@@ -3,6 +3,8 @@ import type { DockSide } from "./DockSide";
 import type { PxRectWire } from "./PxRectWire";
 
 /**
- * 띠 하나. `side` = 붙일 쪽 · `anchor` = 붙일 칸(`None` = 레이아웃 전체의 바깥 변) · `rect` = 그릴 사각형.
+ * 칸 띠 하나. `side` = 붙일 쪽 · `anchor` = 붙일 칸 — [`SlotRegion::bands`] 안에서는 늘 `Some(그 칸)` 이다(바깥
+ * 변은 [`OuterBand`] 가 따로 싣는다) · `rect` = 그릴 사각형이자 판정 사각형이고, 놓았을 때 끼운 것이 차지할
+ * 사각형이다(PRD R3).
  */
 export type Band = { side: DockSide, anchor: string | null, rect: PxRectWire, };

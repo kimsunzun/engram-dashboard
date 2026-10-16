@@ -1,0 +1,297 @@
+{
+  "_format": "Shared golden for slot-docking pick (Rust src-tauri/src/dock/regions.rs `pick` and the TS mirror `pickTarget`). regions = named DockRegions in wire shape, exactly as sent on dock:regions; each was built by regions_for and the Rust test rebuilds and compares it. cases: pick(regions[case.regions], case.point) must equal case.expect (Picked wire shape). point = viewport CSS px of that window. source_view = the dragged tab; it appears in no region (regions_for filters it), so a mirror that does not take it answers the same.",
+  "source_view": "00000000-0000-0000-0000-000000000063",
+  "regions": {
+    "blocked": {"drag_id": "golden", "rev": 1, "bar_rev": 1, "blocked": true, "view_id": null, "canvas_origin": {"x": 0, "y": 0}, "canvas": {"w": 0, "h": 0}, "outer": [], "slots": [], "tab_bar": null},
+    "invalid_outer": {
+      "drag_id": "golden",
+      "rev": 1,
+      "bar_rev": 1,
+      "blocked": false,
+      "view_id": "00000000-0000-0000-0000-000000000014",
+      "canvas_origin": {"x": 0, "y": 28},
+      "canvas": {"w": 1200, "h": 800},
+      "outer": [
+        {"side": "Top", "strip": {"x0": 0, "y0": 0, "x1": 1200, "y1": 32}, "landing": {"x0": 0, "y0": 0, "x1": 1200, "y1": 267}},
+        {"side": "Bottom", "strip": {"x0": 0, "y0": 768, "x1": 1200, "y1": 800}, "landing": {"x0": 0, "y0": 533, "x1": 1200, "y1": 800}}
+      ],
+      "slots": [
+        {
+          "slot_id": "00000000-0000-0000-0000-000000000001",
+          "frame": {"x0": 0, "y0": 0, "x1": 1200, "y1": 800},
+          "bands": [
+            {"side": "Top", "anchor": "00000000-0000-0000-0000-000000000001", "rect": {"x0": 0, "y0": 0, "x1": 1200, "y1": 267}},
+            {"side": "Bottom", "anchor": "00000000-0000-0000-0000-000000000001", "rect": {"x0": 0, "y0": 533, "x1": 1200, "y1": 800}}
+          ]
+        }
+      ],
+      "tab_bar": {"rect": {"x0": 0, "y0": 0, "x1": 600, "y1": 28}, "heads": [{"view_id": "00000000-0000-0000-0000-000000000014", "rect": {"x0": 0, "y0": 0, "x1": 100, "y1": 28}}], "insert_xs": [0, 100]}
+    },
+    "no_canvas": {
+      "drag_id": "golden",
+      "rev": 1,
+      "bar_rev": 1,
+      "blocked": false,
+      "view_id": "00000000-0000-0000-0000-000000000028",
+      "canvas_origin": {"x": 0, "y": 28},
+      "canvas": {"w": 0, "h": 0},
+      "outer": [],
+      "slots": [],
+      "tab_bar": {
+        "rect": {"x0": 0, "y0": 0, "x1": 600, "y1": 28},
+        "heads": [{"view_id": "00000000-0000-0000-0000-000000000028", "rect": {"x0": 0, "y0": 0, "x1": 100, "y1": 28}}, {"view_id": "00000000-0000-0000-0000-000000000029", "rect": {"x0": 100, "y0": 0, "x1": 200, "y1": 28}}],
+        "insert_xs": [0, 100, 200]
+      }
+    },
+    "no_chrome": {"drag_id": "golden", "rev": 1, "bar_rev": 1, "blocked": false, "view_id": "00000000-0000-0000-0000-000000000028", "canvas_origin": {"x": 0, "y": 0}, "canvas": {"w": 1200, "h": 800}, "outer": [], "slots": [], "tab_bar": null},
+    "no_visible": {
+      "drag_id": "golden",
+      "rev": 1,
+      "bar_rev": 1,
+      "blocked": false,
+      "view_id": null,
+      "canvas_origin": {"x": 0, "y": 28},
+      "canvas": {"w": 1200, "h": 800},
+      "outer": [],
+      "slots": [],
+      "tab_bar": {"rect": {"x0": 0, "y0": 0, "x1": 600, "y1": 28}, "heads": [], "insert_xs": [0]}
+    },
+    "split": {
+      "drag_id": "golden",
+      "rev": 1,
+      "bar_rev": 1,
+      "blocked": false,
+      "view_id": "00000000-0000-0000-0000-00000000000a",
+      "canvas_origin": {"x": 0, "y": 28},
+      "canvas": {"w": 1200, "h": 800},
+      "outer": [
+        {"side": "Left", "strip": {"x0": 0, "y0": 0, "x1": 32, "y1": 800}, "landing": {"x0": 0, "y0": 0, "x1": 400, "y1": 800}},
+        {"side": "Right", "strip": {"x0": 1168, "y0": 0, "x1": 1200, "y1": 800}, "landing": {"x0": 800, "y0": 0, "x1": 1200, "y1": 800}},
+        {"side": "Top", "strip": {"x0": 0, "y0": 0, "x1": 1200, "y1": 32}, "landing": {"x0": 0, "y0": 0, "x1": 1200, "y1": 267}},
+        {"side": "Bottom", "strip": {"x0": 0, "y0": 768, "x1": 1200, "y1": 800}, "landing": {"x0": 0, "y0": 533, "x1": 1200, "y1": 800}}
+      ],
+      "slots": [
+        {
+          "slot_id": "00000000-0000-0000-0000-000000000001",
+          "frame": {"x0": 0, "y0": 0, "x1": 600, "y1": 800},
+          "bands": [
+            {"side": "Left", "anchor": "00000000-0000-0000-0000-000000000001", "rect": {"x0": 0, "y0": 0, "x1": 200, "y1": 800}},
+            {"side": "Right", "anchor": "00000000-0000-0000-0000-000000000001", "rect": {"x0": 400, "y0": 0, "x1": 600, "y1": 800}},
+            {"side": "Top", "anchor": "00000000-0000-0000-0000-000000000001", "rect": {"x0": 0, "y0": 0, "x1": 600, "y1": 267}},
+            {"side": "Bottom", "anchor": "00000000-0000-0000-0000-000000000001", "rect": {"x0": 0, "y0": 533, "x1": 600, "y1": 800}}
+          ]
+        },
+        {
+          "slot_id": "00000000-0000-0000-0000-000000000002",
+          "frame": {"x0": 600, "y0": 0, "x1": 1200, "y1": 800},
+          "bands": [
+            {"side": "Left", "anchor": "00000000-0000-0000-0000-000000000002", "rect": {"x0": 600, "y0": 0, "x1": 800, "y1": 800}},
+            {"side": "Right", "anchor": "00000000-0000-0000-0000-000000000002", "rect": {"x0": 1000, "y0": 0, "x1": 1200, "y1": 800}},
+            {"side": "Top", "anchor": "00000000-0000-0000-0000-000000000002", "rect": {"x0": 600, "y0": 0, "x1": 1200, "y1": 267}},
+            {"side": "Bottom", "anchor": "00000000-0000-0000-0000-000000000002", "rect": {"x0": 600, "y0": 533, "x1": 1200, "y1": 800}}
+          ]
+        }
+      ],
+      "tab_bar": {
+        "rect": {"x0": 0, "y0": 0, "x1": 600, "y1": 28},
+        "heads": [{"view_id": "00000000-0000-0000-0000-00000000000a", "rect": {"x0": 0, "y0": 0, "x1": 100, "y1": 28}}, {"view_id": "00000000-0000-0000-0000-00000000000b", "rect": {"x0": 200, "y0": 0, "x1": 300, "y1": 28}}],
+        "insert_xs": [0, 200, 300]
+      }
+    },
+    "thin": {
+      "drag_id": "golden",
+      "rev": 1,
+      "bar_rev": 1,
+      "blocked": false,
+      "view_id": "00000000-0000-0000-0000-00000000001e",
+      "canvas_origin": {"x": 0, "y": 28},
+      "canvas": {"w": 600, "h": 600},
+      "outer": [
+        {"side": "Left", "strip": {"x0": 0, "y0": 0, "x1": 32, "y1": 600}, "landing": {"x0": 0, "y0": 0, "x1": 200, "y1": 600}},
+        {"side": "Right", "strip": {"x0": 568, "y0": 0, "x1": 600, "y1": 600}, "landing": {"x0": 400, "y0": 0, "x1": 600, "y1": 600}},
+        {"side": "Top", "strip": {"x0": 0, "y0": 0, "x1": 600, "y1": 32}, "landing": {"x0": 0, "y0": 0, "x1": 600, "y1": 200}},
+        {"side": "Bottom", "strip": {"x0": 0, "y0": 568, "x1": 600, "y1": 600}, "landing": {"x0": 0, "y0": 400, "x1": 600, "y1": 600}}
+      ],
+      "slots": [
+        {
+          "slot_id": "00000000-0000-0000-0000-000000000001",
+          "frame": {"x0": 0, "y0": 0, "x1": 300, "y1": 300},
+          "bands": [
+            {"side": "Left", "anchor": "00000000-0000-0000-0000-000000000001", "rect": {"x0": 0, "y0": 0, "x1": 100, "y1": 300}},
+            {"side": "Right", "anchor": "00000000-0000-0000-0000-000000000001", "rect": {"x0": 200, "y0": 0, "x1": 300, "y1": 300}},
+            {"side": "Top", "anchor": "00000000-0000-0000-0000-000000000001", "rect": {"x0": 0, "y0": 0, "x1": 300, "y1": 100}},
+            {"side": "Bottom", "anchor": "00000000-0000-0000-0000-000000000001", "rect": {"x0": 0, "y0": 200, "x1": 300, "y1": 300}}
+          ]
+        },
+        {
+          "slot_id": "00000000-0000-0000-0000-000000000002",
+          "frame": {"x0": 0, "y0": 300, "x1": 300, "y1": 303},
+          "bands": [
+            {"side": "Left", "anchor": "00000000-0000-0000-0000-000000000002", "rect": {"x0": 0, "y0": 300, "x1": 100, "y1": 303}},
+            {"side": "Right", "anchor": "00000000-0000-0000-0000-000000000002", "rect": {"x0": 200, "y0": 300, "x1": 300, "y1": 303}},
+            {"side": "Top", "anchor": "00000000-0000-0000-0000-000000000002", "rect": {"x0": 0, "y0": 300, "x1": 300, "y1": 301}},
+            {"side": "Bottom", "anchor": "00000000-0000-0000-0000-000000000002", "rect": {"x0": 0, "y0": 302, "x1": 300, "y1": 303}}
+          ]
+        },
+        {
+          "slot_id": "00000000-0000-0000-0000-000000000003",
+          "frame": {"x0": 0, "y0": 303, "x1": 300, "y1": 600},
+          "bands": [
+            {"side": "Left", "anchor": "00000000-0000-0000-0000-000000000003", "rect": {"x0": 0, "y0": 303, "x1": 100, "y1": 600}},
+            {"side": "Right", "anchor": "00000000-0000-0000-0000-000000000003", "rect": {"x0": 200, "y0": 303, "x1": 300, "y1": 600}},
+            {"side": "Top", "anchor": "00000000-0000-0000-0000-000000000003", "rect": {"x0": 0, "y0": 303, "x1": 300, "y1": 402}},
+            {"side": "Bottom", "anchor": "00000000-0000-0000-0000-000000000003", "rect": {"x0": 0, "y0": 501, "x1": 300, "y1": 600}}
+          ]
+        },
+        {
+          "slot_id": "00000000-0000-0000-0000-000000000004",
+          "frame": {"x0": 300, "y0": 0, "x1": 303, "y1": 600},
+          "bands": [
+            {"side": "Left", "anchor": "00000000-0000-0000-0000-000000000004", "rect": {"x0": 300, "y0": 0, "x1": 301, "y1": 600}},
+            {"side": "Right", "anchor": "00000000-0000-0000-0000-000000000004", "rect": {"x0": 302, "y0": 0, "x1": 303, "y1": 600}},
+            {"side": "Top", "anchor": "00000000-0000-0000-0000-000000000004", "rect": {"x0": 300, "y0": 0, "x1": 303, "y1": 200}},
+            {"side": "Bottom", "anchor": "00000000-0000-0000-0000-000000000004", "rect": {"x0": 300, "y0": 400, "x1": 303, "y1": 600}}
+          ]
+        },
+        {
+          "slot_id": "00000000-0000-0000-0000-000000000005",
+          "frame": {"x0": 303, "y0": 0, "x1": 600, "y1": 600},
+          "bands": [
+            {"side": "Left", "anchor": "00000000-0000-0000-0000-000000000005", "rect": {"x0": 303, "y0": 0, "x1": 402, "y1": 600}},
+            {"side": "Right", "anchor": "00000000-0000-0000-0000-000000000005", "rect": {"x0": 501, "y0": 0, "x1": 600, "y1": 600}},
+            {"side": "Top", "anchor": "00000000-0000-0000-0000-000000000005", "rect": {"x0": 303, "y0": 0, "x1": 600, "y1": 200}},
+            {"side": "Bottom", "anchor": "00000000-0000-0000-0000-000000000005", "rect": {"x0": 303, "y0": 400, "x1": 600, "y1": 600}}
+          ]
+        }
+      ],
+      "tab_bar": {"rect": {"x0": 0, "y0": 0, "x1": 600, "y1": 28}, "heads": [{"view_id": "00000000-0000-0000-0000-00000000001e", "rect": {"x0": 0, "y0": 0, "x1": 100, "y1": 28}}], "insert_xs": [0, 100]}
+    },
+    "offset": {
+      "drag_id": "golden",
+      "rev": 1,
+      "bar_rev": 1,
+      "blocked": false,
+      "view_id": "00000000-0000-0000-0000-000000000032",
+      "canvas_origin": {"x": 40, "y": 28},
+      "canvas": {"w": 1200, "h": 800},
+      "outer": [
+        {"side": "Left", "strip": {"x0": 0, "y0": 0, "x1": 32, "y1": 800}, "landing": {"x0": 0, "y0": 0, "x1": 400, "y1": 800}},
+        {"side": "Right", "strip": {"x0": 1168, "y0": 0, "x1": 1200, "y1": 800}, "landing": {"x0": 800, "y0": 0, "x1": 1200, "y1": 800}},
+        {"side": "Top", "strip": {"x0": 0, "y0": 0, "x1": 1200, "y1": 32}, "landing": {"x0": 0, "y0": 0, "x1": 1200, "y1": 267}},
+        {"side": "Bottom", "strip": {"x0": 0, "y0": 768, "x1": 1200, "y1": 800}, "landing": {"x0": 0, "y0": 533, "x1": 1200, "y1": 800}}
+      ],
+      "slots": [
+        {
+          "slot_id": "00000000-0000-0000-0000-000000000001",
+          "frame": {"x0": 0, "y0": 0, "x1": 600, "y1": 800},
+          "bands": [
+            {"side": "Left", "anchor": "00000000-0000-0000-0000-000000000001", "rect": {"x0": 0, "y0": 0, "x1": 200, "y1": 800}},
+            {"side": "Right", "anchor": "00000000-0000-0000-0000-000000000001", "rect": {"x0": 400, "y0": 0, "x1": 600, "y1": 800}},
+            {"side": "Top", "anchor": "00000000-0000-0000-0000-000000000001", "rect": {"x0": 0, "y0": 0, "x1": 600, "y1": 267}},
+            {"side": "Bottom", "anchor": "00000000-0000-0000-0000-000000000001", "rect": {"x0": 0, "y0": 533, "x1": 600, "y1": 800}}
+          ]
+        },
+        {
+          "slot_id": "00000000-0000-0000-0000-000000000002",
+          "frame": {"x0": 600, "y0": 0, "x1": 1200, "y1": 800},
+          "bands": [
+            {"side": "Left", "anchor": "00000000-0000-0000-0000-000000000002", "rect": {"x0": 600, "y0": 0, "x1": 800, "y1": 800}},
+            {"side": "Right", "anchor": "00000000-0000-0000-0000-000000000002", "rect": {"x0": 1000, "y0": 0, "x1": 1200, "y1": 800}},
+            {"side": "Top", "anchor": "00000000-0000-0000-0000-000000000002", "rect": {"x0": 600, "y0": 0, "x1": 1200, "y1": 267}},
+            {"side": "Bottom", "anchor": "00000000-0000-0000-0000-000000000002", "rect": {"x0": 600, "y0": 533, "x1": 1200, "y1": 800}}
+          ]
+        }
+      ],
+      "tab_bar": {
+        "rect": {"x0": 40, "y0": 0, "x1": 640, "y1": 28},
+        "heads": [{"view_id": "00000000-0000-0000-0000-000000000032", "rect": {"x0": 44, "y0": 0, "x1": 144, "y1": 28}}, {"view_id": "00000000-0000-0000-0000-000000000033", "rect": {"x0": 144, "y0": 0, "x1": 244, "y1": 28}}],
+        "insert_xs": [4, 104, 204]
+      }
+    }
+  },
+  "cases": [
+    {"name": "tab bar: just left of a head center counts it out", "regions": "split", "point": {"x": 49.5, "y": 10}, "expect": {"type": "tab_bar", "index": 0, "over": "00000000-0000-0000-0000-00000000000a"}},
+    {"name": "tab bar: exactly on a head center goes right of it", "regions": "split", "point": {"x": 50, "y": 10}, "expect": {"type": "tab_bar", "index": 1, "over": "00000000-0000-0000-0000-00000000000a"}},
+    {"name": "tab bar: top-left pixel is inside", "regions": "split", "point": {"x": 0, "y": 0}, "expect": {"type": "tab_bar", "index": 0, "over": "00000000-0000-0000-0000-00000000000a"}},
+    {"name": "tab bar: over the stale dragged head = over nothing (filtered by id)", "regions": "split", "point": {"x": 150, "y": 10}, "expect": {"type": "tab_bar", "index": 1, "over": null}},
+    {"name": "tab bar: over the next head", "regions": "split", "point": {"x": 250, "y": 10}, "expect": {"type": "tab_bar", "index": 2, "over": "00000000-0000-0000-0000-00000000000b"}},
+    {"name": "tab bar: a head right edge is outside that head", "regions": "split", "point": {"x": 300, "y": 27.999}, "expect": {"type": "tab_bar", "index": 2, "over": null}},
+    {"name": "tab bar: after the last head", "regions": "split", "point": {"x": 400, "y": 10}, "expect": {"type": "tab_bar", "index": 2, "over": null}},
+    {"name": "tab bar: right edge is outside and not on the canvas", "regions": "split", "point": {"x": 600, "y": 10}, "expect": {"type": "none"}},
+    {"name": "tab bar bottom edge belongs to the canvas top strip", "regions": "split", "point": {"x": 300, "y": 28}, "expect": {"type": "seam", "side": "Top", "anchor": null}},
+    {"name": "outer left", "regions": "split", "point": {"x": 10, "y": 428}, "expect": {"type": "seam", "side": "Left", "anchor": null}},
+    {"name": "outer right", "regions": "split", "point": {"x": 1190, "y": 428}, "expect": {"type": "seam", "side": "Right", "anchor": null}},
+    {"name": "outer top", "regions": "split", "point": {"x": 600, "y": 38}, "expect": {"type": "seam", "side": "Top", "anchor": null}},
+    {"name": "outer bottom", "regions": "split", "point": {"x": 600, "y": 818}, "expect": {"type": "seam", "side": "Bottom", "anchor": null}},
+    {"name": "outer corner tie goes Left before Top", "regions": "split", "point": {"x": 10, "y": 38}, "expect": {"type": "seam", "side": "Left", "anchor": null}},
+    {"name": "outer corner: nearer edge wins (Right over Top)", "regions": "split", "point": {"x": 1190, "y": 48}, "expect": {"type": "seam", "side": "Right", "anchor": null}},
+    {"name": "outer corner: nearer edge wins (Bottom over Right)", "regions": "split", "point": {"x": 1180, "y": 818}, "expect": {"type": "seam", "side": "Bottom", "anchor": null}},
+    {"name": "outer beats the slot band beneath", "regions": "split", "point": {"x": 31.999, "y": 428}, "expect": {"type": "seam", "side": "Left", "anchor": null}},
+    {"name": "top strip last pixel", "regions": "split", "point": {"x": 300, "y": 59.999}, "expect": {"type": "seam", "side": "Top", "anchor": null}},
+    {"name": "first pixel below the top strip = slot top band", "regions": "split", "point": {"x": 300, "y": 60}, "expect": {"type": "seam", "side": "Top", "anchor": "00000000-0000-0000-0000-000000000001"}},
+    {"name": "first pixel past the left strip = slot left band", "regions": "split", "point": {"x": 32, "y": 428}, "expect": {"type": "seam", "side": "Left", "anchor": "00000000-0000-0000-0000-000000000001"}},
+    {"name": "right strip first pixel", "regions": "split", "point": {"x": 1168, "y": 428}, "expect": {"type": "seam", "side": "Right", "anchor": null}},
+    {"name": "last pixel before the right strip = slot right band", "regions": "split", "point": {"x": 1167.999, "y": 428}, "expect": {"type": "seam", "side": "Right", "anchor": "00000000-0000-0000-0000-000000000002"}},
+    {"name": "bottom strip first pixel", "regions": "split", "point": {"x": 300, "y": 796}, "expect": {"type": "seam", "side": "Bottom", "anchor": null}},
+    {"name": "last pixel above the bottom strip = slot bottom band", "regions": "split", "point": {"x": 300, "y": 795.999}, "expect": {"type": "seam", "side": "Bottom", "anchor": "00000000-0000-0000-0000-000000000001"}},
+    {"name": "slot center = no guide", "regions": "split", "point": {"x": 300, "y": 428}, "expect": {"type": "none"}},
+    {"name": "other slot center = no guide", "regions": "split", "point": {"x": 900, "y": 428}, "expect": {"type": "none"}},
+    {"name": "shared slot edge belongs to the right slot", "regions": "split", "point": {"x": 600, "y": 428}, "expect": {"type": "seam", "side": "Left", "anchor": "00000000-0000-0000-0000-000000000002"}},
+    {"name": "just left of the shared edge", "regions": "split", "point": {"x": 599.999, "y": 428}, "expect": {"type": "seam", "side": "Right", "anchor": "00000000-0000-0000-0000-000000000001"}},
+    {"name": "left band last pixel", "regions": "split", "point": {"x": 199.999, "y": 428}, "expect": {"type": "seam", "side": "Left", "anchor": "00000000-0000-0000-0000-000000000001"}},
+    {"name": "left band right edge is outside it", "regions": "split", "point": {"x": 200, "y": 428}, "expect": {"type": "none"}},
+    {"name": "right band first pixel", "regions": "split", "point": {"x": 400, "y": 428}, "expect": {"type": "seam", "side": "Right", "anchor": "00000000-0000-0000-0000-000000000001"}},
+    {"name": "just before the right band", "regions": "split", "point": {"x": 399.999, "y": 428}, "expect": {"type": "none"}},
+    {"name": "top band last pixel", "regions": "split", "point": {"x": 300, "y": 294.999}, "expect": {"type": "seam", "side": "Top", "anchor": "00000000-0000-0000-0000-000000000001"}},
+    {"name": "top band bottom edge is outside it", "regions": "split", "point": {"x": 300, "y": 295}, "expect": {"type": "none"}},
+    {"name": "bottom band first pixel", "regions": "split", "point": {"x": 300, "y": 561}, "expect": {"type": "seam", "side": "Bottom", "anchor": "00000000-0000-0000-0000-000000000001"}},
+    {"name": "just above the bottom band", "regions": "split", "point": {"x": 300, "y": 560.999}, "expect": {"type": "none"}},
+    {"name": "slot corner: smaller normalized distance wins (Top)", "regions": "split", "point": {"x": 100, "y": 128}, "expect": {"type": "seam", "side": "Top", "anchor": "00000000-0000-0000-0000-000000000001"}},
+    {"name": "slot corner: smaller normalized distance wins (Left)", "regions": "split", "point": {"x": 60, "y": 228}, "expect": {"type": "seam", "side": "Left", "anchor": "00000000-0000-0000-0000-000000000001"}},
+    {"name": "slot corner tie goes Left before Top", "regions": "split", "point": {"x": 100, "y": 161.5}, "expect": {"type": "seam", "side": "Left", "anchor": "00000000-0000-0000-0000-000000000001"}},
+    {"name": "outside the canvas: right edge", "regions": "split", "point": {"x": 1200, "y": 428}, "expect": {"type": "none"}},
+    {"name": "outside the canvas: bottom edge", "regions": "split", "point": {"x": 600, "y": 828}, "expect": {"type": "none"}},
+    {"name": "outside the canvas: left of it", "regions": "split", "point": {"x": -1, "y": 428}, "expect": {"type": "none"}},
+    {"name": "offset canvas: outer left strip is measured from the canvas origin", "regions": "offset", "point": {"x": 50, "y": 428}, "expect": {"type": "seam", "side": "Left", "anchor": null}},
+    {"name": "offset canvas: first pixel past the left strip = slot left band", "regions": "offset", "point": {"x": 72, "y": 428}, "expect": {"type": "seam", "side": "Left", "anchor": "00000000-0000-0000-0000-000000000001"}},
+    {"name": "offset canvas: left of the canvas origin is outside", "regions": "offset", "point": {"x": 39.999, "y": 428}, "expect": {"type": "none"}},
+    {"name": "offset canvas: right strip last pixel", "regions": "offset", "point": {"x": 1239.999, "y": 428}, "expect": {"type": "seam", "side": "Right", "anchor": null}},
+    {"name": "offset tab bar: left of the bar is outside", "regions": "offset", "point": {"x": 39.999, "y": 10}, "expect": {"type": "none"}},
+    {"name": "offset tab bar: bar left edge before the first head", "regions": "offset", "point": {"x": 40, "y": 10}, "expect": {"type": "tab_bar", "index": 0, "over": null}},
+    {"name": "offset tab bar: on a head center goes right of it", "regions": "offset", "point": {"x": 94, "y": 10}, "expect": {"type": "tab_bar", "index": 1, "over": "00000000-0000-0000-0000-000000000032"}},
+    {"name": "offset tab bar: right edge is outside", "regions": "offset", "point": {"x": 640, "y": 10}, "expect": {"type": "none"}},
+    {"name": "invalid outer edge falls through to the slot band beneath", "regions": "invalid_outer", "point": {"x": 1190, "y": 128}, "expect": {"type": "seam", "side": "Top", "anchor": "00000000-0000-0000-0000-000000000001"}},
+    {"name": "invalid outer edge over a missing slot band = no guide", "regions": "invalid_outer", "point": {"x": 1190, "y": 428}, "expect": {"type": "none"}},
+    {"name": "invalid nearest outer edge, valid next one wins", "regions": "invalid_outer", "point": {"x": 1190, "y": 48}, "expect": {"type": "seam", "side": "Top", "anchor": null}},
+    {"name": "invalid outer left over a missing slot band = no guide", "regions": "invalid_outer", "point": {"x": 10, "y": 428}, "expect": {"type": "none"}},
+    {"name": "a valid outer edge still wins", "regions": "invalid_outer", "point": {"x": 600, "y": 818}, "expect": {"type": "seam", "side": "Bottom", "anchor": null}},
+    {"name": "1px top band", "regions": "thin", "point": {"x": 150, "y": 328}, "expect": {"type": "seam", "side": "Top", "anchor": "00000000-0000-0000-0000-000000000002"}},
+    {"name": "1px top band last pixel", "regions": "thin", "point": {"x": 150, "y": 328.999}, "expect": {"type": "seam", "side": "Top", "anchor": "00000000-0000-0000-0000-000000000002"}},
+    {"name": "between the 1px bands = no guide", "regions": "thin", "point": {"x": 150, "y": 329}, "expect": {"type": "none"}},
+    {"name": "1px bottom band", "regions": "thin", "point": {"x": 150, "y": 330}, "expect": {"type": "seam", "side": "Bottom", "anchor": "00000000-0000-0000-0000-000000000002"}},
+    {"name": "1px bottom band last pixel", "regions": "thin", "point": {"x": 150, "y": 330.999}, "expect": {"type": "seam", "side": "Bottom", "anchor": "00000000-0000-0000-0000-000000000002"}},
+    {"name": "below the thin slot = next slot top band", "regions": "thin", "point": {"x": 150, "y": 331}, "expect": {"type": "seam", "side": "Top", "anchor": "00000000-0000-0000-0000-000000000003"}},
+    {"name": "above the thin slot = previous slot bottom band", "regions": "thin", "point": {"x": 150, "y": 327.999}, "expect": {"type": "seam", "side": "Bottom", "anchor": "00000000-0000-0000-0000-000000000001"}},
+    {"name": "1px left band", "regions": "thin", "point": {"x": 300, "y": 328}, "expect": {"type": "seam", "side": "Left", "anchor": "00000000-0000-0000-0000-000000000004"}},
+    {"name": "1px left band last pixel", "regions": "thin", "point": {"x": 300.999, "y": 328}, "expect": {"type": "seam", "side": "Left", "anchor": "00000000-0000-0000-0000-000000000004"}},
+    {"name": "between the 1px side bands = no guide", "regions": "thin", "point": {"x": 301, "y": 328}, "expect": {"type": "none"}},
+    {"name": "1px right band", "regions": "thin", "point": {"x": 302, "y": 328}, "expect": {"type": "seam", "side": "Right", "anchor": "00000000-0000-0000-0000-000000000004"}},
+    {"name": "1px right band last pixel", "regions": "thin", "point": {"x": 302.999, "y": 328}, "expect": {"type": "seam", "side": "Right", "anchor": "00000000-0000-0000-0000-000000000004"}},
+    {"name": "right of the thin slot = next slot left band", "regions": "thin", "point": {"x": 303, "y": 328}, "expect": {"type": "seam", "side": "Left", "anchor": "00000000-0000-0000-0000-000000000005"}},
+    {"name": "thin slot side band away from its 1px bands", "regions": "thin", "point": {"x": 299.999, "y": 329.5}, "expect": {"type": "seam", "side": "Right", "anchor": "00000000-0000-0000-0000-000000000002"}},
+    {"name": "corner of a 1px band and a wide band: normalized distance", "regions": "thin", "point": {"x": 299.999, "y": 328}, "expect": {"type": "seam", "side": "Top", "anchor": "00000000-0000-0000-0000-000000000002"}},
+    {"name": "1px band corner tie goes Left before Top", "regions": "thin", "point": {"x": 300.5, "y": 128}, "expect": {"type": "seam", "side": "Left", "anchor": "00000000-0000-0000-0000-000000000004"}},
+    {"name": "1px band corner: Top just nearer", "regions": "thin", "point": {"x": 300.5, "y": 127}, "expect": {"type": "seam", "side": "Top", "anchor": "00000000-0000-0000-0000-000000000004"}},
+    {"name": "1px band corner: Left just nearer", "regions": "thin", "point": {"x": 300.5, "y": 129}, "expect": {"type": "seam", "side": "Left", "anchor": "00000000-0000-0000-0000-000000000004"}},
+    {"name": "no visible tab: the tab bar still takes it (dragged head filtered)", "regions": "no_visible", "point": {"x": 50, "y": 10}, "expect": {"type": "tab_bar", "index": 0, "over": null}},
+    {"name": "no visible tab: canvas center = no guide", "regions": "no_visible", "point": {"x": 600, "y": 428}, "expect": {"type": "none"}},
+    {"name": "no visible tab: canvas edge = no guide", "regions": "no_visible", "point": {"x": 10, "y": 428}, "expect": {"type": "none"}},
+    {"name": "no chrome: no tab bar", "regions": "no_chrome", "point": {"x": 50, "y": 10}, "expect": {"type": "none"}},
+    {"name": "no chrome: no slots", "regions": "no_chrome", "point": {"x": 600, "y": 400}, "expect": {"type": "none"}},
+    {"name": "no canvas: the tab bar still takes it", "regions": "no_canvas", "point": {"x": 150, "y": 10}, "expect": {"type": "tab_bar", "index": 2, "over": "00000000-0000-0000-0000-000000000029"}},
+    {"name": "no canvas: no slots", "regions": "no_canvas", "point": {"x": 300, "y": 300}, "expect": {"type": "none"}},
+    {"name": "blocked: tab bar", "regions": "blocked", "point": {"x": 50, "y": 10}, "expect": {"type": "none"}},
+    {"name": "blocked: outer", "regions": "blocked", "point": {"x": 10, "y": 428}, "expect": {"type": "none"}},
+    {"name": "blocked: slot band", "regions": "blocked", "point": {"x": 32, "y": 428}, "expect": {"type": "none"}}
+  ]
+}

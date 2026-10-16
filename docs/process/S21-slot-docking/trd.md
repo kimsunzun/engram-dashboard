@@ -1,6 +1,6 @@
 # TRD — 슬롯 도킹 (탭을 끌어 다른 창 레이아웃에 붙이기)
 
-> **5.6판 — 사용자 결정 Q19 반영**(2026-10-16): R22 재사용(탭 하나뿐인 팝아웃을 그 창째 옮김)은 다시 확인 · 되돌리기 없이 「A 판정 → 창 옮기기 → 표식 내리기」 — 놓은 뒤 그 사이 변화는 결과 그대로(PRD 4.5 · R13b · R13c 예외). 5.2–5.5 의 재확인(C′) · 되돌리기(`restore_window` · `Moved` · `undo_reuse_move` · `reset_window_place` · 되돌리기 기록 · 시험)를 걷고 거부한 대안으로 남김(§7 #39 · ADR-A ⑫). Create 길의 phase C 재판정 · 연 창 닫기는 그대로. §11-2 에 Create 길 거두기 실패(#25 · 종료 중뿐 · 받아들임)를 더함. 5.4 의 「재사용은 보통 자리가 있을 때만」 조건도 근거(되돌리기)와 함께 거둠 — 탭 하나 팝아웃은 늘 재사용(메인 결정 · #26 해결 · 끝 줄 `reuse_skipped` 칸 걷음). 코드 리뷰 PASS 뒤 문구 둘 — `open_at` 의 자리 입히기 = 검사 세터 `move_steps`(`place` 아님) · 창 포트 설명에 숨은 최대화 창의 깜빡임 뒤 숨음을 「보이는가」와 맞춤 · 4 단계 상태 = 리뷰 PASS · QA 대기.
+> **5.6판 — 사용자 결정 Q19 반영**(2026-10-16): R22 재사용(탭 하나뿐인 팝아웃을 그 창째 옮김)은 다시 확인 · 되돌리기 없이 「A 판정 → 창 옮기기 → 표식 내리기」 — 놓은 뒤 그 사이 변화는 결과 그대로(PRD 4.5 · R13b · R13c 예외). 5.2–5.5 의 재확인(C′) · 되돌리기(`restore_window` · `Moved` · `undo_reuse_move` · `reset_window_place` · 되돌리기 기록 · 시험)를 걷고 거부한 대안으로 남김(§7 #39 · ADR-A ⑫). Create 길의 phase C 재판정 · 연 창 닫기는 그대로. §11-2 에 Create 길 거두기 실패(#25 · 종료 중뿐 · 받아들임)를 더함. 5.4 의 「재사용은 보통 자리가 있을 때만」 조건도 근거(되돌리기)와 함께 거둠 — 탭 하나 팝아웃은 늘 재사용(메인 결정 · #26 해결 · 끝 줄 `reuse_skipped` 칸 걷음). 코드 리뷰 PASS 뒤 문구 둘 — `open_at` 의 자리 입히기 = 검사 세터 `move_steps`(`place` 아님) · 창 포트 설명에 숨은 최대화 창의 깜빡임 뒤 숨음을 「보이는가」와 맞춤 · 4 단계 상태 = 리뷰 PASS · QA 대기. 6a 구현 · 리뷰 PASS 뒤 동기화 — `DockRegions` 의 `view_id` 는 측정 전에도 모델 값(측정 없음 = 캔버스 0×0 · 원점 (0, 0) · 칸 · 바깥은 크롬 · 캔버스 · 보이는 탭이 다 있을 때만) · `blocked` 몸은 비고 기대값은 모델 값 · `regions` 의 `visible_tab` · `bumps` · `Expect{layout, active, tabs}` · `WindowSnap` 을 §2-1 에 · 6b 는 `visible_tab` 을 옮기지 않는다 · invoke 인자 철자(Tauri v2 camelCase — 6c 는 구조체 인자나 `rename_all`) · `DragEffect` 는 6c · 골든 맨 위 `source_view` · 6a 상태 = 리뷰 PASS · QA 대기. 그 뒤 `regions_for` 의 debug 전용 `debug_assert_eq!`(`visible` = `visible_tab`) · 골든 8 영역 · 83 사례(`offset` 영역 · 위 띠 경계).
 >
 > **5.5판 — 4 단계 구현 반영 문구 정정**(2026-10-16 · 코드 리뷰가 낸 TRD 어긋남): 재사용 되돌리기의 표식(출처 탭 닫힘이면 View 와 함께 내려감) · `settled` 는 알림을 낸 쓰기만(창 통째 닫기 · 만들기 · 재사용 성공 · 무변경은 없음 — 그 틈) · 자리 검증이 새 창(기본 자리로)과 재사용(제자리)에서 다름 · `open_at` 에 최대화 풀기 없음 · 최대화 출처의 B′ = 「깜빡였다 다시 숨음」(5.3 의 「보이고 포커스」 정정) · `move_window` 가 `Moved{Applied, StayedPut}` 를 돌려주고 옮긴 것이 없으면(`StayedPut`) 재확인 실패에도 되돌리지 않음 · 되돌린 뒤 모델 자리 다시 적기(`reset_window_place`) · 사라진 창 · 어느 모니터에도 안 걸치는 보통 자리의 되돌리기는 위치 실패로 답함 · 재사용의 걸침 판정 크기 = `at.size` · 모델 보통 크기 · 안쪽 크기 · 기본 · 새 창 자리 입히기 실패 = 창 거둠 · 끝 줄 `moved = false` · `changed = false` · 워커 스레드의 세터는 기다리지 않음 · 6 단계 의무 둘 · 창 포트 구현자 일곱 · 「4 단계 고침」의 줄 포인터를 심볼로.
 >
@@ -385,7 +385,7 @@ Esc(어디서든)           W: dragleave(취소 — 끝보다 먼저 올 수 있
 | 웹뷰 → 셸 | `dock_drag_start` | invoke(동기) | `{ drag_id: String, view_id: Uuid, hotspot: PointCss }` → `()` · `hotspot` = 끌기 그림 안의 커서 자리(R22 새 창 자리에 쓴다 — 상수를 두 언어에 두지 않는다) · `Err` = `TabNotFound` · `AlreadyDragging` · `LateStart` · `Dragging` · `LayoutPoisoned`(웹뷰는 무시 — 그 끌기의 놓기는 아무것도 바꾸지 않고 끝난다) · 부르는 때 = `dragstart` 디스패치 뒤 · 취소되지 않았을 때만(§1-4) |
 | 웹뷰 → 셸 | `dock_drag_over` | invoke(동기) | `{ drag_id, report: Over{ rev: u64, bar_rev: u64, displayed: Option<Uuid>, shown: Picked, point: PointCss } \| Left }` → `()` · 창 label 은 Tauri 가 넣어 준 창 · `displayed` = 그 창 캔버스가 보이던 탭(5.1) · `bar_rev` = 쓰던 영역의 탭바 몫(5.2) |
 | 웹뷰 → 셸 | `dock_drop` | invoke(async) | `{ drag_id, view_id, rev, bar_rev, displayed: Option<Uuid>, shown: Picked, point: PointCss }` → `()` · `view_id` = 끄는 탭(끌기 데이터) · `displayed` = 놓은 창이 보이던 탭 |
-| 웹뷰 → 셸 | `dock_drag_end` | invoke(async) | `{ drag_id, effect: Move \| None \| Other }` → `()` · `Other`(copy · link) = 받은 창이 있다 |
+| 웹뷰 → 셸 | `dock_drag_end` | invoke(async) | `{ drag_id, effect: Move \| None \| Other }` → `()` · `Other`(copy · link) = 받은 창이 있다 · `effect` 의 타입 `DragEffect`(move · none · other)는 6c 가 정한다 |
 | 웹뷰 → 셸 | `dock_pointer_seen` | invoke(동기) | `{ drag_id }` → `()` |
 | 웹뷰 → 셸 | `dock_pull` | invoke(동기) | `()` → `Option<{ started: Started, regions: Option<DockRegions> }>` — 지금 세션과 그 창 영역 |
 | 웹뷰 → 셸 | `report_dock_chrome` | invoke(측정) | `DockChrome{ canvas_origin, tab_bar, tabs: Vec<TabHeader> }` — 끄는 동안 접힌 머리는 싣지 않는다 · 창 label = Tauri 가 넣어 준 창(`report_window_canvas` 와 같다) |
@@ -399,12 +399,13 @@ Esc(어디서든)           W: dragleave(취소 — 끝보다 먼저 올 수 있
 pub struct DockRegions {
     pub drag_id: String, pub rev: u64,
     pub bar_rev: u64,                   // 탭바 몫(`tab_bar` · 탭 목록 기대값)이 바뀔 때만 오른다 — 탭바 놓기의 대조 기준(5.2)
-    pub blocked: bool,                  // 출처 배치가 바뀜 — 받지 않는다(dropEffect none) · 아래는 비어 있다
-    pub view_id: Option<Uuid>,          // 이 창에 보이는 탭 — None = 없음(메인 마지막 탭을 뗌 · 측정 전) · 웹뷰의 `displayed` 와 대조(C1)
-    pub canvas_origin: PointCss, pub canvas: CanvasPx,
-    pub outer: Vec<OuterBand>,          // 유효한 바깥 변만(R8)
-    pub slots: Vec<SlotRegion>,         // 보이는 탭의 칸 전부
-    pub tab_bar: Option<TabBarRegion>,  // None = 탭바 놓기를 받지 않음(크롬 보고 전)
+    pub blocked: bool,                  // 출처 배치가 바뀜 — 받지 않는다(dropEffect none) · 몸은 빈다(view_id null · 원점 · 캔버스 0 · 목록 빔) — 기대값은 모델 값 그대로(6a)
+    pub view_id: Option<Uuid>,          // 이 창에 보이는 탭(모델 — 측정 전에도 선다 · 6a) — None = 보이는 탭 없음(메인 마지막 탭 · 탭 하나 팝아웃을 뗌) · 웹뷰의 `displayed` 와 대조(C1)
+    pub canvas_origin: PointCss,        // 크롬 보고 전 = (0, 0)
+    pub canvas: CanvasPx,               // 캔버스 보고 전 = 0×0
+    pub outer: Vec<OuterBand>,          // 유효한 바깥 변만(R8) — 크롬 · 캔버스 · 보이는 탭이 다 있을 때만
+    pub slots: Vec<SlotRegion>,         // 보이는 탭의 칸 전부 — 같은 조건
+    pub tab_bar: Option<TabBarRegion>,  // None = 탭바 놓기를 받지 않음(크롬 보고 전 · blocked)
 }
 pub struct OuterBand { pub side: DockSide, pub strip: PxRectWire /* 그리기 · 판정 */, pub landing: PxRectWire /* 칠할 결과 */ }
 pub struct SlotRegion { pub slot_id: Uuid, pub frame: PxRectWire, pub bands: Vec<Band> /* rect = 결과 사각형 = 띠(R3) */ }
@@ -412,6 +413,7 @@ pub struct TabBarRegion { pub rect: RectCss, pub heads: Vec<TabHeader> /* 끄는
 pub enum Picked { None, Seam { anchor: Option<Uuid> /* None = 바깥 변 */, side: DockSide }, TabBar { index: u32, over: Option<Uuid> } }
 ```
 
+- ★**invoke 인자 철자(6c)**★ — Tauri v2 는 명령의 맨 위 인자 이름을 기본으로 camelCase 로 받고(`drag_id` → JS 쪽 `dragId`) 이 저장소의 명령은 `rename_all` 을 쓰지 않는다. 위 표의 snake_case 페이로드를 그대로 쓰려면 6c 는 인자를 구조체 하나로 받거나(예: `DropReport` — 안쪽 칸은 serde 철자를 따른다) 명령에 `rename_all = "snake_case"` 를 단다 — 둘 중 하나로 정하고 웹뷰(7 단계)와 맞춘다.
 - 사각형은 전부 그 창 캔버스(칸 · 띠) 또는 뷰포트(탭바) 의 CSS px 다 — 웹뷰는 좌표 계산 없이 그대로 점-사각형 검사를 하고 그린다(ADR-0227 결정 1 과 같은 태도). 화면 좌표 · 배율은 웹뷰로 가지 않는다.
 - **크롬 보고를 늘 하는 이유** — 끌기 시작 때 보고를 기다리면 첫 영역이 늦다. 탭바 · 캔버스 원점은 드물게 바뀌므로 평소에 보고하고(디바운스 · 한 번에 하나 — `windowCanvasReport.ts` 와 같은 꼴), 셸은 `WindowTabs` 의 측정 칸 `chrome`(`canvas` · `metrics` 옆)에 둔다 — `version` 을 올리지 않는다(ADR-0227 의 측정 규칙). 끄는 동안 떼어진 표시가 머리를 접으면 다시 보고한다.
 
@@ -471,13 +473,20 @@ pub fn valid_bands(target, anchor, incoming, canvas) -> Vec<(DockSide, PxRect)>;
 pub fn outer_strips(canvas) -> [(DockSide, PxRect); 4];
 pub fn tab_insert_x(chrome, source_view, index) -> f64;
 
-// regions.rs (6 단계)
-pub struct WindowSnap { label, tabs: Vec<ViewId>, active: ViewId, visible: Option<(ViewId, LayoutNode)>,
+// regions.rs (6a — 끝)
+pub struct WindowSnap { label, tabs: Vec<ViewId>, active: ViewId /* 모델 활성 */,
+                        visible: Option<(ViewId, LayoutNode)> /* 6c 스냅숏 빌더가 visible_tab 으로 채운다 — regions_for 는 그 값을 믿고 debug 빌드에서만 debug_assert_eq! 로 visible_tab 과 대조한다(숨긴 출처 조기 반환 뒤 · release 에선 빠짐) */,
                         canvas: Option<CanvasPx>, chrome: Option<DockChrome>,
                         hidden: bool /* 장부 값(source_hidden) — 게터 아님 · §1-3 */, is_source: bool }
+pub struct Expect { layout: Option<LayoutNode> /* 보이는 탭 배치 */, active: ViewId /* 모델 활성 */, tabs: Vec<ViewId> }
+impl Expect { fn seam(&self) -> Option<TargetExpect> /* Seam{layout, active} · 보이는 탭 없으면 None */; fn tabs(&self) -> TargetExpect /* Tabs */ }
+pub fn visible_tab(tabs: &[ViewId], active: ViewId, source_view: ViewId) -> Option<ViewId>;  // 활성이 끄는 탭이면 succession · 아니면 활성
 pub fn regions_for(w: &WindowSnap, source_view: Uuid, incoming: &LayoutNode, blocked: bool)
-    -> Option<(DockRegions /* drag_id · rev · bar_rev 는 장부가 채운다 */, Expect /* TargetExpect 재료 — Seam{배치, active} · Tabs */)>;   // None = 숨긴 출처
+    -> Option<(DockRegions /* drag_id · rev · bar_rev 는 비워 두고 장부가 채운다 */, Expect /* blocked 와 무관하게 모델 값 */)>;   // None = 숨긴 출처
 pub fn pick(r: &DockRegions, p: PointCss, source_view: Uuid) -> Picked;   // = locate + choose_seam 을 영역 값 위에서
+pub struct Bumps { rev: bool, bar_rev: bool }
+pub fn bumps(sent: Option<(&DockRegions, &Expect)>, next: (&DockRegions, &Expect)) -> Bumps;
+    // 처음 보냄 = 둘 다 · rev = 영역 몸이나 기대값이 바뀜(활성 전환 · 내용만 바뀜 포함) · bar_rev = 탭바 기하나 Tabs 가 바뀜(그때 rev 도) — drag_id · rev · bar_rev 칸은 견주지 않는다
 ```
 
 `pick` 은 새 규칙이 아니다 — 영역에서 `WindowFrame`(안쪽 원점 (0, 0) · 배율 1 · 크롬 = 영역의 탭바 · 머리 · 캔버스 원점)과 띠 목록을 다시 세워 `locate` → `choose_seam` 을 부른다. 규칙의 정본은 `hit.rs` 하나이고, 웹뷰의 `pickTarget` 은 그 거울이다(§2-4 골든).
@@ -501,13 +510,13 @@ Eclipse 4 의 35px(조사 §7)와 같은 크기대 · 탭바 높이(28px — `Ta
 
 ### 2-4. 영역 만들기 · 거울 · 골든
 
-- **창별 영역(`regions_for`)** — 숨긴 출처는 만들지 않는다. 보이는 탭 = 모델 활성(출처 창이고 활성이 출처면 `display_active` — `session.rs` 의 `visible_tab` 규칙을 옮겨 온다). `blocked` 면 칸 · 바깥 · 탭바를 비운다. 칸 · 바깥은 크롬과 캔버스가 둘 다 있어야, 탭바는 크롬이 있어야 싣는다.
+- **창별 영역(`regions_for`)** — 숨긴 출처는 만들지 않는다. 보이는 탭 = `regions::visible_tab`(모델 활성 · 활성이 끄는 탭이면 `succession` — 떼어진 표시의 `display_active` 와 같은 규칙 · 6a 가 `regions.rs` 에 새로 짰다 — 4판 `session.rs` 에서 옮기지 않는다)이고(6c 스냅숏 빌더가 `WindowSnap.visible` 을 이것으로 채운다 — `regions_for` 의 `debug_assert_eq!` 가 debug 빌드에서 어긋남을 잡는다), `view_id` 는 측정 전에도 그 모델 값이다. 측정이 없으면 캔버스 = 0×0 · 캔버스 원점 = (0, 0)이다. `blocked` 면 몸을 비운다(`view_id` 없음 · 원점 · 캔버스 0 · 칸 · 바깥 · 탭바 없음) — 기대값은 모델 값 그대로다. 칸 · 바깥은 크롬 · 캔버스 · 보이는 탭이 다 있어야, 탭바는 크롬이 있어야 싣는다.
   - `outer` = `valid_bands(보이는 탭 배치, Outer, expect_source, canvas)` 의 변만 `outer_strips` 의 띠(그림 · 판정)와 결과 사각형(칠할 것)으로.
   - `slots` = 칸마다(`geometry::frame_px`) `valid_bands(배치, Slot(칸), expect_source, canvas)` — 면적 0 띠는 빠진다(R8 · AC15). 비용 = 칸 수 × 4 + 4 번의 `docked_tree` — 끄는 동안 계기마다 · 트리가 작아 ms 이하(§11-2 #9).
   - `tab_bar` = 크롬 탭바 + 출처를 id 로 뺀 머리 + 자리마다 `tab_insert_x`. 출처 창의 크롬에 접히기 전 출처 머리가 아직 남아 있으면(떼어진 표시 뒤 첫 보고 전) 기하가 옛것이라 끼울 자리 막대가 머리 하나 폭만큼 어긋나 보일 수 있다 — 그래도 그림과 판정이 같은 영역(같은 `rev`)이라 보인 그대로 들어가고, 접은 뒤의 보고가 오면 `rev` 가 올라 맞춰진다(§11-2 #10). 4판처럼 그 틈에 탭바를 비우면 출처 탭바 위 짧은 떼기가 「가이드 없음 = 새 창」이 되므로 비우지 않는다.
   - 기대값 = `Seam{보이는 탭 배치, 그 창 모델 활성}`(활성 = `WindowSnap.active`) · `Tabs(그 창 탭 목록)` — 영역이 같아도 기대값이 바뀌면 장부가 `rev` 를 올린다 · 탭바 영역 · `Tabs` 가 바뀔 때만 `bar_rev` 도(§1-3 「영역」).
 - **TS 거울(`dockPick.ts` `pickTarget`)** — 영역 위에서 같은 순서로: 탭바(반열림 · `index` = 가운데 x ≤ 점인 머리 수 · `over`) → 캔버스 밖 · 보이는 탭 없음 = 없음 → 점을 품은 유효 바깥 띠를 변까지 거리 · `SIDE_ORDER` 순으로 첫 것 → 아니면 밑 칸의 띠를 정규화 거리로(`choose_band`) → 없음. 유효한 바깥 띠만 오므로 「품은 변이 전부 무효면 칸 띠로」가 따로 손대지 않아도 같다.
-- **골든 `src-tauri/src/dock/pick_golden.json`** — 사례 = (영역 · 점 · 기대 `Picked`). Rust 시험(`pick`)과 vitest(`pickTarget`)가 같은 파일을 먹는다 — 규칙을 고치면 골든 · TS 판을 같은 변경에서 고친다(갈라지면 한쪽이 빨개진다 — 대기 입력 골든 `queued_input_golden.json` 과 같은 꼴). 사례는 §9 판정 행의 경계를 다 덮는다. 갈라지면 놓기가 「보인 것과 다름 = 무변경」으로 떨어진다 — 잘못 붙지도, 본 가이드 대신 새 창이 뜨지도 않는다(5.1 · §1-3 「놓기 판정」).
+- **골든 `src-tauri/src/dock/pick_golden.json`**(6a — 끝) — 꼴 = 맨 위 `source_view` 하나 · 이름 붙은 `regions`(dock:regions 로 보내는 wire 꼴 그대로 — Rust 시험이 `regions_for` 로 다시 만들어 견준다) · `cases`(영역 이름 · 점 · 기대 `Picked`). 지금 영역 8 · 사례 83 — 캔버스 원점 (40, 28) · 탭바 x0 40 인 `offset` 영역과 위 띠 경계 한 쌍을 포함한다. 7 단계의 TS 거울(`pickTarget`)이 같은 파일을 읽는다. Rust 시험(`pick`)과 vitest(`pickTarget`)가 같은 파일을 먹는다 — 규칙을 고치면 골든 · TS 판을 같은 변경에서 고친다(갈라지면 한쪽이 빨개진다 — 대기 입력 골든 `queued_input_golden.json` 과 같은 꼴). 사례는 §9 판정 행의 경계를 다 덮는다. 갈라지면 놓기가 「보인 것과 다름 = 무변경」으로 떨어진다 — 잘못 붙지도, 본 가이드 대신 새 창이 뜨지도 않는다(5.1 · §1-3 「놓기 판정」).
 
 ## 3. LLM 표면 — 이번에 없다 (의식적 예외)
 
@@ -700,9 +709,9 @@ Eclipse 4 의 35px(조사 §7)와 같은 크기대 · 탭바 높이(28px — `Ta
 | **5** | `dock/hit.rs` · `dock/types.rs` · `layout/chrome.rs` + 시험 | 끝(`e73e0289`) | 순수 판정 |
 | **3** | 닫히는 창(M2) — 닫기 요청 모델 먼저 · 묘비 · `apply.rs` 주석 · 닫히는 창의 늦은 Subscribe 가드 + 시험 | 끝(`281bd235` — 미커밋이던 4판 `dock/session.rs` · `pub mod session;` 은 넣지 않고 지웠다 · §11-3) | 팝아웃 닫기의 기존 틈이 닫힌 셸(도킹 없이도 값어치) |
 | **4** | ★3 단계 뒤★ 메인 마지막 탭 고침(`MainLastTab` 제거 · `refill_main` 도우미를 `close_tab` 과 나눔 · 시험 갱신) → ★대상 창 활성 고침(5.1 · C1 — 2 단계 코드 변경)★ `TargetExpect::Layout` → `TargetExpect::Seam{layout, active}`(`manager.rs` 정의 · `check_dock` 의 Seam 대조 팔(`target_holds`)에 `windows[대상 창].active` · 판정 순서 주석 · 시험의 `TargetExpect::Layout` 자리 여덟 + 「활성만 바뀜 = `TargetChanged`」 새 시험) → ~~재사용 조건 고침(5.4)~~ — 5.6 에서 거둠(`plan_new_window` 의 `attrs.bounds` 조건 · 그 주석 · 시험을 걷고 탭 하나 팝아웃이면 늘 `Reuse` · `reuse_skipped` 끝 줄 칸도 걷음) → ★구현이 정한 것(5.5 · 5.6)★ 재사용 = 옮기기 → 표식 내리기 · 다시 확인 · 되돌리기 없음(Q19 — 5.3–5.5 에 넣었던 `restore_window` · `Moved` · `undo_reuse_move` · `ViewManager::reset_window_place` · 되돌리기 기록 · 시험은 걷음) · `move_window` → `Result<(), MoveFailed>` · 재사용의 안 걸치는 자리 = 제자리 · 걸침 판정 크기 = `at.size` → 모델 보통 크기 → 안쪽 크기 → 기본 · 새 창 자리 입히기 실패 = 창 거둠 · 창 포트 구현자 일곱 → ★알림 묶음 끝(5.1 · F1)★ `LayoutEvents::settled`(기본 본문 없음 — 구현자 아홉 · `TauriEvents` 는 빈 몸 · `OwnedEvents` 는 `TauriEvents` 로 넘기기 · 부르는 자리 = `notify` · `rename_tab` · 슬롯 옮기기 · `restore.rs` 알림 루프) → 적용 서비스 `apply::dock_tab`(Seam · TabBar 한 락 · NewWindow 세 phase · 재사용 = 옮기기 → 표식 내리기(Q19) · 알림 뒤 `settled`) + `WindowHost::{open_at, move_window(검사 세터)}` · `placement` 의 결과를 돌려주는 자리 입히기 짝(`move_steps`)(★기본 본문 없이 — 구현자 일곱을 같은 커밋에서 닫는다★) + Tauri 구현 · `OwnedWindowHost` 넘기기 · `placement::place` · `land` 공개 + 시험(`lib_unit` · `layout_apply`). 화살표 순서대로 커밋을 나눠도 각각 선다 | 구현 · 코드 리뷰 PASS(codex · doc-aware · 수명 렌즈 — 3 라운드) · QA 대기(미커밋 — 5.5 가 문구를 맞추고 5.6 이 Q19 로 재사용 되돌리기를 걷었다) | 아무도 안 부르는 적용 서비스(다음 작업의 명령도 그 위에 선다) |
-| **6a** | `dock/regions.rs`(`regions_for` · `pick` · 기대값 = `Seam{배치, active}`) · `dock/types.rs`(`DockRegions` · `OuterBand` · `SlotRegion` · `TabBarRegion` · `Picked` · 세션 사건(`Display` 도 `Started` 와 같은 칸) · 보고(`Over` · 놓기의 `displayed` · `bar_rev`) · `DockRegions.bar_rev`(5.2) — `GuideView` · `TabBarHint` 와 그 `.ts` 를 지움) · `pick_golden.json` + 시험 | 4 의 `TargetExpect` 고침 뒤(`TargetExpect` 를 쓴다) · 그 밖은 4 와 병렬 가능(겹침 = `dock/mod.rs` 한 줄) | 순수 영역 · 판정 |
-| **6b** | `dock/book.rs` 장부 + 시험 — 5.1 · 5.2 규칙(§1-3 — 창별 Over · Left · 놓기 판정(탭바는 `bar_rev`) · 이른 끝 신호(버린 id 는 `ended` 로) · 적용 중 · 세션 전 스냅숏 · 옛 `rev` 다시 보냄 · 커서 못 읽음) · 4판 `session.rs`(지움)에서 `visible_tab` · 끝 어휘(`Outcome` · `EndReason`) · 띠 캐시 꼴만 옮겨 온다(`git` 이력에 없다 — 사본 `.claude/handoff/attachments/slot-docking-session-rs-replaced-2026-10-16.rs.txt` 를 본다) | 6a 뒤 · 4 와 병렬 가능 | 순수 장부 |
-| **6c** | 크롬 측정(`WindowTabs.chrome` · `set_dock_chrome` · `state/convert.rs` 구조 분해에 `chrome: _` — 저장 안 함) · `commands/dock.rs`(invoke 여섯 + `report_dock_chrome` · 실행기 · 시한 셋 · 게터는 락 밖 · 세션 깃발 = 세대(시작의 레이아웃 락 안에서 세우고 비교-교체로 내림) · `Apply` 는 늘 spawn · `Refused` · `LateStart` · 계측) · ★6 단계 의무(5.5)★ `dock_tab` 을 메인 스레드 · 동기 명령에서 부르지 않는다(Create 길이 창을 만들어 교착 — §1-3 불변식) · 숨긴 출처의 되보이기는 `apply_deferred_maximize` 를 지나는 보이기 경로로(5.6 — 되돌리기는 없어졌지만 미룬 최대화가 선 창을 같은 길로 보인다) · `lib.rs`(`generate_handler!` · `Destroyed` → 장부) · `TauriEvents::settled` 계기 · 측정 보고 뒤 계기 · `WebviewEnv::finish` 의 `disable_drag_drop_handler()` + 시험 | 4 · 6b 뒤(`manager.rs` · `commands/layout.rs` 겹침) | 웹뷰가 안 부르는 셸 끌기 처리(무해 — 끈 처리기의 사건은 쓰는 곳 0) |
+| **6a** | `dock/regions.rs`(`regions_for` · `pick` · `visible_tab` · `bumps → Bumps{rev, bar_rev}` · 기대값 `Expect{layout, active, tabs}` — `seam()` · `tabs()` · `WindowSnap`) · `dock/types.rs`(`DockRegions` · `OuterBand` · `SlotRegion` · `TabBarRegion` · `Picked` · 세션 사건(`Display` 도 `Started` 와 같은 칸) · 보고(`Over` · 놓기의 `displayed` · `bar_rev`) · `DockRegions.bar_rev`(5.2) — `GuideView` · `TabBarHint` 와 그 `.ts` 를 지움) · `pick_golden.json`(맨 위 `source_view` · 7 단계 TS 거울이 읽는다) + 시험 | 구현 · 코드 리뷰 PASS · QA 대기(미커밋) — 4 의 `TargetExpect` 고침 뒤(`TargetExpect` 를 쓴다) · 그 밖은 4 와 병렬 가능(겹침 = `dock/mod.rs` 한 줄) | 순수 영역 · 판정 |
+| **6b** | `dock/book.rs` 장부 + 시험 — 5.1 · 5.2 규칙(§1-3 — 창별 Over · Left · 놓기 판정(탭바는 `bar_rev`) · 이른 끝 신호(버린 id 는 `ended` 로) · 적용 중 · 세션 전 스냅숏 · 옛 `rev` 다시 보냄 · 커서 못 읽음) · 6a 의 `regions::bumps`(rev · bar_rev 를 올릴지) · `Expect::seam()` · `tabs()` 를 쓴다 · `visible_tab` 은 6a 가 `regions.rs` 에 새로 짰으므로 옮기지 않는다 · 4판 `session.rs`(지움)에서는 끝 어휘(`Outcome` · `EndReason`) · 띠 캐시 꼴만 참고한다(`git` 이력에 없다 — 사본 `.claude/handoff/attachments/slot-docking-session-rs-replaced-2026-10-16.rs.txt`) | 6a 뒤 · 4 와 병렬 가능 | 순수 장부 |
+| **6c** | 크롬 측정(`WindowTabs.chrome` · `set_dock_chrome` · `state/convert.rs` 구조 분해에 `chrome: _` — 저장 안 함) · `commands/dock.rs`(invoke 여섯 + `report_dock_chrome` — 인자는 구조체(예: `DropReport`)로 받거나 `rename_all = "snake_case"`(Tauri v2 의 기본 camelCase · 이 저장소에 `rename_all` 없음 — §1-5) · `DragEffect`(move · none · other) 정의 · 스냅숏 빌더가 `WindowSnap.visible` 을 `regions::visible_tab` 으로 채움(어긋나면 debug 셸은 `regions_for` 의 `debug_assert_eq!` 가 패닉 훅으로 끝낸다 · release 는 검사 없음) · 실행기 · 시한 셋 · 게터는 락 밖 · 세션 깃발 = 세대(시작의 레이아웃 락 안에서 세우고 비교-교체로 내림) · `Apply` 는 늘 spawn · `Refused` · `LateStart` · 계측) · ★6 단계 의무(5.5)★ `dock_tab` 을 메인 스레드 · 동기 명령에서 부르지 않는다(Create 길이 창을 만들어 교착 — §1-3 불변식) · 숨긴 출처의 되보이기는 `apply_deferred_maximize` 를 지나는 보이기 경로로(5.6 — 되돌리기는 없어졌지만 미룬 최대화가 선 창을 같은 길로 보인다) · `lib.rs`(`generate_handler!` · `Destroyed` → 장부) · `TauriEvents::settled` 계기 · 측정 보고 뒤 계기 · `WebviewEnv::finish` 의 `disable_drag_drop_handler()` + 시험 | 4 · 6b 뒤(`manager.rs` · `commands/layout.rs` 겹침) | 웹뷰가 안 부르는 셸 끌기 처리(무해 — 끈 처리기의 사건은 쓰는 곳 0) |
 | — | **실측 S1–S4 · S6**(§8-2) — 결과를 이 문서 개정으로. 불합격이면 멈추고 사용자에게 | — | — |
 | **7** | 프론트 — `TabBar` 끌기 출처(우리 MIME `stopPropagation` · 디스패치 뒤 시작) · `dockDrag.ts`(대상 · 세션 몰라도 받기 · 끊기 · `drag_id` 별 최대 `rev` · `seq` · 보이던 탭 대조 · 세션 구독 · 유실(버튼 0) · Esc 삼키기(창별 상한) · 파일 막기) · `dockPick.ts` + 골든 vitest · `dragImage.ts` · `DockOverlay.tsx` · `dockChromeReport.ts` · `WindowLayout` 떼어진 표시 + 시험 · 커밋 전 S1 ⑦ · ⑧ — **마우스 도킹이 끝까지 된다** | S1 · S2 · S3 · S4 | 마우스 도킹 |
 | **8** | 문서 — ADR(§12) · step-log · CLAUDE.md 「LLM-우선 제어」 남은 갭 한 줄 · `docs/process/S21-slot-docking/structure.html` 갱신(`/review doc`) · `/qa full` 화면 실측(AC 전부 · S5) | — | — |
@@ -763,7 +772,7 @@ PRD 4.4 Q11–Q18 이 같은 결정이다. 아래 「다른 안」은 거부한 
 
 ### 11-3. 5판에서 뺀 것
 
-- **셸 폴링 끌기**(4판 §1-3 · §1-4) — 끌기 스레드 · 8ms 마감 틱 · `TickClock` · 세션 입력 enum(`ForegroundSeen` · `PointerSeen` · `KeySeen` · `TopSeen`) · `Probe` 질문 · 전경 유예(`INPUT_LOST_MS`) · `esc_armed` · 시작 되감기 가드(`BeginGuard`) — 엔진이 같은 일을 한다. 미커밋이던 `dock/session.rs` 는 지웠다(3 단계 커밋에 넣지 않음 · 사본 = `.claude/handoff/attachments/slot-docking-session-rs-replaced-2026-10-16.rs.txt`) — `visible_tab` · 끝 어휘 · 띠 캐시 꼴만 6b 로 옮긴다.
+- **셸 폴링 끌기**(4판 §1-3 · §1-4) — 끌기 스레드 · 8ms 마감 틱 · `TickClock` · 세션 입력 enum(`ForegroundSeen` · `PointerSeen` · `KeySeen` · `TopSeen`) · `Probe` 질문 · 전경 유예(`INPUT_LOST_MS`) · `esc_armed` · 시작 되감기 가드(`BeginGuard`) — 엔진이 같은 일을 한다. 미커밋이던 `dock/session.rs` 는 지웠다(3 단계 커밋에 넣지 않음 · 사본 = `.claude/handoff/attachments/slot-docking-session-rs-replaced-2026-10-16.rs.txt`) — 끝 어휘 · 띠 캐시 꼴만 6b 가 참고한다(`visible_tab` 은 6a 가 `regions.rs` 에 새로 짰다).
 - **platform 함수 · 의존** — `topmost_at` · `NativeWindow` · `foreground`(+ 옛 `foreground_is_current_process` 감싸기) · `pointer` · `escape_key` · `capture_client` · (조건부) `fine_timer` · `raw-window-handle` 운영 의존 · `windows` feature 넷(4판 §11-1 #3 · ADR-C).
 - **딱지 창** — `dock-chip.html` · `src/dockChip/main.ts` · Vite 입력 · `capabilities/dock-chip.json` · `dock/chip.rs` · `dock/preview.rs` · 셸 직접 의존 `png` · `base64` · `dock:chip` · `dock:chip-preview` · 자리 기록 거름 · 4판 #43–#46 · #50.
 - **출처 숨기기의 화면 밖 옮기기 · 자리 기록 멈춤**(`placement.rs` `record` 거름) — `hide()` 는 자리를 안 바꾼다.

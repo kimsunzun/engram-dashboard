@@ -1,6 +1,7 @@
 //! 도킹 대상 판정(hit-test) — 커서 아래가 탭바 · 바깥 띠 · 칸의 어느 띠인가를 값만으로 가른다(TRD
-//! S21-slot-docking §2). Tauri · 락 · OS 호출 0 이라 같은 입력이면 같은 답이다(PRD R6a ③). 틱의 가이드와 놓기
-//! 판정이 같은 함수를 쓴다.
+//! S21-slot-docking §2). Tauri · 락 · OS 호출 0 이라 같은 입력이면 같은 답이다(PRD R6a ③). 셸의 놓기 판정
+//! (`dock::regions::pick`)이 이 함수들을 부르고, 웹뷰의 가이드(`pickTarget`)는 같은 규칙의 거울이다(골든
+//! `dock/pick_golden.json`).
 //!
 //! 진입점: [`locate`](1 단계 — 어디 위인가) → [`choose_seam`](2 단계 — 놓을 이음새 · 무효 바깥 변은 밑 칸 띠로
 //! 넘어감). 띠 재료 = [`valid_bands`] · [`landing_rect`](띠 사각형 = 놓았을 때 끼운 것이 차지할 사각형 — R3 · R4).
@@ -29,13 +30,14 @@ pub const SIDE_ORDER: [DockSide; 4] = [
     DockSide::Bottom,
 ];
 
-/// 커서 아래 맨 위 창 하나 — 셸이 platform 으로 골랐다(딱지 창은 투과).
+/// 판정할 창 하나 — 커서 아래 맨 위 창은 브라우저 엔진이 고른다(끌기 사건을 받은 창이 그 창이다 · TRD §2-2
+/// 규칙 1).
 pub struct WindowFrame<'a> {
     pub label: &'a str,
-    /// 웹뷰 클라이언트 영역의 왼쪽 위 — 물리 px · 가상 화면 좌표(Tauri `inner_position()`). 바깥 틀 원점
-    /// (`outer_position()` — 제목줄 · 테두리 포함)을 주면 판정이 그 틀 두께만큼 밀린다.
+    /// 웹뷰 뷰포트의 왼쪽 위 — [`locate`] 의 `cursor` 와 같은 좌표계. 실행 경로(`dock::regions::pick`)는 뷰포트
+    /// CSS px 를 그대로 넣으므로 (0, 0) 이다.
     pub inner_origin: (f64, f64),
-    /// 그 창의 배율(Tauri `scale_factor`) — 두 모니터에 걸쳐도 창 하나에 하나다.
+    /// `cursor` 단위 ÷ CSS px — 실행 경로는 1 이다(이미 CSS px).
     pub scale: f64,
     pub chrome: &'a DockChrome,
     /// 캔버스 크기(CSS px — ADR-0227 보고).
@@ -89,13 +91,12 @@ impl Locate {
     }
 }
 
-/// `cursor`(물리 px · 가상 화면 좌표)가 `top` 의 어디 위인가. `source_view` = 끄는 탭.
+/// `cursor` 가 `top` 의 어디 위인가. 뷰포트 CSS px = `(cursor − top.inner_origin) / top.scale` — 실행 경로는
+/// 뷰포트 CSS px 를 원점 (0, 0) · 배율 1 로 넣는다(TRD §2-2 규칙 2). `source_view` = 끄는 탭.
 pub fn locate(cursor: (f64, f64), top: Option<&WindowFrame>, source_view: Uuid) -> Locate {
     let Some(w) = top else {
         return Locate::Nothing;
     };
-    // 웹뷰가 창 클라이언트 영역을 가득 채우고 CSS px = 물리 px ÷ 창 배율이라는 전제다. 웹뷰 배율
-    // (`devicePixelRatio`)이 창 배율과 갈리는 모니터 조합이 있는지는 모른다 — 스파이크 S5 가 잰다(TRD §8).
     let css = (
         (cursor.0 - w.inner_origin.0) / w.scale,
         (cursor.1 - w.inner_origin.1) / w.scale,

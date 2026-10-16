@@ -90,7 +90,9 @@ const INSET_MAX_PX: f64 = 64.0;
 const MIN_PANE_PX_MAX: u32 = 1000;
 
 /// 창의 탭 내용 영역 크기(정수 CSS px). 그 창의 탭 전부가 이 영역에 겹쳐 그려진다.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// 도킹 영역(`dock::types::DockRegions`)에 실려 웹뷰로 가므로 serde · ts-rs 를 단다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[ts(export)]
 pub struct CanvasPx {
     pub w: u32,
     pub h: u32,
