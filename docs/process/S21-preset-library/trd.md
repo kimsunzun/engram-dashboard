@@ -260,7 +260,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 | `library.read {path}` | 항목 상세 — 설명 · 위치(라이브러리 경로 + 절대 경로) · 쓰는 곳(프리셋 · 에이전트, 직접/건너서) · 상태 | R15 · R41(절대 경로를 돌려준다) |
 | `library.move {paths, toFolder}` · `library.rename {path, newName}` | 옮기기 · 이름 바꾸기 + 참조 고침 | 대응표(옛 → 새) · 고친 수(Δ3) |
 | `library.delete {paths, yes?}` | 휴지통으로 | 쓰는 곳 있으면 `yes` 없이 `CONFLICT`(Δ9) |
-| `library.newFolder {parent, name}` · `library.newPreset {folder, name}` | 만들기 | 새 경로 |
+| `library.newFolder {parent, name}` · `library.newFile {folder, name, kind: markdown|settings|preset}` | 만들기 — 마크다운 = 빈 `.md` · 설정 · 프리셋 = `kind` 틀(2026-10-16 · 옛 `library.newPreset` 대신) | 새 경로 |
 | `library.relink {holder, from, to}` · `library.ackRelink {holder, path}` | 손으로 다시 잇기 · 확인 대기 후보 확인(같은 적용 함수) · 자동 표시 지우기 | `holder` = 프리셋 경로 또는 에이전트 |
 | `preset.get {path}` | 종류별 칸 · 각 줄 상태 · 충돌 · 경고 · `rev` · 「에이전트 N개가 씀」(Δ4) | 안에 든 프리셋 펼침은 화면이 그 경로로 `preset.get` 을 또 부른다 |
 | `preset.add {path, items, after?}` · `preset.remove {path, items}` · `preset.reorder {path, section, order, baseRev}` | 담기 · 빼기 · 순서 — 최신 파일에 적용(흐름 ③) | `add` · `remove` 는 낡은 판이어도 멱등 · `reorder` 는 `baseRev` 가 다르면 `CONFLICT` · 여러 개 담기는 `{added, skipped}`(Δ7) · 백엔드가 바뀌는 에이전트를 싣는다(Δ4) |
