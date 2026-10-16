@@ -106,6 +106,9 @@ pub fn run() {
     //   선다(`RestoreCoordinator` 문서). 데몬 클라이언트는 구독 원천이 커밋 때마다 찾는다.
     let setup_restore = restore_coordinator.clone();
     builder = builder.manage(restore_coordinator);
+    // 끌기 상태(TRD S21-slot-docking §1-3)도 같은 이유다(ADR-0102) — 웹뷰의 첫 크롬 보고 · 레이아웃 계기가 상태
+    //   없이 지나가지 않게.
+    builder = builder.manage(std::sync::Arc::new(crate::dock::DockState::new()));
 
     // ── 셸 설정 + 유효 테마(TRD S21-storage §5-3 · §5-6) ─────────────────────────────
     // ★위 LayoutState 와 같은 이유로 빌더에서 manage 한다(ADR-0102)★ — 웹뷰의 첫 `get_ui_settings` ·
@@ -348,6 +351,9 @@ pub fn run() {
                             );
                         }
                     }
+                    // ★위 정리가 레이아웃 락을 놓은 뒤★ — 장부의 끝 할 일(표식 내리기)이 같은 락을 잡는다. 끄는 중이
+                    //   아니면 아무것도 안 한다(TRD S21-slot-docking §1-3 「그 밖의 끝」).
+                    crate::commands::dock::on_window_destroyed(window.app_handle(), &label);
                 }
                 // 창 자리 기록(TRD S21-storage §6-3) — 사건 값 대신 게터를 다시 읽는다(최소화 · 최대화 여부가 같이
                 //   필요하다).
@@ -395,6 +401,14 @@ pub fn run() {
             // 측정 보고(웹뷰 → 셸) — 버스 명령이 아니다(ADR-0227).
             commands::report_window_canvas,
             commands::report_ui_metrics,
+            commands::report_dock_chrome,
+            // 슬롯 도킹 끌기(웹뷰 → 셸 · TRD S21-slot-docking §1-5) — 버스 명령이 아니다(사람 손의 끌기 신호).
+            commands::dock_drag_start,
+            commands::dock_drag_over,
+            commands::dock_drop,
+            commands::dock_drag_end,
+            commands::dock_pointer_seen,
+            commands::dock_pull,
             // 부팅 조회 — 미는 쪽(`window.setTheme` · `theme.default` 쓰기 · 부팅 · 복원 수락)은 따로 있다
             //   (`commands/settings.rs` 「창별 테마를 읽는 자리가 둘인 이유」).
             commands::get_ui_settings,

@@ -42,6 +42,7 @@ use engram_dashboard_lib::layout::apply::{
     self, AgentSpawner, DockDest, DockOutcome, DockRequest, LabelSource, LayoutEvents, MoveFailed,
     MoveStep, SubscriptionSync, WindowHost, WindowPlace, WindowTabsPayload,
 };
+use engram_dashboard_lib::layout::chrome::{DockChrome, PointCss, RectCss};
 use engram_dashboard_lib::layout::dock::{DockAnchor, DockSide};
 use engram_dashboard_lib::layout::geometry::{Insets, PxRect};
 use engram_dashboard_lib::layout::manager::{
@@ -2003,6 +2004,19 @@ fn one_px_border() -> UiMetrics {
     }
 }
 
+fn bar_chrome() -> DockChrome {
+    DockChrome {
+        canvas_origin: PointCss { x: 0.0, y: 28.0 },
+        tab_bar: RectCss {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 1200.0,
+            y1: 28.0,
+        },
+        tabs: Vec::new(),
+    }
+}
+
 #[test]
 fn canvas_and_metrics_reports_notify_nothing_and_keep_version() {
     let w = World::new();
@@ -2012,6 +2026,7 @@ fn canvas_and_metrics_reports_notify_nothing_and_keep_version() {
 
     apply::report_window_canvas(&w.state, MAIN_WINDOW_LABEL, 1200, 800).unwrap();
     apply::report_ui_metrics(&w.state, MAIN_WINDOW_LABEL, one_px_border()).unwrap();
+    apply::report_dock_chrome(&w.state, MAIN_WINDOW_LABEL, bar_chrome()).unwrap();
 
     assert_eq!(w.layout_events(), 0, "레이아웃 통지 0");
     assert_eq!(w.tab_events(), 0, "탭 통지 0");
@@ -2044,6 +2059,10 @@ fn canvas_and_metrics_reports_notify_nothing_and_keep_version() {
             y1: 800
         }
     );
+    assert_eq!(
+        w.state.0.lock().unwrap().windows[MAIN_WINDOW_LABEL].chrome,
+        Some(bar_chrome())
+    );
 }
 
 #[test]
@@ -2056,6 +2075,8 @@ fn rejected_reports_notify_nothing_and_keep_version() {
     let err = apply::report_window_canvas(&w.state, "no-such", 1200, 800).unwrap_err();
     assert!(err.contains("window 없음"), "err={err}");
     let err = apply::report_ui_metrics(&w.state, "no-such", one_px_border()).unwrap_err();
+    assert!(err.contains("window 없음"), "err={err}");
+    let err = apply::report_dock_chrome(&w.state, "no-such", bar_chrome()).unwrap_err();
     assert!(err.contains("window 없음"), "err={err}");
     let mut bad = one_px_border();
     bad.frame_insets.l = f64::NAN;

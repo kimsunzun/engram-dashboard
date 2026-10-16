@@ -65,23 +65,63 @@ impl WebviewEnv {
             .as_deref()
     }
 
-    /// 창 빌더에 웹뷰 환경 옵션(폴더 · 브라우저 인자 · 확장 · 스크롤바 모양)을 붙인다 — 창을 만드는 모든 코드가
-    /// `build()` 앞에서 지난다. 앞서 빌더에 붙은 값(설정 창이 `from_config` 로 받은 것 포함)은 덮는다 — 폴더만 예외다
-    /// (모듈 머리).
+    /// 창 빌더에 웹뷰 환경 옵션(폴더 · 브라우저 인자 · 확장 · 스크롤바 모양)을 붙이고 드롭 처리기를 끈다 — 창을 만드는
+    /// 모든 코드가 `build()` 앞에서 지난다. 앞서 빌더에 붙은 값(설정 창이 `from_config` 로 받은 것 포함)은 덮는다 —
+    /// 폴더만 예외다(모듈 머리).
     ///
     /// 폴더는 OS 를 가리지 않고 넘긴다 — 그 값을 쓰느냐는 Tauri 의 플랫폼 구현 몫이다(CLAUDE.md 「플랫폼 중립」).
     pub(crate) fn finish<'a, R: Runtime, M: Manager<R>>(
         &self,
         builder: WebviewWindowBuilder<'a, R, M>,
     ) -> WebviewWindowBuilder<'a, R, M> {
-        let builder = builder
-            .additional_browser_args(WEBVIEW2_BROWSER_ARGS)
-            .browser_extensions_enabled(false)
-            .scroll_bar_style(ScrollBarStyle::Default);
-        match self.chosen_dir() {
-            Some(dir) => builder.data_directory(dir.to_path_buf()),
-            None => builder,
-        }
+        attach(builder, self.chosen_dir())
+    }
+}
+
+// 마무리가 붙이는 것 — 실 빌더는 붙인 값을 읽을 길이 없어 시험이 가짜 빌더로 무엇을 붙였나 본다.
+trait EnvOptions: Sized {
+    fn browser_args(self, args: &str) -> Self;
+    fn extensions(self, enabled: bool) -> Self;
+    fn scroll_bars(self, style: ScrollBarStyle) -> Self;
+    fn no_drop_handler(self) -> Self;
+    fn data_dir(self, dir: PathBuf) -> Self;
+}
+
+impl<'a, R: Runtime, M: Manager<R>> EnvOptions for WebviewWindowBuilder<'a, R, M> {
+    fn browser_args(self, args: &str) -> Self {
+        self.additional_browser_args(args)
+    }
+
+    fn extensions(self, enabled: bool) -> Self {
+        self.browser_extensions_enabled(enabled)
+    }
+
+    fn scroll_bars(self, style: ScrollBarStyle) -> Self {
+        self.scroll_bar_style(style)
+    }
+
+    fn no_drop_handler(self) -> Self {
+        self.disable_drag_drop_handler()
+    }
+
+    fn data_dir(self, dir: PathBuf) -> Self {
+        self.data_directory(dir)
+    }
+}
+
+fn attach<B: EnvOptions>(builder: B, dir: Option<&Path>) -> B {
+    let builder = builder
+        .browser_args(WEBVIEW2_BROWSER_ARGS)
+        .extensions(false)
+        .scroll_bars(ScrollBarStyle::Default)
+        // 켜 두면 wry 가 웹뷰에 자기 드롭 대상(`IDropTarget`)을 달아 HTML5 끌어 놓기 사건이 웹뷰에 닿지 않는다
+        //   (wry 0.55.1 `src/webview2/drag_drop.rs` · `mod.rs`) — 창 사이 탭 끌기가 그 사건으로 돈다. 잃는 것은 Tauri
+        //   의 파일 끌어 놓기 사건뿐이고 쓰는 곳이 없다(점검 = TRD S21-slot-docking §9 「드롭 처리기 점검」).
+        // TRD S21-slot-docking §1-6
+        .no_drop_handler();
+    match dir {
+        Some(dir) => builder.data_dir(dir.to_path_buf()),
+        None => builder,
     }
 }
 
@@ -253,6 +293,69 @@ mod tests {
         std::fs::write(&dir, b"not a folder").unwrap();
         assert_eq!(WebviewEnv::new(dir, fs_check).chosen_dir(), None);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ── 마무리가 붙이는 것 ──
+
+    #[derive(Debug, PartialEq)]
+    enum Attached {
+        BrowserArgs(String),
+        Extensions(bool),
+        // 런타임 쪽 `ScrollBarStyle` 은 `PartialEq` 가 없어 Debug 철자로 견준다.
+        ScrollBars(String),
+        NoDropHandler,
+        DataDir(PathBuf),
+    }
+
+    #[derive(Default)]
+    struct Recorder(Vec<Attached>);
+
+    impl EnvOptions for Recorder {
+        fn browser_args(mut self, args: &str) -> Self {
+            self.0.push(Attached::BrowserArgs(args.to_owned()));
+            self
+        }
+
+        fn extensions(mut self, enabled: bool) -> Self {
+            self.0.push(Attached::Extensions(enabled));
+            self
+        }
+
+        fn scroll_bars(mut self, style: tauri::webview::ScrollBarStyle) -> Self {
+            self.0.push(Attached::ScrollBars(format!("{style:?}")));
+            self
+        }
+
+        fn no_drop_handler(mut self) -> Self {
+            self.0.push(Attached::NoDropHandler);
+            self
+        }
+
+        fn data_dir(mut self, dir: PathBuf) -> Self {
+            self.0.push(Attached::DataDir(dir));
+            self
+        }
+    }
+
+    #[test]
+    fn every_window_gets_the_environment_options_and_no_drop_handler() {
+        let common = || {
+            vec![
+                Attached::BrowserArgs(WEBVIEW2_BROWSER_ARGS.to_owned()),
+                Attached::Extensions(false),
+                Attached::ScrollBars("Default".to_owned()),
+                Attached::NoDropHandler,
+            ]
+        };
+        let dir = std::env::temp_dir().join("webview");
+        let mut with_dir = common();
+        with_dir.push(Attached::DataDir(dir.clone()));
+        assert_eq!(attach(Recorder::default(), Some(&dir)).0, with_dir);
+        assert_eq!(
+            attach(Recorder::default(), None).0,
+            common(),
+            "기본 폴더로 물러나도 드롭 처리기는 끈다"
+        );
     }
 
     // ── 설정 창의 환경 옵션 ──

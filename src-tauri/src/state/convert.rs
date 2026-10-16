@@ -45,7 +45,7 @@ impl StateRevision {
 ///
 /// - 모르는 내용 슬롯(곁표 항목이 있고 메모리 내용이 `Empty`)은 원문으로 적는다 — 새 판이 쓴 슬롯이 이 판의 저장으로
 ///   지워지지 않는다(ADR-0060).
-/// - 화면 실측값(`canvas` · `metrics`)은 싣지 않는다(§6-1).
+/// - 화면 실측값(`canvas` · `metrics` · `chrome`)은 싣지 않는다(§6-1).
 /// - 자리를 본 적 없는 창(만들 때부터 최대화 · 첫 `Moved` 전)도 `bounds: null` 로 적는다 — ★자리 때문에 창을 빼지
 ///   않는다★: main 이면 그 탭이 다음 부팅에 사라진다.
 pub fn to_persisted(layout: &ViewManager) -> Vec<WindowEntry> {
@@ -77,6 +77,7 @@ fn tabbed_entry(
         active,
         canvas: _,
         metrics: _,
+        chrome: _,
         window_id,
         attrs,
         placement_memo: _,
@@ -327,7 +328,7 @@ impl ViewManager {
     ///   번호가 되돌아가고, 기록기는 같은지만 보므로 마지막으로 본 값과 다시 같아지는 순간 그 사이의 변경을 놓친다.
     /// - 곁표(모르는 내용)를 View 와 함께 옮긴다 — View 만 옮기면 그 슬롯이 빈 칸으로 저장돼 원문이 사라진다. 옛
     ///   View 는 `remove_view` 로 지운다(그 곁표 항목을 함께 거둔다).
-    /// - main 항목은 탭 · 속성만 바꾼다 — 통째로 바꾸면 측정값(`canvas` · `metrics`)을 웹뷰가 다시 보고할 때까지 잃는다.
+    /// - main 항목은 탭 · 속성만 바꾼다 — 통째로 바꾸면 측정값(`canvas` · `metrics` · `chrome`)을 웹뷰가 다시 보고할 때까지 잃는다.
     pub(crate) fn from_persisted(windows: Vec<WindowEntry>, labels: &dyn LabelSource) -> Restored {
         let mut restorer = Restorer::default();
         for entry in windows {

@@ -1,6 +1,8 @@
 pub mod agent;
 pub mod autostart;
 pub mod discovery;
+// 슬롯 도킹 끌기의 실행기(TRD S21-slot-docking §1-3).
+pub mod dock;
 pub mod layout;
 pub mod popout;
 pub mod settings;
@@ -13,6 +15,7 @@ pub mod view_bus;
 pub use agent::*;
 pub use autostart::*;
 pub use discovery::*;
+pub use dock::*;
 pub use layout::*;
 pub use popout::*;
 pub use settings::*;

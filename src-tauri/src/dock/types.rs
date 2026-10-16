@@ -1,5 +1,6 @@
 //! 도킹 wire 페이로드(TRD S21-slot-docking §1-5) — 셸 → 웹뷰 영역([`DockRegions`] · `dock:regions`) · 세션 사건
-//! ([`SessionEvent`] · `dock:session`), 웹뷰 → 셸 보고([`DragOverReport`] · [`DropReport`] · [`DragEffect`]).
+//! ([`SessionEvent`] · `dock:session`) · 당긴 답([`DockPullReply`]), 웹뷰 → 셸 보고([`DragOverReport`] ·
+//! [`DropReport`] · [`DragEffect`]).
 //! ts-rs 로 `src-tauri/bindings/` 에 굽는다. 웹뷰 → 셸 측정(크롬)은 레이아웃 창 항목에 두므로 `layout::chrome` 에
 //! 있다.
 //!
@@ -186,6 +187,17 @@ pub struct SessionEvent {
     #[ts(type = "number")]
     pub seq: u64,
     pub phase: SessionPhase,
+}
+
+/// `dock_pull` 의 답(셸 → 부른 웹뷰) — 명령은 이것을 `null` 로 감싸 돌려준다(`null` = 세션이 없다).
+///
+/// - `started`: 지금 세션 — `dock:session` 의 `started` 와 같은 칸.
+/// - `regions`: 부른 창의 지금 영역. `null` = 그 창에 보낼 영역이 없다(숨긴 출처 · 재료 없음 · 사라진 창).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct DockPullReply {
+    pub started: Started,
+    pub regions: Option<DockRegions>,
 }
 
 /// `dock_drag_over` 의 보고 — 웹뷰는 `shown` · `rev` · `displayed` 중 하나가 바뀔 때만 `over` 를, 창 밖으로 나갈 때

@@ -36,6 +36,7 @@ use std::collections::{HashMap, HashSet};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
+use super::chrome::DockChrome;
 use super::dock::{self, DockAnchor, DockSide, DockTreeError};
 use super::geometry::{self, has_area, PxRect, RectF64};
 use super::tree;
@@ -229,11 +230,13 @@ pub struct WindowTabs {
     // 탭 순서(좌→우).
     pub tabs: Vec<ViewId>,
     pub active: ViewId,
-    // 둘 다 그 창 웹뷰가 보고하기 전엔 None 이고 창 엔트리와 함께 사라진다. 탭마다가 아니라 창마다다.
+    // 셋 다 그 창 웹뷰가 보고하기 전엔 None 이고 창 엔트리와 함께 사라진다. 탭마다가 아니라 창마다다.
     // ADR-0227
     pub canvas: Option<CanvasPx>,
     // ADR-0227
     pub metrics: Option<UiMetrics>,
+    // TRD S21-slot-docking §1-5 「크롬 보고를 늘 하는 이유」
+    pub chrome: Option<DockChrome>,
     /// 영속 신원 — main 은 `main`, 팝아웃은 그 창 항목이 처음 생길 때 뽑은 UUID(하이픈 소문자). 저장 · 복원은 이
     /// 값을 쓴다. 런타임 label(맵 키)은 한 부팅 안에서만의 신원이다 — 팝아웃 label 은 실행마다 1 부터 다시
     /// 센다(TRD S21-storage §6-3).
@@ -251,6 +254,7 @@ impl WindowTabs {
             active,
             canvas: None,
             metrics: None,
+            chrome: None,
             window_id,
             attrs,
             placement_memo: PlacementMemo::default(),
@@ -1370,6 +1374,13 @@ impl ViewManager {
         Ok(id)
     }
 
+    /// 지금 표식(번호, 끄는 탭) — `None` = 표식이 없다(끌기 없음 · 도킹 성공이 내렸다 · 그 탭이 지워졌다). 끌기
+    /// 스냅숏은 끄는 탭을 장부가 아니라 이 값에서, 스냅숏 번호를 다는 같은 레이아웃 락 구간 안에서 읽는다(TRD
+    /// S21-slot-docking §1-3 「스냅숏 번호」).
+    pub fn lease(&self) -> Option<(LeaseId, ViewId)> {
+        self.lease
+    }
+
     /// 지금 표식이 `id` 면 내린다 — 아니면(이미 내려짐 · 다른 번호) 무동작.
     pub fn release_lease(&mut self, id: LeaseId) {
         if matches!(self.lease, Some((current, _)) if current == id) {
@@ -1587,6 +1598,18 @@ impl ViewManager {
             .ok_or_else(|| LayoutError::WindowNotFound(label.to_string()))?;
         check_metrics(&m)?;
         wt.metrics = Some(m);
+        Ok(())
+    }
+
+    // 모양 검사를 하지 않는다 — wire(JSON)는 유한하지 않은 수를 못 싣고, 뒤집힌 사각형은 반열림 판정이 어느 점도
+    // 품지 않아 그 칸의 놓기만 없어진다.
+    // TRD S21-slot-docking §1-5
+    pub fn set_dock_chrome(&mut self, label: &str, chrome: DockChrome) -> Result<(), LayoutError> {
+        let wt = self
+            .windows
+            .get_mut(label)
+            .ok_or_else(|| LayoutError::WindowNotFound(label.to_string()))?;
+        wt.chrome = Some(chrome);
         Ok(())
     }
 
@@ -3747,6 +3770,7 @@ mod tests {
                 "{label}: 캔버스는 그 웹뷰 보고 전까지 없다"
             );
             assert_eq!(wt.metrics, None, "{label}: 지표도 없다");
+            assert_eq!(wt.chrome, None, "{label}: 크롬도 없다");
             assert_eq!(
                 mgr.slot_px(view, first_slot_of(&mgr, view)),
                 Ok(None),
@@ -3791,6 +3815,69 @@ mod tests {
         let _ = mgr.set_ui_metrics(MAIN_WINDOW_LABEL, metrics(-1.0, 1.0, 1.0, 1.0, 30));
         let _ = mgr.set_window_canvas("no-such", 1, 1);
         assert_eq!(mgr.version, before);
+    }
+
+    fn chrome(bar_x1: f64) -> DockChrome {
+        use crate::layout::chrome::{PointCss, RectCss};
+        DockChrome {
+            canvas_origin: PointCss { x: 0.0, y: 28.0 },
+            tab_bar: RectCss {
+                x0: 0.0,
+                y0: 0.0,
+                x1: bar_x1,
+                y1: 28.0,
+            },
+            tabs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn dock_chrome_is_stored_per_window_and_vanishes_with_it() {
+        let mut mgr = ViewManager::new();
+        mgr.create_window("popup-1").unwrap();
+        mgr.set_dock_chrome(MAIN_WINDOW_LABEL, chrome(1200.0))
+            .unwrap();
+        mgr.set_dock_chrome("popup-1", chrome(640.0)).unwrap();
+        assert_eq!(window(&mgr, MAIN_WINDOW_LABEL).chrome, Some(chrome(1200.0)));
+        assert_eq!(window(&mgr, "popup-1").chrome, Some(chrome(640.0)));
+
+        mgr.set_dock_chrome("popup-1", chrome(500.0)).unwrap();
+        assert_eq!(
+            window(&mgr, "popup-1").chrome,
+            Some(chrome(500.0)),
+            "다음 보고가 덮는다"
+        );
+
+        mgr.close_window("popup-1").unwrap();
+        assert_eq!(
+            mgr.set_dock_chrome("popup-1", chrome(640.0)),
+            Err(LayoutError::WindowNotFound("popup-1".to_string()))
+        );
+        assert!(
+            !mgr.windows.contains_key("popup-1"),
+            "없는 창을 만들지 않는다"
+        );
+    }
+
+    #[test]
+    fn a_chrome_report_bumps_neither_version_nor_attrs_rev() {
+        let mut mgr = ViewManager::new();
+        let before = (mgr.version, mgr.attrs_rev());
+        mgr.set_dock_chrome(MAIN_WINDOW_LABEL, chrome(1200.0))
+            .unwrap();
+        let _ = mgr.set_dock_chrome("no-such", chrome(1200.0));
+        assert_eq!((mgr.version, mgr.attrs_rev()), before);
+    }
+
+    #[test]
+    fn a_restore_keeps_the_main_chrome() {
+        let mut mgr = ViewManager::new();
+        mgr.set_dock_chrome(MAIN_WINDOW_LABEL, chrome(1200.0))
+            .unwrap();
+        let (fresh, ..) = restored_with_popout("slot-popup-2");
+        mgr.adopt_restored(fresh).unwrap();
+        assert_eq!(window(&mgr, MAIN_WINDOW_LABEL).chrome, Some(chrome(1200.0)));
+        assert_eq!(window(&mgr, "slot-popup-2").chrome, None);
     }
 
     #[test]
@@ -5622,8 +5709,10 @@ mod tests {
         assert_eq!(mgr.lease_tab(p[0]), Err(DockError::Dragging));
         mgr.release_lease(LeaseId(first.0 + 1));
         assert_eq!(mgr.lease, Some((first, p[0])), "다른 번호는 무동작");
+        assert_eq!(mgr.lease(), mgr.lease);
         mgr.release_lease(first);
         assert_eq!(mgr.lease, None);
+        assert_eq!(mgr.lease(), None);
         mgr.release_lease(first);
         let second = mgr.lease_tab(m[0]).unwrap();
         assert_ne!(second, first, "번호를 다시 쓰지 않는다");

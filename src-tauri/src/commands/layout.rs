@@ -70,8 +70,10 @@ impl LayoutEvents for TauriEvents<'_> {
         emit_window_tabs(self.app, tabs);
     }
 
-    // 빈 몸 — 끌기 장부의 스냅숏 계기는 아직 없다(TRD S21-slot-docking §10 6 단계가 단다).
-    fn settled(&self) {}
+    // 끌기 장부의 모델 계기 — 세션 깃발이 섰을 때만 스냅숏을 먹인다(TRD S21-slot-docking §1-3 「영역」).
+    fn settled(&self) {
+        crate::commands::dock::on_layout_changed(self.app);
+    }
 }
 
 pub(crate) struct RouterSubs<'a> {
@@ -565,7 +567,7 @@ pub async fn spawn_into(
 
 // ── 측정 보고(웹뷰 → 셸) ─────────────────────────────────────────────────────
 //
-// 둘 다 버스 명령이 아니다 — 버스에 두면 LLM 이 캔버스·지표를 위조할 수 있다. version 을 올리지도 알리지도
+// 셋째 보고(`report_dock_chrome`)는 끌기 실행기 옆(`commands::dock`)에 있다. 셋 다 버스 명령이 아니다 — 버스에 두면 LLM 이 캔버스·지표를 위조할 수 있다. version 을 올리지도 알리지도
 // 않는다.
 // ADR-0227
 
@@ -581,7 +583,10 @@ pub fn report_window_canvas(
     w: u32,
     h: u32,
 ) -> Result<(), String> {
-    apply::report_window_canvas(&state, window.label(), w, h)
+    apply::report_window_canvas(&state, window.label(), w, h)?;
+    // 측정 계기 — 캔버스가 바뀌면 끄는 중의 영역도 바뀐다(TRD S21-slot-docking §1-3 「영역」).
+    crate::commands::dock::on_layout_changed(window.app_handle());
+    Ok(())
 }
 
 /// 창 웹뷰가 칸 틀 기본 지표를 알린다 — `invoke('report_ui_metrics', { metrics })`. 계약(단위·범위)은
