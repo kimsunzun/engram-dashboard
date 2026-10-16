@@ -98,24 +98,16 @@ pub trait LayoutEvents: Send + Sync {
 ///   다시 잡는다(`popout::destroy_window` → `Destroyed` → `cleanup_popup_window` → `state.0.lock()`).
 ///   워커 스레드가 가드를 쥔 채 부르면 destroy 는 이벤트 루프를 기다리고 이벤트 루프는 그 가드를
 ///   기다린다. 이미 닫힌 label 이면 no-op(호출자가 존재를 확인하지 않는다).
-/// - `is_open`: **OS 창**이 살아 있나 — 모델(`ViewManager`)이 아니다. 둘은 갈릴 수 있다(창이 사라졌으나
-///   `Destroyed` 정리가 아직 모델 엔트리를 안 지운 순간) — 그 순간을 거르는 것은 이 답뿐이고,
+/// - `is_open`: **OS 창**이 살아 있나 — 모델(`ViewManager`)이 아니다. 둘은 갈릴 수 있다(닫기 요청 없이 OS
+///   창이 사라졌으나 `Destroyed` 정리가 아직 모델 엔트리를 안 지운 순간) — 그 순간을 거르는 것은 이 답뿐이고,
 ///   `insert_tab_into` 의 모델 재검증은 그 상태를 통과시킨다.
 ///
-/// ★알려진 미확인 — pop-out 이 창 확인과 모델 변형 사이에서 락을 한 번 놓는다★. 그 틈에 사용자가 대상
-/// 창을 닫으면 **어느 검사도 막지 못하고**, 두 갈래의 뒷일이 다르다.
-/// - **기존 창 타깃**(이 답이 `true` 를 준 뒤 닫힘): 두 검사를 다 통과해 탭이 들어가고, 뒤늦게 도착한
-///   `Destroyed` 의 `cleanup_window_core` 가 그 창을 모델에서 지우며 방금 넣은 탭까지 함께 지운다. 소스
-///   슬롯은 이미 닫힌 뒤라 콘텐츠가 어느 화면에도 없다. **모델은 깨끗하게 남는다**(잔해 없음).
-/// - **새 창 타깃**(`is_open` 을 아예 안 거치는 갈래 — `move_slot_to_window` 의 phase B): 창을 만드는 것이
-///   phase C 라 `Destroyed` 가 도착한 시점엔 그 label 이 `mgr.windows` 에 아직 없다 →
-///   `cleanup_window_core` 가 `contains_key` 가드에서 no-op 으로 돌아선다. 그 뒤 phase C 가 **없는 OS 창**
-///   앞으로 창·탭을 만들고 소스 슬롯을 닫는다. ★`Destroyed` 는 한 번뿐이라 뒤에 치우는 것이 없다★ —
-///   화면 없는 창·탭·콘텐츠가 모델에 영구히 남고, `window.list` 로 label 을 찾아 `window.close` 를 부르는
-///   길 말고는 회수 경로가 없다.
-///
-/// 둘 다 「OS 창 닫힘」과 「모델 변형」의 조정 방식을 정해야 없어지고, 그건 이 포트의 결정이 아니다
-/// (미해결 — 사용자 판단 대기).
+/// pop-out 은 창 확인과 모델 변형 사이에서 락을 한 번 놓는다. 그 틈에 사용자가 대상 창을 닫아도 잔해가 남지
+/// 않는 것은 팝아웃의 닫기 요청이 모델에서 그 창을 먼저 지우고 label 에 묘비를 달기 때문이다(같은 락 한 번 —
+/// `commands::popout::close_requested_popup_window` · TRD S21-slot-docking §1-2 「닫히는 창」). 기존 창 타깃은
+/// phase C 의 `insert_tab_into` 가 창 없음으로, 새 창 타깃은 `attach_view_as_new_window` 가 묘비로 실패해 롤백을
+/// 탄다(옮기려던 슬롯은 출처에 남는다). 그 전제(팝아웃의 닫기 요청은 되돌려지지 않는다)와 점검 명령은 `lib.rs` 의
+/// `CloseRequested` 처리기에 있다.
 pub trait WindowHost: Send + Sync {
     fn open(&self, label: &str) -> Result<(), String>;
     fn close(&self, label: &str);

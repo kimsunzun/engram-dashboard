@@ -208,7 +208,8 @@ pub async fn move_slot_to_window(
 }
 
 // ★창 Destroyed 정리(수명/누수 임계 — 멀티탭, G1)★. 팝업/런타임 창이 닫히면(titlebar close·강제 destroy·
-// close_tab/close_window 경유 destroy) lib.rs Destroyed arm 이 이걸 부른다.
+// close_tab/close_window 경유 destroy) lib.rs Destroyed arm 이 이걸 부른다. titlebar close 는 닫기 요청
+// ([`close_requested_popup_window`])이 모델을 먼저 지웠으므로 여기서는 재계산 · Channel 떼기만 남는다.
 //
 // ★현 버그 수정(G1)★: 옛 코드는 단일 바인딩 하나만 정리해 멀티탭 팝업을 강제 종료하면 나머지 탭이 잔류
 // + Unsubscribe 누락.
@@ -229,10 +230,10 @@ pub fn cleanup_popup_window(
         return;
     }
 
-    // 1) 모델 정리 — ViewManager 락 한 번 안(아래 함수).
-    if !drop_window_in_model(label, state, router, client) {
+    // 1) 모델 정리 — ViewManager 락 한 번 안(아래 함수). 닫기 요청이 먼저 지웠으면 0.
+    let Some(dropped_views) = drop_window_in_model(label, state, router, client) else {
         return;
-    }
+    };
 
     // 2) 출력 Channel registry 에서 이 label 제거(누수 방지 — 죽은 webview Channel 이 남지 않게). Tauri
     //   부분이라 별도 락(ViewManager 무관) — 코어(모델·라우팅) 밖이라 락 밖 유지 OK(F1).
@@ -240,12 +241,37 @@ pub fn cleanup_popup_window(
     //   모듈 헤더).
     crate::output_channel::unregister_window(registry, label);
 
-    tracing::info!(label, "런타임 창 정리 완료(탭 전부 드롭·구독·Channel)");
+    tracing::info!(
+        label,
+        dropped_views,
+        "런타임 창 소멸 정리 완료(모델 몫 · Channel)"
+    );
 }
 
-// 창 소멸 정리의 모델 몫 — 창의 모든 탭 View 드롭 + windows 엔트리 제거 + 라우팅 표 재계산 + 구독 정리 발화 +
-// 사용량 관심 재계산, ★전부 같은 락 안★. `false` = 락 오염(정리 스킵). 창(`AppHandle`) 없이 서므로 셸 단위
-// 시험이 이것을 직접 부른다.
+/// 팝아웃의 닫기 요청(`lib.rs` 의 `CloseRequested`) — 창 정리의 모델 몫([`drop_window_in_model`] · 묘비 포함)을
+/// 소멸을 기다리지 않고 지금 한다. 뒤이은 `Destroyed` 정리([`cleanup_popup_window`])가 같은 몫을 다시 해도 바뀌는
+/// 것은 없다. main 은 무동작이다(main 의 닫기 요청은 숨기기 — 부르는 쪽 갈래).
+/// TRD S21-slot-docking §1-2 「닫히는 창」
+pub(crate) fn close_requested_popup_window(
+    label: &str,
+    state: &LayoutState,
+    router: &OutputRouter,
+    client: &DaemonClient,
+) {
+    // 0 = 모델이 아직 그 창을 몰랐다(새 창 옮기기의 창 열기와 모델 확정 사이) — 묘비만 선다.
+    if let Some(dropped_views) = drop_window_in_model(label, state, router, client) {
+        tracing::info!(
+            label,
+            dropped_views,
+            "팝아웃 닫기 요청 — 모델에서 먼저 지우고 label 에 묘비를 단다"
+        );
+    }
+}
+
+// 팝아웃 창 정리의 모델 몫 — 창의 모든 탭 View 드롭 + windows 엔트리 제거 + 라우팅 표 재계산 + 구독 정리 발화 +
+// 사용량 관심 재계산 + label 묘비, ★전부 같은 락 안★. 닫기 요청과 `Destroyed` 가 둘 다 부르고 두 번째는 바뀌는
+// 것이 없다(창이 이미 없으면 재계산만 · 묘비는 집합). 답 = 모델에서 지운 탭 수(창이 이미 없었으면 0) · `None` =
+// 정리하지 않음(main · 락 오염). 창(`AppHandle`) 없이 서므로 셸 단위 시험이 이것을 직접 부른다.
 //   ★F1 REAL 동시성 버그 수정★: 옛 코드는 델타(cleanup_window_core rebuild)를 락 안에서 계산하고
 //   `to_unsubscribe` 발화를 락 드롭 뒤에 했다 → 계산~발화 사이 다른 command(assign_agent/spawn/move)가
 //   그 agent 를 재추가하면 stale 1→0 unsubscribe 가 방금 형성된 라이브 구독을 죽인다
@@ -258,13 +284,24 @@ pub(crate) fn drop_window_in_model(
     state: &LayoutState,
     router: &OutputRouter,
     client: &DaemonClient,
-) -> bool {
+) -> Option<usize> {
+    // main 은 닫지 않는다(ADR-0057 ④) — 묘비가 서면 main 으로의 도킹이 막힌다.
+    if label == MAIN_WINDOW_LABEL {
+        return None;
+    }
     let Ok(mut mgr) = state.0.lock() else {
-        tracing::warn!(label, "cleanup_popup_window: lock poisoned — 정리 스킵");
-        return false;
+        tracing::warn!(
+            label,
+            "팝아웃 창 정리(닫기 요청 · 소멸): lock poisoned — 정리 스킵"
+        );
+        return None;
     };
+    let dropped_views = mgr.windows.get(label).map_or(0, |w| w.tabs.len());
     // 창이 이미 모델에서 지워졌으면 rebuild 만.
     let delta = crate::output_router::cleanup_window_core(&mut mgr, router, label);
+    // 묘비는 모델 삭제와 같은 락 안 — 이 락 뒤의 도킹 · 새 창 확정은 그 창을 「없음」이나 묘비로 만나 무변경이다
+    //   (TRD S21-slot-docking §1-2 「닫히는 창」 (c)).
+    mgr.mark_closed(label);
     // 이 창이 마지막이던 agent 는 1→0 → Unsubscribe(락 안 발화 — F1).
     for a in delta.to_unsubscribe {
         client.unsubscribe(a);
@@ -273,7 +310,7 @@ pub(crate) fn drop_window_in_model(
     //   모델과 따로 선다: 새 창으로 슬롯 옮기기는 OS 창을 먼저 열고 모델 창을 나중에 더하므로, 그 틈에 숨겨졌다
     //   닫힌 창은 모델에 없어도 표시가 남는다. label 은 다시 쓰이지 않아(`PopupCounter`) 여기서 안 지우면 샌다.
     client.usage_window_destroyed(label, &mgr);
-    true
+    Some(dropped_views)
 }
 
 // ── 테스트: label 발급·prefix 판정(창 생성 자체는 running app 필요라 GUI 검증) ──────────
@@ -313,5 +350,395 @@ mod tests {
         assert_eq!(cascade_position("slot-popup-1"), (140.0, 110.0));
         // 9번째는 wrap(8개마다).
         assert_eq!(cascade_position("slot-popup-9"), (140.0, 110.0));
+    }
+}
+
+// ── 테스트: 팝아웃 닫기 요청의 모델 몫(TRD S21-slot-docking §1-2 「닫히는 창」) — 창 없이 선다 ──────────
+// 라우팅 표 · 구독 재동기는 운영과 같은 실물(`OutputRouter` · `RouterSubs`)이고 데몬에는 붙지 않는다(해제 발화는
+// 창구가 닫혀 no-op — 발화 횟수는 `daemon_client` 시험이 잰다). `lib.rs` 의 창 사건 배선은 화면 실측 몫이다.
+#[cfg(test)]
+mod close_request_tests {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use engram_dashboard_protocol::DaemonInfo;
+    use tokio::runtime::Handle;
+
+    use super::*;
+    use crate::daemon_client::DaemonDiscovery;
+    use crate::layout::dock::{DockAnchor, DockSide};
+    use crate::layout::manager::{DockError, DockGuard, DockTo, FocusPolicy};
+    use crate::layout::{
+        tree, LayoutError, LayoutEvents, SlotContent, SubscriptionSync, ViewManager, ViewSnapshot,
+        WindowTabsPayload,
+    };
+
+    const POPUP: &str = "slot-popup-7";
+
+    struct NoDaemon;
+
+    impl DaemonDiscovery for NoDaemon {
+        fn ensure_spawn(&self, _timeout: Duration) -> Result<DaemonInfo, String> {
+            Err("이 시험은 연결하지 않는다".to_string())
+        }
+        fn read_live(&self) -> Option<DaemonInfo> {
+            None
+        }
+    }
+
+    struct NoEvents;
+
+    impl LayoutEvents for NoEvents {
+        fn layout_updated(&self, _snapshot: &ViewSnapshot) {}
+        fn window_tabs_updated(&self, _tabs: &WindowTabsPayload) {}
+    }
+
+    struct Rig {
+        state: LayoutState,
+        router: Arc<OutputRouter>,
+        client: Arc<DaemonClient>,
+    }
+
+    impl Rig {
+        fn new() -> Self {
+            Rig {
+                state: LayoutState::new(),
+                router: Arc::new(OutputRouter::new()),
+                client: Arc::new(DaemonClient::new(Handle::current(), Arc::new(NoDaemon))),
+            }
+        }
+
+        fn subs(&self) -> RouterSubs<'_> {
+            RouterSubs {
+                router: &self.router,
+                client: &self.client,
+            }
+        }
+
+        // `lib.rs` 의 `CloseRequested` 팝아웃 갈래.
+        fn close_requested(&self, label: &str) {
+            close_requested_popup_window(label, &self.state, &self.router, &self.client);
+        }
+
+        // `lib.rs` 의 `Destroyed` 정리 중 모델 몫.
+        fn destroyed(&self, label: &str) -> Option<usize> {
+            drop_window_in_model(label, &self.state, &self.router, &self.client)
+        }
+
+        // `window` 에 탭 하나를 더한다(없으면 그 창째 만든다).
+        fn add_tab(&self, window: &str) -> Uuid {
+            let mut mgr = self.state.0.lock().unwrap();
+            let view = if mgr.windows.contains_key(window) {
+                mgr.create_tab(window, None).unwrap()
+            } else {
+                mgr.create_window(window).unwrap()
+            };
+            self.subs().resync(&mgr);
+            view
+        }
+
+        fn main_tab(&self) -> Uuid {
+            self.state.0.lock().unwrap().windows[MAIN_WINDOW_LABEL].active
+        }
+
+        fn first_slot(&self, view: Uuid) -> Uuid {
+            tree::first_slot_id(&self.state.0.lock().unwrap().views[&view].layout)
+        }
+
+        // 탭 `view` 의 첫 슬롯에 `agent` 를 앉힌다 — 라우팅 표도 맞춘다.
+        fn seat(&self, view: Uuid, agent: Uuid) {
+            let slot = self.first_slot(view);
+            let mut mgr = self.state.0.lock().unwrap();
+            mgr.assign_agent(view, slot, agent.to_string()).unwrap();
+            self.subs().resync(&mgr);
+        }
+
+        fn routed(&self, agent: Uuid) -> Vec<String> {
+            self.router.targets(agent).to_vec()
+        }
+
+        fn fingerprint(&self) -> (u64, Vec<String>, HashMap<Uuid, String>) {
+            let mgr = self.state.0.lock().unwrap();
+            assert_owned(&mgr);
+            let mut windows: Vec<_> = mgr.windows.keys().cloned().collect();
+            windows.sort();
+            (mgr.version, windows, mgr.view_owner.clone())
+        }
+    }
+
+    // ADR-0057 ① ② — 창 없는 View(롤백이 못 거둔 임시 View 포함)가 남지 않았다.
+    fn assert_owned(mgr: &ViewManager) {
+        let tabs: usize = mgr.windows.values().map(|w| w.tabs.len()).sum();
+        assert_eq!(mgr.views.len(), tabs, "어느 창의 탭도 아닌 View 가 남았다");
+        for (label, w) in &mgr.windows {
+            for view in &w.tabs {
+                assert_eq!(mgr.view_owner.get(view), Some(label));
+            }
+        }
+    }
+
+    // pop-out 이 락을 놓은 틈 — 창을 확인(`is_open` → 열려 있음)하거나 연(`open`) 바로 뒤에 사용자가 그 창을 닫는다.
+    struct ClosingHost<'a> {
+        rig: &'a Rig,
+        closed: Mutex<Vec<String>>,
+    }
+
+    impl<'a> ClosingHost<'a> {
+        fn new(rig: &'a Rig) -> Self {
+            ClosingHost {
+                rig,
+                closed: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn user_closes(&self, label: &str) {
+            assert!(
+                self.rig.state.0.try_lock().is_ok(),
+                "창 포트는 락 밖에서 불려야 한다 — 닫기 요청 처리기가 같은 락을 잡는다"
+            );
+            self.rig.close_requested(label);
+        }
+    }
+
+    impl WindowHost for ClosingHost<'_> {
+        fn open(&self, label: &str) -> Result<(), String> {
+            self.user_closes(label);
+            Ok(())
+        }
+        fn close(&self, label: &str) {
+            self.closed.lock().unwrap().push(label.to_string());
+        }
+        fn is_open(&self, label: &str) -> bool {
+            self.user_closes(label);
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn a_close_request_drops_the_popout_now_and_the_later_destroyed_changes_nothing() {
+        let rig = Rig::new();
+        let shared = Uuid::new_v4();
+        let only_popout = Uuid::new_v4();
+        rig.seat(rig.main_tab(), shared);
+        let q1 = rig.add_tab(POPUP);
+        rig.seat(q1, only_popout);
+        let q2 = rig.add_tab(POPUP);
+        rig.seat(q2, shared);
+        assert_eq!(rig.routed(only_popout), [POPUP]);
+
+        rig.close_requested(POPUP);
+        let after = rig.fingerprint();
+        {
+            let mgr = rig.state.0.lock().unwrap();
+            assert!(!mgr.windows.contains_key(POPUP));
+            for q in [q1, q2] {
+                assert!(!mgr.views.contains_key(&q), "그 창의 탭이 전부 빠진다");
+            }
+        }
+        assert!(
+            rig.routed(only_popout).is_empty(),
+            "그 창에만 보이던 에이전트는 라우팅에서 빠진다"
+        );
+        assert_eq!(rig.routed(shared), [MAIN_WINDOW_LABEL]);
+
+        // 뒤이은 `Destroyed` — 같은 몫을 다시 해도 바뀌는 것이 없다.
+        assert_eq!(rig.destroyed(POPUP), Some(0), "닫기 요청이 이미 지웠다");
+        assert_eq!(rig.fingerprint(), after);
+        assert!(rig.routed(only_popout).is_empty());
+        assert_eq!(rig.routed(shared), [MAIN_WINDOW_LABEL]);
+    }
+
+    #[tokio::test]
+    async fn the_model_part_answers_how_many_tabs_it_dropped() {
+        let rig = Rig::new();
+        rig.add_tab(POPUP);
+        rig.add_tab(POPUP);
+        assert_eq!(rig.destroyed(POPUP), Some(2));
+        assert_eq!(rig.destroyed(POPUP), Some(0), "두 번째는 지울 것이 없다");
+        // 새 창 옮기기의 창 열기와 모델 확정 사이 — 모델이 아직 모르는 창에도 묘비가 선다.
+        let fresh = "slot-popup-99";
+        assert_eq!(rig.destroyed(fresh), Some(0));
+        let main = rig.main_tab();
+        let slot = rig.first_slot(main);
+        let mut mgr = rig.state.0.lock().unwrap();
+        let (tmp, _) = mgr.prepare_detached_view(main, slot, "tmp".into()).unwrap();
+        assert_eq!(
+            mgr.attach_view_as_new_window(fresh, tmp),
+            Err(LayoutError::WindowClosed(fresh.into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn after_a_close_request_docking_into_that_window_is_refused_unchanged() {
+        let rig = Rig::new();
+        // main 의 마지막 탭이 아닌 출처 — 다른 사유(`MainLastTab`)가 끼지 않게.
+        let source = rig.add_tab(MAIN_WINDOW_LABEL);
+        let q = rig.add_tab(POPUP);
+        rig.close_requested(POPUP);
+
+        let before = rig.fingerprint();
+        let mut mgr = rig.state.0.lock().unwrap();
+        let version = mgr.version;
+        for (to, want) in [
+            (
+                DockTo::Seam {
+                    target: q,
+                    anchor: DockAnchor::Outer,
+                    side: DockSide::Left,
+                },
+                DockError::TabNotFound(q),
+            ),
+            (
+                DockTo::TabBar {
+                    window: POPUP.into(),
+                    index: None,
+                },
+                DockError::WindowNotFound(POPUP.into()),
+            ),
+            (
+                DockTo::NewWindow {
+                    label: POPUP.into(),
+                },
+                DockError::WindowClosed(POPUP.into()),
+            ),
+        ] {
+            assert_eq!(
+                mgr.dock(source, to, &DockGuard::NONE, FocusPolicy::Reveal),
+                Err(want)
+            );
+            assert_eq!(mgr.version, version);
+        }
+        // 팝아웃(`slot.popout`)의 새 창 phase C 도 묘비 앞에서 멈춘다.
+        let slot = tree::first_slot_id(&mgr.views[&source].layout);
+        let (tmp, _) = mgr
+            .prepare_detached_view(source, slot, "tmp".into())
+            .unwrap();
+        assert_eq!(
+            mgr.attach_view_as_new_window(POPUP, tmp),
+            Err(LayoutError::WindowClosed(POPUP.into()))
+        );
+        mgr.drop_detached_view(tmp);
+        drop(mgr);
+        // 임시 View 를 만들고 거둔 만큼 `version` 은 오른다 — 창 · 탭 소유만 본다.
+        let after = rig.fingerprint();
+        assert_eq!((after.1, after.2), (before.1, before.2));
+    }
+
+    #[tokio::test]
+    async fn a_close_request_after_the_check_rolls_a_popout_into_that_window_back() {
+        let rig = Rig::new();
+        let agent = Uuid::new_v4();
+        let src = rig.main_tab();
+        rig.seat(src, agent);
+        let slot = rig.first_slot(src);
+        rig.add_tab(POPUP);
+        let host = ClosingHost::new(&rig);
+
+        let out = apply::move_slot_to_window(
+            &rig.state,
+            &rig.subs(),
+            &NoEvents,
+            &host,
+            &PopupCounter::default(),
+            src,
+            slot,
+            Some(POPUP.into()),
+        );
+        assert!(out.is_err(), "{out:?}");
+        {
+            let mgr = rig.state.0.lock().unwrap();
+            assert_owned(&mgr);
+            assert!(!mgr.windows.contains_key(POPUP), "닫힌 창이 모델에 남았다");
+            assert_eq!(
+                mgr.slot_content(src, slot),
+                Ok(SlotContent::Agent {
+                    agent_id: agent.to_string()
+                }),
+                "옮기려던 슬롯은 출처에 남는다"
+            );
+        }
+        assert!(
+            host.closed.lock().unwrap().is_empty(),
+            "기존 창 타깃은 창을 닫지 않는다"
+        );
+        assert_eq!(rig.routed(agent), [MAIN_WINDOW_LABEL]);
+    }
+
+    #[tokio::test]
+    async fn a_close_request_after_the_build_rolls_a_popout_into_a_new_window_back() {
+        let rig = Rig::new();
+        let agent = Uuid::new_v4();
+        let src = rig.main_tab();
+        rig.seat(src, agent);
+        let slot = rig.first_slot(src);
+        let labels = PopupCounter::default();
+        let fresh = "slot-popup-1";
+        let host = ClosingHost::new(&rig);
+
+        let out = apply::move_slot_to_window(
+            &rig.state,
+            &rig.subs(),
+            &NoEvents,
+            &host,
+            &labels,
+            src,
+            slot,
+            None,
+        );
+        assert!(out.is_err(), "{out:?}");
+        let after = rig.fingerprint();
+        assert!(
+            !after.1.iter().any(|w| w == fresh),
+            "OS 창 없는 모델 창이 남았다"
+        );
+        assert_eq!(
+            rig.state.0.lock().unwrap().slot_content(src, slot),
+            Ok(SlotContent::Agent {
+                agent_id: agent.to_string()
+            }),
+            "옮기려던 슬롯은 출처에 남는다"
+        );
+        assert_eq!(*host.closed.lock().unwrap(), [fresh], "방금 연 창을 거둔다");
+        assert_eq!(rig.routed(agent), [MAIN_WINDOW_LABEL]);
+
+        // 그 창의 `Destroyed` 도 바꾸는 것이 없다.
+        assert_eq!(
+            rig.destroyed(fresh),
+            Some(0),
+            "모델이 그 창을 가진 적이 없다"
+        );
+        assert_eq!(rig.fingerprint(), after);
+    }
+
+    #[tokio::test]
+    async fn a_close_request_for_main_changes_nothing_and_main_still_takes_tabs() {
+        let rig = Rig::new();
+        let q = rig.add_tab(POPUP);
+        rig.add_tab(POPUP);
+        let before = rig.fingerprint();
+
+        rig.close_requested(MAIN_WINDOW_LABEL);
+        assert_eq!(
+            rig.destroyed(MAIN_WINDOW_LABEL),
+            None,
+            "main 은 정리하지 않는다"
+        );
+        assert_eq!(rig.fingerprint(), before);
+        // main 에 묘비가 서지 않았다.
+        rig.state
+            .0
+            .lock()
+            .unwrap()
+            .dock(
+                q,
+                DockTo::TabBar {
+                    window: MAIN_WINDOW_LABEL.into(),
+                    index: None,
+                },
+                &DockGuard::NONE,
+                FocusPolicy::Keep,
+            )
+            .unwrap();
     }
 }

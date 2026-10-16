@@ -5327,7 +5327,7 @@ use engram_dashboard_command::{CommandEnvelope, CommandTable, OwnerToken};
 use super::inbound::{InboundReceiver, RuntimeSpawner};
 use super::usage_interest::USAGE_INTEREST_SHRINK_DELAY;
 use crate::commands::layout::{OwnedSubs, RouterSubs};
-use crate::commands::popout::{drop_window_in_model, PopupCounter};
+use crate::commands::popout::{close_requested_popup_window, drop_window_in_model, PopupCounter};
 use crate::layout::commands::{make_table, LayoutPorts, CATALOG_VERSION};
 use crate::layout::{
     apply, AgentSpawner, LayoutEvents, LayoutState, ViewSnapshot, WindowHost, WindowTabsPayload,
@@ -5687,7 +5687,10 @@ async fn a_destroyed_popup_leaves_the_interest_after_the_delay() {
         Some(BTreeSet::from([AgentBackendKind::Claude]))
     );
 
-    assert!(drop_window_in_model(POPUP, &state, &client.router, &client));
+    assert_eq!(
+        drop_window_in_model(POPUP, &state, &client.router, &client),
+        Some(1)
+    );
     settle().await;
     assert_eq!(nudges(&mut rx), 0, "줄임은 곧바로 안 나간다");
     tokio::time::advance(USAGE_INTEREST_SHRINK_DELAY + Duration::from_millis(100)).await;
@@ -5712,7 +5715,10 @@ async fn a_destroyed_popup_forgets_its_hidden_mark_even_when_the_model_never_hel
         client: &client,
     }
     .set_visible(POPUP, false);
-    assert!(drop_window_in_model(POPUP, &state, &client.router, &client));
+    assert_eq!(
+        drop_window_in_model(POPUP, &state, &client.router, &client),
+        Some(0)
+    );
     assert_eq!(nudges(&mut rx), 0);
 
     state.0.lock().unwrap().create_window(POPUP).unwrap();
@@ -5722,6 +5728,100 @@ async fn a_destroyed_popup_forgets_its_hidden_mark_even_when_the_model_never_hel
         1,
         "숨김 표시가 남아 그 창을 숨은 창으로 셌다"
     );
+}
+
+// ── 팝아웃 닫기 요청이 그 창에만 보이던 에이전트의 구독을 한 번 풀고, 뒤이은 소멸 정리는 아무것도 안 보낸다 ─────────
+// 닫기 요청이 모델을 먼저 지우므로(TRD S21-slot-docking §1-2 「닫히는 창」) 해제는 그때 나가고, 소멸 정리는 같은 몫을
+// 다시 해도 낼 것이 없다.
+#[tokio::test]
+async fn a_popout_close_request_unsubscribes_once_and_the_later_destroyed_sends_nothing() {
+    let client = idle_client();
+    let (mut rx, _socket) = captured_channel(&client);
+    let state = LayoutState::new();
+    let agent = uuid::Uuid::new_v4();
+    state.0.lock().unwrap().create_window(POPUP).unwrap();
+    let (view, slot) = active_slot(&state, POPUP);
+    apply::assign_agent(
+        &state,
+        &RouterSubs {
+            router: &client.router,
+            client: &client,
+        },
+        &NoLayoutEvents,
+        view,
+        slot,
+        agent.to_string(),
+    )
+    .expect("팝아웃 슬롯에 배정");
+    assert!(rx.try_recv().is_err(), "배정은 해제를 내지 않는다");
+
+    close_requested_popup_window(POPUP, &state, &client.router, &client);
+    let mut sent = Vec::new();
+    while let Ok(cmd) = rx.try_recv() {
+        sent.push(cmd);
+    }
+    assert!(
+        matches!(sent.as_slice(), [ConnectionCommand::Unsubscribe { agent_id, .. }] if *agent_id == agent),
+        "{sent:?}"
+    );
+
+    assert_eq!(
+        drop_window_in_model(POPUP, &state, &client.router, &client),
+        Some(0)
+    );
+    assert!(rx.try_recv().is_err(), "소멸 정리가 명령을 냈다");
+}
+
+// ── 닫기 요청이 해제를 낸 뒤 죽어 가는 팝아웃 웹뷰가 replay 를 청해도 Subscribe 는 나가지 않는다 ─────────────
+// 나가면 그 구독을 풀 해제가 다시 오지 않아(소멸 정리는 낼 것이 없다) 데몬이 받을 창 없는 출력을 계속 흘린다.
+// 다른 창이 보이는 에이전트의 요청은 그대로 나간다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_replay_request_after_the_close_request_sends_no_subscribe() {
+    let mut server = spawn_usage_server().await;
+    let (client, _disco) = usage_client(&server, Arc::new(RecordingEvents::default()));
+    client.connect().await.expect("connect → connected");
+    let _ = drain_until_marker(&client, &mut server).await;
+
+    let state = LayoutState::new();
+    let subs = RouterSubs {
+        router: &client.router,
+        client: &client,
+    };
+    let shown = uuid::Uuid::new_v4();
+    let gone = uuid::Uuid::new_v4();
+    let (view, slot) = active_slot(&state, MAIN_WINDOW_LABEL);
+    apply::assign_agent(
+        &state,
+        &subs,
+        &NoLayoutEvents,
+        view,
+        slot,
+        shown.to_string(),
+    )
+    .expect("main 슬롯에 배정");
+    state.0.lock().unwrap().create_window(POPUP).unwrap();
+    let (view, slot) = active_slot(&state, POPUP);
+    apply::assign_agent(&state, &subs, &NoLayoutEvents, view, slot, gone.to_string())
+        .expect("팝아웃 슬롯에 배정");
+
+    close_requested_popup_window(POPUP, &state, &client.router, &client);
+    assert!(
+        client.request_replay(gone).await.is_err(),
+        "보이는 창 없는 요청은 gen 을 받지 못한다"
+    );
+    client
+        .request_replay(shown)
+        .await
+        .expect("보이는 에이전트는 그대로 구독한다");
+
+    let sent = drain_until_marker(&client, &mut server).await;
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    assert_eq!(sent[0], format!("1:marker:{gone}"), "닫기 요청의 해제");
+    assert!(
+        sent[1].starts_with("1:Subscribe") && sent[1].contains(&shown.to_string()),
+        "{sent:?}"
+    );
+    client.close();
 }
 
 // ── 트레이 숨기기가 실패한 창은 보이는 창으로 남는다 — 관심이 줄지 않는다 ─────────────────────────

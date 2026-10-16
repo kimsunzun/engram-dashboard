@@ -833,8 +833,9 @@ impl RestoreCoordinator {
         let main_shown = windows.visibility(MAIN_WINDOW_LABEL) != Some(false);
         let mut vanished = Vec::new();
         for (label, attrs) in popouts {
-            // ② 와 ③ 사이에 트레이 「보이기」가 드러낸 창을 사용자가 닫았으면 그 `Destroyed` 정리는 모델에 아직 없던
-            //   label 이라 지나갔다 — 여기서 안 지우면 OS 창 없는 창이 모델에 남는다.
+            // ② 와 ③ 사이에 트레이 「보이기」가 드러낸 창을 사용자가 닫았으면 그 닫기 요청 · `Destroyed` 정리는 모델에
+            //   아직 없던 label 이라 묘비만 남기고 지나갔다(③ 의 채택은 묘비를 보지 않는다) — 여기서 안 지우면 OS 창
+            //   없는 창이 모델에 남는다.
             if windows.visibility(label).is_none() {
                 vanished.push(label.clone());
                 continue;
@@ -847,7 +848,7 @@ impl RestoreCoordinator {
             }
         }
         self.forget_vanished(ports, &vanished);
-        // 그 창의 `Destroyed` 정리는 이미 모델에 없는 label 이라 재계산만 한다(`popout::drop_window_in_model`).
+        // 그 창의 `Destroyed` 정리는 이미 모델에 없는 label 이라 재계산 · 묘비만 한다(`popout::drop_window_in_model`).
         destroy_all(windows, &removed, Leftover::Replaced);
         let kept = popouts.len() - vanished.len();
         // 보인 팝아웃마다 포커스를 가져갔다 — 「복원」을 누른 사람 앞에 main 을 되돌린다(트레이 보이기가 main 을

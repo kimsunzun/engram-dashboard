@@ -1018,7 +1018,8 @@ impl DaemonClient {
     // task 가 ReplayComplete 각인 시 같은 출력 Channel 로 흘린다.
     //
     // ★계약★: 비연결이면 Err(프론트 재요청 구동자는 connected 전이 — M2). 연결 task 에 `RequestReplay` 를
-    //   보내고 oneshot 으로 gen 을 회수한다(actor 가 single-flight 상태를 단독 소유 → 직렬).
+    //   보내고 oneshot 으로 gen 을 회수한다(actor 가 single-flight 상태를 단독 소유 → 직렬). 그 에이전트를 보이는
+    //   창이 없으면 Subscribe 없이 Err(연결 task 의 `RequestReplay` 팔 — 사유 정본 그 주석).
     pub async fn request_replay(&self, agent_id: AgentId) -> Result<u64, String> {
         let Some((cmd_tx, socket)) = self.lifecycle.current_cmd_tx() else {
             return Err(NOT_CONNECTED.to_string());
@@ -1047,10 +1048,12 @@ impl DaemonClient {
         //   구간은 안 탄다.
         // ★ADR-0195 도 같은 자리로 떨어진다★: 옛 소켓 몫으로 판정된 요청은 연결 task 가 이 oneshot 을
         //   그냥 drop 한다 — 나를 통로는 `u64` 뿐이라 실어 보낼 오류값이 없다. 그래서 아래 문구가 그
-        //   경로의 **유일한** 관측이고, 「미전송 · 재요청 안전」이라 그 경우에도 정직하다.
-        reply_rx
-            .await
-            .map_err(|_| "replay 요청 미전송(연결 끊김) — 프론트 재요청 안전".to_string())
+        //   경로의 **유일한** 관측이고, 「미전송 · 재요청 안전」이라 그 경우에도 정직하다. 보이는 창이 없는 요청도
+        //   같은 drop 으로 온다.
+        reply_rx.await.map_err(|_| {
+            "replay 요청 미전송(연결 끊김 · 그 에이전트를 보이는 창 없음) — 프론트 재요청 안전"
+                .to_string()
+        })
     }
 
     fn try_enqueue(&self, make: impl FnOnce(u64) -> ConnectionCommand, kind: &str) {
