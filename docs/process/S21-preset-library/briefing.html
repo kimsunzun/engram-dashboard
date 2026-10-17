@@ -185,6 +185,7 @@ code,.mono{font-family:var(--f-mono);font-size:.88em}
 .cfg{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:16px;align-items:start}
 .cfg .caps{grid-template-columns:minmax(0,1fr)}
 /* edit pane by kind: section heading with its own + ; nested preset contents shown in place, dimmed and read-only */
+.ksec{cursor:pointer}
 .ksec .sp{flex:1}
 .ksec .kh{text-transform:none;letter-spacing:0;font-size:11px}
 .btn.kadd{padding:0 7px;font-size:11.5px;line-height:1.4}
@@ -527,14 +528,13 @@ a{color:var(--accent)}
       </div>
       <div class="pane side">
         <div class="head"><span class="kind p">프리셋</span><span class="t" style="font-size:14px">리뷰어</span><span class="callout">에이전트 3개에서 참조 중</span><span class="sp"></span><button class="btn" type="button">← 선택 항목 추가</button><button class="btn" type="button">+ 추가</button></div>
-        <div class="grp ksec">프리셋</div>
+        <div class="grp ksec">▾ 프리셋</div>
         <div class="row"><span class="tw">▸</span><span class="name">공용 규칙</span><span class="n">2</span><span class="x">×</span></div>
-        <div class="grp ksec">지침</div>
-        <div class="row"><span class="grip">⋮⋮</span><span class="name">리뷰 규율</span><span class="x">×</span></div>
-        <div class="grp ksec">스킬</div>
+        <div class="grp ksec">▸ 지침<span class="n">6</span></div>
+        <div class="grp ksec">▾ 스킬</div>
         <div class="row" style="border-style:dashed;color:var(--gone)"><span class="name">nightly — 찾을 수 없음 · <u>다시 연결</u></span><span class="n">5</span><span class="x">×</span></div>
         <div class="row"><span class="name">review</span><span class="x">×</span></div>
-        <div class="grp ksec">설정</div>
+        <div class="grp ksec">▾ 설정</div>
         <div class="row"><span class="grip">⋮⋮</span><span class="name">codex high</span><span class="x">×</span></div>
         <div class="msg err"><b>충돌</b><span>백엔드 정하는 설정이 둘 — codex high · 공용 규칙 › claude opus</span><span class="n" style="flex:none">3</span></div>
         <div class="msg warn"><b>경고</b><span>에이전트 3개가 다음 실행에서 새 대화로 시작합니다</span></div>
@@ -547,6 +547,7 @@ a{color:var(--accent)}
     <span><span class="n">3</span>빨강 = 충돌(그대로는 못 씀) · 노랑 = 알리기만 — 편집이 그 프리셋을 참조하는 에이전트의 백엔드를 바꾸면 「다음 실행에서 새 대화」 경고(돌고 있는 에이전트엔 알림 없음)</span>
     <span><span class="n">4</span>목록의 깨진 프리셋 · 설정 = 「오류 · 이유」</span>
     <span><span class="n">5</span>가리키던 파일이 없고 연결할 후보도 없음(또는 둘 이상 · Engram 으로 삭제함 · 라이브러리 폴더를 바꿈) → 「찾을 수 없음 · 다시 연결」 로 사용자가 선택 · 후보가 하나일 때는 §4</span>
+    <span><span class="n">6</span><span>종류 머리 ▾ = 그 칸 접고 펴기(▸ = 접힘 — 그림의 지침) — 접은 상태는 1~4 공통으로 기억(2026-10-17)</span></span>
   </div>
   <div class="sh"><h3>편집 칸 = 종류별 칸 · 안에 든 프리셋은 그 자리에서 펼침</h3><span class="tag ok">확정</span></div>
   <div class="win" role="img" aria-label="프리셋 리뷰어의 오른쪽 편집 칸 — 종류별 칸으로 나뉘고 안에 든 프리셋은 그 자리에서 펼쳐진 예시">
@@ -554,7 +555,7 @@ a{color:var(--accent)}
     <div class="win-body">
       <div class="pane side">
         <div class="head"><span class="kind p">프리셋</span><span class="t" style="font-size:14px">리뷰어</span><span class="sp"></span><button class="btn" type="button">← 선택 항목 추가</button><button class="btn" type="button">+ 추가</button><span class="n">4</span></div>
-        <div class="grp ksec">프리셋<span class="sp"></span><span class="n">3</span><button class="btn kadd" type="button" aria-label="이 종류 검색해 추가">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 선택한 항목 추가">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
+        <div class="grp ksec">▾ 프리셋<span class="sp"></span><span class="n">3</span><button class="btn kadd" type="button" aria-label="이 종류 검색해 추가">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 선택한 항목 추가">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
         <div class="row"><span class="tw">▾</span><span class="n">1</span><span class="name">공용 규칙</span><span class="x">×</span></div>
         <div class="nestv">
           <div class="grp ksec">프리셋<span class="n">2</span></div>
@@ -566,12 +567,12 @@ a{color:var(--accent)}
           <div class="grp ksec">설정</div>
           <div class="row"><span class="name">claude opus</span></div>
         </div>
-        <div class="grp ksec">지침<span class="kh">순서대로 이어 붙음</span><span class="n">5</span><span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 추가">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 선택한 항목 추가">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
+        <div class="grp ksec">▾ 지침<span class="kh">순서대로 이어 붙음</span><span class="n">5</span><span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 추가">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 선택한 항목 추가">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
         <div class="row"><span class="grip">⋮⋮</span><span class="name">리뷰 규율</span><span class="x">×</span></div>
         <div class="row"><span class="grip">⋮⋮</span><span class="name">보고 형식</span><span class="x">×</span></div>
-        <div class="grp ksec">스킬<span class="kh">이름순</span><span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 추가">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 선택한 항목 추가">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
+        <div class="grp ksec">▾ 스킬<span class="kh">이름순</span><span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 추가">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 선택한 항목 추가">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
         <div class="row"><span class="name">review</span><span class="x">×</span></div>
-        <div class="grp ksec">설정<span class="kh">순서대로 이어 붙음</span><span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 추가">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 선택한 항목 추가">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
+        <div class="grp ksec">▾ 설정<span class="kh">순서대로 이어 붙음</span><span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 추가">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 선택한 항목 추가">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
         <div class="row"><span class="grip">⋮⋮</span><span class="name">codex high</span><span class="x">×</span></div>
         <div class="msg err"><b>충돌</b><span>백엔드 정하는 설정이 둘 — codex high · 공용 규칙 › claude opus</span></div>
       </div>
@@ -606,9 +607,9 @@ a{color:var(--accent)}
         </div>
         <div class="pane" style="padding-bottom:84px">
           <div class="head"><span class="kind p">프리셋</span><span class="t" style="font-size:14px">리뷰어</span><span class="sp"></span><button class="btn" type="button">+ 추가</button></div>
-          <div class="grp ksec">프리셋<span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 추가">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 선택한 항목 추가">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
+          <div class="grp ksec">▾ 프리셋<span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 추가">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 선택한 항목 추가">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
           <div class="row"><span class="tw">▸</span><span class="name">공용 규칙</span><span class="x">×</span></div>
-          <div class="grp ksec">지침<span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 추가">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 선택한 항목 추가">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
+          <div class="grp ksec">▾ 지침<span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 추가">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 선택한 항목 추가">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
           <div class="row on"><span class="grip">⋮⋮</span><span class="name">리뷰 규율</span><span class="n">1</span><span class="x">×</span></div>
           <div class="detov">
             <div class="head"><span class="kind">지침</span><span class="t" style="font-size:14px">리뷰 규율</span><span class="sp"></span><span class="n">2</span><span class="x" aria-label="닫기">×</span></div>
@@ -622,7 +623,7 @@ a{color:var(--accent)}
             </div>
           </div>
           <div class="row"><span class="grip">⋮⋮</span><span class="name">보고 형식</span><span class="x">×</span></div>
-          <div class="grp ksec">스킬<span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 추가">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 선택한 항목 추가">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
+          <div class="grp ksec">▾ 스킬<span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 추가">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 선택한 항목 추가">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
           <div class="row"><span class="name">review</span><span class="x">×</span></div>
         </div>
       </div>
@@ -659,7 +660,7 @@ a{color:var(--accent)}
       </div>
       <div class="pane side">
         <div class="head"><span class="kind p">프리셋</span><span class="t" style="font-size:14px">리뷰어</span><span class="sp"></span><button class="btn" type="button">+ 추가</button></div>
-        <div class="grp ksec">프리셋<span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 추가">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 선택한 항목 추가">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
+        <div class="grp ksec">▾ 프리셋<span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 추가">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 선택한 항목 추가">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
         <div class="row"><span class="tw">▾</span><span class="n">3</span><span class="name">공용 규칙</span><span class="ico" aria-label="그 자리로 이동"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></span><span class="n">4</span><span class="x">×</span></div>
         <div class="nestv">
           <div class="grp ksec">프리셋</div>
@@ -669,10 +670,10 @@ a{color:var(--accent)}
           <div class="grp ksec">스킬</div>
           <div class="row"><span class="name">pr-check</span></div>
         </div>
-        <div class="grp ksec">지침<span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 추가">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 선택한 항목 추가">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
+        <div class="grp ksec">▾ 지침<span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 추가">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 선택한 항목 추가">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
         <div class="row"><span class="grip">⋮⋮</span><span class="name">리뷰 규율</span><span class="x">×</span></div>
         <div class="row"><span class="grip">⋮⋮</span><span class="name">보고 형식</span><span class="x">×</span></div>
-        <div class="grp ksec">스킬<span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 추가">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 선택한 항목 추가">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
+        <div class="grp ksec">▾ 스킬<span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 추가">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 선택한 항목 추가">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
         <div class="row"><span class="name">review</span><span class="x">×</span></div>
       </div>
     </div>
@@ -696,11 +697,11 @@ a{color:var(--accent)}
       </div>
       <div class="pane side">
         <div class="head"><span class="kind p">프리셋</span><span class="t" style="font-size:14px">공용 규칙</span><span class="sp"></span><button class="btn" type="button">+ 추가</button></div>
-        <div class="grp ksec">프리셋<span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 추가">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 선택한 항목 추가">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
+        <div class="grp ksec">▾ 프리셋<span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 추가">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 선택한 항목 추가">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
         <div class="row"><span class="tw">▸</span><span class="name">기본 원칙</span><span class="x">×</span></div>
-        <div class="grp ksec">지침<span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 추가">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 선택한 항목 추가">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
+        <div class="grp ksec">▾ 지침<span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 추가">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 선택한 항목 추가">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
         <div class="row"><span class="grip">⋮⋮</span><span class="name">공용 원칙</span><span class="x">×</span></div>
-        <div class="grp ksec">스킬<span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 추가">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 선택한 항목 추가">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
+        <div class="grp ksec">▾ 스킬<span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 추가">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 선택한 항목 추가">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
         <div class="row"><span class="name">pr-check</span><span class="x">×</span></div>
       </div>
     </div>
@@ -734,7 +735,7 @@ a{color:var(--accent)}
       </div>
       <div class="pane side">
         <div class="head"><span class="kind p">프리셋</span><span class="t" style="font-size:14px">리뷰어</span></div>
-        <div class="grp ksec">프리셋</div>
+        <div class="grp ksec">▾ 프리셋</div>
         <div class="row"><span class="tw">▾</span><span class="name">공용/기본 규칙</span><span class="x">×</span></div>
         <div class="nestv">
           <div class="grp ksec">프리셋</div>
@@ -744,7 +745,7 @@ a{color:var(--accent)}
           <div class="grp ksec">스킬</div>
           <div class="row"><span class="name">pr-check</span></div>
         </div>
-        <div class="grp ksec">지침</div>
+        <div class="grp ksec">▾ 지침</div>
         <div class="rw45">
           <div class="row on"><span class="grip">⋮⋮</span><span class="name">리뷰 규칙</span><span class="n">6</span><span class="eye45 on" aria-label="내용 보기">👁</span><span class="x">×</span></div>
           <div class="pk45">
@@ -758,7 +759,7 @@ a{color:var(--accent)}
           </div>
         </div>
         <div class="row"><span class="grip">⋮⋮</span><span class="name">글쓰기 규칙</span><span class="x">×</span></div>
-        <div class="grp ksec">스킬</div>
+        <div class="grp ksec">▾ 스킬</div>
         <div class="row"><span class="name">review</span><span class="x">×</span></div>
       </div>
     </div>
@@ -1019,12 +1020,12 @@ a{color:var(--accent)}
         <div class="pane side">
           <div class="head"><span class="kind p">프리셋</span><span class="t" style="font-size:14px">리뷰어</span></div>
           <div class="head"><button class="btn pri" type="button">← 선택 항목 추가 (2)</button><button class="btn" type="button">+ 추가</button></div>
-          <div class="grp ksec">지침</div>
+          <div class="grp ksec">▾ 지침</div>
           <div class="row"><span class="grip">⋮⋮</span><span class="name">리뷰 규율</span><span class="x">×</span></div>
-          <div class="grp ksec">스킬</div>
+          <div class="grp ksec">▾ 스킬</div>
           <div class="row"><span class="name">review</span><span class="x">×</span></div>
           <div class="dropzone" style="padding:4px;font-size:11.5px">↳ code-review · pr-check 가 스킬 칸으로 (이름순) <span class="n">3</span></div>
-          <div class="grp ksec">설정</div>
+          <div class="grp ksec">▾ 설정</div>
           <div class="row"><span class="grip">⋮⋮</span><span class="name">codex high</span><span class="x">×</span></div>
         </div>
       </div>
