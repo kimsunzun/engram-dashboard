@@ -15,6 +15,18 @@
 //! 작업에서 먹이고 실행한다. 동기 명령(메인 스레드)인 `dock_drag_start` 도 붙든 이른 놓기를 이어 먹여 새 창 적용을
 //! 낼 수 있고, 그것을 그 자리에서 돌리면 창을 만들다 교착한다(TRD §1-3 「명령의 실행 스레드」 · §11-2 #23).
 //!
+//! ## ★숨기기 · 보이기 · 포커스는 메인 스레드 맞추기★
+//! `Hide` · `Show` 는 창을 그대로 부르지 않고 메인 스레드 줄([`DockSpawn::on_main`])에 「맞추기」 한 건으로 올린다.
+//! 맞추기는 돌 때 장부 락을 잠깐 잡아 [`Book::visibility`] 의 지금 값을 읽고, 락을 놓은 뒤 창이 그 값이 아닐 때만
+//! 숨기거나 보인다(TRD §1-3 「숨기기 · 보이기」). 여러 스레드가 낸 창 호출은 이벤트 루프에 장부가 낸 순서로 닿지
+//! 않는다 — 보이기 → 숨기기로 닿으면 끝난 세션의 팝아웃이 숨은 채 남는다. 장부 값이 바뀌는 걸음마다 맞추기 한 건이
+//! 그 뒤에 올라가고 맞추기는 늘 그때의 장부 값을 입히므로, 마지막으로 돈 맞추기가 장부의 마지막 값이다 — 할 일의
+//! 세대는 보지 않는다(지난 세션의 할 일도 그 창의 지금 값으로만 맞춘다). ★되보이기는 맞추기가 스스로 숨긴 창만★ —
+//! 트레이 등 다른 길이 숨긴 창은 끌기 끝이 드러내지 않는다(`DockState` 의 「맞추기가 숨긴 창」). 같은 걸음의 `Focus` 는
+//! 같은 줄에 그 뒤로 올리고, 돌 때 그 뒤 새 세션이 섰으면 버린다 — 보이기 전에 포커스를 주지 않고, 새 세션이 숨길 창에
+//! 옛 끝의 포커스를 주지 않게. 메인 스레드에서 올린 작업은 그 자리에서 돈다(tauri-runtime-wry
+//! `send_user_message`) — 할 일 실행이 두 락을 다 놓은 채여야 하는 또 하나의 이유다.
+//!
 //! 바깥 세계에는 포트 둘([`DockPorts`] · [`DockSpawn`])로만 닿는다 — 시험이 가짜로 갈아 끼운다(ADR-0012).
 
 use std::sync::{Arc, OnceLock};
@@ -29,11 +41,12 @@ use crate::commands::popout::{PopupCounter, TauriWindowHost};
 use crate::daemon_client::DaemonClient;
 use crate::dock::book::{
     Action, Book, ClientRect, EndLog, EndReason, Input, MonoMs, PhysPoint, PullReply, Rects,
-    Rejection, Reply, Report, Step, TimerKind,
+    Rejection, Reply, Report, Step, TimerKind, Visibility,
 };
 use crate::dock::snap::StartMaterial;
 use crate::dock::types::{
-    DockPullReply, DockRegions, DragEffect, DragOverReport, DropReport, Picked, SessionEvent,
+    DockPullReply, DockRegions, DragEffect, DragOverReport, DrawnReport, DropReport, Picked,
+    SessionEvent, StripStart,
 };
 use crate::dock::DockState;
 use crate::layout::apply;
@@ -74,6 +87,8 @@ pub(crate) trait DockPorts: Send + Sync {
     /// 떠 있는 우리 창 label 전부.
     fn windows(&self) -> Vec<WindowLabel>;
     fn probe(&self, label: &str) -> Result<WindowProbe, String>;
+    /// 그 창이 지금 보이나 — `None` = 그 창이 없다(맞추기를 올린 뒤 사라졌다). 메인 스레드 맞추기가 부른다.
+    fn visible(&self, label: &str) -> Result<Option<bool>, String>;
     /// 적용 서비스 `dock_tab` — [`DockSpawn::spawn`] 이 넘긴 작업 안에서만 부른다.
     fn apply(&self, layout: &LayoutState, req: DockRequest) -> Result<DockOutcome, DockError>;
     /// 단조 시계 — 원점은 구현 몫이고 장부는 차만 본다.
@@ -82,10 +97,14 @@ pub(crate) trait DockPorts: Send + Sync {
 
 pub(crate) type DockJob = Box<dyn FnOnce() + Send + 'static>;
 
-/// 부른 스레드 밖에서 돌릴 작업 — 적용 · 옛 세션 끝내기(`spawn`)와 시한(`spawn_after`).
+/// 부른 스레드 밖에서 돌릴 작업 — 적용 · 옛 세션 끝내기(`spawn`) · 시한(`spawn_after`) · 숨기기 · 보이기 맞추기와
+/// 포커스(`on_main`).
 pub(crate) trait DockSpawn: Send + Sync {
     fn spawn(&self, job: DockJob);
     fn spawn_after(&self, after_ms: u64, job: DockJob);
+    /// 메인 스레드 줄 — 먼저 올린 것이 먼저 돈다. 메인 스레드에서 올리면 그 자리에서 돈다. `Err` = 올리지 못했다
+    /// (이벤트 루프가 닫혔다) — 그 작업은 돌지 않는다.
+    fn on_main(&self, job: DockJob) -> Result<(), String>;
 }
 
 // 새 창 자리에 쓸 출처 배율을 어느 창에서 읽나.
@@ -127,7 +146,7 @@ impl DockExec {
             Arc::clone(dock),
             layout.clone(),
             Arc::new(TauriDock { app: app.clone() }),
-            Arc::new(TauriSpawn),
+            Arc::new(TauriSpawn { app: app.clone() }),
         )
     }
 
@@ -142,6 +161,7 @@ impl DockExec {
         drag_id: String,
         view: ViewId,
         hotspot: PointCss,
+        strip: Option<StripStart>,
     ) -> Result<(), String> {
         // 1. 장부가 받나 — 표식 · 깃발을 세우기 전에.
         let refused = {
@@ -176,6 +196,15 @@ impl DockExec {
             single_tab_popout,
             snap,
         } = material;
+        // 두 락 밖에서 — 「시한이 앞지른 끝」의 사각형 검사 몫(TRD §1-3 「시작」 2). 보임 · 최소화를 거르지 않는다 —
+        //   끌기를 시작한 바로 그 창이다. 실패는 셈을 비운 뒤(4)에 센다.
+        let source_probe = self.ports.probe(&source_label);
+        let source_rect = source_probe.as_ref().ok().map(|probe| ClientRect {
+            origin: probe.origin,
+            size: probe.size,
+            scale: probe.scale,
+        });
+        let has_strip = strip.is_some();
         let tabs = snap
             .windows
             .iter()
@@ -192,9 +221,8 @@ impl DockExec {
                 source_label: source_label.clone(),
                 expect_source,
                 single_tab_popout,
-                // 9b-2: 웹뷰의 시작 측정을 받고 출처 창 사각형을 락 밖에서 읽어 싣는다 — 그때까지 순서 이동 없이 5.6 그대로.
-                strip: None,
-                source_rect: None,
+                strip,
+                source_rect,
                 snap,
                 now,
             });
@@ -214,15 +242,20 @@ impl DockExec {
         }
 
         // 4. 실행.
-        self.dock.take_errors();
-        // 9b-2: `strip`(시작 측정이 있었나) · `hide_deferred`(탭 하나 팝아웃 숨기기를 미뤘나 = 위 할 일에 `Hide` 가 없다)를
-        //   싣고 `hidden` 을 그 할 일에 `Hide` 가 있나로 고친다 — 지금은 순서 이동이 없어 늘 `single_tab_popout` 과 같다.
+        self.dock.open_errors(generation);
+        if let Err(e) = &source_probe {
+            self.note_failure("window_rect", Some(&source_label), e);
+        }
+        // 탭 하나 팝아웃의 숨기기는 출처 영역에 순서 이동이 서면 도킹 모드 증거까지 미룬다 — 시작 할 일에 `Hide` 가 없다.
+        let hidden = actions.iter().any(|a| matches!(a, Action::Hide { .. }));
         tracing::info!(
             drag = %drag_id,
             view = %view,
             source = %source_label,
             tabs,
-            hidden = single_tab_popout,
+            hidden,
+            strip = has_strip,
+            hide_deferred = single_tab_popout && !hidden,
             "끌기 시작"
         );
         self.run(actions, true);
@@ -289,9 +322,8 @@ impl DockExec {
     fn supersede(&self, old: String) {
         let exec = self.clone();
         self.spawner.spawn(Box::new(move || {
-            // 9b-2: `now` 를 세계 읽기 **전에** 찍는다(도착 시각 — 장부 「시한이 앞지른 끝」) — 지금은 읽은 뒤다.
-            let (cursor, rects) = exec.read_world(Source::Lease);
             let now = exec.ports.now();
+            let (cursor, rects) = exec.read_world(Source::Lease);
             let step = exec.feed(Input::Superseded {
                 drag_id: old,
                 cursor,
@@ -313,6 +345,7 @@ impl DockExec {
                 displayed,
                 shown,
                 point,
+                scroll,
             } => Input::Over {
                 drag_id,
                 label,
@@ -322,8 +355,7 @@ impl DockExec {
                     displayed,
                     shown,
                     point,
-                    // 9b-2: 보고 wire 에 `scroll` 칸이 서면 그 값 — 그때까지 영역마다 잰 때의 것.
-                    scroll: None,
+                    scroll,
                 },
                 now,
             },
@@ -344,10 +376,10 @@ impl DockExec {
     }
 
     // TRD S21-slot-docking §1-3 「끝 신호 셋」
+    // ★끝 신호 · 시한 콜백의 `now` 는 세계를 읽기 전에 찍는다(도착 시각 — 까닭은 `dock::book` 머리)★.
     pub(crate) fn drop_at(&self, label: &str, drop: DropReport) {
-        // 9b-2: `now` 를 세계 읽기 **전에** 찍는다(도착 시각 — 장부 「시한이 앞지른 끝」) — 지금은 읽은 뒤다.
-        let (cursor, rects) = self.read_world(Source::OwnerOf(drop.view_id));
         let now = self.ports.now();
+        let (cursor, rects) = self.read_world(Source::OwnerOf(drop.view_id));
         let report = Report::from(&drop);
         let step = self.feed(Input::Drop {
             drag_id: drop.drag_id,
@@ -361,16 +393,21 @@ impl DockExec {
         self.run(step.actions, false);
     }
 
-    pub(crate) fn source_end(&self, caller: &str, drag_id: String, effect: DragEffect) {
-        // 9b-2: `now` 를 세계 읽기 **전에** 찍는다(도착 시각 — 장부 「시한이 앞지른 끝」) — 지금은 읽은 뒤다.
-        let (cursor, rects) = self.read_world(Source::Caller(caller.to_owned()));
+    pub(crate) fn source_end(
+        &self,
+        caller: &str,
+        drag_id: String,
+        effect: DragEffect,
+        canceled: Option<bool>,
+        last: Option<DrawnReport>,
+    ) {
         let now = self.ports.now();
+        let (cursor, rects) = self.read_world(Source::Caller(caller.to_owned()));
         let step = self.feed(Input::SourceEnd {
             drag_id,
             effect,
-            // 9b-2: `dock_drag_end` 의 선택 인자 `canceled` · `last` — 그때까지 5.6 그대로.
-            canceled: false,
-            last: None,
+            canceled: canceled.unwrap_or(false),
+            last,
             cursor,
             rects,
             now,
@@ -420,6 +457,7 @@ impl DockExec {
 
     /// 우리 창 하나가 사라졌다 — 그 창의 레이아웃 정리가 레이아웃 락을 놓은 뒤에 부른다.
     pub(crate) fn window_destroyed(&self, label: &str) {
+        self.dock.forget_own_hidden(label);
         if !self.dock.session_live() {
             return;
         }
@@ -461,6 +499,8 @@ impl DockExec {
     // 장부가 낸 할 일을 낸 순서대로 — ★두 락 밖에서★. `from_sync` = 먹인 스레드가 동기 명령이었나(적용 넘김
     // 로그 몫).
     fn run(&self, actions: Vec<Action>, from_sync: bool) {
+        // 맞추기는 돌 때의 장부 값을 읽으니 한 걸음에 창마다 한 건이면 된다(그 걸음이 끝난 뒤의 값이다).
+        let mut reconciling: Vec<WindowLabel> = Vec::new();
         for action in actions {
             match action {
                 Action::Broadcast(event) => {
@@ -473,21 +513,20 @@ impl DockExec {
                         self.note_failure("regions", Some(&label), &e);
                     }
                 }
-                // 9b-2: 메인 스레드 맞추기(`Book::visibility`)로 바꾼다 — 그때까지 낸 스레드에서 그대로 부른다.
-                Action::Hide { label, .. } => {
-                    if let Err(e) = self.ports.hide(&label) {
-                        tracing::warn!(label = %label, "끌기 출처 창을 숨기지 못했다 — 보인 채 끌기를 잇는다: {e}");
+                Action::Hide { label, generation } | Action::Show { label, generation } => {
+                    if !reconciling.contains(&label) {
+                        let target = label.clone();
+                        self.on_main(&label, generation, move |exec| {
+                            exec.reconcile(&target, generation);
+                        });
+                        reconciling.push(label);
                     }
                 }
-                Action::Show { label, .. } => {
-                    if let Err(e) = self.ports.show(&label) {
-                        self.note_failure("show", Some(&label), &e);
-                    }
-                }
-                Action::Focus(label) => {
-                    if let Err(e) = self.ports.focus(&label) {
-                        self.note_failure("focus", Some(&label), &e);
-                    }
+                Action::Focus { label, generation } => {
+                    let target = label.clone();
+                    self.on_main(&label, generation, move |exec| {
+                        exec.focus(&target, generation);
+                    });
                 }
                 Action::Apply(req) => self.hand_off(req, from_sync),
                 Action::ArmTimer {
@@ -501,6 +540,93 @@ impl DockExec {
                 }
                 Action::EndLog(log) => self.end_log(log),
             }
+        }
+    }
+
+    // `generation` = 그 작업을 낸 세션 — 실패를 어느 세션 몫으로 칠지(`note_failure_of`).
+    fn on_main(&self, label: &str, generation: u64, job: impl FnOnce(&DockExec) + Send + 'static) {
+        let exec = self.clone();
+        if let Err(e) = self.spawner.on_main(Box::new(move || job(&exec))) {
+            self.note_failure_of(generation, "main_thread", Some(label), &e);
+        }
+    }
+
+    // 메인 스레드에서 돈다(모듈 머리 「맞추기」). 장부 락은 지금 값을 읽는 동안만 쥔다. ★되보이기는 맞추기가 스스로
+    //   숨긴 창만★(`DockState::owns_hidden` · 기본값 · 메인 판단) — 장부 값만 보면 트레이 등 다른 길이 숨긴 창을 끌기
+    //   끝이 드러낸다. `generation` = 맞추기를 올린 할 일의 세션(로그 · 실패 몫 — 판정은 장부의 지금 값만 본다).
+    // TRD S21-slot-docking §1-3 「숨기기 · 보이기」
+    fn reconcile(&self, label: &str, generation: u64) {
+        let want = sync::lock(&self.dock.book).visibility(label);
+        let shown = match self.ports.visible(label) {
+            Ok(Some(shown)) => shown,
+            Ok(None) => {
+                self.dock.forget_own_hidden(label);
+                tracing::debug!(label, generation, ?want, "맞출 창이 이미 없다 — 건너뛴다");
+                return;
+            }
+            Err(e) => return self.note_failure_of(generation, "visible", Some(label), &e),
+        };
+        match (want, shown) {
+            // 창이 보인다 — 맞추기가 전에 숨겼어도 그 뒤 다른 길이 되보였으니 그 몫은 끝났다. 숨기기에 성공했을 때만
+            //   다시 쥔다 — 실패한 숨기기가 낡은 몫을 남기면 다음 끝이 트레이가 숨긴 창을 드러낸다.
+            (Visibility::Hidden, true) => {
+                self.dock.forget_own_hidden(label);
+                match self.ports.hide(label) {
+                    Ok(()) => self.dock.mark_own_hidden(label),
+                    Err(e) => tracing::warn!(
+                        label,
+                        "끌기 출처 창을 숨기지 못했다 — 보인 채 끌기를 잇는다: {e}"
+                    ),
+                }
+            }
+            (Visibility::Shown, false) if self.dock.owns_hidden(label) => {
+                match self.ports.show(label) {
+                    Ok(()) => self.dock.forget_own_hidden(label),
+                    Err(e) => self.note_failure_of(generation, "show", Some(label), &e),
+                }
+            }
+            (Visibility::Shown, false) => tracing::debug!(
+                label,
+                generation,
+                "끌기가 숨기지 않은 숨은 창 — 드러내지 않는다"
+            ),
+            // 같은 값을 낸 다른 맞추기가 먼저 돌았거나 지난 세션의 할 일이다 — 이미 그 값인 창을 다시 부르지 않는다.
+            //   macOS 의 보이기는 보이는 창도 늘 키 창으로 올려(tao 0.35 `set_visible` → `make_key_and_order_front`)
+            //   끝의 포커스를 뺏는다 — Windows 는 같은 값이면 tao 가 무동작이다.
+            _ => {
+                if want == Visibility::Shown {
+                    // 다른 길이 이미 되보였다 — 되보일 몫이 남지 않는다.
+                    self.dock.forget_own_hidden(label);
+                }
+                tracing::debug!(
+                    label,
+                    generation,
+                    ?want,
+                    "창이 이미 장부의 지금 값이다 — 맞출 것이 없다"
+                );
+            }
+        }
+    }
+
+    // 끝의 포커스 — 메인 스레드에서 그 끝의 맞추기 뒤에 돈다. 그 뒤 새 세션이 섰거나 그 창을 지금 숨겨 둬야 하면
+    //   버린다(새 세션이 숨길 창에 포커스를 주지 않게). 장부 락은 읽는 동안만 쥔다.
+    fn focus(&self, label: &str, generation: u64) {
+        let (latest, want) = {
+            let book = sync::lock(&self.dock.book);
+            (book.latest_generation(), book.visibility(label))
+        };
+        if latest != Some(generation) || want != Visibility::Shown {
+            tracing::debug!(
+                label,
+                generation,
+                ?latest,
+                ?want,
+                "끝의 포커스보다 새 세션이 먼저 섰다 — 포커스를 주지 않는다"
+            );
+            return;
+        }
+        if let Err(e) = self.ports.focus(label) {
+            self.note_failure_of(generation, "focus", Some(label), &e);
         }
     }
 
@@ -526,6 +652,7 @@ impl DockExec {
         self.spawner.spawn_after(
             after_ms,
             Box::new(move || {
+                let now = exec.ports.now();
                 let (cursor, rects) = match kind {
                     // 장부가 커서 · 사각형을 쓰지 않는다 — 이른 신호는 버리기만 하고, 떠남 시한은 숨기기만 하며, 붙들기는
                     //   붙든 끝의 것으로 판정한다.
@@ -534,8 +661,6 @@ impl DockExec {
                     }
                     TimerKind::Drop | TimerKind::Grace => exec.read_world(Source::Lease),
                 };
-                // 9b-2: `now` 를 세계 읽기 **전에** 찍는다(도착 시각 — 장부 「시한이 앞지른 끝」) — 지금은 읽은 뒤다.
-                let now = exec.ports.now();
                 let step = exec.feed(Input::Timeout {
                     kind,
                     generation,
@@ -557,7 +682,7 @@ impl DockExec {
         }
         let elapsed_ms = self.ports.now().since(log.started_at);
         // 필드 식은 그 레벨이 켜졌을 때만 돈다 — 셈 비우기를 매크로 안에 두면 기본(warn)에서 비워지지 않는다.
-        let errors = self.dock.take_errors();
+        let errors = self.dock.take_errors(log.generation);
         tracing::info!(
             drag = %log.drag_id,
             outcome = log.outcome.word(),
@@ -592,13 +717,29 @@ impl DockExec {
         );
     }
 
+    // 메인 스레드 작업의 실패 — 낸 세션의 셈이 열려 있을 때만 그 셈에 넣는다(확인과 셈이 한 락 안 —
+    //   `DockState::note_error_of`). 그 끝 줄 뒤면 세지 않는다 — 끝 줄은 이미 나갔고, 센 것은 다음 세션 셈에 섞인다
+    //   (TRD §1-7). 그때는 그 세션당 처음 하나만 warn.
+    fn note_failure_of(&self, generation: u64, op: &'static str, label: Option<&str>, e: &str) {
+        match self.dock.note_error_of(generation) {
+            Some(first) => log_failure(first, op, label, e),
+            None if self.dock.first_late_failure(generation) => {
+                tracing::warn!(op, label, generation, "끌기가 끝난 뒤 메인 스레드의 창 호출이 실패했다(그 세션 처음 — 끝 줄 뒤라 errors 에 세지 않는다): {e}");
+            }
+            None => {
+                tracing::debug!(
+                    op,
+                    label,
+                    generation,
+                    "끌기가 끝난 뒤 메인 스레드의 창 호출이 실패했다: {e}"
+                );
+            }
+        }
+    }
+
     // 세션당 첫 실패만 warn — 끄는 동안 되풀이되는 것은 끝 줄 `errors` 로 센다(TRD §1-7).
     fn note_failure(&self, op: &'static str, label: Option<&str>, e: &str) {
-        if self.dock.note_error() {
-            tracing::warn!(op, label, "끌기 실행기의 창 호출이 실패했다(이 세션 처음 — 나머지는 끝 줄 errors 로 센다): {e}");
-        } else {
-            tracing::debug!(op, label, "끌기 실행기의 창 호출이 실패했다: {e}");
-        }
+        log_failure(self.dock.note_error(), op, label, e);
     }
 }
 
@@ -634,6 +775,18 @@ fn refusal_word(rejection: Rejection) -> &'static str {
     match rejection {
         Rejection::AlreadyDragging { .. } => "AlreadyDragging",
         Rejection::LateStart => "LateStart",
+    }
+}
+
+fn log_failure(first: bool, op: &'static str, label: Option<&str>, e: &str) {
+    if first {
+        tracing::warn!(
+            op,
+            label,
+            "끌기 실행기의 창 호출이 실패했다(이 세션 처음 — 나머지는 끝 줄 errors 로 센다): {e}"
+        );
+    } else {
+        tracing::debug!(op, label, "끌기 실행기의 창 호출이 실패했다: {e}");
     }
 }
 
@@ -738,6 +891,13 @@ impl DockPorts for TauriDock {
         })
     }
 
+    fn visible(&self, label: &str) -> Result<Option<bool>, String> {
+        match self.app.get_webview_window(label) {
+            Some(window) => window.is_visible().map(Some).map_err(|e| e.to_string()),
+            None => Ok(None),
+        }
+    }
+
     fn apply(&self, layout: &LayoutState, req: DockRequest) -> Result<DockOutcome, DockError> {
         // 빌더 · setup 이 등록한다 — 데몬 클라이언트를 못 만든 셸은 다른 레이아웃 명령처럼 도킹도 실패한다.
         let (Some(router), Some(client), Some(labels)) = (
@@ -768,7 +928,9 @@ impl DockPorts for TauriDock {
     }
 }
 
-struct TauriSpawn;
+struct TauriSpawn {
+    app: AppHandle,
+}
 
 impl DockSpawn for TauriSpawn {
     // 적용은 창 만들기를 기다리며 막힐 수 있어 막혀도 되는 풀에서 돈다.
@@ -781,6 +943,10 @@ impl DockSpawn for TauriSpawn {
             tokio::time::sleep(Duration::from_millis(after_ms)).await;
             tauri::async_runtime::spawn_blocking(job);
         });
+    }
+
+    fn on_main(&self, job: DockJob) -> Result<(), String> {
+        self.app.run_on_main_thread(job).map_err(|e| e.to_string())
     }
 }
 
@@ -802,9 +968,6 @@ pub(crate) fn on_window_destroyed(app: &AppHandle, label: &str) {
     let Some(dock) = app.try_state::<Arc<DockState>>() else {
         return;
     };
-    if !dock.session_live() {
-        return;
-    }
     if let Some(layout) = app.try_state::<LayoutState>() {
         DockExec::tauri(app, dock.inner(), layout.inner()).window_destroyed(label);
     }
@@ -815,8 +978,9 @@ pub(crate) fn on_window_destroyed(app: &AppHandle, label: &str) {
 // 창 label 은 인자로 받지 않는다 — Tauri 가 넣어 주는 [`Window`] 가 그 값의 유일한 권위다(`report_window_canvas` 와
 // 같은 규칙). 인자 이름은 snake_case 그대로 받는다(`rename_all`) — 웹뷰는 `dock_drop` 에 `DropReport` 를 그대로 넘긴다.
 
-/// 끌기 시작(동기 · `dragstart` 디스패치 뒤) — `invoke('dock_drag_start', { drag_id, view_id, hotspot })`.
-/// `hotspot` = 끌기 그림 안의 커서 자리(CSS px). `Err` = 거절 낱말 `TabNotFound` · `AlreadyDragging` · `LateStart` ·
+/// 끌기 시작(동기 · `dragstart` 디스패치 뒤) — `invoke('dock_drag_start', { drag_id, view_id, hotspot, strip })`.
+/// `hotspot` = 끌기 그림 안의 커서 자리(CSS px) · `strip` = `dragstart` 안에서 잰 탭바([`StripStart`] · 선택 칸 — 없음 =
+/// 순서 이동 없음). `Err` = 거절 낱말 `TabNotFound` · `AlreadyDragging` · `LateStart` ·
 /// `Dragging` · `LayoutPoisoned` — 그 끌기의 놓기는 아무것도 바꾸지 않는다.
 #[tauri::command(rename_all = "snake_case")]
 pub fn dock_drag_start(
@@ -827,12 +991,14 @@ pub fn dock_drag_start(
     drag_id: String,
     view_id: Uuid,
     hotspot: PointCss,
+    strip: Option<StripStart>,
 ) -> Result<(), String> {
     DockExec::tauri(&app, dock.inner(), layout.inner()).start(
         window.label(),
         drag_id,
         view_id,
         hotspot,
+        strip,
     )
 }
 
@@ -849,7 +1015,8 @@ pub fn dock_drag_over(
     DockExec::tauri(&app, dock.inner(), layout.inner()).over(window.label(), drag_id, report);
 }
 
-/// 대상 창의 놓기(async — 새 창을 만들 수 있다) — `invoke('dock_drop', dropReport)`(칸 = [`DropReport`]). 늘 `Ok` 다.
+/// 대상 창의 놓기(async — 새 창을 만들 수 있다) — `invoke('dock_drop', dropReport)`(칸 = [`DropReport`] · `scroll` 은
+/// 선택 칸). 늘 `Ok` 다.
 #[tauri::command(rename_all = "snake_case")]
 #[allow(clippy::too_many_arguments)]
 pub async fn dock_drop(
@@ -864,6 +1031,7 @@ pub async fn dock_drop(
     displayed: Option<Uuid>,
     shown: Picked,
     point: PointCss,
+    scroll: Option<f64>,
 ) -> Result<(), String> {
     let drop = DropReport {
         drag_id,
@@ -873,13 +1041,17 @@ pub async fn dock_drop(
         displayed,
         shown,
         point,
+        scroll,
     };
     DockExec::tauri(&app, dock.inner(), layout.inner()).drop_at(window.label(), drop);
     Ok(())
 }
 
-/// 출처의 `dragend`(async — 새 창을 만들 수 있다) — `invoke('dock_drag_end', { drag_id, effect })`. 늘 `Ok` 다.
+/// 출처의 `dragend`(async — 새 창을 만들 수 있다) — `invoke('dock_drag_end', { drag_id, effect, canceled, last })`.
+/// `canceled` = 엔진이 접은 끌기(선택 칸 — 없음 = 거짓) · `last` = 출처 창이 마지막으로 그린 판정([`DrawnReport`] ·
+/// 선택 칸). 늘 `Ok` 다.
 #[tauri::command(rename_all = "snake_case")]
+#[allow(clippy::too_many_arguments)]
 pub async fn dock_drag_end(
     window: Window,
     app: AppHandle,
@@ -887,8 +1059,16 @@ pub async fn dock_drag_end(
     layout: State<'_, LayoutState>,
     drag_id: String,
     effect: DragEffect,
+    canceled: Option<bool>,
+    last: Option<DrawnReport>,
 ) -> Result<(), String> {
-    DockExec::tauri(&app, dock.inner(), layout.inner()).source_end(window.label(), drag_id, effect);
+    DockExec::tauri(&app, dock.inner(), layout.inner()).source_end(
+        window.label(),
+        drag_id,
+        effect,
+        canceled,
+        last,
+    );
     Ok(())
 }
 
@@ -937,15 +1117,17 @@ pub fn report_dock_chrome(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
+    use std::collections::{HashSet, VecDeque};
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::{Mutex, MutexGuard, OnceLock};
 
     use super::*;
     use crate::dock::book::{
-        LastUse, Outcome, OverWaitEnd, DROP_WAIT_MS, EARLY_SIGNAL_MS, END_GRACE_MS,
+        LastUse, Outcome, OverWaitEnd, CANCEL_LEAVE_MS, DROP_WAIT_MS, EARLY_SIGNAL_MS,
+        END_GRACE_MS, LEAVE_GRACE_MS, OVER_WAIT_MS,
     };
     use crate::dock::types::SessionPhase;
+    use crate::layout::chrome::{RectCss, TabHeader};
     use crate::layout::{
         DockDest, LayoutEvents, SubscriptionSync, ViewSnapshot, WindowTabsPayload,
         MAIN_WINDOW_LABEL as MAIN,
@@ -973,11 +1155,19 @@ mod tests {
 
     type Hook = Box<dyn FnOnce() + Send>;
 
-    // 포트 호출을 적고, 불릴 때마다 두 락이 다 풀려 있는지 본다(모듈 머리 「락 규율」).
+    // 포트 호출을 적고, 불릴 때마다 두 락이 다 풀려 있는지 본다(모듈 머리 「락 규율」). 창 보임은 `hidden` 하나가 쥔다
+    // — `hide` · `show` 가 바꾸고 `visible` · `probe` 가 읽는다(`probes` 의 `visible` 은 쓰지 않는다).
     struct Fake {
         dock: Arc<DockState>,
         layout: LayoutState,
         calls: Mutex<Vec<Call>>,
+        // 시계 · 커서 · 사각형을 읽은 순서.
+        reads: Mutex<Vec<&'static str>>,
+        hidden: Mutex<HashSet<String>>,
+        // 사라진 창 — `visible` 이 `None` 을 · `probe` 가 실패를 돌려준다.
+        gone: Mutex<HashSet<String>>,
+        // 실패할 창 호출(`hide` · `show` · `focus` · `visible`) — 불린 것은 적고 실패를 돌려준다.
+        failing: Mutex<HashSet<&'static str>>,
         // 보낸 영역 그대로(창, 영역) — 보낸 순서.
         regions: Mutex<Vec<(String, DockRegions)>>,
         cursor: Mutex<Result<PhysPoint, String>>,
@@ -986,6 +1176,8 @@ mod tests {
         clock: AtomicU64,
         // 다음 `now` 한 번에 먼저 돌린다 — 시작의 레이아웃 락 뒤 · `Start` 앞의 틈을 흉내 낸다.
         on_now: Mutex<Option<Hook>>,
+        // 다음 커서 읽기 한 번 뒤에 돌린다 — 끝 신호의 세계 읽기와 장부 걸음 사이의 틈을 흉내 낸다.
+        on_cursor: Mutex<Option<Hook>>,
     }
 
     impl Fake {
@@ -1003,6 +1195,14 @@ mod tests {
         fn record(&self, call: Call) {
             self.check(&format!("{call:?}"));
             self.calls.lock().unwrap().push(call);
+        }
+
+        fn fails(&self, op: &'static str) -> Result<(), String> {
+            if self.failing.lock().unwrap().contains(op) {
+                Err(format!("{op} 실패"))
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -1023,21 +1223,30 @@ mod tests {
 
         fn hide(&self, label: &str) -> Result<(), String> {
             self.record(Call::Hide(label.to_owned()));
+            self.fails("hide")?;
+            self.hidden.lock().unwrap().insert(label.to_owned());
             Ok(())
         }
 
         fn show(&self, label: &str) -> Result<(), String> {
             self.record(Call::Show(label.to_owned()));
+            self.fails("show")?;
+            self.hidden.lock().unwrap().remove(label);
             Ok(())
         }
 
         fn focus(&self, label: &str) -> Result<(), String> {
             self.record(Call::Focus(label.to_owned()));
-            Ok(())
+            self.fails("focus")
         }
 
         fn cursor(&self) -> Result<PhysPoint, String> {
             self.record(Call::Cursor);
+            self.reads.lock().unwrap().push("cursor");
+            let hook = self.on_cursor.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook();
+            }
             self.cursor.lock().unwrap().clone()
         }
 
@@ -1053,12 +1262,29 @@ mod tests {
 
         fn probe(&self, label: &str) -> Result<WindowProbe, String> {
             self.record(Call::Probe(label.to_owned()));
+            self.reads.lock().unwrap().push("probe");
+            if self.gone.lock().unwrap().contains(label) {
+                return Err("창이 없다".to_owned());
+            }
+            let visible = !self.hidden.lock().unwrap().contains(label);
             self.probes
                 .lock()
                 .unwrap()
                 .iter()
                 .find(|(l, _)| l == label)
-                .map_or_else(|| Err("창이 없다".to_owned()), |(_, probe)| probe.clone())
+                .map_or_else(
+                    || Err("창이 없다".to_owned()),
+                    |(_, probe)| probe.clone().map(|p| WindowProbe { visible, ..p }),
+                )
+        }
+
+        fn visible(&self, label: &str) -> Result<Option<bool>, String> {
+            self.check("visible");
+            self.fails("visible")?;
+            if self.gone.lock().unwrap().contains(label) {
+                return Ok(None);
+            }
+            Ok(Some(!self.hidden.lock().unwrap().contains(label)))
         }
 
         fn apply(&self, _: &LayoutState, req: DockRequest) -> Result<DockOutcome, DockError> {
@@ -1071,14 +1297,18 @@ mod tests {
             if let Some(hook) = hook {
                 hook();
             }
+            self.reads.lock().unwrap().push("now");
             MonoMs(self.clock.fetch_add(10, Ordering::SeqCst))
         }
     }
 
-    // 넘긴 작업을 줄에 세워 두기만 한다 — 시험이 언제 돌릴지 고른다.
+    // 넘긴 작업을 줄에 세워 두기만 한다 — 시험이 언제 돌릴지 고른다. 메인 스레드 줄은 따로다(올린 순서대로 돈다).
     #[derive(Default)]
     struct FakeSpawn {
         jobs: Mutex<VecDeque<(Option<u64>, DockJob)>>,
+        main: Mutex<VecDeque<DockJob>>,
+        // 올리는 자리에서 두 락이 풀려 있는지 본다 — 운영의 메인 스레드는 올린 작업을 그 자리에서 돌린다.
+        fake: OnceLock<Arc<Fake>>,
     }
 
     impl DockSpawn for FakeSpawn {
@@ -1088,6 +1318,14 @@ mod tests {
 
         fn spawn_after(&self, after_ms: u64, job: DockJob) {
             self.jobs.lock().unwrap().push_back((Some(after_ms), job));
+        }
+
+        fn on_main(&self, job: DockJob) -> Result<(), String> {
+            if let Some(fake) = self.fake.get() {
+                fake.check("on_main");
+            }
+            self.main.lock().unwrap().push_back(job);
+            Ok(())
         }
     }
 
@@ -1117,6 +1355,23 @@ mod tests {
             ran
         }
 
+        // 메인 스레드 줄을 올린 순서대로 — 도는 동안 올라온 것까지. 돌린 수.
+        fn run_main(&self) -> usize {
+            let mut ran = 0;
+            loop {
+                let job = self.main.lock().unwrap().pop_front();
+                let Some(job) = job else {
+                    return ran;
+                };
+                job();
+                ran += 1;
+            }
+        }
+
+        fn main_pending(&self) -> usize {
+            self.main.lock().unwrap().len()
+        }
+
         fn fire(&self, after_ms: u64) {
             let job = self
                 .take(Some(after_ms))
@@ -1139,6 +1394,10 @@ mod tests {
                 dock: Arc::clone(&dock),
                 layout: layout.clone(),
                 calls: Mutex::new(Vec::new()),
+                reads: Mutex::new(Vec::new()),
+                hidden: Mutex::new(HashSet::new()),
+                gone: Mutex::new(HashSet::new()),
+                failing: Mutex::new(HashSet::new()),
                 regions: Mutex::new(Vec::new()),
                 cursor: Mutex::new(Ok(CURSOR)),
                 probes: Mutex::new(vec![(MAIN.to_owned(), Ok(main_probe()))]),
@@ -1150,8 +1409,10 @@ mod tests {
                 })),
                 clock: AtomicU64::new(1_000),
                 on_now: Mutex::new(None),
+                on_cursor: Mutex::new(None),
             });
             let spawn = Arc::new(FakeSpawn::default());
+            assert!(spawn.fake.set(Arc::clone(&fake)).is_ok());
             let exec = DockExec::new(dock, layout, fake.clone(), spawn.clone());
             Self { fake, spawn, exec }
         }
@@ -1220,7 +1481,7 @@ mod tests {
         (mgr, a, b)
     }
 
-    // 탭 하나뿐인 팝아웃 P1 — 끄는 동안 숨는다. 게터는 숨은 채 배율 2 를 돌려준다.
+    // 탭 하나뿐인 팝아웃 P1 — 끄는 동안 숨는다. 배율 2 · 숨긴 뒤에도 게터가 배율을 읽는다.
     fn lone_popout() -> (Rig, ViewId) {
         let mut mgr = ViewManager::new();
         let lone = mgr.create_window(P1).unwrap();
@@ -1228,7 +1489,6 @@ mod tests {
         rig.fake.probes.lock().unwrap().push((
             P1.to_owned(),
             Ok(WindowProbe {
-                visible: false,
                 scale: 2.0,
                 ..main_probe()
             }),
@@ -1246,6 +1506,7 @@ mod tests {
             displayed: None,
             shown: Picked::None,
             point,
+            scroll: None,
         }
     }
 
@@ -1390,7 +1651,7 @@ mod tests {
         let rig = Rig::new(mgr);
 
         assert_eq!(
-            rig.exec.start(MAIN, "d1".into(), a, HOTSPOT),
+            rig.exec.start(MAIN, "d1".into(), a, HOTSPOT, None),
             Err("Dragging".to_owned())
         );
         assert!(
@@ -1398,7 +1659,7 @@ mod tests {
             "표식을 못 세운 시작은 깃발을 세우지 않는다"
         );
         assert_eq!(
-            rig.exec.start(P1, "d2".into(), a, HOTSPOT),
+            rig.exec.start(P1, "d2".into(), a, HOTSPOT, None),
             Err("TabNotFound".to_owned()),
             "부른 창이 그 탭의 주인이 아니다"
         );
@@ -1406,11 +1667,13 @@ mod tests {
         assert!(rig.calls().is_empty() && rig.spawn.pending().is_empty());
 
         rig.mgr().release_lease(other);
-        assert_eq!(rig.exec.start(MAIN, "d3".into(), a, HOTSPOT), Ok(()));
+        assert_eq!(rig.exec.start(MAIN, "d3".into(), a, HOTSPOT, None), Ok(()));
         assert!(rig.dock().session_live());
         assert_eq!(rig.lease(), Some(a));
+        // 출처 사각형을 읽은 뒤 첫 알림이 시작이다.
+        assert_eq!(rig.calls().first(), Some(&Call::Probe(MAIN.to_owned())));
         assert!(matches!(
-            rig.calls().first(),
+            rig.calls().get(1),
             Some(Call::Broadcast(SessionPhase::Started(_)))
         ));
     }
@@ -1428,14 +1691,18 @@ mod tests {
         }));
 
         assert_eq!(
-            rig.exec.start(MAIN, "d1".into(), a, HOTSPOT),
+            rig.exec.start(MAIN, "d1".into(), a, HOTSPOT, None),
             Err("LateStart".to_owned())
         );
 
         assert_eq!(rig.lease(), None, "함께 낸 표식 내리기를 실행했다");
         assert!(!rig.dock().session_live(), "자기 세대를 내렸다");
-        assert!(rig.calls().is_empty(), "거절한 시작은 알리지 않는다");
-        assert_eq!(rig.exec.start(MAIN, "d2".into(), a, HOTSPOT), Ok(()));
+        assert_eq!(
+            rig.calls(),
+            [Call::Probe(MAIN.to_owned())],
+            "거절한 시작은 알리지 않는다 — 출처 사각형만 읽었다"
+        );
+        assert_eq!(rig.exec.start(MAIN, "d2".into(), a, HOTSPOT, None), Ok(()));
     }
 
     #[test]
@@ -1455,7 +1722,7 @@ mod tests {
             *slot.lock().unwrap() = Some(tab);
         }));
 
-        rig.exec.start(MAIN, "d1".into(), a, HOTSPOT).unwrap();
+        rig.exec.start(MAIN, "d1".into(), a, HOTSPOT, None).unwrap();
 
         let tab = created.lock().unwrap().expect("틈의 쓰기가 돌았다");
         assert_eq!(
@@ -1469,11 +1736,11 @@ mod tests {
     fn a_repeated_start_of_the_live_drag_leaves_it_running() {
         let (mgr, a, _) = two_tabs();
         let rig = Rig::new(mgr);
-        rig.exec.start(MAIN, "d1".into(), a, HOTSPOT).unwrap();
+        rig.exec.start(MAIN, "d1".into(), a, HOTSPOT, None).unwrap();
         let before = rig.calls().len();
 
         assert_eq!(
-            rig.exec.start(MAIN, "d1".into(), a, HOTSPOT),
+            rig.exec.start(MAIN, "d1".into(), a, HOTSPOT, None),
             Err("AlreadyDragging".to_owned())
         );
 
@@ -1510,7 +1777,7 @@ mod tests {
     fn one_settled_feeds_one_snapshot() {
         let (mgr, a, _) = two_tabs();
         let rig = Rig::new(mgr);
-        rig.exec.start(MAIN, "d1".into(), a, HOTSPOT).unwrap();
+        rig.exec.start(MAIN, "d1".into(), a, HOTSPOT, None).unwrap();
         let before = rig.dock().snapshot(&rig.mgr()).number;
         let sent = rig.regions_sent();
         let events = SettledTrigger {
@@ -1543,7 +1810,7 @@ mod tests {
         assert!(rig.calls().contains(&Call::Cursor));
         assert!(rig.calls().contains(&Call::Probe(MAIN.to_owned())));
 
-        rig.exec.start(MAIN, "d1".into(), a, HOTSPOT).unwrap();
+        rig.exec.start(MAIN, "d1".into(), a, HOTSPOT, None).unwrap();
 
         assert!(
             rig.applies().is_empty(),
@@ -1553,6 +1820,7 @@ mod tests {
         assert!(rig.dock().session_live(), "적용 결과 전에는 끝나지 않는다");
 
         assert_eq!(rig.spawn.run_now(), 1);
+        rig.spawn.run_main();
 
         let applies = rig.applies();
         assert_eq!(applies.len(), 1);
@@ -1578,7 +1846,7 @@ mod tests {
     fn an_unreadable_cursor_places_the_new_window_from_the_drop_point() {
         let (mgr, a, _) = two_tabs();
         let rig = Rig::new(mgr);
-        rig.exec.start(MAIN, "d1".into(), a, HOTSPOT).unwrap();
+        rig.exec.start(MAIN, "d1".into(), a, HOTSPOT, None).unwrap();
         *rig.fake.cursor.lock().unwrap() = Err("잠금 화면".to_owned());
 
         rig.exec
@@ -1593,10 +1861,11 @@ mod tests {
     fn with_no_cursor_and_no_window_under_the_new_window_has_no_place() {
         let (mgr, a, _) = two_tabs();
         let rig = Rig::new(mgr);
-        rig.exec.start(MAIN, "d1".into(), a, HOTSPOT).unwrap();
+        rig.exec.start(MAIN, "d1".into(), a, HOTSPOT, None).unwrap();
         *rig.fake.cursor.lock().unwrap() = Err("잠금 화면".to_owned());
 
-        rig.exec.source_end(MAIN, "d1".into(), DragEffect::None);
+        rig.exec
+            .source_end(MAIN, "d1".into(), DragEffect::None, None, None);
         rig.spawn.run_now();
 
         assert_eq!(new_window_pos(&rig.applies()[0]), None);
@@ -1606,11 +1875,11 @@ mod tests {
     fn a_start_over_a_live_session_refuses_and_ends_the_old_one_off_the_command() {
         let (mgr, a, b) = two_tabs();
         let rig = Rig::new(mgr);
-        rig.exec.start(MAIN, "d1".into(), a, HOTSPOT).unwrap();
+        rig.exec.start(MAIN, "d1".into(), a, HOTSPOT, None).unwrap();
         let before = rig.calls().len();
 
         assert_eq!(
-            rig.exec.start(MAIN, "d2".into(), b, HOTSPOT),
+            rig.exec.start(MAIN, "d2".into(), b, HOTSPOT, None),
             Err("AlreadyDragging".to_owned())
         );
         assert_eq!(
@@ -1625,20 +1894,21 @@ mod tests {
         assert_eq!(rig.lease(), None);
         assert!(!rig.dock().session_live());
         assert_eq!(
-            rig.exec.start(MAIN, "d2".into(), b, HOTSPOT),
+            rig.exec.start(MAIN, "d2".into(), b, HOTSPOT, None),
             Err("LateStart".to_owned()),
             "거절한 id 는 끝난 id 다"
         );
-        assert_eq!(rig.exec.start(MAIN, "d3".into(), b, HOTSPOT), Ok(()));
+        assert_eq!(rig.exec.start(MAIN, "d3".into(), b, HOTSPOT, None), Ok(()));
     }
 
     #[test]
     fn the_drop_wait_timer_comes_back_with_its_kind_and_number_and_ends_the_session() {
         let (mgr, a, _) = two_tabs();
         let rig = Rig::new(mgr);
-        rig.exec.start(MAIN, "d1".into(), a, HOTSPOT).unwrap();
+        rig.exec.start(MAIN, "d1".into(), a, HOTSPOT, None).unwrap();
 
-        rig.exec.source_end(MAIN, "d1".into(), DragEffect::Move);
+        rig.exec
+            .source_end(MAIN, "d1".into(), DragEffect::Move, None, None);
         assert_eq!(rig.spawn.pending(), [Some(DROP_WAIT_MS)]);
         *rig.fake.cursor.lock().unwrap() = Ok(PhysPoint { x: 0.0, y: 0.0 });
         rig.spawn.fire(DROP_WAIT_MS);
@@ -1656,7 +1926,7 @@ mod tests {
     fn the_grace_timer_places_the_new_window_at_the_cursor_it_reads() {
         let (mgr, a, _) = two_tabs();
         let rig = Rig::new(mgr);
-        rig.exec.start(MAIN, "d1".into(), a, HOTSPOT).unwrap();
+        rig.exec.start(MAIN, "d1".into(), a, HOTSPOT, None).unwrap();
 
         rig.exec.pointer_seen("d1".into());
         assert_eq!(rig.spawn.pending(), [Some(END_GRACE_MS)]);
@@ -1673,15 +1943,24 @@ mod tests {
         let (rig, lone) = lone_popout();
         *rig.fake.outcome.lock().unwrap() =
             Err(DockError::WindowOpen("이벤트 루프가 닫혔다".to_owned()));
-        rig.exec.start(P1, "d1".into(), lone, HOTSPOT).unwrap();
+        rig.exec
+            .start(P1, "d1".into(), lone, HOTSPOT, None)
+            .unwrap();
+        assert!(
+            !rig.calls().contains(&Call::Hide(P1.to_owned())),
+            "숨기기는 메인 스레드 줄로 간다"
+        );
+        rig.spawn.run_main();
         assert!(rig.calls().contains(&Call::Hide(P1.to_owned())));
         assert!(
             !rig.calls().contains(&Call::Regions(P1.to_owned())),
             "숨긴 출처에는 영역을 보내지 않는다"
         );
 
-        rig.exec.source_end(P1, "d1".into(), DragEffect::None);
+        rig.exec
+            .source_end(P1, "d1".into(), DragEffect::None, None, None);
         rig.spawn.run_now();
+        rig.spawn.run_main();
 
         // 숨긴 출처의 배율 2 — (1000 − 20 × 2, 800 − 10 × 2).
         assert_eq!(new_window_pos(&rig.applies()[0]), Some((960, 780)));
@@ -1699,15 +1978,719 @@ mod tests {
     #[test]
     fn a_destroyed_source_ends_the_session_without_showing_it() {
         let (rig, lone) = lone_popout();
-        rig.exec.start(P1, "d1".into(), lone, HOTSPOT).unwrap();
+        rig.exec
+            .start(P1, "d1".into(), lone, HOTSPOT, None)
+            .unwrap();
+        rig.spawn.run_main();
 
         rig.exec.window_destroyed(P1);
+        rig.spawn.run_main();
 
         let calls = rig.calls();
         assert!(calls.contains(&Call::Broadcast(SessionPhase::Ended)));
         assert!(!calls.iter().any(|c| matches!(c, Call::Show(_))));
         assert!(rig.applies().is_empty());
         assert_eq!(rig.lease(), None);
+        assert!(!rig.dock().session_live());
+    }
+
+    // ── 시작 측정 · 끝 칸 · 스크롤 (5.7) ──
+
+    // 탭바 안 순서 이동 구역의 점 — 머리마다 폭 100 · 잡은 자리 50 에서 탭 하나 팝아웃은 늘 자리 0.
+    const LONE_P: PointCss = PointCss { x: 50.0, y: 10.0 };
+    // main [a, b, c] 에서 b 를 끌 때 — 스크롤 0 이면 자리 1(제자리) · 스크롤 110 이면 자리 2.
+    const IN_PLACE_P: PointCss = PointCss { x: 150.0, y: 10.0 };
+
+    // 그 창 탭 목록 그대로의 시작 측정 — 탭바 (0, 0)–(600, 28) · 머리마다 폭 100 · 잡은 자리 50.
+    fn strip_for(rig: &Rig, label: &str, scroll: f64) -> StripStart {
+        let tabs = rig.mgr().windows[label].tabs.clone();
+        let rect = |x0: f64, x1: f64| RectCss {
+            x0,
+            y0: 0.0,
+            x1,
+            y1: 28.0,
+        };
+        StripStart {
+            bar: rect(0.0, 600.0),
+            heads: tabs
+                .iter()
+                .enumerate()
+                .map(|(i, &view_id)| TabHeader {
+                    view_id,
+                    rect: rect(100.0 * i as f64, 100.0 * (i + 1) as f64),
+                })
+                .collect(),
+            grab_x: 50.0,
+            scroll,
+        }
+    }
+
+    fn over_report(
+        regions: &DockRegions,
+        shown: Picked,
+        point: PointCss,
+        scroll: Option<f64>,
+    ) -> DragOverReport {
+        DragOverReport::Over {
+            rev: regions.rev,
+            bar_rev: regions.bar_rev,
+            displayed: regions.view_id,
+            shown,
+            point,
+            scroll,
+        }
+    }
+
+    fn set_probe(rig: &Rig, label: &str, probe: WindowProbe) {
+        let mut probes = rig.fake.probes.lock().unwrap();
+        probes.retain(|(l, _)| l != label);
+        probes.push((label.to_owned(), Ok(probe)));
+    }
+
+    // 끄는 탭이 그 창 안에 남은 적용 — 모델만 바뀌고 창은 그대로다.
+    fn kept_in(window: &str) -> Result<DockOutcome, DockError> {
+        Ok(DockOutcome {
+            window: window.to_owned(),
+            slot_ids: Vec::new(),
+            closed_window: None,
+            reused: false,
+        })
+    }
+
+    fn tab_bar_dest(req: &DockRequest) -> (String, Option<usize>) {
+        match &req.to {
+            DockDest::TabBar { window, index } => (window.clone(), *index),
+            other => panic!("탭바 적용이 아니다: {other:?}"),
+        }
+    }
+
+    fn is_hidden(rig: &Rig, label: &str) -> bool {
+        rig.fake.hidden.lock().unwrap().contains(label)
+    }
+
+    fn count(rig: &Rig, call: &Call) -> usize {
+        rig.calls().iter().filter(|c| *c == call).count()
+    }
+
+    // main [a, b, c] 에서 시작 측정(스크롤 0)을 실어 b 를 끈다.
+    fn three_tab_reorder() -> (Rig, ViewId) {
+        let mut mgr = ViewManager::new();
+        let b = mgr.create_tab(MAIN, None).unwrap();
+        mgr.create_tab(MAIN, None).unwrap();
+        let rig = Rig::new(mgr);
+        let strip = strip_for(&rig, MAIN, 0.0);
+        rig.exec
+            .start(MAIN, "d1".into(), b, HOTSPOT, Some(strip))
+            .unwrap();
+        (rig, b)
+    }
+
+    #[test]
+    fn a_start_strip_defers_the_lone_popouts_hide_and_gives_its_regions_a_reorder_zone() {
+        let (rig, lone) = lone_popout();
+        let strip = strip_for(&rig, P1, 0.0);
+
+        rig.exec
+            .start(P1, "d1".into(), lone, HOTSPOT, Some(strip))
+            .unwrap();
+        rig.spawn.run_main();
+
+        assert!(
+            !rig.calls().contains(&Call::Hide(P1.to_owned())),
+            "출처 영역에 순서 이동이 서면 숨기기를 도킹 모드 증거까지 미룬다"
+        );
+        assert!(rig.last_regions(P1).and_then(|r| r.reorder).is_some());
+    }
+
+    #[test]
+    fn a_missing_canceled_is_false_and_an_engine_canceled_end_changes_nothing() {
+        for (canceled, applies) in [(None, 1), (Some(false), 1), (Some(true), 0)] {
+            let (mgr, a, _) = two_tabs();
+            let rig = Rig::new(mgr);
+            rig.exec.start(MAIN, "d1".into(), a, HOTSPOT, None).unwrap();
+
+            rig.exec
+                .source_end(MAIN, "d1".into(), DragEffect::None, canceled, None);
+            rig.spawn.run_now();
+
+            assert_eq!(rig.applies().len(), applies, "{canceled:?}");
+            assert_eq!(rig.lease(), None, "{canceled:?}");
+            assert!(!rig.dock().session_live(), "{canceled:?}");
+        }
+    }
+
+    #[test]
+    fn the_end_snapshot_reaches_the_book() {
+        for with_last in [false, true] {
+            let (rig, lone) = lone_popout();
+            set_probe(
+                &rig,
+                P1,
+                WindowProbe {
+                    origin: (3000, 100),
+                    ..main_probe()
+                },
+            );
+            let strip = strip_for(&rig, P1, 0.0);
+            rig.exec
+                .start(P1, "d1".into(), lone, HOTSPOT, Some(strip))
+                .unwrap();
+            let regions = rig.last_regions(P1).unwrap();
+            let last = DrawnReport {
+                rev: regions.rev,
+                bar_rev: regions.bar_rev,
+                displayed: regions.view_id,
+                shown: Picked::Reorder { index: 0 },
+                point: LONE_P,
+                scroll: None,
+                left_before_end_ms: None,
+            };
+
+            rig.exec.source_end(
+                P1,
+                "d1".into(),
+                DragEffect::None,
+                None,
+                with_last.then_some(last),
+            );
+            rig.spawn.run_now();
+
+            let req = &rig.applies()[0];
+            if with_last {
+                // 받은 보고가 없어도 출처가 끝에 그린 것 — 그 자리.
+                assert_eq!(tab_bar_dest(req), (P1.to_owned(), Some(0)));
+            } else {
+                // 보고도 스냅숏도 없고 커서가 출처 밖 — 새 창.
+                assert!(matches!(req.to, DockDest::NewWindow { .. }));
+            }
+        }
+    }
+
+    #[test]
+    fn the_drop_scroll_reaches_the_reorder_repick() {
+        for (scroll, applied) in [(Some(110.0), true), (None, false)] {
+            let (rig, b) = three_tab_reorder();
+            let regions = rig.last_regions(MAIN).unwrap();
+
+            rig.exec.drop_at(
+                MAIN,
+                DropReport {
+                    drag_id: "d1".into(),
+                    view_id: b,
+                    rev: regions.rev,
+                    bar_rev: regions.bar_rev,
+                    displayed: regions.view_id,
+                    shown: Picked::Reorder { index: 2 },
+                    point: IN_PLACE_P,
+                    scroll,
+                },
+            );
+            rig.spawn.run_now();
+
+            if applied {
+                assert_eq!(tab_bar_dest(&rig.applies()[0]), (MAIN.to_owned(), Some(2)));
+            } else {
+                assert!(
+                    rig.applies().is_empty(),
+                    "스크롤 없음 = 시작 스크롤 0 으로 자리 1 — 그린 자리 2 와 달라 무변경"
+                );
+            }
+            assert!(!rig.dock().session_live());
+        }
+    }
+
+    #[test]
+    fn the_over_scroll_reaches_the_last_point_judgement() {
+        let (rig, _) = three_tab_reorder();
+        let regions = rig.last_regions(MAIN).unwrap();
+        rig.exec.over(
+            MAIN,
+            "d1".into(),
+            over_report(
+                &regions,
+                Picked::Reorder { index: 2 },
+                IN_PLACE_P,
+                Some(110.0),
+            ),
+        );
+        // 끝 커서 = main 안쪽의 그 점(원점 (100, 50) · 배율 1.5).
+        *rig.fake.cursor.lock().unwrap() = Ok(PhysPoint {
+            x: 100.0 + 150.0 * 1.5,
+            y: 50.0 + 10.0 * 1.5,
+        });
+
+        rig.exec
+            .source_end(MAIN, "d1".into(), DragEffect::None, None, None);
+        rig.spawn.run_now();
+
+        assert_eq!(tab_bar_dest(&rig.applies()[0]), (MAIN.to_owned(), Some(2)));
+    }
+
+    // ── 시계 · 세계 읽기 순서 ──
+
+    #[test]
+    fn end_signals_and_timers_stamp_the_clock_before_reading_the_world() {
+        fn arrival_first(rig: &Rig, what: &str) {
+            let reads = std::mem::take(&mut *rig.fake.reads.lock().unwrap());
+            let now = reads.iter().position(|r| *r == "now");
+            let cursor = reads.iter().position(|r| *r == "cursor");
+            assert!(
+                now.is_some() && cursor.is_some() && now < cursor,
+                "{what}: {reads:?}"
+            );
+        }
+
+        let (mgr, a, b) = two_tabs();
+        let rig = Rig::new(mgr);
+        rig.exec.start(MAIN, "d1".into(), a, HOTSPOT, None).unwrap();
+        rig.fake.reads.lock().unwrap().clear();
+        rig.exec
+            .drop_at(MAIN, unguided_drop("d1", a, PointCss { x: 40.0, y: 20.0 }));
+        arrival_first(&rig, "drop");
+        rig.spawn.run_now();
+
+        rig.exec.start(MAIN, "d2".into(), b, HOTSPOT, None).unwrap();
+        rig.fake.reads.lock().unwrap().clear();
+        rig.exec
+            .source_end(MAIN, "d2".into(), DragEffect::Move, None, None);
+        arrival_first(&rig, "source_end");
+        rig.spawn.fire(DROP_WAIT_MS);
+        arrival_first(&rig, "drop_wait");
+        rig.spawn.run_now();
+
+        rig.exec.start(MAIN, "d3".into(), b, HOTSPOT, None).unwrap();
+        assert!(rig.exec.start(MAIN, "d4".into(), b, HOTSPOT, None).is_err());
+        rig.fake.reads.lock().unwrap().clear();
+        rig.spawn.run_now();
+        arrival_first(&rig, "superseded");
+    }
+
+    // ── 숨기기 · 보이기 맞추기 ──
+
+    #[test]
+    fn a_late_hide_queued_behind_the_ends_show_leaves_the_popout_shown() {
+        let (rig, lone) = lone_popout();
+        *rig.fake.outcome.lock().unwrap() = Err(DockError::WindowOpen("닫혔다".to_owned()));
+        rig.exec
+            .start(P1, "d1".into(), lone, HOTSPOT, None)
+            .unwrap();
+        rig.spawn.run_main();
+        assert!(is_hidden(&rig, P1), "살아 있는 세션의 숨기기는 숨긴다");
+
+        rig.exec
+            .source_end(P1, "d1".into(), DragEffect::None, None, None);
+        rig.spawn.run_now();
+        assert!(is_hidden(&rig, P1), "보이기는 아직 메인 스레드 줄에 있다");
+        // 그 세션이 먼저 낸 숨기기가 다른 스레드에서 보이기보다 늦게 올라왔다.
+        rig.exec.run(
+            vec![Action::Hide {
+                label: P1.to_owned(),
+                generation: 1,
+            }],
+            false,
+        );
+        assert_eq!(rig.spawn.run_main(), 2);
+
+        assert!(!is_hidden(&rig, P1), "마지막 상태 = 보임");
+        assert_eq!(count(&rig, &Call::Hide(P1.to_owned())), 1);
+        assert_eq!(count(&rig, &Call::Show(P1.to_owned())), 1);
+    }
+
+    #[test]
+    fn a_stale_sessions_hide_and_show_follow_the_current_session() {
+        // 옛 세션(P1 숨김)의 보이기가 줄에 있는 동안 새 세션이 다른 창에서 섰다 — 옛 팝아웃이 숨은 채 남지 않고, 옛
+        //   세션의 늦은 숨기기는 아무것도 숨기지 않는다.
+        let (rig, lone) = lone_popout();
+        *rig.fake.outcome.lock().unwrap() = Err(DockError::WindowOpen("닫혔다".to_owned()));
+        rig.exec
+            .start(P1, "d1".into(), lone, HOTSPOT, None)
+            .unwrap();
+        rig.spawn.run_main();
+        rig.exec
+            .source_end(P1, "d1".into(), DragEffect::None, None, None);
+        rig.spawn.run_now();
+        let main_tab = rig.mgr().windows[MAIN].active;
+        rig.exec
+            .start(MAIN, "d2".into(), main_tab, HOTSPOT, None)
+            .unwrap();
+        rig.exec.run(
+            vec![Action::Hide {
+                label: P1.to_owned(),
+                generation: 1,
+            }],
+            false,
+        );
+        rig.spawn.run_main();
+        assert!(!is_hidden(&rig, P1));
+        assert_eq!(count(&rig, &Call::Hide(P1.to_owned())), 1);
+
+        // 새 세션이 같은 팝아웃을 다시 숨기면 옛 보이기가 그것을 드러내지 않는다.
+        let (rig, lone) = lone_popout();
+        *rig.fake.outcome.lock().unwrap() = Err(DockError::WindowOpen("닫혔다".to_owned()));
+        rig.exec
+            .start(P1, "d1".into(), lone, HOTSPOT, None)
+            .unwrap();
+        rig.spawn.run_main();
+        rig.exec
+            .source_end(P1, "d1".into(), DragEffect::None, None, None);
+        rig.spawn.run_now();
+        rig.exec
+            .start(P1, "d2".into(), lone, HOTSPOT, None)
+            .unwrap();
+        rig.spawn.run_main();
+        assert!(is_hidden(&rig, P1));
+        assert_eq!(count(&rig, &Call::Show(P1.to_owned())), 0);
+    }
+
+    #[test]
+    fn the_ends_focus_runs_on_the_main_thread_behind_its_show() {
+        let (rig, lone) = lone_popout();
+        *rig.fake.outcome.lock().unwrap() = Ok(DockOutcome {
+            window: P1.to_owned(),
+            slot_ids: Vec::new(),
+            closed_window: None,
+            reused: true,
+        });
+        rig.exec
+            .start(P1, "d1".into(), lone, HOTSPOT, None)
+            .unwrap();
+        rig.spawn.run_main();
+
+        rig.exec
+            .source_end(P1, "d1".into(), DragEffect::None, None, None);
+        rig.spawn.run_now();
+        assert!(
+            !rig.calls()
+                .iter()
+                .any(|c| matches!(c, Call::Show(_) | Call::Focus(_))),
+            "끝의 보이기 · 포커스는 메인 스레드 줄에서 돈다"
+        );
+        assert_eq!(rig.spawn.main_pending(), 2);
+        rig.spawn.run_main();
+
+        let calls = rig.calls();
+        let shown = position(&calls, |c| *c == Call::Show(P1.to_owned()));
+        let focused = position(&calls, |c| *c == Call::Focus(P1.to_owned()));
+        assert!(shown < focused);
+        assert!(!is_hidden(&rig, P1));
+    }
+
+    #[test]
+    fn a_window_gone_before_its_reconcile_runs_is_skipped_without_an_error() {
+        let (rig, lone) = lone_popout();
+        rig.exec
+            .start(P1, "d1".into(), lone, HOTSPOT, None)
+            .unwrap();
+        rig.fake.gone.lock().unwrap().insert(P1.to_owned());
+
+        assert_eq!(rig.spawn.run_main(), 1);
+
+        assert!(!rig.calls().iter().any(|c| matches!(c, Call::Hide(_))));
+        assert_eq!(rig.dock().take_errors(1), 0);
+    }
+
+    #[test]
+    fn a_leave_timer_fed_between_the_end_world_read_and_the_end_step_lands_on_the_source_and_shows_it(
+    ) {
+        let (rig, lone) = lone_popout();
+        // 출처 사각형이 다른 창과 겹치지 않게 — 시작에 이 값을 쥔다(숨긴 뒤의 사각형에는 출처가 없다).
+        set_probe(
+            &rig,
+            P1,
+            WindowProbe {
+                origin: (3000, 100),
+                scale: 2.0,
+                ..main_probe()
+            },
+        );
+        *rig.fake.outcome.lock().unwrap() = kept_in(P1);
+        let strip = strip_for(&rig, P1, 0.0);
+        rig.exec
+            .start(P1, "d1".into(), lone, HOTSPOT, Some(strip))
+            .unwrap();
+        let regions = rig
+            .last_regions(P1)
+            .expect("숨기기를 미룬 출처도 영역을 받는다");
+        rig.exec.over(
+            P1,
+            "d1".into(),
+            over_report(&regions, Picked::Reorder { index: 0 }, LONE_P, None),
+        );
+        rig.exec.over(P1, "d1".into(), DragOverReport::Left);
+        assert_eq!(rig.spawn.pending(), [Some(LEAVE_GRACE_MS)]);
+        // 끝 커서 = 출처 안쪽의 그 점. 커서를 읽은 직후 떠남 시한이 장부에 먹히고 메인 스레드가 그 숨기기를 돌린다.
+        *rig.fake.cursor.lock().unwrap() = Ok(PhysPoint {
+            x: 3000.0 + LONE_P.x * 2.0,
+            y: 100.0 + LONE_P.y * 2.0,
+        });
+        let spawn = Arc::clone(&rig.spawn);
+        *rig.fake.on_cursor.lock().unwrap() = Some(Box::new(move || {
+            spawn.fire(LEAVE_GRACE_MS);
+            spawn.run_main();
+        }));
+
+        rig.exec
+            .source_end(P1, "d1".into(), DragEffect::None, None, None);
+        assert!(is_hidden(&rig, P1), "그 틈의 떠남 시한이 출처를 숨겼다");
+        rig.spawn.run_now();
+        rig.spawn.run_main();
+
+        assert_eq!(
+            tab_bar_dest(&rig.applies()[0]),
+            (P1.to_owned(), Some(0)),
+            "끝이 시한보다 먼저 닿았다 — 출처 위에서 그린 자리"
+        );
+        assert!(!is_hidden(&rig, P1), "마지막 상태 = 보임");
+        let calls = rig.calls();
+        let hid = position(&calls, |c| *c == Call::Hide(P1.to_owned()));
+        let shown = position(&calls, |c| *c == Call::Show(P1.to_owned()));
+        let focused = position(&calls, |c| *c == Call::Focus(P1.to_owned()));
+        assert!(hid < shown && shown < focused);
+    }
+
+    // ── 끝의 포커스 · 되보이기 몫 · 끝 줄 뒤 실패 (9b 리뷰) ──
+
+    fn reused_p1() -> Result<DockOutcome, DockError> {
+        Ok(DockOutcome {
+            window: P1.to_owned(),
+            slot_ids: Vec::new(),
+            closed_window: None,
+            reused: true,
+        })
+    }
+
+    // P1 에서 끌어 끝낸다 — 끝의 할 일(보이기 · 포커스)은 메인 스레드 줄에 남긴다.
+    fn ended_lone(outcome: Result<DockOutcome, DockError>) -> (Rig, ViewId) {
+        let (rig, lone) = lone_popout();
+        *rig.fake.outcome.lock().unwrap() = outcome;
+        rig.exec
+            .start(P1, "d1".into(), lone, HOTSPOT, None)
+            .unwrap();
+        rig.spawn.run_main();
+        rig.exec
+            .source_end(P1, "d1".into(), DragEffect::None, None, None);
+        rig.spawn.run_now();
+        (rig, lone)
+    }
+
+    fn refused() -> Result<DockOutcome, DockError> {
+        Err(DockError::WindowOpen("닫혔다".to_owned()))
+    }
+
+    #[test]
+    fn an_ends_focus_is_dropped_when_a_new_session_starts_before_it_runs() {
+        // 같은 팝아웃에서 새 끌기 — 새 세션이 숨길 창에 옛 끝의 포커스를 주지 않는다.
+        let (rig, lone) = ended_lone(reused_p1());
+        rig.exec
+            .start(P1, "d2".into(), lone, HOTSPOT, None)
+            .unwrap();
+        rig.spawn.run_main();
+        assert!(!rig.calls().iter().any(|c| matches!(c, Call::Focus(_))));
+        assert!(is_hidden(&rig, P1));
+
+        // 다른 창에서 새 끌기 — 옛 팝아웃은 되보이되 포커스는 새 세션 몫이다.
+        let (rig, _) = ended_lone(reused_p1());
+        let main_tab = rig.mgr().windows[MAIN].active;
+        rig.exec
+            .start(MAIN, "d2".into(), main_tab, HOTSPOT, None)
+            .unwrap();
+        rig.spawn.run_main();
+        assert!(!rig.calls().iter().any(|c| matches!(c, Call::Focus(_))));
+        assert!(!is_hidden(&rig, P1));
+
+        // 새 세션이 없으면 포커스를 준다.
+        let (rig, _) = ended_lone(reused_p1());
+        rig.spawn.run_main();
+        assert_eq!(count(&rig, &Call::Focus(P1.to_owned())), 1);
+    }
+
+    #[test]
+    fn the_end_reshows_only_what_the_reconcile_itself_hid() {
+        // 맞추기가 숨긴 팝아웃은 끝에서 되보인다.
+        let (rig, lone) = lone_popout();
+        *rig.fake.outcome.lock().unwrap() = refused();
+        rig.exec
+            .start(P1, "d1".into(), lone, HOTSPOT, None)
+            .unwrap();
+        rig.spawn.run_main();
+        assert!(rig.dock().owns_hidden(P1));
+        rig.exec
+            .source_end(P1, "d1".into(), DragEffect::None, None, None);
+        rig.spawn.run_now();
+        rig.spawn.run_main();
+        assert!(!is_hidden(&rig, P1));
+        assert!(!rig.dock().owns_hidden(P1));
+
+        // 트레이가 먼저 숨긴 팝아웃 — 맞추기가 숨기지 않았으니 끝도 드러내지 않는다.
+        let (rig, lone) = lone_popout();
+        *rig.fake.outcome.lock().unwrap() = refused();
+        rig.fake.hidden.lock().unwrap().insert(P1.to_owned());
+        rig.exec
+            .start(P1, "d1".into(), lone, HOTSPOT, None)
+            .unwrap();
+        rig.spawn.run_main();
+        rig.exec
+            .source_end(P1, "d1".into(), DragEffect::None, None, None);
+        rig.spawn.run_now();
+        rig.spawn.run_main();
+        assert!(is_hidden(&rig, P1));
+        assert_eq!(count(&rig, &Call::Hide(P1.to_owned())), 0);
+        assert_eq!(count(&rig, &Call::Show(P1.to_owned())), 0);
+
+        // 숨기기 맞추기가 돌기 전에 끝난 세션 — 그 사이 트레이가 숨긴 창을 지난 할 일이 드러내지 않는다.
+        let (rig, lone) = lone_popout();
+        *rig.fake.outcome.lock().unwrap() = refused();
+        rig.exec
+            .start(P1, "d1".into(), lone, HOTSPOT, None)
+            .unwrap();
+        rig.exec
+            .source_end(P1, "d1".into(), DragEffect::None, None, None);
+        rig.spawn.run_now();
+        rig.fake.hidden.lock().unwrap().insert(P1.to_owned());
+        assert_eq!(rig.spawn.run_main(), 2);
+        assert!(is_hidden(&rig, P1));
+        assert_eq!(count(&rig, &Call::Show(P1.to_owned())), 0);
+    }
+
+    #[test]
+    fn a_destroyed_window_leaves_the_reconciles_own_hidden_set() {
+        let (rig, lone) = lone_popout();
+        rig.exec
+            .start(P1, "d1".into(), lone, HOTSPOT, None)
+            .unwrap();
+        rig.spawn.run_main();
+        assert!(rig.dock().owns_hidden(P1));
+
+        rig.exec.window_destroyed(P1);
+
+        assert!(!rig.dock().owns_hidden(P1));
+    }
+
+    #[test]
+    fn main_thread_failures_after_the_end_line_count_toward_no_session() {
+        // 끝 줄 뒤에 돈 보이기가 실패했다 — 그 세션 끝 줄은 이미 나갔고, 그 사이 선 다음 세션 셈에도 섞이지 않는다.
+        for next_first in [false, true] {
+            let (rig, _) = ended_lone(refused());
+            rig.fake.failing.lock().unwrap().insert("show");
+            if next_first {
+                let main_tab = rig.mgr().windows[MAIN].active;
+                rig.exec
+                    .start(MAIN, "d2".into(), main_tab, HOTSPOT, None)
+                    .unwrap();
+            }
+            rig.spawn.run_main();
+            assert_eq!(count(&rig, &Call::Show(P1.to_owned())), 1, "{next_first}");
+            assert_eq!(rig.dock().booked_errors(), 0, "{next_first}");
+        }
+
+        // 살아 있는 세션의 메인 스레드 실패는 그 세션 몫으로 센다.
+        let (rig, lone) = lone_popout();
+        rig.fake.failing.lock().unwrap().insert("visible");
+        rig.exec
+            .start(P1, "d1".into(), lone, HOTSPOT, None)
+            .unwrap();
+        rig.spawn.run_main();
+        assert_eq!(rig.dock().take_errors(1), 1);
+    }
+
+    #[test]
+    fn a_failed_hide_after_another_path_reshowed_the_window_drops_the_ownership() {
+        let (rig, lone) = lone_popout();
+        *rig.fake.outcome.lock().unwrap() = refused();
+        rig.exec
+            .start(P1, "d1".into(), lone, HOTSPOT, None)
+            .unwrap();
+        rig.spawn.run_main();
+        assert!(rig.dock().owns_hidden(P1));
+        // 다른 길이 되보였다 — 그 뒤 맞추기의 숨기기가 실패한다.
+        rig.fake.hidden.lock().unwrap().remove(P1);
+        rig.fake.failing.lock().unwrap().insert("hide");
+        rig.exec.run(
+            vec![Action::Hide {
+                label: P1.to_owned(),
+                generation: 1,
+            }],
+            false,
+        );
+        rig.spawn.run_main();
+        assert!(!rig.dock().owns_hidden(P1));
+
+        // 그 뒤 트레이가 숨긴 채로 끝 — 끌기가 숨긴 것이 아니니 드러내지 않는다.
+        rig.fake.failing.lock().unwrap().clear();
+        rig.fake.hidden.lock().unwrap().insert(P1.to_owned());
+        rig.exec
+            .source_end(P1, "d1".into(), DragEffect::None, None, None);
+        rig.spawn.run_now();
+        rig.spawn.run_main();
+        assert!(is_hidden(&rig, P1));
+        assert_eq!(count(&rig, &Call::Show(P1.to_owned())), 0);
+    }
+
+    #[test]
+    fn a_left_that_releases_a_held_end_hands_its_apply_to_the_spawn_port() {
+        const P2: &str = "slot-popup-2";
+        let (mut mgr, a, _) = two_tabs();
+        mgr.create_window(P2).unwrap();
+        let rig = Rig::new(mgr);
+        set_probe(
+            &rig,
+            P2,
+            WindowProbe {
+                origin: (3000, 100),
+                scale: 1.0,
+                ..main_probe()
+            },
+        );
+        rig.exec.start(MAIN, "d1".into(), a, HOTSPOT, None).unwrap();
+        // 출처가 마지막으로 그린 것 — 그 뒤 실제로 떠났다(간격 > CANCEL_LEAVE_MS). 끝 커서는 P2 안이고 P2 의 Over 는
+        //   아직 오는 중이다.
+        let main_regions = rig.last_regions(MAIN).unwrap();
+        let last = DrawnReport {
+            rev: main_regions.rev,
+            bar_rev: main_regions.bar_rev,
+            displayed: main_regions.view_id,
+            shown: Picked::None,
+            point: PointCss { x: 40.0, y: 20.0 },
+            scroll: None,
+            left_before_end_ms: Some(CANCEL_LEAVE_MS + 25.0),
+        };
+        *rig.fake.cursor.lock().unwrap() = Ok(PhysPoint {
+            x: 3100.0,
+            y: 200.0,
+        });
+        rig.exec
+            .source_end(MAIN, "d1".into(), DragEffect::None, None, Some(last));
+        assert_eq!(rig.spawn.pending(), [Some(OVER_WAIT_MS)]);
+
+        let p2_regions = rig.last_regions(P2).unwrap();
+        rig.exec.over(
+            P2,
+            "d1".into(),
+            over_report(
+                &p2_regions,
+                Picked::None,
+                PointCss { x: 100.0, y: 100.0 },
+                None,
+            ),
+        );
+        let before = rig.calls().len();
+        rig.exec.over(P2, "d1".into(), DragOverReport::Left);
+
+        assert!(
+            !rig.calls()[before..]
+                .iter()
+                .any(|c| matches!(c, Call::Apply(_) | Call::Show(_) | Call::Focus(_))),
+            "붙들기를 푼 동기 명령 안에서 적용 서비스 · 창을 부르지 않는다"
+        );
+        assert_eq!(
+            rig.spawn.pending().iter().filter(|p| p.is_none()).count(),
+            1
+        );
+        assert_eq!(rig.spawn.run_now(), 1);
+        assert_eq!(rig.applies().len(), 1);
+        // 풀린 뒤의 붙들기 시한은 버린다.
+        rig.spawn.fire(OVER_WAIT_MS);
+        assert_eq!(rig.applies().len(), 1);
         assert!(!rig.dock().session_live());
     }
 }

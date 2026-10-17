@@ -7,8 +7,11 @@ pub mod regions;
 pub mod snap;
 pub mod types;
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+
+use engram_dashboard_base::sync;
 
 use book::{Book, Snap};
 use snap::StartMaterial;
@@ -23,14 +26,29 @@ use crate::layout::ViewManager;
 /// - 세션 세대: 0 = 세션 없음. 시작의 레이아웃 락 안에서 [`Self::begin_generation`] 으로 세우고, 끝에서
 ///   [`Self::end_generation`] 으로 자기 세대일 때만 내린다(TRD §1-3 「시작」 2 — 무조건 내리면 그 사이 선 다음
 ///   세션의 깃발까지 내려 그 세션의 계기가 끊긴다).
-/// - 실패 셈: 실행기(`commands::dock`)의 emit · 창 호출 · 게터 실패 수 — 끝 줄의 `errors`(TRD §1-7).
+/// - 실패 셈: 실행기(`commands::dock`)의 emit · 창 호출 · 게터 실패 수 — 끝 줄의 `errors`(TRD §1-7). 받아들인 시작이
+///   그 세대 몫으로 열고([`Self::open_errors`]) 그 끝 줄이 비우며 닫는다([`Self::take_errors`]). 세대를 단 실패
+///   ([`Self::note_error_of`])는 그 세대 셈이 열려 있을 때만 센다 — 끝 줄 뒤의 메인 스레드 실패는 세지 않고 세대마다
+///   한 번만 알린다([`Self::first_late_failure`]).
+/// - 맞추기가 숨긴 창: 실행기의 숨기기 · 보이기 맞추기가 스스로 숨긴 창 label — 맞추기는 이 창만 되보인다(트레이 등
+///   다른 길이 숨긴 창을 끌기 끝이 드러내지 않게). 잎 락이고 메인 스레드 맞추기 · 창 소멸만 쓴다.
 #[derive(Debug, Default)]
 pub struct DockState {
     pub book: Mutex<Book>,
     snap_seq: AtomicU64,
     generation: AtomicU64,
     gen_seq: AtomicU64,
-    errors: AtomicU64,
+    errors: Mutex<ErrorTally>,
+    late_warned: AtomicU64,
+    own_hidden: Mutex<HashSet<String>>,
+}
+
+// 실패 셈과 그 몫인 세대를 한 락 아래 쥔다 — 세대를 보고 세는 것과 끝 줄이 비우며 닫는 것 사이에 다른 세션의 끝 ·
+//   시작이 끼지 못하게. `generation` 0 = 닫힘.
+#[derive(Debug, Default)]
+struct ErrorTally {
+    generation: u64,
+    count: u64,
 }
 
 impl DockState {
@@ -74,16 +92,64 @@ impl DockState {
         self.generation.load(Ordering::SeqCst) != 0
     }
 
-    /// 실행기 실패 하나를 센다 — 셈을 비운 뒤 첫 실패면 `true`(그것 하나만 warn 하고 나머지는 끝 줄 셈으로 —
-    /// TRD §1-7).
-    pub fn note_error(&self) -> bool {
-        self.errors.fetch_add(1, Ordering::SeqCst) == 0
+    /// 받아들인 시작 — 셈을 비우고 그 세대 몫으로 연다(남아 있던 셈은 버린다).
+    pub fn open_errors(&self, generation: u64) {
+        *sync::lock(&self.errors) = ErrorTally {
+            generation,
+            count: 0,
+        };
     }
 
-    /// 센 실패 수를 돌려주고 비운다 — 끝 줄이 읽고, 받아들인 시작이 새 세션 몫으로 비운다. 세션 밖(시작 전의 이른
-    /// 신호 등)에서 난 실패는 다음 세션 몫으로 섞일 수 있다(셈은 진단용이다).
-    pub fn take_errors(&self) -> u64 {
-        self.errors.swap(0, Ordering::SeqCst)
+    /// 실행기 실패 하나를 지금 셈에 센다(세대를 보지 않는다) — 셈을 비운 뒤 첫 실패면 `true`(그것 하나만 warn 하고
+    /// 나머지는 끝 줄 셈으로 — TRD §1-7). 셈이 닫혀 있으면 다음 시작이 버린다 — 세션 밖(시작 전의 이른 신호 등) 몫은
+    /// 다음 세션에 섞일 수 있다(셈은 진단용이다).
+    pub fn note_error(&self) -> bool {
+        let mut tally = sync::lock(&self.errors);
+        tally.count += 1;
+        tally.count == 1
+    }
+
+    /// 세대 `generation` 몫의 실패 — 그 세대 셈이 열려 있으면 세고 `Some(첫 실패인가)`, 아니면 세지 않고 `None`
+    /// (그 끝 줄이 이미 닫았거나 다음 세션이 열었다). 확인과 셈이 한 락 안이라 끝 줄이 비운 뒤에는 세지 못한다.
+    pub fn note_error_of(&self, generation: u64) -> Option<bool> {
+        let mut tally = sync::lock(&self.errors);
+        (generation != 0 && tally.generation == generation).then(|| {
+            tally.count += 1;
+            tally.count == 1
+        })
+    }
+
+    /// 끝 줄 — 그 세대 셈이 열려 있으면 센 수를 돌려주고 닫는다. 다른 세대가 열려 있으면 0 이고 그 셈은 그대로다(옛
+    /// 세션의 늦은 끝 줄이 새 세션 셈을 가져가지 않는다).
+    pub fn take_errors(&self, generation: u64) -> u64 {
+        let mut tally = sync::lock(&self.errors);
+        if generation == 0 || tally.generation != generation {
+            return 0;
+        }
+        std::mem::take(&mut *tally).count
+    }
+
+    #[cfg(test)]
+    pub fn booked_errors(&self) -> u64 {
+        sync::lock(&self.errors).count
+    }
+
+    /// 끝 줄 뒤 실패의 알림 — 그 세대를 처음 알리면 `true`(셈은 늘지 않는다). 이미 알린 세대 이하면 `false` — 세대는
+    /// 오르기만 하니 더 옛 세대의 늦은 실패는 알리지 않는다(debug 몫).
+    pub fn first_late_failure(&self, generation: u64) -> bool {
+        self.late_warned.fetch_max(generation, Ordering::SeqCst) < generation
+    }
+
+    pub fn mark_own_hidden(&self, label: &str) {
+        sync::lock(&self.own_hidden).insert(label.to_owned());
+    }
+
+    pub fn owns_hidden(&self, label: &str) -> bool {
+        sync::lock(&self.own_hidden).contains(label)
+    }
+
+    pub fn forget_own_hidden(&self, label: &str) {
+        sync::lock(&self.own_hidden).remove(label);
     }
 }
 
@@ -130,10 +196,44 @@ mod tests {
     #[test]
     fn only_the_first_failure_after_a_take_is_first() {
         let dock = DockState::new();
+        dock.open_errors(1);
         assert!(dock.note_error());
         assert!(!dock.note_error());
-        assert_eq!(dock.take_errors(), 2);
-        assert_eq!(dock.take_errors(), 0);
+        assert_eq!(dock.take_errors(1), 2);
+        assert_eq!(dock.take_errors(1), 0);
         assert!(dock.note_error(), "비운 뒤의 첫 실패");
+    }
+
+    #[test]
+    fn a_failure_of_a_generation_counts_only_while_its_tally_is_open() {
+        let dock = DockState::new();
+        assert_eq!(dock.note_error_of(1), None, "연 셈이 없다");
+        dock.open_errors(1);
+        assert_eq!(dock.note_error_of(1), Some(true));
+        assert_eq!(dock.note_error_of(1), Some(false));
+        assert_eq!(dock.note_error_of(2), None, "다른 세대 몫");
+        assert_eq!(dock.take_errors(1), 2);
+        assert_eq!(dock.note_error_of(1), None, "끝 줄이 닫았다");
+        assert_eq!(dock.booked_errors(), 0);
+
+        dock.open_errors(2);
+        assert_eq!(dock.note_error_of(1), None);
+        assert_eq!(
+            dock.take_errors(1),
+            0,
+            "옛 세션의 끝 줄이 새 세션 셈을 가져가지 않는다"
+        );
+        assert!(dock.note_error());
+        assert_eq!(dock.take_errors(2), 1);
+    }
+
+    #[test]
+    fn a_late_failure_is_warned_once_per_generation() {
+        let dock = DockState::new();
+        assert!(dock.first_late_failure(1));
+        assert!(dock.first_late_failure(2));
+        assert!(!dock.first_late_failure(1), "A, B, A — A 는 한 번");
+        assert!(!dock.first_late_failure(2));
+        assert!(dock.first_late_failure(3));
     }
 }

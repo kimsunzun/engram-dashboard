@@ -127,8 +127,7 @@ impl From<&DropReport> for Report {
             displayed: d.displayed,
             shown: d.shown.clone(),
             point: d.point,
-            // 9b-2: 놓기 wire 에 `scroll` 칸이 서면 그 값을 싣는다(TRD §1-5) — 그때까지 영역마다 잰 때의 것.
-            scroll: None,
+            scroll: d.scroll,
         }
     }
 }
@@ -292,13 +291,17 @@ pub enum Action {
         generation: u64,
     },
     /// 숨긴 출처를 되보인다 — 미룬 최대화를 입히는 보이기 경로로. 맞추기는 `Hide` 와 같다(지난 세션의 `Show` 는
-    /// 새 세션이 그 창을 숨겨 두지 않았으면 보인다).
+    /// 새 세션이 그 창을 숨겨 두지 않았으면 보인다) — 단 맞추기가 스스로 숨긴 창만 되보인다(실행기 몫).
     Show {
         label: WindowLabel,
         generation: u64,
     },
-    /// 같은 끝의 `Show` 뒤에 돈다 — 보이기 전에 포커스를 주지 않게.
-    Focus(WindowLabel),
+    /// 같은 끝의 `Show` 뒤에 돈다 — 보이기 전에 포커스를 주지 않게. `generation` = 낸 세션 — 돌 때 그 뒤 새 세션이
+    /// 섰으면([`Book::latest_generation`]) 버린다(새 세션이 숨길 창에 포커스를 주지 않게).
+    Focus {
+        label: WindowLabel,
+        generation: u64,
+    },
     Apply(DockRequest),
     ArmTimer {
         kind: TimerKind,
@@ -937,6 +940,11 @@ impl Book {
             Some(d) if d.source_label == label && d.hidden.is_some() => Visibility::Hidden,
             _ => Visibility::Shown,
         }
+    }
+
+    /// 마지막으로 받아들인 세션(살아 있든 끝났든)의 세대 — `None` = 세션이 선 적 없다. 거절한 시작은 바꾸지 않는다.
+    pub fn latest_generation(&self) -> Option<u64> {
+        self.drag.as_ref().map(|d| d.generation)
     }
 
     pub fn step(&mut self, input: Input) -> Step {
@@ -2160,7 +2168,10 @@ impl Book {
                 drag.mode = Some(Mode::Reuse);
             }
             drag.window = Some(o.window.clone());
-            out.push(Action::Focus(o.window.clone()));
+            out.push(Action::Focus {
+                label: o.window.clone(),
+                generation: drag.generation,
+            });
         }
         out.push(Action::ReleaseLease(drag.lease));
         let end_by = drag.cause.as_ref().map(|c| c.end_by);
@@ -2837,7 +2848,7 @@ mod tests {
                 }
                 Action::Hide { label, .. } => format!("hide:{label}"),
                 Action::Show { label, .. } => format!("show:{label}"),
-                Action::Focus(l) => format!("focus:{l}"),
+                Action::Focus { label: l, .. } => format!("focus:{l}"),
                 Action::Apply(_) => "apply".into(),
                 Action::ArmTimer { .. } => "timer".into(),
                 Action::ReleaseLease(l) => format!("release:{}", l.0),
@@ -6517,5 +6528,34 @@ mod tests {
         book.step(Input::Snapshot(snap(2, None, vec![])));
         assert_eq!(book.visibility(POP), Visibility::Shown, "끝난 뒤");
         assert_eq!(Book::new().visibility(POP), Visibility::Shown);
+    }
+
+    #[test]
+    fn a_screen_point_maps_back_to_the_windows_viewport() {
+        let p = PointCss { x: 37.5, y: 12.0 };
+        for r in [
+            ClientRect {
+                origin: (100, 50),
+                size: (1000, 800),
+                scale: 1.25,
+            },
+            ClientRect {
+                origin: (-1920, -200),
+                size: (1600, 1200),
+                scale: 2.0,
+            },
+        ] {
+            assert_eq!(viewport_point(&r, screen_of(&r, p)), p, "{r:?}");
+        }
+        // 못 읽은 배율은 1 로 셈한다.
+        let r = ClientRect {
+            origin: (-10, 0),
+            size: (100, 100),
+            scale: 0.0,
+        };
+        assert_eq!(
+            viewport_point(&r, PhysPoint { x: 5.0, y: 7.0 }),
+            PointCss { x: 15.0, y: 7.0 }
+        );
     }
 }

@@ -402,6 +402,7 @@ export function createDockDrag(deps: DockDragDeps): DockDragController {
       displayed,
       shown,
       point,
+      scroll: null,
     })
   }
 
@@ -582,6 +583,7 @@ export function createDockDrag(deps: DockDragDeps): DockDragController {
             displayed: d.displayed,
             shown: d.shown,
             point: d.point,
+            scroll: null,
           }
         : {
             drag_id: data.drag_id,
@@ -591,6 +593,7 @@ export function createDockDrag(deps: DockDragDeps): DockDragController {
             displayed,
             shown: NONE,
             point: { x: e.clientX, y: e.clientY },
+            scroll: null,
           }
     ipc.invoke<void>('dock_drop', report).catch(err => console.warn('[dockDrag] dock_drop 실패:', err))
   }

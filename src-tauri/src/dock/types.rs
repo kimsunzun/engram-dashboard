@@ -255,6 +255,8 @@ pub struct DockPullReply {
 /// - `rev` · `bar_rev`: 그 판정에 쓴 영역의 번호(영역을 받기 전 = 0).
 /// - `displayed`: 그 창 캔버스가 보이던 탭(떼어진 자리의 승계 탭 포함 · `null` = 없음).
 /// - `shown`: 그린 것 · `point`: 뷰포트 CSS px 의 점.
+/// - `scroll`: 그 판정 때 그 창 탭바 `scrollLeft`(CSS px). `null` · 빠진 키 = 영역마다 잰 때의 것(순서 이동 = 시작
+///   측정 · 탭바 = 크롬 보고) — 이 칸을 모르는 웹뷰의 보고도 그대로 풀린다.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(export)]
@@ -268,6 +270,7 @@ pub enum DragOverReport {
         displayed: Option<Uuid>,
         shown: Picked,
         point: PointCss,
+        scroll: Option<f64>,
     },
     Left,
 }
@@ -288,6 +291,7 @@ pub struct DropReport {
     pub displayed: Option<Uuid>,
     pub shown: Picked,
     pub point: PointCss,
+    pub scroll: Option<f64>,
 }
 
 /// `dock_drag_end` 의 선택 칸 `last`(끝 스냅숏 — TRD §1-3 「끝 신호」) — 출처 창이 끝에 아직 위였으면 그 창이 마지막으로
@@ -620,8 +624,27 @@ mod tests {
                     over: Some(id(3)),
                 },
                 point: PointCss { x: 10.5, y: 3.0 },
+                scroll: None,
             }
         );
+        // 스크롤을 싣는 웹뷰.
+        let scrolled: DragOverReport = serde_json::from_value(json!({
+            "type": "over",
+            "rev": 4,
+            "bar_rev": 2,
+            "displayed": null,
+            "shown": { "type": "reorder", "index": 1 },
+            "point": { "x": 10.5, "y": 3.0 },
+            "scroll": 40.5,
+        }))
+        .unwrap();
+        assert!(matches!(
+            scrolled,
+            DragOverReport::Over {
+                scroll: Some(40.5),
+                ..
+            }
+        ));
         let left: DragOverReport = serde_json::from_value(json!({ "type": "left" })).unwrap();
         assert_eq!(left, DragOverReport::Left);
 
@@ -657,8 +680,21 @@ mod tests {
                 displayed: None,
                 shown: Picked::None,
                 point: PointCss { x: 1.0, y: 2.0 },
+                scroll: None,
             }
         );
+        let drop: DropReport = serde_json::from_value(json!({
+            "drag_id": "d-1",
+            "view_id": id(9).to_string(),
+            "rev": 0,
+            "bar_rev": 0,
+            "displayed": null,
+            "shown": { "type": "none" },
+            "point": { "x": 1.0, "y": 2.0 },
+            "scroll": 12.0,
+        }))
+        .unwrap();
+        assert_eq!(drop.scroll, Some(12.0));
     }
 
     #[test]

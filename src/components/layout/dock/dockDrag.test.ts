@@ -392,6 +392,7 @@ describe('대상', () => {
         displayed: 'v-other',
         shown: bar(1),
         point: { x: 120, y: 10 },
+        scroll: null,
       },
     ])
   })
@@ -499,6 +500,7 @@ describe('대상', () => {
         displayed: 'v-main',
         shown: seam('s1', 'Bottom'),
         point: { x: 400, y: 590 },
+        scroll: null,
       },
     ])
     expect(ctl.getGuide()).toBeNull()
@@ -520,6 +522,7 @@ describe('대상', () => {
         displayed: 'v-main',
         shown: NONE,
         point: { x: 5, y: 6 },
+        scroll: null,
       },
     ])
   })
@@ -725,6 +728,7 @@ describe('영역 · 세션', () => {
         displayed: 'v-main',
         shown: seam('s1', 'Top'),
         point: { x: 300, y: 40 },
+        scroll: null,
       },
     ])
   })

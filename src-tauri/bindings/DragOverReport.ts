@@ -9,5 +9,7 @@ import type { PointCss } from "./PointCss";
  * - `rev` · `bar_rev`: 그 판정에 쓴 영역의 번호(영역을 받기 전 = 0).
  * - `displayed`: 그 창 캔버스가 보이던 탭(떼어진 자리의 승계 탭 포함 · `null` = 없음).
  * - `shown`: 그린 것 · `point`: 뷰포트 CSS px 의 점.
+ * - `scroll`: 그 판정 때 그 창 탭바 `scrollLeft`(CSS px). `null` · 빠진 키 = 영역마다 잰 때의 것(순서 이동 = 시작
+ *   측정 · 탭바 = 크롬 보고) — 이 칸을 모르는 웹뷰의 보고도 그대로 풀린다.
  */
-export type DragOverReport = { "type": "over", rev: number, bar_rev: number, displayed: string | null, shown: Picked, point: PointCss, } | { "type": "left" };
+export type DragOverReport = { "type": "over", rev: number, bar_rev: number, displayed: string | null, shown: Picked, point: PointCss, scroll: number | null, } | { "type": "left" };
