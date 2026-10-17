@@ -260,7 +260,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 | `library.refresh {folder?}` | 그 폴더(하위 포함) 다시 훑기 · 생략 = 전체 — 트리 우클릭 「새로 고침」 · 에이전트가 부른다(2026-10-16) | 바뀐 항목 수 |
 | `library.list {folder?, query?, kinds?, builtins?}` | 폴더 바로 안 항목 + 하위 폴더 줄 · `query` 면 하위까지 검색 · `builtins` 면 고정 「내장」 묶음(기본 · claude 기본 · codex 기본)을 따로 싣는다 | 행 = 경로 · 종류 · 이름 · 상태(다시 이어짐 포함 — Δd) · 쓰는 곳 수 · 설명. 에이전트 슬롯의 `+` 검색이 `builtins` 를 켠다(Δa) |
 | `library.moves {since}` | 옮김 기록에서 커서 뒤의 쌍 | `{log_id, pairs[{seq, old, new}], head, truncated}`(Δc) |
-| `library.read {path}` | 항목 상세 — 설명 · 위치(라이브러리 경로 + 절대 경로) · 쓰는 곳(프리셋 · 에이전트, 직접/건너서) · 상태 | R15 · R41(절대 경로를 돌려준다) |
+| `library.read {path}` | 항목 상세 — 설명 · 위치(라이브러리 경로 + 절대 경로) · 쓰는 곳(프리셋 · 에이전트, 직접/건너서) · 상태 · 지시서 = 본문 앞부분(미리보기용 · 길이 상한) · 설정 = 백엔드 · 모델 · 원문 칸 이름 · 오류 = 이유 · 줄 (R15 · 2026-10-17) | R15 · R41(절대 경로를 돌려준다) |
 | `library.move {paths, toFolder}` · `library.rename {path, newName}` | 옮기기 · 이름 바꾸기 + 참조 고침 | 대응표(옛 → 새) · 고친 수(Δ3) |
 | `library.delete {paths, yes?}` | 휴지통으로 | 쓰는 곳 있으면 `yes` 없이 `CONFLICT`(Δ9) |
 | `library.newFolder {parent, name}` · `library.newFile {folder, name, kind: markdown|settings|preset}` | 만들기 — 마크다운 = 빈 `.md` · 설정 · 프리셋 = `kind` 틀(2026-10-16 · 옛 `library.newPreset` 대신) | 새 경로 |
@@ -320,7 +320,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 | `LibraryTree` | 폴더 트리 · 루트 머리(이름 + 경로 · 「라이브러리 폴더 바꾸기…」) · 빈/없음 안내(R8) · 놓기 대상 · 우클릭 「새로 고침」(폴더 = 그 폴더 · 루트 머리 줄 = 전체) | react-arborist(통제형 데이터) |
 | `CollectionsPane` | 「즐겨찾기」 머리 · 첫 줄 「기본」(지울 수 없음) · 「+ 새 묶음」(R16) | — |
 | `LibraryList` | 탐색기식 목록 · 열 ★ · 종류 · 이름 · 쓰는 곳 · 정렬(R12) · 📁 줄 · 다중 선택 · 끌기 시작 · 필터 ▾ · 검색 · ★ 대상 칩 | @tanstack/react-table · @tanstack/react-virtual · react-selecto |
-| `LibraryDetail` | 부품 상세(설명 · 위치 · 쓰는 곳 링크 — 단추 없음 · R15) | — |
+| `LibraryDetail` | 부품 상세(설명 · 위치 · 쓰는 곳 링크 — 단추 없음 · R15) · 상태별 = 안 고름 안내 · 폴더 · 지시서 미리보기(react-markdown — 챗과 같은 렌더러) · 설정 값 요약 · 여러 개 개수 · 오류(여러 개 개수는 클라이언트가 선택에서 센다) | — |
 | `components/preset/PresetEditor.tsx` | **공용 편집 부품 하나**(R21) — 대상 = 프리셋 또는 에이전트 · 칸 = (에이전트면 「기본」 +) 프리셋 · 지시서 · 스킬 · 설정 · `readOnly` · `depth` 를 받아 안에 든 프리셋을 **같은 부품으로 재귀** 렌더(R27) · 칸 아래 충돌/경고 줄 · 「에이전트 N개가 씀」 · 백엔드 바뀜 경고(Δ4) | — |
 | `EditorSection` | 칸 제목 `+` · `⇐` · 폴더 돋보기(`FolderSearch` — 아이콘 이름 확인함) · ⋮⋮ 순서(지시서 · 설정 · 프리셋 — D2) · × · 줄 호버 돋보기 | @dnd-kit/sortable |
 | `AddItemsPopover` | 「+ 담기」 · 칸 `+` 검색 팝오버(R25) — 열면 검색칸 커서 · 체크 = 즉시 담기 · 담김/순환/충돌 비활성 + 이유 · 에이전트 대상이면 프리셋만 + 맨 위 고정 「내장」 묶음(Δa) | @radix-ui/react-popover · @tanstack/react-virtual |

@@ -412,6 +412,71 @@ a{color:var(--accent)}
     <span><span>검색 = 치는 즉시 지금 폴더 + 하위 폴더 전부에서 찾아 목록 하나로 · 맞은 글자 강조 · 하위 폴더 줄(📁)은 숨김 · 「위치」 열(누르면 그 폴더로 — ← 기록에 남음)</span></span>
     <span><span>검색칸 왼쪽 × = 지우고 원래 폴더 목록으로 · 검색어 치기는 ← 기록을 늘리지 않음 · 고르기 · 더블클릭 · ★ · 끌기는 평소와 같다</span></span>
   </div>
+  <p class="lead">오른쪽 칸 — 고른 것에 따라</p>
+  <style>.det44{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr));gap:12px}.det44>.win{display:flex}.det44 .pane{flex:1;min-height:150px}.det44 .head .n{margin-left:auto}.det44 .kind.e{background:var(--err-soft);color:var(--err)}.hint44{flex:1;display:flex;align-items:center;justify-content:center;text-align:center;color:var(--app-muted);font-size:12.5px;gap:6px}.prev44{font-size:12px;line-height:1.5;max-height:84px;overflow:hidden;-webkit-mask-image:linear-gradient(to bottom,#000 45%,transparent);mask-image:linear-gradient(to bottom,#000 45%,transparent)}.prev44 b{display:block;font-size:13px}.many44{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px}.many44 .t{font-size:18px;font-weight:600}.many44 small{color:var(--app-muted);font-size:12px}</style>
+  <div class="det44" role="img" aria-label="오른쪽 상세 칸이 고른 것에 따라 달라지는 모습 — 안 고름 · 폴더 · 지시서 · 설정 · 여러 개 · 오류">
+    <div class="win"><div class="pane side">
+      <div class="head"><span class="n">8</span></div>
+      <div class="hint44">항목을 고르면 여기 보입니다</div>
+    </div></div>
+    <div class="win"><div class="pane side">
+      <div class="head"><span class="kind">폴더</span><span class="t" style="font-size:14px">보안</span><span class="n">9</span></div>
+      <div class="final">
+        <span class="k">위치</span>
+        <span class="v">스킬/리뷰/보안</span>
+      </div>
+    </div></div>
+    <div class="win"><div class="pane side">
+      <div class="head"><span class="kind">지시서</span><span class="t" style="font-size:14px">리뷰 규칙</span><span class="n">10</span></div>
+      <div class="final">
+        <span class="k">설명</span>
+        <span class="v">리뷰할 때 지킬 것</span>
+        <span class="k">미리보기</span>
+        <div class="prev44"><b># 리뷰 규칙</b>- 칭찬하지 않는다<br>- 근거 없는 지적 금지<br>- 파일:줄 로 가리킨다<br>- 고칠 것만 적는다</div>
+        <span class="k">위치</span>
+        <span class="v">지시서/리뷰 규칙.md</span>
+        <span class="k">쓰는 곳</span>
+        <span class="v"><u style="color:var(--accent);cursor:pointer">프리셋 리뷰어</u></span>
+      </div>
+    </div></div>
+    <div class="win"><div class="pane side">
+      <div class="head"><span class="kind">설정</span><span class="t" style="font-size:14px">claude opus</span><span class="n">11</span></div>
+      <div class="final">
+        <span class="k">설명</span>
+        <span class="v">claude · opus 고정</span>
+        <span class="k">값</span>
+        <span class="v">백엔드 claude · 모델 claude-opus-5-5 · claude 원문 있음</span>
+        <span class="k">위치</span>
+        <span class="v">설정/claude opus.yaml</span>
+        <span class="k">쓰는 곳</span>
+        <span class="v"><u style="color:var(--accent);cursor:pointer">프리셋 리뷰어</u></span>
+      </div>
+    </div></div>
+    <div class="win"><div class="pane side">
+      <div class="head"><span class="n">12</span></div>
+      <div class="many44"><span class="t">3개 고름</span><small>스킬 2 · 지시서 1</small></div>
+    </div></div>
+    <div class="win"><div class="pane side">
+      <div class="head"><span class="kind e">오류</span><span class="t" style="font-size:14px;color:var(--err)">깨진 설정</span><span class="n">13</span></div>
+      <div class="final">
+        <span class="k">이유</span>
+        <span class="v">kind 가 없습니다</span>
+        <span class="k">줄</span>
+        <span class="v">1째 줄</span>
+        <span class="k">위치</span>
+        <span class="v">설정/깨진 설정.yaml</span>
+      </div>
+    </div></div>
+  </div>
+  <div class="caps">
+    <span><span class="n">8</span><span>아무것도 안 고름 = 흐린 안내 한 줄 (Spacedrive 관행)</span></span>
+    <span><span class="n">9</span><span>폴더 = 이름 · 위치만 — 안의 개수 세지 않음 (관행 = 메타데이터만)</span></span>
+    <span><span class="n">10</span><span>지시서 = 설명(앞머리 <code>description</code> · 없으면 「설명 없음」) · 본문 미리보기(읽기만 · 앞부분만 · 아래로 흐려짐) · 위치 · 쓰는 곳 (탐색기 · Finder · Unity 관행)</span></span>
+    <span><span class="n">11</span><span>설정 = 설명 · 정해 둔 값 요약(백엔드 · 모델 — 있을 때만 · 원문 칸이 있으면 「claude 원문 있음」) · 위치 · 쓰는 곳</span></span>
+    <span><span class="n">12</span><span>여러 개 고름 = 「N개 고름」 + 종류별 수만 (Spacedrive · Finder 관행)</span></span>
+    <span><span class="n">13</span><span>오류 줄 = 이유 · 몇째 줄 · 위치 (관행 없음 — 우리 설계)</span></span>
+    <span><span>스킬 = 위 그림 그대로 · 프리셋 = 편집 칸(3절) · 어디에도 단추 없음 · 근거 = 관행 조사(Spacedrive · 탐색기 · Finder · Unity) — 2026-10-17</span></span>
+  </div>
   <p class="pend"><span class="tag ok">확정</span><span>단축키 = OS 파일 관리자 기본값 — Windows: F2 이름 · Delete 휴지통 · Enter 열기 · Alt+← → 뒤로/앞으로 · Alt+↑ 상위 · Ctrl+Shift+N 새 폴더 · Ctrl+F 검색 · F5 새로 고침 · Shift+F10 메뉴 · 글자 = 그 이름으로 이동 / macOS: Finder 기본값(Enter 이름 · Cmd+Delete 휴지통 · Cmd+[ ] 뒤로/앞으로) — 슬롯 포커스 안에서만 · LLM 경로 없음(데이터 조작은 <code>library.*</code>) (2026-10-16)</span></p>
 </section>
 
