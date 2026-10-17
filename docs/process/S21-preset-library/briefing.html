@@ -330,6 +330,7 @@ a{color:var(--accent)}
   <p class="pend"><span class="tag ok">확정 2026-10-17</span><span>스킬 폴더(<code>SKILL.md</code> 를 바로 안에 든 폴더) = 보통 폴더 — 스킬 아이콘 · 폴더와 함께 정렬 · 들어갈 수 있음 · 폴더 줄이나 <code>SKILL.md</code> 줄을 선택하면 그 스킬(추가하면 폴더 경로) · 폴더 더블클릭 = 들어감 · <code>SKILL.md</code> 더블클릭 = OS 기본 편집기 · 스킬 안 스킬도 같은 규칙 (옛 「스킬 폴더는 항목 · 들어가지 않음」 뒤집음)</span></p>
   <p class="pend"><span class="tag ok">확정 2026-10-17</span><span>우리 종류가 아닌 파일은 안 보임 — 그림 · <code>.json</code> · <code>.txt</code> · 스크립트 등(스킬 폴더 안도) · <code>kind</code> 없거나 아예 못 읽는 <code>.yaml</code> 도</span></p>
   <p class="pend"><span class="tag ok">확정 2026-10-17</span><span>「오류」 줄 = <code>kind: preset</code> · <code>kind: settings</code> 인데 깨진 파일 · 모르는 <code>kind</code> 값(오타일 것)뿐</span></p>
+  <p class="pend"><span class="tag ok">확정 2026-10-17</span><span>설정 검사 — 문법 = 훑을 때(⛔ · N째 줄) · 내용 = 스키마(처음 쓸 때 내려받음 · 바뀐 파일만 · 스키마 바뀌면 전체 · ⚠) · 실행 직전 = claude doctor · codex 모델 목록(⛔ · 실행 막음) · codex 모르는 키 = ⚠ · 「모두 검사」 = 루트 우클릭 · 목록 아이콘 + 이유 툴팁 (실측 2026-10-17)</span></p>
   <p class="pend"><span class="tag ok">확정 2026-10-17</span>이름 앞 종류 아이콘 = 폴더 · 스킬(폴더 모양 + 표시) · 지침 · 설정 · 프리셋 — 트리도 같음 · lucide 이름은 구현 때 확인</p>
   <p class="pend"><span class="tag ok">확정 2026-10-17</span><span>누가 무엇을 — 사람 = 앱 안에서 전부(만들기 · 이동 · 이름 · 삭제 = 라이브러리 화면 · 내용 = 더블클릭 → OS 기본 편집기) · AI = 같은 <code>engram library.*</code> 명령, 또는 바깥에서 직접 + <code>library.refresh</code> — 권고일 뿐 강제 아님 · <code>library.refresh</code> 답 = 바뀐 수 + 다시 읽은 파일의 문제(오류 · kind 없음 · 찾을 수 없음)</span></p>
   <p class="pend"><span class="tag ok">확정 2026-10-16</span>슬롯 이름 = 「라이브러리 1~4」 — 뒤에 브라우저 · 에디터를 붙이지 않음(범용: 나중에 커맨드 묶음 · 스크립트 종류도 담는다)</p>
@@ -372,6 +373,9 @@ a{color:var(--accent)}
           <div class="li on"><span class="star on">★</span><span class="kind">스킬</span><span class="name"><svg class="ico44" aria-hidden="true"><use href="#skill44"/></svg>review</span><span class="use">프리셋 2개</span></div>
           <div class="li"><span class="star">☆</span><span class="kind">스킬</span><span class="name"><svg class="ico44" aria-hidden="true"><use href="#skill44"/></svg>code-review</span><span class="use">프리셋 1개</span></div>
           <div class="li"><span class="star on">★</span><span class="kind">스킬</span><span class="name"><svg class="ico44" aria-hidden="true"><use href="#skill44"/></svg>pr-check</span><span class="use">—</span></div>
+          <style>.vi47{display:inline-block;width:14px;margin-right:3px;font-size:11px;text-align:center}.vi47.e{color:var(--err)}.vi47.w{color:var(--warn)}.tipw47,.li .name.tipw47{position:relative;overflow:visible}.tip47{position:absolute;left:84px;top:50%;transform:translateY(-50%);z-index:3;white-space:nowrap;font-size:11.5px;padding:3px 8px;border-radius:4px;background:var(--app-text);color:var(--app-bg);box-shadow:0 2px 6px rgba(0,0,0,.25)}.tip47::before{content:"";position:absolute;left:-4px;top:50%;margin-top:-4px;border:4px solid transparent;border-left:0;border-right-color:var(--app-text)}</style>
+          <div class="li err tipw47"><span class="star">☆</span><span class="kind">설정</span><span class="name tipw47"><span class="vi47 e" title="2째 줄 · YAML 문법 오류">⛔</span>리뷰 설정<span class="tip47">2째 줄 · YAML 문법 오류</span></span><span class="use">프리셋 1개</span></div>
+          <div class="li"><span class="star">☆</span><span class="kind">설정</span><span class="name"><span class="vi47 w" title="모르는 키 · approval_mode">⚠</span>codex 리뷰</span><span class="use">—</span></div>
         </div>
       </div>
       <div class="pane side">
