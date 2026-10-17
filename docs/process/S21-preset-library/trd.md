@@ -72,12 +72,12 @@ description: PR 리뷰 전용
 presets:
   - 공용/기본 규칙.yaml
 instructions:
-  - 지시서/리뷰 규칙.md
+  - 지침/리뷰 규칙.md
 skills:
   - 스킬/리뷰/review
 settings:
   - path: 설정/claude opus.yaml
-    relinked_from: 옛 설정/claude opus.yaml   # 자동 다시 잇기 표시 — 확인하면 지운다(Δ2)
+    relinked_from: 옛 설정/claude opus.yaml   # 자동 다시 연결 표시 — 확인하면 지운다(Δ2)
 ```
 
 칸 = 종류별 목록 넷(R22). `instructions` · `settings` · `presets` 의 순서가 이어 붙는 순서다(D2). 항목은 경로 문자열이거나 `{path, relinked_from}` 이다.
@@ -473,14 +473,14 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 4. `S21: feat(agent): 실행 전처리 + 실행 재료 포트 + manager 배선(Noop = 오늘과 같은 argv)` — `ensure_registered`(없는 id 를 전처리 앞에 넣기) · `prelaunch`(예약 뒤 · 명부에서 읽기 · 세션 파생 앞 · mutate 한 번 비교-교체 · 다시 시도 한 번 · Engram 폴더 id 멱등) · 생성자 기본값(`backend::builtin_backend_preset`) · `SpawnByCwd` 를 `spawn_blocking` 으로 · `backend::command_for` · `LaunchKitSource` · `LaunchKitGuard` · `LaunchFs` · `materialize` dispatch · `build_spec`/`open_spawn` 인자 · 회귀 골든. ★Noop 회귀는 `SpawnByCwd` · 스모크 bin 길에도 선다★ — 생성자가 붙인 프리셋을 Noop 은 읽지 않고, `extra_args` 는 `backend_args` 로 옮겨도 같은 순서로 실리며, 이름 배정은 자리만 앞으로 옮겼을 뿐 같은 함수다(골든에 그 두 길을 넣는다).
 5. `S21: feat(agent): claude 실행 재료 번역` — 합친 지침 · snapshot off · plugin-dir · 합친 settings · 모델.
 6. `S21: feat(agent): codex 실행 재료 번역(JSON · 터미널)` — developerInstructions · extraRoots · 원문 `-c` · 모델 · 작업 폴더 파일 · 크기 한도 · 이어받기 `additionalContext`(T6). 둘로 쪼개도 된다(JSON / 터미널).
-7. `S21: feat(daemon): library 모듈 — 경로 · 형식 · 저장소 seam · 훑기 · 해석 · 내장` — 아직 아무도 안 부른다.
+7. `S21: feat(daemon): library 모듈 — 경로 · 형식 · 저장소 seam · 훑기 · 해석 · 기본 제공` — 아직 아무도 안 부른다.
 8. `S21: feat(daemon): 실행 재료 실물 꽂기` — `DaemonLaunchKits` → manager. ★여기서 기존 에이전트가 기본 제공 프리셋(「기본」 + 백엔드)으로 뜬다 — 차이는 snapshot off · `DISABLE_AUTOUPDATER` · 합친 지침 파일뿐★. 실 CLI 레인으로 claude · codex 각 1회 기동 확인.
-9. `S21: feat(daemon): 루트 · 신원 · 기본 경로(DataLayout) · 다시 잇기(후보 + 스위치) · 옮김 기록 · 파일 조작 · 편집 · 일지(단계별 판정)` — 실행 출처별 기본값 채움도 여기서 켠다(그 전까지 manager 는 늘 `Interactive` 처럼 막는다).
+9. `S21: feat(daemon): 루트 · 신원 · 기본 경로(DataLayout) · 다시 연결(후보 + 스위치) · 이동 기록 · 파일 조작 · 편집 · 일지(단계별 판정)` — 실행 출처별 기본값 채움도 여기서 켠다(그 전까지 manager 는 늘 `Interactive` 처럼 막는다).
 10. `S21: feat(agent,daemon): 라이브러리 · 프리셋 · 에이전트 프리셋 명령 선언 + 포트` — catalog 7 유지(1 단계에서 올림 · 같은 브랜치) · 바인딩 재생성 · CLI 로 전부 부를 수 있다.
 11. `S21: feat(front): 웹뷰 → 데몬 버스 왕복 + libraryClient` — `CommandReply` 갈래 · `callCommand`.
-12. `S21: feat(shell): 슬롯 종류 둘 · Library{n} 유일성(쓰기 길 · 복원) · slot.openUnique · libraryView.* · 번호별 보기 상태 · 묶음 · 로컬 OS 요청` — shell catalog 은 1 단계에서 올린 16 그대로(같은 브랜치) · 생성물 다시 굽기 · 웹뷰 직접 다이얼로그 셋 이관.
+12. `S21: feat(shell): 슬롯 종류 둘 · Library{n} 유일성(쓰기 길 · 복원) · slot.openUnique · libraryView.* · 번호별 보기 상태 · 컬렉션 · 로컬 OS 요청` — shell catalog 은 1 단계에서 올린 16 그대로(같은 브랜치) · 생성물 다시 굽기 · 웹뷰 직접 다이얼로그 셋 이관.
 13. 화면 — 여러 커밋. ① `LibrarySlot`(읽기 · 트리 · 목록 · 상세 · 빈/없음 안내 · 기록 · 컬렉션) ② 파일 조작(우클릭 · 끌어 이동 · 삭제 확인 · 다시 연결) ③ `PresetEditor` + 추가 세 길 + 상세 패널 ④ 에이전트 프리셋 슬롯 + 트리 「프리셋…」 + 기본 떼기 확인 + 실행 전 대화상자(워크스페이스 · codex 파일). 각 커밋 = 그 화면이 선 채 `/qa`.
-14. `S21: feat: JSON 모드 첫 메시지 전 모델 · 강도 고르기`(T8) — 따로 떨어진 마지막 단계. ★첫 커밋 = 수용 관문★: claude · codex 각각 모델 · 강도 요청이 첫 메시지 전에 먹는지 실 CLI 확인. 하나라도 안 되면 **여기서 멈추고 사용자 결정**(R35 개정 또는 다른 길) — 칸 끄기 · 재기동으로 넘어가지 않는다.
+14. `S21: feat: JSON 모드 첫 메시지 전 모델 · 강도 선택`(T8) — 따로 떨어진 마지막 단계. ★첫 커밋 = 수용 관문★: claude · codex 각각 모델 · 강도 요청이 첫 메시지 전에 먹는지 실 CLI 확인. 하나라도 안 되면 **여기서 멈추고 사용자 결정**(R35 개정 또는 다른 길) — 칸 끄기 · 재기동으로 넘어가지 않는다.
 15. `S21: docs: CLAUDE.md 모듈 맵 · step-log · tracking` — load-bearing 이라 `/review doc`.
 
 ## 6. 위험 · 미결 · 확인 항목
