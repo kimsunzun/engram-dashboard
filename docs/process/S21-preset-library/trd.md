@@ -33,7 +33,9 @@
 | 기본 제공 프리셋(기본 · claude 기본 · codex 기본) | 데몬 | 코드 + 배포판 `prompts\agent-priming.md` | Δ1 |
 | 에이전트에 붙은 프리셋 · 기본 프리셋 여부 · 워크스페이스 · codex 파일 대답 · 백엔드별 패스스루 인자 · Engram 이 작업 폴더에 만든 파일 목록 | 데몬(agent crate 프로필) | `agents.json` | 에이전트와 같은 수명 |
 | 실행 재료(합친 지침 · 스킬 링크 · 합친 claude settings) | 데몬 | `daemon\run\launch\<id>-<epoch>\` — 회수 때 지우고 부팅 때 쓸어 낸다 | 기존 mcp-config 와 같은 수명 규칙 |
-| 번호 1~4 의 보기 상태(폴더 · 뒤로/앞으로 · 칸 폭 · 정렬 · 필터 · 선택 · 마지막 만진 시각) | 셸 — **권위**(웹뷰는 그리기만) | `shell\state\state.json` 의 선택 칸 `library_views` | 보는 쪽 상태(메모 58) · 창이 여럿이어도 한 벌(⇐ 원천) · LLM 이 셸 명령으로 바로 닿는다 |
+| 번호 1~4 의 보기 상태 — 저장 = 마지막 폴더 · 칸 폭 · 트리 펼침(▾ 연 폴더 · 스킬 폴더 포함) · 정렬 · 필터 · 선택 · 마지막 만진 시각 | 셸 — **권위**(웹뷰는 그리기만) | `shell\state\state.json` 의 선택 칸 `library_views` | 보는 쪽 상태(메모 58) · 창이 여럿이어도 한 벌(⇐ 원천) · LLM 이 셸 명령으로 바로 닿는다 · 선택 저장은 옛 서술 그대로(D2 와 어긋나지 않음 — 2026-10-17 에 다시 정하지 않았다) |
+| 번호 1~4 의 뒤로/앞으로 기록 | 셸 — **권위** · 메모리만 | 저장 안 함(다시 켜면 빔 — 탐색기 관행 · PRD R10 · R14 · 사용자 2026-10-17 — 옛 「뒤로/앞으로 기록도 번호마다 저장」 뒤집음) | 번호마다 따로는 그대로 |
+| 접고 펴기(1~4 공통) — 왼쪽 칸 머리(라이브러리 · 즐겨찾기) · 상세 카드 참조 묶음(프리셋 · 에이전트) · 편집 칸 종류 칸 머리 | 셸 — **권위** | `state.json` 의 공통 선택 칸 `library_collapse`(고정 요소 id → 접힘 · 키 이름은 구현 판단) | 한 장치 하나로 1~4 가 나눈다(언리얼 Details 기본값 「종류마다 전역 공유」) · 기억 안 함 = 편집 칸 속 프리셋 줄 펼침 · 메뉴 · 드롭다운 · 👁 카드(PRD R10) |
 | 즐겨찾기 컬렉션 · 대상 컬렉션 · 이동 기록 커서 | 셸 | `shell\config\collections.json` — 데몬별(`daemon_id`) 컬렉션 + 그 데몬의 커서 | 개인 데이터 · 이 PC 만(R16 · 메모 71) |
 | 「다시 묻지 않기」(기본 프리셋 떼기) | 셸 설정 | 기존 `settings.json` 키 하나 | 보는 사람의 확인 습관 |
 | 펼침 · 상세 패널 · 팝오버 · 드래그 중 상태 · 칸 경계를 끄는 중의 폭 | 웹뷰 | 없음(끝난 값만 셸로) | 휘발 |
@@ -288,7 +290,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 | `slot.openUnique {content, target?}` | 같은 내용의 슬롯이 어느 창에든 있으면 그 슬롯에 포커스(창 앞으로) · 없으면 대상(생략 = 기존 열 자리 고르기 규칙)에 채움. 유일성 자체는 레이아웃 관리자가 지킨다(§1-9) |
 | `libraryView.open {number}` · `libraryView.navigate {number, folder}` · `libraryView.back` · `libraryView.forward` | 번호 슬롯 열기 · 폴더 이동 · 기록(R14 — 기록 규칙은 셸의 순수 함수) |
 | `libraryView.reveal {number?, path}` | 그 항목 자리로 — 트리 펼치고 선택(R15 · R28) · 번호 생략 = Δ6 규칙 |
-| `libraryView.select {number, paths}` · `libraryView.setLayout {number, widths, sort, filter}` · `libraryView.get {number}` | 선택 · 칸 폭 · 정렬 · 필터 · 지금 상태 |
+| `libraryView.select {number, paths}` · `libraryView.setLayout {number, widths, sort, filter}` · `libraryView.get {number}` | 선택 · 칸 폭 · 정렬 · 필터 · 지금 상태 — 트리 펼침(번호마다)과 공통 접고 펴기(`library_collapse`)도 이 명령 무리가 바꾼다(명령 이름은 구현 판단 · PRD R10) |
 | `agentPresets.open {agentId}` | 에이전트 프리셋 슬롯을 하나 더 연다(R30) |
 
 `libraryView.*` 는 **셸이 가진 번호별 보기 상태 위의 셸 명령**이다(R40 의 「레이아웃 명령」 쪽). 셸이 상태를 바꾸고 그 번호의 슬롯을 가진 창에만 `library-view:updated {number, state}` 를 쏜다. 화면은 사람 몸짓도 같은 명령으로 보내고(invoke) 받은 상태를 그리기만 한다 — 새 전역 핸들 · 웹뷰 레지스트리 명령 없음.
@@ -322,7 +324,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 | `LibraryTree` | 폴더 트리(스킬 폴더 포함 — 폴더 = 폴더 아이콘 · 스킬 = 스킬 아이콘 `FolderCog` 후보 · §6-2) · 루트 머리(이름 + 경로 · 「라이브러리 폴더 바꾸기…」) · 빈/없음 안내(R8) · 놓기 대상 · 우클릭 「새로 고침」(폴더 = 그 폴더 · 루트 머리 줄 = 전체) | react-arborist(통제형 데이터) |
 | `CollectionsPane` | 「즐겨찾기」 머리 · 첫 줄 「기본」(삭제할 수 없음) · 「+ 새 컬렉션」(R16) | — |
 | `LibraryList` | 탐색기식 목록 · 열 ★ · 종류 · 이름 · 참조 · 이름 앞 종류 아이콘(폴더 · 스킬 `FolderCog` · 지침 `FileText` · 설정 `SlidersHorizontal` · 프리셋 `Layers` — 이름은 후보 · §6-2 · 사용자 2026-10-17) · 정렬(R12) · 📁 줄(스킬 폴더 포함 — 더블클릭 = 들어감 · 그 `SKILL.md` 더블클릭 = OS 기본 편집기) · 다중 선택 · 끌기 시작 · 필터 ▾ · 검색 · 대상 컬렉션 칩 | @tanstack/react-table · @tanstack/react-virtual · react-selecto |
-| `LibraryDetail` | 부품 상세(설명 · 위치 · 참조 링크 — 단추 없음 · R15) · 상태별 = 선택 안 함 안내 · 폴더 · 지침 미리 보기(react-markdown — 챗과 같은 렌더러) · 설정 값 요약 · 여러 개 개수 · 오류(여러 개 개수는 클라이언트가 선택에서 센다) | — |
+| `LibraryDetail` | 부품 상세(설명 · 위치 · 참조 링크 — 단추 없음 · R15) · 참조 = 종류별 묶음 「▾ 프리셋 N」 · 「▾ 에이전트 N」(수 붙은 머리 · 접고 펴기 · 처음 둘 다 펼침 · 한 줄에 링크 하나 · 건너서 = 「(<프리셋> 통해)」 · 「더 보기」 자르기 없음 · 접힘은 공통 `library_collapse` · R15 · R10) · 상태별 = 선택 안 함 안내 · 폴더 · 지침 미리 보기(react-markdown — 챗과 같은 렌더러) · 설정 값 요약 · 여러 개 개수 · 오류(여러 개 개수는 클라이언트가 선택에서 센다) | — |
 | `components/preset/PresetEditor.tsx` | **공용 편집 부품 하나**(R21) — 대상 = 프리셋 또는 에이전트 · 칸 = (에이전트면 「기본」 +) 프리셋 · 지침 · 스킬 · 설정 · `readOnly` · `depth` 를 받아 안에 든 프리셋을 **같은 부품으로 재귀** 렌더(R27) · 칸 아래 충돌/경고 줄 · 「에이전트 N개에서 참조 중」 · 백엔드 바뀜 경고(Δ4) | — |
 | `EditorSection` | 칸 제목 `+` · `⇐` · 폴더 돋보기(`FolderSearch` — 아이콘 이름 확인함) · ⋮⋮ 순서(지침 · 설정 · 프리셋 — D2) · × · 줄 호버 돋보기 · 지침 줄 👁 = `LibraryDetail` 카드를 왼쪽 팝오버로(닫기 = × · 바깥 누름 · Esc · 다른 줄 👁 = 바꿈 · R27) | @dnd-kit/sortable |
 | `AddItemsPopover` | 「+ 추가」 · 칸 `+` 검색 팝오버(R25) — 열면 검색칸 커서 · 체크 = 즉시 추가 · 이미 추가됨/순환/충돌 비활성 + 이유 · 에이전트 대상이면 프리셋만 + 맨 위 고정 「기본 제공」 목록(Δa) | @radix-ui/react-popover · @tanstack/react-virtual |

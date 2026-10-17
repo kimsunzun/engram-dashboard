@@ -99,6 +99,13 @@ code,.mono{font-family:var(--f-mono);font-size:.88em}
 .final{display:flex;flex-direction:column;gap:6px}
 .final .k{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--app-muted);display:flex;align-items:center;gap:6px}
 .final .v{font-family:var(--f-mono);font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}
+.rf46{display:flex;flex-direction:column;gap:1px;font-size:12px}
+.rf46 .rh46{display:flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;color:var(--app-muted);cursor:pointer;margin-top:4px}
+.rf46 .rh46:first-child{margin-top:0}
+.rf46 .rh46 b{color:var(--app-text);font-weight:600}
+.rf46 .rl46{padding-left:14px;line-height:1.5}
+.rf46 u{color:var(--accent);cursor:pointer}
+.rf46 i{font-style:normal;color:var(--app-muted)}
 .chip{display:inline-flex;align-items:center;gap:6px;padding:2px 8px;border-radius:99px;background:var(--app-chip);border:1px solid var(--app-line);font-size:12px;white-space:nowrap}
 .chip.gone{border-style:dashed;color:var(--gone)}
 .vend{width:8px;height:8px;border-radius:2px;display:inline-block}
@@ -326,7 +333,7 @@ a{color:var(--accent)}
   <p class="pend"><span class="tag ok">확정 2026-10-17</span>이름 앞 종류 아이콘 = 폴더 · 스킬(폴더 모양 + 표시) · 지침 · 설정 · 프리셋 — 트리도 같음 · lucide 이름은 구현 때 확인</p>
   <p class="pend"><span class="tag ok">확정 2026-10-17</span><span>누가 무엇을 — 사람 = 앱 안에서 전부(만들기 · 이동 · 이름 · 삭제 = 라이브러리 화면 · 내용 = 더블클릭 → OS 기본 편집기) · AI = 같은 <code>engram library.*</code> 명령, 또는 바깥에서 직접 + <code>library.refresh</code> — 권고일 뿐 강제 아님 · <code>library.refresh</code> 답 = 바뀐 수 + 다시 읽은 파일의 문제(오류 · kind 없음 · 찾을 수 없음)</span></p>
   <p class="pend"><span class="tag ok">확정 2026-10-16</span>슬롯 이름 = 「라이브러리 1~4」 — 뒤에 브라우저 · 에디터를 붙이지 않음(범용: 나중에 커맨드 묶음 · 스크립트 종류도 담는다)</p>
-  <p class="pend"><span class="tag ok">확정</span>번호 1~4 고정 · 빈 슬롯 메뉴 「새 콘텐츠 ▸ 라이브러리 ▸ 1~4」 · 열린 번호를 선택하면 그 슬롯으로(중복 없음) · 닫힌 번호는 그 번호의 보기 상태(칸 폭 · 마지막 폴더 · 뒤로/앞으로 기록)로 다시 열림</p>
+  <p class="pend"><span class="tag ok">확정</span>번호 1~4 고정 · 빈 슬롯 메뉴 「새 콘텐츠 ▸ 라이브러리 ▸ 1~4」 · 열린 번호를 선택하면 그 슬롯으로(중복 없음) · 닫힌 번호는 그 번호의 보기 상태(마지막 폴더 · 칸 폭 · 트리 펼침)로 다시 열림 · 뒤로/앞으로 기록은 저장 안 함(2026-10-17 — 3절)</p>
   <p class="lead">왼쪽 = 폴더 트리 + 즐겨찾기 · 가운데 = 탐색기식 목록 · 오른쪽 = 상세.</p>
   <div class="win" role="img" aria-label="라이브러리 화면 예시">
     <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>라이브러리 1</div>
@@ -375,7 +382,7 @@ a{color:var(--accent)}
           <span class="k">위치</span>
           <span class="v">스킬/리뷰/review/SKILL.md</span>
           <span class="k">참조</span>
-          <span class="v"><u style="color:var(--accent);cursor:pointer">프리셋 리뷰어</u> · <u style="color:var(--accent);cursor:pointer">프리셋 야간 점검</u> · <u style="color:var(--accent);cursor:pointer">에이전트 리뷰봇</u> (리뷰어 통해) <span class="n">7</span></span>
+          <div class="rf46"><span class="rh46">▾ 프리셋 <b>2</b> <span class="n">7</span></span><span class="rl46"><u>리뷰어</u></span><span class="rl46"><u>야간 점검</u></span><span class="rh46">▾ 에이전트 <b>1</b></span><span class="rl46"><u>리뷰봇</u> <i>(리뷰어 통해)</i></span></div>
         </div>
       </div>
     </div>
@@ -387,7 +394,7 @@ a{color:var(--accent)}
     <span><span class="n">4</span><span>왼쪽 칸 = 머리 붙은 칸 둘(언리얼 Content Browser 꼴) — 위 「▾ 라이브러리 폴더 이름 · 경로 …」(트리 · 「…」 = 폴더 선택 창으로 바꾸기) · 아래 「▾ 즐겨찾기 ＋」(＋ = 새 컬렉션 · 첫 줄 「기본」 = 처음부터 있음 · 삭제할 수 없음 · 기본 대상 컬렉션). 칸마다 따로 스크롤 · ▾ 로 접기(머리 줄은 남음) · 칸 사이 경계를 끌어 높이 조절(번호마다 기억) · 이 PC 에만 저장 = 머리 툴팁 — 2026-10-16 · ★ = 대상 컬렉션에 넣고 빼기 · 컬렉션 한 번 누름 = 보기 · 더블클릭/우클릭 「★ 대상 컬렉션으로」 = 대상 지정 · 대상 컬렉션은 PC 마다 하나(슬롯마다 아님) · 컬렉션은 이 PC 에만 저장</span></span>
     <span><span class="n">5</span><span>필터 ▾ = 종류 선택(지침 · 스킬 · 설정 · 프리셋 체크박스 · 모든 필터 제거) — 상태 필터는 첫 판에서 뺌</span></span>
     <span><span class="n">6</span><span>폴더(스킬 폴더 포함 — 스킬 아이콘) 먼저, 다음 이름 · 머리 클릭 = 그 열로 정렬 · 다시 = 거꾸로 (★ · 참조 칸 제외) · ▲/▼ 는 누른 열에만 · 폴더는 늘 맨 위 · 종류 = 필터 순서(지침 · 스킬 · 설정 · 프리셋 — 번역 글자 순 아님) · 같은 값은 이름순 (VS Code 관행 — 2026-10-16)</span></span>
-    <span><span class="n">7</span><span>참조 = 그 항목을 참조하는 프리셋과 에이전트, 직접 + 건너서(「… 통해」) · 프리셋 이름 = 그 자리로 가 선택함(오른쪽이 편집 칸) · 에이전트 이름 = 그 에이전트 프리셋 슬롯을 엶</span></span>
+    <span><span class="n">7</span><span>참조 = 그 항목을 참조하는 프리셋과 에이전트, 직접 + 건너서(「(… 통해)」) · 종류별 묶음 「▾ 프리셋 N」 · 「▾ 에이전트 N」 — 머리 누름 = 접기 · 펼치기(Obsidian 백링크 꼴 · 처음엔 둘 다 펼침) · 한 줄에 이름 하나 · 「N개 더 보기」 자르기 없음 · 접은 상태는 1~4 공통 저장 · 프리셋 이름 = 그 자리로 가 선택함(오른쪽이 편집 칸) · 에이전트 이름 = 그 에이전트 프리셋 슬롯을 엶 · 목록의 참조 열은 수만 (2026-10-17)</span></span>
   </div>
 
   <div class="sh"><h3>필터 · 검색</h3><span class="tag ok">확정 2026-10-16</span></div>
@@ -444,7 +451,7 @@ a{color:var(--accent)}
         <span class="k">위치</span>
         <span class="v">지침/리뷰 규칙.md</span>
         <span class="k">참조</span>
-        <span class="v"><u style="color:var(--accent);cursor:pointer">프리셋 리뷰어</u></span>
+        <div class="rf46"><span class="rh46">▾ 프리셋 <b>2</b></span><span class="rl46"><u>리뷰어</u></span><span class="rl46"><u>야간 점검</u></span><span class="rh46">▾ 에이전트 <b>1</b></span><span class="rl46"><u>리뷰봇</u> <i>(리뷰어 통해)</i></span></div>
       </div>
     </div></div>
     <div class="win"><div class="pane side">
@@ -457,7 +464,7 @@ a{color:var(--accent)}
         <span class="k">위치</span>
         <span class="v">설정/claude opus.yaml</span>
         <span class="k">참조</span>
-        <span class="v"><u style="color:var(--accent);cursor:pointer">프리셋 리뷰어</u></span>
+        <div class="rf46"><span class="rh46">▾ 프리셋 <b>1</b></span><span class="rl46"><u>리뷰어</u></span></div>
       </div>
     </div></div>
     <div class="win"><div class="pane side">
@@ -607,7 +614,7 @@ a{color:var(--accent)}
               <span class="k">위치</span>
               <span class="v">지침/리뷰 규율.md</span>
               <span class="k">참조</span>
-              <span class="v"><u style="color:var(--accent);cursor:pointer">프리셋 리뷰어</u> · <u style="color:var(--accent);cursor:pointer">프리셋 야간 점검</u></span>
+              <div class="rf46"><span class="rh46">▾ 프리셋 <b>2</b></span><span class="rl46"><u>리뷰어</u></span><span class="rl46"><u>야간 점검</u></span><span class="rh46">▾ 에이전트 <b>1</b></span><span class="rl46"><u>리뷰봇</u> <i>(리뷰어 통해)</i></span></div>
             </div>
           </div>
           <div class="row"><span class="grip">⋮⋮</span><span class="name">보고 형식</span><span class="x">×</span></div>
@@ -701,10 +708,10 @@ a{color:var(--accent)}
     <span><span class="n">4</span>줄에 마우스를 올리면 폴더 돋보기 — 누르거나 줄을 더블클릭하면 그 항목 자리로 이동 (기본 제공 프리셋은 꺼짐)</span>
     <span><span class="n">5</span>이동한 곳에선 그 프리셋을 고칠 수 있음 · ← 로 리뷰어로 돌아감</span>
   </div>
-  <p class="pend"><span class="tag ok">확정</span>칸 폭 · 마지막 폴더 · 뒤로/앞으로 기록은 번호(1~4)마다 저장</p>
+  <p class="pend"><span class="tag ok">확정 2026-10-17</span><span>번호마다 저장 = 마지막 폴더 · 칸 폭 · 트리 펼침 · 뒤로/앞으로 기록은 앱이 떠 있는 동안만 · 칸 머리 · 참조 묶음 · 편집 칸 종류 칸의 접고 펴기 = 1~4 공통 저장 · 편집 칸 속 프리셋 펼침 · 메뉴 · 👁 카드 = 기억 안 함 (2026-10-17)</span></p>
   <p class="pend"><span class="tag ok">확정</span>따로 된 프리셋 편집 슬롯은 만들지 않음 — 편집은 라이브러리 오른쪽 칸 하나 · 옛 프리셋(작업 폴더 즐겨찾기) 슬롯도 없앰</p>
   <p class="lead">편집 칸에서 지침 내용 보기 <span class="tag ok">확정 2026-10-17</span></p>
-  <style>.pe45{position:relative;grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.pe45>.pane+.pane{border-left:1px solid var(--app-line);border-top:0}.pe45 .row{padding:4px 8px}.eye45{font-size:11px;padding:0 4px;border:1px solid var(--app-line);border-radius:4px;background:var(--app-panel);line-height:1.4;cursor:pointer;flex:none}.eye45.on{border-color:var(--accent);background:var(--accent-soft);box-shadow:inset 0 1px 2px rgba(0,0,0,.25)}.rw45{position:relative}.pk45{position:absolute;z-index:2;top:-96px;right:calc(100% + 13px);width:260px;border:1px solid var(--accent);border-radius:8px;background:var(--app-raised);box-shadow:0 8px 22px rgba(0,0,0,.28);padding:10px;display:flex;flex-direction:column;gap:7px;color:var(--app-text)}.pk45::after{content:"";position:absolute;right:-6px;top:108px;width:10px;height:10px;background:var(--app-raised);border-top:1px solid var(--accent);border-right:1px solid var(--accent);transform:rotate(45deg)}.pk45 .head{flex-wrap:nowrap}.pk45 .head .t{font-size:14px}.sc45{position:relative;padding-right:9px}.sc45::after{content:"";position:absolute;right:0;top:2px;width:3px;height:45%;border-radius:2px;background:var(--app-line)}.sc45 .prev44{max-height:96px}@media (max-width:720px){.pe45{grid-template-columns:minmax(0,1fr)}.pe45>.pane+.pane{border-left:0;border-top:1px solid var(--app-line)}.pk45{position:relative;top:auto;right:auto;width:auto;margin-top:10px}.pk45::after{top:-6px;right:auto;left:28px;transform:rotate(-45deg)}}</style>
+  <style>.pe45{position:relative;grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.pe45>.pane+.pane{border-left:1px solid var(--app-line);border-top:0}.pe45 .row{padding:4px 8px}.eye45{font-size:11px;padding:0 4px;border:1px solid var(--app-line);border-radius:4px;background:var(--app-panel);line-height:1.4;cursor:pointer;flex:none}.eye45.on{border-color:var(--accent);background:var(--accent-soft);box-shadow:inset 0 1px 2px rgba(0,0,0,.25)}.rw45{position:relative}.pk45{position:absolute;z-index:2;top:-150px;right:calc(100% + 13px);width:260px;border:1px solid var(--accent);border-radius:8px;background:var(--app-raised);box-shadow:0 8px 22px rgba(0,0,0,.28);padding:10px;display:flex;flex-direction:column;gap:7px;color:var(--app-text)}.pk45::after{content:"";position:absolute;right:-6px;top:162px;width:10px;height:10px;background:var(--app-raised);border-top:1px solid var(--accent);border-right:1px solid var(--accent);transform:rotate(45deg)}.pk45 .head{flex-wrap:nowrap}.pk45 .head .t{font-size:14px}.sc45{position:relative;padding-right:9px}.sc45::after{content:"";position:absolute;right:0;top:2px;width:3px;height:45%;border-radius:2px;background:var(--app-line)}.sc45 .prev44{max-height:96px}@media (max-width:720px){.pe45{grid-template-columns:minmax(0,1fr)}.pe45>.pane+.pane{border-left:0;border-top:1px solid var(--app-line)}.pk45{position:relative;top:auto;right:auto;width:auto;margin-top:10px}.pk45::after{top:-6px;right:auto;left:28px;transform:rotate(-45deg)}}</style>
   <div class="win" role="img" aria-label="편집 칸의 지침 줄 리뷰 규칙 끝 눈 단추를 누르면, 목록에서 선택할 때 오른쪽 칸에 나오는 것과 같은 지침 카드가 편집 칸 왼쪽 가운데 목록 위로 떠 그 줄을 가리키는 예시 — 안에 든 프리셋 공용/기본 규칙은 그 자리에서 흐리게 펼쳐짐">
     <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>라이브러리 1 — 프리셋/리뷰어.yaml</div>
     <div class="win-body pe45">
@@ -742,7 +749,7 @@ a{color:var(--accent)}
               <span class="k">미리 보기</span>
               <div class="sc45"><div class="prev44"><b># 리뷰 규칙</b>- 칭찬하지 않는다<br>- 근거 없는 지적 금지<br>- 파일:줄 로 가리킨다<br>- 고칠 수 있으면 고친 안을 준다</div></div>
               <span class="k">참조</span>
-              <span class="v"><u style="color:var(--accent);cursor:pointer">프리셋 리뷰어</u> · <u style="color:var(--accent);cursor:pointer">프리셋 야간 점검</u></span>
+              <div class="rf46"><span class="rh46">▾ 프리셋 <b>2</b></span><span class="rl46"><u>리뷰어</u></span><span class="rl46"><u>야간 점검</u></span><span class="rh46">▾ 에이전트 <b>1</b></span><span class="rl46"><u>리뷰봇</u> <i>(리뷰어 통해)</i></span></div>
             </div>
           </div>
         </div>
@@ -753,7 +760,7 @@ a{color:var(--accent)}
     </div>
   </div>
   <div class="caps">
-    <span><span class="n">6</span><span>지침 줄 끝 👁 = 그 지침 카드를 편집 칸 왼쪽(목록 위)에 띄움 — 목록에서 선택할 때 오른쪽 칸에 나오는 카드와 같은 것 · 카드 안 스크롤</span></span>
+    <span><span class="n">6</span><span>지침 줄 끝 👁 = 그 지침 카드를 편집 칸 왼쪽(목록 위)에 띄움 — 목록에서 선택할 때 오른쪽 칸에 나오는 카드와 같은 것(참조 = 같은 종류별 묶음 · 접고 펴기) · 카드 안 스크롤 · 카드 자체는 기억 안 함</span></span>
     <span><span class="n">7</span><span>닫기 = × · 카드 바깥 아무 데나 누름 · Esc — 카드가 떠 있을 때 다른 줄 👁 = 바로 그 줄 카드로 바뀜(한 번 누름) · 줄 누름 = 끼울 자리 선택(그대로) · 더블클릭 = 그 항목 자리로(R28)</span></span>
     <span><span class="n">8</span><span>안에 든 프리셋 줄 = 누르면 그 자리에서 ▾ 펼침(흐리게 · 보기만 · 몇 겹이든 같음) · 프리셋 줄엔 👁 없음 — 펼쳐서 본다 · 펼친 안쪽 지침 줄도 👁 = 같은 카드</span></span>
   </div>
