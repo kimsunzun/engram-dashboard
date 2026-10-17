@@ -2,7 +2,7 @@
 
 | 항목 | 값 |
 |---|---|
-| **범위 조정** | 2026-10-16 사용자 결정 — 작업 폴더(워크스페이스) 정리는 다음 구현으로 미룬다. 이번엔 지금 동작 그대로(만들 때 폴더를 선택함 · 작업 폴더 필수). 미룬 것 = R34 · D3 · T4 · R31 · R48 · E15 의 워크스페이스 부분 · TRD 의 `workspace` 선택값 · `launched_workspace` · Unattended Engram 폴더 기본값 · `agent.setWorkspace` · 「만들 때 폴더를 묻지 않음」(TRD 해석이었고 사용자 결정 아님). 근거 = 결정 메모 2026-10-16 |
+| **범위 조정** | 2026-10-16 사용자 결정 — 작업 폴더(워크스페이스) 정리는 다음 구현으로 미룬다. 이번엔 지금 동작 그대로(만들 때 폴더를 선택함 · 작업 폴더 필수). 미룬 것 = R34 · D3 · T4 · R31 · R48 · E15 의 워크스페이스 부분 · TRD 의 `workspace` 선택값 · `launched_workspace` · Unattended Engram 폴더 기본값 · `agent.setWorkspace` · 「만들 때 폴더를 묻지 않음」(TRD 해석이었고 사용자 결정 아님) · `CreateProfile.cwd` 선택 · 빈 문자열 = 없음 wire 뜻. 근거 = 결정 메모 2026-10-16. **본문은 이번 판만 적는다 — 미룬 설계는 §8 에 모았다** |
 | **상태** | **초안(사용자 미확정)** — `/review trd` 3회차 반영본 · §2 의 결정을 사용자가 고르기 전 |
 | **작성일** | 2026-10-15 |
 | **리뷰 기록** | 2026-10-15 `/review trd` 1회차 — Claude doc-aware(Architect-breaker) **FIX** 12건 + codex blind(Designer) **FIX** 2건 · 상충 없음. 반영: 실행 전처리 순서 · 백엔드별 인자 · JSON 선택 칸의 길 · T10 · 어휘 소유 · `merge_preserving_live` · `cwd` 키 유지 · `display_name` 고정 · 일지 판정 · `std::sync::RwLock` · `libraryView.*` 셸 명령 · 실행 재료 가드 · 배치 포트 · codex 생성물 · `AGENTS.override.md` 위험 · `trash` 거부 · `Library{n}` 유일성 · 셸 세대 · `DataLayout` 기본 경로 · snapshot off 범위 · **2회차(같은 날)** — 두 리뷰어 FIX(좁음) · 반영: 전처리를 예약 · 떠 있음 확인 바로 뒤로 + 명부 변경 mutate 한 번(비교-교체) + Engram 폴더 = 에이전트 id(멱등) + `SpawnByCwd` 를 `spawn_blocking` 으로 · JSON 선택 칸의 재기동 대체안 삭제(모델 · 강도 둘 다 backend 요청 — 미지원 처리는 3회차가 멈춤 조건으로 바꿈) · 휴지통 = 전용 STA 스레드 · `trash` 거부 사유 정정 · codex 생성물 소유 표식(표식 + 내용 일치일 때만 걷기 · 떠 있는 동안 미룸) · §3 의 `allowedMcpServers` 문장을 T10 에 맞춤 · `DataLayout` 루트 출처 · `backend_args` 권위 · **3회차(같은 날)** — 두 리뷰어 FIX(좁음) · 반영: 명부에 없는 id(`SpawnByCwd` · 스모크 bin)를 전처리 앞에 넣기(`ensure_registered`) + 기본 프리셋을 다는 생성자 하나(`backend::builtin_backend_preset`) + 그 길에서도 Noop 회귀 · 점검은 명부 값을 읽고 mutate 는 그 뒤 안 바뀌었을 때만(한 번 다시 시도) · JSON 선택 칸 확인을 14 단계 수용 관문 · 멈춤 조건으로 |
@@ -14,7 +14,7 @@
 
 ## 0. 한 문단 요약 — 흐름
 
-라이브러리 폴더는 **데몬 PC 의 것**이고 데몬의 새 모듈 `library` 만 읽고 쓴다. 화면은 디스크를 보지 않고 슬롯 열기 · 포커스 · 폴더 이동 때 **버스 명령**(`library.list` 등)을 보내 답을 그린다(요청형 — 데몬은 메모리 목록으로 답하고 디스크는 처음 · `library.refresh` · 루트 바꾸기 때만 훑는다 · 감시 · 방송 없음). `engram` CLI 와 LLM 도 같은 명령을 부른다. 편집 · 파일 조작도 명령이고 데몬이 최신 파일에 적용한다. 실행 때 `AgentManager` 는 세션을 파생하기 **전에** 새 포트 `LaunchKitSource`(실물 = 데몬)로 점검 · 백엔드/워크스페이스 맞추기를 끝내고, 데몬이 펼친 프리셋을 휘발 폴더의 **백엔드 중립 실행 재료**로 받아 `backend` 만이 claude · codex 플래그로 옮긴다. 화면이 낸 실행은 막히면 묻고, 버스 · CLI 실행은 기본값(Engram 폴더 · codex 파일 안 만듦)을 저장하고 간다. 앱 안 이동 · 다시 연결은 데몬 「이동 기록」에 쌓여 각 클라이언트가 다음 요청 때 자기 컬렉션을 고친다. 번호 1~4 보기 상태와 컬렉션 · 대상 컬렉션은 **셸**이 권위로 갖고(키에 데몬 신원), OS 동작은 `platform`(휴지통 · 정션)과 셸의 로컬 요청을 지난다.
+라이브러리 폴더는 **데몬 PC 의 것**이고 데몬의 새 모듈 `library` 만 읽고 쓴다. 화면은 디스크를 보지 않고 슬롯 열기 · 포커스 · 폴더 이동 때 **버스 명령**(`library.list` 등)을 보내 답을 그린다(요청형 — 데몬은 메모리 목록으로 답하고 디스크는 처음 · `library.refresh` · 루트 바꾸기 때만 훑는다 · 감시 · 방송 없음). `engram` CLI 와 LLM 도 같은 명령을 부른다. 편집 · 파일 조작도 명령이고 데몬이 최신 파일에 적용한다. 실행 때 `AgentManager` 는 세션을 파생하기 **전에** 새 포트 `LaunchKitSource`(실물 = 데몬)로 점검 · 백엔드 맞추기를 끝내고, 데몬이 펼친 프리셋을 휘발 폴더의 **백엔드 중립 실행 재료**로 받아 `backend` 만이 claude · codex 플래그로 옮긴다. 작업 폴더는 지금 그대로(만들 때 선택 · 필수 — 미룬 정리 = §8)다. 화면이 낸 실행은 막히면 묻고, 버스 · CLI 실행은 기본값(codex 파일 안 만듦)을 저장하고 간다. 앱 안 이동 · 다시 연결은 데몬 「이동 기록」에 쌓여 각 클라이언트가 다음 요청 때 자기 컬렉션을 고친다. 번호 1~4 보기 상태와 컬렉션 · 대상 컬렉션은 **셸**이 권위로 갖고(키에 데몬 신원), OS 동작은 `platform`(휴지통 · 정션)과 셸의 로컬 요청을 지난다.
 
 ## 1. 아키텍처
 
@@ -22,7 +22,7 @@
 
 | 데이터 | 주인 | 영속 자리 | 갈래 근거 |
 |---|---|---|---|
-| 라이브러리 루트 경로 · Engram 폴더(자동 워크스페이스) 위치 | 데몬 | `daemon\state\library.json` | 데몬 PC 에 묶인 값(메모 58) |
+| 라이브러리 루트 경로 | 데몬 | `daemon\state\library.json` | 데몬 PC 에 묶인 값(메모 58) |
 | 데몬 신원 `daemon_id` | 데몬 | `daemon\state\identity.json`(첫 부팅에 UUID) | 클라이언트 개인 데이터의 키(메모 71 · 72) |
 | 라이브러리 훑기 결과 · 참조 역색인 · 파싱 캐시 | 데몬 | 메모리(처음 · 루트 바꾸기 · refresh 때만 훑고 바뀐 파일만 다시 파싱 — 2026-10-16) | 클라이언트는 디스크를 안 읽는다(PRD 불변 제약) |
 | 다시 연결 색인(직전 훑기의 경로 → 종류 · 이름) · Engram 이 삭제한 경로 기록 | 데몬 | `daemon\state\library-index.json` | 「바깥에서 없어진 것」 판정의 재료(Δ2) |
@@ -31,7 +31,7 @@
 | 다시 연결 후보(확인 대기) | 데몬 | `library-index.json` 안 | 자동/확인 갈림(D10 · Δe) |
 | 지침 · 스킬 · 설정 · 프리셋 파일 | 데몬(파일은 라이브러리 폴더) | 사용자가 선택한 폴더 | R7 |
 | 기본 제공 프리셋(기본 · claude 기본 · codex 기본) | 데몬 | 코드 + 배포판 `prompts\agent-priming.md` | Δ1 |
-| 에이전트에 붙은 프리셋 · 기본 프리셋 여부 · 워크스페이스 · codex 파일 대답 · 백엔드별 패스스루 인자 · Engram 이 작업 폴더에 만든 파일 목록 | 데몬(agent crate 프로필) | `agents.json` | 에이전트와 같은 수명 |
+| 에이전트에 붙은 프리셋 · 기본 프리셋 여부 · 작업 폴더(`cwd` — 지금 그대로) · codex 파일 대답 · 백엔드별 패스스루 인자 · Engram 이 작업 폴더에 만든 파일 목록 | 데몬(agent crate 프로필) | `agents.json` | 에이전트와 같은 수명 |
 | 실행 재료(합친 지침 · 스킬 링크 · 합친 claude settings) | 데몬 | `daemon\run\launch\<id>-<epoch>\` — 회수 때 지우고 부팅 때 쓸어 낸다 | 기존 mcp-config 와 같은 수명 규칙 |
 | 번호 1~4 의 보기 상태 — 저장 = 마지막 폴더 · 칸 폭 · 트리 펼침(▾ 연 폴더 · 스킬 폴더 포함) · 정렬 · 필터 · 선택 · 마지막 만진 시각 | 셸 — **권위**(웹뷰는 그리기만) | `shell\state\state.json` 의 선택 칸 `library_views` | 보는 쪽 상태(메모 58) · 창이 여럿이어도 한 벌(⇐ 원천) · LLM 이 셸 명령으로 바로 닿는다 · 선택 저장은 옛 서술 그대로(D2 와 어긋나지 않음 — 2026-10-17 에 다시 정하지 않았다) |
 | 번호 1~4 의 뒤로/앞으로 기록 | 셸 — **권위** · 메모리만 | 저장 안 함(다시 켜면 빔 — 탐색기 관행 · PRD R10 · R14 · 사용자 2026-10-17 — 옛 「뒤로/앞으로 기록도 번호마다 저장」 뒤집음) | 번호마다 따로는 그대로 |
@@ -124,7 +124,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 5. **충돌**(빨강 — 그대로는 실행 못 함) — 사용자 백엔드 정하는 설정 둘 이상(R4 · 기본 제공은 세지 않는다) · 같은 이름 스킬 둘 이상(다른 경로) · `model` 칸 둘 이상(T3).
 6. **경고**(노랑 — 알리기만) — 다른 백엔드 원문 칸이 있으나 안 쓰임 · codex 크기 한도를 올렸음(R38) · 문맥 차지 비율 · 자동으로 다시 연결됨(확인 전 — Δd).
 7. **상태** — 찾을 수 없음(파일 없음) · 오류(못 읽음) · 순환 · 다시 연결됨(자동 적용 · 확인 전) · 다시 연결 확인 대기(후보만 있음) — 가리키는 줄에만 붙는다(R6).
-8. **막힘 사유(실행 직전)** — 찾을 수 없음 · 오류 · 충돌이 남음(E4) · 다시 연결 확인 대기(확인 방식일 때 — Δe) · 백엔드 정하는 설정 없음(R33) · 라이브러리 미설정/없음인데 라이브러리 프리셋이 붙음 · 워크스페이스 없음(R34) · codex 터미널 + 사용자 폴더인데 파일 만들기 대답이 없음(R37) · codex 파일 사전 검사 실패. 앞 다섯은 누가 실행하든 막힌다. 워크스페이스 · codex 파일 대답 둘은 **화면이 낸 실행에서만** 막힘이고, 버스 · CLI 가 낸 실행은 기본값으로 채워 에이전트에 저장한다(Δg · §1-5).
+8. **막힘 사유(실행 직전)** — 찾을 수 없음 · 오류 · 충돌이 남음(E4) · 다시 연결 확인 대기(확인 방식일 때 — Δe) · 백엔드 정하는 설정 없음(R33) · 라이브러리 미설정/없음인데 라이브러리 프리셋이 붙음 · codex 터미널 + 사용자 폴더인데 파일 만들기 대답이 없음(R37) · codex 파일 사전 검사 실패. 앞 다섯은 누가 실행하든 막힌다. codex 파일 대답은 **화면이 낸 실행에서만** 막힘이고, 버스 · CLI 가 낸 실행은 기본값(「안 만듦 · 프라이밍만」)으로 채워 에이전트에 저장한다(Δg · §1-5). (워크스페이스 없음 막힘 = §8)
 
 같은 함수가 편집 칸의 충돌 · 경고 줄, 「에이전트 N개에서 참조 중」, 실행 재료 셋 모두를 만든다 — 화면과 실행이 다른 규칙으로 갈리지 않게.
 
@@ -145,7 +145,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 | `resolve.rs` | §1-3 | `resolve_agent` · `resolve_preset` → `Resolution` |
 | `builtin.rs` | 기본 제공 셋 | `BuiltinId` · 내용 표 |
 | `launch.rs` | 실행 재료 | `DaemonLaunchKits::{check, prepare, release}` · 부팅 쓸기 |
-| `config.rs` | 루트 · Engram 폴더 위치 · 신원 | `LibraryConfig` · `DaemonIdentity` |
+| `config.rs` | 루트 · 신원 | `LibraryConfig` · `DaemonIdentity` |
 
 **갱신 규칙(사용자 결정 2026-10-16 · 2026-10-17)** — 전체 훑기는 데이터가 처음 필요할 때(아래 「첫 훑기」) · 라이브러리 폴더를 바꿀 때만. 그 밖의 목록 요청(슬롯 열기 · 포커스 · 폴더 이동)은 데몬이 들고 있는 메모리 목록으로 답하고, Engram 안의 변경(이동 · 이름 · 삭제 · 새로 만들기 · 편집)은 그 목록에 바로 반영한다. 바깥 변경은 트리 우클릭 「새로 고침」(그 폴더 — 하위 포함 · 루트 머리 줄 = 전체) · F5 = 포커스한 칸 기준 — 트리 = 선택한 폴더(없으면 전체) · 목록 = 지금 보는 폴더, 둘 다 하위 포함(우리는 폴더에 들어갈 때 다시 읽지 않으므로 — 사용자 2026-10-17) 또는 `library.refresh {folder}`(생략 = 전체)로 들인다 — 에이전트에겐 Engram 밖에서 파일을 바꾼 뒤 이 명령을 부르라고 권한다(프라이밍 · 강제 아님 — PRD R41 · 사용자 2026-10-17) · 답에 다시 읽은 파일의 문제가 실린다(§1-7). 안전장치 = 명령이 목록에 없는 경로를 가리키면 그 경로 하나만 확인해 넣는다 · 실행 직전 붙은 파일을 다시 확인한다. 감시 · 구독 · 방송 · 주기 요청 없음. **첫 훑기 = 전부 한 번(사용자 2026-10-17 · S1–S3)** — 모든 파일의 꼬리표를 적고 설정 · 프리셋 `.yaml` 을 읽어 문법 · 스키마 검사까지 한다(캐시가 없으니 전부 「바뀜」) · 실행 직전 확인은 실행 때만. 시작 = 데이터가 처음 필요할 때 — 라이브러리 슬롯을 처음 열 때 · `library.*` 명령이 처음 올 때 · 실행 중 프리셋이 가리키는 파일이 없어 다시 연결 후보가 필요할 때 중 먼저 오는 쪽(데몬이 켜질 때 미리 훑지 않는다 — 사용자 2026-10-17 「데이터가 필요할때 훓어야지」) · 실행은 전체 훑기를 기다리지 않고 자기 프리셋과 그것이 가리키는 파일만 바로 읽는다(문법 확인 포함). 데몬 작업 스레드에서 돈다 — 데몬도 화면도 멈추지 않는다. 첫 훑기가 끝나기 전에 온 목록 요청은 그 훑기를 기다리고(동시 요청이 훑기 하나를 나눠 쓰는 규칙 그대로 — 흐름 ①), 프론트는 그동안 잠깐 로딩 표시를 띄웠다가 끝나면 목록 · 아이콘 · 참조 수를 한 번에 보인다(나눠 채우기 없음 — S3 · 느리면 §6-2 실측 뒤 다시 본다). 캐시는 메모리에만 있어 데몬을 다시 켜면 전체 훑기가 한 번 더 돈다(S1). 구현 = 아래 흐름 ①.
 
@@ -169,7 +169,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 
 **흐름 ⑥ 이동 기록(Δc)** — 앱 안 이동 · 이름 바꾸기 · 적용된 다시 연결이 쌍(옛 → 새)을 번호 붙여 쌓는다(최근 1,000 쌍 — 넘치면 오래된 것부터 버리고 바닥 번호를 올린다). 클라이언트는 라이브러리 요청을 낼 때마다(슬롯 열기 · 포커스 · 새로고침 · 폴더 이동) `library.moves {since: 커서}` 를 함께 불러 커서 뒤의 쌍을 받고, 자기 컬렉션을 고친 뒤 커서를 옮긴다. 커서가 바닥보다 오래됐으면 답에 `truncated` 가 서고, 그 사이 이동된 컬렉션 항목은 「찾을 수 없음」으로 남는다(받아들인 손실 — §6). 요청한 클라이언트만이 아니라 **모든** 클라이언트가 자기 다음 요청에 따라잡는다 — 방송 없이.
 
-**루트 · 기본 경로** — `library.status` 가 `{daemon_id, root, state: unset|ok|missing, suggested_new}` 를 준다. `suggested_new` 와 Engram 폴더 기본 위치(T4)는 **데이터 폴더 배치(`DataLayout`)의 메서드**로 낸다. `DataLayout` 은 루트가 **어디서 왔나**(`ENGRAM_DATA_DIR` 지정 · 디버그 기본 · 릴리즈 기본)를 함께 든다 — 릴리즈 기본(루트 = `<배포판>\data`) = 그 부모의 `library` · `workspaces`, 그 밖 = 루트 **안**의 `library` · `workspaces`. 디렉터리 이름으로 짐작하지 않는다. 그래서 `ENGRAM_DATA_DIR` 로 격리한 시험은 실제 폴더를 건드리지 않는다. [새로 만들기]는 이 경로를 미리 채울 뿐이고 내용은 넣지 않는다(Δ1). 루트를 바꾸면 에이전트 붙임 · 컬렉션은 그대로 두고 **같은 경로를 새 루트에서** 찾는다 — 없으면 「찾을 수 없음」. 색인과 이동 기록은 새로 시작하므로 루트를 넘는 자동 다시 연결은 없다(Δf). 이동 기록에는 루트마다 새로 뽑는 `log_id` 가 붙고, 클라이언트 커서의 `log_id` 가 다르면 쌍을 적용하지 않고 커서만 새 머리로 옮긴다.
+**루트 · 기본 경로** — `library.status` 가 `{daemon_id, root, state: unset|ok|missing, suggested_new}` 를 준다. `suggested_new` 는 **데이터 폴더 배치(`DataLayout`)의 메서드**로 낸다. `DataLayout` 은 루트가 **어디서 왔나**(`ENGRAM_DATA_DIR` 지정 · 디버그 기본 · 릴리즈 기본)를 함께 든다 — 릴리즈 기본(루트 = `<배포판>\data`) = 그 부모의 `library`, 그 밖 = 루트 **안**의 `library`. 디렉터리 이름으로 짐작하지 않는다. 그래서 `ENGRAM_DATA_DIR` 로 격리한 시험은 실제 폴더를 건드리지 않는다. [새로 만들기]는 이 경로를 미리 채울 뿐이고 내용은 넣지 않는다(Δ1). 루트를 바꾸면 에이전트 붙임 · 컬렉션은 그대로 두고 **같은 경로를 새 루트에서** 찾는다 — 없으면 「찾을 수 없음」. 색인과 이동 기록은 새로 시작하므로 루트를 넘는 자동 다시 연결은 없다(Δf). 이동 기록에는 루트마다 새로 뽑는 `log_id` 가 붙고, 클라이언트 커서의 `log_id` 가 다르면 쌍을 적용하지 않고 커서만 새 머리로 옮긴다.
 
 ### 1-5. agent — 프로필 · 실행 재료 포트 · manager · backend 번역
 
@@ -179,28 +179,28 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 |---|---|
 | `presets: Vec<AttachedPreset { path, relinked_from }>` | 붙은 프리셋(순서 있음) — 기본 제공 `engram:/backend/*` 도 여기 |
 | `default_preset: bool` | 「기본」 칸 — 만들 때 `true`(R32) |
-| `workspace: Option<PathBuf>` | 작업 폴더. `None` = 실행 때 정한다(R34 · D3). 디스크에는 **옛 키 `cwd` 를 그대로 쓴다**(아래 「호환」) |
 | `backend_args: BTreeMap<백엔드 낱말, Vec<String>>` | 패스스루 인자를 **백엔드별로** — 백엔드가 바뀌어도 claude 인자가 codex 로 넘어가지 않는다 |
 | `codex_files: Option<bool>` | codex 터미널 + 사용자 폴더의 파일 만들기 대답(R37). LLM 이 만든 codex 터미널 = `Some(false)`(Δ9) |
 | `generated_paths: Vec<PathBuf>` | Engram 이 작업 폴더에 만든 파일 · 정션(codex 터미널). 걷는 조건은 아래 「생성물 소유」 |
-| `launched_workspace: Option<PathBuf>` | 지금 저장된 세션을 만든 실행의 워크스페이스 — 다르면 새 대화(아래 전처리) |
 | `preset_schema: u32` | 이주 표식 — 0 이면 읽을 때 이주한다 |
 
+작업 폴더 `cwd` 는 지금 그대로다 — 필수 · 만들 때 선택 · 디스크 키 · wire 모양 불변(작업 폴더 부분 = §8).
+
 - **`command`(Claude/Codex/Shell + `extra_args` + `output_format`)** 는 디스크 · wire 모양을 그대로 두고 **해석 결과에서 파생하는 값**이 된다 — 변형 = 해석된 백엔드, 모드(JSON/터미널) = 에이전트 값(D5). 낱말 → 변형 대응은 `backend::command_for(word, output_format, args)` dispatch 한 곳이다(ADR-0004 — manager 는 변형을 모른다). **인자의 권위는 `backend_args`** 다: `command.extra_args` 는 내림용으로 지금 백엔드의 인자를 **비춰 쓸 뿐**이고, 읽을 때 `backend_args` 가 있으면 무시한다. `CreateProfile`(wire) · `agent.new` 로 들어온 `extra_args` 는 그 백엔드의 `backend_args` 칸으로 옮겨 넣는다.
-- **`display_name` 고정** — 만들 때와 이주 때 `None` 이면 그때의 표시 이름을 박는다. 이름이 `cwd` basename 에서 파생되던 길이 워크스페이스(비어 있거나 나중에 Engram 폴더로 채워짐)를 따라 바뀌면 우편 주소 · 트리 이름이 말없이 바뀐다.
+- **`display_name` 고정** — 만들 때와 이주 때 `None` 이면 그때의 표시 이름을 박는다. 이름이 `cwd` basename 에서 파생되던 길은 작업 폴더가 바뀌면 우편 주소 · 트리 이름을 말없이 바꾼다 — 이번 판엔 작업 폴더가 바뀌는 길이 없지만(§8 이 연다) 칸은 이 단계에서 먼저 고정한다.
 - **새 프로필 생성자 하나** — `AgentProfile::new`(지금 `SpawnByCwd` · 스모크 bin · `CreateProfile` 이 이미 지나는 그 생성자)가 기본값을 단다: `default_preset = true` · `presets = [backend::builtin_backend_preset(&command)]`(backend dispatch — claude/codex 는 그 기본 제공 프리셋, Shell 은 없음) · `backend_args = {그 백엔드: 받은 extra_args}` · `preset_schema = 1`. `agent.new` · wire `CreateProfile` · `SpawnByCwd` · 스모크 bin · 이주가 모두 이 한 길로 같은 기본값을 얻는다(이주는 같은 dispatch 를 부른다).
-- **`merge_preserving_live` 보존 칸에 더한다**(「런타임이 저자인 칸」) — `presets` · `default_preset` · `workspace` · `codex_files` · `backend_args` · `generated_paths` · `launched_workspace` · 맞춰진 `command` 변형. 이 칸들의 저자는 프리셋 명령 · 실행 전처리이지 spawn 이 뜬 옛 사본이 아니다.
+- **`merge_preserving_live` 보존 칸에 더한다**(「런타임이 저자인 칸」) — `presets` · `default_preset` · `codex_files` · `backend_args` · `generated_paths` · 맞춰진 `command` 변형. 이 칸들의 저자는 프리셋 명령 · 실행 전처리이지 spawn 이 뜬 옛 사본이 아니다.
 
-**이주(Δ1 · Δh)** — `preset_schema == 0` 인 프로필을 읽을 때: `default_preset = true` · `presets = [engram:/backend/<지금 백엔드>]` · `workspace = Some(옛 cwd)` · `launched_workspace = Some(옛 cwd)`(지금 세션을 이어받을 수 있게) · `backend_args = {지금 백엔드: 옛 extra_args}` · `display_name` 고정 · codex 터미널이면 `codex_files = Some(false)`(지금 codex 터미널 에이전트는 전부 사용자 폴더다 — 파일 안 만듦 · 프라이밍만, 지금 동작과 같다). Shell 에이전트는 프리셋을 받지 않는다(해석 대상 아님). 다음 저장에 표식이 1 로 앉는다.
+**이주(Δ1 · Δh)** — `preset_schema == 0` 인 프로필을 읽을 때: `default_preset = true` · `presets = [engram:/backend/<지금 백엔드>]` · `cwd` 그대로(지금 세션을 이어받는다) · `backend_args = {지금 백엔드: 옛 extra_args}` · `display_name` 고정 · codex 터미널이면 `codex_files = Some(false)`(지금 codex 터미널 에이전트는 전부 사용자 폴더다 — 파일 안 만듦 · 프라이밍만, 지금 동작과 같다). Shell 에이전트는 프리셋을 받지 않는다(해석 대상 아님). 다음 저장에 표식이 1 로 앉는다.
 
-**호환 · 내림(정직하게)** — 새 빌드는 `cwd` 키를 계속 쓴다(`workspace == None` 이면 빈 문자열). 옛 빌드는 모르는 칸을 무시하므로(`deny_unknown_fields` 없음 — 확인함) 새 `agents.json` 을 **읽는다**. 그러나 ① 옛 빌드가 다시 저장하면 새 칸이 전부 사라지고, 다시 새 빌드로 올리면 표식이 없어 이주가 다시 돌아 **붙인 프리셋 · 다른 백엔드의 인자를 잃는다**(기본 + 지금 백엔드의 기본 제공 프리셋으로 돌아간다) ② 빈 `cwd` 인 에이전트를 옛 빌드가 띄우면 어떻게 되는지는 재지 않았다(아마 실패). 내림을 지원하지 않는다는 것은 이 손실을 받아들인다는 뜻이다.
+**호환 · 내림(정직하게)** — 새 빌드는 `cwd` 키를 지금 그대로 쓴다. 옛 빌드는 모르는 칸을 무시하므로(`deny_unknown_fields` 없음 — 확인함) 새 `agents.json` 을 **읽는다**. 그러나 옛 빌드가 다시 저장하면 새 칸이 전부 사라지고, 다시 새 빌드로 올리면 표식이 없어 이주가 다시 돌아 **붙인 프리셋 · 다른 백엔드의 인자를 잃는다**(기본 + 지금 백엔드의 기본 제공 프리셋으로 돌아간다). 내림을 지원하지 않는다는 것은 이 손실을 받아들인다는 뜻이다.
 
 **포트(`launch.rs` 신설)** — 데몬이 꽂는다. 기본 구현 `NoopLaunchKits` 는 「지금과 같은 결과」(백엔드 = 명령 변형, 지침 = 프라이밍 파일 그대로)를 내고 **argv 가 바이트 단위로 같다**(`--system-prompt-snapshot off` 도 안 붙는다 — 아래 번역 표).
 
 - `trait LaunchKitSource { fn check(&self, profile, origin: LaunchOrigin) -> Result<LaunchPlan, LaunchBlocked>; fn prepare(&self, plan, id, epoch, priming: Option<&Path>) -> Result<LaunchKit, String>; fn release(&self, id, epoch); }` — `check` 는 프로필을 고치지 않고, 무인 실행의 기본값 · 맞춰야 할 칸을 `LaunchPlan.profile_changes` 로 돌려준다(포트가 프로필 저장소를 직접 만지지 않는다).
 - `LaunchPlan` = 해석된 백엔드 낱말 · 모델 · 지침 원천 목록 · 스킬(이름 · 절대 폴더) · 그 백엔드 원문 목록 · 프라이밍 포함 여부 · 경고 · 프로필 변경 · `real: bool`(Noop = false).
 - `LaunchKit` = `LaunchPlan` + 휘발 폴더 · 합친 지침 파일 경로 · 스킬 목록(절대 경로).
-- `LaunchBlocked { reasons: Vec<BlockReason> }` — 종류가 있는 사유(`NeedsWorkspace` · `NeedsCodexFilesAnswer` · `NoBackend` · `Conflict` · `Missing` · `Broken` · `RelinkUnconfirmed` · `LibraryUnavailable` · `CodexFilesBlocked`).
+- `LaunchBlocked { reasons: Vec<BlockReason> }` — 종류가 있는 사유(`NeedsCodexFilesAnswer` · `NoBackend` · `Conflict` · `Missing` · `Broken` · `RelinkUnconfirmed` · `LibraryUnavailable` · `CodexFilesBlocked`).
 
 **manager 실행 흐름** — 두 덩이로 가른다.
 
@@ -208,28 +208,26 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 
 0. **명부에 없는 id 를 먼저 넣는다** — wire `SpawnByCwd`(`connection_core.rs:1530-1543`) · 스모크 bin(예 `bin/priming_smoke.rs:168-179`)은 명부에 없는 프로필로 `spawn_agent` 를 부른다. 그래서 `register_for_spawn` 의 **「없을 때 넣는」 부분**(용량 검사 · 이름 배정(`display_name` 고정) · upsert)을 `ensure_registered` 로 떼어 전처리 **앞**으로 옮긴다. 「있을 때 갱신하는」 부분과 나머지 일은 지금 자리에 남는다. 그래서 전처리는 늘 **명부에 있는 항목**을 고친다.
 
-1. `kits.check(명부에서 읽은 프로필, origin)` — 호출자가 넘긴 사본이 아니라 **예약 뒤 명부에서 다시 읽은 값**으로 점검한다. `origin` = **누가 실행을 냈나**(Δg): `Interactive`(화면 — wire `Spawn` · 활성화) 또는 `Unattended`(버스 `agent.spawn` · 제어 CLI · 부팅 자동 복원). 막히면 `PtyError::SpawnFailed(사유 문장)`로 끊고 `failed_reason` 에 남긴다(지금 실패 표시 길). 화면은 실행 전에 `agent.launchCheck` 로 같은 사유를 구조로 받아 대화상자를 띄운다(§1-7). `Unattended` 에서 워크스페이스가 없으면 Engram 폴더를, codex 터미널 + 사용자 폴더의 파일 대답이 없으면 「안 만듦 · 프라이밍만」을 채운다(3차 델타 — 저장되고 에이전트 슬롯 머리에 보인다).
+1. `kits.check(명부에서 읽은 프로필, origin)` — 호출자가 넘긴 사본이 아니라 **예약 뒤 명부에서 다시 읽은 값**으로 점검한다. `origin` = **누가 실행을 냈나**(Δg): `Interactive`(화면 — wire `Spawn` · 활성화) 또는 `Unattended`(버스 `agent.spawn` · 제어 CLI · 부팅 자동 복원). 막히면 `PtyError::SpawnFailed(사유 문장)`로 끊고 `failed_reason` 에 남긴다(지금 실패 표시 길). 화면은 실행 전에 `agent.launchCheck` 로 같은 사유를 구조로 받아 대화상자를 띄운다(§1-7). `Unattended` 에서 codex 터미널 + 사용자 폴더의 파일 대답이 없으면 「안 만듦 · 프라이밍만」을 채운다(3차 델타 — 저장되고 에이전트 슬롯 머리에 보인다).
    - **실행 직전 설정 검사(모델 호출 없음 · 사용자 2026-10-17)** — claude = `claude --settings '<합친 json>' doctor` — 무효여도 종료 코드 0 이라 「Invalid settings」 줄을 파싱한다 · codex = 모델 · 강도 값을 `codex debug models` 목록과 대조. 실패 = 막힘 사유(⛔ · 이유) — `agent.launchCheck` 에도 실린다. codex 모르는 키는 ⚠ 만(`--strict-config` 안 씀). 실행 중 오류(종료 코드 + stderr)도 그 설정 행을 ⛔ 로 표시한다. 필수인 이유 = claude 는 값 하나의 타입만 틀려도 `--settings` 전체를 종료 코드 0 · 로그 없이 버린다(실측).
-2. **맞추기 — 명부 변경 한 번(비교-교체)** — 1 에서 읽은 뒤 `presets` · `default_preset` · `workspace` 가 **바뀌지 않았을 때만** 적용한다. 바뀌었으면 다시 읽어 1 부터 **한 번** 더 하고, 또 바뀌었으면 「실행 준비 중 프리셋 · 워크스페이스가 계속 바뀌었다 — 다시 시도하라」로 끊는다. `backend::command_for` 로 해석된 백엔드의 변형 · 그 백엔드 인자를 고른다. 바뀔 칸 전부(무인 기본값 · 맞춰진 변형 · `launched_workspace` · 세션 놓기)를 **`ProfileRegistry` 의 mutate 한 번**으로 **지금 명부 값에 대해** 적용한다 — 예: `workspace` 는 아직 `None` 일 때만 채운다(그 사이 사람이 정했으면 그 값을 쓴다). **백엔드가 저장된 변형과 다르거나 워크스페이스가 `launched_workspace` 와 다르면** 같은 mutate 안에서 `release_session_id` 와 같은 일(저장된 세션을 옛 목록으로)을 하고 `launched_workspace` 를 새 값으로 적는다(R33 · claude 세션은 작업 폴더에 묶인다). Engram 폴더는 **에이전트 id 로만** 정하고(`<workspaces>\<agent-id>` — 바뀌는 이름을 쓰지 않는다) 있으면 그대로 쓴다(멱등 생성).
-3. **명부에서 다시 읽기** — 그 mutate 가 돌려준 프로필(= 명부의 지금 값)에서 이후 모든 단계(등록 · 화신 표식 · canonicalize · 세션 id · 모드)를 파생한다. 세션을 놓았으면 호출자가 `Resume` 을 청했어도 `Fresh` 로 간다(결말은 `Started` — 지금 `resume_no_fallback` 의 같은 결말 길). 그래서 첫 제출 래치(ADR-0226)는 맞춰진 백엔드 · 워크스페이스와 어긋나지 않는 id 만 본다.
+2. **맞추기 — 명부 변경 한 번(비교-교체)** — 1 에서 읽은 뒤 `presets` · `default_preset` 이 **바뀌지 않았을 때만** 적용한다. 바뀌었으면 다시 읽어 1 부터 **한 번** 더 하고, 또 바뀌었으면 「실행 준비 중 프리셋이 계속 바뀌었다 — 다시 시도하라」로 끊는다. `backend::command_for` 로 해석된 백엔드의 변형 · 그 백엔드 인자를 고른다. 바뀔 칸 전부(무인 기본값 · 맞춰진 변형 · 세션 놓기)를 **`ProfileRegistry` 의 mutate 한 번**으로 **지금 명부 값에 대해** 적용한다 — 예: `codex_files` 는 아직 `None` 일 때만 채운다(그 사이 사람이 정했으면 그 값을 쓴다). **백엔드가 저장된 변형과 다르면** 같은 mutate 안에서 `release_session_id` 와 같은 일(저장된 세션을 옛 목록으로)을 한다(R33). (작업 폴더 맞추기 · Engram 폴더 만들기 = §8)
+3. **명부에서 다시 읽기** — 그 mutate 가 돌려준 프로필(= 명부의 지금 값)에서 이후 모든 단계(등록 · 화신 표식 · canonicalize · 세션 id · 모드)를 파생한다. 세션을 놓았으면 호출자가 `Resume` 을 청했어도 `Fresh` 로 간다(결말은 `Started` — 지금 `resume_no_fallback` 의 같은 결말 길). 그래서 첫 제출 래치(ADR-0226)는 맞춰진 백엔드와 어긋나지 않는 id 만 본다.
 
 *(나) 기동 — 지금 순서 그대로에 셋을 끼운다.*
 
 4. 제어 채널 `provision`(지금 그대로 — 프라이밍 경로가 여기서 나온다).
 5. `kits.prepare(plan, id, epoch, endpoint.priming_file)` — 데몬이 휘발 폴더에 합친 지침(기본이 붙었으면 프라이밍 + 프리셋 지침 순서대로)를 쓰고 스킬 목록을 낸다. **실행 재료 전용 RAII 가드(`LaunchKitGuard`)** 가 바로 무장된다 — `ProvisionGuard` 와 독립이고, 스폰이 끝나기 전 어디서 실패하든 `kits.release(id, epoch)` 를 부른다.
-6. `backend::materialize(command, kit, workspace, fs)`(새 dispatch) — 백엔드만 아는 디스크 배치(claude 플러그인 폴더 정션 · codex 작업 폴더 파일). 쓰기는 **배치 포트 `LaunchFs`**(`write_file` · `link_dir` · `unlink_dir` · `remove` · `exists`)로만 한다 — 운영 = std + `platform::fs`, 시험 = 메모리 가짜(디스크 없이 backend 배치를 잰다). 작업 폴더에 만든 것은 `generated_paths` 로 돌려줘 프로필에 남고, 스폰이 실패하면 가드가 이번에 만든 것을 걷는다. 결과 = `LaunchArtifacts`(그 백엔드가 쓸 경로 · 인자 조각).
+6. `backend::materialize(command, kit, cwd, fs)`(새 dispatch) — 백엔드만 아는 디스크 배치(claude 플러그인 폴더 정션 · codex 작업 폴더 파일). 쓰기는 **배치 포트 `LaunchFs`**(`write_file` · `link_dir` · `unlink_dir` · `remove` · `exists`)로만 한다 — 운영 = std + `platform::fs`, 시험 = 메모리 가짜(디스크 없이 backend 배치를 잰다). 작업 폴더에 만든 것은 `generated_paths` 로 돌려줘 프로필에 남고, 스폰이 실패하면 가드가 이번에 만든 것을 걷는다. 결과 = `LaunchArtifacts`(그 백엔드가 쓸 경로 · 인자 조각).
 7. `build_command_spec(…, control, &artifacts)` · `open_spawn(…, &artifacts)` — 두 함수가 실행 재료 descriptor 를 하나 더 받는다(`ControlEndpoint` 와 같은 방식).
 8. 회수(reaper · kill)에서 `kits.release(id, epoch)` — 휘발 폴더를 지운다. 데몬 부팅 때 남은 `launch\` 를 쓸어 낸다.
 
 **생성물 소유(codex 터미널)** — 만드는 것마다 **확인 가능한 소유 표식**을 단다: `AGENTS.override.md` 첫 줄 `<!-- engram:generated agent=<agent-id> sha=<내용 해시> -->` · 정션 이름 `engram-<agent-id 앞 8자>-<스킬>`. 걷기는 표식이 있고 **내용이 Engram 이 만든 그대로일 때만**(파일 = 해시 일치 · 정션 = 대상이 그 스킬 폴더) 하고, 아니면 남기고 경고한다(사용자가 손댄 것을 지우지 않는다). 전처리는 **기존 파일 검사(R37 막힘)보다 먼저** 지난 실행의 남은 생성물을 이 규칙으로 정리한다(스폰 도중 죽은 경우 포함). 에이전트가 떠 있는 동안의 떼기 · 백엔드 바꾸기는 걷기를 **멈출 때 · 다음 실행 전처리로 미룬다**(돌고 있는 codex 가 읽는 파일을 빼지 않는다).
 
-**워크스페이스 바꾸기** — `agent.setWorkspace` 는 **떠 있는 에이전트에는 `CONFLICT`** 로 거절한다(멈춘 뒤에만 바뀐다 — 돌고 있는 세션의 작업 폴더를 말없이 옮기지 않는다). 바뀐 값은 다음 실행 전처리 2 가 새 대화로 맞춘다.
-
 **backend 번역** (`backend/claude/launch.rs` · `backend/codex/launch.rs` 신설 — 플래그 지식은 여기 둘뿐)
 
 | 재료 | claude(두 모드) | codex JSON(app-server) | codex 터미널 |
 |---|---|---|---|
-| 지침 | `--append-system-prompt-file <합친 파일>`(지금 프라이밍 자리를 대신) + **실 재료(`real`)일 때만** `--system-prompt-snapshot off`(이어받기에도 새 글 — 실측 확실 · 같은 글이면 캐시 손해 없음 실측) | 새 대화 = `thread/start.developerInstructions`(실측 확실). 이어받기 = 지침 해시가 지난 적용값과 다를 때만 첫 턴 `additionalContext`(실험 API — T6) | Engram 폴더 또는 「만든다」 대답 = 작업 폴더 `AGENTS.override.md`(머리에 생성 표식 줄 · 실행마다 결정적으로 다시 씀 · 그 폴더에 사용자 `AGENTS.md` 가 있으면 그 내용을 먼저 옮겨 싣는다 — 아래 위험). 「안 만든다」 = 프라이밍만 `-c developer_instructions=`(지금 길 · 명령줄 8191자 한도라 프리셋 지침은 싣지 않고 경고) |
+| 지침 | `--append-system-prompt-file <합친 파일>`(지금 프라이밍 자리를 대신) + **실 재료(`real`)일 때만** `--system-prompt-snapshot off`(이어받기에도 새 글 — 실측 확실 · 같은 글이면 캐시 손해 없음 실측) | 새 대화 = `thread/start.developerInstructions`(실측 확실). 이어받기 = 지침 해시가 지난 적용값과 다를 때만 첫 턴 `additionalContext`(실험 API — T6) | 「만든다」 대답 = 작업 폴더 `AGENTS.override.md`(머리에 생성 표식 줄 · 실행마다 결정적으로 다시 씀 · 그 폴더에 사용자 `AGENTS.md` 가 있으면 그 내용을 먼저 옮겨 싣는다 — 아래 위험). 「안 만든다」 = 프라이밍만 `-c developer_instructions=`(지금 길 · 명령줄 8191자 한도라 프리셋 지침은 싣지 않고 경고) |
 | 스킬 | 휘발 폴더 `engram\skills\<이름>` = 라이브러리 스킬 폴더로 가는 디렉터리 정션 → `--plugin-dir <휘발>\engram` → 이름 `engram:<스킬>`(T7 · 플러그인 폴더 적재는 실측 확실, 정션 따라가기는 미측) | 같은 정션 폴더를 `skills/extraRoots/set`(프로세스마다 · 실측 가능성 높음) | 작업 폴더 `.agents\skills\engram-<id8>-<이름>` 정션(codex 가 정션을 따라감 — 실측 확실). 지난 것은 「생성물 소유」 규칙으로 먼저 걷는다 |
 | 원문 설정 | 데몬의 제어 settings 조각(`allowedMcpServers`) + 프리셋 claude 원문들을 추가한 순서로 합쳐 휘발 폴더 `settings.json` 하나 → `--settings` 하나. `allowedMcpServers` 는 **Engram 값이 권위** — 프리셋이 그 키를 쓰면 버리고 경고(T10 · ADR-0109 결정 9 대체) | 프리셋 codex 원문 줄을 `-c` 로 하나씩 · 패스스루 뒤 · 우리 덮어쓰기 앞 | 같음 — 명령줄 가드에 걸리는 줄(따옴표 등)은 빼고 경고 |
 | 모델 | `--model <m>`(패스스루 뒤 · 변이 그룹 앞 · 덮으면 경고) · 없으면 안 싣는다(R35) | `-c model=<m>`(TOML 로 안 읽히면 문자 그대로 — `--help` 원문) | 같음 |
@@ -265,7 +263,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 
 | 이름 | 하는 일 | 답 / 비고 |
 |---|---|---|
-| `library.status` | 루트 · 상태 · 데몬 신원 · 새로 만들기 제안 경로 · Engram 폴더 위치 | R8 · R9 |
+| `library.status` | 루트 · 상태 · 데몬 신원 · 새로 만들기 제안 경로 | R8 · R9 |
 | `library.setRoot {path, create?}` | 루트 바꾸기(`create` = 없으면 만든다) | R9 — 화면 머리 메뉴 · 설정 · LLM 같은 명령 |
 | `library.folders` | 폴더 트리 전체 — 폴더 + 스킬 폴더(스킬 표시 — 트리에 스킬 아이콘 · 사용자 2026-10-17) | 트리 칸 |
 | `library.refresh {folder?}` | 그 폴더(하위 포함) 다시 훑기 · 생략 = 전체 — 트리 우클릭 「새로 고침」 · 에이전트에게 부르라고 권한다(2026-10-16 · 권고 — 2026-10-17) | 바뀐 항목 수 + 이번에 다시 읽은 파일의 문제 — 「오류 — <경로> · <줄> · <이유>」(깨진 종류 파일 · 모르는 `kind`) · 「kind 없음 — 목록에 안 보임 — <경로>」(다시 읽은 `.yaml` 에 `kind` 없음 — 평소 목록엔 말없이 숨지만 부른 쪽엔 알린다) · 「찾을 수 없음 — <프리셋 경로> → <없는 경로>」 — 코드 + 인자로(R49 · 사용자 2026-10-17) |
@@ -281,12 +279,10 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 | `preset.add {path, items, after?}` · `preset.remove {path, items}` · `preset.reorder {path, section, order, baseRev}` | 추가 · 빼기 · 순서 — 최신 파일에 적용(흐름 ③) | `add` · `remove` 는 낡은 판이어도 멱등 · `reorder` 는 `baseRev` 가 다르면 `CONFLICT` · 여러 개 추가는 `{added, skipped}`(Δ7) · 백엔드가 바뀌는 에이전트를 싣는다(Δ4) |
 | `agent.presets {agent}` | 에이전트의 「기본」 · 프리셋 칸 · 해석된 백엔드 · 모드 · 충돌 · 경고 | R31 |
 | `agent.attachPreset {agent, presets, after?}` · `agent.detachPreset {agent, presets, yes?}` · `agent.reorderPresets {agent, order, baseRev}` | 붙이기 · 떼기 · 순서 | 프리셋만 받는다(Δ7) · 부분 적용 한 줄 결과 · 해석된 백엔드가 바뀌면 「다음 실행은 새 대화」를 싣는다 · 기본 제공 백엔드는 떼지 않고 사용할 수 없음 상태로 둔다(3차 델타). 기본 떼기는 `yes` 없이 `CONFLICT`(Δ9) |
-| `agent.setWorkspace {agent, path?, engramFolder?}` | 워크스페이스 정하기 / Engram 폴더 만들기 | R34 · 떠 있으면 `CONFLICT`(멈춘 뒤에만) |
 | `agent.setCodexFiles {agent, allow}` | codex 터미널 파일 대답 | R37 |
 | `agent.launchCheck {agent}` | 막힘 사유(구조) · 경고 | 화면 대화상자의 재료 |
-| `agent.new` (바뀜) | `backend` + 모드 + `cwd?`(없으면 Engram 폴더 — R34) + `presets?` + `files?`(codex 터미널 · 기본 = 안 만듦 — Δ9) | 옛 `preset`(작업 폴더 북마크 id) 칸은 걷는다 |
+| `agent.new` (바뀜) | `backend` + 모드 + `cwd` + `presets?` + `files?`(codex 터미널 · 기본 = 안 만듦 — Δ9) | 옛 `preset`(작업 폴더 북마크 id) 칸은 걷는다 — 그래서 지금의 「`cwd` · `preset` 중 정확히 하나」 가 「`cwd` 필수」 로 좁혀진다(작업 폴더 부분 = §8) |
 | `agent.spawn` (뜻 그대로) | 버스 · CLI 실행 = `Unattended` | 대화상자 없음 · 기본값을 채워 저장(Δg · 3차 델타) |
-| `workspace.getRoot` · `workspace.setRoot {path}` | Engram 폴더 위치 | 새 에이전트에만(R34) |
 
 **셸 명령(셸 블록 선언 · catalog 15 → 16)**
 
@@ -308,7 +304,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 ### 1-8. wire · 세대
 
 - **옛 프리셋 wire 를 걷는다** — `ListPresets` · `CreatePreset` · `DeletePreset` · `RenamePreset` · `PresetListUpdated` · `PresetList` · 도메인 `Preset` · `PresetId`. `PROTOCOL_VERSION` 7 → 8.
-- **`cwd` 의 wire · 화면 모양** — `CreateProfile.cwd` 는 선택이 된다(만들 때 폴더를 안 묻는다). wire `AgentProfile.cwd` · `AgentInfo.cwd` · 버스 `AgentRow.cwd` 는 문자열 그대로 두고 **빈 문자열 = 아직 작업 폴더 없음**으로 정한다(칸 모양을 안 바꿔 생성물 · 옛 소비자가 그대로 읽는다). 화면은 빈 값을 「작업 폴더 없음 · 실행 때 정함」으로 그리고, 이름은 고정된 `display_name` 을 쓴다(빈 basename 으로 파생하지 않는다). 이 변경은 3 단계(§5)에 함께 든다.
+- **`cwd` 의 wire · 화면 모양은 그대로** — `CreateProfile.cwd` 필수 · wire `AgentProfile.cwd` · `AgentInfo.cwd` · 버스 `AgentRow.cwd` 의 뜻도 지금과 같다(작업 폴더 부분 = §8).
 - 라이브러리용 새 wire 메시지는 없다 — 전부 버스 봉투(§1-7).
 - agent catalog 6 → 7 · shell catalog 15 → 16 — **선언을 처음 바꾸는 단계에서 올린다**(1 단계: 옛 `agent.new` 칸 · `SlotContentKind` 의 `preset_palette` 를 걷으므로 둘 다). 같은 브랜치의 뒤 단계는 릴리스 전이라 같은 번호를 쓰되 생성물(`commands.schema.json` · 바인딩)은 단계마다 다시 굽는다. 병행 브랜치가 먼저 올렸으면 머지 때 그 +1.
 
@@ -338,20 +334,20 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 | `AddItemsPopover` | 「+ 추가」 · 칸 `+` 검색 팝오버(R25) — 열면 검색칸 커서 · 체크 = 즉시 추가 · 이미 추가됨/순환/충돌 비활성 + 이유 · 에이전트 대상이면 프리셋만 + 맨 위 고정 「기본 제공」 목록(Δa) | @radix-ui/react-popover · @tanstack/react-virtual |
 | `DetailFlyout` | 편집 칸 줄 상세 — 창의 레이아웃 뿌리에 포털로 그리고 슬롯 오른쪽 가장자리에 붙여 옆 슬롯 위에 겹침 · 창 끝이면 일부 잘림 · **전부 창 밖이면 슬롯 안 오른쪽 가장자리에서 안쪽으로 겹침**(D11 · Δi) · 같은 줄 = 닫힘 · Esc(R29 · E1) | — |
 | `LibraryDnd` | 목록 → 트리 끌어 놓기(이동) 문맥 | @dnd-kit/core |
-| `DeleteConfirm` · `RelinkPicker` · `WorkspaceAsk` · `CodexFilesAsk` · `DetachDefaultConfirm` | 확인 창들 | 기존 대화상자 꼴 |
+| `DeleteConfirm` · `RelinkPicker` · `CodexFilesAsk` · `DetachDefaultConfirm` | 확인 창들 | 기존 대화상자 꼴 |
 
 **단축키(R50)** — 라이브러리 슬롯 키는 기존 키 표(`src/commands/keybindings.ts` — 조합 → 명령, ADR-0055)에 넣고 **항목마다 Windows 키 · Mac 키를 따로 적는다**(VS Code 의 `mac:` · Spacedrive 의 `{macos, default}` 와 같은 꼴). OS 판정은 그 표 한 곳에서만 한다. 새 단축키 라이브러리는 들이지 않는다(Ctrl↔Cmd 바꾸기는 한 줄). 슬롯 포커스 안에서만 듣고 입력 칸이면 넘긴다(기존 포커스 가드 `isEditableTarget`). F5 · Ctrl+F · Alt+← → 는 웹뷰 기본 동작(다시 읽기 · 찾기 · 기록 이동)을 `preventDefault` 로 막고 우리 동작에 붙인다. react-arborist 가 내장한 Enter = 이름 바꾸기 · Backspace = 삭제는 탐색기 키와 부딪히므로 끄거나 덮는다.
 
 **데이터(요청형)** — `api/libraryClient.ts` 가 `agentClient.callCommand` 위의 타입 있는 얇은 층(인자 타입 = agent crate 생성 바인딩). `api/libraryQueries.ts` 가 TanStack Query 를 import 하는 **유일한 파일**이다(T1) — 키 = `[daemonId, 종류, 인자]`. 슬롯 열기 · 포커스(슬롯 포커스 이벤트) · 새로고침 · 폴더 이동 때 그 슬롯의 쿼리를 무효화해 다시 받고, 같은 계기에 `library.moves {since}` → 새 쌍이 있으면 `collection.applyMoves` 를 부른다(Δc). 창 포커스 자동 재요청 · 주기 재요청은 끈다(R19). 편집 답은 그 자리의 쿼리 데이터를 바로 바꾼다. 다른 슬롯은 자기 포커스 때 맞춰진다.
 
-**표시** — 「다시 연결됨 · 이전 경로 <경로>」 표시는 편집 칸 줄 · 목록 행 상태 · 상세의 참조 · 에이전트 슬롯 머리에 같은 부품으로 보인다(Δd). 확인 방식(D10)이면 같은 자리에 「다시 연결할까요? · [확인]」. 기본 제공 백엔드를 사용할 수 없으면 그 줄은 흐린 「사용할 수 없음」(3차 델타). 에이전트 슬롯 머리 = 이름 + 해석된 백엔드 · 모드 + 워크스페이스(버스 · CLI 실행이 Engram 폴더를 채웠으면 그 사실) + codex 파일 대답(R31 · 3차 델타).
+**표시** — 「다시 연결됨 · 이전 경로 <경로>」 표시는 편집 칸 줄 · 목록 행 상태 · 상세의 참조 · 에이전트 슬롯 머리에 같은 부품으로 보인다(Δd). 확인 방식(D10)이면 같은 자리에 「다시 연결할까요? · [확인]」. 기본 제공 백엔드를 사용할 수 없으면 그 줄은 흐린 「사용할 수 없음」(3차 델타). 에이전트 슬롯 머리 = 이름 + 해석된 백엔드 · 모드 + codex 파일 대답(R31 · 3차 델타 · 워크스페이스 표시 = §8).
 
 **보기 상태** — 권위는 셸(§1-9). `store/libraryViewStore.ts`(zustand)는 셸이 쏜 `library-view:updated` 를 받아 둔 **그리기용 사본**이고, 몸짓은 `libraryView.*` 를 invoke 한다. 끄는 중의 칸 폭 같은 순간 값만 웹뷰에 머물고 끝난 값을 `libraryView.setLayout` 으로 보낸다.
 
 **메뉴 · 진입**
 - 빈 슬롯 「새 콘텐츠 ▸ 라이브러리 ▸ 1~4」 — 서브메뉴 한 단 더(ADR-0065 덧붙임 · §3) · 「프리셋 팔레트」 항목은 걷는다.
 - 에이전트 트리 줄 메뉴 「프리셋…」 → `agentPresets.open`(인라인 메뉴지만 명령 id 로 부른다).
-- 에이전트 트리 판 메뉴 「에이전트 생성 ▸ claude/codex × JSON/터미널」은 그대로 두고, 만들 때 폴더를 묻지 않는다 — 데몬이 기본 + 맞는 기본 제공 백엔드 프리셋을 붙인다(Δ1). 활성화 전 `agent.launchCheck` → `NeedsWorkspace` 면 「어디서 일할까요?」 · `NeedsCodexFilesAnswer` 면 파일 질문.
+- 에이전트 트리 판 메뉴 「에이전트 생성 ▸ claude/codex × JSON/터미널」은 그대로 두고, 만들 때 지금처럼 폴더를 묻는다(기존 선택 창 — 작업 폴더 부분 = §8) — 데몬이 기본 + 맞는 기본 제공 백엔드 프리셋을 붙인다(Δ1). 활성화 전 `agent.launchCheck` → `NeedsCodexFilesAnswer` 면 파일 질문.
 - 폴더 돋보기(Δ6) — 에이전트 슬롯에선 마지막 만진 라이브러리 슬롯, 없으면 닫힌 번호 중 가장 작은 것 · 라이브러리 슬롯 칸 제목에선 **다른** 라이브러리 슬롯(같은 규칙, 자기 제외) · 그 종류로 `필터 ▾` 를 맞춘다(D7).
 
 ### 1-11. 시나리오
@@ -399,7 +395,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 |---|---|---|
 | D1 | 안에 든 프리셋의 지침이 **앞** | `resolve.rs` 펼침 순서 한 곳 |
 | D2 | 프리셋 칸도 끌어서 순서 | `EditorSection` 의 끌기 칸 목록 · `preset.reorder` 의 `section` 값 |
-| D3 | 워크스페이스 = 에이전트 값 | 프로필 `workspace` · `agent.setWorkspace` · 슬롯 머리 |
+| D3 | 미룸(작업 폴더 정리 — 다음 구현 · §8) | — |
 | D4 | Δ1 로 대체 — 만들 때 기본 + 기본 제공 백엔드 프리셋 | 프로필 생성자 · 이주 |
 | D5 | 모드 = 에이전트 값 | `AgentCommand.output_format` 그대로 |
 | D6 | 강도 = 백엔드 원문 칸 | 설정 파일 꼴 |
@@ -414,8 +410,8 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 - **T1 슬롯 데이터 받기 = TanStack Query** — 추천: 채택 · `libraryQueries.ts` 한 파일에 가둔다. 이유: 요청형 · 포커스 무효화 · 편집 답 반영 · 중복 요청 합치기를 그대로 준다(메모가 예정한 `/research` 는 **아직 안 돌렸다** — 원하면 이 결정 전에).
 - **T2 프리셋 파일의 손 주석** — 추천: Engram 이 고칠 때 사라짐을 받아들이고 그 사실을 적은 머리 주석을 Engram 이 늘 써 넣는다 · 메모는 `description` 칸. 이유: serde 왕복은 주석을 못 지키고, 주석 보존 crate 는 검증 안 됐다.
 - **T3 `model` 칸 둘 이상** — 추천: 충돌. 이유: 백엔드 둘 = 충돌과 같은 규칙 · 나중 것이 이기면 어느 모델인지 화면에 안 보인다.
-- **T4 Engram 폴더 기본 위치** — 추천: 릴리즈 `<배포판>\workspaces\<agent-id>` · 디버그 · `ENGRAM_DATA_DIR` = 데이터 루트 안 `workspaces\<agent-id>`(`DataLayout` 이 낸다) · 화면에는 고정된 이름을 보인다. 이유: 이름은 바뀌므로 id 로만 정해야 멱등 생성(있으면 재사용)이 서고, 프로그램 데이터와 작업물을 가르며 시험 격리가 폴더 하나로 된다.
-- **T5 설정 창이 코드에 없다**(R9 · R34 · E3) — 추천: 첫 판은 트리 머리 메뉴 · 명령(`library.setRoot` · `workspace.setRoot` · `settings.set`)만 · 설정 창은 별 작업. 이유: 설정 창은 이 기능보다 넓은 화면 설계다.
+- **T4 Engram 폴더 기본 위치** — 미룸(작업 폴더 정리 — §8 에 추천 그대로 옮겼다).
+- **T5 설정 창이 코드에 없다**(R9 · E3) — 추천: 첫 판은 트리 머리 메뉴 · 명령(`library.setRoot` · `settings.set`)만 · 설정 창은 별 작업. 이유: 설정 창은 이 기능보다 넓은 화면 설계다.
 - **T6 codex JSON 이어받기에서 바뀐 지침** — 추천: 지침 해시가 바뀐 때만 첫 턴 실험 API `additionalContext` 로 「바뀌었다」 + 새 글(backend/codex 안). 이유: R36 을 codex 에서 지키는 유일한 실측 길(공식 `developerInstructions` 는 이어받기에서 말없이 버려짐). 대안 = 새 대화까지 미반영 + 경고.
 - **T7 claude 스킬 싣는 길** — 추천: `--plugin-dir`(이름 `engram:review`). 대안 = `--add-dir`(접두 없음 · 네이티브 스킬과 이름이 겹치면 승자를 모른다). 이유: 사용자 `~/.claude/skills` 와 안 섞이고 적재가 실측됐다.
 - **T8 JSON 모드 모델 · 강도 선택 칸** — 코드에 없다(R35 는 있는 듯 적혀 있다). 추천: 이 기능의 **마지막 단계**(§5 14). 막지 않고(미리 선택됨 · 어느 출처 첫 메시지든 그 값), 모델 · 강도 둘 다 첫 메시지 전에 backend 요청으로 세션에 닿게 한다. **claude · codex 각각의 실측 확인이 그 단계의 수용 관문**이고, 안 되면 구현을 멈추고 사용자에게 돌아간다(R35 개정 또는 다른 길) — 칸을 조용히 끄거나 재기동하지 않는다. 이유: 프리셋 없이도 서는 독립 부분이다.
@@ -462,10 +458,10 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 | daemon `library::format` · `path` | 순수 · 골든 | YAML 왕복 골든 · 오류 줄 번호 · `LibPath` 거절 표(`..` · 앞 `/` · `\` · `:` · 빈 칸) · 접두 바꾸기 |
 | daemon `FsStore` · 기본 경로 · 구조 시험 | `tempfile` 임시 폴더 · `ENGRAM_DATA_DIR` · `connection_core` 구조 시험 | 실 훑기 · 원자적 쓰기 · 휴지통 · 정션(실 OS — `-- --test-threads=4` 줄) · 기본 경로가 루트 출처별로 갈림(`ENGRAM_DATA_DIR` = 루트 안) · `SpawnByCwd` 의 `spawn_agent` 가 `spawn_blocking` 창 안에서만 불림 |
 | platform `fs` | 실 OS | 휴지통으로 이동한 파일이 원래 자리에 없음(전용 STA 스레드 — 부르는 스레드가 MTA 여도) · 정션 만들기/걷기 · 진짜 폴더는 `unlink_dir` 가 거절 |
-| agent manager | `NoopLaunchKits` · 가짜 `LaunchKitSource` | Noop = 오늘과 바이트 같은 argv(회귀) · 막힘 = 스폰 안 함 + 제어 채널 미발급 · 없는 id 가 전처리 앞에 명부에 들어감 · 전처리가 예약 · 떠 있음 확인 뒤, 화신 표식 · 세션 파생 앞(순서 단언 — 기존 `squashed_production_body` 꼴) · 점검이 명부 값을 읽음 · 명부 변경이 mutate 한 번 · 비교-교체(그 사이 정해진 `workspace` 를 덮지 않음 · 한 번 다시 시도 뒤 실패) · 네 생성 길의 기본값이 같음 · Engram 폴더 = id 로 멱등 · 백엔드 · 워크스페이스 바뀜 = `release_session_id` 후 Fresh · 실행 재료 가드가 어느 실패 지점에서도 `release` · 생성물 걷기 |
+| agent manager | `NoopLaunchKits` · 가짜 `LaunchKitSource` | Noop = 오늘과 바이트 같은 argv(회귀) · 막힘 = 스폰 안 함 + 제어 채널 미발급 · 없는 id 가 전처리 앞에 명부에 들어감 · 전처리가 예약 · 떠 있음 확인 뒤, 화신 표식 · 세션 파생 앞(순서 단언 — 기존 `squashed_production_body` 꼴) · 점검이 명부 값을 읽음 · 명부 변경이 mutate 한 번 · 비교-교체(그 사이 정해진 `codex_files` 를 덮지 않음 · 한 번 다시 시도 뒤 실패) · 네 생성 길의 기본값이 같음 · 백엔드 바뀜 = `release_session_id` 후 Fresh · 실행 재료 가드가 어느 실패 지점에서도 `release` · 생성물 걷기 |
 | agent backend | 지금 `build_spec` 시험 꼴(argv 골든) + 메모리 `LaunchFs` | claude · codex 두 모드 × 재료 표(§1-5) · 순서 불변(`--allowedTools` 맨 끝 · 덮어쓰기는 패스스루 뒤) · `allowedMcpServers` 권위 · 명령줄 가드에 걸린 원문 줄 = 빠짐 + 경고 · codex 터미널 배치 · 사전 검사 · `AGENTS.md` 옮겨 싣기 · 소유 표식(표식 + 내용 일치일 때만 걷기 · 남은 생성물 정리가 사전 검사보다 먼저 · 떠 있는 동안 미룸) · 인자 권위(`backend_args` 가 있으면 `command.extra_args` 무시) |
 | agent 명령 | 기존 `command_declarations` · `command_alphabet` + 가짜 `LibraryCommandHost`(사용량 선례) | 선언 · 인자 검문 · `--yes` 불리언 · 포트로 넘김 |
-| 프로필 이주 · 호환 | 옛 `agents.json` 골든 | 기본 + 기본 제공 백엔드 붙음 · `cwd` → `workspace` · 인자 → 지금 백엔드 칸 · `display_name` 고정 · codex 터미널 = 파일 안 만듦 · 두 번 읽어도 같음 · 새 파일을 **옛 구조체**로 파싱해도 선다(`cwd` 키 유지) · `merge_preserving_live` 가 새 칸을 지킴 |
+| 프로필 이주 · 호환 | 옛 `agents.json` 골든 | 기본 + 기본 제공 백엔드 붙음 · `cwd` 그대로 · 인자 → 지금 백엔드 칸 · `display_name` 고정 · codex 터미널 = 파일 안 만듦 · 두 번 읽어도 같음 · 새 파일을 **옛 구조체**로 파싱해도 선다(`cwd` 키 유지) · `merge_preserving_live` 가 새 칸을 지킴 |
 | shell | 기존 `lib_unit` · `layout_commands` 하네스 | 새 슬롯 종류 영속 왕복 · `preset_palette` 접기 · `Library{n}` 중복 = 쓰기 길 `CONFLICT` · 복원 접기 · `library_views` 왕복 · `libraryView.*` 기록 규칙(R14) · 그 창에만 이벤트 · 컬렉션 파일 왕복 · `collection.applyMoves` 멱등 · 커서 `log_id` 바뀜 |
 | front | vitest + 가짜 `agentClient` | 정렬(R12) · ⇐ 활성(R24) · `PresetEditor` 재귀 읽기 전용(R27) · 칸 제목 단추 순서(R23) · 쿼리 무효화 계기 |
 | 실 CLI(로컬 · `#[ignore]` 또는 수동 — qa 「실 CLI 레인」) | 실 claude · codex | `--plugin-dir` 가 정션을 따라가나 · `--system-prompt-snapshot off` 이어받기 · `DISABLE_AUTOUPDATER` settings `env` · codex `extraRoots` 실제 턴 · codex 터미널 `AGENTS.override.md` |
@@ -480,8 +476,8 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 0. **ADR 박제**(사용자 결정 직후 · 코드 없음) — §7 · ADR-0061 · ADR-0070(프리셋 이름 부분)에 폐기 도장.
 1. `S21: refactor: 옛 프리셋(작업 폴더 북마크) 걷기` — `PresetPalette` · `presetCommands.ts` · 배경 우클릭 프리셋 피커 · `agentStore` 프리셋 · 옛 wire 여섯 · `PresetRegistry` · `presets.json` 저장소 · `agent.new` 의 `preset` 칸 · `SlotContent::PresetPalette`(옛 값 → 빈 슬롯). `PROTOCOL_VERSION` 7 → 8 · agent catalog 6 → 7 · shell catalog 15 → 16(`SlotContentKind` 이 바뀐다 — 선언을 바꾸는 이 단계에서). **먼저 걷는 이유** = 이름 `preset` 의 두 뜻 공존을 없애고 `AgentManager` 생성자 자리를 새 포트에 비운다(걷어도 트리 판 메뉴로 만들기는 선다).
 2. `S21: feat(platform): 휴지통 · 디렉터리 링크 · 경로 비교` — `IFileOperation`(기존 `windows` 0.58 feature 추가) · `junction`(해석된 `windows-sys` 판을 `cargo tree` 로 확인) · 게이트 4g 목록(필요하면 4f 명단).
-3. `S21: refactor(agent): 프로필 workspace(Option) · 프리셋 칸 · 백엔드별 인자 · 이주` — `cwd` → `workspace`(디스크 키는 `cwd` 유지 · 빈 문자열 = 없음) · `backend_args` · `display_name` 고정 · `merge_preserving_live` 보존 칸 · wire `cwd` 빈 문자열 뜻 · 화면의 빈 작업 폴더 표시(§1-8). `None` 이면 지금처럼 스폰 실패(사유 문장). 기존 에이전트 동작 불변.
-4. `S21: feat(agent): 실행 전처리 + 실행 재료 포트 + manager 배선(Noop = 오늘과 같은 argv)` — `ensure_registered`(없는 id 를 전처리 앞에 넣기) · `prelaunch`(예약 뒤 · 명부에서 읽기 · 세션 파생 앞 · mutate 한 번 비교-교체 · 다시 시도 한 번 · Engram 폴더 id 멱등) · 생성자 기본값(`backend::builtin_backend_preset`) · `SpawnByCwd` 를 `spawn_blocking` 으로 · `backend::command_for` · `LaunchKitSource` · `LaunchKitGuard` · `LaunchFs` · `materialize` dispatch · `build_spec`/`open_spawn` 인자 · 회귀 골든. ★Noop 회귀는 `SpawnByCwd` · 스모크 bin 길에도 선다★ — 생성자가 붙인 프리셋을 Noop 은 읽지 않고, `extra_args` 는 `backend_args` 로 옮겨도 같은 순서로 실리며, 이름 배정은 자리만 앞으로 옮겼을 뿐 같은 함수다(골든에 그 두 길을 넣는다).
+3. `S21: refactor(agent): 프로필 프리셋 칸 · 백엔드별 인자 · 이주` — `presets` · `default_preset` · `codex_files` · `generated_paths` · `preset_schema` · `backend_args` · `display_name` 고정 · `merge_preserving_live` 보존 칸 · 이주(§1-5). `cwd` 는 지금 그대로(필수 — 작업 폴더 부분 = §8). 기존 에이전트 동작 불변.
+4. `S21: feat(agent): 실행 전처리 + 실행 재료 포트 + manager 배선(Noop = 오늘과 같은 argv)` — `ensure_registered`(없는 id 를 전처리 앞에 넣기) · `prelaunch`(예약 뒤 · 명부에서 읽기 · 세션 파생 앞 · mutate 한 번 비교-교체 · 다시 시도 한 번) · 생성자 기본값(`backend::builtin_backend_preset`) · `SpawnByCwd` 를 `spawn_blocking` 으로 · `backend::command_for` · `LaunchKitSource` · `LaunchKitGuard` · `LaunchFs` · `materialize` dispatch · `build_spec`/`open_spawn` 인자 · 회귀 골든. ★Noop 회귀는 `SpawnByCwd` · 스모크 bin 길에도 선다★ — 생성자가 붙인 프리셋을 Noop 은 읽지 않고, `extra_args` 는 `backend_args` 로 옮겨도 같은 순서로 실리며, 이름 배정은 자리만 앞으로 옮겼을 뿐 같은 함수다(골든에 그 두 길을 넣는다).
 5. `S21: feat(agent): claude 실행 재료 번역` — 합친 지침 · snapshot off · plugin-dir · 합친 settings · 모델.
 6. `S21: feat(agent): codex 실행 재료 번역(JSON · 터미널)` — developerInstructions · extraRoots · 원문 `-c` · 모델 · 작업 폴더 파일 · 크기 한도 · 이어받기 `additionalContext`(T6). 둘로 쪼개도 된다(JSON / 터미널).
 7. `S21: feat(daemon): library 모듈 — 경로 · 형식 · 저장소 seam · 훑기 · 해석 · 기본 제공` — 아직 아무도 안 부른다.
@@ -490,7 +486,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 10. `S21: feat(agent,daemon): 라이브러리 · 프리셋 · 에이전트 프리셋 명령 선언 + 포트` — catalog 7 유지(1 단계에서 올림 · 같은 브랜치) · 바인딩 재생성 · CLI 로 전부 부를 수 있다.
 11. `S21: feat(front): 웹뷰 → 데몬 버스 왕복 + libraryClient` — `CommandReply` 갈래 · `callCommand`.
 12. `S21: feat(shell): 슬롯 종류 둘 · Library{n} 유일성(쓰기 길 · 복원) · slot.openUnique · libraryView.* · 번호별 보기 상태 · 컬렉션 · 로컬 OS 요청` — shell catalog 은 1 단계에서 올린 16 그대로(같은 브랜치) · 생성물 다시 굽기 · 웹뷰 직접 다이얼로그 셋 이관.
-13. 화면 — 여러 커밋. ① `LibrarySlot`(읽기 · 트리 · 목록 · 상세 · 빈/없음 안내 · 기록 · 컬렉션) ② 파일 조작(우클릭 · 끌어 이동 · 삭제 확인 · 다시 연결) ③ `PresetEditor` + 추가 세 길 + 상세 패널 ④ 에이전트 프리셋 슬롯 + 트리 「프리셋…」 + 기본 떼기 확인 + 실행 전 대화상자(워크스페이스 · codex 파일). 각 커밋 = 그 화면이 선 채 `/qa`.
+13. 화면 — 여러 커밋. ① `LibrarySlot`(읽기 · 트리 · 목록 · 상세 · 빈/없음 안내 · 기록 · 컬렉션) ② 파일 조작(우클릭 · 끌어 이동 · 삭제 확인 · 다시 연결) ③ `PresetEditor` + 추가 세 길 + 상세 패널 ④ 에이전트 프리셋 슬롯 + 트리 「프리셋…」 + 기본 떼기 확인 + 실행 전 대화상자(codex 파일). 각 커밋 = 그 화면이 선 채 `/qa`.
 14. `S21: feat: JSON 모드 첫 메시지 전 모델 · 강도 선택`(T8) — 따로 떨어진 마지막 단계. ★첫 커밋 = 수용 관문★: claude · codex 각각 모델 · 강도 요청이 첫 메시지 전에 먹는지 실 CLI 확인. 하나라도 안 되면 **여기서 멈추고 사용자 결정**(R35 개정 또는 다른 길) — 칸 끄기 · 재기동으로 넘어가지 않는다.
 15. `S21: docs: CLAUDE.md 모듈 맵 · step-log · tracking` — load-bearing 이라 `/review doc`.
 
@@ -504,7 +500,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 | codex 0.156.1 `--help` | `-c key=value`(TOML 로 안 읽히면 문자 그대로) · `-m` | 확실 |
 | `DISABLE_AUTOUPDATER` 를 settings `env` 로 | 공식 문서(settings · env-vars)엔 이름이 없다. 설치본 바이너리 문자열: 업데이터가 `process.env.DISABLE_AUTOUPDATER` 를 읽고, 그 이름이 다른 알려진 환경변수들과 함께 한 목록에 있다(그 목록의 뜻은 모른다). settings `env` 가 프로세스 환경에 앉는 시점이 업데이터보다 앞인지는 모른다 | **가능성 높음 — 실측 필요(8 단계)** |
 | 웹뷰 → 데몬 버스 답 | 웹뷰 `handleEvent` 가 `CommandReply` 를 안 맞춘다(셸 주석) · 데몬은 자기 이름을 그 자리에서 답한다 | 가능성 높음(코드 읽기 · 미측) |
-| 코드에 없는 것 | 설정 창(라우트는 `/` · `/popup` 뿐) · JSON 모델 선택 칸 · 2단 슬롯 서브메뉴(`slotMenu.ts` 「중첩 금지」) · 선택적 작업 폴더(`AgentProfile.cwd` 는 필수) — §6-4 | 확실 |
+| 코드에 없는 것 | 설정 창(라우트는 `/` · `/popup` 뿐) · JSON 모델 선택 칸 · 2단 슬롯 서브메뉴(`slotMenu.ts` 「중첩 금지」) — §6-4 · 선택적 작업 폴더(`AgentProfile.cwd` 는 필수) — §8 | 확실 |
 
 ### 6-2. 확인 안 한 것 (해당 단계에서 잰다)
 
@@ -545,11 +541,10 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 
 ### 6-4. PRD 와 코드가 어긋나는 곳 (PRD 개정 또는 사용자 확인 필요)
 
-- **설정 창이 없다** — R9 「설정 창에 같은 칸」 · R34 「Engram 폴더 위치는 설정」 · E3 「다시 묻지 않기 되돌리기 = 설정 창」(T5).
+- **설정 창이 없다** — R9 「설정 창에 같은 칸」 · E3 「다시 묻지 않기 되돌리기 = 설정 창」(T5).
 - **JSON 모드 모델 선택 칸이 없다** — R35 는 있는 것처럼 적혀 있다(T8).
 - **R32 「다른 세션이 claude 백엔드에 박는 `DISABLE_AUTOUPDATER`」** — 이 브랜치 · HEAD 에 없다(grep 0). master 나 다른 워크트리는 보지 않았다.
 - **R36 「이어받기 포함」** — claude 는 `--system-prompt-snapshot off` 가 있어야 성립하고, codex 는 실험 API 없이는 성립하지 않는다(T6).
-- **R34 「워크스페이스가 없으면」** — 프로필이 지금은 작업 폴더를 필수로 갖는다 → 3 단계의 칸 변경이 전제다.
 - **R30 「이미 열려 있어도 하나 더」 + R24 ⇐** — 편집 칸과 원천 라이브러리 슬롯이 다른 창(팝아웃)에 있을 수 있어 선택을 셸이 나눠 들어야 한다(§1-9) — PRD 엔 드러나 있지 않다.
 - **R10 「라이브러리 ▸ 1~4」** — 빈 슬롯 메뉴가 이미 「새 콘텐츠 ▸」 아래라 두 단 서브메뉴가 되고, 지금 메뉴 스키마는 한 단만 허용한다(§3).
 
@@ -571,8 +566,48 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 14. **서드파티 감싸기 = 목적 포트 · 부품 경계**(walkdir · serde-saphyr → 라이브러리 저장소 · 형식 / 트리 · 목록 · 끌기 · 쿼리 → 우리 부품 한 곳씩) — 거부: 라이브러리마다 1:1 래퍼.
 15. **슬롯 메뉴 서브메뉴 두 단(ADR-0065 덧붙임 개정)** — 거부: 평평한 「라이브러리 1~4」.
 16. **슬롯 데이터 받기 = TanStack Query 한 파일**(T1 확정 시) — 거부: 손으로 짠 zustand 캐시.
-17. **실행 전처리(점검 · 백엔드 · 워크스페이스 맞추기 · 무인 기본값)는 예약 · 떠 있음 확인 뒤, 세션 파생 앞 · 명부 변경은 mutate 한 번(비교-교체) · Engram 폴더는 id 로 멱등** — 거부: 기동 중간에 맞추기(래치 · 화신 표식이 옛 사본을 본다) · 예약 앞(같은 에이전트 두 실행이 겹친다) · 이름으로 폴더 정하기.
+17. **실행 전처리(점검 · 백엔드 맞추기 · 무인 기본값)는 예약 · 떠 있음 확인 뒤, 세션 파생 앞 · 명부 변경은 mutate 한 번(비교-교체)** — 거부: 기동 중간에 맞추기(래치 · 화신 표식이 옛 사본을 본다) · 예약 앞(같은 에이전트 두 실행이 겹친다). (작업 폴더 맞추기 · Engram 폴더 몫 = §8)
 18. **패스스루 인자 = 백엔드별 저장(`backend_args` 가 권위) · `command` 는 해석에서 파생 · `extra_args` 는 내림용 비춤** — 거부: 한 목록을 백엔드 사이에 들고 다니기.
 19. **ADR-0109 결정 9 대체 — 프리셋 claude 원문을 `--settings` 파일 하나에 합치되 `allowedMcpServers` 는 Engram 이 권위**(T10) — 거부: 두 번째 `--settings` · 원문을 안 싣기.
 20. **휴지통 = platform 의 전용 STA 작업 스레드가 부르는 `IFileOperation`(기존 `windows` 0.58)** — 거부: `trash` crate(셋째 `windows` 사본 · `CoInitialize` 실패 패닉).
 21. **번호별 보기 상태 = 셸 권위 + `libraryView.*` 셸 명령 · `Library{n}` 유일성은 레이아웃 관리자** — 거부: 웹뷰 레지스트리 명령 · 열기 명령에서만 유일성.
+
+## 8. 미룬 설계 — 작업 폴더 정리 (다음 구현 · 사용자 결정 2026-10-16)
+
+이번 판은 지금 동작 그대로다 — 만들 때 폴더를 선택하고(기존 선택 창) `cwd` 는 필수. 아래는 `/review trd` 3회차까지 본문에 있던 작업 폴더 설계를 옮겨 둔 것이다(조금 줄임). 다음 구현의 출발점이고, 그때 사용자 결정으로 다시 연다 — 짝 = PRD R34 · D3 · R31 · R48 · E15 의 워크스페이스 부분. 다음 구현이 다룰 것(메모 2026-10-16) = 폴더를 담은 프리셋(하위 포함) · 경로 있이/없이 에이전트 만들기 등. ★「만들 때 폴더를 묻지 않음」 은 TRD 해석이었고 사용자 결정이 아니다★.
+
+**소유 · 영속(§1-1 · §1-4 에서 뺀 몫)** — Engram 폴더(자동 워크스페이스) 위치 = 데몬 · `daemon\state\library.json`(라이브러리 루트와 같은 파일) · `config.rs` 가 맡는다 · `library.status` 가 그 위치도 싣는다.
+
+**프로필 칸(§1-5 에서 뺀 몫)**
+- `workspace: Option<PathBuf>` — 작업 폴더. `None` = 실행 때 정한다(R34 · D3). 디스크에는 옛 키 `cwd` 를 그대로 쓴다(`None` 이면 빈 문자열).
+- `launched_workspace: Option<PathBuf>` — 지금 저장된 세션을 만든 실행의 워크스페이스 — 다르면 새 대화(아래 전처리).
+- 둘 다 `merge_preserving_live` 보존 칸에 든다.
+- 이주 — `workspace = Some(옛 cwd)` · `launched_workspace = Some(옛 cwd)`(지금 세션을 이어받을 수 있게).
+- `display_name` 고정의 원래 이유 — 이름이 `cwd` basename 에서 파생되던 길이 워크스페이스(비어 있거나 나중에 Engram 폴더로 채워짐)를 따라 바뀌면 우편 주소 · 트리 이름이 말없이 바뀐다.
+- 호환 위험 — 빈 `cwd` 인 에이전트를 옛 빌드가 띄우면 어떻게 되는지는 재지 않았다(아마 실패).
+
+**wire · 화면(§1-7 · §1-8 · §1-10 에서 뺀 몫)**
+- `CreateProfile.cwd` 는 선택이 된다(만들 때 폴더를 안 묻는다). wire `AgentProfile.cwd` · `AgentInfo.cwd` · 버스 `AgentRow.cwd` 는 문자열 그대로 두고 **빈 문자열 = 아직 작업 폴더 없음**으로 정한다(칸 모양을 안 바꿔 생성물 · 옛 소비자가 그대로 읽는다). 화면은 빈 값을 「작업 폴더 없음 · 실행 때 정함」으로 그리고, 이름은 고정된 `display_name` 을 쓴다(빈 basename 으로 파생하지 않는다).
+- `agent.new` 의 `cwd?` — 없으면 Engram 폴더(R34).
+- 트리 판 메뉴 「에이전트 생성 ▸」 — 만들 때 폴더를 묻지 않고, 활성화 전 `agent.launchCheck` → `NeedsWorkspace` 면 「어디서 일할까요?」(확인 창 `WorkspaceAsk`).
+- 에이전트 슬롯 머리에 워크스페이스(버스 · CLI 실행이 Engram 폴더를 채웠으면 그 사실 — R31).
+- 전제(옛 §6-4) — R34 「워크스페이스가 없으면」 은 프로필이 지금 작업 폴더를 필수로 갖는 것(`AgentProfile.cwd` 필수 — 확인함)과 어긋나 위 칸 변경이 먼저다.
+
+**막힘 사유(§1-3 · §1-5 에서 뺀 몫)** — 「워크스페이스 없음(R34)」 = `BlockReason::NeedsWorkspace`. codex 파일 대답과 같이 **화면이 낸 실행에서만** 막힘이고, 버스 · CLI 가 낸 실행은 Engram 폴더로 채워 에이전트에 저장한다(Δg).
+
+**실행 전처리(§1-5 (가) 에 더해지던 것)**
+- 1 점검 — `Unattended` 에서 워크스페이스가 없으면 Engram 폴더를 채운다(3차 델타 — 저장되고 에이전트 슬롯 머리에 보인다).
+- 2 맞추기 — 비교-교체 대상에 `workspace` 가 든다(또 바뀌면 「실행 준비 중 프리셋 · 워크스페이스가 계속 바뀌었다 — 다시 시도하라」). mutate 한 번에 `launched_workspace` 도 든다 · `workspace` 는 아직 `None` 일 때만 채운다(그 사이 사람이 정했으면 그 값을 쓴다) · **워크스페이스가 `launched_workspace` 와 다르면** 같은 mutate 안에서 `release_session_id` 와 같은 일을 하고 `launched_workspace` 를 새 값으로 적는다(claude 세션은 작업 폴더에 묶인다). Engram 폴더는 **에이전트 id 로만** 정하고(`<workspaces>\<agent-id>` — 바뀌는 이름을 쓰지 않는다) 있으면 그대로 쓴다(멱등 생성).
+- 3 다시 읽기 — 첫 제출 래치(ADR-0226)는 맞춰진 워크스페이스와도 어긋나지 않는 id 만 본다.
+
+**워크스페이스 바꾸기** — `agent.setWorkspace {agent, path?, engramFolder?}`(워크스페이스 정하기 / Engram 폴더 만들기 · R34)는 **떠 있는 에이전트에는 `CONFLICT`** 로 거절한다(멈춘 뒤에만 바뀐다 — 돌고 있는 세션의 작업 폴더를 말없이 옮기지 않는다). 바뀐 값은 다음 실행 전처리 2 가 새 대화로 맞춘다.
+
+**Engram 폴더 위치(옛 T4 — 추천 그대로)** — 릴리즈 `<배포판>\workspaces\<agent-id>` · 디버그 · `ENGRAM_DATA_DIR` = 데이터 루트 안 `workspaces\<agent-id>`(`DataLayout` 이 낸다 — 라이브러리 `suggested_new` 와 같은 루트 출처 규칙: 릴리즈 기본 = 데이터 루트의 부모 아래 · 그 밖 = 루트 안) · 화면에는 고정된 이름을 보인다. 이유: 이름은 바뀌므로 id 로만 정해야 멱등 생성(있으면 재사용)이 서고, 프로그램 데이터와 작업물을 가르며 시험 격리가 폴더 하나로 된다. 명령 = `workspace.getRoot` · `workspace.setRoot {path}`(새 에이전트에만 — R34). 설정 창이 없으니 첫 판은 명령만이었다(T5 · PRD R34 「Engram 폴더 위치는 설정」 과 어긋남).
+
+**codex 터미널(R37)** — Engram 폴더면 「만든다」 대답과 같이 작업 폴더에 `AGENTS.override.md` + `.agents\skills\engram-*` 정션을 깐다(파일 대답은 사용자 폴더에서만 묻는다).
+
+**시험(§4 에서 뺀 몫)** — 이주 골든 `cwd` → `workspace` · 비교-교체가 그 사이 정해진 `workspace` 를 덮지 않음 · Engram 폴더 = id 로 멱등 · 워크스페이스 바뀜 = `release_session_id` 후 Fresh.
+
+**이행 순서에 끼던 것(§5)** — 3 단계: `cwd` → `workspace`(디스크 키 `cwd` 유지 · 빈 문자열 = 없음) · wire `cwd` 빈 문자열 뜻 · 화면의 빈 작업 폴더 표시 · `None` 이면 지금처럼 스폰 실패(사유 문장). 4 단계: Engram 폴더 id 멱등. 13 ④: 실행 전 대화상자의 워크스페이스.
+
+**ADR 후보(§7 17 에서 뺀 몫)** — 실행 전처리가 워크스페이스도 맞추고 Engram 폴더는 id 로 멱등. 거부: 이름으로 폴더 정하기.
