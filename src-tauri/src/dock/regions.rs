@@ -3,7 +3,8 @@
 //!
 //! 진입점: [`regions_for`](창 하나의 스냅숏 → 웹뷰에 보낼 [`DockRegions`] + 놓기 기대값 [`Expect`]) ·
 //! [`pick`](영역 위의 점 → [`Picked`]) · [`bumps`](마지막 보낸 것과 견줘 `rev` · `bar_rev` 를 올릴지) ·
-//! [`visible_tab`](창에 보이는 탭 — 스냅숏을 뜨는 쪽이 부른다).
+//! [`visible_tab`](창에 보이는 탭 — 스냅숏을 뜨는 쪽이 부른다) · [`reorder_miss`](출처 창에 순서 이동이 서지 않는 까닭 —
+//! 장부의 시작 로그).
 //!
 //! ★규칙의 정본은 `dock::hit` 하나다★ — [`pick`] 은 영역 값으로 `hit::reorder_*`(순서 이동 구역)를, 아니면
 //! `hit::WindowFrame` 을 다시 세워 `hit::locate` → `hit::choose_seam` 을 부르는 어댑터이고, 웹뷰의
@@ -124,7 +125,7 @@ pub fn regions_for(
         return Some((regions, expect));
     }
     if w.is_source {
-        regions.reorder = strip.and_then(|s| reorder_region(s, &w.tabs, source_view));
+        regions.reorder = strip.and_then(|s| reorder_region(s, &w.tabs, source_view).ok());
     }
     regions.view_id = w.visible.as_ref().map(|(view, _)| *view);
     if let Some(canvas) = w.canvas {
@@ -316,16 +317,27 @@ fn tab_bar_region(chrome: &DockChrome, source_view: ViewId) -> TabBarRegion {
     }
 }
 
+/// 출처 창에 순서 이동 영역이 서지 않는 까닭(TRD §2-4 조건 ④–⑥) — `None` = 선다. 낱말 = `ids`(머리 id 순서 ≠ 그 창
+/// 모델 탭 목록) · `dragged`(끄는 머리가 정확히 하나가 아니다) · `finite`(유한하지 않은 값) · `order`(머리 사각형이
+/// 뒤집혔거나 `x0` 오름차순이 아니다). 장부가 시작 때 그 까닭을 남기는 데 쓴다(조건 ① – ③ 은 부르는 쪽이 본다).
+pub fn reorder_miss(
+    strip: &StripStart,
+    tabs: &[ViewId],
+    source_view: ViewId,
+) -> Option<&'static str> {
+    reorder_region(strip, tabs, source_view).err()
+}
+
 // TRD §2-4 조건 ④–⑥(① `strip` 있음 · ② 막히지 않음 · ③ 숨긴 출처 아님 · 출처 창은 부르는 쪽이 본다). 하나라도 어기면
-// `None` — 얼린 기하가 모델과 갈라졌으니 그 창 탭바는 `tab_bar` 로 판정한다.
+// 그 낱말(`reorder_miss`) — 얼린 기하가 모델과 갈라졌으니 그 창 탭바는 `tab_bar` 로 판정한다.
 fn reorder_region(
     strip: &StripStart,
     tabs: &[ViewId],
     source_view: ViewId,
-) -> Option<ReorderRegion> {
+) -> Result<ReorderRegion, &'static str> {
     let heads = &strip.heads;
     if !heads.iter().map(|h| h.view_id).eq(tabs.iter().copied()) {
-        return None;
+        return Err("ids");
     }
     let mut at_source = heads
         .iter()
@@ -333,23 +345,25 @@ fn reorder_region(
         .filter(|(_, h)| h.view_id == source_view)
         .map(|(i, _)| i);
     let (Some(dragged), None) = (at_source.next(), at_source.next()) else {
-        return None;
+        return Err("dragged");
     };
     let finite = |r: &RectCss| [r.x0, r.y0, r.x1, r.y1].iter().all(|v| v.is_finite());
-    let shaped = finite(&strip.bar)
+    if !(finite(&strip.bar)
         && strip.grab_x.is_finite()
         && strip.scroll.is_finite()
-        && heads
-            .iter()
-            .all(|h| finite(&h.rect) && h.rect.x0 <= h.rect.x1)
-        && heads.windows(2).all(|p| p[0].rect.x0 <= p[1].rect.x0);
-    if !shaped {
-        return None;
+        && heads.iter().all(|h| finite(&h.rect)))
+    {
+        return Err("finite");
     }
-    Some(ReorderRegion {
+    if !(heads.iter().all(|h| h.rect.x0 <= h.rect.x1)
+        && heads.windows(2).all(|p| p[0].rect.x0 <= p[1].rect.x0))
+    {
+        return Err("order");
+    }
+    Ok(ReorderRegion {
         zone: hit::reorder_zone(strip.bar),
         heads: heads.clone(),
-        dragged: u32::try_from(dragged).ok()?,
+        dragged: u32::try_from(dragged).map_err(|_| "dragged")?,
         grab_x: strip.grab_x,
         scroll: strip.scroll,
     })
@@ -849,6 +863,32 @@ mod tests {
             assert_eq!(with(&|s| s.bar.y1 = bad), None, "bar {bad}");
             assert_eq!(with(&|s| s.heads[1].rect.y0 = bad), None, "머리 {bad}");
         }
+    }
+
+    #[test]
+    fn reorder_miss_names_the_failed_condition() {
+        let tabs = ids(&[10, SRC, 11]);
+        let miss = |change: &dyn Fn(&mut StripStart)| {
+            let mut s = strip(BAR, &SRC_HEADS, 30.0, 0.0);
+            change(&mut s);
+            reorder_miss(&s, &tabs, id(SRC))
+        };
+        assert_eq!(miss(&|_| {}), None);
+        assert_eq!(miss(&|s| s.heads.swap(0, 2)), Some("ids"));
+        assert_eq!(
+            reorder_miss(
+                &strip(BAR, &[(10, 0.0, 100.0), (11, 100.0, 200.0)], 30.0, 0.0),
+                &ids(&[10, 11]),
+                id(SRC)
+            ),
+            Some("dragged")
+        );
+        assert_eq!(miss(&|s| s.grab_x = f64::NAN), Some("finite"));
+        assert_eq!(miss(&|s| s.heads[0].rect.x1 = -1.0), Some("order"));
+        assert_eq!(
+            miss(&|s| s.heads[2].rect = rect(50.0, 0.0, 90.0, BAR_H)),
+            Some("order")
+        );
     }
 
     // 손으로 세운 출처 창 영역 — 바깥 띠가 없어 구역 밑에 칸 1 의 위 띠가 드러나 있다(`regions_for` 가 만드는 영역에서는

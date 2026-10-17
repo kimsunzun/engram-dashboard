@@ -1,6 +1,6 @@
 //! 도킹 wire 페이로드(TRD S21-slot-docking §1-5) — 셸 → 웹뷰 영역([`DockRegions`] · `dock:regions`) · 세션 사건
 //! ([`SessionEvent`] · `dock:session`) · 당긴 답([`DockPullReply`]), 웹뷰 → 셸 시작 측정([`StripStart`]) · 보고
-//! ([`DragOverReport`] · [`DropReport`] · [`DragEffect`]).
+//! ([`DragOverReport`] · [`DropReport`] · [`DragEffect`] · 끝 스냅숏 [`DrawnReport`]).
 //! ts-rs 로 `src-tauri/bindings/` 에 굽는다. 웹뷰 → 셸 측정(크롬)은 레이아웃 창 항목에 두므로 `layout::chrome` 에
 //! 있다.
 //!
@@ -288,6 +288,27 @@ pub struct DropReport {
     pub displayed: Option<Uuid>,
     pub shown: Picked,
     pub point: PointCss,
+}
+
+/// `dock_drag_end` 의 선택 칸 `last`(끝 스냅숏 — TRD §1-3 「끝 신호」) — 출처 창이 끝에 아직 위였으면 그 창이 마지막으로
+/// **그린** 판정. 앞 여섯 칸은 [`DragOverReport::Over`] 와 같다.
+///
+/// - `scroll`: 그 판정 때 그 창 탭바 `scrollLeft`(CSS px). `null` = 영역마다 잰 때의 것.
+/// - `left_before_end_ms`: 그 판정 뒤 떠남 → `dragend` 사건 시각 간격(ms · 출처 웹뷰 한 엔진 시계). `null` = 떠남
+///   없음. 셸은 이것을 `CANCEL_LEAVE_MS` 와 견줘 엔진이 끌기를 접으며 낸 떠남(끝이 출처 위)과 실제 떠남을 가른다.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct DrawnReport {
+    #[ts(type = "number")]
+    pub rev: u64,
+    #[ts(type = "number")]
+    pub bar_rev: u64,
+    #[ts(type = "string | null")]
+    pub displayed: Option<Uuid>,
+    pub shown: Picked,
+    pub point: PointCss,
+    pub scroll: Option<f64>,
+    pub left_before_end_ms: Option<f64>,
 }
 
 /// `dock_drag_end` 의 `effect` — 출처 `dragend` 의 `dropEffect`. `move` · `other`(copy · link) = 받은 창이 있다 ·
@@ -637,6 +658,46 @@ mod tests {
                 shown: Picked::None,
                 point: PointCss { x: 1.0, y: 2.0 },
             }
+        );
+    }
+
+    #[test]
+    fn the_drawn_report_reads_with_or_without_its_optional_fields() {
+        let full: DrawnReport = serde_json::from_value(json!({
+            "rev": 3,
+            "bar_rev": 2,
+            "displayed": id(1).to_string(),
+            "shown": { "type": "reorder", "index": 2 },
+            "point": { "x": 150.0, "y": 10.0 },
+            "scroll": 40.5,
+            "left_before_end_ms": 3.25,
+        }))
+        .unwrap();
+        assert_eq!(
+            full,
+            DrawnReport {
+                rev: 3,
+                bar_rev: 2,
+                displayed: Some(id(1)),
+                shown: Picked::Reorder { index: 2 },
+                point: PointCss { x: 150.0, y: 10.0 },
+                scroll: Some(40.5),
+                left_before_end_ms: Some(3.25),
+            }
+        );
+        // 떠남 없음 · 스크롤 없음 — `null` 과 빠진 키가 같다.
+        let bare: DrawnReport = serde_json::from_value(json!({
+            "rev": 0,
+            "bar_rev": 0,
+            "displayed": null,
+            "shown": { "type": "none" },
+            "point": { "x": 1.0, "y": 2.0 },
+        }))
+        .unwrap();
+        assert_eq!((bare.scroll, bare.left_before_end_ms), (None, None));
+        assert_eq!(
+            serde_json::to_value(&bare).unwrap()["left_before_end_ms"],
+            json!(null)
         );
     }
 }

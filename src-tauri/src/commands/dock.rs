@@ -192,6 +192,9 @@ impl DockExec {
                 source_label: source_label.clone(),
                 expect_source,
                 single_tab_popout,
+                // 9b-2: 웹뷰의 시작 측정을 받고 출처 창 사각형을 락 밖에서 읽어 싣는다 — 그때까지 순서 이동 없이 5.6 그대로.
+                strip: None,
+                source_rect: None,
                 snap,
                 now,
             });
@@ -212,6 +215,8 @@ impl DockExec {
 
         // 4. 실행.
         self.dock.take_errors();
+        // 9b-2: `strip`(시작 측정이 있었나) · `hide_deferred`(탭 하나 팝아웃 숨기기를 미뤘나 = 위 할 일에 `Hide` 가 없다)를
+        //   싣고 `hidden` 을 그 할 일에 `Hide` 가 있나로 고친다 — 지금은 순서 이동이 없어 늘 `single_tab_popout` 과 같다.
         tracing::info!(
             drag = %drag_id,
             view = %view,
@@ -284,6 +289,7 @@ impl DockExec {
     fn supersede(&self, old: String) {
         let exec = self.clone();
         self.spawner.spawn(Box::new(move || {
+            // 9b-2: `now` 를 세계 읽기 **전에** 찍는다(도착 시각 — 장부 「시한이 앞지른 끝」) — 지금은 읽은 뒤다.
             let (cursor, rects) = exec.read_world(Source::Lease);
             let now = exec.ports.now();
             let step = exec.feed(Input::Superseded {
@@ -316,6 +322,8 @@ impl DockExec {
                     displayed,
                     shown,
                     point,
+                    // 9b-2: 보고 wire 에 `scroll` 칸이 서면 그 값 — 그때까지 영역마다 잰 때의 것.
+                    scroll: None,
                 },
                 now,
             },
@@ -337,6 +345,7 @@ impl DockExec {
 
     // TRD S21-slot-docking §1-3 「끝 신호 셋」
     pub(crate) fn drop_at(&self, label: &str, drop: DropReport) {
+        // 9b-2: `now` 를 세계 읽기 **전에** 찍는다(도착 시각 — 장부 「시한이 앞지른 끝」) — 지금은 읽은 뒤다.
         let (cursor, rects) = self.read_world(Source::OwnerOf(drop.view_id));
         let now = self.ports.now();
         let report = Report::from(&drop);
@@ -353,11 +362,15 @@ impl DockExec {
     }
 
     pub(crate) fn source_end(&self, caller: &str, drag_id: String, effect: DragEffect) {
+        // 9b-2: `now` 를 세계 읽기 **전에** 찍는다(도착 시각 — 장부 「시한이 앞지른 끝」) — 지금은 읽은 뒤다.
         let (cursor, rects) = self.read_world(Source::Caller(caller.to_owned()));
         let now = self.ports.now();
         let step = self.feed(Input::SourceEnd {
             drag_id,
             effect,
+            // 9b-2: `dock_drag_end` 의 선택 인자 `canceled` · `last` — 그때까지 5.6 그대로.
+            canceled: false,
+            last: None,
             cursor,
             rects,
             now,
@@ -460,12 +473,13 @@ impl DockExec {
                         self.note_failure("regions", Some(&label), &e);
                     }
                 }
-                Action::Hide(label) => {
+                // 9b-2: 메인 스레드 맞추기(`Book::visibility`)로 바꾼다 — 그때까지 낸 스레드에서 그대로 부른다.
+                Action::Hide { label, .. } => {
                     if let Err(e) = self.ports.hide(&label) {
                         tracing::warn!(label = %label, "끌기 출처 창을 숨기지 못했다 — 보인 채 끌기를 잇는다: {e}");
                     }
                 }
-                Action::Show(label) => {
+                Action::Show { label, .. } => {
                     if let Err(e) = self.ports.show(&label) {
                         self.note_failure("show", Some(&label), &e);
                     }
@@ -478,9 +492,10 @@ impl DockExec {
                 Action::Apply(req) => self.hand_off(req, from_sync),
                 Action::ArmTimer {
                     kind,
+                    generation,
                     number,
                     after_ms,
-                } => self.arm(kind, number, after_ms),
+                } => self.arm(kind, generation, number, after_ms),
                 Action::ReleaseLease(lease) => {
                     sync::lock(&self.layout.0).release_lease(lease);
                 }
@@ -505,20 +520,25 @@ impl DockExec {
         }));
     }
 
-    // 시한 — `kind` · `number` 를 낸 그대로 되싣는다(어긋나면 장부가 버리고 세션이 끝을 잃는다).
-    fn arm(&self, kind: TimerKind, number: u64, after_ms: u64) {
+    // 시한 — `kind` · `generation` · `number` 를 낸 그대로 되싣는다(어긋나면 장부가 버리고 세션이 끝을 잃는다).
+    fn arm(&self, kind: TimerKind, generation: u64, number: u64, after_ms: u64) {
         let exec = self.clone();
         self.spawner.spawn_after(
             after_ms,
             Box::new(move || {
                 let (cursor, rects) = match kind {
-                    // 붙든 이른 신호를 버리기만 한다 — 커서 · 사각형을 쓰지 않는다.
-                    TimerKind::Early => (None, Rects::default()),
+                    // 장부가 커서 · 사각형을 쓰지 않는다 — 이른 신호는 버리기만 하고, 떠남 시한은 숨기기만 하며, 붙들기는
+                    //   붙든 끝의 것으로 판정한다.
+                    TimerKind::Early | TimerKind::Leave | TimerKind::OverWait => {
+                        (None, Rects::default())
+                    }
                     TimerKind::Drop | TimerKind::Grace => exec.read_world(Source::Lease),
                 };
+                // 9b-2: `now` 를 세계 읽기 **전에** 찍는다(도착 시각 — 장부 「시한이 앞지른 끝」) — 지금은 읽은 뒤다.
                 let now = exec.ports.now();
                 let step = exec.feed(Input::Timeout {
                     kind,
+                    generation,
                     number,
                     cursor,
                     rects,
@@ -549,6 +569,20 @@ impl DockExec {
             leave_gap_ms = log.leave_gap_ms,
             cursor_read = log.cursor_read,
             early = log.early,
+            unseen = log.unseen,
+            strip = log.strip,
+            hide_deferred = log.hide_deferred,
+            hidden = log.hidden,
+            last = log.last.word(),
+            last_gap_ms = log.last_gap_ms,
+            tight = log.tight,
+            lifted = log.lifted,
+            last_differs = log.last_differs,
+            late_hide = log.late_hide,
+            held_rect = log.held_rect,
+            over_wait = log.over_wait.word(),
+            over_wait_ms = log.over_wait_ms,
+            over_from = log.over_from.as_deref(),
             reports = log.reports,
             regions_sent = log.regions_sent,
             regions_resent = log.regions_resent,
@@ -908,7 +942,9 @@ mod tests {
     use std::sync::{Mutex, MutexGuard};
 
     use super::*;
-    use crate::dock::book::{Outcome, DROP_WAIT_MS, EARLY_SIGNAL_MS, END_GRACE_MS};
+    use crate::dock::book::{
+        LastUse, Outcome, OverWaitEnd, DROP_WAIT_MS, EARLY_SIGNAL_MS, END_GRACE_MS,
+    };
     use crate::dock::types::SessionPhase;
     use crate::layout::{
         DockDest, LayoutEvents, SubscriptionSync, ViewSnapshot, WindowTabsPayload,
@@ -1240,6 +1276,20 @@ mod tests {
             leave_gap_ms: None,
             cursor_read: None,
             early: false,
+            unseen: false,
+            strip: false,
+            hide_deferred: false,
+            hidden: false,
+            last: LastUse::None,
+            last_gap_ms: None,
+            tight: false,
+            lifted: false,
+            last_differs: false,
+            late_hide: false,
+            held_rect: false,
+            over_wait: OverWaitEnd::None,
+            over_wait_ms: None,
+            over_from: None,
             reports: 0,
             regions_sent: 0,
             regions_resent: 0,
