@@ -324,7 +324,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 | `LibraryList` | 탐색기식 목록 · 열 ★ · 종류 · 이름 · 쓰는 곳 · 이름 앞 종류 아이콘(폴더 · 스킬 `FolderCog` · 지시서 `FileText` · 설정 `SlidersHorizontal` · 프리셋 `Layers` — 이름은 후보 · §6-2 · 사용자 2026-10-17) · 정렬(R12) · 📁 줄(스킬 폴더 포함 — 더블클릭 = 들어감 · 그 `SKILL.md` 더블클릭 = OS 기본 편집기) · 다중 선택 · 끌기 시작 · 필터 ▾ · 검색 · ★ 대상 칩 | @tanstack/react-table · @tanstack/react-virtual · react-selecto |
 | `LibraryDetail` | 부품 상세(설명 · 위치 · 쓰는 곳 링크 — 단추 없음 · R15) · 상태별 = 안 고름 안내 · 폴더 · 지시서 미리보기(react-markdown — 챗과 같은 렌더러) · 설정 값 요약 · 여러 개 개수 · 오류(여러 개 개수는 클라이언트가 선택에서 센다) | — |
 | `components/preset/PresetEditor.tsx` | **공용 편집 부품 하나**(R21) — 대상 = 프리셋 또는 에이전트 · 칸 = (에이전트면 「기본」 +) 프리셋 · 지시서 · 스킬 · 설정 · `readOnly` · `depth` 를 받아 안에 든 프리셋을 **같은 부품으로 재귀** 렌더(R27) · 칸 아래 충돌/경고 줄 · 「에이전트 N개가 씀」 · 백엔드 바뀜 경고(Δ4) | — |
-| `EditorSection` | 칸 제목 `+` · `⇐` · 폴더 돋보기(`FolderSearch` — 아이콘 이름 확인함) · ⋮⋮ 순서(지시서 · 설정 · 프리셋 — D2) · × · 줄 호버 돋보기 | @dnd-kit/sortable |
+| `EditorSection` | 칸 제목 `+` · `⇐` · 폴더 돋보기(`FolderSearch` — 아이콘 이름 확인함) · ⋮⋮ 순서(지시서 · 설정 · 프리셋 — D2) · × · 줄 호버 돋보기 · 지시서 줄 👁 = `LibraryDetail` 카드를 왼쪽 팝오버로(닫기 = × · 바깥 누름 · Esc · 다른 줄 👁 = 바꿈 · R27) | @dnd-kit/sortable |
 | `AddItemsPopover` | 「+ 담기」 · 칸 `+` 검색 팝오버(R25) — 열면 검색칸 커서 · 체크 = 즉시 담기 · 담김/순환/충돌 비활성 + 이유 · 에이전트 대상이면 프리셋만 + 맨 위 고정 「내장」 묶음(Δa) | @radix-ui/react-popover · @tanstack/react-virtual |
 | `DetailFlyout` | 편집 칸 줄 상세 — 창의 레이아웃 뿌리에 포털로 그리고 슬롯 오른쪽 가장자리에 붙여 옆 슬롯 위에 겹침 · 창 끝이면 일부 잘림 · **전부 창 밖이면 슬롯 안 오른쪽 가장자리에서 안쪽으로 겹침**(D11 · Δi) · 같은 줄 = 닫힘 · Esc(R29 · E1) | — |
 | `LibraryDnd` | 목록 → 트리 끌어 놓기(옮기기) 문맥 | @dnd-kit/core |

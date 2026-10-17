@@ -705,115 +705,59 @@ a{color:var(--accent)}
   </div>
   <p class="pend"><span class="tag ok">확정</span>칸 폭 · 마지막 폴더 · 뒤로/앞으로 기록은 번호(1~4)마다 저장</p>
   <p class="pend"><span class="tag ok">확정</span>따로 된 프리셋 편집 슬롯은 만들지 않음 — 편집은 라이브러리 오른쪽 칸 하나 · 옛 프리셋(작업 폴더 즐겨찾기) 슬롯도 없앰</p>
-  <p class="lead">편집 칸에서 지시서 내용 보기 — 후보 셋 <span class="tag wait">결정 대기</span></p>
-  <style>.cand44{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,290px),1fr));gap:18px;align-items:start}.fig44{display:flex;flex-direction:column;gap:8px;min-width:0}.fig44 .caps{grid-template-columns:minmax(0,1fr)}.ft44{display:flex;align-items:center;gap:6px;font-size:13.5px;font-weight:600}.pv44{position:relative;grid-template-columns:minmax(0,.85fr) minmax(0,1.15fr);font-size:12px}.pv44>.pane{padding:8px;gap:4px}.pv44>.pane+.pane{border-left:1px solid var(--app-line);border-top:0}.pv44 .li{padding:3px 5px;gap:5px}.pv44 .row{padding:3px 6px;gap:6px}.pv44 .side .grp{margin-top:2px}.pv44 .eye{font-size:11px;padding:0 4px;border:1px solid var(--accent);border-radius:4px;background:var(--app-panel);line-height:1.4}.md44{font-size:11px;line-height:1.55;color:var(--app-text);display:flex;flex-direction:column;position:relative;padding-right:8px}.md44 b{font-size:12.5px}.md44::after{content:"";position:absolute;right:0;top:2px;width:3px;height:45%;border-radius:2px;background:var(--app-line)}.fl44{position:absolute;z-index:2;top:58px;right:57.5%;width:44%;border:1px solid var(--app-line);border-radius:8px 0 8px 8px;background:var(--app-raised);box-shadow:0 8px 22px rgba(0,0,0,.28);padding:6px 8px;display:flex;flex-direction:column;gap:4px}.fl44::after{content:"";position:absolute;right:-6px;top:6px;width:10px;height:10px;background:var(--app-raised);border-top:1px solid var(--accent);border-right:1px solid var(--accent);transform:rotate(45deg)}.fl44 .head{gap:4px;font-size:11.5px;font-weight:600;flex-wrap:nowrap}.fl44 .head .sp{flex:1}.dv44{border-top:3px double var(--app-line);text-align:center;font-size:10px;color:var(--app-muted);line-height:1;margin:2px -8px 0;padding-top:2px;cursor:row-resize}.bp44{display:flex;flex-direction:column;gap:3px;background:var(--app-raised);border:1px solid var(--app-line);border-radius:6px;padding:5px 7px}.bp44 .head{font-size:11.5px;font-weight:600;flex-wrap:nowrap}.fl44 .md44>span,.qw44 .md44>span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pv44.tall44{min-height:212px}.figc44{position:relative;padding:72px 0 0 26px}.qw44{position:absolute;z-index:2;top:0;left:0;width:52%;box-shadow:0 8px 22px rgba(0,0,0,.28);border-color:var(--accent)}.qw44 .win-bar{padding:4px 8px;font-size:10.5px;gap:5px}.qw44 .win-bar{font-size:10px;color:var(--app-text)}.qw44 .win-bar .sp{flex:1}.qw44 .md44{padding:6px 14px 6px 8px;background:var(--app-raised)}.qw44 .md44::after{right:4px;top:8px}</style>
-  <div class="cand44">
-    <div class="fig44">
-      <div class="ft44"><span class="n">6</span>A · 왼쪽에 붙는 미리보기 판</div>
-      <div class="win" role="img" aria-label="후보 A — 편집 칸의 지시서 줄 리뷰 규칙에 눈 단추가 붙고, 그 내용 미리보기 판이 가운데 목록 위로 떠 편집 칸 왼쪽 가장자리에 붙은 예시">
-        <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>라이브러리 1</div>
-        <div class="win-body pv44 tall44">
-          <div class="pane">
-            <div class="lst">
-              <div class="li"><span class="kind p">프리셋</span><span class="name">공용 규칙</span></div>
-              <div class="li on sel-ol"><span class="kind p">프리셋</span><span class="name">리뷰어</span></div>
-              <div class="li"><span class="kind p">프리셋</span><span class="name">야간 점검</span></div>
-              <div class="li"><span class="kind p">프리셋</span><span class="name">글쓰기</span></div>
-              <div class="li"><span class="kind p">프리셋</span><span class="name">테스트</span></div>
-              <div class="li"><span class="kind p">프리셋</span><span class="name">배포</span></div>
-            </div>
-          </div>
-          <div class="pane side">
-            <div class="head"><span class="kind p">프리셋</span><span class="t" style="font-size:13px">리뷰어</span></div>
-            <div class="grp ksec">지시서</div>
-            <div class="row on"><span class="grip">⋮⋮</span><span class="name">리뷰 규칙</span><span class="eye" aria-label="미리보기">👁</span><span class="x">×</span></div>
-            <div class="row"><span class="grip">⋮⋮</span><span class="name">글쓰기 규칙</span><span class="x">×</span></div>
-            <div class="grp ksec">스킬</div>
-            <div class="row"><span class="name">review</span><span class="x">×</span></div>
-          </div>
-          <div class="fl44">
-            <div class="head"><span>리뷰 규칙.md</span><span class="sp"></span><span aria-label="고정">📌</span><span class="x" aria-label="닫기">×</span></div>
-            <div class="md44"><b># 리뷰 규칙</b><span>- 칭찬하지 않는다</span><span>- 근거 없는 지적 금지</span><span>- 파일:줄 로 가리킨다</span><span>- 고칠 수 있으면 고친 안을 준다</span></div>
-          </div>
+  <p class="lead">편집 칸에서 지시서 내용 보기 <span class="tag ok">확정 2026-10-17</span></p>
+  <style>.pe45{position:relative;grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.pe45>.pane+.pane{border-left:1px solid var(--app-line);border-top:0}.pe45 .row{padding:4px 8px}.eye45{font-size:11px;padding:0 4px;border:1px solid var(--app-line);border-radius:4px;background:var(--app-panel);line-height:1.4;cursor:pointer;flex:none}.eye45.on{border-color:var(--accent);background:var(--accent-soft);box-shadow:inset 0 1px 2px rgba(0,0,0,.25)}.rw45{position:relative}.pk45{position:absolute;z-index:2;top:-96px;right:calc(100% + 13px);width:260px;border:1px solid var(--accent);border-radius:8px;background:var(--app-raised);box-shadow:0 8px 22px rgba(0,0,0,.28);padding:10px;display:flex;flex-direction:column;gap:7px;color:var(--app-text)}.pk45::after{content:"";position:absolute;right:-6px;top:108px;width:10px;height:10px;background:var(--app-raised);border-top:1px solid var(--accent);border-right:1px solid var(--accent);transform:rotate(45deg)}.pk45 .head{flex-wrap:nowrap}.pk45 .head .t{font-size:14px}.sc45{position:relative;padding-right:9px}.sc45::after{content:"";position:absolute;right:0;top:2px;width:3px;height:45%;border-radius:2px;background:var(--app-line)}.sc45 .prev44{max-height:96px}@media (max-width:720px){.pe45{grid-template-columns:minmax(0,1fr)}.pe45>.pane+.pane{border-left:0;border-top:1px solid var(--app-line)}.pk45{position:relative;top:auto;right:auto;width:auto;margin-top:10px}.pk45::after{top:-6px;right:auto;left:28px;transform:rotate(-45deg)}}</style>
+  <div class="win" role="img" aria-label="편집 칸의 지시서 줄 리뷰 규칙 끝 눈 단추를 누르면, 목록에서 고를 때 오른쪽 칸에 나오는 것과 같은 지시서 카드가 편집 칸 왼쪽 가운데 목록 위로 떠 그 줄을 가리키는 예시 — 안에 든 프리셋 공용/기본 규칙은 그 자리에서 흐리게 펼쳐짐">
+    <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>라이브러리 1 — 프리셋/리뷰어.yaml</div>
+    <div class="win-body pe45">
+      <div class="pane">
+        <div class="lst">
+          <div class="li"><span class="kind">폴더</span><span class="name">📁 공용</span></div>
+          <div class="li on sel-ol"><span class="kind p">프리셋</span><span class="name">리뷰어</span></div>
+          <div class="li"><span class="kind p">프리셋</span><span class="name">야간 점검</span></div>
+          <div class="li"><span class="kind p">프리셋</span><span class="name">글쓰기</span></div>
+          <div class="li"><span class="kind p">프리셋</span><span class="name">테스트</span></div>
+          <div class="li"><span class="kind p">프리셋</span><span class="name">배포</span></div>
+          <div class="li"><span class="kind p">프리셋</span><span class="name">정리</span></div>
+          <div class="li"><span class="kind p">프리셋</span><span class="name">문서 손질</span></div>
+          <div class="li"><span class="kind p">프리셋</span><span class="name">조사</span></div>
         </div>
       </div>
-      <div class="caps">
-        <span><span class="n">6</span><span>줄에 마우스 → 👁 단추 · 또는 줄 고르고 Space</span></span>
-        <span><span class="n">6</span><span>목록 위로 뜸(편집 칸이 오른쪽 끝이라 옆에 붙으면 왼쪽) · 스크롤</span></span>
-        <span><span class="n">6</span><span>📌 고정 = 다른 지시서 줄을 고르면 내용이 바뀜 · Esc · 바깥 누름 = 닫힘 · 더블클릭 = OS 편집기</span></span>
-        <span><span class="n">6</span><span>근거: Obsidian · VS Code 올리기 미리보기 + Quick Look 따라가기</span></span>
+      <div class="pane side">
+        <div class="head"><span class="kind p">프리셋</span><span class="t" style="font-size:14px">리뷰어</span></div>
+        <div class="grp ksec">프리셋</div>
+        <div class="row"><span class="tw">▾</span><span class="name">공용/기본 규칙</span><span class="x">×</span></div>
+        <div class="nestv">
+          <div class="grp ksec">프리셋</div>
+          <div class="row"><span class="tw">▸</span><span class="name">공용/안전 규칙</span><span class="n">8</span></div>
+          <div class="grp ksec">지시서</div>
+          <div class="row"><span class="name">기본 말투</span><span class="eye45" aria-label="내용 보기">👁</span></div>
+          <div class="grp ksec">스킬</div>
+          <div class="row"><span class="name">pr-check</span></div>
+        </div>
+        <div class="grp ksec">지시서</div>
+        <div class="rw45">
+          <div class="row on"><span class="grip">⋮⋮</span><span class="name">리뷰 규칙</span><span class="n">6</span><span class="eye45 on" aria-label="내용 보기">👁</span><span class="x">×</span></div>
+          <div class="pk45">
+            <div class="head"><span class="kind">지시서</span><span class="t">리뷰 규칙</span><span class="sp"></span><span class="n">7</span><span class="x" aria-label="닫기">×</span></div>
+            <div class="final">
+              <span class="k">미리보기</span>
+              <div class="sc45"><div class="prev44"><b># 리뷰 규칙</b>- 칭찬하지 않는다<br>- 근거 없는 지적 금지<br>- 파일:줄 로 가리킨다<br>- 고칠 수 있으면 고친 안을 준다</div></div>
+              <span class="k">쓰는 곳</span>
+              <span class="v"><u style="color:var(--accent);cursor:pointer">프리셋 리뷰어</u> · <u style="color:var(--accent);cursor:pointer">프리셋 야간 점검</u></span>
+            </div>
+          </div>
+        </div>
+        <div class="row"><span class="grip">⋮⋮</span><span class="name">글쓰기 규칙</span><span class="x">×</span></div>
+        <div class="grp ksec">스킬</div>
+        <div class="row"><span class="name">review</span><span class="x">×</span></div>
       </div>
     </div>
-    <div class="fig44">
-      <div class="ft44"><span class="n">7</span>B · 편집 칸 아래 미리보기 칸</div>
-      <div class="win" role="img" aria-label="후보 B — 편집 칸이 위아래로 나뉘어 위는 줄, 끌 수 있는 경계 아래는 고른 지시서 리뷰 규칙의 내용 미리보기 칸인 예시">
-        <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>라이브러리 1</div>
-        <div class="win-body pv44">
-          <div class="pane">
-            <div class="lst">
-              <div class="li"><span class="kind p">프리셋</span><span class="name">공용 규칙</span></div>
-              <div class="li on sel-ol"><span class="kind p">프리셋</span><span class="name">리뷰어</span></div>
-              <div class="li"><span class="kind p">프리셋</span><span class="name">야간 점검</span></div>
-            </div>
-          </div>
-          <div class="pane side">
-            <div class="head"><span class="kind p">프리셋</span><span class="t" style="font-size:13px">리뷰어</span></div>
-            <div class="grp ksec">지시서</div>
-            <div class="row on"><span class="grip">⋮⋮</span><span class="name">리뷰 규칙</span><span class="x">×</span></div>
-            <div class="row"><span class="grip">⋮⋮</span><span class="name">글쓰기 규칙</span><span class="x">×</span></div>
-            <div class="grp ksec">스킬</div>
-            <div class="row"><span class="name">review</span><span class="x">×</span></div>
-            <div class="dv44" aria-label="끌어서 높이 조절">↕</div>
-            <div class="bp44">
-              <div class="head"><span>리뷰 규칙.md</span><span class="sp"></span><span class="x" aria-label="접기">▾</span></div>
-              <div class="md44"><b># 리뷰 규칙</b><span>- 칭찬하지 않는다</span><span>- 근거 없는 지적 금지</span><span>- 파일:줄 로 가리킨다</span><span>- 고칠 수 있으면 고친 안을 준다</span></div>
-            </div>
-          </div>
-        </div>
-      </div>
-      <div class="caps">
-        <span><span class="n">7</span><span>지시서 줄을 고르면 아래 칸에 내용 · 고르는 대로 따라 바뀜</span></span>
-        <span><span class="n">7</span><span>경계 끌어 높이 조절 · 접기 가능</span></span>
-        <span><span class="n">7</span><span>편집 칸 안에 붙어 있어 가리는 것 없음 · 대신 줄이 보이는 높이가 줄어듦</span></span>
-        <span><span class="n">7</span><span>근거: 탐색기 미리보기 창 · JetBrains 문서 도구 창</span></span>
-      </div>
-    </div>
-    <div class="fig44">
-      <div class="ft44"><span class="n">8</span>C · 따로 뜨는 미리보기 창</div>
-      <div class="figc44" role="img" aria-label="후보 C — 라이브러리 슬롯 왼쪽 위에 걸쳐 따로 된 작은 미리보기 창이 떠 고른 지시서 리뷰 규칙의 내용을 보여 주는 예시">
-        <div class="win qw44">
-          <div class="win-bar">미리보기 — 리뷰 규칙.md<span class="sp"></span><span class="x" aria-label="닫기">×</span></div>
-          <div class="md44"><b># 리뷰 규칙</b><span>- 칭찬하지 않는다</span><span>- 근거 없는 지적 금지</span><span>- 파일:줄 로 가리킨다</span><span>- 고칠 수 있으면 고친 안을 준다</span></div>
-        </div>
-        <div class="win">
-          <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>라이브러리 1</div>
-          <div class="win-body pv44">
-            <div class="pane">
-              <div class="lst">
-                <div class="li"><span class="kind p">프리셋</span><span class="name">공용 규칙</span></div>
-                <div class="li on sel-ol"><span class="kind p">프리셋</span><span class="name">리뷰어</span></div>
-                <div class="li"><span class="kind p">프리셋</span><span class="name">야간 점검</span></div>
-                <div class="li"><span class="kind p">프리셋</span><span class="name">글쓰기</span></div>
-              </div>
-            </div>
-            <div class="pane side">
-              <div class="head"><span class="kind p">프리셋</span><span class="t" style="font-size:13px">리뷰어</span></div>
-              <div class="grp ksec">지시서</div>
-              <div class="row on"><span class="grip">⋮⋮</span><span class="name">리뷰 규칙</span><span class="x">×</span></div>
-              <div class="row"><span class="grip">⋮⋮</span><span class="name">글쓰기 규칙</span><span class="x">×</span></div>
-              <div class="grp ksec">스킬</div>
-              <div class="row"><span class="name">review</span><span class="x">×</span></div>
-            </div>
-          </div>
-        </div>
-      </div>
-      <div class="caps">
-        <span><span class="n">8</span><span>줄 고르고 Space = 창 열기 · 다시 Space = 닫기</span></span>
-        <span><span class="n">8</span><span>창은 고르는 줄을 따라 내용이 바뀜 · 크기 · 자리 마음대로</span></span>
-        <span><span class="n">8</span><span>다른 모니터에 띄워 둘 수 있음 · 대신 창이 하나 더 생김</span></span>
-        <span><span class="n">8</span><span>근거: macOS Quick Look</span></span>
-      </div>
-    </div>
+  </div>
+  <div class="caps">
+    <span><span class="n">6</span><span>지시서 줄 끝 👁 = 그 지시서 카드를 편집 칸 왼쪽(목록 위)에 띄움 — 목록에서 고를 때 오른쪽 칸에 나오는 카드와 같은 것 · 카드 안 스크롤</span></span>
+    <span><span class="n">7</span><span>닫기 = × · 카드 바깥 아무 데나 누름 · Esc — 카드가 떠 있을 때 다른 줄 👁 = 바로 그 줄 카드로 바뀜(한 번 누름) · 줄 누름 = 끼울 자리 고르기(그대로) · 더블클릭 = 그 항목 자리로(R28)</span></span>
+    <span><span class="n">8</span><span>안에 든 프리셋 줄 = 누르면 그 자리에서 ▾ 펼침(흐리게 · 보기만 · 몇 겹이든 같음) · 프리셋 줄엔 👁 없음 — 펼쳐서 본다 · 펼친 안쪽 지시서 줄도 👁 = 같은 카드</span></span>
   </div>
 </section>
 
