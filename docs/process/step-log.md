@@ -2758,4 +2758,5 @@
   - **후속 서베이(2026-10-17)** — 에이전트의 라이브러리 파일 조작(경로가 바뀌면 명령 · 아니면 직접 + refresh)의 선례: `docs/research/agent-file-ops-path-command-split-survey-2026-10-17.md`(`/research` light).
   - **후속 서베이(2026-10-17)** — 편집 칸을 떠나지 않고 참조한 항목의 내용 보기(올리기 · peek · 고정 · 선택 따라가기): `docs/research/editor-referenced-content-peek-survey-2026-10-17.md`(`/research` light).
   - **후속 서베이(2026-10-17)** — 마크다운 본문의 글자만 발췌 · 길이 · 자르기: `docs/research/markdown-plaintext-snippet-survey-2026-10-17.md`(`/research` light).
+  - **후속 서베이(2026-10-17)** — 글자 발췌와 그린 미리보기를 어디에 두나: `docs/research/snippet-vs-rendered-preview-placement-survey-2026-10-17.md`(`/research` light).
   - **PRD 초안(2026-10-15)** — `docs/process/S21-preset-library/prd.md`(초안 · 사용자 미확정 · `/review prd` 4회차 반영) · TRD 초안 `trd.md`(`/review trd` full 3회차 반영) · 브리핑 `briefing.html`(v43 화면 그림 + 시스템 구조 · 흐름 그림 · 결정마다 갱신) · 슬롯 이름 조사 `docs/research/agent-customization-pane-naming-survey-2026-10-16.md`(light). 결정 정본 = `.claude/handoff/attachments/20261012-preset-decisions.md` — 여기 베끼지 않는다.

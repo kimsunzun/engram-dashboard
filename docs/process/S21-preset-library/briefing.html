@@ -423,7 +423,7 @@ a{color:var(--accent)}
     <span><span>검색칸 왼쪽 × = 지우고 원래 폴더 목록으로 · 검색어 치기는 ← 기록을 늘리지 않음 · 고르기 · 더블클릭 · ★ · 끌기는 평소와 같다</span></span>
   </div>
   <p class="lead">오른쪽 칸 — 고른 것에 따라</p>
-  <style>.det44{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr));gap:12px}.det44>.win{display:flex}.det44 .pane{flex:1;min-height:150px}.det44 .head .n{margin-left:auto}.det44 .kind.e{background:var(--err-soft);color:var(--err)}.hint44{flex:1;display:flex;align-items:center;justify-content:center;text-align:center;color:var(--app-muted);font-size:12.5px;gap:6px}.prev44{font-size:12px;line-height:1.5;max-height:84px;overflow:hidden;-webkit-mask-image:linear-gradient(to bottom,#000 45%,transparent);mask-image:linear-gradient(to bottom,#000 45%,transparent)}.prev44 b{display:block;font-size:13px}.many44{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px}.many44 .t{font-size:18px;font-weight:600}.many44 small{color:var(--app-muted);font-size:12px}.final .ex44{white-space:normal;font-family:inherit;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}</style>
+  <style>.det44{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr));gap:12px}.det44>.win{display:flex}.det44 .pane{flex:1;min-height:150px}.det44 .head .n{margin-left:auto}.det44 .kind.e{background:var(--err-soft);color:var(--err)}.hint44{flex:1;display:flex;align-items:center;justify-content:center;text-align:center;color:var(--app-muted);font-size:12.5px;gap:6px}.prev44{font-size:12px;line-height:1.5;max-height:84px;overflow:hidden;-webkit-mask-image:linear-gradient(to bottom,#000 45%,transparent);mask-image:linear-gradient(to bottom,#000 45%,transparent)}.prev44 b{display:block;font-size:13px}.many44{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px}.many44 .t{font-size:18px;font-weight:600}.many44 small{color:var(--app-muted);font-size:12px}</style>
   <div class="det44" role="img" aria-label="오른쪽 상세 칸이 고른 것에 따라 달라지는 모습 — 안 고름 · 폴더 · 지시서 · 설정 · 여러 개 · 오류">
     <div class="win"><div class="pane side">
       <div class="head"><span class="n">8</span></div>
@@ -439,8 +439,6 @@ a{color:var(--accent)}
     <div class="win"><div class="pane side">
       <div class="head"><span class="kind">지시서</span><span class="t" style="font-size:14px">리뷰 규칙</span><span class="n">10</span></div>
       <div class="final">
-        <span class="k">발췌</span>
-        <span class="v ex44">리뷰 규칙 칭찬하지 않는다 근거 없는 지적 금지 파일:줄 로 가리킨다 고칠 수 있으면 고친 안을 준다…</span>
         <span class="k">미리보기</span>
         <div class="prev44"><b># 리뷰 규칙</b>- 칭찬하지 않는다<br>- 근거 없는 지적 금지<br>- 파일:줄 로 가리킨다<br>- 고칠 것만 적는다</div>
         <span class="k">위치</span>
@@ -481,7 +479,7 @@ a{color:var(--accent)}
   <div class="caps">
     <span><span class="n">8</span><span>아무것도 안 고름 = 흐린 안내 한 줄(문구는 나중에 다듬음) (Spacedrive 관행)</span></span>
     <span><span class="n">9</span><span>폴더 = 이름 · 위치만 — 안의 개수 세지 않음 (관행 = 메타데이터만)</span></span>
-    <span><span class="n">10</span><span>지시서 = 발췌(글자만 · 제목 글자 포함 · 2줄 …) · 본문 미리보기(읽기만 · 앞부분만 · 아래로 흐려짐) · 위치 · 쓰는 곳 — 설명 = 스킬만(SKILL.md) (탐색기 · Finder · Unity 관행)</span></span>
+    <span><span class="n">10</span><span>지시서 = 본문 미리보기(읽기만 · 앞부분) · 위치 · 쓰는 곳 — 설명 = 스킬만(SKILL.md) · 발췌는 카드가 아니라 「+ 담기」 검색 결과 줄의 한 줄</span></span>
     <span><span class="n">11</span><span>설정 = 설명 · 정해 둔 값 요약(백엔드 · 모델 — 있을 때만 · 원문 칸이 있으면 「claude 원문 있음」) · 위치 · 쓰는 곳</span></span>
     <span><span class="n">12</span><span>여러 개 고름 = 「N개 고름」 + 종류별 수만 (Spacedrive · Finder 관행)</span></span>
     <span><span class="n">13</span><span>오류 줄 = 이유 · 몇째 줄 · 위치 (관행 없음 — 우리 설계) · <code>kind: preset</code> · <code>kind: settings</code> 인데 깨진 것 · 모르는 <code>kind</code> 만 — <code>kind</code> 없는 <code>.yaml</code> 은 목록에 안 보임 (2026-10-17)</span></span>
@@ -706,7 +704,7 @@ a{color:var(--accent)}
   <p class="pend"><span class="tag ok">확정</span>칸 폭 · 마지막 폴더 · 뒤로/앞으로 기록은 번호(1~4)마다 저장</p>
   <p class="pend"><span class="tag ok">확정</span>따로 된 프리셋 편집 슬롯은 만들지 않음 — 편집은 라이브러리 오른쪽 칸 하나 · 옛 프리셋(작업 폴더 즐겨찾기) 슬롯도 없앰</p>
   <p class="lead">편집 칸에서 지시서 내용 보기 <span class="tag ok">확정 2026-10-17</span></p>
-  <style>.pe45{position:relative;grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.pe45>.pane+.pane{border-left:1px solid var(--app-line);border-top:0}.pe45 .row{padding:4px 8px}.eye45{font-size:11px;padding:0 4px;border:1px solid var(--app-line);border-radius:4px;background:var(--app-panel);line-height:1.4;cursor:pointer;flex:none}.eye45.on{border-color:var(--accent);background:var(--accent-soft);box-shadow:inset 0 1px 2px rgba(0,0,0,.25)}.rw45{position:relative}.pk45{position:absolute;z-index:2;top:-150px;right:calc(100% + 13px);width:260px;border:1px solid var(--accent);border-radius:8px;background:var(--app-raised);box-shadow:0 8px 22px rgba(0,0,0,.28);padding:10px;display:flex;flex-direction:column;gap:7px;color:var(--app-text)}.pk45::after{content:"";position:absolute;right:-6px;top:162px;width:10px;height:10px;background:var(--app-raised);border-top:1px solid var(--accent);border-right:1px solid var(--accent);transform:rotate(45deg)}.pk45 .head{flex-wrap:nowrap}.pk45 .head .t{font-size:14px}.sc45{position:relative;padding-right:9px}.sc45::after{content:"";position:absolute;right:0;top:2px;width:3px;height:45%;border-radius:2px;background:var(--app-line)}.sc45 .prev44{max-height:96px}@media (max-width:720px){.pe45{grid-template-columns:minmax(0,1fr)}.pe45>.pane+.pane{border-left:0;border-top:1px solid var(--app-line)}.pk45{position:relative;top:auto;right:auto;width:auto;margin-top:10px}.pk45::after{top:-6px;right:auto;left:28px;transform:rotate(-45deg)}}</style>
+  <style>.pe45{position:relative;grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.pe45>.pane+.pane{border-left:1px solid var(--app-line);border-top:0}.pe45 .row{padding:4px 8px}.eye45{font-size:11px;padding:0 4px;border:1px solid var(--app-line);border-radius:4px;background:var(--app-panel);line-height:1.4;cursor:pointer;flex:none}.eye45.on{border-color:var(--accent);background:var(--accent-soft);box-shadow:inset 0 1px 2px rgba(0,0,0,.25)}.rw45{position:relative}.pk45{position:absolute;z-index:2;top:-96px;right:calc(100% + 13px);width:260px;border:1px solid var(--accent);border-radius:8px;background:var(--app-raised);box-shadow:0 8px 22px rgba(0,0,0,.28);padding:10px;display:flex;flex-direction:column;gap:7px;color:var(--app-text)}.pk45::after{content:"";position:absolute;right:-6px;top:108px;width:10px;height:10px;background:var(--app-raised);border-top:1px solid var(--accent);border-right:1px solid var(--accent);transform:rotate(45deg)}.pk45 .head{flex-wrap:nowrap}.pk45 .head .t{font-size:14px}.sc45{position:relative;padding-right:9px}.sc45::after{content:"";position:absolute;right:0;top:2px;width:3px;height:45%;border-radius:2px;background:var(--app-line)}.sc45 .prev44{max-height:96px}@media (max-width:720px){.pe45{grid-template-columns:minmax(0,1fr)}.pe45>.pane+.pane{border-left:0;border-top:1px solid var(--app-line)}.pk45{position:relative;top:auto;right:auto;width:auto;margin-top:10px}.pk45::after{top:-6px;right:auto;left:28px;transform:rotate(-45deg)}}</style>
   <div class="win" role="img" aria-label="편집 칸의 지시서 줄 리뷰 규칙 끝 눈 단추를 누르면, 목록에서 고를 때 오른쪽 칸에 나오는 것과 같은 지시서 카드가 편집 칸 왼쪽 가운데 목록 위로 떠 그 줄을 가리키는 예시 — 안에 든 프리셋 공용/기본 규칙은 그 자리에서 흐리게 펼쳐짐">
     <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>라이브러리 1 — 프리셋/리뷰어.yaml</div>
     <div class="win-body pe45">
@@ -741,8 +739,6 @@ a{color:var(--accent)}
           <div class="pk45">
             <div class="head"><span class="kind">지시서</span><span class="t">리뷰 규칙</span><span class="sp"></span><span class="n">7</span><span class="x" aria-label="닫기">×</span></div>
             <div class="final">
-              <span class="k">발췌</span>
-              <span class="v ex44">리뷰 규칙 칭찬하지 않는다 근거 없는 지적 금지 파일:줄 로 가리킨다 고칠 수 있으면 고친 안을 준다…</span>
               <span class="k">미리보기</span>
               <div class="sc45"><div class="prev44"><b># 리뷰 규칙</b>- 칭찬하지 않는다<br>- 근거 없는 지적 금지<br>- 파일:줄 로 가리킨다<br>- 고칠 수 있으면 고친 안을 준다</div></div>
               <span class="k">쓰는 곳</span>
