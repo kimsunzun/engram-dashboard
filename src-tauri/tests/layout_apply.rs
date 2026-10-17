@@ -2014,6 +2014,7 @@ fn bar_chrome() -> DockChrome {
             y1: 28.0,
         },
         tabs: Vec::new(),
+        scroll: None,
     }
 }
 

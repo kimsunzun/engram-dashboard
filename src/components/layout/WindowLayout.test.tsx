@@ -1035,7 +1035,8 @@ describe('WindowLayout — 떼어진 표시(그리기만)', () => {
       canvas: { w: 800, h: 572 },
       outer: [],
       slots: [],
-      tab_bar: { rect: { x0: 0, y0: 0, x1: 800, y1: 28 }, heads: [], insert_xs: [0] },
+      tab_bar: { rect: { x0: 0, y0: 0, x1: 800, y1: 28 }, heads: [], insert_xs: [0], scroll: 0 },
+      reorder: null,
     }
     emitDock('dock:regions', regions)
     expect(screen.queryByTestId('dock-tab-insert')).toBeNull()

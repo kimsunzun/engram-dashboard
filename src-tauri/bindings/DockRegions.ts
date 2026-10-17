@@ -2,6 +2,7 @@
 import type { CanvasPx } from "./CanvasPx";
 import type { OuterBand } from "./OuterBand";
 import type { PointCss } from "./PointCss";
+import type { ReorderRegion } from "./ReorderRegion";
 import type { SlotRegion } from "./SlotRegion";
 import type { TabBarRegion } from "./TabBarRegion";
 
@@ -10,10 +11,10 @@ import type { TabBarRegion } from "./TabBarRegion";
  *
  * - `drag_id`: 그 끌기 — 웹뷰는 `drag_id` 별로 가장 큰 `rev` 만 쓴다.
  * - `rev`: 창별 · 세션 안 단조. 영역이나 그 창의 놓기 기대값이 바뀌면 오른다 — 이음새 놓기의 대조 기준.
- * - `bar_rev`: 창별 · 세션 안 단조. 탭바 몫(`tab_bar` · 탭 목록 기대값)이 바뀔 때만 오른다 — 탭바 놓기의 대조
- *   기준이다(활성 전환은 `rev` 만 올린다).
+ * - `bar_rev`: 창별 · 세션 안 단조. 탭바 몫(`tab_bar` 기하 · 탭 목록 기대값 · `reorder` 의 생김 · 빠짐)이 바뀔
+ *   때만 오른다 — 탭바 놓기의 대조 기준이다(활성 전환은 `rev` 만 올린다 · 탭바 `scroll` 만 바뀌어도 오르지 않는다).
  * - `blocked`: 출처 탭 배치가 끌기 시작 뒤 바뀌었다 — 놓기를 받지 않는다(`dropEffect = 'none'`). `true` 면 그
- *   아래 칸은 전부 빈 값이다(`view_id` = `null` · 원점 · 캔버스 = 0 · 목록 = 빈 것 · `tab_bar` = `null`).
+ *   아래 칸은 전부 빈 값이다(`view_id` = `null` · 원점 · 캔버스 = 0 · 목록 = 빈 것 · `tab_bar` · `reorder` = `null`).
  * - `view_id`: 이 창에 보이는 탭(끄는 탭이 그 창 활성이면 떼어진 자리의 승계 탭). `null` = 보이는 탭 없음(메인
  *   마지막 탭을 뗐다) — 그때 캔버스 위는 늘 가이드 없음이다. 웹뷰는 자기 캔버스가 보이던 탭이 이것과 다르면 칸 ·
  *   바깥 띠를 그리지 않는다(탭바는 그린다).
@@ -21,5 +22,8 @@ import type { TabBarRegion } from "./TabBarRegion";
  * - `outer`: 놓을 수 있는 바깥 변만(PRD R8 — 결과에 면적 0 칸이 생길 변은 빠진다).
  * - `slots`: 보이는 탭의 칸 전부. `outer` · `slots` 는 크롬 · 캔버스 보고가 둘 다 있고 보이는 탭이 있을 때만 싣는다.
  * - `tab_bar`: `null` = 탭바 놓기를 받지 않는다(크롬 보고 전).
+ * - `reorder`: 출처 창에만 서는 순서 이동 영역(PRD R23 · TRD §2-4) — 점이 그 `zone` 안이면 다른 어느 사각형보다
+ *   먼저 `reorder` 판정이다. `null` = 순서 이동 없음(다른 창 · 시작 측정 없음 · 그 측정이 모델 탭 목록과 어긋남 ·
+ *   `blocked`) — 그 창 탭바는 `tab_bar` 로 판정한다.
  */
-export type DockRegions = { drag_id: string, rev: number, bar_rev: number, blocked: boolean, view_id: string | null, canvas_origin: PointCss, canvas: CanvasPx, outer: Array<OuterBand>, slots: Array<SlotRegion>, tab_bar: TabBarRegion | null, };
+export type DockRegions = { drag_id: string, rev: number, bar_rev: number, blocked: boolean, view_id: string | null, canvas_origin: PointCss, canvas: CanvasPx, outer: Array<OuterBand>, slots: Array<SlotRegion>, tab_bar: TabBarRegion | null, reorder: ReorderRegion | null, };

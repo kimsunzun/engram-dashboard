@@ -63,7 +63,7 @@ export interface DockIpc {
 
 export interface DockDragDeps {
   ipc: DockIpc
-  pick: (regions: DockRegions, point: PointCss, sourceView: string) => Picked
+  pick: (regions: DockRegions, point: PointCss, scroll: number | null, sourceView: string) => Picked
   /** 그 창의 모델 활성 탭 — 탭 상태를 아직 모르면 `null`. */
   activeTab: (label: string) => string | null
   /** 그 창의 모델 활성 탭이 바뀔 때 부른다. 반환 = 해제. */
@@ -140,6 +140,8 @@ function pickedKey(p: Picked): string {
       return `s:${p.anchor ?? ''}:${p.side}`
     case 'tab_bar':
       return `t:${p.index}:${p.over ?? ''}`
+    case 'reorder':
+      return `r:${p.index}`
   }
 }
 
@@ -360,7 +362,9 @@ export function createDockDrag(deps: DockDragDeps): DockDragController {
     let canvas = false
     let cursorSlot: string | null = null
     if (regions !== null && !regions.blocked) {
-      const picked = deps.pick(regions, point, rec?.session?.source_view ?? '')
+      // 판정 스크롤 = 보고 · 놓기에 실은 스크롤이어야 한다 — 셸이 그것(없으면 영역이 잰 스크롤)으로 다시 고르므로, 다르면
+      //   넘친 탭바에서 그린 자리 ≠ 셸이 고른 자리가 되어 놓기가 거절된다. 보고가 스크롤을 싣지 않으므로 `null` 이다.
+      const picked = deps.pick(regions, point, null, rec?.session?.source_view ?? '')
       canvas = displayed === regions.view_id
       // ★보이던 탭이 영역의 탭이 아니면 캔버스 가이드를 그리지 않는다 — 탭바는 그대로다★(TRD §1-4 · 5.2): 탭 목록
       //   알림과 영역이 엇갈린 틈에 다른 탭 칸 위에 옛 가이드를 그리지 않게. 탭바 영역은 보이는 탭과 무관하다.

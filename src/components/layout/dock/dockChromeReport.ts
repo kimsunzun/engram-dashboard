@@ -49,6 +49,8 @@ export function dockChromeOf(m: ChromeMeasure): DockChrome | null {
     canvas_origin: { x: m.canvas.left, y: m.canvas.top },
     tab_bar: rectCss(m.tabBar),
     tabs: heads.map(h => ({ view_id: h.viewId, rect: rectCss(h.rect) })),
+    // 머리를 뷰포트 x 그대로 보내므로 스크롤은 싣지 않는다 — 셸은 0 으로 읽어 같은 뷰포트 좌표로 판정한다.
+    scroll: null,
   }
 }
 

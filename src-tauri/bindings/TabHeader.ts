@@ -2,6 +2,7 @@
 import type { RectCss } from "./RectCss";
 
 /**
- * 탭 머리 하나 — 탭바 스크롤이 반영된 화면 위 사각형 그대로(탭바 상자 밖으로 밀려난 머리도 싣는다).
+ * 탭 머리 하나 — x 는 탭바 **내용 좌표**(잰 뷰포트 x + 그때 탭바 `scrollLeft` = 스크롤 0 일 때의 뷰포트 x), y 는
+ * 뷰포트다. 탭바 상자 밖으로 밀려난 머리도 싣는다. 화면 x = 내용 x − 지금 `scrollLeft`.
  */
 export type TabHeader = { view_id: string, rect: RectCss, };

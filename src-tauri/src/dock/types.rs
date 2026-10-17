@@ -1,11 +1,13 @@
 //! 도킹 wire 페이로드(TRD S21-slot-docking §1-5) — 셸 → 웹뷰 영역([`DockRegions`] · `dock:regions`) · 세션 사건
-//! ([`SessionEvent`] · `dock:session`) · 당긴 답([`DockPullReply`]), 웹뷰 → 셸 보고([`DragOverReport`] ·
-//! [`DropReport`] · [`DragEffect`]).
+//! ([`SessionEvent`] · `dock:session`) · 당긴 답([`DockPullReply`]), 웹뷰 → 셸 시작 측정([`StripStart`]) · 보고
+//! ([`DragOverReport`] · [`DropReport`] · [`DragEffect`]).
 //! ts-rs 로 `src-tauri/bindings/` 에 굽는다. 웹뷰 → 셸 측정(크롬)은 레이아웃 창 항목에 두므로 `layout::chrome` 에
 //! 있다.
 //!
-//! 칸 · 띠 사각형은 [`PxRectWire`] = 그 창 캔버스의 CSS px 정수(캔버스 왼쪽 위 원점), 탭바 · 점은 그 창 뷰포트의
-//! CSS px 다. 셸이 계산하고 웹뷰는 좌표 계산 없이 그대로 점-사각형 검사를 하고 그린다(ADR-0227 결정 3).
+//! 칸 · 띠 사각형은 [`PxRectWire`] = 그 창 캔버스의 CSS px 정수(캔버스 왼쪽 위 원점), 탭바 · 구역 · 점은 그 창
+//! 뷰포트의 CSS px 다. 셸이 계산하고 웹뷰는 그 사각형 그대로 점-사각형 검사를 하고 그린다(ADR-0227 결정 3). 예외는
+//! 탭 머리 x · 끼울 x · 끄는 머리 왼쪽(탭바 내용 좌표 — `TabHeader`)뿐이다: 웹뷰는 그것과 견줄 때 점 x 에 탭바
+//! 스크롤을 더하고, 그릴 때 지금 스크롤을 뺀다.
 //!
 //! 철자: 구조체 칸은 snake_case · 데이터를 단 enum 은 `type` 판별자에 snake_case variant(레이아웃 타입과 같은 꼴) ·
 //! id 는 문자열 · `DockSide` 만 variant 이름 그대로다(`layout::dock` 의 rename 금지).
@@ -67,10 +69,10 @@ pub struct Band {
 ///
 /// - `drag_id`: 그 끌기 — 웹뷰는 `drag_id` 별로 가장 큰 `rev` 만 쓴다.
 /// - `rev`: 창별 · 세션 안 단조. 영역이나 그 창의 놓기 기대값이 바뀌면 오른다 — 이음새 놓기의 대조 기준.
-/// - `bar_rev`: 창별 · 세션 안 단조. 탭바 몫(`tab_bar` · 탭 목록 기대값)이 바뀔 때만 오른다 — 탭바 놓기의 대조
-///   기준이다(활성 전환은 `rev` 만 올린다).
+/// - `bar_rev`: 창별 · 세션 안 단조. 탭바 몫(`tab_bar` 기하 · 탭 목록 기대값 · `reorder` 의 생김 · 빠짐)이 바뀔
+///   때만 오른다 — 탭바 놓기의 대조 기준이다(활성 전환은 `rev` 만 올린다 · 탭바 `scroll` 만 바뀌어도 오르지 않는다).
 /// - `blocked`: 출처 탭 배치가 끌기 시작 뒤 바뀌었다 — 놓기를 받지 않는다(`dropEffect = 'none'`). `true` 면 그
-///   아래 칸은 전부 빈 값이다(`view_id` = `null` · 원점 · 캔버스 = 0 · 목록 = 빈 것 · `tab_bar` = `null`).
+///   아래 칸은 전부 빈 값이다(`view_id` = `null` · 원점 · 캔버스 = 0 · 목록 = 빈 것 · `tab_bar` · `reorder` = `null`).
 /// - `view_id`: 이 창에 보이는 탭(끄는 탭이 그 창 활성이면 떼어진 자리의 승계 탭). `null` = 보이는 탭 없음(메인
 ///   마지막 탭을 뗐다) — 그때 캔버스 위는 늘 가이드 없음이다. 웹뷰는 자기 캔버스가 보이던 탭이 이것과 다르면 칸 ·
 ///   바깥 띠를 그리지 않는다(탭바는 그린다).
@@ -78,6 +80,9 @@ pub struct Band {
 /// - `outer`: 놓을 수 있는 바깥 변만(PRD R8 — 결과에 면적 0 칸이 생길 변은 빠진다).
 /// - `slots`: 보이는 탭의 칸 전부. `outer` · `slots` 는 크롬 · 캔버스 보고가 둘 다 있고 보이는 탭이 있을 때만 싣는다.
 /// - `tab_bar`: `null` = 탭바 놓기를 받지 않는다(크롬 보고 전).
+/// - `reorder`: 출처 창에만 서는 순서 이동 영역(PRD R23 · TRD §2-4) — 점이 그 `zone` 안이면 다른 어느 사각형보다
+///   먼저 `reorder` 판정이다. `null` = 순서 이동 없음(다른 창 · 시작 측정 없음 · 그 측정이 모델 탭 목록과 어긋남 ·
+///   `blocked`) — 그 창 탭바는 `tab_bar` 로 판정한다.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct DockRegions {
@@ -95,6 +100,7 @@ pub struct DockRegions {
     pub outer: Vec<OuterBand>,
     pub slots: Vec<SlotRegion>,
     pub tab_bar: Option<TabBarRegion>,
+    pub reorder: Option<ReorderRegion>,
 }
 
 /// 캔버스 바깥 변 하나(PRD R5) — `strip` = 그리고 판정하는 띠(두께 `dock::hit::OUTER_BAND_PX` · 캔버스를 넘지
@@ -118,15 +124,53 @@ pub struct SlotRegion {
     pub bands: Vec<Band>,
 }
 
-/// 탭바(PRD R21) — `rect` = 탭바 상자(뷰포트 CSS px · 반열림) · `heads` = 끄는 탭을 뺀 머리(크롬 보고 순서 —
-/// 끼울 자리는 순서와 무관하게 가운데 x 로 센다) · `insert_xs[i]` = 자리 `i`(`0..=heads.len()`)에 그릴 끼울 x
-/// (탭바 상자 왼쪽 `rect.x0` 에서 잰 CSS px).
+/// 탭바(PRD R21) — `rect` = 탭바 상자(뷰포트 CSS px · 반열림 · 스크롤로 안 움직인다) · `heads` = 끄는 탭을 뺀
+/// 머리(크롬 보고 순서 · x = 내용 좌표 — 끼울 자리는 순서와 무관하게 가운데 x 로 센다) · `insert_xs[i]` = 자리
+/// `i`(`0..=heads.len()`)에 그릴 끼울 x(`rect.x0` 에서 잰 내용 좌표 CSS px — 그릴 땐 지금 `scrollLeft` 를 뺀다) ·
+/// `scroll` = 크롬을 잰 때의 탭바 `scrollLeft`(보고에 없었으면 0) — 판정에 스크롤이 주어지지 않을 때 쓴다.
+/// 판정은 점의 내용 x(뷰포트 x + 스크롤)를 머리 가운데와 견주고, 「탭바 안」은 뷰포트 점 그대로 본다.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct TabBarRegion {
     pub rect: RectCss,
     pub heads: Vec<TabHeader>,
     pub insert_xs: Vec<f64>,
+    pub scroll: f64,
+}
+
+/// 출처 창의 순서 이동 영역(PRD R23 · TRD §2-5) — 끌기 시작 때 잰 탭바([`StripStart`])를 세션 내내 얼린 값이다.
+/// 웹뷰는 구역 포함 검사 · 자리 · 끄는 머리 왼쪽을 이 값만으로 셸과 같은 식으로 낸다(`dock::hit` 의 `reorder_*`).
+///
+/// - `zone`: 순서 이동 구역(뷰포트 CSS px · 반열림) — 탭바 상자의 x 그대로 · 위아래로 `dock::hit::REORDER_SLACK_PX`
+///   만큼 넓힌 것(`dock::hit::reorder_zone`).
+/// - `heads`: 머리 전부(끄는 머리 포함 · 화면 순서 · x = 내용 좌표). 순서가 모델 탭 목록과 같다.
+/// - `dragged`: `heads` 안 끄는 머리 자리.
+/// - `grab_x`: 끄는 머리 왼쪽에서 잰 잡은 자리(CSS px).
+/// - `scroll`: 시작 때의 탭바 `scrollLeft` — 판정에 스크롤이 주어지지 않을 때 쓴다.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct ReorderRegion {
+    pub zone: RectCss,
+    pub heads: Vec<TabHeader>,
+    pub dragged: u32,
+    pub grab_x: f64,
+    pub scroll: f64,
+}
+
+/// 끌기 시작 때 출처 웹뷰가 `dragstart` 안에서 잰 탭바(`dock_drag_start` 의 선택 칸 — TRD §1-5). 셸은 세션 내내
+/// 그대로 쥐고 출처 창 영역의 [`ReorderRegion`] 을 이것으로 만든다.
+///
+/// - `bar`: 탭바 상자(스크롤 상자 자신 · 뷰포트 CSS px).
+/// - `heads`: 머리 전부 — 끄는 머리 포함 · 화면(DOM) 순서 · x = 내용 좌표(잰 x + `scroll`).
+/// - `grab_x`: `dragstart.clientX` − 끄는 머리의 뷰포트 x0(스크롤과 무관).
+/// - `scroll`: `dragstart` 때 탭바 `scrollLeft`(CSS px).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct StripStart {
+    pub bar: RectCss,
+    pub heads: Vec<TabHeader>,
+    pub grab_x: f64,
+    pub scroll: f64,
 }
 
 /// 점 하나의 판정 결과 — 셸 `dock::regions::pick` 과 웹뷰 `pickTarget` 이 같은 영역에서 같은 값을 낸다(골든
@@ -135,8 +179,10 @@ pub struct TabBarRegion {
 /// - `none`: 가이드 없음(칸 가운데 · 캔버스 밖 · 보이는 탭 없음) — 셸도 그 자리를 가이드 없음으로 판정하면 놓기 =
 ///   새 창(R22).
 /// - `seam`: `anchor` = 붙일 칸(`null` = 레이아웃 전체의 바깥 변) · `side` = 붙일 쪽.
-/// - `tab_bar`: `index` = 끄는 탭을 뺀 탭 목록에서 끼울 자리(가운데 x 가 점 이하인 머리 수) · `over` = 점을 품은
-///   머리(`null` = 없음 — 머리 사이 · 끝 뒤). 탭바 놓기의 대조는 `index` 만 본다.
+/// - `tab_bar`: `index` = 끄는 탭을 뺀 탭 목록에서 끼울 자리(가운데 x 가 점의 내용 x 이하인 머리 수) · `over` =
+///   점을 품은 머리(`null` = 없음 — 머리 사이 · 끝 뒤). 탭바 놓기의 대조는 `index` 만 본다.
+/// - `reorder`: 출처 창 순서 이동 구역 안 — `index` = 끄는 탭이 놓일 자리(끄는 탭을 뺀 결과 탭 목록의 자리 ·
+///   탭바 놓기의 `index` 와 같은 뜻 · 제자리면 `ReorderRegion.dragged`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(export)]
@@ -151,6 +197,9 @@ pub enum Picked {
         index: u32,
         #[ts(type = "string | null")]
         over: Option<Uuid>,
+    },
+    Reorder {
+        index: u32,
     },
 }
 
@@ -318,7 +367,9 @@ mod tests {
                     },
                 }],
                 insert_xs: vec![4.0, 120.25],
+                scroll: 0.0,
             }),
+            reorder: None,
         };
         let wire = json!({
             "drag_id": "d-1",
@@ -349,7 +400,9 @@ mod tests {
                     "rect": { "x0": 4.0, "y0": 0.0, "x1": 120.25, "y1": 28.0 },
                 }],
                 "insert_xs": [4.0, 120.25],
+                "scroll": 0.0,
             },
+            "reorder": null,
         });
         assert_eq!(serde_json::to_value(&r).unwrap(), wire);
         assert_eq!(serde_json::from_value::<DockRegions>(wire).unwrap(), r);
@@ -368,10 +421,86 @@ mod tests {
             outer: vec![],
             slots: vec![],
             tab_bar: None,
+            reorder: None,
         };
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["view_id"], serde_json::Value::Null);
         assert_eq!(v["tab_bar"], serde_json::Value::Null);
+        assert_eq!(v["reorder"], serde_json::Value::Null);
+    }
+
+    fn head(n: u128, x0: f64, x1: f64) -> TabHeader {
+        TabHeader {
+            view_id: id(n),
+            rect: RectCss {
+                x0,
+                y0: 0.0,
+                x1,
+                y1: 28.0,
+            },
+        }
+    }
+
+    #[test]
+    fn the_reorder_region_and_the_tab_bar_scroll_go_out_in_snake_case() {
+        let zone = RectCss {
+            x0: 40.0,
+            y0: -15.0,
+            x1: 640.0,
+            y1: 43.0,
+        };
+        let r = ReorderRegion {
+            zone,
+            heads: vec![head(1, 40.0, 140.0), head(2, 140.0, 260.5)],
+            dragged: 1,
+            grab_x: 30.25,
+            scroll: 12.5,
+        };
+        let wire = json!({
+            "zone": { "x0": 40.0, "y0": -15.0, "x1": 640.0, "y1": 43.0 },
+            "heads": [
+                { "view_id": id(1).to_string(), "rect": { "x0": 40.0, "y0": 0.0, "x1": 140.0, "y1": 28.0 } },
+                { "view_id": id(2).to_string(), "rect": { "x0": 140.0, "y0": 0.0, "x1": 260.5, "y1": 28.0 } },
+            ],
+            "dragged": 1,
+            "grab_x": 30.25,
+            "scroll": 12.5,
+        });
+        assert_eq!(serde_json::to_value(&r).unwrap(), wire);
+        assert_eq!(serde_json::from_value::<ReorderRegion>(wire).unwrap(), r);
+
+        let bar = TabBarRegion {
+            rect: zone,
+            heads: vec![],
+            insert_xs: vec![0.0],
+            scroll: 80.0,
+        };
+        assert_eq!(serde_json::to_value(&bar).unwrap()["scroll"], json!(80.0));
+    }
+
+    #[test]
+    fn strip_start_reads_what_the_webview_measures() {
+        let s: StripStart = serde_json::from_value(json!({
+            "bar": { "x0": 0.0, "y0": 0.0, "x1": 300.0, "y1": 28.0 },
+            "heads": [{ "view_id": id(3).to_string(), "rect": { "x0": 120.0, "y0": 0.0, "x1": 220.0, "y1": 28.0 } }],
+            "grab_x": 50.0,
+            "scroll": 120.0,
+        }))
+        .unwrap();
+        assert_eq!(
+            s,
+            StripStart {
+                bar: RectCss {
+                    x0: 0.0,
+                    y0: 0.0,
+                    x1: 300.0,
+                    y1: 28.0,
+                },
+                heads: vec![head(3, 120.0, 220.0)],
+                grab_x: 50.0,
+                scroll: 120.0,
+            }
+        );
     }
 
     #[test]
@@ -398,6 +527,10 @@ mod tests {
                     over: None,
                 },
                 json!({ "type": "tab_bar", "index": 2, "over": null }),
+            ),
+            (
+                Picked::Reorder { index: 3 },
+                json!({ "type": "reorder", "index": 3 }),
             ),
         ];
         for (picked, wire) in cases {

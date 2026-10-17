@@ -12,6 +12,7 @@ vi.mock('@tauri-apps/api/event', () => ({ listen: tauriListen }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(async () => undefined) }))
 vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({ label: 'main' }) }))
 
+import goldenSource from '../../../../src-tauri/src/dock/pick_golden.json?raw'
 import type { DockPullReply } from '../../../../src-tauri/bindings/DockPullReply'
 import type { DockRegions } from '../../../../src-tauri/bindings/DockRegions'
 import type { Picked } from '../../../../src-tauri/bindings/Picked'
@@ -31,6 +32,7 @@ import {
   type DockIpc,
   type MountOptions,
 } from './dockDrag'
+import { pickTarget } from './dockPick'
 
 const NONE: Picked = { type: 'none' }
 const seam = (anchor: string | null, side: 'Left' | 'Right' | 'Top' | 'Bottom' = 'Left'): Picked => ({
@@ -58,7 +60,9 @@ function regions(over: Partial<DockRegions> = {}): DockRegions {
         { view_id: 'v-other', rect: { x0: 100, y0: 0, x1: 200, y1: 28 } },
       ],
       insert_xs: [0, 100, 200],
+      scroll: 0,
     },
+    reorder: null,
     ...over,
   }
 }
@@ -93,7 +97,7 @@ let unlistened: string[]
 let ipc: DockIpc
 let active: Record<string, string | null>
 let activeSubs: Set<() => void>
-let pick: Mock<(r: DockRegions, p: PointCss, src: string) => Picked>
+let pick: Mock<(r: DockRegions, p: PointCss, scroll: number | null, src: string) => Picked>
 let switchTab: Mock<(label: string, viewId: string) => void>
 let ctl: DockDragController
 let release: (() => void) | null
@@ -182,7 +186,7 @@ beforeEach(async () => {
   }
   active = { main: 'v-main' }
   activeSubs = new Set()
-  pick = vi.fn((_r: DockRegions, _p: PointCss, _src: string) => NONE)
+  pick = vi.fn((_r: DockRegions, _p: PointCss, _scroll: number | null, _src: string) => NONE)
   switchTab = vi.fn((_label: string, _viewId: string) => undefined)
   release = null
 })
@@ -324,11 +328,35 @@ describe('대상', () => {
     emit(EVT_DOCK_REGIONS, regions())
     pick.mockReturnValue(seam('s1', 'Right'))
     drag('dragover', { x: 790, y: 300 })
-    expect(pick).toHaveBeenLastCalledWith(regions(), { x: 790, y: 300 }, 'v-src')
+    expect(pick).toHaveBeenLastCalledWith(regions(), { x: 790, y: 300 }, null, 'v-src')
     const g = ctl.getGuide()
     expect(g?.shown).toEqual(seam('s1', 'Right'))
     expect(g?.canvas).toBe(true)
     expect(g?.cursorSlot).toBe('s1')
+  })
+
+  it('실제 pickTarget 으로 판정하면 넘친 탭바에서도 셸 다시 판정(스크롤 없음)과 같은 자리를 그리고 보고한다 — 골든', async () => {
+    // 골든 사례의 기대값 = 셸 `pick(.., None, ..)` 의 답(Rust 골든 시험) — 영역이 잰 탭바 스크롤 80 으로 판정한다.
+    const golden = JSON.parse(goldenSource) as {
+      source_view: string
+      regions: Record<string, DockRegions>
+      cases: Array<{ name: string; regions: string; point: PointCss; scroll?: number; expect: Picked }>
+    }
+    const region = golden.regions.target_overflow
+    const cases = golden.cases.filter(c => c.regions === 'target_overflow' && c.scroll === undefined)
+    expect(region.tab_bar?.scroll, '전제: 영역이 스크롤을 잰 채 왔다').not.toBe(0)
+    expect(cases.length).toBeGreaterThan(0)
+    pick.mockImplementation(pickTarget)
+    active.main = region.view_id
+    await mounted()
+    emit(EVT_DOCK_SESSION, started(region.drag_id, 0, { source_view: golden.source_view }))
+    emit(EVT_DOCK_REGIONS, region)
+    for (const c of cases) {
+      drag('dragover', c.point)
+      await flush()
+      expect(ctl.getGuide()?.shown, c.name).toEqual(c.expect)
+      expect(lastOf(cmdCalls('dock_drag_over')), c.name).toMatchObject({ report: { type: 'over', shown: c.expect } })
+    }
   })
 
   it('보이던 탭 ≠ 영역 view_id 면 캔버스 가이드를 그리지 않는다 — 보고 shown = none · displayed 를 싣는다', async () => {
@@ -515,7 +543,7 @@ describe('대상', () => {
     expect(cmdCalls('dock_pull')).toHaveLength(1)
     expect(ctl.getGuide()?.regions.rev).toBe(2)
     expect(ctl.getSession()).toEqual({ drag_id: 'd1', ...startedFields() })
-    expect(pick).toHaveBeenLastCalledWith(regions({ rev: 2 }), { x: 10, y: 50 }, 'v-src')
+    expect(pick).toHaveBeenLastCalledWith(regions({ rev: 2 }), { x: 10, y: 50 }, null, 'v-src')
 
     // 영역을 아는 채로 다시 들어오면 당기지 않는다.
     drag('dragleave', { related: null })
@@ -628,7 +656,7 @@ describe('영역 · 세션', () => {
     await flush()
     expect(ctl.getSession()).toBeNull()
     expect(ctl.getGuide()?.shown).toEqual(seam(null, 'Top'))
-    expect(pick).toHaveBeenLastCalledWith(expect.anything(), expect.anything(), '')
+    expect(pick).toHaveBeenLastCalledWith(expect.anything(), expect.anything(), null, '')
     expect(cmdCalls('dock_drag_over')).toEqual([
       expect.objectContaining({ drag_id: 'd7', report: expect.objectContaining({ type: 'over' }) }),
     ])

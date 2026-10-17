@@ -6,6 +6,8 @@
 //! 진입점: [`locate`](1 단계 — 어디 위인가) → [`choose_seam`](2 단계 — 놓을 이음새 · 무효 바깥 변은 밑 칸 띠로
 //! 넘어감). 띠 재료 = [`valid_bands`] · [`landing_rect`](띠 사각형 = 놓았을 때 끼운 것이 차지할 사각형 — R3 · R4).
 //! 그림 재료 = [`outer_strips`](바깥 띠) · [`tab_insert_x`](탭바 끼울 자리).
+//! 출처 창 탭바 안 순서 이동 = [`reorder_zone`](구역) · [`reorder_left`](끄는 머리 왼쪽) · [`reorder_index`](놓일
+//! 자리) — 셸 `pick` 의 첫 단계가 부르고 그림도 같은 값으로 그린다(TRD §2-5).
 //!
 //! ★그린 사각형 = 판정 사각형(R6a ③)★ — 칸 · 탭바 · 바깥 띠 · 칸 띠 전부 반열림(왼쪽 · 위 포함, 오른쪽 · 아래
 //! 제외)으로 그 사각형에 드는지만 본다. 겹치는 곳(모서리)은 정규화 거리가 작은 쪽, 동률은 언제나 [`SIDE_ORDER`].
@@ -13,7 +15,7 @@
 
 use uuid::Uuid;
 
-use crate::layout::chrome::{DockChrome, RectCss};
+use crate::layout::chrome::{DockChrome, RectCss, TabHeader};
 use crate::layout::dock::{docked_tree, incoming_rect, DockAnchor, DockSide};
 use crate::layout::geometry::{self, px_edge, PxRect};
 use crate::layout::manager::WindowLabel;
@@ -93,6 +95,9 @@ impl Locate {
 
 /// `cursor` 가 `top` 의 어디 위인가. 뷰포트 CSS px = `(cursor − top.inner_origin) / top.scale` — 실행 경로는
 /// 뷰포트 CSS px 를 원점 (0, 0) · 배율 1 로 넣는다(TRD §2-2 규칙 2). `source_view` = 끄는 탭.
+///
+/// 탭바 단계 — 「탭바 안」은 뷰포트 점으로, `index` · `over` 는 그 점의 내용 x(뷰포트 x + `chrome.scroll` · 없음 =
+/// 0)로 머리(내용 좌표)와 견준다(TRD §2-2 규칙 3).
 pub fn locate(cursor: (f64, f64), top: Option<&WindowFrame>, source_view: Uuid) -> Locate {
     let Some(w) = top else {
         return Locate::Nothing;
@@ -103,12 +108,13 @@ pub fn locate(cursor: (f64, f64), top: Option<&WindowFrame>, source_view: Uuid) 
     );
     let chrome = w.chrome;
     if contains_css(&chrome.tab_bar, css) {
+        let content = (css.0 + chrome.scroll.unwrap_or(0.0), css.1);
         let heads = || chrome.tabs.iter().filter(move |t| t.view_id != source_view);
         return Locate::TabBar {
             label: w.label.to_owned(),
-            index: heads().filter(|t| center_x(&t.rect) <= css.0).count(),
+            index: heads().filter(|t| center_x(&t.rect) <= content.0).count(),
             over: heads()
-                .find(|t| contains_css(&t.rect, css))
+                .find(|t| contains_css(&t.rect, content))
                 .map(|t| t.view_id),
         };
     }
@@ -288,11 +294,65 @@ pub fn tab_insert_x(chrome: &DockChrome, source_view: Uuid, index: usize) -> f64
     x - chrome.tab_bar.x0
 }
 
+/// 순서 이동 구역의 탭바 위아래 여유(CSS px — PRD R23). Chrome 탭 스트립의 떼기 문턱
+/// `kVerticalDetachMagnetism = 15` 와 같다(사용자 결정 Q20 「Chrome 처럼 · 약 15 px」 · TRD §2-5).
+pub const REORDER_SLACK_PX: f64 = 15.0;
+
+/// 순서 이동 구역 — 탭바 상자 `bar`(뷰포트)의 x 그대로 · y 위아래로 [`REORDER_SLACK_PX`] 넓힌 사각형. 판정은 다른
+/// 사각형과 같은 반열림이다. 들어올 때 · 나갈 때 같은 경계다(이력 없음 — PRD D19).
+pub fn reorder_zone(bar: RectCss) -> RectCss {
+    RectCss {
+        x0: bar.x0,
+        y0: bar.y0 - REORDER_SLACK_PX,
+        x1: bar.x1,
+        y1: bar.y1 + REORDER_SLACK_PX,
+    }
+}
+
+/// 끄는 머리의 왼쪽 x(내용 좌표) — 커서를 따르되(`x − grab_x`) 머리들이 차지한 범위 `[heads[0].x0,
+/// heads[n−1].x1)` 안에 머문다. `heads` = 얼린 머리 전부(끄는 머리 포함 · 화면 순서 · 내용 좌표) · `dragged` = 그
+/// 안 끄는 머리 자리 · `grab_x` = 잡은 자리(끄는 머리 왼쪽에서 잰 커서) · `x` = 점의 내용 x(뷰포트 x + 탭바 스크롤).
+/// 범위가 끄는 머리 폭보다 좁으면 `heads[0].x0` · `heads` 가 비면 `x − grab_x` · `dragged` 가 범위 밖이면 폭 0 으로
+/// 친다(영역은 그런 값을 싣지 않는다).
+// `f64::min` · `Math.min` 은 NaN · ±0 에서 서로 다른 답을 낼 수 있어 비교로 쓴다 — TS 거울(`reorderLeft`)과 같은 식.
+pub fn reorder_left(heads: &[TabHeader], dragged: usize, grab_x: f64, x: f64) -> f64 {
+    let follow = x - grab_x;
+    let (Some(first), Some(last)) = (heads.first(), heads.last()) else {
+        return follow;
+    };
+    let hi = last.rect.x1 - head_width(heads, dragged);
+    let left = if follow < hi { follow } else { hi };
+    if left > first.rect.x0 {
+        left
+    } else {
+        first.rect.x0
+    }
+}
+
+/// 끄는 머리 왼쪽이 `left` 일 때 끄는 탭이 놓일 자리 — 끄는 탭을 뺀 결과 탭 목록의 자리(`DockTo::TabBar` 의
+/// `index` 와 같은 뜻 · 제자리 = `dragged`). 왼쪽 이웃은 가운데 ≤ `left` 면 왼쪽에 남고, 오른쪽 이웃은 가운데 <
+/// `left + 폭` 이면 왼쪽으로 넘어온다 — 같으면 비키지 않는다(Lumino `TabBar` 와 같은 문턱 · TRD §2-5 ③).
+pub fn reorder_index(heads: &[TabHeader], dragged: usize, left: f64) -> usize {
+    let right = left + head_width(heads, dragged);
+    heads
+        .iter()
+        .enumerate()
+        .filter(|(i, h)| {
+            let m = center_x(&h.rect);
+            (*i < dragged && m <= left) || (*i > dragged && m < right)
+        })
+        .count()
+}
+
+fn head_width(heads: &[TabHeader], i: usize) -> f64 {
+    heads.get(i).map_or(0.0, |h| h.rect.x1 - h.rect.x0)
+}
+
 fn center_x(r: &RectCss) -> f64 {
     (r.x0 + r.x1) / 2.0
 }
 
-fn contains_css(r: &RectCss, p: (f64, f64)) -> bool {
+pub(super) fn contains_css(r: &RectCss, p: (f64, f64)) -> bool {
     (r.x0..r.x1).contains(&p.0) && (r.y0..r.y1).contains(&p.1)
 }
 
@@ -342,7 +402,7 @@ fn thickness(r: &PxRect, side: DockSide) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::chrome::{PointCss, TabHeader};
+    use crate::layout::chrome::PointCss;
     use crate::layout::{SlotContent, SplitDir};
 
     const SOURCE: u128 = 99;
@@ -416,6 +476,7 @@ mod tests {
                     rect: rect(x0, 0.0, x1, BAR_H),
                 })
                 .collect(),
+            scroll: None,
         }
     }
 
@@ -894,8 +955,9 @@ mod tests {
     #[test]
     fn until_the_next_report_a_stale_bar_still_has_the_old_geometry() {
         // 떼어진 표시가 그 머리를 숨기면 웹뷰 탭바는 왼쪽으로 당겨지지만 다음 보고 전까지 셸의 크롬은 옛 자리다 —
-        // 같은 커서가 다른 자리를 낸다. 그래서 세션은 떼어진 표시가 시작된 뒤 첫 보고 전까지 탭바 힌트를 내지
-        // 않는다(TRD §2-2 규칙 3 — 6 단계 몫). 이 함수는 받은 크롬만 믿는다.
+        // 같은 커서가 다른 자리를 낸다. 그 틈에도 옛 탭바를 비우지 않는다: 웹뷰는 같은 영역으로 그리고 셸도 같은
+        // 영역으로 판정하므로 놓기는 보인 자리에 들어가고, 접은 뒤의 보고가 `rev` 를 올려 맞춘다(TRD §2-4). 이 함수는
+        // 받은 크롬만 믿는다.
         let stale = stale_tabs();
         let reflowed = chrome(&[(10, 0.0, 100.0), (11, 100.0, 200.0), (12, 200.0, 300.0)]);
         assert_eq!(tab_bar_at(&stale, 150.0), (1, None));
@@ -946,6 +1008,172 @@ mod tests {
         let c = stale_tabs();
         let (index, _) = tab_bar_at(&c, 260.0);
         assert_eq!(tab_insert_x(&c, id(SOURCE), index), 300.0);
+    }
+
+    #[test]
+    fn the_tab_bar_compares_heads_at_the_points_content_x() {
+        // 머리는 내용 좌표 · 탭바가 150 밀려 있다 — 뷰포트 50 = 내용 200(B 의 왼쪽 변).
+        let mut c = stale_tabs();
+        c.scroll = Some(150.0);
+        assert_eq!(tab_bar_at(&c, 50.0), (1, Some(11)));
+        assert_eq!(tab_bar_at(&c, 99.9), (1, Some(11)));
+        assert_eq!(
+            tab_bar_at(&c, 100.0),
+            (2, Some(11)),
+            "내용 250 = B 가운데 → 오른쪽"
+        );
+        // 「탭바 안」은 뷰포트 그대로 — 내용 x 가 상자 밖이어도 탭바다.
+        assert_eq!(tab_bar_at(&c, 599.0), (3, None));
+        let fr = frames(&slot(1), CANVAS);
+        let w = window(&c, &fr, (0.0, 0.0), 1.0);
+        assert_eq!(locate((600.0, 10.0), Some(&w), id(SOURCE)), Locate::Nothing);
+        // 스크롤 없음 = 0.
+        c.scroll = None;
+        assert_eq!(tab_bar_at(&c, 50.0), (1, Some(10)));
+    }
+
+    // ── 1 단계: 순서 이동 (PRD R23 · TRD §2-5) ──────────────────────────────────
+
+    // 출처 탭바의 얼린 머리 — A(10) [40,140) · 끄는 탭 [140,260) · B(11) [260,340) · C(12) [340,500).
+    // 끄는 머리 폭 120 · 가운데 A 90 · B 300 · C 420.
+    fn strip_heads() -> Vec<TabHeader> {
+        [
+            (10, 40.0, 140.0),
+            (SOURCE, 140.0, 260.0),
+            (11, 260.0, 340.0),
+            (12, 340.0, 500.0),
+        ]
+        .iter()
+        .map(|&(n, x0, x1)| TabHeader {
+            view_id: id(n),
+            rect: rect(x0, 0.0, x1, BAR_H),
+        })
+        .collect()
+    }
+
+    #[test]
+    fn the_reorder_zone_widens_the_bar_by_the_slack_up_and_down_only() {
+        let zone = reorder_zone(rect(40.0, 0.0, 640.0, BAR_H));
+        assert_eq!(zone, rect(40.0, -15.0, 640.0, BAR_H + 15.0));
+        for (p, inside) in [
+            ((40.0, -15.0), true),
+            ((639.999, 42.999), true),
+            ((300.0, -15.001), false),
+            ((300.0, 43.0), false),
+            ((39.999, 10.0), false),
+            ((640.0, 10.0), false),
+        ] {
+            assert_eq!(contains_css(&zone, p), inside, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn the_dragged_head_follows_the_cursor_and_stops_at_both_ends() {
+        let h = strip_heads();
+        // 잡은 자리 30 — 커서 내용 x 170 이면 제자리(140).
+        assert_eq!(reorder_left(&h, 1, 30.0, 170.0), 140.0);
+        assert_eq!(reorder_left(&h, 1, 30.0, 200.5), 170.5);
+        assert_eq!(reorder_left(&h, 1, 30.0, 0.0), 40.0, "왼쪽 끝 = 첫 머리 x0");
+        assert_eq!(reorder_left(&h, 1, 30.0, 70.0), 40.0);
+        assert_eq!(reorder_left(&h, 1, 30.0, 409.0), 379.0);
+        assert_eq!(
+            reorder_left(&h, 1, 30.0, 410.0),
+            380.0,
+            "오른쪽 끝 = 마지막 x1 − 폭"
+        );
+        assert_eq!(reorder_left(&h, 1, 30.0, 5000.0), 380.0);
+    }
+
+    #[test]
+    fn a_neighbour_moves_only_once_the_dragged_edge_passes_its_center() {
+        let h = strip_heads();
+        assert_eq!(reorder_index(&h, 1, 140.0), 1, "제자리");
+        // 왼쪽 이웃 A — 왼쪽 변이 가운데 90 과 같으면 그대로, 1 ULP 작으면 비킨다.
+        assert_eq!(reorder_index(&h, 1, 90.0), 1);
+        assert_eq!(reorder_index(&h, 1, 90.0_f64.next_down()), 0);
+        // 오른쪽 이웃 B — 오른쪽 변(왼쪽 + 120)이 가운데 300 과 같으면 그대로, 1 ULP 크면 비킨다.
+        assert_eq!(reorder_index(&h, 1, 180.0), 1);
+        let past = 300.0_f64.next_up() - 120.0;
+        assert_eq!(
+            past + 120.0,
+            300.0_f64.next_up(),
+            "전제: 오른쪽 변이 정확히 1 ULP 위"
+        );
+        assert_eq!(reorder_index(&h, 1, past), 2);
+        // C 까지 — 오른쪽 변 420 은 그대로, 넘으면 맨 끝.
+        assert_eq!(reorder_index(&h, 1, 300.0), 2);
+        assert_eq!(reorder_index(&h, 1, 300.5), 3);
+        // 양 끝 고정값에서 맨 왼쪽 0 · 맨 오른쪽 n − 1.
+        assert_eq!(reorder_index(&h, 1, 40.0), 0);
+        assert_eq!(reorder_index(&h, 1, 380.0), 3);
+    }
+
+    #[test]
+    fn the_first_and_last_heads_reach_both_ends_too() {
+        let h = strip_heads();
+        // 맨 왼쪽 머리 A 를 끈다(폭 100 · 범위 40..400).
+        assert_eq!(reorder_left(&h, 0, 10.0, 0.0), 40.0);
+        assert_eq!(reorder_index(&h, 0, 40.0), 0, "제자리");
+        assert_eq!(reorder_left(&h, 0, 10.0, 1000.0), 400.0);
+        assert_eq!(reorder_index(&h, 0, 400.0), 3);
+        // 맨 오른쪽 머리 C 를 끈다(폭 160 · 범위 40..340).
+        assert_eq!(reorder_left(&h, 3, 0.0, 1000.0), 340.0);
+        assert_eq!(reorder_index(&h, 3, 340.0), 3, "제자리");
+        assert_eq!(reorder_index(&h, 3, 40.0), 0);
+    }
+
+    #[test]
+    fn a_lone_head_always_stays_put() {
+        let h = vec![TabHeader {
+            view_id: id(SOURCE),
+            rect: rect(40.0, 0.0, 160.0, BAR_H),
+        }];
+        for x in [-100.0, 0.0, 60.0, 300.0, 5000.0] {
+            assert_eq!(reorder_left(&h, 0, 20.0, x), 40.0, "{x}");
+            assert_eq!(reorder_index(&h, 0, reorder_left(&h, 0, 20.0, x)), 0, "{x}");
+        }
+    }
+
+    #[test]
+    fn zero_width_heads_still_have_a_center_and_a_threshold() {
+        // 끄는 머리 폭 0 — 오른쪽 변 = 왼쪽 변. 이웃 폭 0 은 가운데 = x0.
+        let h: Vec<TabHeader> = [
+            (10, 0.0, 100.0),
+            (SOURCE, 100.0, 100.0),
+            (11, 100.0, 200.0),
+            (12, 200.0, 200.0),
+        ]
+        .iter()
+        .map(|&(n, x0, x1)| TabHeader {
+            view_id: id(n),
+            rect: rect(x0, 0.0, x1, BAR_H),
+        })
+        .collect();
+        assert_eq!(reorder_left(&h, 1, 0.0, 500.0), 200.0, "범위 끝 − 폭 0");
+        assert_eq!(reorder_index(&h, 1, 50.0), 1);
+        assert_eq!(reorder_index(&h, 1, 49.999), 0);
+        assert_eq!(
+            reorder_index(&h, 1, 150.0),
+            1,
+            "오른쪽 변 = 가운데 150 → 그대로"
+        );
+        assert_eq!(reorder_index(&h, 1, 150.001), 2);
+        assert_eq!(
+            reorder_index(&h, 1, 200.0),
+            2,
+            "폭 0 머리 가운데 200 = 오른쪽 변 → 그대로"
+        );
+        assert_eq!(reorder_index(&h, 1, 200.0_f64.next_up()), 3);
+    }
+
+    #[test]
+    fn heads_without_the_dragged_one_count_it_as_zero_width() {
+        // 영역은 이런 값을 싣지 않는다(`regions_for` 조건 ⑤) — 그래도 패닉 없이 같은 식으로 답한다.
+        assert_eq!(reorder_left(&[], 0, 30.0, 100.0), 70.0);
+        let h = strip_heads();
+        assert_eq!(reorder_left(&h, 9, 0.0, 1000.0), 500.0);
+        assert_eq!(reorder_index(&h, 9, 500.0), 4);
+        assert_eq!(reorder_index(&[], 0, 10.0), 0);
     }
 
     // ── 2 단계: 띠 고르기 (R6 · R6a ② ③) ────────────────────────────────────────

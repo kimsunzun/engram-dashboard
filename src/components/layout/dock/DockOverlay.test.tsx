@@ -42,7 +42,9 @@ function regions(): DockRegions {
         { view_id: 'v-other', rect: { x0: 104, y0: 0, x1: 204, y1: 28 } },
       ],
       insert_xs: [0, 100, 200],
+      scroll: 0,
     },
+    reorder: null,
   }
 }
 

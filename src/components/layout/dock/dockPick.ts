@@ -12,6 +12,7 @@ import type { PointCss } from '../../../../src-tauri/bindings/PointCss'
 import type { PxRectWire } from '../../../../src-tauri/bindings/PxRectWire'
 import type { RectCss } from '../../../../src-tauri/bindings/RectCss'
 import type { SlotRegion } from '../../../../src-tauri/bindings/SlotRegion'
+import type { TabHeader } from '../../../../src-tauri/bindings/TabHeader'
 
 // 바깥 띠 두께(CSS px) — 셸 `hit::OUTER_BAND_PX` 의 사본. 갈라지면 골든 시험이 빨개진다.
 const OUTER_BAND_PX = 32
@@ -25,18 +26,27 @@ const NONE: Picked = { type: 'none' }
  * 점 `point`(그 창 뷰포트 CSS px)가 영역 `regions` 의 어디인가. `sourceView` = 끄는 탭.
  * 셸 `pick` 과 같은 입력이면 같은 답이다(골든). 영역의 `blocked` 는 보지 않는다 — 막힌 영역은 몸이 비어 늘 `none`
  * 이고, 받을지(`dropEffect`)는 부르는 쪽이 `blocked` 로 가른다.
+ * `scroll` = 그 판정 때 그 창 탭바 `scrollLeft` — 순서 이동 자리 · 탭바 자리를 점의 내용 x(`point.x + scroll`)로 낸다.
+ * `null` = 영역마다 잰 때의 것(`reorder.scroll` · `tab_bar.scroll`). 구역 · 탭바 상자 · 캔버스 검사는 `point` 그대로다.
  */
-export function pickTarget(regions: DockRegions, point: PointCss, sourceView: string): Picked {
+export function pickTarget(regions: DockRegions, point: PointCss, scroll: number | null, sourceView: string): Picked {
   const css = { x: point.x, y: point.y }
+
+  const reorder = regions.reorder
+  if (reorder !== null && containsCss(reorder.zone, css)) {
+    const left = reorderLeft(reorder.heads, reorder.dragged, reorder.grab_x, css.x + (scroll ?? reorder.scroll))
+    return { type: 'reorder', index: reorderIndex(reorder.heads, reorder.dragged, left) }
+  }
 
   const bar = regions.tab_bar
   if (bar !== null && containsCss(bar.rect, css)) {
+    const content = { x: css.x + (scroll ?? bar.scroll), y: css.y }
     // 셸이 이미 뺐어도 다시 거른다 — 셸 `locate` 가 그렇게 한다.
     const heads = bar.heads.filter(h => h.view_id !== sourceView)
     return {
       type: 'tab_bar',
-      index: heads.filter(h => centerX(h.rect) <= css.x).length,
-      over: heads.find(h => containsCss(h.rect, css))?.view_id ?? null,
+      index: heads.filter(h => centerX(h.rect) <= content.x).length,
+      over: heads.find(h => containsCss(h.rect, content))?.view_id ?? null,
     }
   }
 
@@ -57,6 +67,40 @@ export function pickTarget(regions: DockRegions, point: PointCss, sourceView: st
   const bands = regions.slots.find(s => s.slot_id === under.slot_id)?.bands ?? []
   const side = chooseBand(p, under.frame, bands)
   return side === null ? NONE : { type: 'seam', anchor: under.slot_id, side }
+}
+
+/**
+ * 끄는 머리의 왼쪽 x(내용 좌표) — 셸 `hit::reorder_left` 의 거울. 커서를 따르되(`x − grabX`) 머리들이 차지한 범위
+ * `[heads[0].x0, heads[n−1].x1)` 안에 머문다. `x` = 점의 내용 x(뷰포트 x + 탭바 스크롤). 순서 이동 모습이 이 값으로
+ * 끄는 머리를 그린다 — 화면 x = 이 값 − 지금 스크롤.
+ */
+export function reorderLeft(heads: readonly TabHeader[], dragged: number, grabX: number, x: number): number {
+  const follow = x - grabX
+  if (heads.length === 0) return follow
+  const hi = heads[heads.length - 1].rect.x1 - headWidth(heads, dragged)
+  // Math.min · Math.max 는 NaN · ±0 에서 셸 f64::min · max 와 다를 수 있어 비교로 쓴다 — 셸과 같은 식.
+  const left = follow < hi ? follow : hi
+  return left > heads[0].rect.x0 ? left : heads[0].rect.x0
+}
+
+/**
+ * 끄는 머리 왼쪽이 `left` 일 때 끄는 탭이 놓일 자리(끄는 탭을 뺀 결과 탭 목록의 자리 · 제자리 = `dragged`) — 셸
+ * `hit::reorder_index` 의 거울. 왼쪽 이웃은 가운데 ≤ `left` 면 남고, 오른쪽 이웃은 가운데 < `left + 폭` 이면 넘어온다.
+ */
+export function reorderIndex(heads: readonly TabHeader[], dragged: number, left: number): number {
+  const right = left + headWidth(heads, dragged)
+  let index = 0
+  heads.forEach((h, i) => {
+    const m = centerX(h.rect)
+    if ((i < dragged && m <= left) || (i > dragged && m < right)) index++
+  })
+  return index
+}
+
+// 범위 밖 자리는 폭 0 — 셸 `head_width` 와 같다.
+function headWidth(heads: readonly TabHeader[], i: number): number {
+  const h = heads[i]
+  return h === undefined ? 0 : h.rect.x1 - h.rect.x0
 }
 
 function chooseBand(p: Pt, frame: PxRectWire, bands: SlotRegion['bands']): DockSide | null {

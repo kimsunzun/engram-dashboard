@@ -5,14 +5,17 @@
 //! [`pick`](영역 위의 점 → [`Picked`]) · [`bumps`](마지막 보낸 것과 견줘 `rev` · `bar_rev` 를 올릴지) ·
 //! [`visible_tab`](창에 보이는 탭 — 스냅숏을 뜨는 쪽이 부른다).
 //!
-//! ★규칙의 정본은 `dock::hit` 하나다★ — [`pick`] 은 영역에서 `hit::WindowFrame` 을 다시 세워 `hit::locate` →
-//! `hit::choose_seam` 을 부르는 어댑터이고, 웹뷰의 `pickTarget`(`dockPick.ts`)은 같은 영역 위의 거울이다. 둘은 골든
-//! `pick_golden.json` 을 함께 먹는다 — 규칙을 고치면 골든과 TS 판을 같은 변경에서 고친다.
+//! ★규칙의 정본은 `dock::hit` 하나다★ — [`pick`] 은 영역 값으로 `hit::reorder_*`(순서 이동 구역)를, 아니면
+//! `hit::WindowFrame` 을 다시 세워 `hit::locate` → `hit::choose_seam` 을 부르는 어댑터이고, 웹뷰의
+//! `pickTarget`(`dockPick.ts`)은 같은 영역 위의 거울이다. 둘은 골든 `pick_golden.json` 을 함께 먹는다 — 규칙을
+//! 고치면 골든과 TS 판을 같은 변경에서 고친다.
 
 use uuid::Uuid;
 
 use super::hit::{self, Locate, WindowFrame};
-use super::types::{Band, DockRegions, OuterBand, Picked, SlotRegion, TabBarRegion};
+use super::types::{
+    Band, DockRegions, OuterBand, Picked, ReorderRegion, SlotRegion, StripStart, TabBarRegion,
+};
 use crate::layout::chrome::{DockChrome, PointCss, RectCss};
 use crate::layout::dock::{DockAnchor, DockSide};
 use crate::layout::geometry::{self, PxRect};
@@ -77,15 +80,18 @@ pub fn visible_tab(tabs: &[ViewId], active: ViewId, source_view: ViewId) -> Opti
 }
 
 /// 창 하나의 영역과 기대값. `source_view` = 끄는 탭 · `incoming` = 끌기 시작 때의 그 배치(끼울 것) · `blocked` =
-/// 출처 배치가 그 뒤 바뀌었다. `None` = 숨긴 출처 창(영역을 보내지 않는다).
+/// 출처 배치가 그 뒤 바뀌었다 · `strip` = 끌기 시작 때 출처 웹뷰가 잰 탭바(출처 창에만 쓴다). `None` = 숨긴 출처
+/// 창(영역을 보내지 않는다).
 ///
 /// 영역의 `drag_id` · `rev` · `bar_rev` 는 비워 둔다(빈 문자열 · 0) — 장부가 [`bumps`] 로 정해 채운다. 기대값은
-/// `blocked` 와 무관하게 그 창의 모델 값이다.
+/// `blocked` 와 무관하게 그 창의 모델 값이다. `reorder` 는 출처 창 · 막히지 않음 · `strip` 이 그 창 모델 탭 목록과
+/// 맞음(TRD §2-4 조건 ①–⑥)일 때만 선다 — 아니면 그 창 탭바는 `tab_bar` 로 판정한다.
 pub fn regions_for(
     w: &WindowSnap,
     source_view: ViewId,
     incoming: &LayoutNode,
     blocked: bool,
+    strip: Option<&StripStart>,
 ) -> Option<(DockRegions, Expect)> {
     if w.is_source && w.hidden {
         return None;
@@ -112,9 +118,13 @@ pub fn regions_for(
         outer: Vec::new(),
         slots: Vec::new(),
         tab_bar: None,
+        reorder: None,
     };
     if blocked {
         return Some((regions, expect));
+    }
+    if w.is_source {
+        regions.reorder = strip.and_then(|s| reorder_region(s, &w.tabs, source_view));
     }
     regions.view_id = w.visible.as_ref().map(|(view, _)| *view);
     if let Some(canvas) = w.canvas {
@@ -131,9 +141,28 @@ pub fn regions_for(
     Some((regions, expect))
 }
 
-/// 영역 위의 점 `p`(그 창 뷰포트 CSS px) — `hit::locate` → `hit::choose_seam` 을 영역 값 위에서 부른다(안쪽 원점
-/// (0, 0) · 배율 1). `source_view` = 끄는 탭.
-pub fn pick(r: &DockRegions, p: PointCss, source_view: ViewId) -> Picked {
+/// 영역 위의 점 `p`(그 창 뷰포트 CSS px) — 순서 이동 구역 안이면 `hit::reorder_*` 로 `Reorder`, 아니면
+/// `hit::locate` → `hit::choose_seam` 을 영역 값 위에서 부른다(안쪽 원점 (0, 0) · 배율 1). `source_view` = 끄는 탭.
+///
+/// `scroll` = 그 판정 때 그 창 탭바 `scrollLeft`(CSS px) — 순서 이동 자리 · 탭바 자리(`index` · `over`)를 점의 내용
+/// x(`p.x + scroll`)로 낸다. `None` = 영역마다 잰 때의 것(`reorder.scroll` · `tab_bar.scroll`). 구역 · 탭바 상자 ·
+/// 캔버스 검사는 스크롤과 무관하게 `p` 그대로다.
+pub fn pick(r: &DockRegions, p: PointCss, scroll: Option<f64>, source_view: ViewId) -> Picked {
+    if let Some(re) = &r.reorder {
+        if hit::contains_css(&re.zone, (p.x, p.y)) {
+            let dragged = usize::try_from(re.dragged).unwrap_or(usize::MAX);
+            let left = hit::reorder_left(
+                &re.heads,
+                dragged,
+                re.grab_x,
+                p.x + scroll.unwrap_or(re.scroll),
+            );
+            return Picked::Reorder {
+                index: u32::try_from(hit::reorder_index(&re.heads, dragged, left))
+                    .unwrap_or(u32::MAX),
+            };
+        }
+    }
     let chrome = DockChrome {
         canvas_origin: r.canvas_origin,
         // 탭바가 없으면 빈 상자 — 반열림이라 어느 점도 품지 않는다.
@@ -150,6 +179,7 @@ pub fn pick(r: &DockRegions, p: PointCss, source_view: ViewId) -> Picked {
             .tab_bar
             .as_ref()
             .map_or_else(Vec::new, |b| b.heads.clone()),
+        scroll: Some(scroll.unwrap_or_else(|| r.tab_bar.as_ref().map_or(0.0, |b| b.scroll))),
     };
     let slots: Vec<(Uuid, PxRect)> = r
         .slots
@@ -203,7 +233,10 @@ pub struct Bumps {
 ///
 /// - `rev` — 영역이나 기대값(보이는 탭 배치 · 모델 활성 · 탭 목록)이 바뀌었다. 기하가 같아도 기대값만 바뀌면
 ///   오른다(대상 칸 내용만 바뀐 경우 — 안 올리면 본 가이드 그대로 놓아도 모델 대조가 막는다).
-/// - `bar_rev` — 탭바 영역이나 탭 목록이 바뀌었다(이때 `rev` 도 오른다). 활성 전환은 올리지 않는다.
+/// - `bar_rev` — 탭바 영역(기하)이나 순서 이동 영역(생김 · 빠짐)이나 탭 목록이 바뀌었다(이때 `rev` 도 오른다).
+///   활성 전환은 올리지 않는다.
+///
+/// 탭바 영역의 `scroll` 은 견주지 않는다 — 기하가 아니라서, 견주면 스크롤만 바뀐 다시 잼마다 번호만 헛돈다.
 pub fn bumps(sent: Option<(&DockRegions, &Expect)>, next: (&DockRegions, &Expect)) -> Bumps {
     let Some((sent_r, sent_e)) = sent else {
         return Bumps {
@@ -212,7 +245,9 @@ pub fn bumps(sent: Option<(&DockRegions, &Expect)>, next: (&DockRegions, &Expect
         };
     };
     let (next_r, next_e) = next;
-    let bar_rev = sent_r.tab_bar != next_r.tab_bar || sent_e.tabs != next_e.tabs;
+    let bar_rev = !same_bar(&sent_r.tab_bar, &next_r.tab_bar)
+        || sent_r.reorder != next_r.reorder
+        || sent_e.tabs != next_e.tabs;
     Bumps {
         rev: bar_rev || !same_body(sent_r, next_r) || sent_e != next_e,
         bar_rev,
@@ -232,6 +267,7 @@ fn same_body(a: &DockRegions, b: &DockRegions) -> bool {
         outer,
         slots,
         tab_bar,
+        reorder,
     } = a;
     *blocked == b.blocked
         && *view_id == b.view_id
@@ -239,7 +275,25 @@ fn same_body(a: &DockRegions, b: &DockRegions) -> bool {
         && *canvas == b.canvas
         && *outer == b.outer
         && *slots == b.slots
-        && *tab_bar == b.tab_bar
+        && same_bar(tab_bar, &b.tab_bar)
+        && *reorder == b.reorder
+}
+
+// `scroll` 만 빼고 견준다(`bumps` 문서) — 구조 분해라 칸이 늘면 컴파일이 여기를 짚는다.
+fn same_bar(a: &Option<TabBarRegion>, b: &Option<TabBarRegion>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            let TabBarRegion {
+                rect,
+                heads,
+                insert_xs,
+                scroll: _,
+            } = a;
+            *rect == b.rect && *heads == b.heads && *insert_xs == b.insert_xs
+        }
+        _ => false,
+    }
 }
 
 fn tab_bar_region(chrome: &DockChrome, source_view: ViewId) -> TabBarRegion {
@@ -258,7 +312,47 @@ fn tab_bar_region(chrome: &DockChrome, source_view: ViewId) -> TabBarRegion {
         rect: chrome.tab_bar,
         heads,
         insert_xs,
+        scroll: chrome.scroll.unwrap_or(0.0),
     }
+}
+
+// TRD §2-4 조건 ④–⑥(① `strip` 있음 · ② 막히지 않음 · ③ 숨긴 출처 아님 · 출처 창은 부르는 쪽이 본다). 하나라도 어기면
+// `None` — 얼린 기하가 모델과 갈라졌으니 그 창 탭바는 `tab_bar` 로 판정한다.
+fn reorder_region(
+    strip: &StripStart,
+    tabs: &[ViewId],
+    source_view: ViewId,
+) -> Option<ReorderRegion> {
+    let heads = &strip.heads;
+    if !heads.iter().map(|h| h.view_id).eq(tabs.iter().copied()) {
+        return None;
+    }
+    let mut at_source = heads
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| h.view_id == source_view)
+        .map(|(i, _)| i);
+    let (Some(dragged), None) = (at_source.next(), at_source.next()) else {
+        return None;
+    };
+    let finite = |r: &RectCss| [r.x0, r.y0, r.x1, r.y1].iter().all(|v| v.is_finite());
+    let shaped = finite(&strip.bar)
+        && strip.grab_x.is_finite()
+        && strip.scroll.is_finite()
+        && heads
+            .iter()
+            .all(|h| finite(&h.rect) && h.rect.x0 <= h.rect.x1)
+        && heads.windows(2).all(|p| p[0].rect.x0 <= p[1].rect.x0);
+    if !shaped {
+        return None;
+    }
+    Some(ReorderRegion {
+        zone: hit::reorder_zone(strip.bar),
+        heads: heads.clone(),
+        dragged: u32::try_from(dragged).ok()?,
+        grab_x: strip.grab_x,
+        scroll: strip.scroll,
+    })
 }
 
 fn outer_bands(layout: &LayoutNode, incoming: &LayoutNode, canvas: CanvasPx) -> Vec<OuterBand> {
@@ -365,6 +459,17 @@ mod tests {
                     rect: rect(x0, 0.0, x1, BAR_H),
                 })
                 .collect(),
+            scroll: None,
+        }
+    }
+
+    // 출처 웹뷰가 끌기 시작 때 잰 탭바 — 머리는 크롬과 같은 꼴.
+    fn strip(bar: RectCss, heads: &[(u128, f64, f64)], grab_x: f64, scroll: f64) -> StripStart {
+        StripStart {
+            bar,
+            heads: chrome(heads).tabs,
+            grab_x,
+            scroll,
         }
     }
 
@@ -383,7 +488,7 @@ mod tests {
     }
 
     fn regions(w: &WindowSnap) -> (DockRegions, Expect) {
-        regions_for(w, id(SRC), &slot(9), false).expect("숨긴 출처가 아니다")
+        regions_for(w, id(SRC), &slot(9), false, None).expect("숨긴 출처가 아니다")
     }
 
     // ── 창 하나의 영역 ────────────────────────────────────────────────────────────
@@ -393,10 +498,10 @@ mod tests {
         let mut w = snap(&[SRC], SRC, slot(1));
         w.is_source = true;
         w.hidden = true;
-        assert_eq!(regions_for(&w, id(SRC), &slot(9), false), None);
-        assert_eq!(regions_for(&w, id(SRC), &slot(9), true), None);
+        assert_eq!(regions_for(&w, id(SRC), &slot(9), false, None), None);
+        assert_eq!(regions_for(&w, id(SRC), &slot(9), true, None), None);
         w.hidden = false;
-        assert!(regions_for(&w, id(SRC), &slot(9), false).is_some());
+        assert!(regions_for(&w, id(SRC), &slot(9), false, None).is_some());
     }
 
     #[test]
@@ -405,7 +510,7 @@ mod tests {
     fn a_snapshot_showing_the_dragged_tab_trips_in_debug() {
         let mut w = snap(&[10, SRC], SRC, slot(1));
         w.visible = Some((id(SRC), slot(1)));
-        let _ = regions_for(&w, id(SRC), &slot(9), false);
+        let _ = regions_for(&w, id(SRC), &slot(9), false, None);
     }
 
     #[test]
@@ -452,7 +557,7 @@ mod tests {
         let incoming = half_chain(SplitDir::LeftRight, 53, 30_000);
         let target = slot(1);
         let w = snap(&[10], 10, target.clone());
-        let (r, _) = regions_for(&w, id(SRC), &incoming, false).unwrap();
+        let (r, _) = regions_for(&w, id(SRC), &incoming, false, None).unwrap();
         let outer: Vec<_> = r.outer.iter().map(|o| o.side).collect();
         let bands: Vec<_> = r.slots[0].bands.iter().map(|b| b.side).collect();
         for side in SIDE_ORDER {
@@ -471,7 +576,7 @@ mod tests {
     #[test]
     fn blocked_empties_the_regions_but_keeps_the_expectation() {
         let w = snap(&[10, 11], 10, halves());
-        let (r, e) = regions_for(&w, id(SRC), &slot(9), true).unwrap();
+        let (r, e) = regions_for(&w, id(SRC), &slot(9), true, None).unwrap();
         assert_eq!(
             r,
             DockRegions {
@@ -485,6 +590,7 @@ mod tests {
                 outer: vec![],
                 slots: vec![],
                 tab_bar: None,
+                reorder: None,
             }
         );
         assert_eq!(e, regions(&w).1);
@@ -617,6 +723,275 @@ mod tests {
         );
     }
 
+    // ── 순서 이동 영역 (TRD §2-4 「출처 창의 reorder」 · §2-5) ──────────────────────
+
+    const BAR: RectCss = RectCss {
+        x0: 0.0,
+        y0: 0.0,
+        x1: 600.0,
+        y1: BAR_H,
+    };
+    // 모델 탭 [10, SRC, 11] 의 머리 — 끄는 머리 폭 120.
+    const SRC_HEADS: [(u128, f64, f64); 3] =
+        [(10, 0.0, 100.0), (SRC, 100.0, 220.0), (11, 220.0, 300.0)];
+
+    fn source(tabs: &[u128]) -> WindowSnap {
+        let mut w = snap(tabs, 10, halves());
+        w.is_source = true;
+        w
+    }
+
+    fn reorder_of(w: &WindowSnap, s: &StripStart) -> Option<ReorderRegion> {
+        regions_for(w, id(SRC), &slot(9), false, Some(s))
+            .expect("숨긴 출처가 아니다")
+            .0
+            .reorder
+    }
+
+    #[test]
+    fn the_source_window_freezes_the_start_strip_as_its_reorder_region() {
+        let w = source(&[10, SRC, 11]);
+        let s = strip(BAR, &SRC_HEADS, 30.0, 12.5);
+        let (r, _) = regions_for(&w, id(SRC), &slot(9), false, Some(&s)).unwrap();
+        assert_eq!(
+            r.reorder,
+            Some(ReorderRegion {
+                zone: hit::reorder_zone(BAR),
+                heads: s.heads.clone(),
+                dragged: 1,
+                grab_x: 30.0,
+                scroll: 12.5,
+            })
+        );
+        // 탭바는 그대로 실린다 — reorder 가 빠지는 순간의 물러날 자리.
+        let plain = regions_for(&w, id(SRC), &slot(9), false, None).unwrap().0;
+        assert!(r.tab_bar.is_some());
+        assert_eq!(r.tab_bar, plain.tab_bar);
+        assert_eq!(plain.reorder, None, "① strip 없음");
+    }
+
+    #[test]
+    fn blocked_a_hidden_source_and_other_windows_have_no_reorder() {
+        let s = strip(BAR, &SRC_HEADS, 30.0, 0.0);
+        let w = source(&[10, SRC, 11]);
+        let (blocked, _) = regions_for(&w, id(SRC), &slot(9), true, Some(&s)).unwrap();
+        assert_eq!(blocked.reorder, None, "② blocked");
+        let mut hidden = w.clone();
+        hidden.hidden = true;
+        assert_eq!(
+            regions_for(&hidden, id(SRC), &slot(9), false, Some(&s)),
+            None,
+            "③ 숨긴 출처는 영역 자체가 없다"
+        );
+        let mut other = w.clone();
+        other.is_source = false;
+        assert_eq!(reorder_of(&other, &s), None, "다른 창");
+    }
+
+    #[test]
+    fn a_strip_that_disagrees_with_the_model_tabs_has_no_reorder() {
+        let s = |heads: &[(u128, f64, f64)]| strip(BAR, heads, 30.0, 0.0);
+        let w = source(&[10, SRC, 11]);
+        assert!(reorder_of(&w, &s(&SRC_HEADS)).is_some(), "전제");
+        // ④ 끄는 동안 다른 경로가 탭을 더하거나 빼거나 옮겼다.
+        let added = [
+            (10, 0.0, 100.0),
+            (SRC, 100.0, 220.0),
+            (11, 220.0, 300.0),
+            (12, 300.0, 400.0),
+        ];
+        assert_eq!(reorder_of(&w, &s(&added)), None, "더함");
+        assert_eq!(reorder_of(&w, &s(&SRC_HEADS[..2])), None, "뺌");
+        let moved = [(11, 0.0, 80.0), (SRC, 80.0, 200.0), (10, 200.0, 300.0)];
+        assert_eq!(reorder_of(&w, &s(&moved)), None, "옮김");
+        // ⑤ 끄는 머리가 정확히 하나 — 목록이 모델과 같아도 없거나 둘이면 없다.
+        let none = [(10, 0.0, 100.0), (11, 100.0, 200.0)];
+        assert_eq!(
+            reorder_of(&source(&[10, 11]), &s(&none)),
+            None,
+            "끄는 머리 없음"
+        );
+        let twice = [(10, 0.0, 100.0), (SRC, 100.0, 200.0), (SRC, 200.0, 300.0)];
+        assert_eq!(
+            reorder_of(&source(&[10, SRC, SRC]), &s(&twice)),
+            None,
+            "끄는 머리 둘"
+        );
+    }
+
+    #[test]
+    fn a_strip_out_of_order_or_not_finite_has_no_reorder() {
+        let w = source(&[10, SRC, 11]);
+        let with = |change: &dyn Fn(&mut StripStart)| {
+            let mut s = strip(BAR, &SRC_HEADS, 30.0, 0.0);
+            change(&mut s);
+            reorder_of(&w, &s)
+        };
+        assert!(with(&|_| {}).is_some(), "전제");
+        // ⑥ x0 오름차순 · 폭 ≥ 0 · 모든 수가 유한.
+        assert_eq!(
+            with(&|s| s.heads[2].rect = rect(50.0, 0.0, 90.0, BAR_H)),
+            None,
+            "x0 가 내려감"
+        );
+        assert!(
+            with(&|s| {
+                s.heads[1].rect.x1 = 100.0;
+                s.heads[2].rect.x0 = 100.0;
+            })
+            .is_some(),
+            "폭 0 · 같은 x0 는 받는다"
+        );
+        assert_eq!(with(&|s| s.heads[0].rect.x1 = -1.0), None, "폭 음수");
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(with(&|s| s.grab_x = bad), None, "grab_x {bad}");
+            assert_eq!(with(&|s| s.scroll = bad), None, "scroll {bad}");
+            assert_eq!(with(&|s| s.bar.y1 = bad), None, "bar {bad}");
+            assert_eq!(with(&|s| s.heads[1].rect.y0 = bad), None, "머리 {bad}");
+        }
+    }
+
+    // 손으로 세운 출처 창 영역 — 바깥 띠가 없어 구역 밑에 칸 1 의 위 띠가 드러나 있다(`regions_for` 가 만드는 영역에서는
+    // 바깥 위 띠가 늘 그 자리를 덮는다).
+    fn hand_source() -> DockRegions {
+        let heads = chrome(&SRC_HEADS).tabs;
+        DockRegions {
+            drag_id: String::new(),
+            rev: 1,
+            bar_rev: 1,
+            blocked: false,
+            view_id: Some(id(10)),
+            canvas_origin: PointCss { x: 0.0, y: BAR_H },
+            canvas: CanvasPx { w: 600, h: 400 },
+            outer: vec![],
+            slots: vec![SlotRegion {
+                slot_id: id(1),
+                frame: PxRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: 600,
+                    y1: 400,
+                }
+                .into(),
+                bands: vec![Band {
+                    side: DockSide::Top,
+                    anchor: Some(id(1)),
+                    rect: PxRect {
+                        x0: 0,
+                        y0: 0,
+                        x1: 600,
+                        y1: 133,
+                    }
+                    .into(),
+                }],
+            }],
+            tab_bar: Some(TabBarRegion {
+                rect: BAR,
+                heads: heads
+                    .iter()
+                    .filter(|h| h.view_id != id(SRC))
+                    .cloned()
+                    .collect(),
+                insert_xs: vec![0.0, 220.0, 300.0],
+                scroll: 0.0,
+            }),
+            reorder: Some(ReorderRegion {
+                zone: hit::reorder_zone(BAR),
+                heads,
+                dragged: 1,
+                grab_x: 30.0,
+                scroll: 0.0,
+            }),
+        }
+    }
+
+    fn at(x: f64, y: f64) -> PointCss {
+        PointCss { x, y }
+    }
+
+    const TOP_OF_1: Picked = Picked::Seam {
+        anchor: Some(Uuid::from_u128(1)),
+        side: DockSide::Top,
+    };
+
+    #[test]
+    fn the_reorder_zone_is_picked_before_the_tab_bar_and_every_band() {
+        let r = hand_source();
+        let pick_at = |r: &DockRegions, x, y| pick(r, at(x, y), None, id(SRC));
+        assert_eq!(pick_at(&r, 150.0, 10.0), Picked::Reorder { index: 1 });
+        assert_eq!(
+            pick_at(&r, 150.0, 42.999),
+            Picked::Reorder { index: 1 },
+            "칸 위 띠 위"
+        );
+        assert_eq!(
+            pick_at(&r, 150.0, 43.0),
+            TOP_OF_1,
+            "구역 아래 경계 = 지금 판정"
+        );
+        // 구역이 없으면 같은 점이 그대로 6a 판정이다.
+        let mut plain = r.clone();
+        plain.reorder = None;
+        assert_eq!(
+            pick_at(&plain, 150.0, 10.0),
+            Picked::TabBar {
+                index: 1,
+                over: None,
+            }
+        );
+        assert_eq!(pick_at(&plain, 150.0, 42.999), TOP_OF_1);
+    }
+
+    #[test]
+    fn the_scroll_moves_the_index_but_not_the_zone_the_bar_box_or_the_canvas() {
+        let r = hand_source();
+        // 순서 이동 — 내용 x 150 → 왼쪽 120 · 자리 1 / 내용 x 250 → 왼쪽 180(끝 고정) · 자리 2.
+        assert_eq!(
+            pick(&r, at(150.0, 10.0), None, id(SRC)),
+            Picked::Reorder { index: 1 }
+        );
+        assert_eq!(
+            pick(&r, at(150.0, 10.0), Some(100.0), id(SRC)),
+            Picked::Reorder { index: 2 }
+        );
+        // `None` = 영역의 reorder.scroll.
+        let mut scrolled = r.clone();
+        scrolled.reorder.as_mut().unwrap().scroll = 100.0;
+        assert_eq!(
+            pick(&scrolled, at(150.0, 10.0), None, id(SRC)),
+            Picked::Reorder { index: 2 }
+        );
+        assert_eq!(
+            pick(&scrolled, at(150.0, 10.0), Some(0.0), id(SRC)),
+            Picked::Reorder { index: 1 }
+        );
+        // 탭바 — 같은 점 · 다른 스크롤 = 다른 자리 · over. `None` = 영역의 tab_bar.scroll.
+        let mut plain = r.clone();
+        plain.reorder = None;
+        let bar = |index, over: u128| Picked::TabBar {
+            index,
+            over: Some(id(over)),
+        };
+        assert_eq!(pick(&plain, at(60.0, 10.0), None, id(SRC)), bar(1, 10));
+        assert_eq!(
+            pick(&plain, at(60.0, 10.0), Some(200.0), id(SRC)),
+            bar(2, 11)
+        );
+        plain.tab_bar.as_mut().unwrap().scroll = 200.0;
+        assert_eq!(pick(&plain, at(60.0, 10.0), None, id(SRC)), bar(2, 11));
+        assert_eq!(pick(&plain, at(60.0, 10.0), Some(0.0), id(SRC)), bar(1, 10));
+        // 구역 · 탭바 상자 · 캔버스 검사는 점 그대로.
+        assert_eq!(pick(&r, at(150.0, 43.0), Some(500.0), id(SRC)), TOP_OF_1);
+        assert_eq!(
+            pick(&r, at(150.0, 42.999), Some(-500.0), id(SRC)),
+            Picked::Reorder { index: 0 }
+        );
+        assert_eq!(
+            pick(&plain, at(600.0, 10.0), Some(-100.0), id(SRC)),
+            Picked::None
+        );
+    }
+
     // ── rev · bar_rev ────────────────────────────────────────────────────────────
 
     const BOTH: Bumps = Bumps {
@@ -692,11 +1067,43 @@ mod tests {
         assert_eq!(bump(&before, &moved), BOTH);
         // 막히면 탭바가 비므로 둘 다 — 탭바가 이미 없던 창은 rev 만.
         let (r, e) = regions(&before);
-        let (blocked, be) = regions_for(&before, id(SRC), &slot(9), true).unwrap();
+        let (blocked, be) = regions_for(&before, id(SRC), &slot(9), true, None).unwrap();
         assert_eq!(bumps(Some((&r, &e)), (&blocked, &be)), BOTH);
         let mut barless = r.clone();
         barless.tab_bar = None;
         assert_eq!(bumps(Some((&barless, &e)), (&blocked, &be)), REV);
+    }
+
+    #[test]
+    fn a_reorder_region_appearing_or_leaving_bumps_both() {
+        let w = source(&[10, SRC, 11]);
+        let s = strip(BAR, &SRC_HEADS, 30.0, 0.0);
+        let (with, e) = regions_for(&w, id(SRC), &slot(9), false, Some(&s)).unwrap();
+        let (without, plain_e) = regions_for(&w, id(SRC), &slot(9), false, None).unwrap();
+        assert_eq!(e, plain_e, "전제: 기대값은 같다");
+        assert_eq!(bumps(Some((&without, &e)), (&with, &e)), BOTH, "생김");
+        assert_eq!(bumps(Some((&with, &e)), (&without, &e)), BOTH, "빠짐");
+        assert_eq!(bumps(Some((&with, &e)), (&with, &e)), NEITHER);
+    }
+
+    #[test]
+    fn a_tab_bar_scroll_alone_bumps_neither() {
+        let before = snap(&[10, 11], 10, halves());
+        let mut after = before.clone();
+        after.chrome.as_mut().unwrap().scroll = Some(140.0);
+        let (ra, _) = regions(&before);
+        let (rb, _) = regions(&after);
+        assert_eq!(
+            ra.tab_bar.as_ref().map(|b| b.scroll),
+            Some(0.0),
+            "크롬 scroll 없음 = 0"
+        );
+        assert_eq!(
+            rb.tab_bar.as_ref().map(|b| b.scroll),
+            Some(140.0),
+            "전제: 실린다"
+        );
+        assert_eq!(bump(&before, &after), NEITHER);
     }
 
     // ── pick = 골든 ──────────────────────────────────────────────────────────────
@@ -715,33 +1122,39 @@ mod tests {
         name: String,
         regions: String,
         point: PointCss,
+        /// 그 판정의 탭바 스크롤 — 없음 = `pick` 에 `None`.
+        scroll: Option<f64>,
         expect: Picked,
+        /// 순서 이동 사례의 끄는 머리 왼쪽(`hit::reorder_left`) — 웹뷰가 그리는 자리도 같은 파일로 묶는다.
+        left: Option<f64>,
     }
 
     fn golden() -> Golden {
         serde_json::from_str(GOLDEN).expect("골든이 wire 꼴로 읽혀야")
     }
 
-    // 골든의 영역마다 그것을 만든 창 스냅숏 · 끼울 것 · blocked.
-    fn fixture(name: &str) -> (WindowSnap, LayoutNode, bool) {
+    // 골든의 영역마다 그것을 만든 창 스냅숏 · 끼울 것 · blocked · 시작 측정.
+    fn fixture(name: &str) -> (WindowSnap, LayoutNode, bool, Option<StripStart>) {
         let with_heads = |tabs: &[u128], active: u128, layout, heads: &[(u128, f64, f64)]| {
             let mut w = snap(tabs, active, layout);
             w.chrome = Some(chrome(heads));
             w
         };
         let three_heads = [(10, 0.0, 100.0), (SRC, 100.0, 200.0), (11, 200.0, 300.0)];
+        let small = CanvasPx { w: 400, h: 300 };
         match name {
             // 출처 창(탭 셋 · 끄는 탭은 활성 아님) — 크롬에 끄는 머리가 아직 남아 있다.
             "split" => {
                 let mut w = with_heads(&[10, SRC, 11], 10, halves(), &three_heads);
                 w.is_source = true;
-                (w, slot(9), false)
+                (w, slot(9), false, None)
             }
             // 좌우로 붙이면 면적 0 이 생기는 끼울 것 — 바깥 · 칸의 좌우 띠가 빠진다.
             "invalid_outer" => (
                 with_heads(&[20], 20, slot(1), &[(20, 0.0, 100.0)]),
                 half_chain(SplitDir::LeftRight, 53, 30_000),
                 false,
+                None,
             ),
             // 3px 칸 둘(세로로 얇은 칸 · 가로로 얇은 칸) — 그 칸의 마주 보는 띠가 1px 이다.
             "thin" => {
@@ -756,29 +1169,29 @@ mod tests {
                 let layout = split(100, SplitDir::LeftRight, 0.5, left, right);
                 let mut w = with_heads(&[30], 30, layout, &[(30, 0.0, 100.0)]);
                 w.canvas = Some(CanvasPx { w: 600, h: 600 });
-                (w, slot(9), false)
+                (w, slot(9), false, None)
             }
             // 메인 마지막 탭을 끈다 — 보이는 탭 없음.
             "no_visible" => {
                 let mut w = with_heads(&[SRC], SRC, slot(1), &[(SRC, 0.0, 100.0)]);
                 w.is_source = true;
-                (w, slot(9), false)
+                (w, slot(9), false, None)
             }
             "no_chrome" => {
                 let mut w = snap(&[40], 40, slot(1));
                 w.chrome = None;
-                (w, slot(9), false)
+                (w, slot(9), false, None)
             }
             "no_canvas" => {
                 let heads = [(40, 0.0, 100.0), (41, 100.0, 200.0)];
                 let mut w = with_heads(&[40, 41], 40, slot(1), &heads);
                 w.canvas = None;
-                (w, slot(9), false)
+                (w, slot(9), false, None)
             }
             "blocked" => {
                 let mut w = with_heads(&[10, SRC, 11], 10, halves(), &three_heads);
                 w.is_source = true;
-                (w, slot(9), true)
+                (w, slot(9), true, None)
             }
             // 캔버스 원점 (40, 28) · 탭바 x0 40 — 원점을 빼먹은 거울이 다른 답을 낸다.
             "offset" => {
@@ -787,7 +1200,83 @@ mod tests {
                 c.tab_bar = rect(40.0, 0.0, 640.0, BAR_H);
                 let mut w = snap(&[50, 51], 50, halves());
                 w.chrome = Some(c);
-                (w, slot(9), false)
+                (w, slot(9), false, None)
+            }
+            // 출처 창 · 머리 넷(폭 100 · 120 · 80 · 160 — 끄는 머리 120) · `offset` 과 같은 원점.
+            "source_strip" => {
+                let heads = [
+                    (50, 40.0, 140.0),
+                    (SRC, 140.0, 260.0),
+                    (51, 260.0, 340.0),
+                    (52, 340.0, 500.0),
+                ];
+                let bar = rect(40.0, 0.0, 640.0, BAR_H);
+                let mut c = chrome(&heads);
+                c.canvas_origin = PointCss { x: 40.0, y: BAR_H };
+                c.tab_bar = bar;
+                let mut w = snap(&[50, SRC, 51, 52], 50, halves());
+                w.chrome = Some(c);
+                w.is_source = true;
+                (w, slot(9), false, Some(strip(bar, &heads, 30.0, 0.0)))
+            }
+            // 탭 하나 팝아웃을 끈다 — 머리 하나 · 보이는 탭 없음.
+            "source_lone" => {
+                let heads = [(SRC, 40.0, 160.0)];
+                let bar = rect(40.0, 0.0, 640.0, BAR_H);
+                let mut c = chrome(&heads);
+                c.canvas_origin = PointCss { x: 40.0, y: BAR_H };
+                c.tab_bar = bar;
+                let mut w = snap(&[SRC], SRC, slot(1));
+                w.chrome = Some(c);
+                w.is_source = true;
+                (w, slot(9), false, Some(strip(bar, &heads, 20.0, 0.0)))
+            }
+            // 1 ULP 경계 — 잡은 자리 0 이라 점 x = 끄는 머리 왼쪽(아래 `the_ulp_region_...` 시험이 전제를 잰다).
+            "source_ulp" => {
+                let heads = [(80, 40.2, 90.4), (SRC, 90.4, 190.4), (81, 190.4, 256.4)];
+                let bar = rect(0.0, 0.0, 400.0, BAR_H);
+                let mut c = chrome(&heads);
+                c.tab_bar = bar;
+                let mut w = snap(&[80, SRC, 81], 80, slot(1));
+                w.chrome = Some(c);
+                w.canvas = Some(small);
+                w.is_source = true;
+                (w, slot(9), false, Some(strip(bar, &heads, 0.0, 0.0)))
+            }
+            // 넘친 출처 탭바 — 머리 다섯(내용 좌표 0..500)이 폭 300 탭바에 · 시작 때 120 밀려 있었다.
+            "source_overflow" => {
+                let heads = [
+                    (60, 0.0, 100.0),
+                    (61, 100.0, 200.0),
+                    (SRC, 200.0, 300.0),
+                    (62, 300.0, 400.0),
+                    (63, 400.0, 500.0),
+                ];
+                let bar = rect(0.0, 0.0, 300.0, BAR_H);
+                let mut c = chrome(&heads);
+                c.tab_bar = bar;
+                c.scroll = Some(120.0);
+                let mut w = snap(&[60, 61, SRC, 62, 63], 60, slot(1));
+                w.chrome = Some(c);
+                w.canvas = Some(small);
+                w.is_source = true;
+                (w, slot(9), false, Some(strip(bar, &heads, 50.0, 120.0)))
+            }
+            // 넘친 다른 창 탭바 — 머리 넷(내용 좌표 0..400)이 폭 250 탭바에 · 크롬을 잰 때 80 밀려 있었다.
+            "target_overflow" => {
+                let heads = [
+                    (70, 0.0, 100.0),
+                    (71, 100.0, 200.0),
+                    (72, 200.0, 300.0),
+                    (73, 300.0, 400.0),
+                ];
+                let mut c = chrome(&heads);
+                c.tab_bar = rect(0.0, 0.0, 250.0, BAR_H);
+                c.scroll = Some(80.0);
+                let mut w = snap(&[70, 71, 72, 73], 70, slot(1));
+                w.chrome = Some(c);
+                w.canvas = Some(small);
+                (w, slot(9), false, None)
             }
             other => panic!("골든 영역 {other} 을 만든 스냅숏이 없다"),
         }
@@ -803,11 +1292,26 @@ mod tests {
                 .regions
                 .get(&c.regions)
                 .unwrap_or_else(|| panic!("{}: 영역 {} 이 골든에 없다", c.name, c.regions));
-            let got = pick(r, c.point, g.source_view);
+            let got = pick(r, c.point, c.scroll, g.source_view);
             if got != c.expect {
                 wrong.push(format!(
-                    "{}: {:?} → {got:?} (골든 {:?})",
-                    c.name, c.point, c.expect
+                    "{}: {:?} · 스크롤 {:?} → {got:?} (골든 {:?})",
+                    c.name, c.point, c.scroll, c.expect
+                ));
+            }
+            let left = match (&c.expect, &r.reorder) {
+                (Picked::Reorder { .. }, Some(re)) => Some(hit::reorder_left(
+                    &re.heads,
+                    usize::try_from(re.dragged).unwrap(),
+                    re.grab_x,
+                    c.point.x + c.scroll.unwrap_or(re.scroll),
+                )),
+                _ => None,
+            };
+            if left != c.left {
+                wrong.push(format!(
+                    "{}: 끄는 머리 왼쪽 {left:?} (골든 {:?} — 순서 이동 사례에만 싣는다)",
+                    c.name, c.left
                 ));
             }
         }
@@ -817,24 +1321,31 @@ mod tests {
     #[test]
     fn every_golden_region_is_what_regions_for_builds() {
         let g = golden();
+        let mut wrong = Vec::new();
         for (name, r) in &g.regions {
-            let (w, incoming, blocked) = fixture(name);
-            let (built, _) = regions_for(&w, id(SRC), &incoming, blocked).unwrap();
-            assert!(
-                same_body(r, &built),
-                "골든 영역 {name} 이 regions_for 와 다르다 — 지금 값:\n{}",
-                serde_json::to_string(&built).unwrap()
-            );
-            assert!(
-                g.cases.iter().any(|c| c.regions == *name),
-                "{name} 을 쓰는 사례가 없다"
-            );
+            let (w, incoming, blocked, strip) = fixture(name);
+            let (mut built, _) =
+                regions_for(&w, id(SRC), &incoming, blocked, strip.as_ref()).unwrap();
+            // 장부가 채우는 칸만 골든 값으로 맞추고 나머지는 전부 견준다(`same_body` 가 빼는 탭바 스크롤까지).
+            built.drag_id.clone_from(&r.drag_id);
+            (built.rev, built.bar_rev) = (r.rev, r.bar_rev);
+            if built != *r {
+                wrong.push(format!(
+                    "골든 영역 {name} 이 regions_for 와 다르다 — 지금 값:\n{}",
+                    serde_json::to_string(&built).unwrap()
+                ));
+            }
+            if !g.cases.iter().any(|c| c.regions == *name) {
+                wrong.push(format!("{name} 을 쓰는 사례가 없다"));
+            }
         }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
-    // 끄는 탭이 영역에 없어야 `source_view` 를 받지 않는 거울도 같은 답을 낸다.
+    // 끄는 탭이 영역에 없어야 `source_view` 를 받지 않는 거울도 같은 답을 낸다. 순서 이동 영역의 머리만 예외다 — 거기서는
+    // 끄는 머리를 id 가 아니라 `dragged` 자리로 찾는다.
     #[test]
-    fn the_dragged_tab_appears_in_no_golden_region() {
+    fn the_dragged_tab_appears_in_no_golden_region_but_its_reorder_heads() {
         let g = golden();
         for (name, r) in &g.regions {
             let mut seen = vec![r.view_id];
@@ -848,6 +1359,10 @@ mod tests {
                 seen.extend(bar.heads.iter().map(|h| Some(h.view_id)));
             }
             assert!(!seen.contains(&Some(g.source_view)), "{name}");
+            if let Some(re) = &r.reorder {
+                let at = usize::try_from(re.dragged).unwrap();
+                assert_eq!(re.heads[at].view_id, g.source_view, "{name}");
+            }
         }
     }
 
@@ -868,5 +1383,37 @@ mod tests {
         assert!(has(&|p| *p == Picked::None));
         assert!(has(&|p| matches!(p, Picked::TabBar { over: Some(_), .. })));
         assert!(has(&|p| matches!(p, Picked::TabBar { over: None, .. })));
+        assert!(has(&|p| matches!(p, Picked::Reorder { .. })));
+        assert!(g.cases.iter().any(|c| c.scroll.is_some()), "스크롤 사례");
+    }
+
+    // 골든 `source_ulp` 사례의 전제 — 이웃 가운데가 짧은 소수 점에서 정확히 1 ULP 떨어져 있다. 1 ULP 옆 값을 골든에
+    // 바로 적지 않는 것은 serde_json(기본 기능 — `float_roundtrip` 없음)이 17 자리 소수를 1 ULP 어긋나게 읽어서다
+    // (실측 2026-10-17: `119.99999999999999` → `120.0`). 골든의 수는 짧은 소수로 둔다.
+    #[test]
+    fn the_ulp_region_centers_are_one_ulp_off_the_short_points() {
+        assert_eq!((40.2_f64 + 90.4) / 2.0, 65.3_f64.next_up());
+        assert_eq!(190.4_f64 - 90.4, 100.0, "끄는 머리 폭");
+        assert_eq!((190.4_f64 + 256.4) / 2.0, 223.4_f64.next_down());
+        assert_eq!(123.4_f64 + 100.0, 223.4);
+    }
+
+    // 스크롤 0 = 스크롤 없음 — 넘친 영역 밖의 옛 사례는 `Some(0)` 을 줘도 답이 같다(6a 판정 그대로).
+    #[test]
+    fn a_zero_scroll_answers_like_no_scroll_where_nothing_was_scrolled() {
+        let g = golden();
+        for c in g.cases.iter().filter(|c| c.scroll.is_none()) {
+            let r = &g.regions[&c.regions];
+            let measured = r.tab_bar.as_ref().map_or(0.0, |b| b.scroll);
+            let frozen = r.reorder.as_ref().map_or(0.0, |re| re.scroll);
+            if measured == 0.0 && frozen == 0.0 {
+                assert_eq!(
+                    pick(r, c.point, Some(0.0), g.source_view),
+                    c.expect,
+                    "{}",
+                    c.name
+                );
+            }
+        }
     }
 }

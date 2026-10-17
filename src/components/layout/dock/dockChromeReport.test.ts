@@ -29,6 +29,7 @@ const chrome = (originY: number): DockChrome => ({
   canvas_origin: { x: 0, y: originY },
   tab_bar: { x0: 0, y0: 0, x1: 640, y1: 28 },
   tabs: [{ view_id: 'a', rect: { x0: 4, y0: 0, x1: 120.25, y1: 28 } }],
+  scroll: null,
 })
 
 const sent = () => invokeMock.mock.calls.filter(c => c[0] === 'report_dock_chrome').map(c => c[1])
@@ -75,6 +76,7 @@ describe('dockChromeOf', () => {
         { view_id: 'a', rect: { x0: 4, y0: 0, x1: 120.25, y1: 28 } },
         { view_id: 'c', rect: { x0: -50, y0: 0, x1: 2, y1: 28 } },
       ],
+      scroll: null,
     })
   })
 

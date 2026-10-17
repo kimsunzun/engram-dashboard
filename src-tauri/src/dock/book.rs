@@ -1553,7 +1553,7 @@ impl Drag {
     // 창 하나의 영역을 다시 만든다 — 마지막 보낸 것과 다르면 번호를 올려 지금 영역으로 적고 `true`.
     fn renew(&mut self, w: &WindowSnap) -> bool {
         let Some((mut regions, expect)) =
-            regions::regions_for(w, self.source_view, &self.expect_source, self.blocked)
+            regions::regions_for(w, self.source_view, &self.expect_source, self.blocked, None)
         else {
             self.sent.remove(&w.label);
             return false;
@@ -1605,7 +1605,7 @@ impl Drag {
     fn verdict(&self, w: &str, report: &Report) -> Verdict {
         let current = self.sent.get(w);
         let judged = current.map_or(Picked::None, |s| {
-            regions::pick(&s.regions, report.point, self.source_view)
+            regions::pick(&s.regions, report.point, None, self.source_view)
         });
         match (&report.shown, current) {
             (Picked::None, _) if judged == Picked::None => Verdict::NewWindow,
@@ -1765,6 +1765,7 @@ mod tests {
                     },
                 })
                 .collect(),
+            scroll: None,
         }
     }
 
@@ -2322,7 +2323,7 @@ mod tests {
     #[test]
     fn a_window_missing_from_a_snapshot_loses_its_regions_but_keeps_what_it_saw() {
         let mut book = fresh();
-        let shown = regions::pick(&current(&book, POP2), SEAM_P, id(SRC));
+        let shown = regions::pick(&current(&book, POP2), SEAM_P, None, id(SRC));
         over(
             &mut book,
             POP2,
@@ -2562,7 +2563,7 @@ mod tests {
 
     #[test]
     fn a_seam_drop_applies_only_when_rev_displayed_and_repick_all_match() {
-        let shown = regions::pick(&current(&fresh(), MAIN), SEAM_P, id(SRC));
+        let shown = regions::pick(&current(&fresh(), MAIN), SEAM_P, None, id(SRC));
         let Picked::Seam {
             anchor: Some(anchor),
             side,
@@ -2624,7 +2625,7 @@ mod tests {
 
     #[test]
     fn a_tab_bar_drop_matches_bar_rev_and_index_only() {
-        let judged = regions::pick(&current(&fresh(), MAIN), BAR_P, id(SRC));
+        let judged = regions::pick(&current(&fresh(), MAIN), BAR_P, None, id(SRC));
         assert_eq!(
             judged,
             Picked::TabBar {
@@ -2732,7 +2733,7 @@ mod tests {
 
     fn seam_applying() -> Book {
         let mut book = fresh();
-        let shown = regions::pick(&current(&book, MAIN), SEAM_P, id(SRC));
+        let shown = regions::pick(&current(&book, MAIN), SEAM_P, None, id(SRC));
         let out = drop_on(
             &mut book,
             MAIN,
@@ -3134,7 +3135,7 @@ mod tests {
     }
 
     fn seam_report(book: &Book, label: &str, displayed: u128) -> Report {
-        let shown = regions::pick(&current(book, label), SEAM_P, id(SRC));
+        let shown = regions::pick(&current(book, label), SEAM_P, None, id(SRC));
         assert!(matches!(shown, Picked::Seam { .. }), "전제: 칸 띠여야");
         report(1, 1, Some(displayed), shown, SEAM_P)
     }

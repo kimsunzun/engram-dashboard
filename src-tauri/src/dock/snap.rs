@@ -123,6 +123,7 @@ mod tests {
                 y1: 28.0,
             },
             tabs: Vec::new(),
+            scroll: None,
         }
     }
 
@@ -168,7 +169,7 @@ mod tests {
             }
             assert!(!w.hidden && !w.is_source, "{}: 장부 몫", w.label);
             if let (Some(source), Some(incoming)) = (dragged, &snap.source_layout) {
-                regions_for(w, source, incoming, false);
+                regions_for(w, source, incoming, false, None);
             }
         }
     }

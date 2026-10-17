@@ -3,8 +3,10 @@ import type { RectCss } from "./RectCss";
 import type { TabHeader } from "./TabHeader";
 
 /**
- * 탭바(PRD R21) — `rect` = 탭바 상자(뷰포트 CSS px · 반열림) · `heads` = 끄는 탭을 뺀 머리(크롬 보고 순서 —
- * 끼울 자리는 순서와 무관하게 가운데 x 로 센다) · `insert_xs[i]` = 자리 `i`(`0..=heads.len()`)에 그릴 끼울 x
- * (탭바 상자 왼쪽 `rect.x0` 에서 잰 CSS px).
+ * 탭바(PRD R21) — `rect` = 탭바 상자(뷰포트 CSS px · 반열림 · 스크롤로 안 움직인다) · `heads` = 끄는 탭을 뺀
+ * 머리(크롬 보고 순서 · x = 내용 좌표 — 끼울 자리는 순서와 무관하게 가운데 x 로 센다) · `insert_xs[i]` = 자리
+ * `i`(`0..=heads.len()`)에 그릴 끼울 x(`rect.x0` 에서 잰 내용 좌표 CSS px — 그릴 땐 지금 `scrollLeft` 를 뺀다) ·
+ * `scroll` = 크롬을 잰 때의 탭바 `scrollLeft`(보고에 없었으면 0) — 판정에 스크롤이 주어지지 않을 때 쓴다.
+ * 판정은 점의 내용 x(뷰포트 x + 스크롤)를 머리 가운데와 견주고, 「탭바 안」은 뷰포트 점 그대로 본다.
  */
-export type TabBarRegion = { rect: RectCss, heads: Array<TabHeader>, insert_xs: Array<number>, };
+export type TabBarRegion = { rect: RectCss, heads: Array<TabHeader>, insert_xs: Array<number>, scroll: number, };
