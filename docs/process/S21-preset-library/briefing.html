@@ -319,6 +319,12 @@ a{color:var(--accent)}
 <!-- 2 -->
 <section id="list-shape">
   <div class="sh"><span class="no">2</span><h2>라이브러리 1~4</h2><span class="tag ok">확정</span></div>
+  <p class="pend"><span class="tag ok">확정 2026-10-17</span><span>지시서 = 어디에 있든 모든 <code>.md</code>(스킬 폴더 안 것도 · 내용 자유 · 형식 없음) · 예외 = <code>SKILL.md</code> 자신(그 스킬을 대신함) · <code>.txt</code> 는 지시서 아님</span></p>
+  <p class="pend"><span class="tag ok">확정 2026-10-17</span><span>스킬 폴더(<code>SKILL.md</code> 를 바로 안에 든 폴더) = 보통 폴더 — 스킬 아이콘 · 폴더와 함께 정렬 · 들어갈 수 있음 · 폴더 줄이나 <code>SKILL.md</code> 줄을 고르면 그 스킬(담으면 폴더 경로) · 폴더 더블클릭 = 들어감 · <code>SKILL.md</code> 더블클릭 = OS 기본 편집기 · 스킬 안 스킬도 같은 규칙 (옛 「스킬 폴더는 항목 · 들어가지 않음」 뒤집음)</span></p>
+  <p class="pend"><span class="tag ok">확정 2026-10-17</span><span>우리 종류가 아닌 파일은 안 보임 — 그림 · <code>.json</code> · <code>.txt</code> · 스크립트 등(스킬 폴더 안도) · <code>kind</code> 없거나 아예 못 읽는 <code>.yaml</code> 도</span></p>
+  <p class="pend"><span class="tag ok">확정 2026-10-17</span><span>「오류」 줄 = <code>kind: preset</code> · <code>kind: settings</code> 인데 깨진 파일 · 모르는 <code>kind</code> 값(오타일 것)뿐</span></p>
+  <p class="pend"><span class="tag ok">확정 2026-10-17</span>이름 앞 종류 아이콘 = 폴더 · 스킬(폴더 모양 + 표시) · 지시서 · 설정 · 프리셋 — 트리도 같음 · lucide 이름은 구현 때 확인</p>
+  <p class="pend"><span class="tag ok">확정 2026-10-17</span><span>누가 무엇을 — 사람 = 앱 안에서 전부(만들기 · 옮기기 · 이름 · 지우기 = 라이브러리 화면 · 내용 = 더블클릭 → OS 기본 편집기) · AI = 같은 <code>engram library.*</code> 명령, 또는 바깥에서 직접 + <code>library.refresh</code> — 권고일 뿐 강제 아님 · <code>library.refresh</code> 답 = 바뀐 수 + 다시 읽은 파일의 문제(오류 · kind 없음 · 찾을 수 없음)</span></p>
   <p class="pend"><span class="tag ok">확정 2026-10-16</span>슬롯 이름 = 「라이브러리 1~4」 — 뒤에 브라우저 · 에디터를 붙이지 않음(범용: 나중에 커맨드 묶음 · 스크립트 종류도 담는다)</p>
   <p class="pend"><span class="tag ok">확정</span>번호 1~4 고정 · 빈 슬롯 메뉴 「새 콘텐츠 ▸ 라이브러리 ▸ 1~4」 · 열린 번호를 고르면 그 슬롯으로(중복 없음) · 닫힌 번호는 그 번호의 보기 상태(칸 폭 · 마지막 폴더 · 뒤로/앞으로 기록)로 다시 열림</p>
   <p class="lead">왼쪽 = 폴더 트리 + 즐겨찾기 · 가운데 = 탐색기식 목록 · 오른쪽 = 상세.</p>
@@ -327,12 +333,16 @@ a{color:var(--accent)}
     <div class="navrow"><button class="btn" type="button" aria-label="뒤로">←</button><button class="btn" type="button" aria-label="앞으로">→</button><span class="crumb"><u>라이브러리</u> › <u>스킬</u> › <u>리뷰</u></span><span class="n">1</span></div>
     <div class="win-body cols-lib">
       <div class="pane side">
-        <style>.side .grp.sec44,.sec44{text-transform:none;letter-spacing:0;display:flex;align-items:center;gap:6px;background:var(--app-chip);border-radius:4px;padding:2px 6px;margin-top:2px}.seam44{text-align:center;font-size:11px;color:var(--app-muted);border-top:1px solid var(--app-line);margin-top:6px;line-height:1.2}</style>
+        <style>.side .grp.sec44,.sec44{text-transform:none;letter-spacing:0;display:flex;align-items:center;gap:6px;background:var(--app-chip);border-radius:4px;padding:2px 6px;margin-top:2px}.seam44{text-align:center;font-size:11px;color:var(--app-muted);border-top:1px solid var(--app-line);margin-top:6px;line-height:1.2}.ico44{width:12px;height:12px;vertical-align:-1px;margin-right:3px;color:var(--app-muted);flex:none}</style>
+        <svg width="0" height="0" style="position:absolute" aria-hidden="true"><symbol id="skill44" viewBox="0 0 16 16"><path d="M1.5 4a1 1 0 0 1 1-1h3.2l1.5 1.5h6.3a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><circle cx="10" cy="9.4" r="1.5" fill="none" stroke="currentColor" stroke-width="1.1"/><path d="M10 6.8v.9M10 11.1v.9M7.4 9.4h.9M11.7 9.4h.9" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></symbol></svg>
         <div class="grp sec44">▾ library <span title="라이브러리 폴더 바꾸기 — 폴더 고르기 창" style="margin-left:auto;padding:0 5px;border:1px solid var(--app-line);border-radius:3px">…</span> <span class="n">2</span></div><span class="pth">D:\Engram\library</span>
         <div class="tr"><span class="tw">▸</span>지시서</div>
         <div class="tr"><span class="tw">▾</span>스킬</div>
         <div class="tr l1 on"><span class="tw">▾</span>리뷰</div>
         <div class="tr l2">보안</div>
+        <div class="tr l2"><svg class="ico44" aria-hidden="true"><use href="#skill44"/></svg>review</div>
+        <div class="tr l2"><svg class="ico44" aria-hidden="true"><use href="#skill44"/></svg>code-review</div>
+        <div class="tr l2"><svg class="ico44" aria-hidden="true"><use href="#skill44"/></svg>pr-check</div>
         <div class="tr l1">글쓰기</div>
         <div class="tr"><span class="tw">▸</span>설정</div>
         <div class="tr"><span class="tw">▸</span>프리셋</div>
@@ -352,9 +362,9 @@ a{color:var(--accent)}
         <div class="lst cols">
           <div class="li hd"><span class="star"></span><span class="kind">종류</span><span class="name">이름 ▲ <span class="n">6</span></span><span class="use">쓰는 곳</span></div>
           <div class="li"><span class="star"></span><span class="kind">폴더</span><span class="name">📁 보안</span><span class="use">항목 2</span></div>
-          <div class="li on"><span class="star on">★</span><span class="kind">스킬</span><span class="name">review</span><span class="use">프리셋 2</span></div>
-          <div class="li"><span class="star">☆</span><span class="kind">스킬</span><span class="name">code-review</span><span class="use">프리셋 1</span></div>
-          <div class="li"><span class="star on">★</span><span class="kind">스킬</span><span class="name">pr-check</span><span class="use">—</span></div>
+          <div class="li on"><span class="star on">★</span><span class="kind">스킬</span><span class="name"><svg class="ico44" aria-hidden="true"><use href="#skill44"/></svg>review</span><span class="use">프리셋 2</span></div>
+          <div class="li"><span class="star">☆</span><span class="kind">스킬</span><span class="name"><svg class="ico44" aria-hidden="true"><use href="#skill44"/></svg>code-review</span><span class="use">프리셋 1</span></div>
+          <div class="li"><span class="star on">★</span><span class="kind">스킬</span><span class="name"><svg class="ico44" aria-hidden="true"><use href="#skill44"/></svg>pr-check</span><span class="use">—</span></div>
         </div>
       </div>
       <div class="pane side">
@@ -376,7 +386,7 @@ a{color:var(--accent)}
     <span><span class="n">3</span><span>목록 = 데몬이 들고 있는 목록 · Engram 안 변경은 바로 반영 · 바깥 변경은 트리 우클릭 「새로 고침」(그 폴더 · 루트 머리 줄 = 전체) · F5(트리 = 선택한 폴더, 없으면 전체 · 목록 = 지금 폴더 — 하위 포함) 또는 <code>library.refresh</code> 로 들임 · 전체 훑기는 처음 · 폴더 바꾸기 때만 · 실행 직전 데몬이 다시 확인 (2026-10-16)</span></span>
     <span><span class="n">4</span><span>왼쪽 칸 = 머리 붙은 칸 둘(언리얼 Content Browser 꼴) — 위 「▾ 라이브러리 폴더 이름 · 경로 …」(트리 · 「…」 = 폴더 고르기 창으로 바꾸기) · 아래 「▾ 즐겨찾기 ＋」(＋ = 새 묶음 · 첫 줄 「기본」 = 처음부터 있음 · 지울 수 없음 · ★ 기본 대상). 칸마다 따로 스크롤 · ▾ 로 접기(머리 줄은 남음) · 칸 사이 경계를 끌어 높이 조절(번호마다 기억) · 이 PC 에만 저장 = 머리 툴팁 — 2026-10-16 · ★ = 대상 묶음에 넣고 빼기 · 묶음 한 번 누름 = 보기 · 더블클릭/우클릭 「★ 대상으로」 = 대상 · ★ 대상은 PC 마다 하나(슬롯마다 아님) · 묶음은 이 PC 에만 저장</span></span>
     <span><span class="n">5</span><span>필터 ▾ = 종류 고르기(지시서 · 스킬 · 설정 · 프리셋 체크박스 · 필터 리셋) — 상태 필터는 첫 판에서 뺌</span></span>
-    <span><span class="n">6</span><span>폴더 먼저, 다음 이름 · 머리 클릭 = 그 열로 정렬 · 다시 = 거꾸로 (★ · 쓰는 곳 칸 제외) · ▲/▼ 는 누른 열에만 · 폴더는 늘 맨 위 · 종류 = 필터 순서(지시서 · 스킬 · 설정 · 프리셋 — 번역 글자 순 아님) · 같은 값은 이름순 (VS Code 관행 — 2026-10-16)</span></span>
+    <span><span class="n">6</span><span>폴더(스킬 폴더 포함 — 스킬 아이콘) 먼저, 다음 이름 · 머리 클릭 = 그 열로 정렬 · 다시 = 거꾸로 (★ · 쓰는 곳 칸 제외) · ▲/▼ 는 누른 열에만 · 폴더는 늘 맨 위 · 종류 = 필터 순서(지시서 · 스킬 · 설정 · 프리셋 — 번역 글자 순 아님) · 같은 값은 이름순 (VS Code 관행 — 2026-10-16)</span></span>
     <span><span class="n">7</span><span>쓰는 곳 = 그 항목을 쓰는 프리셋과 에이전트, 직접 + 건너서(「… 통해」) · 프리셋 이름 = 그 자리로 가 고름(오른쪽이 편집 칸) · 에이전트 이름 = 그 에이전트 프리셋 슬롯을 엶</span></span>
   </div>
 
@@ -399,10 +409,10 @@ a{color:var(--accent)}
         <div class="fbar"><span class="sel">필터 ▾</span><div class="search" style="flex:1 1 140px;border-color:var(--accent)"><span class="x44">×</span><span>review</span></div></div>
         <div class="lst cols">
           <div class="li hd"><span class="star"></span><span class="kind">종류</span><span class="name">이름</span><span class="use">위치</span></div>
-          <div class="li"><span class="star on">★</span><span class="kind">스킬</span><span class="name"><mark>review</mark></span><span class="use"><u>스킬/리뷰</u></span></div>
-          <div class="li"><span class="star">☆</span><span class="kind">스킬</span><span class="name">code-<mark>review</mark></span><span class="use"><u>스킬/리뷰</u></span></div>
-          <div class="li"><span class="star">☆</span><span class="kind">스킬</span><span class="name"><mark>review</mark>-security</span><span class="use"><u>스킬/리뷰/보안</u></span></div>
-          <div class="li"><span class="star">☆</span><span class="kind">스킬</span><span class="name">pr-<mark>review</mark>-lite</span><span class="use"><u>스킬/공용</u></span></div>
+          <div class="li"><span class="star on">★</span><span class="kind">스킬</span><span class="name"><svg class="ico44" aria-hidden="true"><use href="#skill44"/></svg><mark>review</mark></span><span class="use"><u>스킬/리뷰</u></span></div>
+          <div class="li"><span class="star">☆</span><span class="kind">스킬</span><span class="name"><svg class="ico44" aria-hidden="true"><use href="#skill44"/></svg>code-<mark>review</mark></span><span class="use"><u>스킬/리뷰</u></span></div>
+          <div class="li"><span class="star">☆</span><span class="kind">스킬</span><span class="name"><svg class="ico44" aria-hidden="true"><use href="#skill44"/></svg><mark>review</mark>-security</span><span class="use"><u>스킬/리뷰/보안</u></span></div>
+          <div class="li"><span class="star">☆</span><span class="kind">스킬</span><span class="name"><svg class="ico44" aria-hidden="true"><use href="#skill44"/></svg>pr-<mark>review</mark>-lite</span><span class="use"><u>스킬/공용</u></span></div>
         </div>
       </div></div>
     </div>
@@ -460,21 +470,21 @@ a{color:var(--accent)}
       <div class="head"><span class="kind e">오류</span><span class="t" style="font-size:14px;color:var(--err)">깨진 설정</span><span class="n">13</span></div>
       <div class="final">
         <span class="k">이유</span>
-        <span class="v">kind 가 없습니다</span>
+        <span class="v">YAML 문법 오류 (kind: settings)</span>
         <span class="k">줄</span>
-        <span class="v">1째 줄</span>
+        <span class="v">3째 줄</span>
         <span class="k">위치</span>
         <span class="v">설정/깨진 설정.yaml</span>
       </div>
     </div></div>
   </div>
   <div class="caps">
-    <span><span class="n">8</span><span>아무것도 안 고름 = 흐린 안내 한 줄 (Spacedrive 관행)</span></span>
+    <span><span class="n">8</span><span>아무것도 안 고름 = 흐린 안내 한 줄(문구는 나중에 다듬음) (Spacedrive 관행)</span></span>
     <span><span class="n">9</span><span>폴더 = 이름 · 위치만 — 안의 개수 세지 않음 (관행 = 메타데이터만)</span></span>
     <span><span class="n">10</span><span>지시서 = 설명(앞머리 <code>description</code> · 없으면 「설명 없음」) · 본문 미리보기(읽기만 · 앞부분만 · 아래로 흐려짐) · 위치 · 쓰는 곳 (탐색기 · Finder · Unity 관행)</span></span>
     <span><span class="n">11</span><span>설정 = 설명 · 정해 둔 값 요약(백엔드 · 모델 — 있을 때만 · 원문 칸이 있으면 「claude 원문 있음」) · 위치 · 쓰는 곳</span></span>
     <span><span class="n">12</span><span>여러 개 고름 = 「N개 고름」 + 종류별 수만 (Spacedrive · Finder 관행)</span></span>
-    <span><span class="n">13</span><span>오류 줄 = 이유 · 몇째 줄 · 위치 (관행 없음 — 우리 설계)</span></span>
+    <span><span class="n">13</span><span>오류 줄 = 이유 · 몇째 줄 · 위치 (관행 없음 — 우리 설계) · <code>kind: preset</code> · <code>kind: settings</code> 인데 깨진 것 · 모르는 <code>kind</code> 만 — <code>kind</code> 없는 <code>.yaml</code> 은 목록에 안 보임 (2026-10-17)</span></span>
     <span><span>스킬 = 위 그림 그대로 · 프리셋 = 편집 칸(3절) · 어디에도 단추 없음 · 근거 = 관행 조사(Spacedrive · 탐색기 · Finder · Unity) — 2026-10-17</span></span>
   </div>
   <p class="pend"><span class="tag ok">확정</span><span>단축키 = OS 파일 관리자 기본값 — Windows: F2 이름 · Delete 휴지통 · Enter 열기 · Alt+← → 뒤로/앞으로 · Alt+↑ 상위 · Ctrl+Shift+N 새 폴더 · Ctrl+F 검색 · F5 새로 고침 · Shift+F10 메뉴 · 글자 = 그 이름으로 이동 / macOS: Finder 기본값(Enter 이름 · Cmd+Delete 휴지통 · Cmd+[ ] 뒤로/앞으로) — 슬롯 포커스 안에서만 · LLM 경로 없음(데이터 조작은 <code>library.*</code>) (2026-10-16)</span></p>
@@ -741,11 +751,12 @@ a{color:var(--accent)}
         </div>
         <div class="df"><button class="btn" type="button">취소</button><button class="btn pri" type="button">휴지통으로</button></div>
       </div>
-<div class="cli"><span class="c"># 에이전트 — 명령 이름 = TRD §1-7</span>  <span class="n">4</span>
+<div class="cli"><span class="c"># 에이전트(권고 · 강제 아님) — 명령 이름 = TRD §1-7</span>  <span class="n">4</span>
 <span class="k">내용</span>    → 파일 직접 고침
 <span class="k">옮기기</span>  → engram library.move
 <span class="k">이름</span>    → engram library.rename
-<span class="k">지우기</span>  → engram library.delete   <span class="c"># 쓰이면 --yes 없이 거절</span></div>
+<span class="k">지우기</span>  → engram library.delete   <span class="c"># 쓰이면 --yes 없이 거절</span>
+<span class="k">갱신</span>    → engram library.refresh  <span class="c"># 바깥에서 바꾼 뒤</span></div>
       <span class="callout">프리셋 리뷰어 안 — 탐색기에서 review 를 옮긴 뒤 (같은 종류 · 같은 이름이 정확히 하나)</span>
       <div class="row" style="border-color:var(--warn);color:var(--warn)"><span class="kind">스킬</span><span class="name">review — 다시 이어짐 · 원래 <code>스킬/리뷰/review</code></span><span class="n">5</span></div>
     </div>
@@ -754,7 +765,7 @@ a{color:var(--accent)}
     <span><span class="n">1</span><span>첫 판 = 옮기기 · 이름 바꾸기 · 지우기 · 새로 만들기 ▸ 폴더 · 마크다운(빈 <code>.md</code>) · 설정(<code>kind: settings</code> 틀) · 프리셋(<code>kind: preset</code> 틀 → 바로 편집 칸) — 스킬은 폴더 + <code>SKILL.md</code> 마크다운으로 만든다 · 내용은 편집기 · 에이전트 몫 (2026-10-16)</span></span>
     <span><span class="n">2</span>옮기기 = 목록에서 트리로 끌어 놓기 · 옮기거나 이름을 바꾸면 데몬이 같은 조작 안에서 프리셋 속 경로와 에이전트 붙임을 같이 고침 · 즐겨찾기 묶음은 각 화면이 다음 요청 때 따라 고침(§18)</span>
     <span><span class="n">3</span>지우기 = 항상 OS 휴지통 (데몬 PC · 영구 삭제 없음) · 쓰는 프리셋 · 에이전트가 있으면 먼저 확인 창에 둘 다 늘어놓음</span>
-    <span><span class="n">4</span><span>에이전트: 파일 내용은 직접 고침 · 옮기기 · 이름 · 지우기는 <code>engram</code> 명령으로(참조가 같이 고쳐지게 — 프라이밍에 넣음)</span></span>
+    <span><span class="n">4</span><span>사람 = 앱 안에서 전부(내용 = 더블클릭 → OS 기본 편집기) · AI = 같은 <code>engram</code> 명령 또는 바깥에서 직접 — 강제 아님 · 프라이밍엔 권고 둘: 바깥에서 바꿨으면 <code>library.refresh</code> · 옮기기 · 이름 · 지우기를 <code>engram</code> 명령으로 하면 참조가 같이 고쳐짐(바깥에서 하면 깨지고, 다시 잇기는 같은 종류 · 같은 이름 · 하나일 때만) (2026-10-17)</span></span>
     <span><span class="n">5</span><span>바깥(탐색기)에서 옮기면 → 같은 종류 · 같은 이름이 정확히 하나일 때만 이어지고 「다시 이어짐 · 원래 &lt;경로&gt;」 가 확인할 때까지 편집 칸 줄 · 목록 · 에이전트 슬롯 머리에 보임 · 저절로 쓸지 / 「다시 이어짐? · [확인]」 한 번 누른 뒤 쓸지 = <span class="tag wait">결정 대기 D10</span> · 후보가 없거나 둘 이상이면 「찾을 수 없음 · 다시 잇기」(§3)</span></span>
   </div>
   <p class="pend"><span class="tag ok">확정</span>새로 만들면 우클릭한 폴더 안에 이름 칸이 편집 중인 채로 생김(탐색기처럼) — 새 폴더 · 새 마크다운.md · 새 설정.yaml · 새 프리셋.yaml · 같은 이름이 있으면 (2) · Esc = 기본 이름 그대로 (2026-10-16)</p>
