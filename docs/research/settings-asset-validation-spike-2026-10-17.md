@@ -43,5 +43,67 @@
 
 - claude 대화형 TUI · stream-json 모드(`-p` 만 돌림 — TUI 는 설정 대화상자를 띄울 수도 있다).
 - doctor 출력 문구가 판이 바뀌어도 그대로인지(문서화 안 됨).
-- Rust `jsonschema` · serde-saphyr 를 실제로 컴파일해 돌리지 않음(ajv 가 대신) · schemars 의 `uint*` 형식 처리 미확인.
+- ~~Rust `jsonschema` · serde-saphyr 를 실제로 컴파일해 돌리지 않음(ajv 가 대신) · schemars 의 `uint*` 형식 처리 미확인.~~ → 아래 「Rust 크레이트 실측 (2026-10-18)」에서 쟀다.
 - `codex debug models` 가 네트워크를 타는지.
+
+## Rust 크레이트 실측 (2026-10-18)
+
+스파이크 crate 하나를 실제로 컴파일해 돌렸다(rustc 1.95.0 · Windows · debug). 「실측」 = 돌려서 본 것 · 「소스 읽음」 = 실행 없이 crate 소스 · 메타데이터에서 읽은 것.
+
+**결론:** `jsonschema` 0.59.0 · serde-saphyr 2.0.0 둘 다 계획대로 붙는다. 남는 구멍은 셋 — ① schemars `uint*` 형식은 무시되므로 정수 범위는 스키마의 `minimum`/`maximum` 에서만 오고, `maximum` 없는 상한(uint16 · uint32)은 안 잡힌다 ② claude 최상위 모르는 키는 우리가 스키마 `properties` 와 키를 대조해야 한다 ③ `oneOf` 열거 오류는 허용 값 목록 없이 뭉뚱그린 문구다.
+
+### 의존 · 빌드
+
+| 항목 | 값 | 구분 |
+|---|---|---|
+| 해석된 판 | `jsonschema` 0.59.0(+ `referencing` 0.59.0 · `fancy-regex` 0.19.2 · `idna` 1.1.0) · `serde-saphyr` 2.0.0(파서 `granit-parser` 2.0.0) · `toml` 0.8.23 | 실측 |
+| `jsonschema` 기본 기능 | `resolve-http` · `resolve-file` · `tls-aws-lc-rs` · `idna` | 소스 읽음 |
+| 쓴 기능 | `default-features = false, features = ["resolve-file","idna"]` → reqwest · rustls · aws-lc · tokio 없음 | 실측 |
+| 깨끗한 dev 빌드(serde · serde_json · toml 포함) | 35.7 s · `Cargo.lock` 124 패키지 · `jsonschema` 하위 트리 ≈ 107 줄(regex · fancy-regex · idna) · serde-saphyr ≈ 19 줄 | 실측 |
+
+### 스키마
+
+| 스키마 | 크기 · 모양 | 구분 |
+|---|---|---|
+| codex `https://github.com/openai/codex/releases/download/rust-v0.156.1/config-schema.json` | 220,935 B · draft-07 · 최상위 속성 100 · 최상위 `additionalProperties:false` · 형식 uint×22 · int64×17 · uint64×17 · double×5 · uint16×3 · uri×3 · int32 · uint32 · uint8 | 실측 |
+| claude `https://json.schemastore.org/claude-code-settings.json` | 231,533 B · draft-07 · 최상위 속성 142 · 최상위 `additionalProperties:true` | 실측 |
+| 원격 `$ref` | 없음 → 오프라인 컴파일 · 스키마 하나 컴파일 ≈ 28 ms(debug) | 실측 |
+
+### 모르는 형식(`uint` 등)
+
+- 기본값 = **말없이 무시**(`should_validate_formats(true)` 를 줘도 같다). `should_ignore_unknown_formats(false)` → 컴파일 오류 `Unknown format: 'uint'`. (실측)
+- 사용자 형식 `.with_format(name, |s: &str| …)` 는 **문자열 인스턴스에만** 돈다 → 정수 범위를 못 건다(사용자 `uint32` 를 달아도 5e10 통과). (실측)
+
+### 검사 결과 (실측)
+
+| 경우 | 결과 |
+|---|---|
+| codex 정상 설정 | valid |
+| codex `project_doc_max_bytes="big"` | not of type integer |
+| codex uint 칸 -1 | 잡힘 — 스키마 `minimum: 0` |
+| codex uint8 칸 300 | 잡힘 — `maximum` |
+| codex uint16 `mcp_oauth_callback_port`=70000 | **통과** — `maximum` 없음 · 형식 무시 |
+| codex `approval_policy` 틀린 열거 값 | 「not valid under any of the schemas listed in the 'oneOf'」 — 허용 값 목록 없음 |
+| codex 모르는 최상위 키 | 「Additional properties are not allowed ('not_a_key' was unexpected)」 |
+| codex 모르는 중첩 키 `features.bogus_flag` | 잡힘 |
+| claude 정상 설정 | valid |
+| claude `includeCoAuthoredBy:"no"` | not boolean |
+| claude `cleanupPeriodDays:0` | less than minimum 1 |
+| claude `permissions.allow:"Bash"` | not array |
+| claude 모르는 최상위 키 | **valid(못 잡음)** → 인스턴스 키와 스키마 `properties` 대조로 잡힘 |
+| claude 모르는 중첩 키 `permissions.allowww` | 잡힘 — 그 객체가 `additionalProperties:false` |
+
+오류 API = `iter_errors` · `instance_path()` · `schema_path()` · Display · `kind()`. (실측)
+
+### serde-saphyr (실측)
+
+- 구조체 왕복 OK(블록 스타일). 앞머리(front matter)는 우리가 `---` 줄로 잘라 `from_str` 하면 OK.
+- 오류 = `err.location() -> Option<Location>` · `.line()/.column()` 1부터 · Display 가 `line N column M: …` 로 시작하고 캐럿 조각이 붙는다 — 잘못된 들여쓰기 (5,2) · 안 닫힌 따옴표 (3,1) · 목록 자리에 스칼라 (3,8) · 빠진 필드 (2,1) · 중복 키 = 기본으로 거절 (3,1)(`DuplicateKeyPolicy` 옵션). 이상한 점: 2째 줄 맨 앞 탭이 (1,7) 로 보고됐다.
+- `from_str::<serde_json::Value>` 결과를 그대로 `jsonschema` 에 먹일 수 있다.
+- ★**놀란 점 — 따옴표 없는 `flag: yes` 가 JSON `true` 가 된다**(YAML 1.1 불리언)★. 끄는 옵션이 있는지는 **미확인**.
+
+### 남는 구멍
+
+- `maximum` 없는 uint16 · uint32 상한은 안 잡힌다 — 잡으려면 `format` 을 읽는 후처리를 따로 짜야 한다.
+- claude 최상위 모르는 키 = `properties` 대조를 따로 짠다.
+- `oneOf` 열거 오류 문구가 뭉뚱그려진다.
