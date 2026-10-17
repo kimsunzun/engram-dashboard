@@ -3,21 +3,75 @@
 // ★§5 손발/두뇌 분리★: 사람 클릭(탭 전환/추가/닫기/이름변경)은 viewStore 액션(switchTab/createTab/closeTab/
 // renameTab)만 부른다 — LLM(window.__engramCmd)이 같은 command 를 흔드는 것과 물리적으로
 // 동일 표면. 실제 상태 변경은 백엔드 ViewManager(권위)가 하고 window:tabs-updated emit 으로 반영된다(낙관 갱신 X).
+//
+// ★탭 머리 = 도킹 끌기의 출처(TRD S21-slot-docking §1-4 「출처」)★ — HTML5 끌어 놓기라 문턱 · 캡처 · 창 밖 추적은
+// 엔진 몫이다. `dragstart` 는 끌기 데이터 · 그림만 싣고, 셸 세션(`dock_drag_start`)은 그 사건 디스패치가 끝난 뒤
+// 연다. 대상 쪽 · 세션 구독은 `dock/dockDrag.ts` 이고, 어느 머리를 접을지(떼어진 표시)는 부르는 쪽이 `detached` 로 준다.
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type CSSProperties, type DragEvent } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 
+import type { DragEffect } from '../../../src-tauri/bindings/DragEffect'
+import type { PointCss } from '../../../src-tauri/bindings/PointCss'
 import type { ViewMeta } from '../../api/layoutTypes'
 import { t } from '../../i18n'
+import { MAIN_WINDOW_LABEL } from '../../store/viewStore'
+import { DOCK_MIME } from './dock/dockDrag'
+import { newWindowSize, setDockDragImage } from './dock/dragImage'
 
 interface TabBarProps {
   /** 이 탭바가 속한 창 label(main·slot-popup-N). */
   label: string
   tabs: ViewMeta[]
-  active: string
+  /** 활성으로 칠할 탭 — 이 창 캔버스가 보이는 탭이다. `null` = 없음(떼어진 표시의 메인 마지막 탭). */
+  active: string | null
   onSwitch: (viewId: string) => void
   onCreate: () => void
   onClose: (viewId: string) => void
   onRename: (viewId: string, name: string) => void
+  /** 떼어진 표시로 접을 머리(이 창에서 끄는 탭 — TRD §4-1). 접힌 머리도 DOM 에 남는다(`dragend` 가 거기서 온다). */
+  detached?: string | null
+  /** 끌기 그림의 축소 그림 재료 — 그 탭이 지금 이 창에 보이는 탭이면 그 탭 캔버스 요소, 아니면 `null`(제목만). */
+  dragCanvas?: (viewId: string) => HTMLElement | null
+  /** 탭바가 가로로 스크롤됨 — 머리 사각형이 바뀐다(크롬 보고). */
+  onScroll?: () => void
+}
+
+/** 머리 하나의 끌기 — `dragstart` 에서 만들고 `dragend` 에서 버린다. */
+interface HeadDrag {
+  id: string
+  viewId: string
+  hotspot: PointCss
+  /** 원 사건 — 디스패치가 끝난 뒤 다른 리스너가 시작을 취소했나(`defaultPrevented`)를 본다. */
+  native: Event
+  /** 세션을 열 차례를 기다리는 시한. `null` = 이미 정했다(`started` 가 그 답). */
+  timer: ReturnType<typeof setTimeout> | null
+  started: boolean
+}
+
+// ★디스패치가 끝난 뒤에만, 취소되지 않았을 때만 연다(TRD §1-4 · 5.1 F2)★ — 뒤 리스너가 `dragstart` 를 취소하면 OS
+//   끌기가 없어 끝 신호도 오지 않는다. 그때 세션을 열면 떼어진 탭 · 표식 · 숨긴 팝아웃이 `pointer_seen` 까지 남는다.
+//   ★마이크로태스크로 바꾸지 말 것★ — 리스너 하나가 끝날 때마다 돌아 뒤 리스너보다 먼저다. 시한(task 하나 뒤)이어야
+//   엔진이 접은 끌기의 끝(같은 task 안 · `onHeadDragEnd`)도 이보다 먼저 와 걸러진다.
+function openSession(drag: HeadDrag): void {
+  drag.timer = null
+  if (drag.native.defaultPrevented) return
+  drag.started = true
+  invoke<void>('dock_drag_start', { drag_id: drag.id, view_id: drag.viewId, hotspot: drag.hotspot }).catch(
+    err => console.warn('[TabBar] dock_drag_start 거절 — 이 끌기의 놓기는 아무것도 바꾸지 않는다:', err),
+  )
+}
+
+function onControl(head: Element, target: EventTarget | null): boolean {
+  const el = target instanceof Element ? target : target instanceof Node ? target.parentElement : null
+  const control = el?.closest('input, button')
+  return control != null && head.contains(control)
+}
+
+function effectOf(dropEffect: string | undefined): DragEffect {
+  if (dropEffect === 'move') return 'move'
+  if (dropEffect === 'copy' || dropEffect === 'link') return 'other'
+  return 'none'
 }
 
 export default function TabBar({
@@ -28,6 +82,9 @@ export default function TabBar({
   onCreate,
   onClose,
   onRename,
+  detached = null,
+  dragCanvas,
+  onScroll,
 }: TabBarProps) {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
@@ -55,10 +112,85 @@ export default function TabBar({
     setEditingId(null)
   }
 
+  // ★`dragstart` 안에서 끌린 머리를 누른 자리 밑에서 빼지 않는다★ — Chromium 은 `dragstart` 처리 뒤 누른 자리를 다시
+  //   짚어 그 머리가 거기 없으면(폭 0 · `visibility: hidden` · 앞에 형제가 끼어 밀림) OS 끌기를 열지 않고 곧바로
+  //   `dragend(none)` 을 낸다(실측 15/15). 그 밖의 DOM 변경은 끌기를 끝내지 않는다(실측 25/25). 그래서 머리 접기는
+  //   `Started` 뒤이고, 끌기 기록은 다시 그리기를 부르지 않는 ref 다.
+  const dragRef = useRef<HeadDrag | null>(null)
+
+  // 마지막 누름 자리 — 엔진은 `dragstart` 를 누른 요소가 아니라 그 위의 `draggable` 조상(머리)에 낸다. 닫기 버튼에서
+  //   누른 끌기도 사건 대상은 머리라, 누른 자리를 따로 기억해야 가른다.
+  const pressRef = useRef<EventTarget | null>(null)
+
+  const onHeadDragStart = (e: DragEvent<HTMLDivElement>, tab: ViewMeta) => {
+    const pressed = pressRef.current
+    pressRef.current = null
+    const head = e.currentTarget
+    const dt = e.dataTransfer
+    // 이름 입력 · 닫기 버튼에서 시작한 끌기는 탭 끌기가 아니다(글자 끌기 · 버튼 누름). 우리 MIME 이 아니라 끊지 않는다.
+    if (editingId === tab.id || onControl(head, e.target) || onControl(head, pressed) || !dt) {
+      e.preventDefault()
+      return
+    }
+    // ★우리 MIME 사건이 window 에 닿지 않게 끊는다(TRD §1-4 「다른 끌기 리스너」)★ — 에이전트 트리의 react-dnd 가 뿌리
+    //   `window` 버블 리스너로 자기 원천도 브라우저 기본형도 아닌 `dragstart` 를 취소한다. React 는 뿌리 컨테이너에서
+    //   처리기를 부르므로 원 사건이 거기서 멈춘다.
+    e.stopPropagation()
+    const dragId = crypto.randomUUID()
+    // ★이 형식 하나만 싣는다★ — `text/plain` · URL 을 실으면 다른 앱이 받아 `dropEffect` 가 none 이 아니게 되고 그 앱에
+    //   글자가 들어간다.
+    dt.clearData()
+    dt.setData(DOCK_MIME, JSON.stringify({ drag_id: dragId, view_id: tab.id }))
+    dt.effectAllowed = 'move'
+    const box = head.getBoundingClientRect()
+    const image = setDockDragImage(
+      dt,
+      {
+        title: tab.name,
+        newWindow: newWindowSize(label === MAIN_WINDOW_LABEL, { w: window.innerWidth, h: window.innerHeight }),
+        canvas: dragCanvas?.(tab.id) ?? null,
+      },
+      { x: e.clientX - box.left, y: e.clientY - box.top },
+    )
+    const prev = dragRef.current
+    if (prev !== null && prev.timer !== null) clearTimeout(prev.timer)
+    const drag: HeadDrag = {
+      id: dragId,
+      viewId: tab.id,
+      hotspot: image.hotspot,
+      native: e.nativeEvent,
+      timer: null,
+      started: false,
+    }
+    drag.timer = setTimeout(() => openSession(drag), 0)
+    dragRef.current = drag
+  }
+
+  // 끊지 않는다 — window 쪽 react-dnd 는 캡처 리스너 하나뿐이고 자기 끌기가 아니면 아무것도 안 한다(TRD §1-4).
+  const onHeadDragEnd = (e: DragEvent<HTMLDivElement>) => {
+    const drag = dragRef.current
+    if (drag === null) return
+    dragRef.current = null
+    // ★시작 시한 전에 온 끝 = 엔진이 접은 끌기 — 세션을 열지도 끝내지도 않는다★: Chromium(`MouseEventManager::
+    //   TryStartDrag` 「Drag was canned at the last minute」)은 OS 끌기를 열지 못하면 `dragstart` 와 같은 task 안에서
+    //   `dragend(none)` 을 낸다(실측 = `dragstart` 뒤 0–1 ms). 여기서 시작 · 끝을 보내면 셸에는 영역 보고 없는 「마지막 점에
+    //   놓기」로 보여 새 창이 뜬다(실측 15/15). 실제 OS 끌기의 끝은 이 시한보다 늦다(가장 짧은 실측 = `dragstart` 뒤 +28 ms).
+    if (drag.timer !== null) {
+      clearTimeout(drag.timer)
+      drag.timer = null
+      return
+    }
+    if (!drag.started) return
+    invoke<void>('dock_drag_end', { drag_id: drag.id, effect: effectOf(e.dataTransfer?.dropEffect) }).catch(err =>
+      console.warn('[TabBar] dock_drag_end 실패:', err),
+    )
+  }
+
   return (
     <div
       data-testid="tab-bar"
       data-window-label={label}
+      onScroll={onScroll}
       style={{
         display: 'flex',
         alignItems: 'stretch',
@@ -82,12 +214,21 @@ export default function TabBar({
     >
       {tabs.map(tab => {
         const isActive = tab.id === active
+        const collapsed = tab.id === detached
         return (
           <div
             key={tab.id}
             data-testid="tab"
             data-view-id={tab.id}
             data-active={isActive ? 'true' : 'false'}
+            data-dock-detached={collapsed ? 'true' : undefined}
+            // 이름 편집 중인 머리는 끌지 않는다 — 입력 안에서 누른 채 움직이면 글자 고르기가 아니라 머리 끌기가 된다.
+            draggable={editingId !== tab.id}
+            onPointerDown={e => {
+              pressRef.current = e.target
+            }}
+            onDragStart={e => onHeadDragStart(e, tab)}
+            onDragEnd={onHeadDragEnd}
             onClick={() => onSwitch(tab.id)}
             style={{
               display: 'flex',
@@ -105,6 +246,7 @@ export default function TabBar({
               borderTopLeftRadius: '6px',
               borderTopRightRadius: '6px',
               whiteSpace: 'nowrap',
+              ...(collapsed ? COLLAPSED_HEAD : null),
             }}
           >
             {editingId === tab.id ? (
@@ -204,4 +346,15 @@ export default function TabBar({
       </button>
     </div>
   )
+}
+
+// 떼어진 표시의 머리 접기 — 폭 0 으로 접고 DOM 에는 남긴다. `Started` 뒤 이렇게 접힌 머리도 `dragend` 를 받는다(실측
+//   306/307 · 나머지 1 은 접히기 전에 끝난 끌기). 요소를 빼거나 `display: none` 으로 접는 것은 재지 않았다.
+const COLLAPSED_HEAD: CSSProperties = {
+  width: 0,
+  minWidth: 0,
+  padding: 0,
+  borderRight: 'none',
+  overflow: 'hidden',
+  visibility: 'hidden',
 }

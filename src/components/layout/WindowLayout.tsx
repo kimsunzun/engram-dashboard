@@ -6,11 +6,16 @@
 // ★keep-alive(ADR-0056)★: windows[label].tabs 를 *전부* 마운트하고 활성 탭만 표시한다(숨은 탭
 // display:none — xterm 인스턴스·버퍼 유지, 전환 즉시·무손실). WebglAddon 좌석은 보이는 슬롯만
 // (숨은 탭은 화면에서 빠져 CSS 로 안 보이지만 인스턴스는 살아 출력 계속 누적 — 백엔드가 모든 탭 라우팅).
+//
+// ★떼어진 표시(TRD S21-slot-docking §4-1)는 그리기만이다★ — 끄는 동안 스토어의 탭 목록(`win.tabs`)을 거르지 않는다
+// (0개가 되면 아래 자가닫힘이 창을 닫는다). 끄는 탭의 머리는 접고, 캔버스는 `displayedTabOf` 가 고른 탭을 보인다 —
+// 끌기 대상 쪽(`dock/dockDrag.ts`)이 「보이던 탭」으로 보고하는 값과 같은 함수라 그린 것 · 보고한 것 · 보인 것이 한 값이다.
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { invoke } from '@tauri-apps/api/core'
 
+import type { DockChrome } from '../../../src-tauri/bindings/DockChrome'
 import type { ViewSnapshot } from '../../api/layoutTypes'
 import {
   getCurrentWindow,
@@ -28,6 +33,15 @@ import {
 } from './windowCanvasReport'
 import ViewLayoutRenderer from './ViewLayoutRenderer'
 import TabBar from './TabBar'
+import DockOverlay from './dock/DockOverlay'
+import {
+  cancelDockChromeReport,
+  dockChromeOf,
+  scheduleDockChromeReport,
+  submitDockChrome,
+} from './dock/dockChromeReport'
+import { displayedTabOf, mountDockDrag, useDockSession } from './dock/dockDrag'
+import { ensureDragImageBox } from './dock/dragImage'
 import AgentMonitoringPicker from '../slot/AgentMonitoringPicker'
 import { useMonitoringPickerStore } from '../../store/monitoringPickerStore'
 import { t } from '../../i18n'
@@ -48,7 +62,22 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
   const renameTab = useViewStore(s => s.renameTab)
 
   const closingRef = useRef(false)
-  const canvasRef = useWindowCanvasReport()
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  const canvasElRef = useRef<HTMLDivElement | null>(null)
+  const scheduleChrome = useCallback(
+    () => scheduleDockChromeReport(() => measureDockChrome(rootRef.current, canvasElRef.current)),
+    [],
+  )
+  const reportCanvas = useWindowCanvasReport(scheduleChrome)
+  const canvasRef = useCallback(
+    (el: HTMLDivElement | null) => {
+      canvasElRef.current = el
+      reportCanvas(el)
+    },
+    [reportCanvas],
+  )
+  const session = useDockSession()
+  const detached = session !== null && session.source_label === label ? session.source_view : null
 
   // ADR-0102: 부팅 pull 최종 실패 표면화 — 재시도 소진 후에도 이 창 상태(win)가 안 채워지면 로딩
   //   플레이스홀더에 영구 고착되므로(main 은 이벤트 복구 경로 없음), 조용한 console.warn 대신 이 플래그로
@@ -139,6 +168,30 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
     }
   }, [tabIdsKey, applyLayoutUpdated])
 
+  // ── 도킹 끌기(TRD S21-slot-docking §1-4) — 대상 · 세션 리스너 + 크롬 보고 ─────────────────────────────
+  useEffect(() => mountDockDrag(label), [label])
+  useEffect(() => {
+    ensureDragImageBox()
+  }, [])
+
+  // 크롬(탭바 · 머리 · 캔버스 원점)은 평소에 보고한다 — 끌기 시작 때 기다리면 첫 영역이 늦다(TRD §1-5). 재는 때 = 캔버스
+  //   크기 관측(창 크기가 바뀌면 탭바도 같이 바뀐다) · 탭바 스크롤 · 탭 목록 알림(`win.tabs` 가 새 배열이 된다).
+  const tabs = win?.tabs
+  useEffect(() => {
+    if (tabs) scheduleChrome()
+  }, [tabs, scheduleChrome])
+  useEffect(() => cancelDockChromeReport, [])
+
+  // 떼어진 표시가 머리를 접거나 되살리면 곧바로 다시 보고한다(디바운스 없이) — 접힌 머리가 남은 크롬으로 만든 영역은
+  //   끼울 자리 막대가 머리 하나 폭만큼 어긋난다(TRD §2-4 · §11-2 #10). 접힌 DOM 을 재야 해서 레이아웃 effect 다.
+  const seenDetached = useRef(detached)
+  useLayoutEffect(() => {
+    if (seenDetached.current === detached) return
+    seenDetached.current = detached
+    const chrome = measureDockChrome(rootRef.current, canvasElRef.current)
+    if (chrome !== null) submitDockChrome(chrome)
+  }, [detached])
+
   // ── 0탭 자가닫힘 = ★방어적 idempotent fallback★(S4-F3, §5-2/G2) ─────────────────────────────────
   // ★이 경로는 정상 흐름에선 dead 다★: 팝업 마지막 탭을 닫으면 백엔드 close_tab 이 WindowClosed 로 분류해
   //   close_window→destroy_window 로 OS 창을 *직접 파괴*한다(commands/layout.rs — WindowClosed 분기는
@@ -174,18 +227,24 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
     )
   }
 
+  // 끄는 동안 출처 창이면 떼어진 자리의 승계 탭(`null` = 빈 캔버스 — 메인 마지막 탭), 아니면 모델 활성.
+  const displayed = displayedTabOf(win.active, label, session)
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%' }}>
+    <div ref={rootRef} style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%' }}>
       <TabBar
         label={label}
         tabs={win.tabs}
-        active={win.active}
+        active={displayed}
         onSwitch={viewId => void switchTab(label, viewId).catch(e => console.error('[switchTab]', e))}
         onCreate={() => void createTab(label).catch(e => console.error('[createTab]', e))}
         onClose={viewId => void closeTab(label, viewId).catch(e => console.error('[closeTab]', e))}
         onRename={(viewId, name) =>
           void renameTab(viewId, name).catch(e => console.error('[renameTab]', e))
         }
+        detached={detached}
+        dragCanvas={viewId => (viewId === displayed ? tabCanvasOf(canvasElRef.current, viewId) : null)}
+        onScroll={scheduleChrome}
       />
       <div ref={canvasRef} style={{ flex: 1, position: 'relative', minHeight: 0 }}>
         {win.tabs.map(tab => (
@@ -197,7 +256,7 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
             style={{
               position: 'absolute',
               inset: 0,
-              display: tab.id === win.active ? 'block' : 'none',
+              display: tab.id === displayed ? 'block' : 'none',
             }}
           >
             <TabCanvas viewId={tab.id} />
@@ -210,8 +269,29 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
           key={openId}: open() 마다 key 가 바뀌어 fresh remount → query/activeIndex 가 useState 초기값으로
           재설정된다(stale 플래시 없음, monitoringPickerStore.openId ADR-0067). */}
       <AgentMonitoringPicker key={openId} />
+      <DockOverlay />
     </div>
   )
+}
+
+function tabCanvasOf(area: HTMLElement | null, viewId: string): HTMLElement | null {
+  if (area === null) return null
+  for (const el of Array.from(area.children)) {
+    if (el instanceof HTMLElement && el.dataset.viewId === viewId) return el
+  }
+  return null
+}
+
+// 머리 접힘은 세션 값이 아니라 DOM 의 `data-dock-detached` 로 읽는다 — 지금 그려진 그대로를 재야 보고가 화면과 같다.
+function measureDockChrome(root: HTMLElement | null, canvas: HTMLElement | null): DockChrome | null {
+  const bar = root?.querySelector<HTMLElement>('[data-testid="tab-bar"]')
+  if (!bar || canvas === null) return null
+  const heads = Array.from(bar.querySelectorAll<HTMLElement>('[data-testid="tab"]'), h => ({
+    viewId: h.dataset.viewId ?? '',
+    rect: h.getBoundingClientRect(),
+    collapsed: h.dataset.dockDetached === 'true',
+  }))
+  return dockChromeOf({ canvas: canvas.getBoundingClientRect(), tabBar: bar.getBoundingClientRect(), heads })
 }
 
 /** 훅 인스턴스가 소유하는 관측 상태. */
@@ -229,8 +309,11 @@ const CANVAS_REPORT_DEBOUNCE_MS = 100
 //   하나·합치기·재시도)는 `windowCanvasReport.ts` 가 정한다.
 // callback ref 인 이유: 재는 div 는 win 이 온 뒤에야 렌더되므로(조기 반환) 마운트 때 effect 에선 아직 없다.
 //   참조를 고정하는 이유: 렌더마다 새 함수면 React 가 떼고 다시 붙여 디바운스·재시도가 매번 날아간다.
-function useWindowCanvasReport(): (el: HTMLDivElement | null) => void {
+// `onResize` = 같은 관측에 얹는 크롬 보고(TRD S21-slot-docking §1-5) — 관측을 따로 두지 않는다.
+function useWindowCanvasReport(onResize: () => void): (el: HTMLDivElement | null) => void {
   const obsRef = useRef<CanvasObserverState>({ ro: null, timer: null, measured: null })
+  const onResizeRef = useRef(onResize)
+  onResizeRef.current = onResize
 
   return useCallback((el: HTMLDivElement | null) => {
     const obs = obsRef.current
@@ -244,6 +327,7 @@ function useWindowCanvasReport(): (el: HTMLDivElement | null) => void {
       const rect = entries[entries.length - 1]?.contentRect
       if (!rect) return
       const size: CanvasPx = { w: Math.round(rect.width), h: Math.round(rect.height) }
+      onResizeRef.current()
       observeCanvasSize(st, size)
       obs.measured = size
       if (obs.timer !== null) clearTimeout(obs.timer)
