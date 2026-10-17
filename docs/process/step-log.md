@@ -2762,4 +2762,5 @@
   - **후속 서베이(2026-10-17)** — 라이브러리 화면 한국어 용어(언리얼 · Unity · Windows · VS Code 한국어판 대조): `docs/research/korean-ui-glossary-survey-2026-10-17.md`(`/research` light 2회).
   - **후속 서베이(2026-10-17)** — 상세 카드의 긴 「참조」 목록을 보여 주는 관행: `docs/research/long-reference-list-display-survey-2026-10-17.md`(`/research` light).
   - **후속 서베이(2026-10-17)** — 접고 펴기 상태를 기억하는 범위(보기마다 · 항목마다): `docs/research/collapse-state-persistence-scope-survey-2026-10-17.md`(`/research` light).
+  - **후속 서베이(2026-10-17)** — 접고 펴기 기억이 창(브라우저)마다인가 · 무엇을 기억하나: `docs/research/collapse-state-instance-scope-survey-2026-10-17.md`(`/research` light).
   - **PRD 초안(2026-10-15)** — `docs/process/S21-preset-library/prd.md`(초안 · 사용자 미확정 · `/review prd` 4회차 반영) · TRD 초안 `trd.md`(`/review trd` full 3회차 반영) · 브리핑 `briefing.html`(v43 화면 그림 + 시스템 구조 · 흐름 그림 · 결정마다 갱신) · 슬롯 이름 조사 `docs/research/agent-customization-pane-naming-survey-2026-10-16.md`(light). 결정 정본 = `.claude/handoff/attachments/20261012-preset-decisions.md` — 여기 베끼지 않는다.
