@@ -2755,4 +2755,5 @@
   - **후속 서베이(2026-10-15)** — 가장자리에 붙은 펼침 패널의 방향 · 창 끝일 때: `docs/research/edge-attached-flyout-direction-survey-2026-10-15.md`(`/research` light).
   - **후속 서베이(2026-10-15)** — 라이브러리 폴더를 아직 안 골랐을 때의 빈 화면 안내: `docs/research/library-empty-state-first-run-survey-2026-10-15.md`(`/research` light).
   - **후속 서베이(2026-10-15)** — 라이브러리 항목을 라이브러리 밖 대상(에이전트)에 붙이는 화면: `docs/research/attach-library-items-to-entity-survey-2026-10-15.md`(`/research` medium · codex 적대 리뷰 FIX → 반영).
+  - **후속 서베이(2026-10-17)** — 에이전트의 라이브러리 파일 조작(경로가 바뀌면 명령 · 아니면 직접 + refresh)의 선례: `docs/research/agent-file-ops-path-command-split-survey-2026-10-17.md`(`/research` light).
   - **PRD 초안(2026-10-15)** — `docs/process/S21-preset-library/prd.md`(초안 · 사용자 미확정 · `/review prd` 4회차 반영) · TRD 초안 `trd.md`(`/review trd` full 3회차 반영) · 브리핑 `briefing.html`(v43 화면 그림 + 시스템 구조 · 흐름 그림 · 결정마다 갱신) · 슬롯 이름 조사 `docs/research/agent-customization-pane-naming-survey-2026-10-16.md`(light). 결정 정본 = `.claude/handoff/attachments/20261012-preset-decisions.md` — 여기 베끼지 않는다.
