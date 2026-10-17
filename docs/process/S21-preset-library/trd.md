@@ -134,11 +134,11 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 |---|---|---|
 | `mod.rs` | 외관 · 직렬화(읽기는 함께, 쓰기는 하나씩 — **`std::sync::RwLock` 하나** · tokio 락 아님: 두 포트가 동기라 `blocking_handler` 스레드와 manager 의 동기 spawn 경로가 잡는다. ★그 spawn 경로를 tokio 워커가 부르는 곳이 하나 있다 — wire `SpawnByCwd`(`connection_core.rs:1543`)★ → 이 작업에서 `spawn_blocking` 으로 옮기고 기존 구조 시험(`activate_profile` 을 `spawn_blocking` 창 안에서만 부르는지 보는 그 시험)에 `spawn_agent` 를 더해 못 박는다) · 두 포트 구현 | `LibraryService` — `impl LibraryCommandHost`(버스 본문) · `impl LaunchKitSource`(실행 재료) |
 | `path.rs` | 참조 꼴 | `LibPath` · `AssetRef { Library(LibPath), BuiltIn(BuiltinId) }` · `AssetRef::parse(&str)` |
-| `store.rs` | **목적 포트 하나**(「라이브러리 저장소」 — 감싸기 조사 결론) | `trait LibraryStore { scan(root) · read(path) · write_atomic(path, bytes) · create_dir · rename · trash · exists }` · 실물 `FsStore`(walkdir + std::fs + `platform::fs::move_to_trash`) · 시험 `MemStore` |
+| `store.rs` | **목적 포트 하나**(「라이브러리 저장소」 — 감싸기 조사 결론) | `trait LibraryStore { scan(root, under: Option<&Path>)(`None` = 전체 · `Some` = 그 폴더 하위만) · read(path) · write_atomic(path, bytes) · create_dir · rename · trash · exists }` · 실물 `FsStore`(walkdir + std::fs + `platform::fs::move_to_trash`) · 시험 `MemStore` |
 | `format.rs` | YAML · 앞머리를 아는 유일한 곳 | `PresetDoc` · `SettingsDoc` · `Frontmatter` · `parse_*`(오류에 줄 번호) · `write_preset` |
 | `catalog.rs` | 훑기 결과 → 항목 표 + 참조 역색인 | `Catalog { items, used_by }` · `Catalog::build(scan, cache, profiles)` — 파싱 캐시 꼬리표 = (경로 · 수정 시각(전체 정밀도) · 크기 · 파일 신원(볼륨 일련번호 + 파일 인덱스 — `platform::fs`)) · 같음으로 비교(「더 새것」 아님) · 하나라도 다르면 다시 읽음 · racy 규칙(git 식 — 훑은 시각 T 를 적고 수정 시각 ≥ T − 여유인 항목은 다음 훑기에 무조건 다시 읽음 · 여유 = 2초 하나(볼륨 종류 구분 없음 — 사용자 2026-10-17) · 뒤 훑기가 충분히 오래된 것으로 보면 표시를 지움) · 내용 해시 없음(사용자 위임 — 관행 · `docs/research/file-change-detection-survey-2026-10-17.md`) |
-| `validate.rs` | 설정 검사(사용자 2026-10-17 · 실측 = `docs/research/settings-asset-validation-spike-2026-10-17.md`) | 스키마 캐시 = 데이터 폴더(처음 쓸 때 내려받음 — codex = 설치된 `codex --version` 의 릴리스 자산 `rust-v<ver>/config-schema.json` · claude = SchemaStore `claude-code-settings.json`) · codex 원문 `key=value` 를 `-c` 규칙대로 객체로 조립(점 키 = 중첩 표 · 값 = TOML, 안 읽히면 문자 그대로) · claude = 엄격하지 않게 + 우리 「스키마에 없는 키」 검사 · 다시 파싱하는 자리에서 돌고 결과를 같은 꼬리표로 캐시 · 스키마가 바뀌면(CLI 갱신 → 새 스키마) 설정 전부 다시 검사 · 결과 = ⚠(스키마가 CLI 보다 늦을 수 있어서) · 문법 오류는 `format.rs` 가 훑을 때 = ⛔ |
-| `index.rs` | 다시 연결 — **후보 찾기와 적용을 가른다**(Δe) | `LibraryIndex { root, entries, tombstones, pending }` · `find_relink_candidates(prev, now) -> Vec<RelinkCandidate>`(순수) · `apply_relink(candidate)` · 스위치 `RelinkMode { Auto, Confirm }` |
+| `validate.rs` | 설정 검사(사용자 2026-10-17 · 실측 = `docs/research/settings-asset-validation-spike-2026-10-17.md`) | 스키마 캐시 = 데이터 폴더(처음 쓸 때 내려받음 — codex = 설치된 `codex --version` 의 릴리스 자산 `rust-v<ver>/config-schema.json` · claude = SchemaStore `claude-code-settings.json`) · codex 원문 `key=value` 를 `-c` 규칙대로 객체로 조립(점 키 = 중첩 표 · 값 = TOML, 안 읽히면 문자 그대로) · claude = 엄격하지 않게 + 우리 「스키마에 없는 키」 검사(최상위 키를 스키마 `properties` 와 대조 — 중첩 객체는 스키마가 이미 `additionalProperties:false` 로 닫는다 · 실측 2026-10-18) · 검사기 = `jsonschema` 0.59.0 `default-features = false, features = ["resolve-file","idna"]`(reqwest · rustls · tokio 없음 — 내려받기는 우리 몫 · 원격 `$ref` 없어 오프라인 컴파일) · schemars `uint*` 형식은 무시되므로 정수 범위는 스키마 `minimum`/`maximum` 에서만 온다(§6-3) · 다시 파싱하는 자리에서 돌고 결과를 같은 꼬리표로 캐시 · 스키마가 바뀌면(CLI 갱신 → 새 스키마) 설정 전부 다시 검사 · 결과 = ⚠(스키마가 CLI 보다 늦을 수 있어서) · 문법 오류는 `format.rs` 가 훑을 때 = ⛔ |
+| `index.rs` | 다시 연결 — **후보 찾기와 적용을 가른다**(Δe) | `LibraryIndex { root, entries, tombstones, pending }` · `find_relink_candidates(prev, now, under) -> Vec<RelinkCandidate>`(순수 · `under` = 사라짐을 판정할 범위 — 흐름 ②) · `apply_relink(candidate)` · 스위치 `RelinkMode { Auto, Confirm }` |
 | `moves.rs` | 이동 기록(Δc) | `MoveLog { head_seq, floor_seq, pairs }` · `append(pairs)` · `since(cursor) -> (pairs, head, truncated)` |
 | `ops.rs` | 파일 조작 다섯 + 참조 고침 + 일지 | `move_items` · `rename_item` · `delete_items` · `new_folder` · `new_preset` · `OpJournal::{begin, finish, roll_forward_at_boot}` |
 | `edit.rs` | 프리셋 편집 연산 | `add` · `remove` · `reorder`(판 확인) · `relink` · `ack_relink` — 각각 「최신 파일 읽기 → 연산 → 원자적 쓰기」 |
@@ -151,12 +151,12 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 
 **흐름 ① 목록 요청과 훑기(R19 · 요청형)** — 둘을 가른다. 목록은 디스크를 읽지 않고, 디스크는 훑기만 읽는다.
 - **목록 요청** — 버스 `library.list {folder}`(동기 포트 · `blocking_handler` 스레드) → 첫 훑기가 아직이면 그 훑기를 시작하거나 진행 중인 것을 기다린다(아래 「훑기」 의 합치기) → 읽기 잠금 → 메모리 `Catalog` 에서 그 폴더의 바로 안 항목 + 하위 폴더 줄(스킬 폴더 포함 · 스킬 표시 · 우리 종류 아닌 파일은 빠짐 — §1-2) · 참조 수 · 상태를 낸다. 명령이 `Catalog` 에 없는 경로를 가리키면 그 경로 하나만 디스크에서 확인해 넣는다(갱신 규칙의 안전장치).
-- **훑기** — 계기 = 첫 필요(갱신 규칙의 「첫 훑기」) · `library.refresh {folder?}` · `library.setRoot`. 데몬 작업 스레드에서 `FsStore::scan`(walkdir · 루트 전체 또는 그 폴더 하위) → 바뀐 파일만 다시 파싱(꼬리표 = 경로 · 수정 시각 · 크기 · 파일 신원 같음 비교 + racy 규칙 — `catalog.rs` 행 · 다시 읽은 설정은 `validate.rs` 검사 · 첫 훑기는 캐시가 없어 전부) → `Catalog` 재구성(참조 = 프리셋 + 에이전트, 직접 + 건너서 — Δ3) → 다시 연결 후보(②). 훑기 · 재구성 동안 파일 조작 · 편집은 기다린다(훑기 결과와 Engram 변경이 엇갈리지 않게). 동시 요청(첫 훑기를 기다리는 목록 요청 · 겹친 `library.refresh`)은 훑기 세대 번호로 합친다(뒤에 온 요청이 진행 중 훑기의 결과를 기다려 쓴다 — `Mutex` + `Condvar`). `library.refresh` 의 답 = 바뀐 항목 수 + 다시 읽은 파일의 문제(§1-7).
+- **훑기** — 계기 = 첫 필요(갱신 규칙의 「첫 훑기」) · `library.refresh {folder?}` · `library.setRoot`. 데몬 작업 스레드에서 `FsStore::scan(root, under)`(walkdir · `under = None` = 루트 전체 · `library.refresh {folder}` = `Some(그 폴더)` — 그 하위만 다시 훑고 밖의 항목은 직전 훑기 상태 그대로) → 바뀐 파일만 다시 파싱(꼬리표 = 경로 · 수정 시각 · 크기 · 파일 신원 같음 비교 + racy 규칙 — `catalog.rs` 행 · 다시 읽은 설정은 `validate.rs` 검사 · 첫 훑기는 캐시가 없어 전부) → `Catalog` 재구성(참조 = 프리셋 + 에이전트, 직접 + 건너서 — Δ3) → 다시 연결 후보(②). 훑기 · 재구성 동안 파일 조작 · 편집은 기다린다(훑기 결과와 Engram 변경이 엇갈리지 않게). 동시 요청(첫 훑기를 기다리는 목록 요청 · 겹친 `library.refresh`)은 훑기 세대 번호로 합친다(뒤에 온 요청이 진행 중 훑기의 결과를 기다려 쓴다 — `Mutex` + `Condvar`). `library.refresh` 의 답 = 바뀐 항목 수 + 다시 읽은 파일의 문제(§1-7).
 - **Engram 안의 변경** — 흐름 ③ · ④ · 다시 연결 적용(②)은 훑지 않고 쓰기 잠금 아래 `Catalog`(항목 · 참조 역색인)을 바로 고친다.
 - 방송 · 구독 · 감시 없음.
 
 **흐름 ② 다시 연결(Δ2 · Δe · D10)** — 두 단계로 가른다.
-- **후보 찾기(순수 · 늘 돈다)** — 훑기마다 직전 색인과 비교한다. 「바깥에서 없어진 것」 = 직전 색인에 있었고 · Engram 이 삭제한 기록에 없고 · 지금 없는 경로. 후보 = 이번에 새로 나타난 항목 중 **같은 종류 + 같은 이름**. 후보가 **정확히 하나**일 때만 `RelinkCandidate {old, new, holders}` 가 생긴다. 둘 이상이거나 없으면 후보 없음 → 「찾을 수 없음 · 다시 연결」(R19 — 손으로 선택한다).
+- **후보 찾기(순수 · 늘 돈다)** — 훑기마다 직전 색인과 비교한다. 「바깥에서 없어진 것」 = 직전 색인에 있었고 · Engram 이 삭제한 기록에 없고 · 지금 없는 경로. 후보 = 이번에 새로 나타난 항목 중 **같은 종류 + 같은 이름**. ★폴더 새로 고침(`library.refresh {folder}`)이면★ 「없어진 것」은 **그 폴더 하위 항목만** 판정하고(밖은 이번에 안 봤으므로 직전 상태 그대로), 그 항목들의 후보는 **메모리 `Catalog` 전체**에서 찾는다(폴더 밖으로 옮겨진 것도 잡게 — 밖의 항목은 마지막 훑기 때 상태로 본다) · 전체 훑기는 둘 다 전체(메인 세션 내부 결정 2026-10-18). 후보가 **정확히 하나**일 때만 `RelinkCandidate {old, new, holders}` 가 생긴다. 둘 이상이거나 없으면 후보 없음 → 「찾을 수 없음 · 다시 연결」(R19 — 손으로 선택한다).
 - **적용(스위치 하나 — `RelinkMode`)** — `Auto` 면 쓰기 잠금으로 넘어가 그 경로를 가리키는 프리셋 파일 줄과 에이전트 붙임을 새 경로로 고치고 `relinked_from` 표시를 단다(파일에 쓴다 · 실행은 막지 않는다 · 사용자가 확인하면 표시를 지운다). `Confirm` 이면 참조는 **옛 경로 그대로** 두고 후보를 색인의 `pending` 에 적는다 — 그 참조는 실행할 수 없고(막힘 사유 「다시 연결 확인 대기」) 화면은 줄에 「다시 연결할까요? · [확인]」 한 번 누름을 보인다 → `library.relink` 가 같은 적용 함수를 부른다. 스위치 기본값은 PRD D10 의 결정을 따르는 상수 하나다(설정으로 드러낼지는 그 결정 몫).
 - 적용된 쌍(자동이든 확인이든)은 이동 기록에 쌓인다(흐름 ⑥).
 - 표시(「다시 연결됨 · 이전 경로 <경로>」)는 그 줄 · 목록 행 상태 · 상세의 참조 · 에이전트 슬롯 머리에 함께 보인다(Δd).
@@ -325,9 +325,9 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 |---|---|---|
 | `components/library/LibrarySlot.tsx` | 번호 슬롯 · 에이전트 슬롯 공용 껍데기 · `mode = 'full' \| 'editor-only'` — 에이전트 슬롯은 트리 · 목록을 **마운트하지 않는다**(훑기 없음 — R30 의 성능 걱정을 마운트 단위로 푼다) | — |
 | `LibraryTopBar` | ← → · 누르는 경로(R11) | — |
-| `LibraryTree` | 폴더 트리(스킬 폴더 포함 — 폴더 = 폴더 아이콘 · 스킬 = 스킬 아이콘 `FolderCog` 후보 · §6-2) · 루트 머리(이름 + 경로 · 「라이브러리 폴더 바꾸기…」) · 빈/없음 안내(R8) · 놓기 대상 · 우클릭 「새로 고침」(폴더 = 그 폴더 · 루트 머리 줄 = 전체) | react-arborist(통제형 데이터) |
+| `LibraryTree` | 폴더 트리(스킬 폴더 포함 — 폴더 = 폴더 아이콘 · 스킬 = 스킬 아이콘 `FolderCog` — lucide-react 1.23.0 에 있음 · §6-1) · 루트 머리(이름 + 경로 · 「라이브러리 폴더 바꾸기…」) · 빈/없음 안내(R8) · 놓기 대상 · 우클릭 「새로 고침」(폴더 = 그 폴더 · 루트 머리 줄 = 전체) | react-arborist(통제형 데이터) |
 | `CollectionsPane` | 「즐겨찾기」 머리 · 첫 줄 「기본」(삭제할 수 없음) · 「+ 새 컬렉션」(R16) | — |
-| `LibraryList` | 탐색기식 목록 · 열 ★ · 종류 · 이름 · 참조 · 이름 앞 종류 아이콘(폴더 · 스킬 `FolderCog` · 지침 `FileText` · 설정 `SlidersHorizontal` · 프리셋 `Layers` — 이름은 후보 · §6-2 · 사용자 2026-10-17) · 정렬(R12) · 📁 줄(스킬 폴더 포함 — 더블클릭 = 들어감 · 그 `SKILL.md` 더블클릭 = OS 기본 편집기) · 다중 선택 · 끌기 시작 · 필터 ▾ · 검색 · 대상 컬렉션 칩 · 첫 훑기 전 = 잠깐 로딩 표시 후 한 번에(S3) | @tanstack/react-table · @tanstack/react-virtual · react-selecto |
+| `LibraryList` | 탐색기식 목록 · 열 ★ · 종류 · 이름 · 참조 · 이름 앞 종류 아이콘(폴더 · 스킬 `FolderCog` · 지침 `FileText` · 설정 `SlidersHorizontal` · 프리셋 `Layers` — lucide-react 1.23.0 에 있음 — §6-1 · 사용자 2026-10-17) · 정렬(R12) · 📁 줄(스킬 폴더 포함 — 더블클릭 = 들어감 · 그 `SKILL.md` 더블클릭 = OS 기본 편집기) · 다중 선택 · 끌기 시작 · 필터 ▾ · 검색 · 대상 컬렉션 칩 · 첫 훑기 전 = 잠깐 로딩 표시 후 한 번에(S3) | @tanstack/react-table · @tanstack/react-virtual · react-selecto |
 | `LibraryDetail` | 부품 상세(설명 · 위치 · 참조 링크 — 단추 없음 · R15) · 참조 = 종류별 묶음 「▾ 프리셋 N」 · 「▾ 에이전트 N」(수 붙은 머리 · 접고 펴기 · 처음 둘 다 펼침 · 한 줄에 링크 하나 · 건너서 = 「(<프리셋> 통해)」 · 「더 보기」 자르기 없음 · 접힘은 공통 `library_collapse` · R15 · R10) · 상태별 = 선택 안 함 안내 · 폴더 · 지침 미리 보기(react-markdown — 챗과 같은 렌더러) · 설정 값 요약 · 여러 개 개수 · 오류(여러 개 개수는 클라이언트가 선택에서 센다) | — |
 | `components/preset/PresetEditor.tsx` | **공용 편집 부품 하나**(R21) — 대상 = 프리셋 또는 에이전트 · 칸 = (에이전트면 「기본」 +) 프리셋 · 지침 · 스킬 · 설정 · `readOnly` · `depth` 를 받아 안에 든 프리셋을 **같은 부품으로 재귀** 렌더(R27) · 칸 아래 충돌/경고 줄 · 「에이전트 N개에서 참조 중」 · 백엔드 바뀜 경고(Δ4) | — |
 | `EditorSection` | 칸 제목 `+` · `⇐` · 폴더 돋보기(`FolderSearch` — 아이콘 이름 확인함) · ⋮⋮ 순서(지침 · 설정 · 프리셋 — D2) · × · 줄 호버 돋보기 · 지침 줄 👁 = `LibraryDetail` 카드를 왼쪽 팝오버로(닫기 = × · 바깥 누름 · Esc · 다른 줄 👁 = 바꿈 · R27) | @dnd-kit/sortable |
@@ -372,7 +372,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 | trash | **거부**(리뷰) | 5.2.9 | — | — | 셋째 `windows` 사본 + 호출 스레드 `CoInitialize` 실패 시 패닉(지적 · 미측) → 전용 STA 스레드의 `IFileOperation`(§1-6) |
 | windows(feature 추가) | 기존 | 0.58 | 휴지통 — 전용 STA 스레드의 `IFileOperation` | platform `fs::move_to_trash` | 새 의존 0 · 부르는 쪽 COM 아파트와 무관 |
 | junction | 신규 | 2.1.0 | 스킬 폴더 정션 | platform `fs::link_dir` | 관리자 권한 불요 · `windows-sys` 0.59–0.61 은 이미 lock 에 있다 · `mklink /J` 자식 프로세스는 링크마다 프로세스 · 인용 문제 |
-| jsonschema | 신규(후보) | 0.59.0 | 설정 내용 검사(JSON 스키마) | daemon `library::validate` | MIT · `resolve-http` 끔(스키마는 우리가 내려받아 캐시 — §1-4) |
+| jsonschema | 신규 | 0.59.0 | 설정 내용 검사(JSON 스키마) | daemon `library::validate` | MIT · `default-features = false, features = ["resolve-file","idna"]` — reqwest · rustls · aws-lc · tokio 없음(스키마는 우리가 내려받아 캐시 — §1-4) · 컴파일 · 동작 실측 2026-10-18(§6-1) |
 | notify | **거부** | — | — | — | 요청형 확정(메모 99 · R19) — 나중 감시는 덧붙일 수 있다 |
 | serde_json · uuid · tokio · tracing · thiserror · tempfile(dev) | 기존 | — | settings 합침 · 신원 · 기반 | 여러 곳 | 기반 — 감싸지 않음 |
 | react-arborist | 기존 | ^3.9.0(최신 4.0.1) | 폴더 트리 | `LibraryTree` | 이미 씀 · 4.x 는 Node ≥22.12 · ESM · `react-dnd` peer 요구라 3.x 유지 |
@@ -454,6 +454,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 | 층 | seam · 하네스 | 무엇을 잰다 |
 |---|---|---|
 | daemon `library` | `MemStore`(디스크 없음)로 `LibraryService` 를 세운다 | 펼침 순서(D1) · 중복 · 순환 · 충돌 셋 · 기본 제공 백엔드 물러남과 되살아남 · 막힘 사유 · 참조(직접/건너서 · 에이전트 포함) · 다시 연결 후보(한 후보만 · 삭제한 것 · 루트 바꿈 뒤 없음) × 스위치 두 값(자동 = 표시 · 확인 = 실행 불가) · 이동 기록(커서 · 넘침 · `log_id` 바뀜) · 편집 멱등 · `reorder` 판 거절 · 부분 추가 결과 · 백엔드 바뀜 보고 · 실행 출처별 기본값 채움 |
+| daemon `library` 메모리 목록 · 훑기 | `MemStore` + `scan` 호출 수를 세는 꼬리표 · 훑기를 붙잡아 두는 문(동시 요청 시험) | `library.list` 는 훑지 않는다(첫 훑기 뒤 `Catalog` 로만 답 — `scan` 호출 수 그대로) · 첫 필요에 겹친 요청들(목록 · `library.refresh`)이 훑기 하나를 나눠 씀(세대 번호 — `scan` 1회 · 모두 같은 결과) · Engram 안의 변경(이동 · 이름 · 삭제 · 새로 만들기 · 편집)은 `scan` 없이 `Catalog` 항목 · 참조 역색인을 고침 · 폴더 새로 고침 = `scan(root, Some(폴더))` · 사라짐은 그 폴더 하위만 판정(폴더 밖에서 지워진 파일은 이번 새로 고침에선 사라짐으로 안 잡힘) · 그 항목의 다시 연결 후보는 폴더 밖에서도 찾음 |
 | daemon `library::ops` | `MemStore` 에 실패 지점 주입 | 일지 롤포워드 — (c)~(f) 각 단계 뒤에 죽인 뒤 부팅 재생이 같은 끝 상태(삭제 기록 · 이동 기록 쌍이 한 번만) · 삭제 `yes` 거절 |
 | daemon `library::format` · `path` | 순수 · 골든 | YAML 왕복 골든 · 오류 줄 번호 · `LibPath` 거절 표(`..` · 앞 `/` · `\` · `:` · 빈 칸) · 접두 바꾸기 |
 | daemon `FsStore` · 기본 경로 · 구조 시험 | `tempfile` 임시 폴더 · `ENGRAM_DATA_DIR` · `connection_core` 구조 시험 | 실 훑기 · 원자적 쓰기 · 휴지통 · 정션(실 OS — `-- --test-threads=4` 줄) · 기본 경로가 루트 출처별로 갈림(`ENGRAM_DATA_DIR` = 루트 안) · `SpawnByCwd` 의 `spawn_agent` 가 `spawn_blocking` 창 안에서만 불림 |
@@ -500,6 +501,8 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 | codex 0.156.1 `--help` | `-c key=value`(TOML 로 안 읽히면 문자 그대로) · `-m` | 확실 |
 | `DISABLE_AUTOUPDATER` 를 settings `env` 로 | 공식 문서(settings · env-vars)엔 이름이 없다. 설치본 바이너리 문자열: 업데이터가 `process.env.DISABLE_AUTOUPDATER` 를 읽고, 그 이름이 다른 알려진 환경변수들과 함께 한 목록에 있다(그 목록의 뜻은 모른다). settings `env` 가 프로세스 환경에 앉는 시점이 업데이터보다 앞인지는 모른다 | **가능성 높음 — 실측 필요(8 단계)** |
 | 웹뷰 → 데몬 버스 답 | 웹뷰 `handleEvent` 가 `CommandReply` 를 안 맞춘다(셸 주석) · 데몬은 자기 이름을 그 자리에서 답한다 | 가능성 높음(코드 읽기 · 미측) |
+| `jsonschema` 0.59.0 · serde-saphyr 2.0.0 | 계획대로 컴파일 · 동작(rustc 1.95.0 · [스파이크 보고서 「Rust 크레이트 실측 (2026-10-18)」](../../research/settings-asset-validation-spike-2026-10-17.md#rust-크레이트-실측-2026-10-18)). schemars `uint*` 형식은 무시 → 정수 범위는 스키마 `minimum`/`maximum` 에서만 오고 `maximum` 없는 상한(uint16 · uint32)은 안 잡힌다 · claude 최상위 모르는 키는 스키마 `properties` 대조로 잡는다(중첩은 스키마가 잡음) · YAML 오류 줄 · 칸 = `location()`(1부터) | 확실(실측 2026-10-18) |
+| 종류 아이콘 lucide 이름 | 설치된 lucide-react 1.23.0 이 `FolderCog` · `FileText` · `SlidersHorizontal` · `Layers` 를 내보낸다(`node_modules/lucide-react/dist/lucide-react.d.ts`) | 확실(실측 2026-10-18) |
 | 코드에 없는 것 | 설정 창(라우트는 `/` · `/popup` 뿐) · JSON 모델 선택 칸 · 2단 슬롯 서브메뉴(`slotMenu.ts` 「중첩 금지」) — §6-4 · 선택적 작업 폴더(`AgentProfile.cwd` 는 필수) — §8 | 확실 |
 
 ### 6-2. 확인 안 한 것 (해당 단계에서 잰다)
@@ -518,8 +521,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 - 웹뷰(WebView2)가 F5 · Ctrl+R 로 앱 화면을 다시 읽는지, `preventDefault` 로 막히는지(R50).
 - react-arborist 의 내장 키(Enter = 이름 바꾸기 · Backspace = 삭제)를 끄거나 덮을 수 있는지(R50).
 - 맥 Finder 기본 단축키(R50 의 macOS 줄) — 기억 기준, 맥 이식 때 원문 확인.
-- 종류 아이콘의 lucide 이름(`FolderCog` · `FileText` · `SlidersHorizontal` · `Layers`)이 설치된 lucide-react 판에 있는지 — 안 봤다(후보 · 사용자 2026-10-17). 없으면 가까운 이름으로.
-- Rust `jsonschema` + schemars `uint*` 형식 — 컴파일 · 실행 안 해 봤다.
+- serde-saphyr 의 YAML 1.1 불리언(`yes` · `no` · `on` · `off`)을 끄는 옵션이 있는지 — 안 봤다(구현 때 · §6-3).
 - claude `doctor` 출력 문구(「Invalid settings」 줄) — 문서화된 계약이 아니다. CLI 갱신 때 깨질 수 있다.
 - `codex debug models` 가 네트워크를 타는지 — 안 봤다.
 - 잘못된 설정을 받은 claude 의 TUI · stream-json 동작 — 재지 않았다.
@@ -537,6 +539,9 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 | 내림(옛 빌드) 뒤 다시 올리면 붙인 프리셋 · 다른 백엔드 인자를 잃는다 | §1-5 「호환 · 내림」 — 받아들인 손실 |
 | 같은 이름이 흔하면 자동 다시 연결이 거의 안 일어난다 | 손 다시 연결(R19) · PRD 위험 그대로 |
 | codex 터미널 명령줄 8191자 — 프리셋 지침을 `-c` 로 못 싣는다 | 파일 길(R37) · 「안 만든다」면 프라이밍만 + 경고 |
+| 설정 YAML 의 YAML 1.1 불리언 — serde-saphyr 는 따옴표 없는 `yes` · `no` · `on` · `off` 를 불리언으로 읽는다(실측 2026-10-18 · `flag: yes` → `true`) | 문자열 칸에 `yes` 라 쓰면 스키마 타입 검사에서 걸리거나(⚠), 불리언 칸이면 말없이 불리언이 된다. 끄는 옵션이 있는지는 미확인 — 구현 때 확인한다(§6-2) |
+| codex 정수 칸 상한 — 스키마에 `maximum` 이 없는 uint16 · uint32 칸(예 `mcp_oauth_callback_port`=70000)은 `jsonschema` 가 못 잡는다(형식 무시 · 실측 2026-10-18) | 메인 세션 내부 결정(2026-10-18): 이번엔 받아들인다 — codex 가 기동 때 거절하므로 실행 직전 확인(`codex debug models`)에서 ⛔ 로 드러난다. `format` 을 읽는 자체 후처리는 짜지 않는다 |
+| claude 최상위 모르는 키 — SchemaStore 스키마가 최상위 `additionalProperties:true` 라 검사기는 통과시킨다 | 우리 ⚠ = 최상위 키를 스키마 `properties` 와 대조(`validate.rs`) · 중첩 객체는 스키마가 이미 닫는다(`permissions.allowww` 잡힘 — 실측 2026-10-18) |
 | 「편집 맡은 에이전트에만 쓰기 권한」(메모 38) | 지금 claude 는 `bypassPermissions` 라 강제 수단이 없다 — 이 TRD 범위 밖 |
 
 ### 6-4. PRD 와 코드가 어긋나는 곳 (PRD 개정 또는 사용자 확인 필요)
@@ -547,6 +552,10 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 - **R36 「이어받기 포함」** — claude 는 `--system-prompt-snapshot off` 가 있어야 성립하고, codex 는 실험 API 없이는 성립하지 않는다(T6).
 - **R30 「이미 열려 있어도 하나 더」 + R24 ⇐** — 편집 칸과 원천 라이브러리 슬롯이 다른 창(팝아웃)에 있을 수 있어 선택을 셸이 나눠 들어야 한다(§1-9) — PRD 엔 드러나 있지 않다.
 - **R10 「라이브러리 ▸ 1~4」** — 빈 슬롯 메뉴가 이미 「새 콘텐츠 ▸」 아래라 두 단 서브메뉴가 되고, 지금 메뉴 스키마는 한 단만 허용한다(§3).
+
+### 6-5. 미결 (사용자 확인 필요)
+
+- **§1-3 8 단계 막힘 사유 둘의 갈래가 비어 있다** — 「라이브러리 미설정/없음인데 라이브러리 프리셋이 붙음」 · 「codex 파일 사전 검사 실패」는 「누가 실행하든 막힘」(앞 다섯)에도 「화면이 낸 실행에서만 막힘」(codex 파일 대답)에도 들지 않는다. 버스 · CLI 실행에서 막을지 정해야 한다.
 
 ## 7. ADR 제안 (번호는 `/adr` 가 준다)
 
