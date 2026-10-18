@@ -4,16 +4,20 @@
 //!
 //! ★계약 — 어댑터가 지킬 것★
 //! - 세션은 메인 스레드에서만 돈다. 포트는 그 스레드에서 동기로 불리고, 돌아올 때 할 일을 끝냈다(창 놓기 · 쓰기가
-//!   반영됐다 — 이어 읽는 `geom` · `world` 가 그 결과를 본다).
+//!   반영됐다 — 이어 읽는 `geom` · `world` 가 그 결과를 본다). ★예외 = [`Ports::close_window`]★ — Tauri 창 닫기는
+//!   이벤트 루프 프록시를 거쳐 비동기로 돌아, 돌아온 때 창이 아직 남아 있을 수 있다.
 //! - 포트는 세션을 다시 부르지 않는다. 포트를 부르는 동안 난 사건(`begin_move_loop` · `end_move_loop` · 창을 없애는
 //!   호출 안에서 동기로 오는 루프 끝 알림 · `SetWindowPos` 가 낸 `Moved` · 창 소멸)은 실행기 줄에 넣기만 하고, 지금
 //!   사건 처리가 끝난 뒤 처리한다. 그래서 실행기는 줄을 쥔 채(빌린 채) 포트를 부르지 않는다.
-//! - 레이아웃 락 · 명부 락을 쥔 채 OS 를 부르지 않는다(`layout::apply` 머리 「락 규율」 그대로).
-//! - 보임 — tao 보임 깃발이 OS 보임과 맞게 한다. 숨기기 = Tauri `hide()`(날 `SW_HIDE` 면 깃발이 참으로 남아 다음
-//!   Tauri `show()` 가 바뀐 깃발이 없다며 아무것도 하지 않는다) · 숨은 창을 날 Win32 로 보이거나 되돌렸으면
-//!   (`show_in_place` · `restore_placement`) 뒤이어 Tauri `show()`(깃발이 거짓으로 남으면 트레이 숨기기가 아무것도
-//!   하지 않는다). 안내 창만 예외다 — 지은 뒤 tao 깃발 setter 를 부르지 않고 날 Win32 로만 보이고 숨긴다
-//!   (`commands::dock` 의 안내 창 짓기).
+//! - 레이아웃 락 · 명부 락을 쥔 채 OS 를 부르거나 실행기 줄에 넣지 않는다(`layout::apply` 머리 「락 규율」 그대로 ·
+//!   넣기는 그 자리에서 세션을 돌릴 수 있다 — `exec::Inbox::post`).
+//! - 보임 — tao 보임 깃발이 OS 보임과 맞게 한다. 숨은 창을 날 Win32 로 보이거나 되돌렸으면(`show_in_place` ·
+//!   `restore_placement`) 뒤이어 Tauri `show()`(깃발이 거짓으로 남으면 트레이 숨기기가 아무것도 하지 않는다). 붙기를
+//!   정할 때의 숨기기([`Ports::hide`])는 날 `SW_HIDE`(이동 루프 안에서 잰 길 — 스파이크 S4)라 깃발이 참으로 남는다 —
+//!   그 창이 예비로 돌아가면 [`Ports::give_back`] 이 Tauri `hide()` 로 깃발을 거짓으로 맞추고(그래야 다음 들이기의
+//!   Tauri `show()` 가 돈다), 남긴 창([`Ports::park_kept`])은 날 숨김 그대로 기다리며 tao 깃발 setter 를 부르지
+//!   않는다(깃발이 참이라 setter 하나가 창을 다시 보인다). 안내 창도 지은 뒤 tao 깃발 setter 를 부르지 않고 날
+//!   Win32 로만 보이고 숨긴다(`commands::dock` 의 안내 창 짓기).
 //! - 실패를 돌려주는 포트는 셋뿐이다(`lease_tab` · `dock` · `begin_move_loop`) — 세션이 그 결과로 갈린다. 나머지는
 //!   실패하면 어댑터가 warn 한 줄을 남기고 돌아온다(세션은 이어 간다 · 끝 줄에 셈하지 않는다).
 // ADR-0295
@@ -147,8 +151,7 @@ pub struct DetachPlan {
 impl DetachPlan {
     /// 떼어진 창 바깥 사각형(물리) — 크기 = `dragged_size`(작업 영역 = 커서에 가장 가까운 모니터 · 모니터가 없으면
     /// 자르지 않는다)를 `scale` 로 · 원점 = `detached_origin`. `scale` = 그 창이 놓일 배율(처음엔 커서 모니터 배율 ·
-    /// 놓은 뒤 그 창 배율이 달라졌으면 그 배율로 한 번 더) · `frame_offset` = 그 창의 지금 틀 두께(Alt+Tab 빼기를
-    /// 되돌린 뒤 읽은 것).
+    /// 놓은 뒤 그 창 배율이 셈에 쓴 배율과 다르면 그 배율로 한 번 더) · `frame_offset` = 그 창의 지금 틀 두께.
     // ADR-0295
     pub fn outer_rect(
         &self,
@@ -188,8 +191,8 @@ pub trait Ports {
     fn geom(&mut self, label: &str) -> Option<WindowGeom>;
     /// 떼어진 창(숨은 채 들였다)을 놓고 보이고 활성으로 — 숨은 채 platform `place_window(rect, show: false)` 로 놓고
     /// → Tauri `show()`(포커스 없이 지은 창이라 활성화 없이 보인다) → platform 활성. 자리 = [`DetachPlan::outer_rect`]
-    /// 를 커서 모니터 배율로 셈한 것 — 놓은 뒤 그 창 배율이 달라졌으면 새 배율로 한 번 더 놓는다(배율이 다른 모니터로
-    /// 뗄 때).
+    /// 를 커서 모니터 배율로 셈한 것 — 놓은 뒤 그 창 배율이 셈에 쓴 배율과 다르면 그 창 배율로 한 번 더 놓는다(배율이
+    /// 다른 모니터로 뗄 때 · 창 배율은 그대로인데 커서 모니터 배율과 다를 때).
     fn place_detached(&mut self, label: &str, plan: &DetachPlan, cursor: PhysPoint);
     fn place_whole(&mut self, label: &str, plan: WholePlan);
     /// 보통 자리 · 최대화를 되돌린다 — `behind` = 그 창 바로 뒤로(`None` = z 그대로) · `activate` = 거짓이면 활성화
@@ -202,7 +205,8 @@ pub trait Ports {
         behind: Option<&str>,
         activate: bool,
     );
-    /// Tauri `hide()` 로 숨긴다(날 `SW_HIDE` 가 아니다 — 모듈 머리 「보임」).
+    /// 날 `SW_HIDE` 로 숨긴다(platform `hide_window` — 이동 루프 안에서 잰 길 · 스파이크 S4). tao 보임 깃발은 참으로
+    /// 남는다(모듈 머리 「보임」).
     fn hide(&mut self, label: &str);
     /// 자리 · 크기 · z 를 두고 보이기만 한다(활성화 없음) — 이미 보이면 무동작.
     fn show_in_place(&mut self, label: &str);
@@ -237,11 +241,11 @@ pub trait Ports {
     /// 에 나오지 않아 되돌릴 깃발이 없다. 보이기는 뒤이은 `place_detached`(떼기) · `restore_placement`(남긴 창
     /// 되살리기) 몫이다.
     fn unpark(&mut self, label: &str);
-    /// 비운 떼어진 창을 예비로 — Tauri `hide()` 로 숨기고(이미 숨었어도 — 루프 Esc 훅의 날 숨기기는 tao 깃발을 참으로
-    /// 남긴다) 명부 `Spare` · `dock:spare{parked}`.
+    /// 비운 떼어진 창을 예비로 — Tauri `hide()` 로 숨기고(이미 숨었어도 — 붙기의 [`Self::hide`] · 루프 Esc 훅의 날
+    /// 숨기기는 tao 깃발을 참으로 남긴다) 명부 `Spare` · `dock:spare{parked}`.
     fn give_back(&mut self, label: &str, measures: FrameMeasures);
-    /// 비운 출처 창을 되돌리기용으로 남긴다 — 숨긴 채(붙기를 정할 때 [`Self::hide`] 로 숨었다) 명부 `Kept` ·
-    /// `dock:spare{parked}`.
+    /// 비운 출처 창을 되돌리기용으로 남긴다 — 붙기를 정할 때 [`Self::hide`] 로 숨은 그대로(창 호출 없음) 명부
+    /// `Kept` · `dock:spare{parked}`.
     fn park_kept(&mut self, label: &str, measures: FrameMeasures);
     /// 명부에 예비(짓는 중 포함)가 없을 때만 작업 스레드에서 새로 짓는다.
     fn fill_spare(&mut self);

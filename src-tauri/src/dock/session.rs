@@ -1,6 +1,7 @@
 //! 탭 끌기 세션(TRD S21-slot-docking §2-3) — 메인 스레드에서 사건을 하나씩 받아 포트(`ports`)를 동기로 부른다.
-//! 진입점 = [`Drag::handle`]. 전이 이름 A0–A19 는 끌기 세션 줄임 계획(2026-10-18)의 전이 표 번호다 — TRD §2-3 의
-//! 전이 표는 아직 옛 T01–T44 이고 이 표로 갈아 끼울 것이다(TRD 6.3 U9).
+//! 진입점 = [`Drag::handle`]. 전이 이름 A0–A19 는 끌기 세션 축소안 표(2026-10-18 · 추적 밖
+//! `.claude/handoff/attachments/trd6-review-2026-10-18/u5-trim-plan.md` §3)의 번호다 — TRD §2-3 의 전이 표(T01–T44)와
+//! 번호가 다르다.
 //!
 //! - 세션은 한 번에 하나다. 탭바 안([`Phase::Strip`] — 웹뷰가 순서 이동을 몬다)과 OS 이동 루프([`Phase::Moving`] —
 //!   셸이 몬다) 두 단계를 오간다. 표식(lease)은 시작에 세우고 끝([`Drag`] 의 `finish`)에서만 내린다 — 그 사이의
@@ -663,7 +664,13 @@ impl Drag {
     }
 
     fn step(&mut self, mut s: Session, ev: Event, p: &mut dyn Ports) -> Option<Session> {
+        let timer = matches!(ev, Event::RaiseDue { .. } | Event::ReleaseDue { .. });
         match classify(&s, ev) {
+            // 앞으로 올리기 시한은 `Moved` 마다 새로 걸려 지난 시한이 늘 버려진다 — debug 를 두 배로 불리지 않게.
+            Arm::Ignore(event) if timer => {
+                tracing::trace!(session = s.id, phase = ?s.phase, event, "끌기 사건 무시 — 지난 시한");
+                Some(s)
+            }
             Arm::Ignore(event) => {
                 tracing::debug!(session = s.id, phase = ?s.phase, event, "끌기 사건 무시");
                 Some(s)
@@ -931,6 +938,7 @@ impl Drag {
             // 메인의 마지막 탭을 떼면 모델이 메인에 빈 탭을 채운다(R14) — 메인에 다시 붙거나 되돌릴 때 닫으려면(G14) 적어
             // 둔다.
             Ok(out) => {
+                // 덮어쓰지 않는다 — 이 떼기가 메인을 비우지 않았으면 앞선 창째 끌기 · 떼기가 적은 빈 탭을 그대로 둔다.
                 if let Some(refill) = out.main_refilled {
                     s.main_refill = Some(refill);
                 }
@@ -1169,7 +1177,7 @@ impl Drag {
             match p.dock(write) {
                 Ok(out) => {
                     give_back_emptied(out, p);
-                    // E12 — 보통 자리의 좌표계가 Alt+Tab 빼기 비트에 따라 바뀌어 명부에서 뺀 뒤에 놓는다.
+                    // 보이기(`restore_placement`) 전에 명부에서 빼 웹뷰가 대기 모드(빈 틀)를 먼저 풀게 한다.
                     p.unpark(&o);
                     p.restore_placement(&o, s.origin.start, None, true);
                     back = true;

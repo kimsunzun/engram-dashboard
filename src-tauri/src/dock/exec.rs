@@ -36,8 +36,8 @@ pub const POLL_PERIOD_MS: u64 = 8;
 pub type Job = Box<dyn FnOnce() + Send>;
 
 /// 메인 스레드에 일을 올리는 길 — 어댑터가 Tauri `AppHandle::run_on_main_thread` 로 채운다. 올린 일은 메인 스레드에서
-/// 올린 차례대로 돈다. 올리지 못하면(이벤트 루프가 닫혔다) 그 일은 버리고 어댑터가 로그를 남긴다 — 넣은 사건은 다음
-/// 비우기까지 줄에 남는다.
+/// 돈다 — 도는 차례는 약속하지 않는다(메인 스레드에서 올리면 그 자리에서 돈다 · 사건 차례는 줄이 지킨다). 올리지
+/// 못하면(이벤트 루프가 닫혔다) 그 일은 버리고 어댑터가 로그를 남긴다 — 넣은 사건은 다음 비우기까지 줄에 남는다.
 pub trait MainThread: Send + Sync + 'static {
     fn run(&self, job: Job);
 }
@@ -102,6 +102,10 @@ impl Inbox {
 
     /// 사건을 줄 끝에 넣는다 — 받는 쪽을 세운 스레드면 곧바로 비우고(처리 도중이면 넣기만 — 지금 사건 뒤 같은
     /// 비우기에서 처리된다), 다른 스레드면 [`MainThread`] 로 비우기를 올린다.
+    ///
+    /// ★메인 스레드에서 비우기가 돌지 않을 때 부르면 세션이 이 호출 안에서 돈다★(창 사건 처리기 · 이동 루프 끝 알림) —
+    /// 세션은 포트로 레이아웃 락 · 명부 락을 잡고 Tauri 를 부르므로, 레이아웃 락 · 명부 락 · Tauri 리스너 자물쇠를 쥔
+    /// 채 부르지 않는다.
     // ADR-0295
     pub fn post(&self, ev: Event) {
         sync::lock(&self.shared.queue).push_back(ev);
@@ -522,7 +526,7 @@ mod tests {
         let ctx = rig(|s, ctx| {
             if *s == Seen::Moved("w".to_owned()) {
                 let inbox = ctx.inbox.clone();
-                let mut on_end = move |end: LoopEnd| {
+                let on_end = move |end: LoopEnd| {
                     inbox.post(Event::LoopEnded {
                         session: 7,
                         loop_no: 3,

@@ -1616,6 +1616,23 @@ fn p7_e11_esc_while_attached_returns_the_tab_and_w_selection_and_focuses_the_sou
 }
 
 #[test]
+fn p7_a_revert_whose_write_fails_leaves_the_tab_in_w_and_focuses_nothing() {
+    let (mut d, mut f, ids) = attached_to_w();
+    f.dock_fails = true;
+    end(&mut d, &mut f, W, EndHow::Cancel, EndSrc::Key, None);
+    let mut want = vec![dock(ids.m0, tab_bar(MAIN, 0), FocusPolicy::Keep, None)];
+    want.extend(finish_calls(1, Some(W), None, None));
+    let calls = f.take();
+    assert_eq!(calls, want);
+    assert!(
+        !calls.iter().any(|c| matches!(c, Call::Focus(_))),
+        "탭이 출처로 돌아가지 않았으면 아무 창도 활성으로 하지 않는다"
+    );
+    assert_eq!(f.tabs(W)[0], ids.m0, "탭은 지금 창에 남는다");
+    assert_eq!(d.session_id(), None);
+}
+
+#[test]
 fn p8_the_release_confirm_lets_the_holder_spot_win_over_a_late_reorder() {
     let (mut d, mut f, ids) = attached_to_w();
     pointer(&mut d, &mut f, OVER_W_STRIP, false);

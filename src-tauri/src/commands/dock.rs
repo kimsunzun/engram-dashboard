@@ -1295,7 +1295,7 @@ fn build_spare(app: &AppHandle) {
         tracing::warn!(module = "dock", label, "예비 창을 짓지 못했다: {e}");
         return;
     }
-    let built = dock.parked().mark_built(&label);
+    let built = dock.mark_built(&label);
     let build_ms = elapsed_ms(started);
     if built {
         tracing::debug!(

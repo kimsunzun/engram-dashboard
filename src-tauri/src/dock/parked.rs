@@ -32,6 +32,17 @@ pub struct ParkedEntry {
     pub measures: FrameMeasures,
 }
 
+impl ParkedEntry {
+    fn ready(&self) -> bool {
+        let m = &self.measures;
+        self.role == ParkedRole::Spare
+            && self.built
+            && m.canvas.is_some()
+            && m.metrics.is_some()
+            && m.chrome.is_some()
+    }
+}
+
 /// 웹뷰가 보낸 재기 하나 — 받는 규칙은 모델 항목과 같다(`ViewManager::set_window_canvas` · `set_ui_metrics` ·
 /// `set_dock_chrome`).
 #[derive(Debug, Clone, PartialEq)]
@@ -109,15 +120,14 @@ impl Parked {
     /// 떼기에 쓸 수 있는 예비 창 — 지어졌고 역할이 `Spare` 이고 재기 셋(캔버스 · 지표 · 크롬)이 다 왔다(§2-5 「예비 창
     /// 준비됨」). 재기가 덜 온 예비는 첫 떼기의 `original` · 떼어진 창 자리를 셀 수 없다(§5-4 · §5-5).
     pub fn ready_spare(&self) -> Option<(&str, &FrameMeasures)> {
-        self.entries.iter().find_map(|(label, e)| {
-            let m = &e.measures;
-            (e.role == ParkedRole::Spare
-                && e.built
-                && m.canvas.is_some()
-                && m.metrics.is_some()
-                && m.chrome.is_some())
-            .then_some((label.as_str(), m))
-        })
+        self.entries
+            .iter()
+            .find_map(|(label, e)| e.ready().then_some((label.as_str(), &e.measures)))
+    }
+
+    /// 그 창이 떼기에 쓸 수 있는 예비 창인가(뜻 = [`Self::ready_spare`]) — 명부에 없으면 `false`.
+    pub fn is_ready_spare(&self, label: &str) -> bool {
+        self.entries.get(label).is_some_and(ParkedEntry::ready)
     }
 
     /// 명부의 창이 보낸 재기를 적는다 — `None` = 명부에 없는 label(부르는 쪽이 모델에 적는다). `Some(Err)` = 범위
@@ -258,12 +268,13 @@ mod tests {
                 parked.entries.get_mut(P1).unwrap().built = false;
             }
             let expected = ready.then_some((P1, &measures));
-            assert_eq!(
-                parked.ready_spare(),
-                expected,
+            let row = format!(
                 "{role:?} built={built} canvas={canvas} metrics={metrics_in} chrome={chrome_in}"
             );
+            assert_eq!(parked.ready_spare(), expected, "{row}");
+            assert_eq!(parked.is_ready_spare(P1), ready, "{row}");
         }
+        assert!(!Parked::default().is_ready_spare(P1), "명부에 없다");
     }
 
     #[test]
