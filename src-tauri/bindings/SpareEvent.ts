@@ -5,7 +5,7 @@ import type { SpareStep } from "./SpareStep";
  * `dock:spare` 의 몸 — 대기 창 명부의 창 웹뷰에 그 창의 모드가 바뀌었음을 알린다(TRD §4 · §2-5). 받는 쪽 = 그 창
  * 웹뷰(대기 모드 켜고 끔).
  *
- * ★셸은 아직 이 사건을 내지 않는다★ — 내는 쪽은 끌기 실행기의 들이기 · 되돌리기(`Unpark` · `SpareGiveBack` ·
- * `Park` — TRD §13 U5b)다. 그때까지 웹뷰가 모드를 아는 길은 마운트 때의 `window_role` 하나다.
+ * 내는 쪽 = 끌기 세션이 그 창을 모델에 들일 때(`adopted`) · 명부로 되돌릴 때(`parked`)뿐이다. 마운트 때의 모드는
+ * `window_role` 이 준다 — 그 뒤 바뀜만 이 사건으로 온다.
  */
 export type SpareEvent = { step: SpareStep, };

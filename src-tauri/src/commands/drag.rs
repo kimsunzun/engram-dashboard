@@ -1,7 +1,8 @@
 //! 탭 끌기 세션 포트의 셸 어댑터와 실행기 세우기(TRD S21-slot-docking §2-4) — 세션 포트(`dock::ports::Ports`)를
 //! 레이아웃 적용 서비스(`layout::apply`) · 대기 창 명부(`DockState`) · 창 손(`commands::drag_window`) · 웹뷰 사건 ·
 //! 시한 · 폴러로 채운다. 진입점 = [`install`] — 사건 줄 · 시한 · 폴러 · 포트를 짓고 세션을 메인 스레드의 받는 쪽으로
-//! 세운다.
+//! 세운다. 그 줄에 넣는 셸 쪽 입구 = 웹뷰 invoke 넷([`tab_drag_begin`] · [`tab_drag_reorder`] · [`tab_drag_leave`] ·
+//! [`tab_drag_end`]) · 창 사건 받이 둘([`on_window_moved`] · [`on_window_gone`] — `lib.rs`).
 //!
 //! ★락 규율★ — 포트 계약(`ports` 머리) 그대로:
 //! - 레이아웃 락 · 명부 락은 포트 호출 하나 안에서 잠깐 쥐고 놓는다. 둘을 함께 쥐는 것은 세계 뜨기(`world`) 하나이고
@@ -19,7 +20,8 @@ use std::time::Duration;
 
 use engram_dashboard_base::sync;
 use engram_dashboard_platform::input;
-use tauri::{AppHandle, Emitter, EventTarget, Manager, State};
+use tauri::{AppHandle, Emitter, EventTarget, Manager, State, Window};
+use tokio::sync::oneshot;
 
 use crate::commands::dock::{spawn_spare_build, DOCK_OVERLAY_LABEL};
 use crate::commands::drag_window::{self, DragWindows};
@@ -31,10 +33,13 @@ use crate::dock::parked::ParkedRole;
 use crate::dock::ports::{
     DetachPlan, DockWrite, Placement, Ports, WholePlan, RAISE_AFTER_MS, RELEASE_CONFIRM_MS,
 };
-use crate::dock::session::Event;
+use crate::dock::session::{Event, Reply};
 use crate::dock::targets::Overlay;
 use crate::dock::units::{Monitor, PhysPoint, WindowGeom};
-use crate::dock::wire::{SpareEvent, SpareStep, TabDragEvent, TabDragFeed};
+use crate::dock::wire::{
+    BeginReply, LeaveReply, SpareEvent, SpareStep, TabDragBegin, TabDragEnd, TabDragEvent,
+    TabDragFeed, TabDragLeave, TabDragReorder,
+};
 use crate::dock::world::{self, World};
 use crate::dock::DockState;
 use crate::layout::apply::{self, DockOutcome};
@@ -78,6 +83,136 @@ pub fn install(app: &AppHandle) -> Result<Inbox, String> {
     inbox.install(Driver::new(ports));
     tracing::info!(module = "dock", "탭 끌기 실행기를 세웠다");
     Ok(inbox)
+}
+
+// ── 웹뷰 → 셸 invoke(TRD §4) ──
+// 넷 다 async(tokio)다 — 사건을 줄에 넣고(다른 스레드라 `Inbox::post` 가 메인 스레드로 비우기를 올린다) 돌아오며, begin ·
+//   leave 만 세션의 답을 기다린다(시한 없음). 동기 명령은 메인 스레드의 IPC 처리기 안에서 돌아 세션까지 그 안에서 돈다
+//   (TRD §2-4). 부른 창은 인자가 아니라 `Window` 에서 꺼낸다(TRD §4). 실행기를 못 세웠으면(줄이 `manage` 되지 않았다)
+//   Tauri 가 상태 없음으로 거절한다.
+
+/// 세션이 begin · leave 에 답하지 않고 버렸다(세션 머리 「표에 없는 조합」) — 웹뷰는 그 끌기를 버린다.
+const NO_ANSWER: &str = "끌기 세션이 답하지 않고 사건을 버렸다";
+
+/// 탭 끌기 시작 — 문턱을 넘은 순간 한 번. 답 = 세션의 판정([`BeginReply`]). 웹뷰는 `invoke('tab_drag_begin', { args })`
+/// 로 부른다(넷 다 같은 꼴).
+// ADR-0295
+#[tauri::command]
+pub async fn tab_drag_begin(
+    window: Window,
+    inbox: State<'_, Inbox>,
+    args: TabDragBegin,
+) -> Result<BeginReply, String> {
+    let (reply, answer) = reply_channel();
+    inbox.post(Event::Begin {
+        window: window.label().to_owned(),
+        args,
+        reply,
+    });
+    answered(answer).await
+}
+
+/// 탭바 안 순서 이동 — 셸은 그 세션에서 받은 `seq` 이하를 버린다.
+#[tauri::command]
+pub async fn tab_drag_reorder(
+    window: Window,
+    inbox: State<'_, Inbox>,
+    args: TabDragReorder,
+) -> Result<(), String> {
+    inbox.post(Event::Reorder {
+        session: args.session,
+        from: window.label().to_owned(),
+        seq: args.seq,
+        index: args.index,
+    });
+    Ok(())
+}
+
+/// 점이 탭바 구역을 나갔다 — 답 = 떼었나([`LeaveReply`]). 커서는 셸이 읽는다.
+// ADR-0295
+#[tauri::command]
+pub async fn tab_drag_leave(
+    window: Window,
+    inbox: State<'_, Inbox>,
+    args: TabDragLeave,
+) -> Result<LeaveReply, String> {
+    let (reply, answer) = reply_channel();
+    inbox.post(Event::Leave {
+        session: args.session,
+        from: window.label().to_owned(),
+        reply,
+    });
+    answered(answer).await
+}
+
+/// 끌기의 끝 — 놓기 · 되돌리기(받는 짝 = [`TabDragEnd`] 문서).
+#[tauri::command]
+pub async fn tab_drag_end(
+    window: Window,
+    inbox: State<'_, Inbox>,
+    args: TabDragEnd,
+) -> Result<(), String> {
+    inbox.post(Event::End {
+        session: args.session,
+        from: window.label().to_owned(),
+        how: args.how,
+        src: args.src,
+        at: args.at,
+    });
+    Ok(())
+}
+
+// begin · leave 의 답 다리 — 세션이 보내면 기다리는 invoke 가 그 값으로, 답 없이 버리면(`Reply` 를 떨어뜨리면) 보내는
+//   쪽이 떨어져 `Err` 로 끝난다.
+fn reply_channel<T: Send + 'static>() -> (Reply<T>, oneshot::Receiver<T>) {
+    let (tx, rx) = oneshot::channel();
+    let reply = Reply::new(move |value| {
+        if tx.send(value).is_err() {
+            tracing::debug!(
+                module = "dock",
+                "끌기 답을 기다리던 invoke 가 없다 — 답을 버린다"
+            );
+        }
+    });
+    (reply, rx)
+}
+
+async fn answered<T>(answer: oneshot::Receiver<T>) -> Result<T, String> {
+    answer.await.map_err(|_| NO_ANSWER.to_owned())
+}
+
+// ── 창 사건(`lib.rs` 의 `on_window_event`) ──
+
+/// 우리 창이 움직였다 — 세션은 끄는 창 것만 본다. ★레이아웃 · 명부 락을 다 놓은 뒤★ 부른다 — 창 사건 처리기는 메인
+/// 스레드라 세션이 이 호출 안에서 돌 수 있다(`exec::Inbox::post`).
+// ADR-0295
+pub(crate) fn on_window_moved(app: &AppHandle, label: &str) {
+    post_window_event(
+        app,
+        Event::Moved {
+            label: label.to_owned(),
+        },
+    );
+}
+
+/// 우리 창이 사라졌다 — 명부가 그 창을 뺀 뒤(세션 `WindowGone`), 그 창의 정리가 락을 다 놓은 뒤 부른다.
+// ADR-0295
+pub(crate) fn on_window_gone(app: &AppHandle, label: &str) {
+    post_window_event(
+        app,
+        Event::WindowGone {
+            label: label.to_owned(),
+        },
+    );
+}
+
+// 창 사건 처리기는 런타임이 그 창의 리스너 자물쇠를 쥔 채 부른다(tauri-runtime-wry 2.11.3 `handle_event_loop`). 세션은
+//   그 자물쇠를 다시 잡지 않는다 — 창 리스너를 걸지 않고, 창 닫기 · 부수기는 이벤트 루프 줄을 거친다(같은 crate 의
+//   `close` · `destroy`). 실행기를 못 세웠으면 아무것도 안 한다.
+fn post_window_event(app: &AppHandle, ev: Event) {
+    if let Some(inbox) = app.try_state::<Inbox>() {
+        inbox.post(ev);
+    }
 }
 
 struct TauriMain(AppHandle);
@@ -507,6 +642,21 @@ mod tests {
         ] {
             assert!(beside_overlay(&other), "{other:?}");
         }
+    }
+
+    // 세션은 메인 스레드에서 답한다 — 기다리는 invoke(tokio)와 다른 스레드다.
+    #[tokio::test]
+    async fn a_reply_sent_from_the_session_thread_answers_the_waiting_invoke() {
+        let (reply, answer) = reply_channel();
+        std::thread::spawn(move || reply.send(LeaveReply::NotReady));
+        assert_eq!(answered(answer).await, Ok(LeaveReply::NotReady));
+    }
+
+    #[tokio::test]
+    async fn a_reply_dropped_without_an_answer_fails_the_waiting_invoke() {
+        let (reply, answer) = reply_channel::<BeginReply>();
+        std::thread::spawn(move || drop(reply));
+        assert_eq!(answered(answer).await, Err(NO_ANSWER.to_owned()));
     }
 
     #[test]

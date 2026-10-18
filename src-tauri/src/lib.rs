@@ -297,6 +297,20 @@ pub fn run() {
             crate::commands::dock::spawn_spare_build(app.handle());
             crate::commands::dock::spawn_overlay_build(app.handle());
 
+            // ── 탭 끌기 실행기(TRD S21-slot-docking §2-4) — 세션은 이 메인 스레드에 산다 ──
+            // 끌기 상태 · 레이아웃 상태는 빌더에서 manage 했다. 못 세우면 새 끌기 invoke 만 상태 없음으로 실패하고 옛 끌기는
+            //   그대로 돈다.
+            // ADR-0295
+            match crate::commands::drag::install(app.handle()) {
+                Ok(inbox) => {
+                    app.manage(inbox);
+                }
+                Err(e) => tracing::error!(
+                    module = "dock",
+                    "탭 끌기 실행기를 못 세웠다(새 끌기 불가, 앱 계속): {e}"
+                ),
+            }
+
             // `--hidden` — main 은 숨긴 채 만들었다(⑧). 여기서는 ⑨ 가 보인 채 연 팝아웃을 숨기고(F13) 숨긴 창을
             //   사용량 관심에서 뺀다 — 숨기기 경로는 하나다(ADR-0229).
             if hidden {
@@ -365,17 +379,23 @@ pub fn run() {
                     // ★위 정리가 레이아웃 락을 놓은 뒤★ — 장부의 끝 할 일(표식 내리기)이 같은 락을 잡는다. 끄는 중이
                     //   아니면 아무것도 안 한다(TRD S21-slot-docking §1-3 「그 밖의 끝」).
                     crate::commands::dock::on_window_destroyed(window.app_handle(), &label);
+                    // 끌기 세션 — 명부가 그 창을 뺀 뒤 · 위 정리가 락을 다 놓은 뒤(TRD S21-slot-docking §2-5 「사라지면」).
+                    crate::commands::drag::on_window_gone(window.app_handle(), &label);
                 }
                 // 창 자리 기록(TRD S21-storage §6-3) — 사건 값 대신 게터를 다시 읽는다(최소화 · 최대화 여부가 같이
                 //   필요하다). 대기 창 명부의 창은 모델 밖이라 적지 않는다(TRD S21-slot-docking §2-5). 안내 창도 모델 밖이라
-                //   적을 곳이 없다 — 그릴 때마다 옮기므로 게터 읽기부터 건너뛴다.
+                //   적을 곳이 없다 — 그릴 때마다 옮기므로 게터 읽기부터 건너뛴다. 끌기 세션(TRD S21-slot-docking §2-4)에는
+                //   `Moved` 만 자리 기록이 돌아온 뒤(락 없이) 넣는다 — 안내 창은 끄는 창이 될 수 없어 넣지 않는다.
                 // ADR-0295
                 tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
                     let label = window.label();
-                    if !crate::commands::dock::is_overlay_label(label)
-                        && !crate::commands::dock::is_parked_window(window.app_handle(), label)
-                    {
-                        crate::state::placement::record(window);
+                    if !crate::commands::dock::is_overlay_label(label) {
+                        if !crate::commands::dock::is_parked_window(window.app_handle(), label) {
+                            crate::state::placement::record(window);
+                        }
+                        if matches!(event, tauri::WindowEvent::Moved(_)) {
+                            crate::commands::drag::on_window_moved(window.app_handle(), label);
+                        }
                     }
                 }
                 _ => {}
@@ -429,6 +449,11 @@ pub fn run() {
             commands::dock_drag_end,
             commands::dock_pointer_seen,
             commands::dock_pull,
+            // 탭 끌기 세션(웹뷰 → 셸 · TRD S21-slot-docking §4) — 버스 명령이 아니다(사람 손의 끌기 신호).
+            commands::drag::tab_drag_begin,
+            commands::drag::tab_drag_reorder,
+            commands::drag::tab_drag_leave,
+            commands::drag::tab_drag_end,
             // 부팅 조회 — 미는 쪽(`window.setTheme` · `theme.default` 쓰기 · 부팅 · 복원 수락)은 따로 있다
             //   (`commands/settings.rs` 「창별 테마를 읽는 자리가 둘인 이유」).
             commands::get_ui_settings,

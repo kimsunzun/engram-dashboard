@@ -46,7 +46,7 @@ impl<T> Reply<T> {
         Reply(Box::new(send))
     }
 
-    fn send(self, value: T) {
+    pub(crate) fn send(self, value: T) {
         (self.0)(value)
     }
 }
@@ -655,6 +655,11 @@ impl Drag {
                     args,
                     reply,
                 } => self.begin(window, args, reply, p),
+                // 셸은 우리 창의 `Moved` 를 끌기와 무관하게 다 넣는다 — 손으로 창을 옮길 때마다 debug 를 불리지 않게.
+                other @ Event::Moved { .. } => {
+                    tracing::trace!(event = other.name(), "끌기 없음 — 사건 무시");
+                    None
+                }
                 other => {
                     tracing::debug!(event = other.name(), "끌기 없음 — 사건 무시");
                     None

@@ -13,8 +13,7 @@ use crate::layout::chrome::{PointCss, RectCss};
 ///
 /// - `model`: 탭 모델의 창 — 보통으로 그린다.
 /// - `parked`: 대기 창 명부의 창(예비 창 · 끄는 중 비워 남긴 창) — 대기 모드로 그린다(빈 틀 · 0탭 자가닫힘 끔 ·
-///   끌어오기 재시도 없음 · 재기 보고는 그대로). 그 뒤 모드 바뀜은 `dock:spare`([`SpareEvent`])가 알린다 — ★셸은
-///   아직 내지 않는다★(그 타입 문서).
+///   끌어오기 재시도 없음 · 재기 보고는 그대로). 그 뒤 모드 바뀜은 `dock:spare`([`SpareEvent`])가 알린다.
 /// - `unknown`: 탭 모델에도 명부에도 없다(닫기 요청에서 모델이 먼저 지운 팝아웃 · 안내 창 등).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -25,8 +24,9 @@ pub enum WindowRole {
     Unknown,
 }
 
-/// `window_role` 의 답 — `drag` = 진행 중 끌기 세션 번호(1 부터 단조). `null` = 진행 중 끌기가 없다 — ★아직 늘
-/// `null` 이다★(세션 번호 거울은 TRD §13 U6).
+/// `window_role` 의 답 — `drag` 는 ★늘 `null` 이다★: 진행 중 세션 번호를 비추는 거울은 끌기 세션 축소안에서
+/// 뺐다(다시 읽힌 웹뷰가 끌기 도중에 키 감시를 다시 켜는 몫 — 평소 쓰임 밖 · 추적 밖
+/// `.claude/handoff/attachments/trd6-review-2026-10-18/u5-trim-plan.md` §4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, TS)]
 #[ts(export)]
 pub struct WindowRoleReply {
@@ -39,8 +39,8 @@ pub struct WindowRoleReply {
 /// `dock:spare` 의 몸 — 대기 창 명부의 창 웹뷰에 그 창의 모드가 바뀌었음을 알린다(TRD §4 · §2-5). 받는 쪽 = 그 창
 /// 웹뷰(대기 모드 켜고 끔).
 ///
-/// ★셸은 아직 이 사건을 내지 않는다★ — 내는 쪽은 끌기 실행기의 들이기 · 되돌리기(`Unpark` · `SpareGiveBack` ·
-/// `Park` — TRD §13 U5b)다. 그때까지 웹뷰가 모드를 아는 길은 마운트 때의 `window_role` 하나다.
+/// 내는 쪽 = 끌기 세션이 그 창을 모델에 들일 때(`adopted`) · 명부로 되돌릴 때(`parked`)뿐이다. 마운트 때의 모드는
+/// `window_role` 이 준다 — 그 뒤 바뀜만 이 사건으로 온다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, TS)]
 #[ts(export)]
 pub struct SpareEvent {
