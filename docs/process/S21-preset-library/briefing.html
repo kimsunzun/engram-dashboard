@@ -13,6 +13,7 @@
   --ok:#1a7f37; --warn:#9a6700; --warn-soft:#fff4d6; --err:#cf222e; --err-soft:#fde8ea; --gone:#6e7381;
   --app-bg:#f5f5f5; --app-panel:#ffffff; --app-raised:#ffffff; --app-line:#ccc; --app-text:#1a1a1a; --app-muted:#666; --app-chip:#eef0f3;
   --claude:#d97757; --codex:#6b6f78;
+  --chg:#c2410c; --chg-ink:#ffffff;
   --f-body:"IBM Plex Sans KR","Malgun Gothic","Apple SD Gothic Neo",system-ui,sans-serif;
   --f-mono:"JetBrains Mono",ui-monospace,Consolas,monospace;
 }
@@ -21,13 +22,13 @@
   --accent:#4a9eff; --accent-soft:#132438;
   --ok:#3fb950; --warn:#d29922; --warn-soft:#2b2312; --err:#f85149; --err-soft:#2f1517; --gone:#8b909c;
   --app-bg:#0a0a0a; --app-panel:#141414; --app-raised:#1c1c1c; --app-line:#2a2a2a; --app-text:#e0e0e0; --app-muted:#888; --app-chip:#202226;
-  --claude:#d97757; --codex:#c9c9c9; color-scheme:dark}}
+  --claude:#d97757; --codex:#c9c9c9; --chg:#ff9a3c; --chg-ink:#1b0f00; color-scheme:dark}}
 :root[data-theme="dark"]{
   --bg:#0e0f12; --paper:#16181d; --ink:#e4e6eb; --muted:#9aa0ad; --line:#2a2d35;
   --accent:#4a9eff; --accent-soft:#132438;
   --ok:#3fb950; --warn:#d29922; --warn-soft:#2b2312; --err:#f85149; --err-soft:#2f1517; --gone:#8b909c;
   --app-bg:#0a0a0a; --app-panel:#141414; --app-raised:#1c1c1c; --app-line:#2a2a2a; --app-text:#e0e0e0; --app-muted:#888; --app-chip:#202226;
-  --claude:#d97757; --codex:#c9c9c9; color-scheme:dark}
+  --claude:#d97757; --codex:#c9c9c9; --chg:#ff9a3c; --chg-ink:#1b0f00; color-scheme:dark}
 *{box-sizing:border-box}
 body{background:var(--bg);color:var(--ink);font-family:var(--f-body);font-size:15px;line-height:1.65;margin:0}
 .wrap{max-width:980px;margin:0 auto;padding-inline:16px;padding-block:36px 80px;display:flex;flex-direction:column;gap:48px}
@@ -237,6 +238,36 @@ details.old>summary .tag{margin-right:6px}
 details.old .oldb{display:flex;flex-direction:column;gap:14px;margin-top:12px;opacity:.72;min-width:0}
 .tag.wait{border-color:var(--warn);color:var(--warn);background:var(--warn-soft)}
 a{color:var(--accent)}
+/* change marks (round 2026-10-19): each spot changed in that round = outline + corner label above it. Never put .chg on an element with overflow clipping (.win · .cli · .tbl44 · .fig44) or with its own ::before — wrap it in a div instead. */
+.chg{position:relative;outline:2px solid var(--chg);outline-offset:2px;border-radius:4px;margin-top:16px}
+.chg::before{content:"수정 2026-10-19";position:absolute;right:-4px;bottom:calc(100% + 4px);z-index:5;font:600 10px/14px var(--f-body);letter-spacing:0;text-transform:none;padding:0 5px;border-radius:3px;background:var(--chg);color:var(--chg-ink);white-space:nowrap;pointer-events:none}
+svg .chg-r{fill:none;stroke:var(--chg);stroke-width:2}
+svg .chg-t{fill:var(--chg);font-size:9.5px;font-weight:600}
+/* whole-window modal: dimmed backdrop around a dialog */
+.modal49{display:flex;flex-direction:column;align-items:center;gap:8px;padding:16px;border-radius:10px;background:rgba(18,20,26,.62);min-width:0}
+.modal49 .mn{font-size:11.5px;color:#f1f2f4;text-align:center}
+.modal49 .dialog{width:100%}
+/* top problem list under the editor header: one line per problem, same wording as the row marker, click = jump to the row */
+.pl49{display:flex;flex-direction:column;gap:1px;padding:4px;border:1px solid var(--app-line);border-radius:6px;background:var(--app-panel);font-size:12px;min-width:0}
+.pl49 .pi{display:flex;gap:6px;align-items:baseline;padding:2px 6px;border-radius:4px;cursor:pointer;min-width:0}
+.pl49 .pi:hover{background:var(--app-chip)}
+.pl49 .pi>b{flex:none;font-weight:600}
+.pl49 .pi>b.e{color:var(--err)}
+.pl49 .pi>b.g{color:var(--gone)}
+.pl49 .pi>span{flex:1;min-width:0;overflow-wrap:anywhere}
+.pl49 .pi i{font-style:normal;color:var(--app-muted)}
+/* change summary at the top (round 2026-10-19): one row per section, one link per boxed spot; targets keep room above for their corner label */
+[id^="chg-"]{scroll-margin-top:36px}
+.cs49{border:2px solid var(--chg);border-radius:10px;background:var(--paper);padding:12px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.cs49 h2{font-size:18px;color:var(--chg)}
+.cs49 .hint{font-size:13px;color:var(--muted)}
+.cs49 .rows{display:flex;flex-direction:column;font-size:13px;line-height:1.6}
+.cs49 .r{display:grid;grid-template-columns:2.7rem minmax(0,1fr);gap:8px;padding:4px 0;border-top:1px solid var(--line)}
+.cs49 .r:first-child{border-top:0}
+.cs49 .r>b{font-family:var(--f-mono);font-size:12px;font-weight:600;padding-top:1px}
+.cs49 .r>b a{color:var(--muted);text-decoration:none}
+.cs49 .r>span{min-width:0;overflow-wrap:anywhere;word-break:keep-all;color:var(--muted)}
+.cs49 .hint{word-break:keep-all}
 @media (max-width:860px){.cols-lib{grid-template-columns:minmax(0,1fr)}.cols-lib .pane+.pane{border-left:0;border-top:1px solid var(--app-line)}}
 @media (max-width:720px){
   .ab,.two-slots,.popwrap,.cfg,.dash{grid-template-columns:minmax(0,1fr)}
@@ -251,11 +282,40 @@ a{color:var(--accent)}
 <div class="wrap">
 
 <header style="display:flex;flex-direction:column;gap:10px">
-  <span class="eyebrow">스킬 프리셋 · 현재 브리핑 · 화면 + 시스템 설계 · 최종 갱신 2026-10-18</span>
+  <span class="eyebrow">스킬 프리셋 · 현재 브리핑 · 화면 + 시스템 설계 · 최종 갱신 2026-10-19</span>
   <h1>Engram 프리셋 화면</h1>
   <p class="lead">지침 · 스킬 · 설정을 프리셋으로 묶어 claude · codex 에이전트에 붙이는 화면(1–14)과 그 안의 시스템 설계(15–21). 결정이 날 때마다 이 페이지를 고친다 — 지금 정한 상태만 본문에, 버린 안은 접어 둔다.</p>
   <p class="pend"><span class="tag ok">확정</span><span>사용자가 정한 것 <span class="tag ok">관행 — 2026-10-18</span> 관행 조사로 정한 것 <span class="tag wait">리뷰 때 확인</span> 리뷰에서 다시 볼 것 — 결정 상태는 <a href="#decisions">§21</a> · 기준 = PRD · TRD 초안(2026-10-15~18)</span></p>
 </header>
+
+<!-- change summary 2026-10-19 -->
+<nav class="cs49" id="changes49" aria-label="이번 리뷰에서 바뀐 곳">
+  <h2>이번 리뷰에서 바뀐 곳 (2026-10-19)</h2>
+  <p class="hint">네모로 표시된 곳만 보면 됩니다 — 주황 네모 = 이번에 고친 자리 · 아래 링크로 바로 감</p>
+  <div class="rows">
+    <div class="r"><b>§1</b><span><a href="#chg-s1-dup">에이전트 복제</a> · <a href="#chg-s1-detach">「기본」 떼기 = 모달</a> · <a href="#chg-s1-phases">1차 · 2차 범위</a></span></div>
+    <div class="r"><b>§2</b><span><a href="#chg-s2-detail-order">상세 칸 위치 위로</a> · <a href="#chg-s2-fav-phase">즐겨찾기 = 2차</a> · <a href="#chg-s2-filter-cap">필터 = 체크한 것만</a> · <a href="#chg-s2-filter-fig">필터 그림</a> · <a href="#chg-s2-det-instr">지침 카드 순서</a> · <a href="#chg-s2-det-set">설정 카드 순서</a> · <a href="#chg-s2-det-err">오류 카드 순서</a> · <a href="#chg-s2-cap10">지침 칸</a> · <a href="#chg-s2-cap11">「설명 없음」</a> · <a href="#chg-s2-cap13">오류 줄 칸</a> · <a href="#chg-s2-order-rule">칸 순서 규칙</a> · <a href="#chg-s2-shortcut">단축키 · 차수</a></span></div>
+    <div class="r"><b>§3</b><span><a href="#chg-s3-main-problems">머리 아래 문제 목록</a> · <a href="#chg-s3-cap2">줄 누름 = 카드</a> · <a href="#chg-s3-cap3">충돌 문구</a> · <a href="#chg-s3-cap5">찾을 수 없음 · 다시 연결</a> · <a href="#chg-s3-cap7">문제 목록 규칙</a> · <a href="#chg-s3-kind-problems">종류별 그림 문제 목록</a> · <a href="#chg-s3-card-place-note">카드 자리</a> · <a href="#chg-s3-old-eye">눈 단추 걷은 이력</a> · <a href="#chg-s3-memory">번호별 저장</a> · <a href="#chg-s3-peek-head">부품 내용 보기</a> · <a href="#chg-s3-peek-fig">줄 누름 카드 그림</a> · <a href="#chg-s3-peek-c4">카드 열기</a> · <a href="#chg-s3-peek-c5">카드 닫기 · 바꾸기</a> · <a href="#chg-s3-peek-c6">프리셋 줄 = 펼침</a></span></div>
+    <div class="r"><b>§4</b><span><a href="#chg-s4-head">1차 · 2차 표시</a> · <a href="#chg-s4-drag-fig">여러 개 끌어 옮기기</a> · <a href="#chg-s4-delete-modal">삭제 확인 = 모달</a> · <a href="#chg-s4-cli">CLI · 비우기 없음</a> · <a href="#chg-s4-cap1">새로 만들기 = 1차</a> · <a href="#chg-s4-cap2">어디서든 이동</a> · <a href="#chg-s4-cap3">삭제 → .trash</a> · <a href="#chg-s4-drag-map">끌기 표</a> · <a href="#chg-s4-trash">비우기 = 사람만</a> · <a href="#chg-s4-relink-head">다시 연결 머리</a> · <a href="#chg-s4-relink-fig">다시 연결 그림</a> · <a href="#chg-s4-relink-c4">후보 제안 없음</a> · <a href="#chg-s4-d10">D10 풀림</a></span></div>
+    <div class="r"><b>§5</b><span><a href="#chg-s5-root-relink">폴더 바꾼 뒤 다시 연결</a></span></div>
+    <div class="r"><b>§6</b><span><a href="#chg-s6-dnd">LibraryDnd 어디서든</a> · <a href="#chg-s6-dnd-card">dnd-kit 카드</a> · <a href="#chg-s6-store">저장소 .trash</a> · <a href="#chg-s6-jsonschema">스키마 = cache</a> · <a href="#chg-s6-misc">휴지통 작업 걷음</a> · <a href="#chg-s6-editor-share">편집 칸 부품 공유</a> · <a href="#chg-s6-survey">구현 전 라이브러리 조사</a></span></div>
+    <div class="r"><b>§7</b><span><a href="#chg-s7-relink-note">다시 연결 팝오버</a> · <a href="#chg-s7-add-both">「+ 추가」 둘 다</a></span></div>
+    <div class="r"><b>§8</b><span><a href="#chg-s8-merge">claude 칸 합치기</a> · <a href="#chg-s8-desc">description 쓰게 하기</a> · <a href="#chg-s8-schema-cache">스키마 cache</a></span></div>
+    <div class="r"><b>§9</b><span><a href="#chg-s9-h3">슬롯 = 편집 칸 부품만</a> · <a href="#chg-s9-ctx-dup">우클릭 「복제」</a> · <a href="#chg-s9-slot-problems">슬롯 문제 목록</a> · <a href="#chg-s9-nest-noeye">안쪽 줄 눈 단추 없음</a> · <a href="#chg-s9-detach-modal">떼기 모달</a> · <a href="#chg-s9-cap1">부품 + 데이터 훅</a> · <a href="#chg-s9-cap3">떼기 확인</a> · <a href="#chg-s9-cap-card">안쪽 줄 누름 = 카드</a> · <a href="#chg-s9-cap-problems">문제 목록 규칙</a> · <a href="#chg-s9-cap-dup">복제 규칙</a> · <a href="#chg-s9-t10">T10 합치기</a></span></div>
+    <div class="r"><b>§10</b><span><a href="#chg-s10-next-pill">다음 주제 = 경로 쪽만</a> · <a href="#chg-s10-picker">피커 그림 — 그 백엔드만</a> · <a href="#chg-s10-picker-cap">피커 목록</a> · <a href="#chg-s10-t8">T8 = 2차</a> · <a href="#chg-s10-codex-pre">codex 사전 검사 = ⑤</a> · <a href="#chg-s10-reasons">막힘 사유 다섯</a> · <a href="#chg-s10-card-head">카드 자리 머리</a> · <a href="#chg-s10-card-label">카드 자리 그림</a> · <a href="#chg-s10-card-c2">라이브러리 카드 자리</a> · <a href="#chg-s10-card-c3">카드 닫기</a></span></div>
+    <div class="r"><b>§11</b><span><a href="#chg-s11-cli">명령 목록</a> · <a href="#chg-s11-relink-pend">setWorkspace · relink</a> · <a href="#chg-s11-trash-dup">delete · 비우기 없음 · duplicate</a></span></div>
+    <div class="r"><b>§12</b><span><a href="#chg-s12-gone">찾을 수 없음 표시</a> · <a href="#chg-s12-pend">후보 상태 없음</a></span></div>
+    <div class="r"><b>§13</b><span><a href="#chg-s13-status">리뷰 때 확인 하나</a> · <a href="#chg-s13-scan">휴지통 측정 걷음</a> · <a href="#chg-s13-dnd">끌기 통일 측정</a> · <a href="#chg-s13-priming">프라이밍 에셋(나중)</a></span></div>
+    <div class="r"><b>§14</b><span><a href="#chg-s14-refs">새 조사 넷</a></span></div>
+    <div class="r"><b>§15</b><span><a href="#chg-s15-fig">구조 그림 — 휴지통 걷음 · cache</a> · <a href="#chg-s15-cap">.trash · cache · 편집 칸 부품</a></span></div>
+    <div class="r"><b>§16</b><span><a href="#chg-s16-fig">훑기 ⑤ 후보 걷음</a> · <a href="#chg-s16-cap">cache · 차수</a></span></div>
+    <div class="r"><b>§17</b><span><a href="#chg-s17-cap">편집 뒤 문제 목록</a></span></div>
+    <div class="r"><b>§18</b><span><a href="#chg-s18-head">2차</a> · <a href="#chg-s18-cap">.trash · 모달 · 후보 없음</a></span></div>
+    <div class="r"><b>§19</b><span><a href="#chg-s19-fig">그림 — 사유 다섯</a> · <a href="#chg-s19-cap">사유 다섯 · 실행 오류</a></span></div>
+    <div class="r"><b>§20</b><span><a href="#chg-s20-tbl">표 — 휴지통 줄 뺌 · cache · 끌기</a> · <a href="#chg-s20-cap">걷음 · 구현 전 조사</a></span></div>
+    <div class="r"><b>§21</b><span><a href="#chg-s21-head">리뷰 때 확인 1</a> · <a href="#chg-s21-reasons">막힘 사유 다섯</a> · <a href="#chg-s21-d10">D10 풀림</a> · <a href="#chg-s21-d11">D11 문구</a> · <a href="#chg-s21-bundle">T8 = 2차</a> · <a href="#chg-s21-b">브리핑 리뷰 2차 B1–B17</a> · <a href="#chg-s21-review">리뷰 때 확인 = D11</a> · <a href="#chg-s21-later">프라이밍 에셋</a> · <a href="#chg-s21-pend">열린 것</a></span></div>
+  </div>
+</nav>
 
 <!-- 1 -->
 <section id="s1">
@@ -282,6 +342,7 @@ a{color:var(--accent)}
         <span class="part">작업 폴더 = 만들 때 정함 · 슬롯에서 바꿈(대화 뒤 잠금)</span>
         <span class="part">프리셋 여러 개</span>
         <span class="part">설정 = 그 백엔드 원문 칸만 쓰임 (모델도 그 안)</span>
+        <span class="part chg" id="chg-s1-dup">같은 구성으로 하나 더 = 복제(새 대화 · §9)</span>
       </div>
     </div>
   </div>
@@ -289,9 +350,9 @@ a{color:var(--accent)}
     <span class="kind p">기본 제공 프리셋 「기본」 하나</span>
     <span>라이브러리 밖 <code>engram:/…</code> · 라이브러리를 선택하기 전에도 있음 · 펼쳐 보기만 · 다른 프리셋에 추가할 수 없음(에이전트에만 붙음)</span>
   </div>
-  <div class="defp">
+  <div class="defp chg" id="chg-s1-detach">
     <span class="kind p">기본</span>
-    <span>에이전트 만들 때 늘 붙음 · 뗄 수 있음(확인 창)</span>
+    <span>에이전트 만들 때 늘 붙음 · 뗄 수 있음(확인 = 창 전체 모달 · §9)</span>
     <span class="eq" style="overflow-wrap:anywhere;min-width:0">= 프라이밍 + 기본 설정 (claude 원문 <code>{"env":{"DISABLE_AUTOUPDATER":"1"},"allowedMcpServers":[{"serverName":"engram"}]}</code>)</span>
     <span>감춘 설정 없음 — Engram 메시지 · 제어 통로도 이 칸에 보임 · 떼면 통로도 빠짐</span>
   </div>
@@ -300,6 +361,7 @@ a{color:var(--accent)}
   </div>
   <p class="pend"><span class="tag ok">확정 2026-10-18</span><span>백엔드 = 에이전트 값(만들 때 고정 · 바꾸려면 새 에이전트) · 설정 = 백엔드별 원문 칸만(모델도 그 안) · 기본 제공 = 「기본」 하나 — 옛 「claude 기본」 · 「codex 기본」 은 걷음</span></p>
   <p class="pend"><span class="tag ok">확정 2026-10-18</span><span>모드(JSON · 터미널)도 만들 때 고정(D5) · 작업 폴더 = 에이전트 값 — 만들 때 정하고 에이전트 슬롯 「작업 폴더」 칸에서 바꿈 · 대화한 뒤 · 실행 중엔 잠김(D3 · §9) · 「기본」 claude 칸에 Engram 통로 <code>allowedMcpServers</code> — 감춘 설정 조각 없음(T10 · §9)</span></p>
+  <p class="pend chg" id="chg-s1-phases"><span class="tag ok">확정 2026-10-19</span><span>구현은 두 번에 나눠 냄 — <b>1차</b> = 라이브러리 읽기(트리 · 목록 · 상세 · 필터 · 검색) · 새로 고침 · 번호별 보기 상태 저장 · 새로 만들기(폴더 · 마크다운 · 설정 · 프리셋) · 프리셋 편집(추가 세 길 · 빼기 · 순서 · 머리 아래 문제 목록 · 줄 누름 카드) · 에이전트에 붙이기 · 「작업 폴더」 칸 + <code>agent.setWorkspace</code> · 실행 때 맞추기(claude · codex) · 설정 검사 · 실행 막힘 사유 · 「기본」 · 에이전트 복제 / <b>2차</b> = 파일 조작(이동 · 이름 바꾸기 · 삭제 → <code>.trash</code> · 사람만 비우기) · 다시 연결 · 어디서든 끌어 옮기기 · 컬렉션 · 즐겨찾기 · 이동 기록 · T8 모델 피커 / 단축키 · LLM <code>library.*</code> 명령 = 그 기능의 차수를 따름(메인 세션 결정 — 사용자 위임)</span></p>
 </section>
 
 <!-- 2 -->
@@ -359,11 +421,11 @@ a{color:var(--accent)}
       </div>
       <div class="pane side">
         <div class="head"><span class="kind">스킬</span><span class="t" style="font-size:14px">review</span><span class="sp"></span><span class="star on" title="즐겨찾기">★</span></div>
-        <div class="final">
-          <span class="k">설명 (SKILL.md)</span>
-          <span class="v">코드 변경을 2인 적대 리뷰로 검증한다.</span>
+        <div class="final chg" id="chg-s2-detail-order">
           <span class="k">위치</span>
           <span class="v">스킬/리뷰/review/SKILL.md</span>
+          <span class="k">설명 (SKILL.md)</span>
+          <span class="v">코드 변경을 2인 적대 리뷰로 검증한다.</span>
           <span class="k">참조</span>
           <div class="rf46"><span class="rh46">▾ 프리셋 <b>2</b> <span class="n">7</span></span><span class="rl46"><u>리뷰어</u></span><span class="rl46"><u>야간 점검</u></span><span class="rh46">▾ 에이전트 <b>1</b></span><span class="rl46"><u>리뷰봇</u> <i>(리뷰어 통해)</i></span></div>
         </div>
@@ -374,8 +436,8 @@ a{color:var(--accent)}
     <span><span class="n">1</span><span>← → 와 경로는 한 줄 · 슬롯 전체 폭 — 자리가 바뀔 때만 기록(폴더 이동 · 참조 링크 · 컬렉션 보기 · 항목 자리로 가기) · 같은 폴더 안 클릭 · 편집은 기록 안 함 · 번호마다 따로</span></span>
     <span><span class="n">2</span><span>폴더를 선택하면 바로 안의 것만 (검색은 하위까지) · 트리 맨 위 머리 = 라이브러리 폴더 이름 + 경로 — 머리 줄 누름 = 접기 · 펼치기 · 경로 옆 「…」 = 바로 Windows 폴더 선택 창 → 라이브러리 폴더 바꾸기(메뉴 없음)(§5)</span></span>
     <span><span class="n">3</span><span>목록 = 데몬이 들고 있는 목록 · Engram 안 변경은 바로 반영 · 바깥 변경은 트리 우클릭 「새로 고침」(그 폴더 · 루트 머리 줄 = 전체) · F5(트리 = 선택한 폴더, 없으면 전체 · 목록 = 지금 폴더 — 하위 포함) 또는 <code>library.refresh</code> 로 들임 · 전체 훑기는 처음 · 폴더 바꾸기 때만 · 실행 직전 데몬이 다시 확인 (2026-10-16)</span></span>
-    <span><span class="n">4</span><span>왼쪽 칸 = 머리 붙은 칸 둘(언리얼 Content Browser 꼴) — 위 「▾ 라이브러리 폴더 이름 · 경로 …」(트리 · 「…」 = 폴더 선택 창으로 바꾸기) · 아래 「▾ 즐겨찾기 ＋」(＋ = 새 컬렉션 · 첫 줄 「기본」 = 처음부터 있음 · 삭제할 수 없음 · 기본 대상 컬렉션). 칸마다 따로 스크롤 · ▾ 로 접기(머리 줄은 남음) · 칸 사이 경계를 끌어 높이 조절(번호마다 기억) · 이 PC 에만 저장 = 머리 툴팁 — 2026-10-16 · ★ = 대상 컬렉션에 넣고 빼기 · 컬렉션 한 번 누름 = 보기 · 더블클릭/우클릭 「★ 대상 컬렉션으로」 = 대상 지정 · 대상 컬렉션은 PC 마다 하나(슬롯마다 아님) · 컬렉션은 이 PC 에만 저장</span></span>
-    <span><span class="n">5</span><span>필터 ▾ = 종류 선택(지침 · 스킬 · 설정 · 프리셋 체크박스 · 모든 필터 제거) — 상태 필터는 첫 판에서 뺌</span></span>
+    <span class="chg" id="chg-s2-fav-phase"><span class="n">4</span><span><b>즐겨찾기 · 컬렉션 = 2차(1차엔 트리 칸만)</b> · 왼쪽 칸 = 머리 붙은 칸 둘(언리얼 Content Browser 꼴) — 위 「▾ 라이브러리 폴더 이름 · 경로 …」(트리 · 「…」 = 폴더 선택 창으로 바꾸기) · 아래 「▾ 즐겨찾기 ＋」(＋ = 새 컬렉션 · 첫 줄 「기본」 = 처음부터 있음 · 삭제할 수 없음 · 기본 대상 컬렉션). 칸마다 따로 스크롤 · ▾ 로 접기(머리 줄은 남음) · 칸 사이 경계를 끌어 높이 조절(번호마다 기억) · 이 PC 에만 저장 = 머리 툴팁 — 2026-10-16 · ★ = 대상 컬렉션에 넣고 빼기 · 컬렉션 한 번 누름 = 보기 · 더블클릭/우클릭 「★ 대상 컬렉션으로」 = 대상 지정 · 대상 컬렉션은 PC 마다 하나(슬롯마다 아님) · 컬렉션은 이 PC 에만 저장</span></span>
+    <span class="chg" id="chg-s2-filter-cap"><span class="n">5</span><span>필터 ▾ = 종류 체크박스(지침 · 스킬 · 설정 · 프리셋) — 체크한 종류만 보임 · 아무것도 체크 안 함 = 전부 · 「모든 필터 제거」 = 체크 전부 풀기(언리얼 Content Browser 꼴) — 상태 필터는 첫 판에서 뺌</span></span>
     <span><span class="n">6</span><span>폴더(스킬 폴더 포함 — 스킬 아이콘) 먼저, 다음 이름 · 머리 클릭 = 그 열로 정렬 · 다시 = 거꾸로 (★ · 참조 칸 제외) · ▲/▼ 는 누른 열에만 · 폴더는 늘 맨 위 · 종류 = 필터 순서(지침 · 스킬 · 설정 · 프리셋 — 번역 글자 순 아님) · 같은 값은 이름순 (VS Code 관행 — 2026-10-16)</span></span>
     <span><span class="n">7</span><span>참조 = 그 항목을 참조하는 프리셋과 에이전트, 직접 + 건너서(「(… 통해)」) · 종류별 묶음 「▾ 프리셋 N」 · 「▾ 에이전트 N」 — 머리 누름 = 접기 · 펼치기(Obsidian 백링크 꼴 · 처음엔 둘 다 펼침) · 한 줄에 이름 하나 · 「N개 더 보기」 자르기 없음 · 접은 상태는 1~4 공통 저장 · 프리셋 이름 = 그 자리로 가 선택함(오른쪽이 편집 칸) · 에이전트 이름 = 그 에이전트 프리셋 슬롯을 엶 · 목록의 참조 열은 수만 (2026-10-17)</span></span>
   </div>
@@ -408,7 +470,7 @@ a{color:var(--accent)}
     </div>
   </div>
   <div class="caps">
-    <span><span>필터 ▾ = 종류 체크박스 넷 + 「모든 필터 제거」 — 예: 스킬만 체크하면 스킬만 보인다 · 검색과 겹쳐 걸린다</span></span>
+    <span class="chg" id="chg-s2-filter-fig"><span>필터 ▾ = 종류 체크박스 넷 + 「모든 필터 제거」 — 체크한 종류만 보인다(그림 = 스킬만) · 아무것도 체크 안 하면 전부 · 「모든 필터 제거」 = 체크를 전부 풂 = 전부 보임 · 검색과 겹쳐 걸린다</span></span>
     <span><span>검색 = 치는 즉시 지금 폴더 + 하위 폴더 전부에서 찾아 목록 하나로 · 맞은 글자 강조 · 하위 폴더 줄(📁)은 숨김 · 「위치」 열(누르면 그 폴더로 — ← 기록에 남음)</span></span>
     <span><span>검색칸 왼쪽 × = 지우고 원래 폴더 목록으로 · 검색어 치기는 ← 기록을 늘리지 않음 · 선택 · 더블클릭 · ★ · 끌기는 평소와 같다</span></span>
   </div>
@@ -428,24 +490,24 @@ a{color:var(--accent)}
     </div></div>
     <div class="win"><div class="pane side">
       <div class="head"><span class="kind">지침</span><span class="t" style="font-size:14px">리뷰 규칙</span><span class="n">10</span></div>
-      <div class="final">
-        <span class="k">미리 보기</span>
-        <div class="prev44"><b># 리뷰 규칙</b>- 칭찬하지 않는다<br>- 근거 없는 지적 금지<br>- 파일:줄 로 가리킨다<br>- 고칠 것만 적는다</div>
+      <div class="final chg" id="chg-s2-det-instr">
         <span class="k">위치</span>
         <span class="v">지침/리뷰 규칙.md</span>
+        <span class="k">미리 보기</span>
+        <div class="prev44"><b># 리뷰 규칙</b>- 칭찬하지 않는다<br>- 근거 없는 지적 금지<br>- 파일:줄 로 가리킨다<br>- 고칠 것만 적는다</div>
         <span class="k">참조</span>
         <div class="rf46"><span class="rh46">▾ 프리셋 <b>2</b></span><span class="rl46"><u>리뷰어</u></span><span class="rl46"><u>야간 점검</u></span><span class="rh46">▾ 에이전트 <b>1</b></span><span class="rl46"><u>리뷰봇</u> <i>(리뷰어 통해)</i></span></div>
       </div>
     </div></div>
     <div class="win"><div class="pane side">
       <div class="head"><span class="kind">설정</span><span class="t" style="font-size:14px">claude opus</span><span class="n">11</span></div>
-      <div class="final">
+      <div class="final chg" id="chg-s2-det-set">
+        <span class="k">위치</span>
+        <span class="v">설정/claude opus.yaml</span>
         <span class="k">설명</span>
         <span class="v">모델 고정 — claude opus · codex gpt-5.5</span>
         <span class="k">원문 칸</span>
         <span class="v">claude · codex</span>
-        <span class="k">위치</span>
-        <span class="v">설정/claude opus.yaml</span>
         <span class="k">참조</span>
         <div class="rf46"><span class="rh46">▾ 프리셋 <b>1</b></span><span class="rl46"><u>리뷰어</u></span></div>
       </div>
@@ -456,26 +518,27 @@ a{color:var(--accent)}
     </div></div>
     <div class="win"><div class="pane side">
       <div class="head"><span class="kind e">오류</span><span class="t" style="font-size:14px;color:var(--err)">깨진 설정</span><span class="n">13</span></div>
-      <div class="final">
+      <div class="final chg" id="chg-s2-det-err">
+        <span class="k">위치</span>
+        <span class="v">설정/깨진 설정.yaml</span>
         <span class="k">이유</span>
         <span class="v">YAML 문법 오류 (kind: settings)</span>
         <span class="k">줄</span>
         <span class="v">3째 줄</span>
-        <span class="k">위치</span>
-        <span class="v">설정/깨진 설정.yaml</span>
       </div>
     </div></div>
   </div>
   <div class="caps">
     <span><span class="n">8</span><span>아무것도 선택 안 함 = 흐린 안내 한 줄 「선택한 항목이 없습니다」 (Spacedrive 관행)</span></span>
     <span><span class="n">9</span><span>폴더 = 이름 · 위치만 — 안의 개수 세지 않음 (관행 = 메타데이터만)</span></span>
-    <span><span class="n">10</span><span>지침 = 본문 미리 보기(읽기만 · 앞부분) · 위치 · 참조 — 설명 = 스킬만(SKILL.md) · 발췌는 카드가 아니라 「+ 추가」 검색 결과 줄의 한 줄</span></span>
-    <span><span class="n">11</span><span>설정 = 설명 · 있는 원문 칸(claude · codex) · 위치 · 참조 — 정식 백엔드 · 모델 칸은 없음(모델도 원문 안 · 2026-10-18)</span></span>
+    <span class="chg" id="chg-s2-cap10"><span class="n">10</span><span>지침 = 위치 · 본문 미리 보기(읽기만 · 앞부분) · 참조 — 설명 = 스킬만(SKILL.md) · 발췌는 카드가 아니라 「+ 추가」 검색 결과 줄의 한 줄</span></span>
+    <span class="chg" id="chg-s2-cap11"><span class="n">11</span><span>설정 = 위치 · 설명 · 있는 원문 칸(claude · codex) · 참조 — 정식 백엔드 · 모델 칸은 없음(모델도 원문 안 · 2026-10-18) · 설명이 없으면 흐린 「설명 없음」(막지 않음)</span></span>
     <span><span class="n">12</span><span>여러 개 선택 = 「N개 항목 선택함」 + 종류별 수만 (Spacedrive · Finder 관행)</span></span>
-    <span><span class="n">13</span><span>오류 줄 = 이유 · 몇째 줄 · 위치 (관행 없음 — 우리 설계) · <code>kind: preset</code> · <code>kind: settings</code> 인데 깨진 것 · 모르는 <code>kind</code> 만 — <code>kind</code> 없는 <code>.yaml</code> 은 목록에 안 보임 (2026-10-17)</span></span>
+    <span class="chg" id="chg-s2-cap13"><span class="n">13</span><span>오류 줄 = 위치 · 이유 · 몇째 줄 (관행 없음 — 우리 설계) · <code>kind: preset</code> · <code>kind: settings</code> 인데 깨진 것 · 모르는 <code>kind</code> 만 — <code>kind</code> 없는 <code>.yaml</code> 은 목록에 안 보임 (2026-10-17)</span></span>
     <span><span>스킬 = 위 그림 그대로 · 프리셋 = 편집 칸(3절) · 어디에도 단추 없음 · 근거 = 관행 조사(Spacedrive · 탐색기 · Finder · Unity) — 2026-10-17</span></span>
+    <span class="chg" id="chg-s2-order-rule"><span><b>칸 순서 = 제목 → 위치(짧은 한 줄) → 내용(미리 보기 · 설명 · 이유 …) → 참조(맨 아래)</b> — 오른쪽 칸 · 편집 칸 줄 카드 같음 · 「변수가 작은 짧은 줄이 위」(사용자 · 근거 <code>docs/research/detail-pane-section-order-2026-10-18.md</code>)</span></span>
   </div>
-  <p class="pend"><span class="tag ok">확정</span><span>단축키 = OS 파일 관리자 기본값 — Windows: F2 이름 · Delete 휴지통 · Enter 열기 · Alt+← → 뒤로/앞으로 · Alt+↑ 상위 · Ctrl+Shift+N 새 폴더 · Ctrl+F 검색 · F5 새로 고침 · Shift+F10 메뉴 · 글자 = 그 이름으로 이동 / macOS: Finder 기본값(Enter 이름 · Cmd+Delete 휴지통 · Cmd+[ ] 뒤로/앞으로) — 슬롯 포커스 안에서만 · LLM 경로 없음(데이터 조작은 <code>library.*</code>) (2026-10-16)</span></p>
+  <p class="pend chg" id="chg-s2-shortcut"><span class="tag ok">확정</span><span>단축키 = OS 파일 관리자 기본값 — Windows: F2 이름 · Delete 삭제(라이브러리 안 <code>.trash</code> 로 — OS 휴지통 아님 · §4) · Enter 열기 · Alt+← → 뒤로/앞으로 · Alt+↑ 상위 · Ctrl+Shift+N 새 폴더 · Ctrl+F 검색 · F5 새로 고침 · Shift+F10 메뉴 · 글자 = 그 이름으로 이동 / macOS: Finder 기본값(Enter 이름 · Cmd+Delete 삭제(<code>.trash</code>) · Cmd+[ ] 뒤로/앞으로) — 슬롯 포커스 안에서만 · LLM 경로 없음(데이터 조작은 <code>library.*</code>) (2026-10-16) · 단축키는 그 기능의 차수를 따름 — 이름 바꾸기 · 삭제 키 = 2차 · 나머지 = 1차 (2026-10-19)</span></p>
 </section>
 
 <!-- 3 -->
@@ -506,6 +569,7 @@ a{color:var(--accent)}
       </div>
       <div class="pane side">
         <div class="head"><span class="kind p">프리셋</span><span class="t" style="font-size:14px">리뷰어</span><span class="callout">에이전트 3개에서 참조 중</span><span class="sp"></span><button class="btn" type="button">← 선택 항목 추가</button><button class="btn" type="button">+ 추가</button></div>
+        <div class="pl49 chg" id="chg-s3-main-problems"><span class="pi"><b class="g">찾을 수 없음</b><span>스킬 nightly</span><span class="n" style="flex:none">7</span></span><span class="pi"><b class="e">충돌</b><span>같은 이름 스킬 review 가 둘 — review · 공용 규칙 › 팀/review</span></span></div>
         <div class="grp ksec">▾ 프리셋</div>
         <div class="row"><span class="tw">▸</span><span class="name">공용 규칙</span><span class="n">2</span><span class="x">×</span></div>
         <div class="grp ksec">▸ 지침<span class="n">6</span></div>
@@ -520,10 +584,11 @@ a{color:var(--accent)}
   </div>
   <div class="caps">
     <span><span class="n">1</span>프리셋을 누르면 오른쪽 = 편집 칸 · 머리 = 「에이전트 N개에서 참조 중」(직접 + 건너서)</span>
-    <span><span class="n">2</span>종류별 칸 · ⋮⋮ 끌어 순서 · × 빼기 · 저장 단추 없이 바로 저장 · 안에 든 프리셋은 아래 그림처럼 그 자리에서 펼침</span>
-    <span><span class="n">3</span><span>칸 아래 줄 = 충돌(빨강)뿐 — 한 줄 = 무슨 충돌 — 걸린 항목 전부 + 각자 온 길(› = 그 프리셋 안에 든 · 그림 = 자기 review 와 공용 규칙 안의 팀/review) · 충돌은 하나 = 같은 이름 스킬 둘 이상(경로 다름) · 모델 충돌 검사 없음(CLI 가 하는 대로) · 실행이 막히면 같은 줄이 이유 · 경고 줄 없음</span></span>
+    <span class="chg" id="chg-s3-cap2"><span class="n">2</span><span>종류별 칸 · 왼쪽 ⋮⋮ 끌어 순서 · × 빼기 · 저장 단추 없이 바로 저장 · 안에 든 프리셋은 아래 그림처럼 그 자리에서 펼침 · 부품 줄(지침 · 스킬 · 설정) 누름 = 상세 카드 열고 닫기(아래 「부품 내용 보기」)</span></span>
+    <span class="chg" id="chg-s3-cap3"><span class="n">3</span><span>머리 아래 문제 목록(7)에도 같은 문구 · 칸 아래 줄 = 충돌(빨강)뿐 — 한 줄 = 무슨 충돌 — 걸린 항목 전부 + 각자 온 길(› = 그 프리셋 안에 든 · 그림 = 자기 review 와 공용 규칙 안의 팀/review) · 충돌은 하나 = 같은 이름 스킬 둘 이상(경로 다름) · 모델 충돌 검사 없음(CLI 가 하는 대로) · 실행이 막히면 같은 줄이 이유 · 경고 줄 없음</span></span>
     <span><span class="n">4</span>목록의 깨진 프리셋 · 설정 = 「오류 · 이유」</span>
-    <span><span class="n">5</span><span>가리키던 파일이 없음 → 점선 줄 「찾을 수 없음 · [다시 연결] ×」 · [다시 연결] = 「+ 추가」 와 같은 검색 팝오버(같은 종류 · 옛 이름이 채워진 채)에서 하나 고름 → 나머지도 이름으로 연결 · 같은 종류 · 같은 이름 후보가 하나뿐이면 「찾을 수 없음 — 후보 &lt;경로&gt; [연결]」 — 둘 다 고를 때까지 실행 막힘(§4 · 2026-10-18)</span></span>
+    <span class="chg" id="chg-s3-cap5"><span class="n">5</span><span>가리키던 파일이 없음 → 점선 줄 「찾을 수 없음 · [다시 연결] ×」 · [다시 연결](2차) = 「+ 추가」 와 같은 검색 팝오버(같은 종류 · 옛 이름이 채워진 채)에서 하나 고름 → 나머지도 이름으로 「N개 더 찾아 연결함」 · 고르기 전엔 아무것도 잇지 않음 · 훑을 때 후보 제안 줄 없음 · 다시 연결할 때까지 실행 막힘(찾을 수 없음 — §4 · 2026-10-19)</span></span>
+    <span class="chg" id="chg-s3-cap7"><span class="n">7</span><span>머리 아래 문제 목록 = 문제마다 한 줄(찾을 수 없음 · 오류 · 충돌 — 안에 든 프리셋 속 것도 「&lt;프리셋&gt; › …」 길과 함께) · 문구 = 그 줄 표시와 같음 · 누르면 그 줄로(접힌 종류 칸 · 안에 든 프리셋을 펼쳐서) · 줄 표시는 그대로 남음 · 문제가 없으면 안 보임 · 접는 개수 기준 없음 · 에이전트 슬롯도 같은 부품(§9) — 근거 <code>docs/research/editor-problem-summary-practice-2026-10-18.md</code></span></span>
     <span><span class="n">6</span><span>종류 머리 ▾ = 그 칸 접고 펴기(▸ = 접힘 — 그림의 지침) — 접은 상태는 1~4 공통으로 기억(2026-10-17)</span></span>
   </div>
   <p class="pend"><span class="tag ok">확정 2026-10-18</span><span>편집 칸 = 충돌만(경고 없음) · 실행 때도 충돌 내용만 · 새 대화 · codex 크기 한도 등은 알리지 않음(동작은 그대로)</span></p>
@@ -534,6 +599,7 @@ a{color:var(--accent)}
     <div class="win-body">
       <div class="pane side">
         <div class="head"><span class="kind p">프리셋</span><span class="t" style="font-size:14px">리뷰어</span><span class="sp"></span><button class="btn" type="button">← 선택 항목 추가</button><button class="btn" type="button">+ 추가</button><span class="n">4</span></div>
+        <div class="pl49 chg" id="chg-s3-kind-problems"><span class="pi"><b class="e">충돌</b><span>같은 이름 스킬 review 가 둘 — review · 공용 규칙 › 팀/review</span></span></div>
         <div class="grp ksec">▾ 프리셋<span class="sp"></span><span class="n">3</span><button class="btn kadd" type="button" aria-label="이 종류 검색해 추가">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 선택한 항목 추가">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
         <div class="row"><span class="tw">▾</span><span class="n">1</span><span class="name">공용 규칙</span><span class="x">×</span></div>
         <div class="nestv">
@@ -567,10 +633,10 @@ a{color:var(--accent)}
   </div>
   <p class="pend"><span class="tag ok">확정</span>‘에이전트가 실제로 받는 전체’ 평평한 보기는 만들지 않음 — 안에 든 프리셋은 그 자리에서 펼쳐 본다</p>
   <div class="sh"><h3>편집 칸의 줄 누르기</h3><span class="tag ok">확정</span><span class="tag ok">D11 관행 — 2026-10-18</span><span class="tag wait">리뷰 때 확인</span></div>
-  <p class="pend"><span class="tag ok">관행 — 2026-10-18</span><span>줄 상세 카드(👁) 자리 — 라이브러리 1~4 = 오른쪽 칸 <b>왼쪽</b> 가장자리(그 줄 높이 · 가운데 목록 위 · 창이 좁으면 트리까지 덮음 · 잘리지 않음) · 에이전트 슬롯 = 슬롯 바깥 오른쪽 → 자리 없으면 왼쪽 바깥으로 뒤집기 → 둘 다 없으면 창 안에 맞춰 슬롯을 덮음 · 그림 = <a href="#card-place">§10 「카드 자리」</a> · 옛 「창에 걸려 잘림 · 뒤집기 없음」 을 바꿈(Floating UI · Radix · MUI 관행)</span></p>
+  <p class="pend chg" id="chg-s3-card-place-note"><span class="tag ok">관행 — 2026-10-18</span><span>줄 상세 카드(부품 줄을 누르면 뜸 — 2026-10-19) 자리 —라이브러리 1~4 = 오른쪽 칸 <b>왼쪽</b> 가장자리(그 줄 높이 · 가운데 목록 위 · 창이 좁으면 트리까지 덮음 · 잘리지 않음) · 에이전트 슬롯 = 슬롯 바깥 오른쪽 → 자리 없으면 왼쪽 바깥으로 뒤집기 → 둘 다 없으면 창 안에 맞춰 슬롯을 덮음 · 그림 = <a href="#card-place">§10 「카드 자리」</a> · 옛 「창에 걸려 잘림 · 뒤집기 없음」 을 바꿈(Floating UI · Radix · MUI 관행)</span></p>
   <details class="old"><summary><span class="tag">지난 안</span>줄 누름 → 상세가 슬롯 가장자리에 붙어 옆 슬롯 위로 · 창 끝이면 잘림</summary><div class="oldb">
     <p class="pend"><span class="tag">2026-10-15</span><span>지침 · 스킬 · 설정 줄을 누르면 상세가 라이브러리 슬롯 오른쪽 가장자리에 붙어 옆 슬롯 위로 겹침 · 같은 줄 다시 = 닫힘 · 슬롯이 창 끝이면 창에 걸려 잘림(뒤집기 · 안쪽 대체 없음 — 메모 137)</span></p>
-    <p class="pend"><span class="tag">바뀜</span><span>2026-10-17 지침 내용 보기 = 줄 끝 👁(아래 「편집 칸에서 부품 내용 보기」 — 2026-10-18 모든 부품 줄로) · 2026-10-18 D11 관행 = 잘리지 않는 자리(<a href="#card-place">§10 그림</a>)</span></p>
+    <p class="pend chg" id="chg-s3-old-eye"><span class="tag">바뀜</span><span>2026-10-17 지침 내용 보기 = 줄 끝 눈 단추 → 2026-10-18 모든 부품 줄로 → 2026-10-19 눈 단추 걷고 부품 줄 누름 = 카드(아래 「편집 칸에서 부품 내용 보기」) · 2026-10-18 D11 관행 = 잘리지 않는 자리(<a href="#card-place">§10 그림</a>)</span></p>
   </div></details>
   <div class="win" role="img" aria-label="편집 칸에서 안에 든 프리셋 줄을 눌러 그 자리에서 펼친 예시">
     <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>라이브러리 1</div>
@@ -642,11 +708,11 @@ a{color:var(--accent)}
     <span><span class="n">2</span>줄에 마우스를 올리면 폴더 돋보기 — 누르거나 줄을 더블클릭하면 그 항목 자리로 이동 (기본 제공 프리셋은 꺼짐)</span>
     <span><span class="n">3</span>이동한 곳에선 그 프리셋을 고칠 수 있음 · ← 로 리뷰어로 돌아감</span>
   </div>
-  <p class="pend"><span class="tag ok">확정 2026-10-17</span><span>번호마다 저장 = 마지막 폴더 · 칸 폭 · 트리 펼침 · 뒤로/앞으로 기록은 앱이 떠 있는 동안만 · 칸 머리 · 참조 묶음 · 편집 칸 종류 칸의 접고 펴기 = 1~4 공통 저장 · 편집 칸 속 프리셋 펼침 · 메뉴 · 👁 카드 = 기억 안 함 (2026-10-17)</span></p>
+  <p class="pend chg" id="chg-s3-memory"><span class="tag ok">확정 2026-10-17</span><span>번호마다 저장 = 마지막 폴더 · 칸 폭 · 트리 펼침 · 뒤로/앞으로 기록은 앱이 떠 있는 동안만 · 칸 머리 · 참조 묶음 · 편집 칸 종류 칸의 접고 펴기 = 1~4 공통 저장 · 편집 칸 속 프리셋 펼침 · 메뉴 · 줄 상세 카드 = 기억 안 함 (2026-10-17)</span></p>
   <p class="pend"><span class="tag ok">확정</span>따로 된 프리셋 편집 슬롯은 만들지 않음 — 편집은 라이브러리 오른쪽 칸 하나 · 옛 프리셋(작업 폴더 즐겨찾기) 슬롯도 없앰</p>
-  <p class="lead">편집 칸에서 부품 내용 보기 <span class="tag ok">확정 2026-10-17</span> <span class="tag ok">👁 = 지침 · 스킬 · 설정 줄 모두 — 2026-10-18</span></p>
+  <p class="lead chg" id="chg-s3-peek-head">편집 칸에서 부품 내용 보기 <span class="tag ok">확정 2026-10-17</span> <span class="tag ok">부품 줄 누름 = 카드 열고 닫기 — 2026-10-19 (줄 끝 눈 단추는 걷음)</span></p>
   <style>.pe45{position:relative;grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.pe45>.pane+.pane{border-left:1px solid var(--app-line);border-top:0}.pe45 .row{padding:4px 8px}.eye45{font-size:11px;padding:0 4px;border:1px solid var(--app-line);border-radius:4px;background:var(--app-panel);line-height:1.4;cursor:pointer;flex:none}.eye45.on{border-color:var(--accent);background:var(--accent-soft);box-shadow:inset 0 1px 2px rgba(0,0,0,.25)}.rw45{position:relative}.pk45{position:absolute;z-index:2;top:-150px;right:calc(100% + 13px);width:260px;border:1px solid var(--accent);border-radius:8px;background:var(--app-raised);box-shadow:0 8px 22px rgba(0,0,0,.28);padding:10px;display:flex;flex-direction:column;gap:7px;color:var(--app-text)}.pk45::after{content:"";position:absolute;right:-6px;top:162px;width:10px;height:10px;background:var(--app-raised);border-top:1px solid var(--accent);border-right:1px solid var(--accent);transform:rotate(45deg)}.pk45 .head{flex-wrap:nowrap}.pk45 .head .t{font-size:14px}.sc45{position:relative;padding-right:9px}.sc45::after{content:"";position:absolute;right:0;top:2px;width:3px;height:45%;border-radius:2px;background:var(--app-line)}.sc45 .prev44{max-height:96px}@media (max-width:720px){.pe45{grid-template-columns:minmax(0,1fr)}.pe45>.pane+.pane{border-left:0;border-top:1px solid var(--app-line)}.pk45{position:relative;top:auto;right:auto;width:auto;margin-top:10px}.pk45::after{top:-6px;right:auto;left:28px;transform:rotate(-45deg)}}</style>
-  <div class="win" role="img" aria-label="편집 칸의 지침 줄 리뷰 규칙 끝 눈 단추를 누르면, 목록에서 선택할 때 오른쪽 칸에 나오는 것과 같은 지침 카드가 편집 칸 왼쪽 가운데 목록 위로 떠 그 줄을 가리키는 예시 — 안에 든 프리셋 공용/기본 규칙은 그 자리에서 흐리게 펼쳐짐 · 스킬 · 설정 줄 끝에도 같은 눈 단추가 있음">
+  <div class="chg" id="chg-s3-peek-fig"><div class="win" role="img" aria-label="편집 칸의 지침 줄 리뷰 규칙을 누르면, 목록에서 선택할 때 오른쪽 칸에 나오는 것과 같은 지침 카드(위치 · 미리 보기 · 참조)가 편집 칸 왼쪽 가운데 목록 위로 떠 그 줄을 가리키는 예시 — 안에 든 프리셋 공용/기본 규칙은 그 자리에서 흐리게 펼쳐짐 · 스킬 · 설정 줄도 누르면 같은 카드">
     <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>라이브러리 1 — 프리셋/리뷰어.yaml</div>
     <div class="win-body pe45">
       <div class="pane">
@@ -670,16 +736,18 @@ a{color:var(--accent)}
           <div class="grp ksec">프리셋</div>
           <div class="row"><span class="tw">▸</span><span class="name">공용/안전 규칙</span><span class="n">6</span></div>
           <div class="grp ksec">지침</div>
-          <div class="row"><span class="name">기본 말투</span><span class="eye45" aria-label="내용 보기">👁</span></div>
+          <div class="row"><span class="name">기본 말투</span></div>
           <div class="grp ksec">스킬</div>
-          <div class="row"><span class="name">pr-check</span><span class="eye45" aria-label="내용 보기">👁</span></div>
+          <div class="row"><span class="name">pr-check</span></div>
         </div>
         <div class="grp ksec">▾ 지침</div>
         <div class="rw45">
-          <div class="row on"><span class="grip">⋮⋮</span><span class="name">리뷰 규칙</span><span class="n">4</span><span class="eye45 on" aria-label="내용 보기">👁</span><span class="x">×</span></div>
+          <div class="row on"><span class="grip">⋮⋮</span><span class="name">리뷰 규칙</span><span class="n">4</span><span class="x">×</span></div>
           <div class="pk45">
             <div class="head"><span class="kind">지침</span><span class="t">리뷰 규칙</span><span class="sp"></span><span class="n">5</span><span class="x" aria-label="닫기">×</span></div>
             <div class="final">
+              <span class="k">위치</span>
+              <span class="v">지침/리뷰 규칙.md</span>
               <span class="k">미리 보기</span>
               <div class="sc45"><div class="prev44"><b># 리뷰 규칙</b>- 칭찬하지 않는다<br>- 근거 없는 지적 금지<br>- 파일:줄 로 가리킨다<br>- 고칠 수 있으면 고친 안을 준다</div></div>
               <span class="k">참조</span>
@@ -687,27 +755,27 @@ a{color:var(--accent)}
             </div>
           </div>
         </div>
-        <div class="row"><span class="grip">⋮⋮</span><span class="name">글쓰기 규칙</span><span class="eye45" aria-label="내용 보기">👁</span><span class="x">×</span></div>
+        <div class="row"><span class="grip">⋮⋮</span><span class="name">글쓰기 규칙</span><span class="x">×</span></div>
         <div class="grp ksec">▾ 스킬</div>
-        <div class="row"><span class="name">review</span><span class="eye45" aria-label="내용 보기">👁</span><span class="x">×</span></div>
+        <div class="row"><span class="name">review</span><span class="x">×</span></div>
         <div class="grp ksec">▾ 설정</div>
-        <div class="row"><span class="grip">⋮⋮</span><span class="name">codex high</span><span class="eye45" aria-label="내용 보기">👁</span><span class="x">×</span></div>
+        <div class="row"><span class="grip">⋮⋮</span><span class="name">codex high</span><span class="x">×</span></div>
       </div>
     </div>
-  </div>
+  </div></div>
   <div class="caps">
-    <span><span class="n">4</span><span>부품 줄(지침 · 스킬 · 설정) 끝 👁 = 그 항목 카드를 편집 칸 왼쪽(목록 위)에 띄움(2026-10-17 은 지침 줄만 · 2026-10-18 모든 부품 줄) — 목록에서 선택할 때 오른쪽 칸에 나오는 카드와 같은 것(참조 = 같은 종류별 묶음 · 접고 펴기) · 카드 안 스크롤 · 카드 자체는 기억 안 함</span></span>
-    <span><span class="n">5</span><span>닫기 = × · 카드 바깥 아무 데나 누름 · Esc(겹쳐 떠 있으면 마지막에 연 것부터 · 2026-10-18) — 카드가 떠 있을 때 다른 줄 👁 = 바로 그 줄 카드로 바뀜(한 번 누름) · 줄 누름 = 끼울 자리 선택(그대로) · 더블클릭 = 그 항목 자리로(R28)</span></span>
-    <span><span class="n">6</span><span>안에 든 프리셋 줄 = 누르면 그 자리에서 ▾ 펼침(흐리게 · 보기만 · 몇 겹이든 같음) · 프리셋 줄엔 👁 없음 — 펼쳐서 본다 · 펼친 안쪽 부품 줄도 👁 = 같은 카드</span></span>
+    <span class="chg" id="chg-s3-peek-c4"><span class="n">4</span><span>부품 줄(지침 · 스킬 · 설정 — 바깥 · 펼친 안쪽 모두) 누름 = 그 항목 카드를 편집 칸 왼쪽(목록 위)에 띄움 · 그 줄은 그대로 끼울 자리로 선택됨 — 목록에서 선택할 때 오른쪽 칸에 나오는 카드와 같은 것(위치 → 내용 → 참조 · 참조 = 같은 종류별 묶음 · 접고 펴기) · 떠 있는 카드(마우스 올림 툴팁 아님) · 카드 안 스크롤 · 카드 자체는 기억 안 함 · 줄 끝 눈 단추는 걷음 — 작고 자주 봄(2026-10-19)</span></span>
+    <span class="chg" id="chg-s3-peek-c5"><span class="n">5</span><span>닫기 = 같은 줄 다시 누름 · × · 카드 바깥 아무 데나 누름 · Esc(겹쳐 떠 있으면 마지막에 연 것부터 · 2026-10-18) — 카드가 떠 있을 때 다른 부품 줄 누름 = 바로 그 줄 카드로 바뀜 · 왼쪽 ⋮⋮ = 끌어 순서 · 더블클릭 = 그 항목 자리로(R28)</span></span>
+    <span class="chg" id="chg-s3-peek-c6"><span class="n">6</span><span>안에 든 프리셋 줄 = 누르면 그 자리에서 ▾ 펼침(흐리게 · 보기만 · 몇 겹이든 같음) · 프리셋 줄 누름은 그대로(선택 + 펼침 — 카드 없음) · 펼친 안쪽 부품 줄도 누르면 같은 카드</span></span>
   </div>
 </section>
 
 <!-- 4 -->
 <section id="file-ops">
-  <div class="sh"><span class="no">4</span><h2>파일 조작</h2><span class="tag ok">확정</span></div>
+  <div class="sh chg" id="chg-s4-head"><span class="no">4</span><h2>파일 조작</h2><span class="tag ok">확정</span><span class="tag">2차 — 이동 · 이름 바꾸기 · 삭제 · 끌어 옮기기 · 다시 연결</span><span class="tag ok">1차 — 새로 만들기</span></div>
   <p class="lead">새로 만들기는 폴더 우클릭으로 — 가운데 목록의 ‘+ 새로 만들기’는 없앰.</p>
   <div class="cfg">
-    <div class="win" role="img" aria-label="라이브러리 트리의 폴더 우클릭 메뉴와 목록에서 트리로 끌어서 이동하는 예시">
+    <div class="chg" id="chg-s4-drag-fig"><div class="win" role="img" aria-label="라이브러리 트리의 폴더 우클릭 메뉴와, 목록에서 고른 두 항목을 트리 폴더로 끌어서 한 번에 이동하는 예시">
       <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>라이브러리 1 — 스킬 › 리뷰</div>
       <div class="win-body ab">
         <div class="pane side">
@@ -730,42 +798,56 @@ a{color:var(--accent)}
             <div class="li hd"><span class="star"></span><span class="kind">종류</span><span class="name">이름 ▲</span><span class="use">참조</span></div>
             <div class="li"><span class="star"></span><span class="kind">폴더</span><span class="name">📁 보안</span><span class="use">항목 2개</span></div>
             <div class="li"><span class="star on">★</span><span class="kind">스킬</span><span class="name"><svg class="ico44" aria-hidden="true"><use href="#skill44"/></svg>review</span><span class="use">프리셋 2개</span></div>
-            <div class="li on sel-ol"><span class="star">☆</span><span class="kind">스킬</span><span class="name"><svg class="ico44" aria-hidden="true"><use href="#skill44"/></svg>code-review</span><span class="use">↖ 끄는 중</span></div>
-            <div class="li"><span class="star on">★</span><span class="kind">스킬</span><span class="name"><svg class="ico44" aria-hidden="true"><use href="#skill44"/></svg>pr-check</span><span class="use">—</span></div>
+            <div class="li on sel-ol"><span class="star">☆</span><span class="kind">스킬</span><span class="name"><svg class="ico44" aria-hidden="true"><use href="#skill44"/></svg>code-review</span><span class="use">↖ 2개 끄는 중</span></div>
+            <div class="li on sel-ol"><span class="star on">★</span><span class="kind">스킬</span><span class="name"><svg class="ico44" aria-hidden="true"><use href="#skill44"/></svg>pr-check</span><span class="use">—</span></div>
           </div>
         </div>
       </div>
-    </div>
+    </div></div>
     <div class="side-col">
-      <div class="dialog" role="img" aria-label="참조하는 프리셋이 있는 항목을 삭제할 때의 확인 창 예시">
-        <div class="dh">‘review’ 삭제 <span class="n">3</span></div>
-        <div class="db">
-          <div class="msg warn"><b>경고</b><span>프리셋 2개에서 참조 중입니다 — 리뷰어 · 야간 점검</span></div>
-          <div class="msg warn"><b>경고</b><span>에이전트 3개에서 참조 중입니다 — 리뷰봇 · PR 감시 · 야간 점검 (위 프리셋 통해)</span></div>
-          <span class="callout">휴지통으로 이동합니다 · 삭제한 뒤 그 줄들은 「찾을 수 없음」</span>
+      <div class="modal49 chg" id="chg-s4-delete-modal" role="img" aria-label="여러 개를 골라 지울 때, 그중 하나라도 참조되면 참조를 한 번에 늘어놓는 창 전체 삭제 확인 모달 예시">
+        <span class="mn">창 전체를 덮는 모달 — 뒤 에이전트 · 채팅은 계속 돎 · 입력만 막힘</span>
+        <div class="dialog">
+          <div class="dh">항목 2개 삭제 — review · pr-check <span class="n">3</span></div>
+          <div class="db">
+            <div class="msg warn"><b>경고</b><span>review — 프리셋 2개에서 참조 중입니다 — 리뷰어 · 야간 점검</span></div>
+            <div class="msg warn"><b>경고</b><span>review — 에이전트 3개에서 참조 중입니다 — 리뷰봇 · PR 감시 · 야간 점검 (위 프리셋 통해)</span></div>
+            <span class="callout">pr-check = 참조 없음 · 둘 다 라이브러리 안 숨은 <code>.trash</code> 폴더로 옮깁니다(OS 휴지통 안 씀) · 삭제한 뒤 그 줄들은 「찾을 수 없음」</span>
+          </div>
+          <div class="df"><button class="btn" type="button">취소</button><button class="btn pri" type="button">.trash 로 삭제</button></div>
         </div>
-        <div class="df"><button class="btn" type="button">취소</button><button class="btn pri" type="button">휴지통으로 이동</button></div>
       </div>
-<div class="cli"><span class="c"># 에이전트(권고 · 강제 아님) — 명령 이름 = TRD §1-7</span>  <span class="n">4</span>
+<div class="chg" id="chg-s4-cli"><div class="cli"><span class="c"># 에이전트(권고 · 강제 아님) — 명령 이름 = TRD §1-7</span>  <span class="n">4</span>
 <span class="k">내용</span>    → 파일 직접 고침
-<span class="k">이동</span>    → engram library.move
+<span class="k">이동</span>    → engram library.move     <span class="c"># 여러 개 한 번에</span>
 <span class="k">이름</span>    → engram library.rename
-<span class="k">삭제</span>    → engram library.delete   <span class="c"># 참조 중이면 --yes 필요</span>
-<span class="k">갱신</span>    → engram library.refresh  <span class="c"># 바깥에서 바꾼 뒤</span></div>
+<span class="k">삭제</span>    → engram library.delete   <span class="c"># .trash 로 · 참조 중이면 --yes 필요</span>
+<span class="k">비우기</span>  → 명령 없음                <span class="c"># .trash 비우기 = 사람만</span>
+<span class="k">갱신</span>    → engram library.refresh  <span class="c"># 바깥에서 바꾼 뒤</span></div></div>
     </div>
   </div>
   <div class="caps">
-    <span><span class="n">1</span><span>첫 판 = 이동 · 이름 바꾸기 · 삭제 · 새로 만들기 ▸ 폴더 · 마크다운(빈 <code>.md</code>) · 설정(<code>kind: settings</code> 틀) · 프리셋(<code>kind: preset</code> 틀 → 바로 편집 칸) — 스킬은 폴더 + <code>SKILL.md</code> 마크다운으로 만든다 · 내용은 편집기 · 에이전트 몫 (2026-10-16)</span></span>
-    <span><span class="n">2</span>이동 = 목록에서 트리로 끌어 놓기 · 이동하거나 이름을 바꾸면 데몬이 같은 조작 안에서 프리셋 속 경로와 에이전트 붙임을 같이 고침 · 즐겨찾기 컬렉션은 각 화면이 다음 요청 때 따라 고침(§18)</span>
-    <span><span class="n">3</span>삭제 = 항상 OS 휴지통 (데몬 PC · 영구 삭제 없음) · 참조하는 프리셋 · 에이전트가 있으면 먼저 확인 창에 둘 다 늘어놓음</span>
+    <span class="chg" id="chg-s4-cap1"><span class="n">1</span><span>메뉴 = 새로 만들기(<b>1차</b>) · 이동 · 이름 바꾸기 · 삭제 → <code>.trash</code>(<b>2차</b>) — 새로 만들기 ▸ 폴더 · 마크다운(빈 <code>.md</code>) · 설정(<code>kind: settings</code> 틀 + 빈 <code>description: </code> 줄) · 프리셋(<code>kind: preset</code> 틀 + 빈 <code>description: </code> 줄 → 바로 편집 칸) — 스킬은 폴더 + <code>SKILL.md</code> 마크다운으로 만든다 · 내용은 편집기 · 에이전트 몫 (2026-10-16 · 빈 설명 줄 2026-10-19 — §8)</span></span>
+    <span class="chg" id="chg-s4-cap2"><span class="n">2</span><span>이동 = 폴더 위에 끌어 놓기 — 어디서든(아래 표) · 여러 개를 골라(Ctrl · Shift · 박스) 한 번에 · 이동하거나 이름을 바꾸면 데몬이 같은 조작 안에서 프리셋 속 경로와 에이전트 붙임을 같이 고침 · 즐겨찾기 컬렉션은 각 화면이 다음 요청 때 따라 고침(§18)</span></span>
+    <span class="chg" id="chg-s4-cap3"><span class="n">3</span><span>삭제 = 늘 라이브러리 폴더 안 숨은 <code>.trash</code> 로 옮김(OS 휴지통은 아예 안 씀 · 영구 삭제 없음) · <code>.trash</code> 는 트리 · 목록 · 검색에 안 보임 · 라이브러리 폴더 자체는 지울 수 없음(바꾸기는 「…」 — §5) · 여러 개도 한 번에 · 고른 것 중 하나라도 참조되면 확인 하나에 참조를 전부 늘어놓음 = 창 전체 모달(뒤 에이전트는 계속 돎 · 입력만 막힘) · 참조가 없으면 묻지 않음</span></span>
     <span><span class="n">4</span><span>사람 = 앱 안에서 전부(내용 = 더블클릭 → OS 기본 편집기) · AI = 같은 <code>engram</code> 명령 또는 바깥에서 직접 — 강제 아님 · 프라이밍엔 권고 둘: 바깥에서 바꿨으면 <code>library.refresh</code> · 이동 · 이름 · 삭제를 <code>engram</code> 명령으로 하면 참조가 같이 고쳐짐(바깥에서 하면 「찾을 수 없음」 — 아래 「다시 연결」) (2026-10-17)</span></span>
   </div>
+  <div class="chg" id="chg-s4-drag-map"><div class="tbl44"><table>
+    <thead><tr><th>끌어 옮기기 — 폴더에 놓으면 이동</th><th>무엇</th></tr></thead>
+    <tbody>
+      <tr><td>끌 것</td><td>목록 항목(여러 개 — Ctrl · Shift · 박스 선택) · 트리 폴더</td></tr>
+      <tr><td>놓을 곳</td><td>트리 폴더(같은 슬롯 · 다른 라이브러리 슬롯) · 목록의 📁 폴더 줄(같은 · 다른 슬롯) · 다른 슬롯의 목록(= 그 슬롯이 보고 있는 폴더) — 트리 → 트리 · 목록 → 목록 📁 도 됨</td></tr>
+      <tr><td>창 사이</td><td>떠 있는 창(팝아웃)끼리는 기술 확인 뒤 — 안 되면 첫 판은 같은 창 안 슬롯끼리만(사용자 확인 2026-10-19)</td></tr>
+      <tr><td>기술 메모</td><td>react-arborist 는 자기 끌기(react-dnd)를 품고 목록 · 편집 칸은 dnd-kit — 끌기는 한 가지로 통일(TRD · 구현 전 라이브러리 조사에서 정함)</td></tr>
+    </tbody>
+  </table></div></div>
+  <p class="pend chg" id="chg-s4-trash"><span class="tag ok">확정 2026-10-19</span><span><code>.trash</code> = 늘 우리 숨은 폴더(라이브러리 루트 안) — LLM · CLI 도 지울 수 있음(<code>.trash</code> 로) · <b>비우기 = 사람만</b> — <code>engram</code> · 버스 명령 없음(원칙 「LLM-우선 제어」의 의도된 예외 → ADR 후보 · 이유 = 에이전트가 잘못 지워도 되살릴 수 있어야 함) · 사람의 비우기 · 되살리기 화면과 <code>.trash</code> 안 이름 겹침 = TRD 가 정함 · 근거 <code>docs/research/trash-unavailable-delete-practice-2026-10-19.md</code></span></p>
   <p class="pend"><span class="tag ok">확정</span>새로 만들면 우클릭한 폴더 안에 이름 칸이 편집 중인 채로 생김(탐색기처럼) — 새 폴더 · 새 마크다운.md · 새 설정.yaml · 새 프리셋.yaml · 같은 이름이 있으면 (2) · Esc = 기본 이름 그대로 (2026-10-16)</p>
 
-  <div class="sh" id="relink"><h3>다시 연결 — 하나 고르면 나머지는 이름으로</h3><span class="tag ok">관행 — 2026-10-18</span><span class="tag wait">리뷰 때 확인 · D10</span></div>
+  <div class="chg" id="chg-s4-relink-head"><div class="sh" id="relink"><h3>다시 연결 — 하나 고르면 나머지는 이름으로</h3><span class="tag ok">관행 — 2026-10-18</span><span class="tag ok">D10 확정 2026-10-19 — 후보 제안 없음</span><span class="tag">2차</span></div></div>
   <style>.rl48 .row.gone48{border-style:dashed;color:var(--gone)}.rl48 .row.gone48 code{white-space:nowrap}.rl48 .pop{margin:2px 0 4px 18px}.rl48 .search .fchip{padding:0 8px;font-size:11px}.msg.inf48{background:var(--accent-soft);color:var(--accent)}.step48{font-size:11px;color:var(--app-muted);border-top:1px dashed var(--app-line);padding-top:4px;margin-top:2px}</style>
   <div class="popwrap rl48">
-    <div class="win" role="img" aria-label="바깥에서 스킬 폴더를 옮긴 뒤 프리셋 편집 칸의 찾을 수 없음 줄에서 다시 연결을 눌러 검색 팝오버에서 하나를 고르면 나머지 둘도 이름으로 연결되고, 후보가 하나인 줄은 연결 단추가 붙은 제안으로 남는 예시">
+    <div class="chg" id="chg-s4-relink-fig"><div class="win" role="img" aria-label="바깥에서 스킬 폴더를 옮긴 뒤 프리셋 편집 칸의 찾을 수 없음 줄에서 다시 연결을 눌러 검색 팝오버에서 하나를 고르면 나머지 둘도 이름으로 연결되는 예시 — 고르기 전엔 아무것도 잇지 않음">
       <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>프리셋 리뷰어 — 바깥에서 스킬 폴더를 옮긴 뒤</div>
       <div class="win-body"><div class="pane side">
         <div class="grp ksec">▾ 스킬</div>
@@ -777,19 +859,18 @@ a{color:var(--accent)}
         </div>
         <div class="step48">고른 뒤</div>
         <div class="msg inf48"><b>연결함</b><span>nightly → 스킬/야간/nightly · 2개 더 찾아 연결함 — pr-check · code-review</span><span class="n" style="flex:none">3</span></div>
-        <div class="row gone48"><span class="name" style="white-space:normal">review — 찾을 수 없음 — 후보 <code>스킬/공용/review</code></span><button class="btn" type="button">연결</button><span class="n">4</span><span class="x">×</span></div>
       </div></div>
-    </div>
+    </div></div>
     <div class="caps" style="grid-template-columns:minmax(0,1fr)">
       <span><span class="n">1</span><span>찾을 수 없음 = 점선 줄 · [다시 연결] · × — 편집 칸 · 에이전트 슬롯 같음 · 그 항목을 품은 프리셋 줄엔 빨간 오류 수(§9) · 실행 막힘</span></span>
       <span><span class="n">2</span><span>[다시 연결] = 「+ 추가」 와 같은 검색 팝오버(§7) — 같은 종류만 · 옛 이름이 채워진 채 · 하나 고름</span></span>
       <span><span class="n">3</span><span>고르면 항목마다 묻지 않고 이름으로 이어서 연결 — ① 같은 옛 경로를 가리키던 참조 전부(모든 프리셋 · 에이전트) ② 옛 폴더가 같던 다른 「찾을 수 없음」 중 새 파일 폴더에 같은 이름이 있는 것 → 「N개 더 찾아 연결함」 (Premiere · After Effects · Resolve · Blender 관행)</span></span>
-      <span><span class="n">4</span><span>훑을 때 같은 종류 · 같은 이름 후보가 하나뿐이면 제안만 「찾을 수 없음 — 후보 &lt;경로&gt; [연결]」 — 저절로 쓰지 않음 · [연결] 누를 때까지 실행 막힘(다시 연결 확인 대기) · 누르면 3 도 그대로</span></span>
+      <span class="chg" id="chg-s4-relink-c4"><span class="n">4</span><span>훑을 때 후보를 내지 않음 — 「찾을 수 없음 — 후보 …」 줄 · 「다시 연결 확인 대기」 막힘은 없음 · 사용자가 하나 고르기 전엔 아무것도 잇지 않음 · 옛 이름을 채워 두는 것은 우리 편의(피어 근거 없음) (2026-10-19)</span></span>
       <span><span class="n">5</span><span>LLM · CLI = 같은 일을 <code>library.relink {from, to}</code> 로(code + args — §11) · Engram 안 이동 · 이름 바꾸기는 정확히 따라 고침 — 다시 연결은 바깥(탐색기)에서 옮긴 것만</span></span>
     </div>
   </div>
   <p class="pend"><span class="tag ok">관행 — 2026-10-18</span><span>다시 연결 = 하나 고르면 나머지는 이름으로 · 항목마다 확인 없음 — 근거 <code>docs/research/relink-and-error-popup-practice-2026-10-18.md</code></span></p>
-  <p class="pend"><span class="tag ok">관행 — 2026-10-18</span><span class="tag wait">리뷰 때 확인</span><span>D10 = 확인 한 번 — 사용자가 찾기를 시작하기 전에 이름만 보고 저절로 잇는 곳이 없음 · 옛 「다시 연결됨 · 이전 경로(확인 전)」 표시는 없앰 — 줄은 「찾을 수 없음(+ 후보)」 이거나 정상 · <b>옛 사용자 결정 「저절로」(메모 68)를 뒤집음</b></span></p>
+  <p class="pend chg" id="chg-s4-d10"><span class="tag ok">확정 2026-10-19</span><span>D10 풀림 = 사용자가 하나 고르기 전엔 잇지 않음 — 피어도 첫 하나는 사람이 찾고 나머지를 이름으로 · 이름만 보고 저절로 잇는 곳 없음 · 훑을 때 후보 제안 줄과 「다시 연결 확인 대기」 막힘은 걷음(사용자 「그게 더 자연스러운 것 같네」) · 옛 「다시 연결됨 · 이전 경로(확인 전)」 표시도 없음 — 줄은 「찾을 수 없음 · [다시 연결] ×」 이거나 정상 · <b>옛 사용자 결정 「저절로」(메모 68)를 뒤집음</b></span></p>
 </section>
 
 <!-- 5 -->
@@ -834,7 +915,7 @@ a{color:var(--accent)}
   </div>
   <p class="pend"><span class="tag ok">확정</span><span>기본 제공 프리셋은 라이브러리 밖 — <code>engram:/default</code>(「기본」) 하나 · 라이브러리 프리셋 파일에 적으면 그 줄이 「오류」 · 옛 <code>engram:/backend/claude</code> · <code>engram:/backend/codex</code> 는 걷음(2026-10-18)</span></p>
   <p class="pend"><span class="tag ok">확정</span><span>처음 = 슬롯의 빈 트리 안에 「아직 라이브러리 폴더를 선택하지 않았습니다.」 + [폴더 열기] [새로 만들기] · 선택한 폴더가 없어지면 같은 자리에 「&lt;경로&gt;를 찾을 수 없습니다」 + 같은 단추(설정 값은 둠)</span></p>
-  <p class="pend"><span class="tag ok">확정</span><span>폴더 바꾸기 = 트리 맨 위 머리의 경로 옆 「…」 → 바로 폴더 선택 창(같은 PC · 메뉴 없음) · LLM = <code>library.setRoot</code> · 바꾼 뒤 참조는 새 루트에서 <b>경로 그대로</b> 풀림 — 같은 경로가 있으면 그대로 쓰고(내용이 달라도) 없으면 「찾을 수 없음 · [다시 연결] ×」 · 루트를 넘는 다시 연결 후보 없음</span></p>
+  <p class="pend chg" id="chg-s5-root-relink"><span class="tag ok">확정</span><span>폴더 바꾸기 = 트리 맨 위 머리의 경로 옆 「…」 → 바로 폴더 선택 창(같은 PC · 메뉴 없음) · LLM = <code>library.setRoot</code> · 바꾼 뒤 참조는 새 루트에서 <b>경로 그대로</b> 풀림 — 같은 경로가 있으면 그대로 쓰고(내용이 달라도) 없으면 「찾을 수 없음 · [다시 연결] ×」 · [다시 연결] 검색은 지금 루트 안에서만(훑을 때 후보 제안은 없음 — §4)</span></p>
   <p class="pend"><span class="tag ok">확정 2026-10-18</span><span>T5 = 첫 판엔 설정 창 없음 — 트리 머리(경로 옆 「…」 → 바로 폴더 선택 창) · 명령(<code>library.setRoot</code> · <code>settings.set</code>)만(추천 그대로 · 문구 확인 2026-10-18)</span></p>
   <p class="pend"><span class="tag ok">관행 — 2026-10-18</span><span>T2 = Engram 이 프리셋 YAML 을 고쳐도 손 주석을 남김(관행 = 보존 · Home Assistant · openHAB 불만 · ruamel.yaml) — 후보 <code>yaml-edit</code> 0.3.2(무손실 트리) · 첫 구현 단계 = 실 프리셋 파일로 스파이크 · <code>yamlpatch</code> 와 비교 · 둘 다 안 되면 「잃음 받아들이고 메모는 <code>description</code>」 으로 돌아가 사용자에게 보고 · 읽기는 serde-saphyr 그대로 · 근거 <code>docs/research/yaml-comment-preserving-edit-2026-10-18.md</code></span></p>
   <p class="pend"><span class="tag">범위 밖</span><span>배포판에 라이브러리 내용을 싣지 않음 — 실을 계획이 생기면 그때 「사용자가 고친 같은 이름 파일이 덮이는」 문제를 다시 연다</span></p>
@@ -859,8 +940,8 @@ a{color:var(--accent)}
           <div class="lib"><b>TanStack Table + TanStack Virtual</b><small>많아도 보이는 줄만 그림</small></div>
           <div class="lib"><b>react-selecto</b><small>박스로 여러 개 선택</small></div>
         </div>
-        <div class="wrapc"><span class="wn">LibraryDnd <span class="n">2</span></span>
-          <div class="lib"><b>dnd-kit core</b><small>목록 → 트리 끌어 놓기</small></div>
+        <div class="wrapc chg" id="chg-s6-dnd"><span class="wn">LibraryDnd <span class="n">2</span></span>
+          <div class="lib"><b>dnd-kit core</b><small>폴더에 놓으면 이동 — 목록 · 트리 · 다른 슬롯 어디서든(§4) · 트리의 react-dnd 와 한 가지로 통일(조사 뒤)</small></div>
         </div>
       </div>
       <div class="pane side">
@@ -907,10 +988,10 @@ a{color:var(--accent)}
       <div class="cl"><span class="k">우리 역할</span><span><span class="n">2</span>박스로 여러 개 선택</span></div>
       <div class="cl"><span class="k">감싸는 부품</span><code>LibraryList</code></div>
     </div>
-    <div class="card">
+    <div class="card chg" id="chg-s6-dnd-card">
       <div class="ct"><b>dnd-kit</b><span class="pkg">@dnd-kit/core · @dnd-kit/sortable</span><span class="mini">화면</span><span class="mini">npm</span><span class="mini lic">MIT</span></div>
       <div class="cl"><span class="k">무엇</span><span>가볍고 접근성 좋은 끌어 놓기 라이브러리</span></div>
-      <div class="cl"><span class="k">우리 역할</span><span><span class="n">2</span>목록 → <span class="n">1</span>트리 끌어 놓기 = 이동 · <span class="n">5</span>편집 칸 ⋮⋮ 순서</span></div>
+      <div class="cl"><span class="k">우리 역할</span><span><span class="n">2</span>목록 · <span class="n">1</span>트리 · 다른 슬롯 — 폴더에 놓으면 이동 · <span class="n">5</span>편집 칸 ⋮⋮ 순서 · react-arborist 자체 끌기(react-dnd)와 겹침 → 한 가지로 통일(구현 전 조사)</span></div>
       <div class="cl"><span class="k">감싸는 부품</span><span><code>LibraryDnd</code> · <code>EditorSection</code></span></div>
     </div>
     <div class="card">
@@ -930,7 +1011,7 @@ a{color:var(--accent)}
   <div class="chain">
     <div class="node"><b>화면 요청</b><div class="parts"><span class="part">libraryQueries → 명령 버스</span></div></div>
     <div class="arrow">→</div>
-    <div class="node"><b>데몬 <code>library</code> 모듈 <span class="n">4</span></b><div class="parts"><span class="part"><span>저장소 포트 <code>LibraryStore</code>: 훑기 · 읽기 · 원자적 쓰기 · 폴더 만들기 · 이름 바꾸기 · 휴지통</span></span></div></div>
+    <div class="node"><b>데몬 <code>library</code> 모듈 <span class="n">4</span></b><div class="parts"><span class="part chg" id="chg-s6-store"><span>저장소 포트 <code>LibraryStore</code>: 훑기 · 읽기 · 원자적 쓰기 · 폴더 만들기 · 이름 바꾸기 · <code>.trash</code> 로 옮기기(OS 휴지통 안 씀)</span></span></div></div>
     <div class="arrow">→</div>
     <div class="node"><b>walkdir · serde-saphyr · yaml-edit · jsonschema</b><div class="parts"><span class="part"><span>walkdir — 폴더 훑기 (<code>FsStore</code>)</span></span><span class="part"><span>serde-saphyr — YAML 읽기 (<code>format</code>)</span></span><span class="part"><span>yaml-edit — 주석 지키며 고치기 (<code>format</code> · 후보 · T2 스파이크)</span></span><span class="part"><span>jsonschema — 설정 스키마 검사 (<code>validate</code>)</span></span></div></div>
     <div class="arrow">→</div>
@@ -956,9 +1037,9 @@ a{color:var(--accent)}
       <div class="cl"><span class="k">우리 역할</span><span><span class="n">4</span>Engram 이 프리셋 파일을 고칠 때 손 주석을 남김 · 첫 구현 단계에 실 파일로 스파이크(대안 <code>yamlpatch</code>)</span></div>
       <div class="cl"><span class="k">감싸는 부품</span><code>library::format</code></div>
     </div>
-    <div class="card">
+    <div class="card chg" id="chg-s6-jsonschema">
       <div class="ct"><b>jsonschema</b><span class="mini">데몬</span><span class="mini">crate</span><span class="mini lic">MIT</span></div>
-      <div class="cl"><span class="k">무엇</span><span>JSON 스키마 검사 · 0.59.0 (내려받기 기능 끔 — 스키마는 우리가 받아 둠)</span></div>
+      <div class="cl"><span class="k">무엇</span><span>JSON 스키마 검사 · 0.59.0 (내려받기 기능 끔 — 스키마는 우리가 받아 <code>daemon\cache\schemas\</code> 에 둠 · 지워도 다시 받음)</span></div>
       <div class="cl"><span class="k">우리 역할</span><span><span class="n">4</span>설정 원문 칸 검사 — claude = SchemaStore · codex = 깔린 판 <code>config-schema.json</code></span></div>
       <div class="cl"><span class="k">감싸는 부품</span><code>library::validate</code></div>
     </div>
@@ -967,7 +1048,9 @@ a{color:var(--accent)}
     <span><i class="sw"></i>남의 라이브러리는 항상 우리 부품 안에 감쌈 → 바꿔 끼울 수 있게</span>
     <span><span class="n">4</span><span>데몬 <code>library</code> = 데몬 crate 안 따로 된 모듈 · 실물 <code>FsStore</code> · 시험 땐 메모리 가짜 <code>MemStore</code> 로 갈아 끼움</span></span>
     <span><span class="mini">조합</span>Spacedrive 를 따름</span>
-    <span><span class="mini">그 밖</span>relative-path · junction · windows(휴지통) — §20 표</span>
+    <span class="chg" id="chg-s6-misc"><span class="mini">그 밖</span><span>relative-path · junction — §20 표 · OS 휴지통(windows <code>IFileOperation</code>) 작업은 걷음 — 삭제는 우리 <code>.trash</code></span></span>
+    <span class="chg" id="chg-s6-editor-share"><span class="n">5</span><span><code>PresetEditor</code> = 따로 선 부품 — 라이브러리 오른쪽 칸과 에이전트 슬롯이 같은 것을 띄움 · 에이전트 슬롯은 이 부품 + 데이터 훅만(트리 · 목록 · 필터 · arborist · 가상 표는 안 띄움) · 데몬 훑기는 하나를 같이 씀(옛 「통째 재사용이 느리면 로직만」 대신 · 메인 세션 결정 2026-10-19)</span></span>
+    <span class="chg" id="chg-s6-survey"><span class="mini">구현 전</span><span>구현 부분마다 바깥 라이브러리를 먼저 조사하고 고름 — 위 카드에 없는 부분까지(사용자 2026-10-19 · TRD §5 첫 단계)</span></span>
   </div>
 </section>
 
@@ -1045,7 +1128,8 @@ a{color:var(--accent)}
   <p class="pend"><span class="tag ok">확정</span><span>에이전트 슬롯의 + 검색 = 프리셋만 + 맨 위 고정 「기본 제공」 목록(「기본」 하나 — 뗀 기본을 다시 붙이는 길 · 2026-10-18) — 라이브러리 프리셋의 + 검색엔 기본 제공 프리셋이 없음(추가할 수 없음) · §9</span></p>
   <p class="pend"><span class="tag ok">확정</span><span>슬롯 B 띄우기 = 편집 칸의 칸 제목에 있는 폴더 돋보기 — <b>다른</b> 라이브러리 슬롯(마지막으로 만진 것 · 없으면 닫힌 번호 중 가장 작은 것)을 열어 둘러보고 ⇐ 로 추가 · 편집 칸은 그대로 · 「그 종류」 = 그 슬롯의 필터 ▾ 를 그 종류로 <span class="tag ok">D7 확정</span></span></p>
   <p class="pend"><span class="tag ok">확정</span>라이브러리 우클릭 ‘프리셋에 추가’는 두지 않음 — 추가는 프리셋 편집 칸에서만</p>
-  <p class="pend"><span class="tag ok">관행 — 2026-10-18</span><span>「찾을 수 없음 · [다시 연결] ×」 의 [다시 연결]도 이 팝오버 — 같은 종류만 · 옛 이름이 채워진 채 · 체크 대신 하나 고름 → 나머지는 이름으로 「N개 더 찾아 연결함」(<a href="#relink">§4 다시 연결</a>)</span></p>
+  <p class="pend chg" id="chg-s7-relink-note"><span class="tag ok">관행 — 2026-10-18</span><span class="tag">2차</span><span>「찾을 수 없음 · [다시 연결] ×」 의 [다시 연결]도 이 팝오버 — 같은 종류만 · 옛 이름이 채워진 채 · 체크 대신 하나 고름 → 나머지는 이름으로 「N개 더 찾아 연결함」 · 고르기 전엔 아무것도 잇지 않음 · 훑을 때 후보 제안 없음(<a href="#relink">§4 다시 연결</a> · 2026-10-19)</span></p>
+  <p class="pend chg" id="chg-s7-add-both"><span class="tag ok">관행 — 2026-10-19</span><span>머리의 「+ 추가」(모든 종류) + 칸마다 <code>+</code> = 둘 다 둠(R23) — 언리얼 My Blueprint 가 같은 꼴 · 근거 <code>docs/research/global-vs-section-add-button-2026-10-19.md</code></span></p>
 </section>
 
 <!-- 8 -->
@@ -1069,12 +1153,13 @@ a{color:var(--accent)}
     <div class="caps">
       <span><span class="n">1</span>칸 = 백엔드별 원문 그대로뿐 — 에이전트의 백엔드와 같은 칸만 씀 · 다른 칸은 말없이 빠짐 · 정식 backend · model 칸 없음 (Engram 은 원문을 해석하지 않음)</span>
       <span><span class="n">2</span>모델 · 강도도 원문 칸 안 = CLI 가 그 값으로 시작 · 안 넣으면 CLI 기본값 · JSON 모드 피커로 그 세션에서 바꿀 수 있음(잠그지 않음 — 원문 칸과 맞추기는 사용자 몫 · Engram 은 원문에서 모델을 읽지 않음 · 2026-10-18)</span>
-      <span><span class="n">3</span><span>여러 설정은 붙인 순서대로 — claude 칸 = settings 파일 하나로 합쳐 <code>--settings</code> 하나(값은 뒤 것 · 목록은 합침 · T10) · codex 칸 = <code>-c</code> 줄을 이어 붙임 · 같은 칸에 모델이 둘이어도 충돌 아님</span></span>
+      <span class="chg" id="chg-s8-merge"><span class="n">3</span><span>여러 설정은 붙인 순서대로 — claude 칸 = settings 파일 하나로 합쳐 <code>--settings</code> 하나(객체 = 재귀로 합침 · 목록 = 붙인 순서로 이어 붙이고 같은 값은 하나 · 값 = 뒤 것 — 키마다 다른 규칙 없음 · T10) · codex 칸 = <code>-c</code> 줄을 이어 붙임 · 같은 칸에 모델이 둘이어도 충돌 아님</span></span>
       <span><span class="tag ok">D7 확정</span><span>설정 · 프리셋 <code>.yaml</code> 가르기 = 파일 안 <code>kind</code></span></span>
       <span><span class="tag unv">미측정</span><span>DISABLE_AUTOUPDATER 가 settings env 로 먹히는지 — 기본 제공 프리셋 「기본」 의 claude 원문에 실림(옆에 Engram 통로 <code>allowedMcpServers</code>)</span></span>
     </div>
   </div>
   <p class="pend"><span class="tag ok">확정 2026-10-18</span><span>설정 = 백엔드별 원문 칸만(모델 · 강도도 그 안 — 백엔드는 에이전트 값 · §1) · 모델 충돌 검사 없음(CLI 가 하는 대로) — 옛 T3(<code>model</code> 둘 = 충돌) · D6(강도의 자리) 해결 · 옛 「설정이 고정」 피커 잠금 걷음</span></p>
+  <p class="pend chg" id="chg-s8-desc"><span class="tag ok">확정 2026-10-19</span><span><code>description</code> 쓰게 하는 길 — 프라이밍(「기본」 Engram 안내)과 <code>engram help</code> 가 설정 · 프리셋 파일 꼴을 <code>description:</code> 든 예와 함께 싣고 한 문장 「만들거나 고칠 때 한 줄 설명을 쓴다」 · 맨 위 help 는 부풀리지 않고 묶음 주제 아래(예 <code>engram help library</code>) · 「새로 만들기 ▸ 설정 · 프리셋」 틀에 빈 <code>description: </code> 줄 · 없으면 흐린 「설명 없음」 — 막지 않음 · 거부 = 설명 필수(에이전트가 파일을 직접 쓸 수 있어서)</span></p>
 
   <div class="sh" id="settings-check"><h3>설정 검사 — 가볍게 · 데몬 안에서만</h3><span class="tag ok">확정 2026-10-18</span></div>
   <div class="tbl44"><table>
@@ -1088,7 +1173,7 @@ a{color:var(--accent)}
   </table></div>
   <div class="caps">
     <span><span>검사 때 = Engram 이 내용을 읽을 때마다(VS Code · JetBrains 관행) — 처음 훑기 = 전부 · 새로 고침 = 바뀐 파일(꼬리표) · Engram 안 편집 = 바로 · 실행 = 그 에이전트에 붙은 설정(이미 읽음) · 스키마가 바뀌면 전부 다시 · 비용 ≈ 0 ms</span></span>
-    <span><span>스키마 = claude: SchemaStore <code>claude-code-settings.json</code>(공식 문서가 가리키는 커뮤니티 사본 · claude 보다 늦음) · codex: 깔린 판의 릴리스 <code>config-schema.json</code> · 내려받기 = 실제로 필요할 때(데몬 시작 아님) · 깔린 claude · codex 판이 지난번과 다르면 다시</span></span>
+    <span class="chg" id="chg-s8-schema-cache"><span>스키마 = claude: SchemaStore <code>claude-code-settings.json</code>(공식 문서가 가리키는 커뮤니티 사본 · claude 보다 늦음) · codex: 깔린 판의 릴리스 <code>config-schema.json</code> · 내려받기 = 실제로 필요할 때(데몬 시작 아님) · 깔린 claude · codex 판이 지난번과 다르면 다시 · 받은 것 = <code>daemon\cache\schemas\…</code> — <code>cache</code> = 다시 만들 수 있는 것만 · 언제 지워도 됨(이름을 보고 지워도 된다고 알게 · 사용자 2026-10-19)</span></span>
     <span><span>「검사」 · 「모두 검사」 메뉴 · <code>library.validate</code> 없음 — 새로 고침(F5 · 우클릭 「새로 고침」 · <code>library.refresh</code>)이 덮음 · 「검사 필요」 상태 없음(검사가 공짜라 읽을 때마다 돎)</span></span>
     <span><span>CLI 를 띄우는 검사(claude doctor · codex debug models · codex doctor) 없음 — 어느 정도 어긋남은 각오 · 문제가 생기면 그때 다시 · 바깥에서 고친 것은 새로 고침이나 실행 때 보임(편집기 포커스 때 다시 읽기 없음)</span></span>
   </div>
@@ -1098,7 +1183,7 @@ a{color:var(--accent)}
 <!-- 9 -->
 <section id="s9">
   <div class="sh"><span class="no">9</span><h2>에이전트에 붙이기</h2><span class="tag ok">확정</span></div>
-  <div class="sh"><h3>에이전트 슬롯 = 편집 칸만 켠 라이브러리</h3><span class="tag ok">확정</span></div>
+  <div class="sh chg" id="chg-s9-h3"><h3>에이전트 슬롯 = 라이브러리와 같은 편집 칸 부품만 띄움</h3><span class="tag ok">확정</span><span class="tag ok">부품 + 데이터 훅만 — 2026-10-19</span></div>
   <div class="dash dash-agent" role="img" aria-label="에이전트 트리에서 리뷰봇을 우클릭해 프리셋을 선택하면 편집 칸만 켠 에이전트 슬롯이 열리는 예시">
     <div class="win">
       <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>에이전트 트리</div>
@@ -1108,6 +1193,7 @@ a{color:var(--accent)}
           <div class="opt"><span>열기</span></div>
           <div class="opt"><span>이름 바꾸기</span></div>
           <div class="opt on"><span>프리셋…</span><span class="n">1</span></div>
+          <div class="opt chg" id="chg-s9-ctx-dup"><span>복제</span><span class="n">10</span></div>
           <div class="opt"><span>종료</span></div>
           <div class="opt"><span>삭제</span></div>
         </div>
@@ -1120,6 +1206,7 @@ a{color:var(--accent)}
       <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>리뷰봇 — 프리셋</div>
       <div class="pane side">
         <div class="head"><span class="vend c"></span><span class="t" style="font-size:14px">리뷰봇</span><span class="kind">claude · JSON</span><span class="n">4</span></div>
+        <div class="pl49 chg" id="chg-s9-slot-problems"><span class="pi"><b class="e">⛔ 오류</b><span><i>야간 규칙 ›</i> 설정 claude 정리 — cleanupPeriodDays 는 1 이상의 숫자여야 함 · 3째 줄</span><span class="n" style="flex:none">11</span></span><span class="pi"><b class="g">찾을 수 없음</b><span><i>리뷰어 ›</i> 스킬 nightly</span></span><span class="pi"><b class="g">찾을 수 없음</b><span>프리셋 옛 규칙</span></span></div>
         <div class="defsec">
           <div class="grp ksec">▾ 기본<span class="n">2</span></div>
           <div class="row"><span class="name">기본</span><span class="kind">기본 제공</span><span class="x">×</span></div>
@@ -1131,11 +1218,11 @@ a{color:var(--accent)}
         <div class="grp ksec">▾ 프리셋<span class="sp"></span><span class="n">5</span><button class="btn kadd" type="button" aria-label="이 종류 검색해 추가">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 선택한 항목 추가">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
         <div class="row"><span class="grip">⋮⋮</span><span class="tw">▸</span><span class="name">리뷰어</span><span class="eb48" title="안에 깨진 항목 1개">1</span><span class="n">7</span><span class="x">×</span></div>
         <div class="row"><span class="grip">⋮⋮</span><span class="tw">▾</span><span class="name">야간 규칙</span><span class="eb48" title="안에 깨진 항목 1개">1</span><span class="x">×</span></div>
-        <div class="nestv">
+        <div class="nestv chg" id="chg-s9-nest-noeye">
           <div class="grp ksec">지침</div>
-          <div class="row"><span class="name">야간 보고</span><span class="eye45" aria-label="내용 보기">👁</span></div>
+          <div class="row"><span class="name">야간 보고</span></div>
           <div class="grp ksec">설정</div>
-          <div class="row"><span class="name" style="white-space:normal;color:var(--err)"><span class="vi47 e">⛔</span>claude 정리 — cleanupPeriodDays 는 1 이상의 숫자여야 함 · 3째 줄</span><span class="eye45" aria-label="내용 보기">👁</span></div>
+          <div class="row"><span class="name" style="white-space:normal;color:var(--err)"><span class="vi47 e">⛔</span>claude 정리 — cleanupPeriodDays 는 1 이상의 숫자여야 함 · 3째 줄</span></div>
         </div>
         <div class="row gone48r"><span class="grip">⋮⋮</span><span class="name">옛 규칙 — 찾을 수 없음</span><button class="btn" type="button">다시 연결</button><span class="x">×</span></div>
       </div>
@@ -1153,19 +1240,22 @@ a{color:var(--accent)}
         <div class="grp ksec">▸ 프리셋</div>
       </div>
     </div>
-    <div class="dialog" role="img" aria-label="기본 프리셋을 뗄 때의 확인 창 예시">
-      <div class="dh">기본 프리셋 떼기</div>
-      <div class="db">
-        <span>기본 프리셋을 떼면 Engram 사용 안내, Engram 메시지 · 제어 통로, claude 자동 업데이트 끄기가 빠집니다.</span>
-        <label><span class="cb"></span>다시 묻지 않기<span class="n">3</span></label>
+    <div class="modal49 chg" id="chg-s9-detach-modal" role="img" aria-label="기본 프리셋을 뗄 때 창 전체를 덮는 확인 모달 예시">
+      <span class="mn">창 전체를 덮는 모달 — 뒤 에이전트는 계속 돎 · 입력만 막힘(§4 삭제 확인과 같음)</span>
+      <div class="dialog">
+        <div class="dh">기본 프리셋 떼기</div>
+        <div class="db">
+          <span>기본 프리셋을 떼면 Engram 사용 안내, Engram 메시지 · 제어 통로, claude 자동 업데이트 끄기가 빠집니다.</span>
+          <label><span class="cb"></span>다시 묻지 않기<span class="n">3</span></label>
+        </div>
+        <div class="df"><button class="btn" type="button">취소</button><button class="btn pri" type="button">떼기</button></div>
       </div>
-      <div class="df"><button class="btn" type="button">취소</button><button class="btn pri" type="button">떼기</button></div>
     </div>
   </div>
   <div class="caps">
-    <span><span class="n">1</span><span>에이전트 트리 우클릭 → 프리셋… = 그 에이전트 슬롯이 열림(편집 칸만 켠 라이브러리 — 트리 · 목록 숨김 · 세션 해석 넷 <span class="tag ok">D9 확정</span>) · 다시 누르면 하나 더 · 팝아웃 = OS 창 · 도킹은 슬롯 도킹 작업(wt2)이 붙임 — 이 기능 범위 밖</span></span>
+    <span class="chg" id="chg-s9-cap1"><span class="n">1</span><span>에이전트 트리 우클릭 → 프리셋… = 그 에이전트 슬롯이 열림(라이브러리 오른쪽 칸과 같은 편집 칸 부품 + 데이터 훅만 띄움 — 트리 · 목록 · 필터는 숨기는 게 아니라 아예 안 띄움 · 데몬 훑기는 하나를 같이 씀 · 세션 해석 넷 <span class="tag ok">D9 확정</span>) · 다시 누르면 하나 더 · 팝아웃 = OS 창 · 도킹은 슬롯 도킹 작업(wt2)이 붙임 — 이 기능 범위 밖</span></span>
     <span><span class="n">2</span><span>기본 칸 = 기본 제공 프리셋 「기본」만 · 따로 구분 · 하는 일 한 줄 + claude 원문(자동 업데이트 끄기 · Engram 통로 <code>allowedMcpServers</code> — 감춘 설정 없음) · 뗀 뒤 빈 기본 칸에서도 다시 붙임 <span class="tag ok">D8 확정</span></span></span>
-    <span><span class="n">3</span><span>기본 프리셋을 떼면 확인 — Engram 메시지 · 제어 통로도 빠진다고 적음 · 다시 묻지 않기(되돌리기 = 설정 · 첫 판엔 <code>settings.set</code> 명령만 — T5) · CLI 는 <code>--yes</code> 없으면 거절</span></span>
+    <span class="chg" id="chg-s9-cap3"><span class="n">3</span><span>기본 프리셋을 떼면 확인 = 창 전체 모달(뒤 에이전트는 계속 돎 · 입력만 막힘 — §4 삭제 확인과 같음) — Engram 메시지 · 제어 통로도 빠진다고 적음 · 다시 묻지 않기(되돌리기 = 설정 · 첫 판엔 <code>settings.set</code> 명령만 — T5) · CLI 는 <code>--yes</code> 없으면 거절</span></span>
     <span><span class="n">4</span><span>머리 = 이름 + 백엔드 · 모드(에이전트 값 — 만들 때 고름 · 고정 · 바꾸려면 새 에이전트 · 2026-10-18)</span></span>
     <span><span class="n">5</span>에이전트는 프리셋 칸만 고침(+ · ⇐ · 폴더 돋보기 · ×) — + 검색은 프리셋만 + 맨 위 고정 「기본 제공」 목록(「기본」 하나) · 다른 종류는 건너뜀 · 폴더 돋보기 · 더블클릭 = 라이브러리 슬롯이 그 자리로 가고 에이전트 슬롯은 그대로</span>
     <span><span class="n">6</span><span>작업 폴더 = 경로를 치거나 「찾아보기…」(OS 폴더 선택 창) · 있는 폴더만 · 만들 때 고른 폴더가 처음 값(빈 경로 없음)</span></span>
@@ -1173,13 +1263,15 @@ a{color:var(--accent)}
     <span><span class="n">8</span><span>머리 기본 · 작업 폴더 · 프리셋 = ▾/▸ 접고 펴기 — 접은 상태는 모든 에이전트 슬롯 공통으로 기억(라이브러리 1~4 와 따로)</span></span>
     <span><span class="n">9</span><span>잠김 = 대화한 적 있음(세션 id 저장됨 — 첫 제출 래치) 또는 실행 중 → 읽기만 + 「대화한 에이전트 — 바꾸려면 새 에이전트」 · 새 대화로 돌려 주는 길 없음</span></span>
     <span><span>만들 때 붙는 것 = 「기본」 하나(프리셋 칸은 빔) · 기본 제공 백엔드 프리셋은 없음 · 프리셋을 붙이고 떼도 백엔드는 그대로 — 설정은 그 백엔드의 원문 칸만 쓰임 (2026-10-18)</span></span>
-    <span><span>펼친 안쪽 부품 줄(지침 · 스킬 · 설정) 끝 👁 = 그 항목 상세 카드(§3 과 같은 부품 · 자리 = <a href="#card-place">§10 「카드 자리」</a>) · 프리셋 줄엔 없음 (2026-10-18)</span></span>
+    <span class="chg" id="chg-s9-cap-card"><span>펼친 안쪽 부품 줄(지침 · 스킬 · 설정) 누름 = 그 항목 상세 카드 열고 닫기(§3 과 같은 부품 · 자리 = <a href="#card-place">§10 「카드 자리」</a>) · 프리셋 줄 누름 = 선택 + 펼침(카드 없음) (2026-10-19 — 눈 단추 걷음)</span></span>
+    <span class="chg" id="chg-s9-cap-problems"><span class="n">11</span><span>머리 아래 문제 목록 = 이 에이전트의 실행 막힘 전부 — 붙은 프리셋 안 것도 「&lt;프리셋&gt; › …」 길과 함께 + 에이전트 몫(라이브러리 폴더 없음 · codex 파일 사전 검사 실패 — 이 그림엔 없음) · 문구 = 그 줄 표시와 같음 · 누르면 그 줄로(접힌 프리셋을 펼쳐서) · 문제가 없으면 안 보임 · 라이브러리 편집 칸과 같은 부품(§3)</span></span>
+    <span class="chg" id="chg-s9-cap-dup"><span class="n">10</span><span>복제 = 에이전트 트리 우클릭 「복제」 · LLM = <code>agent.duplicate {agent}</code> — 따라감: 붙은 프리셋(기본 칸 + 프리셋 칸) · 백엔드 · 모드 · 작업 폴더 · 추가 인자 · env / 안 따라감: 세션 id · 대화(새 대화 · 작업 폴더 잠김 풀림) · 실행 상태 · 이름 = 「리뷰봇 (2)」 · (3)… (새 항목 이름과 같은 번호 규칙 — R17) (2026-10-19)</span></span>
   </div>
   <p class="pend"><span class="tag ok">확정</span><span class="tag ok">D4 확정 2026-10-18</span><span>만들기 = 에이전트 트리 판 메뉴 「에이전트 생성 ▸ claude/codex × JSON/터미널」 그대로(옛 작업 폴더 즐겨찾기 피커만 없앰 · <b>만들 때 폴더를 선택하는 것은 지금 그대로</b> — 2026-10-16) · 기본 프리셋만 붙어 바로 실행 · 백엔드 · 모드 = 만들 때 고르는 에이전트 값(고정 — D5 확정 2026-10-18) · <b>기존 에이전트는 이전하지 않음</b> — 새 판 첫 부팅에 옛 <code>agents.json</code> 은 지우지 않고 백업 파일로 비켜 두고 빈 목록으로 시작(백업 = 메인 세션 내부 선택)</span></p>
   <p class="pend"><span class="tag ok">확정</span><span>돌고 있는 에이전트에 바꾼 프리셋은 다음 실행부터(돌고 있는 쪽엔 안내 없음 — 편집 칸엔 「에이전트 N개에서 참조 중」 만 · 2026-10-18) · 모델 · 강도 = <a href="#s10">§10</a></span></p>
   <p class="pend"><span class="tag ok">확정 2026-10-18</span><span>작업 폴더 = 에이전트 값 · 에이전트 슬롯 「작업 폴더」 칸(치기 · 찾아보기) · 대화한 뒤 · 실행 중엔 잠김 · 작업 폴더를 바꿀 때 새 대화로 돌리거나 세션을 놓는 처리 없음 · 만들기는 지금 그대로(만들 때 폴더를 고름) · LLM = <code>agent.new</code> 의 <code>cwd</code> 필수 그대로 + <code>agent.setWorkspace</code>(잠겼으면 CONFLICT · §11) — D3 해결 · 경로 없이 만들기 등은 다음 주제(§10)</span></p>
   <p class="pend"><span class="tag ok">확정 2026-10-18</span><span>머리 접기 = 기본 · 작업 폴더 · 프리셋 모두 · 깨진 항목을 품은 프리셋 줄 = 빨간 오류 수(접혀 있어도) → 펼치면 ⛔ 줄 + 이유 → 누르면 라이브러리에서 그 항목 선택</span></p>
-  <p class="pend"><span class="tag ok">확정 2026-10-18</span><span>T10 = 감춘 설정 없음 — Engram 통로 <code>allowedMcpServers:[{serverName:"engram"}]</code> 는 「기본」 claude 칸(자동 업데이트 끄기 옆) · 붙은 프리셋의 claude 칸은 붙인 순서로 합쳐 <code>--settings</code> 하나 · <b>값은 뒤 것 · 목록은 합침</b>(객체 = 재귀로 합침 · 목록 = 이어 붙이고 같은 값은 하나 · 키마다 다른 규칙 없음 — 2026-10-18 「이어붙이기 진행」 · 그래서 뒤 프리셋이 <code>engram</code> 을 뺄 수 없음 · Engram 우선 규칙 없음) · 「기본」 을 떼면 통로도 빠짐(확인 창에 적음) · ADR-0109 결정 9 대체 · <code>--mcp-config</code>(Engram MCP 서버 등록 실행 인자)는 범위 밖 — 실행 인자 그대로(실행마다 주소 · 토큰을 싣는 인자라 설정이 아님 · 2026-10-18)</span></p>
+  <p class="pend chg" id="chg-s9-t10"><span class="tag ok">확정 2026-10-18</span><span>T10 = 감춘 설정 없음 — Engram 통로 <code>allowedMcpServers:[{serverName:"engram"}]</code> 는 「기본」 claude 칸(자동 업데이트 끄기 옆) · 붙은 프리셋의 claude 칸은 붙인 순서로 합쳐 <code>--settings</code> 하나 · <b>값은 뒤 것 · 목록은 합침</b>(객체 = 재귀로 합침 · 목록 = 이어 붙이고 같은 값은 하나 · 키마다 다른 규칙 없음 — 2026-10-18 「이어붙이기 진행」 · 그래서 뒤 프리셋이 <code>engram</code> 을 뺄 수 없음 · Engram 우선 규칙 없음) · 「기본」 을 떼면 통로도 빠짐(확인 모달에 적음 — 2026-10-19) · ADR-0109 결정 9 대체 · <code>--mcp-config</code>(Engram MCP 서버 등록 실행 인자)는 범위 밖 — 실행 인자 그대로(실행마다 주소 · 토큰을 싣는 인자라 설정이 아님 · 2026-10-18)</span></p>
   <details class="old"><summary><span class="tag">지난 안</span>에이전트에 프리셋을 붙이던 다른 꼴 셋 — 지금은 위 「에이전트 슬롯」</summary><div class="oldb">
     <p class="pend"><span class="tag">이전 안</span><span>에이전트 화면의 칩 줄 + 「+ 프리셋」 피커 + 실행 단추 · 「최종 구성 ▸」 — 에이전트 슬롯(편집 칸만 켠 라이브러리)으로 바뀜</span></p>
     <p class="pend"><span class="tag">버린 안</span><span>트리 우클릭 → 트리 슬롯 옆으로 펼쳐 옆 슬롯 위에 겹치는 프리셋 칸 (PRD R30 거부)</span></p>
@@ -1190,33 +1282,31 @@ a{color:var(--accent)}
 <!-- 10 -->
 <section id="s10">
   <div class="sh"><span class="no">10</span><h2>실행</h2><span class="tag ok">확정</span><span class="tag ok">T8 확정</span></div>
-  <p class="pend"><span class="tag">다음 주제 — 에이전트 트리 설계</span><span>경로 없이 만들기 · 경로가 비면 실행 때 묻기(아래 접힌 「다음 주제 참고」) · 자동 경로(Engram 폴더 · T4) · codex 파일 전용 폴더 · 묶는 폴더 — 이번엔 만들 때 폴더를 고르고(빈 경로 없음) 에이전트 슬롯 「작업 폴더」 칸에서 바꿈(§9 · 2026-10-18)</span></p>
+  <p class="pend chg" id="chg-s10-next-pill"><span class="tag">다음 주제 — 에이전트 트리 설계</span><span>작업 폴더 경로 쪽만 — 경로 없이 만들기 · 경로가 비면 실행 때 묻기(아래 접힌 「다음 주제 참고」) · 자동 경로(Engram 폴더 · T4) · codex 파일 전용 폴더 · 묶는 폴더 — 이번엔 만들 때 폴더를 고르고(빈 경로 없음) 에이전트 슬롯 「작업 폴더」 칸에서 바꿈(§9 · 2026-10-18) · 아래 모델 · 강도 피커(T8)는 다음 주제가 아니라 이 기능 범위 = 2차(2026-10-19)</span></p>
   <p class="lead">JSON 모드는 새 대화마다 첫 메시지 전에 모델 · 강도 칸이 선택된 채 뜬다 — 막지 않고 잠그지 않는다.</p>
   <div class="popwrap">
-    <div class="win" role="img" aria-label="JSON 모드 새 대화의 모델 · 강도 선택 칸 예시">
-      <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>실행 — 리뷰봇 (JSON · 새 대화)</div>
+    <div class="chg" id="chg-s10-picker"><div class="win" role="img" aria-label="JSON 모드 새 대화의 모델 · 강도 선택 칸 예시 — 리뷰봇은 claude 에이전트라 claude 모델만 보임">
+      <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>실행 — 리뷰봇 (claude · JSON · 새 대화)</div>
       <div class="win-body"><div class="pane">
         <div class="pop">
           <input id="model-search" type="text" placeholder="모델 검색" aria-label="모델 검색">
-          <div class="final"><span class="k"><span class="vend c"></span> claude <span class="n">1</span></span></div>
+          <div class="final"><span class="k"><span class="vend c"></span> claude — 이 에이전트의 백엔드만 <span class="n">1</span></span></div>
           <div class="opt on"><span>Default <small>· Opus 5.5</small></span><small>추천</small></div>
           <div class="opt"><span>Sonnet</span><small></small></div>
           <div class="opt"><span>Haiku</span><small>강도 없음</small></div>
-          <div class="final"><span class="k"><span class="vend x"></span> codex</span></div>
-          <div class="opt"><span>gpt-6-sol</span><small>기본</small></div>
           <div class="final"><span class="k">강도</span></div>
           <div class="effort"><span>low</span><span>medium</span><span class="on">high</span><span>xhigh</span><span>max</span></div>
         </div>
       </div></div>
-    </div>
+    </div></div>
     <div class="caps" style="grid-template-columns:minmax(0,1fr)">
-      <span><span class="n">1</span><span>JSON 모드 목록 = claude <code>initialize</code> · codex <code>model/list</code> · 처음부터 선택된 채(CLI 기본값 또는 원문 칸 모델로 CLI 가 시작한 값) · 잠그지 않음 — 원문 칸과 맞추기는 사용자 몫(2026-10-18) · 피커를 안 건드려도 첫 메시지(화면 · 버스 어디서든)는 선택된 값으로 감 · 선택한 값은 그 세션뿐 · 이어받기엔 안 뜸</span></span>
+      <span class="chg" id="chg-s10-picker-cap"><span class="n">1</span><span>JSON 모드 목록 = 그 에이전트 백엔드 모델만(백엔드는 에이전트마다 고정 — claude 에이전트 = claude <code>initialize</code> 목록 · codex 에이전트 = codex <code>model/list</code> 목록 · 둘을 한 목록에 섞지 않음) · 처음부터 선택된 채(CLI 기본값 또는 원문 칸 모델로 CLI 가 시작한 값) · 잠그지 않음 — 원문 칸과 맞추기는 사용자 몫(2026-10-18) · 피커를 안 건드려도 첫 메시지(화면 · 버스 어디서든)는 선택된 값으로 감 · 선택한 값은 그 세션뿐 · 이어받기엔 안 뜸</span></span>
       <span><span>터미널 모드 = 피커 없음 · 원문 칸 모델(없으면 CLI 기본값)로 시작 · 안에서 <code>/model</code></span></span>
     </div>
   </div>
   <p class="pend"><span class="tag ok">확정</span><span>모델 · 강도 = 설정 에셋의 원문 칸 값으로 시작(공유) · JSON 피커로 그 세션만 바꿈 · 에이전트별 기억 없음 · CLI 기본값을 쓰려면 원문 칸에 모델을 넣지 않음 · 강도의 자리 = 백엔드 원문 칸(D6 확정 2026-10-18)</span></p>
-  <p class="pend"><span class="tag ok">확정 2026-10-18</span><span>T8 = JSON 모델 · 강도 칸은 코드에 없음 — 이 기능의 마지막 단계 · 첫 메시지 전 바꾸기 요청이 claude · codex 각각에서 실 CLI 로 먹는지가 관문 · 안 되면 멈추고 여쭘(추천 그대로)</span></p>
-  <p class="pend"><span class="tag ok">확정 2026-10-18</span><span>codex 터미널 = 늘 작업 폴더에 파일을 만듦(<code>AGENTS.override.md</code> + <code>.agents\skills\engram-*</code> 링크 · <code>generated_paths</code> 소유 규칙 그대로) — 묻지 않음 · 옛 「파일을 만들까요?」 대답 · 「안 만듦 · 프라이밍만」 기본값은 걷음 · 막는 경우(이미 있는 <code>AGENTS.override.md</code> · 같은 폴더의 다른 프리셋 codex 터미널 에이전트)는 먼저 검사 = 막힘 ⑥ · 사용자 <code>AGENTS.md</code> 처리와 사용자 폴더에 쓰는 위험은 그대로</span></p>
+  <p class="pend chg" id="chg-s10-t8"><span class="tag ok">확정 2026-10-18</span><span class="tag">2차</span><span>T8 = JSON 모델 · 강도 칸은 코드에 없음 — 이 기능 범위 안 · 2차(Phase 2)의 마지막 단계 · 첫 메시지 전 바꾸기 요청이 claude · codex 각각에서 실 CLI 로 먹는지가 관문 · 안 되면 멈추고 여쭘(추천 그대로) · 피커엔 그 에이전트 백엔드 모델만(2026-10-19)</span></p>
+  <p class="pend chg" id="chg-s10-codex-pre"><span class="tag ok">확정 2026-10-18</span><span>codex 터미널 = 늘 작업 폴더에 파일을 만듦(<code>AGENTS.override.md</code> + <code>.agents\skills\engram-*</code> 링크 · <code>generated_paths</code> 소유 규칙 그대로) — 묻지 않음 · 옛 「파일을 만들까요?」 대답 · 「안 만듦 · 프라이밍만」 기본값은 걷음 · 막는 경우(이미 있는 <code>AGENTS.override.md</code> · 같은 폴더의 다른 프리셋 codex 터미널 에이전트)는 먼저 검사 = 막힘 ⑤(다섯 중 — 2026-10-19) · 사용자 <code>AGENTS.md</code> 처리와 사용자 폴더에 쓰는 위험은 그대로</span></p>
 
   <details class="old"><summary><span class="tag">다음 주제 참고</span>경로가 비었을 때 실행 때 묻는 창 「어디서 일할까요?」 — 에이전트 트리 설계 때 다시 연다</summary><div class="oldb">
     <div class="dialog" role="img" aria-label="작업 폴더가 없는 에이전트를 실행할 때 묻는 창 예시 — 다음 주제">
@@ -1283,12 +1373,12 @@ a{color:var(--accent)}
     <span><span class="n">4</span><span>카드는 라이브러리 창에 가려지거나 닫힐 수 있음 — 남는 기록 = 에이전트 프리셋 슬롯(빨간 오류 수 · ⛔ 줄 — §9) + 에이전트 트리의 ⛔ (JetBrains 풍선 + 알림 기록 · Microsoft InfoBar 관행)</span></span>
     <span><span class="n">5</span><span>LLM · CLI = 같은 내용을 실행 명령의 답으로(code + args) → 사용자가 「고쳐 줘」 → AI 가 파일을 고침 → <code>library.refresh</code> → 다시 실행</span></span>
   </div>
-  <p class="pend"><span class="tag ok">확정 2026-10-18</span><span>막힘 사유 = 여섯 — 누가 실행하든(더블클릭 · CLI · LLM) 이유와 함께 막음: ① 찾을 수 없음(붙은 파일이 없고 다시 연결 안 함) ② 오류(YAML 문법 · 순환 · 설정 스키마 타입 · 범위) ③ 충돌(같은 이름 스킬) ④ 다시 연결 확인 대기(후보 [연결] 전 — 늘) ⑤ 라이브러리 폴더 없음(라이브러리 프리셋이 붙어 있을 때) ⑥ codex 파일 사전 검사 실패(codex 터미널이 파일을 못 놓음) · 걷음 = 백엔드 정하는 설정 없음 · codex 파일 대답 없음 · 설정 실행 직전 검사 실패 · 「화면 실행만 막힘」 갈래 — 근거 <code>docs/research/launch-missing-component-practice-2026-10-18.md</code></span></p>
+  <p class="pend chg" id="chg-s10-reasons"><span class="tag ok">확정 2026-10-18</span><span class="tag ok">여섯 → 다섯 2026-10-19</span><span>막힘 사유 = 다섯 — 누가 실행하든(더블클릭 · CLI · LLM) 이유와 함께 막음: ① 찾을 수 없음(붙은 파일이 없고 다시 연결 안 함) ② 오류(YAML 문법 · 순환 · 설정 스키마 타입 · 범위) ③ 충돌(같은 이름 스킬) ④ 라이브러리 폴더 없음(라이브러리 프리셋이 붙어 있을 때) ⑤ codex 파일 사전 검사 실패(codex 터미널이 파일을 못 놓음) · 걷음 = 다시 연결 확인 대기(훑을 때 후보 제안이 없어져서 — 2026-10-19) · 백엔드 정하는 설정 없음 · codex 파일 대답 없음 · 설정 실행 직전 검사 실패 · 「화면 실행만 막힘」 갈래 — 근거 <code>docs/research/launch-missing-component-practice-2026-10-18.md</code></span></p>
   <p class="pend"><span class="tag ok">확정 2026-10-18</span><span>충돌로 막히면 이유 = 편집 칸과 같은 충돌 줄(무슨 충돌 — 걸린 항목 전부 · 온 길) · 실행 때 그 밖의 알림(새 대화 · codex 크기 한도 등)은 띄우지 않음</span></p>
   <p class="pend"><span class="tag ok">확정 2026-10-18</span><span>띄운 뒤 CLI 가 오류로 끝나면(종료 코드 + stderr) 막힘이 아니라 실행 실패 — 에이전트에만 보임(종료 코드 + stderr 원문) · 설정 줄엔 ⛔ 안 붙음(옛 2026-10-17 「그 설정 줄 ⛔」 걷음)</span></p>
   <p class="pend"><span class="tag ok">관행 — 2026-10-18</span><span>모달은 심각한 · 앱 전체 오류만 · 출처 가까이 · 눌러서 그 자리로(NN/g · Microsoft · Unreal Compiler Results) · 카드는 가려질 수 있고 남는 기록은 슬롯 + 트리 ⛔ — 근거 <code>docs/research/blocked-launch-error-display-practice-2026-10-18.md</code> · <code>docs/research/relink-and-error-popup-practice-2026-10-18.md</code></span></p>
 
-  <div class="sh" id="card-place"><h3>카드 자리 — 줄 상세 카드(👁)</h3><span class="tag ok">D11 관행 — 2026-10-18</span><span class="tag wait">리뷰 때 확인</span></div>
+  <div class="chg" id="chg-s10-card-head"><div class="sh" id="card-place"><h3>카드 자리 — 줄 상세 카드(부품 줄 누름)</h3><span class="tag ok">D11 관행 — 2026-10-18</span><span class="tag wait">리뷰 때 확인</span></div></div>
   <style>.d11 .fr{fill:var(--bg);stroke:var(--muted);stroke-width:1.2}.d11 .bar{fill:var(--line)}.d11 .sl{fill:var(--paper);stroke:var(--line);stroke-width:1}.d11 .ag{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.2}.d11 .rw{fill:var(--line)}.d11 .rh{fill:var(--accent)}.d11 .cd{fill:var(--paper);stroke:var(--accent);stroke-width:1.8}.d11 .cl{fill:var(--muted)}.d11 .ct{fill:var(--accent)}.d11 .lb{fill:var(--muted);font-size:9.5px}.d11 .gh{fill:var(--ink);font-size:13px;font-weight:700}.d11 .ph{fill:var(--ink);font-size:12px;font-weight:600}.d11 .ds{fill:var(--muted);font-size:11.5px}.d11 .dv{stroke:var(--line);stroke-width:1.2;stroke-dasharray:4 4}</style>
   <div class="fig44 d11"><svg viewBox="0 0 960 252" role="img" aria-label="줄 상세 카드 자리 — 에이전트 슬롯은 ① 슬롯 바깥 오른쪽 ② 자리가 없으면 왼쪽 바깥 ③ 둘 다 없으면 창 안에서 슬롯을 덮음, 라이브러리는 ④ 오른쪽 칸 왼쪽 가장자리에 그 줄 높이로 목록 위에 붙음">
     <text class="gh" x="0" y="16">에이전트 슬롯 (편집 칸만)</text>
@@ -1320,7 +1410,7 @@ a{color:var(--accent)}
     <rect class="cd" x="621" y="104" width="80" height="62" rx="5"/><rect class="ct" x="628" y="112" width="44" height="6" rx="2"/><rect class="cl" x="628" y="125" width="62" height="4" rx="2"/><rect class="cl" x="628" y="135" width="56" height="4" rx="2"/><rect class="cl" x="628" y="145" width="42" height="4" rx="2"/>
     <text class="ds" x="490" y="224">양쪽 다 없음(팝아웃 창 등)</text><text class="ds" x="490" y="240">→ 창 안에서 슬롯을 덮음</text>
     <!-- 4 library -->
-    <text class="ph" x="735" y="37">④ 👁 카드</text>
+    <g id="chg-s10-card-label"><rect class="chg-r" x="730" y="23" width="98" height="19" rx="3"/><text class="ph" x="735" y="37">④ 줄 누름 카드</text><text class="chg-t" x="834" y="37">수정 2026-10-19</text></g>
     <rect class="fr" x="735" y="46" width="225" height="160" rx="6"/><rect class="bar" x="736" y="47" width="223" height="11" rx="5"/>
     <rect class="sl" x="743" y="64" width="42" height="134" rx="3"/><text class="lb" x="747" y="76">트리</text>
     <rect class="sl" x="789" y="64" width="72" height="134" rx="3"/><text class="lb" x="794" y="76">목록</text>
@@ -1331,8 +1421,8 @@ a{color:var(--accent)}
   </svg></div>
   <div class="caps">
     <span><span>에이전트 슬롯 = 편집 칸만이라 덮을 목록이 없음 → 슬롯 바깥 ① 오른쪽 → ② 왼쪽 → ③ 창 안(슬롯을 덮는 것은 마지막 수단) · 잘리지 않음 (Floating UI <code>flip()</code> 다음 <code>shift()</code> — 확인함 · Radix · MUI · NSPopover 같은 순서)</span></span>
-    <span><span>④ 라이브러리 1~4 = 오른쪽 칸은 창 안의 열이라 넘치지 않음 · 👁 카드는 오른쪽 칸 왼쪽 가장자리 · 그 줄 높이 · 가운데 목록 위 · 창이 좁으면 트리까지 덮음 · 잘리지 않음</span></span>
-    <span><span>닫기 = Esc 는 겹쳐 뜬 카드를 마지막에 연 것부터 · × = 그 카드 · 바깥 누름 = 닫힘(2026-10-17) · 다른 줄 👁 = 카드가 그 줄로 바뀜</span></span>
+    <span class="chg" id="chg-s10-card-c2"><span>④ 라이브러리 1~4 = 오른쪽 칸은 창 안의 열이라 넘치지 않음 · 부품 줄을 눌러 뜬 카드는 오른쪽 칸 왼쪽 가장자리 · 그 줄 높이 · 가운데 목록 위 · 창이 좁으면 트리까지 덮음 · 잘리지 않음</span></span>
+    <span class="chg" id="chg-s10-card-c3"><span>닫기 = 같은 줄 다시 누름 · Esc 는 겹쳐 뜬 카드를 마지막에 연 것부터 · × = 그 카드 · 바깥 누름 = 닫힘(2026-10-17) · 다른 부품 줄 누름 = 카드가 그 줄로 바뀜(2026-10-19)</span></span>
   </div>
   <p class="pend"><span class="tag ok">관행 — 2026-10-18</span><span class="tag wait">리뷰 때 확인</span><span>D11 = 위 자리 — 옛 「창에 걸려 잘림 · 뒤집기 없음 · 안쪽 대체 없음」(메모 137 — 사용자 결정)을 바꿈 · 앵커를 덮는 것은 마지막 수단뿐</span></p>
 </section>
@@ -1341,7 +1431,7 @@ a{color:var(--accent)}
 <section id="s11">
   <div class="sh"><span class="no">11</span><h2>LLM 조작 — <code>engram</code> CLI</h2><span class="tag ok">확정 원칙</span></div>
   <p class="lead">프리셋 · 라이브러리 조작은 전부 데몬 명령 — 화면 버튼과 LLM이 같은 것을 부른다. 명령 이름 = TRD §1-7 (일반형 <code>engram &lt;이름&gt; --인자 값</code> · 인자 꼴은 TRD 초안).</p>
-  <div class="cli"><span class="c"># 라이브러리 · 프리셋</span>
+  <div class="chg" id="chg-s11-cli"><div class="cli"><span class="c"># 라이브러리 · 프리셋</span>
 engram library.status                              <span class="c"># 루트 · 상태 · 새로 만들기 제안 경로</span>
 engram library.setRoot --path D:\Engram\library
 engram library.list --folder 프리셋
@@ -1349,19 +1439,22 @@ engram library.refresh --folder 스킬                  <span class="c"># 바깥
 engram library.read --path 스킬/리뷰/review           <span class="c"># 설명 · 위치(절대 경로) · 참조</span>
 engram preset.get --path 프리셋/리뷰어.yaml           <span class="c"># 종류별 칸 · 충돌 줄 · 에이전트 N개에서 참조 중</span>
 engram preset.add --path 프리셋/리뷰어.yaml --items 스킬/리뷰/review
-<span class="c"># 라이브러리 파일 조작</span>
+<span class="c"># 라이브러리 파일 조작 — 2차 (명령은 그 기능의 차수를 따름)</span>
 engram library.move --paths 스킬/리뷰/review --toFolder 스킬/공용
 engram library.rename --path … --newName …
-engram library.delete --paths 스킬/리뷰/pr-check     <span class="c"># 휴지통 · 참조가 있으면 --yes 없이 거절 + 참조</span>
+engram library.delete --paths 스킬/리뷰/pr-check     <span class="c"># 라이브러리 안 .trash 로 · 참조가 있으면 --yes 없이 거절 + 참조</span>
+<span class="c">#   .trash 비우기 = 명령 없음 — 사람만(화면 · TRD)</span>
 engram library.relink --from … --to …              <span class="c"># 다시 연결 · 같은 옛 경로 · 같은 옛 폴더의 나머지도 이름으로 — 답 = 더 연결한 수</span>
 <span class="c"># 에이전트</span>
 engram agent.new --backend codex --cwd D:\work\engram   <span class="c"># 기본 이 붙음 · 백엔드 · 모드는 고정 · cwd 필수(지금처럼)</span>
 engram agent.setWorkspace --agent 리뷰봇 --cwd D:\work\other   <span class="c"># 있는 폴더만 · 대화한 · 실행 중이면 CONFLICT</span>
 engram agent.attachPreset --agent 리뷰봇 --presets 프리셋/리뷰어.yaml
 engram agent.detachPreset --agent 리뷰봇 --presets engram:/default --yes
-engram agent.spawn --target 리뷰봇                  <span class="c"># 대화상자 없음 · 막히면 막힘 사유를 code + args 로(화면 카드와 같은 내용)</span></div>
+engram agent.duplicate --agent 리뷰봇               <span class="c"># 복제 = 트리 우클릭 「복제」 · 「리뷰봇 (2)」 · 프리셋 · 백엔드 · 모드 · 작업 폴더 · 추가 인자 · env 따라감 · 새 대화</span>
+engram agent.spawn --target 리뷰봇                  <span class="c"># 대화상자 없음 · 막히면 막힘 사유(다섯)를 code + args 로(화면 카드와 같은 내용)</span></div></div>
   <p class="pend"><span class="tag ok">확정</span><span>컬렉션 · 대상 컬렉션 · 번호 슬롯 보기는 셸 명령(<code>collection.*</code> · <code>libraryView.*</code> · <code>agentPresets.open</code>) — 새 전역 핸들 없음</span></p>
-  <p class="pend"><span class="tag ok">확정 2026-10-18</span><span><code>agent.setWorkspace {agent, cwd}</code> 더함(잠겼으면 CONFLICT = code + args · 경로는 있는 폴더) · <code>agent.new</code> 의 <code>cwd</code> 필수 그대로 · <code>files</code> 인자 없음(codex 파일 대답 걷음) · <code>library.validate</code> 없음 — <code>library.refresh</code> 가 검사까지 · 다시 연결 = <code>library.relink</code>(화면 [다시 연결] · [연결] 과 같은 일)</span></p>
+  <p class="pend chg" id="chg-s11-relink-pend"><span class="tag ok">확정 2026-10-18</span><span><code>agent.setWorkspace {agent, cwd}</code> 더함(잠겼으면 CONFLICT = code + args · 경로는 있는 폴더) · <code>agent.new</code> 의 <code>cwd</code> 필수 그대로 · <code>files</code> 인자 없음(codex 파일 대답 걷음) · <code>library.validate</code> 없음 — <code>library.refresh</code> 가 검사까지 · 다시 연결 = <code>library.relink</code>(화면 [다시 연결] 에서 하나 고른 것과 같은 일)</span></p>
+  <p class="pend chg" id="chg-s11-trash-dup"><span class="tag ok">확정 2026-10-19</span><span><code>library.delete</code> = 우리 <code>.trash</code> 로(OS 휴지통 아님) · <code>.trash</code> 비우기 명령은 일부러 없음 — 사람만(원칙 「LLM-우선 제어」의 의도된 예외 · ADR 후보 · 에이전트가 잘못 지워도 되살릴 수 있게) · <code>agent.duplicate {agent}</code> 더함(§9) · <code>library.relink</code> 의 답에 후보 제안은 없음</span></p>
   <p class="pend"><span class="tag">나중</span>원격 데몬(나중)에서는 화면은 붙이기만, 편집은 LLM 명령으로</p>
 </section>
 
@@ -1371,20 +1464,20 @@ engram agent.spawn --target 리뷰봇                  <span class="c"># 대화�
   <div class="legend">
     <span><i class="e"></i>충돌 — 같은 이름 스킬 · 실행 막음</span>
     <span><i class="r"></i>⛔ 오류 — YAML 문법 · 순환 · 설정 스키마 타입 · 범위 · 실행 막음</span>
-    <span><i class="g"></i>찾을 수 없음 — [다시 연결] · 후보가 하나면 「후보 &lt;경로&gt; [연결]」 · 실행 막음</span>
+    <span class="chg" id="chg-s12-gone"><i class="g"></i>찾을 수 없음 — [다시 연결] · × · 실행 막음 (후보 제안 없음 — 2026-10-19)</span>
     <span><i class="w"></i>⚠ — codex 모르는 키만 · 안 막음</span>
     <span><span class="eb48" style="margin-right:6px">1</span>빨간 수 — 프리셋 안 깨진 항목 수(접혀 있어도)</span>
     <span><i class="d"></i>흐림 — 이미 추가됨 · 추가할 수 없음</span>
     <span><i class="s"></i>선택한 것</span>
   </div>
-  <p class="pend"><span class="tag ok">확정 2026-10-18</span><span>⛔ 오류에 설정 스키마 타입 · 범위 오류가 듦 · ⚠ = codex 모르는 키만(claude 모르는 키는 표시 없음) · 옛 「다시 연결됨 · 이전 경로(확인 전)」 노란 표시는 없앰 — 줄은 「찾을 수 없음(+ 후보)」 이거나 정상(D10) · 경고 범주는 없음</span></p>
+  <p class="pend chg" id="chg-s12-pend"><span class="tag ok">확정 2026-10-18</span><span>⛔ 오류에 설정 스키마 타입 · 범위 오류가 듦 · ⚠ = codex 모르는 키만(claude 모르는 키는 표시 없음) · 옛 「다시 연결됨 · 이전 경로(확인 전)」 노란 표시는 없앰 — 줄은 「찾을 수 없음」 이거나 정상 · 「다시 연결 확인 대기」 · 후보 상태도 없음(D10 · 2026-10-19) · 경고 범주는 없음 · 같은 표시가 편집 칸 머리 아래 문제 목록에도 한 줄씩(§3)</span></p>
 </section>
 
 <!-- 13 -->
 <section id="s13">
   <div class="sh"><span class="no">13</span><h2>열린 것</h2></div>
   <div class="open">
-    <span class="tag ok">D1–D11 · T1–T10 결정 상태 = <a href="#decisions">§21</a> — 2026-10-18 전부 정함 · 리뷰 때 확인 둘(D10 · D11)</span>
+    <span class="tag ok chg" id="chg-s13-status">D1–D11 · T1–T10 결정 상태 = <a href="#decisions">§21</a> — 2026-10-18 전부 정함 · 리뷰 때 확인 하나(D11) — D10 = 2026-10-19 풀림(후보 제안 없음 · 고른 뒤에만 이름으로 이음)</span>
   </div>
   <h3>재 봐야 하는 것 (구현 단계에서)</h3>
   <div class="open">
@@ -1393,13 +1486,15 @@ engram agent.spawn --target 리뷰봇                  <span class="c"># 대화�
     <span class="tag unv">codex extraRoots 실제 턴 적재</span>
     <span class="tag unv">AGENTS.override.md 가 사용자 AGENTS.md 를 가리나(TUI)</span>
     <span class="tag unv">JSON 모델 · 강도 요청(T8 관문)</span>
-    <span class="tag unv">휴지통 IFileOperation · 라이브러리 훑기 비용</span>
+    <span class="tag unv chg" id="chg-s13-scan">라이브러리 훑기 비용 (휴지통 IFileOperation 은 걷음 — 우리 .trash)</span>
+    <span class="tag unv chg" id="chg-s13-dnd">끌기 한 가지로 — react-arborist 자체 끌기(react-dnd) · dnd-kit 통일 · 떠 있는 창끼리 끌기 되나(안 되면 같은 창 안만)</span>
     <span class="tag unv">yaml-edit 가 실 프리셋 파일의 목록 넣기 · 빼기 · 순서와 주석을 지키나(T2 첫 단계 · yamlpatch 비교)</span>
     <span class="tag unv">codex AGENTS.md · 스킬이 압축 뒤 남나(T9 후속 — developer 메시지는 빠짐 실측)</span>
   </div>
   <h3>나중 · 범위 밖</h3>
   <div class="open">
     <span class="tag">에이전트 트리 설계(다음 주제) — 경로 없이 만들기 · 실행 때 경로 묻기 · 자동 경로(T4) · codex 파일 전용 폴더 · 묶는 폴더</span>
+    <span class="tag chg" id="chg-s13-priming">프라이밍 자체를 라이브러리 에셋으로(다음 주제 후보 — 2026-10-19)</span>
     <span class="tag">codex 압축 뒤 재주입(T9 후속)</span>
     <span class="tag">Engram MCP 등록 <code>--mcp-config</code> — 실행 인자로 남음(프리셋 아님)</span>
     <span class="tag">CLI 를 띄우는 설정 검사 — 문제가 생기면 그때</span>
@@ -1418,6 +1513,7 @@ engram agent.spawn --target 리뷰봇                  <span class="c"># 대화�
   <p class="ref">정본 — <code>docs/process/S21-preset-library/prd.md</code>(요구 · D · E) · <code>docs/process/S21-preset-library/trd.md</code>(설계 · T · 명령 이름) · 결정 메모 <code>.claude/handoff/attachments/20261012-preset-decisions.md</code>(시간순 · 뒤 줄이 앞 줄을 대체)</p>
   <p class="ref"><code>docs/research/external-skill-dir-loading-claude-codex-2026-10-10.md</code> · <code>docs/research/agent-preset-components-survey-2026-10-11.md</code> · <code>docs/research/library-multi-root-display-survey-2026-10-14.md</code> · <code>docs/research/favorite-star-vs-collections-survey-2026-10-14.md</code> · <code>docs/research/settings-preset-file-format-survey-2026-10-14.md</code> · <code>docs/research/library-to-bundle-add-patterns-survey-2026-10-14.md</code> · <code>docs/research/browser-back-forward-history-survey-2026-10-14.md</code> · <code>docs/research/library-browser-building-blocks-survey-2026-10-14.md</code> · <code>docs/research/library-folder-change-sync-survey-2026-10-14.md</code> · <code>docs/research/preset-asset-reference-base-survey-2026-10-14.md</code> · <code>docs/research/third-party-wrapping-criteria-survey-2026-10-14.md</code> · <code>docs/research/multi-library-reference-paths-survey-2026-10-15.md</code> · <code>docs/research/preset-editor-nested-items-layout-survey-2026-10-15.md</code> · <code>docs/research/side-detail-panel-push-vs-overlay-survey-2026-10-15.md</code> · <code>docs/research/edge-attached-flyout-direction-survey-2026-10-15.md</code> · <code>docs/research/library-empty-state-first-run-survey-2026-10-15.md</code> · <code>docs/research/attach-library-items-to-entity-survey-2026-10-15.md</code> · <code>docs/research/third-party-license-notice-survey-2026-10-15.md</code> · <code>docs/research/agent-customization-pane-naming-survey-2026-10-16.md</code></p>
   <p class="ref">2026-10-18 — <code>docs/research/launch-missing-component-practice-2026-10-18.md</code> · <code>docs/research/validation-status-after-edit-practice-2026-10-18.md</code> · <code>docs/research/check-result-cache-key-practice-2026-10-18.md</code>(CLI 검사를 걷어 결론은 쓰지 않음) · <code>docs/research/claude-settings-schema-source-2026-10-18.md</code> · <code>docs/research/blocked-launch-error-display-practice-2026-10-18.md</code> · <code>docs/research/relink-and-error-popup-practice-2026-10-18.md</code> · <code>docs/research/yaml-comment-preserving-edit-2026-10-18.md</code> · <code>docs/research/settings-asset-validation-spike-2026-10-17.md</code> 「Rust 크레이트 실측 (2026-10-18)」</p>
+  <p class="ref chg" id="chg-s14-refs">브리핑 리뷰 2차(2026-10-19) — <code>docs/research/detail-pane-section-order-2026-10-18.md</code>(칸 순서 · B2) · <code>docs/research/editor-problem-summary-practice-2026-10-18.md</code>(머리 아래 문제 목록 · B3) · <code>docs/research/global-vs-section-add-button-2026-10-19.md</code>(「+ 추가」 둘 다 · B4) · <code>docs/research/trash-unavailable-delete-practice-2026-10-19.md</code>(늘 우리 <code>.trash</code> · B8) — 결정 목록 = <a href="#chg-s21-b">§21 「브리핑 리뷰 2차」</a></p>
   <p class="ref">위에 없는 2026-10-16~17 조사 = <code>docs/process/step-log.md</code> 의 「[🔎 조사 2026-10-10] 스킬 프리셋 구상」 아래 「후속 서베이」 줄들(PRD §7 과 같은 목록)</p>
 </section>
 
@@ -1464,15 +1560,16 @@ engram agent.spawn --target 리뷰봇                  <span class="c"># 대화�
 .more44 ul{columns:2 260px;margin:8px 0 0;padding-left:1.1em}
 .part44{border-top:2px solid var(--ink);padding-top:14px;display:flex;flex-direction:column;gap:6px}
 </style>
-<header class="part44"><span class="eyebrow">2026-10-18 · TRD 초안 기준</span><h1>시스템 설계</h1><p class="lead">위 화면이 안에서 어떻게 도나 — 구조 1장 · 흐름 4장 · 라이브러리 · 결정 상태.</p></header>
+<header class="part44"><span class="eyebrow">2026-10-19 · TRD 초안 기준</span><h1>시스템 설계</h1><p class="lead">위 화면이 안에서 어떻게 도나 — 구조 1장 · 흐름 4장 · 라이브러리 · 결정 상태.</p></header>
 <section class="v44"><div class="sh"><span class="no">15</span><h2>시스템 구조</h2><span class="tag">TRD 초안</span></div>
 <div class="legend44"><span><i class="lt"></i>서드파티 라이브러리</span><span><i class="lg"></i>데몬 library 모듈</span><span><i class="lf">*.json</i>그 칸이 소유한 파일</span></div>
-<div class="fig44"><svg viewBox="0 0 1000 615" role="img" aria-label="시스템 구조"><defs><marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="s-arh"/></marker></defs><rect class="s-lane" x="0" y="0" width="1000" height="140" rx="6"/><text class="s-lane-t" x="14" y="24">웹뷰</text><text class="s-s" x="14" y="41">그리기만</text><rect class="s-lane" x="0" y="150" width="1000" height="120" rx="6"/><text class="s-lane-t" x="14" y="174">셸</text><text class="s-s" x="14" y="191">이 PC 보기 상태</text><rect class="s-lane" x="0" y="280" width="1000" height="200" rx="6"/><text class="s-lane-t" x="14" y="304">데몬</text><text class="s-s" x="14" y="321">데이터 권위</text><rect class="s-lane" x="0" y="490" width="1000" height="120" rx="6"/><text class="s-lane-t" x="14" y="514">바깥</text><rect class="s-box" x="110" y="14" width="160" height="112" rx="7"/><text class="s-t" x="120" y="34">libraryQueries</text><text class="s-s" x="120" y="51">명령 호출 · 캐시</text><rect class="s-tag" x="120" y="62" width="97.3" height="16" rx="8"/><text class="s-tagt" x="126.0" y="73.5">TanStack Query</text><rect class="s-box" x="290" y="14" width="260" height="112" rx="7"/><text class="s-t" x="300" y="34">LibrarySlot</text><text class="s-s" x="300" y="51">트리 · 목록 · 상세 · ← →</text><rect class="s-tag" x="300" y="62" width="97.3" height="16" rx="8"/><text class="s-tagt" x="306.0" y="73.5">react-arborist</text><rect class="s-tag" x="403.26" y="62" width="91.2" height="16" rx="8"/><text class="s-tagt" x="409.3" y="73.5">react-selecto</text><rect class="s-tag" x="300" y="81" width="158.2" height="16" rx="8"/><text class="s-tagt" x="306.0" y="92.5">TanStack Table · Virtual</text><rect class="s-box" x="570" y="14" width="230" height="112" rx="7"/><text class="s-t" x="580" y="34">PresetEditor (공용 부품)</text><text class="s-s" x="580" y="51">라이브러리 오른쪽 칸</text><text class="s-s" x="580" y="66">= 에이전트 프리셋 슬롯</text><rect class="s-tag" x="580" y="77" width="54.6" height="16" rx="8"/><text class="s-tagt" x="586.0" y="88.5">dnd-kit</text><rect class="s-tag" x="640.63" y="77" width="91.2" height="16" rx="8"/><text class="s-tagt" x="646.6" y="88.5">Radix popover</text><rect class="s-box" x="820" y="14" width="170" height="112" rx="7"/><text class="s-t" x="830" y="34">DetailFlyout · 메뉴</text><text class="s-s" x="830" y="51">잘리지 않게 붙음 · D11</text><rect class="s-tag" x="830" y="62" width="72.9" height="16" rx="8"/><text class="s-tagt" x="836.0" y="73.5">Radix menu</text><rect class="s-tag" x="908.9" y="62" width="48.5" height="16" rx="8"/><text class="s-tagt" x="914.9" y="73.5">lucide</text><rect class="s-box" x="110" y="162" width="160" height="96" rx="7"/><text class="s-t" x="120" y="182">버스 중계</text><text class="s-s" x="120" y="199">웹뷰 ↔ 데몬 명령</text><rect class="s-box" x="290" y="162" width="220" height="96" rx="7"/><text class="s-t" x="300" y="182">library_view</text><text class="s-s" x="300" y="199">번호 1~4 보기 상태</text><text class="s-s" x="300" y="214">폴더 · 기록 · 칸 폭</text><text class="s-f" x="502" y="251" text-anchor="end">state.json</text><rect class="s-box" x="530" y="162" width="220" height="96" rx="7"/><text class="s-t" x="540" y="182">collections</text><text class="s-s" x="540" y="199">컬렉션 · 대상 컬렉션 · 이동 커서</text><text class="s-f" x="742" y="251" text-anchor="end">collections.json</text><rect class="s-box" x="770" y="162" width="220" height="96" rx="7"/><text class="s-t" x="780" y="182">local_os</text><text class="s-s" x="780" y="199">폴더 선택 · 열기 · 보이기</text><rect class="s-tag" x="780" y="210" width="146.0" height="16" rx="8"/><text class="s-tagt" x="786.0" y="221.5">plugin-dialog · opener</text><rect class="s-box" x="110" y="292" width="160" height="176" rx="7"/><text class="s-t" x="120" y="312">명령 버스</text><text class="s-s" x="120" y="329">library.*</text><text class="s-s" x="120" y="344">preset.*</text><text class="s-s" x="120" y="359">agent.*</text><rect class="s-grp" x="290" y="292" width="430" height="176" rx="8"/><text class="s-t" x="300" y="310">LibraryService — 데몬 library 모듈</text><text class="s-f" x="712" y="310" text-anchor="end">라이브러리 폴더</text><rect class="s-box" x="300" y="318" width="130" height="66" rx="7"/><text class="s-t" x="310" y="338">FsStore</text><text class="s-s" x="310" y="355">폴더 훑기</text><rect class="s-tag" x="310" y="366" width="54.6" height="16" rx="8"/><text class="s-tagt" x="316.0" y="377.5">walkdir</text><rect class="s-box" x="440" y="318" width="130" height="66" rx="7"/><text class="s-t" x="450" y="337">format · YAML</text><rect class="s-tag" x="450" y="344" width="98" height="16" rx="8"/><text class="s-tagt" x="456.0" y="355.5">serde-saphyr 읽기</text><rect class="s-tag" x="450" y="364" width="80" height="16" rx="8"/><text class="s-tagt" x="456.0" y="375.5">yaml-edit 고침</text><rect class="s-box" x="580" y="318" width="130" height="66" rx="7"/><text class="s-t" x="590" y="338">LibPath</text><text class="s-s" x="590" y="355">/ 경로 참조</text><rect class="s-tag" x="590" y="366" width="91.2" height="16" rx="8"/><text class="s-tagt" x="596.0" y="377.5">relative-path</text><rect class="s-box" x="300" y="392" width="130" height="66" rx="7"/><text class="s-t" x="310" y="412">Catalog · resolve</text><text class="s-s" x="310" y="429">참조 · 충돌</text><text class="s-s" x="310" y="444">펼침 · 해석</text><rect class="s-box" x="440" y="392" width="130" height="66" rx="7"/><text class="s-t" x="450" y="412">OpJournal</text><text class="s-s" x="450" y="429">이동 · 삭제</text><text class="s-s" x="450" y="444">MoveLog 기록</text><rect class="s-box" x="580" y="392" width="130" height="66" rx="7"/><text class="s-t" x="590" y="412">LaunchKits</text><text class="s-s" x="590" y="429">실행 재료</text><text class="s-s" x="590" y="444">check · prepare</text><rect class="s-box" x="740" y="292" width="250" height="176" rx="7"/><text class="s-t" x="750" y="312">AgentManager</text><text class="s-s" x="750" y="329">① 예약 · 떠 있음 확인</text><text class="s-s" x="750" y="344">② ensure_registered</text><text class="s-s" x="750" y="359">③ check (명부 값 · 설정 검사)</text><text class="s-s" x="750" y="374">④ prepare → 실행</text><text class="s-f" x="982" y="461" text-anchor="end">agents.json</text><rect class="s-box" x="110" y="502" width="160" height="96" rx="7"/><text class="s-t" x="120" y="522">engram CLI · LLM</text><text class="s-s" x="120" y="539">화면 단추와</text><text class="s-s" x="120" y="554">같은 명령</text><rect class="s-box" x="290" y="502" width="300" height="96" rx="7"/><text class="s-t" x="300" y="522">platform fs (OS 층)</text><text class="s-s" x="300" y="539">move_to_trash · link_dir</text><rect class="s-tag" x="300" y="550" width="176.4" height="16" rx="8"/><text class="s-tagt" x="306.0" y="561.5">windows 0.58 IFileOperation</text><rect class="s-tag" x="482.43000000000006" y="550" width="60.7" height="16" rx="8"/><text class="s-tagt" x="488.4" y="561.5">junction</text><rect class="s-box" x="610" y="502" width="190" height="96" rx="7"/><text class="s-t" x="620" y="522">backend::materialize</text><text class="s-s" x="620" y="539">claude · codex 플래그</text><rect class="s-box" x="820" y="502" width="170" height="96" rx="7"/><text class="s-t" x="830" y="522">claude · codex</text><text class="s-s" x="830" y="539">에이전트 프로세스</text><path class="s-ar" d="M190,126 L190,160" marker-end="url(#ah5)"/><path class="s-ar" d="M190,258 L190,290" marker-end="url(#ah5)"/><path class="s-ar" d="M400,126 L400,160" marker-end="url(#ah5)"/><text class="s-al" x="406" y="146" text-anchor="start">보기 상태</text><path class="s-ar" d="M270,380 L288,380" marker-end="url(#ah5)"/><path class="s-ar" d="M190,502 L190,470" marker-end="url(#ah5)"/><path class="s-ar" d="M740,425 L712,425" marker-end="url(#ah5)"/><path class="s-ar" d="M865,468 L865,484 L705,484 L705,500" marker-end="url(#ah5)"/><path class="s-ar" d="M365,458 L365,484 L440,484 L440,500" marker-end="url(#ah5)"/><text class="s-al" x="448" y="496" text-anchor="start">휴지통</text><path class="s-ar" d="M610,560 L592,560" marker-end="url(#ah5)"/><path class="s-ar" d="M800,560 L818,560" marker-end="url(#ah5)"/></svg></div>
-<p class="cap44">데이터(라이브러리 · 프리셋 · 에이전트)는 데몬이 쥐고, 셸은 이 PC 의 보기 상태 · 컬렉션만, 웹뷰는 그리기만. 화면 단추와 LLM 은 같은 명령 버스를 부른다.</p></section>
-<section class="v44"><div class="sh"><span class="no">16</span><h2>라이브러리 열기 — 물어볼 때만 훑는다</h2></div><div class="fig44"><svg viewBox="0 0 1000 362" role="img"><defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="q-arh"/></marker></defs><rect class="q-head" x="50.0" y="8" width="120.0" height="34" rx="7"/><text class="q-ht" x="110" y="30" text-anchor="middle">웹뷰</text><line class="q-life" x1="110" y1="42" x2="110" y2="356"/><rect class="q-head" x="320.0" y="8" width="120.0" height="34" rx="7"/><text class="q-ht" x="380" y="30" text-anchor="middle">셸</text><line class="q-life" x1="380" y1="42" x2="380" y2="356"/><rect class="q-head" x="590.0" y="8" width="120.0" height="34" rx="7"/><text class="q-ht" x="650" y="30" text-anchor="middle">데몬 library</text><line class="q-life" x1="650" y1="42" x2="650" y2="356"/><rect class="q-head" x="856.8" y="8" width="126.4" height="34" rx="7"/><text class="q-ht" x="920" y="30" text-anchor="middle">라이브러리 폴더</text><line class="q-life" x1="920" y1="42" x2="920" y2="356"/><line class="q-ar" x1="110" y1="84" x2="377" y2="84" marker-end="url(#ah1)"/><rect class="q-lbg" x="163.9" y="63" width="162.2" height="17" rx="3"/><text class="q-l" x="245.0" y="76" text-anchor="middle">「라이브러리 ▸ 1」 열기</text><circle class="q-n" cx="110" cy="84" r="10"/><text class="q-nt" x="110" y="87.5" text-anchor="middle">1</text><line class="q-ar" x1="380" y1="128" x2="113" y2="128" marker-end="url(#ah1)"/><rect class="q-lbg" x="116.8" y="107" width="256.3" height="17" rx="3"/><text class="q-l" x="245.0" y="120" text-anchor="middle">번호 1 보기 상태 (폴더 · 기록 · 칸 폭)</text><circle class="q-n" cx="380" cy="128" r="10"/><text class="q-nt" x="380" y="131.5" text-anchor="middle">2</text><line class="q-ar" x1="110" y1="172" x2="647" y2="172" marker-end="url(#ah1)"/><rect class="q-lbg" x="256.4" y="151" width="247.2" height="17" rx="3"/><text class="q-l" x="380.0" y="164" text-anchor="middle">library.list {folder} (셸은 중계만)</text><circle class="q-n" cx="110" cy="172" r="10"/><text class="q-nt" x="110" y="175.5" text-anchor="middle">3</text><line class="q-ar" x1="650" y1="216" x2="917" y2="216" marker-end="url(#ah1)"/><rect class="q-lbg" x="658.7" y="195" width="252.6" height="17" rx="3"/><text class="q-l" x="785.0" y="208" text-anchor="middle">훑기 — 처음 · 새로 고침 · refresh 때만</text><circle class="q-n" cx="650" cy="216" r="10"/><text class="q-nt" x="650" y="219.5" text-anchor="middle">4</text><rect class="q-note" x="536.5" y="245" width="227.0" height="26" rx="6"/><text class="q-l" x="650.0" y="262" text-anchor="middle">참조 · 다시 연결 후보 · 설정 검사</text><circle class="q-n" cx="523.5" cy="258" r="10"/><text class="q-nt" x="523.5" y="261.5" text-anchor="middle">5</text><line class="q-ar" x1="650" y1="304" x2="113" y2="304" marker-end="url(#ah1)"/><rect class="q-lbg" x="273.6" y="283" width="212.9" height="17" rx="3"/><text class="q-l" x="380.0" y="296" text-anchor="middle">그 폴더 항목 — 요청한 쪽에만 답</text><circle class="q-n" cx="650" cy="304" r="10"/><text class="q-nt" x="650" y="307.5" text-anchor="middle">6</text></svg></div><p class="cap44">감시 · 방송 없음. 데몬은 메모리 목록으로 답하고, 전체 훑기는 처음 · 폴더 바꾸기 때만 — 바깥 변경은 트리 우클릭 「새로 고침」(그 폴더 · 루트 머리 줄 = 전체) · <code>library.refresh</code> 로 들인다. 같은 때 <code>library.moves {since}</code> 로 이동 기록도 받아 컬렉션을 고친다(§18 ⑥⑦). ⑤ 의 설정 검사는 데몬 안에서만(문법 · 스키마 — CLI 안 띄움 · ≈ 0 ms) · 스키마는 그 훑기가 처음 필요로 할 때 내려받는다(데몬 시작 아님 · 2026-10-18).</p></section>
-<section class="v44"><div class="sh"><span class="no">17</span><h2>프리셋 편집 — 조작을 보내면 데몬이 최신 파일에 적용</h2></div><div class="fig44"><svg viewBox="0 0 1000 318" role="img"><defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="q-arh"/></marker></defs><g transform="translate(135,0)"><rect class="q-head" x="34.7" y="8" width="150.5" height="34" rx="7"/><text class="q-ht" x="110" y="30" text-anchor="middle">웹뷰 PresetEditor</text><line class="q-life" x1="110" y1="42" x2="110" y2="312"/><rect class="q-head" x="320.0" y="8" width="120.0" height="34" rx="7"/><text class="q-ht" x="380" y="30" text-anchor="middle">데몬 library</text><line class="q-life" x1="380" y1="42" x2="380" y2="312"/><rect class="q-head" x="590.0" y="8" width="120.0" height="34" rx="7"/><text class="q-ht" x="650" y="30" text-anchor="middle">프리셋 파일</text><line class="q-life" x1="650" y1="42" x2="650" y2="312"/><line class="q-ar" x1="110" y1="84" x2="377" y2="84" marker-end="url(#ah2)"/><rect class="q-lbg" x="106.8" y="63" width="276.5" height="17" rx="3"/><text class="q-l" x="245.0" y="76" text-anchor="middle">preset.add · remove · reorder{baseRev}</text><circle class="q-n" cx="110" cy="84" r="10"/><text class="q-nt" x="110" y="87.5" text-anchor="middle">1</text><line class="q-ar" x1="380" y1="128" x2="647" y2="128" marker-end="url(#ah2)"/><rect class="q-lbg" x="465.3" y="107" width="99.4" height="17" rx="3"/><text class="q-l" x="515.0" y="120" text-anchor="middle">최신 파일 읽기</text><circle class="q-n" cx="380" cy="128" r="10"/><text class="q-nt" x="380" y="131.5" text-anchor="middle">2</text><rect class="q-note" x="187.8" y="157" width="384.5" height="26" rx="6"/><text class="q-l" x="380.0" y="174" text-anchor="middle">add·remove = 멱등 · reorder = baseRev 다르면 CONFLICT</text><circle class="q-n" cx="174.8" cy="170" r="10"/><text class="q-nt" x="174.8" y="173.5" text-anchor="middle">3</text><line class="q-ar" x1="380" y1="216" x2="647" y2="216" marker-end="url(#ah2)"/><rect class="q-lbg" x="474.9" y="195" width="80.2" height="17" rx="3"/><text class="q-l" x="515.0" y="208" text-anchor="middle">원자적 쓰기</text><circle class="q-n" cx="380" cy="216" r="10"/><text class="q-nt" x="380" y="219.5" text-anchor="middle">4</text><line class="q-ar" x1="380" y1="260" x2="113" y2="260" marker-end="url(#ah2)"/><rect class="q-lbg" x="172.5" y="239" width="145.0" height="17" rx="3"/><text class="q-l" x="245.0" y="252" text-anchor="middle">새 상태(충돌 줄 포함)</text><circle class="q-n" cx="380" cy="260" r="10"/><text class="q-nt" x="380" y="263.5" text-anchor="middle">5</text></g></svg></div><p class="cap44">저장 단추 · 클라이언트 초안 없음. LLM 이 YAML 을 직접 고친 것도 ② 에서 잡힌다. 순서 바꾸기가 낡은 화면에서 오면 거절 → 그 화면이 새로 받고 「다른 곳에서 바뀌어 새로 불러왔습니다」. ⑤ 의 새 상태엔 충돌 줄(걸린 항목 전부 · 온 길)과 「에이전트 N개에서 참조 중」 만 실린다 — 경고는 없다(2026-10-18 · 참조하는 에이전트를 다시 풀던 단계도 걷었다). 편집은 에이전트의 백엔드를 바꾸지 않는다 — 백엔드는 에이전트 값(만들 때 고정 · 2026-10-18). ④ 의 쓰기는 손 주석을 지킨다(T2 — <code>yaml-edit</code> 스파이크가 첫 구현 단계 · 안 되면 「잃음 받아들임」 으로 돌아가 보고).</p></section>
-<section class="v44"><div class="sh"><span class="no">18</span><h2>이동 · 이름 바꾸기 — 참조까지 한 조작 안에서</h2></div><div class="fig44"><svg viewBox="0 0 1000 406" role="img"><defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="q-arh"/></marker></defs><rect class="q-head" x="50.0" y="8" width="120.0" height="34" rx="7"/><text class="q-ht" x="110" y="30" text-anchor="middle">웹뷰 · CLI</text><line class="q-life" x1="110" y1="42" x2="110" y2="400"/><rect class="q-head" x="320.0" y="8" width="120.0" height="34" rx="7"/><text class="q-ht" x="380" y="30" text-anchor="middle">데몬 library</text><line class="q-life" x1="380" y1="42" x2="380" y2="400"/><rect class="q-head" x="590.0" y="8" width="120.0" height="34" rx="7"/><text class="q-ht" x="650" y="30" text-anchor="middle">디스크</text><line class="q-life" x1="650" y1="42" x2="650" y2="400"/><rect class="q-head" x="855.1" y="8" width="129.7" height="34" rx="7"/><text class="q-ht" x="920" y="30" text-anchor="middle">셸 collections</text><line class="q-life" x1="920" y1="42" x2="920" y2="400"/><line class="q-ar" x1="110" y1="84" x2="377" y2="84" marker-end="url(#ah3)"/><rect class="q-lbg" x="122.2" y="63" width="245.5" height="17" rx="3"/><text class="q-l" x="245.0" y="76" text-anchor="middle">library.move (끌어 놓기 · CLI 같음)</text><circle class="q-n" cx="110" cy="84" r="10"/><text class="q-nt" x="110" y="87.5" text-anchor="middle">1</text><line class="q-ar" x1="380" y1="128" x2="647" y2="128" marker-end="url(#ah3)"/><rect class="q-lbg" x="430.5" y="107" width="169.0" height="17" rx="3"/><text class="q-l" x="515.0" y="120" text-anchor="middle">일지 먼저 쓰기 OpJournal</text><circle class="q-n" cx="380" cy="128" r="10"/><text class="q-nt" x="380" y="131.5" text-anchor="middle">2</text><line class="q-ar" x1="380" y1="172" x2="647" y2="172" marker-end="url(#ah3)"/><rect class="q-lbg" x="459.2" y="151" width="111.6" height="17" rx="3"/><text class="q-l" x="515.0" y="164" text-anchor="middle">파일 이름 바꾸기</text><circle class="q-n" cx="380" cy="172" r="10"/><text class="q-nt" x="380" y="175.5" text-anchor="middle">3</text><line class="q-ar" x1="380" y1="216" x2="647" y2="216" marker-end="url(#ah3)"/><rect class="q-lbg" x="388.6" y="195" width="252.7" height="17" rx="3"/><text class="q-l" x="515.0" y="208" text-anchor="middle">프리셋 파일 · agents.json 참조 고치기</text><circle class="q-n" cx="380" cy="216" r="10"/><text class="q-nt" x="380" y="219.5" text-anchor="middle">4</text><rect class="q-note" x="248.5" y="245" width="263.0" height="26" rx="6"/><text class="q-l" x="380.0" y="262" text-anchor="middle">MoveLog 에 옛→새 쌍 추가 · 일지 지움</text><circle class="q-n" cx="235.5" cy="258" r="10"/><text class="q-nt" x="235.5" y="261.5" text-anchor="middle">5</text><line class="q-ar" x1="920" y1="304" x2="383" y2="304" marker-end="url(#ah3)"/><rect class="q-lbg" x="529.9" y="283" width="240.2" height="17" rx="3"/><text class="q-l" x="650.0" y="296" text-anchor="middle">다음 요청 때 library.moves {since}</text><circle class="q-n" cx="920" cy="304" r="10"/><text class="q-nt" x="920" y="307.5" text-anchor="middle">6</text><line class="q-ar" x1="380" y1="348" x2="917" y2="348" marker-end="url(#ah3)"/><rect class="q-lbg" x="564.7" y="327" width="170.6" height="17" rx="3"/><text class="q-l" x="650.0" y="340" text-anchor="middle">새 쌍 → 컬렉션 · ★ 고침</text><circle class="q-n" cx="380" cy="348" r="10"/><text class="q-nt" x="380" y="351.5" text-anchor="middle">7</text></svg></div><p class="cap44">중간에 죽으면 다음 부팅에 일지를 보고 이어서 마친다. 삭제는 OS 휴지통 — 참조가 있으면 확인 창(CLI = <code>--yes</code> 없으면 거절) · 삭제한 경로는 기록해 두어 같은 이름 후보로도 내지 않는다 · 바깥에서 옮긴 것은 저절로 잇지 않고 「찾을 수 없음 — 후보 [연결]」 로 제안만 한다(D10 · §4 · 2026-10-18).</p></section>
-<section class="v44" id="s19"><div class="sh"><span class="no">19</span><h2>에이전트 실행 — 세션을 만들기 전에 점검 · 맞추기</h2></div><div class="fig44"><svg viewBox="0 0 1000 406" role="img"><defs><marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="q-arh"/></marker></defs><rect class="q-head" x="50.0" y="8" width="120.0" height="34" rx="7"/><text class="q-ht" x="110" y="30" text-anchor="middle">화면 · CLI</text><line class="q-life" x1="110" y1="42" x2="110" y2="400"/><rect class="q-head" x="252.5" y="8" width="120.0" height="34" rx="7"/><text class="q-ht" x="312.5" y="30" text-anchor="middle">AgentManager</text><line class="q-life" x1="312.5" y1="42" x2="312.5" y2="400"/><rect class="q-head" x="434.1" y="8" width="161.7" height="34" rx="7"/><text class="q-ht" x="515" y="30" text-anchor="middle">library LaunchKits</text><line class="q-life" x1="515" y1="42" x2="515" y2="400"/><rect class="q-head" x="657.5" y="8" width="120.0" height="34" rx="7"/><text class="q-ht" x="717.5" y="30" text-anchor="middle">backend</text><line class="q-life" x1="717.5" y1="42" x2="717.5" y2="400"/><rect class="q-head" x="854.2" y="8" width="131.6" height="34" rx="7"/><text class="q-ht" x="920" y="30" text-anchor="middle">claude · codex</text><line class="q-life" x1="920" y1="42" x2="920" y2="400"/><line class="q-ar" x1="110" y1="84" x2="309.5" y2="84" marker-end="url(#ah4)"/><rect class="q-lbg" x="133.7" y="63" width="155.0" height="17" rx="3"/><text class="q-l" x="211.3" y="76" text-anchor="middle">실행 요청 (화면 / CLI)</text><circle class="q-n" cx="110" cy="84" r="10"/><text class="q-nt" x="110" y="87.5" text-anchor="middle">1</text><rect class="q-note" x="170.7" y="113" width="283.7" height="26" rx="6"/><text class="q-l" x="312.5" y="130" text-anchor="middle">예약 · 떠 있음 확인 · ensure_registered</text><circle class="q-n" cx="157.7" cy="126" r="10"/><text class="q-nt" x="157.7" y="129.5" text-anchor="middle">2</text><line class="q-ar" x1="312.5" y1="172" x2="512" y2="172" marker-end="url(#ah4)"/><rect class="q-lbg" x="351.2" y="151" width="125.2" height="17" rx="3"/><text class="q-l" x="413.8" y="164" text-anchor="middle">check · 설정 검사</text><circle class="q-n" cx="312.5" cy="172" r="10"/><text class="q-nt" x="312.5" y="175.5" text-anchor="middle">3</text><rect class="q-note" x="176.9" y="201" width="271.3" height="26" rx="6"/><text class="q-l" x="312.5" y="218" text-anchor="middle">막히면 사유 여섯 → 이유 (code + args)</text><line class="q-ar" x1="312.5" y1="260" x2="512" y2="260" marker-end="url(#ah4)"/><rect class="q-lbg" x="342.4" y="239" width="142.8" height="17" rx="3"/><text class="q-l" x="413.8" y="252" text-anchor="middle">prepare → 휘발 폴더</text><circle class="q-n" cx="312.5" cy="260" r="10"/><text class="q-nt" x="312.5" y="263.5" text-anchor="middle">4</text><line class="q-ar" x1="312.5" y1="304" x2="714.5" y2="304" marker-end="url(#ah4)"/><rect class="q-lbg" x="470.7" y="283" width="88.6" height="17" rx="3"/><text class="q-l" x="515.0" y="296" text-anchor="middle">materialize</text><circle class="q-n" cx="312.5" cy="304" r="10"/><text class="q-nt" x="312.5" y="307.5" text-anchor="middle">5</text><line class="q-ar" x1="717.5" y1="348" x2="917" y2="348" marker-end="url(#ah4)"/><rect class="q-lbg" x="744.6" y="327" width="148.3" height="17" rx="3"/><text class="q-l" x="818.8" y="340" text-anchor="middle">백엔드별 플래그로 띄움</text><circle class="q-n" cx="717.5" cy="348" r="10"/><text class="q-nt" x="717.5" y="351.5" text-anchor="middle">6</text></svg></div><p class="cap44">막히는 사유 여섯(§10)은 ③ 에서 돌아온다 — 제어 채널을 열기 전 · 누가 실행하든 같은 사유(화면 = 에이전트 옆 카드 · CLI · LLM = code + args). ③ 의 설정 검사는 그 에이전트에 붙은 설정을 데몬 안에서만 본다(문법 · 스키마 — CLI 안 띄움). 옛 「codex 파일 대답 기본값 저장」 단계와 실행 직전 CLI 검사는 걷었다(2026-10-18). 백엔드는 맞추지 않는다 — 에이전트 값 그대로라 세션도 놓지 않는다(2026-10-18).</p><div class="tbl44"><table>
+<div class="fig44"><svg viewBox="0 0 1000 615" role="img" aria-label="시스템 구조"><defs><marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="s-arh"/></marker></defs><rect class="s-lane" x="0" y="0" width="1000" height="140" rx="6"/><text class="s-lane-t" x="14" y="24">웹뷰</text><text class="s-s" x="14" y="41">그리기만</text><rect class="s-lane" x="0" y="150" width="1000" height="120" rx="6"/><text class="s-lane-t" x="14" y="174">셸</text><text class="s-s" x="14" y="191">이 PC 보기 상태</text><rect class="s-lane" x="0" y="280" width="1000" height="200" rx="6"/><text class="s-lane-t" x="14" y="304">데몬</text><text class="s-s" x="14" y="321">데이터 권위</text><rect class="s-lane" x="0" y="490" width="1000" height="120" rx="6"/><text class="s-lane-t" x="14" y="514">바깥</text><rect class="s-box" x="110" y="14" width="160" height="112" rx="7"/><text class="s-t" x="120" y="34">libraryQueries</text><text class="s-s" x="120" y="51">명령 호출 · 캐시</text><rect class="s-tag" x="120" y="62" width="97.3" height="16" rx="8"/><text class="s-tagt" x="126.0" y="73.5">TanStack Query</text><rect class="s-box" x="290" y="14" width="260" height="112" rx="7"/><text class="s-t" x="300" y="34">LibrarySlot</text><text class="s-s" x="300" y="51">트리 · 목록 · 상세 · ← →</text><rect class="s-tag" x="300" y="62" width="97.3" height="16" rx="8"/><text class="s-tagt" x="306.0" y="73.5">react-arborist</text><rect class="s-tag" x="403.26" y="62" width="91.2" height="16" rx="8"/><text class="s-tagt" x="409.3" y="73.5">react-selecto</text><rect class="s-tag" x="300" y="81" width="158.2" height="16" rx="8"/><text class="s-tagt" x="306.0" y="92.5">TanStack Table · Virtual</text><rect class="s-box" x="570" y="14" width="230" height="112" rx="7"/><text class="s-t" x="580" y="34">PresetEditor (공용 부품)</text><text class="s-s" x="580" y="51">라이브러리 오른쪽 칸</text><text class="s-s" x="580" y="66">= 에이전트 프리셋 슬롯</text><rect class="s-tag" x="580" y="77" width="54.6" height="16" rx="8"/><text class="s-tagt" x="586.0" y="88.5">dnd-kit</text><rect class="s-tag" x="640.63" y="77" width="91.2" height="16" rx="8"/><text class="s-tagt" x="646.6" y="88.5">Radix popover</text><rect class="s-box" x="820" y="14" width="170" height="112" rx="7"/><text class="s-t" x="830" y="34">DetailFlyout · 메뉴</text><text class="s-s" x="830" y="51">잘리지 않게 붙음 · D11</text><rect class="s-tag" x="830" y="62" width="72.9" height="16" rx="8"/><text class="s-tagt" x="836.0" y="73.5">Radix menu</text><rect class="s-tag" x="908.9" y="62" width="48.5" height="16" rx="8"/><text class="s-tagt" x="914.9" y="73.5">lucide</text><rect class="s-box" x="110" y="162" width="160" height="96" rx="7"/><text class="s-t" x="120" y="182">버스 중계</text><text class="s-s" x="120" y="199">웹뷰 ↔ 데몬 명령</text><rect class="s-box" x="290" y="162" width="220" height="96" rx="7"/><text class="s-t" x="300" y="182">library_view</text><text class="s-s" x="300" y="199">번호 1~4 보기 상태</text><text class="s-s" x="300" y="214">폴더 · 기록 · 칸 폭</text><text class="s-f" x="502" y="251" text-anchor="end">state.json</text><rect class="s-box" x="530" y="162" width="220" height="96" rx="7"/><text class="s-t" x="540" y="182">collections</text><text class="s-s" x="540" y="199">컬렉션 · 대상 컬렉션 · 이동 커서</text><text class="s-f" x="742" y="251" text-anchor="end">collections.json</text><rect class="s-box" x="770" y="162" width="220" height="96" rx="7"/><text class="s-t" x="780" y="182">local_os</text><text class="s-s" x="780" y="199">폴더 선택 · 열기 · 보이기</text><rect class="s-tag" x="780" y="210" width="146.0" height="16" rx="8"/><text class="s-tagt" x="786.0" y="221.5">plugin-dialog · opener</text><rect class="s-box" x="110" y="292" width="160" height="176" rx="7"/><text class="s-t" x="120" y="312">명령 버스</text><text class="s-s" x="120" y="329">library.*</text><text class="s-s" x="120" y="344">preset.*</text><text class="s-s" x="120" y="359">agent.*</text><rect class="s-grp" x="290" y="292" width="430" height="176" rx="8"/><text class="s-t" x="300" y="310">LibraryService — 데몬 library 모듈</text><text class="s-f" x="712" y="310" text-anchor="end">라이브러리 폴더</text><rect class="s-box" x="300" y="318" width="130" height="66" rx="7"/><text class="s-t" x="310" y="338">FsStore</text><text class="s-s" x="310" y="355">훑기 · .trash 로 옮김</text><rect class="s-tag" x="310" y="366" width="54.6" height="16" rx="8"/><text class="s-tagt" x="316.0" y="377.5">walkdir</text><rect class="s-box" x="440" y="318" width="130" height="66" rx="7"/><text class="s-t" x="450" y="337">format · YAML</text><rect class="s-tag" x="450" y="344" width="98" height="16" rx="8"/><text class="s-tagt" x="456.0" y="355.5">serde-saphyr 읽기</text><rect class="s-tag" x="450" y="364" width="80" height="16" rx="8"/><text class="s-tagt" x="456.0" y="375.5">yaml-edit 고침</text><rect class="s-box" x="580" y="318" width="130" height="66" rx="7"/><text class="s-t" x="590" y="338">LibPath</text><text class="s-s" x="590" y="355">/ 경로 참조</text><rect class="s-tag" x="590" y="366" width="91.2" height="16" rx="8"/><text class="s-tagt" x="596.0" y="377.5">relative-path</text><rect class="s-box" x="300" y="392" width="130" height="66" rx="7"/><text class="s-t" x="310" y="412">Catalog · resolve</text><text class="s-s" x="310" y="429">참조 · 충돌</text><text class="s-s" x="310" y="444">펼침 · 해석</text><rect class="s-box" x="440" y="392" width="130" height="66" rx="7"/><text class="s-t" x="450" y="412">OpJournal</text><text class="s-s" x="450" y="429">이동 · 삭제</text><text class="s-s" x="450" y="444">MoveLog 기록</text><rect class="s-box" x="580" y="392" width="130" height="66" rx="7"/><text class="s-t" x="590" y="412">LaunchKits</text><text class="s-s" x="590" y="429">실행 재료</text><text class="s-s" x="590" y="444">check · prepare</text><rect class="s-box" x="740" y="292" width="250" height="176" rx="7"/><text class="s-t" x="750" y="312">AgentManager</text><text class="s-s" x="750" y="329">① 예약 · 떠 있음 확인</text><text class="s-s" x="750" y="344">② ensure_registered</text><text class="s-s" x="750" y="359">③ check (명부 값 · 설정 검사)</text><text class="s-s" x="750" y="374">④ prepare → 실행</text><text class="s-f" x="982" y="461" text-anchor="end">agents.json</text><rect class="s-box" x="110" y="502" width="160" height="96" rx="7"/><text class="s-t" x="120" y="522">engram CLI · LLM</text><text class="s-s" x="120" y="539">화면 단추와</text><text class="s-s" x="120" y="554">같은 명령</text><rect class="s-box" x="290" y="502" width="140" height="96" rx="7"/><text class="s-t" x="300" y="522">daemon\cache\</text><text class="s-s" x="300" y="539">내려받은 스키마</text><text class="s-s" x="300" y="554">지워도 다시 받음</text><text class="s-f" x="422" y="591" text-anchor="end">schemas\</text><rect class="s-box" x="440" y="502" width="150" height="96" rx="7"/><text class="s-t" x="450" y="522">platform fs (OS 층)</text><text class="s-s" x="450" y="539">link_dir (스킬 정션)</text><rect class="s-tag" x="450" y="550" width="60.7" height="16" rx="8"/><text class="s-tagt" x="456.0" y="561.5">junction</text><rect class="s-box" x="610" y="502" width="190" height="96" rx="7"/><text class="s-t" x="620" y="522">backend::materialize</text><text class="s-s" x="620" y="539">claude · codex 플래그</text><rect class="s-box" x="820" y="502" width="170" height="96" rx="7"/><text class="s-t" x="830" y="522">claude · codex</text><text class="s-s" x="830" y="539">에이전트 프로세스</text><path class="s-ar" d="M190,126 L190,160" marker-end="url(#ah5)"/><path class="s-ar" d="M190,258 L190,290" marker-end="url(#ah5)"/><path class="s-ar" d="M400,126 L400,160" marker-end="url(#ah5)"/><text class="s-al" x="406" y="146" text-anchor="start">보기 상태</text><path class="s-ar" d="M270,380 L288,380" marker-end="url(#ah5)"/><path class="s-ar" d="M190,502 L190,470" marker-end="url(#ah5)"/><path class="s-ar" d="M740,425 L712,425" marker-end="url(#ah5)"/><path class="s-ar" d="M865,468 L865,484 L705,484 L705,500" marker-end="url(#ah5)"/><path class="s-ar" d="M360,468 L360,500" marker-end="url(#ah5)"/><text class="s-al" x="366" y="489" text-anchor="start">스키마</text><path class="s-ar" d="M610,560 L592,560" marker-end="url(#ah5)"/><path class="s-ar" d="M800,560 L818,560" marker-end="url(#ah5)"/><g id="chg-s15-fig"><rect class="chg-r" x="296" y="314" width="138" height="74" rx="8"/><rect class="chg-r" x="284" y="498" width="312" height="105" rx="8"/><text class="chg-t" x="594" y="495" text-anchor="end">수정 2026-10-19</text></g></svg></div>
+<p class="cap44">데이터(라이브러리 · 프리셋 · 에이전트)는 데몬이 쥐고, 셸은 이 PC 의 보기 상태 · 컬렉션만, 웹뷰는 그리기만. 화면 단추와 LLM 은 같은 명령 버스를 부른다.</p>
+<p class="cap44 chg" id="chg-s15-cap">삭제 = FsStore 가 라이브러리 안 숨은 <code>.trash</code> 로 옮김 — OS 휴지통 · platform <code>IFileOperation</code> 작업은 걷음 · <code>.trash</code> 비우기 = 사람만(명령 없음). 내려받은 설정 스키마 = <code>daemon\cache\schemas\</code> — <code>cache</code> = 다시 만들 수 있는 것만 · 아무 때나 지워도 됨. PresetEditor = 따로 선 부품 — 에이전트 슬롯은 이 부품 + 데이터 훅만 띄움(트리 · 목록 · 필터 · arborist · 가상 표 없음) · 데몬 훑기는 하나를 함께 씀 (2026-10-19)</p></section>
+<section class="v44"><div class="sh"><span class="no">16</span><h2>라이브러리 열기 — 물어볼 때만 훑는다</h2></div><div class="fig44"><svg viewBox="0 0 1000 362" role="img"><defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="q-arh"/></marker></defs><rect class="q-head" x="50.0" y="8" width="120.0" height="34" rx="7"/><text class="q-ht" x="110" y="30" text-anchor="middle">웹뷰</text><line class="q-life" x1="110" y1="42" x2="110" y2="356"/><rect class="q-head" x="320.0" y="8" width="120.0" height="34" rx="7"/><text class="q-ht" x="380" y="30" text-anchor="middle">셸</text><line class="q-life" x1="380" y1="42" x2="380" y2="356"/><rect class="q-head" x="590.0" y="8" width="120.0" height="34" rx="7"/><text class="q-ht" x="650" y="30" text-anchor="middle">데몬 library</text><line class="q-life" x1="650" y1="42" x2="650" y2="356"/><rect class="q-head" x="856.8" y="8" width="126.4" height="34" rx="7"/><text class="q-ht" x="920" y="30" text-anchor="middle">라이브러리 폴더</text><line class="q-life" x1="920" y1="42" x2="920" y2="356"/><line class="q-ar" x1="110" y1="84" x2="377" y2="84" marker-end="url(#ah1)"/><rect class="q-lbg" x="163.9" y="63" width="162.2" height="17" rx="3"/><text class="q-l" x="245.0" y="76" text-anchor="middle">「라이브러리 ▸ 1」 열기</text><circle class="q-n" cx="110" cy="84" r="10"/><text class="q-nt" x="110" y="87.5" text-anchor="middle">1</text><line class="q-ar" x1="380" y1="128" x2="113" y2="128" marker-end="url(#ah1)"/><rect class="q-lbg" x="116.8" y="107" width="256.3" height="17" rx="3"/><text class="q-l" x="245.0" y="120" text-anchor="middle">번호 1 보기 상태 (폴더 · 기록 · 칸 폭)</text><circle class="q-n" cx="380" cy="128" r="10"/><text class="q-nt" x="380" y="131.5" text-anchor="middle">2</text><line class="q-ar" x1="110" y1="172" x2="647" y2="172" marker-end="url(#ah1)"/><rect class="q-lbg" x="256.4" y="151" width="247.2" height="17" rx="3"/><text class="q-l" x="380.0" y="164" text-anchor="middle">library.list {folder} (셸은 중계만)</text><circle class="q-n" cx="110" cy="172" r="10"/><text class="q-nt" x="110" y="175.5" text-anchor="middle">3</text><line class="q-ar" x1="650" y1="216" x2="917" y2="216" marker-end="url(#ah1)"/><rect class="q-lbg" x="658.7" y="195" width="252.6" height="17" rx="3"/><text class="q-l" x="785.0" y="208" text-anchor="middle">훑기 — 처음 · 새로 고침 · refresh 때만</text><circle class="q-n" cx="650" cy="216" r="10"/><text class="q-nt" x="650" y="219.5" text-anchor="middle">4</text><rect class="q-note" x="565.0" y="245" width="170.0" height="26" rx="6"/><text class="q-l" x="650.0" y="262" text-anchor="middle">참조 · 충돌 · 설정 검사</text><circle class="q-n" cx="552.0" cy="258" r="10"/><text class="q-nt" x="552.0" y="261.5" text-anchor="middle">5</text><g id="chg-s16-fig"><rect class="chg-r" x="538" y="241" width="201" height="34" rx="7"/><text class="chg-t" x="745" y="262">수정 2026-10-19 · 후보 걷음</text></g><line class="q-ar" x1="650" y1="304" x2="113" y2="304" marker-end="url(#ah1)"/><rect class="q-lbg" x="273.6" y="283" width="212.9" height="17" rx="3"/><text class="q-l" x="380.0" y="296" text-anchor="middle">그 폴더 항목 — 요청한 쪽에만 답</text><circle class="q-n" cx="650" cy="304" r="10"/><text class="q-nt" x="650" y="307.5" text-anchor="middle">6</text></svg></div><p class="cap44">감시 · 방송 없음. 데몬은 메모리 목록으로 답하고, 전체 훑기는 처음 · 폴더 바꾸기 때만 — 바깥 변경은 트리 우클릭 「새로 고침」(그 폴더 · 루트 머리 줄 = 전체) · <code>library.refresh</code> 로 들인다. 같은 때 <code>library.moves {since}</code> 로 이동 기록도 받아 컬렉션을 고친다(§18 ⑥⑦). ⑤ 의 설정 검사는 데몬 안에서만(문법 · 스키마 — CLI 안 띄움 · ≈ 0 ms) · 스키마는 그 훑기가 처음 필요로 할 때 내려받는다(데몬 시작 아님 · 2026-10-18).</p><p class="cap44 chg" id="chg-s16-cap">⑤ = 참조 · 충돌 · 설정 검사 — 훑을 때 다시 연결 후보는 셈하지 않음(사용자가 [다시 연결] 에서 하나 고른 뒤에만 이름으로 이음 · D10 풀림) · 내려받은 스키마 = <code>daemon\cache\schemas\</code>(지워도 다시 받음) · 새로 고침 · 번호별 보기 상태(②) = 1차 · 이동 기록(<code>library.moves</code>) = 2차 (2026-10-19)</p></section>
+<section class="v44"><div class="sh"><span class="no">17</span><h2>프리셋 편집 — 조작을 보내면 데몬이 최신 파일에 적용</h2></div><div class="fig44"><svg viewBox="0 0 1000 318" role="img"><defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="q-arh"/></marker></defs><g transform="translate(135,0)"><rect class="q-head" x="34.7" y="8" width="150.5" height="34" rx="7"/><text class="q-ht" x="110" y="30" text-anchor="middle">웹뷰 PresetEditor</text><line class="q-life" x1="110" y1="42" x2="110" y2="312"/><rect class="q-head" x="320.0" y="8" width="120.0" height="34" rx="7"/><text class="q-ht" x="380" y="30" text-anchor="middle">데몬 library</text><line class="q-life" x1="380" y1="42" x2="380" y2="312"/><rect class="q-head" x="590.0" y="8" width="120.0" height="34" rx="7"/><text class="q-ht" x="650" y="30" text-anchor="middle">프리셋 파일</text><line class="q-life" x1="650" y1="42" x2="650" y2="312"/><line class="q-ar" x1="110" y1="84" x2="377" y2="84" marker-end="url(#ah2)"/><rect class="q-lbg" x="106.8" y="63" width="276.5" height="17" rx="3"/><text class="q-l" x="245.0" y="76" text-anchor="middle">preset.add · remove · reorder{baseRev}</text><circle class="q-n" cx="110" cy="84" r="10"/><text class="q-nt" x="110" y="87.5" text-anchor="middle">1</text><line class="q-ar" x1="380" y1="128" x2="647" y2="128" marker-end="url(#ah2)"/><rect class="q-lbg" x="465.3" y="107" width="99.4" height="17" rx="3"/><text class="q-l" x="515.0" y="120" text-anchor="middle">최신 파일 읽기</text><circle class="q-n" cx="380" cy="128" r="10"/><text class="q-nt" x="380" y="131.5" text-anchor="middle">2</text><rect class="q-note" x="187.8" y="157" width="384.5" height="26" rx="6"/><text class="q-l" x="380.0" y="174" text-anchor="middle">add·remove = 멱등 · reorder = baseRev 다르면 CONFLICT</text><circle class="q-n" cx="174.8" cy="170" r="10"/><text class="q-nt" x="174.8" y="173.5" text-anchor="middle">3</text><line class="q-ar" x1="380" y1="216" x2="647" y2="216" marker-end="url(#ah2)"/><rect class="q-lbg" x="474.9" y="195" width="80.2" height="17" rx="3"/><text class="q-l" x="515.0" y="208" text-anchor="middle">원자적 쓰기</text><circle class="q-n" cx="380" cy="216" r="10"/><text class="q-nt" x="380" y="219.5" text-anchor="middle">4</text><line class="q-ar" x1="380" y1="260" x2="113" y2="260" marker-end="url(#ah2)"/><rect class="q-lbg" x="172.5" y="239" width="145.0" height="17" rx="3"/><text class="q-l" x="245.0" y="252" text-anchor="middle">새 상태(충돌 줄 포함)</text><circle class="q-n" cx="380" cy="260" r="10"/><text class="q-nt" x="380" y="263.5" text-anchor="middle">5</text></g></svg></div><p class="cap44">저장 단추 · 클라이언트 초안 없음. LLM 이 YAML 을 직접 고친 것도 ② 에서 잡힌다. 순서 바꾸기가 낡은 화면에서 오면 거절 → 그 화면이 새로 받고 「다른 곳에서 바뀌어 새로 불러왔습니다」. ⑤ 의 새 상태엔 충돌 줄(걸린 항목 전부 · 온 길)과 「에이전트 N개에서 참조 중」 만 실린다 — 경고는 없다(2026-10-18 · 참조하는 에이전트를 다시 풀던 단계도 걷었다). 편집은 에이전트의 백엔드를 바꾸지 않는다 — 백엔드는 에이전트 값(만들 때 고정 · 2026-10-18). ④ 의 쓰기는 손 주석을 지킨다(T2 — <code>yaml-edit</code> 스파이크가 첫 구현 단계 · 안 되면 「잃음 받아들임」 으로 돌아가 보고).</p><p class="cap44 chg" id="chg-s17-cap">⑤ 를 받으면 편집 칸 머리 아래 문제 목록(찾을 수 없음 · 오류 · 충돌 — 안에 든 프리셋 것도 「&lt;프리셋&gt; › …」 길과 함께 · §3)도 다시 그림 — 문구 = 줄 표시와 같음 · 문제가 없으면 목록이 숨음. 같은 편집 칸 부품을 라이브러리 오른쪽 칸과 에이전트 슬롯이 띄우므로 이 흐름은 둘 다 같음 (2026-10-19)</p></section>
+<section class="v44"><div class="sh chg" id="chg-s18-head"><span class="no">18</span><h2>이동 · 이름 바꾸기 — 참조까지 한 조작 안에서</h2><span class="tag">2차</span></div><div class="fig44"><svg viewBox="0 0 1000 406" role="img"><defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="q-arh"/></marker></defs><rect class="q-head" x="50.0" y="8" width="120.0" height="34" rx="7"/><text class="q-ht" x="110" y="30" text-anchor="middle">웹뷰 · CLI</text><line class="q-life" x1="110" y1="42" x2="110" y2="400"/><rect class="q-head" x="320.0" y="8" width="120.0" height="34" rx="7"/><text class="q-ht" x="380" y="30" text-anchor="middle">데몬 library</text><line class="q-life" x1="380" y1="42" x2="380" y2="400"/><rect class="q-head" x="590.0" y="8" width="120.0" height="34" rx="7"/><text class="q-ht" x="650" y="30" text-anchor="middle">디스크</text><line class="q-life" x1="650" y1="42" x2="650" y2="400"/><rect class="q-head" x="855.1" y="8" width="129.7" height="34" rx="7"/><text class="q-ht" x="920" y="30" text-anchor="middle">셸 collections</text><line class="q-life" x1="920" y1="42" x2="920" y2="400"/><line class="q-ar" x1="110" y1="84" x2="377" y2="84" marker-end="url(#ah3)"/><rect class="q-lbg" x="122.2" y="63" width="245.5" height="17" rx="3"/><text class="q-l" x="245.0" y="76" text-anchor="middle">library.move (끌어 놓기 · CLI 같음)</text><circle class="q-n" cx="110" cy="84" r="10"/><text class="q-nt" x="110" y="87.5" text-anchor="middle">1</text><line class="q-ar" x1="380" y1="128" x2="647" y2="128" marker-end="url(#ah3)"/><rect class="q-lbg" x="430.5" y="107" width="169.0" height="17" rx="3"/><text class="q-l" x="515.0" y="120" text-anchor="middle">일지 먼저 쓰기 OpJournal</text><circle class="q-n" cx="380" cy="128" r="10"/><text class="q-nt" x="380" y="131.5" text-anchor="middle">2</text><line class="q-ar" x1="380" y1="172" x2="647" y2="172" marker-end="url(#ah3)"/><rect class="q-lbg" x="459.2" y="151" width="111.6" height="17" rx="3"/><text class="q-l" x="515.0" y="164" text-anchor="middle">파일 이름 바꾸기</text><circle class="q-n" cx="380" cy="172" r="10"/><text class="q-nt" x="380" y="175.5" text-anchor="middle">3</text><line class="q-ar" x1="380" y1="216" x2="647" y2="216" marker-end="url(#ah3)"/><rect class="q-lbg" x="388.6" y="195" width="252.7" height="17" rx="3"/><text class="q-l" x="515.0" y="208" text-anchor="middle">프리셋 파일 · agents.json 참조 고치기</text><circle class="q-n" cx="380" cy="216" r="10"/><text class="q-nt" x="380" y="219.5" text-anchor="middle">4</text><rect class="q-note" x="248.5" y="245" width="263.0" height="26" rx="6"/><text class="q-l" x="380.0" y="262" text-anchor="middle">MoveLog 에 옛→새 쌍 추가 · 일지 지움</text><circle class="q-n" cx="235.5" cy="258" r="10"/><text class="q-nt" x="235.5" y="261.5" text-anchor="middle">5</text><line class="q-ar" x1="920" y1="304" x2="383" y2="304" marker-end="url(#ah3)"/><rect class="q-lbg" x="529.9" y="283" width="240.2" height="17" rx="3"/><text class="q-l" x="650.0" y="296" text-anchor="middle">다음 요청 때 library.moves {since}</text><circle class="q-n" cx="920" cy="304" r="10"/><text class="q-nt" x="920" y="307.5" text-anchor="middle">6</text><line class="q-ar" x1="380" y1="348" x2="917" y2="348" marker-end="url(#ah3)"/><rect class="q-lbg" x="564.7" y="327" width="170.6" height="17" rx="3"/><text class="q-l" x="650.0" y="340" text-anchor="middle">새 쌍 → 컬렉션 · ★ 고침</text><circle class="q-n" cx="380" cy="348" r="10"/><text class="q-nt" x="380" y="351.5" text-anchor="middle">7</text></svg></div><p class="cap44 chg" id="chg-s18-cap">중간에 죽으면 다음 부팅에 일지를 보고 이어서 마친다. 여러 개(Ctrl · Shift · 박스 선택)도 한 조작. 삭제 = 라이브러리 안 숨은 <code>.trash</code> 로 옮김(OS 휴지통 안 씀) — 고른 것 중 하나라도 참조되면 창 전체 모달 확인 하나(CLI = <code>--yes</code> 없으면 거절) · <code>.trash</code> 비우기 = 사람만(명령 없음) · 바깥에서 옮긴 것은 저절로 잇지 않음 — 「찾을 수 없음 · [다시 연결] ×」 에서 사용자가 하나 고르면 나머지를 이름으로 · 훑을 때 후보 제안 없음 · 후보에서 빼려고 두던 삭제 경로 기록은 쓸 곳이 없어짐(D10 풀림 · §4 · 2026-10-19).</p></section>
+<section class="v44" id="s19"><div class="sh"><span class="no">19</span><h2>에이전트 실행 — 세션을 만들기 전에 점검 · 맞추기</h2></div><div class="fig44"><svg viewBox="0 0 1000 406" role="img"><defs><marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="q-arh"/></marker></defs><rect class="q-head" x="50.0" y="8" width="120.0" height="34" rx="7"/><text class="q-ht" x="110" y="30" text-anchor="middle">화면 · CLI</text><line class="q-life" x1="110" y1="42" x2="110" y2="400"/><rect class="q-head" x="252.5" y="8" width="120.0" height="34" rx="7"/><text class="q-ht" x="312.5" y="30" text-anchor="middle">AgentManager</text><line class="q-life" x1="312.5" y1="42" x2="312.5" y2="400"/><rect class="q-head" x="434.1" y="8" width="161.7" height="34" rx="7"/><text class="q-ht" x="515" y="30" text-anchor="middle">library LaunchKits</text><line class="q-life" x1="515" y1="42" x2="515" y2="400"/><rect class="q-head" x="657.5" y="8" width="120.0" height="34" rx="7"/><text class="q-ht" x="717.5" y="30" text-anchor="middle">backend</text><line class="q-life" x1="717.5" y1="42" x2="717.5" y2="400"/><rect class="q-head" x="854.2" y="8" width="131.6" height="34" rx="7"/><text class="q-ht" x="920" y="30" text-anchor="middle">claude · codex</text><line class="q-life" x1="920" y1="42" x2="920" y2="400"/><line class="q-ar" x1="110" y1="84" x2="309.5" y2="84" marker-end="url(#ah4)"/><rect class="q-lbg" x="133.7" y="63" width="155.0" height="17" rx="3"/><text class="q-l" x="211.3" y="76" text-anchor="middle">실행 요청 (화면 / CLI)</text><circle class="q-n" cx="110" cy="84" r="10"/><text class="q-nt" x="110" y="87.5" text-anchor="middle">1</text><rect class="q-note" x="170.7" y="113" width="283.7" height="26" rx="6"/><text class="q-l" x="312.5" y="130" text-anchor="middle">예약 · 떠 있음 확인 · ensure_registered</text><circle class="q-n" cx="157.7" cy="126" r="10"/><text class="q-nt" x="157.7" y="129.5" text-anchor="middle">2</text><line class="q-ar" x1="312.5" y1="172" x2="512" y2="172" marker-end="url(#ah4)"/><rect class="q-lbg" x="351.2" y="151" width="125.2" height="17" rx="3"/><text class="q-l" x="413.8" y="164" text-anchor="middle">check · 설정 검사</text><circle class="q-n" cx="312.5" cy="172" r="10"/><text class="q-nt" x="312.5" y="175.5" text-anchor="middle">3</text><rect class="q-note" x="176.9" y="201" width="271.3" height="26" rx="6"/><text class="q-l" x="312.5" y="218" text-anchor="middle">막히면 사유 다섯 → 이유 (code + args)</text><g id="chg-s19-fig"><rect class="chg-r" x="172" y="197" width="281" height="34" rx="7"/><text class="chg-t" x="176" y="193">수정 2026-10-19 · 여섯 → 다섯</text></g><line class="q-ar" x1="312.5" y1="260" x2="512" y2="260" marker-end="url(#ah4)"/><rect class="q-lbg" x="342.4" y="239" width="142.8" height="17" rx="3"/><text class="q-l" x="413.8" y="252" text-anchor="middle">prepare → 휘발 폴더</text><circle class="q-n" cx="312.5" cy="260" r="10"/><text class="q-nt" x="312.5" y="263.5" text-anchor="middle">4</text><line class="q-ar" x1="312.5" y1="304" x2="714.5" y2="304" marker-end="url(#ah4)"/><rect class="q-lbg" x="470.7" y="283" width="88.6" height="17" rx="3"/><text class="q-l" x="515.0" y="296" text-anchor="middle">materialize</text><circle class="q-n" cx="312.5" cy="304" r="10"/><text class="q-nt" x="312.5" y="307.5" text-anchor="middle">5</text><line class="q-ar" x1="717.5" y1="348" x2="917" y2="348" marker-end="url(#ah4)"/><rect class="q-lbg" x="744.6" y="327" width="148.3" height="17" rx="3"/><text class="q-l" x="818.8" y="340" text-anchor="middle">백엔드별 플래그로 띄움</text><circle class="q-n" cx="717.5" cy="348" r="10"/><text class="q-nt" x="717.5" y="351.5" text-anchor="middle">6</text></svg></div><p class="cap44 chg" id="chg-s19-cap">막히는 사유 다섯(찾을 수 없음 · 오류 · 충돌 · 라이브러리 폴더 없음 · codex 파일 사전 검사 실패 — 옛 「다시 연결 확인 대기」 걷음 · <a href="#launch-block">§10</a> · 2026-10-19)은 ③ 에서 돌아온다 — 제어 채널을 열기 전 · 누가 실행하든 같은 사유(화면 = 에이전트 옆 카드 · CLI · LLM = code + args). ③ 의 설정 검사는 그 에이전트에 붙은 설정을 데몬 안에서만 본다(문법 · 스키마 — CLI 안 띄움). 옛 「codex 파일 대답 기본값 저장」 단계와 실행 직전 CLI 검사는 걷었다(2026-10-18). 백엔드는 맞추지 않는다 — 에이전트 값 그대로라 세션도 놓지 않는다(2026-10-18). 띄운 뒤 CLI 오류(종료 코드 + stderr)는 에이전트에만 — 설정 줄에 ⛔ 를 붙이지 않음(2026-10-18).</p><div class="tbl44"><table>
 <thead><tr><th>재료</th><th>claude</th><th>codex JSON</th><th>codex 터미널</th></tr></thead>
 <tbody>
 <tr><td>지침</td><td><code>--append-system-prompt-file</code> + <code>--system-prompt-snapshot off</code></td><td>새 대화 <code>developerInstructions</code> · 이어받기 <code>additionalContext</code> (T6)</td><td>작업 폴더 <code>AGENTS.override.md</code>(늘 — 묻지 않음)</td></tr>
@@ -1480,25 +1577,25 @@ engram agent.spawn --target 리뷰봇                  <span class="c"># 대화�
 <tr><td>원문 설정</td><td>붙인 순서로 합친 <code>--settings</code> 하나 — 값은 뒤 것 · 목록은 합침 · 감춘 조각 없음(Engram 통로 = 「기본」 claude 칸 · T10)</td><td><code>-c</code> 줄</td><td><code>-c</code> 줄</td></tr>
 <tr><td>모델</td><td>따로 안 실음 — 원문 claude 칸의 <code>model</code> 이 합친 <code>--settings</code> 로</td><td>따로 안 실음 — 원문 <code>-c model=</code> 줄</td><td>따로 안 실음 — 원문 <code>-c model=</code> 줄</td></tr>
 </tbody></table></div></section>
-<section class="v44" id="s20"><div class="sh"><span class="no">20</span><h2>라이브러리 — 어디에 무엇에</h2></div><div class="tbl44"><table>
+<section class="v44" id="s20"><div class="sh"><span class="no">20</span><h2>라이브러리 — 어디에 무엇에</h2></div><div class="chg" id="chg-s20-tbl"><div class="tbl44"><table>
 <thead><tr><th>라이브러리</th><th>신규/기존</th><th>어디</th><th>무엇에</th></tr></thead><tbody>
 <tr><td><code>walkdir</code></td><td>신규</td><td>데몬 FsStore</td><td>라이브러리 폴더 훑기</td></tr>
 <tr><td><code>serde-saphyr</code></td><td>신규</td><td>데몬 format</td><td>프리셋 · 설정 YAML 읽기</td></tr>
 <tr><td><code>yaml-edit</code></td><td>신규 · 후보(T2)</td><td>데몬 format</td><td>손 주석을 지키며 프리셋 고치기 — 첫 구현 단계 스파이크 · 대안 <code>yamlpatch</code> · 둘 다 안 되면 「잃음 받아들임」</td></tr>
-<tr><td><code>jsonschema</code></td><td>신규</td><td>데몬 validate</td><td>설정 원문 칸 스키마 검사(내려받은 스키마 · 내려받기 기능 끔)</td></tr>
+<tr><td><code>jsonschema</code></td><td>신규</td><td>데몬 validate</td><td>설정 원문 칸 스키마 검사(내려받기 기능 끔 · 우리가 받은 스키마 = <code>daemon\cache\schemas\</code> · 지워도 다시 받음)</td></tr>
 <tr><td><code>relative-path</code></td><td>신규</td><td>데몬 LibPath</td><td>/ 경로 참조 · 이동할 때 접두 바꾸기</td></tr>
 <tr><td><code>junction</code></td><td>신규</td><td>platform link_dir</td><td>스킬 폴더 정션</td></tr>
-<tr><td><code>windows 0.58</code></td><td>기존 · 기능 추가</td><td>platform move_to_trash</td><td>휴지통 (전용 STA 스레드 IFileOperation)</td></tr>
-<tr><td><code>react-arborist</code></td><td>기존</td><td>LibraryTree</td><td>폴더 트리</td></tr>
+<tr><td><code>react-arborist</code></td><td>기존</td><td>LibraryTree</td><td>폴더 트리 — 자기 끌기(react-dnd)를 품음 → 끌기는 dnd-kit 과 한 가지로 통일(구현 전 조사에서 정함)</td></tr>
 <tr><td><code>TanStack Table · Virtual</code></td><td>신규</td><td>LibraryList (Virtual 은 AddItemsPopover 도)</td><td>열 · 정렬 · 긴 목록</td></tr>
 <tr><td><code>react-selecto</code></td><td>신규</td><td>LibraryList</td><td>상자 끌어 여러 개 선택</td></tr>
-<tr><td><code>dnd-kit</code></td><td>신규</td><td>LibraryDnd · EditorSection</td><td>트리로 이동 · ⋮⋮ 순서</td></tr>
+<tr><td><code>dnd-kit</code></td><td>신규</td><td>LibraryDnd · EditorSection</td><td>폴더에 놓으면 이동 — 어디서든(목록 · 트리 · 다른 슬롯 · 2차) · ⋮⋮ 순서</td></tr>
 <tr><td><code>TanStack Query</code></td><td>신규 (T1 확정)</td><td>libraryQueries 한 파일</td><td>슬롯 데이터 받기 · 캐시</td></tr>
-<tr><td><code>Radix popover</code></td><td>신규</td><td>AddItemsPopover</td><td>「+ 추가」 검색 팝오버</td></tr>
+<tr><td><code>Radix popover</code></td><td>신규</td><td>AddItemsPopover</td><td>「+ 추가」 검색 팝오버 · [다시 연결](2차) 도 같은 것</td></tr>
 <tr><td><code>Radix menu · lucide · plugin-dialog/opener</code></td><td>기존</td><td>메뉴 · 아이콘 · 셸 local_os</td><td>그대로</td></tr>
-</tbody></table></div>
+</tbody></table></div></div>
+<p class="cap44 chg" id="chg-s20-cap">걷음 2026-10-19 — <code>windows 0.58</code> 기능 추가 · platform <code>move_to_trash</code>(OS 휴지통 · 전용 STA 스레드 <code>IFileOperation</code>) — 삭제는 우리 <code>.trash</code> 로(FsStore 이름 바꾸기). 구현 전 — 구현 부분마다 바깥 라이브러리를 먼저 조사하고 고름(위 표에 없는 부분까지 · TRD §5 첫 단계).</p>
 <p class="cap44">버림 — <code>trash</code>(셋째 windows 사본 · COM 패닉) · <code>notify</code>(감시 안 함) · <code>serde_yaml</code> 계열(낡음) · react-resizable-panels. 위치 잡기(Floating UI)는 줄 상세 카드의 뒤집기 · 밀기 · 창 안 맞춤을 직접 짤지 · 직접 의존으로 올릴지 구현 때 고름(지금 Radix 의 간접 의존).</p></section>
-<section class="v44" id="decisions"><div class="sh"><span class="no">21</span><h2>결정 상태</h2><span class="tag ok">2026-10-18 전부 정함</span><span class="tag wait">리뷰 때 확인 2</span></div>
+<section class="v44" id="decisions"><div class="sh chg" id="chg-s21-head"><span class="no">21</span><h2>결정 상태</h2><span class="tag ok">2026-10-18 전부 정함</span><span class="tag ok">브리핑 리뷰 2차 2026-10-19</span><span class="tag wait">리뷰 때 확인 1</span></div>
 <style>.st48 .d{grid-template-columns:5.2rem minmax(0,1fr) auto;align-items:baseline}.st48 .d b{font-family:var(--f-body);font-size:13px;white-space:nowrap}.st48 .d .ln{font-size:12.5px;white-space:nowrap;color:var(--muted)}.st48 .d .src{font-size:11.5px;color:var(--muted);white-space:nowrap}.st48 .d .rvm{color:var(--warn);font-weight:700}.st48 .grp48{padding:6px 14px;font-size:12px;font-weight:600;color:var(--muted);background:var(--bg);border-top:1px solid var(--line)}.st48 .grp48:first-child{border-top:0;border-radius:8px 8px 0 0}.rv48{border:1px solid var(--warn);background:var(--warn-soft);border-radius:8px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}.rv48 h3{color:var(--warn)}.rv48 ol{margin:0;padding-left:1.3em;display:flex;flex-direction:column;gap:6px;font-size:14px}.rv48 li{max-width:80ch}@media (max-width:600px){.st48 .d{grid-template-columns:4.4rem minmax(0,1fr)}.st48 .d .ln{grid-column:2}}</style>
 <h3>오늘 정한 것</h3>
 <div class="dec44 st48">
@@ -1512,37 +1609,57 @@ engram agent.spawn --target 리뷰봇                  <span class="c"># 대화�
 <div class="d"><b>codex 파일</b><span>codex 터미널 = 늘 작업 폴더에 파일을 만듦 · 「파일을 만들까요?」 대답 걷음 <span class="src">사용자</span></span><span class="ln"><a href="#s10">§10</a></span></div>
 <div class="d"><b>머리 접기</b><span>에이전트 슬롯 기본 · 작업 폴더 · 프리셋 머리 ▾/▸ · 접은 상태 = 에이전트 슬롯 공통 <span class="src">사용자</span></span><span class="ln"><a href="#s9">§9</a></span></div>
 <div class="d"><b>설정 검사</b><span>가볍게 · 데몬 안에서만 · CLI 검사 없음 · 스키마 타입 · 범위 오류 ⛔ 막음 · codex 모르는 키 ⚠ · claude 모르는 키 표시 없음 · 「모두 검사」 · <code>library.validate</code> 없음 <span class="src">사용자</span></span><span class="ln"><a href="#settings-check">§8</a> · <a href="#list-shape">§2</a></span></div>
-<div class="d"><b>막힘 사유</b><span>여섯 — 찾을 수 없음 · 오류 · 충돌 · 다시 연결 확인 대기 · 라이브러리 폴더 없음 · codex 파일 사전 검사 실패 · 누가 실행하든 막음 <span class="src">사용자 · 관행</span></span><span class="ln"><a href="#launch-block">§10</a></span></div>
+<div class="d chg" id="chg-s21-reasons"><b>막힘 사유</b><span>다섯 — 찾을 수 없음 · 오류 · 충돌 · 라이브러리 폴더 없음 · codex 파일 사전 검사 실패 · 누가 실행하든 막음 · 옛 「다시 연결 확인 대기」 걷음(2026-10-19 · B11) <span class="src">사용자 · 관행</span></span><span class="ln"><a href="#launch-block">§10</a></span></div>
 <div class="d"><b>막힘 표시</b><span>에이전트 옆 카드(모달 아님) → 이름 누름 = 라이브러리에서 그 항목 선택 · 슬롯 프리셋 줄 오류 수 · LLM = code + args <span class="src">사용자</span></span><span class="ln"><a href="#launch-block">§10</a> · <a href="#s9">§9</a></span></div>
 <div class="d"><b>다시 연결</b><span>「찾을 수 없음 · [다시 연결] ×」 → 하나 고르면 나머지는 이름으로 「N개 더 찾아 연결함」 <span class="src">관행</span></span><span class="ln"><a href="#relink">§4</a></span></div>
-<div class="d"><b>D10 <span class="rvm">★</span></b><span>확인 한 번 — 후보 하나는 「찾을 수 없음 — 후보 &lt;경로&gt; [연결]」 제안만 · 누를 때까지 실행 막힘 · 「다시 연결됨(확인 전)」 표시 없음 <span class="src">관행</span></span><span class="ln"><a href="#relink">§4</a> · <a href="#s12">§12</a></span></div>
+<div class="d chg" id="chg-s21-d10"><b>D10</b><span>풀림 2026-10-19 — 훑을 때 후보 제안 없음 · 사용자가 [다시 연결] 에서 하나 고르기 전엔 아무것도 잇지 않음 · 고르면 나머지는 이름으로 · 「다시 연결됨(확인 전)」 표시 없음 · 옛 사용자 결정 「저절로」(메모 68)를 뒤집음(B11) <span class="src">사용자 · 관행</span></span><span class="ln"><a href="#relink">§4</a> · <a href="#s12">§12</a></span></div>
 <div class="d"><b>카드 겹침</b><span>막힘 카드는 라이브러리 창에 가려지거나 닫힐 수 있음 · 남는 기록 = 슬롯 오류 표시 + 트리 ⛔ <span class="src">관행</span></span><span class="ln"><a href="#launch-block">§10</a></span></div>
-<div class="d"><b>D11 <span class="rvm">★</span></b><span>줄 상세 카드 = 슬롯 바깥 오른쪽 → 왼쪽 → 창 안 · 라이브러리 👁 = 오른쪽 칸 왼쪽 가장자리 · Esc = 마지막에 연 것부터 <span class="src">관행</span></span><span class="ln"><a href="#card-place">§10</a> · <a href="#preset-edit">§3</a></span></div>
+<div class="d chg" id="chg-s21-d11"><b>D11 <span class="rvm">★</span></b><span>줄 상세 카드(부품 줄 누름 — 2026-10-19) = 슬롯 바깥 오른쪽 → 왼쪽 → 창 안 · 라이브러리 1~4 = 오른쪽 칸 왼쪽 가장자리 · Esc = 마지막에 연 것부터 <span class="src">관행</span></span><span class="ln"><a href="#card-place">§10</a> · <a href="#preset-edit">§3</a></span></div>
 <div class="d"><b>T10</b><span>감춘 설정 없음 — 「기본」 claude 칸에 <code>allowedMcpServers</code> · 붙인 순서로 합친 <code>--settings</code> 하나 · ADR-0109 결정 9 대체 · 합치는 규칙 = 아래 「브리핑 리뷰」 <span class="src">사용자</span></span><span class="ln"><a href="#s9">§9</a> · <a href="#s19">§19</a></span></div>
-<div class="d"><b>추천 묶음</b><span>D1 안에 든 프리셋 지침 = 자기 것 앞 · D2 프리셋 칸도 끌어서 순서 · D7 파일 안 <code>kind</code> 로 가름 · D8 빈 「기본」 칸에서도 다시 붙임 · D9 해석 넷(③ 의 「잠김」 은 뺌) · T1 TanStack Query 한 파일(예정 조사는 구현 때 확인) · T5 첫 판 설정 창 없음 · T6 codex 이어받기 = 해시가 바뀐 때만 <code>additionalContext</code> · T7 claude 스킬 = <code>--plugin-dir</code>(<code>engram:</code>) · T8 JSON 피커 = 마지막 단계 <span class="src">추천 그대로</span></span><span class="ln"><a href="#preset-edit">§3</a> · <a href="#ref-paths">§5</a> · <a href="#ui-parts">§6</a> · <a href="#s9">§9</a> · <a href="#s10">§10</a></span></div>
+<div class="d chg" id="chg-s21-bundle"><b>추천 묶음</b><span>D1 안에 든 프리셋 지침 = 자기 것 앞 · D2 프리셋 칸도 끌어서 순서 · D7 파일 안 <code>kind</code> 로 가름 · D8 빈 「기본」 칸에서도 다시 붙임 · D9 해석 넷(③ 의 「잠김」 은 뺌) · T1 TanStack Query 한 파일(예정 조사는 구현 때 확인) · T5 첫 판 설정 창 없음 · T6 codex 이어받기 = 해시가 바뀐 때만 <code>additionalContext</code> · T7 claude 스킬 = <code>--plugin-dir</code>(<code>engram:</code>) · T8 JSON 피커 = 2차의 마지막 단계 · 그 에이전트 백엔드 모델만(2026-10-19) <span class="src">추천 그대로</span></span><span class="ln"><a href="#preset-edit">§3</a> · <a href="#ref-paths">§5</a> · <a href="#ui-parts">§6</a> · <a href="#s9">§9</a> · <a href="#s10">§10</a></span></div>
 <div class="d"><b>T2</b><span>손 주석 지킴(옛 「사라짐」 을 뒤집음) — <code>yaml-edit</code> 0.3.2 스파이크가 첫 구현 단계(<code>yamlpatch</code> 와 비교 · 둘 다 안 되면 「잃음 받아들임」 으로 돌아가 보고) · 읽기는 serde-saphyr 그대로 <span class="src">관행</span></span><span class="ln"><a href="#ref-paths">§5</a> · <a href="#s20">§20</a></span></div>
 <div class="d"><b>T9</b><span>codex 압축 뒤 재주입 = 첫 판 제외 · 후속(측정 항목 더함 — codex <code>AGENTS.md</code> · 스킬이 압축 뒤 남나) <span class="src">사용자</span></span><span class="ln"><a href="#s13">§13</a></span></div>
 <div class="grp48">브리핑 리뷰 — 2026-10-18</div>
 <div class="d"><b>T10 합침</b><span>claude 칸 합치기 = 값은 뒤 것 · 목록은 합침(객체 = 재귀 · 목록 = 붙인 순서로 이어 붙이고 같은 값 하나 · 키마다 다른 규칙 없음) · 뒤 프리셋이 <code>allowedMcpServers</code> 에서 <code>engram</code> 을 못 뺌(받아들임) · claude 만 — codex 같은 키 <code>-c</code> 는 미측 <span class="src">사용자</span></span><span class="ln"><a href="#s9">§9</a> · <a href="#s8">§8</a> · <a href="#s19">§19</a></span></div>
-<div class="d"><b>👁</b><span>편집 칸의 모든 부품 줄(지침 · 스킬 · 설정)에 👁 · 프리셋 줄엔 없음 <span class="src">사용자</span></span><span class="ln"><a href="#preset-edit">§3</a> · <a href="#s9">§9</a></span></div>
 <div class="d"><b>D4</b><span>만들기 = 판 메뉴 「에이전트 생성 ▸」 · 「기본」 만 붙음(E7 그대로) · 기존 에이전트 이전 없음 — 옛 <code>agents.json</code> = 백업 파일 · 빈 목록으로 시작(백업 = 메인 세션 내부 선택) <span class="src">사용자</span></span><span class="ln"><a href="#s9">§9</a></span></div>
 <div class="d"><b>실행 오류</b><span>띄운 뒤 CLI 오류(종료 코드 + stderr)는 에이전트에만 · 설정 줄 ⛔ 안 붙음(옛 2026-10-17 규칙 걷음) <span class="src">사용자</span></span><span class="ln"><a href="#launch-block">§10</a></span></div>
 <div class="d"><b>T5 문구</b><span>라이브러리 폴더 바꾸기 = 위 칸 머리 경로 옆 「…」 → 바로 폴더 선택 창 · 첫 판 설정 창 없음 <span class="src">사용자</span></span><span class="ln"><a href="#ref-paths">§5</a></span></div>
 <div class="d"><b>MCP 등록</b><span><code>--mcp-config</code> 는 범위 밖 — 실행 인자 그대로(실행마다 주소 · 토큰을 싣는 인자라 설정이 아님) <span class="src">사용자</span></span><span class="ln"><a href="#s9">§9</a></span></div>
 </div>
-<div class="rv48">
+<div class="dec44 st48 chg" id="chg-s21-b">
+<div class="grp48">브리핑 리뷰 2차 — 2026-10-19 · 옛 「눈 단추 = 모든 부품 줄」(2026-10-18) 줄은 B5 가 대체해 지움</div>
+<div class="d"><b>B1 필터</b><span>언리얼 Content Browser 꼴 — 체크한 종류만 보임 · 아무것도 체크 안 함 = 전부 · 「모든 필터 제거」 = 체크 전부 풀기 <span class="src">사용자</span></span><span class="ln"><a href="#list-shape">§2</a></span></div>
+<div class="d"><b>B2 칸 순서</b><span>상세 칸 · 줄 카드 = 제목 → 위치(짧은 한 줄) → 내용 → 참조(맨 아래) 「변수가 작은 짧은 줄이 위」 <span class="src">사용자 · 관행</span></span><span class="ln"><a href="#list-shape">§2</a></span></div>
+<div class="d"><b>B3 문제 목록</b><span>편집 칸 · 에이전트 슬롯 머리 아래 문제마다 한 줄(안에 든 프리셋 것도 「&lt;프리셋&gt; › …」) · 문구 = 줄 표시 · 누르면 그 줄로 · 없으면 숨음 · 접는 수 기준 없음 <span class="src">사용자 · 관행</span></span><span class="ln"><a href="#preset-edit">§3</a> · <a href="#s9">§9</a></span></div>
+<div class="d"><b>B4 + 추가</b><span>머리 「+ 추가」(모든 종류) + 칸마다 + 둘 다 둠(R23) — 언리얼 My Blueprint 가 같은 꼴 <span class="src">관행</span></span><span class="ln"><a href="#add-main">§7</a></span></div>
+<div class="d"><b>B5 줄 누름</b><span>부품 줄 누름 = 상세 카드 열고 닫기 + 끼울 자리 선택 · 눈 단추 걷음 · ⋮⋮ = 순서 · 더블클릭 = 라이브러리에서 그 위치로(R28) · 프리셋 줄 = 선택 + 펼침 그대로 <span class="src">사용자</span></span><span class="ln"><a href="#preset-edit">§3</a> · <a href="#s9">§9</a></span></div>
+<div class="d"><b>B6 끌기</b><span>어디서든 폴더에 놓으면 이동 — 목록 · 트리 · 목록 📁 줄 · 다른 슬롯 · 떠 있는 창끼리 안 되면 같은 창 안만 · 끌기 한 가지로 통일 <span class="src">사용자</span></span><span class="ln"><a href="#file-ops">§4</a></span></div>
+<div class="d"><b>B7 여러 개</b><span>여러 개 골라(Ctrl · Shift · 박스) 이동 · 삭제 · 참조가 있으면 확인 하나에 전부 <span class="src">사용자</span></span><span class="ln"><a href="#file-ops">§4</a></span></div>
+<div class="d"><b>B8 .trash</b><span>삭제 = 늘 라이브러리 안 숨은 <code>.trash</code> · OS 휴지통 안 씀 · 루트는 못 지움 · LLM 도 지움(<code>.trash</code> 로) · 비우기 = 사람만(「LLM-우선 제어」 의도된 예외 · ADR 후보) <span class="src">사용자 · 관행</span></span><span class="ln"><a href="#file-ops">§4</a> · <a href="#s11">§11</a></span></div>
+<div class="d"><b>B9 삭제 확인</b><span>참조가 있을 때만 · 창 전체 모달 · 뒤 에이전트는 계속 돎 · 입력만 막힘 <span class="src">사용자</span></span><span class="ln"><a href="#file-ops">§4</a></span></div>
+<div class="d"><b>B10 떼기</b><span>「기본」 떼기 확인 = 같은 창 전체 모달 <span class="src">사용자</span></span><span class="ln"><a href="#s9">§9</a></span></div>
+<div class="d"><b>B11 연결</b><span>훑을 때 후보 없음 · 「찾을 수 없음 · [다시 연결] ×」 → 같은 종류 검색(옛 이름 채움) → 하나 고르면 나머지 이름으로 「N개 더 찾아 연결함」 · 막힘 사유 다섯 · D10 풀림 <span class="src">사용자</span></span><span class="ln"><a href="#relink">§4</a> · <a href="#launch-block">§10</a></span></div>
+<div class="d"><b>B12 설명</b><span>프라이밍 · <code>engram help library</code> 가 파일 꼴 + <code>description:</code> 예 + 「한 줄 설명을 쓴다」 · 새로 만들기 틀에 빈 <code>description: </code> · 없으면 흐린 「설명 없음」(막지 않음 · 필수 아님) <span class="src">사용자</span></span><span class="ln"><a href="#s8">§8</a> · <a href="#file-ops">§4</a></span></div>
+<div class="d"><b>B13 복제</b><span>트리 우클릭 「복제」 · <code>agent.duplicate</code> — 프리셋 · 백엔드 · 모드 · 작업 폴더 · 인자 · env 따라감 · 새 대화 · 「이름 (2)」 <span class="src">사용자</span></span><span class="ln"><a href="#s9">§9</a> · <a href="#s11">§11</a></span></div>
+<div class="d"><b>B14 cache</b><span><code>daemon\cache\</code> = 다시 만들 수 있는 것만 · 아무 때나 지워도 됨 · 스키마 = <code>daemon\cache\schemas\</code> <span class="src">사용자</span></span><span class="ln"><a href="#s8">§8</a> · <a href="#chg-s15-cap">§15</a></span></div>
+<div class="d"><b>B15 부품</b><span>PresetEditor = 따로 선 부품 · 에이전트 슬롯은 이 부품 + 데이터 훅만 · 데몬 훑기 하나 — 옛 「통째 재사용이 느리면 로직만」(R30) 대체 <span class="src">사용자</span></span><span class="ln"><a href="#ui-parts">§6</a> · <a href="#s9">§9</a></span></div>
+<div class="d"><b>B16 T8</b><span>JSON 첫 메시지 전 모델 · 강도 = 그 에이전트 백엔드 모델만 · 이 기능 범위 = 2차 · 「다음 주제」 = 작업 폴더 경로 쪽만 <span class="src">사용자</span></span><span class="ln"><a href="#s10">§10</a></span></div>
+<div class="d"><b>B17 차수</b><span>두 번에 냄 — 1차 = 읽기 · 새로 만들기 · 편집 · 붙이기 · 작업 폴더 칸 · 실행 · 검사 · 「기본」 · 복제 / 2차 = 파일 조작 · 다시 연결 · 끌어 옮기기 · 컬렉션 · 이동 기록 · T8 <span class="src">메인 세션 · 사용자 위임</span></span><span class="ln"><a href="#s1">§1</a></span></div>
+</div>
+<div class="rv48 chg" id="chg-s21-review">
 <h3>리뷰 때 확인</h3>
 <ol>
-<li><b>D10 = 확인 한 번</b> — 옛 사용자 결정 「저절로」(메모 68)를 뒤집음 · 근거 = 사용자가 찾기를 시작하기 전에 이름만 보고 저절로 잇는 곳이 없음(Premiere · After Effects · Resolve · Blender) — <a href="#relink">§4</a></li>
-<li><b>D11 자리 그림</b> — 슬롯 바깥 오른쪽 → 왼쪽 → 창 안 · 라이브러리 👁 카드 = 오른쪽 칸 왼쪽 가장자리 · 옛 「잘림 · 뒤집기 없음」(메모 137)을 바꿈 — <a href="#card-place">§10 그림</a></li>
+<li><b>D11 자리 그림</b> — 줄 상세 카드(부품 줄 누름) = 슬롯 바깥 오른쪽 → 왼쪽 → 창 안 · 라이브러리 1~4 카드 = 오른쪽 칸 왼쪽 가장자리 · 옛 「잘림 · 뒤집기 없음」(메모 137)을 바꿈 — <a href="#card-place">§10 그림</a></li>
 </ol>
+<p style="font-size:13px;color:var(--muted)">D10 은 이 목록에서 뺌 — 2026-10-19 리뷰에서 풀림(후보 제안 없음 · 고른 뒤에만 이름으로 이음 — 위 「브리핑 리뷰 2차」 B11)</p>
 </div>
 <h3>미룬 것</h3>
 <div class="dec44 st48">
 <div class="d"><b>다음 주제</b><span>에이전트 트리 설계 — 경로 없이 만들기 · 경로가 비면 실행 때 묻기 · 자동 경로(Engram 폴더 · T4) · codex 파일 전용 폴더 · 묶는 폴더</span><span class="ln"><a href="#s10">§10</a></span></div>
 <div class="d"><b>T9</b><span>codex 압축 뒤 재주입 — 후속(측정 항목 = codex <code>AGENTS.md</code> · 스킬이 압축 뒤 남나 · developer 메시지는 빠짐 실측)</span><span class="ln"><a href="#s13">§13</a></span></div>
 <div class="d"><b>CLI 검사</b><span>CLI 를 띄우는 설정 검사(claude doctor · codex debug models) — 문제가 생기면 그때 다시</span><span class="ln"><a href="#settings-check">§8</a></span></div>
+<div class="d chg" id="chg-s21-later"><b>프라이밍</b><span>프라이밍 자체를 라이브러리 에셋으로 — 다음 주제 후보(B12 의 나중 생각 · 2026-10-19)</span><span class="ln"><a href="#s13">§13</a></span></div>
 </div>
-<p class="pend"><span class="tag ok">열린 것 없음</span><span>D1–D11 · T 결정 전부 정함(T4 · T9 = 위 「미룬 것」) — 다시 볼 것은 위 「리뷰 때 확인」 둘(D10 · D11)뿐 (2026-10-18)</span></p>
+<p class="pend chg" id="chg-s21-pend"><span class="tag ok">열린 것 없음</span><span>D1–D11 · T 결정 전부 정함(T4 · T9 = 위 「미룬 것」) — 다시 볼 것은 위 「리뷰 때 확인」 하나(D11)뿐 · D10 = 2026-10-19 풀림 (2026-10-19)</span></p>
 </section>
 </div>
