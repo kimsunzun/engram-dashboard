@@ -3,18 +3,18 @@
 | 항목 | 값 |
 |---|---|
 | **범위 조정** | 작업 폴더(워크스페이스) — 2026-10-16 사용자 결정으로 미뤘다가 2026-10-18 에 이번 판 몫을 다시 정했다(「지금은 프리셋 실행을 위한 기본 기능만」). **이번 판** = 만들 때 폴더를 선택함(지금 그대로 · `cwd` 필수 · 빈 값 없음) + 에이전트 슬롯 「작업 폴더」 칸(입력 · 「찾아보기」) + 대화한 뒤 · 떠 있는 동안 잠금 + `agent.setWorkspace {agent, cwd}`(D3 확정). **다음 주제(에이전트 트리 설계)** = 경로 없이 에이전트 만들기 · 비었으면 실행 때 묻기 · 자동 경로(Engram 폴더 · T4) · codex 파일 전용 폴더 · 묶는 폴더 + R34 · R48 · E15 의 워크스페이스 부분 · `workspace` 선택값 · `launched_workspace` · Unattended Engram 폴더 기본값 · `CreateProfile.cwd` 선택 · 빈 문자열 = 없음 wire 뜻 · 「만들 때 폴더를 묻지 않음」(TRD 해석이었고 사용자 결정 아님). 근거 = 결정 메모 2026-10-16 · 2026-10-18. **본문은 이번 판만 적는다 — 다음 주제 몫은 §8 에 모았다** |
-| **상태** | **초안(사용자 미확정)** — `/review trd` 3회차 반영본 · §2 의 결정을 사용자가 고르기 전 |
+| **상태** | **초안** — `/review trd` 3회차 반영본 + 2026-10-18 사용자 결정 반영(§2 의 결정 전부 확정 — 남은 사용자 결정 없음 · 구현 전 확인 = §6-5) · 이 반영분은 아직 `/review trd` 를 거치지 않았다 |
 | **작성일** | 2026-10-15 |
 | **리뷰 기록** | 2026-10-15 `/review trd` 1회차 — Claude doc-aware(Architect-breaker) **FIX** 12건 + codex blind(Designer) **FIX** 2건 · 상충 없음. 반영: 실행 전처리 순서 · 백엔드별 인자 · JSON 선택 칸의 길 · T10 · 어휘 소유 · `merge_preserving_live` · `cwd` 키 유지 · `display_name` 고정 · 일지 판정 · `std::sync::RwLock` · `libraryView.*` 셸 명령 · 실행 재료 가드 · 배치 포트 · codex 생성물 · `AGENTS.override.md` 위험 · `trash` 거부 · `Library{n}` 유일성 · 셸 세대 · `DataLayout` 기본 경로 · snapshot off 범위 · **2회차(같은 날)** — 두 리뷰어 FIX(좁음) · 반영: 전처리를 예약 · 떠 있음 확인 바로 뒤로 + 명부 변경 mutate 한 번(비교-교체) + Engram 폴더 = 에이전트 id(멱등) + `SpawnByCwd` 를 `spawn_blocking` 으로 · JSON 선택 칸의 재기동 대체안 삭제(모델 · 강도 둘 다 backend 요청 — 미지원 처리는 3회차가 멈춤 조건으로 바꿈) · 휴지통 = 전용 STA 스레드 · `trash` 거부 사유 정정 · codex 생성물 소유 표식(표식 + 내용 일치일 때만 걷기 · 떠 있는 동안 미룸) · §3 의 `allowedMcpServers` 문장을 T10 에 맞춤 · `DataLayout` 루트 출처 · `backend_args` 권위 · **3회차(같은 날)** — 두 리뷰어 FIX(좁음) · 반영: 명부에 없는 id(`SpawnByCwd` · 스모크 bin)를 전처리 앞에 넣기(`ensure_registered`) + 기본 프리셋을 다는 생성자 하나(`backend::builtin_backend_preset`) + 그 길에서도 Noop 회귀 · 점검은 명부 값을 읽고 mutate 는 그 뒤 안 바뀌었을 때만(한 번 다시 시도) · JSON 선택 칸 확인을 14 단계 수용 관문 · 멈춤 조건으로 |
 | **스텝** | S21 |
-| **입력** | [PRD](prd.md)(R1–R50 · D1–D11 · E1–E19) + PRD 리뷰 델타 1차 10건(Δ1–Δ10) · 2차 9건(Δa–Δi) · 3차(「3차 델타」 — 기본 제공 백엔드는 떼지 않고 사용할 수 없음으로 둔다 · 버스 실행 기본값 저장 · JSON 선택 칸은 막지 않는다)(2026-10-15 · PRD 개정 진행 중) + 2026-10-18 사용자 결정(백엔드 = 에이전트 값 · 만들 때 고정 · 설정 = 백엔드별 원문 칸만 · 모델 충돌 검사 없음 — 기본 제공 백엔드 프리셋과 Δ1 · 3차 델타의 그 부분을 걷음) + 2026-10-18 후반 사용자 결정(codex 파일은 늘 깐다 — 「파일을 만들까요?」 대답 걷음 · 막힘 사유 여섯 = 한 범주 · 막힘 팝업 · 설정 검사 = 프로세스 안에서 가볍게(실행 직전 CLI 검사 걷음) · JSON 선택 칸 안 잠금 · 에이전트 슬롯 「작업 폴더」 칸 + 대화 뒤 잠금 + `agent.setWorkspace` · 에이전트 슬롯 칸 머리 접기 · 다시 연결 = 확인 한 번(D10) + 하나 고르면 나머지 자동 · 상세 카드 = flip → shift → clamp(D11)) + 결정 메모 [`20261012-preset-decisions.md`](../../../.claude/handoff/attachments/20261012-preset-decisions.md) |
+| **입력** | [PRD](prd.md)(R1–R50 · D1–D11 · E1–E19) + PRD 리뷰 델타 1차 10건(Δ1–Δ10) · 2차 9건(Δa–Δi) · 3차(「3차 델타」 — 기본 제공 백엔드는 떼지 않고 사용할 수 없음으로 둔다 · 버스 실행 기본값 저장 · JSON 선택 칸은 막지 않는다)(2026-10-15 · PRD 개정 진행 중) + 2026-10-18 사용자 결정(백엔드 = 에이전트 값 · 만들 때 고정 · 설정 = 백엔드별 원문 칸만 · 모델 충돌 검사 없음 — 기본 제공 백엔드 프리셋과 Δ1 · 3차 델타의 그 부분을 걷음) + 2026-10-18 후반 사용자 결정(codex 파일은 늘 깐다 — 「파일을 만들까요?」 대답 걷음 · 막힘 사유 여섯 = 한 범주 · 막힘 팝업 · 설정 검사 = 프로세스 안에서 가볍게(실행 직전 CLI 검사 걷음) · JSON 선택 칸 안 잠금 · 에이전트 슬롯 「작업 폴더」 칸 + 대화 뒤 잠금 + `agent.setWorkspace` · 에이전트 슬롯 칸 머리 접기 · 다시 연결 = 확인 한 번(D10) + 하나 고르면 나머지 자동 · 상세 카드 = flip → shift → clamp(D11) · 숨은 settings 조각 없음(T10) · 프리셋 편집 손 주석 보존(T2 — 스파이크 먼저) · codex 압축 후속(T9) · 추천값 묶음 확정(D1 · D2 · D7 · D8 · D9 · T1 · T5 · T6 · T7 · T8)) + 결정 메모 [`20261012-preset-decisions.md`](../../../.claude/handoff/attachments/20261012-preset-decisions.md) |
 | **줄 포인터 기준** | HEAD `477d9b7a` + 미커밋 문서 |
 | **표기** | (Dn) = 이 부분은 PRD 추천값 Dn 에 기댄다 · (Δn · Δx) = PRD 리뷰 델타를 반영 · 확신도 = 확실 / 가능성 높음 / 불확실 · 「T번호」 = §2-2 의 TRD 결정 |
 | **화면 그림** | [briefing.html](briefing.html) — 여기선 그리지 않는다 |
 
 ## 0. 한 문단 요약 — 흐름
 
-라이브러리 폴더는 **데몬 PC 의 것**이고 데몬의 새 모듈 `library` 만 읽고 쓴다. 화면은 디스크를 보지 않고 슬롯 열기 · 포커스 · 폴더 이동 때 **버스 명령**(`library.list` 등)을 보내 답을 그린다(요청형 — 데몬은 메모리 목록으로 답하고 디스크는 처음 · `library.refresh` · 루트 바꾸기 때만 훑는다 · 감시 · 방송 없음). `engram` CLI 와 LLM 도 같은 명령을 부른다. 편집 · 파일 조작도 명령이고 데몬이 최신 파일에 적용한다. 실행 때 `AgentManager` 는 세션을 파생하기 **전에** 새 포트 `LaunchKitSource`(실물 = 데몬)로 점검을 끝내고, 데몬이 펼친 프리셋을 휘발 폴더의 **백엔드 중립 실행 재료**로 받아 `backend` 만이 claude · codex 플래그로 옮긴다. 백엔드 · 모드는 에이전트 값(만들 때 고정)이고, 설정은 그 백엔드의 원문 칸만 실린다(모델도 그 안 — 사용자 2026-10-18). 작업 폴더는 만들 때 선택하고(필수 — 지금 그대로) 에이전트 슬롯 「작업 폴더」 칸 · `agent.setWorkspace` 로 바꾸되, 대화한 뒤(영속된 세션 id) · 떠 있는 동안은 잠긴다(경로 없는 생성 등 = 다음 주제 §8). 실행이 막히면 누가 냈든(화면 · CLI · LLM) 같은 여섯 사유로 막는다 — 화면은 에이전트 옆 비모달 팝업(항목 링크 → 라이브러리에서 그 항목 선택), LLM · CLI 는 코드 + 인자로 받는다. 설정은 데몬이 내용을 읽을 때마다 프로세스 안에서 검사한다(문법 · 스키마 — CLI 를 돌리지 않는다). 바깥에서 없어진 파일은 같은 이름 후보를 제안만 하고(실행은 막힘) 사용자 · LLM 이 하나를 고르면 같은 옛 경로 · 같은 옛 폴더의 나머지를 함께 고친다. 앱 안 이동 · 다시 연결은 데몬 「이동 기록」에 쌓여 각 클라이언트가 다음 요청 때 자기 컬렉션을 고친다. 번호 1~4 보기 상태와 컬렉션 · 대상 컬렉션은 **셸**이 권위로 갖고(키에 데몬 신원), OS 동작은 `platform`(휴지통 · 정션)과 셸의 로컬 요청을 지난다.
+라이브러리 폴더는 **데몬 PC 의 것**이고 데몬의 새 모듈 `library` 만 읽고 쓴다. 화면은 디스크를 보지 않고 슬롯 열기 · 포커스 · 폴더 이동 때 **버스 명령**(`library.list` 등)을 보내 답을 그린다(요청형 — 데몬은 메모리 목록으로 답하고 디스크는 처음 · `library.refresh` · 루트 바꾸기 때만 훑는다 · 감시 · 방송 없음). `engram` CLI 와 LLM 도 같은 명령을 부른다. 편집 · 파일 조작도 명령이고 데몬이 최신 파일에 적용한다(손으로 단 주석은 지킨다 — T2). 실행 때 `AgentManager` 는 세션을 파생하기 **전에** 새 포트 `LaunchKitSource`(실물 = 데몬)로 점검을 끝내고, 데몬이 펼친 프리셋을 휘발 폴더의 **백엔드 중립 실행 재료**로 받아 `backend` 만이 claude · codex 플래그로 옮긴다. 백엔드 · 모드는 에이전트 값(만들 때 고정)이고, 설정은 그 백엔드의 원문 칸만 실린다(모델도 그 안 — 사용자 2026-10-18) · 숨겨 주입하는 설정은 없다 — Engram 통로 키(`allowedMcpServers`)도 기본 제공 「기본」 의 원문에 보이고, claude 원문은 붙인 순서로 `--settings` 하나에 합친다(T10). 작업 폴더는 만들 때 선택하고(필수 — 지금 그대로) 에이전트 슬롯 「작업 폴더」 칸 · `agent.setWorkspace` 로 바꾸되, 대화한 뒤(영속된 세션 id) · 떠 있는 동안은 잠긴다(경로 없는 생성 등 = 다음 주제 §8). 실행이 막히면 누가 냈든(화면 · CLI · LLM) 같은 여섯 사유로 막는다 — 화면은 에이전트 옆 비모달 팝업(항목 링크 → 라이브러리에서 그 항목 선택), LLM · CLI 는 코드 + 인자로 받는다. 설정은 데몬이 내용을 읽을 때마다 프로세스 안에서 검사한다(문법 · 스키마 — CLI 를 돌리지 않는다). 바깥에서 없어진 파일은 같은 이름 후보를 제안만 하고(실행은 막힘) 사용자 · LLM 이 하나를 고르면 같은 옛 경로 · 같은 옛 폴더의 나머지를 함께 고친다. 앱 안 이동 · 다시 연결은 데몬 「이동 기록」에 쌓여 각 클라이언트가 다음 요청 때 자기 컬렉션을 고친다. 번호 1~4 보기 상태와 컬렉션 · 대상 컬렉션은 **셸**이 권위로 갖고(키에 데몬 신원), OS 동작은 `platform`(휴지통 · 정션)과 셸의 로컬 요청을 지난다.
 
 ## 1. 아키텍처
 
@@ -65,10 +65,10 @@
 
 설정 · 프리셋을 **파일 안 표식**(`kind`)으로 가른다(D7). 확장자나 폴더 이름에 기대면 이동이 종류를 바꾼다.
 
-**프리셋 파일**(serde-saphyr 가 읽고 쓰는 유일한 곳 = `library::format`)
+**프리셋 파일**(읽기 = serde-saphyr · Engram 이 고쳐 쓰기 = 손 주석 · 모양을 지키는 편집기 — 둘을 아는 유일한 곳 = `library::format` · T2)
 
 ```yaml
-# Engram 이 고쳐 쓰는 파일입니다 — 손으로 단 주석은 Engram 이 고칠 때 사라집니다.
+# 손으로 단 주석은 Engram 이 고쳐도 남는다(T2 — 0b 단계 스파이크가 편집기를 고른다)
 kind: preset
 version: 1
 description: PR 리뷰 전용
@@ -107,7 +107,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 
 | 참조 | 표시 이름 | 내용 |
 |---|---|---|
-| `engram:/default` | 기본 | 지침 `engram:/priming`(배포판 `prompts\agent-priming.md` — 지금 프라이밍 그대로) + 설정 `engram:/settings/no-autoupdate`(claude 원문 `{"env":{"DISABLE_AUTOUPDATER":"1"}}`) |
+| `engram:/default` | 기본 | 지침 `engram:/priming`(배포판 `prompts\agent-priming.md` — 지금 프라이밍 그대로) + 설정 `engram:/settings/default`(claude 원문 `{"env":{"DISABLE_AUTOUPDATER":"1"},"allowedMcpServers":[{"serverName":"engram"}]}` — 자동 업데이트 끄기 + Engram 메시지 · 제어 통로(서버 이름 = agent `MCP_SERVER_NAME`) · T10 · 사용자 2026-10-18 「프리셋으로 해줘. 사실 감추는 설정이 있으면 안되지.」 — 옛 id `engram:/settings/no-autoupdate` 는 내용이 늘어 바꿨다) |
 
 기본 제공 프리셋은 「기본」 하나다 — 옛 `engram:/backend/claude` · `engram:/backend/codex`(「claude 기본」 · 「codex 기본」 — 내용 = `backend` 칸 하나)는 걷었다(사용자 2026-10-18 — 백엔드 = 에이전트 값). 기본 제공 프리셋은 읽기 전용이고 라이브러리 프리셋에 추가할 수 없다 — 라이브러리 프리셋 파일이 `engram:/…` 를 가리키면 그 줄이 「오류 · 기본 제공 프리셋은 추가할 수 없다」(Δ1). 에이전트에는 붙는다.
 
@@ -133,7 +133,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 | `mod.rs` | 외관 · 직렬화(읽기는 함께, 쓰기는 하나씩 — **`std::sync::RwLock` 하나** · tokio 락 아님: 두 포트가 동기라 `blocking_handler` 스레드와 manager 의 동기 spawn 경로가 잡는다. ★그 spawn 경로를 tokio 워커가 부르는 곳이 하나 있다 — wire `SpawnByCwd`(`connection_core.rs:1543`)★ → 이 작업에서 `spawn_blocking` 으로 옮기고 기존 구조 시험(`activate_profile` 을 `spawn_blocking` 창 안에서만 부르는지 보는 그 시험)에 `spawn_agent` 를 더해 못 박는다) · 두 포트 구현 | `LibraryService` — `impl LibraryCommandHost`(버스 본문) · `impl LaunchKitSource`(실행 재료) |
 | `path.rs` | 참조 꼴 | `LibPath` · `AssetRef { Library(LibPath), BuiltIn(BuiltinId) }` · `AssetRef::parse(&str)` |
 | `store.rs` | **목적 포트 하나**(「라이브러리 저장소」 — 감싸기 조사 결론) | `trait LibraryStore { scan(root, under: Option<&Path>)(`None` = 전체 · `Some` = 그 폴더 하위만) · read(path) · write_atomic(path, bytes) · create_dir · rename · trash · exists }` · 실물 `FsStore`(walkdir + std::fs + `platform::fs::move_to_trash`) · 시험 `MemStore` |
-| `format.rs` | YAML · 앞머리를 아는 유일한 곳 | `PresetDoc` · `SettingsDoc` · `Frontmatter` · `parse_*`(오류에 줄 번호) · `write_preset` |
+| `format.rs` | YAML · 앞머리를 아는 유일한 곳 | `PresetDoc` · `SettingsDoc` · `Frontmatter` · `parse_*`(serde-saphyr · 오류에 줄 번호) · 프리셋 편집 쓰기 = 주석 보존 편집기 위의 목록 연산(추가 · 빼기 · 순서 — 손 주석 · 모양 보존 · T2 · 편집기 = 0b 스파이크가 `yaml-edit` · `yamlpatch` 중 고름 · 둘 다 안 되면 serde 로 다시 쓰고 잃음을 받아들인다 — §5 0b) |
 | `catalog.rs` | 훑기 결과 → 항목 표 + 참조 역색인 | `Catalog { items, used_by }` · `Catalog::build(scan, cache, profiles)` — 파싱 캐시 꼬리표 = (경로 · 수정 시각(전체 정밀도) · 크기 · 파일 신원(볼륨 일련번호 + 파일 인덱스 — `platform::fs`)) · 같음으로 비교(「더 새것」 아님) · 하나라도 다르면 다시 읽음 · racy 규칙(git 식 — 훑은 시각 T 를 적고 수정 시각 ≥ T − 여유인 항목은 다음 훑기에 무조건 다시 읽음 · 여유 = 2초 하나(볼륨 종류 구분 없음 — 사용자 2026-10-17) · 뒤 훑기가 충분히 오래된 것으로 보면 표시를 지움) · 내용 해시 없음(사용자 위임 — 관행 · `docs/research/file-change-detection-survey-2026-10-17.md`) |
 | `validate.rs` | 설정 검사 — **가볍게 · 프로세스 안 · CLI 를 돌리지 않는다**(사용자 2026-10-18 「가볍게하는걸로하고 나중에 문제되면 차후에 고려하자」 — 옛 2026-10-17 의 실행 직전 CLI 검사를 걷음 · 실측 = `docs/research/settings-asset-validation-spike-2026-10-17.md`) | **무엇을** — ① 문법(YAML) = `format.rs` 가 읽을 때 → ⛔ 오류 「N째 줄」 ② 스키마 — claude = SchemaStore `claude-code-settings.json`(공식 문서가 가리키는 커뮤니티 사본 · claude 보다 늦다 — `docs/research/claude-settings-schema-source-2026-10-18.md`) · codex = 설치된 판의 릴리스 자산 `rust-v<ver>/config-schema.json`. 스키마가 아는 키의 **타입 · 범위 오류 = ⛔ 오류 — 실행을 막는다**(사용자 「막어」 — claude 는 값 하나의 타입만 틀려도 `--settings` 전체를 종료 코드 0 · 로그 없이 버린다(실측) · 합친 `--settings` 하나라 「기본」 의 몫까지 함께 버려진다). **모르는 키** — claude = 알리지 않는다(어느 깊이든 — SchemaStore 가 새 키를 많이 놓친다 · 스키마가 `additionalProperties:false` 로 닫은 중첩 자리의 위반도 거른다) · codex = ⚠ 만(스키마가 정확하다 · 막지 않는다 — 2026-10-17 결정 그대로). **언제** — Engram 이 그 내용을 읽을 때마다(싼 검사의 관행 — VS Code · JetBrains · `docs/research/validation-status-after-edit-practice-2026-10-18.md`): 첫 훑기(전부) · `library.refresh`(꼬리표가 바뀐 파일) · Engram 안의 편집(곧바로) · 실행(그 에이전트에 붙은 설정 — 실행이 이미 읽는다). 스키마가 바뀌면 설정 전부 다시 검사. 따로 된 「검사」 · 「모두 검사」 메뉴와 `library.validate` 는 없다 — 새로 고침(F5 · 우클릭 「새로 고침」 · `library.refresh`)이 덮는다 · 「검사 필요」 상태도 없다(읽을 때마다 돌아 늘 최신). 바깥 편집은 새로 고침이나 실행에서 드러난다(편집기 포커스 때 다시 읽기 안 함 — 사용자 「너무 복잡하게 할 필요는 없는것같아」). **스키마 내려받기** = 가장 늦게 — 그것이 실제로 필요한 훑기 · 검사 때(데몬 시작 때가 아니다 — 사용자 「가장 늦은 타이밍 … 실 필요할 때」) · 캐시 = 데이터 폴더 · 그때 설치된 claude · codex 판(`--version`)이 지난번 내려받을 때의 판과 다르면 다시 받는다(필요할 때 확인). **어떻게** — codex 원문 `key=value` 를 `-c` 규칙대로 객체로 조립(점 키 = 중첩 표 · 값 = TOML, 안 읽히면 문자 그대로) · 검사기 = `jsonschema` 0.59.0 `default-features = false, features = ["resolve-file","idna"]`(reqwest · rustls · tokio 없음 — 내려받기는 우리 몫 · 원격 `$ref` 없어 오프라인 컴파일) · schemars `uint*` 형식은 무시되므로 정수 범위는 스키마 `minimum`/`maximum` 에서만 온다(§6-3) · 결과는 파싱 캐시와 같은 꼬리표에 붙는다 |
 | `index.rs` | 다시 연결 — **후보 찾기와 적용을 가른다**(Δe · D10 = 확인 한 번) | `LibraryIndex { root, entries, tombstones, pending }`(`pending` = 제안) · `find_relink_candidates(prev, now, under) -> Vec<RelinkCandidate>`(순수 · `under` = 사라짐을 판정할 범위 — 흐름 ②) · `relink(old, new) -> RelinkReport`(같은 옛 경로 전부 + 같은 옛 폴더의 나머지 — 흐름 ②) · 옛 스위치 `RelinkMode { Auto, Confirm }` 는 걷었다 |
@@ -226,7 +226,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 |---|---|---|---|
 | 지침 | `--append-system-prompt-file <합친 파일>`(지금 프라이밍 자리를 대신) + **실 재료(`real`)일 때만** `--system-prompt-snapshot off`(이어받기에도 새 글 — 실측 확실 · 같은 글이면 캐시 손해 없음 실측) | 새 대화 = `thread/start.developerInstructions`(실측 확실). 이어받기 = 지침 해시가 지난 적용값과 다를 때만 첫 턴 `additionalContext`(실험 API — T6) | **늘** 작업 폴더 `AGENTS.override.md`(합친 지침 — 기본이 붙었으면 프라이밍 포함 · 머리에 생성 표식 줄 · 실행마다 결정적으로 다시 씀 · 그 폴더에 사용자 `AGENTS.md` 가 있으면 그 내용을 먼저 옮겨 싣는다 — 아래 위험). 묻지 않는다 — 옛 「만들까요?」 대답과 「안 만든다 = 프라이밍만 `-c developer_instructions=`」 길은 걷었다(사용자 2026-10-18) |
 | 스킬 | 휘발 폴더 `engram\skills\<이름>` = 라이브러리 스킬 폴더로 가는 디렉터리 정션 → `--plugin-dir <휘발>\engram` → 이름 `engram:<스킬>`(T7 · 플러그인 폴더 적재는 실측 확실, 정션 따라가기는 미측) | 같은 정션 폴더를 `skills/extraRoots/set`(프로세스마다 · 실측 가능성 높음) | 작업 폴더 `.agents\skills\engram-<id8>-<이름>` 정션(codex 가 정션을 따라감 — 실측 확실). 지난 것은 「생성물 소유」 규칙으로 먼저 걷는다 |
-| 원문 설정 | 데몬의 제어 settings 조각(`allowedMcpServers`) + 프리셋 claude 원문들을 추가한 순서로 합쳐 휘발 폴더 `settings.json` 하나 → `--settings` 하나. `allowedMcpServers` 는 **Engram 값이 권위** — 프리셋이 그 키를 쓰면 버리고 경고(T10 · ADR-0109 결정 9 대체) | 프리셋 codex 원문 줄을 `-c` 로 하나씩 · 패스스루 뒤 · 우리 덮어쓰기 앞 | 같음 — 명령줄 가드에 걸리는 줄(따옴표 등)은 빼고 경고 |
+| 원문 설정 | 붙은 프리셋(「기본」 포함)의 claude 원문들을 **붙인 순서**로 합쳐 휘발 폴더 `settings.json` 하나 → `--settings` 하나(§3 합침 규칙 — 같은 키는 나중 프리셋 것 · Engram 우선 규칙 없음). **숨은 settings 조각이 없다** — 우편 서버 허용 `allowedMcpServers` 는 「기본」 의 claude 원문에 보이게 들어 있다(T10 · ADR-0109 결정 9 대체 · 사용자 2026-10-18). 실 재료(`real`)면 제어 채널의 조각(`ControlEndpoint.settings_file`)을 `--settings` 로 싣지 않는다 · `NoopLaunchKits` 는 지금 그대로 싣는다(argv 바이트 같음). Engram MCP 서버 등록 인자 `--mcp-config` 는 범위 밖 — 실행 인자 그대로다(프리셋 아님) | 프리셋 codex 원문 줄을 `-c` 로 하나씩 · 패스스루 뒤 · 우리 덮어쓰기 앞 | 같음 — 명령줄 가드에 걸리는 줄(따옴표 등)은 빼고 경고 |
 | 모델 | 따로 싣지 않는다 — 원문 claude 칸의 `model`(settings 키)이 위 합친 `--settings` 로 간다 · 없으면 CLI 기본값(R35 · 사용자 2026-10-18 — 옛 `--model <m>` 번역 걷음) | 따로 싣지 않는다 — 원문 codex 칸의 `model=` 줄이 위 `-c` 로 간다(옛 `-c model=<m>` 번역 걷음) | 같음 |
 | 크기 한도 | — | — | 합친 지침 > 32 KiB 면 `-c project_doc_max_bytes=<n>` · 스킬 문맥 몫이 크면 `-c skills.max_context_tokens=<n>` — 실행마다 계산(저장 안 함) · 알리지 않는다(R38 · 사용자 2026-10-18 — 옛 「바뀌었을 때만 경고 줄」 걷음) |
 
@@ -236,7 +236,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 - **수용 관문(14 단계)**: JSON 백엔드 **각각**(claude · codex)에서 모델 · 강도 둘 다 첫 메시지 전에 바뀌는지 실 CLI 로 확인한다(다음 턴 표기). 미리 선택할 「CLI 가 시작한 값」 을 CLI 가 알려 주는지(원문 칸에 모델을 넣은 경우 포함)도 함께 본다(미측).
 - **멈춤 조건**: 어느 백엔드에서든 그 요청이 안 되면 그 부분의 구현을 **멈추고 사용자에게 돌아간다**(R35 를 고치거나 지원되는 다른 길을 찾는다). 칸을 조용히 끄는 것은 허용되는 대체가 아니다. 대기 입력 명부 · 첫 제출 래치의 소유는 건드리지 않는다.
 
-`DISABLE_AUTOUPDATER` 는 기본 제공 프리셋 「기본」의 claude 원문(settings `env`)으로 실린다 — 이 브랜치 · HEAD 에는 claude 백엔드에 박힌 값이 없다(grep 0건). 다른 세션이 박았다면 그 머지 때 이 길로 옮긴다(R32).
+`DISABLE_AUTOUPDATER` 와 `allowedMcpServers:[{serverName:"engram"}]` 는 기본 제공 프리셋 「기본」의 claude 원문(settings `env` · 최상위 키)으로 실린다 — `DISABLE_AUTOUPDATER` 는 이 브랜치 · HEAD 의 claude 백엔드에 박힌 값이 없다(grep 0건 · 다른 세션이 박았다면 그 머지 때 이 길로 옮긴다 — R32). `allowedMcpServers` 는 지금 제어 채널이 스폰마다 쓰는 조각 파일(`control/mcp_config.rs` · ADR-0109 결정 9)에서 이리 옮긴다(T10). 그래서 「기본」 을 떼면 Engram 메시지 · 제어 통로도 빠질 수 있다(사용자 전역 설정이 `allowedMcpServers: []` 로 막을 때) — 떼기 확인 문구에 「Engram 메시지 · 제어 통로」 가 더해진다(`DetachDefaultConfirm` · R32).
 
 **명령 어휘의 자리와 소유(ADR-0155 결정 1 · ADR-0251 선례)** — `library.*` · `preset.*` · 에이전트 프리셋 명령은 **agent crate 의 `declare_commands!` 블록에 선언한다**(catalog 6 → 7). 어휘(이름 · 인자 · 답 행 타입)의 주인은 agent crate 이고, 데몬은 그 어휘를 **구현**만 한다 — 포트 `LibraryCommandHost`(실물 = 데몬 `LibraryService`) + `blocking_handler`. `agent.*` 프리셋 명령도 같은 포트로 간다(붙임 검증에 라이브러리가 필요하다). 거부 = 데몬 자기 블록 + 표 합성(ADR-0251 이 `usage.*` 에서 같은 이유로 거부) · 라이브러리 전용 crate(소비자 하나).
 
@@ -333,7 +333,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 | `DetailFlyout` | 편집 칸 줄 상세 카드 — 창의 레이아웃 뿌리에 포털로 그리고 **잘리지 않는다**(D11 확정 2026-10-18 · 관행 = Floating UI `flip()` 을 `shift()` 앞에(확인함) · Radix · MUI · NSPopover 같은 순서 · 기준 요소를 덮는 것은 마지막 수단). **라이브러리 1~4** — 오른쪽 상세 칸은 창 안의 열이라 넘침이 없다 · 편집 칸 줄 👁 카드는 오른쪽 칸의 **왼쪽 가장자리**에 붙고 위 = 그 줄 · 가운데 목록 위에 겹친다(창이 좁으면 폴더 트리까지 덮는다). **에이전트 슬롯(editor-only)** — ① 슬롯 오른쪽 **바깥**에 붙어 옆 슬롯 위에 겹침 ② 오른쪽에 자리가 없으면 슬롯 왼쪽 바깥으로 뒤집기(왼쪽 옆 슬롯 위) ③ 양쪽 다 없으면(슬롯이 팝아웃 창을 채움 등) 창 안으로 밀어 넣는다(슬롯을 덮음) — flip → shift → clamp. **닫기** — Esc = 쌓인 카드를 마지막에 연 것부터 · × = 그 카드 · 바깥 누름 = 닫힘(2026-10-17) · 다른 줄 👁 = 카드를 바꿈 · 같은 줄 = 닫힘(R29 · E1). 옛 「창 끝이면 일부 잘림 · 전부 창 밖일 때만 슬롯 안쪽」(Δi)은 걷었다 | — |
 | `LibraryDnd` | 목록 → 트리 끌어 놓기(이동) 문맥 | @dnd-kit/core |
 | `LaunchBlockedPopup` | 막힘 팝업 — **비모달**(사용자 「모달에 아니라 그냥 뜨는 팝업」) · 에이전트 곁의 Flyout 꼴 카드 · 닫을 때까지 남고 다른 화면은 그대로 쓴다 · 라이브러리 창에 가려지거나 닫혀도 된다(오래 남는 기록은 에이전트 프리셋 슬롯의 배지 · ⛔ 줄 + 에이전트 트리의 ⛔ — 관행 JetBrains 풍선 + 알림 기록 · Microsoft InfoBar) · 막힌 항목마다 이유 한 줄(예 「리뷰봇을 실행하지 못했습니다 — ⛔ 설정 claude opus — cleanupPeriodDays 는 1 이상의 숫자여야 함 · 3째 줄」) · 항목 이름 = 링크(아래 「막힘 팝업」) | 기존 Radix 팝오버 꼴(구현 판단) |
-| `DeleteConfirm` · `DetachDefaultConfirm` | 확인 창들(옛 `CodexFilesAsk` 는 걷었다 — codex 파일은 늘 깐다 · 옛 `RelinkPicker` 는 `AddItemsPopover` 의 다시 연결 모드가 대신한다) | 기존 대화상자 꼴 |
+| `DeleteConfirm` · `DetachDefaultConfirm` | 확인 창들 — 기본 떼기 문구는 빠지는 것 셋(Engram 사용 안내 · Engram 메시지 · 제어 통로 · claude 자동 업데이트 끄기 — T10 으로 둘째가 더해짐 · 문구 정본 = PRD R32)을 말한다(옛 `CodexFilesAsk` 는 걷었다 — codex 파일은 늘 깐다 · 옛 `RelinkPicker` 는 `AddItemsPopover` 의 다시 연결 모드가 대신한다) | 기존 대화상자 꼴 |
 
 **단축키(R50)** — 라이브러리 슬롯 키는 기존 키 표(`src/commands/keybindings.ts` — 조합 → 명령, ADR-0055)에 넣고 **항목마다 Windows 키 · Mac 키를 따로 적는다**(VS Code 의 `mac:` · Spacedrive 의 `{macos, default}` 와 같은 꼴). OS 판정은 그 표 한 곳에서만 한다. 새 단축키 라이브러리는 들이지 않는다(Ctrl↔Cmd 바꾸기는 한 줄). 슬롯 포커스 안에서만 듣고 입력 칸이면 넘긴다(기존 포커스 가드 `isEditableTarget`). F5 · Ctrl+F · Alt+← → 는 웹뷰 기본 동작(다시 읽기 · 찾기 · 기록 이동)을 `preventDefault` 로 막고 우리 동작에 붙인다. react-arborist 가 내장한 Enter = 이름 바꾸기 · Backspace = 삭제는 탐색기 키와 부딪히므로 끄거나 덮는다.
 
@@ -373,7 +373,9 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 | 라이브러리 | 신규/기존 | 버전 | 쓰는 일 | 자리(감싼 부품) | 고른 이유(대안 대비 한 줄) |
 |---|---|---|---|---|---|
 | walkdir | 신규 직접(지금 간접) | 2.5.0 | 라이브러리 훑기 | daemon `library::store::FsStore` | 링크 순환 · 깊이 처리 내장 · `ignore` 는 과함 |
-| serde-saphyr | 신규 | 2.0.0 | 프리셋 · 설정 YAML 과 `.md` 앞머리 읽고 쓰기 | daemon `library::format` | `serde_yaml` 은 0.9.34 + deprecated · `serde_yml` 0.0.x · `serde_norway` 2024-12 정체(메모 91) |
+| serde-saphyr | 신규 | 2.0.0 | 프리셋 · 설정 YAML 과 `.md` 앞머리 **읽기**(프리셋 고쳐 쓰기는 아래 주석 보존 편집기 — T2 · 그 편집기가 안 서면 쓰기도 이것으로 물러난다) | daemon `library::format` | `serde_yaml` 은 0.9.34 + deprecated · `serde_yml` 0.0.x · `serde_norway` 2024-12 정체(메모 91) |
+| yaml-edit | 신규 후보(0b 스파이크) | 0.3.2 | 프리셋 YAML 고쳐 쓰기 — 손 주석 · 모양 보존(T2) | daemon `library::format`(편집 쓰기) | Apache-2.0 · rowan 무손실 트리 · 문서 확인 = 맵 `set` · `remove` · `rename_key` · 목록 `push` · `set(index)` / **미확인 = 목록 중간 넣기 · 빼기 · 순서 바꾸기 · 빼는 항목에 붙은 주석** → 스파이크(`docs/research/yaml-comment-preserving-edit-2026-10-18.md`) |
+| yamlpatch | 비교 후보(0b 스파이크) | 1.31.1 | 같은 일 | 같은 자리 | MIT · Add · Remove · Append · Replace · 스스로 「best-effort」 · 「not a substitute for comprehensive YAML processing libraries」 라 적는다(같은 조사) |
 | relative-path | 신규 | 2.0.2 | `LibPath` 표현 · 루트 결합 · 이동 때 접두 바꾸기 | daemon `library::path` | `/` 고정 · `strip_prefix`/`join` 이 참조 고침을 덮는다(손 구현의 `\` · 접두 경계 버그 회피). `..` · 드라이브 거절은 우리 검증 |
 | trash | **거부**(리뷰) | 5.2.9 | — | — | 셋째 `windows` 사본 + 호출 스레드 `CoInitialize` 실패 시 패닉(지적 · 미측) → 전용 STA 스레드의 `IFileOperation`(§1-6) |
 | windows(feature 추가) | 기존 | 0.58 | 휴지통 — 전용 STA 스레드의 `IFileOperation` | platform `fs::move_to_trash` | 새 의존 0 · 부르는 쪽 COM 아파트와 무관 |
@@ -399,30 +401,30 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 
 | PRD | 이 문서가 가정한 값 | 바뀌면 |
 |---|---|---|
-| D1 | 안에 든 프리셋의 지침이 **앞** | `resolve.rs` 펼침 순서 한 곳 |
-| D2 | 프리셋 칸도 끌어서 순서 | `EditorSection` 의 끌기 칸 목록 · `preset.reorder` 의 `section` 값 |
+| D1 | **확정 2026-10-18(추천값 그대로)** — 안에 든 프리셋의 지침이 **앞** | `resolve.rs` 펼침 순서 한 곳 |
+| D2 | **확정 2026-10-18(추천값 그대로)** — 프리셋 칸도 끌어서 순서 | `EditorSection` 의 끌기 칸 목록 · `preset.reorder` 의 `section` 값 |
 | D3 | **확정 2026-10-18** — 작업 폴더 = 에이전트 값 · 에이전트 슬롯 「작업 폴더」 칸에서 보고 바꿈(입력 · 찾아보기) · 대화 뒤 · 떠 있는 동안 잠김 · LLM = `agent.setWorkspace`(프리셋이 싣지 않는다 · 경로 없는 생성 · 자동 경로 = 다음 주제 §8) | 프로필 `cwd` · `WorkspaceField` · `agent.setWorkspace` |
 | D4 | 만들 때 기본 프리셋만 · 백엔드 · 모드 = 에이전트 값(사용자 2026-10-18 — 옛 「Δ1 — 기본 + 기본 제공 백엔드 프리셋」) | 프로필 생성자 · 이주 |
 | D5 | **확정 2026-10-18** — 백엔드 · 모드 = 에이전트 값 · 만들 때 고정 | `AgentCommand` 그대로 |
 | D6 | **확정 2026-10-18** — 강도 = 백엔드 원문 칸(모델도) | — |
-| D7 | 파일 안 `kind` 표식 · 폴더 돋보기 = 필터 | 종류 판정 · 돋보기 동작 |
-| D8 | 「기본」 칸이 빈 채 남고 거기서 다시 붙임 | `PresetEditor` 기본 칸 |
-| D9 | 세션 해석 넷 그대로 | `LibrarySlot` `editor-only` · 생성자 · JSON 선택 칸 수명 |
+| D7 | **확정 2026-10-18(추천값 그대로)** — 파일 안 `kind` 표식 · 폴더 돋보기 = 필터 | 종류 판정 · 돋보기 동작 |
+| D8 | **확정 2026-10-18(추천값 그대로)** — 「기본」 칸이 빈 채 남고 거기서도 다시 붙임(`+` 검색의 「기본 제공」 목록에 더해) | `PresetEditor` 기본 칸 |
+| D9 | **확정 2026-10-18** — 세션 해석 넷 그대로 · ③ 의 「잠김」 은 뺀다(JSON 선택 칸은 잠그지 않는다 — §1-5) | `LibrarySlot` `editor-only` · 생성자 · JSON 선택 칸 수명 |
 | D10 | **확정 2026-10-18 = 확인 한 번**(관행 — 사용자가 찾기를 시작하기 전에 이름으로 다시 연결하는 피어가 없다 · ★메모 68 「저절로」 를 뒤집음★) — 후보 = 제안(누르면 적용) · 확인 전 참조는 실행 불가(막힘 ④ 늘 적용) · 하나 고르면 나머지 자동(같은 옛 경로 전부 · 같은 옛 폴더의 같은 이름) | 흐름 ② · `library.relink` — 스위치 `RelinkMode` 는 걷었다 |
 | D11 | **확정 2026-10-18(관행)** — 상세 카드는 잘리지 않는다: 에이전트 슬롯 = 오른쪽 바깥 → 왼쪽 바깥 → 창 안(flip → shift → clamp) · 라이브러리 1~4 = 오른쪽 칸 왼쪽 가장자리에서 목록 위로 · 옛 추천 「전부 창 밖일 때만 슬롯 안」 을 대신(메모 137 「뒤집기 · 안쪽 대체 없음」 을 뒤집음) | `DetailFlyout` 위치 계산 한 곳 |
 
 ### 2-2. TRD 단계 결정 (각각 추천 + 이유 한 줄)
 
-- **T1 슬롯 데이터 받기 = TanStack Query** — 추천: 채택 · `libraryQueries.ts` 한 파일에 가둔다. 이유: 요청형 · 포커스 무효화 · 편집 답 반영 · 중복 요청 합치기를 그대로 준다(메모가 예정한 `/research` 는 **아직 안 돌렸다** — 원하면 이 결정 전에).
-- **T2 프리셋 파일의 손 주석** — 추천: Engram 이 고칠 때 사라짐을 받아들이고 그 사실을 적은 머리 주석을 Engram 이 늘 써 넣는다 · 메모는 `description` 칸. 이유: serde 왕복은 주석을 못 지키고, 주석 보존 crate 는 검증 안 됐다.
+- **T1 슬롯 데이터 받기 = TanStack Query** — **확정 2026-10-18(추천 그대로)** · `libraryQueries.ts` 한 파일에 가둔다. 이유: 요청형 · 포커스 무효화 · 편집 답 반영 · 중복 요청 합치기를 그대로 준다(메모가 예정한 `/research` 는 돌리지 않았다 — 구현 때 확인해도 된다).
+- **T2 프리셋 파일의 손 주석** — **확정 2026-10-18 = 지킨다**(관행 — 사용자 「그런 라이브러리를 찾고 없으면 관행대로 처리해」 · 옛 추천 「사라짐을 받아들이고 머리 주석 · 메모는 `description`」 을 뒤집음). 근거 = 사용자 파일을 고치는 도구가 주석을 날리면 불만이 나온다(Home Assistant · openHAB) · Python 쪽 사실상 표준 ruamel.yaml 이 왕복 보존이 존재 이유(`docs/research/yaml-comment-preserving-edit-2026-10-18.md`). 후보 `yaml-edit` 0.3.2(rowan 무손실 — 맵 set/remove/rename · 목록 push/set 은 문서 확인 · 목록 넣기/빼기/순서 · 뺀 항목 주석은 미확인) → **첫 구현 단계 = 실제 프리셋 파일로 스파이크 · `yamlpatch` 와 견줌**(§5 0b). 둘 다 안 되면 옛 추천(잃음 받아들임 + 메모는 `description`)으로 물러나 사용자에게 보고한다. 읽기는 serde-saphyr 그대로 — 편집 쓰기 길만 바뀐다.
 - **T3 `model` 칸 둘 이상** — **확정 2026-10-18 = 검사 없음**(사용자 「클로드 쪽에서 허용하면 허용인거고 안되면 충돌인거지」 · 「대조표? 매번 업데이트 받아서 비교된다는거잖아. 그게 아니라 이번에 적용하고 나중에 또 대응해야되면 빼는게 맞고」). 정식 `model` 칸이 없어져 모델은 원문 칸 안이고 Engram 은 원문을 해석하지 않는다 — 두 설정이 같은 칸에 모델을 넣으면 CLI 가 하는 대로다. 옛 추천(충돌)은 검사하려면 CLI 마다 대조표를 CLI 갱신 때마다 고쳐야 해서 걷었다. 받아들인 것 = 어느 모델로 뜰지 화면에 안 보인다(§6-3).
 - **T4 Engram 폴더 기본 위치** — 미룸(다음 주제 — 에이전트 트리 · §8 에 추천 그대로 옮겼다 · 사용자 2026-10-18 에도 미룸 유지).
-- **T5 설정 창이 코드에 없다**(R9 · E3) — 추천: 첫 판은 트리 머리 메뉴 · 명령(`library.setRoot` · `settings.set`)만 · 설정 창은 별 작업. 이유: 설정 창은 이 기능보다 넓은 화면 설계다.
-- **T6 codex JSON 이어받기에서 바뀐 지침** — 추천: 지침 해시가 바뀐 때만 첫 턴 실험 API `additionalContext` 로 「바뀌었다」 + 새 글(backend/codex 안). 이유: R36 을 codex 에서 지키는 유일한 실측 길(공식 `developerInstructions` 는 이어받기에서 말없이 버려짐). 대안 = 새 대화까지 미반영 + 경고.
-- **T7 claude 스킬 싣는 길** — 추천: `--plugin-dir`(이름 `engram:review`). 대안 = `--add-dir`(접두 없음 · 네이티브 스킬과 이름이 겹치면 승자를 모른다). 이유: 사용자 `~/.claude/skills` 와 안 섞이고 적재가 실측됐다.
-- **T8 JSON 모드 모델 · 강도 선택 칸** — 코드에 없다(R35 는 있는 듯 적혀 있다). 추천: 이 기능의 **마지막 단계**(§5 14). 막지 않고(미리 선택됨 · 어느 출처 첫 메시지든 그 값), 모델 · 강도 둘 다 첫 메시지 전에 backend 요청으로 세션에 닿게 한다. **claude · codex 각각의 실측 확인이 그 단계의 수용 관문**이고, 안 되면 구현을 멈추고 사용자에게 돌아간다(R35 개정 또는 다른 길) — 칸을 조용히 끄거나 재기동하지 않는다. 이유: 프리셋 없이도 서는 독립 부분이다.
-- **T9 codex 압축 뒤 지시 재주입** — 추천: 첫 판 제외(지금 프라이밍도 같은 틈 — 압축이 developer 메시지를 버린다 · 실측). 이유: 압축 감지 + `inject_items`(실험 API)라는 별 경로가 필요하다.
-- **T10 프리셋 claude 원문을 `--settings` 파일 하나에 합치기 = ADR-0109 결정 9(「조각은 `allowedMcpServers` 단일 키」) 대체** — 추천: 합치되 `allowedMcpServers` 는 Engram 값이 권위(프리셋은 넓히지도 덮지도 못하고 그 키는 버리고 경고). 이유: 두 번째 `--settings` 의 동작이 문서에 없어 한 파일이 유일하게 확실하고, 결정 9 가 지키려던 우편 서버 허용은 그 키의 권위로 지킨다. 대안 = 두 번째 `--settings`(미측 — 거부).
+- **T5 설정 창이 코드에 없다**(R9 · E3) — **확정 2026-10-18(추천 그대로)**: 첫 판은 트리 머리 메뉴 · 명령(`library.setRoot` · `settings.set`)만 · 설정 창은 별 작업. 이유: 설정 창은 이 기능보다 넓은 화면 설계다.
+- **T6 codex JSON 이어받기에서 바뀐 지침** — **확정 2026-10-18(추천 그대로)**: 지침 해시가 바뀐 때만 첫 턴 실험 API `additionalContext` 로 「바뀌었다」 + 새 글(backend/codex 안). 이유: R36 을 codex 에서 지키는 유일한 실측 길(공식 `developerInstructions` 는 이어받기에서 말없이 버려짐). 대안 = 새 대화까지 미반영 + 경고.
+- **T7 claude 스킬 싣는 길** — **확정 2026-10-18(추천 그대로)**: `--plugin-dir`(이름 `engram:<스킬>` — 예 `engram:review`). 대안 = `--add-dir`(접두 없음 · 네이티브 스킬과 이름이 겹치면 승자를 모른다). 이유: 사용자 `~/.claude/skills` 와 안 섞이고 적재가 실측됐다.
+- **T8 JSON 모드 모델 · 강도 선택 칸** — 코드에 없다(R35 는 있는 듯 적혀 있다). **확정 2026-10-18(추천 그대로)**: 이 기능의 **마지막 단계**(§5 14). 막지도 잠그지도 않고(CLI 가 시작한 값이 미리 선택됨 · 어느 출처 첫 메시지든 그 값 — §1-5), 모델 · 강도 둘 다 첫 메시지 전에 backend 요청으로 세션에 닿게 한다. **claude · codex 각각의 실측 확인이 그 단계의 수용 관문**이고, 안 되면 구현을 멈추고 사용자에게 돌아간다(R35 개정 또는 다른 길) — 칸을 조용히 끄거나 재기동하지 않는다. 이유: 프리셋 없이도 서는 독립 부분이다.
+- **T9 codex 압축 뒤 지시 재주입** — **후속으로 뺌 2026-10-18**(사용자 「codex 압축은 나중에 고려하자. 모든 유저 고려하면 넣는게 맞겠지만 후속으로 빼자.」) — 첫 판 제외(지금 프라이밍도 같은 틈 — 압축이 developer 메시지를 버린다 · 실측). 이유: 압축 감지 + `inject_items`(실험 API)라는 별 경로가 필요하다. 덧붙인 실측 항목 = codex `AGENTS.md`(터미널의 `AGENTS.override.md`) · 스킬이 압축 뒤 살아남나(버린다고 잰 것은 developer 메시지뿐 — §6-2).
+- **T10 프리셋 claude 원문을 `--settings` 파일 하나에 합치기 = ADR-0109 결정 9(「조각은 `allowedMcpServers` 단일 키」) 대체** — **확정 2026-10-18 = 숨은 설정 없음**(사용자 「프리셋으로 해줘. 사실 감추는 설정이 있으면 안되지.」 — 옛 추천 「`allowedMcpServers` 는 Engram 값이 권위 · 프리셋의 그 키는 버리고 경고」 를 걷음). Engram 조각 `allowedMcpServers:[{serverName:"engram"}]` 은 기본 제공 「기본」 의 claude 원문으로 옮기고(자동 업데이트 끄기 옆 · §1-2), 붙은 프리셋 claude 원문 전부를 붙인 순서로 한 파일에 합쳐 `--settings` 하나로 넘긴다 — 같은 키는 나중 프리셋 것(보이는 동작 · Engram 우선 규칙 없음). 「기본」 을 떼면 Engram 통로도 빠질 수 있어 떼기 확인 문구에 「Engram 메시지 · 제어 통로」 가 더해진다. 두 번째 `--settings` 는 동작이 문서에 없어 거부 그대로(미측). `--mcp-config`(Engram MCP 서버 등록)는 범위 밖 — 실행 인자 그대로다.
 
 ## 3. 내가 정한 내부 선택 (보고)
 
@@ -438,7 +440,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 - **codex 작업 폴더 생성물 = 에이전트별 목록 + 내용 속 소유 표식** — 표식과 내용이 그대로일 때만 걷고, 떠 있는 동안은 멈춘 뒤로 미룬다(사용자 파일 보호).
 - **지침은 파일 하나로 합친다** — `--append-system-prompt-file` 반복 가능 여부를 묻지 않아도 되게.
 - **claude `--system-prompt-snapshot off` 는 실 재료에만** — 이어받기가 바뀐 지침을 보게(같은 글이면 캐시 손해 없음 — 실측). `NoopLaunchKits` 의 argv 는 바이트 그대로(회귀 골든).
-- **claude settings 합침** — 객체 재귀 · 배열 이어 붙이고 같은 값 하나로 · 값은 나중 것. `allowedMcpServers` 는 Engram 값이 권위다 — 프리셋의 그 키는 합치지 않고 버리며 경고한다(T10).
+- **claude settings 합침** — 붙인 순서(「기본」 먼저 · 그다음 붙은 프리셋 — §1-3 1)로 객체 재귀 · 배열 이어 붙이고 같은 값 하나로 · 값은 나중 것. 특별 취급하는 키는 없다 — 옛 「`allowedMcpServers` 는 Engram 값이 권위」 는 걷었다(T10 · 숨은 조각 없음). ★배열 규칙이 「같은 키는 나중 프리셋 것」(T10)과 어긋날 수 있다 — §6-5★.
 - **덮어쓰기 순서** — codex 는 ADR-0216 규율(패스스루 → 프리셋 원문(모델 줄 포함) → Engram, 덮으면 경고) · claude 는 ADR-0094(`--allowedTools` 맨 끝).
 - **실행 출처는 진입점이 정한다** — wire `Spawn` · 활성화 = `Interactive` · 버스 `agent.spawn` · 제어 CLI · 부팅 자동 복원 = `Unattended`(물을 사람이 없다). 이번 판엔 결과를 바꾸지 않는다(막힘은 누가 실행하든 같다 — §1-5 포트) — 틀만 두고 다음 주제가 쓴다(§8).
 - **다시 연결 = 후보 찾기(제안) + 적용 함수 하나(`relink` — 같은 옛 경로 전부 + 같은 옛 폴더의 나머지)** — D10 = 확인 한 번이라 스위치 상수가 없다. 적용의 참조 고침은 파일 조작(흐름 ④)과 같은 함수.
@@ -462,16 +464,16 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 | daemon `library::validate` | 가짜 스키마 내려받기 · 가짜 설치 판(seam) · 실 스키마 사본 골든 | 문법 오류 = ⛔ 「N째 줄」 · 스키마 타입 · 범위 오류 = ⛔ + 막힘 ② · codex 모르는 키 = ⚠(막지 않음) · claude 모르는 키 = 알리지 않음(최상위 · 중첩 둘 다) · 첫 훑기 · `library.refresh`(바뀐 파일만) · Engram 안의 편집 · 실행이 각각 검사를 부름 · 스키마가 바뀌면 전부 다시 검사 · 스키마 내려받기는 처음 필요할 때 한 번(데몬 시작 때 아님) · 설치 판이 바뀌면 다시 받음 · 검사 자체는 CLI 를 띄우지 않는다(설치 판 읽기 `--version` 만 seam 뒤) |
 | daemon `library` 메모리 목록 · 훑기 | `MemStore` + `scan` 호출 수를 세는 꼬리표 · 훑기를 붙잡아 두는 문(동시 요청 시험) | `library.list` 는 훑지 않는다(첫 훑기 뒤 `Catalog` 로만 답 — `scan` 호출 수 그대로) · 첫 필요에 겹친 요청들(목록 · `library.refresh`)이 훑기 하나를 나눠 씀(세대 번호 — `scan` 1회 · 모두 같은 결과) · Engram 안의 변경(이동 · 이름 · 삭제 · 새로 만들기 · 편집)은 `scan` 없이 `Catalog` 항목 · 참조 역색인을 고침 · 폴더 새로 고침 = `scan(root, Some(폴더))` · 사라짐은 그 폴더 하위만 판정(폴더 밖에서 지워진 파일은 이번 새로 고침에선 사라짐으로 안 잡힘) · 그 항목의 다시 연결 후보는 폴더 밖에서도 찾음 |
 | daemon `library::ops` | `MemStore` 에 실패 지점 주입 | 일지 롤포워드 — (c)~(f) 각 단계 뒤에 죽인 뒤 부팅 재생이 같은 끝 상태(삭제 기록 · 이동 기록 쌍이 한 번만) · 삭제 `yes` 거절 |
-| daemon `library::format` · `path` | 순수 · 골든 | YAML 왕복 골든 · 오류 줄 번호 · `LibPath` 거절 표(`..` · 앞 `/` · `\` · `:` · 빈 칸) · 접두 바꾸기 |
+| daemon `library::format` · `path` | 순수 · 골든 | 편집 뒤 손 주석 · 모양 보존 골든(목록 끝 추가 · 중간 넣기 · 빼기와 그 항목 주석 · 순서 바꾸기 — 0b 스파이크가 고른 편집기 · 물러났으면 왕복 골든) · 오류 줄 번호 · `LibPath` 거절 표(`..` · 앞 `/` · `\` · `:` · 빈 칸) · 접두 바꾸기 |
 | daemon `FsStore` · 기본 경로 · 구조 시험 | `tempfile` 임시 폴더 · `ENGRAM_DATA_DIR` · `connection_core` 구조 시험 | 실 훑기 · 원자적 쓰기 · 휴지통 · 정션(실 OS — `-- --test-threads=4` 줄) · 기본 경로가 루트 출처별로 갈림(`ENGRAM_DATA_DIR` = 루트 안) · `SpawnByCwd` 의 `spawn_agent` 가 `spawn_blocking` 창 안에서만 불림 |
 | platform `fs` | 실 OS | 휴지통으로 이동한 파일이 원래 자리에 없음(전용 STA 스레드 — 부르는 스레드가 MTA 여도) · 정션 만들기/걷기 · 진짜 폴더는 `unlink_dir` 가 거절 |
 | agent manager | `NoopLaunchKits` · 가짜 `LaunchKitSource` | Noop = 오늘과 바이트 같은 argv(회귀) · 막힘 = 스폰 안 함 + 제어 채널 미발급 · 없는 id 가 전처리 앞에 명부에 들어감 · 전처리가 예약 · 떠 있음 확인 뒤, 화신 표식 · 세션 파생 앞(순서 단언 — 기존 `squashed_production_body` 꼴) · 점검이 명부 값을 읽음 · 비교-교체(그 사이 `presets` 가 바뀌면 한 번 다시 시도 뒤 실패) · 네 생성 길의 기본값이 같음(기본만 · `command` 그대로) · 전처리가 백엔드 · 세션을 건드리지 않음 · 실행 재료 가드가 어느 실패 지점에서도 `release` · 생성물 걷기 · `agent.setWorkspace` — 영속된 세션 id 가 있으면 · 떠 있으면 · 실행 준비 중이면 `CONFLICT`(까닭 코드 + 인자) · 없는 경로 · 파일 경로 = 오류 · 바꾼 뒤 실행이 새 `cwd` 로 뜸 · 세션을 놓지 않음 |
-| agent backend | 지금 `build_spec` 시험 꼴(argv 골든) + 메모리 `LaunchFs` | claude · codex 두 모드 × 재료 표(§1-5) · 순서 불변(`--allowedTools` 맨 끝 · 덮어쓰기는 패스스루 뒤) · `allowedMcpServers` 권위 · 명령줄 가드에 걸린 원문 줄 = 빠짐 + 경고 · codex 터미널 배치(늘 깐다 — 프리셋 지침을 `-c developer_instructions=` 로 싣는 길이 없음) · 사전 검사 · `AGENTS.md` 옮겨 싣기 · 소유 표식(표식 + 내용 일치일 때만 걷기 · 남은 생성물 정리가 사전 검사보다 먼저 · 떠 있는 동안 미룸) · 모델은 원문 칸으로만 간다(claude 합친 settings 의 `model` · codex 원문 `-c model=` — 따로 된 `--model` 없음) |
+| agent backend | 지금 `build_spec` 시험 꼴(argv 골든) + 메모리 `LaunchFs` | claude · codex 두 모드 × 재료 표(§1-5) · 순서 불변(`--allowedTools` 맨 끝 · 덮어쓰기는 패스스루 뒤) · 숨은 settings 조각 없음(실 재료면 `ControlEndpoint.settings_file` 이 안 실림 · `--settings` 하나 · `allowedMcpServers` 는 「기본」 원문에서 · 같은 키는 나중 프리셋 것 · 「기본」 을 떼면 그 키가 빠짐 · Noop 은 조각 그대로) · 명령줄 가드에 걸린 원문 줄 = 빠짐 + 경고 · codex 터미널 배치(늘 깐다 — 프리셋 지침을 `-c developer_instructions=` 로 싣는 길이 없음) · 사전 검사 · `AGENTS.md` 옮겨 싣기 · 소유 표식(표식 + 내용 일치일 때만 걷기 · 남은 생성물 정리가 사전 검사보다 먼저 · 떠 있는 동안 미룸) · 모델은 원문 칸으로만 간다(claude 합친 settings 의 `model` · codex 원문 `-c model=` — 따로 된 `--model` 없음) |
 | agent 명령 | 기존 `command_declarations` · `command_alphabet` + 가짜 `LibraryCommandHost`(사용량 선례) | 선언 · 인자 검문 · `--yes` 불리언 · 포트로 넘김 |
 | 프로필 이주 · 호환 | 옛 `agents.json` 골든 | 기본만 붙음 · `command`(백엔드 · 모드 · 인자) 그대로 · `cwd` 그대로 · `display_name` 고정 · 두 번 읽어도 같음 · 새 파일을 **옛 구조체**로 파싱해도 선다(`cwd` 키 유지) · `merge_preserving_live` 가 새 칸과 `cwd` 를 지킴(spawn 이 뜬 옛 사본이 `agent.setWorkspace` 값을 덮지 않음) |
 | shell | 기존 `lib_unit` · `layout_commands` 하네스 | 새 슬롯 종류 영속 왕복 · `preset_palette` 접기 · `Library{n}` 중복 = 쓰기 길 `CONFLICT` · 복원 접기 · `library_views` 왕복 · `libraryView.*` 기록 규칙(R14) · 그 창에만 이벤트 · 컬렉션 파일 왕복 · `collection.applyMoves` 멱등 · 커서 `log_id` 바뀜 · 에이전트 슬롯 접기 칸 왕복(`library_collapse` 와 섞이지 않음) |
 | front | vitest + 가짜 `agentClient` | 정렬(R12) · ⇐ 활성(R24) · `PresetEditor` 재귀 읽기 전용(R27) · 칸 아래 줄은 충돌만(R22) · 칸 제목 단추 순서(R23) · 쿼리 무효화 계기 · 막힘 팝업(비모달 — 떠 있어도 다른 입력이 됨 · 항목마다 이유 · 링크 = `libraryView.reveal` 호출 · 없는 항목은 참조하는 프리셋 경로로) · 프리셋 줄 오류 수 배지(접힌 채 · 안에 든 프리셋에서 올라온 수 포함) · 「작업 폴더」 칸(입력 · 찾아보기 → `agent.setWorkspace` · 잠기면 읽기 전용 + 이유) · 에이전트 슬롯 칸 머리 접기가 모든 에이전트 슬롯에 같게 보임 · 상세 카드 자리(가짜 창 · 슬롯 사각형 — 에이전트 슬롯 = 오른쪽 바깥 → 왼쪽 바깥 → 창 안 · 라이브러리 = 오른쪽 칸 왼쪽 가장자리 · 잘리지 않음) · 닫기 순서(Esc = 마지막 연 카드부터) · 다시 연결 팝오버(그 종류 걸름 · 옛 이름 채움) |
-| 실 CLI(로컬 · `#[ignore]` 또는 수동 — qa 「실 CLI 레인」) | 실 claude · codex | `--plugin-dir` 가 정션을 따라가나 · `--system-prompt-snapshot off` 이어받기 · `DISABLE_AUTOUPDATER` settings `env` · codex `extraRoots` 실제 턴 · codex 터미널 `AGENTS.override.md` |
+| 실 CLI(로컬 · `#[ignore]` 또는 수동 — qa 「실 CLI 레인」) | 실 claude · codex | `--plugin-dir` 가 정션을 따라가나 · `--system-prompt-snapshot off` 이어받기 · `DISABLE_AUTOUPDATER` settings `env` · 합친 `--settings` 하나의 `allowedMcpServers` 로 engram MCP 툴이 보이나(전역 설정이 `allowedMcpServers: []` 일 때 — T10) · codex `extraRoots` 실제 턴 · codex 터미널 `AGENTS.override.md` · codex `AGENTS.md` · 스킬의 압축 뒤 생존(T9 실측 항목) |
 | GUI 실측 | `/qa full` · `scripts/cdp.mjs` | PRD §4 수용 기준 전부 |
 
 회귀망은 Windows 에 묶지 않는다 — 정션 · 휴지통 시험은 OS 별 기대값을 두고 파일 통째 `#![cfg(windows)]` 를 쓰지 않는다.
@@ -481,14 +483,17 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 각 단계는 「자료구조를 먼저 갈아엎고 호출부를 나중에」가 아니라 **새 것을 옆에 세우고 → 잇고 → 옛 것을 걷는** 순서다.
 
 0. **ADR 박제**(사용자 결정 직후 · 코드 없음) — §7 · ADR-0061 · ADR-0070(프리셋 이름 부분)에 폐기 도장.
+
+0b. **스파이크 — 주석 보존 YAML 편집(T2 · 첫 구현 단계 · 운영 코드 없음)** — 실제 프리셋 파일(손 주석 · 목록 넷)로 `yaml-edit` 0.3.2 를 재고 `yamlpatch` 1.31.1 과 견준다: 목록 끝 추가 · 중간 넣기 · 빼기(그 항목에 붙은 주석) · 순서 바꾸기 · 맵 칸 바꾸기 뒤에 손 주석 · 모양이 남는가. 결과 = `docs/research/` 보고서 + 고른 편집기(7 단계 `format.rs` · 9 단계 편집의 쓰기 길). **둘 다 안 되면** 옛 추천(손 주석 잃음을 받아들이고 그 사실을 머리 주석으로 · 메모는 `description`)으로 물러나 사용자에게 보고한다(사용자 2026-10-18 「없으면 관행대로 처리해」).
+
 1. `S21: refactor: 옛 프리셋(작업 폴더 북마크) 걷기` — `PresetPalette` · `presetCommands.ts` · 배경 우클릭 프리셋 피커 · `agentStore` 프리셋 · 옛 wire 여섯 · `PresetRegistry` · `presets.json` 저장소 · `agent.new` 의 `preset` 칸 · `SlotContent::PresetPalette`(옛 값 → 빈 슬롯). `PROTOCOL_VERSION` 7 → 8 · agent catalog 6 → 7 · shell catalog 15 → 16(`SlotContentKind` 이 바뀐다 — 선언을 바꾸는 이 단계에서). **먼저 걷는 이유** = 이름 `preset` 의 두 뜻 공존을 없애고 `AgentManager` 생성자 자리를 새 포트에 비운다(걷어도 트리 판 메뉴로 만들기는 선다).
 2. `S21: feat(platform): 휴지통 · 디렉터리 링크 · 경로 비교` — `IFileOperation`(기존 `windows` 0.58 feature 추가) · `junction`(해석된 `windows-sys` 판을 `cargo tree` 로 확인) · 게이트 4g 목록(필요하면 4f 명단).
 3. `S21: refactor(agent): 프로필 프리셋 칸 · 이주` — `presets` · `default_preset` · `generated_paths` · `preset_schema` · `display_name` 고정(`command` 는 그대로 — 백엔드별 인자 `backend_args` 는 걷었다 · 사용자 2026-10-18) · `merge_preserving_live` 보존 칸(`cwd` 포함) · 이주(§1-5). `cwd` 칸 모양은 지금 그대로(필수 — 경로 없는 생성 = 다음 주제 §8). 기존 에이전트 동작 불변.
 4. `S21: feat(agent): 실행 전처리 + 실행 재료 포트 + manager 배선(Noop = 오늘과 같은 argv)` — `ensure_registered`(없는 id 를 전처리 앞에 넣기) · `prelaunch`(예약 뒤 · 명부에서 읽기 · 세션 파생 앞 · mutate 한 번 비교-교체 · 다시 시도 한 번) · 생성자 기본값(기본만 · `command` 그대로) · `SpawnByCwd` 를 `spawn_blocking` 으로 · `LaunchKitSource` · `LaunchKitGuard` · `LaunchFs` · `materialize` dispatch · `build_spec`/`open_spawn` 인자 · 회귀 골든. ★Noop 회귀는 `SpawnByCwd` · 스모크 bin 길에도 선다★ — 생성자가 붙인 기본을 Noop 은 읽지 않고, `extra_args` 는 지금 그대로 실리며, 이름 배정은 자리만 앞으로 옮겼을 뿐 같은 함수다(골든에 그 두 길을 넣는다).
 5. `S21: feat(agent): claude 실행 재료 번역` — 합친 지침 · snapshot off · plugin-dir · 합친 settings(모델은 원문 안 — 따로 된 모델 번역 없음).
 6. `S21: feat(agent): codex 실행 재료 번역(JSON · 터미널)` — developerInstructions · extraRoots · 원문 `-c`(모델 · 강도 줄 포함) · 작업 폴더 파일 · 크기 한도 · 이어받기 `additionalContext`(T6). 둘로 쪼개도 된다(JSON / 터미널).
-7. `S21: feat(daemon): library 모듈 — 경로 · 형식 · 저장소 seam · 훑기 · 설정 검사 · 해석 · 기본 제공` — 아직 아무도 안 부른다. 설정 검사 = `validate.rs`(스키마 내려받기 · 설치 판 읽기 seam · 처음 필요할 때 받기 · 판이 바뀌면 다시 받기).
-8. `S21: feat(daemon): 실행 재료 실물 꽂기` — `DaemonLaunchKits` → manager. ★여기서 기존 에이전트가 기본 제공 프리셋 「기본」 으로 뜬다(백엔드는 그 에이전트 값 그대로) — 차이는 snapshot off · `DISABLE_AUTOUPDATER` · 합친 지침 파일 · codex 터미널의 작업 폴더 파일(늘 깐다 — §1-5 이주)뿐★. 실 CLI 레인으로 claude · codex 각 1회 기동 확인.
+7. `S21: feat(daemon): library 모듈 — 경로 · 형식 · 저장소 seam · 훑기 · 설정 검사 · 해석 · 기본 제공` — 아직 아무도 안 부른다. 형식 = 읽기 serde-saphyr · 프리셋 편집 쓰기 = 0b 가 고른 편집기. 설정 검사 = `validate.rs`(스키마 내려받기 · 설치 판 읽기 seam · 처음 필요할 때 받기 · 판이 바뀌면 다시 받기).
+8. `S21: feat(daemon): 실행 재료 실물 꽂기` — `DaemonLaunchKits` → manager. ★여기서 기존 에이전트가 기본 제공 프리셋 「기본」 으로 뜬다(백엔드는 그 에이전트 값 그대로) — 차이는 snapshot off · `DISABLE_AUTOUPDATER` · 합친 지침 파일 · 합친 `--settings` 하나(제어 채널 조각 대신 「기본」 원문의 `allowedMcpServers` — T10) · codex 터미널의 작업 폴더 파일(늘 깐다 — §1-5 이주)뿐★. 실 CLI 레인으로 claude · codex 각 1회 기동 확인.
 9. `S21: feat(daemon): 루트 · 신원 · 기본 경로(DataLayout) · 다시 연결(후보 제안 + `relink` — 나머지 자동) · 이동 기록 · 파일 조작 · 편집 · 일지(단계별 판정)` — 막힘 사유 여섯이 여기서 다 선다(누가 실행하든 같다 — 실행 출처별 기본값 채움은 없다).
 10. `S21: feat(agent,daemon): 라이브러리 · 프리셋 · 에이전트 프리셋 명령 선언 + 포트` — catalog 7 유지(1 단계에서 올림 · 같은 브랜치) · 바인딩 재생성 · CLI 로 전부 부를 수 있다. `agent.setWorkspace` 도 여기서 선언하고 본문은 manager 에 둔다(잠금 판정 + 저장 — §1-5).
 11. `S21: feat(front): 웹뷰 → 데몬 버스 왕복 + libraryClient` — `CommandReply` 갈래 · `callCommand`.
@@ -515,6 +520,8 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 
 - claude `--plugin-dir` 가 **정션**을 따라 스킬을 싣나(5 단계) — 안 되면 휘발 폴더에 스킬 폴더를 복사한다(실행마다 · 결정적).
 - codex `skills/extraRoots/set` 실제 모델 턴 적재(조사 공백) · `additionalContext` 의 압축 뒤 생존.
+- codex `AGENTS.md`(터미널의 `AGENTS.override.md`) · 스킬이 압축 뒤 살아남나 — 압축이 버린다고 잰 것은 developer 메시지뿐이다(T9 후속의 실측 항목 · 사용자 2026-10-18).
+- `yaml-edit` 의 목록 중간 넣기 · 빼기 · 순서 바꾸기와 빼는 항목에 붙은 주석의 처리 · `yamlpatch` 비교 — 0b 단계 스파이크(T2). 둘 다 안 되면 물러남(§5 0b).
 - 전용 STA 스레드의 `IFileOperation` 휴지통 — 2 단계에서 실 OS 로 잰다(대화상자 없이 · 여러 파일 · 정션을 품은 폴더).
 - `AGENTS.override.md` 가 같은 폴더의 사용자 `AGENTS.md` 를 가린다 — 조사 보고서는 소스 · fallback 실측으로 「가린다」고 적었으나 대화형 TUI 는 미측. 대응(그 내용을 생성 파일 앞에 옮겨 싣기)과 함께 6 단계에서 잰다.
 - JSON 선택 칸의 모델 · 강도 바꾸기 요청(claude control request · codex `turn/start` 덮어쓰기) — 14 단계 첫 커밋의 수용 관문. **멈춤 조건**: 어느 JSON 백엔드에서든 안 되면 그 구현을 멈추고 사용자에게 돌아간다.
@@ -535,7 +542,8 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 
 | 위험 | 근거 · 대응 |
 |---|---|
-| 기본 프리셋을 떼면 프라이밍과 자동 업데이트 끄기가 함께 빠진다 | R32 확인 창 · CLI `--yes`. 업데이트가 설치를 깬 사례는 다른 세션 조사(이 브랜치에 없음) |
+| 기본 프리셋을 떼면 프라이밍 · Engram 메시지 · 제어 통로(`allowedMcpServers` — T10) · 자동 업데이트 끄기가 함께 빠진다 | R32 확인 창(문구에 통로가 더해짐) · CLI `--yes`. 통로는 사용자 전역 설정이 `allowedMcpServers: []` 로 막을 때만 실제로 끊긴다(실측 2026-07-24 — `types.rs` `settings_file` 주석). 업데이트가 설치를 깬 사례는 다른 세션 조사(이 브랜치에 없음) |
+| 뒤에 붙은 프리셋이 `allowedMcpServers` 를 적으면 Engram 통로가 바뀔 수 있다 | 받아들임(T10 — 보이는 동작 · Engram 우선 규칙 없음 · 사용자 2026-10-18). 배열을 이어 붙일지 갈아 끼울지는 §6-5 |
 | 두 설정이 같은 백엔드 원문 칸에 모델을 넣으면 어느 것으로 뜰지 화면에 안 보인다 | 받아들임(T3 · 사용자 2026-10-18) — 검사하려면 CLI 마다 대조표를 갱신 때마다 고쳐야 한다. CLI 가 하는 대로다(claude 는 우리 settings 합침이 「값은 나중 것」 — §3 · codex 는 같은 키 `-c` 줄이 여럿일 때의 CLI 동작 — 재지 않았다) |
 | 이동 기록 커서가 바닥보다 오래되면(1,000 쌍 넘게 못 따라잡음) 그 사이 이동된 컬렉션 항목을 잃는다 | 받아들인 손실(§3) — 「찾을 수 없음」으로 보이고 손으로 다시 넣는다 |
 | 바깥 이동 뒤 확인 전까지 그 에이전트가 안 뜬다(D10 = 확인 한 번 — 2026-10-18) | 의도(Δe — 같은 이름 다른 파일을 말없이 붙이지 않는다) — 막힘 사유가 「다시 연결 확인 대기」를 말한다. 버스 · CLI 실행도 막힌다 — LLM 은 `library.relink` 로 같은 일을 한다. 하나를 고르면 같은 옛 경로 · 같은 옛 폴더의 나머지가 함께 고쳐져 누름이 준다 |
@@ -562,6 +570,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 ### 6-5. 미결 (사용자 확인 필요)
 
 - (닫힘 2026-10-18) 옛 「§1-3 8 단계 막힘 사유 둘의 갈래가 비어 있다」 — 막힘 사유 여섯은 한 범주이고 누가 실행하든 막힌다(사용자 2026-10-18 · §1-3 8).
+- **claude settings 합침의 배열 규칙** — T10 은 「같은 키는 나중 프리셋 것」 이고 §3 의 합침은 배열을 이어 붙인다(메인 세션 내부 선택). 배열 값 키(예 `allowedMcpServers` · `permissions.allow`)에서 둘이 갈린다 — 이어 붙이면 뒤 프리셋이 `allowedMcpServers: []` 를 적어도 「기본」 의 `engram` 이 남아 사실상 Engram 우선이 되고, 갈아 끼우면 뒤 프리셋이 이긴다. 어느 쪽인지 정하지 않았다(구현 전 확인).
 
 ## 7. ADR 제안 (번호는 `/adr` 가 준다)
 
@@ -583,7 +592,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 16. **슬롯 데이터 받기 = TanStack Query 한 파일**(T1 확정 시) — 거부: 손으로 짠 zustand 캐시.
 17. **실행 전처리(점검 · 무인 기본값)는 예약 · 떠 있음 확인 뒤, 세션 파생 앞 · 명부 변경은 mutate 한 번(비교-교체)** — 거부: 기동 중간에 맞추기(래치 · 화신 표식이 옛 사본을 본다) · 예약 앞(같은 에이전트 두 실행이 겹친다). (작업 폴더 맞추기 · Engram 폴더 몫 = §8)
 18. (걷음 — 2026-10-18 사용자 결정의 귀결) 옛 후보 「패스스루 인자 = 백엔드별 저장(`backend_args`) · `command` 는 해석에서 파생」 — 백엔드가 바뀌지 않아 `command.extra_args` 그대로다(11). 번호는 비워 둔다.
-19. **ADR-0109 결정 9 대체 — 프리셋 claude 원문을 `--settings` 파일 하나에 합치되 `allowedMcpServers` 는 Engram 이 권위**(T10) — 거부: 두 번째 `--settings` · 원문을 안 싣기.
+19. **ADR-0109 결정 9 대체 — 숨은 settings 조각 없음 · `allowedMcpServers` 는 기본 제공 「기본」 의 claude 원문 · 붙은 프리셋 claude 원문을 붙인 순서로 `--settings` 파일 하나에 합침(같은 키 = 나중 프리셋 · Engram 우선 규칙 없음)**(T10 · 사용자 2026-10-18) — 거부: 숨겨 주입하는 조각(사용자 「사실 감추는 설정이 있으면 안되지」) · `allowedMcpServers` 는 Engram 값이 권위(옛 추천) · 두 번째 `--settings`(동작 미문서 · 미측) · 원문을 안 싣기. `--mcp-config` 는 범위 밖(실행 인자 그대로).
 20. **휴지통 = platform 의 전용 STA 작업 스레드가 부르는 `IFileOperation`(기존 `windows` 0.58)** — 거부: `trash` crate(셋째 `windows` 사본 · `CoInitialize` 실패 패닉).
 21. **번호별 보기 상태 = 셸 권위 + `libraryView.*` 셸 명령 · `Library{n}` 유일성은 레이아웃 관리자** — 거부: 웹뷰 레지스트리 명령 · 열기 명령에서만 유일성.
 22. **편집 칸 · 실행이 알리는 것 = 충돌뿐(경고 범주 없음 · 사용자 2026-10-18)** — 충돌 줄 = 걸린 항목 전부 + 온 길 · 실행 막힘 사유와 같은 줄. 거부: 노랑 경고 줄(「다음 실행은 새 대화」 · codex 크기 한도 올림 · 문맥 차지 비율 · 자동 다시 연결) — 어떤 편집이 새 대화를 부르는지 같은 규칙은 바뀔 수 있어 화면이 그것을 따라 계산하게 되고, 옛 대화는 옛 목록에 남아 잃지 않는다(사용자 이유).
@@ -591,6 +600,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 24. **실행 막힘 = 사유 여섯 한 범주 · 누가 실행하든 막음 · 화면 = 에이전트 곁 비모달 팝업(항목 링크 → 라이브러리 선택) + 슬롯 배지 · ⛔ 줄이 남는 기록 · LLM = 코드 + 인자**(사용자 2026-10-18) — 거부: 화면 실행만 막고 버스 · CLI 는 기본값으로 진행(옛 Δg 갈래) · 모달(관행 — 심각 · 앱 전체 오류에만 · 사용자 「모달에 아니라 그냥 뜨는 팝업」).
 25. **작업 폴더 = 에이전트 값 · 에이전트 슬롯 「작업 폴더」 칸 + `agent.setWorkspace` 로 바꿈 · 대화 뒤(영속된 세션 id) · 떠 있는 동안 잠금**(사용자 2026-10-18 · D3) — 거부: 대화 뒤에도 바꾸고 다음 실행을 새 대화로 맞추기(§8 에 옮겨 둔 옛 설계의 `launched_workspace` · `release_session_id` — 사용자 「대화 뒤 잠금은 있어야지」) · 작업 폴더를 프리셋 부품으로(라이브러리 종류를 늘리지 않는다 — D3 추천). 경로 없는 생성 · 자동 경로 · 묶는 폴더 = 다음 주제(§8).
 26. **상세 카드는 잘리지 않는다 — flip → shift → clamp**(D11 · 2026-10-18 관행 — Floating UI · Radix · MUI · NSPopover) — 에이전트 슬롯 = 오른쪽 바깥 → 왼쪽 바깥 → 창 안 · 라이브러리 1~4 = 오른쪽 칸 왼쪽 가장자리. 거부: 창 끝에서 잘린 채 둠 · 뒤집기 없음(메모 137 — 관행에 맞춰 뒤집음) · 기준 요소를 먼저 덮기(마지막 수단).
+27. **프리셋 YAML 편집 = 손 주석 · 모양 보존(읽기 serde-saphyr · 쓰기 = 주석 보존 편집기 — 0b 스파이크가 고름)**(T2 · 2026-10-18 관행) — 거부: serde 왕복으로 다시 쓰고 주석 잃음을 받아들이기(옛 T2 추천 — 관행이 보존 · 스파이크가 실패할 때의 물러날 자리로만 남김).
 
 ## 8. 다음 주제(에이전트 트리) — 작업 폴더의 나머지 (사용자 결정 2026-10-16 · 2026-10-18)
 
