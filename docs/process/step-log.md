@@ -2766,4 +2766,12 @@
   - **실측(2026-10-17)** — 설정 에셋 내용 확인(claude · codex 공개 스키마 · 틀린 값에 대한 실행 때 반응 · 모델 호출 없는 확인): `docs/research/settings-asset-validation-spike-2026-10-17.md`(스파이크 · claude 2.1.284 · codex 0.156.1).
   - **후속 서베이(2026-10-17)** — 에셋 · 설정 파일 검사를 언제 하나(훑을 때 전부 · 고를 때 · 바뀔 때 · 따로 누를 때): `docs/research/asset-validation-timing-survey-2026-10-17.md`(`/research` light).
   - **후속 서베이(2026-10-17)** — 파일이 바뀌었나(수정 시각 · 크기 · 파일 신원 · racy git): `docs/research/file-change-detection-survey-2026-10-17.md`(`/research` light).
+  - **실측(2026-10-18)** — 설정 검사 Rust crate(`jsonschema` 0.59.0 · serde-saphyr 2.0.0)를 실제로 컴파일해 돌림: `docs/research/settings-asset-validation-spike-2026-10-17.md` 의 「Rust 크레이트 실측 (2026-10-18)」 절(스파이크 · rustc 1.95.0).
+  - **후속 서베이(2026-10-18)** — 실행 때 붙은 부품을 못 읽으면 막나 · 알리고 띄우나: `docs/research/launch-missing-component-practice-2026-10-18.md`(`/research` light).
+  - **후속 서베이(2026-10-18)** — 검사 실패 표시와 「고친 뒤 다시 검사 전」 상태: `docs/research/validation-status-after-edit-practice-2026-10-18.md`(`/research` light).
+  - **후속 서베이(2026-10-18)** — 검사 통과 기록의 캐시 키(내용 지문 대 수정 시각): `docs/research/check-result-cache-key-practice-2026-10-18.md`(`/research` light · 실행 직전 CLI 검사를 걷어(사용자 2026-10-18) 결론은 지금 쓰이지 않는다).
+  - **후속 서베이(2026-10-18)** — claude 설정 스키마를 어디서 얻나 · 직접 검사해도 되나: `docs/research/claude-settings-schema-source-2026-10-18.md`(`/research` light + 실측).
+  - **후속 서베이(2026-10-18)** — 실행이 막혔을 때 사유 표시 · 안쪽 오류를 바깥 줄에 끌어올리기: `docs/research/blocked-launch-error-display-practice-2026-10-18.md`(`/research` light).
+  - **후속 서베이(2026-10-18)** — 없어진 참조 다시 연결 안내 · 떠 있는 오류 팝업과 겹침: `docs/research/relink-and-error-popup-practice-2026-10-18.md`(`/research` light).
+  - **후속 서베이(2026-10-18)** — 프리셋 YAML 을 고칠 때 손 주석 지키기(Rust 라이브러리 · 관행): `docs/research/yaml-comment-preserving-edit-2026-10-18.md`(`/research` light · 라이브러리는 돌려 보지 않음).
   - **PRD 초안(2026-10-15)** — `docs/process/S21-preset-library/prd.md`(초안 · 사용자 미확정 · `/review prd` 4회차 반영) · TRD 초안 `trd.md`(`/review trd` full 3회차 반영) · 브리핑 `briefing.html`(v43 화면 그림 + 시스템 구조 · 흐름 그림 · 결정마다 갱신) · 슬롯 이름 조사 `docs/research/agent-customization-pane-naming-survey-2026-10-16.md`(light). 결정 정본 = `.claude/handoff/attachments/20261012-preset-decisions.md` — 여기 베끼지 않는다.
