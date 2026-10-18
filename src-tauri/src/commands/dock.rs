@@ -9,6 +9,8 @@
 //!   게터는 이벤트 루프의 답을 기다리고, 메인 스레드의 창 사건 처리기는 레이아웃 락을 잡는다(TRD §1-3 「창 게터」).
 //! - 할 일은 두 락을 다 놓은 뒤 낸 순서대로 실행한다 — `ReleaseLease` 가 레이아웃 락을 잡고 std 락은 다시 들어갈
 //!   수 없다.
+//! - 대기 창 명부 락(`DockState::parked`)도 잎이다 — 가드는 문장 하나 안에서 쓰고 놓고, 쥔 채 레이아웃 락 · 장부 락 ·
+//!   emit · 창 호출 · 창 짓기를 하지 않는다. 레이아웃 락을 쥔 채 잡는 것은 된다(차례 = `DockState` 문서).
 //!
 //! ## ★`Apply` 는 늘 spawn★
 //! 할 일을 먹인 스레드와 무관하게 적용은 [`DockSpawn::spawn`] 으로 넘기고, 그 결과(`Applied`)와 끝 할 일도 그
@@ -33,7 +35,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use engram_dashboard_base::sync;
-use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, Window};
+use tauri::{
+    AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window,
+};
 use uuid::Uuid;
 
 use crate::commands::layout::{RouterSubs, TauriEvents};
@@ -54,8 +58,9 @@ use crate::dock::DockState;
 use crate::layout::apply;
 use crate::layout::chrome::{DockChrome, PointCss};
 use crate::layout::manager::{DockError, ViewId, WindowLabel};
-use crate::layout::{DockOutcome, DockRequest, LayoutState, ViewManager};
+use crate::layout::{DockOutcome, DockRequest, LabelSource, LayoutState, ViewManager};
 use crate::output_router::OutputRouter;
+use crate::webview_env::WebviewEnv;
 
 const EVT_SESSION: &str = "dock:session";
 const EVT_REGIONS: &str = "dock:regions";
@@ -490,6 +495,11 @@ impl DockExec {
         };
         let mut probes = Vec::new();
         for label in self.ports.windows() {
+            // 대기 창 명부의 창 · 안내 창은 모델 밖이라 이 장부의 대상이 아니다 — 사각형에 넣으면 「끝 커서를 품은 다른
+            //   창」으로 세어져 오는 중 `Over` 를 기다린다(TRD S21-slot-docking §13 U4 「옛 끌기 그대로 돎」).
+            if is_overlay_label(&label) || self.dock.is_parked(&label) {
+                continue;
+            }
             match self.ports.probe(&label) {
                 Ok(probe) => probes.push((label, probe)),
                 Err(e) => self.note_failure("window_rect", Some(&label), &e),
@@ -1141,8 +1151,10 @@ pub(crate) fn is_parked_window(app: &AppHandle, label: &str) -> bool {
         .is_some_and(|dock| dock.is_parked(label))
 }
 
-/// 창 `Destroyed` 의 명부 갈래(TRD §2-5 「사라지면」) — 그 창을 명부에서 뺀다. 닫는 창의 명부 항목을 지우는 곳은 여기
-/// 하나다. 레이아웃 락 밖에서 부른다(`lib.rs`).
+/// 창 `Destroyed` 의 명부 갈래(TRD §2-5 「사라지면」) — 그 창을 명부에서 빼고, 예비 창이었으면 명부에 예비(짓는 중
+/// 포함)가 없을 때 작업 스레드에서 새로 짓는다(예비는 늘 하나 · G11). 닫는 창의 명부 항목을 지우는 곳은 여기 하나다.
+/// 레이아웃 락 밖에서 부른다(`lib.rs`).
+// ADR-0295
 pub(crate) fn on_parked_window_destroyed(app: &AppHandle, label: &str) {
     let Some(dock) = app.try_state::<Arc<DockState>>() else {
         return;
@@ -1151,9 +1163,248 @@ pub(crate) fn on_parked_window_destroyed(app: &AppHandle, label: &str) {
         return;
     };
     match gone.role {
-        // TODO(TRD S21-slot-docking U4b): 명부에 예비(짓는 중 포함)가 없으면 작업 스레드에서 새 예비를 짓는다.
-        ParkedRole::Spare => tracing::warn!(label, "[dock] 예비 창을 잃었다 — 명부에서 뺐다"),
-        ParkedRole::Kept => tracing::debug!(label, "[dock] 남긴 창이 사라져 명부에서 뺐다"),
+        ParkedRole::Spare if dock.exiting() => {
+            tracing::debug!(
+                module = "dock",
+                label,
+                "앱이 끝나는 중에 예비 창이 사라졌다 — 다시 짓지 않는다"
+            );
+        }
+        ParkedRole::Spare => {
+            tracing::warn!(module = "dock", label, "예비 창을 잃어 명부에서 뺐다");
+            let has_spare = dock.parked().has_spare();
+            if !has_spare {
+                spawn_spare_build(app);
+            }
+        }
+        ParkedRole::Kept => {
+            tracing::debug!(module = "dock", label, "남긴 창이 사라져 명부에서 뺐다");
+        }
+    }
+}
+
+/// 창 `Destroyed` 의 안내 창 갈래(TRD §2-5 「안내 창」 「사라지면」) — 작업 스레드에서 다시 짓는다.
+// ADR-0295
+pub(crate) fn on_overlay_destroyed(app: &AppHandle, label: &str) {
+    if !is_overlay_label(label) {
+        return;
+    }
+    if exiting(app) {
+        tracing::debug!(
+            module = "dock",
+            label,
+            "앱이 끝나는 중에 안내 창이 사라졌다 — 다시 짓지 않는다"
+        );
+        return;
+    }
+    tracing::warn!(module = "dock", label, "안내 창이 사라져 다시 짓는다");
+    spawn_overlay_build(app);
+}
+
+/// 앱 종료 요청 — 이 뒤로 사라지는 예비 창 · 안내 창은 다시 짓지 않는다(`lib.rs` 의 `run` 사건).
+pub(crate) fn on_app_exiting(app: &AppHandle) {
+    if let Some(dock) = app.try_state::<Arc<DockState>>() {
+        dock.begin_exit();
+    }
+}
+
+// ── 예비 창 · 안내 창 짓기(TRD §2-5 · §2-4) ─────────────────────────────────────
+//
+// 둘 다 미리 하나씩 지어 ★숨긴 채★ 기다린다 — 화면 밖 대기 자리를 두지 않는다(사용자 결정 2026-10-19). 숨긴 최상위 창은
+// 작업 표시줄 · Alt+Tab 에 나오지 않는다. 대기 창 명부의 남긴 창(`Kept` — 뒤 단위)도 붙는 순간의 날 `SW_HIDE` 그대로
+// 숨긴 채 기다린다 — 화면 밖으로 옮기지 않는다.
+// ★숨긴 채 기다린 창의 첫 보이기 모습은 잰 적이 없다★ — 스파이크 S8 의 미리 만든 창(깜빡임 0)은 화면 밖에 보이는
+// 채였다. 새면 증상 = 뗄 때 · 안내 창을 처음 그릴 때 검정 · 흰 · 지난 그림이 몇 프레임 보인다.
+// ★작업 스레드에서 짓는다★ — 동기 IPC 처리기 안에서 지으면 Windows 에서 교착이고(스파이크), 메인 스레드의 사건
+// 처리기(`Destroyed`)도 부르는 쪽이다.
+
+/// 안내 창 label — 팝아웃 label 이 아니라 트레이 · 닫기 요청 · 명부의 대상이 아니다(TRD §2-5 · G10).
+pub(crate) const DOCK_OVERLAY_LABEL: &str = "dock-overlay";
+// 안내 창 경로(G10) — 웹뷰의 `DockOverlayPage`.
+const DOCK_OVERLAY_URL: &str = "index.html#/dock-overlay";
+// 안내 창의 지을 때 크기(논리 px) — 그릴 때 대상 창 안쪽에 맞춰 다시 놓으므로 기다리는 동안의 값일 뿐이다(스파이크
+//   setup 의 G 400 × 300 그대로).
+const DOCK_OVERLAY_SIZE: (f64, f64) = (400.0, 300.0);
+
+pub(crate) fn is_overlay_label(label: &str) -> bool {
+    label == DOCK_OVERLAY_LABEL
+}
+
+/// 예비 창 하나를 작업 스레드에서 짓는다 — 명부에 예비(짓는 중 포함)가 이미 있거나 앱이 끝나는 중이면 짓지 않는다.
+pub(crate) fn spawn_spare_build(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || build_spare(&app));
+}
+
+/// 안내 창을 작업 스레드에서 짓는다 — 앱이 끝나는 중이면 짓지 않는다.
+pub(crate) fn spawn_overlay_build(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || build_overlay(&app));
+}
+
+fn exiting(app: &AppHandle) -> bool {
+    app.try_state::<Arc<DockState>>()
+        .is_some_and(|dock| dock.exiting())
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+// 예비 창 — 명부에 `Spare` 로 적고(짓기 전 — 짓는 동안의 트레이 · `--hidden` 도 그 창을 보지 않게) · 숨긴 채 짓고 ·
+//   지어짐을 세운다. 짓기에 실패하면 명부에서 뺀다 — 두면 「예비 있음」이 늘 참이라 다시 짓지 못한다. 기다리는 동안 이
+//   창에는 창 호출을 하지 않는다 — tao 보임 깃발(거짓)이 OS 보임과 맞은 채다.
+//
+// ★들이는 차례(뒤 단위 — 실행기의 `Unpark` · `PlaceDetached`)★ — tao 보임 깃발이 늘 OS 보임과 맞게:
+// 1. 숨긴 채 자리 · 크기 = platform `place_window(rect: Some(바깥 사각형), z: Keep, show: false, activate: false)`.
+//    `SWP_SHOWWINDOW` 없는 `SetWindowPos` 한 번이라 창은 숨은 채고 tao 깃발도 건드리지 않으며, 값이 §5-5 셈의
+//    단위(물리 px 바깥 사각형) 그대로다. Tauri `set_position` · `set_size` 는 쓰지 않는다 — 자리 · 크기가 따로 두 번
+//    바뀌고 `set_size` 는 안쪽 크기다.
+// 2. 보이기 = Tauri `show()` — tao 보임 깃발이 참이 돼 그 뒤 트레이 `show` · `hide` 가 그대로 돈다. 날 Win32 로 보이면
+//    깃발이 거짓으로 남아 트레이 숨기기가 아무것도 하지 않는다(바뀐 깃발이 없으면 tao 0.35.3 `apply_diff` 가 돌아간다).
+//    포커스 없이 지은 창이라 tao 는 활성화하지 않고 보인다(`SW_SHOWNOACTIVATE`).
+// 3. 활성 = platform `place_window(rect: None, z: Keep, show: false, activate: true)` — Tauri `set_focus` 는 쓰지 않는다
+//    (tao 가 Alt 를 합성해 키 감시가 놓기로 읽는다 — TRD F7 a).
+// 예비로 되돌릴 때(`SpareGiveBack`)는 Tauri `hide()` 로 숨긴다 — 날 `SW_HIDE` 면 tao 보임 깃발이 참으로 남아 다음
+//   들이기의 2 가 아무것도 하지 않는다.
+// ADR-0295
+fn build_spare(app: &AppHandle) {
+    let started = Instant::now();
+    let (Some(dock), Some(labels)) = (
+        app.try_state::<Arc<DockState>>(),
+        app.try_state::<Arc<PopupCounter>>(),
+    ) else {
+        tracing::warn!(
+            module = "dock",
+            "도킹 상태 · 팝아웃 번호가 등록돼 있지 않아 예비 창을 짓지 못했다"
+        );
+        return;
+    };
+    if dock.exiting() {
+        tracing::debug!(module = "dock", "앱이 끝나는 중이라 예비 창을 짓지 않는다");
+        return;
+    }
+    let label = LabelSource::next_label(&**labels);
+    let reserved = dock.parked().reserve_spare(label.clone());
+    if !reserved {
+        tracing::debug!(module = "dock", label, "예비 창이 이미 있어 짓지 않는다");
+        return;
+    }
+    if let Err(e) = crate::commands::popout::build_spare_window(app, &label) {
+        dock.parked().remove(&label);
+        tracing::warn!(module = "dock", label, "예비 창을 짓지 못했다: {e}");
+        return;
+    }
+    let built = dock.parked().mark_built(&label);
+    let build_ms = elapsed_ms(started);
+    if built {
+        tracing::debug!(
+            module = "dock",
+            label,
+            role = "spare",
+            build_ms,
+            "예비 창을 지었다"
+        );
+    } else {
+        tracing::debug!(
+            module = "dock",
+            label,
+            role = "spare",
+            build_ms,
+            "예비 창이 짓는 동안 사라졌다"
+        );
+    }
+}
+
+// 안내 창 — 투명 · 테두리 · 그림자 없음 · 크기 고정 · 활성화 안 함 · 항상 위 · 클릭 통과(TRD §2-5 · 스파이크 G). 숨긴
+//   채 짓고 보이지 않는다 — 끄는 동안의 보이기 · 숨기기 · 자리 · z 는 platform 함수(날 Win32)로만 한다. 그래서 tao 보임
+//   깃발은 늘 거짓이다.
+// ★지은 뒤로 이 창에는 tao · Tauri 창 깃발 setter 를 부르지 않는다★ — 깃발이 하나라도 바뀌면 tao 가 제 보임 깃발대로
+//   창을 숨기고(`SW_HIDE`) `GWL_EXSTYLE` 을 제 깃발로 통째 다시 써 Alt+Tab 빼기를 되돌린다(TRD §2-5 「tao 깃발
+//   불변식」). 지금 그런 호출은 아래 짓기 걸음뿐이다.
+// ADR-0295
+fn build_overlay(app: &AppHandle) {
+    let started = Instant::now();
+    if exiting(app) {
+        tracing::debug!(module = "dock", "앱이 끝나는 중이라 안내 창을 짓지 않는다");
+        return;
+    }
+    // 웹뷰 환경 없이 만들지 않는다 — 마무리를 건너뛴 창은 다른 창과 환경이 갈린다(ADR-0054).
+    let Some(env) = app.try_state::<Arc<WebviewEnv>>() else {
+        tracing::warn!(
+            module = "dock",
+            "웹뷰 환경이 등록돼 있지 않아 안내 창을 짓지 못했다"
+        );
+        return;
+    };
+    let (w, h) = DOCK_OVERLAY_SIZE;
+    let built = env
+        .finish(
+            WebviewWindowBuilder::new(
+                app,
+                DOCK_OVERLAY_LABEL,
+                WebviewUrl::App(DOCK_OVERLAY_URL.into()),
+            )
+            .title(format!("Engram — {DOCK_OVERLAY_LABEL}"))
+            .inner_size(w, h)
+            .visible(false)
+            .focused(false)
+            .transparent(true)
+            .decorations(false)
+            .shadow(false)
+            .resizable(false)
+            .always_on_top(true),
+        )
+        .build();
+    let window = match built {
+        Ok(window) => window,
+        Err(e) => {
+            tracing::warn!(module = "dock", "안내 창을 짓지 못했다: {e}");
+            return;
+        }
+    };
+    let posted = app.run_on_main_thread(move || {
+        exclude_overlay(&window);
+        tracing::debug!(
+            module = "dock",
+            label = window.label(),
+            role = "overlay",
+            build_ms = elapsed_ms(started),
+            "안내 창을 지었다"
+        );
+    });
+    if let Err(e) = posted {
+        tracing::warn!(
+            module = "dock",
+            "안내 창을 다 짓지 못했다(메인 스레드에 못 넘김): {e}"
+        );
+    }
+}
+
+// 지은 안내 창의 깃발 — 메인 스레드에서 한 걸음에. tao 쪽(클릭 통과 · 작업 표시줄 — tao `skip_taskbar` 는 깃발을 바꾸지
+//   않는다)을 다 한 뒤 Alt+Tab(platform `set_switcher_hidden`)에서 뺀다(E2). 숨은 동안에는 쓸모가 없지만 끄는 동안 날
+//   Win32 로 보일 때 이미 서 있어야 한다. ★메인 스레드여야 하는 까닭★ — 다른 스레드에서 부른 Tauri setter 는
+//   이벤트 루프 줄로 넘어가 나중에 돌아, 날 Win32 인 Alt+Tab 빼기가 먼저 돌면 그 뒤의 tao 깃발 바꿈이 `GWL_EXSTYLE` 을
+//   통째 다시 써 되돌린다. 실패는 한 줄로 남기고 넘어간다 — 창은 그대로 안내 창이다.
+// ADR-0295
+fn exclude_overlay(window: &WebviewWindow) {
+    let mut failed: Vec<String> = Vec::new();
+    if let Err(e) = window.set_ignore_cursor_events(true) {
+        failed.push(format!("click_through: {e}"));
+    }
+    if let Err(e) = window.set_skip_taskbar(true) {
+        failed.push(format!("skip_taskbar: {e}"));
+    }
+    if let Err(e) = engram_dashboard_platform::window::set_switcher_hidden(window, true) {
+        failed.push(format!("switcher_hidden: {e}"));
+    }
+    if !failed.is_empty() {
+        tracing::warn!(
+            module = "dock",
+            label = window.label(),
+            ?failed,
+            "안내 창의 깃발을 다 세우지 못했다"
+        );
     }
 }
 
@@ -2742,5 +2993,54 @@ mod tests {
         rig.spawn.fire(OVER_WAIT_MS);
         assert_eq!(rig.applies().len(), 1);
         assert!(!rig.dock().session_live());
+    }
+
+    // 예비 창(명부의 창) · 안내 창은 모델 밖이라 옛 장부의 대상이 아니다 — 끝 커서를 품어도 사각형을 읽지 않고 오는 중
+    //   `Over` 를 기다리지 않는다(TRD S21-slot-docking §13 U4 「옛 끌기 그대로 돎」). 품은 창이 모델 창이면 기다린다 —
+    //   바로 위 시험과 같은 자리 · 같은 끝이다.
+    #[test]
+    fn the_parked_spare_and_the_overlay_are_no_targets_of_the_old_drag() {
+        const SPARE: &str = "slot-popup-2";
+        let (mgr, a, _) = two_tabs();
+        let rig = Rig::new(mgr);
+        rig.dock().parked().reserve_spare(SPARE.to_owned());
+        let holding = WindowProbe {
+            origin: (3000, 100),
+            scale: 1.0,
+            ..main_probe()
+        };
+        set_probe(&rig, SPARE, holding);
+        set_probe(&rig, DOCK_OVERLAY_LABEL, holding);
+        rig.exec.start(MAIN, "d1".into(), a, HOTSPOT, None).unwrap();
+        let main_regions = rig.last_regions(MAIN).unwrap();
+        let last = DrawnReport {
+            rev: main_regions.rev,
+            bar_rev: main_regions.bar_rev,
+            displayed: main_regions.view_id,
+            shown: Picked::None,
+            point: PointCss { x: 40.0, y: 20.0 },
+            scroll: None,
+            left_before_end_ms: Some(CANCEL_LEAVE_MS + 25.0),
+        };
+        *rig.fake.cursor.lock().unwrap() = Ok(PhysPoint {
+            x: 3100.0,
+            y: 200.0,
+        });
+        rig.exec
+            .source_end(MAIN, "d1".into(), DragEffect::None, None, Some(last));
+
+        assert!(
+            !rig.spawn.pending().contains(&Some(OVER_WAIT_MS)),
+            "오는 중 Over 를 기다리지 않는다: {:?}",
+            rig.spawn.pending()
+        );
+        for label in [SPARE, DOCK_OVERLAY_LABEL] {
+            assert_eq!(
+                count(&rig, &Call::Probe(label.to_owned())),
+                0,
+                "{label} 의 사각형을 읽지 않는다"
+            );
+            assert!(rig.last_regions(label).is_none(), "{label} 에 영역이 없다");
+        }
     }
 }

@@ -22,7 +22,7 @@ import { SlotUnavailableVeil } from '../slot/SlotUnavailableVeil'
 import { buildSlotMenu } from '../../commands/slotMenu'
 import { defaultRenderMode, type RenderMode } from '../slot/renderMode'
 import { t } from '../../i18n'
-import { reportUiMetrics } from './uiMetricsReport'
+import { reportUiMetrics, SLOT_FRAME_BORDER } from './uiMetricsReport'
 
 type SlotNode = Extract<LayoutNode, { type: 'slot' }>
 type MenuAnchor = { x: number; y: number }
@@ -248,11 +248,7 @@ const SlotBody = memo(function SlotBody({
         inset: 0,
         background: 'var(--bg)',
         // border 폭을 항상 1px 고정해 포커스 이동 시 layout shift 제거.
-        // 단축 속성(`border`)으로 합치지 않는다 — 폭이 `var()` 와 한 선언에 섞이면 jsdom 이 계산된 폭을 못 줘서
-        //   위 지표 측정을 테스트로 잴 수 없다.
-        borderWidth: 1,
-        borderStyle: 'solid',
-        borderColor: 'var(--border)',
+        ...SLOT_FRAME_BORDER,
         // ★포커스 링은 여기가 아니라 아래 absolute 오버레이로 그린다★: inset box-shadow 를 이 요소에 직접 주면
         //   overflow:hidden 슬롯에서 100% 채운 자식 컨텐츠(터미널 canvas·RichSlot)가 덮어 안 보였다(빈 슬롯만
         //   보이던 버그, 사용자 제보 2026-07-16). 이 요소가 absolute 라 오버레이의 앵커도 된다.

@@ -5,7 +5,9 @@ pub mod book;
 pub mod geometry;
 pub mod hit;
 pub mod parked;
+pub mod ports;
 pub mod regions;
+pub mod session;
 pub mod sizing;
 pub mod snap;
 pub mod strip;
@@ -16,7 +18,7 @@ pub mod wire;
 pub mod world;
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use engram_dashboard_base::sync;
@@ -44,6 +46,8 @@ use crate::layout::{LayoutError, ViewManager};
 ///   다른 길이 숨긴 창을 끌기 끝이 드러내지 않게). 잎 락이고 메인 스레드 맞추기 · 창 소멸만 쓴다.
 /// - 대기 창 명부([`parked`] · TRD §2-5): 잎 락 — 쥔 채 레이아웃 락 · emit · 창 호출을 하지 않는다. 레이아웃 락을 쥔
 ///   채 잡는 것은 된다(차례 = 레이아웃 → 명부 · 세계 뜨기 [`world::snapshot`] 가 둘을 함께 본다).
+/// - 앱 종료 표지: 종료 요청을 받으면 선다([`Self::begin_exit`]) — 그 뒤 사라진 예비 창 · 안내 창은 다시 짓지 않는다
+///   (TRD §2-5 「사라지면」). 내리지 않는다.
 #[derive(Debug, Default)]
 pub struct DockState {
     pub book: Mutex<Book>,
@@ -54,6 +58,7 @@ pub struct DockState {
     late_warned: AtomicU64,
     own_hidden: Mutex<HashSet<String>>,
     parked: Mutex<Parked>,
+    exiting: AtomicBool,
 }
 
 // 실패 셈과 그 몫인 세대를 한 락 아래 쥔다 — 세대를 보고 세는 것과 끝 줄이 비우며 닫는 것 사이에 다른 세션의 끝 ·
@@ -180,6 +185,15 @@ impl DockState {
         self.parked().record(label, measure)
     }
 
+    /// 앱이 끝나는 중이다 — 사라진 예비 창 · 안내 창을 다시 짓지 않는다. 한 번 서면 내리지 않는다.
+    pub fn begin_exit(&self) {
+        self.exiting.store(true, Ordering::SeqCst);
+    }
+
+    pub fn exiting(&self) -> bool {
+        self.exiting.load(Ordering::SeqCst)
+    }
+
     /// 창 `label` 의 역할 — 명부의 창이면 `Parked`, 아니면 `in_model` 로 `Model` · `Unknown`. `in_model` 은 명부 락을
     /// 놓은 뒤 부르므로 레이아웃 락을 잡아도 된다.
     pub fn window_role(&self, label: &str, in_model: impl FnOnce() -> bool) -> WindowRole {
@@ -275,6 +289,15 @@ mod tests {
         assert!(!dock.first_late_failure(1), "A, B, A — A 는 한 번");
         assert!(!dock.first_late_failure(2));
         assert!(dock.first_late_failure(3));
+    }
+
+    #[test]
+    fn the_exit_mark_stays_once_set() {
+        let dock = DockState::new();
+        assert!(!dock.exiting());
+        dock.begin_exit();
+        dock.begin_exit();
+        assert!(dock.exiting());
     }
 
     #[test]

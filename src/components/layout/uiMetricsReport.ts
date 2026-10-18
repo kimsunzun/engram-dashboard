@@ -5,6 +5,7 @@
 // 컴포넌트 파일과 떼어 둔 이유는 `windowCanvasReport.ts` 와 같다(HMR 은 고친 모듈만 다시 실행 · Fast Refresh 경계).
 
 import { invoke } from '@tauri-apps/api/core'
+import type { CSSProperties } from 'react'
 
 import type { UiMetrics } from '../../api/layoutTypes'
 import { retryAsync } from '../../util/retryInvoke'
@@ -16,6 +17,18 @@ interface UiMetricsReportState {
   /** 지금 보내는 작업(재시도 대기 포함). 끝나면 성공·실패와 무관하게 비운다. */
   inFlight: Promise<void> | null
 }
+
+/**
+ * 칸 틀 테두리 — 잎(`LayoutLeaf`)과 대기 모드의 빈 캔버스(`WindowLayout`)가 함께 입는다. 지표는 이 테두리를 잰 값이라
+ * 둘이 갈리면 셸의 칸 content 가 어긋난다.
+ * ★단축 속성(`border`)으로 합치지 않는다★ — 폭이 `var()` 와 한 선언에 섞이면 jsdom 이 계산된 폭을 못 줘서 지표 측정을
+ * 시험으로 잴 수 없다.
+ */
+export const SLOT_FRAME_BORDER = {
+  borderWidth: 1,
+  borderStyle: 'solid',
+  borderColor: 'var(--border)',
+} as const satisfies CSSProperties
 
 // 초기화가 상태 객체를 통째로 갈아 끼우므로, 그 전에 떠난 작업의 응답은 버려진 객체에만 쓴다.
 let uiMetricsReport: UiMetricsReportState = { reported: false, inFlight: null }

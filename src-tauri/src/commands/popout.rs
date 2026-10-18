@@ -144,6 +144,14 @@ pub(crate) fn build_hidden_runtime_window(
     build_window(app, label, at, false, true)
 }
 
+/// 예비 창(떼어 낼 창 — TRD S21-slot-docking §2-5) — 보통 팝아웃과 같은 빌더 · URL(예비 표시 없음)로 숨긴 채 · 포커스
+/// 없이 짓는다(tao 의 보이기가 활성화하지 않게). 모델에 넣지 않고 자리도 적지 않는다 — 명부에 적기와 들이는 차례(숨긴 채
+/// 놓기 → Tauri `show` → 활성)는 부르는 쪽(`commands::dock` 의 예비 창 짓기)이다.
+// ADR-0295
+pub(crate) fn build_spare_window(app: &AppHandle, label: &str) -> Result<WebviewWindow, String> {
+    build_window(app, label, None, false, false)
+}
+
 /// 팝아웃 기본 크기(논리) — 자리 없이 여는 런타임 창과, 크기를 고르지 않은 도킹 새 창.
 pub(crate) const POPOUT_DEFAULT_SIZE: (f64, f64) = (720.0, 500.0);
 

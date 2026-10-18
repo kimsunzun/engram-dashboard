@@ -165,13 +165,16 @@ pub(crate) fn with_usage_visibility(app: &AppHandle, run: impl FnOnce(&dyn Usage
 }
 
 // 트레이가 다룰 창마다([`core::ui_windows`] 순서) OS 창을 다루고(`os` — `true` = 그 창에 적용됐다) 사용량 관심에
-// 보임을 알린다. `parked` 인 창(대기 창 명부의 창 — TRD S21-slot-docking §2-5)은 다루지 않는다 — 보이기가 화면 밖에서
-// 기다리는 그 창에 show · unminimize · set_focus 를 하게 된다. ★차례는 방향마다 다르다 — 틀려도 안전한 쪽으로★:
+// 보임을 알린다. `parked` 인 창(대기 창 명부의 창 — TRD S21-slot-docking §2-5)은 다루지 않는다 — 그 창은 숨긴 채
+// 기다리므로 보이기가 그 창을 드러내고, 숨기기는 날 `SW_HIDE` 로 숨긴 남긴 창의 tao 보임 깃발을 바꿔 뒤에 날 Win32 로
+// 다시 보일 때 깃발이 OS 보임과 어긋난다(같은 절 「tao 깃발 불변식」). 안내 창(`dock-overlay`)은 팝아웃 label 이 아니라
+// 처음부터 대상이 아니다. ★차례는 방향마다 다르다 — 틀려도 안전한 쪽으로★:
 // - 보이기 = 관심 먼저 · OS 나중. 보이기가 실패해도 남는 비용은 안 보이는 창 몫의 조회뿐이다.
 // - 숨기기 = OS 먼저 · 숨긴 창만 관심에서 뺀다. 실패한 숨기기를 빼면 **보이는** 창의 값이 멎는다.
 // ★`os` 는 락 밖에서 불린다★ — 운영 구현의 ViewManager 락은 `set_visible` 한 번 안에서 잡혔다 풀린다. 이 함수는
 //   명령 워커 스레드에서도 돌고(`commands/tray.rs`), OS 창 호출을 그 락 안에 두면 창 호스트 포트와 같은 교착
 //   위험이다(`layout::apply` 의 `WindowHost` doc).
+// ADR-0295
 pub(crate) fn for_each_ui_window<'a>(
     labels: impl IntoIterator<Item = &'a str>,
     visible: bool,

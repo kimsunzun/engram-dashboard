@@ -289,6 +289,14 @@ pub fn run() {
             // build_tray 가 초기 아이콘을 확정한 뒤 변화만 push 한다(첫 관측은 push 안 함).
             tray::spawn_daemon_observer(&app.handle().clone());
 
+            // ── 예비 창 · 안내 창(TRD S21-slot-docking §2-5 · G3) — 미리 하나씩 지어 숨긴 채 기다리게 한다 ──
+            // ★작업 스레드에서 짓는다(§2-4)★ — 이 setup 이 돌아간 뒤 이벤트 루프가 창을 만든다. 예비 창은 짓기 전에
+            //   명부에 적으므로 아래 `--hidden` 숨기기 · 트레이가 그 창을 보지 않는다. main(⑧)을 만든 뒤라 첫 창이 바뀌지
+            //   않는다.
+            // ADR-0295
+            crate::commands::dock::spawn_spare_build(app.handle());
+            crate::commands::dock::spawn_overlay_build(app.handle());
+
             // `--hidden` — main 은 숨긴 채 만들었다(⑧). 여기서는 ⑨ 가 보인 채 연 팝아웃을 숨기고(F13) 숨긴 창을
             //   사용량 관심에서 뺀다 — 숨기기 경로는 하나다(ADR-0229).
             if hidden {
@@ -351,15 +359,22 @@ pub fn run() {
                             );
                         }
                     }
+                    // 대기 창 명부 · 안내 창(TRD S21-slot-docking §2-5 「사라지면」) — 예비 · 안내 창이면 다시 짓는다.
                     crate::commands::dock::on_parked_window_destroyed(window.app_handle(), &label);
+                    crate::commands::dock::on_overlay_destroyed(window.app_handle(), &label);
                     // ★위 정리가 레이아웃 락을 놓은 뒤★ — 장부의 끝 할 일(표식 내리기)이 같은 락을 잡는다. 끄는 중이
                     //   아니면 아무것도 안 한다(TRD S21-slot-docking §1-3 「그 밖의 끝」).
                     crate::commands::dock::on_window_destroyed(window.app_handle(), &label);
                 }
                 // 창 자리 기록(TRD S21-storage §6-3) — 사건 값 대신 게터를 다시 읽는다(최소화 · 최대화 여부가 같이
-                //   필요하다). 대기 창 명부의 창은 화면 밖 대기 자리라 적지 않는다(TRD S21-slot-docking §2-5).
+                //   필요하다). 대기 창 명부의 창은 모델 밖이라 적지 않는다(TRD S21-slot-docking §2-5). 안내 창도 모델 밖이라
+                //   적을 곳이 없다 — 그릴 때마다 옮기므로 게터 읽기부터 건너뛴다.
+                // ADR-0295
                 tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
-                    if !crate::commands::dock::is_parked_window(window.app_handle(), window.label()) {
+                    let label = window.label();
+                    if !crate::commands::dock::is_overlay_label(label)
+                        && !crate::commands::dock::is_parked_window(window.app_handle(), label)
+                    {
                         crate::state::placement::record(window);
                     }
                 }
@@ -443,8 +458,15 @@ pub fn run() {
         // ADR-0029: 앱은 in-proc 에이전트를 호스팅하지 않으므로 종료 때 거둘 manager 가 없다(데몬이 자기 에이전트
         // graceful 을 담당). 여기서 하는 일은 화면 상태의 정상 종료 쓰기와 셸 실행 잠금 놓기(TRD S21-storage §6-6),
         // 그리고 시작이 실패했으면 종료 코드 정하기다 — 트레이 「완전 종료」(`app.exit(0)`)도 이 사건을 낸다.
-        .run(move |_handle, event| {
+        .run(move |handle, event| {
+            // 끝나는 중에는 사라진 예비 창 · 안내 창을 다시 짓지 않는다(TRD S21-slot-docking §2-5 「사라지면」). 종료를
+            //   막는 코드가 없어(`rg "prevent[_]exit" src-tauri/src/` → 0줄) 요청이 곧 종료다 — 막는 길이 생기면 이 표지를
+            //   `Exit` 로만 옮긴다.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                crate::commands::dock::on_app_exiting(handle);
+            }
             if let tauri::RunEvent::Exit = event {
+                crate::commands::dock::on_app_exiting(handle);
                 exit_session.shutdown();
                 // 종료 요청의 코드는 프로세스 종료 코드로 나가지 않는다 — tauri-runtime-wry 2.11.3 은 요청을
                 //   `ControlFlow::Exit`(tao 0.35 = 코드 0)로 끝낸다. 그래서 여기서 직접 끝낸다. 플러그인의 종료 처리
