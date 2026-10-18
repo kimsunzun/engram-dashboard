@@ -1682,17 +1682,15 @@ impl ViewManager {
     // (적용 서비스가 포트를 안 받는다). 셸 계산이 읽을 때 그 자리에서 본다.
     // ADR-0227
 
-    // `w`·`h` 중 하나라도 0 이면 무시하고 직전 값을 유지한다(`Ok`) — 0 크기 관측은 실재하고, 저장하면 그
-    // 창의 모든 칸이 0 px 가 된다.
+    // 0 크기면 무시하고 직전 값을 유지한다(`Ok` — [`reported_canvas`]).
     pub fn set_window_canvas(&mut self, label: &str, w: u32, h: u32) -> Result<(), LayoutError> {
         let wt = self
             .windows
             .get_mut(label)
             .ok_or_else(|| LayoutError::WindowNotFound(label.to_string()))?;
-        if w == 0 || h == 0 {
-            return Ok(());
+        if let Some(canvas) = reported_canvas(w, h) {
+            wt.canvas = Some(canvas);
         }
-        wt.canvas = Some(CanvasPx { w, h });
         Ok(())
     }
 
@@ -1766,8 +1764,15 @@ impl ViewManager {
     }
 }
 
-// `RangeInclusive::contains` 는 NaN 에 거짓이다 — 그래서 NaN·±∞ 도 이 한 검사에서 함께 걸린다.
-fn check_metrics(m: &UiMetrics) -> Result<(), LayoutError> {
+// 캔버스 보고의 받는 값 — `w`·`h` 중 하나라도 0 이면 `None`(적지 않는다): 0 크기 관측은 실재하고, 저장하면 그 창의
+// 모든 칸이 0 px 가 된다. 모델 밖 창의 보고(`dock::parked`)도 같은 규칙이다.
+pub(crate) fn reported_canvas(w: u32, h: u32) -> Option<CanvasPx> {
+    (w != 0 && h != 0).then_some(CanvasPx { w, h })
+}
+
+// `RangeInclusive::contains` 는 NaN 에 거짓이다 — 그래서 NaN·±∞ 도 이 한 검사에서 함께 걸린다. 모델 밖 창의
+// 보고(`dock::parked`)도 이 검사를 지난다.
+pub(crate) fn check_metrics(m: &UiMetrics) -> Result<(), LayoutError> {
     let i = &m.frame_insets;
     for (name, v) in [("t", i.t), ("r", i.r), ("b", i.b), ("l", i.l)] {
         if !(0.0..=INSET_MAX_PX).contains(&v) {

@@ -1,10 +1,11 @@
 //! 끌기 세션이 보는 세계(TRD S21-slot-docking §2-3 「세계」) — 레이아웃 락 안에서 뜬 모델 값(창별 탭 · 활성 · 보이는
-//! 탭 배치 · 캔버스 · 크롬 · 창 속성 · 표식과 그 탭의 배치)과 실행기가 메인 스레드에서 채우는 OS 기하(창마다 ·
-//! 모니터 목록). 판정(`targets`)과 세션의 입력이다.
+//! 탭 배치 · 캔버스 · 크롬 · 창 속성 · 표식과 그 탭의 배치) · 대기 창 명부(역할 · 재기 — §2-5)와 실행기가 메인
+//! 스레드에서 채우는 OS 기하(창마다 · 모니터 목록). 판정(`targets`)과 세션의 입력이다.
 //!
 //! ★OS 기하는 [`snapshot`] 이 채우지 않는다★ — 레이아웃 락을 쥔 채 OS 를 부르지 않게, 실행기가 락을 놓은 뒤
 //! `WorldWindow::geom` · `World::monitors` 를 채운다. 비어 있으면 그 창은 띠도 붙기도 없다(판정 = `targets`).
 
+use super::parked::Parked;
 use super::units::{Monitor, WindowGeom};
 use crate::layout::chrome::DockChrome;
 use crate::layout::manager::{LeaseId, ViewId, WindowAttrs, WindowLabel};
@@ -19,6 +20,8 @@ pub struct World {
     pub dragged: Option<DraggedTab>,
     /// 실행기가 채운다 — 비어 있으면 「가장 가까운 모니터」가 없다.
     pub monitors: Vec<Monitor>,
+    /// 대기 창 명부 — 모델 밖 창이라 `windows` 에 없다. 떼기의 「예비 창 준비됨」과 들일 때 싣는 재기를 여기서 본다.
+    pub parked: Parked,
 }
 
 /// 끄는 탭 — 끄는 동안 모델이 그때그때 바뀌므로(Chrome 꼴 · PRD R2) 그 탭은 늘 어느 한 창에 있다.
@@ -62,8 +65,8 @@ impl World {
     }
 }
 
-/// 레이아웃 락을 쥔 채 모델 값을 뜬다 — OS 기하 · 모니터는 비어 있다(모듈 머리).
-pub fn snapshot(mgr: &ViewManager) -> World {
+/// 레이아웃 락을 쥔 채 모델 값과 명부를 뜬다 — OS 기하 · 모니터는 비어 있다(모듈 머리).
+pub fn snapshot(mgr: &ViewManager, parked: &Parked) -> World {
     let lease = mgr.lease();
     let dragged = lease.and_then(|(_, view)| {
         Some(DraggedTab {
@@ -92,13 +95,16 @@ pub fn snapshot(mgr: &ViewManager) -> World {
         lease: lease.map(|(id, _)| id),
         dragged,
         monitors: Vec::new(),
+        parked: parked.clone(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dock::parked::ParkedRole;
     use crate::layout::chrome::{PointCss, RectCss};
+    use crate::layout::manager::FrameMeasures;
     use crate::layout::MAIN_WINDOW_LABEL;
 
     const P1: &str = "slot-popup-1";
@@ -127,7 +133,7 @@ mod tests {
         mgr.set_window_canvas(P1, 800, 600).unwrap();
         mgr.set_dock_chrome(P1, chrome()).unwrap();
 
-        let world = snapshot(&mgr);
+        let world = snapshot(&mgr, &Parked::default());
 
         let labels: Vec<&str> = world.windows.iter().map(|w| w.label.as_str()).collect();
         assert_eq!(labels, [MAIN_WINDOW_LABEL, P1, P2]);
@@ -147,6 +153,25 @@ mod tests {
         );
         assert!(world.monitors.is_empty());
         assert_eq!((world.lease, &world.dragged), (None, &None));
+        assert_eq!(world.parked, Parked::default());
+    }
+
+    #[test]
+    fn the_registry_rides_beside_the_model_windows() {
+        let mgr = ViewManager::new();
+        let mut parked = Parked::default();
+        let measures = FrameMeasures {
+            canvas: Some(CanvasPx { w: 800, h: 600 }),
+            metrics: None,
+            chrome: Some(chrome()),
+        };
+        parked.park(P1.to_owned(), ParkedRole::Spare, measures.clone());
+
+        let world = snapshot(&mgr, &parked);
+
+        assert_eq!(world.parked, parked);
+        assert!(world.window(P1).is_none(), "명부의 창은 모델 창이 아니다");
+        assert_eq!(world.parked.get(P1).map(|e| &e.measures), Some(&measures));
     }
 
     #[test]
@@ -156,7 +181,7 @@ mod tests {
         let tab = mgr.create_tab(P1, None).unwrap();
         let lease = mgr.lease_tab(tab).unwrap();
 
-        let world = snapshot(&mgr);
+        let world = snapshot(&mgr, &Parked::default());
 
         assert_eq!(world.lease, Some(lease));
         assert_eq!(
@@ -172,7 +197,7 @@ mod tests {
     #[test]
     fn the_executor_fills_the_os_geometry_by_label() {
         let mgr = ViewManager::new();
-        let mut world = snapshot(&mgr);
+        let mut world = snapshot(&mgr, &Parked::default());
         let geom = WindowGeom {
             outer: crate::dock::units::PhysRect {
                 x0: 0,

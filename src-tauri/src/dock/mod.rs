@@ -4,6 +4,7 @@
 pub mod book;
 pub mod geometry;
 pub mod hit;
+pub mod parked;
 pub mod regions;
 pub mod sizing;
 pub mod snap;
@@ -11,20 +12,23 @@ pub mod strip;
 pub mod targets;
 pub mod types;
 pub mod units;
+pub mod wire;
 pub mod world;
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use engram_dashboard_base::sync;
 
 use book::{Book, Snap};
+use parked::{Measure, Parked};
 use snap::StartMaterial;
+use wire::WindowRole;
 
-use crate::layout::ViewManager;
+use crate::layout::{LayoutError, ViewManager};
 
-/// 셸에 하나인 끌기 상태 — 장부(잎 락 · 규율 = `book` 머리)와 레이아웃 락 안에서 쓰는 두 셈.
+/// 셸에 하나인 끌기 상태 — 장부(잎 락 · 규율 = `book` 머리) · 레이아웃 락 안에서 쓰는 두 셈 · 대기 창 명부.
 ///
 /// - 스냅숏 번호는 1 부터 오르고 0 을 내지 않는다(장부는 마지막으로 먹은 번호 이하를 버린다 — 처음 값이 0). 번호를
 ///   다는 길은 [`Self::snapshot`] · [`Self::start_material`] 둘뿐이고 둘 다 `&ViewManager` 를 받는다 — 레이아웃 락
@@ -38,6 +42,8 @@ use crate::layout::ViewManager;
 ///   한 번만 알린다([`Self::first_late_failure`]).
 /// - 맞추기가 숨긴 창: 실행기의 숨기기 · 보이기 맞추기가 스스로 숨긴 창 label — 맞추기는 이 창만 되보인다(트레이 등
 ///   다른 길이 숨긴 창을 끌기 끝이 드러내지 않게). 잎 락이고 메인 스레드 맞추기 · 창 소멸만 쓴다.
+/// - 대기 창 명부([`parked`] · TRD §2-5): 잎 락 — 쥔 채 레이아웃 락 · emit · 창 호출을 하지 않는다. 레이아웃 락을 쥔
+///   채 잡는 것은 된다(차례 = 레이아웃 → 명부 · 세계 뜨기 [`world::snapshot`] 가 둘을 함께 본다).
 #[derive(Debug, Default)]
 pub struct DockState {
     pub book: Mutex<Book>,
@@ -47,6 +53,7 @@ pub struct DockState {
     errors: Mutex<ErrorTally>,
     late_warned: AtomicU64,
     own_hidden: Mutex<HashSet<String>>,
+    parked: Mutex<Parked>,
 }
 
 // 실패 셈과 그 몫인 세대를 한 락 아래 쥔다 — 세대를 보고 세는 것과 끝 줄이 비우며 닫는 것 사이에 다른 세션의 끝 ·
@@ -157,6 +164,33 @@ impl DockState {
     pub fn forget_own_hidden(&self, label: &str) {
         sync::lock(&self.own_hidden).remove(label);
     }
+
+    /// 명부 가드 — 문장 하나 안에서 쓰고 놓는다(쥔 채 할 수 없는 것 = 구조체 문서).
+    pub fn parked(&self) -> MutexGuard<'_, Parked> {
+        sync::lock(&self.parked)
+    }
+
+    pub fn is_parked(&self, label: &str) -> bool {
+        self.parked().contains(label)
+    }
+
+    /// 명부의 창이 보낸 재기를 적는다 — `None` = 명부에 없다(부르는 쪽이 모델에 적는다 · 뜻 = [`Parked::record`]).
+    /// 명부 락은 돌아오기 전에 놓는다 — 부르는 쪽이 이어서 레이아웃 락을 잡는다.
+    pub fn record_parked(&self, label: &str, measure: Measure) -> Option<Result<(), LayoutError>> {
+        self.parked().record(label, measure)
+    }
+
+    /// 창 `label` 의 역할 — 명부의 창이면 `Parked`, 아니면 `in_model` 로 `Model` · `Unknown`. `in_model` 은 명부 락을
+    /// 놓은 뒤 부르므로 레이아웃 락을 잡아도 된다.
+    pub fn window_role(&self, label: &str, in_model: impl FnOnce() -> bool) -> WindowRole {
+        if self.is_parked(label) {
+            WindowRole::Parked
+        } else if in_model() {
+            WindowRole::Model
+        } else {
+            WindowRole::Unknown
+        }
+    }
 }
 
 #[cfg(test)]
@@ -241,5 +275,52 @@ mod tests {
         assert!(!dock.first_late_failure(1), "A, B, A — A 는 한 번");
         assert!(!dock.first_late_failure(2));
         assert!(dock.first_late_failure(3));
+    }
+
+    #[test]
+    fn a_parked_window_is_parked_without_asking_the_model() {
+        let dock = DockState::new();
+        dock.parked().reserve_spare("slot-popup-1".to_owned());
+        let role = dock.window_role("slot-popup-1", || {
+            panic!("명부의 창은 모델을 묻지 않는다");
+        });
+        assert_eq!(role, WindowRole::Parked);
+    }
+
+    #[test]
+    fn a_window_outside_the_registry_is_model_or_unknown() {
+        let dock = DockState::new();
+        assert_eq!(dock.window_role("main", || true), WindowRole::Model);
+        assert_eq!(
+            dock.window_role("dock-overlay", || false),
+            WindowRole::Unknown
+        );
+    }
+
+    #[test]
+    fn the_model_question_runs_with_the_registry_unlocked() {
+        let dock = DockState::new();
+        let role = dock.window_role("main", || {
+            assert!(
+                dock.parked.try_lock().is_ok(),
+                "명부 락을 쥔 채 묻지 않는다"
+            );
+            true
+        });
+        assert_eq!(role, WindowRole::Model);
+    }
+
+    #[test]
+    fn a_measure_for_a_window_outside_the_registry_is_not_taken() {
+        let dock = DockState::new();
+        assert_eq!(
+            dock.record_parked("main", Measure::Canvas { w: 800, h: 600 }),
+            None
+        );
+        dock.parked().reserve_spare("slot-popup-1".to_owned());
+        assert_eq!(
+            dock.record_parked("slot-popup-1", Measure::Canvas { w: 800, h: 600 }),
+            Some(Ok(()))
+        );
     }
 }

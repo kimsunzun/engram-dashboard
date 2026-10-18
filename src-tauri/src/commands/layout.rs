@@ -20,6 +20,8 @@ use engram_dashboard_protocol::{AgentBackendKind, AgentCommand, AgentEvent, Requ
 use crate::commands::popout::{PopupCounter, TauriWindowHost};
 use crate::commands::settings::TauriSettingsEvents;
 use crate::daemon_client::DaemonClient;
+use crate::dock::parked::Measure;
+use crate::dock::DockState;
 use crate::layout::apply;
 use crate::layout::{
     AgentSpawner, LayoutEvents, LayoutState, MoveFailed, SlotContent, SplitDir, SplitRatioApplied,
@@ -570,20 +572,27 @@ pub async fn spawn_into(
 // 셋째 보고(`report_dock_chrome`)는 끌기 실행기 옆(`commands::dock`)에 있다. 셋 다 버스 명령이 아니다 — 버스에 두면 LLM 이 캔버스·지표를 위조할 수 있다. version 을 올리지도 알리지도
 // 않는다.
 // ADR-0227
+//
+// 셋 다 대기 창 명부의 창(모델 밖)이면 모델 대신 명부에 적는다(TRD S21-slot-docking §2-5 「재기 받기」) — 모델은 모르는
+//   label 을 거절해, 적지 않으면 들일 때 옮겨 담을 재기가 없다.
 
 /// 창 웹뷰가 자기 탭 내용 영역 크기(정수 CSS px)를 알린다 — `invoke('report_window_canvas', { w, h })`.
 ///
 /// ★창 label 을 인자로 받지 않는다★ — 잘못 적힌 label 하나가 남의 창 캔버스를 덮는다. Tauri 가 넣어 주는
 /// [`Window`] 가 그 값의 유일한 권위다(`report_view_commands` 와 같은 규칙).
-/// `w` 나 `h` 가 0 이면 무시하고 직전 값을 유지한다(`Ok`). 탭 모델에 없는 창이면 `Err`.
+/// `w` 나 `h` 가 0 이면 무시하고 직전 값을 유지한다(`Ok`). 탭 모델에도 대기 창 명부에도 없는 창이면 `Err`.
 #[tauri::command]
 pub fn report_window_canvas(
     window: Window,
     state: State<'_, LayoutState>,
+    dock: State<'_, Arc<DockState>>,
     w: u32,
     h: u32,
 ) -> Result<(), String> {
-    apply::report_window_canvas(&state, window.label(), w, h)?;
+    match dock.record_parked(window.label(), Measure::Canvas { w, h }) {
+        Some(recorded) => recorded.map_err(|e| e.to_string())?,
+        None => apply::report_window_canvas(&state, window.label(), w, h)?,
+    }
     // 측정 계기 — 캔버스가 바뀌면 끄는 중의 영역도 바뀐다(TRD S21-slot-docking §1-3 「영역」).
     crate::commands::dock::on_layout_changed(window.app_handle());
     Ok(())
@@ -596,9 +605,13 @@ pub fn report_window_canvas(
 pub fn report_ui_metrics(
     window: Window,
     state: State<'_, LayoutState>,
+    dock: State<'_, Arc<DockState>>,
     metrics: UiMetrics,
 ) -> Result<(), String> {
-    apply::report_ui_metrics(&state, window.label(), metrics)
+    match dock.record_parked(window.label(), Measure::Metrics(metrics)) {
+        Some(recorded) => recorded.map_err(|e| e.to_string()),
+        None => apply::report_ui_metrics(&state, window.label(), metrics),
+    }
 }
 
 // ── read-only 조회 ───────────────────────────────────────────────────────────

@@ -796,21 +796,27 @@ impl RestoreWindows for TauriRestoreWindows {
             return;
         };
         crate::tray::actions::with_usage_visibility(&self.app, |usage| {
-            crate::tray::actions::for_each_ui_window([label], shown, usage, |label| {
-                let result = if shown { window.show() } else { window.hide() };
-                match result {
-                    // 보인 창에만 — 숨은 창을 최대화하면 보였다 숨는다.
-                    Ok(()) if shown => {
-                        apply_deferred_maximize(&window);
-                        true
+            crate::tray::actions::for_each_ui_window(
+                [label],
+                shown,
+                usage,
+                |_| false,
+                |label| {
+                    let result = if shown { window.show() } else { window.hide() };
+                    match result {
+                        // 보인 창에만 — 숨은 창을 최대화하면 보였다 숨는다.
+                        Ok(()) if shown => {
+                            apply_deferred_maximize(&window);
+                            true
+                        }
+                        Ok(()) => true,
+                        Err(e) => {
+                            tracing::warn!(module = "state", label, shown, error = %e, "복원한 창의 보임을 바꾸지 못했다");
+                            false
+                        }
                     }
-                    Ok(()) => true,
-                    Err(e) => {
-                        tracing::warn!(module = "state", label, shown, error = %e, "복원한 창의 보임을 바꾸지 못했다");
-                        false
-                    }
-                }
-            });
+                },
+            );
         });
     }
 

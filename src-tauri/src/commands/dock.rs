@@ -43,11 +43,13 @@ use crate::dock::book::{
     Action, Book, ClientRect, EndLog, EndReason, Input, MonoMs, PhysPoint, PullReply, Rects,
     Rejection, Reply, Report, Step, TimerKind, Visibility,
 };
+use crate::dock::parked::{Measure, ParkedRole};
 use crate::dock::snap::StartMaterial;
 use crate::dock::types::{
     DockPullReply, DockRegions, DragEffect, DragOverReport, DrawnReport, DropReport, Picked,
     SessionEvent, StripStart,
 };
+use crate::dock::wire::WindowRoleReply;
 use crate::dock::DockState;
 use crate::layout::apply;
 use crate::layout::chrome::{DockChrome, PointCss};
@@ -1100,8 +1102,8 @@ pub fn dock_pull(
 }
 
 /// 창 웹뷰가 탭바 · 탭 머리 · 캔버스 원점을 알린다(동기 · 측정) — `invoke('report_dock_chrome', { chrome })`. 계약은
-/// [`DockChrome`] 문서. 탭 모델에 없는 창이면 `Err` 이고 직전 값을 유지한다. 버스 명령이 아니다(ADR-0227 — 측정은
-/// 위조할 수 없게 웹뷰만 보고한다).
+/// [`DockChrome`] 문서. 대기 창 명부의 창이면 모델 대신 명부에 적는다(TRD §2-5). 탭 모델에도 명부에도 없는 창이면
+/// `Err` 이고 직전 값을 유지한다. 버스 명령이 아니다(ADR-0227 — 측정은 위조할 수 없게 웹뷰만 보고한다).
 #[tauri::command]
 pub fn report_dock_chrome(
     window: Window,
@@ -1110,9 +1112,49 @@ pub fn report_dock_chrome(
     layout: State<'_, LayoutState>,
     chrome: DockChrome,
 ) -> Result<(), String> {
-    apply::report_dock_chrome(&layout, window.label(), chrome)?;
+    match dock.record_parked(window.label(), Measure::Chrome(chrome.clone())) {
+        Some(recorded) => recorded.map_err(|e| e.to_string())?,
+        None => apply::report_dock_chrome(&layout, window.label(), chrome)?,
+    }
     DockExec::tauri(&app, dock.inner(), layout.inner()).snapshot_trigger();
     Ok(())
+}
+
+/// 부른 창의 지금 역할(동기) — `invoke('window_role')`. 웹뷰가 마운트 때 묻고 `parked` 면 대기 모드로 그린다(TRD §4 ·
+/// §2-5). 웹뷰 안 배선이라 버스 명령표에 올리지 않는다.
+#[tauri::command]
+pub fn window_role(
+    window: Window,
+    dock: State<'_, Arc<DockState>>,
+    layout: State<'_, LayoutState>,
+) -> WindowRoleReply {
+    let label = window.label();
+    let role = dock.window_role(label, || {
+        apply::list_windows(&layout).is_ok_and(|windows| windows.iter().any(|w| w == label))
+    });
+    WindowRoleReply { role, drag: None }
+}
+
+/// 대기 창 명부의 창인가 — 트레이 보이기 · 숨기기 · `--hidden` 과 자리 기록이 빼는 창(TRD §2-5).
+pub(crate) fn is_parked_window(app: &AppHandle, label: &str) -> bool {
+    app.try_state::<Arc<DockState>>()
+        .is_some_and(|dock| dock.is_parked(label))
+}
+
+/// 창 `Destroyed` 의 명부 갈래(TRD §2-5 「사라지면」) — 그 창을 명부에서 뺀다. 닫는 창의 명부 항목을 지우는 곳은 여기
+/// 하나다. 레이아웃 락 밖에서 부른다(`lib.rs`).
+pub(crate) fn on_parked_window_destroyed(app: &AppHandle, label: &str) {
+    let Some(dock) = app.try_state::<Arc<DockState>>() else {
+        return;
+    };
+    let Some(gone) = dock.parked().remove(label) else {
+        return;
+    };
+    match gone.role {
+        // TODO(TRD S21-slot-docking U4b): 명부에 예비(짓는 중 포함)가 없으면 작업 스레드에서 새 예비를 짓는다.
+        ParkedRole::Spare => tracing::warn!(label, "[dock] 예비 창을 잃었다 — 명부에서 뺐다"),
+        ParkedRole::Kept => tracing::debug!(label, "[dock] 남긴 창이 사라져 명부에서 뺐다"),
+    }
 }
 
 #[cfg(test)]

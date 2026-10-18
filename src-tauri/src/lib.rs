@@ -351,14 +351,17 @@ pub fn run() {
                             );
                         }
                     }
+                    crate::commands::dock::on_parked_window_destroyed(window.app_handle(), &label);
                     // ★위 정리가 레이아웃 락을 놓은 뒤★ — 장부의 끝 할 일(표식 내리기)이 같은 락을 잡는다. 끄는 중이
                     //   아니면 아무것도 안 한다(TRD S21-slot-docking §1-3 「그 밖의 끝」).
                     crate::commands::dock::on_window_destroyed(window.app_handle(), &label);
                 }
                 // 창 자리 기록(TRD S21-storage §6-3) — 사건 값 대신 게터를 다시 읽는다(최소화 · 최대화 여부가 같이
-                //   필요하다).
+                //   필요하다). 대기 창 명부의 창은 화면 밖 대기 자리라 적지 않는다(TRD S21-slot-docking §2-5).
                 tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
-                    crate::state::placement::record(window);
+                    if !crate::commands::dock::is_parked_window(window.app_handle(), window.label()) {
+                        crate::state::placement::record(window);
+                    }
                 }
                 _ => {}
             }
@@ -402,6 +405,8 @@ pub fn run() {
             commands::report_window_canvas,
             commands::report_ui_metrics,
             commands::report_dock_chrome,
+            // 부른 창의 역할(대기 창 명부 · TRD S21-slot-docking §4) — 웹뷰 안 배선이라 버스 명령이 아니다.
+            commands::window_role,
             // 슬롯 도킹 끌기(웹뷰 → 셸 · TRD S21-slot-docking §1-5) — 버스 명령이 아니다(사람 손의 끌기 신호).
             commands::dock_drag_start,
             commands::dock_drag_over,

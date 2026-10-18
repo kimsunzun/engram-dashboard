@@ -5639,7 +5639,7 @@ async fn tray_hide_shrinks_after_the_delay_and_show_grows_at_once() {
         client: &client,
     };
 
-    for_each_ui_window([MAIN_WINDOW_LABEL], false, &tray, |_| true);
+    for_each_ui_window([MAIN_WINDOW_LABEL], false, &tray, |_| false, |_| true);
     settle().await;
     assert_eq!(nudges(&mut rx), 0, "줄임은 곧바로 안 나간다");
     tokio::time::advance(USAGE_INTEREST_SHRINK_DELAY - Duration::from_millis(100)).await;
@@ -5654,7 +5654,7 @@ async fn tray_hide_shrinks_after_the_delay_and_show_grows_at_once() {
         "그 넛지가 보내는 것 = 줄인 관심"
     );
 
-    for_each_ui_window([MAIN_WINDOW_LABEL], true, &tray, |_| true);
+    for_each_ui_window([MAIN_WINDOW_LABEL], true, &tray, |_| false, |_| true);
     assert_eq!(nudges(&mut rx), 1, "늘어남은 기다리지 않는다");
     assert_eq!(
         sync_as_the_connection_task(&client, socket),
@@ -5849,7 +5849,7 @@ async fn a_failed_tray_hide_keeps_the_window_in_the_interest() {
         client: &client,
     };
 
-    for_each_ui_window([MAIN_WINDOW_LABEL], false, &tray, |_| false);
+    for_each_ui_window([MAIN_WINDOW_LABEL], false, &tray, |_| false, |_| false);
     tokio::time::advance(USAGE_INTEREST_SHRINK_DELAY * 2).await;
     settle().await;
     assert_eq!(nudges(&mut rx), 0, "숨기지 못한 창을 관심에서 뺐다");

@@ -247,6 +247,7 @@ mod tests {
                 layout: slot(9),
             }),
             monitors: Vec::new(),
+            parked: Default::default(),
         }
     }
 

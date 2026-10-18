@@ -16,6 +16,7 @@ use tauri_plugin_autostart::ManagerExt;
 
 use super::core::{self, IconState};
 use super::TrayIcons;
+use crate::commands::dock::is_parked_window;
 use crate::commands::popout::is_popup_label;
 use crate::daemon_client::DaemonClient;
 use crate::layout::LayoutState;
@@ -64,17 +65,24 @@ pub struct AutostartCheck(pub CheckMenuItem<Wry>);
 pub fn show_main_ui(app: &AppHandle) {
     let windows = app.webview_windows();
     with_usage_visibility(app, |usage| {
-        for_each_ui_window(windows.keys().map(String::as_str), true, usage, |label| {
-            let Some(w) = windows.get(label) else {
-                return false;
-            };
-            let _ = w.show();
-            // 숨은 동안 미뤄 둔 최대화(main · 복원한 팝아웃)를 보인 직후에 입힌다.
-            crate::state::placement::apply_deferred_maximize(&w.as_ref().window());
-            let _ = w.unminimize();
-            let _ = w.set_focus();
-            true
-        });
+        let parked = |label: &str| is_parked_window(app, label);
+        for_each_ui_window(
+            windows.keys().map(String::as_str),
+            true,
+            usage,
+            parked,
+            |label| {
+                let Some(w) = windows.get(label) else {
+                    return false;
+                };
+                let _ = w.show();
+                // 숨은 동안 미뤄 둔 최대화(main · 복원한 팝아웃)를 보인 직후에 입힌다.
+                crate::state::placement::apply_deferred_maximize(&w.as_ref().window());
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+                true
+            },
+        );
     });
 }
 
@@ -84,21 +92,28 @@ pub fn show_main_ui(app: &AppHandle) {
 pub fn hide_main_ui(app: &AppHandle) {
     let windows = app.webview_windows();
     with_usage_visibility(app, |usage| {
-        for_each_ui_window(windows.keys().map(String::as_str), false, usage, |label| {
-            let Some(w) = windows.get(label) else {
-                return false;
-            };
-            match w.hide() {
-                Ok(()) => true,
-                Err(e) => {
-                    tracing::warn!(
-                        label,
-                        "[tray] 창 숨기기 실패 — 사용량 관심에서 빼지 않는다: {e}"
-                    );
-                    false
+        let parked = |label: &str| is_parked_window(app, label);
+        for_each_ui_window(
+            windows.keys().map(String::as_str),
+            false,
+            usage,
+            parked,
+            |label| {
+                let Some(w) = windows.get(label) else {
+                    return false;
+                };
+                match w.hide() {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::warn!(
+                            label,
+                            "[tray] 창 숨기기 실패 — 사용량 관심에서 빼지 않는다: {e}"
+                        );
+                        false
+                    }
                 }
-            }
-        });
+            },
+        );
     });
 }
 
@@ -150,7 +165,8 @@ pub(crate) fn with_usage_visibility(app: &AppHandle, run: impl FnOnce(&dyn Usage
 }
 
 // 트레이가 다룰 창마다([`core::ui_windows`] 순서) OS 창을 다루고(`os` — `true` = 그 창에 적용됐다) 사용량 관심에
-// 보임을 알린다. ★차례는 방향마다 다르다 — 틀려도 안전한 쪽으로★:
+// 보임을 알린다. `parked` 인 창(대기 창 명부의 창 — TRD S21-slot-docking §2-5)은 다루지 않는다 — 보이기가 화면 밖에서
+// 기다리는 그 창에 show · unminimize · set_focus 를 하게 된다. ★차례는 방향마다 다르다 — 틀려도 안전한 쪽으로★:
 // - 보이기 = 관심 먼저 · OS 나중. 보이기가 실패해도 남는 비용은 안 보이는 창 몫의 조회뿐이다.
 // - 숨기기 = OS 먼저 · 숨긴 창만 관심에서 뺀다. 실패한 숨기기를 빼면 **보이는** 창의 값이 멎는다.
 // ★`os` 는 락 밖에서 불린다★ — 운영 구현의 ViewManager 락은 `set_visible` 한 번 안에서 잡혔다 풀린다. 이 함수는
@@ -160,9 +176,10 @@ pub(crate) fn for_each_ui_window<'a>(
     labels: impl IntoIterator<Item = &'a str>,
     visible: bool,
     usage: &dyn UsageVisibility,
+    parked: impl Fn(&str) -> bool,
     mut os: impl FnMut(&'a str) -> bool,
 ) {
-    for label in core::ui_windows(labels, is_popup_label) {
+    for label in core::ui_windows(labels, |l| is_popup_label(l) && !parked(l)) {
         if visible {
             usage.set_visible(label, true);
             os(label);
@@ -338,10 +355,16 @@ mod tests {
     #[test]
     fn showing_tells_the_usage_interest_before_each_os_call() {
         let log = Log::default();
-        for_each_ui_window(WINDOWS, true, &log, |label| {
-            log.0.borrow_mut().push(format!("os:{label}"));
-            true
-        });
+        for_each_ui_window(
+            WINDOWS,
+            true,
+            &log,
+            |_| false,
+            |label| {
+                log.0.borrow_mut().push(format!("os:{label}"));
+                true
+            },
+        );
         assert_eq!(
             log.0.into_inner(),
             [
@@ -359,10 +382,16 @@ mod tests {
     #[test]
     fn hiding_marks_only_the_windows_the_os_actually_hid() {
         let log = Log::default();
-        for_each_ui_window(WINDOWS, false, &log, |label| {
-            log.0.borrow_mut().push(format!("os:{label}"));
-            label != "slot-popup-2"
-        });
+        for_each_ui_window(
+            WINDOWS,
+            false,
+            &log,
+            |_| false,
+            |label| {
+                log.0.borrow_mut().push(format!("os:{label}"));
+                label != "slot-popup-2"
+            },
+        );
         assert_eq!(
             log.0.into_inner(),
             [
@@ -373,5 +402,32 @@ mod tests {
                 "usage:main:false",
             ]
         );
+    }
+
+    // 대기 창 명부의 창은 보이기 · 숨기기 어느 쪽에서도 OS 도 관심도 건드리지 않는다.
+    #[test]
+    fn a_parked_window_is_left_alone_both_ways() {
+        for visible in [true, false] {
+            let log = Log::default();
+            for_each_ui_window(
+                WINDOWS,
+                visible,
+                &log,
+                |label| label == "slot-popup-2",
+                |label| {
+                    log.0.borrow_mut().push(format!("os:{label}"));
+                    true
+                },
+            );
+            assert!(
+                log.0
+                    .borrow()
+                    .iter()
+                    .all(|line| !line.contains("slot-popup-2")),
+                "visible={visible}: {:?}",
+                log.0.borrow()
+            );
+            assert!(log.0.borrow().contains(&"os:slot-popup-1".to_owned()));
+        }
     }
 }
