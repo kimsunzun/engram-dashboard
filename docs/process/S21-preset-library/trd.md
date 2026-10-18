@@ -183,6 +183,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 - **잠금** — 그 에이전트에 영속된 backend 세션 id 가 있거나(첫 제출 래치가 적은 것 — ADR-0226 · 사용자 「ssi 박히잖아. 그게 있으면 못바꾸게」) **떠 있으면** 바꿀 수 없다. 화면은 읽기 전용 + 짧은 이유 「대화한 에이전트 — 바꾸려면 새 에이전트」. 대화 전에만 바뀌므로 놓을 세션이 없다 — 작업 폴더 바뀜에 새 대화 · 세션 놓기 로직을 두지 않는다(§8 에 옮겨 둔 옛 설계의 `launched_workspace` · `release_session_id` 길을 이 잠금이 대신한다).
 - **`agent.setWorkspace {agent, cwd}`**(본문 = manager — 라이브러리가 필요 없다) — 경로는 있고 폴더여야 한다(아니면 오류 코드 + 인자) · 잠겼으면 `CONFLICT`(코드 + 인자 = 잠긴 까닭 — 대화함 · 떠 있음 · R49). 잠금 판정과 저장은 그 에이전트의 실행 예약과 같은 줄에서 `ProfileRegistry` mutate 한 번으로 한다 — 실행 준비 중인 에이전트와 엇갈리지 않게(그 사이엔 떠 있음으로 `CONFLICT`). 화면 「작업 폴더」 칸의 입력 · 「찾아보기」 도 이 명령을 부른다(LLM 과 같은 길 — CLAUDE.md 「LLM-우선 제어」).
 
+**그 밖의 프로필 규칙**
 - **`command`(Claude/Codex/Shell + `extra_args` + `output_format`)** 는 지금 그대로 **에이전트 값**이다 — 변형 = 백엔드 · `output_format` = 모드(D5) · 둘 다 만들 때 정하고 바꾸는 길이 없다(사용자 2026-10-18 「그냥 고정해. 백엔드는.」). 해석(§1-3 4)은 백엔드를 이 변형에서 읽는다 — 변형 → 백엔드 낱말 대응은 지금 있는 것(`agent.new` 의 백엔드 어휘)을 쓴다. 패스스루 인자도 지금 그대로 `command.extra_args` 하나다. 옛 판의 「`command` 는 해석 결과에서 파생」 · `backend::command_for` · 백엔드별 인자 `backend_args` 는 백엔드가 설정으로 바뀌는 경우를 위한 것이라 걷었다(그 경우가 없다).
 - **`display_name` 고정** — 만들 때와 이주 때 `None` 이면 그때의 표시 이름을 박는다. 이름이 `cwd` basename 에서 파생되던 길은 작업 폴더가 바뀌면 우편 주소 · 트리 이름을 말없이 바꾼다 — 이번 판에 작업 폴더를 바꾸는 길(`agent.setWorkspace` · 「작업 폴더」 칸)이 생기므로 이 단계에서 고정한다.
 - **새 프로필 생성자 하나** — `AgentProfile::new`(지금 `SpawnByCwd` · 스모크 bin · `CreateProfile` 이 이미 지나는 그 생성자)가 기본값을 단다: `default_preset = true` · `presets = []` · `preset_schema = 1`(`command` 는 받은 그대로 — 기본 제공 백엔드 프리셋을 붙이던 dispatch `backend::builtin_backend_preset` 는 걷었다 · 사용자 2026-10-18). `agent.new` · wire `CreateProfile` · `SpawnByCwd` · 스모크 bin · 이주가 모두 이 한 길로 같은 기본값을 얻는다.
@@ -289,7 +290,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 | `collection.applyMoves {daemonId, logId, pairs, head}` | 이동 기록 쌍을 컬렉션에 반영하고 커서를 옮긴다(Δc) |
 | `slot.openUnique {content, target?}` | 같은 내용의 슬롯이 어느 창에든 있으면 그 슬롯에 포커스(창 앞으로) · 없으면 대상(생략 = 기존 열 자리 고르기 규칙)에 채움. 유일성 자체는 레이아웃 관리자가 지킨다(§1-9) |
 | `libraryView.open {number}` · `libraryView.navigate {number, folder}` · `libraryView.back` · `libraryView.forward` | 번호 슬롯 열기 · 폴더 이동 · 기록(R14 — 기록 규칙은 셸의 순수 함수) |
-| `libraryView.reveal {number?, path}` | 그 항목 자리로 — 트리 펼치고 선택(R15 · R28) · 번호 생략 = Δ6 규칙 |
+| `libraryView.reveal {number?, path}` | 그 항목 자리로 — 트리 펼치고 선택(R15 · R28) · 번호 생략 = Δ6 규칙 · 막힘 팝업 · 프리셋 줄 배지의 링크도 이것(§1-10 「막힘 팝업」 — 열린 번호가 없으면 그 번호 슬롯을 연다 · 첫 훑기 전이면 기다렸다 고른다) |
 | `libraryView.select {number, paths}` · `libraryView.setLayout {number, widths, sort, filter}` · `libraryView.get {number}` | 선택 · 칸 폭 · 정렬 · 필터 · 지금 상태 — 트리 펼침(번호마다)과 공통 접고 펴기(`library_collapse`)도 이 명령 무리가 바꾼다(명령 이름은 구현 판단 · PRD R10) |
 | `agentPresets.open {agentId}` | 에이전트 프리셋 슬롯을 하나 더 연다(R30) — 모든 에이전트 슬롯 공통의 칸 머리 접고 펴기(§1-1 · `library_collapse` 와 따로)도 이 명령 무리가 바꾼다(명령 이름은 구현 판단) |
 
