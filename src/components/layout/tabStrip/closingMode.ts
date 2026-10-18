@@ -56,7 +56,7 @@ export function inClosingBounds(bar: Rect, x: number, y: number): boolean {
  * 탭 하나가 빠진 뒤 고정할 폭 = `current` − 빠지는 폭 + 겹침(0). `current` = 지금 고정 폭(모드 중) 또는 들어가는 때의 탭바 폭 ·
  * `widths` = 빠지기 **전** 모든 탭의 계산 폭(`layout.ts` `widths` — 숨긴 탭 포함) · `closed` = 빠진 탭의 자리(마지막 탭이
  * 아니어야 한다 — 마지막이면 Chrome 은 폭을 고치지 않는다 · `stepClosingMode` 가 거른다) · `nextActive` = 빠진 탭이 활성이었으면
- * 다음에 활성이 될 탭의 자리(빠지기 전 자리). 자리가 범위 밖이면 `RangeError`.
+ * 다음에 활성이 될 탭의 자리(빠지기 전 자리 · `closed` 와 다르다). 자리가 범위 밖이거나 둘이 같으면 `RangeError`.
  */
 // Chromium(BSD) tci #1441-1473 을 옮김. ★비활성이 활성보다 좁은 배치(`kInactiveWidthBelowActiveWidth`)에서 활성을 빼면 빠지는
 //   폭 = 다음 활성 탭의 지금 폭★ — 그 탭이 활성 최소 폭으로 늘어나므로 실제로 비는 것은 그 폭이다. 닫힌 폭을 빼면 남은 탭이 더
@@ -67,8 +67,9 @@ export function frozenAvailable(current: number, widths: number[], closed: numbe
   if (!Number.isInteger(closed) || closed < 0 || closed >= n - 1) {
     throw new RangeError(`frozenAvailable: 빠진 탭 자리 ${closed} 가 0..${n - 2} 밖이다`)
   }
-  if (nextActive !== undefined && (!Number.isInteger(nextActive) || nextActive < 0 || nextActive >= n)) {
-    throw new RangeError(`frozenAvailable: 다음 활성 자리 ${nextActive} 가 0..${n - 1} 밖이다`)
+  const badNext = nextActive !== undefined && (!Number.isInteger(nextActive) || nextActive < 0 || nextActive >= n)
+  if (badNext || nextActive === closed) {
+    throw new RangeError(`frozenAvailable: 다음 활성 자리 ${nextActive} 가 0..${n - 1} 밖이거나 빠진 자리 ${closed} 와 같다`)
   }
   const inactiveBelowActive = widths.some(w => w < TAB_MIN_ACTIVE_W)
   return current - (nextActive !== undefined && inactiveBelowActive ? widths[nextActive] : widths[closed])

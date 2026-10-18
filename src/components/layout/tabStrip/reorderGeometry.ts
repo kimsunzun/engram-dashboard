@@ -74,13 +74,13 @@ export function passedThreshold(down: Point, p: Point): boolean {
 /**
  * 탭 끌기 영역 폭 `A` — 끄는 탭은 탭들이 차지한 범위가 아니라 이 폭 안 어디로든 간다. `available` = `layout.ts` 가 받는
  * 「머리들이 쓸 수 있는 폭」의 **잰 값** — ★닫기 모드의 고정 폭을 넣지 말 것★(Chrome 주석 「needs to ignore tab closing mode」).
- * `null` · 유한하지 않은 수 = 재지 못함 → 보이는 탭 폭 합.
+ * 잰 값이면 그대로다 — Chrome 의 `max(쓸 수 있는 폭, 탭바 폭)` 에서 탭바 폭은 늘림 상한이 선호 폭이라 쓸 수 있는 폭을 넘지
+ * 않는다(horizontal_tab_strip_region_view.cc#205-209). `null` · 유한하지 않은 수 = 재지 못함 → 보이는 탭 폭 합.
  */
 // Chromium(BSD) `TabStrip::GetTabDragAreaWidth`(tab_strip.cc#530-544)를 옮김.
 export function dragAreaWidth(available: number | null, B: StripBounds): number {
-  // 레이아웃이 숨긴 끄는 탭을 보이게 셀 때(`idealBounds` 의 `dragged`) 이 합이 잰 폭을 넘어 Chrome 의 끌기 영역보다 넓어질 수 있다.
-  const occupied = B.tabs.reduce((s, b, i) => s + (B.visible[i] ? b.x1 - b.x0 : 0), 0)
-  return available !== null && Number.isFinite(available) ? Math.max(available, occupied) : occupied
+  if (available !== null && Number.isFinite(available)) return available
+  return B.tabs.reduce((s, b, i) => s + (B.visible[i] ? b.x1 - b.x0 : 0), 0)
 }
 
 /**

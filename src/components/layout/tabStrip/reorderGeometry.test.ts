@@ -97,14 +97,15 @@ describe('passedThreshold — 10 px 를 넘어야(같으면 아님)', () => {
   })
 })
 
-describe('dragAreaWidth — max(잰 폭, 보이는 탭 폭 합)', () => {
+describe('dragAreaWidth — 잰 폭 · 재지 못하면 보이는 탭 폭 합', () => {
   const CASES: { name: string; available: number | null; B: StripBounds; out: number }[] = [
     { name: '마지막 탭 뒤 빈 곳까지(잰 폭이 넓음)', available: 500, B: FOUR, out: 500 },
-    { name: '탭이 더 넓으면 탭 폭 합', available: 300, B: FOUR, out: 400 },
-    { name: '숨긴 탭은 합에 안 든다', available: 100, B: OVERFLOW, out: 106 },
-    { name: '레이아웃이 숨긴 끄는 탭을 보이게 세면 잰 폭을 넘을 수 있다(96 + 42)', available: 135, B: DRAGGED_HIDDEN, out: 138 },
+    { name: '탭 폭 합이 더 넓어도 잰 폭(Chrome 탭바 폭 ≤ 쓸 수 있는 폭)', available: 300, B: FOUR, out: 300 },
+    { name: '보이는 탭이 잰 폭을 채워도 잰 폭', available: 100, B: OVERFLOW, out: 100 },
+    { name: '레이아웃이 숨긴 끄는 탭을 보이게 세도 잰 폭(96 + 42 = 138 이 아니라 135)', available: 135, B: DRAGGED_HIDDEN, out: 135 },
     { name: '소수 폭은 그대로', available: 450.5, B: FOUR, out: 450.5 },
     { name: '재지 못함(null) = 탭 폭 합', available: null, B: FOUR, out: 400 },
+    { name: '재지 못함 · 숨긴 탭은 합에 안 든다', available: null, B: OVERFLOW, out: 106 },
     { name: '유한하지 않은 수도 재지 못함', available: Number.NaN, B: FOUR, out: 400 },
     { name: '탭 없음', available: 200, B: EMPTY, out: 200 },
   ]

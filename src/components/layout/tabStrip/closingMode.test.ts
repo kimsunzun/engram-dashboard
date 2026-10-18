@@ -83,11 +83,12 @@ describe('frozenAvailable — 지금 폭 − 빠지는 폭', () => {
     })
   }
 
-  it('빠진 자리가 마지막이거나 범위 밖 · 다음 활성 자리가 범위 밖이면 RangeError', () => {
+  it('빠진 자리가 마지막이거나 범위 밖 · 다음 활성 자리가 범위 밖이거나 빠진 자리와 같으면 RangeError', () => {
     expect(() => frozenAvailable(300, [100, 100, 100], 2)).toThrow(RangeError)
     expect(() => frozenAvailable(300, [100, 100, 100], -1)).toThrow(RangeError)
     expect(() => frozenAvailable(300, [100, 100, 100], 0.5)).toThrow(RangeError)
     expect(() => frozenAvailable(300, [100, 100, 100], 0, 3)).toThrow(RangeError)
+    expect(() => frozenAvailable(146, [I + 3, A, I + 3, I + 2], 1, 1)).toThrow(RangeError)
   })
 })
 
