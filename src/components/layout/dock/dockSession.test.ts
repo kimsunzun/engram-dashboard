@@ -1,4 +1,4 @@
-// dockSession 단위테스트 — 듣기 셋(자기 창 대상 · `window_role` 보다 먼저) · 앱 전체 키 감시(`dock:drag` 로 켜고 끔 · 키 하나에
+// dockSession 단위테스트 — 듣기 셋(자기 창 대상 · 한꺼번에 · `window_role` 보다 먼저) · 앱 전체 키 감시(`dock:drag` 로 켜고 끔 · 키 하나에
 //   끝 하나) · 끌기 입력 구독(`dock:feed`) · 정리. 창 모드가 화면에 닿는 것은 `WindowLayout.test.tsx` 의 대기 모드 시험이 잰다.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -98,6 +98,24 @@ describe('watchDockSession — 듣기 · 창 모드', () => {
     for (const event of [EVT_SPARE, EVT_DRAG, EVT_FEED]) {
       expect(listeners.get(event)?.options).toEqual({ target: LABEL })
     }
+    expect(modes).toEqual(['normal'])
+  })
+
+  it('듣기 셋을 한꺼번에 걸고 셋이 다 걸린 뒤에야 window_role 을 묻는다', async () => {
+    let finish: (off: () => void) => void = () => {}
+    listenMock.mockImplementationOnce(async (event: string, handler: (e: { payload: unknown }) => void, options?: unknown) => {
+      order.push(`listen:${event}`)
+      listeners.set(event, { handler, options })
+      return new Promise<() => void>(res => {
+        finish = res
+      })
+    })
+    stop = watchDockSession(m => modes.push(m))
+    await ticks()
+    expect(order).toEqual([`listen:${EVT_SPARE}`, `listen:${EVT_DRAG}`, `listen:${EVT_FEED}`])
+    finish(() => {})
+    await ticks()
+    expect(order).toEqual([`listen:${EVT_SPARE}`, `listen:${EVT_DRAG}`, `listen:${EVT_FEED}`, `invoke:${CMD_WINDOW_ROLE}`])
     expect(modes).toEqual(['normal'])
   })
 
@@ -273,6 +291,23 @@ describe('구독 — subscribeFeed · subscribeDrag', () => {
     off2()
     emit(EVT_FEED, { session: 3, view: 'v-1', step: { type: 'release' } })
     expect(cb).toHaveBeenCalledTimes(3)
+  })
+
+  it('구독자 하나가 던져도 나머지 구독자는 받는다(오류 로그)', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    await watched()
+    const boom = () => {
+      throw new Error('boom')
+    }
+    const feedCb = vi.fn()
+    const dragCb = vi.fn()
+    unsubs.push(subscribeFeed(boom), subscribeFeed(feedCb), subscribeDrag(boom), subscribeDrag(dragCb))
+    emit(EVT_FEED, attach)
+    emit(EVT_DRAG, drag(2, 'active'))
+    expect(feedCb).toHaveBeenCalledWith(attach)
+    expect(dragCb).toHaveBeenCalledWith(drag(2, 'active'))
+    expect(error).toHaveBeenCalledWith(`[dockSession] ${EVT_FEED} 구독자 오류:`, expect.any(Error))
+    expect(error).toHaveBeenCalledWith(`[dockSession] ${EVT_DRAG} 구독자 오류:`, expect.any(Error))
   })
 
   it('dock:drag 의 몸을 키 감시를 켜고 끈 뒤에 넘긴다', async () => {

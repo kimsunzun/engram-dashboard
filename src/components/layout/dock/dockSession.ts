@@ -7,13 +7,15 @@
 //     닿지 않는다. 그 세션의 `ended` 로 끈다.
 //   - 셸이 미는 끌기 입력(`dock:feed`) — 받은 몸을 `subscribeFeed` 구독자에게 넘긴다.
 // 세 듣기 다 `target` = 자기 label 로 건다 — 몸에 창 label 이 없고, 기본 타깃 `Any` 로 걸면 남의 창으로 보낸 사건까지 받는다
-//   (`src/commands/viewCommandBridge.ts` 의 같은 조항). 셸은 `dock:drag` 를 안내 창 밖 우리 웹뷰 전부에, `dock:feed` 를 탭을 쥔
-//   창 하나에 보낸다. 듣기 셋을 다 건 뒤에 `window_role` 을 묻는다 — 그 사이에 온 사건을 놓치지 않게.
+//   (`src/commands/viewCommandBridge.ts` 의 같은 조항). 셸은 `dock:drag` 를 안내 창 밖 우리 웹뷰 전부에(떼어 들인 예비 창에는
+//   그 세션의 `active` 를 한 번 더 — 끌기가 시작된 뒤에 지어졌을 수 있다), `dock:feed` 를 탭을 쥔 창 하나에 보낸다. 듣기 셋을
+//   다 건 뒤에 `window_role` 을 묻는다 — 그 사이에 온 사건을 놓치지 않게.
 //
 // 탭바 끌기 훅(`useTabDrag`)과 맞물리는 법:
 //   - 키 — 탭을 쥔 창의 훅은 `window` capture 에서 keydown 을 받아 `stopPropagation` 하고 자기 자리를 실은 끝을
 //     `sendDragEnd(keyEnd(session, e.key, at))` 로 보낸다. 이 감시는 `document` capture 라 그 키를 보지 않는다 — 감시는 `at` 을
-//     모르는 나머지 창 몫이다(그 `drop` 은 셸이 놓기 확인 `dock:feed{release}` 로 탭을 쥔 창에 자리를 묻는다).
+//     모르는 나머지 창 몫이다 — 그 `drop` 은 탭바 단계면 셸이 놓기 확인 `dock:feed{release}` 로 탭을 쥔 창에 자리를 묻고, 따라오는
+//     창 단계(이동 루프)면 루프를 끝내고 그 끝 커서 자리로 놓는다.
 //   - 입력 — `subscribeFeed`: `attach`(이 창 탭바에 붙었다) · `move` · `release`(→ `tab_drag_end{drop, release, at}` 로 답한다).
 //   - 끝 — `subscribeDrag`: `ended` 를 받으면 그 세션의 탭바 끌기를 거둔다(다른 창의 키 · 셸이 끝낸 끌기).
 
@@ -110,11 +112,9 @@ export function watchDockSession(onMode: (mode: WindowMode) => void): () => void
   const onDrag = (event: TabDragEvent): void => {
     if (event.phase === 'active') watchKeys(event.session)
     else if (keys?.session === event.session) stopKeys()
-    for (const { cb } of [...dragListeners]) cb(event)
+    notify(dragListeners, event, EVT_DRAG)
   }
-  const onFeed = (feed: TabDragFeed): void => {
-    for (const { cb } of [...feedListeners]) cb(feed)
-  }
+  const onFeed = (feed: TabDragFeed): void => notify(feedListeners, feed, EVT_FEED)
 
   const listenHere = async <T>(event: string, handler: (payload: T) => void, lost: string): Promise<void> => {
     try {
@@ -136,15 +136,15 @@ export function watchDockSession(onMode: (mode: WindowMode) => void): () => void
   }
 
   void (async () => {
-    await listenHere<SpareEvent>(
-      EVT_SPARE,
-      p => onMode(p.step === 'parked' ? 'parked' : 'normal'),
-      '대기 모드 바뀜을 못 받는다',
-    )
-    if (disposed) return
-    await listenHere<TabDragEvent>(EVT_DRAG, onDrag, '끄는 중 키로 끌기를 끝내지 못한다')
-    if (disposed) return
-    await listenHere<TabDragFeed>(EVT_FEED, onFeed, '붙은 탭 끌기 입력을 못 받는다')
+    await Promise.all([
+      listenHere<SpareEvent>(
+        EVT_SPARE,
+        p => onMode(p.step === 'parked' ? 'parked' : 'normal'),
+        '대기 모드 바뀜을 못 받는다',
+      ),
+      listenHere<TabDragEvent>(EVT_DRAG, onDrag, '끄는 중 키로 끌기를 끝내지 못한다'),
+      listenHere<TabDragFeed>(EVT_FEED, onFeed, '붙은 탭 끌기 입력을 못 받는다'),
+    ])
     if (disposed) return
     let mode: WindowMode = 'normal'
     try {
@@ -161,6 +161,17 @@ export function watchDockSession(onMode: (mode: WindowMode) => void): () => void
     for (const off of unlistens) off()
     unlistens.length = 0
     stopKeys()
+  }
+}
+
+// 구독자 하나가 던져도 나머지 구독자는 받는다.
+function notify<T>(listeners: Set<{ cb: (value: T) => void }>, value: T, event: string): void {
+  for (const { cb } of [...listeners]) {
+    try {
+      cb(value)
+    } catch (err) {
+      console.error(`[dockSession] ${event} 구독자 오류:`, err)
+    }
   }
 }
 
