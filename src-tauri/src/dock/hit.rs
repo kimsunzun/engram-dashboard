@@ -15,22 +15,15 @@
 
 use uuid::Uuid;
 
-use crate::layout::chrome::{DockChrome, RectCss, TabHeader};
-use crate::layout::dock::{docked_tree, incoming_rect, DockAnchor, DockSide, DOCK_NEW_SHARE};
-use crate::layout::geometry::{self, px_edge, PxRect};
+pub use super::geometry::{outer_strips, OUTER_BAND_PX, SIDE_ORDER};
+pub use super::strip::DETACH_MAGNETISM_PX as REORDER_SLACK_PX;
+
+use super::geometry::{contains_px, edge_gap, thickness};
+use crate::layout::chrome::{DockChrome, PointCss, RectCss, TabHeader};
+use crate::layout::dock::{DockAnchor, DockSide, DOCK_NEW_SHARE};
+use crate::layout::geometry::PxRect;
 use crate::layout::manager::WindowLabel;
-use crate::layout::{tree, CanvasPx, LayoutNode};
-
-/// 바깥 띠 두께(CSS px — PRD R5). Eclipse 4 의 35px 와 같은 크기대이고 탭바 높이(28px)보다 조금 두껍다(TRD §2-3).
-pub const OUTER_BAND_PX: u32 = 32;
-
-/// 동률 깨기 순서 — 바깥 띠 · 칸 띠 모서리 둘 다.
-pub const SIDE_ORDER: [DockSide; 4] = [
-    DockSide::Left,
-    DockSide::Right,
-    DockSide::Top,
-    DockSide::Bottom,
-];
+use crate::layout::{CanvasPx, LayoutNode};
 
 /// 판정할 창 하나 — 커서 아래 맨 위 창은 브라우저 엔진이 고른다(끌기 사건을 받은 창이 그 창이다 · TRD §2-2
 /// 규칙 1).
@@ -196,11 +189,9 @@ pub fn choose_band(p: (f64, f64), frame: PxRect, bands: &[(DockSide, PxRect)]) -
     best.map(|(side, _)| side)
 }
 
-/// 대상 트리 `target` 의 `anchor` 의 `side` 에 `incoming` 을 끼웠을 때 끼운 것이 차지할 캔버스 px 사각형 — 띠의
-/// 사각형이자 미리보기 사각형이다(PRD R3 · R4). 결과에 새로 면적 0 칸이 생기거나(R8) 기준 칸이 없으면 `None`.
-// 정규화 외접 사각형의 네 경계를 각각 `px_edge` 로 옮긴다 — `px_edge` 가 단조라 놓은 뒤 그려질 칸 틀들
-// (`frame_px`)의 외접 사각형과 같은 정수가 나온다.
-// ADR-0227
+/// 대상 트리 `target` 의 `anchor` 의 `side` 에 `incoming` 을 몫 [`DOCK_NEW_SHARE`] 로 끼웠을 때 끼운 것이 차지할
+/// 캔버스 px 사각형 — `regions`(HTML5 끌기)의 띠 사각형이자 미리보기 사각형이다(PRD R3 · R4). `None` 의 뜻 =
+/// `dock::geometry::landing_rect`.
 pub fn landing_rect(
     target: &LayoutNode,
     anchor: DockAnchor,
@@ -208,14 +199,7 @@ pub fn landing_rect(
     incoming: &LayoutNode,
     canvas: CanvasPx,
 ) -> Option<PxRect> {
-    let result = docked_tree(target, anchor, side, incoming, DOCK_NEW_SHARE).ok()?;
-    let r = incoming_rect(&geometry::compute(&result), &tree::slot_ids(incoming))?;
-    Some(PxRect {
-        x0: px_edge(canvas.w, r.x0),
-        y0: px_edge(canvas.h, r.y0),
-        x1: px_edge(canvas.w, r.x1),
-        y1: px_edge(canvas.h, r.y1),
-    })
+    super::geometry::landing_rect(target, anchor, side, incoming, canvas, DOCK_NEW_SHARE)
 }
 
 /// `anchor` 의 네 변 중 붙을 수 있는 변과 그 [`landing_rect`]([`SIDE_ORDER`] 순). 빠진 변은 그리지도 고르지도
@@ -230,51 +214,6 @@ pub fn valid_bands(
         .into_iter()
         .filter_map(|side| landing_rect(target, anchor, side, incoming, canvas).map(|r| (side, r)))
         .collect()
-}
-
-/// 캔버스 네 변의 바깥 띠([`SIDE_ORDER`] 순 · 캔버스 CSS px). 그림과 [`locate`] 의 판정이 같은 이 사각형을 쓴다.
-/// 두께는 캔버스를 넘지 않는다.
-pub fn outer_strips(canvas: CanvasPx) -> [(DockSide, PxRect); 4] {
-    let (w, h) = (canvas.w, canvas.h);
-    let (tw, th) = (OUTER_BAND_PX.min(w), OUTER_BAND_PX.min(h));
-    [
-        (
-            DockSide::Left,
-            PxRect {
-                x0: 0,
-                y0: 0,
-                x1: tw,
-                y1: h,
-            },
-        ),
-        (
-            DockSide::Right,
-            PxRect {
-                x0: w - tw,
-                y0: 0,
-                x1: w,
-                y1: h,
-            },
-        ),
-        (
-            DockSide::Top,
-            PxRect {
-                x0: 0,
-                y0: 0,
-                x1: w,
-                y1: th,
-            },
-        ),
-        (
-            DockSide::Bottom,
-            PxRect {
-                x0: 0,
-                y0: h - th,
-                x1: w,
-                y1: h,
-            },
-        ),
-    ]
 }
 
 /// [`locate`] 의 탭바 자리 `index` 에 그릴 끼울 x — 탭바 상자 왼쪽(`chrome.tab_bar.x0`)에서 잰 CSS px. 끄는 탭을
@@ -294,19 +233,11 @@ pub fn tab_insert_x(chrome: &DockChrome, source_view: Uuid, index: usize) -> f64
     x - chrome.tab_bar.x0
 }
 
-/// 순서 이동 구역의 탭바 위아래 여유(CSS px — PRD R23). Chrome 탭 스트립의 떼기 문턱
-/// `kVerticalDetachMagnetism = 15` 와 같다(사용자 결정 Q20 「Chrome 처럼 · 약 15 px」 · TRD §2-5).
-pub const REORDER_SLACK_PX: f64 = 15.0;
-
-/// 순서 이동 구역 — 탭바 상자 `bar`(뷰포트)의 x 그대로 · y 위아래로 [`REORDER_SLACK_PX`] 넓힌 사각형. 판정은 다른
-/// 사각형과 같은 반열림이다. 들어올 때 · 나갈 때 같은 경계다(이력 없음 — PRD D19).
+/// 순서 이동 구역 — 탭바 상자 `bar`(뷰포트)의 x 그대로 · y 위아래로 [`REORDER_SLACK_PX`] 넓힌 사각형(=
+/// `dock::strip::strip_zone`). 판정은 다른 사각형과 같은 반열림이다. 들어올 때 · 나갈 때 같은 경계다(이력 없음 —
+/// PRD D19).
 pub fn reorder_zone(bar: RectCss) -> RectCss {
-    RectCss {
-        x0: bar.x0,
-        y0: bar.y0 - REORDER_SLACK_PX,
-        x1: bar.x1,
-        y1: bar.y1 + REORDER_SLACK_PX,
-    }
+    super::strip::strip_zone(bar)
 }
 
 /// 끄는 머리의 왼쪽 x(내용 좌표) — 커서를 따르되(`x − grab_x`) 머리들이 차지한 범위 `[heads[0].x0,
@@ -353,12 +284,7 @@ fn center_x(r: &RectCss) -> f64 {
 }
 
 pub(super) fn contains_css(r: &RectCss, p: (f64, f64)) -> bool {
-    (r.x0..r.x1).contains(&p.0) && (r.y0..r.y1).contains(&p.1)
-}
-
-fn contains_px(r: &PxRect, p: (f64, f64)) -> bool {
-    (f64::from(r.x0)..f64::from(r.x1)).contains(&p.0)
-        && (f64::from(r.y0)..f64::from(r.y1)).contains(&p.1)
+    super::strip::contains(r, PointCss { x: p.0, y: p.1 })
 }
 
 fn within(inner: &PxRect, outer: &PxRect) -> bool {
@@ -382,27 +308,11 @@ fn outer_sides(p: (f64, f64), canvas: CanvasPx) -> Vec<DockSide> {
     hit.into_iter().map(|(side, _)| side).collect()
 }
 
-fn edge_gap(p: (f64, f64), frame: &PxRect, side: DockSide) -> f64 {
-    match side {
-        DockSide::Left => p.0 - f64::from(frame.x0),
-        DockSide::Right => f64::from(frame.x1) - p.0,
-        DockSide::Top => p.1 - f64::from(frame.y0),
-        DockSide::Bottom => f64::from(frame.y1) - p.1,
-    }
-}
-
-// 점을 품은 띠만 부른다 — 그러면 두께가 양수라 나눗셈이 선다.
-fn thickness(r: &PxRect, side: DockSide) -> f64 {
-    match side {
-        DockSide::Left | DockSide::Right => f64::from(r.x1 - r.x0),
-        DockSide::Top | DockSide::Bottom => f64::from(r.y1 - r.y0),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::chrome::PointCss;
+    use crate::layout::dock::docked_tree;
+    use crate::layout::geometry;
     use crate::layout::{SlotContent, SplitDir};
 
     const SOURCE: u128 = 99;
