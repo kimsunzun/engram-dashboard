@@ -1404,7 +1404,9 @@ mod tests {
                 outcome: Mutex::new(Ok(DockOutcome {
                     window: NEW_WINDOW.to_owned(),
                     slot_ids: Vec::new(),
+                    emptied: None,
                     closed_window: None,
+                    main_refilled: None,
                     reused: false,
                 })),
                 clock: AtomicU64::new(1_000),
@@ -2052,7 +2054,9 @@ mod tests {
         Ok(DockOutcome {
             window: window.to_owned(),
             slot_ids: Vec::new(),
+            emptied: None,
             closed_window: None,
+            main_refilled: None,
             reused: false,
         })
     }
@@ -2348,7 +2352,9 @@ mod tests {
         *rig.fake.outcome.lock().unwrap() = Ok(DockOutcome {
             window: P1.to_owned(),
             slot_ids: Vec::new(),
+            emptied: None,
             closed_window: None,
+            main_refilled: None,
             reused: true,
         });
         rig.exec
@@ -2454,7 +2460,9 @@ mod tests {
         Ok(DockOutcome {
             window: P1.to_owned(),
             slot_ids: Vec::new(),
+            emptied: None,
             closed_window: None,
+            main_refilled: None,
             reused: true,
         })
     }

@@ -36,11 +36,12 @@ use super::types::{
     DockRegions, DragEffect, DrawnReport, DropReport, Picked, SessionEvent, SessionPhase, Started,
     StripStart,
 };
-use crate::layout::apply::{DockDest, DockOutcome, DockRequest, WindowPlace};
+use crate::layout::apply::{DockDest, DockOutcome, DockRequest, OnEmptied, WindowPlace};
 use crate::layout::chrome::PointCss;
-use crate::layout::dock::DockAnchor;
+use crate::layout::dock::{DockAnchor, DOCK_NEW_SHARE};
 use crate::layout::manager::{
-    succession, DockError, DockGuard, FocusPolicy, LeaseId, TargetExpect, ViewId, WindowLabel,
+    succession, DockError, DockGuard, DockMove, FocusPolicy, LeaseId, TargetExpect, ViewId,
+    WindowLabel,
 };
 use crate::layout::LayoutNode;
 
@@ -495,6 +496,7 @@ impl EndReason {
                 DockError::SlotNotInTab { .. } => "SlotNotInTab",
                 DockError::SelfTarget => "SelfTarget",
                 DockError::ZeroArea => "ZeroArea",
+                DockError::InvalidShare(_) => "InvalidShare",
                 DockError::Dragging => "Dragging",
                 DockError::WindowClosed(_) => "WindowClosed",
                 DockError::StaleLease => "StaleLease",
@@ -2074,10 +2076,13 @@ impl Book {
             to,
             guard: DockGuard {
                 lease: Some(drag.lease),
+                keep_lease: false,
                 expect_source: Some(drag.expect_source.clone()),
                 expect_target,
             },
             focus: FocusPolicy::Reveal,
+            mv: DockMove::default(),
+            on_emptied: OnEmptied::Close,
         })]
     }
 
@@ -2594,6 +2599,7 @@ fn dock_at(w: &str, picked: &Picked, s: &Sent) -> Verdict {
                     target,
                     anchor: anchor.map_or(DockAnchor::Outer, DockAnchor::Slot),
                     side: *side,
+                    share: DOCK_NEW_SHARE,
                 },
                 expect: Some(expect),
                 mode: Mode::Seam,
@@ -2945,7 +2951,9 @@ mod tests {
         Ok(DockOutcome {
             window: window.into(),
             slot_ids: vec![],
+            emptied: None,
             closed_window: (!reused).then(|| POP.to_string()),
+            main_refilled: None,
             reused,
         })
     }
@@ -3481,10 +3489,13 @@ mod tests {
                 },
                 guard: DockGuard {
                     lease: Some(LEASE),
+                    keep_lease: false,
                     expect_source: Some(slot(50)),
                     expect_target: None,
                 },
                 focus: FocusPolicy::Reveal,
+                mv: DockMove::default(),
+                on_emptied: OnEmptied::Close,
             }
         );
         assert!(is_applying(&book));
@@ -3579,9 +3590,11 @@ mod tests {
                     target: id(10),
                     anchor: DockAnchor::Slot(anchor),
                     side,
+                    share: DOCK_NEW_SHARE,
                 },
                 guard: DockGuard {
                     lease: Some(LEASE),
+                    keep_lease: false,
                     expect_source: Some(slot(50)),
                     expect_target: Some(TargetExpect::Seam {
                         layout: halves(1, 2),
@@ -3589,6 +3602,8 @@ mod tests {
                     }),
                 },
                 focus: FocusPolicy::Reveal,
+                mv: DockMove::default(),
+                on_emptied: OnEmptied::Close,
             }
         );
         assert!(is_applying(&book));
@@ -3634,10 +3649,13 @@ mod tests {
                 },
                 guard: DockGuard {
                     lease: Some(LEASE),
+                    keep_lease: false,
                     expect_source: Some(slot(50)),
                     expect_target: Some(TargetExpect::Tabs(ids(&[10, 11]))),
                 },
                 focus: FocusPolicy::Reveal,
+                mv: DockMove::default(),
+                on_emptied: OnEmptied::Close,
             }
         );
 
@@ -3803,7 +3821,9 @@ mod tests {
         let kept = Ok(DockOutcome {
             window: MAIN.into(),
             slot_ids: vec![],
+            emptied: None,
             closed_window: None,
+            main_refilled: None,
             reused: false,
         });
         let out = book.step(Input::Applied(kept)).actions;
@@ -3993,6 +4013,10 @@ mod tests {
         assert_eq!(
             EndReason::Refused(DockError::WindowOpen("x".into())).word(),
             "WindowOpen"
+        );
+        assert_eq!(
+            EndReason::Refused(DockError::InvalidShare("NaN".into())).word(),
+            "InvalidShare"
         );
         assert_eq!(Outcome::Aborted.word(), "aborted");
         assert_eq!(EndBy::SourceNone.word(), "source_none");
@@ -5029,7 +5053,9 @@ mod tests {
         Ok(DockOutcome {
             window: window.into(),
             slot_ids: vec![],
+            emptied: None,
             closed_window: None,
+            main_refilled: None,
             reused: false,
         })
     }
@@ -5073,10 +5099,13 @@ mod tests {
                     },
                     guard: DockGuard {
                         lease: Some(LEASE),
+                        keep_lease: false,
                         expect_source: Some(slot(50)),
                         expect_target: Some(TargetExpect::Tabs(ids(&[10, SRC, 11]))),
                     },
                     focus: FocusPolicy::Reveal,
+                    mv: DockMove::default(),
+                    on_emptied: OnEmptied::Close,
                 },
                 "{rev} {bar_rev} {displayed:?}"
             );

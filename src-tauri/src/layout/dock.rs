@@ -34,7 +34,7 @@ pub enum DockAnchor {
     Outer,
 }
 
-/// 새것이 차지하는 몫 — 기준은 나머지를 갖는다. 슬롯 옆이든 바깥 변이든 이 값 하나다(PRD R7 — 예외 규칙 없음).
+/// `dock::book` · `dock::hit` 의 끌기가 [`docked_tree`] 에 넘기는 새것 몫 — 슬롯 옆이든 바깥 변이든 이 값 하나다.
 pub const DOCK_NEW_SHARE: f64 = 1.0 / 3.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,9 +50,10 @@ pub enum DockTreeError {
 
 /// `target` 의 `anchor` 를 새 분할로 감싸 `side` 쪽에 `incoming` 을 끼운 결과 트리. 입력은 건드리지 않는다.
 ///
-/// - 모양: `Left`·`Right` = `LeftRight` 분할, `Top`·`Bottom` = `TopBottom` 분할. 새것이 a(왼쪽/위)면 비율
-///   [`DOCK_NEW_SHARE`], b 면 `1 − DOCK_NEW_SHARE`(비율 = a 몫 — ADR-0140). 감싼 기준 안쪽의 비율은 그대로라
-///   슬롯 옆이면 그 슬롯만, 바깥 변이면 대상 전체가 안쪽 비율을 지킨 채 줄어든다.
+/// - 모양: `Left`·`Right` = `LeftRight` 분할, `Top`·`Bottom` = `TopBottom` 분할. `share` = 감싼 자리에서 새것이
+///   차지하는 몫 — `tree::RATIO_MIN ≤ share ≤ 0.5` 여야 한다(아래면 기하가 다른 비율로 읽는다 · 밖이면 디버그
+///   빌드에서 단언한다). 새것이 a(왼쪽/위)면 비율 `share`, b 면 `1 − share`(비율 = a 몫 — ADR-0140). 감싼 기준
+///   안쪽의 비율은 그대로라 슬롯 옆이면 그 슬롯만, 바깥 변이면 대상 전체가 안쪽 비율을 지킨 채 줄어든다.
 /// - id: 감싸는 분할만 새 id 다. 대상 · `incoming` 의 슬롯 id · 분할 id · 내용은 그대로 옮긴다 — 출처에서 지우는
 ///   것은 호출자 몫이다.
 /// - 오류(이 순서로 보고 처음 걸린 것을 낸다):
@@ -66,7 +67,10 @@ pub fn docked_tree(
     anchor: DockAnchor,
     side: DockSide,
     incoming: &LayoutNode,
+    share: f64,
 ) -> Result<LayoutNode, DockTreeError> {
+    // ADR-0295
+    debug_assert!((tree::RATIO_MIN..=0.5).contains(&share), "새것 몫 {share}");
     let (dir, new_is_a) = match side {
         DockSide::Left => (SplitDir::LeftRight, true),
         DockSide::Right => (SplitDir::LeftRight, false),
@@ -97,9 +101,9 @@ pub fn docked_tree(
     ));
     let moved = Box::new(incoming.clone());
     let (a, b, ratio) = if new_is_a {
-        (moved, original, DOCK_NEW_SHARE)
+        (moved, original, share)
     } else {
-        (original, moved, 1.0 - DOCK_NEW_SHARE)
+        (original, moved, 1.0 - share)
     };
     *based = LayoutNode::Split {
         id: Uuid::new_v4(), // ADR-0223 — 분할마다 새 id
@@ -323,6 +327,44 @@ mod tests {
     }
 
     #[test]
+    fn the_given_share_is_the_new_pieces_part_of_the_wrapped_place_on_each_side() {
+        // ADR-0295 — 붙는 몫(PRD R7)은 부르는 쪽이 고른다.
+        let (t, moved) = (target(), slot(9));
+        for share in [tree::RATIO_MIN, 0.25, 0.5] {
+            for anchor in [DockAnchor::Slot(id(2)), DockAnchor::Outer] {
+                for side in SIDES {
+                    let result = docked_tree(&t, anchor, side, &moved, share).unwrap();
+                    let fresh = the_new_split(&result, &t, &moved);
+                    let (dir, new_is_a, _) = shape(side);
+                    let ratio = if new_is_a { share } else { 1.0 - share };
+                    let at = format!("{share} {anchor:?} {side:?}");
+                    assert_eq!(tree::split_ratio(&result, fresh), Some(ratio), "{at}");
+                    assert_eq!(
+                        tree::clamp_ratio(ratio),
+                        ratio,
+                        "{at}: 기하가 다른 비율로 읽으면 안 된다"
+                    );
+                    let g = geometry::compute(&result);
+                    let s = *g.splits.iter().find(|s| s.split_id == fresh).unwrap();
+                    let whole = match dir {
+                        SplitDir::LeftRight => s.x1 - s.x0,
+                        SplitDir::TopBottom => s.y1 - s.y0,
+                    };
+                    let (n0, n1) = along(&rect_of(&g, id(9)), dir);
+                    assert!(close((n1 - n0) / whole, share), "{at}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "새것 몫")]
+    fn a_share_over_half_is_a_caller_bug() {
+        let _ = docked_tree(&target(), DockAnchor::Outer, DockSide::Left, &slot(9), 0.6);
+    }
+
+    #[test]
     fn dock_side_spells_variant_names_on_the_wire() {
         for (side, want) in SIDES.into_iter().zip(["Left", "Right", "Top", "Bottom"]) {
             let json = serde_json::to_string(&side).unwrap();
@@ -337,7 +379,7 @@ mod tests {
     fn outer_wraps_the_whole_target_on_each_side() {
         let (t, moved) = (target(), agent_slot(9));
         for side in SIDES {
-            let result = docked_tree(&t, DockAnchor::Outer, side, &moved).unwrap();
+            let result = docked_tree(&t, DockAnchor::Outer, side, &moved, DOCK_NEW_SHARE).unwrap();
             let fresh = the_new_split(&result, &t, &moved);
             assert_eq!(
                 result,
@@ -351,7 +393,8 @@ mod tests {
     fn a_slot_anchor_wraps_only_that_slot_on_each_side() {
         let (t, moved) = (target(), agent_slot(9));
         for side in SIDES {
-            let result = docked_tree(&t, DockAnchor::Slot(id(2)), side, &moved).unwrap();
+            let result =
+                docked_tree(&t, DockAnchor::Slot(id(2)), side, &moved, DOCK_NEW_SHARE).unwrap();
             let fresh = the_new_split(&result, &t, &moved);
             let want = split(
                 100,
@@ -376,7 +419,7 @@ mod tests {
         let (t, moved) = (target(), split_tab());
         for anchor in [DockAnchor::Slot(id(1)), DockAnchor::Outer] {
             for side in SIDES {
-                let result = docked_tree(&t, anchor, side, &moved).unwrap();
+                let result = docked_tree(&t, anchor, side, &moved, DOCK_NEW_SHARE).unwrap();
                 let mut want_slots = tree::slot_ids(&t);
                 want_slots.extend(tree::slot_ids(&moved));
                 let mut got_slots = tree::slot_ids(&result);
@@ -400,12 +443,12 @@ mod tests {
         let (t, moved) = (target(), split_tab());
         for side in SIDES {
             assert_eq!(
-                docked_tree(&t, DockAnchor::Slot(id(77)), side, &moved),
+                docked_tree(&t, DockAnchor::Slot(id(77)), side, &moved, DOCK_NEW_SHARE),
                 Err(DockTreeError::SlotNotFound(id(77)))
             );
             // 기준은 대상 트리에서만 찾는다 — 끼울 쪽의 칸은 기준이 아니다.
             assert_eq!(
-                docked_tree(&t, DockAnchor::Slot(id(21)), side, &moved),
+                docked_tree(&t, DockAnchor::Slot(id(21)), side, &moved, DOCK_NEW_SHARE),
                 Err(DockTreeError::SlotNotFound(id(21)))
             );
         }
@@ -423,20 +466,26 @@ mod tests {
         ] {
             for side in SIDES {
                 assert_eq!(
-                    docked_tree(&t, anchor, side, &shared),
+                    docked_tree(&t, anchor, side, &shared, DOCK_NEW_SHARE),
                     Err(DockTreeError::SlotIdOverlap),
                     "{anchor:?} {side:?}"
                 );
             }
         }
         assert_eq!(
-            docked_tree(&t, DockAnchor::Outer, DockSide::Left, &t),
+            docked_tree(&t, DockAnchor::Outer, DockSide::Left, &t, DOCK_NEW_SHARE),
             Err(DockTreeError::SlotIdOverlap),
             "자기 자신"
         );
         // 판정 순서 — 기준 슬롯이 먼저다.
         assert_eq!(
-            docked_tree(&t, DockAnchor::Slot(id(77)), DockSide::Left, &shared),
+            docked_tree(
+                &t,
+                DockAnchor::Slot(id(77)),
+                DockSide::Left,
+                &shared,
+                DOCK_NEW_SHARE
+            ),
             Err(DockTreeError::SlotNotFound(id(77)))
         );
         // 판정 순서 — 겹침이 면적 0 보다 먼저다(이 기준은 원래 면적 0 이라 겹침이 없으면 `ZeroArea`).
@@ -455,7 +504,8 @@ mod tests {
                 &chain,
                 DockAnchor::Slot(flat.slot_id),
                 DockSide::Right,
-                &both
+                &both,
+                DOCK_NEW_SHARE
             ),
             Err(DockTreeError::SlotIdOverlap)
         );
@@ -470,8 +520,9 @@ mod tests {
         let orig = rect_of(&before, id(2));
         for side in SIDES {
             let (dir, new_is_a, _) = shape(side);
-            let after =
-                geometry::compute(&docked_tree(&t, DockAnchor::Slot(id(2)), side, &moved).unwrap());
+            let after = geometry::compute(
+                &docked_tree(&t, DockAnchor::Slot(id(2)), side, &moved, DOCK_NEW_SHARE).unwrap(),
+            );
             for other in [id(1), id(3)] {
                 assert_eq!(
                     rect_of(&after, other),
@@ -503,8 +554,9 @@ mod tests {
         let before = geometry::compute(&t);
         for side in SIDES {
             let (dir, new_is_a, _) = shape(side);
-            let after =
-                geometry::compute(&docked_tree(&t, DockAnchor::Outer, side, &moved).unwrap());
+            let after = geometry::compute(
+                &docked_tree(&t, DockAnchor::Outer, side, &moved, DOCK_NEW_SHARE).unwrap(),
+            );
             let new = rect_of(&after, id(9));
             let (n0, n1) = along(&new, dir);
             assert!(close(n1 - n0, 1.0 / 3.0), "{side:?}: 새것 1/3");
@@ -544,15 +596,35 @@ mod tests {
         );
 
         // 대조: 칸 하나면 붙는다 — 끼울 자리의 1/3 자체에는 면적이 있다.
-        let lone = docked_tree(&t, DockAnchor::Slot(deepest), DockSide::Right, &slot(9)).unwrap();
+        let lone = docked_tree(
+            &t,
+            DockAnchor::Slot(deepest),
+            DockSide::Right,
+            &slot(9),
+            DOCK_NEW_SHARE,
+        )
+        .unwrap();
         assert_eq!(zero_area_count(&lone), 0);
         // 사슬이면 그 안쪽 깊은 칸이 무너진다.
         assert_eq!(
-            docked_tree(&t, DockAnchor::Slot(deepest), DockSide::Right, &moved),
+            docked_tree(
+                &t,
+                DockAnchor::Slot(deepest),
+                DockSide::Right,
+                &moved,
+                DOCK_NEW_SHARE
+            ),
             Err(DockTreeError::ZeroArea)
         );
         // 대조: 넓은 자리(바깥 변)에는 같은 사슬이 붙는다 — 일괄 거절이 아니다.
-        let wide = docked_tree(&t, DockAnchor::Outer, DockSide::Left, &moved).unwrap();
+        let wide = docked_tree(
+            &t,
+            DockAnchor::Outer,
+            DockSide::Left,
+            &moved,
+            DOCK_NEW_SHARE,
+        )
+        .unwrap();
         assert_eq!(zero_area_count(&wide), 0);
     }
 
@@ -573,12 +645,25 @@ mod tests {
             "전제: 대상 칸이 새로 무너진다"
         );
         assert_eq!(
-            docked_tree(&t, DockAnchor::Outer, DockSide::Left, &slot(9)),
+            docked_tree(
+                &t,
+                DockAnchor::Outer,
+                DockSide::Left,
+                &slot(9),
+                DOCK_NEW_SHARE
+            ),
             Err(DockTreeError::ZeroArea)
         );
         // 대조: 얕은 사슬은 같은 자리에 붙는다.
         let (shallow, _) = half_chain(SplitDir::LeftRight, 40, 20_000);
-        let ok = docked_tree(&shallow, DockAnchor::Outer, DockSide::Left, &slot(9)).unwrap();
+        let ok = docked_tree(
+            &shallow,
+            DockAnchor::Outer,
+            DockSide::Left,
+            &slot(9),
+            DOCK_NEW_SHARE,
+        )
+        .unwrap();
         assert_eq!(zero_area_count(&ok), 0);
     }
 
@@ -592,7 +677,13 @@ mod tests {
             let mut docked: u128 = 0;
             let err = loop {
                 let incoming = slot(1_000 + docked);
-                match docked_tree(&tree_now, DockAnchor::Slot(anchor), side, &incoming) {
+                match docked_tree(
+                    &tree_now,
+                    DockAnchor::Slot(anchor),
+                    side,
+                    &incoming,
+                    DOCK_NEW_SHARE,
+                ) {
                     Ok(next) => {
                         tree_now = next;
                         if !new_is_a {
@@ -622,7 +713,14 @@ mod tests {
         let t = split(1, SplitDir::TopBottom, 0.5, slot(2), chain);
         let zero = zero_area_count(&t);
         assert!(zero > 0, "전제: 면적 0 칸이 심겼다");
-        let result = docked_tree(&t, DockAnchor::Slot(id(2)), DockSide::Right, &slot(9)).unwrap();
+        let result = docked_tree(
+            &t,
+            DockAnchor::Slot(id(2)),
+            DockSide::Right,
+            &slot(9),
+            DOCK_NEW_SHARE,
+        )
+        .unwrap();
         assert_eq!(
             zero_area_count(&result),
             zero,
@@ -633,7 +731,14 @@ mod tests {
         let (moved, _) = half_chain(SplitDir::TopBottom, 60, 30_000);
         let moved_zero = zero_area_count(&moved);
         assert!(moved_zero > 0, "전제: 끼울 것에 면적 0 칸이 심겼다");
-        let result = docked_tree(&slot(1), DockAnchor::Outer, DockSide::Left, &moved).unwrap();
+        let result = docked_tree(
+            &slot(1),
+            DockAnchor::Outer,
+            DockSide::Left,
+            &moved,
+            DOCK_NEW_SHARE,
+        )
+        .unwrap();
         assert_eq!(zero_area_count(&result), moved_zero);
     }
 
@@ -648,7 +753,13 @@ mod tests {
             .expect("전제: 면적 0 칸이 심겼다");
         for side in SIDES {
             assert_eq!(
-                docked_tree(&t, DockAnchor::Slot(flat.slot_id), side, &slot(9)),
+                docked_tree(
+                    &t,
+                    DockAnchor::Slot(flat.slot_id),
+                    side,
+                    &slot(9),
+                    DOCK_NEW_SHARE
+                ),
                 Err(DockTreeError::ZeroArea),
                 "{side:?}"
             );
@@ -663,7 +774,7 @@ mod tests {
         for moved in [agent_slot(9), split_tab()] {
             for anchor in [DockAnchor::Slot(id(2)), DockAnchor::Outer] {
                 for side in SIDES {
-                    let result = docked_tree(&t, anchor, side, &moved).unwrap();
+                    let result = docked_tree(&t, anchor, side, &moved, DOCK_NEW_SHARE).unwrap();
                     let fresh = the_new_split(&result, &t, &moved);
                     let g = geometry::compute(&result);
                     let s = *g.splits.iter().find(|s| s.split_id == fresh).unwrap();
@@ -695,6 +806,7 @@ mod tests {
             DockAnchor::Slot(id(2)),
             DockSide::Right,
             &split_tab(),
+            DOCK_NEW_SHARE,
         )
         .unwrap();
         let g = geometry::compute(&result);

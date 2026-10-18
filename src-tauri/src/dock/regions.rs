@@ -412,7 +412,7 @@ mod tests {
     use super::*;
     use crate::dock::hit::SIDE_ORDER;
     use crate::layout::chrome::TabHeader;
-    use crate::layout::dock::docked_tree;
+    use crate::layout::dock::{docked_tree, DOCK_NEW_SHARE};
     use crate::layout::{SlotContent, SplitDir};
 
     const SRC: u128 = 99;
@@ -575,7 +575,7 @@ mod tests {
         let outer: Vec<_> = r.outer.iter().map(|o| o.side).collect();
         let bands: Vec<_> = r.slots[0].bands.iter().map(|b| b.side).collect();
         for side in SIDE_ORDER {
-            let ok = |anchor| docked_tree(&target, anchor, side, &incoming).is_ok();
+            let ok = |anchor| docked_tree(&target, anchor, side, &incoming, DOCK_NEW_SHARE).is_ok();
             assert_eq!(outer.contains(&side), ok(DockAnchor::Outer), "{side:?}");
             assert_eq!(
                 bands.contains(&side),

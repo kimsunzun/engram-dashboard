@@ -41,8 +41,9 @@ use uuid::Uuid;
 use super::chrome::DockChrome;
 use super::dock::{DockAnchor, DockSide};
 use super::manager::{
-    CloseTabOutcome, DockError, DockGuard, DockTo, Docked, FocusPolicy, NewWindowPlan, ViewId,
-    ViewManager, WindowLabel, WindowTabsSnapshot, MAIN_WINDOW_LABEL,
+    CloseTabOutcome, DockError, DockGuard, DockMove, DockTo, Docked, EmptiedWindow, FocusPolicy,
+    FrameMeasures, NewWindowPlan, ViewId, ViewManager, WindowLabel, WindowSeed, WindowTabsSnapshot,
+    MAIN_WINDOW_LABEL,
 };
 use super::spatial::{resolve_spatial as resolve_spatial_token, SpatialToken};
 use super::tree::{self, SplitInfo};
@@ -858,13 +859,15 @@ fn rollback_detached(state: &LayoutState, subs: &dyn SubscriptionSync, tmp_view:
 
 // ── 도킹 ─────────────────────────────────────────────────────────────────────
 
-/// 탭 하나를 옮기는 요청 — [`dock_tab`] 이 받는다. `guard` · `focus` 의 뜻은 [`ViewManager::dock`].
+/// 탭 하나를 옮기는 요청 — [`dock_tab`] 이 받는다. `guard` · `focus` · `mv` 의 뜻은 [`ViewManager::dock`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct DockRequest {
     pub view: ViewId,
     pub to: DockDest,
     pub guard: DockGuard,
     pub focus: FocusPolicy,
+    pub mv: DockMove,
+    pub on_emptied: OnEmptied,
 }
 
 /// 옮길 곳. `Seam` · `TabBar` 는 [`DockTo`] 의 같은 이름과 같다.
@@ -874,6 +877,7 @@ pub enum DockDest {
         target: ViewId,
         anchor: DockAnchor,
         side: DockSide,
+        share: f64,
     },
     TabBar {
         window: WindowLabel,
@@ -883,17 +887,42 @@ pub enum DockDest {
     /// `at` 으로 옮긴다(재사용). `at.size` 가 없으면 새 창 = 출처 팝아웃의 보통 크기(메인이면 팝아웃 기본
     /// 크기) · 재사용 = 그 창 크기 그대로.
     NewWindow { at: WindowPlace },
+    /// 이미 떠 있되 모델 밖인 창 `label`(예비 창 · 끄는 중 비워 남긴 창)을 그 탭만 든 창 항목으로 들인다 — 창을
+    /// 열지도 옮기지도 않고 그 자리를 모델에 적지도 않는다(들이는 순간의 창은 아직 기다리는 자리에 있다 — 부르는
+    /// 쪽이 놓은 뒤 그 창의 이동 사건이 적는다). `seed` · `measures` 의 뜻은 [`DockTo::NewWindow`]. 거절은 그
+    /// `NewWindow` 와 같다 — label 에 묘비 `WindowClosed` · 이미 모델의 창 `WindowExists`.
+    // ADR-0295
+    AdoptWindow {
+        label: WindowLabel,
+        seed: Option<WindowSeed>,
+        measures: FrameMeasures,
+    },
+}
+
+/// 도킹이 출처 팝아웃을 비웠을 때 그 OS 창을 어떻게 하나. 어느 쪽이든 모델 항목은 지우고(결말의
+/// [`DockOutcome::emptied`]) 그 창에 탭 목록 알림을 내지 않는다 — 탭 0 개 알림을 받은 웹뷰는 제 창을 닫는다.
+// ADR-0295
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnEmptied {
+    /// 알림을 낸 뒤 닫는다([`DockOutcome::closed_window`]).
+    Close,
+    /// 닫지 않는다 — 부르는 쪽이 그 창을 다시 쓰거나 나중에 닫는다.
+    Keep,
 }
 
 /// [`dock_tab`] 의 결말.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DockOutcome {
     /// 옮긴 것이 든 창.
     pub window: WindowLabel,
     /// 옮긴 탭의 슬롯 id(트리 전위 순) — 옮겨도 id 는 그대로다.
     pub slot_ids: Vec<Uuid>,
-    /// 비어서 닫은 출처 팝아웃.
+    /// 비어 모델에서 지운 출처 팝아웃(`OnEmptied` 와 무관).
+    pub emptied: Option<EmptiedWindow>,
+    /// 비어서 닫은 출처 팝아웃 — `OnEmptied::Close` 일 때만.
     pub closed_window: Option<WindowLabel>,
+    /// main 의 마지막 탭이 떠나 main 에 새로 세운 빈 탭.
+    pub main_refilled: Option<ViewId>,
     /// 새 창 없이 출처 창을 옮겼다 — 모델은 그대로다(`version` 불변 · 알림 없음).
     pub reused: bool,
 }
@@ -902,13 +931,17 @@ pub struct DockOutcome {
 /// 거둔다(표식은 그대로 — 부른 쪽이 내린다). 판정 · 적용 규칙의 정본은 [`ViewManager::dock`] ·
 /// [`ViewManager::plan_new_window`].
 ///
-/// - `Seam` · `TabBar` — 락 한 번에 바꾸고, 락 밖에서 알린 뒤 비어 지운 출처 팝아웃의 OS 창을 닫는다.
+/// - `Seam` · `TabBar` · `AdoptWindow` — 락 한 번에 바꾸고, 락 밖에서 알린 뒤 비어 지운 출처 팝아웃을
+///   `req.on_emptied` 대로 다룬다.
 /// - `NewWindow`(새 창) — 창을 락 밖에서 먼저 열고, 같은 판정을 다시 해 붙인다.
-/// - `NewWindow`(재사용) — 출처 창을 락 밖에서 옮기고 표식만 내린다. 다시 판정하지 않고 되돌리지도 않는다.
+/// - `NewWindow`(재사용) — 출처 창을 락 밖에서 옮기고 표식만 내린다(`keep_lease` 면 그대로). 다시 판정하지 않고
+///   되돌리지도 않는다.
 ///
-/// ★메인 스레드 · 동기 명령 안에서 부르지 말 것★ — 새 창 빌드가 교착한다(`commands::popout::move_slot_to_window`
-/// 가 async 인 까닭과 같다 · TRD S21-slot-docking §1-3 「명령의 실행 스레드」).
-// TRD S21-slot-docking §1-2 「적용 서비스」
+/// 부르는 스레드: ★`NewWindow` 를 메인 스레드 · 동기 명령 안에서 부르지 말 것★ — 새 창 빌드가 교착한다
+/// (`commands::popout::move_slot_to_window` 가 async 인 까닭과 같다 · TRD S21-slot-docking §1-3 「명령의 실행
+/// 스레드」). `Seam` · `TabBar` · `AdoptWindow` 는 창을 열지 않아 어느 스레드에서나 부를 수 있다 —
+/// `OnEmptied::Close` 는 창을 닫기만 한다.
+// TRD S21-slot-docking §1-2 「적용 서비스」 · §7 B9
 pub fn dock_tab(
     state: &LayoutState,
     subs: &dyn SubscriptionSync,
@@ -922,12 +955,22 @@ pub fn dock_tab(
         to,
         guard,
         focus,
+        mv,
+        on_emptied,
     } = req;
+    let ask = DockAsk {
+        view,
+        guard,
+        focus,
+        mv,
+        on_emptied,
+    };
     let (mode, result) = match to {
         DockDest::Seam {
             target,
             anchor,
             side,
+            share,
         } => (
             "seam",
             dock_in_place(
@@ -935,14 +978,13 @@ pub fn dock_tab(
                 subs,
                 events,
                 host,
-                view,
+                &ask,
                 DockTo::Seam {
                     target,
                     anchor,
                     side,
+                    share,
                 },
-                &guard,
-                focus,
             ),
         ),
         DockDest::TabBar { window, index } => (
@@ -952,15 +994,32 @@ pub fn dock_tab(
                 subs,
                 events,
                 host,
-                view,
+                &ask,
                 DockTo::TabBar { window, index },
-                &guard,
-                focus,
+            ),
+        ),
+        DockDest::AdoptWindow {
+            label,
+            seed,
+            measures,
+        } => (
+            "adopt_window",
+            dock_in_place(
+                state,
+                subs,
+                events,
+                host,
+                &ask,
+                DockTo::NewWindow {
+                    label,
+                    seed,
+                    measures,
+                },
             ),
         ),
         DockDest::NewWindow { at } => (
             "new_window",
-            dock_into_window(state, subs, events, host, labels, view, at, &guard, focus),
+            dock_into_window(state, subs, events, host, labels, &ask, at),
         ),
     };
     match &result {
@@ -969,8 +1028,9 @@ pub fn dock_tab(
             mode = if out.reused { "reuse" } else { mode },
             window = %out.window,
             closed_window = out.closed_window.as_deref(),
+            emptied = out.emptied.as_ref().map(|e| e.label.as_str()),
             reused = out.reused,
-            main_refilled = notes.main_refilled,
+            main_refilled = out.main_refilled.is_some(),
             changed = notes.unchanged.then_some(false),
             "도킹 적용"
         ),
@@ -979,10 +1039,17 @@ pub fn dock_tab(
     result.map(|(out, _)| out)
 }
 
+struct DockAsk {
+    view: ViewId,
+    guard: DockGuard,
+    focus: FocusPolicy,
+    mv: DockMove,
+    on_emptied: OnEmptied,
+}
+
 // 끝 로그 몫 — 결말(`DockOutcome`)에 싣지 않는 것.
 #[derive(Default)]
 struct DockNotes {
-    main_refilled: bool,
     // 같은 창 같은 자리의 탭바 놓기 — 모델이 그대로다.
     unchanged: bool,
 }
@@ -991,7 +1058,6 @@ struct DockNotes {
 struct BeforeDock {
     version: u64,
     source_active: Option<ViewId>,
-    main_tabs: Vec<ViewId>,
 }
 
 impl BeforeDock {
@@ -1002,11 +1068,6 @@ impl BeforeDock {
                 .owner_of(view)
                 .and_then(|label| mgr.windows.get(label))
                 .map(|w| w.active),
-            main_tabs: mgr
-                .windows
-                .get(MAIN_WINDOW_LABEL)
-                .map(|w| w.tabs.clone())
-                .unwrap_or_default(),
         }
     }
 }
@@ -1016,28 +1077,22 @@ impl BeforeDock {
 struct DockNews {
     layouts: Vec<ViewSnapshot>,
     tabs: Vec<WindowTabsPayload>,
-    main_refilled: bool,
 }
 
 impl DockNews {
     // `shown` = 대상에서 보일 탭 — `Seam` 은 대상 탭, 그 밖은 옮긴 탭.
     //
-    // ★남은 출처 창의 활성이 바뀌었으면 그 탭의 배치도 싣는다★ — main 의 마지막 탭이 떠나면 `dock` 이 main 에 빈 탭을
-    // 세워 활성으로 두는데(PRD R14), 프론트는 그 탭 id 를 탭 목록으로만 받으면 배치가 없다(`close_tab` 이 남은 창의
-    // 활성 배치를 싣는 것과 같다). `Docked` 는 그 채움을 알리지 않으므로 main 의 탭 목록 앞뒤로 가른다.
-    fn collect(
-        mgr: &ViewManager,
-        before: &BeforeDock,
-        docked: &Docked,
-        view: ViewId,
-        shown: ViewId,
-    ) -> Self {
+    // ★남은 출처 창의 활성이 바뀌었으면 그 탭의 배치도 싣는다★ — 프론트는 그 탭 id 를 탭 목록으로만 받으면 배치가
+    // 없다(`close_tab` 이 남은 창의 활성 배치를 싣는 것과 같다). main 의 마지막 탭이 떠나 세운 빈 탭(PRD R14)도
+    // 이 갈래로 실린다.
+    // ★비어 지운 출처에는 탭 목록을 싣지 않는다★ — 탭 0 개 알림을 받은 웹뷰는 제 창을 닫는다(`OnEmptied`).
+    fn collect(mgr: &ViewManager, before: &BeforeDock, docked: &Docked, shown: ViewId) -> Self {
         if mgr.version == before.version {
             return DockNews::default();
         }
         let mut views = vec![shown];
         let mut windows = vec![docked.window.as_str()];
-        if docked.source_window != docked.window && !docked.source_window_closed {
+        if docked.source_window != docked.window && docked.emptied.is_none() {
             windows.push(&docked.source_window);
             let active = mgr.windows.get(&docked.source_window).map(|w| w.active);
             if let Some(active) = active.filter(|a| Some(*a) != before.source_active && *a != shown)
@@ -1045,78 +1100,69 @@ impl DockNews {
                 views.push(active);
             }
         }
-        let main_refilled = mgr.windows.get(MAIN_WINDOW_LABEL).is_some_and(|w| {
-            w.tabs
-                .iter()
-                .any(|v| *v != view && !before.main_tabs.contains(v))
-        });
         DockNews {
             layouts: views.iter().filter_map(|v| mgr.snapshot(*v).ok()).collect(),
             tabs: windows
                 .into_iter()
                 .filter_map(|label| tabs_payload(mgr, label))
                 .collect(),
-            main_refilled,
         }
     }
 }
 
-// 모델을 바꾼 도킹의 락 밖 몫 — 알림 → 비어 지운 출처 팝아웃의 OS 창 닫기(모델이 먼저 지웠다 — `close_tab` 과 같다).
-fn announce_docked(
+// 모델을 바꾼 도킹의 락 밖 몫 — 알림 → `Close` 면 비어 지운 출처 팝아웃의 OS 창 닫기(모델이 먼저 지웠다 —
+// `close_tab` 과 같다). 결말을 돌려준다.
+fn finish_docked(
     events: &dyn LayoutEvents,
     host: &dyn WindowHost,
-    docked: &Docked,
+    docked: Docked,
     news: &DockNews,
-) {
+    on_emptied: OnEmptied,
+) -> DockOutcome {
     announce(events, &news.layouts, &news.tabs);
-    if docked.source_window_closed {
-        host.close(&docked.source_window);
-    }
-}
-
-fn docked_outcome(docked: Docked) -> DockOutcome {
+    let closed_window = match (&docked.emptied, on_emptied) {
+        (Some(emptied), OnEmptied::Close) => {
+            host.close(&emptied.label);
+            Some(emptied.label.clone())
+        }
+        _ => None,
+    };
     DockOutcome {
-        closed_window: docked
-            .source_window_closed
-            .then(|| docked.source_window.clone()),
         window: docked.window,
         slot_ids: docked.slot_ids,
+        emptied: docked.emptied,
+        closed_window,
+        main_refilled: docked.main_refilled,
         reused: false,
     }
 }
 
-// `Seam` · `TabBar` — 판정 · 변경 · 스냅숏 · 재동기가 락 한 번이다.
+// `Seam` · `TabBar` · `AdoptWindow` — 판정 · 변경 · 스냅숏 · 재동기가 락 한 번이다.
 fn dock_in_place(
     state: &LayoutState,
     subs: &dyn SubscriptionSync,
     events: &dyn LayoutEvents,
     host: &dyn WindowHost,
-    view: ViewId,
+    ask: &DockAsk,
     to: DockTo,
-    guard: &DockGuard,
-    focus: FocusPolicy,
 ) -> Result<(DockOutcome, DockNotes), DockError> {
     let shown = match &to {
         DockTo::Seam { target, .. } => *target,
-        _ => view,
+        _ => ask.view,
     };
     let (docked, news, unchanged) = {
         let mut mgr = sync::lock(&state.0);
-        let before = BeforeDock::take(&mgr, view);
-        let docked = mgr.dock(view, to, guard, focus)?;
-        let news = DockNews::collect(&mgr, &before, &docked, view, shown);
+        let before = BeforeDock::take(&mgr, ask.view);
+        let docked = mgr.dock(ask.view, to, &ask.guard, ask.focus, ask.mv)?;
+        let news = DockNews::collect(&mgr, &before, &docked, shown);
         let unchanged = mgr.version == before.version;
         if !unchanged {
             subs.resync(&mgr);
         }
         (docked, news, unchanged)
     }; // ← 락 드롭
-    announce_docked(events, host, &docked, &news);
-    let notes = DockNotes {
-        main_refilled: news.main_refilled,
-        unchanged,
-    };
-    Ok((docked_outcome(docked), notes))
+    let out = finish_docked(events, host, docked, &news, ask.on_emptied);
+    Ok((out, DockNotes { unchanged }))
 }
 
 // `NewWindow` — phase A(락): 새 창이 필요한가.
@@ -1126,29 +1172,19 @@ fn dock_into_window(
     events: &dyn LayoutEvents,
     host: &dyn WindowHost,
     labels: &dyn LabelSource,
-    view: ViewId,
+    ask: &DockAsk,
     at: WindowPlace,
-    guard: &DockGuard,
-    focus: FocusPolicy,
 ) -> Result<(DockOutcome, DockNotes), DockError> {
-    let plan = sync::lock(&state.0).plan_new_window(view, guard)?; // ← 락 드롭
+    let plan = sync::lock(&state.0).plan_new_window(ask.view, &ask.guard)?; // ← 락 드롭
     match plan {
-        NewWindowPlan::Reuse { label } => reuse_source_window(state, host, view, label, &at, guard),
+        NewWindowPlan::Reuse { label } => reuse_source_window(state, host, ask, label, &at),
         NewWindowPlan::Create { size } => {
             let place = WindowPlace {
                 pos: at.pos,
                 size: at.size.or(size),
             };
-            let (out, main_refilled) = open_new_window(
-                state, subs, events, host, labels, view, &place, guard, focus,
-            )?;
-            Ok((
-                out,
-                DockNotes {
-                    main_refilled,
-                    unchanged: false,
-                },
-            ))
+            let out = open_new_window(state, subs, events, host, labels, ask, &place)?;
+            Ok((out, DockNotes::default()))
         }
     }
 }
@@ -1161,30 +1197,31 @@ fn open_new_window(
     events: &dyn LayoutEvents,
     host: &dyn WindowHost,
     labels: &dyn LabelSource,
-    view: ViewId,
+    ask: &DockAsk,
     place: &WindowPlace,
-    guard: &DockGuard,
-    focus: FocusPolicy,
-) -> Result<(DockOutcome, bool), DockError> {
+) -> Result<DockOutcome, DockError> {
     let label = labels.next_label();
-    if let Err(e) = host.open_at(&label, place, focus == FocusPolicy::Reveal) {
+    if let Err(e) = host.open_at(&label, place, ask.focus == FocusPolicy::Reveal) {
         tracing::warn!(label = %label, "도킹 새 창을 열지 못함 — 모델 그대로: {e}");
         return Err(DockError::WindowOpen(e));
     }
 
     let committed = {
         let mut mgr = sync::lock(&state.0);
-        let before = BeforeDock::take(&mgr, view);
+        let before = BeforeDock::take(&mgr, ask.view);
         mgr.dock(
-            view,
+            ask.view,
             DockTo::NewWindow {
                 label: label.clone(),
+                seed: None,
+                measures: FrameMeasures::default(),
             },
-            guard,
-            focus,
+            &ask.guard,
+            ask.focus,
+            ask.mv,
         )
         .map(|docked| {
-            let news = DockNews::collect(&mgr, &before, &docked, view, view);
+            let news = DockNews::collect(&mgr, &before, &docked, ask.view);
             subs.resync(&mgr);
             (docked, news)
         })
@@ -1197,9 +1234,9 @@ fn open_new_window(
             return Err(e);
         }
     };
-    announce_docked(events, host, &docked, &news);
+    let out = finish_docked(events, host, docked, &news, ask.on_emptied);
     host.record_placement(&label);
-    Ok((docked_outcome(docked), news.main_refilled))
+    Ok(out)
 }
 
 // 재사용 — B′(락 밖) 출처 창 옮기기 → 락 안에서 표식만 내린다(모델 변경 0).
@@ -1210,10 +1247,9 @@ fn open_new_window(
 fn reuse_source_window(
     state: &LayoutState,
     host: &dyn WindowHost,
-    view: ViewId,
+    ask: &DockAsk,
     label: WindowLabel,
     at: &WindowPlace,
-    guard: &DockGuard,
 ) -> Result<(DockOutcome, DockNotes), DockError> {
     if let Err(failed) = host.move_window(&label, at) {
         tracing::warn!(
@@ -1230,12 +1266,10 @@ fn reuse_source_window(
 
     let (slot_ids, still_there) = {
         let mut mgr = sync::lock(&state.0);
-        if let Some(id) = guard.lease {
-            mgr.release_lease(id);
-        }
+        mgr.release_held(&ask.guard);
         let slot_ids = mgr
             .views
-            .get(&view)
+            .get(&ask.view)
             .map(|v| tree::slot_ids(&v.layout))
             .unwrap_or_default();
         (slot_ids, mgr.windows.contains_key(&label))
@@ -1249,7 +1283,9 @@ fn reuse_source_window(
         DockOutcome {
             window: label,
             slot_ids,
+            emptied: None,
             closed_window: None,
+            main_refilled: None,
             reused: true,
         },
         DockNotes::default(),

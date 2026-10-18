@@ -448,11 +448,14 @@ mod close_request_tests {
 
     use super::*;
     use crate::daemon_client::DaemonDiscovery;
-    use crate::layout::dock::{DockAnchor, DockSide};
-    use crate::layout::manager::{DockError, DockGuard, DockTo, FocusPolicy};
+    use crate::layout::dock::{DockAnchor, DockSide, DOCK_NEW_SHARE};
+    use crate::layout::manager::{
+        DockError, DockGuard, DockMove, DockTo, FocusPolicy, FrameMeasures,
+    };
     use crate::layout::{
-        tree, DockDest, DockRequest, LayoutError, LayoutEvents, SlotContent, SubscriptionSync,
-        ViewManager, ViewSnapshot, WindowBounds, WindowPlacement, WindowTabsPayload,
+        tree, DockDest, DockRequest, LayoutError, LayoutEvents, OnEmptied, SlotContent,
+        SubscriptionSync, ViewManager, ViewSnapshot, WindowBounds, WindowPlacement,
+        WindowTabsPayload,
     };
 
     const POPUP: &str = "slot-popup-7";
@@ -675,6 +678,7 @@ mod close_request_tests {
                     target: q,
                     anchor: DockAnchor::Outer,
                     side: DockSide::Left,
+                    share: DOCK_NEW_SHARE,
                 },
                 DockError::TabNotFound(q),
             ),
@@ -688,12 +692,20 @@ mod close_request_tests {
             (
                 DockTo::NewWindow {
                     label: POPUP.into(),
+                    seed: None,
+                    measures: FrameMeasures::default(),
                 },
                 DockError::WindowClosed(POPUP.into()),
             ),
         ] {
             assert_eq!(
-                mgr.dock(source, to, &DockGuard::NONE, FocusPolicy::Reveal),
+                mgr.dock(
+                    source,
+                    to,
+                    &DockGuard::NONE,
+                    FocusPolicy::Reveal,
+                    DockMove::default()
+                ),
                 Err(want)
             );
             assert_eq!(mgr.version, version);
@@ -827,6 +839,7 @@ mod close_request_tests {
                 },
                 &DockGuard::NONE,
                 FocusPolicy::Keep,
+                DockMove::default(),
             )
             .unwrap();
     }
@@ -848,6 +861,8 @@ mod close_request_tests {
                 },
                 guard: DockGuard::NONE,
                 focus: FocusPolicy::Reveal,
+                mv: DockMove::default(),
+                on_emptied: OnEmptied::Close,
             },
         )
         .map(drop)

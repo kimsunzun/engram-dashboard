@@ -16,7 +16,7 @@
 use uuid::Uuid;
 
 use crate::layout::chrome::{DockChrome, RectCss, TabHeader};
-use crate::layout::dock::{docked_tree, incoming_rect, DockAnchor, DockSide};
+use crate::layout::dock::{docked_tree, incoming_rect, DockAnchor, DockSide, DOCK_NEW_SHARE};
 use crate::layout::geometry::{self, px_edge, PxRect};
 use crate::layout::manager::WindowLabel;
 use crate::layout::{tree, CanvasPx, LayoutNode};
@@ -208,7 +208,7 @@ pub fn landing_rect(
     incoming: &LayoutNode,
     canvas: CanvasPx,
 ) -> Option<PxRect> {
-    let result = docked_tree(target, anchor, side, incoming).ok()?;
+    let result = docked_tree(target, anchor, side, incoming, DOCK_NEW_SHARE).ok()?;
     let r = incoming_rect(&geometry::compute(&result), &tree::slot_ids(incoming))?;
     Some(PxRect {
         x0: px_edge(canvas.w, r.x0),
@@ -1439,7 +1439,8 @@ mod tests {
                 for &(side, band) in &bands {
                     let ctx = format!("{canvas:?} {anchor:?} {side:?}");
                     // 놓은 뒤 화면이 그릴 끼운 칸 틀들의 외접 사각형.
-                    let result = docked_tree(&target, anchor, side, &incoming).unwrap();
+                    let result =
+                        docked_tree(&target, anchor, side, &incoming, DOCK_NEW_SHARE).unwrap();
                     let after = frames(&result, canvas);
                     let (a, b) = (frame_of(&after, 21), frame_of(&after, 22));
                     let drawn = px(
@@ -1532,12 +1533,12 @@ mod tests {
         let target = slot(1);
         let anchor = DockAnchor::Slot(id(1));
         assert!(
-            docked_tree(&target, anchor, DockSide::Right, &incoming).is_err(),
+            docked_tree(&target, anchor, DockSide::Right, &incoming, DOCK_NEW_SHARE).is_err(),
             "전제: 오른쪽은 면적 0"
         );
         let bands = valid_bands(&target, anchor, &incoming, CANVAS);
         for side in SIDE_ORDER {
-            let ok = docked_tree(&target, anchor, side, &incoming).is_ok();
+            let ok = docked_tree(&target, anchor, side, &incoming, DOCK_NEW_SHARE).is_ok();
             assert_eq!(bands.iter().any(|(s, _)| *s == side), ok, "{side:?}");
         }
         assert!(bands.iter().any(|(s, _)| *s == DockSide::Top));
