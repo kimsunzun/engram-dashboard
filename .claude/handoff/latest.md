@@ -3,12 +3,12 @@
 ## 한 줄 상태 · 다음 첫 액션
 
 - **상태:** 프리셋 + 라이브러리 설계의 남은 결정을 이번 세션(2026-10-17 밤 ~ 10-18)에 전부 받았고, 결정 메모 · PRD · TRD · 브리핑 · step-log 에 반영 + 세 문서 정합성 정리까지 끝났다. ★로컬 커밋만 있고 push 안 함★(사용자가 중간에 push 를 거부 — 「결정 다 안 끝났잖아」. 이후 push 지시 없음).
-- **다음 첫 액션:** 브리핑을 열어 준다(`cmd //c start "" "docs\process\S21-preset-library\briefing.html"`) → 사용자가 훑으며 리뷰. 특히 §21 「결정 상태」의 「리뷰 때 확인」 셋(아래)과 미결 다섯(아래)을 짚는다. push 는 사용자에게 먼저 묻는다.
+- **다음 첫 액션:** 브리핑을 열어 준다(`cmd //c start "" "docs\process\S25-preset-library\briefing.html"`) → 사용자가 훑으며 리뷰. 특히 §21 「결정 상태」의 「리뷰 때 확인」 셋(아래)과 미결 다섯(아래)을 짚는다. push 는 사용자에게 먼저 묻는다.
 - **그 뒤(사용자 말 「html 깔끔하게 정리하고 그거 완성되면 실 구현 프로세스 들어가자」):** 리뷰 반영 → `/adr`(TRD §7 후보) → `/review trd`(이번 개정은 아직 리뷰 안 받음) → TRD §5 이행 0단계 + **0b = `yaml-edit` vs `yamlpatch` 스파이크**(주석 보존 · T2). 구현은 CLAUDE.md 규약대로 코더 스폰 · 리뷰 · QA.
 
 ## 문서
 
-- 브리핑(사용자가 보는 유일한 문서): `docs/process/S21-preset-library/briefing.html` — §21 = 「결정 상태」(오늘 정한 것 · 리뷰 때 확인 · 미룬 것).
+- 브리핑(사용자가 보는 유일한 문서): `docs/process/S25-preset-library/briefing.html` — §21 = 「결정 상태」(오늘 정한 것 · 리뷰 때 확인 · 미룬 것).
 - PRD `prd.md` · TRD `trd.md` · 결정 정본 `.claude/handoff/attachments/20261012-preset-decisions.md`(맨 아래 2026-10-18 줄들).
 - 이번 세션 결정 원문 묶음(워커 지시서 · 스크래치 · 저장소 밖 · 휘발): `C:\Users\kimsunzun\AppData\Local\Temp\claude\I--Engram-apps-engram-dashboard-wt1\370b426f-2a84-4152-8801-ee45f15f0d46\scratchpad\decisions-2026-10-18-final.md` — 내용은 메모에 다 옮겨졌다.
 - 조사 보고서(전부 커밋 · step-log 링크): `docs/research/` 의 `*-2026-10-18.md` 일곱 — 실행 막힘 관행 · 고친 뒤 표시 · 검사 캐시 키(CLI 검사를 버려 결론은 안 씀) · claude 설정 스키마 출처 · 막힘 표시 · 다시 연결/팝업 · YAML 주석 보존 — + `settings-asset-validation-spike-2026-10-17.md` 의 「Rust 크레이트 실측 (2026-10-18)」 절.

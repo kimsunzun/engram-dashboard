@@ -6,7 +6,7 @@
 | **상태** | **초안** — `/review trd` 3회차 반영본 + 2026-10-18 사용자 결정 반영(§2 의 결정 전부 확정 — 남은 사용자 결정 · 미결 없음 · D4 = 만들기는 E7 그대로 · 기존 에이전트 이전 없음 · §6-5 claude 합침 목록 규칙 닫힘 — 2026-10-18 브리핑 리뷰) + **2026-10-19 브리핑 리뷰 2차 결정 반영**(삭제 = 라이브러리 안 `.trash` · 비우기는 사람만 · OS 휴지통 작업 걷음 · 다시 연결 후보 제안 · 「다시 연결 확인 대기」 걷음(막힘 사유 다섯) · `daemon\cache\schemas\` · 편집 칸 위 문제 목록 · 부품 줄 누름 = 카드 토글(눈 모양 단추 걷음) · 끌어 옮기기 어디서나 · 확인 = 모달 · `agent.duplicate` · 에이전트 슬롯 = 편집 부품만 · 두 판(1판 · 2판) · 구현 전 외부 라이브러리 조사) · 2026-10-18 · 2026-10-19 반영분은 아직 `/review trd` 를 거치지 않았다 |
 | **작성일** | 2026-10-15 |
 | **리뷰 기록** | 2026-10-15 `/review trd` 1회차 — Claude doc-aware(Architect-breaker) **FIX** 12건 + codex blind(Designer) **FIX** 2건 · 상충 없음. 반영: 실행 전처리 순서 · 백엔드별 인자 · JSON 선택 칸의 길 · T10 · 어휘 소유 · `merge_preserving_live` · `cwd` 키 유지 · `display_name` 고정 · 일지 판정 · `std::sync::RwLock` · `libraryView.*` 셸 명령 · 실행 재료 가드 · 배치 포트 · codex 생성물 · `AGENTS.override.md` 위험 · `trash` 거부 · `Library{n}` 유일성 · 셸 세대 · `DataLayout` 기본 경로 · snapshot off 범위 · **2회차(같은 날)** — 두 리뷰어 FIX(좁음) · 반영: 전처리를 예약 · 떠 있음 확인 바로 뒤로 + 명부 변경 mutate 한 번(비교-교체) + Engram 폴더 = 에이전트 id(멱등) + `SpawnByCwd` 를 `spawn_blocking` 으로 · JSON 선택 칸의 재기동 대체안 삭제(모델 · 강도 둘 다 backend 요청 — 미지원 처리는 3회차가 멈춤 조건으로 바꿈) · 휴지통 = 전용 STA 스레드 · `trash` 거부 사유 정정 · codex 생성물 소유 표식(표식 + 내용 일치일 때만 걷기 · 떠 있는 동안 미룸) · §3 의 `allowedMcpServers` 문장을 T10 에 맞춤 · `DataLayout` 루트 출처 · `backend_args` 권위 · **3회차(같은 날)** — 두 리뷰어 FIX(좁음) · 반영: 명부에 없는 id(`SpawnByCwd` · 스모크 bin)를 전처리 앞에 넣기(`ensure_registered`) + 기본 프리셋을 다는 생성자 하나(`backend::builtin_backend_preset`) + 그 길에서도 Noop 회귀 · 점검은 명부 값을 읽고 mutate 는 그 뒤 안 바뀌었을 때만(한 번 다시 시도) · JSON 선택 칸 확인을 14 단계 수용 관문 · 멈춤 조건으로 |
-| **스텝** | S21 |
+| **스텝** | S25(2026-10-19 에 S21 에서 올림) |
 | **입력** | [PRD](prd.md)(R1–R50 · D1–D11 · E1–E19) + PRD 리뷰 델타 1차 10건(Δ1–Δ10) · 2차 9건(Δa–Δi) · 3차(「3차 델타」 — 기본 제공 백엔드는 떼지 않고 사용할 수 없음으로 둔다 · 버스 실행 기본값 저장 · JSON 선택 칸은 막지 않는다)(2026-10-15 · PRD 개정 진행 중) + 2026-10-18 사용자 결정(백엔드 = 에이전트 값 · 만들 때 고정 · 설정 = 백엔드별 원문 칸만 · 모델 충돌 검사 없음 — 기본 제공 백엔드 프리셋과 Δ1 · 3차 델타의 그 부분을 걷음) + 2026-10-18 후반 사용자 결정(codex 파일은 늘 깐다 — 「파일을 만들까요?」 대답 걷음 · 막힘 사유 여섯 = 한 범주(2026-10-19 에 다섯) · 막힘 팝업 · 설정 검사 = 프로세스 안에서 가볍게(실행 직전 CLI 검사 걷음) · JSON 선택 칸 안 잠금 · 에이전트 슬롯 「작업 폴더」 칸 + 대화 뒤 잠금 + `agent.setWorkspace` · 에이전트 슬롯 칸 머리 접기 · 다시 연결 = 확인 한 번(D10 — 2026-10-19 에 후보 제안을 걷음) + 하나 고르면 나머지 자동 · 상세 카드 = flip → shift → clamp(D11) · 숨은 settings 조각 없음(T10) · 프리셋 편집 손 주석 보존(T2 — 스파이크 먼저) · codex 압축 후속(T9) · 추천값 묶음 확정(D1 · D2 · D7 · D8 · D9 · T1 · T5 · T6 · T7 · T8)) + 2026-10-18 브리핑 리뷰 결정(claude settings 합침 = 값은 나중 것 · 목록은 합침 · 상세 카드 단추 = 모든 부품 줄(2026-10-19 에 단추를 걷고 줄 누름으로) · D4 = 기존 에이전트 이전 없음 · 실행 중 오류는 설정 행에 안 붙음 · T5 문구 확인 · `--mcp-config` 범위 밖 확정) + 2026-10-19 브리핑 리뷰 2차 결정(B1–B18 — 필터 = 언리얼 콘텐츠 브라우저 꼴 · 상세 블록 순서 · 편집 칸 위 문제 목록 · 부품 줄 누름 = 카드 토글 · 끌어 옮기기 어디서나 · 여러 개 삭제 · 이동 · 삭제 = 라이브러리 안 `.trash`(OS 휴지통 안 씀) · 비우기는 사람만 · 확인 = 모달 · 다시 연결 후보 제안과 「다시 연결 확인 대기」 걷음 · `description` 쓰기 안내 · `agent.duplicate` · `daemon\cache\` · 에이전트 슬롯 = 편집 부품만 · T8 피커 = 그 백엔드 모델만 · 두 판 · 구현 전 외부 라이브러리 조사) + 결정 메모 [`20261012-preset-decisions.md`](../../../.claude/handoff/attachments/20261012-preset-decisions.md) |
 | **줄 포인터 기준** | HEAD `477d9b7a` + 미커밋 문서 |
 | **표기** | (Dn) = 이 부분은 PRD 추천값 Dn 에 기댄다 · (Δn · Δx) = PRD 리뷰 델타를 반영 · 확신도 = 확실 / 가능성 높음 / 불확실 · 「T번호」 = §2-2 의 TRD 결정 |
@@ -512,40 +512,40 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 
 0b. **스파이크 — 주석 보존 YAML 편집(T2 · 첫 구현 단계 · 운영 코드 없음)** — 실제 프리셋 파일(손 주석 · 목록 넷)로 `yaml-edit` 0.3.2 를 재고 `yamlpatch` 1.31.1 과 견준다: 목록 끝 추가 · 중간 넣기 · 빼기(그 항목에 붙은 주석) · 순서 바꾸기 · 맵 칸 바꾸기 뒤에 손 주석 · 모양이 남는가. 결과 = `docs/research/` 보고서 + 고른 편집기(7 단계 `format.rs` · 9a 단계 편집의 쓰기 길). **둘 다 안 되면** 옛 추천(손 주석 잃음을 받아들이고 그 사실을 머리 주석으로 · 메모는 `description`)으로 물러나 사용자에게 보고한다(사용자 2026-10-18 「없으면 관행대로 처리해」).
 
-1. `S21: refactor: 옛 프리셋(작업 폴더 북마크) 걷기` — `PresetPalette` · `presetCommands.ts` · 배경 우클릭 프리셋 피커 · `agentStore` 프리셋 · 옛 wire 여섯 · `PresetRegistry` · `presets.json` 저장소 · `agent.new` 의 `preset` 칸 · `SlotContent::PresetPalette`(옛 값 → 빈 슬롯). `PROTOCOL_VERSION` 7 → 8 · agent catalog 6 → 7 · shell catalog 15 → 16(`SlotContentKind` 이 바뀐다 — 선언을 바꾸는 이 단계에서). **먼저 걷는 이유** = 이름 `preset` 의 두 뜻 공존을 없애고 `AgentManager` 생성자 자리를 새 포트에 비운다(걷어도 트리 판 메뉴로 만들기는 선다).
-2. `S21: feat(platform): 디렉터리 링크 · 경로 비교 · 파일 신원` — `junction`(해석된 `windows-sys` 판을 `cargo tree` 로 확인) · `file_identity`(§1-6) · 게이트 4g 목록(필요하면 4f 명단). 옛 「휴지통 — `IFileOperation`(기존 `windows` 0.58 feature 추가)」 은 걷었다(B8 — 삭제는 루트 `.trash` 로 rename 이라 OS 층이 필요 없다).
-3. `S21: refactor(agent): 프로필 프리셋 칸 · 옛 agents.json 비켜 두기` — `presets` · `default_preset` · `generated_paths` · `display_name` 고정(`command` 는 그대로 — 백엔드별 인자 `backend_args` 는 걷었다 · 사용자 2026-10-18) · `merge_preserving_live` 보존 칸(`cwd` 포함) · 옛 판 파일 = 백업 + 빈 명부(판 표식 — §1-5 「옛 에이전트」 · D4 — 이전 없음). `cwd` 칸 모양은 지금 그대로(필수 — 경로 없는 생성 = 다음 주제 §8). ★이 단계부터 옛 에이전트는 목록에 없다(백업 파일로 남음)★ — 새로 만든 에이전트의 동작은 그대로.
-4. `S21: feat(agent): 실행 전처리 + 실행 재료 포트 + manager 배선(Noop = 오늘과 같은 argv)` — `ensure_registered`(없는 id 를 전처리 앞에 넣기) · `prelaunch`(예약 뒤 · 명부에서 읽기 · 세션 파생 앞 · mutate 한 번 비교-교체 · 다시 시도 한 번) · 생성자 기본값(기본만 · `command` 그대로) · `SpawnByCwd` 를 `spawn_blocking` 으로 · `LaunchKitSource` · `LaunchKitGuard` · `LaunchFs` · `materialize` dispatch · `build_spec`/`open_spawn` 인자 · 회귀 골든. ★Noop 회귀는 `SpawnByCwd` · 스모크 bin 길에도 선다★ — 생성자가 붙인 기본을 Noop 은 읽지 않고, `extra_args` 는 지금 그대로 실리며, 이름 배정은 자리만 앞으로 옮겼을 뿐 같은 함수다(골든에 그 두 길을 넣는다).
-5. `S21: feat(agent): claude 실행 재료 번역` — 합친 지침 · snapshot off · plugin-dir · 합친 settings(모델은 원문 안 — 따로 된 모델 번역 없음).
-6. `S21: feat(agent): codex 실행 재료 번역(JSON · 터미널)` — developerInstructions · extraRoots · 원문 `-c`(모델 · 강도 줄 포함) · 작업 폴더 파일 · 크기 한도 · 이어받기 `additionalContext`(T6). 둘로 쪼개도 된다(JSON / 터미널).
-7. `S21: feat(daemon): library 모듈 — 경로 · 형식 · 저장소 seam · 훑기 · 설정 검사 · 해석 · 기본 제공` — 아직 아무도 안 부른다. 형식 = 읽기 serde-saphyr · 프리셋 편집 쓰기 = 0b 가 고른 편집기. 설정 검사 = `validate.rs`(스키마 내려받기 · 설치 판 읽기 seam · 처음 필요할 때 받기 · 판이 바뀌면 다시 받기 · 캐시 = `daemon\cache\schemas\`). 문제 목록(§1-3) 포함. 저장소 seam 의 `trash` 는 9b 가 쓴다.
-8. `S21: feat(daemon): 실행 재료 실물 꽂기` — `DaemonLaunchKits` → manager. ★여기서 에이전트가 기본 제공 프리셋 「기본」 으로 뜬다(백엔드는 그 에이전트 값 그대로) — 오늘 동작과의 차이는 snapshot off · `DISABLE_AUTOUPDATER` · 합친 지침 파일 · 합친 `--settings` 하나(제어 채널 조각 대신 「기본」 원문의 `allowedMcpServers` — T10) · codex 터미널의 작업 폴더 파일(늘 깐다 — §1-5 backend 번역)뿐★. 실 CLI 레인으로 claude · codex 각 1회 기동 확인.
+1. `S25: refactor: 옛 프리셋(작업 폴더 북마크) 걷기` — `PresetPalette` · `presetCommands.ts` · 배경 우클릭 프리셋 피커 · `agentStore` 프리셋 · 옛 wire 여섯 · `PresetRegistry` · `presets.json` 저장소 · `agent.new` 의 `preset` 칸 · `SlotContent::PresetPalette`(옛 값 → 빈 슬롯). `PROTOCOL_VERSION` 7 → 8 · agent catalog 6 → 7 · shell catalog 15 → 16(`SlotContentKind` 이 바뀐다 — 선언을 바꾸는 이 단계에서). **먼저 걷는 이유** = 이름 `preset` 의 두 뜻 공존을 없애고 `AgentManager` 생성자 자리를 새 포트에 비운다(걷어도 트리 판 메뉴로 만들기는 선다).
+2. `S25: feat(platform): 디렉터리 링크 · 경로 비교 · 파일 신원` — `junction`(해석된 `windows-sys` 판을 `cargo tree` 로 확인) · `file_identity`(§1-6) · 게이트 4g 목록(필요하면 4f 명단). 옛 「휴지통 — `IFileOperation`(기존 `windows` 0.58 feature 추가)」 은 걷었다(B8 — 삭제는 루트 `.trash` 로 rename 이라 OS 층이 필요 없다).
+3. `S25: refactor(agent): 프로필 프리셋 칸 · 옛 agents.json 비켜 두기` — `presets` · `default_preset` · `generated_paths` · `display_name` 고정(`command` 는 그대로 — 백엔드별 인자 `backend_args` 는 걷었다 · 사용자 2026-10-18) · `merge_preserving_live` 보존 칸(`cwd` 포함) · 옛 판 파일 = 백업 + 빈 명부(판 표식 — §1-5 「옛 에이전트」 · D4 — 이전 없음). `cwd` 칸 모양은 지금 그대로(필수 — 경로 없는 생성 = 다음 주제 §8). ★이 단계부터 옛 에이전트는 목록에 없다(백업 파일로 남음)★ — 새로 만든 에이전트의 동작은 그대로.
+4. `S25: feat(agent): 실행 전처리 + 실행 재료 포트 + manager 배선(Noop = 오늘과 같은 argv)` — `ensure_registered`(없는 id 를 전처리 앞에 넣기) · `prelaunch`(예약 뒤 · 명부에서 읽기 · 세션 파생 앞 · mutate 한 번 비교-교체 · 다시 시도 한 번) · 생성자 기본값(기본만 · `command` 그대로) · `SpawnByCwd` 를 `spawn_blocking` 으로 · `LaunchKitSource` · `LaunchKitGuard` · `LaunchFs` · `materialize` dispatch · `build_spec`/`open_spawn` 인자 · 회귀 골든. ★Noop 회귀는 `SpawnByCwd` · 스모크 bin 길에도 선다★ — 생성자가 붙인 기본을 Noop 은 읽지 않고, `extra_args` 는 지금 그대로 실리며, 이름 배정은 자리만 앞으로 옮겼을 뿐 같은 함수다(골든에 그 두 길을 넣는다).
+5. `S25: feat(agent): claude 실행 재료 번역` — 합친 지침 · snapshot off · plugin-dir · 합친 settings(모델은 원문 안 — 따로 된 모델 번역 없음).
+6. `S25: feat(agent): codex 실행 재료 번역(JSON · 터미널)` — developerInstructions · extraRoots · 원문 `-c`(모델 · 강도 줄 포함) · 작업 폴더 파일 · 크기 한도 · 이어받기 `additionalContext`(T6). 둘로 쪼개도 된다(JSON / 터미널).
+7. `S25: feat(daemon): library 모듈 — 경로 · 형식 · 저장소 seam · 훑기 · 설정 검사 · 해석 · 기본 제공` — 아직 아무도 안 부른다. 형식 = 읽기 serde-saphyr · 프리셋 편집 쓰기 = 0b 가 고른 편집기. 설정 검사 = `validate.rs`(스키마 내려받기 · 설치 판 읽기 seam · 처음 필요할 때 받기 · 판이 바뀌면 다시 받기 · 캐시 = `daemon\cache\schemas\`). 문제 목록(§1-3) 포함. 저장소 seam 의 `trash` 는 9b 가 쓴다.
+8. `S25: feat(daemon): 실행 재료 실물 꽂기` — `DaemonLaunchKits` → manager. ★여기서 에이전트가 기본 제공 프리셋 「기본」 으로 뜬다(백엔드는 그 에이전트 값 그대로) — 오늘 동작과의 차이는 snapshot off · `DISABLE_AUTOUPDATER` · 합친 지침 파일 · 합친 `--settings` 하나(제어 채널 조각 대신 「기본」 원문의 `allowedMcpServers` — T10) · codex 터미널의 작업 폴더 파일(늘 깐다 — §1-5 backend 번역)뿐★. 실 CLI 레인으로 claude · codex 각 1회 기동 확인.
 
-9a. `S21: feat(daemon): 루트 · 신원 · 기본 경로(DataLayout) · 편집 · 새로 만들기` — 막힘 사유 다섯이 여기서 다 선다(누가 실행하든 같다 — 실행 출처별 기본값 채움은 없다 · ① 찾을 수 없음은 다시 연결 없이도 선다).
+9a. `S25: feat(daemon): 루트 · 신원 · 기본 경로(DataLayout) · 편집 · 새로 만들기` — 막힘 사유 다섯이 여기서 다 선다(누가 실행하든 같다 — 실행 출처별 기본값 채움은 없다 · ① 찾을 수 없음은 다시 연결 없이도 선다).
 
-10a. `S21: feat(agent,daemon): 라이브러리 · 프리셋 · 에이전트 프리셋 명령 선언 + 포트(1판 몫)` — 1판 기능의 명령(`library.status` · `setRoot` · `folders` · `refresh` · `list` · `read` · `newFolder` · `newFile` · `preset.*` · `agent.presets` · `attachPreset` · `detachPreset` · `reorderPresets` · `launchCheck` · `new` · `setWorkspace` · `duplicate`) · catalog 7 유지(1 단계에서 올림 · 같은 브랜치) · 바인딩 재생성 · CLI 로 전부 부를 수 있다. `agent.setWorkspace` · `agent.duplicate` 는 본문을 manager 에 둔다(§1-5).
+10a. `S25: feat(agent,daemon): 라이브러리 · 프리셋 · 에이전트 프리셋 명령 선언 + 포트(1판 몫)` — 1판 기능의 명령(`library.status` · `setRoot` · `folders` · `refresh` · `list` · `read` · `newFolder` · `newFile` · `preset.*` · `agent.presets` · `attachPreset` · `detachPreset` · `reorderPresets` · `launchCheck` · `new` · `setWorkspace` · `duplicate`) · catalog 7 유지(1 단계에서 올림 · 같은 브랜치) · 바인딩 재생성 · CLI 로 전부 부를 수 있다. `agent.setWorkspace` · `agent.duplicate` 는 본문을 manager 에 둔다(§1-5).
 
-11. `S21: feat(front): 웹뷰 → 데몬 버스 왕복 + libraryClient` — `CommandReply` 갈래 · `callCommand`.
+11. `S25: feat(front): 웹뷰 → 데몬 버스 왕복 + libraryClient` — `CommandReply` 갈래 · `callCommand`.
 
-12a. `S21: feat(shell): 슬롯 종류 둘 · Library{n} 유일성(쓰기 길 · 복원) · slot.openUnique · libraryView.* · 번호별 보기 상태 · 에이전트 슬롯 접기 칸 · 로컬 OS 요청` — shell catalog 은 1 단계에서 올린 16 그대로(같은 브랜치) · 생성물 다시 굽기 · 웹뷰 직접 다이얼로그 셋 이관. 컬렉션은 12b.
+12a. `S25: feat(shell): 슬롯 종류 둘 · Library{n} 유일성(쓰기 길 · 복원) · slot.openUnique · libraryView.* · 번호별 보기 상태 · 에이전트 슬롯 접기 칸 · 로컬 OS 요청` — shell catalog 은 1 단계에서 올린 16 그대로(같은 브랜치) · 생성물 다시 굽기 · 웹뷰 직접 다이얼로그 셋 이관. 컬렉션은 12b.
 
 13. 화면(1판) — 여러 커밋. ① `LibrarySlot`(읽기 · 트리 · 목록 · 상세(블록 순서 — B2) · 필터 · 검색 · 새로 고침 · 새로 만들기 · 빈/없음 안내 · 기록) ③ `PresetEditor`(독립 부품 — B15) + 추가 세 길 + 위 문제 목록(B3) + 부품 줄 누름 카드(B5) + ⋮⋮ 순서 ④ 에이전트 프리셋 슬롯(편집 부품만 · 칸 머리 접기 · 「작업 폴더」 칸 · 잠김 · 위 문제 목록) + 트리 「프리셋…」 · 「복제」 + 기본 떼기 모달(B10) + 막힘 팝업(링크 → `libraryView.reveal`) + 프리셋 줄 오류 수 배지. 각 커밋 = 그 화면이 선 채 `/qa`. (② · ⑤ · ⑥ 은 2판)
 
-15a. `S21: docs: CLAUDE.md 모듈 맵 · step-log · tracking(1판)` — load-bearing 이라 `/review doc`.
+15a. `S25: docs: CLAUDE.md 모듈 맵 · step-log · tracking(1판)` — load-bearing 이라 `/review doc`.
 
 ### 5-2. 2판
 
-9b. `S21: feat(daemon): 다시 연결(`relink` — 고른 뒤 나머지 자동) · 이동 기록 · 파일 조작(이동 · 이름 · 삭제 → 루트 `.trash`) · 일지(단계별 판정)` — 훑기 때 후보 찾기는 없다(B11). `.trash` 안 자리 규칙은 §6-5 결정을 따른다.
+9b. `S25: feat(daemon): 다시 연결(`relink` — 고른 뒤 나머지 자동) · 이동 기록 · 파일 조작(이동 · 이름 · 삭제 → 루트 `.trash`) · 일지(단계별 판정)` — 훑기 때 후보 찾기는 없다(B11). `.trash` 안 자리 규칙은 §6-5 결정을 따른다.
 
-10b. `S21: feat(agent,daemon): 파일 조작 · 다시 연결 · 이동 기록 명령 선언(2판 몫)` — `library.move` · `rename` · `delete` · `relink` · `moves`. **휴지통 비우기 명령은 선언하지 않는다**(사람만 — §7 28 · 화면 길 = §6-5 결정 뒤).
+10b. `S25: feat(agent,daemon): 파일 조작 · 다시 연결 · 이동 기록 명령 선언(2판 몫)` — `library.move` · `rename` · `delete` · `relink` · `moves`. **휴지통 비우기 명령은 선언하지 않는다**(사람만 — §7 28 · 화면 길 = §6-5 결정 뒤).
 
-12b. `S21: feat(shell): 컬렉션 · 대상 컬렉션 · 이동 기록 따라잡기` — `collection.*` · `collections.json`.
+12b. `S25: feat(shell): 컬렉션 · 대상 컬렉션 · 이동 기록 따라잡기` — `collection.*` · `collections.json`.
 
 13. 화면(2판) — ② 파일 조작(우클릭 · 이름 바꾸기 · 여러 개 삭제 · 삭제 모달(B9) · 다시 연결 팝오버(B11) · 사람만 하는 휴지통 비우기 화면 — §6-5) ⑤ 끌어 옮기기 어디서나(목록 · 트리 · 다른 슬롯 — B6 · 다른 창은 §6-5 확인 결과대로) ⑥ 컬렉션 · 즐겨찾기(`CollectionsPane` · 대상 컬렉션 칩).
 
-14. `S21: feat: JSON 모드 첫 메시지 전 모델 · 강도 선택`(T8) — 따로 떨어진 마지막 단계(목록 = 그 에이전트 백엔드 모델만 — B16). ★첫 커밋 = 수용 관문★: claude · codex 각각 모델 · 강도 요청이 첫 메시지 전에 먹는지 실 CLI 확인. 하나라도 안 되면 **여기서 멈추고 사용자 결정**(R35 개정 또는 다른 길) — 칸 끄기 · 재기동으로 넘어가지 않는다.
+14. `S25: feat: JSON 모드 첫 메시지 전 모델 · 강도 선택`(T8) — 따로 떨어진 마지막 단계(목록 = 그 에이전트 백엔드 모델만 — B16). ★첫 커밋 = 수용 관문★: claude · codex 각각 모델 · 강도 요청이 첫 메시지 전에 먹는지 실 CLI 확인. 하나라도 안 되면 **여기서 멈추고 사용자 결정**(R35 개정 또는 다른 길) — 칸 끄기 · 재기동으로 넘어가지 않는다.
 
-15b. `S21: docs: CLAUDE.md 모듈 맵 · step-log · tracking(2판)` — load-bearing 이라 `/review doc`.
+15b. `S25: docs: CLAUDE.md 모듈 맵 · step-log · tracking(2판)` — load-bearing 이라 `/review doc`.
 
 ## 6. 위험 · 미결 · 확인 항목
 
