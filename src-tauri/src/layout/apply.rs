@@ -1321,7 +1321,7 @@ pub fn report_ui_metrics(
         .map_err(|e| e.to_string())
 }
 
-// TRD S21-slot-docking §1-5
+// TRD S21-slot-docking §4
 pub fn report_dock_chrome(
     state: &LayoutState,
     window: &str,

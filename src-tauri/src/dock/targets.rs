@@ -217,8 +217,6 @@ mod tests {
                 chrome: Some(DockChrome {
                     canvas_origin,
                     tab_bar: rect(0.0, 0.0, 600.0, 28.0),
-                    tabs: Vec::new(),
-                    scroll: None,
                 }),
                 attrs: WindowAttrs::default(),
                 geom,

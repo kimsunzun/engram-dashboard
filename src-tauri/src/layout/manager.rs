@@ -234,7 +234,7 @@ pub struct WindowTabs {
     pub canvas: Option<CanvasPx>,
     // ADR-0227
     pub metrics: Option<UiMetrics>,
-    // TRD S21-slot-docking §1-5 「크롬 보고를 늘 하는 이유」
+    // TRD S21-slot-docking §4 · §2-5 — 늘 보고하는 이유는 `frameReport.ts` 머리
     pub chrome: Option<DockChrome>,
     /// 영속 신원 — main 은 `main`, 팝아웃은 그 창 항목이 처음 생길 때 뽑은 UUID(하이픈 소문자). 저장 · 복원은 이
     /// 값을 쓴다. 런타임 label(맵 키)은 한 부팅 안에서만의 신원이다 — 팝아웃 label 은 실행마다 1 부터 다시
@@ -1703,7 +1703,7 @@ impl ViewManager {
 
     // 모양 검사를 하지 않는다 — wire(JSON)는 유한하지 않은 수를 못 싣고, 뒤집힌 사각형은 반열림 판정이 어느 점도
     // 품지 않아 그 칸의 놓기만 없어진다.
-    // TRD S21-slot-docking §1-5
+    // TRD S21-slot-docking §4
     pub fn set_dock_chrome(&mut self, label: &str, chrome: DockChrome) -> Result<(), LayoutError> {
         let wt = self
             .windows
@@ -4013,8 +4013,6 @@ mod tests {
                 x1: bar_x1,
                 y1: 28.0,
             },
-            tabs: Vec::new(),
-            scroll: None,
         }
     }
 

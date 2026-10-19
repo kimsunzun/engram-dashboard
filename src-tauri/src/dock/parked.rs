@@ -183,8 +183,6 @@ mod tests {
                 x1: 640.0,
                 y1: 28.0,
             },
-            tabs: Vec::new(),
-            scroll: None,
         }
     }
 

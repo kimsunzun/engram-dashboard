@@ -1004,8 +1004,6 @@ describe('WindowLayout — 탭 끌기 배선', () => {
     expect(lastChrome()).toEqual({
       canvas_origin: { x: 0, y: 29 },
       tab_bar: { x0: 0, y0: 0, x1: 768, y1: 28 },
-      tabs: [],
-      scroll: null,
     })
   })
 
@@ -1134,7 +1132,7 @@ describe('WindowLayout — 대기 모드(window_role · dock:spare)', () => {
         ]),
       )
       await waitFor(() => expect(chromeReports().length).toBeGreaterThan(0))
-      expect(lastChrome().tabs).toEqual([])
+      expect(lastChrome()).toEqual({ canvas_origin: expect.any(Object), tab_bar: expect.any(Object) })
     } finally {
       vi.unstubAllGlobals()
     }

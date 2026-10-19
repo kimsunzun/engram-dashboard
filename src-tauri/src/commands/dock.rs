@@ -19,7 +19,7 @@ use crate::layout::chrome::DockChrome;
 use crate::layout::{LabelSource, LayoutState};
 use crate::webview_env::WebviewEnv;
 
-/// 창 웹뷰가 탭바 · 탭 머리 · 캔버스 원점을 알린다(동기 · 측정) — `invoke('report_dock_chrome', { chrome })`. 계약은
+/// 창 웹뷰가 탭 끌기 영역 · 캔버스 원점을 알린다(동기 · 측정) — `invoke('report_dock_chrome', { chrome })`. 계약은
 /// [`DockChrome`] 문서. 대기 창 명부의 창이면 모델 대신 명부에 적는다(TRD §2-5). 탭 모델에도 명부에도 없는 창이면
 /// `Err` 이고 직전 값을 유지한다. 버스 명령이 아니다(ADR-0227 — 측정은 위조할 수 없게 웹뷰만 보고한다).
 #[tauri::command]

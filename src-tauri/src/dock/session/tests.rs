@@ -330,8 +330,6 @@ fn chrome() -> DockChrome {
     DockChrome {
         canvas_origin: PointCss { x: 0.0, y: 28.0 },
         tab_bar: AREA,
-        tabs: Vec::new(),
-        scroll: None,
     }
 }
 

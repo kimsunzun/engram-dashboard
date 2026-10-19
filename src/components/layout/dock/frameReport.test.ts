@@ -1,4 +1,4 @@
-// frameReport 단위테스트 — 측정 → 보고 값(`tab_bar` = 탭 끌기 영역 · 옛 모양 칸 `tabs: []` · `scroll: null`)과 보내기 배선.
+// frameReport 단위테스트 — 측정 → 보고 값(`tab_bar` = 탭 끌기 영역)과 보내기 배선.
 //   보내기 규칙(한 번에 하나 · 재시도)은 `util/latestValueReporter.test.ts` 가 잰다. 언제 재는지는 부르는 쪽의 시험 몫이다.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -64,12 +64,10 @@ describe('dragAreaRect', () => {
 })
 
 describe('frameChromeOf', () => {
-  it('캔버스 왼쪽 위 = 원점 · tab_bar = 끌기 영역 · 옛 모양 칸은 비운다', () => {
+  it('캔버스 왼쪽 위 = 원점 · tab_bar = 끌기 영역 · 그 둘만 싣는다', () => {
     expect(frameChromeOf(frame({ canvasTop: 32.5 }))).toEqual({
       canvas_origin: { x: 0, y: 32.5 },
       tab_bar: { x0: 8, y0: 2, x1: 608, y1: 30 },
-      tabs: [],
-      scroll: null,
     })
   })
 })

@@ -1,8 +1,6 @@
 // TRD S21-slot-docking §4: 창 틀 보고(`report_dock_chrome`)의 보내는 쪽 — 셸은 이 값으로 그 창의 탭바 구역(붙기 판정) · 캔버스
 //   원점(칸 띠)을 안다. 측정이라 version · 알림 · 저장이 없다(ADR-0227). 끌기 시작 때 재면 첫 판정이 늦으므로 평소에 보고한다.
 //   언제 잴지는 부르는 쪽이 정하고 여기서는 무엇을 보낼지만 정한다 — 보내기 규칙은 `util/latestValueReporter.ts`.
-// ★모양은 U8 까지 옛 `DockChrome` 그대로다★ — `tabs: []` · `scroll: null` 을 싣는다. 셸 `DockChrome` 이 그때까지 `tabs` 를
-//   요구해(serde 기본값 없음) 칸을 빼면 보고가 전부 역직렬화에 실패한다(TRD §13 B8). 뜻만 바뀐다: `tab_bar` = 탭 끌기 영역.
 // 상태가 모듈 범위인 이유는 `windowCanvasReport.ts` 와 같다(훅 인스턴스가 바뀌어도 날아가는 invoke 를 안다 · HMR).
 
 import { invoke } from '@tauri-apps/api/core'
@@ -44,12 +42,9 @@ export function frameChromeOf(m: FrameMeasure): DockChrome {
   return {
     canvas_origin: { x: m.canvas.left, y: m.canvas.top },
     tab_bar: dragAreaRect(m.area),
-    tabs: [],
-    scroll: null,
   }
 }
 
-// `tabs` · `scroll` 은 늘 빈 칸이라 보지 않는다.
 const sameFrame = (a: DockChrome, b: DockChrome): boolean =>
   a.canvas_origin.x === b.canvas_origin.x &&
   a.canvas_origin.y === b.canvas_origin.y &&
