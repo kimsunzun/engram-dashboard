@@ -2,7 +2,7 @@
 //   10 px 문턱(그 아래는 click · dblclick 그대로) · 뗌을 놓친 누름(단추 놓인 움직임 · 새 누름 · 창 blur) · 누른 머리 사각형의
 //   잡은 비율 · begin 인자와 답 넷 · 답 기다리는 동안 붙든 끝 · 순서 이동 seq 와 끝의 `at` · 모델 메아리 맞추기 · 구역 나감 →
 //   leave 답 셋(not_ready 면 구역 밖도 가로로 몬다) · 캡처 잃음 · 키(탭을 쥔 창이 받고 끊는다) · 셸 입력(attach · move ·
-//   release) · `dock:drag{ended}` 거두기. 끝에 훅 배선(재기 · `dock:feed` · `dock:drag` · 언마운트)을 실물 `dockSession` 위에서 잰다.
+//   release) · `dock:drag{ended}` 거두기 · 누름부터 끝까지의 `engaged`. 끝에 훅 배선(재기 · `dock:feed` · `dock:drag` · 언마운트)을 실물 `dockSession` 위에서 잰다.
 // 탭바(기대값의 손셈): 줄 x 100..800 · y 40..68 · `+` 40 → 쓸 수 있는 폭 660 · 탭 넷이면 모두 표준 폭 160 → 끌기 영역 좌표의
 //   경계 0 · 160 · 320 · 480 · 640 · 순서 문턱 16 · 끄는 탭 왼쪽 상한 660 − 160 = 500. 탭 a(머리 x 100..260)를 x 180(머리 안
 //   80 = 비율 0.5 → 잡은 오프셋 80)에서 누른다. 움직임은 주 단추를 쥔 채(`buttons` 1)다.
@@ -61,6 +61,7 @@ let row: HTMLDivElement
 let head: HTMLDivElement
 let captured: Set<number>
 let views: (TabDragView | null)[]
+let engaged: boolean[]
 let ctl: TabDragController
 
 const lastView = () => views[views.length - 1] ?? null
@@ -125,11 +126,13 @@ beforeEach(() => {
   row.releasePointerCapture = vi.fn((id: number) => void captured.delete(id))
   row.hasPointerCapture = (id: number) => captured.has(id)
   views = []
+  engaged = []
   ctl = new TabDragController({
     row: () => row,
     measure: () => MEASURE,
     reducedMotion: () => false,
     onView: v => views.push(v),
+    onEngaged: e => engaged.push(e),
   })
   ctl.setModel(['a', 'b', 'c', 'd'], 'b', null)
 })
@@ -403,6 +406,7 @@ describe('탭바 안 순서 이동', () => {
       measure: () => MEASURE,
       reducedMotion: () => true,
       onView: v => views.push(v),
+      onEngaged: () => {},
     })
     ctl.setModel(['a', 'b', 'c', 'd'], 'b', null)
     await strip()
@@ -669,6 +673,36 @@ describe('dock:drag{ended}', () => {
     press()
     move(191, 50)
     expect(calls(CMD_TAB_DRAG_BEGIN)).toHaveLength(2)
+  })
+})
+
+describe('engaged', () => {
+  it('누름부터 — 문턱 전 뗌은 그 자리에서, 끌기는 begin 을 기다리는 동안의 뗌 · 놓은 뒤를 지나 그 세션의 ended 에서 끝난다', async () => {
+    press()
+    up(185, 50)
+    expect(engaged).toEqual([true, false])
+
+    press()
+    move(191, 50)
+    up(191, 50)
+    begins[0].resolve({ type: 'strip', session: 7, zone: ZONE })
+    await ticks()
+    expect(ends()).toHaveLength(1)
+    expect(engaged).toEqual([true, false, true])
+    ctl.dragEvent({ session: 7, phase: 'ended' })
+    expect(engaged).toEqual([true, false, true, false])
+  })
+
+  it('창째 끌기 · 뗀 뒤는 그 세션의 ended 까지 · 셸이 붙인 끌기는 붙은 때부터', async () => {
+    press()
+    move(191, 50)
+    begins[0].resolve({ type: 'whole_window', session: 3 })
+    await ticks()
+    expect(engaged).toEqual([true])
+    ctl.dragEvent({ session: 3, phase: 'ended' })
+    expect(engaged).toEqual([true, false])
+    feed(attachStep())
+    expect(engaged).toEqual([true, false, true])
   })
 })
 

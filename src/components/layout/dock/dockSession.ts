@@ -174,6 +174,3 @@ function notify<T>(listeners: Set<{ cb: (value: T) => void }>, value: T, event: 
     }
   }
 }
-
-/** 옛 이름 — `WindowLayout` 이 부르는 쪽을 `watchDockSession` 으로 바꿀 때(U7b-2) 걷는다. */
-export const watchWindowMode = watchDockSession

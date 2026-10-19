@@ -33,6 +33,9 @@ vi.mock('./store/eventBus', () => ({
 vi.mock('./commands/contributions', () => ({}))
 vi.mock('./components/layout/AppLayout', () => ({ default: () => <div data-testid="app-layout" /> }))
 vi.mock('./pages/PopoutPage', () => ({ default: () => <div data-testid="popout-page" /> }))
+// 안내 창 페이지가 거는 `dock:overlay` 듣기 — jsdom 에는 Tauri 내부가 없다.
+vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }))
+vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({ label: 'dock-overlay' }) }))
 
 import App from './App'
 

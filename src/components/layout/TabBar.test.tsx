@@ -1,15 +1,27 @@
-// TabBar 단위테스트 — 탭 렌더 + 클릭 액션이 올바른 콜백을 부르는지(ADR-0057, §7-2).
+// TabBar 단위테스트 — 탭 렌더 · 누름 전환 · 닫기 · 추가 · 이름 인라인 편집(ADR-0057, §7-2) + 탭 끌기 그리기(TRD
+//   S21-slot-docking §2-2 · §5-1 — 훅 `useTabDrag` 를 실물로 · invoke · 사건은 가짜).
+// 탭바(끌기 쪽 기대값의 손셈): 줄 x 100..800 · y 40..68 · `+` 40 → 쓸 수 있는 폭 660 · 탭 넷이면 모두 160 → 머리 x 0 · 160 ·
+//   320 · 480. 탭 a(머리 x 100..260)를 x 180(잡은 오프셋 80)에서 누른다.
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const invokeMock = vi.hoisted(() => vi.fn(async (_cmd: string, _args?: unknown): Promise<unknown> => undefined))
-vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }))
+vi.mock('@tauri-apps/api/core', () => ({ invoke: (cmd: string, args?: unknown) => invokeMock(cmd, args) }))
+const handlers = vi.hoisted(() => new Map<string, (e: { payload: unknown }) => void>())
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn(async (event: string, handler: (e: { payload: unknown }) => void) => {
+    handlers.set(event, handler)
+    return () => handlers.delete(event)
+  }),
+}))
+vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({ label: 'main' }) }))
 
 import TabBar from './TabBar'
 import type { ViewMeta } from '../../api/layoutTypes'
-import { DOCK_MIME } from './dock/dockDrag'
-import { __resetDragImageForTest, DRAG_IMAGE_HOTSPOT, ensureDragImageBox } from './dock/dragImage'
+import type { BeginReply } from '../../../src-tauri/bindings/BeginReply'
+import { watchDockSession } from './dock/dockSession'
+import { TAB_MIN_ACTIVE_W } from './tabStrip/layout'
 
 afterEach(cleanup)
 
@@ -18,30 +30,32 @@ const TABS: ViewMeta[] = [
   { id: 'v2', name: 'View 2' },
 ]
 
-function renderBar(active = 'v1') {
-  const onSwitch = vi.fn()
-  const onCreate = vi.fn()
-  const onClose = vi.fn()
-  const onRename = vi.fn()
-  render(
-    <TabBar
-      label="main"
-      tabs={TABS}
-      active={active}
-      onSwitch={onSwitch}
-      onCreate={onCreate}
-      onClose={onClose}
-      onRename={onRename}
-    />,
-  )
-  return { onSwitch, onCreate, onClose, onRename }
+type Props = Parameters<typeof TabBar>[0]
+
+function renderBar(active: string | null = 'v1', tabs: ViewMeta[] = TABS) {
+  const props: Props = {
+    label: 'main',
+    tabs,
+    active,
+    onSwitch: vi.fn(),
+    onCreate: vi.fn(),
+    onClose: vi.fn(),
+    onRename: vi.fn(),
+  }
+  const view = render(<TabBar {...props} />)
+  const rerender = (next: Partial<Props>) => {
+    Object.assign(props, next)
+    view.rerender(<TabBar {...props} />)
+  }
+  return { ...props, rerender }
 }
 
+const head = (id: string) => screen.getAllByTestId('tab').find(t => t.getAttribute('data-view-id') === id)!
+const headIds = () => screen.getAllByTestId('tab').map(t => t.getAttribute('data-view-id'))
+const nameOf = (id: string) => head(id).querySelector<HTMLElement>('[data-testid="tab-name"]')!
+
 function openEditForV1() {
-  const nameSpan = screen
-    .getAllByTestId('tab-name')
-    .find(s => s.closest('[data-testid="tab"]')?.getAttribute('data-view-id') === 'v1')!
-  fireEvent.doubleClick(nameSpan)
+  fireEvent.doubleClick(nameOf('v1'))
   return screen.getByTestId('tab-rename-input') as HTMLInputElement
 }
 
@@ -50,17 +64,23 @@ describe('TabBar', () => {
     renderBar('v2')
     const tabs = screen.getAllByTestId('tab')
     expect(tabs).toHaveLength(2)
-    const active = tabs.find(t => t.getAttribute('data-view-id') === 'v2')!
-    const inactive = tabs.find(t => t.getAttribute('data-view-id') === 'v1')!
-    expect(active.getAttribute('data-active')).toBe('true')
-    expect(inactive.getAttribute('data-active')).toBe('false')
+    expect(head('v2').getAttribute('data-active')).toBe('true')
+    expect(head('v1').getAttribute('data-active')).toBe('false')
   })
 
-  it('탭 클릭 → onSwitch(그 view id)', () => {
+  it('비활성 탭 머리를 왼쪽 단추로 누르는 순간 onSwitch(그 view) — 클릭을 기다리지 않는다', () => {
     const { onSwitch } = renderBar('v1')
-    const tab2 = screen.getAllByTestId('tab').find(t => t.getAttribute('data-view-id') === 'v2')!
-    fireEvent.click(tab2)
+    fireEvent.pointerDown(nameOf('v2'), { button: 0, pointerId: 1 })
     expect(onSwitch).toHaveBeenCalledWith('v2')
+    fireEvent.click(head('v2'))
+    expect(onSwitch).toHaveBeenCalledTimes(1)
+  })
+
+  it('활성 탭 누름 · 오른쪽 단추 누름은 전환하지 않는다', () => {
+    const { onSwitch } = renderBar('v1')
+    fireEvent.pointerDown(head('v1'), { button: 0, pointerId: 1 })
+    fireEvent.pointerDown(head('v2'), { button: 2, pointerId: 1 })
+    expect(onSwitch).not.toHaveBeenCalled()
   })
 
   it('[+] 클릭 → onCreate', () => {
@@ -69,11 +89,11 @@ describe('TabBar', () => {
     expect(onCreate).toHaveBeenCalledTimes(1)
   })
 
-  it('탭 × 클릭 → onClose(그 view id) + 부모 onSwitch 로 버블 안 함(stopPropagation)', () => {
+  it('탭 × 클릭 → onClose(그 view id) · × 누름은 머리 누름이 아니다(전환 없음)', () => {
     const { onClose, onSwitch } = renderBar('v1')
-    const closeBtns = screen.getAllByTestId('tab-close')
-    // v2 탭의 닫기 버튼(두 번째).
-    fireEvent.click(closeBtns[1])
+    const close = head('v2').querySelector<HTMLElement>('[data-testid="tab-close"]')!
+    fireEvent.pointerDown(close, { button: 0, pointerId: 1 })
+    fireEvent.click(close)
     expect(onClose).toHaveBeenCalledWith('v2')
     expect(onSwitch).not.toHaveBeenCalled()
   })
@@ -81,7 +101,6 @@ describe('TabBar', () => {
   it('이름 더블클릭 → 인라인 편집 진입(input 등장, 현재 이름 시드)', () => {
     renderBar('v1')
     const input = openEditForV1()
-    expect(input).toBeTruthy()
     expect(input.value).toBe('View 1')
     expect(input.getAttribute('data-view-id')).toBe('v1')
   })
@@ -136,299 +155,364 @@ describe('TabBar', () => {
     expect(onRename).not.toHaveBeenCalled()
   })
 
-  it('편집 중 input 키 입력이 부모 탭 onSwitch 로 버블 안 함(stopPropagation)', () => {
-    const { onSwitch } = renderBar('v1')
+  it('편집 중 input 키 입력이 바깥(전역 키바인딩)으로 새지 않는다(stopPropagation)', () => {
+    renderBar('v1')
     const input = openEditForV1()
+    const outside = vi.fn()
+    document.addEventListener('keydown', outside)
     fireEvent.keyDown(input, { key: 'a' })
-    expect(onSwitch).not.toHaveBeenCalled()
+    document.removeEventListener('keydown', outside)
+    expect(outside).not.toHaveBeenCalled()
   })
 
-  it('이름 더블클릭 → 편집 진입 + 더블클릭 완성 클릭이 spurious switch 유발 안 함(FIX 2)', () => {
-    const { onSwitch } = renderBar('v1') // 비활성 탭 v2 를 더블클릭.
-    const nameSpan = screen
-      .getAllByTestId('tab-name')
-      .find(s => s.closest('[data-testid="tab"]')?.getAttribute('data-view-id') === 'v2')!
-    // 실제 더블클릭 제스처: dblclick 전에 click 이 2번(detail 1, 2) 쏜 뒤 dblclick(detail 2).
-    // span onClick 은 detail>=2 만 stopPropagation → 두 번째(완성) 클릭은 부모 onSwitch 로 안 샌다.
-    fireEvent.click(nameSpan, { detail: 1 })
-    fireEvent.click(nameSpan, { detail: 2 })
-    fireEvent.doubleClick(nameSpan, { detail: 2 })
-    expect(screen.getByTestId('tab-rename-input')).toBeTruthy()
-    expect(onSwitch).toHaveBeenCalledTimes(1)
-    expect(onSwitch).toHaveBeenCalledWith('v2')
+  it('비활성 탭 이름 더블클릭 제스처 → 누름에서 그 탭으로 전환 · 편집 진입', () => {
+    const { onSwitch } = renderBar('v1')
+    const name = nameOf('v2')
+    for (const detail of [1, 2]) {
+      fireEvent.pointerDown(name, { button: 0, pointerId: 1 })
+      fireEvent.pointerUp(name, { button: 0, pointerId: 1 })
+      fireEvent.click(name, { detail })
+    }
+    fireEvent.doubleClick(name, { detail: 2 })
+    expect(screen.getByTestId('tab-rename-input').getAttribute('data-view-id')).toBe('v2')
+    expect(onSwitch).toHaveBeenCalled()
+    expect(vi.mocked(onSwitch).mock.calls.every(c => c[0] === 'v2')).toBe(true)
+  })
+
+  it('머리는 HTML5 끌기 출처가 아니다 — draggable 없음 · div', () => {
+    renderBar('v1')
+    for (const el of screen.getAllByTestId('tab')) {
+      expect(el.tagName).toBe('DIV')
+      expect(el.getAttribute('draggable')).toBeNull()
+    }
+  })
+
+  it('탭바 줄 = 위치 기준 · 스크롤 없음 · 왼쪽 패딩 없음 · 머리와 + 만 담는다', () => {
+    renderBar('v1')
+    const row = screen.getByTestId('tab-strip-row')
+    expect(row.style.position).toBe('relative')
+    expect(row.style.overflow).toBe('')
+    expect(row.style.overflowX).toBe('')
+    expect(row.style.paddingLeft).toBe('')
+    expect(row.style.borderLeft).toBe('')
+    const kinds = Array.from(row.children, c => (c as HTMLElement).dataset.testid)
+    expect(kinds).toEqual(['tab', 'tab', 'tab-add'])
+    expect(screen.getByTestId('tab-add').style.marginLeft).toBe('')
   })
 })
 
-// ── 끌기 출처(TRD S21-slot-docking §1-4 「출처」 · §9 「프론트(7 단계)」 TabBar 줄) ──────────────────────────
-// jsdom 에는 DragEvent · DataTransfer 가 없어 testing-library 가 끌기 데이터 칸을 그대로 붙인 사건을 낸다. 엔진이 끌기를
-//   접는 판정(누른 자리 다시 짚기)과 실제 사건 간격은 이 시험이 못 덮는다 — 시험은 「시한 전 끝 = 접힌 끌기」를 순서로만 흉내 낸다.
+// ── 탭 끌기 그리기 ──
 
-interface FakeDt {
-  data: Map<string, string>
-  effectAllowed: string
-  dropEffect: string
-  setData: ReturnType<typeof vi.fn>
-  getData: (k: string) => string
-  clearData: ReturnType<typeof vi.fn>
-  setDragImage: ReturnType<typeof vi.fn>
+interface Pending<T> {
+  resolve: (v: T) => void
+}
+let begins: Pending<BeginReply>[]
+let stopWatch: () => void
+let rowWidth: number
+const captured = new Set<number>()
+
+const ZONE = { x0: 100, y0: 25, x1: 760, y1: 83 }
+const EASE = 'transform 200ms cubic-bezier(0.3333, 0.6667, 0.6667, 1)'
+// 끌기 밖 — 속성은 그대로 · 시간만 0(진행 중인 전환을 끊지 않는다).
+const SNAP = 'transform 0ms cubic-bezier(0.3333, 0.6667, 0.6667, 1)'
+
+const ticks = async (): Promise<void> => {
+  for (let i = 0; i < 20; i++) await Promise.resolve()
+}
+const calls = (cmd: string) => invokeMock.mock.calls.filter(c => c[0] === cmd).map(c => (c[1] as { args: unknown }).args)
+
+function rect(left: number, top: number, width: number, height: number): DOMRect {
+  return { left, top, width, height, right: left + width, bottom: top + height, x: left, y: top } as DOMRect
 }
 
-function fakeDt(dropEffect = 'none'): FakeDt {
-  const data = new Map<string, string>()
-  return {
-    data,
-    effectAllowed: 'uninitialized',
-    dropEffect,
-    setData: vi.fn((k: string, v: string) => void data.set(k, v)),
-    getData: (k: string) => data.get(k) ?? '',
-    clearData: vi.fn(() => data.clear()),
-    setDragImage: vi.fn(),
+// 그린 그대로를 잰다 — 머리는 `translateX` · 폭에서, 줄 · `+` 는 위 손셈의 상수.
+function fakeRect(this: HTMLElement): DOMRect {
+  const id = this.dataset.testid
+  if (id === 'tab-strip-row') return rect(100, 40, rowWidth, 28)
+  if (id === 'tab-add') return rect(0, 40, 40, 28)
+  if (id === 'tab') return rect(100 + xOf(this), 40, parseFloat(this.style.width), 28)
+  return rect(0, 0, 0, 0)
+}
+
+function xOf(el: HTMLElement): number {
+  return Number(/translateX\((-?[\d.]+)px\)/.exec(el.style.transform)![1])
+}
+
+function pointer(type: string, x: number, y = 50, buttons = type === 'pointermove' ? 1 : 0): void {
+  act(() => {
+    window.dispatchEvent(new PointerEvent(type, { clientX: x, clientY: y, pointerId: 1, buttons, bubbles: true }))
+  })
+}
+
+const emit = (event: string, payload: unknown) => act(() => handlers.get(event)!({ payload }))
+
+// 탭바의 전환 — jsdom 에는 `getAnimations` 가 없어 손으로 단다(없으면 전환 없음으로 읽힌다).
+interface FakeAnimation {
+  playState: string
+  pending: boolean
+  finished: Promise<unknown>
+}
+let running: FakeAnimation[] = []
+const animatable = HTMLElement.prototype as unknown as { getAnimations?: () => unknown[] }
+
+/** 맞추기는 뗌 다음 사건 뒤의 타이머에서 시작한다 — 그 타이머와 뒤따른 기다림까지 보낸다. */
+const flush = () =>
+  act(async () => {
+    await new Promise(resolve => setTimeout(resolve, 0))
+    await ticks()
+  })
+
+/** 자리 전환 하나를 진행 중으로 둔다 — 돌려준 함수가 그 전환을 끝낸다. */
+function holdTransition(): () => Promise<void> {
+  let finish = (): void => {}
+  const finished = new Promise<void>(resolve => (finish = resolve))
+  const anim = { playState: 'running', pending: false, finished }
+  running.push(anim)
+  return async () => {
+    running = running.filter(a => a !== anim)
+    finish()
+    await flush()
   }
 }
 
-const head = (id: string) => screen.getAllByTestId('tab').find(t => t.getAttribute('data-view-id') === id)!
+const ABCD: ViewMeta[] = ['a', 'b', 'c', 'd'].map(id => ({ id, name: id.toUpperCase() }))
 
-const dragIdOf = (dt: FakeDt) => (JSON.parse(dt.data.get(DOCK_MIME)!) as { drag_id: string }).drag_id
-
-function cmdCalls(cmd: string): unknown[] {
-  return invokeMock.mock.calls.filter(c => c[0] === cmd).map(c => c[1])
+/** a 를 누르고 문턱을 넘긴 뒤 begin 답 `strip{7}` 까지. */
+async function dragA(bar: ReturnType<typeof renderBar>): Promise<void> {
+  fireEvent.pointerDown(head('a'), { button: 0, pointerId: 1, clientX: 180, clientY: 50 })
+  bar.rerender({ active: 'a' })
+  pointer('pointermove', 191)
+  await act(async () => {
+    begins[0].resolve({ type: 'strip', session: 7, zone: ZONE })
+    await ticks()
+  })
 }
 
-function renderDragBar(props: Partial<Parameters<typeof TabBar>[0]> = {}) {
-  return render(
-    <TabBar
-      label="main"
-      tabs={TABS}
-      active="v1"
-      onSwitch={vi.fn()}
-      onCreate={vi.fn()}
-      onClose={vi.fn()}
-      onRename={vi.fn()}
-      {...props}
-    />,
-  )
-}
-
-describe('TabBar — 끌기 출처', () => {
+describe('TabBar — 탭 끌기 그리기', () => {
+  beforeEach(async () => {
+    begins = []
+    rowWidth = 700
+    captured.clear()
+    handlers.clear()
+    invokeMock.mockReset()
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'tab_drag_begin') return new Promise(resolve => begins.push({ resolve }))
+      if (cmd === 'window_role') return { role: 'model', drag: null }
+      return undefined
+    })
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(fakeRect)
+    HTMLElement.prototype.setPointerCapture = (id: number) => void captured.add(id)
+    HTMLElement.prototype.releasePointerCapture = (id: number) => void captured.delete(id)
+    HTMLElement.prototype.hasPointerCapture = (id: number) => captured.has(id)
+    window.matchMedia = vi.fn(() => ({ matches: false }) as MediaQueryList)
+    running = []
+    animatable.getAnimations = () => running
+    stopWatch = watchDockSession(() => {})
+    await ticks()
+  })
   afterEach(() => {
-    vi.useRealTimers()
-    invokeMock.mockClear()
-    __resetDragImageForTest()
+    cleanup()
+    stopWatch()
+    delete animatable.getAnimations
+    vi.restoreAllMocks()
   })
 
-  it('머리마다 draggable · 이름 편집 중인 머리만 아니다', () => {
-    renderDragBar()
-    expect(head('v1').getAttribute('draggable')).toBe('true')
-    expect(head('v2').getAttribute('draggable')).toBe('true')
-    openEditForV1()
-    expect(head('v1').getAttribute('draggable')).toBe('false')
-    expect(head('v2').getAttribute('draggable')).toBe('true')
+  it('머리 폭 · 자리 = 탭바 레이아웃(쓸 수 있는 폭 = 줄 − +) · + 는 마지막 머리 뒤', () => {
+    renderBar('a', ABCD)
+    expect(['a', 'b', 'c', 'd'].map(id => [xOf(head(id)), head(id).style.width])).toEqual([
+      [0, '160px'],
+      [160, '160px'],
+      [320, '160px'],
+      [480, '160px'],
+    ])
+    expect(xOf(screen.getByTestId('tab-add'))).toBe(640)
   })
 
-  it('닫기 버튼에서 시작한 끌기 → 취소 · 데이터 없음 · 세션 0 · window 까지 닿음(우리 MIME 이 아니라 끊지 않는다)', () => {
-    vi.useFakeTimers()
-    renderDragBar()
-    const seen = vi.fn()
-    window.addEventListener('dragstart', seen)
-    const dt = fakeDt()
-    const close = screen.getAllByTestId('tab-close')[1]
-    const notCancelled = fireEvent.dragStart(close, { dataTransfer: dt })
-    window.removeEventListener('dragstart', seen)
-    expect(notCancelled).toBe(false)
-    expect(dt.setData).not.toHaveBeenCalled()
-    expect(dt.setDragImage).not.toHaveBeenCalled()
-    expect(seen).toHaveBeenCalledTimes(1)
-    vi.runAllTimers()
-    expect(cmdCalls('dock_drag_start')).toEqual([])
+  it('좁은 탭바 — 보이는 머리만 그리고 활성 최소 폭보다 좁은 비활성 머리는 닫기 버튼을 감춘다', () => {
+    rowWidth = 140 // 쓸 수 있는 폭 100 → 폭 42 · 32 · 32 · 32 · 보이는 것 = 앞 둘
+    renderBar('a', ABCD)
+    expect(headIds()).toEqual(['a', 'b'])
+    expect(head('a').style.width).toBe(`${TAB_MIN_ACTIVE_W}px`)
+    expect(head('a').querySelector('[data-testid="tab-close"]')).not.toBeNull()
+    expect(head('b').style.width).toBe('32px')
+    expect(head('b').querySelector('[data-testid="tab-close"]')).toBeNull()
   })
 
-  it('닫기 버튼에서 누른 끌기는 사건 대상이 머리여도(엔진은 draggable 조상에 낸다) 막는다 · 다음 누름은 다시 끈다', () => {
-    vi.useFakeTimers()
-    renderDragBar()
-    fireEvent.pointerDown(screen.getAllByTestId('tab-close')[0])
-    const blocked = fakeDt()
-    expect(fireEvent.dragStart(head('v1'), { dataTransfer: blocked })).toBe(false)
-    expect(blocked.setData).not.toHaveBeenCalled()
-    vi.runAllTimers()
-    expect(cmdCalls('dock_drag_start')).toEqual([])
-
-    fireEvent.pointerDown(screen.getAllByTestId('tab-name')[0])
-    const ok = fakeDt()
-    expect(fireEvent.dragStart(head('v1'), { dataTransfer: ok })).toBe(true)
-    vi.runAllTimers()
-    expect(cmdCalls('dock_drag_start')).toHaveLength(1)
-  })
-
-  it('이름 입력에서 시작한 끌기(글자 끌기) → 취소 · 데이터 없음 · 세션 0', () => {
-    vi.useFakeTimers()
-    renderDragBar()
-    const input = openEditForV1()
-    const dt = fakeDt()
-    expect(fireEvent.dragStart(input, { dataTransfer: dt })).toBe(false)
-    expect(dt.setData).not.toHaveBeenCalled()
-    vi.runAllTimers()
-    expect(cmdCalls('dock_drag_start')).toEqual([])
-  })
-
-  it('dragstart = 우리 MIME 하나만 · effectAllowed move · setDragImage · window 에 안 닿음 · 탭바 DOM 무변경', () => {
-    vi.useFakeTimers()
-    const { container } = renderDragBar()
-    const box = ensureDragImageBox()
-    const bar = screen.getByTestId('tab-bar')
-    const mo = new MutationObserver(() => undefined)
-    mo.observe(bar, { subtree: true, childList: true, attributes: true, characterData: true })
-    const seen = vi.fn()
-    window.addEventListener('dragstart', seen)
-    const dt = fakeDt()
-
-    const notCancelled = fireEvent.dragStart(head('v2'), { dataTransfer: dt })
-    const mutations = mo.takeRecords()
-    mo.disconnect()
-    window.removeEventListener('dragstart', seen)
-
-    expect(notCancelled).toBe(true)
-    expect(dt.clearData).toHaveBeenCalled()
-    expect(dt.setData).toHaveBeenCalledTimes(1)
-    expect([...dt.data.keys()]).toEqual([DOCK_MIME])
-    const payload = JSON.parse(dt.data.get(DOCK_MIME)!) as { drag_id: string; view_id: string }
-    expect(payload.view_id).toBe('v2')
-    expect(typeof payload.drag_id).toBe('string')
-    expect(dt.effectAllowed).toBe('move')
-    expect(dt.setDragImage).toHaveBeenCalledWith(box, DRAG_IMAGE_HOTSPOT.x, DRAG_IMAGE_HOTSPOT.y)
-    expect(seen).not.toHaveBeenCalled()
-    // ★dragstart 안에서 끌린 머리가 누른 자리 밑에서 빠지면 엔진이 끌기를 접는다★ — 처리기가 다시 그리기를 안 부르는
-    //   것으로 그 길을 막는다. fireEvent 는 act 안에서 돌아 그 처리기가 낸 상태 갱신까지 그린 뒤 돌아오므로, 여기 기록이
-    //   없으면 다시 그리기도 없었다.
-    expect(mutations).toEqual([])
-    expect(container.contains(bar)).toBe(true)
-  })
-
-  it('dock_drag_start 는 디스패치 뒤(시한 0) — drag_id · view_id · hotspot = 그림 상자의 커서 자리', () => {
-    vi.useFakeTimers()
-    renderDragBar()
-    const dt = fakeDt()
-    fireEvent.dragStart(head('v1'), { dataTransfer: dt })
-    expect(cmdCalls('dock_drag_start')).toEqual([])
-    vi.advanceTimersByTime(0)
-    expect(cmdCalls('dock_drag_start')).toEqual([
-      { drag_id: dragIdOf(dt), view_id: 'v1', hotspot: { ...DRAG_IMAGE_HOTSPOT } },
+  it('누름 → 전환은 훅이 누르기 전 활성을 적은 뒤 — begin 의 initial_active 는 누르기 전 활성', async () => {
+    const bar = renderBar('b', ABCD)
+    fireEvent.pointerDown(head('a'), { button: 0, pointerId: 1, clientX: 180, clientY: 50 })
+    expect(bar.onSwitch).toHaveBeenCalledWith('a')
+    bar.rerender({ active: 'a' })
+    pointer('pointermove', 191)
+    expect(calls('tab_drag_begin')).toEqual([
+      expect.objectContaining({ view: 'a', initial_active: 'b', area: { x0: 100, y0: 40, x1: 760, y1: 68 } }),
     ])
   })
 
-  it('뒤 리스너가 dragstart 를 취소하면 세션을 열지 않는다(0 회) · 끝 신호도 안 보낸다', () => {
-    vi.useFakeTimers()
-    const { container } = renderDragBar()
-    // React 처리기는 뿌리 컨테이너에서 돈다 — 같은 노드에 나중에 단 리스너는 우리 뒤에 돌아 끊기로 못 막는다.
-    const cancel = (e: Event) => e.preventDefault()
-    container.addEventListener('dragstart', cancel)
-    fireEvent.dragStart(head('v1'), { dataTransfer: fakeDt() })
-    container.removeEventListener('dragstart', cancel)
-    vi.runAllTimers()
-    expect(cmdCalls('dock_drag_start')).toEqual([])
-    fireEvent.dragEnd(head('v1'), { dataTransfer: fakeDt('none') })
-    expect(cmdCalls('dock_drag_end')).toEqual([])
+  it('끄는 동안 — 끄는 탭은 커서를 바로 따르고(전환 없음 · 맨 위) 이웃은 200 ms EASE_OUT 로 비켜난다 · 줄 · 머리 DOM 은 그대로', async () => {
+    const bar = renderBar('a', ABCD)
+    const row = screen.getByTestId('tab-strip-row')
+    const nodes = screen.getAllByTestId('tab')
+    await dragA(bar)
+    pointer('pointermove', 300)
+
+    expect(calls('tab_drag_reorder')).toEqual([{ session: 7, seq: 1, index: 1 }])
+    expect(xOf(head('a'))).toBe(120)
+    expect(head('a').style.transition).toBe('none')
+    expect(head('a').style.zIndex).toBe('1')
+    expect([xOf(head('b')), xOf(head('c')), xOf(head('d'))]).toEqual([0, 320, 480])
+    expect(head('b').style.transition).toBe(EASE)
+
+    // 모델 메아리 — 보이는 순서가 바뀌어도 DOM 순서 · 노드 · 줄은 그대로다.
+    bar.rerender({ tabs: [ABCD[1], ABCD[0], ABCD[2], ABCD[3]] })
+    expect(screen.getAllByTestId('tab')).toEqual(nodes)
+    expect(screen.getByTestId('tab-strip-row')).toBe(row)
+    expect(captured.has(1)).toBe(true)
   })
 
-  it.each([
-    ['move', 'move'],
-    ['none', 'none'],
-    ['copy', 'other'],
-    ['link', 'other'],
-  ])('dragend(dropEffect=%s) → dock_drag_end{effect: %s}', (dropEffect, effect) => {
-    vi.useFakeTimers()
-    renderDragBar()
-    const dt = fakeDt()
-    fireEvent.dragStart(head('v2'), { dataTransfer: dt })
-    vi.runAllTimers()
-    fireEvent.dragEnd(head('v2'), { dataTransfer: fakeDt(dropEffect) })
-    expect(cmdCalls('dock_drag_end')).toEqual([{ drag_id: dragIdOf(dt), effect }])
+  it('놓으면 끄는 탭이 자리로 미끄러지고, 끌기가 끝나도(drag = null) 같은 자리 · 같은 노드 · 전환 속성 그대로', async () => {
+    const bar = renderBar('a', ABCD)
+    const nodes = screen.getAllByTestId('tab')
+    await dragA(bar)
+    pointer('pointermove', 300)
+    bar.rerender({ tabs: [ABCD[1], ABCD[0], ABCD[2], ABCD[3]] })
+    pointer('pointerup', 300)
+
+    expect(calls('tab_drag_end')).toEqual([{ session: 7, how: 'drop', src: 'pointer', at: 1 }])
+    expect(xOf(head('a'))).toBe(160)
+    expect(head('a').style.transition).toBe(EASE)
+
+    holdTransition()
+    emit('dock:drag', { session: 7, phase: 'ended' })
+    expect(screen.getAllByTestId('tab')).toEqual(nodes)
+    expect([xOf(head('b')), xOf(head('a')), xOf(head('c')), xOf(head('d'))]).toEqual([0, 160, 320, 480])
+    expect(head('a').style.transition).toBe(SNAP)
+    expect(head('b').style.transition).toBe(SNAP)
+    expect(head('a').style.zIndex).toBe('1')
   })
 
-  it('시작 시한보다 dragend 가 먼저 오면(엔진이 접은 끌기) 시작도 끝도 안 보낸다 — 시한도 나중에 안 돈다', () => {
-    vi.useFakeTimers()
-    renderDragBar()
-    fireEvent.dragStart(head('v1'), { dataTransfer: fakeDt() })
-    fireEvent.dragEnd(head('v1'), { dataTransfer: fakeDt('none') })
-    vi.runAllTimers()
-    expect(cmdCalls('dock_drag_start')).toEqual([])
-    expect(cmdCalls('dock_drag_end')).toEqual([])
-    // 같은 머리의 다음 끌기는 그대로 선다.
-    const dt = fakeDt()
-    fireEvent.dragStart(head('v1'), { dataTransfer: dt })
-    vi.runAllTimers()
-    fireEvent.dragEnd(head('v1'), { dataTransfer: fakeDt('move') })
-    expect(cmdCalls('dock_drag_start')).toHaveLength(1)
-    expect(cmdCalls('dock_drag_end')).toEqual([{ drag_id: dragIdOf(dt), effect: 'move' }])
+  // ── 머리 DOM 순서 = 탭 키 · 화면 낭독 순서 ──
+
+  /** a 를 b 뒤로 옮겨 놓고(모델 메아리 b · a · c · d) 끌기가 끝나기까지 — 끄는 동안 · 놓은 뒤 자리 전환이 진행 중이다. */
+  async function reorderAThenEnd(bar: ReturnType<typeof renderBar>): Promise<() => Promise<void>> {
+    await dragA(bar)
+    pointer('pointermove', 300)
+    bar.rerender({ tabs: [ABCD[1], ABCD[0], ABCD[2], ABCD[3]] })
+    const settle = holdTransition()
+    pointer('pointerup', 300)
+    emit('dock:drag', { session: 7, phase: 'ended' })
+    return settle
+  }
+
+  it('끌기가 끝나고 자리 전환까지 끝나면 머리 DOM 순서를 보이는 순서로 맞춘다 — 같은 노드 · 같은 자리 · 줄 그대로', async () => {
+    const bar = renderBar('a', ABCD)
+    const row = screen.getByTestId('tab-strip-row')
+    const [a, b, c, d] = screen.getAllByTestId('tab')
+    const settle = await reorderAThenEnd(bar)
+    expect(screen.getAllByTestId('tab')).toEqual([a, b, c, d])
+
+    await settle()
+    expect(screen.getAllByTestId('tab')).toEqual([b, a, c, d])
+    expect([xOf(b), xOf(a), xOf(c), xOf(d)]).toEqual([0, 160, 320, 480])
+    expect(screen.getByTestId('tab-strip-row')).toBe(row)
   })
 
-  it('시한이 돈 뒤에 온 dragend(OS 끌기) → 시작 다음 끝, 같은 drag_id', () => {
-    vi.useFakeTimers()
-    renderDragBar()
-    const dt = fakeDt()
-    fireEvent.dragStart(head('v1'), { dataTransfer: dt })
-    vi.advanceTimersByTime(0)
-    fireEvent.dragEnd(head('v1'), { dataTransfer: fakeDt('none') })
-    expect(invokeMock.mock.calls.map(c => c[0])).toEqual(['dock_drag_start', 'dock_drag_end'])
-    expect(invokeMock.mock.calls.map(c => (c[1] as { drag_id: string }).drag_id)).toEqual([
-      dragIdOf(dt),
-      dragIdOf(dt),
-    ])
-    expect(cmdCalls('dock_drag_end')).toEqual([{ drag_id: dragIdOf(dt), effect: 'none' }])
+  it('맞추기 전에 온 누름은 그동안 전환이 끝나도 맞추기를 막고, 떼면 그 뗌 다음 사건 뒤에 맞춘다', async () => {
+    const bar = renderBar('a', ABCD)
+    const [a, b, c, d] = screen.getAllByTestId('tab')
+    const settle = await reorderAThenEnd(bar)
+
+    fireEvent.pointerDown(c, { button: 0, pointerId: 1, clientX: 450, clientY: 50 })
+    await settle()
+    expect(screen.getAllByTestId('tab')).toEqual([a, b, c, d])
+
+    pointer('pointerup', 450)
+    expect(screen.getAllByTestId('tab')).toEqual([a, b, c, d])
+    await flush()
+    expect(screen.getAllByTestId('tab')).toEqual([b, a, c, d])
   })
 
-  it('잇단 끌기는 각자의 drag_id 로 끝난다 · 같은 끌기의 끝은 한 번만', () => {
-    vi.useFakeTimers()
-    renderDragBar()
-    const dt1 = fakeDt()
-    fireEvent.dragStart(head('v1'), { dataTransfer: dt1 })
-    vi.runAllTimers()
-    fireEvent.dragEnd(head('v1'), { dataTransfer: fakeDt('move') })
-    const dt2 = fakeDt()
-    fireEvent.dragStart(head('v2'), { dataTransfer: dt2 })
-    vi.runAllTimers()
-    fireEvent.dragEnd(head('v2'), { dataTransfer: fakeDt('none') })
-    fireEvent.dragEnd(head('v2'), { dataTransfer: fakeDt('none') })
-    const id1 = dragIdOf(dt1)
-    const id2 = dragIdOf(dt2)
-    expect(id1).not.toBe(id2)
-    expect(cmdCalls('dock_drag_start').map(a => (a as { drag_id: string }).drag_id)).toEqual([id1, id2])
-    expect(cmdCalls('dock_drag_end')).toEqual([
-      { drag_id: id1, effect: 'move' },
-      { drag_id: id2, effect: 'none' },
-    ])
+  it('begin 답을 기다리는 동안의 뗌은 맞추지 않는다(캡처 그대로) — 그 끌기가 끝나고 전환이 끝난 뒤에 맞춘다', async () => {
+    const bar = renderBar('a', ABCD)
+    const [a, b, c, d] = screen.getAllByTestId('tab')
+    await reorderAThenEnd(bar)
+
+    fireEvent.pointerDown(c, { button: 0, pointerId: 1, clientX: 450, clientY: 50 })
+    bar.rerender({ active: 'c' })
+    pointer('pointermove', 470)
+    pointer('pointerup', 470)
+    running = []
+    await flush()
+    expect(captured.has(1)).toBe(true)
+    expect(screen.getAllByTestId('tab')).toEqual([a, b, c, d])
+
+    await act(async () => {
+      begins[1].resolve({ type: 'strip', session: 8, zone: ZONE })
+      await ticks()
+    })
+    const settle = holdTransition()
+    emit('dock:drag', { session: 8, phase: 'ended' })
+    await flush()
+    expect(screen.getAllByTestId('tab')).toEqual([a, b, c, d])
+
+    await settle()
+    expect(screen.getAllByTestId('tab')).toEqual([b, a, c, d])
   })
 
-  it('끌기 그림 재료 — 그 탭의 캔버스(dragCanvas)를 묻고 탭 제목을 쓴다', () => {
-    const dragCanvas = vi.fn((_viewId: string): HTMLElement | null => null)
-    renderDragBar({ dragCanvas })
-    fireEvent.dragStart(head('v2'), { dataTransfer: fakeDt() })
-    expect(dragCanvas).toHaveBeenCalledWith('v2')
-    expect(ensureDragImageBox().textContent).toBe('View 2')
+  it('끝나고 채움으로 남은 애니메이션은 기다리지 않는다', async () => {
+    const bar = renderBar('a', ABCD)
+    const [a, b, c, d] = screen.getAllByTestId('tab')
+    await reorderAThenEnd(bar)
+    running = [{ playState: 'finished', pending: false, finished: Promise.resolve() }]
+    let polls = 0
+    // 기다림이 제자리를 돌면 다섯 번째 뒤로는 빈 목록을 줘 시험이 멈추지 않고 실패하게 한다.
+    animatable.getAnimations = () => (++polls > 5 ? [] : running)
+
+    await flush()
+    expect(screen.getAllByTestId('tab')).toEqual([b, a, c, d])
+    expect(polls).toBe(1)
   })
 
-  it('떼어진 표시 — 그 머리는 DOM 에 남은 채 접히고(폭 0 · 안 보임) 되살리면 같은 요소다', () => {
-    const { rerender } = renderDragBar({ detached: 'v1' })
-    const v1 = head('v1')
-    expect(v1.getAttribute('data-dock-detached')).toBe('true')
-    expect(v1.style.width).toBe('0px')
-    expect(v1.style.visibility).toBe('hidden')
-    expect(head('v2').getAttribute('data-dock-detached')).toBeNull()
-    expect(head('v2').style.visibility).toBe('')
-    rerender(
-      <TabBar
-        label="main"
-        tabs={TABS}
-        active="v1"
-        onSwitch={vi.fn()}
-        onCreate={vi.fn()}
-        onClose={vi.fn()}
-        onRename={vi.fn()}
-        detached={null}
-      />,
-    )
-    // React key 그대로라 같은 요소다 — `dragend` 를 받는 그 요소.
-    expect(head('v1')).toBe(v1)
-    expect(v1.getAttribute('data-dock-detached')).toBeNull()
-    expect(v1.style.width).toBe('')
+  it('쉴 때 다른 경로가 바꾼 순서는 곧바로 DOM 순서가 되고, 이름 편집 중에는 편집이 끝날 때까지 미룬다', () => {
+    const bar = renderBar('a', ABCD)
+    const [a, b, c, d] = screen.getAllByTestId('tab')
+    bar.rerender({ tabs: [ABCD[1], ABCD[0], ABCD[2], ABCD[3]] })
+    expect(screen.getAllByTestId('tab')).toEqual([b, a, c, d])
+
+    fireEvent.doubleClick(nameOf('c'))
+    bar.rerender({ tabs: [ABCD[3], ABCD[1], ABCD[0], ABCD[2]] })
+    expect(screen.getAllByTestId('tab')).toEqual([b, a, c, d])
+
+    fireEvent.keyDown(screen.getByTestId('tab-rename-input'), { key: 'Escape' })
+    expect(screen.getAllByTestId('tab')).toEqual([d, b, a, c])
+  })
+
+  it('막 붙은 창 — 모델 메아리 전의 끄는 탭은 이름 없는 머리로 자리 · 폭만 그리고, 메아리가 오면 같은 노드가 된다', () => {
+    const bar = renderBar('a', ABCD)
+    emit('dock:feed', {
+      session: 9,
+      view: 'n',
+      step: { type: 'attach', zone: ZONE, grab: { x_ratio: 0.25, y: 10, single_x: 40 }, x: 420, y: 50 },
+    })
+    const n = head('n')
+    expect(n.style.width).toBe('132px') // 탭 다섯 · 660 → 132
+    expect(n.getAttribute('data-active')).toBe('true')
+    expect(nameOf('n').textContent).toBe('')
+
+    bar.rerender({ tabs: [ABCD[0], ABCD[1], { id: 'n', name: 'New' }, ABCD[2], ABCD[3]] })
+    expect(head('n')).toBe(n)
+    expect(nameOf('n').textContent).toBe('New')
+  })
+
+  it('이름 편집 중인 머리 · 닫기 버튼에서 시작한 누름은 끌기가 아니다', () => {
+    renderBar('a', ABCD)
+    fireEvent.doubleClick(nameOf('a'))
+    fireEvent.pointerDown(head('a'), { button: 0, pointerId: 1, clientX: 180, clientY: 50 })
+    pointer('pointermove', 220)
+    pointer('pointerup', 220)
+    const close = head('b').querySelector<HTMLElement>('[data-testid="tab-close"]')!
+    fireEvent.pointerDown(close, { button: 0, pointerId: 1, clientX: 400, clientY: 50 })
+    pointer('pointermove', 440)
+    expect(calls('tab_drag_begin')).toEqual([])
   })
 })

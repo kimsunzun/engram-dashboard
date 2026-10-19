@@ -62,28 +62,14 @@ vi.mock('./ViewLayoutRenderer', async () => {
   }
 })
 
-// ── 끌기 그림 재료 관측 — 진짜 함수를 그대로 부르고 받은 요청만 적어 둔다 ──
-const dragImageReqs = vi.hoisted(() => [] as Array<{ title: string; canvas: HTMLElement | null }>)
-vi.mock('./dock/dragImage', async importOriginal => {
-  const real = await importOriginal<typeof import('./dock/dragImage')>()
-  return {
-    ...real,
-    setDockDragImage: (...args: Parameters<typeof real.setDockDragImage>) => {
-      dragImageReqs.push({ title: args[1].title, canvas: args[1].canvas })
-      return real.setDockDragImage(...args)
-    },
-  }
-})
-
 import WindowLayout from './WindowLayout'
 import { __resetCanvasReportForTest } from './windowCanvasReport'
-import { __resetDockChromeReportForTest } from './dock/dockChromeReport'
+import { __resetFrameReportForTest } from './dock/frameReport'
 import { __resetUiMetricsReportForTest } from './uiMetricsReport'
-import { DOCK_MIME } from './dock/dockDrag'
 import type { DockChrome } from '../../../src-tauri/bindings/DockChrome'
-import type { DockRegions } from '../../../src-tauri/bindings/DockRegions'
 import { useViewStore } from '../../store/viewStore'
 import type { ViewSnapshot } from '../../api/layoutTypes'
+import { t } from '../../i18n'
 
 function slotSnap(viewId: string, version: number): ViewSnapshot {
   return {
@@ -119,7 +105,7 @@ beforeEach(() => {
   mountCounts.clear()
   rendererProps.clear()
   listenShouldReject = false
-  useViewStore.setState({ layouts: {}, windows: {}, renderModeOverride: {} })
+  useViewStore.setState({ layouts: {}, windows: {}, forgottenVersions: {}, renderModeOverride: {} })
   invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
     if (cmd === 'list_tabs') {
       return {
@@ -431,8 +417,11 @@ class FakeResizeObserver {
   }
 }
 
+/** 캔버스 관측 — 탭바 줄의 폭 관측(`TabBar`)은 뺀다. */
 function liveObserver(): FakeResizeObserver {
-  const live = FakeResizeObserver.instances.filter(o => !o.disconnected && o.observed.length > 0)
+  const live = FakeResizeObserver.instances.filter(
+    o => !o.disconnected && o.observed.length > 0 && !o.observed.some(el => (el as HTMLElement).dataset.testid === 'tab-strip-row'),
+  )
   expect(live).toHaveLength(1)
   return live[0]
 }
@@ -891,11 +880,11 @@ describe('WindowLayout — TabBar 액션 → store 액션(이 label)', () => {
     expect(invokeMock).toHaveBeenCalledWith('create_tab', { window: 'main', name: null })
   })
 
-  it('숨은 탭 클릭 → switchTab(label, view) invoke', async () => {
+  it('숨은 탭 누름 → switchTab(label, view) invoke', async () => {
     render(<WindowLayout label="main" />)
     await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
     const tab2 = screen.getAllByTestId('tab').find(t => t.getAttribute('data-view-id') === 'v2')!
-    fireEvent.click(tab2)
+    fireEvent.pointerDown(tab2, { button: 0, pointerId: 1 })
     expect(invokeMock).toHaveBeenCalledWith('switch_tab', { window: 'main', view: 'v2' })
   })
 
@@ -908,8 +897,8 @@ describe('WindowLayout — TabBar 액션 → store 액션(이 label)', () => {
   })
 })
 
-// ── ★떼어진 표시(TRD S21-slot-docking §4-1 · §9 「프론트(7 단계)」 떼어진 표시 줄) + 크롬 보고 배선(§1-5)★ ──────────
-// 세션은 셸의 `dock:session` 방송을 그대로 흉내 내 넣는다(대상 쪽 접기 규칙은 `dock/dockDrag.test.ts` 가 잰다).
+// ── ★탭 끌기 배선(TRD S21-slot-docking §2-2 · §4)★ — 창마다 끌기 세션 받기 · 창 틀 보고(`frameReport`) · 파일 놓기 막기 ──
+// 탭바 줄 · `+` · 캔버스의 사각형은 손으로 준다(jsdom 은 레이아웃이 없다): 줄 x 0..800 · y 0..28 · `+` 32 · 캔버스 원점 (0, 29).
 const TWO_TABS = [
   { id: 'v1', name: 'Tab 1' },
   { id: 'v2', name: 'Tab 2' },
@@ -923,17 +912,8 @@ async function mountDockWindow(label: string, tabs = TWO_TABS, active = 'v1') {
   })
   const view = render(<WindowLayout label={label} />)
   await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
-  await waitFor(() => expect(listeners.has('dock:session')).toBe(true))
-  await waitFor(() => expect(listeners.has('dock:regions')).toBe(true))
+  await waitFor(() => expect(ipcOrder).toContain('invoke:window_role'))
   return view
-}
-
-function started(source_label: string, source_view: string, display_active: string | null, seq = 1) {
-  return { drag_id: 'd1', seq, phase: { type: 'started', source_label, source_view, display_active } }
-}
-
-function emitDock(event: string, payload: unknown): void {
-  act(() => emit(event, payload))
 }
 
 const headOf = (id: string) => screen.getAllByTestId('tab').find(t => t.getAttribute('data-view-id') === id)!
@@ -951,177 +931,142 @@ function lastChrome(): DockChrome {
   return all[all.length - 1]
 }
 
-function fakeDt() {
-  const data = new Map<string, string>()
-  return {
-    effectAllowed: 'uninitialized',
-    dropEffect: 'none',
-    setData: (k: string, v: string) => void data.set(k, v),
-    getData: (k: string) => data.get(k) ?? '',
-    clearData: () => data.clear(),
-    setDragImage: () => undefined,
-  }
+let stripWidth = 800
+
+function stubStrip(): void {
+  const rect = (left: number, top: number, width: number, height: number) =>
+    ({ left, top, width, height, right: left + width, bottom: top + height, x: left, y: top }) as DOMRect
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+    const id = this.dataset.testid
+    if (id === 'tab-strip-row') return rect(0, 0, stripWidth, 28)
+    if (id === 'tab-add') return rect(0, 0, 32, 28)
+    if (this.querySelector(':scope > [data-testid="tab-canvas"], :scope > [data-testid="parked-canvas"]')) {
+      return rect(0, 29, stripWidth, 571)
+    }
+    return rect(0, 0, 0, 0)
+  })
 }
 
-describe('WindowLayout — 떼어진 표시(그리기만)', () => {
+function dragOver(types: string[]): Event {
+  const e = new Event('dragover', { bubbles: true, cancelable: true })
+  Object.defineProperty(e, 'dataTransfer', { value: { types, dropEffect: 'copy' } })
+  act(() => {
+    screen.getByTestId('tab-bar').dispatchEvent(e)
+  })
+  return e
+}
+
+describe('WindowLayout — 탭 끌기 배선', () => {
   beforeEach(() => {
-    __resetDockChromeReportForTest()
-    dragImageReqs.length = 0
+    stripWidth = 800
+    __resetFrameReportForTest()
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false }) as MediaQueryList))
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
   })
 
-  it('활성 탭을 떼면 — 스토어 탭 목록 그대로 · 머리는 DOM 에 남아 접힘 · 캔버스는 승계 탭 · 자가닫힘 없음 · Ended 로 거둠', async () => {
-    await mountDockWindow('main')
-    const tabsBefore = useViewStore.getState().windows['main'].tabs
-    const h1 = headOf('v1')
-
-    emitDock('dock:session', started('main', 'v1', 'v2'))
-
-    expect(useViewStore.getState().windows['main'].tabs).toBe(tabsBefore)
-    expect(useViewStore.getState().windows['main'].active).toBe('v1')
-    expect(screen.getAllByTestId('tab')).toHaveLength(2)
-    expect(headOf('v1')).toBe(h1)
-    expect(h1.getAttribute('data-dock-detached')).toBe('true')
-    expect(canvasOf('v1').style.display).toBe('none')
-    expect(canvasOf('v2').style.display).toBe('block')
-    expect(headOf('v2').getAttribute('data-active')).toBe('true')
-    expect(closeMock).not.toHaveBeenCalled()
-
-    emitDock('dock:session', { drag_id: 'd1', seq: 2, phase: { type: 'ended' } })
-
-    expect(headOf('v1')).toBe(h1)
-    expect(h1.getAttribute('data-dock-detached')).toBeNull()
-    expect(canvasOf('v1').style.display).toBe('block')
-    expect(canvasOf('v2').style.display).toBe('none')
-    expect(headOf('v1').getAttribute('data-active')).toBe('true')
-  })
-
-  it('메인 마지막 탭 — 빈 캔버스 · 빈 탭바(머리는 DOM 에 접혀 남음) · 탭 목록 1 그대로 · 자가닫힘 없음', async () => {
-    await mountDockWindow('main', [{ id: 'v1', name: 'Tab 1' }])
-    emitDock('dock:session', started('main', 'v1', null))
-    expect(useViewStore.getState().windows['main'].tabs).toHaveLength(1)
-    expect(headOf('v1').getAttribute('data-dock-detached')).toBe('true')
-    expect(canvasOf('v1').style.display).toBe('none')
-    expect(screen.getAllByTestId('tab').filter(t => t.getAttribute('data-active') === 'true')).toHaveLength(0)
-    await new Promise(res => setTimeout(res, 20))
-    expect(closeMock).not.toHaveBeenCalled()
-  })
-
-  it('탭 하나 팝아웃이 출처여도 자가닫힘은 안 불린다(0탭 신호가 아니다)', async () => {
-    await mountDockWindow('slot-popup-1', [{ id: 'p1', name: 'Pop' }], 'p1')
-    emitDock('dock:session', started('slot-popup-1', 'p1', null))
-    expect(useViewStore.getState().windows['slot-popup-1'].tabs).toHaveLength(1)
-    expect(headOf('p1').getAttribute('data-dock-detached')).toBe('true')
-    await new Promise(res => setTimeout(res, 20))
-    expect(closeMock).not.toHaveBeenCalled()
-  })
-
-  it('활성이 아닌 탭을 떼면 머리만 접히고 캔버스는 모델 활성 그대로', async () => {
-    await mountDockWindow('main')
-    emitDock('dock:session', started('main', 'v2', null))
-    expect(headOf('v2').getAttribute('data-dock-detached')).toBe('true')
-    expect(headOf('v1').getAttribute('data-dock-detached')).toBeNull()
-    expect(canvasOf('v1').style.display).toBe('block')
-  })
-
-  it('다른 창에서 시작한 끌기는 이 창을 바꾸지 않는다', async () => {
-    await mountDockWindow('main')
-    emitDock('dock:session', started('slot-popup-1', 'v1', 'v2'))
-    expect(headOf('v1').getAttribute('data-dock-detached')).toBeNull()
-    expect(canvasOf('v1').style.display).toBe('block')
-    expect(canvasOf('v2').style.display).toBe('none')
-  })
-
-  it('끌기 그림 재료 — 보이는 탭이면 그 탭 캔버스 요소, 보이지 않던 탭이면 null', async () => {
-    await mountDockWindow('main')
-    fireEvent.dragStart(headOf('v1'), { dataTransfer: fakeDt() })
-    fireEvent.dragStart(headOf('v2'), { dataTransfer: fakeDt() })
-    expect(dragImageReqs).toEqual([
-      { title: 'Tab 1', canvas: canvasOf('v1') },
-      { title: 'Tab 2', canvas: null },
-    ])
-  })
-
-  it('창마다 가이드 오버레이가 붙어 있다 — 우리 MIME 끌기가 탭바 위에 오면 끼울 자리를 그린다', async () => {
-    await mountDockWindow('main')
-    const regions: DockRegions = {
-      drag_id: 'd1',
-      rev: 1,
-      bar_rev: 1,
-      blocked: false,
-      view_id: 'v1',
-      canvas_origin: { x: 0, y: 28 },
-      canvas: { w: 800, h: 572 },
-      outer: [],
-      slots: [],
-      tab_bar: { rect: { x0: 0, y0: 0, x1: 800, y1: 28 }, heads: [], insert_xs: [0], scroll: 0 },
-      reorder: null,
+  it('끌기 세션 사건 셋(dock:spare · dock:drag · dock:feed)을 자기 창 대상으로 건 뒤 window_role 을 묻는다', async () => {
+    currentWindow.label = 'slot-popup-3'
+    await mountDockWindow('slot-popup-3')
+    for (const ev of ['dock:spare', 'dock:drag', 'dock:feed']) {
+      expect(listenOptions.get(ev)).toEqual({ target: 'slot-popup-3' })
+      expect(ipcOrder.indexOf(`listen:${ev}`)).toBeLessThan(ipcOrder.indexOf('invoke:window_role'))
     }
-    emitDock('dock:regions', regions)
-    expect(screen.queryByTestId('dock-tab-insert')).toBeNull()
-    const ev = new MouseEvent('dragover', { bubbles: true, cancelable: true, clientX: 10, clientY: 5 })
-    Object.defineProperty(ev, 'dataTransfer', { value: { types: [DOCK_MIME], dropEffect: 'none' } })
-    act(() => {
-      document.dispatchEvent(ev)
-    })
-    expect(screen.getByTestId('dock-tab-insert')).toBeTruthy()
-  })
-})
-
-describe('WindowLayout — 크롬 보고 배선(report_dock_chrome)', () => {
-  beforeEach(() => {
-    __resetDockChromeReportForTest()
   })
 
-  it('탭 목록이 오면 잰다 · 머리를 접으면 곧바로(디바운스 없이) 접힌 머리를 뺀 크롬 · 되살리면 다시', async () => {
+  it('셸이 이 창에 민 끌기 입력(dock:feed)이 탭바 끌기에 닿는다 — 막 붙은 탭 머리가 활성으로 서고 캔버스는 모델 그대로', async () => {
+    stubStrip()
     await mountDockWindow('main')
-    await waitFor(() => expect(chromeReports().length).toBeGreaterThan(0))
-    expect(lastChrome().tabs.map(t => t.view_id)).toEqual(['v1', 'v2'])
-    await new Promise(res => setTimeout(res, 0)) // 그 보고의 응답을 받아 「한 번에 하나」가 풀린다
-
-    emitDock('dock:session', started('main', 'v1', 'v2'))
-    expect(lastChrome().tabs.map(t => t.view_id)).toEqual(['v2'])
-    await new Promise(res => setTimeout(res, 0))
-
-    emitDock('dock:session', { drag_id: 'd1', seq: 2, phase: { type: 'ended' } })
-    expect(lastChrome().tabs.map(t => t.view_id)).toEqual(['v1', 'v2'])
-  })
-
-  it('탭 목록 알림(window:tabs-updated) · 탭바 스크롤이면 디바운스 뒤 다시 잰다', async () => {
-    await mountDockWindow('main')
-    await waitFor(() => expect(chromeReports().length).toBeGreaterThan(0))
-
     act(() =>
-      emit('window:tabs-updated', {
-        label: 'main',
-        tabs: [...TWO_TABS, { id: 'v3', name: 'Tab 3' }],
-        active: 'v1',
-        version: 2,
+      emit('dock:feed', {
+        session: 4,
+        view: 'v9',
+        step: {
+          type: 'attach',
+          zone: { x0: 0, y0: -15, x1: 768, y1: 43 },
+          grab: { x_ratio: 0.5, y: 10, single_x: 80 },
+          x: 400,
+          y: 14,
+        },
       }),
     )
-    await waitFor(() => expect(lastChrome().tabs.map(t => t.view_id)).toEqual(['v1', 'v2', 'v3']))
+    expect(headOf('v9').getAttribute('data-active')).toBe('true')
+    expect(headOf('v1').getAttribute('data-active')).toBe('false')
+    expect(canvasOf('v1').style.display).toBe('block')
+  })
 
-    const h2 = headOf('v2')
-    h2.getBoundingClientRect = () => ({ left: -40, top: 0, right: 60, bottom: 28 }) as DOMRect
-    fireEvent.scroll(screen.getByTestId('tab-bar'))
-    await waitFor(() =>
-      expect(lastChrome().tabs.find(t => t.view_id === 'v2')!.rect).toEqual({
-        x0: -40,
-        y0: 0,
-        x1: 60,
-        y1: 28,
-      }),
-    )
+  it('창 틀 보고 = 탭 끌기 영역(줄 왼쪽 ~ 줄 − +) · 캔버스 원점 · 머리 목록 없음', async () => {
+    stubStrip()
+    await mountDockWindow('main')
+    await waitFor(() => expect(chromeReports().length).toBeGreaterThan(0))
+    expect(lastChrome()).toEqual({
+      canvas_origin: { x: 0, y: 29 },
+      tab_bar: { x0: 0, y0: 0, x1: 768, y1: 28 },
+      tabs: [],
+      scroll: null,
+    })
+  })
+
+  it('창 틀 보고는 보고기 하나 — 날아가는 동안 겹쳐 보내지 않고 응답 뒤 마지막 값을 보낸다', async () => {
+    stubStrip()
+    const answers: Array<() => void> = []
+    let inAir = 0
+    let maxInAir = 0
+    await mountDockWindow('main')
+    const base = invokeMock.getMockImplementation()!
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd !== 'report_dock_chrome') return base(cmd, args)
+      inAir += 1
+      maxInAir = Math.max(maxInAir, inAir)
+      return new Promise<void>(res =>
+        answers.push(() => {
+          inAir -= 1
+          res()
+        }),
+      )
+    })
+    __resetFrameReportForTest()
+    act(() => emit('window:tabs-updated', { label: 'main', tabs: [...TWO_TABS], active: 'v2', version: 2 }))
+    await waitFor(() => expect(chromeReports()).toHaveLength(1))
+
+    stripWidth = 900
+    act(() => emit('window:tabs-updated', { label: 'main', tabs: [...TWO_TABS], active: 'v1', version: 3 }))
+    await new Promise(res => setTimeout(res, 150))
+    expect(chromeReports()).toHaveLength(1)
+
+    await act(async () => answers[0]())
+    await waitFor(() => expect(chromeReports()).toHaveLength(2))
+    expect(lastChrome().tab_bar.x1).toBe(868)
+    expect(maxInAir).toBe(1)
   })
 
   it('언마운트하면 대기 중이던 보고를 보내지 않는다', async () => {
+    stubStrip()
     const { unmount } = await mountDockWindow('main')
     await waitFor(() => expect(chromeReports().length).toBeGreaterThan(0))
     const sent = chromeReports().length
-    headOf('v1').getBoundingClientRect = () => ({ left: 5, top: 0, right: 50, bottom: 28 }) as DOMRect
-    fireEvent.scroll(screen.getByTestId('tab-bar'))
+    stripWidth = 640
+    act(() => emit('window:tabs-updated', { label: 'main', tabs: [...TWO_TABS], active: 'v2', version: 2 }))
     unmount()
     await new Promise(res => setTimeout(res, 200))
     expect(chromeReports()).toHaveLength(sent)
+  })
+
+  it('파일 · URL 끌어 놓기를 막는다(앱 안 링크 포함) · 글자 끌기는 그대로 · 내리면 뗀다', async () => {
+    const { unmount } = await mountDockWindow('main')
+    const link = dragOver(['text/uri-list'])
+    expect(link.defaultPrevented).toBe(true)
+    expect((link as unknown as { dataTransfer: DataTransfer }).dataTransfer.dropEffect).toBe('none')
+    expect(dragOver(['Files']).defaultPrevented).toBe(true)
+    expect(dragOver(['text/plain']).defaultPrevented).toBe(false)
+
+    unmount()
+    const e = new Event('dragover', { bubbles: true, cancelable: true })
+    Object.defineProperty(e, 'dataTransfer', { value: { types: ['Files'], dropEffect: 'copy' } })
+    document.body.dispatchEvent(e)
+    expect(e.defaultPrevented).toBe(false)
   })
 })
 
@@ -1132,7 +1077,7 @@ describe('WindowLayout — 대기 모드(window_role · dock:spare)', () => {
 
   beforeEach(() => {
     currentWindow.label = SPARE
-    __resetDockChromeReportForTest()
+    __resetFrameReportForTest()
     __resetUiMetricsReportForTest()
   })
 
@@ -1212,6 +1157,97 @@ describe('WindowLayout — 대기 모드(window_role · dock:spare)', () => {
 
     emit('window:tabs-updated', { label: SPARE, tabs: [], active: 'p1', version: 4 })
     await waitFor(() => expect(closeMock).toHaveBeenCalledTimes(1))
+  })
+
+  it('들인 뒤 제 탭을 당겨 오기 전에는 빈 틀 그대로 — 로딩 문구 없음 · 탭바 줄은 같은 노드', async () => {
+    let answer: (payload: unknown) => void = () => {}
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'list_tabs') return new Promise(res => (answer = res))
+      if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+      return undefined
+    })
+    await mountParked()
+    const row = screen.getByTestId('tab-strip-row')
+
+    act(() => emit('dock:spare', { step: 'adopted' }))
+    await waitFor(() => expect(listTabsCalls()).toHaveLength(1))
+    expect(screen.getByTestId('parked-canvas')).toBeTruthy()
+    expect(screen.queryByText(t('window.loading', { label: SPARE }))).toBeNull()
+    expect(screen.getByTestId('tab-strip-row')).toBe(row)
+
+    await act(async () => answer({ label: SPARE, tabs: [{ id: 'p1', name: 'Pop' }], active: 'p1', version: 3 }))
+    await waitFor(() => expect(screen.getAllByTestId('tab-canvas')).toHaveLength(1))
+    expect(screen.queryByTestId('parked-canvas')).toBeNull()
+    expect(screen.getByTestId('tab-strip-row')).toBe(row)
+  })
+
+  // 되돌린 예비 창 — 비울 때 셸이 탭 0 개 알림을 보내지 않아 스토어에 옛 탭이 남아 있던 창.
+  async function mountGivenBackSpare(): Promise<{ answer: (payload: unknown) => void; row: HTMLElement }> {
+    const pending = { answer: (_payload: unknown): void => {} }
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'list_tabs') {
+        if (listTabsCalls().length === 1) return { label: SPARE, tabs: [{ id: 'old', name: 'Old' }], active: 'old', version: 3 }
+        return new Promise(res => (pending.answer = res))
+      }
+      if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+      return undefined
+    })
+    render(<WindowLayout label={SPARE} />)
+    await waitFor(() => expect(screen.getAllByTestId('tab-canvas')).toHaveLength(1))
+    const row = screen.getByTestId('tab-strip-row')
+    act(() => emit('dock:spare', { step: 'parked' }))
+    expect(useViewStore.getState().windows[SPARE]).toBeUndefined()
+    return { answer: payload => pending.answer(payload), row }
+  }
+
+  const headIds = () => screen.queryAllByTestId('tab').map(h => h.getAttribute('data-view-id'))
+
+  it('되돌린 예비 창을 다시 들이면 새 탭을 받을 때까지 빈 틀 그대로(옛 탭을 그리지 않는다) · 받으면 그 탭', async () => {
+    const { answer, row } = await mountGivenBackSpare()
+
+    act(() => emit('dock:spare', { step: 'adopted' }))
+    await waitFor(() => expect(listTabsCalls()).toHaveLength(2))
+    expect(screen.getByTestId('parked-canvas')).toBeTruthy()
+    expect(headIds()).toEqual([])
+    expect(screen.queryAllByTestId('tab-canvas')).toHaveLength(0)
+
+    await act(async () => answer({ label: SPARE, tabs: [{ id: 'p1', name: 'Pop' }], active: 'p1', version: 7 }))
+    await waitFor(() => expect(screen.getAllByTestId('tab-canvas')).toHaveLength(1))
+    expect(headIds()).toEqual(['p1'])
+    expect(canvasOf('p1').style.display).toBe('block')
+    expect(screen.queryByTestId('parked-canvas')).toBeNull()
+    expect(screen.getByTestId('tab-strip-row')).toBe(row)
+  })
+
+  it('대기 중에 들일 탭이 먼저 오면(전역 미러) 대기가 풀릴 때까지 빈 틀 · 풀리는 순간 그 탭', async () => {
+    await mountGivenBackSpare()
+
+    act(() =>
+      useViewStore.getState().applyWindowTabsUpdated({ label: SPARE, tabs: [{ id: 'p1', name: 'Pop' }], active: 'p1', version: 7 }),
+    )
+    expect(screen.getByTestId('parked-canvas')).toBeTruthy()
+    expect(headIds()).toEqual([])
+
+    act(() => emit('dock:spare', { step: 'adopted' }))
+    expect(headIds()).toEqual(['p1'])
+    expect(screen.queryByTestId('parked-canvas')).toBeNull()
+  })
+
+  it('대기에 들기 전 version 의 탭 알림이 늦게 와도 그 창을 다시 채우지 않는다 — 들인 뒤에도 빈 틀 · 더 새 알림은 받는다', async () => {
+    await mountGivenBackSpare()
+    const apply = (version: number, id: string) =>
+      act(() => useViewStore.getState().applyWindowTabsUpdated({ label: SPARE, tabs: [{ id, name: id }], active: id, version }))
+
+    apply(2, 'old')
+    apply(3, 'old')
+    expect(useViewStore.getState().windows[SPARE]).toBeUndefined()
+    act(() => emit('dock:spare', { step: 'adopted' }))
+    expect(screen.getByTestId('parked-canvas')).toBeTruthy()
+    expect(headIds()).toEqual([])
+
+    apply(4, 'p1')
+    expect(headIds()).toEqual(['p1'])
+    expect(screen.queryByTestId('parked-canvas')).toBeNull()
   })
 
   it('dock:spare{parked} → 보통 창이 빈 틀로 바뀌고 그 뒤 0탭 알림에도 닫지 않는다', async () => {

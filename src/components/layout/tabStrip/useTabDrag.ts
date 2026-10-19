@@ -133,6 +133,8 @@ export interface TabDragDeps {
   reducedMotion(): boolean
   /** 끌기 모습이 바뀔 때마다(같은 값을 거듭 줄 수 있다). */
   onView(view: TabDragView | null): void
+  /** `TabDrag.engaged` 가 바뀔 때마다. */
+  onEngaged(engaged: boolean): void
 }
 
 /** 누름 하나 — 탭 머리의 `pointerdown`. */
@@ -157,6 +159,7 @@ export class TabDragController {
   private seq = { session: -1, n: 0 }
   private pointerOn = false
   private keysOn = false
+  private engaged = false
 
   constructor(private readonly deps: TabDragDeps) {}
 
@@ -198,6 +201,7 @@ export class TabDragController {
       initialActive: this.active,
       ratio: pressRatio(p.head, p.x),
     }
+    this.engage(true)
     this.listenPointer(true)
   }
 
@@ -434,6 +438,7 @@ export class TabDragController {
       done: false,
     }
     this.phase = { kind: 'strip', d }
+    this.engage(true)
     this.listenKeys(true)
     this.drive(d, { x: step.x, y: step.y }, true, true)
   }
@@ -558,6 +563,13 @@ export class TabDragController {
     const shown = this.phase.kind === 'strip'
     this.phase = IDLE
     if (shown) this.publish()
+    this.engage(false)
+  }
+
+  private engage(on: boolean): void {
+    if (on === this.engaged) return
+    this.engaged = on
+    this.deps.onEngaged(on)
   }
 
   // ── 셈 ──
@@ -644,6 +656,12 @@ export interface TabDrag {
   /** 이 탭바 안에서 탭을 모는 동안의 모습 — 그 밖 = `null`. */
   drag: TabDragView | null
   /**
+   * 누름부터 그 누름이 다 끝날 때까지 `true` — 문턱 전 · begin 답 기다림 · 탭바 안 몰기와 놓은 뒤 자리로 가기 · 창째 끌기 · 뗀 뒤.
+   * 끌기가 된 누름은 그 세션의 `dock:drag{ended}` 에서, 못 된 누름(문턱 전 뗌 · 깨진 누름 · begin 거절)은 그 자리에서 `false`
+   * 가 된다. 셸이 붙인 끌기(`dock:feed{attach}`)는 붙은 때부터 `true`.
+   */
+  engaged: boolean
+  /**
    * 탭 머리의 `pointerdown` 에 단다 — 누름 순간의 활성(`switch_tab`)은 부르는 쪽 몫이다. 왼쪽 단추 · 닫기 단추와 이름
    * 입력 밖의 누름만 끌기 후보이고, 10 px 을 넘기 전에 떼면 아무것도 하지 않는다(click · dblclick 은 그대로 간다).
    */
@@ -654,6 +672,7 @@ export interface TabDrag {
 // ADR-0295
 export function useTabDrag(options: UseTabDragOptions): TabDrag {
   const [drag, setDrag] = useState<TabDragView | null>(null)
+  const [engaged, setEngaged] = useState(false)
   const live = useRef(options)
   useLayoutEffect(() => {
     live.current = options
@@ -668,6 +687,7 @@ export function useTabDrag(options: UseTabDragOptions): TabDrag {
         },
         reducedMotion: () => window.matchMedia(REDUCED_MOTION).matches,
         onView: setDrag,
+        onEngaged: setEngaged,
       }),
   )
   const { tabs, active, widthCap = null } = options
@@ -696,5 +716,5 @@ export function useTabDrag(options: UseTabDragOptions): TabDrag {
       }),
     [ctl],
   )
-  return { drag, onPointerDown }
+  return { drag, engaged, onPointerDown }
 }

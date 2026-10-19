@@ -1,8 +1,15 @@
 // DockOverlayPage — 안내 창(label `dock-overlay` · 경로 `#/dock-overlay` — TRD S21-slot-docking §2-5)이 그리는 페이지.
-//   셸이 대상 창 위에 덮어 도킹 띠 · 미리보기를 보이는 투명 · 클릭 통과 창이라 페이지 바닥도 투명이다. 아직 그리지
-//   않는다 — `dock:overlay` 를 받아 그리는 것은 TRD §13 U7b-2.
+//   셸이 대상 창 위에 덮어 도킹 띠 · 미리보기를 보이는 투명 · 클릭 통과 창이라 페이지 바닥도 투명이다. 그릴 내용은 셸이
+//   `dock:overlay` 로 민다(`OverlayView` · 치울 때 `null`).
 
-import { useLayoutEffect } from 'react'
+import { useEffect, useLayoutEffect, useState } from 'react'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
+
+import type { OverlayView } from '../../src-tauri/bindings/OverlayView'
+import { DockOverlayView } from '../components/layout/dock/DockOverlay'
+
+const EVT_OVERLAY = 'dock:overlay'
 
 // ADR-0295
 export default function DockOverlayPage() {
@@ -16,5 +23,25 @@ export default function DockOverlayPage() {
     }
   }, [])
 
-  return <div data-testid="dock-overlay-page" />
+  const [guide, setGuide] = useState<OverlayView | null>(null)
+  useEffect(() => {
+    let disposed = false
+    let off: UnlistenFn | null = null
+    listen<OverlayView | null>(EVT_OVERLAY, e => setGuide(e.payload), { target: getCurrentWindow().label })
+      .then(un => {
+        if (disposed) un()
+        else off = un
+      })
+      .catch(err => console.error(`[DockOverlayPage] ${EVT_OVERLAY} 구독 실패 — 안내를 그리지 못한다:`, err))
+    return () => {
+      disposed = true
+      off?.()
+    }
+  }, [])
+
+  return (
+    <div data-testid="dock-overlay-page">
+      <DockOverlayView guide={guide} />
+    </div>
+  )
 }
