@@ -91,7 +91,6 @@ const INSET_MAX_PX: f64 = 64.0;
 const MIN_PANE_PX_MAX: u32 = 1000;
 
 /// 창의 탭 내용 영역 크기(정수 CSS px). 그 창의 탭 전부가 이 영역에 겹쳐 그려진다.
-// 도킹 영역(`dock::types::DockRegions`)에 실려 웹뷰로 가므로 serde · ts-rs 를 단다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
 #[ts(export)]
 pub struct CanvasPx {
@@ -1456,9 +1455,7 @@ impl ViewManager {
         Ok(id)
     }
 
-    /// 지금 표식(번호, 끄는 탭) — `None` = 표식이 없다(끌기 없음 · 도킹 성공이 내렸다 · 그 탭이 지워졌다). 끌기
-    /// 스냅숏은 끄는 탭을 장부가 아니라 이 값에서, 스냅숏 번호를 다는 같은 레이아웃 락 구간 안에서 읽는다(TRD
-    /// S21-slot-docking §1-3 「스냅숏 번호」).
+    /// 지금 표식(번호, 끄는 탭) — `None` = 표식이 없다(끌기 없음 · 도킹 성공이 내렸다 · 그 탭이 지워졌다).
     pub fn lease(&self) -> Option<(LeaseId, ViewId)> {
         self.lease
     }

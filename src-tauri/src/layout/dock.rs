@@ -34,7 +34,7 @@ pub enum DockAnchor {
     Outer,
 }
 
-/// `dock::book` · `dock::hit` 의 끌기가 [`docked_tree`] 에 넘기는 새것 몫 — 슬롯 옆이든 바깥 변이든 이 값 하나다.
+/// 고정 새것 몫 — 시험만 쓴다. 끌기의 몫은 이 값이 아니라 `dock::sizing::attach_share` 가 낸다.
 pub const DOCK_NEW_SHARE: f64 = 1.0 / 3.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

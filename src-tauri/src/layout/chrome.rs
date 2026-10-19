@@ -1,5 +1,5 @@
-//! 창 크롬 측정 — 웹뷰가 보고할 탭바 · 탭 머리 · 캔버스 원점(TRD S21-slot-docking §1-5). 도킹 판정(`dock::hit`)의
-//! 재료다. 계약: 웹뷰가 `report_dock_chrome`(`commands::dock`)으로 보고하면 셸은 이 값을 창 항목(`WindowTabs`)에
+//! 창 크롬 측정 — 웹뷰가 보고할 탭바 · 탭 머리 · 캔버스 원점(TRD S21-slot-docking §4). 끌기 대상 판정
+//! (`dock::targets`)의 재료다. 계약: 웹뷰가 `report_dock_chrome`(`commands::dock`)으로 보고하면 셸은 이 값을 창 항목(`WindowTabs`)에
 //! 측정으로 두고, 측정이라 `version` 을 올리지도 알리지도 저장하지도 않는다(ADR-0227 의 보고 규칙).
 //!
 //! 좌표는 전부 그 창 웹뷰의 CSS px 다(소수 허용 · 창 안쪽 = 웹뷰 뷰포트 왼쪽 위 원점). ts-rs 로

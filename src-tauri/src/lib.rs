@@ -106,8 +106,8 @@ pub fn run() {
     //   선다(`RestoreCoordinator` 문서). 데몬 클라이언트는 구독 원천이 커밋 때마다 찾는다.
     let setup_restore = restore_coordinator.clone();
     builder = builder.manage(restore_coordinator);
-    // 끌기 상태(TRD S21-slot-docking §1-3)도 같은 이유다(ADR-0102) — 웹뷰의 첫 크롬 보고 · 레이아웃 계기가 상태
-    //   없이 지나가지 않게.
+    // 도킹 상태(대기 창 명부 · 종료 표지 — TRD S21-slot-docking §2-5)도 같은 이유다(ADR-0102) — 웹뷰의 첫 측정
+    //   보고 셋(캔버스 · UI 치수 · 크롬) · `window_role` · `drag::install` 이 이 상태를 본다.
     builder = builder.manage(std::sync::Arc::new(crate::dock::DockState::new()));
 
     // ── 셸 설정 + 유효 테마(TRD S21-storage §5-3 · §5-6) ─────────────────────────────
@@ -298,8 +298,8 @@ pub fn run() {
             crate::commands::dock::spawn_overlay_build(app.handle());
 
             // ── 탭 끌기 실행기(TRD S21-slot-docking §2-4) — 세션은 이 메인 스레드에 산다 ──
-            // 끌기 상태 · 레이아웃 상태는 빌더에서 manage 했다. 못 세우면 새 끌기 invoke 만 상태 없음으로 실패하고 옛 끌기는
-            //   그대로 돈다.
+            // 끌기 상태 · 레이아웃 상태는 빌더에서 manage 했다. 못 세우면 탭 끌기 invoke 가 상태 없음으로 실패해 탭 끌기가
+            //   통째로 안 되고, 앱은 그대로 뜬다.
             // ADR-0295
             match crate::commands::drag::install(app.handle()) {
                 Ok(inbox) => {
@@ -307,7 +307,7 @@ pub fn run() {
                 }
                 Err(e) => tracing::error!(
                     module = "dock",
-                    "탭 끌기 실행기를 못 세웠다(새 끌기 불가, 앱 계속): {e}"
+                    "탭 끌기 실행기를 못 세웠다(탭 끌기 불가, 앱 계속): {e}"
                 ),
             }
 
