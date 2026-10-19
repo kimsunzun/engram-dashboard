@@ -376,9 +376,6 @@ pub fn run() {
                     // 대기 창 명부 · 안내 창(TRD S21-slot-docking §2-5 「사라지면」) — 예비 · 안내 창이면 다시 짓는다.
                     crate::commands::dock::on_parked_window_destroyed(window.app_handle(), &label);
                     crate::commands::dock::on_overlay_destroyed(window.app_handle(), &label);
-                    // ★위 정리가 레이아웃 락을 놓은 뒤★ — 장부의 끝 할 일(표식 내리기)이 같은 락을 잡는다. 끄는 중이
-                    //   아니면 아무것도 안 한다(TRD S21-slot-docking §1-3 「그 밖의 끝」).
-                    crate::commands::dock::on_window_destroyed(window.app_handle(), &label);
                     // 끌기 세션 — 명부가 그 창을 뺀 뒤 · 위 정리가 락을 다 놓은 뒤(TRD S21-slot-docking §2-5 「사라지면」).
                     crate::commands::drag::on_window_gone(window.app_handle(), &label);
                 }
@@ -442,13 +439,6 @@ pub fn run() {
             commands::report_dock_chrome,
             // 부른 창의 역할(대기 창 명부 · TRD S21-slot-docking §4) — 웹뷰 안 배선이라 버스 명령이 아니다.
             commands::window_role,
-            // 슬롯 도킹 끌기(웹뷰 → 셸 · TRD S21-slot-docking §1-5) — 버스 명령이 아니다(사람 손의 끌기 신호).
-            commands::dock_drag_start,
-            commands::dock_drag_over,
-            commands::dock_drop,
-            commands::dock_drag_end,
-            commands::dock_pointer_seen,
-            commands::dock_pull,
             // 탭 끌기 세션(웹뷰 → 셸 · TRD S21-slot-docking §4) — 버스 명령이 아니다(사람 손의 끌기 신호).
             commands::drag::tab_drag_begin,
             commands::drag::tab_drag_reorder,
