@@ -354,13 +354,13 @@ fn overlaps(a: &PxRect, b: &PxRect) -> bool {
     a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1
 }
 
-pub(super) fn contains_px(r: &PxRect, p: (f64, f64)) -> bool {
+fn contains_px(r: &PxRect, p: (f64, f64)) -> bool {
     (f64::from(r.x0)..f64::from(r.x1)).contains(&p.0)
         && (f64::from(r.y0)..f64::from(r.y1)).contains(&p.1)
 }
 
 /// 점에서 `frame` 의 `side` 변까지 — 안쪽이면 0 이상.
-pub(super) fn edge_gap(p: (f64, f64), frame: &PxRect, side: DockSide) -> f64 {
+fn edge_gap(p: (f64, f64), frame: &PxRect, side: DockSide) -> f64 {
     match side {
         DockSide::Left => p.0 - f64::from(frame.x0),
         DockSide::Right => f64::from(frame.x1) - p.0,
@@ -370,7 +370,7 @@ pub(super) fn edge_gap(p: (f64, f64), frame: &PxRect, side: DockSide) -> f64 {
 }
 
 // 점을 품은 띠만 부른다 — 그러면 두께가 양수라 나눗셈이 선다.
-pub(super) fn thickness(r: &PxRect, side: DockSide) -> f64 {
+fn thickness(r: &PxRect, side: DockSide) -> f64 {
     match side {
         DockSide::Left | DockSide::Right => f64::from(r.x1 - r.x0),
         DockSide::Top | DockSide::Bottom => f64::from(r.y1 - r.y0),

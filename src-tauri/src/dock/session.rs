@@ -655,8 +655,11 @@ impl Drag {
                     args,
                     reply,
                 } => self.begin(window, args, reply, p),
-                // 셸은 우리 창의 `Moved` 를 끌기와 무관하게 다 넣는다 — 손으로 창을 옮길 때마다 debug 를 불리지 않게.
-                other @ Event::Moved { .. } => {
+                // 끌기 없이도 무더기로 온다 — 셸은 우리 창의 `Moved` 를 끌기와 무관하게 다 넣고, 시한은 세션이 끝나도
+                // 지우지 않는다(`Ports::arm_raise`). 핫패스라 trace(docs/reference/logging-conventions.md).
+                other @ (Event::Moved { .. }
+                | Event::RaiseDue { .. }
+                | Event::ReleaseDue { .. }) => {
                     tracing::trace!(event = other.name(), "끌기 없음 — 사건 무시");
                     None
                 }

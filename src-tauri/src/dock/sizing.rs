@@ -1,11 +1,10 @@
 //! 끌기의 크기 · 자리 셈(TRD S21-slot-docking §5-4 · §5-5) — 띠에 붙는 몫 · 원래 크기 · 떼어진 창 크기(Chrome
-//! `CalculateDraggedWindowSize`) · 커서에 가장 가까운 모니터 · 떼어진 창 · 창째 끄는 창의 자리 · 배율이 다른
-//! 모니터로 뗄 때의 화면 밖 자리.
+//! `CalculateDraggedWindowSize`) · 커서에 가장 가까운 모니터 · 떼어진 창 · 창째 끄는 창의 자리.
 //!
 //! 크기 단위: 붙는 몫 · 원래 크기 = 논리(DIP) px 의 캔버스(내용 영역) · 떼어진 창 크기 = 논리 px 의 **바깥** 크기
 //! (Chrome 의 `GetRestoredBounds` · `GetWindowBoundsInScreen` 이 창 바깥 경계라서) · 자리 = 물리 px.
 
-use super::units::{Monitor, PhysPoint, PhysRect, PhysSize, SizeDip, WindowGeom};
+use super::units::{Monitor, PhysPoint, PhysSize, SizeDip, WindowGeom};
 use crate::layout::chrome::PointCss;
 use crate::layout::dock::DockSide;
 use crate::layout::geometry::PxRect;
@@ -153,61 +152,10 @@ pub fn whole_window_origin(
     }
 }
 
-/// 화면 밖 자리의 모니터 변 거리(물리 px) — 스파이크 `park_origin` 의 값 그대로.
-pub const PARK_GAP_PX: i32 = 4000;
-
-// 화면 밖 자리를 모니터 변을 따라 이만큼 안쪽에 둔다 — 스파이크 `park_origin` 의 값 그대로.
-const PARK_ALONG_PX: i32 = 40;
-
-/// 배율이 다른 모니터로 뗄 때 첫 걸음의 화면 밖 자리 — 가장 가까운 모니터가 `target` 인 곳에 창을 옮겨 두어 배율
-/// 바뀜과 tao 의 크기 고침이 화면 밖에서 끝나게 한다(§5-5 두 걸음 ① · E3).
-///
-/// 후보 = `target` 의 오른쪽 · 아래 · 위 · 왼쪽 바깥 [`PARK_GAP_PX`](스파이크 `park_origin` 의 차례). 겹침은 배율이
-/// 바뀐 뒤 커질 크기 `size × max(1, s_target ÷ s_now)` 로 본다(F3 d — tao 는 Windows 11 에서 OS 제안 크기를 그대로
-/// 쓴다). 그 크기로 어느 모니터와도 겹치지 않고 그 사각형 가운데에 가장 가까운 모니터가 `target` 인 첫 후보 · 없으면
-/// (사방이 다른 모니터) `None` — 실행기는 한 걸음에 놓고 다시 놓기에 맡긴다.
-// ADR-0295
-pub fn offscreen_near(
-    monitors: &[Monitor],
-    target: usize,
-    size: PhysSize,
-    s_now: f64,
-    s_target: f64,
-) -> Option<PhysPoint> {
-    let m = monitors.get(target)?.rect;
-    let grow = (s_target / s_now).max(1.0);
-    let grown = PhysSize {
-        w: (f64::from(size.w) * grow).ceil() as i32,
-        h: (f64::from(size.h) * grow).ceil() as i32,
-    };
-    let candidates = [
-        PhysPoint {
-            x: m.x1.saturating_add(PARK_GAP_PX),
-            y: m.y0.saturating_add(PARK_ALONG_PX),
-        },
-        PhysPoint {
-            x: m.x0.saturating_add(PARK_ALONG_PX),
-            y: m.y1.saturating_add(PARK_GAP_PX),
-        },
-        PhysPoint {
-            x: m.x0.saturating_add(PARK_ALONG_PX),
-            y: m.y0.saturating_sub(grown.h).saturating_sub(PARK_GAP_PX),
-        },
-        PhysPoint {
-            x: m.x0.saturating_sub(grown.w).saturating_sub(PARK_GAP_PX),
-            y: m.y0.saturating_add(PARK_ALONG_PX),
-        },
-    ];
-    candidates.into_iter().find(|&origin| {
-        let rect = PhysRect::at(origin, grown);
-        !monitors.iter().any(|other| other.rect.intersects(rect))
-            && monitor_near(monitors, rect.center()) == Some(target)
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dock::units::PhysRect;
 
     fn dip(w: f64, h: f64) -> SizeDip {
         SizeDip { w, h }
@@ -625,93 +573,6 @@ mod tests {
         assert_eq!(
             whole_window_origin(p(-1800, 0), p(-1700, 10), p(-1750, 0)),
             p(-1850, -10)
-        );
-    }
-
-    // ── 화면 밖 자리 (E3 · F3 d) ──────────────────────────────────────────────
-
-    #[test]
-    fn a_lone_monitor_parks_to_its_right_first() {
-        let ms = vec![monitor(r(0, 0, 1920, 1080), 1.0)];
-        assert_eq!(
-            offscreen_near(&ms, 0, PhysSize { w: 800, h: 600 }, 1.0, 1.0),
-            Some(p(1920 + PARK_GAP_PX, 40))
-        );
-    }
-
-    #[test]
-    fn a_larger_target_scale_checks_the_grown_size() {
-        // 키 큰 창(800 × 10000) — 오른쪽 자리는 지금 크기로는 먼 모니터에 안 걸리지만 배율 2 로 커지면 걸린다.
-        let ms = vec![
-            monitor(r(0, 0, 1920, 1080), 1.0),
-            monitor(r(7000, 15000, 9000, 17000), 1.0),
-        ];
-        let size = PhysSize { w: 800, h: 10000 };
-        assert_eq!(offscreen_near(&ms, 0, size, 1.0, 1.0), Some(p(5920, 40)));
-        assert_eq!(
-            offscreen_near(&ms, 0, size, 1.0, 2.0),
-            Some(p(40, -20000 - PARK_GAP_PX)),
-            "커질 크기로 보면 오른쪽 · 아래가 막혀 위"
-        );
-        assert_eq!(
-            offscreen_near(&ms, 0, size, 2.0, 1.0),
-            Some(p(5920, 40)),
-            "작아지는 쪽은 지금 크기 그대로"
-        );
-    }
-
-    #[test]
-    fn the_above_and_left_spots_leave_the_gap_for_the_grown_size() {
-        // 오른쪽 · 아래가 다른 모니터에 막혀 위로 간다 — 위 자리는 커질 높이만큼 더 올라간다.
-        let ms = vec![
-            monitor(r(0, 0, 1920, 1080), 1.0),
-            monitor(r(5000, 0, 7000, 1080), 1.0),
-            monitor(r(0, 4500, 1920, 6000), 1.0),
-        ];
-        let size = PhysSize { w: 800, h: 600 };
-        assert_eq!(
-            offscreen_near(&ms, 0, size, 1.0, 1.0),
-            Some(p(40, -600 - PARK_GAP_PX))
-        );
-        assert_eq!(
-            offscreen_near(&ms, 0, size, 1.0, 2.0),
-            Some(p(40, -1200 - PARK_GAP_PX))
-        );
-    }
-
-    #[test]
-    fn a_candidate_nearer_another_monitor_is_skipped() {
-        // 대상 = 가운데 모니터 1. 그 오른쪽 후보의 가운데는 모니터 2 에 더 가깝다.
-        let ms = vec![
-            monitor(r(-1920, 0, 0, 1080), 1.0),
-            monitor(r(0, 0, 1920, 1080), 1.25),
-            monitor(r(8000, 0, 9920, 1080), 1.0),
-        ];
-        let got = offscreen_near(&ms, 1, PhysSize { w: 800, h: 600 }, 1.0, 1.25).unwrap();
-        let rect = PhysRect::at(got, PhysSize { w: 1000, h: 750 });
-        assert!(!ms.iter().any(|m| m.rect.intersects(rect)));
-        assert_eq!(monitor_near(&ms, rect.center()), Some(1));
-        assert_eq!(got, p(40, 1080 + PARK_GAP_PX), "오른쪽을 건너뛰고 아래");
-    }
-
-    #[test]
-    fn a_monitor_surrounded_on_all_sides_has_no_park_spot() {
-        let c = r(0, 0, 1000, 1000);
-        let ms = vec![
-            monitor(c, 1.0),
-            monitor(r(1000, -6000, 8000, 7000), 1.0),
-            monitor(r(-7000, -6000, 0, 7000), 1.0),
-            monitor(r(0, -6000, 1000, 0), 1.0),
-            monitor(r(0, 1000, 1000, 7000), 1.0),
-        ];
-        assert_eq!(
-            offscreen_near(&ms, 0, PhysSize { w: 400, h: 300 }, 1.0, 1.0),
-            None
-        );
-        assert_eq!(
-            offscreen_near(&ms, 9, PhysSize { w: 400, h: 300 }, 1.0, 1.0),
-            None,
-            "없는 모니터"
         );
     }
 }

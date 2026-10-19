@@ -114,10 +114,12 @@ fn attach<B: EnvOptions>(builder: B, dir: Option<&Path>) -> B {
         .browser_args(WEBVIEW2_BROWSER_ARGS)
         .extensions(false)
         .scroll_bars(ScrollBarStyle::Default)
-        // 켜 두면 wry 가 웹뷰에 자기 드롭 대상(`IDropTarget`)을 달아 HTML5 끌어 놓기 사건이 웹뷰에 닿지 않는다
-        //   (wry 0.55.1 `src/webview2/drag_drop.rs` · `mod.rs`) — 창 사이 탭 끌기가 그 사건으로 돈다. 잃는 것은 Tauri
-        //   의 파일 끌어 놓기 사건뿐이고 쓰는 곳이 없다(점검 = TRD S21-slot-docking §9 「드롭 처리기 점검」).
-        // TRD S21-slot-docking §1-6
+        // 켜 두면 wry 가 웹뷰 자식 창의 드롭 대상(`IDropTarget`)을 자기 것으로 갈아 끼우고 웹뷰 것에 넘기지 않아(wry
+        //   0.55.1 `src/webview2/drag_drop.rs`) 문서 안 HTML5 끌어 놓기가 통째로 죽는다 — 에이전트 트리 옮기기
+        //   (react-arborist 의 react-dnd HTML5 백엔드)와 입력창에 글자 끌어 놓기가 그 사건으로 돈다. 잃는 것은 Tauri 의
+        //   파일 끌어 놓기 사건뿐이고 쓰는 곳이 없다. 대가로 바깥 파일 · URL 놓기를 웹뷰가 받아 그리로 탐색하므로
+        //   `fileDropGuard.ts` 가 그 놓기를 막는다.
+        // TRD S21-slot-docking §14 G8
         .no_drop_handler();
     match dir {
         Some(dir) => builder.data_dir(dir.to_path_buf()),
