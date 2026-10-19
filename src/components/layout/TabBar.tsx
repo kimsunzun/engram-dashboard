@@ -24,7 +24,7 @@ import {
 
 import type { ViewMeta } from '../../api/layoutTypes'
 import { t } from '../../i18n'
-import { TAB_MIN_ACTIVE_W } from './tabStrip/layout'
+import { TAB_MIN_ACTIVE_W, TAB_STANDARD_W } from './tabStrip/layout'
 import { measureStrip, stripBounds } from './tabStrip/measure'
 import { EASE_OUT_CSS } from './tabStrip/reorderGeometry'
 import { useTabDrag } from './tabStrip/useTabDrag'
@@ -69,6 +69,9 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
     setDraft(tab.name)
   }
   const cancelEdit = () => setEditingId(null)
+  // 마지막 머리 누름이 활성으로 바꾼 탭(바꾸지 않은 누름 = `null`) — 좁은 비활성 머리는 닫기 버튼이 없어, 그 탭의 닫기
+  //   버튼은 그 누름 뒤 넓어진 머리에 커서 밑으로 생겼을 수 있다.
+  const activatedBy = useRef<string | null>(null)
   // ★멱등★: editingId 가 이 탭이 아니면 즉시 return — Enter 가 setEditingId(null) 로 input 을 언마운트하면
   //   브라우저가 blur 를 쏴 onBlur→commitEdit 이 한 번 더 돈다. Enter 후 editingId 는 이미 null 이므로
   //   blur 의 commitEdit 은 여기서 no-op 이 돼 onRename 이중 호출(중복 rename_tab invoke)을 막는다.
@@ -83,6 +86,10 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
   const addRef = useRef<HTMLButtonElement>(null)
   const available = useStripAvailable(rowRef, addRef)
   const ids = useMemo(() => tabs.map(tab => tab.id), [tabs])
+  // 편집 중인 탭이 모델에서 빠지면(닫힘 · 다른 창으로 옮김) 편집도 끝낸다 — 남은 `editingId` 는 머리 DOM 순서 맞추기를 막는다.
+  useEffect(() => {
+    if (editingId !== null && !ids.includes(editingId)) setEditingId(null)
+  }, [editingId, ids])
   const { drag, engaged, onPointerDown } = useTabDrag({ tabs: ids, active, row: rowRef, add: addRef, widthCap: WIDTH_CAP })
 
   const order = drag?.order ?? ids
@@ -95,15 +102,23 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
     widthCap: WIDTH_CAP,
   })
   // 끌기 밖에도 자리 전환 속성은 `transform` 그대로 두고 시간만 0 이다 — CSS Transitions 규칙으로는 시간만 바뀌면 진행 중인
-  //   전환(놓은 뒤 자리로 가는 끄는 탭 · 이웃)이 끝까지 가고, 속성을 걷으면 그 자리에서 끊긴다. WebView2 에서 그대로인지
-  //   미검 — 아니면 끌기가 끝나는 순간(`dock:drag{ended}`) 끄는 탭이 자리로 튄다.
+  //   전환(놓은 뒤 자리로 가는 끄는 탭 · 이웃)이 끝까지 가고, 속성을 걷으면 그 자리에서 끊긴다(WebView2 실측 — M-run 1부 C2).
   const slide = `transform ${drag?.slideMs ?? 0}ms ${EASE_OUT_CSS}`
   const heads: DrawnHead[] = []
   order.forEach((id, i) => {
-    const x = drag === null ? (bounds.visible[i] ? bounds.tabs[i].x0 : null) : i === dragged ? drag.left : drag.targets[i]
+    let x = drag === null ? (bounds.visible[i] ? bounds.tabs[i].x0 : null) : i === dragged ? drag.left : drag.targets[i]
     if (x === null) return
+    let w = bounds.tabs[i].x1 - bounds.tabs[i].x0
+    // 이름 편집 중인 머리는 표준 폭으로 넓혀 이웃 위에 그린다 — 좁은 머리에서는 머리의 `overflow: hidden` 안에 이름 칸 ·
+    //   입력 칸이 모자랐다(실측 — 머리 42 · 62 · 86 px 에서 0 · 19 · 43 px). 오른쪽 끝이 쓸 수 있는 폭을 넘지 않게 왼쪽으로
+    //   당기되 줄 왼쪽 끝(0)에서 멈춘다 — 쓸 수 있는 폭이 표준 폭보다 좁으면 머리가 0..160 으로 그 폭을 넘어 `+` 를 덮을 수
+    //   있고, 숨은 탭이 있어 `+` 가 쓸 수 있는 폭 안쪽에 서면 `+` 일부를 덮을 수 있다. 덮인 이웃 머리의 누름 = `coveredHead`.
+    if (drag === null && id === editingId && w < TAB_STANDARD_W) {
+      w = TAB_STANDARD_W
+      if (available !== null) x = Math.max(0, Math.min(x, available - w))
+    }
     const following = drag !== null && i === dragged && !drag.settling
-    heads.push({ id, x, w: bounds.tabs[i].x1 - bounds.tabs[i].x0, transition: following ? 'none' : slide })
+    heads.push({ id, x, w, transition: following ? 'none' : slide })
   })
   const end = bounds.lastVisible < 0 ? 0 : bounds.tabs[bounds.lastVisible].x1
 
@@ -115,6 +130,23 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
   )
   const headById = new Map(heads.map(h => [h.id, h]))
   const metaById = new Map(tabs.map(tab => [tab.id, tab]))
+
+  const activate = (view: string, button: number) => {
+    const switching = button === 0 && view !== active && metaById.has(view)
+    activatedBy.current = switching ? view : null
+    if (switching) onSwitch(view)
+  }
+  // 이름 편집 중 넓힌 머리(`id`)가 덮은 자리의 누름은 그 밑 머리의 누름이다 — 돌리지 않으면 덮인 이웃은 편집을 끝내기
+  //   전까지 눌리지 않는다. 넓히기 전 자기 자리 안 · 밑에 머리가 없는 곳(`+` · 빈 줄)이면 `null`.
+  const coveredHead = (id: string, clientX: number): string | null => {
+    const row = rowRef.current
+    if (drag !== null || row === null) return null
+    const x = clientX - row.getBoundingClientRect().left
+    const under = (i: number) => bounds.visible[i] && x >= bounds.tabs[i].x0 && x < bounds.tabs[i].x1
+    if (under(order.indexOf(id))) return null
+    const j = order.findIndex((_, i) => under(i))
+    return j < 0 ? null : order[j]
+  }
 
   // 놓은 뒤(`drag` = null)에도 자리로 가는 동안 이웃 위에 그린다 — 다음 끌기까지 둔다(겹치지 않으면 차이가 없다).
   const lastDragged = useRef<string | null>(null)
@@ -165,10 +197,24 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
               data-view-id={id}
               data-active={isActive ? 'true' : 'false'}
               // 누르는 순간 활성(TRD §2-2) — 훅이 누르기 전 활성(`initial_active`)을 먼저 적게 전환은 그 뒤에 부른다.
+              //   편집 중인 머리의 누름은 끌기 후보가 아니고, 덮인 이웃 자리의 누름은 편집을 확정하고 그 이웃으로 전환만 한다.
               onPointerDown={e => {
-                if (editing) return
+                if (editing) {
+                  const inInput = e.target instanceof Element && e.target.closest('input') !== null
+                  const under = e.button === 0 && !inInput ? coveredHead(id, e.clientX) : null
+                  if (under === null) return
+                  commitEdit(tab)
+                  activate(under, e.button)
+                  return
+                }
                 onPointerDown(e, id)
-                if (e.button === 0 && id !== active && metaById.has(id)) onSwitch(id)
+                activate(id, e.button)
+              }}
+              // 머리 어디든(이름 칸 폭이 0 인 좁은 활성 머리 포함) — 닫기 버튼 위는 그 버튼이 닫지 않는 클릭일 때만.
+              onDoubleClick={e => {
+                if (editing) return
+                if (e.target instanceof Element && e.target.closest('button') !== null && activatedBy.current !== id) return
+                beginEdit(tab)
               }}
               style={{
                 position: 'absolute',
@@ -178,7 +224,7 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
                 width: head.w,
                 transform: `translateX(${head.x}px)`,
                 transition: head.transition,
-                zIndex: id === topId ? 1 : undefined,
+                zIndex: editing ? 2 : id === topId ? 1 : undefined,
                 boxSizing: 'border-box',
                 overflow: 'hidden',
                 display: 'flex',
@@ -234,7 +280,6 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
               ) : (
                 <span
                   data-testid="tab-name"
-                  onDoubleClick={() => beginEdit(tab)}
                   style={{ flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}
                 >
                   {tab.name}
@@ -248,7 +293,18 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
                   data-testid="tab-close"
                   // 닫기 버튼 누름은 머리 누름(전환 · 끌기)이 아니다.
                   onPointerDown={e => e.stopPropagation()}
-                  onClick={() => onClose(id)}
+                  // 이름 편집 중인 탭의 닫기 버튼은 누름에 입력 칸 포커스를 뺏지 않는다 — 뺏으면 blur 의 확정으로 머리가 다시
+                  //   그려져(넓힌 머리는 줄고 · 입력 칸 바로 뒤의 버튼은 머리 오른쪽 끝으로 간다) 버튼이 커서 밑에서 빠지고 그
+                  //   클릭은 닫지 못한다. 다른 탭의 닫기 버튼 누름은 그대로 편집을 확정한다.
+                  onMouseDown={editing ? e => e.preventDefault() : undefined}
+                  onClick={e => {
+                    // 같은 연속 클릭(detail ≥ 2)에서 앞 누름이 이 탭을 활성으로 만들어 이 버튼이 커서 밑에 막 생겼다 — 닫지 않는다
+                    //   (좁은 탭바의 비활성 머리 더블클릭이 탭을 닫았다 4/7 — M-run 1부 이상 3). 연속 클릭으로 닫다가 밀려 온
+                    //   다음 탭의 닫기 버튼은 그대로 닫는다.
+                    if (e.detail >= 2 && activatedBy.current === id) return
+                    activatedBy.current = null
+                    onClose(id)
+                  }}
                   style={{
                     flexShrink: 0,
                     background: 'transparent',

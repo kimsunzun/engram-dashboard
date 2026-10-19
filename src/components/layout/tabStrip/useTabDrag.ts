@@ -44,7 +44,8 @@ export const CMD_TAB_DRAG_LEAVE = 'tab_drag_leave'
 const REDUCED_MOTION = '(prefers-reduced-motion: reduce)'
 
 /**
- * 탭바가 지금 그릴 끌기 모습 — 이 탭바 안에서 탭을 모는 동안만 있다(창째 끌기 · 뗀 뒤 · 끌기 밖 = `null`).
+ * 탭바가 지금 그릴 끌기 모습 — 이 탭바 안에서 탭을 모는 동안만 있다(창째 끌기 · 뗀 뒤 · 끌기 밖 = `null`). 떠나기 답을 기다리는데
+ * 모델에서 끄는 탭이 빠졌으면(셸이 이미 떼었다) 그 답 전에도 `null` 이다 — 탭바는 모델대로(그 탭 없이) 그린다.
  * x 는 끌기 영역 좌표(첫 탭 왼쪽 = 0)다.
  */
 export interface TabDragView {
@@ -160,6 +161,8 @@ export class TabDragController {
   private pointerOn = false
   private keysOn = false
   private engaged = false
+  /** 문턱에서 탭바 줄에 건 포인터 캡처 — 놓을 때까지(그 사이 붙은 끌기 · 뗀 뒤로 넘어가도 남는다). */
+  private captured: number | null = null
 
   constructor(private readonly deps: TabDragDeps) {}
 
@@ -338,6 +341,7 @@ export class TabDragController {
     const w0 = B.tabs[index].x1 - B.tabs[index].x0
     const grab: Grab = { x_ratio: ph.ratio, y: ph.down.y - m.row.y0, single_x: grabOffset(ph.ratio, TAB_STANDARD_W) }
     row.setPointerCapture(ph.pointerId)
+    this.captured = ph.pointerId
     // Chrome `SaveFocus`(TRD §6-3) — 끄는 중의 키가 포커스 받은 슬롯에 들어가지 않게.
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
     const next: Phase = {
@@ -535,12 +539,14 @@ export class TabDragController {
     d.slideMs = slideMs(this.deps.reducedMotion(), false)
     this.listenPointer(false)
     this.listenKeys(false)
-    if (d.input === 'pointer') this.releaseCapture(d.pointerId)
+    this.releaseCapture()
     this.publish()
   }
 
   // 창째 끌기 · 뗀 뒤 — 루프가 뗌을 보고(들어갈 때 이미 떨어졌으면 놓기), 키는 앱 전체 키 감시가 받는다. 붙든 포인터 끝은
-  //   버리고 키 끝만 보낸다(TRD §4). 포인터 캡처는 셸 이동 루프가 가져가므로 놓지 않는다.
+  //   버리고 키 끝만 보낸다(TRD §4). 포인터 캡처는 여기서 놓지 않고 그 세션의 `ended`(`abandon`)에서 놓는다 — 셸 이동 루프가
+  //   뗌을 먹어 이 창에는 pointerup · lostpointercapture 가 오지 않고, 남은 캡처는 커서를 움직이기 전 같은 점의 다음 누름을
+  //   머리 대신 탭바 줄로 보낸다(실측 13/13 — 2026-10-19 M-run 1부 이상 2).
   private goAway(session: number, held: EndInput | null): void {
     if (held?.src === 'key') sendDragEnd(keyEnd(session, held.key, null))
     this.listenPointer(false)
@@ -550,11 +556,8 @@ export class TabDragController {
   }
 
   private abandon(): void {
-    const ph = this.phase
-    const pointerId =
-      ph.kind === 'begin' ? ph.pointerId : ph.kind === 'strip' && ph.d.input === 'pointer' ? ph.d.pointerId : null
     this.reset()
-    if (pointerId !== null) this.releaseCapture(pointerId)
+    this.releaseCapture()
   }
 
   private reset(): void {
@@ -576,7 +579,10 @@ export class TabDragController {
 
   private publish(): void {
     const ph = this.phase
-    if (ph.kind !== 'strip') {
+    // 떠나기를 청한 뒤 모델에서 끄는 탭이 빠졌다 = 셸이 떼었다 — 답을 기다리지 않고 그 머리를 지운다. 그 답은 셸 이동 루프가
+    //   다음 메시지를 받을 때까지 웹뷰에 닿지 않아(실측 86–96 ms · 커서를 멈추면 561–577 ms — M-run 1부 이상 1) 그동안 이름
+    //   없는 활성 머리가 남는다. `not_ready` 답이면 몰기가 다시 그린다.
+    if (ph.kind !== 'strip' || (ph.d.leaving !== null && !this.tabs.includes(ph.d.view))) {
       this.deps.onView(null)
       return
     }
@@ -610,7 +616,10 @@ export class TabDragController {
     return this.seq.n
   }
 
-  private releaseCapture(pointerId: number): void {
+  private releaseCapture(): void {
+    const pointerId = this.captured
+    if (pointerId === null) return
+    this.captured = null
     const row = this.deps.row()
     if (row?.hasPointerCapture(pointerId)) row.releasePointerCapture(pointerId)
   }

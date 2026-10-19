@@ -1,8 +1,9 @@
 // useTabDrag 단위테스트 — 컨트롤러(`TabDragController`)를 가짜 invoke · 가짜 재기 · jsdom 포인터 · 키 사건으로 몬다:
 //   10 px 문턱(그 아래는 click · dblclick 그대로) · 뗌을 놓친 누름(단추 놓인 움직임 · 새 누름 · 창 blur) · 누른 머리 사각형의
 //   잡은 비율 · begin 인자와 답 넷 · 답 기다리는 동안 붙든 끝 · 순서 이동 seq 와 끝의 `at` · 모델 메아리 맞추기 · 구역 나감 →
-//   leave 답 셋(not_ready 면 구역 밖도 가로로 몬다) · 캡처 잃음 · 키(탭을 쥔 창이 받고 끊는다) · 셸 입력(attach · move ·
-//   release) · `dock:drag{ended}` 거두기 · 누름부터 끝까지의 `engaged`. 끝에 훅 배선(재기 · `dock:feed` · `dock:drag` · 언마운트)을 실물 `dockSession` 위에서 잰다.
+//   leave 답 셋(not_ready 면 구역 밖도 가로로 몬다) · 답 전 모델에서 빠진 끄는 탭 · 캡처 잃음 · 키(탭을 쥔 창이 받고 끊는다) ·
+//   셸 입력(attach · move · release) · `dock:drag{ended}` 거두기(뗀 끌기 · 창째 끌기의 남은 캡처 놓기 포함) · 누름부터 끝까지의
+//   `engaged`. 끝에 훅 배선(재기 · `dock:feed` · `dock:drag` · 언마운트)을 실물 `dockSession` 위에서 잰다.
 // 탭바(기대값의 손셈): 줄 x 100..800 · y 40..68 · `+` 40 → 쓸 수 있는 폭 660 · 탭 넷이면 모두 표준 폭 160 → 끌기 영역 좌표의
 //   경계 0 · 160 · 320 · 480 · 640 · 순서 문턱 16 · 끄는 탭 왼쪽 상한 660 − 160 = 500. 탭 a(머리 x 100..260)를 x 180(머리 안
 //   80 = 비율 0.5 → 잡은 오프셋 80)에서 누른다. 움직임은 주 단추를 쥔 채(`buttons` 1)다.
@@ -531,6 +532,80 @@ describe('구역 나감 → leave', () => {
     leaves[0].resolve('detached')
     await ticks()
     expect(ends()).toEqual([{ session: 7, how: 'drop', src: 'key', at: null }])
+  })
+
+  it('기다리는 동안 모델에서 끄는 탭이 빠지면(셸이 떼었다) 답 전에 그리지 않고 · not_ready 답이면 다시 몬다', async () => {
+    await strip()
+    move(300, 50)
+    move(300, 100)
+    expect(lastView()).not.toBeNull()
+    ctl.setModel(['b', 'c', 'd'], 'b', null)
+    expect(lastView()).toBeNull()
+    move(320, 110)
+    expect(lastView()).toBeNull()
+
+    leaves[0].resolve('not_ready')
+    await ticks()
+    expect(lastView()).toMatchObject({ view: 'a', order: ['b', 'a', 'c', 'd'], settling: false })
+  })
+
+  it('기다리는 동안 같은 탭바에 다시 붙으면(메아리 · feed attach) 붙은 몰기를 그리고 늦게 온 detached 답은 버린다', async () => {
+    await strip()
+    move(300, 100)
+    ctl.setModel(['b', 'c', 'd'], 'b', null)
+    expect(lastView()).toBeNull()
+    ctl.setModel(['b', 'a', 'c', 'd'], 'a', null)
+    feed(attachStep(), 7, 'a')
+    const attached = lastView()
+    expect(attached).toMatchObject({ view: 'a', settling: false })
+
+    leaves[0].resolve('detached')
+    await ticks()
+    expect(lastView()).toBe(attached)
+  })
+})
+
+describe('뗀 끌기 · 창째 끌기 뒤 남은 캡처', () => {
+  it('detached — 놓지 않고 있다가 그 세션의 ended 에서 탭바 줄의 캡처를 놓는다', async () => {
+    await strip()
+    move(300, 100)
+    leaves[0].resolve('detached')
+    await ticks()
+    expect(captured.has(1)).toBe(true)
+    ctl.dragEvent({ session: 7, phase: 'ended' })
+    expect(row.releasePointerCapture).toHaveBeenCalledWith(1)
+    expect(captured.has(1)).toBe(false)
+  })
+
+  it('whole_window — 그 세션의 ended 에서 놓는다', async () => {
+    press()
+    move(191, 50)
+    begins[0].resolve({ type: 'whole_window', session: 3 })
+    await ticks()
+    expect(captured.has(1)).toBe(true)
+    ctl.dragEvent({ session: 3, phase: 'ended' })
+    expect(captured.has(1)).toBe(false)
+  })
+
+  it('떠나기 답 전에 같은 탭바에 다시 붙은 끌기도 ended 에서 붙기 전의 캡처를 놓는다', async () => {
+    await strip()
+    move(300, 100)
+    feed(attachStep(), 7, 'a')
+    ctl.dragEvent({ session: 7, phase: 'ended' })
+    expect(captured.has(1)).toBe(false)
+  })
+
+  it('ended 전에 새 누름이 왔으면 옛 세션의 ended 는 놓지 않는다 — 그 누름이 문턱에서 건 캡처가 그대로다', async () => {
+    await strip()
+    move(300, 100)
+    leaves[0].resolve('detached')
+    await ticks()
+    press('b', 400, 50)
+    move(411, 50)
+    ctl.dragEvent({ session: 7, phase: 'ended' })
+    expect(row.releasePointerCapture).not.toHaveBeenCalled()
+    expect(captured.has(1)).toBe(true)
+    expect(calls(CMD_TAB_DRAG_BEGIN)).toHaveLength(2)
   })
 })
 

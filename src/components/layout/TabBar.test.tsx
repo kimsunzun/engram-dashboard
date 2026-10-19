@@ -20,6 +20,7 @@ vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({ label: 'ma
 import TabBar from './TabBar'
 import type { ViewMeta } from '../../api/layoutTypes'
 import type { BeginReply } from '../../../src-tauri/bindings/BeginReply'
+import type { LeaveReply } from '../../../src-tauri/bindings/LeaveReply'
 import { watchDockSession } from './dock/dockSession'
 import { TAB_MIN_ACTIVE_W } from './tabStrip/layout'
 
@@ -179,6 +180,26 @@ describe('TabBar', () => {
     expect(vi.mocked(onSwitch).mock.calls.every(c => c[0] === 'v2')).toBe(true)
   })
 
+  it('× 를 연속 클릭으로 닫다가 밀려 온 다음 탭의 × (detail 2)는 닫는다 — 전에 머리 누름으로 활성이 된 탭이라도 · 이름 편집은 열지 않는다', () => {
+    const { onClose } = renderBar('v1')
+    fireEvent.pointerDown(nameOf('v2'), { button: 0, pointerId: 1 })
+    const close = (id: string) => head(id).querySelector<HTMLElement>('[data-testid="tab-close"]')!
+    fireEvent.click(close('v1'), { detail: 1 })
+    fireEvent.click(close('v2'), { detail: 2 })
+    fireEvent.doubleClick(close('v2'), { detail: 2 })
+    expect(vi.mocked(onClose).mock.calls).toEqual([['v1'], ['v2']])
+    expect(screen.queryByTestId('tab-rename-input')).toBeNull()
+  })
+
+  it('이름 칸 밖 머리 더블클릭도 편집을 열고 · 편집 중 입력 칸 안의 더블클릭은 친 글자를 지우지 않는다', () => {
+    renderBar('v1')
+    fireEvent.doubleClick(head('v1'))
+    const input = screen.getByTestId('tab-rename-input') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'Typed' } })
+    fireEvent.doubleClick(input)
+    expect((screen.getByTestId('tab-rename-input') as HTMLInputElement).value).toBe('Typed')
+  })
+
   it('머리는 HTML5 끌기 출처가 아니다 — draggable 없음 · div', () => {
     renderBar('v1')
     for (const el of screen.getAllByTestId('tab')) {
@@ -207,6 +228,7 @@ interface Pending<T> {
   resolve: (v: T) => void
 }
 let begins: Pending<BeginReply>[]
+let leaves: Pending<LeaveReply>[]
 let stopWatch: () => void
 let rowWidth: number
 const captured = new Set<number>()
@@ -291,12 +313,14 @@ async function dragA(bar: ReturnType<typeof renderBar>): Promise<void> {
 describe('TabBar — 탭 끌기 그리기', () => {
   beforeEach(async () => {
     begins = []
+    leaves = []
     rowWidth = 700
     captured.clear()
     handlers.clear()
     invokeMock.mockReset()
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === 'tab_drag_begin') return new Promise(resolve => begins.push({ resolve }))
+      if (cmd === 'tab_drag_leave') return new Promise(resolve => leaves.push({ resolve }))
       if (cmd === 'window_role') return { role: 'model', drag: null }
       return undefined
     })
@@ -502,6 +526,125 @@ describe('TabBar — 탭 끌기 그리기', () => {
     bar.rerender({ tabs: [ABCD[0], ABCD[1], { id: 'n', name: 'New' }, ABCD[2], ABCD[3]] })
     expect(head('n')).toBe(n)
     expect(nameOf('n').textContent).toBe('New')
+  })
+
+  it('떠나기를 청한 뒤 셸이 탭을 빼면(모델 메아리) 답 전에도 그 머리를 지우고 남은 머리를 모델대로 그린다 · not_ready 면 다시 그린다', async () => {
+    const bar = renderBar('a', ABCD)
+    const row = screen.getByTestId('tab-strip-row')
+    await dragA(bar)
+    pointer('pointermove', 300, 120)
+    expect(calls('tab_drag_leave')).toEqual([{ session: 7 }])
+
+    bar.rerender({ tabs: [ABCD[1], ABCD[2], ABCD[3]], active: 'b' })
+    expect(headIds()).toEqual(['b', 'c', 'd'])
+    expect(head('b').getAttribute('data-active')).toBe('true')
+    expect([xOf(head('b')), xOf(head('c')), xOf(head('d'))]).toEqual([0, 160, 320])
+    expect(screen.getByTestId('tab-strip-row')).toBe(row)
+
+    await act(async () => {
+      leaves[0].resolve('not_ready')
+      await ticks()
+    })
+    expect(head('a').getAttribute('data-active')).toBe('true')
+    expect(captured.has(1)).toBe(true)
+  })
+
+  it('좁은 탭바 — 비활성 머리 더블클릭의 둘째 클릭이 막 생긴 닫기 버튼에 떨어져도 닫지 않고 편집을 연다 · 그 뒤 따로 누른 닫기는 닫는다', () => {
+    rowWidth = 140 // 쓸 수 있는 폭 100 → a 42 · b 32(닫기 버튼 없음) · 보이는 것 = 앞 둘
+    const bar = renderBar('a', ABCD)
+    expect(head('b').querySelector('[data-testid="tab-close"]')).toBeNull()
+    fireEvent.pointerDown(nameOf('b'), { button: 0, pointerId: 1, clientX: 150, clientY: 50 })
+    expect(bar.onSwitch).toHaveBeenCalledWith('b')
+    bar.rerender({ active: 'b' })
+    pointer('pointerup', 150)
+    fireEvent.click(head('b'), { detail: 1 })
+
+    const close = head('b').querySelector<HTMLElement>('[data-testid="tab-close"]')!
+    fireEvent.pointerDown(close, { button: 0, pointerId: 1, clientX: 150, clientY: 50 })
+    fireEvent.click(close, { detail: 2 })
+    fireEvent.doubleClick(close, { detail: 2 })
+    expect(bar.onClose).not.toHaveBeenCalled()
+    const input = screen.getByTestId('tab-rename-input')
+    expect(input.getAttribute('data-view-id')).toBe('b')
+
+    fireEvent.keyDown(input, { key: 'Escape' })
+    fireEvent.click(head('b').querySelector<HTMLElement>('[data-testid="tab-close"]')!, { detail: 1 })
+    expect(bar.onClose).toHaveBeenCalledWith('b')
+  })
+
+  it('좁은 탭바 — 이름 칸 폭이 0 인 활성 머리도 머리 더블클릭으로 편집을 열고, 편집 중 머리는 표준 폭 · 맨 위 · 줄 왼쪽 끝까지 당겨져 쓸 수 있는 폭 너머(+ 자리)까지 덮는다', () => {
+    rowWidth = 140 // 활성 b → a 32(x 0) · b 42(x 32) · + x 74 · 쓸 수 있는 폭 100 — 편집 중 b 는 0..160
+    renderBar('b', ABCD)
+    expect(xOf(head('b'))).toBe(32)
+    fireEvent.doubleClick(head('b'))
+    expect(screen.getByTestId('tab-rename-input').getAttribute('data-view-id')).toBe('b')
+    expect(head('b').style.width).toBe('160px')
+    expect(head('b').style.zIndex).toBe('2')
+    expect(xOf(head('b'))).toBe(0)
+
+    fireEvent.keyDown(screen.getByTestId('tab-rename-input'), { key: 'Escape' })
+    expect(head('b').style.width).toBe(`${TAB_MIN_ACTIVE_W}px`)
+    expect(xOf(head('b'))).toBe(32)
+  })
+
+  it('편집 중 머리는 오른쪽에 자리가 있으면 제자리에서 넓어진다', () => {
+    rowWidth = 500 // 쓸 수 있는 폭 460 → 머리 115 · x 0 · 115 · 230 · 345
+    renderBar('a', ABCD)
+    fireEvent.doubleClick(nameOf('c'))
+    expect([xOf(head('c')), head('c').style.width]).toEqual([230, '160px'])
+  })
+
+  it('넓힌 편집 머리가 덮은 이웃 자리의 누름은 편집을 확정하고 그 이웃으로 전환만 한다 · 넓히기 전 자리 · 입력 칸의 누름은 그대로다', () => {
+    rowWidth = 500 // 머리 115 · x 0 · 115 · 230 · 345 → 편집 중 c 230..390 이 d(345..460)의 왼쪽을 덮는다
+    const bar = renderBar('c', ABCD)
+    fireEvent.doubleClick(nameOf('c'))
+    const input = screen.getByTestId('tab-rename-input')
+    fireEvent.change(input, { target: { value: 'Renamed' } })
+
+    fireEvent.pointerDown(input, { button: 0, pointerId: 1, clientX: 450, clientY: 50 })
+    fireEvent.pointerDown(head('c'), { button: 0, pointerId: 1, clientX: 400, clientY: 50 })
+    expect(bar.onSwitch).not.toHaveBeenCalled()
+    expect(screen.getByTestId('tab-rename-input')).toBe(input)
+
+    fireEvent.pointerDown(head('c'), { button: 0, pointerId: 1, clientX: 450, clientY: 50 })
+    expect(bar.onRename).toHaveBeenCalledWith('c', 'Renamed')
+    expect(bar.onSwitch).toHaveBeenCalledWith('d')
+    expect(screen.queryByTestId('tab-rename-input')).toBeNull()
+    pointer('pointermove', 480)
+    expect(calls('tab_drag_begin')).toEqual([])
+  })
+
+  it('좁은 탭바 — 왼쪽으로 당긴 편집 머리가 덮은 이웃 자리의 누름도 그 이웃으로 전환하고, 밑에 머리가 없는 + 자리의 누름은 지금처럼 둔다', () => {
+    rowWidth = 140 // 활성 b → a 32(x 0) · b 42(x 32) · + x 74 — 편집 중 b 는 0..160
+    const bar = renderBar('b', ABCD)
+    fireEvent.doubleClick(head('b'))
+    fireEvent.pointerDown(head('b'), { button: 0, pointerId: 1, clientX: 180, clientY: 50 })
+    expect(screen.getByTestId('tab-rename-input').getAttribute('data-view-id')).toBe('b')
+    expect(bar.onCreate).not.toHaveBeenCalled()
+
+    fireEvent.pointerDown(head('b'), { button: 0, pointerId: 1, clientX: 110, clientY: 50 })
+    expect(bar.onSwitch).toHaveBeenCalledWith('a')
+    expect(screen.queryByTestId('tab-rename-input')).toBeNull()
+  })
+
+  it('이름 편집 중인 탭의 × 는 누름에 입력 칸 포커스를 뺏지 않고 첫 클릭에 닫는다 · 그 탭이 모델에서 빠지면 편집도 끝나 머리 DOM 순서를 다시 맞춘다', () => {
+    const bar = renderBar('a', ABCD)
+    const [a, b, , d] = screen.getAllByTestId('tab')
+    fireEvent.doubleClick(nameOf('c'))
+    const input = screen.getByTestId('tab-rename-input')
+    const close = (id: string) => head(id).querySelector<HTMLElement>('[data-testid="tab-close"]')!
+
+    expect(fireEvent.mouseDown(close('b'))).toBe(true)
+    expect(fireEvent.mouseDown(close('c'))).toBe(false)
+    expect(document.activeElement).toBe(input)
+    fireEvent.click(close('c'), { detail: 1 })
+    expect(bar.onClose).toHaveBeenCalledWith('c')
+    expect(bar.onRename).not.toHaveBeenCalled()
+
+    bar.rerender({ tabs: [ABCD[0], ABCD[1], ABCD[3]] })
+    expect(screen.queryByTestId('tab-rename-input')).toBeNull()
+    bar.rerender({ tabs: [ABCD[3], ABCD[0], ABCD[1]] })
+    expect(screen.getAllByTestId('tab')).toEqual([d, a, b])
   })
 
   it('이름 편집 중인 머리 · 닫기 버튼에서 시작한 누름은 끌기가 아니다', () => {
