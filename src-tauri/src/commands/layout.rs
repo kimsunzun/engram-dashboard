@@ -331,6 +331,30 @@ pub fn switch_tab(
     )
 }
 
+// 탭 끌기의 원래 선택 되돌리기 전용(웹 → 셸 · TRD S21-slot-docking §4-6) — 버스 명령이 아니다(LLM 은 `tab.switch` · §3-6).
+#[tauri::command]
+pub fn switch_tab_if(
+    app: AppHandle,
+    state: State<'_, LayoutState>,
+    router: State<'_, Arc<OutputRouter>>,
+    client: State<'_, Arc<DaemonClient>>,
+    window: String,
+    view: Uuid,
+    expect: Uuid,
+) -> Result<bool, String> {
+    apply::switch_tab_if(
+        &state,
+        &RouterSubs {
+            router: &router,
+            client: &client,
+        },
+        &TauriEvents { app: &app },
+        &window,
+        view,
+        expect,
+    )
+}
+
 // 창 `window` 의 탭 `view` 닫기(§5-2 상태기계).
 #[tauri::command]
 pub async fn close_tab(

@@ -340,6 +340,43 @@ pub fn switch_tab(
     Ok(())
 }
 
+/// 그 창 활성이 `expect` 일 때만 [`switch_tab`] — 바꿨으면 `true` 이고 알림 · 재동기도 `switch_tab` 과 같다. 활성이 달라
+/// `false` 면 모델 · 구독 · 알림 무엇도 건드리지 않는다. 오류(없는 창 · 그 창 탭이 아닌 `view`)는 `switch_tab` 과 같다.
+///
+/// 탭 끌기의 원래 선택 되돌리기 전용 웹 → 셸 명령이다(TRD S21-slot-docking §4-6) — 되돌리기가 닿기 전에 사용자 · LLM 이
+/// 고른 탭을 덮지 않는다. LLM 버스 표에는 없다(LLM 은 `tab.switch` 를 쓴다 · TRD §3-6).
+pub fn switch_tab_if(
+    state: &LayoutState,
+    subs: &dyn SubscriptionSync,
+    events: &dyn LayoutEvents,
+    window: &str,
+    view: Uuid,
+    expect: Uuid,
+) -> Result<bool, String> {
+    let (layout, tabs) = {
+        let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
+        if !mgr
+            .switch_tab_if(window, view, expect)
+            .map_err(|e| e.to_string())?
+        {
+            drop(mgr);
+            tracing::debug!(
+                window,
+                view = %view,
+                expect = %expect,
+                "switch_tab_if: 활성이 expect 가 아니라 바꾸지 않는다"
+            );
+            return Ok(false);
+        }
+        let layout = mgr.snapshot(view).ok();
+        let tabs = tabs_payload(&mgr, window);
+        subs.resync(&mgr);
+        (layout, tabs)
+    }; // ← 락 드롭
+    notify(events, layout, tabs);
+    Ok(true)
+}
+
 // ★마지막 탭 close 로 창이 사라지면 OS 창 닫기는 여기가 단일 소스(§5-2/G2)★ — `windows` 엔트리는
 // `close_tab` 이 이미 지웠으니 OS 창을 닫는다. 그 뒤 Destroyed 이벤트가 registry/Channel 잔여를 정리한다
 // (프론트로 별도 `view:closed` 를 쏘지 않는다 — 이중 발화 방지).

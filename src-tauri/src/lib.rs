@@ -434,6 +434,8 @@ pub fn run() {
             commands::create_tab,
             commands::create_window,
             commands::switch_tab,
+            // 탭 끌기의 원래 선택 되돌리기(웹뷰 → 셸 · TRD S21-slot-docking §4-6) — 버스 명령이 아니다.
+            commands::switch_tab_if,
             commands::close_tab,
             commands::close_window,
             commands::split_slot,

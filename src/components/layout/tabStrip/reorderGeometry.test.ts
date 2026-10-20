@@ -11,6 +11,8 @@ import {
   type StripBounds,
   dragAreaWidth,
   draggedLeft,
+  dropIndex,
+  dropMarkerX,
   easeOut,
   grabOffset,
   idealBounds,
@@ -373,5 +375,58 @@ describe('slideTargets · slideMs — 비켜남(C2)', () => {
     expect(easeOut(0)).toBe(0)
     expect(easeOut(1)).toBe(1)
     expect(easeOut(0.5)).toBe(0.75)
+  })
+})
+
+describe('dropIndex · dropMarkerX — 다른 창 탭바의 놓을 자리 · 세로선(W13)', () => {
+  it('보이는 머리 중 가운데가 x 보다 왼쪽인 것의 수 · 가운데와 같은 x = 그 머리의 왼쪽', () => {
+    // 가운데 = 50 · 150 · 250 · 350
+    expect(dropIndex(FOUR, -5, null)).toBe(0)
+    expect(dropIndex(FOUR, 49, null)).toBe(0)
+    expect(dropIndex(FOUR, 50, null)).toBe(0)
+    expect(dropIndex(FOUR, 51, null)).toBe(1)
+    expect(dropIndex(FOUR, 150, null)).toBe(1)
+    expect(dropIndex(FOUR, 349, null)).toBe(3)
+    expect(dropIndex(FOUR, 351, null)).toBe(4)
+  })
+
+  it('빈 곳(보이는 끝 너머) = 끝', () => {
+    expect(dropIndex(FOUR, 1000, null)).toBe(4)
+    expect(dropMarkerX(FOUR, 4, null)).toBe(400)
+  })
+
+  it('숨긴 탭이 넘친 탭바는 보이는 마지막 머리 다음 자리에서 자른다(R24)', () => {
+    // 보이는 셋 = 0–42 · 42–74 · 74–106 · 숨긴 둘이 106–138 · 138–170 에 제 폭으로 선다.
+    expect(dropIndex(OVERFLOW, 120, null)).toBe(3)
+    expect(dropIndex(OVERFLOW, 160, null)).toBe(3)
+    expect(dropMarkerX(OVERFLOW, 3, null)).toBe(106)
+  })
+
+  it('탭 0 개 = 자리 0 · 선 0', () => {
+    expect(dropIndex(EMPTY, 30, null)).toBe(0)
+    expect(dropMarkerX(EMPTY, 0, null)).toBe(0)
+  })
+
+  it('탭 1 개 = 가운데 앞 0 · 뒤 1', () => {
+    const one = stripOf([100])
+    expect(dropIndex(one, 50, null)).toBe(0)
+    expect(dropIndex(one, 51, null)).toBe(1)
+    expect(dropMarkerX(one, 0, null)).toBe(0)
+    expect(dropMarkerX(one, 1, null)).toBe(100)
+  })
+
+  it('선 = 그 자리 왼쪽 머리 오른쪽 끝(= 오른쪽 머리 왼쪽 끝) · 범위 밖 자리는 끝으로 자름', () => {
+    expect(dropMarkerX(FOUR, 0, null)).toBe(0)
+    expect(dropMarkerX(FOUR, 1, null)).toBe(100)
+    expect(dropMarkerX(FOUR, 2, null)).toBe(200)
+    expect(dropMarkerX(FOUR, -3, null)).toBe(0)
+    expect(dropMarkerX(FOUR, 9, null)).toBe(400)
+  })
+
+  it('끄는 탭이 이 탭바에 있으면 세지 않는다', () => {
+    // 끄는 탭 1(100–200)을 빼면 머리 = 0–100 · 200–300 · 300–400.
+    expect(dropIndex(FOUR, 260, 1)).toBe(2)
+    expect(dropIndex(FOUR, 240, 1)).toBe(1)
+    expect(dropMarkerX(FOUR, 1, 1)).toBe(100)
   })
 })

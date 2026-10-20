@@ -218,6 +218,36 @@ export function easeOut(t: number): number {
   return 1 - (1 - t) ** 2
 }
 
+// TRD S21-slot-docking §4-3 「다른 창」 · W13: 다른 창 탭바 위의 놓을 자리 · 2 px 세로선(VS Code 꼴) — 그 탭바의 탭은 움직이지
+//   않는다. 출처 창 자기 탭바는 위 Chrome `insertionIndex` 를 쓴다.
+
+/** 세는 머리 — 보이고 `dragged` 가 아닌 것(지금 순서). 숨긴 머리는 보이는 끝 너머에 서므로 빼면 보이는 끝에서 잘린다(R24). */
+function dropHeads(B: StripBounds, dragged: number | null): TabBounds[] {
+  return B.tabs.filter((_, i) => B.visible[i] && i !== dragged)
+}
+
+/**
+ * 다른 창 탭바에 놓을 자리 — 보이는 머리 중 가운데가 `x` 보다 왼쪽인 것의 수(가운데와 같으면 그 머리의 왼쪽 = 세지 않는다).
+ * 빈 곳 · 보이는 끝 너머 = 보이는 머리 수(보이는 마지막 머리 다음 자리 — 숨긴 머리 앞)를 넘지 않는다. 결과는 `DropTo.tab_bar`
+ * 의 `index`(그 창 탭 목록에 끄는 탭을 끼운 자리)다. `x` = 끌기 영역 왼쪽 0 기준 CSS px. `dragged` = 이 탭바에 든 끄는 탭의
+ * 자리 — 세지 않는다(다른 창은 `null`).
+ */
+export function dropIndex(B: StripBounds, x: number, dragged: number | null): number {
+  return dropHeads(B, dragged).filter(b => (b.x0 + b.x1) / 2 < x).length
+}
+
+/**
+ * `dropIndex` 자리의 세로선 x — 그 자리 왼쪽 머리의 오른쪽 끝(= 오른쪽 머리의 왼쪽 끝 · 머리는 맞붙는다). 맨 앞이면 첫 머리의
+ * 왼쪽 끝, 머리가 없으면 0. 선(2 px)은 이 x 를 사이에 두고 왼쪽 머리 끝 1 px + 오른쪽 머리 끝 1 px 로 그린다(VS Code
+ * `::after` · `::before`). `index` 는 `dropIndex` 의 답 — 범위 밖이면 가까운 끝으로 자른다.
+ */
+export function dropMarkerX(B: StripBounds, index: number, dragged: number | null): number {
+  const heads = dropHeads(B, dragged)
+  if (heads.length === 0) return 0
+  const k = Math.min(Math.max(index, 0), heads.length)
+  return k === 0 ? heads[0].x0 : heads[k - 1].x1
+}
+
 /** Chromium `base::ClampRound` 의 반올림 — .5 는 0 에서 먼 쪽(`Math.round` 는 음수 .5 를 0 쪽으로 보낸다). */
 function roundHalfAway(v: number): number {
   return Math.sign(v) * Math.round(Math.abs(v))

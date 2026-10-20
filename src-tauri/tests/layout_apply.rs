@@ -660,6 +660,82 @@ fn switch_tab_foreign_view_is_err() {
     );
 }
 
+// ── switch_tab_if(끌기 되돌리기 — TRD S21-slot-docking §4-6) ───────────────────
+
+#[test]
+fn switch_tab_if_switches_when_active_matches() {
+    let w = World::new();
+    let first = w.main_active();
+    let dragged = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
+    assert_eq!(w.main_active(), dragged, "전제: 새 탭이 활성");
+    w.ev.take_order();
+    let resyncs = w.resyncs();
+
+    let switched =
+        apply::switch_tab_if(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, first, dragged).unwrap();
+    assert!(switched);
+    assert_eq!(w.main_active(), first);
+    assert_eq!(w.last_tabs().active, first, "탭 알림이 활성 탭을 나른다");
+    assert_eq!(w.resyncs(), resyncs + 1);
+    assert_one_batch(&w, "switch_tab_if");
+}
+
+// 되돌리기가 닿기 전에 사용자 · LLM 이 다른 탭을 골랐다 — 그 선택을 덮지 않고 아무것도 안 건드린다.
+#[test]
+fn switch_tab_if_mismatch_is_noop_without_notification() {
+    let w = World::new();
+    let first = w.main_active();
+    let dragged = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
+    let chosen = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
+    assert_eq!(
+        w.main_active(),
+        chosen,
+        "전제: 끄는 탭이 아닌 다른 탭이 활성"
+    );
+    w.ev.take_order();
+    let (resyncs, layouts, tabs) = (w.resyncs(), w.layout_events(), w.tab_events());
+    let version = apply::list_tabs(&w.state, MAIN_WINDOW_LABEL)
+        .unwrap()
+        .version;
+
+    let switched =
+        apply::switch_tab_if(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, first, dragged).unwrap();
+    assert!(!switched);
+    assert_eq!(w.main_active(), chosen, "고른 탭이 그대로");
+    assert_eq!(
+        apply::list_tabs(&w.state, MAIN_WINDOW_LABEL)
+            .unwrap()
+            .version,
+        version
+    );
+    assert_eq!(
+        (w.resyncs(), w.layout_events(), w.tab_events()),
+        (resyncs, layouts, tabs),
+        "재동기 · 알림 없음"
+    );
+    assert!(w.ev.take_order().is_empty(), "묶음 끝도 없음");
+}
+
+#[test]
+fn switch_tab_if_errors_like_switch_tab() {
+    let w = World::new();
+    let label = w.popup();
+    let foreign = apply::list_tabs(&w.state, &label).unwrap().active;
+    let active = w.main_active();
+
+    let err = apply::switch_tab_if(&w.state, &w.subs, &w.ev, "no-such-window", active, active)
+        .unwrap_err();
+    assert!(err.contains("window 없음"), "err={err}");
+    // 조건이 맞든 어긋나든 타 창 탭은 오류다.
+    for expect in [active, foreign] {
+        let err =
+            apply::switch_tab_if(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, foreign, expect)
+                .unwrap_err();
+        assert!(err.contains("view 없음"), "err={err}");
+    }
+    assert_eq!(w.main_active(), active, "활성 불변");
+}
+
 // ── close_tab ────────────────────────────────────────────────────────────────
 
 #[test]

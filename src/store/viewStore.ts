@@ -108,6 +108,12 @@ interface ViewState {
   /** 창 `window` 의 활성 탭 변경(그 창만). */
   switchTab: (window: string, viewId: string) => Promise<void>
   /**
+   * 창 `window` 의 활성이 `expect` 일 때만 `viewId` 로 바꾼다 — 바꿨으면 `true`, 활성이 달라 안 바꿨으면 `false`. 오류는
+   * `switchTab` 과 같다. 탭 끌기의 원래 선택 되돌리기 전용(TRD S21-slot-docking §4-6 — 되돌리기가 닿기 전에 사용자 · LLM 이
+   * 고른 탭을 덮지 않는다). ★LLM 표면에 올리지 않는다★ — LLM 은 `tab.switch`(TRD §3-6).
+   */
+  switchTabIf: (window: string, viewId: string, expect: string) => Promise<boolean>
+  /**
    * 탭(View) 이름 교체. view_id 전역 유니크라 window 는 안 받는다(백엔드 view_owner 파생). 백엔드
    * rename_tab 을 invoke 하고 실제 이름 반영은 window:tabs-updated emit 으로만(낙관 갱신 X — 이름 권위
    * = src-tauri, ADR-0035). §5 단일 표면: 사람 더블클릭 인라인 편집(TabBar)·LLM(__engramCmd → tab.rename)이
@@ -208,6 +214,7 @@ export const useViewStore = create<ViewState>((set, get) => ({
   createTab: (window, name) => invoke<string>('create_tab', { window, name: name ?? null }),
   closeTab: (window, viewId) => invoke<void>('close_tab', { window, view: viewId }),
   switchTab: (window, viewId) => invoke<void>('switch_tab', { window, view: viewId }),
+  switchTabIf: (window, viewId, expect) => invoke<boolean>('switch_tab_if', { window, view: viewId, expect }),
   createWindow: () => invoke<string>('create_window'),
   closeWindow: window => invoke<void>('close_window', { window }),
 

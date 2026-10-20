@@ -359,8 +359,8 @@ mod tests {
             Some((DockAnchor::Outer, DockSide::Top)),
             "CSS 44 = 캔버스 16"
         );
-        // 캔버스 위 띠 끝(32 = CSS 60 = 물리 75)까지 줄마다 붙기 또는 칠해진 바깥 위 띠다.
-        for y in 0..75 {
+        // 캔버스 위 띠 끝(20 = CSS 48 = 물리 60)까지 줄마다 붙기 또는 칠해진 바깥 위 띠다.
+        for y in 0..60 {
             let j = judge(&w, cursor(y), Some(MAIN), ORIGINAL);
             match (&j.target, &j.overlay) {
                 (Target::Attach(_), None) => {}
@@ -412,7 +412,7 @@ mod tests {
         let view = j.overlay.expect("띠는 칠한다(R3)").view;
         assert_eq!(view.preview, None);
         assert!(
-            view.outer.contains(&rect(1168.0, 28.0, 1200.0, 828.0)),
+            view.outer.contains(&rect(1180.0, 28.0, 1200.0, 828.0)),
             "{:?}",
             view.outer
         );
@@ -420,7 +420,7 @@ mod tests {
         assert!(!view.bands.is_empty());
         assert!(view.bands.iter().all(|r| r.x1 <= 600.0), "{:?}", view.bands);
         assert!(
-            view.bands.contains(&rect(32.0, 60.0, 60.0, 796.0)),
+            view.bands.contains(&rect(20.0, 48.0, 80.0, 808.0)),
             "칸 1 왼쪽 띠: {:?}",
             view.bands
         );

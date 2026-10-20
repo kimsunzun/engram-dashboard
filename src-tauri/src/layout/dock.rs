@@ -37,8 +37,13 @@ pub enum DockAnchor {
     Outer,
 }
 
-/// 고정 새것 몫 — 시험만 쓴다. 끌기의 몫은 이 값이 아니라 `dock::sizing::attach_share` 가 낸다.
+/// 고정 새것 몫 — 시험만 쓴다. 끌기의 몫은 이 값이 아니라 `layout::bands::attach_share` 가 낸다.
 pub const DOCK_NEW_SHARE: f64 = 1.0 / 3.0;
+
+/// 도킹 분할에서 새것이 차지하는 몫의 상한 — 모델 계약이다(하한은 `tree::RATIO_MIN`). [`docked_tree`] 는 디버그
+/// 빌드에서 단언하고 `ViewManager::dock` 은 `InvalidShare` 로 거절한다. 끌기 쪽 상한 `layout::bands::ATTACH_SHARE_MAX`
+/// 는 이보다 크지 않아야 한다(거기 컴파일 단언).
+pub const SHARE_MAX: f64 = 0.5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DockTreeError {
@@ -54,7 +59,7 @@ pub enum DockTreeError {
 /// `target` 의 `anchor` 를 새 분할로 감싸 `side` 쪽에 `incoming` 을 끼운 결과 트리. 입력은 건드리지 않는다.
 ///
 /// - 모양: `Left`·`Right` = `LeftRight` 분할, `Top`·`Bottom` = `TopBottom` 분할. `share` = 감싼 자리에서 새것이
-///   차지하는 몫 — `tree::RATIO_MIN ≤ share ≤ 0.5` 여야 한다(아래면 기하가 다른 비율로 읽는다 · 밖이면 디버그
+///   차지하는 몫 — `tree::RATIO_MIN ≤ share ≤` [`SHARE_MAX`] 여야 한다(아래면 기하가 다른 비율로 읽는다 · 밖이면 디버그
 ///   빌드에서 단언한다). 새것이 a(왼쪽/위)면 비율 `share`, b 면 `1 − share`(비율 = a 몫 — ADR-0140). 감싼 기준
 ///   안쪽의 비율은 그대로라 슬롯 옆이면 그 슬롯만, 바깥 변이면 대상 전체가 안쪽 비율을 지킨 채 줄어든다.
 /// - id: 감싸는 분할만 새 id 다. 대상 · `incoming` 의 슬롯 id · 분할 id · 내용은 그대로 옮긴다 — 출처에서 지우는
@@ -73,7 +78,10 @@ pub fn docked_tree(
     share: f64,
 ) -> Result<LayoutNode, DockTreeError> {
     // ADR-0295
-    debug_assert!((tree::RATIO_MIN..=0.5).contains(&share), "새것 몫 {share}");
+    debug_assert!(
+        (tree::RATIO_MIN..=SHARE_MAX).contains(&share),
+        "새것 몫 {share}"
+    );
     let (dir, new_is_a) = match side {
         DockSide::Left => (SplitDir::LeftRight, true),
         DockSide::Right => (SplitDir::LeftRight, false),

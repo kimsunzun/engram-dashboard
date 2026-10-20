@@ -92,12 +92,8 @@ fn mid(a: i32, b: i32) -> i32 {
     ((i64::from(a) + i64::from(b)) / 2) as i32
 }
 
-/// 논리(DIP) px 크기 — 웹뷰 확대 1 의 CSS px 와 같다(TRD §5 머리).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct SizeDip {
-    pub w: f64,
-    pub h: f64,
-}
+// 정의는 `layout::bands` 다 — 물리 크기로 옮기는 셈(`to_phys`)은 옛 끌기 엔진만 써서 그 엔진과 함께(U4c) 걷히게 여기 둔다.
+pub use crate::layout::bands::SizeDip;
 
 impl SizeDip {
     /// 배율 `scale` 의 물리 크기 — 가장 가까운 정수(.5 는 0 에서 멀리).

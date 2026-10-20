@@ -782,6 +782,28 @@ impl ViewManager {
         Ok(())
     }
 
+    /// 그 창 활성이 `expect` 일 때만 [`Self::switch_tab`] 한다 — 바꿨으면 `true`, 활성이 달라 안 바꿨으면 `false`(아무것도
+    /// 안 건드림 · version 그대로). 없는 창 · 그 창 탭이 아닌 `view` 는 조건과 무관하게 `switch_tab` 과 같은 오류다.
+    pub fn switch_tab_if(
+        &mut self,
+        label: &str,
+        view: ViewId,
+        expect: ViewId,
+    ) -> Result<bool, LayoutError> {
+        let wt = self
+            .windows
+            .get(label)
+            .ok_or_else(|| LayoutError::WindowNotFound(label.to_string()))?;
+        if !wt.tabs.contains(&view) {
+            return Err(LayoutError::ViewNotFound(view));
+        }
+        if wt.active != expect {
+            return Ok(false);
+        }
+        self.switch_tab(label, view)?;
+        Ok(true)
+    }
+
     // 창 `label` 의 탭 `view` 를 닫음(§5-2 상태기계, ADR-0057). 반환 = 이 close 로 창이 **닫혀야 하는지**.
     pub fn close_tab(&mut self, label: &str, view: ViewId) -> Result<CloseTabOutcome, LayoutError> {
         let wt = self
@@ -1219,7 +1241,7 @@ impl ViewManager {
     ///    `SourceChanged` · `guard.expect_target` 이 대상(`Seam` = 대상 탭 배치와 대상 창의 모델 활성 탭 · `SeamAt` =
     ///    대상 탭의 창 · 대상 탭의 판 번호([`Self::layout_rev`]) · 그 창 모델 활성 탭이 `active` 나 `or_initial` 인가 ·
     ///    `TabBar` = 대상 창 탭 목록)과 다르거나 그 모드의 값이 아니면(`NewWindow` 는 무엇이든) `TargetChanged`.
-    /// 7. `Seam` — `share` 가 유한하지 않거나 `tree::RATIO_MIN..=0.5` 밖이면 `InvalidShare` · 두 트리가 슬롯 id 를
+    /// 7. `Seam` — `share` 가 유한하지 않거나 `tree::RATIO_MIN..=dock::SHARE_MAX` 밖이면 `InvalidShare` · 두 트리가 슬롯 id 를
     ///    함께 가지면 `SlotIdOverlap` · 결과에 새 면적 0 칸이 생기면 `ZeroArea`.
     ///
     /// 보이는 탭 · 포커스: `Keep` 이면 대상 창의 활성 탭과 대상 탭의 포커스를 바꾸지 않는다 — 단 출처가 대상 창의
@@ -1452,7 +1474,7 @@ impl ViewManager {
                 // `docked_tree` 의 범위 단언은 디버그 빌드뿐이라 값으로 거절한다 — 릴리스에서 NaN 이 트리에 들면
                 // 저장이 비율을 `null` 로 적고 다음 부팅의 읽기가 그 탭을 건너뛴다(`state::codec`).
                 // ADR-0295
-                if !(share.is_finite() && (tree::RATIO_MIN..=0.5).contains(share)) {
+                if !(share.is_finite() && (tree::RATIO_MIN..=dock::SHARE_MAX).contains(share)) {
                     return Err(DockError::InvalidShare(share.to_string()));
                 }
                 let layout = dock::docked_tree(
@@ -2120,7 +2142,7 @@ pub enum DockError {
     SelfTarget,
     #[error("붙이면 면적 0 인 슬롯이 생김 (ZeroArea)")]
     ZeroArea,
-    /// `Seam` 의 새것 몫이 유한하지 않거나 `tree::RATIO_MIN..=0.5` 밖이다 — 부르는 쪽 결함이다. 값 = 받은 몫.
+    /// `Seam` 의 새것 몫이 유한하지 않거나 `tree::RATIO_MIN..=dock::SHARE_MAX` 밖이다 — 부르는 쪽 결함이다. 값 = 받은 몫.
     // ADR-0295
     #[error("붙는 몫이 범위 밖: {0} (InvalidShare)")]
     InvalidShare(String),
