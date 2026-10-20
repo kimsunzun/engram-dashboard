@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>슬롯 도킹 브리핑</title>
-<meta name="description" content="S21 슬롯 도킹 관리 브리핑 — 2026-10-16 새 방향(브라우저 내장 HTML5 끌어 놓기) 기준: 사용자가 보는 동작, 프로세스와 코드 구조, 왜 바꿨나, 끌기 흐름, 안전장치, 남은 결정, 위험과 다음 순서">
+<meta name="description" content="S21 슬롯 도킹 구조 브리핑 — TRD 5.8 · PRD 4.7 기준: 층마다 무엇을 쥐나(배치 그림), 사용자가 보는 동작, 탭바 안 순서 이동, Chrome 식 탭바 넘침, 끝 신호와 커서 판정, 안전장치, 결정 · 남은 실측">
 <style>
   :root {
     --ground: #F4F6F8;
@@ -158,15 +158,7 @@
   .callout b { color: var(--prog); }
   .callout.risk { border-color: var(--risk); background: var(--risk-soft); }
   .callout.risk b { color: var(--risk); }
-  .callout.next { border: 2px dashed var(--accent); background: var(--surface); }
-  .callout.next b { color: var(--accent-ink); }
-  .callout.next .cd { display: block; margin-top: 4px; }
 
-  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: 12px; }
-  .stat { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; box-shadow: var(--shadow); }
-  .stat .v { font-size: 26px; font-weight: 700; line-height: 1.2; }
-  .stat .k { font-size: 14px; color: var(--ink-2); }
-  .stat .v.ok { color: var(--ok); } .stat .v.prog { color: var(--prog); } .stat .v.acc { color: var(--accent); }
 
   figure { margin: 0; }
   .fig {
@@ -202,9 +194,7 @@
   .badge.done { color: var(--ok); background: var(--ok-soft); border-color: var(--ok); }
   .badge.prog { color: var(--prog); background: var(--prog-soft); border-color: var(--prog); }
   .badge.new { color: var(--accent-ink); background: var(--accent-soft); border-color: var(--accent); }
-  .badge.repl { color: var(--prog); background: var(--surface); border-color: var(--prog); border-style: dashed; }
   .badge.gone { color: var(--muted); background: var(--surface-2); border-color: var(--line-strong); text-decoration: line-through; }
-  .codemap { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 8px 6px; box-shadow: var(--shadow); }
 
   .why { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 14px; margin: 0; padding: 0; list-style: none; }
   .why > li { background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 10px; padding: 12px 16px; }
@@ -213,26 +203,6 @@
   .why b { display: block; margin-bottom: 4px; }
   .why ul { margin: 0; padding-left: 1.1em; font-size: 15px; color: var(--ink-2); display: flex; flex-direction: column; gap: 4px; }
 
-  /* ---------- decision cards ---------- */
-  .order { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 15px; }
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 520px), 1fr)); gap: 20px; }
-  .card {
-    background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow);
-    padding: 18px 20px; display: flex; flex-direction: column; gap: 10px; min-width: 0;
-  }
-  .card.hot { border: 2px solid var(--risk); }
-  .card .head { display: flex; gap: 12px; align-items: baseline; }
-  .card .dno { font-family: var(--mono); font-weight: 700; font-size: 20px; color: var(--accent); }
-  .card .ctx { font-size: 14px; color: var(--ink-2); }
-  .card .cd { font-size: 12.5px; overflow-wrap: anywhere; }
-  .card dl { margin: 0; display: grid; grid-template-columns: 7.2em minmax(0, 1fr); gap: 6px 12px; font-size: 15px; }
-  .card dt { color: var(--muted); font-weight: 600; }
-  .card dd { margin: 0; }
-  .tag { display: inline-block; font-size: 13px; font-weight: 600; padding: 2px 10px; border-radius: 999px; border: 1px solid; width: fit-content; max-width: 100%; }
-  .tag.urgent { color: var(--risk); background: var(--risk-soft); border-color: var(--risk); }
-  .tag.soon { color: var(--prog); background: var(--prog-soft); border-color: var(--prog); }
-  .tag.calm { color: var(--ink-2); background: var(--surface-2); border-color: var(--line-strong); }
-  .tag.split { color: var(--accent-ink); background: var(--accent-soft); border-color: var(--accent); }
 
   /* ---------- risks / steps ---------- */
   .risks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
@@ -297,7 +267,6 @@
   .d .slot-new { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.6; }
   .d .slot-empty { fill: var(--slot); stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 4 3; }
   .d .band { stroke: var(--accent); stroke-width: 1; stroke-opacity: .55; }
-  .d .band-off { fill: none; stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 3 2; }
   .d .hl { stroke: var(--accent); stroke-width: 1.3; stroke-opacity: .7; }
   .d .hot { fill: var(--accent); fill-opacity: .34; stroke: var(--accent); stroke-width: 1.8; }
   .d .ins { stroke: var(--accent); stroke-width: 3.5; }
@@ -314,14 +283,11 @@
   .d .ln { stroke: var(--ink-2); stroke-width: 1.5; fill: none; }
   .d .ln-f { stroke: var(--line-strong); stroke-width: 1.5; fill: none; }
   .d .ln-a { stroke: var(--accent); stroke-width: 2; fill: none; }
-  .d .ln-r { stroke: var(--risk); stroke-width: 2; fill: none; }
   .d .ln-d { stroke: var(--muted); stroke-width: 1.5; fill: none; stroke-dasharray: 5 4; }
   .d .ln-ad { stroke: var(--accent); stroke-width: 1.8; fill: none; stroke-dasharray: 6 4; }
   .d .life { stroke: var(--line-strong); stroke-width: 1.4; stroke-dasharray: 4 4; }
-  .d .track { stroke: var(--line-strong); stroke-width: 4; stroke-linecap: round; }
   .d .ah { fill: var(--ink-2); }
   .d .ah-a { fill: var(--accent); }
-  .d .ah-r { fill: var(--risk); }
   .d .ah-m { fill: var(--muted); }
   .d .box { fill: var(--surface); stroke: var(--line-strong); stroke-width: 1.2; }
   .d .box2 { fill: var(--surface-2); stroke: var(--line); stroke-width: 1; }
@@ -332,30 +298,43 @@
   .d .layer { fill: var(--surface-2); stroke: var(--line); stroke-width: 1; }
   .d .mod { fill: none; stroke: var(--ink-2); stroke-width: 1.4; }
   .d .panel { fill: var(--surface-2); stroke: var(--line); stroke-width: 1; }
-  .d .pan-def { fill: none; stroke: var(--accent); stroke-width: 2; }
-  .d .pan-alt { fill: none; stroke: var(--line-strong); stroke-width: 1.4; stroke-dasharray: 6 4; }
-  .d .lane { fill: none; stroke: var(--line); stroke-width: 1.2; }
   .d .ok { fill: var(--ok-soft); stroke: var(--ok); stroke-width: 1.6; }
   .d .prog { fill: var(--prog-soft); stroke: var(--prog); stroke-width: 1.6; }
   .d .todo { fill: var(--surface); stroke: var(--line-strong); stroke-width: 1.4; stroke-dasharray: 6 3; }
-  .d .riskb { fill: var(--risk-soft); stroke: var(--risk); stroke-width: 1.6; }
-  .d .dot-a { fill: var(--accent); }
   .d .ev { fill: var(--ink-2); }
   .d .ev-g { fill: var(--surface); stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 3 2; }
-  .d .no { stroke: var(--risk); stroke-width: 2.4; fill: none; }
   .d .sep { stroke: var(--line); stroke-width: 1.2; }
   .d .bk { stroke: var(--muted); stroke-width: 1.2; fill: none; }
   .d .bk-a { stroke: var(--accent); stroke-width: 1.6; fill: none; }
   .d .trk { fill: var(--surface-3); }
   .d .trk-f { fill: var(--accent); }
   .ic .c-risk { fill: none; stroke: var(--risk); stroke-width: 2.4; }
-  .ic .c-prog { fill: none; stroke: var(--prog); stroke-width: 2.4; }
   .ic .c-mut { fill: none; stroke: var(--muted); stroke-width: 2.4; }
   .ic .c-ok { fill: none; stroke: var(--muted); stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; }
   .ic .t-warn { fill: var(--prog-soft); stroke: var(--prog); stroke-width: 2; stroke-linejoin: round; }
   .ic .t-warn-i { stroke: var(--prog); stroke-width: 2.2; stroke-linecap: round; }
   .ic .q { fill: var(--muted); font-size: 13px; font-weight: 700; font-family: var(--sans); }
   .st.risk { color: var(--risk); } .st.prog { color: var(--prog); } .st.mut { color: var(--muted); }
+
+  /* ---------- 5.8 판 더함 ---------- */
+  .d .nb { fill: var(--accent); }
+  .d .nbt { fill: var(--surface); font-size: 12px; font-weight: 700; text-anchor: middle; }
+  .d .zone { fill: var(--accent); fill-opacity: .07; stroke: var(--accent); stroke-width: 1.4; stroke-dasharray: 5 3; }
+  .d .prog-d { fill: var(--surface); stroke: var(--prog); stroke-width: 1.6; stroke-dasharray: 6 3; }
+  .d .axis { stroke: var(--ink-2); stroke-width: 1.4; }
+  .d .tick { stroke: var(--line-strong); stroke-width: 1; }
+  .d .thr { stroke: var(--accent); stroke-width: 1.8; stroke-dasharray: 4 3; }
+  .walk { list-style: none; counter-reset: w; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; max-width: 90ch; }
+  .walk > li { counter-increment: w; position: relative; padding-left: 38px; color: var(--ink-2); }
+  .walk > li::before {
+    content: counter(w); position: absolute; left: 0; top: 2px; width: 24px; height: 24px; border-radius: 50%;
+    background: var(--accent); color: var(--surface); font-size: 13px; font-weight: 700; display: grid; place-items: center;
+  }
+  .walk b { color: var(--ink); }
+  .prose { display: flex; flex-direction: column; gap: 12px; max-width: 86ch; }
+  .prose p { color: var(--ink-2); }
+  .prose b { color: var(--ink); }
+  .sub h3 + .walk, .sub h3 + .prose { margin-top: 2px; }
 </style>
 </head>
 <body>
@@ -364,37 +343,326 @@
 <nav class="toc" aria-label="목차">
   <div class="toc-title">목차</div>
   <ol>
-    <li><a href="#s1"><span class="n">01</span>한눈에</a></li>
+    <li><a href="#s1"><span class="n">01</span>층마다 무엇을</a></li>
     <li><a href="#s2"><span class="n">02</span>사용자가 보는 동작</a></li>
-    <li><a href="#s3"><span class="n">03</span>구조와 코드</a></li>
-    <li><a href="#s4"><span class="n">04</span>왜 바꿨나</a></li>
-    <li><a href="#s5"><span class="n">05</span>끌기 한 번의 흐름</a></li>
+    <li><a href="#s3"><span class="n">03</span>탭바 안 순서 이동</a></li>
+    <li><a href="#s4"><span class="n">04</span>탭바 넘침</a></li>
+    <li><a href="#s5"><span class="n">05</span>끝 신호 · 커서 판정</a></li>
     <li><a href="#s6"><span class="n">06</span>안전장치</a></li>
-    <li><a href="#s7"><span class="n">07</span>남은 결정</a></li>
-    <li><a href="#s8"><span class="n">08</span>위험 · 다음 순서</a></li>
+    <li><a href="#s7"><span class="n">07</span>왜 바꿨나</a></li>
+    <li><a href="#s8"><span class="n">08</span>결정 · 남은 일</a></li>
   </ol>
 </nav>
 
 <main>
 
 <header class="hero">
-  <div class="eyebrow"><span>S21 · 슬롯 도킹 · 관리 브리핑</span><span class="num">TRD 5판 · PRD 4.3판 기준 (리뷰 전) · 2026-10-16</span></div>
+  <div class="eyebrow"><span>S21 · 슬롯 도킹 · 구조 브리핑</span><span class="num">TRD 5.8 · PRD 4.7 기준 (둘 다 미커밋) · 2026-10-18</span></div>
   <h1>탭을 끌어, 원하는 창의 원하는 자리에 붙인다</h1>
-  <p class="lead">팝아웃 창의 탭을 끌어 다른 창(메인 · 다른 팝아웃 · 같은 창의 다른 탭)의 슬롯 옆, 탭바, 또는 빈 곳에 놓는 기능입니다. 지금은 슬롯을 옮기는 길이 팝아웃 하나뿐이고, 그것도 대상 창의 새 탭으로만 들어갑니다.</p>
-  <div class="callout"><b>먼저 알아 두실 것 —</b> 2026-10-16 에 방향을 바꿨습니다. 끌기는 <b>브라우저 내장 HTML5 끌어 놓기</b>(VS Code 와 같은 방식)로 하고, <b>LLM 명령은 바로 다음 작업</b>으로 뺐습니다. 이 페이지의 이름 · 단계 · 결정 목록은 TRD 5판 · PRD 4.3판(커밋됨 · 재리뷰 전)과 같습니다. 정해 주실 것은 8건이고(7절), 급한 것은 <b>#2</b>(4단계 착수 전)입니다.</div>
-  <div class="stats">
-    <div class="stat"><div class="v acc">대략 40%</div><div class="k">전체 진행</div></div>
-    <div class="stat"><div class="v ok">3</div><div class="k">완료 · 커밋된 단계 (1 · 2 · 5)</div></div>
-    <div class="stat"><div class="v prog">1</div><div class="k">진행 중 (3단계 — 재리뷰 · 화면 실측 대기)</div></div>
-    <div class="stat"><div class="v">4461 / 0</div><div class="k">마지막 전체 회귀 통과 / 실패</div></div>
-  </div>
-  <p class="say" style="color:var(--muted);font-size:15px">각 절은 그림 → 두세 문장 → 접힌 「자세히」 순서입니다. 그림 상자마다 쉬운 말 아래 작은 고정폭 글씨로 실제 코드 위치를 달았습니다. 읽는 시간 10–15분.</p>
+  <p class="lead">메인 · 팝아웃 창의 탭을 끌어 다른 창(또는 같은 창)의 슬롯 옆 · 탭바 · 빈 곳에 놓는 기능입니다. 이 페이지는 <b>무엇이 어느 층에 있나</b>를 그림으로 먼저 보이고(1절), 사용자가 보는 동작과 5.7 · 5.8 판에서 새로 들어온 규칙을 차례로 그립니다.</p>
+  <div class="callout"><b>TRD 5판 이후 바뀐 것 —</b> ① 자기 탭바 안에서는 끌기가 <b>순서 이동</b>이고, 탭바 구역을 벗어나야 떼어집니다(Q20 · 5.7 — 3절). ② 어느 창도 보고하지 못한 채 끝난 끌기는 셸이 <b>뗀 순간 커서</b>로 판정해 적용하고(Q21), 엔진이 곧바로 접은 끌기(15ms 안)는 무변경입니다(5.7 — 5절). ③ 탭바는 스크롤하지 않고 <b>Chrome 규칙</b>대로 폭을 줄이다 꼬리 탭을 숨깁니다(Q22 · 5.8 — 4절). ④ 사용자 확인 대상은 전부 닫혔습니다(8절).</div>
+
+  <figure class="fig">
+    <h3 style="margin-bottom:10px">어디까지 왔나 — TRD §10 단계를 git 로그와 대조</h3>
+    <div class="scroll">
+    <svg class="d w900" viewBox="0 0 1160 236" role="img" aria-label="커밋된 단계 열하나: 1 · 2 · 5 · 3 · 4 · 6a · 6b · 6c · 7 · 9a · 9b. 작업 트리에만 있는 9c-A · 9c-B1 · 9c-B2(구현 · 코드 리뷰 통과 · QA standard 통과 · 미커밋), 그 뒤 실 마우스 실측 S7 · S1 ⑧ · 멈춘 채 놓기 5회(아직), 8단계 문서, 다음 작업 LLM 명령">
+      <defs>
+        <marker id="Sn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah"/></marker>
+      </defs>
+      <text x="20" y="24" class="tb">커밋됨 — TRD §10 순서 · HEAD 9b74ff40</text>
+      <g>
+        <rect x="20" y="34" width="92" height="68" rx="8" class="ok"/><text x="30" y="52" class="tb">1</text><text x="30" y="70" class="t2">트리 연산</text><text x="30" y="86" class="cd">080893c5</text>
+        <rect x="119" y="34" width="92" height="68" rx="8" class="ok"/><text x="129" y="52" class="tb">2</text><text x="129" y="70" class="t2">도킹 모델</text><text x="129" y="86" class="cd">ca723ed5</text>
+        <rect x="218" y="34" width="92" height="68" rx="8" class="ok"/><text x="228" y="52" class="tb">5</text><text x="228" y="70" class="t2">판정 규칙</text><text x="228" y="86" class="cd">e73e0289</text>
+        <rect x="317" y="34" width="92" height="68" rx="8" class="ok"/><text x="327" y="52" class="tb">3</text><text x="327" y="70" class="t2">닫히는 창</text><text x="327" y="86" class="cd">281bd235</text>
+        <rect x="416" y="34" width="92" height="68" rx="8" class="ok"/><text x="426" y="52" class="tb">4</text><text x="426" y="70" class="t2">적용 서비스</text><text x="426" y="86" class="cd">52446b05</text>
+        <rect x="515" y="34" width="92" height="68" rx="8" class="ok"/><text x="525" y="52" class="tb">6a</text><text x="525" y="70" class="t2">영역 · 골든</text><text x="525" y="86" class="cd">b36d424f</text>
+        <rect x="614" y="34" width="92" height="68" rx="8" class="ok"/><text x="624" y="52" class="tb">6b</text><text x="624" y="70" class="t2">끌기 장부</text><text x="624" y="86" class="cd">961b7c26</text>
+        <rect x="713" y="34" width="92" height="68" rx="8" class="ok"/><text x="723" y="52" class="tb">6c</text><text x="723" y="70" class="t2">셸 배선</text><text x="723" y="86" class="cd">d582331a</text>
+        <rect x="812" y="34" width="92" height="68" rx="8" class="ok"/><text x="822" y="52" class="tb">7</text><text x="822" y="70" class="t2">웹뷰 끌기</text><text x="822" y="86" class="cd">bb693264</text>
+        <rect x="911" y="34" width="92" height="68" rx="8" class="ok"/><text x="921" y="52" class="tb">9a</text><text x="921" y="70" class="t2">순서 이동</text><text x="921" y="86" class="cd">5f4ef9fb</text>
+        <rect x="1010" y="34" width="92" height="68" rx="8" class="ok"/><text x="1020" y="52" class="tb">9b</text><text x="1020" y="70" class="t2">장부·실행기</text><text x="1020" y="86" class="cd">66eb3188</text><text x="1020" y="99" class="cd">9b74ff40</text>
+      </g>
+      <text x="1102" y="122" class="tm end">7 뒤 실 마우스 실측(10-17): S3 · S6 합격 · S1 ⑧ 에서 결함 셋 → 5.7 판이 9a · 9b · 9c 로 고친다</text>
+
+      <text x="20" y="150" class="tb">남은 순서</text>
+      <text x="750" y="150" class="tm end">9c 세 단위 — QA standard 통과(10-18) · 전부 미커밋 · 커밋은 실 마우스 실측 뒤</text>
+      <rect x="20" y="160" width="172" height="66" rx="8" class="prog"/>
+      <text x="32" y="180" class="tb">9c-A</text><text x="32" y="198" class="t2">끌기 판정 상태</text><text x="32" y="216" class="tm">구현 · 리뷰 통과 · 미커밋</text>
+      <rect x="206" y="160" width="172" height="66" rx="8" class="prog"/>
+      <text x="218" y="180" class="tb">9c-B1</text><text x="218" y="198" class="t2">Chrome 탭 폭 · 숨김</text><text x="218" y="216" class="tm">구현 · 리뷰 통과 · 미커밋</text>
+      <rect x="392" y="160" width="172" height="66" rx="8" class="prog"/>
+      <text x="404" y="180" class="tb">9c-B2</text><text x="404" y="198" class="t2">탭바 · 창 끌기 쪽</text><text x="404" y="216" class="tm">구현 · 리뷰 통과 · 미커밋</text>
+      <rect x="578" y="160" width="172" height="66" rx="8" class="todo"/>
+      <text x="590" y="180" class="tb">실측 S7 · S1 ⑧</text><text x="590" y="198" class="t2">실 마우스 · 9c 트리</text><text x="590" y="216" class="tm">+ 멈춘 채 놓기 5회</text>
+      <rect x="764" y="160" width="172" height="66" rx="8" class="todo"/>
+      <text x="776" y="180" class="tb">8  문서 · 화면 QA</text><text x="776" y="198" class="t2">ADR · step-log</text><text x="776" y="216" class="tm">/qa full · S5</text>
+      <rect x="950" y="160" width="172" height="66" rx="8" class="next"/>
+      <text x="962" y="180" class="tb">다음 작업</text><text x="962" y="198" class="t2">LLM 레이아웃 명령</text><text x="962" y="216" class="tm">apply::dock_tab 위에</text>
+      <line x1="192" y1="193" x2="204" y2="193" class="ln" marker-end="url(#Sn)"/>
+      <line x1="378" y1="193" x2="390" y2="193" class="ln" marker-end="url(#Sn)"/>
+      <line x1="564" y1="193" x2="576" y2="193" class="ln" marker-end="url(#Sn)"/>
+      <line x1="750" y1="193" x2="762" y2="193" class="ln" marker-end="url(#Sn)"/>
+      <line x1="936" y1="193" x2="948" y2="193" class="ln" marker-end="url(#Sn)"/>
+    </svg>
+    </div>
+    <figcaption>초록 = 커밋됨(git 로그로 확인 — 9b 는 9b-1 · 9b-2 두 커밋), 주황 = 작업 트리에만 있음, 회색 점선 = 아직, 청록 점선 = 다음 작업. 9c 를 A · B1 · B2 로 나눈 것과 각 상태는 TRD §10 9c 행에 있습니다 — A · B1 = 코드 리뷰 deep 2 라운드 PASS · B2 = 3 라운드 + 확인 · <code>/qa standard</code> PASS(2026-10-18). 9c 커밋은 실 마우스 실측(S7 — ⑥' 조금 끌고 멈춘 채 놓기 5회 포함 · S1 ⑧) 뒤입니다.</figcaption>
+  </figure>
+  <p class="say">1–6c 가 「놓으면 붙는다」의 셸 쪽 전부이고, 7 이 웹뷰를 붙여 마우스 도킹이 처음으로 끝까지 됐습니다. 그 뒤 실 마우스 실측에서 나온 결함 셋과 사용자 결정 Q20 · Q21 · Q22 가 5.7 · 5.8 판이 되어 <b>9a(순수 규칙) → 9b(장부 · 실행기) → 9c(웹뷰)</b> 순으로 들어가는 중입니다. 각 단계는 새 것을 더하기만 하고 부르는 쪽까지 같은 커밋에서 닫아, 어디서 멈춰도 빌드가 섭니다.</p>
 </header>
 
 <!-- ============================== 01 ============================== -->
 <section id="s1">
-  <div class="eyebrow"><span class="num">01</span><span>한눈에</span></div>
-  <h2>탭 하나를 떼어 들고, 이음새에 넣는다</h2>
+  <div class="eyebrow"><span class="num">01</span><span>층마다 무엇을 쥐나</span></div>
+  <h2>웹뷰는 그리고 알리기만, 셸 장부는 판정만, 배치를 바꾸는 문은 하나</h2>
+
+  <figure class="fig">
+    <div class="scroll">
+    <svg class="d w900" viewBox="0 0 1160 872" role="img" aria-label="층 배치. 맨 위 브라우저 엔진이 끌기를 몰고, 웹뷰 다섯 상자는 판정과 그리기만 하며 invoke 로 셸 실행기에 알린다. 실행기는 dock 의 끌기 장부와 영역 · 판정 규칙을 돌리고 layout 의 apply::dock_tab 한 곳으로 배치를 바꾼다. 결과는 기존 알림으로 웹뷰에 돌아간다. 판정 규칙은 Rust 와 TS 두 벌이고 골든 하나로 묶인다. LLM 명령은 이번에 없고 platform 에 새 함수는 없다">
+      <defs>
+        <marker id="La" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah-a"/></marker>
+        <marker id="Ln" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah"/></marker>
+      </defs>
+
+      <!-- engine -->
+      <text x="22" y="35" class="tb">엔진</text>
+      <rect x="130" y="10" width="1020" height="40" rx="8" class="box2"/>
+      <text x="146" y="35" class="tb">브라우저 엔진 — WebView2 브라우저 프로세스의 OS 끌기 루프</text>
+      <text x="1134" y="35" class="tm end">커서 추적 · 맨 위 창 · 끌기 그림 · 버튼 · Esc — 우리 코드 아님</text>
+
+      <!-- webview band -->
+      <rect x="8" y="60" width="1144" height="194" rx="12" class="layer"/>
+      <rect x="8" y="352" width="1144" height="438" rx="12" class="layer"/>
+      <line x1="424" y1="50" x2="424" y2="89" class="ln" marker-end="url(#Ln)"/>
+      <text x="432" y="78" class="cd">dragstart · dragend</text>
+      <line x1="652" y1="50" x2="652" y2="89" class="ln" marker-end="url(#Ln)"/>
+      <text x="660" y="78" class="cd">dragenter · dragover · dragleave · drop</text>
+      <text x="22" y="112" class="tb">웹뷰</text>
+      <text x="22" y="132" class="tm">창마다 하나</text>
+      <text x="22" y="150" class="tm">그리기 ·</text>
+      <text x="22" y="166" class="tm">사건 전달만</text>
+      <text x="22" y="196" class="cd">src/components/</text>
+      <text x="22" y="210" class="cd">layout/</text>
+
+      <rect x="130" y="92" width="176" height="152" rx="8" class="box"/>
+      <text x="144" y="114" class="tb">평소 · 세션 동안</text>
+      <text x="144" y="136" class="t2">크롬 측정 보고</text>
+      <text x="144" y="156" class="t2">떼어진 표시</text>
+      <text x="144" y="176" class="t2">파일 끌기 막기 (늘)</text>
+      <text x="144" y="214" class="cd">dock/dockChromeReport.ts</text>
+      <text x="144" y="230" class="cd">WindowLayout.tsx</text>
+
+      <rect x="318" y="92" width="212" height="152" rx="8" class="box"/>
+      <text x="332" y="114" class="tb">탭바 — 끌기 출처</text>
+      <text x="332" y="136" class="t2">dragstart → strip 재기</text>
+      <text x="332" y="156" class="t2">dragend → canceled · last</text>
+      <text x="332" y="176" class="t2">순서 이동 모습 · 탭 폭</text>
+      <text x="332" y="200" class="cd">TabBar.tsx</text>
+      <text x="332" y="215" class="cd">tabStripLayout.ts (9c 신설)</text>
+      <text x="332" y="230" class="cd">dock/dragImage.ts</text>
+
+      <rect x="542" y="92" width="230" height="152" rx="8" class="box"/>
+      <text x="556" y="114" class="tb">창마다 끌기 판정</text>
+      <text x="556" y="136" class="t2">pick → 모드 → displayed</text>
+      <text x="556" y="156" class="t2">→ 캔버스 거름 → 그리기</text>
+      <text x="556" y="176" class="t2">보고 = 그린 판정 그대로</text>
+      <text x="556" y="230" class="cd">dock/dockDrag.ts</text>
+
+      <rect x="784" y="92" width="170" height="152" rx="8" class="box"/>
+      <text x="798" y="114" class="tb">가이드 그리기</text>
+      <text x="798" y="136" class="t2">띠 · 결과 사각형</text>
+      <text x="798" y="156" class="t2">끼울 자리 막대</text>
+      <text x="798" y="176" class="t2">순서 이동이면 없음</text>
+      <text x="798" y="230" class="cd">dock/DockOverlay.tsx</text>
+
+      <rect x="966" y="92" width="184" height="152" rx="8" class="box"/>
+      <text x="980" y="114" class="tb">판정 거울 (TS)</text>
+      <text x="980" y="136" class="t2">pickTarget</text>
+      <text x="980" y="156" class="t2">reorderLeft · Index</text>
+      <text x="980" y="176" class="tm">Rust pick 과 같은 순서</text>
+      <text x="980" y="230" class="cd">dock/dockPick.ts</text>
+
+      <!-- crossing: results / invoke / emit / golden -->
+      <line x1="214" y1="368" x2="214" y2="247" class="ln" marker-end="url(#Ln)"/>
+      <text x="206" y="284" class="t2 end">결과 ↑</text>
+      <text x="206" y="300" class="cd end">layout:updated</text>
+      <text x="206" y="314" class="cd end">window:tabs-updated</text>
+      <text x="206" y="330" class="tm end">기존 알림으로만</text>
+
+      <line x1="512" y1="245" x2="512" y2="366" class="ln-a" marker-end="url(#La)"/>
+      <text x="502" y="272" class="ta end">invoke ↓</text>
+      <text x="502" y="288" class="cd end">dock_drag_start{strip}</text>
+      <text x="502" y="302" class="cd end">dock_drag_end{canceled, last}</text>
+      <text x="502" y="316" class="cd end">dock_drag_over · dock_drop</text>
+      <text x="502" y="330" class="cd end">dock_pointer_seen · dock_pull</text>
+      <text x="502" y="344" class="cd end">report_dock_chrome</text>
+
+      <line x1="672" y1="367" x2="672" y2="247" class="ln" marker-end="url(#Ln)"/>
+      <text x="680" y="288" class="t2">emit ↑</text>
+      <text x="680" y="304" class="cd">dock:session — 모든 창</text>
+      <text x="680" y="318" class="cd">dock:regions — 창별</text>
+
+      <path d="M1100,245 V672 H998" class="ln-ad"/>
+      <text x="1092" y="288" class="ta end">같은 골든</text>
+      <text x="1092" y="304" class="tm end">판정 규칙 두 벌</text>
+      <text x="1092" y="320" class="tm end">Rust · TS — 의도된 중복</text>
+
+      <!-- shell band -->
+      <text x="22" y="378" class="tb">셸</text>
+      <text x="22" y="398" class="cd">src-tauri/src/</text>
+
+      <rect x="486" y="368" width="524" height="72" rx="8" class="box"/>
+      <text x="502" y="390" class="tb">실행기 — invoke 껍데기</text>
+      <text x="994" y="390" class="cd end">commands/dock.rs</text>
+      <text x="502" y="412" class="t2">커서 · 창 사각형 · 배율 읽기(락 밖 · now 먼저) → 장부 → 할 일</text>
+      <text x="502" y="430" class="t2">emit · 숨기기 · 보이기(메인 스레드 맞추기) · 시한 · 적용(async)</text>
+
+      <rect x="486" y="456" width="524" height="244" rx="10" class="mod"/>
+      <text x="502" y="478" class="tb"><tspan class="mono">dock</tspan> — 끌기 장부</text>
+      <text x="994" y="478" class="tm end">layout 의 손님</text>
+      <line x1="700" y1="442" x2="700" y2="487" class="ln" marker-start="url(#Ln)" marker-end="url(#Ln)"/>
+      <text x="708" y="470" class="t2">step(사건) ⇄ 할 일</text>
+      <rect x="502" y="490" width="492" height="62" rx="8" class="box"/>
+      <text x="516" y="511" class="tb">끌기 장부 — 순수 상태 하나 · 잎 락 하나 · 스레드 · 틱 없음</text>
+      <text x="516" y="530" class="t2">사건 → 할 일 · 순서 이동 놓기(4c) · 커서 판정 · 미룬 숨기기</text>
+      <text x="516" y="545" class="cd">book.rs · Book::step</text>
+      <rect x="502" y="574" width="234" height="66" rx="8" class="box"/>
+      <text x="516" y="596" class="tb">판정 규칙 (순수)</text>
+      <text x="516" y="615" class="t2">이음새 · 탭바 · 순서 이동 구역</text>
+      <text x="516" y="632" class="cd">hit.rs · locate · reorder_*</text>
+      <rect x="760" y="574" width="234" height="66" rx="8" class="box"/>
+      <text x="774" y="596" class="tb">영역 · 판정 어댑터</text>
+      <text x="774" y="615" class="t2">창별 영역 · 놓을 때 다시 고름</text>
+      <text x="774" y="632" class="cd">regions.rs · regions_for · pick</text>
+      <line x1="877" y1="552" x2="877" y2="571" class="ln" marker-end="url(#Ln)"/>
+      <line x1="760" y1="607" x2="739" y2="607" class="ln" marker-end="url(#Ln)"/>
+      <rect x="502" y="652" width="150" height="40" rx="6" class="box2"/>
+      <text x="514" y="668" class="t2">스냅숏 뜨기</text>
+      <text x="514" y="684" class="cd">snap.rs</text>
+      <rect x="664" y="652" width="150" height="40" rx="6" class="box2"/>
+      <text x="676" y="668" class="t2">wire 타입</text>
+      <text x="676" y="684" class="cd">types.rs</text>
+      <rect x="826" y="652" width="168" height="40" rx="6" class="box-a"/>
+      <text x="838" y="668" class="ta">골든</text>
+      <text x="838" y="684" class="cd">pick_golden.json</text>
+      <line x1="910" y1="650" x2="910" y2="642" class="ln-ad"/>
+
+      <rect x="130" y="368" width="306" height="332" rx="10" class="mod"/>
+      <text x="146" y="390" class="tb"><tspan class="mono">layout</tspan> — 배치의 권위</text>
+      <text x="146" y="408" class="tm">ADR-0035</text>
+      <rect x="146" y="420" width="274" height="72" rx="8" class="box-a"/>
+      <text x="160" y="442" class="tb">적용 서비스 — 유일한 문</text>
+      <text x="160" y="462" class="t2">잠금 한 번 · 메인이 비면 빈 탭</text>
+      <text x="160" y="481" class="cd">apply.rs · apply::dock_tab</text>
+      <rect x="146" y="506" width="274" height="96" rx="8" class="box"/>
+      <text x="160" y="528" class="tb">도킹 모델 · 표식 · 묘비</text>
+      <text x="160" y="550" class="cd">manager.rs · ViewManager::dock</text>
+      <text x="160" y="566" class="cd">plan_new_window · lease_tab</text>
+      <text x="160" y="582" class="cd">mark_closed · refill_main</text>
+      <rect x="146" y="616" width="132" height="76" rx="8" class="box"/>
+      <text x="158" y="638" class="tb">트리 연산</text>
+      <text x="158" y="660" class="cd">dock.rs</text>
+      <text x="158" y="676" class="cd">docked_tree</text>
+      <rect x="288" y="616" width="132" height="76" rx="8" class="box"/>
+      <text x="300" y="638" class="tb">크롬 측정 타입</text>
+      <text x="300" y="660" class="cd">chrome.rs</text>
+      <text x="300" y="676" class="cd">DockChrome</text>
+      <line x1="283" y1="492" x2="283" y2="503" class="ln" marker-end="url(#Ln)"/>
+      <line x1="212" y1="602" x2="212" y2="613" class="ln" marker-end="url(#Ln)"/>
+      <line x1="486" y1="432" x2="423" y2="432" class="ln-a" marker-end="url(#La)"/>
+      <text x="461" y="424" class="ta mid">적용</text>
+
+      <rect x="14" y="420" width="104" height="150" rx="8" class="next"/>
+      <text x="24" y="442" class="tb">다음 작업</text>
+      <text x="24" y="462" class="t2">LLM 명령</text>
+      <text x="24" y="482" class="cd">tab.dock</text>
+      <text x="24" y="496" class="cd">layout.get</text>
+      <text x="24" y="518" class="tm">이번엔 없음</text>
+      <text x="24" y="536" class="tm">Q10 · D22</text>
+      <line x1="118" y1="456" x2="143" y2="456" class="ln-ad" marker-end="url(#La)"/>
+
+      <rect x="130" y="714" width="880" height="62" rx="8" class="box"/>
+      <text x="146" y="738" class="tb">드롭 처리기 끄기 — 모든 런타임 창</text>
+      <text x="146" y="760" class="cd">webview_env.rs · WebviewEnv::finish → disable_drag_drop_handler() — wry 의 드롭 대상을 떼어 HTML5 끌어 놓기를 살림</text>
+
+      <!-- os band -->
+      <rect x="8" y="804" width="1144" height="60" rx="12" class="layer"/>
+      <text x="22" y="830" class="tb">platform</text>
+      <text x="130" y="830" class="t2">OS 층 — 새 함수 없음. 셸이 읽는 OS 값은 Tauri API 셋: cursor_position · inner_position / inner_size · scale_factor</text>
+      <text x="130" y="850" class="tm">커서 밑 맨 위 창을 묻는 OS 함수는 들이지 않았다 → 보고 없는 끝의 커서 판정은 원래 창 · 그 끌기를 본 창만 (PRD D21)</text>
+
+      <!-- reading order -->
+      <circle cx="130" cy="12" r="11" class="nb"/><text x="130" y="16" class="nbt">1</text>
+      <circle cx="130" cy="92" r="11" class="nb"/><text x="130" y="96" class="nbt">2</text>
+      <circle cx="526" cy="262" r="11" class="nb"/><text x="526" y="266" class="nbt">3</text>
+      <circle cx="486" cy="368" r="11" class="nb"/><text x="486" y="372" class="nbt">4</text>
+      <circle cx="486" cy="456" r="11" class="nb"/><text x="486" y="460" class="nbt">5</text>
+      <circle cx="146" cy="420" r="11" class="nb"/><text x="146" y="424" class="nbt">6</text>
+      <circle cx="228" cy="262" r="11" class="nb"/><text x="228" y="266" class="nbt">7</text>
+      <circle cx="1100" cy="345" r="11" class="nb"/><text x="1100" y="349" class="nbt">8</text>
+      <circle cx="14" cy="420" r="11" class="nb"/><text x="14" y="424" class="nbt">9</text>
+      <circle cx="20" cy="804" r="11" class="nb"/><text x="20" y="808" class="nbt">10</text>
+    </svg>
+    </div>
+    <figcaption>청록 실선 = 배치를 바꾸는 쪽으로 가는 길(invoke → 실행기 → 적용) · 청록 점선 = 아직 없는 길(LLM 명령)과 골든 묶음 · 회색 엔진 상자 = 우리 코드가 아님. 번호는 아래 「그림 읽기」 순서이고, 셸 경로는 <code>src-tauri/src/</code>, 웹뷰 경로는 <code>src/components/layout/</code> 기준입니다.</figcaption>
+  </figure>
+
+  <div class="sub">
+    <h3>그림 읽기</h3>
+    <ol class="walk">
+      <li><b>엔진 — 끌기 자체는 우리 코드가 아니다.</b> 커서 추적 · 커서 밑 맨 위 창 · 끌기 그림 · 버튼 · Esc 는 WebView2 브라우저 프로세스(<code>msedgewebview2.exe</code>)의 OS 끌기 루프가 돌립니다. 웹뷰에는 DOM 사건(<code>dragstart</code> · <code>dragover</code> · <code>drop</code> · <code>dragend</code>)으로만 닿습니다. 셸 프로세스의 메인 스레드는 이 루프에 들어가지 않아(실측 지연 최대 4.1ms), 끄는 동안에도 데몬에서 오는 에이전트 출력을 웹뷰로 계속 흘려보냅니다.</li>
+      <li><b>웹뷰 — 그리기와 사건 전달만.</b> 창마다 하나입니다. 탭바(<code>TabBar.tsx</code>)가 끌기를 시작하고 끝을 알리며, <code>dockDrag.ts</code> 가 <code>dragover</code> 마다 셸이 미리 보낸 영역 위에서 점을 판정하고(판정 거울 <code>dockPick.ts</code>) 출처 창이면 모드를 정한 뒤 가이드(<code>DockOverlay.tsx</code>)를 그립니다. 탭 폭 · 숨김을 계산하는 순수 함수(<code>tabStripLayout.ts</code>)도 여기 있습니다. 배치를 바꾸는 코드는 웹뷰에 없습니다.</li>
+      <li><b>invoke — 웹뷰에서 셸로 가는 길은 일곱뿐.</b> 시작은 <code>dragstart</code> 안에서 잰 탭바(<code>strip</code>)를, 놓기 · 출처 끝은 그 창이 마지막으로 <b>그린</b> 판정을 그대로 싣습니다. 보인 것 보고(<code>dock_drag_over</code>)는 바뀔 때만 내므로 <code>dragover</code> 60/s 가 셸로 넘어가지 않습니다.</li>
+      <li><b>실행기 (<code>commands/dock.rs</code>) — invoke 껍데기.</b> 도착 시각(<code>now</code>)을 먼저 찍고 커서 · 창 사각형 · 배율을 락 밖에서 읽어 장부에 먹인 뒤, 장부가 돌려준 할 일을 실행합니다: emit · 탭 하나 팝아웃 숨기기 · 보이기(메인 스레드 줄에서 장부의 지금 값으로 맞춤) · 시한 · 적용 호출(늘 async).</li>
+      <li><b><code>dock</code> — 끌기 장부와 판정.</b> <code>book.rs</code> 는 사건을 받아 할 일만 내는 순수 상태 하나입니다(잎 락 하나 · 스레드 · 틱 없음). <code>regions.rs</code> 가 창마다 놓을 영역을 미리 계산하고 놓을 때 같은 점을 다시 고르며, <code>hit.rs</code> 가 그 규칙(이음새 · 탭바 자리 · 순서 이동 구역)을 순수 함수로 갖습니다. <code>snap.rs</code> 는 레이아웃 락 안에서 모델을 장부 재료로 뜹니다.</li>
+      <li><b>적용 서비스 <code>apply::dock_tab</code> — 배치를 바꾸는 유일한 문.</b> 마우스 놓기(이음새 · 탭바 · 새 창)와 자기 탭바 안 순서 이동(<code>TabBar{같은 창, index}</code>)이 모두 여기를 한 번 지납니다. 잠금 한 번 안에서 모델(<code>manager.rs</code>)과 트리 연산(<code>layout/dock.rs</code>)을 부르고, 메인이 비면 그 안에서 빈 탭을 채웁니다.</li>
+      <li><b>결과 알림 — 새 사건이 없다.</b> 도킹 결과는 기존 <code>layout:updated</code> · <code>window:tabs-updated</code> 로만 웹뷰에 돌아가고, 웹뷰는 받은 배치를 그릴 뿐입니다.</li>
+      <li><b>골든 — 판정 규칙 두 벌을 묶는 파일 하나.</b> 규칙은 Rust(<code>hit.rs</code> · <code>regions::pick</code>)와 TS(<code>dockPick.ts</code>)에 두 벌 있고, 같은 <code>pick_golden.json</code> 을 Rust 시험과 vitest 가 함께 먹습니다.</li>
+      <li><b>LLM 명령 — 점선 상자는 이번에 만들지 않는 것.</b> 다음 작업이 같은 문(⑥) 위에 얹습니다.</li>
+      <li><b><code>platform</code> — 새 함수 없음.</b> 셸이 직접 읽는 OS 값은 Tauri API 셋뿐입니다.</li>
+    </ol>
+  </div>
+
+  <div class="sub">
+    <h3>왜 이렇게 놓았나</h3>
+    <div class="prose">
+      <p><b><code>dock</code> 을 <code>layout</code> 밑에 두지 않은 까닭.</b> 장부는 레이아웃의 권위가 아니라 그 권위를 부르는 손님입니다 — 놓기도 적용 서비스를 부를 뿐입니다. 둘을 한 모듈에 섞으면 「레이아웃 변경은 적용 서비스 하나」라는 경계가 흐려집니다(TRD §1-1). 그래서 장부 락(잎 락)을 쥔 채로는 레이아웃 락 · emit · 창 호출 · 적용 서비스 · 커서 읽기를 하지 않습니다(TRD §1-3).</p>
+      <p><b>배치를 바꾸는 길은 하나.</b> 마우스 놓기 · 순서 이동 · 앞으로의 LLM 명령이 모두 <code>apply::dock_tab</code> 을 지납니다. 다음 작업의 명령은 그 위에 껍데기만 얹고 두 번째 변경 경로를 짓지 않습니다(TRD §3 · ADR-0081 결정 3). 출처에서 빼기 · 대상에 넣기 · 빈 팝아웃 지우기 · 메인 빈 탭 채우기 · 출력 경로 다시 계산이 이 문 안의 잠금 한 번에 일어나므로, 저장 파일에는 도킹 전 아니면 도킹 뒤만 실립니다(TRD §5).</p>
+      <p><b>판정 규칙이 두 벌인 까닭 — 의도된 중복.</b> 가이드는 커서를 60Hz 로 따라가야 하는데, 움직일 때마다 셸에 물으면 invoke 왕복(실측 p99 약 16ms · 최대 약 50ms)만큼 가이드가 늦습니다(TRD §7 #3). 그래서 셸이 창마다 영역을 미리 보내고, 웹뷰는 같은 규칙의 TS 판으로 점만 고릅니다. 놓을 때는 셸이 Rust 판으로 같은 점을 다시 고르고 보인 것과 같을 때만 적용하므로, 두 판이 갈라져도 결과는 엉뚱한 도킹이 아니라 「무변경」입니다(TRD §11-2 #4). 갈라짐은 골든 하나(<code>src-tauri/src/dock/pick_golden.json</code> — 영역 13 · 사례 132)를 Rust 시험과 vitest 가 함께 먹어 막고, 규칙을 고치면 Rust · 골든 · TS 를 같은 변경에서 고칩니다. 판정 순서와 f64 연산 순서까지 같게 짭니다(TRD §2-4).</p>
+      <p><b>LLM 명령이 없는 것은 의식적 예외.</b> 이번 도킹은 LLM 명령(<code>tab.dock</code> 류 · <code>layout.get</code>)도, 탭 순서를 바꾸는 명령도 만들지 않습니다. CLAUDE.md 「LLM-우선 제어」(새 UI 기능엔 LLM 호출 경로를 함께)의 의식적 예외이고 사용자 결정입니다(PRD Q10 · 순서 이동은 D22). 남기는 것은 그 명령이 얹힐 자리 — <code>apply::dock_tab</code> · 타입드 <code>DockError</code> · <code>FocusPolicy::Keep</code> — 이고, 도킹 바로 다음 작업이 그 위에 명령을 얹어 갭을 닫습니다. 그 사이의 갭은 8단계에서 CLAUDE.md 「남은 갭」에 한 줄로 적습니다. 끌기 invoke(<code>dock_*</code>)는 사람 손의 입력과 그 측정이라 명령 버스에 싣지 않습니다.</p>
+      <p><b>OS 층에 새 함수가 없는 까닭과 대가.</b> 커서 추적 · 맨 위 창 · 끌기 그림 · 버튼 · Esc 를 엔진이 맡아, 셸은 Tauri API 셋만 락 밖에서 읽습니다. 그래서 <code>platform</code> 과 OS 경계 게이트 명단이 하나도 바뀌지 않습니다(TRD §1-6). 대가로 셸은 「커서 밑 맨 위 창」을 모르므로, 보고 없는 끝의 커서 판정은 그 끌기를 본 창과 원래 창으로만 좁혔습니다(PRD D21 — 5절). 셸 쪽 준비는 하나 — 창을 만드는 모든 코드가 지나는 한 곳(<code>WebviewEnv::finish</code>)에서 wry 의 드롭 처리기를 끕니다. 켜 두면 wry 의 드롭 대상이 HTML5 끌어 놓기를 막습니다.</p>
+    </div>
+  </div>
+
+  <details>
+    <summary>자세히 — 코드 지도 (파일 · 맡는 일 · 단계)</summary>
+    <div class="body">
+      <div class="tbl"><table>
+        <tr><th>층 · 모듈</th><th>파일</th><th>맡는 일</th><th>단계</th></tr>
+        <tr><td>layout · 트리 연산</td><td class="path">src-tauri/src/layout/dock.rs</td><td><code>docked_tree</code> · <code>incoming_rect</code> — 끼운 결과 트리 · 새 면적 0 판정</td><td><span class="badge done">1</span></td></tr>
+        <tr><td>layout · 도킹 모델</td><td class="path">src-tauri/src/layout/manager.rs</td><td><code>ViewManager::dock</code> · <code>plan_new_window</code> · <code>lease_tab</code>(표식) · <code>mark_closed</code>(묘비) · <code>refill_main</code></td><td><span class="badge done">2 · 4</span></td></tr>
+        <tr><td>닫히는 창 (M2)</td><td class="path">src-tauri/src/commands/popout.rs<br>src-tauri/src/lib.rs</td><td>닫기 요청 순간 모델에서 먼저 지우고 묘비 · 닫히는 창의 늦은 구독 막기</td><td><span class="badge done">3</span></td></tr>
+        <tr><td>layout · 적용 서비스</td><td class="path">src-tauri/src/layout/apply.rs<br>src-tauri/src/state/placement.rs</td><td><code>apply::dock_tab</code> · 창 포트 <code>open_at</code> · <code>move_window</code> · 알림 묶음 끝 <code>LayoutEvents::settled</code> · 새 창 자리</td><td><span class="badge done">4</span></td></tr>
+        <tr><td>layout · 크롬 측정 타입</td><td class="path">src-tauri/src/layout/chrome.rs</td><td><code>DockChrome</code> · <code>TabHeader</code> · <code>RectCss</code></td><td><span class="badge done">5</span><span class="note">9c 는 주석만</span></td></tr>
+        <tr><td>dock · 판정 규칙</td><td class="path">src-tauri/src/dock/hit.rs</td><td><code>locate</code> · <code>choose_seam</code> · <code>valid_bands</code> · <code>tab_insert_x</code> · <code>REORDER_SLACK_PX</code> · <code>reorder_zone</code> · <code>reorder_left</code> · <code>reorder_index</code></td><td><span class="badge done">5 · 9a</span><span class="note">9c 는 주석만</span></td></tr>
+        <tr><td>dock · 영역 · wire · 골든</td><td class="path">src-tauri/src/dock/regions.rs<br>src-tauri/src/dock/types.rs<br>src-tauri/src/dock/pick_golden.json</td><td><code>regions_for</code> · <code>pick</code> · <code>DockRegions</code> · <code>StripStart</code> · <code>ReorderRegion</code> · <code>Picked::Reorder</code></td><td><span class="badge done">6a · 9a</span><span class="note">types.rs 는 9c 주석만</span></td></tr>
+        <tr><td>dock · 끌기 장부</td><td class="path">src-tauri/src/dock/book.rs</td><td><code>Book::step</code> — 순서 이동 놓기 4c · 커서 판정 · 미룬 숨기기 · 끝 스냅숏 <code>last</code> · 오는 중 <code>Over</code> 붙들기</td><td><span class="badge done">6b · 9b</span></td></tr>
+        <tr><td>dock · 스냅숏</td><td class="path">src-tauri/src/dock/snap.rs</td><td>레이아웃 락 안에서 모델 → 장부 재료</td><td><span class="badge done">6c · 9a</span><span class="note">6c(d582331a) · 9a 가 고침(5f4ef9fb)</span></td></tr>
+        <tr><td>실행기 · invoke</td><td class="path">src-tauri/src/commands/dock.rs<br>src-tauri/src/lib.rs</td><td>invoke 여섯 + <code>report_dock_chrome</code> · 선택 인자 <code>strip</code> · <code>canceled</code> · <code>last</code> · 메인 스레드 숨기기 · 보이기 맞추기</td><td><span class="badge done">6c · 9b</span></td></tr>
+        <tr><td>드롭 처리기 끄기</td><td class="path">src-tauri/src/webview_env.rs</td><td><code>WebviewEnv::finish</code> → <code>disable_drag_drop_handler()</code></td><td><span class="badge done">6c</span></td></tr>
+        <tr><td>웹뷰 · 끌기 출처</td><td class="path">src/components/layout/TabBar.tsx<br>src/components/layout/tabStripLayout.ts<br>src/components/layout/dock/dragImage.ts</td><td>끌기 시작 · <code>strip</code> 재기 · 엔진 취소 · 순서 이동 모습 · Chrome 식 탭 폭 · 끌기 그림</td><td><span class="badge done">7</span><span class="badge prog">9c</span></td></tr>
+        <tr><td>웹뷰 · 판정 · 보고</td><td class="path">src/components/layout/dock/dockDrag.ts<br>src/components/layout/dock/dockPick.ts</td><td>모드 · 판정 순서 · 보인 것 보고 · 끝 스냅숏 · TS 판정 거울 <code>pickTarget</code></td><td><span class="badge done">7</span><span class="badge prog">9c</span></td></tr>
+        <tr><td>웹뷰 · 그리기 · 측정</td><td class="path">src/components/layout/dock/DockOverlay.tsx<br>src/components/layout/dock/dockChromeReport.ts<br>src/components/layout/WindowLayout.tsx</td><td>가이드 · 크롬 보고 · 떼어진 표시</td><td><span class="badge done">7</span><span class="badge prog">9c</span></td></tr>
+      </table></div>
+      <p>초록 = 그 단계로 커밋됨 · 주황 9c = 작업 트리에서 고치는 중(미커밋). <code>tabStripLayout.ts</code> 는 9c 가 새로 만든 파일이고 아직 추적되지 않습니다.</p>
+    </div>
+  </details>
+</section>
+
+<!-- ============================== 02 ============================== -->
+<section id="s2">
+  <div class="eyebrow"><span class="num">02</span><span>사용자가 보는 동작</span></div>
+  <h2>떼고, 들고, 셋 중 한 곳에 놓는다</h2>
 
   <figure class="fig">
     <div class="scroll">
@@ -456,174 +724,7 @@
     <figcaption>팝아웃의 탭 「리뷰」를 끌어 메인 창 슬롯 B 의 오른쪽 띠에 놓은 경우. 크기는 언제나 새것 1/3 · 기존 2/3 하나뿐입니다.</figcaption>
   </figure>
 
-  <p class="say">끄는 동안에는 <b>화면만</b> 바뀌고 실제 배치는 <b>놓는 순간 한 번</b> 바뀝니다. 커서 · 끌기 그림 · 버튼 · Esc 는 <b>브라우저 엔진</b>이 맡고, 셸은 창마다 놓을 수 있는 영역을 미리 계산해 주고 놓은 점을 다시 판정해 붙입니다.</p>
-
-  <div class="sub">
-    <h3>어디까지 왔나 — TRD 5판 §10 단계</h3>
-    <figure class="fig">
-      <div class="scroll">
-      <svg class="d w900" viewBox="0 0 1160 430" role="img" aria-label="진행판: 대략 40%. 1·2·5단계 완료, 3단계 진행, 남은 단계 4·6a·6b·6c·실측·7·8, 그다음 LLM 명령. 5판에서 셸 폴링·OS 함수·딱지 창·LLM 표면을 뺐다">
-        <defs>
-          <marker id="m2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah"/></marker>
-        </defs>
-        <text x="20" y="26" class="tb">전체 진행 — 대략 40%</text>
-        <rect x="200" y="14" width="940" height="14" rx="7" class="trk"/>
-        <rect x="200" y="14" width="376" height="14" rx="7" class="trk-f"/>
-
-        <text x="20" y="62" class="tb">끝남 · 커밋</text>
-        <rect x="20" y="74" width="210" height="40" rx="8" class="ok"/>
-        <text x="32" y="91" class="tb">1  트리 연산</text>
-        <text x="32" y="106" class="cd">layout/dock.rs</text>
-        <rect x="20" y="122" width="210" height="40" rx="8" class="ok"/>
-        <text x="32" y="139" class="tb">2  도킹 모델</text>
-        <text x="32" y="154" class="cd">layout/manager.rs</text>
-        <rect x="20" y="170" width="210" height="40" rx="8" class="ok"/>
-        <text x="32" y="187" class="tb">5  판정 규칙</text>
-        <text x="32" y="202" class="cd">dock/hit.rs</text>
-        <rect x="20" y="218" width="210" height="40" rx="8" class="ok"/>
-        <text x="32" y="235" class="tb">문서</text>
-        <text x="32" y="250" class="cd">PRD 4.3 · TRD 5 (리뷰 전)</text>
-
-        <text x="250" y="62" class="tb">진행 중</text>
-        <rect x="250" y="74" width="200" height="110" rx="8" class="prog"/>
-        <text x="262" y="94" class="tb">3  닫히는 창 막기</text>
-        <text x="262" y="114" class="s-prog">미커밋</text>
-        <text x="262" y="134" class="tm">수정 5건 반영</text>
-        <text x="262" y="150" class="tm">재리뷰 · 화면 실측 대기</text>
-        <text x="262" y="172" class="cd">commands/popout.rs</text>
-
-        <text x="470" y="62" class="tb">남은 단계</text>
-        <rect x="470" y="74" width="390" height="32" rx="7" class="todo"/>
-        <text x="482" y="95" class="tb">4  메인 빈 탭 고침 + 적용 서비스</text>
-        <text x="848" y="95" class="cd end">layout/apply.rs</text>
-        <rect x="470" y="114" width="390" height="32" rx="7" class="todo"/>
-        <text x="482" y="135" class="tb">6a  영역 · 판정 어댑터 · 골든</text>
-        <text x="848" y="135" class="cd end">dock/regions.rs</text>
-        <rect x="470" y="154" width="390" height="32" rx="7" class="todo"/>
-        <text x="482" y="175" class="tb">6b  끌기 장부 (순수)</text>
-        <text x="848" y="175" class="cd end">dock/book.rs</text>
-        <rect x="470" y="194" width="390" height="32" rx="7" class="todo"/>
-        <text x="482" y="215" class="tb">6c  셸 배선 · 드롭 처리기 끄기</text>
-        <text x="848" y="215" class="cd end">commands/dock.rs</text>
-        <rect x="470" y="234" width="390" height="32" rx="7" class="todo"/>
-        <text x="482" y="255" class="tb">실측  S1–S4 · S6</text>
-        <text x="848" y="255" class="tm end">끝 신호 · 그림 · 파일 · DPI</text>
-        <rect x="470" y="274" width="390" height="32" rx="7" class="todo"/>
-        <text x="482" y="295" class="tb">7  프론트 — 마우스 도킹 완성</text>
-        <text x="848" y="295" class="cd end">components/layout/</text>
-        <rect x="470" y="314" width="390" height="32" rx="7" class="todo"/>
-        <text x="482" y="335" class="tb">8  문서 · ADR · 화면 실측(+S5)</text>
-        <text x="848" y="335" class="cd end">/qa full</text>
-
-        <text x="910" y="62" class="tb">다음 작업</text>
-        <rect x="910" y="200" width="230" height="146" rx="8" class="next"/>
-        <text x="924" y="222" class="tb">LLM 레이아웃 명령</text>
-        <text x="924" y="242" class="cd">tab.dock · layout.get</text>
-        <text x="924" y="264" class="t2">이번 작업에선 안 만듦</text>
-        <text x="924" y="284" class="tm">첫 단계 = 외부 조사</text>
-        <text x="924" y="314" class="s-prog">LLM-우선 원칙의</text>
-        <text x="924" y="332" class="s-prog">의식적 예외 (사용자 결정)</text>
-        <path d="M860,90 L 890,90 L 890,230 L 908,230" class="ln-d" marker-end="url(#m2)"/>
-        <text x="896" y="160" class="tm">4 뒤</text>
-        <text x="896" y="176" class="tm">시작 가능</text>
-
-        <line x1="230" y1="94" x2="248" y2="94" class="ln" marker-end="url(#m2)"/>
-        <line x1="450" y1="90" x2="468" y2="90" class="ln" marker-end="url(#m2)"/>
-
-        <text x="20" y="392" class="tm">5판에서 뺀 것</text>
-        <rect x="120" y="374" width="250" height="28" rx="6" class="gone"/>
-        <text x="132" y="393" class="t2 t-gone">셸 폴링 상태 기계 (session.rs)</text>
-        <rect x="380" y="374" width="220" height="28" rx="6" class="gone"/>
-        <text x="392" y="393" class="t2 t-gone">platform 함수 · 핸들 의존</text>
-        <rect x="610" y="374" width="120" height="28" rx="6" class="gone"/>
-        <text x="622" y="393" class="t2 t-gone">딱지 창</text>
-        <rect x="740" y="374" width="160" height="28" rx="6" class="gone"/>
-        <text x="752" y="393" class="t2 t-gone">MainLastTab 거절</text>
-        <rect x="910" y="374" width="230" height="28" rx="6" class="gone"/>
-        <text x="922" y="393" class="t2">LLM 표면 → 다음 작업</text>
-      </svg>
-      </div>
-      <figcaption>단계 번호는 TRD 5판 §10 그대로입니다(1 · 2 · 5 가 먼저 끝났고 3 이 진행 중). 6a · 6b 는 4 와 병렬로 할 수 있고, 6c 는 4 · 6b 뒤, 7 은 실측 S1–S4 · S6 뒤입니다. 「대략 40%」는 메인 세션의 어림입니다.</figcaption>
-    </figure>
-    <p class="say"><b>1 · 2 · 5단계</b>(트리 연산 · 도킹 모델 · 판정 규칙)는 커밋됐고 새 방식에서도 그대로 씁니다. <b>3단계</b>는 수정 5건을 반영해 재리뷰 · 화면 실측을 기다립니다. 새로 남은 것은 <b>4 · 6a · 6b · 6c · 실측 · 7 · 8</b>이고, 7단계가 끝나면 마우스 도킹이 처음으로 끝까지 됩니다. 커밋은 전부 로컬이며 push 한 것은 없습니다.</p>
-  </div>
-
-  <details>
-    <summary>자세히 — 커밋 목록 · 미커밋 작업 · 시험 수치</summary>
-    <div class="body">
-      <div class="tbl"><table>
-        <tr><th>커밋</th><th>무엇</th><th>게이트</th></tr>
-        <tr><td class="path">55172e3c</td><td>조사 · PRD 4.1판 · TRD 4판</td><td>—</td></tr>
-        <tr><td class="path">5fb48338</td><td>TRD 4.1판(정합)</td><td>—</td></tr>
-        <tr><td class="path">b7ac588b</td><td>옛 구조 브리핑(이 페이지가 대체)</td><td>—</td></tr>
-        <tr><td class="path">080893c5</td><td>1단계 트리 연산</td><td>리뷰 full PASS · QA standard PASS · 4387 통과 / 0 실패</td></tr>
-        <tr><td class="path">e73e0289</td><td>5단계 대상 판정</td><td>리뷰 full PASS · QA standard PASS · 4429 통과 / 0 실패</td></tr>
-        <tr><td class="path">ca723ed5</td><td>2단계 도킹 모델</td><td>리뷰 full PASS · QA standard PASS · 4461 통과 / 0 실패 / 31 무시</td></tr>
-        <tr><td class="path">bbaa9453</td><td>HTML5 끌어 놓기로 재설계 — PRD 4.3 · TRD 5판 · 끌기 수단 조사</td><td>리뷰 전</td></tr>
-      </table></div>
-      <ul>
-        <li><b>3단계(미커밋)</b> — 팝아웃 닫기 요청 순간 모델에서 먼저 지우기 + 묘비 · 닫히는 창의 늦은 구독 막기. 수정 5건 반영 → 재리뷰 · <code>/qa full</code>(팝아웃 X · 0탭 자가 닫기 · 출력 계속) → 커밋.</li>
-        <li><b>미커밋 <code>src-tauri/src/dock/session.rs</code></b>(셸이 8ms 마다 커서를 읽던 상태 기계)는 5판이 버립니다 — 3단계 커밋에 넣지 않고 지우며, <code>visible_tab</code> · 끝 어휘 · 띠 캐시 꼴만 6b 의 장부로 옮깁니다.</li>
-        <li>4461 은 2단계 커밋 때의 워크스페이스 전체 회귀입니다. 그 뒤 미커밋 작업을 포함한 전체 회귀 수치는 이 페이지에 없습니다.</li>
-      </ul>
-    </div>
-  </details>
-</section>
-
-<!-- ============================== 02 ============================== -->
-<section id="s2">
-  <div class="eyebrow"><span class="num">02</span><span>사용자가 보는 동작</span></div>
-  <h2>떼고, 들고, 셋 중 한 곳에 놓는다</h2>
-
-  <figure class="fig">
-    <div class="scroll">
-    <svg class="d w760" viewBox="0 0 1080 262" role="img" aria-label="탭을 끌기 시작하면 탭이 창에서 떼어져 보이고 Windows 기본 끌기 그림이 커서를 따라간다. 탭이 하나뿐인 팝아웃은 창째 안 보인다">
-      <defs>
-        <marker id="m3m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah-m"/></marker>
-        <linearGradient id="gf3" x1="0" y1="0" x2="1" y2="1"><stop offset="0.35" class="fd0"/><stop offset="1" class="fd1"/></linearGradient>
-      </defs>
-      <text x="20" y="22" class="tb">탭이 여럿인 창 (메인 포함)</text>
-      <text x="330" y="48" class="tm">끌기 전</text>
-      <rect x="330" y="54" width="56" height="20" rx="3" class="tab"/>
-      <text x="358" y="68" class="t2 mid">작업</text>
-      <rect x="390" y="54" width="56" height="20" rx="3" class="tab-on"/>
-      <text x="418" y="68" class="t2 mid">검토</text>
-      <rect x="20" y="40" width="290" height="190" rx="4" class="win"/>
-      <rect x="21" y="41" width="288" height="21" class="bar"/>
-      <text x="32" y="56" class="tm">팝아웃</text>
-      <rect x="21" y="62" width="288" height="24" class="bar2"/>
-      <rect x="26" y="65" width="56" height="21" rx="3" class="tab-on"/>
-      <text x="54" y="80" class="t2 mid">작업</text>
-      <text x="92" y="79" class="tm">← 「검토」 머리가 빠짐</text>
-      <rect x="24" y="90" width="282" height="136" class="slot"/>
-      <text x="165" y="156" class="t2 mid">「작업」 화면이 대신 보임</text>
-      <text x="165" y="176" class="tm mid">(탭 닫기와 같은 이웃 규칙)</text>
-      <path d="M268,74 C 330,80 370,110 392,140" class="ln-d" marker-end="url(#m3m)"/>
-      <g transform="translate(394,146)"><rect width="72" height="48" rx="3" class="dimg"/><rect x="1" y="1" width="70" height="12" class="dimg-h"/><text x="6" y="10.5" class="dimg-t">검토</text><line x1="7" y1="22" x2="52" y2="22" class="dimg-l"/><line x1="7" y1="30" x2="60" y2="30" class="dimg-l"/><line x1="7" y1="38" x2="42" y2="38" class="dimg-l"/><rect width="72" height="48" rx="3" fill="url(#gf3)"/></g>
-      <path d="M0,0L0,15L4,11L7,17L9.5,16L6.5,10L11.5,10Z" transform="translate(432,136)" class="cur"/>
-      <text x="440" y="214" class="t2 mid">끌기 그림이 커서를 따라감</text>
-      <text x="440" y="232" class="tm mid">반투명 · 다른 앱 위에선 사라짐</text>
-      <text x="165" y="252" class="tm mid">탭 목록(모델)은 그대로 — 화면에서만 뺀 것</text>
-
-      <line x1="540" y1="10" x2="540" y2="252" class="sep"/>
-
-      <text x="560" y="22" class="tb">탭이 하나뿐인 팝아웃</text>
-      <rect x="560" y="40" width="230" height="170" rx="4" class="ghost"/>
-      <rect x="566" y="64" width="56" height="20" rx="3" class="ghost"/>
-      <text x="594" y="78" class="tm mid">리뷰</text>
-      <text x="675" y="128" class="t2 mid">창째 안 보임</text>
-      <text x="675" y="148" class="tm mid">(끄는 동안만)</text>
-      <path d="M624,74 C 720,60 850,90 902,128" class="ln-d" marker-end="url(#m3m)"/>
-      <g transform="translate(904,134)"><rect width="72" height="48" rx="3" class="dimg"/><rect x="1" y="1" width="70" height="12" class="dimg-h"/><text x="6" y="10.5" class="dimg-t">리뷰</text><line x1="7" y1="22" x2="52" y2="22" class="dimg-l"/><line x1="7" y1="30" x2="60" y2="30" class="dimg-l"/><line x1="7" y1="38" x2="42" y2="38" class="dimg-l"/><rect width="72" height="48" rx="3" fill="url(#gf3)"/></g>
-      <path d="M0,0L0,15L4,11L7,17L9.5,16L6.5,10L11.5,10Z" transform="translate(942,124)" class="cur"/>
-      <text x="940" y="204" class="t2 mid">끌기 그림만 남는다</text>
-      <text x="810" y="244" class="tm mid">놓으면 — 붙었으면 빈 팝아웃은 닫히고, 빈 곳이면 그 창이 그 자리로 옮겨 다시 보인다</text>
-    </svg>
-    </div>
-    <figcaption>끌기 시작 — 탭을 끌면 바로 떼어집니다. 끌기 그림은 Windows 기본 모양(반투명 · 가장자리 흐려짐)이고, 내용은 위 = 제목 띠 · 아래 = 축소 그림입니다(터미널 칸은 화면 그대로 · 그 밖 칸은 이름 자리채움 · 안 보이던 탭은 제목만 — 결정 #7). 따로 만드는 딱지 창은 없습니다.</figcaption>
-  </figure>
-
-  <p class="say">탭을 끌면 그 탭은 곧바로 창에서 <b>떼어져 보이고</b>, <b>Windows 기본 끌기 그림</b>이 커서를 따라갑니다. 떼어진 모습은 화면 표시일 뿐이라, 이 순간에는 저장된 배치가 바뀌지 않습니다.</p>
+  <p class="say">가장 흔한 경우입니다 — 팝아웃의 탭 「리뷰」를 끌어 메인 창 슬롯 B 의 오른쪽 띠에 놓습니다. 끄는 동안 바뀌는 것은 <b>화면뿐</b>이고(가이드 · 떼어진 모습 · 숨긴 팝아웃), 실제 배치는 놓는 순간 적용 서비스에서 <b>한 번</b> 바뀝니다. 탭이 하나뿐인 팝아웃은 커서가 그 창 탭바 구역을 벗어나 다른 창에 닿을 때 창째 숨고(3절), 붙으면 비어서 닫힙니다.</p>
 
   <figure class="fig">
     <div class="scroll">
@@ -784,14 +885,14 @@
       <text x="1015" y="514" class="tm mid">크기 = 떼어 온 창 크기</text>
     </svg>
     </div>
-    <figcaption>위 = 끄는 중 보이는 가이드, 아래 = 놓은 결과. 빗금 띠 하나가 곧 「놓으면 새것이 차지할 사각형」이고, 커서가 든 띠는 진하게 칠해집니다. 다른 앱 위에서는 끌기 그림이 사라집니다(Windows 기본 동작 · 실측).</figcaption>
+    <figcaption>위 = 끄는 중 보이는 가이드, 아래 = 놓은 결과. 빗금 띠 하나가 곧 「놓으면 새것이 차지할 사각형」이고, 커서가 든 띠는 진하게 칠해집니다. 다른 앱 위에서는 끌기 그림이 사라집니다(Windows 기본 동작 · 실측). ② 의 탭바는 <b>다른 창</b>의 탭바입니다 — 끄는 탭의 원래 창 탭바 안은 놓는 곳이 아니라 순서 이동입니다(3절).</figcaption>
   </figure>
 
-  <p class="say">놓는 곳은 <b>셋뿐</b>입니다 — 이음새(슬롯 옆 · 창 바깥 변), 탭바, 그 밖(새 창). 슬롯 <b>가운데</b>는 이음새가 아니라서 거기 놓으면 새 창이 뜹니다. 결과에서 면적이 0 이 되는 슬롯이 생기는 띠는 아예 칠하지 않습니다.</p>
+  <p class="say">놓는 곳은 <b>셋뿐</b>입니다. ① <b>이음새</b> — 슬롯 상하좌우 띠(슬롯의 1/3)와 창 바깥 변의 32px 띠이고, 빗금 띠 하나가 곧 「놓으면 새것이 차지할 사각형」입니다. ② <b>다른 창의 탭바</b> — 탭 사이 세로 막대 자리에 끼웁니다(원래 창 탭바 안은 놓는 곳이 아니라 순서 이동입니다 — 3절). ③ <b>그 밖</b> — 슬롯 가운데 · 창 밖 · 다른 앱 위는 그 탭만 든 새 창입니다. 결과에서 면적이 0 이 되는 슬롯이 생기는 띠는 칠하지 않습니다.</p>
 
   <figure class="fig">
     <div class="scroll">
-    <svg class="d w900" viewBox="0 0 1160 240" role="img" aria-label="규칙 넷: 제목줄 끌기는 창만 이동, Esc와 비정상 끝은 그 자리에 놓기, 메인의 마지막 탭도 끌 수 있고 메인엔 빈 탭이 생김, 다른 탭 머리 위 0.5초면 탭 전환">
+    <svg class="d w900" viewBox="0 0 1160 240" role="img" aria-label="규칙 넷: 제목줄 끌기는 창만 이동, Esc와 비정상 끝은 그 자리에 놓기, 메인의 마지막 탭도 끌 수 있고 메인엔 빈 탭이 생김, 다른 창 탭 머리 위 0.5초면 탭 전환">
       <defs>
         <marker id="m5a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah-a"/></marker>
         <marker id="m5m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah-m"/></marker>
@@ -845,7 +946,7 @@
       <text x="725" y="214" class="tm mid">끄는 동안 메인은 빈 화면</text>
 
       <rect x="880" y="8" width="270" height="224" rx="10" class="panel"/>
-      <text x="896" y="34" class="tb">다른 탭 머리 위 0.5초</text>
+      <text x="896" y="34" class="tb">다른 창 탭 머리 위 0.5초</text>
       <rect x="898" y="54" width="170" height="100" rx="3" class="win"/>
       <rect x="899" y="55" width="168" height="17" class="bar"/>
       <text x="906" y="68" class="tm">메인</text>
@@ -863,23 +964,21 @@
       <text x="1015" y="214" class="tm mid">그 슬롯 옆에 놓으면 두 탭이 합쳐짐</text>
     </svg>
     </div>
-    <figcaption>규칙 넷. Esc · 비정상 끝도 「원래 창으로 되돌리기」가 아니라 그 자리에 놓기입니다 — 출처 탭이 다른 경로로 사라졌으면 그냥 끝납니다. 단 보인 가이드와 결과가 달라 무변경으로 끝나면 탭은 원래 창에 다시 보입니다(결정 #8).</figcaption>
+    <figcaption>규칙 넷. Esc · 비정상 끝도 「원래 창으로 되돌리기」가 아니라 그 자리에 놓기입니다 — 출처 탭이 다른 경로로 사라졌으면 그냥 끝납니다. 단 보인 가이드와 결과가 달라 무변경으로 끝나면 탭은 원래 창에 다시 보입니다(결정 #8 — 확정). 머묾 전환은 다른 창 탭바에서만 됩니다 — 원래 창 탭바 안은 순서 이동입니다(3절).</figcaption>
   </figure>
 
-  <p class="say"><b>Esc</b>는 손을 뗀 것과 같고, 포커스를 잃거나 떼기 신호를 놓치면 <b>마지막 점에 놓습니다</b>. 메인의 마지막 탭도 끌 수 있고, 그러면 메인에 빈 탭이 자동으로 생깁니다.</p>
+  <p class="say">규칙 넷입니다. 제목줄 끌기는 OS 기본 창 이동이라 이 기능이 끼어들지 않습니다. Esc 와 비정상 끝은 「원래대로 되돌리기」가 아니라 그 자리에 놓기입니다. 메인의 마지막 탭도 끌 수 있고, 떠나면 같은 연산 안에서 메인에 빈 탭이 생깁니다. <b>다른 창</b> 탭 머리 위에 0.5초 머물면 그 탭으로 바뀝니다 — 원래 창 탭바의 머묾 전환은 순서 이동(Q20)과 함께 없어졌습니다(받아들임 · TRD §11-1b ②).</p>
 
   <details>
-    <summary>자세히 — 띠 규칙 · 고를 수 있는 곳 · 새 창 크기 · 비목표</summary>
+    <summary>자세히 — 띠 규칙 · 고를 수 있는 곳 · 새 창 · 비목표</summary>
     <div class="body">
       <ul>
-        <li><b>띠가 겹치면</b> 창 바깥 띠가 슬롯 띠보다 이기고, 슬롯 모서리에서는 커서에서 가장 가까운 변(띠 두께로 나눈 거리)이 이깁니다. 경계선 위는 늘 같은 답이 나옵니다 — 이미 <code>src-tauri/src/dock/hit.rs</code> 에 있습니다.</li>
-        <li><b>바깥 띠 두께 = 32 CSS px</b> — 탭바 높이(28px)보다 조금 두꺼워 노리기 쉽고, 배율과 무관하게 같은 눈 크기입니다.</li>
-        <li><b>고를 수 있는 곳</b> = 커서 밑 맨 위가 우리 창일 때, 그 창의 지금 보이는 탭과 탭바. 다른 앱 창에 가려진 자리 · 최소화된 창은 대상이 아니고 거기 놓으면 새 창입니다. 같은 창의 다른 탭에 붙이려면 그 탭 머리 위에 0.5초 머물러 띄운 뒤 놓습니다.</li>
-        <li><b>새 창 크기</b> = 떼어 온 창의 크기, 메인에서 뗐으면 팝아웃 기본 크기(720×500). <b>자리</b> = 커서에서 끌기 그림 안 커서 자리를 뺀 곳 — 그림이 있던 자리에 창이 뜹니다. 탭이 하나뿐인 팝아웃이면 새 창을 만들지 않고 숨겨 둔 그 창을 놓은 자리로 옮깁니다.</li>
-        <li><b>메인의 마지막 탭</b>을 끄는 동안 메인은 빈 탭바 · 빈 화면이고, 다른 창에 놓으면 같은 연산 안에서 빈 탭이 생깁니다.</li>
-        <li><b>파일 끌어 놓기</b>(탐색기 파일 등)는 모든 창에서 늘 막습니다 — 드롭 처리기를 끄면 웹뷰가 그 파일로 이동할 수 있어서입니다.</li>
-        <li><b>놓은 뒤</b> 대상 창이 앞으로 오고 붙은 첫 슬롯에 포커스가 갑니다.</li>
-        <li><b>에이전트 출력은 끊기지 않습니다</b> — 배치를 바꾸는 같은 잠금 안에서 출력 경로를 다시 계산합니다(팝아웃과 같은 길). 끄는 동안에도 셸 메인 스레드가 비어 있어 출력이 계속 흐릅니다(3절).</li>
+        <li><b>띠가 겹치면</b> 창 바깥 띠가 슬롯 띠보다 이기고, 슬롯 모서리에서는 커서에서 가장 가까운 변(띠 두께로 나눈 거리)이 이깁니다. 경계선 위는 늘 같은 답입니다(<code>src-tauri/src/dock/hit.rs</code>).</li>
+        <li><b>바깥 띠 두께 = 32 CSS px</b> — 탭바 높이(28px)보다 조금 두꺼워 노리기 쉽고, 배율과 무관하게 같은 눈 크기입니다. 출처 창에서는 캔버스 맨 위 15px 이 순서 이동 구역에 들어가 바깥 위 띠의 남은 몫이 17px 입니다(TRD §2-5).</li>
+        <li><b>고를 수 있는 곳</b> = 커서 밑 맨 위가 우리 창일 때, 그 창의 지금 보이는 탭과 탭바. 다른 앱 창에 가려진 자리 · 최소화된 창은 대상이 아닙니다. 같은 창의 다른 탭에 붙이려면 그 탭을 먼저 띄워 둔 채 다른 탭을 끌어 캔버스로 내립니다.</li>
+        <li><b>새 창</b> — 크기 = 떼어 온 창의 크기(최대화였으면 보통 크기 · 메인에서 뗐으면 팝아웃 기본 720×500), 자리 = 커서에서 끌기 그림 안 커서 자리를 뺀 곳. 탭이 하나뿐인 팝아웃이면 새 창을 만들지 않고 숨겨 둔 그 창을 놓은 자리로 옮깁니다(다시 확인 · 되돌리기 없음 — Q19).</li>
+        <li><b>파일 끌어 놓기</b>(탐색기 파일 등)는 모든 창에서 늘 막습니다 — 드롭 처리기를 끈 웹뷰가 그 파일로 이동하지 않게.</li>
+        <li><b>놓은 뒤</b> 대상 창이 앞으로 오고 붙은 첫 슬롯에 포커스가 갑니다. <b>에이전트 출력은 끊기지 않습니다</b> — 배치를 바꾸는 같은 잠금 안에서 출력 경로를 다시 계산합니다(팝아웃과 같은 길).</li>
         <li><b>비목표</b>: 슬롯 하나 직접 끌기 · 슬롯 가운데 칸 · Ctrl 끌기 · 직전 도킹 되돌리기 · 크기 기억 · 웹뷰 안 화면 상태(입력 초안 · 스크롤) 옮기기.</li>
       </ul>
     </div>
@@ -888,249 +987,692 @@
 
 <!-- ============================== 03 ============================== -->
 <section id="s3">
-  <div class="eyebrow"><span class="num">03</span><span>구조와 코드</span></div>
-  <h2>끌기는 브라우저 엔진이 돌리고, 셸은 영역 · 판정 · 적용만 쥔다</h2>
+  <div class="eyebrow"><span class="num">03</span><span>탭바 안 순서 이동 · Q20 · TRD 5.7</span></div>
+  <h2>자기 탭바 안에서는 순서만 바꾸고, 벗어나야 떼어진다</h2>
 
   <figure class="fig">
-    <h3 style="margin-bottom:10px">프로세스 — 끌기가 어디서 도나</h3>
     <div class="scroll">
-    <svg class="d w900" viewBox="0 0 1160 396" role="img" aria-label="끌기 루프는 WebView2 브라우저 프로세스에서 돈다. 셸 프로세스의 메인 스레드는 끄는 동안에도 비어 있어 데몬의 에이전트 출력이 계속 흐른다">
+    <svg class="d w900" viewBox="0 0 1160 540" role="img" aria-label="왼쪽: 출처 창 탭바 구역 안에서는 끄는 머리 C 가 커서를 따라 가로로 움직이고, C 의 왼쪽 끝이 B 의 가운데를 넘어 B 가 비켜난다. 놓으면 순서 A C B D. 오른쪽: 구역을 벗어나면 C 머리가 접히고 캔버스는 승계 탭 D 를 보이며 다른 창에 가이드가 그려진다. 아래: 모드는 출처 웹뷰가 정하고, 놓을 때 셸 장부가 얼린 탭바로 다시 판정해 같은 자리일 때만 적용한다">
       <defs>
-        <marker id="m6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah"/></marker>
-        <marker id="m6a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah-a"/></marker>
+        <marker id="Ra" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah-a"/></marker>
+        <marker id="Rn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah"/></marker>
+        <pattern id="Rh" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="7" class="hl"/></pattern>
+        <linearGradient id="Rg" x1="0" y1="0" x2="1" y2="1"><stop offset="0.35" class="fd0"/><stop offset="1" class="fd1"/></linearGradient>
       </defs>
-      <rect x="20" y="170" width="200" height="110" rx="10" class="box"/>
-      <text x="36" y="196" class="tb">데몬 프로세스</text>
-      <text x="36" y="218" class="t2">에이전트 · PTY</text>
-      <text x="36" y="238" class="t2">출력을 셸로 보냄</text>
-      <text x="36" y="266" class="cd">engram-dashboard-daemon</text>
 
-      <rect x="262" y="110" width="278" height="230" rx="12" class="mod"/>
-      <text x="278" y="136" class="tb">셸 프로세스</text>
-      <text x="278" y="154" class="cd">src-tauri · engram-dashboard.exe</text>
-      <rect x="278" y="168" width="246" height="122" rx="8" class="box-a"/>
-      <text x="292" y="192" class="tb">메인 스레드</text>
-      <text x="292" y="214" class="t2">창 · 레이아웃 모델</text>
-      <text x="292" y="234" class="t2">영역 계산 · 놓기 판정 · 적용</text>
-      <text x="292" y="258" class="s-ok">끄는 동안에도 비어 있음</text>
-      <text x="292" y="278" class="tm">지연 최대 4.1ms (실측)</text>
-      <text x="278" y="320" class="tm">끌기 루프에 끼지 않는다</text>
+      <!-- left: reorder mode -->
+      <rect x="10" y="10" width="560" height="372" rx="10" class="panel"/>
+      <text x="26" y="36" class="tb">구역 안 — 순서 이동 모드</text>
+      <text x="26" y="56" class="tm">출처 창 · 커서가 탭바 구역 안</text>
+      <rect x="30" y="70" width="520" height="260" rx="4" class="win"/>
+      <rect x="31" y="71" width="518" height="20" class="bar"/>
+      <text x="40" y="86" class="tm">팝아웃 (출처)</text>
+      <rect x="31" y="91" width="518" height="28" class="bar2"/>
+      <rect x="33" y="121" width="514" height="206" class="slot"/>
+      <rect x="31" y="91" width="518" height="43" class="zone"/>
+      <rect x="40" y="94" width="99" height="24" rx="3" class="tab"/><text x="90" y="111" class="t2 mid">A</text>
+      <rect x="140" y="94" width="99" height="24" rx="3" class="ghost"/>
+      <rect x="240" y="94" width="99" height="24" rx="3" class="tab"/><text x="290" y="111" class="t2 mid">B</text>
+      <rect x="340" y="94" width="99" height="24" rx="3" class="tab"/><text x="390" y="111" class="t2 mid">D</text>
+      <rect x="442" y="96" width="22" height="20" rx="3" class="tab"/><text x="453" y="111" class="t2 mid">+</text>
+      <rect x="165" y="94" width="99" height="24" rx="3" class="tab-new"/><text x="215" y="111" class="ta mid">C</text>
+      <path d="M0,0L0,15L4,11L7,17L9.5,16L6.5,10L11.5,10Z" transform="translate(205,102)" class="cur"/>
+      <line x1="165" y1="122" x2="165" y2="142" class="ln-a"/>
+      <line x1="190" y1="122" x2="190" y2="142" class="ln-d"/>
+      <text x="160" y="154" class="ta end">C 왼쪽 끝</text>
+      <text x="196" y="154" class="tm">B 가운데</text>
+      <line x1="200" y1="172" x2="282" y2="172" class="ln-a" marker-end="url(#Ra)"/>
+      <text x="290" y="176" class="t2">B 가 머리 폭만큼 비켜남 (150ms)</text>
+      <text x="540" y="146" class="tm end">↑ 구역 = 탭바 상자 ± 15 CSS px</text>
+      <text x="290" y="236" class="t2 mid">C 화면 그대로 — 떼어진 모습 없음</text>
+      <text x="290" y="256" class="tm mid">가이드 · 머묾 전환 없음 · 끌기 그림은 그대로 따라옴</text>
+      <text x="290" y="300" class="tm mid">점선 = B 가 있던 얼린 자리 (판정은 이 자리로)</text>
+      <text x="30" y="354" class="t2">놓으면 순서 A · C · B · D</text>
+      <text x="30" y="372" class="cd">apply::dock_tab(TabBar{같은 창, index 1})</text>
 
-      <rect x="610" y="16" width="530" height="364" rx="12" class="layer"/>
-      <text x="626" y="40" class="tb">WebView2</text>
-      <text x="710" y="40" class="tm">브라우저 프로세스 하나 + 창마다 렌더러</text>
-      <rect x="630" y="56" width="490" height="102" rx="8" class="box-a"/>
-      <text x="646" y="80" class="tb">브라우저 프로세스</text>
-      <text x="1104" y="80" class="cd end">msedgewebview2.exe</text>
-      <text x="646" y="104" class="t2">OS 끌기 루프 · 끌기 그림 창 · 마우스 캡처</text>
-      <text x="646" y="126" class="tm">커서 추적 · 맨 위 창 · 버튼 · Esc 를 여기서 처리한다</text>
-      <text x="646" y="146" class="cd">Windows OLE 끌어 놓기 — 우리 코드 아님</text>
-      <rect x="630" y="232" width="235" height="128" rx="8" class="box"/>
-      <text x="646" y="256" class="tb">출처 창 렌더러</text>
-      <text x="646" y="278" class="t2">탭 머리 — 끌기 시작 · 끝</text>
-      <text x="646" y="298" class="cda">dragstart · dragend</text>
-      <text x="646" y="326" class="cd">TabBar.tsx</text>
-      <text x="646" y="342" class="cd">dragImage.ts (7 신설)</text>
-      <rect x="885" y="232" width="235" height="128" rx="8" class="box"/>
-      <text x="901" y="256" class="tb">대상 창 렌더러</text>
-      <text x="901" y="278" class="t2">가이드를 스스로 그림</text>
-      <text x="901" y="298" class="cda">dragover 60/s · drop</text>
-      <text x="901" y="326" class="cd">dockDrag.ts · dockPick.ts</text>
-      <text x="901" y="342" class="cd">DockOverlay.tsx (7 신설)</text>
+      <!-- right: docking mode -->
+      <rect x="590" y="10" width="560" height="372" rx="10" class="panel"/>
+      <text x="606" y="36" class="tb">구역 밖 — 도킹 모드</text>
+      <text x="606" y="56" class="tm">벗어나는 순간부터 5.6 그대로 · 돌아오면 다시 순서 이동</text>
+      <rect x="606" y="70" width="250" height="200" rx="4" class="win"/>
+      <rect x="607" y="71" width="248" height="20" class="bar"/>
+      <text x="614" y="86" class="tm">팝아웃 (출처)</text>
+      <rect x="607" y="91" width="248" height="28" class="bar2"/>
+      <rect x="609" y="121" width="244" height="146" class="slot"/>
+      <rect x="607" y="91" width="248" height="43" class="zone"/>
+      <rect x="614" y="94" width="49" height="24" rx="3" class="tab"/><text x="638" y="111" class="t2 mid">A</text>
+      <rect x="664" y="94" width="49" height="24" rx="3" class="tab"/><text x="688" y="111" class="t2 mid">B</text>
+      <rect x="714" y="94" width="49" height="24" rx="3" class="tab-on"/><text x="738" y="111" class="t2 mid">D</text>
+      <rect x="766" y="96" width="18" height="20" rx="3" class="tab"/><text x="775" y="111" class="t2 mid">+</text>
+      <text x="848" y="150" class="tm end">C 머리 접힘</text>
+      <text x="731" y="206" class="t2 mid">D 화면 (승계 탭)</text>
+      <text x="731" y="224" class="tm mid">오른쪽 이웃 우선</text>
+      <text x="606" y="292" class="tm">탭 하나뿐인 팝아웃이면 이때 창째 숨김</text>
+      <text x="606" y="308" class="tm">(미룬 숨기기 — 도킹 모드 증거가 서면)</text>
 
-      <line x1="220" y1="225" x2="260" y2="225" class="ln" marker-end="url(#m6)"/>
-      <text x="240" y="214" class="t2 mid">출력</text>
-      <line x1="747" y1="158" x2="747" y2="230" class="ln" marker-end="url(#m6)"/>
-      <text x="755" y="200" class="t2">끌기 사건</text>
-      <line x1="1002" y1="158" x2="1002" y2="230" class="ln" marker-end="url(#m6)"/>
-      <text x="1010" y="200" class="t2">끌기 사건</text>
-      <line x1="540" y1="262" x2="608" y2="262" class="ln-a" marker-end="url(#m6a)"/>
-      <text x="574" y="252" class="t2 mid">출력 · 영역</text>
-      <line x1="608" y1="302" x2="542" y2="302" class="ln-a" marker-end="url(#m6a)"/>
-      <text x="574" y="322" class="t2 mid">invoke</text>
+      <rect x="880" y="70" width="254" height="200" rx="4" class="win"/>
+      <rect x="881" y="71" width="252" height="20" class="bar"/>
+      <text x="888" y="86" class="tm">메인</text>
+      <rect x="881" y="91" width="252" height="28" class="bar2"/>
+      <rect x="886" y="94" width="50" height="24" rx="3" class="tab-on"/><text x="911" y="111" class="t2 mid">작업</text>
+      <rect x="883" y="121" width="122" height="146" class="slot"/>
+      <text x="944" y="200" class="bigs mid">A</text>
+      <rect x="1009" y="121" width="122" height="146" class="slot"/>
+      <rect x="1009" y="121" width="40.7" height="146" fill="url(#Rh)" class="band"/>
+      <rect x="1009" y="121" width="122" height="48.7" fill="url(#Rh)" class="band"/>
+      <rect x="1009" y="218.3" width="122" height="48.7" fill="url(#Rh)" class="band"/>
+      <rect x="1090.3" y="121" width="40.7" height="146" class="hot"/>
+      <text x="1050" y="200" class="bigs mid">B</text>
+      <g transform="translate(1062,222)"><rect width="56" height="38" rx="3" class="dimg"/><rect x="1" y="1" width="54" height="11" class="dimg-h"/><text x="5" y="9.5" class="dimg-t">C</text><line x1="6" y1="19" x2="40" y2="19" class="dimg-l"/><line x1="6" y1="26" x2="48" y2="26" class="dimg-l"/><rect width="56" height="38" rx="3" fill="url(#Rg)"/></g>
+      <path d="M0,0L0,15L4,11L7,17L9.5,16L6.5,10L11.5,10Z" transform="translate(1110,184)" class="cur"/>
+      <text x="1007" y="292" class="tm mid">다른 창 — 가이드를 그린다 (2절)</text>
+      <text x="606" y="354" class="t2">놓으면 → 이음새 · 탭바 · 새 창</text>
+      <text x="606" y="372" class="cd">apply::dock_tab(DockTo::Seam | TabBar | NewWindow)</text>
+
+      <!-- bottom: who decides -->
+      <text x="20" y="412" class="tb">누가 정하나 · 누가 적용하나</text>
+      <rect x="20" y="422" width="280" height="106" rx="8" class="box"/>
+      <text x="34" y="444" class="tb">① 출처 웹뷰가 모드를 정한다</text>
+      <text x="34" y="466" class="t2">자기 dragover 마다 자기 pick</text>
+      <text x="34" y="486" class="t2">Reorder → 순서 이동 · 그 밖 → 도킹</text>
+      <text x="34" y="506" class="tm">셸에 묻지 않음 · 첫 dragover 전 = 순서 이동</text>
+      <text x="34" y="521" class="cd">dock/dockDrag.ts · dockPick.ts</text>
+      <rect x="320" y="422" width="260" height="106" rx="8" class="box"/>
+      <text x="334" y="444" class="tb">② 놓기 · 끝 신호</text>
+      <text x="334" y="466" class="t2">그 창이 그린 판정을 싣는다</text>
+      <text x="334" y="486" class="t2">자리 · 점 · 영역 번호(rev)</text>
+      <text x="334" y="514" class="cd">dock_drop · dock_drag_end{last}</text>
+      <rect x="600" y="422" width="280" height="106" rx="8" class="box"/>
+      <text x="614" y="444" class="tb">③ 셸 장부가 다시 판정</text>
+      <text x="614" y="466" class="t2">dragstart 때 잰 strip(얼림)으로</text>
+      <text x="614" y="486" class="t2">같은 점 → 같은 index 일 때만</text>
+      <text x="614" y="506" class="tm">다르면 무변경 (놓기 판정 4c)</text>
+      <text x="614" y="521" class="cd">regions::pick → hit::reorder_*</text>
+      <rect x="900" y="422" width="240" height="106" rx="8" class="box-a"/>
+      <text x="914" y="444" class="tb">④ 적용 — 놓을 때 한 번</text>
+      <text x="914" y="470" class="cd">apply::dock_tab</text>
+      <text x="914" y="486" class="cd">TabBar{같은 창, index}</text>
+      <text x="914" y="510" class="tm">보이는 자리 = 적용하는 자리</text>
+      <line x1="300" y1="475" x2="317" y2="475" class="ln" marker-end="url(#Rn)"/>
+      <line x1="580" y1="475" x2="597" y2="475" class="ln" marker-end="url(#Rn)"/>
+      <line x1="880" y1="475" x2="897" y2="475" class="ln-a" marker-end="url(#Ra)"/>
     </svg>
     </div>
-    <figcaption>끄는 동안 마우스를 붙잡고 끌기 그림을 그리는 것은 WebView2 의 <b>브라우저 프로세스</b>입니다. 셸 프로세스의 메인 스레드는 그 루프에 들어가지 않아, 데몬에서 오는 에이전트 출력을 계속 웹뷰로 흘려보냅니다(실측: 메인 스레드 지연 최대 4.1ms · 셸 → 웹뷰 이벤트 도착 p99 11ms).</figcaption>
+    <figcaption>왼쪽 = 구역 안(출처 창 탭바 ± 15px), 오른쪽 = 구역 밖. 청록 머리 = 끄는 탭, 점선 머리 = 판정에 쓰는 얼린 자리, 청록 점선 사각형 = 순서 이동 구역. 아래 줄은 모드 · 판정 · 적용이 각각 어느 층에 있는지입니다.</figcaption>
   </figure>
-
-  <figure class="fig">
-    <h3 style="margin-bottom:10px">모듈 — 누가 무엇을 맡나 (경로 = TRD 5판 · 저장소)</h3>
-    <div class="scroll">
-    <svg class="d w900" viewBox="0 0 1160 742" role="img" aria-label="웹뷰는 탭 머리에서 끌기를 시작하고 대상 창이 받은 영역으로 가이드를 그린다. 셸의 실행기가 invoke 를 받아 순수 장부를 돌리고, 장부는 영역을 계산하고 놓기를 판정하며, layout 의 적용 서비스가 배치를 바꾸는 유일한 문이다. platform 에는 새 함수가 없다">
-      <defs>
-        <marker id="m7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah"/></marker>
-        <marker id="m7a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah-a"/></marker>
-      </defs>
-      <rect x="8" y="16" width="992" height="170" rx="12" class="layer"/>
-      <text x="22" y="44" class="tb">웹뷰</text>
-      <text x="22" y="64" class="tm">창마다 하나</text>
-      <text x="22" y="82" class="tm">그리기 · 알림</text>
-      <text x="22" y="104" class="cd">src/components/</text>
-      <text x="22" y="118" class="cd">layout/ 기준</text>
-      <rect x="130" y="40" width="250" height="126" rx="8" class="box"/>
-      <text x="144" y="62" class="tb">출처 — 탭 머리</text>
-      <text x="366" y="62" class="s-new end">7</text>
-      <text x="144" y="82" class="t2">탭 id · 끌기 그림 싣기</text>
-      <text x="144" y="100" class="cda">dragstart · dragend</text>
-      <text x="144" y="124" class="cd">TabBar.tsx</text>
-      <text x="144" y="140" class="cd">dragImage.ts (신설)</text>
-      <rect x="396" y="40" width="330" height="126" rx="8" class="box"/>
-      <text x="410" y="62" class="tb">대상 — 모든 창</text>
-      <text x="712" y="62" class="s-new end">7</text>
-      <text x="410" y="82" class="t2">점이 어느 사각형인가 → 가이드 그림</text>
-      <text x="410" y="100" class="cda">dragover(60/s) · dragleave · drop</text>
-      <text x="410" y="124" class="cd">dockDrag.ts · dockPick.ts (pickTarget)</text>
-      <text x="410" y="140" class="cd">DockOverlay.tsx (모두 신설)</text>
-      <rect x="742" y="40" width="242" height="126" rx="8" class="box"/>
-      <text x="756" y="62" class="tb">평소 · 세션 동안</text>
-      <text x="970" y="62" class="s-new end">7</text>
-      <text x="756" y="82" class="t2">크롬 보고 · 떼어진 표시</text>
-      <text x="756" y="100" class="t2">파일 끌어 놓기 막기(늘)</text>
-      <text x="756" y="124" class="cd">dockChromeReport.ts (신설)</text>
-      <text x="756" y="140" class="cd">WindowLayout.tsx</text>
-
-      <rect x="8" y="226" width="992" height="428" rx="12" class="layer"/>
-      <text x="22" y="254" class="tb">셸</text>
-      <text x="22" y="274" class="tm">배치의 권위</text>
-      <text x="22" y="292" class="tm">영역 · 판정 · 적용</text>
-      <text x="22" y="314" class="cd">src-tauri/src/</text>
-      <text x="22" y="328" class="cd">기준</text>
-      <rect x="130" y="242" width="860" height="58" rx="8" class="box"/>
-      <text x="146" y="264" class="tb">실행기 — invoke 껍데기</text>
-      <text x="974" y="264" class="cd end">commands/dock.rs</text>
-      <text x="146" y="286" class="t2">값 읽기(커서 · 창 사각형 · 배율) → 장부에 싣기 → 할 일 실행(emit · 숨기기 · 보이기 · 시한 · set_focus · 적용)</text>
-      <text x="974" y="286" class="s-new end">6c</text>
-
-      <rect x="130" y="316" width="430" height="282" rx="10" class="mod"/>
-      <text x="320" y="340" class="tb"><tspan class="mono">dock</tspan> — 장부 · 영역 · 판정</text>
-      <rect x="146" y="354" width="398" height="72" rx="8" class="box"/>
-      <text x="160" y="376" class="tb">끌기 장부 (순수 · 잎 락 하나)</text>
-      <text x="530" y="376" class="s-new end">6b 신설</text>
-      <text x="160" y="396" class="t2">사건 → 할 일 · 스레드 · 틱 없음</text>
-      <text x="160" y="414" class="cd">dock/book.rs · Book::step</text>
-      <rect x="146" y="434" width="398" height="72" rx="8" class="box"/>
-      <text x="160" y="456" class="tb">영역 · 판정 어댑터</text>
-      <text x="530" y="456" class="s-new end">6a 신설</text>
-      <text x="160" y="476" class="t2">창별 영역 미리 계산 · 놓을 때 다시 고르기</text>
-      <text x="160" y="494" class="cd">dock/regions.rs · regions_for · pick</text>
-      <rect x="146" y="514" width="398" height="76" rx="8" class="box"/>
-      <text x="160" y="536" class="tb">판정 규칙 (순수)</text>
-      <text x="530" y="536" class="s-ok end">완료 (5)</text>
-      <text x="160" y="556" class="t2">점 → 이음새 · 탭바 · 가이드 없음</text>
-      <text x="160" y="576" class="cd">dock/hit.rs · locate · choose_seam · valid_bands</text>
-      <line x1="345" y1="426" x2="345" y2="432" class="ln"/>
-      <line x1="345" y1="506" x2="345" y2="512" class="ln"/>
-
-      <rect x="580" y="316" width="410" height="282" rx="10" class="mod"/>
-      <text x="596" y="340" class="tb"><tspan class="mono">layout</tspan> — 배치의 권위</text>
-      <rect x="596" y="354" width="378" height="72" rx="8" class="box-a"/>
-      <text x="610" y="376" class="tb">적용 서비스 — 변경의 유일한 문</text>
-      <text x="960" y="376" class="s-new end">4 신설</text>
-      <text x="610" y="396" class="t2">잠금 한 번 · 메인이 비면 빈 탭</text>
-      <text x="610" y="414" class="cd">layout/apply.rs · apply::dock_tab</text>
-      <rect x="596" y="434" width="158" height="156" rx="8" class="box"/>
-      <text x="610" y="456" class="tb">모델</text>
-      <text x="742" y="456" class="s-ok end">완료 (2)</text>
-      <text x="610" y="476" class="t2">탭 목록 · 표식 · 묘비</text>
-      <text x="610" y="500" class="cd">layout/manager.rs</text>
-      <text x="610" y="516" class="cd">ViewManager::dock</text>
-      <text x="610" y="532" class="cd">plan_new_window</text>
-      <text x="610" y="548" class="cd">mark_closed</text>
-      <text x="610" y="572" class="cd">refill_main (4)</text>
-      <rect x="764" y="434" width="210" height="74" rx="8" class="box"/>
-      <text x="776" y="456" class="tb">트리 연산</text>
-      <text x="962" y="456" class="s-ok end">완료 (1)</text>
-      <text x="776" y="490" class="cd">layout/dock.rs</text>
-      <text x="776" y="504" class="cd">docked_tree</text>
-      <rect x="764" y="516" width="210" height="74" rx="8" class="box"/>
-      <text x="776" y="538" class="tb">닫히는 창</text>
-      <text x="962" y="538" class="s-prog end">진행 (3)</text>
-      <text x="776" y="562" class="cd">commands/popout.rs</text>
-      <text x="776" y="578" class="cd">close_requested_popup_window</text>
-      <line x1="685" y1="426" x2="685" y2="432" class="ln"/>
-
-      <rect x="130" y="608" width="860" height="36" rx="8" class="box"/>
-      <text x="146" y="631" class="tb">드롭 처리기 끄기 — 모든 런타임 창</text>
-      <text x="420" y="631" class="cd">webview_env.rs · WebviewEnv::finish → disable_drag_drop_handler()</text>
-      <text x="974" y="631" class="s-new end">6c</text>
-
-      <rect x="1006" y="354" width="146" height="150" rx="8" class="next"/>
-      <text x="1020" y="376" class="tb">다음 작업</text>
-      <text x="1020" y="396" class="t2">LLM 명령</text>
-      <text x="1020" y="418" class="cd">tab.dock</text>
-      <text x="1020" y="434" class="cd">layout.get</text>
-      <text x="1020" y="460" class="tm">이번엔 안 만듦</text>
-      <text x="1020" y="478" class="tm">적용 서비스 위에</text>
-      <text x="1020" y="496" class="tm">껍데기만 얹는다</text>
-      <line x1="1006" y1="388" x2="976" y2="388" class="ln-ad" marker-end="url(#m7a)"/>
-
-      <line x1="200" y1="166" x2="200" y2="240" class="ln-a" marker-end="url(#m7a)"/>
-      <text x="208" y="196" class="t2">invoke</text>
-      <text x="208" y="209" class="cd">dock_drag_start</text>
-      <text x="208" y="222" class="cd">dock_drag_end</text>
-      <line x1="420" y1="242" x2="420" y2="168" class="ln" marker-end="url(#m7)"/>
-      <text x="428" y="196" class="t2">emit</text>
-      <text x="428" y="209" class="cd">dock:session</text>
-      <text x="428" y="222" class="cd">dock:regions</text>
-      <line x1="560" y1="166" x2="560" y2="240" class="ln-a" marker-end="url(#m7a)"/>
-      <text x="568" y="196" class="t2">invoke</text>
-      <text x="568" y="209" class="cd">dock_drag_over · dock_drop</text>
-      <text x="568" y="222" class="cd">dock_pull · dock_pointer_seen</text>
-      <line x1="960" y1="166" x2="960" y2="240" class="ln" marker-end="url(#m7)"/>
-      <text x="952" y="196" class="t2 end">invoke</text>
-      <text x="952" y="209" class="cd end">report_dock_chrome</text>
-      <line x1="250" y1="300" x2="250" y2="352" class="ln" marker-end="url(#m7)"/>
-      <text x="258" y="334" class="t2">step</text>
-      <line x1="880" y1="300" x2="880" y2="352" class="ln-a" marker-end="url(#m7a)"/>
-      <text x="888" y="334" class="ta">적용</text>
-
-      <rect x="8" y="668" width="992" height="62" rx="12" class="layer"/>
-      <text x="22" y="704" class="tb">platform</text>
-      <text x="130" y="694" class="t2">새 함수 없음 — 커서 추적 · 맨 위 창 · 끌기 그림 · 버튼 · Esc 는 브라우저 엔진이 한다.</text>
-      <text x="130" y="716" class="tm">셸이 직접 읽는 OS 값은 Tauri API 셋: cursor_position · inner_position / inner_size · scale_factor</text>
-    </svg>
-    </div>
-    <figcaption>청록 화살표 = 배치를 바꾸는 쪽으로 가는 길. 셸 상자의 경로는 <code>src-tauri/src/</code> 기준이고, 단계 번호(1 · 2 · 4 · 5 · 6a–6c · 7)는 TRD 5판 §10 입니다. 결과는 기존 레이아웃 알림(<code>layout:updated</code> · <code>window:tabs-updated</code>)으로만 웹뷰에 돌아갑니다.</figcaption>
-  </figure>
-
-  <ul class="why">
-    <li><b>셸이 여전히 권위다</b>웹뷰는 셸이 보낸 영역으로 가이드를 그릴 뿐입니다. 놓으면 셸이 같은 규칙으로 다시 고르고, 보인 것과 같을 때만 적용 서비스 한 곳에서 바꿉니다.</li>
-    <li><b>OS 코드가 없다</b>끌기 루프 · 커서 · 그림을 웹 표준이 맡아 platform 에 새 함수가 0 입니다. macOS 는 WKWebView 의 창 사이 동작만 이식 때 따로 잽니다.</li>
-    <li><b>앱 없이 시험한다</b>판정 규칙 · 장부 · 영역은 순수 함수라 가짜 시각 · 커서 · 스냅숏으로 단독 시험하고, 웹뷰의 판정 거울은 Rust 와 같은 골든 파일을 먹습니다.</li>
-  </ul>
-
-  <div class="callout next"><b>다음 작업 — LLM 레이아웃 명령</b> 이번 도킹에서는 LLM 명령(<code>tab.dock</code> · <code>layout.get</code>)도 프론트 레지스트리 명령도 만들지 않고, 도킹이 끝나면 바로 다음 작업으로 합니다. 첫 단계는 외부 조사 — LLM 도구 설계 관례(흔한 요청을 1–2 호출로). CLAUDE.md 「LLM-우선 제어」의 <b>의식적 예외</b>이고 사용자 결정입니다(TRD §3 · ADR-D). 적용 서비스 <code>apply::dock_tab</code> 은 4단계에 만들어지므로, 다음 작업은 4단계만 있으면 시작할 수 있습니다.</div>
 
   <div class="sub">
-    <h3>코드 지도 — TRD 5판 §1-1</h3>
-    <div class="codemap tbl"><table>
-      <tr><th>모듈</th><th>파일</th><th>맡는 일</th><th>상태</th></tr>
-      <tr><td>layout · 트리 연산</td><td class="path">src-tauri/src/layout/dock.rs</td><td><code>docked_tree</code> · <code>incoming_rect</code> — 끼운 결과 트리 · 새 면적 0 판정</td><td><span class="badge done">완료</span><span class="note">1단계</span></td></tr>
-      <tr><td>layout · 모델</td><td class="path">src-tauri/src/layout/manager.rs</td><td><code>ViewManager::dock</code> · <code>plan_new_window</code> · <code>lease_tab</code> · <code>mark_closed</code> · <code>succession</code> — 4단계에서 <code>MainLastTab</code> 을 지우고 <code>refill_main</code> 도우미를 <code>close_tab</code> 과 나눔</td><td><span class="badge done">완료</span><span class="note">2단계 · 4단계 고침</span></td></tr>
-      <tr><td>닫히는 창 (M2)</td><td class="path">src-tauri/src/commands/popout.rs<br>src-tauri/src/lib.rs<br>src-tauri/src/daemon_client/connection.rs</td><td><code>close_requested_popup_window</code> · <code>drop_window_in_model</code> · <code>CloseRequested</code> · <code>RequestReplay</code> 갈래(닫히는 창의 늦은 구독 막기)</td><td><span class="badge prog">진행</span><span class="note">3단계 · 미커밋</span></td></tr>
-      <tr><td>layout · 적용 서비스</td><td class="path">src-tauri/src/layout/apply.rs</td><td><code>apply::dock_tab</code> · 창 포트 <code>open_at</code> · <code>move_window</code>(기본 본문 없음)</td><td><span class="badge new">신설 예정</span><span class="note">4단계</span></td></tr>
-      <tr><td>새 창 자리</td><td class="path">src-tauri/src/state/placement.rs</td><td><code>place</code> · <code>land</code> 를 <code>pub(crate)</code> 로</td><td><span class="badge new">수정 예정</span><span class="note">4단계</span></td></tr>
-      <tr><td>dock · 판정 규칙</td><td class="path">src-tauri/src/dock/hit.rs</td><td><code>locate</code> · <code>choose_seam</code> · <code>choose_band</code> · <code>valid_bands</code> · <code>outer_strips</code> · <code>tab_insert_x</code></td><td><span class="badge done">완료</span><span class="note">5단계</span></td></tr>
-      <tr><td>layout · 크롬 측정 타입</td><td class="path">src-tauri/src/layout/chrome.rs</td><td><code>DockChrome</code> · <code>PointCss</code> · <code>RectCss</code> · <code>TabHeader</code></td><td><span class="badge done">완료</span><span class="note">5단계 · 6c 가 창 칸 · 보고</span></td></tr>
-      <tr><td>dock · 영역 · 판정 어댑터</td><td class="path">src-tauri/src/dock/regions.rs<br>src-tauri/src/dock/pick_golden.json</td><td><code>regions_for</code> · <code>pick</code>(= <code>locate</code> + <code>choose_seam</code>) — TS 거울과 같은 골든</td><td><span class="badge new">신설 예정</span><span class="note">6a</span></td></tr>
-      <tr><td>dock · wire 타입</td><td class="path">src-tauri/src/dock/types.rs</td><td><code>DockRegions</code> · <code>OuterBand</code> · <code>SlotRegion</code> · <code>TabBarRegion</code> · <code>Picked</code> — <code>GuideView</code> · <code>TabBarHint</code> 를 대신함</td><td><span class="badge new">바꿈 예정</span><span class="note">6a</span></td></tr>
-      <tr><td>dock · 끌기 장부</td><td class="path">src-tauri/src/dock/book.rs</td><td><code>Book::step</code> — 사건 → 할 일 · 잎 락 하나 · 스레드 · 틱 없음</td><td><span class="badge new">신설 예정</span><span class="note">6b</span></td></tr>
-      <tr><td>dock · 옛 상태 기계</td><td class="path">src-tauri/src/dock/session.rs</td><td><code>Session::step</code> (커서를 8ms 마다 읽던 4판 방식)</td><td><span class="badge gone">지움</span><span class="note">미커밋 · 일부만 6b 로</span></td></tr>
-      <tr><td>실행기 · invoke</td><td class="path">src-tauri/src/commands/dock.rs<br>src-tauri/src/lib.rs</td><td><code>dock_drag_start</code> · <code>dock_drag_over</code> · <code>dock_drop</code> · <code>dock_drag_end</code> · <code>dock_pointer_seen</code> · <code>dock_pull</code> · <code>report_dock_chrome</code> · <code>generate_handler!</code> · <code>Destroyed</code> → 장부</td><td><span class="badge new">신설 예정</span><span class="note">6c</span></td></tr>
-      <tr><td>모델 · 측정 계기</td><td class="path">src-tauri/src/commands/layout.rs</td><td><code>TauriEvents</code> 알림 뒤 · <code>report_window_canvas</code> 뒤 → 영역 다시</td><td><span class="badge new">수정 예정</span><span class="note">6c</span></td></tr>
-      <tr><td>드롭 처리기 끄기</td><td class="path">src-tauri/src/webview_env.rs</td><td><code>WebviewEnv::finish</code> 에 <code>disable_drag_drop_handler()</code> — 모든 런타임 창</td><td><span class="badge new">한 줄 예정</span><span class="note">6c</span></td></tr>
-      <tr><td>프론트 · 출처</td><td class="path">src/components/layout/TabBar.tsx<br>src/components/layout/dragImage.ts</td><td><code>dragstart</code> · <code>dragend</code> · 끌기 그림(제목 띠 + 축소 그림)</td><td><span class="badge new">수정 · 신설 예정</span><span class="note">7단계</span></td></tr>
-      <tr><td>프론트 · 대상</td><td class="path">src/components/layout/dockDrag.ts<br>src/components/layout/dockPick.ts<br>src/components/layout/DockOverlay.tsx</td><td>세션 구독 · <code>pickTarget</code>(골든 거울) · 가이드 · 끝 신호 유실 대비 · Esc 삼키기 · 파일 막기</td><td><span class="badge new">신설 예정</span><span class="note">7단계</span></td></tr>
-      <tr><td>프론트 · 평소</td><td class="path">src/components/layout/dockChromeReport.ts<br>src/components/layout/WindowLayout.tsx</td><td>크롬 보고 · 떼어진 표시</td><td><span class="badge new">신설 · 수정 예정</span><span class="note">7단계</span></td></tr>
-      <tr><td>5판에서 뺀 것</td><td class="path">platform topmost_at · pointer · foreground<br>dock/chip.rs · dock-chip.html</td><td>셸 폴링 · OS 함수 · <code>raw-window-handle</code> 의존 · 딱지 창</td><td><span class="badge gone">뺌</span></td></tr>
-    </table></div>
-    <p class="cd" style="font-family:var(--sans)">완료 · 진행 행의 이름은 저장소에서 확인했고, 예정 행의 경로 · 이름은 TRD 5판 그대로입니다.</p>
+    <h3>그림 읽기</h3>
+    <ol class="walk">
+      <li><b>구역.</b> 출처 창의 탭바 상자(<code>+</code> 와 그 오른쪽 빈 곳까지 든 줄)를 위아래로 15 CSS px 넓힌 사각형입니다(<code>REORDER_SLACK_PX</code> — Chrome 탭 스트립의 떼기 문턱 <code>kVerticalDetachMagnetism = 15</code> 와 같은 값). 지금 탭바가 뷰포트 맨 위라 위쪽 여유에는 닿지 않습니다. 들어올 때와 나갈 때 경계가 같습니다(이력 없음 — PRD D19).</li>
+      <li><b>순서 이동 모드 (왼쪽).</b> 끄는 머리가 커서를 따라 가로로만, 머리들이 차지한 범위 안에서 움직입니다. 끄는 머리 가장자리가 이웃 머리의 <b>가운데</b>를 넘으면 그 이웃이 머리 폭만큼 150ms 에 비켜납니다(Lumino 규칙). 그림에서는 C 의 왼쪽 끝이 B 의 가운데를 넘어 B 가 오른쪽으로 비켰고, 놓으면 A · C · B · D 입니다. 떼어진 모습 · 가이드 · 머묾 전환은 없고, 끌기 그림(Windows 기본)은 그대로 따라옵니다.</li>
+      <li><b>도킹 모드 (오른쪽).</b> 구역을 벗어나는 순간부터 5.6 판 그대로입니다 — 끄는 머리가 접히고 캔버스는 승계 탭(오른쪽 이웃 우선)을 보이며, 다른 창은 가이드를 그립니다. 같은 끌기에서 구역으로 돌아오면 다시 순서 이동입니다(PRD D15).</li>
+      <li><b>누가 정하고 누가 적용하나 (아래 줄).</b> 모드는 출처 웹뷰가 자기 <code>dragover</code> 마다 자기 판정 결과로 정하고 셸에 묻지 않습니다(왕복 없이 60Hz). 놓을 때는 셸 장부가 <code>dragstart</code> 때 잰 탭바(<code>strip</code> — 세션 내내 얼림)로 같은 점을 다시 판정해, 웹뷰가 그린 것과 같은 <code>index</code> 일 때만 적용합니다(놓기 판정 4c). 규칙은 셸 <code>hit.rs</code> 하나이고 웹뷰는 그 거울이라, 보이는 자리가 곧 적용하는 자리입니다.</li>
+    </ol>
+  </div>
+
+  <div class="sub">
+    <h3>설계상 붙은 것 · 받아들인 것</h3>
+    <div class="prose">
+      <p><b>왜 시작 측정을 얼리나.</b> 도킹 모드에서 머리가 접히면 크롬 보고에서 끄는 머리가 빠져 그 폭을 잃고, 비켜나는 모습(transform)이 걸린 머리를 재면 판정이 자기 그림을 따라 흔들리며, 셸의 크롬 보고는 100ms 디바운스라 늦을 수 있습니다(TRD §2-4). 그래서 출처 창의 구역 · 자리는 <code>dragstart</code> 안에서 한 번 잰 값으로만 판정하고, 순서 이동 모습이 서 있는 동안 출처 창은 크롬 보고를 건너뜁니다. 그 한 번도 앞 끌기의 미끄러짐(transform)이 아직 남았으면 그만큼 빼고 재며, 잡은 자리(<code>grab_x</code>)도 같은 배치에서 잽니다 — 모습 · 놓기 · 보고 없는 끝의 커서 판정이 같은 자리를 내도록(TRD §1-4).</p>
+      <p><b>첫 <code>dragover</code> 전은 순서 이동.</b> OS 끌기 루프는 다음 마우스 메시지 전에는 대상 창에 <code>DragEnter</code> 를 내지 않아 그 틈엔 판정할 점이 없습니다. 그래서 첫 판정 전은 <code>dragstart</code> 점(구성상 구역 안)으로 정합니다. 대가 — 문턱 직후 구역 밖으로 빠르게 빼고 멈추면 다음 움직임까지 모습이 순서 이동 그대로입니다. 결과는 커서 자리 그대로이고 모습만 늦습니다(받아들임 · S7 ⑫ 가 잼 · TRD §11-2 #35). 창 밖으로 나간 떠남도 100ms(<code>LEAVE_GRACE_MS</code>) 뒤에야 도킹 모습으로 바꿉니다 — 구역 안 Esc 가 떠남을 먼저 내기 때문입니다.</p>
+      <p><b>탭 하나 팝아웃은 숨기기를 미룬다.</b> 탭바 안에 머무는 동안은 그 창이 보여야 머무는 것이 보입니다. 그래서 시작 때 숨기지 않고, 「출처 창이 그린 보고가 순서 이동이 아님」 · 「출처 창을 떠난 뒤 100ms 동안 끝도 돌아옴도 없음」 · 「다른 창의 보고」 중 처음 것이 서면 그때 숨깁니다(TRD §1-3 「도킹 모드 증거」). 숨기기 · 보이기는 메인 스레드에서 장부의 지금 값으로 맞춰, 끝의 보이기가 늦은 숨기기에 덮이지 않게 합니다.</p>
+      <p><b>받아들인 것.</b> 원래 창 탭바의 머묾 탭 전환이 없어집니다(Q20 에서 따라 나옴 — 커서 밑이 대개 끄는 머리라 성립하지 않음 · 예외 둘 = 탭바 끝에 닿아 머리가 멈춘 때 · 앞 끌기의 미끄러짐이나 놓음 모습이 남은 채 누른 머리 · TRD §11-1b ②). 그때도 머묾은 걸리지 않습니다. 그 둘째 경우 끄는 머리는 그 끌기 내내 남아 있던 이동만큼 커서와 어긋나 따라갑니다(탭바 끝에 닿기 전까지 · TRD §1-4 「탭바 재기 <code>strip</code>」). 순서 이동도 이번 LLM 명령 예외에 듭니다(PRD D22) — 같은 <code>apply::dock_tab</code> 을 쓰므로 다음 작업의 명령이 그 위에 얹으면 됩니다.</p>
+    </div>
   </div>
 </section>
 
 <!-- ============================== 04 ============================== -->
 <section id="s4">
-  <div class="eyebrow"><span class="num">04</span><span>왜 바꿨나</span></div>
+  <div class="eyebrow"><span class="num">04</span><span>탭바 넘침 · Q22 · TRD 5.8</span></div>
+  <h2>탭바는 스크롤하지 않는다 — 폭은 Chrome 규칙, 남는 탭은 통째로 숨긴다</h2>
+
+  <figure class="fig">
+    <div class="scroll">
+    <svg class="d w900" viewBox="0 0 1160 516" role="img" aria-label="탭바 넘침 다섯 단계. 넉넉하면 모든 탭이 표준 폭 160. 모자라면 모두 같은 폭으로 42 까지. 더 모자라면 활성은 42, 비활성만 32 쪽으로. 넘치면 끝의 탭부터 통째로 숨기고 새 탭 버튼은 보이는 마지막 탭 바로 뒤. 활성 탭이 끝 너머면 숨은 채인 것은 Chrome 과 같은 한계">
+      <text x="40" y="26"><tspan class="tb">넉넉함</tspan><tspan class="t2"> — 모두 표준 폭 S 160 · 이름 길이와 무관 (긴 이름은 머리 안에서 말줄임)</tspan></text>
+      <rect x="40" y="36" width="1026" height="28" class="bar2"/>
+      <rect x="40" y="38" width="159" height="24" rx="3" class="tab"/><text x="50" y="55" class="t2">작업</text><text x="190" y="55" class="tm end">×</text>
+      <rect x="200" y="38" width="159" height="24" rx="3" class="tab-on"/><text x="210" y="55" class="t2">리뷰</text><text x="350" y="55" class="tm end">×</text>
+      <rect x="360" y="38" width="159" height="24" rx="3" class="tab"/><text x="370" y="55" class="t2">빌드 로그</text><text x="510" y="55" class="tm end">×</text>
+      <rect x="520" y="38" width="159" height="24" rx="3" class="tab"/><text x="530" y="55" class="t2">검토</text><text x="670" y="55" class="tm end">×</text>
+      <rect x="680" y="38" width="159" height="24" rx="3" class="tab"/><text x="690" y="55" class="t2">메모</text><text x="830" y="55" class="tm end">×</text>
+      <rect x="840" y="38" width="159" height="24" rx="3" class="tab"/><text x="850" y="55" class="t2">테스트</text><text x="990" y="55" class="tm end">×</text>
+      <rect x="1002" y="40" width="22" height="20" rx="3" class="tab"/><text x="1013" y="55" class="t2 mid">+</text>
+      <text x="1066" y="80" class="tm end">머리 몫 1000 px · 탭 6 → 남는 40 px 는 + 뒤 빈 곳</text>
+
+      <text x="40" y="106"><tspan class="tb">모자람 (단계 A)</tspan><tspan class="t2"> — 모두 같은 폭으로 A 42 ~ S 160 사이 · 나눠 떨어지지 않는 px 는 왼쪽부터 1 px 씩</tspan></text>
+      <rect x="40" y="116" width="646" height="28" class="bar2"/>
+      <rect x="40" y="118" width="103" height="24" rx="3" class="tab"/><text x="50" y="135" class="t2">작업</text><text x="136" y="135" class="tm end">×</text>
+      <rect x="144" y="118" width="103" height="24" rx="3" class="tab-on"/><text x="154" y="135" class="t2">리뷰</text><text x="240" y="135" class="tm end">×</text>
+      <rect x="248" y="118" width="102" height="24" rx="3" class="tab"/><text x="258" y="135" class="t2">빌드 로그</text><text x="343" y="135" class="tm end">×</text>
+      <rect x="351" y="118" width="102" height="24" rx="3" class="tab"/><text x="361" y="135" class="t2">검토</text><text x="446" y="135" class="tm end">×</text>
+      <rect x="454" y="118" width="102" height="24" rx="3" class="tab"/><text x="464" y="135" class="t2">메모</text><text x="549" y="135" class="tm end">×</text>
+      <rect x="557" y="118" width="102" height="24" rx="3" class="tab"/><text x="567" y="135" class="t2">테스트</text><text x="652" y="135" class="tm end">×</text>
+      <rect x="662" y="120" width="22" height="20" rx="3" class="tab"/><text x="673" y="135" class="t2 mid">+</text>
+      <text x="710" y="135" class="tm">머리 몫 620 px → 104 · 104 · 103 · 103 · 103 · 103</text>
+
+      <line x1="20" y1="162" x2="1140" y2="162" class="sep"/>
+      <text x="40" y="184" class="tm">아래 셋은 머리 몫 220 px 인 탭바를 2 배로 키워 그림 — 수는 TRD §4-5 의 식으로 낸 예시 계산</text>
+
+      <text x="40" y="210"><tspan class="tb">더 모자람 (단계 B)</tspan><tspan class="t2"> — 활성은 A 42 에 서고 비활성만 I 32 쪽으로 · 닫기 × 는 폭이 A 이상인 머리에만</tspan></text>
+      <rect x="40" y="220" width="492" height="56" class="bar2"/>
+      <rect x="40" y="224" width="70" height="48" rx="4" class="tab"/><text x="50" y="253" class="t2">작업</text>
+      <rect x="112" y="224" width="82" height="48" rx="4" class="tab-on"/><text x="122" y="253" class="t2">리뷰</text><text x="188" y="253" class="tm end">×</text>
+      <rect x="196" y="224" width="70" height="48" rx="4" class="tab"/><text x="206" y="253" class="t2">빌드</text>
+      <rect x="268" y="224" width="70" height="48" rx="4" class="tab"/><text x="278" y="253" class="t2">검토</text>
+      <rect x="340" y="224" width="68" height="48" rx="4" class="tab"/><text x="350" y="253" class="t2">메모</text>
+      <rect x="410" y="224" width="68" height="48" rx="4" class="tab"/><text x="420" y="253" class="t2">테스</text>
+      <rect x="484" y="230" width="44" height="36" rx="4" class="tab"/><text x="506" y="253" class="t2 mid">+</text>
+      <text x="560" y="238" class="t2">탭 6 · 활성 = 둘째</text>
+      <text x="560" y="256" class="cd">36 · 42 · 36 · 36 · 35 · 35</text>
+      <text x="560" y="272" class="tm">남는 3 px 는 비활성만 받는다 (Chrome TabAcceptsExtraSpace)</text>
+
+      <text x="40" y="306"><tspan class="tb">넘침</tspan><tspan class="t2"> — 끝의 머리부터 통째로 숨김 · + 는 보이는 마지막 머리 바로 뒤에 늘 보임</tspan></text>
+      <rect x="40" y="316" width="492" height="56" class="bar2"/>
+      <rect x="40" y="320" width="62" height="48" rx="4" class="tab"/><text x="50" y="349" class="t2">작업</text>
+      <rect x="104" y="320" width="82" height="48" rx="4" class="tab-on"/><text x="114" y="349" class="t2">리뷰</text><text x="180" y="349" class="tm end">×</text>
+      <rect x="188" y="320" width="62" height="48" rx="4" class="tab"/><text x="198" y="349" class="t2">빌드</text>
+      <rect x="252" y="320" width="62" height="48" rx="4" class="tab"/><text x="262" y="349" class="t2">검토</text>
+      <rect x="316" y="320" width="62" height="48" rx="4" class="tab"/><text x="326" y="349" class="t2">메모</text>
+      <rect x="380" y="320" width="62" height="48" rx="4" class="tab"/><text x="390" y="349" class="t2">테스</text>
+      <line x1="444" y1="314" x2="444" y2="374" class="thr"/>
+      <rect x="448" y="326" width="44" height="36" rx="4" class="tab"/><text x="470" y="349" class="t2 mid">+</text>
+      <text x="444" y="390" class="tm mid">c — 숨긴 머리 셋이 여기 폭 0 으로 선다</text>
+      <text x="560" y="334" class="cd">탭 9 → 32 · 42 · 32 · 32 · 32 · 32 · 숨김 3</text>
+      <text x="560" y="352" class="tm">측정 · strip 은 숨긴 머리도 싣는다 → 셸 규칙 · 골든 무변경</text>
+      <text x="560" y="368" class="tm">끼울 자리 막대 · 끄는 머리는 보이는 끝 c 안에 머문다</text>
+
+      <text x="40" y="420"><tspan class="s-risk">알려진 한계</tspan><tspan class="t2"> — 활성 탭이 끝 너머면 숨은 채 (Chrome 과 같음 · 받아들임 · 나중에 고칠 수 있음)</tspan></text>
+      <rect x="40" y="430" width="492" height="56" class="bar2"/>
+      <rect x="40" y="434" width="62" height="48" rx="4" class="tab"/>
+      <rect x="104" y="434" width="62" height="48" rx="4" class="tab"/>
+      <rect x="168" y="434" width="62" height="48" rx="4" class="tab"/>
+      <rect x="232" y="434" width="62" height="48" rx="4" class="tab"/>
+      <rect x="296" y="434" width="62" height="48" rx="4" class="tab"/>
+      <rect x="360" y="434" width="62" height="48" rx="4" class="tab"/>
+      <rect x="428" y="440" width="44" height="36" rx="4" class="tab"/><text x="450" y="463" class="t2 mid">+</text>
+      <rect x="548" y="434" width="104" height="48" rx="4" class="ghost"/>
+      <text x="600" y="455" class="t2 mid">여덟째</text>
+      <text x="600" y="472" class="s-risk mid">활성 · 안 보임</text>
+      <text x="668" y="446" class="tm">① 다른 창 탭바 끝에 끼운 탭</text>
+      <text x="668" y="462" class="tm">② + 로 맨 끝에 더한 탭</text>
+      <text x="668" y="478" class="tm">③ 끝 너머 활성을 보이는 자리로 당기는 장치 없음 — 셋 다 활성인데 안 보인다</text>
+      <text x="40" y="508" class="tm">탭바는 스크롤하지 않는다 — scrollLeft ≡ 0. wire 의 scroll 칸은 남고 늘 0 을 싣는다(커밋된 셸 코드 · 골든 무변경).</text>
+    </svg>
+    </div>
+    <figcaption>위 두 줄은 실제 크기, 아래 셋은 좁은 탭바를 2 배로 그렸습니다. 회색 탭 = 비활성, 테두리 진한 탭 = 활성, 점선 = 화면에 없는 탭. 탭 폭 수치는 예시 입력(머리 몫 · 탭 수 · 활성 자리)에 TRD §4-5 의 식을 그대로 돌린 값입니다.</figcaption>
+  </figure>
+
+  <div class="sub">
+    <h3>그림 읽기</h3>
+    <ol class="walk">
+      <li><b>넉넉하면</b> 모든 머리가 같은 표준 폭 <code>S</code> 160 입니다. 이름이 짧아도 같은 폭이고(PRD D23), 긴 이름은 머리 안에서 말줄임입니다.</li>
+      <li><b>모자라면(단계 A)</b> 모든 머리가 같은 폭으로 활성 최소 폭 <code>A</code> 42 까지 고르게 줄어듭니다. 나눠 떨어지지 않는 px 는 왼쪽 머리부터 1 px 씩 받습니다.</li>
+      <li><b>더 모자라면(단계 B)</b> 활성은 <code>A</code> 42 에 서고 비활성만 비활성 최소 폭 <code>I</code> 32 쪽으로 줄어듭니다. 닫기 버튼(×)은 폭이 <code>A</code> 이상인 머리에만 보이므로 활성은 늘 닫을 수 있고, 좁아진 비활성의 버튼은 CSS 로 감춥니다(DOM 에는 남습니다).</li>
+      <li><b>그래도 안 들어가면</b> 끝의 머리부터 통째로 숨깁니다 — 일부만 잘려 보이는 머리가 없고, 탭 목록 · 넘침 메뉴도 없습니다. <code>+</code> 는 고정 크기라 짓눌리지 않고 보이는 마지막 머리 바로 뒤에 늘 보이며, 누르면 지금처럼 맨 끝에 더해 활성으로 만듭니다.</li>
+      <li><b>알려진 한계.</b> 넘친 탭바에서 다른 창에서 끝에 끼운 탭과 <code>+</code> 로 더한 탭은 활성인데 끝 너머라 보이지 않고, 끝 너머의 활성 탭을 보이는 자리로 당기는 장치는 없습니다. Chrome 도 같습니다(사용자 지시 「안되는건 안되는걸로 넘어가고」 · TRD §11-2 #40).</li>
+    </ol>
+  </div>
+
+  <div class="sub">
+    <h3>어느 층에 놓였나</h3>
+    <div class="prose">
+      <p><b>계산은 웹뷰의 순수 함수 하나다.</b> 폭 · 숨김은 <code>tabStripLayout(available, n, activeIndex)</code>(<code>src/components/layout/tabStripLayout.ts</code> — 9c 신설)가 냅니다. 상수는 <code>S</code> 160 · <code>A</code> 42 · <code>I</code> 32 CSS px 이고(TRD §1-3 상수 표 — 값은 우리 척도로 옮긴 메인 판단, 규칙은 Chromium 소스 그대로), 우리가 따로 고안한 규칙은 없습니다. 탭바 줄은 스크롤 상자가 아니라 머리들 → <code>+</code> → 빈 곳 순으로 놓입니다.</p>
+      <p><b>셸의 도킹 동작은 바뀌지 않는다(9c 의 Rust 는 주석만).</b> 크롬 보고와 <code>strip</code> 은 숨긴 머리까지 DOM 순서대로 재고, 숨긴 머리는 보이는 마지막 머리의 오른 끝 <code>c</code> 에 선 폭 0 입니다. 그래서 9a 가 커밋한 탭바 · 순서 이동 규칙(<code>hit.rs</code>)과 골든이 그대로 서고, 끼울 자리 막대와 끄는 머리는 보이는 끝 안에 머뭅니다. 5.7 리뷰가 들였던 넘친 탭바 스크롤 설계(엔진 자동 스크롤 · 끝 띠 · 스크롤 사건마다 다시 판정)는 탭바가 밀리지 않으므로 걷었고, wire 의 <code>scroll</code> 칸과 「내용 x = 뷰포트 x + <code>scrollLeft</code>」 식만 늘 0 인 채 남았습니다 — 커밋된 셸 코드 · 골든을 다시 만지지 않으려는 것이고 동작 차이는 없습니다(TRD §7 #64).</p>
+      <p><b>검증은 화면에서.</b> jsdom 에는 레이아웃이 없어 배치는 vitest 로 단언할 수 없습니다. 폭 함수는 vitest 로, 실제 폭 · 숨김 · <code>+</code> · 닫기 버튼은 화면 QA(AC29 — <code>A</code> 42 가 닫기 버튼 실폭과 맞는지 포함)로 봅니다.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== 05 ============================== -->
+<section id="s5">
+  <div class="eyebrow"><span class="num">05</span><span>끝 신호 · 커서 판정</span></div>
+  <h2>끄는 동안 셸은 바꾸지 않고, 끝에서 한 번 다시 고른다</h2>
+  <p class="say">끝 신호는 셋입니다 — 우리 창 위에서 뗀 <b>drop</b>, 창 밖 · Esc · 멈춘 채 뗀 <b>dragend(none)</b>, 신호를 잃었을 때의 끝 뒤 <b>pointermove</b>. 5.7 판이 여기에 엔진이 곧바로 접은 끌기와 보고 없이 끝난 끌기를 따로 다룹니다.</p>
+
+  <figure class="fig">
+    <div class="scroll">
+    <svg class="d w900" viewBox="0 0 1160 704" role="img" aria-label="순서도: dragstart 에 출처 웹뷰가 탭바를 재고 셸이 표식과 창별 영역을 보낸다. 대상 웹뷰가 dragover 로 가이드를 그리고 보인 것이 바뀔 때만 알린다. 끝은 drop, dragend none, 엔진 취소, 신호 유실의 네 줄이고, 마무리로 적용 알림 뒤 Ended 를 낸다">
+      <defs>
+        <marker id="Qa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah-a"/></marker>
+        <marker id="Qn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah"/></marker>
+      </defs>
+      <rect x="10" y="82" width="1140" height="190" rx="8" class="panel"/>
+      <rect x="10" y="278" width="1140" height="100" rx="8" class="panel"/>
+      <rect x="10" y="384" width="1140" height="244" rx="8" class="panel"/>
+      <rect x="10" y="634" width="1140" height="62" rx="8" class="panel"/>
+      <text x="18" y="102" class="ta">① 시작</text>
+      <text x="18" y="298" class="ta">② 끄는 중</text>
+      <text x="18" y="404" class="ta">③ 끝</text>
+      <text x="18" y="654" class="ta">④ 마무리</text>
+
+      <rect x="85" y="12" width="210" height="60" rx="8" class="box"/>
+      <text x="190" y="36" class="tb mid">출처 웹뷰</text>
+      <text x="190" y="56" class="cd mid">TabBar.tsx · dockDrag.ts</text>
+      <rect x="345" y="12" width="210" height="60" rx="8" class="box2"/>
+      <text x="450" y="36" class="tb mid">브라우저 엔진</text>
+      <text x="450" y="56" class="cd mid">OS 끌기 루프</text>
+      <rect x="605" y="12" width="210" height="60" rx="8" class="box"/>
+      <text x="710" y="36" class="tb mid">대상 웹뷰 (모든 창)</text>
+      <text x="710" y="56" class="cd mid">dockDrag · DockOverlay</text>
+      <rect x="880" y="12" width="240" height="60" rx="8" class="box-a"/>
+      <text x="1000" y="32" class="tb mid">셸</text>
+      <text x="1000" y="50" class="cd mid">commands/dock.rs → book.rs</text>
+      <text x="1000" y="64" class="cd mid">→ apply::dock_tab</text>
+      <line x1="190" y1="72" x2="190" y2="696" class="life"/>
+      <line x1="450" y1="72" x2="450" y2="696" class="life"/>
+      <line x1="710" y1="72" x2="710" y2="696" class="life"/>
+      <line x1="1000" y1="72" x2="1000" y2="696" class="life"/>
+      <rect x="444" y="92" width="12" height="526" rx="3" class="act"/>
+
+      <line x1="442" y1="108" x2="194" y2="108" class="ln" marker-end="url(#Qn)"/>
+      <text x="320" y="102" class="cda mid">dragstart</text>
+      <rect x="92" y="116" width="196" height="54" rx="6" class="box"/>
+      <text x="190" y="134" class="t2 mid">우리 MIME · 끌기 그림</text>
+      <text x="190" y="150" class="t2 mid">시작 시각 기록 · strip 재기</text>
+      <text x="190" y="164" class="tm mid">셸 열기는 setTimeout 0 뒤</text>
+      <line x1="190" y1="186" x2="996" y2="186" class="ln-a" marker-end="url(#Qa)"/>
+      <text x="593" y="180" class="cda mid">invoke dock_drag_start{drag_id, view_id, hotspot, strip}</text>
+      <rect x="870" y="194" width="260" height="52" rx="6" class="box"/>
+      <text x="1000" y="211" class="t2 mid">표식 · 창별 영역 (+ 출처 reorder)</text>
+      <text x="1000" y="226" class="tm mid">탭 하나 팝아웃 숨기기는 증거까지 미룸</text>
+      <text x="1000" y="240" class="cd mid">lease_tab · regions_for</text>
+      <line x1="996" y1="262" x2="714" y2="262" class="ln" marker-end="url(#Qn)"/>
+      <text x="855" y="257" class="cda mid">emit dock:session · dock:regions</text>
+
+      <line x1="458" y1="300" x2="706" y2="300" class="ln" marker-end="url(#Qn)"/>
+      <text x="581" y="294" class="cda mid">dragover ×60/s</text>
+      <rect x="612" y="308" width="196" height="44" rx="6" class="box"/>
+      <text x="710" y="326" class="t2 mid">pick → 모드 → 가이드</text>
+      <text x="710" y="342" class="tm mid">모드는 출처 창만</text>
+      <line x1="710" y1="366" x2="996" y2="366" class="ln" marker-end="url(#Qn)"/>
+      <text x="853" y="360" class="cda mid">dock_drag_over (바뀔 때만)</text>
+      <rect x="880" y="290" width="240" height="46" rx="6" class="box"/>
+      <text x="1000" y="309" class="s-ok mid">아무것도 바꾸지 않음</text>
+      <text x="1000" y="326" class="tm mid">메인 스레드 비어 있음 · 출력 계속</text>
+
+      <text x="18" y="424" class="tm">A 우리 창</text>
+      <text x="18" y="438" class="tm">위에서 뗌</text>
+      <line x1="458" y1="414" x2="706" y2="414" class="ln" marker-end="url(#Qn)"/>
+      <text x="581" y="408" class="cda mid">drop</text>
+      <line x1="710" y1="432" x2="996" y2="432" class="ln-a" marker-end="url(#Qa)"/>
+      <text x="853" y="426" class="cda mid">dock_drop{그린 판정}</text>
+      <rect x="880" y="438" width="240" height="36" rx="6" class="box-a"/>
+      <text x="1000" y="454" class="t2 mid">같은 판정이면 적용</text>
+      <text x="1000" y="468" class="tm mid">다르면 무변경 (R13c)</text>
+
+      <text x="18" y="494" class="tm">B 창 밖 · Esc</text>
+      <text x="18" y="508" class="tm">멈춘 채 뗌</text>
+      <line x1="442" y1="490" x2="194" y2="490" class="ln" marker-end="url(#Qn)"/>
+      <text x="320" y="484" class="cda mid">dragend (none)</text>
+      <line x1="190" y1="514" x2="996" y2="514" class="ln-a" marker-end="url(#Qa)"/>
+      <text x="593" y="508" class="cda mid">dock_drag_end{effect: none, last}</text>
+      <rect x="880" y="520" width="240" height="36" rx="6" class="box-a"/>
+      <text x="1000" y="536" class="t2 mid">「마지막 점에 놓기」</text>
+      <text x="1000" y="550" class="tm mid">→ 다음 그림</text>
+
+      <text x="18" y="574" class="tm">C 엔진이</text>
+      <text x="18" y="588" class="tm">곧바로 접음</text>
+      <line x1="442" y1="570" x2="194" y2="570" class="ln" marker-end="url(#Qn)"/>
+      <text x="320" y="564" class="cda mid">dragend (none) · 15ms 안</text>
+      <line x1="190" y1="590" x2="996" y2="590" class="ln" marker-end="url(#Qn)"/>
+      <text x="593" y="584" class="cda mid">dock_drag_end{canceled: true}</text>
+      <text x="1008" y="594" class="s-prog">무변경</text>
+
+      <text x="18" y="616" class="tm">D 신호 유실</text>
+      <line x1="710" y1="612" x2="996" y2="612" class="ln-d" marker-end="url(#Qn)"/>
+      <text x="853" y="606" class="cda mid">pointermove → dock_pointer_seen</text>
+      <text x="1008" y="616" class="tm">300ms 뒤 마지막 보고로</text>
+
+      <line x1="996" y1="656" x2="194" y2="656" class="ln" marker-end="url(#Qn)"/>
+      <text x="593" y="650" class="cda mid">window:tabs-updated → dock:session Ended</text>
+      <text x="593" y="680" class="tm mid">숨긴 출처 되보이기(메인 스레드 맞추기) · 대상 창 set_focus · 표식 내리기 · 떼어진 모습 · 가이드 지움</text>
+    </svg>
+    </div>
+    <figcaption>세로 점선 = 참여자, 가로 화살표 = 실제 DOM 사건 · invoke · emit(청록 = 셸로 들어가 놓기를 정하는 것). 청록 칠한 셸 상자만 배치가 바뀔 수 있는 곳이고, 끄는 동안(②)에는 셸이 아무것도 바꾸지 않습니다.</figcaption>
+  </figure>
+
+  <div class="sub">
+    <h3>그림 읽기</h3>
+    <ol class="walk">
+      <li><b>① 시작.</b> 엔진이 <code>dragstart</code> 를 내면 출처 탭바가 우리 MIME · 끌기 그림을 싣고 탭바를 잽니다(<code>strip</code> — 읽기만; 여기서 DOM 을 바꾸면 Chromium 이 끌기를 끝냅니다). 셸 세션은 그 사건 처리가 끝난 뒤(<code>setTimeout 0</code>) 시작이 취소되지 않았을 때만 엽니다 — 에이전트 트리(react-arborist)가 window 에 단 끌기 리스너가 시작을 취소할 수 있어서입니다. 셸은 표식을 세우고 창마다 영역을 보냅니다.</li>
+      <li><b>② 끄는 중.</b> 대상 창마다 <code>dragover</code> 를 받아 영역 위에서 판정하고 가이드를 그립니다. 셸에는 보인 것이 바뀔 때만 알리고, 셸은 이때 배치를 바꾸지 않습니다(예외 하나 — 다른 창 탭 머리 위 0.5초 머묾 = 사람 클릭과 같은 탭 전환).</li>
+      <li><b>③ 끝 — 네 줄.</b> A: 우리 창 위에서 떼면 그 창의 <code>drop</code> 이 그린 판정을 싣고 오고, 셸이 같은 규칙으로 다시 고릅니다. B: 창 밖 · Esc · 멈춘 채 뗀 끝은 출처의 <code>dragend(none)</code> 하나로 오고 셸이 「마지막 점에 놓기」를 돕니다(다음 그림). C: 엔진이 곧바로 접은 끌기는 <code>canceled</code> 로 와 무변경입니다. D: 끝 신호를 잃으면 끝 뒤 첫 <code>pointermove</code> 가 알리고, 300ms 안에 끝 신호가 안 오면 마지막 보고로 판정합니다.</li>
+      <li><b>④ 마무리.</b> 적용 알림(<code>window:tabs-updated</code>) 뒤에 <code>Ended</code> 를 내고, 숨긴 출처를 되보이고 대상 창에 포커스를 주며 표식을 내립니다. 웹뷰는 <code>Ended</code> 에서 가이드 · 머묾 · 떼어진 표시를 무조건 지웁니다.</li>
+    </ol>
+  </div>
+
+  <figure class="fig">
+    <h3 style="margin-bottom:10px">「마지막 점에 놓기」 — 출처 dragend(none) 를 받은 셸 장부</h3>
+    <div class="scroll">
+    <svg class="d w900" viewBox="0 0 1160 556" role="img" aria-label="출처 dragend none 이 오면 셸 장부는 먼저 canceled, blocked, 오는 중인 Over 를 거르고, W 를 고른 뒤 네 갈래로 나눈다. W 안이면 놓기 판정, W 사각형이 없으면 무변경 또는 새 창, W 없이 커서가 출처 안이면 커서 판정, 그 밖은 새 창. 커서 판정은 끝 순간 커서를 그 창 점으로 옮겨 판정해 순서 이동, 그 자리 적용, 새 창 중 하나로 끝낸다">
+      <defs>
+        <marker id="Ta" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah-a"/></marker>
+        <marker id="Tn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah"/></marker>
+      </defs>
+      <rect x="330" y="12" width="500" height="52" rx="8" class="box"/>
+      <text x="580" y="34" class="tb mid">출처 dragend(none) — 「마지막 점에 놓기」</text>
+      <text x="580" y="54" class="tm mid">실행기: now 먼저 → 커서 · 창 사각형 · 배율 (락 밖)</text>
+      <line x1="580" y1="64" x2="580" y2="175" class="ln" marker-end="url(#Tn)"/>
+      <text x="570" y="118" class="tm end">먼저 거르는 셋</text>
+      <line x1="580" y1="86" x2="636" y2="86" class="ln" marker-end="url(#Tn)"/>
+      <text x="644" y="90" class="t2">canceled — dragstart 처리기 시작 뒤 15ms 안 → 무변경</text>
+      <line x1="580" y1="114" x2="636" y2="114" class="ln" marker-end="url(#Tn)"/>
+      <text x="644" y="118" class="t2">blocked — 끄는 중 출처 배치가 바뀜 → 무변경</text>
+      <line x1="580" y1="142" x2="636" y2="142" class="ln" marker-end="url(#Tn)"/>
+      <text x="644" y="146" class="t2">출처는 떠났는데 다른 창 Over 가 오는 중 → 최대 50ms 붙든 뒤 계속</text>
+
+      <rect x="330" y="178" width="500" height="54" rx="8" class="box"/>
+      <text x="580" y="200" class="tb mid">W 고르기</text>
+      <text x="580" y="220" class="tm mid">W = 마지막으로 Over 를 보낸 우리 창(도착 순번) · W 가 출처면 그 보고 = 끝이 실은 last</text>
+      <path d="M580,232 V250 M155,250 H1015" class="ln"/>
+      <line x1="155" y1="250" x2="155" y2="265" class="ln" marker-end="url(#Tn)"/>
+      <line x1="445" y1="250" x2="445" y2="265" class="ln" marker-end="url(#Tn)"/>
+      <line x1="735" y1="250" x2="735" y2="265" class="ln" marker-end="url(#Tn)"/>
+      <line x1="1015" y1="250" x2="1015" y2="265" class="ln" marker-end="url(#Tn)"/>
+
+      <rect x="20" y="268" width="270" height="54" rx="8" class="box"/>
+      <text x="155" y="290" class="tb mid">W 있음 · 커서가 W 안</text>
+      <text x="155" y="310" class="tm mid">뗀 순간 커서가 W 사각형 안</text>
+      <rect x="310" y="268" width="270" height="54" rx="8" class="box"/>
+      <text x="445" y="290" class="tb mid">W 있음 · 사각형 없음</text>
+      <text x="445" y="310" class="tm mid">소멸 · 숨김 · 최소화 · 못 읽음</text>
+      <rect x="600" y="268" width="270" height="54" rx="8" class="box"/>
+      <text x="735" y="290" class="tb mid">W 없음 · 커서가 출처 안</text>
+      <text x="735" y="310" class="tm mid">멈춘 채 떼기 · 짧은 톡 (5.7)</text>
+      <rect x="890" y="268" width="250" height="54" rx="8" class="box"/>
+      <text x="1015" y="290" class="tb mid">그 밖</text>
+      <text x="1015" y="310" class="tm mid">W 를 떠남 · 커서가 W · 출처 밖</text>
+
+      <line x1="155" y1="322" x2="155" y2="343" class="ln" marker-end="url(#Tn)"/>
+      <line x1="445" y1="322" x2="445" y2="343" class="ln" marker-end="url(#Tn)"/>
+      <line x1="1015" y1="322" x2="1015" y2="343" class="ln" marker-end="url(#Tn)"/>
+      <rect x="20" y="346" width="270" height="60" rx="8" class="box2"/>
+      <text x="155" y="366" class="t2 mid">놓기 판정 (W, 그 보고)</text>
+      <text x="155" y="384" class="tm mid">같으면 적용 · 다르면 무변경</text>
+      <text x="155" y="399" class="tm mid">빈 보고면 ↓ 커서 판정</text>
+      <rect x="310" y="346" width="270" height="60" rx="8" class="box2"/>
+      <text x="445" y="366" class="t2 mid">가이드를 보였으면 무변경</text>
+      <text x="445" y="384" class="tm mid">대상이 사라짐 (Q18)</text>
+      <text x="445" y="399" class="tm mid">가이드 없음이었으면 새 창</text>
+      <rect x="890" y="346" width="250" height="60" rx="8" class="box2"/>
+      <text x="1015" y="370" class="t2 mid">커서 자리에 새 창 (R22)</text>
+      <text x="1015" y="390" class="tm mid">그 자리엔 보인 가이드가 없다</text>
+
+      <line x1="155" y1="406" x2="155" y2="435" class="ln-a" marker-end="url(#Ta)"/>
+      <line x1="735" y1="322" x2="735" y2="435" class="ln-a" marker-end="url(#Ta)"/>
+      <rect x="20" y="438" width="850" height="108" rx="10" class="box-a"/>
+      <text x="36" y="460" class="tb">커서 판정 (5.7 · 사용자 결정 Q21)</text>
+      <text x="36" y="482" class="t2">끝 순간 커서 → 그 창 뷰포트 점 → pick(그 창의 지금 영역) → 캔버스 거름 · 판정할 창 = W, 없으면 원래 창</text>
+      <rect x="36" y="494" width="260" height="42" rx="6" class="box"/>
+      <text x="166" y="512" class="t2 mid">Reorder{i} — 구역 안</text>
+      <text x="166" y="528" class="tm mid">→ 순서 이동 적용</text>
+      <rect x="312" y="494" width="280" height="42" rx="6" class="box"/>
+      <text x="452" y="512" class="t2 mid">이음새 · 끼울 자리</text>
+      <text x="452" y="528" class="tm mid">→ 그 자리에 적용 (Q21)</text>
+      <rect x="608" y="494" width="246" height="42" rx="6" class="box"/>
+      <text x="731" y="512" class="t2 mid">가이드 없음 (칸 가운데 등)</text>
+      <text x="731" y="528" class="tm mid">→ 새 창 (R22)</text>
+      <rect x="890" y="438" width="250" height="108" rx="10" class="box2"/>
+      <text x="904" y="460" class="tb">판정할 창을 둘로 (D21)</text>
+      <text x="904" y="480" class="tm">셸은 커서 밑 맨 위 창을 모른다</text>
+      <text x="904" y="498" class="tm">다른 앱이 덮은 자리를</text>
+      <text x="904" y="514" class="tm">우리 창 위로 오판하지 않게</text>
+      <text x="904" y="532" class="tm">W · 원래 창만 맨 위의 증거가 있다</text>
+    </svg>
+    </div>
+    <figcaption>청록 화살표 = 커서 판정으로 들어가는 길. 회색 상자 = 판정 결과. 「W」는 그 끌기를 마지막으로 본 우리 창이고, 「빈 보고」는 영역을 받기 전(<code>rev</code> 0)이거나 그 창의 지금 영역이 없던 보고 — 웹뷰가 아무것도 그리지 못했다는 뜻입니다.</figcaption>
+  </figure>
+
+  <div class="sub">
+    <h3>그림 읽기</h3>
+    <ol class="walk">
+      <li><b>먼저 거르는 셋.</b> 엔진이 접은 끌기(<code>canceled</code>)와 끄는 중 출처 배치가 바뀐 끌기(<code>blocked</code>)는 판정 없이 무변경입니다. 출처는 끝 전에 떠났다고 말하는데 다른 창의 <code>Over</code> 가 아직 오는 중이면 최대 50ms(<code>OVER_WAIT_MS</code>) 붙든 뒤 계속합니다 — 두 웹뷰의 invoke 는 도착 순서가 보장되지 않아, 사용자가 본 다른 창 가이드를 놓치지 않으려는 것입니다.</li>
+      <li><b>W 고르기.</b> W 는 마지막으로 <code>Over</code> 를 보낸 우리 창입니다. W 가 출처이고 출처 끝이 <code>last</code>(마지막으로 그린 판정)를 실었으면, 셸이 받은 마지막 <code>Over</code> 대신 그것을 씁니다(아래 오른쪽 그림).</li>
+      <li><b>네 갈래.</b> 커서가 W 안이면 W 의 보고로 놓기 판정을 하고, W 의 사각형이 사라졌으면 가이드를 보였던 경우만 무변경입니다. 어느 창도 보고하지 않았는데 커서가 출처 창 안이면 커서 판정, 그 밖은 커서 자리에 새 창입니다.</li>
+      <li><b>커서 판정 (Q21).</b> 끝 순간 커서를 그 창의 뷰포트 점으로 옮겨 그 창의 지금 영역으로 판정하고, 그 결과를 그대로 적용합니다 — 구역 안이면 순서 이동, 이음새 · 끼울 자리면 그 자리, 가이드 없음이면 새 창. 사용자가 준 근거는 「창 안으로 옮겨 온 것 자체가 마우스 움직임이라 뗀 순간 커서가 있는 곳이 목적지」입니다. 단 그린 보고가 있는데 판정이 다르면 여전히 무변경입니다(R13c — 범위는 보고 없는 끝 · 빈 보고뿐).</li>
+    </ol>
+    <div class="prose">
+      <p><b>왜 보고 없는 끝이 생기나.</b> OS 끌기 루프는 다음 마우스 메시지 전에는 대상 창에 <code>DragEnter</code> 를 내지 않습니다(해석 — 실측에서 추정). 그래서 문턱만 넘고 멈춘 채 떼면 어느 창도 보고하지 못합니다. 7 단계 뒤 실측에서 같은 창 12/12 · 짧은 톡 4–9/10 이 그렇게 새 창이 됐고, 영역 전에 낸 보고(<code>rev</code> 0)로 판정돼 무변경이 된 끌기도 있었습니다(이웃 창 6/20). 둘을 「빈 보고」로 묶어 이 판정이 닫습니다. 캔버스 거름은 그 창이 보이던 탭이 영역의 탭과 다르면 이음새를 가이드 없음으로 치는 것으로, 화면에 한 번도 안 보인 탭의 칸에 붙지 않게 합니다.</p>
+    </div>
+  </div>
+
+  <div class="grid2">
+    <figure class="fig">
+      <svg class="d" viewBox="0 0 540 250" role="img" aria-label="엔진 취소 시간축: 0ms 는 dragstart 처리기가 시작한 때(사건 시각이 아니다), 엔진이 접은 끌기의 dragend 는 2 에서 4ms, 문턱 ENGINE_CANCEL_MS 15ms, 가장 짧은 실제 끌기 끝은 28ms">
+        <text x="20" y="24" class="tb">엔진 취소 — 처리기 시작에서 잰 시각 차로 가른다</text>
+        <rect x="40" y="112" width="180" height="16" class="bar-a"/>
+        <line x1="40" y1="120" x2="520" y2="120" class="axis"/>
+        <line x1="160" y1="115" x2="160" y2="125" class="tick"/>
+        <line x1="280" y1="115" x2="280" y2="125" class="tick"/>
+        <line x1="400" y1="115" x2="400" y2="125" class="tick"/>
+        <line x1="520" y1="115" x2="520" y2="125" class="tick"/>
+        <text x="40" y="142" class="tm mid">0</text>
+        <text x="160" y="142" class="tm mid">10</text>
+        <text x="280" y="142" class="tm mid">20</text>
+        <text x="400" y="142" class="tm mid">30</text>
+        <text x="514" y="142" class="tm end">40 ms</text>
+        <rect x="64" y="112" width="24" height="16" class="prog"/>
+        <circle cx="40" cy="120" r="5" class="ev"/>
+        <text x="34" y="100" class="t2">dragstart 처리기 시작</text>
+        <line x1="76" y1="82" x2="76" y2="110" class="tick"/>
+        <text x="70" y="74" class="tm">엔진이 접은 끌기의 dragend(none) 2–4 ms</text>
+        <line x1="220" y1="90" x2="220" y2="166" class="thr"/>
+        <text x="226" y="164" class="cda">ENGINE_CANCEL_MS 15</text>
+        <circle cx="376" cy="120" r="5" class="ev-g"/>
+        <text x="376" y="102" class="tm mid">가장 짧은 실제 끌기 끝 +28 ms</text>
+        <text x="20" y="196" class="t2">이 안의 none 끝 = canceled → 무변경 (세션 전이면 IPC 0)</text>
+        <text x="20" y="220" class="tm">옛 판정(setTimeout 0 보다 먼저 온 끝)은 4/19 를 놓쳤다</text>
+        <text x="20" y="238" class="tm">— task 순서는 보장되지 않아 시한 뒤에 와 새 창이 됐다</text>
+      </svg>
+      <figcaption>엔진이 시작하자마자 접은 끌기는 사용자가 아무것도 보지 못한 끌기입니다. 출처 웹뷰가 <code>dragstart</code> 처리기가 시작한 시각(<code>performance.now()</code>)에서 <code>dragend</code> 사건 시각(<code>timeStamp</code>)까지의 차이로 가르고, 세션이 이미 열렸으면 <code>canceled</code> 를 실어 장부가 무변경으로 끝냅니다. 15ms 는 실측 2–4ms 와 가장 짧은 실제 끌기 끝 28ms 사이의 값이고, S7 ⑦ 에서 다시 잽니다. 두 수는 다른 틀입니다 — 2–4ms 는 웹뷰가 본 차이고 28ms 는 셸에 끝이 닿은 때라, 그림은 둘을 한 축에 어림으로 놓았습니다(TRD §1-4 「엔진 취소」). <code>dragstart</code> 의 사건 시각은 쓰지 않습니다 — Chromium 은 <code>dragstart</code> 를 누른 사건으로 내 그 시각이 누른 때라, 사람 손의 누름 → 문턱 이동(수십–수백 ms · 어림)이 15ms 창을 덮어 버립니다.</figcaption>
+    </figure>
+
+    <figure class="fig">
+      <svg class="d" viewBox="0 0 540 250" role="img" aria-label="끝 스냅숏: 출처 웹뷰가 자리 1, 자리 2 를 그리고 Esc 를 누르면, 셸에는 Over 1, dragend, Over 2 순서로 닿는다. 셸은 받은 마지막 Over 인 자리 1 대신 dragend 가 실은 last 인 자리 2 로 판정한다">
+        <defs>
+          <marker id="Ua" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah-a"/></marker>
+          <marker id="Um" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah-m"/></marker>
+          <marker id="Un" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah"/></marker>
+        </defs>
+        <text x="20" y="24" class="tb">끝 스냅숏 last — 그린 자리로 끝낸다</text>
+        <text x="20" y="64" class="t2">출처 웹뷰</text>
+        <text x="20" y="174" class="t2">셸</text>
+        <line x1="110" y1="60" x2="520" y2="60" class="ln-f"/>
+        <line x1="110" y1="170" x2="520" y2="170" class="ln-f"/>
+        <circle cx="160" cy="60" r="4" class="ev"/><text x="160" y="48" class="tm mid">자리 1 그림</text>
+        <circle cx="300" cy="60" r="4" class="ev"/><text x="300" y="48" class="tm mid">자리 2 그림</text>
+        <circle cx="400" cy="60" r="4" class="ev"/><text x="400" y="48" class="ta mid">Esc</text>
+        <line x1="160" y1="64" x2="198" y2="164" class="ln" marker-end="url(#Un)"/>
+        <line x1="400" y1="64" x2="418" y2="164" class="ln-a" marker-end="url(#Ua)"/>
+        <line x1="300" y1="64" x2="478" y2="164" class="ln-d" marker-end="url(#Um)"/>
+        <text x="200" y="188" class="cd mid">① Over 1</text>
+        <text x="410" y="188" class="cda mid">② dragend{last}</text>
+        <text x="482" y="204" class="cd mid">③ Over 2</text>
+        <text x="20" y="228" class="t2">셸은 받은 마지막 Over(자리 1) 대신 last(자리 2)로 판정</text>
+        <text x="20" y="244" class="tm">보고 줄과 끝 invoke 는 따로라 도착 순서가 보장되지 않는다</text>
+      </svg>
+      <figcaption>출처 창이 끝에 아직 위였으면 <code>dragend</code> 가 그 창이 마지막으로 <b>그린</b> 판정(<code>last</code>)을 스스로 싣습니다. 자리를 바꾼 직후의 Esc 처럼 보고와 끝 신호의 도착이 뒤바뀌어도 사용자가 본 자리로 끝납니다. 놓기(<code>dock_drop</code>)의 칸들도 같은 「그린 판정」 하나에서 옵니다. <code>last</code> 는 W 를 고르지 않고, 이미 고른 W 가 출처일 때 그 보고를 대신할 뿐입니다.</figcaption>
+    </figure>
+  </div>
+
+  <details>
+    <summary>자세히 — 끝나는 경우 전부 · Esc 를 따로 가르지 않는 이유</summary>
+    <div class="body">
+      <div class="tbl"><table>
+        <tr><th>상황</th><th>들어오는 사건</th><th>결과</th></tr>
+        <tr><td>우리 창 위에서 손을 뗌</td><td><code>drop</code> (대상) → <code>dragend</code> move (출처)</td><td>그린 판정으로 셸이 다시 고름 → 같으면 붙임 · 다르면 무변경 · 둘 다 가이드 없음 = 새 창</td></tr>
+        <tr><td><code>dragend</code> move 가 <code>drop</code> 보다 먼저 옴</td><td><code>dragend</code> move</td><td>500ms 동안 <code>drop</code> 을 기다림 → 지나면 마지막 점에 놓기</td></tr>
+        <tr><td>창 밖 · 바탕화면 · 다른 앱 위에서 뗌</td><td><code>dragend</code> none</td><td>마지막 점에 놓기 → 보통 커서 자리에 새 창</td></tr>
+        <tr><td>Esc (어디서든)</td><td>대상 <code>dragleave</code> → 출처 <code>dragend</code> none{<code>last</code>}</td><td>마지막 점에 놓기 — 출처 위면 <code>last</code> 로, 다른 창 가이드 위면 그 창 보고로</td></tr>
+        <tr><td>멈춘 채 뗌 · 짧은 톡</td><td><code>dragend</code> none · 어느 창도 <code>Over</code> 없음</td><td>커서 판정 → 커서 자리 그대로 적용(Q21)</td></tr>
+        <tr><td>엔진이 곧바로 접은 끌기</td><td><code>dragend</code> none · <code>dragstart</code> 처리기 시작 뒤 15ms 안</td><td><code>canceled</code> → 무변경 (세션 전이면 IPC 0)</td></tr>
+        <tr><td>끝 신호 유실</td><td>끝 뒤 첫 <code>pointermove</code> · <code>pointerdown</code></td><td>300ms 뒤 마지막 보고로 판정 · 커서가 그 뒤 움직였으므로 사각형 검사 없음</td></tr>
+        <tr><td>끄는 중 출처 배치가 바뀜</td><td>—</td><td>무변경 (새 창도 만들지 않음)</td></tr>
+        <tr><td>출처 창이 부서짐 · 출처 탭이 사라짐</td><td><code>Destroyed</code> · 스냅숏</td><td>그냥 끝 (변경 없음)</td></tr>
+      </table></div>
+      <ul>
+        <li><b>Esc 와 떼기를 키 상태로 가르지 않습니다.</b> 우리 창 위에서 버튼으로 떼면 그 창의 <code>drop</code> 이 처리하므로, <code>none</code> 끝이 우리 창 위를 가리키면 그것은 Esc(또는 시스템 취소)입니다. Esc 와 떼기는 같은 「그 자리에 놓기」라 가를 것이 없고, 남는 질문 「지금 커서가 어느 우리 창의 보인 가이드 위인가」를 마지막 보고 + 셸 커서의 창 사각형 검사가 답합니다.</li>
+        <li>끄는 동안 웹뷰에는 포인터 사건이 오지 않습니다(끌기가 대신함). 그래서 세션 중 어느 창이든 <code>pointermove</code> 를 보면 끌기는 이미 끝난 것이고, 이것이 유실 대비 신호입니다.</li>
+        <li>끄는 탭은 커스텀 형식 <code>application/x-engram-tab</code> 하나만 싣습니다 — 다른 앱이 받지 않아 그 앱에 아무것도 들어가지 않습니다. Esc 키는 세션 동안 + 200ms 삼켜 터미널 · 입력창에 들어가지 않게 합니다.</li>
+      </ul>
+    </div>
+  </details>
+</section>
+
+<!-- ============================== 06 ============================== -->
+<section id="s6">
+  <div class="eyebrow"><span class="num">06</span><span>안전장치</span></div>
+  <h2>어긋남을 막는 네 장치 — 둘은 웹뷰와 장부 사이, 둘은 layout 모델에</h2>
+  <p class="say">끌기 · 창 닫기 · 출력이 동시에 일어날 수 있는 경로입니다. 넷이 「탭이 두 곳에 있거나 어디에도 없는」 상태, 「사용자가 못 본 결과」, 「끝나지 않는 끌기」를 막습니다. ① ② 는 웹뷰와 셸 장부 사이의 약속이고, ③ ④ 는 <code>layout</code> 모델 쪽 — 레이아웃 락 한 번 안 — 에 있습니다.</p>
+
+  <div class="grid2">
+    <figure class="fig">
+      <h3>① 보인 것과 같을 때만 붙는다</h3>
+      <svg class="d" viewBox="0 0 540 236" role="img" aria-label="대상 웹뷰는 셸이 보낸 영역으로 가이드를 그리기만 하고, 놓은 점을 받은 셸이 다시 골라 보인 것과 같고 영역이 최신일 때만 적용한다">
+        <defs>
+          <marker id="m9" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah"/></marker>
+          <marker id="m9a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah-a"/></marker>
+        </defs>
+        <rect x="20" y="30" width="200" height="140" rx="8" class="box2"/>
+        <text x="36" y="54" class="tb">대상 웹뷰</text>
+        <text x="36" y="74" class="t2">가이드 = 그림만</text>
+        <rect x="36" y="86" width="168" height="44" class="slot"/>
+        <rect x="148" y="86" width="56" height="44" class="hot"/>
+        <text x="36" y="146" class="cd">dockPick.ts</text>
+        <text x="36" y="160" class="cd">DockOverlay.tsx</text>
+        <rect x="320" y="30" width="200" height="140" rx="8" class="box-a"/>
+        <text x="336" y="54" class="tb">셸</text>
+        <text x="336" y="76" class="t2">놓은 점을 다시 고름</text>
+        <text x="336" y="96" class="t2">같음 + 최신 영역 → 적용</text>
+        <text x="336" y="132" class="cd">dock/regions.rs · pick</text>
+        <text x="336" y="148" class="cd">apply::dock_tab</text>
+        <line x1="318" y1="62" x2="224" y2="62" class="ln" marker-end="url(#m9)"/>
+        <text x="270" y="54" class="t2 mid">영역 · rev</text>
+        <line x1="222" y1="140" x2="316" y2="140" class="ln-a" marker-end="url(#m9a)"/>
+        <text x="270" y="132" class="ta mid">점 · 보인 것</text>
+        <text x="20" y="200" class="t2">다르면 무변경 — 사용자가 못 본 이음새 · 탭바에 붙지 않는다.</text>
+        <text x="20" y="222" class="tm">보고가 비었으면(멈춘 채 뗌) 셸이 뗀 순간 커서로 판정해 적용 (Q21).</text>
+      </svg>
+      <figcaption>웹뷰의 판정 거울(<code>pickTarget</code>)은 Rust <code>pick</code> 과 같은 골든 파일(<code>pick_golden.json</code>)을 먹습니다. 둘이 갈라져도 결과는 「무변경」이지 엉뚱한 도킹이 아닙니다. 끄는 중 출처 배치가 바뀌면 아예 받지 않습니다(커서 「안 됨」). 보인 것 · 지금 판정이 둘 다 「가이드 없음」이면 새 창이고, 어느 창도 그리지 못한 「빈 보고」만 예외로 커서 판정을 그대로 적용합니다(5절).</figcaption>
+    </figure>
+
+    <figure class="fig">
+      <h3>② 끌기는 반드시 끝난다</h3>
+      <svg class="d" viewBox="0 0 540 236" role="img" aria-label="우리 창에서 뗌, 창 밖이나 Esc, 끝 신호 유실 모두 그 점에 놓기로 이어진다. 출처 탭이 사라진 경우만 그냥 끝">
+        <defs>
+          <marker id="m10" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah"/></marker>
+        </defs>
+        <rect x="20" y="16" width="180" height="40" rx="6" class="box"/>
+        <text x="110" y="34" class="t2 mid">우리 창에서 뗌</text>
+        <text x="110" y="49" class="cd mid">drop</text>
+        <rect x="20" y="64" width="180" height="40" rx="6" class="box"/>
+        <text x="110" y="82" class="t2 mid">창 밖 · Esc · 시스템 취소</text>
+        <text x="110" y="97" class="cd mid">dragend none</text>
+        <rect x="20" y="112" width="180" height="40" rx="6" class="box"/>
+        <text x="110" y="130" class="t2 mid">끝 신호 유실</text>
+        <text x="110" y="145" class="cd mid">pointermove → 300ms</text>
+        <line x1="200" y1="36" x2="236" y2="72" class="ln" marker-end="url(#m10)"/>
+        <line x1="200" y1="84" x2="236" y2="84" class="ln" marker-end="url(#m10)"/>
+        <line x1="200" y1="132" x2="236" y2="96" class="ln" marker-end="url(#m10)"/>
+        <rect x="240" y="56" width="140" height="56" rx="8" class="box-a"/>
+        <text x="310" y="80" class="tb mid">그 점에 놓기</text>
+        <text x="310" y="99" class="tm mid">(유실이면 마지막 점)</text>
+        <line x1="380" y1="84" x2="412" y2="84" class="ln" marker-end="url(#m10)"/>
+        <rect x="416" y="48" width="104" height="72" rx="8" class="ok"/>
+        <text x="468" y="72" class="tb mid">붙이거나</text>
+        <text x="468" y="90" class="tb mid">새 창</text>
+        <text x="468" y="110" class="tm mid">(다르면 무변경)</text>
+        <rect x="20" y="172" width="240" height="40" rx="6" class="box2"/>
+        <text x="140" y="197" class="t2 mid">출처 탭 · 출처 창이 사라짐</text>
+        <line x1="260" y1="192" x2="296" y2="192" class="ln" marker-end="url(#m10)"/>
+        <rect x="300" y="172" width="220" height="40" rx="6" class="box"/>
+        <text x="410" y="197" class="t2 mid">그냥 끝 — 변경 없음</text>
+      </svg>
+      <figcaption>「원래 창으로 되돌리기」 동작은 없습니다. 다만 ①의 「다르면 무변경」으로 끝나면 결과적으로 탭이 원래 창에 다시 보입니다 — 결정 #8 로 그대로 두기로 확정했습니다. 엔진이 곧바로 접은 끌기(15ms 안)만 판정 없이 무변경입니다(5.7). <code>dragend</code> 는 실측에서 모든 경우에 왔습니다.</figcaption>
+    </figure>
+
+    <figure class="fig">
+      <h3>③ 닫히는 창에 탭을 넣지 않는다</h3>
+      <svg class="d" viewBox="0 0 540 226" role="img" aria-label="사용자가 팝아웃 X를 누르는 순간 모델에서 그 창을 빼고 묘비를 단다. 그 뒤 그 창으로의 확정은 창 없음으로 무변경">
+        <defs>
+          <marker id="m11" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah"/></marker>
+        </defs>
+        <path d="M110,40 L110,32 L470,32 L470,40" class="bk"/>
+        <text x="290" y="24" class="tm mid">예전엔 이 사이 동안 모델에 창이 남아 있었다</text>
+        <text x="16" y="76" class="tb">사용자</text>
+        <line x1="80" y1="72" x2="520" y2="72" class="ln-f"/>
+        <circle cx="110" cy="72" r="7" class="ev"/>
+        <text x="110" y="58" class="t2 mid">X 클릭</text>
+        <circle cx="470" cy="72" r="7" class="ev-g"/>
+        <text x="470" y="58" class="tm mid">OS 창 소멸</text>
+        <rect x="124" y="86" width="226" height="44" rx="8" class="box-a"/>
+        <text x="237" y="104" class="tb mid">즉시 모델에서 뺌 + 묘비</text>
+        <text x="237" y="121" class="cd mid">close_requested_popup_window</text>
+        <line x1="110" y1="79" x2="124" y2="96" class="ln"/>
+        <text x="16" y="166" class="tb">확정</text>
+        <line x1="80" y1="162" x2="520" y2="162" class="ln-f"/>
+        <circle cx="400" cy="162" r="7" class="ev"/>
+        <text x="400" y="148" class="t2 mid">그 창으로 놓기 확정</text>
+        <text x="400" y="186" class="s-risk mid">✗ 창 없음 · 무변경</text>
+        <line x1="80" y1="212" x2="520" y2="212" class="ln" marker-end="url(#m11)"/>
+        <text x="512" y="206" class="tm end">시간</text>
+      </svg>
+      <figcaption>팝아웃의 닫기 요청은 되돌려지지 않음을 소스로 확인했기에 요청 순간 모델에서 지웁니다(3단계 · <code>src-tauri/src/commands/popout.rs</code>). 기존 팝아웃 이동(<code>slot.popout</code>)의 같은 틈도 닫혔고, 닫히는 웹뷰의 늦은 출력 구독도 막습니다. 결정 #2 (확정).</figcaption>
+    </figure>
+
+    <figure class="fig">
+      <h3>④ 메인은 늘 탭이 하나 이상</h3>
+      <svg class="d" viewBox="0 0 540 226" role="img" aria-label="메인의 마지막 탭을 끄는 동안 메인은 빈 화면이고, 다른 창으로 놓으면 같은 연산 안에서 메인에 빈 탭 View 1 이 생긴다">
+        <defs>
+          <marker id="m12a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah-a"/></marker>
+        </defs>
+        <text x="20" y="22" class="tm">끄는 동안 — 메인은 빈 화면</text>
+        <rect x="20" y="30" width="200" height="130" rx="4" class="win"/>
+        <rect x="21" y="31" width="198" height="18" class="bar"/>
+        <text x="28" y="45" class="tm">메인</text>
+        <rect x="21" y="49" width="198" height="22" class="bar2"/>
+        <rect x="23" y="74" width="194" height="83" class="slot-empty"/>
+        <text x="120" y="120" class="tm mid">탭바 · 캔버스 비어 보임</text>
+        <line x1="226" y1="95" x2="314" y2="95" class="ln-a" marker-end="url(#m12a)"/>
+        <text x="270" y="86" class="ta mid">다른 창에</text>
+        <text x="270" y="112" class="ta mid">놓으면</text>
+        <text x="320" y="22" class="tm">놓은 뒤 — 같은 연산 안에서</text>
+        <rect x="320" y="30" width="200" height="130" rx="4" class="win"/>
+        <rect x="321" y="31" width="198" height="18" class="bar"/>
+        <text x="328" y="45" class="tm">메인</text>
+        <rect x="321" y="49" width="198" height="22" class="bar2"/>
+        <rect x="324" y="52" width="56" height="18" rx="3" class="tab-new"/>
+        <text x="352" y="65" class="tm mid">View 1</text>
+        <rect x="323" y="74" width="194" height="83" class="slot-empty"/>
+        <text x="420" y="120" class="tm mid">빈 탭 (자동)</text>
+        <text x="20" y="192" class="t2">메인 탭 ≥ 1 규칙(ADR-0057 ④)은 지키고, 끌기는 막지 않는다.</text>
+        <text x="20" y="212" class="cd">layout/manager.rs · refill_main (4단계 — close_tab 과 나눠 씀)</text>
+      </svg>
+      <figcaption>옛 설계는 메인의 마지막 탭을 아예 끌지 못하게 막았습니다(<code>MainLastTab</code> — 4단계에서 지움). 빈 탭은 탭 닫기와 같은 도우미가 만들고, 잠금 한 번 안이라 아무도 빈 메인을 보지 않습니다. 같은 창 안에 놓으면 빈 탭이 생기지 않습니다.</figcaption>
+    </figure>
+  </div>
+
+  <p class="say"><b>그림 읽기</b> — ① 웹뷰는 셸이 보낸 영역(번호 <code>rev</code> 가 달림)으로 가이드를 그리기만 하고, 놓은 점과 보인 것을 셸에 돌려보냅니다. 셸은 같은 규칙으로 다시 골라 보인 것과 같고 영역이 최신일 때만 적용합니다. ② 끝나는 길이 몇 갈래든 모두 「그 점에 놓기」로 모이고, 출처가 사라진 경우만 그냥 끝납니다. ③ 팝아웃 X 를 누르는 순간 모델에서 그 창을 빼고 묘비를 달아, 그 뒤 그 창으로의 확정은 「창 없음」으로 무변경입니다. ④ 메인의 마지막 탭이 떠나면 같은 연산 안에서 빈 탭이 생겨, 아무도 빈 메인을 보지 않습니다.</p>
+
+  <details>
+    <summary>자세히 — 각 장치의 근거와 한계</summary>
+    <div class="body">
+      <ul>
+        <li><b>한 세션에 적용은 많아야 한 번</b> — 판정과 「적용 중」 표시가 장부 잠금 한 번 안이라, 그 뒤 오는 놓기 · 끝 신호는 늦은 신호로 버립니다. 모르는 세션 id 의 신호도 버립니다.</li>
+        <li><b>표식</b>(<code>lease_tab</code>)은 끌기 시작 때 서고, 놓기는 그 표식을 싣고 갑니다. 지난 끌기의 늦은 놓기는 <code>StaleLease</code> 로 무변경입니다.</li>
+        <li><b>닫히는 창</b> 장치의 전제 = 「팝아웃 닫기는 막을 수 없다」. 누가 프론트에 닫기 요청 리스너를 달면 이 전제가 무너지므로, 점검 명령 두 줄을 QA 게이트로 매번 돌립니다(<code>rg -i "close.?requested" src/</code> → 0줄 · <code>rg "prevent[_]close" src-tauri/src/</code> → 1줄).</li>
+        <li><b>드롭 처리기 점검</b>(6단계부터) — <code>rg "disable_drag_drop_handler" src-tauri/src/</code> → 1줄(<code>webview_env.rs</code>) · 끈 처리기의 사건을 기대하는 코드 0줄.</li>
+        <li><b>저장</b>: 기록기는 같은 잠금 안에서 배치를 통째로 복사해 쓰므로 저장 파일에는 도킹 전 아니면 도킹 뒤만 실립니다 — 다시 켜도 탭은 정확히 한 곳에 있습니다. 끄는 동안 저장되는 것은 0.5초 머물러 바꾼 탭 전환 하나뿐입니다.</li>
+      </ul>
+    </div>
+  </details>
+</section>
+
+<!-- ============================== 07 ============================== -->
+<section id="s7">
+  <div class="eyebrow"><span class="num">07</span><span>왜 바꿨나 · TRD 5판 (2026-10-16)</span></div>
   <h2>셸이 끌기를 몰던 설계에서, 브라우저에 맡기는 설계로</h2>
 
   <figure class="fig">
@@ -1191,702 +1733,137 @@
   </ul>
 
   <details>
-    <summary>자세히 — 피어 · 스파이크 수치</summary>
+    <summary>자세히 — 피어 · 근거 문서</summary>
     <div class="body">
       <ul>
         <li><b>VS Code</b>(Electron)가 편집기 탭을 다른 창 · 새 창으로 떼는 방식이 HTML5 끌어 놓기입니다. 창 밖에 놓았는지는 「어느 창도 마지막에 dragover 를 보지 못했다」로 가르고, 호스트에 커서 위치를 물어 새 창을 엽니다(소스 확인).</li>
         <li>dockview 의 Tauri 데모도 같은 방식이고 모든 창에서 Tauri 드롭 핸들러를 끕니다(리눅스에서만 실측된 데모).</li>
-        <li><b>스파이크</b>(tauri 2.11.3 · WebView2 Edg/155 · RDP 세션 · 배율 1.25 · 끌기 22회): 메인 스레드 지연 p99 1.2 · 최대 4.1ms(평소 최대 1.4) · 셸 → 웹뷰 이벤트 도착 p99 11 · 최대 33ms · invoke 왕복 p50 2.2 · 최대 약 50ms · 대상 dragover 움직일 때 60/s · 멈춤 약 15/s · 좌표 오차 1px 이하 · 커스텀 데이터 12/12 · dragend 는 모든 경우에 옴 · 끄는 중 원본 창을 숨겨도 계속(2회).</li>
-        <li>어느 웹뷰도 아닌 자리(창 사이 틈 · 바탕화면)에서는 JS 사건이 없습니다. 그 자리는 끝 신호 때 셸이 커서(Tauri <code>cursor_position</code>)를 읽어 판정합니다 — 메인 스레드가 비어 있어서 가능하고, OS 별 코드는 없습니다.</li>
-        <li><b>또 버린 대안 — 움직일 때마다 셸에 판정을 묻기</b>: invoke 왕복 p99 약 16ms · 최대 약 50ms(실측)라 60Hz 가이드가 눈에 띄게 늦습니다. 그래서 셸이 영역을 미리 보내고 웹뷰가 거울 규칙으로 고릅니다(TRD ADR-C ⑥).</li>
         <li>근거 문서: <code>docs/research/slot-docking-drag-mechanism-2026-10-16.md</code> (적대 리뷰 대신 실측으로 판정 — 확신도 라벨은 그 문서에).</li>
       </ul>
     </div>
   </details>
 </section>
 
-<!-- ============================== 05 ============================== -->
-<section id="s5">
-  <div class="eyebrow"><span class="num">05</span><span>끌기 한 번의 흐름</span></div>
-  <h2>끝 신호는 셋 — drop · dragend · 끝 뒤 pointermove</h2>
-
-  <figure class="fig">
-    <div class="scroll">
-    <svg class="d w900" viewBox="0 0 1160 760" role="img" aria-label="순서도: dragstart 에 셸이 표식을 세우고 창별 영역을 보낸다. 대상 웹뷰가 dragover 로 가이드를 그리고 보인 것이 바뀔 때만 알린다. 우리 창에서 떼면 drop 으로, 창 밖·Esc 면 dragend none 으로, 신호를 잃으면 pointermove 로 셸이 마지막 점에 놓는다">
-      <defs>
-        <marker id="m8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah"/></marker>
-        <marker id="m8a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah-a"/></marker>
-      </defs>
-      <rect x="10" y="84" width="1140" height="186" rx="8" class="panel"/>
-      <rect x="10" y="276" width="1140" height="100" rx="8" class="panel"/>
-      <rect x="10" y="382" width="1140" height="270" rx="8" class="panel"/>
-      <rect x="10" y="658" width="1140" height="94" rx="8" class="panel"/>
-      <text x="18" y="104" class="ta">① 시작</text>
-      <text x="18" y="296" class="ta">② 끄는 중</text>
-      <text x="18" y="402" class="ta">③ 놓기</text>
-      <text x="18" y="678" class="ta">④ 끝</text>
-
-      <rect x="85" y="12" width="230" height="62" rx="8" class="box"/>
-      <text x="200" y="34" class="tb mid">출처 웹뷰</text>
-      <text x="200" y="52" class="cd mid">TabBar.tsx</text>
-      <text x="200" y="66" class="cd mid">dragImage.ts (7 신설)</text>
-      <rect x="345" y="12" width="230" height="62" rx="8" class="box"/>
-      <text x="460" y="34" class="tb mid">브라우저 프로세스</text>
-      <text x="460" y="52" class="cd mid">msedgewebview2</text>
-      <text x="460" y="66" class="cd mid">OS 끌기 루프</text>
-      <rect x="605" y="12" width="230" height="62" rx="8" class="box"/>
-      <text x="720" y="34" class="tb mid">대상 웹뷰 (모든 창)</text>
-      <text x="720" y="52" class="cd mid">dockDrag.ts · dockPick.ts</text>
-      <text x="720" y="66" class="cd mid">DockOverlay.tsx (7 신설)</text>
-      <rect x="875" y="12" width="230" height="62" rx="8" class="box-a"/>
-      <text x="990" y="34" class="tb mid">셸</text>
-      <text x="990" y="52" class="cd mid">commands/dock.rs → dock/book.rs</text>
-      <text x="990" y="66" class="cd mid">→ apply::dock_tab</text>
-      <line x1="200" y1="74" x2="200" y2="752" class="life"/>
-      <line x1="460" y1="74" x2="460" y2="752" class="life"/>
-      <line x1="720" y1="74" x2="720" y2="752" class="life"/>
-      <line x1="990" y1="74" x2="990" y2="752" class="life"/>
-      <rect x="454" y="96" width="12" height="440" rx="3" class="act"/>
-
-      <line x1="452" y1="112" x2="204" y2="112" class="ln" marker-end="url(#m8)"/>
-      <text x="330" y="106" class="cda mid">dragstart</text>
-      <rect x="95" y="122" width="210" height="46" rx="6" class="box"/>
-      <text x="200" y="141" class="t2 mid">우리 MIME · 끌기 그림</text>
-      <text x="200" y="158" class="cd mid">setData · setDragImage</text>
-      <line x1="200" y1="186" x2="984" y2="186" class="ln-a" marker-end="url(#m8a)"/>
-      <text x="595" y="180" class="cda mid">invoke dock_drag_start{drag_id, view_id, hotspot}</text>
-      <rect x="868" y="194" width="244" height="56" rx="6" class="box"/>
-      <text x="990" y="212" class="t2 mid">표식 · 창별 영역 계산</text>
-      <text x="990" y="228" class="cd mid">lease_tab · regions_for</text>
-      <text x="990" y="244" class="tm mid">탭 하나 팝아웃이면 hide()</text>
-      <line x1="984" y1="266" x2="726" y2="266" class="ln" marker-end="url(#m8)"/>
-      <text x="855" y="261" class="cda mid">emit dock:session · dock:regions</text>
-
-      <line x1="468" y1="300" x2="714" y2="300" class="ln" marker-end="url(#m8)"/>
-      <text x="590" y="294" class="cda mid">dragover ×60/s</text>
-      <rect x="610" y="308" width="220" height="40" rx="6" class="box"/>
-      <text x="720" y="325" class="t2 mid">pickTarget → 가이드 그림</text>
-      <text x="720" y="341" class="tm mid">셸 왕복 없음</text>
-      <line x1="720" y1="364" x2="984" y2="364" class="ln" marker-end="url(#m8)"/>
-      <text x="855" y="358" class="cda mid">dock_drag_over (바뀔 때만)</text>
-      <rect x="880" y="290" width="220" height="50" rx="6" class="box"/>
-      <text x="990" y="310" class="s-ok mid">메인 스레드 비어 있음</text>
-      <text x="990" y="330" class="tm mid">에이전트 출력 계속 흐름</text>
-
-      <text x="18" y="424" class="tm">A. 우리 창</text>
-      <text x="18" y="440" class="tm">위에서 뗌</text>
-      <line x1="468" y1="420" x2="714" y2="420" class="ln" marker-end="url(#m8)"/>
-      <text x="590" y="414" class="cda mid">drop</text>
-      <line x1="720" y1="446" x2="984" y2="446" class="ln-a" marker-end="url(#m8a)"/>
-      <text x="855" y="440" class="cda mid">dock_drop{rev, shown, point}</text>
-      <rect x="860" y="454" width="260" height="58" rx="6" class="box-a"/>
-      <text x="990" y="472" class="t2 mid">pick 다시 → 보인 것과 같으면 적용</text>
-      <text x="990" y="488" class="tm mid">다르면 무변경 · 가이드 없음 = 새 창</text>
-      <text x="990" y="504" class="cd mid">regions::pick → apply::dock_tab</text>
-
-      <text x="18" y="530" class="tm">B. 창 밖 · Esc</text>
-      <text x="18" y="546" class="tm">· 시스템 취소</text>
-      <line x1="452" y1="526" x2="204" y2="526" class="ln" marker-end="url(#m8)"/>
-      <text x="330" y="520" class="cda mid">dragend (none)</text>
-      <line x1="200" y1="552" x2="984" y2="552" class="ln-a" marker-end="url(#m8a)"/>
-      <text x="595" y="546" class="cda mid">dock_drag_end{effect}</text>
-      <rect x="860" y="560" width="260" height="58" rx="6" class="box-a"/>
-      <text x="990" y="578" class="t2 mid">마지막 점에 놓기</text>
-      <text x="990" y="594" class="tm mid">커서가 마지막으로 본 우리 창 안이면</text>
-      <text x="990" y="610" class="tm mid">그 창 보고로 판정 · 아니면 새 창</text>
-
-      <text x="18" y="632" class="tm">C. 끝 신호 유실</text>
-      <line x1="200" y1="636" x2="984" y2="636" class="ln-a" marker-end="url(#m8a)"/>
-      <text x="420" y="630" class="cda mid">pointermove → dock_pointer_seen</text>
-      <text x="690" y="630" class="tm mid">300ms 뒤 마지막 보고로 놓기</text>
-
-      <line x1="452" y1="684" x2="204" y2="684" class="ln" marker-end="url(#m8)"/>
-      <text x="330" y="678" class="cda mid">dragend (A 뒤 · move)</text>
-      <rect x="860" y="668" width="260" height="40" rx="6" class="box"/>
-      <text x="990" y="686" class="t2 mid">Ended → 출처 되보이기</text>
-      <text x="990" y="701" class="cd mid">set_focus → release_lease</text>
-      <line x1="984" y1="736" x2="726" y2="736" class="ln" marker-end="url(#m8)"/>
-      <text x="855" y="730" class="cda mid">Ended · layout:updated 등</text>
-    </svg>
-    </div>
-    <figcaption>세로 점선 = 각 참여자, 가로 화살표 = 실제 DOM 사건 · invoke · emit(청록 = 셸로 들어가 놓기를 정하는 것). 청록 칠한 셸 상자가 배치가 바뀔 수 있는 곳이고, 끄는 동안(②)에는 셸이 아무것도 바꾸지 않습니다. 「마지막 점에 놓기」에 쓰는 시한: 떠남 유예 100ms · drop 기다림 500ms · 유실 300ms.</figcaption>
-  </figure>
-
-  <p class="say">끄는 동안 셸은 끼어들지 않습니다 — 대상 웹뷰가 미리 받은 영역으로 <b>스스로</b> 가이드를 그리고, 보인 것이 바뀔 때만 셸에 알립니다. 끝은 세 길입니다: 우리 창 위에서 떼면 <b>drop</b>, 창 밖 · Esc · 시스템 취소면 <b>dragend(none)</b>, 신호를 잃으면 끝 뒤의 <b>pointermove</b>. 어느 길이든 셸이 같은 판정으로 붙이거나, 새 창을 열거나, 아무것도 바꾸지 않습니다.</p>
-
-  <details>
-    <summary>자세히 — 끝나는 경우 전부 · Esc 를 따로 가르지 않는 이유</summary>
-    <div class="body">
-      <div class="tbl"><table>
-        <tr><th>상황</th><th>들어오는 사건</th><th>결과</th></tr>
-        <tr><td>우리 창 위에서 손을 뗌</td><td><code>drop</code> (대상) → <code>dragend</code> move (출처)</td><td>셸이 다시 고름 → 보인 것과 같으면 붙임 · 다르면 무변경 · 가이드 없음 = 새 창</td></tr>
-        <tr><td><code>dragend</code> move 가 <code>drop</code> 보다 먼저 옴</td><td><code>dragend</code> move</td><td>500ms 동안 <code>drop</code> 을 기다림 → 지나면 마지막 점에 놓기</td></tr>
-        <tr><td>창 밖 · 바탕화면 · 다른 앱 위에서 뗌</td><td><code>dragend</code> none</td><td>마지막 점에 놓기 → 보통 그 자리에 새 창</td></tr>
-        <tr><td>Esc (어디서든)</td><td>대상 <code>dragleave</code> → 출처 <code>dragend</code> none</td><td>마지막 점에 놓기 — 우리 창 안이면 그 창에서 보인 가이드로</td></tr>
-        <tr><td>끝 신호 유실</td><td>끝 뒤 첫 <code>pointermove</code> · <code>pointerdown</code></td><td>300ms 뒤 마지막 보고로 판정 · 보고가 없으면 지금 커서에 새 창</td></tr>
-        <tr><td>끄는 중 출처 배치가 바뀜</td><td>—</td><td>받지 않음(커서 「안 됨」) · 어느 끝이든 무변경</td></tr>
-        <tr><td>출처 창이 부서짐 · 출처 탭이 사라짐</td><td><code>Destroyed</code> · 스냅숏</td><td>그냥 끝 (변경 없음 · 되보이기 없음)</td></tr>
-      </table></div>
-      <ul>
-        <li><b>Esc 와 떼기를 키 상태로 가르지 않습니다.</b> 우리 창 위에서 버튼으로 떼면 그 창의 <code>drop</code> 이 처리하므로, <code>none</code> 끝이 우리 창 위를 가리키면 그것은 Esc(또는 시스템 취소)입니다. Esc 와 떼기는 같은 「그 자리에 놓기」라 가를 것이 없고, 남는 질문 「지금 커서가 어느 우리 창의 보인 가이드 위인가」를 마지막 보고 + 셸 커서의 창 사각형 검사가 답합니다. Esc 가 낸 떠남 보고가 끝보다 먼저 닿을 수 있어 100ms 유예를 둡니다.</li>
-        <li>끄는 동안 웹뷰에는 포인터 사건이 오지 않습니다(끌기가 대신함). 그래서 세션 중 어느 창이든 <code>pointermove</code> 를 보면 끌기는 이미 끝난 것이고, 이것이 유실 대비 신호입니다.</li>
-        <li>끄는 탭은 커스텀 형식 <code>application/x-engram-tab</code> 하나만 싣습니다 — 다른 앱이 받지 않아 그 앱에 아무것도 들어가지 않습니다.</li>
-        <li>Esc 키가 웹뷰에 닿으면 터미널 · 입력창에 들어가지 않게 세션 동안 + 200ms 삼킵니다(보험 — OS 가 넘기는지는 실측 S1).</li>
-      </ul>
-    </div>
-  </details>
-</section>
-
-<!-- ============================== 06 ============================== -->
-<section id="s6">
-  <div class="eyebrow"><span class="num">06</span><span>안전장치</span></div>
-  <h2>어긋남을 막는 네 장치</h2>
-  <p class="say">끌기 · 창 닫기 · 출력이 동시에 일어날 수 있는 경로입니다. 아래 넷이 「탭이 두 곳에 있거나 어디에도 없는」 상태, 「사용자가 못 본 결과」, 「끝나지 않는 끌기」를 막습니다.</p>
-
-  <div class="grid2">
-    <figure class="fig">
-      <h3>① 보인 것과 같을 때만 붙는다</h3>
-      <svg class="d" viewBox="0 0 540 236" role="img" aria-label="대상 웹뷰는 셸이 보낸 영역으로 가이드를 그리기만 하고, 놓은 점을 받은 셸이 다시 골라 보인 것과 같고 영역이 최신일 때만 적용한다">
-        <defs>
-          <marker id="m9" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah"/></marker>
-          <marker id="m9a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah-a"/></marker>
-        </defs>
-        <rect x="20" y="30" width="200" height="140" rx="8" class="box2"/>
-        <text x="36" y="54" class="tb">대상 웹뷰</text>
-        <text x="36" y="74" class="t2">가이드 = 그림만</text>
-        <rect x="36" y="86" width="168" height="44" class="slot"/>
-        <rect x="148" y="86" width="56" height="44" class="hot"/>
-        <text x="36" y="146" class="cd">dockPick.ts</text>
-        <text x="36" y="160" class="cd">DockOverlay.tsx</text>
-        <rect x="320" y="30" width="200" height="140" rx="8" class="box-a"/>
-        <text x="336" y="54" class="tb">셸</text>
-        <text x="336" y="76" class="t2">놓은 점을 다시 고름</text>
-        <text x="336" y="96" class="t2">같음 + 최신 영역 → 적용</text>
-        <text x="336" y="132" class="cd">dock/regions.rs · pick</text>
-        <text x="336" y="148" class="cd">apply::dock_tab</text>
-        <line x1="318" y1="62" x2="224" y2="62" class="ln" marker-end="url(#m9)"/>
-        <text x="270" y="54" class="t2 mid">영역 · rev</text>
-        <line x1="222" y1="140" x2="316" y2="140" class="ln-a" marker-end="url(#m9a)"/>
-        <text x="270" y="132" class="ta mid">점 · 보인 것</text>
-        <text x="20" y="200" class="t2">다르면 무변경 — 사용자가 못 본 이음새 · 탭바에 붙지 않는다.</text>
-        <text x="20" y="222" class="tm">가이드가 없던 자리(슬롯 가운데 · 창 밖)는 보고와 무관하게 새 창.</text>
-      </svg>
-      <figcaption>웹뷰의 판정 거울(<code>pickTarget</code>)은 Rust <code>pick</code> 과 같은 골든 파일(<code>pick_golden.json</code>)을 먹습니다. 둘이 갈라져도 결과는 「무변경」이지 엉뚱한 도킹이 아닙니다. 끄는 중 출처 배치가 바뀌면 아예 받지 않습니다(커서 「안 됨」).</figcaption>
-    </figure>
-
-    <figure class="fig">
-      <h3>② 끌기는 반드시 끝난다</h3>
-      <svg class="d" viewBox="0 0 540 236" role="img" aria-label="우리 창에서 뗌, 창 밖이나 Esc, 끝 신호 유실 모두 그 점에 놓기로 이어진다. 출처 탭이 사라진 경우만 그냥 끝">
-        <defs>
-          <marker id="m10" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah"/></marker>
-        </defs>
-        <rect x="20" y="16" width="180" height="40" rx="6" class="box"/>
-        <text x="110" y="34" class="t2 mid">우리 창에서 뗌</text>
-        <text x="110" y="49" class="cd mid">drop</text>
-        <rect x="20" y="64" width="180" height="40" rx="6" class="box"/>
-        <text x="110" y="82" class="t2 mid">창 밖 · Esc · 시스템 취소</text>
-        <text x="110" y="97" class="cd mid">dragend none</text>
-        <rect x="20" y="112" width="180" height="40" rx="6" class="box"/>
-        <text x="110" y="130" class="t2 mid">끝 신호 유실</text>
-        <text x="110" y="145" class="cd mid">pointermove → 300ms</text>
-        <line x1="200" y1="36" x2="236" y2="72" class="ln" marker-end="url(#m10)"/>
-        <line x1="200" y1="84" x2="236" y2="84" class="ln" marker-end="url(#m10)"/>
-        <line x1="200" y1="132" x2="236" y2="96" class="ln" marker-end="url(#m10)"/>
-        <rect x="240" y="56" width="140" height="56" rx="8" class="box-a"/>
-        <text x="310" y="80" class="tb mid">그 점에 놓기</text>
-        <text x="310" y="99" class="tm mid">(유실이면 마지막 점)</text>
-        <line x1="380" y1="84" x2="412" y2="84" class="ln" marker-end="url(#m10)"/>
-        <rect x="416" y="48" width="104" height="72" rx="8" class="ok"/>
-        <text x="468" y="72" class="tb mid">붙이거나</text>
-        <text x="468" y="90" class="tb mid">새 창</text>
-        <text x="468" y="110" class="tm mid">(다르면 무변경)</text>
-        <rect x="20" y="172" width="240" height="40" rx="6" class="box2"/>
-        <text x="140" y="197" class="t2 mid">출처 탭 · 출처 창이 사라짐</text>
-        <line x1="260" y1="192" x2="296" y2="192" class="ln" marker-end="url(#m10)"/>
-        <rect x="300" y="172" width="220" height="40" rx="6" class="box"/>
-        <text x="410" y="197" class="t2 mid">그냥 끝 — 변경 없음</text>
-      </svg>
-      <figcaption>「원래 창으로 되돌리기」 동작은 없습니다. 다만 ①의 「다르면 무변경」으로 끝나면 결과적으로 탭이 원래 창에 다시 보입니다 — 이 경우를 그대로 둘지는 결정 #8 입니다. <code>dragend</code> 는 실측에서 모든 경우에 왔습니다.</figcaption>
-    </figure>
-
-    <figure class="fig">
-      <h3>③ 닫히는 창에 탭을 넣지 않는다</h3>
-      <svg class="d" viewBox="0 0 540 226" role="img" aria-label="사용자가 팝아웃 X를 누르는 순간 모델에서 그 창을 빼고 묘비를 단다. 그 뒤 그 창으로의 확정은 창 없음으로 무변경">
-        <defs>
-          <marker id="m11" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah"/></marker>
-        </defs>
-        <path d="M110,40 L110,32 L470,32 L470,40" class="bk"/>
-        <text x="290" y="24" class="tm mid">예전엔 이 사이 동안 모델에 창이 남아 있었다</text>
-        <text x="16" y="76" class="tb">사용자</text>
-        <line x1="80" y1="72" x2="520" y2="72" class="ln-f"/>
-        <circle cx="110" cy="72" r="7" class="ev"/>
-        <text x="110" y="58" class="t2 mid">X 클릭</text>
-        <circle cx="470" cy="72" r="7" class="ev-g"/>
-        <text x="470" y="58" class="tm mid">OS 창 소멸</text>
-        <rect x="124" y="86" width="226" height="44" rx="8" class="box-a"/>
-        <text x="237" y="104" class="tb mid">즉시 모델에서 뺌 + 묘비</text>
-        <text x="237" y="121" class="cd mid">close_requested_popup_window</text>
-        <line x1="110" y1="79" x2="124" y2="96" class="ln"/>
-        <text x="16" y="166" class="tb">확정</text>
-        <line x1="80" y1="162" x2="520" y2="162" class="ln-f"/>
-        <circle cx="400" cy="162" r="7" class="ev"/>
-        <text x="400" y="148" class="t2 mid">그 창으로 놓기 확정</text>
-        <text x="400" y="186" class="s-risk mid">✗ 창 없음 · 무변경</text>
-        <line x1="80" y1="212" x2="520" y2="212" class="ln" marker-end="url(#m11)"/>
-        <text x="512" y="206" class="tm end">시간</text>
-      </svg>
-      <figcaption>팝아웃의 닫기 요청은 되돌려지지 않음을 소스로 확인했기에 요청 순간 모델에서 지웁니다(3단계 · <code>src-tauri/src/commands/popout.rs</code>). 기존 팝아웃 이동(<code>slot.popout</code>)의 같은 틈도 닫혔고, 닫히는 웹뷰의 늦은 출력 구독도 막습니다. 결정 #2.</figcaption>
-    </figure>
-
-    <figure class="fig">
-      <h3>④ 메인은 늘 탭이 하나 이상</h3>
-      <svg class="d" viewBox="0 0 540 226" role="img" aria-label="메인의 마지막 탭을 끄는 동안 메인은 빈 화면이고, 다른 창으로 놓으면 같은 연산 안에서 메인에 빈 탭 View 1 이 생긴다">
-        <defs>
-          <marker id="m12a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah-a"/></marker>
-        </defs>
-        <text x="20" y="22" class="tm">끄는 동안 — 메인은 빈 화면</text>
-        <rect x="20" y="30" width="200" height="130" rx="4" class="win"/>
-        <rect x="21" y="31" width="198" height="18" class="bar"/>
-        <text x="28" y="45" class="tm">메인</text>
-        <rect x="21" y="49" width="198" height="22" class="bar2"/>
-        <rect x="23" y="74" width="194" height="83" class="slot-empty"/>
-        <text x="120" y="120" class="tm mid">탭바 · 캔버스 비어 보임</text>
-        <line x1="226" y1="95" x2="314" y2="95" class="ln-a" marker-end="url(#m12a)"/>
-        <text x="270" y="86" class="ta mid">다른 창에</text>
-        <text x="270" y="112" class="ta mid">놓으면</text>
-        <text x="320" y="22" class="tm">놓은 뒤 — 같은 연산 안에서</text>
-        <rect x="320" y="30" width="200" height="130" rx="4" class="win"/>
-        <rect x="321" y="31" width="198" height="18" class="bar"/>
-        <text x="328" y="45" class="tm">메인</text>
-        <rect x="321" y="49" width="198" height="22" class="bar2"/>
-        <rect x="324" y="52" width="56" height="18" rx="3" class="tab-new"/>
-        <text x="352" y="65" class="tm mid">View 1</text>
-        <rect x="323" y="74" width="194" height="83" class="slot-empty"/>
-        <text x="420" y="120" class="tm mid">빈 탭 (자동)</text>
-        <text x="20" y="192" class="t2">메인 탭 ≥ 1 규칙(ADR-0057 ④)은 지키고, 끌기는 막지 않는다.</text>
-        <text x="20" y="212" class="cd">layout/manager.rs · refill_main (4단계 — close_tab 과 나눠 씀)</text>
-      </svg>
-      <figcaption>옛 설계는 메인의 마지막 탭을 아예 끌지 못하게 막았습니다(<code>MainLastTab</code> — 4단계에서 지움). 빈 탭은 탭 닫기와 같은 도우미가 만들고, 잠금 한 번 안이라 아무도 빈 메인을 보지 않습니다. 같은 창 안에 놓으면 빈 탭이 생기지 않습니다.</figcaption>
-    </figure>
-  </div>
-
-  <details>
-    <summary>자세히 — 각 장치의 근거와 한계</summary>
-    <div class="body">
-      <ul>
-        <li><b>한 세션에 적용은 많아야 한 번</b> — 판정과 「적용 중」 표시가 장부 잠금 한 번 안이라, 그 뒤 오는 놓기 · 끝 신호는 늦은 신호로 버립니다. 모르는 세션 id 의 신호도 버립니다.</li>
-        <li><b>표식</b>(<code>lease_tab</code>)은 끌기 시작 때 서고, 놓기는 그 표식을 싣고 갑니다. 지난 끌기의 늦은 놓기는 <code>StaleLease</code> 로 무변경입니다.</li>
-        <li><b>닫히는 창</b> 장치의 전제 = 「팝아웃 닫기는 막을 수 없다」. 누가 프론트에 닫기 요청 리스너를 달면 이 전제가 무너지므로, 점검 명령 두 줄을 QA 게이트로 매번 돌립니다(<code>rg -i "close.?requested" src/</code> → 0줄 · <code>rg "prevent[_]close" src-tauri/src/</code> → 1줄).</li>
-        <li><b>드롭 처리기 점검</b>(6단계부터) — <code>rg "disable_drag_drop_handler" src-tauri/src/</code> → 1줄(<code>webview_env.rs</code>) · 끈 처리기의 사건을 기대하는 코드 0줄.</li>
-        <li><b>저장</b>: 기록기는 같은 잠금 안에서 배치를 통째로 복사해 쓰므로 저장 파일에는 도킹 전 아니면 도킹 뒤만 실립니다 — 다시 켜도 탭은 정확히 한 곳에 있습니다. 끄는 동안 저장되는 것은 0.5초 머물러 바꾼 탭 전환 하나뿐입니다.</li>
-      </ul>
-    </div>
-  </details>
-</section>
-
-<!-- ============================== 07 ============================== -->
-<section id="s7">
-  <div class="eyebrow"><span class="num">07</span><span>남은 결정</span></div>
-  <h2>정해 주실 것 8건 — TRD 5판 §11-1, 지금은 전부 기본값으로 진행 중</h2>
-  <div class="callout"><b>이미 정해져 이 목록에서 빠진 것 —</b> Esc = 그 자리에 놓기 · 비정상 끝 = 마지막 점에 놓기(출처 탭이 사라진 경우만 그냥 끝) · 끌기 그림 모양 = Windows 기본 · 메인 마지막 탭도 끌기(떠나면 빈 탭) · LLM 명령 = 다음 작업 · platform 창 핸들 의존(옛 목록 #3 — 5판에서 OS 함수와 함께 빠짐).</div>
-  <div class="order">
-    <span class="tag urgent">#2 — 4단계 착수 전</span>
-    <span class="tag soon">#4 · #7 — 7단계(프론트) 전</span>
-    <span class="tag split">#8 — 결정 Q8 과 맞춰 볼 것</span>
-    <span class="tag calm">#1 · #3 · #5 · #6 — 이미 기본값으로 구현됨</span>
-  </div>
-  <p class="say">카드마다 청록 실선 = 지금 기본값, 회색 점선 = 대안입니다. 「이미 구현됨」 항목도 답에 따라 그 자리를 고칩니다. 번호는 TRD 5판 §11-1 그대로입니다.</p>
-
-  <div class="cards">
-
-    <article class="card">
-      <div class="head"><span class="dno">#1</span><h3>같은 창 안 도킹 — 보던 탭이 빠지면 무엇이 보이나</h3></div>
-      <span class="tag calm">2단계(커밋됨)에 기본값으로 들어감</span>
-      <span class="cd">src-tauri/src/layout/manager.rs · ViewManager::dock</span>
-      <p class="ctx">탭 [A · 보는 중][B][C] 에서 A 를 끌어 같은 창 C 의 슬롯 옆에 붙이면</p>
-      <svg class="d" viewBox="0 0 500 172" role="img" aria-label="기본값은 C가 보여 A의 내용이 화면에 남고, 대안은 이웃 B가 보이고 A는 C 안에 숨는다">
-        <rect x="8" y="8" width="236" height="156" rx="10" class="pan-def"/>
-        <text x="22" y="30" class="ta">기본값</text>
-        <rect x="24" y="42" width="204" height="96" rx="3" class="win"/>
-        <rect x="25" y="43" width="202" height="19" class="bar2"/>
-        <rect x="28" y="45" width="40" height="16" rx="3" class="tab"/>
-        <text x="48" y="57" class="tm mid">B</text>
-        <rect x="72" y="45" width="40" height="16" rx="3" class="tab-on"/>
-        <text x="92" y="57" class="tm mid">C</text>
-        <rect x="27" y="65" width="130" height="70" class="slot"/>
-        <text x="92" y="105" class="bigs mid">C</text>
-        <rect x="161" y="65" width="64" height="70" class="slot-new"/>
-        <text x="193" y="105" class="ta mid">A</text>
-        <text x="126" y="156" class="tm mid">C 가 보임 — 보던 A 가 화면에 남음</text>
-        <rect x="256" y="8" width="236" height="156" rx="10" class="pan-alt"/>
-        <text x="270" y="30" class="t2">대안</text>
-        <rect x="272" y="42" width="204" height="96" rx="3" class="win"/>
-        <rect x="273" y="43" width="202" height="19" class="bar2"/>
-        <rect x="276" y="45" width="40" height="16" rx="3" class="tab-on"/>
-        <text x="296" y="57" class="tm mid">B</text>
-        <rect x="320" y="45" width="40" height="16" rx="3" class="tab"/>
-        <text x="340" y="57" class="tm mid">C</text>
-        <rect x="275" y="65" width="198" height="70" class="slot"/>
-        <text x="374" y="105" class="bigs mid">B</text>
-        <text x="374" y="156" class="tm mid">이웃 B 가 보임 — A 는 C 안에 숨음</text>
-      </svg>
-      <dl>
-        <dt>지금 기본값</dt><dd>붙은 대상이 보인다(이음새 = 대상 탭 · 탭바 = 옮긴 그 탭) — 보던 내용이 그 탭에 들어가 화면에 남는다.</dd>
-        <dt>대안</dt><dd>탭 닫기와 같은 승계(오른쪽, 없으면 왼쪽 이웃)로 다른 탭이 보인다.</dd>
-        <dt>달라지는 것</dt><dd>놓은 직후 화면에 무엇이 남는가. 「대상 창의 보이는 탭은 안 바뀐다」는 원래 규칙이 보던 탭이 사라지는 이 경우엔 성립하지 않아 둘 중 하나를 골라야 한다.</dd>
-      </dl>
-    </article>
-
-    <article class="card hot">
-      <div class="head"><span class="dno">#2</span><h3>닫히는 창 — 닫기 요청 순간 모델에서 먼저 지우나 (M2)</h3></div>
-      <span class="tag urgent">4단계 착수 전에 필요 · 3단계에 이미 구현 · 확인 대기</span>
-      <span class="cd">src-tauri/src/commands/popout.rs · close_requested_popup_window</span>
-      <p class="ctx">사용자가 팝아웃 X 를 누른 직후 몇 ms 안에 그 창으로의 도킹이 확정되면</p>
-      <svg class="d" viewBox="0 0 500 172" role="img" aria-label="기본값은 X 순간 모델에서 빼므로 확정이 창 없음으로 실패해 탭이 원래 자리에 남는다. 대안은 열림 확인을 통과한 뒤 창이 사라져 붙인 탭도 함께 사라질 수 있다">
-        <rect x="8" y="8" width="236" height="156" rx="10" class="pan-def"/>
-        <text x="22" y="30" class="ta">기본값</text>
-        <line x1="24" y1="78" x2="228" y2="78" class="ln-f"/>
-        <circle cx="48" cy="78" r="6" class="ev"/>
-        <text x="48" y="64" class="t2 mid">X</text>
-        <rect x="24" y="92" width="112" height="24" rx="6" class="box-a"/>
-        <text x="80" y="108" class="tm mid">즉시 모델에서 뺌</text>
-        <circle cx="180" cy="78" r="6" class="ev"/>
-        <text x="180" y="64" class="t2 mid">확정 시도</text>
-        <text x="186" y="108" class="s-risk mid">✗ 창 없음</text>
-        <text x="126" y="156" class="tm mid">탭은 원래 자리 — 틈이 없다</text>
-        <rect x="256" y="8" width="236" height="156" rx="10" class="pan-alt"/>
-        <text x="270" y="30" class="t2">대안 (열림 사전 확인)</text>
-        <line x1="272" y1="78" x2="476" y2="78" class="ln-f"/>
-        <circle cx="294" cy="78" r="6" class="ev"/>
-        <text x="294" y="64" class="t2 mid">X</text>
-        <circle cx="372" cy="78" r="6" class="ev"/>
-        <text x="372" y="64" class="t2 mid">확정 시도</text>
-        <text x="372" y="102" class="s-ok mid">열림 ✓ → 붙임</text>
-        <circle cx="452" cy="78" r="6" class="ev-g"/>
-        <text x="452" y="64" class="tm mid">창 소멸</text>
-        <text x="420" y="126" class="s-risk mid">붙인 탭도 사라짐</text>
-        <text x="374" y="156" class="tm mid">틈이 줄 뿐 닫히지 않음</text>
-      </svg>
-      <dl>
-        <dt>지금 기본값</dt><dd>팝아웃 닫기 요청을 받는 순간 모델에서 그 창을 지우고 묘비를 단다. 기존 <code>slot.popout</code> 의 같은 틈도 함께 닫힌다.</dd>
-        <dt>대안</dt><dd>도킹 직전 「창이 열려 있나」만 확인하고 남는 위험을 기록한다.</dd>
-        <dt>달라지는 것</dt><dd>기본값은 팝아웃 모델 정리의 계기를 「창 소멸」에서 「닫기 요청」으로 옮긴다(ADR-E · 불변식은 그대로). 대안을 고르면 4단계 전에 옛 2판의 검사 둘을 되살린다.</dd>
-      </dl>
-    </article>
-
-    <article class="card">
-      <div class="head"><span class="dno">#3</span><h3>최대화된 창에서 뗀 탭의 새 창 크기</h3></div>
-      <span class="tag calm">2단계(커밋됨)에 기본값으로 들어감</span>
-      <span class="cd">src-tauri/src/layout/manager.rs · plan_new_window</span>
-      <p class="ctx">최대화된 팝아웃에서 탭을 떼어 빈 곳에 놓아 새 창이 될 때</p>
-      <svg class="d" viewBox="0 0 500 172" role="img" aria-label="기본값은 최대화 전 보통 크기의 창, 대안은 최대화 상태 그대로">
-        <rect x="8" y="8" width="236" height="156" rx="10" class="pan-def"/>
-        <text x="22" y="30" class="ta">기본값</text>
-        <rect x="30" y="42" width="192" height="98" rx="4" class="desk"/>
-        <rect x="64" y="60" width="112" height="64" rx="3" class="win-new"/>
-        <text x="120" y="97" class="tm mid">보통 크기</text>
-        <text x="126" y="157" class="tm mid">최대화 전 크기의 보통 창</text>
-        <rect x="256" y="8" width="236" height="156" rx="10" class="pan-alt"/>
-        <text x="270" y="30" class="t2">대안</text>
-        <rect x="278" y="42" width="192" height="98" rx="4" class="desk"/>
-        <rect x="280" y="44" width="188" height="94" rx="3" class="win-new"/>
-        <text x="374" y="96" class="tm mid">화면만 한 창</text>
-        <text x="374" y="157" class="tm mid">최대화 상태 그대로</text>
-      </svg>
-      <dl>
-        <dt>지금 기본값</dt><dd>그 창의 보통(최대화 전) 크기로 연다.</dd>
-        <dt>대안</dt><dd>최대화 상태 그대로 연다.</dd>
-        <dt>달라지는 것</dt><dd>기본값은 「화면만 한데 최대화는 아닌 창」이 생기지 않게 한다. 대안은 떼어 온 창의 모양을 그대로 잇는다.</dd>
-      </dl>
-    </article>
-
-    <article class="card">
-      <div class="head"><span class="dno">#4</span><h3>끄는 중 바꾼 탭을 되돌리나</h3></div>
-      <span class="tag soon">7단계(프론트) 전</span>
-      <span class="cd">대상 웹뷰의 머묾 500ms → 기존 탭 전환(switch_tab) — dockDrag.ts (7 신설)</span>
-      <p class="ctx">끄는 동안 「B」 머리 위에 0.5초 머물러 B 로 바뀌었는데, 끌기가 아무 변화 없이 끝나면</p>
-      <svg class="d" viewBox="0 0 500 172" role="img" aria-label="기본값은 전환된 B 그대로, 대안은 끌기 전 A로 되돌림">
-        <rect x="8" y="8" width="236" height="156" rx="10" class="pan-def"/>
-        <text x="22" y="30" class="ta">기본값</text>
-        <text x="24" y="58" class="tm">시작</text>
-        <rect x="100" y="45" width="44" height="18" rx="3" class="tab-on"/><text x="122" y="58" class="tm mid">A</text>
-        <rect x="148" y="45" width="44" height="18" rx="3" class="tab"/><text x="170" y="58" class="tm mid">B</text>
-        <text x="24" y="90" class="tm">0.5초 뒤</text>
-        <rect x="100" y="77" width="44" height="18" rx="3" class="tab"/><text x="122" y="90" class="tm mid">A</text>
-        <rect x="148" y="77" width="44" height="18" rx="3" class="tab-on"/><text x="170" y="90" class="tm mid">B</text>
-        <text x="24" y="122" class="tm">끝(무변경)</text>
-        <rect x="100" y="109" width="44" height="18" rx="3" class="tab"/><text x="122" y="122" class="tm mid">A</text>
-        <rect x="148" y="109" width="44" height="18" rx="3" class="tab-new"/><text x="170" y="122" class="ta mid">B</text>
-        <text x="126" y="156" class="tm mid">바뀐 탭 그대로 (브라우저 · VS Code)</text>
-        <rect x="256" y="8" width="236" height="156" rx="10" class="pan-alt"/>
-        <text x="270" y="30" class="t2">대안</text>
-        <text x="272" y="58" class="tm">시작</text>
-        <rect x="348" y="45" width="44" height="18" rx="3" class="tab-on"/><text x="370" y="58" class="tm mid">A</text>
-        <rect x="396" y="45" width="44" height="18" rx="3" class="tab"/><text x="418" y="58" class="tm mid">B</text>
-        <text x="272" y="90" class="tm">0.5초 뒤</text>
-        <rect x="348" y="77" width="44" height="18" rx="3" class="tab"/><text x="370" y="90" class="tm mid">A</text>
-        <rect x="396" y="77" width="44" height="18" rx="3" class="tab-on"/><text x="418" y="90" class="tm mid">B</text>
-        <text x="272" y="122" class="tm">끝(무변경)</text>
-        <rect x="348" y="109" width="44" height="18" rx="3" class="tab-on"/><text x="370" y="122" class="tm mid">A</text>
-        <rect x="396" y="109" width="44" height="18" rx="3" class="tab"/><text x="418" y="122" class="tm mid">B</text>
-        <text x="374" y="156" class="tm mid">끌기 전 탭으로 되돌림</text>
-      </svg>
-      <dl>
-        <dt>지금 기본값</dt><dd>되돌리지 않는다 — 탭 전환은 사람 탭 클릭과 같은 쓰기라 저장에도 실린다.</dd>
-        <dt>대안</dt><dd>끌기가 무변경으로 끝나면 끌기 시작 때의 탭으로 되돌린다.</dd>
-        <dt>달라지는 것</dt><dd>끄는 중 모델을 바꾸는 유일한 동작을 「남김」으로 둘지 「취소 가능」으로 둘지. 대안은 끝 정리에 되돌리기 쓰기가 하나 더 생긴다.</dd>
-      </dl>
-    </article>
-
-    <article class="card">
-      <div class="head"><span class="dno">#5</span><h3>칠하지 않은 바깥 띠 위에 놓으면</h3></div>
-      <span class="tag calm">5단계(커밋됨)에 기본값 · PRD R8 괄호와 다름</span>
-      <span class="cd">src-tauri/src/dock/hit.rs · choose_seam</span>
-      <p class="ctx">창 바깥 띠가 「면적 0」이라 칠해지지 않았는데, 그 밑 슬롯의 띠는 칠해져 있는 자리에 놓으면</p>
-      <svg class="d" viewBox="0 0 500 172" role="img" aria-label="기본값은 그 밑 슬롯의 아래 띠로 붙고, 대안은 PRD 문구대로 새 창">
-        <defs>
-          <pattern id="h13" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="7" class="hl"/></pattern>
-        </defs>
-        <rect x="8" y="8" width="236" height="156" rx="10" class="pan-def"/>
-        <text x="22" y="30" class="ta">기본값</text>
-        <rect x="24" y="42" width="204" height="98" rx="3" class="win"/>
-        <rect x="27" y="45" width="198" height="92" class="slot"/>
-        <rect x="27" y="106" width="198" height="31" class="hot"/>
-        <rect x="27" y="128" width="198" height="9" class="band-off"/>
-        <path d="M0,0L0,15L4,11L7,17L9.5,16L6.5,10L11.5,10Z" transform="translate(118,124)" class="cur"/>
-        <text x="126" y="80" class="tm mid">점선 = 칠 안 된 바깥 띠</text>
-        <text x="126" y="157" class="tm mid">그 슬롯의 아래 띠로 붙음</text>
-        <rect x="256" y="8" width="236" height="156" rx="10" class="pan-alt"/>
-        <text x="270" y="30" class="t2">대안 (PRD R8 괄호)</text>
-        <rect x="272" y="42" width="204" height="98" rx="3" class="win"/>
-        <rect x="275" y="45" width="198" height="92" class="slot"/>
-        <rect x="275" y="106" width="198" height="31" fill="url(#h13)" class="band"/>
-        <rect x="275" y="128" width="198" height="9" class="band-off"/>
-        <path d="M0,0L0,15L4,11L7,17L9.5,16L6.5,10L11.5,10Z" transform="translate(366,124)" class="cur"/>
-        <text x="374" y="80" class="tm mid">가이드 없음으로 침</text>
-        <text x="374" y="157" class="tm mid">새 창 (밑 슬롯 띠는 못 고름)</text>
-      </svg>
-      <dl>
-        <dt>지금 기본값</dt><dd>그 밑 슬롯의 띠로 넘어간다(그 칸 띠에 들면 그 이음새, 안 들면 새 창).</dd>
-        <dt>대안</dt><dd>PRD R8 괄호 그대로 — 칠하지 않은 바깥 띠에 놓으면 새 창.</dd>
-        <dt>달라지는 것</dt><dd>기본값을 고르면 PRD 문구를 고친다. 대안이면 PRD 는 그대로지만 그 자리에서는 밑 슬롯 띠를 고를 수 없다.</dd>
-      </dl>
-    </article>
-
-    <article class="card">
-      <div class="head"><span class="dno">#6</span><h3>안 보이던 탭을 제자리 탭바에 도로 놓으면</h3></div>
-      <span class="tag split">2단계(커밋됨)에 잠정 · 리뷰어 둘 의견이 갈림</span>
-      <span class="cd">src-tauri/src/layout/manager.rs · ViewManager::dock (탭바 갈래)</span>
-      <p class="ctx">탭 [A · 보는 중][B][C] 에서 안 보이던 C 를 끌어 같은 창 탭바의 원래 자리에 놓으면</p>
-      <svg class="d" viewBox="0 0 500 172" role="img" aria-label="기본값은 C가 보이게 되고, 대안은 아무것도 안 바뀌어 A가 계속 보인다">
-        <defs>
-          <marker id="m14" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah"/></marker>
-        </defs>
-        <rect x="8" y="8" width="236" height="156" rx="10" class="pan-def"/>
-        <text x="22" y="30" class="ta">기본값</text>
-        <text x="24" y="62" class="tm">전</text>
-        <rect x="56" y="49" width="44" height="18" rx="3" class="tab-on"/><text x="78" y="62" class="tm mid">A</text>
-        <rect x="104" y="49" width="44" height="18" rx="3" class="tab"/><text x="126" y="62" class="tm mid">B</text>
-        <rect x="152" y="49" width="44" height="18" rx="3" class="tab"/><text x="174" y="62" class="tm mid">C</text>
-        <line x1="126" y1="72" x2="126" y2="100" class="ln" marker-end="url(#m14)"/>
-        <text x="24" y="122" class="tm">뒤</text>
-        <rect x="56" y="109" width="44" height="18" rx="3" class="tab"/><text x="78" y="122" class="tm mid">A</text>
-        <rect x="104" y="109" width="44" height="18" rx="3" class="tab"/><text x="126" y="122" class="tm mid">B</text>
-        <rect x="152" y="109" width="44" height="18" rx="3" class="tab-new"/><text x="174" y="122" class="ta mid">C</text>
-        <text x="126" y="156" class="tm mid">목록 그대로 · C 가 보임</text>
-        <rect x="256" y="8" width="236" height="156" rx="10" class="pan-alt"/>
-        <text x="270" y="30" class="t2">대안</text>
-        <text x="272" y="62" class="tm">전</text>
-        <rect x="304" y="49" width="44" height="18" rx="3" class="tab-on"/><text x="326" y="62" class="tm mid">A</text>
-        <rect x="352" y="49" width="44" height="18" rx="3" class="tab"/><text x="374" y="62" class="tm mid">B</text>
-        <rect x="400" y="49" width="44" height="18" rx="3" class="tab"/><text x="422" y="62" class="tm mid">C</text>
-        <line x1="374" y1="72" x2="374" y2="100" class="ln" marker-end="url(#m14)"/>
-        <text x="272" y="122" class="tm">뒤</text>
-        <rect x="304" y="109" width="44" height="18" rx="3" class="tab-on"/><text x="326" y="122" class="tm mid">A</text>
-        <rect x="352" y="109" width="44" height="18" rx="3" class="tab"/><text x="374" y="122" class="tm mid">B</text>
-        <rect x="400" y="109" width="44" height="18" rx="3" class="tab"/><text x="422" y="122" class="tm mid">C</text>
-        <text x="374" y="156" class="tm mid">진짜 무변경 · A 가 계속 보임</text>
-      </svg>
-      <dl>
-        <dt>지금 기본값</dt><dd>그 탭을 보이게 한다(목록은 그대로 · 변경 번호 +1). 마우스로 놓으면 「옮긴 것을 보인다」는 규칙을 이 경우에도 지킨다.</dd>
-        <dt>대안</dt><dd>아무것도 바꾸지 않는다 — 제자리에 놓았으니 진짜 무변경.</dd>
-        <dt>달라지는 것</dt><dd>탭을 집었다 놓는 손동작이 「그 탭 보기」로 읽히는가. 이미 보이는 탭은 어느 안이든 무변경이다.</dd>
-      </dl>
-    </article>
-
-    <article class="card">
-      <div class="head"><span class="dno">#7</span><h3>끌기 그림에 무엇을 담나</h3></div>
-      <span class="tag soon">7단계 전 · 실측 S2 와 함께</span>
-      <span class="cd">src/components/layout/dragImage.ts (7 신설)</span>
-      <p class="ctx">끌기 그림은 Windows 기본 모양으로 정해졌고, 「내용은 되는 만큼」의 범위가 남았다</p>
-      <svg class="d" viewBox="0 0 500 172" role="img" aria-label="기본값은 보이던 탭이면 터미널 칸만 축소 그림이고 다른 칸은 이름 자리채움, 안 보이던 탭은 제목만. 대안은 누르는 순간 그 탭으로 전환해 그린다">
-        <defs>
-          <linearGradient id="gf16" x1="0" y1="0" x2="1" y2="1"><stop offset="0.35" class="fd0"/><stop offset="1" class="fd1"/></linearGradient>
-        </defs>
-        <rect x="8" y="8" width="236" height="156" rx="10" class="pan-def"/>
-        <text x="22" y="30" class="ta">기본값</text>
-        <g transform="translate(22,42)"><rect width="136" height="84" rx="4" class="dimg"/><rect x="1" y="1" width="134" height="15" class="dimg-h"/><text x="7" y="12" class="dimg-t">검토</text><rect x="4" y="20" width="62" height="60" class="slot"/><line x1="9" y1="32" x2="56" y2="32" class="dimg-l"/><line x1="9" y1="42" x2="60" y2="42" class="dimg-l"/><line x1="9" y1="52" x2="44" y2="52" class="dimg-l"/><line x1="9" y1="62" x2="52" y2="62" class="dimg-l"/><rect x="70" y="20" width="62" height="60" class="slot-empty"/><text x="101" y="54" class="dimg-t mid">챗</text><rect width="136" height="84" rx="4" fill="url(#gf16)"/></g>
-        <g transform="translate(170,70)"><rect width="64" height="24" rx="4" class="dimg"/><text x="32" y="16" class="dimg-t mid">검토</text><rect width="64" height="24" rx="4" fill="url(#gf16)"/></g>
-        <text x="202" y="108" class="tm mid">안 보이던</text>
-        <text x="202" y="124" class="tm mid">탭</text>
-        <text x="126" y="144" class="tm mid">터미널만 축소 · 그 밖은 이름</text>
-        <text x="126" y="160" class="tm mid">안 보이던 탭은 제목만</text>
-        <rect x="256" y="8" width="236" height="156" rx="10" class="pan-alt"/>
-        <text x="270" y="30" class="t2">대안</text>
-        <rect x="272" y="44" width="204" height="22" rx="3" class="bar2"/>
-        <rect x="276" y="47" width="44" height="17" rx="3" class="tab"/><text x="298" y="60" class="tm mid">A</text>
-        <rect x="324" y="47" width="44" height="17" rx="3" class="tab-new"/><text x="346" y="60" class="ta mid">검토</text>
-        <path d="M0,0L0,15L4,11L7,17L9.5,16L6.5,10L11.5,10Z" transform="translate(362,56)" class="cur"/>
-        <text x="374" y="92" class="t2 mid">누르는 순간 그 탭으로 전환</text>
-        <text x="374" y="112" class="tm mid">→ 화면이 생긴 뒤 그림</text>
-        <text x="374" y="144" class="tm mid">끌지 않은 누름도 탭을 바꿈</text>
-        <text x="374" y="160" class="tm mid">(브라우저 · VS Code 방식)</text>
-      </svg>
-      <dl>
-        <dt>지금 기본값</dt><dd>보이던 탭이면 터미널 칸 = 그 화면의 축소 그림, 그 밖 칸(챗 · 목록 · 사용량 · 빈 칸) = 칸 이름 자리채움. 안 보이던 탭 = 제목만.</dd>
-        <dt>대안</dt><dd>누르는 순간 그 탭으로 전환해 화면을 띄운 뒤 그린다.</dd>
-        <dt>달라지는 것</dt><dd>DOM 칸은 끌기 시작 순간 그림으로 옮길 수 없어 자리채움이 된다. 대안은 탭 클릭이 「누를 때 전환」으로 바뀌어 끌지 않은 누름도 탭을 바꾼다. 터미널 그림이 비어 보일 수 있는지는 실측 S2 가 잰다.</dd>
-      </dl>
-    </article>
-
-    <article class="card">
-      <div class="head"><span class="dno">#8</span><h3>「보인 것과 다름」으로 끝나면 — 무변경이냐 새 창이냐</h3></div>
-      <span class="tag split">결정 Q8(원래 창 되돌리기 없음)과 맞춰 볼 것</span>
-      <span class="cd">src-tauri/src/dock/book.rs · 놓기 판정 (6b 신설)</span>
-      <p class="ctx">보인 가이드와 다시 고른 결과가 다르거나(그 사이 손이 움직임), 끄는 중 출처 · 대상 배치가 바뀌었을 때</p>
-      <svg class="d" viewBox="0 0 500 172" role="img" aria-label="기본값은 무변경이라 탭이 원래 창에 다시 보인다. 대안은 그 자리에 새 창">
-        <defs>
-          <marker id="m17" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah-a"/></marker>
-        </defs>
-        <rect x="8" y="8" width="236" height="156" rx="10" class="pan-def"/>
-        <text x="22" y="30" class="ta">기본값 — 무변경</text>
-        <rect x="24" y="44" width="150" height="80" rx="3" class="win"/>
-        <rect x="25" y="45" width="148" height="20" class="bar2"/>
-        <rect x="28" y="47" width="40" height="17" rx="3" class="tab"/><text x="48" y="60" class="tm mid">작업</text>
-        <rect x="72" y="47" width="40" height="17" rx="3" class="tab-new"/><text x="92" y="60" class="ta mid">검토</text>
-        <rect x="27" y="68" width="144" height="53" class="slot"/>
-        <text x="99" y="100" class="tm mid">원래 창</text>
-        <path d="M222,112 C 210,70 160,44 118,52" class="ln-a" marker-end="url(#m17)"/>
-        <text x="126" y="144" class="tm mid">탭이 원래 창에 다시 보임</text>
-        <text x="126" y="160" class="tm mid">못 본 결과를 만들지 않음</text>
-        <rect x="256" y="8" width="236" height="156" rx="10" class="pan-alt"/>
-        <text x="270" y="30" class="t2">대안 — 그 자리에 새 창</text>
-        <rect x="272" y="44" width="110" height="80" rx="3" class="desk"/>
-        <rect x="392" y="54" width="84" height="70" rx="3" class="win-new"/>
-        <rect x="393" y="55" width="82" height="14" class="bar"/>
-        <text x="398" y="66" class="tm">새 창</text>
-        <rect x="395" y="72" width="78" height="49" class="slot-new"/>
-        <text x="434" y="101" class="ta mid">검토</text>
-        <text x="374" y="144" class="tm mid">못 본 이음새엔 안 붙고</text>
-        <text x="374" y="160" class="tm mid">「되돌림」도 사라짐</text>
-      </svg>
-      <dl>
-        <dt>지금 기본값</dt><dd>무변경 — 못 본 결과를 만들지 않는 안전장치. 결과로 탭은 원래 창에 다시 보인다.</dd>
-        <dt>대안</dt><dd>이 경우에도 그 자리에 새 창(R22) — 못 본 이음새에 붙지는 않으면서 「되돌림」이 사라진다.</dd>
-        <dt>달라지는 것</dt><dd>TRD 는 결정 Q8 의 「원래 창 되돌리기 없음」을 <b>비정상 끝</b>에 대한 것으로 읽었다. 이 경우까지 넓히면 대안이 맞다.</dd>
-      </dl>
-    </article>
-  </div>
-</section>
-
 <!-- ============================== 08 ============================== -->
 <section id="s8">
-  <div class="eyebrow"><span class="num">08</span><span>위험과 남은 일</span></div>
-  <h2>남은 실측 여섯 — 화면에서는 아직 한 번도 돌려 보지 않았다</h2>
+  <div class="eyebrow"><span class="num">08</span><span>결정 · 남은 실측 · 위험 · 다음 순서</span></div>
+  <h2>사용자 결정은 전부 닫혔고, 남은 것은 9c 마무리와 실 마우스 실측</h2>
   <div class="callout risk"><b>전제 —</b> 실측이 합격선을 못 넘으면 요구를 바꾸지 않는 조정만 시도하고, 그것으로도 안 되면 조용히 물러나지 않고 구현을 멈춘 뒤 PRD 개정(사용자 결정)으로 올립니다(TRD §8-2).</div>
 
-  <div class="legend" aria-hidden="true">
-    <span><svg viewBox="0 0 26 26" class="ic"><circle cx="13" cy="13" r="9" class="c-risk"/></svg>미측정 · 미실행</span>
-    <span><svg viewBox="0 0 26 26" class="ic"><path d="M13,3 L24,22 L2,22 Z" class="t-warn"/><line x1="13" y1="10" x2="13" y2="15" class="t-warn-i"/><line x1="13" y1="18.5" x2="13" y2="18.6" class="t-warn-i"/></svg>설계상 남는 위험</span>
-    <span><svg viewBox="0 0 26 26" class="ic"><circle cx="13" cy="13" r="9" class="c-mut"/><text x="13" y="17.5" class="q" text-anchor="middle">?</text></svg>모름 · 나중에 잼</span>
-    <span><svg viewBox="0 0 26 26" class="ic"><path d="M7,13.5 L11.5,18 L19.5,8.5" class="c-ok"/></svg>받아들임</span>
+  <div class="sub">
+    <h3>사용자 결정 — 전부 닫힘</h3>
+    <div class="tbl"><table>
+      <tr><th>번호</th><th>물음</th><th>답</th></tr>
+      <tr><td class="path">Q10</td><td>LLM 명령을 이번에 만드나</td><td>만들지 않음 — 의식적 예외 · 다음 작업이 닫음 (순서 이동 포함 — D22)</td></tr>
+      <tr><td class="path">§11-1 #1</td><td>같은 창 안 도킹에서 보던 탭이 빠지면</td><td>대상이 보이게 된다 — 보던 내용이 그 탭에 들어가 화면에 남음</td></tr>
+      <tr><td class="path">#2</td><td>닫히는 창과 도킹이 겹치면</td><td>닫기 요청 순간 모델에서 먼저 지우고 묘비 (M2 · 3단계)</td></tr>
+      <tr><td class="path">#3</td><td>최대화 창에서 뗀 탭의 새 창 크기</td><td>보통(최대화 전) 크기</td></tr>
+      <tr><td class="path">#4</td><td>끄는 중 머묾으로 바꾼 탭</td><td>끌기가 무변경으로 끝나도 되돌리지 않음</td></tr>
+      <tr><td class="path">#5</td><td>칠하지 않은(면적 0) 바깥 띠 위에 놓으면</td><td>밑 슬롯 띠로 넘김 — 안 들면 새 창</td></tr>
+      <tr><td class="path">#6</td><td>안 보이던 탭을 제자리 탭바에 놓으면</td><td>그 탭을 보인다</td></tr>
+      <tr><td class="path">#7</td><td>끌기 그림에 무엇을 담나</td><td>터미널 칸 = 축소 그림 · 그 밖 칸 = 이름 자리채움 · 안 보이던 탭 = 제목만</td></tr>
+      <tr><td class="path">#8</td><td>「보인 것과 다름」으로 끝나면</td><td>무변경 — 탭은 원래 창에 다시 보임</td></tr>
+      <tr><td class="path">Q19</td><td>탭 하나 팝아웃을 옮길 때</td><td>다시 확인 · 되돌리기 없이 그 창째 옮김</td></tr>
+      <tr><td class="path">Q20</td><td>자기 탭바 안에서 끌면</td><td>순서 이동 (Chrome 처럼) — 3절</td></tr>
+      <tr><td class="path">Q21 · §11-1b ①</td><td>어느 창도 보고하지 못한 채 끝나면</td><td>뗀 순간 커서 자리에 적용 — 5절</td></tr>
+      <tr><td class="path">§11-1b ②</td><td>원래 창 탭바의 머묾 탭 전환</td><td>없어짐 — 받아들임 (Q20 에서 따라 나옴)</td></tr>
+      <tr><td class="path">Q22</td><td>탭바가 넘치면</td><td>Chrome 과 똑같이 — 스크롤 없음 · 고른 폭 · 꼬리 숨김 — 4절</td></tr>
+    </table></div>
+    <p class="cd" style="font-family:var(--sans)">§11-1 의 8건은 2026-10-16, Q20 · Q21 · Q22 는 2026-10-17 에 닫혔습니다. 거부한 대안은 TRD §11-1 · §12(ADR 후보 A–E)에 남습니다.</p>
   </div>
 
-  <h3>남은 실측 (TRD §8-2) — S5 를 뺀 다섯은 7단계 앞</h3>
-  <ul class="risks">
-    <li>
-      <svg viewBox="0 0 26 26" class="ic" aria-label="미측정"><circle cx="13" cy="13" r="9" class="c-risk"/></svg>
-      <div><b>S1 — 끝 신호</b><span class="st risk">미측정</span>
-      <p>Esc 를 우리 창 위 · 틈 · 바탕화면 · 덮은 다른 앱 위에서 각 20회 — 대상 떠남과 출처 끝이 셸에 닿는 순서 · 간격(떠남 유예 100ms 가 맞나) · 끝 뒤 pointermove · 머리를 접어도 <code>dragend</code> 가 오나 · 팝아웃 <code>hide()</code> · Esc 가 터미널에 들어가나. 안 되면 시한 조정 → 그래도면 platform 함수 하나(「주 버튼이 지금 눌려 있나」 · 사용자 보고).</p></div>
-    </li>
-    <li>
-      <svg viewBox="0 0 26 26" class="ic" aria-label="미측정"><circle cx="13" cy="13" r="9" class="c-risk"/></svg>
-      <div><b>S2 — 끌기 그림 내용</b><span class="st risk">미측정</span>
-      <p>터미널(WebGL) 캔버스를 옮긴 그림이 비지 않나 · <code>dragstart</code> 안 합성 p95 ≤ 8ms · 화면 밖 상자 그림이 쓰이나. 실패하면 자리채움 → 제목만 → 엔진 기본 그림 순으로 물러납니다(결정 #7 범위).</p></div>
-    </li>
-    <li>
-      <svg viewBox="0 0 26 26" class="ic" aria-label="미측정"><circle cx="13" cy="13" r="9" class="c-risk"/></svg>
-      <div><b>S3 — 바탕화면 · 다른 앱 · 파일</b><span class="st risk">미측정</span>
-      <p>탐색기 바탕화면 · 탐색기 창 · 메모장 · Edge 위 떼기 각 10회(새 창 · 그 앱에 아무것도 안 들어감) · OS 파일을 창에 놓아도 웹뷰가 그 파일로 탐색하지 않나. <b>탐색이 남으면 멈춤</b>(회귀).</p></div>
-    </li>
-    <li>
-      <svg viewBox="0 0 26 26" class="ic" aria-label="미측정"><circle cx="13" cy="13" r="9" class="c-risk"/></svg>
-      <div><b>S4 — 배율이 다른 모니터 · 다중 모니터</b><span class="st risk">미측정</span>
-      <p>100% · 150% 모니터에서 그린 띠와 판정이 ±1 CSS px 안 · 다른 모니터 빈 곳에 놓은 새 창 크기 · 걸친 창 위 Esc. 안 되면 마지막 보고 점을 화면 좌표로 옮겨 대조 → 그래도면 멈춤.</p></div>
-    </li>
-    <li>
-      <svg viewBox="0 0 26 26" class="ic" aria-label="미측정"><circle cx="13" cy="13" r="9" class="c-risk"/></svg>
-      <div><b>S5 — 원격(RDP)이 아닌 콘솔 세션 · 다른 PC</b><span class="st risk">미측정 · 8단계</span>
-      <p>2026-10-16 실측(RDP 세션 · 배율 1.25)의 핵심 수치를 로컬 콘솔에서 다시. 결론이 다르면 <b>멈춤 — 수단 재검토</b>(사용자).</p></div>
-    </li>
-    <li>
-      <svg viewBox="0 0 26 26" class="ic" aria-label="미측정"><circle cx="13" cy="13" r="9" class="c-risk"/></svg>
-      <div><b>S6 — Tauri 창 끌기 포커스 이슈(#10767)</b><span class="st risk">미측정</span>
-      <p>팝아웃 제목줄을 메인 위로 옮긴 직후 탭 끌기 10회가 정상인가. 걸리면 끌기 전 웹뷰 포커스를 다시 잡는다 → 그래도면 멈춤.</p></div>
-    </li>
-  </ul>
-
-  <h3>설계상 남는 위험 (TRD §11-2 에서 추림)</h3>
-  <ul class="risks">
-    <li>
-      <svg viewBox="0 0 26 26" class="ic" aria-label="설계상 위험"><path d="M13,3 L24,22 L2,22 Z" class="t-warn"/><line x1="13" y1="10" x2="13" y2="15" class="t-warn-i"/><line x1="13" y1="18.5" x2="13" y2="18.6" class="t-warn-i"/></svg>
-      <div><b>「마지막 점에 놓기」의 오판</b><span class="st prog">가능성 낮음</span>
-      <p>우리 창을 덮은 다른 앱 창 위로 나가 100ms 안에 떼면 그 밑 우리 창의 마지막 가이드로 붙습니다(사용자는 그 가이드를 직전에 봤음). S1 이 간격 분포를 재고, 끝 로그의 <code>leave_gap_ms</code> 로 현장에서도 봅니다.</p></div>
-    </li>
-    <li>
-      <svg viewBox="0 0 26 26" class="ic" aria-label="설계상 위험"><path d="M13,3 L24,22 L2,22 Z" class="t-warn"/><line x1="13" y1="10" x2="13" y2="15" class="t-warn-i"/><line x1="13" y1="18.5" x2="13" y2="18.6" class="t-warn-i"/></svg>
-      <div><b>끝 신호를 잃고 마우스가 우리 창에 안 오면</b><span class="st prog">가능성 낮음</span>
-      <p>장부 · 표식이 남아 그 탭의 떼어진 표시가 남고 다음 끌기가 거절됩니다. 마우스가 우리 창에 오는 순간 <code>dock_pointer_seen</code> 이 끝냅니다.</p></div>
-    </li>
-    <li>
-      <svg viewBox="0 0 26 26" class="ic" aria-label="설계상 위험"><path d="M13,3 L24,22 L2,22 Z" class="t-warn"/><line x1="13" y1="10" x2="13" y2="15" class="t-warn-i"/><line x1="13" y1="18.5" x2="13" y2="18.6" class="t-warn-i"/></svg>
-      <div><b>문턱 직후 캔버스에서 떼면 새 창</b><span class="st prog">확실 · PRD R22 그대로</span>
-      <p>끌기 문턱이 엔진 것이라 값을 고칠 수 없습니다. 거슬리면 QA 에서 「출처 창 안 · 시작 직후의 가이드 없음 놓기 = 무변경」을 올립니다.</p></div>
-    </li>
-    <li>
-      <svg viewBox="0 0 26 26" class="ic" aria-label="모름"><circle cx="13" cy="13" r="9" class="c-mut"/><text x="13" y="17.5" class="q" text-anchor="middle">?</text></svg>
-      <div><b>macOS (WKWebView) 의 창 사이 끌기</b><span class="st mut">모름 · 이식 때 S1 · S2 · S4</span>
-      <p>방식은 웹 표준이지만 WKWebView 가 창 사이 · 끄는 중 포인터 사건 · 끌기 그림을 어떻게 다루는지는 확인하지 않았습니다.</p></div>
-    </li>
-    <li>
-      <svg viewBox="0 0 26 26" class="ic" aria-label="받아들임"><path d="M7,13.5 L11.5,18 L19.5,8.5" class="c-ok"/></svg>
-      <div><b>끌기 그림 모양 · LLM 표면 없음</b><span class="st mut">받아들임 · 사용자 결정</span>
-      <p>끌기 그림은 반투명이고 다른 앱 위에서는 사라집니다. LLM 은 이번에 도킹 · 레이아웃 조회를 못 합니다 — 다음 작업이 닫고, 그 사이 CLAUDE.md 「LLM-우선 제어」 남은 갭에 적습니다(8단계).</p></div>
-    </li>
-  </ul>
+  <div class="sub">
+    <h3>남은 실측 (TRD §8-2)</h3>
+    <div class="legend" aria-hidden="true">
+      <span><svg viewBox="0 0 26 26" class="ic"><circle cx="13" cy="13" r="9" class="c-risk"/></svg>미측정</span>
+      <span><svg viewBox="0 0 26 26" class="ic"><path d="M7,13.5 L11.5,18 L19.5,8.5" class="c-ok"/></svg>합격 · 받아들임</span>
+      <span><svg viewBox="0 0 26 26" class="ic"><path d="M13,3 L24,22 L2,22 Z" class="t-warn"/><line x1="13" y1="10" x2="13" y2="15" class="t-warn-i"/><line x1="13" y1="18.5" x2="13" y2="18.6" class="t-warn-i"/></svg>설계상 남는 위험</span>
+      <span><svg viewBox="0 0 26 26" class="ic"><circle cx="13" cy="13" r="9" class="c-mut"/><text x="13" y="17.5" class="q" text-anchor="middle">?</text></svg>모름 · 나중에 잼</span>
+    </div>
+    <ul class="risks">
+      <li>
+        <svg viewBox="0 0 26 26" class="ic" aria-label="미측정"><circle cx="13" cy="13" r="9" class="c-risk"/></svg>
+        <div><b>S7 — 순서 이동 · 보고 없는 끝 · 엔진 취소 · 빠른 빼기</b><span class="st risk">미측정 · 9c 트리에서 커밋 전</span>
+        <p>실 입력으로 — 끄는 머리 가장자리를 이웃 가운데 ±1px 로 넘나들기 · 구역 경계 ±1px · 구역 안 Esc(<code>last</code> 를 썼나) · 멈춘 채 떼기 · 짧은 톡 · 엔진 취소의 시각 차 분포(처리기 시작 기준) · 이웃 창 멈춘 채 떼기 다시(끊김 없는 이동으로) · 빠르게 빼고 멈춤. 탭바 넘침은 폭 함수 vitest + 화면 QA(AC29).</p></div>
+      </li>
+      <li>
+        <svg viewBox="0 0 26 26" class="ic" aria-label="미측정"><circle cx="13" cy="13" r="9" class="c-risk"/></svg>
+        <div><b>S1 — 끝 신호</b><span class="st risk">미측정 · ⑧ 은 5.7 기준으로 다시</span>
+        <p>Esc 를 우리 창 위 · 틈 · 바탕화면 · 덮은 다른 앱 위에서 각 20회 — 떠남과 끝이 셸에 닿는 순서 · 간격 · 끝 뒤 <code>pointermove</code> · 팝아웃 <code>hide()</code> · Esc 가 터미널에 들어가나. ⑧(사건 순서)은 10-17 실측에서 결함 셋을 내 5.7 판의 고침으로 이어졌습니다.</p></div>
+      </li>
+      <li>
+        <svg viewBox="0 0 26 26" class="ic" aria-label="미측정"><circle cx="13" cy="13" r="9" class="c-risk"/></svg>
+        <div><b>S2 — 끌기 그림 내용</b><span class="st risk">미측정</span>
+        <p>터미널(WebGL) 캔버스를 옮긴 그림이 비지 않나 · <code>dragstart</code> 안 합성 p95 ≤ 8ms · 화면 밖 상자 그림이 쓰이나. 실패하면 자리채움 → 제목만 → 엔진 기본 그림 순으로 물러납니다.</p></div>
+      </li>
+      <li>
+        <svg viewBox="0 0 26 26" class="ic" aria-label="미측정"><circle cx="13" cy="13" r="9" class="c-risk"/></svg>
+        <div><b>S4 — 배율이 다른 모니터 · 다중 모니터</b><span class="st risk">미측정</span>
+        <p>100% · 150% 모니터에서 그린 띠와 판정이 ±1 CSS px 안인가 · 다른 모니터 빈 곳에 놓은 새 창 크기 · 걸친 창 위 Esc.</p></div>
+      </li>
+      <li>
+        <svg viewBox="0 0 26 26" class="ic" aria-label="미측정"><circle cx="13" cy="13" r="9" class="c-risk"/></svg>
+        <div><b>S5 — 원격(RDP)이 아닌 콘솔 세션 · 다른 PC</b><span class="st risk">미측정 · 8단계</span>
+        <p>지금까지의 실측은 전부 RDP 세션 · 배율 1.25 입니다. 핵심 수치를 로컬 콘솔에서 다시 재고, 결론이 다르면 <b>멈춤 — 수단 재검토</b>(사용자).</p></div>
+      </li>
+      <li>
+        <svg viewBox="0 0 26 26" class="ic" aria-label="합격"><path d="M7,13.5 L11.5,18 L19.5,8.5" class="c-ok"/></svg>
+        <div><b>S3 · S6 — 바탕화면 · 다른 앱 · 파일 / 제목줄 끌기 뒤 탭 끌기</b><span class="st mut">합격 2026-10-17</span>
+        <p>S3 ① 다른 앱 위 떼기 40/40 · ② 파일 끌어 놓기로 탐색 0/20 · 에이전트 트리 재확인 합격 · S6 10/10.</p></div>
+      </li>
+    </ul>
+  </div>
 
   <div class="sub">
-    <h3>남은 일 — TRD 5판 §10 순서</h3>
+    <h3>설계상 남는 위험 (TRD §11-2 에서 추림)</h3>
+    <ul class="risks">
+      <li>
+        <svg viewBox="0 0 26 26" class="ic" aria-label="설계상 위험"><path d="M13,3 L24,22 L2,22 Z" class="t-warn"/><line x1="13" y1="10" x2="13" y2="15" class="t-warn-i"/><line x1="13" y1="18.5" x2="13" y2="18.6" class="t-warn-i"/></svg>
+        <div><b>「마지막 점에 놓기」의 오판 (#1)</b><span class="st prog">가능성 낮음</span>
+        <p>우리 창을 덮은 다른 앱 창 위로 나가 100ms 안에 떼면 그 밑 우리 창의 마지막 가이드로 붙습니다(사용자는 그 가이드를 직전에 봤음). S1 이 간격 분포를 잽니다.</p></div>
+      </li>
+      <li>
+        <svg viewBox="0 0 26 26" class="ic" aria-label="설계상 위험"><path d="M13,3 L24,22 L2,22 Z" class="t-warn"/><line x1="13" y1="10" x2="13" y2="15" class="t-warn-i"/><line x1="13" y1="18.5" x2="13" y2="18.6" class="t-warn-i"/></svg>
+        <div><b>이웃 창 위에서 멈춘 채 뗀 끌기는 새 창 (#29)</b><span class="st prog">확실 · 설계의 대가</span>
+        <p>커서 판정을 W · 원래 창으로 좁힌 대가입니다(D21). 창 둘이 문턱 거리 안에 겹친 자리에서만 나고, S7 ⑪ 이 끊김 없는 이동으로 다시 잽니다.</p></div>
+      </li>
+      <li>
+        <svg viewBox="0 0 26 26" class="ic" aria-label="받아들임"><path d="M7,13.5 L11.5,18 L19.5,8.5" class="c-ok"/></svg>
+        <div><b>빠르게 빼고 멈춘 끌기의 모습 늦음 (#35) · 넘친 탭바의 끝 너머 활성 탭 (#40)</b><span class="st mut">받아들임</span>
+        <p>앞의 것은 결과가 커서 자리 그대로이고 모습만 다음 움직임까지 늦습니다. 뒤의 것은 Chrome 과 같은 한계입니다(4절).</p></div>
+      </li>
+      <li>
+        <svg viewBox="0 0 26 26" class="ic" aria-label="모름"><circle cx="13" cy="13" r="9" class="c-mut"/><text x="13" y="17.5" class="q" text-anchor="middle">?</text></svg>
+        <div><b>macOS (WKWebView) 의 창 사이 끌기 (#18)</b><span class="st mut">모름 · 이식 때 S1 · S2 · S4</span>
+        <p>방식은 웹 표준이지만 WKWebView 가 창 사이 · 끄는 중 포인터 사건 · 끌기 그림을 어떻게 다루는지는 확인하지 않았습니다.</p></div>
+      </li>
+      <li>
+        <svg viewBox="0 0 26 26" class="ic" aria-label="받아들임"><path d="M7,13.5 L11.5,18 L19.5,8.5" class="c-ok"/></svg>
+        <div><b>LLM 이 도킹 · 레이아웃 조회를 못 함 (#15)</b><span class="st mut">받아들임 · 사용자 결정</span>
+        <p>다음 작업이 닫고, 그 사이 CLAUDE.md 「LLM-우선 제어」 남은 갭에 적습니다(8단계).</p></div>
+      </li>
+    </ul>
+  </div>
+
+  <div class="sub">
+    <h3>남은 순서</h3>
     <ol class="steps">
-      <li><b>3단계 마무리</b><span>재리뷰 → <code>/qa full</code>(팝아웃 X · 0탭 자가 닫기 · 출력 계속 — PC 잠금 해제 필요) → 커밋. 미커밋 <code>dock/session.rs</code> 는 넣지 않고 지운다.</span></li>
-      <li><b>4단계 — 메인 빈 탭 고침 + 적용 서비스</b><span class="gate">결정 #2 필요.</span> <span><code>MainLastTab</code> 제거 · <code>refill_main</code> · <code>apply::dock_tab</code> · 창 포트 <code>open_at</code> · <code>move_window</code>.</span></li>
-      <li><b>6a · 6b — 영역 · 판정 어댑터 · 골든 · 끌기 장부</b><span>4 와 병렬 가능. <code>dock/regions.rs</code> · <code>dock/types.rs</code> · <code>pick_golden.json</code> · <code>dock/book.rs</code>.</span></li>
-      <li><b>6c — 셸 배선</b><span>4 · 6b 뒤. 크롬 측정 칸 · <code>commands/dock.rs</code>(invoke 여섯 + <code>report_dock_chrome</code>) · 계기 · <code>WebviewEnv::finish</code> 의 드롭 처리기 끄기.</span></li>
-      <li><b>실측 S1–S4 · S6</b><span class="gate">PC 잠금 해제 · 실제 창 필요.</span> <span>불합격이면 멈추고 사용자에게.</span></li>
-      <li><b>7단계 — 프론트</b><span>탭 끌기 출처 · 대상 · 거울 · 끌기 그림 · 가이드 · 떼어진 표시 — <b>마우스 도킹이 끝까지 된다.</b></span></li>
-      <li><b>8단계 — 문서 · 화면 실측</b><span>ADR(A–E) · step-log · CLAUDE.md 남은 갭 한 줄 · 이 페이지 갱신 · <code>/qa full</code>(AC 전부 · S5).</span></li>
-      <li class="nextwork"><b>다음 작업 — LLM 레이아웃 명령</b><span>외부 조사부터(LLM 도구 설계 관례). 4단계만 있으면 시작할 수 있다.</span></li>
+      <li><b>9c-B2 — 탭바 · 창 끌기 쪽 (구현 · 코드 리뷰 3 라운드 + 확인 통과 · 미커밋)</b><span>탭바 재기(숨긴 머리 포함) · 엔진 취소 · <code>last</code> 싣기 · 순서 이동 모습 · 떼어진 표시는 도킹 모드에서만. <code>/qa standard</code> PASS(2026-10-18 — 워크스페이스 4720 통과 · vitest 2384). 마우스 없는 화면 확인(탭바 넘침)은 끝 — TRD §8-1.</span></li>
+      <li><b>실 마우스 실측 — S7(⑥' 조금 끌고 멈춘 채 놓기 5회 = 제자리 무변경 포함) · S1 ⑧ 다시</b><span class="gate">PC 잠금 해제 · 실제 창 필요.</span> <span>9c 작업 트리에서 커밋 전에(아직 안 함). 불합격이면 멈추고 사용자에게.</span></li>
+      <li><b>9c 커밋</b><span>A · B1 · B2 를 함께.</span></li>
+      <li><b>8단계 — 문서 · 화면 QA</b><span>ADR(A–E) · step-log · CLAUDE.md 「LLM-우선 제어」 남은 갭 한 줄 · 이 페이지 <code>/review doc</code> · <code>/qa full</code>(AC 전부 · S5).</span></li>
+      <li class="nextwork"><b>다음 작업 — LLM 레이아웃 명령</b><span>외부 조사부터(LLM 도구 설계 관례). <code>apply::dock_tab</code> 위에 껍데기만 얹습니다.</span></li>
     </ol>
   </div>
 
   <details>
-    <summary>자세히 — 끝난 실측 · ADR 후보</summary>
+    <summary>자세히 — 끝난 실측</summary>
     <div class="body">
       <ul>
-        <li><b>끝난 실측(2026-10-16 · TRD §8-1)</b>: tauri 2.11.3 · wry 0.55.1 · WebView2 Edg/155 · Windows 11 · RDP 세션 · 배율 1.25 · 끌기 22회. 셸 메인 스레드 지연 최대 4.1ms(평소 1.4) · emit → JS p99 11 · 최대 33ms · invoke 왕복 p50 2.2 · p99 약 16 · 최대 약 50ms · 대상 <code>dragover</code> 60/s(움직일 때) · 커스텀 형식 12/12 · <code>dragend</code> 는 모든 경우 · 원본 창을 숨겨도 끌기가 이어짐(2회).</li>
-        <li><b>4판의 스파이크 S1–S6</b>(포인터 직접 읽기 · 맨 위 창 · 딱지 창 등)은 수단이 바뀌어 뜻을 잃었습니다.</li>
-        <li><b>ADR 후보(8단계에서 <code>/adr</code>)</b>: A 도킹 모델 · B 크기 규칙(새것 1/3) · C 끌기 수단 = HTML5 끌어 놓기 · D LLM 표면을 다음 작업으로 · E 팝아웃 닫기 요청에서 모델 먼저 지우기.</li>
-        <li>스파이크 상세: <code>.claude/handoff/attachments/spike-html5dnd-2026-10-16.md</code></li>
+        <li><b>2026-10-16 스파이크</b>(TRD §8-1 · 앱 의존 없는 맨 페이지): tauri 2.11.3 · wry 0.55.1 · WebView2 Edg/155 · Windows 11 · RDP 세션 · 배율 1.25 · 끌기 22회. 셸 메인 스레드 지연 최대 4.1ms(평소 1.4) · emit → JS p99 11 · 최대 33ms · invoke 왕복 p50 2.2 · p99 약 16 · 최대 약 50ms · 대상 <code>dragover</code> 60/s(움직일 때) · 약 15/s(멈춤) · 커스텀 형식 12/12 · <code>dragend</code> 는 모든 경우 · 원본 창을 숨겨도 끌기가 이어짐(2회).</li>
+        <li><b>2026-10-17 실 입력</b>(Win32 <code>SendInput</code> · 6c + 7단계 트리): S3 · S6 · 트리 재확인 합격. S1 ⑧ 은 결함 셋 — ① 멈춘 채 떼면 새 창(같은 창 12/12 · 짧은 톡 10 · 25 · 50ms 에 9/10 · 6/10 · 4/10) ② 엔진 취소 거르기의 0ms 시한 경주(4/19 새어 새 창) ③ 영역 전 보고로 판정돼 무변경(이웃 창 6/20). ① ③ 은 커서 판정(Q21), ② 는 5.7 판이 들인 시각 차 거르기(<code>dragend</code> − 시작 &lt; 15ms)로 고쳤고, 9c-B2 가 그 시작을 <code>dragstart</code> 처리기 시작에서 재게 바꿨습니다.</li>
+        <li><b>2026-10-18 화면 QA(마우스 없음 · 탭바 넘침)</b>(실 앱 · CDP · 9c 트리): main 1280px · 실 팝아웃 720×500 + 뷰포트 훑기 · 탭 1–44개에서 TRD §4-5 규칙과 폭 어긋남 0 · 콘솔 오류 0. 실 닫기 버튼 폭이 12.21px 라 <code>A</code> 의 엄밀한 셈은 44 — 42 에서도 × 가 잘려 보이지 않아 지금은 42 를 두고 T-66 에서 다시 정합니다(TRD §7 #73).</li>
+        <li>스파이크 상세: <code>.claude/handoff/attachments/spike-html5dnd-2026-10-16.md</code> · 실 입력 상세: <code>.claude/handoff/attachments/slot-docking-S1-8-S3-S6-real-2026-10-17.md</code></li>
       </ul>
     </div>
   </details>
@@ -1894,10 +1871,11 @@
   <footer>
     출처:
     <ul>
-      <li><code>docs/process/S21-slot-docking/trd.md</code> 5판 · <code>prd.md</code> 4.3판 (커밋 <code>bbaa9453</code> — 리뷰 전)</li>
-      <li><code>docs/research/slot-docking-drag-mechanism-2026-10-16.md</code> · <code>.claude/handoff/attachments/spike-html5dnd-2026-10-16.md</code></li>
-      <li><code>.claude/handoff/attachments/llm-layout-surface-notes-2026-10-16.md</code> · <code>slot-docking-progress-2026-10-15.md</code></li>
-      <li>코드 위치: 저장소 rg 확인(2026-10-16) · 시험 수치: 커밋 본문 <code>080893c5</code> · <code>e73e0289</code> · <code>ca723ed5</code></li>
+      <li><code>docs/process/S21-slot-docking/trd.md</code> 5.8판 · <code>prd.md</code> 4.7판 (작업 트리 · 미커밋)</li>
+      <li>단계 상태: <code>git log</code>(HEAD <code>9b74ff40</code>) · 9c 의 A · B1 · B2 나눔과 상태는 TRD §10 9c 행(2026-10-18)</li>
+      <li>Chrome 탭바 규칙: Chromium main 소스(2026-10-17 읽음 — <code>tab_strip_layout.cc</code> · <code>tab_width_constraints.cc</code> · <code>tab_container_impl.cc</code> 등 — TRD §4-5)</li>
+      <li><code>docs/research/slot-docking-drag-mechanism-2026-10-16.md</code> · <code>docs/research/slot-docking-chrome-tab-drag-2026-10-17.md</code></li>
+      <li>코드 위치: 저장소에서 심볼 확인(2026-10-18) · 탭 폭 예시 수치는 TRD §4-5 의 식으로 계산</li>
     </ul>
   </footer>
 </section>
