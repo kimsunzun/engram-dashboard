@@ -86,6 +86,7 @@ function slotSnap(viewId: string, version: number): ViewSnapshot {
     ratio_min: 0.1,
     ratio_max: 0.9,
     version,
+    layout_rev: version,
   }
 }
 

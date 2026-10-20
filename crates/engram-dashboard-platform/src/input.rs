@@ -1,7 +1,8 @@
-//! 입력 장치의 지금 상태 — 커서 자리 · 주 버튼이 눌려 있나. 어느 스레드에서나 부른다(셸의 앱 수명 폴러 스레드 ·
-//! 메인 스레드 · 이동 루프의 들어가기 전 · 들어갈 때 확인 — TRD S21-slot-docking §8).
+//! 입력 장치의 지금 상태 — 커서 자리 · 주 버튼 · Esc 가 눌려 있나. 어느 스레드에서나 부른다(셸의 앱 수명 폴러
+//! 스레드 · 메인 스레드 · 이동 루프의 들어가기 전 · 들어갈 때 확인 — TRD S21-slot-docking §8 · 놓기 명령이 끌기가 끝난
+//! 뒤에 읽는 자리 — TRD S21-slot-docking 7판 §3-2).
 //!
-//! 둘 다 OS 의 비동기 상태를 읽는다 — 메시지 큐를 거치지 않으므로 웹뷰가 쥔 캡처 · 다른 프로세스의 창과 무관하게
+//! 셋 다 OS 의 비동기 상태를 읽는다 — 메시지 큐를 거치지 않으므로 웹뷰가 쥔 캡처 · 다른 프로세스의 창과 무관하게
 //! 지금 장치 상태다. ★보안 데스크톱(잠금 화면 · UAC)이 앞에 있으면 OS 가 답하지 않는다★ — 커서는 `None`, 버튼은
 //! 떨어진 것으로 온다(MS `GetCursorPos` · `GetAsyncKeyState` 문서 · TRD §12 M14).
 
@@ -47,6 +48,22 @@ pub fn primary_button_down() -> bool {
     }
 }
 
+/// Esc 가 지금 눌려 있나(Win32 `GetAsyncKeyState(VK_ESCAPE)`). 아주 짧게 친 Esc 는 이미 떨어진 것으로 읽힐 수 있다
+/// (스파이크 2026-10-20 — 짧은 Esc 를 OS 가 놓침 1/5). Windows 밖 = 거짓.
+// TRD S21-slot-docking §3-2
+pub fn escape_down() -> bool {
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE};
+        // SAFETY: 값만 읽는 조회 하나.
+        unsafe { (GetAsyncKeyState(VK_ESCAPE.0 as i32) as u16 & 0x8000) != 0 }
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 #[cfg(windows)]
 fn primary_vk(swapped: bool) -> windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY {
     use windows::Win32::UI::Input::KeyboardAndMouse::{VK_LBUTTON, VK_RBUTTON};
@@ -77,5 +94,17 @@ mod tests {
             !primary_button_down(),
             "시험 중에는 주 버튼을 누르지 않는다"
         );
+    }
+}
+
+// OS 와 무관하게 컴파일된다 — Windows 밖에서는 늘 거짓이라 같은 단언이 선다.
+#[cfg(test)]
+mod portable_tests {
+    use super::*;
+
+    // CI 러너 · 손대지 않은 개발 PC — 아무도 Esc 를 쥐고 있지 않다.
+    #[test]
+    fn escape_reads_up_when_nobody_holds_it() {
+        assert!(!escape_down());
     }
 }

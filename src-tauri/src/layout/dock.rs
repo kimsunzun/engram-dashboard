@@ -9,6 +9,7 @@
 
 use std::collections::HashSet;
 
+use ts_rs::TS;
 use uuid::Uuid;
 
 use super::geometry::{self, has_area, LayoutGeometry, RectF64};
@@ -16,9 +17,12 @@ use super::tree;
 use super::types::{LayoutNode, SlotContent, SplitDir};
 
 /// 붙일 쪽 — 이름이 결과 배치를 말한다. `Left` = 기준의 왼쪽에 새것 · `Right` = 오른쪽 · `Top` = 위 · `Bottom` = 아래.
-// ★`#[serde(rename_all)]` 을 달지 말 것★ — 지금 이것을 싣는 버스 명령 · invoke 는 없고, 실을 버스 명령(`tab.dock`
-// · T-65)의 선언 매크로는 rename 을 못 달아 variant 이름이 그대로 wire 값이 된다. serde 철자도 그와 같게(`Left` …) 둔다.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// wire 값 = variant 이름 그대로(`Left` …).
+// ★`#[serde(rename_all)]` 을 달지 말 것★ — 이것을 실을 버스 명령(`tab.dock` · T-65)의 선언 매크로는 rename 을 못 달아
+// variant 이름이 그대로 wire 값이 된다. 놓기 invoke(`tab_drop` 의 `Seam`)도 같은 철자로 싣는다.
+// TRD S21-slot-docking §3-1
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
 pub enum DockSide {
     Left,
     Right,

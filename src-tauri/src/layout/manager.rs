@@ -340,6 +340,10 @@ pub struct ViewManager {
     // 동안 「점유」다. 프론트로 나가지 않는다 — 스냅숏은 슬롯 id 만 싣는다(`foreign_slots`). 뷰로 먼저 가르는
     // 이유: 탭이 다른 창으로 옮겨도 그대로 따라가고, 뷰를 지울 때 한 번에 거둔다.
     unknown_content: HashMap<ViewId, HashMap<Uuid, Map<String, Value>>>,
+    // 뷰마다 판 번호(`ViewSnapshot::layout_rev`). 적는 곳은 `insert_view` · `edit_layout`(만들기는 `unbumped_revs` 가
+    // 내린다), 지우는 곳은 `remove_view` 뿐이다. 영속하지 않는다 — 영속 · `PartialEq` 인 `View` 에 넣지 않는 이유다.
+    // TRD S21-slot-docking §3-7
+    layout_revs: HashMap<ViewId, u64>,
     // 끄는 중인 탭(표식, 탭) — 한 번에 하나. 모델 안에 두는 이유: 「끄는 중인 탭을 옮기는 명령은 실패」 판정이 그
     // 명령의 변경과 같은 락 안에서 서야 한다(TRD S21-slot-docking §1-2 「표식」). 저장하지 않는다.
     lease: Option<(LeaseId, ViewId)>,
@@ -371,6 +375,7 @@ impl ViewManager {
                 v0,
             ),
         );
+        mgr.unbumped_revs();
         mgr
     }
 
@@ -417,7 +422,17 @@ impl ViewManager {
             mgr.windows
                 .insert(label, WindowTabs::new(window_id, attrs, tabs, active));
         }
+        mgr.unbumped_revs();
         Ok(mgr)
+    }
+
+    // 만들기는 `version` 을 올리지 않는다 — 들인 뷰의 판 번호를 지금 `version` 으로 내린다. 안 내리면 첫 쓰기가 적는
+    // 값(`next_version`)이 만들 때 적은 값과 같아 그 쓰기를 못 본다.
+    fn unbumped_revs(&mut self) {
+        let now = self.version;
+        for rev in self.layout_revs.values_mut() {
+            *rev = now;
+        }
     }
 
     // 창이 하나도 없는 모델 — 불변식 4 가 아직 안 선다. 만드는 쪽이 main 을 세운다.
@@ -429,6 +444,7 @@ impl ViewManager {
             version: 0,
             attrs_rev: 0,
             unknown_content: HashMap::new(),
+            layout_revs: HashMap::new(),
             lease: None,
             lease_seq: 0,
             closed_labels: HashSet::new(),
@@ -457,7 +473,7 @@ impl ViewManager {
             }
             Self::fixup_focus(&mut view);
             self.view_owner.insert(view.id, label.to_string());
-            self.views.insert(view.id, view);
+            self.insert_view(view);
         }
         Ok((ids, active))
     }
@@ -509,7 +525,16 @@ impl ViewManager {
             ratio_min: tree::RATIO_MIN,
             ratio_max: tree::RATIO_MAX,
             version: self.version,
+            layout_rev: self.layout_revs.get(&view_id).copied().unwrap_or(0),
         })
+    }
+
+    /// 뷰 `view` 의 판 번호 — 스냅숏의 `layout_rev` 와 같은 값이다. 없는 뷰면 `None`.
+    // TRD S21-slot-docking §3-7
+    pub fn layout_rev(&self, view: ViewId) -> Option<u64> {
+        self.views
+            .contains_key(&view)
+            .then(|| self.layout_revs.get(&view).copied().unwrap_or(0))
     }
 
     pub fn slot_agent(&self, view_id: Uuid, slot_id: Uuid) -> Result<Option<String>, LayoutError> {
@@ -618,6 +643,38 @@ impl ViewManager {
 
     // ── 내부 헬퍼 ───────────────────────────────────────────────────────────
 
+    // 지금 쓰기가 낼 `version` — 쓰기마다 끝에서 `bump_version` 을 한 번 부르므로 이 값이 그 쓰기의 알림에 실린다. 판
+    // 번호를 이 값으로 적어 같은 뷰의 판 번호가 늘기만 한다(복원이 같은 id 의 뷰를 다시 들여도 앞 값과 겹치지 않는다).
+    fn next_version(&self) -> u64 {
+        self.version + 1
+    }
+
+    // 뷰를 `views` 에 들이는 유일한 문 — 판 번호를 함께 적는다.
+    // TRD S21-slot-docking §3-7
+    fn insert_view(&mut self, view: View) {
+        self.layout_revs.insert(view.id, self.next_version());
+        self.views.insert(view.id, view);
+    }
+
+    // 뷰 레이아웃 칸(트리 · 비율 · 슬롯 내용)을 바꾸는 유일한 문 — `edit` 가 바꿨다고 답하면(`Some`) 그 뷰의 판 번호를
+    // 함께 적는다. `None` 이면 아무것도 바꾸지 않았어야 한다. 포커스는 같은 손에서 바꿔도 된다. 없는 view 는
+    // `ViewNotFound`.
+    // ★레이아웃 칸을 이 밖에서 쓰지 말 것★ — `views` · `View::layout` 이 공개라 컴파일러가 막지 못한다. 그물 = 시험
+    //   `each_layout_write_moves_the_layout_rev_and_nothing_else_does`.
+    // TRD S21-slot-docking §3-7
+    fn edit_layout<R>(
+        &mut self,
+        view_id: ViewId,
+        edit: impl FnOnce(&mut View) -> Option<R>,
+    ) -> Result<Option<R>, LayoutError> {
+        let rev = self.next_version();
+        let out = edit(self.view_mut(view_id)?);
+        if out.is_some() {
+            self.layout_revs.insert(view_id, rev);
+        }
+        Ok(out)
+    }
+
     // 슬롯 내용 쓰기의 유일한 문 — 모르는 내용 항목을 지운다(무엇을 쓰든, `Empty` 여도). version 은 호출자가 올린다.
     fn write_slot_content(
         &mut self,
@@ -625,8 +682,10 @@ impl ViewManager {
         slot_id: Uuid,
         content: SlotContent,
     ) -> Result<(), LayoutError> {
-        let v = self.view_mut(view_id)?;
-        if !tree::set_in_tree(&mut v.layout, slot_id, content) {
+        let written = self.edit_layout(view_id, |v| {
+            tree::set_in_tree(&mut v.layout, slot_id, content).then_some(())
+        })?;
+        if written.is_none() {
             return Err(LayoutError::SlotNotFound(slot_id));
         }
         self.forget_unknown(view_id, slot_id);
@@ -656,6 +715,7 @@ impl ViewManager {
         self.views.remove(&view);
         self.view_owner.remove(&view);
         self.unknown_content.remove(&view);
+        self.layout_revs.remove(&view);
         if matches!(self.lease, Some((_, leased)) if leased == view) {
             self.lease = None;
         }
@@ -666,15 +726,12 @@ impl ViewManager {
         let id = Uuid::new_v4();
         let first_slot = LayoutNode::new_empty_slot();
         let focus = tree::first_slot_id(&first_slot);
-        self.views.insert(
+        self.insert_view(View {
             id,
-            View {
-                id,
-                name,
-                layout: first_slot,
-                focused_slot_id: Some(focus),
-            },
-        );
+            name,
+            layout: first_slot,
+            focused_slot_id: Some(focus),
+        });
         id
     }
 
@@ -824,7 +881,10 @@ impl ViewManager {
         slot_id: Uuid,
         dir: SplitDir,
     ) -> Result<Uuid, LayoutError> {
-        let v = self.view_mut(view_id)?;
+        let v = self
+            .views
+            .get(&view_id)
+            .ok_or(LayoutError::ViewNotFound(view_id))?;
         // 표현 가능성 가드: 늘 같은 쪽 자식을 나누면 새 경계가 부모 끝과 비트 단위로 같아져 한쪽 칸의 폭이
         // 0 이 된다. 새 경계를 실제 기하와 같은 식·같은 비율로 미리 재서 칸 안에 엄격히 들 때만 나눈다.
         // 이미 면적 0 인 칸(쓰기 경로로는 안 생기고 심긴 트리에만 있다)은 축과 무관하게 거절한다 — 다른 축으로
@@ -845,9 +905,13 @@ impl ViewManager {
                 return Err(LayoutError::SplitTooDeep);
             }
         }
-        match tree::split_in_tree(&mut v.layout, slot_id, dir) {
+        let split = self.edit_layout(view_id, |v| {
+            let new_id = tree::split_in_tree(&mut v.layout, slot_id, dir)?;
+            v.focused_slot_id = Some(new_id);
+            Some(new_id)
+        })?;
+        match split {
             Some(new_id) => {
-                v.focused_slot_id = Some(new_id);
                 self.bump_version();
                 Ok(new_id)
             }
@@ -934,7 +998,10 @@ impl ViewManager {
                 outcome: SplitRatioOutcome::Unchanged,
             });
         }
-        self.view_mut(view_id)?.layout = candidate;
+        self.edit_layout(view_id, |v| {
+            v.layout = candidate;
+            Some(())
+        })?;
         self.bump_version();
         Ok(SplitRatioResult {
             ratio: wanted,
@@ -979,11 +1046,12 @@ impl ViewManager {
     }
 
     pub fn close_slot(&mut self, view_id: Uuid, slot_id: Uuid) -> Result<(), LayoutError> {
-        let v = self.view_mut(view_id)?;
-        if !tree::close_in_tree(&mut v.layout, slot_id) {
+        let closed = self.edit_layout(view_id, |v| {
+            tree::close_in_tree(&mut v.layout, slot_id).then(|| Self::fixup_focus(v))
+        })?;
+        if closed.is_none() {
             return Err(LayoutError::SlotNotFound(slot_id));
         }
-        Self::fixup_focus(v);
         self.forget_unknown(view_id, slot_id);
         self.bump_version();
         Ok(())
@@ -1147,9 +1215,10 @@ impl ViewManager {
     /// 4. `Seam` 기준 슬롯이 대상 탭에 없으면 — 다른 탭에 있으면 `SlotNotInTab`, 어디에도 없으면 `SlotNotFound`.
     /// 5. 표식 — 출처에 표식이 섰는데 `guard.lease` 가 없으면 `Dragging` · `guard.lease` 가 출처의 지금 표식이
     ///    아니면(표식 없음 · 다른 번호 · 다른 탭의 표식) `StaleLease`.
-    /// 6. `guard.expect_source` 가 출처 탭 배치와 다르면 `SourceChanged` · `guard.expect_target` 이 대상(`Seam` =
-    ///    대상 탭 배치와 대상 창의 모델 활성 탭 · `TabBar` = 대상 창 탭 목록)과 다르거나 그 모드의 값이 아니면
-    ///    (`NewWindow` 는 무엇이든) `TargetChanged`.
+    /// 6. `guard.expect_window` 가 출처 탭의 창이 아니거나 `guard.expect_source` 가 출처 탭 배치와 다르면
+    ///    `SourceChanged` · `guard.expect_target` 이 대상(`Seam` = 대상 탭 배치와 대상 창의 모델 활성 탭 · `SeamAt` =
+    ///    대상 탭의 창 · 대상 탭의 판 번호([`Self::layout_rev`]) · 그 창 모델 활성 탭이 `active` 나 `or_initial` 인가 ·
+    ///    `TabBar` = 대상 창 탭 목록)과 다르거나 그 모드의 값이 아니면(`NewWindow` 는 무엇이든) `TargetChanged`.
     /// 7. `Seam` — `share` 가 유한하지 않거나 `tree::RATIO_MIN..=0.5` 밖이면 `InvalidShare` · 두 트리가 슬롯 id 를
     ///    함께 가지면 `SlotIdOverlap` · 결과에 새 면적 0 칸이 생기면 `ZeroArea`.
     ///
@@ -1187,11 +1256,15 @@ impl ViewManager {
                 }
                 let pulled = self.pull_docked_tab(&source_window, view, mv.successor);
                 self.remove_view(view);
-                if let Some(t) = self.views.get_mut(&target) {
+                let placed = self.edit_layout(target, |t| {
                     t.layout = layout;
                     if reveal {
                         t.focused_slot_id = Some(first);
                     }
+                    Some(())
+                });
+                if let Err(e) = placed {
+                    tracing::warn!(view = %target, "이음새 도킹 — 판정이 본 대상 탭이 적용 때 없다: {e}");
                 }
                 if reveal || source_was_visible {
                     if let Some(wt) = self.windows.get_mut(&target_window) {
@@ -1320,6 +1393,14 @@ impl ViewManager {
 
         self.check_lease(view, guard.lease)?;
 
+        // TRD S21-slot-docking §3-7
+        if guard
+            .expect_window
+            .as_ref()
+            .is_some_and(|want| *want != source_window)
+        {
+            return Err(DockError::SourceChanged);
+        }
         let source_layout = &self.views[&view].layout;
         if guard
             .expect_source
@@ -1336,6 +1417,21 @@ impl ViewManager {
             (DockTo::Seam { target, .. }, Some(TargetExpect::Seam { layout, active })) => {
                 *layout == self.views[target].layout
                     && *active == self.windows[&target_window].active
+            }
+            // TRD S21-slot-docking §3-3 · §3-7
+            (
+                DockTo::Seam { target, .. },
+                Some(TargetExpect::SeamAt {
+                    window,
+                    rev,
+                    active,
+                    or_initial,
+                }),
+            ) => {
+                let now = self.windows[&target_window].active;
+                target_window == *window
+                    && self.layout_rev(*target) == Some(*rev)
+                    && (now == *active || Some(now) == *or_initial)
             }
             (DockTo::TabBar { window, .. }, Some(TargetExpect::Tabs(want))) => {
                 *want == self.windows[window].tabs
@@ -1415,6 +1511,14 @@ impl ViewManager {
         let source_window = self.tab_window(view).ok_or(DockError::TabNotFound(view))?;
         let source = &self.windows[source_window];
         self.check_lease(view, guard.lease)?;
+        // TRD S21-slot-docking §3-7
+        if guard
+            .expect_window
+            .as_ref()
+            .is_some_and(|want| want != source_window)
+        {
+            return Err(DockError::SourceChanged);
+        }
         if guard
             .expect_source
             .as_ref()
@@ -1546,7 +1650,8 @@ impl ViewManager {
     /// 것 = 지운 옛 팝아웃 label(정렬) — 그 OS 창은 부르는 쪽이 락 밖에서 거둔다.
     ///
     /// - `version` · `attrs_rev` 는 지금 값에서 하나씩 오른다 — `restored` 의 번호는 버린다. 기록기는 같은지만 보므로
-    ///   되감긴 번호가 마지막으로 본 값과 같아지면 그 사이의 변경을 놓친다.
+    ///   되감긴 번호가 마지막으로 본 값과 같아지면 그 사이의 변경을 놓친다. 들인 뷰의 판 번호도 같은 까닭으로 새
+    ///   `version` 으로 다시 적는다.
     /// - owner 없는 View(창 만들기 중인 `prepare_detached_view` 의 임시 View)는 그대로 둔다 — 그 일의 phase C 가
     ///   붙이거나 거둔다.
     /// - `Err` 면 아무것도 바뀌지 않았다: `restored` 에 main 이 없다 · 팝아웃 label 이 지금 모델의 창과 겹친다 ·
@@ -1562,6 +1667,7 @@ impl ViewManager {
             version: _,
             attrs_rev: _,
             unknown_content,
+            layout_revs: _,
             lease: _,
             lease_seq: _,
             closed_labels: _,
@@ -1608,7 +1714,9 @@ impl ViewManager {
         live.active = main.active;
         live.attrs = main.attrs;
         live.placement_memo = PlacementMemo::default();
-        self.views.extend(views);
+        for view in views.into_values() {
+            self.insert_view(view);
+        }
         self.view_owner.extend(view_owner);
         self.unknown_content.extend(unknown_content);
         self.windows.extend(windows);
@@ -1924,6 +2032,9 @@ pub struct DockGuard {
     /// 성공해도 `lease` 를 내리지 않는다 — 한 끌기의 여러 쓰기가 같은 표식을 이어 쥐고 끝에 부르는 쪽이 내린다.
     // ADR-0295
     pub keep_lease: bool,
+    /// 출처 탭이 이 창의 탭일 때만 — 판정한 뒤 그 탭이 다른 창으로 갔으면(LLM 이 옮김 따위) `SourceChanged`.
+    // TRD S21-slot-docking §3-7
+    pub expect_window: Option<WindowLabel>,
     /// 출처 탭 배치가 이 값일 때만.
     pub expect_source: Option<LayoutNode>,
     /// 대상이 이 값일 때만.
@@ -1934,13 +2045,14 @@ impl DockGuard {
     pub const NONE: DockGuard = DockGuard {
         lease: None,
         keep_lease: false,
+        expect_window: None,
         expect_source: None,
         expect_target: None,
     };
 }
 
-/// [`DockGuard::expect_target`] 의 값 — `Seam` = 이음새 대상 탭의 배치와 대상 창의 활성 탭 · `Tabs` = `TabBar` 대상
-/// 창의 탭 목록.
+/// [`DockGuard::expect_target`] 의 값 — `Seam` = 이음새 대상 탭의 배치와 대상 창의 활성 탭 · `SeamAt` = 이음새 대상
+/// 탭의 창 · 판 번호와 그 창의 활성 탭 · `Tabs` = `TabBar` 대상 창의 탭 목록.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TargetExpect {
     /// `active` = 영역을 만든 순간 대상 창의 **모델** 활성 탭 — 같은 창 도킹에서 끄는 탭이 활성이면 그 끄는 탭
@@ -1948,6 +2060,17 @@ pub enum TargetExpect {
     Seam {
         layout: LayoutNode,
         active: ViewId,
+    },
+    /// 트리를 통째로 견주지 않고 대상 탭의 판 번호([`ViewManager::layout_rev`])를 견준다 — 다른 탭 · 다른 창의 바뀜으로는
+    /// 거절되지 않는다. `window` = 대상 탭이 든 창(부른 창의 탭인가). `active` = 판정 때 그 창의 **모델** 활성 탭 ·
+    /// `or_initial` = 그 창 활성이 이 값이어도 받는다 — 같은 창 이음새에서 출처가 원래 선택을 되돌린 것(`switch_tab`)이
+    /// 놓기보다 먼저 닿은 경우다(그 탭이 곧 대상이라 판정이 기댄 배치는 그대로다). 다른 창 대상에는 `None`.
+    // TRD S21-slot-docking §3-3 · §3-7
+    SeamAt {
+        window: WindowLabel,
+        rev: u64,
+        active: ViewId,
+        or_initial: Option<ViewId>,
     },
     Tabs(Vec<ViewId>),
 }
@@ -6027,6 +6150,7 @@ mod tests {
         let held = DockGuard {
             lease: Some(lease),
             keep_lease: false,
+            expect_window: None,
             expect_source: Some(LayoutNode::new_empty_slot()),
             expect_target: Some(TargetExpect::Tabs(Vec::new())),
         };
@@ -6039,6 +6163,7 @@ mod tests {
             let held = DockGuard {
                 lease: Some(lease),
                 keep_lease: false,
+                expect_window: None,
                 expect_source: Some(layout_of(&mgr, p[0])),
                 expect_target: Some(target),
             };
@@ -6061,6 +6186,7 @@ mod tests {
         let held = DockGuard {
             lease: Some(lease),
             keep_lease: false,
+            expect_window: None,
             expect_source: Some(layout_of(&mgr, p[0])),
             expect_target: None,
         };
@@ -6968,5 +7094,129 @@ mod tests {
         );
         assert!(!mgr.windows.contains_key(P2));
         assert_eq!(mgr.windows[FRESH].window_id, own.window_id);
+    }
+
+    // ── 판 번호 `layout_rev` · 놓기 사전조건(TRD S21-slot-docking §3-7 · §8-1 ⑦) ───────────────────
+
+    // 한 쓰기 뒤 — `moved` 면 판 번호가 오르고 그 쓰기가 낸 `version` 과 같다 · 아니면 그대로. 스냅숏도 같은 값을 싣는다.
+    fn rev_step(mgr: &ViewManager, view: ViewId, last: &mut u64, moved: bool, what: &str) {
+        let now = mgr.layout_rev(view).expect("뷰 있음");
+        assert_eq!(mgr.snapshot(view).unwrap().layout_rev, now, "{what}");
+        if moved {
+            assert!(now > *last, "{what}: 판 번호가 올라야");
+            assert_eq!(now, mgr.version, "{what}: 그 쓰기가 낸 version");
+        } else {
+            assert_eq!(now, *last, "{what}: 판 번호 그대로");
+        }
+        *last = now;
+    }
+
+    // 착수 때 센 레이아웃 쓰기 지점 — split_slot · set_split_ratio(Applied) · close_slot · assign_agent · set_slot_content ·
+    // set_unknown_content · dock 이음새의 대상. 포커스 · 이름 · 활성 · 실패 · 무변경은 오르지 않는다.
+    #[test]
+    fn each_layout_write_moves_the_layout_rev_and_nothing_else_does() {
+        let mut mgr = ViewManager::new();
+        let v = main_active(&mgr);
+        let mut last = mgr.layout_rev(v).unwrap();
+        let s1 = first_slot_of(&mgr, v);
+
+        let s2 = mgr.split_slot(v, s1, SplitDir::LeftRight).unwrap();
+        rev_step(&mgr, v, &mut last, true, "split_slot");
+        let split = mgr.list_splits(v).unwrap()[0].id;
+        let applied = mgr.set_split_ratio(v, split, 0.3).unwrap();
+        assert_eq!(applied.outcome, SplitRatioOutcome::Applied);
+        rev_step(&mgr, v, &mut last, true, "set_split_ratio");
+        let same = mgr.set_split_ratio(v, split, 0.3).unwrap();
+        assert_eq!(same.outcome, SplitRatioOutcome::Unchanged);
+        rev_step(&mgr, v, &mut last, false, "set_split_ratio 무변경");
+        mgr.assign_agent(v, s1, "a".into()).unwrap();
+        rev_step(&mgr, v, &mut last, true, "assign_agent");
+        mgr.set_slot_content(v, s1, SlotContent::Empty).unwrap();
+        rev_step(&mgr, v, &mut last, true, "set_slot_content");
+        mgr.set_unknown_content(v, s1, raw("future")).unwrap();
+        rev_step(&mgr, v, &mut last, true, "set_unknown_content");
+
+        mgr.set_focused_slot(v, s2).unwrap();
+        rev_step(&mgr, v, &mut last, false, "set_focused_slot");
+        mgr.rename_tab(v, "이름".into()).unwrap();
+        rev_step(&mgr, v, &mut last, false, "rename_tab");
+        let other = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+        mgr.switch_tab(MAIN_WINDOW_LABEL, v).unwrap();
+        rev_step(&mgr, v, &mut last, false, "다른 탭 · 활성");
+        assert!(mgr
+            .split_slot(v, Uuid::new_v4(), SplitDir::TopBottom)
+            .is_err());
+        assert!(mgr.close_slot(v, Uuid::new_v4()).is_err());
+        assert!(mgr.assign_agent(v, Uuid::new_v4(), "b".into()).is_err());
+        rev_step(&mgr, v, &mut last, false, "실패한 쓰기");
+
+        mgr.close_slot(v, s2).unwrap();
+        rev_step(&mgr, v, &mut last, true, "close_slot");
+        mgr.dock(
+            other,
+            DockTo::Seam {
+                target: v,
+                anchor: DockAnchor::Outer,
+                side: DockSide::Left,
+                share: 0.5,
+            },
+            &DockGuard::NONE,
+            FocusPolicy::Keep,
+            DockMove::default(),
+        )
+        .unwrap();
+        rev_step(&mgr, v, &mut last, true, "dock 이음새의 대상");
+        assert_eq!(mgr.layout_rev(other), None, "지운 뷰");
+    }
+
+    #[test]
+    fn a_new_or_moved_tab_has_a_layout_rev_and_moving_a_tab_keeps_it() {
+        let mut mgr = ViewManager::new();
+        let t = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+        let rev = mgr.layout_rev(t).expect("새 탭도 판 번호가 있다");
+        mgr.create_window("slot-popup-1").unwrap();
+        mgr.dock(
+            t,
+            DockTo::TabBar {
+                window: "slot-popup-1".into(),
+                index: None,
+            },
+            &DockGuard::NONE,
+            FocusPolicy::Keep,
+            DockMove::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            mgr.layout_rev(t),
+            Some(rev),
+            "탭바로 옮기기는 레이아웃을 바꾸지 않는다"
+        );
+    }
+
+    #[test]
+    fn a_restore_that_brings_back_the_same_view_id_moves_its_layout_rev() {
+        let mut mgr = ViewManager::new();
+        let v = main_active(&mgr);
+        mgr.split_slot(v, first_slot_of(&mgr, v), SplitDir::LeftRight)
+            .unwrap();
+        let before = mgr.layout_rev(v).unwrap();
+        let same_id = View {
+            id: v,
+            name: "View 1".into(),
+            layout: LayoutNode::new_empty_slot(),
+            focused_slot_id: None,
+        };
+        let restored = ViewManager::from_restored(
+            RestoredWindow {
+                attrs: WindowAttrs::default(),
+                tabs: vec![same_id],
+                active: Some(v),
+            },
+            Vec::new(),
+        )
+        .unwrap();
+        mgr.adopt_restored(restored).unwrap();
+        assert!(mgr.layout_rev(v).unwrap() > before);
+        assert_eq!(mgr.layout_rev(v), Some(mgr.version));
     }
 }

@@ -9,6 +9,8 @@ pub mod output_channel;
 pub mod output_router;
 pub mod settings;
 pub mod state;
+// 탭 놓기의 셸 몫 — 끌기가 끝난 뒤의 놓기 명령 하나 · 창 사실(ADR-0296).
+pub mod tab_drop;
 pub mod theme;
 mod tray;
 // ADR-0155: 웹뷰가 주인인 명령의 셸쪽 다리(등록 대리 + 2단 배달의 마지막 홉).
@@ -110,6 +112,10 @@ pub fn run() {
     // 도킹 상태(대기 창 명부 · 종료 표지 — TRD S21-slot-docking §2-5)도 같은 이유다(ADR-0102) — 웹뷰의 첫 측정
     //   보고 셋(캔버스 · UI 치수 · 크롬) · `window_role` · `drag::install` 이 이 상태를 본다.
     builder = builder.manage(std::sync::Arc::new(crate::dock::DockState::new()));
+    // 탭 놓기 장부 · 창마다 마지막으로 낸 창 사실(ADR-0296 · TRD S21-slot-docking §3-4 · §3-8)도 같은 이유다
+    //   (ADR-0102) — 웹뷰의 마운트 때 `window_frame` 당기기와 창의 첫 자리 기록이 이 상태를 본다.
+    builder = builder.manage(std::sync::Arc::new(crate::tab_drop::DropBook::default()));
+    builder = builder.manage(std::sync::Arc::new(crate::tab_drop::FrameBook::default()));
 
     // ── 셸 설정 + 유효 테마(TRD S21-storage §5-3 · §5-6) ─────────────────────────────
     // ★위 LayoutState 와 같은 이유로 빌더에서 manage 한다(ADR-0102)★ — 웹뷰의 첫 `get_ui_settings` ·
@@ -370,6 +376,7 @@ pub fn run() {
                         let app = window.app_handle();
                         crate::state::placement::forget_deferred_maximize(app, &label);
                         crate::first_paint::cancel_hold(app, &label);
+                        crate::commands::tab_drop::forget_window_frame(app, &label);
                         // 하나라도 없으면(초기화 실패 극단 케이스) 조용히 스킵(정리 불가여도 앱은 계속).
                         if let (Some(state), Some(router), Some(registry), Some(client)) = (
                             app.try_state::<crate::layout::LayoutState>(),
@@ -455,6 +462,10 @@ pub fn run() {
             commands::drag::tab_drag_reorder,
             commands::drag::tab_drag_leave,
             commands::drag::tab_drag_end,
+            // 탭 놓기 · 창 사실(웹뷰 → 셸 · ADR-0296) — 버스 명령이 아니다(마우스 놓기의 끝 · 웹뷰 안 배선 — TRD
+            //   S21-slot-docking §3-6). 같은 동작의 LLM 명령은 T-65 `tab.dock`.
+            commands::tab_drop::tab_drop,
+            commands::tab_drop::window_frame,
             // 부팅 조회 — 미는 쪽(`window.setTheme` · `theme.default` 쓰기 · 부팅 · 복원 수락)은 따로 있다
             //   (`commands/settings.rs` 「창별 테마를 읽는 자리가 둘인 이유」).
             commands::get_ui_settings,

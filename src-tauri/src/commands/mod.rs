@@ -11,6 +11,8 @@ pub mod layout;
 pub mod popout;
 pub mod settings;
 pub mod state;
+// 탭 놓기 invoke 둘(`tab_drop` · `window_frame`) — 끌기가 끝난 뒤의 명령 하나 · 창 사실(ADR-0296).
+pub mod tab_drop;
 pub mod tray;
 pub mod usage;
 // ADR-0155: 웹뷰 몫 명령의 보고·결말 회수(TRD §6 Step 4).

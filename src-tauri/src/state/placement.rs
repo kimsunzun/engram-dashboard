@@ -1006,7 +1006,8 @@ fn read(window: &Window) -> Option<WindowPlacement> {
 /// 창 하나의 지금 자리를 레이아웃 모델의 그 label 항목에 적는다. 모델에
 /// 없는 label(닫힌 뒤 늦게 온 사건 · 모델에 들기 전의 새 창)은 버린다 — 팝아웃 label 은 재사용되지 않아 다른 창에
 /// 잘못 적히지 않는다(`PopupCounter`). 최대화를 미뤄 둔 동안의 창도 적지 않는다([`DeferredMaximize`]).
-/// 규칙(최소화 · 최대화)은 [`WindowAttrs`] 의 `observe`.
+/// 규칙(최소화 · 최대화)은 [`WindowAttrs`] 의 `observe`. 적었으면 락을 놓은 뒤 그 창의 창 사실(`window:frame`)을 바뀔
+/// 때만 민다(`commands::tab_drop::push_window_frame`).
 pub fn record(window: &Window) {
     let label = window.label();
     let app = window.app_handle();
@@ -1041,8 +1042,18 @@ pub fn record(window: &Window) {
         );
         return;
     };
-    if let Err(e) = mgr.observe_window_placement(label, seen) {
-        tracing::debug!(module = "state", label, error = %e, "모델에 없는 창의 자리라 버린다");
+    let attrs = match mgr.observe_window_placement(label, seen) {
+        Ok(()) => mgr.window_attrs(label).ok(),
+        Err(e) => {
+            tracing::debug!(module = "state", label, error = %e, "모델에 없는 창의 자리라 버린다");
+            None
+        }
+    };
+    // 레이아웃 락을 놓은 뒤에 민다 — 창 사실 밀기는 게터를 부른다.
+    // TRD S21-slot-docking §3-8
+    drop(mgr);
+    if let Some(attrs) = attrs {
+        crate::commands::tab_drop::push_window_frame(window, seen.minimized, attrs);
     }
 }
 

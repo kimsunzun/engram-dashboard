@@ -64,6 +64,7 @@ function snap(overrides: Partial<ViewSnapshot> = {}): ViewSnapshot {
     ratio_min: 0.1,
     ratio_max: 0.9,
     version: 1,
+    layout_rev: 1,
     ...overrides,
   }
 }
