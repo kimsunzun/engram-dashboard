@@ -2117,6 +2117,10 @@
 - **커밋 상태:** `8cf9052`·`71b4d85`·`9beb7a6` 까지 커밋됨. ★**미커밋 = ADR-0180·0181·0182(신규 3) · ADR-0178 정정(수정) · `docs/decisions/README.md` 인덱스 갱신 · `docs/process/S21-transport-crate/` 전체(untracked) · 이 항목 자체**★.
 - **★검증 안 된 것·안 고친 것★:** ① 이 스텝의 문서 판정은 **전부 정적 판독**이고 이 세션은 코드를 한 줄도 고치지 않았다(구현은 ⑧ 별건) ② **ADR-0178 의 미검 4 건은 그대로 열려 있다**(거절 사유 프레임을 클라가 읽는지 · 거절 뒤 재접속 반복 여부 · 옛 클라 동작 · discovery 의 둘째 판정 주체 의심) ③ **ADR-0181 의 8 초 상한은 에이전트 spawn 실소요를 재지 않았다** — 30 갈래 중 그것 하나만 넘길 수 있고, 붙인 뒤 재서 넘치면 올린다 ④ 현행 `REPLY_TIMEOUT` 30 초(한 자리에만 걸림)와 공용 8 초의 정합은 **적용 시점에 함께 처리해야 한다**(ADR-0181 「영향」).
 
+## S25 — 프리셋 · 라이브러리 (2026-10-12~, `v0.5.0/feat/preset-library` — 2026-10-20 에 `v0.4.1/…` 에서 이름 바꿈(사용자 · 다음 릴리스 = 0.5.0), 대화 세션) · 설계 폴더 `docs/process/S25-preset-library/` · **구현 미착수**
+
+- 2026-10-19 에 `v0.3.3/chore/misc` 에서 떼어 낸 주제 브랜치(그 전 커밋은 `S21:` 접두 — 잡동사니 브랜치에서 자란 주제). 이 브랜치의 커밋부터 `S25:`. 타임라인 상세는 「## 다음 (미진행)」 아래 프리셋 항목(2026-10-12~ 줄들)에 있다 — 옮기지 않는다.
+
 ## 다음 (미진행)
 
 - **[✅ 결정 완료 2026-08-14 — ADR-0158] 버전 불일치는 끊지 않고 알린다.** 아래 방향 항목은 이 ADR로 닫혔다. 결정 = 프로토콜 버전 안 올림(상향 기준을 「봉투 문법이 깨질 때」로 좁힘) · 보내기 전 상대 능력 확인(데몬이 연결 직후 먼저 광고하므로 옛 데몬에게 모르는 것을 보낼 일이 없다 — 실측 확인) · 데몬 자동 종료 없음 · **고지 = 앱 시작 시 1회, 알리기만, 닫으면 작은 흔적**(행동 버튼 없음, 모달은 아예 못 붙을 때만) · 버전과 무관하게 마감 시한 + 오류의 상관관계 표시를 함께 깐다. 근거 조사 = `docs/research/daemon-version-mismatch-2026-08-14.md`(적대 리뷰 BLOCK → 추천 수정됨, 그 경위도 그 문서에).
@@ -2769,3 +2773,51 @@
   - **리뷰가 잡은 것** — cargo-about 이 `LICENSE_MIT` · `license-mit` 를 못 읽어 54 crate 가 자리표시 저작권으로 실리던 것 · 정적 링크되는 WebView2 로더 누락 · npm peer 누락 경로 · 손 교체의 버전 고정 · 선언 라이선스와 본문 대조.
   - **메인 실수 1 건** — 조사 보고서에 적대 리뷰 지적을 반영했다고 보고했으나 쓴 `python` 이 Windows 스토어 껍데기라 아무것도 안 바뀌었다(출력 미확인). doc-aware 리뷰가 잡아 node 로 다시 반영했다.
   - **남은 것** — T-62 와 도구 조사 문서는 `v0.3.3/chore/misc`(`249d92cb`)에만 있어, 그 브랜치가 master 에 들어오면 T-62 를 닫는다.
+- **[🔎 조사 2026-10-10 · 브랜치 `v0.3.3/chore/misc` · 코드 변경 없음] 스킬 프리셋 구상 — 바깥 스킬 폴더를 claude · codex 에 네이티브 스킬로 적재할 수 있나** — `docs/research/external-skill-dir-loading-claude-codex-2026-10-10.md`(`/research` medium · codex 적대 리뷰 FIX → 반영). 결론 = claude 는 `--plugin-dir` · `--add-dir` 로 프로세스 단위 가능 · codex 는 JSON 모드 `skills/extraRoots/set` 만 가능하고 터미널 모드는 파일 배치 · 로컬 플러그인(전역)뿐. 곁가지 = codex `thread/resume` 스키마에 `developerInstructions` 칸은 있으나 실제 턴 실측상 새 값을 말없이 버린다(터미널 `exec resume` 의 `-c` 도 같다) — `backend/codex/protocol.rs` 의 「재 보지 않았다」 주석이 기다리던 실측이고, 칸을 더해도 효과가 없다. 결정 없음 — PRD 이전.
+  - **후속 서베이(2026-10-11)** — 프리셋에 묶을 부품 종류 · 묶음 구조: `docs/research/agent-preset-components-survey-2026-10-11.md`(적대 리뷰 생략 — 열화 표기).
+  - **후속 서베이(2026-10-14)** — 라이브러리 슬롯이 여러 소스 폴더를 어떻게 보여 주나(평평한 목록 · 폴더 트리 · 가상 분류 · 바깥 단발 링크): `docs/research/library-multi-root-display-survey-2026-10-14.md`(`/research` medium · codex 적대 리뷰 BLOCK → 반영).
+  - **후속 서베이(2026-10-14)** — 별(즐겨찾기) 한 번 누르기와 사용자 묶음의 관계: `docs/research/favorite-star-vs-collections-survey-2026-10-14.md`(`/research` medium · codex 적대 리뷰 FIX → 반영).
+  - **후속 서베이(2026-10-14)** — 설정 · 프리셋 에셋 파일 형식 관행: `docs/research/settings-preset-file-format-survey-2026-10-14.md`(`/research` medium · codex 적대 리뷰 FIX → 반영).
+  - **후속 서베이(2026-10-14)** — 라이브러리 항목을 프리셋에 넣는 길: `docs/research/library-to-bundle-add-patterns-survey-2026-10-14.md`(`/research` medium · codex 적대 리뷰 FIX → 반영).
+  - **후속 서베이(2026-10-14)** — 라이브러리 슬롯 뒤로/앞으로(이동 기록): `docs/research/browser-back-forward-history-survey-2026-10-14.md`(`/research` light).
+  - **후속 서베이(2026-10-14)** — 라이브러리 슬롯을 얹을 부품(React 트리 · 목록 · Rust 훑기 · 감시): `docs/research/library-browser-building-blocks-survey-2026-10-14.md`(`/research` medium · codex 적대 리뷰 BLOCK → 반영).
+  - **후속 서베이(2026-10-14)** — 서드파티 라이브러리를 언제 감싸나: `docs/research/third-party-wrapping-criteria-survey-2026-10-14.md`(`/research` light).
+  - **후속 서베이(2026-10-14)** — 폴더 목록이 디스크 변경을 따라가는 법(감시 대 앱 활성화 때 훑기 · 보이는 동안 폴링): `docs/research/library-folder-change-sync-survey-2026-10-14.md`(`/research` medium · codex 적대 리뷰 FIX → 반영).
+  - **후속 서베이(2026-10-14)** — 프리셋이 같이 든 에셋을 가리키는 경로 기준(파일 기준 · 루트 기준 · ID): `docs/research/preset-asset-reference-base-survey-2026-10-14.md`(`/research` light).
+  - **후속 서베이(2026-10-15)** — 라이브러리 여러 개일 때 참조 꼴(루트 이름 + 경로 · id · 검색 경로) · 여러 루트의 문제 여섯 · 같은 형태의 선례(Skills Manager · AgentsRoom): `docs/research/multi-library-reference-paths-survey-2026-10-15.md`(`/research` medium · codex 적대 리뷰 FIX → 반영).
+  - **후속 서베이(2026-10-15)** — 프리셋 편집 칸에서 직접 담은 것 대 안에 든 프리셋의 것 · 종류별 칸 · 순서 · 칸마다 담기: `docs/research/preset-editor-nested-items-layout-survey-2026-10-15.md`(`/research` medium · codex 적대 리뷰 FIX → 반영).
+  - **후속 서베이(2026-10-15)** — 옆 상세 패널을 덮나 칸을 끼워 넣나: `docs/research/side-detail-panel-push-vs-overlay-survey-2026-10-15.md`(`/research` light).
+  - **후속 서베이(2026-10-15)** — 가장자리에 붙은 펼침 패널의 방향 · 창 끝일 때: `docs/research/edge-attached-flyout-direction-survey-2026-10-15.md`(`/research` light).
+  - **후속 서베이(2026-10-15)** — 라이브러리 폴더를 아직 안 골랐을 때의 빈 화면 안내: `docs/research/library-empty-state-first-run-survey-2026-10-15.md`(`/research` light).
+  - **후속 서베이(2026-10-15)** — 라이브러리 항목을 라이브러리 밖 대상(에이전트)에 붙이는 화면: `docs/research/attach-library-items-to-entity-survey-2026-10-15.md`(`/research` medium · codex 적대 리뷰 FIX → 반영).
+  - **후속 서베이(2026-10-17)** — 에이전트의 라이브러리 파일 조작(경로가 바뀌면 명령 · 아니면 직접 + refresh)의 선례: `docs/research/agent-file-ops-path-command-split-survey-2026-10-17.md`(`/research` light).
+  - **후속 서베이(2026-10-17)** — 편집 칸을 떠나지 않고 참조한 항목의 내용 보기(올리기 · peek · 고정 · 선택 따라가기): `docs/research/editor-referenced-content-peek-survey-2026-10-17.md`(`/research` light).
+  - **후속 서베이(2026-10-17)** — 마크다운 본문의 글자만 발췌 · 길이 · 자르기: `docs/research/markdown-plaintext-snippet-survey-2026-10-17.md`(`/research` light).
+  - **후속 서베이(2026-10-17)** — 글자 발췌와 그린 미리보기를 어디에 두나: `docs/research/snippet-vs-rendered-preview-placement-survey-2026-10-17.md`(`/research` light).
+  - **후속 서베이(2026-10-17)** — 라이브러리 화면 한국어 용어(언리얼 · Unity · Windows · VS Code 한국어판 대조): `docs/research/korean-ui-glossary-survey-2026-10-17.md`(`/research` light 2회).
+  - **후속 서베이(2026-10-17)** — 상세 카드의 긴 「참조」 목록을 보여 주는 관행: `docs/research/long-reference-list-display-survey-2026-10-17.md`(`/research` light).
+  - **후속 서베이(2026-10-17)** — 접고 펴기 상태를 기억하는 범위(보기마다 · 항목마다): `docs/research/collapse-state-persistence-scope-survey-2026-10-17.md`(`/research` light).
+  - **후속 서베이(2026-10-17)** — 접고 펴기 기억이 창(브라우저)마다인가 · 무엇을 기억하나: `docs/research/collapse-state-instance-scope-survey-2026-10-17.md`(`/research` light).
+  - **실측(2026-10-17)** — 설정 에셋 내용 확인(claude · codex 공개 스키마 · 틀린 값에 대한 실행 때 반응 · 모델 호출 없는 확인): `docs/research/settings-asset-validation-spike-2026-10-17.md`(스파이크 · claude 2.1.284 · codex 0.156.1).
+  - **후속 서베이(2026-10-17)** — 에셋 · 설정 파일 검사를 언제 하나(훑을 때 전부 · 고를 때 · 바뀔 때 · 따로 누를 때): `docs/research/asset-validation-timing-survey-2026-10-17.md`(`/research` light).
+  - **후속 서베이(2026-10-17)** — 파일이 바뀌었나(수정 시각 · 크기 · 파일 신원 · racy git): `docs/research/file-change-detection-survey-2026-10-17.md`(`/research` light).
+  - **실측(2026-10-18)** — 설정 검사 Rust crate(`jsonschema` 0.59.0 · serde-saphyr 2.0.0)를 실제로 컴파일해 돌림: `docs/research/settings-asset-validation-spike-2026-10-17.md` 의 「Rust 크레이트 실측 (2026-10-18)」 절(스파이크 · rustc 1.95.0).
+  - **후속 서베이(2026-10-18)** — 실행 때 붙은 부품을 못 읽으면 막나 · 알리고 띄우나: `docs/research/launch-missing-component-practice-2026-10-18.md`(`/research` light).
+  - **후속 서베이(2026-10-18)** — 검사 실패 표시와 「고친 뒤 다시 검사 전」 상태: `docs/research/validation-status-after-edit-practice-2026-10-18.md`(`/research` light).
+  - **후속 서베이(2026-10-18)** — 검사 통과 기록의 캐시 키(내용 지문 대 수정 시각): `docs/research/check-result-cache-key-practice-2026-10-18.md`(`/research` light · 실행 직전 CLI 검사를 걷어(사용자 2026-10-18) 결론은 지금 쓰이지 않는다).
+  - **후속 서베이(2026-10-18)** — claude 설정 스키마를 어디서 얻나 · 직접 검사해도 되나: `docs/research/claude-settings-schema-source-2026-10-18.md`(`/research` light + 실측).
+  - **후속 서베이(2026-10-18)** — 실행이 막혔을 때 사유 표시 · 안쪽 오류를 바깥 줄에 끌어올리기: `docs/research/blocked-launch-error-display-practice-2026-10-18.md`(`/research` light).
+  - **후속 서베이(2026-10-18)** — 없어진 참조 다시 연결 안내 · 떠 있는 오류 팝업과 겹침: `docs/research/relink-and-error-popup-practice-2026-10-18.md`(`/research` light).
+  - **후속 서베이(2026-10-18)** — 프리셋 YAML 을 고칠 때 손 주석 지키기(Rust 라이브러리 · 관행): `docs/research/yaml-comment-preserving-edit-2026-10-18.md`(`/research` light · 라이브러리는 돌려 보지 않음).
+  - **후속 서베이(2026-10-18)** — 상세 칸 블록 순서(내용 · 위치 · 참조) 관행: `docs/research/detail-pane-section-order-2026-10-18.md`(`/research` light · 정해진 규칙 없음 · 약한 선례 둘).
+  - **후속 서베이(2026-10-18)** — 편집 칸 위쪽 문제 요약(전부 나열 · 개수 · 배너) 관행: `docs/research/editor-problem-summary-practice-2026-10-18.md`(`/research` light · 위쪽에 문제마다 한 줄 + 링크 · 줄 표시 유지).
+  - **후속 서베이(2026-10-19)** — 맨 위 「전체 추가」 와 칸별 `+` 를 함께 두나: `docs/research/global-vs-section-add-button-2026-10-19.md`(`/research` light · 언리얼 My Blueprint 가 같은 꼴 → R23 그대로).
+  - **후속 서베이(2026-10-19)** — 휴지통을 못 쓰는 위치에서 지울 때(앱 휴지통 · 영구 삭제 묻기 · 거절): `docs/research/trash-unavailable-delete-practice-2026-10-19.md`(`/research` light · Obsidian `.trash` · Windows API 가 말없이 영구 삭제할 위험 — 실측 필요).
+  - **후속 서베이(2026-10-19)** — 기본 제공(읽기 전용) 에셋을 브라우저에 어떻게 보이나: `docs/research/builtin-assets-display-practice-2026-10-19.md`(`/research` light · Unreal = 따로 된 폴더 · 보기 옵션으로 켬).
+  - **후속 서베이(2026-10-20)** — 지울 수 없는 기본 목록은 이름도 못 바꾸나(즐겨찾기 「기본」): `docs/research/default-collection-rename-practice-2026-10-20.md`(`/research` light · 규범 확인 못 함 · 이름 = 뜻인 시스템 목록은 고정 쪽 · 「기본」 = 지정 상태인 설계도 있음).
+  - **후속 서베이(2026-10-20)** — 앱 안 휴지통은 어디서 여나 · 되살리기 · 비우기: `docs/research/in-app-trash-access-practice-2026-10-20.md`(`/research` light · 사이드바 고정 항목이 관행 · 메뉴에만 둔 곳 없음 · 원래 자리로 되살림 · 30일 자동 삭제 흔함).
+  - **후속 서베이(2026-10-20)** — 실행이 막혔을 때 무엇이 뜨나 · 누르면 어디로 가나: `docs/research/launch-blocked-popup-navigation-practice-2026-10-20.md`(`/research` light · 대상 옆 팝오버 선례 못 찾음 · Unreal = 저절로 열리는 남는 패널 · 누르면 그 자리로).
+  - **PRD 초안(2026-10-15)** — `docs/process/S25-preset-library/prd.md`(초안 · 사용자 미확정 · `/review prd` 4회차 반영) · TRD 초안 `trd.md`(`/review trd` full 3회차 반영) · 브리핑 `briefing.html`(v43 화면 그림 + 시스템 구조 · 흐름 그림 · 결정마다 갱신) · 슬롯 이름 조사 `docs/research/agent-customization-pane-naming-survey-2026-10-16.md`(light). 결정 정본 = `.claude/handoff/attachments/20261012-preset-decisions.md` — 여기 베끼지 않는다.
+  - **스텝 번호 S25 로 올림(2026-10-19 · 사용자)** — 폴더 `docs/process/S21-preset-library/` → `docs/process/S25-preset-library/` · 같은 날 자기 브랜치 `v0.4.1/feat/preset-library`(2026-10-20 master 머지 전에 `v0.5.0/feat/preset-library` 로 이름 바꿈 — 사용자) 로 떼어 냈고 그 브랜치 커밋부터 `S25:`(「## S25」 헤딩). S22~S24 는 2026-08 에 이미 쓰였다(이 파일 「## S22」 · 「## S23」 · 「## S24」) — 그래서 다음 빈 번호. 다른 `S21-*` 폴더는 참조가 많아 그대로 둔다(T-65 · 옛 핸드오프 기록의 경로는 고치지 않는다 — append-only).
+  - **브리핑 리뷰 결정 반영(2026-10-18)** — 사용자 결정 여섯을 PRD · TRD · 브리핑에 반영(claude settings 합침 = 값은 나중 것 · 목록은 합침 — TRD §6-5 닫힘 · 👁 = 모든 부품 줄 · D4 = 기존 에이전트 이전 없음(옛 `agents.json` 백업 + 빈 목록 — 메인 세션 내부 선택) · 실행 중 오류는 설정 줄에 안 붙음 · T5 문구 확인 · `--mcp-config` 범위 밖 확정). 남은 「리뷰 때 확인」 = D10 · D11 둘 · 미결 없음. 반영분은 `/review` 를 거치지 않았다. 내용 정본 = 결정 메모의 2026-10-18 브리핑 리뷰 줄들.
+  - **브리핑 리뷰 2차 결정 반영(2026-10-19)** — 결정 열여덟(B1–B18)을 PRD · TRD · 브리핑에 반영 — 필터 = 언리얼 꼴 · 상세 블록 순서(제목 → 위치 → 내용 → 참조) · 편집 칸 · 에이전트 슬롯 위 문제 목록(R51) · 부품 줄 누름 = 상세 카드 토글(👁 걷음) · 끌어 옮기기 어디서나 · 여러 개 삭제 · 이동 · 삭제 = 라이브러리 안 `.trash`(OS 휴지통 안 씀) · 비우기는 사람만(「LLM-우선 제어」 예외 — ADR 후보) · 삭제 · 「기본」 떼기 확인 = 모달 · 다시 연결 후보 제안 · 「다시 연결 확인 대기」 걷음(막힘 이유 다섯 · D10 해결) · `description` 쓰기 안내(R52) · 에이전트 복제(R53) · `daemon\cache\` · 에이전트 슬롯 = 편집 부품만 · 모델 피커 = 그 백엔드만 · 2판 · 구현을 두 판으로(메인 세션 결정). 남은 「리뷰 때 확인」 = D11 하나. 반영분은 `/review` 를 거치지 않았다. 내용 정본 = 결정 메모의 2026-10-19 줄들.
