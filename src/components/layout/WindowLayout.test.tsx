@@ -1,5 +1,5 @@
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // ── listen mock: 이벤트명별 핸들러 보관 → 테스트가 직접 emit ──
@@ -66,10 +66,15 @@ vi.mock('./ViewLayoutRenderer', async () => {
   }
 })
 
+vi.mock('@tauri-apps/api/app', () => ({ getIdentifier: async () => 'com.engram.test' }))
+
 import WindowLayout from './WindowLayout'
 import { __resetCanvasReportForTest } from './windowCanvasReport'
 import { __resetFrameReportForTest } from './dock/frameReport'
 import { __resetUiMetricsReportForTest } from './uiMetricsReport'
+import { localDrag } from './dock/localDrag'
+import { __resetDragSourceForTest } from './tabStrip/useTabDragSource'
+import { buildTabDragType, buildTabDragValue } from './dock/tabDragData'
 import type { DockChrome } from '../../../src-tauri/bindings/DockChrome'
 import { useViewStore } from '../../store/viewStore'
 import type { ViewSnapshot } from '../../api/layoutTypes'
@@ -964,7 +969,7 @@ describe('WindowLayout — TabBar 액션 → store 액션(이 label)', () => {
   })
 })
 
-// ── ★탭 끌기 배선(TRD S21-slot-docking §2-2 · §4)★ — 창마다 끌기 세션 받기 · 창 틀 보고(`frameReport`) · 파일 놓기 막기 ──
+// ── ★탭 끌기 배선(TRD S21-slot-docking §4)★ — 창마다 끌기 세션 받기 · 뿌리 받기와 안내 층(`useWindowDrop`) · 파일 놓기 막기 ──
 // 탭바 줄 · `+` · 캔버스의 사각형은 손으로 준다(jsdom 은 레이아웃이 없다): 줄 x 0..800 · y 0..28 · `+` 32 · 캔버스 원점 (0, 29).
 const TWO_TABS = [
   { id: 'v1', name: 'Tab 1' },
@@ -991,11 +996,6 @@ function chromeReports(): DockChrome[] {
   return invokeMock.mock.calls
     .filter(c => c[0] === 'report_dock_chrome')
     .map(c => (c[1] as { chrome: DockChrome }).chrome)
-}
-
-function lastChrome(): DockChrome {
-  const all = chromeReports()
-  return all[all.length - 1]
 }
 
 let stripWidth = 800
@@ -1043,80 +1043,166 @@ describe('WindowLayout — 탭 끌기 배선', () => {
     }
   })
 
-  it('셸이 이 창에 민 끌기 입력(dock:feed)이 탭바 끌기에 닿는다 — 막 붙은 탭 머리가 활성으로 서고 캔버스는 모델 그대로', async () => {
+  it('이 창에서 끄는 동안 탭바 구역 밖이면 남은 탭 캔버스를 보이고(R15 · 모델 그대로) 돌아오면 끄는 탭 · 크롬 = 뷰포트 − 탭 캔버스', async () => {
     stubStrip()
-    await mountDockWindow('main')
-    act(() =>
-      emit('dock:feed', {
-        session: 4,
-        view: 'v9',
-        step: {
-          type: 'attach',
-          zone: { x0: 0, y0: -15, x1: 768, y1: 43 },
-          grab: { x_ratio: 0.5, y: 10, single_x: 80 },
-          x: 400,
-          y: 14,
-        },
-      }),
-    )
-    expect(headOf('v9').getAttribute('data-active')).toBe('true')
-    expect(headOf('v1').getAttribute('data-active')).toBe('false')
-    expect(canvasOf('v1').style.display).toBe('block')
-  })
-
-  it('창 틀 보고 = 탭 끌기 영역(줄 왼쪽 ~ 줄 − +) · 캔버스 원점 · 머리 목록 없음', async () => {
-    stubStrip()
-    await mountDockWindow('main')
-    await waitFor(() => expect(chromeReports().length).toBeGreaterThan(0))
-    expect(lastChrome()).toEqual({
-      canvas_origin: { x: 0, y: 29 },
-      tab_bar: { x0: 0, y0: 0, x1: 768, y1: 28 },
-    })
-  })
-
-  it('창 틀 보고는 보고기 하나 — 날아가는 동안 겹쳐 보내지 않고 응답 뒤 마지막 값을 보낸다', async () => {
-    stubStrip()
-    const answers: Array<() => void> = []
-    let inAir = 0
-    let maxInAir = 0
-    await mountDockWindow('main')
-    const base = invokeMock.getMockImplementation()!
+    __resetDragSourceForTest()
+    Object.defineProperty(window.screen, 'availWidth', { value: 1920, configurable: true })
+    Object.defineProperty(window.screen, 'availHeight', { value: 1080, configurable: true })
     invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
-      if (cmd !== 'report_dock_chrome') return base(cmd, args)
-      inAir += 1
-      maxInAir = Math.max(maxInAir, inAir)
-      return new Promise<void>(res =>
-        answers.push(() => {
-          inAir -= 1
-          res()
-        }),
-      )
+      if (cmd === 'list_tabs') return { label: 'main', tabs: TWO_TABS, active: 'v1', version: 1 }
+      if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+      // 뷰포트(jsdom 1024 × 768)와 같은 복원 크기 — 새 창 크기 = 그대로.
+      if (cmd === 'window_frame') return { restored: { w: 1024, h: 768 }, maximized: false, insets: { t: 0, r: 0, b: 0, l: 0 } }
+      return undefined
     })
-    __resetFrameReportForTest()
-    act(() => emit('window:tabs-updated', { label: 'main', tabs: [...TWO_TABS], active: 'v2', version: 2 }))
-    await waitFor(() => expect(chromeReports()).toHaveLength(1))
+    try {
+      render(<WindowLayout label="main" />)
+      await waitFor(() => expect(screen.getAllByTestId('tab-canvas')).toHaveLength(2))
+      await act(async () => {
+        for (let i = 0; i < 20; i++) await Promise.resolve()
+      })
+      // 누름 → 전환 메아리 → dragstart(다른 task 에서 끌기가 이어진다).
+      fireEvent.pointerDown(headOf('v2'), { button: 0, clientX: 600, clientY: 14 })
+      act(() => emit('window:tabs-updated', { label: 'main', tabs: TWO_TABS, active: 'v2', version: 2 }))
+      const data = new Map<string, string>()
+      const ev = createEvent.dragStart(headOf('v2'), {
+        dataTransfer: {
+          effectAllowed: 'uninitialized',
+          setData: (k: string, v: string) => void data.set(k, v),
+          clearData: () => data.clear(),
+          setDragImage: () => {},
+        },
+      })
+      Object.defineProperty(ev, 'clientX', { value: 604 })
+      Object.defineProperty(ev, 'clientY', { value: 14 })
+      act(() => void fireEvent(headOf('v2'), ev))
+      // 원래 크기 = 새 창 1024 × 768 − 크롬(1024 − 800 · 768 − 571) = 탭 캔버스 · 모양 = 그 탭 캐시의 레이아웃(칸 하나).
+      expect([...data.keys()][0].replace(/;drag=[^;]*/, '')).toBe('application/x-engram-tab;app=com.engram.test;w=800;h=571;shape=l')
+      expect(canvasOf('v2').style.display).toBe('block')
 
-    stripWidth = 900
-    act(() => emit('window:tabs-updated', { label: 'main', tabs: [...TWO_TABS], active: 'v1', version: 3 }))
-    await new Promise(res => setTimeout(res, 150))
-    expect(chromeReports()).toHaveLength(1)
+      act(() => localDrag.setSourceStrip(null))
+      expect(canvasOf('v1').style.display).toBe('block')
+      expect(canvasOf('v2').style.display).toBe('none')
+      expect(headOf('v1').getAttribute('data-active')).toBe('true')
+      expect(useViewStore.getState().windows.main.active).toBe('v2')
 
-    await act(async () => answers[0]())
-    await waitFor(() => expect(chromeReports()).toHaveLength(2))
-    expect(lastChrome().tab_bar.x1).toBe(868)
-    expect(maxInAir).toBe(1)
+      act(() => localDrag.setSourceStrip({ index: 1, left: 384, x: 600 }))
+      expect(canvasOf('v2').style.display).toBe('block')
+      expect(canvasOf('v1').style.display).toBe('none')
+    } finally {
+      act(() => {
+        localDrag.setOutgoing(null)
+        localDrag.setSourceStrip(null)
+      })
+    }
   })
 
-  it('언마운트하면 대기 중이던 보고를 보내지 않는다', async () => {
+  it('창 틀(크롬) 보고를 보내지 않는다 — 옛 셸 끌기 엔진의 재료다(TRD §7 U3)', async () => {
     stubStrip()
-    const { unmount } = await mountDockWindow('main')
-    await waitFor(() => expect(chromeReports().length).toBeGreaterThan(0))
-    const sent = chromeReports().length
-    stripWidth = 640
+    await mountDockWindow('main')
     act(() => emit('window:tabs-updated', { label: 'main', tabs: [...TWO_TABS], active: 'v2', version: 2 }))
-    unmount()
-    await new Promise(res => setTimeout(res, 200))
-    expect(chromeReports()).toHaveLength(sent)
+    await new Promise(res => setTimeout(res, 150))
+    expect(chromeReports()).toEqual([])
+  })
+
+  // 캔버스 상자 (0, 29) 800 × 571 · 보이는 탭 v1 = 칸 하나(비율 한계 0.1 · 0.9 · 판 번호 1) · 끄는 탭 원래 크기 400 × 300.
+  const DRAG_TYPE = buildTabDragType({ app: 'com.engram.test', drag: 'd9', original: { w: 400, h: 300 }, shape: 'l' })
+  const DRAG_VALUE = buildTabDragValue({
+    drag: 'd9',
+    view: 'p1',
+    from: 'slot-popup-2',
+    initial: null,
+    size: { w: 640, h: 480 },
+    grab: { x: 40, y: 14 },
+  })
+
+  function fireDrag(type: string, at: { x: number; y: number }, types = [DRAG_TYPE]): MouseEvent {
+    const e = new MouseEvent(type, { bubbles: true, cancelable: true, clientX: at.x, clientY: at.y })
+    Object.defineProperty(e, 'dataTransfer', {
+      value: { types, dropEffect: 'none', getData: (t: string) => (t === DRAG_TYPE ? DRAG_VALUE : '') },
+    })
+    act(() => {
+      canvasOf('v1').dispatchEvent(e)
+    })
+    return e
+  }
+
+  async function mountDropWindow() {
+    stubStrip()
+    await mountDockWindow('main')
+    // identifier 답 · 캐시 당기기를 끝낸다.
+    await act(async () => {
+      for (let i = 0; i < 20; i++) await Promise.resolve()
+    })
+  }
+
+  it('끌기 안내 층은 탭 캔버스 상자 바로 안에 그 상자를 덮고 · 늘 마운트돼 있다(안내는 없음)', async () => {
+    await mountDropWindow()
+    const layer = screen.getByTestId('dock-overlay-layer')
+    expect(layer.parentElement).toBe(canvasOf('v1').parentElement)
+    expect(layer.style.position).toBe('absolute')
+    expect(layer.style.pointerEvents).toBe('none')
+    expect(screen.queryByTestId('dock-overlay')).toBeNull()
+  })
+
+  it('우리 끌기를 뿌리에서 받아 캔버스 좌표로 미리보기를 그리고 · 끄는 동안 셸을 부르지 않고 · drop 에 Seam 하나를 보낸다', async () => {
+    await mountDropWindow()
+    const seen: string[] = []
+    const rdnd = (e: Event) => void seen.push(e.type)
+    for (const t of ['dragenter', 'dragover', 'drop']) window.addEventListener(t, rdnd)
+    const calls = invokeMock.mock.calls.length
+    try {
+      // 캔버스 (5, 271) = 바깥 왼쪽 띠 → 붙을 사각형 = 왼쪽 절반(몫 = 원래 폭 400 ÷ 800).
+      const enter = fireDrag('dragenter', { x: 5, y: 300 })
+      fireDrag('dragover', { x: 6, y: 300 })
+      expect(enter.defaultPrevented).toBe(true)
+      expect((enter as unknown as { dataTransfer: DataTransfer }).dataTransfer.dropEffect).toBe('move')
+      const preview = screen.getByTestId('dock-preview')
+      expect(screen.getByTestId('dock-overlay-layer').contains(preview)).toBe(true)
+      expect([preview.style.left, preview.style.top, preview.style.width, preview.style.height]).toEqual([
+        '0px',
+        '0px',
+        '400px',
+        '571px',
+      ])
+      expect(invokeMock.mock.calls.length).toBe(calls)
+
+      const drop = fireDrag('drop', { x: 6, y: 300 })
+      expect(drop.defaultPrevented).toBe(true)
+      expect(invokeMock.mock.calls.slice(calls)).toEqual([
+        [
+          'tab_drop',
+          {
+            drop: {
+              drag: 'd9',
+              view: 'p1',
+              from: 'slot-popup-2',
+              initial: null,
+              to: { type: 'seam', target: 'v1', anchor: { type: 'outer' }, side: 'Left', share: 0.5 },
+            },
+          },
+        ],
+      ])
+      expect(seen).toEqual([])
+    } finally {
+      for (const t of ['dragenter', 'dragover', 'drop']) window.removeEventListener(t, rdnd)
+    }
+  })
+
+  it('우리 것이 아닌 끌기(트리 행 · 파일)는 받지도 끊지도 않는다 — window 의 react-dnd 꼴 리스너까지 간다', async () => {
+    await mountDropWindow()
+    const seen: string[] = []
+    const rdnd = (e: Event) => void seen.push(e.type)
+    window.addEventListener('dragover', rdnd)
+    try {
+      const row = fireDrag('dragover', { x: 5, y: 300 }, ['application/x-tree-row'])
+      expect(row.defaultPrevented).toBe(false)
+      fireDrag('dragover', { x: 5, y: 300 }, ['Files'])
+      expect(seen).toEqual(['dragover', 'dragover'])
+      expect(screen.queryByTestId('dock-overlay')).toBeNull()
+    } finally {
+      window.removeEventListener('dragover', rdnd)
+    }
   })
 
   it('파일 · URL 끌어 놓기를 막는다(앱 안 링크 포함) · 글자 끌기는 그대로 · 내리면 뗀다', async () => {
@@ -1185,7 +1271,7 @@ describe('WindowLayout — 대기 모드(window_role · dock:spare)', () => {
     expect(screen.getByTestId('parked-canvas')).toBeTruthy()
   })
 
-  it('대기 모드에서도 재기 셋(캔버스 · 칸 틀 지표 · 크롬)을 보낸다', async () => {
+  it('대기 모드에서도 재기 둘(캔버스 · 칸 틀 지표)을 보낸다 · 창 틀(크롬) 보고는 없다', async () => {
     FakeResizeObserver.instances = []
     vi.stubGlobal('ResizeObserver', FakeResizeObserver)
     __resetCanvasReportForTest()
@@ -1198,8 +1284,7 @@ describe('WindowLayout — 대기 모드(window_role · dock:spare)', () => {
           ['report_ui_metrics', { metrics: expect.objectContaining({ frame_insets: { t: 1, r: 1, b: 1, l: 1 } }) }],
         ]),
       )
-      await waitFor(() => expect(chromeReports().length).toBeGreaterThan(0))
-      expect(lastChrome()).toEqual({ canvas_origin: expect.any(Object), tab_bar: expect.any(Object) })
+      expect(chromeReports()).toEqual([])
     } finally {
       vi.unstubAllGlobals()
     }
@@ -1222,6 +1307,28 @@ describe('WindowLayout — 대기 모드(window_role · dock:spare)', () => {
 
     emit('window:tabs-updated', { label: SPARE, tabs: [], active: 'p1', version: 4 })
     await waitFor(() => expect(closeMock).toHaveBeenCalledTimes(1))
+  })
+
+  it('대기 창은 창 사실(window_frame)을 당기지 않는다 — 셸 창 모델 밖이다 · 들이면 당긴다 · 다시 대기에 들면 그 뒤로는 안 당긴다', async () => {
+    const frameCalls = () => invokeMock.mock.calls.filter(c => c[0] === 'window_frame')
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'list_tabs') return { label: SPARE, tabs: [{ id: 'p1', name: 'Pop' }], active: 'p1', version: 3 }
+      if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+      if (cmd === 'window_frame') return { restored: { w: 800, h: 600 }, maximized: false, insets: { t: 0, r: 0, b: 0, l: 0 } }
+      return undefined
+    })
+    await mountParked()
+    await new Promise(res => setTimeout(res, 50))
+    expect(frameCalls()).toEqual([])
+
+    act(() => emit('dock:spare', { step: 'adopted' }))
+    await waitFor(() => expect(screen.getAllByTestId('tab-canvas')).toHaveLength(1))
+    await waitFor(() => expect(frameCalls()).toEqual([['window_frame', undefined]]))
+
+    act(() => emit('dock:spare', { step: 'parked' }))
+    expect(screen.getByTestId('parked-canvas')).toBeTruthy()
+    await new Promise(res => setTimeout(res, 50))
+    expect(frameCalls()).toHaveLength(1)
   })
 
   it('들인 뒤 제 탭을 당겨 오기 전에는 빈 틀 그대로 — 로딩 문구 없음 · 탭바 줄은 같은 노드', async () => {

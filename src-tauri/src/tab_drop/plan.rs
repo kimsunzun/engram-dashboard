@@ -1,7 +1,7 @@
 //! 놓기 명령의 순수 판정 — 명령 하나 · 끌기가 끝난 뒤 읽은 입력 · 출처 창 틀에서 적용할 도킹 요청 또는 취소 · 무시를
 //! 고른다. Tauri · 락 · OS 호출 0 이라 단독 시험이 된다(ADR-0012). 진입점 = [`plan`] · 그 안의 새 창 가름 [`decide`] ·
 //! 새 창 자리 [`new_window_origin`].
-// ADR-0296
+// ADR-0296 · ADR-0297
 // TRD S21-slot-docking §3-3 · §3-5
 
 use super::wire::{DropAnchor, DropTo, EndEffect, NewWindowBy, SizeCss, TabDrop};
@@ -9,7 +9,7 @@ use crate::layout::apply::{DockDest, DockRequest, OnEmptied, WindowPlace};
 use crate::layout::chrome::PointCss;
 use crate::layout::dock::DockAnchor;
 use crate::layout::geometry::Insets;
-use crate::layout::manager::{DockGuard, DockMove, FocusPolicy, TargetExpect, WindowLabel};
+use crate::layout::manager::{DockGuard, DockMove, FocusPolicy, WindowLabel};
 
 /// 무시 사유(`TabDropReply::Ignored.why` 의 철자).
 pub const NO_CURSOR: &str = "no-cursor";
@@ -76,61 +76,52 @@ pub enum Plan {
     Ignore(&'static str),
 }
 
-/// 놓기 명령 하나를 적용할 것으로 옮긴다. `caller` = 명령을 부른 창 — 탭바 · 이음새의 창이다(`drop.from` 이 아니다).
+/// 놓기 명령 하나를 적용할 것으로 옮긴다. `caller` = 명령을 부른 창 — 탭바 놓기의 창이다(`drop.from` 이 아니다).
 ///
-/// 모든 도킹 요청이 `FocusPolicy::Reveal` · `OnEmptied::Close` · 표식 없음 · `expect_window = from` 이고, 다음 활성
-/// (`mv.successor`)은 `initial ≠ view` 일 때만 `initial` 이다. 사전조건 = `tab_bar` → `Tabs(expect)` · `seam` →
-/// `SeamAt{window: caller, rev, active, or_initial}`(`or_initial` 은 `caller = from` 일 때만 `initial ≠ view` 인 `initial`)
-/// · `new_window` → 없음. 새 창의 크기는 유한 양수일 때만 싣는다.
+/// 모든 도킹 요청이 `FocusPolicy::Reveal` · `OnEmptied::Close` · [`DockGuard::NONE`] 이고, 다음 활성(`mv.successor`)은
+/// `initial ≠ view` 일 때만 `initial` 이되 끄는 탭이 적용 때 `from` 창에 있을 때만 쓴다(`mv.successor_window = from` —
+/// 다른 창에 있으면 그 창은 셸 승계를 따른다). 새 창의 크기는 유한 양수일 때만 싣는다.
+///
+/// 놓기가 가리킨 것(끄는 탭 · 대상 탭 · 대상 칸 · 탭바 창)은 모델이 id 로 지금 상태에서 다시 찾는다 — 있으면 지금
+/// 상태에 맞춰 적용하고(탭바 자리는 지금 목록의 끝 자리로 자름 · 그사이 나뉜 칸에도 붙음 · 그사이 다른 창으로 간 끄는
+/// 탭은 지금 창에서 뺌) 없으면 거절한다(모델 그대로). ★놓기가 본 탭 목록 · 판 번호 · 활성 · 출처 창을 견주어 거절하는
+/// 대조를 되살리지 말 것★ — 결과가 조금 어긋나도 사용자가 다시 끌면 되고, 대조는 거절할 예외만 늘린다.
+// ADR-0297
 // TRD S21-slot-docking §3-3
 pub fn plan(drop: &TabDrop, caller: &str, input: &InputNow, frame: &SourceFrame) -> Plan {
     let successor = drop.initial.filter(|initial| *initial != drop.view);
-    let dock = |to: DockDest, expect_target: Option<TargetExpect>| {
+    let dock = |to: DockDest| {
         Plan::Dock(DockRequest {
             view: drop.view,
             to,
-            guard: DockGuard {
-                expect_window: Some(drop.from.clone()),
-                expect_target,
-                ..DockGuard::NONE
-            },
+            guard: DockGuard::NONE,
             focus: FocusPolicy::Reveal,
-            mv: DockMove { successor },
+            mv: DockMove {
+                successor,
+                successor_window: Some(drop.from.clone()),
+            },
             on_emptied: OnEmptied::Close,
         })
     };
     match &drop.to {
-        DropTo::TabBar { index, expect } => dock(
-            DockDest::TabBar {
-                window: caller.to_owned(),
-                index: Some(*index as usize),
-            },
-            Some(TargetExpect::Tabs(expect.clone())),
-        ),
+        DropTo::TabBar { index } => dock(DockDest::TabBar {
+            window: caller.to_owned(),
+            index: Some(*index as usize),
+        }),
         DropTo::Seam {
             target,
             anchor,
             side,
             share,
-            rev,
-            active,
-        } => dock(
-            DockDest::Seam {
-                target: *target,
-                anchor: match anchor {
-                    DropAnchor::Slot { id } => DockAnchor::Slot(*id),
-                    DropAnchor::Outer => DockAnchor::Outer,
-                },
-                side: *side,
-                share: *share,
+        } => dock(DockDest::Seam {
+            target: *target,
+            anchor: match anchor {
+                DropAnchor::Slot { id } => DockAnchor::Slot(*id),
+                DropAnchor::Outer => DockAnchor::Outer,
             },
-            Some(TargetExpect::SeamAt {
-                window: caller.to_owned(),
-                rev: *rev,
-                active: *active,
-                or_initial: if caller == drop.from { successor } else { None },
-            }),
-        ),
+            side: *side,
+            share: *share,
+        }),
         DropTo::NewWindow { by, size, grab } => match decide(by, input) {
             Decision::Cancel => Plan::Cancel,
             Decision::Ignore(why) => Plan::Ignore(why),
@@ -140,15 +131,12 @@ pub fn plan(drop: &TabDrop, caller: &str, input: &InputNow, frame: &SourceFrame)
                     .find(|s| s.is_finite() && *s > 0.0)
                     .unwrap_or(1.0);
                 let pos = new_window_origin(cursor, scale, (frame.insets.l, frame.insets.t), *grab);
-                dock(
-                    DockDest::NewWindow {
-                        at: WindowPlace {
-                            pos: Some(pos),
-                            size: size.and_then(usable_size),
-                        },
+                dock(DockDest::NewWindow {
+                    at: WindowPlace {
+                        pos: Some(pos),
+                        size: size.and_then(usable_size),
                     },
-                    None,
-                )
+                })
             }
         },
     }
@@ -272,8 +260,6 @@ mod tests {
             anchor,
             side: DockSide::Bottom,
             share: 0.3,
-            rev: 42,
-            active: id(1),
         }
     }
 
@@ -288,16 +274,8 @@ mod tests {
     // ── ① 대응 (§3-3) ──────────────────────────────────────────────────────────
 
     #[test]
-    fn a_tab_bar_drop_targets_the_calling_window_with_the_tab_list_and_source_window_preconditions()
-    {
-        let d = drop_to(
-            MAIN,
-            Some(id(3)),
-            DropTo::TabBar {
-                index: 2,
-                expect: vec![id(3), id(1), id(4)],
-            },
-        );
+    fn a_tab_bar_drop_targets_the_calling_window_without_preconditions() {
+        let d = drop_to(MAIN, Some(id(3)), DropTo::TabBar { index: 2 });
         let req = request(plan(&d, POPUP, &quiet(TopAt::Unknown), &FLAT));
         assert_eq!(
             req,
@@ -307,16 +285,11 @@ mod tests {
                     window: POPUP.into(),
                     index: Some(2),
                 },
-                guard: DockGuard {
-                    lease: None,
-                    keep_lease: false,
-                    expect_window: Some(MAIN.into()),
-                    expect_source: None,
-                    expect_target: Some(TargetExpect::Tabs(vec![id(3), id(1), id(4)])),
-                },
+                guard: DockGuard::NONE,
                 focus: FocusPolicy::Reveal,
                 mv: DockMove {
-                    successor: Some(id(3))
+                    successor: Some(id(3)),
+                    successor_window: Some(MAIN.into()),
                 },
                 on_emptied: OnEmptied::Close,
             },
@@ -326,10 +299,7 @@ mod tests {
 
     #[test]
     fn the_successor_is_the_initial_tab_only_when_it_is_not_the_dragged_tab() {
-        let bar = || DropTo::TabBar {
-            index: 0,
-            expect: vec![id(1)],
-        };
+        let bar = || DropTo::TabBar { index: 0 };
         for (initial, want) in [
             (Some(id(3)), Some(id(3))),
             (Some(id(1)), None),
@@ -342,43 +312,38 @@ mod tests {
                 &FLAT,
             ));
             assert_eq!(req.mv.successor, want, "{initial:?}");
+            assert_eq!(
+                req.mv.successor_window.as_deref(),
+                Some(MAIN),
+                "from 창에서만"
+            );
         }
     }
 
     #[test]
-    fn a_seam_drop_maps_the_anchor_and_carries_the_seam_preconditions() {
-        // 다른 창 대상 — or_initial 없음.
-        let req = request(plan(
-            &drop_to(MAIN, Some(id(3)), seam(DropAnchor::Slot { id: id(9) })),
-            POPUP,
-            &quiet(TopAt::Unknown),
-            &FLAT,
-        ));
-        assert_eq!(
-            req.to,
-            DockDest::Seam {
-                target: id(7),
-                anchor: DockAnchor::Slot(id(9)),
-                side: DockSide::Bottom,
-                share: 0.3,
-            }
-        );
-        assert_eq!(
-            req.guard,
-            DockGuard {
-                expect_window: Some(MAIN.into()),
-                expect_target: Some(TargetExpect::SeamAt {
-                    window: POPUP.into(),
-                    rev: 42,
-                    active: id(1),
-                    or_initial: None,
-                }),
-                ..DockGuard::NONE
-            }
-        );
-        assert_eq!(req.focus, FocusPolicy::Reveal);
-        assert_eq!(req.mv.successor, Some(id(3)));
-        assert_eq!(req.on_emptied, OnEmptied::Close);
+    fn a_seam_drop_maps_the_anchor_without_preconditions_whatever_the_calling_window() {
+        for caller in [MAIN, POPUP] {
+            let req = request(plan(
+                &drop_to(MAIN, Some(id(3)), seam(DropAnchor::Slot { id: id(9) })),
+                caller,
+                &quiet(TopAt::Unknown),
+                &FLAT,
+            ));
+            assert_eq!(
+                req.to,
+                DockDest::Seam {
+                    target: id(7),
+                    anchor: DockAnchor::Slot(id(9)),
+                    side: DockSide::Bottom,
+                    share: 0.3,
+                },
+                "{caller}"
+            );
+            assert_eq!(req.guard, DockGuard::NONE, "{caller}");
+            assert_eq!(req.focus, FocusPolicy::Reveal);
+            assert_eq!(req.mv.successor, Some(id(3)));
+            assert_eq!(req.on_emptied, OnEmptied::Close);
+        }
 
         let outer = request(plan(
             &drop_to(MAIN, None, seam(DropAnchor::Outer)),
@@ -396,33 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn or_initial_is_set_only_for_a_seam_in_the_source_window_with_a_different_initial_tab() {
-        let cases = [
-            (MAIN, Some(id(3)), Some(id(3))),
-            (MAIN, Some(id(1)), None),
-            (MAIN, None, None),
-            (POPUP, Some(id(3)), None),
-        ];
-        for (caller, initial, want) in cases {
-            let req = request(plan(
-                &drop_to(MAIN, initial, seam(DropAnchor::Outer)),
-                caller,
-                &quiet(TopAt::Unknown),
-                &FLAT,
-            ));
-            let Some(TargetExpect::SeamAt {
-                or_initial, window, ..
-            }) = req.guard.expect_target
-            else {
-                panic!("SeamAt 이어야");
-            };
-            assert_eq!(or_initial, want, "{caller} {initial:?}");
-            assert_eq!(window, caller);
-        }
-    }
-
-    #[test]
-    fn a_new_window_drop_places_at_the_origin_with_only_the_source_window_precondition() {
+    fn a_new_window_drop_places_at_the_origin_without_preconditions() {
         let size = SizeCss { w: 800.0, h: 600.0 };
         let d = drop_to(
             MAIN,
@@ -452,13 +391,7 @@ mod tests {
                 },
             }
         );
-        assert_eq!(
-            req.guard,
-            DockGuard {
-                expect_window: Some(MAIN.into()),
-                ..DockGuard::NONE
-            }
-        );
+        assert_eq!(req.guard, DockGuard::NONE);
         assert_eq!(req.mv.successor, Some(id(3)));
         assert_eq!(req.focus, FocusPolicy::Reveal);
         assert_eq!(req.on_emptied, OnEmptied::Close);

@@ -14,7 +14,7 @@ use crate::layout::apply::DockOutcome;
 use crate::layout::chrome::{DockChrome, PointCss, RectCss};
 use crate::layout::dock::{DockAnchor, DockSide};
 use crate::layout::geometry::Insets;
-use crate::layout::manager::{DockError, DockMove, DockTo, FrameMeasures, LeaseId};
+use crate::layout::manager::{DockError, DockTo, FrameMeasures, LeaseId};
 use crate::layout::{CanvasPx, UiMetrics, ViewManager, WindowBounds, MAIN_WINDOW_LABEL};
 
 const MAIN: &str = MAIN_WINDOW_LABEL;
@@ -148,15 +148,7 @@ impl Ports for Fake {
             },
         };
         let req = write.into_request();
-        let docked = self.mgr.dock(
-            req.view,
-            to,
-            &req.guard,
-            req.focus,
-            DockMove {
-                successor: req.mv.successor,
-            },
-        )?;
+        let docked = self.mgr.dock(req.view, to, &req.guard, req.focus, req.mv)?;
         Ok(DockOutcome {
             window: docked.window,
             slot_ids: docked.slot_ids,

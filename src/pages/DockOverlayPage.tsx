@@ -1,13 +1,13 @@
 // DockOverlayPage — 안내 창(label `dock-overlay` · 경로 `#/dock-overlay` — TRD S21-slot-docking §2-5)이 그리는 페이지.
-//   셸이 대상 창 위에 덮어 도킹 띠 · 미리보기를 보이는 투명 · 클릭 통과 창이라 페이지 바닥도 투명이다. 그릴 내용은 셸이
+//   셸이 대상 창 위에 덮어 도킹 안내를 보이는 투명 · 클릭 통과 창이라 페이지 바닥도 투명이다. 그릴 내용은 셸이
 //   `dock:overlay` 로 민다(`OverlayView` · 치울 때 `null`).
 
 import { useEffect, useLayoutEffect, useState } from 'react'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 
-import type { OverlayView } from '../../src-tauri/bindings/OverlayView'
 import { DockOverlayView } from '../components/layout/dock/DockOverlay'
+import type { OverlayView } from '../components/layout/dock/overlayTypes'
 
 const EVT_OVERLAY = 'dock:overlay'
 
@@ -40,7 +40,7 @@ export default function DockOverlayPage() {
   }, [])
 
   return (
-    <div data-testid="dock-overlay-page">
+    <div data-testid="dock-overlay-page" style={{ position: 'fixed', inset: 0 }}>
       <DockOverlayView guide={guide} />
     </div>
   )

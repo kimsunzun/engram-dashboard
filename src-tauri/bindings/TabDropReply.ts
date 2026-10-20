@@ -12,7 +12,7 @@
  * - `duplicate`: 같은 끌기를 이미 처리했다 — 이 호출은 알림도 없다. 같은 끌기의 `drag_end` 새 창이 진행 중일 때 닿은
  *   `drop` 도 이것으로 답하되 셸이 맡아 둔다 — 그 새 창이 거절되면 셸이 그 `drop` 을 이어 처리하고 그 결과는
  *   [`TabDropDone`] 으로만 간다.
- * - `rejected`: 모델이 거절했다 — 모델 그대로. `kind` = 거절 종류 낱말(`TabNotFound` · `SourceChanged` ·
- *   `TargetChanged` · `ZeroArea` · `WindowOpen` 따위 — 셸 도킹 오류 문구의 괄호 속 낱말) · `reason` = 사람이 읽는 문장.
+ * - `rejected`: 모델이 거절했다 — 모델 그대로. `kind` = 거절 종류 낱말(`TabNotFound` · `WindowNotFound` ·
+ *   `SlotNotFound` · `ZeroArea` · `WindowOpen` 따위 — 셸 도킹 오류 문구의 괄호 속 낱말) · `reason` = 사람이 읽는 문장.
  */
 export type TabDropReply = { "type": "applied", window: string, reused: boolean, } | { "type": "canceled" } | { "type": "ignored", why: string, } | { "type": "duplicate" } | { "type": "rejected", kind: string, reason: string, };

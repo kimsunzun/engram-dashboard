@@ -32,7 +32,7 @@ pub const EVT_WINDOW_FRAME: &str = "window:frame";
 /// 끌기의 중복 · 맡아 둔 `drop` 에 자리를 내준 거절은 빼고 — [`TabDropDone`]). 늘 `Ok` 다 — 실패도 답의 갈래다.
 ///
 /// 입력은 받자마자, 락 · 장부보다 먼저 읽는다 — 출처 dragend 가 보낸 명령이면 커서 · 주 버튼 · Esc · 커서 밑 맨 위 창,
-/// 우리 웹뷰의 drop 이면 커서만. 끌기가 끝난 뒤의 호출이라 「끌기 도중 셸 호출 0」은 그대로다.
+/// 우리 웹뷰의 drop 이면 커서만. 끌기가 끝난 뒤의 호출이다(끌기 명령은 놓을 때만 — ADR-0296 · ADR-0297).
 // TRD S21-slot-docking §3-2
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
@@ -261,7 +261,7 @@ impl DropShell for TauriDropShell<'_> {
             tracing::debug!(
                 module = "dock",
                 window = label,
-                "놓은 창에 포커스를 못 줬다: {e}"
+                "옮긴 탭이 든 창에 포커스를 못 줬다: {e}"
             );
         }
     }

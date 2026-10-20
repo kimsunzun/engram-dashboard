@@ -1237,19 +1237,18 @@ impl ViewManager {
     /// 4. `Seam` 기준 슬롯이 대상 탭에 없으면 — 다른 탭에 있으면 `SlotNotInTab`, 어디에도 없으면 `SlotNotFound`.
     /// 5. 표식 — 출처에 표식이 섰는데 `guard.lease` 가 없으면 `Dragging` · `guard.lease` 가 출처의 지금 표식이
     ///    아니면(표식 없음 · 다른 번호 · 다른 탭의 표식) `StaleLease`.
-    /// 6. `guard.expect_window` 가 출처 탭의 창이 아니거나 `guard.expect_source` 가 출처 탭 배치와 다르면
-    ///    `SourceChanged` · `guard.expect_target` 이 대상(`Seam` = 대상 탭 배치와 대상 창의 모델 활성 탭 · `SeamAt` =
-    ///    대상 탭의 창 · 대상 탭의 판 번호([`Self::layout_rev`]) · 그 창 모델 활성 탭이 `active` 나 `or_initial` 인가 ·
-    ///    `TabBar` = 대상 창 탭 목록)과 다르거나 그 모드의 값이 아니면(`NewWindow` 는 무엇이든) `TargetChanged`.
+    /// 6. `guard.expect_source` 가 출처 탭 배치와 다르면 `SourceChanged` · `guard.expect_target` 이 대상(`Seam` = 대상
+    ///    탭 배치와 대상 창의 모델 활성 탭 · `TabBar` = 대상 창 탭 목록)과 다르거나 그 모드의 값이 아니면(`NewWindow` 는
+    ///    무엇이든) `TargetChanged`.
     /// 7. `Seam` — `share` 가 유한하지 않거나 `tree::RATIO_MIN..=dock::SHARE_MAX` 밖이면 `InvalidShare` · 두 트리가 슬롯 id 를
     ///    함께 가지면 `SlotIdOverlap` · 결과에 새 면적 0 칸이 생기면 `ZeroArea`.
     ///
     /// 보이는 탭 · 포커스: `Keep` 이면 대상 창의 활성 탭과 대상 탭의 포커스를 바꾸지 않는다 — 단 출처가 대상 창의
     /// 활성 탭이었으면(같은 창 도킹) 대상(`Seam` = 대상 탭 · `TabBar` = 옮긴 탭)이 활성이 된다. `Reveal` 이면 대상
     /// (`Seam` = 대상 탭 · 그 밖 = 옮긴 탭)이 활성이고, `Seam` 은 대상 탭 포커스를 끼운 첫 슬롯으로 둔다. 옮긴 탭이
-    /// 출처 창의 활성이었고 그 창이 남으면 `mv.successor` 가 남은 탭일 때 그것이, 아니면 [`succession`] 이 그 창의
-    /// 활성이 된다. 성공하면 `guard.lease` 의 표식을 내린다 — `guard.keep_lease` 면 그대로 둔다(단 `Seam` 은 출처
-    /// 탭을 지우므로 그 탭의 표식도 함께 사라진다).
+    /// 출처 창의 활성이었고 그 창이 남으면 `mv.successor` 가 남은 탭일 때 그것이(`mv.successor_window` 가 있으면 출처
+    /// 창이 그 창일 때만), 아니면 [`succession`] 이 그 창의 활성이 된다. 성공하면 `guard.lease` 의 표식을 내린다 —
+    /// `guard.keep_lease` 면 그대로 둔다(단 `Seam` 은 출처 탭을 지우므로 그 탭의 표식도 함께 사라진다).
     pub fn dock(
         &mut self,
         view: ViewId,
@@ -1276,7 +1275,8 @@ impl ViewManager {
                         .or_default()
                         .extend(slots);
                 }
-                let pulled = self.pull_docked_tab(&source_window, view, mv.successor);
+                let pulled =
+                    self.pull_docked_tab(&source_window, view, mv.successor_in(&source_window));
                 self.remove_view(view);
                 let placed = self.edit_layout(target, |t| {
                     t.layout = layout;
@@ -1311,7 +1311,7 @@ impl ViewManager {
                 let pulled = if window == source_window {
                     PulledDock::default()
                 } else {
-                    self.pull_docked_tab(&source_window, view, mv.successor)
+                    self.pull_docked_tab(&source_window, view, mv.successor_in(&source_window))
                 };
                 // 쌍 갱신(불변식 1·2). // ADR-0057
                 self.view_owner.insert(view, window.clone());
@@ -1328,7 +1328,8 @@ impl ViewManager {
                 seed,
                 measures,
             } => {
-                let pulled = self.pull_docked_tab(&source_window, view, mv.successor);
+                let pulled =
+                    self.pull_docked_tab(&source_window, view, mv.successor_in(&source_window));
                 // 단언으로 멈추지 않는다 — 이 자리는 출처를 이미 뺀 뒤라 멈추면 모델이 반쯤 바뀐 채 남는다.
                 let seed = seed.map(|seed| {
                     if self.has_window_id(&seed.window_id) {
@@ -1415,14 +1416,6 @@ impl ViewManager {
 
         self.check_lease(view, guard.lease)?;
 
-        // TRD S21-slot-docking §3-7
-        if guard
-            .expect_window
-            .as_ref()
-            .is_some_and(|want| *want != source_window)
-        {
-            return Err(DockError::SourceChanged);
-        }
         let source_layout = &self.views[&view].layout;
         if guard
             .expect_source
@@ -1439,21 +1432,6 @@ impl ViewManager {
             (DockTo::Seam { target, .. }, Some(TargetExpect::Seam { layout, active })) => {
                 *layout == self.views[target].layout
                     && *active == self.windows[&target_window].active
-            }
-            // TRD S21-slot-docking §3-3 · §3-7
-            (
-                DockTo::Seam { target, .. },
-                Some(TargetExpect::SeamAt {
-                    window,
-                    rev,
-                    active,
-                    or_initial,
-                }),
-            ) => {
-                let now = self.windows[&target_window].active;
-                target_window == *window
-                    && self.layout_rev(*target) == Some(*rev)
-                    && (now == *active || Some(now) == *or_initial)
             }
             (DockTo::TabBar { window, .. }, Some(TargetExpect::Tabs(want))) => {
                 *want == self.windows[window].tabs
@@ -1533,14 +1511,6 @@ impl ViewManager {
         let source_window = self.tab_window(view).ok_or(DockError::TabNotFound(view))?;
         let source = &self.windows[source_window];
         self.check_lease(view, guard.lease)?;
-        // TRD S21-slot-docking §3-7
-        if guard
-            .expect_window
-            .as_ref()
-            .is_some_and(|want| want != source_window)
-        {
-            return Err(DockError::SourceChanged);
-        }
         if guard
             .expect_source
             .as_ref()
@@ -2034,11 +2004,25 @@ pub struct EmptiedWindow {
 }
 
 /// 옮긴 탭이 출처 창의 활성이었고 그 창이 남을 때 그 창의 다음 활성 — `successor` 가 남은 탭이 아니거나
-/// `None` 이면 [`succession`]. 규칙의 정본 = [`ViewManager::dock`].
-// ADR-0295
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// `None` 이면 [`succession`]. `successor_window` 가 있으면 `successor` 는 적용 때 옮긴 탭이 그 창에 있을 때만 쓴다
+/// (다른 창에 있으면 [`succession`] — `successor` 가 그 창의 탭이라 남의 창 선택을 고르지 않게) · `None` = 어느 창이든.
+/// 규칙의 정본 = [`ViewManager::dock`].
+// ADR-0295 · ADR-0297
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DockMove {
     pub successor: Option<ViewId>,
+    pub successor_window: Option<WindowLabel>,
+}
+
+impl DockMove {
+    // 출처 창 `source` 에서 쓸 `successor`.
+    fn successor_in(&self, source: &str) -> Option<ViewId> {
+        self.successor.filter(|_| {
+            self.successor_window
+                .as_deref()
+                .is_none_or(|window| window == source)
+        })
+    }
 }
 
 /// 끌기 표식 번호 — [`ViewManager::lease_tab`] 이 한 부팅 안에서 겹치지 않게 발급한다. 모델은 같은지만 본다.
@@ -2054,9 +2038,6 @@ pub struct DockGuard {
     /// 성공해도 `lease` 를 내리지 않는다 — 한 끌기의 여러 쓰기가 같은 표식을 이어 쥐고 끝에 부르는 쪽이 내린다.
     // ADR-0295
     pub keep_lease: bool,
-    /// 출처 탭이 이 창의 탭일 때만 — 판정한 뒤 그 탭이 다른 창으로 갔으면(LLM 이 옮김 따위) `SourceChanged`.
-    // TRD S21-slot-docking §3-7
-    pub expect_window: Option<WindowLabel>,
     /// 출처 탭 배치가 이 값일 때만.
     pub expect_source: Option<LayoutNode>,
     /// 대상이 이 값일 때만.
@@ -2067,14 +2048,13 @@ impl DockGuard {
     pub const NONE: DockGuard = DockGuard {
         lease: None,
         keep_lease: false,
-        expect_window: None,
         expect_source: None,
         expect_target: None,
     };
 }
 
-/// [`DockGuard::expect_target`] 의 값 — `Seam` = 이음새 대상 탭의 배치와 대상 창의 활성 탭 · `SeamAt` = 이음새 대상
-/// 탭의 창 · 판 번호와 그 창의 활성 탭 · `Tabs` = `TabBar` 대상 창의 탭 목록.
+/// [`DockGuard::expect_target`] 의 값 — `Seam` = 이음새 대상 탭의 배치와 대상 창의 활성 탭 · `Tabs` = `TabBar` 대상
+/// 창의 탭 목록.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TargetExpect {
     /// `active` = 영역을 만든 순간 대상 창의 **모델** 활성 탭 — 같은 창 도킹에서 끄는 탭이 활성이면 그 끄는 탭
@@ -2082,17 +2062,6 @@ pub enum TargetExpect {
     Seam {
         layout: LayoutNode,
         active: ViewId,
-    },
-    /// 트리를 통째로 견주지 않고 대상 탭의 판 번호([`ViewManager::layout_rev`])를 견준다 — 다른 탭 · 다른 창의 바뀜으로는
-    /// 거절되지 않는다. `window` = 대상 탭이 든 창(부른 창의 탭인가). `active` = 판정 때 그 창의 **모델** 활성 탭 ·
-    /// `or_initial` = 그 창 활성이 이 값이어도 받는다 — 같은 창 이음새에서 출처가 원래 선택을 되돌린 것(`switch_tab`)이
-    /// 놓기보다 먼저 닿은 경우다(그 탭이 곧 대상이라 판정이 기댄 배치는 그대로다). 다른 창 대상에는 `None`.
-    // TRD S21-slot-docking §3-3 · §3-7
-    SeamAt {
-        window: WindowLabel,
-        rev: u64,
-        active: ViewId,
-        or_initial: Option<ViewId>,
     },
     Tabs(Vec<ViewId>),
 }
@@ -6172,7 +6141,6 @@ mod tests {
         let held = DockGuard {
             lease: Some(lease),
             keep_lease: false,
-            expect_window: None,
             expect_source: Some(LayoutNode::new_empty_slot()),
             expect_target: Some(TargetExpect::Tabs(Vec::new())),
         };
@@ -6185,7 +6153,6 @@ mod tests {
             let held = DockGuard {
                 lease: Some(lease),
                 keep_lease: false,
-                expect_window: None,
                 expect_source: Some(layout_of(&mgr, p[0])),
                 expect_target: Some(target),
             };
@@ -6208,7 +6175,6 @@ mod tests {
         let held = DockGuard {
             lease: Some(lease),
             keep_lease: false,
-            expect_window: None,
             expect_source: Some(layout_of(&mgr, p[0])),
             expect_target: None,
         };
@@ -6737,6 +6703,7 @@ mod tests {
                     FocusPolicy::Reveal,
                     DockMove {
                         successor: pick(&p, m0),
+                        ..DockMove::default()
                     },
                 )
                 .unwrap();
@@ -6755,10 +6722,36 @@ mod tests {
             FocusPolicy::Reveal,
             DockMove {
                 successor: Some(p[2]),
+                ..DockMove::default()
             },
         )
         .unwrap();
         assert_eq!(mgr.windows[P1].active, p[1]);
+    }
+
+    // ADR-0297 — 놓기의 `initial` 은 끌기를 시작한 창의 탭이다. 끄는 탭이 그사이 다른 창으로 갔으면 그 창은 승계를 따른다.
+    #[test]
+    fn the_given_successor_is_taken_only_while_the_tab_is_in_its_successor_window() {
+        // P1 [p0, p1, p2] · 활성 p1 — 승계라면 오른쪽 이웃 p2 다.
+        for (window, want) in [(Some(P1), 0), (None, 0), (Some(MAIN_WINDOW_LABEL), 2)] {
+            let Fx { mut mgr, p, .. } = fixture();
+            let p2 = mgr.create_tab(P1, None).unwrap();
+            mgr.switch_tab(P1, p[1]).unwrap();
+            let p = [p[0], p[1], p2];
+            mgr.dock(
+                p[1],
+                tab_bar(MAIN_WINDOW_LABEL, None),
+                &DockGuard::NONE,
+                FocusPolicy::Reveal,
+                DockMove {
+                    successor: Some(p[0]),
+                    successor_window: window.map(str::to_owned),
+                },
+            )
+            .unwrap();
+            assert_eq!(mgr.windows[P1].active, p[want], "{window:?}");
+            assert_invariants(&mgr);
+        }
     }
 
     #[test]
@@ -7118,7 +7111,7 @@ mod tests {
         assert_eq!(mgr.windows[FRESH].window_id, own.window_id);
     }
 
-    // ── 판 번호 `layout_rev` · 놓기 사전조건(TRD S21-slot-docking §3-7 · §8-1 ⑦) ───────────────────
+    // ── 판 번호 `layout_rev`(TRD S21-slot-docking §3-7 · §8-1 ⑦) ────────────────────────────────────
 
     // 한 쓰기 뒤 — `moved` 면 판 번호가 오르고 그 쓰기가 낸 `version` 과 같다 · 아니면 그대로. 스냅숏도 같은 값을 싣는다.
     fn rev_step(mgr: &ViewManager, view: ViewId, last: &mut u64, moved: bool, what: &str) {

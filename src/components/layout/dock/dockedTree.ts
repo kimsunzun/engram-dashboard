@@ -1,5 +1,6 @@
 // TRD S21-slot-docking §4-5: 셸 `layout::dock::{docked_tree, incoming_rect}` · `layout::geometry::{compute, boundary, px_edge,
-//   frame_px}` 의 거울 — 끄는 동안 셸 호출이 0 이라(ADR-0296) 띠 유효성(R8) · 미리보기(R4)를 웹이 다시 센다. 순수하다.
+//   frame_px}` 의 거울 — 끄는 동안 끌기는 판정을 셸과 맞추지 않아(ADR-0296 · ADR-0297) 띠 유효성(R8) · 미리보기(R4)를 웹이 혼자
+//   센다. 순수하다.
 // ★셸과 같은 f64 연산을 같은 순서로 한다★ — 경계는 부모 값을 복사하고 새로 셈하는 값은 분할 경계 하나뿐이다(셸 `geometry.rs`
 //   머리 불변식). 그래야 미리보기가 놓은 뒤 셸이 그릴 칸과 비트 단위로 같고, 깊은 사슬의 면적 0 판정이 셸과 같은 칸에서 선다.
 //   두 판은 골든 `src-tauri/src/layout/bands_golden.json` 이 묶는다(`bands.test.ts` · `judge.test.ts`).

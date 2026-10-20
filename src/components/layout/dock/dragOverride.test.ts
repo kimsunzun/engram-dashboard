@@ -230,6 +230,17 @@ describe('dragOverride — 원래 선택 되돌리기(§4-6)', () => {
     expect(run([[{ type: 'start', window: WIN, drag: 'drag-2', view: 'C', initial: 'B' }, AT_START]], s).state.phase).toBe('live')
   })
 
+  it('되돌리기를 기다림 — 그 되돌리기의 오류면 풀어 모델 활성으로 · 남의 끌기 오류 · 끄는 동안의 오류 알림은 무동작', () => {
+    const s = run([start(), out(), end('none'), done('canceled')]).state
+    expect(shownTab(s, AT_START)).toBe('A')
+    expect(run([[{ type: 'revertFailed', drag: 'drag-0' }, AT_START]], s).state).toBe(s)
+    const failed = run([[{ type: 'revertFailed', drag: DRAG }, AT_START]], s)
+    expect(failed).toEqual({ state: IDLE, reverts: [] })
+    expect(shownTab(failed.state, AT_START)).toBe('B')
+    const live = run([start(), out()]).state
+    expect(run([[{ type: 'revertFailed', drag: DRAG }, AT_START]], live).state).toBe(live)
+  })
+
   it('되돌릴 탭이 그사이 닫혔으면 모델 활성을 그린다', () => {
     const s = run([start(), out(), end('none'), done('canceled')]).state
     expect(shownTab(s, { tabs: ['B', 'C'], active: 'B' })).toBe('B')

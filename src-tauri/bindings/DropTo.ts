@@ -6,15 +6,16 @@ import type { PointCss } from "./PointCss";
 import type { SizeCss } from "./SizeCss";
 
 /**
- * 놓을 곳.
+ * 놓을 곳 — 셸은 놓기가 본 상태와 견주지 않는다. 가리킨 것이 놓을 때 있으면 지금 상태에 맞춰 적용하고, 없으면
+ * `rejected` 다.
  *
- * - `tab_bar`: 부른 창의 탭바. `index` = 결과 탭 목록에서의 자리(넘치면 맨 뒤) · `expect` = 판정에 쓴 그 창 탭
- *   목록(끄는 탭 포함 — 지금 목록과 다르면 `TargetChanged`).
+ * - `tab_bar`: 부른 창의 탭바. `index` = 결과 탭 목록에서의 자리 — 셸이 지금 목록(끄는 탭을 뺀 것)에 넣고, 넘치면
+ *   맨 뒤다. 부른 창이 없으면 `WindowNotFound`.
  * - `seam`: 부른 창에 보이던 탭 `target` 의 이음새(`side` 철자 = [`DockSide`] variant 이름). `share` = 감싼 자리에서
- *   끄는 탭이 차지하는 몫(`RATIO_MIN(0.01) ≤ share ≤ 0.5` — 밖이면 `InvalidShare`) · `rev` = 판정에 쓴 `target` 의
- *   `ViewSnapshot.layout_rev` · `active` = 판정 때 부른 창의 모델 활성 탭. 셋 중 하나라도 지금과 다르면(또는
- *   `target` 이 부른 창의 탭이 아니면) `TargetChanged`.
+ *   끄는 탭이 차지하는 몫(`RATIO_MIN(0.01) ≤ share ≤ 0.5` — 밖이면 `InvalidShare`). `target` 의 지금 배치에 붙인다 —
+ *   그사이 나뉘었거나 다른 창으로 갔어도 `target` 과 기준 칸이 있으면 붙고, 없으면 `TabNotFound` · `SlotNotFound`(기준
+ *   칸이 다른 탭으로 갔으면 `SlotNotInTab`).
  * - `new_window`: 그 탭만 든 창. `size` = 새 창 안쪽 크기(유한 양수가 아니면 셸 기본 크기 · `null` = 탭 하나뿐인
  *   팝아웃 — 새 창 없이 그 창을 크기 그대로 옮긴다) · `grab` = 새 창 뷰포트에서 커서가 올 점.
  */
-export type DropTo = { "type": "tab_bar", index: number, expect: Array<string>, } | { "type": "seam", target: string, anchor: DropAnchor, side: DockSide, share: number, rev: number, active: string, } | { "type": "new_window", by: NewWindowBy, size: SizeCss | null, grab: PointCss, };
+export type DropTo = { "type": "tab_bar", index: number, } | { "type": "seam", target: string, anchor: DropAnchor, side: DockSide, share: number, } | { "type": "new_window", by: NewWindowBy, size: SizeCss | null, grab: PointCss, };

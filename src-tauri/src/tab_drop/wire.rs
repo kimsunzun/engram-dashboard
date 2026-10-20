@@ -14,9 +14,11 @@ use crate::layout::geometry::Insets;
 ///
 /// - `drag`: 출처가 dragstart 에 뽑는 끌기 id — 셸 장부의 열쇠다(같은 끌기의 두 번째 처리는 `duplicate`).
 /// - `view`: 끄는 탭.
-/// - `from`: dragstart 때 그 탭의 창 label — 그사이 그 탭이 다른 창으로 갔으면 `SourceChanged` 로 거절된다.
-/// - `initial`: 누르기 전 `from` 창의 모델 활성 탭 — `view` 가 아니면 놓은 뒤 `from` 에 남은 탭 중 활성이 된다(`null`
-///   · `view` 와 같음 = 셸 규칙(오른쪽 이웃 → 왼쪽)).
+/// - `from`: dragstart 때 그 탭의 창 label — 결과 알림(`tab_drop:done`)을 받는 창이다. 그 탭이 그사이 다른 창으로
+///   갔으면 셸은 지금 창에서 옮긴다.
+/// - `initial`: 누르기 전 `from` 창의 모델 활성 탭 — `view` 가 아니고 끄는 탭이 놓을 때 `from` 에 있으면 놓은 뒤
+///   `from` 에 남은 탭 중 활성이 된다. 그 밖(`null` · `view` 와 같음 · 끄는 탭이 다른 창에 있음)은 셸 규칙(오른쪽
+///   이웃 → 왼쪽)이다.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct TabDrop {
@@ -30,14 +32,15 @@ pub struct TabDrop {
     pub to: DropTo,
 }
 
-/// 놓을 곳.
+/// 놓을 곳 — 셸은 놓기가 본 상태와 견주지 않는다. 가리킨 것이 놓을 때 있으면 지금 상태에 맞춰 적용하고, 없으면
+/// `rejected` 다.
 ///
-/// - `tab_bar`: 부른 창의 탭바. `index` = 결과 탭 목록에서의 자리(넘치면 맨 뒤) · `expect` = 판정에 쓴 그 창 탭
-///   목록(끄는 탭 포함 — 지금 목록과 다르면 `TargetChanged`).
+/// - `tab_bar`: 부른 창의 탭바. `index` = 결과 탭 목록에서의 자리 — 셸이 지금 목록(끄는 탭을 뺀 것)에 넣고, 넘치면
+///   맨 뒤다. 부른 창이 없으면 `WindowNotFound`.
 /// - `seam`: 부른 창에 보이던 탭 `target` 의 이음새(`side` 철자 = [`DockSide`] variant 이름). `share` = 감싼 자리에서
-///   끄는 탭이 차지하는 몫(`RATIO_MIN(0.01) ≤ share ≤ 0.5` — 밖이면 `InvalidShare`) · `rev` = 판정에 쓴 `target` 의
-///   `ViewSnapshot.layout_rev` · `active` = 판정 때 부른 창의 모델 활성 탭. 셋 중 하나라도 지금과 다르면(또는
-///   `target` 이 부른 창의 탭이 아니면) `TargetChanged`.
+///   끄는 탭이 차지하는 몫(`RATIO_MIN(0.01) ≤ share ≤ 0.5` — 밖이면 `InvalidShare`). `target` 의 지금 배치에 붙인다 —
+///   그사이 나뉘었거나 다른 창으로 갔어도 `target` 과 기준 칸이 있으면 붙고, 없으면 `TabNotFound` · `SlotNotFound`(기준
+///   칸이 다른 탭으로 갔으면 `SlotNotInTab`).
 /// - `new_window`: 그 탭만 든 창. `size` = 새 창 안쪽 크기(유한 양수가 아니면 셸 기본 크기 · `null` = 탭 하나뿐인
 ///   팝아웃 — 새 창 없이 그 창을 크기 그대로 옮긴다) · `grab` = 새 창 뷰포트에서 커서가 올 점.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
@@ -46,8 +49,6 @@ pub struct TabDrop {
 pub enum DropTo {
     TabBar {
         index: u32,
-        #[ts(type = "Array<string>")]
-        expect: Vec<Uuid>,
     },
     Seam {
         #[ts(type = "string")]
@@ -55,11 +56,6 @@ pub enum DropTo {
         anchor: DropAnchor,
         side: DockSide,
         share: f64,
-        // ts-rs 의 u64 기본 매핑은 bigint 이나 serde_json 은 number 로 싣는다(`ViewSnapshot.version` 과 같다).
-        #[ts(type = "number")]
-        rev: u64,
-        #[ts(type = "string")]
-        active: Uuid,
     },
     NewWindow {
         by: NewWindowBy,
@@ -114,8 +110,8 @@ pub enum DropAnchor {
 /// - `duplicate`: 같은 끌기를 이미 처리했다 — 이 호출은 알림도 없다. 같은 끌기의 `drag_end` 새 창이 진행 중일 때 닿은
 ///   `drop` 도 이것으로 답하되 셸이 맡아 둔다 — 그 새 창이 거절되면 셸이 그 `drop` 을 이어 처리하고 그 결과는
 ///   [`TabDropDone`] 으로만 간다.
-/// - `rejected`: 모델이 거절했다 — 모델 그대로. `kind` = 거절 종류 낱말(`TabNotFound` · `SourceChanged` ·
-///   `TargetChanged` · `ZeroArea` · `WindowOpen` 따위 — 셸 도킹 오류 문구의 괄호 속 낱말) · `reason` = 사람이 읽는 문장.
+/// - `rejected`: 모델이 거절했다 — 모델 그대로. `kind` = 거절 종류 낱말(`TabNotFound` · `WindowNotFound` ·
+///   `SlotNotFound` · `ZeroArea` · `WindowOpen` 따위 — 셸 도킹 오류 문구의 괄호 속 낱말) · `reason` = 사람이 읽는 문장.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(export)]
@@ -186,7 +182,7 @@ mod tests {
             "drag": id(1), "view": id(2), "from": "main", "initial": id(3),
             "to": {
                 "type": "seam", "target": id(4), "anchor": { "type": "slot", "id": id(5) },
-                "side": "Left", "share": 0.25, "rev": 17, "active": id(2),
+                "side": "Left", "share": 0.25,
             },
         });
         let drop: TabDrop = serde_json::from_value(sent).unwrap();
@@ -202,8 +198,6 @@ mod tests {
                     anchor: DropAnchor::Slot { id: id(5) },
                     side: DockSide::Left,
                     share: 0.25,
-                    rev: 17,
-                    active: id(2),
                 },
             }
         );
@@ -211,17 +205,9 @@ mod tests {
 
     #[test]
     fn tab_bar_and_new_window_drops_read_what_the_webview_sends() {
-        let tab_bar: DropTo = serde_json::from_value(
-            json!({ "type": "tab_bar", "index": 2, "expect": [id(1), id(2)] }),
-        )
-        .unwrap();
-        assert_eq!(
-            tab_bar,
-            DropTo::TabBar {
-                index: 2,
-                expect: vec![id(1), id(2)]
-            }
-        );
+        let tab_bar: DropTo =
+            serde_json::from_value(json!({ "type": "tab_bar", "index": 2 })).unwrap();
+        assert_eq!(tab_bar, DropTo::TabBar { index: 2 });
         let ended: DropTo = serde_json::from_value(json!({
             "type": "new_window", "by": { "type": "drag_end", "effect": "move" },
             "size": null, "grab": { "x": 12.5, "y": 8.0 },
@@ -279,11 +265,11 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(TabDropReply::Rejected {
-                kind: "TargetChanged".into(),
-                reason: "대상이 바뀜 (TargetChanged)".into()
+                kind: "SlotNotFound".into(),
+                reason: "슬롯 없음: x (SlotNotFound)".into()
             })
             .unwrap(),
-            json!({ "type": "rejected", "kind": "TargetChanged", "reason": "대상이 바뀜 (TargetChanged)" })
+            json!({ "type": "rejected", "kind": "SlotNotFound", "reason": "슬롯 없음: x (SlotNotFound)" })
         );
         assert_eq!(
             serde_json::to_value(TabDropDone {

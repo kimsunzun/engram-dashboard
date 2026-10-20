@@ -3,7 +3,8 @@
 //   원래 선택 되돌리기(`switch_tab_if(initial, expect = 끄는 탭)`)를 낼지도 여기서 정한다 — 내는 것은 부르는 쪽(출처 훅)이다.
 // ★시한이 없다★ — 푸는 계기는 넷뿐이다: ① 그 끌기의 `tab_drop:done`(자기 invoke 오류면 곧바로) ② dragend 뒤 끄는 탭을 활성으로
 //   두지 않는 `window:tabs-updated` ③ 그 창의 다음 pointerdown · dragstart ④ 셸이 끝을 정하지 않는 출처 dragend(같은 웹뷰 제자리
-//   놓기 · 엔진이 접은 끌기). 시한으로 풀면 `Drop` 적용 전에 끄는 탭이 한두 프레임 보인다.
+//   놓기 · 엔진이 접은 끌기). 시한으로 풀면 `Drop` 적용 전에 끄는 탭이 한두 프레임 보인다. 되돌리기를 기다리는 동안은 그
+//   되돌리기의 오류도 푼다(모델 활성으로 물러남 — TRD §4-6).
 // 부르는 쪽 약속: 사건은 그 창 스토어에 적용한 **뒤의** 탭 상태(`WindowModel`)와 함께 넣는다. dragend 는 그 끌기의 `DragEnd`
 //   invoke 를 보내기 **전에** 넣는다 — 그래야 dragend 전에 닿은 `done` 이 받은 창의 `Drop` 몫이라고 가를 수 있다.
 
@@ -60,6 +61,8 @@ export type OverrideEvent =
   | { type: 'done'; drag: string; outcome: DropOutcome }
   /** 자기 `tab_drop` invoke 가 오류로 끝남. */
   | { type: 'sendFailed'; drag: string }
+  /** 그 끌기의 되돌리기(`switch_tab_if`)가 오류로 끝남 — 기다리던 활성이 오지 않으니 모델 활성으로 물러난다(TRD §4-6). */
+  | { type: 'revertFailed'; drag: string }
   /** 그 창의 `window:tabs-updated` 를 스토어에 적용함. */
   | { type: 'tabs' }
   /** 그 창의 pointerdown. */
@@ -111,6 +114,7 @@ export function stepOverride(state: OverrideState, event: OverrideEvent, model: 
 
   if (state.phase === 'reverting') {
     if (event.type === 'pointerdown') return released()
+    if (event.type === 'revertFailed' && event.drag === state.drag) return released()
     // 되돌리기가 닿음(활성 = `to`) · LLM 이 다른 탭으로 바꿈 · 끄는 탭이 떠남 — 셋 다 활성이 끄는 탭이 아니게 된 것이다(②).
     if (event.type === 'tabs' && model.active !== state.view) return released()
     return same
@@ -126,6 +130,8 @@ export function stepOverride(state: OverrideState, event: OverrideEvent, model: 
       return released()
     case 'sendFailed':
       return event.drag === state.drag ? released() : same
+    case 'revertFailed':
+      return same
     case 'done': {
       if (event.drag !== state.drag) return same
       if (event.outcome === 'rejected') return released()
@@ -148,7 +154,7 @@ export function stepOverride(state: OverrideState, event: OverrideEvent, model: 
     }
     case 'tabs':
       // 끄는 탭이 그 창을 떠났다 — 어느 때든 푼다(메인 결정 2026-10-20). 옮겨 나감이면 모델 활성이 곧 남은 탭이고, 끄는 중
-      //   닫혔으면 떨어진 머리의 dragend 가 오지 않는다(TRD §4-7 (c) 와 같은 까닭).
+      //   닫혔으면 떨어진 머리의 dragend 가 오지 않는다.
       if (!model.tabs.includes(state.view)) return released()
       if (state.applied && orderChanged(state, model)) return released()
       return state.phase === 'ended' && model.active !== state.view ? released() : same

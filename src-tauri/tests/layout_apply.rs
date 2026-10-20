@@ -32,7 +32,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 
 use engram_dashboard_protocol::AgentBackendKind;
 use uuid::Uuid;
@@ -2452,7 +2452,6 @@ impl World {
         DockGuard {
             lease: Some(self.lease(view)),
             keep_lease: false,
-            expect_window: None,
             expect_source: Some(self.layout_of(view)),
             expect_target: None,
         }
@@ -2564,7 +2563,6 @@ fn dock_tab_seam_moves_the_tab_under_one_lock_and_notifies_after_it() {
     let guard = DockGuard {
         lease: Some(w.lease(source)),
         keep_lease: false,
-        expect_window: None,
         expect_source: Some(w.layout_of(source)),
         expect_target: Some(TargetExpect::Seam {
             layout: w.layout_of(target),
@@ -2631,7 +2629,6 @@ fn dock_tab_tab_bar_moves_the_tab_and_notifies_both_windows() {
     let guard = DockGuard {
         lease: Some(w.lease(source)),
         keep_lease: false,
-        expect_window: None,
         expect_source: Some(w.layout_of(source)),
         expect_target: Some(TargetExpect::Tabs(vec![main_tab])),
     };
@@ -3178,6 +3175,7 @@ fn dock_tab_hands_the_source_window_to_the_given_successor() {
             focus: FocusPolicy::Reveal,
             mv: DockMove {
                 successor: pick.map(|i: usize| tabs[i]),
+                ..DockMove::default()
             },
             on_emptied: OnEmptied::Close,
         })
@@ -3660,9 +3658,47 @@ struct Line {
     fields: Vec<(String, String)>,
 }
 
-/// 이 스레드에서 낸 이벤트를 전부 모은다(`settings` 시험의 같은 이름 가짜와 같은 꼴).
-#[derive(Clone, Default)]
+/// 이 스레드에서 낸 이벤트를 전부 모은다(`settings` 시험의 같은 이름 가짜와 같은 꼴). 만들 때 [`ASK_ALWAYS`] 를 세운다.
+#[derive(Clone)]
 struct Captured(std::sync::Arc<Mutex<Vec<Line>>>);
+
+impl Default for Captured {
+    fn default() -> Self {
+        LazyLock::force(&ASK_ALWAYS);
+        Self(std::sync::Arc::default())
+    }
+}
+
+// tracing-core 0.1.36: 마지막 구독자 등록 때 살아 있던 구독자가 하나뿐이었으면 callsite 의 첫 등록이 **그 스레드의** 기본 구독자에게만 관심을 묻는다
+//   (`Dispatchers::rebuilder` → `JustOne`). capture 밖 시험 스레드가 「도킹 적용」 같은 공용 자리를 capture 도중 처음 때리면
+//   「관심 없음」이 전역에 박혀 그 capture 가 빈손이 된다(실측 — 6 병렬 120 회 중 38 회). 이것을 바이너리 내내 붙들어 두면 첫
+//   등록이 살아 있는 구독자 전부에게 묻고, 이것이 늘 「때마다 묻기」라 「관심 없음」이 박히지 않는다. 남는 틈 = 이것을 처음 세우는
+//   그 순간의 같은 경주 하나(미검 — 새면 증상은 위와 같다).
+static ASK_ALWAYS: LazyLock<tracing::Dispatch> =
+    LazyLock::new(|| tracing::Dispatch::new(AskAlways));
+
+/// 아무것도 받지 않고 모든 callsite 에 「때마다 묻기」만 답한다 — [`ASK_ALWAYS`].
+struct AskAlways;
+
+impl tracing::Subscriber for AskAlways {
+    fn register_callsite(
+        &self,
+        _: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        tracing::subscriber::Interest::sometimes()
+    }
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        false
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, _: &tracing::Event<'_>) {}
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
 
 impl Line {
     fn field(&self, name: &str) -> Option<&str> {
@@ -3765,10 +3801,11 @@ fn dock_tab_onto_the_same_place_logs_that_nothing_changed() {
     );
 }
 
-// ── 놓기 명령의 사전조건(TRD S21-slot-docking §3-3 · §3-7 · §8-1 ⑦) ───────────────────────────
+// ── 놓기 명령 — 놓을 때 대상을 다시 찾는다(ADR-0297 · TRD S21-slot-docking §3-3 · §8-1 ⑦) ─────────────────────
 //
-// 놓기 명령(`tab_drop`)은 웹 스토어로 판정한 상태를 싣는다 — 그 스토어가 모델보다 늦으면 같은 `dock_tab` 이 거절한다.
-// 요청은 운영과 같은 순수 판정(`tab_drop::plan::plan`)으로 짓는다.
+// 놓기 명령(`tab_drop`)은 웹 스토어로 판정한 것을 싣는다 — 그 스토어가 모델보다 늦어도 놓기가 가리킨 것(끄는 탭 · 대상
+// 탭 · 대상 칸 · 탭바 창)이 지금 있으면 같은 `dock_tab` 이 지금 상태에 맞춰 적용하고, 없으면 거절한다. 요청은 운영과
+// 같은 순수 판정(`tab_drop::plan::plan`)으로 짓는다.
 
 const FLAT_FRAME: SourceFrame = SourceFrame {
     insets: Insets {
@@ -3807,14 +3844,24 @@ impl World {
         }
     }
 
-    // 이음새 놓기 — 판정이 본 대상 `target` 의 판 번호와 부른 창의 모델 활성을 지금 값으로 싣는다.
+    fn tab_bar_drop(&self, view: Uuid, from: &str, initial: Option<Uuid>, index: u32) -> TabDrop {
+        TabDrop {
+            drag: Uuid::new_v4(),
+            view,
+            from: from.into(),
+            initial,
+            to: DropTo::TabBar { index },
+        }
+    }
+
+    // 이음새 놓기 — `target` 의 `anchor` 오른쪽 반.
     fn seam_drop(
         &self,
         view: Uuid,
         from: &str,
         initial: Option<Uuid>,
         target: Uuid,
-        caller: &str,
+        anchor: DropAnchor,
     ) -> TabDrop {
         TabDrop {
             drag: Uuid::new_v4(),
@@ -3823,11 +3870,23 @@ impl World {
             initial,
             to: DropTo::Seam {
                 target,
-                anchor: DropAnchor::Outer,
+                anchor,
                 side: DockSide::Right,
                 share: 0.5,
-                rev: self.layout_rev(target),
-                active: self.active_of(caller),
+            },
+        }
+    }
+
+    fn new_window_drop(&self, view: Uuid, from: &str) -> TabDrop {
+        TabDrop {
+            drag: Uuid::new_v4(),
+            view,
+            from: from.into(),
+            initial: None,
+            to: DropTo::NewWindow {
+                by: NewWindowBy::Drop,
+                size: None,
+                grab: PointCss { x: 0.0, y: 0.0 },
             },
         }
     }
@@ -3839,27 +3898,252 @@ impl World {
     }
 }
 
-// main = [m0, t] · 팝아웃 = [p] — `t` 를 끌기 시작한 뒤 LLM 이 `t` 를 팝아웃으로 옮겼다(D9).
+// main = [m0, t] · 팝아웃 = [p] — `t` 를 main 에서 끌기 시작한 뒤 LLM 이 `t` 를 팝아웃으로 옮겼다(D9).
 #[test]
-fn a_drop_whose_tab_left_its_source_window_is_source_changed_on_every_destination() {
+fn a_drop_whose_tab_left_its_source_window_moves_it_from_where_it_is_now() {
+    let setup = || {
+        let w = World::new();
+        let m0 = w.main_active();
+        let t = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
+        let popout = w.popup();
+        let p = w.active_of(&popout);
+        w.dock(
+            t,
+            DockDest::TabBar {
+                window: popout.clone(),
+                index: None,
+            },
+            DockGuard::NONE,
+            FocusPolicy::Keep,
+        )
+        .unwrap();
+        w.forget();
+        (w, m0, t, popout, p)
+    };
+
+    let (w, m0, t, popout, p) = setup();
+    let out = w
+        .tab_drop(
+            &w.tab_bar_drop(t, MAIN_WINDOW_LABEL, Some(m0), 0),
+            MAIN_WINDOW_LABEL,
+        )
+        .expect("탭바");
+    assert_eq!(out.window, MAIN_WINDOW_LABEL);
+    assert_eq!(w.tabs_of(MAIN_WINDOW_LABEL), [t, m0]);
+    assert_eq!(w.tabs_of(&popout), [p], "지금 창(팝아웃)에서 뺐다");
+    assert_invariants(&w);
+
+    let (w, _, t, popout, p) = setup();
+    let out = w
+        .tab_drop(
+            &w.seam_drop(t, MAIN_WINDOW_LABEL, None, p, DropAnchor::Outer),
+            &popout,
+        )
+        .expect("이음새");
+    assert_eq!(out.window, popout);
+    assert_eq!(w.tabs_of(&popout), [p]);
+    assert_eq!(w.owner(t), None, "t 는 p 에 붙어 사라졌다");
+    assert_invariants(&w);
+
+    let (w, _, t, popout, p) = setup();
+    let out = w
+        .tab_drop(&w.new_window_drop(t, MAIN_WINDOW_LABEL), &popout)
+        .expect("새 창");
+    assert!(!out.reused, "팝아웃에 탭이 둘이라 새 창");
+    assert_eq!(w.owner(t).as_deref(), Some(out.window.as_str()));
+    assert_eq!(w.tabs_of(&popout), [p]);
+    assert_eq!(w.host.opened_at.lock().unwrap().len(), 1);
+    assert_invariants(&w);
+}
+
+// `initial` 은 끌기를 시작한 창(main)의 선택이다 — 끄는 탭이 그사이 간 창(팝아웃)은 `initial` 이 거기 있어도 셸 승계를 따른다.
+#[test]
+fn a_drop_whose_tab_left_its_source_window_leaves_that_window_to_the_shell_succession() {
+    let w = World::new();
+    let i = w.main_active();
+    let t = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
+    let drop = w.tab_bar_drop(t, MAIN_WINDOW_LABEL, Some(i), 0);
+    let popout = w.popup();
+    let p = w.active_of(&popout);
+    for (tab, index) in [(i, Some(0)), (t, None)] {
+        w.dock(
+            tab,
+            DockDest::TabBar {
+                window: popout.clone(),
+                index,
+            },
+            DockGuard::NONE,
+            FocusPolicy::Reveal,
+        )
+        .unwrap();
+    }
+    assert_eq!(w.tabs_of(&popout), [i, p, t], "전제");
+    assert_eq!(w.active_of(&popout), t, "전제");
+    w.tab_drop(&drop, MAIN_WINDOW_LABEL).expect("받는다");
+    assert_eq!(w.tabs_of(&popout), [i, p]);
+    assert_eq!(
+        w.active_of(&popout),
+        p,
+        "승계(왼쪽 이웃) — initial 이 아니다"
+    );
+    assert_eq!(w.active_of(MAIN_WINDOW_LABEL), t);
+    assert_invariants(&w);
+}
+
+#[test]
+fn a_drop_whose_tab_is_gone_is_refused_before_opening_anything() {
+    let w = World::new();
+    let m0 = w.main_active();
+    let t = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
+    let drops = [
+        w.tab_bar_drop(t, MAIN_WINDOW_LABEL, Some(m0), 0),
+        w.seam_drop(t, MAIN_WINDOW_LABEL, Some(m0), m0, DropAnchor::Outer),
+        w.new_window_drop(t, MAIN_WINDOW_LABEL),
+    ];
+    apply::close_tab(&w.state, &w.subs, &w.ev, &w.host, MAIN_WINDOW_LABEL, t).unwrap();
+    w.forget();
+    for drop in &drops {
+        w.assert_refused(
+            w.tab_drop(drop, MAIN_WINDOW_LABEL),
+            DockError::TabNotFound(t),
+            &format!("{:?}", drop.to),
+        );
+    }
+    assert!(
+        w.host.opened_at.lock().unwrap().is_empty(),
+        "창을 열기 전에 거절"
+    );
+    assert!(w.host.moves.lock().unwrap().is_empty());
+    assert_eq!(w.ev.take_order(), Vec::<&str>::new(), "알림 없음");
+}
+
+#[test]
+fn a_tab_bar_drop_lands_in_the_tab_list_as_it_is_now_and_clamps_to_its_end() {
+    // 판정 뒤 탭이 늘었다 — 자리는 지금 목록에서 센다.
+    let w = World::new();
+    let m0 = w.main_active();
+    let a = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
+    let (popout, tabs) = w.popup_with(2);
+    let t = tabs[1];
+    let drop = w.tab_bar_drop(t, &popout, Some(tabs[0]), 1);
+    let c = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
+    w.tab_drop(&drop, MAIN_WINDOW_LABEL).expect("받는다");
+    assert_eq!(w.tabs_of(MAIN_WINDOW_LABEL), [m0, t, a, c]);
+    assert_eq!(w.active_of(MAIN_WINDOW_LABEL), t, "놓은 탭이 보인다");
+    assert_invariants(&w);
+
+    // 판정 뒤 탭이 줄었다 — 넘친 자리는 지금 목록의 끝 자리다.
+    let w = World::new();
+    let m0 = w.main_active();
+    let a = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
+    let b = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
+    let (popout, tabs) = w.popup_with(2);
+    let t = tabs[1];
+    let drop = w.tab_bar_drop(t, &popout, Some(tabs[0]), 3);
+    apply::close_tab(&w.state, &w.subs, &w.ev, &w.host, MAIN_WINDOW_LABEL, b).unwrap();
+    w.tab_drop(&drop, MAIN_WINDOW_LABEL).expect("받는다");
+    assert_eq!(w.tabs_of(MAIN_WINDOW_LABEL), [m0, a, t]);
+    assert_eq!(w.tabs_of(&popout), [tabs[0]]);
+    assert_invariants(&w);
+
+    // 같은 창 — 끄는 탭을 뺀 지금 목록에서 센다.
+    let w = World::new();
+    let m0 = w.main_active();
+    let a = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
+    let t = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
+    let b = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
+    let drop = w.tab_bar_drop(t, MAIN_WINDOW_LABEL, Some(m0), 3);
+    apply::close_tab(&w.state, &w.subs, &w.ev, &w.host, MAIN_WINDOW_LABEL, a).unwrap();
+    w.tab_drop(&drop, MAIN_WINDOW_LABEL).expect("받는다");
+    assert_eq!(w.tabs_of(MAIN_WINDOW_LABEL), [m0, b, t]);
+    assert_invariants(&w);
+}
+
+#[test]
+fn a_tab_bar_drop_into_a_window_that_closed_is_refused() {
     let w = World::new();
     let t = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
     let popout = w.popup();
-    let p = w.active_of(&popout);
-    let seam = w.seam_drop(t, MAIN_WINDOW_LABEL, None, p, &popout);
-    let new_window = TabDrop {
-        drag: Uuid::new_v4(),
-        view: t,
-        from: MAIN_WINDOW_LABEL.into(),
-        initial: None,
-        to: DropTo::NewWindow {
-            by: NewWindowBy::Drop,
-            size: None,
-            grab: PointCss { x: 0.0, y: 0.0 },
-        },
+    let drop = w.tab_bar_drop(t, MAIN_WINDOW_LABEL, None, 0);
+    apply::close_window(&w.state, &w.subs, &w.host, &popout).unwrap();
+    w.forget();
+    w.assert_refused(
+        w.tab_drop(&drop, &popout),
+        DockError::WindowNotFound(popout.clone()),
+        "닫힌 창",
+    );
+    assert_eq!(w.owner(t).as_deref(), Some(MAIN_WINDOW_LABEL));
+}
+
+#[test]
+fn a_seam_drop_lands_in_the_target_layout_as_it_is_now() {
+    // 대상 = 팝아웃의 탭 q · 끄는 탭 = main 의 t.
+    let setup = || {
+        let w = World::new();
+        let t = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
+        let popout = w.popup();
+        let q = w.active_of(&popout);
+        let s = w.empty_slot(q);
+        (w, t, popout, q, s)
     };
+
+    // 기준 칸이 그사이 나뉘었다 — 그 칸이 남았으니 그 칸에 붙는다.
+    let (w, t, popout, q, s) = setup();
+    let moved = w.slots(t);
+    let drop = w.seam_drop(t, MAIN_WINDOW_LABEL, None, q, DropAnchor::Slot { id: s });
+    let n = apply::split_slot(&w.state, &w.subs, &w.ev, q, s, SplitDir::TopBottom).unwrap();
+    apply::rename_tab(&w.state, &w.ev, q, "새 이름".into()).unwrap();
+    let out = w.tab_drop(&drop, &popout).expect("받는다");
+    assert_eq!(out.window, popout);
+    let slots = w.slots(q);
+    assert!(
+        [s, n].iter().chain(&moved).all(|x| slots.contains(x)),
+        "나뉜 두 칸 + 붙은 칸: {slots:?}"
+    );
+    assert_eq!(slots.len(), 2 + moved.len());
+    assert_eq!(w.owner(t), None);
+    assert_invariants(&w);
+
+    // 바깥 변 — 그사이 나뉜 대상 탭 전체에 붙는다.
+    let (w, t, popout, q, s) = setup();
+    let drop = w.seam_drop(t, MAIN_WINDOW_LABEL, None, q, DropAnchor::Outer);
+    apply::split_slot(&w.state, &w.subs, &w.ev, q, s, SplitDir::LeftRight).unwrap();
+    assert!(w.tab_drop(&drop, &popout).is_ok());
+    assert_invariants(&w);
+
+    // 기준 칸이 그사이 사라졌다 — 거절.
+    let (w, t, popout, q, s) = setup();
+    let n = apply::split_slot(&w.state, &w.subs, &w.ev, q, s, SplitDir::TopBottom).unwrap();
+    let drop = w.seam_drop(t, MAIN_WINDOW_LABEL, None, q, DropAnchor::Slot { id: n });
+    apply::close_slot(&w.state, &w.subs, &w.ev, q, n).unwrap();
+    w.assert_refused(
+        w.tab_drop(&drop, &popout),
+        DockError::SlotNotFound(n),
+        "기준 칸 없음",
+    );
+
+    // 대상 탭이 그사이 사라졌다 — 거절.
+    let (w, t, popout, q, _) = setup();
+    let other = apply::create_tab(&w.state, &w.subs, &w.ev, &popout, None).unwrap();
+    let drop = w.seam_drop(t, MAIN_WINDOW_LABEL, None, q, DropAnchor::Outer);
+    apply::close_tab(&w.state, &w.subs, &w.ev, &w.host, &popout, q).unwrap();
+    w.assert_refused(
+        w.tab_drop(&drop, &popout),
+        DockError::TabNotFound(q),
+        "대상 탭 없음",
+    );
+    assert_eq!(w.tabs_of(&popout), [other]);
+}
+
+#[test]
+fn a_seam_drop_onto_a_tab_that_moved_to_another_window_docks_where_that_tab_is_now() {
+    let w = World::new();
+    let t = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
+    let q = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
+    let drop = w.seam_drop(t, MAIN_WINDOW_LABEL, None, q, DropAnchor::Outer);
+    let popout = w.popup();
     w.dock(
-        t,
+        q,
         DockDest::TabBar {
             window: popout.clone(),
             index: None,
@@ -3868,104 +4152,16 @@ fn a_drop_whose_tab_left_its_source_window_is_source_changed_on_every_destinatio
         FocusPolicy::Keep,
     )
     .unwrap();
-    w.forget();
-
-    // 탭 목록은 지금 값으로 맞춘다 — 창만 어긋나게.
-    let tab_bar = TabDrop {
-        drag: Uuid::new_v4(),
-        view: t,
-        from: MAIN_WINDOW_LABEL.into(),
-        initial: None,
-        to: DropTo::TabBar {
-            index: 0,
-            expect: w.tabs_of(&popout),
-        },
-    };
-    w.assert_refused(
-        w.tab_drop(&tab_bar, &popout),
-        DockError::SourceChanged,
-        "탭바",
-    );
-    w.assert_refused(
-        w.tab_drop(&seam, &popout),
-        DockError::SourceChanged,
-        "이음새",
-    );
-    w.assert_refused(
-        w.tab_drop(&new_window, &popout),
-        DockError::SourceChanged,
-        "새 창",
-    );
-    assert!(
-        w.host.opened_at.lock().unwrap().is_empty(),
-        "창을 열기 전에 거절"
-    );
-    assert!(w.host.moves.lock().unwrap().is_empty());
-    assert_eq!(w.ev.take_order(), Vec::<&str>::new(), "알림 없음");
-
-    // `from` 이 지금 창이면 같은 놓기가 선다(대조).
-    let fixed = TabDrop {
-        from: popout.clone(),
-        ..tab_bar
-    };
-    assert!(w.tab_drop(&fixed, &popout).is_ok());
+    let out = w.tab_drop(&drop, MAIN_WINDOW_LABEL).expect("받는다");
+    assert_eq!(out.window, popout);
+    assert_eq!(w.active_of(&popout), q, "대상 탭이 보인다");
+    assert_eq!(w.owner(t), None);
     assert_invariants(&w);
-}
-
-#[test]
-fn a_seam_drop_takes_focus_and_name_changes_of_the_target_but_not_a_layout_change() {
-    // 대상 = 팝아웃의 탭 q · 끄는 탭 = main 의 t.
-    let setup = || {
-        let w = World::new();
-        let t = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
-        let popout = w.popup();
-        let q = w.active_of(&popout);
-        (w, t, popout, q)
-    };
-
-    let (w, t, popout, q) = setup();
-    let slot = w.empty_slot(q);
-    let drop = w.seam_drop(t, MAIN_WINDOW_LABEL, None, q, &popout);
-    let rev = w.layout_rev(q);
-    apply::focus_slot(&w.state, &w.ev, q, slot).unwrap();
-    apply::rename_tab(&w.state, &w.ev, q, "새 이름".into()).unwrap();
-    assert_eq!(
-        w.layout_rev(q),
-        rev,
-        "포커스 · 이름은 판 번호를 올리지 않는다"
-    );
-    assert!(w.tab_drop(&drop, &popout).is_ok(), "받는다");
-    assert_invariants(&w);
-
-    let (w, t, popout, q) = setup();
-    let slot = w.empty_slot(q);
-    let drop = w.seam_drop(t, MAIN_WINDOW_LABEL, None, q, &popout);
-    apply::split_slot(&w.state, &w.subs, &w.ev, q, slot, SplitDir::TopBottom).unwrap();
-    w.assert_refused(
-        w.tab_drop(&drop, &popout),
-        DockError::TargetChanged,
-        "대상 레이아웃이 바뀜",
-    );
-}
-
-#[test]
-fn a_seam_drop_onto_a_tab_outside_the_calling_window_is_target_changed() {
-    let w = World::new();
-    let t = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
-    let popout = w.popup();
-    let q = w.active_of(&popout);
-    // 웹 결함 — 팝아웃의 탭을 main 이 대상으로 보냈다.
-    let drop = w.seam_drop(t, MAIN_WINDOW_LABEL, None, q, MAIN_WINDOW_LABEL);
-    w.assert_refused(
-        w.tab_drop(&drop, MAIN_WINDOW_LABEL),
-        DockError::TargetChanged,
-        "부른 창의 탭이 아님",
-    );
 }
 
 // main = [i, d] — d 를 누르면(활성 = d) 끄는 동안 남은 탭 i 를 보이고, 사용자는 i 의 이음새에 놓는다(같은 창).
 #[test]
-fn a_same_window_seam_takes_the_restored_initial_tab_as_the_active_tab_only_with_or_initial() {
+fn a_same_window_seam_applies_whichever_tab_the_window_shows_now() {
     let setup = || {
         let w = World::new();
         let i = w.main_active();
@@ -3976,13 +4172,14 @@ fn a_same_window_seam_takes_the_restored_initial_tab_as_the_active_tab_only_with
 
     // 놓기가 먼저 닿음 — 활성 = d.
     let (w, i, d) = setup();
-    let drop = w.seam_drop(d, MAIN_WINDOW_LABEL, Some(i), i, MAIN_WINDOW_LABEL);
+    let drop = w.seam_drop(d, MAIN_WINDOW_LABEL, Some(i), i, DropAnchor::Outer);
     assert!(w.tab_drop(&drop, MAIN_WINDOW_LABEL).is_ok());
+    assert_eq!(w.tabs_of(MAIN_WINDOW_LABEL), [i]);
     assert_invariants(&w);
 
-    // 출처의 원래 선택 되돌리기(`switch_tab(initial)`)가 먼저 닿음 — or_initial 이 받는다(F5).
+    // 출처의 원래 선택 되돌리기(`switch_tab_if(initial)`)가 먼저 닿음 — 활성 = i.
     let (w, i, d) = setup();
-    let drop = w.seam_drop(d, MAIN_WINDOW_LABEL, Some(i), i, MAIN_WINDOW_LABEL);
+    let drop = w.seam_drop(d, MAIN_WINDOW_LABEL, Some(i), i, DropAnchor::Outer);
     apply::switch_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, i).unwrap();
     let out = w.tab_drop(&drop, MAIN_WINDOW_LABEL).unwrap();
     assert_eq!(out.window, MAIN_WINDOW_LABEL);
@@ -3992,35 +4189,20 @@ fn a_same_window_seam_takes_the_restored_initial_tab_as_the_active_tab_only_with
         "d 가 i 의 이음새에 붙었다"
     );
 
-    // or_initial 이 없는 사전조건이면 같은 되돌리기 뒤에 거절된다.
-    let (w, i, d) = setup();
-    let drop = w.seam_drop(d, MAIN_WINDOW_LABEL, Some(i), i, MAIN_WINDOW_LABEL);
-    let Plan::Dock(mut req) =
-        drop_plan::plan(&drop, MAIN_WINDOW_LABEL, &dropped_at(1, 1), &FLAT_FRAME)
-    else {
-        panic!("도킹 요청");
-    };
-    if let Some(TargetExpect::SeamAt { or_initial, .. }) = &mut req.guard.expect_target {
-        *or_initial = None;
-    }
-    apply::switch_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, i).unwrap();
-    w.assert_refused(w.dock_req(req), DockError::TargetChanged, "or_initial 없음");
-
-    // 그 창 활성이 active 도 or_initial 도 아니다(LLM 이 셋째 탭을 보였다).
+    // LLM 이 셋째 탭을 보였다 — 그래도 붙고, 대상 탭이 보인다.
     let (w, i, d) = setup();
     let x = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
     apply::switch_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, d).unwrap();
-    let drop = w.seam_drop(d, MAIN_WINDOW_LABEL, Some(i), i, MAIN_WINDOW_LABEL);
+    let drop = w.seam_drop(d, MAIN_WINDOW_LABEL, Some(i), i, DropAnchor::Outer);
     apply::switch_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, x).unwrap();
-    w.assert_refused(
-        w.tab_drop(&drop, MAIN_WINDOW_LABEL),
-        DockError::TargetChanged,
-        "셋째 탭",
-    );
+    assert!(w.tab_drop(&drop, MAIN_WINDOW_LABEL).is_ok());
+    assert_eq!(w.tabs_of(MAIN_WINDOW_LABEL), [i, x]);
+    assert_eq!(w.active_of(MAIN_WINDOW_LABEL), i);
+    assert_invariants(&w);
 }
 
 #[test]
-fn the_announced_snapshot_carries_the_layout_rev_a_seam_drop_checks() {
+fn the_announced_snapshot_carries_the_layout_rev() {
     let w = World::new();
     let view = w.main_active();
     let slot = w.empty_slot(view);
@@ -4047,29 +4229,6 @@ fn the_announced_snapshot_carries_the_layout_rev_a_seam_drop_checks() {
     assert_eq!(
         focused.layout_rev, split.layout_rev,
         "포커스는 판 번호를 올리지 않는다"
-    );
-}
-
-#[test]
-fn a_tab_bar_drop_judged_on_a_stale_tab_list_is_target_changed() {
-    let w = World::new();
-    let m0 = w.main_active();
-    let t = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
-    let drop = TabDrop {
-        drag: Uuid::new_v4(),
-        view: t,
-        from: MAIN_WINDOW_LABEL.into(),
-        initial: Some(m0),
-        to: DropTo::TabBar {
-            index: 0,
-            expect: vec![m0, t],
-        },
-    };
-    apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
-    w.assert_refused(
-        w.tab_drop(&drop, MAIN_WINDOW_LABEL),
-        DockError::TargetChanged,
-        "탭이 늘었다",
     );
 }
 

@@ -4,13 +4,16 @@
 // renameTab)만 부른다 — LLM(window.__engramCmd)이 같은 command 를 흔드는 것과 물리적으로
 // 동일 표면. 실제 상태 변경은 백엔드 ViewManager(권위)가 하고 window:tabs-updated emit 으로 반영된다(낙관 갱신 X).
 //
-// ★탭 끌기(TRD S21-slot-docking §2-2 · §5-1) = `tabStrip/useTabDrag`★ — 탭바 하나에 훅 하나. 그리기 규칙:
-//   - 탭바 줄(`tab-strip-row`)은 끌기 중이든 아니든 같은 DOM 노드다 — 포인터 캡처가 거기 걸려, 다시 마운트되면
-//     `lostpointercapture` 로 끌기가 되돌려진다. 줄에는 머리와 `+` 만 둔다(`measure.ts` 가 줄 폭 − `+` 폭을 잰다).
-//   - 머리 폭 · 숨김 = `stripBounds`(훅과 같은 입력) · 자리 = 절대 x(끄는 동안 = 훅이 준 `targets` · `left`).
+// ★탭 끌기(TRD S21-slot-docking §4-2 · §4-4) = 머리가 OS(HTML5) 끌기 출처 · `tabStrip/useTabDragSource`★ — 탭바 하나에 훅
+//   하나. 그리기 규칙:
+//   - 줄(`tab-strip-row`)에는 머리와 `+` 만 둔다(`measure.ts` 가 줄 폭 − `+` 폭을 잰다). 다른 창 끌기의 세로선은 그 줄 위에
+//     겹쳐 그리고 그때만 있다.
+//   - 머리 폭 · 숨김 = `stripBounds` · 자리 = 절대 x(`translateX`). 자기 탭바 구역 안에서 끄는 동안의 순서 이동은 transform 만
+//     바꾼다 — 끄는 머리는 커서를 따르고 이웃은 확정한 순서의 자리로 비켜난다(`DragSourceSnapshot.motion`). ★끄는 머리는 숨김이어도
+//     그린다★ — 출처 노드를 떼면 그 끌기의 dragend 가 오지 않는다.
 //   - 머리 DOM 순서(= 탭 키 · 화면 낭독 순서)는 쉴 때 보이는 순서로 맞추고, 누름 · 끌기 · 놓은 뒤 자리 전환 · 이름 편집 동안은
 //     이미 그린 순서를 지킨다 — React 가 요소를 옮기면(떼었다 다시 붙임) 진행 중인 CSS 전환이 끊겨 이웃 · 끄는 탭이
-//     미끄러지지 않고 튀고(WebView2 실측 아님), 편집 중인 이름 입력은 포커스를 잃는다.
+//     미끄러지지 않고 튀고(WebView2 실측 아님), 편집 중인 이름 입력은 포커스를 잃으며, 끄는 머리면 OS 끌기가 끊긴다.
 
 import {
   useEffect,
@@ -24,10 +27,12 @@ import {
 
 import type { ViewMeta } from '../../api/layoutTypes'
 import { t } from '../../i18n'
+import { shownTab, stripHeld } from './dock/dragOverride'
+import { useLocalDrag } from './dock/localDrag'
 import { TAB_MIN_ACTIVE_W, TAB_STANDARD_W } from './tabStrip/layout'
 import { measureStrip, stripBounds } from './tabStrip/measure'
-import { EASE_OUT_CSS } from './tabStrip/reorderGeometry'
-import { useTabDrag } from './tabStrip/useTabDrag'
+import { EASE_OUT_CSS, slideMs, slideTargets } from './tabStrip/reorderGeometry'
+import { useTabDragSource } from './tabStrip/useTabDragSource'
 
 interface TabBarProps {
   /** 이 탭바가 속한 창 label(main·slot-popup-N). */
@@ -39,6 +44,10 @@ interface TabBarProps {
   onCreate: () => void
   onClose: (viewId: string) => void
   onRename: (viewId: string, name: string) => void
+  /** 이 창의 탭 캔버스 영역 — 끌기 크기의 크롬(뷰포트 − 캔버스) 재기. 없으면 크롬 0 으로 친다. */
+  canvas?: () => Element | null
+  /** `UseTabDragSourceOptions.pullFrame`. */
+  pullFrame?: boolean
 }
 
 /** 그릴 머리 하나 — `x` = 탭바 줄 왼쪽 기준 CSS px. */
@@ -53,7 +62,7 @@ interface DrawnHead {
 const WIDTH_CAP: number | null = null
 
 // ADR-0295
-export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClose, onRename }: TabBarProps) {
+export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClose, onRename, canvas, pullFrame }: TabBarProps) {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   // ★안정 ref★: input 에 매 렌더 새 콜백 ref 를 걸면 React 가 매번 재부착 → select() 가 매 키입력마다
@@ -90,49 +99,88 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
   useEffect(() => {
     if (editingId !== null && !ids.includes(editingId)) setEditingId(null)
   }, [editingId, ids])
-  const { drag, engaged, onPointerDown } = useTabDrag({ tabs: ids, active, row: rowRef, add: addRef, widthCap: WIDTH_CAP })
+  const metaById = new Map(tabs.map(tab => [tab.id, tab]))
+  const source = useTabDragSource({
+    label,
+    tabs: ids,
+    active,
+    editing: editingId,
+    nameOf: id => metaById.get(id)?.name ?? '',
+    row: rowRef,
+    add: addRef,
+    canvas,
+    pullFrame,
+  })
+  const { snapshot } = source
+  const model = { tabs: ids, active }
+  const mine = snapshot.window === label
+  // 칠하는 활성 = 이 창 캔버스가 보이는 탭(R15 남은 탭 · 되돌리기를 기다리는 탭 포함 — `WindowLayout` 과 같은 값).
+  const shown = mine ? shownTab(snapshot.override, model) : active
+  const motion = mine && stripHeld(snapshot.override, model) ? snapshot.motion : null
+  const dragged =
+    mine && (snapshot.override.phase === 'live' || snapshot.override.phase === 'ended') ? snapshot.override.view : null
 
-  const order = drag?.order ?? ids
-  const dragged = drag === null ? -1 : order.indexOf(drag.view)
+  const order = motion === null ? ids : placeAt(ids, motion.view, motion.index)
+  const at = motion === null ? -1 : order.indexOf(motion.view)
+  const draggedAt = dragged === null ? -1 : order.indexOf(dragged)
   const bounds = stripBounds({
     available,
     count: order.length,
-    active: drag !== null ? dragged : active === null ? -1 : ids.indexOf(active),
-    dragged: drag !== null ? dragged : undefined,
+    active: motion !== null ? at : shown === null ? -1 : order.indexOf(shown),
+    dragged: draggedAt >= 0 ? draggedAt : undefined,
     widthCap: WIDTH_CAP,
+  })
+  useLayoutEffect(() => {
+    source.drawn.current = { order, bounds, available }
   })
   // 끌기 밖에도 자리 전환 속성은 `transform` 그대로 두고 시간만 0 이다 — CSS Transitions 규칙으로는 시간만 바뀌면 진행 중인
   //   전환(놓은 뒤 자리로 가는 끄는 탭 · 이웃)이 끝까지 가고, 속성을 걷으면 그 자리에서 끊긴다(WebView2 실측 — M-run 1부 C2).
-  const slide = `transform ${drag?.slideMs ?? 0}ms ${EASE_OUT_CSS}`
+  //   끌기가 풀리는 그 그림까지는 시간을 둔다 — 취소 · 거절로 모델 순서로 돌아가는 머리가 미끄러져 간다.
+  const dragOwned = mine && snapshot.override.phase !== 'idle'
+  const wasDragOwned = useRef(false)
+  useLayoutEffect(() => {
+    wasDragOwned.current = dragOwned
+  })
+  const slide = `transform ${dragOwned || wasDragOwned.current ? slideMs(reducedMotion(), false) : 0}ms ${EASE_OUT_CSS}`
+  const targets = motion === null ? null : slideTargets(bounds, at)
   const heads: DrawnHead[] = []
   order.forEach((id, i) => {
-    let x = drag === null ? (bounds.visible[i] ? bounds.tabs[i].x0 : null) : i === dragged ? drag.left : drag.targets[i]
+    let x =
+      motion === null || targets === null
+        ? bounds.visible[i]
+          ? bounds.tabs[i].x0
+          : null
+        : i === at
+          ? motion.settled
+            ? bounds.tabs[i].x0
+            : motion.left
+          : targets[i]
     if (x === null) return
     let w = bounds.tabs[i].x1 - bounds.tabs[i].x0
     // 이름 편집 중인 머리는 표준 폭으로 넓혀 이웃 위에 그린다 — 좁은 머리에서는 머리 내용 칸의 `overflow: hidden` 안에 이름 칸 ·
     //   입력 칸이 모자랐다(실측 — 머리 42 · 62 · 86 px 에서 0 · 19 · 43 px). 오른쪽 끝이 쓸 수 있는 폭을 넘지 않게 왼쪽으로
     //   당기되 줄 왼쪽 끝(0)에서 멈춘다 — 쓸 수 있는 폭이 표준 폭보다 좁으면 머리가 0..160 으로 그 폭을 넘어 `+` 를 덮을 수
     //   있고, 숨은 탭이 있어 `+` 가 쓸 수 있는 폭 안쪽에 서면 `+` 일부를 덮을 수 있다. 덮인 이웃 머리의 누름 = `coveredHead`.
-    if (drag === null && id === editingId && w < TAB_STANDARD_W) {
+    if (motion === null && id === editingId && w < TAB_STANDARD_W) {
       w = TAB_STANDARD_W
       if (available !== null) x = Math.max(0, Math.min(x, available - w))
     }
-    const following = drag !== null && i === dragged && !drag.settling
+    const following = motion !== null && i === at && !motion.settled
     heads.push({ id, x, w, transition: following ? 'none' : slide })
   })
   const end = bounds.lastVisible < 0 ? 0 : bounds.tabs[bounds.lastVisible].x1
+  const marker = useLocalDrag(s => s.targetMarker)
 
   const domOrder = useDomOrder(
     heads.map(h => h.id),
-    engaged,
+    source.engaged,
     editingId !== null,
     rowRef,
   )
   const headById = new Map(heads.map(h => [h.id, h]))
-  const metaById = new Map(tabs.map(tab => [tab.id, tab]))
 
   const activate = (view: string, button: number) => {
-    const switching = button === 0 && view !== active && metaById.has(view)
+    const switching = button === 0 && metaById.has(view) && (view !== active || source.forceSwitch(view))
     activatedBy.current = switching ? view : null
     if (switching) onSwitch(view)
   }
@@ -140,7 +188,7 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
   //   전까지 눌리지 않는다. 넓히기 전 자기 자리 안 · 밑에 머리가 없는 곳(`+` · 빈 줄)이면 `null`.
   const coveredHead = (id: string, clientX: number): string | null => {
     const row = rowRef.current
-    if (drag !== null || row === null) return null
+    if (motion !== null || row === null) return null
     const x = clientX - row.getBoundingClientRect().left
     const under = (i: number) => bounds.visible[i] && x >= bounds.tabs[i].x0 && x < bounds.tabs[i].x1
     if (under(order.indexOf(id))) return null
@@ -148,17 +196,18 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
     return j < 0 ? null : order[j]
   }
 
-  // 놓은 뒤(`drag` = null)에도 자리로 가는 동안 이웃 위에 그린다 — 다음 끌기까지 둔다(겹치지 않으면 차이가 없다).
+  // 순서 이동을 거둔 뒤에도 자리로 가는 동안 이웃 위에 그린다 — 다음 끌기까지 둔다(겹치지 않으면 차이가 없다).
   const lastDragged = useRef<string | null>(null)
   useLayoutEffect(() => {
-    if (drag !== null) lastDragged.current = drag.view
+    if (motion !== null) lastDragged.current = motion.view
   })
-  const topId = drag?.view ?? lastDragged.current
+  const topId = motion?.view ?? lastDragged.current
 
-  // 끄는 동안은 머리 위 맴돎을 보지 않는다 — 포인터 캡처가 줄에 걸려 머리의 들고 남이 끄는 손을 따르지 않는다.
+  // 순서 이동을 그리는 동안은 맴돎을 칠하지 않는다 — 누른 순간의 맴돎이 비켜나는 머리에 남아 보인다(OS 끌기 동안 머리의 들고
+  //   남이 오는지는 미검 — TRD §4-7 M11).
   const [hovered, setHovered] = useState<string | null>(null)
-  const activeId = drag !== null ? drag.view : active
-  const lit = (id: string) => id === activeId || (drag === null && id === hovered)
+  const activeId = shown
+  const lit = (id: string) => id === activeId || (motion === null && id === hovered)
   // 맴돎이 끝난 지 `SEPARATOR_FADE_MS` 안의 머리 — 그 양옆 구분선만 서서히 되살아난다(`SEPARATOR_FADE_MS` 머리 주석).
   const [hoverEnding, setHoverEnding] = useState<ReadonlySet<string>>(() => new Set())
   const hoverEndTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>())
@@ -227,8 +276,12 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
               data-testid="tab"
               data-view-id={id}
               data-active={isActive ? 'true' : 'false'}
-              // 누르는 순간 활성(TRD §2-2) — 훅이 누르기 전 활성(`initial_active`)을 먼저 적게 전환은 그 뒤에 부른다.
-              //   편집 중인 머리의 누름은 끌기 후보가 아니고, 덮인 이웃 자리의 누름은 편집을 확정하고 그 이웃으로 전환만 한다.
+              draggable={source.draggable(id)}
+              // 누름은 캡처 단계에서 적는다 — 닫기 버튼이 거품을 끊어도 그 자리에서 시작한 끌기를 가를 수 있고, 전환(아래 거품
+              //   처리기)보다 먼저라 누르기 전 활성이 그 끌기의 `initial` 이 된다.
+              onPointerDownCapture={e => source.onPointerDown(e, id)}
+              // 누르는 순간 활성(TRD §2-3 ①). 편집 중인 머리의 누름은 끌기 후보가 아니고, 덮인 이웃 자리의 누름은 편집을 확정하고
+              //   그 이웃으로 전환만 한다.
               onPointerDown={e => {
                 if (editing) {
                   const inInput = e.target instanceof Element && e.target.closest('input') !== null
@@ -238,9 +291,10 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
                   activate(under, e.button)
                   return
                 }
-                onPointerDown(e, id)
                 activate(id, e.button)
               }}
+              onDragStart={e => source.onDragStart(e, id)}
+              onDragEnd={e => source.onDragEnd(e, id)}
               // 머리 어디든(이름 칸 폭이 0 인 좁은 활성 머리 포함) — 닫기 버튼 위는 그 버튼이 닫지 않는 클릭일 때만.
               onDoubleClick={e => {
                 if (editing) return
@@ -373,6 +427,13 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
         >
           +
         </button>
+        {marker !== null && (
+          <span
+            aria-hidden
+            data-testid="tab-drop-marker"
+            style={{ ...MARKER_STYLE, transform: `translateX(${marker - MARKER_W / 2}px)` }}
+          />
+        )}
       </div>
     </div>
   )
@@ -390,6 +451,20 @@ const ADD_STYLE: CSSProperties = {
   cursor: 'pointer',
   padding: '0 12px',
   fontSize: '14px',
+}
+
+const REDUCED_MOTION = '(prefers-reduced-motion: reduce)'
+
+/** Chrome 의 풍부한 애니메이션 꺼짐 — 비켜남 시간 0(`reorderGeometry.slideMs`). */
+function reducedMotion(): boolean {
+  return typeof window.matchMedia === 'function' && window.matchMedia(REDUCED_MOTION).matches
+}
+
+/** `ids` 에서 `view` 를 빼고 그 목록의 `index` 자리에 끼운 순서(범위 밖은 가까운 끝). */
+function placeAt(ids: readonly string[], view: string, index: number): string[] {
+  const others = ids.filter(id => id !== view)
+  const k = Math.min(Math.max(index, 0), others.length)
+  return [...others.slice(0, k), view, ...others.slice(k)]
 }
 
 // 활성 · 맴돎 면은 머리 위 이만큼 내려앉는다 — 그 위로 바가 보여야 탭이 바에서 솟은 조각으로 읽힌다(Chrome). 머리 상자는 줄
@@ -459,6 +534,20 @@ const EDIT_COVER: CSSProperties = {
   inset: 0,
   background: 'var(--tab-bar-bg)',
   pointerEvents: 'none',
+}
+
+// 다른 창 끌기의 끼울 자리 — VS Code 의 2 px 세로선(TRD §4-3 · W13 · U2 ② 양쪽 머리 끝에 1 px 씩 걸친다). x = 탭바 좌표
+//   (`localDrag` `targetMarker` — 그 창 뿌리 dragover 가 적는다).
+const MARKER_W = 2
+const MARKER_STYLE: CSSProperties = {
+  position: 'absolute',
+  top: SURFACE_TOP,
+  bottom: 0,
+  left: 0,
+  width: MARKER_W,
+  background: 'var(--accent)',
+  pointerEvents: 'none',
+  zIndex: 3,
 }
 
 // 구분선 = Chrome 그대로(PRD R27 · Chromium `tab_style.cc` `kSeparator*` · `horizontal_tab_style_views.cc`

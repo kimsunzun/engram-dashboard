@@ -27,18 +27,19 @@ afterEach(cleanup)
 const push = (payload: unknown) => act(() => handlers.get('dock:overlay')!({ payload }))
 
 describe('DockOverlayPage', () => {
-  it('dock:overlay 를 자기 창 대상으로 듣고 민 그림을 그린다 · null 이면 치운다', async () => {
+  it('dock:overlay 를 자기 창 대상으로 듣고 민 그림을 그린다 · null 이면 흐려진 뒤 치운다', async () => {
     render(<DockOverlayPage />)
     await waitFor(() => expect(handlers.has('dock:overlay')).toBe(true))
     expect(listenOptions.get('dock:overlay')).toEqual({ target: 'dock-overlay' })
     expect(screen.queryByTestId('dock-overlay')).toBeNull()
 
     push({ outer: [], bands: [{ x0: 10, y0: 20, x1: 30, y1: 40 }], preview: { x0: 10, y0: 20, x1: 50, y1: 40 } })
-    expect(screen.getByTestId('dock-slot-band').style.left).toBe('10px')
+    expect(screen.getByTestId('dock-preview').style.left).toBe('10px')
     expect(screen.getByTestId('dock-preview').style.width).toBe('40px')
+    expect(screen.getByTestId('dock-overlay-page').style.position).toBe('fixed')
 
     push(null)
-    expect(screen.queryByTestId('dock-overlay')).toBeNull()
+    await waitFor(() => expect(screen.queryByTestId('dock-overlay')).toBeNull())
   })
 
   it('내리면 듣기를 뗀다', async () => {

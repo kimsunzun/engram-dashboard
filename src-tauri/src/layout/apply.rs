@@ -1191,7 +1191,7 @@ fn dock_in_place(
     let (docked, news, unchanged) = {
         let mut mgr = sync::lock(&state.0);
         let before = BeforeDock::take(&mgr, ask.view);
-        let docked = mgr.dock(ask.view, to, &ask.guard, ask.focus, ask.mv)?;
+        let docked = mgr.dock(ask.view, to, &ask.guard, ask.focus, ask.mv.clone())?;
         let news = DockNews::collect(&mgr, &before, &docked, shown);
         let unchanged = mgr.version == before.version;
         if !unchanged {
@@ -1256,7 +1256,7 @@ fn open_new_window(
             },
             &ask.guard,
             ask.focus,
-            ask.mv,
+            ask.mv.clone(),
         )
         .map(|docked| {
             let news = DockNews::collect(&mgr, &before, &docked, ask.view);

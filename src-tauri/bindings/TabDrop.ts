@@ -7,8 +7,10 @@ import type { DropTo } from "./DropTo";
  *
  * - `drag`: 출처가 dragstart 에 뽑는 끌기 id — 셸 장부의 열쇠다(같은 끌기의 두 번째 처리는 `duplicate`).
  * - `view`: 끄는 탭.
- * - `from`: dragstart 때 그 탭의 창 label — 그사이 그 탭이 다른 창으로 갔으면 `SourceChanged` 로 거절된다.
- * - `initial`: 누르기 전 `from` 창의 모델 활성 탭 — `view` 가 아니면 놓은 뒤 `from` 에 남은 탭 중 활성이 된다(`null`
- *   · `view` 와 같음 = 셸 규칙(오른쪽 이웃 → 왼쪽)).
+ * - `from`: dragstart 때 그 탭의 창 label — 결과 알림(`tab_drop:done`)을 받는 창이다. 그 탭이 그사이 다른 창으로
+ *   갔으면 셸은 지금 창에서 옮긴다.
+ * - `initial`: 누르기 전 `from` 창의 모델 활성 탭 — `view` 가 아니고 끄는 탭이 놓을 때 `from` 에 있으면 놓은 뒤
+ *   `from` 에 남은 탭 중 활성이 된다. 그 밖(`null` · `view` 와 같음 · 끄는 탭이 다른 창에 있음)은 셸 규칙(오른쪽
+ *   이웃 → 왼쪽)이다.
  */
 export type TabDrop = { drag: string, view: string, from: string, initial: string | null, to: DropTo, };

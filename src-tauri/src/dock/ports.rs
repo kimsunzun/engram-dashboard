@@ -111,6 +111,7 @@ impl DockWrite {
             focus: self.focus,
             mv: DockMove {
                 successor: self.successor,
+                ..DockMove::default()
             },
             on_emptied: OnEmptied::Keep,
         }

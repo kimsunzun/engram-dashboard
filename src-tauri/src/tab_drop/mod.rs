@@ -2,14 +2,17 @@
 //! 셈 [`frame_insets`] · 바뀔 때만 내기 [`push_frame`]. Tauri 껍데기 · 포트 어댑터 = `commands::tab_drop`. 판정은 순수
 //! 모듈 [`plan`], wire 타입은 [`wire`].
 //!
-//! ★끌기 도중 셸 호출 0 (ADR-0296)★ — 셸은 끌기가 끝난 뒤의 명령(끌기 하나에 많아야 둘)과 끌기 밖의 창 사실만 다룬다.
-//! 끌기 도중 기하 · 상태를 셸로 보내는 길을 여기 더하지 말 것 — 그 경계 동기화가 이 결정이 없앤 결함의 뿌리다.
+//! ★끌기 명령은 끌기가 끝난 뒤에만 온다 (ADR-0296 · ADR-0297)★ — 끌기 하나에 많아야 둘이다. 창 사실은 끌기와 무관하게
+//! 흐른다. 끄는 동안 끌기의 판정 · 기하 · 상태를 셸로 보내는 길을 여기 더하지 말 것 — 그 경계 동기화가 ADR-0296 이
+//! 없앤 결함의 뿌리다.
 //!
+//! - ★놓기가 본 상태를 견주지 않는다★ — 놓기가 가리킨 것을 모델이 id 로 지금 상태에서 다시 찾아, 있으면 지금 상태에
+//!   맞춰 적용하고 없으면 거절한다(규칙 = [`plan::plan`]).
 //! - 모델 쓰기는 사람 · LLM 명령과 같은 `layout::apply::dock_tab` 한 번뿐이다(ADR-0081 · CLAUDE.md 「LLM-우선 제어」).
 //!   이 명령은 버스 명령표에 올리지 않는다 — 같은 동작의 LLM 명령은 T-65 `tab.dock` 이 같은 함수 위에 선다.
 //! - ★락 규율★ — 장부 · 창 사실 표의 락은 잎이다. 쥔 채 레이아웃 락 · emit · 창 호출을 하지 않는다. 결과 알림
 //!   ([`DropShell::done`]) · 포커스는 락을 다 놓은 뒤에 부른다.
-// ADR-0296
+// ADR-0296 · ADR-0297
 // TRD S21-slot-docking §3
 
 pub mod plan;
@@ -238,7 +241,8 @@ fn evict(seen: &mut VecDeque<(Uuid, Mark)>) -> bool {
 
 /// 처리가 레이아웃 밖에서 닿는 셸 — 둘 다 ★락을 다 놓은 뒤에만★ 불린다.
 pub trait DropShell: Send + Sync {
-    /// 놓은 창에 포커스를 준다(탭바 · 이음새에 놓아 적용됐을 때만 · 새 창은 열 때 활성으로 연다).
+    /// 옮긴 탭이 든 창에 포커스를 준다 — 탭바 · 이음새에 놓아 적용됐을 때만(새 창은 열 때 활성으로 연다). 보통 놓은
+    /// 창이고, 이음새 대상 탭이 그사이 다른 창으로 갔으면 그 창이다.
     fn focus(&self, label: &str);
     /// 사건 `tab_drop:done` 을 출처 창(`source` = 명령의 `from`)에만 낸다 — 그 창이 없으면(비어 닫힘 따위) 건너뛴다.
     fn done(&self, source: &str, done: &TabDropDone);
@@ -355,7 +359,7 @@ fn run(
             let reply = match applied {
                 Ok(out) => {
                     if in_place {
-                        ports.shell.focus(&caller);
+                        ports.shell.focus(&out.window);
                     }
                     TabDropReply::Applied {
                         window: out.window,
@@ -432,9 +436,9 @@ fn log_handled(
     reply: &TabDropReply,
     superseded: bool,
 ) {
-    let (to, effect, rev) = match &drop.to {
-        DropTo::TabBar { .. } => ("tab_bar", None, None),
-        DropTo::Seam { rev, .. } => ("seam", None, Some(*rev)),
+    let (to, effect) = match &drop.to {
+        DropTo::TabBar { .. } => ("tab_bar", None),
+        DropTo::Seam { .. } => ("seam", None),
         DropTo::NewWindow { by, .. } => (
             "new_window",
             match by {
@@ -444,7 +448,6 @@ fn log_handled(
                 }),
                 NewWindowBy::Drop => None,
             },
-            None,
         ),
     };
     let top = match &input.top {
@@ -472,7 +475,6 @@ fn log_handled(
         esc = input.escape_down,
         top = %top,
         top_class,
-        rev,
         ?outcome,
         kind,
         why,
@@ -629,7 +631,7 @@ mod tests {
     };
     use crate::layout::chrome::PointCss;
     use crate::layout::dock::DockSide;
-    use crate::layout::manager::{DockGuard, DockMove, FocusPolicy};
+    use crate::layout::manager::{DockGuard, DockMove, DockTo, FocusPolicy};
     use crate::layout::{ViewManager, ViewSnapshot, WindowBounds, MAIN_WINDOW_LABEL};
 
     const MAIN: &str = MAIN_WINDOW_LABEL;
@@ -919,10 +921,7 @@ mod tests {
     // 장부에 그 끌기의 명령 하나를 들인다 — 답 = "run" · "parked" · "duplicate".
     fn admit(book: &DropBook, drag: Uuid, arrival: Arrival, plan: Plan) -> &'static str {
         let to = match arrival {
-            Arrival::Drop => DropTo::TabBar {
-                index: 0,
-                expect: vec![],
-            },
+            Arrival::Drop => DropTo::TabBar { index: 0 },
             Arrival::DragEnd => drag_end(EndEffect::None),
         };
         let item = Handling {
@@ -1147,13 +1146,7 @@ mod tests {
             grab: PointCss { x: 0.0, y: 0.0 },
         };
         assert_eq!(Arrival::of(&by_drop), Arrival::Drop);
-        assert_eq!(
-            Arrival::of(&DropTo::TabBar {
-                index: 0,
-                expect: vec![]
-            }),
-            Arrival::Drop
-        );
+        assert_eq!(Arrival::of(&DropTo::TabBar { index: 0 }), Arrival::Drop);
     }
 
     // ── ⑤ 거절 옮기기 · 취소 · 무시 ────────────────────────────────────────────
@@ -1194,29 +1187,26 @@ mod tests {
     #[test]
     fn a_rejected_drop_reports_the_kind_and_leaves_the_model() {
         let rig = Rig::new();
-        let (a, b) = two_tabs(&rig);
+        two_tabs(&rig);
         let before = rig.mgr().version;
-        let stale = DropTo::TabBar {
-            index: 1,
-            expect: vec![a],
-        };
+        let gone = id(42);
         let reply = rig.handle(
             &DropBook::default(),
-            drop(id(9), a, MAIN, None, stale),
+            drop(id(9), gone, MAIN, None, DropTo::TabBar { index: 1 }),
             MAIN,
             &released(TopAt::Unknown),
         );
         assert_eq!(
             reply,
             TabDropReply::Rejected {
-                kind: "TargetChanged".into(),
-                reason: DockError::TargetChanged.to_string(),
-            }
+                kind: "TabNotFound".into(),
+                reason: DockError::TabNotFound(gone).to_string(),
+            },
+            "끄는 탭이 그사이 사라졌다"
         );
         assert_eq!(rig.mgr().version, before);
         assert_eq!(rig.mgr().list_tabs(MAIN).unwrap().tabs.len(), 2);
         assert_eq!(rig.take_log(), ["done:Rejected"], "알림 · 포커스 없음");
-        let _ = b;
     }
 
     #[test]
@@ -1263,18 +1253,9 @@ mod tests {
     #[test]
     fn done_comes_once_per_handling_after_the_model_news_and_never_for_a_duplicate() {
         let rig = Rig::new();
-        let (a, b) = two_tabs(&rig);
+        let (a, _) = two_tabs(&rig);
         let book = DropBook::default();
-        let reorder = drop(
-            id(7),
-            a,
-            MAIN,
-            Some(a),
-            DropTo::TabBar {
-                index: 1,
-                expect: vec![a, b],
-            },
-        );
+        let reorder = drop(id(7), a, MAIN, Some(a), DropTo::TabBar { index: 1 });
         let reply = rig.handle(&book, reorder.clone(), MAIN, &released(TopAt::Unknown));
         assert_eq!(
             reply,
@@ -1305,7 +1286,7 @@ mod tests {
     #[test]
     fn an_ignored_drag_end_then_the_winning_drop_each_announce_once() {
         let rig = Rig::new();
-        let (a, b) = two_tabs(&rig);
+        let (a, _) = two_tabs(&rig);
         let book = DropBook::default();
         let ignored = rig.handle(
             &book,
@@ -1321,16 +1302,7 @@ mod tests {
         );
         let won = rig.handle(
             &book,
-            drop(
-                id(5),
-                a,
-                MAIN,
-                Some(a),
-                DropTo::TabBar {
-                    index: 1,
-                    expect: vec![a, b],
-                },
-            ),
+            drop(id(5), a, MAIN, Some(a), DropTo::TabBar { index: 1 }),
             MAIN,
             &released(TopAt::Unknown),
         );
@@ -1344,7 +1316,7 @@ mod tests {
             open_fails: true,
             ..Rig::new()
         };
-        let (a, b) = two_tabs(&rig);
+        let (a, _) = two_tabs(&rig);
         let book = DropBook::default();
         let rejected = rig.handle(
             &book,
@@ -1358,16 +1330,7 @@ mod tests {
         );
         let won = rig.handle(
             &book,
-            drop(
-                id(6),
-                a,
-                MAIN,
-                Some(a),
-                DropTo::TabBar {
-                    index: 1,
-                    expect: vec![a, b],
-                },
-            ),
+            drop(id(6), a, MAIN, Some(a), DropTo::TabBar { index: 1 }),
             MAIN,
             &released(TopAt::Unknown),
         );
@@ -1380,21 +1343,15 @@ mod tests {
     }
 
     #[test]
-    fn a_seam_drop_into_another_window_applies_with_focus_on_the_caller() {
+    fn a_seam_drop_into_another_window_applies_with_focus_on_that_window() {
         let rig = Rig::new();
         let (a, _) = two_tabs(&rig);
-        let (target, rev) = {
-            let mut mgr = rig.mgr();
-            let target = mgr.create_window("slot-popup-1").unwrap();
-            (target, mgr.layout_rev(target).unwrap())
-        };
+        let target = rig.mgr().create_window("slot-popup-1").unwrap();
         let seam = DropTo::Seam {
             target,
             anchor: DropAnchor::Outer,
             side: DockSide::Right,
             share: 0.5,
-            rev,
-            active: target,
         };
         let reply = rig.handle(
             &DropBook::default(),
@@ -1420,6 +1377,52 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_seam_drop_whose_target_tab_moved_to_another_window_docks_there_and_focuses_that_window() {
+        let rig = Rig::new();
+        let (a, b) = two_tabs(&rig);
+        // main 에 보이던 b 의 이음새에 놓기 전에 b 가 팝아웃으로 갔다(LLM 따위).
+        let popup = {
+            let mut mgr = rig.mgr();
+            mgr.create_window("slot-popup-1").unwrap();
+            mgr.dock(
+                b,
+                DockTo::TabBar {
+                    window: "slot-popup-1".into(),
+                    index: None,
+                },
+                &DockGuard::NONE,
+                FocusPolicy::Keep,
+                DockMove::default(),
+            )
+            .unwrap();
+            "slot-popup-1"
+        };
+        let seam = DropTo::Seam {
+            target: b,
+            anchor: DropAnchor::Outer,
+            side: DockSide::Right,
+            share: 0.5,
+        };
+        let reply = rig.handle(
+            &DropBook::default(),
+            drop(id(8), a, MAIN, None, seam),
+            MAIN,
+            &released(TopAt::Unknown),
+        );
+        assert_eq!(
+            reply,
+            TabDropReply::Applied {
+                window: popup.into(),
+                reused: false
+            }
+        );
+        let log = rig.take_log();
+        assert!(log.contains(&format!("focus:{popup}")), "{log:?}");
+        assert!(!log.contains(&"focus:main".to_owned()), "{log:?}");
+        assert_eq!(rig.mgr().owner_of(a), None, "a 는 b 에 붙어 사라졌다");
+    }
+
     // ── ⑩ 진행 중인 drag_end 새 창과 같은 끌기의 drop ──────────────────────────────
 
     // main = [a, b] 에서 a 를 끈 끌기 id(6) — drag_end(새 창)를 처리하는 도중 `at` 자리에서 탭바 drop 이 닿는다.
@@ -1429,16 +1432,7 @@ mod tests {
     ) -> (Uuid, Uuid, Arc<DropBook>, TabDropReply) {
         let (a, b) = two_tabs(rig);
         let book = Arc::new(DropBook::default());
-        let reorder = drop(
-            id(6),
-            a,
-            MAIN,
-            Some(a),
-            DropTo::TabBar {
-                index: 1,
-                expect: vec![a, b],
-            },
-        );
+        let reorder = drop(id(6), a, MAIN, Some(a), DropTo::TabBar { index: 1 });
         *rig.racing.lock().unwrap() = Some((at, book.clone(), reorder));
         let ended = rig.handle(
             &book,
@@ -1465,17 +1459,8 @@ mod tests {
     }
 
     // 같은 끌기의 drop 이 하나 더 닿아도 duplicate 이고 알림이 없다.
-    fn assert_drag_is_over(rig: &Rig, book: &DropBook, a: Uuid, b: Uuid) {
-        let again = drop(
-            id(6),
-            a,
-            MAIN,
-            Some(a),
-            DropTo::TabBar {
-                index: 0,
-                expect: vec![b, a],
-            },
-        );
+    fn assert_drag_is_over(rig: &Rig, book: &DropBook, a: Uuid) {
+        let again = drop(id(6), a, MAIN, Some(a), DropTo::TabBar { index: 0 });
         assert_eq!(
             rig.handle(book, again, MAIN, &released(TopAt::Unknown)),
             TabDropReply::Duplicate,
@@ -1513,7 +1498,7 @@ mod tests {
         let focus = log.iter().position(|s| s == "focus:main").expect("포커스");
         let applied = log.iter().position(|s| s == "done:Applied").unwrap();
         assert!(focus < applied, "{log:?}");
-        assert_drag_is_over(&rig, &book, a, b);
+        assert_drag_is_over(&rig, &book, a);
     }
 
     #[test]
@@ -1546,7 +1531,7 @@ mod tests {
         let focus = log.iter().position(|s| s == "focus:main").expect("포커스");
         let applied = log.iter().position(|s| s == "done:Applied").unwrap();
         assert!(rejected < focus && focus < applied, "{log:?}");
-        assert_drag_is_over(&rig, &book, a, b);
+        assert_drag_is_over(&rig, &book, a);
     }
 
     #[test]
