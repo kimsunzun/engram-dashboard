@@ -116,7 +116,10 @@ beforeEach(() => {
   })
   currentViewIdMock.mockReset()
   currentViewIdMock.mockReturnValue('main-view')
-  useAgentStore.setState({ agents: [], profiles: [], presets: [], selectedAgentId: null })
+  // 기본은 「명부 · 프로필 둘 다 받음」 — 미수신 구간은 그 시험이 플래그를 직접 내린다.
+  useAgentStore.setState({
+    agents: [], agentsLoaded: true, profiles: [], profilesLoaded: true, presets: [], selectedAgentId: null,
+  })
 })
 afterEach(() => {
   cleanup()
@@ -277,6 +280,53 @@ describe('rowPhase / rowGlyphIcon / rowGlyphColor (시연 층, pure)', () => {
       expect(statusGlyphIcon(s).shape).not.toBe('pending')
       expect(statusGlyphIcon(s, 'SpawnFailed').shape).not.toBe('pending')
     }
+  })
+})
+
+// ── 첫 목록 수신 전(새 창) — 중간 화면을 그리지 않는다 ──────────────────────────
+describe('AgentList 첫 목록 수신 전', () => {
+  beforeEach(() => {
+    useAgentStore.setState({ agentsLoaded: false, profilesLoaded: false })
+  })
+
+  it('둘 다 못 받음 → 빈 목록 안내도 트리도 없다(라벨만)', () => {
+    render(<AgentList />)
+    expect(screen.queryByText(/에이전트 없음/)).toBeNull()
+    expect(document.querySelector('[data-testid="agent-tree"]')).toBeNull()
+    expect(document.querySelector('[data-slot-label="agent-list"]')).toBeTruthy()
+  })
+
+  it('명부만 빈 채로 받음(프로필 대기) → 아직 빈 목록 안내를 그리지 않는다', () => {
+    render(<AgentList />)
+    act(() => useAgentStore.getState().setAgents([]))
+    expect(screen.queryByText(/에이전트 없음/)).toBeNull()
+  })
+
+  it('프로필만 받음(명부 대기) → 예약 행을 먼저 그리지 않는다', () => {
+    render(<AgentList />)
+    act(() => useAgentStore.getState().setProfiles([profile('p1', 'C:/r')]))
+    expect(document.querySelector('[data-agent-row="p1"]')).toBeNull()
+  })
+
+  it('둘 다 빈 채로 받음 → 그때 빈 목록 안내', () => {
+    render(<AgentList />)
+    act(() => {
+      useAgentStore.getState().setAgents([])
+      useAgentStore.getState().setProfiles([])
+    })
+    expect(screen.getByText(/에이전트 없음/)).toBeTruthy()
+  })
+
+  it('둘 다 받음 + 비지 않음 → 트리 행, 빈 목록 안내는 끝내 나오지 않는다', () => {
+    render(<AgentList />)
+    act(() => {
+      useAgentStore.getState().setAgents([agent('a1', 'C:/w')])
+      useAgentStore.getState().setProfiles([profile('p1', 'C:/r')])
+    })
+    const tree = document.querySelector('[data-testid="agent-tree"]')
+    expect(tree?.querySelector('[data-agent-row="a1"]')).toBeTruthy()
+    expect(tree?.querySelector('[data-agent-row="p1"]')).toBeTruthy()
+    expect(screen.queryByText(/에이전트 없음/)).toBeNull()
   })
 })
 

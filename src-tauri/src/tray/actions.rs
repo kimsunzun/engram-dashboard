@@ -75,6 +75,9 @@ pub fn show_main_ui(app: &AppHandle) {
                 let Some(w) = windows.get(label) else {
                     return false;
                 };
+                // 첫 화면을 기다리던 창이면 그 올림을 거둔다 — 이 보이기가 그 기다림을 끝낸다(숨기기와 같은 길). 남기면
+                //   뒤에 오는 알림 · 시한이 보인 창을 이 순서 밖에서 한 번 더 보인다(`crate::first_paint`).
+                crate::first_paint::cancel_hold(app, label);
                 let _ = w.show();
                 // 숨은 동안 미뤄 둔 최대화(main · 복원한 팝아웃)를 보인 직후에 입힌다.
                 crate::state::placement::apply_deferred_maximize(&w.as_ref().window());
@@ -102,6 +105,9 @@ pub fn hide_main_ui(app: &AppHandle) {
                 let Some(w) = windows.get(label) else {
                     return false;
                 };
+                // 첫 화면을 기다리던 창이면 그 올림을 거둔다 — 숨긴 뒤 오는 알림 · 시한이 그 창을 다시 보인다
+                //   (`crate::first_paint`). 숨기기가 실패해도 거둔다 — 숨기라고 청한 창이다.
+                crate::first_paint::cancel_hold(app, label);
                 match w.hide() {
                     Ok(()) => true,
                     Err(e) => {

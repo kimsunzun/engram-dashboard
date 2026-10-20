@@ -3,7 +3,7 @@ import { HashRouter, Routes, Route } from 'react-router-dom'
 import { installUiSettings } from './theme/uiSettings'
 import AppLayout from './components/layout/AppLayout'
 import PopoutPage from './pages/PopoutPage'
-import { initEventBus, refreshProfiles, refreshPresets } from './store/eventBus'
+import { initEventBus } from './store/eventBus'
 import { agentClient, bootstrapDaemonIfNeeded } from './api/clientFactory'
 import { retryAsync } from './util/retryInvoke'
 import { useAgentStore } from './store/agentStore'
@@ -33,10 +33,19 @@ function App() {
   return path === DOCK_OVERLAY_PATH ? <DockOverlayPage /> : <TabWindowApp />
 }
 
+function bootPull<T>(name: string, fetch: () => Promise<T>, apply: (value: T) => void): void {
+  retryAsync(fetch, {
+    onRetry: (err, attempt) => {
+      console.warn(`[App] ${name} 재시도 #${attempt}:`, err)
+    },
+  })
+    .then(apply)
+    .catch(err => console.warn(`[App] ${name} 최종 실패:`, err))
+}
+
 function TabWindowApp() {
-  // 테마는 셸이 정한다 — 창 테마(`window.setTheme`) ?? 셸 설정 `theme.default`(ADR-0265). 붙는 시점은
-  // 부팅 조회가 돌아온 뒤라, 그 전까지는 main.tsx 가
-  // 첫 페인트 전에 박아 둔 dark 가 보인다(색 토큰 미정의 구간을 없애는 그 한 줄 — 사유는 그 파일).
+  // 테마는 셸이 정한다 — 창 테마(`window.setTheme`) ?? 셸 설정 `theme.default`(ADR-0265). 부팅 조회가 돌아오기
+  // 전까지는 셸이 창을 만들며 박은 그 창의 테마가 보인다(`theme/bootTheme.ts`).
   // ★값만 갈아끼운다 — 리마운트 없음(ADR-0149)★.
   useEffect(() => installUiSettings(), [])
 
@@ -59,17 +68,13 @@ function TabWindowApp() {
       void initEventBus()
       // ADR-0102: 부팅 pull 을 재시도로 감싼다 — bootstrapDaemonIfNeeded 와 동일 패턴.
       // 데몬 연결 직후 IPC 가 일시적으로 미준비 상태일 수 있어 one-shot 실패가 그대로 공란이 된다.
-      retryAsync(() => agentClient.getAgents(), {
-        onRetry: (err, attempt) => {
-          console.warn(`[App] getAgents 재시도 #${attempt}:`, err)
-        },
-      })
-        .then(agents => useAgentStore.getState().setAgents(agents))
-        .catch(err => console.warn('[App] getAgents 최종 실패:', err))
+      // ★프로필 · 프리셋도 재시도한다★: 트리 · 프리셋 칸은 첫 목록을 받기 전엔 비워 두므로(AgentList · PresetPalette)
+      //   단발 실패가 곧 빈 칸 고착이다.
+      bootPull('getAgents', () => agentClient.getAgents(), agents => useAgentStore.getState().setAgents(agents))
       // ADR-0018: 트리가 예약(깡통) 노드를 그리려면 필요.
-      void refreshProfiles()
-      // ADR-0061: PresetPalette 가 목록을 그리려면 필요(refreshProfiles 미러).
-      void refreshPresets()
+      bootPull('listProfiles', () => agentClient.listProfiles(), p => useAgentStore.getState().setProfiles(p))
+      // ADR-0061: PresetPalette 가 목록을 그리려면 필요.
+      bootPull('listPresets', () => agentClient.listPresets(), p => useAgentStore.getState().setPresets(p))
     })()
   }, [])
 

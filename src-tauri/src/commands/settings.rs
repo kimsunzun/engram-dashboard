@@ -20,11 +20,13 @@ use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 
+use crate::commands::dock::is_overlay_label;
 use crate::settings::{
     reset_and_notify, set_and_notify, ResetOutcome, SetOutcome, SettingsEvents, SettingsSchema,
     SettingsService, SettingsSnapshot,
 };
-use crate::theme::{EffectiveThemes, ThemeControl, ThemeWindows, UiSettingsPayload};
+use crate::theme::{EffectiveThemes, ThemeControl, ThemeWindows, UiSettingsPayload, UiTheme};
+use crate::webview_env;
 
 /// 창마다 **자기 값**을 받는다 — 목적지를 지목해 보내므로 받는 쪽도 자기 label 로 구독해야 한다
 /// (`src/theme/uiSettings.ts` · 사유 = `theme::deliver_per_window`).
@@ -141,8 +143,19 @@ impl ThemeWindows for TauriThemeWindows {
         self.app.webview_windows().into_keys().collect()
     }
 
-    // 테마 관문을 쥔 채 불린다 — Rust 쪽 수신자가 없어(웹뷰로만 나간다) 그 락을 되잡는 길이 없다.
+    // 테마 관문을 쥔 채 불린다 — Rust 쪽 수신자가 없어(웹뷰로만 나간다) 그 락을 되잡는 길이 없다. 바탕 칠하기도
+    //   이벤트 루프에 넘기기만 하거나(다른 스레드) 그 자리에서 색만 바꾼다(메인 스레드 — tauri-runtime-wry 2.11.3
+    //   `send_user_message`) — 셸의 락을 잡지 않는다.
     fn send(&self, label: &str, payload: UiSettingsPayload) -> Result<(), String> {
+        // 안내 창은 투명이라 칠하지 않는다(`Backdrop::Unpainted`).
+        if !is_overlay_label(label) {
+            if let (Some(window), Some(theme)) = (
+                self.app.get_webview_window(label),
+                UiTheme::from_wire(&payload.theme),
+            ) {
+                webview_env::repaint(&window, theme);
+            }
+        }
         self.app
             .emit_to(label, EVT_UI_SETTINGS_UPDATED, payload)
             .map_err(|e| e.to_string())

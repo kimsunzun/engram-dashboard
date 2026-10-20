@@ -3,6 +3,7 @@ pub mod daemon_client;
 pub mod discovery;
 pub mod dock;
 mod file_hooks;
+mod first_paint;
 pub mod layout;
 pub mod output_channel;
 pub mod output_router;
@@ -132,6 +133,10 @@ pub fn run() {
     let webview_env = std::sync::Arc::new(crate::webview_env::WebviewEnv::resolve());
     let setup_webview_env = webview_env.clone();
     builder = builder.manage(webview_env);
+    // 숨긴 채 지은 창을 첫 화면 알림까지 기다리는 명부 — 창을 만드는 어느 자리보다 먼저 있어야 한다(없으면 곧바로 보인다).
+    builder = builder.manage(std::sync::Arc::new(
+        crate::first_paint::FirstPaintGate::default(),
+    ));
 
     let exit_session = state_session.clone();
     // 시작이 실패했다는 표지 — setup ⑧ 이 세우고 종료 사건이 읽는다(아래 `run`).
@@ -228,7 +233,7 @@ pub fn run() {
 
             // ── 부팅 단계 ⑧ ⑨: 정적 창(main)을 저장된 자리로 만들기 · 복원한 팝아웃 창 · 테마 한 번 ──
             // (TRD S21-storage §4 · §6-5) 여기서 첫 창이 생긴다(설정의 `"create": false`). `--hidden` 이면 main 은
-            //   숨긴 채 만들고, 팝아웃은 아래 숨기기가 숨긴다(사용자 결정 F13).
+            //   첫 화면에도 보이지 않고, 팝아웃은 아래 숨기기가 첫 화면 기다림을 거둬 숨긴 채 둔다(사용자 결정 F13).
             if crate::state::placement::restore_windows(
                 app.handle(),
                 &setup_webview_env,
@@ -311,8 +316,11 @@ pub fn run() {
                 ),
             }
 
-            // `--hidden` — main 은 숨긴 채 만들었다(⑧). 여기서는 ⑨ 가 보인 채 연 팝아웃을 숨기고(F13) 숨긴 창을
-            //   사용량 관심에서 뺀다 — 숨기기 경로는 하나다(ADR-0229).
+            // `--hidden` — main 은 첫 화면에 보이도록 올리지 않았다(⑧). 여기서는 ⑨ 가 첫 화면에 보이도록 올린 팝아웃의
+            //   올림을 거두고(F13 — 거두지 않으면 첫 화면 알림 · 시한이 main 은 트레이에 둔 채 팝아웃만 보인다) 그 창을
+            //   사용량 관심에서 뺀다 — 숨기기 경로는 하나다(ADR-0229). 첫 화면의 보이기는 보일지를 메인 스레드에서
+            //   보이기 바로 앞에 정하고(`first_paint`) 이 setup 도 메인 스레드라, 그 보이기는 여기서 거둔 뒤에야 돌아
+            //   거둔 창을 보이지 않는다.
             if hidden {
                 crate::tray::actions::hide_main_ui(app.handle());
             }
@@ -361,6 +369,7 @@ pub fn run() {
                     if crate::commands::popout::is_popup_label(&label) {
                         let app = window.app_handle();
                         crate::state::placement::forget_deferred_maximize(app, &label);
+                        crate::first_paint::cancel_hold(app, &label);
                         // 하나라도 없으면(초기화 실패 극단 케이스) 조용히 스킵(정리 불가여도 앱은 계속).
                         if let (Some(state), Some(router), Some(registry), Some(client)) = (
                             app.try_state::<crate::layout::LayoutState>(),
@@ -437,6 +446,8 @@ pub fn run() {
             commands::report_window_canvas,
             commands::report_ui_metrics,
             commands::report_dock_chrome,
+            // 첫 화면 알림(웹뷰 → 셸) — 버스 명령이 아니다(`first_paint`).
+            commands::webview_painted,
             // 부른 창의 역할(대기 창 명부 · TRD S21-slot-docking §4) — 웹뷰 안 배선이라 버스 명령이 아니다.
             commands::window_role,
             // 탭 끌기 세션(웹뷰 → 셸 · TRD S21-slot-docking §4) — 버스 명령이 아니다(사람 손의 끌기 신호).

@@ -29,7 +29,7 @@ use crate::layout::{
     MAIN_WINDOW_LABEL,
 };
 use crate::theme::ThemeControl;
-use crate::webview_env::WebviewEnv;
+use crate::webview_env::{Backdrop, WebviewEnv};
 
 /// 모니터 하나 — OS 가 알려 준 물리 픽셀 사각형과 그 배율.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -172,18 +172,18 @@ fn open_popouts_then_push_themes(
 ///
 /// - 세우는 쪽 = main 에 자리 · 최대화를 입히는 길(부팅 ⑧ [`restore_windows`] · 런타임 복원 수락
 ///   [`TauriRestoreWindows`] — main 이 숨어 있으면 보일 때까지, 보이면 그 자리에서 입혀질 때까지 —
-///   [`DeferredMaximize::apply_now`]) · 런타임 복원 수락이 숨긴 채 만든 최대화 팝아웃
-///   (`RestoreWindows::open_hidden`). 거두는 쪽 = 입히기에 성공한 그 길 · [`apply_deferred_maximize`](보이기 경로 —
-///   `tray::actions::show_main_ui` · 복원 수락의 `set_shown`) · 최대화가 아닌 사본을 입히는 런타임 복원(main) ·
-///   창 소멸([`forget_deferred_maximize`]).
+///   [`DeferredMaximize::apply_now`]) · 숨긴 채 만든 최대화 팝아웃(부팅 복원 [`open_popout`] · 런타임 복원 수락
+///   `RestoreWindows::open_hidden`). 거두는 쪽 = 입히기에 성공한 그 길 · 첫 화면의 보이기([`show_placed`] — 부팅 ·
+///   복원 수락의 `set_shown`) · [`apply_deferred_maximize`](보이기 경로 — `tray::actions::show_main_ui`) · 최대화가 아닌
+///   사본을 입히는 런타임 복원(main) · 창 소멸([`forget_deferred_maximize`]).
 /// - 숨은 창을 최대화하면 tao 가 `SW_MAXIMIZE`(창을 보이고 활성화한다)를 낸 뒤에야 `SW_HIDE` 로 되숨긴다(tao 0.35.3
 ///   `platform_impl/windows/window_state.rs` `apply_diff`) — `--hidden` 부팅에 main 이 번쩍이고 포커스를 가져간다.
 /// - 서 있는 동안은 그 창의 자리를 적지 않는다([`record`]) — 숨은 동안 오는 `Moved` · `Resized` 는 복원이 입힌 보통
 ///   자리를 「최대화 아님」으로 읽어, 적으면 모델의 최대화 표식이 내려간다(보이기 전에 끝내면 다음 부팅이 최대화를
 ///   잃는다).
-/// - 부팅은 `--hidden` 이면 main 을 숨긴 채 만들어([`restore_windows`]) 보일 때까지 남고, 아니면 보인 채 만들어
-///   최대화를 못 입혔을 때만 남는다. 런타임 복원 수락은 숨은 main(트레이 숨기기 · `--hidden` 부팅 뒤 LLM 의 답)에
-///   보일 때까지 남는다.
+/// - 부팅은 main · 팝아웃을 늘 숨긴 채 만들어([`restore_windows`]) 보일 때까지 남는다 — 보이는 부팅은 첫 화면의
+///   보이기까지, `--hidden` 부팅은 트레이 보이기까지. 런타임 복원 수락은 숨은 main(트레이 숨기기 · `--hidden` 부팅 뒤
+///   LLM 의 답)에 보일 때까지 남는다.
 /// - 락은 잎이다 — 쥔 채 창 호출 · 로그 · 다른 락을 하지 않는다.
 #[derive(Debug, Default)]
 pub struct DeferredMaximize(Mutex<BTreeSet<String>>);
@@ -248,8 +248,9 @@ impl DeferredMaximize {
 ///
 /// - ★실행 표식(⑤) 뒤에 부른다(I6)★ — 창을 만들다 앱이 죽어도 다음 부팅이 비정상으로 읽는다. 사용자 setup 은 부팅
 ///   단계 플러그인보다 늘 뒤라 setup 안이면 선다.
-/// - `boot_hidden` = `--hidden` 부팅 — main 을 처음부터 숨긴 채 만든다. 팝아웃은 그래도 보인 채 열고 부르는 쪽의
-///   숨기기가 main 과 함께 숨긴다(사용자 결정 F13).
+/// - `boot_hidden` = `--hidden` 부팅 — main 은 첫 화면에도 보이지 않고 트레이 보이기를 기다린다. 팝아웃은 그래도
+///   첫 화면에 보이도록 올리고, 부르는 쪽의 숨기기가 그 올림을 거둬 main 과 함께 숨긴 채 둔다(사용자 결정 F13 ·
+///   `crate::first_paint`).
 /// - `Err` = main 을 못 만들었다 — 그 자리에서 멈추고(팝아웃 · 테마 밀기 없음) 부르는 쪽이 앱을 끝낸다(사용자 결정
 ///   2026-10-07).
 ///
@@ -344,6 +345,10 @@ fn open_static(app: &AppHandle, env: &WebviewEnv, window: StaticWindow) -> Resul
     } = window;
     let built = build_static(app, env, MAIN_WINDOW_LABEL, at.map(first_place), hide)?;
     place_main(app, &built.as_ref().window(), at, maximized);
+    // 보이는 부팅은 자리를 입힌(최대화는 미룬) 뒤 첫 화면에 보인다. `--hidden` 부팅은 트레이 보이기를 기다린다.
+    if !hide {
+        crate::first_paint::hold_window(&built);
+    }
     Ok(())
 }
 
@@ -370,17 +375,24 @@ fn build_static(
             .position(position.x, position.y)
             .inner_size(size.width, size.height);
     }
-    // 숨긴 채 만드는 창은 포커스를 받지 않는다 — 받으면 숨은 창이 만들어진 직후 보이는 창의 전경을 가져간다. 이 규칙의
+    // ★늘 숨긴 채 만든다★ — 보이는 부팅도 자리를 입힌 뒤 첫 화면에 보인다(`crate::first_paint`).
+    builder = builder.visible(false);
+    // 숨긴 채 두는 창은 포커스를 받지 않는다 — 받으면 숨은 창이 만들어진 직후 보이는 창의 전경을 가져간다. 이 규칙의
     //   출처는 지금은 걷힌 숨은 트리 창이다(ADR-0225 · QA 관측 2026-10-07 — 보이는 부팅 3/3, 그 창이 main 의 전경을
     //   가져갔다). 남은 쓰임은 `--hidden` 부팅의 main 하나이고, 그 이득(자동 시작 때 다른 앱의 전경을 뺏지 않는다)은
     //   [미검 — GUI]. wry 0.55.1 은 `focused` 인 웹뷰를 만들자마자 `MoveFocus` 로 키보드 포커스를 그 안에 넣는다
     //   (`webview2/mod.rs` 의 만들기 끝) — 그것이 원인이라는 것은 소스 독해다 [미검 — GUI]. 보일 때는 창의 `WM_SETFOCUS`
-    //   가 웹뷰로 포커스를 넘긴다(같은 파일의 부모 창 서브클래스). tao 0.35.3 은 이 창의 첫 보이기를 활성화 없이
+    //   가 웹뷰로 포커스를 넘긴다(같은 파일의 부모 창 서브클래스). tao 0.35.3 은 이 창의 보이기를 활성화 없이
     //   (`SW_SHOWNOACTIVATE`) 한다 — 트레이 보이기는 그 뒤 `set_focus` 로 앞에 둔다.
+    // 보이는 부팅의 main 은 설정대로 포커스를 받는다 — 숨은 동안 이미 받고(위 `MoveFocus`), 첫 화면의 보이기가 활성화한다.
+    //   ★그 보이기가 활성화하는 보이기(`SW_SHOW`)여야 미룬 최대화를 보통 크기 틀 없이 입힌다★([`show_placed`]).
     if hide {
-        builder = builder.focused(false).visible(false);
+        builder = builder.focused(false);
     }
-    let built = env.finish(builder).build().map_err(|e| e.to_string())?;
+    let built = env
+        .finish(builder, Backdrop::for_window(app, label))
+        .build()
+        .map_err(|e| e.to_string())?;
     confirm_created(built.is_visible().map_err(|e| e.to_string()), || {
         tauri::webview_version().map_err(|e| e.to_string())
     })?;
@@ -416,15 +428,24 @@ fn open_popout(
     let saved = attrs.bounds.and_then(|bounds| {
         land(label, bounds, monitors, Fallback::DefaultPlace).map(|at| (bounds, at))
     });
-    let window = crate::commands::popout::build_runtime_window(app, label, saved.map(first_place))?;
-    let window = window.as_ref().window();
+    let built = crate::commands::popout::build_runtime_window(app, label, saved.map(first_place))?;
+    let window = built.as_ref().window();
     if let Some((bounds, at)) = saved {
         place(&window, bounds, at);
     }
+    // 숨은 창이라 최대화는 첫 화면의 보이기로 미룬다([`DeferredMaximize`] · [`show_placed`]).
     if attrs.maximized {
-        maximize(&window);
+        match app.try_state::<DeferredMaximize>() {
+            Some(deferred) => deferred.defer(label),
+            None => tracing::warn!(
+                module = "state",
+                label,
+                "미룬 최대화 표가 등록돼 있지 않아 그 창의 최대화를 입히지 않는다"
+            ),
+        }
     }
     record(&window);
+    crate::first_paint::hold_window(&built);
     Ok(())
 }
 
@@ -677,6 +698,66 @@ pub fn apply_deferred_maximize(window: &Window) {
     }
 }
 
+/// 숨긴 채 짓고 자리를 입힌 창을 처음 보인다 — 첫 화면의 보이기(`crate::first_paint`). 미룬 최대화가 있으면 보통 크기
+/// 틀을 거치지 않고 곧바로 최대화로 보이고(platform `restore_placement` — 지금 보통 자리를 되돌릴 자리로 둔다) 자리를
+/// 적는다. 그 보이기가 실패하면(Windows 밖 포함) 보통으로 보인 뒤 최대화한다 — 트레이 보이기와 같은 길이라 보통 크기
+/// 틀이 한 번 보인다. ★메인 스레드에서 부른다★.
+///
+/// 보이며 활성화한다.
+///
+/// ★최대화로 보일 창은 포커스를 받는 빌더(`focused(true)`)로 지은 창이어야 한다★ — 날 Win32 로 보인 뒤 tao 보임 깃발을
+/// 맞추는 Tauri `show` 가, 포커스 없이 지은 창에서는 `SW_SHOWNOACTIVATE` 를 낸다(tao 0.35.3 `window_state.rs`
+/// `apply_diff` — 그 표식은 지운다는 코드가 사본에만 닿아 남는다 · 소스 독해). 그 명령은 `SW_SHOWNORMAL` 처럼 최대화를
+/// 되돌릴 수 있다 [미검]. 지금 최대화를 미루는 창은 main · 복원 팝아웃(부팅 · 런타임 복원 수락)뿐이고 모두 포커스를
+/// 받는다.
+pub(crate) fn show_placed(window: &Window) {
+    let label = window.label();
+    let app = window.app_handle();
+    let deferred = app.try_state::<DeferredMaximize>();
+    if deferred
+        .as_ref()
+        .is_some_and(|deferred| deferred.is_pending(label))
+    {
+        match show_maximized(window) {
+            Ok(()) => {
+                // tao 보임 깃발을 맞춘다 — 거짓으로 남으면 다음 깃발 setter 가 창을 숨기고 트레이 숨기기가 아무것도 하지
+                //   않는다(`dock::ports` 머리 「보임」).
+                if let Err(e) = window.show() {
+                    tracing::warn!(module = "state", label, error = %e, "최대화로 보인 창의 보임 깃발을 맞추지 못했다");
+                }
+                if deferred.is_some_and(|deferred| deferred.take(label)) {
+                    record(window);
+                }
+                return;
+            }
+            Err(e) => tracing::warn!(
+                module = "state",
+                label,
+                "곧바로 최대화로 보이지 못해 보통으로 보인 뒤 최대화한다: {e}"
+            ),
+        }
+    }
+    if let Err(e) = window.show() {
+        tracing::warn!(module = "state", label, error = %e, "숨긴 창을 보이지 못했다");
+        return;
+    }
+    apply_deferred_maximize(window);
+}
+
+// 숨은 창의 지금 바깥 사각형(물리 화면 좌표)을 보통 자리로 두고 최대화로 보인다.
+fn show_maximized(window: &Window) -> Result<(), String> {
+    let at = window.outer_position().map_err(|e| e.to_string())?;
+    let size = window.outer_size().map_err(|e| e.to_string())?;
+    let normal = engram_dashboard_platform::window::PhysRect {
+        x: at.x,
+        y: at.y,
+        width: i32::try_from(size.width).map_err(|e| e.to_string())?,
+        height: i32::try_from(size.height).map_err(|e| e.to_string())?,
+    };
+    engram_dashboard_platform::window::restore_placement(window, normal, true, None, true)
+        .map_err(|e| e.to_string())
+}
+
 /// 창이 소멸했다(`WindowEvent::Destroyed`) — 그 창의 미룬 최대화를 거둔다. 팝아웃 label 은 재사용되지 않아 남겨도 다른
 /// 창에 입혀지지는 않지만, 거두지 않으면 집합이 숨긴 채 만들었다 거둔 창마다 자란다.
 pub fn forget_deferred_maximize(app: &AppHandle, label: &str) {
@@ -745,12 +826,12 @@ impl RestoreWindows for TauriRestoreWindows {
         } else {
             None
         };
-        let window = match crate::commands::popout::build_hidden_runtime_window(
+        let built = match crate::commands::popout::build_runtime_window(
             &self.app,
             label,
             at.map(first_place),
         ) {
-            Ok(window) => window.as_ref().window(),
+            Ok(built) => built,
             Err(e) => {
                 if let Some(deferred) = deferred {
                     deferred.take(label);
@@ -758,6 +839,9 @@ impl RestoreWindows for TauriRestoreWindows {
                 return Err(e);
             }
         };
+        // 보일지는 모델에 넣은 뒤 정한다([`RestoreWindows::set_shown`]) — 그 전에 온 첫 화면 알림을 받아 둔다.
+        crate::first_paint::hold_window_unarmed(&built);
+        let window = built.as_ref().window();
         if let Some((bounds, at)) = at {
             place(&window, bounds, at);
             // 만든 뒤 트레이 「보이기」가 끼어들어 미룬 최대화를 이미 입혔으면 방금의 위치 세터가 그 최대화를 내렸다(F8)
@@ -802,16 +886,16 @@ impl RestoreWindows for TauriRestoreWindows {
                 usage,
                 |_| false,
                 |label| {
-                    let result = if shown { window.show() } else { window.hide() };
-                    match result {
-                        // 보인 창에만 — 숨은 창을 최대화하면 보였다 숨는다.
-                        Ok(()) if shown => {
-                            apply_deferred_maximize(&window);
-                            true
-                        }
+                    // 보이기는 첫 화면 뒤다 — 미룬 최대화도 그 보이기가 입힌다([`show_placed`]).
+                    if shown {
+                        crate::first_paint::reveal_held(&self.app, label);
+                        return true;
+                    }
+                    crate::first_paint::cancel_hold(&self.app, label);
+                    match window.hide() {
                         Ok(()) => true,
                         Err(e) => {
-                            tracing::warn!(module = "state", label, shown, error = %e, "복원한 창의 보임을 바꾸지 못했다");
+                            tracing::warn!(module = "state", label, error = %e, "복원한 창을 숨기지 못했다");
                             false
                         }
                     }

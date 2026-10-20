@@ -220,6 +220,92 @@ describe('TabBar', () => {
     expect(kinds).toEqual(['tab', 'tab', 'tab-add'])
     expect(screen.getByTestId('tab-add').style.marginLeft).toBe('')
   })
+
+  it('구분선은 그린 이웃 사이마다 있고 · 활성 탭과 맴도는 탭의 양옆에서는 떼지 않고 사라진다 · 활성 면은 활성 탭에만', () => {
+    const tabs = ['a', 'b', 'c', 'd', 'e', 'f'].map(id => ({ id, name: id }))
+    renderBar('b', tabs)
+    // 구분선은 머리 왼쪽 가에 둔다 — 머리 x 의 구분선 = (x 앞 이웃 | x) 사이.
+    const sep = (id: string) => head(id).querySelector<HTMLElement>('[data-testid="tab-separator"]')
+    const separated = () => tabs.map(t => t.id).filter(id => sep(id)?.style.opacity === '1')
+    const has = (id: string, testid: string) => head(id).querySelector(`[data-testid="${testid}"]`) !== null
+    expect(tabs.map(t => sep(t.id) !== null)).toEqual([false, true, true, true, true, true])
+    expect(separated()).toEqual(['d', 'e', 'f'])
+    expect(sep('c')!.style.opacity).toBe('0')
+    expect(tabs.map(t => has(t.id, 'tab-surface'))).toEqual([false, true, false, false, false, false])
+
+    fireEvent.pointerEnter(head('e'))
+    expect(separated()).toEqual(['d'])
+    expect(tabs.map(t => sep(t.id) !== null)).toEqual([false, true, true, true, true, true])
+    expect(has('e', 'tab-hover')).toBe(true)
+
+    // 활성 탭 위 맴돎은 맴돎 면을 따로 그리지 않는다.
+    fireEvent.pointerLeave(head('e'))
+    fireEvent.pointerEnter(head('b'))
+    expect(separated()).toEqual(['d', 'e', 'f'])
+    expect(has('b', 'tab-hover')).toBe(false)
+  })
+
+  // PRD R27 · ADR-0295 결정 1 — 위 모서리 10 · 아래 날개 12 · 구분선 2×16 · 좌우 여백 2.
+  it('활성 탭 모양 = 위 모서리 반지름 10 · 아래 바깥 날개 반지름 12 · 구분선 두께 2 · 높이 16 · 좌우 여백 2', () => {
+    const tabs = ['a', 'b', 'c'].map(id => ({ id, name: id }))
+    renderBar('b', tabs)
+    const part = (id: string, testid: string) => head(id).querySelector<HTMLElement>(`[data-testid="${testid}"]`)!
+
+    expect(part('b', 'tab-surface').style.borderRadius).toBe('10px 10px 0 0')
+    const left = part('b', 'tab-flare-left').style
+    const right = part('b', 'tab-flare-right').style
+    expect([left.width, left.height, left.left, left.right]).toEqual(['12px', '12px', '-12px', ''])
+    expect([right.width, right.height, right.right, right.left]).toEqual(['12px', '12px', '-12px', ''])
+    for (const flare of [left, right]) {
+      expect(flare.background).toContain('transparent 11.5px')
+      expect(flare.background).toMatch(/var\(--tab-active-bg\) 12px/)
+    }
+
+    // 여백 · 두께 · 여백(2 + 2 + 2) 칸이 머리 경계 가운데에 걸린다.
+    const slot = part('c', 'tab-separator')
+    expect([slot.style.width, slot.style.left, slot.style.paddingLeft, slot.style.paddingRight]).toEqual([
+      '6px',
+      '-3px',
+      '2px',
+      '2px',
+    ])
+    expect(slot.style.boxSizing).toBe('border-box')
+    expect(slot.style.alignItems).toBe('center')
+    const line = (slot.firstElementChild as HTMLElement).style
+    expect([line.width, line.height, line.borderRadius]).toEqual(['2px', '16px', '1px'])
+  })
+
+  // Chrome `horizontal_tab_style_views.cc` `GetSeparatorOpacity` · `GetHoverInterpolatedSeparatorOpacity`.
+  it('구분선은 곧바로 사라지고 · 맴돎이 끝난 머리 양옆만 200 ms EASE_IN 으로 나타나며 · 그 뒤와 활성이 옮은 되살아남은 곧바로다', () => {
+    vi.useFakeTimers()
+    try {
+      const tabs = ['a', 'b', 'c', 'd'].map(id => ({ id, name: id }))
+      const bar = renderBar('a', tabs)
+      const sep = (id: string) => head(id).querySelector<HTMLElement>('[data-testid="tab-separator"]')!
+      const FADE_IN = 'opacity 200ms cubic-bezier(0.3333, 0, 0.6667, 0.3333)'
+      const d = sep('d')
+      expect([d.style.opacity, d.style.transition]).toEqual(['1', ''])
+
+      fireEvent.pointerEnter(head('d'))
+      expect(sep('d')).toBe(d)
+      expect([d.style.opacity, d.style.transition]).toEqual(['0', ''])
+
+      fireEvent.pointerLeave(head('d'))
+      expect([d.style.opacity, d.style.transition]).toEqual(['1', FADE_IN])
+      act(() => {
+        vi.advanceTimersByTime(200)
+      })
+      expect([d.style.opacity, d.style.transition]).toEqual(['1', ''])
+
+      // 활성이 b → c 로 옮으면 (a|b) 는 맴돎 없이 곧바로 되살아나고 (c|d) 는 곧바로 사라진다.
+      bar.rerender({ active: 'b' })
+      bar.rerender({ active: 'c' })
+      expect([sep('b').style.opacity, sep('b').style.transition]).toEqual(['1', ''])
+      expect([d.style.opacity, d.style.transition]).toEqual(['0', ''])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
 
 // ── 탭 끌기 그리기 ──

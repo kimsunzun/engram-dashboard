@@ -1,5 +1,5 @@
 //! 데스크톱 창의 OS 규칙 — 창 정체 · 자리와 z 순서 · 보임 · 자리 되돌리기 · Alt+Tab 빼기 · 커서 밑 맨 위 창 ·
-//! 전경 창이 이 프로세스의 것인가.
+//! 창 진단 사실(로그 몫) · 전경 창이 이 프로세스의 것인가.
 //!
 //! 창은 `raw-window-handle` 0.6 의 [`HasWindowHandle`] 로 받고 그 핸들의 변이 맞추기(Windows = `Win32` · 그 밖 =
 //! [`WindowError::Unsupported`])를 이 모듈이 한다 — 부르는 쪽이 변이를 맞추면 그것도 이 crate 밖의 런타임 OS
@@ -9,8 +9,8 @@
 //! ★스레드★ — 창을 바꾸는 함수([`place_window`] · [`hide_window`] · [`move_window`] · [`restore_placement`] ·
 //! [`set_switcher_hidden`])는 그 창을 만든 스레드(메인)에서 부른다. 다른 스레드에서 부르면 Win32 가 그 창
 //! 스레드에 메시지를 보내고 답을 기다린다 — 그 스레드가 부른 쪽을 기다리고 있으면 교착이다. 읽기
-//! ([`NativeWindow::of`] · [`is_window_visible`] · [`top_level_at`] · [`foreground_is_current_process`])는 어느
-//! 스레드에서나 된다.
+//! ([`NativeWindow::of`] · [`is_window_visible`] · [`top_level_at`] · [`describe_window`] ·
+//! [`foreground_is_current_process`])는 어느 스레드에서나 된다.
 
 // ADR-0266
 // ADR-0295
@@ -49,6 +49,13 @@ impl NativeWindow {
     /// 늘 `None` 이다.
     pub fn of(w: &impl HasWindowHandle) -> Option<NativeWindow> {
         raw_of(w).ok().map(NativeWindow)
+    }
+}
+
+/// 로그 몫 — 창 들여다보기 도구(Spy++ 따위)가 쓰는 16진 핸들 값.
+impl fmt::LowerHex for NativeWindow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::LowerHex::fmt(&self.0, f)
     }
 }
 
@@ -161,12 +168,15 @@ pub fn is_window_visible(w: &impl HasWindowHandle) -> bool {
 }
 
 /// 화면 점 `p` 를 품은 맨 위 최상위 창 — z 순서 위에서부터 걸으며 `skip` 을 건너뛰고, 보이고 · 최소화 아니고 ·
-/// 가려지지(DWM cloaked — 다른 가상 데스크톱 따위) 않고 · 클릭이 지나가는 창(`WS_EX_LAYERED` + `WS_EX_TRANSPARENT` —
-/// OS 의 `WindowFromPoint` 도 건너뛴다)이 아닌 첫 창이다. 우리 창인지는 부르는 쪽이 [`NativeWindow::of`] 와
-/// 견준다 — 다른 앱 창 · 바탕화면이 오면 그 자리는 가려진 것이다(PRD R15).
+/// 가려지지(DWM cloaked — 다른 가상 데스크톱 따위) 않고 · 비쳐 보이는 창이 아닌 첫 창이다. 비쳐 보이는 창 = 클릭이
+/// 지나가는 창(`WS_EX_LAYERED` + `WS_EX_TRANSPARENT` — 모든 창) · 다른 앱의 layered 창 중 창 전체 알파가 0 이거나
+/// 색 키가 있는 창이다. 픽셀마다 알파를 주는 다른 앱 layered 창은 가리는 창으로 친다(판정 = `hit_accepts`). 우리
+/// 창인지는 부르는 쪽이 [`NativeWindow::of`] 와 견준다 — 다른 앱 창 · 바탕화면이 오면 그 자리는 가려진 것이다(PRD
+/// R15).
 ///
 /// 「품는다」는 OS 바깥 사각형(`GetWindowRect` — 보이지 않는 크기 조절 테두리 포함)이다. OS 의 적중 판정도 그
-/// 테두리를 그 창으로 친다. `None` = 품은 창이 없다 · Windows 밖.
+/// 테두리를 그 창으로 친다. 단 창 모양(`SetWindowRgn`)이 있는 창은 점이 그 모양 안이어야 한다. `None` = 품은 창이
+/// 없다 · Windows 밖.
 // ADR-0295
 pub fn top_level_at(p: PhysPoint, skip: &[NativeWindow]) -> Option<NativeWindow> {
     #[cfg(windows)]
@@ -176,6 +186,51 @@ pub fn top_level_at(p: PhysPoint, skip: &[NativeWindow]) -> Option<NativeWindow>
     #[cfg(not(windows))]
     {
         let _ = (p, skip);
+        None
+    }
+}
+
+/// layered 창(Win32 `WS_EX_LAYERED`)이 얼마나 비쳐 보이는가 — OS 에서 읽을 수 있는 만큼.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayeredKind {
+    NotLayered,
+    /// `SetLayeredWindowAttributes` 로 준 창 전체 알파 — `LWA_ALPHA` 없이 준 창은 255(불투명)다.
+    Alpha(u8),
+    /// `SetLayeredWindowAttributes` 의 색 키(`LWA_COLORKEY`) — 그 색 픽셀은 그려지지 않고 클릭도 지나간다. 창 전체
+    /// 알파가 함께 있어도 이것이다.
+    ColorKey,
+    /// 속성을 못 읽었다 — 픽셀마다 알파를 주는 `UpdateLayeredWindow` 창이면 OS 가 답하지 않는다(MS
+    /// `GetLayeredWindowAttributes` 문서). 속성을 아직 안 준 layered 창도 여기다(실측). 어느 픽셀이 비었는지는 모른다.
+    PerPixel,
+}
+
+/// 창 하나의 진단 사실 — [`describe_window`] 의 답(로그 몫).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowFacts {
+    /// 그 창을 만든 프로세스 — 0 = 그 사이 사라졌다.
+    pub pid: u32,
+    /// 창 클래스 이름 — 못 읽었으면 빈 문자열.
+    pub class: String,
+    /// 확장 스타일(Win32 `GWL_EXSTYLE` 값) — 못 읽었으면 0.
+    pub ex_style: u32,
+    /// 확장 스타일을 못 읽었으면 `NotLayered` 다.
+    pub layered: LayeredKind,
+    /// 오른쪽에서 왼쪽 배치(`WS_EX_LAYOUTRTL`) — 창 모양 좌표를 오른쪽 위에서 잰다.
+    pub rtl: bool,
+    /// 창 모양(Win32 `SetWindowRgn`)이 있다.
+    pub has_region: bool,
+}
+
+/// 그 창의 진단 사실 — 창에 메시지를 보내지 않는 조회뿐이라 응답 없는 다른 앱 창에도 막히지 않는다. `None` =
+/// 그 창이 없다 · Windows 밖.
+pub fn describe_window(w: NativeWindow) -> Option<WindowFacts> {
+    #[cfg(windows)]
+    {
+        win::describe(w)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = w;
         None
     }
 }
@@ -299,6 +354,40 @@ fn contains(r: PhysRect, p: PhysPoint) -> bool {
     p.x >= r.x && p.x < r.x + r.width && p.y >= r.y && p.y < r.y + r.height
 }
 
+/// 점과 그 창의 창 모양(Win32 `SetWindowRgn`) — [`hit_accepts`] 의 재료.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegionHit {
+    /// 창 모양이 없다(또는 못 읽었다) — 바깥 사각형 전체가 그 창이다.
+    NoRegion,
+    Inside,
+    Outside,
+}
+
+/// 점을 바깥 사각형에 품은(보이고 · 최소화 아니고 · 가려지지 않은) 창을 [`top_level_at`] 의 답으로 치는가 — OS 의
+/// 적중 판정을 읽을 수 있는 만큼 따른다. `ours` = 이 프로세스의 창 · `transparent` = `WS_EX_TRANSPARENT`.
+///
+/// - layered + `WS_EX_TRANSPARENT` 창은 건너뛴다 — 클릭이 지나간다(MS 「Layered Windows」 · OS `WindowFromPoint` 도
+///   건너뛴다). `WS_EX_TRANSPARENT` 만 켜진 창은 가리는 창이다 — 그 깃발 혼자는 그리기 순서일 뿐 클릭은 그 창이 받는다(실측 —
+///   `WindowFromPoint` 와 견준 시험 `transparent_only_window_still_takes_the_click`).
+/// - 다른 앱 layered 창은 창 전체 알파 0 · 색 키면 건너뛴다. OS 는 알파 0 · 색 키 픽셀에서만 클릭을 지나가게 하는데
+///   (MS 「Layered Windows」) 픽셀은 못 읽어 색 키 창은 창 전체를 비친 것으로 친다 — 대가: 그 창의 칠해진 자리
+///   밑도 가려지지 않은 자리다. 늘 위인 녹화 영역 틀(화면 녹화 도구 따위)이 그 밑 우리 창에 붙지 못하게 하던 결함
+///   (2026-10-19)을 이 갈래로 푼다 — 그 틀이 픽셀마다 알파 창이면 풀리지 않는데 어느 쪽인지 재지 않았다.
+/// - 그 밖의 다른 앱 layered 창(알파 1 이상 · 픽셀마다 알파)은 가리는 창이다 — 불투명하게 그리는 layered 앱이 많다
+///   (WPF `AllowsTransparency` · Electron `transparent` · Qt 반투명 창). 다 건너뛰면 그 앱에 가린 우리 창에 붙고 750 ms
+///   머묾이 그 창을 올린다(PRD R15 · AC43). Chromium `TopMostFinder`(Chrome 70 `window_finder_win.cc`)는 layered ·
+///   `WS_EX_TRANSPARENT` 중 하나만 켜져도 건너뛰는데, 이 대가를 받지 않으려고 따르지 않는다.
+/// - 우리 창은 클릭 통과 창만 건너뛴다 — tao 는 커서 무시 창에만 layered 를 켠다(tao 0.35.3 `window_state.rs`
+///   `IGNORE_CURSOR_EVENT`).
+/// - 창 모양이 있으면 점이 그 안이어야 한다 — 모양 밖은 그 창이 그리지도 클릭을 받지도 않는다(Chromium 같은 곳).
+// ADR-0295
+fn hit_accepts(ours: bool, layered: LayeredKind, transparent: bool, region: RegionHit) -> bool {
+    let click_through = layered != LayeredKind::NotLayered && transparent;
+    let see_through = click_through
+        || (!ours && matches!(layered, LayeredKind::Alpha(0) | LayeredKind::ColorKey));
+    !see_through && region != RegionHit::Outside
+}
+
 #[cfg(windows)]
 mod win {
     use std::ffi::c_void;
@@ -308,21 +397,24 @@ mod win {
     use windows::Win32::Foundation::{GetLastError, SetLastError, HWND, RECT, WIN32_ERROR};
     use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
     use windows::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MonitorFromRect, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        CreateRectRgn, DeleteObject, GetMonitorInfoW, GetWindowRgn, MonitorFromRect, PtInRegion,
+        HRGN, MONITORINFO, MONITOR_DEFAULTTONEAREST, RGN_ERROR,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetTopWindow, GetWindow, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, IsIconic,
-        IsWindow, IsWindowVisible, SetForegroundWindow, SetWindowLongPtrW, SetWindowPlacement,
-        SetWindowPos, ShowWindow, GWL_EXSTYLE, GW_HWNDNEXT, HWND_TOP, HWND_TOPMOST,
-        SET_WINDOW_POS_FLAGS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-        SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWMAXIMIZED, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
-        WINDOWPLACEMENT, WINDOWPLACEMENT_FLAGS, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
+        GetClassNameW, GetLayeredWindowAttributes, GetTopWindow, GetWindow, GetWindowLongPtrW,
+        GetWindowPlacement, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindow,
+        IsWindowVisible, SetForegroundWindow, SetWindowLongPtrW, SetWindowPlacement, SetWindowPos,
+        ShowWindow, GWL_EXSTYLE, GW_HWNDNEXT, HWND_TOP, HWND_TOPMOST,
+        LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA, LWA_COLORKEY, SET_WINDOW_POS_FLAGS,
+        SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+        SW_HIDE, SW_SHOWMAXIMIZED, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, WINDOWPLACEMENT,
+        WINDOWPLACEMENT_FLAGS, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_LAYOUTRTL, WS_EX_TOOLWINDOW,
         WS_EX_TRANSPARENT,
     };
 
     use super::{
-        contains, raw_of, screen_to_workspace, switcher_ex_style, NativeWindow, PhysPoint,
-        PhysRect, WindowError, ZOrder,
+        contains, hit_accepts, raw_of, screen_to_workspace, switcher_ex_style, LayeredKind,
+        NativeWindow, PhysPoint, PhysRect, RegionHit, WindowError, WindowFacts, ZOrder,
     };
 
     /// 최상위 창 z 걷기의 상한 — MS 는 `GetWindow` 로 걸으면 그동안 z 순서가 바뀌어 끝없이 돌 수 있다고 적는다
@@ -560,6 +652,79 @@ mod win {
             && v != 0
     }
 
+    /// 그 창을 만든 프로세스 — 사라진 창이면 0.
+    fn pid_of(hwnd: HWND) -> u32 {
+        let mut pid = 0u32;
+        // SAFETY: 살아 있는 지역 변수에 PID 를 쓰는 조회 — 사라진 창이면 0 으로 남는다.
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+        pid
+    }
+
+    /// 창 모양의 사본 — `GetWindowRgn` 이 부르는 쪽이 만든 영역에 베껴 준다. 버리면 지운다.
+    struct Region(HRGN);
+
+    impl Drop for Region {
+        fn drop(&mut self) {
+            // SAFETY: 이 값이 만든 영역이고 창에 넘기지 않았다(베껴 받기만 했다).
+            let _ = unsafe { DeleteObject(self.0) };
+        }
+    }
+
+    /// 그 창의 창 모양 — 없거나 · 못 읽었거나 · 받을 영역을 못 만들었으면 `None`.
+    fn window_region(hwnd: HWND) -> Option<Region> {
+        // SAFETY: 값 인자뿐이다 — 실패하면 null.
+        let rgn = unsafe { CreateRectRgn(0, 0, 0, 0) };
+        if rgn.is_invalid() {
+            return None;
+        }
+        let rgn = Region(rgn);
+        // SAFETY: 살아 있는 영역 핸들 — 창이 사라졌거나 모양이 없으면 `RGN_ERROR`.
+        (unsafe { GetWindowRgn(hwnd, rgn.0) } != RGN_ERROR).then_some(rgn)
+    }
+
+    fn region_hit(hwnd: HWND, outer: RECT, rtl: bool, p: PhysPoint) -> RegionHit {
+        let Some(rgn) = window_region(hwnd) else {
+            return RegionHit::NoRegion;
+        };
+        // 창 모양 좌표는 바깥 사각형의 왼쪽 위가 0 이다(MS `GetWindowRgn` 문서). `WS_EX_LAYOUTRTL` 창은 오른쪽 위가 0
+        //   이고 x 가 왼쪽으로 는다 — 맨 오른쪽 픽셀이 x = 0(실측 — OS 적중 판정 `WindowFromPoint` 와 견준 시험
+        //   `top_level_at_mirrors_the_region_of_rtl_windows`). DPI 인식이 다른 다른 앱 창의 모양이 그 창의 논리
+        //   좌표로 오는지는 재지 않았다 — 그러면 그 창의 모양 판정이 배율만큼 어긋난다.
+        let x = if rtl {
+            outer.right - 1 - p.x
+        } else {
+            p.x - outer.left
+        };
+        // SAFETY: 살아 있는 영역 핸들과 값 인자.
+        if unsafe { PtInRegion(rgn.0, x, p.y - outer.top) }.as_bool() {
+            RegionHit::Inside
+        } else {
+            RegionHit::Outside
+        }
+    }
+
+    fn layered_kind(hwnd: HWND, ex: u32) -> LayeredKind {
+        if ex & WS_EX_LAYERED.0 == 0 {
+            return LayeredKind::NotLayered;
+        }
+        let mut alpha = 0u8;
+        let mut flags = LAYERED_WINDOW_ATTRIBUTES_FLAGS(0);
+        // 다른 프로세스의 창에도 답하는지는 재지 않았다 — 못 받으면 `PerPixel` 이라 가리는 창(PRD R15 쪽)으로 떨어진다.
+        // SAFETY: 살아 있는 지역 변수에 쓰는 조회다(색 키 값은 받지 않는다). 사라진 창이면 실패한다.
+        if unsafe { GetLayeredWindowAttributes(hwnd, None, Some(&mut alpha), Some(&mut flags)) }
+            .is_err()
+        {
+            return LayeredKind::PerPixel;
+        }
+        if flags.0 & LWA_COLORKEY.0 != 0 {
+            LayeredKind::ColorKey
+        } else if flags.0 & LWA_ALPHA.0 != 0 {
+            LayeredKind::Alpha(alpha)
+        } else {
+            LayeredKind::Alpha(u8::MAX)
+        }
+    }
+
     fn candidate(hwnd: HWND, p: PhysPoint) -> bool {
         let mut r = RECT::default();
         // SAFETY: 걷는 동안 사라진 창이면 조회가 실패하거나 거짓을 돌려준다 — 그 창은 건너뛴다.
@@ -571,13 +736,39 @@ mod win {
                 return false;
             }
         }
-        let click_through = WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0;
-        match ex_style(hwnd) {
-            Ok(ex) if ex & click_through == click_through => return false,
-            Ok(_) => {}
-            Err(_) => return false,
+        let Ok(ex) = ex_style(hwnd) else {
+            return false;
+        };
+        let ours = pid_of(hwnd) == std::process::id();
+        let transparent = ex & WS_EX_TRANSPARENT.0 != 0;
+        let rtl = ex & WS_EX_LAYOUTRTL.0 != 0;
+        hit_accepts(
+            ours,
+            layered_kind(hwnd, ex),
+            transparent,
+            region_hit(hwnd, r, rtl, p),
+        ) && !cloaked(hwnd)
+    }
+
+    pub(super) fn describe(w: NativeWindow) -> Option<WindowFacts> {
+        let hwnd = HWND(w.0 as *mut c_void);
+        // SAFETY: 값만 보는 조회 — 사라진 핸들이면 거짓이다.
+        if !unsafe { IsWindow(hwnd) }.as_bool() {
+            return None;
         }
-        !cloaked(hwnd)
+        // 창 클래스 이름은 256 자를 넘지 않는다(MS `WNDCLASSEXW` 문서).
+        let mut class = [0u16; 256];
+        // SAFETY: 살아 있는 지역 버퍼 — 돌려준 길이만큼 썼다(실패면 0).
+        let len = unsafe { GetClassNameW(hwnd, &mut class) }.max(0) as usize;
+        let ex = ex_style(hwnd).unwrap_or(0);
+        Some(WindowFacts {
+            pid: pid_of(hwnd),
+            class: String::from_utf16_lossy(&class[..len.min(class.len())]),
+            ex_style: ex,
+            layered: layered_kind(hwnd, ex),
+            rtl: ex & WS_EX_LAYOUTRTL.0 != 0,
+            has_region: window_region(hwnd).is_some(),
+        })
     }
 
     pub(super) fn top_level_at(p: PhysPoint, skip: &[NativeWindow]) -> Option<NativeWindow> {
@@ -716,6 +907,47 @@ mod tests {
         assert!(!contains(r, PhysPoint { x: 9, y: 20 }));
     }
 
+    #[test]
+    fn hit_accepts_skips_see_through_foreign_windows_and_points_outside_the_region() {
+        use LayeredKind::{Alpha, ColorKey, NotLayered, PerPixel};
+        use RegionHit::{Inside, NoRegion, Outside};
+        // (ours, layered, transparent, region, 기대)
+        let cases = [
+            // 다른 앱 창
+            (false, NotLayered, false, NoRegion, true),
+            (false, NotLayered, true, NoRegion, true),
+            (false, Alpha(255), false, NoRegion, true),
+            (false, Alpha(1), false, NoRegion, true),
+            (false, Alpha(0), false, NoRegion, false),
+            (false, ColorKey, false, NoRegion, false),
+            (false, PerPixel, false, NoRegion, true),
+            (false, Alpha(255), true, NoRegion, false),
+            (false, PerPixel, true, NoRegion, false),
+            // 우리 창 — 클릭 통과만 건너뛴다
+            (true, NotLayered, false, NoRegion, true),
+            (true, NotLayered, true, NoRegion, true),
+            (true, Alpha(0), false, NoRegion, true),
+            (true, ColorKey, false, NoRegion, true),
+            (true, PerPixel, false, NoRegion, true),
+            (true, Alpha(255), true, NoRegion, false),
+            (true, PerPixel, true, NoRegion, false),
+            // 창 모양
+            (false, NotLayered, false, Inside, true),
+            (false, NotLayered, false, Outside, false),
+            (false, Alpha(255), false, Inside, true),
+            (false, ColorKey, false, Inside, false),
+            (true, NotLayered, false, Inside, true),
+            (true, NotLayered, false, Outside, false),
+        ];
+        for (ours, layered, transparent, region, want) in cases {
+            assert_eq!(
+                hit_accepts(ours, layered, transparent, region),
+                want,
+                "ours={ours} layered={layered:?} transparent={transparent} region={region:?}"
+            );
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn place_plan_maps_each_argument_to_one_flag() {
@@ -746,10 +978,70 @@ mod tests {
     mod real {
         use super::super::*;
         use crate::test_window::TestWindow;
+        use windows::core::w;
+        use windows::Win32::Foundation::HWND;
         use windows::Win32::UI::WindowsAndMessaging::{
-            GetWindowLongPtrW, GetWindowRect, ShowWindow, GWL_EXSTYLE, SW_SHOWMINNOACTIVE,
-            SW_SHOWNOACTIVATE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+            CreateWindowExW, DestroyWindow, GetWindowLongPtrW, GetWindowRect, SetWindowPos,
+            ShowWindow, GWL_EXSTYLE, HWND_TOPMOST, SWP_NOACTIVATE, SWP_SHOWWINDOW,
+            SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE, WINDOW_EX_STYLE, WINDOW_STYLE, WS_EX_APPWINDOW,
+            WS_EX_TOOLWINDOW, WS_POPUP,
         };
+
+        /// 확장 스타일을 고르는 테두리 없는 도구 창 — [`TestWindow`] 는 확장 스타일을 못 고른다. `rect` 에 늘 위로
+        /// 활성 없이 보인다. 버리면 부순다.
+        struct StyledWindow(HWND);
+
+        impl StyledWindow {
+            fn new(ex: WINDOW_EX_STYLE, rect: PhysRect) -> Self {
+                // `SS_NOTIFY`(이 crate 가 켜지 않은 `Win32_UI_Controls` 의 상수) — 없으면 STATIC 이 OS 적중 판정에
+                //   답하지 않아 `WindowFromPoint` 가 그 창을 지나간다(실측).
+                const SS_NOTIFY: WINDOW_STYLE = WINDOW_STYLE(0x100);
+                // SAFETY: 시스템 클래스 이름 · 값 인자뿐이다. 인스턴스 · 부모 · 메뉴 없음.
+                let hwnd = unsafe {
+                    CreateWindowExW(
+                        WS_EX_TOOLWINDOW | ex,
+                        w!("STATIC"),
+                        w!("engram-platform-test"),
+                        WS_POPUP | SS_NOTIFY,
+                        rect.x,
+                        rect.y,
+                        rect.width,
+                        rect.height,
+                        HWND::default(),
+                        None,
+                        None,
+                        None,
+                    )
+                }
+                .expect("시험 창 짓기");
+                let w = Self(hwnd);
+                // SAFETY: 이 값이 지은 살아 있는 창과 값 인자.
+                unsafe {
+                    SetWindowPos(
+                        hwnd,
+                        HWND_TOPMOST,
+                        rect.x,
+                        rect.y,
+                        rect.width,
+                        rect.height,
+                        SWP_SHOWWINDOW | SWP_NOACTIVATE,
+                    )
+                }
+                .expect("시험 창 보이기");
+                w
+            }
+
+            fn native(&self) -> NativeWindow {
+                NativeWindow(self.0 .0 as isize)
+            }
+        }
+
+        impl Drop for StyledWindow {
+            fn drop(&mut self) {
+                // SAFETY: 이 값이 지은 창.
+                let _ = unsafe { DestroyWindow(self.0) };
+            }
+        }
 
         #[test]
         fn native_window_of_reads_the_win32_handle() {
@@ -900,6 +1192,161 @@ mod tests {
                 let _ = ShowWindow(above.hwnd(), SW_SHOWNOACTIVATE);
             }
             assert_eq!(top_level_at(p, &[]), Some(a));
+        }
+
+        #[test]
+        fn top_level_at_skips_points_outside_the_window_region() {
+            use windows::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn};
+            let below = TestWindow::new(true);
+            let above = TestWindow::new(true);
+            let rect = PhysRect {
+                x: -25000,
+                y: -25000,
+                width: 200,
+                height: 200,
+            };
+            place_window(&below, Some(rect), ZOrder::Topmost, true, false).unwrap();
+            place_window(&above, Some(rect), ZOrder::Topmost, true, false).unwrap();
+            let (a, b) = (
+                NativeWindow::of(&above).unwrap(),
+                NativeWindow::of(&below).unwrap(),
+            );
+            assert!(!describe_window(a).unwrap().has_region);
+            // SAFETY: 이 시험이 쥔 살아 있는 창 — 성공하면 영역은 OS 것이 된다(지우지 않는다).
+            unsafe {
+                let rgn = CreateRectRgn(0, 0, 100, 100);
+                assert_ne!(SetWindowRgn(above.hwnd(), rgn, false), 0);
+            }
+            let inside = PhysPoint {
+                x: rect.x + 50,
+                y: rect.y + 50,
+            };
+            let outside = PhysPoint {
+                x: rect.x + 150,
+                y: rect.y + 150,
+            };
+            assert_eq!(top_level_at(inside, &[]), Some(a), "모양 안");
+            assert_eq!(top_level_at(outside, &[]), Some(b), "모양 밖이면 밑 창");
+            let facts = describe_window(a).unwrap();
+            assert!(facts.has_region);
+            assert_eq!(facts.pid, std::process::id());
+            assert!(
+                facts.class.eq_ignore_ascii_case("static"),
+                "{}",
+                facts.class
+            );
+        }
+
+        #[test]
+        fn top_level_at_mirrors_the_region_of_rtl_windows() {
+            use windows::Win32::Foundation::POINT;
+            use windows::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn};
+            use windows::Win32::UI::WindowsAndMessaging::{WindowFromPoint, WS_EX_LAYOUTRTL};
+            let rect = PhysRect {
+                x: -26000,
+                y: -26000,
+                width: 200,
+                height: 200,
+            };
+            for (ex, rtl) in [(WINDOW_EX_STYLE(0), false), (WS_EX_LAYOUTRTL, true)] {
+                let w = StyledWindow::new(ex, rect);
+                // SAFETY: 이 시험이 쥔 살아 있는 창 — 성공하면 영역은 OS 것이 된다(지우지 않는다).
+                unsafe {
+                    assert_ne!(SetWindowRgn(w.0, CreateRectRgn(0, 0, 100, 200), false), 0);
+                }
+                assert_eq!(describe_window(w.native()).unwrap().rtl, rtl);
+                // 모양 x [0, 100) — 왼쪽 배치면 왼쪽 절반 · 오른쪽 배치면 오른쪽 절반이 그 창이다.
+                for dx in [0, 99, 100, 199] {
+                    let p = PhysPoint {
+                        x: rect.x + dx,
+                        y: rect.y + 50,
+                    };
+                    let want = (dx < 100) != rtl;
+                    // SAFETY: 값 인자 조회.
+                    let os_hit = unsafe { WindowFromPoint(POINT { x: p.x, y: p.y }) } == w.0;
+                    assert_eq!(os_hit, want, "OS 적중 판정 rtl={rtl} dx={dx}");
+                    assert_eq!(
+                        top_level_at(p, &[]) == Some(w.native()),
+                        want,
+                        "rtl={rtl} dx={dx}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn transparent_only_window_still_takes_the_click() {
+            use windows::Win32::Foundation::POINT;
+            use windows::Win32::UI::WindowsAndMessaging::{WindowFromPoint, WS_EX_TRANSPARENT};
+            let rect = PhysRect {
+                x: -28000,
+                y: -28000,
+                width: 120,
+                height: 90,
+            };
+            let w = StyledWindow::new(WS_EX_TRANSPARENT, rect);
+            let p = PhysPoint {
+                x: rect.x + 10,
+                y: rect.y + 10,
+            };
+            // SAFETY: 값 인자 조회.
+            let os_hit = unsafe { WindowFromPoint(POINT { x: p.x, y: p.y }) } == w.0;
+            assert!(os_hit, "OS 적중 판정");
+            assert_eq!(top_level_at(p, &[]), Some(w.native()));
+        }
+
+        #[test]
+        fn describe_window_reads_layered_attributes() {
+            use windows::Win32::Foundation::COLORREF;
+            use windows::Win32::UI::WindowsAndMessaging::{
+                SetLayeredWindowAttributes, LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA,
+                LWA_COLORKEY, WS_EX_LAYERED,
+            };
+            let rect = PhysRect {
+                x: -27000,
+                y: -27000,
+                width: 120,
+                height: 90,
+            };
+            let plain = StyledWindow::new(WINDOW_EX_STYLE(0), rect);
+            assert_eq!(
+                describe_window(plain.native()).unwrap().layered,
+                LayeredKind::NotLayered
+            );
+            drop(plain);
+            let w = StyledWindow::new(WS_EX_LAYERED, rect);
+            assert_eq!(
+                describe_window(w.native()).unwrap().layered,
+                LayeredKind::PerPixel,
+                "속성을 아직 안 준 layered 창"
+            );
+            let cases = [
+                (LWA_ALPHA, 0, LayeredKind::Alpha(0)),
+                (LWA_ALPHA, 128, LayeredKind::Alpha(128)),
+                (
+                    LAYERED_WINDOW_ATTRIBUTES_FLAGS(0),
+                    0,
+                    LayeredKind::Alpha(255),
+                ),
+                (LWA_COLORKEY, 255, LayeredKind::ColorKey),
+                (LWA_ALPHA | LWA_COLORKEY, 0, LayeredKind::ColorKey),
+            ];
+            for (flags, alpha, want) in cases {
+                // SAFETY: 이 시험이 쥔 살아 있는 layered 창과 값 인자.
+                unsafe { SetLayeredWindowAttributes(w.0, COLORREF(0), alpha, flags) }
+                    .expect("layered 속성");
+                assert_eq!(
+                    describe_window(w.native()).unwrap().layered,
+                    want,
+                    "flags={flags:?} alpha={alpha}"
+                );
+            }
+            // 우리 창은 클릭 통과만 건너뛴다 — 색 키 창도 답이다(`hit_accepts`).
+            let p = PhysPoint {
+                x: rect.x + 10,
+                y: rect.y + 10,
+            };
+            assert_eq!(top_level_at(p, &[]), Some(w.native()));
         }
 
         /// 보통(도구 아닌) 창을 화면 안에 보이므로 보는 사람 화면에 잠깐 나온다 — 데스크톱 세션에서 손으로 돌린다.

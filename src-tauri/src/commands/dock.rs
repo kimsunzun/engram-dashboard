@@ -17,7 +17,7 @@ use crate::dock::DockState;
 use crate::layout::apply;
 use crate::layout::chrome::DockChrome;
 use crate::layout::{LabelSource, LayoutState};
-use crate::webview_env::WebviewEnv;
+use crate::webview_env::{Backdrop, WebviewEnv};
 
 /// 창 웹뷰가 탭 끌기 영역 · 캔버스 원점을 알린다(동기 · 측정) — `invoke('report_dock_chrome', { chrome })`. 계약은
 /// [`DockChrome`] 문서. 대기 창 명부의 창이면 모델 대신 명부에 적는다(TRD §2-5). 탭 모델에도 명부에도 없는 창이면
@@ -260,6 +260,7 @@ fn build_overlay(app: &AppHandle) {
             .shadow(false)
             .resizable(false)
             .always_on_top(true),
+            Backdrop::Unpainted,
         )
         .build();
     let window = match built {

@@ -531,7 +531,9 @@ pub trait RestoreWindows: Send + Sync {
     /// 않고([`Self::record_placement`] 포함) 다음 보이기가 다시 입힌다.
     fn place_main(&self, at: Option<(WindowBounds, Landing)>, maximized: bool);
     /// 보이거나(`true`) 숨기고 사용량 관심에 그 보임을 알린다 — 트레이 보이기 · 숨기기와 같은 차례다(ADR-0229 ·
-    /// `tray::actions::for_each_ui_window`). 보일 때 미뤄 둔 최대화가 있으면 입힌다. 창이 없으면 아무것도 안 한다.
+    /// `tray::actions::for_each_ui_window`). 보이기는 그 창의 첫 화면 뒤다(알림이 이미 왔으면 곧바로 · 오지 않으면 시한에
+    /// — `first_paint`) — 그 보이기가 미뤄 둔 최대화를 입힌다. 보이기는 활성화해 그 창을 앞에 둔다
+    /// (`placement::show_placed`). 숨기면 그 첫 화면 기다림을 거둔다. 창이 없으면 아무것도 안 한다.
     fn set_shown(&self, label: &str, shown: bool);
     /// 그 창의 지금 자리를 모델에 적는다 — 창이 모델에 든 뒤에 부른다(그 전의 `Moved` 는 버려진다). 최대화를 미뤄
     /// 둔 동안의 창은 적지 않는다.
@@ -684,29 +686,49 @@ impl RestoreCoordinator {
     // ①–④. `Err` = 커밋 전 실패 — 만든 창은 거뒀다.
     fn accept(&self, ports: &RestorePorts, copy: &CrashCopy) -> Result<u32, String> {
         let prepared = self.prepare(copy)?;
-        // 포커스는 창을 하나라도 만지기 전에 읽는다 — 보인 창이 활성화를 가져간 뒤에 읽으면 답 전에 다른 앱이 앞에
-        //   있었던 것을 놓친다.
+        // 포커스는 창을 하나라도 만지기 전(② 앞)에 읽는다 — 숨긴 채 지은 팝아웃(`focused(true)`)이 포커스를 가져간
+        //   뒤에 읽으면 답 전에 다른 앱이 앞에 있었던 것을 놓칠 수 있다(방어 — [미검 — 추론]).
         let desktop = Desktop {
             app_had_focus: ports.windows.app_has_focus(),
             monitors: ports.windows.monitors(),
         };
+        // 새 팝아웃은 모델에 들기 전에 만들어 그 창의 바탕 · 첫 테마 · 첫 당기기가 사본의 창 테마를 보게 미리 정한다 —
+        //   안 정하면 전역 테마로 한 번 그려진다. 커밋 뒤에는 모델이 답하므로 성패와 무관하게 거둔다.
+        // ADR-0265
+        for (label, attrs) in &prepared.popouts {
+            ports.themes.stage(label, attrs.theme);
+        }
+        let unstage = |popouts: &[(WindowLabel, WindowAttrs)]| {
+            for (label, _) in popouts {
+                ports.themes.unstage(label);
+            }
+        };
         let created =
-            open_hidden_popouts(ports.windows.as_ref(), &prepared.popouts, &desktop.monitors)?;
+            match open_hidden_popouts(ports.windows.as_ref(), &prepared.popouts, &desktop.monitors)
+            {
+                Ok(created) => created,
+                Err(reason) => {
+                    unstage(&prepared.popouts);
+                    return Err(reason);
+                }
+            };
 
         let Prepared {
             layout,
             main,
             popouts,
         } = prepared;
-        let committed = match self.commit(ports, layout) {
+        let committed = self.commit(ports, layout);
+        unstage(&popouts);
+        let committed = match committed {
             Ok(committed) => committed,
             Err(reason) => {
                 destroy_all(ports.windows.as_ref(), &created, Leftover::HiddenRestored);
                 return Err(reason);
             }
         };
-        // 사본의 창 테마가 모델에 들었다 — 떠 있는 main 과, 커밋 전(모델에 들기 전)에 첫 값을 당긴 새 팝아웃이 그 값을
-        //   받게 민다. 보이기(④) 앞이라 새 팝아웃이 옛 값으로 비치지 않는다(TRD S21-storage §6-7).
+        // 사본의 창 테마가 모델에 들었다 — 떠 있는 main 이 그 값을 받게 민다. 새 팝아웃은 ② 앞에서 정한 값으로 이미
+        //   칠해지고 당겼다(TRD S21-storage §6-7).
         // ADR-0265
         ports.themes.push();
 
@@ -826,36 +848,43 @@ impl RestoreCoordinator {
         windows.record_placement(MAIN_WINDOW_LABEL);
 
         let main_shown = windows.visibility(MAIN_WINDOW_LABEL) != Some(false);
-        let mut vanished = Vec::new();
-        for (label, attrs) in popouts {
-            // ② 와 ③ 사이에 트레이 「보이기」가 드러낸 창을 사용자가 닫았으면 그 닫기 요청 · `Destroyed` 정리는 모델에
-            //   아직 없던 label 이라 묘비만 남기고 지나갔다(③ 의 채택은 묘비를 보지 않는다) — 여기서 안 지우면 OS 창
-            //   없는 창이 모델에 남는다.
-            if windows.visibility(label).is_none() {
-                vanished.push(label.clone());
-                continue;
-            }
+        // ② 와 ③ 사이에 트레이 「보이기」가 드러낸 창을 사용자가 닫았으면 그 닫기 요청 · `Destroyed` 정리는 모델에 아직
+        //   없던 label 이라 묘비만 남기고 지나갔다(③ 의 채택은 묘비를 보지 않는다) — 여기서 안 지우면 OS 창 없는 창이
+        //   모델에 남는다.
+        let (vanished, live): (Vec<_>, Vec<_>) = popouts
+            .iter()
+            .partition(|(label, _)| windows.visibility(label).is_none());
+        let kept = live.len();
+        // main 에 먼저 포커스를 주고, 복원한 팝아웃은 첫 화면 때 보이며 그 위로 온다(사용자 결정 2026-10-20 — main 은
+        //   크다 · TRD S21-storage §6-7 ④). 팝아웃의 보이기는 활성화라 그 첫 화면이 이미 왔어도 이 뒤에 오므로 어느
+        //   차례로 와도 팝아웃이 위다(`set_shown` → `first_paint::reveal_held`). 포커스 주기는 숨긴 채 지은 팝아웃이
+        //   가져간 포커스를 「복원」을 누른 사람 앞의 main 으로 되돌린다(`focused(true)` — `commands::popout` · 트레이
+        //   보이기가 main 을 마지막에 두는 것과 같은 까닭 — ADR-0229). 남은 팝아웃이 없으면 끌어오지 않는다 —
+        //   지은 것이 없었으면 포커스가 옮지 않았고, 사라졌으면 사람이 이미 손댔다.
+        // ★답 전에 우리 창이 포커스를 가졌고 지금도 가졌을 때만★ — 다른 앱이 앞에 있으면 포커스 주기가 그 앱에 가짜
+        //   Alt 키를 쏴 포커스를 뺏는다(tao 0.35.3 Windows `set_focus` → `force_window_active`). LLM 이 뒤에서 답하는
+        //   동안 사람은 다른 앱에서 일하고 있을 수 있다. 답 전의 표본만으로는 ②–④ 사이에 사람이 다른 앱으로 옮긴 것을
+        //   놓친다 — 부르기 바로 앞에서 다시 읽는다(앞의 표본은 그대로 쓴다 — 숨긴 채 지은 팝아웃이 포커스를 가져갔다면 이
+        //   값만으로는 답 전에 다른 앱이 앞에 있었던 것을 놓친다 · 방어 — [미검 — 추론]).
+        if desktop.app_had_focus && main_shown && kept > 0 && windows.app_has_focus() {
+            windows.focus(MAIN_WINDOW_LABEL);
+        }
+        for (label, attrs) in live {
             windows.set_shown(label, main_shown);
             // 숨긴 채 두는 최대화 팝아웃은 적지 않는다 — 그 최대화는 ② 가 보일 때로 미뤘고, 지금 자리(보통)를 적으면
-            //   모델에서 사본의 최대화가 지워진다. 보였으면 `set_shown` 이 최대화를 입혔다.
+            //   모델에서 사본의 최대화가 지워진다. 보일 창은 첫 화면의 보이기가 최대화를 입히고 자리를 적는다 — 그 전의
+            //   이 적기는 미룸이 막는다(`placement::record`).
             if main_shown || !attrs.maximized {
                 windows.record_placement(label);
             }
         }
+        let vanished: Vec<WindowLabel> = vanished
+            .into_iter()
+            .map(|(label, _)| label.clone())
+            .collect();
         self.forget_vanished(ports, &vanished);
         // 그 창의 `Destroyed` 정리는 이미 모델에 없는 label 이라 재계산 · 묘비만 한다(`popout::drop_window_in_model`).
         destroy_all(windows, &removed, Leftover::Replaced);
-        let kept = popouts.len() - vanished.len();
-        // 보인 팝아웃마다 포커스를 가져갔다 — 「복원」을 누른 사람 앞에 main 을 되돌린다(트레이 보이기가 main 을
-        //   마지막에 두는 것과 같은 까닭 — ADR-0229). 보인 창이 없으면 포커스가 옮지 않았으니 끌어오지 않는다.
-        // ★답 전에 우리 창이 포커스를 가졌고 지금도 가졌을 때만★ — 다른 앱이 앞에 있으면 포커스 주기가 그 앱에 가짜
-        //   Alt 키를 쏴 포커스를 뺏는다(tao 0.35.3 Windows `set_focus` → `force_window_active`). LLM 이 뒤에서 답하는
-        //   동안 사람은 다른 앱에서 일하고 있을 수 있다. 답 전의 표본만으로는 ②–④ 사이에 사람이 다른 앱으로 옮긴 것을
-        //   놓친다 — 부르기 바로 앞에서 다시 읽는다(앞의 표본은 그대로 쓴다 — 보인 팝아웃이 활성화를 가져가 이 값만으로는
-        //   답 전에 다른 앱이 앞에 있었던 것을 놓친다).
-        if desktop.app_had_focus && main_shown && kept > 0 && windows.app_has_focus() {
-            windows.focus(MAIN_WINDOW_LABEL);
-        }
         kept
     }
 
@@ -1532,11 +1561,14 @@ mod tests {
         fail_destroy: Mutex<Option<String>>,
         /// 최대화를 보일 때로 미룬 창 — 보이기가 입히고 거둔다(운영 포트의 계약).
         deferred: Mutex<Vec<String>>,
-        /// 다른 앱이 앞에 있다(우리 창 어느 것도 포커스가 없다). 보인 창이 활성화를 가져간다고 쳐 보이기가 이 값을
-        /// 내린다 — 포커스를 ② 뒤에 읽으면 이 값에 속는다.
+        /// 다른 앱이 앞에 있다(우리 창 어느 것도 포커스가 없다). 숨긴 채 지은 팝아웃이 포커스를 가져간다고 쳐(운영은
+        /// `focused(true)` 로 짓는다) 만들기가 이 값을 내린다 — 포커스를 ② 뒤에 읽으면 이 값에 속는다.
         background: Mutex<bool>,
         /// 포커스 읽기의 답을 앞에서부터 하나씩 정한다 — 다 쓰면 `background` 로 답한다.
         focus_samples: Mutex<Vec<bool>>,
+        /// 운영 포트가 창 바탕 · 첫 테마를 고를 때 보는 그 유효 테마 — 있으면 만들 때의 답을 `opened_with` 에 적는다.
+        themes: OnceLock<Arc<EffectiveThemes>>,
+        opened_with: Mutex<Vec<(String, String)>>,
     }
 
     impl FakeWindows {
@@ -1616,6 +1648,12 @@ mod tests {
                 at.is_some(),
                 self.in_model(label)
             ));
+            if let Some(themes) = self.themes.get() {
+                self.opened_with.lock().unwrap().push((
+                    label.to_string(),
+                    themes.effective_for(label).as_wire().to_string(),
+                ));
+            }
             if self.fail_open.lock().unwrap().as_deref() == Some(label) {
                 self.deferred.lock().unwrap().retain(|l| l != label);
                 return Err("창 생성 실패(시험)".into());
@@ -1623,6 +1661,7 @@ mod tests {
             if self.squat_on_open.lock().unwrap().as_deref() == Some(label) {
                 self.layout.0.lock().unwrap().create_window(label).unwrap();
             }
+            *self.background.lock().unwrap() = false;
             Ok(())
         }
 
@@ -1644,9 +1683,6 @@ mod tests {
         fn set_shown(&self, label: &str, shown: bool) {
             let verb = if shown { "show" } else { "hide" };
             self.note(format!("{verb} {label} in_model={}", self.in_model(label)));
-            if shown {
-                *self.background.lock().unwrap() = false;
-            }
             let applied = {
                 let mut deferred = self.deferred.lock().unwrap();
                 let pending = shown && deferred.iter().any(|l| l == label);
@@ -1781,6 +1817,7 @@ mod tests {
         slot: Arc<SubsSlot>,
         theme_screen: Arc<ThemeScreen>,
         themes: ThemeControl,
+        effective: Arc<EffectiveThemes>,
     }
 
     impl Rig {
@@ -1820,10 +1857,9 @@ mod tests {
             let settings = Arc::new(SettingsService::load_from_dir(
                 &std::env::temp_dir().join("engram-restore-no-settings"),
             ));
-            let themes = ThemeControl::new(
-                Arc::new(EffectiveThemes::new(settings, layout.clone())),
-                theme_screen.clone(),
-            );
+            let effective = Arc::new(EffectiveThemes::new(settings, layout.clone()));
+            let _ = windows.themes.set(effective.clone());
+            let themes = ThemeControl::new(effective.clone(), theme_screen.clone());
             Rig {
                 coordinator,
                 service,
@@ -1836,6 +1872,7 @@ mod tests {
                 slot,
                 theme_screen,
                 themes,
+                effective,
             }
         }
 
@@ -1955,14 +1992,14 @@ mod tests {
                 "record main",
                 "visible? main",
                 "visible? slot-popup-2",
+                "focused?",
+                "focus main",
                 "show slot-popup-2 in_model=true",
                 "maximize slot-popup-2 (deferred)",
                 "record slot-popup-2",
                 "destroy slot-popup-1 in_model=false",
-                "focused?",
-                "focus main",
             ],
-            "포커스 읽기 → 숨긴 채 만들고(최대화는 만들기 전에 미룬다 · 모델 밖 · 안 걸치는 자리는 버림) → 커밋 → 자리 → 지금 자리 적기 → 보이기(미룬 최대화) → 옛 창 거두기 → 포커스 다시 읽기 → main 에 포커스"
+            "포커스 읽기 → 숨긴 채 만들고(최대화는 만들기 전에 미룬다 · 모델 밖 · 안 걸치는 자리는 버림) → 커밋 → 자리 → 지금 자리 적기 → 포커스 다시 읽기 → main 에 포커스 → 팝아웃 보이기(미룬 최대화 — main 포커스 뒤라 팝아웃이 위) → 옛 창 거두기"
         );
         assert!(rig.windows.deferred().is_empty(), "보인 창의 미룸은 거뒀다");
         assert!(
@@ -2052,6 +2089,39 @@ mod tests {
                 .all(|free| *free),
             "레이아웃 락 밖에서 민다"
         );
+
+        // 새 팝아웃은 모델에 들기 전에 만들어도 처음부터 사본의 테마로 칠해진다 — 만들 때의 답이 밀린 값과 같다.
+        let opened = rig.windows.opened_with.lock().unwrap().clone();
+        assert_eq!(opened.len(), 2, "{opened:?}");
+        for window in &opened {
+            assert!(sent.contains(window), "만들 때 {window:?} · 민 값 {sent:?}");
+        }
+    }
+
+    /// 커밋 전에 실패해도 미리 정한 팝아웃 테마는 남지 않는다 — 같은 label 이 뒤에 쓰이면 남의 테마를 받는다.
+    #[test]
+    fn a_failed_accept_leaves_no_staged_theme() {
+        let rig = Rig::new(None);
+        rig.attach();
+        let mut prev = ViewManager::new();
+        prev.create_window("slot-popup-70").unwrap();
+        prev.set_window_theme("slot-popup-70", Some(UiTheme::EInk))
+            .unwrap();
+        rig.service.set_boot(
+            Some(copy_of(to_persisted(&prev))),
+            StateFileStatus::Ok,
+            true,
+        );
+        *rig.windows.fail_open.lock().unwrap() = Some("slot-popup-1".to_string());
+
+        assert!(rig.coordinator.answer(true).is_err());
+
+        assert_eq!(
+            *rig.windows.opened_with.lock().unwrap(),
+            [("slot-popup-1".to_string(), "e-ink".to_string())],
+            "만들 때는 사본의 테마였다"
+        );
+        assert_eq!(rig.effective.effective_for("slot-popup-1"), UiTheme::Dark);
     }
 
     /// 수락 전에 실패하면 화면이 그대로라 밀 것이 없다.
@@ -2115,8 +2185,10 @@ mod tests {
             ]
             .map(String::from),
         );
-        for (label, maximized) in labels.iter().zip(maximized) {
+        for label in labels {
             expected.push(format!("visible? {label}"));
+        }
+        for (label, maximized) in labels.iter().zip(maximized) {
             expected.push(format!("hide {label} in_model=true"));
             if !maximized {
                 expected.push(format!("record {label}"));
@@ -2194,7 +2266,7 @@ mod tests {
                 .calls()
                 .iter()
                 .any(|call| call.starts_with("focus ")),
-            "보인 팝아웃이 없으면 포커스가 안 옮았으니 main 을 끌어오지 않는다"
+            "남은 팝아웃이 없으면 main 을 끌어오지 않는다"
         );
     }
 
@@ -2210,7 +2282,7 @@ mod tests {
             rig.attach();
             *rig.windows.background.lock().unwrap() = background;
             if switched_away {
-                // 보인 팝아웃도 다른 앱에게서 앞자리를 못 가져왔다(가짜의 보이기가 내리는 `background` 를 덮는다).
+                // 숨긴 채 지은 팝아웃도 다른 앱에게서 앞자리를 못 가져왔다(가짜의 만들기가 내리는 `background` 를 덮는다).
                 *rig.windows.focus_samples.lock().unwrap() = vec![true, false];
             }
             let windows = previous_screen(1, false);
@@ -2230,7 +2302,7 @@ mod tests {
                 calls
                     .iter()
                     .any(|call| call == "show slot-popup-1 in_model=true"),
-                "{case} — 보인 팝아웃이 있다(그 보이기가 가짜의 「다른 앱이 앞」을 내린다): {calls:?}"
+                "{case} — 보인 팝아웃이 있다: {calls:?}"
             );
             assert_eq!(
                 calls.iter().filter(|call| *call == "focused?").count(),
@@ -2243,10 +2315,19 @@ mod tests {
                 "{case} — 다른 앱이 앞에 있었거나 지금 있으면 main 을 끌어오지 않는다(가짜 Alt 로 그 앱의 포커스를 뺏는다): {calls:?}"
             );
             if takes_focus {
+                let focus = calls.iter().position(|call| call == "focus main").unwrap();
+                let show = calls
+                    .iter()
+                    .position(|call| call == "show slot-popup-1 in_model=true")
+                    .unwrap();
                 assert_eq!(
-                    calls[calls.len() - 2..],
-                    ["focused?", "focus main"],
-                    "{case} — 다시 읽기는 포커스 주기 바로 앞이다"
+                    calls[focus - 1],
+                    "focused?",
+                    "{case} — 다시 읽기는 포커스 주기 바로 앞이다: {calls:?}"
+                );
+                assert!(
+                    focus < show,
+                    "{case} — main 에 먼저 포커스를 주고 팝아웃을 보인다(팝아웃이 main 위): {calls:?}"
                 );
             }
             assert_eq!(rig.service.status().crash_copy, CrashCopyStatus::Answered);

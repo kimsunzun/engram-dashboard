@@ -44,6 +44,7 @@ import type { StripBounds } from './tabStrip/reorderGeometry'
 import { reportUiMetrics, SLOT_FRAME_BORDER } from './uiMetricsReport'
 import AgentMonitoringPicker from '../slot/AgentMonitoringPicker'
 import { useMonitoringPickerStore } from '../../store/monitoringPickerStore'
+import { reportFirstPaint } from '../../theme/firstPaint'
 import { t } from '../../i18n'
 
 interface WindowLayoutProps {
@@ -105,8 +106,8 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
   )
   const parked = mode === 'parked'
   const normal = mode === 'normal'
-  // 들인 예비 창(`dock:spare{adopted}`)은 제 탭을 받기 전까지 빈 틀 그대로다 — 「로딩」 화면으로 바꾸면 끌려 나와 보이는
-  //   순간 문구가 깜빡이고 탭바가 다시 마운트된다. 대기에 들 때 항목을 지웠으므로 `win` 이 있다 = 대기에 든 뒤 받은 탭이다.
+  // 들인 예비 창(`dock:spare{adopted}`)은 제 탭을 받기 전까지 빈 틀 그대로다 — 「로딩」 화면(바탕만)으로 바꾸면 끌려 나와
+  //   보이는 순간 탭바가 사라졌다 다시 마운트된다. 대기에 들 때 항목을 지웠으므로 `win` 이 있다 = 대기에 든 뒤 받은 탭이다.
   const framed = parked || (wasParked && win === undefined && !bootFailed)
 
   useEffect(() => installFileDropGuard(), [])
@@ -166,6 +167,15 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
   // 대기 중에 이 창 항목이 다시 차도(셸은 들일 탭을 알린 뒤 대기를 푼다 — 전역 미러가 받는다) 대기가 풀리기 전에는 그리지 않는다.
   const tabs = framed ? NO_TABS : win?.tabs
   const active = framed ? null : (win?.active ?? null)
+
+  // 셸은 이 창을 숨긴 채 만들고 첫 화면 알림에 창을 보인다(`theme/firstPaint.ts`) — 그 알림을 첫 화면(탭바 + 활성 탭의
+  //   레이아웃 · 대기 창의 빈 틀 · 부팅 실패 문구)이 커밋된 뒤에 보낸다. 그 전 화면(바탕만 · 활성 탭의 「View 로딩」)이
+  //   보이는 것은 알림이 오지 않아 셸 시한이 보일 때뿐이다.
+  const activeLaidOut = useViewStore(s => active === null || selectView(s, active) !== null)
+  const firstScreen = bootFailed || framed || (tabs !== undefined && activeLaidOut)
+  useEffect(() => {
+    if (firstScreen) reportFirstPaint()
+  }, [firstScreen])
 
   // ── keep-alive: 이 창의 모든 탭 layout 을 캐시에 채운다(숨은 탭도 렌더 유지, ADR-0056) ───────────
   // layout:updated 는 eventBus 전역 구독이 이미 캐시에 반영하므로(뷰별 version 가드), 여기선 "아직 한 번도
@@ -240,11 +250,9 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
         </div>
       )
     }
-    return (
-      <div style={centerStyle}>
-        <span>{t('window.loading', { label })}</span>
-      </div>
-    )
+    // 바탕만 그린다 — 문구 · 표시를 그리면 셸이 시한으로 창을 보였을 때 탭 화면 앞에 한 번 깜빡인다(사용자 요구
+    //   2026-10-19: 창의 첫 화면은 테마 바탕 다음 곧바로 실제 내용).
+    return <div data-testid="window-loading" style={blankStyle} />
   }
 
   return (
@@ -398,6 +406,12 @@ function TabCanvas({ viewId }: { viewId: string }) {
       foreignSlots={cached.foreignSlots}
     />
   )
+}
+
+const blankStyle: React.CSSProperties = {
+  width: '100%',
+  height: '100%',
+  background: 'var(--bg)',
 }
 
 const centerStyle: React.CSSProperties = {

@@ -114,6 +114,7 @@ beforeEach(() => {
   invokeMock.mockImplementation(async () => ({ theme: 'dark' }))
   document.documentElement.removeAttribute('data-theme')
   useThemeStore.setState({ theme: 'dark' })
+  sessionStorage.clear()
 })
 
 afterEach(() => {
@@ -140,7 +141,10 @@ describe('installUiSettings — 부팅 조회', () => {
     expect(themeAttr()).toBe('e-ink')
   })
 
-  it('조회가 실패하면 dark 로 간다(무테마로 남지 않는다)', async () => {
+  // ★셸이 창을 만들며 박은 그 창의 테마를 dark 로 덮지 않는다★ — 덮으면 light · e-ink 창이 셸 값을 못 받은 것만으로
+  //   그 창의 테마가 아닌 색으로 바뀐다.
+  it('조회가 실패하면 지금 붙은 테마를 그대로 둔다', async () => {
+    document.documentElement.dataset.theme = 'light'
     invokeMock.mockImplementation(async () => {
       throw new Error('셸이 아직 안 떴다')
     })
@@ -148,18 +152,67 @@ describe('installUiSettings — 부팅 조회', () => {
     render(<Host />)
     await settle()
 
-    expect(themeAttr()).toBe('dark')
+    expect(themeAttr()).toBe('light')
     expect(warn).toHaveBeenCalled()
   })
 
-  it('모르는 이름이 오면 통과시키지 않고 dark 로 접는다', async () => {
+  it('조회가 실패했는데 붙은 테마가 없으면 dark 로 간다(무테마로 남지 않는다)', async () => {
+    invokeMock.mockImplementation(async () => {
+      throw new Error('셸이 아직 안 떴다')
+    })
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    render(<Host />)
+    await settle()
+
+    expect(themeAttr()).toBe('dark')
+  })
+
+  it('모르는 이름이 오면 통과시키지 않고 지금 테마를 둔다', async () => {
+    document.documentElement.dataset.theme = 'e-ink'
     invokeMock.mockImplementation(async () => ({ theme: 'solarized' }))
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     render(<Host />)
     await settle()
 
-    expect(themeAttr()).toBe('dark')
+    expect(themeAttr()).toBe('e-ink')
     expect(warn).toHaveBeenCalled()
+  })
+
+  it('모르는 이름이 왔는데 붙은 테마도 모르는 철자면 dark 로 접는다', async () => {
+    document.documentElement.dataset.theme = 'sepia'
+    invokeMock.mockImplementation(async () => ({ theme: 'solarized' }))
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    render(<Host />)
+    await settle()
+
+    expect(themeAttr()).toBe('dark')
+  })
+})
+
+describe('installUiSettings — 다시 읽기용 기억', () => {
+  // 셸의 초기화 스크립트가 다시 읽기 때 이 키를 먼저 읽는다(`src-tauri/src/webview_env.rs`) — 안 적으면 테마가 바뀐 창을
+  //   다시 읽을 때 창을 만들 때의 테마로 한 번 그려진다.
+  it('붙인 테마를 그 창 label 의 키로 적는다', async () => {
+    invokeMock.mockImplementation(async () => ({ theme: 'light' }))
+    render(<Host />)
+    await settle()
+
+    expect(sessionStorage.getItem(`engram.theme.${WINDOW_LABEL}`)).toBe('light')
+
+    push('e-ink')
+
+    expect(sessionStorage.getItem(`engram.theme.${WINDOW_LABEL}`)).toBe('e-ink')
+  })
+
+  it('셸 값을 못 받아 지금 테마를 두면 기억도 그대로다', async () => {
+    document.documentElement.dataset.theme = 'light'
+    sessionStorage.setItem(`engram.theme.${WINDOW_LABEL}`, 'light')
+    invokeMock.mockImplementation(async () => ({ theme: 'solarized' }))
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    render(<Host />)
+    await settle()
+
+    expect(sessionStorage.getItem(`engram.theme.${WINDOW_LABEL}`)).toBe('light')
   })
 })
 
@@ -218,14 +271,15 @@ describe('installUiSettings — 셸 테마 푸시', () => {
     expect(themeAttr()).toBe('e-ink')
   })
 
-  it('푸시 값이 깨져 있어도 무테마로 남지 않는다', async () => {
+  it('푸시 값이 깨져 있으면 지금 테마를 그대로 둔다', async () => {
+    invokeMock.mockImplementation(async () => ({ theme: 'light' }))
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     render(<Host />)
     await settle()
 
     push(42)
 
-    expect(themeAttr()).toBe('dark')
+    expect(themeAttr()).toBe('light')
     expect(warn).toHaveBeenCalled()
   })
 })

@@ -27,8 +27,9 @@ interface AgentState {
    */
   profiles: AgentProfile[]
   /**
-   * 프로필 목록을 한 번이라도 받았나(ADR-0148 — agentsLoaded 의 대칭). refreshProfiles 는 재시도 없는
-   * 단발 pull 이라 실패·지연이 있을 수 있는데, 그때 `profiles: []` 를 "프로필도 없다"로 읽으면 **살아있는
+   * 프로필 목록을 한 번이라도 받았나(ADR-0148 — agentsLoaded 의 대칭). 프로필 pull 은 늦거나 실패할 수 있다 —
+   * 부팅 pull 은 몇 번 다시 하고도 끝내 실패할 수 있고(`App.tsx` `bootPull`), 그 밖의 다시 읽기(refreshProfiles)는
+   * 재시도 없는 단발이다. 그때 `profiles: []` 를 "프로필도 없다"로 읽으면 **살아있는
    * 시체 슬롯이 「대상 없음」으로 오분류돼 대화를 보존 중인 뷰가 조기 언마운트된다.**
    * 그래서 "프로필 없음" 판정은 이 플래그가 선 뒤에만 내린다(안 서면 보수적으로 「연결 중」에 머문다).
    */
@@ -39,6 +40,11 @@ interface AgentState {
    * 으로 파생한다(이름 미저장 — ADR-0061).
    */
   presets: Preset[]
+  /**
+   * 프리셋 목록을 한 번이라도 받았나(agentsLoaded 의 대칭). `presets: []` 만으로는 「아직 못 받음」과
+   * 「정말 없음」이 갈리지 않는다 — PresetPalette 는 이것이 선 뒤에만 빈 목록 안내를 그린다.
+   */
+  presetsLoaded: boolean
   groups: typeof dummyGroups
   selectedAgentId: string | null
   setSelectedAgent: (id: string | null) => void
@@ -62,12 +68,13 @@ export const useAgentStore = create<AgentState>(set => ({
   profiles: [],
   profilesLoaded: false,
   presets: [],
+  presetsLoaded: false,
   groups: dummyGroups,
   selectedAgentId: null,
   setSelectedAgent: id => set({ selectedAgentId: id }),
   setAgents: agents => set({ agents, agentsLoaded: true }),
   setProfiles: profiles => set({ profiles, profilesLoaded: true }),
-  setPresets: presets => set({ presets }),
+  setPresets: presets => set({ presets, presetsLoaded: true }),
   onStatusChanged: (id, status) =>
     set(state => ({
       agents: state.agents.map(a => (a.id === id ? { ...a, status } : a)),

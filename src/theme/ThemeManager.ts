@@ -1,4 +1,5 @@
 import { type ThemeName, useThemeStore } from '../store/themeStore'
+import { rememberTheme } from './themeMemory'
 
 class ThemeManager {
   private static instance: ThemeManager
@@ -12,6 +13,7 @@ class ThemeManager {
 
   apply(theme: ThemeName): void {
     useThemeStore.getState().setTheme(theme)
+    rememberTheme(theme)
   }
 }
 

@@ -4,7 +4,7 @@ import App from "./App";
 import "./index.css";
 import { useThemeStore } from "./store/themeStore";
 import { useAgentStore } from "./store/agentStore";
-import { themeManager } from "./theme/ThemeManager";
+import { applyBootTheme } from "./theme/bootTheme";
 import { settingsClient } from "./api/settingsClient";
 import { installChatStyleApplier } from "./store/chatStyleStore";
 
@@ -18,10 +18,9 @@ settingsClient.install();
 // ★첫 페인트 전에 data-theme 를 반드시 박는다★ — 색 토큰은 `styles/theme.css` 의 `:root[data-theme='…']`
 // 안에만 있고 폴백이 없다. 속성이 없는 동안에는 `--text`·`--border` 가 통째로 미정의라 index.css 가 배경만
 // 어둡게 깔고 글자·테두리는 UA 기본값(검정)으로 떨어진다 = 검은 배경에 검은 글자. 그 구간은 셸이 정한 테마가
-// 붙기까지의 IPC 왕복만큼 길다(`theme/uiSettings.ts`) — 그래서 여기서 dark 를 먼저 박아 최악을 「dark→저장
-// 테마 한 번 전환」으로 줄인다. ★이 줄을 App 안 effect 로 되돌리지 말 것★(createRoot 뒤면 이미 늦다).
-// 값이 dark 인 것은 themeStore 의 초기값·index.css 폴백과 같은 값을 쓰기 위해서다.
-themeManager.apply("dark");
+// 붙기까지의 IPC 왕복만큼 길다(`theme/uiSettings.ts`). 셸이 창을 만들며 박은 값이 있으면 그 값을 지킨다(그 함수 doc).
+// ★이 줄을 App 안 effect 로 되돌리지 말 것★(createRoot 뒤면 이미 늦다).
+applyBootTheme();
 
 // LLM 제어 표면(CLAUDE.md §5) — 개발 빌드에서만 store 핸들을 window에 노출한다.
 // 외부(cdp.mjs eval / CDP)에서 window.__engram.<store>.getState()로 상태를 JSON으로 읽고

@@ -34,6 +34,10 @@ vi.mock('@tauri-apps/api/core', () => ({
   },
 }))
 
+// ── 첫 페인트 알림 — 언제 보내나만 관측(보내는 법은 `theme/firstPaint.test.ts`) ──
+const reportFirstPaintMock = vi.hoisted(() => vi.fn())
+vi.mock('../../theme/firstPaint', () => ({ reportFirstPaint: reportFirstPaintMock }))
+
 // ── getCurrentWindow mock — 0탭 자가닫힘 관측 · 사건 구독 대상 label ──
 const closeMock = vi.fn(async () => undefined)
 const currentWindow = vi.hoisted(() => ({ label: 'main' }))
@@ -69,7 +73,6 @@ import { __resetUiMetricsReportForTest } from './uiMetricsReport'
 import type { DockChrome } from '../../../src-tauri/bindings/DockChrome'
 import { useViewStore } from '../../store/viewStore'
 import type { ViewSnapshot } from '../../api/layoutTypes'
-import { t } from '../../i18n'
 
 function slotSnap(viewId: string, version: number): ViewSnapshot {
   return {
@@ -101,6 +104,7 @@ beforeEach(() => {
   windowRoleMock.mockImplementation(async () => ({ role: 'model', drag: null }))
   unlistenMock.mockClear()
   closeMock.mockClear()
+  reportFirstPaintMock.mockReset()
   invokeMock.mockReset()
   mountCounts.clear()
   rendererProps.clear()
@@ -257,6 +261,68 @@ describe('WindowLayout — 부팅 pull 재시도/표면화(ADR-0102)', () => {
       timeout: 3000,
     })
     expect(screen.queryByTestId('tab-bar')).toBeNull()
+  })
+})
+
+// ── 첫 화면과 첫 화면 알림 — 셸이 숨긴 채 지은 창은 알림에 보인다(`theme/firstPaint.ts`) ──
+describe('WindowLayout — 첫 화면 · 첫 페인트 알림', () => {
+  it('탭을 받기 전은 바탕만(문구 없음) · 알림은 탭바와 활성 탭의 레이아웃이 그려진 뒤 한 번', async () => {
+    let answerTabs: (payload: unknown) => void = () => {}
+    let answerActiveView: (snap: ViewSnapshot) => void = () => {}
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'list_tabs') return new Promise(res => (answerTabs = res))
+      if (cmd === 'get_view') {
+        const viewId = (args as { viewId: string }).viewId
+        if (viewId === 'v1') return new Promise<ViewSnapshot>(res => (answerActiveView = res))
+        return slotSnap(viewId, 1)
+      }
+      return undefined
+    })
+    const seenAtReport: string[][] = []
+    reportFirstPaintMock.mockImplementation(() => {
+      seenAtReport.push(screen.queryAllByTestId('view-renderer').map(r => r.getAttribute('data-view-id') ?? ''))
+    })
+
+    render(<WindowLayout label="slot-popup-10" />)
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('list_tabs', { window: 'slot-popup-10' }))
+    const blank = screen.getByTestId('window-loading')
+    expect(blank.textContent).toBe('')
+    expect(reportFirstPaintMock).not.toHaveBeenCalled()
+
+    await act(async () =>
+      answerTabs({
+        label: 'slot-popup-10',
+        tabs: [{ id: 'v1', name: 'Tab 1' }, { id: 'v2', name: 'Tab 2' }],
+        active: 'v1',
+        version: 1,
+      }),
+    )
+    await waitFor(() => expect(screen.getAllByTestId('view-renderer')).toHaveLength(1))
+    expect(screen.getByTestId('tab-bar')).toBeTruthy()
+    expect(screen.queryByTestId('window-loading')).toBeNull()
+    expect(reportFirstPaintMock).not.toHaveBeenCalled()
+
+    await act(async () => answerActiveView(slotSnap('v1', 1)))
+    await waitFor(() => expect(reportFirstPaintMock).toHaveBeenCalledTimes(1))
+    expect(seenAtReport).toEqual([['v1', 'v2']])
+  })
+
+  it('부팅 실패면 실패 문구가 첫 화면이다 — 알림을 보낸다', async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_tabs') throw new Error('backend down')
+      return undefined
+    })
+    render(<WindowLayout label="main" />)
+    await waitFor(() => expect(screen.getByTestId('window-boot-error')).toBeTruthy(), { timeout: 3000 })
+    await waitFor(() => expect(reportFirstPaintMock).toHaveBeenCalledTimes(1))
+  })
+
+  it('대기 창은 빈 틀이 첫 화면이다 — 알림을 보낸다', async () => {
+    currentWindow.label = 'slot-popup-7'
+    windowRoleMock.mockImplementation(async () => ({ role: 'parked', drag: null }))
+    render(<WindowLayout label="slot-popup-7" />)
+    await waitFor(() => expect(screen.getByTestId('parked-canvas')).toBeTruthy())
+    await waitFor(() => expect(reportFirstPaintMock).toHaveBeenCalledTimes(1))
   })
 })
 
@@ -1170,7 +1236,7 @@ describe('WindowLayout — 대기 모드(window_role · dock:spare)', () => {
     act(() => emit('dock:spare', { step: 'adopted' }))
     await waitFor(() => expect(listTabsCalls()).toHaveLength(1))
     expect(screen.getByTestId('parked-canvas')).toBeTruthy()
-    expect(screen.queryByText(t('window.loading', { label: SPARE }))).toBeNull()
+    expect(screen.queryByTestId('window-loading')).toBeNull()
     expect(screen.getByTestId('tab-strip-row')).toBe(row)
 
     await act(async () => answer({ label: SPARE, tabs: [{ id: 'p1', name: 'Pop' }], active: 'p1', version: 3 }))

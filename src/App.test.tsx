@@ -10,9 +10,9 @@ const wiring = vi.hoisted(() => ({
   installNativeScrollActivity: vi.fn(() => () => {}),
   bootstrapDaemonIfNeeded: vi.fn(async () => {}),
   initEventBus: vi.fn(async () => {}),
-  refreshProfiles: vi.fn(async () => {}),
-  refreshPresets: vi.fn(async () => {}),
   getAgents: vi.fn(async () => []),
+  listProfiles: vi.fn(async () => []),
+  listPresets: vi.fn(async () => []),
 }))
 
 vi.mock('./theme/uiSettings', () => ({ installUiSettings: wiring.installUiSettings }))
@@ -23,13 +23,9 @@ vi.mock('./components/ui/nativeScrollActivity', () => ({
 }))
 vi.mock('./api/clientFactory', () => ({
   bootstrapDaemonIfNeeded: wiring.bootstrapDaemonIfNeeded,
-  agentClient: { getAgents: wiring.getAgents },
+  agentClient: { getAgents: wiring.getAgents, listProfiles: wiring.listProfiles, listPresets: wiring.listPresets },
 }))
-vi.mock('./store/eventBus', () => ({
-  initEventBus: wiring.initEventBus,
-  refreshProfiles: wiring.refreshProfiles,
-  refreshPresets: wiring.refreshPresets,
-}))
+vi.mock('./store/eventBus', () => ({ initEventBus: wiring.initEventBus }))
 vi.mock('./commands/contributions', () => ({}))
 vi.mock('./components/layout/AppLayout', () => ({ default: () => <div data-testid="app-layout" /> }))
 vi.mock('./pages/PopoutPage', () => ({ default: () => <div data-testid="popout-page" /> }))

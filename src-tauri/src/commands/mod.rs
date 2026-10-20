@@ -6,6 +6,7 @@ pub mod dock;
 // 탭 끌기 세션의 포트 어댑터 · 실행기 세우기(TRD S21-slot-docking §2-4).
 pub mod drag;
 pub mod drag_window;
+pub mod first_paint;
 pub mod layout;
 pub mod popout;
 pub mod settings;
@@ -19,6 +20,7 @@ pub use agent::*;
 pub use autostart::*;
 pub use discovery::*;
 pub use dock::*;
+pub use first_paint::*;
 pub use layout::*;
 pub use popout::*;
 pub use settings::*;

@@ -30,7 +30,7 @@ use crate::layout::{
 };
 use crate::output_router::OutputRouter;
 use crate::state::placement::{self, Fallback};
-use crate::webview_env::WebviewEnv;
+use crate::webview_env::{Backdrop, WebviewEnv};
 
 // 팝업/런타임 창 label prefix. capabilities/popup.json·usage-links.json 의 `"slot-popup-*"` glob 과 짝(변경 시
 // 함께 동기).
@@ -73,7 +73,9 @@ pub(crate) struct TauriWindowHost<'a> {
 
 impl WindowHost for TauriWindowHost<'_> {
     fn open(&self, label: &str) -> Result<(), String> {
-        build_runtime_window(self.app, label, None).map(drop)
+        let window = build_runtime_window(self.app, label, None)?;
+        crate::first_paint::hold_window(&window);
+        Ok(())
     }
 
     fn open_at(&self, label: &str, at: &WindowPlace, activate: bool) -> Result<(), String> {
@@ -126,22 +128,16 @@ fn cascade_position(label: &str) -> (f64, f64) {
 // `at` = 빌더에 줄 첫 자리 — `None` 이면 label 순번의 계단 자리 · 기본 크기. 저장된 자리를 정확히 놓는 것은 부르는
 //   쪽(`state::placement`)이 만든 뒤에 한다: tao 는 빌더의 논리 위치를 모니터를 열거 순으로 훑어 처음 들어맞는 것의
 //   배율로 풀어(tao 0.35 `platform_impl/windows/window.rs` `init`), 배율이 다른 모니터가 섞이면 다른 모니터에 뜰 수 있다.
+//
+// ★숨긴 채 만든다 — 보이기는 부르는 쪽 몫이다★: 자리 · 최대화를 입힌 뒤 첫 화면에 보이거나
+//   (`first_paint::hold_window`), 런타임 복원 수락이 모델에 넣은 뒤 보이기로 정하면 첫 화면에 보인다
+//   (`first_paint::reveal_held` · TRD S21-storage §6-7 ② ④).
 pub(crate) fn build_runtime_window(
     app: &AppHandle,
     label: &str,
     at: Option<(LogicalPosition<f64>, LogicalSize<f64>)>,
 ) -> Result<WebviewWindow, String> {
-    build_window(app, label, at, true, true)
-}
-
-/// [`build_runtime_window`] 와 같되 숨긴 채 만든다 — 보이기는 부르는 쪽 몫이다(런타임 복원 수락이 모델에 넣은
-/// 뒤 보인다 — TRD S21-storage §6-7 ② ④).
-pub(crate) fn build_hidden_runtime_window(
-    app: &AppHandle,
-    label: &str,
-    at: Option<(LogicalPosition<f64>, LogicalSize<f64>)>,
-) -> Result<WebviewWindow, String> {
-    build_window(app, label, at, false, true)
+    build_window(app, label, at, true)
 }
 
 /// 예비 창(떼어 낼 창 — TRD S21-slot-docking §2-5) — 보통 팝아웃과 같은 빌더 · URL(예비 표시 없음)로 숨긴 채 · 포커스
@@ -149,7 +145,7 @@ pub(crate) fn build_hidden_runtime_window(
 /// 놓기 → Tauri `show` → 활성)는 부르는 쪽(`commands::dock` 의 예비 창 짓기)이다.
 // ADR-0295
 pub(crate) fn build_spare_window(app: &AppHandle, label: &str) -> Result<WebviewWindow, String> {
-    build_window(app, label, None, false, false)
+    build_window(app, label, None, false)
 }
 
 /// 팝아웃 기본 크기(논리) — 자리 없이 여는 런타임 창과, 크기를 고르지 않은 도킹 새 창.
@@ -177,13 +173,7 @@ fn open_runtime_window_at(
         Fallback::DefaultPlace,
     ) {
         Some(landed) => {
-            let window = build_window(
-                app,
-                label,
-                Some(placement::first_place(landed)),
-                true,
-                activate,
-            )?;
+            let window = build_window(app, label, Some(placement::first_place(landed)), activate)?;
             let (bounds, landing) = landed;
             // 고른 자리를 못 입혔으면 그 창을 거두고 실패로 답한다 — 남기면 도킹이 엉뚱한 자리의 창에 탭을 붙인다(창 포트
             //   `open_at` 계약).
@@ -202,28 +192,32 @@ fn open_runtime_window_at(
                     failed.step, failed.error
                 ));
             }
+            crate::first_paint::hold_window(&window);
         }
         None => {
             let (w, h) = placement::usable_size(at.size).unwrap_or(POPOUT_DEFAULT_SIZE);
             let (x, y) = cascade_position(label);
-            build_window(
+            let window = build_window(
                 app,
                 label,
                 Some((LogicalPosition::new(x, y), LogicalSize::new(w, h))),
-                true,
                 activate,
             )?;
+            crate::first_paint::hold_window(&window);
         }
     }
     Ok(())
 }
 
-// `focused = false` = 만들되 포커스를 가져가지 않는다(도킹 새 창의 `FocusPolicy::Keep`).
+// `focused = false` = 만들되 포커스를 가져가지 않는다(도킹 새 창의 `FocusPolicy::Keep` · 예비 창). `true` 면 숨은 동안에도
+//   포커스가 이 창으로 간다(wry 가 만들자마자 웹뷰에 넣는다 — `state::placement` 의 main 짓기 주석) — 보이기 전과 같은
+//   때다.
+//
+// ★늘 숨긴 채 짓는다 — 빌더에 `visible(true)` 를 주지 말 것(`crate::first_paint` 머리 — 첫 프레임의 비침)★.
 fn build_window(
     app: &AppHandle,
     label: &str,
     at: Option<(LogicalPosition<f64>, LogicalSize<f64>)>,
-    visible: bool,
     focused: bool,
 ) -> Result<WebviewWindow, String> {
     let ((x, y), (w, h)) = match at {
@@ -239,8 +233,9 @@ fn build_window(
             .title(format!("Engram — {label}"))
             .inner_size(w, h)
             .position(x, y)
-            .visible(visible)
+            .visible(false)
             .focused(focused),
+        Backdrop::for_window(app, label),
     )
     .build()
     .map_err(|e| format!("런타임 창 생성 실패: {e}"))
