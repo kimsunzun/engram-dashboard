@@ -9,20 +9,31 @@
 
 /**
  * 넉넉할 때 머리 하나의 폭(`S` · CSS px · `border-box` — 패딩 · 테두리 포함). Chrome `TabStyle::GetStandardWidth()`
- * 256 dp 의 우리 축척 — 수는 옛 이름 칸 상한(160 px)을 따랐다(TRD §5-7 폭 상수).
+ * 256 dp 의 우리 축척 — 수는 옛 이름 칸 상한(160 px)을 따랐다.
  */
 export const TAB_STANDARD_W = 160
 
 /**
- * 활성 머리의 최소 폭(`A`) = 닫기 버튼이 들어가는 폭 — Chrome `GetMinimumActiveWidth()` 와 같은 뜻. 셈 = 왼 패딩 12 +
- * 이름 0 + 간격 6 + 닫기 버튼 ≈ 11(패딩 2 + `×` ≈ 7 + 패딩 2) + 오른 패딩 12 + 오른 테두리 1(`TabBar.tsx` 머리 ·
- * `tab-close` 스타일). `×` 글자 폭은 어림이다(실측 아님 — 화면 QA 가 `tab-close` 를 재 다르면 그 값으로 고친다).
+ * 닫기(×) · 새 탭(+) 단추의 원 지름(CSS px — ADR-0298 결정 5 · 사용자 결정 2026-10-21). 활성 최소 폭이 × 원을 담아 여기
+ * 둔다(`TabBar.tsx` 가 그리기에 쓴다).
  */
-export const TAB_MIN_ACTIVE_W = 42
+export const TAB_BUTTON_SIZE = 22
+
+/** 머리 내용 칸의 좌우 패딩(CSS px — `TabBar.tsx` `HEAD_CONTENT`). */
+export const TAB_HEAD_PAD = 12
+
+/** 머리 내용 칸에서 이름과 × 사이 간격(CSS px — `TabBar.tsx` `HEAD_CONTENT`). */
+export const TAB_HEAD_GAP = 6
 
 /**
- * 비활성 머리의 최소 폭(`I`) — Chrome `GetMinimumInactiveWidth()` ≈ 32 dp 그대로. 패딩 · 테두리 25 를 빼면 이름 칸
- * 7 px 이고 닫기 버튼은 들어가지 않는다(`A` 보다 좁은 머리는 닫기 버튼을 감춘다).
+ * 활성 머리의 최소 폭(`A`) = 닫기 버튼이 들어가는 폭 — Chrome `GetMinimumActiveWidth()` 와 같은 뜻. 셈 = 왼 패딩 + 이름 0 +
+ * 간격 + 닫기 원 + 오른 패딩(ADR-0298 결정 5 · 머리에 테두리는 없다).
+ */
+export const TAB_MIN_ACTIVE_W = TAB_HEAD_PAD + 0 + TAB_HEAD_GAP + TAB_BUTTON_SIZE + TAB_HEAD_PAD
+
+/**
+ * 비활성 머리의 최소 폭(`I`) — Chrome `GetMinimumInactiveWidth()` ≈ 32 dp 그대로. 좌우 패딩(`TAB_HEAD_PAD` × 2)을 빼고 남는 이름 칸만 있고
+ * 닫기 버튼은 들어가지 않는다(`A` 보다 좁은 머리는 닫기 버튼을 감춘다).
  */
 export const TAB_MIN_INACTIVE_W = 32
 

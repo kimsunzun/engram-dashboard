@@ -107,6 +107,67 @@ describe('TabBar', () => {
     expect(onSwitch).not.toHaveBeenCalled()
   })
 
+  it('닫기 · + 단추 = 22 px 원 안의 아이콘 · + 원 앞 틈은 margin 이 아니라 왼 패딩', () => {
+    renderBar('v1')
+    const close = head('v1').querySelector<HTMLElement>('[data-testid="tab-close"]')!
+    expect(close.style.width).toBe('22px')
+    expect(close.style.height).toBe('22px')
+    expect(close.style.borderRadius).toBe('50%')
+    expect(close.querySelector('svg')).not.toBeNull()
+    expect(close.textContent).toBe('')
+    const add = screen.getByTestId('tab-add')
+    expect(add.style.paddingLeft).toBe('4px')
+    expect(add.style.marginLeft).toBe('')
+    const circle = screen.getByTestId('tab-add-circle')
+    expect(circle.style.width).toBe('22px')
+    expect(circle.style.height).toBe('22px')
+    expect(circle.style.borderRadius).toBe('50%')
+    expect(circle.querySelector('svg')).not.toBeNull()
+  })
+
+  // jsdom 은 :hover 를 칠하지 않는다 — 클래스가 붙었는지 · 그것을 이기는 인라인 배경이 없는지까지만 본다.
+  it('× · + 원의 맴돎 색은 테마 토큰 클래스 · 인라인 배경 없음 · 두 원은 머리 내용과 같은 세로 띠', () => {
+    renderBar('v1')
+    const close = head('v1').querySelector<HTMLElement>('[data-testid="tab-close"]')!
+    expect(close.className.split(' ')).toContain('hover:bg-[var(--tab-button-hover-bg)]')
+    expect(close.style.background).toBe('')
+    expect(close.style.backgroundColor).toBe('')
+    const add = screen.getByTestId('tab-add')
+    const circle = screen.getByTestId('tab-add-circle')
+    expect(add.className.split(' ')).toContain('group/add')
+    expect(circle.className.split(' ')).toContain('group-hover/add:bg-[var(--tab-button-hover-bg)]')
+    expect([circle.style.background, circle.style.backgroundColor]).toEqual(['', ''])
+
+    // × 원은 머리 내용 칸 가운데, + 원은 + 상자 가운데 — 두 칸의 위 · 아래가 같으면 원 가운데 높이도 같다.
+    const content = close.parentElement!
+    expect([content.style.top, content.style.bottom, content.style.alignItems]).toEqual(['4px', '0px', 'center'])
+    expect([add.style.top, add.style.bottom, add.style.alignItems]).toEqual([content.style.top, content.style.bottom, 'center'])
+  })
+
+  // 이름은 머리 글자색을 물려받는다 — 머리와 × 의 인라인 색이 같으면 이름 · × 가 한 색이다.
+  it('이름 · × 는 한 전경색 — 활성 · 맴돎 = --text · 쉴 때 = --tab-text-inactive · + 도 쉴 때 그 회색', () => {
+    renderBar('v1')
+    const close = (id: string) => head(id).querySelector<HTMLElement>('[data-testid="tab-close"]')!
+    const colours = (id: string) => [nameOf(id).style.color, head(id).style.color, close(id).style.color]
+    expect(colours('v1')).toEqual(['', 'var(--text)', 'var(--text)'])
+    expect(colours('v2')).toEqual(['', 'var(--tab-text-inactive)', 'var(--tab-text-inactive)'])
+
+    fireEvent.pointerEnter(head('v2'))
+    expect(colours('v2')).toEqual(['', 'var(--text)', 'var(--text)'])
+    fireEvent.pointerLeave(head('v2'))
+    expect(colours('v2')).toEqual(['', 'var(--tab-text-inactive)', 'var(--tab-text-inactive)'])
+
+    expect(screen.getByTestId('tab-add').style.color).toBe('var(--tab-text-inactive)')
+  })
+
+  it('+ 원(아이콘) 클릭 → onCreate · 닫기 아이콘 클릭 → onClose', () => {
+    const { onCreate, onClose } = renderBar('v1')
+    fireEvent.click(screen.getByTestId('tab-add-circle').querySelector('svg')!)
+    expect(onCreate).toHaveBeenCalledTimes(1)
+    fireEvent.click(head('v2').querySelector('[data-testid="tab-close"] svg')!)
+    expect(onClose).toHaveBeenCalledWith('v2')
+  })
+
   it('이름 더블클릭 → 인라인 편집 진입(input 등장, 현재 이름 시드)', () => {
     renderBar('v1')
     const input = openEditForV1()
@@ -253,8 +314,8 @@ describe('TabBar', () => {
     expect(has('b', 'tab-hover')).toBe(false)
   })
 
-  // PRD R27 · ADR-0295 결정 1 — 위 모서리 10 · 아래 날개 12 · 구분선 2×16 · 좌우 여백 2.
-  it('활성 탭 모양 = 위 모서리 반지름 10 · 아래 바깥 날개 반지름 12 · 구분선 두께 2 · 높이 16 · 좌우 여백 2', () => {
+  // PRD R27 · ADR-0295 결정 1 — 위 모서리 10 · 아래 날개 12 · 좌우 여백 2 · ADR-0298 결정 3 — 구분선 1×13.
+  it('활성 탭 모양 = 위 모서리 반지름 10 · 아래 바깥 날개 반지름 12 · 구분선 두께 1 · 높이 13 · 좌우 여백 2', () => {
     const tabs = ['a', 'b', 'c'].map(id => ({ id, name: id }))
     renderBar('b', tabs)
     const part = (id: string, testid: string) => head(id).querySelector<HTMLElement>(`[data-testid="${testid}"]`)!
@@ -269,18 +330,18 @@ describe('TabBar', () => {
       expect(flare.background).toMatch(/var\(--tab-active-bg\) 12px/)
     }
 
-    // 여백 · 두께 · 여백(2 + 2 + 2) 칸이 머리 경계 가운데에 걸린다.
+    // 여백 · 두께 · 여백(2 + 1 + 2) 칸이 머리 경계 가운데에 걸린다.
     const slot = part('c', 'tab-separator')
     expect([slot.style.width, slot.style.left, slot.style.paddingLeft, slot.style.paddingRight]).toEqual([
-      '6px',
-      '-3px',
+      '5px',
+      '-2.5px',
       '2px',
       '2px',
     ])
     expect(slot.style.boxSizing).toBe('border-box')
     expect(slot.style.alignItems).toBe('center')
     const line = (slot.firstElementChild as HTMLElement).style
-    expect([line.width, line.height, line.borderRadius]).toEqual(['2px', '16px', '1px'])
+    expect([line.width, line.height, line.borderRadius]).toEqual(['1px', '13px', '0.5px'])
   })
 
   // Chrome `horizontal_tab_style_views.cc` `GetSeparatorOpacity` · `GetHoverInterpolatedSeparatorOpacity`.
@@ -313,6 +374,25 @@ describe('TabBar', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  // 사용자 보고 2026-10-21 — 마지막 비활성 머리의 × 와 + 가 붙어 보였다.
+  it('마지막 머리 오른쪽 가에 끝 구분선 — 마지막 머리에만 · 경계 가운데 · 비활성 · 맴돎 아님일 때만 보인다', () => {
+    const tabs = ['a', 'b', 'c'].map(id => ({ id, name: id }))
+    const bar = renderBar('a', tabs)
+    const trail = () => screen.getByTestId('tab-separator-trailing')
+    expect(screen.getAllByTestId('tab-separator-trailing')).toHaveLength(1)
+    expect(head('c').contains(trail())).toBe(true)
+    expect([trail().style.right, trail().style.left, trail().style.width]).toEqual(['-2.5px', '', '5px'])
+    expect(trail().style.opacity).toBe('1')
+
+    fireEvent.pointerEnter(head('c'))
+    expect(trail().style.opacity).toBe('0')
+    fireEvent.pointerLeave(head('c'))
+    expect(trail().style.opacity).toBe('1')
+
+    bar.rerender({ active: 'c' })
+    expect(trail().style.opacity).toBe('0')
   })
 })
 
@@ -505,7 +585,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
   })
 
   it('좁은 탭바 — 보이는 머리만 그리고 활성 최소 폭보다 좁은 비활성 머리는 닫기 버튼을 감춘다', async () => {
-    rowWidth = 140 // 쓸 수 있는 폭 100 → 폭 42 · 32 · 32 · 32 · 보이는 것 = 앞 둘
+    rowWidth = 140 // 쓸 수 있는 폭 100 → 폭 52 · 32 · 32 · 32 · 보이는 것 = 앞 둘
     await mount('a')
     expect(headIds()).toEqual(['a', 'b'])
     expect(head('a').style.width).toBe(`${TAB_MIN_ACTIVE_W}px`)
@@ -1036,17 +1116,17 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
 
   // ── 이름 편집 · 좁은 탭바 ──
   it('좁은 탭바 — 비활성 머리 더블클릭의 둘째 클릭이 막 생긴 닫기 버튼에 떨어져도 닫지 않고 편집을 연다 · 그 뒤 따로 누른 닫기는 닫는다', () => {
-    rowWidth = 140 // 쓸 수 있는 폭 100 → a 42 · b 32(닫기 버튼 없음) · 보이는 것 = 앞 둘
+    rowWidth = 140 // 쓸 수 있는 폭 100 → a 52 · b 32(닫기 버튼 없음) · 보이는 것 = 앞 둘 · b 는 화면 x 152..184
     const bar = renderBar('a', ABCD)
     expect(head('b').querySelector('[data-testid="tab-close"]')).toBeNull()
-    fireEvent.pointerDown(nameOf('b'), { button: 0, pointerId: 1, clientX: 150, clientY: 50 })
+    fireEvent.pointerDown(nameOf('b'), { button: 0, pointerId: 1, clientX: 160, clientY: 50 })
     expect(bar.onSwitch).toHaveBeenCalledWith('b')
     bar.rerender({ active: 'b' })
-    pointer('pointerup', 150)
+    pointer('pointerup', 160)
     fireEvent.click(head('b'), { detail: 1 })
 
     const close = head('b').querySelector<HTMLElement>('[data-testid="tab-close"]')!
-    fireEvent.pointerDown(close, { button: 0, pointerId: 1, clientX: 150, clientY: 50 })
+    fireEvent.pointerDown(close, { button: 0, pointerId: 1, clientX: 160, clientY: 50 })
     fireEvent.click(close, { detail: 2 })
     fireEvent.doubleClick(close, { detail: 2 })
     expect(bar.onClose).not.toHaveBeenCalled()
@@ -1059,7 +1139,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
   })
 
   it('좁은 탭바 — 이름 칸 폭이 0 인 활성 머리도 머리 더블클릭으로 편집을 열고, 편집 중 머리는 표준 폭 · 맨 위 · 줄 왼쪽 끝까지 당겨져 쓸 수 있는 폭 너머(+ 자리)까지 덮는다', () => {
-    rowWidth = 140 // 활성 b → a 32(x 0) · b 42(x 32) · + x 74 · 쓸 수 있는 폭 100 — 편집 중 b 는 0..160
+    rowWidth = 140 // 활성 b → a 32(x 0) · b 52(x 32) · + x 84 · 쓸 수 있는 폭 100 — 편집 중 b 는 0..160
     renderBar('b', ABCD)
     expect(xOf(head('b'))).toBe(32)
     fireEvent.doubleClick(head('b'))
@@ -1099,10 +1179,10 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
   })
 
   it('좁은 탭바 — 왼쪽으로 당긴 편집 머리가 덮은 이웃 자리의 누름도 그 이웃으로 전환하고, 밑에 머리가 없는 + 자리의 누름은 지금처럼 둔다', () => {
-    rowWidth = 140 // 활성 b → a 32(x 0) · b 42(x 32) · + x 74 — 편집 중 b 는 0..160
+    rowWidth = 140 // 활성 b → a 32(x 0) · b 52(x 32) · + x 84 — 편집 중 b 는 0..160
     const bar = renderBar('b', ABCD)
     fireEvent.doubleClick(head('b'))
-    fireEvent.pointerDown(head('b'), { button: 0, pointerId: 1, clientX: 180, clientY: 50 })
+    fireEvent.pointerDown(head('b'), { button: 0, pointerId: 1, clientX: 190, clientY: 50 })
     expect(screen.getByTestId('tab-rename-input').getAttribute('data-view-id')).toBe('b')
     expect(bar.onCreate).not.toHaveBeenCalled()
 

@@ -25,11 +25,12 @@ import {
   type RefObject,
 } from 'react'
 
+import { Plus, X } from 'lucide-react'
 import type { ViewMeta } from '../../api/layoutTypes'
 import { t } from '../../i18n'
 import { shownTab, stripHeld } from './dock/dragOverride'
 import { useLocalDrag } from './dock/localDrag'
-import { TAB_MIN_ACTIVE_W, TAB_STANDARD_W } from './tabStrip/layout'
+import { TAB_BUTTON_SIZE, TAB_HEAD_GAP, TAB_HEAD_PAD, TAB_MIN_ACTIVE_W, TAB_STANDARD_W } from './tabStrip/layout'
 import { measureStrip, stripBounds } from './tabStrip/measure'
 import { EASE_OUT_CSS, slideMs, slideTargets } from './tabStrip/reorderGeometry'
 import { useTabDragSource } from './tabStrip/useTabDragSource'
@@ -158,9 +159,10 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
     if (x === null) return
     let w = bounds.tabs[i].x1 - bounds.tabs[i].x0
     // 이름 편집 중인 머리는 표준 폭으로 넓혀 이웃 위에 그린다 — 좁은 머리에서는 머리 내용 칸의 `overflow: hidden` 안에 이름 칸 ·
-    //   입력 칸이 모자랐다(실측 — 머리 42 · 62 · 86 px 에서 0 · 19 · 43 px). 오른쪽 끝이 쓸 수 있는 폭을 넘지 않게 왼쪽으로
-    //   당기되 줄 왼쪽 끝(0)에서 멈춘다 — 쓸 수 있는 폭이 표준 폭보다 좁으면 머리가 0..160 으로 그 폭을 넘어 `+` 를 덮을 수
-    //   있고, 숨은 탭이 있어 `+` 가 쓸 수 있는 폭 안쪽에 서면 `+` 일부를 덮을 수 있다. 덮인 이웃 머리의 누름 = `coveredHead`.
+    //   입력 칸이 모자랐다(실측 — 옛 ≈ 11 px 닫기 버튼 때 머리 42 · 62 · 86 px 에서 0 · 19 · 43 px · 22 px 원으로는 다시 재지
+    //   않았다). 오른쪽 끝이 쓸 수 있는 폭을 넘지 않게 왼쪽으로 당기되 줄 왼쪽 끝(0)에서 멈춘다 — 쓸 수 있는 폭이 표준 폭보다
+    //   좁으면 머리가 0..160 으로 그 폭을 넘어 `+` 를 덮을 수 있고, 숨은 탭이 있어 `+` 가 쓸 수 있는 폭 안쪽에 서면 `+` 일부를
+    //   덮을 수 있다. 덮인 이웃 머리의 누름 = `coveredHead`.
     if (motion === null && id === editingId && w < TAB_STANDARD_W) {
       w = TAB_STANDARD_W
       if (available !== null) x = Math.max(0, Math.min(x, available - w))
@@ -236,6 +238,9 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
   const leftNeighbour = new Map(heads.slice(1).map((h, k) => [h.id, heads[k].id]))
   const separatorShown = (id: string) => !lit(leftNeighbour.get(id)!) && !lit(id)
   const separatorFadesIn = (id: string) => hoverEnding.has(id) || hoverEnding.has(leftNeighbour.get(id)!)
+  // 마지막 그린 머리의 오른쪽 가에도 하나 — 없으면 마지막 비활성 머리의 × 와 + 가 붙어 보였다(ADR-0298 결정 4).
+  //   머리 안쪽에 걸어 줄 폭 · + 자리는 그대로다. 보임 · 서서히 = 그 머리 하나만 본다.
+  const trailingId = heads.length > 0 ? heads[heads.length - 1].id : null
 
   return (
     <div
@@ -246,13 +251,16 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
         alignItems: 'stretch',
         height: '28px',
         flexShrink: 0,
-        // ★면 규칙 = 바는 내용 면보다 한 칸 눌린 면(`--tab-bar-bg`), 활성 탭은 내용과 같은 면(`--tab-active-bg`)★ —
-        //   Chrome 처럼 활성 탭이 아래 캔버스로 이어진다(사용자 결정 2026-10-19 · 값은 테마마다 `styles/theme.css`).
-        //   ☞ 활성 탭이 바보다 어두운 배치와 `--text` 를 섞어 바를 띄우는 안은 적용해 봤다가 되돌렸다 — 전자는 활성 탭이
-        //   구멍처럼 읽혔고, 후자는 바가 트리 패널과 따로 노는 회색 띠가 됐다(사용자 판단 2026-08-23).
+        // ★면 규칙 = 활성 탭은 내용과 같은 면(`--tab-active-bg`)이라 아래 캔버스로 이어지고, 바(`--tab-bar-bg`)는 내용과
+        //   밝기가 다른 면★ — Chrome 꼴(사용자 결정 2026-10-19 · 값은 테마마다 `styles/theme.css`). 라이트 · e-ink = 바가 내용보다
+        //   한 칸 눌린 면 · 다크 = 바가 내용보다 밝아 활성 탭이 가장 어둡다(Zed Ayu Dark 꼴 — ADR-0298 결정 1).
+        //   ☞ 활성 탭이 바보다 어두운 배치는 「활성 탭이 구멍처럼 읽힌다」로 되돌린 적이 있고(사용자 판단 2026-08-23) 그 판단은
+        //   라이트 · e-ink 에 남는다 — 다크는 ADR-0298 이 그것을 뒤집었다(바가 #000 이면 활성이 안 보였다). `--text` 를
+        //   섞어 바를 띄우는 안은 바가 트리 패널과 따로 노는 회색 띠가 돼 되돌렸다(사용자 판단 2026-08-23).
         background: 'var(--tab-bar-bg)',
-        // 다크는 내용(#0a0a0a)이 거의 검정이라 바를 더 누를 여지가 없다 — 바와 내용의 경계는 이 선이 긋고, 활성 면 · 날개가
-        //   덮은 자리만 끊긴다. 지우면 줄 높이가 1px 늘어 활성 면의 `bottom: -1` 도 함께 고친다.
+        // 바 아래 1px 선 — 활성 면 · 날개가 덮은 자리만 끊긴다. 선이 바와 내용을 가르는 것은 e-ink 뿐이고 다크 · 라이트는 면
+        //   밝기 차가 가르므로 투명이다(선 자리는 남아 줄 높이는 그대로). 테두리를 지우면 줄 높이가 1px 늘어 활성 면의
+        //   `bottom: -1` 도 함께 고친다.
         borderBottom: '1px solid var(--tab-bar-edge)',
         fontFamily: 'var(--font-ui)',
         fontSize: '12px',
@@ -270,6 +278,10 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
           const tab = metaById.get(id) ?? { id, name: '' }
           const isActive = id === activeId
           const editing = editingId === id
+          // 이름 · × 는 한 전경색 — 활성 · 맴돎이면 `--text`(ADR-0298 결정 8). 한 전경색은 Chrome 꼴이고(`tab.cc` — 탭 제목과
+          //   닫기 단추에 같은 전경색), 맴돎 → `--text` 는 우리 선택이다(Chrome 은 맴돎 전경색을 따로 둔다 —
+          //   `kColorTabForegroundInactiveHoverFrameActive` · `tab_style.cc`).
+          const fg = lit(id) ? 'var(--text)' : 'var(--tab-text-inactive)'
           return (
             <div
               key={id}
@@ -314,7 +326,7 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
                 zIndex: editing ? 2 : id === topId ? 1 : undefined,
                 boxSizing: 'border-box',
                 cursor: 'pointer',
-                color: isActive ? 'var(--text)' : 'var(--text-muted)',
+                color: fg,
               }}
             >
               {/* 면 · 날개 · 구분선은 그리기만 한다(`pointer-events: none`) — 머리 상자(누름 · 잡기 판정)는 그대로이고 날개가 이웃
@@ -334,6 +346,15 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
               )}
               {leftNeighbour.has(id) && (
                 <span aria-hidden data-testid="tab-separator" style={separatorStyle(separatorShown(id), separatorFadesIn(id))}>
+                  <span style={SEPARATOR_LINE} />
+                </span>
+              )}
+              {id === trailingId && (
+                <span
+                  aria-hidden
+                  data-testid="tab-separator-trailing"
+                  style={{ ...separatorStyle(!lit(id), hoverEnding.has(id)), left: undefined, right: -SEPARATOR_SLOT / 2 }}
+                >
                   <span style={SEPARATOR_LINE} />
                 </span>
               )}
@@ -399,18 +420,10 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
                       activatedBy.current = null
                       onClose(id)
                     }}
-                    style={{
-                      flexShrink: 0,
-                      background: 'transparent',
-                      border: 'none',
-                      color: 'var(--text-muted)',
-                      cursor: 'pointer',
-                      padding: '0 2px',
-                      fontSize: '12px',
-                      lineHeight: 1,
-                    }}
+                    className={BUTTON_HOVER}
+                    style={{ ...CLOSE_STYLE, color: fg }}
                   >
-                    ×
+                    <X aria-hidden size={BUTTON_ICON} strokeWidth={2} />
                   </button>
                 )}
               </div>
@@ -423,9 +436,12 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
           aria-label={t('tab.create')}
           data-testid="tab-add"
           onClick={onCreate}
+          className="group/add"
           style={{ ...ADD_STYLE, transform: `translateX(${end}px)`, transition: slide }}
         >
-          +
+          <span aria-hidden data-testid="tab-add-circle" className={ADD_HOVER} style={ADD_CIRCLE}>
+            <Plus size={BUTTON_ICON} strokeWidth={2} />
+          </span>
         </button>
         {marker !== null && (
           <span
@@ -439,18 +455,61 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
   )
 }
 
-// 가로 여백(margin)을 두지 말 것 — 쓸 수 있는 폭은 줄 폭 − `+` 테두리 상자 폭이다(`measure.ts`).
+// 활성 · 맴돎 면은 머리 위 이만큼 내려앉는다 — 그 위로 바가 보여야 탭이 바에서 솟은 조각으로 읽힌다(Chrome). 머리 상자는 줄
+//   높이 그대로다. 머리 내용 칸과 `+` 상자도 이 높이부터 줄 바닥까지 세워 × 원과 `+` 원의 가운데 높이를 맞춘다.
+const SURFACE_TOP = 4
+
+// 닫기 · `+` 단추 = `TAB_BUTTON_SIZE`(22) px 원 안의 13 px 아이콘(ADR-0298 결정 5 · 사용자 결정 2026-10-21). `+` 원 = Chrome
+//   `tab_strip_control_button.cc` `kButtonSize` 28 을 머리 높이 비율 28/34 로 줄인 자리(셈은 ≈ 23 — 22 는 사용자 결정). × 원 =
+//   같은 22 — Chrome 닫기 단추의 보이는 크기(맴돎 모양 = `layout_constants.cc` `kTabCloseButtonSize` 16 dp · `tab.cc`
+//   #545-548)보다 크게 둔 사용자 결정이라 Chrome 비율로 줄이지 말 것. 아이콘 둘 = Chrome `tab_strip_control_button.cc`
+//   `kIconSize` 16 × 28/34 ≈ 13. 맴돎 원 = Chrome 잉크 드롭 하이라이트 불투명도 0.16(`--tab-button-hover-bg`).
+const BUTTON_ICON = 13
+// ★클래스 이름은 통째 글자로 둔다★ — Tailwind 는 소스 글자를 훑어 클래스를 만들므로 조각을 이어 붙이면 생기지 않는다. 맴돎
+//   색을 인라인 `background` 로 두지 말 것 — 인라인이 클래스를 이겨 맴돎 원이 사라진다.
+const BUTTON_HOVER = 'bg-transparent hover:bg-[var(--tab-button-hover-bg)]'
+const ADD_HOVER = 'group-hover/add:bg-[var(--tab-button-hover-bg)]'
+
+const CLOSE_STYLE: CSSProperties = {
+  flexShrink: 0,
+  width: TAB_BUTTON_SIZE,
+  height: TAB_BUTTON_SIZE,
+  borderRadius: '50%',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  padding: 0,
+  border: 'none',
+  cursor: 'pointer',
+}
+
+/** `+` 원 앞 틈 — 마지막 머리 오른 가에 걸친 구분선(±2.5)에 원이 닿지 않게. */
+const TAB_ADD_GAP = 4
+
+// 가로 여백(margin)을 두지 말 것 — 쓸 수 있는 폭은 줄 폭 − `+` 테두리 상자 폭이다(`measure.ts`). 원 앞 틈은 그래서 margin
+//   이 아니라 왼 패딩이다(상자 = 틈 4 + 원 22). 맴돎 원은 상자가 아니라 안의 원에만 칠한다(Tailwind `group-hover/add`).
 const ADD_STYLE: CSSProperties = {
   position: 'absolute',
-  top: 0,
+  top: SURFACE_TOP,
   bottom: 0,
   left: 0,
+  display: 'flex',
+  alignItems: 'center',
   background: 'transparent',
   border: 'none',
-  color: 'var(--text-muted)',
+  // × 의 쉴 때 회색과 같은 토큰.
+  color: 'var(--tab-text-inactive)',
   cursor: 'pointer',
-  padding: '0 12px',
-  fontSize: '14px',
+  padding: `0 0 0 ${TAB_ADD_GAP}px`,
+}
+
+const ADD_CIRCLE: CSSProperties = {
+  width: TAB_BUTTON_SIZE,
+  height: TAB_BUTTON_SIZE,
+  borderRadius: '50%',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
 }
 
 const REDUCED_MOTION = '(prefers-reduced-motion: reduce)'
@@ -467,9 +526,6 @@ function placeAt(ids: readonly string[], view: string, index: number): string[] 
   return [...others.slice(0, k), view, ...others.slice(k)]
 }
 
-// 활성 · 맴돎 면은 머리 위 이만큼 내려앉는다 — 그 위로 바가 보여야 탭이 바에서 솟은 조각으로 읽힌다(Chrome). 머리 상자는 줄
-//   높이 그대로다.
-const SURFACE_TOP = 4
 // 활성 탭 모양 = Chrome 그대로(PRD R27 · ADR-0295 결정 1 · Chromium `tab_style.cc` `GetTopCornerRadius` ·
 //   `GetBottomCornerRadius`) — 위 모서리 반지름과 아래 바깥 날개 반지름은 다른 값이다.
 const CORNER_RADIUS = 10
@@ -486,8 +542,8 @@ const HEAD_CONTENT: CSSProperties = {
   overflow: 'hidden',
   display: 'flex',
   alignItems: 'center',
-  gap: '6px',
-  padding: '0 12px',
+  gap: TAB_HEAD_GAP,
+  padding: `0 ${TAB_HEAD_PAD}px`,
   whiteSpace: 'nowrap',
 }
 
@@ -550,12 +606,13 @@ const MARKER_STYLE: CSSProperties = {
   zIndex: 3,
 }
 
-// 구분선 = Chrome 그대로(PRD R27 · Chromium `tab_style.cc` `kSeparator*` · `horizontal_tab_style_views.cc`
-//   `GetSeparatorBounds`) — 두께 2 · 높이 16 · 좌우 여백 2 · 둥글기 = 두께의 반 · 위아래 = 머리 높이 가운데. 여백 · 두께 ·
-//   여백 칸을 이웃 머리와의 경계 가운데에 건다 — Chrome 은 그 칸을 탭끼리 겹친 자리(18)에 두는데 우리 머리는 겹치지 않는다
-//   (`tabStrip/layout.ts` 머리).
-const SEPARATOR_W = 2
-const SEPARATOR_H = 16
+// 구분선 = Chrome 꼴(PRD R27 · Chromium `tab_style.cc` `kSeparator*` · `horizontal_tab_style_views.cc`
+//   `GetSeparatorBounds`) — 좌우 여백 2 · 둥글기 = 두께의 반 · 위아래 = 머리 높이 가운데는 그대로이고, ★두께 1 · 높이 13 은
+//   ADR-0298 결정 3★(두께 = Chrome 의 2 보다 얇게 · 높이 = Chrome 탭 34 대 구분선 16 의 비율을 우리 머리 28 에). 여백 ·
+//   두께 · 여백 칸을 이웃 머리와의 경계 가운데에 건다 — Chrome 은 그 칸을 탭끼리 겹친 자리(18)에 두는데 우리 머리는 겹치지
+//   않는다(`tabStrip/layout.ts` 머리).
+const SEPARATOR_W = 1
+const SEPARATOR_H = 13
 const SEPARATOR_MARGIN = 2
 const SEPARATOR_SLOT = SEPARATOR_MARGIN + SEPARATOR_W + SEPARATOR_MARGIN
 // 사라지기 · 나타나기 = Chrome 소스 그대로(PRD R27 · Q23) — 배경이 보이는 탭(활성 ·

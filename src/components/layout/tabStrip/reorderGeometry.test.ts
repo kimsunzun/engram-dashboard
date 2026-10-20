@@ -44,15 +44,15 @@ const EMPTY: StripBounds = { tabs: [], visible: [], lastVisible: -1 }
 const FOUR = stripOf([100, 100, 100, 100])
 /** 단계 B — 활성(끄는 탭) A · 비활성 I 와 그 사이(`layout.ts` 가 내는 꼴). */
 const PHASE_B = stripOf([I, A, I, I])
-/** 넘침 — 보이는 셋(A · I · I) 뒤 숨긴 둘이 보이는 끝 106 너머에 제 폭으로 선다(106–138 · 138–170). */
+/** 넘침 — 보이는 셋(A · I · I) 뒤 숨긴 둘이 보이는 끝 116 너머에 제 폭으로 선다(116–148 · 148–180). */
 const OVERFLOW = stripOf([A, I, I, I, I], 3)
-/** 넘침 · 끄는 탭(활성)이 끝 너머 4 — 레이아웃은 숨기지만 끄는 탭이라 보이는 탭으로 센다(숨긴 3 = 96–128 · 4 = 128–170). */
+/** 넘침 · 끄는 탭(활성)이 끝 너머 4 — 레이아웃은 숨기지만 끄는 탭이라 보이는 탭으로 센다(숨긴 3 = 96–128 · 4 = 128–180). */
 const DRAGGED_HIDDEN = stripOf([I, I, I, I, A], 3, 4)
 
 describe('idealBounds — 모든 탭 계산 폭 누적 · 보임 · 보이는 마지막 자리', () => {
   it('숨긴 탭도 보이는 끝 너머에 제 폭으로 선다 · 보이는 마지막 = 2', () => {
-    expect(idealBounds(tabStripLayout(135, 5, 0))).toEqual(OVERFLOW)
-    expect(OVERFLOW.tabs[3]).toEqual({ x0: 106, x1: 138 })
+    expect(idealBounds(tabStripLayout(A + 3 * I - 3, 5, 0))).toEqual(OVERFLOW)
+    expect(OVERFLOW.tabs[3]).toEqual({ x0: A + 2 * I, x1: A + 3 * I })
     expect(OVERFLOW.lastVisible).toBe(2)
   })
   it('넉넉하면 모두 표준 폭', () => {
@@ -104,10 +104,10 @@ describe('dragAreaWidth — 잰 폭 · 재지 못하면 보이는 탭 폭 합', 
     { name: '마지막 탭 뒤 빈 곳까지(잰 폭이 넓음)', available: 500, B: FOUR, out: 500 },
     { name: '탭 폭 합이 더 넓어도 잰 폭(Chrome 탭바 폭 ≤ 쓸 수 있는 폭)', available: 300, B: FOUR, out: 300 },
     { name: '보이는 탭이 잰 폭을 채워도 잰 폭', available: 100, B: OVERFLOW, out: 100 },
-    { name: '레이아웃이 숨긴 끄는 탭을 보이게 세도 잰 폭(96 + 42 = 138 이 아니라 135)', available: 135, B: DRAGGED_HIDDEN, out: 135 },
+    { name: '레이아웃이 숨긴 끄는 탭을 보이게 세도 잰 폭(96 + 52 = 148 이 아니라 135)', available: 135, B: DRAGGED_HIDDEN, out: 135 },
     { name: '소수 폭은 그대로', available: 450.5, B: FOUR, out: 450.5 },
     { name: '재지 못함(null) = 탭 폭 합', available: null, B: FOUR, out: 400 },
-    { name: '재지 못함 · 숨긴 탭은 합에 안 든다', available: null, B: OVERFLOW, out: 106 },
+    { name: '재지 못함 · 숨긴 탭은 합에 안 든다', available: null, B: OVERFLOW, out: A + 2 * I },
     { name: '유한하지 않은 수도 재지 못함', available: Number.NaN, B: FOUR, out: 400 },
     { name: '탭 없음', available: 200, B: EMPTY, out: 200 },
   ]
@@ -175,14 +175,14 @@ describe('insertionIndex — Chromium CalculateInsertionIndex', () => {
     { name: 'd=3 · 제자리', B: FOUR, d: 3, L: 251, out: 3 },
     { name: 'd=3 · 맨 앞', B: FOUR, d: 3, L: 0, out: 0 },
 
-    // ── 폭이 다름(단계 B · 끄는 탭 = 활성 A, d=1) — k0 0 · k1 32 · k3 106 − 42 = 64 · k4 96 ──
+    // ── 폭이 다름(단계 B · 끄는 탭 = 활성 A, d=1) — k0 0 · k1 32 · k3 116 − 52 = 64 · k4 96 ──
     { name: '단계 B · k1 · k3 가운데(48) 동률 → k1 = 제자리', B: PHASE_B, d: 1, L: 48, out: 1 },
     { name: '단계 B · 가운데 넘음 → k3 → 2', B: PHASE_B, d: 1, L: 48.5, out: 2 },
     { name: '단계 B · k3 · k4 가운데(80) 동률 → 2', B: PHASE_B, d: 1, L: 80, out: 2 },
     { name: '단계 B · k4 → 3', B: PHASE_B, d: 1, L: 81, out: 3 },
 
     // ── 넘친 탭바 — 숨긴 탭은 제 폭 · 보이는 마지막 자리로 자른다 ──
-    // OVERFLOW · d=0(A): k0 0 · k2 32 · k3 64 · k4 138 − 42 = 96 · k5 128.
+    // OVERFLOW · d=0(A): k0 0 · k2 32 · k3 64 · k4 148 − 52 = 96 · k5 128.
     { name: '넘침 · 숨긴 탭 사이 후보(k4 → 3)가 이겨도 보이는 마지막 자리 2 로 자른다', B: OVERFLOW, d: 0, L: 93, out: 2 },
     { name: '넘침 · 보이는 범위 안은 그대로(k3 → 2)', B: OVERFLOW, d: 0, L: 64, out: 2 },
     { name: '넘침 · 보이는 범위 안(k2 → 1)', B: OVERFLOW, d: 0, L: 40, out: 1 },
@@ -232,10 +232,10 @@ describe('reorderThreshold — round(지금 자리 탭 폭 ÷ 160 × 16)', () =>
   const CASES: { name: string; widths: number[]; to: number; out: number }[] = [
     { name: '표준 폭 = 16', widths: [160, 160], to: 1, out: 16 },
     { name: '100 → 10', widths: [100, 100], to: 0, out: 10 },
-    { name: '활성 최소 42 → 4.2 → 4', widths: [42, 32], to: 0, out: 4 },
+    { name: '활성 최소 A(52) → 5.2 → 5', widths: [A, I], to: 0, out: 5 },
     { name: '45 → 4.5 → 5(.5 는 위로)', widths: [32, 45], to: 1, out: 5 },
-    { name: '비활성 최소 32 → 3.2 → 3', widths: [42, 32], to: 1, out: 3 },
-    { name: '자리 to 의 탭 폭을 쓴다(끄는 탭 폭 아님)', widths: [42, 32, 32], to: 2, out: 3 },
+    { name: '비활성 최소 I(32) → 3.2 → 3', widths: [A, I], to: 1, out: 3 },
+    { name: '자리 to 의 탭 폭을 쓴다(끄는 탭 폭 아님)', widths: [A, I, I], to: 2, out: 3 },
   ]
   for (const c of CASES) {
     it(c.name, () => {
@@ -340,7 +340,7 @@ describe('reorderMove — 움직임 하나', () => {
 
   it('넘친 탭바 — 그리는 L 은 끌기 영역 끝까지 · 자리는 보이는 마지막까지', () => {
     const out = reorderMove({ bounds: OVERFLOW, dragged: 0, grabOffset: 0, available: 135, justAttached: false, pointerX: 120, lastMovePoint: 0 })
-    expect(out).toEqual({ left: 93, to: 2, send: true, lastMovePoint: 120 })
+    expect(out).toEqual({ left: 135 - A, to: 2, send: true, lastMovePoint: 120 })
   })
 
   it('끄는 탭 자리가 범위 밖이면 RangeError', () => {
@@ -396,10 +396,10 @@ describe('dropIndex · dropMarkerX — 다른 창 탭바의 놓을 자리 · 세
   })
 
   it('숨긴 탭이 넘친 탭바는 보이는 마지막 머리 다음 자리에서 자른다(R24)', () => {
-    // 보이는 셋 = 0–42 · 42–74 · 74–106 · 숨긴 둘이 106–138 · 138–170 에 제 폭으로 선다.
+    // 보이는 셋 = 0–52 · 52–84 · 84–116 · 숨긴 둘이 116–148 · 148–180 에 제 폭으로 선다.
     expect(dropIndex(OVERFLOW, 120, null)).toBe(3)
     expect(dropIndex(OVERFLOW, 160, null)).toBe(3)
-    expect(dropMarkerX(OVERFLOW, 3, null)).toBe(106)
+    expect(dropMarkerX(OVERFLOW, 3, null)).toBe(A + 2 * I)
   })
 
   it('탭 0 개 = 자리 0 · 선 0', () => {

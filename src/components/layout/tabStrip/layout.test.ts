@@ -40,7 +40,7 @@ const CASES: Case[] = [
   { name: '넘김점 바로 아래 — 활성 A 고정 · 비활성만 준다', available: 3 * A - 1, n: 3, active: 1, widths: [A, A, A - 1], visible: [T, T, T] },
   {
     name: '남는 px 은 활성을 건너뛰고 비활성만 왼쪽부터(TabAcceptsExtraSpace — 활성 최소 = 넘김점)',
-    available: 140,
+    available: A + 3 * I + 2,
     n: 4,
     active: 0,
     widths: [A, I + 1, I + 1, I],
@@ -48,7 +48,7 @@ const CASES: Case[] = [
   },
   {
     name: '활성이 맨 왼쪽이 아니어도 — 그 앞 비활성은 받고 활성은 건너뛴다',
-    available: 140,
+    available: A + 3 * I + 2,
     n: 4,
     active: 1,
     widths: [I + 1, A, I + 1, I],
@@ -63,7 +63,7 @@ const CASES: Case[] = [
     widths: [A, I, I, I],
     visible: [T, T, T, F],
   },
-  { name: '활성 없음 — 모두 비활성 최소 I 기준', available: 140, n: 4, active: -1, widths: [A - 7, A - 7, A - 7, A - 7], visible: [T, T, T, T] },
+  { name: '활성 없음 — 모두 비활성 최소 I 기준', available: 140, n: 4, active: -1, widths: [I + 3, I + 3, I + 3, I + 3], visible: [T, T, T, T] },
   { name: '머리 하나 · 비활성 — I 와 A 사이', available: 35, n: 1, active: -1, widths: [35], visible: [T] },
 
   // ── 숨김(ShouldTabBeVisible) ──
@@ -203,7 +203,7 @@ describe('tabStripLayout — 폭 상한(닫기 모드의 고정 폭) · 보임�
   }
   const CAP_CASES: CapCase[] = [
     {
-      name: '상한이 좁으면 폭은 상한으로 · 보임은 잰 폭 135 로(상한 80 으로 재면 둘째 뒤가 숨는다)',
+      name: '상한이 좁으면 폭은 상한으로 · 보임은 잰 폭 135 로(상한 80 으로 재면 둘째부터 숨는다)',
       available: 135,
       n: 5,
       active: 0,

@@ -71,11 +71,11 @@ describe('frozenAvailable — 지금 폭 − 빠지는 폭', () => {
     { name: '비활성 하나를 뺌', current: 400, widths: [100, 100, 100, 100], closed: 1, out: 300 },
     { name: '바탕은 폭 합이 아니라 넘긴 지금 폭', current: 330, widths: [100, 100, 100], closed: 1, out: 230 },
     { name: '단계 A 에서 활성을 뺌 — 닫힌 폭(다음 활성을 줘도)', current: 301, widths: [101, 100, 100], closed: 0, next: 1, out: 200 },
-    { name: '단계 B 에서 활성을 뺌 — ★다음 활성 탭의 지금 폭★', current: 146, widths: [I + 3, A, I + 3, I + 2], closed: 1, next: 2, out: 111 },
-    { name: '단계 B 라도 비활성을 빼면 닫힌 폭', current: 146, widths: [I + 3, A, I + 3, I + 2], closed: 2, out: 111 },
-    { name: '단계 B · 다음 활성이 숨긴 탭이어도 그 계산 폭', current: 106, widths: [A, I, I], closed: 0, next: 2, out: 74 },
+    { name: '단계 B 에서 활성을 뺌 — ★다음 활성 탭의 지금 폭★', current: 3 * I + 8 + A, widths: [I + 3, A, I + 3, I + 2], closed: 1, next: 2, out: 2 * I + 5 + A },
+    { name: '단계 B 라도 비활성을 빼면 닫힌 폭', current: 3 * I + 8 + A, widths: [I + 3, A, I + 3, I + 2], closed: 2, out: 2 * I + 5 + A },
+    { name: '단계 B · 다음 활성이 숨긴 탭이어도 그 계산 폭', current: A + 2 * I, widths: [A, I, I], closed: 0, next: 2, out: A + I },
     { name: '숨긴 탭을 빼도 그 계산 폭(Chrome 의 보임 = 고정 탭 · 그룹뿐)', current: 135, widths: [A, I, I, I, I], closed: 3, out: 103 },
-    { name: '넘김점 그대로(모두 A) = 단계 A', current: 126, widths: [A, A, A], closed: 1, next: 2, out: 84 },
+    { name: '넘김점 그대로(모두 A) = 단계 A', current: 3 * A, widths: [A, A, A], closed: 1, next: 2, out: 2 * A },
   ]
   for (const c of CASES) {
     it(c.name, () => {
@@ -88,7 +88,7 @@ describe('frozenAvailable — 지금 폭 − 빠지는 폭', () => {
     expect(() => frozenAvailable(300, [100, 100, 100], -1)).toThrow(RangeError)
     expect(() => frozenAvailable(300, [100, 100, 100], 0.5)).toThrow(RangeError)
     expect(() => frozenAvailable(300, [100, 100, 100], 0, 3)).toThrow(RangeError)
-    expect(() => frozenAvailable(146, [I + 3, A, I + 3, I + 2], 1, 1)).toThrow(RangeError)
+    expect(() => frozenAvailable(3 * I + 8 + A, [I + 3, A, I + 3, I + 2], 1, 1)).toThrow(RangeError)
   })
 })
 
@@ -189,7 +189,7 @@ describe('stepClosingMode — 들어감 · 탭이 빠짐', () => {
     {
       name: '단계 B 에서 활성을 닫음 — 다음 활성 폭을 뺀다',
       from: CLOSING_OFF,
-      input: closed([I + 3, A, I + 3, I + 2], 1, 146, { next: 2 }),
+      input: closed([I + 3, A, I + 3, I + 2], 1, 3 * I + 8 + A, { next: 2 }),
       out: { on: true, available: 2 * I + 5 + A, deadline: null },
     },
   ]
