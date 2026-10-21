@@ -126,7 +126,9 @@ pub(crate) fn on_app_exiting(app: &AppHandle) {
 
 /// 안내 창 label — 팝아웃 label 이 아니라 트레이 · 닫기 요청 · 명부의 대상이 아니다(TRD §2-5 · G10).
 pub(crate) const DOCK_OVERLAY_LABEL: &str = "dock-overlay";
-// 안내 창 경로(G10) — 웹뷰의 `DockOverlayPage`.
+// 안내 창 경로(G10). ★웹뷰에 이 경로의 페이지가 없다★ — 이 창을 지으면 탭 창 앱(데몬 부팅 · 버스 명령 보고 등 전역 배선)이
+//   돈다. 부팅은 짓지 않고 다시 짓기는 안내 창이 사라질 때만 돈다.
+// TODO(U4c′-1): 안내 창 짓기 · 다시 짓기 몫을 걷는다(TRD S21-slot-docking §7).
 const DOCK_OVERLAY_URL: &str = "index.html#/dock-overlay";
 // 안내 창의 지을 때 크기(논리 px) — 그릴 때 대상 창 안쪽에 맞춰 다시 놓으므로 기다리는 동안의 값일 뿐이다(스파이크
 //   setup 의 G 400 × 300 그대로).

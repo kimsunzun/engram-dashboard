@@ -145,6 +145,12 @@ describe('dragSource — 끄는 동안(출처 탭바 판정)', () => {
     expect(h.src.getSnapshot().motion).toBeNull()
     h.local.setSourceStrip({ index: 2, left: 205, x: 205 })
     expect(h.src.getSnapshot().motion?.index).toBe(2)
+    // 문턱을 넘었어도 자리가 같으면 마지막 이동 점은 그대로(205) — 그 점을 옮기면 다음 판정(180 − 187 = 7)이 문턱 안이 된다.
+    //   ★문턱 16 은 이 하네스(탭 셋 · 480 px)의 값이다 — 폭이나 탭 수를 바꾸면 187 이 문턱을 넘는지 다시 셈한다★
+    h.local.setSourceStrip({ index: 2, left: 187, x: 187 })
+    expect(h.src.getSnapshot().motion?.index).toBe(2)
+    h.local.setSourceStrip({ index: 1, left: 180, x: 180 })
+    expect(h.src.getSnapshot().motion?.index).toBe(1)
   })
 
   it('dragend 뒤의 판정은 듣지 않는다 — 끄는 머리는 확정한 자리로(settled)', () => {

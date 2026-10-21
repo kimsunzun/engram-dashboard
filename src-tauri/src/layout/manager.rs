@@ -234,7 +234,7 @@ pub struct WindowTabs {
     pub canvas: Option<CanvasPx>,
     // ADR-0227
     pub metrics: Option<UiMetrics>,
-    // TRD S21-slot-docking §4 · §2-5 — 늘 보고하는 이유는 `frameReport.ts` 머리
+    // 웹뷰에 보내는 쪽이 없어 늘 None 이다 — 이 칸은 TRD S21-slot-docking §7 U4c′-1 이 걷는다.
     pub chrome: Option<DockChrome>,
     /// 영속 신원 — main 은 `main`, 팝아웃은 그 창 항목이 처음 생길 때 뽑은 UUID(하이픈 소문자). 저장 · 복원은 이
     /// 값을 쓴다. 런타임 label(맵 키)은 한 부팅 안에서만의 신원이다 — 팝아웃 label 은 실행마다 1 부터 다시

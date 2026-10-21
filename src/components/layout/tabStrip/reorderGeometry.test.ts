@@ -1,11 +1,10 @@
 // TRD S21-slot-docking §5-1 · §11 「TS tabStrip」: 탭바 안 순서 이동 순수 기하의 표 시험 — 기대값은 Chromium 규칙을 손으로
-//   셈한 것이다(제자리 후보 건너뜀 · 앞 쪽 동률 · 끄는 탭 뒤 −1 · 보이는 끝 자르기 · 문턱 · `pLast` 는 자리가 바뀔 때만).
+//   셈한 것이다(제자리 후보 건너뜀 · 앞 쪽 동률 · 끄는 탭 뒤 −1 · 보이는 끝 자르기 · 문턱).
 
 import { describe, expect, it } from 'vitest'
 
 import { TAB_MIN_ACTIVE_W, TAB_MIN_INACTIVE_W, TAB_STANDARD_W, tabStripLayout } from './layout'
 import {
-  DRAG_THRESHOLD_PX,
   EASE_OUT_CSS,
   SLIDE_MS,
   type StripBounds,
@@ -18,8 +17,6 @@ import {
   idealBounds,
   insertionIndex,
   moveDue,
-  passedThreshold,
-  reorderMove,
   reorderThreshold,
   slideMs,
   slideTargets,
@@ -75,27 +72,6 @@ describe('idealBounds — 모든 탭 계산 폭 누적 · 보임 · 보이는 �
   })
   it('끄는 탭이 보이면 dragged 는 결과를 바꾸지 않는다', () => {
     expect(idealBounds(tabStripLayout(135, 5, 0), 0)).toEqual(OVERFLOW)
-  })
-})
-
-describe('passedThreshold — 10 px 를 넘어야(같으면 아님)', () => {
-  const CASES: { name: string; p: { x: number; y: number }; out: boolean }[] = [
-    { name: '제자리', p: { x: 0, y: 0 }, out: false },
-    { name: '가로 딱 10', p: { x: DRAG_THRESHOLD_PX, y: 0 }, out: false },
-    { name: '가로 10 넘음', p: { x: 10.001, y: 0 }, out: true },
-    { name: '세로 딱 10(가로세로 같음)', p: { x: 0, y: -10 }, out: false },
-    { name: '세로 10 넘음', p: { x: 0, y: -10.5 }, out: true },
-    { name: '대각 6·8 = 딱 10', p: { x: 6, y: 8 }, out: false },
-    { name: '대각 6·8.01', p: { x: 6, y: 8.01 }, out: true },
-  ]
-  for (const c of CASES) {
-    it(c.name, () => {
-      expect(passedThreshold({ x: 0, y: 0 }, c.p)).toBe(c.out)
-    })
-  }
-  it('누른 점 기준', () => {
-    expect(passedThreshold({ x: 100, y: 50 }, { x: 110, y: 50 })).toBe(false)
-    expect(passedThreshold({ x: 100, y: 50 }, { x: 89, y: 50 })).toBe(true)
   })
 })
 
@@ -260,93 +236,6 @@ describe('moveDue — 붙은 직후 또는 |p − pLast| > 문턱', () => {
       expect(moveDue(c.pLast, c.p, c.thr, c.just)).toBe(c.out)
     })
   }
-})
-
-describe('reorderMove — 움직임 하나', () => {
-  // 같은 폭 넷 · 가운데 잡음(r = 0.5) · 끌기 영역 = 500(마지막 탭 뒤 빈 곳 100).
-  const base = { bounds: FOUR, dragged: 1, grabOffset: 50, available: 500, justAttached: false }
-
-  const CASES: {
-    name: string
-    pointerX: number
-    lastMovePoint: number
-    justAttached?: boolean
-    out: { left: number; to: number; send: boolean; lastMovePoint: number }
-  }[] = [
-    {
-      name: '문턱 안 — 그리기만(L) · 보내지 않음 · pLast 그대로',
-      pointerX: 160,
-      lastMovePoint: 150,
-      out: { left: 110, to: 1, send: false, lastMovePoint: 150 },
-    },
-    {
-      name: '문턱(10)을 넘었으나 자리가 같음 — ★pLast 그대로★',
-      pointerX: 199,
-      lastMovePoint: 150,
-      out: { left: 149, to: 1, send: false, lastMovePoint: 150 },
-    },
-    {
-      name: '문턱을 넘고 자리가 바뀜 — 보냄 · pLast = p',
-      pointerX: 201,
-      lastMovePoint: 150,
-      out: { left: 151, to: 2, send: true, lastMovePoint: 201 },
-    },
-    {
-      name: '자리는 바뀌지만 문턱 안 — 보내지 않음(떨림 막기)',
-      pointerX: 201,
-      lastMovePoint: 195,
-      out: { left: 151, to: 2, send: false, lastMovePoint: 195 },
-    },
-    {
-      name: '마지막 탭 뒤 빈 곳까지 그림(끌기 영역 500 − 100)',
-      pointerX: 470,
-      lastMovePoint: 150,
-      out: { left: 400, to: 3, send: true, lastMovePoint: 470 },
-    },
-    {
-      name: '붙은 직후 — 문턱 없이 · 자리가 다르면 곧바로 보냄',
-      pointerX: 60,
-      lastMovePoint: 60,
-      justAttached: true,
-      out: { left: 10, to: 0, send: true, lastMovePoint: 60 },
-    },
-    {
-      name: '붙은 직후라도 제자리면 보내지 않음',
-      pointerX: 150,
-      lastMovePoint: 150,
-      justAttached: true,
-      out: { left: 100, to: 1, send: false, lastMovePoint: 150 },
-    },
-  ]
-  for (const c of CASES) {
-    it(c.name, () => {
-      expect(
-        reorderMove({
-          ...base,
-          pointerX: c.pointerX,
-          lastMovePoint: c.lastMovePoint,
-          justAttached: c.justAttached ?? base.justAttached,
-        }),
-      ).toEqual(c.out)
-    })
-  }
-
-  it('문턱은 갈 자리 to 의 탭 폭으로 잰다 — 단계 B 에서 비활성 자리면 3', () => {
-    // PHASE_B · 끄는 탭 d=1(A) · r = 0 → L = p. k3 로 가는 L = 49 · 자리 2 의 탭 폭 I → 문턱 3.
-    const input = { bounds: PHASE_B, dragged: 1, grabOffset: 0, available: 300, justAttached: false }
-    expect(reorderMove({ ...input, pointerX: 49, lastMovePoint: 46 })).toEqual({ left: 49, to: 2, send: false, lastMovePoint: 46 })
-    expect(reorderMove({ ...input, pointerX: 49, lastMovePoint: 45.9 })).toEqual({ left: 49, to: 2, send: true, lastMovePoint: 49 })
-  })
-
-  it('넘친 탭바 — 그리는 L 은 끌기 영역 끝까지 · 자리는 보이는 마지막까지', () => {
-    const out = reorderMove({ bounds: OVERFLOW, dragged: 0, grabOffset: 0, available: 135, justAttached: false, pointerX: 120, lastMovePoint: 0 })
-    expect(out).toEqual({ left: 135 - A, to: 2, send: true, lastMovePoint: 120 })
-  })
-
-  it('끄는 탭 자리가 범위 밖이면 RangeError', () => {
-    expect(() => reorderMove({ ...base, dragged: 4, pointerX: 0, lastMovePoint: 0 })).toThrow(RangeError)
-    expect(() => reorderMove({ ...base, bounds: EMPTY, dragged: 0, pointerX: 0, lastMovePoint: 0 })).toThrow(RangeError)
-  })
 })
 
 describe('slideTargets · slideMs — 비켜남(C2)', () => {

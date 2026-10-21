@@ -70,12 +70,10 @@ vi.mock('@tauri-apps/api/app', () => ({ getIdentifier: async () => 'com.engram.t
 
 import WindowLayout from './WindowLayout'
 import { __resetCanvasReportForTest } from './windowCanvasReport'
-import { __resetFrameReportForTest } from './dock/frameReport'
 import { __resetUiMetricsReportForTest } from './uiMetricsReport'
 import { localDrag } from './dock/localDrag'
 import { __resetDragSourceForTest } from './tabStrip/useTabDragSource'
 import { buildTabDragType, buildTabDragValue } from './dock/tabDragData'
-import type { DockChrome } from '../../../src-tauri/bindings/DockChrome'
 import { useViewStore } from '../../store/viewStore'
 import type { ViewSnapshot } from '../../api/layoutTypes'
 
@@ -969,7 +967,7 @@ describe('WindowLayout — TabBar 액션 → store 액션(이 label)', () => {
   })
 })
 
-// ── ★탭 끌기 배선(TRD S21-slot-docking §4)★ — 창마다 끌기 세션 받기 · 뿌리 받기와 안내 층(`useWindowDrop`) · 파일 놓기 막기 ──
+// ── ★탭 끌기 배선(TRD S21-slot-docking §4)★ — 뿌리 받기와 안내 층(`useWindowDrop`) · 파일 놓기 막기 ──
 // 탭바 줄 · `+` · 캔버스의 사각형은 손으로 준다(jsdom 은 레이아웃이 없다): 줄 x 0..800 · y 0..28 · `+` 32 · 캔버스 원점 (0, 29).
 const TWO_TABS = [
   { id: 'v1', name: 'Tab 1' },
@@ -991,12 +989,6 @@ async function mountDockWindow(label: string, tabs = TWO_TABS, active = 'v1') {
 const headOf = (id: string) => screen.getAllByTestId('tab').find(t => t.getAttribute('data-view-id') === id)!
 const canvasOf = (id: string) =>
   screen.getAllByTestId('tab-canvas').find(c => c.getAttribute('data-view-id') === id)!
-
-function chromeReports(): DockChrome[] {
-  return invokeMock.mock.calls
-    .filter(c => c[0] === 'report_dock_chrome')
-    .map(c => (c[1] as { chrome: DockChrome }).chrome)
-}
 
 let stripWidth = 800
 
@@ -1026,7 +1018,6 @@ function dragOver(types: string[]): Event {
 describe('WindowLayout — 탭 끌기 배선', () => {
   beforeEach(() => {
     stripWidth = 800
-    __resetFrameReportForTest()
     vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false }) as MediaQueryList))
   })
   afterEach(() => {
@@ -1034,13 +1025,13 @@ describe('WindowLayout — 탭 끌기 배선', () => {
     vi.restoreAllMocks()
   })
 
-  it('끌기 세션 사건 셋(dock:spare · dock:drag · dock:feed)을 자기 창 대상으로 건 뒤 window_role 을 묻는다', async () => {
+  it('셸 끌기 세션 사건(dock:drag · dock:feed)은 듣지 않는다 — dock:spare 만 자기 창 대상으로 건 뒤 window_role 을 묻는다', async () => {
     currentWindow.label = 'slot-popup-3'
     await mountDockWindow('slot-popup-3')
-    for (const ev of ['dock:spare', 'dock:drag', 'dock:feed']) {
-      expect(listenOptions.get(ev)).toEqual({ target: 'slot-popup-3' })
-      expect(ipcOrder.indexOf(`listen:${ev}`)).toBeLessThan(ipcOrder.indexOf('invoke:window_role'))
-    }
+    expect(listenOptions.get('dock:spare')).toEqual({ target: 'slot-popup-3' })
+    expect(ipcOrder.indexOf('listen:dock:spare')).toBeLessThan(ipcOrder.indexOf('invoke:window_role'))
+    expect(ipcOrder).not.toContain('listen:dock:drag')
+    expect(ipcOrder).not.toContain('listen:dock:feed')
   })
 
   it('이 창에서 끄는 동안 탭바 구역 밖이면 남은 탭 캔버스를 보이고(R15 · 모델 그대로) 돌아오면 끄는 탭 · 크롬 = 뷰포트 − 탭 캔버스', async () => {
@@ -1095,14 +1086,6 @@ describe('WindowLayout — 탭 끌기 배선', () => {
         localDrag.setSourceStrip(null)
       })
     }
-  })
-
-  it('창 틀(크롬) 보고를 보내지 않는다 — 옛 셸 끌기 엔진의 재료다(TRD §7 U3)', async () => {
-    stubStrip()
-    await mountDockWindow('main')
-    act(() => emit('window:tabs-updated', { label: 'main', tabs: [...TWO_TABS], active: 'v2', version: 2 }))
-    await new Promise(res => setTimeout(res, 150))
-    expect(chromeReports()).toEqual([])
   })
 
   // 캔버스 상자 (0, 29) 800 × 571 · 보이는 탭 v1 = 칸 하나(비율 한계 0.1 · 0.9 · 판 번호 1) · 끄는 탭 원래 크기 400 × 300.
@@ -1228,7 +1211,6 @@ describe('WindowLayout — 대기 모드(window_role · dock:spare)', () => {
 
   beforeEach(() => {
     currentWindow.label = SPARE
-    __resetFrameReportForTest()
     __resetUiMetricsReportForTest()
   })
 
@@ -1271,7 +1253,7 @@ describe('WindowLayout — 대기 모드(window_role · dock:spare)', () => {
     expect(screen.getByTestId('parked-canvas')).toBeTruthy()
   })
 
-  it('대기 모드에서도 재기 둘(캔버스 · 칸 틀 지표)을 보낸다 · 창 틀(크롬) 보고는 없다', async () => {
+  it('대기 모드에서도 재기 둘(캔버스 · 칸 틀 지표)을 보낸다', async () => {
     FakeResizeObserver.instances = []
     vi.stubGlobal('ResizeObserver', FakeResizeObserver)
     __resetCanvasReportForTest()
@@ -1284,7 +1266,6 @@ describe('WindowLayout — 대기 모드(window_role · dock:spare)', () => {
           ['report_ui_metrics', { metrics: expect.objectContaining({ frame_insets: { t: 1, r: 1, b: 1, l: 1 } }) }],
         ]),
       )
-      expect(chromeReports()).toEqual([])
     } finally {
       vi.unstubAllGlobals()
     }

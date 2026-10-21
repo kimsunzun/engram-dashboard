@@ -46,11 +46,13 @@ use crate::layout::manager::{DockError, FrameMeasures, LeaseId, ViewId, WindowLa
 use crate::layout::{LayoutState, WindowHost};
 use crate::output_router::OutputRouter;
 
-/// 끌기 세션이 섰다 · 끝났다 — 몸 = [`TabDragEvent`]. 받는 쪽 = 우리 웹뷰(안내 창 제외).
+/// 끌기 세션이 섰다 · 끝났다 — 몸 = [`TabDragEvent`]. 지금 듣는 웹뷰가 없다.
+// TODO(U4c′-1): 듣는 쪽이 없는 이 사건과 그 코드를 걷는다(TRD S21-slot-docking §7).
 pub const EVT_DRAG: &str = "dock:drag";
-/// 끄는 탭을 쥔 창 웹뷰 하나에 셸이 미는 단계 — 몸 = [`TabDragFeed`].
+/// 끄는 탭을 쥔 창 웹뷰 하나에 셸이 미는 단계 — 몸 = [`TabDragFeed`]. 지금 듣는 웹뷰가 없다.
+// TODO(U4c′-1): 듣는 쪽이 없는 이 사건과 그 코드를 걷는다(TRD S21-slot-docking §7).
 pub const EVT_FEED: &str = "dock:feed";
-/// 대기 창 명부의 창 모드가 바뀌었다 — 몸 = [`SpareEvent`] · 받는 쪽 = 그 창 웹뷰(웹뷰 쪽 이름 = `dockSession.ts` 의
+/// 대기 창 명부의 창 모드가 바뀌었다 — 몸 = [`SpareEvent`] · 받는 쪽 = 그 창 웹뷰(웹뷰 쪽 이름 = `spareMode.ts` 의
 /// `EVT_SPARE`).
 pub const EVT_SPARE: &str = "dock:spare";
 

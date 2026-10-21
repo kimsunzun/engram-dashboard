@@ -17,21 +17,6 @@ import { installViewCommandBridge } from './commands/viewCommandBridge'
 //   입힌다. 스타일 배선이라 슬롯 컴포넌트가 아니라 앱 루트에서 한 번 설치한다(탭 창마다 이 배선이 뜬다).
 import { installNativeScrollActivity } from './components/ui/nativeScrollActivity'
 import { RootErrorBoundary } from './components/ui/RootErrorBoundary'
-import DockOverlayPage from './pages/DockOverlayPage'
-
-// 안내 창(TRD S21-slot-docking §2-5 — label `dock-overlay`)의 경로. 셸이 창을 지을 때 정하고 앱 안에서 바꾸는 곳이 없다.
-const DOCK_OVERLAY_PATH = '#/dock-overlay'
-
-// 안내 창은 셸이 미는 그림만 그린다 — 탭 창의 전역 배선(아래 `TabWindowApp` 의 effect — 데몬 부팅 · 버스 명령 보고 · 키 ·
-//   목록 조회 등)을 하나도 돌리지 않으므로 버스 명령표에 뷰로 오르지 않는다. ★라우터 안의 레이아웃 경로로 옮기지 말 것★ —
-//   그러면 배선이 `RootErrorBoundary` 안에 들어가 「다시 그리기」가 부팅 effect 까지 다시 돌린다(아래 경계 주석).
-// ★모듈을 읽는 것만으로 도는 일은 안내 창에서도 돈다★ — `main.tsx` 의 설정 · 챗 스타일 설치와 `agentClient` 의 transport
-//   생성(데몬에 붙어 있으면 이 창 label 로 출력 Channel 등록을 시도한다). 어느 것도 뷰를 올리지 않는다.
-// ADR-0295
-function App() {
-  const path = window.location.hash.split('?')[0]
-  return path === DOCK_OVERLAY_PATH ? <DockOverlayPage /> : <TabWindowApp />
-}
 
 function bootPull<T>(name: string, fetch: () => Promise<T>, apply: (value: T) => void): void {
   retryAsync(fetch, {
@@ -43,7 +28,7 @@ function bootPull<T>(name: string, fetch: () => Promise<T>, apply: (value: T) =>
     .catch(err => console.warn(`[App] ${name} 최종 실패:`, err))
 }
 
-function TabWindowApp() {
+function App() {
   // 테마는 셸이 정한다 — 창 테마(`window.setTheme`) ?? 셸 설정 `theme.default`(ADR-0265). 부팅 조회가 돌아오기
   // 전까지는 셸이 창을 만들며 박은 그 창의 테마가 보인다(`theme/bootTheme.ts`).
   // ★값만 갈아끼운다 — 리마운트 없음(ADR-0149)★.

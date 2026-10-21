@@ -4,14 +4,11 @@
 //   ★TRD 문장과 Chromium 소스가 다르면 소스를 따른다★(메인 결정 2026-10-18 — 「Chrome 소스 그대로」).
 // Chromium 소스는 BSD-style 라이선스다(「Copyright The Chromium Authors」 · 그 LICENSE) — 옮긴 것은 알고리즘이고 코드 문장이
 //   아니다. 줄 번호 = chromium/src main(2026-10-18 받음): `tab_strip.cc` · `tab_container_impl.cc` = `chrome/browser/ui/views/tabs/` ·
-//   `dragging_tabs_session.cc` · TDC(`tab_drag_controller.cc`) = `chrome/browser/ui/views/tabs/dragging/` · `tween.cc` ·
-//   `animation.cc` = `ui/gfx/animation/` · `bounds_animator.h` = `ui/views/animation/`.
+//   `dragging_tabs_session.cc` = `chrome/browser/ui/views/tabs/dragging/` · `tween.cc` · `animation.cc` = `ui/gfx/animation/` ·
+//   `bounds_animator.h` = `ui/views/animation/`.
 // 좌표 = CSS px · 끌기 영역 왼쪽(= 첫 탭 왼쪽)이 0. 반올림은 잡은 오프셋 · 문턱 두 곳뿐이고 나머지는 부동소수 그대로다(TRD §5).
 
 import { TAB_STANDARD_W, type TabStripLayout } from './layout'
-
-/** 누른 뒤 끌기로 넘어가는 거리 — 이 값을 **넘어야** 끌기다(같으면 아님). Chrome `kMinimumDragDistance`(TDC#1068). */
-export const DRAG_THRESHOLD_PX = 10
 
 /** 순서 문턱의 기준값 — 표준 폭 탭에서 이만큼. Chrome `kHorizontalMoveThreshold`(dragging_tabs_session.cc#89). */
 export const REORDER_THRESHOLD_PX = 16
@@ -44,11 +41,6 @@ export interface StripBounds {
   lastVisible: number
 }
 
-export interface Point {
-  x: number
-  y: number
-}
-
 /**
  * `layout.ts` 결과 → 이상적 경계. 경계는 **모든 탭의 계산 폭 누적**이다 — 숨긴 탭도 폭을 지닌 채 보이는 끝 너머에 선다
  * (Chrome 의 이상적 경계 그대로). ★숨긴 탭을 보이는 끝에 폭 0 으로 겹쳐 세우지 말 것★ — 그러면 그 뒤 끄는 탭의 제자리 후보가
@@ -67,10 +59,6 @@ export function idealBounds(layout: TabStripLayout, dragged?: number): StripBoun
   return { tabs, visible, lastVisible: visible.lastIndexOf(true) }
 }
 
-export function passedThreshold(down: Point, p: Point): boolean {
-  return Math.hypot(p.x - down.x, p.y - down.y) > DRAG_THRESHOLD_PX
-}
-
 /**
  * 탭 끌기 영역 폭 `A` — 끄는 탭은 탭들이 차지한 범위가 아니라 이 폭 안 어디로든 간다. `available` = `layout.ts` 가 받는
  * 「머리들이 쓸 수 있는 폭」의 **잰 값** — ★닫기 모드의 고정 폭을 넣지 말 것★(Chrome 주석 「needs to ignore tab closing mode」).
@@ -84,8 +72,8 @@ export function dragAreaWidth(available: number | null, B: StripBounds): number 
 }
 
 /**
- * 잡은 오프셋 = `round(r · w0)` — `r` = 잡은 폭 비율(`Grab.x_ratio`) · `w0` = **그 탭바에서 끌기 세션이 시작될 때**(출처의
- * 문턱 넘음 · 붙음) 끄는 탭의 폭. ★세션마다 한 번만 셈한다★ — 끄는 중 탭 폭이 바뀌어도 오프셋은 그대로다(Chrome 은 세션
+ * 잡은 오프셋 = `round(r · w0)` — `r` = 잡은 폭 비율(누른 점의 머리 안 자리 ÷ 머리 폭) · `w0` = **끌기를 시작할 때**
+ * (dragstart) 끄는 탭의 폭. ★끌기마다 한 번만 셈한다★ — 끄는 중 탭 폭이 바뀌어도 오프셋은 그대로다(Chrome 은 세션
  * 생성자에서 `mouse_offset_` 을 한 번 정한다 — dragging_tabs_session.cc#50).
  */
 // Chromium(BSD) `CalculateMouseOffset`(dragging_tabs_session.cc#25-36)을 탭 하나로 옮김.
@@ -146,54 +134,15 @@ export function reorderThreshold(B: StripBounds, to: number): number {
   return roundHalfAway(((T[to].x1 - T[to].x0) / TAB_STANDARD_W) * REORDER_THRESHOLD_PX)
 }
 
-/** 순서 이동을 셈할 때인가 — 붙은 직후는 문턱 없이 · 아니면 마지막으로 자리가 바뀐 점 `pLast` 에서 문턱을 **넘었을** 때. */
-// Chromium(BSD) dragging_tabs_session.cc#101-104 를 탭 하나로 옮김(연속 아님 갈래는 탭 하나에 없다).
-export function moveDue(pLast: number, p: number, thr: number, justAttached: boolean): boolean {
-  return justAttached || Math.abs(p - pLast) > thr
-}
-
-export interface ReorderInput {
-  /** 지금 순서의 이상적 경계(끄는 탭 포함) — 보낸 자리의 모델 메아리가 오기 전이면 보낸 순서로(TRD §5-1). */
-  bounds: StripBounds
-  dragged: number
-  /** `grabOffset` — 그 탭바에서 세션이 시작될 때 한 번 셈한 값. */
-  grabOffset: number
-  pointerX: number
-  /** `dragAreaWidth` 의 `available` — 잰 값. */
-  available: number | null
-  /** 마지막으로 자리가 실제로 바뀐 점 — 처음 값 = 그 탭바에서 끌기 세션이 시작된 점(문턱을 넘은 점 · 붙은 점). */
-  lastMovePoint: number
-  /** 이 탭바에서 세션을 막 연 셈인가(출처의 문턱 넘음 · 붙음 — dragging_tabs_session.cc#56). */
-  justAttached: boolean
-}
-
-export interface ReorderMove {
-  /** 끄는 탭을 그릴 왼쪽 `L`. */
-  left: number
-  /** `insertionIndex` 결과. */
-  to: number
-  /** `tab_drag_reorder{to}` 를 보낼 때 — `moveDue` 이고 `to` 가 지금 자리와 다를 때만. */
-  send: boolean
-  /** 다음 `lastMovePoint` — 보낼 때만 지금 커서 x 로 바뀐다. */
-  lastMovePoint: number
-}
-
 /**
- * 움직임 하나의 셈(TRD §5-1 본문 순서 그대로) — `L` → `to` → 문턱 → 보낼지 · `pLast`.
- * ★`pLast` 는 문턱을 넘어도 자리가 같으면 그대로다★ — Chrome 「Make sure the tabstrip actually changed before updating
+ * 순서 이동을 셈할 때인가 — 붙은 직후는 문턱 없이 · 아니면 마지막으로 자리가 바뀐 점 `pLast` 에서 문턱을 **넘었을** 때.
+ * ★부르는 쪽은 `pLast` 를 자리가 실제로 바뀔 때만 옮긴다★ — Chrome 「Make sure the tabstrip actually changed before updating
  * `last_move_attached_context_loc_`」(dragging_tabs_session.cc#143-149). 문턱을 넘을 때마다 적으면 자리가 바뀌는 순간 다시
  * 문턱을 넘어야 해 순서 바뀜이 최대 문턱만큼 늦어진다.
  */
-export function reorderMove(input: ReorderInput): ReorderMove {
-  const { bounds: B, dragged: d, pointerX: p } = input
-  if (!Number.isInteger(d) || d < 0 || d >= B.tabs.length) {
-    throw new RangeError(`reorderMove: 끄는 탭 자리 ${d} 가 0..${B.tabs.length - 1} 밖이다`)
-  }
-  const left = draggedLeft(p, input.grabOffset, B.tabs[d].x1 - B.tabs[d].x0, dragAreaWidth(input.available, B))
-  const to = insertionIndex(B, d, left)
-  const due = moveDue(input.lastMovePoint, p, reorderThreshold(B, to), input.justAttached)
-  const send = due && to !== d
-  return { left, to, send, lastMovePoint: send ? p : input.lastMovePoint }
+// Chromium(BSD) dragging_tabs_session.cc#101-104 를 탭 하나로 옮김(연속 아님 갈래는 탭 하나에 없다).
+export function moveDue(pLast: number, p: number, thr: number, justAttached: boolean): boolean {
+  return justAttached || Math.abs(p - pLast) > thr
 }
 
 /**

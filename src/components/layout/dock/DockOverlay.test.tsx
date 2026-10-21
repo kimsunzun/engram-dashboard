@@ -131,7 +131,7 @@ describe('DockOverlayView — 그림', () => {
     expect(['dock-slot-lines', 'dock-frame', 'dock-preview'].map(opacity)).toEqual(['0', '0', '0'])
   })
 
-  it('옛 셸 판의 몸(slot 칸 없음)도 받는다 — 선 없이 붙을 사각형을 그린다', () => {
+  it('slot 칸이 없는 몸도 받는다 — 선 없이 붙을 사각형을 그린다', () => {
     const old = { bands: [{ x0: 10, y0: 20, x1: 30, y1: 40 }], outer: [], preview: { x0: 10, y0: 20, x1: 50, y1: 40 } }
     render(<DockOverlayView guide={old} />)
     expect(opacity('dock-slot-lines')).toBe('0')

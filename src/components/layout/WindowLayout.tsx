@@ -11,10 +11,9 @@
 // 캔버스(R15 남은 탭)는 출처 쪽 `useShownTab` 이 정한다 — keep-alive 의 `display` 가 그것을 따른다. 파일 · URL 놓기는
 // `dock/fileDropGuard.ts` 가 막는다.
 //
-// ★대기 모드(옛 끌기 엔진 — TRD S21-slot-docking §7 U4 가 걷는다)★: 대기 창 명부의 창(예비 창 · 끄는 중 비워 남긴 창)은 탭
-// 모델 밖이다. 그 창은 탭바 + 빈 캔버스(빈 틀)만 그리고, 탭을 끌어오지 않고, 0탭 자가닫힘을 끈다. 재기 보고(캔버스 · 지표)는
-// 그대로 보낸다. 창 틀(크롬) 보고는 어느 창도 보내지 않는다 — 그것을 쓰던 옛 셸 끌기 엔진은 더 불리지 않는다(TRD §7 U3).
-// 모드는 `dock/dockSession.ts` 가 정한다.
+// ★대기 모드(예열 창 — ADR-0299 · TRD S21-slot-docking §3-9)★: 대기 창 명부의 창(숨은 예비 창)은 탭 모델 밖이다. 그 창은
+// 탭바 + 빈 캔버스(빈 틀)만 그리고, 탭을 끌어오지 않고, 0탭 자가닫힘을 끈다. 재기 보고(캔버스 · 지표)는 그대로 보낸다.
+// 모드는 `spareMode.ts` 가 정한다.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
@@ -38,8 +37,8 @@ import {
 } from './windowCanvasReport'
 import ViewLayoutRenderer from './ViewLayoutRenderer'
 import TabBar from './TabBar'
+import { watchSpareMode, type WindowMode } from './spareMode'
 import { installFileDropGuard } from './dock/fileDropGuard'
-import { watchDockSession, type WindowMode } from './dock/dockSession'
 import { DockOverlayView } from './dock/DockOverlay'
 import { useWindowDrop } from './dock/useWindowDrop'
 import { useShownTab } from './tabStrip/useTabDragSource'
@@ -91,10 +90,11 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
   const [wasParked, setWasParked] = useState(false)
   // 대기에 들 때 스토어의 이 창 항목을 지운다 — 셸은 비운 창에 탭 0 개 알림을 보내지 않아(TRD S21-slot-docking §7 ⑤) 두면
   //   옛 탭(이미 다른 창에 있다)이 남는다. 그러면 아래 `framed` 가 「대기에 든 뒤 받은 탭」을 못 가려, 빈 틀을 거두는 때가 셸이
-  //   들인 창의 탭을 대기를 풀기 전에 알리는 순서(지금은 그렇다 — 세션의 AdoptWindow 가 대기 풀기보다 먼저다)에 기댄다.
+  //   들인 창의 탭을 대기를 풀기 전에 알리는 순서에 기댄다 — 예비 창 채택(ADR-0299 · TRD S21-slot-docking U4d′)이 그 순서로
+  //   알린다는 가정이다.
   useEffect(
     () =>
-      watchDockSession(next => {
+      watchSpareMode(next => {
         setMode(next)
         if (next === 'parked') {
           setWasParked(true)
@@ -105,7 +105,7 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
   )
   const parked = mode === 'parked'
   const normal = mode === 'normal'
-  // 들인 예비 창(`dock:spare{adopted}`)은 제 탭을 받기 전까지 빈 틀 그대로다 — 「로딩」 화면(바탕만)으로 바꾸면 끌려 나와
+  // 들인 예비 창(`dock:spare{adopted}`)은 제 탭을 받기 전까지 빈 틀 그대로다 — 「로딩」 화면(바탕만)으로 바꾸면 채택돼
   //   보이는 순간 탭바가 사라졌다 다시 마운트된다. 대기에 들 때 항목을 지웠으므로 `win` 이 있다 = 대기에 든 뒤 받은 탭이다.
   const framed = parked || (wasParked && win === undefined && !bootFailed)
 

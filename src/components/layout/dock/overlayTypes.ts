@@ -28,7 +28,7 @@ export interface SlotZones {
 
 /**
  * 안내에 그릴 것(`DockOverlay` 의 `DockOverlayView`) — 좌표 = 안내 층 CSS px(층이 대상 창 캔버스를 덮으므로 그 캔버스 좌표).
- * 사각형은 반열림이다. U4b 까지 옛 안내 창 페이지도 이 타입으로 셸이 민 몸을 받는다 — 그 판은 `slot` 을 보내지 않는다.
+ * 사각형은 반열림이다.
  */
 export interface OverlayView {
   /** 커서 밑 칸의 유효 칸 띠 영역 — 그리지 않는다(칸 띠의 경계는 `slot` 의 구역 선이 보인다 · 사용자 결정 2026-10-19). */
@@ -40,6 +40,6 @@ export interface OverlayView {
   outer: RectCss[]
   /** 고른 띠의 붙을 사각형 — `null` = 고른 띠가 없다. */
   preview: RectCss | null
-  /** 커서 밑 칸의 구역 선 — 없음 · `null` = 그리지 않는다(커서가 바깥 띠에 들었다 · 그 칸에 유효 칸 띠가 없다 · 옛 셸 판). */
+  /** 커서 밑 칸의 구역 선 — 없음 · `null` = 그리지 않는다(커서가 바깥 띠에 들었다 · 그 칸에 유효 칸 띠가 없다). */
   slot?: SlotZones | null
 }

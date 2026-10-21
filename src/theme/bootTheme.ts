@@ -1,7 +1,7 @@
 import { isThemeName, type ThemeName } from '../store/themeStore'
 import { themeManager } from './ThemeManager'
 
-// 셸 밖(맨 브라우저 · dev 서버 직접 열기)과 셸이 박지 않는 창(투명 안내 창)의 첫 테마 — themeStore 초기값 ·
+// 셸 밖(맨 브라우저 · dev 서버 직접 열기)과 셸이 박지 않는 창의 첫 테마 — themeStore 초기값 ·
 //   index.css 의 바탕 폴백과 같은 값이다.
 const DEFAULT_BOOT_THEME: ThemeName = 'dark'
 

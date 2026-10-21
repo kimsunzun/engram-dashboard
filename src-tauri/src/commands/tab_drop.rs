@@ -250,7 +250,7 @@ struct TauriDropShell<'a> {
 }
 
 impl DropShell for TauriDropShell<'_> {
-    // 이 길의 끌기 동안에는 키 감시가 돌지 않는다(옛 끌기 엔진의 감시는 그 엔진의 끌기 동안만 돈다) — `set_focus` 가
+    // 이 길의 끌기 동안에는 키 감시가 돌지 않는다 — `set_focus` 가
     //   합성하는 Alt 를 놓기로 읽을 쪽이 없다.
     fn focus(&self, label: &str) {
         let focused = match self.app.get_webview_window(label) {

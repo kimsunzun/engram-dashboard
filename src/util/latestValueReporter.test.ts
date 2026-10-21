@@ -1,5 +1,5 @@
 // latestValueReporter 단위테스트 — 한 번에 하나 · 마지막 값이 덮음 · 같은 값 안 보냄 · 관측이 낡은 값을 거둠 · 재시도 · 떼기 ·
-//   디바운스. 캔버스 크기 보고의 흐름은 `WindowLayout.test.tsx` 가, 창 틀 보고는 `frameReport.test.ts` 가 잰다.
+//   디바운스. 캔버스 크기 보고의 흐름은 `WindowLayout.test.tsx` 가 잰다.
 
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 
