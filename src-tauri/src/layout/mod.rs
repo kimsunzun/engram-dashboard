@@ -14,7 +14,8 @@ pub mod types;
 
 pub use apply::{
     AgentSpawner, DockDest, DockOutcome, DockRequest, LabelSource, LayoutEvents, MoveFailed,
-    MoveStep, OnEmptied, SlotMove, SubscriptionSync, WindowHost, WindowPlace, WindowTabsPayload,
+    MoveStep, OnEmptied, SlotMove, SpareClaim, SubscriptionSync, WindowHost, WindowPlace,
+    WindowTabsPayload,
 };
 pub use manager::{
     CanvasPx, CloseTabOutcome, LayoutError, SlotPx, SpawnSlotError, SplitRatioResult, ViewManager,

@@ -84,7 +84,7 @@ pub(crate) fn spawn_spare_build(app: &AppHandle) {
     tauri::async_runtime::spawn_blocking(move || build_spare(&app));
 }
 
-fn elapsed_ms(started: Instant) -> u64 {
+pub(crate) fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 

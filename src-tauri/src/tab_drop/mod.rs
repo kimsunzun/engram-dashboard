@@ -29,7 +29,7 @@ use self::plan::{InputNow, Plan, SourceFrame, TopAt};
 use self::wire::{
     DropOutcome, DropTo, EndEffect, NewWindowBy, TabDrop, TabDropDone, TabDropReply, WindowFrame,
 };
-use crate::layout::apply::{self, DockDest};
+use crate::layout::apply::{self, DockDest, DockOutcome};
 use crate::layout::bands::SizeCss;
 use crate::layout::geometry::Insets;
 use crate::layout::manager::DockError;
@@ -340,6 +340,7 @@ fn run(
         top_class,
         plan,
     } = item;
+    let mut via = None;
     let (decision, outcome, reply, settled) = match plan {
         Plan::Dock(req) => {
             let in_place = !matches!(req.to, DockDest::NewWindow { .. });
@@ -355,6 +356,9 @@ fn run(
                 Ok(_) => DropOutcome::Applied,
                 Err(_) => DropOutcome::Rejected,
             };
+            if let (Ok(out), false) = (&applied, in_place) {
+                via = Some(new_window_via(out));
+            }
             let settled = book.settle(drop.drag, outcome);
             let reply = match applied {
                 Ok(out) => {
@@ -421,8 +425,22 @@ fn run(
         outcome,
         &reply,
         superseded,
+        via,
     );
     (reply, replay)
+}
+
+// 놓은 새 창이 어디서 왔나 — 맡긴 예열 창 · 새로 지은 창 · 새 창 없이 옮긴 출처 창. 재사용에 예열 뜻을 겹쳐 싣지 않는다
+//   (TRD S21-slot-docking §3-2 ⑦ · §3-9 「로그」).
+// ADR-0299
+fn new_window_via(out: &DockOutcome) -> &'static str {
+    if out.reused {
+        "reuse"
+    } else if out.prewarmed {
+        "spare"
+    } else {
+        "fresh"
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -435,6 +453,7 @@ fn log_handled(
     outcome: DropOutcome,
     reply: &TabDropReply,
     superseded: bool,
+    via: Option<&str>,
 ) {
     let (to, effect) = match &drop.to {
         DropTo::TabBar { .. } => ("tab_bar", None),
@@ -479,6 +498,7 @@ fn log_handled(
         kind,
         why,
         superseded = superseded.then_some(true),
+        via,
         "놓기 처리"
     );
 }
@@ -627,7 +647,7 @@ mod tests {
     use super::*;
     use crate::commands::popout::PopupCounter;
     use crate::layout::apply::{
-        DockDest, DockRequest, MoveFailed, OnEmptied, WindowPlace, WindowTabsPayload,
+        DockDest, DockRequest, MoveFailed, OnEmptied, SpareClaim, WindowPlace, WindowTabsPayload,
     };
     use crate::layout::bands::PointCss;
     use crate::layout::dock::DockSide;
@@ -652,6 +672,8 @@ mod tests {
         racing: Mutex<Option<(RaceAt, Arc<DropBook>, TabDrop)>>,
         // 그렇게 닿은 drop 의 답.
         racing_replies: Mutex<Vec<TabDropReply>>,
+        // 창 포트가 한 번 맡길 예열 창.
+        spare: Mutex<Option<SpareClaim>>,
     }
 
     impl Rig {
@@ -663,6 +685,7 @@ mod tests {
                 open_fails: false,
                 racing: Mutex::new(None),
                 racing_replies: Mutex::new(Vec::new()),
+                spare: Mutex::new(None),
             }
         }
 
@@ -779,6 +802,22 @@ mod tests {
             self.note(format!("move:{label}"));
             Ok(())
         }
+
+        fn claim_spare(&self) -> Option<SpareClaim> {
+            let claim = self.spare.lock().unwrap().take()?;
+            self.note(format!("claim:{}", claim.label));
+            Some(claim)
+        }
+
+        fn committed(&self, claim: &SpareClaim) {
+            self.outside("committed");
+            self.note(format!("committed:{}", claim.label));
+        }
+
+        fn release_spare(&self, claim: &SpareClaim) {
+            self.outside("release_spare");
+            self.note(format!("release:{}", claim.label));
+        }
     }
 
     impl DropShell for Rig {
@@ -809,8 +848,8 @@ mod tests {
     struct Logs(Arc<Mutex<Vec<Vec<(String, String)>>>>);
 
     impl Logs {
-        // 「놓기 처리」 줄마다 `superseded` 칸 — 없으면 `None`.
-        fn superseded(&self) -> Vec<Option<String>> {
+        // 「놓기 처리」 줄마다 `name` 칸 — 없으면 `None`.
+        fn handled(&self, name: &str) -> Vec<Option<String>> {
             let field = |line: &[(String, String)], name: &str| {
                 line.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone())
             };
@@ -819,7 +858,7 @@ mod tests {
                 .unwrap()
                 .iter()
                 .filter(|line| field(line, "message").as_deref() == Some("놓기 처리"))
-                .map(|line| field(line, "superseded"))
+                .map(|line| field(line, name))
                 .collect()
         }
     }
@@ -827,6 +866,11 @@ mod tests {
     struct Fields<'a>(&'a mut Vec<(String, String)>);
 
     impl tracing::field::Visit for Fields<'_> {
+        // 문자열 칸은 따옴표 없이 — Debug 로 적으면 `"fresh"` 처럼 따옴표가 붙는다.
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.push((field.name().to_owned(), value.to_owned()));
+        }
+
         fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
             self.0.push((field.name().to_owned(), format!("{value:?}")));
         }
@@ -1490,7 +1534,7 @@ mod tests {
             "거절된 drag_end 는 done 을 내지 않는다 — 출처가 받는 done 은 drop 의 것 하나"
         );
         assert_eq!(
-            logs.superseded(),
+            logs.handled("superseded"),
             [Some("true".to_owned()), None],
             "drag_end 처리 줄은 남기되 자리를 내줬다고 적는다"
         );
@@ -1525,7 +1569,7 @@ mod tests {
             [DropOutcome::Rejected, DropOutcome::Applied],
             "거절 done 이 먼저 · 그 끌기의 마지막 done 은 drop 의 것"
         );
-        assert_eq!(logs.superseded(), [None, None]);
+        assert_eq!(logs.handled("superseded"), [None, None]);
         let log = rig.take_log();
         let rejected = log.iter().position(|s| s == "done:Rejected").unwrap();
         let focus = log.iter().position(|s| s == "focus:main").expect("포커스");
@@ -1561,6 +1605,81 @@ mod tests {
             [DropOutcome::Applied],
             "맡겨 둔 drop 은 알림도 없다"
         );
+    }
+
+    // ── ⑦ 놓기 처리 줄의 `via` (TRD §3-2 ⑦ · §3-9 「로그」 · ADR-0299) ─────────────────────────
+
+    // 처리 하나의 `via` 칸과 그 답 — `view` 를 `from` 창에서 바탕화면으로 끌어 놓는다(새 창).
+    fn new_window_drop_via(rig: &Rig, view: Uuid, from: &str) -> (Option<String>, TabDropReply) {
+        let logs = Logs::default();
+        let reply = tracing::subscriber::with_default(logs.clone(), || {
+            rig.handle(
+                &DropBook::default(),
+                drop(id(8), view, from, Some(view), drag_end(EndEffect::None)),
+                from,
+                &released(TopAt::Foreign),
+            )
+        });
+        let [via] = logs.handled("via").try_into().expect("놓기 처리 줄 하나");
+        (via, reply)
+    }
+
+    #[test]
+    fn a_new_window_drop_logs_whether_the_window_was_prewarmed_built_or_reused() {
+        let fresh = Rig::new();
+        let (a, _) = two_tabs(&fresh);
+        assert_eq!(
+            new_window_drop_via(&fresh, a, MAIN).0.as_deref(),
+            Some("fresh")
+        );
+
+        let prewarmed = Rig::new();
+        let (a, _) = two_tabs(&prewarmed);
+        let spare = "slot-popup-9";
+        *prewarmed.spare.lock().unwrap() = Some(SpareClaim {
+            label: spare.into(),
+            generation: 4,
+        });
+        let (via, reply) = new_window_drop_via(&prewarmed, a, MAIN);
+        assert_eq!(via.as_deref(), Some("spare"));
+        assert_eq!(
+            reply,
+            TabDropReply::Applied {
+                window: spare.into(),
+                reused: false
+            },
+            "맡긴 창의 label 로 연다"
+        );
+        let log = prewarmed.take_log();
+        let at = |entry: &str| log.iter().position(|s| s == entry).expect(entry);
+        assert!(
+            at("claim:slot-popup-9") < at("open:slot-popup-9")
+                && at("open:slot-popup-9") < at("settled")
+                && at("settled") < at("committed:slot-popup-9"),
+            "맡기기 → 열기 → 알림 → 확정: {log:?}"
+        );
+
+        let reused = Rig::new();
+        let lone = reused.mgr().create_window("slot-popup-5").unwrap();
+        let (via, reply) = new_window_drop_via(&reused, lone, "slot-popup-5");
+        assert!(
+            matches!(reply, TabDropReply::Applied { reused: true, .. }),
+            "{reply:?}"
+        );
+        assert_eq!(via.as_deref(), Some("reuse"));
+
+        let in_place = Rig::new();
+        let (a, _) = two_tabs(&in_place);
+        let logs = Logs::default();
+        tracing::subscriber::with_default(logs.clone(), || {
+            in_place.handle(
+                &DropBook::default(),
+                drop(id(9), a, MAIN, Some(a), DropTo::TabBar { index: 1 }),
+                MAIN,
+                &released(TopAt::Unknown),
+            )
+        });
+        assert_eq!(logs.handled("via"), [None], "새 창이 아닌 놓기에는 없다");
     }
 
     // ── ⑥ `window:frame` ───────────────────────────────────────────────────────

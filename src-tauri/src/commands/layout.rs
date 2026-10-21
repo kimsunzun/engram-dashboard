@@ -22,9 +22,9 @@ use crate::commands::settings::TauriSettingsEvents;
 use crate::daemon_client::DaemonClient;
 use crate::layout::apply;
 use crate::layout::{
-    AgentSpawner, LayoutEvents, LayoutState, MoveFailed, SlotContent, SplitDir, SplitRatioApplied,
-    SubscriptionSync, UiMetrics, ViewManager, ViewSnapshot, WindowHost, WindowPlace,
-    WindowTabsPayload,
+    AgentSpawner, LayoutEvents, LayoutState, MoveFailed, SlotContent, SpareClaim, SplitDir,
+    SplitRatioApplied, SubscriptionSync, UiMetrics, ViewManager, ViewSnapshot, WindowHost,
+    WindowPlace, WindowTabsPayload,
 };
 use crate::output_router::{OutputRouter, SubscriptionDelta};
 use crate::settings::SettingsService;
@@ -207,6 +207,16 @@ impl WindowHost for OwnedWindowHost {
     fn record_placement(&self, label: &str) {
         TauriWindowHost { app: &self.app }.record_placement(label);
     }
+
+    // 예열 창 채택은 아직 꺼져 있다 — 셋을 Tauri 어댑터로 넘기는 것은 켜는 단위(TRD S21-slot-docking §7 U4d′-5)다.
+    // ADR-0299
+    fn claim_spare(&self) -> Option<SpareClaim> {
+        None
+    }
+
+    fn committed(&self, _claim: &SpareClaim) {}
+
+    fn release_spare(&self, _claim: &SpareClaim) {}
 }
 
 struct OwnedSpawner {

@@ -15,6 +15,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use tauri::{
     AppHandle, LogicalPosition, LogicalSize, Manager, State, WebviewUrl, WebviewWindow,
@@ -25,7 +26,7 @@ use uuid::Uuid;
 use crate::commands::layout::{RouterSubs, TauriEvents};
 use crate::daemon_client::DaemonClient;
 use crate::layout::{
-    apply, LabelSource, LayoutState, MoveFailed, SlotMove, WindowHost, WindowPlace,
+    apply, LabelSource, LayoutState, MoveFailed, SlotMove, SpareClaim, WindowHost, WindowPlace,
     MAIN_WINDOW_LABEL,
 };
 use crate::output_router::OutputRouter;
@@ -73,14 +74,30 @@ pub(crate) struct TauriWindowHost<'a> {
 
 impl WindowHost for TauriWindowHost<'_> {
     fn open(&self, label: &str) -> Result<(), String> {
+        let started = Instant::now();
         let window = build_runtime_window(self.app, label, None)?;
         crate::first_paint::hold_window(&window);
+        log_window_open(label, started);
         Ok(())
     }
 
     fn open_at(&self, label: &str, at: &WindowPlace, activate: bool) -> Result<(), String> {
-        open_runtime_window_at(self.app, label, at, activate)
+        let started = Instant::now();
+        open_runtime_window_at(self.app, label, at, activate)?;
+        log_window_open(label, started);
+        Ok(())
     }
+
+    // 예열 창 채택은 아직 꺼져 있다 — 늘 새로 짓고, 맡긴 적이 없으니 확정 · 되물림이 올 일도 없다(켜는 단위 = TRD
+    //   S21-slot-docking §7 U4d′-5).
+    // ADR-0299
+    fn claim_spare(&self) -> Option<SpareClaim> {
+        None
+    }
+
+    fn committed(&self, _claim: &SpareClaim) {}
+
+    fn release_spare(&self, _claim: &SpareClaim) {}
 
     fn close(&self, label: &str) {
         destroy_window(self.app, label);
@@ -99,6 +116,19 @@ impl WindowHost for TauriWindowHost<'_> {
             crate::state::placement::record(&window.as_ref().window());
         }
     }
+}
+
+// 창 포트가 새 창을 연 한 줄 — 예열 창 · 새로 짓기 지연을 가르는 재료(TRD S21-slot-docking §3-9 「로그」 · M14). 지금은
+//   늘 새로 짓는다.
+// ADR-0299
+fn log_window_open(label: &str, started: Instant) {
+    tracing::info!(
+        module = "spare",
+        label,
+        via = "fresh",
+        build_ms = crate::commands::spare::elapsed_ms(started),
+        "창 포트 — 새 창을 열었다(window_open)"
+    );
 }
 
 // lib.rs Destroyed arm 이 main 과 구분하는 데 쓴다.
@@ -514,6 +544,13 @@ mod close_request_tests {
             drop_window_in_model(label, &self.state, &self.router, &self.client)
         }
 
+        // 런타임 크래시 사본 수락의 모델 몫(`state::restore` — 팝아웃 없는 사본) — 지금 팝아웃은 항목째 빠진다.
+        fn adopt_crash_copy(&self) {
+            let mut mgr = self.state.0.lock().unwrap();
+            mgr.adopt_restored(ViewManager::new()).unwrap();
+            self.subs().resync(&mgr);
+        }
+
         // `window` 에 탭 하나를 더한다(없으면 그 창째 만든다).
         fn add_tab(&self, window: &str) -> Uuid {
             let mut mgr = self.state.0.lock().unwrap();
@@ -567,19 +604,49 @@ mod close_request_tests {
     }
 
     // pop-out 이 락을 놓은 틈 — 창을 확인(`is_open` → 열려 있음)하거나 연(`open`) 바로 뒤에 사용자가 그 창을 닫는다.
+    //   `adopts_on_open` 이면 연 바로 뒤의 일이 닫기가 아니라 런타임 크래시 사본 수락이다.
     struct ClosingHost<'a> {
         rig: &'a Rig,
+        adopts_on_open: bool,
         closed: Mutex<Vec<String>>,
         placed: Mutex<Vec<String>>,
+        // 한 번 맡길 예열 창(TRD S21-slot-docking §8-1 ⑬).
+        spare: Mutex<Option<SpareClaim>>,
+        // 창 포트가 불린 차례 — `"claim:"` · `"open:"` · `"committed:"` · `"release:"` · `"close:"` · `"place:"` + label.
+        journal: Mutex<Vec<String>>,
+        // 확정 · 되물림이 돌려준 맡김표.
+        returned: Mutex<Vec<SpareClaim>>,
     }
 
     impl<'a> ClosingHost<'a> {
         fn new(rig: &'a Rig) -> Self {
             ClosingHost {
                 rig,
+                adopts_on_open: false,
                 closed: Mutex::new(Vec::new()),
                 placed: Mutex::new(Vec::new()),
+                spare: Mutex::new(None),
+                journal: Mutex::new(Vec::new()),
+                returned: Mutex::new(Vec::new()),
             }
+        }
+
+        fn adopting(rig: &'a Rig) -> Self {
+            ClosingHost {
+                adopts_on_open: true,
+                ..ClosingHost::new(rig)
+            }
+        }
+
+        fn with_spare(rig: &'a Rig, claim: SpareClaim) -> Self {
+            ClosingHost {
+                spare: Mutex::new(Some(claim)),
+                ..ClosingHost::new(rig)
+            }
+        }
+
+        fn note(&self, entry: String) {
+            self.journal.lock().unwrap().push(entry);
         }
 
         fn user_closes(&self, label: &str) {
@@ -593,8 +660,26 @@ mod close_request_tests {
 
     // 새 창 · 재사용 옮기기도 같은 틈이다 — 열거나 옮긴 바로 뒤에 닫힌다.
     impl WindowHost for ClosingHost<'_> {
+        // ★모델에 들기 전이어야 한다★ — 새 창을 여는 세 자리가 모두 창을 먼저 열고 모델에 넣는다(TRD S21-slot-docking
+        // §3-9 「자리별 차례」 · ADR-0299).
         fn open(&self, label: &str) -> Result<(), String> {
-            self.user_closes(label);
+            let mgr = self
+                .rig
+                .state
+                .0
+                .try_lock()
+                .expect("창 포트는 락 밖에서 불려야 한다");
+            assert!(
+                !mgr.windows.contains_key(label),
+                "open({label}) 은 창이 모델에 들기 전에 불려야 한다"
+            );
+            drop(mgr);
+            self.note(format!("open:{label}"));
+            if self.adopts_on_open {
+                self.rig.adopt_crash_copy();
+            } else {
+                self.user_closes(label);
+            }
             Ok(())
         }
         fn open_at(&self, label: &str, _at: &WindowPlace, _activate: bool) -> Result<(), String> {
@@ -605,6 +690,7 @@ mod close_request_tests {
                 self.rig.state.0.try_lock().is_ok(),
                 "close 는 락 밖에서 불려야 한다 — destroy 의 `Destroyed` 처리기가 같은 락을 잡는다"
             );
+            self.note(format!("close:{label}"));
             self.closed.lock().unwrap().push(label.to_string());
         }
         fn is_open(&self, label: &str) -> bool {
@@ -616,7 +702,25 @@ mod close_request_tests {
             Ok(())
         }
         fn record_placement(&self, label: &str) {
+            self.note(format!("place:{label}"));
             self.placed.lock().unwrap().push(label.to_string());
+        }
+        fn claim_spare(&self) -> Option<SpareClaim> {
+            let claim = self.spare.lock().unwrap().take()?;
+            self.note(format!("claim:{}", claim.label));
+            Some(claim)
+        }
+        fn committed(&self, claim: &SpareClaim) {
+            self.note(format!("committed:{}", claim.label));
+            self.returned.lock().unwrap().push(claim.clone());
+        }
+        fn release_spare(&self, claim: &SpareClaim) {
+            assert!(
+                self.rig.state.0.try_lock().is_ok(),
+                "release_spare 는 락 밖에서 불려야 한다"
+            );
+            self.note(format!("release:{}", claim.label));
+            self.returned.lock().unwrap().push(claim.clone());
         }
     }
 
@@ -651,6 +755,74 @@ mod close_request_tests {
             "모델이 그 창을 가진 적이 없다"
         );
         assert_eq!(rig.fingerprint(), before);
+    }
+
+    // 같은 틈의 예열 창 판 — 넣기가 묘비로 거절되면 맡긴 창은 닫지 않고 그 맡김표 그대로 되물린다(확정 · 자리 기록
+    //   없음). TRD S21-slot-docking §8-1 ⑬
+    #[tokio::test]
+    async fn a_close_before_the_insert_refuses_a_prewarmed_window_and_gives_it_back() {
+        let rig = Rig::new();
+        let claim = SpareClaim {
+            label: "slot-popup-4".into(),
+            generation: 3,
+        };
+        let spare = claim.label.clone();
+        let host = ClosingHost::with_spare(&rig, claim.clone());
+        let before = rig.fingerprint();
+
+        let err = apply::create_window(&rig.state, &rig.subs(), &host, &PopupCounter::default())
+            .unwrap_err();
+
+        assert_eq!(err, LayoutError::WindowClosed(spare.clone()).to_string());
+        assert_eq!(
+            *host.journal.lock().unwrap(),
+            [
+                format!("claim:{spare}"),
+                format!("open:{spare}"),
+                format!("release:{spare}"),
+            ],
+            "닫기 · 확정 · 자리 기록 없음"
+        );
+        assert_eq!(
+            *host.returned.lock().unwrap(),
+            [claim],
+            "맡김표 그대로 한 번"
+        );
+        assert_eq!(rig.fingerprint(), before, "모델 무변경");
+        assert!(!apply::list_windows(&rig.state)
+            .unwrap()
+            .iter()
+            .any(|w| *w == spare));
+    }
+
+    // 빈 새 창이 열린 바로 뒤 · 모델에 넣기 전에 크래시 사본 수락이 창 묶음을 갈아끼운다 — 그 수락은 모델이 아직 모르는
+    //   그 창을 지우지 않으므로(묘비도 없다) 넣기가 서고, 창은 남아 모델의 창이 된다(정한 결말 — 리뷰 2026-10-21).
+    //   TRD S21-slot-docking §3-9 「자리별 차례」
+    #[tokio::test]
+    async fn a_crash_copy_adopted_during_the_open_keeps_the_created_window_in_the_model() {
+        let rig = Rig::new();
+        let old_popout = rig.add_tab(POPUP);
+        let host = ClosingHost::adopting(&rig);
+
+        let label =
+            apply::create_window(&rig.state, &rig.subs(), &host, &PopupCounter::default()).unwrap();
+
+        assert_eq!(label, "slot-popup-1");
+        assert!(
+            host.closed.lock().unwrap().is_empty(),
+            "연 창을 거두지 않는다"
+        );
+        assert_eq!(*host.placed.lock().unwrap(), [label.as_str()]);
+        let mgr = rig.state.0.lock().unwrap();
+        assert_owned(&mgr);
+        assert!(
+            !mgr.windows.contains_key(POPUP),
+            "수락이 옛 팝아웃을 지웠다"
+        );
+        assert!(!mgr.views.contains_key(&old_popout));
+        let tabs = mgr.list_tabs(&label).expect("새 창은 모델의 창이다");
+        assert_eq!(tabs.tabs.len(), 1, "빈 탭 하나");
+        assert_eq!(mgr.owner_of(tabs.active), Some(&label));
     }
 
     #[tokio::test]
@@ -846,6 +1018,10 @@ mod close_request_tests {
             "옮기려던 슬롯은 출처에 남는다"
         );
         assert_eq!(*host.closed.lock().unwrap(), [fresh], "방금 연 창을 거둔다");
+        assert!(
+            host.placed.lock().unwrap().is_empty(),
+            "모델에 없는 창의 자리는 적지 않는다"
+        );
         assert_eq!(rig.routed(agent), [MAIN_WINDOW_LABEL]);
 
         // 그 창의 `Destroyed` 도 바꾸는 것이 없다.
@@ -929,6 +1105,10 @@ mod close_request_tests {
             Err(DockError::WindowClosed(fresh.into()))
         );
         assert_eq!(*host.closed.lock().unwrap(), [fresh], "방금 연 창을 거둔다");
+        assert!(
+            host.placed.lock().unwrap().is_empty(),
+            "모델에 없는 창의 자리는 적지 않는다"
+        );
         assert_eq!(rig.fingerprint(), before, "탭은 출처에");
         assert_eq!(rig.routed(agent), [MAIN_WINDOW_LABEL]);
     }

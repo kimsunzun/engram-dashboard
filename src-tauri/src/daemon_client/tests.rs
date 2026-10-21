@@ -5330,8 +5330,8 @@ use crate::commands::layout::{OwnedSubs, RouterSubs};
 use crate::commands::popout::{close_requested_popup_window, drop_window_in_model, PopupCounter};
 use crate::layout::commands::{make_table, LayoutPorts, CATALOG_VERSION};
 use crate::layout::{
-    apply, AgentSpawner, LayoutEvents, LayoutState, MoveFailed, MoveStep, ViewSnapshot, WindowHost,
-    WindowPlace, WindowTabsPayload,
+    apply, AgentSpawner, LayoutEvents, LayoutState, MoveFailed, MoveStep, SpareClaim, ViewSnapshot,
+    WindowHost, WindowPlace, WindowTabsPayload,
 };
 use crate::settings::{SettingsEvents, SettingsService, SettingsSnapshot};
 use crate::theme::{EffectiveThemes, ThemeControl, ThemeWindows, UiSettingsPayload};
@@ -5368,6 +5368,11 @@ impl WindowHost for NoWindows {
             error: NO_OS_WINDOW.to_string(),
         })
     }
+    fn claim_spare(&self) -> Option<SpareClaim> {
+        None
+    }
+    fn committed(&self, _claim: &SpareClaim) {}
+    fn release_spare(&self, _claim: &SpareClaim) {}
 }
 
 struct NoSpawner;
@@ -5875,6 +5880,11 @@ impl WindowHost for OpenWindows {
     fn move_window(&self, _label: &str, _at: &WindowPlace) -> Result<(), MoveFailed> {
         Ok(())
     }
+    fn claim_spare(&self) -> Option<SpareClaim> {
+        None
+    }
+    fn committed(&self, _claim: &SpareClaim) {}
+    fn release_spare(&self, _claim: &SpareClaim) {}
 }
 
 // ── 사용량 슬롯을 새 창으로 옮겨도 데몬에 아무것도 안 간다(TRD §1-9 #9) ─────────────────────────────
