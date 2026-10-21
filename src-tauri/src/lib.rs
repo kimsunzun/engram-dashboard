@@ -110,7 +110,7 @@ pub fn run() {
     let setup_restore = restore_coordinator.clone();
     builder = builder.manage(restore_coordinator);
     // 도킹 상태(대기 창 명부 · 종료 표지 — TRD S21-slot-docking §2-5)도 같은 이유다(ADR-0102) — 웹뷰의 첫 측정
-    //   보고 셋(캔버스 · UI 치수 · 크롬) · `window_role` · `drag::install` 이 이 상태를 본다.
+    //   보고 셋(캔버스 · UI 치수 · 크롬) · `window_role` 이 이 상태를 본다.
     builder = builder.manage(std::sync::Arc::new(crate::dock::DockState::new()));
     // 탭 놓기 장부 · 창마다 마지막으로 낸 창 사실(ADR-0296 · TRD S21-slot-docking §3-4 · §3-8)도 같은 이유다
     //   (ADR-0102) — 웹뷰의 마운트 때 `window_frame` 당기기와 창의 첫 자리 기록이 이 상태를 본다.
@@ -300,27 +300,16 @@ pub fn run() {
             // build_tray 가 초기 아이콘을 확정한 뒤 변화만 push 한다(첫 관측은 push 안 함).
             tray::spawn_daemon_observer(&app.handle().clone());
 
-            // ── 예비 창 · 안내 창(TRD S21-slot-docking §2-5 · G3) — 미리 하나씩 지어 숨긴 채 기다리게 한다 ──
+            // ── 예비 창(TRD S21-slot-docking §2-5 · G3) — 미리 하나 지어 숨긴 채 기다리게 한다 ──
             // ★작업 스레드에서 짓는다(§2-4)★ — 이 setup 이 돌아간 뒤 이벤트 루프가 창을 만든다. 예비 창은 짓기 전에
             //   명부에 적으므로 아래 `--hidden` 숨기기 · 트레이가 그 창을 보지 않는다. main(⑧)을 만든 뒤라 첫 창이 바뀌지
             //   않는다.
-            // ADR-0295
+            // ★안내 창(`dock-overlay`)은 짓지 않고 탭 끌기 실행기(`drag::install`)도 세우지 않는다★ — 탭 끌기는 웹 OS
+            //   끌기(`tab_drop`)가 맡는다. 등록만 남은 `tab_drag_*` 명령은 실행기 상태가 없어 Tauri 가 거절하고, 창
+            //   사건의 끌기 갈래는 그 상태가 없으면 아무것도 하지 않는다.
+            // TODO(U4c′-1): 등록만 남은 끌기 명령 · 창 사건 갈래 · 안내 창 코드를 걷는다(TRD S21-slot-docking §7).
+            // ADR-0295 · ADR-0299
             crate::commands::dock::spawn_spare_build(app.handle());
-            crate::commands::dock::spawn_overlay_build(app.handle());
-
-            // ── 탭 끌기 실행기(TRD S21-slot-docking §2-4) — 세션은 이 메인 스레드에 산다 ──
-            // 끌기 상태 · 레이아웃 상태는 빌더에서 manage 했다. 못 세우면 탭 끌기 invoke 가 상태 없음으로 실패해 탭 끌기가
-            //   통째로 안 되고, 앱은 그대로 뜬다.
-            // ADR-0295
-            match crate::commands::drag::install(app.handle()) {
-                Ok(inbox) => {
-                    app.manage(inbox);
-                }
-                Err(e) => tracing::error!(
-                    module = "dock",
-                    "탭 끌기 실행기를 못 세웠다(탭 끌기 불가, 앱 계속): {e}"
-                ),
-            }
 
             // `--hidden` — main 은 첫 화면에 보이도록 올리지 않았다(⑧). 여기서는 ⑨ 가 첫 화면에 보이도록 올린 팝아웃의
             //   올림을 거두고(F13 — 거두지 않으면 첫 화면 알림 · 시한이 main 은 트레이에 둔 채 팝아웃만 보인다) 그 창을
