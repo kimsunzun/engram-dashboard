@@ -510,7 +510,8 @@ describe('출처 창 — 자기 탭바 판정 · 제자리 놓기', () => {
     expect(second).toEqual(first)
     expect(second).not.toBe(first)
     over(h, { x: 404, y: 10 })
-    expect(h.local.getSourceStrip()).toEqual({ index: 2, left: 324, x: 404 })
+    // 커서 − 잡은 80 = 324 지만 마지막 자리(탭 셋 폭 480 − 160 = 320)에서 멈춘다(`reorderAreaWidth`).
+    expect(h.local.getSourceStrip()).toEqual({ index: 2, left: 320, x: 404 })
     expect(h.local.getTargetMarker()).toBeNull()
     over(h, CENTRE)
     expect(h.local.getSourceStrip()).toBeNull()

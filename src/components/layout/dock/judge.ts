@@ -4,11 +4,11 @@
 
 import type { PointCss } from '../../../../src-tauri/bindings/PointCss'
 import {
-  dragAreaWidth,
   draggedLeft,
   dropIndex,
   dropMarkerX,
   insertionIndex,
+  reorderAreaWidth,
   type StripBounds,
 } from '../tabStrip/reorderGeometry'
 import { choose, contains, zonesAt, type WindowBands } from './bands'
@@ -28,7 +28,7 @@ export type JudgeStrip =
       dragged: number
       /** `grabOffset` — dragstart 에 한 번 셈한 값. */
       grabOffset: number
-      /** `dragAreaWidth` 의 `available` — 잰 값(`null` = 재지 못함). */
+      /** `reorderAreaWidth` 의 `available` — 잰 값(`null` = 재지 못함). */
       available: number | null
     }
   | { role: 'other'; left: number; bounds: StripBounds }
@@ -73,6 +73,6 @@ function stripAt(s: JudgeStrip, x: number): Judgement {
     const index = dropIndex(s.bounds, x, null)
     return { type: 'strip', index, left: null, marker: dropMarkerX(s.bounds, index, null) }
   }
-  const left = draggedLeft(x, s.grabOffset, head.x1 - head.x0, dragAreaWidth(s.available, s.bounds))
+  const left = draggedLeft(x, s.grabOffset, head.x1 - head.x0, reorderAreaWidth(s.available, s.bounds))
   return { type: 'strip', index: insertionIndex(s.bounds, s.dragged, left), left, marker: null }
 }

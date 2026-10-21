@@ -101,6 +101,8 @@ describe('탭바 자리', () => {
     // 커서 탭바 x 400 − 잡은 80 = 왼쪽 320 → 셋째 뒤(끄는 탭을 뺀 목록의 끝).
     expect(judge(w, { x: 404, y: 10 })).toEqual({ type: 'strip', index: 2, left: 320, marker: null })
     expect(judge(w, { x: 84, y: 10 })).toEqual({ type: 'strip', index: 0, left: 0, marker: null })
+    // 탭 뒤 빈 곳(480..600)으로 끌어도 마지막 자리(320)에서 멈춘다.
+    expect(judge(w, { x: 584, y: 10 })).toEqual({ type: 'strip', index: 2, left: 320, marker: null })
   })
 
   it('다른 창 — dropIndex · 세로선(가운데와 같은 x = 오른쪽)', () => {

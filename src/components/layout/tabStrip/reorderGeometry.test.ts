@@ -17,6 +17,7 @@ import {
   idealBounds,
   insertionIndex,
   moveDue,
+  reorderAreaWidth,
   reorderThreshold,
   slideMs,
   slideTargets,
@@ -92,6 +93,28 @@ describe('dragAreaWidth — 잰 폭 · 재지 못하면 보이는 탭 폭 합', 
       expect(dragAreaWidth(c.available, c.B)).toBe(c.out)
     })
   }
+})
+
+describe('reorderAreaWidth — 끌기 영역을 보이는 탭 폭 합으로 자름(끄는 탭이 마지막 자리 너머 `+` 위로 가지 않는다)', () => {
+  const CASES: { name: string; available: number | null; B: StripBounds; out: number }[] = [
+    { name: '마지막 탭 뒤 빈 곳은 뺀다', available: 500, B: FOUR, out: 400 },
+    { name: '잰 폭이 더 좁으면 잰 폭', available: 300, B: FOUR, out: 300 },
+    { name: '숨긴 탭은 합에 안 든다', available: 1000, B: OVERFLOW, out: A + 2 * I },
+    { name: '재지 못함(null) = 탭 폭 합', available: null, B: FOUR, out: 400 },
+    { name: '탭 없음', available: 200, B: EMPTY, out: 0 },
+  ]
+  for (const c of CASES) {
+    it(c.name, () => {
+      expect(reorderAreaWidth(c.available, c.B)).toBe(c.out)
+    })
+  }
+
+  it('탭 둘 · 넓은 탭바 — 오른쪽 끝까지 끌어도 끄는 탭은 마지막 자리에서 멈추고 그 자리에 넣는다', () => {
+    const B = stripOf([160, 160])
+    const L = draggedLeft(900, 80, 160, reorderAreaWidth(800, B))
+    expect(L).toBe(160)
+    expect(insertionIndex(B, 0, L)).toBe(1)
+  })
 })
 
 describe('grabOffset — round(r · 세션 시작 때 폭)', () => {

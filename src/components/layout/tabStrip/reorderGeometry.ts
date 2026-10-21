@@ -72,6 +72,16 @@ export function dragAreaWidth(available: number | null, B: StripBounds): number 
 }
 
 /**
+ * 자기 탭바 순서 이동에서 끄는 탭이 갈 수 있는 폭 — `dragAreaWidth` 를 보이는 탭 폭 합(마지막 자리의 오른쪽 끝)으로 자른다.
+ * `draggedLeft` 의 `A` 로 넘긴다. 마지막 자리의 이상적 x(= 합 − 끄는 탭 폭)에 그대로 닿으므로 넣을 자리는 Chrome 그대로다.
+ */
+// 사용자 결정 2026-10-22: Chrome 은 끌기 영역(`dragAreaWidth`) 끝까지 보내지만 우리는 끄는 탭이 마지막 탭 자리를 넘어 `+` 위로
+//   가지 않게 한다(실측 — 탭 둘에서 오른쪽으로 끌면 `+` 너머로 갔다).
+export function reorderAreaWidth(available: number | null, B: StripBounds): number {
+  return Math.min(dragAreaWidth(available, B), dragAreaWidth(null, B))
+}
+
+/**
  * 잡은 오프셋 = `round(r · w0)` — `r` = 잡은 폭 비율(누른 점의 머리 안 자리 ÷ 머리 폭) · `w0` = **끌기를 시작할 때**
  * (dragstart) 끄는 탭의 폭. ★끌기마다 한 번만 셈한다★ — 끄는 중 탭 폭이 바뀌어도 오프셋은 그대로다(Chrome 은 세션
  * 생성자에서 `mouse_offset_` 을 한 번 정한다 — dragging_tabs_session.cc#50).
