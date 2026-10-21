@@ -25,11 +25,13 @@ use uuid::Uuid;
 
 use crate::commands::layout::{RouterSubs, TauriEvents};
 use crate::daemon_client::DaemonClient;
+use crate::first_paint::NewWindowShow;
 use crate::layout::{
     apply, LabelSource, LayoutState, MoveFailed, SlotMove, SpareClaim, WindowHost, WindowPlace,
     MAIN_WINDOW_LABEL,
 };
 use crate::output_router::OutputRouter;
+use crate::spare::pool::Opening;
 use crate::state::placement::{self, Fallback};
 use crate::webview_env::{Backdrop, WebviewEnv};
 
@@ -74,30 +76,25 @@ pub(crate) struct TauriWindowHost<'a> {
 
 impl WindowHost for TauriWindowHost<'_> {
     fn open(&self, label: &str) -> Result<(), String> {
-        let started = Instant::now();
-        let window = build_runtime_window(self.app, label, None)?;
-        crate::first_paint::hold_window(&window);
-        log_window_open(label, started);
-        Ok(())
+        open_new_window(self.app, label, None, true)
     }
 
     fn open_at(&self, label: &str, at: &WindowPlace, activate: bool) -> Result<(), String> {
-        let started = Instant::now();
-        open_runtime_window_at(self.app, label, at, activate)?;
-        log_window_open(label, started);
-        Ok(())
+        open_new_window(self.app, label, Some(at), activate)
     }
 
-    // 예열 창 채택은 아직 꺼져 있다 — 늘 새로 짓고, 맡긴 적이 없으니 확정 · 되물림이 올 일도 없다(켜는 단위 = TRD
-    //   S21-slot-docking §7 U4d′-5).
     // ADR-0299
     fn claim_spare(&self) -> Option<SpareClaim> {
-        None
+        crate::commands::spare::claim(self.app)
     }
 
-    fn committed(&self, _claim: &SpareClaim) {}
+    fn committed(&self, claim: &SpareClaim) {
+        crate::commands::spare::commit(self.app, claim);
+    }
 
-    fn release_spare(&self, _claim: &SpareClaim) {}
+    fn release_spare(&self, claim: &SpareClaim) {
+        crate::commands::spare::release(self.app, claim);
+    }
 
     fn close(&self, label: &str) {
         destroy_window(self.app, label);
@@ -118,17 +115,154 @@ impl WindowHost for TauriWindowHost<'_> {
     }
 }
 
-// 창 포트가 새 창을 연 한 줄 — 예열 창 · 새로 짓기 지연을 가르는 재료(TRD S21-slot-docking §3-9 「로그」 · M14). 지금은
-//   늘 새로 짓는다.
+// 창 포트의 새 창 열기 — 맡긴 예열 창이면 짓지 않고 숨긴 채 놓고, 풀과 무관한 label 이면 새로 짓는다. `at = None` =
+//   `open`(계단 자리 · 기본 크기). 새로 짓는 창은 열 때 정한다 — 활성 요청이고 전경이 우리면 지금처럼 포커스를 받으며
+//   짓고, 아니면 포커스 없이 지어 올리기만 하는 보이기로 둔다(I30). 맡긴 창의 활성화는 보이기 바로 앞에 정한다(I5).
+//   `window_open` 줄 = 예열 창 · 새로 짓기 지연을 가르는 재료(TRD S21-slot-docking §3-9 「로그」 · M14 — 열기 → 보임은
+//   첫 화면 풀림 줄의 `reveal_ms` · 짓는 중 기다림은 `spare_claim` 줄의 `wait_ms`).
 // ADR-0299
-fn log_window_open(label: &str, started: Instant) {
-    tracing::info!(
-        module = "spare",
-        label,
-        via = "fresh",
-        build_ms = crate::commands::spare::elapsed_ms(started),
-        "창 포트 — 새 창을 열었다(window_open)"
-    );
+fn open_new_window(
+    app: &AppHandle,
+    label: &str,
+    at: Option<&WindowPlace>,
+    activate: bool,
+) -> Result<(), String> {
+    let started = Instant::now();
+    match crate::commands::spare::opening(app, label, activate) {
+        Opening::Claimed => {
+            let placed = place_claimed(app, label, at)?;
+            tracing::info!(
+                module = "spare",
+                label,
+                via = "spare",
+                activate,
+                place_ms = crate::commands::spare::elapsed_ms(started),
+                scale_from = placed.scale_from,
+                scale_to = ?placed.scale_to,
+                "창 포트 — 새 창을 열었다(window_open)"
+            );
+            Ok(())
+        }
+        Opening::Unavailable => {
+            tracing::warn!(
+                module = "spare",
+                label,
+                "창 포트 — 맡긴 예열 창이 사라졌다 · 그 label 로 새로 짓지 않는다"
+            );
+            Err(format!(
+                "맡긴 예열 창 {label} 이 사라져 그 label 로 새로 짓지 않는다"
+            ))
+        }
+        Opening::Fresh => {
+            let focused =
+                crate::first_paint::new_window_show(activate, placement::foreground_is_ours(app))
+                    == NewWindowShow::RaiseAndActivate;
+            match at {
+                Some(at) => open_runtime_window_at(app, label, at, focused, started)?,
+                None => {
+                    let window = build_window(app, label, None, focused)?;
+                    crate::first_paint::hold_built(&window, focused, started);
+                }
+            }
+            tracing::info!(
+                module = "spare",
+                label,
+                via = "fresh",
+                activate,
+                focused,
+                build_ms = crate::commands::spare::elapsed_ms(started),
+                "창 포트 — 새 창을 열었다(window_open)"
+            );
+            Ok(())
+        }
+    }
+}
+
+/// 맡긴 예열 창을 놓은 뒤의 배율 — 다른 배율 모니터로 옮긴 채택을 가르는 로그 몫(I9 · M16).
+struct SparePlaced {
+    scale_from: f64,
+    scale_to: Option<f64>,
+}
+
+// 맡긴 예열 창을 숨긴 채 놓는다([`spare_spot`] · 위치 → 크기 — 까닭 = [`placement::place`]). 보이지 않는다 — 보이기는
+//   확정 뒤 첫 화면이다. 못 놓으면 그 창을 거두고 `Err` 다(창 포트 `open_at` 계약 — 떠 있는 창이 없다 · 그 `Destroyed` 가
+//   맡김을 끝내고 다시 짓는다). 창이 이미 없으면 거둘 것 없이 `Err` 다 — 그 label 로 새로 짓지 않는다(I20).
+// ADR-0299
+fn place_claimed(
+    app: &AppHandle,
+    label: &str,
+    at: Option<&WindowPlace>,
+) -> Result<SparePlaced, String> {
+    let Some(window) = app.get_webview_window(label) else {
+        return Err(format!(
+            "맡긴 예열 창 {label} 이 없다 — 그 label 로 새로 짓지 않는다"
+        ));
+    };
+    let window = window.as_ref().window();
+    let placed = window
+        .scale_factor()
+        .map_err(|e| format!("배율을 못 읽었다: {e}"))
+        .and_then(|scale_from| {
+            let monitors = match at.and_then(|at| at.pos) {
+                Some(_) => placement::monitors(app),
+                None => Vec::new(),
+            };
+            let (pos, size) = spare_spot(label, at, &monitors, scale_from);
+            placement::move_steps(&window, Some(pos), Some(size))
+                .map_err(|failed| format!("{:?}: {}", failed.step, failed.error))?;
+            Ok(SparePlaced {
+                scale_from,
+                scale_to: window.scale_factor().ok(),
+            })
+        });
+    placed.map_err(|reason| {
+        tracing::warn!(
+            module = "spare",
+            label,
+            error = %reason,
+            "맡긴 예열 창을 놓지 못해 거둔다"
+        );
+        let gone = match try_destroy_window(app, label) {
+            Ok(()) => "거뒀다".to_string(),
+            Err(e) => {
+                crate::commands::spare::abandon_claimed(app, label);
+                format!("거두기도 실패: {e}")
+            }
+        };
+        format!("맡긴 예열 창 자리를 못 입혔다({reason}) — {gone}")
+    })
+}
+
+// 맡긴 예열 창의 자리 — 물리 바깥 왼쪽 위 · 논리 안쪽 크기. 새로 짓는 창([`open_runtime_window_at`] · [`build_window`])과
+//   같은 셈이다 — `at` 이 어느 모니터에 걸치면 그 착지, 아니면 label 의 계단 자리를 그 창의 지금 배율 `scale` 로 푼 것(Tauri
+//   의 논리 위치 세터와 같은 풀이) · 크기 = `at.size`(없거나 쓸 수 없으면 기본). 돌려받은 예열 창은 앞선 놓기가 옮기고 크기를
+//   바꿨을 수 있어 `open`(`at = None`)도 계단 자리 · 기본 크기를 다시 입힌다(I18).
+fn spare_spot(
+    label: &str,
+    at: Option<&WindowPlace>,
+    monitors: &[placement::MonitorArea],
+    scale: f64,
+) -> ((i32, i32), (f64, f64)) {
+    let landed = at.and_then(|at| {
+        placement::resolve_place(
+            label,
+            at,
+            POPOUT_DEFAULT_SIZE,
+            monitors,
+            Fallback::DefaultPlace,
+        )
+    });
+    if let Some((bounds, landing)) = landed {
+        return ((landing.x, landing.y), (bounds.w(), bounds.h()));
+    }
+    let size = at
+        .and_then(|at| placement::usable_size(at.size))
+        .unwrap_or(POPOUT_DEFAULT_SIZE);
+    let (x, y) = cascade_position(label);
+    (
+        ((x * scale).round() as i32, (y * scale).round() as i32),
+        size,
+    )
 }
 
 // lib.rs Destroyed arm 이 main 과 구분하는 데 쓴다.
@@ -183,13 +317,15 @@ pub(crate) const POPOUT_DEFAULT_SIZE: (f64, f64) = (720.0, 500.0);
 
 // 도킹의 새 창(창 포트 `open_at`) — `at` 이 어느 모니터에 걸치면 빌더에 첫 자리를 주고 만든 뒤 그 자리를 다시
 //   정확히 입힌다(위치 먼저 — 그 까닭 = [`placement::place`] · [`build_runtime_window`] 머리). 안 걸치거나 위치가 없으면
-//   label 의 계단 자리다. 크기가 없거나 쓸 수 없는 값이면 기본 크기다.
+//   label 의 계단 자리다. 크기가 없거나 쓸 수 없는 값이면 기본 크기다. `activate` = 포커스를 받으며 짓는다(아니면 올리기만
+//   하는 보이기 — `first_paint::hold_built`) · `opened` = 창 포트가 열기를 시작한 때.
 // TRD S21-slot-docking §1-2 「적용 서비스」
 fn open_runtime_window_at(
     app: &AppHandle,
     label: &str,
     at: &WindowPlace,
     activate: bool,
+    opened: Instant,
 ) -> Result<(), String> {
     let monitors = match at.pos {
         Some(_) => placement::monitors(app),
@@ -222,7 +358,7 @@ fn open_runtime_window_at(
                     failed.step, failed.error
                 ));
             }
-            crate::first_paint::hold_window(&window);
+            crate::first_paint::hold_built(&window, activate, opened);
         }
         None => {
             let (w, h) = placement::usable_size(at.size).unwrap_or(POPOUT_DEFAULT_SIZE);
@@ -233,7 +369,7 @@ fn open_runtime_window_at(
                 Some((LogicalPosition::new(x, y), LogicalSize::new(w, h))),
                 activate,
             )?;
-            crate::first_paint::hold_window(&window);
+            crate::first_paint::hold_built(&window, activate, opened);
         }
     }
     Ok(())
@@ -464,6 +600,59 @@ mod tests {
         assert_eq!(cascade_position("slot-popup-1"), (140.0, 110.0));
         // 9번째는 wrap(8개마다).
         assert_eq!(cascade_position("slot-popup-9"), (140.0, 110.0));
+    }
+
+    // ── 맡긴 예열 창의 자리(TRD S21-slot-docking §3-9 「`open_at`(맡긴 label)」 · I18) ──
+
+    const SCREEN: placement::MonitorArea = placement::MonitorArea {
+        x: 0,
+        y: 0,
+        w: 1920,
+        h: 1080,
+        scale: 1.0,
+    };
+
+    #[test]
+    fn a_claimed_spare_opened_without_a_place_gets_the_cascade_and_the_default_size_again() {
+        assert_eq!(
+            spare_spot("slot-popup-3", None, &[SCREEN], 1.5),
+            ((426, 345), POPOUT_DEFAULT_SIZE),
+            "계단 자리(284, 230)를 그 창의 배율로 푼다"
+        );
+    }
+
+    #[test]
+    fn a_claimed_spare_lands_where_a_fresh_window_would() {
+        let at = WindowPlace {
+            pos: Some((300, 200)),
+            size: Some((800.0, 600.0)),
+        };
+        assert_eq!(
+            spare_spot("slot-popup-3", Some(&at), &[SCREEN], 2.0),
+            ((300, 200), (800.0, 600.0)),
+            "모니터에 걸친 자리는 물리 그대로 — 배율로 풀지 않는다"
+        );
+    }
+
+    #[test]
+    fn a_claimed_spare_whose_place_is_off_every_monitor_takes_the_cascade_and_the_asked_size() {
+        let off = WindowPlace {
+            pos: Some((-5000, -5000)),
+            size: Some((640.0, 480.0)),
+        };
+        assert_eq!(
+            spare_spot("slot-popup-1", Some(&off), &[SCREEN], 1.0),
+            ((140, 110), (640.0, 480.0))
+        );
+        let unusable = WindowPlace {
+            pos: None,
+            size: Some((0.0, 480.0)),
+        };
+        assert_eq!(
+            spare_spot("slot-popup-1", Some(&unusable), &[SCREEN], 1.0),
+            ((140, 110), POPOUT_DEFAULT_SIZE),
+            "쓸 수 없는 크기는 기본 크기"
+        );
     }
 }
 

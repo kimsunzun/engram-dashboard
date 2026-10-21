@@ -885,6 +885,7 @@ impl RestoreWindows for TauriRestoreWindows {
                 shown,
                 usage,
                 |_| false,
+                |_| {},
                 |label| {
                     // 보이기는 첫 화면 뒤다 — 미룬 최대화도 그 보이기가 입힌다([`show_placed`]).
                     if shown {
@@ -931,7 +932,7 @@ impl RestoreWindows for TauriRestoreWindows {
 //   웹뷰의 GotFocus · LostFocus 에서 만든다. [미검증 — 소스 독해. GUI 실측 몫]
 // 그 밖의 OS 는 그 게터를 그대로 쓴다 — OS 층이 답할 수단이 없다고(`None`) 할 때다. [미검증 — 그 갈래는 Windows
 //   에서 돌지 않는다] OS 분기는 OS 층 crate 에 있다(ADR-0266 — 셸에 `#[cfg(windows)]` 를 두지 않는다).
-fn foreground_is_ours(app: &AppHandle) -> bool {
+pub(crate) fn foreground_is_ours(app: &AppHandle) -> bool {
     engram_dashboard_platform::window::foreground_is_current_process().unwrap_or_else(|| {
         app.webview_windows()
             .values()

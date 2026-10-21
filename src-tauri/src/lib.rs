@@ -383,7 +383,8 @@ pub fn run() {
                             );
                         }
                     }
-                    // 예비 창 풀(TRD S21-slot-docking §3-9 「다시 짓기」) — 예비 창이면 다시 짓는다.
+                    // 예열 창 풀(TRD S21-slot-docking §3-9 「다시 짓기」) — 풀의 창이면 빼고 다시 짓고, 보임을 기다리던 채택
+                    //   창이면 그 다시 짓기 완료다(맡긴 창 보이기 · 안전 시한과 같은 완료 — label 마다 한 번).
                     crate::commands::spare::on_spare_window_destroyed(window.app_handle(), &label);
                 }
                 // 창 자리 기록(TRD S21-storage §6-3) — 사건 값 대신 게터를 다시 읽는다(최소화 · 최대화 여부가 같이

@@ -33,6 +33,10 @@ pub const BUILD_WAIT: Duration = Duration::from_secs(1);
 pub const REVEAL_SAFETY: Duration =
     crate::first_paint::FALLBACK_REVEAL.saturating_add(Duration::from_secs(1));
 
+/// 안전 시한조차 끝내지 못한 보임 기다림을 맡기기가 끝내는 상한 — 그 시한이 걸리지 않았거나 울리지 않았을 때의 그물이다.
+/// 두 배는 판단이다(시한 일이 늦게 돌 몫을 둔다).
+pub const REVEAL_BACKSTOP: Duration = REVEAL_SAFETY.saturating_mul(2);
+
 /// 첫 화면 문 손잡이(`first_paint` — I17 · I23 · I26). 풀을 만들 때 넘긴다.
 ///
 /// ★`hold_unarmed` · `cancel` 은 풀 락을 쥔 채 불린다★ — 구현은 자기 잎 락 하나만 잡고 풀을 부르지 않는다(차례 =
@@ -44,9 +48,15 @@ pub trait PaintGate: Send + Sync {
     /// 그 label 의 올림을 거둔다 — 없으면 무동작.
     fn cancel(&self, label: &str);
     /// 확정 ③ — 그 label 의 올림이 남아 있으면 기다리는 상태로 올리고 `true`(그 뒤 채택 번호 `generation` 을 실은 알림만
-    /// 받는다 · `activate` = 보인 뒤 활성화를 고를지), 없으면(UI 숨기기가 거뒀다) 아무 일도 하지 않고 `false`. 풀 락 ·
-    /// 레이아웃 락 밖에서 불린다.
-    fn reveal_if_held(&self, label: &str, generation: u32, activate: bool) -> bool;
+    /// 받는다 · `activate` = 보인 뒤 활성화를 고를지 · `opened` = 그 창을 마지막으로 연(놓은) 때 — 보임 로그의 열기 → 보임
+    /// 몫), 없으면(UI 숨기기가 거뒀다) 아무 일도 하지 않고 `false`. 풀 락 · 레이아웃 락 밖에서 불린다.
+    fn reveal_if_held(
+        &self,
+        label: &str,
+        generation: u32,
+        activate: bool,
+        opened: Option<Instant>,
+    ) -> bool;
 }
 
 /// 풀을 만들 때 넘기는 seam(I23) — 시험은 짧은 시한과 가짜 문을 넘긴다.
@@ -56,6 +66,8 @@ pub struct SpareSeams {
     pub build_wait: Duration,
     /// 확정 뒤 다시 짓기 완료의 안전 시한([`REVEAL_SAFETY`]) — [`CommitPort::reveal_deadline`] 에 넘긴다.
     pub reveal_safety: Duration,
+    /// 맡기기가 끝나지 않은 보임 기다림을 끝내는 상한([`REVEAL_BACKSTOP`]).
+    pub reveal_backstop: Duration,
 }
 
 impl SpareSeams {
@@ -64,6 +76,7 @@ impl SpareSeams {
             gate,
             build_wait: BUILD_WAIT,
             reveal_safety: REVEAL_SAFETY,
+            reveal_backstop: REVEAL_BACKSTOP,
         }
     }
 }
@@ -153,6 +166,7 @@ pub struct SpareState {
     gate: Arc<dyn PaintGate>,
     build_wait: Duration,
     reveal_safety: Duration,
+    reveal_backstop: Duration,
 }
 
 impl SpareState {
@@ -163,6 +177,7 @@ impl SpareState {
             gate: seams.gate,
             build_wait: seams.build_wait,
             reveal_safety: seams.reveal_safety,
+            reveal_backstop: seams.reveal_backstop,
         }
     }
 
@@ -339,7 +354,8 @@ impl SpareState {
     /// 지어진 예열 창을 맡긴다 — 같은 풀 락 안에서 그 label 에 받아 두기만 하는 첫 화면 올림을 건다. 짓는 중이면
     /// 지어질 때까지(상한 = `build_wait`) 기다린다 — 지어짐 · 짓기 실패 · 사라짐 · 종료가 깨우고, 깬 뒤 먼저 락을 잡은
     /// 하나만 맡는다. 기다리던 짓기가 실패하거나 사라졌으면 그 뒤에 자리를 잡은 다른 짓기를 따라가지 않고 곧바로
-    /// `None` 이다. ★락 밖 · 메인 스레드 밖에서 부른다★(I15 — 그 짓기가 메인 스레드에서 돈다).
+    /// `None` 이다. 보임 기다림이 `reveal_backstop` 을 넘겨 서 있으면 먼저 그 다시 짓기 완료를 한다(그 뒤 칸이 비었으니
+    /// 이 맡기기가 짓기를 띄운다). ★락 밖 · 메인 스레드 밖에서 부른다★(I15 — 그 짓기가 메인 스레드에서 돈다).
     // ADR-0299
     pub fn claim(&self) -> ClaimReply {
         let started = Instant::now();
@@ -347,6 +363,7 @@ impl SpareState {
         let mut waited = false;
         let mut awaited = None;
         let mut pool = self.pool();
+        let expired = pool.expire_reveal(started, self.reveal_backstop);
         let (claim, build, timed_out) = loop {
             match pool.take_built(awaited) {
                 ClaimStep::Claimed(claim) => {
@@ -368,6 +385,15 @@ impl SpareState {
             }
         };
         drop(pool);
+        if let Some((label, generation)) = expired {
+            tracing::warn!(
+                module = "spare",
+                label,
+                generation,
+                backstop_ms = u64::try_from(self.reveal_backstop.as_millis()).unwrap_or(u64::MAX),
+                "채택한 창의 보임 기다림이 안전 시한을 넘겨도 끝나지 않아 맡기기가 다시 짓기 완료로 쳤다"
+            );
+        }
         let waited = waited.then(|| started.elapsed());
         if timed_out {
             tracing::warn!(
@@ -444,7 +470,7 @@ impl SpareState {
         let in_model = mgr.window_attrs(&claim.label).is_ok();
         let decision = {
             let mut pool = self.pool();
-            let decision = pool.commit(claim, in_model);
+            let decision = pool.commit(claim, in_model, Instant::now());
             if decision == CommitDecision::Close {
                 self.gate.cancel(&claim.label);
             }
@@ -629,7 +655,9 @@ impl CommitStep {
                         "예열 창이 쥐던 재기를 모델에 옮기지 못했다: {e}"
                     );
                 }
-                let revealed = spare.gate.reveal_if_held(label, generation, activate);
+                let revealed = spare
+                    .gate
+                    .reveal_if_held(label, generation, activate, opened_at);
                 port.adopted(label, generation);
                 port.reveal_deadline(label, spare.reveal_safety);
                 tracing::info!(

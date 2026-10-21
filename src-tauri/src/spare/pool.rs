@@ -14,7 +14,7 @@
 // ADR-0295 · ADR-0299
 
 use std::collections::BTreeSet;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::layout::manager::{check_metrics, reported_canvas, WindowLabel};
 use crate::layout::{CanvasPx, LayoutError, SpareClaim, UiMetrics};
@@ -187,6 +187,8 @@ pub struct SparePool {
     slot: Slot,
     /// 확정 ① 이 세우고 다시 짓기 완료가 비운다 — 그동안 `window_role` 이 그 번호를 싣는다(I26).
     awaiting_reveal: Option<(WindowLabel, u32)>,
+    /// `awaiting_reveal` 을 세운 때 — [`Self::expire_reveal`] 몫. 확정 ① 밖에서 세운 기다림(시험)은 `None` 이다.
+    reveal_since: Option<Instant>,
     exiting: bool,
     disabled: bool,
     listen_failures: u8,
@@ -206,6 +208,7 @@ impl Default for SparePool {
         Self {
             slot: Slot::Empty,
             awaiting_reveal: None,
+            reveal_since: None,
             exiting: false,
             disabled: false,
             listen_failures: 0,
@@ -417,7 +420,7 @@ impl SparePool {
     /// 확정 ① — 맡김표가 지금의 맡김이면 칸을 비우며 같은 자리에서 `awaiting_reveal` 을 세운다(그 뒤의 둘째 맡기기는
     /// 짓기를 띄우지 않는다 · I25). `in_model` = 부른 쪽이 레이아웃 락 안에서 본 그 label 의 모델 항목 여부.
     // ADR-0299
-    pub fn commit(&mut self, claim: &SpareClaim, in_model: bool) -> CommitDecision {
+    pub fn commit(&mut self, claim: &SpareClaim, in_model: bool, now: Instant) -> CommitDecision {
         match std::mem::replace(&mut self.slot, Slot::Empty) {
             Slot::Claimed {
                 label,
@@ -431,6 +434,7 @@ impl SparePool {
                     return CommitDecision::Close;
                 }
                 self.awaiting_reveal = Some((label, generation));
+                self.reveal_since = Some(now);
                 CommitDecision::Adopt {
                     measures,
                     activate,
@@ -463,11 +467,30 @@ impl SparePool {
     pub fn complete_reveal(&mut self, label: &str, now: Instant) -> Option<bool> {
         self.reveal_generation(label)?;
         self.awaiting_reveal = None;
+        self.reveal_since = None;
         let build = !self.exiting && !self.disabled;
         if build {
             self.revealed_at = Some(now);
         }
         Some(build)
+    }
+
+    /// 보임 기다림이 `older_than` 넘게 섰으면 그 다시 짓기 완료를 지금 한다 — 안전 시한(확정 뒤 창 쪽이 건다)이 끝내지
+    /// 못한 기다림의 그물이다. 남기면 그 실행 내내 짓기 자리를 잡지 못해 예열이 멈춘다. `Some` = 끝낸 기다림의 label ·
+    /// 채택 번호(짓기 여부는 [`Self::complete_reveal`] 과 같다 — 맡기기의 `Empty` 갈래가 이어서 띄운다).
+    // ADR-0299
+    pub fn expire_reveal(
+        &mut self,
+        now: Instant,
+        older_than: Duration,
+    ) -> Option<(WindowLabel, u32)> {
+        let since = self.reveal_since?;
+        if now.saturating_duration_since(since) <= older_than {
+            return None;
+        }
+        let (label, generation) = self.awaiting_reveal.clone()?;
+        self.complete_reveal(&label, now);
+        Some((label, generation))
     }
 
     pub fn destroyed(&mut self, label: &str, now: Instant) -> Gone {
@@ -721,20 +744,20 @@ mod tests {
         let (mut pool, claim) = claimed(P1);
         report_all(&mut pool, P1);
         assert!(matches!(
-            pool.commit(&claim, true),
+            pool.commit(&claim, true, now()),
             CommitDecision::Adopt { measures, activate: true, .. } if measures == full()
         ));
         assert_eq!(pool.slot(), &Slot::Empty);
         assert_eq!(pool.awaiting_reveal(), Some((P1, claim.generation)));
         assert_eq!(pool.reveal_generation(P1), Some(claim.generation));
         assert!(!pool.contains(P1), "확정 뒤는 모델 창이다");
-        assert_eq!(pool.commit(&claim, true), CommitDecision::Stale);
+        assert_eq!(pool.commit(&claim, true, now()), CommitDecision::Stale);
     }
 
     #[test]
     fn commit_for_a_label_gone_from_the_model_keeps_it_closing() {
         let (mut pool, claim) = claimed(P1);
-        assert_eq!(pool.commit(&claim, false), CommitDecision::Close);
+        assert_eq!(pool.commit(&claim, false, now()), CommitDecision::Close);
         assert_eq!(
             pool.slot(),
             &Slot::Closing {
@@ -746,7 +769,7 @@ mod tests {
         assert!(pool.contains(P1));
         assert_eq!(pool.take_built(None), ClaimStep::Fresh { build: false });
         assert!(!pool.release(&claim), "닫기로 정한 창은 돌아가지 않는다");
-        assert_eq!(pool.commit(&claim, true), CommitDecision::Stale);
+        assert_eq!(pool.commit(&claim, true, now()), CommitDecision::Stale);
         assert!(pool.close_failed(&claim));
         assert_eq!(pool.slot(), &Slot::Empty);
         assert!(!pool.close_failed(&claim));
@@ -757,7 +780,7 @@ mod tests {
     #[test]
     fn a_reveal_completion_while_disabled_clears_without_building() {
         let (mut pool, claim) = claimed(P1);
-        pool.commit(&claim, true);
+        pool.commit(&claim, true, now());
         pool.disabled = true;
         assert_eq!(pool.complete_reveal(P1, now()), Some(false));
         assert_eq!(pool.awaiting_reveal(), None);
@@ -765,9 +788,49 @@ mod tests {
     }
 
     #[test]
+    fn a_pending_reveal_older_than_the_backstop_is_completed_once_and_frees_the_build_place() {
+        let (mut pool, claim) = claimed(P1);
+        let at = now();
+        pool.commit(&claim, true, at);
+        let limit = Duration::from_secs(5);
+        assert_eq!(
+            pool.expire_reveal(at + limit, limit),
+            None,
+            "상한까지는 둔다"
+        );
+        assert_eq!(pool.reserve(), Err(NoBuild::AwaitingReveal));
+        let late = at + limit + Duration::from_millis(1);
+        assert_eq!(
+            pool.expire_reveal(late, limit),
+            Some((P1.to_owned(), claim.generation))
+        );
+        assert_eq!(pool.awaiting_reveal(), None);
+        assert_eq!(
+            pool.complete_reveal(P1, late),
+            None,
+            "끝난 기다림의 늦은 완료는 무동작"
+        );
+        assert_eq!(pool.expire_reveal(late, limit), None);
+        assert_eq!(pool.take_built(None), ClaimStep::Fresh { build: true });
+        assert_eq!(pool.reserve(), Ok(Some(late)));
+    }
+
+    #[test]
+    fn a_completed_reveal_leaves_nothing_to_expire() {
+        let (mut pool, claim) = claimed(P1);
+        let at = now();
+        pool.commit(&claim, true, at);
+        assert_eq!(pool.complete_reveal(P1, at), Some(true));
+        assert_eq!(
+            pool.expire_reveal(at + Duration::from_secs(60), Duration::ZERO),
+            None
+        );
+    }
+
+    #[test]
     fn the_reveal_time_is_handed_to_the_next_build_once() {
         let (mut pool, claim) = claimed(P1);
-        pool.commit(&claim, true);
+        pool.commit(&claim, true, now());
         let at = now();
         assert_eq!(pool.complete_reveal(P1, at), Some(true));
         assert_eq!(pool.reserve(), Ok(Some(at)));
@@ -783,7 +846,7 @@ mod tests {
         assert_eq!(building(P1).tray_show(P1), TrayShow::Untouched);
         let (mut pool, claim) = claimed(P1);
         assert_eq!(pool.tray_show(P1), TrayShow::Rehold);
-        pool.commit(&claim, true);
+        pool.commit(&claim, true, now());
         assert_eq!(pool.tray_show(P1), TrayShow::Adopted);
     }
 
@@ -795,7 +858,7 @@ mod tests {
         assert_eq!(pool.record(P1, Measure::Canvas { w: 800, h: 600 }), None);
         assert_eq!(pool, SparePool::default());
         let (mut pool, claim) = claimed(P1);
-        pool.commit(&claim, false);
+        pool.commit(&claim, false, now());
         assert_eq!(
             pool.record(P1, Measure::Canvas { w: 800, h: 600 }),
             None,

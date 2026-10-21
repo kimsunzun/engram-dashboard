@@ -5,8 +5,8 @@ use ts_rs::TS;
 
 /// 예비 창이 모델에 들었다 — 셸 → 그 창 웹뷰(대상 = 그 창 label) · 몸 = [`SpareAdopted`]. 받으면 보통 모드로 그리고
 /// 그 뒤의 첫 화면 알림(`webview_painted`)에 몸의 채택 번호를 싣는다(웹뷰 쪽 이름 = `spareMode.ts` 의
-/// `EVT_SPARE_ADOPTED`). 마운트 때의 모드는 `window_role` 이 준다 — 그 뒤 바뀜만 이 사건으로 온다. ★지금 내는 쪽이
-/// 없다★ — 예열 창 채택(TRD S21-slot-docking §3-9 · U4d′-5)이 낸다.
+/// `EVT_SPARE_ADOPTED`). 마운트 때의 모드는 `window_role` 이 준다 — 그 뒤 바뀜만 이 사건으로 온다. 내는 쪽 = 확정 ④
+/// (`commands::spare` 의 확정 포트 — TRD S21-slot-docking §3-9 「`committed`」).
 pub const EVT_SPARE_ADOPTED: &str = "spare:adopted";
 
 /// 사건 `spare:adopted`(`EVT_SPARE_ADOPTED`) 의 몸.

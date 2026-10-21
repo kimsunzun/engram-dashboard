@@ -90,7 +90,13 @@ impl PaintGate for FakeGate {
             .push(GateCall::Cancel(label.to_owned()));
     }
 
-    fn reveal_if_held(&self, label: &str, generation: u32, activate: bool) -> bool {
+    fn reveal_if_held(
+        &self,
+        label: &str,
+        generation: u32,
+        activate: bool,
+        _opened: Option<Instant>,
+    ) -> bool {
         assert!(!self.pool_locked(), "③ 은 풀 락 밖이다");
         let held = match self.held.lock().unwrap().get_mut(label) {
             Some(entry) => {
@@ -196,12 +202,21 @@ impl CommitPort for FakePort {
 
 // ── 차림 ──
 
+// 보임 기다림 그물은 기본으로 닿지 않는 `LONG` 이다 — 짧으면 보임 기다림을 재는 시험이 느린 실행에서 그물에 걸린다.
 fn fresh_with(build_wait: Duration) -> (Arc<SpareState>, Arc<FakeGate>) {
+    fresh_seams(build_wait, LONG)
+}
+
+fn fresh_seams(
+    build_wait: Duration,
+    reveal_backstop: Duration,
+) -> (Arc<SpareState>, Arc<FakeGate>) {
     let gate = Arc::new(FakeGate::default());
     let spare = Arc::new(SpareState::new(SpareSeams {
         gate: gate.clone(),
         build_wait,
         reveal_safety: SAFETY,
+        reveal_backstop,
     }));
     gate.spare.set(Arc::downgrade(&spare)).unwrap();
     (spare, gate)
@@ -529,6 +544,27 @@ fn one_build_at_a_time_and_a_refused_build_takes_no_number() {
         SpareBuild::Refused(NoBuild::Occupied)
     );
     assert_eq!(labels.issued(), 1);
+}
+
+// 안전 시한이 끝내지 못한 보임 기다림 — 다음 맡기기가 그 완료를 하고 짓기를 띄운다. 그 뒤의 늦은 완료 셋은 무동작이다.
+#[test]
+fn a_claim_completes_a_pending_reveal_older_than_the_backstop_and_asks_for_a_build() {
+    let backstop = Duration::from_millis(5);
+    let (spare, _) = fresh_seams(LONG, backstop);
+    let labels = Labels::default();
+    let claim = claimed(&spare, &labels);
+    adopt(&spare, &claim);
+    thread::sleep(backstop * 4);
+    let reply = spare.claim();
+    assert_eq!((reply.claim, reply.build), (None, true));
+    assert_eq!(spare.awaiting_reveal(), None);
+    assert!(!spare.on_shown(&claim.label));
+    assert!(!spare.on_reveal_overdue(&claim.label));
+    assert!(!spare.on_destroyed(&claim.label));
+    assert!(matches!(
+        spare.build(&labels, |_| Ok(())),
+        SpareBuild::Built { .. }
+    ));
 }
 
 #[test]

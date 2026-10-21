@@ -9,8 +9,9 @@
 //! - ★보일지는 메인 스레드에서, 보이기 바로 앞에 정한다★ — 알림 · 시한 · 복원은 올린 차례만 실어 메인 스레드로 넘기고,
 //!   넘긴 일이 돌 때 그 차례의 올림이 남아 있으면 빼내고 보인다([`FirstPaintGate::release`]). 넘기기 전에 빼내면, 넘긴
 //!   뒤 · 돌기 전에 메인 스레드의 숨기기(`--hidden` 부팅 setup 끝 · 트레이 숨기기)가 거둘 것을 못 찾고 넘긴 일이 숨긴 창을
-//!   보인다. 보이는 법은 [`crate::state::placement::show_placed`] 다(미룬 최대화가 있으면 보통 크기 틀 없이 최대화로
-//!   보인다).
+//!   보인다. 보이는 법은 셋이다 — 지어서 올린 창 · 복원 창은 [`crate::state::placement::show_placed`](보일 때 활성화 ·
+//!   미룬 최대화가 있으면 보통 크기 틀 없이 최대화로 보인다), 창 포트가 포커스 없이 새로 지은 창(I30)과 맡긴 예열 창은
+//!   숨긴 채 z 만 맨 위로 올린 뒤 보인다(맡긴 창만 아래 조건에서 활성화한다 — [`new_window_show`]).
 //! - 런타임 복원 수락의 팝아웃은 보일지가 모델에 넣은 뒤에 정해져 둘로 나눠 올린다 — 지을 때는 알림만 받아 두고
 //!   ([`hold_window_unarmed`]) 보이기로 정하면 보인다([`reveal_held`] — 알림이 이미 왔으면 곧바로, 아니면 알림 · 시한에).
 //!   시한은 보이기로 정한 때부터 잰다 — 정하기 전에 보이면 되돌릴 수도 있는 창이 드러난다. 보이는 법은 지을 때 올린
@@ -19,7 +20,9 @@
 //!   ([`SparePaintGate`]) 확정 ③ 이 그 올림이 남아 있을 때만 보이기로 정한다([`reveal_if_held`] — 시한은 여기부터).
 //!   ★그 항목은 그 맡김의 채택 번호를 실은 알림만 받는다★(I26) — 번호가 없거나 다른 알림은 채택 전 틀(대기 페이지 ·
 //!   `bootFailed`)이 보낸 것이라, 따르면 그 틀이 곧바로 보인다. ③ 전에 받아 둔 알림도 같은 번호일 때만 ③ 이 곧바로
-//!   보인다. 번호는 이 길만 본다 — 지어서 올린 창과 복원 길은 번호가 있든 없든 알림을 받는다.
+//!   보인다. 번호는 이 길만 본다 — 지어서 올린 창과 복원 길은 번호가 있든 없든 알림을 받는다. ★맡긴 창이 보이면
+//!   (알림 · 시한 어느 쪽이든) 예열 창 풀의 다시 짓기 완료를 부른다★(`SpareState::on_shown` — 그 밖의 완료 = 창
+//!   `Destroyed` · 안전 시한).
 //! - ★명부 락은 잎이다★ — 쥔 채 로그 · 창 호출 · 다른 락을 하지 않는다. 예열 창 풀이 자기 락을 쥔 채 올림을 걸고
 //!   거둔다(차례 = 레이아웃 → 풀 → 첫 화면 문 — `crate::spare::SpareState`).
 //! - ★숨기기는 올림을 거둔다([`cancel_hold`])★ — 트레이 숨기기 경로(`tray::actions::hide_main_ui` — ADR-0229)와 복원의
@@ -58,11 +61,13 @@ pub(crate) struct FirstPaintGate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Hold {
     /// 알림 또는 시한에 보인다. `ticket` = 올린 차례 — 올릴 때마다 새로 뽑아(명부 전체에서 단조) 넘긴 보이기는 자기
-    /// 차례일 때만 빼낸다. 거둔 뒤 다시 올린 창을 옛 일이 보이지 않게 한다. `since` = 올린 때(로그 `held_ms`).
+    /// 차례일 때만 빼낸다. 거둔 뒤 다시 올린 창을 옛 일이 보이지 않게 한다. `since` = 올린 때(로그 `held_ms`) · `opened` =
+    /// 창 포트가 그 창을 열기 시작한 때(로그 `reveal_ms` — 창 포트 밖에서 올린 창은 `None`).
     Armed {
         ticket: u64,
         reveal: Reveal,
         since: Instant,
+        opened: Option<Instant>,
     },
     /// 알림만 받아 둔다 — 보일지는 [`FirstPaintGate::arm`](복원) · [`FirstPaintGate::arm_adopted`](확정 ③)가 정한다.
     Unarmed { painted: Painted },
@@ -73,6 +78,8 @@ enum Hold {
 enum Reveal {
     /// 지어서 올린 창 · 복원 창 — 번호를 보지 않고 어느 알림이든 받는다. 보일 때 활성화한다.
     Placed,
+    /// 창 포트가 포커스 없이 새로 지은 창(I30) — 번호를 보지 않는다. 숨긴 채 z 만 올리고 활성화 없이 보인다.
+    Raised,
     /// 맡긴 예열 창(확정 ③) — 채택 번호 `generation` 을 실은 알림만 받는다(I26). `activate` = 그 맡김이 활성으로
     /// 열렸다(I5).
     Adopted { generation: u32, activate: bool },
@@ -115,6 +122,7 @@ enum Signal {
 struct Released {
     reveal: Reveal,
     since: Instant,
+    opened: Option<Instant>,
 }
 
 impl FirstPaintGate {
@@ -123,14 +131,19 @@ impl FirstPaintGate {
     }
 
     fn hold(&self, label: &str) -> u64 {
+        self.hold_as(label, Reveal::Placed, None)
+    }
+
+    fn hold_as(&self, label: &str, reveal: Reveal, opened: Option<Instant>) -> u64 {
         let ticket = self.ticket();
         let since = Instant::now();
         sync::lock(&self.held).insert(
             label.to_owned(),
             Hold::Armed {
                 ticket,
-                reveal: Reveal::Placed,
+                reveal,
                 since,
+                opened,
             },
         );
         ticket
@@ -160,6 +173,7 @@ impl FirstPaintGate {
                 ticket,
                 reveal: Reveal::Placed,
                 since,
+                opened: None,
             },
         );
         if painted {
@@ -170,7 +184,13 @@ impl FirstPaintGate {
     }
 
     // 항목이 없으면(거뒀다) 아무것도 하지 않는다 — `arm` 처럼 지금부터 기다리면 UI 숨기기가 거둔 창을 되살린다.
-    fn arm_adopted(&self, label: &str, generation: u32, activate: bool) -> Option<Arm> {
+    fn arm_adopted(
+        &self,
+        label: &str,
+        generation: u32,
+        activate: bool,
+        opened: Option<Instant>,
+    ) -> Option<Arm> {
         let ticket = self.ticket();
         let since = Instant::now();
         let mut held = sync::lock(&self.held);
@@ -189,6 +209,7 @@ impl FirstPaintGate {
                     activate,
                 },
                 since,
+                opened,
             },
         );
         Some(if painted {
@@ -206,7 +227,7 @@ impl FirstPaintGate {
         match hold {
             Hold::Armed {
                 ticket,
-                reveal: Reveal::Placed,
+                reveal: Reveal::Placed | Reveal::Raised,
                 ..
             } => Signal::Release(*ticket),
             Hold::Armed {
@@ -258,9 +279,14 @@ impl FirstPaintGate {
                 ticket: t,
                 reveal,
                 since,
+                opened,
             }) if t == ticket => {
                 held.remove(label);
-                Some(Released { reveal, since })
+                Some(Released {
+                    reveal,
+                    since,
+                    opened,
+                })
             }
             _ => None,
         }
@@ -302,9 +328,15 @@ impl crate::spare::PaintGate for SparePaintGate {
         self.gate.cancel(label);
     }
 
-    fn reveal_if_held(&self, label: &str, generation: u32, activate: bool) -> bool {
+    fn reveal_if_held(
+        &self,
+        label: &str,
+        generation: u32,
+        activate: bool,
+        opened: Option<Instant>,
+    ) -> bool {
         if let Some(app) = self.app.get() {
-            return reveal_if_held(app, &self.gate, label, generation, activate);
+            return reveal_if_held(app, &self.gate, label, generation, activate, opened);
         }
         // 「거둬졌다」와 같이 다룬다 — 숨긴 채 모델 창이 되고 다음 트레이 보이기가 보인다.
         self.gate.cancel(label);
@@ -333,10 +365,33 @@ pub(crate) fn hold_window(window: &WebviewWindow) {
             label = window.label(),
             "첫 화면 명부가 등록돼 있지 않아 창을 곧바로 보인다"
         );
-        show(window);
+        show_as(window, Reveal::Placed);
         return;
     };
     let ticket = gate.hold(window.label());
+    reveal_when_overdue_on_main_thread(window.app_handle(), gate, window.label(), ticket);
+}
+
+/// [`hold_window`] 의 창 포트 판 — 창 포트가 새로 지은 팝아웃. `focused` = 포커스를 받으며 지었다(보일 때 활성화 —
+/// [`hold_window`] 와 같다) · `false` = 포커스 없이 지었다(숨긴 채 z 만 올리고 활성화 없이 보인다 — I30). `opened` = 창
+/// 포트가 그 창을 열기 시작한 때(보임 로그 `reveal_ms`).
+// ADR-0299
+pub(crate) fn hold_built(window: &WebviewWindow, focused: bool, opened: Instant) {
+    let reveal = if focused {
+        Reveal::Placed
+    } else {
+        Reveal::Raised
+    };
+    let Some(gate) = gate(window.app_handle()) else {
+        tracing::warn!(
+            module = "first_paint",
+            label = window.label(),
+            "첫 화면 명부가 등록돼 있지 않아 창을 곧바로 보인다"
+        );
+        show_as(window, reveal);
+        return;
+    };
+    let ticket = gate.hold_as(window.label(), reveal, Some(opened));
     reveal_when_overdue_on_main_thread(window.app_handle(), gate, window.label(), ticket);
 }
 
@@ -377,8 +432,9 @@ fn reveal_if_held(
     label: &str,
     generation: u32,
     activate: bool,
+    opened: Option<Instant>,
 ) -> bool {
-    match gate.arm_adopted(label, generation, activate) {
+    match gate.arm_adopted(label, generation, activate, opened) {
         None => false,
         Some(Arm::Painted(ticket)) => {
             release_on_main_thread(app, gate.clone(), label, ticket, Cause::PaintedBeforeArming);
@@ -433,28 +489,41 @@ enum Cause {
 }
 
 impl Cause {
-    fn log(self, label: &str, since: Instant) {
-        let held_ms = crate::spare::elapsed_ms(since);
+    // `via` · `reveal_ms` = 예열 창과 새로 짓기의 열기 → 보임 지연을 견주는 재료(TRD S21-slot-docking §3-9 「로그」 · M14).
+    // ADR-0299
+    fn log(self, label: &str, released: &Released) {
+        let held_ms = crate::spare::elapsed_ms(released.since);
+        let reveal_ms = released.opened.map(crate::spare::elapsed_ms);
+        let via = match released.reveal {
+            Reveal::Adopted { .. } => "spare",
+            Reveal::Placed | Reveal::Raised => "fresh",
+        };
         match self {
             Self::Painted => tracing::info!(
                 module = "first_paint",
                 label,
                 cause = "painted",
+                via,
                 held_ms,
+                reveal_ms = ?reveal_ms,
                 "첫 화면 알림에 창을 보인다"
             ),
             Self::PaintedBeforeArming => tracing::info!(
                 module = "first_paint",
                 label,
                 cause = "painted_before_arming",
+                via,
                 held_ms,
+                reveal_ms = ?reveal_ms,
                 "첫 화면 알림이 먼저 와 있어 창을 곧바로 보인다"
             ),
             Self::Overdue => tracing::warn!(
                 module = "first_paint",
                 label,
                 cause = "overdue",
+                via,
                 held_ms,
+                reveal_ms = ?reveal_ms,
                 "첫 화면 알림이 시한 안에 오지 않아 창을 보인다"
             ),
         }
@@ -501,8 +570,8 @@ fn release_on_main_thread(
 ) {
     reveal_on_main_thread(app, label, move |label| {
         let released = gate.release(label, ticket);
-        match released {
-            Some(Released { since, .. }) => cause.log(label, since),
+        match &released {
+            Some(released) => cause.log(label, released),
             None => tracing::debug!(
                 module = "first_paint",
                 label,
@@ -527,10 +596,7 @@ fn reveal_on_main_thread(
             return;
         };
         match handle.get_webview_window(&owned) {
-            Some(window) => match reveal {
-                Reveal::Placed => show(&window),
-                Reveal::Adopted { activate, .. } => show_adopted(&window, activate),
-            },
+            Some(window) => show_as(&window, reveal),
             None => {
                 tracing::debug!(module = "first_paint", label = %owned, "보이기 전에 창이 닫혔다")
             }
@@ -545,39 +611,79 @@ fn reveal_on_main_thread(
     }
 }
 
-fn show(window: &WebviewWindow) {
-    crate::state::placement::show_placed(&window.as_ref().window());
+// 메인 스레드에서 부른다(모듈 머리).
+fn show_as(window: &WebviewWindow, reveal: Reveal) {
+    match reveal {
+        Reveal::Placed => crate::state::placement::show_placed(&window.as_ref().window()),
+        Reveal::Raised => raise_and_show(window, false),
+        Reveal::Adopted { activate, .. } => show_adopted(window, activate),
+    }
 }
 
-// TODO(U4d′-5): 맡긴 창 보이기(TRD §3-9 「보이는 차례」) — ⓐ 숨긴 채 z 만 맨 위로(platform `window::place_window(..,
-//   None, ZOrder::Top, false, false)` · I29) → ⓑ Tauri `show()` → ⓒ [`adopted_show`] 가 `RaiseAndActivate` 일 때만
-//   `set_focus`(전경 판정 = `state::placement` 의 `foreground_is_ours`) · 보인 뒤 `SpareState::on_shown` 이 참이면
-//   `commands::spare::spawn_spare_build`(다시 짓기 완료 — 이 함수가 그 자리다 · 알림 · 시한 둘 다 여기로 온다). 그때까지는
-//   지어서 올린 창처럼 보인다 — 맡기는 쪽(`TauriWindowHost::claim_spare`)이 아직 없어 닿지 않는다.
-fn show_adopted(window: &WebviewWindow, _activate: bool) {
-    show(window);
+// 맡긴 창 보이기(TRD S21-slot-docking §3-9 「보이는 차례」) — 전경 판정은 보이기 바로 앞이다. 보인 뒤(못 보였어도)
+//   다시 짓기 완료를 부른다 — 알림 · 시한 둘 다 여기로 온다.
+// ADR-0299
+fn show_adopted(window: &WebviewWindow, activate: bool) {
+    let app = window.app_handle();
+    let show = new_window_show(activate, crate::state::placement::foreground_is_ours(app));
+    raise_and_show(window, show == NewWindowShow::RaiseAndActivate);
+    crate::commands::spare::on_adopted_window_shown(app, window.label());
 }
 
-/// 맡긴 예열 창의 보이기 — 둘 다 숨긴 채 z 를 맨 위로 올린 뒤 보인다(I29).
+// ⓐ 숨긴 채 z 만 맨 위로 → ⓑ 보이기 → ⓒ 활성화(`activate` 일 때만). ⓐ 를 ⓑ 앞에 둔다 — 오래 숨은 창이 옛 z 자리에서 한
+//   프레임도 보이지 않게(I29). ★ⓑ 는 Tauri `show()` 다★ — 날 Win32 로 보이면 tao 보임 깃발이 거짓으로 남아 트레이
+//   숨기기가 아무것도 하지 않는다(`commands::spare` 의 예열 창 짓기 머리). 포커스 없이 지은 창이라 tao 는 활성화하지
+//   않고 보인다. ⓐ 만으로 남의 앱 전경 창 위에 서는지 · 숨긴 채 올린 z 가 ⓑ 뒤에도 남는지는 [미측 — M22].
+// ADR-0299
+fn raise_and_show(window: &WebviewWindow, activate: bool) {
+    let label = window.label();
+    let os = window.as_ref().window();
+    if let Err(e) = engram_dashboard_platform::window::place_window(
+        &os,
+        None,
+        engram_dashboard_platform::window::ZOrder::Top,
+        false,
+        false,
+    ) {
+        // 올리기가 돌았는지가 M22 진단 재료다 — 이 OS 에 수단이 없는 것만 조용히 둔다.
+        match e {
+            engram_dashboard_platform::window::WindowError::Unsupported => {
+                tracing::debug!(module = "first_paint", label, error = %e, "숨긴 창의 z 를 올리지 못하고 보인다");
+            }
+            engram_dashboard_platform::window::WindowError::NoWindow
+            | engram_dashboard_platform::window::WindowError::Os(_) => {
+                tracing::warn!(module = "first_paint", label, error = %e, "숨긴 창의 z 를 올리지 못하고 보인다");
+            }
+        }
+    }
+    if let Err(e) = window.show() {
+        tracing::warn!(module = "first_paint", label, error = %e, "숨긴 창을 보이지 못했다");
+        return;
+    }
+    if activate {
+        if let Err(e) = window.set_focus() {
+            tracing::debug!(module = "first_paint", label, error = %e, "보인 창에 포커스를 주지 못했다");
+        }
+    }
+}
+
+/// 새 창(맡긴 예열 창 · 창 포트가 새로 지은 창)의 보이기 — 둘 다 숨긴 채 z 를 맨 위로 올린 뒤 보인다(I29).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AdoptedShow {
+pub(crate) enum NewWindowShow {
     /// 포커스를 그대로 둔다(사용자 결정 2026-10-21 「포커스 뺏지말고, 순서만 위로올려.」).
     Raise,
-    /// 보인 뒤 활성화한다.
+    /// 보이며 활성화한다 — 맡긴 창은 보인 뒤 포커스를 주고, 새로 짓는 창은 포커스를 받으며 짓는다.
     RaiseAndActivate,
 }
 
-// 활성화는 그 맡김이 활성으로 열렸고(`activate`) 지금 전경이 우리 프로세스일 때만이다(I5) — 전경이 남의 것일 때
-//   활성화하면 tao 가 가짜 Alt 로 포커스를 빼앗는다(`state::placement` 의 `foreground_is_ours` 머리).
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "U4d′-5 의 맡긴 창 보이기가 부른다")
-)]
-fn adopted_show(activate: bool, foreground_is_ours: bool) -> AdoptedShow {
+/// 활성화는 그 요청이 활성으로 열렸고(`activate`) 지금 전경이 우리 프로세스일 때만이다(I5 · I30) — 전경이 남의 것일 때
+/// 활성화하면 tao 가 가짜 Alt 로 포커스를 빼앗는다(`state::placement` 의 `foreground_is_ours` 머리). 맡긴 창은 보이기
+/// 바로 앞에, 새로 짓는 창은 열 때 정한다.
+pub(crate) fn new_window_show(activate: bool, foreground_is_ours: bool) -> NewWindowShow {
     if activate && foreground_is_ours {
-        AdoptedShow::RaiseAndActivate
+        NewWindowShow::RaiseAndActivate
     } else {
-        AdoptedShow::Raise
+        NewWindowShow::Raise
     }
 }
 
@@ -791,7 +897,7 @@ mod tests {
     #[test]
     fn revealing_a_label_without_a_hold_does_nothing() {
         let gate = FirstPaintGate::default();
-        assert_eq!(gate.arm_adopted("slot-popup-1", 1, true), None);
+        assert_eq!(gate.arm_adopted("slot-popup-1", 1, true, None), None);
         assert_eq!(
             gate.painted("slot-popup-1", Some(1)),
             Signal::Ignored,
@@ -804,7 +910,7 @@ mod tests {
         let gate = FirstPaintGate::default();
         gate.hold_unarmed("slot-popup-1");
         assert!(gate.cancel("slot-popup-1"), "UI 숨기기가 거둔다");
-        assert_eq!(gate.arm_adopted("slot-popup-1", 1, true), None);
+        assert_eq!(gate.arm_adopted("slot-popup-1", 1, true, None), None);
     }
 
     #[test]
@@ -812,7 +918,7 @@ mod tests {
         let gate = FirstPaintGate::default();
         gate.hold_unarmed("slot-popup-1");
         assert_eq!(gate.painted("slot-popup-1", None), Signal::Recorded);
-        let Some(Arm::Waiting(ticket)) = gate.arm_adopted("slot-popup-1", 2, true) else {
+        let Some(Arm::Waiting(ticket)) = gate.arm_adopted("slot-popup-1", 2, true, None) else {
             panic!("채택 전 틀의 알림으로 곧바로 보이지 않는다");
         };
         assert!(
@@ -831,7 +937,7 @@ mod tests {
         gate.hold_unarmed("slot-popup-1");
         assert_eq!(gate.painted("slot-popup-1", Some(1)), Signal::Recorded);
         assert!(matches!(
-            gate.arm_adopted("slot-popup-1", 2, true),
+            gate.arm_adopted("slot-popup-1", 2, true, None),
             Some(Arm::Waiting(_))
         ));
     }
@@ -841,7 +947,7 @@ mod tests {
         let gate = FirstPaintGate::default();
         gate.hold_unarmed("slot-popup-1");
         assert_eq!(gate.painted("slot-popup-1", Some(2)), Signal::Recorded);
-        let Some(Arm::Painted(ticket)) = gate.arm_adopted("slot-popup-1", 2, true) else {
+        let Some(Arm::Painted(ticket)) = gate.arm_adopted("slot-popup-1", 2, true, None) else {
             panic!("같은 번호의 알림이 먼저 왔으면 ③ 이 곧바로 보인다");
         };
         assert_eq!(
@@ -860,7 +966,7 @@ mod tests {
         assert_eq!(gate.painted("slot-popup-1", Some(2)), Signal::Recorded);
         assert_eq!(gate.painted("slot-popup-1", None), Signal::Recorded);
         assert!(matches!(
-            gate.arm_adopted("slot-popup-1", 2, true),
+            gate.arm_adopted("slot-popup-1", 2, true, None),
             Some(Arm::Painted(_))
         ));
     }
@@ -869,7 +975,7 @@ mod tests {
     fn after_the_commit_only_the_signal_with_its_number_reveals() {
         let gate = FirstPaintGate::default();
         gate.hold_unarmed("slot-popup-1");
-        let Some(Arm::Waiting(ticket)) = gate.arm_adopted("slot-popup-1", 5, false) else {
+        let Some(Arm::Waiting(ticket)) = gate.arm_adopted("slot-popup-1", 5, false, None) else {
             panic!("알림 전에 정했으면 기다린다");
         };
         assert_eq!(
@@ -908,7 +1014,7 @@ mod tests {
     fn an_adopted_window_is_revealed_once_between_its_signal_and_the_deadline() {
         let gate = FirstPaintGate::default();
         gate.hold_unarmed("slot-popup-1");
-        let Some(Arm::Waiting(ticket)) = gate.arm_adopted("slot-popup-1", 1, true) else {
+        let Some(Arm::Waiting(ticket)) = gate.arm_adopted("slot-popup-1", 1, true, None) else {
             panic!("알림 전에 정했으면 기다린다");
         };
         let signal = released(gate.painted("slot-popup-1", Some(1)));
@@ -925,7 +1031,7 @@ mod tests {
     fn hiding_after_the_commit_keeps_the_adopted_window_hidden() {
         let gate = FirstPaintGate::default();
         gate.hold_unarmed("slot-popup-1");
-        let Some(Arm::Waiting(ticket)) = gate.arm_adopted("slot-popup-1", 1, true) else {
+        let Some(Arm::Waiting(ticket)) = gate.arm_adopted("slot-popup-1", 1, true, None) else {
             panic!("알림 전에 정했으면 기다린다");
         };
         assert!(gate.cancel("slot-popup-1"));
@@ -941,7 +1047,7 @@ mod tests {
         assert!(gate.cancel("slot-popup-1"));
         gate.hold_unarmed("slot-popup-1");
         assert!(matches!(
-            gate.arm_adopted("slot-popup-1", 1, true),
+            gate.arm_adopted("slot-popup-1", 1, true, None),
             Some(Arm::Waiting(_))
         ));
     }
@@ -949,19 +1055,63 @@ mod tests {
     // ── 맡긴 창 보이기의 갈래(I5 · I30) ──
 
     #[test]
-    fn an_adopted_window_is_activated_only_when_opened_active_and_the_foreground_is_ours() {
+    fn a_new_window_is_activated_only_when_asked_active_and_the_foreground_is_ours() {
         for (activate, ours, show) in [
-            (true, true, AdoptedShow::RaiseAndActivate),
-            (true, false, AdoptedShow::Raise),
-            (false, true, AdoptedShow::Raise),
-            (false, false, AdoptedShow::Raise),
+            (true, true, NewWindowShow::RaiseAndActivate),
+            (true, false, NewWindowShow::Raise),
+            (false, true, NewWindowShow::Raise),
+            (false, false, NewWindowShow::Raise),
         ] {
             assert_eq!(
-                adopted_show(activate, ours),
+                new_window_show(activate, ours),
                 show,
                 "activate={activate} ours={ours}"
             );
         }
+    }
+
+    // 창 포트가 포커스 없이 새로 지은 창(I30) — 번호를 보지 않고 받으며, 올리기만 하는 보이기로 빠진다.
+    #[test]
+    fn a_window_built_without_focus_takes_any_signal_and_is_raised_without_activation() {
+        let gate = FirstPaintGate::default();
+        let opened = Instant::now();
+        for generation in [None, Some(4)] {
+            let ticket = gate.hold_as("slot-popup-2", Reveal::Raised, Some(opened));
+            assert_eq!(
+                gate.painted("slot-popup-2", generation),
+                Signal::Release(ticket)
+            );
+            let released = gate.release("slot-popup-2", ticket).expect("빼낸다");
+            assert_eq!(
+                (released.reveal, released.opened),
+                (Reveal::Raised, Some(opened))
+            );
+        }
+    }
+
+    // 맡긴 창의 열기 때가 ③ 의 항목을 거쳐 보임 로그까지 간다(`reveal_ms`).
+    #[test]
+    fn the_open_time_of_an_adopted_window_reaches_its_release() {
+        let gate = FirstPaintGate::default();
+        let opened = Instant::now();
+        gate.hold_unarmed("slot-popup-1");
+        let Some(Arm::Waiting(ticket)) = gate.arm_adopted("slot-popup-1", 2, false, Some(opened))
+        else {
+            panic!("알림 전에 정했으면 기다린다");
+        };
+        assert_eq!(
+            gate.painted("slot-popup-1", Some(2)),
+            Signal::Release(ticket)
+        );
+        let released = gate.release("slot-popup-1", ticket).expect("빼낸다");
+        assert_eq!(released.opened, Some(opened));
+        assert!(matches!(
+            released.reveal,
+            Reveal::Adopted {
+                generation: 2,
+                activate: false
+            }
+        ));
     }
 
     // ── 풀의 손잡이 ──
@@ -981,7 +1131,7 @@ mod tests {
         let gate = Arc::new(FirstPaintGate::default());
         let handle = SparePaintGate::new(gate.clone());
         handle.hold_unarmed("slot-popup-1");
-        assert!(!handle.reveal_if_held("slot-popup-1", 1, true));
+        assert!(!handle.reveal_if_held("slot-popup-1", 1, true, None));
         assert_eq!(gate.painted("slot-popup-1", Some(1)), Signal::Ignored);
     }
 
@@ -1047,7 +1197,7 @@ mod tests {
     async fn an_adopted_window_whose_signals_carry_another_number_is_revealed_by_the_deadline() {
         let gate = Arc::new(FirstPaintGate::default());
         gate.hold_unarmed("slot-popup-1");
-        let Some(Arm::Waiting(ticket)) = gate.arm_adopted("slot-popup-1", 3, true) else {
+        let Some(Arm::Waiting(ticket)) = gate.arm_adopted("slot-popup-1", 3, true, None) else {
             panic!("알림 전에 정했으면 기다린다");
         };
         let (queued, queue) = counter();

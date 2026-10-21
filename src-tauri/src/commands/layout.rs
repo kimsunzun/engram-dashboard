@@ -207,15 +207,18 @@ impl WindowHost for OwnedWindowHost {
         TauriWindowHost { app: &self.app }.record_placement(label);
     }
 
-    // 예열 창 채택은 아직 꺼져 있다 — 셋을 Tauri 어댑터로 넘기는 것은 켜는 단위(TRD S21-slot-docking §7 U4d′-5)다.
     // ADR-0299
     fn claim_spare(&self) -> Option<SpareClaim> {
-        None
+        TauriWindowHost { app: &self.app }.claim_spare()
     }
 
-    fn committed(&self, _claim: &SpareClaim) {}
+    fn committed(&self, claim: &SpareClaim) {
+        TauriWindowHost { app: &self.app }.committed(claim);
+    }
 
-    fn release_spare(&self, _claim: &SpareClaim) {}
+    fn release_spare(&self, claim: &SpareClaim) {
+        TauriWindowHost { app: &self.app }.release_spare(claim);
+    }
 }
 
 struct OwnedSpawner {
