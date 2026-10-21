@@ -4,9 +4,9 @@
 // ADR-0296 · ADR-0297
 // TRD S21-slot-docking §3-3 · §3-5
 
-use super::wire::{DropAnchor, DropTo, EndEffect, NewWindowBy, SizeCss, TabDrop};
+use super::wire::{DropAnchor, DropTo, EndEffect, NewWindowBy, TabDrop};
 use crate::layout::apply::{DockDest, DockRequest, OnEmptied, WindowPlace};
-use crate::layout::bands::PointCss;
+use crate::layout::bands::{PointCss, SizeCss};
 use crate::layout::dock::DockAnchor;
 use crate::layout::geometry::Insets;
 use crate::layout::manager::{DockGuard, DockMove, FocusPolicy, WindowLabel};

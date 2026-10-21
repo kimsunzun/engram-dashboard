@@ -4,15 +4,15 @@
 //! ★웹 거울과 한 벌이다★ — 출처 웹뷰가 dragstart 에 같은 규칙(`dock/dragSize.ts`)으로 셈해 싣는다. 둘은 골든
 //! `bands_golden.json` 의 `drag_size` 표를 함께 먹는다. 상수는 `bands.rs` 머리 한 벌이다.
 
-use super::bands::{SizeDip, MAXIMIZED_INSET_DIP};
+use super::bands::{SizeCss, MAXIMIZED_INSET_DIP};
 use super::geometry::Insets;
 use super::manager::WindowBounds;
 
 /// 출처 창의 복원(보통) 크기 — 모델의 보통 자리 크기(`bounds` — 안쪽 논리 크기 · 최대화 중이어도 보통 크기)에
 /// `frame`(그 크기에 더할 틀 — 안쪽 크기를 셀 때는 0)을 더한다. 모델 값이 없으면 `current`(같은 쪽의 지금 크기)다.
-pub fn restored_size(bounds: Option<WindowBounds>, frame: SizeDip, current: SizeDip) -> SizeDip {
+pub fn restored_size(bounds: Option<WindowBounds>, frame: SizeCss, current: SizeCss) -> SizeCss {
     match bounds {
-        Some(b) => SizeDip {
+        Some(b) => SizeCss {
             w: b.w() + frame.w,
             h: b.h() + frame.h,
         },
@@ -24,7 +24,7 @@ pub fn restored_size(bounds: Option<WindowBounds>, frame: SizeDip, current: Size
 /// 큰 변은 `max(0, work − 2 × MAXIMIZED_INSET_DIP)` ② 출처가 최대화(`maximized` = 그 크기)면 각 변을 그 절반 이상으로.
 /// ★②가 마지막이라 이긴다(C5)★ — 순서를 바꾸지 말 것. 세 크기는 같은 쪽(셋 다 바깥 · 셋 다 안쪽)이어야 한다.
 // ADR-0295
-pub fn dragged_size(restored: SizeDip, maximized: Option<SizeDip>, work: SizeDip) -> SizeDip {
+pub fn dragged_size(restored: SizeCss, maximized: Option<SizeCss>, work: SizeCss) -> SizeCss {
     let mut s = restored;
     if s.w > work.w {
         s.w = (work.w - 2.0 * MAXIMIZED_INSET_DIP).max(0.0);
@@ -43,16 +43,16 @@ pub fn dragged_size(restored: SizeDip, maximized: Option<SizeDip>, work: SizeDip
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SourceWindow {
     /// 복원(보통) 안쪽 크기(`window:frame.restored`) — 모르면 `None`(지금 크기로 친다).
-    pub restored: Option<SizeDip>,
+    pub restored: Option<SizeCss>,
     pub maximized: bool,
     /// 창 틀 = 바깥 − 안쪽(`window:frame.insets`).
     pub insets: Insets,
     /// 지금 안쪽 크기(뷰포트) — 최대화면 최대화 안쪽 크기다.
-    pub viewport: SizeDip,
+    pub viewport: SizeCss,
     /// 끄는 창 모니터의 작업 영역(바깥 크기의 한계 — `screen.availWidth` · `availHeight`).
-    pub work: SizeDip,
+    pub work: SizeCss,
     /// 크롬 = 뷰포트 − 탭 캔버스(탭바 높이 · 왼쪽 여백 따위).
-    pub chrome: SizeDip,
+    pub chrome: SizeCss,
     /// 탭 하나뿐인 팝아웃 — 새 창을 만들지 않고 그 창을 옮긴다(Q34).
     pub single: bool,
 }
@@ -61,9 +61,9 @@ pub struct SourceWindow {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DragSizes {
     /// 새 창 안쪽 크기(R22) — `None` = 탭 하나뿐인 팝아웃(그 창을 크기 그대로 옮긴다).
-    pub size: Option<SizeDip>,
+    pub size: Option<SizeCss>,
     /// 끄는 탭의 원래 크기(R7 — 붙는 몫의 재료) = 캔버스 크기. 음수는 0 으로 친다.
-    pub original: SizeDip,
+    pub original: SizeCss,
 }
 
 /// 끄는 탭의 새 창 크기와 원래 크기(TRD §4-2 「크기」).
@@ -72,7 +72,7 @@ pub struct DragSizes {
 ///   틀 · 최대화면 그 안쪽 크기. `original` = `size` − 크롬.
 /// - 탭 하나뿐인 팝아웃 — `size` 없음 · `original` = (최대화면 복원 크기 · 아니면 지금 크기) − 크롬.
 pub fn drag_sizes(s: &SourceWindow) -> DragSizes {
-    let canvas = |v: SizeDip| SizeDip {
+    let canvas = |v: SizeCss| SizeCss {
         w: (v.w - s.chrome.w).max(0.0),
         h: (v.h - s.chrome.h).max(0.0),
     };
@@ -86,7 +86,7 @@ pub fn drag_sizes(s: &SourceWindow) -> DragSizes {
             original: canvas(shown),
         };
     }
-    let work = SizeDip {
+    let work = SizeCss {
         w: s.work.w - (s.insets.l + s.insets.r),
         h: s.work.h - (s.insets.t + s.insets.b),
     };
@@ -105,8 +105,8 @@ pub fn drag_sizes(s: &SourceWindow) -> DragSizes {
 mod tests {
     use super::*;
 
-    fn dip(w: f64, h: f64) -> SizeDip {
-        SizeDip { w, h }
+    fn dip(w: f64, h: f64) -> SizeCss {
+        SizeCss { w, h }
     }
 
     const NO_FRAME: Insets = Insets {

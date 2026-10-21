@@ -77,14 +77,14 @@ struct Size {
     h: f64,
 }
 
-impl From<Size> for SizeDip {
+impl From<Size> for SizeCss {
     fn from(s: Size) -> Self {
-        SizeDip { w: s.w, h: s.h }
+        SizeCss { w: s.w, h: s.h }
     }
 }
 
-impl From<SizeDip> for Size {
-    fn from(s: SizeDip) -> Self {
+impl From<SizeCss> for Size {
+    fn from(s: SizeCss) -> Self {
         Size { w: s.w, h: s.h }
     }
 }
@@ -341,11 +341,11 @@ impl<'a> Eval<'a> {
             layout: &input.layout,
             incoming,
             original: input.original.map_or(
-                SizeDip {
+                SizeCss {
                     w: f64::NAN,
                     h: f64::NAN,
                 },
-                SizeDip::from,
+                SizeCss::from,
             ),
             zone: input
                 .tab_bar
@@ -448,7 +448,7 @@ impl<'a> Eval<'a> {
 
 fn drag_size_line(input: &DragSizeInput) -> DragSizeLine<'_> {
     let out = drag_sizes(&SourceWindow {
-        restored: input.restored.map(SizeDip::from),
+        restored: input.restored.map(SizeCss::from),
         maximized: input.maximized,
         insets: input.insets,
         viewport: input.viewport.into(),
@@ -669,7 +669,7 @@ fn band_inputs() -> Vec<BandsInput> {
         },
         window(
             "a blocked outer top band over a deep chain",
-            blocked_outer_top_layout(&one, SizeDip { w: 300.0, h: 300.0 }),
+            blocked_outer_top_layout(&one, SizeCss { w: 300.0, h: 300.0 }),
             &one,
             size(300.0, 300.0),
         ),

@@ -1,4 +1,4 @@
-// spareMode 단위테스트 — 듣기(자기 창 대상 · `window_role` 보다 먼저) · `window_role` 답 → 모드 · `dock:spare` 바뀜 · 정리.
+// spareMode 단위테스트 — 듣기(자기 창 대상 · `window_role` 보다 먼저) · `window_role` 답 → 모드 · `spare:adopted` 바뀜 · 정리.
 //   창 모드가 화면에 닿는 것은 `WindowLayout.test.tsx` 의 대기 모드 시험이 잰다.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -17,7 +17,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 }))
 vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({ label: LABEL }) }))
 
-import { CMD_WINDOW_ROLE, EVT_SPARE, watchSpareMode, type WindowMode } from './spareMode'
+import { CMD_WINDOW_ROLE, EVT_SPARE_ADOPTED, watchSpareMode, type WindowMode } from './spareMode'
 
 const ticks = async (): Promise<void> => {
   for (let i = 0; i < 20; i++) await Promise.resolve()
@@ -53,7 +53,7 @@ beforeEach(() => {
   invokeMock.mockImplementation(async (cmd: string) => {
     if (cmd === CMD_WINDOW_ROLE) {
       order.push(`invoke:${cmd}`)
-      return { role: 'model', drag: null }
+      return { role: 'model' }
     }
     return undefined
   })
@@ -66,10 +66,10 @@ afterEach(() => {
 })
 
 describe('watchSpareMode — 듣기 · 창 모드', () => {
-  it('dock:spare 하나만 자기 창 대상으로 건 뒤 window_role 을 묻는다', async () => {
+  it('spare:adopted 하나만 자기 창 대상으로 건 뒤 window_role 을 묻는다', async () => {
     await watched()
-    expect(order).toEqual([`listen:${EVT_SPARE}`, `invoke:${CMD_WINDOW_ROLE}`])
-    expect(listeners.get(EVT_SPARE)?.options).toEqual({ target: LABEL })
+    expect(order).toEqual([`listen:${EVT_SPARE_ADOPTED}`, `invoke:${CMD_WINDOW_ROLE}`])
+    expect(listeners.get(EVT_SPARE_ADOPTED)?.options).toEqual({ target: LABEL })
     expect(modes).toEqual(['normal'])
   })
 
@@ -84,17 +84,17 @@ describe('watchSpareMode — 듣기 · 창 모드', () => {
     })
     stop = watchSpareMode(m => modes.push(m))
     await ticks()
-    expect(order).toEqual([`listen:${EVT_SPARE}`])
+    expect(order).toEqual([`listen:${EVT_SPARE_ADOPTED}`])
     finish(() => {})
     await ticks()
-    expect(order).toEqual([`listen:${EVT_SPARE}`, `invoke:${CMD_WINDOW_ROLE}`])
+    expect(order).toEqual([`listen:${EVT_SPARE_ADOPTED}`, `invoke:${CMD_WINDOW_ROLE}`])
     expect(modes).toEqual(['normal'])
   })
 
   const REPLIES: { name: string; reply: () => Promise<unknown>; out: WindowMode; warns: boolean }[] = [
-    { name: 'parked → parked', reply: async () => ({ role: 'parked', drag: null }), out: 'parked', warns: false },
-    { name: 'model → normal', reply: async () => ({ role: 'model', drag: null }), out: 'normal', warns: false },
-    { name: 'unknown → normal', reply: async () => ({ role: 'unknown', drag: null }), out: 'normal', warns: false },
+    { name: 'spare → spare', reply: async () => ({ role: 'spare' }), out: 'spare', warns: false },
+    { name: 'model → normal', reply: async () => ({ role: 'model' }), out: 'normal', warns: false },
+    { name: 'unknown → normal', reply: async () => ({ role: 'unknown' }), out: 'normal', warns: false },
     {
       name: '실패 → normal(경고 로그)',
       reply: async () => {
@@ -118,23 +118,23 @@ describe('watchSpareMode — 듣기 · 창 모드', () => {
     })
   }
 
-  it('window_role = parked → parked · 그 뒤 dock:spare 로 바뀜을 알린다', async () => {
-    invokeMock.mockImplementation(async () => ({ role: 'parked', drag: null }))
+  it('window_role = spare → spare · 그 뒤 spare:adopted 마다 normal 을 알린다', async () => {
+    invokeMock.mockImplementation(async () => ({ role: 'spare' }))
     await watched()
-    expect(modes).toEqual(['parked'])
-    emit(EVT_SPARE, { step: 'adopted' })
-    emit(EVT_SPARE, { step: 'parked' })
-    expect(modes).toEqual(['parked', 'normal', 'parked'])
+    expect(modes).toEqual(['spare'])
+    emit(EVT_SPARE_ADOPTED, null)
+    emit(EVT_SPARE_ADOPTED, null)
+    expect(modes).toEqual(['spare', 'normal', 'normal'])
   })
 
-  it('dock:spare 구독이 실패해도(오류 로그) window_role 은 묻는다', async () => {
+  it('spare:adopted 구독이 실패해도(오류 로그) window_role 은 묻는다', async () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})
     listenMock.mockImplementationOnce(async () => {
       throw new Error('listen failed')
     })
     await watched()
     expect(error).toHaveBeenCalledWith(
-      `[spareMode] ${EVT_SPARE} 구독 실패 — 이 창은 대기 모드 바뀜을 못 받는다:`,
+      `[spareMode] ${EVT_SPARE_ADOPTED} 구독 실패 — 이 창은 대기 모드 바뀜을 못 받는다:`,
       expect.any(Error),
     )
     expect(order).toEqual([`invoke:${CMD_WINDOW_ROLE}`])
@@ -145,9 +145,9 @@ describe('watchSpareMode — 듣기 · 창 모드', () => {
     await watched()
     stop?.()
     stop = null
-    expect(unlistened).toEqual([EVT_SPARE])
+    expect(unlistened).toEqual([EVT_SPARE_ADOPTED])
 
-    emit(EVT_SPARE, { step: 'parked' })
+    emit(EVT_SPARE_ADOPTED, null)
     await ticks()
     expect(modes).toEqual(['normal'])
   })
@@ -164,7 +164,7 @@ describe('watchSpareMode — 듣기 · 창 모드', () => {
     await ticks()
     stop()
     stop = null
-    answer({ role: 'parked', drag: null })
+    answer({ role: 'spare' })
     await ticks()
     expect(modes).toEqual([])
   })

@@ -27,10 +27,10 @@ use uuid::Uuid;
 
 use self::plan::{InputNow, Plan, SourceFrame, TopAt};
 use self::wire::{
-    DropOutcome, DropTo, EndEffect, NewWindowBy, SizeCss, TabDrop, TabDropDone, TabDropReply,
-    WindowFrame,
+    DropOutcome, DropTo, EndEffect, NewWindowBy, TabDrop, TabDropDone, TabDropReply, WindowFrame,
 };
 use crate::layout::apply::{self, DockDest};
+use crate::layout::bands::SizeCss;
 use crate::layout::geometry::Insets;
 use crate::layout::manager::DockError;
 use crate::layout::{

@@ -89,8 +89,6 @@ interface ViewState {
   layouts: Record<string, CachedView>
   /** 창 label → 그 창의 탭 상태(window:tabs-updated 미러). 탭바·useCurrentViewId 의 단일 출처. */
   windows: Record<string, WindowTabs>
-  /** 창 label → `forgetWindow` 로 지운 항목의 version — 그 창 항목이 없는 동안 수신은 이보다 커야 채택된다. */
-  forgottenVersions: Record<string, number>
 
   /**
    * ★렌더 모드 오버라이드(§5)★: slot node.id → 강제 RenderMode. caps 유도 기본 렌더러
@@ -198,17 +196,11 @@ interface ViewState {
   applyLayoutUpdated: (snap: ViewSnapshot) => void
   /** window:tabs-updated / list_tabs 수신 — 그 창의 탭 목록/active 갱신(version stale 방어). */
   applyWindowTabsUpdated: (payload: WindowTabsPayload) => void
-  /**
-   * 창 `label` 의 탭 상태를 지운다 — 대기 모드에 든 창(탭 모델 밖 · TRD S21-slot-docking §2-5)용. 지운 항목의 version 은
-   * `forgottenVersions` 에 남아, 그보다 늦지 않은 수신(대기에 들기 전 알림이 늦게 온 것)은 그 창을 다시 채우지 않는다.
-   */
-  forgetWindow: (label: string) => void
 }
 
 export const useViewStore = create<ViewState>((set, get) => ({
   layouts: {},
   windows: {},
-  forgottenVersions: {},
   renderModeOverride: {}, // 갱신 경로 = set/clearRenderMode(+DOM 별칭)만(계약은 필드 JSDoc).
 
   createTab: (window, name) => invoke<string>('create_tab', { window, name: name ?? null }),
@@ -323,10 +315,10 @@ export const useViewStore = create<ViewState>((set, get) => ({
 
   applyWindowTabsUpdated: payload => {
     // 그 창의 탭 목록·active 를 미러. ★version stale 방어(G10)★: 같은 창의 낮은/같은 전역 version emit 은
-    // 폐기한다(전역 단조라 창 내 비교가 성립). 첫 수신(prev 없음 · 지운 적 없음)은 자동 채택. 다른 창끼리는 version 을
+    // 폐기한다(전역 단조라 창 내 비교가 성립). 첫 수신(prev 없음)은 자동 채택. 다른 창끼리는 version 을
     // 비교하지 않는다(창별 독립 엔트리 — layout 캐시와 동일 규율).
-    const last = get().windows[payload.label]?.version ?? get().forgottenVersions[payload.label]
-    if (last !== undefined && payload.version <= last) return
+    const prev = get().windows[payload.label]
+    if (prev && payload.version <= prev.version) return
     set(state => ({
       windows: {
         ...state.windows,
@@ -337,16 +329,6 @@ export const useViewStore = create<ViewState>((set, get) => ({
         },
       },
     }))
-  },
-
-  forgetWindow: label => {
-    const prev = get().windows[label]
-    if (prev === undefined) return
-    set(state => {
-      const windows = { ...state.windows }
-      delete windows[label]
-      return { windows, forgottenVersions: { ...state.forgottenVersions, [label]: prev.version } }
-    })
   },
 }))
 

@@ -81,7 +81,7 @@ pub(crate) const THEME_MEMORY_PREFIX: &str = "engram.theme.";
 /// 떠 있는 창의 바탕을 그 테마로 다시 칠한다 — 테마를 밀 때 창마다 부른다(`commands::settings`).
 ///
 /// tao 0.35.3 쪽 칠하기는 색을 적고 다시 그리기만 한다(`InvalidateRect` + `UpdateWindow`) — 창 깃발을 건드리지 않아, 숨긴 채
-/// 기다리는 창(예비 창 — `commands::dock`)에 불러도 그 창이 보이지 않는다(소스 독해).
+/// 기다리는 창(예비 창 — `commands::spare`)에 불러도 그 창이 보이지 않는다(소스 독해).
 pub(crate) fn repaint<R: Runtime>(window: &WebviewWindow<R>, theme: UiTheme) {
     // 바탕은 페이지가 덮기 전에만 보이는 색이라 배달(테마 알림)을 실패로 만들 사유가 아니다 — 로그로만 남긴다.
     if let Err(e) = window.set_background_color(Some(color(theme))) {

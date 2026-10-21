@@ -11,7 +11,7 @@
 // 캔버스(R15 남은 탭)는 출처 쪽 `useShownTab` 이 정한다 — keep-alive 의 `display` 가 그것을 따른다. 파일 · URL 놓기는
 // `dock/fileDropGuard.ts` 가 막는다.
 //
-// ★대기 모드(예열 창 — ADR-0299 · TRD S21-slot-docking §3-9)★: 대기 창 명부의 창(숨은 예비 창)은 탭 모델 밖이다. 그 창은
+// ★대기 모드(예열 창 — ADR-0299 · TRD S21-slot-docking §3-9)★: 예비 창 풀의 창(숨은 예비 창)은 탭 모델 밖이다. 그 창은
 // 탭바 + 빈 캔버스(빈 틀)만 그리고, 탭을 끌어오지 않고, 0탭 자가닫힘을 끈다. 재기 보고(캔버스 · 지표)는 그대로 보낸다.
 // 모드는 `spareMode.ts` 가 정한다.
 
@@ -65,7 +65,6 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
   const createTab = useViewStore(s => s.createTab)
   const closeTab = useViewStore(s => s.closeTab)
   const renameTab = useViewStore(s => s.renameTab)
-  const forgetWindow = useViewStore(s => s.forgetWindow)
 
   const closingRef = useRef(false)
   const canvasElRef = useRef<HTMLDivElement | null>(null)
@@ -87,34 +86,30 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
 
   // `null` = 아직 모름(`window_role` 답 전) — 탭 끌어오기 · 자가닫힘은 `normal` 일 때만 돈다.
   const [mode, setMode] = useState<WindowMode | null>(null)
-  const [wasParked, setWasParked] = useState(false)
-  // 대기에 들 때 스토어의 이 창 항목을 지운다 — 셸은 비운 창에 탭 0 개 알림을 보내지 않아(TRD S21-slot-docking §7 ⑤) 두면
-  //   옛 탭(이미 다른 창에 있다)이 남는다. 그러면 아래 `framed` 가 「대기에 든 뒤 받은 탭」을 못 가려, 빈 틀을 거두는 때가 셸이
-  //   들인 창의 탭을 대기를 풀기 전에 알리는 순서에 기댄다 — 예비 창 채택(ADR-0299 · TRD S21-slot-docking U4d′)이 그 순서로
-  //   알린다는 가정이다.
+  const [wasSpare, setWasSpare] = useState(false)
+  // 빈 틀을 거두는 때는 셸이 들인 창의 탭을 대기를 풀기 전에 알리는 순서에 기댄다 — 예비 창 채택(ADR-0299 · TRD
+  //   S21-slot-docking U4d′)이 그 순서로 알린다는 가정이다.
   useEffect(
     () =>
       watchSpareMode(next => {
         setMode(next)
-        if (next === 'parked') {
-          setWasParked(true)
-          forgetWindow(label)
-        }
+        if (next === 'spare') setWasSpare(true)
       }),
-    [label, forgetWindow],
+    [],
   )
-  const parked = mode === 'parked'
+  const spare = mode === 'spare'
   const normal = mode === 'normal'
-  // 들인 예비 창(`dock:spare{adopted}`)은 제 탭을 받기 전까지 빈 틀 그대로다 — 「로딩」 화면(바탕만)으로 바꾸면 채택돼
-  //   보이는 순간 탭바가 사라졌다 다시 마운트된다. 대기에 들 때 항목을 지웠으므로 `win` 이 있다 = 대기에 든 뒤 받은 탭이다.
-  const framed = parked || (wasParked && win === undefined && !bootFailed)
+  // 들인 예비 창(`spare:adopted`)은 제 탭을 받기 전까지 빈 틀 그대로다 — 「로딩」 화면(바탕만)으로 바꾸면 채택돼
+  //   보이는 순간 탭바가 사라졌다 다시 마운트된다. 예비 창은 새 label 로 대기에 든 채 떠 마운트 때 스토어에 그 창 항목이
+  //   없다 — 그래서 `win` 이 있다 = 채택 때 받은 탭이다.
+  const framed = spare || (wasSpare && win === undefined && !bootFailed)
 
   useEffect(() => installFileDropGuard(), [])
 
   // ── 보통 모드: 자기 창 탭 상태 초기 pull + window:tabs-updated listen(자기 label 만) ────────────────
   // ★구독 먼저, pull 나중★(F-listen 동형): listen 등록 완료 전 도착한 emit 을 놓치지 않게 구독을 먼저
   // 걸고 그 뒤 pull 한다. 더 최신 emit 이 pull 을 덮으면 applyWindowTabsUpdated 의 version 가드가 역전을 막는다.
-  // 대기 모드에서 들여지면(`dock:spare{adopted}`) 여기로 다시 들어와 들인 탭을 당긴다.
+  // 대기 모드에서 들여지면(`spare:adopted`) 여기로 다시 들어와 들인 탭을 당긴다.
   // ADR-0295
   useEffect(() => {
     if (!normal) return
@@ -222,7 +217,7 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
   // 그래도 이 분기를 남기는 이유(제거 X): 어떤 비정상 경로로든 tabs 가 0인 window:tabs-updated 가 프론트에
   //   닿으면(방어), 여기서 idempotent 하게 자기 창을 한 번만 닫아 stranded 창을 정리한다(main 은 백엔드가
   //   빈 탭을 강제 유지하므로 0이 안 됨). ★재진입 가드(closingRef)★: 이미 닫히는 중이면 no-op.
-  // ★보통 모드에서만★ — 대기 창은 탭 0 개가 정상이다(TRD S21-slot-docking §2-5). 모드를 모르는 동안 온 0탭은 모드가
+  // ★보통 모드에서만★ — 대기 창은 탭 0 개가 정상이다(TRD S21-slot-docking §3-9). 모드를 모르는 동안 온 0탭은 모드가
   //   정해진 뒤 다시 본다.
   // ADR-0295
   useEffect(() => {
@@ -267,7 +262,7 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
         pullFrame={normal}
       />
       <div ref={canvasRef} style={{ flex: 1, position: 'relative', minHeight: 0 }}>
-        {framed && <ParkedCanvas />}
+        {framed && <SpareCanvas />}
         {tabs.map(tab => (
           <div
             key={tab.id}
@@ -359,7 +354,7 @@ function detachCanvasObserver(obs: CanvasObserverState): void {
 // 대기 모드의 빈 캔버스 — 칸 틀 하나만 그린다. 탭이 없어 잎이 마운트되지 않으므로 칸 틀 지표(`report_ui_metrics`)를
 //   여기서 보낸다 — 예비 창을 채택할 때 셸이 이 지표를 모델에 옮겨 적는다(★지금 채택하는 쪽이 없다★ — TRD S21-slot-docking §3-9 `committed` · U4d′).
 // ADR-0295
-function ParkedCanvas() {
+function SpareCanvas() {
   const borderRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     if (borderRef.current !== null) void reportUiMetrics(borderRef.current)
@@ -367,7 +362,7 @@ function ParkedCanvas() {
   return (
     <div
       ref={borderRef}
-      data-testid="parked-canvas"
+      data-testid="spare-canvas"
       style={{ position: 'absolute', inset: 0, background: 'var(--bg)', boxSizing: 'border-box', ...SLOT_FRAME_BORDER }}
     />
   )

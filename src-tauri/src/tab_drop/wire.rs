@@ -5,7 +5,7 @@
 use ts_rs::TS;
 use uuid::Uuid;
 
-use crate::layout::bands::PointCss;
+use crate::layout::bands::{PointCss, SizeCss};
 use crate::layout::dock::DockSide;
 use crate::layout::geometry::Insets;
 
@@ -144,14 +144,6 @@ pub enum DropOutcome {
     Canceled,
     Ignored,
     Rejected,
-}
-
-/// 크기 — CSS px(논리).
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, TS)]
-#[ts(export)]
-pub struct SizeCss {
-    pub w: f64,
-    pub h: f64,
 }
 
 /// 창 사실 — 셸 → 그 창 사건 `window:frame`(값이 바뀔 때만) · 마운트 때 당기는 `window_frame` 의 답.

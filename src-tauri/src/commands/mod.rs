@@ -1,12 +1,12 @@
 pub mod agent;
 pub mod autostart;
 pub mod discovery;
-// 도킹의 셸 쪽 창 관리 — 대기 창 명부 · 예비 창(TRD S21-slot-docking §2-5).
-pub mod dock;
 pub mod first_paint;
 pub mod layout;
 pub mod popout;
 pub mod settings;
+// 예비 창의 셸 쪽 창 관리 — 예비 창 풀 · 짓기 · 역할 답(TRD S21-slot-docking §3-9).
+pub mod spare;
 pub mod state;
 // 탭 놓기 invoke 둘(`tab_drop` · `window_frame`) — 끌기가 끝난 뒤의 명령 하나 · 창 사실(ADR-0296).
 pub mod tab_drop;
@@ -18,11 +18,11 @@ pub mod view_bus;
 pub use agent::*;
 pub use autostart::*;
 pub use discovery::*;
-pub use dock::*;
 pub use first_paint::*;
 pub use layout::*;
 pub use popout::*;
 pub use settings::*;
+pub use spare::*;
 pub use state::*;
 pub use tray::*;
 pub use usage::*;

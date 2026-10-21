@@ -20,8 +20,6 @@ use engram_dashboard_protocol::{AgentBackendKind, AgentCommand, AgentEvent, Requ
 use crate::commands::popout::{PopupCounter, TauriWindowHost};
 use crate::commands::settings::TauriSettingsEvents;
 use crate::daemon_client::DaemonClient;
-use crate::dock::parked::Measure;
-use crate::dock::DockState;
 use crate::layout::apply;
 use crate::layout::{
     AgentSpawner, LayoutEvents, LayoutState, MoveFailed, SlotContent, SplitDir, SplitRatioApplied,
@@ -30,6 +28,8 @@ use crate::layout::{
 };
 use crate::output_router::{OutputRouter, SubscriptionDelta};
 use crate::settings::SettingsService;
+use crate::spare::pool::Measure;
+use crate::spare::SpareState;
 use crate::state::restore::RestoreCoordinator;
 use crate::theme::ThemeControl;
 
@@ -594,23 +594,23 @@ pub async fn spawn_into(
 // 둘 다 버스 명령이 아니다 — 버스에 두면 LLM 이 캔버스·지표를 위조할 수 있다. version 을 올리지도 알리지도 않는다.
 // ADR-0227
 //
-// 둘 다 대기 창 명부의 창(모델 밖)이면 모델 대신 명부에 적는다(TRD S21-slot-docking §2-5 「재기 받기」) — 모델은 모르는
+// 둘 다 예비 창 풀의 창(모델 밖)이면 모델 대신 풀에 적는다(TRD S21-slot-docking §3-9 「풀」) — 모델은 모르는
 //   label 을 거절해, 적지 않으면 들일 때 옮겨 담을 재기가 없다.
 
 /// 창 웹뷰가 자기 탭 내용 영역 크기(정수 CSS px)를 알린다 — `invoke('report_window_canvas', { w, h })`.
 ///
 /// ★창 label 을 인자로 받지 않는다★ — 잘못 적힌 label 하나가 남의 창 캔버스를 덮는다. Tauri 가 넣어 주는
 /// [`Window`] 가 그 값의 유일한 권위다(`report_view_commands` 와 같은 규칙).
-/// `w` 나 `h` 가 0 이면 무시하고 직전 값을 유지한다(`Ok`). 탭 모델에도 대기 창 명부에도 없는 창이면 `Err`.
+/// `w` 나 `h` 가 0 이면 무시하고 직전 값을 유지한다(`Ok`). 탭 모델에도 예비 창 풀에도 없는 창이면 `Err`.
 #[tauri::command]
 pub fn report_window_canvas(
     window: Window,
     state: State<'_, LayoutState>,
-    dock: State<'_, Arc<DockState>>,
+    spare: State<'_, Arc<SpareState>>,
     w: u32,
     h: u32,
 ) -> Result<(), String> {
-    match dock.record_parked(window.label(), Measure::Canvas { w, h }) {
+    match spare.record_measure(window.label(), Measure::Canvas { w, h }) {
         Some(recorded) => recorded.map_err(|e| e.to_string())?,
         None => apply::report_window_canvas(&state, window.label(), w, h)?,
     }
@@ -624,10 +624,10 @@ pub fn report_window_canvas(
 pub fn report_ui_metrics(
     window: Window,
     state: State<'_, LayoutState>,
-    dock: State<'_, Arc<DockState>>,
+    spare: State<'_, Arc<SpareState>>,
     metrics: UiMetrics,
 ) -> Result<(), String> {
-    match dock.record_parked(window.label(), Measure::Metrics(metrics)) {
+    match spare.record_measure(window.label(), Measure::Metrics(metrics)) {
         Some(recorded) => recorded.map_err(|e| e.to_string()),
         None => apply::report_ui_metrics(&state, window.label(), metrics),
     }

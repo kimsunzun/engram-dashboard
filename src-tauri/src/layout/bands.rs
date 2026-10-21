@@ -67,9 +67,10 @@ const _: () = assert!(OUTER_BAND_PX as f64 > STRIP_ZONE_PX);
 // 상한을 모델 상한보다 올리면 미리보기는 그려지는데 놓기가 거절된다.
 const _: () = assert!(ATTACH_SHARE_MAX <= crate::layout::dock::SHARE_MAX);
 
-/// 논리(DIP) px 크기 — 웹뷰 확대 1 의 CSS px 와 같다.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct SizeDip {
+/// 크기 — 논리(DIP) px(소수 허용) · 웹뷰 확대 1 의 CSS px 와 같다.
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct SizeCss {
     pub w: f64,
     pub h: f64,
 }
@@ -119,7 +120,7 @@ pub struct WindowTargets<'a> {
     /// 끄는 탭의 배치.
     pub incoming: &'a LayoutNode,
     /// 끄는 탭의 원래 크기(R7) — 모르면(크기 칸이 없거나 깨짐) NaN 을 넣는다: 몫이 상한([`ATTACH_SHARE_MAX`])이 된다.
-    pub original: SizeDip,
+    pub original: SizeCss,
     /// 그 창 탭바 구역 — [`zone_in_canvas`] 의 값(캔버스 좌표 · 정수 경계 · 위로 음수일 수 있다). 탭바 판정이 쓴
     /// 경계와 같아야 한다. `None` = 탭바를 모른다(띠에서 빼지 않는다).
     pub zone: Option<RectCss>,
@@ -178,7 +179,7 @@ pub fn zone_in_canvas(zone: RectCss, canvas_origin: PointCss) -> RectCss {
 /// (`Seam.share`)가 같은 이 값을 `docked_tree` 에 넘기고, 놓기 쪽은 범위 밖을 `DockError::InvalidShare` 로 거절한다.
 /// 그래서 칸 길이 0 이면 상한 · `L` 이 NaN · +∞ 면 상한 · 0 이하면 하한이다.
 // ADR-0295
-pub fn attach_share(original: SizeDip, side: DockSide, target: PxRect) -> f64 {
+pub fn attach_share(original: SizeCss, side: DockSide, target: PxRect) -> f64 {
     let (l, t) = match side {
         DockSide::Left | DockSide::Right => (original.w, target.x1.saturating_sub(target.x0)),
         DockSide::Top | DockSide::Bottom => (original.h, target.y1.saturating_sub(target.y0)),

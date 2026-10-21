@@ -2,8 +2,6 @@
 import type { WindowRole } from "./WindowRole";
 
 /**
- * `window_role` 의 답 — `drag` 는 ★늘 `null` 이다★: 진행 중 세션 번호를 비추는 거울은 끌기 세션 축소안에서
- * 뺐다(다시 읽힌 웹뷰가 끌기 도중에 키 감시를 다시 켜는 몫 — 평소 쓰임 밖 · 추적 밖
- * `.claude/handoff/attachments/trd6-review-2026-10-18/u5-trim-plan.md` §4).
+ * `window_role` 의 답.
  */
-export type WindowRoleReply = { role: WindowRole, drag: number | null, };
+export type WindowRoleReply = { role: WindowRole, };

@@ -16,8 +16,8 @@ use tauri_plugin_autostart::ManagerExt;
 
 use super::core::{self, IconState};
 use super::TrayIcons;
-use crate::commands::dock::is_parked_window;
 use crate::commands::popout::is_popup_label;
+use crate::commands::spare::is_spare_window;
 use crate::daemon_client::DaemonClient;
 use crate::layout::LayoutState;
 
@@ -65,12 +65,12 @@ pub struct AutostartCheck(pub CheckMenuItem<Wry>);
 pub fn show_main_ui(app: &AppHandle) {
     let windows = app.webview_windows();
     with_usage_visibility(app, |usage| {
-        let parked = |label: &str| is_parked_window(app, label);
+        let spare = |label: &str| is_spare_window(app, label);
         for_each_ui_window(
             windows.keys().map(String::as_str),
             true,
             usage,
-            parked,
+            spare,
             |label| {
                 let Some(w) = windows.get(label) else {
                     return false;
@@ -95,12 +95,12 @@ pub fn show_main_ui(app: &AppHandle) {
 pub fn hide_main_ui(app: &AppHandle) {
     let windows = app.webview_windows();
     with_usage_visibility(app, |usage| {
-        let parked = |label: &str| is_parked_window(app, label);
+        let spare = |label: &str| is_spare_window(app, label);
         for_each_ui_window(
             windows.keys().map(String::as_str),
             false,
             usage,
-            parked,
+            spare,
             |label| {
                 let Some(w) = windows.get(label) else {
                     return false;
@@ -171,7 +171,7 @@ pub(crate) fn with_usage_visibility(app: &AppHandle, run: impl FnOnce(&dyn Usage
 }
 
 // 트레이가 다룰 창마다([`core::ui_windows`] 순서) OS 창을 다루고(`os` — `true` = 그 창에 적용됐다) 사용량 관심에
-// 보임을 알린다. `parked` 인 창(대기 창 명부의 창 — TRD S21-slot-docking §2-5)은 다루지 않는다 — 그 창은 숨긴 채
+// 보임을 알린다. `spare` 인 창(예비 창 풀의 창 — TRD S21-slot-docking §3-9)은 다루지 않는다 — 그 창은 숨긴 채
 // 기다리므로 보이기가 그 창을 드러낸다. ★차례는 방향마다 다르다 — 틀려도 안전한 쪽으로★:
 // - 보이기 = 관심 먼저 · OS 나중. 보이기가 실패해도 남는 비용은 안 보이는 창 몫의 조회뿐이다.
 // - 숨기기 = OS 먼저 · 숨긴 창만 관심에서 뺀다. 실패한 숨기기를 빼면 **보이는** 창의 값이 멎는다.
@@ -183,10 +183,10 @@ pub(crate) fn for_each_ui_window<'a>(
     labels: impl IntoIterator<Item = &'a str>,
     visible: bool,
     usage: &dyn UsageVisibility,
-    parked: impl Fn(&str) -> bool,
+    spare: impl Fn(&str) -> bool,
     mut os: impl FnMut(&'a str) -> bool,
 ) {
-    for label in core::ui_windows(labels, |l| is_popup_label(l) && !parked(l)) {
+    for label in core::ui_windows(labels, |l| is_popup_label(l) && !spare(l)) {
         if visible {
             usage.set_visible(label, true);
             os(label);
@@ -411,9 +411,9 @@ mod tests {
         );
     }
 
-    // 대기 창 명부의 창은 보이기 · 숨기기 어느 쪽에서도 OS 도 관심도 건드리지 않는다.
+    // 예비 창 풀의 창은 보이기 · 숨기기 어느 쪽에서도 OS 도 관심도 건드리지 않는다.
     #[test]
-    fn a_parked_window_is_left_alone_both_ways() {
+    fn a_spare_window_is_left_alone_both_ways() {
         for visible in [true, false] {
             let log = Log::default();
             for_each_ui_window(

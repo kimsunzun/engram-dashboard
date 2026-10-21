@@ -4,8 +4,8 @@
  * 부른 창의 지금 역할(`window_role` 의 답).
  *
  * - `model`: 탭 모델의 창 — 보통으로 그린다.
- * - `parked`: 대기 창 명부의 창(예비 창 · 끄는 중 비워 남긴 창) — 대기 모드로 그린다(빈 틀 · 0탭 자가닫힘 끔 ·
- *   끌어오기 재시도 없음 · 재기 보고는 그대로). 그 뒤 모드 바뀜은 `dock:spare`([`SpareEvent`])가 알린다.
- * - `unknown`: 탭 모델에도 명부에도 없다(닫기 요청에서 모델이 먼저 지운 팝아웃 · 안내 창 등).
+ * - `spare`: 예비 창 풀의 창(숨긴 예비 창) — 대기 모드로 그린다(빈 틀 · 0탭 자가닫힘 끔 · 끌어오기 재시도 없음 ·
+ *   재기 보고는 그대로). 그 뒤 보통 모드로의 바뀜은 `spare:adopted` 가 알린다.
+ * - `unknown`: 탭 모델에도 풀에도 없다(닫기 요청에서 모델이 먼저 지운 팝아웃 등).
  */
-export type WindowRole = "model" | "parked" | "unknown";
+export type WindowRole = "model" | "spare" | "unknown";

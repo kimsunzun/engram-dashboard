@@ -56,8 +56,8 @@ fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> RectCss {
     RectCss { x0, y0, x1, y1 }
 }
 
-fn dip(w: f64, h: f64) -> SizeDip {
-    SizeDip { w, h }
+fn dip(w: f64, h: f64) -> SizeCss {
+    SizeCss { w, h }
 }
 
 fn frame_of(frames: &[(Uuid, PxRect)], n: u128) -> PxRect {
@@ -79,7 +79,7 @@ const ZONE: RectCss = RectCss {
 fn targets<'a>(
     layout: &'a LayoutNode,
     incoming: &'a LayoutNode,
-    original: SizeDip,
+    original: SizeCss,
 ) -> WindowTargets<'a> {
     WindowTargets {
         canvas: CANVAS,
@@ -864,7 +864,7 @@ fn a_low_top_row_slot_keeps_its_top_band_just_inside_the_outer_band() {
 }
 
 // AC36 마지막의 배치 — 레이아웃 전체 위에 붙이면 아래 반쪽의 깊은 사슬이 무너진다(바깥 위 띠가 막힘). 골든도 쓴다.
-pub(super) fn blocked_outer_top_layout(incoming: &LayoutNode, original: SizeDip) -> LayoutNode {
+pub(super) fn blocked_outer_top_layout(incoming: &LayoutNode, original: SizeCss) -> LayoutNode {
     let share = attach_share(original, DockSide::Top, px(0, 0, 1200, 800));
     (40..120)
         .map(|depth| {
@@ -1010,7 +1010,7 @@ fn ac44_the_outer_top_landing_is_the_original_height_capped_at_half() {
 // ── 붙는 몫 (R7 · AC2 · AC39 · AC44) ──────────────────────────────────────────
 
 // 몫 × 칸 길이 = 붙는 길이(px). 반올림은 실제 칸 경계가 하므로 여기서는 셈 값 그대로 본다.
-fn attached_len(original: SizeDip, side: DockSide, target: PxRect) -> f64 {
+fn attached_len(original: SizeCss, side: DockSide, target: PxRect) -> f64 {
     let t = match side {
         DockSide::Left | DockSide::Right => target.x1 - target.x0,
         DockSide::Top | DockSide::Bottom => target.y1 - target.y0,
