@@ -22,7 +22,8 @@ pub struct SpareAdopted {
 /// - `model`: 탭 모델의 창 — 보통으로 그린다.
 /// - `spare`: 예비 창 풀의 창(숨긴 예비 창) — 대기 모드로 그린다(빈 틀 · 0탭 자가닫힘 끔 · 끌어오기 재시도 없음 ·
 ///   재기 보고는 그대로). 그 뒤 보통 모드로의 바뀜은 `spare:adopted` 가 알린다.
-/// - `unknown`: 탭 모델에도 풀에도 없다(닫기 요청에서 모델이 먼저 지운 팝아웃 등).
+/// - `unknown`: 탭 모델에도 풀에도 없다(닫기 요청에서 모델이 먼저 지운 팝아웃 · `spare:adopted` 듣기를 못 걸어
+///   (`adoptable: false`) 셸이 풀에서 빼 닫는 예열 창 등).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]

@@ -1,4 +1,4 @@
-
+import { StrictMode } from 'react'
 import { act, cleanup, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -10,10 +10,12 @@ const listenOptions = new Map<string, unknown>()
 const ipcOrder: string[] = []
 const unlistenMock = vi.fn()
 let listenShouldReject = false
+/** 등록을 거절할 이벤트명(`listenShouldReject` 는 전부). */
+const rejectListen = new Set<string>()
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(async (event: string, handler: (e: { payload: unknown }) => void, options?: unknown) => {
     ipcOrder.push(`listen:${event}`)
-    if (listenShouldReject) throw new Error('listen registration failed')
+    if (listenShouldReject || rejectListen.has(event)) throw new Error('listen registration failed')
     listeners.set(event, handler)
     listenOptions.set(event, options)
     return unlistenMock
@@ -22,12 +24,12 @@ vi.mock('@tauri-apps/api/event', () => ({
 
 // ── invoke mock: list_tabs/get_view pull · window_role 은 따로(기본 = 모델 창) ──
 const invokeMock = vi.fn(async (_cmd: string, ..._rest: unknown[]) => undefined as unknown)
-const windowRoleMock = vi.fn(async (): Promise<unknown> => ({ role: 'model' }))
+const windowRoleMock = vi.fn(async (_args?: unknown): Promise<unknown> => ({ role: 'model', generation: null }))
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: (cmd: string, ...rest: unknown[]) => {
     if (cmd !== 'window_role') return invokeMock(cmd, ...rest)
     ipcOrder.push('invoke:window_role')
-    return windowRoleMock()
+    return windowRoleMock(rest[0])
   },
   Channel: class {
     onmessage: unknown = null
@@ -105,7 +107,7 @@ beforeEach(() => {
   ipcOrder.length = 0
   currentWindow.label = 'main'
   windowRoleMock.mockReset()
-  windowRoleMock.mockImplementation(async () => ({ role: 'model' }))
+  windowRoleMock.mockImplementation(async () => ({ role: 'model', generation: null }))
   unlistenMock.mockClear()
   closeMock.mockClear()
   reportFirstPaintMock.mockReset()
@@ -113,6 +115,7 @@ beforeEach(() => {
   mountCounts.clear()
   rendererProps.clear()
   listenShouldReject = false
+  rejectListen.clear()
   useViewStore.setState({ layouts: {}, windows: {}, renderModeOverride: {} })
   invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
     if (cmd === 'list_tabs') {
@@ -308,6 +311,7 @@ describe('WindowLayout — 첫 화면 · 첫 페인트 알림', () => {
 
     await act(async () => answerActiveView(slotSnap('v1', 1)))
     await waitFor(() => expect(reportFirstPaintMock).toHaveBeenCalledTimes(1))
+    expect(reportFirstPaintMock).toHaveBeenCalledWith(null)
     expect(seenAtReport).toEqual([['v1', 'v2']])
   })
 
@@ -321,12 +325,14 @@ describe('WindowLayout — 첫 화면 · 첫 페인트 알림', () => {
     await waitFor(() => expect(reportFirstPaintMock).toHaveBeenCalledTimes(1))
   })
 
-  it('대기 창은 빈 틀이 첫 화면이다 — 알림을 보낸다', async () => {
+  // 대기 창은 숨은 채 맡겨질 때를 기다린다 — 빈 틀은 첫 화면이 아니다(TRD S21-slot-docking §3-9 I7).
+  it('대기 창은 첫 화면을 알리지 않는다', async () => {
     currentWindow.label = 'slot-popup-7'
-    windowRoleMock.mockImplementation(async () => ({ role: 'spare' }))
+    windowRoleMock.mockImplementation(async () => ({ role: 'spare', generation: null }))
     render(<WindowLayout label="slot-popup-7" />)
     await waitFor(() => expect(screen.getByTestId('spare-canvas')).toBeTruthy())
-    await waitFor(() => expect(reportFirstPaintMock).toHaveBeenCalledTimes(1))
+    await new Promise(res => setTimeout(res, 50))
+    expect(reportFirstPaintMock).not.toHaveBeenCalled()
   })
 })
 
@@ -1214,7 +1220,7 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
     __resetUiMetricsReportForTest()
   })
 
-  const spareRole = () => windowRoleMock.mockImplementation(async () => ({ role: 'spare' }))
+  const spareRole = () => windowRoleMock.mockImplementation(async () => ({ role: 'spare', generation: null }))
   const listTabsCalls = () => invokeMock.mock.calls.filter(c => c[0] === 'list_tabs')
 
   async function mountSpare() {
@@ -1280,7 +1286,7 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
     await mountSpare()
     expect(listTabsCalls()).toEqual([])
 
-    act(() => emit('spare:adopted', null))
+    act(() => emit('spare:adopted', { generation: 1 }))
 
     await waitFor(() => expect(screen.getAllByTestId('tab-canvas')).toHaveLength(1))
     expect(listTabsCalls()).toEqual([['list_tabs', { window: SPARE }]])
@@ -1302,7 +1308,7 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
     await new Promise(res => setTimeout(res, 50))
     expect(frameCalls()).toEqual([])
 
-    act(() => emit('spare:adopted', null))
+    act(() => emit('spare:adopted', { generation: 1 }))
     await waitFor(() => expect(screen.getAllByTestId('tab-canvas')).toHaveLength(1))
     await waitFor(() => expect(frameCalls()).toEqual([['window_frame', undefined]]))
   })
@@ -1317,7 +1323,7 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
     await mountSpare()
     const row = screen.getByTestId('tab-strip-row')
 
-    act(() => emit('spare:adopted', null))
+    act(() => emit('spare:adopted', { generation: 1 }))
     await waitFor(() => expect(listTabsCalls()).toHaveLength(1))
     expect(screen.getByTestId('spare-canvas')).toBeTruthy()
     expect(screen.queryByTestId('window-loading')).toBeNull()
@@ -1345,13 +1351,13 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
     expect(screen.getByTestId('spare-canvas')).toBeTruthy()
     expect(headIds()).toEqual([])
 
-    act(() => emit('spare:adopted', null))
+    act(() => emit('spare:adopted', { generation: 1 }))
     expect(headIds()).toEqual(['p1'])
     expect(screen.queryByTestId('spare-canvas')).toBeNull()
   })
 
   it('window_role = unknown 이거나 실패하면 보통으로 그린다', async () => {
-    windowRoleMock.mockImplementation(async () => ({ role: 'unknown' }))
+    windowRoleMock.mockImplementation(async () => ({ role: 'unknown', generation: null }))
     const first = render(<WindowLayout label={SPARE} />)
     await waitFor(() => expect(screen.getAllByTestId('tab-canvas')).toHaveLength(2))
     first.unmount()
@@ -1380,8 +1386,161 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
     await new Promise(res => setTimeout(res, 20))
     expect(closeMock).not.toHaveBeenCalled()
 
-    await act(async () => answer({ role: 'spare' }))
+    await act(async () => answer({ role: 'spare', generation: null }))
     expect(screen.getByTestId('spare-canvas')).toBeTruthy()
     expect(closeMock).not.toHaveBeenCalled()
+  })
+})
+
+// ── 예열 창 채택 · 첫 화면 알림(TRD S21-slot-docking §3-9 I26 · I28) — 채택한 창의 셸 문은 그 채택 번호를 실은 알림만 받는다 ──
+describe('WindowLayout — 채택 번호 · 첫 화면 다시 알림', () => {
+  const SPARE = 'slot-popup-7'
+  const TABS = { label: SPARE, tabs: [{ id: 'p1', name: 'Pop' }], active: 'p1', version: 3 }
+
+  beforeEach(() => {
+    currentWindow.label = SPARE
+  })
+
+  const listTabsCalls = () => invokeMock.mock.calls.filter(c => c[0] === 'list_tabs')
+  const reports = () => reportFirstPaintMock.mock.calls
+  const roleArgs = () => windowRoleMock.mock.calls.map(c => c[0])
+
+  function listTabsAnswers(ok: () => boolean) {
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'list_tabs') {
+        if (!ok()) throw new Error('unknown window')
+        return TABS
+      }
+      if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+      return undefined
+    })
+  }
+
+  it('대기 → 채택: 제 탭을 그린 뒤 그 채택 번호로 한 번 알린다', async () => {
+    listTabsAnswers(() => true)
+    windowRoleMock.mockImplementation(async () => ({ role: 'spare', generation: null }))
+    render(<WindowLayout label={SPARE} />)
+    await waitFor(() => expect(screen.getByTestId('spare-canvas')).toBeTruthy())
+    expect(roleArgs()).toEqual([{ adoptable: true }])
+
+    act(() => emit('spare:adopted', { generation: 4 }))
+    await waitFor(() => expect(screen.getAllByTestId('view-renderer')).toHaveLength(1))
+    await waitFor(() => expect(reports()).toEqual([[4]]))
+  })
+
+  it('번호 0 도 채택 번호로 싣는다', async () => {
+    listTabsAnswers(() => true)
+    windowRoleMock.mockImplementation(async () => ({ role: 'spare', generation: null }))
+    render(<WindowLayout label={SPARE} />)
+    await waitFor(() => expect(screen.getByTestId('spare-canvas')).toBeTruthy())
+    act(() => emit('spare:adopted', { generation: 0 }))
+    await waitFor(() => expect(reports()).toEqual([[0]]))
+  })
+
+  // `window_role` 이 실패한 예열 페이지는 보통 모드로 모델이 모르는 자기 label 을 당겨 `bootFailed` 로 이미 알렸다.
+  it('window_role 실패 페이지 — 채택에 부팅 실패를 내리고 다시 당겨 탭을 그린 뒤 그 번호로 다시 알린다', async () => {
+    let adopted = false
+    listTabsAnswers(() => adopted)
+    windowRoleMock.mockImplementation(async () => {
+      throw new Error('no dock state')
+    })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      render(<WindowLayout label={SPARE} />)
+      await waitFor(() => expect(screen.getByTestId('window-boot-error')).toBeTruthy(), { timeout: 3000 })
+      await waitFor(() => expect(reports()).toEqual([[null]]))
+      const pulled = listTabsCalls().length
+
+      adopted = true
+      act(() => emit('spare:adopted', { generation: 2 }))
+      expect(screen.queryByTestId('window-boot-error')).toBeNull()
+      await waitFor(() => expect(screen.getAllByTestId('view-renderer')).toHaveLength(1))
+      expect(listTabsCalls()).toHaveLength(pulled + 1)
+      await waitFor(() => expect(reports()).toEqual([[null], [2]]))
+    } finally {
+      warn.mockRestore()
+      error.mockRestore()
+    }
+  }, 6000)
+
+  it('채택 전후로 첫 화면이 이어져도(부팅 실패를 내림과 탭 반영이 한 렌더) 그 번호로 다시 알린다', async () => {
+    listTabsAnswers(() => false)
+    windowRoleMock.mockImplementation(async () => {
+      throw new Error('no dock state')
+    })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      render(<WindowLayout label={SPARE} />)
+      await waitFor(() => expect(screen.getByTestId('window-boot-error')).toBeTruthy(), { timeout: 3000 })
+      act(() => useViewStore.getState().applyWindowTabsUpdated(TABS))
+      await waitFor(() => expect(screen.getAllByTestId('view-renderer')).toHaveLength(1))
+      expect(reports()).toEqual([[null]])
+
+      act(() => emit('spare:adopted', { generation: 9 }))
+      await waitFor(() => expect(reports()).toEqual([[null], [9]]))
+    } finally {
+      warn.mockRestore()
+      error.mockRestore()
+    }
+  }, 6000)
+
+  // 셸은 맡기기 전에 페이지가 다 읽혔는지 보지 않는다 — 채택 사건을 놓친 페이지는 보임을 기다리는 동안 답으로 번호를 받는다.
+  it('spare:adopted 뒤에 마운트한 페이지 — window_role 답 model + 번호로 보통 모드 · 그 번호로 한 번 알린다', async () => {
+    listTabsAnswers(() => true)
+    windowRoleMock.mockImplementation(async () => ({ role: 'model', generation: 7 }))
+    render(<WindowLayout label={SPARE} />)
+    await waitFor(() => expect(screen.getAllByTestId('view-renderer')).toHaveLength(1))
+    expect(screen.queryByTestId('spare-canvas')).toBeNull()
+    await waitFor(() => expect(reports()).toEqual([[7]]))
+  })
+
+  it('채택을 본 뒤 늦게 온 window_role 답 spare 는 대기로 되돌리지 않는다', async () => {
+    listTabsAnswers(() => true)
+    let answer: (reply: unknown) => void = () => {}
+    windowRoleMock.mockImplementation(() => new Promise(res => (answer = res)))
+    render(<WindowLayout label={SPARE} />)
+    await waitFor(() => expect(ipcOrder).toContain('invoke:window_role'))
+
+    act(() => emit('spare:adopted', { generation: 5 }))
+    await waitFor(() => expect(screen.getAllByTestId('view-renderer')).toHaveLength(1))
+    await act(async () => answer({ role: 'spare', generation: null }))
+    expect(screen.queryByTestId('spare-canvas')).toBeNull()
+    expect(screen.getAllByTestId('view-renderer')).toHaveLength(1)
+    await waitFor(() => expect(reports()).toEqual([[5]]))
+  })
+
+  it('spare:adopted 듣기를 못 걸면 adoptable: false 로 묻고 · 답 spare 가 와도 대기로 그리지 않는다', async () => {
+    listTabsAnswers(() => true)
+    rejectListen.add('spare:adopted')
+    windowRoleMock.mockImplementation(async () => ({ role: 'spare', generation: null }))
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      render(<WindowLayout label={SPARE} />)
+      await waitFor(() => expect(screen.getAllByTestId('view-renderer')).toHaveLength(1))
+      expect(roleArgs()).toEqual([{ adoptable: false }])
+      expect(screen.queryByTestId('spare-canvas')).toBeNull()
+      expect(listTabsCalls()).toEqual([['list_tabs', { window: SPARE }]])
+    } finally {
+      error.mockRestore()
+    }
+  })
+
+  it('StrictMode 두 번 마운트 — 늘 adoptable: true 로 묻고 채택 뒤 알림은 한 번', async () => {
+    listTabsAnswers(() => true)
+    windowRoleMock.mockImplementation(async () => ({ role: 'spare', generation: null }))
+    render(
+      <StrictMode>
+        <WindowLayout label={SPARE} />
+      </StrictMode>,
+    )
+    await waitFor(() => expect(screen.getByTestId('spare-canvas')).toBeTruthy())
+    expect(roleArgs().length).toBeGreaterThanOrEqual(1)
+    expect(roleArgs().every(a => (a as { adoptable: boolean }).adoptable === true)).toBe(true)
+
+    act(() => emit('spare:adopted', { generation: 3 }))
+    await waitFor(() => expect(screen.getAllByTestId('view-renderer')).toHaveLength(1))
+    await waitFor(() => expect(reports()).toEqual([[3]]))
   })
 })

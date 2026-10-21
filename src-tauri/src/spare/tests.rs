@@ -1079,6 +1079,105 @@ fn the_adoption_number_is_reported_only_while_the_reveal_is_pending() {
     assert_eq!(spare.reveal_generation(&claim.label), None);
 }
 
+// ── `window_role{adoptable}` 의 답(I26 · I28) ──
+
+fn reply(role: WindowRole, generation: Option<u32>, close: bool) -> RoleAnswer {
+    RoleAnswer {
+        reply: WindowRoleReply { role, generation },
+        close,
+    }
+}
+
+#[test]
+fn a_pool_window_that_could_not_listen_is_unknown_and_closed_without_asking_the_model() {
+    let (spare, _) = fresh();
+    let label = built(&spare, &Labels::default());
+    let answer = spare.answer_role(&label, false, || panic!("뺀 창은 모델을 묻지 않는다"));
+    assert_eq!(answer, reply(WindowRole::Unknown, None, true));
+    assert!(!spare.is_spare(&label));
+    assert!(
+        !spare.on_destroyed(&label),
+        "그 닫기의 Destroyed 는 짓지 않는다"
+    );
+}
+
+#[test]
+fn a_claimed_window_that_could_not_listen_is_unknown_even_if_the_model_has_it() {
+    let (spare, gate) = fresh();
+    let claim = claimed(&spare, &Labels::default());
+    assert_eq!(
+        spare.answer_role(&claim.label, false, || true),
+        reply(WindowRole::Unknown, None, true)
+    );
+    assert!(!gate.is_held(&claim.label));
+    assert_eq!(adopt(&spare, &claim), CommitOutcome::Stale);
+}
+
+#[test]
+fn a_pool_window_that_listens_stays_spare() {
+    let (spare, _) = fresh();
+    let label = built(&spare, &Labels::default());
+    assert_eq!(
+        spare.answer_role(&label, true, || panic!("풀의 창은 모델을 묻지 않는다")),
+        reply(WindowRole::Spare, None, false)
+    );
+    assert!(spare.is_spare(&label));
+}
+
+// 모델 창은 이 사건이 필요 없다 — 듣기를 못 걸어도 닫지 않고 셈하지도 않는다.
+#[test]
+fn a_model_window_is_model_whether_or_not_it_listens() {
+    let (spare, _) = fresh();
+    let labels = Labels::default();
+    for adoptable in [true, false] {
+        assert_eq!(
+            spare.answer_role("main", adoptable, || true),
+            reply(WindowRole::Model, None, false)
+        );
+        assert_eq!(
+            spare.answer_role("slot-popup-9", adoptable, || false),
+            reply(WindowRole::Unknown, None, false)
+        );
+    }
+    for _ in 0..3 {
+        spare.answer_role("main", false, || true);
+    }
+    built(&spare, &labels);
+    assert!(
+        spare.claim().claim.is_some(),
+        "풀 밖 창은 실패로 세지 않는다"
+    );
+}
+
+// 채택 사건을 놓친 페이지(늦은 마운트 · 다시 읽기)는 보임을 기다리는 동안 그 번호를 답으로 받는다 — 듣기를 못 걸었어도.
+#[test]
+fn an_adopted_window_awaiting_its_reveal_gets_its_adoption_number() {
+    let (spare, _) = fresh();
+    let claim = claimed(&spare, &Labels::default());
+    adopt(&spare, &claim);
+    for adoptable in [true, false] {
+        assert_eq!(
+            spare.answer_role(&claim.label, adoptable, || true),
+            reply(WindowRole::Model, Some(claim.generation), false)
+        );
+    }
+    spare.on_shown(&claim.label);
+    assert_eq!(
+        spare.answer_role(&claim.label, true, || true),
+        reply(WindowRole::Model, None, false)
+    );
+}
+
+#[test]
+fn the_role_answer_asks_the_model_with_the_pool_unlocked() {
+    let (spare, _) = fresh();
+    let answer = spare.answer_role("main", true, || {
+        assert!(spare.pool.try_lock().is_ok(), "풀 락을 쥔 채 묻지 않는다");
+        true
+    });
+    assert_eq!(answer, reply(WindowRole::Model, None, false));
+}
+
 // ── 뜻밖의 `Destroyed` ──
 
 #[test]

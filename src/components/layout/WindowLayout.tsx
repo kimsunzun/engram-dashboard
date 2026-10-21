@@ -87,21 +87,34 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
   // `null` = 아직 모름(`window_role` 답 전) — 탭 끌어오기 · 자가닫힘은 `normal` 일 때만 돈다.
   const [mode, setMode] = useState<WindowMode | null>(null)
   const [wasSpare, setWasSpare] = useState(false)
-  // 빈 틀을 거두는 때는 셸이 들인 창의 탭을 대기를 풀기 전에 알리는 순서에 기댄다 — 예비 창 채택(ADR-0299 · TRD
-  //   S21-slot-docking U4d′)이 그 순서로 알린다는 가정이다.
+  // 이 페이지가 받은 채택 번호(`spare:adopted` · `window_role` 답 — TRD S21-slot-docking §3-9 I26). `0` 도 번호다.
+  const [adoption, setAdoption] = useState<number | null>(null)
+  const adoptionRef = useRef<number | null>(null)
+  // 빈 틀을 거두는 때는 셸이 들인 창의 탭을 대기를 풀기 전에 알리는 순서에 기댄다 — 예열 창 채택(ADR-0299 · TRD
+  //   S21-slot-docking §3-9 「`committed`」)이 그 순서로 알린다는 가정이다.
+  // 새 채택 번호는 부팅 실패를 같은 렌더에서 내린다 — `window_role` 이 실패해 보통 모드로 모델이 모르는 자기 label 을
+  //   당긴 예열 페이지는 이미 `bootFailed` 이고, 모드가 그대로 `normal` 이라 번호가 바뀌어야 당기기가 다시 돈다(아래
+  //   deps). 따로 렌더하면 그 사이 실패 문구 화면을 새 번호로 알려 셸이 그 화면을 보인다. 같은 번호가 거듭 오면(답과
+  //   사건이 둘 다 실음) 내리지 않는다 — 당기기가 다시 돌지 않아 로딩 바탕에 남는다.
+  // ADR-0299
   useEffect(
     () =>
       watchSpareMode(next => {
-        setMode(next)
-        if (next === 'spare') setWasSpare(true)
+        setMode(next.mode)
+        if (next.mode === 'spare') setWasSpare(true)
+        if (next.generation !== null && next.generation !== adoptionRef.current) {
+          adoptionRef.current = next.generation
+          setAdoption(next.generation)
+          setBootFailed(false)
+        }
       }),
     [],
   )
   const spare = mode === 'spare'
   const normal = mode === 'normal'
-  // 들인 예비 창(`spare:adopted`)은 제 탭을 받기 전까지 빈 틀 그대로다 — 「로딩」 화면(바탕만)으로 바꾸면 채택돼
-  //   보이는 순간 탭바가 사라졌다 다시 마운트된다. 예비 창은 새 label 로 대기에 든 채 떠 마운트 때 스토어에 그 창 항목이
-  //   없다 — 그래서 `win` 이 있다 = 채택 때 받은 탭이다.
+  // 들인 예열 창(`spare:adopted`)은 제 탭을 받기 전까지 빈 틀 그대로다 — 「로딩」 화면(바탕만)으로 바꾸면 탭바가
+  //   사라졌다 다시 마운트된다. 예열 창은 새 label 로 대기에 든 채 떠 마운트 때 스토어에 그 창 항목이 없다 — 그래서
+  //   `win` 이 있다 = 채택 때 받은 탭이다.
   const framed = spare || (wasSpare && win === undefined && !bootFailed)
 
   useEffect(() => installFileDropGuard(), [])
@@ -109,8 +122,9 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
   // ── 보통 모드: 자기 창 탭 상태 초기 pull + window:tabs-updated listen(자기 label 만) ────────────────
   // ★구독 먼저, pull 나중★(F-listen 동형): listen 등록 완료 전 도착한 emit 을 놓치지 않게 구독을 먼저
   // 걸고 그 뒤 pull 한다. 더 최신 emit 이 pull 을 덮으면 applyWindowTabsUpdated 의 version 가드가 역전을 막는다.
-  // 대기 모드에서 들여지면(`spare:adopted`) 여기로 다시 들어와 들인 탭을 당긴다.
+  // 대기 모드에서 들여지면(`spare:adopted`) 여기로 다시 들어와 들인 탭을 당긴다 — 이미 보통 모드면 새 채택 번호가 다시 돌린다.
   // ADR-0295
+  // ADR-0299
   useEffect(() => {
     if (!normal) return
     let disposed = false
@@ -156,7 +170,7 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
       disposed = true
       if (unlisten) unlisten()
     }
-  }, [label, normal, applyWindowTabsUpdated])
+  }, [label, normal, adoption, applyWindowTabsUpdated])
 
   // 대기 중에 이 창 항목이 다시 차도(셸은 들일 탭을 알린 뒤 대기를 푼다 — 전역 미러가 받는다) 대기가 풀리기 전에는 그리지 않는다.
   const tabs = framed ? NO_TABS : win?.tabs
@@ -166,13 +180,17 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
   const shown = useShownTab(label, tabIds, active)
 
   // 셸은 이 창을 숨긴 채 만들고 첫 화면 알림에 창을 보인다(`theme/firstPaint.ts`) — 그 알림을 첫 화면(탭바 + 활성 탭의
-  //   레이아웃 · 대기 창의 빈 틀 · 부팅 실패 문구)이 커밋된 뒤에 보낸다. 그 전 화면(바탕만 · 활성 탭의 「View 로딩」)이
-  //   보이는 것은 알림이 오지 않아 셸 시한이 보일 때뿐이다.
+  //   레이아웃 · 부팅 실패 문구)이 커밋된 뒤에 보낸다. 그 전 화면(바탕만 · 활성 탭의 「View 로딩」)이 보이는 것은 알림이
+  //   오지 않아 셸 시한이 보일 때뿐이다.
+  // 빈 틀은 첫 화면이 아니다 — 대기 창은 숨은 채 맡겨질 때를 기다리고, 채택한 창은 제 탭을 그린 뒤 채택 번호로 알린다
+  //   (TRD S21-slot-docking §3-9 I26). 번호가 deps 에 드는 것은 채택 전후로 `firstScreen` 이 참으로 이어져도(부팅 실패를
+  //   내림과 탭 반영이 한 렌더) 다시 알리게 하려는 것이다 — 빠지면 채택한 창이 늘 셸 시한에만 보인다.
+  // ADR-0299
   const activeLaidOut = useViewStore(s => active === null || selectView(s, active) !== null)
-  const firstScreen = bootFailed || framed || (tabs !== undefined && activeLaidOut)
+  const firstScreen = bootFailed || (!framed && tabs !== undefined && activeLaidOut)
   useEffect(() => {
-    if (firstScreen) reportFirstPaint()
-  }, [firstScreen])
+    if (firstScreen) reportFirstPaint(adoption)
+  }, [firstScreen, adoption])
 
   // ── keep-alive: 이 창의 모든 탭 layout 을 캐시에 채운다(숨은 탭도 렌더 유지, ADR-0056) ───────────
   // layout:updated 는 eventBus 전역 구독이 이미 캐시에 반영하므로(뷰별 version 가드), 여기선 "아직 한 번도

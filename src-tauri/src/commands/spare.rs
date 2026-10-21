@@ -12,27 +12,35 @@ use crate::commands::popout::PopupCounter;
 use crate::layout::apply;
 use crate::layout::LayoutState;
 pub(crate) use crate::spare::elapsed_ms;
-use crate::spare::wire::{WindowRole, WindowRoleReply};
+use crate::spare::wire::WindowRoleReply;
 use crate::spare::SpareState;
 
-/// 부른 창의 지금 역할(동기) — `invoke('window_role')`. 웹뷰가 마운트 때 묻고 `spare` 면 대기 모드로 그린다(TRD
-/// §3-9). 채택 뒤 보임을 기다리는 창이면 그 채택 번호도 싣는다(I26). 웹뷰 안 배선이라 버스 명령표에 올리지 않는다.
+/// 부른 창의 지금 역할(동기) — `invoke('window_role', { adoptable })`. 웹뷰가 마운트 때 `spare:adopted` 듣기를 건 뒤
+/// 묻고 `spare` 면 대기 모드로 그린다(TRD §3-9). `adoptable` = 그 듣기를 걸었다 — `false` 인 풀의 창은 풀에서 빼 닫고
+/// `unknown` 이다(I28). 채택 뒤 보임을 기다리는 창이면 그 채택 번호도 싣는다(I26). 웹뷰 안 배선이라 버스 명령표에 올리지
+/// 않는다.
+// ADR-0299
 #[tauri::command]
 pub fn window_role(
+    app: AppHandle,
     window: Window,
+    adoptable: bool,
     spare: State<'_, Arc<SpareState>>,
     layout: State<'_, LayoutState>,
 ) -> WindowRoleReply {
     let label = window.label();
-    let role = spare.window_role(label, || {
+    let answer = spare.answer_role(label, adoptable, || {
         apply::list_windows(&layout).is_ok_and(|windows| windows.iter().any(|w| w == label))
     });
-    // 번호는 역할을 본 뒤 읽고 모델 창에만 싣는다 — 확정 ① 전의 `spare` 답에 ① 뒤의 번호가 붙지 않는다.
-    let generation = match role {
-        WindowRole::Model => spare.reveal_generation(label),
-        WindowRole::Spare | WindowRole::Unknown => None,
-    };
-    WindowRoleReply { role, generation }
+    if answer.close {
+        // 동기 명령은 메인 스레드에서 돈다 — 부른 웹뷰를 그 IPC 처리기 안에서 거두지 않고 작업 스레드로 넘긴다. 곧바로
+        //   다시 짓지 않는다 — 풀에서 먼저 뺐으므로 그 `Destroyed` 는 풀 항목을 못 찾는다(다음 맡기기가 짓는다 · I16).
+        let label = label.to_owned();
+        tauri::async_runtime::spawn_blocking(move || {
+            crate::commands::popout::destroy_window(&app, &label)
+        });
+    }
+    answer.reply
 }
 
 /// 예열 창 풀의 창인가 — 트레이 보이기 · 숨기기 · `--hidden` 과 자리 기록이 빼는 창(TRD §3-9).

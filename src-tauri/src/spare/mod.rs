@@ -17,7 +17,7 @@ use pool::{
     ClaimStep, CommitDecision, Gone, Listen, Measure, NoBuild, Opening, SpareMeasures, SparePool,
     TrayShow,
 };
-use wire::WindowRole;
+use wire::{WindowRole, WindowRoleReply};
 
 use crate::layout::manager::WindowLabel;
 use crate::layout::{
@@ -88,6 +88,14 @@ pub struct ClaimReply {
     pub build: bool,
     /// 짓는 중인 창을 기다린 시간(로그 `wait_ms`) — 기다리지 않았으면 `None`.
     pub waited: Option<Duration>,
+}
+
+/// [`SpareState::answer_role`] 의 답.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoleAnswer {
+    pub reply: WindowRoleReply,
+    /// 듣기를 못 건 풀의 창이라 풀에서 뺐다 — 부른 쪽이 그 창을 닫는다(락 밖 · 동기 처리기 밖 · I28).
+    pub close: bool,
 }
 
 /// [`SpareState::build`] 의 결과.
@@ -198,6 +206,36 @@ impl SpareState {
             WindowRole::Model
         } else {
             WindowRole::Unknown
+        }
+    }
+
+    /// `window_role{adoptable}` 의 답(I26 · I28) — 채택 사건 듣기를 못 건 풀의 창이면 풀에서 빼고([`Self::on_listen`])
+    /// `unknown` + 닫기다. 그 밖은 [`Self::window_role`] 의 역할이고, 모델 창이면 보임을 기다리는 채택 번호를 싣는다.
+    /// `in_model` 은 풀 락을 놓은 뒤 부른다.
+    pub fn answer_role(
+        &self,
+        label: &str,
+        adoptable: bool,
+        in_model: impl FnOnce() -> bool,
+    ) -> RoleAnswer {
+        if let Listen::Removed { .. } = self.on_listen(label, adoptable) {
+            return RoleAnswer {
+                reply: WindowRoleReply {
+                    role: WindowRole::Unknown,
+                    generation: None,
+                },
+                close: true,
+            };
+        }
+        let role = self.window_role(label, in_model);
+        // 번호는 역할을 본 뒤 읽는다 — 확정 ① 전의 `spare` 답에 ① 뒤의 번호가 붙지 않는다.
+        let generation = match role {
+            WindowRole::Model => self.reveal_generation(label),
+            WindowRole::Spare | WindowRole::Unknown => None,
+        };
+        RoleAnswer {
+            reply: WindowRoleReply { role, generation },
+            close: false,
         }
     }
 
