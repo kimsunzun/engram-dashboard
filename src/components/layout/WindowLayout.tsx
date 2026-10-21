@@ -357,7 +357,7 @@ function detachCanvasObserver(obs: CanvasObserverState): void {
 }
 
 // 대기 모드의 빈 캔버스 — 칸 틀 하나만 그린다. 탭이 없어 잎이 마운트되지 않으므로 칸 틀 지표(`report_ui_metrics`)를
-//   여기서 보낸다 — 셸은 지표가 있어야 예비 창을 쓸 수 있다(TRD S21-slot-docking §2-5 「예비 창 준비됨」).
+//   여기서 보낸다 — 예비 창을 채택할 때 셸이 이 지표를 모델에 옮겨 적는다(★지금 채택하는 쪽이 없다★ — TRD S21-slot-docking §3-9 `committed` · U4d′).
 // ADR-0295
 function ParkedCanvas() {
   const borderRef = useRef<HTMLDivElement>(null)

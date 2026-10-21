@@ -1,11 +1,8 @@
 pub mod agent;
 pub mod autostart;
 pub mod discovery;
-// 도킹의 셸 쪽 창 관리 — 끌기 세션 밖(TRD S21-slot-docking §2-5).
+// 도킹의 셸 쪽 창 관리 — 대기 창 명부 · 예비 창(TRD S21-slot-docking §2-5).
 pub mod dock;
-// 탭 끌기 세션의 포트 어댑터 · 실행기 세우기(TRD S21-slot-docking §2-4).
-pub mod drag;
-pub mod drag_window;
 pub mod first_paint;
 pub mod layout;
 pub mod popout;

@@ -110,7 +110,7 @@ pub fn run() {
     let setup_restore = restore_coordinator.clone();
     builder = builder.manage(restore_coordinator);
     // 도킹 상태(대기 창 명부 · 종료 표지 — TRD S21-slot-docking §2-5)도 같은 이유다(ADR-0102) — 웹뷰의 첫 측정
-    //   보고 셋(캔버스 · UI 치수 · 크롬) · `window_role` 이 이 상태를 본다.
+    //   보고 둘(캔버스 · UI 치수) · `window_role` 이 이 상태를 본다.
     builder = builder.manage(std::sync::Arc::new(crate::dock::DockState::new()));
     // 탭 놓기 장부 · 창마다 마지막으로 낸 창 사실(ADR-0296 · TRD S21-slot-docking §3-4 · §3-8)도 같은 이유다
     //   (ADR-0102) — 웹뷰의 마운트 때 `window_frame` 당기기와 창의 첫 자리 기록이 이 상태를 본다.
@@ -304,10 +304,6 @@ pub fn run() {
             // ★작업 스레드에서 짓는다(§2-4)★ — 이 setup 이 돌아간 뒤 이벤트 루프가 창을 만든다. 예비 창은 짓기 전에
             //   명부에 적으므로 아래 `--hidden` 숨기기 · 트레이가 그 창을 보지 않는다. main(⑧)을 만든 뒤라 첫 창이 바뀌지
             //   않는다.
-            // ★안내 창(`dock-overlay`)은 짓지 않고 탭 끌기 실행기(`drag::install`)도 세우지 않는다★ — 탭 끌기는 웹 OS
-            //   끌기(`tab_drop`)가 맡는다. 등록만 남은 `tab_drag_*` 명령은 실행기 상태가 없어 Tauri 가 거절하고, 창
-            //   사건의 끌기 갈래는 그 상태가 없으면 아무것도 하지 않는다.
-            // TODO(U4c′-1): 등록만 남은 끌기 명령 · 창 사건 갈래 · 안내 창 코드를 걷는다(TRD S21-slot-docking §7).
             // ADR-0295 · ADR-0299
             crate::commands::dock::spawn_spare_build(app.handle());
 
@@ -378,26 +374,15 @@ pub fn run() {
                             );
                         }
                     }
-                    // 대기 창 명부 · 안내 창(TRD S21-slot-docking §2-5 「사라지면」) — 예비 · 안내 창이면 다시 짓는다.
+                    // 대기 창 명부(TRD S21-slot-docking §2-5 「사라지면」) — 예비 창이면 다시 짓는다.
                     crate::commands::dock::on_parked_window_destroyed(window.app_handle(), &label);
-                    crate::commands::dock::on_overlay_destroyed(window.app_handle(), &label);
-                    // 끌기 세션 — 명부가 그 창을 뺀 뒤 · 위 정리가 락을 다 놓은 뒤(TRD S21-slot-docking §2-5 「사라지면」).
-                    crate::commands::drag::on_window_gone(window.app_handle(), &label);
                 }
                 // 창 자리 기록(TRD S21-storage §6-3) — 사건 값 대신 게터를 다시 읽는다(최소화 · 최대화 여부가 같이
-                //   필요하다). 대기 창 명부의 창은 모델 밖이라 적지 않는다(TRD S21-slot-docking §2-5). 안내 창도 모델 밖이라
-                //   적을 곳이 없다 — 그릴 때마다 옮기므로 게터 읽기부터 건너뛴다. 끌기 세션(TRD S21-slot-docking §2-4)에는
-                //   `Moved` 만 자리 기록이 돌아온 뒤(락 없이) 넣는다 — 안내 창은 끄는 창이 될 수 없어 넣지 않는다.
+                //   필요하다). 대기 창 명부의 창은 모델 밖이라 적지 않는다(TRD S21-slot-docking §2-5).
                 // ADR-0295
                 tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
-                    let label = window.label();
-                    if !crate::commands::dock::is_overlay_label(label) {
-                        if !crate::commands::dock::is_parked_window(window.app_handle(), label) {
-                            crate::state::placement::record(window);
-                        }
-                        if matches!(event, tauri::WindowEvent::Moved(_)) {
-                            crate::commands::drag::on_window_moved(window.app_handle(), label);
-                        }
+                    if !crate::commands::dock::is_parked_window(window.app_handle(), window.label()) {
+                        crate::state::placement::record(window);
                     }
                 }
                 _ => {}
@@ -443,16 +428,10 @@ pub fn run() {
             // 측정 보고(웹뷰 → 셸) — 버스 명령이 아니다(ADR-0227).
             commands::report_window_canvas,
             commands::report_ui_metrics,
-            commands::report_dock_chrome,
             // 첫 화면 알림(웹뷰 → 셸) — 버스 명령이 아니다(`first_paint`).
             commands::webview_painted,
             // 부른 창의 역할(대기 창 명부 · TRD S21-slot-docking §4) — 웹뷰 안 배선이라 버스 명령이 아니다.
             commands::window_role,
-            // 탭 끌기 세션(웹뷰 → 셸 · TRD S21-slot-docking §4) — 버스 명령이 아니다(사람 손의 끌기 신호).
-            commands::drag::tab_drag_begin,
-            commands::drag::tab_drag_reorder,
-            commands::drag::tab_drag_leave,
-            commands::drag::tab_drag_end,
             // 탭 놓기 · 창 사실(웹뷰 → 셸 · ADR-0296) — 버스 명령이 아니다(마우스 놓기의 끝 · 웹뷰 안 배선 — TRD
             //   S21-slot-docking §3-6). 같은 동작의 LLM 명령은 T-65 `tab.dock`.
             commands::tab_drop::tab_drop,
@@ -487,7 +466,7 @@ pub fn run() {
         // graceful 을 담당). 여기서 하는 일은 화면 상태의 정상 종료 쓰기와 셸 실행 잠금 놓기(TRD S21-storage §6-6),
         // 그리고 시작이 실패했으면 종료 코드 정하기다 — 트레이 「완전 종료」(`app.exit(0)`)도 이 사건을 낸다.
         .run(move |handle, event| {
-            // 끝나는 중에는 사라진 예비 창 · 안내 창을 다시 짓지 않는다(TRD S21-slot-docking §2-5 「사라지면」). 종료를
+            // 끝나는 중에는 사라진 예비 창을 다시 짓지 않는다(TRD S21-slot-docking §2-5 「사라지면」). 종료를
             //   막는 코드가 없어(`rg "prevent[_]exit" src-tauri/src/` → 0줄) 요청이 곧 종료다 — 막는 길이 생기면 이 표지를
             //   `Exit` 로만 옮긴다.
             if let tauri::RunEvent::ExitRequested { .. } = event {

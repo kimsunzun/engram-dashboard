@@ -36,7 +36,6 @@ use std::collections::{HashMap, HashSet};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
-use super::chrome::DockChrome;
 use super::dock::{self, DockAnchor, DockSide, DockTreeError};
 use super::geometry::{self, has_area, PxRect, RectF64};
 use super::tree;
@@ -229,13 +228,11 @@ pub struct WindowTabs {
     // 탭 순서(좌→우).
     pub tabs: Vec<ViewId>,
     pub active: ViewId,
-    // 셋 다 그 창 웹뷰가 보고하기 전엔 None 이고 창 엔트리와 함께 사라진다. 탭마다가 아니라 창마다다.
+    // 둘 다 그 창 웹뷰가 보고하기 전엔 None 이고 창 엔트리와 함께 사라진다. 탭마다가 아니라 창마다다.
     // ADR-0227
     pub canvas: Option<CanvasPx>,
     // ADR-0227
     pub metrics: Option<UiMetrics>,
-    // 웹뷰에 보내는 쪽이 없어 늘 None 이다 — 이 칸은 TRD S21-slot-docking §7 U4c′-1 이 걷는다.
-    pub chrome: Option<DockChrome>,
     /// 영속 신원 — main 은 `main`, 팝아웃은 그 창 항목이 처음 생길 때 뽑은 UUID(하이픈 소문자). 저장 · 복원은 이
     /// 값을 쓴다. 런타임 label(맵 키)은 한 부팅 안에서만의 신원이다 — 팝아웃 label 은 실행마다 1 부터 다시
     /// 센다(TRD S21-storage §6-3).
@@ -254,7 +251,6 @@ impl WindowTabs {
             active,
             canvas: None,
             metrics: None,
-            chrome: None,
             window_id,
             attrs,
             placement_memo: PlacementMemo::default(),
@@ -286,14 +282,9 @@ impl WindowTabs {
 
     // ADR-0295
     fn with_measures(mut self, measures: FrameMeasures) -> Self {
-        let FrameMeasures {
-            canvas,
-            metrics,
-            chrome,
-        } = measures;
+        let FrameMeasures { canvas, metrics } = measures;
         self.canvas = canvas;
         self.metrics = metrics;
-        self.chrome = chrome;
         self
     }
 
@@ -301,7 +292,6 @@ impl WindowTabs {
         FrameMeasures {
             canvas: self.canvas,
             metrics: self.metrics,
-            chrome: self.chrome.clone(),
         }
     }
 }
@@ -1801,18 +1791,6 @@ impl ViewManager {
         Ok(())
     }
 
-    // 모양 검사를 하지 않는다 — wire(JSON)는 유한하지 않은 수를 못 싣고, 뒤집힌 사각형은 반열림 판정이 어느 점도
-    // 품지 않아 그 칸의 놓기만 없어진다.
-    // TRD S21-slot-docking §4
-    pub fn set_dock_chrome(&mut self, label: &str, chrome: DockChrome) -> Result<(), LayoutError> {
-        let wt = self
-            .windows
-            .get_mut(label)
-            .ok_or_else(|| LayoutError::WindowNotFound(label.to_string()))?;
-        wt.chrome = Some(chrome);
-        Ok(())
-    }
-
     // view 를 소유한 창의 캔버스·지표. 둘 중 하나라도 모르면 `Ok(None)`.
     // 소유 창이 없는 View(`prepare_detached_view` 의 임시 View)도 `Ok(None)` 이다.
     // ADR-0227
@@ -1985,13 +1963,12 @@ pub struct WindowSeed {
     pub(crate) placement_memo: PlacementMemo,
 }
 
-/// 창 웹뷰가 보고한 재기 셋 — 창 항목의 `canvas` · `metrics` · `chrome` 과 같은 값이다. `None` = 아직 보고가 없다.
+/// 창 웹뷰가 보고한 재기 둘 — 창 항목의 `canvas` · `metrics` 와 같은 값이다. `None` = 아직 보고가 없다.
 // ADR-0295
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct FrameMeasures {
     pub canvas: Option<CanvasPx>,
     pub metrics: Option<UiMetrics>,
-    pub chrome: Option<DockChrome>,
 }
 
 /// 도킹이 비워 모델에서 지운 팝아웃 항목 — `measures` = 지우기 직전의 재기. 그 OS 창은 아직 떠 있다.
@@ -4070,7 +4047,6 @@ mod tests {
                 "{label}: 캔버스는 그 웹뷰 보고 전까지 없다"
             );
             assert_eq!(wt.metrics, None, "{label}: 지표도 없다");
-            assert_eq!(wt.chrome, None, "{label}: 크롬도 없다");
             assert_eq!(
                 mgr.slot_px(view, first_slot_of(&mgr, view)),
                 Ok(None),
@@ -4105,78 +4081,16 @@ mod tests {
     }
 
     #[test]
-    fn reports_do_not_bump_version() {
+    fn reports_bump_neither_version_nor_attrs_rev() {
         let mut mgr = ViewManager::new();
-        let before = mgr.version;
+        let before = (mgr.version, mgr.attrs_rev());
         mgr.set_window_canvas(MAIN_WINDOW_LABEL, 1200, 800).unwrap();
         mgr.set_window_canvas(MAIN_WINDOW_LABEL, 0, 800).unwrap();
         mgr.set_ui_metrics(MAIN_WINDOW_LABEL, one_px_border())
             .unwrap();
         let _ = mgr.set_ui_metrics(MAIN_WINDOW_LABEL, metrics(-1.0, 1.0, 1.0, 1.0, 30));
         let _ = mgr.set_window_canvas("no-such", 1, 1);
-        assert_eq!(mgr.version, before);
-    }
-
-    fn chrome(bar_x1: f64) -> DockChrome {
-        use crate::layout::chrome::{PointCss, RectCss};
-        DockChrome {
-            canvas_origin: PointCss { x: 0.0, y: 28.0 },
-            tab_bar: RectCss {
-                x0: 0.0,
-                y0: 0.0,
-                x1: bar_x1,
-                y1: 28.0,
-            },
-        }
-    }
-
-    #[test]
-    fn dock_chrome_is_stored_per_window_and_vanishes_with_it() {
-        let mut mgr = ViewManager::new();
-        mgr.create_window("popup-1").unwrap();
-        mgr.set_dock_chrome(MAIN_WINDOW_LABEL, chrome(1200.0))
-            .unwrap();
-        mgr.set_dock_chrome("popup-1", chrome(640.0)).unwrap();
-        assert_eq!(window(&mgr, MAIN_WINDOW_LABEL).chrome, Some(chrome(1200.0)));
-        assert_eq!(window(&mgr, "popup-1").chrome, Some(chrome(640.0)));
-
-        mgr.set_dock_chrome("popup-1", chrome(500.0)).unwrap();
-        assert_eq!(
-            window(&mgr, "popup-1").chrome,
-            Some(chrome(500.0)),
-            "다음 보고가 덮는다"
-        );
-
-        mgr.close_window("popup-1").unwrap();
-        assert_eq!(
-            mgr.set_dock_chrome("popup-1", chrome(640.0)),
-            Err(LayoutError::WindowNotFound("popup-1".to_string()))
-        );
-        assert!(
-            !mgr.windows.contains_key("popup-1"),
-            "없는 창을 만들지 않는다"
-        );
-    }
-
-    #[test]
-    fn a_chrome_report_bumps_neither_version_nor_attrs_rev() {
-        let mut mgr = ViewManager::new();
-        let before = (mgr.version, mgr.attrs_rev());
-        mgr.set_dock_chrome(MAIN_WINDOW_LABEL, chrome(1200.0))
-            .unwrap();
-        let _ = mgr.set_dock_chrome("no-such", chrome(1200.0));
         assert_eq!((mgr.version, mgr.attrs_rev()), before);
-    }
-
-    #[test]
-    fn a_restore_keeps_the_main_chrome() {
-        let mut mgr = ViewManager::new();
-        mgr.set_dock_chrome(MAIN_WINDOW_LABEL, chrome(1200.0))
-            .unwrap();
-        let (fresh, ..) = restored_with_popout("slot-popup-2");
-        mgr.adopt_restored(fresh).unwrap();
-        assert_eq!(window(&mgr, MAIN_WINDOW_LABEL).chrome, Some(chrome(1200.0)));
-        assert_eq!(window(&mgr, "slot-popup-2").chrome, None);
     }
 
     #[test]
@@ -6769,7 +6683,6 @@ mod tests {
         let measures = FrameMeasures {
             canvas: Some(CanvasPx { w: 800, h: 600 }),
             metrics: Some(one_px_border()),
-            chrome: Some(chrome(640.0)),
         };
         docked(
             &mut mgr,
@@ -6795,7 +6708,6 @@ mod tests {
         mgr.observe_window_placement(P2, normal_at(120.0)).unwrap();
         mgr.set_window_canvas(P2, 800, 600).unwrap();
         mgr.set_ui_metrics(P2, one_px_border()).unwrap();
-        mgr.set_dock_chrome(P2, chrome(640.0)).unwrap();
         let before = window(&mgr, P2);
         assert!(before.measures().canvas.is_some(), "전제: 재기가 섰다");
 
@@ -7061,7 +6973,6 @@ mod tests {
         let measures = FrameMeasures {
             canvas: Some(CanvasPx { w: 800, h: 600 }),
             metrics: Some(one_px_border()),
-            chrome: Some(chrome(640.0)),
         };
 
         docked(

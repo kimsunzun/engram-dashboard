@@ -20,9 +20,9 @@
 //! 진입점: [`strip_zone`] → [`zone_in_canvas`](탭바 구역) · [`effective_bands`](창 하나의 유효 띠 전부) ·
 //! [`bands_at`](바깥 띠 + 점 밑 칸의 띠) → [`choose`] · [`slot_zones`](점에서 그릴 칸 구역 선).
 
+use ts_rs::TS;
 use uuid::Uuid;
 
-use super::chrome::{PointCss, RectCss};
 use super::dock::{docked_tree, incoming_rect, DockAnchor, DockSide};
 use super::geometry::{self as layout_geometry, px_edge, PxRect};
 use super::{tree, CanvasPx, LayoutNode};
@@ -72,6 +72,27 @@ const _: () = assert!(ATTACH_SHARE_MAX <= crate::layout::dock::SHARE_MAX);
 pub struct SizeDip {
     pub w: f64,
     pub h: f64,
+}
+
+/// 점 — CSS px(소수 허용). 원점은 쓰는 자리가 정한다: 웹뷰 wire(`TabDrop` 등)는 그 창 뷰포트 왼쪽 위 · 띠 판정은
+/// 그 창 캔버스 왼쪽 위.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct PointCss {
+    pub x: f64,
+    pub y: f64,
+}
+
+/// 사각형 — CSS px 경계 꼴(`getBoundingClientRect` 의 left · top · right · bottom · 원점은 [`PointCss`] 와 같이 쓰는
+/// 자리가 정한다). `x0 <= x1` · `y0 <= y1` 이어야 한다. 반열림(왼쪽 · 위 포함, 오른쪽 · 아래 제외)으로 읽는다
+/// ([`contains`]).
+// ts 내보내기를 달지 않는다 — 웹은 `dock/overlayTypes.ts` 의 TS 고유 타입을 쓰고 두 판은 골든이 묶는다(TRD §5-4).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RectCss {
+    pub x0: f64,
+    pub y0: f64,
+    pub x1: f64,
+    pub y1: f64,
 }
 
 /// 띠 하나 — 고른 띠의 판정 · 그림 · 놓기 재료가 다 여기 있다.

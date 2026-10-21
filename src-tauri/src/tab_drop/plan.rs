@@ -6,7 +6,7 @@
 
 use super::wire::{DropAnchor, DropTo, EndEffect, NewWindowBy, SizeCss, TabDrop};
 use crate::layout::apply::{DockDest, DockRequest, OnEmptied, WindowPlace};
-use crate::layout::chrome::PointCss;
+use crate::layout::bands::PointCss;
 use crate::layout::dock::DockAnchor;
 use crate::layout::geometry::Insets;
 use crate::layout::manager::{DockGuard, DockMove, FocusPolicy, WindowLabel};

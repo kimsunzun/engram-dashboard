@@ -16,7 +16,7 @@
 //!   쓴다). WebView2 가 상대 경로를 무엇에 대어 푸는지는 확인하지 않았다 — 상대 경로를 넘기면 확인한 폴더와 쓰는
 //!   폴더가 갈릴 수 있다.
 //! - ★창 바탕과 첫 테마([`Backdrop`])도 마무리가 붙인다★ — 환경 옵션이 아니라 창마다 다른 값(그 창의 유효 테마)이지만,
-//!   창을 만드는 코드가 모두 여기를 지나므로 부르는 쪽이 칠할지를 빠짐없이 고르게 인자로 받는다.
+//!   창을 만드는 코드가 모두 여기를 지나므로 인자로 받아 빠짐없이 붙인다.
 // ADR-0054
 
 use std::path::{Path, PathBuf};
@@ -43,14 +43,14 @@ type WriteCheck = fn(&Path) -> Result<(), String>;
 /// 창을 보일 때 지우는 색이고(`crate::first_paint` — 창은 첫 화면 뒤에 보이지만 시한으로 먼저 보일 수 있다), 웹뷰 바탕을
 /// 칠하지 않으면 페이지가 칠해지기 전에 WebView2 기본 흰 바탕이 비친다. 첫 테마를 박지 않으면 페이지가 dark 기본값으로
 /// 한 번 그려진다(`src/theme/bootTheme.ts`).
+///
+/// 투명 창을 새로 지을 땐 칠하지 않는 갈래를 되살린다 — 칠하면 tauri-runtime-wry 2.11.3 이 투명 창의 바닥을 그 색으로
+/// 채워(`window/windows.rs` 의 `draw_surface` — 알파를 버린다) 창이 불투명해진다(소스 독해).
 pub(crate) enum Backdrop {
     /// 그 테마의 페이지 바탕색([`UiTheme::page_background`])을 칠하고, 페이지 스크립트보다 먼저 도는 초기화
     /// 스크립트로 `data-theme` 를 박는다 — 그 창 `label` 이 이 웹뷰에서 마지막으로 칠한 테마([`THEME_MEMORY_PREFIX`])가
     /// 있으면 그 값, 없으면 `theme`.
     Theme { label: String, theme: UiTheme },
-    /// 칠하지도 박지도 않는다 — 투명 창(안내 창) 몫. 칠하면 tauri-runtime-wry 2.11.3 이 투명 창의 바닥을 그 색으로 채워
-    /// (`window/windows.rs` 의 `draw_surface` — 알파를 버린다) 창이 불투명해진다(소스 독해).
-    Unpainted,
 }
 
 impl Backdrop {
@@ -78,11 +78,10 @@ impl Backdrop {
 /// 빈 저장소로 시작하는지는 실측하지 않았다(아니면 증상 = 새 창이 지난 같은 label 창의 테마로 한 번 그려진다).
 pub(crate) const THEME_MEMORY_PREFIX: &str = "engram.theme.";
 
-/// 떠 있는 창의 바탕을 그 테마로 다시 칠한다 — 테마를 밀 때 창마다 부른다(`commands::settings`). 투명 창(안내 창)에는
-/// 부르지 않는다([`Backdrop::Unpainted`]).
+/// 떠 있는 창의 바탕을 그 테마로 다시 칠한다 — 테마를 밀 때 창마다 부른다(`commands::settings`).
 ///
-/// tao 0.35.3 쪽 칠하기는 색을 적고 다시 그리기만 한다(`InvalidateRect` + `UpdateWindow`) — 창 깃발을 건드리지 않아, tao 보임
-/// 깃발과 OS 보임이 일부러 갈린 창(예비 · 남긴 창 — `commands::dock`)에 불러도 그 창이 보이거나 숨지 않는다(소스 독해).
+/// tao 0.35.3 쪽 칠하기는 색을 적고 다시 그리기만 한다(`InvalidateRect` + `UpdateWindow`) — 창 깃발을 건드리지 않아, 숨긴 채
+/// 기다리는 창(예비 창 — `commands::dock`)에 불러도 그 창이 보이지 않는다(소스 독해).
 pub(crate) fn repaint<R: Runtime>(window: &WebviewWindow<R>, theme: UiTheme) {
     // 바탕은 페이지가 덮기 전에만 보이는 색이라 배달(테마 알림)을 실패로 만들 사유가 아니다 — 로그로만 남긴다.
     if let Err(e) = window.set_background_color(Some(color(theme))) {
@@ -148,7 +147,7 @@ impl WebviewEnv {
 
     /// 창 빌더에 웹뷰 환경 옵션(폴더 · 브라우저 인자 · 확장 · 스크롤바 모양)과 바탕 · 첫 테마(`backdrop`)를 붙이고 드롭
     /// 처리기를 끈다 — 창을 만드는 모든 코드가 `build()` 앞에서 지난다. 앞서 빌더에 붙은 값(설정 창이 `from_config` 로
-    /// 받은 것 포함)은 덮는다 — 폴더와 [`Backdrop::Unpainted`] 의 바탕은 예외다(붙이지 않는다). 초기화 스크립트는 덮지 않고
+    /// 받은 것 포함)은 덮는다 — 폴더는 예외다(물러날 때 붙이지 않는다). 초기화 스크립트는 덮지 않고
     /// 앞서 붙은 것 뒤에 더한다.
     ///
     /// 폴더는 OS 를 가리지 않고 넘긴다 — 그 값을 쓰느냐는 Tauri 의 플랫폼 구현 몫이다(CLAUDE.md 「플랫폼 중립」).
@@ -220,12 +219,10 @@ fn attach<B: EnvOptions>(builder: B, dir: Option<&Path>, backdrop: Backdrop) -> 
         Some(dir) => builder.data_dir(dir.to_path_buf()),
         None => builder,
     };
-    match backdrop {
-        Backdrop::Theme { label, theme } => builder
-            .background(color(theme))
-            .init_script(theme_script(&label, theme)),
-        Backdrop::Unpainted => builder,
-    }
+    let Backdrop::Theme { label, theme } = backdrop;
+    builder
+        .background(color(theme))
+        .init_script(theme_script(&label, theme))
 }
 
 // 절대 경로로 바꾼 뒤 확인한다(모듈 머리) — 바꾸지 못하면 못 쓰는 폴더와 같이 물러난다.
@@ -461,18 +458,35 @@ mod tests {
         ]
     }
 
+    fn dark(label: &str) -> Backdrop {
+        Backdrop::Theme {
+            label: label.to_owned(),
+            theme: UiTheme::Dark,
+        }
+    }
+
+    fn painted_dark(label: &str) -> [Attached; 2] {
+        [
+            Attached::Background(color(UiTheme::Dark)),
+            Attached::InitScript(theme_script(label, UiTheme::Dark)),
+        ]
+    }
+
     #[test]
     fn every_window_gets_the_environment_options_and_no_drop_handler() {
         let dir = std::env::temp_dir().join("webview");
         let mut with_dir = common();
         with_dir.push(Attached::DataDir(dir.clone()));
+        with_dir.extend(painted_dark("main"));
         assert_eq!(
-            attach(Recorder::default(), Some(&dir), Backdrop::Unpainted).0,
+            attach(Recorder::default(), Some(&dir), dark("main")).0,
             with_dir
         );
+        let mut fallback = common();
+        fallback.extend(painted_dark("main"));
         assert_eq!(
-            attach(Recorder::default(), None, Backdrop::Unpainted).0,
-            common(),
+            attach(Recorder::default(), None, dark("main")).0,
+            fallback,
             "기본 폴더로 물러나도 드롭 처리기는 끈다"
         );
     }
@@ -541,17 +555,6 @@ mod tests {
                 "export const THEME_KEY_PREFIX = '{THEME_MEMORY_PREFIX}'"
             )),
             "src/theme/themeMemory.ts 의 THEME_KEY_PREFIX"
-        );
-    }
-
-    #[test]
-    fn an_unpainted_window_gets_no_background_and_no_theme_script() {
-        let attached = attach(Recorder::default(), None, Backdrop::Unpainted).0;
-        assert!(
-            !attached
-                .iter()
-                .any(|a| matches!(a, Attached::Background(_) | Attached::InitScript(_))),
-            "{attached:?}"
         );
     }
 

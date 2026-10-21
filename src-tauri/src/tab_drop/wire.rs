@@ -5,7 +5,7 @@
 use ts_rs::TS;
 use uuid::Uuid;
 
-use crate::layout::chrome::PointCss;
+use crate::layout::bands::PointCss;
 use crate::layout::dock::DockSide;
 use crate::layout::geometry::Insets;
 

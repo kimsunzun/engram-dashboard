@@ -2,7 +2,6 @@
 
 pub mod apply;
 pub mod bands;
-pub mod chrome;
 // ADR-0155 결정 1: `window`/`tab`/`slot` 선언은 그 본문(적용 서비스) 옆에 산다.
 pub mod commands;
 pub mod dock;

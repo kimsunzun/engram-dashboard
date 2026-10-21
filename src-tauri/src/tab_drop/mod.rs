@@ -629,7 +629,7 @@ mod tests {
     use crate::layout::apply::{
         DockDest, DockRequest, MoveFailed, OnEmptied, WindowPlace, WindowTabsPayload,
     };
-    use crate::layout::chrome::PointCss;
+    use crate::layout::bands::PointCss;
     use crate::layout::dock::DockSide;
     use crate::layout::manager::{DockGuard, DockMove, DockTo, FocusPolicy};
     use crate::layout::{ViewManager, ViewSnapshot, WindowBounds, MAIN_WINDOW_LABEL};

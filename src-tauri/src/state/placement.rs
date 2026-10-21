@@ -721,7 +721,7 @@ pub(crate) fn show_placed(window: &Window) {
         match show_maximized(window) {
             Ok(()) => {
                 // tao 보임 깃발을 맞춘다 — 거짓으로 남으면 다음 깃발 setter 가 창을 숨기고 트레이 숨기기가 아무것도 하지
-                //   않는다(`dock::ports` 머리 「보임」).
+                //   않는다(바뀐 깃발이 없으면 tao 0.35.3 `apply_diff` 가 돌아간다 · 소스 독해).
                 if let Err(e) = window.show() {
                     tracing::warn!(module = "state", label, error = %e, "최대화로 보인 창의 보임 깃발을 맞추지 못했다");
                 }
