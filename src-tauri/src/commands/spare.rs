@@ -1,22 +1,22 @@
-//! 예비 창의 셸 쪽 창 관리(TRD S21-slot-docking §3-9): 창 역할 질의([`window_role`]) · 예비 창 풀의 `Destroyed`
-//! 갈래 · 예비 창 짓기 · 앱 종료 표시([`on_app_exiting`]).
+//! 예열 창의 셸 쪽 창 관리(TRD S21-slot-docking §3-9): 창 역할 질의([`window_role`]) · 창 `Destroyed` 의 풀 갈래 ·
+//! 예열 창 짓기 · 앱 종료 표시([`on_app_exiting`]). 상태 기계는 `crate::spare` 에 있고 여기는 Tauri 어댑터다.
 //!
-//! ★락 규율★ — 예비 창 풀 락(`SpareState::pool`)은 잎이다. 가드는 문장 하나 안에서 쓰고 놓고, 쥔 채 레이아웃 락 ·
-//! emit · 창 호출 · 창 짓기를 하지 않는다. 레이아웃 락을 쥔 채 잡는 것은 된다(차례 = `SpareState` 문서).
+//! ★락 차례 = 레이아웃 → 예열 창 풀 → 첫 화면 문★(`SpareState` 문서) — 풀 락을 쥔 채 잡는 것은 첫 화면 문의 잎 락
+//! 하나뿐이고, 쥔 채 레이아웃 락 · emit · 창 호출 · 창 짓기를 하지 않는다.
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use tauri::{AppHandle, Manager, State, Window};
 
 use crate::commands::popout::PopupCounter;
 use crate::layout::apply;
-use crate::layout::{LabelSource, LayoutState};
-use crate::spare::wire::WindowRoleReply;
+use crate::layout::LayoutState;
+pub(crate) use crate::spare::elapsed_ms;
+use crate::spare::wire::{WindowRole, WindowRoleReply};
 use crate::spare::SpareState;
 
 /// 부른 창의 지금 역할(동기) — `invoke('window_role')`. 웹뷰가 마운트 때 묻고 `spare` 면 대기 모드로 그린다(TRD
-/// §3-9). 웹뷰 안 배선이라 버스 명령표에 올리지 않는다.
+/// §3-9). 채택 뒤 보임을 기다리는 창이면 그 채택 번호도 싣는다(I26). 웹뷰 안 배선이라 버스 명령표에 올리지 않는다.
 #[tauri::command]
 pub fn window_role(
     window: Window,
@@ -27,49 +27,41 @@ pub fn window_role(
     let role = spare.window_role(label, || {
         apply::list_windows(&layout).is_ok_and(|windows| windows.iter().any(|w| w == label))
     });
-    WindowRoleReply { role }
+    // 번호는 역할을 본 뒤 읽고 모델 창에만 싣는다 — 확정 ① 전의 `spare` 답에 ① 뒤의 번호가 붙지 않는다.
+    let generation = match role {
+        WindowRole::Model => spare.reveal_generation(label),
+        WindowRole::Spare | WindowRole::Unknown => None,
+    };
+    WindowRoleReply { role, generation }
 }
 
-/// 예비 창 풀의 창인가 — 트레이 보이기 · 숨기기 · `--hidden` 과 자리 기록이 빼는 창(TRD §3-9).
+/// 예열 창 풀의 창인가 — 트레이 보이기 · 숨기기 · `--hidden` 과 자리 기록이 빼는 창(TRD §3-9).
 pub(crate) fn is_spare_window(app: &AppHandle, label: &str) -> bool {
     app.try_state::<Arc<SpareState>>()
         .is_some_and(|spare| spare.is_spare(label))
 }
 
-/// 창 `Destroyed` 의 풀 갈래(TRD §3-9 「다시 짓기」) — 그 창을 풀에서 빼고, 앱이 끝나는 중이 아니면 풀에 예비(짓는
-/// 중 포함)가 없을 때 작업 스레드에서 새로 짓는다(예비는 늘 하나). 닫는 창의 풀 항목을 지우는 곳은 여기 하나다.
-/// 레이아웃 락 밖에서 부른다(`lib.rs`).
-// ADR-0295
+/// 창 `Destroyed` 의 풀 갈래(TRD §3-9 「다시 짓기」) — 풀의 창이면 풀에서 빼고 다시 짓고, 보임을 기다리던 채택 창이면
+/// 다시 짓기 완료다(둘 다 종료 중 · 풀 꺼짐이면 짓지 않는다 · 판정 = `SpareState::on_destroyed`). 닫는 창의 풀 항목을
+/// 지우는 곳은 여기 하나다. 레이아웃 락 밖에서 부른다(`lib.rs`).
+// ADR-0295 · ADR-0299
 pub(crate) fn on_spare_window_destroyed(app: &AppHandle, label: &str) {
     let Some(spare) = app.try_state::<Arc<SpareState>>() else {
         return;
     };
-    if spare.pool().remove(label).is_none() {
-        return;
-    }
-    if spare.exiting() {
-        tracing::debug!(
-            module = "spare",
-            label,
-            "앱이 끝나는 중에 예비 창이 사라졌다 — 다시 짓지 않는다"
-        );
-        return;
-    }
-    tracing::warn!(module = "spare", label, "예비 창을 잃어 풀에서 뺐다");
-    let has_spare = spare.pool().has_spare();
-    if !has_spare {
+    if spare.on_destroyed(label) {
         spawn_spare_build(app);
     }
 }
 
-/// 앱 종료 요청 — 이 뒤로 사라지는 예비 창은 다시 짓지 않는다(`lib.rs` 의 `run` 사건).
+/// 앱 종료 요청 — 이 뒤로 사라지는 예열 창은 다시 짓지 않는다(`lib.rs` 의 `run` 사건).
 pub(crate) fn on_app_exiting(app: &AppHandle) {
     if let Some(spare) = app.try_state::<Arc<SpareState>>() {
         spare.begin_exit();
     }
 }
 
-// ── 예비 창 짓기(TRD §3-9 「부팅」 · 「다시 짓기」) ─────────────────────────────────────
+// ── 예열 창 짓기(TRD §3-9 「부팅」 · 「다시 짓기」) ─────────────────────────────────────
 //
 // 미리 하나 지어 ★숨긴 채★ 기다린다 — 화면 밖 대기 자리를 두지 않는다(사용자 결정 2026-10-19). 숨긴 최상위 창은
 // 작업 표시줄 · Alt+Tab 에 나오지 않는다.
@@ -78,67 +70,30 @@ pub(crate) fn on_app_exiting(app: &AppHandle) {
 // ★작업 스레드에서 짓는다★ — 동기 IPC 처리기 안에서 지으면 Windows 에서 교착이고(스파이크), 메인 스레드의 사건
 // 처리기(`Destroyed`)도 부르는 쪽이다.
 
-/// 예비 창 하나를 작업 스레드에서 짓는다 — 풀에 예비(짓는 중 포함)가 이미 있거나 앱이 끝나는 중이면 짓지 않는다.
+/// 예열 창 하나를 작업 스레드에서 짓는다 — 풀에 예열 창(짓는 중 포함)이 이미 있거나 · 보임을 기다리는 채택 창이
+/// 있거나 · 앱이 끝나는 중 · 풀이 꺼졌으면 짓지 않고 팝아웃 번호도 받지 않는다(`SpareState::build`).
 pub(crate) fn spawn_spare_build(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || build_spare(&app));
 }
 
-pub(crate) fn elapsed_ms(started: Instant) -> u64 {
-    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
-}
-
-// 예비 창 — 풀에 적고(짓기 전 — 짓는 동안의 트레이 · `--hidden` 도 그 창을 보지 않게) · 숨긴 채 짓고 ·
-//   지어짐을 세운다. 짓기에 실패하면 풀에서 뺀다 — 두면 「예비 있음」이 늘 참이라 다시 짓지 못한다. 기다리는 동안 이
-//   창에는 보임을 바꾸는 창 호출을 하지 않는다 — tao 보임 깃발(거짓)이 OS 보임과 맞은 채다.
+// 기다리는 동안 이 창에는 보임을 바꾸는 창 호출을 하지 않는다 — tao 보임 깃발(거짓)이 OS 보임과 맞은 채다.
 // ★보일 때는 Tauri `show()` 로★ — 날 Win32 로 보이면 깃발이 거짓으로 남아 트레이 숨기기가 아무것도 하지 않는다(바뀐
 //   깃발이 없으면 tao 0.35.3 `apply_diff` 가 돌아간다). 포커스 없이 지은 창이라 tao 는 활성화하지 않고 보인다
 //   (`SW_SHOWNOACTIVATE`).
 // ADR-0295
 fn build_spare(app: &AppHandle) {
-    let started = Instant::now();
     let (Some(spare), Some(labels)) = (
         app.try_state::<Arc<SpareState>>(),
         app.try_state::<Arc<PopupCounter>>(),
     ) else {
         tracing::warn!(
             module = "spare",
-            "예비 창 상태 · 팝아웃 번호가 등록돼 있지 않아 예비 창을 짓지 못했다"
+            "예열 창 상태 · 팝아웃 번호가 등록돼 있지 않아 예열 창을 짓지 못했다"
         );
         return;
     };
-    if spare.exiting() {
-        tracing::debug!(module = "spare", "앱이 끝나는 중이라 예비 창을 짓지 않는다");
-        return;
-    }
-    let label = LabelSource::next_label(&**labels);
-    let reserved = spare.pool().reserve_spare(label.clone());
-    if !reserved {
-        tracing::debug!(module = "spare", label, "예비 창이 이미 있어 짓지 않는다");
-        return;
-    }
-    if let Err(e) = crate::commands::popout::build_spare_window(app, &label) {
-        spare.pool().remove(&label);
-        tracing::warn!(module = "spare", label, "예비 창을 짓지 못했다: {e}");
-        return;
-    }
-    let built = spare.mark_built(&label);
-    let build_ms = elapsed_ms(started);
-    if built {
-        tracing::debug!(
-            module = "spare",
-            label,
-            role = "spare",
-            build_ms,
-            "예비 창을 지었다"
-        );
-    } else {
-        tracing::debug!(
-            module = "spare",
-            label,
-            role = "spare",
-            build_ms,
-            "예비 창이 짓는 동안 사라졌다"
-        );
-    }
+    spare.build(&**labels, |label| {
+        crate::commands::popout::build_spare_window(app, label).map(drop)
+    });
 }

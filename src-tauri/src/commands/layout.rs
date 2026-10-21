@@ -28,7 +28,6 @@ use crate::layout::{
 };
 use crate::output_router::{OutputRouter, SubscriptionDelta};
 use crate::settings::SettingsService;
-use crate::spare::pool::Measure;
 use crate::spare::SpareState;
 use crate::state::restore::RestoreCoordinator;
 use crate::theme::ThemeControl;
@@ -620,11 +619,7 @@ pub fn report_window_canvas(
     w: u32,
     h: u32,
 ) -> Result<(), String> {
-    match spare.record_measure(window.label(), Measure::Canvas { w, h }) {
-        Some(recorded) => recorded.map_err(|e| e.to_string())?,
-        None => apply::report_window_canvas(&state, window.label(), w, h)?,
-    }
-    Ok(())
+    spare.report_canvas(&state, window.label(), w, h)
 }
 
 /// 창 웹뷰가 칸 틀 기본 지표를 알린다 — `invoke('report_ui_metrics', { metrics })`. 계약(단위·범위)은
@@ -637,10 +632,7 @@ pub fn report_ui_metrics(
     spare: State<'_, Arc<SpareState>>,
     metrics: UiMetrics,
 ) -> Result<(), String> {
-    match spare.record_measure(window.label(), Measure::Metrics(metrics)) {
-        Some(recorded) => recorded.map_err(|e| e.to_string()),
-        None => apply::report_ui_metrics(&state, window.label(), metrics),
-    }
+    spare.report_metrics(&state, window.label(), metrics)
 }
 
 // ── read-only 조회 ───────────────────────────────────────────────────────────

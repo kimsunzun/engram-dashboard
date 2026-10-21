@@ -109,9 +109,18 @@ pub fn run() {
     //   선다(`RestoreCoordinator` 문서). 데몬 클라이언트는 구독 원천이 커밋 때마다 찾는다.
     let setup_restore = restore_coordinator.clone();
     builder = builder.manage(restore_coordinator);
-    // 예비 창 상태(예비 창 풀 · 종료 표지 — TRD S21-slot-docking §3-9)도 같은 이유다(ADR-0102) — 웹뷰의 첫 측정
+    // 숨긴 채 지은 창을 첫 화면 알림까지 기다리는 명부 — 창을 만드는 어느 자리보다 먼저 있어야 한다(없으면 곧바로 보인다).
+    //   예열 창 풀이 그 손잡이를 쥐므로 풀보다 먼저 만든다(앱 손잡이는 setup 첫머리에 꽂는다).
+    let first_paint = std::sync::Arc::new(crate::first_paint::FirstPaintGate::default());
+    let spare_paint_gate =
+        std::sync::Arc::new(crate::first_paint::SparePaintGate::new(first_paint.clone()));
+    let setup_spare_paint_gate = spare_paint_gate.clone();
+    builder = builder.manage(first_paint);
+    // 예열 창 상태(예열 창 풀 · 종료 표지 — TRD S21-slot-docking §3-9)도 같은 이유다(ADR-0102) — 웹뷰의 첫 측정
     //   보고 둘(캔버스 · UI 치수) · `window_role` 이 이 상태를 본다.
-    builder = builder.manage(std::sync::Arc::new(crate::spare::SpareState::new()));
+    builder = builder.manage(std::sync::Arc::new(crate::spare::SpareState::new(
+        crate::spare::SpareSeams::new(spare_paint_gate),
+    )));
     // 탭 놓기 장부 · 창마다 마지막으로 낸 창 사실(ADR-0296 · TRD S21-slot-docking §3-4 · §3-8)도 같은 이유다
     //   (ADR-0102) — 웹뷰의 마운트 때 `window_frame` 당기기와 창의 첫 자리 기록이 이 상태를 본다.
     builder = builder.manage(std::sync::Arc::new(crate::tab_drop::DropBook::default()));
@@ -139,10 +148,6 @@ pub fn run() {
     let webview_env = std::sync::Arc::new(crate::webview_env::WebviewEnv::resolve());
     let setup_webview_env = webview_env.clone();
     builder = builder.manage(webview_env);
-    // 숨긴 채 지은 창을 첫 화면 알림까지 기다리는 명부 — 창을 만드는 어느 자리보다 먼저 있어야 한다(없으면 곧바로 보인다).
-    builder = builder.manage(std::sync::Arc::new(
-        crate::first_paint::FirstPaintGate::default(),
-    ));
 
     let exit_session = state_session.clone();
     // 시작이 실패했다는 표지 — setup ⑧ 이 세우고 종료 사건이 읽는다(아래 `run`).
@@ -151,6 +156,10 @@ pub fn run() {
     builder
         .setup(move |app| {
             // 로그는 부팅 단계 플러그인이 이미 열었다(TRD S21-storage §6-5 ⓪).
+
+            // 예열 창 풀의 첫 화면 문 손잡이가 확정 ③ 의 보이기를 메인 스레드로 넘길 앱 손잡이 — 창을 만드는 어느
+            //   자리(⑧ · 예열 창 짓기)보다 앞.
+            setup_spare_paint_gate.attach(app.handle().clone());
 
             // ── 웹뷰 폴더 결정(TRD S21-storage §4 · M4) — 창을 만드는 어느 자리보다 앞 ─────────────────
             // 단일 인스턴스 관문 뒤라 쓰기 확인(프로브)을 해도 된다.
