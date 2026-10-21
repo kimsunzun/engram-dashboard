@@ -134,9 +134,10 @@ struct TauriThemeWindows {
 }
 
 impl ThemeWindows for TauriThemeWindows {
-    // ★명단은 Tauri 에서 받는다 — 레이아웃 명부가 아니다★. 둘은 양쪽으로 어긋난다 — 슬롯 팝아웃
-    //   (`move_slot_to_window`)과 복원 수락(TRD S21-storage §6-7 ②)은 웹뷰를 먼저 만들고 모델에 나중에 들이고,
-    //   빈 새 창(`create_window`)은 모델에 먼저 들이고 웹뷰를 나중에 만든다. 여기서 세는 것은 「지금 살아 있는
+    // ★명단은 Tauri 에서 받는다 — 레이아웃 명부가 아니다★. 둘은 양쪽으로 어긋난다 — 새 창(슬롯 팝아웃
+    //   `move_slot_to_window` · 빈 새 창 `create_window` · 도킹 새 창)과 복원 수락(TRD S21-storage §6-7 ②)은 웹뷰를
+    //   먼저 만들고 모델에 나중에 들이고, 부팅 복원(`state::placement::open_restored_popouts`)은 모델에 먼저 든 팝아웃의
+    //   웹뷰를 나중에 만든다. 여기서 세는 것은 「지금 살아 있는
     //   웹뷰」이고, 그 label 이 웹뷰가 구독을 거는 값과 같다는 근거는 `view_commands` 의 같은 조항.
     fn labels(&self) -> Vec<String> {
         self.app.webview_windows().into_keys().collect()

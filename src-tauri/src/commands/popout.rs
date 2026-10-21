@@ -570,6 +570,7 @@ mod close_request_tests {
     struct ClosingHost<'a> {
         rig: &'a Rig,
         closed: Mutex<Vec<String>>,
+        placed: Mutex<Vec<String>>,
     }
 
     impl<'a> ClosingHost<'a> {
@@ -577,6 +578,7 @@ mod close_request_tests {
             ClosingHost {
                 rig,
                 closed: Mutex::new(Vec::new()),
+                placed: Mutex::new(Vec::new()),
             }
         }
 
@@ -599,6 +601,10 @@ mod close_request_tests {
             self.open(label)
         }
         fn close(&self, label: &str) {
+            assert!(
+                self.rig.state.0.try_lock().is_ok(),
+                "close 는 락 밖에서 불려야 한다 — destroy 의 `Destroyed` 처리기가 같은 락을 잡는다"
+            );
             self.closed.lock().unwrap().push(label.to_string());
         }
         fn is_open(&self, label: &str) -> bool {
@@ -609,6 +615,42 @@ mod close_request_tests {
             self.user_closes(label);
             Ok(())
         }
+        fn record_placement(&self, label: &str) {
+            self.placed.lock().unwrap().push(label.to_string());
+        }
+    }
+
+    // 빈 새 창이 열린 바로 뒤 · 모델에 넣기 전에 사용자가 닫는다(`Destroyed` 정리도 같은 모델 몫 — 묘비) — 넣기가 묘비를
+    //   만나 연 창을 거두고, OS 창 없는 팝아웃 항목이 모델 · `window.list` 에 남지 않는다(남으면 다음 부팅에 빈 팝업으로
+    //   복원된다). TRD S21-slot-docking §8-1 ⑬ · §3-9 「자리별 차례」
+    #[tokio::test]
+    async fn a_close_before_the_insert_refuses_a_created_window_and_closes_it() {
+        let rig = Rig::new();
+        let host = ClosingHost::new(&rig);
+        let before = rig.fingerprint();
+
+        let fresh = "slot-popup-1";
+        let err = apply::create_window(&rig.state, &rig.subs(), &host, &PopupCounter::default())
+            .unwrap_err();
+        assert_eq!(err, LayoutError::WindowClosed(fresh.into()).to_string());
+        assert_eq!(*host.closed.lock().unwrap(), [fresh], "방금 연 창을 거둔다");
+        assert!(
+            host.placed.lock().unwrap().is_empty(),
+            "모델에 없는 창의 자리는 적지 않는다"
+        );
+        assert_eq!(rig.fingerprint(), before, "모델 무변경");
+        assert!(!apply::list_windows(&rig.state)
+            .unwrap()
+            .iter()
+            .any(|w| w == fresh));
+
+        // 그 창의 `Destroyed` 도 바꾸는 것이 없다.
+        assert_eq!(
+            rig.destroyed(fresh),
+            Some(0),
+            "모델이 그 창을 가진 적이 없다"
+        );
+        assert_eq!(rig.fingerprint(), before);
     }
 
     #[tokio::test]

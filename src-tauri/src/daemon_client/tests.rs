@@ -5717,7 +5717,8 @@ async fn a_destroyed_popup_leaves_the_interest_after_the_delay() {
 
 // ── 팝업 소멸은 모델이 그 창을 쥐지 않았어도 숨김 표시를 잊는다 ─────────────────────────────────
 // 새 창으로 슬롯 옮기기는 OS 창을 먼저 열고 모델 창을 나중에 더한다 — 그 틈에 트레이가 숨기고 창이 닫히면 모델엔
-// 그 창이 없다. 같은 label 을 다시 세우면(시험만 — 운영 label 은 다시 안 쓰인다) 잊힌 표시는 보임으로 센다.
+// 그 창이 없다. 같은 label 의 창을 묘비 없는 새 모델에 세우면(시험만 — 운영 label 은 다시 안 쓰이고, 묘비가 선 label 은
+// 모델이 받지 않는다) 잊힌 표시는 보임으로 센다.
 #[tokio::test]
 async fn a_destroyed_popup_forgets_its_hidden_mark_even_when_the_model_never_held_it() {
     let client = idle_client();
@@ -5734,6 +5735,7 @@ async fn a_destroyed_popup_forgets_its_hidden_mark_even_when_the_model_never_hel
     );
     assert_eq!(nudges(&mut rx), 0);
 
+    let state = LayoutState::new();
     state.0.lock().unwrap().create_window(POPUP).unwrap();
     set_usage_slot(&state, &client, POPUP, true, false);
     assert_eq!(

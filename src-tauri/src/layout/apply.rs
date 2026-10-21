@@ -273,6 +273,11 @@ pub fn create_tab(
 //
 // 창 mount 시 프론트가 `list_tabs(label)` pull + 탭 알림 listen 으로 초기 렌더하므로(§3-3) 성공 경로에
 // 별도 알림이 없다.
+//
+// ★OS 창을 연 뒤에 모델에 넣는다★ — 새 창을 여는 다른 두 자리(`move_slot_to_window` · 도킹 새 창)와 같은 차례다(TRD
+// S21-slot-docking §3-9 「자리별 차례」). 열기와 넣기 사이에 그 창이 닫히면(닫기 요청 · `Destroyed`) 그 정리가 label 에
+// 묘비를 달아 넣기가 `WindowClosed` 로 거절되고, 연 창을 거둔다(이미 닫혔으면 무동작).
+// ADR-0299
 pub fn create_window(
     state: &LayoutState,
     subs: &dyn SubscriptionSync,
@@ -280,38 +285,30 @@ pub fn create_window(
     labels: &dyn LabelSource,
 ) -> Result<String, String> {
     let label = labels.next_label();
+    host.open(&label)?;
 
-    {
-        let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
-        mgr.create_window(&label).map_err(|e| e.to_string())?;
-        subs.resync(&mgr);
-        let n_windows = mgr.windows.len();
-        if n_windows >= 3 {
-            tracing::info!(
-                windows = n_windows,
-                "create_window: 창 수 증가 — 보이는 슬롯 상한(≤16, ADR-0056) 근접 주의"
-            );
+    let inserted = state
+        .0
+        .lock()
+        .map_err(|e| e.to_string())
+        .and_then(|mut mgr| {
+            mgr.create_window(&label).map_err(|e| e.to_string())?;
+            subs.resync(&mgr);
+            Ok(mgr.windows.len())
+        }); // ← 락 드롭
+    let n_windows = match inserted {
+        Ok(n) => n,
+        Err(e) => {
+            host.close(&label);
+            tracing::warn!(label = %label, "create_window: 연 창을 모델에 넣지 못해 거둔다 — {e}");
+            return Err(e);
         }
-    } // ← 락 드롭
-
-    if let Err(e) = host.open(&label) {
-        // ★롤백 재동기도 락 안★: 락 밖으로 내면 계산~발화 사이에 그 agent 가 다시 배정돼 stale 1→0
-        //   해제가 방금 형성된 라이브 구독을 죽인다(F1/F2 와 같은 클래스 — 되돌리지 말 것). 근거는
-        //   `output_router::rebuild` 의 호출 계약이고, 그 주석이 이 롤백 경로를 **유일한 예외**로 적어
-        //   두었던 것을 이 서비스가 없앴다(ADR 조항이 아니다).
-        let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
-        let _ = mgr.close_window(&label);
-        subs.resync(&mgr);
-        return Err(e);
-    }
-    // 창을 만드는 동안 락이 풀려 있었다 — 그 사이 모델에서 그 창을 지운 쪽(창 닫기 · 크래시 사본 수락의 화면
-    //   교체 — `ViewManager::adopt_restored`)의 OS 창 거두기는 아직 등록 전인 이 창을 못 찾고 지나갔을 수 있다.
-    //   여기서 안 거두면 모델에 없는 OS 창이 남는다(옮기기 phase C 의 재검증과 같은 틈). 읽기만 하므로 독이 들어도 본다.
-    let kept = sync::lock(&state.0).windows.contains_key(&label);
-    if !kept {
-        host.close(&label);
-        tracing::warn!(label = %label, "create_window: 창을 만드는 사이 모델에서 지워져 그 OS 창을 거둔다");
-        return Err(format!("창을 만드는 사이 모델에서 지워졌다: {label}"));
+    };
+    if n_windows >= 3 {
+        tracing::info!(
+            windows = n_windows,
+            "create_window: 창 수 증가 — 보이는 슬롯 상한(≤16, ADR-0056) 근접 주의"
+        );
     }
     host.record_placement(&label);
 
@@ -867,14 +864,17 @@ pub fn move_slot_to_window(
         (src_tabs, tgt_tabs, src_layout)
     }; // ← 락 드롭
 
-    if is_new_window {
-        host.record_placement(&target_label);
-    }
     announce(
         events,
         src_layout.as_ref(),
         [src_tabs.as_ref(), tgt_tabs.as_ref()].into_iter().flatten(),
     );
+    // 첫 자리 기록은 알림 뒤 — 그 기록이 내는 창 사실(`window:frame`)이 새 창의 탭 알림 뒤에 난다(도킹 새 창과 같은
+    //   차례 · TRD S21-slot-docking §3-9 「자리별 차례」).
+    // ADR-0299
+    if is_new_window {
+        host.record_placement(&target_label);
+    }
 
     tracing::info!(window = %target_label, view = %tmp_view, "슬롯 MOVE 완료(detach)");
     Ok(SlotMove {

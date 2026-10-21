@@ -32,7 +32,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use engram_dashboard_protocol::AgentBackendKind;
 use uuid::Uuid;
@@ -85,21 +85,40 @@ impl Probe {
 
 // ── 가짜 포트 ────────────────────────────────────────────────────────────────
 
+/// 창 포트와 알림 포트를 가로지른 차례 — 둘이 한 기록을 나눠 쓴다(TRD S21-slot-docking §8-1 ⑬ 자리별 차례). 창 포트 =
+/// `"open:<label>"`(`open_at` 포함) · `"close:<label>"` · `"place:<label>"`, 알림 = `"layout"` · `"tabs:<label>"` ·
+/// `"settled"`.
+#[derive(Clone, Default)]
+struct Journal(Arc<Mutex<Vec<String>>>);
+
+impl Journal {
+    fn note(&self, entry: String) {
+        self.0.lock().unwrap().push(entry);
+    }
+
+    /// 지금까지의 기록을 비우며 돌려준다.
+    fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+    }
+}
+
 struct Recorder {
     probe: Probe,
     layout: Mutex<Vec<ViewSnapshot>>,
     tabs: Mutex<Vec<WindowTabsPayload>>,
     /// 알림 · 묶음 끝이 온 차례 — `"layout"` · `"tabs"` · `"settled"`.
     order: Mutex<Vec<&'static str>>,
+    journal: Journal,
 }
 
 impl Recorder {
-    fn new(state: &LayoutState) -> Self {
+    fn new(state: &LayoutState, journal: Journal) -> Self {
         Recorder {
             probe: Probe::new(state),
             layout: Mutex::new(Vec::new()),
             tabs: Mutex::new(Vec::new()),
             order: Mutex::new(Vec::new()),
+            journal,
         }
     }
 
@@ -114,6 +133,7 @@ impl LayoutEvents for Recorder {
         self.probe.assert_outside("LayoutEvents::layout_updated");
         self.layout.lock().unwrap().push(snapshot.clone());
         self.order.lock().unwrap().push("layout");
+        self.journal.note("layout".to_string());
     }
 
     fn window_tabs_updated(&self, tabs: &WindowTabsPayload) {
@@ -121,11 +141,13 @@ impl LayoutEvents for Recorder {
             .assert_outside("LayoutEvents::window_tabs_updated");
         self.tabs.lock().unwrap().push(tabs.clone());
         self.order.lock().unwrap().push("tabs");
+        self.journal.note(format!("tabs:{}", tabs.label));
     }
 
     fn settled(&self) {
         self.probe.assert_outside("LayoutEvents::settled");
         self.order.lock().unwrap().push("settled");
+        self.journal.note("settled".to_string());
     }
 }
 
@@ -181,12 +203,14 @@ struct Host {
     fail_steps: Mutex<Vec<MoveStep>>,
     /// `move_window` 가 세터를 부르기 전 락 밖에서 한 번 — 옮기는 사이 다른 경로가 출처를 바꾼 상태를 세운다.
     during_move: Mutex<Option<DuringOpen>>,
+    journal: Journal,
 }
 
 impl Host {
-    fn new(state: &LayoutState, fail_open: bool) -> Self {
+    fn new(state: &LayoutState, fail_open: bool, journal: Journal) -> Self {
         Host {
             probe: Probe::new(state),
+            journal,
             fail_open,
             opened: Mutex::new(Vec::new()),
             closed: Mutex::new(Vec::new()),
@@ -221,8 +245,15 @@ impl Host {
 }
 
 impl WindowHost for Host {
+    // ★모델에 들기 전이어야 한다★ — 새 창을 여는 세 자리가 모두 창을 먼저 열고 모델에 넣는다(TRD S21-slot-docking §3-9
+    // 「자리별 차례」 · ADR-0299).
     fn open(&self, label: &str) -> Result<(), String> {
         self.probe.assert_outside("WindowHost::open");
+        assert!(
+            !self.probe.0 .0.lock().unwrap().windows.contains_key(label),
+            "open({label}) 은 창이 모델에 들기 전에 불려야 한다"
+        );
+        self.journal.note(format!("open:{label}"));
         if let Some(hook) = self.during_open.lock().unwrap().take() {
             hook(&self.probe.0);
         }
@@ -260,6 +291,7 @@ impl WindowHost for Host {
 
     fn close(&self, label: &str) {
         self.probe.assert_outside("WindowHost::close");
+        self.journal.note(format!("close:{label}"));
         self.closed.lock().unwrap().push(label.to_string());
     }
 
@@ -270,6 +302,7 @@ impl WindowHost for Host {
             self.probe.0 .0.lock().unwrap().windows.contains_key(label),
             "record_placement({label}) 는 창이 모델에 든 뒤에 불려야 한다"
         );
+        self.journal.note(format!("place:{label}"));
         self.placed.lock().unwrap().push(label.to_string());
     }
 
@@ -364,6 +397,8 @@ struct World {
     // 실물 발급기(프로브만 덧씌움) — prefix(`slot-popup-`)는 capabilities/popup.json glob 과 짝이고
     // 단조성은 닫힌 label 재-build 에러를 막는 계약이다.
     labels: Labels,
+    /// `ev` · `host` 가 나눠 쓰는 차례 기록.
+    journal: Journal,
 }
 
 impl World {
@@ -377,14 +412,16 @@ impl World {
 
     fn build(fail_open: bool) -> Self {
         let state = LayoutState::new();
+        let journal = Journal::default();
         World {
             subs: Subs::new(&state),
-            ev: Recorder::new(&state),
-            host: Host::new(&state, fail_open),
+            ev: Recorder::new(&state, journal.clone()),
+            host: Host::new(&state, fail_open, journal.clone()),
             labels: Labels {
                 probe: Probe::new(&state),
                 inner: PopupCounter::default(),
             },
+            journal,
             state,
         }
     }
@@ -562,54 +599,56 @@ fn create_window_registers_model_and_opens_os_window() {
     assert_eq!(w.layout_events() + w.tab_events(), 0);
 }
 
+// TRD S21-slot-docking §8-1 ⑬ — 새로 짓기 차례 `open` → 모델 넣기 → `record_placement`(알림 없음). 모델에 들기 전에
+// 연다는 것은 가짜 `open` 이 스스로 잰다. 넣기가 거절되는 갈래(묘비)는 `commands::popout` 의 셸 단위 시험이 잰다 — 묘비를
+// 다는 함수가 이 crate 에서 닿지 않는다.
 #[test]
-fn create_window_rolls_back_model_when_open_fails() {
+fn create_window_opens_then_inserts_then_records_the_placement() {
+    let w = World::new();
+    *w.host.during_open.lock().unwrap() = Some(Box::new(|state: &LayoutState| {
+        assert!(
+            !state.0.lock().unwrap().windows.contains_key("slot-popup-1"),
+            "여는 동안 모델은 그 창을 모른다"
+        );
+    }));
+
+    let label = apply::create_window(&w.state, &w.subs, &w.host, &w.labels).unwrap();
+
+    assert_eq!(
+        w.journal.take(),
+        [format!("open:{label}"), format!("place:{label}")]
+    );
+    assert_eq!(w.resyncs(), 1, "넣기 한 번");
+}
+
+// 포트 계약 — `open` 이 `Err` 면 떠 있는 창이 없다. 모델은 손대지 않았으니 되돌릴 것도 거둘 창도 없다.
+#[test]
+fn create_window_open_failure_leaves_the_model_untouched() {
     let w = World::failing_host();
+    let version = apply::list_tabs(&w.state, MAIN_WINDOW_LABEL)
+        .unwrap()
+        .version;
+
     let err = apply::create_window(&w.state, &w.subs, &w.host, &w.labels).unwrap_err();
     assert!(err.contains("창 생성 실패"), "err={err}");
 
     let label = w.host.opened.lock().unwrap()[0].clone();
     assert!(
         !apply::list_windows(&w.state).unwrap().contains(&label),
-        "빌드 실패 시 모델 롤백 — 유령 창 금지"
+        "못 연 창은 모델에 들지 않는다 — 유령 창 금지"
     );
-    assert_eq!(w.resyncs(), 2, "생성·롤백 각 1회");
-    assert!(
-        w.host.placed.lock().unwrap().is_empty(),
-        "못 연 창은 적지 않는다"
-    );
-}
-
-/// ★창을 만드는 사이 모델에서 그 창이 지워지면 만든 OS 창을 거둔다★ — 지운 쪽(창 닫기 · 크래시 사본 수락의 화면
-/// 교체)의 OS 창 거두기는 아직 등록 전인 창을 못 찾고 지나간다. 다시 보지 않으면 모델에 없는 OS 창이 남는다.
-#[test]
-fn create_window_closes_the_os_window_when_the_model_dropped_it_during_the_build() {
-    let w = World::new();
-    *w.host.during_open.lock().unwrap() = Some(Box::new(|state: &LayoutState| {
-        state
-            .0
-            .lock()
-            .unwrap()
-            .close_window("slot-popup-1")
-            .expect("만드는 중인 창이 모델에 있다");
-    }));
-
-    let err = apply::create_window(&w.state, &w.subs, &w.host, &w.labels).unwrap_err();
-
-    assert!(err.contains("slot-popup-1"), "err={err}");
-    assert_eq!(&*w.host.opened.lock().unwrap(), &["slot-popup-1"]);
     assert_eq!(
-        &*w.host.closed.lock().unwrap(),
-        &["slot-popup-1"],
-        "만든 OS 창을 거둔다"
+        apply::list_tabs(&w.state, MAIN_WINDOW_LABEL)
+            .unwrap()
+            .version,
+        version
     );
-    assert!(
-        w.host.placed.lock().unwrap().is_empty(),
-        "모델에 없는 창의 자리는 적지 않는다"
+    assert_eq!(w.resyncs(), 0);
+    assert_eq!(
+        w.journal.take(),
+        [format!("open:{label}")],
+        "닫기 · 자리 기록 없음"
     );
-    assert!(!apply::list_windows(&w.state)
-        .unwrap()
-        .contains(&"slot-popup-1".to_string()));
 }
 
 // ★실 `PopupCounter` 를 통과시킨다★: prefix 는 capabilities/popup.json 의 glob 과 짝이고(다른 label 이면
@@ -1241,6 +1280,41 @@ fn move_slot_to_window_notifies_both_windows() {
         sent,
         vec![MAIN_WINDOW_LABEL, moved.window.as_str()],
         "원본 창 → 대상 창 순으로 탭바가 갱신된다"
+    );
+}
+
+// TRD S21-slot-docking §8-1 ⑬ — 새로 짓기 차례 단계 A(임시 View) → `open` → 단계 C → 알림 → `record_placement`. 첫 자리
+// 기록은 알림 뒤다.
+#[test]
+fn move_slot_to_window_into_a_new_window_records_the_placement_after_the_notifications() {
+    let w = World::new();
+    let (view, slot, _) = w.view_with_filled_slot();
+    let views_before = w.view_count();
+    *w.host.during_open.lock().unwrap() = Some(Box::new(move |state: &LayoutState| {
+        assert_eq!(
+            state.0.lock().unwrap().views.len(),
+            views_before + 1,
+            "단계 A 의 임시 View 가 열기 전에 선다"
+        );
+    }));
+    w.journal.take();
+
+    let moved = apply::move_slot_to_window(
+        &w.state, &w.subs, &w.ev, &w.host, &w.labels, view, slot, None,
+    )
+    .unwrap();
+
+    let label = moved.window;
+    assert_eq!(
+        w.journal.take(),
+        [
+            format!("open:{label}"),
+            "layout".to_string(),
+            format!("tabs:{MAIN_WINDOW_LABEL}"),
+            format!("tabs:{label}"),
+            "settled".to_string(),
+            format!("place:{label}"),
+        ]
     );
 }
 
@@ -1934,7 +2008,7 @@ fn set_split_ratio_returns_the_notified_snapshots_version_not_a_later_one() {
     let w = World::new();
     let (view, split) = w.split_view();
     let meddler = Meddler {
-        inner: Recorder::new(&w.state),
+        inner: Recorder::new(&w.state, Journal::default()),
         state: w.state.clone(),
     };
 
@@ -2450,6 +2524,7 @@ impl World {
         h.opened_at.lock().unwrap().clear();
         h.moves.lock().unwrap().clear();
         h.steps.lock().unwrap().clear();
+        self.journal.take();
     }
 
     fn dock(
@@ -3259,6 +3334,19 @@ fn dock_tab_new_window_opens_then_attaches_and_records_the_placement() {
     assert_eq!(w.resyncs(), resyncs + 1);
     assert_eq!(w.notified_views(), [source, first]);
     assert_eq!(w.notified_windows(), [label.as_str(), MAIN_WINDOW_LABEL]);
+    // TRD S21-slot-docking §8-1 ⑬ — `open_at` → `dock` → 알림 → `record_placement`.
+    assert_eq!(
+        w.journal.take(),
+        [
+            format!("open:{label}"),
+            "layout".to_string(),
+            "layout".to_string(),
+            format!("tabs:{label}"),
+            format!("tabs:{MAIN_WINDOW_LABEL}"),
+            "settled".to_string(),
+            format!("place:{label}"),
+        ]
+    );
     w.assert_notified_at_current_version();
     assert_one_batch(&w, "dock_tab(새 창)");
     assert!(!w.lease_held());

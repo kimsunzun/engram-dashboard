@@ -745,8 +745,14 @@ impl ViewManager {
         Ok(id)
     }
 
-    // label 은 호출자(command 레이어)가 발급(D-6).
+    // label 은 호출자(command 레이어)가 발급(D-6). label 에 묘비가 있으면(OS 창을 연 뒤 · 넣기 전에 그 창이 닫힘)
+    // `WindowClosed` — 닫힌 창의 모델 항목을 만들지 않는다(안 보면 OS 창 없는 팝아웃이 `state.json` 에 남아 다음 부팅에
+    // 빈 팝업으로 복원된다 · TRD S21-slot-docking §3-9 「자리별 차례」).
+    // ADR-0299
     pub fn create_window(&mut self, label: &str) -> Result<ViewId, LayoutError> {
+        if self.closed_labels.contains(label) {
+            return Err(LayoutError::WindowClosed(label.to_string()));
+        }
         if self.windows.contains_key(label) {
             return Err(LayoutError::WindowNotFound(label.to_string()));
         }
@@ -1553,8 +1559,8 @@ impl ViewManager {
     }
 
     /// 창 `label` 에 묘비를 단다 — 그 뒤 그 label 로 새 창을 붙이는 [`Self::dock`](`NewWindow`) ·
-    /// [`Self::attach_view_as_new_window`] 는 `WindowClosed`, 그 창으로의 `Seam` · `TabBar` 는 「없음」(`TabNotFound` ·
-    /// `WindowNotFound`)으로 무변경이다. 모델의 창 항목 · `version` 은 손대지 않는다(지우는 것은 부르는 쪽 몫 —
+    /// [`Self::attach_view_as_new_window`] · [`Self::create_window`] 는 `WindowClosed`, 그 창으로의 `Seam` · `TabBar` 는
+    /// 「없음」(`TabNotFound` · `WindowNotFound`)으로 무변경이다. 모델의 창 항목 · `version` 은 손대지 않는다(지우는 것은 부르는 쪽 몫 —
     /// `commands::popout::drop_window_in_model` 이 창을 지우는 같은 락 안에서 부른다).
     pub(crate) fn mark_closed(&mut self, label: &str) {
         self.closed_labels.insert(label.to_string());
@@ -2334,8 +2340,33 @@ mod tests {
     fn create_window_duplicate_label_is_err() {
         let mut mgr = ViewManager::new();
         mgr.create_window("slot-popup-1").unwrap();
-        assert!(mgr.create_window("slot-popup-1").is_err());
-        assert!(mgr.create_window("main").is_err());
+        assert_eq!(
+            mgr.create_window("slot-popup-1"),
+            Err(LayoutError::WindowNotFound("slot-popup-1".into()))
+        );
+        assert_eq!(
+            mgr.create_window(MAIN_WINDOW_LABEL),
+            Err(LayoutError::WindowNotFound(MAIN_WINDOW_LABEL.into()))
+        );
+    }
+
+    // TRD S21-slot-docking §8-1 ⑬ — OS 창을 연 뒤 · 넣기 전에 닫힌 창(묘비)은 모델에 들지 않는다.
+    #[test]
+    fn create_window_refuses_a_tombstoned_label_unchanged() {
+        let mut mgr = ViewManager::new();
+        mgr.mark_closed("slot-popup-1");
+        let before = model(&mgr);
+
+        assert_eq!(
+            mgr.create_window("slot-popup-1"),
+            Err(LayoutError::WindowClosed("slot-popup-1".into()))
+        );
+        assert_eq!(model(&mgr), before);
+        assert!(!mgr.windows.contains_key("slot-popup-1"));
+        assert_invariants(&mgr);
+        // 묘비 없는 label 은 그대로 만든다.
+        mgr.create_window("slot-popup-2").unwrap();
+        assert_invariants(&mgr);
     }
 
     // ── close_tab 상태기계(§5-2) ─────────────────────────────────────────────
