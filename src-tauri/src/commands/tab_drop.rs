@@ -204,7 +204,7 @@ fn read_input(app: &AppHandle, arrival: Arrival, places: bool) -> ReadInput {
 // 점 밑 맨 위 최상위 창 — 우리 웹뷰 창이면 그 label, 아니면 다른 앱(그 창 클래스와 함께), 못 읽으면 `Unknown`.
 // TRD S21-slot-docking §3-2 · §3-5
 fn top_at(app: &AppHandle, at: PhysPoint) -> (TopAt, Option<String>) {
-    let Some(hit) = os::top_level_at(os::PhysPoint { x: at.x, y: at.y }, &[]) else {
+    let Some(hit) = os::top_level_at(os::PhysPoint { x: at.x, y: at.y }) else {
         return (TopAt::Unknown, None);
     };
     let ours = app

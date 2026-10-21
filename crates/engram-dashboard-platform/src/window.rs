@@ -1,15 +1,14 @@
-//! 데스크톱 창의 OS 규칙 — 창 정체 · 자리와 z 순서 · 보임 · 자리 되돌리기 · Alt+Tab 빼기 · 커서 밑 맨 위 창 ·
-//! 창 진단 사실(로그 몫) · 전경 창이 이 프로세스의 것인가.
+//! 데스크톱 창의 OS 규칙 — 창 정체 · 자리와 z 순서 · 보임 · 자리 되돌리기 · 커서 밑 맨 위 창 · 창 진단 사실(로그
+//! 몫) · 전경 창이 이 프로세스의 것인가.
 //!
 //! 창은 `raw-window-handle` 0.6 의 [`HasWindowHandle`] 로 받고 그 핸들의 변이 맞추기(Windows = `Win32` · 그 밖 =
 //! [`WindowError::Unsupported`])를 이 모듈이 한다 — 부르는 쪽이 변이를 맞추면 그것도 이 crate 밖의 런타임 OS
 //! 가름이다(TRD S21-slot-docking §8 · B10). 창을 바꾸는 함수는 날 Win32 호출이라 창 툴킷(tao)의 깃발을 거치지
-//! 않는다 — 툴킷이 아는 보임 · 확장 스타일과 어긋날 수 있다는 것이 부르는 쪽 계약이다(TRD §2-5 「tao 깃발 불변식」).
+//! 않는다 — 툴킷이 아는 보임과 어긋날 수 있다는 것이 부르는 쪽 계약이다(TRD §2-5 「tao 깃발 불변식」).
 //!
-//! ★스레드★ — 창을 바꾸는 함수([`place_window`] · [`hide_window`] · [`move_window`] · [`restore_placement`] ·
-//! [`set_switcher_hidden`])는 그 창을 만든 스레드(메인)에서 부른다. 다른 스레드에서 부르면 Win32 가 그 창
-//! 스레드에 메시지를 보내고 답을 기다린다 — 그 스레드가 부른 쪽을 기다리고 있으면 교착이다. 읽기
-//! ([`NativeWindow::of`] · [`is_window_visible`] · [`top_level_at`] · [`describe_window`] ·
+//! ★스레드★ — 창을 바꾸는 함수([`place_window`] · [`restore_placement`])는 그 창을 만든 스레드(메인)에서
+//! 부른다. 다른 스레드에서 부르면 Win32 가 그 창 스레드에 메시지를 보내고 답을 기다린다 — 그 스레드가 부른 쪽을
+//! 기다리고 있으면 교착이다. 읽기([`NativeWindow::of`] · [`top_level_at`] · [`describe_window`] ·
 //! [`foreground_is_current_process`])는 어느 스레드에서나 된다.
 
 // ADR-0266
@@ -36,8 +35,8 @@ pub struct PhysRect {
     pub height: i32,
 }
 
-/// 창 정체 — 같은 창인가 비교 · [`top_level_at`] 의 건너뛰기 · [`ZOrder::After`] 의 기준에 쓴다. 안은 부르는
-/// 쪽이 모른다(Windows = HWND 값).
+/// 창 정체 — 같은 창인가 비교([`top_level_at`] 의 답) · [`ZOrder::After`] 의 기준에 쓴다. 안은 부르는 쪽이
+/// 모른다(Windows = HWND 값).
 ///
 /// ★창이 사라진 뒤에도 값은 남는다★ — OS 가 같은 값을 새 창에 다시 줄 수 있어, 오래 쥔 값끼리의 같음은 「같은
 /// 창」을 보증하지 않는다.
@@ -110,7 +109,7 @@ fn raw_of(w: &impl HasWindowHandle) -> Result<isize, WindowError> {
 /// 자리 · 크기 · z · 보임 · 활성을 한 번의 `SetWindowPos` 로 입힌다(TRD §8 — 깜빡임 없이 한 번에 놓는다).
 ///
 /// - `rect: None` = 자리 · 크기를 그대로 둔다(제자리 보이기 — `show` 와 함께 쓴다).
-/// - `show` = 거짓이면 보임을 건드리지 않는다(숨기지 않는다 — 숨기기는 [`hide_window`]).
+/// - `show` = 거짓이면 보임을 건드리지 않는다(숨기지 않는다).
 /// - `activate` = 참이면 그 창을 전경으로 청한다 — 활성이 되면 `z` 가 [`ZOrder::Keep`] 이어도 맨 위로 온다.
 ///   ★OS 가 거절하면 그대로 두고 `Ok` 다★ — tao 의
 ///   `force_window_active` 처럼 Alt 를 합성해 전경을 빼앗지 않는다: 끄는 동안 웹뷰의 앱 전체 키 감시가 그 Alt 를
@@ -136,38 +135,7 @@ pub fn place_window(
     }
 }
 
-/// 창을 숨긴다(Win32 `SW_HIDE`). ★포인터 캡처를 쥔 웹뷰의 창에는 부르지 않는다★ — 캡처가 조용히 끊긴다(스파이크
-/// S2). 툴킷의 보임 깃발은 참으로 남는다(모듈 머리).
-///
-/// Windows 밖 = [`WindowError::Unsupported`].
-pub fn hide_window(w: &impl HasWindowHandle) -> Result<(), WindowError> {
-    #[cfg(windows)]
-    {
-        win::hide_window(win::hwnd_of(w)?);
-        Ok(())
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = w;
-        Err(WindowError::Unsupported)
-    }
-}
-
-/// OS 가 보는 그 창의 보임(Win32 `IsWindowVisible`) — 툴킷의 보임 깃발과 대조하는 데 쓴다(TRD §6-1 · F7 c). 창이
-/// 없거나 Windows 밖이면 거짓이다.
-pub fn is_window_visible(w: &impl HasWindowHandle) -> bool {
-    #[cfg(windows)]
-    {
-        win::hwnd_of(w).map(win::is_visible).unwrap_or(false)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = w;
-        false
-    }
-}
-
-/// 화면 점 `p` 를 품은 맨 위 최상위 창 — z 순서 위에서부터 걸으며 `skip` 을 건너뛰고, 보이고 · 최소화 아니고 ·
+/// 화면 점 `p` 를 품은 맨 위 최상위 창 — z 순서 위에서부터 걸으며 보이고 · 최소화 아니고 ·
 /// 가려지지(DWM cloaked — 다른 가상 데스크톱 따위) 않고 · 비쳐 보이는 창이 아닌 첫 창이다. 비쳐 보이는 창 = 클릭이
 /// 지나가는 창(`WS_EX_LAYERED` + `WS_EX_TRANSPARENT` — 모든 창) · 다른 앱의 layered 창 중 창 전체 알파가 0 이거나
 /// 색 키가 있는 창이다. 픽셀마다 알파를 주는 다른 앱 layered 창은 가리는 창으로 친다(판정 = `hit_accepts`). 우리
@@ -178,14 +146,14 @@ pub fn is_window_visible(w: &impl HasWindowHandle) -> bool {
 /// 테두리를 그 창으로 친다. 단 창 모양(`SetWindowRgn`)이 있는 창은 점이 그 모양 안이어야 한다. `None` = 품은 창이
 /// 없다 · Windows 밖.
 // ADR-0295
-pub fn top_level_at(p: PhysPoint, skip: &[NativeWindow]) -> Option<NativeWindow> {
+pub fn top_level_at(p: PhysPoint) -> Option<NativeWindow> {
     #[cfg(windows)]
     {
-        win::top_level_at(p, skip)
+        win::top_level_at(p)
     }
     #[cfg(not(windows))]
     {
-        let _ = (p, skip);
+        let _ = p;
         None
     }
 }
@@ -235,28 +203,13 @@ pub fn describe_window(w: NativeWindow) -> Option<WindowFacts> {
     }
 }
 
-/// 자리만 옮긴다 — 크기 · z · 활성은 그대로(TRD §5-5 두 걸음 놓기 ①).
-///
-/// Windows 밖 = [`WindowError::Unsupported`].
-pub fn move_window(w: &impl HasWindowHandle, origin: PhysPoint) -> Result<(), WindowError> {
-    #[cfg(windows)]
-    {
-        win::move_window(win::hwnd_of(w)?, origin)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (w, origin);
-        Err(WindowError::Unsupported)
-    }
-}
-
 /// 보통 자리 `normal`(★화면 좌표★)과 최대화를 되돌리고(`SetWindowPlacement`), `after` 가 있으면 그 창 바로
 /// 아래로 둔다(TRD §8 · PRD R14).
 ///
 /// - 좌표계 — `WINDOWPLACEMENT` 의 보통 자리는 `WS_EX_TOOLWINDOW` 가 없는 최상위 창이면 작업 공간 좌표(그 모니터
 ///   작업 영역의 왼쪽 위가 0 — 작업 표시줄이 위 · 왼쪽에 있으면 그만큼 밀린다)이고 있으면 화면 좌표다(MS
 ///   `WINDOWPLACEMENT` 문서 · TRD E12). 이 함수가 그 창의 지금 확장 스타일과 `normal` 에 가장 가까운 모니터로 옮겨
-///   넣는다 — 그래서 Alt+Tab 빼기를 되돌린 뒤(`set_switcher_hidden(false)`)에 부른다(TRD §6-2 ②).
+///   넣는다 — 그래서 그 창의 `WS_EX_TOOLWINDOW` 를 바꾸는 일은 이 함수보다 먼저 끝낸다.
 /// - `activate` = 거짓이면 보통 자리는 활성화 없이 보인다(`SW_SHOWNOACTIVATE`). ★`maximized` 는 `activate` 와
 ///   무관하게 `SW_SHOWMAXIMIZED` 다★ — Win32 에 활성화 없이 최대화로 보이는 show 명령이 없다. 그래서 OS 의 전경
 ///   규칙이 허락하면 활성이 된다(미확인 — TRD §12 M6 이 재고, 안 되면 §15-2 S-c).
@@ -278,31 +231,6 @@ pub fn restore_placement(
     #[cfg(not(windows))]
     {
         let _ = (w, normal, maximized, after, activate);
-        Err(WindowError::Unsupported)
-    }
-}
-
-/// Alt+Tab 에서 빼고(`hidden`) 넣는다(TRD §8 · B7 · E2). 뺄 때 `WS_EX_TOOLWINDOW` 를 켜고 `WS_EX_APPWINDOW` 를
-/// 끈다 · 넣을 때 둘 다 되돌린다(+ `SWP_FRAMECHANGED`).
-///
-/// - `WS_EX_APPWINDOW` 도 끄는 까닭 — tao 는 주인 없는 창에 그 비트를 늘 켜고(tao 0.35.3 `window_state.rs` 의
-///   `ON_TASKBAR`), 켜져 있으면 도구 창이어도 작업 표시줄 · Alt+Tab 에 나갈 수 있다(가능성 높음 — TRD §12 M18).
-///   넣을 때 그 비트를 켜는 것도 같은 까닭이다(우리 창은 주인 없는 tao 창이다).
-/// - ★뺀 창에 tao 깃발 setter 를 부르지 않는다★ — tao 는 깃발이 바뀔 때마다 `GWL_EXSTYLE` 을 제 깃발로 통째 다시
-///   써 이 두 비트를 되돌린다(TRD §2-5 「tao 깃발 불변식」).
-/// - 테두리 있는 창은 틀 두께가 바뀐다 — 자리는 이것을 바꾼 뒤에 읽어 셈한다(TRD §5-5 · W-13).
-/// - 작업 표시줄 빼기는 이 함수의 몫이 아니다(tao `skip_taskbar` — `ITaskbarList`).
-///
-/// Windows 밖 = [`WindowError::Unsupported`].
-// ADR-0295
-pub fn set_switcher_hidden(w: &impl HasWindowHandle, hidden: bool) -> Result<(), WindowError> {
-    #[cfg(windows)]
-    {
-        win::set_switcher_hidden(win::hwnd_of(w)?, hidden)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (w, hidden);
         Err(WindowError::Unsupported)
     }
 }
@@ -338,15 +266,6 @@ fn screen_to_workspace(rect: PhysRect, monitor: PhysRect, work: PhysRect) -> Phy
         x: rect.x - (work.x - monitor.x),
         y: rect.y - (work.y - monitor.y),
         ..rect
-    }
-}
-
-/// Alt+Tab 에서 빼고 넣을 때의 확장 스타일(인자 · 결과 = `GWL_EXSTYLE` 값).
-fn switcher_ex_style(ex: u32, hidden: bool, tool_window: u32, app_window: u32) -> u32 {
-    if hidden {
-        (ex | tool_window) & !app_window
-    } else {
-        (ex & !tool_window) | app_window
     }
 }
 
@@ -403,25 +322,23 @@ mod win {
     use windows::Win32::UI::WindowsAndMessaging::{
         GetClassNameW, GetLayeredWindowAttributes, GetTopWindow, GetWindow, GetWindowLongPtrW,
         GetWindowPlacement, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindow,
-        IsWindowVisible, SetForegroundWindow, SetWindowLongPtrW, SetWindowPlacement, SetWindowPos,
-        ShowWindow, GWL_EXSTYLE, GW_HWNDNEXT, HWND_TOP, HWND_TOPMOST,
-        LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA, LWA_COLORKEY, SET_WINDOW_POS_FLAGS,
-        SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
-        SW_HIDE, SW_SHOWMAXIMIZED, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, WINDOWPLACEMENT,
-        WINDOWPLACEMENT_FLAGS, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_LAYOUTRTL, WS_EX_TOOLWINDOW,
-        WS_EX_TRANSPARENT,
+        IsWindowVisible, SetForegroundWindow, SetWindowPlacement, SetWindowPos, GWL_EXSTYLE,
+        GW_HWNDNEXT, HWND_TOP, HWND_TOPMOST, LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA,
+        LWA_COLORKEY, SET_WINDOW_POS_FLAGS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+        SWP_SHOWWINDOW, SW_SHOWMAXIMIZED, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, WINDOWPLACEMENT,
+        WINDOWPLACEMENT_FLAGS, WS_EX_LAYERED, WS_EX_LAYOUTRTL, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
     };
 
     use super::{
-        contains, hit_accepts, raw_of, screen_to_workspace, switcher_ex_style, LayeredKind,
-        NativeWindow, PhysPoint, PhysRect, RegionHit, WindowError, WindowFacts, ZOrder,
+        contains, hit_accepts, raw_of, screen_to_workspace, LayeredKind, NativeWindow, PhysPoint,
+        PhysRect, RegionHit, WindowError, WindowFacts, ZOrder,
     };
 
     /// 최상위 창 z 걷기의 상한 — MS 는 `GetWindow` 로 걸으면 그동안 z 순서가 바뀌어 끝없이 돌 수 있다고 적는다
     /// (`GetWindow` 문서). 한 데스크톱의 최상위 창은 숨은 것까지 수천 개를 넘지 않는다.
     const MAX_Z_WALK: usize = 16_384;
 
-    pub(crate) fn hwnd_of(w: &impl HasWindowHandle) -> Result<HWND, WindowError> {
+    pub(super) fn hwnd_of(w: &impl HasWindowHandle) -> Result<HWND, WindowError> {
         let hwnd = HWND(raw_of(w)? as *mut c_void);
         // SAFETY: 값만 보는 조회다 — 사라진 핸들이면 거짓이다.
         if unsafe { IsWindow(hwnd) }.as_bool() {
@@ -431,7 +348,7 @@ mod win {
         }
     }
 
-    pub(crate) fn native(hwnd: HWND) -> NativeWindow {
+    fn native(hwnd: HWND) -> NativeWindow {
         NativeWindow(hwnd.0 as isize)
     }
 
@@ -488,33 +405,6 @@ mod win {
             let _ = unsafe { SetForegroundWindow(hwnd) };
         }
         Ok(())
-    }
-
-    pub(super) fn hide_window(hwnd: HWND) {
-        // 돌려주는 값은 전의 보임이지 성공 여부가 아니다.
-        // SAFETY: 살아 있는 창 핸들 하나.
-        let _ = unsafe { ShowWindow(hwnd, SW_HIDE) };
-    }
-
-    pub(super) fn is_visible(hwnd: HWND) -> bool {
-        // SAFETY: 값만 보는 조회.
-        unsafe { IsWindowVisible(hwnd) }.as_bool()
-    }
-
-    pub(super) fn move_window(hwnd: HWND, origin: PhysPoint) -> Result<(), WindowError> {
-        // SAFETY: 살아 있는 창 핸들과 값 인자뿐이다.
-        unsafe {
-            SetWindowPos(
-                hwnd,
-                HWND::default(),
-                origin.x,
-                origin.y,
-                0,
-                0,
-                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-            )
-        }
-        .map_err(|e| os("SetWindowPos", e))
     }
 
     fn to_rect(r: RECT) -> PhysRect {
@@ -606,35 +496,6 @@ mod win {
             .map_err(|e| os("SetWindowPos", e))?;
         }
         Ok(())
-    }
-
-    pub(super) fn set_switcher_hidden(hwnd: HWND, hidden: bool) -> Result<(), WindowError> {
-        let ex = ex_style(hwnd)?;
-        let next = switcher_ex_style(ex, hidden, WS_EX_TOOLWINDOW.0, WS_EX_APPWINDOW.0);
-        if next != ex {
-            // SAFETY: 살아 있는 창 핸들. 전 값 0 이 정당할 수 있어 마지막 오류를 지운 뒤 함께 본다(MS 문서).
-            unsafe {
-                SetLastError(WIN32_ERROR(0));
-                let prev = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next as i32 as isize);
-                if prev == 0 && GetLastError().0 != 0 {
-                    return Err(WindowError::Os(io::Error::last_os_error()));
-                }
-            }
-        }
-        // 틀 스타일을 바꾼 뒤 OS 가 틀을 다시 셈하게 한다(MS `SetWindowLongPtr` 문서).
-        // SAFETY: 살아 있는 창 핸들과 값 인자.
-        unsafe {
-            SetWindowPos(
-                hwnd,
-                HWND::default(),
-                0,
-                0,
-                0,
-                0,
-                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-            )
-        }
-        .map_err(|e| os("SetWindowPos", e))
     }
 
     fn cloaked(hwnd: HWND) -> bool {
@@ -771,11 +632,11 @@ mod win {
         })
     }
 
-    pub(super) fn top_level_at(p: PhysPoint, skip: &[NativeWindow]) -> Option<NativeWindow> {
+    pub(super) fn top_level_at(p: PhysPoint) -> Option<NativeWindow> {
         // SAFETY: 인자 없는(null = 바탕) 조회 — 최상위 창 z 순서의 맨 위.
         let mut hwnd = unsafe { GetTopWindow(HWND::default()) }.ok()?;
         for _ in 0..MAX_Z_WALK {
-            if !skip.contains(&native(hwnd)) && candidate(hwnd, p) {
+            if candidate(hwnd, p) {
                 return Some(native(hwnd));
             }
             // SAFETY: 값 조회 — 맨 아래거나 그 사이 사라진 창이면 실패한다.
@@ -784,9 +645,6 @@ mod win {
         None
     }
 }
-
-#[cfg(windows)]
-pub(crate) use win::hwnd_of;
 
 #[cfg(test)]
 mod tests {
@@ -873,23 +731,6 @@ mod tests {
                 height: 600
             }
         );
-    }
-
-    #[test]
-    fn switcher_bits_flip_both_ways() {
-        const TOOL: u32 = 0x80;
-        const APP: u32 = 0x40000;
-        const OTHER: u32 = 0x100;
-        assert_eq!(
-            switcher_ex_style(APP | OTHER, true, TOOL, APP),
-            TOOL | OTHER
-        );
-        assert_eq!(
-            switcher_ex_style(TOOL | OTHER, false, TOOL, APP),
-            APP | OTHER
-        );
-        assert_eq!(switcher_ex_style(TOOL, true, TOOL, APP), TOOL);
-        assert_eq!(switcher_ex_style(0, false, TOOL, APP), APP);
     }
 
     #[test]
@@ -981,11 +822,21 @@ mod tests {
         use windows::core::w;
         use windows::Win32::Foundation::HWND;
         use windows::Win32::UI::WindowsAndMessaging::{
-            CreateWindowExW, DestroyWindow, GetWindowLongPtrW, GetWindowRect, SetWindowPos,
-            ShowWindow, GWL_EXSTYLE, HWND_TOPMOST, SWP_NOACTIVATE, SWP_SHOWWINDOW,
-            SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE, WINDOW_EX_STYLE, WINDOW_STYLE, WS_EX_APPWINDOW,
-            WS_EX_TOOLWINDOW, WS_POPUP,
+            CreateWindowExW, DestroyWindow, GetWindowRect, IsWindowVisible, SetWindowPos,
+            ShowWindow, HWND_TOPMOST, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWMINNOACTIVE,
+            SW_SHOWNOACTIVATE, WINDOW_EX_STYLE, WINDOW_STYLE, WS_EX_TOOLWINDOW, WS_POPUP,
         };
+
+        fn visible(w: &TestWindow) -> bool {
+            // SAFETY: 값만 보는 조회.
+            unsafe { IsWindowVisible(w.hwnd()) }.as_bool()
+        }
+
+        fn hide(w: &TestWindow) {
+            // 돌려주는 값은 전의 보임이지 성공 여부가 아니다.
+            // SAFETY: 이 시험이 쥔 살아 있는 창.
+            let _ = unsafe { ShowWindow(w.hwnd(), SW_HIDE) };
+        }
 
         /// 확장 스타일을 고르는 테두리 없는 도구 창 — [`TestWindow`] 는 확장 스타일을 못 고른다. `rect` 에 늘 위로
         /// 활성 없이 보인다. 버리면 부순다.
@@ -1053,7 +904,7 @@ mod tests {
         #[test]
         fn place_window_moves_sizes_and_shows_without_activation() {
             let w = TestWindow::new(true);
-            assert!(!is_window_visible(&w));
+            assert!(!visible(&w));
             let rect = PhysRect {
                 x: -21000,
                 y: -21000,
@@ -1061,7 +912,7 @@ mod tests {
                 height: 200,
             };
             place_window(&w, Some(rect), ZOrder::Top, true, false).unwrap();
-            assert!(is_window_visible(&w));
+            assert!(visible(&w));
             assert_eq!(w.outer(), rect);
         }
 
@@ -1075,42 +926,10 @@ mod tests {
                 height: 180,
             };
             place_window(&w, Some(rect), ZOrder::Keep, false, false).unwrap();
-            assert!(!is_window_visible(&w), "show 거짓이면 보이지 않는다");
+            assert!(!visible(&w), "show 거짓이면 보이지 않는다");
             place_window(&w, None, ZOrder::Keep, true, false).unwrap();
-            assert!(is_window_visible(&w));
+            assert!(visible(&w));
             assert_eq!(w.outer(), rect);
-        }
-
-        #[test]
-        fn hide_and_move_keep_the_rest() {
-            let w = TestWindow::new(true);
-            let rect = PhysRect {
-                x: -22000,
-                y: -22000,
-                width: 260,
-                height: 140,
-            };
-            place_window(&w, Some(rect), ZOrder::Keep, true, false).unwrap();
-            move_window(
-                &w,
-                PhysPoint {
-                    x: -22100,
-                    y: -22050,
-                },
-            )
-            .unwrap();
-            assert_eq!(
-                w.outer(),
-                PhysRect {
-                    x: -22100,
-                    y: -22050,
-                    width: 260,
-                    height: 140
-                }
-            );
-            assert!(is_window_visible(&w));
-            hide_window(&w).unwrap();
-            assert!(!is_window_visible(&w));
         }
 
         #[test]
@@ -1118,31 +937,18 @@ mod tests {
             let w = TestWindow::new(true);
             let gone = w.handle_only();
             drop(w);
-            assert!(matches!(hide_window(&gone), Err(WindowError::NoWindow)));
             assert!(matches!(
-                move_window(&gone, PhysPoint::default()),
+                place_window(&gone, None, ZOrder::Keep, true, false),
                 Err(WindowError::NoWindow)
             ));
-            assert!(!is_window_visible(&gone));
+            assert!(matches!(
+                restore_placement(&gone, PhysRect::default(), false, None, false),
+                Err(WindowError::NoWindow)
+            ));
         }
 
         #[test]
-        fn switcher_hidden_flips_tool_and_app_bits() {
-            let w = TestWindow::new(false);
-            set_switcher_hidden(&w, true).unwrap();
-            // SAFETY: 이 시험이 쥔 살아 있는 창.
-            let ex = unsafe { GetWindowLongPtrW(w.hwnd(), GWL_EXSTYLE) } as u32;
-            assert_ne!(ex & WS_EX_TOOLWINDOW.0, 0);
-            assert_eq!(ex & WS_EX_APPWINDOW.0, 0);
-            set_switcher_hidden(&w, false).unwrap();
-            // SAFETY: 위와 같다.
-            let ex = unsafe { GetWindowLongPtrW(w.hwnd(), GWL_EXSTYLE) } as u32;
-            assert_eq!(ex & WS_EX_TOOLWINDOW.0, 0);
-            assert_ne!(ex & WS_EX_APPWINDOW.0, 0);
-        }
-
-        #[test]
-        fn top_level_at_skips_listed_hidden_and_minimized_windows() {
+        fn top_level_at_skips_hidden_and_minimized_windows() {
             let below = TestWindow::new(true);
             let above = TestWindow::new(true);
             let rect = PhysRect {
@@ -1161,16 +967,14 @@ mod tests {
                 NativeWindow::of(&above).unwrap(),
                 NativeWindow::of(&below).unwrap(),
             );
-            assert_eq!(top_level_at(p, &[]), Some(a));
-            assert_eq!(top_level_at(p, &[a]), Some(b));
-            assert_eq!(top_level_at(p, &[a, b]), None);
+            assert_eq!(top_level_at(p), Some(a));
             let right_edge = PhysPoint {
                 x: rect.x + rect.width,
                 y: p.y,
             };
-            assert_eq!(top_level_at(right_edge, &[]), None, "오른쪽 변은 밖이다");
-            hide_window(&above).unwrap();
-            assert_eq!(top_level_at(p, &[]), Some(b), "숨은 창은 대상이 아니다");
+            assert_eq!(top_level_at(right_edge), None, "오른쪽 변은 밖이다");
+            hide(&above);
+            assert_eq!(top_level_at(p), Some(b), "숨은 창은 대상이 아니다");
             // SAFETY: 이 시험이 쥔 살아 있는 창 — 활성 없이 최소화한다.
             unsafe {
                 let _ = ShowWindow(below.hwnd(), SW_SHOWMINNOACTIVE);
@@ -1183,7 +987,7 @@ mod tests {
                 y: r.top,
             };
             assert_ne!(
-                top_level_at(in_icon, &[]),
+                top_level_at(in_icon),
                 Some(b),
                 "최소화된 창은 대상이 아니다"
             );
@@ -1191,7 +995,7 @@ mod tests {
             unsafe {
                 let _ = ShowWindow(above.hwnd(), SW_SHOWNOACTIVATE);
             }
-            assert_eq!(top_level_at(p, &[]), Some(a));
+            assert_eq!(top_level_at(p), Some(a));
         }
 
         #[test]
@@ -1225,8 +1029,8 @@ mod tests {
                 x: rect.x + 150,
                 y: rect.y + 150,
             };
-            assert_eq!(top_level_at(inside, &[]), Some(a), "모양 안");
-            assert_eq!(top_level_at(outside, &[]), Some(b), "모양 밖이면 밑 창");
+            assert_eq!(top_level_at(inside), Some(a), "모양 안");
+            assert_eq!(top_level_at(outside), Some(b), "모양 밖이면 밑 창");
             let facts = describe_window(a).unwrap();
             assert!(facts.has_region);
             assert_eq!(facts.pid, std::process::id());
@@ -1266,7 +1070,7 @@ mod tests {
                     let os_hit = unsafe { WindowFromPoint(POINT { x: p.x, y: p.y }) } == w.0;
                     assert_eq!(os_hit, want, "OS 적중 판정 rtl={rtl} dx={dx}");
                     assert_eq!(
-                        top_level_at(p, &[]) == Some(w.native()),
+                        top_level_at(p) == Some(w.native()),
                         want,
                         "rtl={rtl} dx={dx}"
                     );
@@ -1292,7 +1096,7 @@ mod tests {
             // SAFETY: 값 인자 조회.
             let os_hit = unsafe { WindowFromPoint(POINT { x: p.x, y: p.y }) } == w.0;
             assert!(os_hit, "OS 적중 판정");
-            assert_eq!(top_level_at(p, &[]), Some(w.native()));
+            assert_eq!(top_level_at(p), Some(w.native()));
         }
 
         #[test]
@@ -1346,7 +1150,7 @@ mod tests {
                 x: rect.x + 10,
                 y: rect.y + 10,
             };
-            assert_eq!(top_level_at(p, &[]), Some(w.native()));
+            assert_eq!(top_level_at(p), Some(w.native()));
         }
 
         /// 보통(도구 아닌) 창을 화면 안에 보이므로 보는 사람 화면에 잠깐 나온다 — 데스크톱 세션에서 손으로 돌린다.
@@ -1361,9 +1165,9 @@ mod tests {
                 height: 300,
             };
             restore_placement(&w, normal, false, None, false).unwrap();
-            assert!(is_window_visible(&w));
+            assert!(visible(&w));
             assert_eq!(w.outer(), normal);
-            hide_window(&w).unwrap();
+            hide(&w);
         }
     }
 }

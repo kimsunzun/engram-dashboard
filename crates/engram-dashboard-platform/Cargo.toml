@@ -19,7 +19,7 @@ test-support = []
 # 돌려줄 곳이 없는 실패(`Drop`)만 직접 찍는다(ADR-0266 결정 9 · ADR-0268) — 예: `file_holders` 의 Restart
 #   Manager 세션 닫기. facade 뿐이라 base 를 끌지 않는다.
 tracing = "0.1"
-# 창을 받는 함수(`window` · `move_loop`)의 인자 꼴 — `&impl HasWindowHandle` 를 받아 핸들 변이 맞추기(Windows =
+# 창을 받는 함수(`window`)의 인자 꼴 — `&impl HasWindowHandle` 를 받아 핸들 변이 맞추기(Windows =
 #   `Win32`)를 이 crate 안에서 한다(TRD S21-slot-docking §8 · B10). 부르는 쪽은 Tauri 창을 그대로 넘기므로 이
 #   crate 를 의존하지 않는다. Tauri 가 이미 끄는 같은 판이라 `Cargo.lock` 에 새 패키지가 없다.
 raw-window-handle = "0.6"
@@ -47,17 +47,12 @@ raw-window-handle = "0.6"
 #   ★`Win32_System_Variant` 는 켜지 않는다★ — 그 코드가 쓰는 `VARIANT` 는 windows-core 의 것이고, 0.58 의 Wmi
 #   바인딩은 그 feature 를 요구하지 않는다(이 crate 단독 빌드로 확인).
 # `Win32_UI_WindowsAndMessaging` = `window` 몫 — 전경 창과 그 창을 만든 스레드의 PID(`GetForegroundWindow` ·
-#   `GetWindowThreadProcessId`). 셸이 런타임 복원 수락 끝에 main 에 포커스를 줄지 가른다. 탭 끌기(TRD
-#   S21-slot-docking §8)의 창 놓기 · z 순서 · 자리 되돌리기 · Alt+Tab 빼기 · 커서 밑 창 · 커서(`window` · `input`)와
-#   이동 루프의 시작 · 끝 · 스레드 훅(`move_loop`)도 이 feature 뒤다.
-# `Win32_UI_Shell` = `move_loop` 의 창 서브클래스(`SetWindowSubclass` · `DefSubclassProc` · `RemoveWindowSubclass`) —
-#   루프의 `SC_MOVE` 도착 · 들어감 · 끝 · 창 소멸을 그 창의 메시지에서 본다.
-# `Win32_UI_Input_KeyboardAndMouse` = `move_loop` 의 캡처 풀기(`ReleaseCapture`) · Esc 키 번호와 `input` 의 버튼
-#   상태(`GetAsyncKeyState`).
-# `Win32_Graphics_Dwm` = `move_loop` 의 Esc 훅이 끄는 창 전환 애니메이션(`DWMWA_TRANSITIONS_FORCEDISABLED`)과
-#   `window::top_level_at` 의 가려진 창 판정(`DWMWA_CLOAKED`).
-# `Win32_Graphics_Gdi` = `window::restore_placement` 의 모니터 작업 영역(`MonitorFromRect` · `GetMonitorInfoW`) —
-#   화면 좌표를 작업 공간 좌표로 옮긴다.
+#   `GetWindowThreadProcessId`). 셸이 런타임 복원 수락 끝에 main 에 포커스를 줄지 가른다. 창 놓기 · z 순서 · 자리
+#   되돌리기 · 커서 밑 창 · 창 진단(`window`)과 커서 · 단추 바꿈(`input`)도 이 feature 뒤다.
+# `Win32_UI_Input_KeyboardAndMouse` = `input` 의 주 버튼 · Esc 상태(`GetAsyncKeyState`).
+# `Win32_Graphics_Dwm` = `window::top_level_at` 의 가려진 창 판정(`DWMWA_CLOAKED`).
+# `Win32_Graphics_Gdi` = `window::restore_placement` 의 모니터 작업 영역(`MonitorFromRect` · `GetMonitorInfoW` —
+#   화면 좌표를 작업 공간 좌표로 옮긴다)과 `window::top_level_at` 의 창 모양(`GetWindowRgn` · `PtInRegion`).
 # ★기능별 cargo feature 로 쪼개지 않는다★ — 이 의존 하나에 쓰는 바인딩 feature 의 합집합을 켠다(ADR-0275
 #   결정 13). 모듈을 옮겨 올 때 그 모듈이 쓰는 feature 를 여기 더한다.
 [target.'cfg(windows)'.dependencies]
@@ -74,7 +69,6 @@ windows = { version = "0.58", features = [
     "Win32_System_Wmi",
     "Win32_System_Rpc",
     "Win32_UI_WindowsAndMessaging",
-    "Win32_UI_Shell",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",

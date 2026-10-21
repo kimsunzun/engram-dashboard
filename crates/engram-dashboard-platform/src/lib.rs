@@ -8,7 +8,7 @@
 //! 운영 OS 분기는 없다(ADR-0291 이 ADR-0275 결정 15 의 시한부 예외를 닫았다). `cfg` 없이 런타임에 OS 규칙을
 //! 쓰는 자리는 이 셈에 들지 않는다(④ 의 한계).
 //!
-//! 지금 입주자는 열이다 — [`process`](PID liveness · 프로세스 시작시각과 그 세 갈래 판정 · 프로세스 표 ·
+//! 지금 입주자는 아홉이다 — [`process`](PID liveness · 프로세스 시작시각과 그 세 갈래 판정 · 프로세스 표 ·
 //! 자식 PID 열거 · 한 뿌리 아래 신원 목록 · 한 프로세스 트리 끄기 — Windows `taskkill`) · [`group`](프로세스
 //! 무리의 강한 주인 · 약한 손잡이 · 붙든 멤버 · 가입 알림 포트 — Windows Job Object) ·
 //! [`file_holders`](이 파일을 지금 연 프로세스 — Restart Manager) ·
@@ -18,9 +18,9 @@
 //! 깨우기 · 실패한 셸의 「프로그램 없음」 판정 · 이 프로세스의 Job 밖에서 띄우기 — Windows = WMI) ·
 //! [`shell`](대화형 기본 셸 · CLI 를 콘솔 셸로 감싸기) ·
 //! [`env`](홈 디렉터리 · 실행 파일 이름 · 지금 실행 파일 옆 실행 파일 경로 · 환경변수 이름 비교) ·
-//! [`window`](창 정체 · 자리와 z 순서 한 번에 놓기 · 숨기기 · 자리 되돌리기 · Alt+Tab 빼기 · 커서 밑 맨 위 창 · 창 진단
-//! 사실 · 전경 창이 이 프로세스의 것인가) · [`move_loop`](창 이동 루프 — Windows = 올린 시작 신호가 닿으면 보내는 `SC_MOVE` 와
-//! 그 동안의 스레드 훅 · 끝 알림 정확히 한 번) · [`input`](커서 자리 · 주 버튼 상태). 모듈 헤더와 공개 함수 문서가 그 책임의 정본이다.
+//! [`window`](창 정체 · 자리와 z 순서 한 번에 놓기 · 자리 되돌리기 · 커서 밑 맨 위 창 — 탭 놓기 끝 판정 · 창 진단
+//! 사실 · 전경 창이 이 프로세스의 것인가) · [`input`](커서 자리 · 주 버튼 · Esc 상태). 모듈 헤더와 공개 함수 문서가 그
+//! 책임의 정본이다.
 //! 창을 받는 함수는 `raw-window-handle` 의 `HasWindowHandle` 를 받고 그 변이 맞추기도 여기서 한다(TRD
 //! S21-slot-docking §8 · B10).
 //!
@@ -44,13 +44,10 @@
 //!    로 가른 그 갈래는 여기서도 컴파일 검증을 받지 않는다★ — 개발 · CI 가 Windows 뿐이다(ADR-0230 현황).
 //!    `cfg!(windows)` 로 가른 갈래(`env::env_key_eq` · `fs` 의 실패 분류 셋)는 양쪽 다 타입 검사를 받지만 그
 //!    밖의 OS 에서 돌려 본 적은 없다.
-//! 4. **로그는 결과를 돌려줄 길이 없는 경로에서만 찍는다**(TRD 1-3 §3-7 —
-//!    `docs/process/S21-crate-boundaries/trd-1-3-platform-crate.md`) — 셋이다: `Drop` · OS 가 부르는 창 프로시저와
-//!    훅(그 안의 실패 · 끝 까닭은 돌려줄 호출자가 없다) · `move_loop` 의 수명 줄(시작 · 들어감 · 끝
-//!    까닭 · 들어가기 전 끝냄 · 훅 설치 실패 — TRD S21-slot-docking §10 「platform 루프」 줄이 정한 계측이다. 시작
-//!    줄은 돌려줄 길이 있는 `begin_move_loop` 안에서도 찍는다). 나머지 실패는 값으로 돌려주고 부르는 쪽이 자기
-//!    문구로 찍는다 — 도메인 낱말을 이 crate 의 로그로 가져오지 않는다(규칙 1). 찍을 때는 `tracing` facade 를 직접 부른다(ADR-0266 결정 9 · ADR-0268) — 로그 때문에 base 를
-//!    끌지 않는다.
+//! 4. **로그는 결과를 돌려줄 길이 없는 경로(`Drop`)에서만 찍는다**(TRD 1-3 §3-7 —
+//!    `docs/process/S21-crate-boundaries/trd-1-3-platform-crate.md`). 나머지 실패는 값으로 돌려주고 부르는
+//!    쪽이 자기 문구로 찍는다 — 도메인 낱말을 이 crate 의 로그로 가져오지 않는다(규칙 1). 찍을 때는
+//!    `tracing` facade 를 직접 부른다(ADR-0266 결정 9 · ADR-0268) — 로그 때문에 base 를 끌지 않는다.
 //!
 //! ## 의존 (불변)
 //!
@@ -210,7 +207,6 @@ pub mod file_holders;
 pub mod fs;
 pub mod group;
 pub mod input;
-pub mod move_loop;
 pub mod process;
 pub mod shell;
 pub mod spawn;
