@@ -216,8 +216,7 @@ impl WindowAttrs {
 }
 
 /// 창 하나의 바로 앞 읽기 기억 — 그 읽기가 보통 자리를 적었으면 (적은 자리, 그 앞 자리). 쓰는 곳은
-/// [`WindowAttrs::observe`] 뿐이고 다음 읽기가 늘 지운다. 영속하지 않는다 — 창 항목과 같이 살고, 도킹이 비워 지운
-/// 창 항목은 [`WindowSeed`] 에 실려 되살 때 함께 돌아온다.
+/// [`WindowAttrs::observe`] 뿐이고 다음 읽기가 늘 지운다. 영속하지 않는다 — 창 항목과 같이 산다.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub(crate) struct PlacementMemo {
     last: Option<(WindowBounds, Option<WindowBounds>)>,
@@ -243,8 +242,7 @@ pub struct WindowTabs {
 }
 
 impl WindowTabs {
-    // 새 창 엔트리는 전부 여기서 만든다 — 측정값은 그 창 웹뷰가 보고할 때까지 비어 있어야 한다. 예외는 모델 밖에서
-    // 이미 보고를 받아 둔 창을 들일 때뿐이다(`with_measures` — 웹뷰는 같은 값을 다시 보내지 않는다).
+    // 새 창 엔트리는 전부 여기서 만든다 — 측정값은 그 창 웹뷰가 보고할 때까지 비어 있어야 한다.
     fn new(window_id: String, attrs: WindowAttrs, tabs: Vec<ViewId>, active: ViewId) -> Self {
         WindowTabs {
             tabs,
@@ -264,35 +262,6 @@ impl WindowTabs {
             vec![view],
             view,
         )
-    }
-
-    fn popout_from(view: ViewId, seed: Option<WindowSeed>) -> Self {
-        match seed {
-            Some(WindowSeed {
-                window_id,
-                attrs,
-                placement_memo,
-            }) => Self {
-                placement_memo,
-                ..Self::new(window_id, attrs, vec![view], view)
-            },
-            None => Self::new_popout(view),
-        }
-    }
-
-    // ADR-0295
-    fn with_measures(mut self, measures: FrameMeasures) -> Self {
-        let FrameMeasures { canvas, metrics } = measures;
-        self.canvas = canvas;
-        self.metrics = metrics;
-        self
-    }
-
-    fn measures(&self) -> FrameMeasures {
-        FrameMeasures {
-            canvas: self.canvas,
-            metrics: self.metrics,
-        }
     }
 }
 
@@ -330,15 +299,6 @@ pub struct ViewManager {
     // 동안 「점유」다. 프론트로 나가지 않는다 — 스냅숏은 슬롯 id 만 싣는다(`foreign_slots`). 뷰로 먼저 가르는
     // 이유: 탭이 다른 창으로 옮겨도 그대로 따라가고, 뷰를 지울 때 한 번에 거둔다.
     unknown_content: HashMap<ViewId, HashMap<Uuid, Map<String, Value>>>,
-    // 뷰마다 판 번호(`ViewSnapshot::layout_rev`). 적는 곳은 `insert_view` · `edit_layout`(만들기는 `unbumped_revs` 가
-    // 내린다), 지우는 곳은 `remove_view` 뿐이다. 영속하지 않는다 — 영속 · `PartialEq` 인 `View` 에 넣지 않는 이유다.
-    // TRD S21-slot-docking §3-7
-    layout_revs: HashMap<ViewId, u64>,
-    // 끄는 중인 탭(표식, 탭) — 한 번에 하나. 모델 안에 두는 이유: 「끄는 중인 탭을 옮기는 명령은 실패」 판정이 그
-    // 명령의 변경과 같은 락 안에서 서야 한다(TRD S21-slot-docking §1-2 「표식」). 저장하지 않는다.
-    lease: Option<(LeaseId, ViewId)>,
-    // 마지막으로 발급한 표식 번호 — 한 부팅 안에서 같은 번호를 다시 내지 않는다.
-    lease_seq: u64,
     // 닫힌 창 label 의 묘비. 팝아웃 label 은 한 부팅 안에서 다시 쓰이지 않으므로 늘기만 한다. 저장하지 않는다.
     closed_labels: HashSet<WindowLabel>,
 }
@@ -365,7 +325,6 @@ impl ViewManager {
                 v0,
             ),
         );
-        mgr.unbumped_revs();
         mgr
     }
 
@@ -412,17 +371,7 @@ impl ViewManager {
             mgr.windows
                 .insert(label, WindowTabs::new(window_id, attrs, tabs, active));
         }
-        mgr.unbumped_revs();
         Ok(mgr)
-    }
-
-    // 만들기는 `version` 을 올리지 않는다 — 들인 뷰의 판 번호를 지금 `version` 으로 내린다. 안 내리면 첫 쓰기가 적는
-    // 값(`next_version`)이 만들 때 적은 값과 같아 그 쓰기를 못 본다.
-    fn unbumped_revs(&mut self) {
-        let now = self.version;
-        for rev in self.layout_revs.values_mut() {
-            *rev = now;
-        }
     }
 
     // 창이 하나도 없는 모델 — 불변식 4 가 아직 안 선다. 만드는 쪽이 main 을 세운다.
@@ -434,9 +383,6 @@ impl ViewManager {
             version: 0,
             attrs_rev: 0,
             unknown_content: HashMap::new(),
-            layout_revs: HashMap::new(),
-            lease: None,
-            lease_seq: 0,
             closed_labels: HashSet::new(),
         }
     }
@@ -463,7 +409,7 @@ impl ViewManager {
             }
             Self::fixup_focus(&mut view);
             self.view_owner.insert(view.id, label.to_string());
-            self.insert_view(view);
+            self.views.insert(view.id, view);
         }
         Ok((ids, active))
     }
@@ -515,16 +461,7 @@ impl ViewManager {
             ratio_min: tree::RATIO_MIN,
             ratio_max: tree::RATIO_MAX,
             version: self.version,
-            layout_rev: self.layout_revs.get(&view_id).copied().unwrap_or(0),
         })
-    }
-
-    /// 뷰 `view` 의 판 번호 — 스냅숏의 `layout_rev` 와 같은 값이다. 없는 뷰면 `None`.
-    // TRD S21-slot-docking §3-7
-    pub fn layout_rev(&self, view: ViewId) -> Option<u64> {
-        self.views
-            .contains_key(&view)
-            .then(|| self.layout_revs.get(&view).copied().unwrap_or(0))
     }
 
     pub fn slot_agent(&self, view_id: Uuid, slot_id: Uuid) -> Result<Option<String>, LayoutError> {
@@ -633,38 +570,6 @@ impl ViewManager {
 
     // ── 내부 헬퍼 ───────────────────────────────────────────────────────────
 
-    // 지금 쓰기가 낼 `version` — 쓰기마다 끝에서 `bump_version` 을 한 번 부르므로 이 값이 그 쓰기의 알림에 실린다. 판
-    // 번호를 이 값으로 적어 같은 뷰의 판 번호가 늘기만 한다(복원이 같은 id 의 뷰를 다시 들여도 앞 값과 겹치지 않는다).
-    fn next_version(&self) -> u64 {
-        self.version + 1
-    }
-
-    // 뷰를 `views` 에 들이는 유일한 문 — 판 번호를 함께 적는다.
-    // TRD S21-slot-docking §3-7
-    fn insert_view(&mut self, view: View) {
-        self.layout_revs.insert(view.id, self.next_version());
-        self.views.insert(view.id, view);
-    }
-
-    // 뷰 레이아웃 칸(트리 · 비율 · 슬롯 내용)을 바꾸는 유일한 문 — `edit` 가 바꿨다고 답하면(`Some`) 그 뷰의 판 번호를
-    // 함께 적는다. `None` 이면 아무것도 바꾸지 않았어야 한다. 포커스는 같은 손에서 바꿔도 된다. 없는 view 는
-    // `ViewNotFound`.
-    // ★레이아웃 칸을 이 밖에서 쓰지 말 것★ — `views` · `View::layout` 이 공개라 컴파일러가 막지 못한다. 그물 = 시험
-    //   `each_layout_write_moves_the_layout_rev_and_nothing_else_does`.
-    // TRD S21-slot-docking §3-7
-    fn edit_layout<R>(
-        &mut self,
-        view_id: ViewId,
-        edit: impl FnOnce(&mut View) -> Option<R>,
-    ) -> Result<Option<R>, LayoutError> {
-        let rev = self.next_version();
-        let out = edit(self.view_mut(view_id)?);
-        if out.is_some() {
-            self.layout_revs.insert(view_id, rev);
-        }
-        Ok(out)
-    }
-
     // 슬롯 내용 쓰기의 유일한 문 — 모르는 내용 항목을 지운다(무엇을 쓰든, `Empty` 여도). version 은 호출자가 올린다.
     fn write_slot_content(
         &mut self,
@@ -672,10 +577,8 @@ impl ViewManager {
         slot_id: Uuid,
         content: SlotContent,
     ) -> Result<(), LayoutError> {
-        let written = self.edit_layout(view_id, |v| {
-            tree::set_in_tree(&mut v.layout, slot_id, content).then_some(())
-        })?;
-        if written.is_none() {
+        let v = self.view_mut(view_id)?;
+        if !tree::set_in_tree(&mut v.layout, slot_id, content) {
             return Err(LayoutError::SlotNotFound(slot_id));
         }
         self.forget_unknown(view_id, slot_id);
@@ -698,17 +601,11 @@ impl ViewManager {
         }
     }
 
-    // 뷰를 지우는 유일한 자리. 창 탭 목록(`windows[*].tabs`)은 호출자가 맞춘다(불변식 1). 그 뷰의 끌기 표식도
-    // 여기서 내린다 — 끄던 탭이 닫혀도 다음 끌기가 막히지 않는다(늦게 온 놓기는 `StaleLease`). 이음새 도킹이
-    // 출처를 지울 때는 그 표식이 요청의 표식이라(판정 5) 성공 뒤의 `release_held` 와 같은 결과다.
+    // 뷰를 지우는 유일한 자리. 창 탭 목록(`windows[*].tabs`)은 호출자가 맞춘다(불변식 1).
     fn remove_view(&mut self, view: ViewId) {
         self.views.remove(&view);
         self.view_owner.remove(&view);
         self.unknown_content.remove(&view);
-        self.layout_revs.remove(&view);
-        if matches!(self.lease, Some((_, leased)) if leased == view) {
-            self.lease = None;
-        }
     }
 
     // 소유/창 배정은 호출자.
@@ -716,12 +613,15 @@ impl ViewManager {
         let id = Uuid::new_v4();
         let first_slot = LayoutNode::new_empty_slot();
         let focus = tree::first_slot_id(&first_slot);
-        self.insert_view(View {
+        self.views.insert(
             id,
-            name,
-            layout: first_slot,
-            focused_slot_id: Some(focus),
-        });
+            View {
+                id,
+                name,
+                layout: first_slot,
+                focused_slot_id: Some(focus),
+            },
+        );
         id
     }
 
@@ -814,7 +714,7 @@ impl ViewManager {
         self.remove_view(view);
         let outcome = match self.pull_tab(label, view, None) {
             Pulled::Stayed => CloseTabOutcome::Stayed,
-            Pulled::PopoutRemoved(_) => CloseTabOutcome::WindowClosed,
+            Pulled::PopoutRemoved => CloseTabOutcome::WindowClosed,
             Pulled::MainEmptied => {
                 self.refill_main();
                 CloseTabOutcome::Stayed
@@ -825,7 +725,7 @@ impl ViewManager {
     }
 
     // 창 `label` 의 탭 목록에서 `view` 를 뺀다 — 활성이었으면 `successor` 가 남은 탭이면 그것을, 아니면 `succession`
-    // 으로 승계하고, 팝아웃이 비면 창 항목째 지워 돌려준다(ADR-0057 D-3). View · `view_owner` · version 은 부르는
+    // 으로 승계하고, 팝아웃이 비면 창 항목째 지운다(ADR-0057 D-3). View · `view_owner` · version 은 부르는
     // 쪽 몫이다. `MainEmptied` 면 main 이 빈 목록으로 남아 있다 — 부르는 쪽이 같은 연산 안에서 `refill_main` 으로
     // 채운다(불변식 4). 목록에 없으면 무동작 `Stayed`.
     // ADR-0057
@@ -849,10 +749,8 @@ impl ViewManager {
         } else if label == MAIN_WINDOW_LABEL {
             Pulled::MainEmptied
         } else {
-            match self.windows.remove(label) {
-                Some(entry) => Pulled::PopoutRemoved(Box::new(entry)),
-                None => Pulled::Stayed,
-            }
+            self.windows.remove(label);
+            Pulled::PopoutRemoved
         }
     }
 
@@ -899,10 +797,7 @@ impl ViewManager {
         slot_id: Uuid,
         dir: SplitDir,
     ) -> Result<Uuid, LayoutError> {
-        let v = self
-            .views
-            .get(&view_id)
-            .ok_or(LayoutError::ViewNotFound(view_id))?;
+        let v = self.view_mut(view_id)?;
         // 표현 가능성 가드: 늘 같은 쪽 자식을 나누면 새 경계가 부모 끝과 비트 단위로 같아져 한쪽 칸의 폭이
         // 0 이 된다. 새 경계를 실제 기하와 같은 식·같은 비율로 미리 재서 칸 안에 엄격히 들 때만 나눈다.
         // 이미 면적 0 인 칸(쓰기 경로로는 안 생기고 심긴 트리에만 있다)은 축과 무관하게 거절한다 — 다른 축으로
@@ -923,13 +818,9 @@ impl ViewManager {
                 return Err(LayoutError::SplitTooDeep);
             }
         }
-        let split = self.edit_layout(view_id, |v| {
-            let new_id = tree::split_in_tree(&mut v.layout, slot_id, dir)?;
-            v.focused_slot_id = Some(new_id);
-            Some(new_id)
-        })?;
-        match split {
+        match tree::split_in_tree(&mut v.layout, slot_id, dir) {
             Some(new_id) => {
+                v.focused_slot_id = Some(new_id);
                 self.bump_version();
                 Ok(new_id)
             }
@@ -1016,10 +907,7 @@ impl ViewManager {
                 outcome: SplitRatioOutcome::Unchanged,
             });
         }
-        self.edit_layout(view_id, |v| {
-            v.layout = candidate;
-            Some(())
-        })?;
+        self.view_mut(view_id)?.layout = candidate;
         self.bump_version();
         Ok(SplitRatioResult {
             ratio: wanted,
@@ -1064,12 +952,11 @@ impl ViewManager {
     }
 
     pub fn close_slot(&mut self, view_id: Uuid, slot_id: Uuid) -> Result<(), LayoutError> {
-        let closed = self.edit_layout(view_id, |v| {
-            tree::close_in_tree(&mut v.layout, slot_id).then(|| Self::fixup_focus(v))
-        })?;
-        if closed.is_none() {
+        let v = self.view_mut(view_id)?;
+        if !tree::close_in_tree(&mut v.layout, slot_id) {
             return Err(LayoutError::SlotNotFound(slot_id));
         }
+        Self::fixup_focus(v);
         self.forget_unknown(view_id, slot_id);
         self.bump_version();
         Ok(())
@@ -1218,11 +1105,10 @@ impl ViewManager {
     /// 탭 `view` 를 `to` 로 옮긴다. 성공이면 출처 창에서 빼기 · 대상에 넣기 · 빈 팝아웃 항목 지우기 · 모르는 내용
     /// 곁표 옮기기가 이 한 번에 일어나고 `version` 이 한 번 오른다 — 단 같은 창 같은 자리의 `TabBar` 는 무변경
     /// `Ok`(`version` 그대로)이고, 그중 `Reveal` 인데 그 탭이 안 보이던 탭이면 보이게만 한다(`version` +1).
-    /// 비어 지운 팝아웃은 `Docked::emptied` 로 돌려준다(그 OS 창은 부르는 쪽 몫). `NewWindow` 의 `seed` 영속 id 를
-    /// 산 창이 이미 쓰면 새 id 로 들이고 경고를 남긴다(부르는 쪽 결함). main 의 마지막 탭이 다른 창 · 새
+    /// 비어 지운 팝아웃은 `Docked::emptied` 로 돌려준다(그 OS 창은 부르는 쪽 몫). main 의 마지막 탭이 다른 창 · 새
     /// 창으로 떠나면 같은 한 번 안에서 main 에 빈 탭 「View 1」 이 생겨 main 의 활성이 되고 그 id 가
     /// `Docked::main_refilled` 다(PRD R14 · ADR-0057 불변식 4 — 탭을 닫을 때와 같은 규칙). `Err` 면 아무것도 바뀌지
-    /// 않는다(`version` · 표식 포함).
+    /// 않는다(`version` 포함).
     ///
     /// 판정 순서가 계약이다 — 앞에서 걸리면 뒤는 안 본다:
     /// 1. 출처가 어느 창의 탭도 아니면 `TabNotFound`.
@@ -1231,29 +1117,22 @@ impl ViewManager {
     ///    `WindowExists`.
     /// 3. `Seam` 대상 = 출처 → `SelfTarget`. `TabBar` 의 대상 창 = 출처 창은 자리 옮기기로 허용한다.
     /// 4. `Seam` 기준 슬롯이 대상 탭에 없으면 — 다른 탭에 있으면 `SlotNotInTab`, 어디에도 없으면 `SlotNotFound`.
-    /// 5. 표식 — 출처에 표식이 섰는데 `guard.lease` 가 없으면 `Dragging` · `guard.lease` 가 출처의 지금 표식이
-    ///    아니면(표식 없음 · 다른 번호 · 다른 탭의 표식) `StaleLease`.
-    /// 6. `guard.expect_source` 가 출처 탭 배치와 다르면 `SourceChanged` · `guard.expect_target` 이 대상(`Seam` = 대상
-    ///    탭 배치와 대상 창의 모델 활성 탭 · `TabBar` = 대상 창 탭 목록)과 다르거나 그 모드의 값이 아니면(`NewWindow` 는
-    ///    무엇이든) `TargetChanged`.
-    /// 7. `Seam` — `share` 가 유한하지 않거나 `tree::RATIO_MIN..=dock::SHARE_MAX` 밖이면 `InvalidShare` · 두 트리가 슬롯 id 를
+    /// 5. `Seam` — `share` 가 유한하지 않거나 `tree::RATIO_MIN..=dock::SHARE_MAX` 밖이면 `InvalidShare` · 두 트리가 슬롯 id 를
     ///    함께 가지면 `SlotIdOverlap` · 결과에 새 면적 0 칸이 생기면 `ZeroArea`.
     ///
     /// 보이는 탭 · 포커스: `Keep` 이면 대상 창의 활성 탭과 대상 탭의 포커스를 바꾸지 않는다 — 단 출처가 대상 창의
     /// 활성 탭이었으면(같은 창 도킹) 대상(`Seam` = 대상 탭 · `TabBar` = 옮긴 탭)이 활성이 된다. `Reveal` 이면 대상
     /// (`Seam` = 대상 탭 · 그 밖 = 옮긴 탭)이 활성이고, `Seam` 은 대상 탭 포커스를 끼운 첫 슬롯으로 둔다. 옮긴 탭이
     /// 출처 창의 활성이었고 그 창이 남으면 `mv.successor` 가 남은 탭일 때 그것이(`mv.successor_window` 가 있으면 출처
-    /// 창이 그 창일 때만), 아니면 [`succession`] 이 그 창의 활성이 된다. 성공하면 `guard.lease` 의 표식을 내린다 —
-    /// `guard.keep_lease` 면 그대로 둔다(단 `Seam` 은 출처 탭을 지우므로 그 탭의 표식도 함께 사라진다).
+    /// 창이 그 창일 때만), 아니면 [`succession`] 이 그 창의 활성이 된다.
     pub fn dock(
         &mut self,
         view: ViewId,
         to: DockTo,
-        guard: &DockGuard,
         focus: FocusPolicy,
         mv: DockMove,
     ) -> Result<Docked, DockError> {
-        let (source_window, plan) = self.check_dock(view, &to, guard)?;
+        let (source_window, plan) = self.check_dock(view, &to)?;
         let slot_ids = tree::slot_ids(&self.views[&view].layout);
         let reveal = focus == FocusPolicy::Reveal;
         let (window, pulled) = match plan {
@@ -1274,15 +1153,16 @@ impl ViewManager {
                 let pulled =
                     self.pull_docked_tab(&source_window, view, mv.successor_in(&source_window));
                 self.remove_view(view);
-                let placed = self.edit_layout(target, |t| {
-                    t.layout = layout;
-                    if reveal {
-                        t.focused_slot_id = Some(first);
+                match self.view_mut(target) {
+                    Ok(t) => {
+                        t.layout = layout;
+                        if reveal {
+                            t.focused_slot_id = Some(first);
+                        }
                     }
-                    Some(())
-                });
-                if let Err(e) = placed {
-                    tracing::warn!(view = %target, "이음새 도킹 — 판정이 본 대상 탭이 적용 때 없다: {e}");
+                    Err(e) => {
+                        tracing::warn!(view = %target, "이음새 도킹 — 판정이 본 대상 탭이 적용 때 없다: {e}")
+                    }
                 }
                 if reveal || source_was_visible {
                     if let Some(wt) = self.windows.get_mut(&target_window) {
@@ -1294,7 +1174,6 @@ impl ViewManager {
             DockPlan::TabBar { window, tabs } => {
                 let current = &self.windows[&window];
                 if tabs == current.tabs && (!reveal || current.active == view) {
-                    self.release_held(guard);
                     return Ok(Docked {
                         window,
                         slot_ids,
@@ -1319,31 +1198,16 @@ impl ViewManager {
                 }
                 (window, pulled)
             }
-            DockPlan::NewWindow {
-                label,
-                seed,
-                measures,
-            } => {
+            DockPlan::NewWindow { label } => {
                 let pulled =
                     self.pull_docked_tab(&source_window, view, mv.successor_in(&source_window));
-                // 단언으로 멈추지 않는다 — 이 자리는 출처를 이미 뺀 뒤라 멈추면 모델이 반쯤 바뀐 채 남는다.
-                let seed = seed.map(|seed| {
-                    if self.has_window_id(&seed.window_id) {
-                        reidentified(&label, seed)
-                    } else {
-                        seed
-                    }
-                });
                 // 쌍 갱신(불변식 1·2). // ADR-0057
                 self.view_owner.insert(view, label.clone());
-                self.windows.insert(
-                    label.clone(),
-                    WindowTabs::popout_from(view, seed).with_measures(measures),
-                );
+                self.windows
+                    .insert(label.clone(), WindowTabs::new_popout(view));
                 (label, pulled)
             }
         };
-        self.release_held(guard);
         self.bump_version();
         Ok(Docked {
             window,
@@ -1354,13 +1218,8 @@ impl ViewManager {
         })
     }
 
-    // `dock` 판정 1–7 — `&self` 라 무엇도 바꾸지 않는다. 돌려주는 것 = (출처 창, 적용할 것).
-    fn check_dock(
-        &self,
-        view: ViewId,
-        to: &DockTo,
-        guard: &DockGuard,
-    ) -> Result<(WindowLabel, DockPlan), DockError> {
+    // `dock` 판정 1–5 — `&self` 라 무엇도 바꾸지 않는다. 돌려주는 것 = (출처 창, 적용할 것).
+    fn check_dock(&self, view: ViewId, to: &DockTo) -> Result<(WindowLabel, DockPlan), DockError> {
         let source_window = self
             .tab_window(view)
             .ok_or(DockError::TabNotFound(view))?
@@ -1410,34 +1269,7 @@ impl ViewManager {
             }
         }
 
-        self.check_lease(view, guard.lease)?;
-
         let source_layout = &self.views[&view].layout;
-        if guard
-            .expect_source
-            .as_ref()
-            .is_some_and(|want| want != source_layout)
-        {
-            return Err(DockError::SourceChanged);
-        }
-        let target_holds = match (to, &guard.expect_target) {
-            (_, None) => true,
-            // 활성도 본다 — `switch_tab` 은 활성을 락 안에서 바꾸고 알림은 락 밖에서 내므로, 배치만 보면 옛 활성의
-            // 영역으로 놓은 이음새가 이제 안 보이는 탭에 들어가고 `Reveal` 이 그 탭을 도로 앞에 낸다(TRD
-            // S21-slot-docking §1-2 「4 단계 고침 둘」).
-            (DockTo::Seam { target, .. }, Some(TargetExpect::Seam { layout, active })) => {
-                *layout == self.views[target].layout
-                    && *active == self.windows[&target_window].active
-            }
-            (DockTo::TabBar { window, .. }, Some(TargetExpect::Tabs(want))) => {
-                *want == self.windows[window].tabs
-            }
-            _ => false,
-        };
-        if !target_holds {
-            return Err(DockError::TargetChanged);
-        }
-
         let plan = match to {
             DockTo::Seam {
                 target,
@@ -1483,10 +1315,8 @@ impl ViewManager {
                     tabs,
                 }
             }
-            DockTo::NewWindow { seed, measures, .. } => DockPlan::NewWindow {
+            DockTo::NewWindow { .. } => DockPlan::NewWindow {
                 label: target_window,
-                seed: seed.clone(),
-                measures: measures.clone(),
             },
         };
         Ok((source_window, plan))
@@ -1494,29 +1324,13 @@ impl ViewManager {
 
     /// R22 새 창 놓기의 phase A — 새 OS 창이 필요한가, 몇 크기로 여나. 아무것도 바꾸지 않는다.
     ///
-    /// 판정은 [`Self::dock`] 의 1 · 5 · 6 과 같은 순서 · 같은 오류다 — 6 의 대상 쪽은 `NewWindow` 규칙(`expect_target`
-    /// 이 무엇이든 있으면 `TargetChanged`)이라, 창을 열기 전에 phase C 가 거절할 요청을 여기서 먼저 거절한다.
-    /// 출처가 탭이 그것 하나뿐인 팝아웃이면 `Reuse{그 창}`(새 창 없이 그 창을 옮긴다 — 그 창의 보통 자리를 아직 못
-    /// 봤어도), 아니면 `Create{size}` — `size` = 출처 팝아웃 창의 보통 자리 크기(논리 · 최대화 중이어도 최대화 전 크기
-    /// · 아직 모르면 `None`), main 이면 `None`(창 포트의 팝아웃 기본 크기).
-    pub fn plan_new_window(
-        &self,
-        view: ViewId,
-        guard: &DockGuard,
-    ) -> Result<NewWindowPlan, DockError> {
+    /// 출처가 어느 창의 탭도 아니면 `TabNotFound`([`Self::dock`] 판정 1 과 같다). 출처가 탭이 그것 하나뿐인
+    /// 팝아웃이면 `Reuse{그 창}`(새 창 없이 그 창을 옮긴다 — 그 창의 보통 자리를 아직 못 봤어도), 아니면
+    /// `Create{size}` — `size` = 출처 팝아웃 창의 보통 자리 크기(논리 · 최대화 중이어도 최대화 전 크기 · 아직
+    /// 모르면 `None`), main 이면 `None`(창 포트의 팝아웃 기본 크기).
+    pub fn plan_new_window(&self, view: ViewId) -> Result<NewWindowPlan, DockError> {
         let source_window = self.tab_window(view).ok_or(DockError::TabNotFound(view))?;
         let source = &self.windows[source_window];
-        self.check_lease(view, guard.lease)?;
-        if guard
-            .expect_source
-            .as_ref()
-            .is_some_and(|want| *want != self.views[&view].layout)
-        {
-            return Err(DockError::SourceChanged);
-        }
-        if guard.expect_target.is_some() {
-            return Err(DockError::TargetChanged);
-        }
         Ok(if source_window == MAIN_WINDOW_LABEL {
             NewWindowPlan::Create { size: None }
         } else if source.tabs.len() == 1 {
@@ -1530,44 +1344,12 @@ impl ViewManager {
         })
     }
 
-    /// 탭 `view` 에 끌기 표식을 세운다 — 그 뒤 표식 없이 이 탭을 옮기는 [`Self::dock`] 은 `Dragging` 이다. `version`
-    /// 을 올리지 않는다. 거절(이 순서): 어느 창의 탭도 아님 `TabNotFound` · 이미 다른 표식이 있음(어느 탭이든)
-    /// `Dragging`.
-    pub fn lease_tab(&mut self, view: ViewId) -> Result<LeaseId, DockError> {
-        if self.tab_window(view).is_none() {
-            return Err(DockError::TabNotFound(view));
-        }
-        if self.lease.is_some() {
-            return Err(DockError::Dragging);
-        }
-        self.lease_seq += 1;
-        let id = LeaseId(self.lease_seq);
-        self.lease = Some((id, view));
-        Ok(id)
-    }
-
-    /// 지금 표식(번호, 끄는 탭) — `None` = 표식이 없다(끌기 없음 · 도킹 성공이 내렸다 · 그 탭이 지워졌다).
-    pub fn lease(&self) -> Option<(LeaseId, ViewId)> {
-        self.lease
-    }
-
-    /// 지금 표식이 `id` 면 내린다 — 아니면(이미 내려짐 · 다른 번호) 무동작.
-    pub fn release_lease(&mut self, id: LeaseId) {
-        if matches!(self.lease, Some((current, _)) if current == id) {
-            self.lease = None;
-        }
-    }
-
     /// 창 `label` 에 묘비를 단다 — 그 뒤 그 label 로 새 창을 붙이는 [`Self::dock`](`NewWindow`) ·
     /// [`Self::attach_view_as_new_window`] · [`Self::create_window`] 는 `WindowClosed`, 그 창으로의 `Seam` · `TabBar` 는
     /// 「없음」(`TabNotFound` · `WindowNotFound`)으로 무변경이다. 모델의 창 항목 · `version` 은 손대지 않는다(지우는 것은 부르는 쪽 몫 —
     /// `commands::popout::drop_window_in_model` 이 창을 지우는 같은 락 안에서 부른다).
     pub(crate) fn mark_closed(&mut self, label: &str) {
         self.closed_labels.insert(label.to_string());
-    }
-
-    fn has_window_id(&self, window_id: &str) -> bool {
-        self.windows.values().any(|w| w.window_id == window_id)
     }
 
     // `view` 를 탭으로 가진 창 — View · 소유 쌍이 다 서야 한다. 창 없는 임시 View(`prepare_detached_view`)는
@@ -1584,26 +1366,6 @@ impl ViewManager {
             .then_some(label)
     }
 
-    fn check_lease(&self, view: ViewId, held: Option<LeaseId>) -> Result<(), DockError> {
-        match (held, self.lease) {
-            (None, Some((_, leased))) if leased == view => Err(DockError::Dragging),
-            (None, _) => Ok(()),
-            (Some(id), Some(current)) if current == (id, view) => Ok(()),
-            (Some(_), _) => Err(DockError::StaleLease),
-        }
-    }
-
-    /// 도킹이 성공한 뒤의 표식 처리 — `guard.lease` 를 내리되 `guard.keep_lease` 면 그대로 둔다. [`Self::dock`] 과
-    /// 재사용 도킹(`apply::dock_tab`)이 같은 규칙을 쓴다.
-    pub(crate) fn release_held(&mut self, guard: &DockGuard) {
-        if guard.keep_lease {
-            return;
-        }
-        if let Some(id) = guard.lease {
-            self.release_lease(id);
-        }
-    }
-
     fn pull_docked_tab(
         &mut self,
         label: &str,
@@ -1612,16 +1374,8 @@ impl ViewManager {
     ) -> PulledDock {
         match self.pull_tab(label, view, successor) {
             Pulled::Stayed => PulledDock::default(),
-            Pulled::PopoutRemoved(entry) => PulledDock {
-                emptied: Some(EmptiedWindow {
-                    label: label.to_string(),
-                    measures: entry.measures(),
-                    seed: WindowSeed {
-                        window_id: entry.window_id,
-                        attrs: entry.attrs,
-                        placement_memo: entry.placement_memo,
-                    },
-                }),
+            Pulled::PopoutRemoved => PulledDock {
+                emptied: Some(label.to_string()),
                 main_refilled: None,
             },
             Pulled::MainEmptied => PulledDock {
@@ -1638,8 +1392,7 @@ impl ViewManager {
     /// 것 = 지운 옛 팝아웃 label(정렬) — 그 OS 창은 부르는 쪽이 락 밖에서 거둔다.
     ///
     /// - `version` · `attrs_rev` 는 지금 값에서 하나씩 오른다 — `restored` 의 번호는 버린다. 기록기는 같은지만 보므로
-    ///   되감긴 번호가 마지막으로 본 값과 같아지면 그 사이의 변경을 놓친다. 들인 뷰의 판 번호도 같은 까닭으로 새
-    ///   `version` 으로 다시 적는다.
+    ///   되감긴 번호가 마지막으로 본 값과 같아지면 그 사이의 변경을 놓친다.
     /// - owner 없는 View(창 만들기 중인 `prepare_detached_view` 의 임시 View)는 그대로 둔다 — 그 일의 phase C 가
     ///   붙이거나 거둔다.
     /// - `Err` 면 아무것도 바뀌지 않았다: `restored` 에 main 이 없다 · 팝아웃 label 이 지금 모델의 창과 겹친다 ·
@@ -1655,9 +1408,6 @@ impl ViewManager {
             version: _,
             attrs_rev: _,
             unknown_content,
-            layout_revs: _,
-            lease: _,
-            lease_seq: _,
             closed_labels: _,
         } = restored;
         let main = windows
@@ -1702,9 +1452,7 @@ impl ViewManager {
         live.active = main.active;
         live.attrs = main.attrs;
         live.placement_memo = PlacementMemo::default();
-        for view in views.into_values() {
-            self.insert_view(view);
-        }
+        self.views.extend(views);
         self.view_owner.extend(view_owner);
         self.unknown_content.extend(unknown_content);
         self.windows.extend(windows);
@@ -1905,28 +1653,14 @@ pub fn succession(tabs: &[ViewId], removed: ViewId) -> Option<ViewId> {
 #[derive(Debug)]
 enum Pulled {
     Stayed,
-    PopoutRemoved(Box<WindowTabs>),
+    PopoutRemoved,
     MainEmptied,
 }
 
 #[derive(Default)]
 struct PulledDock {
-    emptied: Option<EmptiedWindow>,
+    emptied: Option<WindowLabel>,
     main_refilled: Option<ViewId>,
-}
-
-// 산 창이 이미 쓰는 영속 id 를 단 `seed` — 새 id 를 뽑고 속성 · 자리 기억은 둔다. 같은 id 로 저장하면 다음 부팅의
-// 복원이 뒤엣것을 탭째 버린다(`state::convert` 의 `DuplicateWindow`) — 신원을 잃고 탭을 지킨다.
-// ADR-0295
-fn reidentified(label: &str, seed: WindowSeed) -> WindowSeed {
-    let window_id = Uuid::new_v4().to_string();
-    tracing::warn!(
-        label,
-        claimed = %seed.window_id,
-        fresh = %window_id,
-        "되살릴 창의 영속 id 를 산 창이 이미 쓴다 — 새 id 로 들인다"
-    );
-    WindowSeed { window_id, ..seed }
 }
 
 // ── 도킹 타입(TRD S21-slot-docking §1-2) ──────────────────────────────────────
@@ -1946,44 +1680,8 @@ pub enum DockTo {
         window: WindowLabel,
         index: Option<usize>,
     },
-    /// 그 탭만 든 새 창 항목 `label` 을 만든다(PRD R22). `label` 은 부르는 쪽이 이미 연 OS 창의 것이다. `seed` 가
-    /// 있으면 새 항목의 영속 id · 속성을 그것으로 둔다(되살리는 창 — 없으면 새 영속 id · 기본 속성). `measures` 는
-    /// 새 항목의 재기가 된다(그 창 웹뷰가 모델 밖에 있을 때 받아 둔 보고 — 비었으면 다음 보고까지 없다).
-    NewWindow {
-        label: WindowLabel,
-        seed: Option<WindowSeed>,
-        measures: FrameMeasures,
-    },
-}
-
-/// 창 항목의 영속 신원과 자리 기억 — 모델에서 빠진 창([`EmptiedWindow`])을 같은 창으로 되살릴 때
-/// [`DockTo::NewWindow`] 에 싣는다. 크레이트 밖에서는 만들 수 없다(받은 것을 되돌려줄 뿐이다). `window_id` 를 산
-/// 창이 이미 쓰면 되살릴 때 새 id 를 받는다 — [`ViewManager::dock`].
-// ADR-0295
-#[derive(Debug, Clone, PartialEq)]
-pub struct WindowSeed {
-    pub window_id: String,
-    pub attrs: WindowAttrs,
-    // 「바로 앞 읽기」 기억 — 비운 동안 끊기면 되살린 뒤 첫 최대화 읽기가 잘못 적힌 보통 자리를 못 되돌린다
-    // (`WindowAttrs::observe`).
-    pub(crate) placement_memo: PlacementMemo,
-}
-
-/// 창 웹뷰가 보고한 재기 둘 — 창 항목의 `canvas` · `metrics` 와 같은 값이다. `None` = 아직 보고가 없다.
-// ADR-0295
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct FrameMeasures {
-    pub canvas: Option<CanvasPx>,
-    pub metrics: Option<UiMetrics>,
-}
-
-/// 도킹이 비워 모델에서 지운 팝아웃 항목 — `measures` = 지우기 직전의 재기. 그 OS 창은 아직 떠 있다.
-// ADR-0295
-#[derive(Debug, Clone, PartialEq)]
-pub struct EmptiedWindow {
-    pub label: WindowLabel,
-    pub seed: WindowSeed,
-    pub measures: FrameMeasures,
+    /// 그 탭만 든 새 창 항목 `label` 을 만든다(PRD R22). `label` 은 부르는 쪽이 이미 연 OS 창의 것이다.
+    NewWindow { label: WindowLabel },
 }
 
 /// 옮긴 탭이 출처 창의 활성이었고 그 창이 남을 때 그 창의 다음 활성 — `successor` 가 남은 탭이 아니거나
@@ -2008,47 +1706,6 @@ impl DockMove {
     }
 }
 
-/// 끌기 표식 번호 — [`ViewManager::lease_tab`] 이 한 부팅 안에서 겹치지 않게 발급한다. 모델은 같은지만 본다.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct LeaseId(pub u64);
-
-/// [`ViewManager::dock`] · [`ViewManager::plan_new_window`] 의 사전조건 — 모델은 누가 불렀는지 모른다. `None` 칸은
-/// 그 대조를 하지 않는다(명령 경로 = [`DockGuard::NONE`]).
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct DockGuard {
-    /// 이 요청이 쥔 표식. 표식이 선 탭은 같은 표식을 쥔 요청만 옮긴다.
-    pub lease: Option<LeaseId>,
-    /// 성공해도 `lease` 를 내리지 않는다 — 한 끌기의 여러 쓰기가 같은 표식을 이어 쥐고 끝에 부르는 쪽이 내린다.
-    // ADR-0295
-    pub keep_lease: bool,
-    /// 출처 탭 배치가 이 값일 때만.
-    pub expect_source: Option<LayoutNode>,
-    /// 대상이 이 값일 때만.
-    pub expect_target: Option<TargetExpect>,
-}
-
-impl DockGuard {
-    pub const NONE: DockGuard = DockGuard {
-        lease: None,
-        keep_lease: false,
-        expect_source: None,
-        expect_target: None,
-    };
-}
-
-/// [`DockGuard::expect_target`] 의 값 — `Seam` = 이음새 대상 탭의 배치와 대상 창의 활성 탭 · `Tabs` = `TabBar` 대상
-/// 창의 탭 목록.
-#[derive(Debug, Clone, PartialEq)]
-pub enum TargetExpect {
-    /// `active` = 영역을 만든 순간 대상 창의 **모델** 활성 탭 — 같은 창 도킹에서 끄는 탭이 활성이면 그 끄는 탭
-    /// 자신이다(화면에 대신 보이는 승계 탭이 아니다).
-    Seam {
-        layout: LayoutNode,
-        active: ViewId,
-    },
-    Tabs(Vec<ViewId>),
-}
-
 /// 놓은 뒤 무엇을 보이나 — `Keep` = 명령(보이는 탭 · 포커스를 바꾸지 않는다 — PRD R11b · R16) · `Reveal` = 마우스
 /// (옮긴 것을 보이고 첫 슬롯에 포커스). 규칙의 정본 = [`ViewManager::dock`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2064,8 +1721,9 @@ pub struct Docked {
     /// 옮긴 탭의 슬롯 id(트리 전위 순) — 옮겨도 id 는 그대로다.
     pub slot_ids: Vec<Uuid>,
     pub source_window: WindowLabel,
-    /// 출처 팝아웃이 비어 그 창 항목을 지웠다 — 그 OS 창을 어떻게 할지는 부르는 쪽이 락 밖에서 정한다.
-    pub emptied: Option<EmptiedWindow>,
+    /// 출처 팝아웃이 비어 그 창 항목을 지웠다(그 label) — 그 OS 창은 아직 떠 있고, 어떻게 할지는 부르는 쪽이 락
+    /// 밖에서 정한다.
+    pub emptied: Option<WindowLabel>,
     /// main 의 마지막 탭이 떠나 main 에 새로 세운 빈 탭.
     pub main_refilled: Option<ViewId>,
 }
@@ -2098,18 +1756,9 @@ pub enum DockError {
     // ADR-0295
     #[error("붙는 몫이 범위 밖: {0} (InvalidShare)")]
     InvalidShare(String),
-    #[error("사용자가 그 탭을 끄는 중 (Dragging)")]
-    Dragging,
     /// `NewWindow` 의 label 에 묘비 — 그 새 창이 붙기 전에 닫혔다.
     #[error("새 창이 붙기 전에 닫힘: {0} (WindowClosed)")]
     WindowClosed(String),
-    // 아래 셋은 사전조건(`DockGuard`)을 단 요청만 받는다.
-    #[error("끌기 표식이 지금 것이 아님 (StaleLease)")]
-    StaleLease,
-    #[error("출처 탭 배치가 바뀜 (SourceChanged)")]
-    SourceChanged,
-    #[error("대상이 바뀜 (TargetChanged)")]
-    TargetChanged,
     /// 닿지 않는 방어 — label 발급기가 단조라 닿으면 셸 결함이다.
     #[error("새 창 label 이 이미 있음: {0} (WindowExists)")]
     WindowExists(String),
@@ -2135,8 +1784,6 @@ enum DockPlan {
     },
     NewWindow {
         label: WindowLabel,
-        seed: Option<WindowSeed>,
-        measures: FrameMeasures,
     },
 }
 
@@ -3995,6 +3642,33 @@ mod tests {
         assert_invariants(&mgr);
     }
 
+    #[test]
+    fn a_restore_that_brings_back_the_same_view_id_keeps_the_restored_view() {
+        let mut mgr = ViewManager::new();
+        let v = main_active(&mgr);
+        mgr.split_slot(v, first_slot_of(&mgr, v), SplitDir::LeftRight)
+            .unwrap();
+        let restored_layout = LayoutNode::new_empty_slot();
+        let same_id = View {
+            id: v,
+            name: "View 1".into(),
+            layout: restored_layout.clone(),
+            focused_slot_id: None,
+        };
+        let restored = ViewManager::from_restored(
+            RestoredWindow {
+                attrs: WindowAttrs::default(),
+                tabs: vec![same_id],
+                active: Some(v),
+            },
+            Vec::new(),
+        )
+        .unwrap();
+        mgr.adopt_restored(restored).unwrap();
+        assert_eq!(mgr.views[&v].layout, restored_layout);
+        assert_invariants(&mgr);
+    }
+
     // ── 측정 보고 · slot_px (ADR-0227) ───────────────────────────────────────
 
     fn metrics(t: f64, r: f64, b: f64, l: f64, min_pane_px: u32) -> UiMetrics {
@@ -4925,7 +4599,6 @@ mod tests {
         owners: Vec<(ViewId, WindowLabel)>,
         windows: Vec<(WindowLabel, Vec<ViewId>, ViewId, String, WindowAttrs)>,
         unknown: Vec<(ViewId, Vec<(Uuid, Map<String, Value>)>)>,
-        lease: Option<(LeaseId, ViewId)>,
         closed: Vec<WindowLabel>,
     }
 
@@ -4971,7 +4644,6 @@ mod tests {
             owners,
             windows,
             unknown,
-            lease: mgr.lease,
             closed,
         }
     }
@@ -4995,29 +4667,11 @@ mod tests {
     fn new_window(label: &str) -> DockTo {
         DockTo::NewWindow {
             label: label.to_string(),
-            seed: None,
-            measures: FrameMeasures::default(),
         }
     }
 
     fn layout_of(mgr: &ViewManager, view: ViewId) -> LayoutNode {
         mgr.views[&view].layout.clone()
-    }
-
-    // 이음새 대상 `target` 의 지금 값 — 배치 + 그 창의 모델 활성.
-    fn seam_expect(mgr: &ViewManager, target: ViewId) -> TargetExpect {
-        TargetExpect::Seam {
-            layout: layout_of(mgr, target),
-            active: mgr.windows[&mgr.view_owner[&target]].active,
-        }
-    }
-
-    // 배치만 지금과 다른 이음새 기대값(활성은 지금 값).
-    fn stale_seam_expect(mgr: &ViewManager, target: ViewId) -> TargetExpect {
-        TargetExpect::Seam {
-            layout: LayoutNode::new_empty_slot(),
-            active: mgr.windows[&mgr.view_owner[&target]].active,
-        }
     }
 
     fn slots_of(mgr: &ViewManager, view: ViewId) -> Vec<Uuid> {
@@ -5031,34 +4685,20 @@ mod tests {
     }
 
     // 성공 — version 이 정확히 한 번 오르고 불변식이 선다.
-    fn docked(
-        mgr: &mut ViewManager,
-        view: ViewId,
-        to: DockTo,
-        guard: &DockGuard,
-        focus: FocusPolicy,
-    ) -> Docked {
+    fn docked(mgr: &mut ViewManager, view: ViewId, to: DockTo, focus: FocusPolicy) -> Docked {
         let before = mgr.version;
-        let out = mgr
-            .dock(view, to, guard, focus, DockMove::default())
-            .unwrap();
+        let out = mgr.dock(view, to, focus, DockMove::default()).unwrap();
         assert_eq!(mgr.version, before + 1, "성공은 version 을 한 번 올린다");
         assert_invariants(mgr);
         out
     }
 
-    // 실패 — 두 포커스 정책 모두 같은 사유이고 모델 전체(version · 표식 · 묘비 포함)가 그대로다.
-    fn refused(
-        mgr: &mut ViewManager,
-        view: ViewId,
-        to: DockTo,
-        guard: &DockGuard,
-        want: DockError,
-    ) {
+    // 실패 — 두 포커스 정책 모두 같은 사유이고 모델 전체(version · 묘비 포함)가 그대로다.
+    fn refused(mgr: &mut ViewManager, view: ViewId, to: DockTo, want: DockError) {
         let before = model(mgr);
         for focus in [FocusPolicy::Keep, FocusPolicy::Reveal] {
             assert_eq!(
-                mgr.dock(view, to.clone(), guard, focus, DockMove::default()),
+                mgr.dock(view, to.clone(), focus, DockMove::default()),
                 Err(want.clone()),
                 "{to:?} {focus:?}"
             );
@@ -5088,7 +4728,6 @@ mod tests {
             &mut mgr,
             p[1],
             seam(m[1], DockAnchor::Slot(anchor), DockSide::Top),
-            &DockGuard::NONE,
             FocusPolicy::Keep,
         );
         assert_eq!(
@@ -5147,7 +4786,6 @@ mod tests {
             &mut mgr,
             q,
             seam(m[2], DockAnchor::Outer, DockSide::Bottom),
-            &DockGuard::NONE,
             FocusPolicy::Reveal,
         );
         let LayoutNode::Split {
@@ -5182,7 +4820,6 @@ mod tests {
             &mut mgr,
             p[1],
             seam(m[0], DockAnchor::Outer, DockSide::Left),
-            &DockGuard::NONE,
             FocusPolicy::Keep,
         );
         assert_eq!(
@@ -5208,7 +4845,6 @@ mod tests {
             &mut mgr,
             m[1],
             seam(m[0], DockAnchor::Outer, DockSide::Right),
-            &DockGuard::NONE,
             FocusPolicy::Keep,
         );
         assert_eq!(main_active(&mgr), m[0]);
@@ -5220,7 +4856,6 @@ mod tests {
             &mut mgr,
             m[1],
             seam(m[0], DockAnchor::Outer, DockSide::Right),
-            &DockGuard::NONE,
             FocusPolicy::Keep,
         );
         assert_eq!(main_active(&mgr), m[2]);
@@ -5235,7 +4870,6 @@ mod tests {
                 &mut mgr,
                 p[moved],
                 seam(m[0], DockAnchor::Outer, DockSide::Left),
-                &DockGuard::NONE,
                 FocusPolicy::Reveal,
             );
             assert_eq!(mgr.windows[P1].active, p[heir]);
@@ -5250,7 +4884,6 @@ mod tests {
             &mut mgr,
             p[0],
             tab_bar(MAIN_WINDOW_LABEL, Some(1)),
-            &DockGuard::NONE,
             FocusPolicy::Keep,
         );
         assert_eq!(
@@ -5285,7 +4918,6 @@ mod tests {
             &mut mgr,
             q,
             tab_bar(MAIN_WINDOW_LABEL, Some(99)),
-            &DockGuard::NONE,
             FocusPolicy::Keep,
         );
         assert!(out.emptied.is_some());
@@ -5294,7 +4926,6 @@ mod tests {
             &mut mgr,
             p[1],
             tab_bar(MAIN_WINDOW_LABEL, None),
-            &DockGuard::NONE,
             FocusPolicy::Keep,
         );
         assert_eq!(
@@ -5310,7 +4941,6 @@ mod tests {
             &mut mgr,
             p[1],
             tab_bar(MAIN_WINDOW_LABEL, Some(0)),
-            &DockGuard::NONE,
             FocusPolicy::Reveal,
         );
         assert_eq!(main_active(&mgr), p[1]);
@@ -5324,7 +4954,6 @@ mod tests {
             &mut mgr,
             m[0],
             tab_bar(MAIN_WINDOW_LABEL, None),
-            &DockGuard::NONE,
             FocusPolicy::Keep,
         );
         assert!(!out.emptied.is_some());
@@ -5337,7 +4966,6 @@ mod tests {
             &mut mgr,
             m[2],
             tab_bar(MAIN_WINDOW_LABEL, Some(0)),
-            &DockGuard::NONE,
             FocusPolicy::Keep,
         );
         assert_eq!(mgr.windows[MAIN_WINDOW_LABEL].tabs, vec![m[2], m[0], m[1]]);
@@ -5346,7 +4974,6 @@ mod tests {
             &mut mgr,
             m[1],
             tab_bar(MAIN_WINDOW_LABEL, Some(1)),
-            &DockGuard::NONE,
             FocusPolicy::Reveal,
         );
         assert_eq!(mgr.windows[MAIN_WINDOW_LABEL].tabs, vec![m[2], m[1], m[0]]);
@@ -5369,7 +4996,6 @@ mod tests {
                 .dock(
                     view,
                     tab_bar(MAIN_WINDOW_LABEL, index),
-                    &DockGuard::NONE,
                     FocusPolicy::Keep,
                     DockMove::default(),
                 )
@@ -5382,7 +5008,6 @@ mod tests {
         mgr.dock(
             m[0],
             tab_bar(MAIN_WINDOW_LABEL, Some(0)),
-            &DockGuard::NONE,
             FocusPolicy::Reveal,
             DockMove::default(),
         )
@@ -5398,7 +5023,6 @@ mod tests {
                 &mut mgr,
                 view,
                 tab_bar(MAIN_WINDOW_LABEL, index),
-                &DockGuard::NONE,
                 FocusPolicy::Reveal,
             );
             assert!(!out.emptied.is_some());
@@ -5414,7 +5038,6 @@ mod tests {
             mgr.dock(
                 only,
                 tab_bar(MAIN_WINDOW_LABEL, None),
-                &DockGuard::NONE,
                 focus,
                 DockMove::default(),
             )
@@ -5427,13 +5050,7 @@ mod tests {
     fn new_window_makes_a_popout_entry_holding_only_that_tab() {
         let Fx { mut mgr, p, .. } = fixture();
         let view_before = mgr.views[&p[1]].clone();
-        let out = docked(
-            &mut mgr,
-            p[1],
-            new_window(FRESH),
-            &DockGuard::NONE,
-            FocusPolicy::Keep,
-        );
+        let out = docked(&mut mgr, p[1], new_window(FRESH), FocusPolicy::Keep);
         assert_eq!(
             out,
             Docked {
@@ -5454,21 +5071,14 @@ mod tests {
 
         // 탭 하나뿐인 팝아웃에서도 모델은 선다(재사용 판단은 `plan_new_window` 몫).
         let Fx { mut mgr, m, q, .. } = fixture();
-        assert!(docked(
-            &mut mgr,
-            q,
-            new_window(FRESH),
-            &DockGuard::NONE,
-            FocusPolicy::Keep
-        )
-        .emptied
-        .is_some());
+        assert!(docked(&mut mgr, q, new_window(FRESH), FocusPolicy::Keep)
+            .emptied
+            .is_some());
         assert!(!mgr.windows.contains_key(P2));
         docked(
             &mut mgr,
             m[1],
             new_window("slot-popup-10"),
-            &DockGuard::NONE,
             FocusPolicy::Keep,
         );
         assert_eq!(mgr.windows[MAIN_WINDOW_LABEL].tabs, vec![m[0], m[2]]);
@@ -5478,40 +5088,34 @@ mod tests {
     fn missing_sources_and_destinations_are_refused_in_order() {
         let Fx { mut mgr, m, p, .. } = fixture();
         let (bogus, bogus2) = (Uuid::new_v4(), Uuid::new_v4());
-        let none = &DockGuard::NONE;
         refused(
             &mut mgr,
             bogus,
             seam(bogus2, DockAnchor::Outer, DockSide::Left),
-            none,
             DockError::TabNotFound(bogus),
         );
         refused(
             &mut mgr,
             p[0],
             seam(bogus2, DockAnchor::Slot(bogus), DockSide::Left),
-            none,
             DockError::TabNotFound(bogus2),
         );
         refused(
             &mut mgr,
             p[0],
             tab_bar("no-such", None),
-            none,
             DockError::WindowNotFound("no-such".into()),
         );
         refused(
             &mut mgr,
             p[0],
             new_window(P2),
-            none,
             DockError::WindowExists(P2.into()),
         );
         refused(
             &mut mgr,
             p[0],
             new_window(MAIN_WINDOW_LABEL),
-            none,
             DockError::WindowExists(MAIN_WINDOW_LABEL.into()),
         );
         // 묘비가 「이미 있음」보다 먼저다.
@@ -5520,7 +5124,6 @@ mod tests {
             &mut mgr,
             p[0],
             new_window(P2),
-            none,
             DockError::WindowClosed(P2.into()),
         );
         // 창 없는 임시 View 는 탭이 아니다 — 출처로도 대상으로도.
@@ -5540,7 +5143,7 @@ mod tests {
         ] {
             let before = model(&mgr);
             assert_eq!(
-                mgr.dock(view, to, none, FocusPolicy::Keep, DockMove::default()),
+                mgr.dock(view, to, FocusPolicy::Keep, DockMove::default()),
                 Err(want)
             );
             assert_eq!(model(&mgr), before);
@@ -5550,15 +5153,13 @@ mod tests {
     }
 
     #[test]
-    fn self_target_and_anchor_slot_checks_come_before_the_lease() {
+    fn self_target_and_anchor_slot_checks_are_refused_unchanged() {
         let Fx { mut mgr, m, p, .. } = fixture();
-        let none = &DockGuard::NONE;
         let bogus = Uuid::new_v4();
         refused(
             &mut mgr,
             p[1],
             seam(p[1], DockAnchor::Slot(bogus), DockSide::Left),
-            none,
             DockError::SelfTarget,
         );
         let elsewhere = first_slot_of(&mgr, m[2]);
@@ -5566,7 +5167,6 @@ mod tests {
             &mut mgr,
             p[1],
             seam(m[1], DockAnchor::Slot(elsewhere), DockSide::Left),
-            none,
             DockError::SlotNotInTab {
                 slot: elsewhere,
                 tab: m[1],
@@ -5577,7 +5177,6 @@ mod tests {
             &mut mgr,
             p[1],
             seam(m[1], DockAnchor::Slot(own), DockSide::Left),
-            none,
             DockError::SlotNotInTab {
                 slot: own,
                 tab: m[1],
@@ -5587,277 +5186,42 @@ mod tests {
             &mut mgr,
             p[1],
             seam(m[1], DockAnchor::Slot(bogus), DockSide::Left),
-            none,
             DockError::SlotNotFound(bogus),
         );
 
-        // main 하나뿐 — 같은 탭 · 슬롯 판정이 표식보다 먼저이고, 거절은 main 에 빈 탭을 만들지 않는다.
+        // main 하나뿐 — 거절은 main 에 빈 탭을 만들지 않는다.
         let mut mgr = ViewManager::new();
         let only = main_active(&mgr);
         let p0 = mgr.create_window(P1).unwrap();
-        mgr.lease = Some((LeaseId(42), only));
         refused(
             &mut mgr,
             only,
             seam(only, DockAnchor::Outer, DockSide::Left),
-            none,
             DockError::SelfTarget,
         );
         refused(
             &mut mgr,
             only,
             seam(p0, DockAnchor::Slot(bogus), DockSide::Left),
-            none,
             DockError::SlotNotFound(bogus),
         );
-        for to in [
-            seam(p0, DockAnchor::Outer, DockSide::Left),
-            tab_bar(P1, None),
-            new_window(FRESH),
-        ] {
-            refused(&mut mgr, only, to, none, DockError::Dragging);
-        }
         assert_eq!(mgr.windows[MAIN_WINDOW_LABEL].tabs, vec![only]);
         assert_invariants(&mgr);
     }
 
     #[test]
-    fn guard_mismatches_are_refused_and_matches_dock() {
-        let Fx { mut mgr, m, p, .. } = fixture();
-        let to = seam(m[1], DockAnchor::Outer, DockSide::Left);
-        let stale_source = DockGuard {
-            expect_source: Some(LayoutNode::new_empty_slot()),
-            ..DockGuard::NONE
-        };
-        refused(
-            &mut mgr,
-            p[1],
-            to.clone(),
-            &stale_source,
-            DockError::SourceChanged,
-        );
-        // 출처가 먼저다.
-        let both = DockGuard {
-            expect_target: Some(stale_seam_expect(&mgr, m[1])),
-            ..stale_source.clone()
-        };
-        refused(&mut mgr, p[1], to.clone(), &both, DockError::SourceChanged);
-        let stale_target = DockGuard {
-            expect_source: Some(layout_of(&mgr, p[1])),
-            expect_target: Some(stale_seam_expect(&mgr, m[1])),
-            ..DockGuard::NONE
-        };
-        refused(
-            &mut mgr,
-            p[1],
-            to.clone(),
-            &stale_target,
-            DockError::TargetChanged,
-        );
-        // 모드에 맞지 않는 기대값은 「대상이 그 값이 아님」이다.
-        let tabs = DockGuard {
-            expect_target: Some(TargetExpect::Tabs(
-                mgr.windows[MAIN_WINDOW_LABEL].tabs.clone(),
-            )),
-            ..DockGuard::NONE
-        };
-        refused(&mut mgr, p[1], to.clone(), &tabs, DockError::TargetChanged);
-        let layout = DockGuard {
-            expect_target: Some(seam_expect(&mgr, m[1])),
-            ..DockGuard::NONE
-        };
-        refused(
-            &mut mgr,
-            p[1],
-            tab_bar(MAIN_WINDOW_LABEL, None),
-            &layout,
-            DockError::TargetChanged,
-        );
-        refused(
-            &mut mgr,
-            p[1],
-            new_window(FRESH),
-            &layout,
-            DockError::TargetChanged,
-        );
-        refused(
-            &mut mgr,
-            p[1],
-            new_window(FRESH),
-            &tabs,
-            DockError::TargetChanged,
-        );
-        let mut wrong_tabs = tabs.clone();
-        wrong_tabs.expect_target = Some(TargetExpect::Tabs(vec![m[0]]));
-        refused(
-            &mut mgr,
-            p[1],
-            tab_bar(MAIN_WINDOW_LABEL, None),
-            &wrong_tabs,
-            DockError::TargetChanged,
-        );
-
-        // 지금 값과 같으면 붙는다.
-        let exact = DockGuard {
-            expect_source: Some(layout_of(&mgr, p[1])),
-            expect_target: Some(seam_expect(&mgr, m[1])),
-            ..DockGuard::NONE
-        };
-        docked(&mut mgr, p[1], to, &exact, FocusPolicy::Reveal);
-        let exact = DockGuard {
-            expect_source: Some(layout_of(&mgr, p[0])),
-            expect_target: Some(TargetExpect::Tabs(
-                mgr.windows[MAIN_WINDOW_LABEL].tabs.clone(),
-            )),
-            ..DockGuard::NONE
-        };
-        docked(
-            &mut mgr,
-            p[0],
-            tab_bar(MAIN_WINDOW_LABEL, None),
-            &exact,
-            FocusPolicy::Reveal,
-        );
-    }
-
-    #[test]
-    fn a_source_layout_change_after_the_guard_was_taken_is_source_changed() {
-        let Fx { mut mgr, m, p, .. } = fixture();
-        let guard = DockGuard {
-            expect_source: Some(layout_of(&mgr, p[0])),
-            ..DockGuard::NONE
-        };
-        let slot = first_slot_of(&mgr, p[0]);
-        mgr.assign_agent(p[0], slot, "a-2".into()).unwrap();
-        refused(
-            &mut mgr,
-            p[0],
-            seam(m[0], DockAnchor::Outer, DockSide::Left),
-            &guard,
-            DockError::SourceChanged,
-        );
-        let target = DockGuard {
-            expect_target: Some(seam_expect(&mgr, m[0])),
-            ..DockGuard::NONE
-        };
-        let slot = first_slot_of(&mgr, m[0]);
-        mgr.split_slot(m[0], slot, SplitDir::TopBottom).unwrap();
-        refused(
-            &mut mgr,
-            p[0],
-            seam(m[0], DockAnchor::Outer, DockSide::Left),
-            &target,
-            DockError::TargetChanged,
-        );
-        assert_invariants(&mgr);
-    }
-
-    #[test]
-    fn a_seam_target_whose_window_switched_tabs_is_target_changed() {
-        // 배치가 같아도 대상 창의 활성이 바뀌었으면 무변경이다(TRD §1-2 「4 단계 고침 둘」).
-        let Fx { mut mgr, m, p, .. } = fixture();
-        assert_eq!(main_active(&mgr), m[0], "전제");
-        let to = seam(m[1], DockAnchor::Outer, DockSide::Left);
-        let guard = DockGuard {
-            expect_target: Some(seam_expect(&mgr, m[1])),
-            ..DockGuard::NONE
-        };
-        let target_layout = layout_of(&mgr, m[1]);
-        for now_active in [m[2], m[1]] {
-            mgr.switch_tab(MAIN_WINDOW_LABEL, now_active).unwrap();
-            assert_eq!(layout_of(&mgr, m[1]), target_layout, "전제: 배치는 같다");
-            refused(&mut mgr, p[1], to.clone(), &guard, DockError::TargetChanged);
-        }
-        // 기대한 활성으로 돌아오면 붙는다.
-        mgr.switch_tab(MAIN_WINDOW_LABEL, m[0]).unwrap();
-        docked(&mut mgr, p[1], to, &guard, FocusPolicy::Reveal);
-        assert_eq!(main_active(&mgr), m[1]);
-        assert_invariants(&mgr);
-    }
-
-    #[test]
-    fn a_same_window_seam_expects_the_dragged_tab_as_the_model_active() {
-        // 끄는 탭이 그 창의 활성이면 기대 활성은 그 끄는 탭 자신이다 — 화면에 대신 보이는 승계 탭이 아니다.
-        let Fx { mut mgr, m, .. } = fixture();
-        mgr.switch_tab(MAIN_WINDOW_LABEL, m[1]).unwrap();
-        let heir = succession(&mgr.windows[MAIN_WINDOW_LABEL].tabs, m[1]).unwrap();
-        assert_eq!(heir, m[2], "전제: 승계 탭은 오른쪽 이웃");
-        let to = seam(m[0], DockAnchor::Outer, DockSide::Right);
-        let shown = DockGuard {
-            expect_target: Some(TargetExpect::Seam {
-                layout: layout_of(&mgr, m[0]),
-                active: heir,
-            }),
-            ..DockGuard::NONE
-        };
-        refused(&mut mgr, m[1], to.clone(), &shown, DockError::TargetChanged);
-        let guard = DockGuard {
-            expect_target: Some(seam_expect(&mgr, m[0])),
-            ..DockGuard::NONE
-        };
-        assert_eq!(
-            guard.expect_target,
-            Some(TargetExpect::Seam {
-                layout: layout_of(&mgr, m[0]),
-                active: m[1],
-            })
-        );
-        docked(&mut mgr, m[1], to, &guard, FocusPolicy::Reveal);
-        assert!(!mgr.views.contains_key(&m[1]));
-        assert_eq!(main_active(&mgr), m[0]);
-        assert_invariants(&mgr);
-    }
-
-    #[test]
-    fn a_tab_bar_target_does_not_look_at_the_active_tab() {
-        let Fx { mut mgr, m, p, .. } = fixture();
-        let guard = DockGuard {
-            expect_target: Some(TargetExpect::Tabs(
-                mgr.windows[MAIN_WINDOW_LABEL].tabs.clone(),
-            )),
-            ..DockGuard::NONE
-        };
-        mgr.switch_tab(MAIN_WINDOW_LABEL, m[2]).unwrap();
-        docked(
-            &mut mgr,
-            p[0],
-            tab_bar(MAIN_WINDOW_LABEL, Some(1)),
-            &guard,
-            FocusPolicy::Keep,
-        );
-        assert_eq!(
-            mgr.windows[MAIN_WINDOW_LABEL].tabs,
-            vec![m[0], p[0], m[1], m[2]]
-        );
-        assert_eq!(main_active(&mgr), m[2]);
-        assert_invariants(&mgr);
-    }
-
-    #[test]
-    fn a_new_zero_area_slot_is_refused_after_every_other_check() {
+    fn a_new_zero_area_slot_is_refused_but_a_wide_place_docks() {
         let Fx { mut mgr, m, p, .. } = fixture();
         plant(&mut mgr, m[1], planted_half_chain(40));
         plant(&mut mgr, p[1], planted_half_chain(20));
         let deepest = *slots_of(&mgr, m[1]).last().unwrap();
         let to = seam(m[1], DockAnchor::Slot(deepest), DockSide::Right);
-        refused(
-            &mut mgr,
-            p[1],
-            to.clone(),
-            &DockGuard::NONE,
-            DockError::ZeroArea,
-        );
-        let stale_target = DockGuard {
-            expect_target: Some(stale_seam_expect(&mgr, m[1])),
-            ..DockGuard::NONE
-        };
-        refused(&mut mgr, p[1], to, &stale_target, DockError::TargetChanged);
+        refused(&mut mgr, p[1], to, DockError::ZeroArea);
         // 같은 출처가 넓은 자리(바깥 변)에는 붙는다.
         docked(
             &mut mgr,
             p[1],
             seam(m[1], DockAnchor::Outer, DockSide::Left),
-            &DockGuard::NONE,
             FocusPolicy::Keep,
         );
     }
@@ -5878,124 +5242,13 @@ mod tests {
             &mut mgr,
             p[0],
             seam(m[1], DockAnchor::Outer, DockSide::Left),
-            &DockGuard::NONE,
             DockError::SlotIdOverlap,
         );
     }
 
     #[test]
-    fn a_leased_tab_moves_only_with_its_lease_and_docking_releases_it() {
-        let Fx { mut mgr, m, p, .. } = fixture();
-        let version = mgr.version;
-        let lease = mgr.lease_tab(p[0]).unwrap();
-        assert_eq!(mgr.version, version, "표식은 레이아웃 변경이 아니다");
-        let to = tab_bar(MAIN_WINDOW_LABEL, None);
-        refused(
-            &mut mgr,
-            p[0],
-            to.clone(),
-            &DockGuard::NONE,
-            DockError::Dragging,
-        );
-        // 표식이 사전조건 대조보다 먼저다.
-        let stale = DockGuard {
-            expect_source: Some(LayoutNode::new_empty_slot()),
-            ..DockGuard::NONE
-        };
-        refused(&mut mgr, p[0], to.clone(), &stale, DockError::Dragging);
-        for wrong in [LeaseId(lease.0 + 1), LeaseId(0)] {
-            let guard = DockGuard {
-                lease: Some(wrong),
-                ..stale.clone()
-            };
-            refused(&mut mgr, p[0], to.clone(), &guard, DockError::StaleLease);
-        }
-        // 다른 탭은 표식과 무관하게 옮겨진다 — 그 표식을 쥐고 옮기면 늦은 놓기다.
-        let held = DockGuard {
-            lease: Some(lease),
-            ..DockGuard::NONE
-        };
-        refused(&mut mgr, p[1], to.clone(), &held, DockError::StaleLease);
-        docked(
-            &mut mgr,
-            m[2],
-            new_window(FRESH),
-            &DockGuard::NONE,
-            FocusPolicy::Keep,
-        );
-        assert_eq!(mgr.lease, Some((lease, p[0])));
-
-        docked(&mut mgr, p[0], to.clone(), &held, FocusPolicy::Reveal);
-        assert_eq!(mgr.lease, None, "성공이 표식을 내린다");
-        // 내려간 표식으로 다시 오면 늦은 놓기다.
-        refused(
-            &mut mgr,
-            p[1],
-            seam(m[0], DockAnchor::Outer, DockSide::Left),
-            &held,
-            DockError::StaleLease,
-        );
-    }
-
-    #[test]
-    fn a_same_position_tab_bar_drop_also_releases_the_lease() {
-        // 무변경 갈래(Keep) · 보이기만 하는 갈래(Reveal · 안 보이던 탭) 둘 다 `Ok` 라 표식을 내린다.
-        for (focus, bumps) in [(FocusPolicy::Keep, 0), (FocusPolicy::Reveal, 1)] {
-            let Fx { mut mgr, m, .. } = fixture();
-            let lease = mgr.lease_tab(m[1]).unwrap();
-            let held = DockGuard {
-                lease: Some(lease),
-                ..DockGuard::NONE
-            };
-            let version = mgr.version;
-            mgr.dock(
-                m[1],
-                tab_bar(MAIN_WINDOW_LABEL, Some(1)),
-                &held,
-                focus,
-                DockMove::default(),
-            )
-            .unwrap();
-            assert_eq!(mgr.version, version + bumps, "{focus:?}");
-            assert_eq!(mgr.lease, None, "{focus:?}");
-            assert_invariants(&mgr);
-        }
-    }
-
-    #[test]
-    fn lease_tab_is_one_at_a_time_and_takes_the_main_last_tab() {
-        let Fx { mut mgr, m, p, .. } = fixture();
-        let bogus = Uuid::new_v4();
-        assert_eq!(mgr.lease_tab(bogus), Err(DockError::TabNotFound(bogus)));
-        let first = mgr.lease_tab(p[0]).unwrap();
-        assert_eq!(mgr.lease_tab(p[1]), Err(DockError::Dragging));
-        assert_eq!(mgr.lease_tab(p[0]), Err(DockError::Dragging));
-        mgr.release_lease(LeaseId(first.0 + 1));
-        assert_eq!(mgr.lease, Some((first, p[0])), "다른 번호는 무동작");
-        assert_eq!(mgr.lease(), mgr.lease);
-        mgr.release_lease(first);
-        assert_eq!(mgr.lease, None);
-        assert_eq!(mgr.lease(), None);
-        mgr.release_lease(first);
-        let second = mgr.lease_tab(m[0]).unwrap();
-        assert_ne!(second, first, "번호를 다시 쓰지 않는다");
-        assert_invariants(&mgr);
-
-        // main 의 마지막 탭도 끈다(PRD R14).
-        let mut mgr = ViewManager::new();
-        let only = main_active(&mgr);
-        let before = model(&mgr);
-        let lease = mgr.lease_tab(only).unwrap();
-        assert_eq!(mgr.lease, Some((lease, only)));
-        assert_eq!(mgr.version, before.version, "표식은 레이아웃 변경이 아니다");
-        assert_eq!(mgr.windows[MAIN_WINDOW_LABEL].tabs, vec![only]);
-        assert_invariants(&mgr);
-    }
-
-    #[test]
     fn plan_new_window_reuses_a_lone_popout_and_sizes_the_rest_from_the_source() {
         let Fx { mut mgr, m, p, q } = fixture();
-        let none = &DockGuard::NONE;
         let maximized = |bounds| WindowPlacement {
             minimized: false,
             maximized: true,
@@ -6004,12 +5257,12 @@ mod tests {
         // 보통 자리를 아직 못 봤어도 재사용이다.
         assert_eq!(mgr.windows[P2].attrs.bounds, None, "전제");
         assert_eq!(
-            mgr.plan_new_window(q, none),
+            mgr.plan_new_window(q),
             Ok(NewWindowPlan::Reuse { label: P2.into() })
         );
         mgr.observe_window_placement(P2, normal_at(30.0)).unwrap();
         assert_eq!(
-            mgr.plan_new_window(q, none),
+            mgr.plan_new_window(q),
             Ok(NewWindowPlan::Reuse { label: P2.into() })
         );
         // 최대화 중이어도 보통 자리가 적혀 있으면 재사용이다.
@@ -6022,22 +5275,22 @@ mod tests {
             "전제"
         );
         assert_eq!(
-            mgr.plan_new_window(q, none),
+            mgr.plan_new_window(q),
             Ok(NewWindowPlan::Reuse { label: P2.into() })
         );
         assert_eq!(
-            mgr.plan_new_window(m[1], none),
+            mgr.plan_new_window(m[1]),
             Ok(NewWindowPlan::Create { size: None }),
             "main = 팝아웃 기본 크기"
         );
         assert_eq!(
-            mgr.plan_new_window(p[1], none),
+            mgr.plan_new_window(p[1]),
             Ok(NewWindowPlan::Create { size: None }),
             "아직 못 본 자리"
         );
         mgr.observe_window_placement(P1, normal_at(10.0)).unwrap();
         assert_eq!(
-            mgr.plan_new_window(p[1], none),
+            mgr.plan_new_window(p[1]),
             Ok(NewWindowPlan::Create {
                 size: Some((1280.0, 800.0))
             })
@@ -6054,7 +5307,7 @@ mod tests {
         .unwrap();
         let before = model(&mgr);
         assert_eq!(
-            mgr.plan_new_window(p[1], none),
+            mgr.plan_new_window(p[1]),
             Ok(NewWindowPlan::Create {
                 size: Some((1280.0, 800.0))
             })
@@ -6065,78 +5318,19 @@ mod tests {
 
     #[test]
     fn plan_new_window_checks_the_source_side_like_dock() {
-        let Fx { mut mgr, p, .. } = fixture();
+        let Fx { mgr, .. } = fixture();
         let bogus = Uuid::new_v4();
-        let none = &DockGuard::NONE;
         assert_eq!(
-            mgr.plan_new_window(bogus, none),
+            mgr.plan_new_window(bogus),
             Err(DockError::TabNotFound(bogus))
         );
-        let lease = mgr.lease_tab(p[0]).unwrap();
-        assert_eq!(mgr.plan_new_window(p[0], none), Err(DockError::Dragging));
-        let stale = DockGuard {
-            lease: Some(LeaseId(lease.0 + 1)),
-            ..DockGuard::NONE
-        };
-        assert_eq!(
-            mgr.plan_new_window(p[0], &stale),
-            Err(DockError::StaleLease)
-        );
-        // 출처가 대상보다 먼저다.
-        let held = DockGuard {
-            lease: Some(lease),
-            keep_lease: false,
-            expect_source: Some(LayoutNode::new_empty_slot()),
-            expect_target: Some(TargetExpect::Tabs(Vec::new())),
-        };
-        assert_eq!(
-            mgr.plan_new_window(p[0], &held),
-            Err(DockError::SourceChanged)
-        );
-        // 대상 기대값은 phase C(`dock` NewWindow)와 같은 답 — 창을 열기 전에 거절한다.
-        for target in [TargetExpect::Tabs(Vec::new()), seam_expect(&mgr, p[0])] {
-            let held = DockGuard {
-                lease: Some(lease),
-                keep_lease: false,
-                expect_source: Some(layout_of(&mgr, p[0])),
-                expect_target: Some(target),
-            };
-            assert_eq!(
-                mgr.plan_new_window(p[0], &held),
-                Err(DockError::TargetChanged)
-            );
-            assert_eq!(
-                mgr.dock(
-                    p[0],
-                    new_window(FRESH),
-                    &held,
-                    FocusPolicy::Reveal,
-                    DockMove::default()
-                ),
-                Err(DockError::TargetChanged),
-                "phase A 와 C 가 같은 답"
-            );
-        }
-        let held = DockGuard {
-            lease: Some(lease),
-            keep_lease: false,
-            expect_source: Some(layout_of(&mgr, p[0])),
-            expect_target: None,
-        };
-        assert!(mgr.plan_new_window(p[0], &held).is_ok());
-        assert_eq!(
-            mgr.lease,
-            Some((lease, p[0])),
-            "판단은 표식을 내리지 않는다"
-        );
-        assert_invariants(&mgr);
 
         // main 의 마지막 탭도 새 창으로 떠날 수 있다(PRD R14) — 판단만 하므로 빈 탭은 아직 없다.
         let mgr = ViewManager::new();
         let only = main_active(&mgr);
         let before = model(&mgr);
         assert_eq!(
-            mgr.plan_new_window(only, none),
+            mgr.plan_new_window(only),
             Ok(NewWindowPlan::Create { size: None })
         );
         assert_eq!(model(&mgr), before);
@@ -6153,7 +5347,6 @@ mod tests {
             &mut mgr,
             p[1],
             new_window(FRESH),
-            &DockGuard::NONE,
             DockError::WindowClosed(FRESH.into()),
         );
 
@@ -6209,23 +5402,20 @@ mod tests {
         // 묘비는 모델 삭제 뒤에 서므로 이 조합(묘비 + 모델에 남은 창)은 방어 갈래다 — 「없음」과 같은 사유.
         let Fx { mut mgr, m, q, .. } = fixture();
         mgr.mark_closed(P2);
-        let none = &DockGuard::NONE;
         refused(
             &mut mgr,
             m[1],
             tab_bar(P2, None),
-            none,
             DockError::WindowNotFound(P2.into()),
         );
         refused(
             &mut mgr,
             m[1],
             seam(q, DockAnchor::Outer, DockSide::Left),
-            none,
             DockError::TabNotFound(q),
         );
         // 묘비 없는 창은 그대로 받는다.
-        docked(&mut mgr, m[1], tab_bar(P1, None), none, FocusPolicy::Keep);
+        docked(&mut mgr, m[1], tab_bar(P1, None), FocusPolicy::Keep);
     }
 
     #[test]
@@ -6234,16 +5424,10 @@ mod tests {
         let Fx { mut mgr, p, q, .. } = fixture();
         let anchor = slots_of(&mgr, p[1])[1];
         let moved = slots_of(&mgr, q);
-        let seed = WindowSeed {
-            window_id: mgr.windows[P2].window_id.clone(),
-            attrs: mgr.windows[P2].attrs,
-            placement_memo: mgr.windows[P2].placement_memo,
-        };
         let out = docked(
             &mut mgr,
             q,
             seam(p[1], DockAnchor::Slot(anchor), DockSide::Right),
-            &DockGuard::NONE,
             FocusPolicy::Reveal,
         );
         assert_eq!(
@@ -6252,11 +5436,7 @@ mod tests {
                 window: P1.to_string(),
                 slot_ids: moved.clone(),
                 source_window: P2.to_string(),
-                emptied: Some(EmptiedWindow {
-                    label: P2.to_string(),
-                    seed,
-                    measures: FrameMeasures::default(),
-                }),
+                emptied: Some(P2.to_string()),
                 main_refilled: None,
             }
         );
@@ -6277,7 +5457,6 @@ mod tests {
             &mut mgr,
             p[1],
             seam(m[2], DockAnchor::Outer, DockSide::Right),
-            &DockGuard::NONE,
             FocusPolicy::Reveal,
         );
         let result = slots_of(&mgr, m[2]);
@@ -6286,94 +5465,28 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_after_the_lease_check_keeps_the_lease() {
-        let Fx { mut mgr, m, p, .. } = fixture();
-        let lease = mgr.lease_tab(p[1]).unwrap();
-        let held = DockGuard {
-            lease: Some(lease),
-            ..DockGuard::NONE
-        };
-        let to = seam(m[1], DockAnchor::Outer, DockSide::Left);
-        let stale_source = DockGuard {
-            expect_source: Some(LayoutNode::new_empty_slot()),
-            ..held.clone()
-        };
-        refused(
-            &mut mgr,
-            p[1],
-            to.clone(),
-            &stale_source,
-            DockError::SourceChanged,
-        );
-        let stale_target = DockGuard {
-            expect_target: Some(stale_seam_expect(&mgr, m[1])),
-            ..held.clone()
-        };
-        refused(&mut mgr, p[1], to, &stale_target, DockError::TargetChanged);
-        plant(&mut mgr, m[1], planted_half_chain(40));
-        plant(&mut mgr, p[1], planted_half_chain(20));
-        let deepest = *slots_of(&mgr, m[1]).last().unwrap();
-        refused(
-            &mut mgr,
-            p[1],
-            seam(m[1], DockAnchor::Slot(deepest), DockSide::Right),
-            &held,
-            DockError::ZeroArea,
-        );
-        assert_eq!(
-            mgr.lease,
-            Some((lease, p[1])),
-            "거절은 표식을 내리지 않는다"
-        );
-        // 그 표식으로 붙일 수 있는 자리에는 붙는다.
-        docked(
-            &mut mgr,
-            p[1],
-            seam(m[1], DockAnchor::Outer, DockSide::Left),
-            &held,
-            FocusPolicy::Reveal,
-        );
-        assert_eq!(mgr.lease, None);
-    }
-
-    #[test]
     fn a_refused_dock_of_the_main_last_tab_makes_no_empty_tab() {
         let mut mgr = ViewManager::new();
         let only = main_active(&mgr);
         mgr.create_window(P1).unwrap();
         let bogus = Uuid::new_v4();
-        let none = &DockGuard::NONE;
         refused(
             &mut mgr,
             only,
             tab_bar("no-such", None),
-            none,
             DockError::WindowNotFound("no-such".into()),
         );
         refused(
             &mut mgr,
             only,
             seam(bogus, DockAnchor::Outer, DockSide::Left),
-            none,
             DockError::TabNotFound(bogus),
         );
         refused(
             &mut mgr,
             only,
             new_window(P1),
-            none,
             DockError::WindowExists(P1.into()),
-        );
-        let stale_source = DockGuard {
-            expect_source: Some(LayoutNode::new_empty_slot()),
-            ..DockGuard::NONE
-        };
-        refused(
-            &mut mgr,
-            only,
-            tab_bar(P1, None),
-            &stale_source,
-            DockError::SourceChanged,
         );
         assert_eq!(mgr.windows[MAIN_WINDOW_LABEL].tabs, vec![only]);
         assert_invariants(&mgr);
@@ -6388,18 +5501,12 @@ mod tests {
                 let p0 = mgr.create_window(P1).unwrap();
                 let (only, _) = foreign_root(&mut mgr);
                 let moved = mgr.views[&only].clone();
-                let lease = mgr.lease_tab(only).unwrap();
-                let held = DockGuard {
-                    lease: Some(lease),
-                    expect_source: Some(moved.layout.clone()),
-                    ..DockGuard::NONE
-                };
                 let (to, window) = match mode {
                     "seam" => (seam(p0, DockAnchor::Outer, DockSide::Left), P1),
                     "tab_bar" => (tab_bar(P1, None), P1),
                     _ => (new_window(FRESH), FRESH),
                 };
-                let out = docked(&mut mgr, only, to, &held, focus);
+                let out = docked(&mut mgr, only, to, focus);
                 let main = &mgr.windows[MAIN_WINDOW_LABEL];
                 assert_eq!(main.tabs.len(), 1, "{mode} {focus:?}");
                 let blank = main.tabs[0];
@@ -6425,7 +5532,6 @@ mod tests {
                     }
                 ));
                 assert!(!mgr.unknown_content.contains_key(&blank));
-                assert_eq!(mgr.lease, None, "{mode} {focus:?}");
                 if mode == "seam" {
                     assert!(!mgr.views.contains_key(&only));
                     assert!(mgr.unknown_content.contains_key(&p0), "곁표는 대상으로");
@@ -6443,177 +5549,7 @@ mod tests {
         }
     }
 
-    // 끄던 탭이 지워진 뒤: 지난 세션의 늦은 해제는 무동작 · 늦은 놓기는 `StaleLease` · 새 끌기는 선다.
-    fn assert_lease_gone_after_removal(mgr: &mut ViewManager, old: LeaseId, other: ViewId) {
-        assert_eq!(mgr.lease, None, "지운 탭의 표식이 남았다");
-        let held = DockGuard {
-            lease: Some(old),
-            ..DockGuard::NONE
-        };
-        refused(
-            mgr,
-            other,
-            tab_bar(MAIN_WINDOW_LABEL, None),
-            &held,
-            DockError::StaleLease,
-        );
-        let fresh = mgr.lease_tab(other).unwrap();
-        mgr.release_lease(old);
-        assert_eq!(
-            mgr.lease,
-            Some((fresh, other)),
-            "지난 번호의 해제는 새 표식을 못 내린다"
-        );
-        refused(
-            mgr,
-            other,
-            tab_bar(MAIN_WINDOW_LABEL, None),
-            &held,
-            DockError::StaleLease,
-        );
-    }
-
-    #[test]
-    fn closing_the_leased_tab_clears_its_lease() {
-        let Fx { mut mgr, p, .. } = fixture();
-        let old = mgr.lease_tab(p[0]).unwrap();
-        mgr.close_tab(P1, p[0]).unwrap();
-        assert_invariants(&mgr);
-        assert_lease_gone_after_removal(&mut mgr, old, p[1]);
-    }
-
-    #[test]
-    fn closing_the_window_of_the_leased_tab_clears_its_lease() {
-        let Fx { mut mgr, m, p, .. } = fixture();
-        let old = mgr.lease_tab(p[1]).unwrap();
-        mgr.close_window(P1).unwrap();
-        assert_invariants(&mgr);
-        assert_lease_gone_after_removal(&mut mgr, old, m[1]);
-    }
-
-    #[test]
-    fn a_restore_that_drops_the_leased_tab_clears_its_lease() {
-        let Fx { mut mgr, p, .. } = fixture();
-        let old = mgr.lease_tab(p[0]).unwrap();
-        let (restored, a, ..) = restored_with_popout("slot-popup-7");
-        mgr.adopt_restored(restored).unwrap();
-        assert_invariants(&mgr);
-        assert_lease_gone_after_removal(&mut mgr, old, a.id);
-    }
-
-    #[test]
-    fn removing_another_tab_keeps_the_lease() {
-        let Fx { mut mgr, m, p, .. } = fixture();
-        let lease = mgr.lease_tab(p[0]).unwrap();
-        mgr.close_tab(P1, p[1]).unwrap();
-        mgr.close_window(P2).unwrap();
-        assert_eq!(mgr.lease, Some((lease, p[0])));
-        // 다른 탭을 이음새로 붙여 그 출처가 지워져도 그대로다.
-        docked(
-            &mut mgr,
-            m[1],
-            seam(m[0], DockAnchor::Outer, DockSide::Left),
-            &DockGuard::NONE,
-            FocusPolicy::Keep,
-        );
-        assert_eq!(mgr.lease, Some((lease, p[0])));
-        // 끄던 탭을 이음새로 붙이면 표식은 정확히 내려가고 다음 끌기가 선다.
-        let held = DockGuard {
-            lease: Some(lease),
-            ..DockGuard::NONE
-        };
-        docked(
-            &mut mgr,
-            p[0],
-            seam(m[0], DockAnchor::Outer, DockSide::Right),
-            &held,
-            FocusPolicy::Reveal,
-        );
-        assert_eq!(mgr.lease, None);
-        assert!(mgr.lease_tab(m[2]).is_ok());
-    }
-
-    // ── 끌기 하나의 여러 쓰기(TRD S21-slot-docking §7 · ADR-0295) ──────────────
-
-    // 표식을 이어 쥐는 끌기 사전조건.
-    fn kept(lease: LeaseId) -> DockGuard {
-        DockGuard {
-            lease: Some(lease),
-            keep_lease: true,
-            ..DockGuard::NONE
-        }
-    }
-
-    #[test]
-    fn keep_lease_holds_the_lease_through_every_write_of_one_drag() {
-        let Fx { mut mgr, p, .. } = fixture();
-        let lease = mgr.lease_tab(p[0]).unwrap();
-        let held = kept(lease);
-        docked(
-            &mut mgr,
-            p[0],
-            tab_bar(MAIN_WINDOW_LABEL, Some(1)),
-            &held,
-            FocusPolicy::Reveal,
-        );
-        assert_eq!(mgr.lease, Some((lease, p[0])), "다른 창 탭바");
-        let before = model(&mgr);
-        mgr.dock(
-            p[0],
-            tab_bar(MAIN_WINDOW_LABEL, Some(1)),
-            &held,
-            FocusPolicy::Keep,
-            DockMove::default(),
-        )
-        .unwrap();
-        assert_eq!(model(&mgr), before, "같은 자리 — 무변경이고 표식도 그대로");
-        docked(
-            &mut mgr,
-            p[0],
-            new_window(FRESH),
-            &held,
-            FocusPolicy::Reveal,
-        );
-        assert_eq!(mgr.lease, Some((lease, p[0])), "새 창");
-        let out = docked(
-            &mut mgr,
-            p[0],
-            tab_bar(MAIN_WINDOW_LABEL, None),
-            &held,
-            FocusPolicy::Reveal,
-        );
-        assert_eq!(
-            out.emptied.map(|e| e.label),
-            Some(FRESH.to_string()),
-            "전제: 비운 새 창"
-        );
-        assert_eq!(mgr.lease, Some((lease, p[0])), "비운 창에서 돌아옴");
-        // 표식 없는 쓰기는 여전히 막힌다 — 표식은 부르는 쪽이 끝에 내린다.
-        refused(
-            &mut mgr,
-            p[0],
-            tab_bar(P1, None),
-            &DockGuard::NONE,
-            DockError::Dragging,
-        );
-        mgr.release_lease(lease);
-        assert_eq!(mgr.lease, None);
-    }
-
-    #[test]
-    fn a_seam_takes_the_kept_lease_away_with_the_source_tab() {
-        let Fx { mut mgr, m, p, .. } = fixture();
-        let lease = mgr.lease_tab(p[1]).unwrap();
-        docked(
-            &mut mgr,
-            p[1],
-            seam(m[0], DockAnchor::Outer, DockSide::Left),
-            &kept(lease),
-            FocusPolicy::Reveal,
-        );
-        assert_eq!(mgr.lease, None, "출처 탭이 지워져 그 표식도 없다");
-        assert!(mgr.lease_tab(m[0]).is_ok());
-    }
+    // ── 다음 활성 · 붙는 몫(ADR-0295 · ADR-0297) ──────────────
 
     #[test]
     fn the_source_window_takes_the_given_successor_when_it_remains() {
@@ -6644,7 +5580,6 @@ mod tests {
                 mgr.dock(
                     p[1],
                     to,
-                    &DockGuard::NONE,
                     FocusPolicy::Reveal,
                     DockMove {
                         successor: pick(&p, m0),
@@ -6663,7 +5598,6 @@ mod tests {
         mgr.dock(
             p[0],
             tab_bar(MAIN_WINDOW_LABEL, None),
-            &DockGuard::NONE,
             FocusPolicy::Reveal,
             DockMove {
                 successor: Some(p[2]),
@@ -6686,7 +5620,6 @@ mod tests {
             mgr.dock(
                 p[1],
                 tab_bar(MAIN_WINDOW_LABEL, None),
-                &DockGuard::NONE,
                 FocusPolicy::Reveal,
                 DockMove {
                     successor: Some(p[0]),
@@ -6697,180 +5630,6 @@ mod tests {
             assert_eq!(mgr.windows[P1].active, p[want], "{window:?}");
             assert_invariants(&mgr);
         }
-    }
-
-    #[test]
-    fn new_window_takes_the_seed_identity_and_the_carried_measures() {
-        let Fx { mut mgr, p, .. } = fixture();
-        let seed = WindowSeed {
-            window_id: "kept-window-id".into(),
-            attrs: WindowAttrs {
-                theme: Some(UiTheme::Light),
-                bounds: Some(bounds(300.0)),
-                maximized: true,
-            },
-            placement_memo: PlacementMemo::default(),
-        };
-        let measures = FrameMeasures {
-            canvas: Some(CanvasPx { w: 800, h: 600 }),
-            metrics: Some(one_px_border()),
-        };
-        docked(
-            &mut mgr,
-            p[1],
-            DockTo::NewWindow {
-                label: FRESH.into(),
-                seed: Some(seed.clone()),
-                measures: measures.clone(),
-            },
-            &DockGuard::NONE,
-            FocusPolicy::Keep,
-        );
-        let w = window(&mgr, FRESH);
-        assert_eq!((w.window_id.clone(), w.attrs), (seed.window_id, seed.attrs));
-        assert_eq!(w.measures(), measures);
-        assert_eq!((w.tabs, w.active), (vec![p[1]], p[1]));
-    }
-
-    #[test]
-    fn an_emptied_popout_is_returned_whole_and_comes_back_from_it() {
-        let Fx { mut mgr, q, .. } = fixture();
-        mgr.set_window_theme(P2, Some(UiTheme::Light)).unwrap();
-        mgr.observe_window_placement(P2, normal_at(120.0)).unwrap();
-        mgr.set_window_canvas(P2, 800, 600).unwrap();
-        mgr.set_ui_metrics(P2, one_px_border()).unwrap();
-        let before = window(&mgr, P2);
-        assert!(before.measures().canvas.is_some(), "전제: 재기가 섰다");
-
-        let out = docked(
-            &mut mgr,
-            q,
-            tab_bar(MAIN_WINDOW_LABEL, None),
-            &DockGuard::NONE,
-            FocusPolicy::Reveal,
-        );
-        let emptied = out.emptied.expect("탭 하나뿐인 팝아웃은 빈다");
-        assert_eq!(
-            emptied,
-            EmptiedWindow {
-                label: P2.to_string(),
-                seed: WindowSeed {
-                    window_id: before.window_id.clone(),
-                    attrs: before.attrs,
-                    placement_memo: before.placement_memo,
-                },
-                measures: before.measures(),
-            }
-        );
-        assert!(!mgr.windows.contains_key(P2));
-
-        // 같은 label · 영속 id · 속성 · 재기로 되살린다(되돌리기).
-        let back = docked(
-            &mut mgr,
-            q,
-            DockTo::NewWindow {
-                label: emptied.label.clone(),
-                seed: Some(emptied.seed.clone()),
-                measures: emptied.measures.clone(),
-            },
-            &DockGuard::NONE,
-            FocusPolicy::Reveal,
-        );
-        assert_eq!(back.window, P2);
-        let now = window(&mgr, P2);
-        assert_eq!(
-            (now.window_id.clone(), now.attrs, now.measures()),
-            (before.window_id.clone(), before.attrs, before.measures())
-        );
-        assert_eq!((now.tabs, now.active), (vec![q], q));
-    }
-
-    #[test]
-    fn re_adopting_refuses_a_live_or_tombstoned_label_unchanged() {
-        let Fx { mut mgr, q, .. } = fixture();
-        let out = docked(
-            &mut mgr,
-            q,
-            tab_bar(MAIN_WINDOW_LABEL, None),
-            &DockGuard::NONE,
-            FocusPolicy::Reveal,
-        );
-        let emptied = out.emptied.unwrap();
-        refused(
-            &mut mgr,
-            q,
-            DockTo::NewWindow {
-                label: P1.into(),
-                seed: Some(emptied.seed.clone()),
-                measures: FrameMeasures::default(),
-            },
-            &DockGuard::NONE,
-            DockError::WindowExists(P1.into()),
-        );
-        // 비워 둔 사이 그 창에 닫기 요청이 왔다(묘비).
-        mgr.mark_closed(P2);
-        refused(
-            &mut mgr,
-            q,
-            DockTo::NewWindow {
-                label: emptied.label.clone(),
-                seed: Some(emptied.seed),
-                measures: emptied.measures,
-            },
-            &DockGuard::NONE,
-            DockError::WindowClosed(P2.into()),
-        );
-    }
-
-    #[test]
-    fn a_re_adopted_popout_keeps_its_placement_memo() {
-        // 사용자가 최대화하면 최대화된 사각형이 보통 자리로 한 번 먼저 적힌다(`WindowAttrs::observe`) — 그 사이에
-        // 비웠다 되살려도 이어지는 최대화 읽기가 그것을 되돌려야 한다.
-        let Fx { mut mgr, q, .. } = fixture();
-        mgr.observe_window_placement(P2, normal_at(100.0)).unwrap();
-        mgr.observe_window_placement(P2, normal_at(500.0)).unwrap();
-        let emptied = docked(
-            &mut mgr,
-            q,
-            tab_bar(MAIN_WINDOW_LABEL, None),
-            &DockGuard::NONE,
-            FocusPolicy::Reveal,
-        )
-        .emptied
-        .unwrap();
-        assert_ne!(
-            emptied.seed.placement_memo,
-            PlacementMemo::default(),
-            "전제: 기억이 실렸다"
-        );
-        docked(
-            &mut mgr,
-            q,
-            DockTo::NewWindow {
-                label: emptied.label,
-                seed: Some(emptied.seed),
-                measures: emptied.measures,
-            },
-            &DockGuard::NONE,
-            FocusPolicy::Reveal,
-        );
-
-        mgr.observe_window_placement(
-            P2,
-            WindowPlacement {
-                minimized: false,
-                maximized: true,
-                bounds: Some(bounds(500.0)),
-            },
-        )
-        .unwrap();
-
-        let attrs = mgr.window_attrs(P2).unwrap();
-        assert_eq!(
-            (attrs.maximized, attrs.bounds),
-            (true, Some(bounds(100.0))),
-            "잘못 적힌 보통 자리를 되돌렸다"
-        );
     }
 
     #[test]
@@ -6894,22 +5653,9 @@ mod tests {
                 &mut mgr,
                 p[1],
                 at(share),
-                &DockGuard::NONE,
                 DockError::InvalidShare(share.to_string()),
             );
         }
-        // 판정 순서 — 사전조건이 먼저다.
-        let stale = DockGuard {
-            expect_source: Some(LayoutNode::new_empty_slot()),
-            ..DockGuard::NONE
-        };
-        refused(
-            &mut mgr,
-            p[1],
-            at(f64::NAN),
-            &stale,
-            DockError::SourceChanged,
-        );
         // 판정 순서 — 면적 0 보다 먼저다.
         plant(&mut mgr, m[1], planted_half_chain(40));
         plant(&mut mgr, p[0], planted_half_chain(20));
@@ -6924,14 +5670,12 @@ mod tests {
             &mut mgr,
             p[0],
             to(dock::DOCK_NEW_SHARE),
-            &DockGuard::NONE,
             DockError::ZeroArea,
         );
         refused(
             &mut mgr,
             p[0],
             to(f64::NAN),
-            &DockGuard::NONE,
             DockError::InvalidShare("NaN".into()),
         );
     }
@@ -6949,7 +5693,6 @@ mod tests {
                     side: DockSide::Right,
                     share,
                 },
-                &DockGuard::NONE,
                 FocusPolicy::Keep,
             );
             assert_eq!(
@@ -6958,222 +5701,5 @@ mod tests {
                 "{share}"
             );
         }
-    }
-
-    #[test]
-    fn a_seed_whose_id_a_live_window_holds_gets_a_fresh_id_and_keeps_the_rest() {
-        let seed = WindowSeed {
-            window_id: "taken".into(),
-            attrs: WindowAttrs {
-                theme: Some(UiTheme::Light),
-                bounds: Some(bounds(300.0)),
-                maximized: false,
-            },
-            placement_memo: PlacementMemo {
-                last: Some((bounds(300.0), None)),
-            },
-        };
-        let fresh = reidentified(FRESH, seed.clone());
-        assert_ne!(fresh.window_id, seed.window_id);
-        assert!(
-            Uuid::parse_str(&fresh.window_id).is_ok(),
-            "팝아웃 영속 id 꼴"
-        );
-        assert_eq!(
-            (fresh.attrs, fresh.placement_memo),
-            (seed.attrs, seed.placement_memo)
-        );
-    }
-
-    #[test]
-    fn re_adopting_with_a_live_windows_id_mints_a_fresh_id_and_keeps_the_rest() {
-        // P1 은 탭이 남아 산 창이다 — 그 영속 id 를 단 seed 로 들이면 신원만 새로 받는다.
-        let Fx { mut mgr, p, .. } = fixture();
-        let live = mgr.windows[P1].window_id.clone();
-        let seed = WindowSeed {
-            window_id: live.clone(),
-            attrs: WindowAttrs {
-                theme: Some(UiTheme::Light),
-                bounds: Some(bounds(300.0)),
-                maximized: false,
-            },
-            placement_memo: PlacementMemo {
-                last: Some((bounds(300.0), None)),
-            },
-        };
-        let measures = FrameMeasures {
-            canvas: Some(CanvasPx { w: 800, h: 600 }),
-            metrics: Some(one_px_border()),
-        };
-
-        docked(
-            &mut mgr,
-            p[1],
-            DockTo::NewWindow {
-                label: FRESH.into(),
-                seed: Some(seed.clone()),
-                measures: measures.clone(),
-            },
-            &DockGuard::NONE,
-            FocusPolicy::Keep,
-        );
-
-        let w = window(&mgr, FRESH);
-        assert_ne!(w.window_id, live, "새 신원");
-        assert!(Uuid::parse_str(&w.window_id).is_ok(), "팝아웃 영속 id 꼴");
-        assert_eq!(mgr.windows[P1].window_id, live, "산 창의 신원은 그대로");
-        assert_eq!(
-            (w.attrs, w.placement_memo, w.measures()),
-            (seed.attrs, seed.placement_memo, measures)
-        );
-        assert_eq!((w.tabs, w.active), (vec![p[1]], p[1]), "탭은 잃지 않는다");
-    }
-
-    #[test]
-    fn re_adopting_the_source_windows_own_seed_keeps_its_id() {
-        // 비우는 출처의 영속 id 는 같은 쓰기 안에서 풀린다 — 산 창의 것이 아니다.
-        let Fx { mut mgr, q, .. } = fixture();
-        let own = WindowSeed {
-            window_id: mgr.windows[P2].window_id.clone(),
-            attrs: mgr.windows[P2].attrs,
-            placement_memo: mgr.windows[P2].placement_memo,
-        };
-        docked(
-            &mut mgr,
-            q,
-            DockTo::NewWindow {
-                label: FRESH.into(),
-                seed: Some(own.clone()),
-                measures: FrameMeasures::default(),
-            },
-            &DockGuard::NONE,
-            FocusPolicy::Keep,
-        );
-        assert!(!mgr.windows.contains_key(P2));
-        assert_eq!(mgr.windows[FRESH].window_id, own.window_id);
-    }
-
-    // ── 판 번호 `layout_rev`(TRD S21-slot-docking §3-7 · §8-1 ⑦) ────────────────────────────────────
-
-    // 한 쓰기 뒤 — `moved` 면 판 번호가 오르고 그 쓰기가 낸 `version` 과 같다 · 아니면 그대로. 스냅숏도 같은 값을 싣는다.
-    fn rev_step(mgr: &ViewManager, view: ViewId, last: &mut u64, moved: bool, what: &str) {
-        let now = mgr.layout_rev(view).expect("뷰 있음");
-        assert_eq!(mgr.snapshot(view).unwrap().layout_rev, now, "{what}");
-        if moved {
-            assert!(now > *last, "{what}: 판 번호가 올라야");
-            assert_eq!(now, mgr.version, "{what}: 그 쓰기가 낸 version");
-        } else {
-            assert_eq!(now, *last, "{what}: 판 번호 그대로");
-        }
-        *last = now;
-    }
-
-    // 착수 때 센 레이아웃 쓰기 지점 — split_slot · set_split_ratio(Applied) · close_slot · assign_agent · set_slot_content ·
-    // set_unknown_content · dock 이음새의 대상. 포커스 · 이름 · 활성 · 실패 · 무변경은 오르지 않는다.
-    #[test]
-    fn each_layout_write_moves_the_layout_rev_and_nothing_else_does() {
-        let mut mgr = ViewManager::new();
-        let v = main_active(&mgr);
-        let mut last = mgr.layout_rev(v).unwrap();
-        let s1 = first_slot_of(&mgr, v);
-
-        let s2 = mgr.split_slot(v, s1, SplitDir::LeftRight).unwrap();
-        rev_step(&mgr, v, &mut last, true, "split_slot");
-        let split = mgr.list_splits(v).unwrap()[0].id;
-        let applied = mgr.set_split_ratio(v, split, 0.3).unwrap();
-        assert_eq!(applied.outcome, SplitRatioOutcome::Applied);
-        rev_step(&mgr, v, &mut last, true, "set_split_ratio");
-        let same = mgr.set_split_ratio(v, split, 0.3).unwrap();
-        assert_eq!(same.outcome, SplitRatioOutcome::Unchanged);
-        rev_step(&mgr, v, &mut last, false, "set_split_ratio 무변경");
-        mgr.assign_agent(v, s1, "a".into()).unwrap();
-        rev_step(&mgr, v, &mut last, true, "assign_agent");
-        mgr.set_slot_content(v, s1, SlotContent::Empty).unwrap();
-        rev_step(&mgr, v, &mut last, true, "set_slot_content");
-        mgr.set_unknown_content(v, s1, raw("future")).unwrap();
-        rev_step(&mgr, v, &mut last, true, "set_unknown_content");
-
-        mgr.set_focused_slot(v, s2).unwrap();
-        rev_step(&mgr, v, &mut last, false, "set_focused_slot");
-        mgr.rename_tab(v, "이름".into()).unwrap();
-        rev_step(&mgr, v, &mut last, false, "rename_tab");
-        let other = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
-        mgr.switch_tab(MAIN_WINDOW_LABEL, v).unwrap();
-        rev_step(&mgr, v, &mut last, false, "다른 탭 · 활성");
-        assert!(mgr
-            .split_slot(v, Uuid::new_v4(), SplitDir::TopBottom)
-            .is_err());
-        assert!(mgr.close_slot(v, Uuid::new_v4()).is_err());
-        assert!(mgr.assign_agent(v, Uuid::new_v4(), "b".into()).is_err());
-        rev_step(&mgr, v, &mut last, false, "실패한 쓰기");
-
-        mgr.close_slot(v, s2).unwrap();
-        rev_step(&mgr, v, &mut last, true, "close_slot");
-        mgr.dock(
-            other,
-            DockTo::Seam {
-                target: v,
-                anchor: DockAnchor::Outer,
-                side: DockSide::Left,
-                share: 0.5,
-            },
-            &DockGuard::NONE,
-            FocusPolicy::Keep,
-            DockMove::default(),
-        )
-        .unwrap();
-        rev_step(&mgr, v, &mut last, true, "dock 이음새의 대상");
-        assert_eq!(mgr.layout_rev(other), None, "지운 뷰");
-    }
-
-    #[test]
-    fn a_new_or_moved_tab_has_a_layout_rev_and_moving_a_tab_keeps_it() {
-        let mut mgr = ViewManager::new();
-        let t = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
-        let rev = mgr.layout_rev(t).expect("새 탭도 판 번호가 있다");
-        mgr.create_window("slot-popup-1").unwrap();
-        mgr.dock(
-            t,
-            DockTo::TabBar {
-                window: "slot-popup-1".into(),
-                index: None,
-            },
-            &DockGuard::NONE,
-            FocusPolicy::Keep,
-            DockMove::default(),
-        )
-        .unwrap();
-        assert_eq!(
-            mgr.layout_rev(t),
-            Some(rev),
-            "탭바로 옮기기는 레이아웃을 바꾸지 않는다"
-        );
-    }
-
-    #[test]
-    fn a_restore_that_brings_back_the_same_view_id_moves_its_layout_rev() {
-        let mut mgr = ViewManager::new();
-        let v = main_active(&mgr);
-        mgr.split_slot(v, first_slot_of(&mgr, v), SplitDir::LeftRight)
-            .unwrap();
-        let before = mgr.layout_rev(v).unwrap();
-        let same_id = View {
-            id: v,
-            name: "View 1".into(),
-            layout: LayoutNode::new_empty_slot(),
-            focused_slot_id: None,
-        };
-        let restored = ViewManager::from_restored(
-            RestoredWindow {
-                attrs: WindowAttrs::default(),
-                tabs: vec![same_id],
-                active: Some(v),
-            },
-            Vec::new(),
-        )
-        .unwrap();
-        mgr.adopt_restored(restored).unwrap();
-        assert!(mgr.layout_rev(v).unwrap() > before);
-        assert_eq!(mgr.layout_rev(v), Some(mgr.version));
     }
 }

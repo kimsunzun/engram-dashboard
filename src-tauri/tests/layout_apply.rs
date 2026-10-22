@@ -41,16 +41,14 @@ use uuid::Uuid;
 use engram_dashboard_lib::commands::popout::PopupCounter;
 use engram_dashboard_lib::layout::apply::{
     self, AgentSpawner, DockDest, DockOutcome, DockRequest, LabelSource, LayoutEvents, MoveFailed,
-    MoveStep, OnEmptied, SpareClaim, SubscriptionSync, WindowHost, WindowPlace, WindowTabsPayload,
+    MoveStep, SpareClaim, SubscriptionSync, WindowHost, WindowPlace, WindowTabsPayload,
 };
 use engram_dashboard_lib::layout::bands::PointCss;
 use engram_dashboard_lib::layout::dock::{DockAnchor, DockSide, DOCK_NEW_SHARE};
 use engram_dashboard_lib::layout::geometry::{Insets, PxRect};
-use engram_dashboard_lib::layout::manager::{
-    DockError, DockGuard, DockMove, FocusPolicy, FrameMeasures, LeaseId, TargetExpect,
-};
+use engram_dashboard_lib::layout::manager::{DockError, DockMove, FocusPolicy};
 use engram_dashboard_lib::layout::{
-    tree, CanvasPx, LayoutNode, LayoutState, SlotContent, SplitDir, SplitRatioOutcome, UiMetrics,
+    tree, LayoutNode, LayoutState, SlotContent, SplitDir, SplitRatioOutcome, UiMetrics,
     ViewManager, ViewSnapshot, WindowBounds, WindowPlacement, MAIN_WINDOW_LABEL,
 };
 use engram_dashboard_lib::output_router::OutputRouter;
@@ -2893,34 +2891,6 @@ impl World {
             .unwrap();
     }
 
-    fn lease(&self, view: Uuid) -> LeaseId {
-        self.state.0.lock().unwrap().lease_tab(view).unwrap()
-    }
-
-    // 표식이 하나라도 서 있나 — 세워 보고 서면 곧바로 내린다.
-    fn lease_held(&self) -> bool {
-        let main = self.main_active();
-        let mut mgr = self.state.0.lock().unwrap();
-        match mgr.lease_tab(main) {
-            Ok(id) => {
-                mgr.release_lease(id);
-                false
-            }
-            Err(DockError::Dragging) => true,
-            Err(e) => panic!("표식 확인: {e}"),
-        }
-    }
-
-    // 끌기가 싣는 사전조건 — 표식 + 출처 배치.
-    fn drag_guard(&self, view: Uuid) -> DockGuard {
-        DockGuard {
-            lease: Some(self.lease(view)),
-            keep_lease: false,
-            expect_source: Some(self.layout_of(view)),
-            expect_target: None,
-        }
-    }
-
     // 준비 쓰기가 남긴 기록을 비운다 — 뒤의 단언은 도킹 한 번만 본다. ★연 창 목록(`opened`)은 남긴다★ — 이 가짜의
     // `is_open` · 되돌리기가 그것으로 창이 떠 있는지 본다.
     fn forget(&self) {
@@ -2936,14 +2906,8 @@ impl World {
         self.journal.take();
     }
 
-    fn dock(
-        &self,
-        view: Uuid,
-        to: DockDest,
-        guard: DockGuard,
-        focus: FocusPolicy,
-    ) -> Result<DockOutcome, DockError> {
-        self.dock_via(&self.ev, view, to, guard, focus)
+    fn dock(&self, view: Uuid, to: DockDest, focus: FocusPolicy) -> Result<DockOutcome, DockError> {
+        self.dock_via(&self.ev, view, to, focus)
     }
 
     fn dock_via(
@@ -2951,7 +2915,6 @@ impl World {
         events: &dyn LayoutEvents,
         view: Uuid,
         to: DockDest,
-        guard: DockGuard,
         focus: FocusPolicy,
     ) -> Result<DockOutcome, DockError> {
         apply::dock_tab(
@@ -2963,10 +2926,8 @@ impl World {
             DockRequest {
                 view,
                 to,
-                guard,
                 focus,
                 mv: DockMove::default(),
-                on_emptied: OnEmptied::Close,
             },
         )
     }
@@ -3025,15 +2986,6 @@ fn dock_tab_seam_moves_the_tab_under_one_lock_and_notifies_after_it() {
     let slot = w.empty_slot(source);
     let agent = Uuid::new_v4();
     apply::assign_agent(&w.state, &w.subs, &w.ev, source, slot, agent.to_string()).unwrap();
-    let guard = DockGuard {
-        lease: Some(w.lease(source)),
-        keep_lease: false,
-        expect_source: Some(w.layout_of(source)),
-        expect_target: Some(TargetExpect::Seam {
-            layout: w.layout_of(target),
-            active: target,
-        }),
-    };
     let resyncs = w.resyncs();
     w.forget();
 
@@ -3046,7 +2998,6 @@ fn dock_tab_seam_moves_the_tab_under_one_lock_and_notifies_after_it() {
                 side: DockSide::Left,
                 share: DOCK_NEW_SHARE,
             },
-            guard,
             FocusPolicy::Reveal,
         )
         .unwrap();
@@ -3082,7 +3033,6 @@ fn dock_tab_seam_moves_the_tab_under_one_lock_and_notifies_after_it() {
     w.assert_notified_at_current_version();
     assert_one_batch(&w, "dock_tab(seam)");
     assert!(w.host.closed.lock().unwrap().is_empty());
-    assert!(!w.lease_held(), "성공하면 표식이 내려간다");
     assert_invariants(&w);
 }
 
@@ -3092,12 +3042,6 @@ fn dock_tab_tab_bar_moves_the_tab_and_notifies_both_windows() {
     let main_tab = w.main_active();
     let (label, tabs) = w.popup_with(2);
     let source = tabs[1];
-    let guard = DockGuard {
-        lease: Some(w.lease(source)),
-        keep_lease: false,
-        expect_source: Some(w.layout_of(source)),
-        expect_target: Some(TargetExpect::Tabs(vec![main_tab])),
-    };
     let resyncs = w.resyncs();
     let spare = w.prewarm();
     let asked = w.claims_asked();
@@ -3110,7 +3054,6 @@ fn dock_tab_tab_bar_moves_the_tab_and_notifies_both_windows() {
                 window: MAIN_WINDOW_LABEL.to_string(),
                 index: Some(0),
             },
-            guard,
             FocusPolicy::Reveal,
         )
         .unwrap();
@@ -3141,7 +3084,6 @@ fn dock_tab_closes_an_emptied_source_popout_once_after_its_notifications() {
     let target = w.main_active();
     let (label, tabs) = w.popup_with(1);
     let source = tabs[0];
-    let guard = w.drag_guard(source);
     w.forget();
     let events = ClosesAfter {
         inner: &w.ev,
@@ -3158,14 +3100,13 @@ fn dock_tab_closes_an_emptied_source_popout_once_after_its_notifications() {
                 side: DockSide::Right,
                 share: DOCK_NEW_SHARE,
             },
-            guard,
             FocusPolicy::Reveal,
         )
         .unwrap();
 
     assert_eq!(out.closed_window.as_deref(), Some(label.as_str()));
     assert_eq!(
-        out.emptied.map(|e| e.label),
+        out.emptied,
         Some(label.clone()),
         "닫아도 지운 항목은 돌려준다"
     );
@@ -3183,56 +3124,41 @@ fn dock_tab_closes_an_emptied_source_popout_once_after_its_notifications() {
 #[test]
 fn dock_tab_refusals_change_nothing_and_notify_nothing() {
     let w = World::new();
-    let target = w.main_active();
     let (_, tabs) = w.popup_with(2);
     let source = tabs[1];
-    let outer = |target| DockDest::Seam {
-        target,
-        anchor: DockAnchor::Outer,
-        side: DockSide::Top,
-        share: DOCK_NEW_SHARE,
-    };
-    let stale_active = DockGuard {
-        expect_target: Some(TargetExpect::Seam {
-            layout: w.layout_of(target),
-            active: source,
-        }),
-        ..DockGuard::default()
-    };
-    let to_new_window = DockGuard {
-        expect_target: Some(TargetExpect::Tabs(vec![target])),
-        ..DockGuard::default()
-    };
+    let bogus = Uuid::new_v4();
     let cases = [
-        (outer(source), DockGuard::NONE, DockError::SelfTarget),
         (
+            source,
+            DockDest::Seam {
+                target: source,
+                anchor: DockAnchor::Outer,
+                side: DockSide::Top,
+                share: DOCK_NEW_SHARE,
+            },
+            DockError::SelfTarget,
+        ),
+        (
+            source,
             DockDest::TabBar {
                 window: "no-such".into(),
                 index: None,
             },
-            DockGuard::NONE,
             DockError::WindowNotFound("no-such".into()),
         ),
-        (outer(target), stale_active, DockError::TargetChanged),
         (
+            bogus,
             DockDest::NewWindow { at: AT },
-            to_new_window,
-            DockError::TargetChanged,
+            DockError::TabNotFound(bogus),
         ),
     ];
     let version = w.version();
     let resyncs = w.resyncs();
     w.forget();
 
-    for (to, guard, want) in cases {
-        assert_eq!(w.dock(source, to, guard, FocusPolicy::Reveal), Err(want));
+    for (view, to, want) in cases {
+        assert_eq!(w.dock(view, to, FocusPolicy::Reveal), Err(want));
     }
-    w.lease(source);
-    assert_eq!(
-        w.dock(source, outer(target), DockGuard::NONE, FocusPolicy::Keep),
-        Err(DockError::Dragging),
-        "끄는 중인 탭은 표식 없이 못 옮긴다"
-    );
 
     assert_eq!(w.version(), version);
     assert_eq!(w.resyncs(), resyncs, "실패 = 재동기 없음");
@@ -3242,7 +3168,6 @@ fn dock_tab_refusals_change_nothing_and_notify_nothing() {
         "새 창도 안 연다"
     );
     assert!(w.host.closed.lock().unwrap().is_empty());
-    assert!(w.lease_held(), "거절은 표식을 건드리지 않는다");
     assert_invariants(&w);
 }
 
@@ -3261,7 +3186,6 @@ fn dock_tab_onto_the_same_place_is_ok_and_silent() {
                 window: label.clone(),
                 index: Some(1),
             },
-            DockGuard::NONE,
             FocusPolicy::Keep,
         )
         .unwrap();
@@ -3278,9 +3202,8 @@ fn dock_tab_onto_the_same_place_is_ok_and_silent() {
 
 #[test]
 fn dock_tab_of_mains_last_tab_announces_the_fresh_empty_tab() {
-    // 탭바(다른 창) · 새 창 · 들이는 창 — 셋 다 main 에 빈 탭이 생기고 그 id 를 돌려주며 그 배치 · 탭 목록이
-    // 알림에 실린다.
-    for mode in ["tab_bar", "new_window", "adopt_window"] {
+    // 탭바(다른 창) · 새 창 — 둘 다 main 에 빈 탭이 생기고 그 id 를 돌려주며 그 배치 · 탭 목록이 알림에 실린다.
+    for mode in ["tab_bar", "new_window"] {
         let w = World::new();
         let only = w.main_active();
         let (label, _) = w.popup_with(1);
@@ -3290,17 +3213,10 @@ fn dock_tab_of_mains_last_tab_announces_the_fresh_empty_tab() {
                 window: label.clone(),
                 index: None,
             },
-            "new_window" => DockDest::NewWindow { at: AT },
-            _ => DockDest::AdoptWindow {
-                label: ADOPTED.into(),
-                seed: None,
-                measures: FrameMeasures::default(),
-            },
+            _ => DockDest::NewWindow { at: AT },
         };
 
-        let out = w
-            .dock(only, to, DockGuard::NONE, FocusPolicy::Keep)
-            .unwrap();
+        let out = w.dock(only, to, FocusPolicy::Keep).unwrap();
 
         let main = w.tabs_of(MAIN_WINDOW_LABEL);
         assert_eq!(main.len(), 1, "{mode}: main 에 빈 탭 하나");
@@ -3323,10 +3239,7 @@ fn dock_tab_of_mains_last_tab_announces_the_fresh_empty_tab() {
     }
 }
 
-// ── dock_tab: 끌기 하나의 여러 쓰기(TRD S21-slot-docking §7 · ADR-0295) ──
-
-// 모델 밖에 떠 있는 창의 label — 이 가짜는 그 창을 연 적이 없다(예비 창은 셸이 따로 짓는다).
-const ADOPTED: &str = "slot-popup-77";
+// ── dock_tab: 다음 활성 · 붙는 몫(ADR-0295) ──
 
 impl World {
     fn dock_req(&self, req: DockRequest) -> Result<DockOutcome, DockError> {
@@ -3339,288 +3252,6 @@ impl World {
             req,
         )
     }
-
-    fn window_id(&self, label: &str) -> String {
-        self.state.0.lock().unwrap().windows[label]
-            .window_id
-            .clone()
-    }
-
-    fn measures_of(&self, label: &str) -> FrameMeasures {
-        let mgr = self.state.0.lock().unwrap();
-        let w = &mgr.windows[label];
-        FrameMeasures {
-            canvas: w.canvas,
-            metrics: w.metrics,
-        }
-    }
-
-    // 창 포트가 창을 열거나 옮기거나 그 자리를 적지 않았다(`forget` 뒤부터). `opened` 는 `forget` 이 안 비우므로
-    // 그 전 길이를 받는다.
-    fn assert_no_window_work(&self, opened_before: usize, write: &str) {
-        let h = &self.host;
-        assert_eq!(
-            h.opened.lock().unwrap().len(),
-            opened_before,
-            "{write}: 창을 열지 않는다"
-        );
-        assert!(h.opened_at.lock().unwrap().is_empty(), "{write}");
-        assert!(
-            h.moves.lock().unwrap().is_empty(),
-            "{write}: 창을 옮기지 않는다"
-        );
-        assert!(
-            h.placed.lock().unwrap().is_empty(),
-            "{write}: 첫 자리를 적지 않는다"
-        );
-    }
-}
-
-fn reported() -> FrameMeasures {
-    FrameMeasures {
-        canvas: Some(CanvasPx { w: 800, h: 600 }),
-        metrics: Some(one_px_border()),
-    }
-}
-
-fn report_all(w: &World, label: &str) {
-    apply::report_window_canvas(&w.state, label, 800, 600).unwrap();
-    apply::report_ui_metrics(&w.state, label, one_px_border()).unwrap();
-}
-
-#[test]
-fn dock_tab_keep_leaves_the_emptied_popout_open_unannounced_and_hands_it_back() {
-    let w = World::new();
-    let (label, tabs) = w.popup_with(1);
-    let source = tabs[0];
-    report_all(&w, &label);
-    let window_id = w.window_id(&label);
-    let guard = w.drag_guard(source);
-    w.forget();
-
-    let out = w
-        .dock_req(DockRequest {
-            view: source,
-            to: DockDest::TabBar {
-                window: MAIN_WINDOW_LABEL.into(),
-                index: None,
-            },
-            guard,
-            focus: FocusPolicy::Reveal,
-            mv: DockMove::default(),
-            on_emptied: OnEmptied::Keep,
-        })
-        .unwrap();
-
-    let emptied = out.emptied.clone().expect("비운 출처");
-    assert_eq!(emptied.label, label);
-    assert_eq!(emptied.seed.window_id, window_id);
-    assert_eq!(emptied.measures, reported(), "지우기 직전의 재기");
-    assert_eq!(out.closed_window, None);
-    assert!(
-        w.host.closed.lock().unwrap().is_empty(),
-        "Keep — 창을 닫지 않는다"
-    );
-    assert!(!w.window_exists(&label), "모델에서는 빠진다");
-    assert_eq!(
-        w.notified_windows(),
-        [MAIN_WINDOW_LABEL],
-        "비운 창에 탭 0 개 알림이 가지 않는다 — 받으면 웹뷰가 제 창을 닫는다"
-    );
-    assert_one_batch(&w, "dock_tab(Keep)");
-    assert_invariants(&w);
-}
-
-#[test]
-fn dock_tab_adopt_window_brings_an_emptied_popout_back_without_touching_the_os_window() {
-    let w = World::new();
-    let (label, tabs) = w.popup_with(1);
-    let source = tabs[0];
-    report_all(&w, &label);
-    w.observe(&label, false, bounds(40.0, 30.0, 800.0, 600.0));
-    let window_id = w.window_id(&label);
-    let attrs = w.state.0.lock().unwrap().window_attrs(&label).unwrap();
-    let keep = |to: DockDest| DockRequest {
-        view: source,
-        to,
-        guard: DockGuard::NONE,
-        focus: FocusPolicy::Reveal,
-        mv: DockMove::default(),
-        on_emptied: OnEmptied::Keep,
-    };
-    let emptied = w
-        .dock_req(keep(DockDest::TabBar {
-            window: MAIN_WINDOW_LABEL.into(),
-            index: None,
-        }))
-        .unwrap()
-        .emptied
-        .expect("전제: 비운 출처");
-    let opened = w.host.opened.lock().unwrap().len();
-    let resyncs = w.resyncs();
-    w.forget();
-
-    let out = w
-        .dock_req(keep(DockDest::AdoptWindow {
-            label: label.clone(),
-            seed: Some(emptied.seed.clone()),
-            measures: emptied.measures.clone(),
-        }))
-        .unwrap();
-
-    assert_eq!(out.window, label);
-    assert_eq!((out.emptied, out.closed_window), (None, None));
-    w.assert_no_window_work(opened, "들이기");
-    assert!(w.host.closed.lock().unwrap().is_empty());
-    assert_eq!(w.tabs_of(&label), [source]);
-    assert_eq!(w.window_id(&label), window_id, "같은 영속 id");
-    assert_eq!(
-        w.state.0.lock().unwrap().window_attrs(&label).unwrap(),
-        attrs,
-        "같은 속성"
-    );
-    assert_eq!(
-        w.measures_of(&label),
-        reported(),
-        "재기를 같은 락에서 옮겨 담는다"
-    );
-    assert_eq!(w.resyncs(), resyncs + 1, "재동기 한 번 — 락 안(프로브)");
-    assert_eq!(w.notified_windows(), [label.as_str(), MAIN_WINDOW_LABEL]);
-    w.assert_notified_at_current_version();
-    assert_one_batch(&w, "dock_tab(들이기)");
-    assert_invariants(&w);
-}
-
-#[test]
-fn dock_tab_adopt_window_of_a_fresh_label_starts_a_new_identity_with_the_given_measures() {
-    let w = World::new();
-    let main_tab = w.main_active();
-    let source = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
-    let guard = w.drag_guard(source);
-    let opened = w.host.opened.lock().unwrap().len();
-    w.forget();
-
-    let out = w
-        .dock_req(DockRequest {
-            view: source,
-            to: DockDest::AdoptWindow {
-                label: ADOPTED.into(),
-                seed: None,
-                measures: reported(),
-            },
-            guard,
-            focus: FocusPolicy::Reveal,
-            mv: DockMove::default(),
-            on_emptied: OnEmptied::Keep,
-        })
-        .unwrap();
-
-    assert_eq!(out.window, ADOPTED);
-    w.assert_no_window_work(opened, "새 label 들이기");
-    assert_eq!(w.tabs_of(ADOPTED), [source]);
-    assert_ne!(w.window_id(ADOPTED), w.window_id(MAIN_WINDOW_LABEL));
-    assert_eq!(w.measures_of(ADOPTED), reported());
-    assert_eq!(w.notified_views(), [source, main_tab]);
-    assert_eq!(w.notified_windows(), [ADOPTED, MAIN_WINDOW_LABEL]);
-    assert!(!w.lease_held(), "keep_lease 가 아니면 표식을 내린다");
-    assert_invariants(&w);
-}
-
-#[test]
-fn dock_tab_adopt_window_refuses_a_label_already_in_the_model_and_changes_nothing() {
-    let w = World::new();
-    let (label, _) = w.popup_with(1);
-    let source = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
-    let version = w.version();
-    let resyncs = w.resyncs();
-    let opened = w.host.opened.lock().unwrap().len();
-    w.forget();
-
-    let out = w.dock(
-        source,
-        DockDest::AdoptWindow {
-            label: label.clone(),
-            seed: None,
-            measures: reported(),
-        },
-        DockGuard::NONE,
-        FocusPolicy::Reveal,
-    );
-
-    assert_eq!(out, Err(DockError::WindowExists(label)));
-    assert_eq!(w.version(), version);
-    assert_eq!(w.resyncs(), resyncs);
-    assert_eq!(w.ev.take_order(), Vec::<&str>::new());
-    w.assert_no_window_work(opened, "거절");
-    assert!(w.host.closed.lock().unwrap().is_empty());
-}
-
-#[test]
-fn dock_tab_keep_lease_holds_the_lease_across_the_writes_of_one_drag() {
-    let w = World::new();
-    let (label, tabs) = w.popup_with(2);
-    let source = tabs[1];
-    let lease = w.lease(source);
-    let guard = DockGuard {
-        lease: Some(lease),
-        keep_lease: true,
-        ..DockGuard::default()
-    };
-    let to_main = |index| DockDest::TabBar {
-        window: MAIN_WINDOW_LABEL.into(),
-        index,
-    };
-
-    w.dock(source, to_main(None), guard.clone(), FocusPolicy::Reveal)
-        .unwrap();
-    assert!(w.lease_held(), "다른 창 탭바");
-    let version = w.version();
-    w.dock(source, to_main(Some(1)), guard.clone(), FocusPolicy::Keep)
-        .unwrap();
-    assert_eq!(w.version(), version, "전제: 같은 자리");
-    assert!(w.lease_held(), "같은 자리 — 무변경이어도 그대로");
-    w.dock(
-        source,
-        DockDest::TabBar {
-            window: label,
-            index: None,
-        },
-        guard,
-        FocusPolicy::Reveal,
-    )
-    .unwrap();
-    assert!(w.lease_held(), "출처 창으로 돌아옴");
-    assert_eq!(
-        w.dock(source, to_main(None), DockGuard::NONE, FocusPolicy::Keep),
-        Err(DockError::Dragging),
-        "표식 없는 쓰기는 여전히 막힌다"
-    );
-    w.state.0.lock().unwrap().release_lease(lease);
-    assert!(!w.lease_held());
-    assert_invariants(&w);
-}
-
-#[test]
-fn dock_tab_keep_lease_holds_the_lease_across_a_reuse_too() {
-    let w = World::new();
-    let (_, view) = w.lone_popout();
-    let guard = DockGuard {
-        lease: Some(w.lease(view)),
-        keep_lease: true,
-        ..DockGuard::default()
-    };
-
-    let out = w
-        .dock(
-            view,
-            DockDest::NewWindow { at: AT },
-            guard,
-            FocusPolicy::Reveal,
-        )
-        .unwrap();
-
-    assert!(out.reused, "전제: 재사용");
-    assert!(w.lease_held());
 }
 
 #[test]
@@ -3638,13 +3269,11 @@ fn dock_tab_hands_the_source_window_to_the_given_successor() {
                 window: MAIN_WINDOW_LABEL.into(),
                 index: None,
             },
-            guard: DockGuard::NONE,
             focus: FocusPolicy::Reveal,
             mv: DockMove {
                 successor: pick.map(|i: usize| tabs[i]),
                 ..DockMove::default()
             },
-            on_emptied: OnEmptied::Close,
         })
         .unwrap();
 
@@ -3672,7 +3301,6 @@ fn dock_tab_seam_wraps_the_target_with_the_requested_share() {
             side: DockSide::Right,
             share: 0.25,
         },
-        DockGuard::NONE,
         FocusPolicy::Keep,
     )
     .unwrap();
@@ -3688,7 +3316,6 @@ fn dock_tab_seam_with_a_share_outside_its_range_changes_nothing() {
     let w = World::new();
     let target = w.main_active();
     let (_, tabs) = w.popup_with(2);
-    let guard = w.drag_guard(tabs[1]);
     let version = w.version();
     let resyncs = w.resyncs();
     w.forget();
@@ -3701,7 +3328,6 @@ fn dock_tab_seam_with_a_share_outside_its_range_changes_nothing() {
             side: DockSide::Left,
             share: f64::NAN,
         },
-        guard,
         FocusPolicy::Reveal,
     );
 
@@ -3709,7 +3335,6 @@ fn dock_tab_seam_with_a_share_outside_its_range_changes_nothing() {
     assert_eq!(w.version(), version);
     assert_eq!(w.resyncs(), resyncs);
     assert_eq!(w.ev.take_order(), Vec::<&str>::new());
-    assert!(w.lease_held(), "거절은 표식을 건드리지 않는다");
     assert_invariants(&w);
 }
 
@@ -3720,17 +3345,11 @@ fn dock_tab_new_window_opens_then_attaches_and_records_the_placement() {
     let w = World::new();
     let first = w.main_active();
     let source = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
-    let guard = w.drag_guard(source);
     let resyncs = w.resyncs();
     w.forget();
 
     let out = w
-        .dock(
-            source,
-            DockDest::NewWindow { at: AT },
-            guard,
-            FocusPolicy::Reveal,
-        )
+        .dock(source, DockDest::NewWindow { at: AT }, FocusPolicy::Reveal)
         .unwrap();
 
     let label = out.window.clone();
@@ -3764,7 +3383,6 @@ fn dock_tab_new_window_opens_then_attaches_and_records_the_placement() {
     );
     w.assert_notified_at_current_version();
     assert_one_batch(&w, "dock_tab(새 창)");
-    assert!(!w.lease_held());
     assert_invariants(&w);
 }
 
@@ -3775,12 +3393,7 @@ fn dock_tab_new_window_activates_only_when_revealing() {
     w.forget();
 
     let out = w
-        .dock(
-            source,
-            DockDest::NewWindow { at: AT },
-            DockGuard::NONE,
-            FocusPolicy::Keep,
-        )
+        .dock(source, DockDest::NewWindow { at: AT }, FocusPolicy::Keep)
         .unwrap();
 
     assert_eq!(
@@ -3803,13 +3416,8 @@ fn dock_tab_new_window_takes_the_source_popouts_normal_size_unless_given_one() {
     w.observe(&label, false, bounds(50.0, 60.0, 640.0, 480.0));
     w.forget();
 
-    w.dock(
-        tabs[2],
-        DockDest::NewWindow { at: AT },
-        DockGuard::NONE,
-        FocusPolicy::Reveal,
-    )
-    .unwrap();
+    w.dock(tabs[2], DockDest::NewWindow { at: AT }, FocusPolicy::Reveal)
+        .unwrap();
     let given = WindowPlace {
         pos: AT.pos,
         size: Some((400.0, 300.0)),
@@ -3817,7 +3425,6 @@ fn dock_tab_new_window_takes_the_source_popouts_normal_size_unless_given_one() {
     w.dock(
         tabs[1],
         DockDest::NewWindow { at: given },
-        DockGuard::NONE,
         FocusPolicy::Reveal,
     )
     .unwrap();
@@ -3843,17 +3450,11 @@ fn dock_tab_new_window_takes_the_source_popouts_normal_size_unless_given_one() {
 fn dock_tab_new_window_open_failure_changes_nothing() {
     let w = World::failing_host();
     let source = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
-    let guard = w.drag_guard(source);
     let version = w.version();
     let resyncs = w.resyncs();
     w.forget();
 
-    let out = w.dock(
-        source,
-        DockDest::NewWindow { at: AT },
-        guard,
-        FocusPolicy::Reveal,
-    );
+    let out = w.dock(source, DockDest::NewWindow { at: AT }, FocusPolicy::Reveal);
 
     assert!(matches!(out, Err(DockError::WindowOpen(_))), "{out:?}");
     assert_eq!(w.version(), version);
@@ -3865,7 +3466,6 @@ fn dock_tab_new_window_open_failure_changes_nothing() {
         "못 연 창은 닫을 것도 없다"
     );
     assert!(w.host.placed.lock().unwrap().is_empty());
-    assert!(w.lease_held(), "표식은 부른 쪽이 내린다");
     assert_invariants(&w);
 }
 
@@ -3873,28 +3473,21 @@ fn dock_tab_new_window_open_failure_changes_nothing() {
 fn dock_tab_new_window_closes_the_opened_window_when_phase_c_refuses() {
     let w = World::new();
     let source = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
-    let slot = w.empty_slot(source);
-    let guard = w.drag_guard(source);
     w.forget();
-    // 창을 여는 사이 다른 경로가 출처 탭을 나눈다.
+    // 창을 여는 사이 다른 경로가 출처 탭을 닫는다.
     *w.host.during_open.lock().unwrap() = Some(Box::new(move |state: &LayoutState| {
         state
             .0
             .lock()
             .unwrap()
-            .split_slot(source, slot, SplitDir::LeftRight)
+            .close_tab(MAIN_WINDOW_LABEL, source)
             .unwrap();
     }));
     let resyncs = w.resyncs();
 
-    let out = w.dock(
-        source,
-        DockDest::NewWindow { at: AT },
-        guard,
-        FocusPolicy::Reveal,
-    );
+    let out = w.dock(source, DockDest::NewWindow { at: AT }, FocusPolicy::Reveal);
 
-    assert_eq!(out, Err(DockError::SourceChanged));
+    assert_eq!(out, Err(DockError::TabNotFound(source)));
     let opened: Vec<String> = w
         .host
         .opened_at
@@ -3910,15 +3503,10 @@ fn dock_tab_new_window_closes_the_opened_window_when_phase_c_refuses() {
         "방금 연 창을 거둔다"
     );
     assert!(!w.window_exists(&opened[0]));
-    assert_eq!(
-        w.owner(source).as_deref(),
-        Some(MAIN_WINDOW_LABEL),
-        "탭은 출처에"
-    );
+    assert_eq!(w.owner(source), None, "닫힌 탭은 새 창에 붙지 않는다");
     assert!(w.host.placed.lock().unwrap().is_empty());
     assert_eq!(w.resyncs(), resyncs);
     assert_eq!(w.ev.take_order(), Vec::<&str>::new());
-    assert!(w.lease_held());
     assert_invariants(&w);
 }
 
@@ -3929,17 +3517,11 @@ fn dock_tab_new_window_closes_the_opened_window_when_phase_c_refuses() {
 fn dock_tab_new_window_opens_the_prewarmed_window_and_commits_after_the_notifications() {
     let w = World::new();
     let source = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
-    let guard = w.drag_guard(source);
     let spare = w.prewarm();
     w.forget();
 
     let out = w
-        .dock(
-            source,
-            DockDest::NewWindow { at: AT },
-            guard,
-            FocusPolicy::Reveal,
-        )
+        .dock(source, DockDest::NewWindow { at: AT }, FocusPolicy::Reveal)
         .unwrap();
 
     assert_eq!(out.window, spare, "맡긴 창의 label 로 연다");
@@ -3976,12 +3558,7 @@ fn dock_tab_new_window_uses_the_prewarmed_window_without_focus_too() {
     w.forget();
 
     let out = w
-        .dock(
-            source,
-            DockDest::NewWindow { at: AT },
-            DockGuard::NONE,
-            FocusPolicy::Keep,
-        )
+        .dock(source, DockDest::NewWindow { at: AT }, FocusPolicy::Keep)
         .unwrap();
 
     assert!(out.prewarmed);
@@ -3997,12 +3574,7 @@ fn dock_tab_new_window_whose_prewarmed_window_fails_to_open_changes_nothing() {
     let spare = w.prewarm();
     w.forget();
 
-    let out = w.dock(
-        source,
-        DockDest::NewWindow { at: AT },
-        DockGuard::NONE,
-        FocusPolicy::Reveal,
-    );
+    let out = w.dock(source, DockDest::NewWindow { at: AT }, FocusPolicy::Reveal);
 
     assert!(matches!(out, Err(DockError::WindowOpen(_))), "{out:?}");
     assert_eq!(
@@ -4013,13 +3585,11 @@ fn dock_tab_new_window_whose_prewarmed_window_fails_to_open_changes_nothing() {
     assert!(!w.claim_outstanding(), "창 포트가 거뒀다");
 }
 
-// 붙이기 전 판정이 바뀌면(여는 사이 출처 탭이 나뉨) 맡긴 창은 닫지 않고 되물린다.
+// 붙이기 전 판정이 바뀌면(여는 사이 출처 탭이 닫힘) 맡긴 창은 닫지 않고 되물린다.
 #[test]
 fn dock_tab_new_window_refused_at_the_attach_gives_the_prewarmed_window_back() {
     let w = World::new();
     let source = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
-    let slot = w.empty_slot(source);
-    let guard = w.drag_guard(source);
     let spare = w.prewarm();
     w.forget();
     *w.host.during_open.lock().unwrap() = Some(Box::new(move |state: &LayoutState| {
@@ -4027,18 +3597,13 @@ fn dock_tab_new_window_refused_at_the_attach_gives_the_prewarmed_window_back() {
             .0
             .lock()
             .unwrap()
-            .split_slot(source, slot, SplitDir::LeftRight)
+            .close_tab(MAIN_WINDOW_LABEL, source)
             .unwrap();
     }));
 
-    let out = w.dock(
-        source,
-        DockDest::NewWindow { at: AT },
-        guard,
-        FocusPolicy::Reveal,
-    );
+    let out = w.dock(source, DockDest::NewWindow { at: AT }, FocusPolicy::Reveal);
 
-    assert_eq!(out, Err(DockError::SourceChanged));
+    assert_eq!(out, Err(DockError::TabNotFound(source)));
     assert_eq!(
         w.journal.take(),
         [
@@ -4048,7 +3613,7 @@ fn dock_tab_new_window_refused_at_the_attach_gives_the_prewarmed_window_back() {
         ],
         "닫기 · 알림 · 자리 기록 없음"
     );
-    assert_eq!(w.owner(source).as_deref(), Some(MAIN_WINDOW_LABEL));
+    assert_eq!(w.owner(source), None);
     assert_invariants(&w);
 }
 
@@ -4066,12 +3631,7 @@ fn dock_tab_new_window_commits_the_claim_even_if_the_window_left_the_model_befor
     w.forget();
 
     let out = w
-        .dock(
-            source,
-            DockDest::NewWindow { at: AT },
-            DockGuard::NONE,
-            FocusPolicy::Reveal,
-        )
+        .dock(source, DockDest::NewWindow { at: AT }, FocusPolicy::Reveal)
         .unwrap();
 
     assert!(out.prewarmed);
@@ -4107,7 +3667,6 @@ fn dock_tab_reuse_moves_the_source_window_once_and_keeps_the_model() {
     let w = World::new();
     let (label, view) = w.lone_popout();
     let slot = w.empty_slot(view);
-    let guard = w.drag_guard(view);
     let version = w.version();
     let resyncs = w.resyncs();
     let spare = w.prewarm();
@@ -4115,12 +3674,7 @@ fn dock_tab_reuse_moves_the_source_window_once_and_keeps_the_model() {
     w.forget();
 
     let out = w
-        .dock(
-            view,
-            DockDest::NewWindow { at: AT },
-            guard,
-            FocusPolicy::Reveal,
-        )
+        .dock(view, DockDest::NewWindow { at: AT }, FocusPolicy::Reveal)
         .unwrap();
 
     w.assert_spare_not_asked(&spare, asked);
@@ -4142,7 +3696,6 @@ fn dock_tab_reuse_moves_the_source_window_once_and_keeps_the_model() {
     assert_eq!(w.version(), version, "모델 변경 0");
     assert_eq!(w.resyncs(), resyncs);
     assert_eq!(w.ev.take_order(), Vec::<&str>::new(), "알릴 것이 없다");
-    assert!(!w.lease_held(), "표식을 내린다");
     assert_eq!(w.owner(view).as_deref(), Some(label.as_str()));
     assert_invariants(&w);
 }
@@ -4163,17 +3716,11 @@ fn dock_tab_a_lone_popout_without_a_normal_place_is_reused_too() {
         None,
         "전제: 보통 자리를 아직 못 봤다"
     );
-    let guard = w.drag_guard(view);
     let version = w.version();
     w.forget();
 
     let out = w
-        .dock(
-            view,
-            DockDest::NewWindow { at: AT },
-            guard,
-            FocusPolicy::Reveal,
-        )
+        .dock(view, DockDest::NewWindow { at: AT }, FocusPolicy::Reveal)
         .unwrap();
 
     assert!(out.reused);
@@ -4185,7 +3732,6 @@ fn dock_tab_a_lone_popout_without_a_normal_place_is_reused_too() {
     assert_eq!(&*w.host.placed.lock().unwrap(), &[label.clone()]);
     assert_eq!(w.version(), version);
     assert_eq!(w.ev.take_order(), Vec::<&str>::new());
-    assert!(!w.lease_held());
     assert_invariants(&w);
 }
 
@@ -4221,7 +3767,6 @@ fn dock_tab_reuse_finishes_the_drop_even_if_the_source_changes_during_the_move()
         let w = World::new();
         let (label, view) = w.lone_popout();
         let slot = w.empty_slot(view);
-        let guard = w.drag_guard(view);
         w.forget();
         let hooked = label.clone();
         *w.host.during_move.lock().unwrap() = Some(Box::new(move |state: &LayoutState| {
@@ -4229,12 +3774,7 @@ fn dock_tab_reuse_finishes_the_drop_even_if_the_source_changes_during_the_move()
         }));
 
         let out = w
-            .dock(
-                view,
-                DockDest::NewWindow { at: AT },
-                guard,
-                FocusPolicy::Reveal,
-            )
+            .dock(view, DockDest::NewWindow { at: AT }, FocusPolicy::Reveal)
             .unwrap_or_else(|e| panic!("{what}: {e}"));
 
         assert!(out.reused, "{what}");
@@ -4252,7 +3792,6 @@ fn dock_tab_reuse_finishes_the_drop_even_if_the_source_changes_during_the_move()
             if kept { vec![label.clone()] } else { vec![] },
             "{what}: 모델에 남은 창만 자리를 적는다"
         );
-        assert!(!w.lease_held(), "{what}: 표식은 내려가 있다");
         assert_eq!(w.ev.take_order(), Vec::<&str>::new(), "{what}");
         assert_invariants(&w);
     }
@@ -4270,14 +3809,13 @@ fn dock_tab_reuse_move_failure_is_window_open_and_undoes_nothing() {
     ] {
         let w = World::new();
         let (label, view) = w.lone_popout();
-        let guard = w.drag_guard(view);
         let version = w.version();
         w.forget();
         w.host.fail_step(failing);
         let captured = Captured::default();
 
         let out = tracing::subscriber::with_default(captured.clone(), || {
-            w.dock(view, DockDest::NewWindow { at }, guard, FocusPolicy::Reveal)
+            w.dock(view, DockDest::NewWindow { at }, FocusPolicy::Reveal)
         });
 
         assert!(
@@ -4304,7 +3842,6 @@ fn dock_tab_reuse_move_failure_is_window_open_and_undoes_nothing() {
         assert!(w.host.closed.lock().unwrap().is_empty());
         assert_eq!(w.version(), version);
         assert_eq!(w.owner(view).as_deref(), Some(label.as_str()));
-        assert!(w.lease_held(), "표식은 부른 쪽이 내린다");
         assert_invariants(&w);
     }
 }
@@ -4429,7 +3966,6 @@ fn dock_tab_onto_the_same_place_logs_that_nothing_changed() {
                 window: label.clone(),
                 index: Some(1),
             },
-            DockGuard::NONE,
             FocusPolicy::Keep,
         )
         .unwrap();
@@ -4439,7 +3975,6 @@ fn dock_tab_onto_the_same_place_logs_that_nothing_changed() {
                 window: label.clone(),
                 index: Some(0),
             },
-            DockGuard::NONE,
             FocusPolicy::Keep,
         )
         .unwrap();
@@ -4488,10 +4023,6 @@ fn dropped_at(x: i32, y: i32) -> InputNow {
 }
 
 impl World {
-    fn layout_rev(&self, view: Uuid) -> u64 {
-        self.snapshot(view).layout_rev
-    }
-
     fn active_of(&self, label: &str) -> Uuid {
         apply::list_tabs(&self.state, label).unwrap().active
     }
@@ -4573,7 +4104,6 @@ fn a_drop_whose_tab_left_its_source_window_moves_it_from_where_it_is_now() {
                 window: popout.clone(),
                 index: None,
             },
-            DockGuard::NONE,
             FocusPolicy::Keep,
         )
         .unwrap();
@@ -4632,7 +4162,6 @@ fn a_drop_whose_tab_left_its_source_window_leaves_that_window_to_the_shell_succe
                 window: popout.clone(),
                 index,
             },
-            DockGuard::NONE,
             FocusPolicy::Reveal,
         )
         .unwrap();
@@ -4808,7 +4337,6 @@ fn a_seam_drop_onto_a_tab_that_moved_to_another_window_docks_where_that_tab_is_n
             window: popout.clone(),
             index: None,
         },
-        DockGuard::NONE,
         FocusPolicy::Keep,
     )
     .unwrap();
@@ -4859,37 +4387,6 @@ fn a_same_window_seam_applies_whichever_tab_the_window_shows_now() {
     assert_eq!(w.tabs_of(MAIN_WINDOW_LABEL), [i, x]);
     assert_eq!(w.active_of(MAIN_WINDOW_LABEL), i);
     assert_invariants(&w);
-}
-
-#[test]
-fn the_announced_snapshot_carries_the_layout_rev() {
-    let w = World::new();
-    let view = w.main_active();
-    let slot = w.empty_slot(view);
-    w.forget();
-    apply::split_slot(&w.state, &w.subs, &w.ev, view, slot, SplitDir::LeftRight).unwrap();
-    let split =
-        w.ev.layout
-            .lock()
-            .unwrap()
-            .last()
-            .cloned()
-            .expect("스냅숏 알림");
-    assert_eq!(split.layout_rev, split.version, "그 쓰기가 낸 version");
-    assert_eq!(split.layout_rev, w.layout_rev(view));
-    apply::focus_slot(&w.state, &w.ev, view, slot).unwrap();
-    let focused =
-        w.ev.layout
-            .lock()
-            .unwrap()
-            .last()
-            .cloned()
-            .expect("스냅숏 알림");
-    assert!(focused.version > split.version);
-    assert_eq!(
-        focused.layout_rev, split.layout_rev,
-        "포커스는 판 번호를 올리지 않는다"
-    );
 }
 
 #[test]

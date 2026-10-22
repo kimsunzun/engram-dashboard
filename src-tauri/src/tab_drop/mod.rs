@@ -647,11 +647,11 @@ mod tests {
     use super::*;
     use crate::commands::popout::PopupCounter;
     use crate::layout::apply::{
-        DockDest, DockRequest, MoveFailed, OnEmptied, SpareClaim, WindowPlace, WindowTabsPayload,
+        DockDest, DockRequest, MoveFailed, SpareClaim, WindowPlace, WindowTabsPayload,
     };
     use crate::layout::bands::PointCss;
     use crate::layout::dock::DockSide;
-    use crate::layout::manager::{DockGuard, DockMove, DockTo, FocusPolicy};
+    use crate::layout::manager::{DockMove, DockTo, FocusPolicy};
     use crate::layout::{ViewManager, ViewSnapshot, WindowBounds, MAIN_WINDOW_LABEL};
 
     const MAIN: &str = MAIN_WINDOW_LABEL;
@@ -953,10 +953,8 @@ mod tests {
                 window: MAIN.into(),
                 index: None,
             },
-            guard: DockGuard::NONE,
             focus: FocusPolicy::Reveal,
             mv: DockMove::default(),
-            on_emptied: OnEmptied::Close,
         })
     }
 
@@ -1211,11 +1209,7 @@ mod tests {
             (DockError::SelfTarget, "SelfTarget"),
             (DockError::ZeroArea, "ZeroArea"),
             (DockError::InvalidShare("0.9".into()), "InvalidShare"),
-            (DockError::Dragging, "Dragging"),
             (DockError::WindowClosed("w".into()), "WindowClosed"),
-            (DockError::StaleLease, "StaleLease"),
-            (DockError::SourceChanged, "SourceChanged"),
-            (DockError::TargetChanged, "TargetChanged"),
             (DockError::WindowExists("w".into()), "WindowExists"),
             (DockError::SlotIdOverlap, "SlotIdOverlap"),
             (
@@ -1435,7 +1429,6 @@ mod tests {
                     window: "slot-popup-1".into(),
                     index: None,
                 },
-                &DockGuard::NONE,
                 FocusPolicy::Keep,
                 DockMove::default(),
             )

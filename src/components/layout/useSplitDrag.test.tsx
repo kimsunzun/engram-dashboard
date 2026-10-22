@@ -57,7 +57,6 @@ function snap(version: number, p: { a?: number; cAt?: number; withC?: boolean } 
     ratio_min: 0.1,
     ratio_max: 0.9,
     version,
-    layout_rev: version,
   }
 }
 
@@ -79,7 +78,6 @@ function snapV2(version: number, at = 0.5): ViewSnapshot {
     ratio_min: 0.1,
     ratio_max: 0.9,
     version,
-    layout_rev: version,
   }
 }
 

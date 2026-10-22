@@ -40,9 +40,8 @@ use uuid::Uuid;
 
 use super::dock::{DockAnchor, DockSide};
 use super::manager::{
-    CloseTabOutcome, DockError, DockGuard, DockMove, DockTo, Docked, EmptiedWindow, FocusPolicy,
-    FrameMeasures, NewWindowPlan, ViewId, ViewManager, WindowLabel, WindowSeed, WindowTabsSnapshot,
-    MAIN_WINDOW_LABEL,
+    CloseTabOutcome, DockError, DockMove, DockTo, Docked, FocusPolicy, NewWindowPlan, ViewId,
+    ViewManager, WindowLabel, WindowTabsSnapshot, MAIN_WINDOW_LABEL,
 };
 use super::spatial::{resolve_spatial as resolve_spatial_token, SpatialToken};
 use super::tree::{self, SplitInfo};
@@ -992,15 +991,13 @@ fn rollback_detached(state: &LayoutState, subs: &dyn SubscriptionSync, tmp_view:
 
 // ── 도킹 ─────────────────────────────────────────────────────────────────────
 
-/// 탭 하나를 옮기는 요청 — [`dock_tab`] 이 받는다. `guard` · `focus` · `mv` 의 뜻은 [`ViewManager::dock`].
+/// 탭 하나를 옮기는 요청 — [`dock_tab`] 이 받는다. `focus` · `mv` 의 뜻은 [`ViewManager::dock`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct DockRequest {
     pub view: ViewId,
     pub to: DockDest,
-    pub guard: DockGuard,
     pub focus: FocusPolicy,
     pub mv: DockMove,
-    pub on_emptied: OnEmptied,
 }
 
 /// 옮길 곳. `Seam` · `TabBar` 는 [`DockTo`] 의 같은 이름과 같다.
@@ -1020,27 +1017,6 @@ pub enum DockDest {
     /// `at` 으로 옮긴다(재사용). `at.size` 가 없으면 새 창 = 출처 팝아웃의 보통 크기(메인이면 팝아웃 기본
     /// 크기) · 재사용 = 그 창 크기 그대로.
     NewWindow { at: WindowPlace },
-    /// 이미 떠 있되 모델 밖인 창 `label`(예비 창 · 끄는 중 비워 남긴 창)을 그 탭만 든 창 항목으로 들인다 — 창을
-    /// 열지도 옮기지도 않고 그 자리를 모델에 적지도 않는다(들이는 순간의 창은 아직 기다리는 자리에 있다 — 부르는
-    /// 쪽이 놓은 뒤 그 창의 이동 사건이 적는다). `seed` · `measures` 의 뜻은 [`DockTo::NewWindow`]. 거절은 그
-    /// `NewWindow` 와 같다 — label 에 묘비 `WindowClosed` · 이미 모델의 창 `WindowExists`.
-    // ADR-0295
-    AdoptWindow {
-        label: WindowLabel,
-        seed: Option<WindowSeed>,
-        measures: FrameMeasures,
-    },
-}
-
-/// 도킹이 출처 팝아웃을 비웠을 때 그 OS 창을 어떻게 하나. 어느 쪽이든 모델 항목은 지우고(결말의
-/// [`DockOutcome::emptied`]) 그 창에 탭 목록 알림을 내지 않는다 — 탭 0 개 알림을 받은 웹뷰는 제 창을 닫는다.
-// ADR-0295
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OnEmptied {
-    /// 알림을 낸 뒤 닫는다([`DockOutcome::closed_window`]).
-    Close,
-    /// 닫지 않는다 — 부르는 쪽이 그 창을 다시 쓰거나 나중에 닫는다.
-    Keep,
 }
 
 /// [`dock_tab`] 의 결말.
@@ -1050,9 +1026,9 @@ pub struct DockOutcome {
     pub window: WindowLabel,
     /// 옮긴 탭의 슬롯 id(트리 전위 순) — 옮겨도 id 는 그대로다.
     pub slot_ids: Vec<Uuid>,
-    /// 비어 모델에서 지운 출처 팝아웃(`OnEmptied` 와 무관).
-    pub emptied: Option<EmptiedWindow>,
-    /// 비어서 닫은 출처 팝아웃 — `OnEmptied::Close` 일 때만.
+    /// 비어 모델에서 지운 출처 팝아웃.
+    pub emptied: Option<WindowLabel>,
+    /// 비어서 OS 창을 닫은 출처 팝아웃. 늘 `emptied` 와 같다 — 비어 지운 팝아웃은 언제나 닫고, 창을 옮겨 쓴 길은 둘 다 `None` 이다.
     pub closed_window: Option<WindowLabel>,
     /// main 의 마지막 탭이 떠나 main 에 새로 세운 빈 탭.
     pub main_refilled: Option<ViewId>,
@@ -1064,19 +1040,16 @@ pub struct DockOutcome {
 }
 
 /// 탭 `req.view` 를 `req.to` 로 옮긴다. `Err` 면 모델이 그대로이고 알림도 묶음 끝도 없다 — 그사이 연 새 창은
-/// 거둔다(표식은 그대로 — 부른 쪽이 내린다). 판정 · 적용 규칙의 정본은 [`ViewManager::dock`] ·
-/// [`ViewManager::plan_new_window`].
+/// 거둔다. 판정 · 적용 규칙의 정본은 [`ViewManager::dock`] · [`ViewManager::plan_new_window`].
 ///
-/// - `Seam` · `TabBar` · `AdoptWindow` — 락 한 번에 바꾸고, 락 밖에서 알린 뒤 비어 지운 출처 팝아웃을
-///   `req.on_emptied` 대로 다룬다.
+/// - `Seam` · `TabBar` — 락 한 번에 바꾸고, 락 밖에서 알린 뒤 비어 지운 출처 팝아웃의 창을 닫는다.
 /// - `NewWindow`(새 창) — 창을 락 밖에서 먼저 열고, 같은 판정을 다시 해 붙인다.
-/// - `NewWindow`(재사용) — 출처 창을 락 밖에서 옮기고 표식만 내린다(`keep_lease` 면 그대로). 다시 판정하지 않고
-///   되돌리지도 않는다.
+/// - `NewWindow`(재사용) — 출처 창을 락 밖에서 옮긴다(모델 변경 없음). 다시 판정하지 않고 되돌리지도 않는다.
 ///
 /// 부르는 스레드: ★`NewWindow` 를 메인 스레드 · 동기 명령 안에서 부르지 말 것★ — 새 창 빌드가 교착한다
 /// (`commands::popout::move_slot_to_window` 가 async 인 까닭과 같다 · TRD S21-slot-docking §1-3 「명령의 실행
-/// 스레드」). `Seam` · `TabBar` · `AdoptWindow` 는 창을 열지 않아 어느 스레드에서나 부를 수 있다 —
-/// `OnEmptied::Close` 는 창을 닫기만 한다.
+/// 스레드」). `Seam` · `TabBar` 는 창을 열지 않아 어느 스레드에서나 부를 수 있다 — 비운 출처 창은
+/// 닫기만 한다.
 // TRD S21-slot-docking §1-2 「적용 서비스」 · §7 B9
 pub fn dock_tab(
     state: &LayoutState,
@@ -1089,18 +1062,10 @@ pub fn dock_tab(
     let DockRequest {
         view,
         to,
-        guard,
         focus,
         mv,
-        on_emptied,
     } = req;
-    let ask = DockAsk {
-        view,
-        guard,
-        focus,
-        mv,
-        on_emptied,
-    };
+    let ask = DockAsk { view, focus, mv };
     let (mode, result) = match to {
         DockDest::Seam {
             target,
@@ -1134,25 +1099,6 @@ pub fn dock_tab(
                 DockTo::TabBar { window, index },
             ),
         ),
-        DockDest::AdoptWindow {
-            label,
-            seed,
-            measures,
-        } => (
-            "adopt_window",
-            dock_in_place(
-                state,
-                subs,
-                events,
-                host,
-                &ask,
-                DockTo::NewWindow {
-                    label,
-                    seed,
-                    measures,
-                },
-            ),
-        ),
         DockDest::NewWindow { at } => (
             "new_window",
             dock_into_window(state, subs, events, host, labels, &ask, at),
@@ -1164,7 +1110,7 @@ pub fn dock_tab(
             mode = if out.reused { "reuse" } else { mode },
             window = %out.window,
             closed_window = out.closed_window.as_deref(),
-            emptied = out.emptied.as_ref().map(|e| e.label.as_str()),
+            emptied = out.emptied.as_deref(),
             reused = out.reused,
             main_refilled = out.main_refilled.is_some(),
             changed = notes.unchanged.then_some(false),
@@ -1177,10 +1123,8 @@ pub fn dock_tab(
 
 struct DockAsk {
     view: ViewId,
-    guard: DockGuard,
     focus: FocusPolicy,
     mv: DockMove,
-    on_emptied: OnEmptied,
 }
 
 // 끝 로그 몫 — 결말(`DockOutcome`)에 싣지 않는 것.
@@ -1221,7 +1165,7 @@ impl DockNews {
     // ★남은 출처 창의 활성이 바뀌었으면 그 탭의 배치도 싣는다★ — 프론트는 그 탭 id 를 탭 목록으로만 받으면 배치가
     // 없다(`close_tab` 이 남은 창의 활성 배치를 싣는 것과 같다). main 의 마지막 탭이 떠나 세운 빈 탭(PRD R14)도
     // 이 갈래로 실린다.
-    // ★비어 지운 출처에는 탭 목록을 싣지 않는다★ — 탭 0 개 알림을 받은 웹뷰는 제 창을 닫는다(`OnEmptied`).
+    // ★비어 지운 출처에는 탭 목록을 싣지 않는다★ — 탭 0 개 알림을 받은 웹뷰는 제 창을 닫는다.
     fn collect(mgr: &ViewManager, before: &BeforeDock, docked: &Docked, shown: ViewId) -> Self {
         if mgr.version == before.version {
             return DockNews::default();
@@ -1246,23 +1190,20 @@ impl DockNews {
     }
 }
 
-// 모델을 바꾼 도킹의 락 밖 몫 — 알림 → `Close` 면 비어 지운 출처 팝아웃의 OS 창 닫기(모델이 먼저 지웠다 —
+// 모델을 바꾼 도킹의 락 밖 몫 — 알림 → 비어 지운 출처 팝아웃의 OS 창 닫기(모델이 먼저 지웠다 —
 // `close_tab` 과 같다). 결말을 돌려준다.
+// ADR-0057
 fn finish_docked(
     events: &dyn LayoutEvents,
     host: &dyn WindowHost,
     docked: Docked,
     news: &DockNews,
-    on_emptied: OnEmptied,
 ) -> DockOutcome {
     announce(events, &news.layouts, &news.tabs);
-    let closed_window = match (&docked.emptied, on_emptied) {
-        (Some(emptied), OnEmptied::Close) => {
-            host.close(&emptied.label);
-            Some(emptied.label.clone())
-        }
-        _ => None,
-    };
+    let closed_window = docked.emptied.as_ref().map(|emptied| {
+        host.close(emptied);
+        emptied.clone()
+    });
     DockOutcome {
         window: docked.window,
         slot_ids: docked.slot_ids,
@@ -1274,7 +1215,7 @@ fn finish_docked(
     }
 }
 
-// `Seam` · `TabBar` · `AdoptWindow` — 판정 · 변경 · 스냅숏 · 재동기가 락 한 번이다.
+// `Seam` · `TabBar` — 판정 · 변경 · 스냅숏 · 재동기가 락 한 번이다.
 fn dock_in_place(
     state: &LayoutState,
     subs: &dyn SubscriptionSync,
@@ -1290,7 +1231,7 @@ fn dock_in_place(
     let (docked, news, unchanged) = {
         let mut mgr = sync::lock(&state.0);
         let before = BeforeDock::take(&mgr, ask.view);
-        let docked = mgr.dock(ask.view, to, &ask.guard, ask.focus, ask.mv.clone())?;
+        let docked = mgr.dock(ask.view, to, ask.focus, ask.mv.clone())?;
         let news = DockNews::collect(&mgr, &before, &docked, shown);
         let unchanged = mgr.version == before.version;
         if !unchanged {
@@ -1298,7 +1239,7 @@ fn dock_in_place(
         }
         (docked, news, unchanged)
     }; // ← 락 드롭
-    let out = finish_docked(events, host, docked, &news, ask.on_emptied);
+    let out = finish_docked(events, host, docked, &news);
     Ok((out, DockNotes { unchanged }))
 }
 
@@ -1312,7 +1253,7 @@ fn dock_into_window(
     ask: &DockAsk,
     at: WindowPlace,
 ) -> Result<(DockOutcome, DockNotes), DockError> {
-    let plan = sync::lock(&state.0).plan_new_window(ask.view, &ask.guard)?; // ← 락 드롭
+    let plan = sync::lock(&state.0).plan_new_window(ask.view)?; // ← 락 드롭
     match plan {
         NewWindowPlan::Reuse { label } => reuse_source_window(state, host, ask, label, &at),
         NewWindowPlan::Create { size } => {
@@ -1327,7 +1268,7 @@ fn dock_into_window(
 }
 
 // 새 창 — phase B(락 밖) 창 열기 → phase C(락) 같은 판정을 다시 해 붙이기. phase C 가 거절하면(그 사이 창이 닫혀
-//   묘비가 섰거나 출처가 바뀜) 연 창을 거둔다 — 출처 창은 건드린 적이 없다.
+//   묘비가 섰거나 출처 탭이 사라짐) 연 창을 거둔다 — 출처 창은 건드린 적이 없다.
 // ★예열 창은 `focus` 와 상관없이 묻는다★ — `Keep` 이어도 맡긴 창을 쓰고, 활성 여부는 `open_at` 이 그 맡김에 적는다
 //   (TRD S21-slot-docking §3-9 I4 · 사용자 결정 2026-10-21).
 // ADR-0299
@@ -1353,10 +1294,7 @@ fn open_new_window(
             ask.view,
             DockTo::NewWindow {
                 label: label.clone(),
-                seed: None,
-                measures: FrameMeasures::default(),
             },
-            &ask.guard,
             ask.focus,
             ask.mv.clone(),
         )
@@ -1376,16 +1314,16 @@ fn open_new_window(
     };
     let out = DockOutcome {
         prewarmed: claim.is_some(),
-        ..finish_docked(events, host, docked, &news, ask.on_emptied)
+        ..finish_docked(events, host, docked, &news)
     };
     settle_new_window(host, &label, claim.as_ref());
     Ok(out)
 }
 
-// 재사용 — B′(락 밖) 출처 창 옮기기 → 락 안에서 표식만 내린다(모델 변경 0).
+// 재사용 — B′(락 밖) 출처 창 옮기기 → 락 안에서 결말에 실을 것만 읽는다(모델 변경 0).
 //   ★다시 판정하지 않고 되돌리지도 않는다(사용자 결정 2026-10-16)★ — 끄기가 서면 놓은 자리에 둔다. 옮기는 사이 다른 경로가
 //   출처를 바꿨으면(탭 · 슬롯 더함 · 탭 닫힘) 모델은 그 쓰기가 남긴 그대로다 — 탭이 늘었으면 그 창째 옮겨진 것이고, 탭이
-//   닫혔으면 창도 그 닫기가 거둔다. 표식 내리기는 번호를 보므로 그 사이 표식이 내려갔어도 무해하다.
+//   닫혔으면 창도 그 닫기가 거둔다.
 // TRD S21-slot-docking §1-2 「적용 서비스」 재사용
 fn reuse_source_window(
     state: &LayoutState,
@@ -1408,8 +1346,7 @@ fn reuse_source_window(
     }
 
     let (slot_ids, still_there) = {
-        let mut mgr = sync::lock(&state.0);
-        mgr.release_held(&ask.guard);
+        let mgr = sync::lock(&state.0);
         let slot_ids = mgr
             .views
             .get(&ask.view)

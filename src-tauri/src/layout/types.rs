@@ -159,13 +159,6 @@ pub struct ViewSnapshot {
     /// (불일치 시 프론트 race 가드 `snap.version > pulled` 에서 bigint↔number 혼용 에러, FIX-1). 카운터라 2^53 비현실적.
     #[ts(type = "number")]
     pub version: u64,
-    /// 이 뷰의 판 번호 — 이 뷰의 레이아웃(트리 · 비율 · 슬롯 내용)이 마지막으로 바뀐 때의 `version` 이다. 포커스 ·
-    /// 이름만 바뀌면 그대로다. 같은 뷰에서 값이 같으면 레이아웃이 같다(늘기만 한다 · 영속하지 않아 셸을 다시 띄우면
-    /// 새로 센다). `version` 은 이 값이 될 수 없다 — 바뀌지 않은 뷰도 나중 `version` 으로 다시 실린다. number 로
-    /// 고정하는 이유는 `version` 과 같다.
-    // TRD S21-slot-docking §3-7
-    #[ts(type = "number")]
-    pub layout_rev: u64,
 }
 
 /// 비율 쓰기(`set_split_ratio`)의 결말.

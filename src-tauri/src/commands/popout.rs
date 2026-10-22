@@ -671,13 +671,10 @@ mod close_request_tests {
     use super::*;
     use crate::daemon_client::DaemonDiscovery;
     use crate::layout::dock::{DockAnchor, DockSide, DOCK_NEW_SHARE};
-    use crate::layout::manager::{
-        DockError, DockGuard, DockMove, DockTo, FocusPolicy, FrameMeasures,
-    };
+    use crate::layout::manager::{DockError, DockMove, DockTo, FocusPolicy};
     use crate::layout::{
-        tree, DockDest, DockRequest, LayoutError, LayoutEvents, OnEmptied, SlotContent,
-        SubscriptionSync, ViewManager, ViewSnapshot, WindowBounds, WindowPlacement,
-        WindowTabsPayload,
+        tree, DockDest, DockRequest, LayoutError, LayoutEvents, SlotContent, SubscriptionSync,
+        ViewManager, ViewSnapshot, WindowBounds, WindowPlacement, WindowTabsPayload,
     };
 
     const POPUP: &str = "slot-popup-7";
@@ -1098,20 +1095,12 @@ mod close_request_tests {
             (
                 DockTo::NewWindow {
                     label: POPUP.into(),
-                    seed: None,
-                    measures: FrameMeasures::default(),
                 },
                 DockError::WindowClosed(POPUP.into()),
             ),
         ] {
             assert_eq!(
-                mgr.dock(
-                    source,
-                    to,
-                    &DockGuard::NONE,
-                    FocusPolicy::Reveal,
-                    DockMove::default()
-                ),
+                mgr.dock(source, to, FocusPolicy::Reveal, DockMove::default()),
                 Err(want)
             );
             assert_eq!(mgr.version, version);
@@ -1247,7 +1236,6 @@ mod close_request_tests {
                     window: MAIN_WINDOW_LABEL.into(),
                     index: None,
                 },
-                &DockGuard::NONE,
                 FocusPolicy::Keep,
                 DockMove::default(),
             )
@@ -1269,10 +1257,8 @@ mod close_request_tests {
                         size: None,
                     },
                 },
-                guard: DockGuard::NONE,
                 focus: FocusPolicy::Reveal,
                 mv: DockMove::default(),
-                on_emptied: OnEmptied::Close,
             },
         )
         .map(drop)

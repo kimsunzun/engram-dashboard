@@ -5,11 +5,11 @@
 // TRD S21-slot-docking §3-3 · §3-5
 
 use super::wire::{DropAnchor, DropTo, EndEffect, NewWindowBy, TabDrop};
-use crate::layout::apply::{DockDest, DockRequest, OnEmptied, WindowPlace};
+use crate::layout::apply::{DockDest, DockRequest, WindowPlace};
 use crate::layout::bands::{PointCss, SizeCss};
 use crate::layout::dock::DockAnchor;
 use crate::layout::geometry::Insets;
-use crate::layout::manager::{DockGuard, DockMove, FocusPolicy, WindowLabel};
+use crate::layout::manager::{DockMove, FocusPolicy, WindowLabel};
 
 /// 무시 사유(`TabDropReply::Ignored.why` 의 철자).
 pub const NO_CURSOR: &str = "no-cursor";
@@ -78,9 +78,9 @@ pub enum Plan {
 
 /// 놓기 명령 하나를 적용할 것으로 옮긴다. `caller` = 명령을 부른 창 — 탭바 놓기의 창이다(`drop.from` 이 아니다).
 ///
-/// 모든 도킹 요청이 `FocusPolicy::Reveal` · `OnEmptied::Close` · [`DockGuard::NONE`] 이고, 다음 활성(`mv.successor`)은
-/// `initial ≠ view` 일 때만 `initial` 이되 끄는 탭이 적용 때 `from` 창에 있을 때만 쓴다(`mv.successor_window = from` —
-/// 다른 창에 있으면 그 창은 셸 승계를 따른다). 새 창의 크기는 유한 양수일 때만 싣는다.
+/// 모든 도킹 요청이 `FocusPolicy::Reveal` 이고, 다음 활성(`mv.successor`)은 `initial ≠ view`
+/// 일 때만 `initial` 이되 끄는 탭이 적용 때 `from` 창에 있을 때만 쓴다(`mv.successor_window = from` — 다른 창에
+/// 있으면 그 창은 셸 승계를 따른다). 새 창의 크기는 유한 양수일 때만 싣는다.
 ///
 /// 놓기가 가리킨 것(끄는 탭 · 대상 탭 · 대상 칸 · 탭바 창)은 모델이 id 로 지금 상태에서 다시 찾는다 — 있으면 지금
 /// 상태에 맞춰 적용하고(탭바 자리는 지금 목록의 끝 자리로 자름 · 그사이 나뉜 칸에도 붙음 · 그사이 다른 창으로 간 끄는
@@ -94,13 +94,11 @@ pub fn plan(drop: &TabDrop, caller: &str, input: &InputNow, frame: &SourceFrame)
         Plan::Dock(DockRequest {
             view: drop.view,
             to,
-            guard: DockGuard::NONE,
             focus: FocusPolicy::Reveal,
             mv: DockMove {
                 successor,
                 successor_window: Some(drop.from.clone()),
             },
-            on_emptied: OnEmptied::Close,
         })
     };
     match &drop.to {
@@ -285,13 +283,11 @@ mod tests {
                     window: POPUP.into(),
                     index: Some(2),
                 },
-                guard: DockGuard::NONE,
                 focus: FocusPolicy::Reveal,
                 mv: DockMove {
                     successor: Some(id(3)),
                     successor_window: Some(MAIN.into()),
                 },
-                on_emptied: OnEmptied::Close,
             },
             "탭바 창 = 부른 창(인자의 from 이 아니다)"
         );
@@ -339,10 +335,8 @@ mod tests {
                 },
                 "{caller}"
             );
-            assert_eq!(req.guard, DockGuard::NONE, "{caller}");
             assert_eq!(req.focus, FocusPolicy::Reveal);
             assert_eq!(req.mv.successor, Some(id(3)));
-            assert_eq!(req.on_emptied, OnEmptied::Close);
         }
 
         let outer = request(plan(
@@ -391,10 +385,8 @@ mod tests {
                 },
             }
         );
-        assert_eq!(req.guard, DockGuard::NONE);
         assert_eq!(req.mv.successor, Some(id(3)));
         assert_eq!(req.focus, FocusPolicy::Reveal);
-        assert_eq!(req.on_emptied, OnEmptied::Close);
     }
 
     #[test]
