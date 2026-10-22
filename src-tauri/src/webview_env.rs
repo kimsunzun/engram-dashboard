@@ -213,7 +213,7 @@ fn attach<B: EnvOptions>(builder: B, dir: Option<&Path>, backdrop: Backdrop) -> 
         //   (react-arborist 의 react-dnd HTML5 백엔드)와 입력창에 글자 끌어 놓기가 그 사건으로 돈다. 잃는 것은 Tauri 의
         //   파일 끌어 놓기 사건뿐이고 쓰는 곳이 없다. 대가로 바깥 파일 · URL 놓기를 웹뷰가 받아 그리로 탐색하므로
         //   `fileDropGuard.ts` 가 그 놓기를 막는다.
-        // TRD S21-slot-docking §14 G8
+        // TRD S21-slot-docking 6.3판 §14 G8
         .no_drop_handler();
     let builder = match dir {
         Some(dir) => builder.data_dir(dir.to_path_buf()),

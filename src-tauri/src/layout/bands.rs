@@ -141,7 +141,7 @@ pub struct SlotZones {
 /// 탭바 구역 — `area`(탭 끌기 영역 사각형 · 뷰포트 CSS px)의 가로 그대로 · 세로 위아래 [`STRIP_ZONE_PX`]. 가로는
 /// 탭들 범위다 — 첫 머리 왼쪽부터 보이는 마지막 머리 오른 끝(`+` 앞)까지(웹뷰 `useTabDragSource.ts` `geometryOf` · 사용자 결정
 /// 2026-10-19 「도킹 영역을 + 전까지로」). 세로 판정은 Chrome `DoesTabStripContain`(TDC#1461-1477 ·
-/// `DoesRectContainVerticalPointExpanded` TDC#234) 그대로고, 가로는 Chrome(쓸 수 있는 폭 전체 — TRD G7)과 다르다.
+/// `DoesRectContainVerticalPointExpanded` TDC#234) 그대로고, 가로는 Chrome(쓸 수 있는 폭 전체 — TRD S21-slot-docking 6.3판 §14 G7)과 다르다.
 // ADR-0295
 pub fn strip_zone(area: RectCss) -> RectCss {
     RectCss {

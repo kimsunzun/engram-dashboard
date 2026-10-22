@@ -3,8 +3,9 @@
 //!
 //! 창은 `raw-window-handle` 0.6 의 [`HasWindowHandle`] 로 받고 그 핸들의 변이 맞추기(Windows = `Win32` · 그 밖 =
 //! [`WindowError::Unsupported`])를 이 모듈이 한다 — 부르는 쪽이 변이를 맞추면 그것도 이 crate 밖의 런타임 OS
-//! 가름이다(TRD S21-slot-docking §8 · B10). 창을 바꾸는 함수는 날 Win32 호출이라 창 툴킷(tao)의 깃발을 거치지
-//! 않는다 — 툴킷이 아는 보임과 어긋날 수 있다는 것이 부르는 쪽 계약이다(TRD §2-5 「tao 깃발 불변식」).
+//! 가름이다(TRD S21-slot-docking 6.3판 §8 · B10 · 7판 §5-1). 창을 바꾸는 함수는 날 Win32 호출이라 창
+//! 툴킷(tao)의 깃발을 거치지 않는다 — 툴킷이 아는 보임과 어긋날 수 있다는 것이 부르는 쪽 계약이다(TRD
+//! S21-slot-docking §9-3 I29).
 //!
 //! ★스레드★ — 창을 바꾸는 함수([`place_window`] · [`restore_placement`])는 그 창을 만든 스레드(메인)에서
 //! 부른다. 다른 스레드에서 부르면 Win32 가 그 창 스레드에 메시지를 보내고 답을 기다린다 — 그 스레드가 부른 쪽을
@@ -106,17 +107,18 @@ fn raw_of(w: &impl HasWindowHandle) -> Result<isize, WindowError> {
     }
 }
 
-/// 자리 · 크기 · z · 보임 · 활성을 한 번의 `SetWindowPos` 로 입힌다(TRD §8 — 깜빡임 없이 한 번에 놓는다).
+/// 자리 · 크기 · z · 보임 · 활성을 한 번의 `SetWindowPos` 로 입힌다(TRD S21-slot-docking §9-3 I29 — 깜빡임 없이 한
+/// 번에 놓는다).
 ///
 /// - `rect: None` = 자리 · 크기를 그대로 둔다(제자리 보이기 — `show` 와 함께 쓴다).
 /// - `show` = 거짓이면 보임을 건드리지 않는다(숨기지 않는다).
 /// - `activate` = 참이면 그 창을 전경으로 청한다 — 활성이 되면 `z` 가 [`ZOrder::Keep`] 이어도 맨 위로 온다.
-///   ★OS 가 거절하면 그대로 두고 `Ok` 다★ — tao 의
-///   `force_window_active` 처럼 Alt 를 합성해 전경을 빼앗지 않는다: 끄는 동안 웹뷰의 앱 전체 키 감시가 그 Alt 를
-///   놓기로 읽는다(TRD §6-3 · F7 a). 거절됐는지는 [`foreground_is_current_process`] 따위로 따로 본다.
+///   ★OS 가 거절하면 그대로 두고 `Ok` 다★ — tao 의 `force_window_active` 처럼 Alt 를 합성해 전경을 빼앗지 않는다:
+///   포커스를 빼앗지 않고 올리기만 한다(ADR-0299 결정 5 · TRD S21-slot-docking §9-3 I5 · I29). 거절됐는지는 [`foreground_is_current_process`] 따위로 따로 본다.
 ///
 /// Windows 밖 = [`WindowError::Unsupported`].
 // ADR-0295
+// ADR-0299
 pub fn place_window(
     w: &impl HasWindowHandle,
     rect: Option<PhysRect>,
@@ -139,13 +141,14 @@ pub fn place_window(
 /// 가려지지(DWM cloaked — 다른 가상 데스크톱 따위) 않고 · 비쳐 보이는 창이 아닌 첫 창이다. 비쳐 보이는 창 = 클릭이
 /// 지나가는 창(`WS_EX_LAYERED` + `WS_EX_TRANSPARENT` — 모든 창) · 다른 앱의 layered 창 중 창 전체 알파가 0 이거나
 /// 색 키가 있는 창이다. 픽셀마다 알파를 주는 다른 앱 layered 창은 가리는 창으로 친다(판정 = `hit_accepts`). 우리
-/// 창인지는 부르는 쪽이 [`NativeWindow::of`] 와 견준다 — 다른 앱 창 · 바탕화면이 오면 그 자리는 가려진 것이다(PRD
-/// R15).
+/// 창인지는 부르는 쪽이 [`NativeWindow::of`] 와 견준다 — 놓기 명령은 다른 앱 창 · 바탕화면이 오면 새 창으로
+/// 읽는다(TRD S21-slot-docking §3-5 ④ · PRD R22).
 ///
 /// 「품는다」는 OS 바깥 사각형(`GetWindowRect` — 보이지 않는 크기 조절 테두리 포함)이다. OS 의 적중 판정도 그
 /// 테두리를 그 창으로 친다. 단 창 모양(`SetWindowRgn`)이 있는 창은 점이 그 모양 안이어야 한다. `None` = 품은 창이
 /// 없다 · Windows 밖.
 // ADR-0295
+// ADR-0296
 pub fn top_level_at(p: PhysPoint) -> Option<NativeWindow> {
     #[cfg(windows)]
     {
@@ -204,15 +207,15 @@ pub fn describe_window(w: NativeWindow) -> Option<WindowFacts> {
 }
 
 /// 보통 자리 `normal`(★화면 좌표★)과 최대화를 되돌리고(`SetWindowPlacement`), `after` 가 있으면 그 창 바로
-/// 아래로 둔다(TRD §8 · PRD R14).
+/// 아래로 둔다(TRD S21-slot-docking §5-1).
 ///
 /// - 좌표계 — `WINDOWPLACEMENT` 의 보통 자리는 `WS_EX_TOOLWINDOW` 가 없는 최상위 창이면 작업 공간 좌표(그 모니터
 ///   작업 영역의 왼쪽 위가 0 — 작업 표시줄이 위 · 왼쪽에 있으면 그만큼 밀린다)이고 있으면 화면 좌표다(MS
-///   `WINDOWPLACEMENT` 문서 · TRD E12). 이 함수가 그 창의 지금 확장 스타일과 `normal` 에 가장 가까운 모니터로 옮겨
-///   넣는다 — 그래서 그 창의 `WS_EX_TOOLWINDOW` 를 바꾸는 일은 이 함수보다 먼저 끝낸다.
+///   `WINDOWPLACEMENT` 문서 · TRD S21-slot-docking 6.3판 E12). 이 함수가 그 창의 지금 확장 스타일과 `normal` 에
+///   가장 가까운 모니터로 옮겨 넣는다 — 그래서 그 창의 `WS_EX_TOOLWINDOW` 를 바꾸는 일은 이 함수보다 먼저 끝낸다.
 /// - `activate` = 거짓이면 보통 자리는 활성화 없이 보인다(`SW_SHOWNOACTIVATE`). ★`maximized` 는 `activate` 와
 ///   무관하게 `SW_SHOWMAXIMIZED` 다★ — Win32 에 활성화 없이 최대화로 보이는 show 명령이 없다. 그래서 OS 의 전경
-///   규칙이 허락하면 활성이 된다(미확인 — TRD §12 M6 이 재고, 안 되면 §15-2 S-c).
+///   규칙이 허락하면 활성이 된다(미확인 — TRD S21-slot-docking 6.3판 §12 M6 · §15-2 S-c).
 /// - OS 는 화면 밖으로 완전히 나가는 보통 자리를 화면 안으로 고쳐 넣는다(MS `SetWindowPlacement` 문서).
 ///
 /// Windows 밖 = [`WindowError::Unsupported`].
@@ -290,16 +293,17 @@ enum RegionHit {
 ///   `WindowFromPoint` 와 견준 시험 `transparent_only_window_still_takes_the_click`).
 /// - 다른 앱 layered 창은 창 전체 알파 0 · 색 키면 건너뛴다. OS 는 알파 0 · 색 키 픽셀에서만 클릭을 지나가게 하는데
 ///   (MS 「Layered Windows」) 픽셀은 못 읽어 색 키 창은 창 전체를 비친 것으로 친다 — 대가: 그 창의 칠해진 자리
-///   밑도 가려지지 않은 자리다. 늘 위인 녹화 영역 틀(화면 녹화 도구 따위)이 그 밑 우리 창에 붙지 못하게 하던 결함
-///   (2026-10-19)을 이 갈래로 푼다 — 그 틀이 픽셀마다 알파 창이면 풀리지 않는데 어느 쪽인지 재지 않았다.
+///   밑도 가려지지 않은 자리다. 늘 위인 녹화 영역 틀(화면 녹화 도구 따위) 밑의 놓기가
+///   다른 앱 창 위 놓기로 읽혀 우리 창이 아니라 새 창으로 가는 것을 이 갈래로 막는다 — 그 틀이 픽셀마다 알파 창이면 풀리지 않는데 어느 쪽인지 재지 않았다.
 /// - 그 밖의 다른 앱 layered 창(알파 1 이상 · 픽셀마다 알파)은 가리는 창이다 — 불투명하게 그리는 layered 앱이 많다
-///   (WPF `AllowsTransparency` · Electron `transparent` · Qt 반투명 창). 다 건너뛰면 그 앱에 가린 우리 창에 붙고 750 ms
-///   머묾이 그 창을 올린다(PRD R15 · AC43). Chromium `TopMostFinder`(Chrome 70 `window_finder_win.cc`)는 layered ·
+///   (WPF `AllowsTransparency` · Electron `transparent` · Qt 반투명 창). 다 건너뛰면 놓기 끝 판정이 그 앱 위 놓기를
+///   그 밑에 가린 우리 창 위 놓기로 읽어 새 창이 생기지 않는다(TRD S21-slot-docking §3-5 ③ · ④). Chromium `TopMostFinder`(Chrome 70 `window_finder_win.cc`)는 layered ·
 ///   `WS_EX_TRANSPARENT` 중 하나만 켜져도 건너뛰는데, 이 대가를 받지 않으려고 따르지 않는다.
 /// - 우리 창은 클릭 통과 창만 건너뛴다 — tao 는 커서 무시 창에만 layered 를 켠다(tao 0.35.3 `window_state.rs`
 ///   `IGNORE_CURSOR_EVENT`).
 /// - 창 모양이 있으면 점이 그 안이어야 한다 — 모양 밖은 그 창이 그리지도 클릭을 받지도 않는다(Chromium 같은 곳).
 // ADR-0295
+// ADR-0296
 fn hit_accepts(ours: bool, layered: LayeredKind, transparent: bool, region: RegionHit) -> bool {
     let click_through = layered != LayeredKind::NotLayered && transparent;
     let see_through = click_through
@@ -570,7 +574,7 @@ mod win {
         }
         let mut alpha = 0u8;
         let mut flags = LAYERED_WINDOW_ATTRIBUTES_FLAGS(0);
-        // 다른 프로세스의 창에도 답하는지는 재지 않았다 — 못 받으면 `PerPixel` 이라 가리는 창(PRD R15 쪽)으로 떨어진다.
+        // 다른 프로세스의 창에도 답하는지는 재지 않았다 — 못 받으면 `PerPixel` 이라 가리는 창(놓기면 새 창 쪽)으로 떨어진다.
         // SAFETY: 살아 있는 지역 변수에 쓰는 조회다(색 키 값은 받지 않는다). 사라진 창이면 실패한다.
         if unsafe { GetLayeredWindowAttributes(hwnd, None, Some(&mut alpha), Some(&mut flags)) }
             .is_err()

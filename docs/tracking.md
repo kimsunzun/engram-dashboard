@@ -68,9 +68,9 @@
 
 ### T-65. 슬롯 도킹의 LLM 명령(`tab.dock` · `layout.get`) — CLAUDE.md 「LLM-우선 제어」의 의식적 예외
 - **상태:** 다음 작업(사용자 결정 2026-10-16 — 슬롯 도킹 직후 바로). 먼저 외부 조사: 호출 횟수 최소 · 이름 지목.
-- **문제:** 슬롯 도킹은 마우스 경로만 만든다(PRD 4.3 Q10 · R16 · R17 · AC10). 적용 서비스 `apply::dock_tab` 은 남아 명령이 그 위에 선다(TRD 5판 §3). 그 사이 LLM 은 탭을 도킹할 수 없다.
+- **문제:** 슬롯 도킹은 마우스 경로만 만든다(PRD 4.3 Q10 · R16 · R17 · AC10). 적용 서비스 `apply::dock_tab` 은 남아 명령이 그 위에 선다(TRD 7판 §3-6 — 옛 5판 §3). 그 사이 LLM 은 탭을 도킹할 수 없다.
 - **사용자 기준:** 「LLM 시나리오는 여러 번 거치지 않아야 실수가 적다」.
-- **근거:** `process/S21-slot-docking/prd.md` Q10 · `process/S21-slot-docking/trd.md` §3 · 메모 `.claude/handoff/attachments/llm-layout-surface-notes-2026-10-16.md`
+- **근거:** `process/S21-slot-docking/prd.md` Q10 · `process/S21-slot-docking/trd.md` §3-6(7판 — LLM 경로 · 끄는 중 LLM 이 같은 탭을 옮긴 뒤의 놓기 · 예열 창) · §9-5(PRD 에 아직 없는 그 놓기 결과 — U7 대조) · 메모 `.claude/handoff/attachments/llm-layout-surface-notes-2026-10-16.md`
 
 ### T-49. 꺼진 에이전트의 슬롯 쪽 활성화 · 완전한 이어받기 — 지금은 트리에서만 켠다
 - **상태:** 보류 — 저장 시스템(`v0.3.3/feat/storage`)을 마친 뒤 사용자에게 올린다(사용자 결정 2026-10-06 — 「저장 시스템 다 하고 언급하면 될듯」).
@@ -94,7 +94,7 @@
 - **상태:** 보류(사용자 결정 2026-09-27). 챗 화면 라운드는 Esc 만 채팅 칸 안에서 되게 했다. 옛 번호 = T-36(`v0.3.3/feat/chat-ux` 브랜치 기록에서 이 주제를 가리키는 「T-36」).
 - **문제:** 전역 표(`src/commands/keybindings.ts` 의 `BINDINGS`)는 `ctrl+tab → tab.next` 하나뿐이고 재지정·chord 가 없다. 명령의 `keybinding` 칸(`src/commands/registry.ts:50`)은 표시용 힌트일 뿐 표와 안 이어지고, 채팅 입력창 Enter · 팝오버 Esc 닫기 · 이름 바꾸기 Esc 취소 · 채팅 칸 Esc → `agent.interrupt` 가 칸마다 따로 붙어 있다. CLAUDE.md 「LLM-우선 제어」 남은 갭 「키바인딩 커스터마이징 미구현」이 이것이다.
 - **함정:** 입력 요소 · contenteditable · `.xterm` 안 키를 전역 표가 무시하는 입력 가드(`keybindings.ts:7-35`)는 load-bearing 이다 — 풀면 터미널·입력 타이핑을 단축키가 삼킨다.
-- **참고:** 끄는 중(HTML5 끌어 놓기) Esc 는 OS 끌기 루프가 받는 것이라 표에 넣을 키가 아니다 — 슬롯 도킹은 세션 동안(+200ms) `window` capture 단계에서 Escape 를 삼킨다(`process/S21-slot-docking/trd.md` §1-4 「세션 동안 그 밖」의 「Esc 삼키기」). 단축키 표를 만들 때 「드래그 중 Esc = 끌기 몫」 규칙 한 줄로 우선순위를 둔다(사용자 2026-10-16 — 그때 다시 본다).
+- **참고:** 끄는 중(HTML5 끌어 놓기) Esc 는 OS 끌기 루프가 받는 것이라 표에 넣을 키가 아니다 — 끌기가 끝난 뒤 셸이 Esc · 버튼 상태를 읽어 취소로 가른다(`process/S21-slot-docking/trd.md` §3-5 ② — 7판). 옛 판(5.8 §1-4 「세션 동안 그 밖」 — 백업 `.claude/handoff/attachments/trd-5.8-before-chrome-2026-10-18.md`)의 「세션 동안(+200ms) `window` capture 단계에서 Escape 삼키기」는 옛 끌기 엔진과 함께 걷혔다(`rg Escape src/components/layout` 에 끌기 몫 0 — 2026-10-23). 단축키 표를 만들 때 「드래그 중 Esc = 끌기 몫」 규칙 한 줄로 우선순위를 둔다(사용자 2026-10-16 — 그때 다시 본다).
 - **다음(펼칠 때 쟁점):** ① 범위·우선순위(전역 / 포커스 칸 / 입력창 — Esc 는 팝오버 닫기가 끊기보다 먼저) ② 입력 가드와 공존 ③ 터미널 칸 예외 선언 ④ 한글 IME 조합 중 무시 ⑤ 재지정·저장·LLM 제어(명령 표 위에 — 새 전역 핸들 금지) ⑥ 표시 힌트를 실제 표와 일치. 채팅 칸 Esc 를 표 한 줄로 옮기는 것부터.
 - **근거:** ADR-0237(거부한 대안 「단축키 시스템을 지금 만든다」) · ADR-0055 · `docs/research/chat-ux-four-features-2026-09-27.md` §2-2(피어 paseo · t3code · VS Code `when`)
 
@@ -296,7 +296,7 @@
 - **문제:** `replay_flight`(`src-tauri/src/daemon_client/replay_flight.rs`)는 에이전트당 in-flight Subscribe 를 하나로 강제하고 그동안 온 요청을 「다음 1회 Subscribe」로 병합한다. 병합된 후속 Subscribe 가 나가기 전에 그 에이전트를 보이던 마지막 창이 닫히면, 후속 Subscribe 가 닫힌 뒤에 데몬으로 나간다. 구독 해제는 레이아웃의 「보임 1→0 전이」에서 한 번만 나가므로 이 구독은 풀리지 않는다 → 데몬이 그 에이전트 출력을 계속 보내고 셸은 받을 창이 없어 버린다. 화면 영향 없음 · 낭비 트래픽. 재연결 또는 그 에이전트를 다시 보였다 숨기면 풀린다.
 - **3단계가 막은 것과의 경계:** 3단계는 `daemon_client/connection.rs` 의 `RequestReplay` 갈래에 「`router.targets` 가 비면 Subscribe 안 보냄」 가드를 넣어 닫히는 창이 *새로* 내는 요청만 막았다. 이미 병합돼 대기 중인 후속은 그 가드를 지나지 않는다.
 - **다음(해법 스케치):** 병합된 후속 Subscribe 를 실제로 보내기 직전에 같은 가시성 검사(`router.targets` 비었나)를 하고, 비었으면 보내지 않고 버린다. ★함정 — 버릴 때 in-flight 슬롯 해제를 함께 해야 한다★: 슬롯을 남긴 채 버리면 그 에이전트의 다음 replay 요청이 영영 안 나가 출력이 안 나온다(`replay_flight` 헤더 「단일 outstanding」 전제 · 해제 경로 셋 = resolution · 거절 · disconnect). 대안 = 후속 Ack 때 보이지 않으면 즉시 Unsubscribe. 시험을 붙여 고친다.
-- **근거:** `process/S21-slot-docking/trd.md` §1-2 「닫히는 창」 · 3단계 리뷰(codex FIX 1 · doc-aware 「추적만」)
+- **근거:** `process/S21-slot-docking/trd.md` 5.8판 §1-2 「닫히는 창」(지금 7판에는 그 절이 없다 — 백업 `.claude/handoff/attachments/trd-5.8-before-chrome-2026-10-18.md`) · 3단계 리뷰(codex FIX 1 · doc-aware 「추적만」)
 
 ### T-67. claude 강제 종료가 백그라운드 자동 업데이트를 끊어 설치가 깨진다(사용자 관찰)
 - **상태:** 결정됨 — 자동 업데이트를 막는다(사용자 2026-10-20: 「이거 얘전에 자동업데이트를 막는걸로 했는데」 · 조사 §5 의 C 쪽). 그 앞 결정은 저장소 어디에도 기록이 없었다(코드 · 문서 · 모든 로컬 브랜치 `git grep` 0 — 2026-10-20) · 구현도 없음.

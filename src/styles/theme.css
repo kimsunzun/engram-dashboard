@@ -2,7 +2,7 @@
 :root[data-theme='light'] { --bg: #f5f5f5; --bg-secondary: #fff; --surface-elevated: #ffffff; --text: #1a1a1a; --text-muted: #666; --border: #ccc; --accent: #0066cc; --status-running: #1a7f37; /* 활성(Running) 글리프 색 — 밝은 bg 위 가독 green(github-light 계열, ADR-0062 색 개정) */ --status-blocked: #9a6700; /* 마지막 실패로 못 여는 항목의 경고색 — 밝은 bg 위 가독 amber(ADR-0173) */ --scrollbar-thumb: rgba(0, 0, 0, 0.28); /* 밝은 bg 위 어두운 반투명 thumb */ --status-danger: #cf222e; /* 위험 — 밝은 bg 위 가독 red(github-light 계열) */ --vendor-claude: #d97757; --vendor-codex: var(--text-muted); /* 다크의 밝은 회색은 흰 bg 에서 안 보인다 */ }
 :root[data-theme='e-ink']  { --bg: #ffffff; --bg-secondary: #f0f0f0; --surface-elevated: #f0f0f0; --text: #000000; --text-muted: #444; --border: #000; --accent: #000; --status-running: var(--text-muted); /* e-ink 은 색 무력화 — Running 도 muted(중립)로 모양만 남긴다(ADR-0062 e-ink 의도 보존, 색 개정 예외) */ --status-blocked: var(--text); /* e-ink 은 색 무력화 — 금지 표식은 본문색으로 두어 모양만 남긴다 */ --scrollbar-thumb: rgba(0, 0, 0, 0.32); /* 흰 고대비 bg 위 진한 반투명 thumb(e-ink 강조) */ --status-danger: var(--text); --vendor-claude: var(--text); --vendor-codex: var(--text); /* e-ink 은 색 무력화 — 위험은 막대 모양이, 회사는 아이콘 모양이 가른다 */ }
 
-/* 탭바(TRD S21-slot-docking U7c — Chrome 꼴, 사용자 결정 2026-10-19) — 바는 내용 면(--bg)보다 한 칸 눌린 면, 활성 탭은 내용과
+/* 탭바(ADR-0295 결정 1 · ADR-0298 — Chrome 꼴, 사용자 결정 2026-10-19) — 바는 내용 면(--bg)보다 한 칸 눌린 면, 활성 탭은 내용과
    같은 면이라 아래 캔버스로 이어진다. 비활성 탭은 채우지 않고 구분선만, 맴돎은 둥근 옅은 면. edge = 바 아래 1px 선(활성 탭이
    덮은 자리만 끊긴다).
    ★다크는 내용이 거의 검정(#0a0a0a)이라 바를 더 누를 여지가 없어 거꾸로 바를 한 단계 밝힌다(#242424)★ — 활성 탭이 가장 어둡고

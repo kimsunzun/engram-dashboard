@@ -22,7 +22,7 @@
 //! 사실 · 전경 창이 이 프로세스의 것인가) · [`input`](커서 자리 · 주 버튼 · Esc 상태). 모듈 헤더와 공개 함수 문서가 그
 //! 책임의 정본이다.
 //! 창을 받는 함수는 `raw-window-handle` 의 `HasWindowHandle` 를 받고 그 변이 맞추기도 여기서 한다(TRD
-//! S21-slot-docking §8 · B10).
+//! S21-slot-docking 6.3판 §8 · B10 · 7판 §5-1).
 //!
 //! ★`testing`(실프로세스 시험 도우미) · `group::GroupRef::gone`(주인이 처음부터 없는 손잡이) ·
 //! `spawn::wmi_create_raw`(WMI 띄우기의 원시 호출 — 진단 시험 몫)는 cargo 기능 `test-support` 뒤다★
@@ -54,7 +54,7 @@
 //! - **워크스페이스 crate 의존 0 — base 도 아니다**(ADR-0266 「거부한 대안」 둘째 · ADR-0268). 아래 게이트
 //!   ①이 그 벽이다 — 컴파일러는 잎 성질을 강제하지 않는다.
 //! - **운영 의존의 서드파티는 `windows`(Windows 대상만) · `tracing` facade · `raw-window-handle` 만 들인다**(TRD 1-3
-//!   §0 ① · TRD S21-slot-docking §8) — 시험 전용 dev 의존은 이 규칙 밖이다. `windows` 는 의존 하나에 쓰는 바인딩
+//!   §0 ① · TRD S21-slot-docking 6.3판 §8 · B10 · 7판 §5-1) — 시험 전용 dev 의존은 이 규칙 밖이다. `windows` 는 의존 하나에 쓰는 바인딩
 //!   feature 의 합집합을 켜고, 기능별 cargo feature 로 쪼개지 않는다(ADR-0275 결정 13). `tracing` 은 규칙 4 의 경로가
 //!   찍는 데만 쓴다. `raw-window-handle` 은 창을 받는 함수의 인자 트레이트(`HasWindowHandle`) 하나 몫이다 — 의존이
 //!   없는 잎 crate 이고 OS crate 가 아니다(게이트 ⑤ 목록 밖).

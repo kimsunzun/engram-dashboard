@@ -206,7 +206,7 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
   const topId = motion?.view ?? lastDragged.current
 
   // 순서 이동을 그리는 동안은 맴돎을 칠하지 않는다 — 누른 순간의 맴돎이 비켜나는 머리에 남아 보인다(OS 끌기 동안 머리의 들고
-  //   남이 오는지는 미검 — TRD §4-7 M11).
+  //   남이 오는지는 미검 — TRD §2-4 · M11).
   const [hovered, setHovered] = useState<string | null>(null)
   const activeId = shown
   const lit = (id: string) => id === activeId || (motion === null && id === hovered)
@@ -274,7 +274,8 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
       >
         {domOrder.map(id => {
           const head = headById.get(id)!
-          // 막 붙은 창은 끄는 탭을 모델 메아리보다 먼저 받는다 — 그때는 이름 없이 자리 · 폭만 그린다(TRD §5-1 「붙은 직후」).
+          // `placeAt` 은 모델에 없는 끄는 탭도 줄에 넣는다 — 그 머리는 이름 없이 자리 · 폭만 그린다. 순서 이동은 끄기 시작의 탭 목록이
+          //   모델과 같을 때만 그려(`stripHeld`) 지금은 닿지 않는 것으로 보인다(미검).
           const tab = metaById.get(id) ?? { id, name: '' }
           const isActive = id === activeId
           const editing = editingId === id

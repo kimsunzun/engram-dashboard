@@ -319,7 +319,7 @@ pub(crate) const POPOUT_DEFAULT_SIZE: (f64, f64) = (720.0, 500.0);
 //   정확히 입힌다(위치 먼저 — 그 까닭 = [`placement::place`] · [`build_runtime_window`] 머리). 안 걸치거나 위치가 없으면
 //   label 의 계단 자리다. 크기가 없거나 쓸 수 없는 값이면 기본 크기다. `activate` = 포커스를 받으며 짓는다(아니면 올리기만
 //   하는 보이기 — `first_paint::hold_built`) · `opened` = 창 포트가 열기를 시작한 때.
-// TRD S21-slot-docking §1-2 「적용 서비스」
+// TRD S21-slot-docking §3-9 「`open_at`(맡긴 label)」 · 「폴백」
 fn open_runtime_window_at(
     app: &AppHandle,
     label: &str,
@@ -501,7 +501,7 @@ pub fn cleanup_popup_window(
 /// 팝아웃의 닫기 요청(`lib.rs` 의 `CloseRequested`) — 창 정리의 모델 몫([`drop_window_in_model`] · 묘비 포함)을
 /// 소멸을 기다리지 않고 지금 한다. 뒤이은 `Destroyed` 정리([`cleanup_popup_window`])가 같은 몫을 다시 해도 바뀌는
 /// 것은 없다. main 은 무동작이다(main 의 닫기 요청은 숨기기 — 부르는 쪽 갈래).
-/// TRD S21-slot-docking §1-2 「닫히는 창」
+/// TRD S21-slot-docking 5.8판 §1-2 「닫히는 창」
 pub(crate) fn close_requested_popup_window(
     label: &str,
     state: &LayoutState,
@@ -550,7 +550,7 @@ pub(crate) fn drop_window_in_model(
     // 창이 이미 모델에서 지워졌으면 rebuild 만.
     let delta = crate::output_router::cleanup_window_core(&mut mgr, router, label);
     // 묘비는 모델 삭제와 같은 락 안 — 이 락 뒤의 도킹 · 새 창 확정은 그 창을 「없음」이나 묘비로 만나 무변경이다
-    //   (TRD S21-slot-docking §1-2 「닫히는 창」 (c)).
+    //   (TRD S21-slot-docking 5.8판 §1-2 「닫히는 창」 (c)).
     mgr.mark_closed(label);
     // 이 창이 마지막이던 agent 는 1→0 → Unsubscribe(락 안 발화 — F1).
     for a in delta.to_unsubscribe {
@@ -656,7 +656,7 @@ mod tests {
     }
 }
 
-// ── 테스트: 팝아웃 닫기 요청의 모델 몫(TRD S21-slot-docking §1-2 「닫히는 창」) — 창 없이 선다 ──────────
+// ── 테스트: 팝아웃 닫기 요청의 모델 몫(TRD S21-slot-docking 5.8판 §1-2 「닫히는 창」) — 창 없이 선다 ──────────
 // 라우팅 표 · 구독 재동기는 운영과 같은 실물(`OutputRouter` · `RouterSubs`)이고 데몬에는 붙지 않는다(해제 발화는
 // 창구가 닫혀 no-op — 발화 횟수는 `daemon_client` 시험이 잰다). `lib.rs` 의 창 사건 배선은 화면 실측 몫이다.
 #[cfg(test)]

@@ -20,8 +20,8 @@ test-support = []
 #   Manager 세션 닫기. facade 뿐이라 base 를 끌지 않는다.
 tracing = "0.1"
 # 창을 받는 함수(`window`)의 인자 꼴 — `&impl HasWindowHandle` 를 받아 핸들 변이 맞추기(Windows =
-#   `Win32`)를 이 crate 안에서 한다(TRD S21-slot-docking §8 · B10). 부르는 쪽은 Tauri 창을 그대로 넘기므로 이
-#   crate 를 의존하지 않는다. Tauri 가 이미 끄는 같은 판이라 `Cargo.lock` 에 새 패키지가 없다.
+#   `Win32`)를 이 crate 안에서 한다(TRD S21-slot-docking 6.3판 §8 · B10 · 7판 §5-1). 부르는 쪽은 Tauri 창을
+#   그대로 넘기므로 이 crate 를 의존하지 않는다. Tauri 가 이미 끄는 같은 판이라 `Cargo.lock` 에 새 패키지가 없다.
 raw-window-handle = "0.6"
 
 # Foundation = `process`(CloseHandle·FILETIME) · `file_holders`(Win32 오류 코드) · `group` 이 함께 쓴다 ·

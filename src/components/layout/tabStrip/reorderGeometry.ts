@@ -1,4 +1,4 @@
-// TRD S21-slot-docking §5-1(C1 · C2 · C3): 탭바 안 순서 이동의 순수 기하 — Chromium 데스크톱 탭바 끌기
+// TRD S21-slot-docking §4-1 · §4-2 · 6.3판 §5-1(C1 · C2 · C3): 탭바 안 순서 이동의 순수 기하 — Chromium 데스크톱 탭바 끌기
 //   (`DraggingTabsSession::MoveAttachedImpl` · `TabStrip` 의 `GetInsertionIndexForDraggedBounds` → `CalculateInsertionIndex`)를
 //   탭 하나 · 고정 탭 없음 · 그룹 없음 · 분할 없음 · 겹침 0 인 우리 경우로 그대로 옮겼다. 규칙을 고안해 넣지 말 것(Q23).
 //   ★TRD 문장과 Chromium 소스가 다르면 소스를 따른다★(메인 결정 2026-10-18 — 「Chrome 소스 그대로」).
@@ -6,7 +6,7 @@
 //   아니다. 줄 번호 = chromium/src main(2026-10-18 받음): `tab_strip.cc` · `tab_container_impl.cc` = `chrome/browser/ui/views/tabs/` ·
 //   `dragging_tabs_session.cc` = `chrome/browser/ui/views/tabs/dragging/` · `tween.cc` · `animation.cc` = `ui/gfx/animation/` ·
 //   `bounds_animator.h` = `ui/views/animation/`.
-// 좌표 = CSS px · 끌기 영역 왼쪽(= 첫 탭 왼쪽)이 0. 반올림은 잡은 오프셋 · 문턱 두 곳뿐이고 나머지는 부동소수 그대로다(TRD §5).
+// 좌표 = CSS px · 끌기 영역 왼쪽(= 첫 탭 왼쪽)이 0. 반올림은 잡은 오프셋 · 문턱 두 곳뿐이고 나머지는 부동소수 그대로다(TRD S21-slot-docking 6.3판 §5-1).
 
 import { TAB_STANDARD_W, type TabStripLayout } from './layout'
 

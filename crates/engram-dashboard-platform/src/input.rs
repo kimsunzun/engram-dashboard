@@ -3,7 +3,7 @@
 //!
 //! 셋 다 OS 의 비동기 상태를 읽는다 — 메시지 큐를 거치지 않으므로 웹뷰가 쥔 캡처 · 다른 프로세스의 창과 무관하게
 //! 지금 장치 상태다. ★보안 데스크톱(잠금 화면 · UAC)이 앞에 있으면 OS 가 답하지 않는다★ — 커서는 `None`, 버튼은
-//! 떨어진 것으로 온다(MS `GetCursorPos` · `GetAsyncKeyState` 문서 · TRD §12 M14).
+//! 떨어진 것으로 온다(MS `GetCursorPos` · `GetAsyncKeyState` 문서 · TRD S21-slot-docking 6.3판 §12 M14).
 
 // ADR-0266
 // ADR-0295

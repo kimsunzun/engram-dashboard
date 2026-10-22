@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>슬롯 도킹 브리핑</title>
-<meta name="description" content="S21 슬롯 도킹 구조 브리핑 — TRD 5.8 · PRD 4.7 기준: 층마다 무엇을 쥐나(배치 그림), 사용자가 보는 동작, 탭바 안 순서 이동, Chrome 식 탭바 넘침, 끝 신호와 커서 판정, 안전장치, 결정 · 남은 실측">
+<meta name="description" content="S21 슬롯 도킹 구조 브리핑(낡음 — 2026-10-18 그림 · 지금 구조의 정본은 TRD 7판) — TRD 5.8 · PRD 4.7 기준: 층마다 무엇을 쥐나(배치 그림), 사용자가 보는 동작, 탭바 안 순서 이동, Chrome 식 탭바 넘침, 끝 신호와 커서 판정, 안전장치, 결정 · 남은 실측">
 <style>
   :root {
     --ground: #F4F6F8;
@@ -361,6 +361,7 @@
   <h1>탭을 끌어, 원하는 창의 원하는 자리에 붙인다</h1>
   <p class="lead">메인 · 팝아웃 창의 탭을 끌어 다른 창(또는 같은 창)의 슬롯 옆 · 탭바 · 빈 곳에 놓는 기능입니다. 이 페이지는 <b>무엇이 어느 층에 있나</b>를 그림으로 먼저 보이고(1절), 사용자가 보는 동작과 5.7 · 5.8 판에서 새로 들어온 규칙을 차례로 그립니다.</p>
   <div class="callout"><b>TRD 5판 이후 바뀐 것 —</b> ① 자기 탭바 안에서는 끌기가 <b>순서 이동</b>이고, 탭바 구역을 벗어나야 떼어집니다(Q20 · 5.7 — 3절). ② 어느 창도 보고하지 못한 채 끝난 끌기는 셸이 <b>뗀 순간 커서</b>로 판정해 적용하고(Q21), 엔진이 곧바로 접은 끌기(15ms 안)는 무변경입니다(5.7 — 5절). ③ 탭바는 스크롤하지 않고 <b>Chrome 규칙</b>대로 폭을 줄이다 꼬리 탭을 숨깁니다(Q22 · 5.8 — 4절). ④ 사용자 확인 대상은 전부 닫혔습니다(8절).</div>
+  <div class="callout risk"><b>낡은 그림입니다(2026-10-23 표시) —</b> 이 페이지는 TRD 5.8 · PRD 4.7(2026-10-18) 때의 구조입니다. 그 뒤 탭 끌기는 두 번 바뀌었습니다 — 데스크톱 Chrome 식(TRD 6.3판 · ADR-0295)을 거쳐, 지금은 OS(HTML5) 끌기 · 놓을 때 한 번 옮김입니다(TRD 7판 · ADR-0296 · ADR-0297 · ADR-0299). 그래서 아래의 셸 끌기 장부(<code>dock/book.rs</code>) · 실행기(<code>commands/dock.rs</code>) · 판정 규칙 두 벌(<code>hit.rs</code> · <code>dockPick.ts</code> · <code>pick_golden.json</code>) · <code>dock_drag_*</code> 명령은 지금 없습니다(6.3판 U7b · U8 과 7판 U4c′ 가 걷었습니다). 6.3판이 platform 에 더했던 창 이동 루프 · 창 숨기기 · 옮기기 · Alt+Tab 빼기는 7판 U5(<code>3dcc6263</code>)가, 끌기 표식(<code>lease_tab</code> · <code>StaleLease</code>) · 판 번호 · 옛 대조 · <code>DockGuard</code> 는 7판 U6(<code>617cc54a</code>)이 걷었습니다 — 아래에서 표식에는 줄을 그었습니다. 1절의 「platform — 새 함수 없음 · 커서 밑 맨 위 창을 묻는 OS 함수는 들이지 않았다」도 지금은 맞지 않습니다 — 7판은 끌기가 끝난 뒤 셸이 platform <code>input::escape_down</code> · <code>window::top_level_at</code> 으로 창 밖 놓기를 가릅니다. 지금 구조의 정본 = <code>docs/process/S21-slot-docking/trd.md</code>(7판) §2 · §3 · §5.</div>
 
   <figure class="fig">
     <h3 style="margin-bottom:10px">어디까지 왔나 — TRD §10 단계를 git 로그와 대조</h3>
@@ -555,9 +556,9 @@
       <text x="160" y="462" class="t2">잠금 한 번 · 메인이 비면 빈 탭</text>
       <text x="160" y="481" class="cd">apply.rs · apply::dock_tab</text>
       <rect x="146" y="506" width="274" height="96" rx="8" class="box"/>
-      <text x="160" y="528" class="tb">도킹 모델 · 표식 · 묘비</text>
+      <text x="160" y="528" class="tb">도킹 모델 · <tspan text-decoration="line-through">표식</tspan> · 묘비</text>
       <text x="160" y="550" class="cd">manager.rs · ViewManager::dock</text>
-      <text x="160" y="566" class="cd">plan_new_window · lease_tab</text>
+      <text x="160" y="566" class="cd">plan_new_window · <tspan text-decoration="line-through">lease_tab</tspan></text>
       <text x="160" y="582" class="cd">mark_closed · refill_main</text>
       <rect x="146" y="616" width="132" height="76" rx="8" class="box"/>
       <text x="158" y="638" class="tb">트리 연산</text>
@@ -640,7 +641,7 @@
       <div class="tbl"><table>
         <tr><th>층 · 모듈</th><th>파일</th><th>맡는 일</th><th>단계</th></tr>
         <tr><td>layout · 트리 연산</td><td class="path">src-tauri/src/layout/dock.rs</td><td><code>docked_tree</code> · <code>incoming_rect</code> — 끼운 결과 트리 · 새 면적 0 판정</td><td><span class="badge done">1</span></td></tr>
-        <tr><td>layout · 도킹 모델</td><td class="path">src-tauri/src/layout/manager.rs</td><td><code>ViewManager::dock</code> · <code>plan_new_window</code> · <code>lease_tab</code>(표식) · <code>mark_closed</code>(묘비) · <code>refill_main</code></td><td><span class="badge done">2 · 4</span></td></tr>
+        <tr><td>layout · 도킹 모델</td><td class="path">src-tauri/src/layout/manager.rs</td><td><code>ViewManager::dock</code> · <code>plan_new_window</code> · <del><code>lease_tab</code>(표식)</del>(U6 이 걷음) · <code>mark_closed</code>(묘비) · <code>refill_main</code></td><td><span class="badge done">2 · 4</span></td></tr>
         <tr><td>닫히는 창 (M2)</td><td class="path">src-tauri/src/commands/popout.rs<br>src-tauri/src/lib.rs</td><td>닫기 요청 순간 모델에서 먼저 지우고 묘비 · 닫히는 창의 늦은 구독 막기</td><td><span class="badge done">3</span></td></tr>
         <tr><td>layout · 적용 서비스</td><td class="path">src-tauri/src/layout/apply.rs<br>src-tauri/src/state/placement.rs</td><td><code>apply::dock_tab</code> · 창 포트 <code>open_at</code> · <code>move_window</code> · 알림 묶음 끝 <code>LayoutEvents::settled</code> · 새 창 자리</td><td><span class="badge done">4</span></td></tr>
         <tr><td>layout · 크롬 측정 타입</td><td class="path">src-tauri/src/layout/chrome.rs</td><td><code>DockChrome</code> · <code>TabHeader</code> · <code>RectCss</code></td><td><span class="badge done">5</span><span class="note">9c 는 주석만</span></td></tr>
@@ -1233,7 +1234,7 @@
 
   <figure class="fig">
     <div class="scroll">
-    <svg class="d w900" viewBox="0 0 1160 704" role="img" aria-label="순서도: dragstart 에 출처 웹뷰가 탭바를 재고 셸이 표식과 창별 영역을 보낸다. 대상 웹뷰가 dragover 로 가이드를 그리고 보인 것이 바뀔 때만 알린다. 끝은 drop, dragend none, 엔진 취소, 신호 유실의 네 줄이고, 마무리로 적용 알림 뒤 Ended 를 낸다">
+    <svg class="d w900" viewBox="0 0 1160 704" role="img" aria-label="순서도: dragstart 에 출처 웹뷰가 탭바를 재고 셸이 창별 영역을 보낸다(표식은 U6 에서 걷힘). 대상 웹뷰가 dragover 로 가이드를 그리고 보인 것이 바뀔 때만 알린다. 끝은 drop, dragend none, 엔진 취소, 신호 유실의 네 줄이고, 마무리로 적용 알림 뒤 Ended 를 낸다">
       <defs>
         <marker id="Qa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah-a"/></marker>
         <marker id="Qn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah"/></marker>
@@ -1275,9 +1276,9 @@
       <line x1="190" y1="186" x2="996" y2="186" class="ln-a" marker-end="url(#Qa)"/>
       <text x="593" y="180" class="cda mid">invoke dock_drag_start{drag_id, view_id, hotspot, strip}</text>
       <rect x="870" y="194" width="260" height="52" rx="6" class="box"/>
-      <text x="1000" y="211" class="t2 mid">표식 · 창별 영역 (+ 출처 reorder)</text>
+      <text x="1000" y="211" class="t2 mid"><tspan text-decoration="line-through">표식</tspan> · 창별 영역 (+ 출처 reorder)</text>
       <text x="1000" y="226" class="tm mid">탭 하나 팝아웃 숨기기는 증거까지 미룸</text>
-      <text x="1000" y="240" class="cd mid">lease_tab · regions_for</text>
+      <text x="1000" y="240" class="cd mid"><tspan text-decoration="line-through">lease_tab</tspan> · regions_for</text>
       <line x1="996" y1="262" x2="714" y2="262" class="ln" marker-end="url(#Qn)"/>
       <text x="855" y="257" class="cda mid">emit dock:session · dock:regions</text>
 
@@ -1327,7 +1328,7 @@
 
       <line x1="996" y1="656" x2="194" y2="656" class="ln" marker-end="url(#Qn)"/>
       <text x="593" y="650" class="cda mid">window:tabs-updated → dock:session Ended</text>
-      <text x="593" y="680" class="tm mid">숨긴 출처 되보이기(메인 스레드 맞추기) · 대상 창 set_focus · 표식 내리기 · 떼어진 모습 · 가이드 지움</text>
+      <text x="593" y="680" class="tm mid">숨긴 출처 되보이기(메인 스레드 맞추기) · 대상 창 set_focus · <tspan text-decoration="line-through">표식 내리기</tspan> · 떼어진 모습 · 가이드 지움</text>
     </svg>
     </div>
     <figcaption>세로 점선 = 참여자, 가로 화살표 = 실제 DOM 사건 · invoke · emit(청록 = 셸로 들어가 놓기를 정하는 것). 청록 칠한 셸 상자만 배치가 바뀔 수 있는 곳이고, 끄는 동안(②)에는 셸이 아무것도 바꾸지 않습니다.</figcaption>
@@ -1336,10 +1337,10 @@
   <div class="sub">
     <h3>그림 읽기</h3>
     <ol class="walk">
-      <li><b>① 시작.</b> 엔진이 <code>dragstart</code> 를 내면 출처 탭바가 우리 MIME · 끌기 그림을 싣고 탭바를 잽니다(<code>strip</code> — 읽기만; 여기서 DOM 을 바꾸면 Chromium 이 끌기를 끝냅니다). 셸 세션은 그 사건 처리가 끝난 뒤(<code>setTimeout 0</code>) 시작이 취소되지 않았을 때만 엽니다 — 에이전트 트리(react-arborist)가 window 에 단 끌기 리스너가 시작을 취소할 수 있어서입니다. 셸은 표식을 세우고 창마다 영역을 보냅니다.</li>
+      <li><b>① 시작.</b> 엔진이 <code>dragstart</code> 를 내면 출처 탭바가 우리 MIME · 끌기 그림을 싣고 탭바를 잽니다(<code>strip</code> — 읽기만; 여기서 DOM 을 바꾸면 Chromium 이 끌기를 끝냅니다). 셸 세션은 그 사건 처리가 끝난 뒤(<code>setTimeout 0</code>) 시작이 취소되지 않았을 때만 엽니다 — 에이전트 트리(react-arborist)가 window 에 단 끌기 리스너가 시작을 취소할 수 있어서입니다. 셸은 <del>표식을 세우고</del>(표식은 U6 이 걷음) 창마다 영역을 보냅니다.</li>
       <li><b>② 끄는 중.</b> 대상 창마다 <code>dragover</code> 를 받아 영역 위에서 판정하고 가이드를 그립니다. 셸에는 보인 것이 바뀔 때만 알리고, 셸은 이때 배치를 바꾸지 않습니다(예외 하나 — 다른 창 탭 머리 위 0.5초 머묾 = 사람 클릭과 같은 탭 전환).</li>
       <li><b>③ 끝 — 네 줄.</b> A: 우리 창 위에서 떼면 그 창의 <code>drop</code> 이 그린 판정을 싣고 오고, 셸이 같은 규칙으로 다시 고릅니다. B: 창 밖 · Esc · 멈춘 채 뗀 끝은 출처의 <code>dragend(none)</code> 하나로 오고 셸이 「마지막 점에 놓기」를 돕니다(다음 그림). C: 엔진이 곧바로 접은 끌기는 <code>canceled</code> 로 와 무변경입니다. D: 끝 신호를 잃으면 끝 뒤 첫 <code>pointermove</code> 가 알리고, 300ms 안에 끝 신호가 안 오면 마지막 보고로 판정합니다.</li>
-      <li><b>④ 마무리.</b> 적용 알림(<code>window:tabs-updated</code>) 뒤에 <code>Ended</code> 를 내고, 숨긴 출처를 되보이고 대상 창에 포커스를 주며 표식을 내립니다. 웹뷰는 <code>Ended</code> 에서 가이드 · 머묾 · 떼어진 표시를 무조건 지웁니다.</li>
+      <li><b>④ 마무리.</b> 적용 알림(<code>window:tabs-updated</code>) 뒤에 <code>Ended</code> 를 내고, 숨긴 출처를 되보이고 대상 창에 포커스를 주며 <del>표식을 내립니다</del>(표식은 U6 이 걷음). 웹뷰는 <code>Ended</code> 에서 가이드 · 머묾 · 떼어진 표시를 무조건 지웁니다.</li>
     </ol>
   </div>
 
@@ -1661,7 +1662,7 @@
     <div class="body">
       <ul>
         <li><b>한 세션에 적용은 많아야 한 번</b> — 판정과 「적용 중」 표시가 장부 잠금 한 번 안이라, 그 뒤 오는 놓기 · 끝 신호는 늦은 신호로 버립니다. 모르는 세션 id 의 신호도 버립니다.</li>
-        <li><b>표식</b>(<code>lease_tab</code>)은 끌기 시작 때 서고, 놓기는 그 표식을 싣고 갑니다. 지난 끌기의 늦은 놓기는 <code>StaleLease</code> 로 무변경입니다.</li>
+        <li><del><b>표식</b>(<code>lease_tab</code>)은 끌기 시작 때 서고, 놓기는 그 표식을 싣고 갑니다. 지난 끌기의 늦은 놓기는 <code>StaleLease</code> 로 무변경입니다.</del> — U6(<code>617cc54a</code>)이 표식 장치를 통째로 걷었습니다. 지금 놓기는 대상을 id 로 다시 찾아 있으면 붙이고 없으면 무동작입니다(ADR-0297).</li>
         <li><b>닫히는 창</b> 장치의 전제 = 「팝아웃 닫기는 막을 수 없다」. 누가 프론트에 닫기 요청 리스너를 달면 이 전제가 무너지므로, 점검 명령 두 줄을 QA 게이트로 매번 돌립니다(<code>rg -i "close.?requested" src/</code> → 0줄 · <code>rg "prevent[_]close" src-tauri/src/</code> → 1줄).</li>
         <li><b>드롭 처리기 점검</b>(6단계부터) — <code>rg "disable_drag_drop_handler" src-tauri/src/</code> → 1줄(<code>webview_env.rs</code>) · 끈 처리기의 사건을 기대하는 코드 0줄.</li>
         <li><b>저장</b>: 기록기는 같은 잠금 안에서 배치를 통째로 복사해 쓰므로 저장 파일에는 도킹 전 아니면 도킹 뒤만 실립니다 — 다시 켜도 탭은 정확히 한 곳에 있습니다. 끄는 동안 저장되는 것은 0.5초 머물러 바꾼 탭 전환 하나뿐입니다.</li>

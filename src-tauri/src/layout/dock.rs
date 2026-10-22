@@ -1,5 +1,5 @@
 //! 도킹 트리 연산 — 탭 하나의 배치(`incoming`)를 대상 탭 트리의 슬롯 옆이나 바깥 변에 끼운 **결과 트리**를 새로
-//! 만든다(PRD R7–R9 · TRD S21-slot-docking §1-2). `tree`·`geometry` 만 알고 Tauri·락·I/O 를 모른다 →
+//! 만든다(PRD R7–R9 · TRD S21-slot-docking 5.8판 §1-2 「트리 연산」). `tree`·`geometry` 만 알고 Tauri·락·I/O 를 모른다 →
 //! 단독 headless 테스트가 된다(ADR-0012 격리).
 //!
 //! 진입점 = [`docked_tree`](결과 트리 · 새 면적 0 거절) · [`incoming_rect`](결과 기하에서 끼운 것의 사각형).
@@ -214,7 +214,7 @@ mod tests {
         }
     }
 
-    // TRD §1-2 분할 모양 표 — (방향, 새것이 a 인가, 비율 = a 몫).
+    // TRD S21-slot-docking 5.8판 §1-2 「트리 연산」 분할 모양 — (방향, 새것이 a 인가, 비율 = a 몫).
     fn shape(side: DockSide) -> (SplitDir, bool, f64) {
         match side {
             DockSide::Left => (SplitDir::LeftRight, true, 1.0 / 3.0),

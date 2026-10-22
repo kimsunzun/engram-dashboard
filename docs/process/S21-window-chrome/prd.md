@@ -7,7 +7,7 @@
 | **스텝** | S21 |
 | **브랜치** | `v0.5.0/feat/slot-docking`(2026-10-20 개명 — 옛 `v0.4.1/…`) — 슬롯 도킹과 같은 브랜치 · 9c 직후 · 최종 머지에 포함(결정 · 2026-10-17) |
 | **트래킹** | T-66(`docs/tracking.md`) |
-| **근거 문서** | [window-naming-titlebar-2026-10-17.md](../../research/window-naming-titlebar-2026-10-17.md)(이름 · 번호 관행 · 메인 제안) · [custom-titlebar-tauri-2026-10-18.md](../../research/custom-titlebar-tauri-2026-10-18.md)(제목 표시줄 구현 선택지 · 피어 · 미확인) · 슬롯 도킹 [PRD](../S21-slot-docking/prd.md) R1 · R21–R24 · [TRD](../S21-slot-docking/trd.md) §4-5 · §7 #73(탭 폭 상수 · `A` 다시 끌어내기) |
+| **근거 문서** | [window-naming-titlebar-2026-10-17.md](../../research/window-naming-titlebar-2026-10-17.md)(이름 · 번호 관행 · 메인 제안) · [custom-titlebar-tauri-2026-10-18.md](../../research/custom-titlebar-tauri-2026-10-18.md)(제목 표시줄 구현 선택지 · 피어 · 미확인) · 슬롯 도킹 [PRD](../S21-slot-docking/prd.md) R1 · R21–R24 · TRD 5.8판 §4-5 · §7 #73(탭 폭 상수 · `A` 다시 끌어내기 — 지금 [TRD](../S21-slot-docking/trd.md) 7판에는 그 절이 없다 · 백업 `.claude/handoff/attachments/trd-5.8-before-chrome-2026-10-18.md`) |
 | **출처 표기** | (결정 · 2026-10-17) = 그날의 사용자 결정 · (기본값 — 메인 제안) = 메인이 제안했고 사용자는 아직 정하지 않았다 — 바꿀 수 있다 · (조사 이름 §x) · (조사 제목 §x) = 위 두 근거 문서의 절 · (원칙) = CLAUDE.md 「LLM-우선 제어」 · 「플랫폼 중립」 · (코드) = 지금 코드의 사실 |
 | **리뷰 기록** | 1차 `/review prd full` — User(Claude · blind) FIX 12 · Tester(codex · blind) BLOCK 12 → 반영(0.2판) · 2차 `/review prd light`(codex · Tester) BLOCK → 반영(0.3판) · 3차 리뷰 미실행(남은 세부는 TRD 단계 — 사용자 결정 뒤) |
 

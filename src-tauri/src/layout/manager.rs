@@ -1078,7 +1078,7 @@ impl ViewManager {
 
     // ★phase C — 새 창 생성 + 임시 View 를 그 창 첫 탭으로★. label 은 호출자 발급(단조 카운터).
     // 새 창 windows 엔트리 생성 + view_owner 쌍 갱신. label 에 묘비가 있으면(phase B 동안 그 새 창이 닫힘)
-    // `WindowClosed` — 닫힌 창의 모델 항목을 만들지 않는다(TRD S21-slot-docking §1-2 「닫히는 창」 (b)).
+    // `WindowClosed` — 닫힌 창의 모델 항목을 만들지 않는다(TRD S21-slot-docking 5.8판 §1-2 「닫히는 창」 (b)).
     pub fn attach_view_as_new_window(
         &mut self,
         label: &str,
@@ -1100,7 +1100,7 @@ impl ViewManager {
         Ok(())
     }
 
-    // ── 도킹(TRD S21-slot-docking §1-2) ──────────────────────────────────────
+    // ── 도킹(TRD S21-slot-docking §2-1 · §3-3) ──────────────────────────────
 
     /// 탭 `view` 를 `to` 로 옮긴다. 성공이면 출처 창에서 빼기 · 대상에 넣기 · 빈 팝아웃 항목 지우기 · 모르는 내용
     /// 곁표 옮기기가 이 한 번에 일어나고 `version` 이 한 번 오른다 — 단 같은 창 같은 자리의 `TabBar` 는 무변경
@@ -1225,7 +1225,7 @@ impl ViewManager {
             .ok_or(DockError::TabNotFound(view))?
             .clone();
 
-        // 묘비가 선 창은 모델에서 먼저 지워지므로(TRD S21-slot-docking §1-2 「닫히는 창」) 여기 묘비 검사는 방어다 —
+        // 묘비가 선 창은 모델에서 먼저 지워지므로(TRD S21-slot-docking 5.8판 §1-2 「닫히는 창」) 여기 묘비 검사는 방어다 —
         // 그래서 「없음」과 같은 오류를 낸다.
         let target_window = match to {
             DockTo::Seam { target, .. } => self
@@ -1640,8 +1640,9 @@ pub enum CloseTabOutcome {
 }
 
 /// 탭 목록 `tabs` 에서 `removed` 가 빠질 때 활성을 이을 탭 — 오른쪽 이웃 우선, 없으면 왼쪽. `removed` 가 목록에
-/// 없거나 혼자면 `None`. 탭 닫기 · 도킹이 모델에서, 끄는 동안의 떼어진 표시가 화면에서 같은 탭을 보이려고 이
-/// 하나를 쓴다(TRD S21-slot-docking §4-1).
+/// 없거나 혼자면 `None`. 탭 닫기 · 도킹이 쓴다. ★웹 거울 `src/components/layout/tabStrip/succession.ts` 와 규칙이
+/// 같아야 한다★ — 끄는 동안 출처 창이 보이는 남은 탭이 놓은 뒤 이것이 고르는 탭과 같아야 화면이 바뀌지 않는다
+/// (TRD S21-slot-docking §3-3 · §4-2).
 // ADR-0057
 pub fn succession(tabs: &[ViewId], removed: ViewId) -> Option<ViewId> {
     let pos = tabs.iter().position(|v| *v == removed)?;
@@ -1663,7 +1664,7 @@ struct PulledDock {
     main_refilled: Option<ViewId>,
 }
 
-// ── 도킹 타입(TRD S21-slot-docking §1-2) ──────────────────────────────────────
+// ── 도킹 타입(TRD S21-slot-docking §3-3 · §3-7) ──────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DockTo {
@@ -1737,7 +1738,7 @@ pub enum NewWindowPlan {
 }
 
 /// 도킹 실패 사유 — 실패면 모델은 그대로다. 문구 = 한국어 사유 + 괄호 속 종류 낱말(사람 · LLM 이 읽는다 · 기계
-/// 분기는 종류로 한다 — TRD S21-slot-docking §3-2).
+/// 분기는 종류로 한다 — TRD S21-slot-docking §3-4).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DockError {
     #[error("탭 없음: {0} (TabNotFound)")]
@@ -4551,7 +4552,7 @@ mod tests {
         );
     }
 
-    // ── 도킹(TRD S21-slot-docking §1-2 · §9 모델) ─────────────────────────────
+    // ── 도킹(TRD S21-slot-docking 5.8판 §1-2 · §9 「모델」 · 7판 §8-1 ⑦) ──────
 
     const P1: &str = "slot-popup-1";
     const P2: &str = "slot-popup-2";
@@ -4833,7 +4834,7 @@ mod tests {
 
     #[test]
     fn docking_the_visible_tab_inside_its_own_window_makes_the_target_visible() {
-        // ★출처가 대상 창의 보이는 탭이면 「보이는 탭 그대로」가 설 수 없다 — 대상이 보인다(TRD §1-2 · §11-1 #1)★.
+        // ★출처가 대상 창의 보이는 탭이면 「보이는 탭 그대로」가 설 수 없다 — 대상이 보인다(TRD S21-slot-docking 5.8판 §1-2 「보이는 탭」 · §11-1 #1)★.
         let Fx { mut mgr, m, .. } = fixture();
         mgr.switch_tab(MAIN_WINDOW_LABEL, m[1]).unwrap();
         assert_eq!(
@@ -4948,7 +4949,7 @@ mod tests {
 
     #[test]
     fn tab_bar_in_the_same_window_reorders_and_keeps_the_visible_tab() {
-        // 보이는 탭을 옮기면 그 탭이 그대로 보인다(같은 창 TabBar — TRD §1-2 「보이는 탭」).
+        // 보이는 탭을 옮기면 그 탭이 그대로 보인다(같은 창 TabBar — TRD S21-slot-docking 5.8판 §1-2 「보이는 탭」).
         let Fx { mut mgr, m, .. } = fixture();
         let out = docked(
             &mut mgr,
@@ -5295,7 +5296,7 @@ mod tests {
                 size: Some((1280.0, 800.0))
             })
         );
-        // 최대화 중이어도 보통 자리 크기다(TRD §11-1 #4).
+        // 최대화 중이어도 보통 자리 크기다(TRD S21-slot-docking §3-3 「size: None」 · §3-5).
         mgr.observe_window_placement(
             P1,
             WindowPlacement {

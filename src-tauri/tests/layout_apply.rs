@@ -2436,7 +2436,7 @@ fn set_split_ratio_returns_the_notified_snapshots_version_not_a_later_one() {
     );
 }
 
-// ── 알림 묶음 끝(`LayoutEvents::settled` — TRD S21-slot-docking §1-2) ──────────
+// ── 알림 묶음 끝(`LayoutEvents::settled` — TRD S21-slot-docking 5.8판 §1-2 「적용 서비스」) ──
 
 // 쓰기 하나가 낸 차례 — 알림이 하나 이상이고 묶음 끝은 그 뒤에 정확히 한 번(맨 끝).
 fn assert_one_batch(w: &World, write: &str) {
@@ -2769,7 +2769,7 @@ fn reads_observe_writes_immediately() {
     );
 }
 
-// ── dock_tab (TRD S21-slot-docking §1-2 「적용 서비스」) ──────────────────────
+// ── dock_tab (TRD S21-slot-docking §3-3) ──────────────────────
 //
 // 여기서 안 재는 것: 새 창 자리가 어느 모니터에도 안 걸치면 기본 자리로 가는 규칙은 창 포트의 Tauri 구현 몫이라
 // `state::placement` 의 `resolve_place` 단위 시험(`lib_unit`)이 잰다. 새 창이 붙기 전에 닫혀 묘비가 선 갈래 · 재사용

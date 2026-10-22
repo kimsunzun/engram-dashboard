@@ -1,4 +1,4 @@
-// TRD S21-slot-docking §3 「TS — tabStrip」 `measure.ts`: 탭바의 DOM 재기 하나 — 탭바 줄 사각형 · 머리들이 쓸 수 있는 폭.
+// TRD S21-slot-docking §4-1 `measure.ts`: 탭바의 DOM 재기 하나 — 탭바 줄 사각형 · 머리들이 쓸 수 있는 폭.
 //   ★머리는 재지 않는다★ — 탭 경계는 `layout.ts` 폭의 누적(이상적 경계)이다: 끄는 중에는 머리가 비켜남 · 끄는 탭 x 로
 //   옮겨져 그려져 잰 머리가 이상적 자리와 다르다.
 

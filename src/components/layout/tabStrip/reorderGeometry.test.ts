@@ -1,4 +1,4 @@
-// TRD S21-slot-docking §5-1 · §11 「TS tabStrip」: 탭바 안 순서 이동 순수 기하의 표 시험 — 기대값은 Chromium 규칙을 손으로
+// TRD S21-slot-docking §4-1 · §8-2 · 6.3판 §5-1 · §11 「TS tabStrip」: 탭바 안 순서 이동 순수 기하의 표 시험 — 기대값은 Chromium 규칙을 손으로
 //   셈한 것이다(제자리 후보 건너뜀 · 앞 쪽 동률 · 끄는 탭 뒤 −1 · 보이는 끝 자르기 · 문턱).
 
 import { describe, expect, it } from 'vitest'

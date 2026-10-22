@@ -5765,7 +5765,7 @@ async fn a_destroyed_popup_forgets_its_hidden_mark_even_when_the_model_never_hel
 }
 
 // ── 팝아웃 닫기 요청이 그 창에만 보이던 에이전트의 구독을 한 번 풀고, 뒤이은 소멸 정리는 아무것도 안 보낸다 ─────────
-// 닫기 요청이 모델을 먼저 지우므로(TRD S21-slot-docking §1-2 「닫히는 창」) 해제는 그때 나가고, 소멸 정리는 같은 몫을
+// 닫기 요청이 모델을 먼저 지우므로(TRD S21-slot-docking 5.8판 §1-2 「닫히는 창」) 해제는 그때 나가고, 소멸 정리는 같은 몫을
 // 다시 해도 낼 것이 없다.
 #[tokio::test]
 async fn a_popout_close_request_unsubscribes_once_and_the_later_destroyed_sends_nothing() {

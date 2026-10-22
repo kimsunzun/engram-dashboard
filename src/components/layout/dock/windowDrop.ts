@@ -103,7 +103,7 @@ interface Bands {
   bands: WindowBands | null
 }
 
-/** 판정 하나와 그때 쓴 상태 — drop 이 이것으로 명령을 짓는다(미리보기 = 결과 — R4 · TRD §2-4). */
+/** 판정 하나와 그때 쓴 상태 — drop 이 이것으로 명령을 짓는다(미리보기 = 결과 — R4 · TRD §4-3). */
 interface Decision {
   j: Judgement
   /** 이 웹뷰에서 나간 그 끌기(이 창 = 출처) · 아니면 `null`. */

@@ -1,4 +1,4 @@
-// TRD S21-slot-docking §5-6 · §11 「TS tabStrip」 · PRD AC40: 닫기 모드 순수 상태 줄의 표 시험 — 경계(39/40 · 59/60 · 위 ·
+// TRD S21-slot-docking §4-3 「그대로인 것」 · 6.3판 §5-6 · §11 「TS tabStrip」 · PRD AC40: 닫기 모드 순수 상태 줄의 표 시험 — 경계(39/40 · 59/60 · 위 ·
 //   시작 쪽 0) · 300 ms(가짜 시계 = 입력의 `now`) · 밖 누름 · 맨 끝 탭 · 고정 폭.
 
 import { describe, expect, it } from 'vitest'

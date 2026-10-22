@@ -98,11 +98,11 @@ pub trait LayoutEvents: Send + Sync {
     /// 다 나간 뒤의 레이아웃을 본다. ★운영 소비자는 지금 없다★ — 운영 구현(`TauriEvents`)은 아무것도 하지 않고, 이
     /// 계약을 재는 것은 시험 이중뿐이다.
     /// ★기본 본문을 두지 않는다★ — 두면 넘기기 어댑터가 빈 몸을 물려받아, 소비자가 다시 붙어도 계기가 말없이 끊긴다.
-    // TRD S21-slot-docking §1-2 「알림 묶음 끝」
+    // TRD S21-slot-docking 5.8판 §1-2 「적용 서비스」(알림 묶음 끝)
     fn settled(&self);
 }
 
-/// 창 포트가 창을 놓을 자리 — 도킹의 새 창 · 옮길 창(TRD S21-slot-docking §1-2 「적용 서비스」).
+/// 창 포트가 창을 놓을 자리 — 도킹의 새 창 · 옮길 창(TRD S21-slot-docking §3-3 · §3-5).
 ///
 /// - `pos` = **물리** 바깥 왼쪽 위(`outer_position` 과 같은 단위 — 논리 위치는 배율이 다른 모니터가 섞이면 한 값이
 ///   두 모니터를 가리킨다 · `state::placement` 머리). `None` = 자리를 고르지 않는다.
@@ -159,7 +159,7 @@ pub struct SpareClaim {
 ///
 /// pop-out 은 창 확인과 모델 변형 사이에서 락을 한 번 놓는다. 그 틈에 사용자가 대상 창을 닫아도 잔해가 남지
 /// 않는 것은 팝아웃의 닫기 요청이 모델에서 그 창을 먼저 지우고 label 에 묘비를 달기 때문이다(같은 락 한 번 —
-/// `commands::popout::close_requested_popup_window` · TRD S21-slot-docking §1-2 「닫히는 창」). 기존 창 타깃은
+/// `commands::popout::close_requested_popup_window` · TRD S21-slot-docking 5.8판 §1-2 「닫히는 창」). 기존 창 타깃은
 /// phase C 의 `insert_tab_into` 가 창 없음으로, 새 창 타깃은 `attach_view_as_new_window` 가 묘비로 실패해 롤백을
 /// 탄다(옮기려던 슬롯은 출처에 남는다). 그 전제(팝아웃의 닫기 요청은 되돌려지지 않는다)와 점검 명령은 `lib.rs` 의
 /// `CloseRequested` 처리기에 있다.
@@ -252,7 +252,7 @@ fn notify(
 /// 쓰기 하나의 알림 묶음을 낸다 — 레이아웃 스냅숏들 → 창 탭 목록들, 낸 것이 있으면 끝에서
 /// [`LayoutEvents::settled`] 를 한 번. 낼 것이 없으면(무변경 결말) 끝도 내지 않는다. ★락을 놓은 뒤에만 부른다★
 /// (「락 규율」). 알리는 쓰기는 전부 여기를 지난다 — 복원 수락(`state::restore`)도.
-// TRD S21-slot-docking §1-2 「알림 묶음 끝」
+// TRD S21-slot-docking 5.8판 §1-2 「적용 서비스」(알림 묶음 끝)
 pub(crate) fn announce<'a>(
     events: &dyn LayoutEvents,
     layouts: impl IntoIterator<Item = &'a ViewSnapshot>,
@@ -1047,10 +1047,10 @@ pub struct DockOutcome {
 /// - `NewWindow`(재사용) — 출처 창을 락 밖에서 옮긴다(모델 변경 없음). 다시 판정하지 않고 되돌리지도 않는다.
 ///
 /// 부르는 스레드: ★`NewWindow` 를 메인 스레드 · 동기 명령 안에서 부르지 말 것★ — 새 창 빌드가 교착한다
-/// (`commands::popout::move_slot_to_window` 가 async 인 까닭과 같다 · TRD S21-slot-docking §1-3 「명령의 실행
-/// 스레드」). `Seam` · `TabBar` 는 창을 열지 않아 어느 스레드에서나 부를 수 있다 — 비운 출처 창은
+/// (`commands::popout::move_slot_to_window` 가 async 인 까닭과 같다 · TRD S21-slot-docking §3-2 ④).
+/// `Seam` · `TabBar` 는 창을 열지 않아 어느 스레드에서나 부를 수 있다 — 비운 출처 창은
 /// 닫기만 한다.
-// TRD S21-slot-docking §1-2 「적용 서비스」 · §7 B9
+// TRD S21-slot-docking §3-2 ④ · §3-3
 pub fn dock_tab(
     state: &LayoutState,
     subs: &dyn SubscriptionSync,
@@ -1324,7 +1324,7 @@ fn open_new_window(
 //   ★다시 판정하지 않고 되돌리지도 않는다(사용자 결정 2026-10-16)★ — 끄기가 서면 놓은 자리에 둔다. 옮기는 사이 다른 경로가
 //   출처를 바꿨으면(탭 · 슬롯 더함 · 탭 닫힘) 모델은 그 쓰기가 남긴 그대로다 — 탭이 늘었으면 그 창째 옮겨진 것이고, 탭이
 //   닫혔으면 창도 그 닫기가 거둔다.
-// TRD S21-slot-docking §1-2 「적용 서비스」 재사용
+// TRD S21-slot-docking §3-3 「size: None」 · §3-5 재사용
 fn reuse_source_window(
     state: &LayoutState,
     host: &dyn WindowHost,
