@@ -115,6 +115,12 @@ describe('viewStore 탭/창 액션 → invoke (탭 소유 모델, ADR-0057)', ()
     expect(invokeMock).toHaveBeenCalledWith('switch_tab', { window: 'main', view: 'v2' })
   })
 
+  it('switchTabIf → switch_tab_if invoke(window, view, expect) · 셸의 bool 을 돌려준다', async () => {
+    invokeMock.mockResolvedValueOnce(false)
+    await expect(useViewStore.getState().switchTabIf('main', 'v1', 'v2')).resolves.toBe(false)
+    expect(invokeMock).toHaveBeenCalledWith('switch_tab_if', { window: 'main', view: 'v1', expect: 'v2' })
+  })
+
   it('renameTab → rename_tab invoke({ viewId, name })', async () => {
     await useViewStore.getState().renameTab('v1', 'New Name')
     expect(invokeMock).toHaveBeenCalledWith('rename_tab', { viewId: 'v1', name: 'New Name' })

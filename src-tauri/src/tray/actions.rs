@@ -17,8 +17,11 @@ use tauri_plugin_autostart::ManagerExt;
 use super::core::{self, IconState};
 use super::TrayIcons;
 use crate::commands::popout::is_popup_label;
+use crate::commands::spare::is_spare_window;
 use crate::daemon_client::DaemonClient;
 use crate::layout::LayoutState;
+use crate::spare::pool::TrayShow;
+use crate::spare::SpareState;
 
 // 트레이 아이콘 id(빌더에 부여, tray_by_id 로 재조회). 단일 트레이라 고정 문자열.
 pub const TRAY_ID: &str = "engram-main-tray";
@@ -60,46 +63,122 @@ pub struct AutostartCheck(pub CheckMenuItem<Wry>);
 //   `SW_RESTORE` · `SetForegroundWindow`) 메인 뒤에 무엇이든 하면 그 창이 포커스를 가져간다. 순서는
 //   [`core::ui_windows`] 가 정한다.
 // 창 하나가 실패해도(목록을 뜬 뒤 닫힌 팝아웃 등) 나머지와 메인은 계속 처리한다 — `?` 로 끊지 말 것.
-// ADR-0229
+// 예열 창 풀의 창은 띄우지 않는다 — 그사이 확정으로 풀을 떠난 창만 보통 창처럼 띄운다([`show_ui_windows`]).
+// ADR-0229 · ADR-0299
 pub fn show_main_ui(app: &AppHandle) {
     let windows = app.webview_windows();
+    let show = |label: &str| {
+        let Some(w) = windows.get(label) else {
+            return false;
+        };
+        // 첫 화면을 기다리던 창이면 그 올림을 거둔다 — 이 보이기가 그 기다림을 끝낸다(숨기기와 같은 길). 남기면
+        //   뒤에 오는 알림 · 시한이 보인 창을 이 순서 밖에서 한 번 더 보인다(`crate::first_paint`).
+        crate::first_paint::cancel_hold(app, label);
+        let _ = w.show();
+        // 숨은 동안 미뤄 둔 최대화(main · 복원한 팝아웃)를 보인 직후에 입힌다.
+        crate::state::placement::apply_deferred_maximize(&w.as_ref().window());
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+        true
+    };
     with_usage_visibility(app, |usage| {
-        for_each_ui_window(windows.keys().map(String::as_str), true, usage, |label| {
-            let Some(w) = windows.get(label) else {
-                return false;
-            };
-            let _ = w.show();
-            // 숨은 동안 미뤄 둔 최대화(main · 복원한 팝아웃)를 보인 직후에 입힌다.
-            crate::state::placement::apply_deferred_maximize(&w.as_ref().window());
-            let _ = w.unminimize();
-            let _ = w.set_focus();
-            true
-        });
+        show_ui_windows(
+            windows.keys().map(String::as_str),
+            usage,
+            |label| is_spare_window(app, label),
+            |label| {
+                app.try_state::<Arc<SpareState>>()
+                    .map_or(TrayShow::Untouched, |spare| spare.on_tray_show(label))
+            },
+            show,
+        );
     });
+}
+
+// 트레이 보이기의 차례 — [`for_each_ui_window`] 를 보이기로 돌리고, 예열 창 술어(`spare`)로 건너뛴 label 마다 풀에
+// 묻는다(`tray_show` — 운영 = `SpareState::on_tray_show`). 술어 판정 뒤 확정으로 풀을 떠난 창(`Adopted`)만 다른 창과
+// 같은 `show` 로 띄우고, 맡긴 창(`Rehold` — 풀이 올림을 다시 걸어 확정 ③ 이 보인다)과 맡기지 않은 예열 창(`Untouched`)은
+// 띄우지 않는다 — 띄우면 내용 없는 틀이 드러난다.
+// ★`Adopted` 는 차례를 정한 창들보다 먼저 띄운다★ — 뒤에 띄우면 그 포커스가 main 의 마지막 포커스를 앗는다.
+// ★`tray_show` 는 풀 락을 놓고 돌아와야 한다★ — 이어서 사용량 관심이 레이아웃 락을 잡고(차례 = 레이아웃 → 풀) 창을
+//   부른다(풀 락을 쥔 채 창 호출 금지 — `SpareState`).
+// (TRD S21-slot-docking §3-9 「숨어 있기」)
+// ADR-0299
+fn show_ui_windows<'a>(
+    labels: impl IntoIterator<Item = &'a str>,
+    usage: &dyn UsageVisibility,
+    spare: impl Fn(&str) -> bool,
+    tray_show: impl Fn(&str) -> TrayShow,
+    show: impl Fn(&'a str) -> bool,
+) {
+    for_each_ui_window(
+        labels,
+        true,
+        usage,
+        spare,
+        |skipped| {
+            for &label in skipped {
+                if tray_show(label) == TrayShow::Adopted {
+                    usage.set_visible(label, true);
+                    show(label);
+                }
+            }
+        },
+        &show,
+    );
 }
 
 // 메인과 팝아웃 창을 전부 숨긴다(파괴 아님 — WebView 상주, [`show_main_ui`] 로 복귀). 메인 X 도 여기로
 // 온다. 대상은 [`show_main_ui`] 와 같다 — 숨긴 창을 보이기가 못 되살리면 되찾을 길이 없다.
-// ADR-0229
+// ADR-0229 · ADR-0299
 pub fn hide_main_ui(app: &AppHandle) {
     let windows = app.webview_windows();
+    let labels: Vec<&str> = windows.keys().map(String::as_str).collect();
     with_usage_visibility(app, |usage| {
-        for_each_ui_window(windows.keys().map(String::as_str), false, usage, |label| {
-            let Some(w) = windows.get(label) else {
-                return false;
-            };
-            match w.hide() {
-                Ok(()) => true,
-                Err(e) => {
-                    tracing::warn!(
-                        label,
-                        "[tray] 창 숨기기 실패 — 사용량 관심에서 빼지 않는다: {e}"
-                    );
-                    false
+        hide_ui_windows(
+            &labels,
+            usage,
+            |label| is_spare_window(app, label),
+            |label| {
+                let Some(w) = windows.get(label) else {
+                    return false;
+                };
+                // 첫 화면을 기다리던 창이면 그 올림을 거둔다 — 숨긴 뒤 오는 알림 · 시한이 그 창을 다시 보인다
+                //   (`crate::first_paint`). 숨기기가 실패해도 거둔다 — 숨기라고 청한 창이다.
+                crate::first_paint::cancel_hold(app, label);
+                match w.hide() {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::warn!(
+                            label,
+                            "[tray] 창 숨기기 실패 — 사용량 관심에서 빼지 않는다: {e}"
+                        );
+                        false
+                    }
                 }
-            }
-        });
+            },
+            |label| crate::first_paint::cancel_hold(app, label),
+        );
     });
+}
+
+// 트레이 숨기기의 차례 — [`for_each_ui_window`] 를 숨기기로 돌린 뒤 팝아웃 label 전부의 올림을 예열 창 술어와 상관없이
+// 거둔다(`cancel_hold` — 올림이 없는 label 은 무동작). 그 차례는 술어로 건너뛴 창(맡긴 예열 창 포함)에 `hide` 를 부르지
+// 않아, 맡길 때 건 올림이 남으면 확정 ③ 이 그 창을 숨긴 UI 위로 보인다.
+// ★건너뛴 것만 고르려고 풀을 다시 묻지 말 것★ — 확정 ① 과 경주한다([`for_each_ui_window`]). 차례 뒤에 두어 차례를 도는
+//   동안 맡겨진 창의 올림도 거둔다(TRD S21-slot-docking §3-9 「숨어 있기」).
+// ADR-0299
+fn hide_ui_windows<'a>(
+    labels: &[&'a str],
+    usage: &dyn UsageVisibility,
+    spare: impl Fn(&str) -> bool,
+    hide: impl FnMut(&'a str) -> bool,
+    mut cancel_hold: impl FnMut(&'a str),
+) {
+    for_each_ui_window(labels.iter().copied(), false, usage, spare, |_| {}, hide);
+    for &label in labels.iter().filter(|label| is_popup_label(label)) {
+        cancel_hold(label);
+    }
 }
 
 /// 트레이 보이기·숨기기가 창 하나의 보임을 바꿀 때 사용량 관심에 알리는 자리(ADR-0012 seam — 운영 =
@@ -150,19 +229,30 @@ pub(crate) fn with_usage_visibility(app: &AppHandle, run: impl FnOnce(&dyn Usage
 }
 
 // 트레이가 다룰 창마다([`core::ui_windows`] 순서) OS 창을 다루고(`os` — `true` = 그 창에 적용됐다) 사용량 관심에
-// 보임을 알린다. ★차례는 방향마다 다르다 — 틀려도 안전한 쪽으로★:
+// 보임을 알린다. `spare` 인 창(예비 창 풀의 창 — TRD S21-slot-docking §3-9)은 다루지 않는다 — 그 창은 숨긴 채
+// 기다리므로 보이기가 그 창을 드러낸다. 그렇게 건너뛴 label 은 `skipped` 가 받는다 — 거른 뒤 · `os` 첫 호출 전에
+// 정확히 한 번(건너뛴 것이 없어도). ★`spare` 는 팝아웃 label 마다 한 번만 묻고 그 판정을 `skipped` 에 넘긴다★ — 부르는
+// 쪽이 풀을 다시 물으면 그 물음이 확정 ① 과 경주해 어느 쪽에서도 다루지 않는 label 이 생긴다.
+// ★차례는 방향마다 다르다 — 틀려도 안전한 쪽으로★:
 // - 보이기 = 관심 먼저 · OS 나중. 보이기가 실패해도 남는 비용은 안 보이는 창 몫의 조회뿐이다.
 // - 숨기기 = OS 먼저 · 숨긴 창만 관심에서 뺀다. 실패한 숨기기를 빼면 **보이는** 창의 값이 멎는다.
 // ★`os` 는 락 밖에서 불린다★ — 운영 구현의 ViewManager 락은 `set_visible` 한 번 안에서 잡혔다 풀린다. 이 함수는
 //   명령 워커 스레드에서도 돌고(`commands/tray.rs`), OS 창 호출을 그 락 안에 두면 창 호스트 포트와 같은 교착
 //   위험이다(`layout::apply` 의 `WindowHost` doc).
+// ADR-0295 · ADR-0299
 pub(crate) fn for_each_ui_window<'a>(
     labels: impl IntoIterator<Item = &'a str>,
     visible: bool,
     usage: &dyn UsageVisibility,
+    spare: impl Fn(&str) -> bool,
+    skipped: impl FnOnce(&[&'a str]),
     mut os: impl FnMut(&'a str) -> bool,
 ) {
-    for label in core::ui_windows(labels, is_popup_label) {
+    let (spares, rest): (Vec<&'a str>, Vec<&'a str>) = labels
+        .into_iter()
+        .partition(|&label| is_popup_label(label) && spare(label));
+    skipped(&spares);
+    for label in core::ui_windows(rest, is_popup_label) {
         if visible {
             usage.set_visible(label, true);
             os(label);
@@ -319,7 +409,7 @@ pub fn toggle_autostart(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     use super::*;
 
@@ -338,10 +428,17 @@ mod tests {
     #[test]
     fn showing_tells_the_usage_interest_before_each_os_call() {
         let log = Log::default();
-        for_each_ui_window(WINDOWS, true, &log, |label| {
-            log.0.borrow_mut().push(format!("os:{label}"));
-            true
-        });
+        for_each_ui_window(
+            WINDOWS,
+            true,
+            &log,
+            |_| false,
+            |_| {},
+            |label| {
+                log.0.borrow_mut().push(format!("os:{label}"));
+                true
+            },
+        );
         assert_eq!(
             log.0.into_inner(),
             [
@@ -359,10 +456,17 @@ mod tests {
     #[test]
     fn hiding_marks_only_the_windows_the_os_actually_hid() {
         let log = Log::default();
-        for_each_ui_window(WINDOWS, false, &log, |label| {
-            log.0.borrow_mut().push(format!("os:{label}"));
-            label != "slot-popup-2"
-        });
+        for_each_ui_window(
+            WINDOWS,
+            false,
+            &log,
+            |_| false,
+            |_| {},
+            |label| {
+                log.0.borrow_mut().push(format!("os:{label}"));
+                label != "slot-popup-2"
+            },
+        );
         assert_eq!(
             log.0.into_inner(),
             [
@@ -371,6 +475,180 @@ mod tests {
                 "os:slot-popup-2",
                 "os:main",
                 "usage:main:false",
+            ]
+        );
+    }
+
+    // 예비 창 풀의 창은 보이기 · 숨기기 어느 쪽에서도 OS 도 관심도 건드리지 않는다.
+    #[test]
+    fn a_spare_window_is_left_alone_both_ways() {
+        for visible in [true, false] {
+            let log = Log::default();
+            for_each_ui_window(
+                WINDOWS,
+                visible,
+                &log,
+                |label| label == "slot-popup-2",
+                |_| {},
+                |label| {
+                    log.0.borrow_mut().push(format!("os:{label}"));
+                    true
+                },
+            );
+            assert!(
+                log.0
+                    .borrow()
+                    .iter()
+                    .all(|line| !line.contains("slot-popup-2")),
+                "visible={visible}: {:?}",
+                log.0.borrow()
+            );
+            assert!(log.0.borrow().contains(&"os:slot-popup-1".to_owned()));
+        }
+    }
+
+    // ── 예열 창 — 건너뛴 label 의 훅 · 보이기 · 숨기기(TRD S21-slot-docking §8-1 ⑫) ──
+
+    // 술어는 팝아웃 label 마다 한 번만 묻고, 그 판정으로 건너뛴 label 을 훅이 `os` 첫 호출 전에 한 번 받는다.
+    #[test]
+    fn the_skipped_hook_gets_the_spare_labels_once_before_any_os_call() {
+        for visible in [true, false] {
+            let log = Log::default();
+            for_each_ui_window(
+                [
+                    "main",
+                    "slot-popup-3",
+                    "slot-popup-2",
+                    "devtools",
+                    "slot-popup-1",
+                ],
+                visible,
+                &log,
+                |label| {
+                    log.0.borrow_mut().push(format!("spare:{label}"));
+                    label != "slot-popup-1"
+                },
+                |skipped| {
+                    log.0
+                        .borrow_mut()
+                        .push(format!("skipped:{}", skipped.join(",")))
+                },
+                |label| {
+                    log.0.borrow_mut().push(format!("os:{label}"));
+                    true
+                },
+            );
+            let log = log.0.into_inner();
+            assert_eq!(
+                log[..4],
+                [
+                    "spare:slot-popup-3",
+                    "spare:slot-popup-2",
+                    "spare:slot-popup-1",
+                    "skipped:slot-popup-3,slot-popup-2",
+                ],
+                "visible={visible}: {log:?}"
+            );
+            assert_eq!(
+                log.iter()
+                    .filter(|line| line.starts_with("spare:") || line.starts_with("skipped:"))
+                    .count(),
+                4,
+                "visible={visible}: {log:?}"
+            );
+            assert!(
+                log.contains(&"os:slot-popup-1".to_owned()) && log.contains(&"os:main".to_owned()),
+                "visible={visible}: {log:?}"
+            );
+        }
+
+        let calls = Cell::new(0);
+        for_each_ui_window(
+            ["main"],
+            true,
+            &Log::default(),
+            |_| false,
+            |skipped| {
+                assert!(skipped.is_empty());
+                calls.set(calls.get() + 1);
+            },
+            |_| true,
+        );
+        assert_eq!(calls.get(), 1, "건너뛴 것이 없어도 훅은 한 번 불린다");
+    }
+
+    // 보이기 — 건너뛴 예열 창 중 그사이 풀을 떠난 창(`Adopted`)만 다른 창과 같은 보이기로 띄우고, 차례를 정한 창들보다
+    // 먼저라 main 이 마지막이다. 맡긴 창(`Rehold`) · 맡기지 않은 예열 창(`Untouched`)은 띄우지 않는다.
+    #[test]
+    fn showing_reveals_only_the_spares_that_left_the_pool_before_the_ordered_windows() {
+        let log = Log::default();
+        show_ui_windows(
+            [
+                "main",
+                "slot-popup-1",
+                "slot-popup-2",
+                "slot-popup-3",
+                "slot-popup-4",
+            ],
+            &log,
+            |label| label != "slot-popup-1",
+            |label| {
+                log.0.borrow_mut().push(format!("pool:{label}"));
+                match label {
+                    "slot-popup-2" => TrayShow::Rehold,
+                    "slot-popup-3" => TrayShow::Adopted,
+                    _ => TrayShow::Untouched,
+                }
+            },
+            |label| {
+                log.0.borrow_mut().push(format!("os:{label}"));
+                true
+            },
+        );
+        assert_eq!(
+            log.0.into_inner(),
+            [
+                "pool:slot-popup-2",
+                "pool:slot-popup-3",
+                "usage:slot-popup-3:true",
+                "os:slot-popup-3",
+                "pool:slot-popup-4",
+                "usage:slot-popup-1:true",
+                "os:slot-popup-1",
+                "usage:main:true",
+                "os:main",
+            ]
+        );
+    }
+
+    // 숨기기 — 술어로 건너뛴 예열 창의 올림도 차례 뒤에 거둔다. 거둠은 팝아웃 label 전부이고 술어를 다시 묻지 않는다.
+    #[test]
+    fn hiding_cancels_the_hold_of_every_popup_label_after_the_ordered_windows() {
+        let log = Log::default();
+        hide_ui_windows(
+            &WINDOWS,
+            &log,
+            |label| {
+                log.0.borrow_mut().push(format!("spare:{label}"));
+                label == "slot-popup-2"
+            },
+            |label| {
+                log.0.borrow_mut().push(format!("os:{label}"));
+                true
+            },
+            |label| log.0.borrow_mut().push(format!("cancel:{label}")),
+        );
+        assert_eq!(
+            log.0.into_inner(),
+            [
+                "spare:slot-popup-2",
+                "spare:slot-popup-1",
+                "os:slot-popup-1",
+                "usage:slot-popup-1:false",
+                "os:main",
+                "usage:main:false",
+                "cancel:slot-popup-2",
+                "cancel:slot-popup-1",
             ]
         );
     }

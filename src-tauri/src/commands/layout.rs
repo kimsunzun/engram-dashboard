@@ -22,11 +22,13 @@ use crate::commands::settings::TauriSettingsEvents;
 use crate::daemon_client::DaemonClient;
 use crate::layout::apply;
 use crate::layout::{
-    AgentSpawner, LayoutEvents, LayoutState, SlotContent, SplitDir, SplitRatioApplied,
-    SubscriptionSync, UiMetrics, ViewManager, ViewSnapshot, WindowHost, WindowTabsPayload,
+    AgentSpawner, LayoutEvents, LayoutState, MoveFailed, SlotContent, SpareClaim, SplitDir,
+    SplitRatioApplied, SubscriptionSync, UiMetrics, ViewManager, ViewSnapshot, WindowHost,
+    WindowPlace, WindowTabsPayload,
 };
 use crate::output_router::{OutputRouter, SubscriptionDelta};
 use crate::settings::SettingsService;
+use crate::spare::SpareState;
 use crate::state::restore::RestoreCoordinator;
 use crate::theme::ThemeControl;
 
@@ -68,6 +70,9 @@ impl LayoutEvents for TauriEvents<'_> {
     fn window_tabs_updated(&self, tabs: &WindowTabsPayload) {
         emit_window_tabs(self.app, tabs);
     }
+
+    // 묶음 끝을 받을 운영 소비자가 지금 없다 — 빈 몸은 의도이고, 포트는 다음 소비자를 위해 남긴다.
+    fn settled(&self) {}
 }
 
 pub(crate) struct RouterSubs<'a> {
@@ -134,6 +139,10 @@ impl LayoutEvents for OwnedEvents {
     fn window_tabs_updated(&self, tabs: &WindowTabsPayload) {
         TauriEvents { app: &self.app }.window_tabs_updated(tabs);
     }
+
+    fn settled(&self) {
+        TauriEvents { app: &self.app }.settled();
+    }
 }
 
 // 셸 단위 시험이 버스 경로(표 → 적용 서비스 → 이 어댑터 → 실 소켓)를 창 없이 세우려고 crate 안에 연다.
@@ -178,6 +187,10 @@ impl WindowHost for OwnedWindowHost {
         TauriWindowHost { app: &self.app }.open(label)
     }
 
+    fn open_at(&self, label: &str, at: &WindowPlace, activate: bool) -> Result<(), String> {
+        TauriWindowHost { app: &self.app }.open_at(label, at, activate)
+    }
+
     fn close(&self, label: &str) {
         TauriWindowHost { app: &self.app }.close(label);
     }
@@ -186,8 +199,25 @@ impl WindowHost for OwnedWindowHost {
         TauriWindowHost { app: &self.app }.is_open(label)
     }
 
+    fn move_window(&self, label: &str, at: &WindowPlace) -> Result<(), MoveFailed> {
+        TauriWindowHost { app: &self.app }.move_window(label, at)
+    }
+
     fn record_placement(&self, label: &str) {
         TauriWindowHost { app: &self.app }.record_placement(label);
+    }
+
+    // ADR-0299
+    fn claim_spare(&self) -> Option<SpareClaim> {
+        TauriWindowHost { app: &self.app }.claim_spare()
+    }
+
+    fn committed(&self, claim: &SpareClaim) {
+        TauriWindowHost { app: &self.app }.committed(claim);
+    }
+
+    fn release_spare(&self, claim: &SpareClaim) {
+        TauriWindowHost { app: &self.app }.release_spare(claim);
     }
 }
 
@@ -310,6 +340,30 @@ pub fn switch_tab(
         &TauriEvents { app: &app },
         &window,
         view,
+    )
+}
+
+// 탭 끌기의 원래 선택 되돌리기 전용(웹 → 셸 · TRD S21-slot-docking §4-6) — 버스 명령이 아니다(LLM 은 `tab.switch` · §3-6).
+#[tauri::command]
+pub fn switch_tab_if(
+    app: AppHandle,
+    state: State<'_, LayoutState>,
+    router: State<'_, Arc<OutputRouter>>,
+    client: State<'_, Arc<DaemonClient>>,
+    window: String,
+    view: Uuid,
+    expect: Uuid,
+) -> Result<bool, String> {
+    apply::switch_tab_if(
+        &state,
+        &RouterSubs {
+            router: &router,
+            client: &client,
+        },
+        &TauriEvents { app: &app },
+        &window,
+        view,
+        expect,
     )
 }
 
@@ -549,23 +603,26 @@ pub async fn spawn_into(
 
 // ── 측정 보고(웹뷰 → 셸) ─────────────────────────────────────────────────────
 //
-// 둘 다 버스 명령이 아니다 — 버스에 두면 LLM 이 캔버스·지표를 위조할 수 있다. version 을 올리지도 알리지도
-// 않는다.
+// 둘 다 버스 명령이 아니다 — 버스에 두면 LLM 이 캔버스·지표를 위조할 수 있다. version 을 올리지도 알리지도 않는다.
 // ADR-0227
+//
+// 둘 다 예비 창 풀의 창(모델 밖)이면 모델 대신 풀에 적는다(TRD S21-slot-docking §3-9 「풀」) — 모델은 모르는
+//   label 을 거절해, 적지 않으면 들일 때 옮겨 담을 재기가 없다.
 
 /// 창 웹뷰가 자기 탭 내용 영역 크기(정수 CSS px)를 알린다 — `invoke('report_window_canvas', { w, h })`.
 ///
 /// ★창 label 을 인자로 받지 않는다★ — 잘못 적힌 label 하나가 남의 창 캔버스를 덮는다. Tauri 가 넣어 주는
 /// [`Window`] 가 그 값의 유일한 권위다(`report_view_commands` 와 같은 규칙).
-/// `w` 나 `h` 가 0 이면 무시하고 직전 값을 유지한다(`Ok`). 탭 모델에 없는 창이면 `Err`.
+/// `w` 나 `h` 가 0 이면 무시하고 직전 값을 유지한다(`Ok`). 탭 모델에도 예비 창 풀에도 없는 창이면 `Err`.
 #[tauri::command]
 pub fn report_window_canvas(
     window: Window,
     state: State<'_, LayoutState>,
+    spare: State<'_, Arc<SpareState>>,
     w: u32,
     h: u32,
 ) -> Result<(), String> {
-    apply::report_window_canvas(&state, window.label(), w, h)
+    spare.report_canvas(&state, window.label(), w, h)
 }
 
 /// 창 웹뷰가 칸 틀 기본 지표를 알린다 — `invoke('report_ui_metrics', { metrics })`. 계약(단위·범위)은
@@ -575,9 +632,10 @@ pub fn report_window_canvas(
 pub fn report_ui_metrics(
     window: Window,
     state: State<'_, LayoutState>,
+    spare: State<'_, Arc<SpareState>>,
     metrics: UiMetrics,
 ) -> Result<(), String> {
-    apply::report_ui_metrics(&state, window.label(), metrics)
+    spare.report_metrics(&state, window.label(), metrics)
 }
 
 // ── read-only 조회 ───────────────────────────────────────────────────────────

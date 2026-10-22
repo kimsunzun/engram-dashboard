@@ -452,7 +452,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 
 ## 3. 내가 정한 내부 선택 (보고)
 
-- **로컬라이제이션(PRD R49 · 2026-10-16)** — 화면 문자열은 `src/i18n` 키(`t()` · `ko.ts`)로만. 데몬 → 화면 사유 · 상태는 `{code, args}` 꼴(예 `{code:"conflict.skill_name", args:{name, items:[{path, via:[프리셋 경로…]}]}}` — 충돌 줄은 걸린 항목 **전부**를 온 길과 함께 싣는다 · 둘로 못 박지 않는다 · §1-3 5)로 답하고 화면이 `t(code, args)` 로 그린다 — `Resolution` · `LaunchBlocked` · `CONFLICT` 답 · 다시 연결 표시가 해당. CLI 사람용 출력은 지금처럼 한국어(T-64 에서 정책 결정). 기본 제공 프리셋 표시 이름 = 화면 키, 저장 값 = `engram:/…`.
+- **로컬라이제이션(PRD R49 · 2026-10-16)** — 화면 문자열은 `src/i18n` 키(`t()` · `ko.ts`)로만. 데몬 → 화면 사유 · 상태는 `{code, args}` 꼴(예 `{code:"conflict.skill_name", args:{name, items:[{path, via:[프리셋 경로…]}]}}` — 충돌 줄은 걸린 항목 **전부**를 온 길과 함께 싣는다 · 둘로 못 박지 않는다 · §1-3 5)로 답하고 화면이 `t(code, args)` 로 그린다 — `Resolution` · `LaunchBlocked` · `CONFLICT` 답 · 다시 연결 표시가 해당. CLI 사람용 출력은 지금처럼 한국어(T-68 에서 정책 결정). 기본 제공 프리셋 표시 이름 = 화면 키, 저장 값 = `engram:/…`.
 
 본문에 근거가 있는 것은 자리만 가리킨다.
 

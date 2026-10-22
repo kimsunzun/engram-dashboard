@@ -56,9 +56,9 @@ use engram_dashboard_lib::layout::commands::{
 };
 use engram_dashboard_lib::layout::geometry::Insets;
 use engram_dashboard_lib::layout::{
-    tree, AgentSpawner, LayoutEvents, LayoutState, SlotContent, SplitDir, SplitRatioApplied,
-    SplitRatioOutcome, SubscriptionSync, UiMetrics, ViewManager, ViewSnapshot, WindowBounds,
-    WindowHost, WindowTabsPayload, MAIN_WINDOW_LABEL,
+    tree, AgentSpawner, LayoutEvents, LayoutState, MoveFailed, SlotContent, SpareClaim, SplitDir,
+    SplitRatioApplied, SplitRatioOutcome, SubscriptionSync, UiMetrics, ViewManager, ViewSnapshot,
+    WindowBounds, WindowHost, WindowPlace, WindowTabsPayload, MAIN_WINDOW_LABEL,
 };
 use engram_dashboard_lib::settings::{
     SettingItem, SettingsEvents, SettingsService, SettingsSnapshot, THEME_DEFAULT,
@@ -88,6 +88,7 @@ struct Events;
 impl LayoutEvents for Events {
     fn layout_updated(&self, _snapshot: &ViewSnapshot) {}
     fn window_tabs_updated(&self, _tabs: &WindowTabsPayload) {}
+    fn settled(&self) {}
 }
 
 #[derive(Default)]
@@ -97,16 +98,46 @@ impl SubscriptionSync for Subs {
     fn resync(&self, _mgr: &ViewManager) {}
 }
 
-#[derive(Default)]
 struct Windows {
+    /// 표가 쥔 것과 같은 모델 — `open` 이 그 창이 아직 모델에 없는지 본다.
+    state: LayoutState,
     opened: Mutex<Vec<String>>,
     closed: Mutex<Vec<String>>,
+    /// 한 번 맡길 숨은 예열 창의 label(TRD S21-slot-docking §8-1 ⑬).
+    spare: Mutex<Option<String>>,
+    /// 예열 창 셋이 불린 차례 — `"claim:<label>"` · `"committed:<label>"` · `"release:<label>"`.
+    spare_calls: Mutex<Vec<String>>,
+}
+
+impl Windows {
+    fn new(state: LayoutState) -> Self {
+        Windows {
+            state,
+            opened: Mutex::new(Vec::new()),
+            closed: Mutex::new(Vec::new()),
+            spare: Mutex::new(None),
+            spare_calls: Mutex::new(Vec::new()),
+        }
+    }
 }
 
 impl WindowHost for Windows {
+    // ★모델에 들기 전이어야 한다★ — 버스 `window.create` · `slot.popout` 도 창을 먼저 열고 모델에 넣는다(TRD
+    // S21-slot-docking §3-9 「자리별 차례」 · ADR-0299). 락을 못 잡으면 보지 않는다 — 락 위치는 `layout_apply.rs` 가 재고,
+    // 여기서 기다리면 그 결함이 실패가 아니라 멈춤으로 나온다.
     fn open(&self, label: &str) -> Result<(), String> {
+        if let Ok(mgr) = self.state.0.try_lock() {
+            assert!(
+                !mgr.windows.contains_key(label),
+                "open({label}) 은 창이 모델에 들기 전에 불려야 한다"
+            );
+        }
         self.opened.lock().unwrap().push(label.to_string());
         Ok(())
+    }
+
+    fn open_at(&self, label: &str, _at: &WindowPlace, _activate: bool) -> Result<(), String> {
+        self.open(label)
     }
 
     fn close(&self, label: &str) {
@@ -118,6 +149,36 @@ impl WindowHost for Windows {
         label == MAIN_WINDOW_LABEL
             || (self.opened.lock().unwrap().iter().any(|l| l == label)
                 && !self.closed.lock().unwrap().iter().any(|l| l == label))
+    }
+
+    fn move_window(&self, _label: &str, _at: &WindowPlace) -> Result<(), MoveFailed> {
+        Ok(())
+    }
+
+    fn claim_spare(&self) -> Option<SpareClaim> {
+        let label = self.spare.lock().unwrap().take()?;
+        self.spare_calls
+            .lock()
+            .unwrap()
+            .push(format!("claim:{label}"));
+        Some(SpareClaim {
+            label,
+            generation: 1,
+        })
+    }
+
+    fn committed(&self, claim: &SpareClaim) {
+        self.spare_calls
+            .lock()
+            .unwrap()
+            .push(format!("committed:{}", claim.label));
+    }
+
+    fn release_spare(&self, claim: &SpareClaim) {
+        self.spare_calls
+            .lock()
+            .unwrap()
+            .push(format!("release:{}", claim.label));
     }
 }
 
@@ -419,7 +480,7 @@ struct World {
 impl World {
     fn build() -> (World, LayoutPorts) {
         let state = LayoutState::new();
-        let windows = Arc::new(Windows::default());
+        let windows = Arc::new(Windows::new(state.clone()));
         let config = ConfigDir::new();
         let settings = config.service();
         let theme_windows = Arc::new(RecordingWindows::new(&[
@@ -1098,6 +1159,84 @@ async fn popout_of_a_missing_slot_is_refused_without_opening_a_window() {
         world.windows.opened.lock().unwrap().is_empty(),
         "거절됐으면 창도 안 연다"
     );
+}
+
+// ── 예열 창 — 버스의 새 창 둘도 창 포트에 먼저 묻는다(TRD S21-slot-docking §3-9 · §8-1 ⑬ · ADR-0299) ──────────
+
+const SPARE: &str = "slot-popup-9";
+
+#[tokio::test]
+async fn window_create_opens_the_prewarmed_window_under_its_label() {
+    let (world, queue, receiver) = queued();
+    *world.windows.spare.lock().unwrap() = Some(SPARE.to_string());
+
+    let created = call(&receiver, &queue, &world.mail, "window.create", json!({}))
+        .await
+        .outcome
+        .expect("창 생성");
+
+    assert_eq!(created["window"].as_str(), Some(SPARE));
+    assert_eq!(world.windows.opened.lock().unwrap().as_slice(), [SPARE]);
+    assert_eq!(
+        world.windows.spare_calls.lock().unwrap().as_slice(),
+        [format!("claim:{SPARE}"), format!("committed:{SPARE}")]
+    );
+    assert!(apply::list_windows(&world.state)
+        .unwrap()
+        .iter()
+        .any(|w| w == SPARE));
+}
+
+#[tokio::test]
+async fn popout_into_a_new_window_opens_the_prewarmed_window() {
+    let (world, queue, receiver) = queued();
+    let (view, slot) = world.filled_slot();
+    *world.windows.spare.lock().unwrap() = Some(SPARE.to_string());
+
+    let ok = call(
+        &receiver,
+        &queue,
+        &world.mail,
+        "slot.popout",
+        json!({ "view_id": view.to_string(), "slot_id": slot.to_string() }),
+    )
+    .await
+    .outcome
+    .expect("분리 성공");
+
+    assert_eq!(ok["window"].as_str(), Some(SPARE));
+    assert_eq!(world.windows.opened.lock().unwrap().as_slice(), [SPARE]);
+    assert_eq!(
+        world.windows.spare_calls.lock().unwrap().as_slice(),
+        [format!("claim:{SPARE}"), format!("committed:{SPARE}")]
+    );
+}
+
+// 이른 거절(단계 A — 없는 슬롯)은 맡긴 창을 되물린다 — 연 적이 없으니 닫지 않는다.
+#[tokio::test]
+async fn a_refused_popout_gives_the_prewarmed_window_back() {
+    let (world, queue, receiver) = queued();
+    let view = world.main_tabs().active;
+    *world.windows.spare.lock().unwrap() = Some(SPARE.to_string());
+
+    let err = error_of(
+        call(
+            &receiver,
+            &queue,
+            &world.mail,
+            "slot.popout",
+            json!({ "view_id": view.to_string(), "slot_id": uuid::Uuid::new_v4().to_string() }),
+        )
+        .await,
+    );
+
+    assert_eq!(err.code(), ErrorCode::Conflict);
+    assert_eq!(
+        world.windows.spare_calls.lock().unwrap().as_slice(),
+        [format!("claim:{SPARE}"), format!("release:{SPARE}")]
+    );
+    assert!(world.windows.opened.lock().unwrap().is_empty());
+    assert!(world.windows.closed.lock().unwrap().is_empty());
 }
 
 // ── (B) 창 테마 — window.getTheme · window.setTheme (TRD S21-storage §5-6) ──────────────

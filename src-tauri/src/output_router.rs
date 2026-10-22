@@ -186,10 +186,10 @@ impl OutputRouter {
 //   부분)는 핸들러가 맡는다.
 //
 // - `label == MAIN_WINDOW_LABEL`: 정리 대상 아님(불변식 4) — no-op, 빈 델타(방어적, 호출자도 선차단).
-// - `windows` 에 `label` 없음(close_tab/close_window command 가 먼저 모델을 지운 정상 경로): close 스킵,
-//   `rebuild` 만 1회(계약상 표 재계산). Destroyed 는 그 뒤 OS 이벤트라 모델엔 이미 없다.
-// - `windows` 에 `label` 있음(titlebar/강제 Destroyed — 멀티탭 잔류 위험, G1): `close_window` 로 tabs
-//   전부 순회 드롭 후 `rebuild`.
+// - `windows` 에 `label` 없음(close_tab/close_window command 나 팝아웃 닫기 요청이 먼저 모델을 지운 정상 경로):
+//   close 스킵, `rebuild` 만 1회(계약상 표 재계산). Destroyed 는 그 뒤 OS 이벤트라 모델엔 이미 없다.
+// - `windows` 에 `label` 있음(팝아웃 닫기 요청 · 닫기 요청 없는 강제 Destroyed — 멀티탭 잔류 위험, G1):
+//   `close_window` 로 tabs 전부 순회 드롭 후 `rebuild`.
 pub fn cleanup_window_core(
     mgr: &mut ViewManager,
     router: &OutputRouter,

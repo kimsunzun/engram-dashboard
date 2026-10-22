@@ -50,7 +50,6 @@ export const ko = {
   window: {
     create: '새 창',
     close: '창 닫기',
-    loading: '창 로딩 중… (label: {label})',
     // ADR-0102: 부팅 pull(list_tabs) 유계 재시도 소진 후 최종 실패 표면화(조용히 로딩에 고착 금지).
     loadFailed: '창을 불러오지 못했습니다 (label: {label}). 백엔드 연결을 확인하세요.',
     renderFailed: '화면을 그리는 중 오류가 났습니다',
@@ -292,7 +291,7 @@ export const ko = {
     // 반복 placeholder 시드 — 같은 토큰 2회. 전역 치환(global replace) 회귀 검증용(index.test.ts). ADR-0069.
     duplicatePreview: '{name} / {name}',
     viewLoading: 'View 로딩 중…',
-    // LoadingPanel 의 화면 밖 이름(aria-label) — 보이는 텍스트가 아니다. window.loading 은 인자가 달라 따로 둔다.
+    // LoadingPanel 의 화면 밖 이름(aria-label) — 보이는 텍스트가 아니다.
     loading: '로딩 중…',
     emptyResult: '(빈 결과)',
     copied: '복사됨',

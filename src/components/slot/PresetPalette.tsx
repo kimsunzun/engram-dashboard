@@ -31,6 +31,8 @@ type RowMenu = { x: number; y: number; presetId: string }
 
 export default function PresetPalette() {
   const presets = useAgentStore(s => s.presets)
+  // 받기 전엔 목록 칸을 비워 둔다 — 새 창에서 목록이 오기 전 빈 목록 안내가 잠깐 보이지 않게(AgentList 와 같은 규칙).
+  const presetsLoaded = useAgentStore(s => s.presetsLoaded)
   const rowMenuRef = useRef<HTMLDivElement>(null)
   const [rowMenu, setRowMenu] = useState<RowMenu | null>(null)
 
@@ -182,9 +184,11 @@ export default function PresetPalette() {
       {/* 공용 ScrollArea seam(ADR-0053)으로 스크롤. 평면 목록(가상화 없음)이라 Viewport 로 감싸도 무해. */}
       <ScrollArea style={{ flex: 1, minHeight: 0 }}>
         {presets.length === 0 ? (
-          <div style={{ padding: '12px', color: 'var(--text-muted)', fontSize: '12px' }}>
-            {t('preset.empty')}
-          </div>
+          presetsLoaded && (
+            <div style={{ padding: '12px', color: 'var(--text-muted)', fontSize: '12px' }}>
+              {t('preset.empty')}
+            </div>
+          )
         ) : (
           presets.map(preset => {
             const isBusy = deleting.has(preset.id) || renaming.has(preset.id)

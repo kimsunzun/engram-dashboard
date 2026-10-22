@@ -1164,6 +1164,20 @@ async fn main_loop(
                         }
                     }
                     ConnectionCommand::RequestReplay { agent_id, reply, .. } => {
+                        // ★어느 창에도 안 보이는 에이전트는 구독하지 않는다★ — 그 출력을 받을 창이 없고(배달도 같은
+                        //   `targets` 를 본다), 그 구독을 풀 해제도 다시 오지 않는다(해제는 레이아웃의 1→0 전이에서만
+                        //   나간다). 닫히는 팝아웃의 웹뷰는 닫기 요청이 해제를 낸 뒤에도 잠깐 살아 replay 를 청할 수 있다
+                        //   (TRD S21-slot-docking 5.8판 §1-2 「닫히는 창」). 요청 쪽(invoke)이 아니라 꺼내는 이 자리에서 보는
+                        //   것은 그 해제와 순서를 맞추기 위해서다 — 라우팅 표는 해제를 넣기 전에 같은 레이아웃 락 안에서
+                        //   바뀌므로, 이 채널에서 해제 뒤에 꺼낸 요청은 그 해제를 낸 표나 그보다 새 표를 본다. reply 는 drop(요청 쪽 =
+                        //   「미전송 · 재요청 안전」) · `flight` 는 건드리지 않는다.
+                        if router.targets(agent_id).is_empty() {
+                            tracing::debug!(
+                                %agent_id,
+                                "request_replay: 그 에이전트를 보이는 창이 없다 — Subscribe 를 보내지 않는다"
+                            );
+                            continue;
+                        }
                         let epoch = known_epoch(subs, agent_id);
                         let outcome = flight.request_replay(agent_id, Instant::now());
                         // send_now=false 가 **반복**되면 슬롯이 좀비라는 뜻이다(정상 병합은 뷰 동시

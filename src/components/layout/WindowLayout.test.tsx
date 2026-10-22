@@ -1,32 +1,50 @@
-
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { StrictMode } from 'react'
+import { act, cleanup, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // ── listen mock: 이벤트명별 핸들러 보관 → 테스트가 직접 emit ──
 const listeners = new Map<string, (e: { payload: unknown }) => void>()
+/** 이벤트명 → 등록 옵션(`target` 관측). */
+const listenOptions = new Map<string, unknown>()
+/** IPC 순서 관측 — `listen:<이벤트>` · `invoke:window_role`. */
+const ipcOrder: string[] = []
 const unlistenMock = vi.fn()
 let listenShouldReject = false
+/** 등록을 거절할 이벤트명(`listenShouldReject` 는 전부). */
+const rejectListen = new Set<string>()
 vi.mock('@tauri-apps/api/event', () => ({
-  listen: vi.fn(async (event: string, handler: (e: { payload: unknown }) => void) => {
-    if (listenShouldReject) throw new Error('listen registration failed')
+  listen: vi.fn(async (event: string, handler: (e: { payload: unknown }) => void, options?: unknown) => {
+    ipcOrder.push(`listen:${event}`)
+    if (listenShouldReject || rejectListen.has(event)) throw new Error('listen registration failed')
     listeners.set(event, handler)
+    listenOptions.set(event, options)
     return unlistenMock
   }),
 }))
 
-// ── invoke mock: list_tabs/get_view pull ──
+// ── invoke mock: list_tabs/get_view pull · window_role 은 따로(기본 = 모델 창) ──
 const invokeMock = vi.fn(async (_cmd: string, ..._rest: unknown[]) => undefined as unknown)
+const windowRoleMock = vi.fn(async (_args?: unknown): Promise<unknown> => ({ role: 'model', generation: null }))
 vi.mock('@tauri-apps/api/core', () => ({
-  invoke: (cmd: string, ...rest: unknown[]) => invokeMock(cmd, ...rest),
+  invoke: (cmd: string, ...rest: unknown[]) => {
+    if (cmd !== 'window_role') return invokeMock(cmd, ...rest)
+    ipcOrder.push('invoke:window_role')
+    return windowRoleMock(rest[0])
+  },
   Channel: class {
     onmessage: unknown = null
   },
 }))
 
-// ── getCurrentWindow mock — 0탭 자가닫힘 관측 ──
+// ── 첫 페인트 알림 — 언제 보내나만 관측(보내는 법은 `theme/firstPaint.test.ts`) ──
+const reportFirstPaintMock = vi.hoisted(() => vi.fn())
+vi.mock('../../theme/firstPaint', () => ({ reportFirstPaint: reportFirstPaintMock }))
+
+// ── getCurrentWindow mock — 0탭 자가닫힘 관측 · 사건 구독 대상 label ──
 const closeMock = vi.fn(async () => undefined)
+const currentWindow = vi.hoisted(() => ({ label: 'main' }))
 vi.mock('@tauri-apps/api/window', () => ({
-  getCurrentWindow: () => ({ close: closeMock, label: () => 'main' }),
+  getCurrentWindow: () => ({ close: closeMock, label: currentWindow.label }),
 }))
 
 // ── ViewLayoutRenderer stub — 캔버스 내부는 관심 밖(어느 view 를 그리는지만 관측) + ★mount 카운터★.
@@ -50,8 +68,14 @@ vi.mock('./ViewLayoutRenderer', async () => {
   }
 })
 
+vi.mock('@tauri-apps/api/app', () => ({ getIdentifier: async () => 'com.engram.test' }))
+
 import WindowLayout from './WindowLayout'
 import { __resetCanvasReportForTest } from './windowCanvasReport'
+import { __resetUiMetricsReportForTest } from './uiMetricsReport'
+import { localDrag } from './dock/localDrag'
+import { __resetDragSourceForTest } from './tabStrip/useTabDragSource'
+import { buildTabDragType, buildTabDragValue } from './dock/tabDragData'
 import { useViewStore } from '../../store/viewStore'
 import type { ViewSnapshot } from '../../api/layoutTypes'
 
@@ -78,12 +102,19 @@ function emit(event: string, payload: unknown): void {
 
 beforeEach(() => {
   listeners.clear()
+  listenOptions.clear()
+  ipcOrder.length = 0
+  currentWindow.label = 'main'
+  windowRoleMock.mockReset()
+  windowRoleMock.mockImplementation(async () => ({ role: 'model', generation: null }))
   unlistenMock.mockClear()
   closeMock.mockClear()
+  reportFirstPaintMock.mockReset()
   invokeMock.mockReset()
   mountCounts.clear()
   rendererProps.clear()
   listenShouldReject = false
+  rejectListen.clear()
   useViewStore.setState({ layouts: {}, windows: {}, renderModeOverride: {} })
   invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
     if (cmd === 'list_tabs') {
@@ -236,6 +267,71 @@ describe('WindowLayout — 부팅 pull 재시도/표면화(ADR-0102)', () => {
       timeout: 3000,
     })
     expect(screen.queryByTestId('tab-bar')).toBeNull()
+  })
+})
+
+// ── 첫 화면과 첫 화면 알림 — 셸이 숨긴 채 지은 창은 알림에 보인다(`theme/firstPaint.ts`) ──
+describe('WindowLayout — 첫 화면 · 첫 페인트 알림', () => {
+  it('탭을 받기 전은 바탕만(문구 없음) · 알림은 탭바와 활성 탭의 레이아웃이 그려진 뒤 한 번', async () => {
+    let answerTabs: (payload: unknown) => void = () => {}
+    let answerActiveView: (snap: ViewSnapshot) => void = () => {}
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'list_tabs') return new Promise(res => (answerTabs = res))
+      if (cmd === 'get_view') {
+        const viewId = (args as { viewId: string }).viewId
+        if (viewId === 'v1') return new Promise<ViewSnapshot>(res => (answerActiveView = res))
+        return slotSnap(viewId, 1)
+      }
+      return undefined
+    })
+    const seenAtReport: string[][] = []
+    reportFirstPaintMock.mockImplementation(() => {
+      seenAtReport.push(screen.queryAllByTestId('view-renderer').map(r => r.getAttribute('data-view-id') ?? ''))
+    })
+
+    render(<WindowLayout label="slot-popup-10" />)
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('list_tabs', { window: 'slot-popup-10' }))
+    const blank = screen.getByTestId('window-loading')
+    expect(blank.textContent).toBe('')
+    expect(reportFirstPaintMock).not.toHaveBeenCalled()
+
+    await act(async () =>
+      answerTabs({
+        label: 'slot-popup-10',
+        tabs: [{ id: 'v1', name: 'Tab 1' }, { id: 'v2', name: 'Tab 2' }],
+        active: 'v1',
+        version: 1,
+      }),
+    )
+    await waitFor(() => expect(screen.getAllByTestId('view-renderer')).toHaveLength(1))
+    expect(screen.getByTestId('tab-bar')).toBeTruthy()
+    expect(screen.queryByTestId('window-loading')).toBeNull()
+    expect(reportFirstPaintMock).not.toHaveBeenCalled()
+
+    await act(async () => answerActiveView(slotSnap('v1', 1)))
+    await waitFor(() => expect(reportFirstPaintMock).toHaveBeenCalledTimes(1))
+    expect(reportFirstPaintMock).toHaveBeenCalledWith(null)
+    expect(seenAtReport).toEqual([['v1', 'v2']])
+  })
+
+  it('부팅 실패면 실패 문구가 첫 화면이다 — 알림을 보낸다', async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_tabs') throw new Error('backend down')
+      return undefined
+    })
+    render(<WindowLayout label="main" />)
+    await waitFor(() => expect(screen.getByTestId('window-boot-error')).toBeTruthy(), { timeout: 3000 })
+    await waitFor(() => expect(reportFirstPaintMock).toHaveBeenCalledTimes(1))
+  })
+
+  // 대기 창은 숨은 채 맡겨질 때를 기다린다 — 빈 틀은 첫 화면이 아니다(TRD S21-slot-docking §3-9 I7).
+  it('대기 창은 첫 화면을 알리지 않는다', async () => {
+    currentWindow.label = 'slot-popup-7'
+    windowRoleMock.mockImplementation(async () => ({ role: 'spare', generation: null }))
+    render(<WindowLayout label="slot-popup-7" />)
+    await waitFor(() => expect(screen.getByTestId('spare-canvas')).toBeTruthy())
+    await new Promise(res => setTimeout(res, 50))
+    expect(reportFirstPaintMock).not.toHaveBeenCalled()
   })
 })
 
@@ -396,8 +492,11 @@ class FakeResizeObserver {
   }
 }
 
+/** 캔버스 관측 — 탭바 줄의 폭 관측(`TabBar`)은 뺀다. */
 function liveObserver(): FakeResizeObserver {
-  const live = FakeResizeObserver.instances.filter(o => !o.disconnected && o.observed.length > 0)
+  const live = FakeResizeObserver.instances.filter(
+    o => !o.disconnected && o.observed.length > 0 && !o.observed.some(el => (el as HTMLElement).dataset.testid === 'tab-strip-row'),
+  )
   expect(live).toHaveLength(1)
   return live[0]
 }
@@ -856,11 +955,11 @@ describe('WindowLayout — TabBar 액션 → store 액션(이 label)', () => {
     expect(invokeMock).toHaveBeenCalledWith('create_tab', { window: 'main', name: null })
   })
 
-  it('숨은 탭 클릭 → switchTab(label, view) invoke', async () => {
+  it('숨은 탭 누름 → switchTab(label, view) invoke', async () => {
     render(<WindowLayout label="main" />)
     await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
     const tab2 = screen.getAllByTestId('tab').find(t => t.getAttribute('data-view-id') === 'v2')!
-    fireEvent.click(tab2)
+    fireEvent.pointerDown(tab2, { button: 0, pointerId: 1 })
     expect(invokeMock).toHaveBeenCalledWith('switch_tab', { window: 'main', view: 'v2' })
   })
 
@@ -870,5 +969,577 @@ describe('WindowLayout — TabBar 액션 → store 액션(이 label)', () => {
     const closeBtns = screen.getAllByTestId('tab-close')
     fireEvent.click(closeBtns[0]) // v1 닫기
     expect(invokeMock).toHaveBeenCalledWith('close_tab', { window: 'main', view: 'v1' })
+  })
+})
+
+// ── ★탭 끌기 배선(TRD S21-slot-docking §4)★ — 뿌리 받기와 안내 층(`useWindowDrop`) · 파일 놓기 막기 ──
+// 탭바 줄 · `+` · 캔버스의 사각형은 손으로 준다(jsdom 은 레이아웃이 없다): 줄 x 0..800 · y 0..28 · `+` 32 · 캔버스 원점 (0, 29).
+const TWO_TABS = [
+  { id: 'v1', name: 'Tab 1' },
+  { id: 'v2', name: 'Tab 2' },
+]
+
+async function mountDockWindow(label: string, tabs = TWO_TABS, active = 'v1') {
+  invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+    if (cmd === 'list_tabs') return { label, tabs, active, version: 1 }
+    if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+    return undefined
+  })
+  const view = render(<WindowLayout label={label} />)
+  await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
+  await waitFor(() => expect(ipcOrder).toContain('invoke:window_role'))
+  return view
+}
+
+const headOf = (id: string) => screen.getAllByTestId('tab').find(t => t.getAttribute('data-view-id') === id)!
+const canvasOf = (id: string) =>
+  screen.getAllByTestId('tab-canvas').find(c => c.getAttribute('data-view-id') === id)!
+
+let stripWidth = 800
+
+function stubStrip(): void {
+  const rect = (left: number, top: number, width: number, height: number) =>
+    ({ left, top, width, height, right: left + width, bottom: top + height, x: left, y: top }) as DOMRect
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+    const id = this.dataset.testid
+    if (id === 'tab-strip-row') return rect(0, 0, stripWidth, 28)
+    if (id === 'tab-add') return rect(0, 0, 32, 28)
+    if (this.querySelector(':scope > [data-testid="tab-canvas"], :scope > [data-testid="spare-canvas"]')) {
+      return rect(0, 29, stripWidth, 571)
+    }
+    return rect(0, 0, 0, 0)
+  })
+}
+
+function dragOver(types: string[]): Event {
+  const e = new Event('dragover', { bubbles: true, cancelable: true })
+  Object.defineProperty(e, 'dataTransfer', { value: { types, dropEffect: 'copy' } })
+  act(() => {
+    screen.getByTestId('tab-bar').dispatchEvent(e)
+  })
+  return e
+}
+
+describe('WindowLayout — 탭 끌기 배선', () => {
+  beforeEach(() => {
+    stripWidth = 800
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false }) as MediaQueryList))
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('셸 끌기 세션 사건(dock:drag · dock:feed)은 듣지 않는다 — spare:adopted 만 자기 창 대상으로 건 뒤 window_role 을 묻는다', async () => {
+    currentWindow.label = 'slot-popup-3'
+    await mountDockWindow('slot-popup-3')
+    expect(listenOptions.get('spare:adopted')).toEqual({ target: 'slot-popup-3' })
+    expect(ipcOrder.indexOf('listen:spare:adopted')).toBeLessThan(ipcOrder.indexOf('invoke:window_role'))
+    expect(ipcOrder).not.toContain('listen:dock:drag')
+    expect(ipcOrder).not.toContain('listen:dock:feed')
+  })
+
+  it('이 창에서 끄는 동안 탭바 구역 밖이면 남은 탭 캔버스를 보이고(R15 · 모델 그대로) 돌아오면 끄는 탭 · 크롬 = 뷰포트 − 탭 캔버스', async () => {
+    stubStrip()
+    __resetDragSourceForTest()
+    Object.defineProperty(window.screen, 'availWidth', { value: 1920, configurable: true })
+    Object.defineProperty(window.screen, 'availHeight', { value: 1080, configurable: true })
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'list_tabs') return { label: 'main', tabs: TWO_TABS, active: 'v1', version: 1 }
+      if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+      // 뷰포트(jsdom 1024 × 768)와 같은 복원 크기 — 새 창 크기 = 그대로.
+      if (cmd === 'window_frame') return { restored: { w: 1024, h: 768 }, maximized: false, insets: { t: 0, r: 0, b: 0, l: 0 } }
+      return undefined
+    })
+    try {
+      render(<WindowLayout label="main" />)
+      await waitFor(() => expect(screen.getAllByTestId('tab-canvas')).toHaveLength(2))
+      await act(async () => {
+        for (let i = 0; i < 20; i++) await Promise.resolve()
+      })
+      // 누름 → 전환 메아리 → dragstart(다른 task 에서 끌기가 이어진다).
+      fireEvent.pointerDown(headOf('v2'), { button: 0, clientX: 600, clientY: 14 })
+      act(() => emit('window:tabs-updated', { label: 'main', tabs: TWO_TABS, active: 'v2', version: 2 }))
+      const data = new Map<string, string>()
+      const ev = createEvent.dragStart(headOf('v2'), {
+        dataTransfer: {
+          effectAllowed: 'uninitialized',
+          setData: (k: string, v: string) => void data.set(k, v),
+          clearData: () => data.clear(),
+          setDragImage: () => {},
+        },
+      })
+      Object.defineProperty(ev, 'clientX', { value: 604 })
+      Object.defineProperty(ev, 'clientY', { value: 14 })
+      act(() => void fireEvent(headOf('v2'), ev))
+      // 원래 크기 = 새 창 1024 × 768 − 크롬(1024 − 800 · 768 − 571) = 탭 캔버스 · 모양 = 그 탭 캐시의 레이아웃(칸 하나).
+      expect([...data.keys()][0].replace(/;drag=[^;]*/, '')).toBe('application/x-engram-tab;app=com.engram.test;w=800;h=571;shape=l')
+      expect(canvasOf('v2').style.display).toBe('block')
+
+      act(() => localDrag.setSourceStrip(null))
+      expect(canvasOf('v1').style.display).toBe('block')
+      expect(canvasOf('v2').style.display).toBe('none')
+      expect(headOf('v1').getAttribute('data-active')).toBe('true')
+      expect(useViewStore.getState().windows.main.active).toBe('v2')
+
+      act(() => localDrag.setSourceStrip({ index: 1, left: 384, x: 600 }))
+      expect(canvasOf('v2').style.display).toBe('block')
+      expect(canvasOf('v1').style.display).toBe('none')
+    } finally {
+      act(() => {
+        localDrag.setOutgoing(null)
+        localDrag.setSourceStrip(null)
+      })
+    }
+  })
+
+  // 캔버스 상자 (0, 29) 800 × 571 · 보이는 탭 v1 = 칸 하나(비율 한계 0.1 · 0.9 · 판 번호 1) · 끄는 탭 원래 크기 400 × 300.
+  const DRAG_TYPE = buildTabDragType({ app: 'com.engram.test', drag: 'd9', original: { w: 400, h: 300 }, shape: 'l' })
+  const DRAG_VALUE = buildTabDragValue({
+    drag: 'd9',
+    view: 'p1',
+    from: 'slot-popup-2',
+    initial: null,
+    size: { w: 640, h: 480 },
+    grab: { x: 40, y: 14 },
+  })
+
+  function fireDrag(type: string, at: { x: number; y: number }, types = [DRAG_TYPE]): MouseEvent {
+    const e = new MouseEvent(type, { bubbles: true, cancelable: true, clientX: at.x, clientY: at.y })
+    Object.defineProperty(e, 'dataTransfer', {
+      value: { types, dropEffect: 'none', getData: (t: string) => (t === DRAG_TYPE ? DRAG_VALUE : '') },
+    })
+    act(() => {
+      canvasOf('v1').dispatchEvent(e)
+    })
+    return e
+  }
+
+  async function mountDropWindow() {
+    stubStrip()
+    await mountDockWindow('main')
+    // identifier 답 · 캐시 당기기를 끝낸다.
+    await act(async () => {
+      for (let i = 0; i < 20; i++) await Promise.resolve()
+    })
+  }
+
+  it('끌기 안내 층은 탭 캔버스 상자 바로 안에 그 상자를 덮고 · 늘 마운트돼 있다(안내는 없음)', async () => {
+    await mountDropWindow()
+    const layer = screen.getByTestId('dock-overlay-layer')
+    expect(layer.parentElement).toBe(canvasOf('v1').parentElement)
+    expect(layer.style.position).toBe('absolute')
+    expect(layer.style.pointerEvents).toBe('none')
+    expect(screen.queryByTestId('dock-overlay')).toBeNull()
+  })
+
+  it('우리 끌기를 뿌리에서 받아 캔버스 좌표로 미리보기를 그리고 · 끄는 동안 셸을 부르지 않고 · drop 에 Seam 하나를 보낸다', async () => {
+    await mountDropWindow()
+    const seen: string[] = []
+    const rdnd = (e: Event) => void seen.push(e.type)
+    for (const t of ['dragenter', 'dragover', 'drop']) window.addEventListener(t, rdnd)
+    const calls = invokeMock.mock.calls.length
+    try {
+      // 캔버스 (5, 271) = 바깥 왼쪽 띠 → 붙을 사각형 = 왼쪽 절반(몫 = 원래 폭 400 ÷ 800).
+      const enter = fireDrag('dragenter', { x: 5, y: 300 })
+      fireDrag('dragover', { x: 6, y: 300 })
+      expect(enter.defaultPrevented).toBe(true)
+      expect((enter as unknown as { dataTransfer: DataTransfer }).dataTransfer.dropEffect).toBe('move')
+      const preview = screen.getByTestId('dock-preview')
+      expect(screen.getByTestId('dock-overlay-layer').contains(preview)).toBe(true)
+      expect([preview.style.left, preview.style.top, preview.style.width, preview.style.height]).toEqual([
+        '0px',
+        '0px',
+        '400px',
+        '571px',
+      ])
+      expect(invokeMock.mock.calls.length).toBe(calls)
+
+      const drop = fireDrag('drop', { x: 6, y: 300 })
+      expect(drop.defaultPrevented).toBe(true)
+      expect(invokeMock.mock.calls.slice(calls)).toEqual([
+        [
+          'tab_drop',
+          {
+            drop: {
+              drag: 'd9',
+              view: 'p1',
+              from: 'slot-popup-2',
+              initial: null,
+              to: { type: 'seam', target: 'v1', anchor: { type: 'outer' }, side: 'Left', share: 0.5 },
+            },
+          },
+        ],
+      ])
+      expect(seen).toEqual([])
+    } finally {
+      for (const t of ['dragenter', 'dragover', 'drop']) window.removeEventListener(t, rdnd)
+    }
+  })
+
+  it('우리 것이 아닌 끌기(트리 행 · 파일)는 받지도 끊지도 않는다 — window 의 react-dnd 꼴 리스너까지 간다', async () => {
+    await mountDropWindow()
+    const seen: string[] = []
+    const rdnd = (e: Event) => void seen.push(e.type)
+    window.addEventListener('dragover', rdnd)
+    try {
+      const row = fireDrag('dragover', { x: 5, y: 300 }, ['application/x-tree-row'])
+      expect(row.defaultPrevented).toBe(false)
+      fireDrag('dragover', { x: 5, y: 300 }, ['Files'])
+      expect(seen).toEqual(['dragover', 'dragover'])
+      expect(screen.queryByTestId('dock-overlay')).toBeNull()
+    } finally {
+      window.removeEventListener('dragover', rdnd)
+    }
+  })
+
+  it('파일 · URL 끌어 놓기를 막는다(앱 안 링크 포함) · 글자 끌기는 그대로 · 내리면 뗀다', async () => {
+    const { unmount } = await mountDockWindow('main')
+    const link = dragOver(['text/uri-list'])
+    expect(link.defaultPrevented).toBe(true)
+    expect((link as unknown as { dataTransfer: DataTransfer }).dataTransfer.dropEffect).toBe('none')
+    expect(dragOver(['Files']).defaultPrevented).toBe(true)
+    expect(dragOver(['text/plain']).defaultPrevented).toBe(false)
+
+    unmount()
+    const e = new Event('dragover', { bubbles: true, cancelable: true })
+    Object.defineProperty(e, 'dataTransfer', { value: { types: ['Files'], dropEffect: 'copy' } })
+    document.body.dispatchEvent(e)
+    expect(e.defaultPrevented).toBe(false)
+  })
+})
+
+// ── ★대기 모드(TRD S21-slot-docking §3-9)★ — 예비 창 풀의 창(숨은 예비 창)은 빈 틀 · 0탭 자가닫힘 끔 · 탭 끌어오기
+//   없음 · 재기 보고 그대로. 모드 = 마운트 때 `window_role`, 그 뒤 `spare:adopted`(보통으로).
+describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
+  const SPARE = 'slot-popup-7'
+
+  beforeEach(() => {
+    currentWindow.label = SPARE
+    __resetUiMetricsReportForTest()
+  })
+
+  const spareRole = () => windowRoleMock.mockImplementation(async () => ({ role: 'spare', generation: null }))
+  const listTabsCalls = () => invokeMock.mock.calls.filter(c => c[0] === 'list_tabs')
+
+  async function mountSpare() {
+    spareRole()
+    const view = render(<WindowLayout label={SPARE} />)
+    await waitFor(() => expect(screen.getByTestId('spare-canvas')).toBeTruthy())
+    return view
+  }
+
+  it('spare:adopted 듣기를 자기 창 대상으로 먼저 건 뒤 window_role 을 묻는다', async () => {
+    render(<WindowLayout label={SPARE} />)
+    await waitFor(() => expect(ipcOrder).toContain('invoke:window_role'))
+    expect(ipcOrder.indexOf('listen:spare:adopted')).toBeGreaterThanOrEqual(0)
+    expect(ipcOrder.indexOf('listen:spare:adopted')).toBeLessThan(ipcOrder.indexOf('invoke:window_role'))
+    expect(listenOptions.get('spare:adopted')).toEqual({ target: SPARE })
+  })
+
+  it('window_role = spare → 빈 틀(탭바 + 빈 캔버스) · list_tabs 를 당기지 않는다 · 부팅 오류 · 로딩 문구 없음', async () => {
+    await mountSpare()
+    expect(screen.getByTestId('tab-bar')).toBeTruthy()
+    expect(screen.queryAllByTestId('tab')).toHaveLength(0)
+    expect(screen.queryAllByTestId('tab-canvas')).toHaveLength(0)
+    await new Promise(res => setTimeout(res, 50))
+    expect(listTabsCalls()).toEqual([])
+    expect(listeners.has('window:tabs-updated')).toBe(false)
+    expect(screen.queryByTestId('window-boot-error')).toBeNull()
+  })
+
+  it('대기 모드에선 이 창의 0탭 알림이 와도 닫지 않는다', async () => {
+    await mountSpare()
+    act(() =>
+      useViewStore.getState().applyWindowTabsUpdated({ label: SPARE, tabs: [], active: '', version: 9 }),
+    )
+    await new Promise(res => setTimeout(res, 20))
+    expect(closeMock).not.toHaveBeenCalled()
+    expect(screen.getByTestId('spare-canvas')).toBeTruthy()
+  })
+
+  it('대기 모드에서도 재기 둘(캔버스 · 칸 틀 지표)을 보낸다', async () => {
+    FakeResizeObserver.instances = []
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver)
+    __resetCanvasReportForTest()
+    try {
+      await mountSpare()
+      act(() => liveObserver().fire(640, 400))
+      await waitFor(() => expect(canvasReports()).toEqual([{ w: 640, h: 400 }]))
+      await waitFor(() =>
+        expect(invokeMock.mock.calls.filter(c => c[0] === 'report_ui_metrics')).toEqual([
+          ['report_ui_metrics', { metrics: expect.objectContaining({ frame_insets: { t: 1, r: 1, b: 1, l: 1 } }) }],
+        ]),
+      )
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('spare:adopted → 보통 모드: list_tabs 로 들인 탭을 당겨 그리고, 0탭 자가닫힘이 다시 산다', async () => {
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'list_tabs') return { label: SPARE, tabs: [{ id: 'p1', name: 'Pop' }], active: 'p1', version: 3 }
+      if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+      return undefined
+    })
+    await mountSpare()
+    expect(listTabsCalls()).toEqual([])
+
+    act(() => emit('spare:adopted', { generation: 1 }))
+
+    await waitFor(() => expect(screen.getAllByTestId('tab-canvas')).toHaveLength(1))
+    expect(listTabsCalls()).toEqual([['list_tabs', { window: SPARE }]])
+    expect(screen.queryByTestId('spare-canvas')).toBeNull()
+
+    emit('window:tabs-updated', { label: SPARE, tabs: [], active: 'p1', version: 4 })
+    await waitFor(() => expect(closeMock).toHaveBeenCalledTimes(1))
+  })
+
+  it('대기 창은 창 사실(window_frame)을 당기지 않는다 — 셸 창 모델 밖이다 · 들이면 당긴다', async () => {
+    const frameCalls = () => invokeMock.mock.calls.filter(c => c[0] === 'window_frame')
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'list_tabs') return { label: SPARE, tabs: [{ id: 'p1', name: 'Pop' }], active: 'p1', version: 3 }
+      if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+      if (cmd === 'window_frame') return { restored: { w: 800, h: 600 }, maximized: false, insets: { t: 0, r: 0, b: 0, l: 0 } }
+      return undefined
+    })
+    await mountSpare()
+    await new Promise(res => setTimeout(res, 50))
+    expect(frameCalls()).toEqual([])
+
+    act(() => emit('spare:adopted', { generation: 1 }))
+    await waitFor(() => expect(screen.getAllByTestId('tab-canvas')).toHaveLength(1))
+    await waitFor(() => expect(frameCalls()).toEqual([['window_frame', undefined]]))
+  })
+
+  it('들인 뒤 제 탭을 당겨 오기 전에는 빈 틀 그대로 — 로딩 문구 없음 · 탭바 줄은 같은 노드', async () => {
+    let answer: (payload: unknown) => void = () => {}
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'list_tabs') return new Promise(res => (answer = res))
+      if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+      return undefined
+    })
+    await mountSpare()
+    const row = screen.getByTestId('tab-strip-row')
+
+    act(() => emit('spare:adopted', { generation: 1 }))
+    await waitFor(() => expect(listTabsCalls()).toHaveLength(1))
+    expect(screen.getByTestId('spare-canvas')).toBeTruthy()
+    expect(screen.queryByTestId('window-loading')).toBeNull()
+    expect(screen.getByTestId('tab-strip-row')).toBe(row)
+
+    await act(async () => answer({ label: SPARE, tabs: [{ id: 'p1', name: 'Pop' }], active: 'p1', version: 3 }))
+    await waitFor(() => expect(screen.getAllByTestId('tab-canvas')).toHaveLength(1))
+    expect(screen.queryByTestId('spare-canvas')).toBeNull()
+    expect(screen.getByTestId('tab-strip-row')).toBe(row)
+  })
+
+  const headIds = () => screen.queryAllByTestId('tab').map(h => h.getAttribute('data-view-id'))
+
+  it('대기 중에 들일 탭이 먼저 오면(전역 미러) 대기가 풀릴 때까지 빈 틀 · 풀리는 순간 그 탭', async () => {
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'list_tabs') return new Promise(() => {})
+      if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+      return undefined
+    })
+    await mountSpare()
+
+    act(() =>
+      useViewStore.getState().applyWindowTabsUpdated({ label: SPARE, tabs: [{ id: 'p1', name: 'Pop' }], active: 'p1', version: 7 }),
+    )
+    expect(screen.getByTestId('spare-canvas')).toBeTruthy()
+    expect(headIds()).toEqual([])
+
+    act(() => emit('spare:adopted', { generation: 1 }))
+    expect(headIds()).toEqual(['p1'])
+    expect(screen.queryByTestId('spare-canvas')).toBeNull()
+  })
+
+  it('window_role = unknown 이거나 실패하면 보통으로 그린다', async () => {
+    windowRoleMock.mockImplementation(async () => ({ role: 'unknown', generation: null }))
+    const first = render(<WindowLayout label={SPARE} />)
+    await waitFor(() => expect(screen.getAllByTestId('tab-canvas')).toHaveLength(2))
+    first.unmount()
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      windowRoleMock.mockImplementation(async () => {
+        throw new Error('no dock state')
+      })
+      render(<WindowLayout label={SPARE} />)
+      await waitFor(() => expect(screen.getAllByTestId('tab-canvas')).toHaveLength(2))
+      expect(screen.queryByTestId('spare-canvas')).toBeNull()
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('모드를 모르는 동안(window_role 답 전)에는 0탭 알림이 와도 닫지 않는다 — 대기로 답하면 끝까지 안 닫는다', async () => {
+    let answer: (reply: unknown) => void = () => {}
+    windowRoleMock.mockImplementation(() => new Promise(res => (answer = res)))
+    render(<WindowLayout label={SPARE} />)
+    await waitFor(() => expect(ipcOrder).toContain('invoke:window_role'))
+    act(() =>
+      useViewStore.getState().applyWindowTabsUpdated({ label: SPARE, tabs: [], active: '', version: 9 }),
+    )
+    await new Promise(res => setTimeout(res, 20))
+    expect(closeMock).not.toHaveBeenCalled()
+
+    await act(async () => answer({ role: 'spare', generation: null }))
+    expect(screen.getByTestId('spare-canvas')).toBeTruthy()
+    expect(closeMock).not.toHaveBeenCalled()
+  })
+})
+
+// ── 예열 창 채택 · 첫 화면 알림(TRD S21-slot-docking §3-9 I26 · I28) — 채택한 창의 셸 문은 그 채택 번호를 실은 알림만 받는다 ──
+describe('WindowLayout — 채택 번호 · 첫 화면 다시 알림', () => {
+  const SPARE = 'slot-popup-7'
+  const TABS = { label: SPARE, tabs: [{ id: 'p1', name: 'Pop' }], active: 'p1', version: 3 }
+
+  beforeEach(() => {
+    currentWindow.label = SPARE
+  })
+
+  const listTabsCalls = () => invokeMock.mock.calls.filter(c => c[0] === 'list_tabs')
+  const reports = () => reportFirstPaintMock.mock.calls
+  const roleArgs = () => windowRoleMock.mock.calls.map(c => c[0])
+
+  function listTabsAnswers(ok: () => boolean) {
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'list_tabs') {
+        if (!ok()) throw new Error('unknown window')
+        return TABS
+      }
+      if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+      return undefined
+    })
+  }
+
+  it('대기 → 채택: 제 탭을 그린 뒤 그 채택 번호로 한 번 알린다', async () => {
+    listTabsAnswers(() => true)
+    windowRoleMock.mockImplementation(async () => ({ role: 'spare', generation: null }))
+    render(<WindowLayout label={SPARE} />)
+    await waitFor(() => expect(screen.getByTestId('spare-canvas')).toBeTruthy())
+    expect(roleArgs()).toEqual([{ adoptable: true }])
+
+    act(() => emit('spare:adopted', { generation: 4 }))
+    await waitFor(() => expect(screen.getAllByTestId('view-renderer')).toHaveLength(1))
+    await waitFor(() => expect(reports()).toEqual([[4]]))
+  })
+
+  it('번호 0 도 채택 번호로 싣는다', async () => {
+    listTabsAnswers(() => true)
+    windowRoleMock.mockImplementation(async () => ({ role: 'spare', generation: null }))
+    render(<WindowLayout label={SPARE} />)
+    await waitFor(() => expect(screen.getByTestId('spare-canvas')).toBeTruthy())
+    act(() => emit('spare:adopted', { generation: 0 }))
+    await waitFor(() => expect(reports()).toEqual([[0]]))
+  })
+
+  // `window_role` 이 실패한 예열 페이지는 보통 모드로 모델이 모르는 자기 label 을 당겨 `bootFailed` 로 이미 알렸다.
+  it('window_role 실패 페이지 — 채택에 부팅 실패를 내리고 다시 당겨 탭을 그린 뒤 그 번호로 다시 알린다', async () => {
+    let adopted = false
+    listTabsAnswers(() => adopted)
+    windowRoleMock.mockImplementation(async () => {
+      throw new Error('no dock state')
+    })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      render(<WindowLayout label={SPARE} />)
+      await waitFor(() => expect(screen.getByTestId('window-boot-error')).toBeTruthy(), { timeout: 3000 })
+      await waitFor(() => expect(reports()).toEqual([[null]]))
+      const pulled = listTabsCalls().length
+
+      adopted = true
+      act(() => emit('spare:adopted', { generation: 2 }))
+      expect(screen.queryByTestId('window-boot-error')).toBeNull()
+      await waitFor(() => expect(screen.getAllByTestId('view-renderer')).toHaveLength(1))
+      expect(listTabsCalls()).toHaveLength(pulled + 1)
+      await waitFor(() => expect(reports()).toEqual([[null], [2]]))
+    } finally {
+      warn.mockRestore()
+      error.mockRestore()
+    }
+  }, 6000)
+
+  it('채택 전후로 첫 화면이 이어져도(부팅 실패를 내림과 탭 반영이 한 렌더) 그 번호로 다시 알린다', async () => {
+    listTabsAnswers(() => false)
+    windowRoleMock.mockImplementation(async () => {
+      throw new Error('no dock state')
+    })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      render(<WindowLayout label={SPARE} />)
+      await waitFor(() => expect(screen.getByTestId('window-boot-error')).toBeTruthy(), { timeout: 3000 })
+      act(() => useViewStore.getState().applyWindowTabsUpdated(TABS))
+      await waitFor(() => expect(screen.getAllByTestId('view-renderer')).toHaveLength(1))
+      expect(reports()).toEqual([[null]])
+
+      act(() => emit('spare:adopted', { generation: 9 }))
+      await waitFor(() => expect(reports()).toEqual([[null], [9]]))
+    } finally {
+      warn.mockRestore()
+      error.mockRestore()
+    }
+  }, 6000)
+
+  // 셸은 맡기기 전에 페이지가 다 읽혔는지 보지 않는다 — 채택 사건을 놓친 페이지는 보임을 기다리는 동안 답으로 번호를 받는다.
+  it('spare:adopted 뒤에 마운트한 페이지 — window_role 답 model + 번호로 보통 모드 · 그 번호로 한 번 알린다', async () => {
+    listTabsAnswers(() => true)
+    windowRoleMock.mockImplementation(async () => ({ role: 'model', generation: 7 }))
+    render(<WindowLayout label={SPARE} />)
+    await waitFor(() => expect(screen.getAllByTestId('view-renderer')).toHaveLength(1))
+    expect(screen.queryByTestId('spare-canvas')).toBeNull()
+    await waitFor(() => expect(reports()).toEqual([[7]]))
+  })
+
+  it('채택을 본 뒤 늦게 온 window_role 답 spare 는 대기로 되돌리지 않는다', async () => {
+    listTabsAnswers(() => true)
+    let answer: (reply: unknown) => void = () => {}
+    windowRoleMock.mockImplementation(() => new Promise(res => (answer = res)))
+    render(<WindowLayout label={SPARE} />)
+    await waitFor(() => expect(ipcOrder).toContain('invoke:window_role'))
+
+    act(() => emit('spare:adopted', { generation: 5 }))
+    await waitFor(() => expect(screen.getAllByTestId('view-renderer')).toHaveLength(1))
+    await act(async () => answer({ role: 'spare', generation: null }))
+    expect(screen.queryByTestId('spare-canvas')).toBeNull()
+    expect(screen.getAllByTestId('view-renderer')).toHaveLength(1)
+    await waitFor(() => expect(reports()).toEqual([[5]]))
+  })
+
+  it('spare:adopted 듣기를 못 걸면 adoptable: false 로 묻고 · 답 spare 가 와도 대기로 그리지 않는다', async () => {
+    listTabsAnswers(() => true)
+    rejectListen.add('spare:adopted')
+    windowRoleMock.mockImplementation(async () => ({ role: 'spare', generation: null }))
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      render(<WindowLayout label={SPARE} />)
+      await waitFor(() => expect(screen.getAllByTestId('view-renderer')).toHaveLength(1))
+      expect(roleArgs()).toEqual([{ adoptable: false }])
+      expect(screen.queryByTestId('spare-canvas')).toBeNull()
+      expect(listTabsCalls()).toEqual([['list_tabs', { window: SPARE }]])
+    } finally {
+      error.mockRestore()
+    }
+  })
+
+  it('StrictMode 두 번 마운트 — 늘 adoptable: true 로 묻고 채택 뒤 알림은 한 번', async () => {
+    listTabsAnswers(() => true)
+    windowRoleMock.mockImplementation(async () => ({ role: 'spare', generation: null }))
+    render(
+      <StrictMode>
+        <WindowLayout label={SPARE} />
+      </StrictMode>,
+    )
+    await waitFor(() => expect(screen.getByTestId('spare-canvas')).toBeTruthy())
+    expect(roleArgs().length).toBeGreaterThanOrEqual(1)
+    expect(roleArgs().every(a => (a as { adoptable: boolean }).adoptable === true)).toBe(true)
+
+    act(() => emit('spare:adopted', { generation: 3 }))
+    await waitFor(() => expect(screen.getAllByTestId('view-renderer')).toHaveLength(1))
+    await waitFor(() => expect(reports()).toEqual([[3]]))
   })
 })

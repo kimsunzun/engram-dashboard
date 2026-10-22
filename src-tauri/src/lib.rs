@@ -2,11 +2,15 @@ pub mod commands;
 pub mod daemon_client;
 pub mod discovery;
 mod file_hooks;
+mod first_paint;
 pub mod layout;
 pub mod output_channel;
 pub mod output_router;
 pub mod settings;
+pub mod spare;
 pub mod state;
+// 탭 놓기의 셸 몫 — 끌기가 끝난 뒤의 놓기 명령 하나 · 창 사실(ADR-0296).
+pub mod tab_drop;
 pub mod theme;
 mod tray;
 // ADR-0155: 웹뷰가 주인인 명령의 셸쪽 다리(등록 대리 + 2단 배달의 마지막 홉).
@@ -105,6 +109,22 @@ pub fn run() {
     //   선다(`RestoreCoordinator` 문서). 데몬 클라이언트는 구독 원천이 커밋 때마다 찾는다.
     let setup_restore = restore_coordinator.clone();
     builder = builder.manage(restore_coordinator);
+    // 숨긴 채 지은 창을 첫 화면 알림까지 기다리는 명부 — 창을 만드는 어느 자리보다 먼저 있어야 한다(없으면 곧바로 보인다).
+    //   예열 창 풀이 그 손잡이를 쥐므로 풀보다 먼저 만든다(앱 손잡이는 setup 첫머리에 꽂는다).
+    let first_paint = std::sync::Arc::new(crate::first_paint::FirstPaintGate::default());
+    let spare_paint_gate =
+        std::sync::Arc::new(crate::first_paint::SparePaintGate::new(first_paint.clone()));
+    let setup_spare_paint_gate = spare_paint_gate.clone();
+    builder = builder.manage(first_paint);
+    // 예열 창 상태(예열 창 풀 · 종료 표지 — TRD S21-slot-docking §3-9)도 같은 이유다(ADR-0102) — 웹뷰의 첫 측정
+    //   보고 둘(캔버스 · UI 치수) · `window_role` 이 이 상태를 본다.
+    builder = builder.manage(std::sync::Arc::new(crate::spare::SpareState::new(
+        crate::spare::SpareSeams::new(spare_paint_gate),
+    )));
+    // 탭 놓기 장부 · 창마다 마지막으로 낸 창 사실(ADR-0296 · TRD S21-slot-docking §3-4 · §3-8)도 같은 이유다
+    //   (ADR-0102) — 웹뷰의 마운트 때 `window_frame` 당기기와 창의 첫 자리 기록이 이 상태를 본다.
+    builder = builder.manage(std::sync::Arc::new(crate::tab_drop::DropBook::default()));
+    builder = builder.manage(std::sync::Arc::new(crate::tab_drop::FrameBook::default()));
 
     // ── 셸 설정 + 유효 테마(TRD S21-storage §5-3 · §5-6) ─────────────────────────────
     // ★위 LayoutState 와 같은 이유로 빌더에서 manage 한다(ADR-0102)★ — 웹뷰의 첫 `get_ui_settings` ·
@@ -136,6 +156,10 @@ pub fn run() {
     builder
         .setup(move |app| {
             // 로그는 부팅 단계 플러그인이 이미 열었다(TRD S21-storage §6-5 ⓪).
+
+            // 예열 창 풀의 첫 화면 문 손잡이가 확정 ③ 의 보이기를 메인 스레드로 넘길 앱 손잡이 — 창을 만드는 어느
+            //   자리(⑧ · 예열 창 짓기)보다 앞.
+            setup_spare_paint_gate.attach(app.handle().clone());
 
             // ── 웹뷰 폴더 결정(TRD S21-storage §4 · M4) — 창을 만드는 어느 자리보다 앞 ─────────────────
             // 단일 인스턴스 관문 뒤라 쓰기 확인(프로브)을 해도 된다.
@@ -224,7 +248,7 @@ pub fn run() {
 
             // ── 부팅 단계 ⑧ ⑨: 정적 창(main)을 저장된 자리로 만들기 · 복원한 팝아웃 창 · 테마 한 번 ──
             // (TRD S21-storage §4 · §6-5) 여기서 첫 창이 생긴다(설정의 `"create": false`). `--hidden` 이면 main 은
-            //   숨긴 채 만들고, 팝아웃은 아래 숨기기가 숨긴다(사용자 결정 F13).
+            //   첫 화면에도 보이지 않고, 팝아웃은 아래 숨기기가 첫 화면 기다림을 거둬 숨긴 채 둔다(사용자 결정 F13).
             if crate::state::placement::restore_windows(
                 app.handle(),
                 &setup_webview_env,
@@ -285,8 +309,18 @@ pub fn run() {
             // build_tray 가 초기 아이콘을 확정한 뒤 변화만 push 한다(첫 관측은 push 안 함).
             tray::spawn_daemon_observer(&app.handle().clone());
 
-            // `--hidden` — main 은 숨긴 채 만들었다(⑧). 여기서는 ⑨ 가 보인 채 연 팝아웃을 숨기고(F13) 숨긴 창을
-            //   사용량 관심에서 뺀다 — 숨기기 경로는 하나다(ADR-0229).
+            // ── 예비 창(TRD S21-slot-docking §3-9 「부팅」) — 미리 하나 지어 숨긴 채 기다리게 한다 ──
+            // ★작업 스레드에서 짓는다★ — 이 setup 이 돌아간 뒤 이벤트 루프가 창을 만든다. 예비 창은 짓기 전에
+            //   풀에 적으므로 아래 `--hidden` 숨기기 · 트레이가 그 창을 보지 않는다. main(⑧)을 만든 뒤라 첫 창이 바뀌지
+            //   않는다.
+            // ADR-0295 · ADR-0299
+            crate::commands::spare::spawn_spare_build(app.handle());
+
+            // `--hidden` — main 은 첫 화면에 보이도록 올리지 않았다(⑧). 여기서는 ⑨ 가 첫 화면에 보이도록 올린 팝아웃의
+            //   올림을 거두고(F13 — 거두지 않으면 첫 화면 알림 · 시한이 main 은 트레이에 둔 채 팝아웃만 보인다) 그 창을
+            //   사용량 관심에서 뺀다 — 숨기기 경로는 하나다(ADR-0229). 첫 화면의 보이기는 보일지를 메인 스레드에서
+            //   보이기 바로 앞에 정하고(`first_paint`) 이 setup 도 메인 스레드라, 그 보이기는 여기서 거둔 뒤에야 돌아
+            //   거둔 창을 보이지 않는다.
             if hidden {
                 crate::tray::actions::hide_main_ui(app.handle());
             }
@@ -299,10 +333,30 @@ pub fn run() {
         .on_window_event(move |window, event| {
             match event {
                 tauri::WindowEvent::CloseRequested { api, .. } => {
+                    let label = window.label();
                     // ADR-0229: 숨기기 경로는 하나다 — 여기서 창을 따로 숨기면 입구마다 숨기는 창이 갈린다.
-                    if window.label() == crate::layout::MAIN_WINDOW_LABEL {
+                    if label == crate::layout::MAIN_WINDOW_LABEL {
                         api.prevent_close();
                         crate::tray::actions::hide_main_ui(window.app_handle());
+                    } else if crate::commands::popout::is_popup_label(label) {
+                        // 팝아웃은 닫기 요청에서 모델을 먼저 지우고 label 에 묘비를 단다 — 닫히는 창으로 붙는 확정을
+                        //   막는다(TRD S21-slot-docking 5.8판 §1-2 「닫히는 창」). ★전제 = 팝아웃의 닫기 요청은 되돌려지지
+                        //   않는다★: 닫기 취소는 위 main 갈래뿐이고, 프론트에 닫기 요청 리스너가 없으며, 런타임은 이
+                        //   콜백이 돌아오자마자 창을 닫는다(tauri-runtime-wry 2.11.3 `on_close_requested` →
+                        //   `on_window_close`). 리스너나 닫기 취소가 하나라도 생기면 지운 창이 살아남는다 — 그때는
+                        //   「닫는 중 표시 + 막히면 해제」로 바꾼다. 점검(매 `/qa` · 저장소 루트에서): `rg -i "close.?requested" src/`
+                        //   → 0줄 · `rg "prevent[_]close" src-tauri/src/` → 1줄(위 main 갈래).
+                        let app = window.app_handle();
+                        // 하나라도 없으면(초기화 실패 극단 케이스) 건너뛴다 — 아래 `Destroyed` 갈래와 같다.
+                        if let (Some(state), Some(router), Some(client)) = (
+                            app.try_state::<crate::layout::LayoutState>(),
+                            app.try_state::<std::sync::Arc<crate::output_router::OutputRouter>>(),
+                            app.try_state::<std::sync::Arc<crate::daemon_client::DaemonClient>>(),
+                        ) {
+                            crate::commands::popout::close_requested_popup_window(
+                                label, &state, &router, &client,
+                            );
+                        }
                     }
                 }
                 // ★팝업 창 Destroyed 정리(수명/누수 임계)★: 팝업이 실제로 소멸하면(정상 close 또는 프로그램
@@ -315,6 +369,8 @@ pub fn run() {
                     if crate::commands::popout::is_popup_label(&label) {
                         let app = window.app_handle();
                         crate::state::placement::forget_deferred_maximize(app, &label);
+                        crate::first_paint::cancel_hold(app, &label);
+                        crate::commands::tab_drop::forget_window_frame(app, &label);
                         // 하나라도 없으면(초기화 실패 극단 케이스) 조용히 스킵(정리 불가여도 앱은 계속).
                         if let (Some(state), Some(router), Some(registry), Some(client)) = (
                             app.try_state::<crate::layout::LayoutState>(),
@@ -327,11 +383,17 @@ pub fn run() {
                             );
                         }
                     }
+                    // 예열 창 풀(TRD S21-slot-docking §3-9 「다시 짓기」) — 풀의 창이면 빼고 다시 짓고, 보임을 기다리던 채택
+                    //   창이면 그 다시 짓기 완료다(맡긴 창 보이기 · 안전 시한과 같은 완료 — label 마다 한 번).
+                    crate::commands::spare::on_spare_window_destroyed(window.app_handle(), &label);
                 }
                 // 창 자리 기록(TRD S21-storage §6-3) — 사건 값 대신 게터를 다시 읽는다(최소화 · 최대화 여부가 같이
-                //   필요하다).
+                //   필요하다). 예비 창 풀의 창은 모델 밖이라 적지 않는다(TRD S21-slot-docking §3-9 「숨어 있기」).
+                // ADR-0295
                 tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
-                    crate::state::placement::record(window);
+                    if !crate::commands::spare::is_spare_window(window.app_handle(), window.label()) {
+                        crate::state::placement::record(window);
+                    }
                 }
                 _ => {}
             }
@@ -356,6 +418,8 @@ pub fn run() {
             commands::create_tab,
             commands::create_window,
             commands::switch_tab,
+            // 탭 끌기의 원래 선택 되돌리기(웹뷰 → 셸 · TRD S21-slot-docking §4-6) — 버스 명령이 아니다.
+            commands::switch_tab_if,
             commands::close_tab,
             commands::close_window,
             commands::split_slot,
@@ -374,6 +438,14 @@ pub fn run() {
             // 측정 보고(웹뷰 → 셸) — 버스 명령이 아니다(ADR-0227).
             commands::report_window_canvas,
             commands::report_ui_metrics,
+            // 첫 화면 알림(웹뷰 → 셸) — 버스 명령이 아니다(`first_paint`).
+            commands::webview_painted,
+            // 부른 창의 역할(예비 창 풀 · TRD S21-slot-docking §3-9) — 웹뷰 안 배선이라 버스 명령이 아니다.
+            commands::window_role,
+            // 탭 놓기 · 창 사실(웹뷰 → 셸 · ADR-0296) — 버스 명령이 아니다(마우스 놓기의 끝 · 웹뷰 안 배선 — TRD
+            //   S21-slot-docking §3-6). 같은 동작의 LLM 명령은 T-65 `tab.dock`.
+            commands::tab_drop::tab_drop,
+            commands::tab_drop::window_frame,
             // 부팅 조회 — 미는 쪽(`window.setTheme` · `theme.default` 쓰기 · 부팅 · 복원 수락)은 따로 있다
             //   (`commands/settings.rs` 「창별 테마를 읽는 자리가 둘인 이유」).
             commands::get_ui_settings,
@@ -403,8 +475,15 @@ pub fn run() {
         // ADR-0029: 앱은 in-proc 에이전트를 호스팅하지 않으므로 종료 때 거둘 manager 가 없다(데몬이 자기 에이전트
         // graceful 을 담당). 여기서 하는 일은 화면 상태의 정상 종료 쓰기와 셸 실행 잠금 놓기(TRD S21-storage §6-6),
         // 그리고 시작이 실패했으면 종료 코드 정하기다 — 트레이 「완전 종료」(`app.exit(0)`)도 이 사건을 낸다.
-        .run(move |_handle, event| {
+        .run(move |handle, event| {
+            // 끝나는 중에는 사라진 예비 창을 다시 짓지 않는다(TRD S21-slot-docking §3-9 「다시 짓기」). 종료를
+            //   막는 코드가 없어(`rg "prevent[_]exit" src-tauri/src/` → 0줄) 요청이 곧 종료다 — 막는 길이 생기면 이 표지를
+            //   `Exit` 로만 옮긴다.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                crate::commands::spare::on_app_exiting(handle);
+            }
             if let tauri::RunEvent::Exit = event {
+                crate::commands::spare::on_app_exiting(handle);
                 exit_session.shutdown();
                 // 종료 요청의 코드는 프로세스 종료 코드로 나가지 않는다 — tauri-runtime-wry 2.11.3 은 요청을
                 //   `ControlFlow::Exit`(tao 0.35 = 코드 0)로 끝낸다. 그래서 여기서 직접 끝낸다. 플러그인의 종료 처리

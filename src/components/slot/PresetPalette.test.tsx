@@ -31,7 +31,8 @@ beforeEach(() => {
   clientMock.deletePreset.mockClear()
   clientMock.renamePreset.mockClear()
   refreshPresetsMock.mockClear()
-  useAgentStore.setState({ presets: [] })
+  // 기본은 「목록 받음」 — 미수신 구간은 그 시험이 플래그를 직접 내린다.
+  useAgentStore.setState({ presets: [], presetsLoaded: true })
 })
 
 afterEach(() => {
@@ -92,6 +93,14 @@ describe('presetDisplayName (name override ?? basename 파생 — ADR-0061 리�
 describe('PresetPalette 렌더', () => {
   it('빈 목록 → 안내 문구', () => {
     render(<PresetPalette />)
+    expect(screen.getByText(/프리셋 없음/)).toBeTruthy()
+  })
+
+  it('첫 목록 수신 전 → 빈 목록 안내를 그리지 않고, 빈 목록을 받으면 그때 그린다', () => {
+    useAgentStore.setState({ presetsLoaded: false })
+    render(<PresetPalette />)
+    expect(screen.queryByText(/프리셋 없음/)).toBeNull()
+    act(() => useAgentStore.getState().setPresets([]))
     expect(screen.getByText(/프리셋 없음/)).toBeTruthy()
   })
 

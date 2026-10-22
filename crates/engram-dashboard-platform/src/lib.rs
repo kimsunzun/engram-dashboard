@@ -8,7 +8,7 @@
 //! 운영 OS 분기는 없다(ADR-0291 이 ADR-0275 결정 15 의 시한부 예외를 닫았다). `cfg` 없이 런타임에 OS 규칙을
 //! 쓰는 자리는 이 셈에 들지 않는다(④ 의 한계).
 //!
-//! 지금 입주자는 여덟이다 — [`process`](PID liveness · 프로세스 시작시각과 그 세 갈래 판정 · 프로세스 표 ·
+//! 지금 입주자는 아홉이다 — [`process`](PID liveness · 프로세스 시작시각과 그 세 갈래 판정 · 프로세스 표 ·
 //! 자식 PID 열거 · 한 뿌리 아래 신원 목록 · 한 프로세스 트리 끄기 — Windows `taskkill`) · [`group`](프로세스
 //! 무리의 강한 주인 · 약한 손잡이 · 붙든 멤버 · 가입 알림 포트 — Windows Job Object) ·
 //! [`file_holders`](이 파일을 지금 연 프로세스 — Restart Manager) ·
@@ -18,8 +18,11 @@
 //! 깨우기 · 실패한 셸의 「프로그램 없음」 판정 · 이 프로세스의 Job 밖에서 띄우기 — Windows = WMI) ·
 //! [`shell`](대화형 기본 셸 · CLI 를 콘솔 셸로 감싸기) ·
 //! [`env`](홈 디렉터리 · 실행 파일 이름 · 지금 실행 파일 옆 실행 파일 경로 · 환경변수 이름 비교) ·
-//! [`window`](전경 창이 이 프로세스의 것인가 — Windows `GetForegroundWindow`). 모듈 헤더와 공개 함수 문서가 그
+//! [`window`](창 정체 · 자리와 z 순서 한 번에 놓기 · 자리 되돌리기 · 커서 밑 맨 위 창 — 탭 놓기 끝 판정 · 창 진단
+//! 사실 · 전경 창이 이 프로세스의 것인가) · [`input`](커서 자리 · 주 버튼 · Esc 상태). 모듈 헤더와 공개 함수 문서가 그
 //! 책임의 정본이다.
+//! 창을 받는 함수는 `raw-window-handle` 의 `HasWindowHandle` 를 받고 그 변이 맞추기도 여기서 한다(TRD
+//! S21-slot-docking 6.3판 §8 · B10 · 7판 §5-1).
 //!
 //! ★`testing`(실프로세스 시험 도우미) · `group::GroupRef::gone`(주인이 처음부터 없는 손잡이) ·
 //! `spawn::wmi_create_raw`(WMI 띄우기의 원시 호출 — 진단 시험 몫)는 cargo 기능 `test-support` 뒤다★
@@ -50,9 +53,11 @@
 //!
 //! - **워크스페이스 crate 의존 0 — base 도 아니다**(ADR-0266 「거부한 대안」 둘째 · ADR-0268). 아래 게이트
 //!   ①이 그 벽이다 — 컴파일러는 잎 성질을 강제하지 않는다.
-//! - **운영 의존의 서드파티는 `windows`(Windows 대상만)와 `tracing` facade 만 들인다**(TRD 1-3 §0 ①) —
-//!   시험 전용 dev 의존은 이 규칙 밖이다. `windows` 는 의존 하나에 쓰는 바인딩 feature 의 합집합을 켜고, 기능별 cargo
-//!   feature 로 쪼개지 않는다(ADR-0275 결정 13). `tracing` 은 규칙 4 의 `Drop` 경로가 찍는 데만 쓴다.
+//! - **운영 의존의 서드파티는 `windows`(Windows 대상만) · `tracing` facade · `raw-window-handle` 만 들인다**(TRD 1-3
+//!   §0 ① · TRD S21-slot-docking 6.3판 §8 · B10 · 7판 §5-1) — 시험 전용 dev 의존은 이 규칙 밖이다. `windows` 는 의존 하나에 쓰는 바인딩
+//!   feature 의 합집합을 켜고, 기능별 cargo feature 로 쪼개지 않는다(ADR-0275 결정 13). `tracing` 은 규칙 4 의 경로가
+//!   찍는 데만 쓴다. `raw-window-handle` 은 창을 받는 함수의 인자 트레이트(`HasWindowHandle`) 하나 몫이다 — 의존이
+//!   없는 잎 crate 이고 OS crate 가 아니다(게이트 ⑤ 목록 밖).
 //! - ★**async 런타임(`tokio` 등)을 들이지 않는다**★ — 동기 crate 도 OS 층을 부른다(지금 agent). 여기 든
 //!   런타임은 그 동기 소비자로 조용히 번지고, 아래 게이트 ⑦ 이 그것을 빨갛게 만든다.
 //!
@@ -201,9 +206,12 @@ pub mod env;
 pub mod file_holders;
 pub mod fs;
 pub mod group;
+pub mod input;
 pub mod process;
 pub mod shell;
 pub mod spawn;
+#[cfg(all(test, windows))]
+mod test_window;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 pub mod window;

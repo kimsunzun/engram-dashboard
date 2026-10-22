@@ -26,4 +26,5 @@
 |---|---|---|
 | `shell-crate-boundary-survey-2026-08-23.md` | 셸(`src-tauri`) 10,637줄 중 어디까지 crate로 떼어낼 수 있나 — `use tauri` 실측 + 의존 방향 | 경계 실측 완료 · **모양 미결**(사용자 검토 중) · 연결 = T-27 |
 | `socket-head-of-line-blocking-2026-09-17.md` | 활성화 하나가 클라↔데몬 소켓 수신을 통째로 막는다 — 코드 3지점 + 「직렬은 가드가 아니다」 반증 | 구조 부채 계측 · **네트워크 리팩토링에 편입**(사용자 결정 2026-09-17) |
+| `slot-docking-drag-code-audit-2026-10-18.md` | 슬롯 도킹 끌기 코드(9c 트리) 구조 점검 — 중복 · 거대 클로저 · 잠든 스크롤 배관 · Chrome 식 재설계 기준으로 본 살릴 것/걷을 것(그 방향은 ADR-0296 이 OS 끌기로 대신했다) | 계측 완료 · 방향 = ADR-0296(OS 끌기) · 걷기 범위 정본 = TRD 7판 §5 · 짝 조사 = `../research/slot-docking-chrome-desktop-drag-2026-10-18.md` |
 | `architecture-discussion-2026-09-26.md` | transport 부착 전 전체 의존관계·모듈 쪼개기 논의 — 모듈 순서 Q&A 에서 나온 사실과 결정 후보 | **논의 완료**(2026-10-02) · ADR-0266~0273 작성(2026-10-02/03) · 후보 7(transport 부착 뒤 net 걷기)은 transport TRD 로 미룸 · 후보 3(로그는 base 경유만)은 번복 — 감싸지 않는다(ADR-0268) · 후보 2(`command`·`messaging` 의 base 의존)는 철회 — 필요해질 때만 연결한다(ADR-0267) · 큰 절 A(로깅 시스템 설계) 요구 수집 · 연결 = T-47 |
