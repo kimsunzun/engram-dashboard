@@ -2124,6 +2124,7 @@
 ## S26 — 창 크롬 · 이름 (T-66) (2026-10-23~, `v0.5.0/feat/window-chrome`, 대화 세션) · 설계 폴더 `docs/process/S26-window-chrome/` · **구현 미착수**
 
 - PRD 0.3판은 슬롯 도킹 브랜치 시절(스텝 S21)에 `docs/process/S21-window-chrome/prd.md` 로 썼다 — 옮기지 않는다. 이 브랜치의 커밋부터 `S26:`.
+- 2026-10-23 — PRD 0.4판: 사용자 결정 반영(Q2 · Q3 · Q1 · Q8 · Q9 · Q7 · Q6 · Q4 닫힘 · Q5 · Q10 = 메인이 스파이크로 정해 보고 · 슬롯 도킹 실측 ①–⑤ 중 ② 만 함 — PRD §5-1) · 예열 창(ADR-0299) · OS(HTML5) 탭 끌기(ADR-0296/0297) 기준으로 낡은 곳 고침. Q3 근거 조사 = `docs/research/window-identity-display-2026-10-23.md`(창 번호 표시 · 주 창 구분 관행 · `/research medium`). 리뷰 전.
 
 ## 다음 (미진행)
 

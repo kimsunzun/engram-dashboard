@@ -1,6 +1,6 @@
 # 탭을 창 밖으로 끌 때의 금지 커서 — 바꿀 길이 있나
 
-- 상태: 확정 — 적대 리뷰 FIX 3 건 반영 (2026-10-22) · 결정 없음(사용자 결정 대기 — T-66 에서 함께 본다)
+- 상태: 확정 — 적대 리뷰 FIX 3 건 반영 (2026-10-22) · T-66 에서 정함(사용자 2026-10-23): ④⑤ 이번엔 하지 않음 · B/C 안 감 — PRD `docs/process/S21-window-chrome/prd.md` R28
 - 방법: `/research` medium — 수집자 3(① WebView2 API · ② OS 끌기 커서 · ③ 다른 앱 선례) · 메인 grounding(로컬 소스 스팟 확인) · cross-family 적대 리뷰(codex)
 - 확신도 범례: 확실 · 가능성 높음 · 불확실 · contested
 - 계기: 사용자 실측(2026-10-22) — 탭을 창 밖(바탕화면 · 다른 앱)으로 끌면 🚫 커서가 뜬다. 놓으면 새 창은 정상으로 생긴다(TRD `docs/process/S21-slot-docking/trd.md` §8-5 M2 · M5).
