@@ -78,7 +78,7 @@
 - **상태:** 다음 작업(사용자 결정 2026-10-16 — 슬롯 도킹 직후 바로). 먼저 외부 조사: 호출 횟수 최소 · 이름 지목.
 - **문제:** 슬롯 도킹은 마우스 경로만 만든다(PRD 4.3 Q10 · R16 · R17 · AC10). 적용 서비스 `apply::dock_tab` 은 남아 명령이 그 위에 선다(TRD 7판 §3-6 — 옛 5판 §3). 그 사이 LLM 은 탭을 도킹할 수 없다.
 - **사용자 기준:** 「LLM 시나리오는 여러 번 거치지 않아야 실수가 적다」.
-- **근거:** `process/S21-slot-docking/prd.md` Q10 · `process/S21-slot-docking/trd.md` §3-6(7판 — LLM 경로 · 끄는 중 LLM 이 같은 탭을 옮긴 뒤의 놓기 · 예열 창) · §9-5(PRD 에 아직 없는 그 놓기 결과 — U7 대조) · 메모 `.claude/handoff/attachments/llm-layout-surface-notes-2026-10-16.md`
+- **근거:** `process/S21-slot-docking/prd.md` Q10 · `process/S21-slot-docking/trd.md` §3-6(7판 — LLM 경로 · 끄는 중 LLM 이 같은 탭을 옮긴 뒤의 놓기 · 예열 창) · §9-5(그 놓기 결과 — U7 대조 · 2026-10-23 사용자 결정으로 PRD R13c 에 ADR-0297 결정 2 를 적었다 · 우리 웹뷰 밖에서 뗀 경우의 예외는 여전히 TRD 에만) · 메모 `.claude/handoff/attachments/llm-layout-surface-notes-2026-10-16.md`
 
 ### T-49. 꺼진 에이전트의 슬롯 쪽 활성화 · 완전한 이어받기 — 지금은 트리에서만 켠다
 - **상태:** 보류 — 저장 시스템(`v0.3.3/feat/storage`)을 마친 뒤 사용자에게 올린다(사용자 결정 2026-10-06 — 「저장 시스템 다 하고 언급하면 될듯」).
