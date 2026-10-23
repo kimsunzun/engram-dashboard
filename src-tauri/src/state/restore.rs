@@ -1711,7 +1711,7 @@ mod tests {
         }
     }
 
-    /// 알림 — 첫 알림 순간에 레이아웃 락이 비었는지 적는다. `order` = 알림 · 묶음 끝이 온 차례.
+    /// 알림 — 첫 알림 순간에 레이아웃 락이 비었는지 적는다. `order` = 알림이 온 차례.
     struct FakeEvents {
         layout: LayoutState,
         layouts: Mutex<Vec<Uuid>>,
@@ -1742,10 +1742,6 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((tabs.label.clone(), tabs.version));
-        }
-
-        fn settled(&self) {
-            self.note("settled");
         }
     }
 
@@ -2031,8 +2027,8 @@ mod tests {
         );
         assert_eq!(
             *rig.events.order.lock().unwrap(),
-            ["layout", "layout", "tabs", "tabs", "settled"],
-            "묶음 끝은 알림을 다 낸 뒤 한 번"
+            ["layout", "layout", "tabs", "tabs"],
+            "레이아웃 알림 → 탭 알림"
         );
 
         assert_eq!(rig.service.status().crash_copy, CrashCopyStatus::Answered);
@@ -2361,7 +2357,7 @@ mod tests {
         assert!(rig.events.tabs.lock().unwrap().is_empty());
         assert!(
             rig.events.order.lock().unwrap().is_empty(),
-            "알리지 않은 실패는 묶음 끝도 없다"
+            "알리지 않은 실패는 알림도 없다"
         );
         assert_eq!(rig.service.status().crash_copy, CrashCopyStatus::Awaiting);
         assert_eq!(

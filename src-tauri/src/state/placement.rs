@@ -754,7 +754,7 @@ fn show_maximized(window: &Window) -> Result<(), String> {
         width: i32::try_from(size.width).map_err(|e| e.to_string())?,
         height: i32::try_from(size.height).map_err(|e| e.to_string())?,
     };
-    engram_dashboard_platform::window::restore_placement(window, normal, true, None, true)
+    engram_dashboard_platform::window::restore_placement(window, normal, true, true)
         .map_err(|e| e.to_string())
 }
 

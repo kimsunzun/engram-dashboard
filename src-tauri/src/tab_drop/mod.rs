@@ -768,11 +768,6 @@ mod tests {
             self.outside("window_tabs_updated");
             self.note(format!("tabs:{}", tabs.label));
         }
-
-        fn settled(&self) {
-            self.outside("settled");
-            self.note("settled".into());
-        }
     }
 
     impl WindowHost for Rig {
@@ -1309,9 +1304,12 @@ mod tests {
             Some("done:Applied"),
             "{log:?}"
         );
-        let settled = log.iter().position(|s| s == "settled").expect("묶음 끝");
+        let notified = log
+            .iter()
+            .rposition(|s| s == "layout" || s.starts_with("tabs:"))
+            .expect("모델 알림");
         let focus = log.iter().position(|s| s == "focus:main").expect("포커스");
-        assert!(settled < focus, "모델 알림 → 포커스 → done: {log:?}");
+        assert!(notified < focus, "모델 알림 → 포커스 → done: {log:?}");
         assert_eq!(log.iter().filter(|s| s.starts_with("done:")).count(), 1);
 
         assert_eq!(
@@ -1645,10 +1643,14 @@ mod tests {
         );
         let log = prewarmed.take_log();
         let at = |entry: &str| log.iter().position(|s| s == entry).expect(entry);
+        let notified = log
+            .iter()
+            .rposition(|s| s == "layout" || s.starts_with("tabs:"))
+            .expect("모델 알림");
         assert!(
             at("claim:slot-popup-9") < at("open:slot-popup-9")
-                && at("open:slot-popup-9") < at("settled")
-                && at("settled") < at("committed:slot-popup-9"),
+                && at("open:slot-popup-9") < notified
+                && notified < at("committed:slot-popup-9"),
             "맡기기 → 열기 → 알림 → 확정: {log:?}"
         );
 

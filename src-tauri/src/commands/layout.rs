@@ -70,9 +70,6 @@ impl LayoutEvents for TauriEvents<'_> {
     fn window_tabs_updated(&self, tabs: &WindowTabsPayload) {
         emit_window_tabs(self.app, tabs);
     }
-
-    // 묶음 끝을 받을 운영 소비자가 지금 없다 — 빈 몸은 의도이고, 포트는 다음 소비자를 위해 남긴다.
-    fn settled(&self) {}
 }
 
 pub(crate) struct RouterSubs<'a> {
@@ -138,10 +135,6 @@ impl LayoutEvents for OwnedEvents {
 
     fn window_tabs_updated(&self, tabs: &WindowTabsPayload) {
         TauriEvents { app: &self.app }.window_tabs_updated(tabs);
-    }
-
-    fn settled(&self) {
-        TauriEvents { app: &self.app }.settled();
     }
 }
 

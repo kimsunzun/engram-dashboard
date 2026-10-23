@@ -5344,7 +5344,6 @@ struct NoLayoutEvents;
 impl LayoutEvents for NoLayoutEvents {
     fn layout_updated(&self, _snapshot: &ViewSnapshot) {}
     fn window_tabs_updated(&self, _tabs: &WindowTabsPayload) {}
-    fn settled(&self) {}
 }
 
 struct NoWindows;
