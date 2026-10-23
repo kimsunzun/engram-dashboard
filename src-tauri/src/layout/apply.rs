@@ -93,13 +93,6 @@ pub trait SubscriptionSync: Send + Sync {
 pub trait LayoutEvents: Send + Sync {
     fn layout_updated(&self, snapshot: &ViewSnapshot);
     fn window_tabs_updated(&self, tabs: &WindowTabsPayload);
-    /// 쓰기 하나의 알림 묶음 끝 — 그 쓰기가 낼 알림을 다 낸 뒤 정확히 한 번 불린다([`announce`]). 알린 것이 없는
-    /// 쓰기(실패 · 무변경 결말)에는 불리지 않는다. 알림 하나마다가 아니라 묶음 끝이라, 받는 쪽은 그 쓰기의 알림이
-    /// 다 나간 뒤의 레이아웃을 본다. ★운영 소비자는 지금 없다★ — 운영 구현(`TauriEvents`)은 아무것도 하지 않고, 이
-    /// 계약을 재는 것은 시험 이중뿐이다.
-    /// ★기본 본문을 두지 않는다★ — 두면 넘기기 어댑터가 빈 몸을 물려받아, 소비자가 다시 붙어도 계기가 말없이 끊긴다.
-    // TRD S21-slot-docking 5.8판 §1-2 「적용 서비스」(알림 묶음 끝)
-    fn settled(&self);
 }
 
 /// 창 포트가 창을 놓을 자리 — 도킹의 새 창 · 옮길 창(TRD S21-slot-docking §3-3 · §3-5).
@@ -249,26 +242,18 @@ fn notify(
     announce(events, layout.as_ref(), tabs.as_ref());
 }
 
-/// 쓰기 하나의 알림 묶음을 낸다 — 레이아웃 스냅숏들 → 창 탭 목록들, 낸 것이 있으면 끝에서
-/// [`LayoutEvents::settled`] 를 한 번. 낼 것이 없으면(무변경 결말) 끝도 내지 않는다. ★락을 놓은 뒤에만 부른다★
-/// (「락 규율」). 알리는 쓰기는 전부 여기를 지난다 — 복원 수락(`state::restore`)도.
-// TRD S21-slot-docking 5.8판 §1-2 「적용 서비스」(알림 묶음 끝)
+/// 쓰기 하나의 알림 묶음을 낸다 — 레이아웃 스냅숏들 → 창 탭 목록들. ★락을 놓은 뒤에만 부른다★(「락 규율」). 알리는
+/// 쓰기는 전부 여기를 지난다 — 복원 수락(`state::restore`)도.
 pub(crate) fn announce<'a>(
     events: &dyn LayoutEvents,
     layouts: impl IntoIterator<Item = &'a ViewSnapshot>,
     tabs: impl IntoIterator<Item = &'a WindowTabsPayload>,
 ) {
-    let mut sent = false;
     for snapshot in layouts {
         events.layout_updated(snapshot);
-        sent = true;
     }
     for payload in tabs {
         events.window_tabs_updated(payload);
-        sent = true;
-    }
-    if sent {
-        events.settled();
     }
 }
 
@@ -1026,10 +1011,8 @@ pub struct DockOutcome {
     pub window: WindowLabel,
     /// 옮긴 탭의 슬롯 id(트리 전위 순) — 옮겨도 id 는 그대로다.
     pub slot_ids: Vec<Uuid>,
-    /// 비어 모델에서 지운 출처 팝아웃.
+    /// 비어 모델에서 지우고 그 OS 창도 닫은 출처 팝아웃. 창을 옮겨 쓴 길(재사용)은 `None` 이다.
     pub emptied: Option<WindowLabel>,
-    /// 비어서 OS 창을 닫은 출처 팝아웃. 늘 `emptied` 와 같다 — 비어 지운 팝아웃은 언제나 닫고, 창을 옮겨 쓴 길은 둘 다 `None` 이다.
-    pub closed_window: Option<WindowLabel>,
     /// main 의 마지막 탭이 떠나 main 에 새로 세운 빈 탭.
     pub main_refilled: Option<ViewId>,
     /// 새 창 없이 출처 창을 옮겼다 — 모델은 그대로다(`version` 불변 · 알림 없음).
@@ -1039,7 +1022,7 @@ pub struct DockOutcome {
     pub prewarmed: bool,
 }
 
-/// 탭 `req.view` 를 `req.to` 로 옮긴다. `Err` 면 모델이 그대로이고 알림도 묶음 끝도 없다 — 그사이 연 새 창은
+/// 탭 `req.view` 를 `req.to` 로 옮긴다. `Err` 면 모델이 그대로이고 알림도 없다 — 그사이 연 새 창은
 /// 거둔다. 판정 · 적용 규칙의 정본은 [`ViewManager::dock`] · [`ViewManager::plan_new_window`].
 ///
 /// - `Seam` · `TabBar` — 락 한 번에 바꾸고, 락 밖에서 알린 뒤 비어 지운 출처 팝아웃의 창을 닫는다.
@@ -1109,7 +1092,6 @@ pub fn dock_tab(
             view = %view,
             mode = if out.reused { "reuse" } else { mode },
             window = %out.window,
-            closed_window = out.closed_window.as_deref(),
             emptied = out.emptied.as_deref(),
             reused = out.reused,
             main_refilled = out.main_refilled.is_some(),
@@ -1200,15 +1182,13 @@ fn finish_docked(
     news: &DockNews,
 ) -> DockOutcome {
     announce(events, &news.layouts, &news.tabs);
-    let closed_window = docked.emptied.as_ref().map(|emptied| {
+    if let Some(emptied) = &docked.emptied {
         host.close(emptied);
-        emptied.clone()
-    });
+    }
     DockOutcome {
         window: docked.window,
         slot_ids: docked.slot_ids,
         emptied: docked.emptied,
-        closed_window,
         main_refilled: docked.main_refilled,
         reused: false,
         prewarmed: false,
@@ -1364,7 +1344,6 @@ fn reuse_source_window(
             window: label,
             slot_ids,
             emptied: None,
-            closed_window: None,
             main_refilled: None,
             reused: true,
             prewarmed: false,

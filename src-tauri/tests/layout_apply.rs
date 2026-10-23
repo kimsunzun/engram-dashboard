@@ -87,7 +87,7 @@ impl Probe {
 
 /// 창 포트와 알림 포트를 가로지른 차례 — 둘이 한 기록을 나눠 쓴다(TRD S21-slot-docking §8-1 ⑬ 자리별 차례). 창 포트 =
 /// `"open:<label>"` · `"open_at:<label>"` · `"close:<label>"` · `"place:<label>"` · 예열 창 셋 `"claim:<label>"`(맡겼을
-/// 때만) · `"committed:<label>"` · `"release:<label>"`, 알림 = `"layout"` · `"tabs:<label>"` · `"settled"`.
+/// 때만) · `"committed:<label>"` · `"release:<label>"`, 알림 = `"layout"` · `"tabs:<label>"`.
 #[derive(Clone, Default)]
 struct Journal(Arc<Mutex<Vec<String>>>);
 
@@ -106,11 +106,11 @@ struct Recorder {
     probe: Probe,
     layout: Mutex<Vec<ViewSnapshot>>,
     tabs: Mutex<Vec<WindowTabsPayload>>,
-    /// 알림 · 묶음 끝이 온 차례 — `"layout"` · `"tabs"` · `"settled"`.
+    /// 알림이 온 차례 — `"layout"` · `"tabs"`.
     order: Mutex<Vec<&'static str>>,
     journal: Journal,
-    /// 묶음 끝에서 락 밖으로 한 번 — 새 창 항목이 모델에 든 뒤 · 확정 전에 다른 경로가 모델을 바꾼 상태를 세운다.
-    on_settled: Mutex<Option<DuringOpen>>,
+    /// 첫 탭 알림에서 락 밖으로 한 번 — 새 창 항목이 모델에 든 뒤 · 확정 전에 다른 경로가 모델을 바꾼 상태를 세운다.
+    on_tabs: Mutex<Option<DuringOpen>>,
 }
 
 impl Recorder {
@@ -121,7 +121,7 @@ impl Recorder {
             tabs: Mutex::new(Vec::new()),
             order: Mutex::new(Vec::new()),
             journal,
-            on_settled: Mutex::new(None),
+            on_tabs: Mutex::new(None),
         }
     }
 
@@ -145,13 +145,7 @@ impl LayoutEvents for Recorder {
         self.tabs.lock().unwrap().push(tabs.clone());
         self.order.lock().unwrap().push("tabs");
         self.journal.note(format!("tabs:{}", tabs.label));
-    }
-
-    fn settled(&self) {
-        self.probe.assert_outside("LayoutEvents::settled");
-        self.order.lock().unwrap().push("settled");
-        self.journal.note("settled".to_string());
-        if let Some(hook) = self.on_settled.lock().unwrap().take() {
+        if let Some(hook) = self.on_tabs.lock().unwrap().take() {
             hook(&self.probe.0);
         }
     }
@@ -919,7 +913,7 @@ fn switch_tab_if_switches_when_active_matches() {
     assert_eq!(w.main_active(), first);
     assert_eq!(w.last_tabs().active, first, "탭 알림이 활성 탭을 나른다");
     assert_eq!(w.resyncs(), resyncs + 1);
-    assert_one_batch(&w, "switch_tab_if");
+    assert_notified(&w, "switch_tab_if");
 }
 
 // 되돌리기가 닿기 전에 사용자 · LLM 이 다른 탭을 골랐다 — 그 선택을 덮지 않고 아무것도 안 건드린다.
@@ -955,7 +949,7 @@ fn switch_tab_if_mismatch_is_noop_without_notification() {
         (resyncs, layouts, tabs),
         "재동기 · 알림 없음"
     );
-    assert!(w.ev.take_order().is_empty(), "묶음 끝도 없음");
+    assert!(w.ev.take_order().is_empty(), "알림도 없음");
 }
 
 #[test]
@@ -1515,7 +1509,6 @@ fn move_slot_to_window_into_a_new_window_records_the_placement_after_the_notific
             "layout".to_string(),
             format!("tabs:{MAIN_WINDOW_LABEL}"),
             format!("tabs:{label}"),
-            "settled".to_string(),
             format!("place:{label}"),
         ]
     );
@@ -1553,7 +1546,6 @@ fn move_slot_to_window_opens_the_prewarmed_window_and_commits_after_the_notifica
             "layout".to_string(),
             format!("tabs:{MAIN_WINDOW_LABEL}"),
             format!("tabs:{spare}"),
-            "settled".to_string(),
             format!("committed:{spare}"),
             format!("place:{spare}"),
         ]
@@ -1655,7 +1647,7 @@ fn move_slot_to_window_refused_at_the_attach_gives_the_prewarmed_window_back() {
     );
 }
 
-// 알린 뒤 · 확정 전에 그 창이 모델에서 빠져도 확정은 맡김표를 그대로 넘긴다 — 그 창을 닫는 것은 창 포트 몫이다(TRD
+// 알리는 사이(첫 탭 알림) · 확정 전에 그 창이 모델에서 빠져도 확정은 맡김표를 그대로 넘긴다 — 그 창을 닫는 것은 창 포트 몫이다(TRD
 //   §3-9 「자리별 차례」 · I27 · I31).
 #[test]
 fn move_slot_to_window_commits_the_claim_even_if_the_window_left_the_model_before_it() {
@@ -1663,7 +1655,7 @@ fn move_slot_to_window_commits_the_claim_even_if_the_window_left_the_model_befor
     let (view, slot, _) = w.view_with_filled_slot();
     let spare = w.prewarm();
     let gone = spare.clone();
-    *w.ev.on_settled.lock().unwrap() = Some(Box::new(move |state: &LayoutState| {
+    *w.ev.on_tabs.lock().unwrap() = Some(Box::new(move |state: &LayoutState| {
         state.0.lock().unwrap().close_window(&gone).unwrap();
     }));
     w.host.vanished.lock().unwrap().push(spare.clone());
@@ -1676,12 +1668,8 @@ fn move_slot_to_window_commits_the_claim_even_if_the_window_left_the_model_befor
 
     let journal = w.journal.take();
     assert_eq!(
-        journal[journal.len() - 3..],
-        [
-            "settled".to_string(),
-            format!("committed:{spare}"),
-            format!("place:{spare}"),
-        ]
+        journal[journal.len() - 2..],
+        [format!("committed:{spare}"), format!("place:{spare}")]
     );
     assert!(!w.window_exists(&spare));
     assert!(
@@ -2404,10 +2392,6 @@ impl LayoutEvents for Meddler {
     fn window_tabs_updated(&self, tabs: &WindowTabsPayload) {
         self.inner.window_tabs_updated(tabs);
     }
-
-    fn settled(&self) {
-        self.inner.settled();
-    }
 }
 
 #[test]
@@ -2436,40 +2420,32 @@ fn set_split_ratio_returns_the_notified_snapshots_version_not_a_later_one() {
     );
 }
 
-// ── 알림 묶음 끝(`LayoutEvents::settled` — TRD S21-slot-docking 5.8판 §1-2 「적용 서비스」) ──
-
-// 쓰기 하나가 낸 차례 — 알림이 하나 이상이고 묶음 끝은 그 뒤에 정확히 한 번(맨 끝).
-fn assert_one_batch(w: &World, write: &str) {
-    let order = w.ev.take_order();
-    let (last, notes) = order.split_last().expect("알림이 있어야 한다");
-    assert_eq!(*last, "settled", "{write}: 묶음 끝은 알림 뒤 — {order:?}");
-    assert!(
-        !notes.is_empty() && !notes.contains(&"settled"),
-        "{write}: 알림 하나 이상 · 묶음 끝 한 번 — {order:?}"
-    );
+// 쓰기 하나가 알림을 하나 이상 냈다 — 그 차례를 비운다.
+fn assert_notified(w: &World, write: &str) {
+    assert!(!w.ev.take_order().is_empty(), "{write}: 알림이 있어야 한다");
 }
 
 #[tokio::test]
-async fn every_notifying_write_ends_its_notifications_with_one_settled() {
+async fn every_notifying_write_notifies() {
     let w = World::new();
     let main = w.main_active();
     let slot = w.empty_slot(main);
 
     let tab = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
-    assert_one_batch(&w, "create_tab");
+    assert_notified(&w, "create_tab");
     apply::switch_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, main).unwrap();
-    assert_one_batch(&w, "switch_tab");
+    assert_notified(&w, "switch_tab");
     let added =
         apply::split_slot(&w.state, &w.subs, &w.ev, main, slot, SplitDir::LeftRight).unwrap();
-    assert_one_batch(&w, "split_slot");
+    assert_notified(&w, "split_slot");
     apply::focus_slot(&w.state, &w.ev, main, added).unwrap();
-    assert_one_batch(&w, "focus_slot");
+    assert_notified(&w, "focus_slot");
     let split = w.snapshot(main).split_rects[0].split_id;
     let ratio = apply::set_split_ratio(&w.state, &w.ev, main, split, 0.3).unwrap();
     assert_eq!(ratio.outcome, SplitRatioOutcome::Applied);
-    assert_one_batch(&w, "set_split_ratio");
+    assert_notified(&w, "set_split_ratio");
     apply::rename_tab(&w.state, &w.ev, main, "이름".to_string()).unwrap();
-    assert_one_batch(&w, "rename_tab");
+    assert_notified(&w, "rename_tab");
     apply::assign_agent(
         &w.state,
         &w.subs,
@@ -2479,7 +2455,7 @@ async fn every_notifying_write_ends_its_notifications_with_one_settled() {
         Uuid::new_v4().to_string(),
     )
     .unwrap();
-    assert_one_batch(&w, "assign_agent");
+    assert_notified(&w, "assign_agent");
     apply::set_slot_content(
         &w.state,
         &w.subs,
@@ -2489,18 +2465,18 @@ async fn every_notifying_write_ends_its_notifications_with_one_settled() {
         SlotContent::AgentList,
     )
     .unwrap();
-    assert_one_batch(&w, "set_slot_content");
+    assert_notified(&w, "set_slot_content");
     apply::set_usage_slot(&w.state, &w.subs, &w.ev, main, added, Some(false), None).unwrap();
-    assert_one_batch(&w, "set_usage_slot");
+    assert_notified(&w, "set_usage_slot");
     apply::close_slot(&w.state, &w.subs, &w.ev, main, added).unwrap();
-    assert_one_batch(&w, "close_slot");
+    assert_notified(&w, "close_slot");
     apply::close_tab(&w.state, &w.subs, &w.ev, &w.host, MAIN_WINDOW_LABEL, tab).unwrap();
-    assert_one_batch(&w, "close_tab");
+    assert_notified(&w, "close_tab");
     apply::move_slot_to_window(
         &w.state, &w.subs, &w.ev, &w.host, &w.labels, main, slot, None,
     )
     .unwrap();
-    assert_one_batch(&w, "move_slot_to_window");
+    assert_notified(&w, "move_slot_to_window");
     let spawner = Spawner::ok(&w.state, Uuid::new_v4());
     apply::spawn_into(
         &w.state,
@@ -2515,11 +2491,11 @@ async fn every_notifying_write_ends_its_notifications_with_one_settled() {
     )
     .await
     .unwrap();
-    assert_one_batch(&w, "spawn_into");
+    assert_notified(&w, "spawn_into");
 }
 
 #[test]
-fn writes_that_notify_nothing_never_settle() {
+fn writes_that_change_nothing_notify_nothing() {
     let w = World::new();
     let (view, split) = w.split_view();
     let label = w.popup();
@@ -2809,7 +2785,7 @@ fn bounds(x: f64, y: f64, w: f64, h: f64) -> Option<WindowBounds> {
     WindowBounds::new(x, y, w, h)
 }
 
-// 알림마다 창이 아직 안 닫혔나 본다 — 빈 출처 팝아웃 닫기가 알림 묶음(끝 포함) 뒤인지 재는 눈.
+// 알림마다 창이 아직 안 닫혔나 본다 — 빈 출처 팝아웃 닫기가 알림 묶음 뒤인지 재는 눈.
 struct ClosesAfter<'a> {
     inner: &'a Recorder,
     host: &'a Host,
@@ -2833,11 +2809,6 @@ impl LayoutEvents for ClosesAfter<'_> {
     fn window_tabs_updated(&self, tabs: &WindowTabsPayload) {
         self.not_closed_yet();
         self.inner.window_tabs_updated(tabs);
-    }
-
-    fn settled(&self) {
-        self.not_closed_yet();
-        self.inner.settled();
     }
 }
 
@@ -3008,7 +2979,6 @@ fn dock_tab_seam_moves_the_tab_under_one_lock_and_notifies_after_it() {
             window: MAIN_WINDOW_LABEL.to_string(),
             slot_ids: vec![slot],
             emptied: None,
-            closed_window: None,
             main_refilled: None,
             reused: false,
             prewarmed: false,
@@ -3031,7 +3001,7 @@ fn dock_tab_seam_moves_the_tab_under_one_lock_and_notifies_after_it() {
     assert_eq!(w.notified_windows(), [MAIN_WINDOW_LABEL, label.as_str()]);
     assert_eq!(w.notified_tabs_of(&label).active, tabs[0]);
     w.assert_notified_at_current_version();
-    assert_one_batch(&w, "dock_tab(seam)");
+    assert_notified(&w, "dock_tab(seam)");
     assert!(w.host.closed.lock().unwrap().is_empty());
     assert_invariants(&w);
 }
@@ -3061,7 +3031,7 @@ fn dock_tab_tab_bar_moves_the_tab_and_notifies_both_windows() {
     w.assert_spare_not_asked(&spare, asked);
     assert!(!out.prewarmed);
     assert_eq!(out.window, MAIN_WINDOW_LABEL);
-    assert_eq!(out.closed_window, None);
+    assert_eq!(out.emptied, None);
     assert_eq!(w.resyncs(), resyncs + 1);
     assert_eq!(w.tabs_of(MAIN_WINDOW_LABEL), [source, main_tab]);
     assert_eq!(w.owner(source).as_deref(), Some(MAIN_WINDOW_LABEL));
@@ -3074,7 +3044,7 @@ fn dock_tab_tab_bar_moves_the_tab_and_notifies_both_windows() {
     assert_eq!(w.notified_tabs_of(&label).active, tabs[0]);
     assert_eq!(w.notified_views(), [source, tabs[0]]);
     w.assert_notified_at_current_version();
-    assert_one_batch(&w, "dock_tab(tab_bar)");
+    assert_notified(&w, "dock_tab(tab_bar)");
     assert_invariants(&w);
 }
 
@@ -3104,7 +3074,6 @@ fn dock_tab_closes_an_emptied_source_popout_once_after_its_notifications() {
         )
         .unwrap();
 
-    assert_eq!(out.closed_window.as_deref(), Some(label.as_str()));
     assert_eq!(
         out.emptied,
         Some(label.clone()),
@@ -3117,7 +3086,7 @@ fn dock_tab_closes_an_emptied_source_popout_once_after_its_notifications() {
         [MAIN_WINDOW_LABEL],
         "지운 창의 탭 목록은 없다"
     );
-    assert_one_batch(&w, "dock_tab(빈 출처)");
+    assert_notified(&w, "dock_tab(빈 출처)");
     assert_invariants(&w);
 }
 
@@ -3162,7 +3131,7 @@ fn dock_tab_refusals_change_nothing_and_notify_nothing() {
 
     assert_eq!(w.version(), version);
     assert_eq!(w.resyncs(), resyncs, "실패 = 재동기 없음");
-    assert_eq!(w.ev.take_order(), Vec::<&str>::new(), "알림 · 묶음 끝 0");
+    assert_eq!(w.ev.take_order(), Vec::<&str>::new(), "알림 0");
     assert!(
         w.host.opened_at.lock().unwrap().is_empty(),
         "새 창도 안 연다"
@@ -3234,7 +3203,7 @@ fn dock_tab_of_mains_last_tab_announces_the_fresh_empty_tab() {
             "빈 탭의 배치도 싣는다 — 탭 id 만 받으면 그릴 배치가 없다"
         );
         w.assert_notified_at_current_version();
-        assert_one_batch(&w, "dock_tab(main 마지막 탭)");
+        assert_notified(&w, "dock_tab(main 마지막 탭)");
         assert_invariants(&w);
     }
 }
@@ -3282,7 +3251,7 @@ fn dock_tab_hands_the_source_window_to_the_given_successor() {
             w.notified_views().contains(&tabs[want]),
             "{pick:?}: 새 활성의 배치도 싣는다"
         );
-        assert_one_batch(&w, "dock_tab(다음 활성)");
+        assert_notified(&w, "dock_tab(다음 활성)");
         assert_invariants(&w);
     }
 }
@@ -3355,7 +3324,7 @@ fn dock_tab_new_window_opens_then_attaches_and_records_the_placement() {
     let label = out.window.clone();
     assert!(!out.reused);
     assert!(!out.prewarmed);
-    assert_eq!(out.closed_window, None);
+    assert_eq!(out.emptied, None);
     assert_eq!(
         &*w.host.opened_at.lock().unwrap(),
         &[(label.clone(), AT, true)],
@@ -3377,12 +3346,11 @@ fn dock_tab_new_window_opens_then_attaches_and_records_the_placement() {
             "layout".to_string(),
             format!("tabs:{label}"),
             format!("tabs:{MAIN_WINDOW_LABEL}"),
-            "settled".to_string(),
             format!("place:{label}"),
         ]
     );
     w.assert_notified_at_current_version();
-    assert_one_batch(&w, "dock_tab(새 창)");
+    assert_notified(&w, "dock_tab(새 창)");
     assert_invariants(&w);
 }
 
@@ -3539,7 +3507,6 @@ fn dock_tab_new_window_opens_the_prewarmed_window_and_commits_after_the_notifica
             "layout".to_string(),
             format!("tabs:{spare}"),
             format!("tabs:{MAIN_WINDOW_LABEL}"),
-            "settled".to_string(),
             format!("committed:{spare}"),
             format!("place:{spare}"),
         ]
@@ -3617,14 +3584,14 @@ fn dock_tab_new_window_refused_at_the_attach_gives_the_prewarmed_window_back() {
     assert_invariants(&w);
 }
 
-// 알린 뒤 · 확정 전에 그 창이 모델에서 빠져도 확정은 맡김표를 그대로 넘긴다(TRD §3-9 · I27 · I31).
+// 알리는 사이(첫 탭 알림) · 확정 전에 그 창이 모델에서 빠져도 확정은 맡김표를 그대로 넘긴다(TRD §3-9 · I27 · I31).
 #[test]
 fn dock_tab_new_window_commits_the_claim_even_if_the_window_left_the_model_before_it() {
     let w = World::new();
     let source = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
     let spare = w.prewarm();
     let gone = spare.clone();
-    *w.ev.on_settled.lock().unwrap() = Some(Box::new(move |state: &LayoutState| {
+    *w.ev.on_tabs.lock().unwrap() = Some(Box::new(move |state: &LayoutState| {
         state.0.lock().unwrap().close_window(&gone).unwrap();
     }));
     w.host.vanished.lock().unwrap().push(spare.clone());
@@ -3637,12 +3604,8 @@ fn dock_tab_new_window_commits_the_claim_even_if_the_window_left_the_model_befor
     assert!(out.prewarmed);
     let journal = w.journal.take();
     assert_eq!(
-        journal[journal.len() - 3..],
-        [
-            "settled".to_string(),
-            format!("committed:{spare}"),
-            format!("place:{spare}"),
-        ]
+        journal[journal.len() - 2..],
+        [format!("committed:{spare}"), format!("place:{spare}")]
     );
     assert!(!w.window_exists(&spare));
     assert!(
@@ -3684,7 +3647,6 @@ fn dock_tab_reuse_moves_the_source_window_once_and_keeps_the_model() {
             window: label.clone(),
             slot_ids: vec![slot],
             emptied: None,
-            closed_window: None,
             main_refilled: None,
             reused: true,
             prewarmed: false,
@@ -3725,7 +3687,7 @@ fn dock_tab_a_lone_popout_without_a_normal_place_is_reused_too() {
 
     assert!(out.reused);
     assert_eq!(out.window, label);
-    assert_eq!(out.closed_window, None);
+    assert_eq!(out.emptied, None);
     assert_eq!(&*w.host.moves.lock().unwrap(), &[(label.clone(), AT)]);
     assert!(w.host.opened_at.lock().unwrap().is_empty(), "새 창 없음");
     assert!(w.host.closed.lock().unwrap().is_empty());

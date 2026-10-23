@@ -695,7 +695,6 @@ mod close_request_tests {
     impl LayoutEvents for NoEvents {
         fn layout_updated(&self, _snapshot: &ViewSnapshot) {}
         fn window_tabs_updated(&self, _tabs: &WindowTabsPayload) {}
-        fn settled(&self) {}
     }
 
     struct Rig {

@@ -206,8 +206,7 @@ pub fn describe_window(w: NativeWindow) -> Option<WindowFacts> {
     }
 }
 
-/// 보통 자리 `normal`(★화면 좌표★)과 최대화를 되돌리고(`SetWindowPlacement`), `after` 가 있으면 그 창 바로
-/// 아래로 둔다(TRD S21-slot-docking §5-1).
+/// 보통 자리 `normal`(★화면 좌표★)과 최대화를 되돌린다(`SetWindowPlacement` · TRD S21-slot-docking §5-1).
 ///
 /// - 좌표계 — `WINDOWPLACEMENT` 의 보통 자리는 `WS_EX_TOOLWINDOW` 가 없는 최상위 창이면 작업 공간 좌표(그 모니터
 ///   작업 영역의 왼쪽 위가 0 — 작업 표시줄이 위 · 왼쪽에 있으면 그만큼 밀린다)이고 있으면 화면 좌표다(MS
@@ -224,16 +223,15 @@ pub fn restore_placement(
     w: &impl HasWindowHandle,
     normal: PhysRect,
     maximized: bool,
-    after: Option<NativeWindow>,
     activate: bool,
 ) -> Result<(), WindowError> {
     #[cfg(windows)]
     {
-        win::restore_placement(win::hwnd_of(w)?, normal, maximized, after, activate)
+        win::restore_placement(win::hwnd_of(w)?, normal, maximized, activate)
     }
     #[cfg(not(windows))]
     {
-        let _ = (w, normal, maximized, after, activate);
+        let _ = (w, normal, maximized, activate);
         Err(WindowError::Unsupported)
     }
 }
@@ -445,7 +443,6 @@ mod win {
         hwnd: HWND,
         normal: PhysRect,
         maximized: bool,
-        after: Option<NativeWindow>,
         activate: bool,
     ) -> Result<(), WindowError> {
         let tool = ex_style(hwnd)? & WS_EX_TOOLWINDOW.0 != 0;
@@ -484,21 +481,6 @@ mod win {
         wp.showCmd = show.0 as u32;
         // SAFETY: 위와 같다.
         unsafe { SetWindowPlacement(hwnd, &wp) }.map_err(|e| os("SetWindowPlacement", e))?;
-        if let Some(after) = after {
-            // SAFETY: 살아 있는 창 핸들과 값 인자. 기준 창이 사라졌으면 OS 가 실패를 돌려준다.
-            unsafe {
-                SetWindowPos(
-                    hwnd,
-                    HWND(after.0 as *mut c_void),
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                )
-            }
-            .map_err(|e| os("SetWindowPos", e))?;
-        }
         Ok(())
     }
 
@@ -946,7 +928,7 @@ mod tests {
                 Err(WindowError::NoWindow)
             ));
             assert!(matches!(
-                restore_placement(&gone, PhysRect::default(), false, None, false),
+                restore_placement(&gone, PhysRect::default(), false, false),
                 Err(WindowError::NoWindow)
             ));
         }
@@ -1168,7 +1150,7 @@ mod tests {
                 width: 400,
                 height: 300,
             };
-            restore_placement(&w, normal, false, None, false).unwrap();
+            restore_placement(&w, normal, false, false).unwrap();
             assert!(visible(&w));
             assert_eq!(w.outer(), normal);
             hide(&w);
