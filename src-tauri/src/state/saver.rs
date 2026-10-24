@@ -883,6 +883,7 @@ mod tests {
             };
             Ok(vec![WindowEntry {
                 id,
+                number: Some(2),
                 kind: WindowKind::Popout(TabStrip {
                     active_tab: uuid::Uuid::nil(),
                     tabs: Vec::new(),

@@ -78,6 +78,7 @@ fn tabbed_entry(
         canvas: _,
         metrics: _,
         window_id,
+        number,
         attrs,
         placement_memo: _,
     } = window;
@@ -88,6 +89,7 @@ fn tabbed_entry(
         .collect();
     window_entry(
         window_id.clone(),
+        *number,
         kind(TabStrip {
             active_tab: *active,
             tabs,
@@ -96,7 +98,7 @@ fn tabbed_entry(
     )
 }
 
-fn window_entry(id: String, kind: WindowKind, attrs: WindowAttrs) -> WindowEntry {
+fn window_entry(id: String, number: u32, kind: WindowKind, attrs: WindowAttrs) -> WindowEntry {
     let WindowAttrs {
         theme,
         bounds,
@@ -104,6 +106,7 @@ fn window_entry(id: String, kind: WindowKind, attrs: WindowAttrs) -> WindowEntry
     } = attrs;
     WindowEntry {
         id,
+        number: Some(number),
         kind,
         theme,
         bounds: bounds.map(|bounds| Bounds {
@@ -243,6 +246,13 @@ pub enum RestoreWarning {
         slot: Uuid,
         kind: Option<String>,
     },
+    /// 팝아웃이 저장 번호를 못 받았다 — 없거나 못 쓰는 값(`saved` = `None`) · main 의 1 · 앞 창과 겹침. 빈 가장 작은
+    /// 번호 `given` 을 준다(TRD S26-window-chrome §3-4 · D3).
+    NumberReassigned {
+        window_id: String,
+        saved: Option<u32>,
+        given: u32,
+    },
     /// 고친 입력으로도 모델을 못 세웠다 — 이 모듈의 결함이다. 기본 화면으로 시작한다.
     Internal(String),
 }
@@ -305,6 +315,17 @@ impl fmt::Display for RestoreWarning {
                 "창 {window_id} 의 탭 {view} 슬롯 {slot} — 이 판이 모르는 내용({}) 을 그대로 쥔다",
                 kind.as_deref().unwrap_or("종류 없음")
             ),
+            RestoreWarning::NumberReassigned {
+                window_id,
+                saved,
+                given,
+            } => match saved {
+                Some(saved) => write!(
+                    f,
+                    "팝아웃 {window_id} 의 번호 {saved} 를 쓸 수 없다 — {given} 을 준다"
+                ),
+                None => write!(f, "팝아웃 {window_id} 에 번호가 없다 — {given} 을 준다"),
+            },
             RestoreWarning::Internal(reason) => {
                 write!(
                     f,
@@ -367,6 +388,7 @@ impl Restorer {
     fn window(&mut self, entry: WindowEntry, labels: &dyn LabelSource) {
         let WindowEntry {
             id,
+            number,
             kind,
             theme,
             bounds,
@@ -382,7 +404,7 @@ impl Restorer {
                 }
                 let staged = self.stage(&id, strip);
                 let attrs = self.attrs(&id, theme, bounds, maximized);
-                self.main = Some(self.commit(attrs, staged));
+                self.main = Some(self.commit(attrs, number, staged));
             }
             WindowKind::Popout(strip) => {
                 let Ok(uuid) = Uuid::parse_str(&id) else {
@@ -409,7 +431,7 @@ impl Restorer {
                 }
                 self.popout_ids.insert(uuid);
                 let attrs = self.attrs(&id, theme, bounds, maximized);
-                let pending = self.commit(attrs, staged);
+                let pending = self.commit(attrs, number, staged);
                 self.popouts.push((label, id, pending));
             }
         }
@@ -520,7 +542,7 @@ impl Restorer {
         });
     }
 
-    fn commit(&mut self, attrs: WindowAttrs, staged: Staged) -> Pending {
+    fn commit(&mut self, attrs: WindowAttrs, number: Option<u32>, staged: Staged) -> Pending {
         let Staged {
             tabs,
             active,
@@ -536,6 +558,7 @@ impl Restorer {
                 attrs,
                 tabs,
                 active,
+                number,
             },
             unknown,
         }
@@ -555,6 +578,7 @@ impl Restorer {
                 attrs: WindowAttrs::default(),
                 tabs: Vec::new(),
                 active: None,
+                number: None,
             },
             unknown: Vec::new(),
         });
@@ -562,6 +586,10 @@ impl Restorer {
             warnings.push(RestoreWarning::MainWithoutTabs);
         }
         let mut unknown = main.unknown;
+        let saved: Vec<(WindowLabel, String, Option<u32>)> = popouts
+            .iter()
+            .map(|(label, id, pending)| (label.clone(), id.clone(), pending.window.number))
+            .collect();
         let popouts = popouts
             .into_iter()
             .map(|(label, id, pending)| {
@@ -579,6 +607,18 @@ impl Restorer {
                 };
             }
         };
+        for (label, window_id, saved) in saved {
+            let Some(given) = layout.windows.get(&label).map(|w| w.number) else {
+                continue;
+            };
+            if saved != Some(given) {
+                warnings.push(RestoreWarning::NumberReassigned {
+                    window_id,
+                    saved,
+                    given,
+                });
+            }
+        }
         for (view, slot, raw) in unknown {
             if let Err(e) = layout.set_unknown_content(view, slot, raw) {
                 warnings.push(RestoreWarning::Internal(e.to_string()));
@@ -657,7 +697,7 @@ fn known_content(content: SlotContent) -> SlotContent {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
     use serde_json::{json, Map, Value};
     use uuid::Uuid;
@@ -1014,9 +1054,20 @@ mod tests {
         }
     }
 
+    // 부를 때마다 겹치지 않는 저장 번호 — 번호 고치기 경고가 번호를 재지 않는 시험의 경고 목록에 끼지 않게.
+    fn fresh_number() -> u32 {
+        static NEXT: AtomicU32 = AtomicU32::new(2);
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    }
+
     fn entry(id: &str, kind: WindowKind) -> WindowEntry {
+        let number = match kind {
+            WindowKind::Main(_) => 1,
+            WindowKind::Popout(_) => fresh_number(),
+        };
         WindowEntry {
             id: id.into(),
+            number: Some(number),
             kind,
             theme: None,
             bounds: Some(dto_bounds()),
@@ -1490,6 +1541,96 @@ mod tests {
         let back = restore(vec![main_entry(vec![tab.clone()])]);
         assert_eq!(back.warnings, vec![]);
         assert_eq!(ratio_after(&back, &tab, id), Some(0.3));
+    }
+
+    // ── 창 번호(TRD S26-window-chrome §3-3 · §3-4) ──
+
+    fn numbers_by_id(layout: &ViewManager) -> Vec<(String, u32)> {
+        let mut numbers: Vec<(String, u32)> = layout
+            .windows
+            .values()
+            .map(|w| (w.window_id.clone(), w.number))
+            .collect();
+        numbers.sort();
+        numbers
+    }
+
+    #[test]
+    fn window_numbers_round_trip_and_closing_numbers_are_not_written() {
+        let mut mgr = ViewManager::new();
+        mgr.create_window("slot-popup-1").unwrap();
+        mgr.create_window("slot-popup-2").unwrap();
+        mgr.create_window("slot-popup-3").unwrap();
+        mgr.close_window("slot-popup-2").unwrap();
+        assert_eq!(mgr.closing_numbers(), [3]);
+
+        let written = to_persisted(&mgr);
+        assert_eq!(written[0].number, Some(1), "main 도 1 을 적는다");
+        let text = codec::encode(&StateFile {
+            version: STATE_VERSION,
+            saved_at_ms: 1,
+            clean_exit: false,
+            resolved_crash_copy: None,
+            windows: written.clone(),
+        })
+        .unwrap();
+        let (decoded, decode_warnings) = codec::decode(&text).unwrap();
+        assert_eq!(decode_warnings, vec![]);
+        let back = ViewManager::from_persisted(decoded.windows, &Labels::default());
+        assert_eq!(back.warnings, vec![]);
+        assert_eq!(numbers_by_id(&back.layout), numbers_by_id(&mgr));
+        assert!(back.layout.closing_numbers().is_empty());
+        back.layout.assert_number_invariants();
+        assert_eq!(to_persisted(&back.layout), written);
+    }
+
+    #[test]
+    fn a_popout_whose_number_cannot_stand_gets_the_smallest_free_one_and_is_kept() {
+        let ids: Vec<String> = (0..4).map(|_| Uuid::new_v4().to_string()).collect();
+        let popout = |id: &String, number: Option<u32>| {
+            let mut entry = popout_entry(id, vec![empty_tab()]);
+            entry.number = number;
+            entry
+        };
+        let mut main = main_entry(vec![empty_tab()]);
+        main.number = None;
+        let back = ViewManager::from_persisted(
+            vec![
+                main,
+                popout(&ids[0], Some(3)),
+                popout(&ids[1], Some(3)),
+                popout(&ids[2], None),
+                popout(&ids[3], Some(1)),
+            ],
+            &Labels::default(),
+        );
+        let given: Vec<u32> = (1..=4)
+            .map(|i| back.layout.windows[&format!("slot-popup-{i}")].number)
+            .collect();
+        assert_eq!(given, [3, 2, 4, 5]);
+        assert_eq!(back.layout.windows[MAIN_WINDOW_LABEL].number, 1);
+        assert_eq!(
+            back.warnings,
+            vec![
+                RestoreWarning::NumberReassigned {
+                    window_id: ids[1].clone(),
+                    saved: Some(3),
+                    given: 2,
+                },
+                RestoreWarning::NumberReassigned {
+                    window_id: ids[2].clone(),
+                    saved: None,
+                    given: 4,
+                },
+                RestoreWarning::NumberReassigned {
+                    window_id: ids[3].clone(),
+                    saved: Some(1),
+                    given: 5,
+                },
+            ],
+            "main 의 번호 없음은 알리지 않는다"
+        );
+        back.layout.assert_number_invariants();
     }
 
     // ── 변경 번호 ──

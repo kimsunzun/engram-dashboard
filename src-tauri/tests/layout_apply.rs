@@ -866,6 +866,87 @@ fn create_window_issues_monotonic_popup_labels_from_real_counter() {
     assert!(apply::list_windows(&w.state).unwrap().contains(&c));
 }
 
+// ── 창 번호(TRD S26-window-chrome §4-1 · §10-2) ──
+
+fn number_of(w: &World, label: &str) -> u32 {
+    apply::list_tabs(&w.state, label).unwrap().number
+}
+
+// 새 창 세 자리가 예열 창이든 새로 지은 창이든 빈 가장 작은 번호를 받고, 탭 목록 페이로드가 번호와 영속 id 를 싣는다.
+#[test]
+fn every_new_window_path_numbers_the_window_and_the_tabs_payload_carries_it() {
+    let w = World::new();
+    let main = apply::list_tabs(&w.state, MAIN_WINDOW_LABEL).unwrap();
+    assert_eq!((main.number, main.window_id.as_str()), (1, "main"));
+
+    let mut labels = Vec::new();
+    for prewarmed in [true, false] {
+        if prewarmed {
+            w.prewarm();
+        }
+        labels.push(apply::create_window(&w.state, &w.subs, &w.host, &w.labels).unwrap());
+
+        if prewarmed {
+            w.prewarm();
+        }
+        let (view, slot, _) = w.view_with_filled_slot();
+        let moved = apply::move_slot_to_window(
+            &w.state, &w.subs, &w.ev, &w.host, &w.labels, view, slot, None,
+        )
+        .unwrap();
+        let notified = w.notified_tabs_of(&moved.window);
+        assert_eq!(notified.number, number_of(&w, &moved.window));
+        labels.push(moved.window);
+
+        if prewarmed {
+            w.prewarm();
+        }
+        let source = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
+        let out = w
+            .dock(source, DockDest::NewWindow { at: AT }, FocusPolicy::Keep)
+            .unwrap();
+        assert_eq!(out.prewarmed, prewarmed);
+        let notified = w.notified_tabs_of(&out.window);
+        assert_eq!(notified.number, number_of(&w, &out.window));
+        labels.push(out.window);
+    }
+
+    let numbers: Vec<u32> = labels.iter().map(|l| number_of(&w, l)).collect();
+    assert_eq!(numbers, [2, 3, 4, 5, 6, 7]);
+    let mut ids: Vec<String> = labels
+        .iter()
+        .map(|l| apply::list_tabs(&w.state, l).unwrap().window_id)
+        .collect();
+    assert!(ids.iter().all(|id| Uuid::parse_str(id).is_ok()), "{ids:?}");
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), labels.len(), "영속 id 는 창마다 다르다");
+}
+
+// 닫은 팝아웃의 OS 창이 아직 있는 동안(가짜 `close` 는 `Destroyed` 를 내지 않는다) 그 번호는 새 창에 가지 않고,
+// `Destroyed` 몫의 번호 풀기가 풀면 다음 새 창이 받는다(AC20 ②). 이 crate 밖에서 부를 수 있는 것은 정리를 못 부르는
+// 갈래의 `release_window_number` 뿐이다 — 정리 갈래(`drop_window_in_model`)는 셸 단위 시험이 잰다.
+#[test]
+fn a_closed_popouts_number_waits_for_its_destroyed() {
+    let w = World::new();
+    let a = w.popup();
+    let b = w.popup();
+    let only = apply::list_tabs(&w.state, &b).unwrap().active;
+    apply::close_window(&w.state, &w.subs, &w.host, &a).unwrap();
+    apply::close_tab(&w.state, &w.subs, &w.ev, &w.host, &b, only).unwrap();
+    assert_eq!(&*w.host.closed.lock().unwrap(), &[a.clone(), b.clone()]);
+
+    let c = w.popup();
+    assert_eq!(number_of(&w, &c), 4, "닫히는 두 창의 번호를 건너뛴다");
+
+    engram_dashboard_lib::layout::release_window_number(&w.state, &b);
+    let d = w.popup();
+    assert_eq!(number_of(&w, &d), 3);
+    engram_dashboard_lib::layout::release_window_number(&w.state, &a);
+    let e = w.popup();
+    assert_eq!(number_of(&w, &e), 2);
+}
+
 // ── switch_tab ───────────────────────────────────────────────────────────────
 
 #[test]

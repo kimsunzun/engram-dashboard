@@ -371,7 +371,9 @@ pub fn run() {
                         crate::state::placement::forget_deferred_maximize(app, &label);
                         crate::first_paint::cancel_hold(app, &label);
                         crate::commands::tab_drop::forget_window_frame(app, &label);
-                        // 하나라도 없으면(초기화 실패 극단 케이스) 조용히 스킵(정리 불가여도 앱은 계속).
+                        // 창 번호는 정리가 묘비 · 구독 정리와 한 락 안에서 푼다. 하나라도 없으면(초기화 실패 극단
+                        //   케이스) 정리는 건너뛰고(앱은 계속) 번호만 푼다 — 안 풀면 번호가 실행 끝까지 잡힌다(TRD
+                        //   S26-window-chrome §4-1).
                         if let (Some(state), Some(router), Some(registry), Some(client)) = (
                             app.try_state::<crate::layout::LayoutState>(),
                             app.try_state::<std::sync::Arc<crate::output_router::OutputRouter>>(),
@@ -381,6 +383,8 @@ pub fn run() {
                             crate::commands::popout::cleanup_popup_window(
                                 &app, &label, &state, &router, &registry, &client,
                             );
+                        } else if let Some(state) = app.try_state::<crate::layout::LayoutState>() {
+                            crate::layout::release_window_number(&state, &label);
                         }
                     }
                     // 예열 창 풀(TRD S21-slot-docking §3-9 「다시 짓기」) — 풀의 창이면 빼고 다시 짓고, 보임을 기다리던 채택

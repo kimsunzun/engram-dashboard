@@ -55,6 +55,10 @@ use super::LayoutState;
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct WindowTabsPayload {
     pub label: String,
+    /// 그 창의 영속 신원 — main = `main`, 팝아웃 = UUID. label 과 달리 실행이 바뀌어도 같은 창이다.
+    pub window_id: String,
+    /// 창 번호 — main = 1, 팝아웃 = 2 이상(TRD S26-window-chrome §4-1). 창 항목이 모델에 있는 동안 바뀌지 않는다.
+    pub number: u32,
     pub tabs: Vec<ViewMeta>,
     pub active: Uuid,
     pub version: u64,
@@ -64,6 +68,8 @@ impl From<WindowTabsSnapshot> for WindowTabsPayload {
     fn from(s: WindowTabsSnapshot) -> Self {
         WindowTabsPayload {
             label: s.label,
+            window_id: s.window_id,
+            number: s.number,
             tabs: s.tabs,
             active: s.active,
             version: s.version,

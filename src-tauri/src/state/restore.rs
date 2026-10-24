@@ -909,7 +909,7 @@ impl RestoreCoordinator {
             return;
         };
         for label in labels {
-            if let Err(e) = mgr.close_window(label) {
+            if let Err(e) = mgr.drop_window_gone(label) {
                 tracing::debug!(module = "state", label = %label, error = %e, "이미 모델에 없는 복원 팝아웃");
             }
         }
@@ -1024,6 +1024,7 @@ mod tests {
     fn window(id: &str, kind: WindowKind) -> WindowEntry {
         WindowEntry {
             id: id.into(),
+            number: None,
             kind,
             theme: None,
             bounds: None,
@@ -2239,6 +2240,13 @@ mod tests {
         );
         assert!(rig.ports_called_with_the_lock_free());
         assert_eq!(rig.service.status().crash_copy, CrashCopyStatus::Answered);
+        // 사라진 사본 창의 `Destroyed` 는 이미 지나갔다 — 번호를 곧바로 내놓아 다음 새 창이 받는다(TRD S26-window-chrome
+        //   §4-1 · §5-6).
+        let mut mgr = rig.layout.0.lock().unwrap();
+        assert!(mgr.closing_numbers().is_empty());
+        mgr.create_window("slot-popup-9").unwrap();
+        assert_eq!(mgr.windows["slot-popup-9"].number, 2);
+        mgr.assert_number_invariants();
     }
 
     #[test]

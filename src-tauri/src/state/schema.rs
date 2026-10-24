@@ -50,6 +50,9 @@ pub struct StateFile {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct WindowEntry {
     pub id: String,
+    /// 창 번호(TRD S26-window-chrome §3-3). 쓰기는 늘 값이다(main 도 1). 읽기는 `1..=MAX_SAVED_NUMBER` 정수만
+    /// `Some` 으로 받고 그 밖은 `None` 으로 접는다 — 창은 살린다(`codec`). main 의 값은 복원이 보지 않는다(D3).
+    pub number: Option<u32>,
     #[serde(flatten)]
     pub kind: WindowKind,
     /// `None` = 전역 테마를 따른다(파일에는 `null`).

@@ -30,7 +30,7 @@ use crate::layout::{
     apply, LabelSource, LayoutState, MoveFailed, SlotMove, SpareClaim, WindowHost, WindowPlace,
     MAIN_WINDOW_LABEL,
 };
-use crate::output_router::OutputRouter;
+use crate::output_router::{DropCause, OutputRouter};
 use crate::spare::pool::Opening;
 use crate::state::placement::{self, Fallback};
 use crate::webview_env::{Backdrop, WebviewEnv};
@@ -459,7 +459,8 @@ pub async fn move_slot_to_window(
 
 // ★창 Destroyed 정리(수명/누수 임계 — 멀티탭, G1)★. 팝업/런타임 창이 닫히면(titlebar close·강제 destroy·
 // close_tab/close_window 경유 destroy) lib.rs Destroyed arm 이 이걸 부른다. titlebar close 는 닫기 요청
-// ([`close_requested_popup_window`])이 모델을 먼저 지웠으므로 여기서는 재계산 · Channel 떼기만 남는다.
+// ([`close_requested_popup_window`])이 모델을 먼저 지웠으므로 여기서는 재계산 · 닫히는 창 번호 풀기 · Channel 떼기만
+// 남는다. 창 번호는 이것이 푼다 — 부르는 쪽은 번호를 따로 풀지 않는다(TRD S26-window-chrome §4-1).
 //
 // ★현 버그 수정(G1)★: 옛 코드는 단일 바인딩 하나만 정리해 멀티탭 팝업을 강제 종료하면 나머지 탭이 잔류
 // + Unsubscribe 누락.
@@ -480,8 +481,10 @@ pub fn cleanup_popup_window(
         return;
     }
 
-    // 1) 모델 정리 — ViewManager 락 한 번 안(아래 함수). 닫기 요청이 먼저 지웠으면 0.
-    let Some(dropped_views) = drop_window_in_model(label, state, router, client) else {
+    // 1) 모델 정리 · 창 번호 풀기 — ViewManager 락 한 번 안(아래 함수). 닫기 요청이 먼저 지웠으면 0.
+    let Some(dropped_views) =
+        drop_window_in_model(label, DropCause::Destroyed, state, router, client)
+    else {
         return;
     };
 
@@ -499,8 +502,8 @@ pub fn cleanup_popup_window(
 }
 
 /// 팝아웃의 닫기 요청(`lib.rs` 의 `CloseRequested`) — 창 정리의 모델 몫([`drop_window_in_model`] · 묘비 포함)을
-/// 소멸을 기다리지 않고 지금 한다. 뒤이은 `Destroyed` 정리([`cleanup_popup_window`])가 같은 몫을 다시 해도 바뀌는
-/// 것은 없다. main 은 무동작이다(main 의 닫기 요청은 숨기기 — 부르는 쪽 갈래).
+/// 소멸을 기다리지 않고 지금 한다. 뒤이은 `Destroyed` 정리([`cleanup_popup_window`])가 같은 몫을 다시 하면 바뀌는
+/// 것은 그 창 번호 풀기뿐이다. main 은 무동작이다(main 의 닫기 요청은 숨기기 — 부르는 쪽 갈래).
 /// TRD S21-slot-docking 5.8판 §1-2 「닫히는 창」
 pub(crate) fn close_requested_popup_window(
     label: &str,
@@ -509,7 +512,9 @@ pub(crate) fn close_requested_popup_window(
     client: &DaemonClient,
 ) {
     // 0 = 모델이 아직 그 창을 몰랐다(새 창 옮기기의 창 열기와 모델 확정 사이) — 묘비만 선다.
-    if let Some(dropped_views) = drop_window_in_model(label, state, router, client) {
+    if let Some(dropped_views) =
+        drop_window_in_model(label, DropCause::CloseRequested, state, router, client)
+    {
         tracing::info!(
             label,
             dropped_views,
@@ -519,8 +524,8 @@ pub(crate) fn close_requested_popup_window(
 }
 
 // 팝아웃 창 정리의 모델 몫 — 창의 모든 탭 View 드롭 + windows 엔트리 제거 + 라우팅 표 재계산 + 구독 정리 발화 +
-// 사용량 관심 재계산 + label 묘비, ★전부 같은 락 안★. 닫기 요청과 `Destroyed` 가 둘 다 부르고 두 번째는 바뀌는
-// 것이 없다(창이 이미 없으면 재계산만 · 묘비는 집합). 답 = 모델에서 지운 탭 수(창이 이미 없었으면 0) · `None` =
+// 사용량 관심 재계산 + label 묘비, ★전부 같은 락 안★. 닫기 요청과 `Destroyed` 가 둘 다 부르고 두 번째는 닫히는 창
+// 번호 풀기 말고 바뀌는 것이 없다(창이 이미 없으면 재계산만 · 묘비는 집합). 답 = 모델에서 지운 탭 수(창이 이미 없었으면 0) · `None` =
 // 정리하지 않음(main · 락 오염). 창(`AppHandle`) 없이 서므로 셸 단위 시험이 이것을 직접 부른다.
 //   ★F1 REAL 동시성 버그 수정★: 옛 코드는 델타(cleanup_window_core rebuild)를 락 안에서 계산하고
 //   `to_unsubscribe` 발화를 락 드롭 뒤에 했다 → 계산~발화 사이 다른 command(assign_agent/spawn/move)가
@@ -529,8 +534,13 @@ pub(crate) fn close_requested_popup_window(
 //   는 락 안」 조항은 없다★). 이제 적용 서비스(`SubscriptionSync::resync`)·move_slot_to_window 와
 //   일관되게 발화도 락 안이다(unsubscribe 는 동기 try_send — await/network 0, lifecycle 락 독립 →
 //   데드락 없음).
+// 창 번호(TRD S26-window-chrome §4-1) — 닫기 요청이 지운 창은 번호를 그 `Destroyed` 까지 쥐고, `Destroyed` 는 그
+//   번호를 같은 락 안에서 푼다(아직 모델에 있던 창이면 곧바로). ★`Destroyed` 의 번호 풀기를 이 락 밖으로 떼지
+//   않는다★ — 먼저 다른 락에서 모델 창을 빼면 그 틈에 묘비 없이 빠진 창이 보이고 지운 탭 수가 늘 0 이 된다.
+//   이것을 못 부르는 극단(`lib.rs` — 상태가 없다)만 `layout::release_window_number` 가 번호를 푼다.
 pub(crate) fn drop_window_in_model(
     label: &str,
+    cause: DropCause,
     state: &LayoutState,
     router: &OutputRouter,
     client: &DaemonClient,
@@ -548,7 +558,10 @@ pub(crate) fn drop_window_in_model(
     };
     let dropped_views = mgr.windows.get(label).map_or(0, |w| w.tabs.len());
     // 창이 이미 모델에서 지워졌으면 rebuild 만.
-    let delta = crate::output_router::cleanup_window_core(&mut mgr, router, label);
+    let delta = crate::output_router::cleanup_window_core(&mut mgr, router, label, cause);
+    if cause == DropCause::Destroyed {
+        mgr.release_closing(label);
+    }
     // 묘비는 모델 삭제와 같은 락 안 — 이 락 뒤의 도킹 · 새 창 확정은 그 창을 「없음」이나 묘비로 만나 무변경이다
     //   (TRD S21-slot-docking 5.8판 §1-2 「닫히는 창」 (c)).
     mgr.mark_closed(label);
@@ -724,9 +737,15 @@ mod close_request_tests {
             close_requested_popup_window(label, &self.state, &self.router, &self.client);
         }
 
-        // `lib.rs` 의 `Destroyed` 정리 중 모델 몫.
+        // `lib.rs` 의 `Destroyed` 정리(상태가 다 있는 갈래) 중 모델 몫 — 운영처럼 이것 하나가 창 번호까지 푼다.
         fn destroyed(&self, label: &str) -> Option<usize> {
-            drop_window_in_model(label, &self.state, &self.router, &self.client)
+            drop_window_in_model(
+                label,
+                DropCause::Destroyed,
+                &self.state,
+                &self.router,
+                &self.client,
+            )
         }
 
         // 런타임 크래시 사본 수락의 모델 몫(`state::restore` — 팝아웃 없는 사본) — 지금 팝아웃은 항목째 빠진다.
@@ -777,7 +796,7 @@ mod close_request_tests {
         }
     }
 
-    // ADR-0057 ① ② — 창 없는 View(롤백이 못 거둔 임시 View 포함)가 남지 않았다.
+    // ADR-0057 ① ② — 창 없는 View(롤백이 못 거둔 임시 View 포함)가 남지 않았다 · 창 번호 불변식(TRD S26-window-chrome §10-1).
     fn assert_owned(mgr: &ViewManager) {
         let tabs: usize = mgr.windows.values().map(|w| w.tabs.len()).sum();
         assert_eq!(mgr.views.len(), tabs, "어느 창의 탭도 아닌 View 가 남았다");
@@ -786,6 +805,7 @@ mod close_request_tests {
                 assert_eq!(mgr.view_owner.get(view), Some(label));
             }
         }
+        mgr.assert_number_invariants();
     }
 
     // pop-out 이 락을 놓은 틈 — 창을 확인(`is_open` → 열려 있음)하거나 연(`open`) 바로 뒤에 사용자가 그 창을 닫는다.
@@ -1042,6 +1062,31 @@ mod close_request_tests {
         assert_eq!(rig.fingerprint(), after);
         assert!(rig.routed(only_popout).is_empty());
         assert_eq!(rig.routed(shared), [MAIN_WINDOW_LABEL]);
+    }
+
+    // TRD S26-window-chrome §4-1 — 닫기 요청은 번호를 그 창의 `Destroyed` 까지 쥐고 `Destroyed` 가 푼다. 닫기 요청 없이 온
+    //   `Destroyed`(모델에 남은 창)는 곧바로 푼다.
+    #[tokio::test]
+    async fn a_close_request_holds_the_number_until_destroyed_frees_it() {
+        let rig = Rig::new();
+        rig.add_tab("slot-popup-1");
+        rig.add_tab("slot-popup-2");
+        let closing = || rig.state.0.lock().unwrap().closing_numbers();
+
+        rig.close_requested("slot-popup-1");
+        assert_eq!(closing(), [2]);
+        rig.fingerprint();
+        assert_eq!(rig.destroyed("slot-popup-1"), Some(0));
+        assert!(closing().is_empty());
+
+        assert_eq!(rig.destroyed("slot-popup-2"), Some(1));
+        assert!(closing().is_empty());
+        rig.add_tab("slot-popup-3");
+        assert_eq!(
+            rig.state.0.lock().unwrap().windows["slot-popup-3"].number,
+            2
+        );
+        rig.fingerprint();
     }
 
     #[tokio::test]

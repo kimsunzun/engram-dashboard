@@ -142,7 +142,7 @@ pub fn open_restored_popouts(
         match layout.0.lock() {
             Ok(mut mgr) => {
                 for label in &failed {
-                    let _ = mgr.close_window(label);
+                    let _ = mgr.drop_window_gone(label);
                 }
             }
             Err(_) => tracing::error!(
@@ -1281,7 +1281,7 @@ mod tests {
         });
 
         assert_eq!(removed, ["slot-popup-1"]);
-        let mgr = layout.0.lock().unwrap();
+        let mut mgr = layout.0.lock().unwrap();
         let mut windows = mgr.list_windows();
         windows.sort();
         assert_eq!(windows, [MAIN_WINDOW_LABEL, "slot-popup-2"]);
@@ -1289,6 +1289,11 @@ mod tests {
             mgr.version > version,
             "지운 것이 레이아웃 변경이라 기록기가 싣는다"
         );
+        // 못 연 창의 `Destroyed` 는 오지 않는다 — 번호를 곧바로 내놓아 다음 새 창이 받는다(TRD S26-window-chrome §4-1).
+        assert!(mgr.closing_numbers().is_empty());
+        mgr.create_window("slot-popup-3").unwrap();
+        assert_eq!(mgr.windows["slot-popup-3"].number, 2);
+        mgr.assert_number_invariants();
     }
 
     #[test]

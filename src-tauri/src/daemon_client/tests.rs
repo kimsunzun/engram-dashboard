@@ -5333,6 +5333,7 @@ use crate::layout::{
     apply, AgentSpawner, LayoutEvents, LayoutState, MoveFailed, MoveStep, SpareClaim, ViewSnapshot,
     WindowHost, WindowPlace, WindowTabsPayload,
 };
+use crate::output_router::DropCause;
 use crate::settings::{SettingsEvents, SettingsService, SettingsSnapshot};
 use crate::theme::{EffectiveThemes, ThemeControl, ThemeWindows, UiSettingsPayload};
 use crate::tray::actions::{for_each_ui_window, LayoutUsageVisibility, UsageVisibility};
@@ -5719,7 +5720,7 @@ async fn a_destroyed_popup_leaves_the_interest_after_the_delay() {
     );
 
     assert_eq!(
-        drop_window_in_model(POPUP, &state, &client.router, &client),
+        drop_window_in_model(POPUP, DropCause::Destroyed, &state, &client.router, &client),
         Some(1)
     );
     settle().await;
@@ -5748,7 +5749,7 @@ async fn a_destroyed_popup_forgets_its_hidden_mark_even_when_the_model_never_hel
     }
     .set_visible(POPUP, false);
     assert_eq!(
-        drop_window_in_model(POPUP, &state, &client.router, &client),
+        drop_window_in_model(POPUP, DropCause::Destroyed, &state, &client.router, &client),
         Some(0)
     );
     assert_eq!(nudges(&mut rx), 0);
@@ -5799,10 +5800,77 @@ async fn a_popout_close_request_unsubscribes_once_and_the_later_destroyed_sends_
     );
 
     assert_eq!(
-        drop_window_in_model(POPUP, &state, &client.router, &client),
+        drop_window_in_model(POPUP, DropCause::Destroyed, &state, &client.router, &client),
         Some(0)
     );
     assert!(rx.try_recv().is_err(), "소멸 정리가 명령을 냈다");
+}
+
+// ── 닫기 요청 없이 온 소멸(모델에 남은 팝아웃) — `lib.rs` 의 `Destroyed` 정리가 부르는 모델 몫 한 번이 구독 해제 ·
+//   묘비 · 사용량 관심 줄임 · 창 번호 풀기를 다 한다(TRD S26-window-chrome §4-1) ─────────────────────────
+#[tokio::test(start_paused = true)]
+async fn a_destroyed_popout_still_in_the_model_is_cleaned_up_in_one_pass_and_frees_its_number() {
+    let client = idle_client();
+    let (mut rx, socket) = captured_channel(&client);
+    let state = LayoutState::new();
+    let subs = RouterSubs {
+        router: &client.router,
+        client: &client,
+    };
+    let agent = uuid::Uuid::new_v4();
+    state.0.lock().unwrap().create_window(POPUP).unwrap();
+    let (view, slot) = active_slot(&state, POPUP);
+    apply::assign_agent(
+        &state,
+        &subs,
+        &NoLayoutEvents,
+        view,
+        slot,
+        agent.to_string(),
+    )
+    .expect("팝아웃 슬롯에 배정");
+    apply::create_tab(&state, &subs, &NoLayoutEvents, POPUP, None).expect("팝아웃의 둘째 탭");
+    set_usage_slot(&state, &client, POPUP, true, false);
+    assert_eq!(nudges(&mut rx), 1);
+    assert_eq!(
+        sync_as_the_connection_task(&client, socket),
+        Some(BTreeSet::from([AgentBackendKind::Claude]))
+    );
+
+    assert_eq!(
+        drop_window_in_model(POPUP, DropCause::Destroyed, &state, &client.router, &client),
+        Some(2)
+    );
+    let mut sent = Vec::new();
+    while let Ok(cmd) = rx.try_recv() {
+        sent.push(cmd);
+    }
+    assert!(
+        matches!(sent.as_slice(), [ConnectionCommand::Unsubscribe { agent_id, .. }] if *agent_id == agent),
+        "{sent:?}"
+    );
+    tokio::time::advance(USAGE_INTEREST_SHRINK_DELAY + Duration::from_millis(100)).await;
+    settle().await;
+    assert_eq!(nudges(&mut rx), 1);
+    assert_eq!(
+        sync_as_the_connection_task(&client, socket),
+        Some(BTreeSet::new())
+    );
+
+    let mut mgr = state.0.lock().unwrap();
+    assert!(!mgr.windows.contains_key(POPUP));
+    assert!(mgr.closing_numbers().is_empty());
+    assert_eq!(
+        mgr.create_window(POPUP),
+        Err(crate::layout::LayoutError::WindowClosed(POPUP.to_string())),
+        "묘비가 섰다"
+    );
+    mgr.create_window("slot-popup-8").unwrap();
+    assert_eq!(
+        mgr.windows["slot-popup-8"].number, 2,
+        "풀린 번호를 다음 새 창이 받는다"
+    );
+    mgr.assert_number_invariants();
 }
 
 // ── 닫기 요청이 해제를 낸 뒤 죽어 가는 팝아웃 웹뷰가 replay 를 청해도 Subscribe 는 나가지 않는다 ─────────────
