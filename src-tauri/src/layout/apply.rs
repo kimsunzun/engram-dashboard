@@ -593,6 +593,26 @@ pub fn rename_tab(
     Ok(())
 }
 
+/// 데몬 에이전트 목록의 이름 `names`(에이전트 id, 표시 이름)를 이름 장부에 덮어쓰고, 자동 이름 탭의 보이는 이름이 실제로
+/// 바뀐 창만 새 판 번호로 알린다(TRD S26-window-chrome §2-4 ② · §4-3). 바뀐 탭이 없으면 판도 그대로이고 아무것도 내지
+/// 않는다. 이름은 데몬이 지은 그대로 쓴다 — 셸은 다시 짓지 않는다(유일화 · canonicalize 가 데몬 안이다).
+// ★탭 알림만★: 이름은 탭 페이로드에만 있고(`rename_tab` 과 같은 까닭) 출력 라우팅도 트리도 안 바뀐다.
+pub fn agent_names_updated(
+    state: &LayoutState,
+    events: &dyn LayoutEvents,
+    names: &[(String, String)],
+) -> Result<(), String> {
+    let tabs: Vec<WindowTabsPayload> = {
+        let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
+        mgr.update_agent_names(names)
+            .iter()
+            .filter_map(|label| tabs_payload(&mgr, label))
+            .collect()
+    }; // ← 락 드롭
+    announce(events, None::<&ViewSnapshot>, &tabs);
+    Ok(())
+}
+
 pub fn assign_agent(
     state: &LayoutState,
     subs: &dyn SubscriptionSync,

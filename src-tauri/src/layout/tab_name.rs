@@ -41,6 +41,24 @@ const fn word(w: Word) -> &'static str {
     }
 }
 
+impl Word {
+    // 변형을 더하면 여기에도 더한다 — 빠진 낱말은 [`is_word`] 를 지나 에이전트 이름 시드로 심긴다.
+    const ALL: [Word; 6] = [
+        Word::EmptySlot,
+        Word::AgentUnknown,
+        Word::AgentTree,
+        Word::Presets,
+        Word::Usage,
+        Word::Foreign,
+    ];
+}
+
+/// `text` 가 낱말 표의 글자 그대로인가. 저장 파일의 자동 탭 이름은 그 순간의 [`slot_label`] 이라, 이름 장부에 없던
+/// 에이전트의 탭은 「에이전트」로 적혀 있다 — 그 글자를 장부 시드로 심지 않으려고 거른다(TRD S26-window-chrome §4-3).
+pub(crate) fn is_word(text: &str) -> bool {
+    Word::ALL.iter().any(|&w| word(w) == text)
+}
+
 /// 탭의 보이는 이름(R4 · AC4 · AC35) — 정한 이름이면 그 이름이고, 자동이면 포커스 슬롯의 [`slot_label`] 이다. 포커스가
 /// 없거나 트리에 없는 슬롯을 가리키면 트리 첫 슬롯을 쓴다(`ViewManager::fixup_focus` 와 같은 규칙). 그 슬롯이 이 판이
 /// 모르는 내용을 쥐었으면 「알 수 없는 내용」이다 — 메모리 내용(`Empty`)대로 「빈 칸」이라 하면 점유된 칸을 비었다고
@@ -135,6 +153,30 @@ mod tests {
             ko.contains(&format!("foreignContent: '{}'", word(Word::Foreign))),
             "src/i18n/ko.ts 의 slot.foreignContent"
         );
+    }
+
+    #[test]
+    fn every_table_word_is_a_word_and_nothing_else_is() {
+        for text in [
+            "빈 칸",
+            "에이전트",
+            "에이전트 트리",
+            "프리셋",
+            "사용량",
+            "알 수 없는 내용",
+        ] {
+            assert!(is_word(text), "{text}");
+        }
+        for text in [
+            "myproj",
+            "에이전트 ",
+            " 에이전트",
+            "에이전트1",
+            "View 3",
+            "",
+        ] {
+            assert!(!is_word(text), "{text:?}");
+        }
     }
 
     // ── slot_label ──

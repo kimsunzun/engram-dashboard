@@ -120,7 +120,7 @@ PRD 가 Q5 · Q10 을 메인에게 맡겼다(스파이크 뒤 결정 · 사용�
 | `src-tauri/src/first_paint.rs` · `src-tauri/src/state/placement.rs` | 바뀜 | 첫 화면 대기 여부 조회(`is_held`) · 모든 보이기 갈래가 미룬 최대화를 입힌다(§5-2) | Tauri |
 | `src-tauri/src/tray/actions.rs` | 바뀜 | 보이기에 「포커스 빼앗지 않기」 갈래(LLM 길 · §6-2) | Tauri |
 | `src-tauri/src/daemon_client/{connection,mod}.rs` | 바뀜 | 포트 `AgentNamesSink`(emit 포트 `DaemonEvents` 를 넓히지 않는다 — 그 파일 머리 「넓히기 금지」) | — |
-| `crates/engram-dashboard-daemon/src/connection_core.rs` | 바뀜 | `RenameProfile` 성공 뒤 `AgentListUpdated` 도 낸다(§4-3) | — |
+| `crates/engram-dashboard-daemon/src/connection_core.rs` | 바뀜 | `Renamed` 뒤 · `RosterFanout::roster_changed` 도 `AgentListUpdated` 를 낸다(§4-3) | — |
 | `crates/engram-dashboard-platform/src/window.rs` | 바뀜 | `caption_style()` · `is_foreground(w)` · (필요하면) 활성화 없이 펴기(§6-2) · `snap` 모듈(feature `snap-overlay` 뒤 — §8-4) | — |
 | `crates/engram-dashboard-platform/Cargo.toml` · `src-tauri/Cargo.toml` | 바뀜 | feature `snap-overlay`(기본 꺼짐) — 셸 feature 는 platform feature 를 켠다 | — |
 | `src-tauri/src/webview_env.rs` | 바뀜 | `finish` 가 `decorations(false)` · `shadow(true)` 를 붙인다(`EnvOptions` 로 — 시험이 본다) | Tauri |
@@ -271,9 +271,9 @@ pub fn effective_tab_name(mgr: &ViewManager, view: &View) -> String  // Named �
 ### 4-3 에이전트 이름 장부
 
 - **출처 = 데몬 `AgentListUpdated` 의 `AgentInfo.name`**(protocol — canonical 표시 이름 = `display_name ?? basename(cwd)` · 이름 유일화 포함 — 데몬 `AgentManager` 가 짓는다 · ADR-0101 · ADR-0120). 셸은 그 이름을 다시 짓지 않는다(유일화 · canonicalize 가 데몬 안에 있다 — 셸이 흉내 내면 갈라진다).
-- **데몬 개명 뒤 알림** — 지금 `RenameProfile` 성공은 `ProfileListUpdated` 만 낸다(코드 — `connection_core.rs` 의 `RenameProfile` 팔 → `broadcast_profile_list`). 그 뒤 `AgentInfo.name` 이 바뀌는지는 미검(`try_rename_agent` 가 `list_agents` 의 이름 출처를 바꾸는지). U3b 가 ① 그것을 시험으로 확인하고 ② `Renamed` 일 때 `AgentListUpdated` 도 내게 한다(`agent_list_event` 재사용). 거부한 갈래 = 셸이 `ProfileListUpdated` 에서 이름을 다시 셈(유일화 접미사를 놓친다).
+- **데몬 개명 뒤 알림** — U3b 전에는 `RenameProfile` 성공이 `ProfileListUpdated` 만 냈다 → 지금은 `Renamed` 면 `AgentListUpdated` 도 낸다(`agent_list_event` 재사용 · 산 에이전트면 `AgentInfo.name` 이 바뀜을 U3b 시험이 확인). 거부한 갈래 = 셸이 `ProfileListUpdated` 에서 이름을 다시 셈(유일화 접미사를 놓친다). **버스 · CLI `agent.rename`** 은 이 WS 팔을 지나지 않고 명부 통지 포트(`RosterFanout::roster_changed`)로 알리므로, 그 포트도 `ProfileListUpdated` 뒤 `AgentListUpdated` 를 **늘** 낸다(메인 결정 · U3b 리뷰 2026-10-25). 포트는 어느 동사가 불렀는지 모른다 — 띄우기 · 만들기 · 옮기기 · 무변경 개명이 덧붙여 내는 목록은 이름이 그대로면 셸의 이름 장부가 판도 알림도 없이 넘긴다(웹의 에이전트 목록 교체 · 명부 관측은 그대로 한 번 더 돈다).
 - **장부 = `ViewManager.agent_names`**(메인 결정 M5) — 이름 셈이 레이아웃 락 하나 안에서 끝난다(새 락 · 새 차례 없음). 바꾸는 길 = `apply::agent_names_updated(state, events, &[(id, name)])`: 락 → 바뀌기 전 자동 이름 탭들의 유효 이름을 뜬다 → 장부 덮어쓰기(지우지 않는다 — 죽은 에이전트 슬롯도 마지막 이름을 쓴다) → 유효 이름이 실제로 바뀐 탭이 하나라도 있으면 **`version` 을 올리고** 그 탭들의 창 페이로드를 복사 → 락 놓고 `announce`(제목 포함 — 불변식 2). 안 올리면 웹이 같은 판 번호의 탭 알림을 버리고(코드 — `viewStore.ts` 의 판 가드) 제목 입히기도 옛 판으로 본다(리뷰 Claude ③ · codex ⑤). 바뀐 것이 없으면 아무것도 내지 않는다.
-- **잇는 길** — 연결 태스크의 `emit_broadcast`(`daemon_client/connection.rs`)가 `AgentListUpdated` 팔에서 기존 `events.agent_list_updated` 뒤에 새 포트 `AgentNamesSink::agents(&[AgentInfo])` 를 부른다. 실물은 셸 조립이 `LayoutState` · `TauriEvents` 로 `apply::agent_names_updated` 를 부른다. emit 포트 `DaemonEvents` 를 넓히지 않는다(그 파일 머리 「넓히기 금지」 · 형제 포트 `refusal` 과 같은 가름). `emit_broadcast` 를 부르는 자리가 다른 락을 쥐지 않는다는 것은 코드 흐름상 가능성 높음 — U3b 가 확인한다.
+- **잇는 길** — 연결 태스크의 `emit_broadcast`(`daemon_client/connection.rs`)가 `AgentListUpdated` 팔에서 기존 `events.agent_list_updated` 뒤에 새 포트 `AgentNamesSink::agents(&[AgentInfo])` 를 부른다. 실물은 셸 조립이 `LayoutState` · `TauriEvents` 로 `apply::agent_names_updated` 를 부른다. emit 포트 `DaemonEvents` 를 넓히지 않는다(그 파일 머리 「넓히기 금지」 · 형제 포트 `refusal` 과 같은 가름). `emit_broadcast` 를 부르는 자리(`main_loop` 의 Text 팔 한 곳)는 다른 락을 쥐지 않는다(U3b 확인).
 - **부팅 시드**(메인 결정 M16) — `from_persisted` 가 `named == Some(false)` 이고 포커스 슬롯이 `Agent` 인 탭의 저장 `name` 으로 `agent_names[agent_id]` 를 채운다. 옛 파일(`named` 칸 없음)은 시드하지 않는다 — 그 `name` 은 「View 3」 같은 옛 기본값일 수 있다. 데몬이 늦게 붙어도 OS 제목이 「에이전트 - Engram:1」로 한 번 깜빡이지 않게 한다. 사본 수락은 시드를 살아 있는 장부에 **빈 칸만** 더한다(살아 있는 값이 더 새롭다).
 - **데몬이 없을 때** — 장부에 없는 에이전트 = 「에이전트」(T2). 데몬이 붙어 목록이 오면 바뀐다.
 
@@ -370,6 +370,11 @@ pub fn effective_tab_name(mgr: &ViewManager, view: &View) -> String  // Named �
 ### 5-7 받아들인 잠깐 겹침(다시 막지 않는 것)
 
 복원 · 사본 수락 도중(W12) · `Destroyed` 를 기다리는 동안의 `window.list` 번호 빈칸(D13 의 대가 — 도움말에 적는다). 명령은 영속 id 로 가리켜 엇나가지 않는다(Q9).
+
+이름 장부(§4-3)에서 받아들인 것 둘(메인 결정 · U3b 리뷰 2026-10-25):
+
+- **잠든 · 죽은 에이전트의 개명은 그 슬롯 탭에 그 에이전트가 다시 살아날 때까지 안 비친다** — `list_agents` 는 산 세션만 싣고 셸은 이름을 다시 짓지 않는다.
+- **`AgentListUpdated` 를 내는 쪽끼리 차례가 없다** — 동시 띄우기 · 끄기가 낸 옛 목록이 다음 목록까지 옛 이름을 되살리고, 끝난 에이전트를 웹 명부에 되살려 트리가 살아 있다고 보이며 그 뷰가 구독 거절을 거쳐 `error` 로 앉을 수 있다(목록은 띄우기 · 끄기 · 명부 동사 · 재연결 때만 오므로 조용하면 오래 갈 수 있다 · U3b 가 내는 쪽을 늘렸다). 원래 있던 경쟁 부류이고, 진짜 해법은 protocol 의 목록 판 번호다(범위 밖).
 
 ---
 
@@ -611,7 +616,7 @@ platform `window::caption_style() -> CaptionStyle { drawn_buttons: bool, leading
 | `webview_env` | 가짜 빌더에 `decorations(false)` · `shadow(true)` 가 붙음 | AC5 |
 | `tab_drop` | `WindowFrame` 칸 · 바뀔 때만 밂(`focused` 포함) | AC15 |
 | platform | `caption_style` · `is_foreground`(Windows 실 창 — 기존 `test_window` 도우미) | AC15 |
-| 데몬 `connection_core` | `RenameProfile` 성공 뒤 `AgentListUpdated` 가 나가고 그 이름이 새 이름이다 | AC4 |
+| 데몬 `connection_core` | `Renamed` 뒤 · `RosterFanout::roster_changed` 도 `AgentListUpdated` 가 나가고 그 이름이 새 이름이다 | AC4 |
 
 ### 10-2 통합(`--test layout_apply` · `--test layout_commands`)
 

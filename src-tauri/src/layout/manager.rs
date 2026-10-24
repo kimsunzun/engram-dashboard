@@ -360,8 +360,9 @@ pub struct ViewManager {
     // (TRD S26-window-chrome §4-1 W7 — 받아들임).
     closing: HashMap<WindowLabel, Closing>,
     // 에이전트 id → 표시 이름 — 데몬 `AgentListUpdated` 의 이름을 받아 쥔 파생 캐시(TRD S26-window-chrome §4-3)다. 저장하지
-    // 않는다. 탭 자동 이름이 이 표를 읽는다 — 항목이 없는 에이전트는 「에이전트」다.
-    // TODO(T-66 U3b): 데몬 목록 · 부팅 시드로 채운다 — 그 전까지 이 표는 비어 있다.
+    // 않는다. 탭 자동 이름이 이 표를 읽는다 — 항목이 없는 에이전트는 「에이전트」다. 운영에서 쓰는 길 =
+    // `update_agent_names`(데몬 목록 — 덮어쓴다) · `seed_agent_names`(부팅 · 사본 수락 — 빈 칸만) 둘뿐이고, 항목을 지우는
+    // 길은 없다.
     agent_names: HashMap<String, String>,
 }
 
@@ -630,6 +631,49 @@ impl ViewManager {
     /// 에이전트 `agent_id` 의 표시 이름 — 이름 장부에 없으면 `None`.
     pub(super) fn agent_name(&self, agent_id: &str) -> Option<&str> {
         self.agent_names.get(agent_id).map(String::as_str)
+    }
+
+    /// 이름 장부에 `names`(에이전트 id, 표시 이름)를 덮어쓴다 — 지우지는 않는다: 목록에서 빠진(죽은) 에이전트의 슬롯도
+    /// 마지막 이름을 쓴다(TRD S26-window-chrome §4-3). 돌려주는 것 = 자동 이름 탭의 보이는 이름이 실제로 바뀐 창의
+    /// label(정렬 · 겹침 없음). 하나라도 있으면 `version` 을 올리고, 없으면 `version` 도 그대로다 — 웹은 같은 판
+    /// 번호의 탭 알림을 버리고 기록기는 판이 바뀌어야 파일의 탭 이름을 다시 쓴다.
+    pub(crate) fn update_agent_names(&mut self, names: &[(String, String)]) -> Vec<WindowLabel> {
+        let before: Vec<(WindowLabel, ViewId, String)> = self
+            .windows
+            .iter()
+            .flat_map(|(label, w)| w.tabs.iter().map(move |view| (label, view)))
+            .filter_map(|(label, view)| {
+                let v = self.views.get(view)?;
+                (!v.name.is_named()).then(|| (label.clone(), v.id, effective_tab_name(self, v)))
+            })
+            .collect();
+        for (agent_id, name) in names {
+            self.agent_names.insert(agent_id.clone(), name.clone());
+        }
+        let mut changed: Vec<WindowLabel> = before
+            .into_iter()
+            .filter(|(_, view, old)| {
+                self.views
+                    .get(view)
+                    .is_some_and(|v| effective_tab_name(self, v) != *old)
+            })
+            .map(|(label, _, _)| label)
+            .collect();
+        changed.sort();
+        changed.dedup();
+        if !changed.is_empty() {
+            self.bump_version();
+        }
+        changed
+    }
+
+    /// 이름 장부의 빈 칸만 `names` 로 채운다 — 이미 있는 항목은 그대로 둔다(데몬 목록에서 온 값이 저장 파일의 값보다
+    /// 새롭다). `version` 은 건드리지 않는다. 부팅 · 사본 수락의 시드 몫이다(TRD S26-window-chrome §4-3) — 어떤 이름을
+    /// 시드로 쓸지는 부르는 쪽이 고른다(`state::convert`).
+    pub(crate) fn seed_agent_names(&mut self, names: impl IntoIterator<Item = (String, String)>) {
+        for (agent_id, name) in names {
+            self.agent_names.entry(agent_id).or_insert(name);
+        }
     }
 
     #[cfg(test)]
@@ -1546,6 +1590,8 @@ impl ViewManager {
     /// - 번호(TRD S26-window-chrome §4-1 · §5-6) — 옛 팝아웃(닫히는 창 포함)의 번호를 다 풀고, `restored` 팝아웃의
     ///   번호(그 모델이 세운 것)를 지금 쥔 번호(남는 main 의 1)에 맞춰 [`numbering::resolve_saved`] 로 다시 고친다 —
     ///   번호 오름차순이 그 순서다. 옛 팝아웃의 늦은 `Destroyed` 는 [`Self::release_closing`] 이 label 로만 찾아 무동작이다.
+    /// - 이름 장부 — `restored` 의 장부(저장 파일에서 뜬 시드)는 지금 장부의 빈 칸에만 든다([`Self::seed_agent_names`] —
+    ///   지금 값은 데몬 목록에서 왔다).
     pub(crate) fn adopt_restored(
         &mut self,
         restored: ViewManager,
@@ -1559,8 +1605,7 @@ impl ViewManager {
             unknown_content,
             closed_labels: _,
             closing: _,
-            // TODO(T-66 U3b): 사본의 이름 시드를 살아 있는 장부에 빈 칸만 더한다(TRD S26-window-chrome §4-3).
-            agent_names: _,
+            agent_names: seeds,
         } = restored;
         let main = windows
             .remove(MAIN_WINDOW_LABEL)
@@ -1609,6 +1654,7 @@ impl ViewManager {
         self.views.extend(views);
         self.view_owner.extend(view_owner);
         self.unknown_content.extend(unknown_content);
+        self.seed_agent_names(seeds);
         let mut popouts: Vec<(WindowLabel, WindowTabs)> = windows.into_iter().collect();
         popouts.sort_by_key(|(_, w)| w.number);
         let saved: Vec<Option<u32>> = popouts.iter().map(|(_, w)| Some(w.number)).collect();
@@ -2572,6 +2618,151 @@ mod tests {
         ));
         assert_eq!(mgr.version, ver, "실패 시 version 불변(no-op)");
         assert_invariants(&mgr);
+    }
+
+    // ── 에이전트 이름 장부(TRD S26-window-chrome §4-3) ──
+
+    fn names(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(id, name)| (id.to_string(), name.to_string()))
+            .collect()
+    }
+
+    fn tab_names(mgr: &ViewManager, label: &str) -> Vec<String> {
+        mgr.list_tabs(label)
+            .unwrap()
+            .tabs
+            .into_iter()
+            .map(|t| t.name)
+            .collect()
+    }
+
+    // main = 자동 탭(a1) · 정한 탭(a1) · 팝아웃 = 자동 탭(a2).
+    fn agents_in_two_windows() -> ViewManager {
+        let mut mgr = ViewManager::new();
+        let auto = main_active(&mgr);
+        mgr.assign_agent(auto, first_slot_of(&mgr, auto), "a1".into())
+            .unwrap();
+        let named = mgr
+            .create_tab(MAIN_WINDOW_LABEL, Some("작업".into()))
+            .unwrap();
+        mgr.assign_agent(named, first_slot_of(&mgr, named), "a1".into())
+            .unwrap();
+        let popout = mgr.create_window("slot-popup-1").unwrap();
+        mgr.assign_agent(popout, first_slot_of(&mgr, popout), "a2".into())
+            .unwrap();
+        mgr
+    }
+
+    #[test]
+    fn a_name_update_reports_only_windows_whose_auto_tab_name_changed_and_bumps_the_version() {
+        let mut mgr = agents_in_two_windows();
+        assert_eq!(tab_names(&mgr, MAIN_WINDOW_LABEL), ["에이전트", "작업"]);
+        let ver = mgr.version;
+
+        assert_eq!(
+            mgr.update_agent_names(&names(&[("a1", "myproj")])),
+            [MAIN_WINDOW_LABEL]
+        );
+        assert_eq!(mgr.version, ver + 1);
+        assert_eq!(tab_names(&mgr, MAIN_WINDOW_LABEL), ["myproj", "작업"]);
+        assert_eq!(tab_names(&mgr, "slot-popup-1"), ["에이전트"]);
+
+        assert_eq!(
+            mgr.update_agent_names(&names(&[("a1", "other"), ("a2", "beta")])),
+            [MAIN_WINDOW_LABEL, "slot-popup-1"],
+            "정렬 · 겹침 없음"
+        );
+        assert_eq!(mgr.version, ver + 2, "한 번에 한 판");
+        assert_invariants(&mgr);
+    }
+
+    #[test]
+    fn a_name_update_that_changes_no_visible_name_keeps_the_version() {
+        let mut mgr = agents_in_two_windows();
+        mgr.update_agent_names(&names(&[("a1", "myproj")]));
+        let ver = mgr.version;
+
+        assert!(mgr
+            .update_agent_names(&names(&[("a1", "myproj")]))
+            .is_empty());
+        assert!(
+            mgr.update_agent_names(&names(&[("a9", "nowhere")]))
+                .is_empty(),
+            "화면에 없는 에이전트"
+        );
+        assert!(mgr.update_agent_names(&[]).is_empty());
+        assert_eq!(mgr.version, ver);
+        assert_eq!(mgr.agent_name("a9"), Some("nowhere"), "장부에는 적는다");
+    }
+
+    // 포커스 밖 에이전트 슬롯은 탭 이름이 아니다 — 그 이름이 바뀌어도 그 창은 바뀐 창이 아니다.
+    #[test]
+    fn an_agent_outside_the_focused_slot_does_not_change_the_tab() {
+        let mut mgr = ViewManager::new();
+        let view = main_active(&mgr);
+        let left = first_slot_of(&mgr, view);
+        let right = mgr.split_slot(view, left, SplitDir::LeftRight).unwrap();
+        mgr.assign_agent(view, left, "a1".into()).unwrap();
+        mgr.set_slot_content(view, right, SlotContent::AgentList)
+            .unwrap();
+        let ver = mgr.version;
+
+        assert!(mgr
+            .update_agent_names(&names(&[("a1", "myproj")]))
+            .is_empty());
+        assert_eq!(mgr.version, ver);
+        mgr.set_focused_slot(view, left).unwrap();
+        assert_eq!(tab_names(&mgr, MAIN_WINDOW_LABEL), ["myproj"]);
+    }
+
+    // 목록에서 빠진(죽은) 에이전트의 슬롯도 마지막 이름을 쓴다 — 장부는 지우지 않는다.
+    #[test]
+    fn a_name_update_never_forgets_an_agent() {
+        let mut mgr = agents_in_two_windows();
+        mgr.update_agent_names(&names(&[("a1", "myproj")]));
+        mgr.update_agent_names(&names(&[("a2", "beta")]));
+        assert_eq!(tab_names(&mgr, MAIN_WINDOW_LABEL), ["myproj", "작업"]);
+        assert_eq!(mgr.agent_name("a1"), Some("myproj"));
+    }
+
+    #[test]
+    fn a_seed_fills_only_empty_entries_and_keeps_the_version() {
+        let mut mgr = agents_in_two_windows();
+        mgr.update_agent_names(&names(&[("a1", "live")]));
+        let ver = mgr.version;
+
+        mgr.seed_agent_names(names(&[("a1", "old"), ("a2", "seeded")]));
+
+        assert_eq!(mgr.agent_name("a1"), Some("live"));
+        assert_eq!(mgr.agent_name("a2"), Some("seeded"));
+        assert_eq!(mgr.version, ver);
+    }
+
+    // 사본 수락 — 사본의 장부(저장 파일의 시드)는 지금 장부의 빈 칸에만 든다(TRD S26-window-chrome §4-3).
+    #[test]
+    fn adopting_a_restored_copy_adds_its_seeds_only_to_empty_entries() {
+        let mut mgr = ViewManager::new();
+        mgr.update_agent_names(&names(&[("a1", "live")]));
+        let mut copy = ViewManager::new();
+        copy.seed_agent_names(names(&[("a1", "old"), ("a2", "seeded")]));
+
+        mgr.adopt_restored(copy).unwrap();
+
+        assert_eq!(mgr.agent_name("a1"), Some("live"));
+        assert_eq!(mgr.agent_name("a2"), Some("seeded"));
+    }
+
+    #[test]
+    fn a_refused_adoption_adds_no_seed() {
+        let mut mgr = ViewManager::new();
+        let mut no_main = ViewManager::new();
+        no_main.seed_agent_names(names(&[("a1", "seeded")]));
+        no_main.windows.remove(MAIN_WINDOW_LABEL);
+
+        assert!(mgr.adopt_restored(no_main).is_err());
+        assert_eq!(mgr.agent_name("a1"), None);
     }
 
     #[test]

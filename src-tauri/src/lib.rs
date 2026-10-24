@@ -26,6 +26,29 @@ use tauri::Manager;
 /// main 창을 못 만든 시작(setup ⑧)의 프로세스 종료 코드.
 const STARTUP_FAILED_EXIT_CODE: i32 = 1;
 
+// 데몬 에이전트 목록 → 탭 자동 이름 장부(TRD S26-window-chrome §4-3) — 연결 태스크가 프론트 알림 뒤에 부른다. 레이아웃은
+//   사람 클릭 · 버스와 같은 인스턴스여야 한다(ADR-0035 레이아웃 권위는 하나).
+struct LayoutAgentNames {
+    layout: crate::layout::LayoutState,
+    app: tauri::AppHandle,
+}
+
+impl crate::daemon_client::AgentNamesSink for LayoutAgentNames {
+    fn agents(&self, agents: &[engram_dashboard_protocol::AgentInfo]) {
+        let names: Vec<(String, String)> = agents
+            .iter()
+            .map(|agent| (agent.id.to_string(), agent.name.clone()))
+            .collect();
+        if let Err(e) = crate::layout::apply::agent_names_updated(
+            &self.layout,
+            &crate::commands::layout::TauriEvents { app: &self.app },
+            &names,
+        ) {
+            tracing::warn!("에이전트 이름 장부를 고치지 못했다(탭 이름은 다음 목록에서): {e}");
+        }
+    }
+}
+
 // ── run() ────────────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -207,6 +230,10 @@ pub fn run() {
                 router.clone(),
                 registry.clone(),
                 app.handle().clone(),
+                std::sync::Arc::new(LayoutAgentNames {
+                    layout: setup_layout.clone(),
+                    app: app.handle().clone(),
+                }),
             ) {
                 Ok(client) => {
                     let client = std::sync::Arc::new(client);

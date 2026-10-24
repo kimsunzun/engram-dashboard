@@ -1281,6 +1281,95 @@ fn rename_tab_unknown_view_is_err() {
     assert_eq!(w.tab_events(), 0);
 }
 
+// ── agent_names_updated (TRD S26-window-chrome §4-3 — 탭 알림만 · 바뀐 창만 · 새 판) ──
+
+#[test]
+fn agent_names_updated_announces_only_the_window_whose_tab_name_changed() {
+    let w = World::new();
+    let view = w.main_active();
+    let agent = Uuid::new_v4().to_string();
+    apply::assign_agent(
+        &w.state,
+        &w.subs,
+        &w.ev,
+        view,
+        w.empty_slot(view),
+        agent.clone(),
+    )
+    .unwrap();
+    let popup = w.popup();
+    let (layouts, tabs, resyncs) = (w.layout_events(), w.tab_events(), w.resyncs());
+    let version = apply::list_tabs(&w.state, MAIN_WINDOW_LABEL)
+        .unwrap()
+        .version;
+
+    apply::agent_names_updated(&w.state, &w.ev, &[(agent.clone(), "myproj".into())]).unwrap();
+
+    assert_eq!(w.tab_events(), tabs + 1, "바뀐 창 하나만");
+    let sent = w.last_tabs();
+    assert_eq!(sent.label, MAIN_WINDOW_LABEL);
+    assert_eq!(sent.tabs[0].name, "myproj");
+    assert!(
+        sent.version > version,
+        "새 판 번호 — 같은 판이면 웹이 버린다"
+    );
+    assert_eq!(w.layout_events(), layouts, "이름은 뷰 스냅숏에 없다");
+    assert_eq!(w.resyncs(), resyncs, "출력 라우팅은 그대로");
+    assert_eq!(
+        apply::list_tabs(&w.state, &popup).unwrap().version,
+        sent.version
+    );
+}
+
+#[test]
+fn agent_names_updated_without_a_visible_change_announces_nothing() {
+    let w = World::new();
+    let view = w.main_active();
+    let agent = Uuid::new_v4().to_string();
+    apply::assign_agent(
+        &w.state,
+        &w.subs,
+        &w.ev,
+        view,
+        w.empty_slot(view),
+        agent.clone(),
+    )
+    .unwrap();
+    apply::agent_names_updated(&w.state, &w.ev, &[(agent.clone(), "myproj".into())]).unwrap();
+    let tabs = w.tab_events();
+    let version = apply::list_tabs(&w.state, MAIN_WINDOW_LABEL)
+        .unwrap()
+        .version;
+
+    apply::agent_names_updated(
+        &w.state,
+        &w.ev,
+        &[
+            (agent, "myproj".into()),
+            (Uuid::new_v4().to_string(), "화면에 없음".into()),
+        ],
+    )
+    .unwrap();
+    apply::agent_names_updated(&w.state, &w.ev, &[]).unwrap();
+
+    assert_eq!(w.tab_events(), tabs);
+    assert_eq!(
+        apply::list_tabs(&w.state, MAIN_WINDOW_LABEL)
+            .unwrap()
+            .version,
+        version,
+        "판도 그대로"
+    );
+}
+
+#[test]
+fn agent_names_updated_on_a_poisoned_lock_is_err_without_notify() {
+    let w = World::new();
+    poison(&w.state);
+    assert!(apply::agent_names_updated(&w.state, &w.ev, &[("a1".into(), "x".into())]).is_err());
+    assert_eq!(w.tab_events(), 0);
+}
+
 // ── assign_agent / set_slot_content ──────────────────────────────────────────
 
 #[test]

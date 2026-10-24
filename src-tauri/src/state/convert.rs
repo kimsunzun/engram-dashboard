@@ -16,7 +16,7 @@ use super::schema::{
     Bounds, PersistedContent, PersistedNode, TabEntry, TabStrip, WindowEntry, WindowKind,
 };
 use crate::layout::manager::{RestoredWindow, ViewId, WindowLabel, WindowTabs};
-use crate::layout::tab_name::effective_tab_name;
+use crate::layout::tab_name::{self, effective_tab_name};
 use crate::layout::{
     tree, LabelSource, LayoutNode, SlotContent, TabName, View, ViewManager, WindowAttrs,
     WindowBounds, MAIN_WINDOW_LABEL,
@@ -360,6 +360,8 @@ impl ViewManager {
     /// - 곁표(모르는 내용)를 View 와 함께 옮긴다 — View 만 옮기면 그 슬롯이 빈 칸으로 저장돼 원문이 사라진다. 옛
     ///   View 는 `remove_view` 로 지운다(그 곁표 항목을 함께 거둔다).
     /// - main 항목은 탭 · 속성만 바꾼다 — 통째로 바꾸면 측정값(`canvas` · `metrics`)을 웹뷰가 다시 보고할 때까지 잃는다.
+    /// - 결과의 에이전트 이름 장부는 저장 파일에서 뜬 시드뿐이다(`agent_name_seed`) — 수락은 지금 장부의 빈 칸에만
+    ///   더한다(`adopt_restored`).
     pub(crate) fn from_persisted(windows: Vec<WindowEntry>, labels: &dyn LabelSource) -> Restored {
         let mut restorer = Restorer::default();
         for entry in windows {
@@ -377,6 +379,8 @@ struct Restorer {
     popout_ids: HashSet<Uuid>,
     views: HashSet<Uuid>,
     nodes: HashSet<Uuid>,
+    // 남긴 탭에서 뜬 에이전트 이름 시드(에이전트 id, 이름 — `agent_name_seed`) · 저장 순서.
+    names: Vec<(String, String)>,
 }
 
 struct Pending {
@@ -392,6 +396,7 @@ struct Staged {
     active: Option<ViewId>,
     nodes: HashSet<Uuid>,
     unknown: Vec<(ViewId, Uuid, Map<String, Value>)>,
+    names: Vec<(String, String)>,
     warnings: Vec<RestoreWarning>,
 }
 
@@ -546,6 +551,9 @@ impl Restorer {
             });
             staged.unknown.push((id, slot, raw));
         }
+        staged
+            .names
+            .extend(agent_name_seed(&name, named, &layout, focused_slot_id));
         staged.tabs.push(View {
             id,
             name: restored_name(name, named),
@@ -560,10 +568,12 @@ impl Restorer {
             active,
             nodes,
             unknown,
+            names,
             warnings,
         } = staged;
         self.views.extend(tabs.iter().map(|v| v.id));
         self.nodes.extend(nodes);
+        self.names.extend(names);
         self.warnings.extend(warnings);
         Pending {
             window: RestoredWindow {
@@ -584,6 +594,7 @@ impl Restorer {
             popout_ids: _,
             views: _,
             nodes: _,
+            names,
         } = self;
         let main = main.unwrap_or(Pending {
             window: RestoredWindow {
@@ -636,8 +647,33 @@ impl Restorer {
                 warnings.push(RestoreWarning::Internal(e.to_string()));
             }
         }
+        layout.seed_agent_names(names);
         Restored { layout, warnings }
     }
+}
+
+/// 자동 이름 탭이 저장한 이름에서 에이전트 이름 장부의 시드를 뜬다(TRD S26-window-chrome §4-3 · 메인 결정 M16) — 그
+/// 이름은 저장 순간 포커스 슬롯의 [`slot_label`](crate::layout::tab_name::slot_label) 이라, 그 슬롯이 에이전트면 그
+/// 에이전트의 표시 이름이다. 데몬 목록이 오기 전에도 탭 이름 · OS 제목이 「에이전트」로 한 번 깜빡이지 않게 한다.
+///
+/// 시드가 아닌 것 — `named` 가 `Some(false)` 가 아님(정한 이름 · 칸이 없는 옛 파일: 그 글자는 「View 3」 같은 옛
+/// 기본값일 수 있다) · 빈 글자 · 낱말 표의 글자(장부에 없던 에이전트의 「에이전트」 — 이름이 아니다) · 포커스 슬롯이
+/// 에이전트가 아님(이 판이 모르는 내용 슬롯은 메모리 내용이 `Empty` 라 여기 든다). 포커스가 없거나 트리 밖이면 트리 첫
+/// 슬롯을 본다 — 복원 모델이 포커스를 고치는 규칙과 같다.
+fn agent_name_seed(
+    name: &str,
+    named: Option<bool>,
+    layout: &LayoutNode,
+    focused: Option<Uuid>,
+) -> Option<(String, String)> {
+    if named != Some(false) || name.trim().is_empty() || tab_name::is_word(name) {
+        return None;
+    }
+    let slot = focused
+        .filter(|&id| tree::contains_slot(layout, id))
+        .unwrap_or_else(|| tree::first_slot_id(layout));
+    let agent_id = tree::find_slot(layout, slot)?.agent_id()?;
+    Some((agent_id.to_string(), name.to_string()))
 }
 
 /// 한 탭의 트리를 내려가며 모은 것 — 노드 id(전위 순) · 모르는 내용 · 고친 비율(분할 id, 받은 값).
@@ -714,10 +750,10 @@ mod tests {
     use serde_json::{json, Map, Value};
     use uuid::Uuid;
 
-    use super::{to_persisted, RestoreWarning, Restored, StateRevision};
+    use super::{agent_name_seed, to_persisted, RestoreWarning, Restored, StateRevision};
     use crate::layout::{
-        tree, LabelSource, SlotContent, SplitDir, TabName, ViewManager, WindowAttrs, WindowBounds,
-        WindowPlacement, MAIN_WINDOW_LABEL,
+        tree, LabelSource, LayoutNode, SlotContent, SplitDir, TabName, ViewManager, WindowAttrs,
+        WindowBounds, WindowPlacement, MAIN_WINDOW_LABEL,
     };
     use crate::state::codec;
     use crate::state::schema::{
@@ -1005,6 +1041,142 @@ mod tests {
                 TabName::Auto,
             ]
         );
+    }
+
+    // ── 에이전트 이름 시드(TRD S26-window-chrome §4-3) ──
+
+    fn agent_tab(agent: &str, name: &str, named: Option<bool>) -> TabEntry {
+        let (mut tab, _) = slot_tab(PersistedContent::Known(SlotContent::Agent {
+            agent_id: agent.into(),
+        }));
+        tab.name = name.into();
+        tab.named = named;
+        tab
+    }
+
+    fn listed_names(layout: &ViewManager) -> Vec<String> {
+        layout
+            .list_tabs(MAIN_WINDOW_LABEL)
+            .unwrap()
+            .tabs
+            .into_iter()
+            .map(|t| t.name)
+            .collect()
+    }
+
+    // 자동 이름 탭(`named: false`)의 저장 이름만 시드다 — 정한 이름 · 칸이 없는 옛 파일의 글자 · 낱말 표의 글자는 심지
+    //   않는다. 심었으면 같은 에이전트를 보는 자동 탭이 그 글자를 보인다.
+    #[test]
+    fn only_an_auto_tabs_saved_agent_name_seeds_the_name_book() {
+        let back = restore(vec![main_entry(vec![
+            agent_tab("a1", "myproj", Some(false)),
+            agent_tab("a2", "정함", Some(true)),
+            agent_tab("a2", "에이전트", Some(false)),
+            agent_tab("a3", "View 3", None),
+        ])]);
+        assert_eq!(back.warnings, vec![]);
+        assert_eq!(
+            listed_names(&back.layout),
+            ["myproj", "정함", "에이전트", "에이전트"]
+        );
+    }
+
+    #[test]
+    fn a_seed_comes_from_the_focused_slot_or_else_the_first_slot() {
+        let slot = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let agent = LayoutNode::Slot {
+            id: slot,
+            content: SlotContent::Agent {
+                agent_id: "a1".into(),
+            },
+        };
+        let seed = Some(("a1".to_string(), "myproj".to_string()));
+        for focus in [Some(slot), None, Some(Uuid::new_v4())] {
+            assert_eq!(
+                agent_name_seed("myproj", Some(false), &agent, focus),
+                seed,
+                "{focus:?}"
+            );
+        }
+        let split = LayoutNode::Split {
+            id: Uuid::new_v4(),
+            dir: SplitDir::LeftRight,
+            ratio: 0.5,
+            a: Box::new(agent),
+            b: Box::new(LayoutNode::Slot {
+                id: other,
+                content: SlotContent::AgentList,
+            }),
+        };
+        assert_eq!(
+            agent_name_seed("myproj", Some(false), &split, Some(other)),
+            None,
+            "포커스 칸이 에이전트가 아니다"
+        );
+        assert_eq!(agent_name_seed("myproj", Some(false), &split, None), seed);
+    }
+
+    // 낱말 표의 글자는 이름이 아니다 — 장부에 없던 에이전트의 탭은 「에이전트」로 저장된다(메인 결정 · U3a 리뷰).
+    #[test]
+    fn no_word_of_the_table_and_no_blank_is_a_seed() {
+        let slot = Uuid::new_v4();
+        let agent = LayoutNode::Slot {
+            id: slot,
+            content: SlotContent::Agent {
+                agent_id: "a1".into(),
+            },
+        };
+        for text in [
+            "빈 칸",
+            "에이전트",
+            "에이전트 트리",
+            "프리셋",
+            "사용량",
+            "알 수 없는 내용",
+            "",
+            "  ",
+        ] {
+            assert_eq!(
+                agent_name_seed(text, Some(false), &agent, Some(slot)),
+                None,
+                "{text:?}"
+            );
+        }
+    }
+
+    // 자리채움 글자를 심었다면 그 칸이 차서, 뒤에 받아들인 사본의 진짜 이름이 빈 칸에만 드는 시드로 들어가지 못한다.
+    #[test]
+    fn a_placeholder_saved_at_boot_does_not_keep_a_restored_copys_name_out() {
+        let mut live = restore(vec![main_entry(vec![agent_tab(
+            "a1",
+            "에이전트",
+            Some(false),
+        )])])
+        .layout;
+        let copy = restore(vec![main_entry(vec![agent_tab(
+            "a1",
+            "myproj",
+            Some(false),
+        )])])
+        .layout;
+
+        live.adopt_restored(copy).unwrap();
+
+        assert_eq!(listed_names(&live), ["myproj"]);
+    }
+
+    #[test]
+    fn a_skipped_tab_seeds_nothing() {
+        let kept = agent_tab("a1", "에이전트", Some(false));
+        let mut twin = agent_tab("a1", "myproj", Some(false));
+        twin.id = kept.id;
+        let back = restore(vec![main_entry(vec![kept, twin])]);
+        assert!(matches!(
+            back.warnings.as_slice(),
+            [RestoreWarning::DuplicateTab { .. }]
+        ));
+        assert_eq!(listed_names(&back.layout), ["에이전트"]);
     }
 
     #[test]

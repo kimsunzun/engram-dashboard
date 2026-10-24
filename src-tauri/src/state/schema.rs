@@ -95,7 +95,8 @@ pub struct Bounds {
 pub struct TabEntry {
     pub id: Uuid,
     /// 쓰기 = 그 순간의 보이는 이름(정한 이름 · 아니면 자동 이름). 읽기는 `named == Some(true)` 일 때만 이 글자를 탭
-    /// 이름으로 쓴다(TRD S26-window-chrome §3-3) — 자동 탭의 글자는 지난 실행의 그 순간 값일 뿐이다.
+    /// 이름으로 쓴다(TRD S26-window-chrome §3-3) — 자동 탭의 글자는 지난 실행의 그 순간 값일 뿐이고, `Some(false)` 면
+    /// 에이전트 이름 장부의 시드로만 쓰인다(§4-3 · `convert::agent_name_seed`).
     pub name: String,
     /// 이름을 정했나. 쓰기는 늘 값이다. 읽기는 칸 없음 · `null` · 불이 아닌 값을 `None` 으로 접는다 — 그 값 때문에
     /// 탭을 건너뛰지 않는다. `None` · `Some(false)` = 자동 이름(D16).
