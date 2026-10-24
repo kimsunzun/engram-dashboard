@@ -8,7 +8,9 @@ pub mod dock;
 pub mod drag_size;
 pub mod geometry;
 pub mod manager;
+pub mod numbering;
 pub mod spatial;
+pub mod tab_name;
 pub mod tree;
 pub mod types;
 

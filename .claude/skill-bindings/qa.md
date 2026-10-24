@@ -141,7 +141,7 @@ cargo test  -p engram-dashboard-agent -- --test-threads=4      # 영향 crate �
 ```
 - **`-- --test-threads=4`는 crate마다 갈린다** — 실 자식 프로세스를 띄우는 crate에만 붙는다(`agent`·`daemon`·`platform`·`cli`). 인메모리 단위 테스트뿐인 crate(`base`·`command`·`protocol`·`messaging`·`net`)엔 안 붙는다 — `base` 는 프로세스를 띄우던 PID 헬퍼 시험이 `platform` 으로 나가며 이쪽으로 왔다(ADR-0266). **판정 규칙의 정본 = CLAUDE.md 「빌드·검증 명령」**.
 - **★좁혀 돌릴 때도 분리 실행이다★** — 위 「분리 실행」 절은 quick에도 그대로 걸린다. 한 crate짜리 명령이라고 셸에서 직접 돌리지 않는다(좁혀 돌려도 컴파일 로그는 길다 — 이유는 크래시 회피가 아니라 **출력 처리**이고 근거는 그 절).
-- **에이전트 crate(`engram-dashboard-agent`)가 닿으면 격리 게이트도 포함**(quick이어도 — 명령·판정은 아래 standard 4번): quick의 `cargo test -p`만으론 Tauri import 회귀를 못 잡아 false PASS가 난다. **바닥 crate(`engram-dashboard-base`)가 닿을 때도 같다** — 그쪽 짝은 standard 4b·4c번. **OS 층 crate(`engram-dashboard-platform`)가 닿을 때도 같다** — 그쪽 짝은 standard 4e번과 아래 의존 상한 게이트의 platform 줄, 그리고 platform 시험 기능 운영 그래프 게이트. **어느 crate 든 `.rs` 의 OS `cfg` 술어(목록 = platform `src/lib.rs` 헤더 게이트 ④)를 더하거나 걷거나 그런 파일을 옮기면 standard 4f 블록도 필수다**(quick이어도 — 명단 밖 새 파일이 CI 에서야 빨개진다). **어느 멤버든 `Cargo.toml` 의 의존을 더하거나 바꾸면 4g · 4i 블록**, **`.rs` 에 `std::os::windows` · `std::os::unix` 를 더하거나 걷거나 그런 파일을 옮기면 4h 블록도 필수다**(같은 이유). **셸의 `src-tauri/src/daemon_client/replay_flight.rs`가 닿을 때도 같다** — 그쪽 짝은 standard 4d번이고, 거기선 컴파일러가 아무것도 막아 주지 않아 그 게이트가 유일한 벽이다.
+- **에이전트 crate(`engram-dashboard-agent`)가 닿으면 격리 게이트도 포함**(quick이어도 — 명령·판정은 아래 standard 4번): quick의 `cargo test -p`만으론 Tauri import 회귀를 못 잡아 false PASS가 난다. **바닥 crate(`engram-dashboard-base`)가 닿을 때도 같다** — 그쪽 짝은 standard 4b·4c번. **OS 층 crate(`engram-dashboard-platform`)가 닿을 때도 같다** — 그쪽 짝은 standard 4e번과 아래 의존 상한 게이트의 platform 줄, 그리고 platform 시험 기능 운영 그래프 게이트. **어느 crate 든 `.rs` 의 OS `cfg` 술어(목록 = platform `src/lib.rs` 헤더 게이트 ④)를 더하거나 걷거나 그런 파일을 옮기면 standard 4f 블록도 필수다**(quick이어도 — 명단 밖 새 파일이 CI 에서야 빨개진다). **어느 멤버든 `Cargo.toml` 의 의존을 더하거나 바꾸면 4g · 4i 블록**, **`.rs` 에 `std::os::windows` · `std::os::unix` 를 더하거나 걷거나 그런 파일을 옮기면 4h 블록도 필수다**(같은 이유). **셸의 `src-tauri/src/daemon_client/replay_flight.rs`가 닿을 때도 같다** — 그쪽 짝은 standard 4d번이고, 거기선 컴파일러가 아무것도 막아 주지 않아 그 게이트가 유일한 벽이다. **셸의 `src-tauri/src/layout/tab_name.rs`가 닿으면 standard 4j 블록도 필수다** — CI 가 clippy 를 돌리지 않아 `slot_label` 의 와일드카드 · 묶음 이름 갈래(D17)를 막는 것이 그 게이트뿐이다. `types.rs` 의 `SlotContent` 변형을 더하거나 바꿀 때도 같다(그 게이트가 변형 목록을 거기서 읽는다).
 - 프론트가 닿았으면(quick 범위라도) 프론트 게이트(위 확정 절차): `npm test` + `npx tsc --noEmit`.
 
 ### standard (기본) — workspace 전회귀 + 격리 + 프론트
@@ -170,10 +170,11 @@ rg "^\s*use tauri" crates/engram-dashboard-platform/src/   # 4e) OS 층 crate �
 # 4g) OS crate 의존 게이트 — 아래 「4g」 항목 안의 블록으로 돌린다
 # 4h) std::os 경로 게이트 — 아래 「4h」 항목 안의 블록으로 돌린다
 # 4i) 셸 → agent 운영 의존 게이트 — 아래 「4i」 항목 안의 블록으로 돌린다
+# 4j) slot_label 변형 덮기 · 갈래 모양 게이트(D17) — 아래 「4j」 항목 안의 블록으로 돌린다
 npx tsc --noEmit                            # 5) 프론트 타입체크 (package.json에 typecheck 스크립트 없음)
 npm test                                    # 6) 프론트 테스트 (vitest run)
 ```
-- **★위 블록의 빌드·테스트 줄(1·2·2b~2g·3·5·6)은 전부 「분리 실행」 절을 거쳐 돈다★**(4-pre~4e 의 `test -d`/`test -f`·`rg` 와 4f~4i 블록은 대상 밖 — 출력이 몇 줄뿐인 단발 조회라 그 절의 판정 규칙이 감싸지 않는다). 근거·실측은 그 절이 갖는다.
+- **★위 블록의 빌드·테스트 줄(1·2·2b~2g·3·5·6)은 전부 「분리 실행」 절을 거쳐 돈다★**(4-pre~4e 의 `test -d`/`test -f`·`rg` 와 4f~4j 블록은 대상 밖 — 출력이 몇 줄뿐인 단발 조회라 그 절의 판정 규칙이 감싸지 않는다). 근거·실측은 그 절이 갖는다.
 - **★2b~2g의 `--test`를 `-p` 단독이나 `--tests`로 넓히지 말 것★** — ★**여기 적혀 있던 사유 둘은 이제 둘 다 죽었다(2026-08-24) — 되살려 인용하지 말 것**★: 옛 사유①("죽는 lib 타깃(`0xc0000139`)을 도로 끌어온다")은 ADR-0174 로 해소됐고(그 타깃은 이제 `lib_unit`으로 돈다), 옛 사유②("`lib_unit`의 알려진 실패가 뭉친 스텝을 통째로 빨갛게 만들어 통합 스위트의 판정이 그 안에 묻힌다")는 그 실패가 전부 고쳐지며 사라졌다. **살아 있는 사유는 둘이다:** ① **★`--lib`·`--all-targets`는 여전히 즉사한다★**(`[lib] test = false`는 *기본 선택*에서만 빼므로 명시로 부르면 manifest 없는 내장 타깃이 골라진다 — 실측 2026-08-24. ★`-p` 단독·`--tests`는 이 축이 아니다★ — 그 둘은 기본 선택을 따라 내장 타깃을 안 골라 즉사하지 않는다. 넓히면 안 되는 이유는 아래 ② 하나다). ② 넓히면 여섯 타깃이 **한 스텝에 뭉쳐** 돌아 **어느 타깃에서 난 실패인지가 판정에서 섞인다** — 아래 「실패 보고 시 게이트 명칭」이 `test(어느 테스트)`를 요구하는데, 줄이 갈려 있으면 그게 공짜로 나온다.
   - ★**그리고 이 여섯 줄 자체를 지우지도 말 것 — 단 그 사유도 절반이 갈렸다(2026-08-24)**★. 옛 사유는 "`cargo build`·2번 어느 쪽도 이 타깃들을 컴파일하지 않으므로 이 줄들이 빠지면 그 스위트가 깨진 것조차 안 보인다"였고 — **2d·2e가 이 목록에 없던 동안 실제로 그랬다**(정정 2026-08-21) — `cargo build`가 테스트 타깃을 안 굽는 것은 지금도 참이지만 **2번은 이제 이 패키지를 함께 돈다**(제외 해제). 그러니 "빠지면 안 보인다"는 더 이상 참이 아니다. 살아 있는 사유는 위 ②와, ★**`--test <이름>`은 타깃이 사라지면 실패한다**★는 것이다 — 2번은 이 축을 구조적으로 못 잡는다(사라진 타깃은 실패가 아니라 **침묵**이라 스위트가 통째로 증발한 채 초록으로 남는다). **`[[test]] lib_unit` 선언을 지키는 것이 정확히 2f 다.** 타깃이 늘면 여기에도 줄을 늘린다 — **2f가 그렇게 늘어난 줄이다**(정정 2026-08-24).
 - 격리 게이트(`rg "^\s*use tauri" ...`)는 **출력이 0줄일 때만 PASS** — 한 줄이라도 나오면 FAIL(그 crate가 Tauri를 import = 격리 위반). 종료코드가 아니라 *매치 유무*로 판정한다. 패턴은 import 라인 앵커(`^\s*`) — 게이트 규칙을 자기 인용한 문서 주석(`//!`)이 오탐되는 것 방지(실측 2026-07-13). ★**그 판정 규칙이 만드는 함정 = 경로가 사라지면 매치도 0이라 통과로 읽힌다**★ — 그래서 4-pre·4b-pre·4e-pre 로 경로 존재를 먼저 본다(CI 는 rg 종료코드 2를 따로 갈라 이 갈래를 막지만 여기엔 그 분기가 없었다. crate 개명 ADR-0175 때 실제로 노출된 구멍이다).
@@ -251,6 +252,22 @@ npm test                                    # 6) 프론트 테스트 (vitest run
     eval "$src"
     declare -F shell_agent_gate >/dev/null || fail "함수가 서지 않았다"
     shell_agent_gate || exit 1
+    )
+    ```
+  - **4j(`slot_label` 변형 덮기 · 갈래 모양 게이트)도 ADR-0003 축이 아니다** — D17(TRD S26-window-chrome §10-4 · 메인 결정 M15)의 기계 벽이다. **양성 검사다** — 위반 꼴을 정규식으로 열거하지 않고(열거하던 음성 정규식은 계속 샜다 — U1 리뷰 2), `src-tauri/src/layout/tab_name.rs` 의 `slot_label` 본문(0 열 `pub fn slot_label` 줄부터 첫 0 열 `}` 까지 · 주석을 걷은 것)이 ① `types.rs` 의 `SlotContent` 변형을 전부 `SlotContent::<변형>` 으로 다루고 ② 갈래 자리의 줄이 `=>` 를 많아야 하나 담고 `|` 로 가른 모든 갈래를 `SlotContent::` 로 시작하는지(`=>` 앞이 빈 줄 · 그 밖 자리의 `=>` 는 없음) 잰다. 범위가 잘리면 잘린 자리가 어느 변형 갈래보다 앞일 때만 닫힌 쪽으로 실패한다 — 모든 갈래 뒤에서 잘려 그 뒤에 숨은 묶음 갈래는 다음 변형을 더할 때 ① 이 잡는다. 일부러 속이는 꼴 셋(가짜 `match` 원시 문자열 · ① 을 채우는 문자열 · 닿지 않는 `match` 앞의 일찍 돌아가기)은 사용자 결정 대기다(U1 리뷰 3) — 함수의 `#[deny(clippy::wildcard_enum_match_arm)]` 는 clippy 를 안 돌리면 아무것도 막지 않는다. 짝 둘 = ① 0 열 `pub fn slot_label` 이 정확히 하나 · 그 앞(attribute · 주석 줄만 끼어도 된다)에 `#[deny(…)]` · 그 파일에 이 lint 를 끄는 `allow` · `expect` · `warn` 이 없음 · 그 파일 어디에도 rustfmt 건너뛰기(`rustfmt::skip` · `rustfmt_skip`)가 없음 · 본문 끝을 찾음 · 주석 밖 `match` ② 도우미 자기 시험(갈래 모양 위반 · 위반 아닌 표본 · 한 변형이 빠진 가짜 enum/본문 — 수 고정). 아래 블록을 Git Bash 에 통째로 붙여 돌린다(`rg` 줄이라 「분리 실행」으로 감싸지 않는다). **마지막 줄이 `PASS` 여야 한다.** 판정 함수(`slot_label_gate` — `rg` 확인 · 파일 존재 · 짝 둘 · 본 판정 전부)를 `ci.yml` 의 `shell gate 2` 스텝에서 머리부터 `} # end slot_label_gate` 줄까지 읽어 그대로 부른다 — 범위 · 규칙 · 표본 · 남는 구멍의 정본은 그 스텝 주석이다.
+    - ★**짝을 지우지 말 것**★ — `slot_label` 이 그 파일을 떠나거나 `match` 를 다른 함수로 떼어 내거나 도우미가 망가지면 본 판정이 눈먼 채 통과할 수 있다.
+    ```bash
+    (
+    set +e; set -o pipefail
+    ci=.github/workflows/ci.yml
+    fail() { echo "FAIL — $*"; exit 1; }
+    nf=$(grep -cE '^[[:space:]]*slot_label_gate\(\) \{$' "$ci")
+    ne=$(grep -cE '^[[:space:]]*\} # end slot_label_gate$' "$ci")
+    [ "$nf" = 1 ] && [ "$ne" = 1 ] || fail "ci.yml 에서 못 찾았다(머리 $nf · 끝 $ne)"
+    src=$(awk '/^[[:space:]]*slot_label_gate\(\) \{$/{f=1} f{print} f&&/^[[:space:]]*\} # end slot_label_gate$/{exit}' "$ci") || fail "함수 읽기"
+    eval "$src"
+    declare -F slot_label_gate >/dev/null || fail "함수가 서지 않았다"
+    slot_label_gate || exit 1
     )
     ```
 - 멤버별로 좁혀 돌릴 땐 `cargo test -p <멤버>`.

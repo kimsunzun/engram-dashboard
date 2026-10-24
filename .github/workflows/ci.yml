@@ -848,6 +848,149 @@ jobs:
           }
           shell_agent_gate
 
+      # D17(TRD S26-window-chrome §10-4 · 메인 결정 M15): `slot_label`(`src-tauri/src/layout/tab_name.rs`)이 `SlotContent` 의
+      #   모든 변형을 이름으로 다루고 와일드카드 · 묶음 이름 갈래를 두지 않아야 PASS — 슬롯 종류를 더하면 이름을 짓기
+      #   전에는 통과하지 못하게 하려는 것이다. 함수에 `#[deny(clippy::wildcard_enum_match_arm)]` 가 붙어 있지만 CI 가
+      #   clippy 를 돌리지 않아 그 attribute 만으로는 지켜지지 않는다 — 이 스텝이 벽이다.
+      #   ★판정 함수(`slot_label_gate`)는 여기 하나에만 둔다★ — `/qa` 바인딩 4j 블록이 이것을 읽어 그대로 부른다.
+      # ★양성 검사다 — 위반 꼴을 정규식으로 열거하지 않는다★(U1 리뷰 2): 열거하던 음성 정규식은 `Other =>` ·
+      #   `other | other =>` · `other @ &_ =>` · 범위를 자르는 0 열 `}` · 주석 글자에 차례로 샜다. 대신 둘을 잰다.
+      #   범위 = `slot_label` 본문(0 열 `pub fn slot_label` 줄부터 첫 0 열 `}` 줄까지)에서 `/* … */`(한 줄) · `//` 주석을
+      #   걷은 것.
+      #   ① 변형 덮기: `types.rs` 의 `pub enum SlotContent` 블록에서 뽑은 변형(4 칸 들여쓴 대문자 이름 줄)이 전부 본문에
+      #     `SlotContent::<변형>` 으로 나온다. 새 변형을 묶음 갈래가 받으면 문법과 상관없이 걸린다. 범위가 잘리면 잘린
+      #     자리가 어느 변형 갈래보다 앞일 때만 그 변형이 빠져 닫힌 쪽으로 실패한다 — 모든 변형 갈래 뒤에서 잘려 그 뒤에
+      #     숨은 묶음 갈래는 지금은 안 보이고, 다음 변형을 더할 때 ① 이 잡는다.
+      #   ② 갈래 모양: `match` 줄 들여쓰기 + 4 가 갈래 자리다. 그 자리 줄은 `=>` 를 많아야 하나 담고(한 줄에 둘째 갈래를
+      #     이어 쓰면 FAIL), `}` · `},` · `} => …`(여러 줄 구조 패턴의 끝) 말고는 앞의 `|` 를 떼고 `=>` 앞을 `|` 로 가른
+      #     모든 갈래가 `SlotContent::` 로 시작해야 한다(`=>` 가 없는 여러 줄 패턴의 앞줄도 · `=>` 앞이 빈 줄은 FAIL).
+      #     그 밖 자리의 `=>`(중첩 `match` · `=>` 만 내린 줄 · rustfmt 가 다음 줄로 내린 가드)도 FAIL 이다.
+      # ★짝 둘을 지우지 말 것★ — ① 0 열 `pub fn slot_label` 이 정확히 하나 · 그 앞에 `#[deny(…)]`(사이 `#[…]` · `//`
+      #   줄 허용) · 그 파일에 이 lint 를 끄는 `allow` · `expect` · `warn` 이 없음 · 그 파일 어디에도 rustfmt 건너뛰기
+      #   (`rustfmt::skip` · `rustfmt_skip`)가 없음(② 가 기대는 rustfmt 꼴을 끄므로) · 본문 끝을 찾음 · 주석 밖 `match` 가
+      #   있음. ② 도우미 자기 시험 — 갈래 모양 위반 표본 19 개는 전부 걸리고 위반 아닌 표본 10 개는 하나도 안 걸리며,
+      #   가짜 enum(변형 3 · 문서 줄 · attribute 줄)과 한 변형(`Ag` — `AgList` 와 앞이 같다 · 주석에만 있다)이 빠진
+      #   가짜 본문에서 정확히 그 하나를 빠졌다고 한다. 수를 고정한다(배열이 비면 0 = 0 이다).
+      # 기대는 것 = rustfmt(`cargo fmt --check`)가 갈래를 줄마다 · 4 칸 들여쓰기로 놓는다는 것.
+      # ★남는 구멍★ — 여러 줄 블록 주석 · 매크로가 짓는 갈래 · 본문 안 문자열 속 `SlotContent::<변형>`(①을 속인다 —
+      #   그때도 ②와 컴파일러의 망라 검사가 남는다). 가드의 `||` · 구조 패턴 칸의 `|` · `crate::…` 경로 갈래는 위반으로
+      #   읽힌다(닫힌 쪽) — `slot_label` 에서는 쓰지 않는다(그 파일 머리).
+      # ★일부러 속이는 꼴 셋은 받아들인 채 사용자 결정을 기다린다★(U1 리뷰 3 에서 다툼): 가짜 `match` 를 담은 원시 문자열 ·
+      #   ① 을 채우는 문자열 속 `SlotContent::<새 변형>` · 망라한 `match` 를 닿지 않게 두고 그 앞에서 묶음 갈래를 가진
+      #   도우미로 일찍 돌아가기. 셋 다 코드 리뷰가 볼 몫으로 남긴다.
+      # ★함수 끝은 `} # end slot_label_gate` 줄이다★ — 4j 블록이 함수 머리부터 그 줄까지를 함수로 읽는다. 바꾸지 말 것.
+      - name: 'shell gate 2: slot_label names every SlotContent variant with path-pattern arms only (D17)'
+        shell: bash
+        run: |
+          slot_label_gate() {
+            local t=src-tauri/src/layout/types.rs f=src-tauri/src/layout/tab_name.rs
+            local n rc s e body variants missing hits x
+            local -a bad good
+            command -v rg >/dev/null 2>&1 || { echo "FAIL — rg 가 PATH 에 없다(설치 스텝을 확인할 것)"; return 1; }
+            # 도우미 — 모두 stdin 을 읽는다.
+            d17_strip() { sed -E -e 's#/\*([^*]|\*+[^*/])*\*+/##g' -e 's#//.*$##'; }
+            d17_variants() {
+              awk '/^pub enum SlotContent \{/ { f = 1; next }
+                   f && /^\}/ { exit }
+                   f && /^    [A-Z]/ { match($0, /^    [A-Za-z0-9_]+/); print substr($0, 5, RLENGTH - 4) }'
+            }
+            # $1 = 주석을 걷은 본문 · stdin = 변형 이름 → 본문에 없는 변형
+            d17_missing() {
+              local v
+              while IFS= read -r v; do
+                [ -n "$v" ] || continue
+                rg -q "SlotContent::${v}\b" <<<"$1" || echo "$v"
+              done
+            }
+            # stdin = 주석을 걷은 본문 → 어긋난 줄을 「본문 줄 번호: 줄」로
+            d17_shape() {
+              awk '
+                { line = $0; sub(/\r$/, "", line) }
+                !m && line ~ /(^|[^A-Za-z0-9_])match([^A-Za-z0-9_]|$)/ {
+                  m = 1; match(line, /^ */); ind = RLENGTH + 4
+                  if (line ~ /=>/) print NR ": " line
+                  next
+                }
+                line ~ /^[ \t]*$/ { next }
+                { match(line, /^ */); li = RLENGTH; rest = substr(line, li + 1) }
+                m && li == ind {
+                  q = rest; if (gsub(/=>/, "", q) > 1) { print NR ": " line; next }
+                  if (rest ~ /^\}[ \t]*,?[ \t]*$/ || rest ~ /^\}[ \t]*=>/) next
+                  p = rest; k = index(p, "=>"); if (k) p = substr(p, 1, k - 1)
+                  sub(/^\|[ \t]*/, "", p)
+                  if (p ~ /^[ \t]*$/) { print NR ": " line; next }
+                  n = split(p, alt, "|")
+                  for (i = 1; i <= n; i++) {
+                    a = alt[i]; sub(/^[ \t]+/, "", a)
+                    if (a !~ /^SlotContent::/) { print NR ": " line; next }
+                  }
+                  next
+                }
+                line ~ /=>/ { print NR ": " line }
+              '
+            }
+            # 표본 한 갈래(갈래 자리 기준 들여쓰기)를 가짜 `match` 에 넣는다.
+            d17_wrap() { printf '    match content {\n'; sed 's/^/        /' <<<"$1"; printf '    }\n'; }
+
+            [ -f "$t" ] || { echo "FAIL — 게이트 대상 파일이 없다: $t (개명했나 · 이사했나)"; return 1; }
+            [ -f "$f" ] || { echo "FAIL — 게이트 대상 파일이 없다: $f (개명했나 · 이사했나)"; return 1; }
+
+            # 짝 ② — 도우미 자기 시험
+            bad=('_ => a,' 'other => a,' 'Other => a,' '_other => a,' 'other | other => a,' 'x @ _ => a,'
+              'SlotContent::Empty | _ => a,' '| _ => a,' 'other @ &_ => a,' '&_ => a,' '_ /* c */ => a,' '} | _ => a,'
+              $'_ | SlotContent::Usage {\n    show_claude: _,\n} => a,' $'_\n| SlotContent::Empty => a,'
+              $'SlotContent::Empty => match x {\n    _ => a,\n},' $'SlotContent::Empty\n    => a,' $'SlotContent::Empty\n=> a,'
+              'SlotContent::Empty => a, _ => b,' $'SlotContent::Usage {\n    show_claude: _,\n} => a, _ => b,')
+            good=('SlotContent::Empty => word(Word::EmptySlot).to_owned(),'
+              $'SlotContent::Agent { agent_id } => agent(agent_id)\n    .filter(|name| !name.trim().is_empty())\n    .to_owned(),'
+              'SlotContent::Usage { show_claude: _, show_codex: _ } => a,'
+              $'SlotContent::Usage {\n    show_claude: _,\n    show_codex: _,\n} => word(Word::Usage).to_owned(),'
+              $'SlotContent::Empty\n| SlotContent::AgentList => a,' '| SlotContent::AgentList => a,'
+              $'SlotContent::Empty => {\n    let x = 1;\n    x\n}' '// | _ => a,' 'SlotContent::Empty => a, // _ =>'
+              'SlotContent::Empty /* _ | */ => a,')
+            [ "${#bad[@]}" = 19 ] && [ "${#good[@]}" = 10 ] || { echo "FAIL — 짝 ②: 표본 수가 ${#bad[@]} · ${#good[@]}(기대 19 · 10)"; return 1; }
+            n=0; for x in "${bad[@]}"; do [ -n "$(d17_wrap "$x" | d17_strip | d17_shape)" ] && n=$((n + 1)); done
+            [ "$n" = 19 ] || { echo "FAIL — 짝 ②: 갈래 모양 위반 표본 19 개 중 $n 개만 걸렸다 — 도우미가 망가졌나"; return 1; }
+            n=0; for x in "${good[@]}"; do [ -z "$(d17_wrap "$x" | d17_strip | d17_shape)" ] && n=$((n + 1)); done
+            [ "$n" = 10 ] || { echo "FAIL — 짝 ②: 위반 아닌 표본 10 개 중 $n 개만 통과했다 — 도우미가 망가졌나"; return 1; }
+            x=$(d17_variants <<<$'pub enum SlotContent {\n    /// 문서 줄\n    Ag,\n    #[serde(default)]\n    AgList {\n        x: u8,\n    },\n    C(u8),\n}')
+            [ "$(printf '%s' "$x" | tr '\n' ' ')" = "Ag AgList C" ] || { echo "FAIL — 짝 ②: 가짜 enum 의 변형을 '$x' 로 읽었다(기대 Ag AgList C)"; return 1; }
+            missing=$(d17_missing "$(d17_strip <<<$'    match c {\n        SlotContent::AgList { .. } => 1,\n        // SlotContent::Ag => 2,\n        SlotContent::C(_) => 3,\n    }')" <<<"$x")
+            [ "$missing" = "Ag" ] || { echo "FAIL — 짝 ②: 가짜 본문에서 빠진 변형을 '$missing' 로 읽었다(기대 Ag)"; return 1; }
+
+            # 짝 ① — 범위 · attribute
+            n=$(rg -c '^pub fn slot_label[<(]' "$f") || n=0
+            [ "$n" = 1 ] || { echo "FAIL — 짝 ①: $f 에 0 열 'pub fn slot_label' 이 $n 개(기대 1) — 개명 · 이사했나"; return 1; }
+            n=$(rg -U --count-matches '#\[deny\(clippy::wildcard_enum_match_arm\)\]\s*(?:(?:#\[.*\]|//.*)\s*)*pub fn slot_label[<(]' "$f") || n=0
+            [ "$n" = 1 ] || { echo "FAIL — 짝 ①: 'pub fn slot_label' 앞에 '#[deny(clippy::wildcard_enum_match_arm)]' 가 없다(attribute 를 걷었나)"; return 1; }
+            rc=0; hits=$(rg -n '\b(?:allow|expect|warn)\s*\([^)]*(?:wildcard_enum_match_arm|clippy::restriction)' "$f") || rc=$?
+            [ "$rc" -le 1 ] || { echo "FAIL — rg errored (exit $rc)"; return 1; }
+            [ -z "$hits" ] || { echo "FAIL — 짝 ①: $f 에 그 lint 를 끄는 attribute 가 있다:"; printf '%s\n' "$hits"; return 1; }
+            rc=0; hits=$(rg -n 'rustfmt::skip|rustfmt_skip' "$f") || rc=$?
+            [ "$rc" -le 1 ] || { echo "FAIL — rg errored (exit $rc)"; return 1; }
+            [ -z "$hits" ] || { echo "FAIL — 짝 ①: $f 에 rustfmt 건너뛰기가 있다(② 가 기대는 rustfmt 꼴을 끈다):"; printf '%s\n' "$hits"; return 1; }
+            s=$(awk '/^pub fn slot_label[<(]/ { print NR; exit }' "$f")
+            e=$(awk -v s="$s" 'NR > s && /^\}/ { print NR; exit }' "$f")
+            [ -n "$e" ] || { echo "FAIL — 짝 ①: $f:$s 의 slot_label 본문 끝(0 열 '}')을 못 찾았다"; return 1; }
+            body=$(sed -n "${s},${e}p" "$f" | d17_strip)
+            rg -q '\bmatch\b' <<<"$body" || { echo "FAIL — 짝 ①: slot_label 본문($f:$s-$e)의 주석 밖에 match 가 없다 — 다른 함수로 떼어 냈나"; return 1; }
+
+            # ① 변형 덮기
+            n=$(rg -c '^pub enum SlotContent \{' "$t") || n=0
+            [ "$n" = 1 ] || { echo "FAIL — $t 에 0 열 'pub enum SlotContent {' 가 $n 개(기대 1)"; return 1; }
+            variants=$(d17_variants <"$t")
+            [ -n "$variants" ] || { echo "FAIL — $t 의 SlotContent 에서 변형을 하나도 못 읽었다"; return 1; }
+            missing=$(d17_missing "$body" <<<"$variants")
+            [ -z "$missing" ] || { echo "FAIL — D17: slot_label 본문($f:$s-$e)이 이 변형을 'SlotContent::<변형>' 으로 다루지 않는다:"; printf '%s\n' "$missing"; return 1; }
+
+            # ② 갈래 모양
+            hits=$(d17_shape <<<"$body")
+            [ -z "$hits" ] || { echo "FAIL — D17: slot_label 의 갈래가 'SlotContent::<변형>' 경로 패턴만 쓰지 않는다:"; printf '%s\n' "$hits" | awk -v o=$((s - 1)) -v f="$f" '{ k = index($0, ":"); print f ":" (substr($0, 1, k - 1) + o) substr($0, k) }'; return 1; }
+
+            echo "PASS — slot_label($f:$s-$e)이 SlotContent 변형 $(printf '%s\n' "$variants" | wc -l | tr -d '[:space:]') 개를 전부 이름으로 다루고 갈래가 경로 패턴뿐이다(짝 ① ② 통과)"
+          } # end slot_label_gate
+          slot_label_gate
+
       # ADR-0273: CLI 패키지(`engram-dashboard-cli`)의 직접 워크스페이스 의존이 정확히 agent · cli(자기) · command
       #   여야 PASS. 해석된 그래프를 읽는다 — 꼴 · 플래그는 messaging · command · base · platform 상한 게이트와
       #   같다(줄이면 rename · 비활성 target · optional 이 샌다).
