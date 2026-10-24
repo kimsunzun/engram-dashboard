@@ -329,12 +329,16 @@ pub fn effective_tab_name(mgr: &ViewManager, view: &View) -> String  // Named �
 | 창 | `minimize` | `maximize` | `unmaximize` | `raise` | `close` |
 |---|---|---|---|---|---|
 | 보임 | 한다 | 한다 | 한다 | §6-2 | §5-4 |
-| 첫 화면 대기(첫 화면 문에 항목 — `first_paint::is_held`) | `CONFLICT`「아직 첫 화면 전인 창」 | 미룬 최대화에 적는다(`DeferredMaximize` · 모델 `attrs.maximized = true`) — 첫 화면 보이기가 입힌다 · 답 `{ deferred: true }` | 미룬 최대화를 거둔다(그 창이 최대화로 지어졌으면 보통 크기로 보인다 — 모델 `attrs.maximized = false`) · 답 `{ deferred: true }` | 아무것도 하지 않는다 — 첫 화면 문이 곧 보인다 · 답 `{ shown_all: false, focused: false, pending: true }` | 한다(닫기는 보이기와 무관) |
-| 숨김(모두 숨기기 · `--hidden`) | `CONFLICT`「숨은 창 — 먼저 window.raise 또는 window.showAll」 | 위와 같다(미룸 — 다음 보이기가 `apply_deferred_maximize` 로 입힌다 — 코드 `tray::actions::show_main_ui`) | 위와 같다 | LLM 보이기(`NoSteal` — §6-2) → 그 창 앞으로 | 한다 |
+| 첫 화면 대기(첫 화면 문에 항목 — `first_paint::is_held`) | `CONFLICT`「아직 첫 화면 전인 창」 | 바랄 최대화 상태 `true` 를 적는다(`DeferredMaximize` — label 마다 bool · 먼저 적은 것을 덮는다 · 모델 `attrs.maximized = true`) — 보일 때 입힌다 · 답 `{ deferred: true }`. 이미 최대화(최소화 아님)면 적어 둔 바람만 거둔다 · `{ deferred: false }` | 바랄 상태 `false` 를 적는다(모델 `attrs.maximized = false`) — 보일 때 원래 크기로 입힌다 · 답 `{ deferred: true }`. 이미 보통 크기(최대화 · 최소화 아님)면 바람만 거둔다 · `{ deferred: false }`. 거절하지 않는다 | 아무것도 하지 않는다 — 첫 화면 문이 곧 보인다 · 답 `{ shown_all: false, focused: false, pending: true }` | 한다(닫기는 보이기와 무관) |
+| 숨김(모두 숨기기 · `--hidden`) | `CONFLICT`「숨은 창 — 먼저 window.raise 또는 window.showAll」 | 위와 같다(다음 보이기가 입힌다 — 코드 `tray::actions::show_main_ui` · `window_ctl::show_one_no_steal`) | 위와 같다 | LLM 보이기(`NoSteal` — §6-2) → 그 창 앞으로 | 한다 |
 
-- **읽기 · 판정 · 입히기를 한 메인 스레드 일로 돈다**(0.3판 재리뷰 ② — M29) — 첫 화면 보이기는 메인 스레드에서 돈다(코드 — `first_paint` 의 `release_on_main_thread` → `show_as` → `show_placed` 가 그때 미룬 최대화 표를 읽는다). 0.2판처럼 버스 스레드에서 `is_held` 를 읽고 메인 스레드에서 미룸을 적으면, 그 틈에 보이기가 지나가 미룸이 홀로 남는다 — 그러면 `state::placement::record` 가 미룸이 서 있는 동안 자리 적기와 `window:frame` 밀기를 조기 반환으로 멈춘다(코드 — `record` 의 `is_pending`). 그래서 실물 포트(`WindowControl::apply`)는 상태 읽기(`is_held` · 보임 · 최대화 · 최소화) → 표 판정(`window_ctl::plan` — 순수) → 미룸 적기/거두기 · OS 호출을 **`app.run_on_main_thread` 일 하나** 안에서 하고 그 답을 기다린다. 메인 스레드는 한 줄이라 그 일과 첫 화면 보이기가 끼어들 수 없다. 부르는 쪽은 메인 스레드가 아니고, 기다리는 동안 async 워커도 붙들지 않는다. 셸 표의 `blocking_handler` 본문은 블로킹 풀이 아니라 데몬 클라이언트 런타임의 async 워커에서 돈다(코드 — `layout/commands.rs` `offloaded_handler` 문서). 그래서 새 동사 `window.minimize` · `window.maximize` · `window.unmaximize` · `window.raise` · `window.showAll` · `window.hideAll` 과 OS 상태를 읽는 `window.list` 는 `offloaded_handler`(`spawn_blocking` 뒤에서 돈다)로 꽂는다. invoke `window_control` 은 async 명령으로 둔다(메인 스레드에서 자기 일을 기다리는 교착을 막는다).
+- **최소화된 창의 `is_maximized` 는 거짓이다**(tao 0.35.3 `platform_impl/windows/event_loop.rs` — 최소화의 `WM_SIZE` 가 최대화 깃발을 내린다 · 소스 독해) — 최대화한 뒤 최소화한 창은 `min = true, max = false` 로 읽혀 펴면 어느 크기로 돌아올지 모른다. 그래서 보이지 않는 최소화 창의 `maximize` · `unmaximize` 는 늘 바람을 적고(보이기 → 펴기 → 바람 입히기 차례 — §6-2 ⓑ), 보이는 최소화 창의 `unmaximize` 는 무동작이다(먼저 `window.raise`).
+- **이미 그 크기면 바람을 거둔다** — 거두지 않으면 먼저 적은 반대 바람(숨은 최대화 창의 `unmaximize` 뒤 `maximize` 등)이 보일 때 입혀져 뒤 동작이 뒤집힌다. 보이는 창도 같다 — `maximize` · `unmaximize` 는 OS 호출 뒤에, 이미 그 크기(최소화 아님)인 무동작 갈래도 바람을 거두고 모델 `attrs.maximized` 를 그 값으로 둔다(`window_ctl::plan` 의 `Settle`). 보이기의 바람 입히기가 실패하면 바람이 보이는 창에 남고(`apply_deferred` 는 못 입히면 남긴다), 남은 바람은 다음 숨기기 · 보이기에서 입혀져 그 사이 동작을 뒤집는다. 보이는 최소화 창의 `unmaximize`(무동작)는 바람을 건드리지 않는다.
+- **숨은 창이 OS 로 최대화돼 있는 것은 최대화된 채 모두 숨기기를 했을 때뿐이다** — 부팅 · 런타임 복원은 main 의 최대화도 미룬다(바람으로 적고 보일 때 입힌다). 그래서 `--hidden` 으로 뜬 main 은 저장 상태가 최대화여도 숨은 동안 OS 최대화가 아니다(`is_maximized` 거짓 · 바람 `true`) — 그 창의 `maximize` 는 `Settle` 이 아니라 바람 덮어쓰기이고, `unmaximize` 는 바람만 거둔다.
+
+- **읽기 · 판정 · 입히기를 한 메인 스레드 일로 돈다**(0.3판 재리뷰 ② — M29) — 첫 화면 보이기는 메인 스레드에서 돈다(코드 — `first_paint` 의 `release_on_main_thread` → `show_as` → `show_placed` 가 그때 미룬 최대화 표를 읽는다). 0.2판처럼 버스 스레드에서 `is_held` 를 읽고 메인 스레드에서 미룸을 적으면, 그 틈에 보이기가 지나가 미룸이 홀로 남는다 — 그러면 `state::placement::record` 가 미룸이 서 있는 동안 자리 적기와 `window:frame` 밀기를 조기 반환으로 멈춘다(코드 — `record` 의 `is_pending`). 그래서 실물 포트(`WindowControl::apply`)는 상태 읽기(`is_held` · 보임 · 최대화 · 최소화) → 표 판정(`window_ctl::plan` — 순수) → 미룸 적기/거두기 · OS 호출을 **`app.run_on_main_thread` 일 하나** 안에서 하고 그 답을 기다린다. 메인 스레드는 한 줄이라 그 일과 첫 화면 보이기가 끼어들 수 없다. 부르는 쪽은 메인 스레드가 아니고, 기다리는 동안 async 워커도 붙들지 않는다. 셸 표의 `blocking_handler` 본문은 블로킹 풀이 아니라 데몬 클라이언트 런타임의 async 워커에서 돈다(코드 — `layout/commands.rs` `offloaded_handler` 문서). 그래서 새 동사 `window.minimize` · `window.maximize` · `window.unmaximize` · `window.raise` · `window.showAll` · `window.hideAll` 과 OS 상태를 읽는 `window.list` 는 `offloaded_handler`(`spawn_blocking` 뒤에서 돈다)로 꽂는다. invoke `window_control` 은 async 명령으로 둔다. ★메인 스레드에서 불러도 교착은 아니다★ — tauri-runtime-wry 2.11.3 `send_user_message` 가 메인 스레드에서 넘긴 일을 그 자리에서 돈다(소스 독해). 위험은 둘이다: ① 레이아웃 락을 쥔 채 부르면 그 일이 같은 락을 다시 잡는다(재진입 안 되는 뮤텍스) ② 답 채널이 용량 0 이면 그 자리에서 도는 일의 보내기가 아직 오지 않은 받기 앞에서 영영 선다 — 실물은 `mpsc::channel()`(또는 `sync_channel(1)`)로 받고 `recv_timeout` 으로 기다린다(메인 스레드가 멈추면 풀 스레드를 붙들지 않고 오류 값이 된다).
 - **LLM 보이기는 첫 화면 대기 창을 건너뛴다 · 트레이 누름은 그대로**(0.3판 재리뷰 ③ — M30) — 트레이 보이기는 지금 예열 창이 아닌 모든 창에 `cancel_hold` → `show()` 를 한다(코드 — `tray::actions::show_main_ui`) — 첫 화면 대기 창도 그리기 전에 드러낸다. 사람이 누른 보이기라 그 동작을 둔다. LLM 길(`NoSteal` — `window.showAll` · 숨은 창의 `window.raise` · invoke `show_main_ui`)은 같은 일 안에서 `is_held` 인 창을 건너뛴다 — 그 창은 곧 첫 화면 문이 보인다(불변식 5).
-- **모든 보이기 갈래가 미룬 최대화를 입힌다** — 지금은 첫 화면 보이기 중 「지어서 올린 창 · 복원 창」 갈래(`state::placement::show_placed`)와 트레이 보이기만 입히고, 창 포트가 포커스 없이 지은 창 · 맡긴 예열 창 갈래(`first_paint` 의 `raise_and_show` · `show_adopted`)는 입히지 않는다(코드 — `first_paint` 머리 「보이는 법은 셋이다」). U7a 가 그 둘에도 `apply_deferred_maximize` 를 붙인다(미룬 것이 없으면 무동작).
+- **모든 보이기 갈래가 미룬 최대화를 입힌다** — 지금은 첫 화면 보이기 중 「지어서 올린 창 · 복원 창」 갈래(`state::placement::show_placed`)와 트레이 보이기만 입히고, 창 포트가 포커스 없이 지은 창 · 맡긴 예열 창 갈래(`first_paint` 의 `raise_and_show` · `show_adopted`)는 입히지 않는다(코드 — `first_paint` 머리 「보이는 법은 셋이다」). U7a 가 그 둘에도 바람 입히기(`apply_deferred_maximize` — 바람이 bool 이 되어 `false` 면 원래 크기로 입힌다)를 붙인다(적은 것이 없으면 무동작).
 - **시험**(0.3판 재리뷰 ②) — `lib_unit` 에 「메인 스레드 줄」 흉내(일을 넣은 차례대로 하나씩 도는 큐)를 두고, 같은 창에 대해 「첫 화면 보이기 일」과 「`maximize` 일」을 두 차례로 넣는다: (a) 보이기 먼저 → `maximize` 는 보인 창으로 판정돼 그 자리에서 입혀지고 미룸 표가 비어 있다 (b) `maximize` 먼저 → 미룸에 적히고 뒤의 보이기가 입히고 거둔다. 두 차례 모두 끝에 미룸 표가 비어 있다(= `record` 가 멈추지 않는다). `unmaximize` · 숨김 창 · LLM `showAll` 의 대기 창 건너뛰기도 같은 흉내로 잰다. 판정 순수 함수 `plan` 은 표 시험으로 따로 잰다.
 
 ### 5-3 새 창 세 자리 — 답(R6 · AC2)
@@ -385,8 +389,8 @@ pub fn effective_tab_name(mgr: &ViewManager, view: &View) -> String  // Named �
 | 이름 | 인자 | 답 | 하는 일 | 오류 |
 |---|---|---|---|---|
 | `window.minimize` | `window` | `{}` | 그 창 최소화(§5-2 표) | 없는 창 `CONFLICT` · 번호 `INVALID_ARGUMENT` · 보이지 않는 창 `CONFLICT` |
-| `window.maximize` | `window` | `{ deferred: bool }` | 최대화(이미면 무동작 · 보이지 않으면 미룸) | 같음 |
-| `window.unmaximize` | `window` | `{ deferred: bool }` | 최대화 → 원래 크기(최대화가 아니면 무동작 · 보이지 않으면 미룸을 거둠) | 같음 |
+| `window.maximize` | `window` | `{ deferred: bool }` | 최대화(이미면 무동작 · 보이지 않으면 바랄 상태를 적는다 — §5-2) | 없는 창 `CONFLICT` · 번호 `INVALID_ARGUMENT` |
+| `window.unmaximize` | `window` | `{ deferred: bool }` | 최대화 → 원래 크기(최대화가 아니거나 최소화면 무동작 · 보이지 않으면 바랄 상태를 적는다 — §5-2) | 같음 |
 | `window.raise` | `window` | `{ shown_all: bool, focused: bool, pending: bool }` | 숨어 있으면 모든 창 보이기 → 최소화면 펴기 → 맨 위 · 전경을 **청한다**(빼앗지 않는다) | 같음 |
 | `window.hideAll` | — | `{}` | 모든 창 숨기기(`hide_main_ui` — main 셋째 단추와 같다) | — |
 | `window.showAll` | — | `{ focused: bool }` | 모든 창 보이기(트레이 보이기와 같은 차례 · 포커스를 빼앗지 않는 갈래 — §6-2) | — |
@@ -403,11 +407,14 @@ pub fn effective_tab_name(mgr: &ViewManager, view: &View) -> String  // Named �
 
 ```rust
 pub trait WindowControl: Send + Sync {          // ★레이아웃 락 밖에서 부른다 · 실물은 한 동작을 메인 스레드 일 하나로 돈다(§5-2)★
-    fn apply(&self, label: &str, action: WindowAction) -> Result<Applied, String>;  // 읽기 → plan → 미룸 · OS 호출
-    fn show_all(&self, how: Activation);         // 실물 = tray::actions::show_main_ui(app, how) — 메인 스레드 일 하나
+    fn apply(&self, label: &str, action: WindowAction) -> Result<Applied, String>;  // 일 몸통 = run_action
+    fn show_all(&self, how: Activation) -> bool; // 실물 = tray::actions::show_main_ui(app, how) — 메인 스레드 일 하나 · 답 = 그 뒤 main 이 OS 전경 창
     fn hide_all(&self);                          // 실물 = tray::actions::hide_main_ui — 메인 스레드 일 하나
     fn state(&self, label: &str) -> Option<OsWindowState>;   // window.list 몫 순간값 · None = OS 창 없음
 }
+pub trait WindowOps { /* read · minimize · maximize · unmaximize · defer_maximized(label, bool) · drop_deferred · raise_without_activation · show · unminimize · apply_deferred · foreground_is_ours · set_focus · show_all_no_steal */ }  // 일 몸통이 쓰는 창 하나의 OS 조작 seam — Tauri 어댑터가 구현
+pub fn run_action(ops: &impl WindowOps, layout: &LayoutState, label: &str, action: WindowAction) -> Result<Applied, String>;  // 읽기 → plan → 바람 · OS 호출
+pub fn show_one_no_steal(ops: &impl WindowOps, label: &str, focus: bool) -> bool;  // NoSteal 보이기의 창 하나 몫(ⓐ–ⓒ · 대기 창은 건너뛴다)
 pub enum WindowAction { Minimize, Maximize, Unmaximize, Raise }
 pub enum Activation { TrayClick, NoSteal }
 pub struct Applied { pub deferred: bool, pub pending: bool, pub shown_all: bool, pub focused: bool }
@@ -419,10 +426,10 @@ pub fn plan(action: WindowAction, s: OsWindowState) -> Plan;   // 순수 — §5
 
 - **포커스를 빼앗지 않는 보이기 · 앞으로 내기**(리뷰 Claude ⑤ · 0.3판 재리뷰 ① — 메인 결정 M22) — 0.2판의 「날 Win32 `place_window(show: true, activate: true)` 로 보인다」는 걷는다: 날 Win32 로 보이면 tao 의 보임 깃발이 거짓으로 남아 다음 트레이 숨기기가 아무것도 하지 않는다(코드 주석 — `first_paint::raise_and_show` 의 ⓑ · `commands::spare` 예열 창 짓기 머리). 대신 이미 있는 「포커스 없이 보이기」 차례(`first_paint::raise_and_show` · ADR-0299)를 그대로 쓴다 — 모두 메인 스레드에서:
   - ⓐ platform `window::place_window(&os, None, ZOrder::Top, show: false, activate: false)` — 숨긴 채(보인 창이면 보인 채) z 만 맨 위.
-  - ⓑ 숨었으면 Tauri `show()` · 최소화면 Tauri `unminimize()`(보임 · 최소화 깃발을 tao 가 맞게 쥔다). 미룬 최대화가 있으면 `apply_deferred_maximize`.
+  - ⓑ 숨었으면 Tauri `show()` · 최소화면 Tauri `unminimize()`(보임 · 최소화 깃발을 tao 가 맞게 쥔다). 그 뒤 적어 둔 바람이 있으면 입힌다(`WindowOps::apply_deferred` — 최대화 · 원래 크기 · 펴기 전에 입히면 `SW_RESTORE` 가 덮는다).
   - ⓒ Tauri `set_focus()` 는 **지금 전경이 우리 프로세스일 때만**(`first_paint::new_window_show(true, foreground_is_ours)` 의 규칙 그대로 — 남의 앱이 전경이면 tao 가 가짜 Alt 로 빼앗으므로 부르지 않는다). 답의 `focused` = 그 뒤 `is_foreground`.
 - **`restore_no_activate` 는 필요 없다**(0.3판 재리뷰 ① 의 「다시 끌어내기」) — 펴기를 날 Win32(`SW_SHOWNOACTIVATE`)로 하면 위 깃발 문제가 그대로 생긴다. Tauri `unminimize()`(tao = `SW_RESTORE`)를 쓴다. `SW_RESTORE` 의 활성화는 OS 의 전경 잠금을 따르고 Alt 를 합성하지 않는다(가능성 높음 — tao 의 `unminimize` 경로는 읽지 않았다 · QA 가 다른 앱이 앞일 때 `window.raise` 로 잰다 · AC9). 다른 앱 위로 올라서는지(ⓐ 만으로)는 기존 미측정 그대로다(코드 주석 — `raise_and_show` 「[미측 — M22]」).
-- **트레이 보이기와 한 경로**(ADR-0229 「경로는 하나」) — `tray::actions::show_main_ui(app, Activation)`: `TrayClick` = 지금 그대로(예열 창 아닌 모든 창에 `cancel_hold` → `show()` → 미룬 최대화 → `unminimize()` → `set_focus()` · main 이 마지막 — 누름이 전경 권한을 준다) · `NoSteal` = 첫 화면 대기 창을 건너뛰고(§5-2) 각 창에 ⓐ–ⓑ, ⓒ 는 전경이 우리일 때 main 에만(창 사이 차례 그대로). 예열 창 건너뛰기 · 사용량 관심은 두 갈래가 같이 탄다.
+- **트레이 보이기와 한 경로**(ADR-0229 「경로는 하나」) — `tray::actions::show_main_ui(app, Activation)`: `TrayClick` = 예열 창 아닌 모든 창에 `cancel_hold` → `show()` → `unminimize()` → 미룬 상태 입히기 → `set_focus()`(main 이 마지막 — 누름이 전경 권한을 준다). 입히기를 펴기 뒤에 두는 것은 최소화된 창의 `false` 바람을 잃지 않으려는 것이다 — tao 가 최소화된 동안 최대화 깃발을 내려 두어 원래 크기 입히기의 차이가 비고(아무것도 안 한다), 그 뒤 `SW_RESTORE` 가 최대화로 되돌린다(§5-2 「최소화된 창의 `is_maximized`」 · ⓑ). 지금 코드는 입히기가 펴기 앞이다 — U7a 2부가 `tray::actions::show_main_ui` 의 차례를 이렇게 바꾼다 · `NoSteal` = 첫 화면 대기 창을 건너뛰고(§5-2) 각 창에 ⓐ–ⓑ, ⓒ 는 전경이 우리일 때 main 에만(창 사이 차례 그대로). 예열 창 건너뛰기 · 사용량 관심은 두 갈래가 같이 탄다.
 - **누가 어느 갈래인가**(0.3판 재리뷰 잔손 — M31) — `TrayClick` = 트레이 아이콘 누름 처리기(`tray::mod`)와 단일 인스턴스 플러그인의 두 번째 실행 콜백(`lib.rs` 의 `tauri_plugin_single_instance::init` — 사용자가 앱을 다시 실행했다)뿐 — 둘 다 사람의 손이다. **invoke `show_main_ui`(`commands::tray` — LLM · cdp 가 부르는 §5 표면 · 코드 주석)는 `NoSteal`** 로 바꾼다 — 버스 `window.showAll` 과 같은 결과가 되고, LLM 에게 두 번째 「빼앗는 길」이 남지 않는다.
 - **앞 창 판정**(리뷰 Claude ④ — 메인 결정 M12) — Windows 에서는 Tauri `is_focused` 를 쓰지 않는다: wry 가 창의 `WM_SETFOCUS` 마다 포커스를 웹뷰로 넘겨 그 값이 웹뷰가 키보드 포커스를 쥔 동안 거짓이다(코드 주석 — `state::placement::foreground_is_ours` · 소스 독해 · GUI 미검). 대신 platform 에 `window::is_foreground(w: &impl HasWindowHandle) -> Option<bool>`(Windows = `GetForegroundWindow` 가 그 최상위 창인가 · 그 밖 = `None` → 셸이 Tauri `is_focused` 로 물러난다)을 더한다 — `foreground_is_current_process` 와 같은 꼴 · `cfg` 는 그 함수 안에만. 「많아야 한 창만 참」은 전경 창이 하나라 선다.
 - 서비스 함수(`window_ctl`)는 창 인자를 해석하고(§4-5) · 레이아웃 락 안에서 그 창이 모델에 있는지 확인하고 · 락 밖에서 `WindowControl::apply` 를 부른다(`raise` 의 숨은 창 갈래는 그 일 안에서 `NoSteal` 보이기를 먼저 한다). 판정 표는 순수 `plan` 이고 실물이 메인 스레드 일 안에서 그것을 부른다 — 그래서 판정은 Tauri 없이 표 시험으로, 순서(보이기 일과의 끼어듦)는 §5-2 의 메인 스레드 줄 흉내로 잰다.
@@ -651,6 +658,8 @@ CDP(`scripts/cdp.mjs`)가 재는 것 — DOM 배치 · 번호 · `window.list` �
 | AC17 · AC22 | U8a · U8b | CDP(창 폭 줄이기) |
 | AC32 · AC37 | U7a · U2 | 단위 하네스(AC37 = 저장 기록기의 기존 실패 · 원자 쓰기 시험 + 새 칸 왕복) |
 | AC19 · AC33 | — | 없음(Q1 · T1) |
+
+- **숨은 창 보이기의 전경**(AC9 · U7a) — 다른 앱을 앞에 둔 채 숨은 main 을 `window.showAll` · `window.raise` 로 보이고, 전경이 옮겨 가는지를 갈래마다 적는다: main 이 숨기 전 최대화였나 · 아니었나 × 바람 없음 · `window.unmaximize` 로 적은 `false` 바람(숨은 팝아웃에 `window.maximize` 로 적은 `true` 바람도 같이 본다). 활성화가 끼어들 자리가 셋이다 — tao `show()` 가 내는 `SW_SHOW`(포커스를 받게 지은 창이면 활성화한다) · 바람을 입히는 `SW_MAXIMIZE` · 펴기와 원래 크기 입히기의 `SW_RESTORE`(둘 다 활성화를 겸한다). 옮겨 가면 AC9 위반이다. LLM 길에서 이것이 지켜지는지는 모른다(M22).
 
 ---
 

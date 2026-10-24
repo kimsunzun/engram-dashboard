@@ -45,6 +45,9 @@ use engram_dashboard_command::{
 
 use super::apply;
 use super::window_arg::{self, WindowArgError};
+use super::window_ctl::{
+    self, Activation, Applied, CloseOutcome, WindowAction, WindowControl, WindowCtlError,
+};
 use super::{
     AgentSpawner, LabelSource, LayoutEvents, LayoutState, SlotContent, SplitDir, SubscriptionSync,
     WindowHost,
@@ -65,6 +68,10 @@ use crate::theme::{ThemeControl, ThemeError, UiTheme, WindowTheme};
 //   `window.setTheme`·`window.getTheme`(화면에는 테마를 바꾸는 UI 가 없다 — TRD S21-storage §10 F7) ·
 //   `split.setRatio`·`split.list`(화면의 구분선 드래그는 Tauri `set_split_ratio` 를 직접 부르고 레지스트리에
 //   이름을 싣지 않는다 — ADR-0227).
+// ★세대 20 = 창 상태 명령 여섯(`window.minimize` · `window.maximize` · `window.unmaximize` · `window.raise` ·
+//   `window.hideAll` · `window.showAll`)이 들고 `window.close` 가 main 을 받는 세대★(TRD S26-window-chrome §6-1 · §6-6) —
+//   `window.close` 는 `if_empty` 를 받고 답이 `outcome` 을 싣는다(main = 모든 창 숨기기 · 지금까지의 `CONFLICT` 대신).
+//   `window.list` 의 답은 `windows` 를 그대로 두고 `details` 를 더했다.
 // ★세대 19 = 창 인자가 영속 id(window_id)도 받고 숫자만인 인자(창 번호)를 `INVALID_ARGUMENT` 로 거절하는 세대★(TRD
 //   S26-window-chrome §4-5 · §6-6) — 이름 · 인자 타입은 그대로고 창 인자를 받는 동사의 받는 어휘 · 오류 어휘(앞 실행의
 //   label = `CONFLICT`)와 summary 가 바뀌었다. `window.list` 의 summary 도 번호를 다시 쓰는 규칙을 말하게 됐다. 같은
@@ -109,7 +116,7 @@ use crate::theme::{ThemeControl, ThemeError, UiTheme, WindowTheme};
 //   ★wire 프로토콜 판(`engram_dashboard_protocol::PROTOCOL_VERSION`)과 다른 번호다★ — 그쪽은 프레임 계약이고
 //   이쪽은 이 crate 의 어휘 세대다. 하나를 올린다고 다른 하나가 따라 올라가지 않는다.
 declare_commands! {
-    catalog_version: 19;
+    catalog_version: 20;
 
     /// 탭 바 한 칸 — `name` = 보이는 이름 · `named` = 이름을 정했나(거짓이면 `name` 은 포커스 칸 내용을 따라 바뀐다).
     struct TabRow {
@@ -180,6 +187,28 @@ declare_commands! {
         description: String,
     }
 
+    /// 창 하나 — window_id = 재시작을 넘어 같은 창(창 인자로 넘길 값) · window = label(그 실행 안에서만) · number = 보이는
+    /// 창 번호(다시 쓰인다 — 창 인자로 받지 않는다) · main = main 창인가 · visible · minimized · maximized = 그 순간의 OS
+    /// 상태 · focused = 그 창이 OS 전경 창인가. OS 창을 못 읽은 창은 넷 다 false 다.
+    struct WindowRow {
+        window_id: String,
+        window: String,
+        number: u32,
+        main: bool,
+        visible: bool,
+        minimized: bool,
+        maximized: bool,
+        focused: bool,
+    }
+
+    /// window.close 의 결말 — Closed = 팝아웃을 닫았다 · HiddenAll = main 이라 닫지 않고 모든 창을 숨겼다 · Kept =
+    /// if_empty 인데 그 창에 탭이 있거나 이미 닫혀 그대로 뒀다.
+    enum WindowCloseOutcome {
+        Closed,
+        HiddenAll,
+        Kept,
+    }
+
     /// 창에 빈 탭을 하나 더 만들고 활성화한다. name 을 빼면 자동 이름 — 그 탭의 포커스 칸(에이전트면 그 이름)을
     /// 따라 바뀐다(tab.list 의 named = false). name 을 주면 정한 이름이다(앞뒤 공백은 깎는다).
     /// window = window.list 의 window_id(재시작을 넘어 같은 창) 또는 같은 실행 안 label. 번호는 받지 않는다(다시
@@ -243,21 +272,85 @@ declare_commands! {
                     -> ok   WindowCreateOk { window: String, window_id: String, number: u32 }
                     errors [CONFLICT];
 
-    /// 창을 통째로 닫는다(main 창은 거부된다). window 는 tab.create 와 같다(window_id 또는 같은 실행 안 label ·
-    /// 번호는 받지 않는다).
+    /// 창을 닫는다 — 팝아웃은 탭째 닫고(outcome = Closed), main 은 닫지 않고 모든 창을 숨긴다(HiddenAll — window.hideAll
+    /// 과 같다 · window.showAll 이나 트레이 「보이기」가 되살린다). if_empty = true 면 window 는 그 창의 window_id 여야 하고,
+    /// 그 창에 탭이 들어와 있거나 이미 닫혔으면 닫지 않는다(Kept — 오류가 아니다). window 는 tab.create 와 같다(window_id
+    /// 또는 같은 실행 안 label · 번호는 받지 않는다 — if_empty 여도 INVALID_ARGUMENT).
     #[effect(Write)]
     #[since(1)]
     "window.close" => args WindowCloseArgs {
         window: String,
-    } -> ok WindowCloseOk {} errors [CONFLICT];
+        if_empty: Option<bool>,
+    } -> ok WindowCloseOk {
+        outcome: WindowCloseOutcome,
+    } errors [CONFLICT];
 
-    /// 지금 열려 있는 창 label 전량. 창 번호는 비어 있는 가장 작은 수를 다시 쓴다 — 닫히는 창이 아직 없어지지
-    /// 않았으면 그 번호는 비지 않는다.
+    /// 지금 열려 있는 창. windows = label 전량 · details = 창마다 window_id · label · 번호 · main 인가 · OS 상태(번호 순 ·
+    /// 칸 뜻은 행 모양). 창 번호는 비어 있는 가장 작은 수를 다시 쓴다 — 닫히는 창이 아직 없어지지 않았으면 그 번호는 비지
+    /// 않는다(그 창은 목록에 없다). 창을 가리킬 때는 번호가 아니라 window_id 를 넘긴다.
     #[effect(Read)]
     #[since(1)]
     "window.list" => args WindowListArgs {}
-                  -> ok   WindowListOk { windows: Vec<String> }
+                  -> ok   WindowListOk { windows: Vec<String>, details: Vec<WindowRow> }
                   errors [CONFLICT];
+
+    /// 창을 최소화한다(이미 최소화면 무동작). 보이지 않는 창은 CONFLICT — 숨은 창은 먼저 window.raise 또는
+    /// window.showAll, 아직 첫 화면 전인 창은 곧 보인다. window 는 tab.create 와 같다(window_id 또는 같은 실행 안 label ·
+    /// 번호는 받지 않는다).
+    #[effect(Write)]
+    #[since(20)]
+    "window.minimize" => args WindowMinimizeArgs {
+        window: String,
+    } -> ok WindowMinimizeOk {} errors [CONFLICT];
+
+    /// 창을 최대화한다(이미 최대화면 무동작). 보이지 않는 창(숨김 · 아직 첫 화면 전)은 화면을 건드리지 않고 미뤄 뒀다가
+    /// 그 창이 보일 때 최대화로 보인다 — deferred = true. window 는 tab.create 와 같다(window_id 또는 같은 실행 안 label ·
+    /// 번호는 받지 않는다).
+    #[effect(Write)]
+    #[since(20)]
+    "window.maximize" => args WindowMaximizeArgs {
+        window: String,
+    } -> ok WindowMaximizeOk {
+        deferred: bool,
+    } errors [CONFLICT];
+
+    /// 최대화된 창을 원래 크기로 되돌린다(최대화가 아니면 무동작 · 최소화된 창도 무동작이다 — 먼저 window.raise). 보이지
+    /// 않는 창(숨김 · 아직 첫 화면 전)은 화면을 건드리지 않고 미뤄 뒀다가 그 창이 보일 때 원래 크기로 보인다 — deferred =
+    /// true. window 는 tab.create 와 같다(window_id 또는 같은 실행 안 label · 번호는 받지 않는다).
+    #[effect(Write)]
+    #[since(20)]
+    "window.unmaximize" => args WindowUnmaximizeArgs {
+        window: String,
+    } -> ok WindowUnmaximizeOk {
+        deferred: bool,
+    } errors [CONFLICT];
+
+    /// 창을 앞으로 낸다 — 숨어 있으면 모든 창을 보이고(shown_all = true), 최소화면 펴고, 맨 위로 올린 뒤 전경을 청한다.
+    /// 빼앗지 않는다: 다른 앱이 앞이면 맨 위로만 올라 focused = false(focused 는 그 뒤 그 창이 OS 전경 창인가 그대로다).
+    /// 아직 첫 화면 전인 창은 손대지 않는다(곧 보인다 — pending = true). window 는 tab.create 와 같다(window_id 또는 같은
+    /// 실행 안 label · 번호는 받지 않는다).
+    #[effect(Write)]
+    #[since(20)]
+    "window.raise" => args WindowRaiseArgs {
+        window: String,
+    } -> ok WindowRaiseOk {
+        shown_all: bool,
+        focused: bool,
+        pending: bool,
+    } errors [CONFLICT];
+
+    /// 모든 창을 숨긴다(트레이로 — main 의 닫기와 같다). 되살리려면 window.showAll 또는 window.raise.
+    #[effect(Write)]
+    #[since(20)]
+    "window.hideAll" => args WindowHideAllArgs {} -> ok WindowHideAllOk {} errors [];
+
+    /// 숨은 창을 모두 보인다 — 포커스를 빼앗지 않는다(다른 앱이 앞이면 보이기만 한다). 아직 첫 화면 전인 창은 건너뛴다(곧
+    /// 저절로 보인다). focused = 그 뒤 main 이 OS 전경 창인가.
+    #[effect(Write)]
+    #[since(20)]
+    "window.showAll" => args WindowShowAllArgs {} -> ok WindowShowAllOk {
+        focused: bool,
+    } errors [];
 
     // ADR-0265
     /// 창 하나의 테마를 읽는다. window = window.list 의 window_id(재시작을 넘어 같은 창) 또는 같은 실행 안 label —
@@ -557,9 +650,9 @@ declare_commands! {
 
 /// 이 표의 핸들러들이 잡는 실물 전량 — ★조립 때 주입된다★(ADR-0155 결정 5 / 규칙 T-1).
 ///
-/// 앞 다섯의 계약(어느 것이 락 안이고 어느 것이 락 밖인가)은 적용 서비스가 소유한다 — 이 구조체는 그것을
-/// **소유형으로** 들고 있을 뿐이다. `#[tauri::command]` 쪽이 빌려 쓰는 어댑터를 `Arc` 로 바꾼 것이 차이의
-/// 전부이고, 그렇게 하는 이유는 표의 핸들러가 `'static` 이어야 하기 때문이다.
+/// 앞 다섯의 계약(어느 것이 락 안이고 어느 것이 락 밖인가)은 적용 서비스가, `control` 의 계약은 `super::window_ctl` 이
+/// 소유한다 — 이 구조체는 그것을 **소유형으로** 들고 있을 뿐이다. `#[tauri::command]` 쪽이 빌려 쓰는 어댑터를 `Arc` 로
+/// 바꾼 것이 차이의 전부이고, 그렇게 하는 이유는 표의 핸들러가 `'static` 이어야 하기 때문이다.
 ///
 /// ★이름이 `Layout` 인데 적용 서비스 밖 포트가 넷 있다★(`themes` · `settings` · `settings_events` · `restore`) —
 /// 표가 하나라 포트 묶음도 하나다(사유 = 모듈 헤더 「레이아웃 밖의 셸 명령도 여기 선다」). 그 포트들은 적용 서비스를
@@ -572,6 +665,9 @@ pub struct LayoutPorts {
     pub windows: Arc<dyn WindowHost>,
     pub labels: Arc<dyn LabelSource>,
     pub spawner: Arc<dyn AgentSpawner>,
+    /// 창 상태(최소화 · 최대화 · 보이기 · 숨기기 · OS 상태 읽기) — 계약은 `super::window_ctl` 이 소유한다. 실물이 메인
+    /// 스레드 일을 기다리므로 이 포트를 부르는 동사는 [`offloaded_handler`] 로 꽂는다.
+    pub control: Arc<dyn WindowControl>,
     /// 창 테마 읽기 · 쓰기 · 밀기 — 설정 알림 · 복원 조율자와 **같은 유효 테마 인스턴스**.
     pub themes: ThemeControl,
     /// 셸 설정 — 사람 경로(Tauri 설정 command)와 **같은 인스턴스**.
@@ -626,17 +722,82 @@ pub fn make_table(ports: LayoutPorts) -> CommandTable {
         "window.create",
         blocking_handler(move |_: WindowCreateArgs| verb_window_create(&p)),
     );
+    // 창 상태 포트를 부르는 동사 — 실물이 메인 스레드 일을 기다린다(TRD S26-window-chrome §5-2). `window.close` 는
+    //   main 이면 모두 숨기기를 기다리고, `window.list` 는 창마다 OS 상태를 읽는다.
     let p = Arc::clone(&ports);
     plug(
         &mut table,
         "window.close",
-        blocking_handler(move |args: WindowCloseArgs| verb_window_close(&p, args)),
+        offloaded_handler(move |args: WindowCloseArgs| verb_window_close(&p, args)),
     );
     let p = Arc::clone(&ports);
     plug(
         &mut table,
         "window.list",
-        blocking_handler(move |_: WindowListArgs| verb_window_list(&p)),
+        offloaded_handler(move |_: WindowListArgs| verb_window_list(&p)),
+    );
+    let p = Arc::clone(&ports);
+    plug(
+        &mut table,
+        "window.minimize",
+        offloaded_handler(move |args: WindowMinimizeArgs| {
+            verb_window_act(&p, &args.window, WindowAction::Minimize).map(|_| WindowMinimizeOk {})
+        }),
+    );
+    let p = Arc::clone(&ports);
+    plug(
+        &mut table,
+        "window.maximize",
+        offloaded_handler(move |args: WindowMaximizeArgs| {
+            verb_window_act(&p, &args.window, WindowAction::Maximize).map(|applied| {
+                WindowMaximizeOk {
+                    deferred: applied.deferred,
+                }
+            })
+        }),
+    );
+    let p = Arc::clone(&ports);
+    plug(
+        &mut table,
+        "window.unmaximize",
+        offloaded_handler(move |args: WindowUnmaximizeArgs| {
+            verb_window_act(&p, &args.window, WindowAction::Unmaximize).map(|applied| {
+                WindowUnmaximizeOk {
+                    deferred: applied.deferred,
+                }
+            })
+        }),
+    );
+    let p = Arc::clone(&ports);
+    plug(
+        &mut table,
+        "window.raise",
+        offloaded_handler(move |args: WindowRaiseArgs| {
+            verb_window_act(&p, &args.window, WindowAction::Raise).map(|applied| WindowRaiseOk {
+                shown_all: applied.shown_all,
+                focused: applied.focused,
+                pending: applied.pending,
+            })
+        }),
+    );
+    let p = Arc::clone(&ports);
+    plug(
+        &mut table,
+        "window.hideAll",
+        offloaded_handler(move |_: WindowHideAllArgs| {
+            p.control.hide_all();
+            Ok(WindowHideAllOk {})
+        }),
+    );
+    let p = Arc::clone(&ports);
+    plug(
+        &mut table,
+        "window.showAll",
+        offloaded_handler(move |_: WindowShowAllArgs| {
+            Ok(WindowShowAllOk {
+                focused: p.control.show_all(Activation::NoSteal),
+            })
+        }),
     );
     let p = Arc::clone(&ports);
     plug(
@@ -912,25 +1073,64 @@ fn verb_window_create(ports: &LayoutPorts) -> Result<WindowCreateOk, CommandErro
     })
 }
 
+// 창 인자를 해석기에 넘기기 전에 `if_empty` 를 본다 — 그 길의 창은 대개 이미 모델에 없다(차례 = `window_ctl::close`).
 fn verb_window_close(
     ports: &LayoutPorts,
     args: WindowCloseArgs,
 ) -> Result<WindowCloseOk, CommandError> {
-    let window = window_label(ports, "window", &args.window)?;
-    apply::close_window(
+    let window = text("window", &args.window)?;
+    let outcome = window_ctl::close(
         &ports.state,
         ports.subs.as_ref(),
         ports.windows.as_ref(),
-        &window,
+        ports.control.as_ref(),
+        window,
+        args.if_empty.unwrap_or(false),
     )
-    .map_err(not_applied)?;
-    Ok(WindowCloseOk {})
+    .map_err(window_ctl_error)?;
+    Ok(WindowCloseOk {
+        outcome: match outcome {
+            CloseOutcome::Closed => WindowCloseOutcome::Closed,
+            CloseOutcome::HiddenAll => WindowCloseOutcome::HiddenAll,
+            CloseOutcome::Kept => WindowCloseOutcome::Kept,
+        },
+    })
 }
 
 fn verb_window_list(ports: &LayoutPorts) -> Result<WindowListOk, CommandError> {
+    let rows = window_ctl::list(&ports.state, ports.control.as_ref()).map_err(not_applied)?;
     Ok(WindowListOk {
-        windows: apply::list_windows(&ports.state).map_err(not_applied)?,
+        windows: rows.iter().map(|row| row.window.clone()).collect(),
+        details: rows
+            .into_iter()
+            .map(|row| WindowRow {
+                window_id: row.window_id,
+                window: row.window,
+                number: row.number,
+                main: row.main,
+                visible: row.os.visible,
+                minimized: row.os.minimized,
+                maximized: row.os.maximized,
+                focused: row.os.focused,
+            })
+            .collect(),
     })
+}
+
+fn verb_window_act(
+    ports: &LayoutPorts,
+    window: &str,
+    action: WindowAction,
+) -> Result<Applied, CommandError> {
+    let window = text("window", window)?;
+    window_ctl::act(&ports.state, ports.control.as_ref(), window, action).map_err(window_ctl_error)
+}
+
+fn window_ctl_error(error: WindowCtlError) -> CommandError {
+    match error {
+        WindowCtlError::Arg(error) => window_arg_error(error),
+        WindowCtlError::NotApplied(detail) => not_applied(detail),
+    }
 }
 
 fn verb_window_get_theme(

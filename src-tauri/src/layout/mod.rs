@@ -14,6 +14,7 @@ pub mod tab_name;
 pub mod tree;
 pub mod types;
 pub mod window_arg;
+pub mod window_ctl;
 
 pub use apply::{
     AgentSpawner, DockDest, DockOutcome, DockRequest, LabelSource, LayoutEvents, MoveFailed,

@@ -310,9 +310,7 @@ enum Os {
 // 모델에서 빠졌고 OS 창은 아직 `Destroyed` 를 내지 않은 팝아웃 하나(TRD S26-window-chrome §3-1 · §4-1).
 #[derive(Debug, Clone)]
 struct Closing {
-    // 0탭 자가닫힘이 영속 id 로 이 표를 찾는다(TRD §5-5).
-    // TODO(T-66 U7a): `window_ctl::close_if_empty` 가 이 칸을 읽으면 아래 allow 를 걷는다.
-    #[cfg_attr(not(test), allow(dead_code))]
+    // 0탭 자가닫힘이 영속 id 로 이 표를 찾는다(TRD §5-5 · [`ViewManager::closing_label_for`]).
     window_id: String,
     number: u32,
 }
@@ -508,6 +506,23 @@ impl ViewManager {
     /// 않는다. `version` 은 그대로다(번호를 저장 · 알림에 싣는 창 항목이 바뀌지 않는다).
     pub fn release_closing(&mut self, label: &str) -> bool {
         self.closing.remove(label).is_some()
+    }
+
+    /// 닫히는 창 중 영속 id 가 `window_id` 인 것의 label — 철자가 같은 것 먼저, 없으면 UUID 값이 같은 것(창 인자
+    /// 해석기와 같은 규칙 — `super::window_arg::resolve`). 없으면 `None`. 0탭 자가닫힘이 쓴다(TRD S26-window-chrome §5-5).
+    pub fn closing_label_for(&self, window_id: &str) -> Option<WindowLabel> {
+        let by_spelling = self
+            .closing
+            .iter()
+            .find(|(_, closing)| closing.window_id == window_id);
+        if let Some((label, _)) = by_spelling {
+            return Some(label.clone());
+        }
+        let id = Uuid::parse_str(window_id).ok()?;
+        self.closing
+            .iter()
+            .find(|(_, closing)| Uuid::parse_str(&closing.window_id).ok() == Some(id))
+            .map(|(label, _)| label.clone())
     }
 
     // 창 `label` 의 탭을 들인다 — 소유 쌍(불변식 1·2)과 활성 검사(불변식 3). 돌려주는 것 = (탭 순서, 활성 탭).
@@ -1691,6 +1706,20 @@ impl ViewManager {
         theme: Option<UiTheme>,
     ) -> Result<(), LayoutError> {
         self.update_attrs(label, |attrs| attrs.set_theme(theme))
+    }
+
+    /// 최대화 표식만 적는다 — `bounds` 는 그대로다. 보이지 않는 창의 최대화를 미루거나 거둘 때 쓴다(TRD S26-window-chrome
+    /// §5-2 — 그 창이 보이며 입혀지면 자리 기록이 같은 값을 다시 적는다).
+    pub fn set_window_maximized(
+        &mut self,
+        label: &str,
+        maximized: bool,
+    ) -> Result<(), LayoutError> {
+        self.update_attrs(label, |attrs| {
+            let changed = attrs.maximized != maximized;
+            attrs.maximized = maximized;
+            changed
+        })
     }
 
     /// `Moved` · `Resized` 때 읽은 게터 한 벌을 적는다 — 규칙은 [`WindowAttrs::observe`].

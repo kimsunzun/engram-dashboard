@@ -33,7 +33,7 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, TryLockError};
 
 use engram_dashboard_protocol::AgentBackendKind;
@@ -48,6 +48,7 @@ use engram_dashboard_lib::layout::bands::PointCss;
 use engram_dashboard_lib::layout::dock::{DockAnchor, DockSide, DOCK_NEW_SHARE};
 use engram_dashboard_lib::layout::geometry::{Insets, PxRect};
 use engram_dashboard_lib::layout::manager::{DockError, DockMove, FocusPolicy};
+use engram_dashboard_lib::layout::window_ctl::{self, CloseOutcome};
 use engram_dashboard_lib::layout::{
     tree, LayoutNode, LayoutState, SlotContent, SplitDir, SplitRatioOutcome, UiMetrics,
     ViewManager, ViewSnapshot, WindowBounds, WindowPlacement, MAIN_WINDOW_LABEL,
@@ -215,6 +216,9 @@ struct Host {
     generation: AtomicU32,
     /// 모델에 든 뒤 · 확정 전에 시험이 모델에서 지운 label — `record_placement` 가 그것에는 모델 항목을 요구하지 않는다.
     vanished: Mutex<Vec<String>>,
+    /// 참이면 `close` 가 아무것도 하지 않는다(기록만 남긴다) — 「모델에서만 빠지고 OS 창은 남은 창」을 세운다(TRD
+    /// S26-window-chrome §2-3 「시험 몫 도우미」).
+    close_does_nothing: AtomicBool,
 }
 
 impl Host {
@@ -237,6 +241,7 @@ impl Host {
             claims_asked: AtomicUsize::new(0),
             generation: AtomicU32::new(0),
             vanished: Mutex::new(Vec::new()),
+            close_does_nothing: AtomicBool::new(false),
         }
     }
 
@@ -355,6 +360,9 @@ impl WindowHost for Host {
     fn close(&self, label: &str) {
         self.probe.assert_outside("WindowHost::close");
         self.journal.note(format!("close:{label}"));
+        if self.close_does_nothing.load(Ordering::Relaxed) {
+            return;
+        }
         self.closed.lock().unwrap().push(label.to_string());
     }
 
@@ -1200,6 +1208,66 @@ fn close_window_main_is_rejected_and_os_window_untouched() {
     assert!(apply::list_windows(&w.state)
         .unwrap()
         .contains(&MAIN_WINDOW_LABEL.to_string()));
+}
+
+// ── 0탭 자가닫힘(TRD S26-window-chrome §5-5 · §10-2) ──
+
+fn window_id_of(w: &World, label: &str) -> String {
+    apply::list_tabs(&w.state, label).unwrap().window_id
+}
+
+// 닫기가 아무것도 하지 않아 모델에서만 빠지고 OS 창이 남은 팝아웃을 비었으면 닫기가 그 영속 id 로 닫는다(AC24 의 0탭 갈래).
+#[test]
+fn close_if_empty_closes_a_popout_that_left_the_model_with_its_os_window_open() {
+    let w = World::new();
+    let label = w.popup();
+    let id = window_id_of(&w, &label);
+    w.host.close_does_nothing.store(true, Ordering::Relaxed);
+    apply::close_window(&w.state, &w.subs, &w.host, &label).unwrap();
+    w.host.close_does_nothing.store(false, Ordering::Relaxed);
+    assert!(w.host.is_open(&label), "OS 창은 남았다");
+    assert!(!apply::list_windows(&w.state).unwrap().contains(&label));
+
+    assert_eq!(
+        window_ctl::close_if_empty(&w.state, &w.host, &id),
+        Ok(CloseOutcome::Closed)
+    );
+    assert_eq!(&*w.host.closed.lock().unwrap(), &[label]);
+}
+
+// 탭이 있는 창(그사이 탭이 들어온 창)은 닫지 않고, 영속 id 로만 고르므로 같은 번호를 받은 새 창에도 닿지 않는다(AC32).
+#[test]
+fn close_if_empty_keeps_a_window_with_tabs_and_never_reaches_a_new_window() {
+    let w = World::new();
+    let kept = w.popup();
+    apply::create_tab(&w.state, &w.subs, &w.ev, &kept, None).unwrap();
+    assert_eq!(
+        window_ctl::close_if_empty(&w.state, &w.host, &window_id_of(&w, &kept)),
+        Ok(CloseOutcome::Kept)
+    );
+
+    let left = w.popup();
+    let left_id = window_id_of(&w, &left);
+    w.host.close_does_nothing.store(true, Ordering::Relaxed);
+    apply::close_window(&w.state, &w.subs, &w.host, &left).unwrap();
+    w.host.close_does_nothing.store(false, Ordering::Relaxed);
+    engram_dashboard_lib::layout::release_window_number(&w.state, &left);
+    let newcomer = w.popup();
+    assert_eq!(
+        number_of(&w, &newcomer),
+        3,
+        "새 창이 그 번호를 다시 받았다 — 번호가 아니라 영속 id 로 고른다"
+    );
+    assert_eq!(
+        window_ctl::close_if_empty(&w.state, &w.host, &window_id_of(&w, &newcomer)),
+        Ok(CloseOutcome::Kept)
+    );
+    assert!(w.host.closed.lock().unwrap().is_empty());
+    assert_eq!(
+        window_ctl::close_if_empty(&w.state, &w.host, &left_id),
+        Ok(CloseOutcome::Kept),
+        "번호를 푼 창(그 OS 창의 `Destroyed` 가 지나갔다)은 닫힐 것이 없다"
+    );
 }
 
 // ── split_slot / close_slot ──────────────────────────────────────────────────

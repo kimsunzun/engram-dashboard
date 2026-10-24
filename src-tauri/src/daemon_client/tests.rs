@@ -5444,6 +5444,7 @@ use super::usage_interest::USAGE_INTEREST_SHRINK_DELAY;
 use crate::commands::layout::{OwnedSubs, RouterSubs};
 use crate::commands::popout::{close_requested_popup_window, drop_window_in_model, PopupCounter};
 use crate::layout::commands::{make_table, LayoutPorts, CATALOG_VERSION};
+use crate::layout::window_ctl::{Activation, Applied, OsWindowState, WindowAction, WindowControl};
 use crate::layout::{
     apply, AgentSpawner, LayoutEvents, LayoutState, MoveFailed, MoveStep, SpareClaim, ViewSnapshot,
     WindowHost, WindowPlace, WindowTabsPayload,
@@ -5488,6 +5489,21 @@ impl WindowHost for NoWindows {
     }
     fn committed(&self, _claim: &SpareClaim) {}
     fn release_spare(&self, _claim: &SpareClaim) {}
+}
+
+struct NoWindowControl;
+
+impl WindowControl for NoWindowControl {
+    fn apply(&self, _label: &str, _action: WindowAction) -> Result<Applied, String> {
+        Err(NO_OS_WINDOW.to_string())
+    }
+    fn show_all(&self, _how: Activation) -> bool {
+        false
+    }
+    fn hide_all(&self) {}
+    fn state(&self, _label: &str) -> Option<OsWindowState> {
+        None
+    }
 }
 
 struct NoSpawner;
@@ -5540,6 +5556,7 @@ fn bus_table(state: &LayoutState, client: &Arc<DaemonClient>) -> CommandTable {
         windows: Arc::new(NoWindows),
         labels: Arc::new(PopupCounter::default()),
         spawner: Arc::new(NoSpawner),
+        control: Arc::new(NoWindowControl),
         themes,
         settings,
         settings_events: Arc::new(NoSettingsEvents),
