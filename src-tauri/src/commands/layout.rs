@@ -2,7 +2,7 @@
 //!
 //! ★이 파일에 로직이 없다★: `#[tauri::command]` 전부가 전송 중립 적용 서비스(`crate::layout::apply`)를
 //! 부르는 얇은 껍데기이고, 락 규율·순서·검증은 전부 거기 있다(ADR-0081 결정 3 — 사람 클릭과 중계된 LLM
-//! 호출이 같은 함수에 떨어진다). 여기 남는 것은 Tauri 세계로의 번역 4종(알림 emit · 구독 재동기 ·
+//! 호출이 같은 함수에 떨어진다). 여기 남는 것은 Tauri 세계로의 번역 4종(알림 emit(+ OS 창 제목 — `crate::chrome`) · 구독 재동기 ·
 //! OS 창 · 데몬 스폰)과 측정 보고의 창 label(Tauri 가 넣어 주는 `Window` 에서 꺼낸다)뿐이다.
 //!
 //! ## ★이벤트: 창별 `window:tabs-updated`(ADR-0057)★
@@ -67,8 +67,10 @@ impl LayoutEvents for TauriEvents<'_> {
         }
     }
 
+    // 페이로드의 제목은 OS 창에도 입힌다 — 웹은 그 칸을 읽지 않는다(TRD S26-window-chrome §4-4).
     fn window_tabs_updated(&self, tabs: &WindowTabsPayload) {
         emit_window_tabs(self.app, tabs);
+        crate::chrome::push_title(self.app, tabs);
     }
 }
 
@@ -309,6 +311,7 @@ pub async fn create_window(
             router: &router,
             client: &client,
         },
+        &TauriEvents { app: &app },
         &TauriWindowHost { app: &app },
         &**counter,
     )

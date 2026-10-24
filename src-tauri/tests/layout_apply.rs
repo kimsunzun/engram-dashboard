@@ -30,6 +30,7 @@
 //! 스레드가 락을 쥐고 있으면 `is_err()` 가 거짓 통과할 수 있다 — 이 파일은 스레드를 만들지 않는다).
 //! 실 Tauri 어댑터는 창이 필요해 여기서 못 돌린다(그건 GUI 실측 몫).
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
@@ -534,7 +535,8 @@ impl World {
 
     // 팝업 창 하나(빈 탭 1개) — WindowClosed/close_window 경로의 전제.
     fn popup(&self) -> String {
-        apply::create_window(&self.state, &self.subs, &self.host, &self.labels).expect("창 생성")
+        apply::create_window(&self.state, &self.subs, &self.ev, &self.host, &self.labels)
+            .expect("창 생성")
     }
 
     // 창 포트가 맡길 숨은 예열 창 하나 — 운영처럼 지을 때 발급기에서 label 을 받는다. 반환 = 그 label.
@@ -679,7 +681,8 @@ fn create_tab_unknown_window_is_err_without_notify() {
 #[test]
 fn create_window_registers_model_and_opens_os_window() {
     let w = World::new();
-    let label = apply::create_window(&w.state, &w.subs, &w.host, &w.labels).unwrap();
+    let version = w.version();
+    let label = apply::create_window(&w.state, &w.subs, &w.ev, &w.host, &w.labels).unwrap();
 
     assert_eq!(&*w.host.opened.lock().unwrap(), &[label.clone()]);
     assert_eq!(
@@ -693,11 +696,16 @@ fn create_window_registers_model_and_opens_os_window() {
         1,
         "빈 탭 1개"
     );
-    // 성공 경로는 프론트에 아무것도 안 쏜다(창 mount 시 list_tabs pull — §3-3).
-    assert_eq!(w.layout_events() + w.tab_events(), 0);
+    // 새 창의 탭 목록 하나 — OS 제목을 입히는 재료다(TRD S26-window-chrome §2-4 ② · §4-4). 배치는 웹이 마운트 때 당긴다.
+    assert_eq!(w.layout_events(), 0);
+    assert_eq!(w.tab_events(), 1);
+    let notified = w.last_tabs();
+    assert_eq!(notified, apply::list_tabs(&w.state, &label).unwrap());
+    assert_eq!(notified.title, "빈 칸 - Engram:2");
+    assert!(notified.version > version, "새 판으로 알린다");
 }
 
-// TRD S21-slot-docking §8-1 ⑬ — 새로 짓기 차례 `open` → 모델 넣기 → `record_placement`(알림 없음). 모델에 들기 전에
+// TRD S21-slot-docking §8-1 ⑬ — 새로 짓기 차례 `open` → 모델 넣기 → 탭 알림 → `record_placement`. 모델에 들기 전에
 // 연다는 것은 가짜 `open` 이 스스로 잰다. 넣기가 거절되는 갈래(묘비)는 `commands::popout` 의 셸 단위 시험이 잰다 — 묘비를
 // 다는 함수가 이 crate 에서 닿지 않는다.
 #[test]
@@ -710,11 +718,15 @@ fn create_window_opens_then_inserts_then_records_the_placement() {
         );
     }));
 
-    let label = apply::create_window(&w.state, &w.subs, &w.host, &w.labels).unwrap();
+    let label = apply::create_window(&w.state, &w.subs, &w.ev, &w.host, &w.labels).unwrap();
 
     assert_eq!(
         w.journal.take(),
-        [format!("open:{label}"), format!("place:{label}")]
+        [
+            format!("open:{label}"),
+            format!("tabs:{label}"),
+            format!("place:{label}")
+        ]
     );
     assert_eq!(w.resyncs(), 1, "넣기 한 번");
 }
@@ -727,7 +739,7 @@ fn create_window_open_failure_leaves_the_model_untouched() {
         .unwrap()
         .version;
 
-    let err = apply::create_window(&w.state, &w.subs, &w.host, &w.labels).unwrap_err();
+    let err = apply::create_window(&w.state, &w.subs, &w.ev, &w.host, &w.labels).unwrap_err();
     assert!(err.contains("창 생성 실패"), "err={err}");
 
     let label = w.host.opened.lock().unwrap()[0].clone();
@@ -751,13 +763,13 @@ fn create_window_open_failure_leaves_the_model_untouched() {
 
 // ── create_window: 예열 창(TRD S21-slot-docking §8-1 ⑬ · ADR-0299) ──
 
-// 예열 차례 `claim_spare` → `open` → 모델 넣기 → `committed` → `record_placement`(알림 없음).
+// 예열 차례 `claim_spare` → `open` → 모델 넣기 → 탭 알림 → `committed` → `record_placement`.
 #[test]
 fn create_window_opens_the_prewarmed_window_inserts_then_commits_before_the_placement() {
     let w = World::new();
     let spare = w.prewarm();
 
-    let label = apply::create_window(&w.state, &w.subs, &w.host, &w.labels).unwrap();
+    let label = apply::create_window(&w.state, &w.subs, &w.ev, &w.host, &w.labels).unwrap();
 
     assert_eq!(label, spare, "맡긴 창의 label 로 연다");
     assert_eq!(
@@ -765,13 +777,14 @@ fn create_window_opens_the_prewarmed_window_inserts_then_commits_before_the_plac
         [
             format!("claim:{label}"),
             format!("open:{label}"),
+            format!("tabs:{label}"),
             format!("committed:{label}"),
             format!("place:{label}"),
         ]
     );
     assert!(apply::list_windows(&w.state).unwrap().contains(&label));
     assert!(!w.claim_outstanding());
-    let next = apply::create_window(&w.state, &w.subs, &w.host, &w.labels).unwrap();
+    let next = apply::create_window(&w.state, &w.subs, &w.ev, &w.host, &w.labels).unwrap();
     assert_eq!(next, "slot-popup-2", "맡길 창이 없으면 발급기의 새 label");
 }
 
@@ -781,7 +794,7 @@ fn create_window_whose_prewarmed_window_fails_to_open_neither_commits_nor_releas
     let w = World::failing_host();
     let spare = w.prewarm();
 
-    let err = apply::create_window(&w.state, &w.subs, &w.host, &w.labels).unwrap_err();
+    let err = apply::create_window(&w.state, &w.subs, &w.ev, &w.host, &w.labels).unwrap_err();
 
     assert!(err.contains("창 생성 실패"), "err={err}");
     assert_eq!(
@@ -802,7 +815,7 @@ fn create_window_insert_refusal_gives_the_prewarmed_window_back() {
         state.0.lock().unwrap().create_window(&taken).unwrap();
     }));
 
-    assert!(apply::create_window(&w.state, &w.subs, &w.host, &w.labels).is_err());
+    assert!(apply::create_window(&w.state, &w.subs, &w.ev, &w.host, &w.labels).is_err());
 
     assert_eq!(
         w.journal.take(),
@@ -824,7 +837,7 @@ fn create_window_on_a_poisoned_lock_withdraws_the_window_it_opened() {
         let spare = prewarmed.then(|| w.prewarm());
         *w.host.during_open.lock().unwrap() = Some(Box::new(poison));
 
-        assert!(apply::create_window(&w.state, &w.subs, &w.host, &w.labels).is_err());
+        assert!(apply::create_window(&w.state, &w.subs, &w.ev, &w.host, &w.labels).is_err());
 
         let journal = w.journal.take();
         let expected = match spare {
@@ -850,13 +863,13 @@ fn create_window_on_a_poisoned_lock_withdraws_the_window_it_opened() {
 #[test]
 fn create_window_issues_monotonic_popup_labels_from_real_counter() {
     let w = World::new();
-    let a = apply::create_window(&w.state, &w.subs, &w.host, &w.labels).unwrap();
-    let b = apply::create_window(&w.state, &w.subs, &w.host, &w.labels).unwrap();
+    let a = apply::create_window(&w.state, &w.subs, &w.ev, &w.host, &w.labels).unwrap();
+    let b = apply::create_window(&w.state, &w.subs, &w.ev, &w.host, &w.labels).unwrap();
     assert_eq!(a, "slot-popup-1");
     assert_eq!(b, "slot-popup-2");
 
     apply::close_window(&w.state, &w.subs, &w.host, &a).unwrap();
-    let c = apply::create_window(&w.state, &w.subs, &w.host, &w.labels).unwrap();
+    let c = apply::create_window(&w.state, &w.subs, &w.ev, &w.host, &w.labels).unwrap();
     assert_eq!(c, "slot-popup-3", "닫힌 label 을 되돌려 쓰지 않는다");
     assert!(apply::list_windows(&w.state).unwrap().contains(&c));
 }
@@ -867,19 +880,33 @@ fn number_of(w: &World, label: &str) -> u32 {
     apply::list_tabs(&w.state, label).unwrap().number
 }
 
-// 새 창 세 자리가 예열 창이든 새로 지은 창이든 빈 가장 작은 번호를 받고, 탭 목록 페이로드가 번호와 영속 id 를 싣는다.
+// 새 창의 첫 탭 알림이 번호 · 그 번호를 단 제목 · 방금 쓴 판을 싣는다(TRD S26-window-chrome §10-2). `tab` = 그 창 활성
+//   탭의 보이는 이름.
+fn assert_new_window_announced(w: &World, label: &str, tab: &str) {
+    let notified = w.notified_tabs_of(label);
+    let number = number_of(w, label);
+    assert_eq!(notified.number, number);
+    assert_eq!(notified.title, format!("{tab} - Engram:{number}"));
+    assert_eq!(notified.version, w.version(), "{label} — 새 창을 넣은 판");
+}
+
+// 새 창 세 자리가 예열 창이든 새로 지은 창이든 빈 가장 작은 번호를 받고, 탭 목록 페이로드가 번호 · 제목 · 영속 id 를
+// 싣는다.
 #[test]
 fn every_new_window_path_numbers_the_window_and_the_tabs_payload_carries_it() {
     let w = World::new();
     let main = apply::list_tabs(&w.state, MAIN_WINDOW_LABEL).unwrap();
     assert_eq!((main.number, main.window_id.as_str()), (1, "main"));
+    assert_eq!(main.title, "빈 칸 - Engram:1");
 
     let mut labels = Vec::new();
     for prewarmed in [true, false] {
         if prewarmed {
             w.prewarm();
         }
-        labels.push(apply::create_window(&w.state, &w.subs, &w.host, &w.labels).unwrap());
+        let created = apply::create_window(&w.state, &w.subs, &w.ev, &w.host, &w.labels).unwrap();
+        assert_new_window_announced(&w, &created, "빈 칸");
+        labels.push(created);
 
         if prewarmed {
             w.prewarm();
@@ -889,8 +916,7 @@ fn every_new_window_path_numbers_the_window_and_the_tabs_payload_carries_it() {
             &w.state, &w.subs, &w.ev, &w.host, &w.labels, view, slot, None,
         )
         .unwrap();
-        let notified = w.notified_tabs_of(&moved.window);
-        assert_eq!(notified.number, number_of(&w, &moved.window));
+        assert_new_window_announced(&w, &moved.window, "에이전트");
         labels.push(moved.window);
 
         if prewarmed {
@@ -901,8 +927,7 @@ fn every_new_window_path_numbers_the_window_and_the_tabs_payload_carries_it() {
             .dock(source, DockDest::NewWindow { at: AT }, FocusPolicy::Keep)
             .unwrap();
         assert_eq!(out.prewarmed, prewarmed);
-        let notified = w.notified_tabs_of(&out.window);
-        assert_eq!(notified.number, number_of(&w, &out.window));
+        assert_new_window_announced(&w, &out.window, "빈 칸");
         labels.push(out.window);
     }
 
@@ -2706,6 +2731,242 @@ fn writes_that_change_nothing_notify_nothing() {
     apply::close_tab(&w.state, &w.subs, &w.ev, &w.host, &label, popup_tab).unwrap();
 
     assert_eq!(w.ev.take_order(), Vec::<&str>::new());
+}
+
+// ── OS 창 제목(TRD S26-window-chrome §2-4 ② · §4-4 · §10-2) ──
+
+// 창마다 지금 제목 — 조회로 뜬다.
+fn titles(w: &World) -> BTreeMap<String, String> {
+    apply::list_windows(&w.state)
+        .unwrap()
+        .into_iter()
+        .map(|label| {
+            let title = apply::list_tabs(&w.state, &label).unwrap().title;
+            (label, title)
+        })
+        .collect()
+}
+
+// 쓰기 하나 앞의 모습 — [`TitleCheck::after`] 가 불변식 2 를 잰다: 제목이 바뀐 창(새 창 포함)마다 그 쓰기가 그 창의 탭
+//   목록을 쓰기 앞보다 큰 판으로 알렸고, 그 창의 마지막 알림이 지금 제목을 싣는다.
+struct TitleCheck {
+    titles: BTreeMap<String, String>,
+    version: u64,
+    seen: usize,
+}
+
+impl TitleCheck {
+    fn before(w: &World) -> Self {
+        TitleCheck {
+            titles: titles(w),
+            version: w.version(),
+            seen: w.ev.tabs.lock().unwrap().len(),
+        }
+    }
+
+    // `changes` = 이 쓰기가 어느 창의 제목을 바꾸는가 — 제목을 안 바꾸는 쓰기만 돌려 헛통과하지 않게 짝으로 본다.
+    fn after(self, w: &World, write: &str, changes: bool) {
+        let after = titles(w);
+        let sent = w.ev.tabs.lock().unwrap()[self.seen..].to_vec();
+        let changed: Vec<&String> = after
+            .iter()
+            .filter(|(label, title)| self.titles.get(*label) != Some(*title))
+            .map(|(label, _)| label)
+            .collect();
+        assert_eq!(
+            !changed.is_empty(),
+            changes,
+            "{write}: 제목이 바뀐 창 {changed:?}"
+        );
+        for label in changed {
+            let last = sent
+                .iter()
+                .rev()
+                .find(|t| &t.label == label)
+                .unwrap_or_else(|| panic!("{write}: 제목이 바뀐 {label} 을 알리지 않았다"));
+            assert_eq!(last.title, after[label], "{write}: {label}");
+            assert!(
+                last.version > self.version,
+                "{write}: {label} 을 옛 판으로 알렸다"
+            );
+        }
+    }
+}
+
+fn title_write<T>(w: &World, write: &str, changes: bool, run: impl FnOnce() -> T) -> T {
+    let check = TitleCheck::before(w);
+    let out = run();
+    check.after(w, write, changes);
+    out
+}
+
+// 제목을 바꾸는 쓰기 전부(창 · 탭 · 슬롯 · 이름 장부 · 옮기기 · 도킹 · 스폰)가 그 창을 새 판으로 알린다.
+#[tokio::test]
+async fn every_write_that_changes_a_window_title_announces_that_window_at_a_new_version() {
+    let w = World::new();
+    let first = w.main_active();
+    let slot = w.empty_slot(first);
+    let agent = Uuid::new_v4().to_string();
+    assert_eq!(titles(&w)[MAIN_WINDOW_LABEL], "빈 칸 - Engram:1");
+
+    let popup = title_write(&w, "create_window", true, || {
+        apply::create_window(&w.state, &w.subs, &w.ev, &w.host, &w.labels).unwrap()
+    });
+    let work = title_write(&w, "create_tab", true, || {
+        apply::create_tab(
+            &w.state,
+            &w.subs,
+            &w.ev,
+            MAIN_WINDOW_LABEL,
+            Some("작업".to_string()),
+        )
+        .unwrap()
+    });
+    title_write(&w, "switch_tab", true, || {
+        apply::switch_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, first).unwrap()
+    });
+    title_write(&w, "switch_tab_if", true, || {
+        apply::switch_tab_if(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, work, first).unwrap()
+    });
+    title_write(&w, "switch_tab", true, || {
+        apply::switch_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, first).unwrap()
+    });
+    title_write(&w, "assign_agent", true, || {
+        apply::assign_agent(&w.state, &w.subs, &w.ev, first, slot, agent.clone()).unwrap()
+    });
+    title_write(&w, "agent_names_updated", true, || {
+        apply::agent_names_updated(&w.state, &w.ev, &[(agent.clone(), "myproj".to_string())])
+            .unwrap()
+    });
+    assert_eq!(titles(&w)[MAIN_WINDOW_LABEL], "myproj - Engram:1");
+    let added = title_write(&w, "split_slot", true, || {
+        apply::split_slot(&w.state, &w.subs, &w.ev, first, slot, SplitDir::LeftRight).unwrap()
+    });
+    title_write(&w, "focus_slot", true, || {
+        apply::focus_slot(&w.state, &w.ev, first, slot).unwrap()
+    });
+    title_write(&w, "set_slot_content", true, || {
+        apply::set_slot_content(
+            &w.state,
+            &w.subs,
+            &w.ev,
+            first,
+            slot,
+            SlotContent::AgentList,
+        )
+        .unwrap()
+    });
+    title_write(&w, "set_usage_slot", true, || {
+        apply::set_usage_slot(&w.state, &w.subs, &w.ev, first, slot, Some(false), None).unwrap()
+    });
+    title_write(&w, "close_slot", true, || {
+        apply::close_slot(&w.state, &w.subs, &w.ev, first, slot).unwrap()
+    });
+    assert_eq!(w.snapshot(first).focused_slot_id, Some(added));
+    title_write(&w, "rename_tab", true, || {
+        apply::rename_tab(&w.state, &w.ev, first, "이름".to_string()).unwrap()
+    });
+    title_write(&w, "close_tab", true, || {
+        apply::close_tab(&w.state, &w.subs, &w.ev, &w.host, MAIN_WINDOW_LABEL, first).unwrap()
+    });
+    assert_eq!(titles(&w)[MAIN_WINDOW_LABEL], "작업 - Engram:1");
+    let work_slot = w.empty_slot(work);
+    title_write(&w, "move_slot_to_window(새 창)", true, || {
+        apply::move_slot_to_window(
+            &w.state, &w.subs, &w.ev, &w.host, &w.labels, work, work_slot, None,
+        )
+        .unwrap()
+    });
+    let (view, filled, _) = w.view_with_filled_slot();
+    title_write(&w, "move_slot_to_window(있는 창)", true, || {
+        apply::move_slot_to_window(
+            &w.state,
+            &w.subs,
+            &w.ev,
+            &w.host,
+            &w.labels,
+            view,
+            filled,
+            Some(popup.clone()),
+        )
+        .unwrap()
+    });
+    title_write(&w, "dock_tab(탭바)", true, || {
+        w.dock(
+            work,
+            DockDest::TabBar {
+                window: popup.clone(),
+                index: None,
+            },
+            FocusPolicy::Reveal,
+        )
+        .unwrap()
+    });
+    assert_eq!(titles(&w)[popup.as_str()], "작업 - Engram:2");
+    title_write(&w, "dock_tab(새 창)", true, || {
+        w.dock(work, DockDest::NewWindow { at: AT }, FocusPolicy::Reveal)
+            .unwrap()
+    });
+    let spawner = Spawner::ok(&w.state, Uuid::new_v4());
+    let check = TitleCheck::before(&w);
+    apply::spawn_into(
+        &w.state,
+        &w.subs,
+        &w.ev,
+        &spawner,
+        MAIN_WINDOW_LABEL,
+        None,
+        None,
+        None,
+        "C:/tmp".to_string(),
+    )
+    .await
+    .unwrap();
+    check.after(&w, "spawn_into", true);
+    assert_eq!(titles(&w)[MAIN_WINDOW_LABEL], "에이전트 - Engram:1");
+}
+
+// 부팅의 한 번 — 모든 창을 지금 판 그대로 알리고 판도 모델도 바꾸지 않는다(TRD S26-window-chrome §4-4 ③).
+#[test]
+fn sync_titles_announces_every_window_once_at_the_current_version() {
+    let w = World::new();
+    let popup = w.popup();
+    w.forget();
+    let version = w.version();
+
+    apply::sync_titles(&w.state, &w.ev).unwrap();
+
+    let mut sent: Vec<(String, String, u64)> =
+        w.ev.tabs
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|t| (t.label.clone(), t.title.clone(), t.version))
+            .collect();
+    sent.sort();
+    assert_eq!(
+        sent,
+        [
+            (
+                MAIN_WINDOW_LABEL.to_string(),
+                "빈 칸 - Engram:1".to_string(),
+                version
+            ),
+            (popup, "빈 칸 - Engram:2".to_string(), version),
+        ]
+    );
+    assert_eq!(w.layout_events(), 0);
+    assert_eq!(w.version(), version, "판을 올리지 않는다");
+    assert_eq!(w.resyncs(), 1, "재동기 없음 — 앞의 1 은 창 만들기 몫");
+}
+
+#[test]
+fn sync_titles_on_a_poisoned_lock_is_err_without_notify() {
+    let w = World::new();
+    poison(&w.state);
+
+    assert!(apply::sync_titles(&w.state, &w.ev).is_err());
+    assert_eq!(w.tab_events(), 0);
 }
 
 // ── 측정 보고 2종 (ADR-0227) ─────────────────────────────────────────────────

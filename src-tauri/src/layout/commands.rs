@@ -875,6 +875,7 @@ fn verb_window_create(ports: &LayoutPorts) -> Result<WindowCreateOk, CommandErro
     let window = apply::create_window(
         &ports.state,
         ports.subs.as_ref(),
+        ports.events.as_ref(),
         ports.windows.as_ref(),
         ports.labels.as_ref(),
     )

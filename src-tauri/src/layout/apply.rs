@@ -44,6 +44,7 @@ use super::manager::{
     ViewManager, WindowLabel, WindowTabsSnapshot, MAIN_WINDOW_LABEL,
 };
 use super::spatial::{resolve_spatial as resolve_spatial_token, SpatialToken};
+use super::tab_name::window_title;
 use super::tree::{self, SplitInfo};
 use super::types::{
     SlotContent, SplitDir, SplitRatioApplied, SplitRatioOutcome, UiMetrics, ViewMeta, ViewSnapshot,
@@ -59,6 +60,9 @@ pub struct WindowTabsPayload {
     pub window_id: String,
     /// 창 번호 — main = 1, 팝아웃 = 2 이상(TRD S26-window-chrome §4-1). 창 항목이 모델에 있는 동안 바뀌지 않는다.
     pub number: u32,
+    /// 그 창의 OS 제목 — 활성 탭의 보이는 이름과 번호로 짓는다(TRD S26-window-chrome §4-4). 웹은 읽지 않는다 — 셸의
+    /// 알림 어댑터가 `version` 과 함께 OS 창에 입힌다(`crate::chrome`).
+    pub title: String,
     pub tabs: Vec<ViewMeta>,
     pub active: Uuid,
     pub version: u64,
@@ -66,10 +70,17 @@ pub struct WindowTabsPayload {
 
 impl From<WindowTabsSnapshot> for WindowTabsPayload {
     fn from(s: WindowTabsSnapshot) -> Self {
+        let active_name = s
+            .tabs
+            .iter()
+            .find(|meta| meta.id == s.active)
+            .map(|meta| meta.name.as_str());
+        let title = window_title(active_name, Some(s.number));
         WindowTabsPayload {
             label: s.label,
             window_id: s.window_id,
             number: s.number,
+            title,
             tabs: s.tabs,
             active: s.active,
             version: s.version,
@@ -93,9 +104,10 @@ pub trait SubscriptionSync: Send + Sync {
     fn resync(&self, mgr: &ViewManager);
 }
 
-/// 프론트 알림 포트. ★락 미보유 상태에서만 불린다★(락 보유 중 외부 호출 금지 — ADR-0006 원칙). 실패는
-/// 구현이 삼킨다 — 알림 유실은 레이아웃 변형을 되돌릴 사유가 아니다(프론트가 read-only pull 로 복구한다,
-/// §3-3).
+/// 프론트 알림 포트 — 운영 구현은 탭 목록의 `title` 을 OS 창에도 입힌다(`crate::chrome` · TRD S26-window-chrome §4-4).
+/// ★락 미보유 상태에서만 불린다★(락 보유 중 외부 호출 금지 — ADR-0006 원칙). 실패는 구현이 삼킨다 — 알림 유실은
+/// 레이아웃 변형을 되돌릴 사유가 아니다(프론트가 read-only pull 로 복구한다, §3-3 · OS 제목은 그 창의 다음 탭 알림이
+/// 고친다).
 pub trait LayoutEvents: Send + Sync {
     fn layout_updated(&self, snapshot: &ViewSnapshot);
     fn window_tabs_updated(&self, tabs: &WindowTabsPayload);
@@ -298,7 +310,7 @@ fn settle_new_window(host: &dyn WindowHost, label: &str, claim: Option<&SpareCla
     host.record_placement(label);
 }
 
-// ── 쓰기 14종 ────────────────────────────────────────────────────────────────
+// ── 쓰기 ─────────────────────────────────────────────────────────────────────
 
 pub fn create_tab(
     state: &LayoutState,
@@ -324,8 +336,8 @@ pub fn create_tab(
 // ★창 수 상한 근접 로그(ADR-0056/§4-2)★: 보이는 슬롯 상한(≤16)에 다가가는 것을 로그로만 남긴다 —
 // 하드 블록이 아니다(초과 레이아웃은 프론트 onContextLoss→DOM graceful degrade + ADR-0056 재검토 트리거).
 //
-// 창 mount 시 프론트가 `list_tabs(label)` pull + 탭 알림 listen 으로 초기 렌더하므로(§3-3) 성공 경로에
-// 별도 알림이 없다.
+// ★넣은 새 창의 탭 목록을 알린다★ — 웹은 마운트 때 당겨 그리지만(§3-3), OS 창 제목은 이 알림으로만 입는다(TRD
+// S26-window-chrome §2-4 ② · §4-4). 알림 뒤에 확정 · 첫 자리 기록이다(새 창을 여는 다른 두 자리와 같은 차례).
 //
 // ★OS 창을 연 뒤에 모델에 넣는다★ — 새 창을 여는 다른 두 자리(`move_slot_to_window` · 도킹 새 창)와 같은 차례다(TRD
 // S21-slot-docking §3-9 「자리별 차례」). 열기와 넣기 사이에 그 창이 닫히면(닫기 요청 · `Destroyed`) 그 정리가 label 에
@@ -334,6 +346,7 @@ pub fn create_tab(
 pub fn create_window(
     state: &LayoutState,
     subs: &dyn SubscriptionSync,
+    events: &dyn LayoutEvents,
     host: &dyn WindowHost,
     labels: &dyn LabelSource,
 ) -> Result<String, String> {
@@ -347,10 +360,10 @@ pub fn create_window(
         .and_then(|mut mgr| {
             mgr.create_window(&label).map_err(|e| e.to_string())?;
             subs.resync(&mgr);
-            Ok(mgr.windows.len())
+            Ok((mgr.windows.len(), tabs_payload(&mgr, &label)))
         }); // ← 락 드롭
-    let n_windows = match inserted {
-        Ok(n) => n,
+    let (n_windows, tabs) = match inserted {
+        Ok(inserted) => inserted,
         Err(e) => {
             withdraw_new_window(host, &label, claim.as_ref());
             tracing::warn!(label = %label, "create_window: 연 창을 모델에 넣지 못해 거둔다 — {e}");
@@ -363,6 +376,7 @@ pub fn create_window(
             "create_window: 창 수 증가 — 보이는 슬롯 상한(≤16, ADR-0056) 근접 주의"
         );
     }
+    announce(events, None::<&ViewSnapshot>, tabs.as_ref());
     settle_new_window(host, &label, claim.as_ref());
 
     tracing::info!(label = %label, "빈 새 창 생성 완료(create_window)");
@@ -532,7 +546,7 @@ pub fn focus_slot(
             .map_err(|e| e.to_string())?;
         let layout = mgr.snapshot(view_id).ok();
         // ★탭 알림을 빼지 말 것★: 자동 이름 탭의 보이는 이름은 포커스 슬롯이 정한다 — 포커스가 옮으면 탭바의
-        //   이름이 바뀐다(TRD S26-window-chrome §4-2 · AC35).
+        //   이름과 OS 창 제목이 바뀐다(TRD S26-window-chrome §4-2 · §2-4 ② · AC35).
         let tabs = owner_tabs(&mgr, view_id);
         (layout, tabs)
     }; // ← 락 드롭
@@ -1367,6 +1381,23 @@ fn reuse_source_window(
         },
         DockNotes::default(),
     ))
+}
+
+// ── 부팅 제목 ────────────────────────────────────────────────────────────────
+
+/// 모델의 모든 창 탭 목록을 지금 판 그대로 한 번 알린다 — 부팅에서 창을 다 지은 뒤 OS 창 제목을 처음 입히는 몫이다
+/// (TRD S26-window-chrome §4-4 ③). 모델을 바꾸지 않아 판을 올리지 않는다 — 웹이 이미 당긴 창은 같은 판이라 그 알림을
+/// 버린다(판 가드).
+pub fn sync_titles(state: &LayoutState, events: &dyn LayoutEvents) -> Result<(), String> {
+    let tabs: Vec<WindowTabsPayload> = {
+        let mgr = state.0.lock().map_err(|e| e.to_string())?;
+        mgr.list_windows()
+            .iter()
+            .filter_map(|label| tabs_payload(&mgr, label))
+            .collect()
+    }; // ← 락 드롭
+    announce(events, None::<&ViewSnapshot>, &tabs);
+    Ok(())
 }
 
 // ── 측정 보고 2종 ────────────────────────────────────────────────────────────

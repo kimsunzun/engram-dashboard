@@ -73,6 +73,7 @@ function tabsPayload(overrides: Partial<WindowTabsPayload> = {}): WindowTabsPayl
     label: 'main',
     window_id: 'main',
     number: 1,
+    title: 'View 1 - Engram:1',
     tabs: [{ id: 'v1', name: 'View 1', named: true }],
     active: 'v1',
     version: 1,

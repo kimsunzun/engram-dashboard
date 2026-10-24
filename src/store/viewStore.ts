@@ -55,6 +55,8 @@ export interface WindowTabsPayload {
   window_id: string
   /** 창 번호 — main = 1, 팝아웃 = 2 이상(TRD S26-window-chrome §4-1). */
   number: number
+  /** OS 창 제목 — 셸이 OS 창에 입히는 몫이라 웹은 읽지 않는다(TRD S26-window-chrome §4-4). */
+  title: string
   tabs: ViewMeta[]
   active: string
   version: number

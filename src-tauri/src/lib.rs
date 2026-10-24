@@ -1,3 +1,5 @@
+// 창 크롬 — OS 창 제목(TRD S26-window-chrome §4-4).
+mod chrome;
 pub mod commands;
 pub mod daemon_client;
 pub mod discovery;
@@ -148,6 +150,9 @@ pub fn run() {
     //   (ADR-0102) — 웹뷰의 마운트 때 `window_frame` 당기기와 창의 첫 자리 기록이 이 상태를 본다.
     builder = builder.manage(std::sync::Arc::new(crate::tab_drop::DropBook::default()));
     builder = builder.manage(std::sync::Arc::new(crate::tab_drop::FrameBook::default()));
+    // 창마다 마지막으로 입힌 OS 제목의 판(TRD S26-window-chrome §4-4) — 탭 알림이 오는 어느 길보다 먼저 있어야 한다(없는
+    //   동안 온 제목은 입히지 않고 지나간다).
+    builder = builder.manage(crate::chrome::ChromeState::default());
 
     // ── 셸 설정 + 유효 테마(TRD S21-storage §5-3 · §5-6) ─────────────────────────────
     // ★위 LayoutState 와 같은 이유로 빌더에서 manage 한다(ADR-0102)★ — 웹뷰의 첫 `get_ui_settings` ·
@@ -294,6 +299,14 @@ pub fn run() {
                 app.handle().exit(STARTUP_FAILED_EXIT_CODE);
                 return Ok(());
             }
+            // 지은 창마다 OS 제목을 한 번 입힌다(TRD S26-window-chrome §4-4 ③) — ⑨ 가 못 연 팝아웃을 모델에서 지운 뒤라
+            //   남은 창만 알린다. 이것이 없으면 다음 탭 변경까지 창 제목이 지을 때의 「Engram」에 머문다.
+            if let Err(e) = crate::layout::apply::sync_titles(
+                &setup_layout,
+                &crate::commands::layout::TauriEvents { app: app.handle() },
+            ) {
+                tracing::warn!("부팅 뒤 창 제목을 입히지 못했다(다음 탭 변경 때 입는다): {e}");
+            }
 
             // ── 부팅 단계 ⑩: 파생 표(라우터 · 사용량 관심)를 마지막 창 묶음으로 한 번 다시 계산한다 ──
             // 부팅 단계 플러그인은 이 클라이언트보다 먼저 돌아 부를 수 없었고, ⑨ 가 못 연 팝아웃을 모델에서 지운
@@ -393,6 +406,9 @@ pub fn run() {
                 //   (ADR-0046: 일반 라우팅 메커니즘 정리.)
                 tauri::WindowEvent::Destroyed => {
                     let label = window.label().to_string();
+                    // 아래 팝아웃 · 상태 조건 밖이다 — 그 조건이 걸러도 이 창의 제목 장부 항목은 남지 않는다(TRD
+                    //   S26-window-chrome §4-4).
+                    crate::chrome::forget(window.app_handle(), &label);
                     if crate::commands::popout::is_popup_label(&label) {
                         let app = window.app_handle();
                         crate::state::placement::forget_deferred_maximize(app, &label);

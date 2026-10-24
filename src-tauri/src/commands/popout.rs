@@ -26,6 +26,7 @@ use uuid::Uuid;
 use crate::commands::layout::{RouterSubs, TauriEvents};
 use crate::daemon_client::DaemonClient;
 use crate::first_paint::NewWindowShow;
+use crate::layout::tab_name::window_title;
 use crate::layout::{
     apply, LabelSource, LayoutState, MoveFailed, SlotMove, SpareClaim, WindowHost, WindowPlace,
     MAIN_WINDOW_LABEL,
@@ -386,7 +387,8 @@ fn build_window(
         .ok_or_else(|| "런타임 창 생성 실패: 웹뷰 환경이 등록돼 있지 않다".to_owned())?;
     env.finish(
         WebviewWindowBuilder::new(app, label, WebviewUrl::App(window_url(label).into()))
-            .title(format!("Engram — {label}"))
+            // 번호 없는 모델 밖 창(숨은 예열 창 포함)의 제목 — 모델에 들면 탭 알림이 덮는다(TRD S26-window-chrome §4-4).
+            .title(window_title(None, None))
             .inner_size(w, h)
             .position(x, y)
             .visible(false)
@@ -929,8 +931,14 @@ mod close_request_tests {
         let before = rig.fingerprint();
 
         let fresh = "slot-popup-1";
-        let err = apply::create_window(&rig.state, &rig.subs(), &host, &PopupCounter::default())
-            .unwrap_err();
+        let err = apply::create_window(
+            &rig.state,
+            &rig.subs(),
+            &NoEvents,
+            &host,
+            &PopupCounter::default(),
+        )
+        .unwrap_err();
         assert_eq!(err, LayoutError::WindowClosed(fresh.into()).to_string());
         assert_eq!(*host.closed.lock().unwrap(), [fresh], "방금 연 창을 거둔다");
         assert!(
@@ -965,8 +973,14 @@ mod close_request_tests {
         let host = ClosingHost::with_spare(&rig, claim.clone());
         let before = rig.fingerprint();
 
-        let err = apply::create_window(&rig.state, &rig.subs(), &host, &PopupCounter::default())
-            .unwrap_err();
+        let err = apply::create_window(
+            &rig.state,
+            &rig.subs(),
+            &NoEvents,
+            &host,
+            &PopupCounter::default(),
+        )
+        .unwrap_err();
 
         assert_eq!(err, LayoutError::WindowClosed(spare.clone()).to_string());
         assert_eq!(
@@ -999,8 +1013,14 @@ mod close_request_tests {
         let old_popout = rig.add_tab(POPUP);
         let host = ClosingHost::adopting(&rig);
 
-        let label =
-            apply::create_window(&rig.state, &rig.subs(), &host, &PopupCounter::default()).unwrap();
+        let label = apply::create_window(
+            &rig.state,
+            &rig.subs(),
+            &NoEvents,
+            &host,
+            &PopupCounter::default(),
+        )
+        .unwrap();
 
         assert_eq!(label, "slot-popup-1");
         assert!(

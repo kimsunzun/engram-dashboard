@@ -15,7 +15,7 @@
       {
         "label": "main",
         "create": false,
-        "title": "Engram Dashboard",
+        "title": "Engram",
         "width": 1280,
         "height": 800,
         "dragDropEnabled": false

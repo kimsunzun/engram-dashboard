@@ -1251,7 +1251,7 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
   it('대기 모드에선 이 창의 0탭 알림이 와도 닫지 않는다', async () => {
     await mountSpare()
     act(() =>
-      useViewStore.getState().applyWindowTabsUpdated({ label: SPARE, window_id: 'w-spare', number: 2, tabs: [], active: '', version: 9 }),
+      useViewStore.getState().applyWindowTabsUpdated({ label: SPARE, window_id: 'w-spare', number: 2, title: 'Engram:2', tabs: [], active: '', version: 9 }),
     )
     await new Promise(res => setTimeout(res, 20))
     expect(closeMock).not.toHaveBeenCalled()
@@ -1345,7 +1345,7 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
     await mountSpare()
 
     act(() =>
-      useViewStore.getState().applyWindowTabsUpdated({ label: SPARE, window_id: 'w-spare', number: 2, tabs: [{ id: 'p1', name: 'Pop', named: true }], active: 'p1', version: 7 }),
+      useViewStore.getState().applyWindowTabsUpdated({ label: SPARE, window_id: 'w-spare', number: 2, title: 'Pop - Engram:2', tabs: [{ id: 'p1', name: 'Pop', named: true }], active: 'p1', version: 7 }),
     )
     expect(screen.getByTestId('spare-canvas')).toBeTruthy()
     expect(headIds()).toEqual([])
@@ -1380,7 +1380,7 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
     render(<WindowLayout label={SPARE} />)
     await waitFor(() => expect(ipcOrder).toContain('invoke:window_role'))
     act(() =>
-      useViewStore.getState().applyWindowTabsUpdated({ label: SPARE, window_id: 'w-spare', number: 2, tabs: [], active: '', version: 9 }),
+      useViewStore.getState().applyWindowTabsUpdated({ label: SPARE, window_id: 'w-spare', number: 2, title: 'Engram:2', tabs: [], active: '', version: 9 }),
     )
     await new Promise(res => setTimeout(res, 20))
     expect(closeMock).not.toHaveBeenCalled()
@@ -1394,7 +1394,7 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
 // ── 예열 창 채택 · 첫 화면 알림(TRD S21-slot-docking §3-9 I26 · I28) — 채택한 창의 셸 문은 그 채택 번호를 실은 알림만 받는다 ──
 describe('WindowLayout — 채택 번호 · 첫 화면 다시 알림', () => {
   const SPARE = 'slot-popup-7'
-  const TABS = { label: SPARE, window_id: 'w-spare', number: 2, tabs: [{ id: 'p1', name: 'Pop', named: true }], active: 'p1', version: 3 }
+  const TABS = { label: SPARE, window_id: 'w-spare', number: 2, title: 'Pop - Engram:2', tabs: [{ id: 'p1', name: 'Pop', named: true }], active: 'p1', version: 3 }
 
   beforeEach(() => {
     currentWindow.label = SPARE
