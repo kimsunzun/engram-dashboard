@@ -1048,7 +1048,14 @@ describe('WindowLayout — 탭 끌기 배선', () => {
       if (cmd === 'list_tabs') return { label: 'main', tabs: TWO_TABS, active: 'v1', version: 1 }
       if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
       // 뷰포트(jsdom 1024 × 768)와 같은 복원 크기 — 새 창 크기 = 그대로.
-      if (cmd === 'window_frame') return { restored: { w: 1024, h: 768 }, maximized: false, insets: { t: 0, r: 0, b: 0, l: 0 } }
+      if (cmd === 'window_frame')
+        return {
+          restored: { w: 1024, h: 768 },
+          maximized: false,
+          insets: { t: 0, r: 0, b: 0, l: 0 },
+          focused: true,
+          caption: { buttons: true, leading_inset: 0, snap_overlay: false },
+        }
       return undefined
     })
     try {
@@ -1300,7 +1307,14 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
     invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
       if (cmd === 'list_tabs') return { label: SPARE, tabs: [{ id: 'p1', name: 'Pop', named: true }], active: 'p1', version: 3 }
       if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
-      if (cmd === 'window_frame') return { restored: { w: 800, h: 600 }, maximized: false, insets: { t: 0, r: 0, b: 0, l: 0 } }
+      if (cmd === 'window_frame')
+        return {
+          restored: { w: 800, h: 600 },
+          maximized: false,
+          insets: { t: 0, r: 0, b: 0, l: 0 },
+          focused: true,
+          caption: { buttons: true, leading_inset: 0, snap_overlay: false },
+        }
       return undefined
     })
     await mountSpare()

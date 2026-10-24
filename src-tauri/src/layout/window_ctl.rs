@@ -454,7 +454,7 @@ pub fn list(state: &LayoutState, control: &dyn WindowControl) -> Result<Vec<List
         .collect())
 }
 
-fn resolve(state: &LayoutState, window: &str) -> Result<WindowLabel, WindowCtlError> {
+pub(crate) fn resolve(state: &LayoutState, window: &str) -> Result<WindowLabel, WindowCtlError> {
     let mgr = state
         .0
         .lock()

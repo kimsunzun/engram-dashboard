@@ -44,6 +44,7 @@ pub const REVEAL_BACKSTOP: Duration = REVEAL_SAFETY.saturating_mul(2);
 /// 되물림의 거둠이 곧이어 다시 맡긴 쪽의 올림을 지우지 않는다.
 pub trait PaintGate: Send + Sync {
     /// 그 label 에 받아 두기만 하는 올림을 건다 — 알림 · 시한이 그 창을 보이지 않는다(보일지는 `reveal_if_held` 가 정한다).
+    /// 이미 올림이 있으면 그대로 둔다(받아 둔 알림을 지우지 않는다).
     fn hold_unarmed(&self, label: &str);
     /// 그 label 의 올림을 거둔다 — 없으면 무동작.
     fn cancel(&self, label: &str);

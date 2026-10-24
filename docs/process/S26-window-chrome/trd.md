@@ -443,7 +443,9 @@ pub fn plan(action: WindowAction, s: OsWindowState) -> Plan;   // 순수 — §5
 
 ### 6-4 사람 길 — 웹 레지스트리 · invoke
 
-- **invoke 하나** `window_control { window: String, action: WindowAction, if_empty?: bool } -> WindowControlOutcome`(ts-rs export) — 동사마다 invoke 를 늘리지 않는다(메인 결정 M7). 같은 서비스(`window_ctl`)에 떨어진다(ADR-0081 두 껍데기). `if_empty` 이면 해석기를 거치지 않는다(§4-5 예외).
+- **invoke 하나** `window_control { window: String, action: WindowControlAction, ifEmpty?: bool } -> WindowControlOutcome`(ts-rs export) — 동사마다 invoke 를 늘리지 않는다(메인 결정 M7). 같은 서비스(`window_ctl`)에 떨어진다(ADR-0081 두 껍데기). `ifEmpty` 이면 해석기를 거치지 않는다(§4-5 예외).
+  - **U7b 가 붙는 면**(코드 — `commands/window_ctl.rs`) — `WindowControlAction` 은 서비스의 `WindowAction` 과 따로 선 wire enum 이다: `minimize` · `maximize` · `unmaximize` · `raise` · `hide_all` · `show_all` · `close`(snake_case). 인자 이름은 `ifEmpty`(Tauri 가 JS 쪽을 camelCase 로 받는다). 답 `WindowControlOutcome { deferred, pending, shown_all, focused, close }` — `close` 는 `close` 동작에만 `WindowCloseResult`(`closed` · `hidden_all` · `kept`) · 그 밖은 `null`.
+  - main 의 `close` 는 출력 라우터 · 데몬 클라이언트 없이 모든 창 숨기기로 간다(팝아웃 닫기만 그 둘을 요구한다).
 - **레지스트리**(`src/commands/tabCommands.ts` 또는 새 `windowCommands.ts`) — `window.minimize` · `window.maximize` · `window.unmaximize` · `window.raise` · `window.hideAll` · `window.showAll` 을 등록하고 `viewStore` 액션 → invoke 로 보낸다. `window.close` 는 지금 등록을 넓힌다(main 도 받는다 · `if_empty`). 셸 표와 같은 id 다(지금 `window.create` · `window.close` 가 두 표에 함께 있는 것과 같은 꼴).
 - **단추 → 레지스트리 명령**(R17 · D6) — 최대화 단추는 창 사실(`window:frame`)의 `maximized` 를 보고 `window.maximize` / `window.unmaximize` 를 고른다.
 
@@ -556,7 +558,7 @@ pub fn plan(action: WindowAction, s: OsWindowState) -> Plan;   // 순수 — §5
 
 ### 7-11 macOS 를 막지 않기(R16 · D10)
 
-platform `window::caption_style() -> CaptionStyle { drawn_buttons: bool, leading_inset: f64 }` — Windows · 그 밖 = `{ true, 0 }` · macOS = `{ false, <신호등 폭> }`(값 미검 — 짓지 않는다). 셸이 창 사실(`WindowFrame.caption`)에 실어 웹에 준다. 셸 `WebviewEnv::finish` 는 `drawn_buttons` 일 때만 OS 틀을 걷는다. macOS 의 「Overlay 제목 표시줄」 빌더 호출은 Tauri 의 macOS 전용 API 라 셸에 `cfg` 를 부른다 — 그 자리는 macOS 를 지을 때 정한다(지금 정하지 않는다).
+platform `window::caption_style() -> CaptionStyle { drawn_buttons: bool, leading_inset: f64 }` — Windows · 그 밖 = `{ true, 0 }` · macOS = `{ false, <신호등 폭> }`(값 미검 — 짓지 않는다). ★지금 코드는 모든 OS 에서 `{ true, 0 }` 이다★ — macOS 갈래는 macOS 이식 때 짓는다. 셸이 창 사실(`WindowFrame.caption`)에 실어 웹에 준다. 셸 `WebviewEnv::finish` 는 `drawn_buttons` 일 때만 OS 틀을 걷는다. macOS 의 「Overlay 제목 표시줄」 빌더 호출은 Tauri 의 macOS 전용 API 라 셸에 `cfg` 를 부른다 — 그 자리는 macOS 를 지을 때 정한다(지금 정하지 않는다).
 
 ---
 
@@ -660,6 +662,7 @@ CDP(`scripts/cdp.mjs`)가 재는 것 — DOM 배치 · 번호 · `window.list` �
 | AC19 · AC33 | — | 없음(Q1 · T1) |
 
 - **숨은 창 보이기의 전경**(AC9 · U7a) — 다른 앱을 앞에 둔 채 숨은 main 을 `window.showAll` · `window.raise` 로 보이고, 전경이 옮겨 가는지를 갈래마다 적는다: main 이 숨기 전 최대화였나 · 아니었나 × 바람 없음 · `window.unmaximize` 로 적은 `false` 바람(숨은 팝아웃에 `window.maximize` 로 적은 `true` 바람도 같이 본다). 활성화가 끼어들 자리가 셋이다 — tao `show()` 가 내는 `SW_SHOW`(포커스를 받게 지은 창이면 활성화한다) · 바람을 입히는 `SW_MAXIMIZE` · 펴기와 원래 크기 입히기의 `SW_RESTORE`(둘 다 활성화를 겸한다). 옮겨 가면 AC9 위반이다. LLM 길에서 이것이 지켜지는지는 모른다(M22).
+- **S12 — 앞 창 칸 두 출처**(U7a) — 사건 계기(Alt+Tab · 다른 창 누름 · 끌 자리 누름)마다 ① `window:frame` 의 `focused`(그 창의 `Focused` 사건 값) 와 같은 순간 `window.list` 의 `focused`(`is_foreground`)가 어긋나는지 ② 메인 스레드 밖에서도 불리는 자리 기록(`state::placement::record`)이 민 `window:frame` 과 `Focused` 밀기의 차례가 뒤바뀌어 낡은 `focused` 가 마지막에 남는지를 함께 적는다(§6-5).
 
 ---
 

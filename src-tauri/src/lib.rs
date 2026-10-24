@@ -84,8 +84,9 @@ pub fn run() {
     //   만든다(tauri-plugin-single-instance 2.4.2 `platform_impl/windows.rs:67`). 그래서 identifier 를
     //   공유하는 두 빌드는 서로를 죽인다 — dev 빌드는 `src-tauri/tauri.dev.conf.json` 오버레이로
     //   identifier 를 갈라 릴리즈와 공존한다. ★두 identifier 를 통일하지 말 것★(사유 = 그 파일 주석).
+    // 두 번째 실행 = 사람이 앱을 다시 실행했다 — 트레이 누름과 같은 「누름」 갈래다(TRD S26-window-chrome §6-2).
     builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-        crate::tray::actions::show_main_ui(app);
+        crate::tray::actions::show_main_ui(app, crate::layout::window_ctl::Activation::TrayClick);
     }));
     // ★단일 인스턴스 바로 뒤에 둔다★ — 로그 초기화 · 셸 실행 잠금 · 상태 파일 판정 · 모델 채우기를 관문 뒤 · 어느
     //   창보다 앞에서 한다(TRD S21-storage §6-5 · 정본 = 그 모듈 머리).
@@ -442,6 +443,12 @@ pub fn run() {
                         crate::state::placement::record(window);
                     }
                 }
+                // 창 사실의 앞 창 칸(제목 줄 흐림 — TRD S26-window-chrome §6-5) — 그 창의 칸은 사건의 값으로 민다. 다른 우리
+                //   창이 앞으로 오면 그 창의 `Focused(true)` 와 옛 창의 `Focused(false)` 가 둘 다 와 각자 민다. 모델 밖 창
+                //   (예열 창)은 미는 쪽이 건너뛴다.
+                tauri::WindowEvent::Focused(focused) => {
+                    crate::commands::tab_drop::push_window_focus(window, *focused);
+                }
                 _ => {}
             }
         })
@@ -493,6 +500,8 @@ pub fn run() {
             //   S21-slot-docking §3-6). 같은 동작의 LLM 명령은 T-65 `tab.dock`.
             commands::tab_drop::tab_drop,
             commands::tab_drop::window_frame,
+            // 창 상태(사람 길 — 웹 단추 · 레지스트리) — 버스 `window.*` 와 같은 서비스(TRD S26-window-chrome §6-4).
+            commands::window_ctl::window_control,
             // 부팅 조회 — 미는 쪽(`window.setTheme` · `theme.default` 쓰기 · 부팅 · 복원 수락)은 따로 있다
             //   (`commands/settings.rs` 「창별 테마를 읽는 자리가 둘인 이유」).
             commands::get_ui_settings,

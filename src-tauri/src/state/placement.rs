@@ -13,7 +13,7 @@
 //!   호출 금지(§6-3 · `layout/apply.rs` 머리 「락 규율」).
 //! - 패닉하지 않는다 — 창 사건 처리기에서 불리고, 셸의 패닉은 훅이 곧 셸 종료로 만든다(ADR-0292).
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard};
 
 use engram_dashboard_base::sync;
@@ -168,72 +168,120 @@ fn open_popouts_then_push_themes(
     failed
 }
 
-/// 저장된 최대화를 그 창이 처음 보일 때로 미룬 창의 label 들.
+/// 그 창이 보일 때 입힐 최대화 바람 — label 마다 하나(참 = 최대화 · 거짓 = 원래 크기 · 뒤에 적은 것이 앞의 것을 덮는다).
 ///
-/// - 세우는 쪽 = main 에 자리 · 최대화를 입히는 길(부팅 ⑧ [`restore_windows`] · 런타임 복원 수락
+/// - 적는 쪽 = main 에 자리 · 최대화를 입히는 길(부팅 ⑧ [`restore_windows`] · 런타임 복원 수락
 ///   [`TauriRestoreWindows`] — main 이 숨어 있으면 보일 때까지, 보이면 그 자리에서 입혀질 때까지 —
 ///   [`DeferredMaximize::apply_now`]) · 숨긴 채 만든 최대화 팝아웃(부팅 복원 [`open_popout`] · 런타임 복원 수락
-///   `RestoreWindows::open_hidden`). 거두는 쪽 = 입히기에 성공한 그 길 · 첫 화면의 보이기([`show_placed`] — 부팅 ·
-///   복원 수락의 `set_shown`) · [`apply_deferred_maximize`](보이기 경로 — `tray::actions::show_main_ui`) · 최대화가 아닌
-///   사본을 입히는 런타임 복원(main) · 창 소멸([`forget_deferred_maximize`]).
+///   `RestoreWindows::open_hidden`) — 여기까지는 늘 참이다 · 보이지 않는 창의 창 상태 명령(`window.maximize` ·
+///   `window.unmaximize` — [`defer_maximize`] · TRD S26-window-chrome §5-2). 거두는 쪽 = 입히기에 성공한 그 길 · 보이는
+///   길 모두(첫 화면의 보이기 [`show_placed`] · `first_paint` 의 포커스 없는 보이기 · 트레이 보이기 · 포커스를 빼앗지 않는
+///   보이기 — 다 [`apply_deferred_maximize`] 를 지난다) · 이미 그 크기인 창의 창 상태 명령([`drop_deferred_maximize`]) ·
+///   최대화가 아닌 사본을 입히는 런타임 복원(main) · 창 소멸([`forget_deferred_maximize`]).
 /// - 숨은 창을 최대화하면 tao 가 `SW_MAXIMIZE`(창을 보이고 활성화한다)를 낸 뒤에야 `SW_HIDE` 로 되숨긴다(tao 0.35.3
-///   `platform_impl/windows/window_state.rs` `apply_diff`) — `--hidden` 부팅에 main 이 번쩍이고 포커스를 가져간다.
-/// - 서 있는 동안은 그 창의 자리를 적지 않는다([`record`]) — 숨은 동안 오는 `Moved` · `Resized` 는 복원이 입힌 보통
-///   자리를 「최대화 아님」으로 읽어, 적으면 모델의 최대화 표식이 내려간다(보이기 전에 끝내면 다음 부팅이 최대화를
-///   잃는다).
+///   `platform_impl/windows/window_state.rs` `apply_diff`) — `--hidden` 부팅에 main 이 번쩍이고 포커스를 가져간다. 풀기도
+///   같은 까닭으로 바람에 적는다(TRD §5-2).
+/// - 바람이 있는 동안은(값과 무관하게) 그 창의 자리를 적지 않는다([`record`]) — 숨은 동안 오는 `Moved` · `Resized` 는
+///   복원이 입힌 보통 자리를 「최대화 아님」으로 읽어, 적으면 모델의 최대화 표식이 내려간다(보이기 전에 끝내면 다음
+///   부팅이 최대화를 잃는다). 그래서 바람이 홀로 남으면 그 창의 자리 기록과 `window:frame` 밀기가 멈춘다.
 /// - 부팅은 main · 팝아웃을 늘 숨긴 채 만들어([`restore_windows`]) 보일 때까지 남는다 — 보이는 부팅은 첫 화면의
 ///   보이기까지, `--hidden` 부팅은 트레이 보이기까지. 런타임 복원 수락은 숨은 main(트레이 숨기기 · `--hidden` 부팅 뒤
 ///   LLM 의 답)에 보일 때까지 남는다.
 /// - 락은 잎이다 — 쥔 채 창 호출 · 로그 · 다른 락을 하지 않는다.
 #[derive(Debug, Default)]
-pub struct DeferredMaximize(Mutex<BTreeSet<String>>);
+pub struct DeferredMaximize(Mutex<Wishes>);
+
+#[derive(Debug, Default)]
+struct Wishes {
+    // 적을 때마다 하나씩 오른다 — 같은 값을 다시 적어도(참 → 거짓 → 참 포함) 판이 갈린다.
+    next_rev: u64,
+    by_label: BTreeMap<String, Wish>,
+}
+
+// `rev` = 이 바람을 적은 판. 락 밖에서 입히는 쪽은 읽은 판이 그대로일 때만 거둔다 — 값만 보면 그 사이 다시 적힌 같은
+//   값의 바람을 지운다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Wish {
+    maximized: bool,
+    rev: u64,
+}
 
 impl DeferredMaximize {
-    fn labels(&self) -> MutexGuard<'_, BTreeSet<String>> {
-        // 칸이 집합 하나라 반쯤 바뀐 상태가 없다 — 창 사건 처리기에서 불려 패닉하면 안 된다(모듈 머리).
+    fn wishes(&self) -> MutexGuard<'_, Wishes> {
+        // 칸이 표 하나라 반쯤 바뀐 상태가 없다 — 창 사건 처리기에서 불려 패닉하면 안 된다(모듈 머리).
         sync::lock(&self.0)
     }
 
-    fn defer(&self, label: &str) {
-        self.labels().insert(label.to_string());
+    fn defer(&self, label: &str, maximized: bool) -> Wish {
+        let mut wishes = self.wishes();
+        let wish = Wish {
+            maximized,
+            rev: wishes.next_rev,
+        };
+        wishes.next_rev = wishes.next_rev.wrapping_add(1);
+        wishes.by_label.insert(label.to_string(), wish);
+        wish
+    }
+
+    fn wish(&self, label: &str) -> Option<Wish> {
+        self.wishes().by_label.get(label).copied()
     }
 
     fn is_pending(&self, label: &str) -> bool {
-        self.labels().contains(label)
+        self.wish(label).is_some()
     }
 
-    /// 서 있었으면 내리고 `true` — 미룬 최대화는 한 번만 입힌다. 창 소멸의 거두기도 이것이다.
-    fn take(&self, label: &str) -> bool {
-        self.labels().remove(label)
+    /// 있었으면 거두고 그 값 — 창 소멸의 거두기도 이것이다.
+    fn take(&self, label: &str) -> Option<bool> {
+        self.wishes()
+            .by_label
+            .remove(label)
+            .map(|wish| wish.maximized)
     }
 
-    /// 서 있으면 `maximize` 로 입히고, 입혀졌을 때만 내린다 — `true` = 이번에 입히고 내렸다(부르는 쪽이 자리를
-    /// 적는다). ★못 입혔으면 남긴다★ — 내리면 보통 자리를 「최대화 아님」으로 적어 모델의 최대화가 지워지고 다시
-    /// 입힐 길도 없다. 남기면 다음 보이기가 다시 입힌다. `maximize` 는 락 밖에서 부른다.
-    fn apply(&self, label: &str, maximize: impl FnOnce() -> bool) -> bool {
-        self.is_pending(label) && maximize() && self.take(label)
+    // 읽은 그 바람이 그대로 남아 있을 때만 거둔다 — 입히는 사이 다른 스레드(런타임 복원 수락 · 창 상태 명령)가 새로 적은
+    //   바람을 지우지 않게.
+    fn take_if_unchanged(&self, label: &str, seen: Wish) -> bool {
+        let mut wishes = self.wishes();
+        let unchanged = wishes.by_label.get(label) == Some(&seen);
+        if unchanged {
+            wishes.by_label.remove(label);
+        }
+        unchanged
     }
 
-    /// 보이는 창에 지금 입힌다 — 세운 채 `place`(보통 자리)와 `maximize` 를 부르고, 입혀졌을 때만 내린다. `true` =
-    /// 입혔다. ★못 입혔으면 남긴다★ — [`record`] 가 그 창을 「최대화 아님」으로 적지 않고(런타임 복원 수락 뒤의 자리
-    /// 기록 포함) 다음 보이기가 다시 입힌다([`Self::apply`] 와 같은 까닭). `place` · `maximize` 는 락 밖에서 부른다.
-    /// - ★`place` 보다 먼저 세운다★ — 자리 입히기가 낸 `Moved` · `Resized` 가 보통 자리를 「최대화 아님」으로 적지
+    /// 바람이 있으면 `set(바람)` 으로 입히고, 입혀졌을 때만 거둔다 — `true` = 이번에 입히고 거뒀다(부르는 쪽이 자리를
+    /// 적는다). ★못 입혔으면 남긴다★ — 거두면 보통 자리를 「최대화 아님」으로 적어 모델의 최대화가 지워지고 다시
+    /// 입힐 길도 없다. 남기면 다음 보이기가 다시 입힌다. `set` 은 락 밖에서 부른다 — 그 사이 바람이 다시 적혔으면(같은
+    /// 값이어도) 새 바람을 남기고 `false`.
+    fn apply(&self, label: &str, set: impl FnOnce(bool) -> bool) -> bool {
+        let Some(seen) = self.wish(label) else {
+            return false;
+        };
+        set(seen.maximized) && self.take_if_unchanged(label, seen)
+    }
+
+    /// 보이는 창에 지금 최대화를 입힌다 — 참 바람을 적은 채 `place`(보통 자리)와 `maximize` 를 부르고, 입혀졌을 때만
+    /// 거둔다. `true` = 입혔다. ★못 입혔으면 남긴다★ — [`record`] 가 그 창을 「최대화 아님」으로 적지 않고(런타임 복원
+    /// 수락 뒤의 자리 기록 포함) 다음 보이기가 다시 입힌다([`Self::apply`] 와 같은 까닭). `place` · `maximize` 는 락
+    /// 밖에서 부른다.
+    /// - ★`place` 보다 먼저 적는다★ — 자리 입히기가 낸 `Moved` · `Resized` 가 보통 자리를 「최대화 아님」으로 적지
     ///   않게.
-    /// - ★사이에 보이기가 미룸을 입히고 거뒀어도 `maximize` 를 부른다★ — 그 뒤의 위치 세터가 최대화를 내렸다(F8).
-    ///   못 입혔으면 그래서 다시 세운다.
+    /// - ★사이에 보이기가 바람을 입히고 거뒀어도 `maximize` 를 부른다★ — 그 뒤의 위치 세터가 최대화를 내렸다(F8).
+    ///   못 입혔으면 그래서 다시 적는다.
     fn apply_now(
         &self,
         label: &str,
         place: impl FnOnce(),
         maximize: impl FnOnce() -> bool,
     ) -> bool {
-        self.defer(label);
+        let seen = self.defer(label, true);
         place();
         let applied = maximize();
         if applied {
-            self.take(label);
+            self.take_if_unchanged(label, seen);
         } else {
-            self.defer(label);
+            self.defer(label, true);
         }
         applied
     }
@@ -436,7 +484,9 @@ fn open_popout(
     // 숨은 창이라 최대화는 첫 화면의 보이기로 미룬다([`DeferredMaximize`] · [`show_placed`]).
     if attrs.maximized {
         match app.try_state::<DeferredMaximize>() {
-            Some(deferred) => deferred.defer(label),
+            Some(deferred) => {
+                deferred.defer(label, true);
+            }
             None => tracing::warn!(
                 module = "state",
                 label,
@@ -516,6 +566,17 @@ fn maximize(window: &Window) -> bool {
         Ok(()) => true,
         Err(e) => {
             tracing::warn!(module = "state", label = window.label(), error = %e, "저장된 최대화를 못 입혔다");
+            false
+        }
+    }
+}
+
+// 원래 크기 바람을 입힌다 — `false` = 못 입혔다.
+fn unmaximize(window: &Window) -> bool {
+    match window.unmaximize() {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(module = "state", label = window.label(), error = %e, "원래 크기 바람을 못 입혔다");
             false
         }
     }
@@ -646,11 +707,12 @@ fn place_main(
     };
     let deferred = app.try_state::<DeferredMaximize>();
     if !maximized {
-        // 미룸을 먼저 거둔다 — 그래야 아래 자리 입히기가 낸 `Moved` · `Resized` 가 적힌다([`record`]).
-        if deferred.is_some_and(|deferred| deferred.take(MAIN_WINDOW_LABEL)) {
+        // 바람을 먼저 거둔다 — 그래야 아래 자리 입히기가 낸 `Moved` · `Resized` 가 적힌다([`record`]). 먼저 적힌 바람이
+        //   어느 값이든 사본이 이긴다.
+        if deferred.is_some_and(|deferred| deferred.take(MAIN_WINDOW_LABEL).is_some()) {
             tracing::debug!(
                 module = "state",
-                "사본의 main 이 최대화가 아니라 미뤄 둔 최대화를 거둔다"
+                "사본의 main 이 최대화가 아니라 적어 둔 최대화 바람을 거둔다"
             );
         }
         place_at();
@@ -666,13 +728,13 @@ fn place_main(
     let hidden = matches!(window.is_visible(), Ok(false));
     match deferred {
         Some(deferred) if hidden => {
-            deferred.defer(MAIN_WINDOW_LABEL);
+            let seen = deferred.defer(MAIN_WINDOW_LABEL, true);
             place_at();
             // 보임을 읽은 뒤 트레이 「보이기」가 끼어들어 미룬 최대화를 이미 입혔으면, 그 뒤의 위치 세터가 최대화를
             //   내렸다(F8) — 보이게 된 main 에는 여기서 입히고 미룸을 거둔다. 그 보이기가 이 뒤에 오면 미룸이 남아
             //   그쪽이 입힌다. 못 입혔으면 미룸을 남긴다([`DeferredMaximize::apply`] 와 같은 까닭).
             if matches!(window.is_visible(), Ok(true)) && maximize(window) {
-                deferred.take(MAIN_WINDOW_LABEL);
+                deferred.take_if_unchanged(MAIN_WINDOW_LABEL, seen);
             }
         }
         Some(deferred) => {
@@ -685,39 +747,77 @@ fn place_main(
     }
 }
 
-/// 보이기 경로가 창을 보인 직후 부른다 — 그 창의 미룬 최대화가 있으면 입히고 지금 자리를 적는다
-/// ([`DeferredMaximize`]). 미룬 동안 적지 않은 자리를 여기서 메운다. 못 입혔으면 미룸을 남기고 적지 않는다
-/// ([`DeferredMaximize::apply`]).
+/// 보이기 경로가 창을 보이고 ★펴기(`unminimize`)까지 한 뒤★ 부른다 — 그 창의 최대화 바람이 있으면 입히고(참 =
+/// 최대화 · 거짓 = 원래 크기) 지금 자리를 적는다([`DeferredMaximize`]). 바람이 있던 동안 적지 않은 자리를 여기서
+/// 메운다. 못 입혔으면 바람을 남기고 적지 않는다([`DeferredMaximize::apply`]). 바람이 없으면 무동작.
+///
+/// ★펴기 앞에 부르지 말 것★ — tao 0.35.3 은 최소화된 창의 최대화 깃발을 내려 두어 원래 크기 입히기가 아무것도 하지
+/// 않고 바람만 거두고, 뒤의 펴기(`SW_RESTORE`)가 최소화 전 최대화로 돌아가 바람을 잃는다(TRD S26-window-chrome §6-2 ⓑ).
+// TRD S26-window-chrome §5-2 「모든 보이기 갈래가 미룬 최대화를 입힌다」
 pub fn apply_deferred_maximize(window: &Window) {
     if window
         .app_handle()
         .try_state::<DeferredMaximize>()
-        .is_some_and(|deferred| deferred.apply(window.label(), || maximize(window)))
+        .is_some_and(|deferred| {
+            deferred.apply(window.label(), |maximized| {
+                if maximized {
+                    maximize(window)
+                } else {
+                    unmaximize(window)
+                }
+            })
+        })
     {
         record(window);
     }
 }
 
-/// 숨긴 채 짓고 자리를 입힌 창을 처음 보인다 — 첫 화면의 보이기(`crate::first_paint`). 미룬 최대화가 있으면 보통 크기
+/// 보이지 않는 창의 창 상태 명령(`window.maximize` · `window.unmaximize`)이 바랄 최대화 상태를 적는다 — 먼저 적은 것을
+/// 덮는다. 그 창을 보이는 길이 [`apply_deferred_maximize`] 로 입힌다(TRD S26-window-chrome §5-2). 표가 등록돼 있지
+/// 않으면 아무것도 하지 않는다.
+pub(crate) fn defer_maximize(app: &AppHandle, label: &str, maximized: bool) {
+    match app.try_state::<DeferredMaximize>() {
+        Some(deferred) => {
+            deferred.defer(label, maximized);
+        }
+        None => tracing::warn!(
+            module = "state",
+            label,
+            "미룬 최대화 표가 등록돼 있지 않아 그 창의 최대화 바람을 적지 않는다"
+        ),
+    }
+}
+
+/// 적어 둔 최대화 바람을 거둔다(없으면 무동작) — OS 창이 이미 그 크기가 됐거나 될 창의 창 상태 명령이 부른다(TRD
+/// S26-window-chrome §5-2 「이미 그 크기면 바람을 거둔다」).
+pub(crate) fn drop_deferred_maximize(app: &AppHandle, label: &str) {
+    if let Some(deferred) = app.try_state::<DeferredMaximize>() {
+        deferred.take(label);
+    }
+}
+
+/// 숨긴 채 짓고 자리를 입힌 창을 처음 보인다 — 첫 화면의 보이기(`crate::first_paint`). 최대화 바람이 참이면 보통 크기
 /// 틀을 거치지 않고 곧바로 최대화로 보이고(platform `restore_placement` — 지금 보통 자리를 되돌릴 자리로 둔다) 자리를
 /// 적는다. 그 보이기가 실패하면(Windows 밖 포함) 보통으로 보인 뒤 최대화한다 — 트레이 보이기와 같은 길이라 보통 크기
-/// 틀이 한 번 보인다. ★메인 스레드에서 부른다★.
+/// 틀이 한 번 보인다. 바람이 거짓이면 보통으로 보인 뒤 원래 크기를 입힌다([`apply_deferred_maximize`]). ★메인 스레드에서
+/// 부른다★.
 ///
 /// 보이며 활성화한다.
 ///
 /// ★최대화로 보일 창은 포커스를 받는 빌더(`focused(true)`)로 지은 창이어야 한다★ — 날 Win32 로 보인 뒤 tao 보임 깃발을
 /// 맞추는 Tauri `show` 가, 포커스 없이 지은 창에서는 `SW_SHOWNOACTIVATE` 를 낸다(tao 0.35.3 `window_state.rs`
 /// `apply_diff` — 그 표식은 지운다는 코드가 사본에만 닿아 남는다 · 소스 독해). 그 명령은 `SW_SHOWNORMAL` 처럼 최대화를
-/// 되돌릴 수 있다 [미검]. 지금 최대화를 미루는 창은 main · 복원 팝아웃(부팅 · 런타임 복원 수락)뿐이고 모두 포커스를
-/// 받는다.
+/// 되돌릴 수 있다 [미검]. 이 길로 보이는 창(보이는 부팅의 main · 복원 팝아웃 · 창 포트가 활성으로 지은 팝아웃)은 모두
+/// 포커스를 받는 빌더로 지었다.
 pub(crate) fn show_placed(window: &Window) {
     let label = window.label();
     let app = window.app_handle();
     let deferred = app.try_state::<DeferredMaximize>();
-    if deferred
+    let seen = deferred
         .as_ref()
-        .is_some_and(|deferred| deferred.is_pending(label))
-    {
+        .and_then(|deferred| deferred.wish(label))
+        .filter(|wish| wish.maximized);
+    if let Some(seen) = seen {
         match show_maximized(window) {
             Ok(()) => {
                 // tao 보임 깃발을 맞춘다 — 거짓으로 남으면 다음 깃발 setter 가 창을 숨기고 트레이 숨기기가 아무것도 하지
@@ -725,7 +825,7 @@ pub(crate) fn show_placed(window: &Window) {
                 if let Err(e) = window.show() {
                     tracing::warn!(module = "state", label, error = %e, "최대화로 보인 창의 보임 깃발을 맞추지 못했다");
                 }
-                if deferred.is_some_and(|deferred| deferred.take(label)) {
+                if deferred.is_some_and(|deferred| deferred.take_if_unchanged(label, seen)) {
                     record(window);
                 }
                 return;
@@ -763,7 +863,7 @@ fn show_maximized(window: &Window) -> Result<(), String> {
 pub fn forget_deferred_maximize(app: &AppHandle, label: &str) {
     if app
         .try_state::<DeferredMaximize>()
-        .is_some_and(|deferred| deferred.take(label))
+        .is_some_and(|deferred| deferred.take(label).is_some())
     {
         tracing::debug!(
             module = "state",
@@ -814,15 +914,20 @@ impl RestoreWindows for TauriRestoreWindows {
     ) -> Result<(), String> {
         let deferred = if maximized {
             let deferred = self.app.try_state::<DeferredMaximize>();
-            match &deferred {
-                Some(deferred) => deferred.defer(label),
-                None => tracing::debug!(
-                    module = "state",
-                    label,
-                    "미룬 최대화 표가 등록돼 있지 않아 그 창의 최대화를 입히지 않는다"
-                ),
+            match deferred {
+                Some(deferred) => {
+                    let seen = deferred.defer(label, true);
+                    Some((deferred, seen))
+                }
+                None => {
+                    tracing::debug!(
+                        module = "state",
+                        label,
+                        "미룬 최대화 표가 등록돼 있지 않아 그 창의 최대화를 입히지 않는다"
+                    );
+                    None
+                }
             }
-            deferred
         } else {
             None
         };
@@ -833,7 +938,7 @@ impl RestoreWindows for TauriRestoreWindows {
         ) {
             Ok(built) => built,
             Err(e) => {
-                if let Some(deferred) = deferred {
+                if let Some((deferred, _)) = deferred {
                     deferred.take(label);
                 }
                 return Err(e);
@@ -848,8 +953,8 @@ impl RestoreWindows for TauriRestoreWindows {
             //   — 보이게 된 창에는 여기서 다시 입힌다(`place_main` 과 같은 까닭). 그 보이기가 이 뒤에 오면 미룸이 남아
             //   그쪽이 입힌다.
             if maximized && matches!(window.is_visible(), Ok(true)) && maximize(&window) {
-                if let Some(deferred) = &deferred {
-                    deferred.take(label);
+                if let Some((deferred, seen)) = &deferred {
+                    deferred.take_if_unchanged(label, *seen);
                 }
             }
         }
@@ -1580,35 +1685,102 @@ mod tests {
     fn a_deferred_maximize_is_applied_once() {
         let deferred = DeferredMaximize::default();
         assert!(!deferred.is_pending(MAIN_WINDOW_LABEL));
-        assert!(
-            !deferred.take(MAIN_WINDOW_LABEL),
+        assert_eq!(
+            deferred.take(MAIN_WINDOW_LABEL),
+            None,
             "미룬 것이 없으면 입히지 않는다"
         );
 
-        deferred.defer(MAIN_WINDOW_LABEL);
+        deferred.defer(MAIN_WINDOW_LABEL, true);
         assert!(
             deferred.is_pending(MAIN_WINDOW_LABEL),
             "서 있는 동안 main 의 자리를 적지 않는다"
         );
-        assert!(deferred.take(MAIN_WINDOW_LABEL));
+        assert_eq!(deferred.take(MAIN_WINDOW_LABEL), Some(true));
         assert!(!deferred.is_pending(MAIN_WINDOW_LABEL));
-        assert!(
-            !deferred.take(MAIN_WINDOW_LABEL),
+        assert_eq!(
+            deferred.take(MAIN_WINDOW_LABEL),
+            None,
             "다음 보이기는 다시 최대화하지 않는다"
         );
+    }
+
+    // 바람은 label 마다 하나다 — 뒤에 적은 값이 앞의 것을 덮고, 입히기는 그 값을 받는다. 원래 크기 바람도 서 있는 동안 자리
+    //   기록을 멈춘다(`record` — 값과 무관하다).
+    #[test]
+    fn a_later_wish_overwrites_an_earlier_one_and_is_applied_with_its_value() {
+        let deferred = DeferredMaximize::default();
+        deferred.defer("slot-popup-5", true);
+        deferred.defer("slot-popup-5", false);
+        assert!(deferred.is_pending("slot-popup-5"), "원래 크기 바람");
+        let mut applied = Vec::new();
+        assert!(deferred.apply("slot-popup-5", |maximized| {
+            applied.push(maximized);
+            true
+        }));
+        assert_eq!(applied, [false]);
+        assert!(!deferred.is_pending("slot-popup-5"));
+    }
+
+    // 입히는 사이 다른 쪽이 새 바람을 적으면 그 바람을 남긴다 — 다음 보이기가 그것을 입힌다.
+    #[test]
+    fn a_wish_written_while_applying_is_kept() {
+        let deferred = DeferredMaximize::default();
+        deferred.defer("slot-popup-5", true);
+        assert!(!deferred.apply("slot-popup-5", |_| {
+            deferred.defer("slot-popup-5", false);
+            true
+        }));
+        assert_eq!(
+            deferred.wish("slot-popup-5").map(|wish| wish.maximized),
+            Some(false)
+        );
+    }
+
+    // 입히는 사이 같은 값을 다시 적어도 그 바람은 새 것이다 — 값만 보고 거두면 지워진다.
+    #[test]
+    fn a_same_value_wish_rewritten_while_applying_is_kept() {
+        let deferred = DeferredMaximize::default();
+        deferred.defer("slot-popup-5", true);
+        assert!(!deferred.apply("slot-popup-5", |_| {
+            deferred.defer("slot-popup-5", true);
+            true
+        }));
+        assert_eq!(
+            deferred.wish("slot-popup-5").map(|wish| wish.maximized),
+            Some(true)
+        );
+    }
+
+    // 참 → 거짓 → 참으로 되돌아온 바람도 입히는 동안 적힌 새 바람이다(ABA).
+    #[test]
+    fn a_wish_that_returns_to_the_applied_value_while_applying_is_kept() {
+        let deferred = DeferredMaximize::default();
+        deferred.defer("slot-popup-5", true);
+        assert!(!deferred.apply("slot-popup-5", |_| {
+            deferred.defer("slot-popup-5", false);
+            deferred.defer("slot-popup-5", true);
+            true
+        }));
+        assert!(deferred.is_pending("slot-popup-5"));
+        assert!(
+            deferred.apply("slot-popup-5", |maximized| maximized),
+            "다음 보이기가 남은 바람을 입힌다"
+        );
+        assert!(!deferred.is_pending("slot-popup-5"));
     }
 
     #[test]
     fn a_deferred_maximize_that_fails_to_apply_stays_pending_for_the_next_show() {
         let deferred = DeferredMaximize::default();
         assert!(
-            !deferred.apply("slot-popup-5", || panic!("미룬 것이 없으면 입히지 않는다")),
+            !deferred.apply("slot-popup-5", |_| panic!("미룬 것이 없으면 입히지 않는다")),
             "미룬 것이 없다"
         );
 
-        deferred.defer("slot-popup-5");
+        deferred.defer("slot-popup-5", true);
         assert!(
-            !deferred.apply("slot-popup-5", || false),
+            !deferred.apply("slot-popup-5", |_| false),
             "못 입혔으면 자리를 적지 않는다"
         );
         assert!(
@@ -1617,12 +1789,12 @@ mod tests {
         );
 
         assert!(
-            deferred.apply("slot-popup-5", || true),
+            deferred.apply("slot-popup-5", |_| true),
             "다음 보이기가 다시 입힌다"
         );
         assert!(!deferred.is_pending("slot-popup-5"));
         assert!(
-            !deferred.apply("slot-popup-5", || panic!("한 번만 입힌다")),
+            !deferred.apply("slot-popup-5", |_| panic!("한 번만 입힌다")),
             "입힌 뒤에는 다시 입히지 않는다"
         );
     }
@@ -1644,7 +1816,7 @@ mod tests {
         );
 
         assert!(
-            deferred.apply(MAIN_WINDOW_LABEL, || true),
+            deferred.apply(MAIN_WINDOW_LABEL, |_| true),
             "다음 보이기가 다시 입힌다"
         );
         assert!(!deferred.is_pending(MAIN_WINDOW_LABEL));
@@ -1663,7 +1835,7 @@ mod tests {
         assert!(!deferred.apply_now(
             MAIN_WINDOW_LABEL,
             // 트레이 「보이기」가 끼어들어 미룬 최대화를 입히고 거뒀다 — 그 뒤의 위치 세터가 그 최대화를 내린다(F8).
-            || assert!(deferred.apply(MAIN_WINDOW_LABEL, || true)),
+            || assert!(deferred.apply(MAIN_WINDOW_LABEL, |_| true)),
             || {
                 maximized = true;
                 false
@@ -1679,24 +1851,29 @@ mod tests {
     #[test]
     fn deferred_maximizes_are_kept_per_window() {
         let deferred = DeferredMaximize::default();
-        deferred.defer("slot-popup-3");
-        deferred.defer("slot-popup-4");
+        deferred.defer("slot-popup-3", true);
+        deferred.defer("slot-popup-4", false);
 
         assert!(
             !deferred.is_pending(MAIN_WINDOW_LABEL),
             "다른 창은 그대로 적힌다"
         );
-        assert!(deferred.take("slot-popup-3"), "보인 창 하나만 입힌다");
+        assert_eq!(
+            deferred.take("slot-popup-3"),
+            Some(true),
+            "보인 창 하나만 입힌다"
+        );
         assert!(!deferred.is_pending("slot-popup-3"));
         assert!(
             deferred.is_pending("slot-popup-4"),
             "아직 숨은 창의 미룸은 남는다"
         );
-        assert!(
+        assert_eq!(
             deferred.take("slot-popup-4"),
-            "창 소멸도 같은 거두기다 — 거둔 뒤 집합이 빈다"
+            Some(false),
+            "창 소멸도 같은 거두기다 — 거둔 뒤 표가 빈다"
         );
-        assert!(deferred.labels().is_empty());
+        assert!(deferred.wishes().by_label.is_empty());
     }
 
     // ── 결과를 돌려주는 자리 입히기(도킹의 창 포트) ──

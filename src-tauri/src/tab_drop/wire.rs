@@ -163,12 +163,31 @@ pub enum DropOutcome {
 /// - `restored`: 그 창의 보통(복원) 안쪽 크기 — 최대화 중이어도 최대화 전 크기다. 아직 모르면 `null`.
 /// - `maximized`: 최대화돼 있나.
 /// - `insets`: 창 틀 = 바깥 사각형 − 안쪽 사각형(CSS px — 그 창 배율로 나눈 값 · 보이지 않는 크기 조절 테두리 포함).
+/// - `focused`: 그 창이 OS 전경 창인가(제목 줄 흐림 몫 — TRD S26-window-chrome §6-5). 그 창의 포커스 사건이 민 값은
+///   그 사건의 값이고, 당기기 · 그 밖의 밀기는 그때의 OS 전경 창 판정이다 — 두 값이 잠깐 어긋날 수 있다(미검 · S12).
+/// - `caption`: 제목 줄 크롬 모양 — OS 상수라 창마다 · 실행 내내 같다.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct WindowFrame {
     pub restored: Option<SizeCss>,
     pub maximized: bool,
     pub insets: Insets,
+    pub focused: bool,
+    pub caption: CaptionChrome,
+}
+
+/// 제목 줄 크롬 모양(TRD S26-window-chrome §3-2 · §7-11).
+///
+/// - `buttons`: 최소화 · 최대화 · 닫기 단추를 웹이 그린다. 거짓 = OS 가 그린다(macOS 몫 — 지금은 늘 참).
+/// - `leading_inset`: 제목 줄 왼쪽에서 웹이 비워 둘 폭(CSS px — OS 가 그 자리에 단추를 그린다 · 지금은 늘 0).
+/// - `snap_overlay`: 셸이 스냅 레이아웃 오버레이를 켠 빌드인가 — 참일 때만 웹이 최대화 단추 사각형을 보고한다(지금은 늘
+///   거짓 · §8-4).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct CaptionChrome {
+    pub buttons: bool,
+    pub leading_inset: f64,
+    pub snap_overlay: bool,
 }
 
 #[cfg(test)]
@@ -312,11 +331,19 @@ mod tests {
                     b: 8.0,
                     l: 8.0
                 },
+                focused: true,
+                caption: CaptionChrome {
+                    buttons: true,
+                    leading_inset: 0.0,
+                    snap_overlay: false,
+                },
             })
             .unwrap(),
             json!({
                 "restored": { "w": 640.0, "h": 480.0 }, "maximized": true,
                 "insets": { "t": 31.0, "r": 8.0, "b": 8.0, "l": 8.0 },
+                "focused": true,
+                "caption": { "buttons": true, "leading_inset": 0.0, "snap_overlay": false },
             })
         );
     }

@@ -9,7 +9,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // 창 사실 당기기(`window_frame`)는 탭바가 마운트마다 낸다 — 계약 모양으로 답해 경고를 내지 않게 한다.
 const invokeMock = vi.hoisted(() =>
   vi.fn(async (cmd: string, _args?: unknown): Promise<unknown> =>
-    cmd === 'window_frame' ? { restored: null, maximized: false, insets: { t: 0, r: 0, b: 0, l: 0 } } : undefined,
+    cmd === 'window_frame'
+      ? {
+          restored: null,
+          maximized: false,
+          insets: { t: 0, r: 0, b: 0, l: 0 },
+          focused: true,
+          caption: { buttons: true, leading_inset: 0, snap_overlay: false },
+        }
+      : undefined,
   ),
 )
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (cmd: string, args?: unknown) => invokeMock(cmd, args) }))
@@ -490,7 +498,13 @@ const EASE = 'transform 200ms cubic-bezier(0.3333, 0.6667, 0.6667, 1)'
 // 끌기 밖 — 속성은 그대로 · 시간만 0(진행 중인 전환을 끊지 않는다).
 const SNAP = 'transform 0ms cubic-bezier(0.3333, 0.6667, 0.6667, 1)'
 /** 셸이 미는 창 사실(`window_frame` 당기기의 답). */
-const FRAME = { restored: { w: 1000, h: 700 }, maximized: false, insets: { t: 31, r: 8, b: 8, l: 8 } }
+const FRAME = {
+  restored: { w: 1000, h: 700 },
+  maximized: false,
+  insets: { t: 31, r: 8, b: 8, l: 8 },
+  focused: true,
+  caption: { buttons: true, leading_inset: 0, snap_overlay: false },
+}
 
 const ticks = async (): Promise<void> => {
   for (let i = 0; i < 20; i++) await Promise.resolve()

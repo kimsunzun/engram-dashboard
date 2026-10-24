@@ -27,7 +27,8 @@ use uuid::Uuid;
 
 use self::plan::{InputNow, Plan, SourceFrame, TopAt};
 use self::wire::{
-    DropOutcome, DropTo, EndEffect, NewWindowBy, TabDrop, TabDropDone, TabDropReply, WindowFrame,
+    CaptionChrome, DropOutcome, DropTo, EndEffect, NewWindowBy, TabDrop, TabDropDone, TabDropReply,
+    WindowFrame,
 };
 use crate::layout::apply::{self, DockDest, DockOutcome};
 use crate::layout::bands::SizeCss;
@@ -564,21 +565,26 @@ pub fn source_frame(geom: Option<&FrameGeom>) -> SourceFrame {
     }
 }
 
-/// 창 사실 하나 — 복원 크기 · 최대화는 모델(`WindowAttrs`)의 값이다.
-pub fn window_frame(attrs: &WindowAttrs, insets: Insets) -> WindowFrame {
+/// 창 사실 하나 — 복원 크기 · 최대화는 모델(`WindowAttrs`)의 값, 앞 창 · 크롬 모양은 읽은 값 그대로다.
+pub fn window_frame(seen: &FrameSeen, insets: Insets) -> WindowFrame {
     WindowFrame {
-        restored: attrs.bounds.map(|b| SizeCss { w: b.w(), h: b.h() }),
-        maximized: attrs.maximized,
+        restored: seen.attrs.bounds.map(|b| SizeCss { w: b.w(), h: b.h() }),
+        maximized: seen.attrs.maximized,
         insets,
+        focused: seen.focused,
+        caption: seen.caption,
     }
 }
 
-/// 창 하나를 지금 읽은 것 — `minimized` · `geom` 은 게터(어느 락도 쥐지 않고 읽는다), `attrs` 는 그 창의 모델 값.
+/// 창 하나를 지금 읽은 것 — `minimized` · `geom` 은 게터(어느 락도 쥐지 않고 읽는다), `attrs` 는 그 창의 모델 값,
+/// `focused` 는 그 창의 포커스 사건 값 또는 OS 전경 창 판정, `caption` 은 OS 상수(TRD S26-window-chrome §6-5).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FrameSeen {
     pub minimized: bool,
     pub attrs: WindowAttrs,
     pub geom: Option<FrameGeom>,
+    pub focused: bool,
+    pub caption: CaptionChrome,
 }
 
 /// 창마다 마지막으로 낸 `window:frame` — 값이 바뀔 때만 내게 한다. 락은 잎이다. 닫힌 창의 항목은 그 창이 사라질 때
@@ -600,10 +606,11 @@ impl FrameBook {
     }
 }
 
-/// 자리 기록 경로(`Moved` · `Resized` · 창 포트의 `record_placement`)가 모델에 적은 뒤 부른다 — 그 창의 값이 마지막으로
-/// 낸 값과 다를 때만 `emit` 을 한 번, 표 락을 놓은 뒤에 부른다. 최소화 중 · 기하를 못 읽음이면 내지도 적지도 않는다
-/// (최소화 중의 게터는 화면 밖 값이다). 제목 표시줄로 창을 옮기는 동안의 `Moved` 연타는 값이 같아 내지 않는다.
-// TRD S21-slot-docking §3-8
+/// 자리 기록 경로(`Moved` · `Resized` · 창 포트의 `record_placement`)가 모델에 적은 뒤 · 그 창의 포커스 사건(`Focused`)이
+/// 부른다 — 그 창의 값(앞 창 포함)이 마지막으로 낸 값과 다를 때만 `emit` 을 한 번, 표 락을 놓은 뒤에 부른다. 최소화 중 ·
+/// 기하를 못 읽음이면 내지도 적지도 않는다(최소화 중의 게터는 화면 밖 값이다). 제목 표시줄로 창을 옮기는 동안의 `Moved`
+/// 연타는 값이 같아 내지 않는다.
+// TRD S21-slot-docking §3-8 · TRD S26-window-chrome §6-5
 pub fn push_frame(book: &FrameBook, label: &str, seen: FrameSeen, emit: impl FnOnce(&WindowFrame)) {
     if seen.minimized {
         return;
@@ -611,7 +618,7 @@ pub fn push_frame(book: &FrameBook, label: &str, seen: FrameSeen, emit: impl FnO
     let Some(insets) = seen.geom.as_ref().and_then(frame_insets) else {
         return;
     };
-    let frame = window_frame(&seen.attrs, insets);
+    let frame = window_frame(&seen, insets);
     let changed = {
         let mut last = sync::lock(&book.last);
         let changed = last.get(label) != Some(&frame);
@@ -636,7 +643,7 @@ pub fn pull_frame(book: &FrameBook, label: &str, seen: FrameSeen) -> WindowFrame
     let insets = fresh
         .or_else(|| book.last(label).map(|f| f.insets))
         .unwrap_or(NO_INSETS);
-    window_frame(&seen.attrs, insets)
+    window_frame(&seen, insets)
 }
 
 #[cfg(test)]
@@ -1738,11 +1745,19 @@ mod tests {
         }
     }
 
+    const CAPTION: CaptionChrome = CaptionChrome {
+        buttons: true,
+        leading_inset: 0.0,
+        snap_overlay: false,
+    };
+
     fn seen(maximized: bool, geom: Option<FrameGeom>) -> FrameSeen {
         FrameSeen {
             minimized: false,
             attrs: attrs(maximized),
             geom,
+            focused: false,
+            caption: CAPTION,
         }
     }
 
@@ -1806,12 +1821,32 @@ mod tests {
         assert_eq!(
             sent,
             [
-                window_frame(&attrs(false), frame_insets(&GEOM).unwrap()),
-                window_frame(&attrs(true), frame_insets(&GEOM).unwrap()),
-                window_frame(&attrs(true), frame_insets(&thicker).unwrap()),
+                window_frame(&seen(false, None), frame_insets(&GEOM).unwrap()),
+                window_frame(&seen(true, None), frame_insets(&GEOM).unwrap()),
+                window_frame(&seen(true, None), frame_insets(&thicker).unwrap()),
             ]
         );
         assert_eq!(sent[0].restored, Some(SizeCss { w: 800.0, h: 600.0 }));
+    }
+
+    // 앞 창이 바뀌면 다른 칸이 같아도 나간다 — 같은 값의 포커스 사건 연타는 나가지 않는다(TRD S26-window-chrome §6-5).
+    #[test]
+    fn a_focus_change_alone_sends_the_frame_once() {
+        let book = FrameBook::default();
+        let mut sent = Vec::new();
+        let focused = |on: bool| FrameSeen {
+            focused: on,
+            ..seen(false, Some(GEOM))
+        };
+        for on in [false, true, true, false, false] {
+            push_frame(&book, MAIN, focused(on), |f| sent.push(f.focused));
+        }
+        assert_eq!(sent, [false, true, false]);
+        assert_eq!(
+            pull_frame(&book, MAIN, focused(true)).caption,
+            CAPTION,
+            "당기기도 크롬 모양을 싣는다"
+        );
     }
 
     #[test]
@@ -1881,6 +1916,8 @@ mod tests {
                 restored: Some(SizeCss { w: 800.0, h: 600.0 }),
                 maximized: true,
                 insets: frame_insets(&GEOM).unwrap(),
+                focused: false,
+                caption: CAPTION,
             }
         );
         let unknown = FrameSeen {

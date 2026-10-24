@@ -71,7 +71,11 @@ impl FakeGate {
 impl PaintGate for FakeGate {
     fn hold_unarmed(&self, label: &str) {
         assert!(self.pool_locked(), "올림은 맡김과 같은 풀 락 안에서 건다");
-        self.held.lock().unwrap().insert(label.to_owned(), None);
+        self.held
+            .lock()
+            .unwrap()
+            .entry(label.to_owned())
+            .or_insert(None);
         self.calls
             .lock()
             .unwrap()

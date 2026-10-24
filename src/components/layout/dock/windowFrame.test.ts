@@ -18,8 +18,21 @@ import {
   windowFrame,
 } from './windowFrame'
 
-const PULLED: WindowFrame = { restored: { w: 1200, h: 800 }, maximized: false, insets: { t: 31, r: 8, b: 8, l: 8 } }
-const PUSHED: WindowFrame = { restored: { w: 1000, h: 700 }, maximized: true, insets: { t: 31, r: 8, b: 8, l: 8 } }
+const CAPTION = { buttons: true, leading_inset: 0, snap_overlay: false }
+const PULLED: WindowFrame = {
+  restored: { w: 1200, h: 800 },
+  maximized: false,
+  insets: { t: 31, r: 8, b: 8, l: 8 },
+  focused: true,
+  caption: CAPTION,
+}
+const PUSHED: WindowFrame = {
+  restored: { w: 1000, h: 700 },
+  maximized: true,
+  insets: { t: 31, r: 8, b: 8, l: 8 },
+  focused: false,
+  caption: CAPTION,
+}
 
 function fakeIpc() {
   let handler: ((payload: unknown) => void) | undefined
@@ -94,11 +107,14 @@ describe('windowFrame', () => {
       { ...PUSHED, maximized: 'yes' },
       { ...PUSHED, insets: { t: 1, r: 1, b: 1 } },
       { ...PUSHED, restored: { w: 'a', h: 1 } },
+      { ...PUSHED, focused: 'yes' },
+      { ...PUSHED, caption: undefined },
+      { ...PUSHED, caption: { buttons: true, leading_inset: 0 } },
     ]) {
       f.push(bad)
     }
     expect(src.current()).toBeNull()
-    expect(warn).toHaveBeenCalledTimes(5)
+    expect(warn).toHaveBeenCalledTimes(8)
   })
 
   it('떼면 등록을 풀고 그 뒤 값을 바꾸지 않는다 · 등록 전에 떼면 늦은 등록을 곧바로 푼다', async () => {

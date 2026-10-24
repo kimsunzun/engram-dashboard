@@ -20,10 +20,10 @@ use engram_dashboard_protocol::{AgentBackendKind, AgentCommand, AgentEvent, Requ
 
 use crate::commands::popout::{PopupCounter, TauriWindowHost};
 use crate::commands::settings::TauriSettingsEvents;
+use crate::commands::window_ctl::TauriWindowControl;
 use crate::daemon_client::DaemonClient;
 use crate::layout::apply;
 use crate::layout::window_arg;
-use crate::layout::window_ctl::{Activation, Applied, OsWindowState, WindowAction, WindowControl};
 use crate::layout::{
     AgentSpawner, LayoutEvents, LayoutState, MoveFailed, NewWindow, SlotContent, SpareClaim,
     SplitDir, SplitRatioApplied, SubscriptionSync, UiMetrics, ViewManager, ViewSnapshot,
@@ -226,27 +226,6 @@ impl WindowHost for OwnedWindowHost {
     }
 }
 
-// TODO(T-66 U7a-2): `commands::window_ctl::TauriWindowControl` 이 이 자리를 대신한다 — 그때까지 버스의 창 상태 동사는
-//   실패하고(`apply`), `window.close main` · `window.hideAll` · `window.showAll` 은 아무것도 하지 않은 채 성공을 답하며,
-//   `window.list` 의 OS 상태 칸은 모두 false 다.
-struct UnwiredWindowControl;
-
-impl WindowControl for UnwiredWindowControl {
-    fn apply(&self, _label: &str, _action: WindowAction) -> Result<Applied, String> {
-        Err("미구현 — U7a-2".to_string())
-    }
-
-    fn show_all(&self, _how: Activation) -> bool {
-        false
-    }
-
-    fn hide_all(&self) {}
-
-    fn state(&self, _label: &str) -> Option<OsWindowState> {
-        None
-    }
-}
-
 struct OwnedSpawner {
     client: Arc<DaemonClient>,
 }
@@ -294,7 +273,7 @@ pub fn command_ports(
         windows: Arc::new(OwnedWindowHost { app: app.clone() }),
         labels,
         spawner: Arc::new(OwnedSpawner { client }),
-        control: Arc::new(UnwiredWindowControl),
+        control: Arc::new(TauriWindowControl::new(app.clone())),
         // 아래 넷은 레이아웃 포트가 아니다 — 표가 하나라 여기 함께 실린다(`layout::commands` 헤더).
         themes: themes.clone(),
         settings,

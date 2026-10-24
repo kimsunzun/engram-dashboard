@@ -14,6 +14,8 @@ pub mod tray;
 pub mod usage;
 // ADR-0155: 웹뷰 몫 명령의 보고·결말 회수(TRD §6 Step 4).
 pub mod view_bus;
+// 창 상태 포트의 Tauri 어댑터 · invoke `window_control`(TRD S26-window-chrome §6-2 · §6-4).
+pub mod window_ctl;
 
 pub use agent::*;
 pub use autostart::*;

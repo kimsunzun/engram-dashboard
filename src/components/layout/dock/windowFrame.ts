@@ -1,4 +1,5 @@
-// TRD S21-slot-docking §3-8: 이 창의 창 사실(복원 안쪽 크기 · 최대화 · 틀 inset) — 마운트 때 `window_frame` 으로 한 번 당기고,
+// TRD S21-slot-docking §3-8: 이 창의 창 사실(복원 안쪽 크기 · 최대화 · 틀 inset · 앞 창 · 크롬 모양 — 뒤 둘은 TRD
+//   S26-window-chrome §6-5) — 마운트 때 `window_frame` 으로 한 번 당기고,
 //   그 뒤는 셸이 값이 바뀔 때만 미는 `window:frame` 을 받아 마지막 값 하나만 쥔다. 출처 웹뷰가 dragstart 에 원래 크기 · 새 창
 //   크기를 셈하는 재료다(R7 · R22). 끌기 밖의 통신이라 끄는 동안에도 막지 않고 받는다(ADR-0297) — 끌기는 dragstart 에 그때
 //   값을 한 번 읽을 뿐이다.
@@ -9,6 +10,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 
+import type { CaptionChrome } from '../../../../src-tauri/bindings/CaptionChrome'
 import type { Insets } from '../../../../src-tauri/bindings/Insets'
 import type { SizeCss } from '../../../../src-tauri/bindings/SizeCss'
 import type { WindowFrame } from '../../../../src-tauri/bindings/WindowFrame'
@@ -49,14 +51,30 @@ function insetsOf(raw: unknown): Insets | undefined {
   return finite(v.t) && finite(v.r) && finite(v.b) && finite(v.l) ? { t: v.t, r: v.r, b: v.b, l: v.l } : undefined
 }
 
+function captionOf(raw: unknown): CaptionChrome | undefined {
+  if (raw === null || typeof raw !== 'object') return undefined
+  const v = raw as Record<string, unknown>
+  return typeof v.buttons === 'boolean' && finite(v.leading_inset) && typeof v.snap_overlay === 'boolean'
+    ? { buttons: v.buttons, leading_inset: v.leading_inset, snap_overlay: v.snap_overlay }
+    : undefined
+}
+
 /** 모양이 계약과 다르면 `null`. */
 function frameOf(raw: unknown): WindowFrame | null {
   if (raw === null || typeof raw !== 'object') return null
   const v = raw as Record<string, unknown>
   const restored = sizeOf(v.restored)
   const insets = insetsOf(v.insets)
-  if (restored === undefined || insets === undefined || typeof v.maximized !== 'boolean') return null
-  return { restored, maximized: v.maximized, insets }
+  const caption = captionOf(v.caption)
+  if (
+    restored === undefined ||
+    insets === undefined ||
+    caption === undefined ||
+    typeof v.maximized !== 'boolean' ||
+    typeof v.focused !== 'boolean'
+  )
+    return null
+  return { restored, maximized: v.maximized, insets, focused: v.focused, caption }
 }
 
 export function createWindowFrame(ipc: WindowFrameIpc): WindowFrameSource {
