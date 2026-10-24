@@ -57,16 +57,6 @@ impl LabelSource for PopupCounter {
     fn next_label(&self) -> String {
         PopupCounter::next_label(self)
     }
-
-    // label 형식(`slot-popup-<n>`)을 아는 쪽이 짓는다 — "slot-popup-3" → "Popup 3".
-    // ★바이트 슬라이싱 금지★: 이건 공개 포트라 어떤 `&str` 이든 들어올 수 있고, 인덱스로 자르면 문자
-    //   경계가 아닌 자리에서 패닉한다 — 셸은 아무것도 가두지 않아 그 패닉이 곧 셸 종료다(훅 · ADR-0292).
-    fn tab_name(&self, label: &str) -> String {
-        format!(
-            "Popup {}",
-            label.strip_prefix(POPUP_LABEL_PREFIX).unwrap_or(label)
-        )
-    }
 }
 
 // 적용 서비스의 OS 창 포트(`crate::layout::apply`) — 창 빌드·destroy·존재 확인은 이 파일이 소유한 Tauri 기법이다.
@@ -1102,7 +1092,7 @@ mod close_request_tests {
         let main = rig.main_tab();
         let slot = rig.first_slot(main);
         let mut mgr = rig.state.0.lock().unwrap();
-        let (tmp, _) = mgr.prepare_detached_view(main, slot, "tmp".into()).unwrap();
+        let (tmp, _) = mgr.prepare_detached_view(main, slot).unwrap();
         assert_eq!(
             mgr.attach_view_as_new_window(fresh, tmp),
             Err(LayoutError::WindowClosed(fresh.into()))
@@ -1151,9 +1141,7 @@ mod close_request_tests {
         }
         // 팝아웃(`slot.popout`)의 새 창 phase C 도 묘비 앞에서 멈춘다.
         let slot = tree::first_slot_id(&mgr.views[&source].layout);
-        let (tmp, _) = mgr
-            .prepare_detached_view(source, slot, "tmp".into())
-            .unwrap();
+        let (tmp, _) = mgr.prepare_detached_view(source, slot).unwrap();
         assert_eq!(
             mgr.attach_view_as_new_window(POPUP, tmp),
             Err(LayoutError::WindowClosed(POPUP.into()))

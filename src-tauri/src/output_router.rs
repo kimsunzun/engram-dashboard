@@ -812,7 +812,7 @@ mod tests {
         mgr.assign_agent(src, slot, astr).unwrap();
 
         // phase A: 임시 View 예약.
-        let (tmp, _src_content) = mgr.prepare_detached_view(src, slot, "Tab".into()).unwrap();
+        let (tmp, _src_content) = mgr.prepare_detached_view(src, slot).unwrap();
         // phase C: 타깃 창이 없음(소멸 모델) → Err.
         let err = mgr.insert_tab_into("gone-window", tmp).unwrap_err();
         assert!(matches!(
@@ -842,7 +842,7 @@ mod tests {
         mgr.assign_agent(src, slot, moved_str.clone()).unwrap();
 
         // phase A: 옮길 콘텐츠를 임시 View 로(src_content = 반출한 SlotContent — still_ours 대조 기준).
-        let (tmp, src_content) = mgr.prepare_detached_view(src, slot, "Tab".into()).unwrap();
+        let (tmp, src_content) = mgr.prepare_detached_view(src, slot).unwrap();
         mgr.create_window("slot-popup-1").unwrap();
 
         // ★phase B 동안 소스 슬롯이 다른 agent 로 재배정됨(gap race 시뮬)★.
@@ -876,7 +876,7 @@ mod tests {
         let (moved, moved_str) = agent();
         mgr.assign_agent(src, slot, moved_str.clone()).unwrap();
 
-        let (tmp, src_content) = mgr.prepare_detached_view(src, slot, "Tab".into()).unwrap();
+        let (tmp, src_content) = mgr.prepare_detached_view(src, slot).unwrap();
         mgr.create_window("slot-popup-1").unwrap();
         mgr.insert_tab_into("slot-popup-1", tmp).unwrap();
 
@@ -915,7 +915,7 @@ mod tests {
         );
 
         // phase A: agent_list 콘텐츠를 임시 View 로 반출.
-        let (tmp, src_content) = mgr.prepare_detached_view(src, slot, "Tab".into()).unwrap();
+        let (tmp, src_content) = mgr.prepare_detached_view(src, slot).unwrap();
         assert_eq!(src_content, SlotContent::AgentList);
         assert!(
             router.rebuild(&mgr).is_empty(),

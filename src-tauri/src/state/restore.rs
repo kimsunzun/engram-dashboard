@@ -1013,6 +1013,7 @@ mod tests {
         TabEntry {
             id: Uuid::new_v4(),
             name: "탭".into(),
+            named: Some(true),
             focused_slot_id: None,
             layout: PersistedNode::Slot {
                 id: Uuid::new_v4(),
@@ -1458,7 +1459,7 @@ mod tests {
     // ── 복원 조율자 ──
 
     use crate::commands::popout::PopupCounter;
-    use crate::layout::{tree, WindowPlacement};
+    use crate::layout::{tree, TabName, WindowPlacement};
     use crate::settings::SettingsService;
     use crate::state::convert::to_persisted;
     use crate::theme::{EffectiveThemes, ThemeWindows, UiSettingsPayload, UiTheme};
@@ -1965,7 +1966,10 @@ mod tests {
                 "번호는 지금 값에서 하나씩 오른다"
             );
             let main = &mgr.windows[MAIN_WINDOW_LABEL];
-            assert_eq!(mgr.views[&main.active].name, "지난 탭");
+            assert_eq!(
+                mgr.views[&main.active].name,
+                TabName::Named("지난 탭".into())
+            );
             assert_eq!(main.attrs.bounds, Some(rect(100.0, 80.0, 1200.0, 800.0)));
             assert!(!mgr.views.contains_key(&live_view));
             let popout = &mgr.windows["slot-popup-2"];
@@ -2443,7 +2447,8 @@ mod tests {
             );
             let main = &mgr.windows[MAIN_WINDOW_LABEL];
             assert_ne!(
-                mgr.views[&main.active].name, "지난 탭",
+                mgr.views[&main.active].name,
+                TabName::Named("지난 탭".into()),
                 "main 은 사본으로 안 바뀌었다"
             );
         }

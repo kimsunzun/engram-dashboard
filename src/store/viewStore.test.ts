@@ -71,7 +71,9 @@ function snap(overrides: Partial<ViewSnapshot> = {}): ViewSnapshot {
 function tabsPayload(overrides: Partial<WindowTabsPayload> = {}): WindowTabsPayload {
   return {
     label: 'main',
-    tabs: [{ id: 'v1', name: 'View 1' }],
+    window_id: 'main',
+    number: 1,
+    tabs: [{ id: 'v1', name: 'View 1', named: true }],
     active: 'v1',
     version: 1,
     ...overrides,
@@ -304,7 +306,7 @@ describe('viewStore emit 수신 → 상태 갱신', () => {
     }
     emit('window:tabs-updated', tabsPayload({
       label: 'main',
-      tabs: [{ id: 'v1', name: 'View 1' }, { id: 'v2', name: 'View 2' }],
+      tabs: [{ id: 'v1', name: 'View 1', named: true }, { id: 'v2', name: 'View 2', named: true }],
       active: 'v2',
       version: 4,
     }))
@@ -322,7 +324,7 @@ describe('viewStore emit 수신 → 상태 갱신', () => {
     emit('window:tabs-updated', tabsPayload({ label: 'main', active: 'v1', version: 1 }))
     emit('window:tabs-updated', tabsPayload({
       label: 'slot-popup-1',
-      tabs: [{ id: 'p1', name: 'Popup Tab' }],
+      tabs: [{ id: 'p1', name: 'Popup Tab', named: true }],
       active: 'p1',
       version: 2,
     }))
@@ -385,7 +387,7 @@ describe('initMainWindowFromBackend 부팅 init(read-only pull)', () => {
     invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
       if (cmd === 'list_tabs') {
         expect(args).toEqual({ window: 'main' })
-        return tabsPayload({ label: 'main', tabs: [{ id: 'v1', name: 'View 1' }], active: 'v1', version: 0 })
+        return tabsPayload({ label: 'main', tabs: [{ id: 'v1', name: 'View 1', named: true }], active: 'v1', version: 0 })
       }
       if (cmd === 'get_view') return snap({ view_id: 'v1', version: 0, focused_slot_id: 's1' })
       return undefined
@@ -406,7 +408,7 @@ describe('initMainWindowFromBackend 부팅 init(read-only pull)', () => {
       if (cmd === 'list_tabs') {
         listTabsCalls += 1
         if (listTabsCalls <= 2) throw new Error(`state not ready ${listTabsCalls}`)
-        return tabsPayload({ label: 'main', tabs: [{ id: 'v1', name: 'View 1' }], active: 'v1', version: 0 })
+        return tabsPayload({ label: 'main', tabs: [{ id: 'v1', name: 'View 1', named: true }], active: 'v1', version: 0 })
       }
       if (cmd === 'get_view') return snap({ view_id: 'v1', version: 0, focused_slot_id: 's1' })
       return undefined
@@ -444,7 +446,7 @@ describe('initMainWindowFromBackend 부팅 init(read-only pull)', () => {
     // 그 뒤 늦게 완료된 init 의 get_view pull(낡은 version 0)이 도착.
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === 'list_tabs') {
-        return tabsPayload({ label: 'main', tabs: [{ id: 'v1', name: 'View 1' }], active: 'v1', version: 0 })
+        return tabsPayload({ label: 'main', tabs: [{ id: 'v1', name: 'View 1', named: true }], active: 'v1', version: 0 })
       }
       if (cmd === 'get_view') return snap({ view_id: 'v1', version: 0, focused_slot_id: 's-old' })
       return undefined
@@ -644,7 +646,7 @@ describe('readWindowLabelFromHash + currentViewId (창 컨텍스트 해소, ADR-
 
   it('currentViewId: main 창이면 windows["main"].active', () => {
     window.location.hash = '#/'
-    useViewStore.setState({ windows: { main: { tabs: [{ id: 'v9', name: 'V9' }], active: 'v9', version: 1 } } })
+    useViewStore.setState({ windows: { main: { tabs: [{ id: 'v9', name: 'V9', named: true }], active: 'v9', version: 1 } } })
     expect(currentViewId()).toBe('v9')
   })
 
@@ -652,8 +654,8 @@ describe('readWindowLabelFromHash + currentViewId (창 컨텍스트 해소, ADR-
     window.location.hash = '#/popup?window=slot-popup-1'
     useViewStore.setState({
       windows: {
-        main: { tabs: [{ id: 'vм', name: 'main' }], active: 'vм', version: 1 },
-        'slot-popup-1': { tabs: [{ id: 'p1', name: 'p1' }], active: 'p1', version: 1 },
+        main: { tabs: [{ id: 'vм', name: 'main', named: true }], active: 'vм', version: 1 },
+        'slot-popup-1': { tabs: [{ id: 'p1', name: 'p1', named: true }], active: 'p1', version: 1 },
       },
     })
     expect(currentViewId()).toBe('p1')
@@ -661,7 +663,7 @@ describe('readWindowLabelFromHash + currentViewId (창 컨텍스트 해소, ADR-
 
   it('currentViewId: 모르는 라우트(#/unknown)면 windows["main"].active 폴백', () => {
     window.location.hash = '#/unknown'
-    useViewStore.setState({ windows: { main: { tabs: [{ id: 'vmain', name: 'main' }], active: 'vmain', version: 1 } } })
+    useViewStore.setState({ windows: { main: { tabs: [{ id: 'vmain', name: 'main', named: true }], active: 'vmain', version: 1 } } })
     expect(currentViewId()).toBe('vmain')
   })
 

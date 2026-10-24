@@ -12,7 +12,9 @@
 //! 창의 `theme` 이 모르는 값 · `number` 가 `1..=MAX_SAVED_NUMBER` 정수가 아닌 값이면 창은 살리고 그 칸만
 //! `None`(전역 테마 · 번호 없음)으로 접는다. `bounds` · `number` 가 없거나 `null` 이면 `None`(자리를 본 적 없는 창 ·
 //! 번호를 적지 않은 파일)이다 — 경고가 아니다. main 의 `number` 는 복원이 보지 않으므로(D3) 무슨 값이든 경고하지
-//! 않는다. 건너뛰고 접은 것은 [`DecodeWarning`] 으로 돌려준다 — 로그는 부르는 쪽이 낸다.
+//! 않는다. 탭의 `named` 가 없거나 불이 아니면 그 탭은 살리고 `None`(자동 이름)으로 읽는다 — 이것도 경고가 아니다(TRD
+//! S26-window-chrome §3-3 · 판정은 `schema::TabEntry` 의 serde 가 한다). 건너뛰고 접은 것은 [`DecodeWarning`] 으로
+//! 돌려준다 — 로그는 부르는 쪽이 낸다.
 
 use std::fmt;
 
@@ -387,6 +389,7 @@ mod tests {
         TabEntry {
             id: Uuid::new_v4(),
             name: name.to_string(),
+            named: Some(true),
             focused_slot_id: None,
             layout,
         }
@@ -396,7 +399,8 @@ mod tests {
         let focused = Uuid::new_v4();
         let first = TabEntry {
             id: Uuid::new_v4(),
-            name: "View 1".to_string(),
+            name: "빈 칸".to_string(),
+            named: Some(false),
             focused_slot_id: Some(focused),
             layout: PersistedNode::Split {
                 id: Uuid::new_v4(),
@@ -490,7 +494,7 @@ mod tests {
 
     fn tab_json(content: Value) -> Value {
         json!({
-            "id": Uuid::new_v4(), "name": "t", "focused_slot_id": null,
+            "id": Uuid::new_v4(), "name": "t", "named": false, "focused_slot_id": null,
             "layout": { "type": "slot", "id": Uuid::new_v4(), "content": content },
         })
     }
@@ -555,6 +559,8 @@ mod tests {
         assert_eq!(main["tabs"].as_array().unwrap().len(), 2);
         assert_eq!(main["tabs"][0]["layout"]["type"], "split");
         assert_eq!(main["tabs"][0]["layout"]["dir"], "left_right");
+        assert_eq!(main["tabs"][0]["named"], false);
+        assert_eq!(main["tabs"][1]["named"], true);
 
         let popout = &doc["windows"][1];
         assert_eq!(popout["kind"], "popout");
@@ -721,6 +727,46 @@ mod tests {
             })
             .collect();
         assert_eq!(skipped, [0, 2, 3]);
+    }
+
+    // TRD S26-window-chrome §3-3 — `named` 가 불이 아니어도 탭은 살리고 `None`(자동 이름)으로 읽는다. 경고하지 않는다.
+    #[test]
+    fn a_tab_named_flag_that_is_not_a_bool_reads_as_none_and_keeps_the_tab() {
+        let flags = [
+            None,
+            Some(json!(null)),
+            Some(json!(true)),
+            Some(json!(false)),
+            Some(json!("true")),
+            Some(json!(1)),
+            Some(json!({ "named": true })),
+            Some(json!([true])),
+        ];
+        let tabs = flags
+            .iter()
+            .map(|flag| {
+                let mut tab = tab_json(json!({ "type": "empty" }));
+                match flag {
+                    None => {
+                        tab.as_object_mut().unwrap().remove("named");
+                    }
+                    Some(raw) => tab["named"] = raw.clone(),
+                }
+                tab
+            })
+            .collect();
+        let (mut state, warnings) = decode_value(&file(vec![tabbed("main", "main", tabs)]));
+
+        assert_eq!(warnings, vec![]);
+        let named: Vec<Option<bool>> = main_strip(&mut state)
+            .tabs
+            .iter()
+            .map(|t| t.named)
+            .collect();
+        assert_eq!(
+            named,
+            [None, None, Some(true), Some(false), None, None, None, None]
+        );
     }
 
     #[test]

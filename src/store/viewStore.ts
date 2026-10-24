@@ -48,12 +48,13 @@ export const MAIN_WINDOW_LABEL = 'main'
 /** 사용량 슬롯에 쓸 표시 칸 — 빠진 칸은 셸이 그 슬롯의 지금 값으로 지킨다(`setUsageSlot`). */
 export type UsageShows = Partial<Pick<Extract<SlotContent, { type: 'usage' }>, 'show_claude' | 'show_codex'>>
 
-/**
- * window:tabs-updated / list_tabs 페이로드(WindowTabsPayload 미러, layout/apply.rs).
- * 옛 ViewListPayload{views, active_view_id}(전역) → 창별 {label, tabs, active, version}(ADR-0057).
- */
+/** window:tabs-updated / list_tabs 페이로드 — layout/apply.rs `WindowTabsPayload` 의 미러. 칸 이름이 wire 계약이다(ADR-0057). */
 export interface WindowTabsPayload {
   label: string
+  /** 그 창의 영속 신원 — main = `main`, 팝아웃 = UUID. */
+  window_id: string
+  /** 창 번호 — main = 1, 팝아웃 = 2 이상(TRD S26-window-chrome §4-1). */
+  number: number
   tabs: ViewMeta[]
   active: string
   version: number

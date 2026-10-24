@@ -475,7 +475,7 @@ mod tests {
 
     use super::*;
     use crate::commands::popout::PopupCounter;
-    use crate::layout::{LayoutEvents, ViewSnapshot, WindowBounds, WindowTabsPayload};
+    use crate::layout::{LayoutEvents, TabName, ViewSnapshot, WindowBounds, WindowTabsPayload};
     use crate::state::codec;
     use crate::state::lock::LOCK_FILE;
     use crate::state::placement::{Landing, MonitorArea};
@@ -676,7 +676,7 @@ mod tests {
         );
         {
             let mgr = layout.0.lock().unwrap();
-            assert_eq!(mgr.views[&saved_tab].name, "지난 탭");
+            assert_eq!(mgr.views[&saved_tab].name, TabName::Named("지난 탭".into()));
             assert_eq!(mgr.windows.len(), 2, "main + 복원한 팝아웃");
             assert!(
                 mgr.windows.contains_key("slot-popup-1"),

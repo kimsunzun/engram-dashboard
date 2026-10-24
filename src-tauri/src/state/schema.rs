@@ -1,9 +1,11 @@
 //! `state.json` 의 영속 모양 — 메모리 타입(`layout::ViewManager` 의 창 항목)과 따로 둔다(TRD S21-storage §6-1 ·
 //! §6-2).
 //!
-//! 탭 하나([`TabEntry`])는 `layout::View` 와, 분할 트리([`PersistedNode`])는 `layout::LayoutNode` 와 **같은 JSON**
-//! 이다 — 그 둘을 그대로 쓰지 않는 이유는 슬롯 내용 칸 하나다([`PersistedContent`]). 한쪽에 칸을 더하면 다른
-//! 쪽도 같이 고친다(시험이 둘을 맞댄다).
+//! 탭 하나([`TabEntry`])는 이름 칸을 빼면 `layout::View` 와, 분할 트리([`PersistedNode`])는 `layout::LayoutNode` 와
+//! **같은 JSON** 이다 — 그 둘을 그대로 쓰지 않는 이유는 슬롯 내용 칸([`PersistedContent`])과 이름 칸이다. 이름 칸은
+//! 파일에서 글자(`name` — 보이는 이름) + 불(`named`)이고 메모리에서 `layout::TabName` 이라, [`super::convert`] 가 풀어
+//! 옮긴다(TRD S26-window-chrome §3-3 — 글자로 적어 옛 빌드도 그 이름을 보인다). 한쪽에 칸을 더하면 다른 쪽도 같이
+//! 고친다(시험이 이름 칸 밖을 맞댄다).
 //!
 //! 읽기의 관용(창 · 탭만 건너뛰기)은 [`super::codec`] 이 진다 — 그래서 파일 · 창 · 탭 묶음(`StateFile` ·
 //! `WindowEntry` · `WindowKind` · `TabStrip`)은 직렬화만 derive 하고, 읽기는 그쪽이 조각마다 한다.
@@ -92,7 +94,13 @@ pub struct Bounds {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TabEntry {
     pub id: Uuid,
+    /// 쓰기 = 그 순간의 보이는 이름(정한 이름 · 아니면 자동 이름). 읽기는 `named == Some(true)` 일 때만 이 글자를 탭
+    /// 이름으로 쓴다(TRD S26-window-chrome §3-3) — 자동 탭의 글자는 지난 실행의 그 순간 값일 뿐이다.
     pub name: String,
+    /// 이름을 정했나. 쓰기는 늘 값이다. 읽기는 칸 없음 · `null` · 불이 아닌 값을 `None` 으로 접는다 — 그 값 때문에
+    /// 탭을 건너뛰지 않는다. `None` · `Some(false)` = 자동 이름(D16).
+    #[serde(default, deserialize_with = "lenient_bool")]
+    pub named: Option<bool>,
     pub focused_slot_id: Option<Uuid>,
     pub layout: PersistedNode,
 }
@@ -151,6 +159,10 @@ impl<'de> Deserialize<'de> for PersistedContent {
     }
 }
 
+fn lenient_bool<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<bool>, D::Error> {
+    Ok(Value::deserialize(deserializer)?.as_bool())
+}
+
 fn theme_wire<S: Serializer>(theme: &Option<UiTheme>, serializer: S) -> Result<S::Ok, S::Error> {
     theme.map(UiTheme::as_wire).serialize(serializer)
 }
@@ -164,7 +176,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::{PersistedContent, PersistedNode, TabEntry};
-    use crate::layout::{LayoutNode, SlotContent, SplitDir, View};
+    use crate::layout::{LayoutNode, SlotContent, SplitDir, TabName, View};
 
     fn slot(content: SlotContent) -> LayoutNode {
         LayoutNode::Slot {
@@ -232,11 +244,11 @@ mod tests {
     }
 
     #[test]
-    fn a_tab_is_the_same_json_as_a_view() {
+    fn a_tab_is_the_same_json_as_a_view_but_for_the_name() {
         let views = [
             View {
                 id: Uuid::new_v4(),
-                name: "View 1".to_string(),
+                name: TabName::Auto,
                 layout: split(
                     SplitDir::LeftRight,
                     split(
@@ -263,7 +275,7 @@ mod tests {
             },
             View {
                 id: Uuid::new_v4(),
-                name: "탭 둘".to_string(),
+                name: TabName::Named("탭 둘".to_string()),
                 layout: slot(SlotContent::Empty),
                 focused_slot_id: None,
             },
@@ -272,9 +284,19 @@ mod tests {
         let mut seen = BTreeSet::new();
         for view in &views {
             view_shapes(view, &mut seen);
-            let wire = serde_json::to_value(view).unwrap();
-            let tab = TabEntry::deserialize(wire.clone()).unwrap();
-            assert_eq!(serde_json::to_value(&tab).unwrap(), wire);
+            let mut wire = serde_json::to_value(view).unwrap();
+            assert!(wire.as_object_mut().unwrap().remove("name").is_some());
+            // 이름 칸은 `convert` 가 옮긴다(TRD S26-window-chrome §3-3) — 파일 쪽 꼴(글자 + 불)을 꽂아 읽고 이름 칸 밖이
+            // 그대로 되나오는지 본다.
+            let mut file = wire.clone();
+            file["name"] = json!("보이는 이름");
+            file["named"] = json!(true);
+            let tab = TabEntry::deserialize(file).unwrap();
+            let mut back = serde_json::to_value(&tab).unwrap();
+            let fields = back.as_object_mut().unwrap();
+            assert_eq!(fields.remove("name"), Some(json!("보이는 이름")));
+            assert_eq!(fields.remove("named"), Some(json!(true)));
+            assert_eq!(back, wire);
         }
         assert_eq!(
             seen,

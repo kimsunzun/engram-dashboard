@@ -55,6 +55,7 @@ use engram_dashboard_lib::layout::commands::{
     COMMAND_SPECS,
 };
 use engram_dashboard_lib::layout::geometry::Insets;
+use engram_dashboard_lib::layout::tab_name::effective_tab_name;
 use engram_dashboard_lib::layout::{
     tree, AgentSpawner, LayoutEvents, LayoutState, MoveFailed, SlotContent, SpareClaim, SplitDir,
     SplitRatioApplied, SplitRatioOutcome, SubscriptionSync, UiMetrics, ViewManager, ViewSnapshot,
@@ -678,8 +679,10 @@ fn the_catalog_generation_is_pinned_to_the_declaration_set() {
     //   `window.getTheme` · `restore.status` 것만 바뀌었다). 세대 16 은 `restore.status` 의 `state_file` **어휘**가
     //   늘고(`newer`) `settings.set` · `settings.reset` 의 **오류 선언**에 `CONFLICT` 가 든 세대다(ADR-0291). 세대 17 은
     //   그 둘이 지금 못 읽은 설정 파일을 `INTERNAL` 대신 `CONFLICT` 로 답하는 **답 어휘**와 summary 가 바뀐 세대다
-    //   (ADR-0291 R17).
-    assert_eq!(CATALOG_VERSION, 17);
+    //   (ADR-0291 R17). 세대 18 은 `tab.list` 의 탭 칸에 `named` 가 붙고 `name` 이 보이는 이름이 된
+    //   **답 모양**의 세대다(TRD S26-window-chrome §3-2 · §6-6 · `tab.create` · `tab.rename` 의 summary 와 `name` 앞뒤
+    //   공백 깎기도 같은 세대).
+    assert_eq!(CATALOG_VERSION, 18);
     assert_eq!(COMMAND_SPECS.len(), 26);
     assert_eq!(
         SlotPopoutArgs::SPEC.since,
@@ -815,6 +818,138 @@ async fn a_read_command_answers_from_the_same_authority() {
     assert!(
         windows.contains(&label.as_str()),
         "방금 만든 창이 조회에 보인다: {windows:?}"
+    );
+}
+
+/// `tab.list` 의 탭 칸은 이름을 정했나를 싣는다 — 이름 없이 만든 탭은 자동 이름(포커스 칸의 낱말)이고, 그 글자
+/// 그대로 `tab.rename` 해도 정한 이름이 된다(TRD S26-window-chrome §3-1 · §3-2).
+#[tokio::test]
+async fn tab_list_says_whether_each_tab_name_was_set() {
+    let (world, queue, receiver) = queued();
+    let auto = call(
+        &receiver,
+        &queue,
+        &world.mail,
+        "tab.create",
+        json!({ "window": MAIN_WINDOW_LABEL }),
+    )
+    .await
+    .outcome
+    .expect("자동 이름 탭");
+    let named = call(
+        &receiver,
+        &queue,
+        &Mailbox::default(),
+        "tab.create",
+        json!({ "window": MAIN_WINDOW_LABEL, "name": "작업" }),
+    )
+    .await
+    .outcome
+    .expect("이름을 정한 탭");
+    async fn list(receiver: &InboundReceiver, queue: &Queued) -> serde_json::Value {
+        call(
+            receiver,
+            queue,
+            &Mailbox::default(),
+            "tab.list",
+            json!({ "window": MAIN_WINDOW_LABEL }),
+        )
+        .await
+        .outcome
+        .expect("탭 목록")
+    }
+    let row = |listed: &serde_json::Value, id: &serde_json::Value| {
+        listed["tabs"]
+            .as_array()
+            .expect("배열")
+            .iter()
+            .find(|t| t["id"] == *id)
+            .cloned()
+            .expect("그 탭")
+    };
+
+    let listed = list(&receiver, &queue).await;
+    assert_eq!(
+        row(&listed, &auto["view_id"]),
+        json!({ "id": auto["view_id"], "name": "빈 칸", "named": false })
+    );
+    assert_eq!(
+        row(&listed, &named["view_id"]),
+        json!({ "id": named["view_id"], "name": "작업", "named": true })
+    );
+
+    call(
+        &receiver,
+        &queue,
+        &Mailbox::default(),
+        "tab.rename",
+        json!({ "view_id": auto["view_id"], "name": "빈 칸" }),
+    )
+    .await
+    .outcome
+    .expect("같은 글자로 이름 바꾸기");
+    assert_eq!(
+        row(&list(&receiver, &queue).await, &auto["view_id"]),
+        json!({ "id": auto["view_id"], "name": "빈 칸", "named": true })
+    );
+}
+
+/// `tab.create` · `tab.rename` 은 `name` 앞뒤 공백을 깎아 정한다 — 웹 레지스트리 `tab.rename` · 탭바 편집과 같은 글자가
+/// 된다.
+#[tokio::test]
+async fn tab_create_and_rename_trim_the_name() {
+    let (world, queue, receiver) = queued();
+    let created = call(
+        &receiver,
+        &queue,
+        &world.mail,
+        "tab.create",
+        json!({ "window": MAIN_WINDOW_LABEL, "name": "  작업 \t" }),
+    )
+    .await
+    .outcome
+    .expect("이름을 정한 탭");
+    async fn name_of(
+        receiver: &InboundReceiver,
+        queue: &Queued,
+        id: &serde_json::Value,
+    ) -> serde_json::Value {
+        let listed = call(
+            receiver,
+            queue,
+            &Mailbox::default(),
+            "tab.list",
+            json!({ "window": MAIN_WINDOW_LABEL }),
+        )
+        .await
+        .outcome
+        .expect("탭 목록");
+        listed["tabs"]
+            .as_array()
+            .expect("배열")
+            .iter()
+            .find(|t| t["id"] == *id)
+            .expect("그 탭")["name"]
+            .clone()
+    }
+    assert_eq!(
+        name_of(&receiver, &queue, &created["view_id"]).await,
+        json!("작업")
+    );
+
+    call(
+        &receiver,
+        &queue,
+        &Mailbox::default(),
+        "tab.rename",
+        json!({ "view_id": created["view_id"], "name": " 새 이름  " }),
+    )
+    .await
+    .outcome
+    .expect("이름 바꾸기");
+    assert_eq!(
+        name_of(&receiver, &queue, &created["view_id"]).await,
+        json!("새 이름")
     );
 }
 
@@ -2240,9 +2375,7 @@ impl World {
 
     fn main_tab_name(&self) -> String {
         let mgr = self.state.0.lock().unwrap();
-        mgr.views[&mgr.windows[MAIN_WINDOW_LABEL].active]
-            .name
-            .clone()
+        effective_tab_name(&mgr, &mgr.views[&mgr.windows[MAIN_WINDOW_LABEL].active])
     }
 }
 

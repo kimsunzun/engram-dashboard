@@ -392,11 +392,6 @@ impl LabelSource for Labels {
         self.probe.assert_outside("LabelSource::next_label");
         LabelSource::next_label(&self.inner)
     }
-
-    fn tab_name(&self, label: &str) -> String {
-        self.probe.assert_outside("LabelSource::tab_name");
-        LabelSource::tab_name(&self.inner, label)
-    }
 }
 
 struct Spawner {
@@ -1260,6 +1255,24 @@ fn rename_tab_notifies_tabs_only() {
     );
 }
 
+// AC36 — 빈 이름은 모델이 거절한다(경계가 거르지 않아도) · 알림 없음 · 이름 그대로.
+#[test]
+fn rename_tab_refuses_a_blank_name_without_notifying() {
+    let w = World::new();
+    let view = w.main_active();
+    let before = apply::list_tabs(&w.state, MAIN_WINDOW_LABEL).unwrap();
+
+    for blank in ["", "   ", "\t\n"] {
+        assert!(apply::rename_tab(&w.state, &w.ev, view, blank.to_string()).is_err());
+    }
+
+    assert_eq!(w.tab_events(), 0);
+    assert_eq!(
+        apply::list_tabs(&w.state, MAIN_WINDOW_LABEL).unwrap(),
+        before
+    );
+}
+
 #[test]
 fn rename_tab_unknown_view_is_err() {
     let w = World::new();
@@ -1631,10 +1644,11 @@ fn move_slot_to_window_opens_the_prewarmed_window_and_commits_after_the_notifica
             format!("place:{spare}"),
         ]
     );
+    let tab = &apply::list_tabs(&w.state, &spare).unwrap().tabs[0];
     assert_eq!(
-        apply::list_tabs(&w.state, &spare).unwrap().tabs[0].name,
-        "Popup 1",
-        "탭 이름도 맡긴 label 로 짓는다"
+        (tab.name.as_str(), tab.named),
+        ("에이전트", false),
+        "새 창의 탭은 자동 이름 — 옮긴 칸의 이름이다(장부에 없는 에이전트)"
     );
     let moved_layout = w.snapshot(moved.tab).layout;
     assert_eq!(

@@ -3,4 +3,13 @@
 /**
  * 탭 바용 View 메타(레이아웃 본체 제외 — `window:tabs-updated` 페이로드).
  */
-export type ViewMeta = { id: string, name: string, };
+export type ViewMeta = { id: string, 
+/**
+ * 보이는 이름 — 정한 이름이거나, 정하지 않았으면 그 순간의 자동 이름(포커스 슬롯의 이름).
+ */
+name: string, 
+/**
+ * 이름을 정했나 — 거짓이면 `name` 은 슬롯 내용 · 포커스를 따라 바뀐다. 같은 글자로 이름 바꾸기를 보내면 그
+ * 이름을 정한 것이 된다(TRD S26-window-chrome §3-1).
+ */
+named: boolean, };

@@ -1,5 +1,6 @@
-//! 탭 · 창 이름의 순수 셈(TRD S26-window-chrome §4-2 · §4-4 · PRD R3 · R4) — 슬롯 표시 이름(`slot_label`) ·
-//! OS 창 제목(`window_title`) · 셸 낱말 표(`word`). Tauri 도 모델(`View` · `ViewManager`)도 모른다.
+//! 탭 · 창 이름의 순수 셈(TRD S26-window-chrome §4-2 · §4-4 · PRD R3 · R4) — 탭 유효 이름(`effective_tab_name`) ·
+//! 슬롯 표시 이름(`slot_label`) · OS 창 제목(`window_title`) · 셸 낱말 표(`word`). Tauri 를 모른다 — 모델은 읽기만
+//! 한다(`effective_tab_name` 이 `View` 와 `ViewManager` 의 이름 장부 · 모르는 내용 곁표를 읽는다).
 //!
 //! ★D17 — `slot_label` 은 0 열 함수로 두고 본문에 `SlotContent` 위 `match` 하나만 담는다★: 갈래는 모두
 //! `SlotContent::<변형>` 경로 패턴으로 시작하고(`|` 로 이은 갈래도 — 와일드카드 · 이름 묶기 · `x @ …` · `crate::…`
@@ -10,7 +11,9 @@
 //! 변형이 `SlotContent::<변형>` 으로 나오는지 ② 갈래 줄이 위 꼴인지 잰다 — CI 가 clippy 를 돌리지 않아 lint
 //! attribute 만으로는 지켜지지 않는다. `match` 를 다른 함수로 떼어 내면 게이트가 못 본다.
 
-use super::types::SlotContent;
+use super::manager::ViewManager;
+use super::tree;
+use super::types::{SlotContent, TabName, View};
 
 const PRODUCT: &str = "Engram";
 
@@ -22,8 +25,6 @@ enum Word {
     Presets,
     Usage,
     /// 이 판이 모르는 내용의 슬롯 — `SlotContent` 의 갈래가 아니다(메모리 내용은 `Empty` · 원문은 곁표).
-    // TODO(T-66 U3a): effective_tab_name 이 이 변형을 쓰면 아래 allow 를 걷는다(그 전엔 운영 빌드에서 안 만들어진다).
-    #[cfg_attr(not(test), allow(dead_code))]
     Foreign,
 }
 
@@ -37,6 +38,29 @@ const fn word(w: Word) -> &'static str {
         Word::Presets => "프리셋",
         Word::Usage => "사용량",
         Word::Foreign => "알 수 없는 내용",
+    }
+}
+
+/// 탭의 보이는 이름(R4 · AC4 · AC35) — 정한 이름이면 그 이름이고, 자동이면 포커스 슬롯의 [`slot_label`] 이다. 포커스가
+/// 없거나 트리에 없는 슬롯을 가리키면 트리 첫 슬롯을 쓴다(`ViewManager::fixup_focus` 와 같은 규칙). 그 슬롯이 이 판이
+/// 모르는 내용을 쥐었으면 「알 수 없는 내용」이다 — 메모리 내용(`Empty`)대로 「빈 칸」이라 하면 점유된 칸을 비었다고
+/// 말한다. 에이전트 이름은 `mgr` 의 이름 장부에서 읽는다. 결과를 저장하지 않는다 — 부를 때마다 셈한다.
+pub fn effective_tab_name(mgr: &ViewManager, view: &View) -> String {
+    match &view.name {
+        TabName::Named(name) => name.clone(),
+        TabName::Auto => {
+            let slot = view
+                .focused_slot_id
+                .filter(|&id| tree::contains_slot(&view.layout, id))
+                .unwrap_or_else(|| tree::first_slot_id(&view.layout));
+            if mgr.unknown_content(view.id, slot).is_some() {
+                return word(Word::Foreign).to_owned();
+            }
+            match tree::find_slot(&view.layout, slot) {
+                Some(content) => slot_label(content, |id: &str| mgr.agent_name(id)),
+                None => word(Word::EmptySlot).to_owned(),
+            }
+        }
     }
 }
 
@@ -77,7 +101,10 @@ pub fn window_title(active_tab: Option<&str>, number: Option<u32>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::manager::MAIN_WINDOW_LABEL;
+    use crate::layout::types::SplitDir;
     use std::collections::HashMap;
+    use uuid::Uuid;
 
     fn no_names(_: &str) -> Option<&'static str> {
         None
@@ -196,6 +223,112 @@ mod tests {
             slot_label(&content, lookup);
         }
         assert!(!called.get());
+    }
+
+    // ── effective_tab_name ──
+
+    fn main_tab(mgr: &ViewManager) -> Uuid {
+        mgr.windows[MAIN_WINDOW_LABEL].active
+    }
+
+    fn name_of(mgr: &ViewManager, view: Uuid) -> String {
+        effective_tab_name(mgr, &mgr.views[&view])
+    }
+
+    // 왼쪽 = 에이전트 a1 · 오른쪽 = 에이전트 트리. 포커스는 새 칸(오른쪽)이다(`split_slot`).
+    fn agent_and_tree() -> (ViewManager, Uuid, Uuid, Uuid) {
+        let mut mgr = ViewManager::new();
+        let view = main_tab(&mgr);
+        let left = tree::first_slot_id(&mgr.views[&view].layout);
+        let right = mgr.split_slot(view, left, SplitDir::LeftRight).unwrap();
+        mgr.assign_agent(view, left, "a1".into()).unwrap();
+        mgr.set_slot_content(view, right, SlotContent::AgentList)
+            .unwrap();
+        mgr.put_agent_name("a1", "myproj");
+        (mgr, view, left, right)
+    }
+
+    #[test]
+    fn an_auto_tab_is_named_after_its_focused_slot() {
+        let (mut mgr, view, left, right) = agent_and_tree();
+        assert_eq!(name_of(&mgr, view), "에이전트 트리");
+        mgr.set_focused_slot(view, left).unwrap();
+        assert_eq!(name_of(&mgr, view), "myproj");
+        mgr.set_focused_slot(view, right).unwrap();
+        assert_eq!(name_of(&mgr, view), "에이전트 트리");
+    }
+
+    #[test]
+    fn a_named_tab_keeps_its_name_whatever_the_focus() {
+        let (mut mgr, view, left, _) = agent_and_tree();
+        mgr.rename_tab(view, "작업".into()).unwrap();
+        assert_eq!(name_of(&mgr, view), "작업");
+        mgr.set_focused_slot(view, left).unwrap();
+        assert_eq!(name_of(&mgr, view), "작업");
+    }
+
+    #[test]
+    fn a_focus_that_is_missing_or_outside_the_tree_falls_back_to_the_first_slot() {
+        let (mgr, view, _, _) = agent_and_tree();
+        let mut detached = mgr.views[&view].clone();
+        detached.focused_slot_id = Some(Uuid::new_v4());
+        assert_eq!(effective_tab_name(&mgr, &detached), "myproj");
+        detached.focused_slot_id = None;
+        assert_eq!(effective_tab_name(&mgr, &detached), "myproj");
+    }
+
+    #[test]
+    fn an_agent_missing_from_the_ledger_is_the_agent_word() {
+        let mut mgr = ViewManager::new();
+        let view = main_tab(&mgr);
+        let slot = tree::first_slot_id(&mgr.views[&view].layout);
+        mgr.assign_agent(view, slot, "a-unknown".into()).unwrap();
+        assert_eq!(name_of(&mgr, view), "에이전트");
+    }
+
+    #[test]
+    fn a_slot_holding_unknown_content_is_the_foreign_word_not_empty() {
+        let mut mgr = ViewManager::new();
+        let view = main_tab(&mgr);
+        let slot = tree::first_slot_id(&mgr.views[&view].layout);
+        let raw = serde_json::json!({ "type": "from_the_future" });
+        mgr.set_unknown_content(view, slot, raw.as_object().unwrap().clone())
+            .unwrap();
+        assert_eq!(name_of(&mgr, view), "알 수 없는 내용");
+        mgr.set_slot_content(view, slot, SlotContent::Empty)
+            .unwrap();
+        assert_eq!(name_of(&mgr, view), "빈 칸");
+    }
+
+    // 새 탭 · 새 창의 하나뿐인 빈 칸은 처음부터 포커스 칸이다 — 거기 놓은 내용이 곧 탭 이름이다(§4-2).
+    #[test]
+    fn placing_content_in_a_new_tabs_only_slot_names_the_tab() {
+        let mut mgr = ViewManager::new();
+        let view = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+        assert_eq!(name_of(&mgr, view), "빈 칸");
+        let slot = tree::first_slot_id(&mgr.views[&view].layout);
+        mgr.set_slot_content(view, slot, SlotContent::PresetPalette)
+            .unwrap();
+        assert_eq!(name_of(&mgr, view), "프리셋");
+    }
+
+    // 기본 이름(「View N」 · 「Popup N」 · 「Tab」)을 짓지 않는다 — 새로 서는 탭은 모두 자동 이름이다.
+    #[test]
+    fn new_tabs_are_auto_named_everywhere() {
+        let mut mgr = ViewManager::new();
+        let boot = main_tab(&mgr);
+        let tab = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+        let popout = mgr.create_window("slot-popup-1").unwrap();
+        let slot = tree::first_slot_id(&mgr.views[&boot].layout);
+        mgr.set_slot_content(boot, slot, SlotContent::AgentList)
+            .unwrap();
+        let (detached, _) = mgr.prepare_detached_view(boot, slot).unwrap();
+        for view in [boot, tab, popout, detached] {
+            assert_eq!(mgr.views[&view].name, TabName::Auto, "{view}");
+        }
+        assert_eq!(name_of(&mgr, detached), "에이전트 트리", "옮긴 칸의 이름");
+        let listed = mgr.list_tabs(MAIN_WINDOW_LABEL).unwrap();
+        assert!(listed.tabs.iter().all(|t| !t.named));
     }
 
     // ── window_title ──

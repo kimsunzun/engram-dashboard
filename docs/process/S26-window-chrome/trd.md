@@ -176,7 +176,7 @@ struct Closing { window_id: String, number: u32 }
 - **`View.name: String` → `TabName`**(메인 결정 M4′) — 이름을 정했나를 타입이 든다. 옛 `name` 을 직접 읽던 자리(`list_tabs` 의 `ViewMeta` 짓기 · `convert::tab_entry` 등)는 컴파일이 깨져 전부 유효 이름 셈으로 옮겨진다. 그대로 `String` 에 「정한 이름인가」 칸을 덧대는 갈래는 거부했다 — 자동 탭의 낡은 문자열(「View 1」)을 누가 바로 읽으면 AC3 이 깨진다.
 - **기본 이름 짓기를 걷는다** — `make_view(name)` → `make_view()`(`TabName::Auto`) · `create_tab(label, name)` 은 `Some` = `Named` · `None` = `Auto` · `refill_main` · `from_restored` 의 빈 main · `create_window` · `prepare_detached_view` 의 이름 인자 · `apply::move_slot_to_window` 의 `"Tab"` · `LabelSource::tab_name`(「Popup N」 — `commands::popout::PopupCounter`)을 모두 걷는다(코드 — 그 자리들에 지금 「View N」 · 「View 1」 · 「Tab」 · 「Popup N」 이 있다).
 - **`rename_tab` 은 빈 이름 · 공백뿐인 이름을 거절한다**(모델 쪽 방어 — `LayoutError::EmptyName`). 지금은 「정규화는 경계 몫」이라 받은 문자열을 그대로 쓴다(`ViewManager::rename_tab` 주석). 버스(`commands::text`)와 화면(`TabBar.tsx` `commitEdit` · 레지스트리 `tab.rename`)은 이미 거르므로 결과는 같고, 앞으로 새 경계가 생겨도 「정한 이름」이 빈 글자로 굳지 않는다(AC36).
-- **`rename_tab` 은 지금 유효 이름과 같은 글자여도 `Named` 로 굳힌다** — 자동 이름 「myproj」 탭을 사람이 「myproj」로 「바꾸면」 그 이름을 정한 것이다(그 뒤 에이전트 이름이 바뀌어도 따라가지 않는다). 웹 `TabBar.tsx` `commitEdit` 은 지금 `trimmed !== tab.name` 일 때만 보낸다(코드) — `tab.named` 가 거짓이면 같은 글자도 보내게 고친다(U3a · 리뷰 codex ⑨).
+- **`rename_tab` 은 지금 유효 이름과 같은 글자여도 `Named` 로 굳힌다** — 자동 이름 「myproj」 탭을 사람이 「myproj」로 「바꾸면」 그 이름을 정한 것이다(그 뒤 에이전트 이름이 바뀌어도 따라가지 않는다). 웹 `TabBar.tsx` `commitEdit` 은 지금 `trimmed !== tab.name` 일 때만 보낸다(코드) — `tab.named` 가 거짓이면 같은 글자도 보내게 고친다(U3a · 리뷰 codex ⑨). 같은 글자는 Enter(일부러 한 확정)에서만 보내고, 포커스 잃음 · 덮인 이웃 누름은 바뀐 글자만 보낸다 — 메인 결정(U3a 리뷰 · 2026-10-25).
 - **`WindowTabs::new` 가 `number` 를 인자로 받는다** — 새 창 항목은 전부 그 생성자를 지나므로(코드 — 그 함수 주석) 번호 없는 항목이 생기지 않는다.
 
 ### 3-2 wire
@@ -621,7 +621,7 @@ platform `window::caption_style() -> CaptionStyle { drawn_buttons: bool, leading
 
 ### 10-3 TS(vitest)
 
-`TitleRow` 배치 순서(탭바 → 빈 곳 → 표식 → 단추) · 표식이 Tab 순서 밖 · `pointer-events: none` · 자리 수별 폭 · 단추가 레지스트리 명령을 부름 · 최대화 상태에 따라 단추 · 접근성 이름 · main/팝아웃 셋째 단추 이름 · 아이콘(`EyeOff`) · `frame.focused` → 비활성 속성 · 최소 폭 셈과 보고 차례(보고 뒤 첫 화면 알림) · 0탭 효과가 `window_control{Close, if_empty}` 를 자기 `window_id` 로 · `viewStore` 의 `number` · `windowId` 칸 · 탭바 `available` 이 표식 · 단추 · 빈 곳을 뺀 폭 · **놓기 구역**(`geometryOf` · `windowDrop.decide` — 빈 곳 · 표식 · 단추 · 위 여백 위 점 = `tab_bar` 끝 번호 · 제목 줄 밖 = 지금처럼) · **이름 편집 확정**(자동 이름 탭에 같은 글자 = 보냄 · 정한 이름 탭에 같은 글자 = 안 보냄) · `windowFrame.ts` 가 새 칸을 읽고 모양이 틀리면 버림.
+`TitleRow` 배치 순서(탭바 → 빈 곳 → 표식 → 단추) · 표식이 Tab 순서 밖 · `pointer-events: none` · 자리 수별 폭 · 단추가 레지스트리 명령을 부름 · 최대화 상태에 따라 단추 · 접근성 이름 · main/팝아웃 셋째 단추 이름 · 아이콘(`EyeOff`) · `frame.focused` → 비활성 속성 · 최소 폭 셈과 보고 차례(보고 뒤 첫 화면 알림) · 0탭 효과가 `window_control{Close, if_empty}` 를 자기 `window_id` 로 · `viewStore` 의 `number` · `windowId` 칸 · 탭바 `available` 이 표식 · 단추 · 빈 곳을 뺀 폭 · **놓기 구역**(`geometryOf` · `windowDrop.decide` — 빈 곳 · 표식 · 단추 · 위 여백 위 점 = `tab_bar` 끝 번호 · 제목 줄 밖 = 지금처럼) · **이름 편집 확정**(자동 이름 탭에 같은 글자 Enter = 보냄 · 같은 글자 포커스 잃음 · 이웃 누름 = 안 보냄 · 정한 이름 탭에 같은 글자 = 안 보냄) · `windowFrame.ts` 가 새 칸을 읽고 모양이 틀리면 버림.
 
 ### 10-4 구조 게이트(CI · `/qa` 바인딩 — U1 · U7b 가 더한다)
 

@@ -64,6 +64,9 @@ use crate::theme::{ThemeControl, ThemeError, UiTheme, WindowTheme};
 //   `window.setTheme`·`window.getTheme`(화면에는 테마를 바꾸는 UI 가 없다 — TRD S21-storage §10 F7) ·
 //   `split.setRatio`·`split.list`(화면의 구분선 드래그는 Tauri `set_split_ratio` 를 직접 부르고 레지스트리에
 //   이름을 싣지 않는다 — ADR-0227).
+// ★세대 18 = `tab.list` 의 탭 칸에 `named` 가 붙고 `name` 이 보이는 이름(정한 이름 · 아니면 자동 이름)인 세대★(TRD
+//   S26-window-chrome §3-2 · §6-6) — 이름은 그대로고 답 모양이 바뀌었다. 같은 세대에 `tab.create` · `tab.rename` 의
+//   summary 가 자동 이름과 정한 이름의 굳음을 말하게 됐고 두 명령이 `name` 앞뒤 공백을 깎는다.
 // ★세대 17 = `settings.set`·`settings.reset` 이 설정 파일을 지금 못 읽은 쓰기를 `INTERNAL` 대신 `CONFLICT` 로 답하는
 //   세대★(ADR-0291 R17 · 사용자 결정 2026-10-11 — 대개 잠깐 쥔 잠김이라 조금 뒤 다시 하면 된다) — 이름 · 타입 · 오류
 //   선언은 그대로고 그 답 어휘와 summary 가 바뀌었다.
@@ -100,12 +103,13 @@ use crate::theme::{ThemeControl, ThemeError, UiTheme, WindowTheme};
 //   ★wire 프로토콜 판(`engram_dashboard_protocol::PROTOCOL_VERSION`)과 다른 번호다★ — 그쪽은 프레임 계약이고
 //   이쪽은 이 crate 의 어휘 세대다. 하나를 올린다고 다른 하나가 따라 올라가지 않는다.
 declare_commands! {
-    catalog_version: 17;
+    catalog_version: 18;
 
-    /// 탭 바 한 칸.
+    /// 탭 바 한 칸 — `name` = 보이는 이름 · `named` = 이름을 정했나(거짓이면 `name` 은 포커스 칸 내용을 따라 바뀐다).
     struct TabRow {
         id: String,
         name: String,
+        named: bool,
     }
 
     /// 나눌 방향 — 이름이 결과 배치를 말한다(`LeftRight` = 좌/우, `TopBottom` = 위/아래). // ADR-0140
@@ -170,7 +174,8 @@ declare_commands! {
         description: String,
     }
 
-    /// 창에 빈 탭을 하나 더 만들고 활성화한다.
+    /// 창에 빈 탭을 하나 더 만들고 활성화한다. name 을 빼면 자동 이름 — 그 탭의 포커스 칸(에이전트면 그 이름)을
+    /// 따라 바뀐다(tab.list 의 named = false). name 을 주면 정한 이름이다(앞뒤 공백은 깎는다).
     #[effect(Write)]
     #[since(1)]
     "tab.create" => args TabCreateArgs {
@@ -196,7 +201,9 @@ declare_commands! {
         view_id: String,
     } -> ok TabCloseOk {} errors [CONFLICT];
 
-    /// 탭 이름을 바꾼다(창은 탭 id 에서 파생하므로 안 받는다).
+    /// 탭 이름을 바꾼다(창은 탭 id 에서 파생하므로 안 받는다 · 앞뒤 공백은 깎는다). 그 뒤 이름은 굳는다 — 지금
+    /// 보이는 자동 이름과 같은 글자여도 포커스 칸 · 에이전트 이름을 더는 따라가지 않고, 자동 이름으로 되돌리는
+    /// 명령은 없다.
     #[effect(Write)]
     #[since(1)]
     "tab.rename" => args TabRenameArgs {
@@ -794,7 +801,7 @@ where
 
 fn verb_tab_create(ports: &LayoutPorts, args: TabCreateArgs) -> Result<TabCreateOk, CommandError> {
     let window = text("window", &args.window)?;
-    let name = optional_text("name", args.name.as_deref())?;
+    let name = optional_text("name", args.name.as_deref())?.map(str::trim);
     let view_id = apply::create_tab(
         &ports.state,
         ports.subs.as_ref(),
@@ -839,7 +846,7 @@ fn verb_tab_close(ports: &LayoutPorts, args: TabCloseArgs) -> Result<TabCloseOk,
 
 fn verb_tab_rename(ports: &LayoutPorts, args: TabRenameArgs) -> Result<TabRenameOk, CommandError> {
     let view = uuid_arg("view_id", &args.view_id)?;
-    let name = text("name", &args.name)?;
+    let name = text("name", &args.name)?.trim();
     apply::rename_tab(&ports.state, ports.events.as_ref(), view, name.to_string())
         .map_err(not_applied)?;
     Ok(TabRenameOk {})
@@ -856,6 +863,7 @@ fn verb_tab_list(ports: &LayoutPorts, args: TabListArgs) -> Result<TabListOk, Co
             .map(|meta| TabRow {
                 id: meta.id.to_string(),
                 name: meta.name,
+                named: meta.named,
             })
             .collect(),
         active: tabs.active.to_string(),

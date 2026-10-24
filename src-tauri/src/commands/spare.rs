@@ -304,9 +304,6 @@ mod tests {
         fn next_label(&self) -> String {
             format!("slot-popup-{}", self.0.fetch_add(1, Ordering::SeqCst) + 1)
         }
-        fn tab_name(&self, label: &str) -> String {
-            label.to_owned()
-        }
     }
 
     // 채택해 보임을 기다리는 창 하나.

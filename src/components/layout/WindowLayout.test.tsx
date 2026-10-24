@@ -120,7 +120,7 @@ beforeEach(() => {
     if (cmd === 'list_tabs') {
       return {
         label: (args as { window: string }).window,
-        tabs: [{ id: 'v1', name: 'Tab 1' }, { id: 'v2', name: 'Tab 2' }],
+        tabs: [{ id: 'v1', name: 'Tab 1', named: true }, { id: 'v2', name: 'Tab 2', named: true }],
         active: 'v1',
         version: 1,
       }
@@ -195,7 +195,7 @@ describe('WindowLayout — mount-race(초기 pull vs 최신 emit, S4-F4)', () =>
 
     emit('window:tabs-updated', {
       label: 'slot-popup-1',
-      tabs: [{ id: 'v1', name: 'Tab 1' }, { id: 'v2', name: 'Tab 2' }],
+      tabs: [{ id: 'v1', name: 'Tab 1', named: true }, { id: 'v2', name: 'Tab 2', named: true }],
       active: 'v2',
       version: 5,
     })
@@ -203,7 +203,7 @@ describe('WindowLayout — mount-race(초기 pull vs 최신 emit, S4-F4)', () =>
 
     resolveListTabs({
       label: 'slot-popup-1',
-      tabs: [{ id: 'v1', name: 'Tab 1' }, { id: 'v2', name: 'Tab 2' }],
+      tabs: [{ id: 'v1', name: 'Tab 1', named: true }, { id: 'v2', name: 'Tab 2', named: true }],
       active: 'v1',
       version: 1,
     })
@@ -228,7 +228,7 @@ describe('WindowLayout — 부팅 pull 재시도/표면화(ADR-0102)', () => {
         if (listTabsCalls <= 2) throw new Error(`state not ready ${listTabsCalls}`)
         return {
           label: (args as { window: string }).window,
-          tabs: [{ id: 'v1', name: 'Tab 1' }],
+          tabs: [{ id: 'v1', name: 'Tab 1', named: true }],
           active: 'v1',
           version: 1,
         }
@@ -298,7 +298,7 @@ describe('WindowLayout — 첫 화면 · 첫 페인트 알림', () => {
     await act(async () =>
       answerTabs({
         label: 'slot-popup-10',
-        tabs: [{ id: 'v1', name: 'Tab 1' }, { id: 'v2', name: 'Tab 2' }],
+        tabs: [{ id: 'v1', name: 'Tab 1', named: true }, { id: 'v2', name: 'Tab 2', named: true }],
         active: 'v1',
         version: 1,
       }),
@@ -345,7 +345,7 @@ describe('WindowLayout — get_view keep-alive 재시도 self-heal(FIX-3)', () =
       if (cmd === 'list_tabs') {
         return {
           label: (args as { window: string }).window,
-          tabs: [{ id: 'v1', name: 'Tab 1' }],
+          tabs: [{ id: 'v1', name: 'Tab 1', named: true }],
           active: 'v1',
           version: 1,
         }
@@ -380,7 +380,7 @@ describe('WindowLayout — window:tabs-updated 자기 label 필터', () => {
     await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
     emit('window:tabs-updated', {
       label: 'main',
-      tabs: [{ id: 'v1', name: 'Tab 1' }, { id: 'v2', name: 'Tab 2' }],
+      tabs: [{ id: 'v1', name: 'Tab 1', named: true }, { id: 'v2', name: 'Tab 2', named: true }],
       active: 'v2',
       version: 2,
     })
@@ -397,7 +397,7 @@ describe('WindowLayout — window:tabs-updated 자기 label 필터', () => {
     await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
     emit('window:tabs-updated', {
       label: 'slot-popup-9',
-      tabs: [{ id: 'x1', name: 'X' }],
+      tabs: [{ id: 'x1', name: 'X', named: true }],
       active: 'x1',
       version: 99,
     })
@@ -426,7 +426,7 @@ describe('WindowLayout — keep-alive no-remount(ADR-0056, S4-F5)', () => {
 
     emit('window:tabs-updated', {
       label: 'main',
-      tabs: [{ id: 'v1', name: 'Tab 1' }, { id: 'v2', name: 'Tab 2' }],
+      tabs: [{ id: 'v1', name: 'Tab 1', named: true }, { id: 'v2', name: 'Tab 2', named: true }],
       active: 'v2',
       version: 2,
     })
@@ -579,7 +579,7 @@ describe('WindowLayout — 창 캔버스 보고(ADR-0227, TRD §2d)', () => {
 
     resolveListTabs({
       label: 'main',
-      tabs: [{ id: 'v1', name: 'Tab 1' }, { id: 'v2', name: 'Tab 2' }],
+      tabs: [{ id: 'v1', name: 'Tab 1', named: true }, { id: 'v2', name: 'Tab 2', named: true }],
       active: 'v1',
       version: 1,
     })
@@ -879,7 +879,7 @@ describe('WindowLayout — 창 캔버스 보고(ADR-0227, TRD §2d)', () => {
     act(() =>
       emit('window:tabs-updated', {
         label: 'main',
-        tabs: [{ id: 'v1', name: 'Tab 1' }, { id: 'v2', name: 'Tab 2' }],
+        tabs: [{ id: 'v1', name: 'Tab 1', named: true }, { id: 'v2', name: 'Tab 2', named: true }],
         active: 'v2',
         version: 2,
       }),
@@ -975,8 +975,8 @@ describe('WindowLayout — TabBar 액션 → store 액션(이 label)', () => {
 // ── ★탭 끌기 배선(TRD S21-slot-docking §4)★ — 뿌리 받기와 안내 층(`useWindowDrop`) · 파일 놓기 막기 ──
 // 탭바 줄 · `+` · 캔버스의 사각형은 손으로 준다(jsdom 은 레이아웃이 없다): 줄 x 0..800 · y 0..28 · `+` 32 · 캔버스 원점 (0, 29).
 const TWO_TABS = [
-  { id: 'v1', name: 'Tab 1' },
-  { id: 'v2', name: 'Tab 2' },
+  { id: 'v1', name: 'Tab 1', named: true },
+  { id: 'v2', name: 'Tab 2', named: true },
 ]
 
 async function mountDockWindow(label: string, tabs = TWO_TABS, active = 'v1') {
@@ -1251,7 +1251,7 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
   it('대기 모드에선 이 창의 0탭 알림이 와도 닫지 않는다', async () => {
     await mountSpare()
     act(() =>
-      useViewStore.getState().applyWindowTabsUpdated({ label: SPARE, tabs: [], active: '', version: 9 }),
+      useViewStore.getState().applyWindowTabsUpdated({ label: SPARE, window_id: 'w-spare', number: 2, tabs: [], active: '', version: 9 }),
     )
     await new Promise(res => setTimeout(res, 20))
     expect(closeMock).not.toHaveBeenCalled()
@@ -1278,7 +1278,7 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
 
   it('spare:adopted → 보통 모드: list_tabs 로 들인 탭을 당겨 그리고, 0탭 자가닫힘이 다시 산다', async () => {
     invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
-      if (cmd === 'list_tabs') return { label: SPARE, tabs: [{ id: 'p1', name: 'Pop' }], active: 'p1', version: 3 }
+      if (cmd === 'list_tabs') return { label: SPARE, tabs: [{ id: 'p1', name: 'Pop', named: true }], active: 'p1', version: 3 }
       if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
       return undefined
     })
@@ -1298,7 +1298,7 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
   it('대기 창은 창 사실(window_frame)을 당기지 않는다 — 셸 창 모델 밖이다 · 들이면 당긴다', async () => {
     const frameCalls = () => invokeMock.mock.calls.filter(c => c[0] === 'window_frame')
     invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
-      if (cmd === 'list_tabs') return { label: SPARE, tabs: [{ id: 'p1', name: 'Pop' }], active: 'p1', version: 3 }
+      if (cmd === 'list_tabs') return { label: SPARE, tabs: [{ id: 'p1', name: 'Pop', named: true }], active: 'p1', version: 3 }
       if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
       if (cmd === 'window_frame') return { restored: { w: 800, h: 600 }, maximized: false, insets: { t: 0, r: 0, b: 0, l: 0 } }
       return undefined
@@ -1328,7 +1328,7 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
     expect(screen.queryByTestId('window-loading')).toBeNull()
     expect(screen.getByTestId('tab-strip-row')).toBe(row)
 
-    await act(async () => answer({ label: SPARE, tabs: [{ id: 'p1', name: 'Pop' }], active: 'p1', version: 3 }))
+    await act(async () => answer({ label: SPARE, tabs: [{ id: 'p1', name: 'Pop', named: true }], active: 'p1', version: 3 }))
     await waitFor(() => expect(screen.getAllByTestId('tab-canvas')).toHaveLength(1))
     expect(screen.queryByTestId('spare-canvas')).toBeNull()
     expect(screen.getByTestId('tab-strip-row')).toBe(row)
@@ -1345,7 +1345,7 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
     await mountSpare()
 
     act(() =>
-      useViewStore.getState().applyWindowTabsUpdated({ label: SPARE, tabs: [{ id: 'p1', name: 'Pop' }], active: 'p1', version: 7 }),
+      useViewStore.getState().applyWindowTabsUpdated({ label: SPARE, window_id: 'w-spare', number: 2, tabs: [{ id: 'p1', name: 'Pop', named: true }], active: 'p1', version: 7 }),
     )
     expect(screen.getByTestId('spare-canvas')).toBeTruthy()
     expect(headIds()).toEqual([])
@@ -1380,7 +1380,7 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
     render(<WindowLayout label={SPARE} />)
     await waitFor(() => expect(ipcOrder).toContain('invoke:window_role'))
     act(() =>
-      useViewStore.getState().applyWindowTabsUpdated({ label: SPARE, tabs: [], active: '', version: 9 }),
+      useViewStore.getState().applyWindowTabsUpdated({ label: SPARE, window_id: 'w-spare', number: 2, tabs: [], active: '', version: 9 }),
     )
     await new Promise(res => setTimeout(res, 20))
     expect(closeMock).not.toHaveBeenCalled()
@@ -1394,7 +1394,7 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
 // ── 예열 창 채택 · 첫 화면 알림(TRD S21-slot-docking §3-9 I26 · I28) — 채택한 창의 셸 문은 그 채택 번호를 실은 알림만 받는다 ──
 describe('WindowLayout — 채택 번호 · 첫 화면 다시 알림', () => {
   const SPARE = 'slot-popup-7'
-  const TABS = { label: SPARE, tabs: [{ id: 'p1', name: 'Pop' }], active: 'p1', version: 3 }
+  const TABS = { label: SPARE, window_id: 'w-spare', number: 2, tabs: [{ id: 'p1', name: 'Pop', named: true }], active: 'p1', version: 3 }
 
   beforeEach(() => {
     currentWindow.label = SPARE

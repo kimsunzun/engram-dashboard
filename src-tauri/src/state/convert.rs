@@ -16,9 +16,10 @@ use super::schema::{
     Bounds, PersistedContent, PersistedNode, TabEntry, TabStrip, WindowEntry, WindowKind,
 };
 use crate::layout::manager::{RestoredWindow, ViewId, WindowLabel, WindowTabs};
+use crate::layout::tab_name::effective_tab_name;
 use crate::layout::{
-    tree, LabelSource, LayoutNode, SlotContent, View, ViewManager, WindowAttrs, WindowBounds,
-    MAIN_WINDOW_LABEL,
+    tree, LabelSource, LayoutNode, SlotContent, TabName, View, ViewManager, WindowAttrs,
+    WindowBounds, MAIN_WINDOW_LABEL,
 };
 use crate::theme::UiTheme;
 
@@ -119,6 +120,7 @@ fn window_entry(id: String, number: u32, kind: WindowKind, attrs: WindowAttrs) -
     }
 }
 
+// 이름 = 그 순간의 보이는 이름 + 정했나(TRD S26-window-chrome §3-3). 자동 탭의 글자는 다음 부팅이 이름으로 쓰지 않는다.
 fn tab_entry(layout: &ViewManager, view: &View) -> TabEntry {
     let View {
         id,
@@ -128,7 +130,8 @@ fn tab_entry(layout: &ViewManager, view: &View) -> TabEntry {
     } = view;
     TabEntry {
         id: *id,
-        name: name.clone(),
+        name: effective_tab_name(layout, view),
+        named: Some(name.is_named()),
         focused_slot_id: *focused_slot_id,
         layout: persisted_node(layout, *id, node),
     }
@@ -183,6 +186,14 @@ fn persisted_content(
 }
 
 // ── 영속 → 메모리 ───────────────────────────────────────────────────────────
+
+// 정한 이름만 되살린다 — 칸이 없거나(옛 파일) 거짓이면 자동이다(D16). 정한 이름이 빈 글자면 자동으로 접는다(AC36).
+fn restored_name(name: String, named: Option<bool>) -> TabName {
+    match named {
+        Some(true) => TabName::named(name).unwrap_or(TabName::Auto),
+        Some(false) | None => TabName::Auto,
+    }
+}
 
 /// [`ViewManager::from_persisted`] 의 결과.
 pub struct Restored {
@@ -493,6 +504,7 @@ impl Restorer {
         let TabEntry {
             id,
             name,
+            named,
             focused_slot_id,
             layout,
         } = tab;
@@ -536,7 +548,7 @@ impl Restorer {
         }
         staged.tabs.push(View {
             id,
-            name,
+            name: restored_name(name, named),
             layout,
             focused_slot_id,
         });
@@ -704,7 +716,7 @@ mod tests {
 
     use super::{to_persisted, RestoreWarning, Restored, StateRevision};
     use crate::layout::{
-        tree, LabelSource, SlotContent, SplitDir, ViewManager, WindowAttrs, WindowBounds,
+        tree, LabelSource, SlotContent, SplitDir, TabName, ViewManager, WindowAttrs, WindowBounds,
         WindowPlacement, MAIN_WINDOW_LABEL,
     };
     use crate::state::codec;
@@ -721,10 +733,6 @@ mod tests {
         fn next_label(&self) -> String {
             format!("slot-popup-{}", self.0.fetch_add(1, Ordering::SeqCst) + 1)
         }
-
-        fn tab_name(&self, label: &str) -> String {
-            label.to_string()
-        }
     }
 
     /// 늘 같은 label 을 준다.
@@ -733,10 +741,6 @@ mod tests {
     impl LabelSource for Fixed {
         fn next_label(&self) -> String {
             self.0.to_string()
-        }
-
-        fn tab_name(&self, label: &str) -> String {
-            label.to_string()
         }
     }
 
@@ -940,6 +944,69 @@ mod tests {
         assert_eq!(names, ["작업", "둘"]);
     }
 
+    // TRD S26-window-chrome §3-3 — 이름 칸은 그 순간의 보이는 이름 + 정했나다(자동 탭도 글자로 적는다).
+    #[test]
+    fn a_tab_is_written_with_its_visible_name_and_whether_it_was_named() {
+        let mut mgr = ViewManager::new();
+        let auto = main_active(&mgr);
+        let slot = first_slot(&mgr, auto);
+        mgr.set_slot_content(auto, slot, SlotContent::AgentList)
+            .unwrap();
+        let named = mgr
+            .create_tab(MAIN_WINDOW_LABEL, Some("작업".into()))
+            .unwrap();
+        let foreign = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+        let slot = first_slot(&mgr, foreign);
+        mgr.set_unknown_content(foreign, slot, raw("from_the_future"))
+            .unwrap();
+
+        let written = to_persisted(&mgr);
+        let tabs: Vec<(Uuid, &str, Option<bool>)> = main_strip(&written)
+            .tabs
+            .iter()
+            .map(|t| (t.id, t.name.as_str(), t.named))
+            .collect();
+        assert_eq!(
+            tabs,
+            [
+                (auto, "에이전트 트리", Some(false)),
+                (named, "작업", Some(true)),
+                (foreign, "알 수 없는 내용", Some(false)),
+            ]
+        );
+    }
+
+    // D16 · AC36 — `named` 가 참인 탭만 이름을 되살린다. 옛 파일(칸 없음)의 글자는 「View 3」 같은 옛 기본값일 수 있다.
+    #[test]
+    fn only_a_tab_marked_named_restores_its_name() {
+        let tab = |name: &str, named: Option<bool>| {
+            let mut tab = empty_tab();
+            tab.name = name.into();
+            tab.named = named;
+            tab
+        };
+        let back = restore(vec![main_entry(vec![
+            tab("작업", Some(true)),
+            tab("myproj", Some(false)),
+            tab("View 3", None),
+            tab("  ", Some(true)),
+        ])]);
+        assert_eq!(back.warnings, vec![]);
+        let names: Vec<TabName> = main_tab_ids(&back.layout)
+            .iter()
+            .map(|id| back.layout.views[id].name.clone())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                TabName::Named("작업".into()),
+                TabName::Auto,
+                TabName::Auto,
+                TabName::Auto,
+            ]
+        );
+    }
+
     #[test]
     fn unknown_content_is_written_back_only_while_the_slot_is_untouched() {
         let mut mgr = ViewManager::new();
@@ -1037,6 +1104,7 @@ mod tests {
         let tab = TabEntry {
             id: Uuid::new_v4(),
             name: "t".into(),
+            named: Some(false),
             focused_slot_id: Some(slot),
             layout: PersistedNode::Slot { id: slot, content },
         };
@@ -1249,7 +1317,7 @@ mod tests {
             })
         );
         let only = main_active(&back.layout);
-        assert_eq!(back.layout.views[&only].name, "View 1");
+        assert_eq!(back.layout.views[&only].name, TabName::Auto);
     }
 
     #[test]

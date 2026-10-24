@@ -54,6 +54,21 @@ describe('tabCommands 라우팅 (window 해소)', () => {
     expect(createTabSpy).toHaveBeenCalledWith('slot-popup-2', 'My Tab')
   })
 
+  it('tab.create(name 앞뒤 공백) → createTab(그 창, trim된 name)', () => {
+    run('tab.create', { window: 'slot-popup-2', name: '  My Tab  ' })
+    expect(createTabSpy).toHaveBeenCalledWith('slot-popup-2', 'My Tab')
+  })
+
+  it('tab.create(공백 name) → throw(createTab 안 부름)', () => {
+    expect(() => run('tab.create', { name: '   ' })).toThrow()
+    expect(createTabSpy).not.toHaveBeenCalled()
+  })
+
+  it('tab.create(name 생략 · window 지정) → createTab(그 창, undefined) — 자동 이름', () => {
+    run('tab.create', { window: 'slot-popup-2' })
+    expect(createTabSpy).toHaveBeenCalledWith('slot-popup-2', undefined)
+  })
+
   it('tab.switch(view 지정) → switchTab(이 창, view)', () => {
     run('tab.switch', { view: 'v7' })
     expect(switchTabSpy).toHaveBeenCalledWith('main', 'v7')
@@ -72,8 +87,8 @@ describe('tabCommands 라우팅 (window 해소)', () => {
   it('tab.close(window 지정·view 생략) → 그 창의 active 를 닫는다(현재 웹뷰 active 아님)', () => {
     useViewStore.setState({
       windows: {
-        main: { tabs: [{ id: 'mv', name: 'M' }], active: 'mv', version: 1 },
-        'slot-popup-1': { tabs: [{ id: 'pv', name: 'P' }], active: 'pv', version: 1 },
+        main: { tabs: [{ id: 'mv', name: 'M', named: true }], active: 'mv', version: 1 },
+        'slot-popup-1': { tabs: [{ id: 'pv', name: 'P', named: true }], active: 'pv', version: 1 },
       },
     })
     run('tab.close', { window: 'slot-popup-1' })
@@ -83,7 +98,7 @@ describe('tabCommands 라우팅 (window 해소)', () => {
 
   it('tab.close(window·view 모두 생략) → 이 웹뷰 창(main)의 active 를 닫는다', () => {
     useViewStore.setState({
-      windows: { main: { tabs: [{ id: 'mv', name: 'M' }], active: 'mv', version: 1 } },
+      windows: { main: { tabs: [{ id: 'mv', name: 'M', named: true }], active: 'mv', version: 1 } },
     })
     run('tab.close')
     expect(closeTabSpy).toHaveBeenCalledWith('main', 'mv')
@@ -261,7 +276,7 @@ describe('tab.next (Ctrl+Tab 순환)', () => {
   it('탭 여러 개 → 오른쪽 순환(active 다음 탭으로 switch)', () => {
     useViewStore.setState({
       windows: {
-        main: { tabs: [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }, { id: 'c', name: 'C' }], active: 'a', version: 1 },
+        main: { tabs: [{ id: 'a', name: 'A', named: true }, { id: 'b', name: 'B', named: true }, { id: 'c', name: 'C', named: true }], active: 'a', version: 1 },
       },
     })
     run('tab.next')
@@ -270,7 +285,7 @@ describe('tab.next (Ctrl+Tab 순환)', () => {
 
   it('마지막 탭이 active → 첫 탭으로 wrap', () => {
     useViewStore.setState({
-      windows: { main: { tabs: [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }], active: 'b', version: 1 } },
+      windows: { main: { tabs: [{ id: 'a', name: 'A', named: true }, { id: 'b', name: 'B', named: true }], active: 'b', version: 1 } },
     })
     run('tab.next')
     expect(switchTabSpy).toHaveBeenCalledWith('main', 'a')
@@ -278,7 +293,7 @@ describe('tab.next (Ctrl+Tab 순환)', () => {
 
   it('탭 1개 → no-op(switch 안 부름)', () => {
     useViewStore.setState({
-      windows: { main: { tabs: [{ id: 'a', name: 'A' }], active: 'a', version: 1 } },
+      windows: { main: { tabs: [{ id: 'a', name: 'A', named: true }], active: 'a', version: 1 } },
     })
     run('tab.next')
     expect(switchTabSpy).not.toHaveBeenCalled()

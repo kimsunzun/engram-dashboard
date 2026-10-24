@@ -202,15 +202,14 @@ pub trait WindowHost: Send + Sync {
 /// `WindowHost` 와 가른 이유: 창을 닫기만 하는 경로(`close_tab`·`close_window`)는 발급기를 손에 쥐지
 /// 않는다 — 포트를 합치면 그 경로가 안 쓰는 의존을 끌고 와야 한다.
 ///
-/// ★둘 다 락 밖에서만 불린다★(형제 포트와 같은 규율 — 「락 규율」). 오늘 구현이 순수하다는 것에 기대지
+/// 새 창 첫 탭의 이름은 짓지 않는다 — 그 탭은 자동 이름이다(TRD S26-window-chrome §3-1). label 꼴에서 이름을 지어
+/// 넣으면 OS 제목 · 탭바가 슬롯 내용 대신 그 글자(「Popup N」)를 보인다.
+///
+/// ★락 밖에서만 불린다★(형제 포트와 같은 규율 — 「락 규율」). 오늘 구현이 순수하다는 것에 기대지
 /// 말 것: 상태를 만지는 구현이 락 안에서 불리면 `Destroyed → cleanup_popup_window → state.0.lock()` 와
 /// 교착한다.
 pub trait LabelSource: Send + Sync {
     fn next_label(&self) -> String;
-    /// 그 label 로 연 창의 첫 탭에 붙일 이름. ★label 형식을 아는 쪽이 짓는다★ — 적용 서비스는 label 이
-    /// 어떤 모양인지 모르고(그 prefix 는 Tauri 쪽 상수다), 그걸 여기서 다시 파싱하면 형식이 두 곳에 산다.
-    /// 인자는 **이 발급기가 낸 label** 을 전제하고, 그 밖의 문자열엔 label 을 그대로 쓴 이름을 준다.
-    fn tab_name(&self, label: &str) -> String;
 }
 
 /// 에이전트 스폰 포트 — 성공 시 agent id. ★락 미보유 상태에서 await 된다★(데몬 왕복).
@@ -532,7 +531,8 @@ pub fn focus_slot(
         mgr.set_focused_slot(view_id, slot_id)
             .map_err(|e| e.to_string())?;
         let layout = mgr.snapshot(view_id).ok();
-        // 탭 이름·목록은 안 바뀌나 형제 명령과 동형으로 창 탭바도 계약상 갱신(view_owner 파생).
+        // ★탭 알림을 빼지 말 것★: 자동 이름 탭의 보이는 이름은 포커스 슬롯이 정한다 — 포커스가 옮으면 탭바의
+        //   이름이 바뀐다(TRD S26-window-chrome §4-2 · AC35).
         let tabs = owner_tabs(&mgr, view_id);
         (layout, tabs)
     }; // ← 락 드롭
@@ -828,15 +828,6 @@ pub fn move_slot_to_window(
         Some(label) => (label, None),
         None => new_window_label(host, labels),
     };
-    // ★탭 이름은 락을 잡기 **전에** 짓는다★ — `target_label` 에만 의존해 임계구역 안에 둘 이유가 없는데,
-    //   두면 `LabelSource` 가 「락 안에서 불리는 포트」가 되어 상태를 만지는 다음 구현이 이 락과
-    //   `Destroyed → cleanup_popup_window → state.0.lock()` 사이에서 교착한다. 기존 창 타깃은 label 형식과
-    //   무관한 고정 이름이라 발급기를 아예 안 부른다.
-    let tab_name = if is_new_window {
-        labels.tab_name(&target_label)
-    } else {
-        "Tab".to_string()
-    };
 
     // ── phase A(락): 소스 콘텐츠 → 임시 View(아직 어느 창 tabs 에도 안 넣음 — orphan 방지) ──────────
     // ★SlotContent 를 락 밖으로 반출★(MOVE 원자성): 창 build 로 락이 풀린 사이 원본 슬롯이 다른 콘텐츠로
@@ -856,7 +847,7 @@ pub fn move_slot_to_window(
         .map_err(|e| e.to_string())
         .and_then(|mut mgr| {
             let detached = mgr
-                .prepare_detached_view(view_id, slot_id, tab_name)
+                .prepare_detached_view(view_id, slot_id)
                 .map_err(|e| e.to_string())?;
             subs.resync(&mgr);
             Ok(detached)

@@ -24,8 +24,8 @@ pub use manager::{
 };
 pub use spatial::{compute_spatial, resolve_spatial, Neighbors, SlotSpatial, SpatialToken};
 pub use types::{
-    LayoutNode, SlotContent, SplitDir, SplitRatioApplied, SplitRatioOutcome, UiMetrics, View,
-    ViewMeta, ViewSnapshot,
+    LayoutNode, SlotContent, SplitDir, SplitRatioApplied, SplitRatioOutcome, TabName, UiMetrics,
+    View, ViewMeta, ViewSnapshot,
 };
 
 use std::sync::{Arc, Mutex};

@@ -74,7 +74,12 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
     if (editingId !== null) inputRef.current?.select()
   }, [editingId])
 
+  // 편집을 연 때의 이름 — 확정은 지금 이름이 아니라 이것과 견준다. 편집 중 LLM 이 이름을 바꾸거나 자동 이름이 따라 바뀌어도
+  //   손대지 않은 칸이 옛 이름을 써 넣지 않는다. 확정 글자(`draft.trim()`)와 견주므로 다듬어 둔다 — 앞뒤 공백이 붙은
+  //   이름에서 손대지 않은 칸이 다듬은 글자를 「바뀐 글자」로 보내 자동 이름을 굳히거나 LLM 이 바꾼 이름을 덮지 않게.
+  const seed = useRef('')
   const beginEdit = (tab: ViewMeta) => {
+    seed.current = tab.name.trim()
     setEditingId(tab.id)
     setDraft(tab.name)
   }
@@ -82,13 +87,16 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
   // 마지막 머리 누름이 활성으로 바꾼 탭(바꾸지 않은 누름 = `null`) — 좁은 비활성 머리는 닫기 버튼이 없어, 그 탭의 닫기
   //   버튼은 그 누름 뒤 넓어진 머리에 커서 밑으로 생겼을 수 있다.
   const activatedBy = useRef<string | null>(null)
-  // ★멱등★: editingId 가 이 탭이 아니면 즉시 return — Enter 가 setEditingId(null) 로 input 을 언마운트하면
-  //   브라우저가 blur 를 쏴 onBlur→commitEdit 이 한 번 더 돈다. Enter 후 editingId 는 이미 null 이므로
-  //   blur 의 commitEdit 은 여기서 no-op 이 돼 onRename 이중 호출(중복 rename_tab invoke)을 막는다.
-  const commitEdit = (tab: ViewMeta) => {
+  // Enter 뒤 input 이 빠지며 나는 blur 는 React 에 닿지 않는다 — React 19 는 commit 동안 이벤트 배달을 끄고
+  //   (react-dom `prepareForCommit` 의 `_enabled=false`), 그 뒤의 blur 는 루트 리스너에 닿지 않는 떨어진 노드에 난다.
+  //   첫 줄의 `editingId` 확인은 그래도 commitEdit 이 두 번 불릴 때 onRename 이 두 번 나가지 않게 하는 덧막이다.
+  // `deliberate` = Enter. 같은 글자는 Enter 로만 보낸다 — 자동 이름 탭(`named` 거짓)을 그 글자 그대로 Enter 로 확정하면 그
+  //   이름을 정한 것이고(TRD S26-window-chrome §3-1), 포커스 잃음 · 덮인 이웃 누름은 확정할 뜻이 아니라 바뀐 글자만 보낸다 —
+  //   보내면 편집만 열었다 닫은 자동 이름이 굳는다. 정한 이름 탭의 같은 글자는 바꿀 것이 없다.
+  const commitEdit = (tab: ViewMeta, deliberate: boolean) => {
     if (editingId !== tab.id) return
     const trimmed = draft.trim()
-    if (trimmed.length > 0 && trimmed !== tab.name) onRename(tab.id, trimmed)
+    if (trimmed.length > 0 && (trimmed !== seed.current || (deliberate && !tab.named))) onRename(tab.id, trimmed)
     setEditingId(null)
   }
 
@@ -276,7 +284,7 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
           const head = headById.get(id)!
           // `placeAt` 은 모델에 없는 끄는 탭도 줄에 넣는다 — 그 머리는 이름 없이 자리 · 폭만 그린다. 순서 이동은 끄기 시작의 탭 목록이
           //   모델과 같을 때만 그려(`stripHeld`) 지금은 닿지 않는 것으로 보인다(미검).
-          const tab = metaById.get(id) ?? { id, name: '' }
+          const tab = metaById.get(id) ?? { id, name: '', named: false }
           const isActive = id === activeId
           const editing = editingId === id
           // 이름 · × 는 한 전경색 — 활성 · 맴돎이면 `--text`(ADR-0298 결정 8). 한 전경색은 Chrome 꼴이고(`tab.cc` — 탭 제목과
@@ -300,7 +308,7 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
                   const inInput = e.target instanceof Element && e.target.closest('input') !== null
                   const under = e.button === 0 && !inInput ? coveredHead(id, e.clientX) : null
                   if (under === null) return
-                  commitEdit(tab)
+                  commitEdit(tab, false)
                   activate(under, e.button)
                   return
                 }
@@ -372,10 +380,10 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
                     onKeyDown={e => {
                       // ★버블 차단★: 편집 중 키가 전역 키바인딩으로 새면 안 된다.
                       e.stopPropagation()
-                      if (e.key === 'Enter') commitEdit(tab)
+                      if (e.key === 'Enter') commitEdit(tab, true)
                       else if (e.key === 'Escape') cancelEdit()
                     }}
-                    onBlur={() => commitEdit(tab)}
+                    onBlur={() => commitEdit(tab, false)}
                     style={{
                       // ★내용 폭에 맞춤★: field-sizing:content 로 input 이 draft 텍스트 폭만큼만 차지한다
                       //   (기본 input 은 size 속성 폭 ~160px 고정이라 짧은 이름에도 넓게 벌어짐). 브라우저가

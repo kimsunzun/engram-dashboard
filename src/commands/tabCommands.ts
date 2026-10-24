@@ -31,8 +31,13 @@ register({
   id: 'tab.create',
   title: t('tab.create'),
   category: 'tab',
+  // name 은 tab.rename 과 같게 다듬고 공백뿐이면 invoke 전에 throw 한다 — 빠지면 자동 이름.
   run: args => {
-    const name = typeof args?.name === 'string' ? args.name : undefined
+    let name: string | undefined
+    if (typeof args?.name === 'string') {
+      name = args.name.trim()
+      if (name.length === 0) throw new Error('[tab.create] name 은 공백일 수 없음')
+    }
     return useViewStore.getState().createTab(resolveWindow(args), name)
   },
 })

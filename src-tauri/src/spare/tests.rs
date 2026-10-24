@@ -128,10 +128,6 @@ impl LabelSource for Labels {
     fn next_label(&self) -> String {
         format!("slot-popup-{}", self.0.fetch_add(1, Ordering::SeqCst) + 1)
     }
-
-    fn tab_name(&self, label: &str) -> String {
-        label.to_owned()
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
