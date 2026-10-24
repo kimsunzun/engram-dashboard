@@ -129,11 +129,12 @@ describe('viewStore 탭/창 액션 → invoke (탭 소유 모델, ADR-0057)', ()
     expect(invokeMock).toHaveBeenCalledWith('rename_tab', { viewId: 'v1', name: 'New Name' })
   })
 
-  it('createWindow/closeWindow → 대응 invoke', async () => {
-    invokeMock.mockResolvedValueOnce('slot-popup-3')
-    const label = await useViewStore.getState().createWindow()
+  it('createWindow/closeWindow → 대응 invoke · createWindow 는 {window, window_id, number} 를 그대로 돌려준다', async () => {
+    const created = { window: 'slot-popup-3', window_id: '7d2f0b8e-1c3a-4f5e-9b6d-2a4c6e8f0a1b', number: 2 }
+    invokeMock.mockResolvedValueOnce(created)
+    const answer = await useViewStore.getState().createWindow()
     expect(invokeMock).toHaveBeenCalledWith('create_window')
-    expect(label).toBe('slot-popup-3')
+    expect(answer).toEqual(created)
     await useViewStore.getState().closeWindow('slot-popup-3')
     expect(invokeMock).toHaveBeenCalledWith('close_window', { window: 'slot-popup-3' })
   })
@@ -215,8 +216,9 @@ describe('viewStore 탭/창 액션 → invoke (탭 소유 모델, ADR-0057)', ()
     })
   })
 
-  it('moveSlotToWindow → move_slot_to_window invoke(viewId/slotId/toWindow) + {window,tab} 반환', async () => {
-    invokeMock.mockResolvedValueOnce({ window: 'slot-popup-2', tab: 'v-new' })
+  it('moveSlotToWindow → move_slot_to_window invoke(viewId/slotId/toWindow) + {window,tab,window_id,number} 반환', async () => {
+    const moved = { window: 'slot-popup-2', tab: 'v-new', window_id: '7d2f0b8e-1c3a-4f5e-9b6d-2a4c6e8f0a1b', number: 2 }
+    invokeMock.mockResolvedValueOnce(moved)
     const res = await useViewStore.getState().moveSlotToWindow('v1', 's1')
     // null = 새 팝업 창.
     expect(invokeMock).toHaveBeenCalledWith('move_slot_to_window', {
@@ -224,11 +226,11 @@ describe('viewStore 탭/창 액션 → invoke (탭 소유 모델, ADR-0057)', ()
       slotId: 's1',
       toWindow: null,
     })
-    expect(res).toEqual({ window: 'slot-popup-2', tab: 'v-new' })
+    expect(res).toEqual(moved)
   })
 
   it('moveSlotToWindow(toWindow 지정) → 그 label 을 넘긴다(기존 창 타깃)', async () => {
-    invokeMock.mockResolvedValueOnce({ window: 'main', tab: 'v-new' })
+    invokeMock.mockResolvedValueOnce({ window: 'main', tab: 'v-new', window_id: 'main', number: 1 })
     await useViewStore.getState().moveSlotToWindow('v1', 's1', 'main')
     expect(invokeMock).toHaveBeenCalledWith('move_slot_to_window', {
       viewId: 'v1',

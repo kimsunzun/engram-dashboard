@@ -41,7 +41,7 @@ static EMPTY_TARGETS: LazyLock<Arc<[WindowLabel]>> = LazyLock::new(|| Arc::from(
 
 pub type AgentKey = uuid::Uuid;
 
-// Tauri window label(예: "main", "slot-popup-3"). `ViewManager.windows` 키와 동일 타입 → 별도
+// Tauri window label(예: "main", "slot-popup-0a1b2c3d-3"). `ViewManager.windows` 키와 동일 타입 → 별도
 // numeric 레지스트리 불필요(spike §8 D1).
 pub type WindowLabel = String;
 

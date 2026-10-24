@@ -14,7 +14,7 @@
 //! 상태를 갖고 있지 않다).
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use tauri::{
@@ -23,7 +23,7 @@ use tauri::{
 };
 use uuid::Uuid;
 
-use crate::commands::layout::{RouterSubs, TauriEvents};
+use crate::commands::layout::{resolve_window, RouterSubs, TauriEvents};
 use crate::daemon_client::DaemonClient;
 use crate::first_paint::NewWindowShow;
 use crate::layout::tab_name::window_title;
@@ -42,6 +42,19 @@ use crate::webview_env::{Backdrop, WebviewEnv};
 // 게이트 is_popup_label 재사용 — 다른 label 이면 cleanup 스킵 → 라우팅/구독/Channel 누수).
 const POPUP_LABEL_PREFIX: &str = "slot-popup-";
 
+// 실행 표식 — 프로세스마다 한 번 뽑는 소문자 hex 8 자(TRD S26-window-chrome §4-5 · 메인 결정 M8). 순번은 실행마다 1 부터
+//   다시 세므로, 표식이 없으면 앞 실행의 label 을 쥔 버스 호출자가 이번 실행의 다른 창을 집는다. 앞 실행과 같은 표식일
+//   확률(2⁻³²)은 받아들인다.
+fn run_marker() -> &'static str {
+    static RUN: OnceLock<String> = OnceLock::new();
+    RUN.get_or_init(|| Uuid::new_v4().simple().to_string()[..8].to_string())
+}
+
+/// 이 실행의 `n` 번째 팝업/런타임 창 label — `slot-popup-<실행 표식>-<n>`. [`PopupCounter`] 가 이 꼴로 발급한다.
+pub fn popup_label(n: u64) -> String {
+    format!("{POPUP_LABEL_PREFIX}{}-{n}", run_marker())
+}
+
 // 팝업/런타임 창 label 발급용 단조 카운터. app-level 공유(app.manage). ★재사용 금지 불변식★: fetch_add
 // 로 단조 증가만 하고 창을 닫아도 되돌리지 않는다(닫힌 label 재-build 에러 회피).
 #[derive(Default)]
@@ -49,8 +62,7 @@ pub struct PopupCounter(pub AtomicU64);
 
 impl PopupCounter {
     fn next_label(&self) -> String {
-        let n = self.0.fetch_add(1, Ordering::Relaxed) + 1;
-        format!("{POPUP_LABEL_PREFIX}{n}")
+        popup_label(self.0.fetch_add(1, Ordering::Relaxed) + 1)
     }
 }
 
@@ -267,10 +279,12 @@ fn window_url(label: &str) -> String {
     format!("index.html#/popup?window={label}")
 }
 
-// 대각 cascade 위치(창이 겹쳐 뜨는 것 방지).
+// 대각 cascade 위치(창이 겹쳐 뜨는 것 방지) — label 끝 `-<n>` 의 순번으로 고른다. 실행 표식까지 수로 풀면 모든 창이
+//   같은 계단에 선다(TRD S26-window-chrome §4-5).
 fn cascade_position(label: &str) -> (f64, f64) {
     let n: u32 = label
         .strip_prefix(POPUP_LABEL_PREFIX)
+        .and_then(|rest| rest.rsplit('-').next())
         .and_then(|s| s.parse().ok())
         .unwrap_or(1);
     let step = (n.saturating_sub(1) % 8) as f64;
@@ -434,6 +448,9 @@ pub async fn move_slot_to_window(
     slot_id: Uuid,
     to_window: Option<String>,
 ) -> Result<SlotMove, String> {
+    let to_window = to_window
+        .map(|window| resolve_window(&state, &window))
+        .transpose()?;
     apply::move_slot_to_window(
         &state,
         &RouterSubs {
@@ -578,13 +595,49 @@ mod tests {
         let c = PopupCounter::default();
         let a = c.next_label();
         let b = c.next_label();
-        assert_eq!(a, "slot-popup-1");
-        assert_eq!(b, "slot-popup-2");
+        assert_eq!(a, popup_label(1));
+        assert_eq!(b, popup_label(2));
         assert_ne!(a, b, "label 재사용 금지 — 단조 증가");
+    }
+
+    // TRD S26-window-chrome §4-5 · §10-1 — `slot-popup-<소문자 hex 8>-<n>` · 표식은 발급기가 여럿이어도 한 실행에 하나.
+    #[test]
+    fn popup_labels_carry_one_run_marker_per_process() {
+        let a = PopupCounter::default().next_label();
+        let b = PopupCounter::default().next_label();
+        assert_eq!(
+            a, b,
+            "두 발급기의 첫 label 이 같다 — 표식이 프로세스에 하나"
+        );
+        let (run, n) = a
+            .strip_prefix(POPUP_LABEL_PREFIX)
+            .and_then(|rest| rest.split_once('-'))
+            .expect("접두 · 표식 · 순번");
+        assert_eq!(n, "1");
+        assert_eq!(run.len(), 8, "{a}");
+        assert!(
+            run.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "소문자 hex: {a}"
+        );
+        assert_eq!(run, run_marker());
+    }
+
+    // 부팅 · 런타임 복원이 팝아웃을 (길이, 글자) 순으로 세워 발급 순을 되찾는다(`state::placement` · `state::restore`) —
+    //   실행 표식이 붙어도 그 순서가 발급 순이다(자리 수가 느는 9 → 10 포함).
+    #[test]
+    fn popup_labels_sorted_by_length_then_text_come_back_in_issue_order() {
+        let c = PopupCounter::default();
+        let issued: Vec<String> = (0..12).map(|_| c.next_label()).collect();
+        let mut sorted = issued.clone();
+        sorted.reverse();
+        sorted.sort_by_key(|label| (label.len(), label.clone()));
+        assert_eq!(sorted, issued);
     }
 
     #[test]
     fn is_popup_label_matches_prefix_only() {
+        assert!(is_popup_label(&popup_label(1)));
         assert!(is_popup_label("slot-popup-1"));
         assert!(is_popup_label("slot-popup-42"));
         assert!(!is_popup_label("main"));
@@ -602,9 +655,13 @@ mod tests {
 
     #[test]
     fn cascade_position_offsets_by_label_index() {
-        assert_eq!(cascade_position("slot-popup-1"), (140.0, 110.0));
+        assert_eq!(cascade_position(&popup_label(1)), (140.0, 110.0));
+        assert_eq!(cascade_position(&popup_label(2)), (212.0, 170.0));
         // 9번째는 wrap(8개마다).
-        assert_eq!(cascade_position("slot-popup-9"), (140.0, 110.0));
+        assert_eq!(cascade_position(&popup_label(9)), (140.0, 110.0));
+        // 끝 순번을 푼다 — 숫자뿐인 실행 표식을 순번으로 읽지 않는다.
+        assert_eq!(cascade_position("slot-popup-12345678-2"), (212.0, 170.0));
+        assert_eq!(cascade_position("slot-popup-3"), (284.0, 230.0));
     }
 
     // ── 맡긴 예열 창의 자리(TRD S21-slot-docking §3-9 「`open_at`(맡긴 label)」 · I18) ──
@@ -930,7 +987,8 @@ mod close_request_tests {
         let host = ClosingHost::new(&rig);
         let before = rig.fingerprint();
 
-        let fresh = "slot-popup-1";
+        let fresh = popup_label(1);
+        let fresh = fresh.as_str();
         let err = apply::create_window(
             &rig.state,
             &rig.subs(),
@@ -1020,9 +1078,10 @@ mod close_request_tests {
             &host,
             &PopupCounter::default(),
         )
-        .unwrap();
+        .unwrap()
+        .window;
 
-        assert_eq!(label, "slot-popup-1");
+        assert_eq!(label, popup_label(1));
         assert!(
             host.closed.lock().unwrap().is_empty(),
             "연 창을 거두지 않는다"
@@ -1221,7 +1280,8 @@ mod close_request_tests {
         rig.seat(src, agent);
         let slot = rig.first_slot(src);
         let labels = PopupCounter::default();
-        let fresh = "slot-popup-1";
+        let fresh = popup_label(1);
+        let fresh = fresh.as_str();
         let host = ClosingHost::new(&rig);
 
         let out = apply::move_slot_to_window(
@@ -1326,7 +1386,8 @@ mod close_request_tests {
         let host = ClosingHost::new(&rig);
         let before = rig.fingerprint();
 
-        let fresh = "slot-popup-1";
+        let fresh = popup_label(1);
+        let fresh = fresh.as_str();
         assert_eq!(
             dock_to_new_window(&rig, &host, src),
             Err(DockError::WindowClosed(fresh.into()))

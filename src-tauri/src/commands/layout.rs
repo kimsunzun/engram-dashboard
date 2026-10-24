@@ -3,7 +3,8 @@
 //! ★이 파일에 로직이 없다★: `#[tauri::command]` 전부가 전송 중립 적용 서비스(`crate::layout::apply`)를
 //! 부르는 얇은 껍데기이고, 락 규율·순서·검증은 전부 거기 있다(ADR-0081 결정 3 — 사람 클릭과 중계된 LLM
 //! 호출이 같은 함수에 떨어진다). 여기 남는 것은 Tauri 세계로의 번역 4종(알림 emit(+ OS 창 제목 — `crate::chrome`) · 구독 재동기 ·
-//! OS 창 · 데몬 스폰)과 측정 보고의 창 label(Tauri 가 넣어 주는 `Window` 에서 꺼낸다)뿐이다.
+//! OS 창 · 데몬 스폰)과 측정 보고의 창 label(Tauri 가 넣어 주는 `Window` 에서 꺼낸다) · 창 인자 풀기(버스와 같은
+//! 해석기 — [`resolve_window`])뿐이다.
 //!
 //! ## ★이벤트: 창별 `window:tabs-updated`(ADR-0057)★
 //! `view:closed` 는 엔드투엔드 은퇴(더는 emit 안 함 — §5-2/G2). `layout:updated`(뷰 스냅샷)는 유지.
@@ -21,10 +22,11 @@ use crate::commands::popout::{PopupCounter, TauriWindowHost};
 use crate::commands::settings::TauriSettingsEvents;
 use crate::daemon_client::DaemonClient;
 use crate::layout::apply;
+use crate::layout::window_arg;
 use crate::layout::{
-    AgentSpawner, LayoutEvents, LayoutState, MoveFailed, SlotContent, SpareClaim, SplitDir,
-    SplitRatioApplied, SubscriptionSync, UiMetrics, ViewManager, ViewSnapshot, WindowHost,
-    WindowPlace, WindowTabsPayload,
+    AgentSpawner, LayoutEvents, LayoutState, MoveFailed, NewWindow, SlotContent, SpareClaim,
+    SplitDir, SplitRatioApplied, SubscriptionSync, UiMetrics, ViewManager, ViewSnapshot,
+    WindowHost, WindowPlace, WindowTabsPayload,
 };
 use crate::output_router::{OutputRouter, SubscriptionDelta};
 use crate::settings::SettingsService;
@@ -44,6 +46,13 @@ pub(crate) fn send_subscription_delta(client: &DaemonClient, delta: Subscription
     for agent_id in delta.to_unsubscribe {
         client.unsubscribe(agent_id);
     }
+}
+
+/// 창 인자를 지금 모델 안 창의 label 로 푼다 — 버스 동사와 같은 해석기다(TRD S26-window-chrome §4-5). 웹은 제 창 label
+/// 을 넘기므로 그대로 지나간다. 레이아웃 락은 푸는 동안만 쥔다.
+pub(crate) fn resolve_window(state: &LayoutState, window: &str) -> Result<String, String> {
+    let mgr = state.0.lock().map_err(|e| e.to_string())?;
+    window_arg::resolve(&mgr, window).map_err(|e| e.to_string())
 }
 
 // ★락 미보유 상태에서 발행★.
@@ -283,6 +292,7 @@ pub fn create_tab(
     window: String,
     name: Option<String>,
 ) -> Result<Uuid, String> {
+    let window = resolve_window(&state, &window)?;
     apply::create_tab(
         &state,
         &RouterSubs {
@@ -295,7 +305,7 @@ pub fn create_tab(
     )
 }
 
-// 빈 새 창(빈 탭 1개) 생성 + 웹뷰 빌드(D-6). 성공 시 새 창 label 반환.
+// 빈 새 창(빈 탭 1개) 생성 + 웹뷰 빌드(D-6). 성공 시 새 창의 label · 영속 id · 번호([`NewWindow`]).
 // ★async fn 필수★: WebviewWindowBuilder 데드락 회피(락 밖 빌드).
 #[tauri::command]
 pub async fn create_window(
@@ -304,7 +314,7 @@ pub async fn create_window(
     router: State<'_, Arc<OutputRouter>>,
     counter: State<'_, Arc<PopupCounter>>,
     client: State<'_, Arc<DaemonClient>>,
-) -> Result<String, String> {
+) -> Result<NewWindow, String> {
     apply::create_window(
         &state,
         &RouterSubs {
@@ -327,6 +337,7 @@ pub fn switch_tab(
     window: String,
     view: Uuid,
 ) -> Result<(), String> {
+    let window = resolve_window(&state, &window)?;
     apply::switch_tab(
         &state,
         &RouterSubs {
@@ -350,6 +361,7 @@ pub fn switch_tab_if(
     view: Uuid,
     expect: Uuid,
 ) -> Result<bool, String> {
+    let window = resolve_window(&state, &window)?;
     apply::switch_tab_if(
         &state,
         &RouterSubs {
@@ -373,6 +385,7 @@ pub async fn close_tab(
     window: String,
     view: Uuid,
 ) -> Result<(), String> {
+    let window = resolve_window(&state, &window)?;
     apply::close_tab(
         &state,
         &RouterSubs {
@@ -395,6 +408,7 @@ pub async fn close_window(
     client: State<'_, Arc<DaemonClient>>,
     window: String,
 ) -> Result<(), String> {
+    let window = resolve_window(&state, &window)?;
     apply::close_window(
         &state,
         &RouterSubs {
@@ -580,6 +594,7 @@ pub async fn spawn_into(
     backend: Option<String>,
     cwd: String,
 ) -> Result<String, String> {
+    let window = resolve_window(&state, &window)?;
     apply::spawn_into(
         &state,
         &RouterSubs {
@@ -647,7 +662,7 @@ pub fn list_tabs(
     state: State<'_, LayoutState>,
     window: String,
 ) -> Result<WindowTabsPayload, String> {
-    apply::list_tabs(&state, &window)
+    apply::list_tabs(&state, &resolve_window(&state, &window)?)
 }
 
 // 창 label 목록 조회(부팅·진단용).
@@ -663,5 +678,8 @@ pub fn resolve_spatial(
     window: Option<String>,
     view_id: Option<Uuid>,
 ) -> Result<Option<Uuid>, String> {
+    let window = window
+        .map(|window| resolve_window(&state, &window))
+        .transpose()?;
     apply::resolve_spatial(&state, &token, window.as_deref(), view_id)
 }

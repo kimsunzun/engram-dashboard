@@ -474,7 +474,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::commands::popout::PopupCounter;
+    use crate::commands::popout::{popup_label, PopupCounter};
     use crate::layout::{LayoutEvents, TabName, ViewSnapshot, WindowBounds, WindowTabsPayload};
     use crate::state::codec;
     use crate::state::lock::LOCK_FILE;
@@ -679,7 +679,7 @@ mod tests {
             assert_eq!(mgr.views[&saved_tab].name, TabName::Named("지난 탭".into()));
             assert_eq!(mgr.windows.len(), 2, "main + 복원한 팝아웃");
             assert!(
-                mgr.windows.contains_key("slot-popup-1"),
+                mgr.windows.contains_key(&popup_label(1)),
                 "팝아웃은 이 실행의 발급기에서 새 label 을 받는다"
             );
             assert_eq!(

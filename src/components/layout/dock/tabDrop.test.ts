@@ -24,7 +24,7 @@ function fakeIpc() {
   const unlisten = vi.fn()
   let release: () => void = () => {}
   const ipc: TabDropIpc = {
-    invoke: vi.fn(async () => ({ type: 'applied', window: 'main', reused: false })) as unknown as TabDropIpc['invoke'],
+    invoke: vi.fn(async () => ({ type: 'applied', window: 'main', window_id: 'main', number: 1, reused: false })) as unknown as TabDropIpc['invoke'],
     listen: vi.fn(
       (event: string, handler: (payload: unknown) => void) =>
         new Promise<() => void>(resolve => {
@@ -50,7 +50,7 @@ describe('tabDrop — send', () => {
     const f = fakeIpc()
     const reply = await createTabDropClient(f.ipc).send(DROP)
     expect(f.ipc.invoke).toHaveBeenCalledWith(CMD_TAB_DROP, { drop: DROP })
-    expect(reply).toEqual({ type: 'applied', window: 'main', reused: false })
+    expect(reply).toEqual({ type: 'applied', window: 'main', window_id: 'main', number: 1, reused: false })
   })
 
   it('IPC 오류면 거절한다(부르는 쪽이 바꿔 그리기를 곧바로 푼다)', async () => {

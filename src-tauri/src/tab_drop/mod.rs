@@ -365,8 +365,11 @@ fn run(
                     if in_place {
                         ports.shell.focus(&out.window);
                     }
+                    let (window_id, number) = out.identity.map(|w| (w.window_id, w.number)).unzip();
                     TabDropReply::Applied {
                         window: out.window,
+                        window_id,
+                        number,
                         reused: out.reused,
                     }
                 }
@@ -932,6 +935,18 @@ mod tests {
         }
     }
 
+    // 모델 안 창 `window` 로 옮겼다는 답 — 신원은 그 창 항목에서 읽는다.
+    fn applied(rig: &Rig, window: &str, reused: bool) -> TabDropReply {
+        let mgr = rig.mgr();
+        let w = &mgr.windows[window];
+        TabDropReply::Applied {
+            window: window.into(),
+            window_id: Some(w.window_id.clone()),
+            number: Some(w.number),
+            reused,
+        }
+    }
+
     // main = [a, b] · 활성 a.
     fn two_tabs(rig: &Rig) -> (Uuid, Uuid) {
         let mut mgr = rig.mgr();
@@ -1294,8 +1309,11 @@ mod tests {
             reply,
             TabDropReply::Applied {
                 window: MAIN.into(),
+                window_id: Some(MAIN.into()),
+                number: Some(1),
                 reused: false
-            }
+            },
+            "기존 창(탭바)도 그 창의 신원을 싣는다"
         );
         assert_eq!(rig.mgr().list_tabs(MAIN).unwrap().tabs[1].id, a);
         let log = rig.take_log();
@@ -1395,13 +1413,7 @@ mod tests {
             "slot-popup-1",
             &released(TopAt::Unknown),
         );
-        assert_eq!(
-            reply,
-            TabDropReply::Applied {
-                window: "slot-popup-1".into(),
-                reused: false
-            }
-        );
+        assert_eq!(reply, applied(&rig, "slot-popup-1", false));
         let log = rig.take_log();
         assert!(log.contains(&"focus:slot-popup-1".to_owned()), "{log:?}");
         assert_eq!(log.last().map(String::as_str), Some("done:Applied"));
@@ -1445,13 +1457,7 @@ mod tests {
             MAIN,
             &released(TopAt::Unknown),
         );
-        assert_eq!(
-            reply,
-            TabDropReply::Applied {
-                window: popup.into(),
-                reused: false
-            }
-        );
+        assert_eq!(reply, applied(&rig, popup, false));
         let log = rig.take_log();
         assert!(log.contains(&format!("focus:{popup}")), "{log:?}");
         assert!(!log.contains(&"focus:main".to_owned()), "{log:?}");
@@ -1576,6 +1582,7 @@ mod tests {
         let TabDropReply::Applied {
             window,
             reused: false,
+            ..
         } = ended
         else {
             panic!("{ended:?}");
@@ -1635,10 +1642,7 @@ mod tests {
         assert_eq!(via.as_deref(), Some("spare"));
         assert_eq!(
             reply,
-            TabDropReply::Applied {
-                window: spare.into(),
-                reused: false
-            },
+            applied(&prewarmed, spare, false),
             "맡긴 창의 label 로 연다"
         );
         let log = prewarmed.take_log();
@@ -1675,6 +1679,44 @@ mod tests {
             )
         });
         assert_eq!(logs.handled("via"), [None], "새 창이 아닌 놓기에는 없다");
+    }
+
+    // 새 창 놓기의 답은 옮긴 탭이 든 창의 영속 id · 번호를 싣는다 — 새로 지은 창 · 맡긴 예열 창 · 재사용한 출처 창
+    // 모두(TRD S26-window-chrome §3-2).
+    #[test]
+    fn a_new_window_drop_answers_the_identity_of_the_window_the_tab_landed_in() {
+        for spare in [None, Some("slot-popup-9")] {
+            let rig = Rig::new();
+            let (a, _) = two_tabs(&rig);
+            if let Some(label) = spare {
+                *rig.spare.lock().unwrap() = Some(SpareClaim {
+                    label: label.into(),
+                    generation: 4,
+                });
+            }
+            let (_, reply) = new_window_drop_via(&rig, a, MAIN);
+            let TabDropReply::Applied {
+                window,
+                window_id: Some(window_id),
+                number: Some(number),
+                reused: false,
+            } = &reply
+            else {
+                panic!("{spare:?}: {reply:?}");
+            };
+            if let Some(label) = spare {
+                assert_eq!(window, label, "맡긴 창");
+            }
+            assert_eq!(rig.mgr().owner_of(a), Some(window), "{spare:?}");
+            assert!(Uuid::parse_str(window_id).is_ok(), "{window_id}");
+            assert_eq!(*number, 2, "{spare:?}: main 다음 첫 번호");
+            assert_eq!(reply, applied(&rig, window, false), "{spare:?}");
+        }
+
+        let rig = Rig::new();
+        let lone = rig.mgr().create_window("slot-popup-5").unwrap();
+        let (_, reply) = new_window_drop_via(&rig, lone, "slot-popup-5");
+        assert_eq!(reply, applied(&rig, "slot-popup-5", true), "재사용");
     }
 
     // ── ⑥ `window:frame` ───────────────────────────────────────────────────────

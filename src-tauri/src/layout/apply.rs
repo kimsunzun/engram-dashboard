@@ -310,6 +310,50 @@ fn settle_new_window(host: &dyn WindowHost, label: &str, claim: Option<&SpareCla
     host.record_placement(label);
 }
 
+/// 새로 연 창(또는 탭을 받은 창) 하나 — invoke `create_window` 의 답이고, 버스 `window.create` · `slot.popout` 과 도킹
+/// 결말이 같은 셋을 싣는다(TRD S26-window-chrome §3-2 · §5-3).
+///
+/// - `window` = label — 그 실행 안에서만 맞는다.
+/// - `window_id` = 영속 id(main = `main` · 팝아웃 = UUID) — 재시작을 넘어 같은 창이고, 창 인자로 넘길 값이다.
+/// - `number` = 보이는 창 번호(main = 1 · 팝아웃 ≥ 2) — 닫힌 창의 번호를 다시 쓰므로 창을 가리키는 데 쓰지 않는다
+///   (창 인자로 주면 거절된다).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct NewWindow {
+    pub window: String,
+    pub window_id: String,
+    pub number: u32,
+}
+
+impl NewWindow {
+    // 탭 목록 페이로드의 신원 칸 — 넣은 그 락 안에서 뜬 것을 넘긴다.
+    fn of(tabs: &WindowTabsPayload) -> Self {
+        NewWindow {
+            window: tabs.label.clone(),
+            window_id: tabs.window_id.clone(),
+            number: tabs.number,
+        }
+    }
+
+    // 모델 안 창 `label` 의 신원 — 탭 목록 페이로드를 뜨지 않고 창 항목에서 바로 읽는다. 모델에 없으면 `None`.
+    fn in_model(mgr: &ViewManager, label: &str) -> Option<Self> {
+        mgr.windows.get(label).map(|w| NewWindow {
+            window: label.to_string(),
+            window_id: w.window_id.clone(),
+            number: w.number,
+        })
+    }
+}
+
+// 창을 넣은(또는 탭을 받은) 그 락 안에서 뜬 탭 목록으로 답을 짓는다. 그 락 안에서 넣었으니 목록은 늘 있다 — 없으면 답만
+//   실패로 낸다(넣기 · 알림은 이미 됐다).
+fn window_answer(label: &str, tabs: Option<&WindowTabsPayload>) -> Result<NewWindow, String> {
+    tabs.map(NewWindow::of).ok_or_else(|| {
+        tracing::warn!(label, "새 창 답 — 넣은 창의 탭 목록이 없다");
+        format!("window 없음: {label} — 넣은 뒤 그 창의 탭 목록을 못 읽었다")
+    })
+}
+
 // ── 쓰기 ─────────────────────────────────────────────────────────────────────
 
 pub fn create_tab(
@@ -331,7 +375,7 @@ pub fn create_tab(
     Ok(id)
 }
 
-// 빈 새 창(빈 탭 1개) + OS 창. 성공 시 새 창 label.
+// 빈 새 창(빈 탭 1개) + OS 창. 성공 시 새 창의 label · 영속 id · 번호(TRD S26-window-chrome §5-3).
 //
 // ★창 수 상한 근접 로그(ADR-0056/§4-2)★: 보이는 슬롯 상한(≤16)에 다가가는 것을 로그로만 남긴다 —
 // 하드 블록이 아니다(초과 레이아웃은 프론트 onContextLoss→DOM graceful degrade + ADR-0056 재검토 트리거).
@@ -349,7 +393,7 @@ pub fn create_window(
     events: &dyn LayoutEvents,
     host: &dyn WindowHost,
     labels: &dyn LabelSource,
-) -> Result<String, String> {
+) -> Result<NewWindow, String> {
     let (label, claim) = new_window_label(host, labels);
     host.open(&label)?;
 
@@ -380,7 +424,7 @@ pub fn create_window(
     settle_new_window(host, &label, claim.as_ref());
 
     tracing::info!(label = %label, "빈 새 창 생성 완료(create_window)");
-    Ok(label)
+    window_answer(&label, tabs.as_ref())
 }
 
 // keep-alive 라 노출 집합이 안 바뀌지만(활성 표시만 바뀜) 계약상 재동기한다.
@@ -824,13 +868,16 @@ pub async fn spawn_into(
     Ok(agent_id)
 }
 
-/// 슬롯 분리(pop-out)의 결말 — 콘텐츠가 내려앉은 창 label + 그것을 실은 **새 탭**의 View id.
+/// 슬롯 분리(pop-out)의 결말 — 콘텐츠가 내려앉은 창 label + 그것을 실은 **새 탭**의 View id + 그 창의 영속 id · 번호
+/// (새 창이든 기존 창이든 그 창의 것 — 뜻은 [`NewWindow`] 와 같다 · TRD S26-window-chrome §3-2).
 ///
-/// 필드 이름은 wire 계약이다 — 프론트(`viewStore.moveSlotToWindow`)가 `{window, tab}` 으로 읽는다.
+/// 필드 이름은 wire 계약이다 — 프론트(`viewStore.moveSlotToWindow`)가 `{window, tab, window_id, number}` 로 읽는다.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SlotMove {
     pub window: String,
     pub tab: Uuid,
+    pub window_id: String,
+    pub number: u32,
 }
 
 // ★슬롯을 다른 창의 새 탭으로 MOVE(mirror 아님)★: 원본 슬롯의 **콘텐츠(SlotContent)** 를 새 탭으로 옮기고
@@ -988,9 +1035,12 @@ pub fn move_slot_to_window(
     }
 
     tracing::info!(window = %target_label, view = %tmp_view, "슬롯 MOVE 완료(detach)");
+    let target = window_answer(&target_label, tgt_tabs.as_ref())?;
     Ok(SlotMove {
-        window: target_label,
+        window: target.window,
         tab: tmp_view,
+        window_id: target.window_id,
+        number: target.number,
     })
 }
 
@@ -1051,6 +1101,10 @@ pub struct DockOutcome {
     /// 새 창을 창 포트가 맡긴 예열 창으로 열었다([`WindowHost::claim_spare`]). `reused` 면 늘 거짓이다(새 창이 없다).
     // ADR-0299
     pub prewarmed: bool,
+    /// `window` 의 신원(뜻은 [`NewWindow`] 와 같다 — 새 창이든 기존 창이든 그 창의 것 · TRD S26-window-chrome §3-2).
+    /// 결말을 짓는 락에서 뜬다 — 새 창 · `Seam` · `TabBar` 는 늘 `Some`, 재사용은 창을 옮기는 사이 그 창이 닫혔으면
+    /// `None` 이다.
+    pub identity: Option<NewWindow>,
 }
 
 /// 탭 `req.view` 를 `req.to` 로 옮긴다. `Err` 면 모델이 그대로이고 알림도 없다 — 그사이 연 새 창은
@@ -1211,6 +1265,7 @@ fn finish_docked(
     host: &dyn WindowHost,
     docked: Docked,
     news: &DockNews,
+    identity: Option<NewWindow>,
 ) -> DockOutcome {
     announce(events, &news.layouts, &news.tabs);
     if let Some(emptied) = &docked.emptied {
@@ -1223,6 +1278,7 @@ fn finish_docked(
         main_refilled: docked.main_refilled,
         reused: false,
         prewarmed: false,
+        identity,
     }
 }
 
@@ -1239,7 +1295,7 @@ fn dock_in_place(
         DockTo::Seam { target, .. } => *target,
         _ => ask.view,
     };
-    let (docked, news, unchanged) = {
+    let (docked, news, unchanged, identity) = {
         let mut mgr = sync::lock(&state.0);
         let before = BeforeDock::take(&mgr, ask.view);
         let docked = mgr.dock(ask.view, to, ask.focus, ask.mv.clone())?;
@@ -1248,9 +1304,10 @@ fn dock_in_place(
         if !unchanged {
             subs.resync(&mgr);
         }
-        (docked, news, unchanged)
+        let identity = NewWindow::in_model(&mgr, &docked.window);
+        (docked, news, unchanged, identity)
     }; // ← 락 드롭
-    let out = finish_docked(events, host, docked, &news);
+    let out = finish_docked(events, host, docked, &news, identity);
     Ok((out, DockNotes { unchanged }))
 }
 
@@ -1311,11 +1368,12 @@ fn open_new_window(
         )
         .map(|docked| {
             let news = DockNews::collect(&mgr, &before, &docked, ask.view);
+            let identity = NewWindow::in_model(&mgr, &label);
             subs.resync(&mgr);
-            (docked, news)
+            (docked, news, identity)
         })
     }; // ← 락 드롭
-    let (docked, news) = match committed {
+    let (docked, news, identity) = match committed {
         Ok(done) => done,
         Err(e) => {
             withdraw_new_window(host, &label, claim.as_ref());
@@ -1325,7 +1383,7 @@ fn open_new_window(
     };
     let out = DockOutcome {
         prewarmed: claim.is_some(),
-        ..finish_docked(events, host, docked, &news)
+        ..finish_docked(events, host, docked, &news, identity)
     };
     settle_new_window(host, &label, claim.as_ref());
     Ok(out)
@@ -1356,18 +1414,18 @@ fn reuse_source_window(
         )));
     }
 
-    let (slot_ids, still_there) = {
+    let (slot_ids, identity) = {
         let mgr = sync::lock(&state.0);
         let slot_ids = mgr
             .views
             .get(&ask.view)
             .map(|v| tree::slot_ids(&v.layout))
             .unwrap_or_default();
-        (slot_ids, mgr.windows.contains_key(&label))
+        (slot_ids, NewWindow::in_model(&mgr, &label))
     }; // ← 락 드롭
 
     // 그 사이 닫혀 모델에 없는 창은 적을 항목이 없다.
-    if still_there {
+    if identity.is_some() {
         host.record_placement(&label);
     }
     Ok((
@@ -1378,6 +1436,7 @@ fn reuse_source_window(
             main_refilled: None,
             reused: true,
             prewarmed: false,
+            identity,
         },
         DockNotes::default(),
     ))

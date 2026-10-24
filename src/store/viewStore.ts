@@ -31,6 +31,7 @@ import { create } from 'zustand'
 
 import type {
   LayoutNode,
+  NewWindow,
   SlotContent,
   SlotRect,
   SplitDir,
@@ -61,6 +62,9 @@ export interface WindowTabsPayload {
   active: string
   version: number
 }
+
+/** `move_slot_to_window` 의 답 — layout/apply.rs `SlotMove` 의 미러. `tab` = 옮겨 간 창에 생긴 탭. */
+export type SlotMove = NewWindow & { tab: string }
 
 /** 한 창의 탭 상태(프론트 미러). version = 전역 단조(stale emit 폐기용). */
 export interface WindowTabs {
@@ -121,8 +125,11 @@ interface ViewState {
    * 같은 이 핸들로 수렴한다. 이름 정규화(trim/공백거부)는 호출부 경계(TabBar·tab.rename)가 담당.
    */
   renameTab: (viewId: string, name: string) => Promise<void>
-  /** 빈 새 창(빈 탭 1개) 생성 → 새 창 label 반환(D-6). */
-  createWindow: () => Promise<string>
+  /**
+   * 빈 새 창(빈 탭 1개) 생성(D-6) → 그 창의 `{window, window_id, number}`(뜻 = 바인딩 `NewWindow` — TRD S26-window-chrome
+   * §5-3). 창을 다시 가리킬 땐 `window_id` 를 쓴다 — 번호는 닫힌 창의 것을 다시 쓴다.
+   */
+  createWindow: () => Promise<NewWindow>
   /** 창 `window` 통째 닫기(main 금지). */
   closeWindow: (window: string) => Promise<void>
 
@@ -163,7 +170,8 @@ interface ViewState {
   /**
    * slot 의 agent 를 다른 창의 새 탭으로 MOVE(detach, not mirror). 백엔드 move_slot_to_window 가 새 View
    * 생성 → agent 이전 → 대상 창(미지정 시 새 팝업 창) 새 탭 삽입 → 원본 슬롯 제거를 한다. 원본 슬롯 제거는
-   * emit(layout:updated)으로 반영된다(낙관 갱신 X — 백엔드 권위, ADR-0035). 반환 = {window, tab}(G4).
+   * emit(layout:updated)으로 반영된다(낙관 갱신 X — 백엔드 권위, ADR-0035). 반환 = {window, tab}(G4) + 옮겨 간 창의
+   * window_id · number(`createWindow` 와 같은 뜻 — 기존 창이면 그 창의 것).
    * §5: `slot.popout` command 로 LLM 도 호출 — ★그 command 는 toWindow 를 안 넘겨 항상 새 창이다★.
    * 그래서 `toWindow` 는 프로덕션 호출부가 없고 `viewStore.test.ts` 만 그 갈래를 잰다. 기존 창을 목적지로
    * 고르는 갈래는 셸의 버스 선언(`slot.popout` 의 `to_window`)이 쥐고 있고, 두 표면이 받는 것도 주는 것도
@@ -178,7 +186,7 @@ interface ViewState {
     viewId: string,
     slotId: string,
     toWindow?: string,
-  ) => Promise<{ window: string; tab: string }>
+  ) => Promise<SlotMove>
 
   // ── ★렌더 모드 오버라이드(§5)★ 지정/해제(프론트 전용, invoke 안 탐) ──────────────────────────
   /** slot 의 렌더러를 mode 로 강제(caps 유도 기본을 덮음). */
@@ -210,7 +218,7 @@ export const useViewStore = create<ViewState>((set, get) => ({
   closeTab: (window, viewId) => invoke<void>('close_tab', { window, view: viewId }),
   switchTab: (window, viewId) => invoke<void>('switch_tab', { window, view: viewId }),
   switchTabIf: (window, viewId, expect) => invoke<boolean>('switch_tab_if', { window, view: viewId, expect }),
-  createWindow: () => invoke<string>('create_window'),
+  createWindow: () => invoke<NewWindow>('create_window'),
   closeWindow: window => invoke<void>('close_window', { window }),
 
   split: (viewId, slotId, dir) => invoke<string>('split_slot', { viewId, slotId, dir }),
@@ -257,7 +265,7 @@ export const useViewStore = create<ViewState>((set, get) => ({
     // 프론트 전용 상태라 emit 루프 밖). 실제 슬롯 제거·대상 창 탭 삽입은 백엔드 move_slot_to_window 가
     // 하고 emit(양 창 window:tabs-updated + 원본 layout:updated)으로 반영된다.
     get().clearRenderMode(slotId)
-    return invoke<{ window: string; tab: string }>('move_slot_to_window', {
+    return invoke<SlotMove>('move_slot_to_window', {
       viewId,
       slotId,
       toWindow: toWindow ?? null,

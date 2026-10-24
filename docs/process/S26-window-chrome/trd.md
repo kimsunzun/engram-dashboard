@@ -189,7 +189,7 @@ struct Closing { window_id: String, number: u32 }
 | `WindowFrame`(`window:frame` · invoke `window_frame` — `tab_drop/wire.rs`) | `focused: bool` · `caption: CaptionChrome { buttons: bool, leading_inset: f64, snap_overlay: bool }` 더함 | 기존 길 그대로(구독 먼저 · 당기기 · 사건이 오면 당기기 답을 버림 — `windowFrame.ts` `createWindowFrame`). `snap_overlay` = 셸이 feature `snap-overlay` 로 지어졌나(늘 거짓 — §8-4) |
 | invoke `create_window` 답 | `String` → `NewWindow { window, window_id, number }` | 웹 `viewStore.createWindow` · 레지스트리 `window.create` 가 그 셋을 돌려준다(R6) |
 | invoke `move_slot_to_window` 답(`SlotMove`) | `window_id` · `number` 더함 | 기존 창 대상이면 그 창의 것 |
-| invoke `tab_drop` 의 `DockOutcome` | 새 창이면 `window_id` · `number` 더함 | 앞으로의 `tab.dock`(T-65)이 쓴다 |
+| invoke `tab_drop` 의 답 `TabDropReply`(`applied` — 셸 안 `DockOutcome.identity` 를 옮긴다) | `applied` 에 `window_id` · `number` 더함(둘 다 null 가능) — 새 창이든 기존 창(이음새 · 탭바 · 재사용)이든 옮긴 탭이 든 창의 것 · null = 재사용 길에서 옮기는 사이 그 창이 닫힘 | ts-rs `TabDropReply` 다시 구움 · 웹은 아직 읽지 않는다 · 앞으로의 `tab.dock`(T-65)이 쓴다 |
 | invoke `window_control`(새) · `report_window_min_width`(새) | §6-4 · §7-7 | ts-rs export |
 | 버스 `tab.list` | `TabRow.named` 더함 | 선언 세대 올림(§6-6) |
 | 버스 `window.create` · `slot.popout` · `window.list` · `window.close` · 새 명령 | §6 | |
@@ -287,19 +287,19 @@ pub fn effective_tab_name(mgr: &ViewManager, view: &View) -> String  // Named �
 
 ### 4-5 창 인자 · label(R6 · D11 · D12 · Q9 · AC26 · AC28)
 
-- **label 꼴**(메인 결정 M8) = `slot-popup-<run>-<n>` — `run` = 프로세스마다 한 번 뽑는 소문자 hex 8 자(`Uuid::new_v4` 앞 8), `n` = 지금처럼 단조. 글롭 `slot-popup-*`(capability) · `is_popup_label`(접두) 그대로. 고칠 자리 = `PopupCounter::next_label` · `cascade_position`(끝 `-<n>` 을 푼다 — 지금은 접두 뒤 전체를 수로 풀어 실행 표식이 붙으면 모든 창이 같은 계단에 선다) · `state::restore` `prepare` 의 「같은 접두 + 십진 순번이라 (길이, 글자) 순이 발급 순」(같은 실행 안이면 그대로 참). 충돌 확률 = 앞 실행과 같은 `run` 일 때 2⁻³² · 받아들인다.
+- **label 꼴**(메인 결정 M8) = `slot-popup-<run>-<n>` — `run` = 프로세스마다 한 번 뽑는 소문자 hex 8 자(`Uuid::new_v4` 앞 8), `n` = 지금처럼 단조. 글롭 `slot-popup-*`(capability) · `is_popup_label`(접두) 그대로. 고칠 자리 = `PopupCounter::next_label` · `cascade_position`(끝 `-<n>` 을 푼다 — 지금은 접두 뒤 전체를 수로 풀어 실행 표식이 붙으면 모든 창이 같은 계단에 선다) · `state::restore` `prepare` 의 「같은 접두 + 십진 순번이라 (길이, 글자) 순이 발급 순」(같은 실행 안이면 그대로 참) · `tray::core::popout_number`(이미 끝 `-` 조각을 읽어 맞음 · 시험 더함). 충돌 확률 = 앞 실행과 같은 `run` 일 때 2⁻³² · 받아들인다.
 - **해석기 하나** — `window_arg::resolve(&ViewManager, arg)`:
 
 | 인자 | 답 |
 |---|---|
 | `main` | `main` |
-| UUID 철자 | 그 영속 id 를 가진 **모델 안** 창의 label · 없으면 `NotFound` |
-| `slot-popup-` 접두 | 모델에 있으면 그대로(같은 실행 안 별칭) · 없으면 `NotFound`(앞 실행 label · 닫힌 label) |
+| 영속 id(같은 철자 · 또는 UUID 값이 같은 철자) | 그 영속 id 를 가진 **모델 안** 창의 label(같은 철자 먼저 — 저장된 id 가 정규 UUID 철자가 아니어도 앱이 내준 그대로 맞는다) · 없으면 label 갈래로 — 운영엔 UUID 꼴 label 이 없어 결국 `NotFound` · 영속 id 와 label 이 같은 철자면 id 가 이긴다 |
+| 모델 안 label | 그대로(같은 실행 안 별칭 — 운영 모델의 label 은 `main` · `slot-popup-*` 뿐) |
 | 숫자만(`"2"`) | `NumberGiven` |
-| 그 밖 | `NotFound` |
+| 그 밖(앞 실행 label · 닫힌 label 포함) | `NotFound` |
 
 - **오류 코드** — `NumberGiven` = `INVALID_ARGUMENT`, 문구 = 「창 번호는 창 인자로 받지 않는다 — 번호는 다시 쓰인다. window.list 의 details 에서 그 번호의 window_id 를 찾아 넘기라」 · `NotFound` = `CONFLICT`(지금 레이아웃 실패와 같은 코드 — `commands::not_applied`).
-- **쓰는 자리** — 창 인자를 받는 모든 버스 동사(`tab.create` · `tab.switch` · `tab.close` · `tab.list` · `window.close`(단 `if_empty` 는 아래 예외) · `window.getTheme` · `window.setTheme` · `slot.popout` 의 `to_window` · §6 의 새 명령)와, 창 인자를 받는 invoke 껍데기(`commands/layout.rs` 의 창 인자 command · `window_control`). 웹은 label 을 넘기므로 지나가기만 한다.
+- **쓰는 자리** — 창 인자를 받는 모든 버스 동사(`tab.create` · `tab.switch` · `tab.close` · `tab.list` · `window.close`(단 `if_empty` 는 아래 예외) · `window.getTheme` · `window.setTheme` · `slot.popout` 의 `to_window` · `agent.spawnInto` · `slot.resolveSpatial` · §6 의 새 명령)와, 창 인자를 받는 invoke 껍데기(`commands/layout.rs` 의 창 인자 command · `window_control`). 웹은 label 을 넘기므로 지나가기만 한다. 웹 레지스트리 중 창 인자로 웹 스토어를 고르던 것(`tab.next` · `tab.close` 의 뷰 생략)은 invoke `list_tabs` 로 셸이 푼 답(`label` · 활성 · 탭)을 쓴다 — 스토어 키는 label 뿐이라 window_id 를 못 찾는다. 셸 거절은 그 명령의 오류로 던진다 — 웹 경로의 거절은 브리지 한계로 코드가 INTERNAL 이고 이유는 문구에만 실린다(`commands/view_bus.rs` — AC26 의 웹 명령 몫은 기록한 어긋남).
 - **예외 — `window.close { if_empty: true }` 는 해석기를 거치지 않는다**(리뷰 codex ②) — 그 길의 창은 대개 이미 모델에 없다(팝아웃은 탭이 0 이 되는 연산에서 빠진다 — 코드 `pull_tab`). 해석기는 그 창을 `NotFound`(= `CONFLICT`)로 답해 버린다. 그래서 동사가 `if_empty` 를 먼저 보고 `window_ctl::close_if_empty` 로 보낸다 — 판정은 그 함수가 한 락 안에서 한다(§5-5). **단 번호 거부는 그보다 먼저다**(0.3판 재리뷰 잔손 · Q9 · AC26) — 동사의 차례 = ① 인자가 숫자만이면 `INVALID_ARGUMENT`(`if_empty` 여도) ② `if_empty` 면 `close_if_empty`(인자 = 영속 id) ③ 아니면 해석기.
 - **도움말**(버스 summary) — 「window = window.list 의 window_id(재시작을 넘어 같은 창) 또는 같은 실행 안 label. 번호는 받지 않는다(다시 쓰인다). label 은 그 실행 안에서만 맞는다.」 · `window.list` summary 에 「번호는 비어 있는 가장 작은 수를 다시 쓴다 · 닫히는 창이 아직 없어지지 않았으면 그 번호는 비지 않는다(D13)」.
 
@@ -451,7 +451,7 @@ pub fn plan(action: WindowAction, s: OsWindowState) -> Plan;   // 순수 — §5
 
 ### 6-6 선언 세대
 
-선언이 바뀌는 단위마다 `catalog_version` 을 올린다(지금 17 — `layout/commands.rs` 머리 규칙). 예상: U3a(`TabRow.named` — 18) · U5(창 인자 도움말 · 번호 거부 — 19) · U6(`window.create` · `slot.popout` 답 — 20) · U7a(새 명령 · `window.close` · `window.list` — 21). 같은 PR 에 묶이면 한 번 올려도 된다(번호는 세대 표지이지 분기 재료가 아니다 — 그 머리 주석).
+선언이 바뀌는 단위마다 `catalog_version` 을 올린다(지금 17 — `layout/commands.rs` 머리 규칙). 예상: U3a(`TabRow.named` — 18) · U5 + U6(창 인자 도움말 · 번호 거부 · `window.create` · `slot.popout` 답 — 한 번에 19) · U7a(새 명령 · `window.close` · `window.list` — 20). 같은 PR 에 묶이면 한 번 올려도 된다(번호는 세대 표지이지 분기 재료가 아니다 — 그 머리 주석).
 
 ---
 
@@ -657,6 +657,8 @@ CDP(`scripts/cdp.mjs`)가 재는 것 — DOM 배치 · 번호 · `window.list` �
 ## 11. 구현 단위
 
 > 규칙 — 각 단위 끝에서 빌드 · 워크스페이스 회귀 · 생성물 sync 가 초록이고 앱이 쓸 수 있는 모습이다(OS 틀은 웹 제목 줄이 선 뒤 U8b 에서 걷는다). 단위 안에서도 「자료구조 → 호출부」 순서를 지켜 중간에 멈춰도 컴파일이 서게 한다(타입을 바꾸는 단위는 생성자 · 읽기 도우미를 먼저 두고 호출부를 옮긴다). 코더 한 명이 한 단위. `/review code` · `/qa` 는 단위마다. 0.1판과 번호가 바뀐 곳 = §15-3.
+>
+> 머지 — **U5 · U6 은 U7a 없이 master 에 머지하지 않는다**: 창 인자 도움말 · 번호 거절 문구가 `window.list` 의 window_id · details 를 가리키는데 그 칸은 U7a 가 싣는다.
 
 | 단위 | 내용 | 기대는 것 | 크기 · 비고 |
 |---|---|---|---|
@@ -673,7 +675,7 @@ CDP(`scripts/cdp.mjs`)가 재는 것 — DOM 배치 · 번호 · `window.list` �
 | **U8a** | 제목 줄(웹) — `TitleRow` · `NumberMarker` · `CaptionButtons`(T3) · `metrics.ts` · i18n · 테마 토큰 · 흐림 · 끌 자리 속성(`data-tauri-drag-region` — Q5) + `core:window:allow-start-dragging`(main · 팝아웃) · **놓기 구역 넓히기**(`useTabDragSource` · `windowDrop`) · 최소 폭 셈과 보고 · `report_window_min_width` 껍데기(입히기는 U8b) — OS 틀은 아직 있다(OS 제목 줄 아래 우리 제목 줄 — 그대로 쓸 수 있다) | U4 · U7b · U0 | 큼. 시작 전에 기준 빌드(OS 제목 표시줄)의 줄 높이 · 단추 폭을 떠 둔다(S11) |
 | **U8b** | OS 틀 걷기 — `WebviewEnv::finish` 의 `decorations(false)` · `shadow(true)`(`caption_style()` 을 읽는다 — U7a 가 지었다) · 줄 높이 보통/최대화 · `ChromeBook` 최소 크기 몫 · 열기 표시 · `fit_min_width`(D14) · QA 가 S8–S10 · AC13(창 끌기 뒤 누름) · AC23(Alt+Space · 오른쪽 클릭 — 결과만 적는다)을 잰다 · **측정 문 S13 · S14**(접힌 끌기 · 놓기 잃음 — §1-3 · W13 · W14) — 통과 전에는 U8b 를 닫지 않는다 | U8a | 중간 |
 | **U9** | 스냅 오버레이를 꺼진 feature 뒤로 — platform `window::snap`(스파이크 옮김 · MIT 귀속) · 셸 `[features] snap-overlay` · invoke `report_max_button_rect`(feature 뒤) · 웹 보고(`caption.snap_overlay` 일 때만) · CI 컴파일 · 그래프 게이트 · CLAUDE.md 켜는 법 | U8b · U0(원본 패치) | 중간. 스파이크에서 메뉴가 떴다(S6) — 옮긴 뒤 켠 빌드의 동작 확인은 켜는 날 한다 |
-| **U10** | 문서 — ADR(§12-3) · CLAUDE.md(「LLM-우선 제어」 남은 갭 · platform `window` 입주자 · 의존 절 · 스냅 feature) · step-log · tracking(T-66 · T-68 몫) · 코드 앵커 · `/qa` 바인딩 게이트 | 앞 단위 전부 | `/review doc` |
+| **U10** | 문서 — ADR(§12-3) · CLAUDE.md(「LLM-우선 제어」 남은 갭 · platform `window` 입주자 · 의존 절 · 스냅 feature) · step-log · tracking(T-66 · T-68 몫) · 코드 앵커 · `/qa` 바인딩 게이트 · `prompts/engram-help.md`(창 인자 · window_id · 번호 거부 — U7a 뒤) | 앞 단위 전부 | `/review doc` |
 
 ---
 

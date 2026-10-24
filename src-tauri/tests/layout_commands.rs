@@ -40,7 +40,7 @@ use engram_dashboard_protocol::{
     command_request_id, event_reply_request_id, AgentCommand, AgentEvent,
 };
 
-use engram_dashboard_lib::commands::popout::PopupCounter;
+use engram_dashboard_lib::commands::popout::{popup_label, PopupCounter};
 use engram_dashboard_lib::daemon_client::connection::{
     accept_inbound, outcome_sink, registration_command, ConnectionCommand, OutcomeSender,
 };
@@ -681,8 +681,10 @@ fn the_catalog_generation_is_pinned_to_the_declaration_set() {
     //   그 둘이 지금 못 읽은 설정 파일을 `INTERNAL` 대신 `CONFLICT` 로 답하는 **답 어휘**와 summary 가 바뀐 세대다
     //   (ADR-0291 R17). 세대 18 은 `tab.list` 의 탭 칸에 `named` 가 붙고 `name` 이 보이는 이름이 된
     //   **답 모양**의 세대다(TRD S26-window-chrome §3-2 · §6-6 · `tab.create` · `tab.rename` 의 summary 와 `name` 앞뒤
-    //   공백 깎기도 같은 세대).
-    assert_eq!(CATALOG_VERSION, 18);
+    //   공백 깎기도 같은 세대). 세대 19 는 창 인자가 받는 **어휘**(영속 id)와 **오류 어휘**(숫자만 = `INVALID_ARGUMENT` ·
+    //   앞 실행의 label = `CONFLICT`)가 바뀌고 `window.create` · `slot.popout` 의 **답 모양**에 `window_id` · `number` 가 든
+    //   세대다(TRD S26-window-chrome §4-5 · §5-3 · §6-6).
+    assert_eq!(CATALOG_VERSION, 19);
     assert_eq!(COMMAND_SPECS.len(), 26);
     assert_eq!(
         SlotPopoutArgs::SPEC.since,
@@ -999,6 +1001,297 @@ async fn an_unapplicable_request_keeps_the_services_reason() {
         world.windows.closed.lock().unwrap().is_empty(),
         "거절됐으면 OS 창도 안 닫는다"
     );
+}
+
+// ── 창 인자(TRD S26-window-chrome §4-5 · §10-2) ──
+
+/// 창 인자를 받는 버스 동사 전부 — (이름, 창 인자에 `window` 를 넣은 인자). `view` · `slot` = 그 동사가 함께 받는 id.
+fn window_arg_calls(
+    window: &str,
+    view: uuid::Uuid,
+    slot: uuid::Uuid,
+) -> Vec<(&'static str, serde_json::Value)> {
+    let (view, slot) = (view.to_string(), slot.to_string());
+    vec![
+        ("tab.create", json!({ "window": window })),
+        ("tab.switch", json!({ "window": window, "view_id": view })),
+        ("tab.close", json!({ "window": window, "view_id": view })),
+        ("tab.list", json!({ "window": window })),
+        ("window.close", json!({ "window": window })),
+        ("window.getTheme", json!({ "window": window })),
+        (
+            "window.setTheme",
+            json!({ "window": window, "theme": "light" }),
+        ),
+        (
+            "slot.popout",
+            json!({ "view_id": view, "slot_id": slot, "to_window": window }),
+        ),
+        (
+            "agent.spawnInto",
+            json!({ "window": window, "cwd": "C:/work" }),
+        ),
+        (
+            "slot.resolveSpatial",
+            json!({ "token": "top-left", "window": window }),
+        ),
+    ]
+}
+
+/// 숫자만인 창 인자는 창 번호로 읽혀 `INVALID_ARGUMENT` 다 — 그 번호의 창이 있어도 집지 않고(번호는 다시 쓰인다) 문구가
+/// window_id 로 안내한다. 아무것도 바뀌지 않는다.
+#[tokio::test]
+async fn a_window_number_is_an_invalid_argument_on_every_window_verb() {
+    let (mut world, queue, receiver) = queued();
+    let popout = call(&receiver, &queue, &world.mail, "window.create", json!({}))
+        .await
+        .outcome
+        .expect("창 생성")["window"]
+        .as_str()
+        .expect("label")
+        .to_string();
+    assert_eq!(apply::list_tabs(&world.state, &popout).unwrap().number, 2);
+    let (view, slot) = world.filled_slot();
+    let before = (
+        apply::list_windows(&world.state).unwrap(),
+        world.main_tabs(),
+        world.windows.opened.lock().unwrap().len(),
+    );
+
+    for (name, args) in window_arg_calls("2", view, slot) {
+        let err = error_of(call(&receiver, &queue, &Mailbox::default(), name, args).await);
+        assert_eq!(err.code(), ErrorCode::InvalidArgument, "{name}");
+        assert!(
+            err.message().contains("window_id"),
+            "{name}: {}",
+            err.message()
+        );
+    }
+    assert_eq!(
+        (
+            apply::list_windows(&world.state).unwrap(),
+            world.main_tabs(),
+            world.windows.opened.lock().unwrap().len(),
+        ),
+        before,
+        "번호 인자는 아무것도 바꾸지 않는다"
+    );
+    assert!(world.windows.closed.lock().unwrap().is_empty());
+    assert!(
+        world.spawn_requests.try_recv().is_err(),
+        "스폰까지 가지 않는다"
+    );
+    assert!(world.theme_windows.take().is_empty());
+}
+
+/// 영속 id(window_id)는 그 창의 label 과 같은 창에 닿는다 — 답의 `window` 는 label 이다.
+#[tokio::test]
+async fn a_window_id_reaches_the_same_window_as_its_label() {
+    let (world, queue, receiver) = queued();
+    let created = call(&receiver, &queue, &world.mail, "window.create", json!({}))
+        .await
+        .outcome
+        .expect("창 생성");
+    let popout = created["window"].as_str().expect("label").to_string();
+    let window_id = created["window_id"].as_str().expect("영속 id").to_string();
+    assert_ne!(window_id, popout);
+
+    let created = call(
+        &receiver,
+        &queue,
+        &Mailbox::default(),
+        "tab.create",
+        json!({ "window": window_id.to_uppercase() }),
+    )
+    .await
+    .outcome
+    .expect("영속 id 로 탭 만들기");
+    let listed = call(
+        &receiver,
+        &queue,
+        &Mailbox::default(),
+        "tab.list",
+        json!({ "window": window_id }),
+    )
+    .await
+    .outcome
+    .expect("영속 id 로 탭 목록");
+    assert_eq!(listed["window"].as_str(), Some(popout.as_str()));
+    assert_eq!(listed["active"], created["view_id"]);
+    assert_eq!(listed["tabs"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        call(
+            &receiver,
+            &queue,
+            &Mailbox::default(),
+            "tab.list",
+            json!({ "window": "main" }),
+        )
+        .await
+        .outcome
+        .expect("main")["window"],
+        json!(MAIN_WINDOW_LABEL)
+    );
+}
+
+/// 앞 실행의 label(실행 표식이 없는 옛 꼴 · 다른 실행 표식)과 닫힌 창의 영속 id 는 지금 창을 가리키지 않는다 —
+/// `CONFLICT` 이고 문구가 그 인자를 싣는다.
+#[tokio::test]
+async fn a_label_from_a_previous_run_or_a_closed_window_id_is_a_conflict() {
+    let (world, queue, receiver) = queued();
+    let popout = call(&receiver, &queue, &world.mail, "window.create", json!({}))
+        .await
+        .outcome
+        .expect("창 생성")["window"]
+        .as_str()
+        .expect("label")
+        .to_string();
+    assert_eq!(popout, popup_label(1));
+    let (run, _) = popout
+        .strip_prefix("slot-popup-")
+        .and_then(|rest| rest.split_once('-'))
+        .expect("실행 표식");
+    let other_run = if run == "00000000" {
+        "11111111"
+    } else {
+        "00000000"
+    };
+    let closed = call(
+        &receiver,
+        &queue,
+        &Mailbox::default(),
+        "window.create",
+        json!({}),
+    )
+    .await
+    .outcome
+    .expect("창 생성")["window"]
+        .as_str()
+        .expect("label")
+        .to_string();
+    let closed_id = apply::list_tabs(&world.state, &closed).unwrap().window_id;
+    call(
+        &receiver,
+        &queue,
+        &Mailbox::default(),
+        "window.close",
+        json!({ "window": closed }),
+    )
+    .await
+    .outcome
+    .expect("닫기");
+    let (view, slot) = world.filled_slot();
+
+    for stale in [
+        "slot-popup-1".to_string(),
+        format!("slot-popup-{other_run}-1"),
+        closed_id,
+    ] {
+        for (name, args) in window_arg_calls(&stale, view, slot) {
+            let err = error_of(call(&receiver, &queue, &Mailbox::default(), name, args).await);
+            assert_eq!(err.code(), ErrorCode::Conflict, "{name} {stale}");
+            assert!(err.message().contains(&stale), "{name}: {}", err.message());
+        }
+    }
+    assert!(
+        world.slots(view).contains(&slot),
+        "옮기려던 슬롯은 그 자리에 있다"
+    );
+}
+
+/// 새 창을 여는 버스 동사의 답은 그 창의 영속 id · 번호를 싣는다 — 탭 목록과 같은 값이고, 기존 창으로 옮긴 `slot.popout` 은
+/// 그 창의 것이다(TRD S26-window-chrome §5-3 · §10-2).
+#[tokio::test]
+async fn new_window_answers_carry_the_windows_id_and_number() {
+    let (world, queue, receiver) = queued();
+    let identity = |label: &str| {
+        let tabs = apply::list_tabs(&world.state, label).expect("그 창");
+        (tabs.window_id, tabs.number)
+    };
+    let check = |answer: &serde_json::Value, want_number: u32| {
+        let label = answer["window"].as_str().expect("label");
+        let (window_id, number) = identity(label);
+        assert_eq!(
+            answer["window_id"].as_str(),
+            Some(window_id.as_str()),
+            "{answer}"
+        );
+        assert_eq!(answer["number"], json!(number), "{answer}");
+        assert_eq!(number, want_number, "{answer}");
+        assert!(uuid::Uuid::parse_str(&window_id).is_ok(), "{answer}");
+    };
+
+    let created = call(&receiver, &queue, &world.mail, "window.create", json!({}))
+        .await
+        .outcome
+        .expect("창 생성");
+    check(&created, 2);
+
+    let (view, slot) = world.filled_slot();
+    let popped = call(
+        &receiver,
+        &queue,
+        &Mailbox::default(),
+        "slot.popout",
+        json!({ "view_id": view.to_string(), "slot_id": slot.to_string() }),
+    )
+    .await
+    .outcome
+    .expect("새 창으로 분리");
+    check(&popped, 3);
+
+    let (view, slot) = world.filled_slot();
+    let into = call(
+        &receiver,
+        &queue,
+        &Mailbox::default(),
+        "slot.popout",
+        json!({
+            "view_id": view.to_string(),
+            "slot_id": slot.to_string(),
+            "to_window": created["window_id"],
+        }),
+    )
+    .await
+    .outcome
+    .expect("영속 id 로 기존 창에 분리");
+    assert_eq!(into["window"], created["window"]);
+    check(&into, 2);
+
+    *world.windows.spare.lock().unwrap() = Some(SPARE.to_string());
+    let prewarmed = call(
+        &receiver,
+        &queue,
+        &Mailbox::default(),
+        "window.create",
+        json!({}),
+    )
+    .await
+    .outcome
+    .expect("예열 창으로 생성");
+    assert_eq!(prewarmed["window"].as_str(), Some(SPARE));
+    check(&prewarmed, 4);
+}
+
+/// 창 인자를 받는 동사의 summary 가 받는 꼴(window_id · 같은 실행 안 label)과 번호 거절을 말하고, `window.list` 가 번호를
+/// 다시 쓰는 규칙을 말한다(TRD S26-window-chrome §4-5 「도움말」).
+#[test]
+fn every_window_verb_summary_says_what_the_window_argument_takes() {
+    let any = uuid::Uuid::nil();
+    for (name, _) in window_arg_calls("main", any, any) {
+        let spec = spec_of(name).expect("선언");
+        for want in ["window_id", "label", "번호는 받지 않는다"] {
+            assert!(
+                spec.summary.contains(want),
+                "{name}: {want} 없음 — {}",
+                spec.summary
+            );
+        }
+    }
+    assert!(spec_of("window.list")
+        .expect("선언")
+        .summary
+        .contains("가장 작은 수를 다시 쓴다"));
 }
 
 /// 태그와 곁칸이 어긋나면 조용히 고치지 않는다.
@@ -2637,10 +2930,10 @@ async fn restore_accept_swaps_the_screen_through_the_shared_coordinator_off_the_
     assert_eq!(accepted, json!({"restored_windows": 2, "durable": false}));
     assert_eq!(world.main_tab_name(), "지난 탭");
     let opened = screen.opened.lock().unwrap().clone();
-    assert_eq!(opened, ["slot-popup-1"], "새 팝아웃은 공유 발급기의 label");
+    assert_eq!(opened, [popup_label(1)], "새 팝아웃은 공유 발급기의 label");
     let mut windows = world.state.0.lock().unwrap().list_windows();
     windows.sort();
-    assert_eq!(windows, [MAIN_WINDOW_LABEL, "slot-popup-1"]);
+    assert_eq!(windows, [MAIN_WINDOW_LABEL.to_string(), popup_label(1)]);
     assert_eq!(world.restore.status().crash_copy, CrashCopyStatus::Answered);
     let threads = screen.threads.lock().unwrap().clone();
     assert_eq!(threads.len(), 1);

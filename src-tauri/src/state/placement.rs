@@ -120,7 +120,7 @@ pub fn open_restored_popouts(
             return Vec::new();
         }
     };
-    // 같은 접두 + 십진 순번이라 (길이, 글자) 순이 발급 순이다 — 저장된 순서대로 쌓인다.
+    // 같은 접두 · 같은 실행 표식(한 발급기) + 십진 순번이라 (길이, 글자) 순이 발급 순이다 — 저장된 순서대로 쌓인다.
     popouts.sort_by_key(|(label, _)| (label.len(), label.clone()));
 
     let failed: Vec<String> = popouts

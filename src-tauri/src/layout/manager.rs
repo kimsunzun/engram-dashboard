@@ -59,7 +59,7 @@ pub const MAIN_WINDOW_LABEL: &str = "main";
 
 // View 전역 식별자(창 간 이동·저장복원 후속 확장 위해 전역 UUID — ADR-0057).
 pub type ViewId = Uuid;
-// Tauri 창 label(예: "main", "slot-popup-3").
+// Tauri 창 label(예: "main", "slot-popup-0a1b2c3d-3").
 pub type WindowLabel = String;
 
 // invalid id 는 no-op + 이 에러(부분변경 금지).
@@ -246,8 +246,9 @@ pub struct WindowTabs {
     // ADR-0227
     pub metrics: Option<UiMetrics>,
     /// 영속 신원 — main 은 `main`, 팝아웃은 그 창 항목이 처음 생길 때 뽑은 UUID(하이픈 소문자). 저장 · 복원은 이
-    /// 값을 쓴다. 런타임 label(맵 키)은 한 부팅 안에서만의 신원이다 — 팝아웃 label 은 실행마다 1 부터 다시
-    /// 센다(TRD S21-storage §6-3).
+    /// 값을 쓴다. 런타임 label(맵 키)은 한 부팅 안에서만의 신원이다 — 팝아웃 label 은 실행마다 새 실행 표식으로 1
+    /// 부터 다시 센다(TRD S21-storage §6-3 · S26-window-chrome §4-5). 버스 · invoke 의 창 인자는 이 값도 받는다
+    /// (`super::window_arg`).
     // ADR-0167
     pub window_id: String,
     /// 창 번호 — main = 1, 팝아웃 = 2 이상이고 살아 있는 창 · 닫히는 창 사이에서 겹치지 않는다(TRD S26-window-chrome

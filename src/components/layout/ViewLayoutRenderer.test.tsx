@@ -905,7 +905,12 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
   const closeSlotSpy = vi.fn(async () => undefined)
   const assignAgentSpy = vi.fn(async () => undefined)
   const setSlotContentSpy = vi.fn(async () => undefined)
-  const moveSlotToWindowSpy = vi.fn(async () => ({ window: 'slot-popup-1', tab: 'v-new' }))
+  const moveSlotToWindowSpy = vi.fn(async () => ({
+    window: 'slot-popup-1',
+    tab: 'v-new',
+    window_id: '7d2f0b8e-1c3a-4f5e-9b6d-2a4c6e8f0a1b',
+    number: 2,
+  }))
   const origHash = window.location.hash
 
   beforeEach(() => {

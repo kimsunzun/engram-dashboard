@@ -106,7 +106,7 @@ function harness(over: Partial<State> = {}, extra: Partial<WindowDropPorts> = {}
     model: () => state.model,
     send: drop => {
       sends.push(drop)
-      return Promise.resolve<TabDropReply>({ type: 'applied', window: 'main', reused: false })
+      return Promise.resolve<TabDropReply>({ type: 'applied', window: 'main', window_id: 'main', number: 1, reused: false })
     },
     setTimer: (fn, ms) => setTimeout(fn, ms),
     clearTimer: h => clearTimeout(h as ReturnType<typeof setTimeout>),

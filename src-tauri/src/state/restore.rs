@@ -756,7 +756,7 @@ impl RestoreCoordinator {
             .filter(|(label, _)| label.as_str() != MAIN_WINDOW_LABEL)
             .map(|(label, window)| (label.clone(), window.attrs))
             .collect();
-        // 같은 접두 + 십진 순번이라 (길이, 글자) 순이 발급 순이다.
+        // 같은 접두 · 같은 실행 표식(한 발급기) + 십진 순번이라 (길이, 글자) 순이 발급 순이다.
         popouts.sort_by_key(|(label, _)| (label.len(), label.clone()));
         {
             let live = self
@@ -1458,7 +1458,6 @@ mod tests {
 
     // ── 복원 조율자 ──
 
-    use crate::commands::popout::PopupCounter;
     use crate::layout::{tree, TabName, WindowPlacement};
     use crate::settings::SettingsService;
     use crate::state::convert::to_persisted;
@@ -1803,12 +1802,24 @@ mod tests {
         }
     }
 
+    // 실행 표식 없는 꼴(`slot-popup-<n>`)로 단조 발급한다 — 이 시험들이 기대 label 을 글자 그대로 적으려고 쓴다. 실
+    //   발급기(`PopupCounter`)의 꼴과 그 꼴에서도 (길이, 글자) 순이 발급 순인 것은 `commands::popout` 시험이 잰다.
+    #[derive(Default)]
+    struct SeqLabels(std::sync::atomic::AtomicU64);
+
+    impl LabelSource for SeqLabels {
+        fn next_label(&self) -> String {
+            let n = self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            format!("slot-popup-{n}")
+        }
+    }
+
     struct Rig {
         coordinator: RestoreCoordinator,
         service: Arc<RestoreService>,
         notices: Arc<Recorder>,
         layout: LayoutState,
-        labels: Arc<PopupCounter>,
+        labels: Arc<SeqLabels>,
         windows: Arc<FakeWindows>,
         events: Arc<FakeEvents>,
         subs: Arc<FakeSubs>,
@@ -1820,12 +1831,12 @@ mod tests {
 
     impl Rig {
         /// `labels` = 조율자의 발급기 — `None` 이면 런타임 팝아웃과 같은 것(`self.labels`).
-        fn new(labels: Option<Arc<PopupCounter>>) -> Self {
+        fn new(labels: Option<Arc<SeqLabels>>) -> Self {
             let service = Arc::new(RestoreService::new());
             let notices = Arc::new(Recorder::default());
             service.set_notifier(notices.clone());
             let layout = LayoutState::new();
-            let shared = Arc::new(PopupCounter::default());
+            let shared = Arc::new(SeqLabels::default());
             let coordinator = RestoreCoordinator::new(
                 service.clone(),
                 layout.clone(),
@@ -2465,7 +2476,7 @@ mod tests {
     #[test]
     fn a_label_source_that_collides_with_a_live_popout_fails_before_any_window() {
         // 조율자만 따로 센다 — 떠 있는 `slot-popup-1` 과 같은 label 을 낸다.
-        let rig = Rig::new(Some(Arc::new(PopupCounter::default())));
+        let rig = Rig::new(Some(Arc::new(SeqLabels::default())));
         rig.attach();
         rig.live_popout();
         let windows = previous_screen(1, false);

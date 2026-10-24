@@ -13,10 +13,12 @@ pub mod spatial;
 pub mod tab_name;
 pub mod tree;
 pub mod types;
+pub mod window_arg;
 
 pub use apply::{
     AgentSpawner, DockDest, DockOutcome, DockRequest, LabelSource, LayoutEvents, MoveFailed,
-    MoveStep, SlotMove, SpareClaim, SubscriptionSync, WindowHost, WindowPlace, WindowTabsPayload,
+    MoveStep, NewWindow, SlotMove, SpareClaim, SubscriptionSync, WindowHost, WindowPlace,
+    WindowTabsPayload,
 };
 pub use manager::{
     CanvasPx, CloseTabOutcome, LayoutError, SlotPx, SpawnSlotError, SplitRatioResult, ViewManager,

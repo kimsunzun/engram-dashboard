@@ -435,7 +435,16 @@ const SCENARIOS: Scenario[] = [
     name: '창 밖 새 창(DragEnd 적용) — 끄는 탭이 떠난다',
     effect: 'none',
     out: true,
-    dragEnd: { reply: { type: 'applied', window: 'slot-popup-9', reused: false }, done: 'applied' },
+    dragEnd: {
+      reply: {
+        type: 'applied',
+        window: 'slot-popup-9',
+        window_id: '7d2f0b8e-1c3a-4f5e-9b6d-2a4c6e8f0a1b',
+        number: 2,
+        reused: false,
+      },
+      done: 'applied',
+    },
     arrivals: [tabsOf('tabs:new-window', { tabs: ['A', 'C'], active: 'A' }, true), layoutNoise],
     releases: true,
     reverts: 0,
