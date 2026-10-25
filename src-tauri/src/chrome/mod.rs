@@ -6,9 +6,8 @@
 //! 내 차례가 뒤바뀔 수 있어, 메인 스레드 한 줄 + 장부의 판 비교가 옛 판을 버린다.
 //!
 //! 최소 크기의 정본은 웹이다(정책 상수 정본 = 화면 — ADR-0227 선례). 보고(invoke `report_window_min_width` →
-//! [`report_min_size`]) · 열기 표시([`mark_opening`]) · 크기 바뀜([`on_resized`])이 모두 메인 스레드 일 하나 안에서 장부를
-//! 보고 입힌다 — 무엇을 언제 입히나는 `book` 머리. 새 자리 앞의 걷기([`lift_min`])만 부르는 쪽 스레드에서 돈다(항목을
-//! 만들지 않는다).
+//! [`report_min_size`]) · 열기 표시([`mark_opening`]) · 새 자리 앞의 걷기([`lift_min`]) · 크기 바뀜([`on_resized`])이 모두
+//! 메인 스레드 일 하나 안에서 장부를 보고 입힌다 — 무엇을 언제 입히나는 `book` 머리.
 
 mod book;
 
@@ -131,27 +130,40 @@ pub(crate) fn on_resized(window: &Window) {
     book::apply_min(&state.0, label, plan, window);
 }
 
-/// 셸이 다시 짓지 않는 창에 새 보통 자리를 입히기 직전 — 입혀 둔 OS 최소 크기를 걷고 열기 표시를 세운다(보통 크기일
-/// 때만 걷는다 — `book::ChromeBook::lift_min`). 자리를 입힌 뒤 [`mark_opening`] 을 부른다 — 그 일이 넓혀 당기고 다시
+/// 셸이 다시 짓지 않는 창 `label` 에 새 보통 자리를 입히기 직전 — 입혀 둔 OS 최소 크기를 걷고 열기 표시를 세운다(보통
+/// 크기일 때만 걷는다 — `book::ChromeBook::lift_min`). 자리를 입힌 뒤 [`mark_opening`] 을 부른다 — 그 일이 넓혀 당기고 다시
 /// 입힌다. 지금 쓰는 곳 = 런타임 사본 수락의 main(`state::placement::TauriRestoreWindows::place_main` — 다시 짓는 창은 새
-/// 창이라 걷을 것이 없다). 아무 스레드에서나 부른다 — ★어떤 락도 쥔 채 부르지 않는다★. 걷기와 자리 입히기 사이에 그 창의
-/// 보고가 끼면(값이 바뀔 때만 온다) 그 보고가 표시를 거두고 OS 최소 크기를 다시 입혀, 좁은 자리는 OS 가 키운 채 남는다 —
-/// 다루지 않는다.
-pub(crate) fn lift_min(window: &Window) {
-    let Some(state) = window.app_handle().try_state::<ChromeState>() else {
-        return;
-    };
-    let label = window.label();
-    let frame = frame_state(window);
-    if !sync::lock(&state.0).lift_min(label, frame) {
-        return;
-    }
-    if let Err(e) = window.set_min_size(None::<LogicalSize<f64>>) {
-        // 장부는 걷은 것으로 적었다 — 표시를 거두는 판정이 같은 값을 다시 입힌다(넓히기는 OS 가 키운 폭이라 할 일이 없다).
+/// 창이라 걷을 것이 없다).
+///
+/// ★크기 상태 읽기 · 장부 적기 · OS 걷기를 메인 스레드 일 하나로 넘기고 기다리지 않는다★(`book::lift`) — 걷기를 부르는 쪽
+/// 스레드에서 적고 OS 걷기만 메인 스레드로 줄 세우면, 그 사이에 돈 그 창의 보고(메인 스레드 동기 명령)가 입힌 값을 뒤늦은
+/// 걷기가 지워 장부만 「입혔다」로 남았다(U8b 리뷰 2 · TRD §7-7). 부르는 쪽이 메인 스레드 밖이면 이 일 · 그 뒤 자리 세터 ·
+/// [`mark_opening`] 의 일이 넘긴 차례대로 돈다 — 셋 다 같은 이벤트 루프 줄에 선다(tauri-runtime-wry 2.11.3
+/// `send_user_message` → `proxy.send_event`). 자리 입히기와 열기 표시 사이에 보고가 끼어도 열기 표시가 받아 둔 값으로 다시
+/// 넓혀 당기고 입힌다(`book::ChromeBook::mark_opening`). 메인 스레드에서 부르면 그 자리에서 돈다 — ★어떤 락도 쥔 채 부르지
+/// 않는다★.
+pub(crate) fn lift_min(app: &AppHandle, label: &str) {
+    let handle = app.clone();
+    let owned = label.to_owned();
+    let queued = app.run_on_main_thread(move || {
+        let Some(window) = handle
+            .get_webview_window(&owned)
+            .map(|window| window.as_ref().window())
+        else {
+            tracing::debug!(label = owned, "OS 창이 없어 최소 크기를 걷지 않는다");
+            return;
+        };
+        let Some(state) = handle.try_state::<ChromeState>() else {
+            return;
+        };
+        // 창의 크기 상태는 장부 락 밖에서 읽는다(잎 락 — 쥔 채 OS 를 부르지 않는다).
+        let frame = frame_state(&window);
+        book::lift(&state.0, &owned, frame, &window);
+    });
+    if let Err(e) = queued {
         tracing::warn!(
-            module = "chrome",
             label,
-            "새 자리 앞에 OS 최소 창 크기를 걷지 못했다: {e}"
+            "새 자리 앞 걷기 일을 메인 스레드에 넘기지 못했다(좁은 사본 자리는 OS 최소 크기로 키워진 채 남을 수 있다): {e}"
         );
     }
 }
@@ -232,6 +244,11 @@ impl book::MinWindow for Window {
             scale,
         );
         self.set_min_size(Some(LogicalSize::new(width, height)))
+            .map_err(|e| e.to_string())
+    }
+
+    fn clear_min_size(&self) -> Result<(), String> {
+        self.set_min_size(None::<LogicalSize<f64>>)
             .map_err(|e| e.to_string())
     }
 }

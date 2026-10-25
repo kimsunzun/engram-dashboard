@@ -78,6 +78,21 @@ impl WindowControl for TauriWindowControl {
     fn state(&self, label: &str) -> Option<OsWindowState> {
         read_state(&self.app, label)
     }
+
+    // 팝아웃 label 만 — main 은 늘 모델에 있고, 그 밖 label 의 창은 셸이 짓지 않는다. 예열 창 풀의 창은 뺀다 — 숨은 채
+    //   다음 새 창을 기다리는 창이라 닫거나 바람을 적으면 들인 창에 옮아간다.
+    fn is_unmodeled(&self, label: &str) -> bool {
+        crate::commands::popout::is_popup_label(label)
+            && self.app.get_webview_window(label).is_some()
+            && !crate::commands::spare::is_spare_window(&self.app, label)
+    }
+
+    fn apply_unmodeled(&self, label: &str, action: WindowAction) -> Result<Applied, String> {
+        let label = label.to_owned();
+        on_main_thread(&self.app, "모델 밖 창 상태 동작", move |app| {
+            window_ctl::run_unmodeled_action(&TauriOps::new(app), &label, action)
+        })?
+    }
 }
 
 // `job` 을 메인 스레드 일 하나로 돌고 그 답을 기다린다. 답의 주인은 [`handoff`] 가 가른다 — 시한 뒤 버려진 답은 일 쪽이

@@ -200,6 +200,17 @@ pub trait WindowControl: Send + Sync {
     fn hide_all(&self);
     /// `window.list` 몫 순간값 — `None` = 그 label 의 OS 창이 없다.
     fn state(&self, label: &str) -> Option<OsWindowState>;
+    /// 모델 밖 창인가 — 모델에 없는 `label` 인데 그 label 의 팝아웃 OS 창이 지금 열려 있고 예열 창 풀의 창이 아니다(TRD
+    /// S26-window-chrome §6-2 「모델 밖 창」 — 부팅 실패 화면의 낡은 팝아웃 따위). 모델에 있는지는 서비스가 먼저 본다. 기본 =
+    /// 거짓(모델 밖 창을 모른다).
+    fn is_unmodeled(&self, _label: &str) -> bool {
+        false
+    }
+    /// 모델 밖 창에 [`run_unmodeled_action`] 을 메인 스레드 일 하나로 돈다 — `apply` 와 같되 모델을 건드리지 않는다. `Err` =
+    /// 그 문구. 기본 = OS 창이 없다는 `Err`.
+    fn apply_unmodeled(&self, label: &str, _action: WindowAction) -> Result<Applied, String> {
+        Err(no_os_window(label))
+    }
 }
 
 /// 창 `label` 에 `action` 을 건다 — 읽기 → [`plan`] → 입히기. [`WindowControl::apply`] 의 실물이 메인 스레드 일 하나 안에서
@@ -212,6 +223,33 @@ pub trait WindowControl: Send + Sync {
 pub fn run_action<O: WindowOps + ?Sized>(
     ops: &O,
     layout: &LayoutState,
+    label: &str,
+    action: WindowAction,
+) -> Result<Applied, String> {
+    run(ops, Some(layout), label, action)
+}
+
+/// 모델 밖 창 `label`([`WindowControl::is_unmodeled`])에 `action` 을 건다 — [`run_action`] 과 같은 읽기 → [`plan`] → 입히기
+/// 이되 ★모델의 최대화 표식을 적지 않는다★(그 창은 모델에 없다 · 미룬 최대화 표는 OS 창 몫이라 그대로 쓴다). 앞으로 내기는
+/// 받지 않는다(`Err` — 서비스가 그 동작을 이 길로 보내지 않는다 · 숨은 창이면 모든 창 보이기까지 가는 동작이다).
+/// [`WindowControl::apply_unmodeled`] 의 실물이 메인 스레드 일 하나 안에서 부르는 몸통이다(TRD S26-window-chrome §6-2).
+pub fn run_unmodeled_action<O: WindowOps + ?Sized>(
+    ops: &O,
+    label: &str,
+    action: WindowAction,
+) -> Result<Applied, String> {
+    if action == WindowAction::Raise {
+        return Err(format!(
+            "window 없음: {label} — 모델 밖 창은 앞으로 내지 않는다"
+        ));
+    }
+    run(ops, None, label, action)
+}
+
+// `layout` = 최대화 표식을 적을 모델 — `None` = 모델 밖 창이라 적지 않는다.
+fn run<O: WindowOps + ?Sized>(
+    ops: &O,
+    layout: Option<&LayoutState>,
     label: &str,
     action: WindowAction,
 ) -> Result<Applied, String> {
@@ -230,7 +268,9 @@ pub fn run_action<O: WindowOps + ?Sized>(
             Ok(Applied::default())
         }
         Plan::Defer(maximized) => {
-            set_model_maximized(layout, label, maximized)?;
+            if let Some(layout) = layout {
+                set_model_maximized(layout, label, maximized)?;
+            }
             ops.defer_maximized(label, maximized);
             Ok(Applied {
                 deferred: true,
@@ -238,7 +278,9 @@ pub fn run_action<O: WindowOps + ?Sized>(
             })
         }
         Plan::Settle(maximized) => {
-            set_model_maximized(layout, label, maximized)?;
+            if let Some(layout) = layout {
+                set_model_maximized(layout, label, maximized)?;
+            }
             ops.drop_deferred(label);
             Ok(Applied::default())
         }
@@ -347,17 +389,41 @@ pub enum WindowCtlError {
 }
 
 /// 창 인자 `window` 를 풀어(TRD §4-5) 그 창에 `action` 을 건다. 인자는 레이아웃 락 안에서 풀고 포트는 놓은 뒤 부른다 — 그
-/// 사이 창이 닫혀 OS 창이 없으면 포트가 거절한다.
+/// 사이 창이 닫혀 OS 창이 없으면 포트가 거절한다. 모델에 없는 인자가 모델 밖 창의 label 이면([`unmodeled`]) 최소화 · 최대화 ·
+/// 원래 크기는 그 OS 창에 바로 건다([`WindowControl::apply_unmodeled`] — 모델을 바꾸지 않는다). 앞으로 내기는 그대로
+/// 「창 없음」이다.
 pub fn act(
     state: &LayoutState,
     control: &dyn WindowControl,
     window: &str,
     action: WindowAction,
 ) -> Result<Applied, WindowCtlError> {
-    let label = resolve(state, window)?;
+    let label = match resolve(state, window) {
+        Ok(label) => label,
+        Err(error) => {
+            return match unmodeled(control, &error) {
+                Some(label) if action != WindowAction::Raise => control
+                    .apply_unmodeled(&label, action)
+                    .map_err(WindowCtlError::NotApplied),
+                _ => Err(error),
+            };
+        }
+    };
     control
         .apply(&label, action)
         .map_err(WindowCtlError::NotApplied)
+}
+
+// 모델 밖 창(TRD S26-window-chrome §6-2 · 메인 결정 M34) — 창 인자가 모델에 없다는 거절(`NotFound`)이고 그 철자 그대로가
+//   모델 밖 창의 label 이면 그 label. 부팅 실패 화면(`list_tabs` 실패 — 모델에 없는 낡은 팝아웃 따위)의 창 단추가 그 창의
+//   label 로 보내는 명령이 여기서 산다. 포트는 레이아웃 락 밖에서 묻는다(`resolve` 가 놓은 뒤).
+fn unmodeled(control: &dyn WindowControl, error: &WindowCtlError) -> Option<String> {
+    match error {
+        WindowCtlError::Arg(WindowArgError::NotFound(arg)) if control.is_unmodeled(arg) => {
+            Some(arg.clone())
+        }
+        _ => None,
+    }
 }
 
 /// `window.close` 의 결말.
@@ -373,7 +439,8 @@ pub enum CloseOutcome {
 
 /// 창을 닫는다(TRD §5-4) — 차례: ① 숫자만인 인자는 `NumberGiven`(`if_empty` 여도) ② `if_empty` 면 [`close_if_empty`](인자 =
 /// 영속 id · 해석기를 거치지 않는다 — 그 창은 대개 이미 모델에 없다) ③ 인자를 풀어 main 이면 모든 창 숨기기, 팝아웃이면
-/// `apply::close_window`.
+/// `apply::close_window`. 모델에 없는 인자가 모델 밖 창의 label 이면 그 OS 창을 거두고(`host.close` — 그 `Destroyed` 가
+/// 팝아웃 닫기 요청과 같은 정리 · 묘비를 한다 · 모델은 바꿀 것이 없다) `Closed`.
 pub fn close(
     state: &LayoutState,
     subs: &dyn SubscriptionSync,
@@ -386,7 +453,16 @@ pub fn close(
     if if_empty {
         return close_if_empty(state, host, window).map_err(WindowCtlError::NotApplied);
     }
-    let label = resolve(state, window)?;
+    let label = match resolve(state, window) {
+        Ok(label) => label,
+        Err(error) => {
+            let Some(label) = unmodeled(control, &error) else {
+                return Err(error);
+            };
+            host.close(&label);
+            return Ok(CloseOutcome::Closed);
+        }
+    };
     if label == MAIN_WINDOW_LABEL {
         // ADR-0229
         control.hide_all();
@@ -1211,6 +1287,67 @@ mod tests {
         assert!(err.contains(POP), "{err}");
     }
 
+    // 모델 밖 창(부팅 실패 화면의 낡은 팝아웃) — 보이는 창이면 OS 창에 바로 걸고, 이미 그 크기면 바람만 거두고, 숨은 창이면
+    //   바람을 적는다. 어느 갈래도 모델을 건드리지 않는다(빈 모델이라 적으려 했으면 `Err` 였다).
+    #[test]
+    fn an_unmodeled_window_gets_the_os_action_without_the_model() {
+        let ops = FakeOps::with(&[(MAIN_WINDOW_LABEL, SHOWN), (POP, SHOWN), (POP2, HIDDEN)]);
+        ops.deferred.borrow_mut().insert(POP.to_string(), false);
+
+        assert_eq!(
+            run_unmodeled_action(&ops, POP, WindowAction::Maximize),
+            Ok(Applied::default())
+        );
+        assert!(ops.window(POP).maximized);
+        assert_eq!(
+            run_unmodeled_action(&ops, POP, WindowAction::Maximize),
+            Ok(Applied::default()),
+            "이미 최대화 — 바람만 거둔다"
+        );
+        assert_eq!(
+            run_unmodeled_action(&ops, POP, WindowAction::Unmaximize),
+            Ok(Applied::default())
+        );
+        assert_eq!(
+            run_unmodeled_action(&ops, POP, WindowAction::Minimize),
+            Ok(Applied::default())
+        );
+        assert!(ops.window(POP).minimized && !ops.window(POP).maximized);
+        assert_eq!(
+            ops.calls(),
+            [
+                format!("maximize:{POP}"),
+                format!("drop_deferred:{POP}"),
+                format!("drop_deferred:{POP}"),
+                format!("unmaximize:{POP}"),
+                format!("drop_deferred:{POP}"),
+                format!("minimize:{POP}"),
+            ]
+        );
+
+        assert_eq!(
+            run_unmodeled_action(&ops, POP2, WindowAction::Maximize),
+            Ok(Applied {
+                deferred: true,
+                ..Applied::default()
+            }),
+            "숨은 창은 OS 창을 건드리지 않고 바람을 적는다"
+        );
+        assert_eq!(ops.deferred(), [(POP2.to_string(), true)]);
+        assert!(!ops.window(POP2).visible);
+    }
+
+    #[test]
+    fn an_unmodeled_window_is_not_raised_and_one_without_an_os_window_fails() {
+        let ops = FakeOps::with(&[(MAIN_WINDOW_LABEL, SHOWN), (POP, HIDDEN)]);
+
+        let err = run_unmodeled_action(&ops, POP, WindowAction::Raise).unwrap_err();
+        assert!(err.contains(POP), "{err}");
+        assert!(ops.calls().is_empty(), "{:?}", ops.calls());
+        let err = run_unmodeled_action(&ops, POP2, WindowAction::Minimize).unwrap_err();
+        assert!(err.contains(POP2), "{err}");
+    }
+
     // 모델 표식을 못 적으면 바람을 적지도 거두지도 않는다 — 표와 모델이 갈리지 않는다.
     #[test]
     fn a_wish_for_a_window_missing_from_the_model_is_refused_without_touching_the_table() {
@@ -1228,11 +1365,12 @@ mod tests {
 
     // ── 서비스(창 인자 · 락 밖 포트) ──
 
-    /// 기록형 창 상태 포트 — 부를 때마다 레이아웃 락 밖인지 본다.
+    /// 기록형 창 상태 포트 — 부를 때마다 레이아웃 락 밖인지 본다. `unmodeled` = 모델 밖 창으로 답할 label.
     struct Control {
         layout: LayoutState,
         calls: Mutex<Vec<String>>,
         states: Mutex<BTreeMap<String, OsWindowState>>,
+        unmodeled: Mutex<BTreeSet<String>>,
     }
 
     impl Control {
@@ -1241,7 +1379,12 @@ mod tests {
                 layout: layout.clone(),
                 calls: Mutex::new(Vec::new()),
                 states: Mutex::new(BTreeMap::new()),
+                unmodeled: Mutex::new(BTreeSet::new()),
             }
+        }
+
+        fn unmodeled(&self, label: &str) {
+            self.unmodeled.lock().unwrap().insert(label.to_string());
         }
 
         fn outside(&self, call: String) {
@@ -1275,6 +1418,16 @@ mod tests {
         fn state(&self, label: &str) -> Option<OsWindowState> {
             self.outside(format!("state:{label}"));
             self.states.lock().unwrap().get(label).copied()
+        }
+
+        fn is_unmodeled(&self, label: &str) -> bool {
+            self.outside(format!("is_unmodeled:{label}"));
+            self.unmodeled.lock().unwrap().contains(label)
+        }
+
+        fn apply_unmodeled(&self, label: &str, action: WindowAction) -> Result<Applied, String> {
+            self.outside(format!("apply_unmodeled:{label}:{action:?}"));
+            Ok(Applied::default())
         }
     }
 
@@ -1374,10 +1527,89 @@ mod tests {
             )))
         );
         assert_eq!(
-            control.calls().len(),
-            2,
-            "거절된 인자는 포트까지 가지 않는다"
+            control.calls()[2..],
+            ["is_unmodeled:slot-popup-9".to_string()],
+            "거절된 인자는 동작 포트까지 가지 않는다 — 모델에 없는 인자만 모델 밖 창인지 묻는다"
         );
+    }
+
+    // 모델 밖 창(부팅 실패 화면의 낡은 팝아웃)의 창 단추 — 최소화 · 최대화 · 원래 크기는 그 label 로 모델 밖 동작에 가고,
+    //   앞으로 내기는 그대로 「창 없음」이다. 모델은 그대로다.
+    #[test]
+    fn act_on_an_unmodeled_window_reaches_its_os_window_outside_the_lock() {
+        let layout = layout_with_popouts(&[]);
+        let control = Control::new(&layout);
+        control.unmodeled(POP);
+
+        for action in [
+            WindowAction::Minimize,
+            WindowAction::Maximize,
+            WindowAction::Unmaximize,
+        ] {
+            assert_eq!(
+                act(&layout, &control, &format!(" {POP} "), action),
+                Ok(Applied::default())
+            );
+        }
+        assert_eq!(
+            act(&layout, &control, POP, WindowAction::Raise),
+            Err(WindowCtlError::Arg(WindowArgError::NotFound(
+                POP.to_string()
+            )))
+        );
+        assert_eq!(
+            act(&layout, &control, POP2, WindowAction::Minimize),
+            Err(WindowCtlError::Arg(WindowArgError::NotFound(
+                POP2.to_string()
+            ))),
+            "OS 창이 없는(모델 밖 창이 아닌) label 은 그대로 「창 없음」"
+        );
+        let calls = control.calls();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.starts_with("apply"))
+                .cloned()
+                .collect::<Vec<_>>(),
+            [
+                format!("apply_unmodeled:{POP}:Minimize"),
+                format!("apply_unmodeled:{POP}:Maximize"),
+                format!("apply_unmodeled:{POP}:Unmaximize"),
+            ]
+        );
+        assert_eq!(
+            layout.0.lock().unwrap().windows.len(),
+            1,
+            "모델은 main 하나 그대로"
+        );
+    }
+
+    // 모델 밖 창의 닫기 — 그 OS 창을 거두고 `Closed`(모델은 바꿀 것이 없다). 모델 밖 창이 아닌 label 은 그대로 「창 없음」.
+    #[test]
+    fn closing_an_unmodeled_window_closes_its_os_window() {
+        let layout = layout_with_popouts(&[]);
+        let (control, host) = (Control::new(&layout), Host::new(&layout));
+        control.unmodeled(POP);
+        host.open_os(POP);
+
+        assert_eq!(
+            close(&layout, &Subs, &host, &control, POP, false),
+            Ok(CloseOutcome::Closed)
+        );
+        assert_eq!(host.closed(), [POP]);
+        assert_eq!(
+            close(&layout, &Subs, &host, &control, POP2, false),
+            Err(WindowCtlError::Arg(WindowArgError::NotFound(
+                POP2.to_string()
+            )))
+        );
+        assert_eq!(host.closed(), [POP]);
+        assert!(
+            !control.calls().iter().any(|call| call.starts_with("apply")),
+            "{:?}",
+            control.calls()
+        );
+        layout.0.lock().unwrap().assert_number_invariants();
     }
 
     // ── 닫기 합류(§5-4) · 비었으면 닫기(§5-5) ──

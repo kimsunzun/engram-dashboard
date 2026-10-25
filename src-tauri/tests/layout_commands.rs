@@ -186,8 +186,9 @@ impl WindowHost for Windows {
     }
 }
 
-/// 창 상태 포트 대역 — 부른 차례(`"apply:<label>:<동작>"` · `"show_all:<갈래>"` · `"hide_all"` · `"state:<label>"`)와 부른
-/// 스레드를 남기고, 꾸민 답을 낸다. `state` 는 `states` 에 없는 창이면 OS 창이 없다고 답한다.
+/// 창 상태 포트 대역 — 부른 차례(`"apply:<label>:<동작>"` · `"apply_unmodeled:<label>:<동작>"` · `"show_all:<갈래>"` ·
+/// `"hide_all"` · `"state:<label>"`)와 부른 스레드를 남기고, 꾸민 답을 낸다. `state` 는 `states` 에 없는 창이면 OS 창이
+/// 없다고 답한다. `unmodeled` = 모델 밖 창으로 답할 label(묻기는 차례에 남기지 않는다 — 모델에 없는 인자마다 불린다).
 #[derive(Default)]
 struct Control {
     calls: Mutex<Vec<String>>,
@@ -195,6 +196,7 @@ struct Control {
     answer: Mutex<Option<Result<Applied, String>>>,
     focused: Mutex<bool>,
     states: Mutex<BTreeMap<String, OsWindowState>>,
+    unmodeled: Mutex<BTreeSet<String>>,
 }
 
 impl Control {
@@ -237,6 +239,19 @@ impl WindowControl for Control {
     fn state(&self, label: &str) -> Option<OsWindowState> {
         self.note(format!("state:{label}"));
         self.states.lock().unwrap().get(label).copied()
+    }
+
+    fn is_unmodeled(&self, label: &str) -> bool {
+        self.unmodeled.lock().unwrap().contains(label)
+    }
+
+    fn apply_unmodeled(&self, label: &str, action: WindowAction) -> Result<Applied, String> {
+        self.note(format!("apply_unmodeled:{label}:{action:?}"));
+        self.answer
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or(Ok(Applied::default()))
     }
 }
 
@@ -1250,6 +1265,81 @@ async fn window_close_hides_everything_for_main_and_closes_a_popout() {
     .expect("팝아웃 닫기");
     assert_eq!(closed, json!({ "outcome": "Closed" }));
     assert_eq!(world.windows.closed.lock().unwrap().as_slice(), &[popout]);
+}
+
+/// 모델 밖 창(모델에 없는데 OS 창은 열린 팝아웃 — 부팅 실패 화면의 낡은 팝아웃)의 창 단추가 보내는 명령 — 최소화 ·
+/// 최대화 · 원래 크기는 그 창에 바로 가고(모델 밖 동작) 닫기는 그 창을 거둔다(`Closed`). 앞으로 내기는 그대로 `CONFLICT`
+/// 다(TRD S26-window-chrome §6-2 「모델 밖 창」). 모델은 그대로다.
+#[tokio::test]
+async fn window_buttons_of_an_unmodeled_window_reach_its_os_window() {
+    let (world, queue, receiver) = queued();
+    world
+        .control
+        .unmodeled
+        .lock()
+        .unwrap()
+        .insert(UNMODELED_POPOUT_LABEL.to_string());
+    let before = apply::list_windows(&world.state).unwrap();
+
+    let mut answers = Vec::new();
+    for name in ["window.minimize", "window.maximize", "window.unmaximize"] {
+        answers.push(
+            call(
+                &receiver,
+                &queue,
+                &Mailbox::default(),
+                name,
+                json!({ "window": UNMODELED_POPOUT_LABEL }),
+            )
+            .await
+            .outcome
+            .expect(name),
+        );
+    }
+    assert_eq!(
+        answers,
+        [
+            json!({}),
+            json!({ "deferred": false }),
+            json!({ "deferred": false })
+        ]
+    );
+    let err = error_of(
+        call(
+            &receiver,
+            &queue,
+            &Mailbox::default(),
+            "window.raise",
+            json!({ "window": UNMODELED_POPOUT_LABEL }),
+        )
+        .await,
+    );
+    assert_eq!(err.code(), ErrorCode::Conflict);
+    let closed = call(
+        &receiver,
+        &queue,
+        &world.mail,
+        "window.close",
+        json!({ "window": UNMODELED_POPOUT_LABEL }),
+    )
+    .await
+    .outcome
+    .expect("모델 밖 창 닫기");
+    assert_eq!(closed, json!({ "outcome": "Closed" }));
+
+    assert_eq!(
+        world.control.calls(),
+        [
+            format!("apply_unmodeled:{UNMODELED_POPOUT_LABEL}:Minimize"),
+            format!("apply_unmodeled:{UNMODELED_POPOUT_LABEL}:Maximize"),
+            format!("apply_unmodeled:{UNMODELED_POPOUT_LABEL}:Unmaximize"),
+        ]
+    );
+    assert_eq!(
+        world.windows.closed.lock().unwrap().as_slice(),
+        &[UNMODELED_POPOUT_LABEL.to_string()]
+    );
+    assert_eq!(apply::list_windows(&world.state).unwrap(), before);
 }
 
 /// `if_empty` 는 해석기 앞에서 갈린다 — 모델에 없는 창 · 탭이 있는 창 어느 쪽에도 `CONFLICT` 를 내지 않는다. 숫자만인 인자는

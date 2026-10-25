@@ -1020,7 +1020,8 @@ impl RestoreWindows for TauriRestoreWindows {
             // 사본의 main 폭이 최소 폭보다 좁으면 넓혀 당긴다(TRD S26-window-chrome §7-7 · D14 · PRD AC34 「사본 수락」).
             //   main 은 다시 짓지 않아 그 페이지가 다시 보고하지 않고, 이미 입은 OS 최소 크기가 좁은 자리를 왼쪽 끝을 둔 채
             //   키운다 — 그래서 자리 앞에 그 최소 크기를 걷고, 자리 뒤의 열기 표시가 받아 둔 값으로 넓혀 당긴 뒤 다시 입힌다.
-            crate::chrome::lift_min(&window);
+            //   ★걷기 일을 자리 세터보다 먼저 넘긴다★ — 둘 다 메인 스레드 줄에 넘긴 차례대로 선다(`crate::chrome::lift_min`).
+            crate::chrome::lift_min(&self.app, MAIN_WINDOW_LABEL);
             place_main(&self.app, &window, at, maximized);
             crate::chrome::mark_opening(&self.app, MAIN_WINDOW_LABEL);
         }

@@ -49,6 +49,7 @@ vi.mock('@tauri-apps/api/window', () => ({
 /** 0탭 자가닫힘 관측 — 셸에 청한 창 닫기(`window_control`). */
 const closeCalls = () => invokeMock.mock.calls.filter(c => c[0] === 'window_control')
 const KEPT = { deferred: false, pending: false, shown_all: false, focused: false, close: 'kept' }
+const CLOSED = { ...KEPT, close: 'closed' }
 
 // ── ViewLayoutRenderer stub — 캔버스 내부는 관심 밖(어느 view 를 그리는지만 관측) + ★mount 카운터★.
 // ★S4-F5 keep-alive no-remount★: 슬롯 컴포넌트가 탭 전환에 remount 되지 않는지(터미널 인스턴스 생존)를
@@ -1140,17 +1141,27 @@ describe('WindowLayout — 알림 층의 자리', () => {
     expect(screen.queryByTestId('tab-bar')).toBeNull()
   })
 
-  it('부팅 실패 화면에도 제목 줄 아래에 알림 층을 그린다 — 창을 닫을 수 있고 연결 실패 이유도 읽힌다', async () => {
-    invokeMock.mockImplementation(async (cmd: string) => {
+  // 그 창은 모델에 없을 수 있다(낡은 팝아웃) — 창 단추는 window_id 없이 그 label 로 보내고, 셸이 그 label 의 열린 팝아웃
+  //   창에 바로 건다(모델 밖 창 — TRD S26-window-chrome §6-2 · 셸 시험 `window_buttons_of_an_unmodeled_window_reach_its_os_window`).
+  it('부팅 실패 화면에도 제목 줄 아래에 알림 층을 그린다 — 창 단추가 그 label 로 가고 연결 실패 이유도 읽힌다', async () => {
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
       if (cmd === 'list_tabs') throw new Error('backend down')
-      if (cmd === 'window_control') return KEPT
+      if (cmd === 'window_control') return (args as { action: string }).action === 'close' ? CLOSED : { ...KEPT, close: null }
       return undefined
     })
     render(<WindowLayout label="slot-popup-6" notices={notices} />)
     await waitFor(() => expect(screen.getByTestId('window-boot-error')).toBeTruthy(), { timeout: 3000 })
     expectFrame('window-boot-error')
+    fireEvent.click(screen.getByTestId('caption-minimize'))
+    fireEvent.click(screen.getByTestId('caption-maximize'))
     fireEvent.click(screen.getByTestId('caption-close'))
-    expect(closeCalls()).toEqual([['window_control', { window: 'slot-popup-6', action: 'close', ifEmpty: false }]])
+    await waitFor(() =>
+      expect(closeCalls()).toEqual([
+        ['window_control', { window: 'slot-popup-6', action: 'minimize', ifEmpty: null }],
+        ['window_control', { window: 'slot-popup-6', action: 'maximize', ifEmpty: null }],
+        ['window_control', { window: 'slot-popup-6', action: 'close', ifEmpty: false }],
+      ]),
+    )
   })
 
   it('번호를 받기 전(로딩 · 부팅 실패)에는 최소 창 크기를 보내지 않는다', async () => {

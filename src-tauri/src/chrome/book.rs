@@ -21,8 +21,11 @@
 //! 다음에 받아들인 보고에서. 웹은 창 번호를 받기 전(예열 창의 대기 · 로딩 · 부팅 실패)에는 보고하지 않는다 — 그래서 예열
 //! 창을 들일 때 적은 표시를 대기 중 보고가 먼저 거두지 못한다(`titleRow/TitleRow.tsx`). 다시 짓지 않는 창에 새 자리를
 //! 입힐 때는 그 전에 입힌 OS 최소 크기를 걷고 표시를 세운다([`ChromeBook::lift_min`]) — 걷지 않으면 OS 가 좁은 자리를
-//! 왼쪽 끝을 둔 채 최소 크기로 키워 넓혀 당기기가 할 일이 없어진다. 표시가 서 있는 동안 크기 바뀜은 OS 최소 크기를
-//! 입히지 않는다([`ChromeBook::on_frame`]) — 걷기가 낸 크기 바뀜이 곧바로 다시 입히지 않게.
+//! 왼쪽 끝을 둔 채 최소 크기로 키워 넓혀 당기기가 할 일이 없어진다. ★걷기의 장부 적기와 OS 걷기는 메인 스레드 일 하나다★
+//! ([`lift`]) — 둘이 갈리면 그 사이에 온 보고가 입힌 값을 뒤늦은 OS 걷기가 지워, 장부는 「입혔다」인데 OS 에는 최소 크기가
+//! 없게 남는다(U8b 리뷰 2). 표시가 서 있는 동안 크기 바뀜은 OS 최소 크기를 입히지 않는다([`ChromeBook::on_frame`]) — 걷기가
+//! 낸 크기 바뀜이 곧바로 다시 입히지 않게. 받아 둔 최소 크기가 있는 창의 표시는 그 값을 늘 다시 입힌다
+//! ([`ChromeBook::mark_opening`]) — 장부와 OS 가 어긋났어도 열 때 고친다.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -209,8 +212,9 @@ impl ChromeBook {
     /// 창 `label` 을 셸이 막 열었다(TRD §7-7 — 창 포트의 새로 짓기 · 맡긴 예열 창의 확정 · 부팅 복원 창 짓기 · 사본 수락의
     /// 숨긴 팝아웃 짓기 · 사본 수락의 main 자리 입히기) — 넓혀 당기기를 한 번 판정한다. 그 창의 최소 크기를 아직 받지
     /// 않았으면 표시를 세워 다음에 받아들인 보고가 판정하고([`Self::on_min_report`]) 빈 판정이다. 이미 받았으면 지금 `state`
-    /// 로 판정하고 표시를 거둔다 — 보통 크기면 넓혀 당기고 그 값을 입힌 값과 다르면 OS 에 입힌다(최대화 · 최소화면 넓히지
-    /// 않는다 — 열 때 한 번). 항목이 없으면 만든다(창 확인은 부르는 쪽 — 모듈 머리). `state` 는 자리를 입힌 뒤에 읽는다.
+    /// 로 판정하고 표시를 거둔다 — 보통 크기면 넓혀 당기고 ★그 값을 늘 OS 에 다시 입힌다★(입힌 값으로 적은 것과 같아도 —
+    /// 장부와 OS 가 어긋났어도 이 판정이 고친다 · TRD §7-7 · U8b 리뷰 2 수정). 최대화 · 최소화면 넓히지도 입히지도 않는다(열
+    /// 때 한 번 · 모듈 머리). 항목이 없으면 만든다(창 확인은 부르는 쪽 — 모듈 머리). `state` 는 자리를 입힌 뒤에 읽는다.
     pub(crate) fn mark_opening(&mut self, label: &str, state: FrameState) -> MinPlan {
         let window = self.windows.entry(label.to_owned()).or_default();
         let Some(min) = window.min.as_ref().map(|mark| mark.size) else {
@@ -218,18 +222,21 @@ impl ChromeBook {
             return MinPlan::default();
         };
         window.opening = false;
-        let normal = state == FrameState::Normal;
+        if state != FrameState::Normal {
+            return MinPlan::default();
+        }
+        window.applied = Some(min);
         MinPlan {
-            widen: normal.then_some(min),
-            set_min: if normal { window.next_min() } else { None },
+            widen: Some(min),
+            set_min: Some(min),
         }
     }
 
     /// 셸이 다시 짓지 않는 창 `label` 에 새 보통 자리를 입히려 한다(런타임 사본 수락의 main) — 열기 표시를 세우고, 보통
     /// 크기이고 OS 최소 크기를 입혀 두었으면 입힌 값을 잊는다. `true` = 부르는 쪽이 OS 최소 크기를 걷는다(모듈 머리 —
     /// 걷지 않으면 OS 가 좁은 자리를 키워 넓혀 당기기가 할 일이 없다). 최대화 · 최소화 창은 걷지 않는다(걷는 세터가 최대화를
-    /// 푼다 — 모듈 머리). 자리를 입힌 뒤 [`Self::mark_opening`] 이 넓혀 당기고 다시 입힌다. ★항목을 만들지 않는다★ —
-    /// 메인 스레드 밖에서도 불리므로 창 확인과 적기가 한 일 안이 아니다(모듈 머리) · 항목이 없으면 걷을 것도 없다.
+    /// 푼다 — 모듈 머리). 자리를 입힌 뒤 [`Self::mark_opening`] 이 넓혀 당기고 다시 입힌다. 몸통 = [`lift`](메인 스레드 일
+    /// 하나). 항목을 만들지 않는다 — 항목이 없으면 걷을 것도 없다.
     pub(crate) fn lift_min(&mut self, label: &str, state: FrameState) -> bool {
         let Some(window) = self.windows.get_mut(label) else {
             return false;
@@ -339,6 +346,31 @@ pub(crate) trait MinWindow {
     /// OS 최소 크기를 입힌다 — `min` = 웹이 보고한 논리 안쪽 px. 안쪽이 그 값 아래로 줄지 않게 하는 것은 실물의 몫이다
     /// ([`os_min_size`]).
     fn apply_min_size(&self, min: MinSize) -> Result<(), String>;
+    /// OS 최소 크기를 걷는다([`lift`]).
+    fn clear_min_size(&self) -> Result<(), String>;
+}
+
+/// 새 자리 앞 걷기 일 하나의 몸통(`crate::chrome::lift_min` 이 메인 스레드 일로 넘긴다) — `state` · `window` = 그 label 의
+/// OS 창과 그 크기 상태(부르는 쪽이 같은 일 안에서 창이 있는 것을 보고 읽는다). 장부에 걷기를 적고([`ChromeBook::lift_min`])
+/// 걷을 값이 있었으면 장부 락을 놓은 뒤 OS 최소 크기를 걷는다. ★적기와 걷기가 한 메인 스레드 일 안이라 그 창의 보고(메인
+/// 스레드 동기 명령)가 그 사이에 끼지 않는다★(모듈 머리). 못 걷었으면 warn 만 남긴다 — 장부는 걷은 것으로 적었고, 열기
+/// 표시의 판정이 받아 둔 값을 다시 입힌다([`ChromeBook::mark_opening`] — OS 에 남은 옛 값이 넓혀 당기기를 막을 수는 있다).
+pub(crate) fn lift(
+    book: &Mutex<ChromeBook>,
+    label: &str,
+    state: FrameState,
+    window: &impl MinWindow,
+) {
+    if !sync::lock(book).lift_min(label, state) {
+        return;
+    }
+    if let Err(e) = window.clear_min_size() {
+        tracing::warn!(
+            module = "chrome",
+            label,
+            "새 자리 앞에 OS 최소 창 크기를 걷지 못했다: {e}"
+        );
+    }
 }
 
 /// OS 최소 크기 세터(Tauri `set_min_size` → tao `set_min_inner_size`)에 넘길 논리 크기 — 웹이 보고한 안쪽 최소 크기 `min` 에
@@ -946,9 +978,9 @@ mod tests {
             book.mark_opening(POPUP, Normal),
             MinPlan {
                 widen: Some(size(286, 64)),
-                set_min: None,
+                set_min: Some(size(286, 64)),
             },
-            "같은 값이어도 넓혀 본다 — OS 최소 크기는 이미 입혔다"
+            "같은 값이어도 넓혀 보고 다시 입힌다 — 장부와 OS 가 어긋났어도 고친다"
         );
         assert_eq!(
             plan(&mut book, 2, size(295, 64), Normal),
@@ -981,6 +1013,34 @@ mod tests {
                 widen: Some(size(286, 64)),
                 set_min: Some(size(286, 64)),
             }
+        );
+        assert_eq!(book.on_frame(POPUP, Normal), MinPlan::default());
+    }
+
+    // 걷기와 열기 표시 사이에 그 창의 보고가 낀 차례(U8b 리뷰 2) — 보고가 표시를 거두고 새 값을 입혔어도 열기 표시가 그
+    //   값으로 다시 넓혀 당기고 입힌다. 걷기 · 보고는 메인 스레드 일 하나씩이라 둘 사이에 끼는 OS 걷기는 이제 없지만(모듈
+    //   머리), 그 뒤 자리 세터가 OS 최소 크기에 걸려 좁은 자리를 왼쪽 끝을 둔 채 키운 것을 이 판정이 작업 영역으로 당긴다.
+    #[test]
+    fn a_report_between_the_lift_and_the_mark_still_ends_with_the_min_applied() {
+        let mut book = ChromeBook::default();
+        plan(&mut book, 1, size(286, 64), Normal);
+        assert!(book.lift_min(POPUP, Normal));
+
+        assert_eq!(
+            plan(&mut book, 2, size(295, 64), Normal),
+            MinPlan {
+                widen: Some(size(295, 64)),
+                set_min: Some(size(295, 64)),
+            },
+            "보고가 걷기의 표시를 거둔다"
+        );
+        assert_eq!(
+            book.mark_opening(POPUP, Normal),
+            MinPlan {
+                widen: Some(size(295, 64)),
+                set_min: Some(size(295, 64)),
+            },
+            "입힌 값으로 적힌 같은 값이어도 다시 넓혀 당기고 입힌다"
         );
         assert_eq!(book.on_frame(POPUP, Normal), MinPlan::default());
     }
@@ -1129,6 +1189,72 @@ mod tests {
             self.log(format!("min {}x{}", min.width, min.height));
             self.set.clone()
         }
+
+        fn clear_min_size(&self) -> Result<(), String> {
+            self.log("clear".to_owned());
+            self.set.clone()
+        }
+    }
+
+    // ── lift(새 자리 앞 걷기 일) ──
+
+    #[test]
+    fn a_lift_clears_the_os_min_outside_the_book_lock_only_when_one_was_applied() {
+        let book = Mutex::new(ChromeBook::default());
+        book.lock()
+            .unwrap()
+            .on_min_report(POPUP, nth(1), size(286, 64), Normal);
+        let window = FakeMinWindow::new(&book);
+
+        lift(&book, POPUP, Normal, &window);
+        lift(&book, POPUP, Normal, &window);
+
+        assert_eq!(
+            window.calls.into_inner(),
+            [("clear".to_owned(), true)],
+            "두 번째 걷기는 걷을 값이 없다"
+        );
+        assert_eq!(
+            book.lock().unwrap().mark_opening(POPUP, Normal),
+            MinPlan {
+                widen: Some(size(286, 64)),
+                set_min: Some(size(286, 64)),
+            },
+            "걷기가 세운 표시를 열기 표시가 거둔다"
+        );
+    }
+
+    #[test]
+    fn a_lift_of_a_maximized_or_unseen_window_clears_nothing() {
+        let book = Mutex::new(ChromeBook::default());
+        let window = FakeMinWindow::new(&book);
+
+        lift(&book, POPUP, Normal, &window);
+        book.lock()
+            .unwrap()
+            .on_min_report(POPUP, nth(1), size(286, 64), Normal);
+        lift(&book, POPUP, Other, &window);
+
+        assert!(window.calls.into_inner().is_empty());
+    }
+
+    // 못 걷었어도 장부는 걷은 것으로 남고 열기 표시가 받아 둔 값을 다시 입힌다.
+    #[test]
+    fn a_failed_lift_is_repaired_by_the_mark() {
+        let book = Mutex::new(ChromeBook::default());
+        book.lock()
+            .unwrap()
+            .on_min_report(POPUP, nth(1), size(286, 64), Normal);
+        let mut window = FakeMinWindow::new(&book);
+        window.set = Err("창 핸들 무효(시험)".to_owned());
+
+        lift(&book, POPUP, Normal, &window);
+
+        assert_eq!(window.calls.into_inner().len(), 1);
+        assert_eq!(
+            book.lock().unwrap().mark_opening(POPUP, Normal).set_min,
+            Some(size(286, 64))
+        );
     }
 
     #[test]
