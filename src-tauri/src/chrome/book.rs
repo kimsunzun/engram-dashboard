@@ -1018,8 +1018,9 @@ mod tests {
     }
 
     // 걷기와 열기 표시 사이에 그 창의 보고가 낀 차례(U8b 리뷰 2) — 보고가 표시를 거두고 새 값을 입혔어도 열기 표시가 그
-    //   값으로 다시 넓혀 당기고 입힌다. 걷기 · 보고는 메인 스레드 일 하나씩이라 둘 사이에 끼는 OS 걷기는 이제 없지만(모듈
-    //   머리), 그 뒤 자리 세터가 OS 최소 크기에 걸려 좁은 자리를 왼쪽 끝을 둔 채 키운 것을 이 판정이 작업 영역으로 당긴다.
+    //   값을 다시 입힌다. 걷기 · 보고는 메인 스레드 일 하나씩이라 둘 사이에 끼는 OS 걷기는 이제 없다(모듈 머리). 단 그 뒤
+    //   자리 세터가 OS 최소 크기에 걸려 좁은 자리를 왼쪽 끝을 둔 채 키웠으면 폭이 이미 최소라 `fit_min_width` 는 당기지
+    //   않는다 — 작업 영역 오른쪽으로 넘친 채 남을 수 있다(드묾 · 받아들임 · TRD §7-7).
     #[test]
     fn a_report_between_the_lift_and_the_mark_still_ends_with_the_min_applied() {
         let mut book = ChromeBook::default();
@@ -1040,7 +1041,7 @@ mod tests {
                 widen: Some(size(295, 64)),
                 set_min: Some(size(295, 64)),
             },
-            "입힌 값으로 적힌 같은 값이어도 다시 넓혀 당기고 입힌다"
+            "입힌 값으로 적힌 같은 값이어도 다시 입힌다"
         );
         assert_eq!(book.on_frame(POPUP, Normal), MinPlan::default());
     }

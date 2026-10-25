@@ -170,7 +170,8 @@ pub struct SpareClaim {
 ///
 /// pop-out 은 창 확인과 모델 변형 사이에서 락을 한 번 놓는다. 그 틈에 사용자가 대상 창을 닫아도 잔해가 남지
 /// 않는 것은 팝아웃의 닫기 요청이 모델에서 그 창을 먼저 지우고 label 에 묘비를 달기 때문이다(같은 락 한 번 —
-/// `commands::popout::close_requested_popup_window` · TRD S21-slot-docking 5.8판 §1-2 「닫히는 창」). 기존 창 타깃은
+/// `commands::popout::close_requested_popup_window` · TRD S21-slot-docking 5.8판 §1-2 「닫히는 창」 · 모델 밖 창의
+/// `window.close` 도 같다 — `window_ctl::close`). 기존 창 타깃은
 /// phase C 의 `insert_tab_into` 가 창 없음으로, 새 창 타깃은 `attach_view_as_new_window` 가 묘비로 실패해 롤백을
 /// 탄다(옮기려던 슬롯은 출처에 남는다). 그 전제(팝아웃의 닫기 요청은 되돌려지지 않는다)와 점검 명령은 `lib.rs` 의
 /// `CloseRequested` 처리기에 있다.
@@ -526,10 +527,20 @@ pub fn close_window(
 ) -> Result<(), String> {
     {
         let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
-        mgr.close_window(window).map_err(|e| e.to_string())?;
-        subs.resync(&mgr);
+        close_window_in_model(&mut mgr, subs, window)?;
     } // ← 락 드롭
     host.close(window);
+    Ok(())
+}
+
+/// [`close_window`] 의 모델 몫 — 레이아웃 락을 쥔 쪽이 부르고, 그 OS 창은 락을 놓은 뒤 거둔다([`WindowHost::close`]).
+pub(crate) fn close_window_in_model(
+    mgr: &mut ViewManager,
+    subs: &dyn SubscriptionSync,
+    window: &str,
+) -> Result<(), String> {
+    mgr.close_window(window).map_err(|e| e.to_string())?;
+    subs.resync(mgr);
     Ok(())
 }
 

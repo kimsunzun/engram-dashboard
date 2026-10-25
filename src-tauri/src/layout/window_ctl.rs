@@ -439,8 +439,7 @@ pub enum CloseOutcome {
 
 /// 창을 닫는다(TRD §5-4) — 차례: ① 숫자만인 인자는 `NumberGiven`(`if_empty` 여도) ② `if_empty` 면 [`close_if_empty`](인자 =
 /// 영속 id · 해석기를 거치지 않는다 — 그 창은 대개 이미 모델에 없다) ③ 인자를 풀어 main 이면 모든 창 숨기기, 팝아웃이면
-/// `apply::close_window`. 모델에 없는 인자가 모델 밖 창의 label 이면 그 OS 창을 거두고(`host.close` — 그 `Destroyed` 가
-/// 팝아웃 닫기 요청과 같은 정리 · 묘비를 한다 · 모델은 바꿀 것이 없다) `Closed`.
+/// `apply::close_window`. 모델에 없는 인자가 모델 밖 창의 label 이면 [`close_unmodeled`] 가 그 창을 닫고 `Closed`.
 pub fn close(
     state: &LayoutState,
     subs: &dyn SubscriptionSync,
@@ -459,8 +458,7 @@ pub fn close(
             let Some(label) = unmodeled(control, &error) else {
                 return Err(error);
             };
-            host.close(&label);
-            return Ok(CloseOutcome::Closed);
+            return close_unmodeled(state, subs, host, &label);
         }
     };
     if label == MAIN_WINDOW_LABEL {
@@ -469,6 +467,35 @@ pub fn close(
         return Ok(CloseOutcome::HiddenAll);
     }
     apply::close_window(state, subs, host, &label).map_err(WindowCtlError::NotApplied)?;
+    Ok(CloseOutcome::Closed)
+}
+
+// 모델 밖 창 닫기(TRD S26-window-chrome §6-2 「모델 밖 창」) — 모델 판정을 레이아웃 락 하나 안에서 다시 한다(포트는 락
+//   밖에서 물었다 — 그 사이 새 창 옮기기의 확정이 이 창을 모델에 넣었을 수 있다). 들었으면 모델 창 닫기의 모델 몫, 아니면
+//   label 에 묘비(`ViewManager::mark_closed` — 팝아웃 닫기 요청의 `commands::popout::drop_window_in_model` 이 세우는 그
+//   묘비)를 단 뒤 락을 놓고 OS 창을 거둔다(`host.close` — 락 안이면 교착 · `WindowHost` 머리).
+//   ★묘비를 `host.close` 뒤로 미루거나 `Destroyed` 정리에 맡기지 말 것★ — destroy 는 이벤트 루프에 줄 서므로, 그 사이
+//   슬롯 분리 · 새 창 놓기의 확정(`attach_view_as_new_window` · `dock`)이 이 label 로 붙으면 뒤의 `Destroyed` 정리가 옮겨
+//   온 탭째 지운다. 묘비가 먼저 서면 그 확정이 `WindowClosed` 로 거절돼 롤백을 타고 탭은 출처에 남는다.
+fn close_unmodeled(
+    state: &LayoutState,
+    subs: &dyn SubscriptionSync,
+    host: &dyn WindowHost,
+    label: &str,
+) -> Result<CloseOutcome, WindowCtlError> {
+    {
+        let mut mgr = state
+            .0
+            .lock()
+            .map_err(|e| WindowCtlError::NotApplied(e.to_string()))?;
+        if mgr.windows.contains_key(label) {
+            apply::close_window_in_model(&mut mgr, subs, label)
+                .map_err(WindowCtlError::NotApplied)?;
+        } else {
+            mgr.mark_closed(label);
+        }
+    } // ← 락 드롭
+    host.close(label);
     Ok(CloseOutcome::Closed)
 }
 
@@ -545,8 +572,13 @@ mod tests {
     use std::sync::{Mutex, TryLockError};
 
     use super::*;
-    use crate::layout::apply::{MoveFailed, SpareClaim, WindowPlace};
-    use crate::layout::manager::ViewManager;
+    use crate::layout::apply::{
+        DockDest, DockRequest, LabelSource, LayoutEvents, MoveFailed, SpareClaim, WindowPlace,
+        WindowTabsPayload,
+    };
+    use crate::layout::manager::{DockError, DockMove, FocusPolicy, LayoutError, ViewManager};
+    use crate::layout::tree;
+    use crate::layout::types::{SlotContent, ViewSnapshot};
 
     const POP: &str = "slot-popup-0a1b2c3d-1";
     const POP2: &str = "slot-popup-0a1b2c3d-2";
@@ -1365,12 +1397,14 @@ mod tests {
 
     // ── 서비스(창 인자 · 락 밖 포트) ──
 
-    /// 기록형 창 상태 포트 — 부를 때마다 레이아웃 락 밖인지 본다. `unmodeled` = 모델 밖 창으로 답할 label.
+    /// 기록형 창 상태 포트 — 부를 때마다 레이아웃 락 밖인지 본다. `unmodeled` = 모델 밖 창으로 답할 label · `admits` = 모델
+    /// 밖 창인지 답한 바로 뒤 모델에 드는 label(새 창 옮기기의 확정이 그 틈에 선다 — 한 번).
     struct Control {
         layout: LayoutState,
         calls: Mutex<Vec<String>>,
         states: Mutex<BTreeMap<String, OsWindowState>>,
         unmodeled: Mutex<BTreeSet<String>>,
+        admits: Mutex<BTreeSet<String>>,
     }
 
     impl Control {
@@ -1380,11 +1414,16 @@ mod tests {
                 calls: Mutex::new(Vec::new()),
                 states: Mutex::new(BTreeMap::new()),
                 unmodeled: Mutex::new(BTreeSet::new()),
+                admits: Mutex::new(BTreeSet::new()),
             }
         }
 
         fn unmodeled(&self, label: &str) {
             self.unmodeled.lock().unwrap().insert(label.to_string());
+        }
+
+        fn admits(&self, label: &str) {
+            self.admits.lock().unwrap().insert(label.to_string());
         }
 
         fn outside(&self, call: String) {
@@ -1422,7 +1461,11 @@ mod tests {
 
         fn is_unmodeled(&self, label: &str) -> bool {
             self.outside(format!("is_unmodeled:{label}"));
-            self.unmodeled.lock().unwrap().contains(label)
+            let unmodeled = self.unmodeled.lock().unwrap().contains(label);
+            if self.admits.lock().unwrap().remove(label) {
+                self.layout.0.lock().unwrap().create_window(label).unwrap();
+            }
+            unmodeled
         }
 
         fn apply_unmodeled(&self, label: &str, action: WindowAction) -> Result<Applied, String> {
@@ -1584,7 +1627,8 @@ mod tests {
         );
     }
 
-    // 모델 밖 창의 닫기 — 그 OS 창을 거두고 `Closed`(모델은 바꿀 것이 없다). 모델 밖 창이 아닌 label 은 그대로 「창 없음」.
+    // 모델 밖 창의 닫기 — label 에 묘비를 달고 그 OS 창을 거둔 뒤 `Closed`(모델의 창 항목은 바꿀 것이 없다). 모델 밖 창이
+    //   아닌 label 은 그대로 「창 없음」.
     #[test]
     fn closing_an_unmodeled_window_closes_its_os_window() {
         let layout = layout_with_popouts(&[]);
@@ -1598,6 +1642,11 @@ mod tests {
         );
         assert_eq!(host.closed(), [POP]);
         assert_eq!(
+            layout.0.lock().unwrap().create_window(POP),
+            Err(LayoutError::WindowClosed(POP.to_string())),
+            "그 label 로는 모델 창이 서지 않는다"
+        );
+        assert_eq!(
             close(&layout, &Subs, &host, &control, POP2, false),
             Err(WindowCtlError::Arg(WindowArgError::NotFound(
                 POP2.to_string()
@@ -1610,6 +1659,163 @@ mod tests {
             control.calls()
         );
         layout.0.lock().unwrap().assert_number_invariants();
+    }
+
+    /// 새 창을 연 바로 뒤 · 모델에 넣기 전에(phase B) 그 창의 웹 닫기 단추가 `window.close <label>` 을 보내는 창 포트 —
+    /// 그 창은 아직 모델 밖 창이다(부팅 실패 화면). `close` 는 destroy 를 줄 세울 뿐이라 그 `Destroyed` 정리는 이 시험
+    /// 안에서 오지 않는다 — 확정은 그 정리 전에 선다.
+    struct ClosesOnOpen<'a> {
+        host: Host,
+        control: &'a Control,
+    }
+
+    impl WindowHost for ClosesOnOpen<'_> {
+        fn open(&self, label: &str) -> Result<(), String> {
+            self.host.open_os(label);
+            assert_eq!(
+                close(&self.host.layout, &Subs, self, self.control, label, false),
+                Ok(CloseOutcome::Closed)
+            );
+            Ok(())
+        }
+
+        fn open_at(&self, label: &str, _at: &WindowPlace, _activate: bool) -> Result<(), String> {
+            self.open(label)
+        }
+
+        // 묘비는 OS 창을 거두기 전에 선다 — destroy 가 줄 선 동안 붙는 확정도 거절된다.
+        fn close(&self, label: &str) {
+            assert_eq!(
+                self.host.layout.0.lock().unwrap().create_window(label),
+                Err(LayoutError::WindowClosed(label.to_string()))
+            );
+            self.host.close(label);
+        }
+
+        fn is_open(&self, label: &str) -> bool {
+            self.host.is_open(label)
+        }
+
+        fn move_window(&self, _label: &str, _at: &WindowPlace) -> Result<(), MoveFailed> {
+            unreachable!("이 시험은 창을 옮기지 않는다")
+        }
+
+        fn claim_spare(&self) -> Option<SpareClaim> {
+            None
+        }
+
+        fn committed(&self, _claim: &SpareClaim) {}
+
+        fn release_spare(&self, _claim: &SpareClaim) {}
+    }
+
+    struct NextIsPop;
+
+    impl LabelSource for NextIsPop {
+        fn next_label(&self) -> String {
+            POP.to_string()
+        }
+    }
+
+    struct NoEvents;
+
+    impl LayoutEvents for NoEvents {
+        fn layout_updated(&self, _snapshot: &ViewSnapshot) {}
+        fn window_tabs_updated(&self, _tabs: &WindowTabsPayload) {}
+    }
+
+    // 모델 밖 창의 닫기가 새 창 옮기기의 틈에 낀다 — 묘비가 OS 창 거두기보다 먼저 서서 슬롯 분리 · 새 창 놓기의 확정이
+    //   `WindowClosed` 로 거절되고, 옮기려던 슬롯 · 탭은 출처에 남는다(묘비를 `Destroyed` 정리에 맡기면 확정이 서고 그 정리가
+    //   옮겨 온 탭째 지운다 · TRD S26-window-chrome §6-2 「모델 밖 창」).
+    #[test]
+    fn closing_an_unmodeled_window_refuses_a_move_into_it_and_keeps_the_source() {
+        let layout = layout_with_popouts(&[]);
+        let control = Control::new(&layout);
+        control.unmodeled(POP);
+        let host = ClosesOnOpen {
+            host: Host::new(&layout),
+            control: &control,
+        };
+        let (main_tab, slot, content) = {
+            let mut mgr = layout.0.lock().unwrap();
+            let main_tab = mgr.windows[MAIN_WINDOW_LABEL].active;
+            let slot = tree::first_slot_id(&mgr.views[&main_tab].layout);
+            mgr.set_slot_content(main_tab, slot, SlotContent::AgentList)
+                .unwrap();
+            (main_tab, slot, SlotContent::AgentList)
+        };
+
+        let err = apply::move_slot_to_window(
+            &layout, &Subs, &NoEvents, &host, &NextIsPop, main_tab, slot, None,
+        )
+        .unwrap_err();
+        assert!(
+            err.ends_with(&LayoutError::WindowClosed(POP.to_string()).to_string()),
+            "{err}"
+        );
+        {
+            let mgr = layout.0.lock().unwrap();
+            assert_eq!(mgr.slot_content(main_tab, slot), Ok(content));
+            assert!(!mgr.windows.contains_key(POP));
+        }
+        assert_eq!(host.host.closed(), [POP, POP], "닫기 단추 · 연 창 거두기");
+
+        let docked = layout
+            .0
+            .lock()
+            .unwrap()
+            .create_tab(MAIN_WINDOW_LABEL, None)
+            .unwrap();
+        let tabs_before = layout.0.lock().unwrap().windows[MAIN_WINDOW_LABEL]
+            .tabs
+            .clone();
+        let refused = apply::dock_tab(
+            &layout,
+            &Subs,
+            &NoEvents,
+            &host,
+            &NextIsPop,
+            DockRequest {
+                view: docked,
+                to: DockDest::NewWindow {
+                    at: WindowPlace {
+                        pos: None,
+                        size: None,
+                    },
+                },
+                focus: FocusPolicy::Reveal,
+                mv: DockMove::default(),
+            },
+        );
+        assert_eq!(
+            refused.map(|_| ()),
+            Err(DockError::WindowClosed(POP.to_string()))
+        );
+        let mgr = layout.0.lock().unwrap();
+        assert_eq!(mgr.windows[MAIN_WINDOW_LABEL].tabs, tabs_before);
+        assert!(!mgr.windows.contains_key(POP));
+        mgr.assert_number_invariants();
+    }
+
+    // 포트가 모델 밖 창이라 답한 뒤 · 레이아웃 락을 잡기 전에 그 창이 모델에 들었다(새 창 옮기기의 확정) — 모델 창 닫기로
+    //   간다: 모델에서 지우고 번호는 그 `Destroyed` 까지 쥔 채 OS 창을 거둔다.
+    #[test]
+    fn an_unmodeled_window_that_entered_the_model_is_closed_as_a_model_window() {
+        let layout = layout_with_popouts(&[]);
+        let (control, host) = (Control::new(&layout), Host::new(&layout));
+        control.unmodeled(POP);
+        control.admits(POP);
+        host.open_os(POP);
+
+        assert_eq!(
+            close(&layout, &Subs, &host, &control, POP, false),
+            Ok(CloseOutcome::Closed)
+        );
+        assert_eq!(host.closed(), [POP]);
+        let mut mgr = layout.0.lock().unwrap();
+        assert!(!mgr.windows.contains_key(POP));
+        mgr.assert_number_invariants();
+        assert!(mgr.release_closing(POP), "번호는 그 `Destroyed` 까지 쥔다");
     }
 
     // ── 닫기 합류(§5-4) · 비었으면 닫기(§5-5) ──

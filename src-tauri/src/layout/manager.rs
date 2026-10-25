@@ -1553,7 +1553,8 @@ impl ViewManager {
     /// 창 `label` 에 묘비를 단다 — 그 뒤 그 label 로 새 창을 붙이는 [`Self::dock`](`NewWindow`) ·
     /// [`Self::attach_view_as_new_window`] · [`Self::create_window`] 는 `WindowClosed`, 그 창으로의 `Seam` · `TabBar` 는
     /// 「없음」(`TabNotFound` · `WindowNotFound`)으로 무변경이다. 모델의 창 항목 · `version` 은 손대지 않는다(지우는 것은 부르는 쪽 몫 —
-    /// `commands::popout::drop_window_in_model` 이 창을 지우는 같은 락 안에서 부른다).
+    /// `commands::popout::drop_window_in_model` 이 창을 지우는 같은 락 안에서, 모델 밖 창의 `window.close` 가 그 OS 창을
+    /// 거두기 전에 부른다 — `window_ctl::close`).
     pub(crate) fn mark_closed(&mut self, label: &str) {
         self.closed_labels.insert(label.to_string());
     }
