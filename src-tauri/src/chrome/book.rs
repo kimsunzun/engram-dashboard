@@ -15,6 +15,14 @@
 //! 입힌다. 최대화 동안 최소 크기를 걷지 않는 것은 그 때문이다 — 최대화 사각형은 작업 영역이고(tao 의 테두리 없는 창
 //! `WM_NCCALCSIZE`) 웹이 보고하는 최소 크기(수백 px)가 그보다 작아 끼어들 일이 없다(작업 영역이 그보다 좁은 화면은
 //! QA S8 이 잰다).
+//!
+//! ★열기 표시는 그 창의 최소 크기를 받은 뒤 한 번 판정한다★([`ChromeBook::mark_opening`]) — 이미 받았으면 표시를 적는
+//! 그 자리에서(다시 짓지 않는 창 — 런타임 사본 수락의 main · 그 페이지는 값이 바뀌지 않으면 다시 보고하지 않는다), 아직이면
+//! 다음에 받아들인 보고에서. 웹은 창 번호를 받기 전(예열 창의 대기 · 로딩 · 부팅 실패)에는 보고하지 않는다 — 그래서 예열
+//! 창을 들일 때 적은 표시를 대기 중 보고가 먼저 거두지 못한다(`titleRow/TitleRow.tsx`). 다시 짓지 않는 창에 새 자리를
+//! 입힐 때는 그 전에 입힌 OS 최소 크기를 걷고 표시를 세운다([`ChromeBook::lift_min`]) — 걷지 않으면 OS 가 좁은 자리를
+//! 왼쪽 끝을 둔 채 최소 크기로 키워 넓혀 당기기가 할 일이 없어진다. 표시가 서 있는 동안 크기 바뀜은 OS 최소 크기를
+//! 입히지 않는다([`ChromeBook::on_frame`]) — 걷기가 낸 크기 바뀜이 곧바로 다시 입히지 않게.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -30,8 +38,9 @@ pub(crate) struct ChromeBook {
 struct WindowChrome {
     title: Option<TitleMark>,
     min: Option<MinMark>,
-    // 열기 표시 — 셸이 그 창을 열 때 세우고([`ChromeBook::mark_opening`]) 그 창의 다음 최소 크기 보고가 거둔다. 넓혀
-    //   당기기는 이 표시를 거둔 보고에서만 한다(열 때 한 번 — TRD §7-7 · PRD R20 · AC34).
+    // 열기 표시 — 셸이 그 창을 열 때 세우고([`ChromeBook::mark_opening`] · 새 자리 앞의 [`ChromeBook::lift_min`]) 최소
+    //   크기를 받은 첫 판정이 거둔다(표시를 적을 때 이미 받았으면 그 자리 · 아니면 다음 보고). 넓혀 당기기는 이 표시를 거둔
+    //   판정에서만 한다(열 때 한 번 — TRD §7-7 · PRD R20 · AC34). 서 있는 동안 크기 바뀜은 OS 최소 크기를 입히지 않는다.
     opening: bool,
     // OS 창에 마지막으로 입힌 최소 크기 — `None` = 아직 입히지 않았거나 입히다 실패했다.
     applied: Option<MinSize>,
@@ -197,11 +206,36 @@ impl ChromeBook {
         verdict
     }
 
-    /// 창 `label` 을 셸이 막 열었다 — 그 창의 다음 최소 크기 보고가 넓혀 당기기를 한다(TRD §7-7 — 창 포트의 새로 짓기 ·
-    /// 맡긴 예열 창의 확정 · 부팅 복원 창 짓기 · 사본 수락의 숨긴 팝아웃 짓기). 항목이 없으면 만든다(창 확인은 부르는 쪽 —
-    /// 모듈 머리).
-    pub(crate) fn mark_opening(&mut self, label: &str) {
-        self.windows.entry(label.to_owned()).or_default().opening = true;
+    /// 창 `label` 을 셸이 막 열었다(TRD §7-7 — 창 포트의 새로 짓기 · 맡긴 예열 창의 확정 · 부팅 복원 창 짓기 · 사본 수락의
+    /// 숨긴 팝아웃 짓기 · 사본 수락의 main 자리 입히기) — 넓혀 당기기를 한 번 판정한다. 그 창의 최소 크기를 아직 받지
+    /// 않았으면 표시를 세워 다음에 받아들인 보고가 판정하고([`Self::on_min_report`]) 빈 판정이다. 이미 받았으면 지금 `state`
+    /// 로 판정하고 표시를 거둔다 — 보통 크기면 넓혀 당기고 그 값을 입힌 값과 다르면 OS 에 입힌다(최대화 · 최소화면 넓히지
+    /// 않는다 — 열 때 한 번). 항목이 없으면 만든다(창 확인은 부르는 쪽 — 모듈 머리). `state` 는 자리를 입힌 뒤에 읽는다.
+    pub(crate) fn mark_opening(&mut self, label: &str, state: FrameState) -> MinPlan {
+        let window = self.windows.entry(label.to_owned()).or_default();
+        let Some(min) = window.min.as_ref().map(|mark| mark.size) else {
+            window.opening = true;
+            return MinPlan::default();
+        };
+        window.opening = false;
+        let normal = state == FrameState::Normal;
+        MinPlan {
+            widen: normal.then_some(min),
+            set_min: if normal { window.next_min() } else { None },
+        }
+    }
+
+    /// 셸이 다시 짓지 않는 창 `label` 에 새 보통 자리를 입히려 한다(런타임 사본 수락의 main) — 열기 표시를 세우고, 보통
+    /// 크기이고 OS 최소 크기를 입혀 두었으면 입힌 값을 잊는다. `true` = 부르는 쪽이 OS 최소 크기를 걷는다(모듈 머리 —
+    /// 걷지 않으면 OS 가 좁은 자리를 키워 넓혀 당기기가 할 일이 없다). 최대화 · 최소화 창은 걷지 않는다(걷는 세터가 최대화를
+    /// 푼다 — 모듈 머리). 자리를 입힌 뒤 [`Self::mark_opening`] 이 넓혀 당기고 다시 입힌다. ★항목을 만들지 않는다★ —
+    /// 메인 스레드 밖에서도 불리므로 창 확인과 적기가 한 일 안이 아니다(모듈 머리) · 항목이 없으면 걷을 것도 없다.
+    pub(crate) fn lift_min(&mut self, label: &str, state: FrameState) -> bool {
+        let Some(window) = self.windows.get_mut(label) else {
+            return false;
+        };
+        window.opening = true;
+        state == FrameState::Normal && window.applied.take().is_some()
     }
 
     /// 최소 크기 보고 하나 — 적고([`Self::record_min`]) 무엇을 입힐지 정한다. 옛 순번(`Stale`)이면 아무것도 입히지 않고
@@ -235,10 +269,11 @@ impl ChromeBook {
     }
 
     /// 창 `label` 의 크기 상태가 바뀌었다(`Resized` — 최대화 · 최소화에서 돌아옴 포함) — 보통 크기가 됐고 적은 최소 크기를
-    /// 아직 OS 에 입히지 않았으면 그 값을 입히게 한다(넓혀 당기기는 하지 않는다). 항목을 만들지 않는다.
+    /// 아직 OS 에 입히지 않았으면 그 값을 입히게 한다(넓혀 당기기는 하지 않는다). 열기 표시가 서 있으면 입히지 않는다 — 그
+    /// 표시를 거두는 판정이 넓혀 당긴 뒤 입힌다(모듈 머리). 항목을 만들지 않는다.
     pub(crate) fn on_frame(&mut self, label: &str, state: FrameState) -> MinPlan {
         let set_min = match (state, self.windows.get_mut(label)) {
-            (FrameState::Normal, Some(window)) => window.next_min(),
+            (FrameState::Normal, Some(window)) if !window.opening => window.next_min(),
             _ => None,
         };
         MinPlan {
@@ -301,8 +336,31 @@ pub(crate) trait MinWindow {
     /// 보통 크기가 `min_w`(논리 px)보다 좁으면 그 폭으로 넓히고 작업 영역 안으로 당긴다(`state::placement::fit_min_width`).
     /// `Ok(true)` = 옮겼다 · `Ok(false)` = 넓힐 일이 없었다.
     fn widen_to(&self, min_w: u32) -> Result<bool, String>;
-    /// OS 최소 크기(논리 안쪽 px)를 입힌다.
+    /// OS 최소 크기를 입힌다 — `min` = 웹이 보고한 논리 안쪽 px. 안쪽이 그 값 아래로 줄지 않게 하는 것은 실물의 몫이다
+    /// ([`os_min_size`]).
     fn apply_min_size(&self, min: MinSize) -> Result<(), String>;
+}
+
+/// OS 최소 크기 세터(Tauri `set_min_size` → tao `set_min_inner_size`)에 넘길 논리 크기 — 웹이 보고한 안쪽 최소 크기 `min` 에
+/// 그 창의 보이지 않는 테두리(`frame_w` · `frame_h` = 바깥 − 안쪽 폭 · 높이 · 물리 px)를 배율 `scale` 로 논리로 풀어 더한다.
+/// 배율이 유한한 양수가 아니면 더하지 않는다.
+///
+/// 까닭(tao 0.35.3 · 소스 독해): 세터의 이름은 「안쪽」이지만 `WM_GETMINMAXINFO` 처리(`platform_impl/windows/event_loop.rs`)는
+/// 최소 추적 크기를 그 값에서 `util::adjust_size` 로 셈하고, 그 셈(`util.rs` `adjust_window_rect`)은 틀 없는 창이면
+/// `WS_CAPTION` · `WS_SIZEBOX` 를 빼고 `AdjustWindowRectEx` 를 불러 테두리를 더하지 않는다. 그런데 그림자를 단 틀 없는 창은
+/// `WM_NCCALCSIZE` 가 안쪽을 좌우 · 아래로 크기 조절 테두리만큼 · 위로 한두 px(Windows 11) 줄인다(`util.rs`
+/// `calculate_insets_for_dpi`) — 그래서 그대로 넘기면 안쪽이 보고한 값보다 그 테두리만큼(100 % 에서 폭 약 16 · 높이 약 9 px)
+/// 좁게 끌려 줄어든다. 같은 판의 크기 세터(`set_inner_size`)는 그 차이를 더한다(`undecorated_with_shadows`). 테두리는 배율에
+/// 비례하므로 논리 값은 모니터를 옮겨도 거의 그대로다 — 다만 위 테두리의 반올림 몫이 1 px 안쪽으로 어긋날 수 있다.
+pub(crate) fn os_min_size(min: MinSize, frame_w: u32, frame_h: u32, scale: f64) -> (f64, f64) {
+    let (width, height) = (f64::from(min.width), f64::from(min.height));
+    if !(scale.is_finite() && scale > 0.0) {
+        return (width, height);
+    }
+    (
+        width + f64::from(frame_w) / scale,
+        height + f64::from(frame_h) / scale,
+    )
 }
 
 /// 판정 `plan` 을 창 `label` 에 입힌다 — 장부 락 밖에서 부른다(잎 락 — 쥔 채 OS 를 부르지 않는다). ★넓혀 당기기가
@@ -839,28 +897,35 @@ mod tests {
     fn only_the_first_report_after_an_opening_mark_widens() {
         let mut book = ChromeBook::default();
         assert_eq!(
-            plan(&mut book, 1, size(286, 64), Normal).widen,
-            None,
-            "표시 없는 보고는 넓히지 않는다"
+            book.mark_opening(POPUP, Normal),
+            MinPlan::default(),
+            "최소 크기를 받기 전의 표시는 다음 보고를 기다린다"
         );
-
-        book.mark_opening(POPUP);
 
         assert_eq!(
-            plan(&mut book, 2, size(286, 64), Normal),
+            plan(&mut book, 1, size(286, 64), Normal),
             MinPlan {
                 widen: Some(size(286, 64)),
-                set_min: None,
-            },
-            "같은 값이어도 연 창은 넓혀 본다 — OS 최소 크기는 이미 입혔다"
+                set_min: Some(size(286, 64)),
+            }
         );
-        assert_eq!(plan(&mut book, 3, size(295, 64), Normal).widen, None);
+        assert_eq!(plan(&mut book, 2, size(295, 64), Normal).widen, None);
+    }
+
+    #[test]
+    fn a_report_without_an_opening_mark_never_widens() {
+        let mut book = ChromeBook::default();
+
+        assert_eq!(
+            plan(&mut book, 1, size(286, 64), Normal),
+            set_only(size(286, 64))
+        );
     }
 
     #[test]
     fn an_opening_mark_spent_by_a_maximized_report_never_widens() {
         let mut book = ChromeBook::default();
-        book.mark_opening(POPUP);
+        book.mark_opening(POPUP, Normal);
 
         assert_eq!(plan(&mut book, 1, size(286, 64), Other), MinPlan::default());
         assert_eq!(
@@ -870,20 +935,93 @@ mod tests {
         );
     }
 
+    // 다시 짓지 않는 창(런타임 사본 수락의 main) — 그 페이지는 값이 바뀌지 않으면 다시 보고하지 않아, 표시를 적는 자리에서
+    //   판정한다(모듈 머리).
     #[test]
-    fn a_stale_report_keeps_the_opening_mark_for_the_next_one() {
+    fn marking_a_window_whose_min_is_known_widens_at_once_and_spends_the_mark() {
+        let mut book = ChromeBook::default();
+        plan(&mut book, 1, size(286, 64), Normal);
+
+        assert_eq!(
+            book.mark_opening(POPUP, Normal),
+            MinPlan {
+                widen: Some(size(286, 64)),
+                set_min: None,
+            },
+            "같은 값이어도 넓혀 본다 — OS 최소 크기는 이미 입혔다"
+        );
+        assert_eq!(
+            plan(&mut book, 2, size(295, 64), Normal),
+            set_only(size(295, 64)),
+            "표시는 거뒀다"
+        );
+    }
+
+    #[test]
+    fn marking_a_maximized_window_whose_min_is_known_never_widens() {
+        let mut book = ChromeBook::default();
+        plan(&mut book, 1, size(286, 64), Normal);
+
+        assert_eq!(book.mark_opening(POPUP, Other), MinPlan::default());
+        assert_eq!(plan(&mut book, 2, size(295, 64), Normal).widen, None);
+    }
+
+    // 새 자리 앞에 걷은 OS 최소 크기는 표시를 거두는 판정이 넓혀 당긴 뒤 다시 입힌다 — 그 사이의 크기 바뀜(걷기 · 자리
+    //   입히기가 낸다)은 입히지 않는다(모듈 머리).
+    #[test]
+    fn a_lifted_min_is_held_until_the_mark_widens_and_applies_it_again() {
+        let mut book = ChromeBook::default();
+        plan(&mut book, 1, size(286, 64), Normal);
+
+        assert!(book.lift_min(POPUP, Normal), "입혀 둔 값을 걷는다");
+        assert_eq!(book.on_frame(POPUP, Normal), MinPlan::default());
+        assert_eq!(
+            book.mark_opening(POPUP, Normal),
+            MinPlan {
+                widen: Some(size(286, 64)),
+                set_min: Some(size(286, 64)),
+            }
+        );
+        assert_eq!(book.on_frame(POPUP, Normal), MinPlan::default());
+    }
+
+    #[test]
+    fn a_maximized_window_keeps_its_os_min_through_a_lift() {
+        let mut book = ChromeBook::default();
+        plan(&mut book, 1, size(286, 64), Normal);
+
+        assert!(
+            !book.lift_min(POPUP, Other),
+            "걷는 세터가 최대화를 푼다 — 걷지 않는다"
+        );
+        assert_eq!(book.mark_opening(POPUP, Other), MinPlan::default());
+        assert_eq!(
+            book.on_frame(POPUP, Normal),
+            MinPlan::default(),
+            "OS 에 남은 값을 다시 입히지 않는다"
+        );
+    }
+
+    #[test]
+    fn lifting_a_window_never_seen_makes_no_entry() {
+        let mut book = ChromeBook::default();
+
+        assert!(!book.lift_min(POPUP, Normal));
+
+        assert!(book.windows.is_empty());
+    }
+
+    #[test]
+    fn a_stale_report_leaves_a_lifted_mark_for_the_mark_to_spend() {
         let mut book = ChromeBook::default();
         plan(&mut book, 5, size(286, 64), Normal);
-        book.mark_opening(POPUP);
+        book.lift_min(POPUP, Normal);
 
         assert_eq!(
             plan(&mut book, 4, size(120, 64), Normal),
             MinPlan::default()
         );
-        assert_eq!(
-            plan(&mut book, 6, size(286, 64), Normal).widen,
-            Some(size(286, 64))
-        );
+        assert_eq!(book.mark_opening(POPUP, Normal).widen, Some(size(286, 64)));
     }
 
     #[test]
@@ -900,15 +1038,45 @@ mod tests {
     #[test]
     fn forgetting_a_window_drops_its_opening_mark_and_applied_min() {
         let mut book = ChromeBook::default();
-        plan(&mut book, 1, size(286, 64), Normal);
-        book.mark_opening(POPUP);
+        book.mark_opening(POPUP, Normal);
         book.forget(POPUP);
 
         assert_eq!(
             plan(&mut book, 1, size(286, 64), Normal),
             set_only(size(286, 64)),
-            "입힌 값 · 열기 표시를 함께 잊는다"
+            "열기 표시를 함께 잊는다"
         );
+        book.forget(POPUP);
+        assert_eq!(
+            plan(&mut book, 1, size(286, 64), Normal),
+            set_only(size(286, 64)),
+            "입힌 값을 함께 잊는다"
+        );
+    }
+
+    // ── OS 최소 크기에 더하는 보이지 않는 테두리(`os_min_size`) ──
+
+    #[test]
+    fn the_os_min_adds_the_invisible_frame_in_logical_px() {
+        assert_eq!(
+            os_min_size(size(286, 64), 16, 9, 1.0),
+            (302.0, 73.0),
+            "100 % — 좌우 8 + 8 · 위 1 + 아래 8"
+        );
+        let (w, h) = os_min_size(size(286, 64), 24, 13, 1.5);
+        assert_eq!(w, 302.0, "150 % — 물리 24 = 논리 16");
+        assert!((h - (64.0 + 13.0 / 1.5)).abs() < 1e-9, "{h}");
+    }
+
+    #[test]
+    fn an_unusable_scale_adds_no_frame() {
+        for scale in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                os_min_size(size(286, 64), 16, 9, scale),
+                (286.0, 64.0),
+                "{scale}"
+            );
+        }
     }
 
     #[test]

@@ -116,7 +116,7 @@ describe('PopoutPage — 연결 띠는 레이아웃을 덮는다(ADR-0277)', () 
     expect(style.position).toBe('absolute')
     expect([style.top, style.left, style.right]).toEqual(['0px', '0px', '0px'])
     expect(windowLayout.contains(overlay)).toBe(true)
-    // 감싼 칸 = 제목 줄을 그리기 전 화면에서 알림이 붙는 자리.
+    // 감싼 칸 = WindowLayout 의 자리(positioned 로 둔다 — 알림 층의 기준은 WindowLayout 안 칸이다).
     expect(getComputedStyle(box).position).toBe('relative')
   })
 

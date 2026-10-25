@@ -1,7 +1,7 @@
 // TRD S26-window-chrome §7-7: 최소 창 크기 보고(`report_window_min_width`) — 이 창의 제목 줄이 센 값(`metrics.ts`
-//   `minWindowSize`)을 셸에 보낸다. 셸은 그 값을 OS 최소 크기로 입히고 열 때 한 번 넓힌다 — 그래서 첫 화면 알림이 이 보고를
-//   기다린다(`minWindowSizeSettled` — 첫 화면이 보이기 전에 넓히기가 끝나게). 지금 셸은 적기만 한다 — 입히기 · 넓히기는
-//   U8b(`chrome::report_min_size` 의 할 일)라 그때까지 이 기다림은 배선뿐이다.
+//   `minWindowSize`)을 셸에 보낸다(창 번호를 받은 뒤에만 — `TitleRow`). 셸은 같은 동기 명령 안에서 그 값을 OS 최소 크기로
+//   입히고(보통 크기 창만) 창을 연 뒤 첫 보고면 한 번 넓혀 당긴 뒤 답한다(`src-tauri/src/chrome` — `report_min_size`). 그래서
+//   첫 화면 알림이 이 보고의 답을 기다린다(`minWindowSizeSettled` — 첫 화면이 보이기 전에 넓히기가 끝나게).
 // 상태가 모듈 범위인 이유: 보고는 웹뷰(창) 하나에 하나이고, 다시 읽기가 모듈을 새로 실행하며 함께 초기화된다(`uiMetricsReport.ts`
 //   와 같다).
 // ★한 번에 하나 · 마지막 값만★ — 보내는 동안 맡은 값은 그 응답 뒤에 보내고, 그사이 더 새 값을 맡으면 옛 값은 보내지 않는다.

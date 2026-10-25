@@ -7,7 +7,8 @@
 //!
 //! 최소 크기의 정본은 웹이다(정책 상수 정본 = 화면 — ADR-0227 선례). 보고(invoke `report_window_min_width` →
 //! [`report_min_size`]) · 열기 표시([`mark_opening`]) · 크기 바뀜([`on_resized`])이 모두 메인 스레드 일 하나 안에서 장부를
-//! 보고 입힌다 — 무엇을 언제 입히나는 `book` 머리.
+//! 보고 입힌다 — 무엇을 언제 입히나는 `book` 머리. 새 자리 앞의 걷기([`lift_min`])만 부르는 쪽 스레드에서 돈다(항목을
+//! 만들지 않는다).
 
 mod book;
 
@@ -51,22 +52,31 @@ pub(crate) fn push_title(app: &AppHandle, tabs: &WindowTabsPayload) {
     }
 }
 
-/// 셸이 창 `label` 을 막 열었다 — 그 창의 다음 최소 크기 보고가 넓혀 당기기를 하게 열기 표시를 세운다(TRD §7-7 — 창
-/// 포트의 새로 짓기 · 맡긴 예열 창의 확정 · 부팅 복원 창 짓기 · 사본 수락의 숨긴 팝아웃 짓기). 창을 지은 뒤에 부른다.
-/// 적기는 메인 스레드 일로 넘기고 기다리지 않는다 — 그 일이 창이 있는 것을 본 뒤에만 적는다(`book` 머리). 그 창의 웹
-/// 페이지가 보고하기 전에 그 일이 돈다: 메인 스레드는 한 줄이고 보고는 페이지를 읽은 뒤에 같은 줄로 온다. 메인 스레드에서
-/// 부르면 그 자리에서 돈다 — ★어떤 락도 쥔 채 부르지 않는다★.
+/// 셸이 창 `label` 을 막 열었다 — 열기 표시를 적어 넓혀 당기기를 한 번 판정하게 한다(TRD §7-7 — 창 포트의 새로 짓기 ·
+/// 맡긴 예열 창의 확정 · 부팅 복원 창 짓기 · 사본 수락의 숨긴 팝아웃 짓기 · 사본 수락의 main 자리 입히기). 그 창의 최소
+/// 크기를 아직 받지 않았으면 다음 보고가 판정하고, 받았으면(다시 짓지 않는 창) 이 일이 판정해 입힌다(`book::ChromeBook::
+/// mark_opening`). 창을 지은 뒤(다시 짓지 않는 창이면 자리를 입힌 뒤)에 부른다. 적기는 메인 스레드 일로 넘기고 기다리지
+/// 않는다 — 그 일이 창이 있는 것을 본 뒤에만 적는다(`book` 머리). 그 창의 웹 페이지가 보고하기 전에 그 일이 돈다: 메인
+/// 스레드는 한 줄이고 보고는 페이지를 읽은 뒤에 같은 줄로 온다. 메인 스레드에서 부르면 그 자리에서 돈다 — ★어떤 락도 쥔
+/// 채 부르지 않는다★.
 pub(crate) fn mark_opening(app: &AppHandle, label: &str) {
     let handle = app.clone();
     let owned = label.to_owned();
     let queued = app.run_on_main_thread(move || {
-        if handle.get_webview_window(&owned).is_none() {
+        let Some(window) = handle
+            .get_webview_window(&owned)
+            .map(|window| window.as_ref().window())
+        else {
             tracing::debug!(label = owned, "OS 창이 없어 열기 표시를 적지 않는다");
             return;
-        }
-        if let Some(state) = handle.try_state::<ChromeState>() {
-            sync::lock(&state.0).mark_opening(&owned);
-        }
+        };
+        let Some(state) = handle.try_state::<ChromeState>() else {
+            return;
+        };
+        // 창의 크기 상태는 장부 락 밖에서 읽는다(잎 락 — 쥔 채 OS 를 부르지 않는다).
+        let frame = frame_state(&window);
+        let plan = sync::lock(&state.0).mark_opening(&owned, frame);
+        book::apply_min(&state.0, &owned, plan, &window);
     });
     if let Err(e) = queued {
         tracing::warn!(
@@ -115,8 +125,35 @@ pub(crate) fn on_resized(window: &Window) {
         return;
     };
     let label = window.label();
-    let plan = sync::lock(&state.0).on_frame(label, frame_state(window));
+    // 창의 크기 상태는 장부 락 밖에서 읽는다(잎 락 — 쥔 채 OS 를 부르지 않는다).
+    let frame = frame_state(window);
+    let plan = sync::lock(&state.0).on_frame(label, frame);
     book::apply_min(&state.0, label, plan, window);
+}
+
+/// 셸이 다시 짓지 않는 창에 새 보통 자리를 입히기 직전 — 입혀 둔 OS 최소 크기를 걷고 열기 표시를 세운다(보통 크기일
+/// 때만 걷는다 — `book::ChromeBook::lift_min`). 자리를 입힌 뒤 [`mark_opening`] 을 부른다 — 그 일이 넓혀 당기고 다시
+/// 입힌다. 지금 쓰는 곳 = 런타임 사본 수락의 main(`state::placement::TauriRestoreWindows::place_main` — 다시 짓는 창은 새
+/// 창이라 걷을 것이 없다). 아무 스레드에서나 부른다 — ★어떤 락도 쥔 채 부르지 않는다★. 걷기와 자리 입히기 사이에 그 창의
+/// 보고가 끼면(값이 바뀔 때만 온다) 그 보고가 표시를 거두고 OS 최소 크기를 다시 입혀, 좁은 자리는 OS 가 키운 채 남는다 —
+/// 다루지 않는다.
+pub(crate) fn lift_min(window: &Window) {
+    let Some(state) = window.app_handle().try_state::<ChromeState>() else {
+        return;
+    };
+    let label = window.label();
+    let frame = frame_state(window);
+    if !sync::lock(&state.0).lift_min(label, frame) {
+        return;
+    }
+    if let Err(e) = window.set_min_size(None::<LogicalSize<f64>>) {
+        // 장부는 걷은 것으로 적었다 — 표시를 거두는 판정이 같은 값을 다시 입힌다(넓히기는 OS 가 키운 폭이라 할 일이 없다).
+        tracing::warn!(
+            module = "chrome",
+            label,
+            "새 자리 앞에 OS 최소 창 크기를 걷지 못했다: {e}"
+        );
+    }
 }
 
 /// 창 `label` 의 장부 항목을 잊는다 — 그 OS 창의 `Destroyed`(메인 스레드).
@@ -182,11 +219,19 @@ impl book::MinWindow for Window {
         Ok(true)
     }
 
+    // 세터에 보이지 않는 테두리(바깥 − 안쪽)를 더해 넘긴다 — tao 의 최소 추적 크기가 그 테두리를 빼먹어 안쪽이 그만큼 더
+    //   줄어든다(`book::os_min_size` 의 까닭). 보통 크기 창에서만 불리므로(`book` 머리) 잰 차이가 그 창의 테두리다.
     fn apply_min_size(&self, min: book::MinSize) -> Result<(), String> {
-        self.set_min_size(Some(LogicalSize::new(
-            f64::from(min.width),
-            f64::from(min.height),
-        )))
-        .map_err(|e| e.to_string())
+        let scale = self.scale_factor().map_err(|e| e.to_string())?;
+        let inner = self.inner_size().map_err(|e| e.to_string())?;
+        let outer = self.outer_size().map_err(|e| e.to_string())?;
+        let (width, height) = book::os_min_size(
+            min,
+            outer.width.saturating_sub(inner.width),
+            outer.height.saturating_sub(inner.height),
+            scale,
+        );
+        self.set_min_size(Some(LogicalSize::new(width, height)))
+            .map_err(|e| e.to_string())
     }
 }

@@ -93,7 +93,7 @@ describe('AppLayout — 알림은 레이아웃을 덮는다(ADR-0276 · ADR-0277
     const windowLayout = screen.getByTestId('window-layout')
     expect(windowLayout.getAttribute('data-label')).toBe(MAIN_WINDOW_LABEL)
     expect(windowLayout.contains(overlay)).toBe(true)
-    // 감싼 칸 = 제목 줄을 그리기 전 화면에서 알림이 붙는 자리.
+    // 감싼 칸 = WindowLayout 의 자리(positioned 로 둔다 — 알림 층의 기준은 WindowLayout 안 칸이다).
     expect(getComputedStyle(windowLayout.parentElement as HTMLElement).position).toBe('relative')
   })
 

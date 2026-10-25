@@ -650,10 +650,12 @@ pub(crate) fn resolve_place(
 }
 
 /// 넓혀 당기기(TRD S26-window-chrome §7-7 · D14) — 창을 열 때 한 번, 보통 자리 `bounds` 의 폭이 웹이 보고한 최소 폭
-/// `min_w`(논리 안쪽 px)보다 좁으면 그 폭으로 넓히고, 넓힌 창의 바깥 사각형이 작업 영역 `work`(그 창이 놓인 모니터의 작업
-/// 영역 — 물리 px · `scale` = 그 창의 배율)의 오른쪽을 넘으면 작업 영역 안으로 당긴다. 작업 영역이 창보다 좁으면 바깥 왼쪽
-/// 끝을 작업 영역 왼쪽 끝에 댄다(R20). `frame` = 바깥 폭 − 안쪽 폭(물리 px — OS 틀을 걷은 창에도 크기 조절용 보이지 않는
-/// 테두리가 남는다).
+/// `min_w`(논리 안쪽 px)보다 좁으면 그 폭으로 넓히고, 넓힌 창의 ★보이는 오른쪽 가장자리★가 작업 영역 `work`(그 창이 놓인
+/// 모니터의 작업 영역 — 물리 px · `scale` = 그 창의 배율)의 오른쪽을 넘으면 작업 영역 안으로 당긴다. 작업 영역이 창보다
+/// 좁으면 보이는 왼쪽 가장자리를 작업 영역 왼쪽 끝에 댄다(R20). `frame` = 바깥 폭 − 안쪽 폭(물리 px — OS 틀을 걷은 창에도
+/// 크기 조절용 보이지 않는 테두리가 남는다). 보이는 가장자리 = 바깥 가장자리에서 그 테두리 한쪽(`frame` / 2 — tao 0.35.3 은
+/// 좌우를 같은 두께로 둔다 · `calculate_insets_for_dpi`)만큼 안쪽 — 바깥 가장자리를 맞추면 보이는 창이 작업 영역 가장자리에서
+/// 그만큼(100 % 에서 약 8 px) 떨어진다.
 ///
 /// 넓힐 일이 없으면 그대로 돌려준다 — 화면 밖에 걸친 자리여도 옮기지 않는다(넓혀 당기기의 일이 아니다). 높이 · 세로 위치는
 /// 건드리지 않는다. 배율이 유한한 양수가 아니면 넓히기만 하고 당기지 않는다.
@@ -668,11 +670,14 @@ pub(crate) fn fit_min_width(
         return bounds;
     }
     let x = if work.scale.is_finite() && work.scale > 0.0 {
-        let outer_w = min_w * work.scale + frame.max(0.0);
+        let side = frame.max(0.0) / 2.0;
         let left = f64::from(work.x);
         let right = left + f64::from(work.w);
-        // 오른쪽을 먼저 맞추고 왼쪽이 이긴다 — 둘 다 못 맞추면(작업 영역이 좁다) 왼쪽 끝이다.
-        bounds.x().min((right - outer_w).floor()).max(left)
+        // 바깥 x 의 범위 — 보이는 오른쪽(x + side + 안쪽 폭) ≤ 작업 영역 오른쪽 · 보이는 왼쪽(x + side) ≥ 작업 영역 왼쪽.
+        //   오른쪽을 먼저 맞추고 왼쪽이 이긴다 — 둘 다 못 맞추면(작업 영역이 좁다) 보이는 왼쪽 끝이다.
+        let max_x = (right - side - min_w * work.scale).floor();
+        let min_x = (left - side).ceil();
+        bounds.x().min(max_x).max(min_x)
     } else {
         bounds.x()
     };
@@ -1012,7 +1017,12 @@ impl RestoreWindows for TauriRestoreWindows {
 
     fn place_main(&self, at: Option<(WindowBounds, Landing)>, maximized: bool) {
         if let Some(window) = self.window(MAIN_WINDOW_LABEL) {
+            // 사본의 main 폭이 최소 폭보다 좁으면 넓혀 당긴다(TRD S26-window-chrome §7-7 · D14 · PRD AC34 「사본 수락」).
+            //   main 은 다시 짓지 않아 그 페이지가 다시 보고하지 않고, 이미 입은 OS 최소 크기가 좁은 자리를 왼쪽 끝을 둔 채
+            //   키운다 — 그래서 자리 앞에 그 최소 크기를 걷고, 자리 뒤의 열기 표시가 받아 둔 값으로 넓혀 당긴 뒤 다시 입힌다.
+            crate::chrome::lift_min(&window);
             place_main(&self.app, &window, at, maximized);
+            crate::chrome::mark_opening(&self.app, MAIN_WINDOW_LABEL);
         }
     }
 
@@ -1943,30 +1953,54 @@ mod tests {
 
     #[test]
     fn a_widened_window_past_the_work_area_right_edge_is_pulled_back_in() {
-        // 바깥 폭 = 286 + 16 = 302 → 바깥 오른 끝 = 1920 이 되도록 왼쪽 끝 = 1618.
+        // 보이는 오른 끝 = 바깥 x + 8 + 286 = 1920 이 되도록 바깥 x = 1626(보이지 않는 오른쪽 테두리 8 px 는 작업 영역 밖).
         assert_eq!(
             fit_min_width(rect(1800.0, 200.0, 120.0, 500.0), 286.0, WORK, FRAME),
-            rect(1618.0, 200.0, 286.0, 500.0)
+            rect(1626.0, 200.0, 286.0, 500.0)
         );
     }
 
     #[test]
-    fn the_pull_uses_the_window_scale_for_the_outer_width() {
-        // 150 % — 바깥 폭 = 286 × 1.5 + 24 = 453 → 오른 끝 1920 + 2560 = 4480 에 맞춰 4027.
+    fn the_pull_uses_the_window_scale_for_the_visible_width() {
+        // 150 % — 보이는 폭 = 286 × 1.5 = 429 · 한쪽 테두리 = 24 / 2 = 12 → 보이는 오른 끝 1920 + 2560 = 4480 에 맞춰
+        //   바깥 x = 4480 − 12 − 429 = 4039.
         let work = monitor(1920, 0, 2560, 1392, 1.5);
         assert_eq!(
             fit_min_width(rect(4400.0, 100.0, 200.0, 400.0), 286.0, work, 24.0),
-            rect(4027.0, 100.0, 286.0, 400.0)
+            rect(4039.0, 100.0, 286.0, 400.0)
         );
     }
 
     #[test]
-    fn a_work_area_narrower_than_the_min_aligns_the_window_to_its_left_edge() {
+    fn a_work_area_narrower_than_the_min_aligns_the_visible_left_edge() {
         let tiny = monitor(-640, 0, 280, 480, 1.0);
         assert_eq!(
             fit_min_width(rect(-500.0, 40.0, 120.0, 300.0), 286.0, tiny, FRAME),
-            rect(-640.0, 40.0, 286.0, 300.0),
-            "바깥 폭 302 > 작업 영역 280 — 바깥 왼쪽 끝 = 작업 영역 왼쪽 끝"
+            rect(-648.0, 40.0, 286.0, 300.0),
+            "보이는 폭 286 > 작업 영역 280 — 보이는 왼쪽 끝(바깥 x + 8) = 작업 영역 왼쪽 끝"
+        );
+    }
+
+    #[test]
+    fn a_window_left_of_the_work_area_is_pulled_to_the_visible_left_edge() {
+        assert_eq!(
+            fit_min_width(rect(-300.0, 200.0, 120.0, 500.0), 286.0, WORK, FRAME),
+            rect(-8.0, 200.0, 286.0, 500.0),
+            "넓힐 때는 왼쪽 밖 자리도 보이는 왼쪽 끝 = 작업 영역 왼쪽 끝으로 당긴다"
+        );
+    }
+
+    #[test]
+    fn an_odd_frame_keeps_the_visible_edges_inside_the_work_area() {
+        // 한쪽 테두리 = 8.5 — 오른쪽 범위는 내림 · 왼쪽 범위는 올림이라 반 px 가 작업 영역 밖으로 나가지 않는다.
+        assert_eq!(
+            fit_min_width(rect(1800.0, 200.0, 120.0, 500.0), 286.0, WORK, 17.0),
+            rect(1625.0, 200.0, 286.0, 500.0)
+        );
+        let tiny = monitor(-640, 0, 280, 480, 1.0);
+        assert_eq!(
+            fit_min_width(rect(-500.0, 40.0, 120.0, 300.0), 286.0, tiny, 17.0),
+            rect(-648.0, 40.0, 286.0, 300.0)
         );
     }
 

@@ -1,4 +1,4 @@
-import { StrictMode } from 'react'
+import { StrictMode, useEffect, useState } from 'react'
 import { act, cleanup, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -1118,22 +1118,115 @@ describe('WindowLayout — 알림 층의 자리', () => {
     expect(row.compareDocumentPosition(probe) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
-  it('제목 줄을 그리기 전(로딩)에도 알림 층을 그린다', () => {
+  // 로딩 · 부팅 실패 화면도 같은 틀이다 — 제목 줄 → 칸(맨 앞 = 알림 층) → 화면 내용.
+  function expectFrame(content: string): void {
+    const probe = screen.getByTestId('notices-probe')
+    const row = screen.getByTestId('title-row')
+    const box = probe.parentElement as HTMLElement
+    expect(box.style.position).toBe('relative')
+    expect([...box.children].map(el => (el as HTMLElement).dataset.testid)).toEqual(['notices-probe', content])
+    expect(row.nextElementSibling).toBe(box)
+    expect(row.contains(probe)).toBe(false)
+  }
+
+  it('로딩 화면에도 제목 줄(끌 자리 · 창 단추 — 표식은 아직 없다) 아래에 알림 층을 그린다', async () => {
     invokeMock.mockImplementation(() => new Promise(() => {}))
     render(<WindowLayout label="main" notices={notices} />)
-    expect(screen.getByTestId('window-loading')).toBeTruthy()
-    expect(screen.getByTestId('notices-probe')).toBeTruthy()
-    expect(screen.queryByTestId('title-row')).toBeNull()
+    expect(screen.getByTestId('window-loading').textContent).toBe('')
+    expectFrame('window-loading')
+    await waitFor(() => expect(screen.getByTestId('caption-buttons')).toBeTruthy())
+    expect(screen.getByTestId('tab-bar-standin').hasAttribute('data-tauri-drag-region')).toBe(true)
+    expect(screen.queryByTestId('window-number')).toBeNull()
+    expect(screen.queryByTestId('tab-bar')).toBeNull()
   })
 
-  it('부팅 실패 화면에도 알림 층을 그린다 — 연결 실패 이유는 그때도 읽혀야 한다', async () => {
+  it('부팅 실패 화면에도 제목 줄 아래에 알림 층을 그린다 — 창을 닫을 수 있고 연결 실패 이유도 읽힌다', async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_tabs') throw new Error('backend down')
+      if (cmd === 'window_control') return KEPT
+      return undefined
+    })
+    render(<WindowLayout label="slot-popup-6" notices={notices} />)
+    await waitFor(() => expect(screen.getByTestId('window-boot-error')).toBeTruthy(), { timeout: 3000 })
+    expectFrame('window-boot-error')
+    fireEvent.click(screen.getByTestId('caption-close'))
+    expect(closeCalls()).toEqual([['window_control', { window: 'slot-popup-6', action: 'close', ifEmpty: false }]])
+  })
+
+  it('번호를 받기 전(로딩 · 부팅 실패)에는 최소 창 크기를 보내지 않는다', async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === 'list_tabs') throw new Error('backend down')
       return undefined
     })
     render(<WindowLayout label="main" notices={notices} />)
     await waitFor(() => expect(screen.getByTestId('window-boot-error')).toBeTruthy(), { timeout: 3000 })
-    expect(screen.getByTestId('notices-probe')).toBeTruthy()
+    expect(invokeMock.mock.calls.filter(c => c[0] === 'report_window_min_width')).toEqual([])
+  })
+})
+
+// ADR-0277: ✕ 로 닫은 기억(`ConnectionNotice` · `StateFileNotice` 의 상태)은 걷지 않는다 — 화면이 바뀌어도 알림 층이 다시
+//   마운트되지 않아야 그 기억이 남는다.
+describe('WindowLayout — 화면이 바뀌어도 알림의 닫힘 기억이 남는다', () => {
+  let mounts = 0
+  function DismissableProbe() {
+    const [open, setOpen] = useState(true)
+    useEffect(() => {
+      mounts += 1
+    }, [])
+    return open ? (
+      <button type="button" data-testid="notice-dismiss" onClick={() => setOpen(false)} />
+    ) : (
+      <span data-testid="notice-dismissed" />
+    )
+  }
+  beforeEach(() => {
+    mounts = 0
+  })
+
+  it('로딩 중에 닫고 탭이 오면 닫힌 채다', async () => {
+    let answerTabs: (payload: unknown) => void = () => {}
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'list_tabs') return new Promise(res => (answerTabs = res))
+      if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+      return undefined
+    })
+    render(<WindowLayout label="main" notices={<DismissableProbe />} />)
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('list_tabs', { window: 'main' }))
+    expect(screen.getByTestId('window-loading')).toBeTruthy()
+    fireEvent.click(screen.getByTestId('notice-dismiss'))
+
+    await act(async () =>
+      answerTabs({ label: 'main', window_id: 'wid-main', number: 1, tabs: [{ id: 'v1', name: 'Tab 1', named: true }], active: 'v1', version: 1 }),
+    )
+    await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
+    expect(screen.getByTestId('notice-dismissed')).toBeTruthy()
+    expect(mounts).toBe(1)
+  })
+
+  it('부팅 실패 화면에서 닫고 탭 알림으로 되살아나도 닫힌 채다', async () => {
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'list_tabs') throw new Error('backend down')
+      if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+      return undefined
+    })
+    render(<WindowLayout label="main" notices={<DismissableProbe />} />)
+    await waitFor(() => expect(screen.getByTestId('window-boot-error')).toBeTruthy(), { timeout: 3000 })
+    fireEvent.click(screen.getByTestId('notice-dismiss'))
+
+    act(() =>
+      emit('window:tabs-updated', {
+        label: 'main',
+        window_id: 'wid-main',
+        number: 1,
+        tabs: [{ id: 'v1', name: 'Tab 1', named: true }],
+        active: 'v1',
+        version: 2,
+      }),
+    )
+    await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
+    expect(screen.queryByTestId('window-boot-error')).toBeNull()
+    expect(screen.getByTestId('notice-dismissed')).toBeTruthy()
+    expect(mounts).toBe(1)
   })
 })
 

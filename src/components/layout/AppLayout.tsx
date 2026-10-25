@@ -34,7 +34,7 @@ export default function AppLayout({ restore = restoreClient }: Props) {
       {/* 알림도 잠기는 층 안이다 — 묻는 동안 알림의 ✕ 도 막힌다. 제목 줄(창 단추 · 끌 자리)도 이 층 안이라 함께 막힌다 —
             묻는 동안 제목 줄을 살리는 것은 작은 변경이 아니어서 하지 않았다(TRD S26-window-chrome §12-2 「모달 · 제목 줄」). */}
       <div inert={awaiting} style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-        {/* 감싼 칸 = 제목 줄을 그리기 전 화면(로딩 · 부팅 실패)에서 알림이 붙는 자리. */}
+        {/* 감싼 칸 = `WindowLayout` 의 자리. 알림 층은 이 칸이 아니라 `WindowLayout` 안 제목 줄 아래 칸에 붙는다(화면마다 같은 자리). */}
         <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
           <WindowLayout
             label={MAIN_WINDOW_LABEL}

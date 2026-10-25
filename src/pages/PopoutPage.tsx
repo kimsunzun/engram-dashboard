@@ -42,7 +42,7 @@ export default function PopoutPage() {
         flexDirection: 'column',
       }}
     >
-      {/* 감싼 칸 = 제목 줄을 그리기 전 화면(로딩 · 부팅 실패)에서 알림이 붙는 자리. */}
+      {/* 감싼 칸 = `WindowLayout` 의 자리. 알림 층은 이 칸이 아니라 `WindowLayout` 안 제목 줄 아래 칸에 붙는다(화면마다 같은 자리). */}
       <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
         <WindowLayout
           label={label}

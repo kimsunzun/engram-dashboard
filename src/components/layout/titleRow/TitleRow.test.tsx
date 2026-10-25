@@ -57,9 +57,14 @@ function fakeFrame(initial: WindowFrame | null = FRAME) {
   }
 }
 
-function renderRow(o: { label?: string; number?: number | null; frame?: WindowFrameSource } = {}) {
+function renderRow(o: { label?: string; number?: number | null; standby?: boolean; frame?: WindowFrameSource } = {}) {
   return render(
-    <TitleRow label={o.label ?? 'main'} number={o.number === undefined ? 1 : o.number} frame={o.frame ?? fakeFrame().source}>
+    <TitleRow
+      label={o.label ?? 'main'}
+      number={o.number === undefined ? 1 : o.number}
+      standby={o.standby}
+      frame={o.frame ?? fakeFrame().source}
+    >
       <div data-testid="tab-bar" />
     </TitleRow>,
   )
@@ -273,10 +278,20 @@ describe('TitleRow — 흐림 · 대기 모드', () => {
     }
   })
 
-  it('대기 모드(number null) = 표식 · 단추 없이 줄 · 끌 빈 자리만 — 탭바는 그대로 자식', () => {
-    renderRow({ number: null })
+  it('대기 모드(standby · number null) = 표식 · 단추 없이 줄 · 끌 빈 자리만 — 탭바는 그대로 자식', () => {
+    renderRow({ number: null, standby: true })
     expect([...row().children].map(el => (el as HTMLElement).dataset.testid)).toEqual(['tab-bar', 'title-grab-gap'])
     expect(row().getAttribute(DRAG)).toBe('')
+  })
+
+  // 로딩 · 부팅 실패 화면 — OS 틀이 없어 창을 옮기고 닫는 자리가 이 줄뿐이다(`WindowLayout`).
+  it('번호가 아직 없는 보통 화면 = 표식만 빼고 창 단추는 그린다', () => {
+    renderRow({ number: null })
+    expect([...row().children].map(el => (el as HTMLElement).dataset.testid)).toEqual([
+      'tab-bar',
+      'title-grab-gap',
+      'caption-buttons',
+    ])
   })
 })
 
@@ -303,9 +318,9 @@ describe('TitleRow — 최소 창 크기 보고', () => {
     })
   }
 
-  function rowWith(number: number | null, frame: WindowFrameSource = fakeFrame().source) {
+  function rowWith(number: number | null, frame: WindowFrameSource = fakeFrame().source, standby = false) {
     return (
-      <TitleRow label="slot-popup-1" number={number} frame={frame}>
+      <TitleRow label="slot-popup-1" number={number} standby={standby} frame={frame}>
         <div data-testid="tab-bar" />
       </TitleRow>
     )
@@ -335,15 +350,18 @@ describe('TitleRow — 최소 창 크기 보고', () => {
     ])
   })
 
-  it('대기 모드 = 표식 · 단추 없는 폭 · 들여 번호를 받으면 그 둘을 실어 다시 보낸다', async () => {
-    const view = render(rowWith(null))
+  // 셸은 창을 열 때 세운 열기 표시를 그 창의 다음 보고에서 거둔다 — 대기 중 보고가 들일 때의 표시를 먼저 거두면 들인 창이
+  //   넓혀 당겨지지 않는다(`TitleRow` 머리 · `src-tauri/src/chrome/book.rs` 머리).
+  it('번호가 없으면(대기 · 로딩 · 부팅 실패) 보내지 않는다 · 번호를 받으면 표식 · 단추를 실어 처음 보낸다', async () => {
+    const f = fakeFrame()
+    const view = render(rowWith(null, f.source, true))
     await settle()
-    view.rerender(rowWith(3))
+    view.rerender(rowWith(null, f.source))
     await settle()
-    expect(minReports()).toEqual([
-      { width: 120, height: 64 },
-      { width: 286, height: 64 },
-    ])
+    expect(minReports()).toEqual([])
+    view.rerender(rowWith(3, f.source))
+    await settle()
+    expect(minReports()).toEqual([{ width: 286, height: 64 }])
   })
 
   it('크롬 모양이 바뀌면 다시 보낸다 — 단추를 OS 가 그리면 단추 몫을 빼고 · 왼 여백은 더한다', async () => {
@@ -361,7 +379,7 @@ describe('TitleRow — 최소 창 크기 보고', () => {
     ])
   })
 
-  it('최대화해도 보내는 값은 그대로다(보통 상태 기준 — 최대화 동안은 셸이 걷는다)', async () => {
+  it('최대화해도 보내는 값은 그대로다(보통 상태 기준 — 셸은 보통 크기 창에만 입힌다)', async () => {
     const f = fakeFrame()
     render(rowWith(1, f.source))
     await settle()
