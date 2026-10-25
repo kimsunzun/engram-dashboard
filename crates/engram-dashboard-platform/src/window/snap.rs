@@ -16,8 +16,11 @@
 //! 찾는다(전역 표 없음).
 //!
 //! ★스레드★ — 두 함수 다 부모 창을 만든 스레드(메인)에서 부른다(자식 창은 부른 스레드에 묶이고, 창 프로시저 · 콜백도 그
-//! 스레드에서 돈다). ★콜백 안에서 이 모듈 함수를 부르지 말 것★ — 막지는 않지만(콜백을 갈아 끼워도 · 오버레이를 걷어도
-//! 도는 콜백은 끝까지 돈다) 그 꼴을 시험하지 않았다.
+//! 스레드에서 돈다). 다른 스레드에서 부르면 아무것도 하지 않고 [`WindowError::Os`] 다 — 부모 창 스레드를 대 보는 가드가
+//! 막는다(남의 스레드에서 자식 창을 지으면 부모에 보내는 알림이 그 스레드를 기다려 교착할 수 있고, 지은 창은 부른 스레드가
+//! 끝나면 함께 사라진다). ★콜백 안에서 이 모듈 함수를 부르지 말 것★ — 막지는 않지만(콜백을 갈아 끼워도 · 오버레이를
+//! 걷어도 도는 콜백은 끝까지 돈다) 그 꼴을 시험하지 않았고, 나감(`WM_NCMOUSELEAVE`)은 콜백 뒤 앞 프로시저로 넘기므로
+//! 콜백 안에서 걷으면 부서진 창으로 넘긴다.
 //!
 //! Windows 밖 = [`WindowError::Unsupported`](이 crate 「들이는 규칙」 3 — 자리채움). 켠 빌드의 동작(배율 · 창마다 ·
 //! 포커스)은 켜는 날 다시 잰다(TRD §14 W8).
@@ -33,7 +36,8 @@ use super::{PhysRect, WindowError};
 pub type HoverFn = Box<dyn Fn(bool)>;
 
 /// `parent` 의 클라이언트 물리 px 사각형 `rect` 에 오버레이를 놓는다 — 없으면 짓고 있으면 옮긴다(맨 위 형제로 다시 올린다).
-/// `on_hover` 는 앞 콜백을 갈아 끼운다. 너비 · 높이가 1 보다 작으면 [`WindowError::Os`] 다(부르는 쪽은 걷기를 부른다).
+/// `on_hover` 는 앞 콜백을 갈아 끼운다. 너비 · 높이가 1 보다 작거나 `parent` 를 만든 스레드가 아닌 스레드에서 부르면
+/// 아무것도 하지 않고 [`WindowError::Os`] 다(빈 사각형이면 부르는 쪽은 걷기를 부른다).
 pub fn place_overlay(
     parent: &impl HasWindowHandle,
     rect: PhysRect,
@@ -50,7 +54,8 @@ pub fn place_overlay(
     }
 }
 
-/// `parent` 의 오버레이를 걷는다 — 없으면 무동작 `Ok`.
+/// `parent` 의 오버레이를 걷는다 — 없으면 무동작 `Ok`. `parent` 를 만든 스레드가 아닌 스레드에서 부르면 아무것도 하지 않고
+/// [`WindowError::Os`] 다.
 pub fn remove_overlay(parent: &impl HasWindowHandle) -> Result<(), WindowError> {
     #[cfg(windows)]
     {
@@ -72,16 +77,18 @@ mod win {
     use raw_window_handle::HasWindowHandle;
     use windows::core::w;
     use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         TrackMouseEvent, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CallWindowProcW, CreateWindowExW, DefWindowProcW, DestroyWindow, GetDlgItem,
-        GetWindowLongPtrW, IsZoomed, LoadCursorW, PostMessageW, SetCursor, SetWindowLongPtrW,
-        SetWindowPos, GWLP_USERDATA, GWLP_WNDPROC, HMENU, HTMAXBUTTON, HWND_TOP, IDC_ARROW,
-        SC_MAXIMIZE, SC_RESTORE, SWP_NOACTIVATE, SWP_SHOWWINDOW, WINDOW_EX_STYLE, WM_NCDESTROY,
-        WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE,
-        WM_SETCURSOR, WM_SYSCOMMAND, WNDPROC, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
+        GetWindowLongPtrW, GetWindowThreadProcessId, IsZoomed, LoadCursorW, PostMessageW,
+        SetCursor, SetWindowLongPtrW, SetWindowPos, GWLP_USERDATA, GWLP_WNDPROC, HMENU,
+        HTMAXBUTTON, HWND_TOP, IDC_ARROW, SC_MAXIMIZE, SC_RESTORE, SWP_NOACTIVATE, SWP_SHOWWINDOW,
+        WINDOW_EX_STYLE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN,
+        WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_SETCURSOR, WM_SYSCOMMAND, WNDPROC, WS_CHILD,
+        WS_CLIPSIBLINGS, WS_VISIBLE,
     };
 
     use super::super::win::hwnd_of;
@@ -118,6 +125,21 @@ mod win {
         }
     }
 
+    /// 부모 창 스레드 가드(머리 「스레드」) — `parent` 를 만든 스레드가 아니면 아무것도 건드리기 전에 거절한다. 그 뒤의
+    /// 상태 읽기 · 쓰기와 창 프로시저가 같은 스레드라 겹치지 않는다는 것도 이 가드가 받친다.
+    fn on_parent_thread(parent: HWND) -> Result<(), WindowError> {
+        // SAFETY: 값만 보는 조회 둘 — 사라진 창이면 0 이라 맞지 않아 거절된다.
+        let (owner, caller) =
+            unsafe { (GetWindowThreadProcessId(parent, None), GetCurrentThreadId()) };
+        if owner == caller {
+            Ok(())
+        } else {
+            Err(WindowError::Os(io::Error::other(format!(
+                "오버레이는 부모 창 스레드에서만 다룬다: 부모 창 스레드 {owner} · 부른 스레드 {caller}"
+            ))))
+        }
+    }
+
     pub(super) fn place_overlay(
         parent: &impl HasWindowHandle,
         r: PhysRect,
@@ -130,6 +152,7 @@ mod win {
             ))));
         }
         let parent = hwnd_of(parent)?;
+        on_parent_thread(parent)?;
         let on_hover: Rc<dyn Fn(bool)> = Rc::from(on_hover);
         let child = match find(parent) {
             Some(child) => {
@@ -197,6 +220,7 @@ mod win {
 
     pub(super) fn remove_overlay(parent: &impl HasWindowHandle) -> Result<(), WindowError> {
         let parent = hwnd_of(parent)?;
+        on_parent_thread(parent)?;
         let Some(child) = find(parent) else {
             return Ok(());
         };
@@ -250,12 +274,13 @@ mod win {
                 }
                 return LRESULT(HTMAXBUTTON as isize);
             }
+            // 우리 몫(맴돎 칸 · 콜백)만 하고 앞 프로시저로 넘긴다 — 스파이크가 그렇게 했고 그 빌드에서 메뉴가 떴다(TRD §1-3
+            //   S6 — 사용자 관측). 삼키는 꼴은 화면에서 잰 적이 없다. `prev` 는 위에서 이미 복사해 두어 상태를 다시 읽지
+            //   않는다 — 단 콜백이 오버레이를 걷으면 부서진 창으로 넘기게 되므로 콜백 안에서 걷지 않는다(머리 「스레드」).
             WM_NCMOUSELEAVE => {
                 if let Some(f) = flip(state, false) {
                     f(false);
                 }
-                // 콜백이 오버레이를 걷었을 수 있다 — 앞 프로시저로 넘기지 않는다(처리했으면 0 — MS 문서).
-                return LRESULT(0);
             }
             // 누름은 삼킨다 — 기본 처리가 OS 캡션 단추 누름 추적을 시작하지 않게.
             WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK if wparam.0 == HTMAXBUTTON as usize => {
@@ -295,11 +320,12 @@ mod win {
 mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::time::{Duration, Instant};
 
     use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowRect, IsWindow, PeekMessageW, SendMessageW, HTMAXBUTTON, MSG, PM_REMOVE,
-        SC_MAXIMIZE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE,
+        GetWindowRect, IsWindow, PeekMessageW, SendMessageW, HTMAXBUTTON, MSG, PM_NOREMOVE,
+        PM_REMOVE, SC_MAXIMIZE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE,
         WM_SYSCOMMAND,
     };
 
@@ -434,6 +460,36 @@ mod tests {
             Some(SC_MAXIMIZE as usize),
             "최대화 아닌 부모 = 최대화"
         );
+    }
+
+    #[test]
+    fn other_thread_is_refused_and_leaves_the_overlay_as_is() {
+        let parent = TestWindow::new(true);
+        place_overlay(&parent, RECT_A, Box::new(|_| {})).expect("놓기");
+        let child = find(parent.hwnd()).expect("오버레이");
+        let handle = parent.handle_only();
+        let worker = std::thread::spawn(move || {
+            let moved = PhysRect { x: 64, ..RECT_A };
+            (
+                place_overlay(&handle, moved, Box::new(|_| {})),
+                remove_overlay(&handle),
+            )
+        });
+        // 가드가 빠지면 남의 스레드가 이 창에 메시지를 보내고 답을 기다린다 — 그동안 이 스레드가 받은 메시지를 처리해
+        //   교착 대신 아래 단언의 실패로 끝나게 한다(`PeekMessageW` 가 들여다보는 동안 보내온 메시지를 처리한다).
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !worker.is_finished() {
+            assert!(Instant::now() < deadline, "남의 스레드가 끝나지 않았다");
+            let mut msg = MSG::default();
+            // SAFETY: 이 스레드 큐를 들여다보기만 한다(꺼내지 않는다).
+            let _ = unsafe { PeekMessageW(&mut msg, HWND::default(), 0, 0, PM_NOREMOVE) };
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let (place, remove) = worker.join().expect("남의 스레드");
+        assert!(matches!(place, Err(WindowError::Os(_))), "놓기 거절");
+        assert!(matches!(remove, Err(WindowError::Os(_))), "걷기 거절");
+        assert_eq!(find(parent.hwnd()), Some(child), "오버레이가 그대로 있다");
+        assert_eq!(placed(&parent, child), RECT_A, "옮기지 않았다");
     }
 
     #[test]

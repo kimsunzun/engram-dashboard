@@ -31,7 +31,8 @@ raw-window-handle = "0.6"
 
 # Foundation = `process`(CloseHandle·FILETIME) · `file_holders`(Win32 오류 코드) · `group` 이 함께 쓴다 ·
 #   Threading = OpenProcess/GetProcessTimes/GetExitCodeProcess · `group` 의 TerminateProcess/WaitForSingleObject/
-#   ResumeThread · `spawn` 의 CREATE_NO_WINDOW · CREATE_SUSPENDED · ToolHelp = process_parent_table 의 프로세스
+#   ResumeThread · `spawn` 의 CREATE_NO_WINDOW · CREATE_SUSPENDED · `window::snap` 의 부모 창 스레드 가드
+#   (GetCurrentThreadId — 기능 `snap-overlay` 뒤) · ToolHelp = process_parent_table 의 프로세스
 #   표(child_pids 가 그 위에 선다)와 `group` 의 스레드 스냅숏(멈춘 채 띄운 자식의 첫 스레드를 찾는다 — std 가 그
 #   핸들을 내주지 않는다).
 # `Win32_System_RestartManager` = `file_holders` 몫 — 「이 파일을 누가 열고 있나」를 묻는
@@ -54,7 +55,8 @@ raw-window-handle = "0.6"
 # `Win32_UI_WindowsAndMessaging` = `window` 몫 — 전경 창과 그 창을 만든 스레드의 PID(`GetForegroundWindow` ·
 #   `GetWindowThreadProcessId`). 셸이 런타임 복원 수락 끝에 main 에 포커스를 줄지 가른다. 창 놓기 · z 순서 · 자리
 #   되돌리기 · 커서 밑 창 · 창 진단(`window`)과 커서 · 단추 바꿈(`input`)도 이 feature 뒤다.
-# `Win32_UI_Input_KeyboardAndMouse` = `input` 의 주 버튼 · Esc 상태(`GetAsyncKeyState`).
+# `Win32_UI_Input_KeyboardAndMouse` = `input` 의 주 버튼 · Esc 상태(`GetAsyncKeyState`)와 `window::snap` 의 맴돎 나감
+#   듣기(`TrackMouseEvent` — 기능 `snap-overlay` 뒤라 기본 빌드는 부르지 않는다).
 # `Win32_Graphics_Dwm` = `window::top_level_at` 의 가려진 창 판정(`DWMWA_CLOAKED`).
 # `Win32_Graphics_Gdi` = `window::restore_placement` 의 모니터 작업 영역(`MonitorFromRect` · `GetMonitorInfoW` —
 #   화면 좌표를 작업 공간 좌표로 옮긴다)과 `window::top_level_at` 의 창 모양(`GetWindowRgn` · `PtInRegion`).

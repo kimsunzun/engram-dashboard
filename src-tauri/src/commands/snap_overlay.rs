@@ -9,7 +9,8 @@
 //! - 창 label 을 인자로 받지 않는다 — Tauri 가 넣어 주는 창이 그 값의 유일한 권위다(`report_window_min_width` 와 같은 규칙).
 //!   버스 명령이 아니다 — 측정 보고다(ADR-0227).
 //! - ★비동기로 바꾸지 말 것★ — 동기 명령은 메인 스레드에서 돌고, 오버레이 창은 부모 창 스레드(메인)에서 지어야 한다
-//!   (platform `window::snap` 머리).
+//!   (platform `window::snap` 머리 「스레드」). 다른 스레드에서 부르면 platform 의 부모 창 스레드 가드(`on_parent_thread`)가
+//!   아무것도 하지 않고 `Err` 로 거절한다 — 그러면 오버레이가 늘 안 선다.
 //! - OS `cfg` 를 두지 않는다 — OS 마다 다른 일은 platform 이 한다(ADR-0266 · TRD §8-3).
 
 use engram_dashboard_platform::window::{snap, PhysRect};

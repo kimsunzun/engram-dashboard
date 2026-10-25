@@ -38,7 +38,10 @@ tauri-build = { version = "2", features = [] }
 
 # ★snap-overlay — 기본 OFF(사용자 결정 Q1 2026-10-24 · TRD S26-window-chrome §8-4)★: Windows 11 스냅 레이아웃 메뉴를 웹이
 #   그린 최대화 단추에서 뜨게 하는 오버레이(platform `window::snap`)와 그 invoke `report_max_button_rect`
-#   (`src/commands/snap_overlay.rs`)를 컴파일에 넣는다. 켠 빌드 = `cargo build -p engram-dashboard --features snap-overlay`.
+#   (`src/commands/snap_overlay.rs`)를 컴파일에 넣는다. 켠 빌드의 컴파일 확인 = `cargo check -p engram-dashboard --features
+#   snap-overlay`. ★`cargo build` 로 지은 셸 exe 는 띄우지 않는다★(CLAUDE.md 「빌드·검증 명령」의 `cargo build` 줄 ·
+#   ADR-0137) — 띄울 exe 를 짓는 `scripts/build-client-shell.mjs` 는 기능 인자를 받지 않는다. 띄울 수 있는 켠 빌드는 이
+#   기능을 켜는 날 그 스크립트에 기능 넘기기를 더해서 짓는다(지금은 없다).
 #   꺼진 빌드에서 창 사실 `caption.snap_overlay` 는 늘 거짓이라 웹이 그 invoke 를 부르지 않는다. 운영 그래프에 이 기능이
 #   없다는 것과 켠 빌드가 컴파일된다는 것은 CI 가 잰다(`ci.yml` 의 `snap-overlay gate 1` · `2`).
 [features]
