@@ -89,17 +89,17 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
 아래 <창> 자리(--window · --to_window)에는 window.list 의 details 가 주는 window_id 를 넘긴다 — 재시작을 넘어 같은 창이다. 같은 실행 안에서는 label(windows 의 값)도 받고 main 은 늘 main 이다. 창 번호(창에 보이는 숫자 · number)는 받지 않는다 — 닫힌 창의 번호를 새 창이 다시 쓰므로 숫자만 주면 INVALID_ARGUMENT 다. 없는 창 · 닫힌 창 · 앞 실행의 label 은 CONFLICT 다.
 
   {tool} window.list
-      열려 있는 창. windows = label 전량. details = 창마다 window_id · window(label) · number · main · visible · minimized · maximized · focused(그 창이 OS 전경 창인가)
+      열려 있는 창. windows = label 전량. details = 창마다 window_id · window(label) · number · main · visible · minimized · maximized · focused(그 창이 OS 전경 창인가). number 는 비어 있는 가장 작은 수를 다시 쓰는데, 닫히는 창은 OS 창이 없어질 때까지 번호를 쥔 채 목록에는 안 나온다 — 그 잠깐은 목록에 없는 번호가 비어 있지 않을 수 있다(1 · 2 · 3 에서 닫히는 2 가 아직 있으면 새 창은 4)
   {tool} window.create
       빈 탭 하나를 든 새 창. window(label) · window_id · number 를 돌려준다
   {tool} window.close --window <창> [--if_empty true]
       팝아웃은 탭째 닫는다(outcome Closed). main 은 닫지 않고 모든 창을 숨긴다(HiddenAll — window.hideAll 과 같다). if_empty 면 window 는 그 창의 window_id 여야 하고, 그 창에 탭이 들어와 있거나 이미 닫혔으면 닫지 않는다(Kept — 오류가 아니다)
 
   {tool} window.minimize --window <창>
-      최소화한다. 숨은 창은 CONFLICT — 먼저 window.raise 나 window.showAll
+      최소화한다. 보이지 않는 창은 CONFLICT — 숨은 창은 먼저 window.raise 나 window.showAll, 아직 첫 화면 전인 창은 곧 보인다
   {tool} window.maximize --window <창>
   {tool} window.unmaximize --window <창>
-      최대화한다 · 원래 크기로 되돌린다(최소화된 창의 unmaximize 는 무동작 — 먼저 window.raise). 숨은 창이나 아직 첫 화면 전인 창은 화면을 건드리지 않고 보일 때 그 크기로 보인다(deferred true)
+      최대화한다 · 원래 크기로 되돌린다(보이는 최소화 창의 unmaximize 는 무동작 — 먼저 window.raise). 숨은 창이나 아직 첫 화면 전인 창은 화면을 건드리지 않고 바랄 크기를 적어 뒀다가 보일 때 그 크기로 보인다 — 그때 deferred 가 true 다. 이미 그 크기인 창(최소화 아님)은 적을 것이 없어 숨었어도 deferred 가 false 다(예: 원래 크기인 숨은 창의 unmaximize)
   {tool} window.raise --window <창>
       앞으로 낸다. 숨어 있으면 모든 창을 보이고(shown_all true), 최소화면 편다. 포커스를 빼앗지 않는다 — 다른 앱이 앞이면 맨 위로만 올라 focused 가 false 다. 아직 첫 화면 전인 창은 손대지 않는다(pending true)
   {tool} window.hideAll

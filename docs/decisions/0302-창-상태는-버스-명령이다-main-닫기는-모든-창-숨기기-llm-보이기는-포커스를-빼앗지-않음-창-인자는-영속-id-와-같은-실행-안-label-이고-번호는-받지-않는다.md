@@ -50,7 +50,7 @@ OS 쪽 사실도 묶였다 — tao 의 최대화 · 최소화 · 펴기는 숨�
 - 사용자 결정 PRD §5-1(Q7 · Q9 · 리뷰 1차 지적 ② — 2026-10-23) · ADR-0229 · ADR-0299 결정 5.
 - 리뷰 · 실측 기록 = TRD §15(0.1판 리뷰 codex ② · ⑤ · ⑥ · Claude ④ · ⑤ · ⑦ · 0.3판 재리뷰 ① – ③ · 리뷰 4).
 - 소스 독해(TRD §5-2 · §6-2): tauri-runtime-wry 2.11.3 `send_user_message` 는 메인 스레드에서 넘긴 일을 그 자리에서 돈다 — 그래서 메인 스레드에서 불러도 교착은 아니지만, 레이아웃 락을 쥔 채 부르면 재진입 안 되는 뮤텍스를 다시 잡고, 답 채널 용량이 0 이면 그 자리에서 도는 일의 보내기가 선다. tao 0.35.3 은 최소화의 `WM_SIZE` 에서 최대화 깃발을 내린다(그래서 보이지 않는 최소화 창의 `maximize` · `unmaximize` 는 늘 바람을 적는다).
-- 조사 이름 §2 ①(tmux — 번호와 id 의 가름) · PRD R6.
+- 조사 `docs/research/window-naming-titlebar-2026-10-17.md` §2 ①(tmux — 번호와 id 의 가름) · PRD R6.
 
 ## 영향 / 불변식
 
@@ -60,4 +60,4 @@ OS 쪽 사실도 묶였다 — tao 의 최대화 · 최소화 · 펴기는 숨�
 - `focused: false` 는 정상 답이다 — 다른 앱이 앞이면 맨 위로만 올린다(의도). `SW_RESTORE` 의 활성화가 Alt 를 합성하지 않는지는 tao 경로를 읽지 않았다(가능성 높음 — QA 가 AC9 로 잰다).
 - 모델 밖 창의 남는 갭(받아들임 · M34): 그 화면의 창 사실 당기기는 유계 재시도 뒤 `console.error` 한 줄로 끝나고, 최대화 단추 모양이 OS 상태를 따르지 않는다.
 - 알려진 갭: LLM 의 창 옮기기 · 크기 · 스냅 명령이 없다(CLAUDE.md 「LLM-우선 제어」 남은 갭에 더한다).
-- 앵커 — `layout/window_ctl.rs`(`plan` · `close_if_empty` · `close_unmodeled`) · `layout/window_arg.rs` · `commands/window_ctl.rs`(메인 스레드 일) · `tray::actions::show_main_ui` 의 `Activation` 갈래 · `PopupCounter` 의 label 꼴에 `// ADR-0302` 를 단다.
+- 앵커 — `layout/window_ctl.rs`(`plan` · `close_if_empty` · `close_unmodeled`) · `layout/window_arg.rs` · `commands/window_ctl.rs`(메인 스레드 일) · `tray::actions::show_main_ui` 의 `Activation` 갈래 · platform `window::is_foreground`(결정 8) · `commands/popout.rs` 의 `PopupCounter::next_label`(label 꼴은 `popup_label` 이 짓는다)에 `// ADR-0302` 를 단다.

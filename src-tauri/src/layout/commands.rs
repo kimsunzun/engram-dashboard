@@ -314,7 +314,7 @@ declare_commands! {
         deferred: bool,
     } errors [CONFLICT];
 
-    /// 최대화된 창을 원래 크기로 되돌린다(최대화가 아니면 무동작 · 최소화된 창도 무동작이다 — 먼저 window.raise). 보이지
+    /// 최대화된 창을 원래 크기로 되돌린다(최대화가 아니면 무동작 · 보이는 최소화된 창도 무동작이다 — 먼저 window.raise). 보이지
     /// 않는 창(숨김 · 아직 첫 화면 전)은 화면을 건드리지 않고 미뤄 뒀다가 그 창이 보일 때 원래 크기로 보인다 — deferred =
     /// true. window 는 tab.create 와 같다(window_id 또는 같은 실행 안 label · 번호는 받지 않는다).
     #[effect(Write)]

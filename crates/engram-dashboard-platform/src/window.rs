@@ -273,7 +273,7 @@ pub fn foreground_is_current_process() -> Option<bool> {
 /// Windows = `GetForegroundWindow` 가 그 최상위 창인가. 핸들을 못 얻었거나 그 창이 이미 없으면 `Some(false)` 다. 창
 /// 툴킷의 포커스 게터와 다른 답일 수 있다 — WebView2 를 품은 창은 웹뷰가 키보드 포커스를 쥔 동안 그 게터가 거짓이다
 /// (TRD S26-window-chrome §6-2 「앞 창 판정」).
-// ADR-0303 — 크롬식 제목 표시줄
+// ADR-0302 — 창 상태 명령(앞 창 판정)
 pub fn is_foreground(w: &impl HasWindowHandle) -> Option<bool> {
     #[cfg(windows)]
     {
