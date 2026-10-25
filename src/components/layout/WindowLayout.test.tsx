@@ -993,6 +993,61 @@ describe('WindowLayout — 창 캔버스 보고(ADR-0227, TRD §2d)', () => {
   })
 })
 
+// TRD S26-window-chrome §7-1 · §7-5 — 탭바를 놓던 자리에 제목 줄(배치 · 단추 · 흐림의 세부 = `titleRow/TitleRow.test.tsx`).
+describe('WindowLayout — 제목 줄', () => {
+  const FRAME = {
+    restored: { w: 800, h: 600 },
+    maximized: false,
+    insets: { t: 0, r: 0, b: 0, l: 0 },
+    focused: true,
+    caption: { buttons: true, leading_inset: 0, snap_overlay: false },
+  }
+
+  function tabsWithNumber(label: string, number: number) {
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'list_tabs') {
+        return { label, window_id: `wid-${label}`, number, tabs: [{ id: 'v1', name: 'Tab 1', named: true }], active: 'v1', version: 1 }
+      }
+      if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+      if (cmd === 'window_frame') return FRAME
+      if (cmd === 'window_control') return KEPT
+      return undefined
+    })
+  }
+
+  it('main — 제목 줄이 탭바를 품고 · 번호 표식 = 탭 알림의 번호 · 셋째 단추 = 모든 창 숨기기', async () => {
+    tabsWithNumber('main', 3)
+    render(<WindowLayout label="main" />)
+    await waitFor(() => expect(screen.getByTestId('window-number').textContent).toBe('3'))
+    const row = screen.getByTestId('title-row')
+    expect(row.firstElementChild).toBe(screen.getByTestId('tab-bar'))
+    expect(screen.getByTestId('caption-close').getAttribute('aria-label')).toBe('모든 창 숨기기')
+  })
+
+  it('팝아웃 — 셋째 단추 = 창 닫기 · 누르면 이 창 label 로 window_control close', async () => {
+    currentWindow.label = 'slot-popup-4'
+    tabsWithNumber('slot-popup-4', 2)
+    render(<WindowLayout label="slot-popup-4" />)
+    await waitFor(() => expect(screen.getByTestId('window-number').textContent).toBe('2'))
+    const close = screen.getByTestId('caption-close')
+    expect(close.getAttribute('aria-label')).toBe('창 닫기')
+    fireEvent.click(close)
+    expect(closeCalls()).toEqual([['window_control', { window: 'slot-popup-4', action: 'close', ifEmpty: false }]])
+  })
+
+  it('창 사실(window:frame)의 focused · maximized 를 제목 줄이 따라간다', async () => {
+    tabsWithNumber('main', 1)
+    render(<WindowLayout label="main" />)
+    await waitFor(() => expect(listeners.has('window:frame')).toBe(true))
+    act(() => emit('window:frame', { ...FRAME, focused: false, maximized: true }))
+    const row = screen.getByTestId('title-row')
+    expect([row.dataset.windowActive, row.dataset.maximized]).toEqual(['false', 'true'])
+    expect(screen.getByTestId('caption-maximize').getAttribute('aria-label')).toBe('이전 크기로 복원')
+    act(() => emit('window:frame', FRAME))
+    expect([row.dataset.windowActive, row.dataset.maximized]).toEqual(['true', 'false'])
+  })
+})
+
 describe('WindowLayout — TabBar 액션 → store 액션(이 label)', () => {
   it('[+] 클릭 → createTab(label) invoke', async () => {
     render(<WindowLayout label="main" />)
@@ -1293,6 +1348,10 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
   it('window_role = spare → 빈 틀(탭바 + 빈 캔버스) · list_tabs 를 당기지 않는다 · 부팅 오류 · 로딩 문구 없음', async () => {
     await mountSpare()
     expect(screen.getByTestId('tab-bar')).toBeTruthy()
+    // 제목 줄은 그리되(들일 때 탭바가 다시 마운트되지 않게) 번호 표식 · 창 단추는 없다 — 셸 창 모델 밖이다.
+    expect(screen.getByTestId('title-row').firstElementChild).toBe(screen.getByTestId('tab-bar'))
+    expect(screen.queryByTestId('window-number')).toBeNull()
+    expect(screen.queryByTestId('caption-buttons')).toBeNull()
     expect(screen.queryAllByTestId('tab')).toHaveLength(0)
     expect(screen.queryAllByTestId('tab-canvas')).toHaveLength(0)
     await new Promise(res => setTimeout(res, 50))

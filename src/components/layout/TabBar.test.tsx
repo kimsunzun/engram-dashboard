@@ -100,6 +100,25 @@ describe('TabBar', () => {
     expect(onSwitch).not.toHaveBeenCalled()
   })
 
+  // TRD S26-window-chrome §7-1 · §7-2 — 제목 줄 안의 탭바.
+  it('탭 줄 행 = 창 끌 자리(값 없는 속성 — 자기 자신만) · 탭바 뿌리 · 머리 · × · + 에는 없다', () => {
+    renderBar('v1')
+    expect(screen.getByTestId('tab-strip-row').getAttribute('data-tauri-drag-region')).toBe('')
+    const others = [
+      screen.getByTestId('tab-bar'),
+      ...screen.getAllByTestId('tab'),
+      ...screen.getAllByTestId('tab-close'),
+      screen.getByTestId('tab-add'),
+    ]
+    for (const el of others) expect(el.hasAttribute('data-tauri-drag-region'), el.dataset.testid).toBe(false)
+  })
+
+  it('탭바 뿌리는 제목 줄에서 줄어드는 쪽 — flex 1 1 0 · min-width 0 · 높이 28', () => {
+    renderBar('v1')
+    const s = screen.getByTestId('tab-bar').style
+    expect([s.flexGrow, s.flexShrink, s.flexBasis, s.minWidth, s.height]).toEqual(['1', '1', '0px', '0px', '28px'])
+  })
+
   it('[+] 클릭 → onCreate', () => {
     const { onCreate } = renderBar()
     fireEvent.click(screen.getByTestId('tab-add'))
@@ -153,15 +172,15 @@ describe('TabBar', () => {
   })
 
   // 이름은 머리 글자색을 물려받는다 — 머리와 × 의 인라인 색이 같으면 이름 · × 가 한 색이다.
-  it('이름 · × 는 한 전경색 — 활성 · 맴돎 = --text · 쉴 때 = --tab-text-inactive · + 도 쉴 때 그 회색', () => {
+  it('이름 · × 는 한 전경색 — 활성 · 맴돎 = --tab-text · 쉴 때 = --tab-text-inactive · + 도 쉴 때 그 회색', () => {
     renderBar('v1')
     const close = (id: string) => head(id).querySelector<HTMLElement>('[data-testid="tab-close"]')!
     const colours = (id: string) => [nameOf(id).style.color, head(id).style.color, close(id).style.color]
-    expect(colours('v1')).toEqual(['', 'var(--text)', 'var(--text)'])
+    expect(colours('v1')).toEqual(['', 'var(--tab-text)', 'var(--tab-text)'])
     expect(colours('v2')).toEqual(['', 'var(--tab-text-inactive)', 'var(--tab-text-inactive)'])
 
     fireEvent.pointerEnter(head('v2'))
-    expect(colours('v2')).toEqual(['', 'var(--text)', 'var(--text)'])
+    expect(colours('v2')).toEqual(['', 'var(--tab-text)', 'var(--tab-text)'])
     fireEvent.pointerLeave(head('v2'))
     expect(colours('v2')).toEqual(['', 'var(--tab-text-inactive)', 'var(--tab-text-inactive)'])
 

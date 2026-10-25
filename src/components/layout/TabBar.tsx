@@ -34,6 +34,8 @@ import { TAB_BUTTON_SIZE, TAB_HEAD_GAP, TAB_HEAD_PAD, TAB_MIN_ACTIVE_W, TAB_STAN
 import { measureStrip, stripBounds } from './tabStrip/measure'
 import { EASE_OUT_CSS, slideMs, slideTargets } from './tabStrip/reorderGeometry'
 import { useTabDragSource } from './tabStrip/useTabDragSource'
+import { dragProps } from './titleRow/dragRegion'
+import { SURFACE_TOP, TAB_BAR_H } from './titleRow/metrics'
 
 interface TabBarProps {
   /** 이 탭바가 속한 창 label(main·slot-popup-N). */
@@ -257,8 +259,10 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
       style={{
         display: 'flex',
         alignItems: 'stretch',
-        height: '28px',
-        flexShrink: 0,
+        height: TAB_BAR_H,
+        // 제목 줄에서 탭바만 줄어든다 — 줄이 좁아지면 잰 폭(`useStripAvailable`)이 줄어 탭이 먼저 준다(TRD S26-window-chrome §7-1).
+        flex: '1 1 0px',
+        minWidth: 0,
         // ★면 규칙 = 활성 탭은 내용과 같은 면(`--tab-active-bg`)이라 아래 캔버스로 이어지고, 바(`--tab-bar-bg`)는 내용과
         //   밝기가 다른 면★ — Chrome 꼴(사용자 결정 2026-10-19 · 값은 테마마다 `styles/theme.css`). 라이트 · e-ink = 바가 내용보다
         //   한 칸 눌린 면 · 다크 = 바가 내용보다 밝아 활성 탭이 가장 어둡다(Zed Ayu Dark 꼴 — ADR-0298 결정 1).
@@ -278,6 +282,8 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
       <div
         ref={rowRef}
         data-testid="tab-strip-row"
+        // 탭 사이 · 마지막 탭 뒤 빈 곳 = 창 끌 자리(자기 자신만 — 머리 · `+` 는 아니다 · TRD S26-window-chrome §7-2).
+        {...dragProps()}
         style={{ position: 'relative', flex: '1 1 0', minWidth: 0 }}
       >
         {domOrder.map(id => {
@@ -287,10 +293,11 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
           const tab = metaById.get(id) ?? { id, name: '', named: false }
           const isActive = id === activeId
           const editing = editingId === id
-          // 이름 · × 는 한 전경색 — 활성 · 맴돎이면 `--text`(ADR-0298 결정 8). 한 전경색은 Chrome 꼴이고(`tab.cc` — 탭 제목과
-          //   닫기 단추에 같은 전경색), 맴돎 → `--text` 는 우리 선택이다(Chrome 은 맴돎 전경색을 따로 둔다 —
-          //   `kColorTabForegroundInactiveHoverFrameActive` · `tab_style.cc`).
-          const fg = lit(id) ? 'var(--text)' : 'var(--tab-text-inactive)'
+          // 이름 · × 는 한 전경색 — 활성 · 맴돎이면 `--tab-text`(= `--text` · ADR-0298 결정 8). 한 전경색은 Chrome 꼴이고(`tab.cc`
+          //   — 탭 제목과 닫기 단추에 같은 전경색), 맴돎 → `--text` 는 우리 선택이다(Chrome 은 맴돎 전경색을 따로 둔다 —
+          //   `kColorTabForegroundInactiveHoverFrameActive` · `tab_style.cc`). 두 토큰은 창이 앞 창이 아닐 때 제목 줄이 흐림으로
+          //   갈아 끼운다(`styles/theme.css` · TRD S26-window-chrome §7-5).
+          const fg = lit(id) ? 'var(--tab-text)' : 'var(--tab-text-inactive)'
           return (
             <div
               key={id}
@@ -463,10 +470,6 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
     </div>
   )
 }
-
-// 활성 · 맴돎 면은 머리 위 이만큼 내려앉는다 — 그 위로 바가 보여야 탭이 바에서 솟은 조각으로 읽힌다(Chrome). 머리 상자는 줄
-//   높이 그대로다. 머리 내용 칸과 `+` 상자도 이 높이부터 줄 바닥까지 세워 × 원과 `+` 원의 가운데 높이를 맞춘다.
-const SURFACE_TOP = 4
 
 // 닫기 · `+` 단추 = `TAB_BUTTON_SIZE`(22) px 원 안의 13 px 아이콘(ADR-0298 결정 5 · 사용자 결정 2026-10-21). `+` 원 = Chrome
 //   `tab_strip_control_button.cc` `kButtonSize` 28 을 머리 높이 비율 28/34 로 줄인 자리(셈은 ≈ 23 — 22 는 사용자 결정). × 원 =

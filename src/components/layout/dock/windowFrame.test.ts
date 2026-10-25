@@ -1,4 +1,4 @@
-// TRD S21-slot-docking §3-8: 창 사실 받기 — 구독 뒤 당기기 · 사건이 당기기 답을 이김 · 깨진 몸 거름 · 떼기 · Tauri `target`.
+// TRD S21-slot-docking §3-8: 창 사실 받기 — 구독 뒤 당기기 · 사건이 당기기 답을 이김 · 깨진 몸 거름 · 떼기 · 바뀜 알림 · Tauri `target`.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -137,6 +137,28 @@ describe('windowFrame', () => {
     await flush()
     expect(g.unlisten).toHaveBeenCalledTimes(1)
     expect(g.ipc.invoke).not.toHaveBeenCalled()
+  })
+
+  it('구독자는 받은 값(답 · 사건)마다 불리고 버린 몸에는 안 불린다 · 그 사이 current 는 같은 참조 · 떼면 안 불린다', async () => {
+    const f = fakeIpc()
+    const src = createWindowFrame(f.ipc)
+    const seen: (WindowFrame | null)[] = []
+    const off = src.subscribe(() => seen.push(src.current()))
+    src.install()
+    f.registered()
+    await flush()
+    f.answer(PULLED)
+    await flush()
+    expect(seen).toEqual([PULLED])
+    expect(src.current()).toBe(src.current())
+
+    f.push({ ...PUSHED, focused: 'yes' })
+    f.push(PUSHED)
+    expect(seen).toEqual([PULLED, PUSHED])
+
+    off()
+    f.push({ ...PUSHED, maximized: false })
+    expect(seen).toHaveLength(2)
   })
 
   it('Tauri 어댑터 — 자기 창 label 을 타깃으로 듣고 `window_frame` 을 당긴다', async () => {

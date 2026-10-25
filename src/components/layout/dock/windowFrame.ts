@@ -1,8 +1,8 @@
 // TRD S21-slot-docking §3-8: 이 창의 창 사실(복원 안쪽 크기 · 최대화 · 틀 inset · 앞 창 · 크롬 모양 — 뒤 둘은 TRD
 //   S26-window-chrome §6-5) — 마운트 때 `window_frame` 으로 한 번 당기고,
 //   그 뒤는 셸이 값이 바뀔 때만 미는 `window:frame` 을 받아 마지막 값 하나만 쥔다. 출처 웹뷰가 dragstart 에 원래 크기 · 새 창
-//   크기를 셈하는 재료다(R7 · R22). 끌기 밖의 통신이라 끄는 동안에도 막지 않고 받는다(ADR-0297) — 끌기는 dragstart 에 그때
-//   값을 한 번 읽을 뿐이다.
+//   크기를 셈하는 재료이고(R7 · R22), 제목 줄이 최대화 · 흐림 · 단추를 그리는 재료다(TRD S26-window-chrome §7 — `subscribe`).
+//   끌기 밖의 통신이라 끄는 동안에도 막지 않고 받는다(ADR-0297) — 끌기는 dragstart 에 그때 값을 한 번 읽을 뿐이다.
 // ★틀 inset 을 웹에서 `outer* − inner*` 로 셈하지 않는다★ — WebView2 에서 그 값이 창 틀과 맞는지 미검이라 셸이 셈한 값만 쓴다.
 // invoke/listen 을 직접 부르는 까닭 · 끊는 법은 `tabDrop.ts` 와 같다(셸이 주인 · 버스 명령 아님 · ADR-0012).
 
@@ -28,8 +28,10 @@ export interface WindowFrameIpc {
 }
 
 export interface WindowFrameSource {
-  /** 마지막으로 받은 값 — 아직 못 받았으면 `null`(그동안 대상은 크기 없음으로 친다 · TRD §4-2). */
+  /** 마지막으로 받은 값 — 아직 못 받았으면 `null`(그동안 대상은 크기 없음으로 친다 · TRD §4-2). 다음 값을 받기 전까지 같은 참조다. */
   current(): WindowFrame | null
+  /** `current()` 가 바뀔 때마다 부른다(`useSyncExternalStore` 꼴). 반환 = 떼기. 받기는 `install` 이 따로 단다. */
+  subscribe(listener: () => void): () => void
   /** 사건 듣기를 단 뒤 한 번 당긴다. 반환 = 떼기. */
   install(): () => void
 }
@@ -81,9 +83,21 @@ export function createWindowFrame(ipc: WindowFrameIpc): WindowFrameSource {
   let frame: WindowFrame | null = null
   // 받은 `window:frame` 의 수 — 당기기 답은 그것을 낸 뒤 사건이 하나라도 왔으면 버린다.
   let pushes = 0
+  const listeners = new Set<() => void>()
+  const set = (next: WindowFrame): void => {
+    frame = next
+    listeners.forEach(fn => fn())
+  }
 
   return {
     current: () => frame,
+
+    subscribe(listener) {
+      listeners.add(listener)
+      return () => {
+        listeners.delete(listener)
+      }
+    },
 
     install() {
       let disposed = false
@@ -102,7 +116,7 @@ export function createWindowFrame(ipc: WindowFrameIpc): WindowFrameSource {
                   return
                 }
                 pushes += 1
-                frame = next
+                set(next)
               }),
             {
               isCancelled,
@@ -136,7 +150,7 @@ export function createWindowFrame(ipc: WindowFrameIpc): WindowFrameSource {
             console.warn(`[windowFrame] ${CMD_WINDOW_FRAME}: 모양이 계약과 다르다 — 버린다:`, raw)
             return
           }
-          frame = next
+          set(next)
         } catch (err) {
           if (err instanceof RetryCancelledError) return
           console.error(`[windowFrame] ${CMD_WINDOW_FRAME} 최종 실패 — 다음 ${EVT_WINDOW_FRAME} 까지 창 사실이 없다:`, err)

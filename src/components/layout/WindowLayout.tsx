@@ -12,8 +12,8 @@
 // `dock/fileDropGuard.ts` 가 막는다.
 //
 // ★대기 모드(예열 창 — ADR-0299 · TRD S21-slot-docking §3-9)★: 예비 창 풀의 창(숨은 예비 창)은 탭 모델 밖이다. 그 창은
-// 탭바 + 빈 캔버스(빈 틀)만 그리고, 탭을 끌어오지 않고, 0탭 자가닫힘을 끈다. 재기 보고(캔버스 · 지표)는 그대로 보낸다.
-// 모드는 `spareMode.ts` 가 정한다.
+// 제목 줄(빈 탭바 — 번호 표식 · 창 단추 없음) + 빈 캔버스(빈 틀)만 그리고, 탭을 끌어오지 않고, 0탭 자가닫힘을 끈다. 재기
+// 보고(캔버스 · 지표)는 그대로 보낸다. 모드는 `spareMode.ts` 가 정한다.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
@@ -33,6 +33,7 @@ import {
 } from './windowCanvasReport'
 import ViewLayoutRenderer from './ViewLayoutRenderer'
 import TabBar from './TabBar'
+import TitleRow from './titleRow/TitleRow'
 import { watchSpareMode, type WindowMode } from './spareMode'
 import { installFileDropGuard } from './dock/fileDropGuard'
 import { DockOverlayView } from './dock/DockOverlay'
@@ -176,7 +177,7 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
   // 보이는 캔버스 — 이 창에서 끄는 동안 탭바 구역 밖이면 남은 탭(R15 · 모델은 그대로 — TRD S21-slot-docking §4-2).
   const shown = useShownTab(label, tabIds, active)
 
-  // 셸은 이 창을 숨긴 채 만들고 첫 화면 알림에 창을 보인다(`theme/firstPaint.ts`) — 그 알림을 첫 화면(탭바 + 활성 탭의
+  // 셸은 이 창을 숨긴 채 만들고 첫 화면 알림에 창을 보인다(`theme/firstPaint.ts`) — 그 알림을 첫 화면(제목 줄 + 활성 탭의
   //   레이아웃 · 부팅 실패 문구)이 커밋된 뒤에 보낸다. 그 전 화면(바탕만 · 활성 탭의 「View 로딩」)이 보이는 것은 알림이
   //   오지 않아 셸 시한이 보일 때뿐이다.
   // 빈 틀은 첫 화면이 아니다 — 대기 창은 숨은 채 맡겨질 때를 기다리고, 채택한 창은 제 탭을 그린 뒤 채택 번호로 알린다
@@ -273,20 +274,22 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%' }}>
-      <TabBar
-        label={label}
-        tabs={tabs}
-        active={active}
-        onSwitch={viewId => void switchTab(label, viewId).catch(e => console.error('[switchTab]', e))}
-        onCreate={() => void createTab(label).catch(e => console.error('[createTab]', e))}
-        onClose={viewId => void closeTab(label, viewId).catch(e => console.error('[closeTab]', e))}
-        onRename={(viewId, name) =>
-          void renameTab(viewId, name).catch(e => console.error('[renameTab]', e))
-        }
-        canvas={canvasOf}
-        // 모드를 모르는 동안도 당기지 않는다 — 대기 창이면 셸이 그 창을 몰라 실패한다.
-        pullFrame={normal}
-      />
+      <TitleRow label={label} number={framed ? null : (win?.number ?? null)}>
+        <TabBar
+          label={label}
+          tabs={tabs}
+          active={active}
+          onSwitch={viewId => void switchTab(label, viewId).catch(e => console.error('[switchTab]', e))}
+          onCreate={() => void createTab(label).catch(e => console.error('[createTab]', e))}
+          onClose={viewId => void closeTab(label, viewId).catch(e => console.error('[closeTab]', e))}
+          onRename={(viewId, name) =>
+            void renameTab(viewId, name).catch(e => console.error('[renameTab]', e))
+          }
+          canvas={canvasOf}
+          // 모드를 모르는 동안도 당기지 않는다 — 대기 창이면 셸이 그 창을 몰라 실패한다.
+          pullFrame={normal}
+        />
+      </TitleRow>
       <div ref={canvasRef} style={{ flex: 1, position: 'relative', minHeight: 0 }}>
         {framed && <SpareCanvas />}
         {tabs.map(tab => (
