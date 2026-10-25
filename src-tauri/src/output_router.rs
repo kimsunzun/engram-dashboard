@@ -186,7 +186,7 @@ impl OutputRouter {
 //   풀기를 같은 락 안에서 맡는다. registry 떼기(Tauri 부분)는 `cleanup_popup_window` 몫이다.
 //
 // - `label == MAIN_WINDOW_LABEL`: 정리 대상 아님(불변식 4) — no-op, 빈 델타(방어적, 호출자도 선차단).
-// - `windows` 에 `label` 없음(close_tab/close_window command 나 팝아웃 닫기 요청이 먼저 모델을 지운 정상 경로):
+// - `windows` 에 `label` 없음(close_tab · 창 닫기(`apply::close_window`)나 팝아웃 닫기 요청이 먼저 모델을 지운 정상 경로):
 //   close 스킵, `rebuild` 만 1회(계약상 표 재계산). Destroyed 는 그 뒤 OS 이벤트라 모델엔 이미 없다.
 // - `windows` 에 `label` 있음(팝아웃 닫기 요청 · 닫기 요청 없이 온 `Destroyed` — 멀티탭 잔류 위험, G1):
 //   tabs 전부 순회 드롭 후 `rebuild`. 창 번호는 `cause` 가 가른다 — 닫기 요청이면 OS 창이 아직 있어 그 `Destroyed`
@@ -782,7 +782,7 @@ mod tests {
 
     #[test]
     fn cleanup_core_already_removed_window_only_rebuilds() {
-        // 정상 경로: close_window command 가 먼저 모델을 지운 뒤 OS Destroyed 가 뒤늦게 도착 →
+        // 정상 경로: 창 닫기(`apply::close_window`)가 먼저 모델을 지운 뒤 OS Destroyed 가 뒤늦게 도착 →
         //   windows 에 label 없음 → close 스킵, rebuild 만(빈 델타 — 이미 라우팅에서 빠졌으니).
         let mut mgr = ViewManager::new();
         let (aid, astr) = agent();

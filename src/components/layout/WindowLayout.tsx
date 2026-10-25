@@ -20,12 +20,8 @@ import { listen } from '@tauri-apps/api/event'
 import { invoke } from '@tauri-apps/api/core'
 
 import type { ViewMeta, ViewSnapshot } from '../../api/layoutTypes'
-import {
-  getCurrentWindow,
-  selectView,
-  useViewStore,
-  type WindowTabsPayload,
-} from '../../store/viewStore'
+import { fireAndForget } from '../../commands/dispatch'
+import { selectView, useViewStore, type WindowTabsPayload } from '../../store/viewStore'
 import { REPORT_DEBOUNCE_MS } from '../../util/latestValueReporter'
 import { retryAsync, RetryCancelledError } from '../../util/retryInvoke'
 import {
@@ -67,6 +63,7 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
   const renameTab = useViewStore(s => s.renameTab)
 
   const closingRef = useRef(false)
+  const windowIdRef = useRef<string | null>(null)
   const canvasElRef = useRef<HTMLDivElement | null>(null)
   const reportCanvas = useWindowCanvasReport()
   const canvasRef = useCallback(
@@ -228,25 +225,36 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
   }, [tabIdsKey, applyLayoutUpdated])
 
   // ── 0탭 자가닫힘 = ★방어적 idempotent fallback★(S4-F3, §5-2/G2) ─────────────────────────────────
-  // ★이 경로는 정상 흐름에선 dead 다★: 팝업 마지막 탭을 닫으면 백엔드 close_tab 이 WindowClosed 로 분류해
-  //   close_window→destroy_window 로 OS 창을 *직접 파괴*한다(commands/layout.rs — WindowClosed 분기는
-  //   emit 을 (None,None) 으로 두어 window:tabs-updated{tabs:[]} 를 프론트에 안 쏜다). 즉 정상 닫힘의 주
-  //   경로는 백엔드 destroy 이고, 프론트는 tabs:[] 신호를 받지 못한다.
+  // ★이 경로는 정상 흐름에선 dead 다★: 팝업 마지막 탭을 닫으면 셸 close_tab 이 WindowClosed 로 분류해
+  //   OS 창을 *직접 파괴*한다(`layout/apply.rs` `close_tab` — WindowClosed 분기는 emit 을 (None,None) 으로 두어
+  //   window:tabs-updated{tabs:[]} 를 프론트에 안 쏜다). 즉 정상 닫힘의 주 경로는 셸 destroy 이고, 프론트는
+  //   tabs:[] 신호를 받지 못한다.
   // 그래도 이 분기를 남기는 이유(제거 X): 어떤 비정상 경로로든 tabs 가 0인 window:tabs-updated 가 프론트에
-  //   닿으면(방어), 여기서 idempotent 하게 자기 창을 한 번만 닫아 stranded 창을 정리한다(main 은 백엔드가
-  //   빈 탭을 강제 유지하므로 0이 안 됨). ★재진입 가드(closingRef)★: 이미 닫히는 중이면 no-op.
+  //   닿으면(방어), 자기 창을 한 번만 닫아 달라고 셸에 청해 stranded 창을 정리한다(main 은 백엔드가 빈 탭을 강제
+  //   유지하므로 0이 안 됨). ★재진입 가드(closingRef)★: 청한 뒤 탭이 다시 올 때까지는 no-op.
+  // ★닫기는 셸이 판정한다 — 웹이 창 API 로 닫지 않는다★(TRD S26-window-chrome §5-5 · AC10 · 팝아웃 권한에 창 닫기가 없다):
+  //   `window.close { if_empty }` 는 그 창이 모델에 다시 있으면(그사이 탭이 들어왔다) 닫지 않는다. 그 판정이 영속 id 로
+  //   찾으므로 탭이 있던 때 받아 둔 id 만 넘긴다(§5-5) — 탭 0 개 창은 이미 모델에서 빠져 있다. 받아 둔 id 가 없으면(이
+  //   화면이 그 창의 탭을 본 적이 없다) 청하지 않는다.
   // ★보통 모드에서만★ — 대기 창은 탭 0 개가 정상이다(TRD S21-slot-docking §3-9). 모드를 모르는 동안 온 0탭은 모드가
   //   정해진 뒤 다시 본다.
   // ADR-0295
   useEffect(() => {
     if (!normal || !win) return
-    if (win.tabs.length === 0 && !closingRef.current) {
-      closingRef.current = true
-      getCurrentWindow()
-        .close()
-        .catch(err => console.warn('[WindowLayout] 0탭 자가닫힘 실패:', err))
+    if (win.tabs.length > 0) {
+      windowIdRef.current = win.windowId
+      closingRef.current = false
+      return
     }
-  }, [win, normal])
+    if (closingRef.current) return
+    const windowId = windowIdRef.current
+    if (!windowId) {
+      console.warn(`[WindowLayout] 0탭 자가닫힘 — ${label} 이 탭을 가진 때의 window_id 가 없어 청하지 않는다`)
+      return
+    }
+    closingRef.current = true
+    fireAndForget('window.close', { window: windowId, if_empty: true })
+  }, [win, normal, label])
 
   if (!tabs) {
     // 로딩 플레이스홀더가 뜨는 경우: 부팅 직후 pull 전, 또는 유효 label 못 찾음(dev 리로드 stale 팝업,

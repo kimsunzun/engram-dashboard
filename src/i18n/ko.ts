@@ -50,6 +50,12 @@ export const ko = {
   window: {
     create: '새 창',
     close: '창 닫기',
+    minimize: '창 최소화',
+    maximize: '창 최대화',
+    unmaximize: '창 원래 크기로',
+    raise: '창 앞으로 내기',
+    hideAll: '모든 창 숨기기',
+    showAll: '모든 창 보이기',
     // ADR-0102: 부팅 pull(list_tabs) 유계 재시도 소진 후 최종 실패 표면화(조용히 로딩에 고착 금지).
     loadFailed: '창을 불러오지 못했습니다 (label: {label}). 백엔드 연결을 확인하세요.',
     renderFailed: '화면을 그리는 중 오류가 났습니다',

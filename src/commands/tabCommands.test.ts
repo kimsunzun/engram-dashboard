@@ -3,9 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(async () => undefined) }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => vi.fn()) }))
-vi.mock('@tauri-apps/api/window', () => ({
-  getCurrentWindow: () => ({ close: vi.fn(async () => undefined), label: () => 'main' }),
-}))
 
 import { invoke } from '@tauri-apps/api/core'
 
@@ -13,7 +10,7 @@ import './tabCommands' // side-effect register
 import { run } from './registry'
 import { useViewStore } from '../store/viewStore'
 import type { WindowTabsPayload } from '../store/viewStore'
-import type { LayoutNode } from '../api/layoutTypes'
+import type { LayoutNode, WindowControlAction, WindowControlOutcome } from '../api/layoutTypes'
 
 const POPUP = 'slot-popup-0a1b2c3d-1'
 const POPUP_ID = '7d2f0b8e-1c3a-4f5e-9b6d-2a4c6e8f0a1b'
@@ -49,7 +46,16 @@ const switchTabSpy = vi.fn(async () => undefined)
 const closeTabSpy = vi.fn(async () => undefined)
 const NEW_WINDOW = { window: 'slot-popup-0a1b2c3d-1', window_id: '7d2f0b8e-1c3a-4f5e-9b6d-2a4c6e8f0a1b', number: 2 }
 const createWindowSpy = vi.fn(async () => NEW_WINDOW)
-const closeWindowSpy = vi.fn(async () => undefined)
+/** 셸 `window_control` 답 흉내 — 모든 칸이 참이라 명령마다 버스 답 모양으로 깎였는지가 보인다. `close` 는 main = 숨김. */
+const controlWindowSpy = vi.fn(
+  async (window: string, action: WindowControlAction, ifEmpty?: boolean): Promise<WindowControlOutcome> => ({
+    deferred: true,
+    pending: true,
+    shown_all: true,
+    focused: true,
+    close: action !== 'close' ? null : window === 'main' ? 'hidden_all' : ifEmpty ? 'kept' : 'closed',
+  }),
+)
 const renameTabSpy = vi.fn(async () => undefined)
 
 const origHash = window.location.hash
@@ -61,7 +67,7 @@ beforeEach(() => {
   switchTabSpy.mockClear()
   closeTabSpy.mockClear()
   createWindowSpy.mockClear()
-  closeWindowSpy.mockClear()
+  controlWindowSpy.mockClear()
   renameTabSpy.mockClear()
   window.location.hash = '#/' // main 창 컨텍스트
   useViewStore.setState({
@@ -70,7 +76,7 @@ beforeEach(() => {
     switchTab: switchTabSpy,
     closeTab: closeTabSpy,
     createWindow: createWindowSpy,
-    closeWindow: closeWindowSpy,
+    controlWindow: controlWindowSpy,
     renameTab: renameTabSpy,
   })
 })
@@ -177,20 +183,100 @@ describe('tabCommands 라우팅 (window 해소)', () => {
     expect(createWindowSpy).toHaveBeenCalledTimes(1)
   })
 
-  it('window.close(window 생략) → closeWindow(이 창=main)', () => {
-    run('window.close')
-    expect(closeWindowSpy).toHaveBeenCalledWith('main')
+  it('window.close(window 생략) → window_control close(이 창=main) · 답 = 버스 철자 outcome', async () => {
+    await expect(run('window.close')).resolves.toEqual({ outcome: 'HiddenAll' })
+    expect(controlWindowSpy).toHaveBeenCalledWith('main', 'close', false)
+  })
+
+  it('window.close(팝아웃 window_id) → 답 outcome = Closed', async () => {
+    await expect(run('window.close', { window: POPUP_ID })).resolves.toEqual({ outcome: 'Closed' })
+    expect(controlWindowSpy).toHaveBeenCalledWith(POPUP_ID, 'close', false)
+  })
+
+  it('window.close(if_empty = true · window_id) → ifEmpty 를 실어 보낸다 · 답 outcome = Kept', async () => {
+    await expect(run('window.close', { window: POPUP_ID, if_empty: true })).resolves.toEqual({ outcome: 'Kept' })
+    expect(controlWindowSpy).toHaveBeenCalledWith(POPUP_ID, 'close', true)
+  })
+
+  it('window.close(if_empty = true · window 생략) → throw — 이 창 label 로 떨어지면 셸이 아무것도 못 찾는다', () => {
+    for (const w of [undefined, null]) {
+      expect(() => run('window.close', { window: w, if_empty: true })).toThrow(/^\[window\.close\] if_empty 에는 window/)
+    }
+    expect(controlWindowSpy).not.toHaveBeenCalled()
+  })
+
+  it('window.close(if_empty 가 boolean 아님) → throw', () => {
+    for (const ifEmpty of ['true', 1]) {
+      expect(() => run('window.close', { window: POPUP_ID, if_empty: ifEmpty })).toThrow(
+        /^\[window\.close\] if_empty 는 boolean/,
+      )
+    }
+    expect(controlWindowSpy).not.toHaveBeenCalled()
+  })
+
+  // ── 창 상태 명령 — 셸 버스와 같은 id · 같은 답 모양(TRD S26-window-chrome §6-1 · §6-4) ──
+  it.each([
+    ['window.minimize', 'minimize', {}],
+    ['window.maximize', 'maximize', { deferred: true }],
+    ['window.unmaximize', 'unmaximize', { deferred: true }],
+    ['window.raise', 'raise', { shown_all: true, focused: true, pending: true }],
+  ] as const)('%s → window_control %s(그 창) · 답 = 버스 답 칸만', async (id, action, answer) => {
+    await expect(run(id, { window: POPUP_ID })).resolves.toEqual(answer)
+    expect(controlWindowSpy).toHaveBeenCalledWith(POPUP_ID, action)
+    await run(id)
+    expect(controlWindowSpy).toHaveBeenLastCalledWith('main', action)
+  })
+
+  it.each([
+    ['window.hideAll', 'hide_all', {}],
+    ['window.showAll', 'show_all', { focused: true }],
+  ] as const)('%s → window_control %s · window 인자로 창을 고르지 않고 이 창 label 을 채운다', async (id, action, answer) => {
+    window.location.hash = `#/popup?window=${POPUP}`
+    for (const w of [undefined, null, 'main', POPUP_ID]) {
+      controlWindowSpy.mockClear()
+      await expect(run(id, { window: w })).resolves.toEqual(answer)
+      expect(controlWindowSpy).toHaveBeenCalledWith(POPUP, action)
+    }
+  })
+
+  it.each(['window.hideAll', 'window.showAll'])('%s 도 준 window 가 빈 값 · 문자열 아님이면 던진다', id => {
+    for (const w of ['', '   ', 2]) {
+      expect(() => run(id, { window: w })).toThrow(new RegExp(`^\\[${id.replace('.', '\\.')}\\] window 는 비어 있지 않은`))
+    }
+    expect(controlWindowSpy).not.toHaveBeenCalled()
+  })
+
+  it('창 상태 명령도 빈 window 는 이 창으로 접지 않는다', () => {
+    expect(() => run('window.maximize', { window: '  ' })).toThrow(/^\[window\.maximize\] window 는 비어 있지 않은/)
+    expect(controlWindowSpy).not.toHaveBeenCalled()
+  })
+
+  it.each(['window.minimize', 'window.maximize', 'window.unmaximize', 'window.raise', 'window.hideAll', 'window.showAll'])(
+    '%s 의 셸 거절(문자열)은 명령 이름을 붙인 Error 로 던진다',
+    async id => {
+      controlWindowSpy.mockRejectedValueOnce('창 번호는 창 인자로 받지 않는다')
+      const err = await Promise.resolve(run(id, { window: POPUP_ID })).catch((e: unknown) => e)
+      expect(err).toBeInstanceOf(Error)
+      expect((err as Error).message).toBe(`[${id}] 창 번호는 창 인자로 받지 않는다`)
+    },
+  )
+
+  it('window.close 의 셸 거절(문자열)도 명령 이름을 붙인 Error 로 던진다', async () => {
+    controlWindowSpy.mockRejectedValueOnce('window 없음: w-9')
+    const err = await Promise.resolve(run('window.close', { window: 'w-9', if_empty: true })).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(Error)
+    expect((err as Error).message).toBe('[window.close] window 없음: w-9')
   })
 
   // ── 빈 window 인자는 이 창으로 접지 않는다 ──
   it('window: undefined → 이 창(main)으로 떨어진다', () => {
     run('window.close', { window: undefined })
-    expect(closeWindowSpy).toHaveBeenCalledWith('main')
+    expect(controlWindowSpy).toHaveBeenCalledWith('main', 'close', false)
   })
 
   it('window: null → undefined 처럼 이 창(main)으로 떨어진다', () => {
     run('window.close', { window: null })
-    expect(closeWindowSpy).toHaveBeenCalledWith('main')
+    expect(controlWindowSpy).toHaveBeenCalledWith('main', 'close', false)
   })
 
   it('window 가 BigInt · 순환 객체여도 명령 접두를 단 오류로 던진다', () => {
@@ -207,7 +293,7 @@ describe('tabCommands 라우팅 (window 해소)', () => {
       expect(() => run('window.close', { window: w })).toThrow(/^\[window\.close\] window 는 비어 있지 않은 문자열/)
       expect(() => run('tab.create', { window: w })).toThrow(/^\[tab\.create\] window/)
     }
-    expect(closeWindowSpy).not.toHaveBeenCalled()
+    expect(controlWindowSpy).not.toHaveBeenCalled()
     expect(createTabSpy).not.toHaveBeenCalled()
   })
 

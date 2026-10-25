@@ -21,9 +21,8 @@ vi.mock('@tauri-apps/api/core', () => ({
 }))
 
 // ── getCurrentWindow mock ──
-const closeMock = vi.fn(async () => undefined)
 vi.mock('@tauri-apps/api/window', () => ({
-  getCurrentWindow: () => ({ close: closeMock, label: () => 'slot-popup-1' }),
+  getCurrentWindow: () => ({ label: () => 'slot-popup-1' }),
 }))
 
 // ── WindowLayout stub — 내부 로직은 WindowLayout.test 가 커버 ──
@@ -61,7 +60,6 @@ const origHash = window.location.hash
 beforeEach(() => {
   listeners.clear()
   unlistenMock.mockClear()
-  closeMock.mockClear()
   invokeMock.mockReset()
   invokeMock.mockImplementation(async () => undefined)
   window.location.hash = `#/popup?window=${POPUP_LABEL}`
@@ -85,7 +83,6 @@ describe('PopoutPage (탭 소유 모델, ADR-0057)', () => {
     render(<PopoutPage />)
     // 옛 버그: view:closed 리스너로 창 자가종료 → 이중 발화/재진입.
     expect(listeners.has('view:closed')).toBe(false)
-    expect(closeMock).not.toHaveBeenCalled()
   })
 })
 

@@ -40,12 +40,15 @@ vi.mock('@tauri-apps/api/core', () => ({
 const reportFirstPaintMock = vi.hoisted(() => vi.fn())
 vi.mock('../../theme/firstPaint', () => ({ reportFirstPaint: reportFirstPaintMock }))
 
-// ── getCurrentWindow mock — 0탭 자가닫힘 관측 · 사건 구독 대상 label ──
-const closeMock = vi.fn(async () => undefined)
+// ── getCurrentWindow mock — 사건 구독 대상 label ──
 const currentWindow = vi.hoisted(() => ({ label: 'main' }))
 vi.mock('@tauri-apps/api/window', () => ({
-  getCurrentWindow: () => ({ close: closeMock, label: currentWindow.label }),
+  getCurrentWindow: () => ({ label: currentWindow.label }),
 }))
+
+/** 0탭 자가닫힘 관측 — 셸에 청한 창 닫기(`window_control`). */
+const closeCalls = () => invokeMock.mock.calls.filter(c => c[0] === 'window_control')
+const KEPT = { deferred: false, pending: false, shown_all: false, focused: false, close: 'kept' }
 
 // ── ViewLayoutRenderer stub — 캔버스 내부는 관심 밖(어느 view 를 그리는지만 관측) + ★mount 카운터★.
 // ★S4-F5 keep-alive no-remount★: 슬롯 컴포넌트가 탭 전환에 remount 되지 않는지(터미널 인스턴스 생존)를
@@ -70,6 +73,7 @@ vi.mock('./ViewLayoutRenderer', async () => {
 
 vi.mock('@tauri-apps/api/app', () => ({ getIdentifier: async () => 'com.engram.test' }))
 
+import '../../commands/tabCommands' // 0탭 자가닫힘이 부르는 `window.close` 등록(운영은 `App.tsx` 의 contributions)
 import WindowLayout from './WindowLayout'
 import { __resetCanvasReportForTest } from './windowCanvasReport'
 import { __resetUiMetricsReportForTest } from './uiMetricsReport'
@@ -108,7 +112,6 @@ beforeEach(() => {
   windowRoleMock.mockReset()
   windowRoleMock.mockImplementation(async () => ({ role: 'model', generation: null }))
   unlistenMock.mockClear()
-  closeMock.mockClear()
   reportFirstPaintMock.mockReset()
   invokeMock.mockReset()
   mountCounts.clear()
@@ -120,12 +123,14 @@ beforeEach(() => {
     if (cmd === 'list_tabs') {
       return {
         label: (args as { window: string }).window,
+        window_id: `wid-${(args as { window: string }).window}`,
         tabs: [{ id: 'v1', name: 'Tab 1', named: true }, { id: 'v2', name: 'Tab 2', named: true }],
         active: 'v1',
         version: 1,
       }
     }
     if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+    if (cmd === 'window_control') return KEPT
     return undefined
   })
 })
@@ -445,22 +450,63 @@ describe('WindowLayout — keep-alive no-remount(ADR-0056, S4-F5)', () => {
   })
 })
 
-describe('WindowLayout — 0탭 자가닫힘(§5-2/G2)', () => {
-  it('0탭 신호(window:tabs-updated{tabs:[]}) → getCurrentWindow().close()', async () => {
+describe('WindowLayout — 0탭 자가닫힘(§5-2/G2 · TRD S26-window-chrome §5-5)', () => {
+  const CLOSE_IF_EMPTY = ['window_control', { window: 'wid-slot-popup-1', action: 'close', ifEmpty: true }]
+
+  it('0탭 신호(window:tabs-updated{tabs:[]}) → 레지스트리 window.close{if_empty} 를 탭이 있던 때 받은 window_id 로', async () => {
     render(<WindowLayout label="slot-popup-1" />)
     await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
-    emit('window:tabs-updated', { label: 'slot-popup-1', tabs: [], active: 'v1', version: 5 })
-    await waitFor(() => expect(closeMock).toHaveBeenCalledTimes(1))
+    // 0탭 페이로드의 window_id 는 쓰지 않는다 — 탭이 있던 때 받아 둔 값만 쓴다.
+    emit('window:tabs-updated', { label: 'slot-popup-1', window_id: 'other', tabs: [], active: 'v1', version: 5 })
+    await waitFor(() => expect(closeCalls()).toEqual([CLOSE_IF_EMPTY]))
   })
 
-  it('0탭 신호가 두 번 와도 close 는 한 번만(idempotent 재진입 가드)', async () => {
+  it('0탭 신호가 두 번 와도 청하기는 한 번만(idempotent 재진입 가드)', async () => {
     render(<WindowLayout label="slot-popup-1" />)
     await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
     emit('window:tabs-updated', { label: 'slot-popup-1', tabs: [], active: 'v1', version: 5 })
     emit('window:tabs-updated', { label: 'slot-popup-1', tabs: [], active: 'v1', version: 6 })
-    await waitFor(() => expect(closeMock).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(closeCalls()).toHaveLength(1))
     await Promise.resolve()
-    expect(closeMock).toHaveBeenCalledTimes(1)
+    expect(closeCalls()).toHaveLength(1)
+  })
+
+  it('청한 뒤 탭이 다시 오면(셸이 닫지 않았다 — Kept) 다음 0탭에 다시 청한다', async () => {
+    render(<WindowLayout label="slot-popup-1" />)
+    await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
+    emit('window:tabs-updated', { label: 'slot-popup-1', tabs: [], active: 'v1', version: 5 })
+    await waitFor(() => expect(closeCalls()).toHaveLength(1))
+    act(() =>
+      emit('window:tabs-updated', {
+        label: 'slot-popup-1',
+        window_id: 'wid-slot-popup-1',
+        tabs: [{ id: 'v1', name: 'Tab 1', named: true }],
+        active: 'v1',
+        version: 6,
+      }),
+    )
+    emit('window:tabs-updated', { label: 'slot-popup-1', tabs: [], active: 'v1', version: 7 })
+    await waitFor(() => expect(closeCalls()).toEqual([CLOSE_IF_EMPTY, CLOSE_IF_EMPTY]))
+  })
+
+  it.each([
+    ['window_id 없음', undefined],
+    ['0탭 페이로드의 window_id 뿐', 'wid-0tab'],
+  ])('탭이 있던 때의 window_id 가 없으면 청하지 않는다(%s)', async (_case, windowId) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+        if (cmd === 'list_tabs') return { label: 'slot-popup-1', window_id: windowId, tabs: [], active: '', version: 1 }
+        if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+        if (cmd === 'window_control') return KEPT
+        return undefined
+      })
+      render(<WindowLayout label="slot-popup-1" />)
+      await waitFor(() => expect(warn).toHaveBeenCalledWith(expect.stringMatching(/window_id 가 없어 청하지 않는다/)))
+      expect(closeCalls()).toEqual([])
+    } finally {
+      warn.mockRestore()
+    }
   })
 })
 
@@ -1261,7 +1307,7 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
       useViewStore.getState().applyWindowTabsUpdated({ label: SPARE, window_id: 'w-spare', number: 2, title: 'Engram:2', tabs: [], active: '', version: 9 }),
     )
     await new Promise(res => setTimeout(res, 20))
-    expect(closeMock).not.toHaveBeenCalled()
+    expect(closeCalls()).toEqual([])
     expect(screen.getByTestId('spare-canvas')).toBeTruthy()
   })
 
@@ -1285,8 +1331,10 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
 
   it('spare:adopted → 보통 모드: list_tabs 로 들인 탭을 당겨 그리고, 0탭 자가닫힘이 다시 산다', async () => {
     invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
-      if (cmd === 'list_tabs') return { label: SPARE, tabs: [{ id: 'p1', name: 'Pop', named: true }], active: 'p1', version: 3 }
+      if (cmd === 'list_tabs')
+        return { label: SPARE, window_id: 'w-spare', tabs: [{ id: 'p1', name: 'Pop', named: true }], active: 'p1', version: 3 }
       if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+      if (cmd === 'window_control') return KEPT
       return undefined
     })
     await mountSpare()
@@ -1299,7 +1347,9 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
     expect(screen.queryByTestId('spare-canvas')).toBeNull()
 
     emit('window:tabs-updated', { label: SPARE, tabs: [], active: 'p1', version: 4 })
-    await waitFor(() => expect(closeMock).toHaveBeenCalledTimes(1))
+    await waitFor(() =>
+      expect(closeCalls()).toEqual([['window_control', { window: 'w-spare', action: 'close', ifEmpty: true }]]),
+    )
   })
 
   it('대기 창은 창 사실(window_frame)을 당기지 않는다 — 셸 창 모델 밖이다 · 들이면 당긴다', async () => {
@@ -1397,11 +1447,11 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
       useViewStore.getState().applyWindowTabsUpdated({ label: SPARE, window_id: 'w-spare', number: 2, title: 'Engram:2', tabs: [], active: '', version: 9 }),
     )
     await new Promise(res => setTimeout(res, 20))
-    expect(closeMock).not.toHaveBeenCalled()
+    expect(closeCalls()).toEqual([])
 
     await act(async () => answer({ role: 'spare', generation: null }))
     expect(screen.getByTestId('spare-canvas')).toBeTruthy()
-    expect(closeMock).not.toHaveBeenCalled()
+    expect(closeCalls()).toEqual([])
   })
 })
 

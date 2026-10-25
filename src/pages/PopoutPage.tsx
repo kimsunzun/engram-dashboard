@@ -6,8 +6,9 @@
 //   label 만 뽑아 넘기는 껍데기다.
 //
 // ★view:closed 은퇴(G2)★: 옛 "자기 view 가 닫히면 창 자가종료"(view:closed 리스너)는 제거됐다. 창 닫힘은
-//   백엔드 close_window 단일 소스(§5-2)이고, 프론트 자가닫힘은 WindowLayout 의 window:tabs-updated{tabs:[]}
-//   (0탭) 신호로만 일어난다(이중 발화·재진입 방지). 이 페이지엔 자가종료 로직이 없다.
+//   셸 몫이고(마지막 탭 닫기 · invoke `window_control` · 버스 `window.close` — TRD S26-window-chrome §5-4 · §5-5),
+//   프론트 자가닫힘은 WindowLayout 의 window:tabs-updated{tabs:[]}(0탭) 신호로 셸에 청하는 것뿐이다(이중 발화·재진입
+//   방지). 이 페이지엔 자가종료 로직이 없다.
 //
 // ★출력 구독은 자동★: 이 창은 자기 TauriTransport 싱글톤(별 WebView2 프로세스라 모듈 그래프가 신선)이
 //   connected 전이에서 subscribe_output 을 자기 window_label 로 등록한다 → 이 창 tabs 의 agent 출력이

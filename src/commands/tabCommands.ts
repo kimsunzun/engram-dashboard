@@ -6,7 +6,13 @@
 
 import { invoke } from '@tauri-apps/api/core'
 
-import type { LayoutNode, SlotContent } from '../api/layoutTypes'
+import type {
+  LayoutNode,
+  SlotContent,
+  WindowCloseResult,
+  WindowControlAction,
+  WindowControlOutcome,
+} from '../api/layoutTypes'
 import { t } from '../i18n'
 import { matchDeclaredSpelling } from './enumArg'
 import { register } from './registry'
@@ -36,18 +42,24 @@ function describeArg(v: unknown): string {
   }
 }
 
-/**
- * 창 인자 `window` 의 탭 목록을 셸에서 받는다 — 셸이 버스와 같은 해석기로 그 인자를 푼다(window_id · 같은 실행 안 label
- * 을 받고 번호는 거절 — TRD S26-window-chrome §4-5). 답의 `label` 이 푼 창이다. ★웹 스토어(`windows`)로 고르지 말
- * 것★ — 그 키는 label 뿐이라 window_id 를 받으면 아무 창도 못 찾아 조용히 아무 일도 안 한다. 셸 거절(invoke 는 문자열로
- * 거절한다)은 명령 이름을 붙인 Error 로 던진다.
- */
-async function listTabsOf(cmd: string, window: string): Promise<WindowTabsPayload> {
+// 셸 거절(invoke 는 문자열로 거절한다)을 명령 이름을 붙인 Error 로 바꾼다 — 버스 답의 오류 문구가 어느 명령의 것인지
+//   보이게.
+async function tagShellRejection<T>(cmd: string, call: Promise<T>): Promise<T> {
   try {
-    return await invoke<WindowTabsPayload>('list_tabs', { window })
+    return await call
   } catch (e) {
     throw new Error(`[${cmd}] ${e instanceof Error ? e.message : String(e)}`)
   }
+}
+
+/**
+ * 창 인자 `window` 의 탭 목록을 셸에서 받는다 — 셸이 버스와 같은 해석기로 그 인자를 푼다(window_id · 같은 실행 안 label
+ * 을 받고 번호는 거절 — TRD S26-window-chrome §4-5). 답의 `label` 이 푼 창이다. ★웹 스토어(`windows`)로 고르지 말
+ * 것★ — 그 키는 label 뿐이라 window_id 를 받으면 아무 창도 못 찾아 조용히 아무 일도 안 한다. 셸 거절은 명령 이름을
+ * 붙인 Error 로 던진다.
+ */
+function listTabsOf(cmd: string, window: string): Promise<WindowTabsPayload> {
+  return tagShellRejection(cmd, invoke<WindowTabsPayload>('list_tabs', { window }))
 }
 
 register({
@@ -146,12 +158,73 @@ register({
   run: () => useViewStore.getState().createWindow(),
 })
 
+// ── 창 상태 명령(TRD S26-window-chrome §6-4) ──
+// 셸 버스 표와 같은 id 다 — ★`help` 를 달지 않는다★(같은 이름을 데몬 명부에 다시 올리면 등록 패킷이 통째로 반려된다 —
+//   `viewCommandBridge.ts` 의 `offeredCommands`). 모두 invoke `window_control` 하나로 가고, 답은 같은 id 의 버스 답
+//   모양으로 깎는다 — 두 표면에서 같은 명령이 다른 칸을 돌려주지 않게.
+
+// 버스 `window.close` 의 `outcome` 철자 — invoke 답의 `close` 는 snake_case 다.
+const CLOSE_OUTCOME: Record<WindowCloseResult, 'Closed' | 'HiddenAll' | 'Kept'> = {
+  closed: 'Closed',
+  hidden_all: 'HiddenAll',
+  kept: 'Kept',
+}
+
+function registerWindowControl(
+  id: string,
+  title: string,
+  action: WindowControlAction,
+  answer: (outcome: WindowControlOutcome) => Record<string, unknown>,
+): void {
+  // 모든 창 동사(`hide_all` · `show_all`)는 버스처럼 `window` 인자로 창을 고르지 않는다 — invoke 가 요구하는 칸은 이 창
+  //   label 로 채운다(셸은 그 값으로 창을 고르지 않는다). 그래도 준 `window` 의 모양은 resolveWindow 로 본다 — 빈 인자는
+  //   대개 안 채운 셸 변수라 다른 창 동사와 같이 던진다.
+  const allWindows = action === 'hide_all' || action === 'show_all'
+  register({
+    id,
+    title,
+    category: 'window',
+    run: args => {
+      const target = resolveWindow(id, args)
+      return tagShellRejection(
+        id,
+        useViewStore.getState().controlWindow(allWindows ? readWindowLabelFromHash() : target, action),
+      ).then(answer)
+    },
+  })
+}
+
+registerWindowControl('window.minimize', t('window.minimize'), 'minimize', () => ({}))
+registerWindowControl('window.maximize', t('window.maximize'), 'maximize', o => ({ deferred: o.deferred }))
+registerWindowControl('window.unmaximize', t('window.unmaximize'), 'unmaximize', o => ({ deferred: o.deferred }))
+registerWindowControl('window.raise', t('window.raise'), 'raise', o => ({
+  shown_all: o.shown_all,
+  focused: o.focused,
+  pending: o.pending,
+}))
+registerWindowControl('window.hideAll', t('window.hideAll'), 'hide_all', () => ({}))
+registerWindowControl('window.showAll', t('window.showAll'), 'show_all', o => ({ focused: o.focused }))
+
 register({
   id: 'window.close',
   title: t('window.close'),
   category: 'window',
-  // main 은 백엔드가 거부(hide only, 불변식 4).
-  run: args => useViewStore.getState().closeWindow(resolveWindow('window.close', args)),
+  // 팝아웃 = 닫기 · main = 모든 창 숨기기(셸이 가른다 — TRD §5-4). `if_empty` 는 버스와 같은 이름 · 같은 뜻(§5-5)이고, 그때
+  //   `window` 를 생략하면 이 창 label 로 떨어져 window_id 로만 찾는 셸이 아무것도 닫지 않으므로(답 `Kept`) 던진다.
+  run: args => {
+    const raw = args?.if_empty
+    if (raw !== undefined && raw !== null && typeof raw !== 'boolean') {
+      throw new Error(`[window.close] if_empty 는 boolean 이어야 함(받음: ${describeArg(raw)})`)
+    }
+    const ifEmpty = raw === true
+    if (ifEmpty && (args?.window === undefined || args.window === null)) {
+      throw new Error('[window.close] if_empty 에는 window(그 창의 window_id)가 필요하다')
+    }
+    return tagShellRejection(
+      'window.close',
+      useViewStore.getState().controlWindow(resolveWindow('window.close', args), 'close', ifEmpty),
+    ).then(o => ({ outcome: o.close === null ? null : CLOSE_OUTCOME[o.close] }))
+  },
 })
 
 /** tab/slot 는 백엔드 ViewId/slot id(Uuid) 라 형식이 맞아야 한다. */

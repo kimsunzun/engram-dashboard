@@ -21,3 +21,7 @@ export type { SplitRatioOutcome } from '../../src-tauri/bindings/SplitRatioOutco
 export type { UiMetrics } from '../../src-tauri/bindings/UiMetrics'
 // TRD S26-window-chrome §3-2: 새 창 답(`create_window`) — label · 영속 id · 번호.
 export type { NewWindow } from '../../src-tauri/bindings/NewWindow'
+// TRD S26-window-chrome §6-4: 창 상태 동작(`window_control`)의 인자 · 답.
+export type { WindowControlAction } from '../../src-tauri/bindings/WindowControlAction'
+export type { WindowControlOutcome } from '../../src-tauri/bindings/WindowControlOutcome'
+export type { WindowCloseResult } from '../../src-tauri/bindings/WindowCloseResult'

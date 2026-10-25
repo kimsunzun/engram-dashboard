@@ -475,7 +475,6 @@ pub fn run() {
             // 탭 끌기의 원래 선택 되돌리기(웹뷰 → 셸 · TRD S21-slot-docking §4-6) — 버스 명령이 아니다.
             commands::switch_tab_if,
             commands::close_tab,
-            commands::close_window,
             commands::split_slot,
             commands::set_split_ratio,
             commands::close_slot,
@@ -501,6 +500,8 @@ pub fn run() {
             commands::tab_drop::tab_drop,
             commands::tab_drop::window_frame,
             // 창 상태(사람 길 — 웹 단추 · 레지스트리) — 버스 `window.*` 와 같은 서비스(TRD S26-window-chrome §6-4).
+            //   ★창 닫기 전용 invoke 를 따로 두지 않는다★ — main 의 닫기는 모든 창 숨기기라(§5-4) 닫기 길이 둘이면 그 판정이
+            //   갈린다.
             commands::window_ctl::window_control,
             // 부팅 조회 — 미는 쪽(`window.setTheme` · `theme.default` 쓰기 · 부팅 · 복원 수락)은 따로 있다
             //   (`commands/settings.rs` 「창별 테마를 읽는 자리가 둘인 이유」).

@@ -401,27 +401,6 @@ pub async fn close_tab(
     )
 }
 
-// 창 `window` 통째 닫기(모든 탭). 모델에서 창을 지운 뒤 OS 창을 destroy 한다.
-#[tauri::command]
-pub async fn close_window(
-    app: AppHandle,
-    state: State<'_, LayoutState>,
-    router: State<'_, Arc<OutputRouter>>,
-    client: State<'_, Arc<DaemonClient>>,
-    window: String,
-) -> Result<(), String> {
-    let window = resolve_window(&state, &window)?;
-    apply::close_window(
-        &state,
-        &RouterSubs {
-            router: &router,
-            client: &client,
-        },
-        &TauriWindowHost { app: &app },
-        &window,
-    )
-}
-
 // 새 슬롯 id 반환.
 #[tauri::command]
 pub fn split_slot(

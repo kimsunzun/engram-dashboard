@@ -28,12 +28,6 @@ vi.mock('@tauri-apps/api/event', () => ({
   listen: (event: string, handler: (e: { payload: unknown }) => void) => listenMock(event, handler),
 }))
 
-// getCurrentWindow mock — currentViewId/useCurrentViewId 는 URL 로 창을 판정하므로 이 mock 은 미사용이나,
-// viewStore 가 re-export 하는 getCurrentWindow(팝업 자가닫힘용)의 import 해소를 위해 stub.
-vi.mock('@tauri-apps/api/window', () => ({
-  getCurrentWindow: () => ({ close: vi.fn(async () => undefined), label: () => 'main' }),
-}))
-
 import {
   currentViewId,
   initMainWindowFromBackend,
@@ -129,14 +123,25 @@ describe('viewStore 탭/창 액션 → invoke (탭 소유 모델, ADR-0057)', ()
     expect(invokeMock).toHaveBeenCalledWith('rename_tab', { viewId: 'v1', name: 'New Name' })
   })
 
-  it('createWindow/closeWindow → 대응 invoke · createWindow 는 {window, window_id, number} 를 그대로 돌려준다', async () => {
+  it('createWindow → create_window invoke · {window, window_id, number} 를 그대로 돌려준다', async () => {
     const created = { window: 'slot-popup-3', window_id: '7d2f0b8e-1c3a-4f5e-9b6d-2a4c6e8f0a1b', number: 2 }
     invokeMock.mockResolvedValueOnce(created)
     const answer = await useViewStore.getState().createWindow()
     expect(invokeMock).toHaveBeenCalledWith('create_window')
     expect(answer).toEqual(created)
-    await useViewStore.getState().closeWindow('slot-popup-3')
-    expect(invokeMock).toHaveBeenCalledWith('close_window', { window: 'slot-popup-3' })
+  })
+
+  it('controlWindow → window_control invoke 하나(window · action · ifEmpty) · 셸 답을 그대로 돌려준다', async () => {
+    const outcome = { deferred: false, pending: false, shown_all: false, focused: false, close: 'kept' }
+    invokeMock.mockResolvedValueOnce(outcome)
+    await expect(useViewStore.getState().controlWindow('w-1', 'close', true)).resolves.toEqual(outcome)
+    expect(invokeMock).toHaveBeenLastCalledWith('window_control', { window: 'w-1', action: 'close', ifEmpty: true })
+    await useViewStore.getState().controlWindow('slot-popup-3', 'maximize')
+    expect(invokeMock).toHaveBeenLastCalledWith('window_control', {
+      window: 'slot-popup-3',
+      action: 'maximize',
+      ifEmpty: null,
+    })
   })
 
   it('split → split_slot invoke(viewId/slotId/dir) + 새 slot id 반환', async () => {
@@ -302,18 +307,22 @@ describe('viewStore emit 수신 → 상태 갱신', () => {
     expect(useViewStore.getState().layouts['v1'].foreignSlots).toEqual([])
   })
 
-  it('window:tabs-updated → windows[label].{tabs,active,version} 갱신', async () => {
+  it('window:tabs-updated → windows[label].{windowId,number,tabs,active,version} 갱신', async () => {
     {
       const { ready } = subscribeViewEvents()
       await ready
     }
     emit('window:tabs-updated', tabsPayload({
-      label: 'main',
+      label: 'slot-popup-1',
+      window_id: 'w-popup',
+      number: 3,
       tabs: [{ id: 'v1', name: 'View 1', named: true }, { id: 'v2', name: 'View 2', named: true }],
       active: 'v2',
       version: 4,
     }))
-    const win = useViewStore.getState().windows['main']
+    const win = useViewStore.getState().windows['slot-popup-1']
+    expect(win.windowId).toBe('w-popup')
+    expect(win.number).toBe(3)
     expect(win.tabs).toHaveLength(2)
     expect(win.active).toBe('v2')
     expect(win.version).toBe(4)
@@ -649,7 +658,9 @@ describe('readWindowLabelFromHash + currentViewId (창 컨텍스트 해소, ADR-
 
   it('currentViewId: main 창이면 windows["main"].active', () => {
     window.location.hash = '#/'
-    useViewStore.setState({ windows: { main: { tabs: [{ id: 'v9', name: 'V9', named: true }], active: 'v9', version: 1 } } })
+    useViewStore.setState({
+      windows: { main: { windowId: 'main', number: 1, tabs: [{ id: 'v9', name: 'V9', named: true }], active: 'v9', version: 1 } },
+    })
     expect(currentViewId()).toBe('v9')
   })
 
@@ -657,8 +668,14 @@ describe('readWindowLabelFromHash + currentViewId (창 컨텍스트 해소, ADR-
     window.location.hash = '#/popup?window=slot-popup-1'
     useViewStore.setState({
       windows: {
-        main: { tabs: [{ id: 'vм', name: 'main', named: true }], active: 'vм', version: 1 },
-        'slot-popup-1': { tabs: [{ id: 'p1', name: 'p1', named: true }], active: 'p1', version: 1 },
+        main: { windowId: 'main', number: 1, tabs: [{ id: 'vм', name: 'main', named: true }], active: 'vм', version: 1 },
+        'slot-popup-1': {
+          windowId: 'w-popup',
+          number: 2,
+          tabs: [{ id: 'p1', name: 'p1', named: true }],
+          active: 'p1',
+          version: 1,
+        },
       },
     })
     expect(currentViewId()).toBe('p1')
@@ -666,7 +683,11 @@ describe('readWindowLabelFromHash + currentViewId (창 컨텍스트 해소, ADR-
 
   it('currentViewId: 모르는 라우트(#/unknown)면 windows["main"].active 폴백', () => {
     window.location.hash = '#/unknown'
-    useViewStore.setState({ windows: { main: { tabs: [{ id: 'vmain', name: 'main', named: true }], active: 'vmain', version: 1 } } })
+    useViewStore.setState({
+      windows: {
+        main: { windowId: 'main', number: 1, tabs: [{ id: 'vmain', name: 'main', named: true }], active: 'vmain', version: 1 },
+      },
+    })
     expect(currentViewId()).toBe('vmain')
   })
 

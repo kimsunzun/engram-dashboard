@@ -25,7 +25,6 @@
 //     그 창의 모든 탭 layout 을 담아야 한다(숨은 탭도 렌더 유지). 각 슬롯 캔버스가 자기 view_id 캐시를 본다.
 
 import { invoke } from '@tauri-apps/api/core'
-import { getCurrentWindow } from '@tauri-apps/api/window'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { create } from 'zustand'
 
@@ -39,6 +38,8 @@ import type {
   SplitRect,
   ViewMeta,
   ViewSnapshot,
+  WindowControlAction,
+  WindowControlOutcome,
 } from '../api/layoutTypes'
 import { isRenderMode, type RenderMode } from '../components/slot/renderMode'
 import { retryAsync } from '../util/retryInvoke'
@@ -66,8 +67,10 @@ export interface WindowTabsPayload {
 /** `move_slot_to_window` 의 답 — layout/apply.rs `SlotMove` 의 미러. `tab` = 옮겨 간 창에 생긴 탭. */
 export type SlotMove = NewWindow & { tab: string }
 
-/** 한 창의 탭 상태(프론트 미러). version = 전역 단조(stale emit 폐기용). */
+/** 한 창의 탭 상태(프론트 미러). version = 전역 단조(stale emit 폐기용). `windowId` · `number` = 페이로드 그대로. */
 export interface WindowTabs {
+  windowId: string
+  number: number
   tabs: ViewMeta[]
   active: string
   version: number
@@ -130,8 +133,18 @@ interface ViewState {
    * §5-3). 창을 다시 가리킬 땐 `window_id` 를 쓴다 — 번호는 닫힌 창의 것을 다시 쓴다.
    */
   createWindow: () => Promise<NewWindow>
-  /** 창 `window` 통째 닫기(main 금지). */
-  closeWindow: (window: string) => Promise<void>
+  /**
+   * 창 상태 동작 하나 — invoke `window_control`(TRD S26-window-chrome §6-4 · 버스 `window.*` 와 같은 서비스). `window` 는
+   * 셸이 푸는 창 인자(window_id 또는 같은 실행 안 label — 번호는 거절)이고, `hide_all` · `show_all` 은 창을 가리지 않는다
+   * (셸은 숫자 거절만 본다). `ifEmpty` 는 `close` 에만 — 그때 `window` 는 그 창의 window_id 다(§5-5). 거절 = 셸 문구
+   * (문자열 — Error 가 아니다)로 reject — 명령 이름은 레지스트리 `window.*` 가 붙인다. ★창 닫기도 이 길이다★ — main 의
+   * `close` 는 모든 창 숨기기다(답 `close: 'hidden_all'`).
+   */
+  controlWindow: (
+    window: string,
+    action: WindowControlAction,
+    ifEmpty?: boolean,
+  ) => Promise<WindowControlOutcome>
 
   // ── View 내부 조작(view_id 전역 유니크라 시그니처 유지 — 소속 창은 백엔드 view_owner 파생) ──
   /** slot 분할 → 새 slot_id 반환. */
@@ -219,7 +232,8 @@ export const useViewStore = create<ViewState>((set, get) => ({
   switchTab: (window, viewId) => invoke<void>('switch_tab', { window, view: viewId }),
   switchTabIf: (window, viewId, expect) => invoke<boolean>('switch_tab_if', { window, view: viewId, expect }),
   createWindow: () => invoke<NewWindow>('create_window'),
-  closeWindow: window => invoke<void>('close_window', { window }),
+  controlWindow: (window, action, ifEmpty) =>
+    invoke<WindowControlOutcome>('window_control', { window, action, ifEmpty: ifEmpty ?? null }),
 
   split: (viewId, slotId, dir) => invoke<string>('split_slot', { viewId, slotId, dir }),
   setSplitRatio: (viewId, splitId, ratio) =>
@@ -334,6 +348,8 @@ export const useViewStore = create<ViewState>((set, get) => ({
       windows: {
         ...state.windows,
         [payload.label]: {
+          windowId: payload.window_id,
+          number: payload.number,
           tabs: payload.tabs,
           active: payload.active,
           version: payload.version,
@@ -469,6 +485,3 @@ export async function initMainWindowFromBackend(): Promise<void> {
   )
   useViewStore.getState().applyLayoutUpdated(snap)
 }
-
-// getCurrentWindow 를 여기서 재노출 — 팝업 자가닫힘(0탭)에서 창 close 에 쓴다(§7-1). import 경로 통일.
-export { getCurrentWindow }
