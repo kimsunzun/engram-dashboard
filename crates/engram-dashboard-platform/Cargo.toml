@@ -13,7 +13,7 @@ description = "Engram Dashboard OS 층 — OS 에 따라 달라지는 운영 코
 # ★snap-overlay (TRD S26-window-chrome §8-4 · 사용자 결정 Q1 2026-10-24)★: 스냅 레이아웃 오버레이(`window::snap` —
 #   최대화 단추 위 자식 창)를 연다. 기본 OFF — 켜는 것은 셸 기능 `snap-overlay` 하나뿐이다(셸 `Cargo.toml`). 꺼진 채
 #   코드를 남기는 까닭 = 주석으로 막은 코드는 컴파일되지 않아 썩는다 — 켠 빌드는 CI 가 컴파일한다. 운영 그래프에 이
-#   기능이 없다는 것도 CI 게이트가 잰다. ADR-0275 결정 13 의 「cargo 기능은 `test-support` 하나」를 넓힌다.
+#   기능이 없다는 것도 CI 게이트가 잰다. ADR-0275 결정 13 의 「cargo 기능은 `test-support` 하나」를 넓힌다. ADR-0304
 [features]
 test-support = []
 snap-overlay = []

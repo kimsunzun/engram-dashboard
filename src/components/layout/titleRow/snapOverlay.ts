@@ -1,3 +1,4 @@
+// ADR-0304 — 스냅 오버레이 feature
 // TRD S26-window-chrome §8-4: 스냅 레이아웃 오버레이 — 셸이 그것을 켠 빌드(창 사실 `caption.snap_overlay` — 셸 기능
 //   `snap-overlay` · 기본 꺼짐 · 사용자 결정 Q1 2026-10-24)일 때만 최대화 단추 사각형을 셸에 보고한다(invoke
 //   `report_max_button_rect` — 그 invoke 는 그 빌드에만 등록된다). 셸은 그 자리에 OS 자식 창을 얹어 Windows 11 스냅 메뉴가

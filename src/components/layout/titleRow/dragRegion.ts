@@ -1,3 +1,4 @@
+// ADR-0303 — 크롬식 제목 표시줄
 // TRD S26-window-chrome §7-2: 창 끌 자리 = Tauri `data-tauri-drag-region`(Q5 = ①). 누름 · 두 번 누름(최대화 토글)은 Tauri
 //   `drag.js` 가 OS 에 넘긴다 — 버스를 지나지 않는다(D7). 권한 = `core:window:allow-start-dragging`(main · 팝아웃 — §9).
 // ★값 없는 속성 = 그 요소 자신을 누를 때만 끈다★ — 누른 요소부터 위로 걸으며 처음 만난 표시가 자기 자신이 아니면 끌지 않는다

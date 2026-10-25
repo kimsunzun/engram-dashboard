@@ -54,6 +54,7 @@ export function tabsEnd(B: StripBounds): number {
  */
 // 사용자 결정 2026-10-26(T-66) — 탭이 있는 곳(첫 탭 ~ `+`)만 탭바 구역. 자기 탭도 `+` 를 넘으면 구역 밖(떼어짐) · `+` 오른쪽
 //   밑 캔버스 위 끝은 바깥 위 띠다.
+// ADR-0303 — 크롬식 제목 표시줄
 export function stripZoneArea(
   m: StripMeasure,
   bounds: StripBounds,

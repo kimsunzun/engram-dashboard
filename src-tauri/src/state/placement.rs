@@ -659,6 +659,7 @@ pub(crate) fn resolve_place(
 ///
 /// 넓힐 일이 없으면 그대로 돌려준다 — 화면 밖에 걸친 자리여도 옮기지 않는다(넓혀 당기기의 일이 아니다). 높이 · 세로 위치는
 /// 건드리지 않는다. 배율이 유한한 양수가 아니면 넓히기만 하고 당기지 않는다.
+// ADR-0303 — 크롬식 제목 표시줄
 pub(crate) fn fit_min_width(
     bounds: WindowBounds,
     min_w: f64,

@@ -50,6 +50,7 @@ impl LayoutState {
 /// 항목째 빼 곧바로 푼다. 라우팅 표 재계산 · 구독 정리 · 묘비는 하지 않는다 — 그래서 정리를 부를 수 있으면 이것을
 /// 부르지 않는다(정리가 번호 풀기를 그 셋과 한 락 안에서 한다). main · 모르는 label · 두 번째 부름은 무동작이고,
 /// 락이 오염됐으면 아무것도 하지 않는다.
+// ADR-0300 — 창 번호
 pub fn release_window_number(state: &LayoutState, label: &str) {
     if label == MAIN_WINDOW_LABEL {
         return;

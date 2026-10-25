@@ -1,4 +1,5 @@
 // @vitest-environment node
+// ADR-0302 — 창 상태 명령
 // AC10 게이트(TRD S26-window-chrome §10-4) — 웹은 Tauri 창 제어 API 를 부르지 않는다. 창 닫기 · 최소화 · 최대화 · 보이기 ·
 //   포커스는 전부 셸 invoke `window_control` 로 간다(레지스트리 `window.*` — §6-4 · 0탭 자가닫힘 — §5-5). 두 층이다 —
 //   ① 소스 타입 검사 ② 그 권한을 어느 capability 도 웹에 주지 않는다는 실행 시점 받침(§9 — 아래 「capability」 구획).

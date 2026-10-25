@@ -61,6 +61,7 @@ pub fn popup_label(n: u64) -> String {
 pub struct PopupCounter(pub AtomicU64);
 
 impl PopupCounter {
+    // ADR-0302 — 창 상태 명령(팝아웃 label 재사용 금지)
     fn next_label(&self) -> String {
         popup_label(self.0.fetch_add(1, Ordering::Relaxed) + 1)
     }

@@ -107,6 +107,7 @@ pub enum LayoutNode {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(tag = "type", content = "name", rename_all = "snake_case")]
 #[ts(export)]
+// ADR-0301 — 탭 이름 · OS 제목
 pub enum TabName {
     Auto,
     Named(String),

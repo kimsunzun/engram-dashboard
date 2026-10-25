@@ -32,6 +32,7 @@ use std::sync::Mutex;
 
 use engram_dashboard_base::sync;
 
+// ADR-0303 — 크롬식 제목 표시줄
 #[derive(Debug, Default)]
 pub(crate) struct ChromeBook {
     windows: HashMap<String, WindowChrome>,
@@ -162,6 +163,7 @@ impl ChromeBook {
     /// 받아들이고(같은 판은 옛 판이다), 받아들이면 `Same` 이어도 판을 적는다 — 뒤에 온 옛 판이 같은 글자 뒤에 숨어
     /// 들어오지 못하게. `Set` 이면 부르는 쪽이 곧 입힌다(못 입혔으면 [`Self::title_failed`]). 항목이 없으면 만든다 —
     /// 그 OS 창이 지금 있는지는 부르는 쪽이 먼저 본다(모듈 머리).
+    // ADR-0301 — 탭 이름 · OS 제목
     pub(crate) fn accept_title(&mut self, label: &str, version: u64, title: &str) -> TitleVerdict {
         let window = self.windows.entry(label.to_owned()).or_default();
         let Some(mark) = &mut window.title else {
@@ -215,6 +217,7 @@ impl ChromeBook {
     /// 로 판정하고 표시를 거둔다 — 보통 크기면 넓혀 당기고 ★그 값을 늘 OS 에 다시 입힌다★(입힌 값으로 적은 것과 같아도 —
     /// 장부와 OS 가 어긋났어도 이 판정이 고친다 · TRD §7-7 · U8b 리뷰 2 수정). 최대화 · 최소화면 넓히지도 입히지도 않는다(열
     /// 때 한 번 · 모듈 머리). 항목이 없으면 만든다(창 확인은 부르는 쪽 — 모듈 머리). `state` 는 자리를 입힌 뒤에 읽는다.
+    // ADR-0303 — 크롬식 제목 표시줄
     pub(crate) fn mark_opening(&mut self, label: &str, state: FrameState) -> MinPlan {
         let window = self.windows.entry(label.to_owned()).or_default();
         let Some(min) = window.min.as_ref().map(|mark| mark.size) else {
@@ -237,6 +240,7 @@ impl ChromeBook {
     /// 걷지 않으면 OS 가 좁은 자리를 키워 넓혀 당기기가 할 일이 없다). 최대화 · 최소화 창은 걷지 않는다(걷는 세터가 최대화를
     /// 푼다 — 모듈 머리). 자리를 입힌 뒤 [`Self::mark_opening`] 이 넓혀 당기고 다시 입힌다. 몸통 = [`lift`](메인 스레드 일
     /// 하나). 항목을 만들지 않는다 — 항목이 없으면 걷을 것도 없다.
+    // ADR-0303 — 크롬식 제목 표시줄
     pub(crate) fn lift_min(&mut self, label: &str, state: FrameState) -> bool {
         let Some(window) = self.windows.get_mut(label) else {
             return false;
@@ -249,6 +253,7 @@ impl ChromeBook {
     /// 열기 표시도 두지 않는다. 받아들인 보고는 열기 표시를 거두고, 넓혀 당기기는 그 표시가 있었고 지금 보통 크기일 때만이다
     /// (최대화 · 최소화 동안 연 창은 넓히지 않는다 — 열 때 한 번). OS 최소 크기는 보통 크기일 때 입힌 값과 다르면 입힌다
     /// (그 밖은 [`Self::on_frame`] 이 보통 크기가 될 때 입힌다 — 모듈 머리).
+    // ADR-0303 — 크롬식 제목 표시줄
     pub(crate) fn on_min_report(
         &mut self,
         label: &str,
@@ -384,6 +389,7 @@ pub(crate) fn lift(
 /// `calculate_insets_for_dpi`) — 그래서 그대로 넘기면 안쪽이 보고한 값보다 그 테두리만큼(100 % 에서 폭 약 16 · 높이 약 9 px)
 /// 좁게 끌려 줄어든다. 같은 판의 크기 세터(`set_inner_size`)는 그 차이를 더한다(`undecorated_with_shadows`). 테두리는 배율에
 /// 비례하므로 논리 값은 모니터를 옮겨도 거의 그대로다 — 다만 위 테두리의 반올림 몫이 1 px 안쪽으로 어긋날 수 있다.
+// ADR-0303 — 크롬식 제목 표시줄
 pub(crate) fn os_min_size(min: MinSize, frame_w: u32, frame_h: u32, scale: f64) -> (f64, f64) {
     let (width, height) = (f64::from(min.width), f64::from(min.height));
     if !(scale.is_finite() && scale > 0.0) {

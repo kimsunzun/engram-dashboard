@@ -168,6 +168,7 @@ pub enum DropOutcome {
 /// - `caption`: 제목 줄 크롬 모양 — OS 상수라 창마다 · 실행 내내 같다.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
+// ADR-0303 — 크롬식 제목 표시줄
 pub struct WindowFrame {
     pub restored: Option<SizeCss>,
     pub maximized: bool,

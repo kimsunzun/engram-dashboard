@@ -65,7 +65,7 @@ pub struct AutostartCheck(pub CheckMenuItem<Wry>);
 //   부른다. 버스 · invoke 는 `commands::window_ctl::TauriWindowControl` 의 메인 스레드 일로 들어온다.
 // 창 하나가 실패해도(목록을 뜬 뒤 닫힌 팝아웃 등) 나머지와 메인은 계속 처리한다 — `?` 로 끊지 말 것.
 // 예열 창 풀의 창은 두 갈래 다 띄우지 않는다 — 그사이 확정으로 풀을 떠난 창만 보통 창처럼 띄운다([`show_ui_windows`]).
-// ADR-0229 · ADR-0299
+// ADR-0229 · ADR-0299 · ADR-0302
 pub(crate) fn show_main_ui(app: &AppHandle, how: Activation) {
     match how {
         Activation::TrayClick => show_main_ui_on_click(app),

@@ -33,6 +33,7 @@ const MAIN_THREAD_WAIT: Duration = Duration::from_secs(5);
 
 /// [`WindowControl`] 의 Tauri 실물 — 시한 뒤의 답: `apply` = `Err` · `show_all` = 거짓 · `hide_all` = 무동작(로그 한 줄).
 /// 메인 스레드에서 불러도 된다 — 넘긴 일이 그 자리에서 돈다(`layout::window_ctl::WindowControl` 문서).
+// ADR-0302 — 창 상태 명령
 pub(crate) struct TauriWindowControl {
     app: AppHandle,
 }
@@ -507,6 +508,7 @@ fn control(
 ///   닿아도 마지막으로 보낸 값을 덮지 못한다.
 /// - 너비 · 높이 둘 중 하나라도 1~4096 밖이면 `Err` 이고 그 창의 직전 값을 유지한다.
 /// - 비동기로 바꾸지 말 것 — 메인 스레드에서 돌아야 창 확인과 적기 사이에 `Destroyed` 가 끼지 않는다(`crate::chrome`).
+// ADR-0303 — 크롬식 제목 표시줄
 #[tauri::command]
 pub fn report_window_min_width(
     app: AppHandle,

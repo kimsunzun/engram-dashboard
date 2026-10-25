@@ -30,6 +30,7 @@ enum Word {
 
 /// 사람에게 보이는 낱말의 셸 정본(사용자 결정 T2 · 2026-10-24) — 셸에는 i18n 층이 없어 여기 한 곳에 둔다.
 /// 웹 i18n 과 합치는 것은 T-68 몫이다. `Foreign` 의 글자는 웹 `ko.ts` 의 `slot.foreignContent` 와 같아야 한다.
+// ADR-0301 — 탭 이름 · OS 제목
 const fn word(w: Word) -> &'static str {
     match w {
         Word::EmptySlot => "빈 칸",
@@ -63,6 +64,7 @@ pub(crate) fn is_word(text: &str) -> bool {
 /// 없거나 트리에 없는 슬롯을 가리키면 트리 첫 슬롯을 쓴다(`ViewManager::fixup_focus` 와 같은 규칙). 그 슬롯이 이 판이
 /// 모르는 내용을 쥐었으면 「알 수 없는 내용」이다 — 메모리 내용(`Empty`)대로 「빈 칸」이라 하면 점유된 칸을 비었다고
 /// 말한다. 에이전트 이름은 `mgr` 의 이름 장부에서 읽는다. 결과를 저장하지 않는다 — 부를 때마다 셈한다.
+// ADR-0301 — 탭 이름 · OS 제목
 pub fn effective_tab_name(mgr: &ViewManager, view: &View) -> String {
     match &view.name {
         TabName::Named(name) => name.clone(),
@@ -86,6 +88,7 @@ pub fn effective_tab_name(mgr: &ViewManager, view: &View) -> String {
 /// `None`(장부에 없음)이거나 빈 글자 · 공백뿐이면 「에이전트」다(빈 탭 이름 · 「 - Engram:<n>」 제목을 막는다).
 /// 준 이름은 다듬지 않고 그대로 쓴다.
 // D17: 와일드카드 · 묶음 이름 갈래를 두지 않는다 — 슬롯 종류를 더하면 이름을 짓기 전에는 컴파일이 안 된다.
+// ADR-0301 — 탭 이름 · OS 제목
 #[deny(clippy::wildcard_enum_match_arm)]
 pub fn slot_label<'n>(
     content: &SlotContent,

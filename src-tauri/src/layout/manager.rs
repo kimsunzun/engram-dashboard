@@ -466,6 +466,7 @@ impl ViewManager {
     }
 
     // 창 항목을 넣는 유일한 자리. 번호는 `entry` 가 이미 쥐었다(새 팝아웃 = [`Self::insert_new_popout`]).
+    // ADR-0300 — 창 번호
     fn insert_window_entry(&mut self, label: WindowLabel, entry: WindowTabs) {
         // 운영 팝아웃 label 은 다시 쓰이지 않는다(`PopupCounter`) — 닫히는 창의 label 로 넣으면 그 label 의 번호 · 영속
         //   id 가 둘이 된다.
@@ -486,6 +487,7 @@ impl ViewManager {
     // 창 항목을 빼는 유일한 자리. `Os::Alive` 면 번호를 그 OS 창의 `Destroyed`([`Self::release_closing`])까지 `closing`
     // 에 쥐고, `Os::Gone` 이면 곧바로 푼다. View · `view_owner` · version 은 부르는 쪽 몫이다. main 은 빼지 않는다
     // (불변식 4).
+    // ADR-0300 — 창 번호
     fn retire_window_entry(&mut self, label: &str, os: Os) -> Option<WindowTabs> {
         debug_assert_ne!(label, MAIN_WINDOW_LABEL, "main 창 항목을 뺀다");
         let entry = self.windows.remove(label)?;
@@ -504,6 +506,7 @@ impl ViewManager {
     /// 닫히는 창 `label` 의 번호를 푼다 — 그 OS 창의 `Destroyed` 가 부른다. 닫히는 창이 아니면(예열 창 · 이미 푼 창 ·
     /// 사본 수락이 푼 옛 창 · 모델에 있는 창) 무동작 `false` — label 로만 찾으므로 살아 있는 창의 번호는 건드리지
     /// 않는다. `version` 은 그대로다(번호를 저장 · 알림에 싣는 창 항목이 바뀌지 않는다).
+    // ADR-0300 — 창 번호
     pub fn release_closing(&mut self, label: &str) -> bool {
         self.closing.remove(label).is_some()
     }
@@ -979,6 +982,7 @@ impl ViewManager {
     /// [`Self::close_window`] 와 같되 그 OS 창이 이미 없다 — 번호를 곧바로 푼다. 그 창의 `Destroyed` 가 이미 지나갔거나
     /// 오지 않는 자리(못 연 부팅 복원 팝아웃 · 바꾸기 전에 사라진 사본 창 · `Destroyed` 때 아직 모델에 있던 창)가
     /// 부른다(TRD S26-window-chrome §4-1). OS 창이 남아 있는데 부르면 그 창이 닫히기 전에 새 창이 같은 번호를 받는다.
+    // ADR-0300 — 창 번호
     pub fn drop_window_gone(&mut self, label: &str) -> Result<Vec<ViewId>, LayoutError> {
         self.remove_window(label, Os::Gone)
     }
@@ -1555,6 +1559,7 @@ impl ViewManager {
     /// 「없음」(`TabNotFound` · `WindowNotFound`)으로 무변경이다. 모델의 창 항목 · `version` 은 손대지 않는다(지우는 것은 부르는 쪽 몫 —
     /// `commands::popout::drop_window_in_model` 이 창을 지우는 같은 락 안에서, 모델 밖 창의 `window.close` 가 그 OS 창을
     /// 거두기 전에 부른다 — `window_ctl::close`).
+    // ADR-0302 — 창 상태 명령
     pub(crate) fn mark_closed(&mut self, label: &str) {
         self.closed_labels.insert(label.to_string());
     }

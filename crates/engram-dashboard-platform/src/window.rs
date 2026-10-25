@@ -23,6 +23,7 @@ use std::io;
 
 use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle};
 
+// ADR-0304 — 스냅 오버레이 feature
 #[cfg(feature = "snap-overlay")]
 pub mod snap;
 
@@ -272,6 +273,7 @@ pub fn foreground_is_current_process() -> Option<bool> {
 /// Windows = `GetForegroundWindow` 가 그 최상위 창인가. 핸들을 못 얻었거나 그 창이 이미 없으면 `Some(false)` 다. 창
 /// 툴킷의 포커스 게터와 다른 답일 수 있다 — WebView2 를 품은 창은 웹뷰가 키보드 포커스를 쥔 동안 그 게터가 거짓이다
 /// (TRD S26-window-chrome §6-2 「앞 창 판정」).
+// ADR-0303 — 크롬식 제목 표시줄
 pub fn is_foreground(w: &impl HasWindowHandle) -> Option<bool> {
     #[cfg(windows)]
     {
@@ -297,6 +299,7 @@ pub struct CaptionStyle {
 /// 이 OS 의 제목 줄 크롬 모양(TRD S26-window-chrome §7-11) — 늘 `{ drawn_buttons: true, leading_inset: 0 }` 이다. macOS
 /// 는 신호등 단추를 OS 가 그리므로 `{ false, <신호등 폭> }` 이어야 하는데, 그 폭을 재지 않았고 macOS 를 짓지 않아 그
 /// 갈래를 두지 않았다 — macOS 를 지을 때 이 함수 안에 더한다.
+// ADR-0303 — 크롬식 제목 표시줄
 pub fn caption_style() -> CaptionStyle {
     CaptionStyle {
         drawn_buttons: true,

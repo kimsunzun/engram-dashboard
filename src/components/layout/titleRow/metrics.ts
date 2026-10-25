@@ -12,6 +12,7 @@ export const SURFACE_TOP = 4
 
 // 보통 상태 위 여백 — Chrome 의 「최대화 아닐 때 비활성 탭 위 6 px」(슬롯 도킹 R25)이자, 빠른 위쪽 끌기가 OS 끌기 시작 전에
 //   창을 벗어나지 않게 그 길을 출처 창 안에 두는 몫이다(W13). 값은 S13 이 정한다.
+// ADR-0303 — 크롬식 제목 표시줄
 export const TOP_GAP = 6
 // Chrome 은 최대화(condensed) 때 끌 손잡이를 탭 위로 늘리지 않는다(Chromium `TabStrip::CanExtendDragHandle`).
 export const TOP_GAP_MAXIMIZED = 0

@@ -32,6 +32,7 @@ pub enum WindowArgError {
 /// - 그 밖 → 모델에 그 label 의 창이 있으면 그대로(같은 실행 안 별칭). 운영 label 은 `main` 과 팝아웃 접두
 ///   (`slot-popup-`)뿐이라 이 갈래가 표의 「접두 label」 갈래다. 영속 id 와 label 이 같은 철자면 id 가 이긴다.
 /// - 어디에도 없으면 `NotFound` — 닫히는 창의 id · label 도 모델에 없어 여기다.
+// ADR-0302 — 창 상태 명령
 pub fn resolve(mgr: &ViewManager, arg: &str) -> Result<WindowLabel, WindowArgError> {
     let arg = arg.trim();
     if arg == MAIN_WINDOW_LABEL {

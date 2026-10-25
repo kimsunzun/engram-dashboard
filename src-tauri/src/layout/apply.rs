@@ -666,6 +666,7 @@ pub fn rename_tab(
 /// 바뀐 창만 새 판 번호로 알린다(TRD S26-window-chrome §2-4 ② · §4-3). 바뀐 탭이 없으면 판도 그대로이고 아무것도 내지
 /// 않는다. 이름은 데몬이 지은 그대로 쓴다 — 셸은 다시 짓지 않는다(유일화 · canonicalize 가 데몬 안이다).
 // ★탭 알림만★: 이름은 탭 페이로드에만 있고(`rename_tab` 과 같은 까닭) 출력 라우팅도 트리도 안 바뀐다.
+// ADR-0301 — 탭 이름 · OS 제목
 pub fn agent_names_updated(
     state: &LayoutState,
     events: &dyn LayoutEvents,

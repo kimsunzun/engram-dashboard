@@ -1,3 +1,4 @@
+// ADR-0304 — 스냅 오버레이 feature
 //! 스냅 레이아웃 오버레이의 Tauri 어댑터 — invoke `report_max_button_rect`(TRD S26-window-chrome §8-4). ★셸 기능
 //! `snap-overlay` 뒤 · 기본 꺼짐★(사용자 결정 Q1 2026-10-24) — 이 파일 · 그 모듈 선언(`commands/mod.rs`) · invoke 등록
 //! (`lib.rs`)이 그 기능으로만 컴파일된다. 꺼진 빌드에서 창 사실 `caption.snap_overlay` 는 거짓이라(`commands/tab_drop.rs` 의

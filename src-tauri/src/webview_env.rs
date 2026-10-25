@@ -247,6 +247,7 @@ fn attach<B: EnvOptions>(
         .background(color(theme))
         .init_script(theme_script(&label, theme));
     // 앱이 단추를 그리지 않는 OS(macOS 몫 — 지금 없다)는 OS 틀을 그대로 둔다(TRD S26-window-chrome §7-11).
+    // ADR-0303 — 크롬식 제목 표시줄
     if caption.drawn_buttons {
         builder.decorated(false).shadowed(true)
     } else {

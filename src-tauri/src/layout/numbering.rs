@@ -1,6 +1,7 @@
 //! 창 번호의 순수 셈(TRD S26-window-chrome §3-4 · §4-1 · PRD R1 · D1–D3) — 새 창이 받을 번호(`smallest_free`) ·
 //! 저장 번호 고치기(`resolve_saved`) · 저장값 범위 판정(`saved_number`). 셈만 하고 번호를 쥐지 않는다
 //! (Tauri · 모델을 모른다).
+// ADR-0300 — 창 번호
 
 use std::collections::BTreeSet;
 
@@ -18,6 +19,7 @@ fn in_saved_range(n: u32) -> bool {
 /// 새 창(팝아웃)이 받을 번호 = `held` 에도 없고 메인의 1 도 아닌 가장 작은 양의 정수. `held` 의 순서 · 겹침 ·
 /// 0 · 1 은 상관없다. 1 은 `held` 에 없어도 주지 않는다 — 부르는 쪽이 메인을 빠뜨려도 1 이 둘이 되지 않는다.
 /// 부르는 쪽은 살아 있는 창 번호와 닫히는 창 번호를 함께 넘긴다.
+// ADR-0300 — 창 번호
 pub fn smallest_free(held: impl IntoIterator<Item = u32>) -> u32 {
     let held: BTreeSet<u32> = held.into_iter().collect();
     let mut want = MAIN_WINDOW_NUMBER + 1;

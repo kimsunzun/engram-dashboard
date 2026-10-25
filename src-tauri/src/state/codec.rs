@@ -84,6 +84,7 @@ pub enum DecodeWarning {
     /// 팝아웃의 창 번호 칸에 값이 있는데 `1..=MAX_SAVED_NUMBER` 정수가 아니다 — 그 칸만 `None` 으로 접고 창은
     /// 살린다(TRD S26-window-chrome §3-3). 칸 없음 · `null` · main 의 칸은 이 경고를 내지 않는다. `raw` = 받은 값의
     /// JSON 원문 — `ThemeDropped` 와 같은 상한.
+    // ADR-0300 — 창 번호
     NumberDropped { window_id: String, raw: String },
 }
 

@@ -57,6 +57,7 @@ interface WindowLayoutProps {
    * 실패 화면도 같은 자리다 — ★어느 화면이든 트리의 같은 자리에 둔다★: 자리가 바뀌면 React 가 층을 다시 마운트해 ✕ 로
    * 닫은 기억(`ConnectionNotice` · `StateFileNotice` — ADR-0277 이 걷지 말라고 한 것)이 사라진다.
    */
+  // ADR-0306 — 알림 띠 자리
   notices?: ReactNode
 }
 
@@ -345,7 +346,7 @@ export default function WindowLayout({ label, notices }: WindowLayoutProps) {
       </TitleRow>
       {/* 캔버스 크기 보고(callback ref)는 탭을 그리는 동안만 붙는다 — 탭 내용 영역의 크기다(ADR-0227). */}
       <div ref={tabs ? canvasRef : undefined} style={{ flex: 1, position: 'relative', minHeight: 0 }}>
-        {/* 알림 층은 이 칸(positioned)의 맨 위 = 제목 줄 바로 아래에 붙는다 — 흐름 밖이라 캔버스 크기 보고를 바꾸지 않는다. */}
+        {/* 알림 층은 이 칸(positioned)의 맨 위 = 제목 줄 바로 아래에 붙는다 — 흐름 밖이라 캔버스 크기 보고를 바꾸지 않는다(ADR-0306). */}
         {notices}
         {content}
       </div>

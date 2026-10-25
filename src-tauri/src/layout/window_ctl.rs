@@ -33,6 +33,7 @@ pub enum WindowAction {
 ///   보이며 창마다 포커스를 준다(main 이 마지막 — 누름이 전경 권한을 준다).
 /// - `NoSteal` = 그 밖 전부(버스 `window.showAll` · 숨은 창의 `window.raise` · invoke `show_main_ui`). 첫 화면 대기 창을
 ///   건너뛰고 창마다 [`show_one_no_steal`] 이다 — 포커스는 우리 프로세스가 이미 전경을 쥐었을 때 main 에만 준다.
+// ADR-0302 — 창 상태 명령
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Activation {
     TrayClick,
@@ -111,6 +112,7 @@ pub enum Plan {
 /// - 보이지 않는 창의 최대화 · 원래 크기는 거절하지 않는다 — OS 창을 건드리면 tao 가 창을 드러내므로([`WindowOps`]) 바랄
 ///   상태를 적고 보일 때 입힌다. 이미 그 상태로 보일 것이 분명하면(최소화 아님) 적어 둔 바람만 거둔다. 최소화된 창에는 늘
 ///   적는다 — 펴면 어느 크기로 돌아올지 모른다.
+// ADR-0302 — 창 상태 명령
 pub fn plan(action: WindowAction, s: OsWindowState) -> Plan {
     let unseen = if s.awaiting_first_paint {
         Some(Unseen::AwaitingFirstPaint)
@@ -191,6 +193,7 @@ pub trait WindowOps {
 ///   자리에서 도는 일의 보내기가 아직 오지 않은 받기를 영영 기다린다.
 /// - 실물은 `recv_timeout` 으로 기다린다 — 메인 스레드가 멈추면 부른 스레드를 붙들지 않고 시한 뒤 `apply` = `Err` ·
 ///   `show_all` = 거짓 · `hide_all` = 무동작으로 끝난다.
+// ADR-0302 — 창 상태 명령
 pub trait WindowControl: Send + Sync {
     /// [`run_action`] 을 메인 스레드 일 하나로 돈다. `Err` = 그 문구(버스 `CONFLICT`).
     fn apply(&self, label: &str, action: WindowAction) -> Result<Applied, String>;
@@ -477,6 +480,7 @@ pub fn close(
 //   ★묘비를 `host.close` 뒤로 미루거나 `Destroyed` 정리에 맡기지 말 것★ — destroy 는 이벤트 루프에 줄 서므로, 그 사이
 //   슬롯 분리 · 새 창 놓기의 확정(`attach_view_as_new_window` · `dock`)이 이 label 로 붙으면 뒤의 `Destroyed` 정리가 옮겨
 //   온 탭째 지운다. 묘비가 먼저 서면 그 확정이 `WindowClosed` 로 거절돼 롤백을 타고 탭은 출처에 남는다.
+// ADR-0302 — 창 상태 명령
 fn close_unmodeled(
     state: &LayoutState,
     subs: &dyn SubscriptionSync,
@@ -502,6 +506,7 @@ fn close_unmodeled(
 /// 0탭 자가닫힘(TRD §5-5) — 영속 id `window_id` 의 창이 모델에 있으면(그 창엔 탭이 1 개 이상이다) `Kept`, 모델에 없고 닫히는
 /// 창이면 그 OS 창이 열려 있을 때 닫고 `Closed`, 둘 다 아니면 `Kept`. 모델 판정이 한 락 안이라 그 사이 탭이 들어오는 틈이
 /// 없다(들어오면 첫 갈래다). 영속 id 로만 고르므로 다른 창에 닿지 않는다. `Err` = 락 오염.
+// ADR-0302 — 창 상태 명령
 pub fn close_if_empty(
     state: &LayoutState,
     host: &dyn WindowHost,

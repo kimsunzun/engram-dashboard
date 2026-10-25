@@ -119,6 +119,7 @@ pub(crate) fn report_min_size(
 
 /// 창의 크기가 바뀌었다(`WindowEvent::Resized` — 메인 스레드) — 최대화 · 최소화에서 보통 크기로 돌아왔고 적어 둔 최소 크기를
 /// 아직 OS 에 입히지 않았으면 입힌다(`book::ChromeBook::on_frame`). ★어떤 락도 쥔 채 부르지 않는다★.
+// ADR-0303 — 크롬식 제목 표시줄
 pub(crate) fn on_resized(window: &Window) {
     let Some(state) = window.app_handle().try_state::<ChromeState>() else {
         return;
@@ -142,6 +143,7 @@ pub(crate) fn on_resized(window: &Window) {
 /// `send_user_message` → `proxy.send_event`). 자리 입히기와 열기 표시 사이에 보고가 끼어도 열기 표시가 받아 둔 값으로 다시
 /// 넓혀 당기고 입힌다(`book::ChromeBook::mark_opening`). 메인 스레드에서 부르면 그 자리에서 돈다 — ★어떤 락도 쥔 채 부르지
 /// 않는다★.
+// ADR-0303 — 크롬식 제목 표시줄
 pub(crate) fn lift_min(app: &AppHandle, label: &str) {
     let handle = app.clone();
     let owned = label.to_owned();
