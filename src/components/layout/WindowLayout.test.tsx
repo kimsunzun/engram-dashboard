@@ -1100,6 +1100,43 @@ describe('WindowLayout — 제목 줄', () => {
   })
 })
 
+// 사용자 결정 2026-10-26(T-66): 알림 띠가 제목 줄(창 단추 · 끌 자리)을 덮지 않는다 — 제목 줄 아래 캔버스 칸의 맨 위에 붙는다.
+//   jsdom 은 크기를 재지 못한다 — 자리를 구조로 단언한다(덮는 층 자체의 위치 · z 는 NoticeOverlay.test 몫).
+describe('WindowLayout — 알림 층의 자리', () => {
+  const notices = <div data-testid="notices-probe" />
+
+  it('알림 층은 제목 줄 밖 · 캔버스 칸(positioned) 맨 앞에 붙고, 제목 줄이 그보다 앞이다', async () => {
+    render(<WindowLayout label="main" notices={notices} />)
+    await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
+    const probe = screen.getByTestId('notices-probe')
+    const row = screen.getByTestId('title-row')
+    expect(row.contains(probe)).toBe(false)
+    const canvas = probe.parentElement as HTMLElement
+    expect(canvas.style.position).toBe('relative')
+    expect(canvas.firstElementChild).toBe(probe)
+    expect(canvas.contains(screen.getAllByTestId('tab-canvas')[0])).toBe(true)
+    expect(row.compareDocumentPosition(probe) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('제목 줄을 그리기 전(로딩)에도 알림 층을 그린다', () => {
+    invokeMock.mockImplementation(() => new Promise(() => {}))
+    render(<WindowLayout label="main" notices={notices} />)
+    expect(screen.getByTestId('window-loading')).toBeTruthy()
+    expect(screen.getByTestId('notices-probe')).toBeTruthy()
+    expect(screen.queryByTestId('title-row')).toBeNull()
+  })
+
+  it('부팅 실패 화면에도 알림 층을 그린다 — 연결 실패 이유는 그때도 읽혀야 한다', async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_tabs') throw new Error('backend down')
+      return undefined
+    })
+    render(<WindowLayout label="main" notices={notices} />)
+    await waitFor(() => expect(screen.getByTestId('window-boot-error')).toBeTruthy(), { timeout: 3000 })
+    expect(screen.getByTestId('notices-probe')).toBeTruthy()
+  })
+})
+
 describe('WindowLayout — TabBar 액션 → store 액션(이 label)', () => {
   it('[+] 클릭 → createTab(label) invoke', async () => {
     render(<WindowLayout label="main" />)

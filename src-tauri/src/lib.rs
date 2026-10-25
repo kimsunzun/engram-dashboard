@@ -442,6 +442,12 @@ pub fn run() {
                     if !crate::commands::spare::is_spare_window(window.app_handle(), window.label()) {
                         crate::state::placement::record(window);
                     }
+                    // 최대화 · 최소화에서 보통 크기로 돌아온 창에 적어 둔 OS 최소 크기를 입힌다(TRD S26-window-chrome §7-7
+                    //   — 최대화 · 최소화 동안은 입히지 않는다 · 까닭 = `crate::chrome` 장부 머리). 예열 창도 보고하므로
+                    //   빼지 않는다.
+                    if matches!(event, tauri::WindowEvent::Resized(_)) {
+                        crate::chrome::on_resized(window);
+                    }
                 }
                 // 창 사실의 앞 창 칸(제목 줄 흐림 — TRD S26-window-chrome §6-5) — 그 창의 칸은 사건의 값으로 민다. 다른 우리
                 //   창이 앞으로 오면 그 창의 `Focused(true)` 와 옛 창의 `Focused(false)` 가 둘 다 와 각자 민다. 모델 밖 창

@@ -133,6 +133,10 @@ pub(crate) fn commit(app: &AppHandle, claim: &SpareClaim) {
         );
         return;
     };
+    // 들인 창의 열기 표시는 들임 알림(`spare:adopted`)보다 먼저다 — 알림을 받은 페이지가 표식 · 창 단추를 그리며 다시
+    //   보내는 최소 크기 보고가 넓혀 당긴다(TRD S26-window-chrome §7-7). 확정이 닫기로 끝나면 그 창의 `Destroyed` 가
+    //   표시를 잊는다.
+    crate::chrome::mark_opening(app, &claim.label);
     spare.commit(&layout, claim, &TauriCommitPort { app });
 }
 

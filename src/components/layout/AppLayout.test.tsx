@@ -1,12 +1,18 @@
 // 삭제된 고정 크롬 파일의 dangling import 도 이 스위트가 잡는다 — 셸이 그것들을 import 하면
 // 단언 이전에 이 테스트 파일이 로드 실패한다.
 
+import type { ReactNode } from 'react'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-// 실제 탭/캔버스 배선 커버리지는 WindowLayout.test 담당이라 여기선 sentinel 로 stub.
+// 실제 탭/캔버스 배선 커버리지는 WindowLayout.test 담당이라 여기선 sentinel 로 stub. 알림 층은 `notices` 로 받아 그 안에
+//   그린다 — 제목 줄 아래 자리는 WindowLayout.test 「알림 층의 자리」 몫.
 vi.mock('./WindowLayout', () => ({
-  default: ({ label }: { label: string }) => <div data-testid="window-layout" data-label={label} />,
+  default: ({ label, notices }: { label: string; notices?: ReactNode }) => (
+    <div data-testid="window-layout" data-label={label}>
+      {notices}
+    </div>
+  ),
 }))
 
 // 연결 알림을 띄우려고 연결 상태 표면만 대역한다(ConnectionNotice.test 와 같은 모양).
@@ -75,17 +81,20 @@ describe('AppLayout — 슬롯화된 셸(ADR-0063)', () => {
 // jsdom 은 크기를 재지 못한다 — 「밀지 않는다」를 계산된 위치와 구조로 단언한다. 층 자체(줄만큼 · 스크롤 · 쌓임)는
 // NoticeOverlay.test 몫이다.
 describe('AppLayout — 알림은 레이아웃을 덮는다(ADR-0276 · ADR-0277)', () => {
-  it('알림 층의 계산된 위치가 absolute 이고 레이아웃 칸의 맨 위에 붙는다', async () => {
+  // 덮는 자리는 WindowLayout 이 정한다 — 제목 줄 아래 캔버스 칸(사용자 결정 2026-10-26 · T-66). 여기서는 층이 `notices` 로
+  //   넘어가고 덮는 층(absolute)이라는 것만 본다.
+  it('알림 층은 main WindowLayout 의 notices 로 넘어가고, 계산된 위치가 absolute 로 기준 칸의 맨 위에 붙는다', async () => {
     const { overlay } = await mount(view('none', { state_file: 'unreadable', saves: false }))
     const style = getComputedStyle(overlay)
     expect(style.position).toBe('absolute')
     expect([style.top, style.left, style.right]).toEqual(['0px', '0px', '0px'])
     expect(overlay.contains(screen.getByRole('status'))).toBe(true)
 
-    const box = overlay.parentElement as HTMLElement
-    expect(getComputedStyle(box).position).toBe('relative')
-    expect(box.contains(screen.getByTestId('window-layout'))).toBe(true)
-    expect(overlay.contains(screen.getByTestId('window-layout'))).toBe(false)
+    const windowLayout = screen.getByTestId('window-layout')
+    expect(windowLayout.getAttribute('data-label')).toBe(MAIN_WINDOW_LABEL)
+    expect(windowLayout.contains(overlay)).toBe(true)
+    // 감싼 칸 = 제목 줄을 그리기 전 화면에서 알림이 붙는 자리.
+    expect(getComputedStyle(windowLayout.parentElement as HTMLElement).position).toBe('relative')
   })
 
   it('두 알림이 한 층 안에 연결 띠 → 상태 파일 알림 차례로 쌓인다', async () => {
@@ -97,7 +106,7 @@ describe('AppLayout — 알림은 레이아웃을 덮는다(ADR-0276 · ADR-0277
     expect(alert.compareDocumentPosition(status) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
-  it('알림이 둘 다 떠도 레이아웃 칸은 그대로다 — 세로 스택의 나머지를 다 쓰고, 흐름 안의 자식은 레이아웃 칸뿐이다', async () => {
+  it('알림이 둘 다 떠도 레이아웃 칸은 그대로다 — 세로 스택의 나머지를 다 쓰고, 흐름 안의 자식은 WindowLayout 뿐이다', async () => {
     const { overlay, layer } = await mount(view('answered', { saves: false }), '폴더 문제')
     expect(screen.getByRole('alert')).toBeTruthy()
     expect(screen.getByRole('status')).toBeTruthy()
@@ -111,7 +120,8 @@ describe('AppLayout — 알림은 레이아웃을 덮는다(ADR-0276 · ADR-0277
     expect(box.style.flexGrow).toBe('1')
     expect(box.style.minHeight).toBe('0px')
     expect(box.style.position).toBe('relative')
-    expect([...box.children]).toEqual([overlay, windowLayout])
+    expect([...box.children]).toEqual([windowLayout])
+    expect(windowLayout.contains(overlay)).toBe(true)
   })
 
   it('알림이 없어도 층은 레이아웃 칸 안에 있고 비어 있다', async () => {

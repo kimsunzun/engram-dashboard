@@ -17,11 +17,15 @@
 //!   폴더가 갈릴 수 있다.
 //! - ★창 바탕과 첫 테마([`Backdrop`])도 마무리가 붙인다★ — 환경 옵션이 아니라 창마다 다른 값(그 창의 유효 테마)이지만,
 //!   창을 만드는 코드가 모두 여기를 지나므로 인자로 받아 빠짐없이 붙인다.
+//! - ★OS 틀(제목 표시줄 · 단추)도 마무리가 걷는다★ — 앱이 제목 줄 · 창 단추를 그리는 OS(platform
+//!   `window::caption_style` 의 `drawn_buttons`)면 `decorations(false)` · `shadow(true)` 다(TRD S26-window-chrome §8-1).
+//!   창마다 따로 걷지 않고 한 곳이다 — `tauri.conf.json` 의 창 선언에도 적지 않는다(이 모듈 시험이 설정을 본다).
 // ADR-0054
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
+use engram_dashboard_platform::window::{self as os, CaptionStyle};
 use tauri::webview::ScrollBarStyle;
 use tauri::window::Color;
 use tauri::{Manager, Runtime, WebviewWindow, WebviewWindowBuilder};
@@ -148,9 +152,9 @@ impl WebviewEnv {
     }
 
     /// 창 빌더에 웹뷰 환경 옵션(폴더 · 브라우저 인자 · 확장 · 스크롤바 모양)과 바탕 · 첫 테마(`backdrop`)를 붙이고 드롭
-    /// 처리기를 끈다 — 창을 만드는 모든 코드가 `build()` 앞에서 지난다. 앞서 빌더에 붙은 값(설정 창이 `from_config` 로
-    /// 받은 것 포함)은 덮는다 — 폴더는 예외다(물러날 때 붙이지 않는다). 초기화 스크립트는 덮지 않고
-    /// 앞서 붙은 것 뒤에 더한다.
+    /// 처리기를 끈다 — 창을 만드는 모든 코드가 `build()` 앞에서 지난다. 앱이 창 단추를 그리는 OS 면 OS 틀을 걷고 그림자를
+    /// 남긴다(모듈 머리). 앞서 빌더에 붙은 값(설정 창이 `from_config` 로 받은 것 포함)은 덮는다 — 폴더는 예외다(물러날 때
+    /// 붙이지 않는다). 초기화 스크립트는 덮지 않고 앞서 붙은 것 뒤에 더한다.
     ///
     /// 폴더는 OS 를 가리지 않고 넘긴다 — 그 값을 쓰느냐는 Tauri 의 플랫폼 구현 몫이다(CLAUDE.md 「플랫폼 중립」).
     pub(crate) fn finish<'a, R: Runtime, M: Manager<R>>(
@@ -158,7 +162,7 @@ impl WebviewEnv {
         builder: WebviewWindowBuilder<'a, R, M>,
         backdrop: Backdrop,
     ) -> WebviewWindowBuilder<'a, R, M> {
-        attach(builder, self.chosen_dir(), backdrop)
+        attach(builder, self.chosen_dir(), backdrop, os::caption_style())
     }
 }
 
@@ -171,6 +175,8 @@ trait EnvOptions: Sized {
     fn data_dir(self, dir: PathBuf) -> Self;
     fn background(self, color: Color) -> Self;
     fn init_script(self, script: String) -> Self;
+    fn decorated(self, on: bool) -> Self;
+    fn shadowed(self, on: bool) -> Self;
 }
 
 impl<'a, R: Runtime, M: Manager<R>> EnvOptions for WebviewWindowBuilder<'a, R, M> {
@@ -203,9 +209,24 @@ impl<'a, R: Runtime, M: Manager<R>> EnvOptions for WebviewWindowBuilder<'a, R, M
     fn init_script(self, script: String) -> Self {
         self.initialization_script(script)
     }
+
+    fn decorated(self, on: bool) -> Self {
+        self.decorations(on)
+    }
+
+    // 테두리 없는 창에 그림자 · 둥근 모서리 · 1 px 테두리를 남긴다(Windows 11 — 모양은 QA S10). tao 는 이 창의 둘레에 크기
+    //   조절용 보이지 않는 테두리를 둔다(tao 0.35.3 `WM_NCCALCSIZE` · `calculate_insets_for_dpi`).
+    fn shadowed(self, on: bool) -> Self {
+        self.shadow(on)
+    }
 }
 
-fn attach<B: EnvOptions>(builder: B, dir: Option<&Path>, backdrop: Backdrop) -> B {
+fn attach<B: EnvOptions>(
+    builder: B,
+    dir: Option<&Path>,
+    backdrop: Backdrop,
+    caption: CaptionStyle,
+) -> B {
     let builder = builder
         .browser_args(WEBVIEW2_BROWSER_ARGS)
         .extensions(false)
@@ -222,9 +243,15 @@ fn attach<B: EnvOptions>(builder: B, dir: Option<&Path>, backdrop: Backdrop) -> 
         None => builder,
     };
     let Backdrop::Theme { label, theme } = backdrop;
-    builder
+    let builder = builder
         .background(color(theme))
-        .init_script(theme_script(&label, theme))
+        .init_script(theme_script(&label, theme));
+    // 앱이 단추를 그리지 않는 OS(macOS 몫 — 지금 없다)는 OS 틀을 그대로 둔다(TRD S26-window-chrome §7-11).
+    if caption.drawn_buttons {
+        builder.decorated(false).shadowed(true)
+    } else {
+        builder
+    }
 }
 
 // 절대 경로로 바꾼 뒤 확인한다(모듈 머리) — 바꾸지 못하면 못 쓰는 폴더와 같이 물러난다.
@@ -409,6 +436,8 @@ mod tests {
         DataDir(PathBuf),
         Background(Color),
         InitScript(String),
+        Decorations(bool),
+        Shadow(bool),
     }
 
     #[derive(Default)]
@@ -449,6 +478,27 @@ mod tests {
             self.0.push(Attached::InitScript(script));
             self
         }
+
+        fn decorated(mut self, on: bool) -> Self {
+            self.0.push(Attached::Decorations(on));
+            self
+        }
+
+        fn shadowed(mut self, on: bool) -> Self {
+            self.0.push(Attached::Shadow(on));
+            self
+        }
+    }
+
+    /// 앱이 창 단추를 그리는 OS(지금 모든 OS — platform `caption_style`).
+    const DRAWN: CaptionStyle = CaptionStyle {
+        drawn_buttons: true,
+        leading_inset: 0.0,
+    };
+
+    /// OS 틀을 걷고 그림자를 남긴다(TRD S26-window-chrome §8-1).
+    fn frameless() -> [Attached; 2] {
+        [Attached::Decorations(false), Attached::Shadow(true)]
     }
 
     fn common() -> Vec<Attached> {
@@ -480,17 +530,55 @@ mod tests {
         let mut with_dir = common();
         with_dir.push(Attached::DataDir(dir.clone()));
         with_dir.extend(painted_dark("main"));
+        with_dir.extend(frameless());
         assert_eq!(
-            attach(Recorder::default(), Some(&dir), dark("main")).0,
+            attach(Recorder::default(), Some(&dir), dark("main"), DRAWN).0,
             with_dir
         );
         let mut fallback = common();
         fallback.extend(painted_dark("main"));
+        fallback.extend(frameless());
         assert_eq!(
-            attach(Recorder::default(), None, dark("main")).0,
+            attach(Recorder::default(), None, dark("main"), DRAWN).0,
             fallback,
             "기본 폴더로 물러나도 드롭 처리기는 끈다"
         );
+    }
+
+    /// 앱이 창 단추를 그리면 OS 틀을 걷고 그림자를 남긴다 — 그리지 않는 OS(macOS 몫 — 지금 없다)는 OS 틀을 그대로 둔다
+    /// (TRD S26-window-chrome §7-11 · §8-1).
+    #[test]
+    fn the_os_frame_is_dropped_only_where_the_app_draws_the_caption_buttons() {
+        let drawn = attach(Recorder::default(), None, dark("slot-popup-3"), DRAWN).0;
+        assert!(
+            drawn.ends_with(&frameless()),
+            "그림자는 틀을 걷은 뒤에 남긴다: {drawn:?}"
+        );
+
+        let native = CaptionStyle {
+            drawn_buttons: false,
+            leading_inset: 72.0,
+        };
+        let kept = attach(Recorder::default(), None, dark("slot-popup-3"), native).0;
+        assert!(
+            !kept
+                .iter()
+                .any(|a| matches!(a, Attached::Decorations(_) | Attached::Shadow(_))),
+            "{kept:?}"
+        );
+    }
+
+    /// OS 틀은 마무리 한 곳이 정한다 — 설정 창 선언이 `decorations` · `shadow` 를 적으면 마무리와 두 출처가 된다(TRD
+    /// S26-window-chrome §8-1). 설정 JSON 은 주석을 못 달아 사유를 여기 둔다.
+    #[test]
+    fn config_windows_leave_the_os_frame_to_finish() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        for value in conf["app"]["windows"].as_array().unwrap() {
+            for key in ["decorations", "shadow"] {
+                assert!(value.get(key).is_none(), "창 {} 의 {key}", value["label"]);
+            }
+        }
     }
 
     #[test]
@@ -503,12 +591,13 @@ mod tests {
             let mut painted = common();
             painted.push(Attached::Background(expected));
             painted.push(Attached::InitScript(theme_script("slot-popup-3", theme)));
+            painted.extend(frameless());
             let backdrop = Backdrop::Theme {
                 label: "slot-popup-3".to_owned(),
                 theme,
             };
             assert_eq!(
-                attach(Recorder::default(), None, backdrop).0,
+                attach(Recorder::default(), None, backdrop, DRAWN).0,
                 painted,
                 "{theme:?}"
             );

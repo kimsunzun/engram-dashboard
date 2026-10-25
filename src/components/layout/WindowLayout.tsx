@@ -15,7 +15,7 @@
 // 제목 줄(빈 탭바 — 번호 표식 · 창 단추 없음) + 빈 캔버스(빈 틀)만 그리고, 탭을 끌어오지 않고, 0탭 자가닫힘을 끈다. 재기
 // 보고(캔버스 · 지표)는 그대로 보낸다. 모드는 `spareMode.ts` 가 정한다.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { invoke } from '@tauri-apps/api/core'
 
@@ -49,12 +49,18 @@ import { t } from '../../i18n'
 interface WindowLayoutProps {
   /** 이 창의 label(main·slot-popup-N). */
   label: string
+  /**
+   * 알림 층(`NoticeOverlay`) — 제목 줄 바로 아래 캔버스의 맨 위를 덮는다. ★제목 줄은 가리지 않는다★ — 창 단추 · 끌 자리가
+   * 알림에 덮이면 창을 옮기지도 닫지도 못한다(사용자 결정 2026-10-26 · T-66 · TRD S26-window-chrome §12-2). 제목 줄을 아직
+   * 그리지 않는 화면(로딩 · 부팅 실패)에서는 감싼 칸의 맨 위다.
+   */
+  notices?: ReactNode
 }
 
 // 대기 모드의 탭 목록 — 참조가 고정돼야 탭 목록에 걸린 effect(창 틀 보고 · keep-alive pull)가 렌더마다 다시 돌지 않는다.
 const NO_TABS: ViewMeta[] = []
 
-export default function WindowLayout({ label }: WindowLayoutProps) {
+export default function WindowLayout({ label, notices }: WindowLayoutProps) {
   const win = useViewStore(s => s.windows[label])
   const openId = useMonitoringPickerStore(s => s.openId)
   const applyWindowTabsUpdated = useViewStore(s => s.applyWindowTabsUpdated)
@@ -272,16 +278,25 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
   if (!tabs) {
     // 로딩 플레이스홀더가 뜨는 경우: 부팅 직후 pull 전, 또는 유효 label 못 찾음(dev 리로드 stale 팝업,
     //   §3-3/G3).
+    // 제목 줄이 없는 화면이라 알림은 감싼 칸의 맨 위에 덮는다 — 연결 실패 이유는 이때도 읽혀야 한다.
     if (bootFailed) {
       return (
-        <div style={centerStyle} data-testid="window-boot-error">
-          <span>{t('window.loadFailed', { label })}</span>
-        </div>
+        <>
+          {notices}
+          <div style={centerStyle} data-testid="window-boot-error">
+            <span>{t('window.loadFailed', { label })}</span>
+          </div>
+        </>
       )
     }
     // 바탕만 그린다 — 문구 · 표시를 그리면 셸이 시한으로 창을 보였을 때 탭 화면 앞에 한 번 깜빡인다(사용자 요구
     //   2026-10-19: 창의 첫 화면은 테마 바탕 다음 곧바로 실제 내용).
-    return <div data-testid="window-loading" style={blankStyle} />
+    return (
+      <>
+        {notices}
+        <div data-testid="window-loading" style={blankStyle} />
+      </>
+    )
   }
 
   return (
@@ -304,6 +319,8 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
         />
       </TitleRow>
       <div ref={canvasRef} style={{ flex: 1, position: 'relative', minHeight: 0 }}>
+        {/* 알림 층은 이 칸(positioned)의 맨 위 = 제목 줄 바로 아래에 붙는다 — 흐름 밖이라 캔버스 크기 보고를 바꾸지 않는다. */}
+        {notices}
         {framed && <SpareCanvas />}
         {tabs.map(tab => (
           <div

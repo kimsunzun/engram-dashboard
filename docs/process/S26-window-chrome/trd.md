@@ -1,5 +1,7 @@
 # TRD — 창 크롬 · 이름 (크롬식 제목 표시줄 · 보이는 창 번호 · 창 제목 · 창 상태 명령)
 
+> **U8b 구현 중 고침 · 사용자 결정 셋**(2026-10-26 · T-66): ① §7-7 — OS 최소 크기는 보통 크기 창에만 입히고 최대화 · 최소화 동안은 입히지도 걷지도 않는다(tao 0.35.3 의 최소 크기 세터가 최대화 창을 원래 크기로 되돌린다 — 소스 독해 · 0.3판의 「최대화면 걷는다」를 대신함) · 보통 크기가 되면(`Resized`) 적어 둔 값을 입힌다 · `fit_min_width` 에 바깥 틀 폭 인자 · `mark_opening` 은 메인 스레드 일 ② 사용자 결정 — 알림 띠는 제목 줄 아래(§7-12) · 복원 모달 동안 제목 줄을 살리는 것은 작은 변경이 아니라 하지 않음(§7-12) · 비활성 흐림 대비는 그대로 받아들임(§7-5) — §12-2 ③ §10-1 · §10-3 · §11 U8b 를 지은 것에 맞춤.
+>
 > **사용자 결정 반영**(2026-10-26 · T-66): 탭 놓기의 탭바 구역 가로 = 첫 탭 왼쪽 ~ `+` 오른 끝(「탭이 있는 곳(첫 탭 ~ `+`)만 탭바 구역」) — `+` 오른쪽 빈 곳 · 끌 빈 자리 · 번호 표식 · 창 단추 위 놓기 = 새 창 · 세로(제목 줄 · 위 여백 포함)는 그대로 · 메인 결정 M26 의 가로를 뒤집음. 딸린 결정 둘 — D-a 자기 탭도 `+` 오른 끝을 넘으면 구역 밖(떼어짐) · D-b `+` 오른쪽 밑 캔버스 위 끝 15 px 는 바깥 위 띠(§7-9 · §12-2). §0 · §2-2 · §7-9 · §10-3 · §11 U8a · §12 · §14 · §15 고침 · PRD R14 · D9 · AC11 · AC12 함께.
 >
 > **U8a 구현 중 고침**(2026-10-25): §7-1 대기 모드도 제목 줄을 그린다(표식 · 단추만 뺌) · §7-2 `SURFACE_TOP` · §7-6 탭바 높이의 자리 = `titleRow/metrics.ts` · §7-7 셈 · 보고의 자리 · 대기 모드 폭 · 첫 화면 기다림 상한 · 셸은 적기만(입히기 = U8b) · §7-9 `stripZone` 의 위아래 넓힘은 그대로 · §3-2 최소 폭 보고는 생성 바인딩이 없다 · §2-2 `minSizeReport.ts` · §7-7 · §3-2 보고 순번 `seq` · `epoch`(메인 결정 · U8a 리뷰).
@@ -71,7 +73,7 @@ PRD 가 Q5 · Q10 을 메인에게 맡겼다(스파이크 뒤 결정 · 사용�
 | S5 | 테두리 없는 창에서 Alt+Space 창 메뉴가 뜨는가 | Q10 · AC23 | **재지 않음 → QA 가 적는다** · 무엇이 나오든 A 가 주는 네이티브 동작을 받아들인다(Q10 ①) |
 | S6 | 스냅 오버레이 — 최대화 단추에 올리면 메뉴가 뜨나 | Q1 · R15 | **떴다**(사용자 관측) — 그래도 켜지 않는다(Q1 결정) · 코드는 U9 가 꺼진 feature 뒤로 옮긴다 |
 | S7 | Win+Z | R15 · AC16 | QA |
-| S8 | 테두리 없는 창의 최대화 사각형 = 작업 영역인가(작업 표시줄을 덮지 않나) · OS 최소 크기가 최대화에 끼어드나 | AC14 · AC34 · R20 | QA(U8b) |
+| S8 | 테두리 없는 창의 최대화 사각형 = 작업 영역인가(작업 표시줄을 덮지 않나) · OS 최소 크기가 최대화에 끼어드나 | AC14 · AC34 · R20 | QA(U8b). 코드 사실(소스 독해 · U8b): tao 0.35.3 이 테두리 없는 최대화 창의 `WM_NCCALCSIZE` 를 작업 영역(rcWork — 자동 숨김 작업 표시줄이면 그 쪽 1 px 남김)으로 자른다 · OS 최소 크기는 최대화 동안 걷지 않는다(§7-7 — 걷는 세터가 최대화를 푼다) — 그래서 「끼어드나」는 작업 영역이 최소 크기(약 290–350 × 64)보다 좁은 화면에서만 볼 일이다 |
 | S9 | 위 가장자리 크기 조절 띠 두께와 보통 상태 위 여백(끌 자리)의 겹침 | R12 · R25 · AC30 | QA(U8b) |
 | S10 | `shadow(true)` 의 그림자 · 둥근 모서리 · 1 px 테두리 색(테마별) | R12 · AC18 | QA(U8b) |
 | S11 | 기준 빌드(OS 제목 표시줄)의 제목 줄 높이 · 캡션 단추 폭 — 배율 100 · 150 · 200 % | D8 · AC18 · AC22 | QA(U8a 전 기준 빌드에서 떠 둔다) |
@@ -114,8 +116,8 @@ PRD 가 Q5 · Q10 을 메인에게 맡겼다(스파이크 뒤 결정 · 사용�
 | `src-tauri/src/layout/tab_name.rs` | 새 | U1 = `slot_label`(D17 — 와일드카드 없는 `match`) · `window_title` · 낱말 표 `word` / U3a = `effective_tab_name` | 0(순수) |
 | `src-tauri/src/layout/window_arg.rs` | 새 | `resolve(&ViewManager, &str) -> Result<WindowLabel, WindowArgError>` | 0 |
 | `src-tauri/src/layout/window_ctl.rs` | 새 | 창 상태 서비스(최소화 · 최대화 · 원래 크기 · 앞으로 · 숨기기 · 보이기 · 닫기 합류 · 비었으면 닫기) · 포트 `WindowControl` | 0 |
-| `src-tauri/src/chrome/book.rs` | 새 | `ChromeBook` — 순수 판정(창별 마지막 제목 판 · 열기 표시 · 최소 크기 켜기/걷기 · 넓혀 당기기 여부) · 단위 시험 | 0(순수) |
-| `src-tauri/src/chrome/mod.rs` | 새 | `ChromeBook` 을 잎 락으로 쥔 Tauri 어댑터 — 제목 입히기(메인 스레드) · 최소 크기 입히기 · `Destroyed` 때 잊기 | Tauri |
+| `src-tauri/src/chrome/book.rs` | 새 | `ChromeBook` — 순수 판정(창별 마지막 제목 판 · 열기 표시 · 최소 크기 입히기(보통 크기 창만 — §7-7) · 넓혀 당기기 여부) · 입히기 차례(`apply_min` · seam `MinWindow`) · 단위 시험 | 0(순수) |
+| `src-tauri/src/chrome/mod.rs` | 새 | `ChromeBook` 을 잎 락으로 쥔 Tauri 어댑터 — 제목 입히기(메인 스레드) · 최소 크기 입히기 · 열기 표시(`mark_opening`) · `Resized` 때 미룬 최소 크기(`on_resized`) · `Destroyed` 때 잊기 | Tauri |
 | `src-tauri/src/commands/window_ctl.rs` | 새 | `WindowControl` 의 Tauri 어댑터 · invoke `window_control` · `report_window_min_width` | Tauri |
 | `src-tauri/src/layout/{types,manager,apply,commands}.rs` | 바뀜 | `TabName` · `WindowTabs.number` · `closing` · `agent_names` · `drop_window_gone` · 페이로드 칸 · 새 명령 · 만들기 답 | — |
 | `src-tauri/src/state/{schema,codec,convert,placement,restore}.rs` | 바뀜 | 영속 칸 둘(`number` · `named`) · D3 고치기 · 이름 시드 · OS 창이 없는 창은 `drop_window_gone` · `fit_min_width` | — |
@@ -131,6 +133,7 @@ PRD 가 Q5 · Q10 을 메인에게 맡겼다(스파이크 뒤 결정 · 사용�
 | `src-tauri/src/lib.rs` | 바뀜 | `Focused` → `push_window_frame` · `Resized` → 최소 크기 판정 · `Destroyed` → 번호 풀기 · 크롬 잊기 · invoke 등록 | Tauri |
 | `src/components/layout/titleRow/{TitleRow,NumberMarker,CaptionButtons}.tsx` · `titleRow/metrics.ts` · `titleRow/minSizeReport.ts` · `titleRow/dragRegion.ts` | 새 | 제목 줄 렌더 · 크기 상수 · 최소 폭 셈 · 최소 폭 보고 · 끌 자리 속성 | — |
 | `src/components/layout/{TabBar,WindowLayout}.tsx` · `tabStrip/{useTabDragSource,measure}.ts` · `dock/windowFrame.ts` · `src/store/viewStore.ts` · `src/commands/tabCommands.ts` · `src/i18n/ko.ts` · `src/styles/theme.css` | 바뀜 | 제목 줄 끼우기 · 놓기 구역(세로 = 제목 줄 · 가로 = 첫 탭 ~ `+` — §7-9) · 창 사실 칸 · 0탭 자가닫힘 → 버스 · 창 명령 등록 · 이름 편집 확정 · 낱말 · 토큰 | — |
+| `src/components/layout/{AppLayout,NoticeOverlay,ConnectionNotice}.tsx` · `src/pages/PopoutPage.tsx` | 바뀜(U8b) | 알림 층을 `WindowLayout` 의 `notices` 로 넘겨 제목 줄 아래 캔버스 칸에 붙인다(§7-12) | — |
 | `src-tauri/capabilities/{default,popup}.json` | 바뀜 | §9 | — |
 
 ### 2-3 포트(seam) — 바깥 세계마다 하나
@@ -517,6 +520,8 @@ pub fn plan(action: WindowAction, s: OsWindowState) -> Plan;   // 순수 — §5
 
 `TitleRow` 의 `data-window-active="false"`(창 사실 `focused` 거짓)일 때 탭 글자 · 번호 · 단추 글리프에 테마 토큰 `--chrome-inactive-fg` 를 쓴다(테마 셋 각각 — `src/styles/theme.css`). 끄는 동안의 흐림은 이 AC 밖이다(PRD AC15 · 슬롯 도킹 Q36).
 
+- **흐림 대비는 그대로 받아들인다**(결정 · 2026-10-26 — §12-2 「흐림 대비」) — U8a 리뷰가 잰 흐린 글자 대비(다크 3.6:1 · 라이트 3.1:1 · e-ink 는 거의 안 보임 — 활성 글자 검정 → `#444` 만 바뀐다)를 고치지 않는다. 토큰 값은 그대로다.
+
 ### 7-6 크기 값(D8 — 메인 결정 · 기준 빌드 실측 S9 · S11 로 확정)
 
 | 값 | 0.2판 제안(DIP = CSS px · 확대 1) | 근거 |
@@ -533,14 +538,16 @@ pub fn plan(action: WindowAction, s: OsWindowState) -> Plan;   // 순수 — §5
 ### 7-7 최소 창 폭 · 저장 크기(R20 · D14 · D15 · AC22 · AC27 · AC34)
 
 - **셈(웹 · 창마다 — `titleRow/metrics.ts` `minWindowSize`)** = 탭 줄 왼 여백 + `TAB_MIN_ACTIVE_W`(52) + `+` 칸(지금 4 + 22 — `tabStrip/layout.ts` `TAB_ADD_GAP` · `TAB_BUTTON_SIZE`) + `GRAB_MIN_W` + 번호 표식의 지금 폭(잰 값 · `MARKER_MIN_W` 아래로 치지 않는다) + 단추 3 × 46(그릴 때만). 한 자리 번호에서 = 286 + 왼 여백(셈 — 화면 실측은 미검) · 대기 모드(표식 · 단추 없음) = 120. 최소 높이 = 보통 상태 줄 높이(34) + 칸 최소(`min_pane_px` — ADR-0227 의 그 값 · 웹 `splitPreview.ts` `MIN_PANE_PX` 30) = 64 — 최대화에도 같은 값을 보낸다. 정수로 올림.
-- **보고** — 새 invoke `report_window_min_width { width, height, seq, epoch }`(웹 → 셸 · `titleRow/minSizeReport.ts` · 창 label 은 껍데기가 Tauri 창에서 꺼낸다 · `report_window_canvas` 와 같은 꼴 — 인자가 수뿐이라 생성 바인딩이 없다 · 범위 1~4096 밖 = `Err`). 마운트 때 · 표식 · 단추 · 왼 여백이 바뀔 때 · 표식 폭이 바뀔 때(관측) 보낸다 — 같은 값은 다시 보내지 않고 한 번에 하나다. 한 시도의 답 시한 = `MIN_SIZE_ATTEMPT_TIMEOUT_MS` 1 s — 넘긴 시도는 셸에 닿았는지 모름으로 치고 다음 차례(같은 값 재시도 · 더 새 값)로 넘어간다(답 없는 invoke 하나가 그 뒤 보고를 다 막지 않게 · 순서는 아래 보고 순번이 가른다). **첫 화면 알림보다 먼저 보낸다** — 첫 화면 보이기 전에 넓히기가 끝나게(웹 `WindowLayout` 의 차례 — 보고 `await` 뒤 `reportFirstPaint`. 기다림 상한 = `MIN_SIZE_WAIT_CAP_MS` 300 ms — 답이 없거나 거절돼도 첫 화면을 막지 않는다. 1.5 s 시한 · 그 상한으로 먼저 보인 창은 보인 뒤 넓혀질 수 있다 — T1 로 받아들임). U8a 의 셸은 보고를 장부(`ChromeBook`)에 적기만 하고 입히기는 U8b 다(`chrome::report_min_size` 의 `TODO(T-66 U8b)`). 그래서 U8a 에서 첫 화면 알림이 보고를 기다리는 것은 얻는 것이 없다 — 배선만 — U8b 에서 값어치(그때까지는 첫 화면이 보고 답만큼 · 늦어도 300 ms 늦을 뿐이다).
+- **보고** — 새 invoke `report_window_min_width { width, height, seq, epoch }`(웹 → 셸 · `titleRow/minSizeReport.ts` · 창 label 은 껍데기가 Tauri 창에서 꺼낸다 · `report_window_canvas` 와 같은 꼴 — 인자가 수뿐이라 생성 바인딩이 없다 · 범위 1~4096 밖 = `Err`). 마운트 때 · 표식 · 단추 · 왼 여백이 바뀔 때 · 표식 폭이 바뀔 때(관측) 보낸다 — 같은 값은 다시 보내지 않고 한 번에 하나다. 한 시도의 답 시한 = `MIN_SIZE_ATTEMPT_TIMEOUT_MS` 1 s — 넘긴 시도는 셸에 닿았는지 모름으로 치고 다음 차례(같은 값 재시도 · 더 새 값)로 넘어간다(답 없는 invoke 하나가 그 뒤 보고를 다 막지 않게 · 순서는 아래 보고 순번이 가른다). **첫 화면 알림보다 먼저 보낸다** — 첫 화면 보이기 전에 넓히기가 끝나게(웹 `WindowLayout` 의 차례 — 보고 `await` 뒤 `reportFirstPaint`. 기다림 상한 = `MIN_SIZE_WAIT_CAP_MS` 300 ms — 답이 없거나 거절돼도 첫 화면을 막지 않는다. 1.5 s 시한 · 그 상한으로 먼저 보인 창은 보인 뒤 넓혀질 수 있다 — T1 로 받아들임). U8a 의 셸은 보고를 장부(`ChromeBook`)에 적기만 했고, U8b 부터 같은 동기 명령(메인 스레드) 안에서 아래 판정대로 입힌다 — 그래서 첫 화면 알림이 보고 답을 기다리는 동안 셸이 숨은 창을 넓혀 당기기와 OS 최소 크기 입히기를 끝낸다(답이 그 뒤에 간다).
 - **보고 순번**(메인 결정 · U8a 리뷰 2026-10-25) — 시한에 놓은 시도가 더 새 시도보다 늦게 셸에 닿을 수 있어, 순서를 셸에서 가른다. `seq` = 웹 페이지 하나 안에서 보낼 때마다(재시도 포함) 하나 오르는 순번(1 부터) · `epoch` = 페이지를 읽은 벽시계 ms `Math.floor(performance.timeOrigin)`(u64 — 다시 읽을수록 크다 · 난수였으면 다시 읽기 전 페이지의 늦은 보고가 새 페이지 값을 덮었다 · 같은 ms 에 읽은 두 페이지는 한 페이지로 섞인다 — 다루지 않음). 셸 `ChromeBook::record_min` 은 `(epoch, seq)` 를 사전순으로 견준다 — 옛 `epoch` 이거나 같은 `epoch` 에서 받아들인 순번보다 새 것이 아니면 적지 않고 `Ok`(debug 로그) · 더 큰 `epoch` 면 순번을 새로 센다 · `forget` 이 함께 지운다 — 닿는 차례와 무관하게 가장 새 페이지가 마지막으로 보낸 값이 남는다. 웹은 가장 큰 순번의 성공 답만 「셸의 지금 값」으로 적고(그보다 옛 순번의 답은 시한 뒤에 왔어도 버린다) · 새 순번을 보내는 순간 그 값을 모름으로 돌린다 — 같은 값 건너뛰기는 그 값과만 견준다.
-- **판정(순수 — `chrome::ChromeBook`, 리뷰 Claude ⑩)**:
-  - `mark_opening(label)` — 창을 **열 때** 셸이 적는다: 창 포트의 `open` · `open_at`(새로 짓기) · 맡긴 예열 창의 `committed` · 부팅 복원 창 짓기(`state::placement` 의 main · 팝아웃) · 사본 수락의 숨긴 팝아웃 짓기(`RestoreWindows::open_hidden`).
-  - `on_min_report(label, min, maximized) -> MinPlan { set_min: Option<(w, h)> /* None = 걷기 */, widen: bool }` — 보통 상태면 최소 크기를 입히고 최대화면 걷는다(R20 — 최대화 사각형 = 작업 영역). `widen` 은 그 창에 열기 표시가 있을 때만 참이고 표시를 거둔다 — **넓혀 당기기는 열 때 한 번뿐**이다(사람이 창을 끌어 좁은 모니터로 옮기는 동안은 OS 최소 크기만 걸린다 — 리뷰 codex ⑩ · PRD 0.5판 R20 · AC34).
-  - `on_frame(label, maximized)` — 최대화가 바뀌면 최소 크기를 다시 입히거나 걷는다(창 사실 밀기 길 — §6-5 에서 부른다). 최대화에 최소 크기가 끼어드는지는 미검(S8) — 끼어들지 않으면 이 토글을 걷는다.
-  - `forget(label)` — `Destroyed`.
-- **넓혀 당기기(D14)** — `widen` 이면 그 창 보통 크기가 최소보다 좁을 때 최소 폭으로 넓히고, 넓힌 창이 작업 영역을 넘으면 자리를 작업 영역 안으로 당긴다 · 작업 영역 자체가 최소 폭보다 좁으면 왼쪽 끝 = 작업 영역 왼쪽 끝(R20). 셈 = `state::placement` 의 순수 함수 `fit_min_width(bounds, min_w, work_area) -> bounds`(그 모듈의 `resolve_place` 와 같은 층). 입히기 = `placement::move_steps`(어댑터 · 락 밖).
+- **판정(순수 — `chrome::ChromeBook`, 리뷰 Claude ⑩)** — U8b 가 지은 꼴(2026-10-26):
+  - `mark_opening(label)` — 창을 **열 때** 셸이 적는다: 창 포트의 `open` · `open_at` 중 새로 짓기(`commands::popout::open_new_window` 의 `Fresh` 갈래) · 맡긴 예열 창의 `committed`(`commands::spare::commit` — 확정 · `spare:adopted` 알림 **앞**) · 부팅 복원 창 짓기(`state::placement` 의 `open_static`(main) · `open_popout`) · 사본 수락의 숨긴 팝아웃 짓기(`TauriRestoreWindows::open_hidden`). 모두 창을 지은 **뒤**에 부른다. 어댑터(`chrome::mark_opening`)는 적기를 메인 스레드 일로 넘기고 그 일 안에서 창이 있는 것을 본 뒤에만 항목을 만든다(장부 머리의 불변식 — 메인 스레드에서 부르면 그 자리에서 돈다). 그 창의 첫 보고보다 먼저 돈다 — 메인 스레드는 한 줄이고 보고는 페이지를 읽은 뒤 같은 줄로 온다(들인 예열 창은 들임 알림 앞에 적는다).
+  - `on_min_report(label, order, min, state) -> MinReport { verdict, plan: MinPlan { widen: Option<MinSize>, set_min: Option<MinSize> } }` — `state` = 그 창의 크기 상태(`Normal` · `Other` = 최대화 · 최소화 · 못 읽음 — 같은 메인 스레드 일 안에서 읽는다). **OS 최소 크기는 `Normal` 일 때만 입히고(입힌 값과 다를 때만) 최대화 · 최소화 동안은 입히지도 걷지도 않는다** — tao 0.35.3 의 최소 크기 세터(`set_min_inner_size`)가 지금 크기를 다시 입혀(`set_inner_size`) 최대화 깃발을 내리고 `SW_RESTORE` 로 원래 크기로 되돌린다 · 숨은 창이면 보이며 활성화한다(소스 독해 — `platform_impl/windows/window.rs` · `window_state.rs` `apply_diff`). 그래서 0.3판의 「최대화면 걷는다」는 지을 수 없어 걷었다 — 최대화 사각형 = 작업 영역은 tao 의 테두리 없는 창 `WM_NCCALCSIZE` 가 지키고(작업 표시줄을 덮지 않게 rcWork 로 자른다 · 소스 독해), 웹의 최소 크기(수백 px)가 작업 영역보다 작아 끼어들 일이 없다(작업 영역이 그보다 좁은 화면 = S8). `widen` 은 그 창에 열기 표시가 있고 `Normal` 일 때만이며, 받아들인 보고(`Stale` 아님)는 늘 표시를 거둔다 — **넓혀 당기기는 열 때 한 번뿐**이다(사람이 창을 끌어 좁은 모니터로 옮기는 동안은 OS 최소 크기만 걸린다 — 리뷰 codex ⑩ · PRD 0.5판 R20 · AC34). 열 때 최대화(OS 로)였던 창은 넓히지 않는다 — 복원 창의 최대화는 보일 때로 미뤄져 보고 때는 보통 크기라 이 갈래에 들지 않는다(§5-2).
+  - `on_frame(label, state) -> MinPlan` — `lib.rs` 의 `WindowEvent::Resized`(예열 창 포함 — `chrome::on_resized`)가 부른다. `Normal` 이 됐고 적어 둔 최소 크기를 아직 OS 에 입히지 않았으면 입힌다(최대화 · 최소화 동안 온 보고 · 입히다 실패한 값). 항목을 만들지 않는다. 최대화로 바뀔 때는 아무것도 하지 않는다(위 까닭). 0.3판의 「창 사실 밀기 길(§6-5)에서 부른다」는 `Resized` 로 옮겼다 — 최대화 바뀜은 늘 크기 바뀜이고, 창 사실 밀기는 미룬 최대화 동안 멈춘다(`state::placement::record`).
+  - `min_failed(label)` — OS 최소 크기를 못 입혔다 → 입힌 값을 잊어 다음 보고 · 크기 바뀜이 다시 입힌다. `forget(label)` — `Destroyed`(열기 표시 · 입힌 값 · 보고 순번 모두).
+  - **남은 갭 — 작업 영역이 최소 크기보다 좁은 화면의 최대화**(U8b · 미검 · 사용자 보고 몫) — PRD R20 · AC34 는 「최대화한 창은 작업 영역이 최소 폭보다 좁아도 작업 영역과 같다」를 요구하는데, 최대화 동안 최소 크기를 걷지 못하므로(위) 그 화면에서는 OS 최소 크기가 남는다. Windows 의 `DefWindowProc` 가 `WM_WINDOWPOSCHANGING` 에서 최대화 크기도 최소 추적 크기로 키우는지(Wine 은 최소화만 빼고 키운다 — 추론 · 가능성 높음 · tao 는 그 사건을 전체 화면일 때만 만진다)와, 키워도 tao 의 `WM_NCCALCSIZE` 가 안쪽을 작업 영역으로 잘라 보이는 것이 작업 영역에 머무는지는 모른다 → S8 이 작업 영역이 좁은 배치(예: 800×600 · 300 % = 논리 폭 약 266)로 잰다. 넘치면 고를 길 = ① 받아들임 ② 입히는 최소 크기를 그 창 모니터의 작업 영역으로 줄임(보통 상태의 「최소 폭이 이긴다」(R20)를 그 화면에서 잃는다) ③ platform 에 `WM_GETMINMAXINFO` 서브클래스(최대화 동안 최소 추적 크기를 걷는다 — 큼).
+  - **입히기 차례**(`chrome::book::apply_min` — 장부 락 밖 · seam `MinWindow` = 창 하나의 `widen_to` · `apply_min_size`) — ★넓혀 당기기가 먼저★(OS 최소 크기를 먼저 입히면 OS 가 왼쪽 끝을 두고 오른쪽으로 넓혀 작업 영역 밖으로 민 뒤에 당기게 된다) → OS 최소 크기(Tauri `set_min_size` — 논리 안쪽 크기). 넓히기가 실패해도 최소 크기는 입힌다(warn).
+- **넓혀 당기기(D14)** — `widen` 이면 그 창 보통 크기가 최소보다 좁을 때 최소 폭으로 넓히고, 넓힌 창의 바깥 사각형이 작업 영역 오른쪽을 넘으면 자리를 작업 영역 안으로 당긴다 · 작업 영역 자체가 창보다 좁으면 바깥 왼쪽 끝 = 작업 영역 왼쪽 끝(R20). 넓힐 일이 없으면 화면 밖에 걸친 자리여도 옮기지 않는다. 셈 = `state::placement` 의 순수 함수 `fit_min_width(bounds, min_w, work, frame) -> bounds`(그 모듈의 `resolve_place` 와 같은 층 · `bounds` = 물리 바깥 위치 · 논리 안쪽 크기 · `work` = 그 창이 놓인 모니터의 작업 영역(물리) + 그 창의 배율 · `frame` = 바깥 폭 − 안쪽 폭(물리) — OS 틀을 걷은 창에도 tao 가 둘레에 크기 조절용 보이지 않는 테두리를 둔다(`calculate_insets_for_dpi` · 100 % 에서 좌우 각 약 8 px — 소스 독해) · 0.3판의 세 인자에서 `frame` 이 늘었다). 입히기 = `placement::move_steps`(위치는 바뀔 때만 · 크기 — 어댑터 · 락 밖 · 메인 스레드).
 - **옛 파일의 안쪽 크기**(W5 · D14) — 저장 크기 = 안쪽 크기(코드 — `state/placement.rs` 머리)라 OS 틀이 없어지면 첫 부팅 창이 틀 높이만큼 짧아진다. 받아들인다(PRD D14 — 한 번뿐).
 
 ### 7-8 탭 폭 상수 다시 끌어내기(W3 · AC17)
@@ -568,14 +575,21 @@ pub fn plan(action: WindowAction, s: OsWindowState) -> Plan;   // 순수 — §5
 
 platform `window::caption_style() -> CaptionStyle { drawn_buttons: bool, leading_inset: f64 }` — Windows · 그 밖 = `{ true, 0 }` · macOS = `{ false, <신호등 폭> }`(값 미검 — 짓지 않는다). ★지금 코드는 모든 OS 에서 `{ true, 0 }` 이다★ — macOS 갈래는 macOS 이식 때 짓는다. 셸이 창 사실(`WindowFrame.caption`)에 실어 웹에 준다. 셸 `WebviewEnv::finish` 는 `drawn_buttons` 일 때만 OS 틀을 걷는다. macOS 의 「Overlay 제목 표시줄」 빌더 호출은 Tauri 의 macOS 전용 API 라 셸에 `cfg` 를 부른다 — 그 자리는 macOS 를 지을 때 정한다(지금 정하지 않는다).
 
+### 7-12 알림 띠 · 복원 모달과 제목 줄(사용자 결정 2026-10-26 · T-66 — U8b)
+
+OS 틀을 걷으면 제목 줄이 창을 옮기고 닫는 유일한 자리다. 그 위를 덮는 것이 둘 있었다 — 알림 띠(`NoticeOverlay` · 상태 파일 · 연결 실패)와 복원 모달(`RestoreModal` — main 만 · 비정상 종료 뒤).
+
+- **알림 띠는 제목 줄 아래다**(결정 · 2026-10-26) — 0.3판까지 알림 층은 `AppLayout` · `PopoutPage` 의 감싼 칸 맨 위(`top: 0` · z 40)에 붙어 제목 줄(탭바 · 끌 자리 · 창 단추)을 덮었다(ADR-0276 결정 2 「TabBar 를 가려도 된다」). 이제 호출부는 그 층을 `WindowLayout` 의 `notices` 로 넘기고, `WindowLayout` 은 제목 줄 바로 아래 캔버스 칸(positioned)의 맨 앞에 붙인다 — 제목 줄 높이(보통 34 · 최대화 28)를 따로 셀 일이 없다. 덮는 꼴(흐름 밖 · 줄만큼 · z 40 · 최대 높이 33vh)은 그대로이고 캔버스 위쪽을 덮는다. 제목 줄을 아직 그리지 않는 화면(로딩 · 부팅 실패)에서는 감싼 칸의 맨 위다(연결 실패 이유는 그때도 읽혀야 한다). ADR-0276 결정 2 · ADR-0277 의 「TabBar 를 덮는다」는 이 결정이 바꾼다 — 기록은 U10(§12-4).
+- **복원 모달 동안 제목 줄은 그대로 막힌다**(결정 · 2026-10-26 — 「작은 변경일 때만 살린다」 · 크기를 재 보고 하지 않았다). 지금은 `AppLayout` 이 레이아웃 전체(제목 줄 포함)를 `inert` 로 잠그고 모달의 덮개가 창 전체(`fixed inset-0` · z-50)를 덮는다. 제목 줄의 창 단추 · 끌 자리만 살리려면 (1) `inert` 를 감싼 칸에서 걷어 `WindowLayout` 안의 캔버스 칸과 탭바(`TabBar` 뿌리 — 제목 줄의 자식이다)에 따로 걸고(`inert` 는 자손에서 풀 수 없다) (2) 모달 덮개를 제목 줄 아래에서 시작하게(캔버스 칸 안으로 옮기거나 창 사실의 최대화로 줄 높이를 세어) (3) 로딩 · 부팅 실패 화면의 덮개를 따로 두고 (4) 잠긴 탭 위 누름이 `pointer-events` 처럼 부모 제목 줄(끌 자리)로 빠져 창 끌기가 되는 것을 정해야 한다 — 네 컴포넌트(`AppLayout` · `WindowLayout` · `TabBar` · `RestoreModal`) · 약 60–100 줄 + 시험이라 하지 않았다. 묻는 동안 창을 옮기거나 숨기는 길 = 키보드(Alt+Space · Win+화살표 — 결과는 QA 가 적는다 · AC23) · 트레이 숨기기 · 작업 표시줄. 사람이 그 동안 창을 닫으면(Alt+F4 · 트레이) main 은 숨을 뿐이고(ADR-0229) 물음은 `awaiting` 으로 남아 다시 보이면 모달이 그대로다 — 앱을 끝내도 답하지 않은 사본은 남아 다음 부팅에 다시 묻는다(코드 — `state::boot_plugin` 시험 `an_unanswered_copy_survives_a_clean_exit_and_is_asked_again`).
+
 ---
 
 ## 8. 플랫폼 · 창 만들기
 
 ### 8-1 `WebviewEnv::finish`(ADR-0283 — 모든 창이 지난다)
 
-- `EnvOptions` 에 `decorations(bool)` · `shadow(bool)` 를 더하고 `attach` 가 `caption_style().drawn_buttons` 일 때 `decorations(false)` · `shadow(true)` 를 붙인다 — 가짜 빌더 시험이 「붙였다」를 본다(그 모듈의 기존 시험 꼴). main(설정 창 `from_config`) · 팝아웃 · 예열 창이 모두 지난다(코드 — 그 모듈 머리).
-- `tauri.conf.json` 의 main 선언에 `decorations` 를 적지 않는다(마무리가 덮는다 — 한 곳).
+- `EnvOptions` 에 `decorated(bool)` · `shadowed(bool)`(빌더의 `decorations` · `shadow` — 이름을 갈라 빌더 메서드와 헷갈리지 않게)를 더하고 `attach` 가 크롬 모양 인자의 `drawn_buttons` 일 때 다른 옵션 뒤에 `decorated(false)` · `shadowed(true)` 를 붙인다 · `finish` 가 platform `window::caption_style()` 을 넘긴다 — 가짜 빌더 시험이 「붙였다 · 단추를 그리지 않는 OS 는 안 붙였다」를 본다(그 모듈의 기존 시험 꼴). main(설정 창 `from_config` — `state::placement::build_static`) · 팝아웃 · 예열 창 · 복원 팝아웃(모두 `commands::popout::build_window`)이 지난다(코드 — `WebviewWindowBuilder` 를 쓰는 자리는 그 둘뿐 · U8b 확인).
+- `tauri.conf.json` 의 main 선언에 `decorations` · `shadow` 를 적지 않는다(마무리가 덮는다 — 한 곳) — 그 모듈 시험이 설정 파일을 읽어 맞댄다.
 - 크기 조절 테두리 = Tauri 코어의 테두리 없는 창 크기 조절(조사 — `tauri-runtime-wry` `undecorated_resizing.rs` · 확실) · 그림자 · 둥근 모서리 · 1 px 테두리 색 = S10.
 
 ### 8-2 platform crate(`crates/engram-dashboard-platform/src/window.rs`)
@@ -626,11 +640,11 @@ platform `window::caption_style() -> CaptionStyle { drawn_buttons: bool, leading
 | `window_arg` | 표(§4-5) 전부 · 앞 실행 label · 닫힌 창 영속 id | AC26 · AC28 |
 | `window_ctl` | main 닫기 = `hide_all` · 숫자 인자 = `INVALID_ARGUMENT`(`if_empty` 여도 — 그 앞) · `if_empty` 가 해석기 앞에서 갈림(모델에 있음 → Kept · 없음+closing → 그 label 닫기 · 다른 id → Kept) · `plan` = §5-2 표 전부(첫 화면 대기 · 숨김 × 다섯 동사) · **메인 스레드 줄 흉내**(§5-2 — 보이기 일 · `maximize` 일 두 차례 · 끝에 미룸 표가 빔 · `unmaximize` · 숨김 · `NoSteal` 이 대기 창을 건너뜀) · `raise`(숨음 → `NoSteal` 먼저 · 전경이 남의 것으로 꾸미면 `set_focus` 를 부르지 않고 `focused: false`) | AC8 · AC9 · AC24 · AC26 · AC32 |
 | `tray::actions` | `show_ui_windows` 의 두 갈래 — `TrayClick` = 지금 차례 그대로(기존 시험) · `NoSteal` = 대기 창 건너뜀 · `set_focus` 는 전경이 우리일 때 main 에만 | AC9 |
-| `chrome::book` | 제목 판 — 옛 판 버림 · 같은 제목 건너뜀 · 잊은 뒤 온 늦은 일(창 없음)은 항목을 만들지 않음 · 최소 크기 — 보통 = 입힘 · 최대화 = 걷기 · 최대화 바뀜 토글 · 넓히기 = 열기 표시가 있을 때 한 번 · 표시 없는 보고는 넓히지 않음 | AC3 · AC22 · AC27 · AC34 |
+| `chrome::book` | 제목 판 — 옛 판 버림 · 같은 제목 건너뜀 · 잊은 뒤 온 늦은 일(창 없음)은 항목을 만들지 않음 · 최소 크기(U8b) — 보통 = 새 값만 한 번 입힘 · 최대화 · 최소화 = 입히지 않고 보통이 되면(`on_frame`) 입힘 · 최대화 · 원래 크기로 걷지 않음 · 보고 없는 크기 바뀜은 항목을 안 만듦 · 넓히기 = 열기 표시 뒤 첫 보고 한 번(같은 값이어도) · 표시 없는 보고는 넓히지 않음 · 최대화 때 쓴 표시는 넓히지 않음 · 옛 순번은 표시를 남김 · 못 입힌 값은 다음 크기 바뀜이 다시 입힘 · 잊기가 표시 · 입힌 값을 지움 · 창 없는 보고 · 범위 검사 차례 · `apply_min` 차례(넓히기 → 최소 크기 · 둘 다 장부 락 밖 · 넓히기 실패에도 최소 크기 · 최소 크기 실패 → 다시 입힘) | AC3 · AC22 · AC27 · AC34 |
 | `codec` · `convert` | `number` · `named` 너그러운 읽기(창 · 탭을 건너뛰지 않는다) · 왕복 · 시드 규칙(`named` 없음은 시드 안 함) · 「같은 JSON」 시험 고침 | AC25 · AC37 |
 | `popout` | label 꼴 · 실행 표식 고정 · `cascade_position` 이 끝 수를 푼다 | AC1 · AC28 |
-| `placement` | `fit_min_width` — 좁은 저장 크기 · 작업 영역 오른 끝 · 작업 영역 < 최소 폭 → 왼 끝 맞춤 | AC27 · AC34 |
-| `webview_env` | 가짜 빌더에 `decorations(false)` · `shadow(true)` 가 붙음 | AC5 |
+| `placement` | `fit_min_width` — 좁은 저장 크기(제자리 넓힘) · 충분히 넓으면 그대로(화면 밖이어도) · 작업 영역 오른 끝으로 당김 · 150 % 배율의 바깥 폭 · 작업 영역 < 창 → 왼 끝 맞춤 · 못 쓰는 배율 → 넓히기만 | AC27 · AC34 |
+| `webview_env` | 가짜 빌더에 `decorations(false)` · `shadow(true)` 가 다른 옵션 뒤에 붙음(폴더 있음 · 기본 폴더 · 테마 셋) · 단추를 그리지 않는 크롬 모양이면 안 붙음 · `tauri.conf.json` 창 선언에 `decorations` · `shadow` 없음 | AC5 |
 | `tab_drop` | `WindowFrame` 칸 · 바뀔 때만 밂(`focused` 포함) | AC15 |
 | platform | `caption_style` · `is_foreground`(Windows 실 창 — 기존 `test_window` 도우미) | AC15 |
 | 데몬 `connection_core` | `Renamed` 뒤 · `RosterFanout::roster_changed` 도 `AgentListUpdated` 가 나가고 그 이름이 새 이름이다 | AC4 |
@@ -643,7 +657,7 @@ platform `window::caption_style() -> CaptionStyle { drawn_buttons: bool, leading
 
 ### 10-3 TS(vitest)
 
-`TitleRow` 배치 순서(탭바 → 빈 곳 → 표식 → 단추) · 표식이 Tab 순서 밖 · `pointer-events: none` · 자리 수별 폭 · 단추가 레지스트리 명령을 부름 · 최대화 상태에 따라 단추 · 접근성 이름 · main/팝아웃 셋째 단추 이름 · 아이콘(`EyeOff`) · `frame.focused` → 비활성 속성 · 최소 폭 셈과 보고 차례(보고 뒤 첫 화면 알림) · 0탭 효과가 `window_control{Close, if_empty}` 를 자기 `window_id` 로 · `viewStore` 의 `number` · `windowId` 칸 · 탭바 `available` 이 표식 · 단추 · 빈 곳을 뺀 폭 · **놓기 구역**(`stripZoneArea` · `geometryOf` · `windowDrop.decide` — 탭 · `+` 와 그 위 여백 위 점 = `tab_bar`(`+` 위 = 끝 번호) · `+` 오른쪽 빈 곳 · 표식 · 단추 · 그 위 여백 위 점 = 새 창 · 출처 창 자기 탭이면 구역 밖 = 남은 탭 · 놓으면 떼어 냄 · 탭 0 = `+` 만 · 제목 줄 밖 = 지금처럼 · D-a 자기 탭 가로 넘침 → 구역 밖 · 돌아오면 순서 이동(`dragSource.test.ts`) · D-b `+` 오른쪽 밑 캔버스 위 끝 = 바깥 위 띠(실제 `windowBands`) — 사용자 결정 2026-10-26) · **이름 편집 확정**(자동 이름 탭에 같은 글자 Enter = 보냄 · 같은 글자 포커스 잃음 · 이웃 누름 = 안 보냄 · 정한 이름 탭에 같은 글자 = 안 보냄) · `windowFrame.ts` 가 새 칸을 읽고 모양이 틀리면 버림.
+`TitleRow` 배치 순서(탭바 → 빈 곳 → 표식 → 단추) · 표식이 Tab 순서 밖 · `pointer-events: none` · 자리 수별 폭 · 단추가 레지스트리 명령을 부름 · 최대화 상태에 따라 단추 · 접근성 이름 · main/팝아웃 셋째 단추 이름 · 아이콘(`EyeOff`) · `frame.focused` → 비활성 속성 · 최소 폭 셈과 보고 차례(보고 뒤 첫 화면 알림) · 0탭 효과가 `window_control{Close, if_empty}` 를 자기 `window_id` 로 · `viewStore` 의 `number` · `windowId` 칸 · 탭바 `available` 이 표식 · 단추 · 빈 곳을 뺀 폭 · **놓기 구역**(`stripZoneArea` · `geometryOf` · `windowDrop.decide` — 탭 · `+` 와 그 위 여백 위 점 = `tab_bar`(`+` 위 = 끝 번호) · `+` 오른쪽 빈 곳 · 표식 · 단추 · 그 위 여백 위 점 = 새 창 · 출처 창 자기 탭이면 구역 밖 = 남은 탭 · 놓으면 떼어 냄 · 탭 0 = `+` 만 · 제목 줄 밖 = 지금처럼 · D-a 자기 탭 가로 넘침 → 구역 밖 · 돌아오면 순서 이동(`dragSource.test.ts`) · D-b `+` 오른쪽 밑 캔버스 위 끝 = 바깥 위 띠(실제 `windowBands`) — 사용자 결정 2026-10-26) · **이름 편집 확정**(자동 이름 탭에 같은 글자 Enter = 보냄 · 같은 글자 포커스 잃음 · 이웃 누름 = 안 보냄 · 정한 이름 탭에 같은 글자 = 안 보냄) · `windowFrame.ts` 가 새 칸을 읽고 모양이 틀리면 버림 · **알림 층의 자리**(U8b · §7-12 — `WindowLayout.test` 「알림 층의 자리」: `notices` 가 제목 줄 밖 · 캔버스 칸 맨 앞 · 제목 줄 뒤 · 로딩 · 부팅 실패 화면에도 그린다 / `AppLayout` · `PopoutPage` · `RestoreModal` 시험: 층이 `notices` 로 넘어가고 흐름 안의 자식은 `WindowLayout` 뿐 · 묻는 동안 그 층도 잠긴다).
 
 ### 10-4 구조 게이트(CI · `/qa` 바인딩 — U1 · U7b 가 더한다)
 
@@ -695,7 +709,7 @@ CDP(`scripts/cdp.mjs`)가 재는 것 — DOM 배치 · 번호 · `window.list` �
 | **U7a** | 창 상태 명령(셸) — `window_ctl` · `WindowControl` · Tauri 어댑터 · §5-2 보이지 않는 창 규칙 · 모든 보이기 갈래의 미룬 최대화 · 버스 명령 · `window.list` details · `window.close`(main · `if_empty` 를 해석기 앞에서) · invoke `window_control`(async) · 메인 스레드 일 하나로 읽기 · `plan` · 입히기(§5-2) + 메인 스레드 줄 흉내 시험 · 트레이 보이기의 `Activation` 갈래(`NoSteal` = 대기 창 건너뜀 · `raise_and_show` 차례) · invoke `show_main_ui` → `NoSteal` · platform `is_foreground` · **platform `caption_style()`**(이 단위가 `WindowFrame.caption` 을 채운다 — 0.3판 재리뷰 ④) · `WindowFrame.focused`(사건 값) · `caption` · `Focused` → 밀기 | U2 · U5 | 큼 |
 | **U7b** | 창 상태 명령(웹) — 레지스트리 · `viewStore` 액션 · 0탭 자가닫힘 → 버스 · `popup.json` 의 `allow-close` 걷기 · `windowFrame.ts` 새 칸 · AC10 타입 검사 시험 | U7a | 중간. 접점 = invoke `window_control` 모양 · `WindowFrame` 모양 하나씩(U7a 가 먼저 못 박는다) |
 | **U8a** | 제목 줄(웹) — `TitleRow` · `NumberMarker` · `CaptionButtons`(T3) · `metrics.ts` · i18n · 테마 토큰 · 흐림 · 끌 자리 속성(`data-tauri-drag-region` — Q5) + `core:window:allow-start-dragging`(main · 팝아웃) · **놓기 구역**(세로 = 제목 줄 · 가로 = 첫 탭 ~ `+` — `measure.ts` `stripZoneArea` · `useTabDragSource` · `windowDrop` · §7-9) · 최소 폭 셈과 보고 · `report_window_min_width` 껍데기(입히기는 U8b) — OS 틀은 아직 있다(OS 제목 줄 아래 우리 제목 줄 — 그대로 쓸 수 있다) | U4 · U7b · U0 | 큼. 시작 전에 기준 빌드(OS 제목 표시줄)의 줄 높이 · 단추 폭을 떠 둔다(S11) |
-| **U8b** | OS 틀 걷기 — `WebviewEnv::finish` 의 `decorations(false)` · `shadow(true)`(`caption_style()` 을 읽는다 — U7a 가 지었다) · 줄 높이 보통/최대화 · `ChromeBook` 최소 크기 몫 · 열기 표시 · `fit_min_width`(D14) · QA 가 S8–S10 · AC13(창 끌기 뒤 누름) · AC23(Alt+Space · 오른쪽 클릭 — 결과만 적는다)을 잰다 · **측정 문 S13 · S14**(접힌 끌기 · 놓기 잃음 — §1-3 · W13 · W14) — 통과 전에는 U8b 를 닫지 않는다 | U8a | 중간 |
+| **U8b** | OS 틀 걷기 — `WebviewEnv::finish` 의 `decorations(false)` · `shadow(true)`(`caption_style()` 을 읽는다 — U7a 가 지었다 · §8-1) · 줄 높이 보통/최대화(U8a 가 이미 `titleRowHeight` · `TOP_GAP` 한 상수로 그린다 — U8b 몫 없음) · `ChromeBook` 최소 크기 몫(보통 크기 창만 입힘 · `Resized` 때 미룬 값 — §7-7) · 열기 표시(다섯 자리) · `fit_min_width`(D14) · **사용자 결정 2026-10-26 셋**(알림 띠 = 제목 줄 아래 · 복원 모달 동안 제목 줄은 막힌 채 · 흐림 대비 그대로 — §7-12 · §7-5 · §12-2) · QA 가 S8–S10 · AC13(창 끌기 뒤 누름) · AC23(Alt+Space · 오른쪽 클릭 — 결과만 적는다)을 잰다 · **측정 문 S13 · S14**(접힌 끌기 · 놓기 잃음 — §1-3 · W13 · W14) — 통과 전에는 U8b 를 닫지 않는다 | U8a | 중간 |
 | **U9** | 스냅 오버레이를 꺼진 feature 뒤로 — platform `window::snap`(스파이크 옮김 · MIT 귀속) · 셸 `[features] snap-overlay` · invoke `report_max_button_rect`(feature 뒤) · 웹 보고(`caption.snap_overlay` 일 때만) · CI 컴파일 · 그래프 게이트 · CLAUDE.md 켜는 법 | U8b · U0(원본 패치) | 중간. 스파이크에서 메뉴가 떴다(S6) — 옮긴 뒤 켠 빌드의 동작 확인은 켜는 날 한다 |
 | **U10** | 문서 — ADR(§12-3) · CLAUDE.md(「LLM-우선 제어」 남은 갭 · platform `window` 입주자 · 의존 절 · 스냅 feature) · step-log · tracking(T-66 · T-68 몫) · 코드 앵커 · `/qa` 바인딩 게이트 · `prompts/engram-help.md`(창 인자 · window_id · 번호 거부 — U7a 뒤) | 앞 단위 전부 | `/review doc` |
 
@@ -715,6 +729,9 @@ CDP(`scripts/cdp.mjs`)가 재는 것 — DOM 배치 · 번호 · `window.list` �
 | 구역(2026-10-26) | 탭 놓기의 탭바 구역 가로 = 첫 탭 왼쪽 ~ `+` 오른 끝 — 「탭이 있는 곳(첫 탭 ~ `+`)만 탭바 구역」 · `+` 오른쪽 빈 곳 · 끌 빈 자리 · 번호 표식 · 창 단추 위 놓기 = 새 창 | §0 · §7-9 · §10-3 · M26 뒤집음 · PRD R14 · D9 · AC11 · AC12 · 슬롯 도킹 TRD §4-3 |
 | D-a(2026-10-26) | 자기 탭도 `+` 오른 끝을 넘으면 구역 밖 — 순서 이동 멈춤 · 남은 탭 · 떼면 새 창(지금 코드). 거부 = `dragAreaWidth` 끝까지 붙여 두기(거기까지 가야 떼어지면 다루기 어렵다) | §7-9 · PRD R14 · D9 |
 | D-b(2026-10-26) | `+` 오른쪽 밑 캔버스 위 끝 0..15 px = 바깥 위 띠(레이아웃 전체 위로 나눔 · 미리보기) — 그 위가 탭바가 아니니 내용의 위 끝으로 군다 | §7-9 · PRD D9 |
+| 알림 띠(2026-10-26) | 알림 띠(`NoticeOverlay` — 상태 파일 · 연결 실패)는 제목 줄 **아래**에 덮는다 — 창 단추 · 끌 자리를 가리지 않는다(그 전 = 감싼 칸 맨 위 · z 40 · 제목 줄을 덮음 — ADR-0276 결정 2) | §7-12 · U8b · ADR-0276 · ADR-0277 개정(U10) |
+| 모달 · 제목 줄(2026-10-26) | 복원 모달이 떠 있는 동안 제목 줄(창 단추 · 끌 자리)을 살리는 것은 **작은 변경일 때만** — 재 보니 작지 않아(네 컴포넌트 · 약 60–100 줄 + 시험) 하지 않았다 · 막힌 채 둔다 | §7-12 · U8b |
+| 흐림 대비(2026-10-26) | 비활성 창 흐림 글자 대비(다크 3.6:1 · 라이트 3.1:1 · e-ink 거의 안 보임)를 그대로 받아들인다 — 토큰을 고치지 않는다 | §7-5 · AC15 |
 | Q1 | 스냅 레이아웃 메뉴를 켜지 않는다 · 코드는 남긴다 | §8-4 · U9 · PRD R15 · AC19 · §2 |
 | T2 | 낱말 = 빈 칸 · 에이전트 · 에이전트 트리 · 프리셋 · 사용량 | §4-2 · PRD R4 |
 | T3 | main 셋째 단추 = `EyeOff` · 옅은 올림 바탕 · 툴팁 「모든 창 숨기기」 | §7-4 · PRD R10 |
@@ -732,7 +749,7 @@ CDP(`scripts/cdp.mjs`)가 재는 것 — DOM 배치 · 번호 · `window.list` �
 | M7 | 창 상태 = 새 포트 `WindowControl` · 서비스 `window_ctl` · invoke 하나 · 버스 이름(`unmaximize` · `raise` · `hideAll` · `showAll`) | §6 |
 | M8 | label = `slot-popup-<8hex>-<n>` · 창 인자 해석기 하나 · 번호 = `INVALID_ARGUMENT` · `if_empty` 는 해석기 앞 | §4-5 |
 | M10 | 크기 값 표 — 줄 34/28 · 단추 46 · 끌 빈 자리 42 를 표식과 따로 | §7-6 |
-| M11 | 최소 폭 정본 = 웹 · 창마다 보고 · 셸이 입힘(보통 상태만) · 넓혀 당기기는 열 때만 · 판정 = 순수 `ChromeBook` | §7-7 |
+| M11 | 최소 폭 정본 = 웹 · 창마다 보고 · 셸이 입힘(보통 상태만 — 최대화 · 최소화 동안은 입히지도 걷지도 않고 보통이 되면 입힘 · U8b 가 tao 세터 동작으로 고침) · 넓혀 당기기는 열 때만 · 판정 = 순수 `ChromeBook` | §7-7 |
 | M12 | 앞 창 = platform `is_foreground`(Windows 에서 Tauri `is_focused` 금지) | §6-2 · §6-5 |
 | M13 | 0탭 자가닫힘 = `window.close{if_empty}` · 「0 탭」 = 모델에 항목 없음 · 한 락 판정 | §5-5 |
 | M14 | 만들기 답 = `{window, window_id, number}`(invoke · 버스 · 레지스트리 같은 셋) | §3-2 · §5-3 |
@@ -758,7 +775,7 @@ CDP(`scripts/cdp.mjs`)가 재는 것 — DOM 배치 · 번호 · `window.list` �
 
 ### 12-4 ADR 로 박을 것(U0 결론 뒤 · `/adr`)
 
-① 창 번호(살아 있는 창이 안 쓰는 가장 작은 수 · 모델이 쥠 · `Destroyed` 에서 풂 · OS 창 없음 = 곧바로 · 영속 · 고치기 규칙) ② 탭 자동 이름은 셸이 짓는다(낱말 셸 표 · 거부 = 웹 보고 · 이름 바뀜 = 판 오름) ③ 창 상태 버스 명령 · `window.close(main)` = 숨기기 · 포커스를 빼앗지 않는 LLM 보이기 · 보이지 않는 창 규칙 · 창 인자 = 영속 id/label 별칭 · 번호 거부 · label 실행 표식 ④ 크롬식 제목 표시줄(OS 틀 걷기 · 끌기 영역 기법 · Alt+Space · 놓기 구역 · 창 사실 칸) ⑤ 스냅 오버레이 = 꺼진 feature(사용자 결정 Q1) ⑥ 첫 화면 전 실패를 처리하지 않음(사용자 결정 T1 — 거부한 대안 = 0.1판 §5-2 · §5-3 의 시한 실패 · 되돌림, `ProcessFailed` 잡기). 거부한 대안은 본문의 「거부한 갈래」를 옮긴다.
+① 창 번호(살아 있는 창이 안 쓰는 가장 작은 수 · 모델이 쥠 · `Destroyed` 에서 풂 · OS 창 없음 = 곧바로 · 영속 · 고치기 규칙) ② 탭 자동 이름은 셸이 짓는다(낱말 셸 표 · 거부 = 웹 보고 · 이름 바뀜 = 판 오름) ③ 창 상태 버스 명령 · `window.close(main)` = 숨기기 · 포커스를 빼앗지 않는 LLM 보이기 · 보이지 않는 창 규칙 · 창 인자 = 영속 id/label 별칭 · 번호 거부 · label 실행 표식 ④ 크롬식 제목 표시줄(OS 틀 걷기 · 끌기 영역 기법 · Alt+Space · 놓기 구역 · 창 사실 칸) ⑤ 스냅 오버레이 = 꺼진 feature(사용자 결정 Q1) ⑥ 첫 화면 전 실패를 처리하지 않음(사용자 결정 T1 — 거부한 대안 = 0.1판 §5-2 · §5-3 의 시한 실패 · 되돌림, `ProcessFailed` 잡기) ⑦ 알림 띠는 제목 줄 아래(사용자 결정 2026-10-26 — ADR-0276 결정 2 「TabBar 를 가려도 된다」 · ADR-0277 의 덮는 자리를 개정 · §7-12). 거부한 대안은 본문의 「거부한 갈래」를 옮긴다.
 
 ---
 
@@ -793,6 +810,7 @@ PRD R4 의 포커스 문장은 고칠 것이 없다(§4-2 — 0.1판 §13 ④ �
 - **옛 빌드로 내림** — 번호 · 정한 이름이 사라진다(§3-3 — 저장 TRD §12 R3).
 - **데몬 crate 변경** — 개명 뒤 `AgentListUpdated` 가 늘어난다(개명은 드물다). 웹의 `agent-list-updated` 소비는 이미 그 사건을 다룬다.
 - **크기 값이 기준 빌드와 어긋남** — S11 로 확정하기 전 값으로 U8a 를 지으면 U8b 에서 고친다(상수 한 파일).
+- **작업 영역이 최소 크기보다 좁은 화면의 최대화**(U8b) — 최대화 동안 OS 최소 크기를 걷지 못한다(tao 세터가 최대화를 푼다 — §7-7). 그 화면에서 최대화 사각형이 작업 영역을 넘는지 = S8 · 넘치면 §7-7 「남은 갭」의 세 갈래를 사용자에게 올린다.
 - **스냅 feature 썩음** — CI 컴파일 단계(§8-4)가 막는다. 켠 빌드의 동작(배율 · 창마다 · 포커스)은 켤 때 다시 잰다(W8).
 
 ---

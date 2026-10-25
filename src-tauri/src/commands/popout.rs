@@ -167,6 +167,9 @@ fn open_new_window(
                     crate::first_paint::hold_built(&window, focused, started);
                 }
             }
+            // 새로 지은 창 — 그 창의 첫 최소 크기 보고가 넓혀 당긴다(TRD S26-window-chrome §7-7). 맡긴 예열 창은 확정이
+            //   세운다(`commands::spare::commit`).
+            crate::chrome::mark_opening(app, label);
             tracing::info!(
                 module = "spare",
                 label,

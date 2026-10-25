@@ -42,13 +42,19 @@ export default function PopoutPage() {
         flexDirection: 'column',
       }}
     >
+      {/* 감싼 칸 = 제목 줄을 그리기 전 화면(로딩 · 부팅 실패)에서 알림이 붙는 자리. */}
       <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
-        {/* 알림은 모든 창에 나온다 — 부팅은 창마다 돌고 실패 이유도 창마다 도착한다(ADR-0134). 레이아웃을 밀지 않고
-              덮는다(ADR-0277 — ADR-0180 개정). */}
-        <NoticeOverlay>
-          <ConnectionNotice />
-        </NoticeOverlay>
-        <WindowLayout label={label} />
+        <WindowLayout
+          label={label}
+          // 알림은 모든 창에 나온다 — 부팅은 창마다 돌고 실패 이유도 창마다 도착한다(ADR-0134). 레이아웃을 밀지 않고
+          //   덮는다(ADR-0277 — ADR-0180 개정). 덮는 자리는 제목 줄 아래다 — 제목 줄은 덮지 않는다(사용자 결정
+          //   2026-10-26 · T-66).
+          notices={
+            <NoticeOverlay>
+              <ConnectionNotice />
+            </NoticeOverlay>
+          }
+        />
       </div>
     </div>
   )

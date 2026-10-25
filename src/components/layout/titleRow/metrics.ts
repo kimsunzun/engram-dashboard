@@ -42,7 +42,8 @@ export interface MinWindowSizeInput {
 
 /**
  * 최소 창 크기(TRD §7-7 · 정수 CSS px — 올림). 폭 = 왼 여백 + 활성 탭 하나 + `+` 상자 + 끌 빈 자리 + 표식 + 단추 셋 · 높이 =
- * 보통 상태 줄 높이 + 칸 최소. 보통 상태 기준이다 — 셸은 최대화 동안 걷는다(R20). 표식 폭은 `MARKER_MIN_W` 아래로 치지 않는다
+ * 보통 상태 줄 높이 + 칸 최소. 보통 상태 기준이다 — 셸은 보통 크기 창에만 OS 최소 크기로 입히고 열 때 한 번 넓혀 당긴다
+ * (`src-tauri/src/chrome` — 최대화 동안은 걷지 않고 둔다 · 최대화 사각형은 작업 영역이다 · R20). 표식 폭은 `MARKER_MIN_W` 아래로 치지 않는다
  * (재지 못한 0 폭도 그 값이다).
  */
 export function minWindowSize(input: MinWindowSizeInput): { width: number; height: number } {

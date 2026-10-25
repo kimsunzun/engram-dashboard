@@ -392,6 +392,8 @@ fn open_static(app: &AppHandle, env: &WebviewEnv, window: StaticWindow) -> Resul
         hide,
     } = window;
     let built = build_static(app, env, MAIN_WINDOW_LABEL, at.map(first_place), hide)?;
+    // 저장된 크기가 최소 폭보다 좁으면 첫 최소 크기 보고가 넓혀 당긴다(TRD S26-window-chrome §7-7 · D14).
+    crate::chrome::mark_opening(app, MAIN_WINDOW_LABEL);
     place_main(app, &built.as_ref().window(), at, maximized);
     // 보이는 부팅은 자리를 입힌(최대화는 미룬) 뒤 첫 화면에 보인다. `--hidden` 부팅은 트레이 보이기를 기다린다.
     if !hide {
@@ -477,6 +479,8 @@ fn open_popout(
         land(label, bounds, monitors, Fallback::DefaultPlace).map(|at| (bounds, at))
     });
     let built = crate::commands::popout::build_runtime_window(app, label, saved.map(first_place))?;
+    // 저장된 크기가 최소 폭보다 좁으면 첫 최소 크기 보고가 넓혀 당긴다(TRD S26-window-chrome §7-7 · D14).
+    crate::chrome::mark_opening(app, label);
     let window = built.as_ref().window();
     if let Some((bounds, at)) = saved {
         place(&window, bounds, at);
@@ -643,6 +647,36 @@ pub(crate) fn resolve_place(
     let (w, h) = usable_size(at.size).unwrap_or(default_size);
     let bounds = WindowBounds::new(f64::from(x), f64::from(y), w, h)?;
     land(label, bounds, monitors, fallback).map(|landing| (bounds, landing))
+}
+
+/// 넓혀 당기기(TRD S26-window-chrome §7-7 · D14) — 창을 열 때 한 번, 보통 자리 `bounds` 의 폭이 웹이 보고한 최소 폭
+/// `min_w`(논리 안쪽 px)보다 좁으면 그 폭으로 넓히고, 넓힌 창의 바깥 사각형이 작업 영역 `work`(그 창이 놓인 모니터의 작업
+/// 영역 — 물리 px · `scale` = 그 창의 배율)의 오른쪽을 넘으면 작업 영역 안으로 당긴다. 작업 영역이 창보다 좁으면 바깥 왼쪽
+/// 끝을 작업 영역 왼쪽 끝에 댄다(R20). `frame` = 바깥 폭 − 안쪽 폭(물리 px — OS 틀을 걷은 창에도 크기 조절용 보이지 않는
+/// 테두리가 남는다).
+///
+/// 넓힐 일이 없으면 그대로 돌려준다 — 화면 밖에 걸친 자리여도 옮기지 않는다(넓혀 당기기의 일이 아니다). 높이 · 세로 위치는
+/// 건드리지 않는다. 배율이 유한한 양수가 아니면 넓히기만 하고 당기지 않는다.
+pub(crate) fn fit_min_width(
+    bounds: WindowBounds,
+    min_w: f64,
+    work: MonitorArea,
+    frame: f64,
+) -> WindowBounds {
+    // NaN 인 `min_w` 도 여기서 걸러진다.
+    if !(bounds.w() < min_w) {
+        return bounds;
+    }
+    let x = if work.scale.is_finite() && work.scale > 0.0 {
+        let outer_w = min_w * work.scale + frame.max(0.0);
+        let left = f64::from(work.x);
+        let right = left + f64::from(work.w);
+        // 오른쪽을 먼저 맞추고 왼쪽이 이긴다 — 둘 다 못 맞추면(작업 영역이 좁다) 왼쪽 끝이다.
+        bounds.x().min((right - outer_w).floor()).max(left)
+    } else {
+        bounds.x()
+    };
+    WindowBounds::new(x, bounds.y(), min_w, bounds.h()).unwrap_or(bounds)
 }
 
 /// 창 포트 `move_window` 의 Tauri 실물(계약 = `layout::apply::WindowHost`). 위치가 어느 모니터에도 안 걸치면 그
@@ -946,6 +980,8 @@ impl RestoreWindows for TauriRestoreWindows {
         };
         // 보일지는 모델에 넣은 뒤 정한다([`RestoreWindows::set_shown`]) — 그 전에 온 첫 화면 알림을 받아 둔다.
         crate::first_paint::hold_window_unarmed(&built);
+        // 사본의 크기가 최소 폭보다 좁으면 첫 최소 크기 보고가 넓혀 당긴다(TRD S26-window-chrome §7-7 · D14).
+        crate::chrome::mark_opening(&self.app, label);
         let window = built.as_ref().window();
         if let Some((bounds, at)) = at {
             place(&window, bounds, at);
@@ -1874,6 +1910,73 @@ mod tests {
             "창 소멸도 같은 거두기다 — 거둔 뒤 표가 빈다"
         );
         assert!(deferred.wishes().by_label.is_empty());
+    }
+
+    // ── 넓혀 당기기(TRD S26-window-chrome §7-7 · D14) ──
+
+    /// 작업 영역 = PRIMARY 에서 아래 작업 표시줄 48 px 를 뺀 것. 바깥 틀 = 좌우 보이지 않는 테두리 8 px 씩.
+    const WORK: MonitorArea = MonitorArea {
+        x: 0,
+        y: 0,
+        w: 1920,
+        h: 1032,
+        scale: 1.0,
+    };
+    const FRAME: f64 = 16.0;
+
+    #[test]
+    fn a_narrow_saved_width_is_widened_to_the_min_in_place() {
+        assert_eq!(
+            fit_min_width(rect(300.0, 200.0, 200.0, 500.0), 286.0, WORK, FRAME),
+            rect(300.0, 200.0, 286.0, 500.0),
+            "넓힌 창이 작업 영역 안이면 자리는 그대로다"
+        );
+    }
+
+    #[test]
+    fn a_wide_enough_window_is_left_alone_even_off_the_work_area() {
+        let off = rect(1800.0, 200.0, 600.0, 500.0);
+        assert_eq!(fit_min_width(off, 286.0, WORK, FRAME), off);
+        let exact = rect(1700.0, 200.0, 286.0, 500.0);
+        assert_eq!(fit_min_width(exact, 286.0, WORK, FRAME), exact);
+    }
+
+    #[test]
+    fn a_widened_window_past_the_work_area_right_edge_is_pulled_back_in() {
+        // 바깥 폭 = 286 + 16 = 302 → 바깥 오른 끝 = 1920 이 되도록 왼쪽 끝 = 1618.
+        assert_eq!(
+            fit_min_width(rect(1800.0, 200.0, 120.0, 500.0), 286.0, WORK, FRAME),
+            rect(1618.0, 200.0, 286.0, 500.0)
+        );
+    }
+
+    #[test]
+    fn the_pull_uses_the_window_scale_for_the_outer_width() {
+        // 150 % — 바깥 폭 = 286 × 1.5 + 24 = 453 → 오른 끝 1920 + 2560 = 4480 에 맞춰 4027.
+        let work = monitor(1920, 0, 2560, 1392, 1.5);
+        assert_eq!(
+            fit_min_width(rect(4400.0, 100.0, 200.0, 400.0), 286.0, work, 24.0),
+            rect(4027.0, 100.0, 286.0, 400.0)
+        );
+    }
+
+    #[test]
+    fn a_work_area_narrower_than_the_min_aligns_the_window_to_its_left_edge() {
+        let tiny = monitor(-640, 0, 280, 480, 1.0);
+        assert_eq!(
+            fit_min_width(rect(-500.0, 40.0, 120.0, 300.0), 286.0, tiny, FRAME),
+            rect(-640.0, 40.0, 286.0, 300.0),
+            "바깥 폭 302 > 작업 영역 280 — 바깥 왼쪽 끝 = 작업 영역 왼쪽 끝"
+        );
+    }
+
+    #[test]
+    fn an_unusable_scale_widens_without_pulling() {
+        let broken = monitor(0, 0, 1920, 1032, f64::NAN);
+        assert_eq!(
+            fit_min_width(rect(1800.0, 200.0, 120.0, 500.0), 286.0, broken, FRAME),
+            rect(1800.0, 200.0, 286.0, 500.0)
+        );
     }
 
     // ── 결과를 돌려주는 자리 입히기(도킹의 창 포트) ──
