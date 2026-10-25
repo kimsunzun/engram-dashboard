@@ -77,6 +77,7 @@ import '../../commands/tabCommands' // 0탭 자가닫힘이 부르는 `window.cl
 import WindowLayout from './WindowLayout'
 import { __resetCanvasReportForTest } from './windowCanvasReport'
 import { __resetUiMetricsReportForTest } from './uiMetricsReport'
+import { __resetMinSizeReportForTest, MIN_SIZE_WAIT_CAP_MS } from './titleRow/minSizeReport'
 import { localDrag } from './dock/localDrag'
 import { __resetDragSourceForTest } from './tabStrip/useTabDragSource'
 import { buildTabDragType, buildTabDragValue } from './dock/tabDragData'
@@ -118,6 +119,7 @@ beforeEach(() => {
   rendererProps.clear()
   listenShouldReject = false
   rejectListen.clear()
+  __resetMinSizeReportForTest()
   useViewStore.setState({ layouts: {}, windows: {}, renderModeOverride: {} })
   invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
     if (cmd === 'list_tabs') {
@@ -327,6 +329,56 @@ describe('WindowLayout — 첫 화면 · 첫 페인트 알림', () => {
     render(<WindowLayout label="main" />)
     await waitFor(() => expect(screen.getByTestId('window-boot-error')).toBeTruthy(), { timeout: 3000 })
     await waitFor(() => expect(reportFirstPaintMock).toHaveBeenCalledTimes(1))
+  })
+
+  // TRD S26-window-chrome §7-7 — 셸이 보이기 전에 그 창을 넓히게.
+  it('알림은 제목 줄의 최소 창 크기 보고가 답한 뒤 — 보고가 먼저 나가고 그 답을 기다린다', async () => {
+    let answerReport: () => void = () => {}
+    const order: string[] = []
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'list_tabs') {
+        return { label: 'main', window_id: 'wid-main', number: 1, tabs: [{ id: 'v1', name: 'Tab 1', named: true }], active: 'v1', version: 1 }
+      }
+      if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+      if (cmd === 'report_window_min_width') {
+        const { width, height } = args as { width: number; height: number }
+        order.push(`report:${width}x${height}`)
+        return new Promise<void>(res => (answerReport = res))
+      }
+      return undefined
+    })
+    reportFirstPaintMock.mockImplementation(() => void order.push('first-paint'))
+
+    render(<WindowLayout label="main" />)
+    await waitFor(() => expect(order).toEqual(['report:286x64']))
+    await new Promise(res => setTimeout(res, MIN_SIZE_WAIT_CAP_MS / 3))
+    expect(reportFirstPaintMock).not.toHaveBeenCalled()
+
+    await act(async () => answerReport())
+    await waitFor(() => expect(order).toEqual(['report:286x64', 'first-paint']))
+  })
+
+  it('보고가 답하지 않거나 거절돼도 알림은 상한 뒤에 나간다', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    for (const answer of ['hang', 'reject'] as const) {
+      reportFirstPaintMock.mockReset()
+      __resetMinSizeReportForTest()
+      invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+        if (cmd === 'list_tabs') {
+          return { label: 'main', window_id: 'wid-main', number: 1, tabs: [{ id: 'v1', name: 'Tab 1', named: true }], active: 'v1', version: 1 }
+        }
+        if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+        if (cmd === 'report_window_min_width') {
+          if (answer === 'hang') return new Promise<void>(() => {})
+          throw new Error('거절(시험)')
+        }
+        return undefined
+      })
+      const view = render(<WindowLayout label="main" />)
+      await waitFor(() => expect(reportFirstPaintMock).toHaveBeenCalledTimes(1), { timeout: MIN_SIZE_WAIT_CAP_MS * 3 })
+      view.unmount()
+    }
+    warn.mockRestore()
   })
 
   // 대기 창은 숨은 채 맡겨질 때를 기다린다 — 빈 틀은 첫 화면이 아니다(TRD S21-slot-docking §3-9 I7).

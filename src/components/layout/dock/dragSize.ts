@@ -22,7 +22,10 @@ export interface SourceWindow {
   viewport: SizeCss
   /** 그 창 모니터의 작업 영역(`screen.availWidth` · `availHeight` — 바깥 크기의 한계). */
   work: SizeCss
-  /** 크롬 = 뷰포트 − 탭 캔버스. */
+  /**
+   * 새 창(보통 상태로 뜬다)의 크롬 = 뷰포트 − 탭 캔버스 + 제목 줄 높이 차(보통 − 출처의 지금 — 출처가 최대화면 0 이 아니다 · TRD
+   * S26-window-chrome §7-6). 그 차는 부르는 쪽이 더해 넘긴다(`useTabDragSource` 의 `rowGrowth`).
+   */
   chrome: SizeCss
   /** 탭 하나뿐인 팝아웃 — 새 창 없이 그 창을 옮긴다(Q34). */
   single: boolean
@@ -69,7 +72,7 @@ export function dragSizes(s: SourceWindow): DragSizes {
 
 /** `dragGrab` 의 입력 — 좌표는 출처 뷰포트 CSS px. */
 export interface GrabInput {
-  /** 누른 점. */
+  /** 누른 점 — 새 창 탭바의 세로 자리가 출처와 다르면(최대화된 출처 — 새 창은 보통 상태) 부르는 쪽이 그만큼 옮겨 넘긴다. */
   pressed: PointCss
   /** 누른 때 끄는 머리의 가로 범위. */
   head: { x0: number; x1: number }

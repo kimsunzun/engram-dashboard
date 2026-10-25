@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { TabDrop } from '../../../../src-tauri/bindings/TabDrop'
 import type { TabDropReply } from '../../../../src-tauri/bindings/TabDropReply'
+import { stripZoneArea } from '../tabStrip/measure'
 import { idealBounds } from '../tabStrip/reorderGeometry'
 import * as bands from './bands'
 import { createLocalDrag, type LocalDrag, type StripGeometry } from './localDrag'
@@ -469,6 +470,136 @@ describe('drop — 마지막 판정으로 명령 하나', () => {
     expect(h.ctl.getGuide()).toBeNull()
     h.ctl.drop(ev(SLOT_TOP))
     expect(h.sends.map(s => s.to.type)).toEqual(['seam'])
+  })
+})
+
+// ── 제목 줄 안 탭바 구역 ───────────────────────────────────────────────────────
+
+// 사용자 결정 2026-10-26(T-66 · TRD S26-window-chrome §7-9) — 탭이 있는 곳(첫 탭 ~ `+`)만 탭바 구역. 바탕 = 첫 탭
+//   왼쪽 ~ `+` 오른 끝 × 제목 줄(위 여백 6 + 탭바 28 — `tabStrip/measure.ts` `stripZoneArea`). 제목 줄 = x 0..1200 · y 0..34 · 탭
+//   T · U(머리 160) 0..320 · `+` 320..346 · 그 오른쪽에 빈 곳 · 끌 빈 자리 · 번호 표식 · 단추(1062..1200) · 캔버스 원점 (0, 34).
+describe('제목 줄 안 탭바 구역 — 탭 · + 위 놓기 = 탭바 · 그 오른쪽(빈 곳 · 표식 · 단추) 위 놓기 = 새 창', () => {
+  const ZONE = { x0: 0, y0: 0, x1: 346, y1: 34 }
+  const titleStrip = (): StripGeometry => ({ ...otherStrip(), zoneViewport: bands.stripZone(ZONE) })
+  const canvas = { left: 0, top: 34, width: 1200, height: 800 }
+  const ADD = { x: 333, y: 20 }
+  const PAST_ADD = { x: 346, y: 20 }
+  const EMPTY = { x: 620, y: 20 }
+  const MARKER = { x: 1040, y: 20 }
+  const CLOSE_BUTTON = { x: 1180, y: 20 }
+  const TOP_GAP_EMPTY = { x: 900, y: 2 }
+  const NEW_WINDOW = { type: 'new_window', by: { type: 'drop' }, size: { w: 800, h: 600 }, grab: { x: 80, y: 14 } }
+
+  it('+ 위 놓기 = TabBar{끝 번호} · 세로선 = 마지막 탭 뒤', () => {
+    const h = harness({ canvas, geometry: titleStrip })
+    enter(h, ADD)
+    expect(h.local.getTargetMarker()).toBe(320)
+    h.ctl.drop(ev(ADD))
+    expect(h.sends.map(s => s.to)).toEqual([{ type: 'tab_bar', index: 2 }])
+  })
+
+  it.each([
+    ['+ 오른 끝(반열림 — 구역 밖)', PAST_ADD],
+    ['+ 뒤 빈 곳', EMPTY],
+    ['번호 표식', MARKER],
+    ['창 단추', CLOSE_BUTTON],
+    ['위 여백(빈 곳 위)', TOP_GAP_EMPTY],
+  ])('%s 위 놓기 = 새 창 · 세로선 없음', (_name, p) => {
+    const h = harness({ canvas, geometry: titleStrip })
+    enter(h, p)
+    expect(h.local.getTargetMarker()).toBeNull()
+    h.ctl.drop(ev(p))
+    expect(h.sends.map(s => s.to)).toEqual([NEW_WINDOW])
+  })
+
+  it('위 여백의 탭 위 놓기는 지금처럼 x 로 자리를 고른다 · 제목 줄 밖(캔버스)은 지금처럼 띠 · 그 밖', () => {
+    const h = harness({ canvas, geometry: titleStrip })
+    enter(h, { x: 100, y: 2 })
+    h.ctl.drop(ev({ x: 100, y: 2 }))
+    const centre = { x: 300, y: 434 }
+    const h2 = harness({ canvas, geometry: titleStrip })
+    enter(h2, centre)
+    h2.ctl.drop(ev(centre))
+    expect([...h.sends, ...h2.sends].map(s => s.to)).toEqual([{ type: 'tab_bar', index: 1 }, NEW_WINDOW])
+  })
+
+  // 사용자 결정 2026-10-26(T-66 · D-b) — 구역 밖이 된 `+` 오른쪽 밑 캔버스 위 끝 0..15 px 는 바깥 위 띠다(그 위가 더는 탭바가
+  //   아니다). 구역은 손으로 적지 않고 규칙(`stripZoneArea`)으로 짓고 띠는 실제 `windowBands` 가 센다.
+  it('+ 오른쪽 밑 캔버스 위 끝(0..15) = 바깥 위 띠(레이아웃 전체 위로 나눔 · 미리보기) · 같은 높이의 탭 밑 = 탭바', () => {
+    const strip = otherStrip()
+    const m = { row: { x0: 0, y0: 6, x1: 1000, y1: 34 }, left: 0, available: 974, addWidth: 26 }
+    const zoneViewport = bands.stripZone(stripZoneArea(m, strip.bounds, { top: 0, bottom: 34 }))
+    const geometry = (): StripGeometry => ({ ...strip, zoneViewport })
+    // 캔버스 원점 (0, 34) — 둘 다 캔버스 y 5.
+    const BELOW_EMPTY = { x: 600, y: 39 }
+    const BELOW_TAB = { x: 100, y: 39 }
+
+    const h = harness({ canvas, geometry })
+    enter(h, BELOW_EMPTY)
+    expect(windowBands).toHaveBeenCalled()
+    expect(h.local.getTargetMarker()).toBeNull()
+    const g = h.ctl.getGuide()
+    expect(g?.preview).not.toBeNull()
+    expect(g?.outer.length).toBeGreaterThan(0)
+    h.ctl.drop(ev(BELOW_EMPTY))
+
+    const h2 = harness({ canvas, geometry })
+    enter(h2, BELOW_TAB)
+    expect(h2.local.getTargetMarker()).toBe(160)
+    expect(h2.ctl.getGuide()).toBeNull()
+    h2.ctl.drop(ev(BELOW_TAB))
+
+    expect([...h.sends, ...h2.sends].map(s => s.to)).toEqual([
+      { type: 'seam', target: 'T', anchor: { type: 'outer' }, side: 'Top', share: 0.375 },
+      { type: 'tab_bar', index: 1 },
+    ])
+  })
+
+  it('띠 빼기도 같은 구역을 본다', () => {
+    const h = harness({ canvas, geometry: titleStrip })
+    enter(h, MARKER)
+    expect(windowBands.mock.calls[windowBands.mock.calls.length - 1]?.[0].zone).toEqual(bands.zoneInCanvas(bands.stripZone(ZONE), { x: 0, y: 34 }))
+  })
+
+  // 출처 창 — 탭 A · S · C(머리 160 · 0..480) · `+` 480..506 · S 를 끈다(잡은 점 = 머리 왼쪽에서 80).
+  describe('출처 창 자기 탭바', () => {
+    const tabs = ['A', 'S', 'C']
+    const source = (): Harness => {
+      const h = harness({
+        canvas,
+        shown: 'S',
+        views: { A: VIEW_T, S: VIEW_T },
+        model: { tabs, active: 'S' },
+        geometry: () => ({
+          left: 0,
+          bounds: idealBounds({ widths: tabs.map(() => 160), visible: tabs.map(() => true) }, 1),
+          available: 600,
+          zoneViewport: bands.stripZone({ x0: 0, y0: 0, x1: 506, y1: 34 }),
+          tabs,
+        }),
+      })
+      h.local.setOutgoing({ drag: DRAG, window: 'main', view: 'S', grabOffset: 80 })
+      return h
+    }
+
+    it('+ 위는 구역 안 — 끄는 탭은 끝자리에 머문다', () => {
+      const h = source()
+      enter(h, { x: 490, y: 20 })
+      expect(h.local.getSourceStrip()).toEqual({ index: 2, left: 320, x: 490 })
+    })
+
+    it.each([
+      ['+ 뒤 빈 곳', EMPTY],
+      ['창 단추', CLOSE_BUTTON],
+    ])('%s 위는 구역 밖(남은 탭으로 바꾼다) · 놓으면 떼어 새 창', (_name, p) => {
+      const h = source()
+      enter(h, { x: 490, y: 20 })
+      expect(h.local.getSourceStrip()).not.toBeNull()
+      over(h, p)
+      expect(h.local.getSourceStrip()).toBeNull()
+      h.ctl.drop(ev(p))
+      expect(h.sends.map(s => s.to)).toEqual([NEW_WINDOW])
+    })
   })
 })
 

@@ -14,7 +14,9 @@
 //!   `ratio_max`).
 //! - `bands[]` — 창 하나씩.
 //!   - 입력: `name` · `canvas {w, h}`(정수 CSS px) · `canvas_origin {x, y}` · `tab_bar {x0, y0, x1, y1} | null`(뷰포트
-//!     CSS px — 탭 끌기 영역) · `layout`(보이는 탭의 `LayoutNode` wire 꼴) · `shape`(끄는 탭 배치 — 끌기 MIME 의 모양
+//!     CSS px — [`strip_zone`] 의 바탕 사각형. 골든의 값은 탭 끌기 영역 꼴이다 — 웹이 지금 넘기는 바탕은 첫 머리 왼쪽 ~
+//!     `+` 오른 끝 × 제목 줄(없으면 탭바 줄)이고 규칙은 바탕을 그대로 받으므로 골든은 바뀌지 않는다 · TRD
+//!     S26-window-chrome §7-9) · `layout`(보이는 탭의 `LayoutNode` wire 꼴) · `shape`(끄는 탭 배치 — 끌기 MIME 의 모양
 //!     문자열: 전위 순 `l` = 칸 · `h<비율>_` = 좌우 분할 · `v<비율>_` = 위아래 분할, 분할 뒤에 두 자식. 칸 id 는 `layout`
 //!     에 없는 새 값으로 짓는다) · `original {w, h} | null`(끄는 탭의 원래 크기 — `null` = 모름 → 길이를 NaN 으로
 //!     친다 = 몫이 `ATTACH_SHARE_MAX`).

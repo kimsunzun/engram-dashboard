@@ -503,6 +503,8 @@ pub fn run() {
             //   ★창 닫기 전용 invoke 를 따로 두지 않는다★ — main 의 닫기는 모든 창 숨기기라(§5-4) 닫기 길이 둘이면 그 판정이
             //   갈린다.
             commands::window_ctl::window_control,
+            // 최소 창 크기 보고(웹뷰 → 셸) — 측정 보고라 버스 명령이 아니다(ADR-0227 · TRD S26-window-chrome §7-7).
+            commands::window_ctl::report_window_min_width,
             // 부팅 조회 — 미는 쪽(`window.setTheme` · `theme.default` 쓰기 · 부팅 · 복원 수락)은 따로 있다
             //   (`commands/settings.rs` 「창별 테마를 읽는 자리가 둘인 이유」).
             commands::get_ui_settings,

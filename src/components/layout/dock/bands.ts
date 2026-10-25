@@ -77,7 +77,10 @@ const ONE_SLOT: LayoutNode = { type: 'slot', id: 'shape-slot-0', content: { type
 
 // ── 탭바 구역 ─────────────────────────────────────────────────────────────────
 
-/** 셸 `strip_zone` — 탭 끌기 영역(뷰포트 CSS px — 첫 탭 왼쪽 ~ `+` 앞 × 탭바 줄)의 가로 그대로 · 세로 위아래 `STRIP_ZONE_PX`. */
+/**
+ * 셸 `strip_zone` — 바탕 사각형 `area`(뷰포트 CSS px — `localDrag.StripGeometry.zoneViewport` 의 바탕)의 가로 그대로 · 세로 위아래
+ * `STRIP_ZONE_PX`.
+ */
 // ADR-0295
 export function stripZone(area: RectCss): RectCss {
   return { x0: area.x0, y0: area.y0 - STRIP_ZONE_PX, x1: area.x1, y1: area.y1 + STRIP_ZONE_PX }
@@ -99,7 +102,7 @@ export function zoneInCanvas(zone: RectCss, canvasOrigin: PointCss): RectCss {
   }
 }
 
-/** 탭 끌기 영역 `area`(뷰포트 · `null` = 탭바를 모름)의 탭바 구역(캔버스 좌표) — `BandsInput.zone` · 판정의 구역. */
+/** 바탕 사각형 `area`(뷰포트 · `null` = 탭바를 모름 — `stripZone`)의 탭바 구역(캔버스 좌표) — `BandsInput.zone` · 판정의 구역. */
 export function canvasZone(area: RectCss | null, canvasOrigin: PointCss): RectCss | null {
   return area === null ? null : zoneInCanvas(stripZone(area), canvasOrigin)
 }

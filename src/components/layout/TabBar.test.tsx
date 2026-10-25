@@ -315,6 +315,42 @@ describe('TabBar', () => {
     expect(bar.onRename).not.toHaveBeenCalled()
   })
 
+  // Tauri `drag.js` 는 끌 자리 누름의 기본 동작(포커스 옮김)을 막아 입력 칸이 blur 되지 않는다. 그 흉내 = 먼저 건 document
+  //   거품 단계 듣는 쪽 — 뒤 듣기도 끊는다(jsdom 은 누름으로 포커스를 옮기지 않으니 기본 동작 쪽은 이미 같다).
+  it('편집 중 창 끌 자리(탭 줄 빈 곳) 누름 → 편집을 끝낸다 — 포커스 잃음과 같은 규칙(바꾼 글자만 보낸다)', () => {
+    const dragJs = (e: MouseEvent) => {
+      if (!(e.target instanceof Element) || !e.target.hasAttribute('data-tauri-drag-region')) return
+      e.preventDefault()
+      e.stopImmediatePropagation()
+    }
+    document.addEventListener('mousedown', dragJs)
+    try {
+      const { onRename } = renderBar('v1')
+      let input = openEditForV1()
+      expect(document.activeElement).toBe(input)
+      fireEvent.change(input, { target: { value: ' Renamed ' } })
+      fireEvent.mouseDown(screen.getByTestId('tab-strip-row'))
+      expect(screen.queryByTestId('tab-rename-input')).toBeNull()
+      expect(onRename).toHaveBeenCalledTimes(1)
+      expect(onRename).toHaveBeenCalledWith('v1', 'Renamed')
+
+      input = openEditForV1()
+      fireEvent.mouseDown(screen.getByTestId('tab-strip-row'))
+      expect(screen.queryByTestId('tab-rename-input')).toBeNull()
+      expect(onRename).toHaveBeenCalledTimes(1)
+    } finally {
+      document.removeEventListener('mousedown', dragJs)
+    }
+  })
+
+  it('끌 자리가 아닌 누름에는 포커스를 빼지 않는다 — 편집 중인 탭의 × 누름이 입력 칸 포커스를 지키는 규칙 그대로', () => {
+    renderBar('v1')
+    const input = openEditForV1()
+    fireEvent.mouseDown(head('v1').querySelector('[data-testid="tab-close"]')!)
+    expect(document.activeElement).toBe(input)
+    expect(screen.getByTestId('tab-rename-input')).toBe(input)
+  })
+
   it('앞뒤 공백이 붙은 자동 이름 — 손대지 않고 포커스를 잃으면 onRename 안 부른다', () => {
     const { onRename } = renderBar('v1', [{ id: 'v1', name: ' proj ', named: false }])
     const input = openEditForV1()
@@ -541,6 +577,10 @@ function fakeRect(this: HTMLElement): DOMRect {
   if (id === 'tab-strip-row') return rect(100, 40, rowWidth, 28)
   if (id === 'tab-add') return rect(0, 40, 40, 28)
   if (id === 'tab') return rect(100 + xOf(this), 40, parseFloat(this.style.width), 28)
+  // 탭바를 품은 제목 줄 — 위 여백 6 · 오른쪽에 끌 빈 자리 · 번호 표식 · 단추가 서서 탭바 줄보다 넓다.
+  if (id === 'title-row') return rect(100, 34, 1100, 34)
+  // 탭 캔버스 — 뷰포트(jsdom 1024 × 768)에서 최대화된 제목 줄 28 을 뺀 자리.
+  if (id === 'tab-canvas') return rect(0, 28, 1024, 740)
   return rect(0, 0, 0, 0)
 }
 
@@ -711,6 +751,40 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     expect(head('b').querySelector('[data-testid="tab-close"]')).toBeNull()
   })
 
+  // 창이 제목 줄의 최소 폭보다 좁을 때 — 줄 폭 0 을 「재지 못함」으로 치면 머리가 다 160 으로 서서 제목 줄 오른쪽을 덮는다.
+  it('줄 폭 0(높이는 있음) = 잰 값 — 머리를 하나도 그리지 않고 · 탭바 뿌리는 가로로 자른다', async () => {
+    rowWidth = 0
+    await mount('a')
+    expect(screen.queryAllByTestId('tab')).toEqual([])
+    expect(xOf(screen.getByTestId('tab-add'))).toBe(0)
+    expect(screen.getByTestId('tab-bar').style.overflowX).toBe('clip')
+  })
+
+  // 사용자 결정 2026-10-26(T-66 · TRD S26-window-chrome §7-9) — 탭이 있는 곳(첫 탭 ~ `+`)만 탭바 구역. 그 오른쪽 빈 곳 · 끌 빈
+  //   자리 · 번호 표식 · 창 단추 위 놓기는 새 창이다.
+  it('탭바 구역의 바탕 = 첫 탭 왼쪽 ~ + 오른 끝 × 탭바 줄(제목 줄 안이면 제목 줄 — 위 여백 포함) · 그 위아래 15', async () => {
+    const bar = await mount('a')
+    // 머리 넷 640 · + 640..680 → 뷰포트 100..780(탭바 줄은 800 까지).
+    expect(xOf(screen.getByTestId('tab-add'))).toBe(640)
+    expect(localDrag.readStripGeometry()!.zoneViewport).toEqual({ x0: 100, y0: 25, x1: 780, y1: 83 })
+
+    const title = document.createElement('div')
+    title.dataset.testid = 'title-row'
+    bar.rerender({ titleRow: { current: title } })
+    expect(localDrag.readStripGeometry()).toMatchObject({ left: 100, available: 660 })
+    // 제목 줄(100..1200)의 + 오른쪽은 구역이 아니다 — 세로만 제목 줄을 따른다.
+    expect(localDrag.readStripGeometry()!.zoneViewport).toEqual({ x0: 100, y0: 19, x1: 780, y1: 83 })
+  })
+
+  it('탭바 구역 — 숨긴 머리가 있으면 + 가 선 보이는 끝까지 · 탭이 없으면 + 만', async () => {
+    rowWidth = 140 // 쓸 수 있는 폭 100 → 보이는 머리 a(52) · b(32) · + 84..124
+    const bar = await mount('a')
+    expect(localDrag.readStripGeometry()!.zoneViewport).toEqual({ x0: 100, y0: 25, x1: 224, y1: 83 })
+
+    bar.rerender({ tabs: [], active: null })
+    expect(localDrag.readStripGeometry()!.zoneViewport).toEqual({ x0: 100, y0: 25, x1: 140, y1: 83 })
+  })
+
   // ── draggable 조건 ──
 
   it('머리 = 끌기 출처(draggable) — 이름 편집 중인 머리 · main 의 마지막 탭(Q35)은 아니다 · 탭 하나뿐인 팝아웃은 끈다(Q34)', async () => {
@@ -781,6 +855,25 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     expect(label.isConnected).toBe(false)
   })
 
+  // TRD S26-window-chrome §7-6 — 최대화된 제목 줄은 위 여백이 없고, 새 창은 보통 상태라 그 여백(6)이 선다.
+  it('최대화된 창에서 뗀 탭 — 새 창의 크롬 · 잡은 y 를 보통 상태 제목 줄 높이로 센다', async () => {
+    invokeMock.mockImplementation(async (cmd: string) => (cmd === 'window_frame' ? { ...FRAME, maximized: true } : undefined))
+    const bar = await mount('b')
+    const title = document.createElement('div')
+    title.dataset.testid = 'title-row'
+    const canvas = document.createElement('div')
+    canvas.dataset.testid = 'tab-canvas'
+    bar.rerender({ titleRow: { current: title }, canvas: () => canvas })
+    fireEvent.pointerDown(head('a'), { button: 0, pointerId: 1, clientX: 180, clientY: 50 })
+    bar.rerender({ active: 'a' })
+    const dt = fakeDt()
+    drag('dragStart', head('a'), dt)
+    // 크롬 = 768 − 740 = 28(최대화 줄) → 새 창 34 · 원래 크기 = 복원 1000 × (700 − 34).
+    const value = valueOf(dt)
+    expect(typeOf(dt)).toBe(`application/x-engram-tab;app=com.engram.test;drag=${value.drag};w=1000;h=666`)
+    expect(value).toMatchObject({ size: { w: 1000, h: 700 }, grab: { x: 180, y: 56 } })
+  })
+
   it('닫기 버튼에서 누른 끌기(엔진은 머리에 낸다) · 이름 입력에서 시작한 글자 끌기 → 취소 · 자료 없음 · window 까지 닿음', async () => {
     await mount('a')
     const seen = vi.fn()
@@ -840,7 +933,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     expect(screen.getAllByTestId('tab')).toEqual(nodes)
     expect(screen.getByTestId('tab-strip-row')).toBe(row)
     expect(localDrag.readStripGeometry()).toMatchObject({ left: 100, tabs: ['b', 'a', 'c', 'd'], available: 660 })
-    expect(localDrag.readStripGeometry()!.zoneViewport).toEqual({ x0: 100, y0: 25, x1: 760, y1: 83 })
+    expect(localDrag.readStripGeometry()!.zoneViewport).toEqual({ x0: 100, y0: 25, x1: 780, y1: 83 })
 
     // 문턱(탭 폭 160 → 16 px) 안의 되돌림은 자리를 바꾸지 않는다 — 끄는 머리만 따른다.
     strip(0, 110, 290)

@@ -44,7 +44,10 @@ export interface StripGeometry {
   bounds: StripBounds
   /** `dragAreaWidth` 의 `available` — 잰 값(`null` = 재지 못함). */
   available: number | null
-  /** 탭바 구역 = 탭 끌기 영역의 가로 × 탭바 줄 위아래 `STRIP_ZONE_PX`(`bands.stripZone`) — 뷰포트 좌표. */
+  /**
+   * 탭바 구역 = 바탕 사각형(첫 탭 왼쪽 ~ `+` 오른 끝 × 제목 줄 안의 탭바면 제목 줄 · 아니면 탭바 줄 — `tabStrip/measure.ts`
+   * `stripZoneArea`)의 위아래 `STRIP_ZONE_PX`(`bands.stripZone`) — 뷰포트 좌표.
+   */
   zoneViewport: RectCss
   /** `bounds.tabs` 순서의 탭 id. */
   tabs: readonly string[]

@@ -42,6 +42,38 @@ describe('SlotContextMenu — 오버레이 표지(ADR-0237)', () => {
   })
 })
 
+describe('SlotContextMenu — 바깥 누름으로 닫기', () => {
+  it('창 끌 자리 누름에도 닫는다 — Tauri `drag.js` 가 뒤에 건 document 거품 단계 듣기를 끊어도', () => {
+    const drag = document.createElement('div')
+    drag.setAttribute('data-tauri-drag-region', '')
+    document.body.appendChild(drag)
+    // `drag.js` 흉내 — 메뉴보다 먼저 건 document 거품 단계 듣는 쪽이 끌 자리 누름을 끊는다.
+    const dragJs = (e: MouseEvent) => {
+      if (e.target !== drag) return
+      e.preventDefault()
+      e.stopImmediatePropagation()
+    }
+    document.addEventListener('mousedown', dragJs)
+    try {
+      const onClose = vi.fn()
+      render(
+        <SlotContextMenu
+          x={0}
+          y={0}
+          items={[item('slot.close')]}
+          ctx={{ viewId: 'v1', slotId: 's1', agentId: 'a1' }}
+          onClose={onClose}
+        />,
+      )
+      fireEvent.mouseDown(drag)
+      expect(onClose).toHaveBeenCalledTimes(1)
+    } finally {
+      document.removeEventListener('mousedown', dragJs)
+      drag.remove()
+    }
+  })
+})
+
 describe('SlotContextMenu — 공유 dispatch 경로(FIX-3)', () => {
   it('항목 클릭 → fireAndForget(item.id, ctx) 로 라우팅(run 직접 호출 아님)', () => {
     const onClose = vi.fn()

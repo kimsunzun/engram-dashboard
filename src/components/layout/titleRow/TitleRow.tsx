@@ -8,14 +8,23 @@
 //   없고 창 명령이 그 창을 찾지 못한다. 줄을 통째로 빼면 들일 때 탭바가 다시 마운트되고(탭바 줄 노드가 바뀐다 — `WindowLayout`
 //   의 빈 틀 조항), 셸이 들일 때 모델에 옮겨 적는 대기 중 캔버스 크기(`src-tauri/src/spare/mod.rs`)가 들인 뒤 화면과 위
 //   여백만큼 어긋난다.
+// 최소 창 크기(§7-7)는 이 줄이 그린 것으로 센다 — 대기 모드는 표식 · 단추 없는 폭이고, 들이면 그 둘이 서며 다시 보낸다.
 
-import { useSyncExternalStore, type CSSProperties, type ReactNode } from 'react'
+import {
+  useLayoutEffect,
+  useRef,
+  useSyncExternalStore,
+  type CSSProperties,
+  type ReactNode,
+  type Ref,
+} from 'react'
 
 import { MAIN_WINDOW_LABEL } from '../../../store/viewStore'
 import { windowFrame, type WindowFrameSource } from '../dock/windowFrame'
 import CaptionButtons from './CaptionButtons'
 import { dragProps } from './dragRegion'
-import { GRAB_MIN_W, titleRowHeight } from './metrics'
+import { GRAB_MIN_W, minWindowSize, titleRowHeight } from './metrics'
+import { reportMinWindowSize } from './minSizeReport'
 import NumberMarker from './NumberMarker'
 
 interface TitleRowProps {
@@ -24,18 +33,44 @@ interface TitleRowProps {
   number: number | null
   /** 창 사실 — 받기(`install`)는 탭바의 끌기 훅이 단다(`pullFrame`). 시험이 갈아 끼운다. */
   frame?: WindowFrameSource
+  /** 줄 요소 — 탭바의 놓기 판정이 탭바 구역을 이 줄 전체로 잰다(`UseTabDragSourceOptions.titleRow`). */
+  ref?: Ref<HTMLDivElement>
   /** 이 창의 탭바(`TabBar`). */
   children: ReactNode
 }
 
-export default function TitleRow({ label, number, frame = windowFrame, children }: TitleRowProps) {
+export default function TitleRow({ label, number, frame = windowFrame, ref, children }: TitleRowProps) {
   const facts = useSyncExternalStore(frame.subscribe, frame.current)
   // 창 사실을 받기 전 = 최대화 아님 · 앞 창 · 단추를 그린다(지금 OS 의 크롬 모양 — 받은 뒤 바뀌면 탭 폭이 한 번 바뀐다).
   const maximized = facts?.maximized ?? false
   const active = facts?.focused ?? true
   const buttons = number !== null && (facts?.caption.buttons ?? true)
+  const leading = facts?.caption.leading_inset ?? 0
+
+  // ★layout effect 다★ — 같은 커밋의 `WindowLayout` 첫 화면 effect(passive)보다 먼저 보고를 맡겨야 첫 화면 알림이 그 보고를
+  //   기다린다(§7-7). 다시 재는 때 = 표식 · 단추 · 왼 여백이 바뀔 때와 표식 폭이 바뀔 때(자리 수 · 글꼴 · 배율 — 관측).
+  const markerRef = useRef<HTMLSpanElement>(null)
+  useLayoutEffect(() => {
+    const measure = (): void =>
+      reportMinWindowSize(
+        minWindowSize({
+          leadingInset: leading,
+          markerW: markerRef.current === null ? null : markerRef.current.getBoundingClientRect().width,
+          buttons,
+        }),
+      )
+    measure()
+    const marker = markerRef.current
+    // jsdom 처럼 관측기가 없는 환경은 재기 한 번으로 지나간다.
+    if (marker === null || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(measure)
+    ro.observe(marker)
+    return () => ro.disconnect()
+  }, [number, buttons, leading])
+
   return (
     <div
+      ref={ref}
       data-testid="title-row"
       {...dragProps()}
       data-window-active={active ? 'true' : 'false'}
@@ -46,7 +81,7 @@ export default function TitleRow({ label, number, frame = windowFrame, children 
         flexShrink: 0,
         height: titleRowHeight(maximized),
         boxSizing: 'border-box',
-        paddingLeft: facts?.caption.leading_inset ?? 0,
+        paddingLeft: leading,
         background: 'var(--tab-bar-bg)',
         fontFamily: 'var(--font-ui)',
         userSelect: 'none',
@@ -54,7 +89,7 @@ export default function TitleRow({ label, number, frame = windowFrame, children 
     >
       {children}
       <div data-testid="title-grab-gap" aria-hidden {...dragProps()} style={GRAB_GAP} />
-      {number !== null && <NumberMarker n={number} />}
+      {number !== null && <NumberMarker ref={markerRef} n={number} />}
       {buttons && <CaptionButtons label={label} main={label === MAIN_WINDOW_LABEL} maximized={maximized} />}
     </div>
   )

@@ -1,5 +1,6 @@
 //! 창 상태 포트(`layout::window_ctl::WindowControl`)의 Tauri 어댑터와 invoke `window_control` — 사람 길(웹 단추 ·
 //! 레지스트리)과 버스 동사가 같은 서비스(`layout::window_ctl`)에 떨어진다(ADR-0081 · TRD S26-window-chrome §6-2 · §6-4).
+//! 웹의 최소 창 크기 보고 invoke `report_window_min_width` 도 여기 둔다(장부 = `crate::chrome` · §7-7).
 //!
 //! - ★동작 하나 = 메인 스레드 일 하나★(§5-2) — [`TauriWindowControl`] 의 `apply` · `show_all` · `hide_all` 은 읽기 ·
 //!   판정 · 입히기를 한 `run_on_main_thread` 일 안에서 하고 그 답을 기다린다. 첫 화면 보이기도 메인 스레드라 그 일과
@@ -478,6 +479,35 @@ fn control(
             })
         }
     }
+}
+
+/// 창 웹뷰가 자기 제목 줄로 센 최소 창 크기(정수 CSS px = 논리 px · 보통 상태 기준)를 알린다 —
+/// `invoke('report_window_min_width', { width, height, seq, epoch })`(TRD S26-window-chrome §7-7).
+///
+/// - 창 label 을 인자로 받지 않는다 — Tauri 가 넣어 주는 [`Window`] 가 그 값의 유일한 권위다(`report_window_canvas` 와 같은
+///   규칙). 버스 명령이 아니다 — 측정 보고라 LLM 이 위조할 값이 아니다(ADR-0227).
+/// - `seq` = 그 웹 페이지 안에서 보낼 때마다(재시도 포함) 오르는 순번 · `epoch` = 그 페이지를 읽은 벽시계 ms
+///   (`Math.floor(performance.timeOrigin)` — 다시 읽을수록 크다). 받아들인 것보다 옛 `epoch` 이거나 같은 `epoch` 에서
+///   받아들인 순번보다 새 것이 아니면 적지 않고 `Ok` 다 — 웹이 시한에 놓은 옛 시도(다시 읽기 전 페이지의 것 포함)가 늦게
+///   닿아도 마지막으로 보낸 값을 덮지 못한다.
+/// - 너비 · 높이 둘 중 하나라도 1~4096 밖이면 `Err` 이고 그 창의 직전 값을 유지한다.
+/// - 비동기로 바꾸지 말 것 — 메인 스레드에서 돌아야 창 확인과 적기 사이에 `Destroyed` 가 끼지 않는다(`crate::chrome`).
+#[tauri::command]
+pub fn report_window_min_width(
+    app: AppHandle,
+    window: Window,
+    width: u32,
+    height: u32,
+    seq: u32,
+    epoch: u64,
+) -> Result<(), String> {
+    crate::chrome::report_min_size(
+        &app,
+        window.label(),
+        width,
+        height,
+        crate::chrome::MinOrder { epoch, seq },
+    )
 }
 
 // main 닫기 · `if_empty` 닫기에 넘기는 빈 구독 포트 — 두 갈래 다 부르지 않는다. 불렸으면 구독이 낡았다는 뜻이라 남긴다.

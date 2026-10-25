@@ -34,6 +34,7 @@ import {
 import ViewLayoutRenderer from './ViewLayoutRenderer'
 import TabBar from './TabBar'
 import TitleRow from './titleRow/TitleRow'
+import { minWindowSizeSettled } from './titleRow/minSizeReport'
 import { watchSpareMode, type WindowMode } from './spareMode'
 import { installFileDropGuard } from './dock/fileDropGuard'
 import { DockOverlayView } from './dock/DockOverlay'
@@ -76,6 +77,7 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
   )
   const canvasOf = useCallback(() => canvasElRef.current, [])
   const guide = useWindowDrop({ label, canvas: canvasOf })
+  const titleRowRef = useRef<HTMLDivElement>(null)
 
   // ADR-0102: 부팅 pull 최종 실패 표면화 — 재시도 소진 후에도 이 창 상태(win)가 안 채워지면 로딩
   //   플레이스홀더에 영구 고착되므로(main 은 이벤트 복구 경로 없음), 조용한 console.warn 대신 이 플래그로
@@ -183,11 +185,21 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
   // 빈 틀은 첫 화면이 아니다 — 대기 창은 숨은 채 맡겨질 때를 기다리고, 채택한 창은 제 탭을 그린 뒤 채택 번호로 알린다
   //   (TRD S21-slot-docking §3-9 I26). 번호가 deps 에 드는 것은 채택 전후로 `firstScreen` 이 참으로 이어져도(부팅 실패를
   //   내림과 탭 반영이 한 렌더) 다시 알리게 하려는 것이다 — 빠지면 채택한 창이 늘 셸 시한에만 보인다.
+  // 알림은 제목 줄의 최소 창 크기 보고(`titleRow/minSizeReport.ts`)가 끝난 뒤다 — 셸이 보이기 전에 그 창을 넓히게(TRD
+  //   S26-window-chrome §7-7). 기다림에는 상한이 있다. 기다리는 사이 deps 가 바뀌면 그 알림은 버린다 — 옛 채택 번호가 새
+  //   번호 뒤에 나가면 한 번 더 보낸다.
   // ADR-0299
   const activeLaidOut = useViewStore(s => active === null || selectView(s, active) !== null)
   const firstScreen = bootFailed || (!framed && tabs !== undefined && activeLaidOut)
   useEffect(() => {
-    if (firstScreen) reportFirstPaint(adoption)
+    if (!firstScreen) return
+    let current = true
+    void minWindowSizeSettled().then(() => {
+      if (current) reportFirstPaint(adoption)
+    })
+    return () => {
+      current = false
+    }
   }, [firstScreen, adoption])
 
   // ── keep-alive: 이 창의 모든 탭 layout 을 캐시에 채운다(숨은 탭도 렌더 유지, ADR-0056) ───────────
@@ -274,9 +286,10 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%' }}>
-      <TitleRow label={label} number={framed ? null : (win?.number ?? null)}>
+      <TitleRow ref={titleRowRef} label={label} number={framed ? null : (win?.number ?? null)}>
         <TabBar
           label={label}
+          titleRow={titleRowRef}
           tabs={tabs}
           active={active}
           onSwitch={viewId => void switchTab(label, viewId).catch(e => console.error('[switchTab]', e))}

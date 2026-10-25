@@ -19,6 +19,7 @@ vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({ label: 'ma
 
 import '../../../commands/tabCommands' // 단추가 부르는 `window.*` 등록(운영은 `commands/contributions.ts`)
 import type { WindowFrame, WindowFrameSource } from '../dock/windowFrame'
+import { __resetMinSizeReportForTest, minWindowSizeSettled } from './minSizeReport'
 import TitleRow from './TitleRow'
 
 // theme.css 원문을 Node fs 로 읽는다 — 까닭과 선언 모양은 `store/chatStyleStore.test.ts` 와 같다.
@@ -69,8 +70,14 @@ const button = (id: 'caption-minimize' | 'caption-maximize' | 'caption-close') =
 const controlCalls = () => invokeMock.mock.calls.filter(c => c[0] === 'window_control')
 const DRAG = 'data-tauri-drag-region'
 
-beforeEach(() => invokeMock.mockClear())
-afterEach(cleanup)
+beforeEach(() => {
+  invokeMock.mockClear()
+  __resetMinSizeReportForTest()
+})
+afterEach(() => {
+  cleanup()
+  vi.restoreAllMocks()
+})
 
 describe('TitleRow — 배치 · 끌 자리', () => {
   it('줄 순서 = 탭바 → 끌 빈 자리 → 번호 표식 → 창 단추(최소화 → 최대화 → 셋째)', () => {
@@ -123,11 +130,12 @@ describe('TitleRow — 배치 · 끌 자리', () => {
 })
 
 describe('TitleRow — 번호 표식', () => {
-  it('글자 = 번호만 · Tab 순서 밖 · 누름을 받지 않는다(부모 끌 자리로 간다)', () => {
+  it('글자 = 번호만 · Tab 순서 밖 · 화면 낭독기에서 감춘다 · 누름을 받지 않는다(부모 끌 자리로 간다)', () => {
     renderRow({ number: 7 })
     const marker = screen.getByTestId('window-number')
     expect(marker.textContent).toBe('7')
     expect(marker.hasAttribute('tabindex')).toBe(false)
+    expect(marker.getAttribute('aria-hidden')).toBe('true')
     expect(marker.style.pointerEvents).toBe('none')
     expect(marker.style.fontVariantNumeric).toBe('tabular-nums')
   })
@@ -269,5 +277,96 @@ describe('TitleRow — 흐림 · 대기 모드', () => {
     renderRow({ number: null })
     expect([...row().children].map(el => (el as HTMLElement).dataset.testid)).toEqual(['tab-bar', 'title-grab-gap'])
     expect(row().getAttribute(DRAG)).toBe('')
+  })
+})
+
+// TRD S26-window-chrome §7-7 — 셈의 숫자는 `metrics.test.ts` 가 본다. 여기는 무엇을 재서 언제 보내나.
+describe('TitleRow — 최소 창 크기 보고', () => {
+  // 순번 · epoch 는 `minSizeReport.test.ts` 가 본다 — 여기는 크기만.
+  const minReports = () =>
+    invokeMock.mock.calls
+      .filter(c => c[0] === 'report_window_min_width')
+      .map(c => {
+        const { width, height } = c[1] as { width: number; height: number }
+        return { width, height }
+      })
+  /** 맡은 보고가 다 나갈 때까지 — 그 사이 다음 값을 맡으면 앞 값은 보내지 않는다. */
+  const settle = () => act(() => minWindowSizeSettled())
+
+  // 표식 폭 = 글자 7 px × 자리 수 + 양옆 8(그린 그대로 — jsdom 은 배치를 하지 않는다).
+  function measureMarkerByDigits(): void {
+    const real = HTMLElement.prototype.getBoundingClientRect
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this.dataset.testid !== 'window-number') return real.call(this)
+      const width = 16 + 7 * (this.textContent ?? '').length
+      return { left: 0, top: 0, width, height: 28, right: width, bottom: 28, x: 0, y: 0 } as DOMRect
+    })
+  }
+
+  function rowWith(number: number | null, frame: WindowFrameSource = fakeFrame().source) {
+    return (
+      <TitleRow label="slot-popup-1" number={number} frame={frame}>
+        <div data-testid="tab-bar" />
+      </TitleRow>
+    )
+  }
+
+  it('마운트 때 보낸다 — 표식 폭은 재고 단추 셋을 싣는다 · 다시 그려도 같은 값은 다시 보내지 않는다', async () => {
+    const f = fakeFrame()
+    renderRow({ frame: f.source })
+    await settle()
+    f.set({ ...FRAME, focused: false })
+    await settle()
+    expect(minReports()).toEqual([{ width: 286, height: 64 }])
+  })
+
+  it('번호 자리 수가 바뀌면 표식 폭을 다시 재서 보낸다(한 · 두 · 세 자리)', async () => {
+    measureMarkerByDigits()
+    const view = render(rowWith(9))
+    await settle()
+    view.rerender(rowWith(10))
+    await settle()
+    view.rerender(rowWith(100))
+    await settle()
+    expect(minReports()).toEqual([
+      { width: 286, height: 64 },
+      { width: 288, height: 64 },
+      { width: 295, height: 64 },
+    ])
+  })
+
+  it('대기 모드 = 표식 · 단추 없는 폭 · 들여 번호를 받으면 그 둘을 실어 다시 보낸다', async () => {
+    const view = render(rowWith(null))
+    await settle()
+    view.rerender(rowWith(3))
+    await settle()
+    expect(minReports()).toEqual([
+      { width: 120, height: 64 },
+      { width: 286, height: 64 },
+    ])
+  })
+
+  it('크롬 모양이 바뀌면 다시 보낸다 — 단추를 OS 가 그리면 단추 몫을 빼고 · 왼 여백은 더한다', async () => {
+    const f = fakeFrame()
+    render(rowWith(1, f.source))
+    await settle()
+    f.set({ ...FRAME, caption: { ...FRAME.caption, buttons: false } })
+    await settle()
+    f.set({ ...FRAME, caption: { ...FRAME.caption, leading_inset: 80 } })
+    await settle()
+    expect(minReports()).toEqual([
+      { width: 286, height: 64 },
+      { width: 148, height: 64 },
+      { width: 366, height: 64 },
+    ])
+  })
+
+  it('최대화해도 보내는 값은 그대로다(보통 상태 기준 — 최대화 동안은 셸이 걷는다)', async () => {
+    const f = fakeFrame()
+    render(rowWith(1, f.source))
+    await settle()
+    f.set({ ...FRAME, maximized: true })
+    await settle()
+    expect(minReports()).toEqual([{ width: 286, height: 64 }])
   })
 })

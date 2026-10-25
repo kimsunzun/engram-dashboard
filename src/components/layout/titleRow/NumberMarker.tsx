@@ -1,13 +1,15 @@
 // TRD S26-window-chrome §7-3: 보이는 창 번호 표식 — 글자 = 번호만. ★누르는 요소가 아니다★ — `pointer-events: none` 이라 누름이
 //   부모(제목 줄 — 끌 자리)로 가고, Tab 순서 밖이다(`tabIndex` 없음). 폭은 자리 수만큼 넓어지고 자르지 않는다(`metrics.ts`).
+// 화면 낭독기에서는 감춘다 — 맨 「1」 만 읽혀 뜻이 없고, 창 정체는 OS 제목(「<탭> - Engram:<n>」 · §4-4)이 나른다.
 
-import type { CSSProperties } from 'react'
+import type { CSSProperties, Ref } from 'react'
 
 import { MARKER_MIN_W, MARKER_PAD, SURFACE_TOP, TAB_BAR_H } from './metrics'
 
-export default function NumberMarker({ n }: { n: number }) {
+/** `ref` = 표식 요소 — 제목 줄이 그 폭을 재 최소 창 폭에 싣는다(§7-7). */
+export default function NumberMarker({ n, ref }: { n: number; ref?: Ref<HTMLSpanElement> }) {
   return (
-    <span data-testid="window-number" style={MARKER}>
+    <span ref={ref} data-testid="window-number" aria-hidden style={MARKER}>
       {String(n)}
     </span>
   )

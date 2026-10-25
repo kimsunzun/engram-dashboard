@@ -30,11 +30,11 @@ import type { ViewMeta } from '../../api/layoutTypes'
 import { t } from '../../i18n'
 import { shownTab, stripHeld } from './dock/dragOverride'
 import { useLocalDrag } from './dock/localDrag'
-import { TAB_BUTTON_SIZE, TAB_HEAD_GAP, TAB_HEAD_PAD, TAB_MIN_ACTIVE_W, TAB_STANDARD_W } from './tabStrip/layout'
-import { measureStrip, stripBounds } from './tabStrip/measure'
+import { TAB_ADD_GAP, TAB_BUTTON_SIZE, TAB_HEAD_GAP, TAB_HEAD_PAD, TAB_MIN_ACTIVE_W, TAB_STANDARD_W } from './tabStrip/layout'
+import { measureStrip, stripBounds, tabsEnd } from './tabStrip/measure'
 import { EASE_OUT_CSS, slideMs, slideTargets } from './tabStrip/reorderGeometry'
 import { useTabDragSource } from './tabStrip/useTabDragSource'
-import { dragProps } from './titleRow/dragRegion'
+import { dragProps, useBlurOnDragRegionPress } from './titleRow/dragRegion'
 import { SURFACE_TOP, TAB_BAR_H } from './titleRow/metrics'
 
 interface TabBarProps {
@@ -51,6 +51,8 @@ interface TabBarProps {
   canvas?: () => Element | null
   /** `UseTabDragSourceOptions.pullFrame`. */
   pullFrame?: boolean
+  /** `UseTabDragSourceOptions.titleRow`. */
+  titleRow?: RefObject<HTMLElement | null>
 }
 
 /** 그릴 머리 하나 — `x` = 탭바 줄 왼쪽 기준 CSS px. */
@@ -65,7 +67,18 @@ interface DrawnHead {
 const WIDTH_CAP: number | null = null
 
 // ADR-0295
-export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClose, onRename, canvas, pullFrame }: TabBarProps) {
+export default function TabBar({
+  label,
+  tabs,
+  active,
+  onSwitch,
+  onCreate,
+  onClose,
+  onRename,
+  canvas,
+  pullFrame,
+  titleRow,
+}: TabBarProps) {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   // ★안정 ref★: input 에 매 렌더 새 콜백 ref 를 걸면 React 가 매번 재부착 → select() 가 매 키입력마다
@@ -101,6 +114,8 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
     if (trimmed.length > 0 && (trimmed !== seed.current || (deliberate && !tab.named))) onRename(tab.id, trimmed)
     setEditingId(null)
   }
+  // 창 끌 자리 = 탭 줄 빈 곳 · 제목 줄 · 끌 빈 자리 — 그 누름에도 편집이 끝난다(확정 규칙은 onBlur 그대로).
+  useBlurOnDragRegionPress(editingId !== null, inputRef)
 
   const rowRef = useRef<HTMLDivElement>(null)
   const addRef = useRef<HTMLButtonElement>(null)
@@ -121,6 +136,7 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
     add: addRef,
     canvas,
     pullFrame,
+    titleRow,
   })
   const { snapshot } = source
   const model = { tabs: ids, active }
@@ -180,7 +196,8 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
     const following = motion !== null && i === at && !motion.settled
     heads.push({ id, x, w, transition: following ? 'none' : slide })
   })
-  const end = bounds.lastVisible < 0 ? 0 : bounds.tabs[bounds.lastVisible].x1
+  // `+` 자리 — 탭바 구역의 오른 끝(`stripZoneArea`)과 같은 값이다.
+  const end = tabsEnd(bounds)
   const marker = useLocalDrag(s => s.targetMarker)
 
   const domOrder = useDomOrder(
@@ -263,6 +280,9 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
         // 제목 줄에서 탭바만 줄어든다 — 줄이 좁아지면 잰 폭(`useStripAvailable`)이 줄어 탭이 먼저 준다(TRD S26-window-chrome §7-1).
         flex: '1 1 0px',
         minWidth: 0,
+        // 덧막이 — 줄이 머리 · `+` 보다 좁아도 그 오른쪽(끌 빈 자리 · 번호 표식 · 창 단추) 위에 그리지 않는다. 가로만 자른다 —
+        //   `hidden` 은 세로도 잘라 탭바 아래 1px 선 위에 걸친 활성 면 · 날개(`bottom: -1`)를 지운다.
+        overflowX: 'clip',
         // ★면 규칙 = 활성 탭은 내용과 같은 면(`--tab-active-bg`)이라 아래 캔버스로 이어지고, 바(`--tab-bar-bg`)는 내용과
         //   밝기가 다른 면★ — Chrome 꼴(사용자 결정 2026-10-19 · 값은 테마마다 `styles/theme.css`). 라이트 · e-ink = 바가 내용보다
         //   한 칸 눌린 면 · 다크 = 바가 내용보다 밝아 활성 탭이 가장 어둡다(Zed Ayu Dark 꼴 — ADR-0298 결정 1).
@@ -495,9 +515,6 @@ const CLOSE_STYLE: CSSProperties = {
   cursor: 'pointer',
 }
 
-/** `+` 원 앞 틈 — 마지막 머리 오른 가에 걸친 구분선(±2.5)에 원이 닿지 않게. */
-const TAB_ADD_GAP = 4
-
 // 가로 여백(margin)을 두지 말 것 — 쓸 수 있는 폭은 줄 폭 − `+` 테두리 상자 폭이다(`measure.ts`). 원 앞 틈은 그래서 margin
 //   이 아니라 왼 패딩이다(상자 = 틈 4 + 원 22). 맴돎 원은 상자가 아니라 안의 원에만 칠한다(Tailwind `group-hover/add`).
 const ADD_STYLE: CSSProperties = {
@@ -661,8 +678,9 @@ const separatorStyle = (shown: boolean, fadesIn: boolean): CSSProperties => ({
 })
 
 /**
- * 머리들이 쓸 수 있는 폭(줄 폭 − `+` 폭 — 훅이 끌기 때 재는 것과 같은 식) — 줄 크기가 바뀔 때마다 다시 잰다. 줄 폭이 0 이면
- * (재기 전 · 잴 수 없는 환경) `null` = 제한 없음.
+ * 머리들이 쓸 수 있는 폭(줄 폭 − `+` 폭 — 훅이 끌기 때 재는 것과 같은 식) — 줄 크기가 바뀔 때마다 다시 잰다. 줄 높이가 0 이면
+ * 레이아웃이 없다(재기 전 · jsdom · `display: none`) — `null` = 제한 없음. ★폭 0 은 잰 값이다★ — 창이 제목 줄의 최소 폭보다
+ * 좁으면 줄 폭이 0 이 되고, 그때 `null` 로 치면 머리가 다 표준 폭으로 서서 끌 빈 자리 · 번호 표식 · 창 단추를 덮는다.
  */
 function useStripAvailable(
   row: RefObject<HTMLElement | null>,
@@ -674,7 +692,7 @@ function useStripAvailable(
     if (el === null) return
     const measure = () => {
       const m = measureStrip({ row: el, add: add.current })
-      setAvailable(m.row.x1 > m.row.x0 ? m.available : null)
+      setAvailable(m.row.y1 > m.row.y0 ? m.available : null)
     }
     measure()
     if (typeof ResizeObserver === 'undefined') return
