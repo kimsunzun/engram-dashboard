@@ -297,6 +297,14 @@ npm test                                    # 6) 프론트 테스트 (vitest run
   cargo tree --locked -p engram-dashboard-agent  -e normal,dev,features -i engram-dashboard-platform --target all | rg 'engram-dashboard-platform feature "test-support"' # → 1줄 이상 PASS (짝)
   ```
   판정 · 짝을 빼지 말 것 · `cargo tree` 종료코드 규칙은 위 base 게이트와 같다. 근거·한계의 정본 = `ci.yml` 의 같은 스텝 주석.
+- **스냅 오버레이 기능 게이트(TRD S26-window-chrome §8-4 — 사용자 결정 Q1 2026-10-24 · standard에서 항상, platform · 셸의 `Cargo.toml` · platform `window` 모듈 · 셸 `commands/snap_overlay.rs` 가 닿으면 quick에서도 필수):** 기본 꺼진 기능 `snap-overlay` 의 켠 빌드가 컴파일되고 오버레이 실 창 시험이 돌며(CI `snap-overlay gate 1`), 그 기능이 셸 **정상 · build** 그래프에 없음을 해석된 그래프로 잰다(CI `snap-overlay gate 2`).
+  ```bash
+  cargo check -p engram-dashboard --features snap-overlay                                          # → 성공해야 PASS (gate 1 · 셸)
+  cargo test  -p engram-dashboard-platform --features snap-overlay -- window::snap --test-threads=4 # → `test window::snap::… ok` 1줄 이상 + 성공 PASS (gate 1 · platform)
+  cargo tree --locked -p engram-dashboard -e normal,build,features -i engram-dashboard-platform --target all | rg 'feature "snap-overlay"'                                   # → 0줄 PASS (gate 2)
+  cargo tree --locked -p engram-dashboard -e normal,build,features -i engram-dashboard-platform --target all --features snap-overlay | rg 'engram-dashboard-platform feature "snap-overlay"'   # → 1줄 이상 PASS (짝)
+  ```
+  `cargo check` · `cargo test` 줄은 「분리 실행」을 거친다. 판정 · 짝을 빼지 말 것 · `cargo tree` 종료코드 규칙은 위 base 게이트와 같다. 근거·한계의 정본 = `ci.yml` 의 두 스텝 주석.
 - **네트워크 행 격리 게이트(ADR-0129 — net crate가 닿으면 필수, quick이어도):** 아래를 **전부** 돌린다. 기대값·근거의 정본은 `crates/engram-dashboard-net/src/lib.rs` 헤더이고, 기대값을 늘리기 전에 그 헤더와 그 crate `Cargo.toml`의 의존 상한 규칙을 먼저 읽는다.
   ```bash
   rg "engram_dashboard_(daemon|messaging)" crates/engram-dashboard-net/src/          # 게이트1 소스 참조 → 0줄 PASS
