@@ -8,10 +8,15 @@ description = "Engram Dashboard OS 층 — OS 에 따라 달라지는 운영 코
 #   (`group::GroupRef::gone`) · WMI 띄우기의 원시 호출(`spawn::wmi_create_raw` — 진단 시험 몫)을 연다. 기본 OFF —
 #   소비 crate 는
 #   dev-dependency 에서만 켠다(선례 = `engram-dashboard-command` · `engram-dashboard-base` 의 같은 이름). 데몬 · 셸
-#   운영 그래프에 이 기능이 없다는 것은 CI 게이트가 잰다. ★이 crate 의 cargo 기능은 이것 하나뿐이다★ — windows
-#   바인딩을 기능별로 쪼개지 않는다(아래 `windows` 주석).
+#   운영 그래프에 이 기능이 없다는 것은 CI 게이트가 잰다. ★windows 바인딩을 기능별로 쪼개지 않는다★(아래 `windows`
+#   주석) — 아래 `snap-overlay` 도 코드만 여닫고 바인딩을 켜지 않는다.
+# ★snap-overlay (TRD S26-window-chrome §8-4 · 사용자 결정 Q1 2026-10-24)★: 스냅 레이아웃 오버레이(`window::snap` —
+#   최대화 단추 위 자식 창)를 연다. 기본 OFF — 켜는 것은 셸 기능 `snap-overlay` 하나뿐이다(셸 `Cargo.toml`). 꺼진 채
+#   코드를 남기는 까닭 = 주석으로 막은 코드는 컴파일되지 않아 썩는다 — 켠 빌드는 CI 가 컴파일한다. 운영 그래프에 이
+#   기능이 없다는 것도 CI 게이트가 잰다. ADR-0275 결정 13 의 「cargo 기능은 `test-support` 하나」를 넓힌다.
 [features]
 test-support = []
+snap-overlay = []
 
 # ★워크스페이스 crate 를 여기 적지 않는다 — base 도 아니다★(ADR-0266 「거부한 대안」 둘째 · ADR-0268).
 #   기계 강제 = lib.rs 헤더의 의존 상한 게이트(해석된 의존 그래프를 읽는다).

@@ -436,6 +436,29 @@ jobs:
         shell: bash
         run: cargo check --locked -p engram-dashboard-transport --features ws
 
+      # TRD S26-window-chrome §8-4(사용자 결정 Q1 2026-10-24): 스냅 레이아웃 오버레이는 기본 꺼진 cargo 기능 `snap-overlay` 뒤에
+      #   남겨 둔 코드다(셸 기능이 platform 의 같은 이름을 켠다). 어느 운영 빌드도 켜지 않아 이 스텝이 없으면 아무도 컴파일하지
+      #   않고 썩는다 — 켠 빌드를 여기서 컴파일한다. 셸 = `cargo check`(lib · bin — invoke 어댑터 · 등록 · 창 사실 칸).
+      #   platform = 컴파일에 더해 오버레이의 실 창 시험(`window::snap` — 화면 밖 숨긴 창 · 기능 뒤라 위 platform 스텝은 안 돈다)을
+      #   돌린다. 이름 거르기가 0 건이면(모듈 · 기능 이름이 바뀌어 시험이 빠지면) 종료코드는 0 이라, 「1 건 이상 ok」를 직접 센다
+      #   (transport gate 4c 와 같은 까닭). 켠 빌드의 화면 동작(배율 · 창마다 · 포커스)은 켜는 날 잰다(TRD §14 W8).
+      - name: 'snap-overlay gate 1: the feature-on build compiles (shell) and its overlay tests pass (platform)'
+        shell: bash
+        run: |
+          cargo check --locked -p engram-dashboard --features snap-overlay
+          set +e
+          out=$(cargo test --locked -p engram-dashboard-platform --features snap-overlay -- window::snap 2>&1)
+          rc=$?
+          set -e
+          printf '%s\n' "$out"
+          if [ "$rc" -ne 0 ]; then echo "FAIL — cargo test (snap-overlay) exited $rc"; exit 1; fi
+          set +e
+          n=$(printf '%s\n' "$out" | grep -cE '^test window::snap::[A-Za-z0-9_:]+ \.\.\. ok[[:space:]]*$')
+          set -e
+          echo "window::snap: $n test(s) ok"
+          if [ "$n" -lt 1 ]; then echo "FAIL — window::snap 시험이 하나도 돌지 않았다(모듈 · 기능 이름이 바뀌었나)"; exit 1; fi
+          echo "PASS"
+
       # 워크스페이스 전체 빌드(회귀 명령이 제외한 src-tauri 까지 여기서 컴파일된다).
       - name: cargo build
         shell: bash
@@ -813,6 +836,47 @@ jobs:
           if [ -z "$hits" ]; then n=0; else n=$(printf '%s\n' "$hits" | wc -l | tr -d '[:space:]'); fi
           echo "agent dev graph: $n match(es)"
           if [ "$n" -lt 1 ]; then echo "FAIL — expected >= 1 — 기능 이름이 바뀌었나(그러면 위 0 기대 셋이 눈먼 채 통과한다)"; printf '%s\n' "$tree"; exit 1; fi
+          echo "PASS"
+
+      # TRD S26-window-chrome §8-4(사용자 결정 Q1 2026-10-24): 스냅 레이아웃 오버레이 기능 `snap-overlay` 는 기본 꺼짐이고 운영
+      #   빌드가 켜지 않는다. 셸(`engram-dashboard`)의 정상 · build 그래프에 platform 의 그 기능이 0 줄이어야 PASS — 누가 셸
+      #   `[features] default` 에 넣거나 platform 의존 줄에 그 기능을 적으면 빨갛다. 해석된 그래프를 읽는다(매니페스트 grep 이 아니다).
+      # ★꼴은 platform gate 3 을 따른다★ — TRD 의 `-e normal,features` 에 `build` 를 더하고 짝을 crate 이름으로 한정했다(그
+      #   스텝 주석의 까닭과 같다).
+      # ★짝(같은 명령에 `--features snap-overlay` → 1 줄 이상)을 지우지 말 것★ — 기능 이름이 바뀌거나 셸 기능이 platform 기능을
+      #   켜지 않게 되면 0 기대 줄이 매치할 낱말을 잃고 눈먼 채 통과한다.
+      # ★한계★ — 셸 그래프만 본다(그 기능을 켜는 길은 셸 기능 하나다 — 데몬 · CLI 는 platform 의 그 기능을 켜지 않는다). 해석된
+      #   그래프라 `--all-features` 로 짓는 빌드는 못 본다 — 배포 빌드(`scripts/build-release.ps1`)는 그렇게 짓지 않는다.
+      - name: 'snap-overlay gate 2: the feature stays out of the shell release graph (shell = 0, shell --features snap-overlay >= 1)'
+        shell: bash
+        run: |
+          set +e
+          tree=$(cargo tree --locked -p engram-dashboard -e normal,build,features -i engram-dashboard-platform --target all)
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then echo "FAIL — cargo tree -p engram-dashboard exited $rc"; printf '%s\n' "$tree"; exit 1; fi
+          set +e
+          hits=$(printf '%s\n' "$tree" | rg 'feature "snap-overlay"')
+          rgrc=$?
+          set -e
+          case "$rgrc" in
+            1) echo "PASS — shell normal graph: 0 matches" ;;
+            0) echo "FAIL — 셸 운영 그래프에 snap-overlay 가 켜졌다:"; printf '%s\n' "$tree"; exit 1 ;;
+            *) echo "FAIL — rg errored (exit $rgrc)"; exit 1 ;;
+          esac
+          set +e
+          tree=$(cargo tree --locked -p engram-dashboard -e normal,build,features -i engram-dashboard-platform --target all --features snap-overlay)
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then echo "FAIL — cargo tree -p engram-dashboard --features snap-overlay exited $rc"; printf '%s\n' "$tree"; exit 1; fi
+          set +e
+          hits=$(printf '%s\n' "$tree" | rg 'engram-dashboard-platform feature "snap-overlay"')
+          rgrc=$?
+          set -e
+          if [ "$rgrc" -gt 1 ]; then echo "FAIL — rg errored (exit $rgrc)"; exit 1; fi
+          if [ -z "$hits" ]; then n=0; else n=$(printf '%s\n' "$hits" | wc -l | tr -d '[:space:]'); fi
+          echo "shell --features snap-overlay graph: $n match(es)"
+          if [ "$n" -lt 1 ]; then echo "FAIL — expected >= 1 — 기능 이름이 바뀌었나(그러면 위 0 기대 줄이 눈먼 채 통과한다)"; printf '%s\n' "$tree"; exit 1; fi
           echo "PASS"
 
       # ADR-0270 「영향」 불변식 「셸(`src-tauri`)은 agent crate 를 운영 의존하지 않는다」의 기계 벽(TRD 2-1 D6).

@@ -11,6 +11,9 @@
 //! 부른다. 다른 스레드에서 부르면 Win32 가 그 창 스레드에 메시지를 보내고 답을 기다린다 — 그 스레드가 부른 쪽을
 //! 기다리고 있으면 교착이다. 읽기([`NativeWindow::of`] · [`top_level_at`] · [`describe_window`] ·
 //! [`foreground_is_current_process`] · [`is_foreground`])는 어느 스레드에서나 된다.
+//!
+//! 스냅 레이아웃 오버레이(최대화 단추 위 자식 창)는 하위 모듈 `snap` 이고 cargo 기능 `snap-overlay` 뒤다 — 기본 꺼짐(TRD
+//! S26-window-chrome §8-4 · 사용자 결정 Q1 2026-10-24).
 
 // ADR-0266
 // ADR-0295
@@ -19,6 +22,9 @@ use std::fmt;
 use std::io;
 
 use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle};
+
+#[cfg(feature = "snap-overlay")]
+pub mod snap;
 
 /// 화면의 물리 px 점. 프로세스가 모니터별 DPI 인식(v2 — tao 가 켠다)이 아니면 OS 가 배율로 가상화한 값이 온다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]

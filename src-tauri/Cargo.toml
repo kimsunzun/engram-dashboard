@@ -36,6 +36,14 @@ path = "src/main.rs"
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+# ★snap-overlay — 기본 OFF(사용자 결정 Q1 2026-10-24 · TRD S26-window-chrome §8-4)★: Windows 11 스냅 레이아웃 메뉴를 웹이
+#   그린 최대화 단추에서 뜨게 하는 오버레이(platform `window::snap`)와 그 invoke `report_max_button_rect`
+#   (`src/commands/snap_overlay.rs`)를 컴파일에 넣는다. 켠 빌드 = `cargo build -p engram-dashboard --features snap-overlay`.
+#   꺼진 빌드에서 창 사실 `caption.snap_overlay` 는 늘 거짓이라 웹이 그 invoke 를 부르지 않는다. 운영 그래프에 이 기능이
+#   없다는 것과 켠 빌드가 컴파일된다는 것은 CI 가 잰다(`ci.yml` 의 `snap-overlay gate 1` · `2`).
+[features]
+snap-overlay = ["engram-dashboard-platform/snap-overlay"]
+
 [dependencies]
 # caret resolve(현재 2.11.3 = 최신 2.x). 2.11.3에서 channel-data 데드락 수정 흡수
 #   (carrier 리서치 2026-06-28: docs/research/tauri-channel-multiwindow-carrier-…). Channel spike 검증 완료.
@@ -90,6 +98,7 @@ engram-dashboard-net = { path = "../crates/engram-dashboard-net" }
 #   화면 상태(`crate::state`) — 상태 폴더 임시 파일 쓸기의 주인 생존 판정(`process::pid_alive` — `state::boot` 의
 #   `sweep_temps`) · 런타임 복원 수락 끝에 main 에 포커스를 줄지 가르는 전경 창 판정
 #   (`window::foreground_is_current_process` — `state::placement` 의 `foreground_is_ours`).
+#   스냅 레이아웃 오버레이(`window::snap`)는 위 `[features] snap-overlay` 를 켤 때만 — 그 기능이 platform 의 같은 이름을 켠다.
 #   ★`windows` 를 이 셸에 직접 되살리지 말 것★ — OS crate 운영 의존은 platform 하나에만 둔다(CI `platform gate 5`).
 #   ★운영 의존에서 `test-support` 를 켜지 않는다★(CI `platform gate 3` — 시험 기능은 아래 dev 재선언에서만).
 engram-dashboard-platform = { path = "../crates/engram-dashboard-platform" }

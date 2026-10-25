@@ -98,7 +98,9 @@ export default function TitleRow({ label, number, standby = false, frame = windo
       {children}
       <div data-testid="title-grab-gap" aria-hidden {...dragProps()} style={GRAB_GAP} />
       {number !== null && <NumberMarker ref={markerRef} n={number} />}
-      {buttons && <CaptionButtons label={label} main={label === MAIN_WINDOW_LABEL} maximized={maximized} />}
+      {buttons && (
+        <CaptionButtons label={label} main={label === MAIN_WINDOW_LABEL} maximized={maximized} snapOverlay={facts?.caption.snap_overlay ?? false} />
+      )}
     </div>
   )
 }

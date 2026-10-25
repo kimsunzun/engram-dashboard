@@ -236,6 +236,23 @@ describe('TitleRow — 창 단추', () => {
     }
   })
 
+  // TRD §8-4 — 보고 · 맴돎의 세부는 `snapOverlay.test.ts` 가 본다. 여기는 창 사실 칸이 그 길을 여닫는지.
+  it('스냅 오버레이 — caption.snap_overlay 거짓(기본 빌드)이면 최대화 단추 사각형을 보고하지 않는다 · 참이면 보고하고 떼면 걷는다', () => {
+    const snapCalls = () => invokeMock.mock.calls.filter(c => c[0] === 'report_max_button_rect')
+    const off = renderRow()
+    expect(snapCalls()).toEqual([])
+    expect(button('caption-maximize').dataset.snapHover).toBe('false')
+    expect(button('caption-maximize').className.split(' ')).toContain('data-[snap-hover=true]:bg-[var(--caption-hover-bg)]')
+    off.unmount()
+    expect(snapCalls()).toEqual([])
+
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(DOMRect.fromRect({ x: 900, y: 0, width: 46, height: 34 }))
+    const on = renderRow({ frame: fakeFrame({ ...FRAME, caption: { ...FRAME.caption, snap_overlay: true } }).source })
+    expect(snapCalls()).toEqual([['report_max_button_rect', { rect: { x: 900, y: 0, width: 46, height: 34 } }]])
+    on.unmount()
+    expect(snapCalls().slice(-1)[0]).toEqual(['report_max_button_rect', { rect: null }])
+  })
+
   it('크롬 모양이 단추를 OS 몫으로 두면(caption.buttons 거짓) 그리지 않는다 — 표식은 그대로', () => {
     renderRow({ frame: fakeFrame({ ...FRAME, caption: { ...FRAME.caption, buttons: false } }).source })
     expect(screen.queryByTestId('caption-buttons')).toBeNull()

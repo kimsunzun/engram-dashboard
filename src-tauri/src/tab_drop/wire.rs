@@ -180,8 +180,8 @@ pub struct WindowFrame {
 ///
 /// - `buttons`: 최소화 · 최대화 · 닫기 단추를 웹이 그린다. 거짓 = OS 가 그린다(macOS 몫 — 지금은 늘 참).
 /// - `leading_inset`: 제목 줄 왼쪽에서 웹이 비워 둘 폭(CSS px — OS 가 그 자리에 단추를 그린다 · 지금은 늘 0).
-/// - `snap_overlay`: 셸이 스냅 레이아웃 오버레이를 켠 빌드인가 — 참일 때만 웹이 최대화 단추 사각형을 보고한다(지금은 늘
-///   거짓 · §8-4).
+/// - `snap_overlay`: 셸이 스냅 레이아웃 오버레이를 켠 빌드인가 — 참일 때만 웹이 최대화 단추 사각형을 보고한다(셸 기능
+///   `snap-overlay` 로 지은 빌드만 참 · 기본 꺼짐 · §8-4).
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct CaptionChrome {

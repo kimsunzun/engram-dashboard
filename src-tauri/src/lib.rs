@@ -511,6 +511,10 @@ pub fn run() {
             commands::window_ctl::window_control,
             // 최소 창 크기 보고(웹뷰 → 셸) — 측정 보고라 버스 명령이 아니다(ADR-0227 · TRD S26-window-chrome §7-7).
             commands::window_ctl::report_window_min_width,
+            // 최대화 단추 사각형 보고(웹뷰 → 셸) — 스냅 레이아웃 오버레이를 그 자리에 놓는다. 측정 보고라 버스 명령이 아니다
+            //   (ADR-0227). ★셸 기능 `snap-overlay` 뒤(기본 꺼짐 · TRD S26-window-chrome §8-4)★.
+            #[cfg(feature = "snap-overlay")]
+            commands::snap_overlay::report_max_button_rect,
             // 부팅 조회 — 미는 쪽(`window.setTheme` · `theme.default` 쓰기 · 부팅 · 복원 수락)은 따로 있다
             //   (`commands/settings.rs` 「창별 테마를 읽는 자리가 둘인 이유」).
             commands::get_ui_settings,

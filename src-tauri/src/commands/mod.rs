@@ -5,6 +5,10 @@ pub mod first_paint;
 pub mod layout;
 pub mod popout;
 pub mod settings;
+// 스냅 레이아웃 오버레이 invoke `report_max_button_rect`(TRD S26-window-chrome §8-4) — 셸 기능 `snap-overlay` 뒤(기본 꺼짐 ·
+//   사용자 결정 Q1 2026-10-24).
+#[cfg(feature = "snap-overlay")]
+pub mod snap_overlay;
 // 예비 창의 셸 쪽 창 관리 — 예비 창 풀 · 짓기 · 역할 답(TRD S21-slot-docking §3-9).
 pub mod spare;
 pub mod state;

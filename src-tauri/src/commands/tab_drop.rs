@@ -187,8 +187,8 @@ fn caption_chrome() -> CaptionChrome {
     CaptionChrome {
         buttons: style.drawn_buttons,
         leading_inset: style.leading_inset,
-        // TODO(T-66 U9): 셸 feature `snap-overlay` 를 들이면 그 빌드에서 참 — 지금은 그 feature 가 없다(§8-4).
-        snap_overlay: false,
+        // 셸 기능 `snap-overlay` 로 지은 빌드에서만 참(기본 꺼짐 — §8-4) — 참일 때만 웹이 `report_max_button_rect` 를 부른다.
+        snap_overlay: cfg!(feature = "snap-overlay"),
     }
 }
 

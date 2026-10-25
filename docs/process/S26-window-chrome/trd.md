@@ -119,6 +119,7 @@ PRD 가 Q5 · Q10 을 메인에게 맡겼다(스파이크 뒤 결정 · 사용�
 | `src-tauri/src/chrome/book.rs` | 새 | `ChromeBook` — 순수 판정(창별 마지막 제목 판 · 열기 표시 · 최소 크기 입히기(보통 크기 창만 — §7-7) · 넓혀 당기기 여부) · 입히기 차례(`apply_min` · seam `MinWindow`) · 단위 시험 | 0(순수) |
 | `src-tauri/src/chrome/mod.rs` | 새 | `ChromeBook` 을 잎 락으로 쥔 Tauri 어댑터 — 제목 입히기(메인 스레드) · 최소 크기 입히기(보이지 않는 테두리를 더한다) · 열기 표시(`mark_opening`) · 새 자리 앞 걷기(`lift_min` — 메인 스레드 일 하나) · `Resized` 때 미룬 최소 크기(`on_resized`) · `Destroyed` 때 잊기 | Tauri |
 | `src-tauri/src/commands/window_ctl.rs` | 새 | `WindowControl` 의 Tauri 어댑터 · invoke `window_control` · `report_window_min_width` | Tauri |
+| `src-tauri/src/commands/snap_overlay.rs`(U9) | 새 · 셸 feature `snap-overlay` 뒤 | invoke `report_max_button_rect` — platform `window::snap` 을 부르고 맴돎을 사건 `window:snap-hover` 로 그 창에 돌려준다(§8-4) | Tauri |
 | `src-tauri/src/layout/{types,manager,apply,commands}.rs` | 바뀜 | `TabName` · `WindowTabs.number` · `closing` · `agent_names` · `drop_window_gone` · 페이로드 칸 · 새 명령 · 만들기 답 | — |
 | `src-tauri/src/state/{schema,codec,convert,placement,restore}.rs` | 바뀜 | 영속 칸 둘(`number` · `named`) · D3 고치기 · 이름 시드 · OS 창이 없는 창은 `drop_window_gone` · `fit_min_width` | — |
 | `src-tauri/src/tab_drop/{wire,mod}.rs` · `src-tauri/src/commands/tab_drop.rs` | 바뀜 | `WindowFrame` 에 `focused` · `caption` 칸 · 앞 창 읽기(platform) | — / Tauri |
@@ -127,11 +128,12 @@ PRD 가 Q5 · Q10 을 메인에게 맡겼다(스파이크 뒤 결정 · 사용�
 | `src-tauri/src/tray/actions.rs` | 바뀜 | 보이기에 「포커스 빼앗지 않기」 갈래(LLM 길 · §6-2) | Tauri |
 | `src-tauri/src/daemon_client/{connection,mod}.rs` | 바뀜 | 포트 `AgentNamesSink`(emit 포트 `DaemonEvents` 를 넓히지 않는다 — 그 파일 머리 「넓히기 금지」) | — |
 | `crates/engram-dashboard-daemon/src/connection_core.rs` | 바뀜 | `Renamed` 뒤 · `RosterFanout::roster_changed` 도 `AgentListUpdated` 를 낸다(§4-3) | — |
-| `crates/engram-dashboard-platform/src/window.rs` | 바뀜 | `caption_style()` · `is_foreground(w)` · (필요하면) 활성화 없이 펴기(§6-2) · `snap` 모듈(feature `snap-overlay` 뒤 — §8-4) | — |
+| `crates/engram-dashboard-platform/src/window.rs` | 바뀜 | `caption_style()` · `is_foreground(w)` · (필요하면) 활성화 없이 펴기(§6-2) · `snap` 모듈(`window/snap.rs` — `place_overlay` · `remove_overlay` · feature `snap-overlay` 뒤 — §8-4) | — |
 | `crates/engram-dashboard-platform/Cargo.toml` · `src-tauri/Cargo.toml` | 바뀜 | feature `snap-overlay`(기본 꺼짐) — 셸 feature 는 platform feature 를 켠다 | — |
 | `src-tauri/src/webview_env.rs` | 바뀜 | `finish` 가 `decorations(false)` · `shadow(true)` 를 붙인다(`EnvOptions` 로 — 시험이 본다) | Tauri |
 | `src-tauri/src/lib.rs` | 바뀜 | `Focused` → `push_window_frame` · `Resized` → 최소 크기 판정 · `Destroyed` → 번호 풀기 · 크롬 잊기 · invoke 등록 | Tauri |
 | `src/components/layout/titleRow/{TitleRow,NumberMarker,CaptionButtons}.tsx` · `titleRow/metrics.ts` · `titleRow/minSizeReport.ts` · `titleRow/dragRegion.ts` | 새 | 제목 줄 렌더 · 크기 상수 · 최소 폭 셈 · 최소 폭 보고 · 끌 자리 속성 | — |
+| `src/components/layout/titleRow/snapOverlay.ts`(U9) | 새 | 최대화 단추 사각형 보고 · 맴돎 듣기 — `caption.snap_overlay` 가 참일 때만(§8-4) | — |
 | `src/components/layout/{TabBar,WindowLayout}.tsx` · `tabStrip/{useTabDragSource,measure}.ts` · `dock/windowFrame.ts` · `src/store/viewStore.ts` · `src/commands/tabCommands.ts` · `src/i18n/ko.ts` · `src/styles/theme.css` | 바뀜 | 제목 줄 끼우기 · 놓기 구역(세로 = 제목 줄 · 가로 = 첫 탭 ~ `+` — §7-9) · 창 사실 칸 · 0탭 자가닫힘 → 버스 · 창 명령 등록 · 이름 편집 확정 · 낱말 · 토큰 | — |
 | `src/components/layout/{AppLayout,NoticeOverlay,ConnectionNotice}.tsx` · `src/pages/PopoutPage.tsx` | 바뀜(U8b) | 알림 층을 `WindowLayout` 의 `notices` 로 넘겨 제목 줄 아래 캔버스 칸에 붙인다(§7-12) | — |
 | `src-tauri/capabilities/{default,popup}.json` | 바뀜 | §9 | — |
@@ -198,6 +200,7 @@ struct Closing { window_id: String, number: u32 }
 | invoke `move_slot_to_window` 답(`SlotMove`) | `window_id` · `number` 더함 | 기존 창 대상이면 그 창의 것 |
 | invoke `tab_drop` 의 답 `TabDropReply`(`applied` — 셸 안 `DockOutcome.identity` 를 옮긴다) | `applied` 에 `window_id` · `number` 더함(둘 다 null 가능) — 새 창이든 기존 창(이음새 · 탭바 · 재사용)이든 옮긴 탭이 든 창의 것 · null = 재사용 길에서 옮기는 사이 그 창이 닫힘 | ts-rs `TabDropReply` 다시 구움 · 웹은 아직 읽지 않는다 · 앞으로의 `tab.dock`(T-65)이 쓴다 |
 | invoke `window_control`(새) · `report_window_min_width`(새) | §6-4 · §7-7 | ts-rs export(`window_control` 의 동작 · 답 — `report_window_min_width` 는 인자가 수 넷 `width` · `height` · `seq`(u32 — 보고 순번) · `epoch`(u64 — 페이지를 읽은 벽시계 ms · §7-7)이라 없다) |
+| invoke `report_max_button_rect`(새 · U9) · 사건 `window:snap-hover`(새 · U9) — 둘 다 셸 feature `snap-overlay` 빌드에만 | §8-4 | 인자 `rect: { x, y, width, height } \| null`(그 창 클라이언트 물리 px · `null` = 걷기) · 사건 몸 = bool(그 창 label 로 지목). ts-rs export 없음 — 셸 쪽 타입이 feature 뒤라 기본 빌드의 바인딩에 나올 수 없다(웹은 `snapOverlay.ts` 가 같은 모양을 손으로 적는다) |
 | 버스 `tab.list` | `TabRow.named` 더함 | 선언 세대 올림(§6-6) |
 | 버스 `window.create` · `slot.popout` · `window.list` · `window.close` · 새 명령 | §6 | |
 
@@ -602,8 +605,8 @@ OS 틀을 걷으면 제목 줄이 창을 옮기고 닫는 유일한 자리다. �
 
 ### 8-3 게이트 영향(CLAUDE.md 「플랫폼 중립」 · `/qa` 4f · 4g · 4h)
 
-- 4f(OS `cfg` 파일 명단 — platform **밖**) — 바뀌지 않는다: 새 OS `cfg` 는 platform 안뿐이다. 셸의 `#[cfg(feature = "snap-overlay")]` 는 OS 술어가 아니다(4f 의 matcher 는 OS 술어를 본다 — 정본 = platform `src/lib.rs` 헤더 게이트 ④ · 그 matcher 가 `feature` 를 잡지 않는다는 것은 U9 가 확인 — 미검).
-- 4g(OS crate 운영 의존 = platform 하나) — 바뀌지 않는다. 스냅 오버레이가 쓰는 `windows` 바인딩(`Win32_UI_WindowsAndMessaging` · `Win32_UI_Input_KeyboardAndMouse`)은 이미 켜져 있다(코드 — platform `Cargo.toml` · 스파이크가 지금 feature 로 빌드됐다 — 가능성 높음).
+- 4f(OS `cfg` 파일 명단 — platform **밖**) — 바뀌지 않는다: 새 OS `cfg` 는 platform 안뿐이다. 셸의 `#[cfg(feature = "snap-overlay")]` 는 OS 술어가 아니다(4f 의 matcher 는 OS 술어를 본다 — 정본 = platform `src/lib.rs` 헤더 게이트 ④). 그 matcher 가 `feature` 를 잡지 않는 것은 U9 가 확인했다(실측 2026-10-26 — `#[cfg(feature = "snap-overlay")]` · `cfg!(feature = "snap-overlay")` 를 담은 셸 파일 넷과 표본 파일은 안 걸리고 같이 넣은 `#[cfg(windows)]` 표본만 걸림 · 4f 블록 PASS).
+- 4g(OS crate 운영 의존 = platform 하나) — 바뀌지 않는다. 스냅 오버레이가 쓰는 `windows` 바인딩(`Win32_UI_WindowsAndMessaging` · `Win32_UI_Input_KeyboardAndMouse`)은 이미 켜져 있다 — U9 가 바인딩을 더하지 않고 켠 빌드를 컴파일했다(확실 · 4g 블록 PASS).
 - 4h(`std::os::windows` 파일 명단 — platform 밖) — 바뀌지 않는다.
 - 셸 쪽 새 코드(`chrome/` · `commands/window_ctl.rs`)에 OS `cfg` 를 두지 않는다.
 
@@ -614,7 +617,9 @@ OS 틀을 걷으면 제목 줄이 창을 옮기고 닫는 유일한 자리다. �
   - platform `Cargo.toml` `[features] snap-overlay = []` · 모듈 `window::snap`(스파이크 `t66_snap_spike.rs` 를 옮겨 다시 짓는다 — 참고한 `Hyph-M/tauri-plugin-snap-layout` MIT 귀속을 그 모듈 머리에 남긴다) 전체가 `#[cfg(feature = "snap-overlay")]` 뒤.
   - 셸 `src-tauri/Cargo.toml` 에 `[features] snap-overlay = ["engram-dashboard-platform/snap-overlay"]`(셸의 첫 `[features]` 표 — 기본 꺼짐). 부르는 자리(invoke `report_max_button_rect` · 그 어댑터)와 그 invoke 등록이 같은 feature 뒤.
   - 웹은 창 사실의 `caption.snap_overlay` 가 참일 때만 최대화 단추 사각형을 보고한다(feature 를 끈 빌드는 늘 거짓 — 웹 코드는 늘 컴파일된다).
-- **CI · `/qa` 몫(U9)** — ① 켠 빌드 컴파일: `cargo check --locked -p engram-dashboard --features snap-overlay`(그리고 platform 몫 `cargo check --locked -p engram-dashboard-platform --features snap-overlay`) ② 운영 그래프에 꺼져 있음: `cargo tree --locked -p engram-dashboard -e normal,features -i engram-dashboard-platform --target all | rg 'feature "snap-overlay"'` → 0 줄(짝 = 같은 명령에 `--features snap-overlay` 를 주면 1 줄 이상 — 기능 이름이 바뀌어 0 기대 줄이 눈먼 채 통과하지 않게 · base · platform 의 `test-support` 게이트와 같은 꼴). CLAUDE.md 「빌드·검증 명령」에 켜는 법 한 줄을 더한다: 「스냅 오버레이를 켠 빌드 = `--features snap-overlay`(셸) — 기본 꺼짐 · 사용자 결정 2026-10-24」.
+  - **착지한 모양(U9)** — platform `window::snap` = `place_overlay(parent, rect, on_hover)`(없으면 짓고 있으면 옮김 · 콜백 갈아 끼움 · 빈 사각형 거절) · `remove_overlay(parent)`. 오버레이는 부모의 자식 ID 로 찾는다(스파이크의 전역 표를 걷었다 — 창 프로시저가 우리 것인지로 거른다). 셸 `report_max_button_rect(rect | null)` 은 동기 명령(메인 스레드 — 자식 창은 부모 스레드에서 짓는다)이고 맴돎을 사건 `window:snap-hover`(bool · 그 창 label)로 돌려준다. 웹 `snapOverlay.ts` 가 CSS px × `devicePixelRatio` 를 바깥으로 맞춰(floor · ceil) 보내고, 창 크기 · 단추 크기가 바뀔 때 다시 재며(같은 값은 안 보냄), 꺼지거나 떼어지면 `null` 로 걷는다. 단추는 맴돎을 `data-snap-hover` 로 그린다 — 오버레이가 커서를 가져가 HTML `:hover` 가 안 선다(스파이크 · 참고 플러그인 `.is-hovered` 와 같은 꼴). 최대화 · 복원 단추를 한 요소로 합쳤다(재는 단추가 상태 바뀜에도 그대로). 오버레이 떼기 = 부모에 `SC_MAXIMIZE` · `SC_RESTORE`(제목 줄 두 번 누름과 같은 OS 길 — 버스를 안 지난다) · 키보드는 웹 단추 그대로.
+  - **켤 때 다시 볼 것(재지 않음)** — 배율만 바뀌고 CSS 크기가 그대로인 때(배율 다른 모니터로 옮김) 다시 재지 않는다 · 오버레이 위 탭 놓기(W14) · 그 STATIC 창이 웹 단추를 가리지 않고 보이는 까닭(스파이크에서 본 것뿐).
+- **CI · `/qa` 몫(U9 — 착지)** — ① `snap-overlay gate 1`(백엔드 잡): 셸 `cargo check --locked -p engram-dashboard --features snap-overlay` + platform 은 `cargo check` 대신 `cargo test --locked -p engram-dashboard-platform --features snap-overlay -- window::snap`(오버레이의 실 창 시험 여섯이 기능 뒤라 다른 어디서도 안 돈다 — 컴파일을 포함한다) · 이름 거르기가 0 건이어도 종료코드 0 이라 `test window::snap::… ok` 를 1 줄 이상 센다(transport gate 4c 와 같은 까닭) ② `snap-overlay gate 2`(게이트 잡): `cargo tree --locked -p engram-dashboard -e normal,build,features -i engram-dashboard-platform --target all | rg 'feature "snap-overlay"'` → 0 줄(짝 = 같은 명령에 `--features snap-overlay` · `rg 'engram-dashboard-platform feature "snap-overlay"'` → 1 줄 이상). 0.x 판의 `-e normal,features` 에 `build` 를 더하고 짝을 crate 이름으로 한정했다 — platform gate 3 이 base 게이트 리뷰 지적으로 그렇게 착지한 꼴을 따랐다. `/qa` 바인딩 standard 에 같은 넷을 실었다(「스냅 오버레이 기능 게이트」). CLAUDE.md 「빌드·검증 명령」에 켜는 법 한 줄을 더한다: 「스냅 오버레이를 켠 빌드 = `--features snap-overlay`(셸) — 기본 꺼짐 · 사용자 결정 2026-10-24」.
 
 ---
 
@@ -651,6 +656,7 @@ OS 틀을 걷으면 제목 줄이 창을 옮기고 닫는 유일한 자리다. �
 | `webview_env` | 가짜 빌더에 `decorations(false)` · `shadow(true)` 가 다른 옵션 뒤에 붙음(폴더 있음 · 기본 폴더 · 테마 셋) · 단추를 그리지 않는 크롬 모양이면 안 붙음 · `tauri.conf.json` 창 선언에 `decorations` · `shadow` 없음 | AC5 |
 | `tab_drop` | `WindowFrame` 칸 · 바뀔 때만 밂(`focused` 포함) | AC15 |
 | platform | `caption_style` · `is_foreground`(Windows 실 창 — 기존 `test_window` 도우미) | AC15 |
+| platform `window::snap`(U9 · feature 뒤 — CI `snap-overlay gate 1` 만 돈다) | 실 창(화면 밖 숨긴 부모): 놓기 → 그 자리 · 다시 놓기 = 같은 자식을 옮김 · 걷기 · 없을 때 걷기 무동작 · 빈 사각형 거절 · 적중 판정 = `HTMAXBUTTON` · 맴돎 콜백은 바뀔 때 한 번(들어옴 · 나감) · 다시 놓기가 콜백을 갈아 끼움 · 누름은 아무것도 안 보냄 · 떼기 = 부모에 `SC_MAXIMIZE`(꺼내기만 — 창이 커지지 않는다) · 부모와 함께 부서지면 상태가 풀림 | (AC19 없음 — Q1) |
 | 데몬 `connection_core` | `Renamed` 뒤 · `RosterFanout::roster_changed` 도 `AgentListUpdated` 가 나가고 그 이름이 새 이름이다 | AC4 |
 
 ### 10-2 통합(`--test layout_apply` · `--test layout_commands`)
@@ -661,14 +667,14 @@ OS 틀을 걷으면 제목 줄이 창을 옮기고 닫는 유일한 자리다. �
 
 ### 10-3 TS(vitest)
 
-`TitleRow` 배치 순서(탭바 → 빈 곳 → 표식 → 단추) · 표식이 Tab 순서 밖 · `pointer-events: none` · 자리 수별 폭 · 단추가 레지스트리 명령을 부름 · 최대화 상태에 따라 단추 · 접근성 이름 · main/팝아웃 셋째 단추 이름 · 아이콘(`EyeOff`) · `frame.focused` → 비활성 속성 · 최소 폭 셈과 보고 차례(보고 뒤 첫 화면 알림) · 0탭 효과가 `window_control{Close, if_empty}` 를 자기 `window_id` 로 · `viewStore` 의 `number` · `windowId` 칸 · 탭바 `available` 이 표식 · 단추 · 빈 곳을 뺀 폭 · **놓기 구역**(`stripZoneArea` · `geometryOf` · `windowDrop.decide` — 탭 · `+` 와 그 위 여백 위 점 = `tab_bar`(`+` 위 = 끝 번호) · `+` 오른쪽 빈 곳 · 표식 · 단추 · 그 위 여백 위 점 = 새 창 · 출처 창 자기 탭이면 구역 밖 = 남은 탭 · 놓으면 떼어 냄 · 탭 0 = `+` 만 · 제목 줄 밖 = 지금처럼 · D-a 자기 탭 가로 넘침 → 구역 밖 · 돌아오면 순서 이동(`dragSource.test.ts`) · D-b `+` 오른쪽 밑 캔버스 위 끝 = 바깥 위 띠(실제 `windowBands`) — 사용자 결정 2026-10-26) · **이름 편집 확정**(자동 이름 탭에 같은 글자 Enter = 보냄 · 같은 글자 포커스 잃음 · 이웃 누름 = 안 보냄 · 정한 이름 탭에 같은 글자 = 안 보냄) · `windowFrame.ts` 가 새 칸을 읽고 모양이 틀리면 버림 · **알림 층의 자리**(U8b · §7-12 — `WindowLayout.test` 「알림 층의 자리」: `notices` 가 제목 줄 밖 · 캔버스 칸 맨 앞 · 제목 줄 뒤 · 로딩 · 부팅 실패 화면에도 그린다 / `AppLayout` · `PopoutPage` · `RestoreModal` 시험: 층이 `notices` 로 넘어가고 흐름 안의 자식은 `WindowLayout` 뿐 · 묻는 동안 그 층도 잠긴다).
+`TitleRow` 배치 순서(탭바 → 빈 곳 → 표식 → 단추) · 표식이 Tab 순서 밖 · `pointer-events: none` · 자리 수별 폭 · 단추가 레지스트리 명령을 부름 · 최대화 상태에 따라 단추 · 접근성 이름 · main/팝아웃 셋째 단추 이름 · 아이콘(`EyeOff`) · `frame.focused` → 비활성 속성 · 최소 폭 셈과 보고 차례(보고 뒤 첫 화면 알림) · 0탭 효과가 `window_control{Close, if_empty}` 를 자기 `window_id` 로 · `viewStore` 의 `number` · `windowId` 칸 · 탭바 `available` 이 표식 · 단추 · 빈 곳을 뺀 폭 · **놓기 구역**(`stripZoneArea` · `geometryOf` · `windowDrop.decide` — 탭 · `+` 와 그 위 여백 위 점 = `tab_bar`(`+` 위 = 끝 번호) · `+` 오른쪽 빈 곳 · 표식 · 단추 · 그 위 여백 위 점 = 새 창 · 출처 창 자기 탭이면 구역 밖 = 남은 탭 · 놓으면 떼어 냄 · 탭 0 = `+` 만 · 제목 줄 밖 = 지금처럼 · D-a 자기 탭 가로 넘침 → 구역 밖 · 돌아오면 순서 이동(`dragSource.test.ts`) · D-b `+` 오른쪽 밑 캔버스 위 끝 = 바깥 위 띠(실제 `windowBands`) — 사용자 결정 2026-10-26) · **이름 편집 확정**(자동 이름 탭에 같은 글자 Enter = 보냄 · 같은 글자 포커스 잃음 · 이웃 누름 = 안 보냄 · 정한 이름 탭에 같은 글자 = 안 보냄) · `windowFrame.ts` 가 새 칸을 읽고 모양이 틀리면 버림 · **알림 층의 자리**(U8b · §7-12 — `WindowLayout.test` 「알림 층의 자리」: `notices` 가 제목 줄 밖 · 캔버스 칸 맨 앞 · 제목 줄 뒤 · 로딩 · 부팅 실패 화면에도 그린다 / `AppLayout` · `PopoutPage` · `RestoreModal` 시험: 층이 `notices` 로 넘어가고 흐름 안의 자식은 `WindowLayout` 뿐 · 묻는 동안 그 층도 잠긴다) · **스냅 오버레이**(U9 · §8-4 — `snapOverlay.test.ts`: 물리 px 셈(100 % · 150 % 바깥 맞춤 · 빈 사각형 = 걷기) · 꺼지면 보고도 듣기도 없음 · 켜면 한 번 보고 · 창 크기 바뀜에 다시 재되 같은 값은 안 보냄 · 배율 곱 · 맴돎 사건 참/거짓(bool 아니면 거짓) · 꺼지거나 떼면 `null` 로 걷고 듣기를 풂 · 떼기 뒤 끝난 듣기 등록은 그 자리에서 풂 · 보이지 않는 단추 / `TitleRow.test`: `caption.snap_overlay` 거짓이면 `report_max_button_rect` 0 번 · 참이면 사각형 보고 · 떼면 걷기 · 맴돎 클래스).
 
 ### 10-4 구조 게이트(CI · `/qa` 바인딩 — U1 · U7b 가 더한다)
 
 - **D17** — CI `shell gate 2`(판정 함수는 그 스텝 하나 · `/qa` 바인딩 4j 가 그것을 부른다)가 `src-tauri/src/layout/tab_name.rs` 의 `slot_label` 본문(0 열 `pub fn slot_label` 줄부터 첫 0 열 `}` 까지 · `//` 와 한 줄 `/* */` 주석을 걷은 것 — 같은 파일의 다른 함수 · 시험은 보지 않는다)을 **양성으로** 잰다. ① 변형 덮기 — `types.rs` 의 `pub enum SlotContent` 블록에서 뽑은 변형이 전부 본문에 `SlotContent::<변형>` 으로 나온다(블록을 못 찾거나 변형이 0 개면 FAIL). 새 변형을 묶음 갈래가 받으면 문법과 상관없이 걸린다. 범위가 잘리면 잘린 자리가 어느 변형 갈래보다 앞일 때만 그 변형이 빠져 닫힌 쪽으로 실패한다 — 모든 변형 갈래 뒤에서 잘려 그 뒤에 숨은 묶음 갈래는 지금은 안 보이고 다음 변형을 더할 때 ① 이 잡는다. ② 갈래 모양 — `match` 줄 들여쓰기 + 4 가 갈래 자리이고, 그 자리 줄은 `=>` 를 많아야 하나 담고(한 줄에 둘째 갈래를 이어 쓰면 FAIL), `}` · `},` · `} => …`(여러 줄 구조 패턴의 끝) 말고는 `=>` 앞이 비지 않아야 하며 앞의 `|` 를 뗀 뒤 `=>` 앞을 `|` 로 가른 모든 갈래가 `SlotContent::` 로 시작해야 한다. 그 밖 자리의 `=>`(중첩 `match` · rustfmt 가 다음 줄로 내린 가드 등)는 FAIL 이다. 짝 = 0 열 `pub fn slot_label` 하나와 그 앞의 `#[deny(clippy::wildcard_enum_match_arm)]`(사이 `#[…]` · `//` 줄 허용) · 그 파일에 이 lint 를 끄는 `allow` · `expect` · `warn` 없음 · 그 파일 어디에도 rustfmt 건너뛰기(`rustfmt::skip` · `rustfmt_skip`) 없음(② 가 기대는 rustfmt 꼴을 끈다 — U1 리뷰 3) · 주석 밖 `match` · 도우미 자기 시험(갈래 모양 위반 · 위반 아닌 표본과 한 변형이 빠진 가짜 enum/본문 — 수 고정). **의도는 0.3판 그대로 — 새 변형은 이름을 짓기 전에 통과하지 못하고 와일드카드 · 묶음 이름 갈래를 두지 않는다**(메인 결정 · U1 리뷰 2 · 2026-10-24 — 위반 꼴을 정규식으로 열거하던 음성 게이트(0.3판 한 줄 · 리뷰 1 의 네 갈래)는 `Other =>` · `other | other =>` · `other @ &_ =>` · 원시 문자열의 0 열 `}` 로 범위가 잘려 뒤 갈래가 빠지는 것 · 주석 글자 오탐에 계속 샜다. 허용 꼴만 통과시키는 양성 검사는 그 열거가 필요 없다). 그래서 `slot_label` 은 0 열 함수로 두고 본문에 `match` 하나만 담으며, 갈래는 `SlotContent::<변형>` 경로 패턴만 쓴다(가드의 `||` · `crate::…` 경로 · 중첩 `match` 는 닫힌 쪽으로 걸린다 — 파일 머리에 적는다). CI 에 clippy 가 없어 함수 attribute 만으로는 지켜지지 않는다(메인 결정 M15). 기대는 것 = rustfmt(`cargo fmt --check`)가 갈래를 줄마다 4 칸 들여쓰기로 놓는다는 것. 남는 구멍 = 여러 줄 블록 주석 · 매크로가 짓는 갈래 · 본문 문자열 속 `SlotContent::<변형>`(① 을 속인다 — 그때도 ② 와 컴파일러의 망라 검사가 남는다). **일부러 속이는 꼴 셋은 받아들인 채 사용자 결정을 기다린다**(U1 리뷰 3 에서 다툼 — 가짜 `match` 를 담은 원시 문자열 · ① 을 채우는 문자열 속 `SlotContent::<새 변형>` · 망라한 `match` 를 닿지 않게 두고 그 앞에서 묶음 갈래를 가진 도우미로 일찍 돌아가기 — 코드 리뷰가 본다).
 - **AC10(웹이 창 제어 API 를 부르지 않는다)** — 0.1판의 rg 한 줄은 줄바꿈 · 별칭(`const w = getCurrentWindow(); w.close()`)에 뚫린다(리뷰 Claude ⑦). 대신 vitest 시험 하나(`src/__tests__/noWindowControl.test.ts`)가 TypeScript 컴파일러 API 로 `src/**/*.{ts,tsx}`(시험 파일 제외)를 프로젝트 `tsconfig` 로 타입 검사해, **받는 쪽 타입이 `@tauri-apps/api` 의 `Window` · `WebviewWindow` 인 속성 접근** 중 이름이 `close` · `destroy` · `minimize` · `maximize` · `unmaximize` · `toggleMaximize` · `show` · `hide` · `setFocus` · `unminimize` 인 것을 찾으면 실패한다(메인 결정 M25 — `typescript` 는 이미 개발 의존이다 · `npx tsc --noEmit` 이 쓴다). 별칭 · 줄바꿈 · 구조 분해(`const { close } = getCurrentWindow()` — 그 꼴은 바인딩 요소의 원천 타입으로 같이 본다)를 타입으로 잡는다. 지금 `getCurrentWindow` 를 쓰는 자리(label · `listen` 몫 — 코드)는 걸리지 않는다.
 - CLAUDE.md 「LLM-우선 제어」 찾는 법 결과가 이 작업 앞과 같다(AC10 — 새 전역 핸들 0).
-- 스냅 오버레이 feature 게이트 둘(§8-4).
+- 스냅 오버레이 feature 게이트 둘(§8-4) — CI `snap-overlay gate 1`(셸 켠 빌드 컴파일 · platform 오버레이 시험 1 건 이상 ok) · `snap-overlay gate 2`(셸 운영 그래프 0 줄 · 짝 1 줄 이상). `/qa` 바인딩 standard 「스냅 오버레이 기능 게이트」 · CLAUDE.md 「빌드·검증 명령」에 같은 줄(U9).
 
 ### 10-5 화면 실측 · 실제 입력(`/qa full` · 사용자 체크리스트)
 
@@ -714,7 +720,7 @@ CDP(`scripts/cdp.mjs`)가 재는 것 — DOM 배치 · 번호 · `window.list` �
 | **U7b** | 창 상태 명령(웹) — 레지스트리 · `viewStore` 액션 · 0탭 자가닫힘 → 버스 · `popup.json` 의 `allow-close` 걷기 · `windowFrame.ts` 새 칸 · AC10 타입 검사 시험 | U7a | 중간. 접점 = invoke `window_control` 모양 · `WindowFrame` 모양 하나씩(U7a 가 먼저 못 박는다) |
 | **U8a** | 제목 줄(웹) — `TitleRow` · `NumberMarker` · `CaptionButtons`(T3) · `metrics.ts` · i18n · 테마 토큰 · 흐림 · 끌 자리 속성(`data-tauri-drag-region` — Q5) + `core:window:allow-start-dragging`(main · 팝아웃) · **놓기 구역**(세로 = 제목 줄 · 가로 = 첫 탭 ~ `+` — `measure.ts` `stripZoneArea` · `useTabDragSource` · `windowDrop` · §7-9) · 최소 폭 셈과 보고 · `report_window_min_width` 껍데기(입히기는 U8b) — OS 틀은 아직 있다(OS 제목 줄 아래 우리 제목 줄 — 그대로 쓸 수 있다) | U4 · U7b · U0 | 큼. 시작 전에 기준 빌드(OS 제목 표시줄)의 줄 높이 · 단추 폭을 떠 둔다(S11) |
 | **U8b** | OS 틀 걷기 — `WebviewEnv::finish` 의 `decorations(false)` · `shadow(true)`(`caption_style()` 을 읽는다 — U7a 가 지었다 · §8-1) · 줄 높이 보통/최대화(U8a 가 이미 `titleRowHeight` · `TOP_GAP` 한 상수로 그린다 — U8b 몫 없음) · `ChromeBook` 최소 크기 몫(보통 크기 창만 입힘 · `Resized` 때 미룬 값 · 보이지 않는 테두리를 더해 입힘 — §7-7) · 열기 표시(여섯 자리 — 사본 수락의 main 은 자리 앞 걷기 `lift_min`) · `fit_min_width`(D14 — 보이는 가장자리) · **사용자 결정 2026-10-26 셋**(알림 띠 = 제목 줄 아래 · 복원 모달 동안 제목 줄은 막힌 채 · 흐림 대비 그대로 — §7-12 · §7-5 · §12-2) · QA 가 S8–S10 · AC13(창 끌기 뒤 누름) · AC23(Alt+Space · 오른쪽 클릭 — 결과만 적는다)을 잰다 · **측정 문 S13 · S14**(접힌 끌기 · 놓기 잃음 — §1-3 · W13 · W14) — 통과 전에는 U8b 를 닫지 않는다 | U8a | 중간 |
-| **U9** | 스냅 오버레이를 꺼진 feature 뒤로 — platform `window::snap`(스파이크 옮김 · MIT 귀속) · 셸 `[features] snap-overlay` · invoke `report_max_button_rect`(feature 뒤) · 웹 보고(`caption.snap_overlay` 일 때만) · CI 컴파일 · 그래프 게이트 · CLAUDE.md 켜는 법 | U8b · U0(원본 패치) | 중간. 스파이크에서 메뉴가 떴다(S6) — 옮긴 뒤 켠 빌드의 동작 확인은 켜는 날 한다 |
+| **U9** | 스냅 오버레이를 꺼진 feature 뒤로 — platform `window::snap`(`window/snap.rs` · 스파이크 옮김 · MIT 귀속 · 실 창 시험 여섯) · platform · 셸 `[features] snap-overlay` · invoke `report_max_button_rect` + 맴돎 사건 `window:snap-hover`(`commands/snap_overlay.rs` · 등록 — feature 뒤) · `caption.snap_overlay` = `cfg!(feature)` · 웹 `snapOverlay.ts`(`caption.snap_overlay` 일 때만 보고 · 맴돎 `data-snap-hover`) · CI `snap-overlay gate 1` · `2` · `/qa` 바인딩 · CLAUDE.md 켜는 법과 게이트 두 줄 · platform 머리 · `Cargo.toml` 의 「기능은 `test-support` 하나」 문구(ADR-0275 결정 13 개정은 U10) — 착지 모양 = §8-4 | U8b · U0(원본 패치) | 중간. 스파이크에서 메뉴가 떴다(S6) — 옮긴 뒤 켠 빌드의 화면 동작 확인은 켜는 날 한다 |
 | **U10** | 문서 — ADR(§12-3) · CLAUDE.md(「LLM-우선 제어」 남은 갭 · platform `window` 입주자 · 의존 절 · 스냅 feature) · step-log · tracking(T-66 · T-68 몫) · 코드 앵커 · `/qa` 바인딩 게이트 · `prompts/engram-help.md`(창 인자 · window_id · 번호 거부 — U7a 뒤) | 앞 단위 전부 | `/review doc` |
 
 ---
@@ -816,7 +822,7 @@ PRD R4 의 포커스 문장은 고칠 것이 없다(§4-2 — 0.1판 §13 ④ �
 - **데몬 crate 변경** — 개명 뒤 `AgentListUpdated` 가 늘어난다(개명은 드물다). 웹의 `agent-list-updated` 소비는 이미 그 사건을 다룬다.
 - **크기 값이 기준 빌드와 어긋남** — S11 로 확정하기 전 값으로 U8a 를 지으면 U8b 에서 고친다(상수 한 파일).
 - **작업 영역이 최소 크기보다 좁은 화면의 최대화**(U8b) — 최대화 동안 OS 최소 크기를 걷지 못한다(tao 세터가 최대화를 푼다 — §7-7). 그 화면에서 최대화 사각형이 작업 영역을 넘는지 = S8 · 넘치면 §7-7 「남은 갭」의 세 갈래를 사용자에게 올린다.
-- **스냅 feature 썩음** — CI 컴파일 단계(§8-4)가 막는다. 켠 빌드의 동작(배율 · 창마다 · 포커스)은 켤 때 다시 잰다(W8).
+- **스냅 feature 썩음** — CI `snap-overlay gate 1`(셸 켠 빌드 컴파일 · platform 오버레이 실 창 시험 — §8-4)이 막는다. 웹 몫은 늘 컴파일 · 시험된다. 켠 빌드의 화면 동작(배율 · 창마다 · 포커스)은 켤 때 다시 잰다(W8).
 
 ---
 
