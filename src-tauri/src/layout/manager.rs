@@ -1326,7 +1326,8 @@ impl ViewManager {
     /// 2. 목적지 — `Seam` 대상 탭이 없거나 그 창에 묘비([`Self::mark_closed`]) `TabNotFound` · `TabBar` 창이 없거나
     ///    묘비 `WindowNotFound` · `NewWindow` label 에 묘비 `WindowClosed` · 그 label 의 창이 이미 있음
     ///    `WindowExists`.
-    /// 3. `Seam` 대상 = 출처 → `SelfTarget`. `TabBar` 의 대상 창 = 출처 창은 자리 옮기기로 허용한다.
+    /// 3. `Seam` 대상 = 출처 → `SelfTarget`. `TabBar` 의 대상 창 = 출처 창은 자리 옮기기로 허용한다. `TabBar` 의 `after` =
+    ///    출처 → `SelfTarget` · `after` 가 그 창의 탭이 아니면 `TabNotFound(after)`.
     /// 4. `Seam` 기준 슬롯이 대상 탭에 없으면 — 다른 탭에 있으면 `SlotNotInTab`, 어디에도 없으면 `SlotNotFound`.
     /// 5. `Seam` — `share` 가 유한하지 않거나 `tree::RATIO_MIN..=dock::SHARE_MAX` 밖이면 `InvalidShare` · 두 트리가 슬롯 id 를
     ///    함께 가지면 `SlotIdOverlap` · 결과에 새 면적 0 칸이 생기면 `ZeroArea`.
@@ -1460,6 +1461,18 @@ impl ViewManager {
             }
         };
 
+        if let DockTo::TabBar {
+            after: Some(after), ..
+        } = to
+        {
+            if *after == view {
+                return Err(DockError::SelfTarget);
+            }
+            if !self.windows[&target_window].tabs.contains(after) {
+                return Err(DockError::TabNotFound(*after));
+            }
+        }
+
         if let DockTo::Seam { target, anchor, .. } = to {
             if *target == view {
                 return Err(DockError::SelfTarget);
@@ -1511,14 +1524,17 @@ impl ViewManager {
                     layout,
                 }
             }
-            DockTo::TabBar { index, .. } => {
+            DockTo::TabBar { index, after, .. } => {
                 let mut tabs: Vec<ViewId> = self.windows[&target_window]
                     .tabs
                     .iter()
                     .copied()
                     .filter(|v| *v != view)
                     .collect();
-                let at = index.unwrap_or(tabs.len()).min(tabs.len());
+                let at = match after.and_then(|a| tabs.iter().position(|v| *v == a)) {
+                    Some(anchor) => anchor + 1,
+                    None => index.unwrap_or(tabs.len()).min(tabs.len()),
+                };
                 tabs.insert(at, view);
                 DockPlan::TabBar {
                     window: target_window,
@@ -1920,9 +1936,12 @@ pub enum DockTo {
         share: f64,
     },
     /// 창 `window` 의 탭으로 넣는다(PRD R21). `index` = 결과 탭 목록에서의 자리 — 넘치면 맨 뒤 · `None` = 맨 뒤.
+    /// `after` = 그 창의 탭 `after` 바로 뒤 — 있으면 `index` 는 보지 않는다. 자리는 출처를 뺀 목록에서 센다(같은 창에서
+    /// 출처가 `after` 앞에 있어도 바로 뒤다). 마우스는 늘 `None` 이다(TRD S28 §4-1).
     TabBar {
         window: WindowLabel,
         index: Option<usize>,
+        after: Option<ViewId>,
     },
     /// 그 탭만 든 새 창 항목 `label` 을 만든다(PRD R22). `label` 은 부르는 쪽이 이미 연 OS 창의 것이다.
     NewWindow { label: WindowLabel },
@@ -5412,6 +5431,7 @@ mod tests {
         DockTo::TabBar {
             window: window.to_string(),
             index,
+            after: None,
         }
     }
 

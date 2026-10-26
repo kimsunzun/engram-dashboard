@@ -33,7 +33,7 @@
 | 칸에 넣을 에이전트 | `assign`(이름 또는 id) | | |
 
 - 한 줄(무엇을 고르나) 안에서 **정확히 하나**를 준다 — 둘 이상 / 하나도 없음 = `INVALID_ARGUMENT`(필수인 줄만).
-- `slot_of` · `tab_of` · `beside` 의 에이전트가 **여러 칸에 떠 있으면** `CONFLICT` + 후보(그 칸들의 `slot_id` · 탭 · 창) — 다음 호출에 `slot_id` · `beside_slot` · `tab` 으로 바로 고친다.
+- `slot_of` · `beside` 의 에이전트가 **여러 칸에 떠 있으면** `CONFLICT` + 후보(그 칸들의 `slot_id` · 탭 · 창) — 다음 호출에 `slot_id` · `beside_slot` 으로 바로 고친다. `tab_of` · `after_tab_of` 는 **탭 단위**로 본다 — 한 탭 안 여러 칸이면 그 탭으로 풀리고(탭을 고르는 데는 모호함이 없다), 여러 탭에 떠 있을 때만 `CONFLICT` + 후보(`tab` 으로 고친다).
 - 어느 칸에도 없으면 `NOT_FOUND` + 후보(칸에 떠 있는 에이전트 이름 최대 5).
 - `at` · `beside_at` 은 `window` 의 **보이는 탭**에서 푼다(`apply::resolve_spatial` 그대로 · `window` 없으면 main). 낱말이 칸을 못 집으면 `NOT_FOUND`.
 - 창 인자는 ADR-0302 그대로(영속 id · 같은 실행 label · 번호 거부 — `layout/window_arg.rs`).
@@ -79,7 +79,7 @@ TabMoveOk / TabDockOk / TabDetachOk {
 ```
 
 - `DockOutcome` 에 `changed: bool` 을 더한다(지금은 「바뀐 것 없음」이 알림만 빠지는 꼴이라 몸통이 모른다).
-- `DockOutcome.identity == None`(다시 쓴 창이 그 사이 닫힘)이어도 탭은 이미 옮겨졌으므로 **`ok`** — 창 칸은 커밋 뒤 모델에서 다시 읽고, 창이 이미 없으면 `window` · `window_id` 를 빈 문자열 · `number` 0 으로 둔다.
+- 다시 쓴 창(혼자인 팝아웃 재사용)이 그 사이 닫히면 그 탭도 모델에서 사라진다 — 결말을 읽는 잠금에서 대상을 다시 풀어 다르거나 없으면 `CONFLICT`(옮기려던 탭이 없어졌다 · 구현 = `TargetDockError::Moved`). 마우스 경로(`identity == None` → 성공)는 그대로.
 - `emptied` · `main_refilled` 은 `layout` 에 드러나므로 따로 싣지 않는다.
 
 ### 4-5. `layout.get` — 배치 조회 (#[effect(Read)])
@@ -160,7 +160,7 @@ LayoutRow {
 
 - 데몬(agent crate): `agent.resolve` 의 id · 이름 · 중복 · 없음 · 여럿 · 후보 문구 · 답 골든 JSON.
 - 셸 `src-tauri/tests/layout_commands.rs`: 새 명령 넷 + 넓힌 인자 — 가짜 데몬이 골든 JSON 으로 `agent.resolve` 를 답한다 · 표 이름 골든 목록 갱신 · 인자 배타(둘 다 / 없음) · 후보 문구 · 오류 코드 대응(WindowNotFound = CONFLICT 포함) · 선언 `errors` 와 실제 코드 일치 · `Keep`(보이는 탭 · 포커스 불변 — 예외 셋 §11-4) · `tab.detach` 의 `reused` → `changed: false` · `tab.dock` 의 응답 `tab` = 목적 탭 · 이름 왕복 시한 넘김 → 적용 없음 · NewWindow 는 가짜 `WindowHost` 로 headless.
-- 셸 `src-tauri/tests/layout_apply.rs`: `Target` 풀기(잠금 안) · **끼어들기 시험**(이름을 푼 뒤 · 적용 전에 그 에이전트를 다른 칸으로 옮기면 `CONFLICT` 이고 엉뚱한 탭을 안 건드린다) · `after_tab_of` 자리(같은 창에서 원본이 앞 · 뒤) · `LayoutRow` 짓기(창 · 탭 · 칸 순서 · 좌표 · 다중 표시 · 빈 탭).
+- 셸 `src-tauri/tests/layout_apply.rs`: `Target` 풀기(잠금 안) · **끼어들기 시험**(데몬이 이름을 푼 뒤 · 적용 전에 그 에이전트가 옮겨지면 적용 잠금 안에서 **지금 자리**로 풀린다 — 옮겨 간 탭이 움직이고 떠난 탭은 안 건드린다 · 어느 칸에도 없으면 `NOT_FOUND` · 새 창 두 잠금 사이에 옮겨지면 연 창을 거두고 `CONFLICT`) · `after_tab_of` 자리(같은 창에서 원본이 앞 · 뒤) · `LayoutRow` 짓기(창 · 탭 · 칸 순서 · 좌표 · 다중 표시 · 빈 탭).
 - 명령: `cargo test -p engram-dashboard --test layout_commands` · `--test layout_apply` · `--test lib_unit` · `cargo test -p engram-dashboard-agent -- --test-threads=4` · CI 생성물 동기.
 
 ## 10. 구현 단위(파일 겹침으로 가른다 · 단위마다 빌드가 선다)
