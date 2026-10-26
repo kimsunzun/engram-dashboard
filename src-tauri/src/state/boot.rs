@@ -576,6 +576,13 @@ fn report_decode_warning(file: &str, warning: &DecodeWarning) {
             raw = %raw,
             "상태 파일의 창 테마를 모른다 — 전역 테마를 따른다"
         ),
+        DecodeWarning::NumberDropped { window_id, raw } => tracing::warn!(
+            module = "state",
+            file,
+            window_id = %window_id,
+            raw = %raw,
+            "상태 파일의 창 번호를 쓸 수 없다 — 버린다"
+        ),
     }
 }
 
@@ -895,6 +902,7 @@ mod tests {
     fn a_window() -> WindowEntry {
         WindowEntry {
             id: "main".into(),
+            number: Some(1),
             kind: WindowKind::Main(TabStrip {
                 active_tab: uuid::Uuid::nil(),
                 tabs: Vec::new(),

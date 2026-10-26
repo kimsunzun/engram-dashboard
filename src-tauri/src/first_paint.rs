@@ -10,8 +10,11 @@
 //!   넘긴 일이 돌 때 그 차례의 올림이 남아 있으면 빼내고 보인다([`FirstPaintGate::release`]). 넘기기 전에 빼내면, 넘긴
 //!   뒤 · 돌기 전에 메인 스레드의 숨기기(`--hidden` 부팅 setup 끝 · 트레이 숨기기)가 거둘 것을 못 찾고 넘긴 일이 숨긴 창을
 //!   보인다. 보이는 법은 셋이다 — 지어서 올린 창 · 복원 창은 [`crate::state::placement::show_placed`](보일 때 활성화 ·
-//!   미룬 최대화가 있으면 보통 크기 틀 없이 최대화로 보인다), 창 포트가 포커스 없이 새로 지은 창(I30)과 맡긴 예열 창은
-//!   숨긴 채 z 만 맨 위로 올린 뒤 보인다(맡긴 창만 아래 조건에서 활성화한다 — [`new_window_show`]).
+//!   최대화 바람이 참이면 보통 크기 틀 없이 최대화로 보인다), 창 포트가 포커스 없이 새로 지은 창(I30)과 맡긴 예열 창은
+//!   숨긴 채 z 만 맨 위로 올린 뒤 보인다(맡긴 창만 아래 조건에서 활성화한다 — [`new_window_show`]). ★셋 다 보인 뒤 적어 둔
+//!   최대화 바람을 입힌다★(`state::placement::apply_deferred_maximize` — 대기 창에 온 창 상태 명령이 그 바람을 적는다 ·
+//!   TRD S26-window-chrome §5-2). 빠진 길이 있으면 그 바람이 홀로 남아 그 창의 자리 기록이 멈춘다.
+//! - 창 상태 명령은 [`is_held`] 로 그 창이 이 문에 올려져 있는지 본다 — 올려진 창은 드러내지 않는다(그 문이 보인다).
 //! - 런타임 복원 수락의 팝아웃은 보일지가 모델에 넣은 뒤에 정해져 둘로 나눠 올린다 — 지을 때는 알림만 받아 두고
 //!   ([`hold_window_unarmed`]) 보이기로 정하면 보인다([`reveal_held`] — 알림이 이미 왔으면 곧바로, 아니면 알림 · 시한에).
 //!   시한은 보이기로 정한 때부터 잰다 — 정하기 전에 보이면 되돌릴 수도 있는 창이 드러난다. 보이는 법은 지을 때 올린
@@ -48,6 +51,7 @@ use tauri::{AppHandle, Manager, WebviewWindow};
 /// 첫 화면 알림을 기다리는 상한 — 넘으면 알림 없이 보인다. 덮는 것 = 페이지 읽기 · 번들 실행 · 첫 마운트 · 탭 목록과 활성
 /// 탭 레이아웃 조회. 값은 실측이 아니라 「넘으면 깨진 것으로 본다」는 판단이다(개발 서버로 띄운 창은 0.8~1.1 s — 사용자
 /// 관측 2026-10-19). 넘으면 첫 화면 전에 보인다.
+// ADR-0305 — 첫 화면 전 실패
 pub(crate) const FALLBACK_REVEAL: Duration = Duration::from_millis(1500);
 
 /// 보이기를 기다리는 숨긴 창의 명부 — label → 올린 상태. 보이기는 메인 스레드에서 그 차례의 항목을 빼낸 쪽 하나만 한다
@@ -149,13 +153,14 @@ impl FirstPaintGate {
         ticket
     }
 
+    // 이미 올림이 있으면 그대로 둔다 — 덮으면 그 창에 이미 받아 둔 첫 화면 알림을 잃어, 뒤의 `arm` · `arm_adopted` 가
+    //   곧바로 보이지 못하고 시한을 기다린다(트레이 보이기의 다시 걸기 — `spare::SpareState::on_tray_show`).
     fn hold_unarmed(&self, label: &str) {
-        sync::lock(&self.held).insert(
-            label.to_owned(),
-            Hold::Unarmed {
+        sync::lock(&self.held)
+            .entry(label.to_owned())
+            .or_insert(Hold::Unarmed {
                 painted: Painted::Not,
-            },
-        );
+            });
     }
 
     // 명부에 없는 창(거둔 창 포함)도 지금부터 기다린다 — 그 전에 온 알림은 남아 있지 않아 시한에 보인다.
@@ -295,6 +300,10 @@ impl FirstPaintGate {
     fn cancel(&self, label: &str) -> bool {
         sync::lock(&self.held).remove(label).is_some()
     }
+
+    fn is_held(&self, label: &str) -> bool {
+        sync::lock(&self.held).contains_key(label)
+    }
 }
 
 /// 예열 창 풀이 쥐는 첫 화면 문 손잡이(`crate::spare::PaintGate` — I17 · I26). 빌더에서 풀보다 먼저 만들고, 확정 ③ 의
@@ -396,8 +405,9 @@ pub(crate) fn hold_built(window: &WebviewWindow, focused: bool, opened: Instant)
 }
 
 /// 숨긴 채 지은 창의 첫 화면 알림을 받아 두기만 한다 — 보일지는 뒤에 [`reveal_held`](보인다) · [`cancel_hold`](숨긴 채
-/// 둔다)가 정한다. 정할 때까지 알림도 시한도 창을 보이지 않는다. 명부가 등록돼 있지 않으면 아무것도 하지 않는다(그때
-/// [`reveal_held`] 가 곧바로 보인다).
+/// 둔다)가 정한다. 정할 때까지 알림도 시한도 창을 보이지 않는다. ★그 창에 이미 올림이 있으면 그대로 둔다★ — 이미 보이기로
+/// 정한(armed) 올림도 그대로라, 그 창은 이 호출 뒤에도 알림 · 시한에 보인다(받아 둔 알림도 지우지 않는다). 명부가 등록돼
+/// 있지 않으면 아무것도 하지 않는다(그때 [`reveal_held`] 가 곧바로 보인다).
 pub(crate) fn hold_window_unarmed(window: &WebviewWindow) {
     if let Some(gate) = gate(window.app_handle()) {
         gate.hold_unarmed(window.label());
@@ -457,6 +467,13 @@ pub(crate) fn cancel_hold(app: &AppHandle, label: &str) {
             "첫 화면을 기다리던 창의 올림을 거둔다 — 알림 · 시한이 그 창을 보이지 않는다"
         );
     }
+}
+
+/// 그 창이 지금 이 문에 올려져 있나 — 보이기로 정한 올림이든 알림만 받아 두는 올림이든 참이다(둘 다 보일지를 이 문 ·
+/// 그 주인이 정한다). 명부가 등록돼 있지 않으면 거짓. 순간값이다 — 메인 스레드 밖에서 읽으면 읽은 뒤 · 쓰기 전에 그 문의
+/// 보이기가 지나갈 수 있다(TRD S26-window-chrome §5-2 — 창 상태 명령은 메인 스레드 일 하나 안에서 읽는다).
+pub(crate) fn is_held(app: &AppHandle, label: &str) -> bool {
+    gate(app).is_some_and(|gate| gate.is_held(label))
 }
 
 /// 그 창의 첫 화면 알림 — `generation` = 알림이 실은 채택 번호. 올린 창이면 보이고(받아 두기만 하는 창이면 받아 둔다 ·
@@ -630,16 +647,37 @@ fn show_adopted(window: &WebviewWindow, activate: bool) {
     crate::commands::spare::on_adopted_window_shown(app, window.label());
 }
 
-// ⓐ 숨긴 채 z 만 맨 위로 → ⓑ 보이기 → ⓒ 활성화(`activate` 일 때만). ⓐ 를 ⓑ 앞에 둔다 — 오래 숨은 창이 옛 z 자리에서 한
-//   프레임도 보이지 않게(I29). ★ⓑ 는 Tauri `show()` 다★ — 날 Win32 로 보이면 tao 보임 깃발이 거짓으로 남아 트레이
-//   숨기기가 아무것도 하지 않는다(`commands::spare` 의 예열 창 짓기 머리). 포커스 없이 지은 창이라 tao 는 활성화하지
-//   않고 보인다. ⓐ 만으로 남의 앱 전경 창 위에 서는지 · 숨긴 채 올린 z 가 ⓑ 뒤에도 남는지는 [미측 — M22].
+// ⓐ 숨긴 채 z 만 맨 위로 → ⓑ 보이기 · 적어 둔 최대화 바람 입히기 → ⓒ 활성화(`activate` 일 때만). ⓐ 를 ⓑ 앞에 둔다 — 오래
+//   숨은 창이 옛 z 자리에서 한 프레임도 보이지 않게(I29). ★ⓑ 는 Tauri `show()` 다★ — 날 Win32 로 보이면 tao 보임 깃발이
+//   거짓으로 남아 트레이 숨기기가 아무것도 하지 않는다(`commands::spare` 의 예열 창 짓기 머리). 포커스 없이 지은 창이라
+//   tao 는 활성화하지 않고 보인다. ⓐ 만으로 남의 앱 전경 창 위에 서는지 · 숨긴 채 올린 z 가 ⓑ 뒤에도 남는지는
+//   [미측 — M22]. 바람 입히기의 `SW_MAXIMIZE` · `SW_RESTORE` 는 활성화를 겸한다 — 포커스 없이 지은 창에 바람이 있으면
+//   그 입히기가 전경을 옮기는지는 [미측 — TRD S26-window-chrome §10-5 「숨은 창 보이기의 전경」].
 // ADR-0299
 fn raise_and_show(window: &WebviewWindow, activate: bool) {
     let label = window.label();
     let os = window.as_ref().window();
+    raise_without_activation(&os);
+    if let Err(e) = window.show() {
+        tracing::warn!(module = "first_paint", label, error = %e, "숨긴 창을 보이지 못했다");
+        return;
+    }
+    // TRD S26-window-chrome §5-2 「모든 보이기 갈래가 미룬 최대화를 입힌다」
+    crate::state::placement::apply_deferred_maximize(&os);
+    if activate {
+        if let Err(e) = window.set_focus() {
+            tracing::debug!(module = "first_paint", label, error = %e, "보인 창에 포커스를 주지 못했다");
+        }
+    }
+}
+
+/// 활성화 없이 그 창의 z 만 그 띠의 맨 위로 — 숨은 창은 숨은 채다(platform `place_window(.., ZOrder::Top, show: false,
+/// activate: false)` · I29). 실패는 로그로만 남긴다. ★메인 스레드에서 부른다★(platform `window` 머리 「스레드」).
+// ADR-0299
+pub(crate) fn raise_without_activation(window: &tauri::Window) {
+    let label = window.label();
     if let Err(e) = engram_dashboard_platform::window::place_window(
-        &os,
+        window,
         None,
         engram_dashboard_platform::window::ZOrder::Top,
         false,
@@ -648,21 +686,12 @@ fn raise_and_show(window: &WebviewWindow, activate: bool) {
         // 올리기가 돌았는지가 M22 진단 재료다 — 이 OS 에 수단이 없는 것만 조용히 둔다.
         match e {
             engram_dashboard_platform::window::WindowError::Unsupported => {
-                tracing::debug!(module = "first_paint", label, error = %e, "숨긴 창의 z 를 올리지 못하고 보인다");
+                tracing::debug!(module = "first_paint", label, error = %e, "창의 z 를 올리지 못하고 넘어간다");
             }
             engram_dashboard_platform::window::WindowError::NoWindow
             | engram_dashboard_platform::window::WindowError::Os(_) => {
-                tracing::warn!(module = "first_paint", label, error = %e, "숨긴 창의 z 를 올리지 못하고 보인다");
+                tracing::warn!(module = "first_paint", label, error = %e, "창의 z 를 올리지 못하고 넘어간다");
             }
-        }
-    }
-    if let Err(e) = window.show() {
-        tracing::warn!(module = "first_paint", label, error = %e, "숨긴 창을 보이지 못했다");
-        return;
-    }
-    if activate {
-        if let Err(e) = window.set_focus() {
-            tracing::debug!(module = "first_paint", label, error = %e, "보인 창에 포커스를 주지 못했다");
         }
     }
 }
@@ -1049,6 +1078,19 @@ mod tests {
         assert!(matches!(
             gate.arm_adopted("slot-popup-1", 1, true, None),
             Some(Arm::Waiting(_))
+        ));
+    }
+
+    // 거두지 않은 채 다시 건 올림(트레이 보이기의 다시 걸기)은 이미 받아 둔 알림을 지우지 않는다.
+    #[test]
+    fn holding_again_keeps_a_notice_already_received() {
+        let gate = FirstPaintGate::default();
+        gate.hold_unarmed("slot-popup-1");
+        assert_eq!(gate.painted("slot-popup-1", Some(1)), Signal::Recorded);
+        gate.hold_unarmed("slot-popup-1");
+        assert!(matches!(
+            gate.arm_adopted("slot-popup-1", 1, true, None),
+            Some(Arm::Painted(_))
         ));
     }
 

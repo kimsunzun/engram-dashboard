@@ -30,6 +30,14 @@
 //! 슬롯 내용 쓰기는 `write_slot_content` 하나로만, 뷰 지우기는 `remove_view` 하나로만 한다 — 그 둘과
 //! `close_slot` 이 곁표(`unknown_content`) 항목을 거둔다. `tree::set_in_tree` 를 직접 부르거나 `views` 에서 직접
 //! 지우면 사용자가 바꾼 슬롯에 옛 원문이 저장으로 되살아난다(§12 R6). 빈/점유 판정은 `slot_is_free` 하나다.
+//!
+//! ## ★창 번호(TRD S26-window-chrome §2-4 ① · §4-1)★
+//! 창 항목은 `insert_window_entry` 로만 넣고 `retire_window_entry` 로만 뺀다. 번호는 넣기 전에 `numbering` 으로
+//! 셈한다 — 새 팝아웃 = `insert_new_popout` · 부팅 복원 = `from_restored` · 사본 수락 = `adopt_restored`. 번호가
+//! 풀리는 자리는 셋이다 — `retire_window_entry(Os::Gone)` · `release_closing` · `adopt_restored` 의 `closing` 비우기.
+//! 팝아웃을 빼도 OS 창이 남아 있으면(`Os::Alive`) 그 번호를 `closing` 에 쥐었다가 그 창의 `Destroyed`
+//! (`release_closing`)에 푼다(D13 — 그 사이 새 창이 닫히는 창과 같은 번호를 보이지 않는다). `windows` 를 직접
+//! `insert` · `remove` 하면 번호가 겹치거나 샌다.
 
 use std::collections::{HashMap, HashSet};
 
@@ -38,9 +46,12 @@ use uuid::Uuid;
 
 use super::dock::{self, DockAnchor, DockSide, DockTreeError};
 use super::geometry::{self, has_area, PxRect, RectF64};
+use super::numbering;
+use super::tab_name::effective_tab_name;
 use super::tree;
 use super::types::{
-    LayoutNode, SlotContent, SplitDir, SplitRatioOutcome, UiMetrics, View, ViewMeta, ViewSnapshot,
+    LayoutNode, SlotContent, SplitDir, SplitRatioOutcome, TabName, UiMetrics, View, ViewMeta,
+    ViewSnapshot,
 };
 use crate::theme::UiTheme;
 
@@ -48,7 +59,7 @@ pub const MAIN_WINDOW_LABEL: &str = "main";
 
 // View 전역 식별자(창 간 이동·저장복원 후속 확장 위해 전역 UUID — ADR-0057).
 pub type ViewId = Uuid;
-// Tauri 창 label(예: "main", "slot-popup-3").
+// Tauri 창 label(예: "main", "slot-popup-0a1b2c3d-3").
 pub type WindowLabel = String;
 
 // invalid id 는 no-op + 이 에러(부분변경 금지).
@@ -74,6 +85,8 @@ pub enum LayoutError {
     InvalidRatio(String),
     #[error("칸이 너무 작아 더 나눌 수 없음 — 새 경계가 그 칸 안에 표현되지 않는다(부동소수 한계). 이 칸을 품은 분할의 비율을 넓히거나 다른 칸을 나누시오")]
     SplitTooDeep,
+    #[error("탭 이름이 비었다 — 빈 글자 · 공백뿐인 이름은 받지 않는다")]
+    EmptyName,
 }
 
 /// `ViewManager::set_split_ratio` 의 결과 — `ratio` 는 셸이 지금 가진 값이다(`Applied` 면 방금 쓴 값,
@@ -233,36 +246,73 @@ pub struct WindowTabs {
     // ADR-0227
     pub metrics: Option<UiMetrics>,
     /// 영속 신원 — main 은 `main`, 팝아웃은 그 창 항목이 처음 생길 때 뽑은 UUID(하이픈 소문자). 저장 · 복원은 이
-    /// 값을 쓴다. 런타임 label(맵 키)은 한 부팅 안에서만의 신원이다 — 팝아웃 label 은 실행마다 1 부터 다시
-    /// 센다(TRD S21-storage §6-3).
+    /// 값을 쓴다. 런타임 label(맵 키)은 한 부팅 안에서만의 신원이다 — 팝아웃 label 은 실행마다 새 실행 표식으로 1
+    /// 부터 다시 센다(TRD S21-storage §6-3 · S26-window-chrome §4-5). 버스 · invoke 의 창 인자는 이 값도 받는다
+    /// (`super::window_arg`).
     // ADR-0167
     pub window_id: String,
+    /// 창 번호 — main = 1, 팝아웃 = 2 이상이고 살아 있는 창 · 닫히는 창 사이에서 겹치지 않는다(TRD S26-window-chrome
+    /// §4-1 · PRD D1 · D2). 창 항목이 모델에 있는 동안 바뀌지 않는다.
+    pub number: u32,
     pub attrs: WindowAttrs,
     pub(crate) placement_memo: PlacementMemo,
 }
 
 impl WindowTabs {
     // 새 창 엔트리는 전부 여기서 만든다 — 측정값은 그 창 웹뷰가 보고할 때까지 비어 있어야 한다.
-    fn new(window_id: String, attrs: WindowAttrs, tabs: Vec<ViewId>, active: ViewId) -> Self {
+    fn new(
+        window_id: String,
+        number: u32,
+        attrs: WindowAttrs,
+        tabs: Vec<ViewId>,
+        active: ViewId,
+    ) -> Self {
         WindowTabs {
             tabs,
             active,
             canvas: None,
             metrics: None,
             window_id,
+            number,
             attrs,
             placement_memo: PlacementMemo::default(),
         }
     }
 
-    fn new_popout(view: ViewId) -> Self {
+    fn new_main(attrs: WindowAttrs, tabs: Vec<ViewId>, active: ViewId) -> Self {
+        Self::new(
+            MAIN_WINDOW_LABEL.to_string(),
+            numbering::MAIN_WINDOW_NUMBER,
+            attrs,
+            tabs,
+            active,
+        )
+    }
+
+    fn new_popout(number: u32, view: ViewId) -> Self {
         Self::new(
             Uuid::new_v4().to_string(),
+            number,
             WindowAttrs::default(),
             vec![view],
             view,
         )
     }
+}
+
+// 창 항목을 뺄 때 그 OS 창이 아직 있나 — 번호를 `closing` 에 쥘지 곧바로 풀지를 가른다(TRD S26-window-chrome §4-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Os {
+    Alive,
+    Gone,
+}
+
+// 모델에서 빠졌고 OS 창은 아직 `Destroyed` 를 내지 않은 팝아웃 하나(TRD S26-window-chrome §3-1 · §4-1).
+#[derive(Debug, Clone)]
+struct Closing {
+    // 0탭 자가닫힘이 영속 id 로 이 표를 찾는다(TRD §5-5 · [`ViewManager::closing_label_for`]).
+    window_id: String,
+    number: u32,
 }
 
 /// 영속에서 되살린 창 하나 — 메모리 모양. 영속 모양의 해석 · 수리는 `state::convert` 가 끝낸 뒤 넘긴다.
@@ -273,12 +323,16 @@ pub(crate) struct RestoredWindow {
     pub tabs: Vec<View>,
     /// `tabs` 가 있으면 그 안의 하나여야 한다.
     pub active: Option<ViewId>,
+    /// 저장된 번호(너그러운 읽기 뒤 — `None` = 없거나 못 쓰는 값). 팝아웃 것만 본다 — main 은 늘 1 이다(D3).
+    pub number: Option<u32>,
 }
 
 // 창별 탭 조회 결과(list_tabs 반환 / window:tabs-updated 페이로드 원천). ADR-0057.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowTabsSnapshot {
     pub label: WindowLabel,
+    pub window_id: String,
+    pub number: u32,
     pub tabs: Vec<ViewMeta>,
     pub active: ViewId,
     pub version: u64,
@@ -301,6 +355,14 @@ pub struct ViewManager {
     unknown_content: HashMap<ViewId, HashMap<Uuid, Map<String, Value>>>,
     // 닫힌 창 label 의 묘비. 팝아웃 label 은 한 부팅 안에서 다시 쓰이지 않으므로 늘기만 한다. 저장하지 않는다.
     closed_labels: HashSet<WindowLabel>,
+    // 닫히는 팝아웃(label → 그 창) — 저장하지 않는다. 그 창의 `Destroyed` 가 끝내 안 오면 번호가 실행 끝까지 잡힌다
+    // (TRD S26-window-chrome §4-1 W7 — 받아들임).
+    closing: HashMap<WindowLabel, Closing>,
+    // 에이전트 id → 표시 이름 — 데몬 `AgentListUpdated` 의 이름을 받아 쥔 파생 캐시(TRD S26-window-chrome §4-3)다. 저장하지
+    // 않는다. 탭 자동 이름이 이 표를 읽는다 — 항목이 없는 에이전트는 「에이전트」다. 운영에서 쓰는 길 =
+    // `update_agent_names`(데몬 목록 — 덮어쓴다) · `seed_agent_names`(부팅 · 사본 수락 — 빈 칸만) 둘뿐이고, 항목을 지우는
+    // 길은 없다.
+    agent_names: HashMap<String, String>,
 }
 
 impl Default for ViewManager {
@@ -314,16 +376,11 @@ impl ViewManager {
     // (`set_slot_content`)로 사용자가 놓는다. // ADR-0222
     pub fn new() -> Self {
         let mut mgr = Self::blank();
-        let v0 = mgr.make_view("View 1".to_string());
+        let v0 = mgr.make_view();
         mgr.view_owner.insert(v0, MAIN_WINDOW_LABEL.to_string());
-        mgr.windows.insert(
+        mgr.insert_window_entry(
             MAIN_WINDOW_LABEL.to_string(),
-            WindowTabs::new(
-                MAIN_WINDOW_LABEL.to_string(),
-                WindowAttrs::default(),
-                vec![v0],
-                v0,
-            ),
+            WindowTabs::new_main(WindowAttrs::default(), vec![v0], v0),
         );
         mgr
     }
@@ -331,9 +388,12 @@ impl ViewManager {
     /// 되살린 창들로 새 모델을 세운다 — `version` · `attrs_rev` 는 0, 곁표는 비었다(모르는 내용은 부르는 쪽이
     /// `set_unknown_content` 로 세운다). 각 View 의 포커스는 트리 첫 슬롯으로 고친다(`fixup_focus` 와 같은 규칙).
     ///
-    /// main 의 탭이 없으면 빈 탭 하나(`View 1`)를 세운다(불변식 4). 그 밖에 불변식 1–4 를 세울 수 없는 입력은 `Err`
+    /// main 의 탭이 없으면 빈 탭 하나를 세운다(불변식 4). 그 밖에 불변식 1–4 를 세울 수 없는 입력은 `Err`
     /// 이고 아무것도 만들지 않는다 — 탭 없는 팝아웃 · 탭 밖이거나 없는 활성 탭 · 겹친 View id · `main` 이거나 겹친
     /// 팝아웃 label. 팝아웃 항목 = (label, 영속 id, 창).
+    ///
+    /// 번호 — main = 1, 팝아웃 = 저장 번호를 이 순서대로 [`numbering::resolve_saved`] 로 고친 것(TRD S26-window-chrome
+    /// §3-4 · D3). 고쳐진 창은 `RestoredWindow::number` 와 결과 창의 번호를 견주어 가른다.
     pub(crate) fn from_restored(
         main: RestoredWindow,
         popouts: Vec<(WindowLabel, String, RestoredWindow)>,
@@ -343,19 +403,21 @@ impl ViewManager {
             attrs,
             tabs,
             active,
+            number: _,
         } = main;
         let main_window = if tabs.is_empty() {
-            let v0 = mgr.make_view("View 1".to_string());
+            let v0 = mgr.make_view();
             mgr.view_owner.insert(v0, MAIN_WINDOW_LABEL.to_string());
-            WindowTabs::new(MAIN_WINDOW_LABEL.to_string(), attrs, vec![v0], v0)
+            WindowTabs::new_main(attrs, vec![v0], v0)
         } else {
             let (tabs, active) = mgr.adopt_tabs(MAIN_WINDOW_LABEL, tabs, active)?;
-            WindowTabs::new(MAIN_WINDOW_LABEL.to_string(), attrs, tabs, active)
+            WindowTabs::new_main(attrs, tabs, active)
         };
-        mgr.windows
-            .insert(MAIN_WINDOW_LABEL.to_string(), main_window);
+        mgr.insert_window_entry(MAIN_WINDOW_LABEL.to_string(), main_window);
 
-        for (label, window_id, restored) in popouts {
+        let saved: Vec<Option<u32>> = popouts.iter().map(|(_, _, w)| w.number).collect();
+        let numbers = numbering::resolve_saved(&saved, [numbering::MAIN_WINDOW_NUMBER]);
+        for ((label, window_id, restored), number) in popouts.into_iter().zip(numbers) {
             if mgr.windows.contains_key(&label) {
                 return Err(format!("팝아웃 label {label} 이 겹친다"));
             }
@@ -363,13 +425,16 @@ impl ViewManager {
                 attrs,
                 tabs,
                 active,
+                number: _,
             } = restored;
             if tabs.is_empty() {
                 return Err(format!("팝아웃 {window_id} 에 탭이 없다"));
             }
             let (tabs, active) = mgr.adopt_tabs(&label, tabs, active)?;
-            mgr.windows
-                .insert(label, WindowTabs::new(window_id, attrs, tabs, active));
+            mgr.insert_window_entry(
+                label,
+                WindowTabs::new(window_id, number, attrs, tabs, active),
+            );
         }
         Ok(mgr)
     }
@@ -384,7 +449,83 @@ impl ViewManager {
             attrs_rev: 0,
             unknown_content: HashMap::new(),
             closed_labels: HashSet::new(),
+            closing: HashMap::new(),
+            agent_names: HashMap::new(),
         }
+    }
+
+    // ── 창 항목 넣고 빼기(번호 — TRD S26-window-chrome §2-4 ① · §4-1) ────────────
+
+    // 지금 쥔 번호 — 살아 있는 창과 닫히는 창.
+    fn held_numbers(&self) -> Vec<u32> {
+        self.windows
+            .values()
+            .map(|w| w.number)
+            .chain(self.closing.values().map(|c| c.number))
+            .collect()
+    }
+
+    // 창 항목을 넣는 유일한 자리. 번호는 `entry` 가 이미 쥐었다(새 팝아웃 = [`Self::insert_new_popout`]).
+    // ADR-0300 — 창 번호
+    fn insert_window_entry(&mut self, label: WindowLabel, entry: WindowTabs) {
+        // 운영 팝아웃 label 은 다시 쓰이지 않는다(`PopupCounter`) — 닫히는 창의 label 로 넣으면 그 label 의 번호 · 영속
+        //   id 가 둘이 된다.
+        debug_assert!(
+            !self.closing.contains_key(&label),
+            "닫히는 창 {label} 의 label 로 창 항목을 넣는다"
+        );
+        let replaced = self.windows.insert(label, entry);
+        debug_assert!(replaced.is_none(), "창 항목을 덮어썼다");
+    }
+
+    // 새 팝아웃 항목 — 번호 = 살아 있는 창 · 닫히는 창이 쥐지 않은 가장 작은 것(D2 · D13).
+    fn insert_new_popout(&mut self, label: &str, view: ViewId) {
+        let number = numbering::smallest_free(self.held_numbers());
+        self.insert_window_entry(label.to_string(), WindowTabs::new_popout(number, view));
+    }
+
+    // 창 항목을 빼는 유일한 자리. `Os::Alive` 면 번호를 그 OS 창의 `Destroyed`([`Self::release_closing`])까지 `closing`
+    // 에 쥐고, `Os::Gone` 이면 곧바로 푼다. View · `view_owner` · version 은 부르는 쪽 몫이다. main 은 빼지 않는다
+    // (불변식 4).
+    // ADR-0300 — 창 번호
+    fn retire_window_entry(&mut self, label: &str, os: Os) -> Option<WindowTabs> {
+        debug_assert_ne!(label, MAIN_WINDOW_LABEL, "main 창 항목을 뺀다");
+        let entry = self.windows.remove(label)?;
+        if os == Os::Alive {
+            self.closing.insert(
+                label.to_string(),
+                Closing {
+                    window_id: entry.window_id.clone(),
+                    number: entry.number,
+                },
+            );
+        }
+        Some(entry)
+    }
+
+    /// 닫히는 창 `label` 의 번호를 푼다 — 그 OS 창의 `Destroyed` 가 부른다. 닫히는 창이 아니면(예열 창 · 이미 푼 창 ·
+    /// 사본 수락이 푼 옛 창 · 모델에 있는 창) 무동작 `false` — label 로만 찾으므로 살아 있는 창의 번호는 건드리지
+    /// 않는다. `version` 은 그대로다(번호를 저장 · 알림에 싣는 창 항목이 바뀌지 않는다).
+    // ADR-0300 — 창 번호
+    pub fn release_closing(&mut self, label: &str) -> bool {
+        self.closing.remove(label).is_some()
+    }
+
+    /// 닫히는 창 중 영속 id 가 `window_id` 인 것의 label — 철자가 같은 것 먼저, 없으면 UUID 값이 같은 것(창 인자
+    /// 해석기와 같은 규칙 — `super::window_arg::resolve`). 없으면 `None`. 0탭 자가닫힘이 쓴다(TRD S26-window-chrome §5-5).
+    pub fn closing_label_for(&self, window_id: &str) -> Option<WindowLabel> {
+        let by_spelling = self
+            .closing
+            .iter()
+            .find(|(_, closing)| closing.window_id == window_id);
+        if let Some((label, _)) = by_spelling {
+            return Some(label.clone());
+        }
+        let id = Uuid::parse_str(window_id).ok()?;
+        self.closing
+            .iter()
+            .find(|(_, closing)| Uuid::parse_str(&closing.window_id).ok() == Some(id))
+            .map(|(label, _)| label.clone())
     }
 
     // 창 `label` 의 탭을 들인다 — 소유 쌍(불변식 1·2)과 활성 검사(불변식 3). 돌려주는 것 = (탭 순서, 활성 탭).
@@ -428,12 +569,15 @@ impl ViewManager {
             .filter_map(|vid| {
                 self.views.get(vid).map(|v| ViewMeta {
                     id: v.id,
-                    name: v.name.clone(),
+                    name: effective_tab_name(self, v),
+                    named: v.name.is_named(),
                 })
             })
             .collect();
         Ok(WindowTabsSnapshot {
             label: label.to_string(),
+            window_id: wt.window_id.clone(),
+            number: wt.number,
             tabs,
             active: wt.active,
             version: self.version,
@@ -501,6 +645,60 @@ impl ViewManager {
         slot_id: Uuid,
     ) -> Option<&Map<String, Value>> {
         self.unknown_content.get(&view_id)?.get(&slot_id)
+    }
+
+    /// 에이전트 `agent_id` 의 표시 이름 — 이름 장부에 없으면 `None`.
+    pub(super) fn agent_name(&self, agent_id: &str) -> Option<&str> {
+        self.agent_names.get(agent_id).map(String::as_str)
+    }
+
+    /// 이름 장부에 `names`(에이전트 id, 표시 이름)를 덮어쓴다 — 지우지는 않는다: 목록에서 빠진(죽은) 에이전트의 슬롯도
+    /// 마지막 이름을 쓴다(TRD S26-window-chrome §4-3). 돌려주는 것 = 자동 이름 탭의 보이는 이름이 실제로 바뀐 창의
+    /// label(정렬 · 겹침 없음). 하나라도 있으면 `version` 을 올리고, 없으면 `version` 도 그대로다 — 웹은 같은 판
+    /// 번호의 탭 알림을 버리고 기록기는 판이 바뀌어야 파일의 탭 이름을 다시 쓴다.
+    pub(crate) fn update_agent_names(&mut self, names: &[(String, String)]) -> Vec<WindowLabel> {
+        let before: Vec<(WindowLabel, ViewId, String)> = self
+            .windows
+            .iter()
+            .flat_map(|(label, w)| w.tabs.iter().map(move |view| (label, view)))
+            .filter_map(|(label, view)| {
+                let v = self.views.get(view)?;
+                (!v.name.is_named()).then(|| (label.clone(), v.id, effective_tab_name(self, v)))
+            })
+            .collect();
+        for (agent_id, name) in names {
+            self.agent_names.insert(agent_id.clone(), name.clone());
+        }
+        let mut changed: Vec<WindowLabel> = before
+            .into_iter()
+            .filter(|(_, view, old)| {
+                self.views
+                    .get(view)
+                    .is_some_and(|v| effective_tab_name(self, v) != *old)
+            })
+            .map(|(label, _, _)| label)
+            .collect();
+        changed.sort();
+        changed.dedup();
+        if !changed.is_empty() {
+            self.bump_version();
+        }
+        changed
+    }
+
+    /// 이름 장부의 빈 칸만 `names` 로 채운다 — 이미 있는 항목은 그대로 둔다(데몬 목록에서 온 값이 저장 파일의 값보다
+    /// 새롭다). `version` 은 건드리지 않는다. 부팅 · 사본 수락의 시드 몫이다(TRD S26-window-chrome §4-3) — 어떤 이름을
+    /// 시드로 쓸지는 부르는 쪽이 고른다(`state::convert`).
+    pub(crate) fn seed_agent_names(&mut self, names: impl IntoIterator<Item = (String, String)>) {
+        for (agent_id, name) in names {
+            self.agent_names.entry(agent_id).or_insert(name);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn put_agent_name(&mut self, agent_id: &str, name: &str) {
+        self.agent_names
+            .insert(agent_id.to_owned(), name.to_owned());
     }
 
     // 트리 전위 순 — 표 순회 순서(HashMap)를 스냅숏에 새지 않게 트리를 따라 거른다.
@@ -608,8 +806,8 @@ impl ViewManager {
         self.unknown_content.remove(&view);
     }
 
-    // 소유/창 배정은 호출자.
-    fn make_view(&mut self, name: String) -> ViewId {
+    // 소유/창 배정은 호출자. 이름은 자동(TRD S26-window-chrome §3-1) — 기본 이름을 지어 넣지 않는다.
+    fn make_view(&mut self) -> ViewId {
         let id = Uuid::new_v4();
         let first_slot = LayoutNode::new_empty_slot();
         let focus = tree::first_slot_id(&first_slot);
@@ -617,7 +815,7 @@ impl ViewManager {
             id,
             View {
                 id,
-                name,
+                name: TabName::Auto,
                 layout: first_slot,
                 focused_slot_id: Some(focus),
             },
@@ -627,15 +825,18 @@ impl ViewManager {
 
     // ── mutation ────────────────────────────────────────────────────────────
 
+    /// `name` 이 `Some` 이면 그 이름을 정한 탭 · `None` 이면 자동 이름 탭. 빈 글자 · 공백뿐인 이름은 `EmptyName`
+    /// 이고 아무것도 만들지 않는다.
     pub fn create_tab(&mut self, label: &str, name: Option<String>) -> Result<ViewId, LayoutError> {
         if !self.windows.contains_key(label) {
             return Err(LayoutError::WindowNotFound(label.to_string()));
         }
-        let default_name = {
-            let count = self.windows.get(label).map(|w| w.tabs.len()).unwrap_or(0);
-            format!("View {}", count + 1)
+        let name = match name {
+            Some(name) => TabName::named(name).ok_or(LayoutError::EmptyName)?,
+            None => TabName::Auto,
         };
-        let id = self.make_view(name.unwrap_or(default_name));
+        let id = self.make_view();
+        self.view_mut(id).expect("방금 만든 View").name = name;
         // 쌍 갱신(불변식 1·2). // ADR-0057
         self.view_owner.insert(id, label.to_string());
         let wt = self.windows.get_mut(label).expect("존재 확인됨");
@@ -656,10 +857,9 @@ impl ViewManager {
         if self.windows.contains_key(label) {
             return Err(LayoutError::WindowNotFound(label.to_string()));
         }
-        let id = self.make_view("View 1".to_string());
+        let id = self.make_view();
         self.view_owner.insert(id, label.to_string());
-        self.windows
-            .insert(label.to_string(), WindowTabs::new_popout(id));
+        self.insert_new_popout(label, id);
         self.bump_version();
         Ok(id)
     }
@@ -749,16 +949,17 @@ impl ViewManager {
         } else if label == MAIN_WINDOW_LABEL {
             Pulled::MainEmptied
         } else {
-            self.windows.remove(label);
+            // OS 창은 부르는 쪽이 닫는다 — 그 `Destroyed` 까지 번호를 쥔다.
+            self.retire_window_entry(label, Os::Alive);
             Pulled::PopoutRemoved
         }
     }
 
-    // 빈 main 에 빈 탭 「View 1」 하나를 세워 활성으로 두고 그 id 를 돌려준다 — `pull_tab` 이 `MainEmptied` 를 낸
+    // 빈 main 에 빈 탭 하나를 세워 활성으로 두고 그 id 를 돌려준다 — `pull_tab` 이 `MainEmptied` 를 낸
     // 그 연산(같은 락) 안에서 불러야 빈 main 이 밖에 보이지 않는다(불변식 4). version 은 부르는 쪽 몫이다.
     // ADR-0057
     fn refill_main(&mut self) -> ViewId {
-        let id = self.make_view("View 1".to_string());
+        let id = self.make_view();
         // 쌍 갱신(불변식 1·2). // ADR-0057
         self.view_owner.insert(id, MAIN_WINDOW_LABEL.to_string());
         let wt = self
@@ -771,15 +972,27 @@ impl ViewManager {
     }
 
     // 창 `label` 을 통째로 닫음(모든 탭 View 드롭 + windows 엔트리 제거). 반환 = 드롭된 View id 들
-    // (command 레이어가 rebuild 후 Unsubscribe 델타에 반영).
-    // 팝업 창 Destroyed 멀티탭 정리(§5-2/G1)의 코어 경로. // ADR-0057
+    // (command 레이어가 rebuild 후 Unsubscribe 델타에 반영). 그 OS 창은 아직 있다고 보고 번호를 그 `Destroyed` 까지
+    // 쥔다 — OS 창이 이미 없으면 [`Self::drop_window_gone`].
+    // 팝업 창 멀티탭 정리(§5-2/G1)의 코어 경로. // ADR-0057
     pub fn close_window(&mut self, label: &str) -> Result<Vec<ViewId>, LayoutError> {
+        self.remove_window(label, Os::Alive)
+    }
+
+    /// [`Self::close_window`] 와 같되 그 OS 창이 이미 없다 — 번호를 곧바로 푼다. 그 창의 `Destroyed` 가 이미 지나갔거나
+    /// 오지 않는 자리(못 연 부팅 복원 팝아웃 · 바꾸기 전에 사라진 사본 창 · `Destroyed` 때 아직 모델에 있던 창)가
+    /// 부른다(TRD S26-window-chrome §4-1). OS 창이 남아 있는데 부르면 그 창이 닫히기 전에 새 창이 같은 번호를 받는다.
+    // ADR-0300 — 창 번호
+    pub fn drop_window_gone(&mut self, label: &str) -> Result<Vec<ViewId>, LayoutError> {
+        self.remove_window(label, Os::Gone)
+    }
+
+    fn remove_window(&mut self, label: &str, os: Os) -> Result<Vec<ViewId>, LayoutError> {
         if label == MAIN_WINDOW_LABEL {
             return Err(LayoutError::MainNotClosable);
         }
         let wt = self
-            .windows
-            .remove(label)
+            .retire_window_entry(label, os)
             .ok_or_else(|| LayoutError::WindowNotFound(label.to_string()))?;
         // 이 창의 모든 탭 View 를 드롭(불변식 1 쌍 갱신 — tabs 전부 순회). // ADR-0057
         let dropped = wt.tabs.clone();
@@ -941,12 +1154,12 @@ impl ViewManager {
         Ok(())
     }
 
-    // view-id-키(name 은 View 속성 — split_slot 과 동형으로 소속 창은 view_owner 파생).
-    // ★이름 정규화는 프론트 경계 몫★: 여기선 받은 문자열을 그대로 저장한다(trim/공백거부는 사람 UI·
-    // LLM command 어댑터가 invoke 전에 처리).
+    /// 탭 이름을 정한다 — 지금 보이는 자동 이름과 같은 글자여도 정한 이름이 된다(그 뒤 슬롯 · 에이전트 이름을 따라가지
+    /// 않는다 · TRD S26-window-chrome §3-1). 빈 글자 · 공백뿐인 이름은 `EmptyName` 이고 무변경이다(AC36). 그 밖의 글자는
+    /// 다듬지 않고 그대로 쥔다 — 다듬기는 경계(사람 UI · 버스 어댑터) 몫이다.
     pub fn rename_tab(&mut self, view_id: Uuid, name: String) -> Result<(), LayoutError> {
         let v = self.view_mut(view_id)?;
-        v.name = name;
+        v.name = TabName::named(name).ok_or(LayoutError::EmptyName)?;
         self.bump_version();
         Ok(())
     }
@@ -1033,11 +1246,10 @@ impl ViewManager {
         &mut self,
         src_view: ViewId,
         src_slot: Uuid,
-        name: String,
     ) -> Result<(ViewId, SlotContent), LayoutError> {
         let content = self.slot_content(src_view, src_slot)?;
         let carried = self.unknown_content(src_view, src_slot).cloned();
-        let id = self.make_view(name);
+        let id = self.make_view();
         let slot = {
             let v = self.views.get(&id).expect("방금 만든 View");
             tree::first_slot_id(&v.layout)
@@ -1094,8 +1306,7 @@ impl ViewManager {
             return Err(LayoutError::ViewNotFound(view));
         }
         self.view_owner.insert(view, label.to_string());
-        self.windows
-            .insert(label.to_string(), WindowTabs::new_popout(view));
+        self.insert_new_popout(label, view);
         self.bump_version();
         Ok(())
     }
@@ -1106,7 +1317,7 @@ impl ViewManager {
     /// 곁표 옮기기가 이 한 번에 일어나고 `version` 이 한 번 오른다 — 단 같은 창 같은 자리의 `TabBar` 는 무변경
     /// `Ok`(`version` 그대로)이고, 그중 `Reveal` 인데 그 탭이 안 보이던 탭이면 보이게만 한다(`version` +1).
     /// 비어 지운 팝아웃은 `Docked::emptied` 로 돌려준다(그 OS 창은 부르는 쪽 몫). main 의 마지막 탭이 다른 창 · 새
-    /// 창으로 떠나면 같은 한 번 안에서 main 에 빈 탭 「View 1」 이 생겨 main 의 활성이 되고 그 id 가
+    /// 창으로 떠나면 같은 한 번 안에서 main 에 빈 탭이 생겨 main 의 활성이 되고 그 id 가
     /// `Docked::main_refilled` 다(PRD R14 · ADR-0057 불변식 4 — 탭을 닫을 때와 같은 규칙). `Err` 면 아무것도 바뀌지
     /// 않는다(`version` 포함).
     ///
@@ -1203,8 +1414,7 @@ impl ViewManager {
                     self.pull_docked_tab(&source_window, view, mv.successor_in(&source_window));
                 // 쌍 갱신(불변식 1·2). // ADR-0057
                 self.view_owner.insert(view, label.clone());
-                self.windows
-                    .insert(label.clone(), WindowTabs::new_popout(view));
+                self.insert_new_popout(&label, view);
                 (label, pulled)
             }
         };
@@ -1347,7 +1557,9 @@ impl ViewManager {
     /// 창 `label` 에 묘비를 단다 — 그 뒤 그 label 로 새 창을 붙이는 [`Self::dock`](`NewWindow`) ·
     /// [`Self::attach_view_as_new_window`] · [`Self::create_window`] 는 `WindowClosed`, 그 창으로의 `Seam` · `TabBar` 는
     /// 「없음」(`TabNotFound` · `WindowNotFound`)으로 무변경이다. 모델의 창 항목 · `version` 은 손대지 않는다(지우는 것은 부르는 쪽 몫 —
-    /// `commands::popout::drop_window_in_model` 이 창을 지우는 같은 락 안에서 부른다).
+    /// `commands::popout::drop_window_in_model` 이 창을 지우는 같은 락 안에서, 모델 밖 창의 `window.close` 가 그 OS 창을
+    /// 거두기 전에 부른다 — `window_ctl::close`).
+    // ADR-0302 — 창 상태 명령
     pub(crate) fn mark_closed(&mut self, label: &str) {
         self.closed_labels.insert(label.to_string());
     }
@@ -1397,6 +1609,11 @@ impl ViewManager {
     ///   붙이거나 거둔다.
     /// - `Err` 면 아무것도 바뀌지 않았다: `restored` 에 main 이 없다 · 팝아웃 label 이 지금 모델의 창과 겹친다 ·
     ///   View id 가 남는 View 와 겹친다.
+    /// - 번호(TRD S26-window-chrome §4-1 · §5-6) — 옛 팝아웃(닫히는 창 포함)의 번호를 다 풀고, `restored` 팝아웃의
+    ///   번호(그 모델이 세운 것)를 지금 쥔 번호(남는 main 의 1)에 맞춰 [`numbering::resolve_saved`] 로 다시 고친다 —
+    ///   번호 오름차순이 그 순서다. 옛 팝아웃의 늦은 `Destroyed` 는 [`Self::release_closing`] 이 label 로만 찾아 무동작이다.
+    /// - 이름 장부 — `restored` 의 장부(저장 파일에서 뜬 시드)는 지금 장부의 빈 칸에만 든다([`Self::seed_agent_names`] —
+    ///   지금 값은 데몬 목록에서 왔다).
     pub(crate) fn adopt_restored(
         &mut self,
         restored: ViewManager,
@@ -1409,6 +1626,8 @@ impl ViewManager {
             attrs_rev: _,
             unknown_content,
             closed_labels: _,
+            closing: _,
+            agent_names: seeds,
         } = restored;
         let main = windows
             .remove(MAIN_WINDOW_LABEL)
@@ -1441,9 +1660,11 @@ impl ViewManager {
             .cloned()
             .collect();
         removed.sort();
+        // 옛 OS 창은 아직 있지만(부르는 쪽이 사본 창을 보인 뒤 거둔다) 그 번호는 지금 푼다 — 사본 창이 쓴다.
         for label in &removed {
-            self.windows.remove(label);
+            self.retire_window_entry(label, Os::Gone);
         }
+        self.closing.clear();
         let live = self
             .windows
             .get_mut(MAIN_WINDOW_LABEL)
@@ -1455,7 +1676,15 @@ impl ViewManager {
         self.views.extend(views);
         self.view_owner.extend(view_owner);
         self.unknown_content.extend(unknown_content);
-        self.windows.extend(windows);
+        self.seed_agent_names(seeds);
+        let mut popouts: Vec<(WindowLabel, WindowTabs)> = windows.into_iter().collect();
+        popouts.sort_by_key(|(_, w)| w.number);
+        let saved: Vec<Option<u32>> = popouts.iter().map(|(_, w)| Some(w.number)).collect();
+        let numbers = numbering::resolve_saved(&saved, self.held_numbers());
+        for ((label, mut window), number) in popouts.into_iter().zip(numbers) {
+            window.number = number;
+            self.insert_window_entry(label, window);
+        }
         self.bump_version();
         self.attrs_rev += 1;
         Ok(removed)
@@ -1483,6 +1712,20 @@ impl ViewManager {
         theme: Option<UiTheme>,
     ) -> Result<(), LayoutError> {
         self.update_attrs(label, |attrs| attrs.set_theme(theme))
+    }
+
+    /// 최대화 표식만 적는다 — `bounds` 는 그대로다. 보이지 않는 창의 최대화를 미루거나 거둘 때 쓴다(TRD S26-window-chrome
+    /// §5-2 — 그 창이 보이며 입혀지면 자리 기록이 같은 값을 다시 적는다).
+    pub fn set_window_maximized(
+        &mut self,
+        label: &str,
+        maximized: bool,
+    ) -> Result<(), LayoutError> {
+        self.update_attrs(label, |attrs| {
+            let changed = attrs.maximized != maximized;
+            attrs.maximized = maximized;
+            changed
+        })
     }
 
     /// `Moved` · `Resized` 때 읽은 게터 한 벌을 적는다 — 규칙은 [`WindowAttrs::observe`].
@@ -1788,6 +2031,55 @@ enum DockPlan {
     },
 }
 
+// 시험 몫 — 셸 패키지에 시험 feature 를 두지 않으므로 `cfg(test)` 로만 연다(TRD S26-window-chrome §2-3).
+#[cfg(test)]
+impl ViewManager {
+    /// 닫히는 창이 쥔 번호(오름차순).
+    pub(crate) fn closing_numbers(&self) -> Vec<u32> {
+        let mut numbers: Vec<u32> = self.closing.values().map(|c| c.number).collect();
+        numbers.sort_unstable();
+        numbers
+    }
+
+    /// 창 번호 불변식 — main = 1 · 팝아웃 ≥ 2 · 살아 있는 창과 닫히는 창을 통틀어 같은 번호가 없다 · 닫히는 창의 label ·
+    /// 영속 id 는 모델의 창과 겹치지 않는다. 창 항목을 넣고 빼는 쓰기 시험 끝에 부른다(§10-1).
+    pub(crate) fn assert_number_invariants(&self) {
+        let main = self.windows.get(MAIN_WINDOW_LABEL).expect("main 창");
+        assert_eq!(main.number, numbering::MAIN_WINDOW_NUMBER, "main 은 1");
+        let mut seen = HashSet::new();
+        for (label, w) in &self.windows {
+            if label != MAIN_WINDOW_LABEL {
+                assert!(
+                    w.number > numbering::MAIN_WINDOW_NUMBER,
+                    "팝아웃 {label} 의 번호 {}",
+                    w.number
+                );
+            }
+            assert!(seen.insert(w.number), "번호 {} 를 두 창이 쥐었다", w.number);
+        }
+        for (label, c) in &self.closing {
+            assert!(
+                !self.windows.contains_key(label),
+                "닫히는 창 {label} 이 모델에 있다"
+            );
+            assert!(
+                self.windows.values().all(|w| w.window_id != c.window_id),
+                "닫히는 창 {label} 의 영속 id 가 모델에 있다"
+            );
+            assert!(
+                c.number > numbering::MAIN_WINDOW_NUMBER,
+                "닫히는 창 {label} 의 번호 {}",
+                c.number
+            );
+            assert!(
+                seen.insert(c.number),
+                "닫히는 창 {label} 의 번호 {} 를 다른 창도 쥐었다",
+                c.number
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1861,6 +2153,7 @@ mod tests {
                 );
             }
         }
+        mgr.assert_number_invariants();
     }
 
     fn raw(kind: &str) -> Map<String, Value> {
@@ -1937,7 +2230,10 @@ mod tests {
         let wt = mgr.windows.get(MAIN_WINDOW_LABEL).unwrap();
         assert_eq!(wt.tabs.len(), 2);
         assert_eq!(wt.active, id, "새 탭이 active");
-        assert_eq!(mgr.views.get(&id).unwrap().name, "Custom");
+        assert_eq!(
+            mgr.views.get(&id).unwrap().name,
+            TabName::Named("Custom".into())
+        );
         assert_eq!(mgr.view_owner.get(&id).unwrap(), MAIN_WINDOW_LABEL);
         assert_eq!(mgr.version, v0 + 1);
         assert_invariants(&mgr);
@@ -2293,10 +2589,58 @@ mod tests {
         mgr.rename_tab(view_id, "New Name".to_string()).unwrap();
         assert_eq!(
             mgr.views.get(&view_id).unwrap().name,
-            "New Name",
+            TabName::Named("New Name".into()),
             "View.name 이 교체됨"
         );
         assert_eq!(mgr.version, ver + 1, "성공 시 version +1");
+        assert_invariants(&mgr);
+    }
+
+    // AC36 — 빈 이름은 경계가 거르지 않아도 모델이 거절한다(이름 · version 그대로).
+    #[test]
+    fn rename_tab_refuses_a_blank_name() {
+        let mut mgr = ViewManager::new();
+        let view = main_active(&mgr);
+        mgr.rename_tab(view, "작업".into()).unwrap();
+        let ver = mgr.version;
+        for blank in ["", " ", "\t\n", "\u{3000}"] {
+            assert_eq!(
+                mgr.rename_tab(view, blank.into()),
+                Err(LayoutError::EmptyName),
+                "{blank:?}"
+            );
+        }
+        assert_eq!(mgr.views[&view].name, TabName::Named("작업".into()));
+        assert_eq!(mgr.version, ver);
+    }
+
+    // 자동 이름과 같은 글자로 바꿔도 그 이름을 정한 것이다(TRD S26-window-chrome §3-1).
+    #[test]
+    fn rename_tab_to_the_current_auto_name_fixes_it() {
+        let mut mgr = ViewManager::new();
+        let view = main_active(&mgr);
+        assert_eq!(
+            mgr.list_tabs(MAIN_WINDOW_LABEL).unwrap().tabs[0].name,
+            "빈 칸"
+        );
+        mgr.rename_tab(view, "빈 칸".into()).unwrap();
+        assert_eq!(mgr.views[&view].name, TabName::Named("빈 칸".into()));
+        mgr.assign_agent(view, first_slot_of(&mgr, view), "a1".into())
+            .unwrap();
+        let meta = &mgr.list_tabs(MAIN_WINDOW_LABEL).unwrap().tabs[0];
+        assert_eq!((meta.name.as_str(), meta.named), ("빈 칸", true));
+    }
+
+    #[test]
+    fn create_tab_with_a_blank_name_is_refused_without_a_tab() {
+        let mut mgr = ViewManager::new();
+        let ver = mgr.version;
+        assert_eq!(
+            mgr.create_tab(MAIN_WINDOW_LABEL, Some("  ".into())),
+            Err(LayoutError::EmptyName)
+        );
+        assert_eq!(mgr.views.len(), 1);
+        assert_eq!(mgr.version, ver);
         assert_invariants(&mgr);
     }
 
@@ -2310,6 +2654,151 @@ mod tests {
         ));
         assert_eq!(mgr.version, ver, "실패 시 version 불변(no-op)");
         assert_invariants(&mgr);
+    }
+
+    // ── 에이전트 이름 장부(TRD S26-window-chrome §4-3) ──
+
+    fn names(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(id, name)| (id.to_string(), name.to_string()))
+            .collect()
+    }
+
+    fn tab_names(mgr: &ViewManager, label: &str) -> Vec<String> {
+        mgr.list_tabs(label)
+            .unwrap()
+            .tabs
+            .into_iter()
+            .map(|t| t.name)
+            .collect()
+    }
+
+    // main = 자동 탭(a1) · 정한 탭(a1) · 팝아웃 = 자동 탭(a2).
+    fn agents_in_two_windows() -> ViewManager {
+        let mut mgr = ViewManager::new();
+        let auto = main_active(&mgr);
+        mgr.assign_agent(auto, first_slot_of(&mgr, auto), "a1".into())
+            .unwrap();
+        let named = mgr
+            .create_tab(MAIN_WINDOW_LABEL, Some("작업".into()))
+            .unwrap();
+        mgr.assign_agent(named, first_slot_of(&mgr, named), "a1".into())
+            .unwrap();
+        let popout = mgr.create_window("slot-popup-1").unwrap();
+        mgr.assign_agent(popout, first_slot_of(&mgr, popout), "a2".into())
+            .unwrap();
+        mgr
+    }
+
+    #[test]
+    fn a_name_update_reports_only_windows_whose_auto_tab_name_changed_and_bumps_the_version() {
+        let mut mgr = agents_in_two_windows();
+        assert_eq!(tab_names(&mgr, MAIN_WINDOW_LABEL), ["에이전트", "작업"]);
+        let ver = mgr.version;
+
+        assert_eq!(
+            mgr.update_agent_names(&names(&[("a1", "myproj")])),
+            [MAIN_WINDOW_LABEL]
+        );
+        assert_eq!(mgr.version, ver + 1);
+        assert_eq!(tab_names(&mgr, MAIN_WINDOW_LABEL), ["myproj", "작업"]);
+        assert_eq!(tab_names(&mgr, "slot-popup-1"), ["에이전트"]);
+
+        assert_eq!(
+            mgr.update_agent_names(&names(&[("a1", "other"), ("a2", "beta")])),
+            [MAIN_WINDOW_LABEL, "slot-popup-1"],
+            "정렬 · 겹침 없음"
+        );
+        assert_eq!(mgr.version, ver + 2, "한 번에 한 판");
+        assert_invariants(&mgr);
+    }
+
+    #[test]
+    fn a_name_update_that_changes_no_visible_name_keeps_the_version() {
+        let mut mgr = agents_in_two_windows();
+        mgr.update_agent_names(&names(&[("a1", "myproj")]));
+        let ver = mgr.version;
+
+        assert!(mgr
+            .update_agent_names(&names(&[("a1", "myproj")]))
+            .is_empty());
+        assert!(
+            mgr.update_agent_names(&names(&[("a9", "nowhere")]))
+                .is_empty(),
+            "화면에 없는 에이전트"
+        );
+        assert!(mgr.update_agent_names(&[]).is_empty());
+        assert_eq!(mgr.version, ver);
+        assert_eq!(mgr.agent_name("a9"), Some("nowhere"), "장부에는 적는다");
+    }
+
+    // 포커스 밖 에이전트 슬롯은 탭 이름이 아니다 — 그 이름이 바뀌어도 그 창은 바뀐 창이 아니다.
+    #[test]
+    fn an_agent_outside_the_focused_slot_does_not_change_the_tab() {
+        let mut mgr = ViewManager::new();
+        let view = main_active(&mgr);
+        let left = first_slot_of(&mgr, view);
+        let right = mgr.split_slot(view, left, SplitDir::LeftRight).unwrap();
+        mgr.assign_agent(view, left, "a1".into()).unwrap();
+        mgr.set_slot_content(view, right, SlotContent::AgentList)
+            .unwrap();
+        let ver = mgr.version;
+
+        assert!(mgr
+            .update_agent_names(&names(&[("a1", "myproj")]))
+            .is_empty());
+        assert_eq!(mgr.version, ver);
+        mgr.set_focused_slot(view, left).unwrap();
+        assert_eq!(tab_names(&mgr, MAIN_WINDOW_LABEL), ["myproj"]);
+    }
+
+    // 목록에서 빠진(죽은) 에이전트의 슬롯도 마지막 이름을 쓴다 — 장부는 지우지 않는다.
+    #[test]
+    fn a_name_update_never_forgets_an_agent() {
+        let mut mgr = agents_in_two_windows();
+        mgr.update_agent_names(&names(&[("a1", "myproj")]));
+        mgr.update_agent_names(&names(&[("a2", "beta")]));
+        assert_eq!(tab_names(&mgr, MAIN_WINDOW_LABEL), ["myproj", "작업"]);
+        assert_eq!(mgr.agent_name("a1"), Some("myproj"));
+    }
+
+    #[test]
+    fn a_seed_fills_only_empty_entries_and_keeps_the_version() {
+        let mut mgr = agents_in_two_windows();
+        mgr.update_agent_names(&names(&[("a1", "live")]));
+        let ver = mgr.version;
+
+        mgr.seed_agent_names(names(&[("a1", "old"), ("a2", "seeded")]));
+
+        assert_eq!(mgr.agent_name("a1"), Some("live"));
+        assert_eq!(mgr.agent_name("a2"), Some("seeded"));
+        assert_eq!(mgr.version, ver);
+    }
+
+    // 사본 수락 — 사본의 장부(저장 파일의 시드)는 지금 장부의 빈 칸에만 든다(TRD S26-window-chrome §4-3).
+    #[test]
+    fn adopting_a_restored_copy_adds_its_seeds_only_to_empty_entries() {
+        let mut mgr = ViewManager::new();
+        mgr.update_agent_names(&names(&[("a1", "live")]));
+        let mut copy = ViewManager::new();
+        copy.seed_agent_names(names(&[("a1", "old"), ("a2", "seeded")]));
+
+        mgr.adopt_restored(copy).unwrap();
+
+        assert_eq!(mgr.agent_name("a1"), Some("live"));
+        assert_eq!(mgr.agent_name("a2"), Some("seeded"));
+    }
+
+    #[test]
+    fn a_refused_adoption_adds_no_seed() {
+        let mut mgr = ViewManager::new();
+        let mut no_main = ViewManager::new();
+        no_main.seed_agent_names(names(&[("a1", "seeded")]));
+        no_main.windows.remove(MAIN_WINDOW_LABEL);
+
+        assert!(mgr.adopt_restored(no_main).is_err());
+        assert_eq!(mgr.agent_name("a1"), None);
     }
 
     #[test]
@@ -2424,6 +2913,12 @@ mod tests {
         assert_eq!(snap.active, t1);
         assert_eq!(snap.version, mgr.version);
         assert_eq!(snap.tabs[1].name, "Second");
+        assert!(snap.tabs[1].named);
+        assert_eq!(
+            snap.tabs[0].name, "빈 칸",
+            "자동 이름 탭 = 포커스 칸의 낱말"
+        );
+        assert!(!snap.tabs[0].named);
     }
 
     #[test]
@@ -2484,9 +2979,7 @@ mod tests {
         let src = main_active(&mgr);
         let slot = first_slot_of(&mgr, src);
         mgr.assign_agent(src, slot, "moving".into()).unwrap();
-        let (tmp, content) = mgr
-            .prepare_detached_view(src, slot, "Popup".into())
-            .unwrap();
+        let (tmp, content) = mgr.prepare_detached_view(src, slot).unwrap();
         assert_eq!(
             content,
             SlotContent::Agent {
@@ -2517,9 +3010,7 @@ mod tests {
         let slot = first_slot_of(&mgr, src);
         mgr.set_slot_content(src, slot, SlotContent::AgentList)
             .unwrap();
-        let (tmp, content) = mgr
-            .prepare_detached_view(src, slot, "Popup".into())
-            .unwrap();
+        let (tmp, content) = mgr.prepare_detached_view(src, slot).unwrap();
         assert_eq!(content, SlotContent::AgentList, "반환 콘텐츠 = AgentList");
         let tslot = first_slot_of(&mgr, tmp);
         assert_eq!(
@@ -2540,9 +3031,7 @@ mod tests {
         let src = main_active(&mgr);
         let slot = first_slot_of(&mgr, src);
         mgr.set_slot_content(src, slot, SlotContent::Empty).unwrap();
-        let (tmp, content) = mgr
-            .prepare_detached_view(src, slot, "Popup".into())
-            .unwrap();
+        let (tmp, content) = mgr.prepare_detached_view(src, slot).unwrap();
         assert_eq!(content, SlotContent::Empty, "반환 콘텐츠 = Empty");
         let tslot = first_slot_of(&mgr, tmp);
         assert_eq!(
@@ -2567,11 +3056,11 @@ mod tests {
         let views_before = mgr.views.len();
         let ghost = Uuid::new_v4();
         assert_eq!(
-            mgr.prepare_detached_view(src, ghost, "P".into()),
+            mgr.prepare_detached_view(src, ghost),
             Err(LayoutError::SlotNotFound(ghost))
         );
         assert_eq!(
-            mgr.prepare_detached_view(ghost, ghost, "P".into()),
+            mgr.prepare_detached_view(ghost, ghost),
             Err(LayoutError::ViewNotFound(ghost))
         );
         assert_eq!(
@@ -2588,9 +3077,7 @@ mod tests {
         let slot = first_slot_of(&mgr, src);
         mgr.assign_agent(src, slot, "moving".into()).unwrap();
         let existing = mgr.create_window("slot-popup-1").unwrap();
-        let (tmp, _content) = mgr
-            .prepare_detached_view(src, slot, "Popup".into())
-            .unwrap();
+        let (tmp, _content) = mgr.prepare_detached_view(src, slot).unwrap();
         mgr.insert_tab_into("slot-popup-1", tmp).unwrap();
         let wt = mgr.windows.get("slot-popup-1").unwrap();
         assert_eq!(wt.tabs, vec![existing, tmp]);
@@ -2606,9 +3093,7 @@ mod tests {
         let src = main_active(&mgr);
         let slot = first_slot_of(&mgr, src);
         mgr.assign_agent(src, slot, "moving".into()).unwrap();
-        let (tmp, _content) = mgr
-            .prepare_detached_view(src, slot, "Popup".into())
-            .unwrap();
+        let (tmp, _content) = mgr.prepare_detached_view(src, slot).unwrap();
         let err = mgr.insert_tab_into("gone", tmp).unwrap_err();
         assert!(matches!(err, LayoutError::WindowNotFound(_)));
         assert!(mgr.view_owner.get(&tmp).is_none());
@@ -2623,9 +3108,7 @@ mod tests {
         let existing = mgr.create_window("slot-popup-1").unwrap();
         let eslot = first_slot_of(&mgr, existing);
         mgr.assign_agent(existing, eslot, "shared".into()).unwrap();
-        let (tmp, _content) = mgr
-            .prepare_detached_view(src, slot, "Popup".into())
-            .unwrap();
+        let (tmp, _content) = mgr.prepare_detached_view(src, slot).unwrap();
         mgr.insert_tab_into("slot-popup-1", tmp).unwrap();
         assert_eq!(mgr.windows.get("slot-popup-1").unwrap().tabs.len(), 2);
         assert_invariants(&mgr);
@@ -2637,9 +3120,7 @@ mod tests {
         let src = main_active(&mgr);
         let slot = first_slot_of(&mgr, src);
         mgr.assign_agent(src, slot, "moving".into()).unwrap();
-        let (tmp, _content) = mgr
-            .prepare_detached_view(src, slot, "Popup".into())
-            .unwrap();
+        let (tmp, _content) = mgr.prepare_detached_view(src, slot).unwrap();
         mgr.attach_view_as_new_window("slot-popup-1", tmp).unwrap();
         let wt = mgr.windows.get("slot-popup-1").unwrap();
         assert_eq!(wt.tabs, vec![tmp]);
@@ -2654,9 +3135,7 @@ mod tests {
         let src = main_active(&mgr);
         let slot = first_slot_of(&mgr, src);
         mgr.assign_agent(src, slot, "moving".into()).unwrap();
-        let (tmp, _content) = mgr
-            .prepare_detached_view(src, slot, "Popup".into())
-            .unwrap();
+        let (tmp, _content) = mgr.prepare_detached_view(src, slot).unwrap();
         mgr.drop_detached_view(tmp);
         assert!(!mgr.views.contains_key(&tmp), "임시 View 제거");
         assert_invariants(&mgr);
@@ -3075,9 +3554,7 @@ mod tests {
     fn moving_an_unknown_content_slot_carries_its_raw_content() {
         let mut mgr = ViewManager::new();
         let (src, slot) = foreign_root(&mut mgr);
-        let (tmp, content) = mgr
-            .prepare_detached_view(src, slot, "Popup".into())
-            .unwrap();
+        let (tmp, content) = mgr.prepare_detached_view(src, slot).unwrap();
         assert_eq!(content, SlotContent::Empty);
         let tslot = first_slot_of(&mgr, tmp);
         assert_eq!(
@@ -3098,9 +3575,7 @@ mod tests {
     fn rolling_back_a_move_drops_only_the_carried_entry() {
         let mut mgr = ViewManager::new();
         let (src, slot) = foreign_root(&mut mgr);
-        let (tmp, _content) = mgr
-            .prepare_detached_view(src, slot, "Popup".into())
-            .unwrap();
+        let (tmp, _content) = mgr.prepare_detached_view(src, slot).unwrap();
         mgr.drop_detached_view(tmp);
         assert!(!mgr.unknown_content.contains_key(&tmp));
         assert_eq!(
@@ -3132,7 +3607,7 @@ mod tests {
         mgr.create_window("slot-popup-1").unwrap();
         let src = main_active(&mgr);
         let (tmp, _) = mgr
-            .prepare_detached_view(src, first_slot_of(&mgr, src), "P".into())
+            .prepare_detached_view(src, first_slot_of(&mgr, src))
             .unwrap();
         mgr.attach_view_as_new_window("slot-popup-2", tmp).unwrap();
 
@@ -3363,6 +3838,8 @@ mod tests {
             .unwrap();
         assert_eq!(mgr.window_attrs(MAIN_WINDOW_LABEL).unwrap().theme, None);
         mgr.close_window("slot-popup-1").unwrap();
+        // 옛 OS 창의 `Destroyed` 가 지나야 같은 label 이 설 수 있다.
+        assert!(mgr.release_closing("slot-popup-1"));
         mgr.create_window("slot-popup-1").unwrap();
         assert_eq!(
             mgr.window_attrs("slot-popup-1"),
@@ -3377,7 +3854,7 @@ mod tests {
         let layout = LayoutNode::new_empty_slot();
         View {
             id: Uuid::new_v4(),
-            name: name.into(),
+            name: TabName::Named(name.into()),
             focused_slot_id: Some(tree::first_slot_id(&layout)),
             layout,
         }
@@ -3392,6 +3869,7 @@ mod tests {
             },
             tabs,
             active,
+            number: None,
         }
     }
 
@@ -3426,7 +3904,7 @@ mod tests {
         assert_invariants(&mgr);
         let main = window(&mgr, MAIN_WINDOW_LABEL);
         assert_eq!(main.tabs.len(), 1);
-        assert_eq!(mgr.views[&main.active].name, "View 1");
+        assert_eq!(mgr.views[&main.active].name, TabName::Auto);
         assert_eq!(main.attrs, restored(vec![], None).attrs, "속성은 살린다");
 
         let mut lost = view_named("lost");
@@ -3595,9 +4073,7 @@ mod tests {
         mgr.create_window("slot-popup-1").unwrap();
         let src = main_active(&mgr);
         let src_slot = first_slot_of(&mgr, src);
-        let (tmp, _) = mgr
-            .prepare_detached_view(src, src_slot, "옮기는 중".into())
-            .unwrap();
+        let (tmp, _) = mgr.prepare_detached_view(src, src_slot).unwrap();
         let before = fingerprint(&mgr);
 
         let (live_label, ..) = restored_with_popout("slot-popup-1");
@@ -3631,9 +4107,7 @@ mod tests {
         let mut mgr = ViewManager::new();
         let src = main_active(&mgr);
         let src_slot = first_slot_of(&mgr, src);
-        let (tmp, _) = mgr
-            .prepare_detached_view(src, src_slot, "옮기는 중".into())
-            .unwrap();
+        let (tmp, _) = mgr.prepare_detached_view(src, src_slot).unwrap();
 
         let (fresh, ..) = restored_with_popout("slot-popup-2");
         mgr.adopt_restored(fresh).unwrap();
@@ -3652,7 +4126,7 @@ mod tests {
         let restored_layout = LayoutNode::new_empty_slot();
         let same_id = View {
             id: v,
-            name: "View 1".into(),
+            name: TabName::Auto,
             layout: restored_layout.clone(),
             focused_slot_id: None,
         };
@@ -3661,6 +4135,7 @@ mod tests {
                 attrs: WindowAttrs::default(),
                 tabs: vec![same_id],
                 active: Some(v),
+                number: None,
             },
             Vec::new(),
         )
@@ -3668,6 +4143,278 @@ mod tests {
         mgr.adopt_restored(restored).unwrap();
         assert_eq!(mgr.views[&v].layout, restored_layout);
         assert_invariants(&mgr);
+    }
+
+    // ── 창 번호(TRD S26-window-chrome §4-1 · §10-1) ─────────────────────────
+
+    fn number_of(mgr: &ViewManager, label: &str) -> u32 {
+        mgr.windows[label].number
+    }
+
+    #[test]
+    fn windows_are_numbered_from_1_and_a_closing_number_waits_for_destroyed() {
+        let mut mgr = ViewManager::new();
+        assert_eq!(number_of(&mgr, MAIN_WINDOW_LABEL), 1);
+        mgr.create_window("p-1").unwrap();
+        mgr.create_window("p-2").unwrap();
+        mgr.create_window("p-3").unwrap();
+        assert_eq!(["p-1", "p-2", "p-3"].map(|l| number_of(&mgr, l)), [2, 3, 4]);
+        assert_invariants(&mgr);
+
+        mgr.close_window("p-2").unwrap();
+        assert_eq!(mgr.closing_numbers(), [3], "OS 창이 남아 번호를 쥔다");
+        mgr.create_window("p-4").unwrap();
+        assert_eq!(number_of(&mgr, "p-4"), 5, "닫히는 창의 번호를 건너뛴다");
+        assert_invariants(&mgr);
+
+        assert!(mgr.release_closing("p-2"));
+        assert!(mgr.closing_numbers().is_empty());
+        mgr.create_window("p-5").unwrap();
+        assert_eq!(number_of(&mgr, "p-5"), 3, "풀린 번호는 다음 새 창이 받는다");
+        assert_invariants(&mgr);
+    }
+
+    #[test]
+    fn two_closes_before_either_destroyed_hold_both_numbers() {
+        let mut mgr = ViewManager::new();
+        mgr.create_window("p-1").unwrap();
+        mgr.create_window("p-2").unwrap();
+        mgr.close_window("p-1").unwrap();
+        mgr.close_window("p-2").unwrap();
+        assert_eq!(mgr.closing_numbers(), [2, 3]);
+        mgr.create_window("p-3").unwrap();
+        assert_eq!(number_of(&mgr, "p-3"), 4);
+        assert_invariants(&mgr);
+
+        assert!(mgr.release_closing("p-2"));
+        mgr.create_window("p-4").unwrap();
+        assert_eq!(number_of(&mgr, "p-4"), 3);
+        assert!(mgr.release_closing("p-1"));
+        mgr.create_window("p-5").unwrap();
+        assert_eq!(number_of(&mgr, "p-5"), 2);
+        assert_invariants(&mgr);
+    }
+
+    #[test]
+    fn release_closing_of_a_label_that_is_not_closing_changes_nothing() {
+        let mut mgr = ViewManager::new();
+        mgr.create_window("p-1").unwrap();
+        mgr.create_window("p-2").unwrap();
+        mgr.close_window("p-2").unwrap();
+        let version = mgr.version;
+
+        assert!(!mgr.release_closing("p-9"), "예열 창 — 모델에 든 적 없다");
+        assert!(!mgr.release_closing("p-1"), "살아 있는 창");
+        assert!(!mgr.release_closing(MAIN_WINDOW_LABEL));
+        assert!(mgr.release_closing("p-2"));
+        assert!(!mgr.release_closing("p-2"), "두 번째는 무동작");
+
+        assert_eq!(number_of(&mgr, "p-1"), 2);
+        assert_eq!(mgr.version, version, "번호 풀기는 version 을 올리지 않는다");
+        assert_invariants(&mgr);
+    }
+
+    #[test]
+    fn drop_window_gone_frees_the_number_at_once() {
+        let mut mgr = ViewManager::new();
+        let p = mgr.create_window("p-1").unwrap();
+        mgr.create_window("p-2").unwrap();
+        let version = mgr.version;
+
+        assert_eq!(mgr.drop_window_gone("p-1").unwrap(), [p]);
+        assert!(!mgr.windows.contains_key("p-1"));
+        assert!(mgr.closing_numbers().is_empty());
+        assert_eq!(mgr.version, version + 1);
+        mgr.create_window("p-3").unwrap();
+        assert_eq!(number_of(&mgr, "p-3"), 2);
+        assert_invariants(&mgr);
+
+        assert_eq!(
+            mgr.drop_window_gone(MAIN_WINDOW_LABEL),
+            Err(LayoutError::MainNotClosable)
+        );
+        assert_eq!(
+            mgr.drop_window_gone("p-1"),
+            Err(LayoutError::WindowNotFound("p-1".into()))
+        );
+    }
+
+    #[test]
+    fn a_popout_emptied_by_its_last_tab_or_a_dock_holds_its_number() {
+        let mut mgr = ViewManager::new();
+        let p = mgr.create_window("p-1").unwrap();
+        assert_eq!(
+            mgr.close_tab("p-1", p).unwrap(),
+            CloseTabOutcome::WindowClosed
+        );
+        assert_eq!(mgr.closing_numbers(), [2]);
+        assert_invariants(&mgr);
+
+        let q = mgr.create_window("p-2").unwrap();
+        assert_eq!(number_of(&mgr, "p-2"), 3);
+        let out = docked(
+            &mut mgr,
+            q,
+            tab_bar(MAIN_WINDOW_LABEL, None),
+            FocusPolicy::Keep,
+        );
+        assert_eq!(out.emptied.as_deref(), Some("p-2"));
+        assert_eq!(mgr.closing_numbers(), [2, 3]);
+        assert_invariants(&mgr);
+    }
+
+    #[test]
+    fn every_new_window_path_takes_the_smallest_free_number() {
+        let mut mgr = ViewManager::new();
+        mgr.create_window("p-1").unwrap();
+        mgr.create_window("p-2").unwrap();
+        mgr.close_window("p-1").unwrap();
+        mgr.release_closing("p-1");
+
+        let src = main_active(&mgr);
+        let slot = first_slot_of(&mgr, src);
+        let (tmp, _) = mgr.prepare_detached_view(src, slot).unwrap();
+        mgr.attach_view_as_new_window("p-3", tmp).unwrap();
+        assert_eq!(number_of(&mgr, "p-3"), 2, "새 창으로 슬롯 옮기기");
+
+        let extra = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+        docked(&mut mgr, extra, new_window("p-4"), FocusPolicy::Keep);
+        assert_eq!(number_of(&mgr, "p-4"), 4, "도킹 새 창");
+        assert_invariants(&mgr);
+    }
+
+    #[test]
+    fn main_keeps_1_through_refills_and_a_refused_close() {
+        let mut mgr = ViewManager::new();
+        let only = main_active(&mgr);
+        mgr.close_tab(MAIN_WINDOW_LABEL, only).unwrap();
+        assert_eq!(
+            mgr.close_window(MAIN_WINDOW_LABEL),
+            Err(LayoutError::MainNotClosable)
+        );
+        mgr.create_window("p-1").unwrap();
+        let last = main_active(&mgr);
+        let out = docked(&mut mgr, last, tab_bar("p-1", None), FocusPolicy::Keep);
+        assert!(out.main_refilled.is_some());
+        assert_eq!(number_of(&mgr, MAIN_WINDOW_LABEL), 1);
+        assert!(mgr.closing_numbers().is_empty());
+        assert_invariants(&mgr);
+    }
+
+    #[test]
+    fn from_restored_numbers_popouts_by_the_saved_numbers_in_order() {
+        let popout = |label: &str, number: Option<u32>| {
+            let v = view_named(label);
+            let mut w = restored(vec![v.clone()], Some(v.id));
+            w.number = number;
+            (label.to_string(), Uuid::new_v4().to_string(), w)
+        };
+        let mut main = restored(vec![], None);
+        main.number = Some(7);
+        let mgr = ViewManager::from_restored(
+            main,
+            vec![
+                popout("p-1", Some(3)),
+                popout("p-2", Some(3)),
+                popout("p-3", None),
+                popout("p-4", Some(1)),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            number_of(&mgr, MAIN_WINDOW_LABEL),
+            1,
+            "main 의 저장값은 보지 않는다"
+        );
+        assert_eq!(
+            ["p-1", "p-2", "p-3", "p-4"].map(|l| number_of(&mgr, l)),
+            [3, 2, 4, 5],
+            "앞 창이 번호를 지키고 나머지는 저장 순서대로 빈 번호"
+        );
+        assert!(mgr.closing_numbers().is_empty());
+        assert_invariants(&mgr);
+    }
+
+    #[test]
+    fn adopt_restored_frees_every_old_number_and_keeps_the_copy_numbers() {
+        let mut mgr = ViewManager::new();
+        mgr.create_window("slot-popup-1").unwrap();
+        mgr.create_window("slot-popup-2").unwrap();
+        mgr.create_window("slot-popup-3").unwrap();
+        mgr.close_window("slot-popup-3").unwrap();
+        assert_eq!(mgr.closing_numbers(), [4]);
+
+        let copy_popout = |label: &str, number: Option<u32>| {
+            let v = view_named(label);
+            let mut w = restored(vec![v.clone()], Some(v.id));
+            w.number = number;
+            (label.to_string(), Uuid::new_v4().to_string(), w)
+        };
+        let m = view_named("m");
+        let copy = ViewManager::from_restored(
+            restored(vec![m.clone()], Some(m.id)),
+            vec![
+                copy_popout("slot-popup-10", Some(4)),
+                copy_popout("slot-popup-11", None),
+            ],
+        )
+        .unwrap();
+
+        let removed = mgr.adopt_restored(copy).unwrap();
+        assert_eq!(removed, ["slot-popup-1", "slot-popup-2"]);
+        assert!(mgr.closing_numbers().is_empty(), "닫히는 창 번호도 푼다");
+        assert_eq!(number_of(&mgr, "slot-popup-10"), 4);
+        assert_eq!(number_of(&mgr, "slot-popup-11"), 2);
+        assert_invariants(&mgr);
+
+        // 옛 창의 늦은 `Destroyed` 는 사본 창의 번호를 건드리지 않는다.
+        for old in ["slot-popup-1", "slot-popup-2", "slot-popup-3"] {
+            assert!(!mgr.release_closing(old));
+        }
+        assert_eq!(number_of(&mgr, "slot-popup-10"), 4);
+        mgr.create_window("slot-popup-12").unwrap();
+        assert_eq!(number_of(&mgr, "slot-popup-12"), 3);
+        assert_invariants(&mgr);
+    }
+
+    // `lib.rs` 의 `Destroyed` 갈래 중 정리를 부를 상태가 없는 쪽 — 이것 하나만 돈다(TRD S26-window-chrome §4-1).
+    #[test]
+    fn release_window_number_frees_a_closing_window_or_one_still_in_the_model() {
+        let state = crate::layout::LayoutState::new();
+        {
+            let mut mgr = state.0.lock().unwrap();
+            mgr.create_window("p-1").unwrap();
+            mgr.create_window("p-2").unwrap();
+            mgr.close_window("p-1").unwrap();
+        }
+
+        crate::layout::release_window_number(&state, "p-1");
+        crate::layout::release_window_number(&state, "p-2");
+        crate::layout::release_window_number(&state, "p-9");
+        crate::layout::release_window_number(&state, MAIN_WINDOW_LABEL);
+
+        let mut mgr = state.0.lock().unwrap();
+        assert!(mgr.closing_numbers().is_empty());
+        assert!(
+            !mgr.windows.contains_key("p-2"),
+            "모델에 남았던 창은 항목째 뺀다"
+        );
+        assert!(mgr.windows.contains_key(MAIN_WINDOW_LABEL));
+        assert_invariants(&mgr);
+        mgr.create_window("p-3").unwrap();
+        mgr.create_window("p-4").unwrap();
+        assert_eq!(["p-3", "p-4"].map(|l| number_of(&mgr, l)), [2, 3]);
+    }
+
+    #[test]
+    fn list_tabs_carries_the_window_id_and_number() {
+        let mut mgr = ViewManager::new();
+        mgr.create_window("p-1").unwrap();
+        let main = mgr.list_tabs(MAIN_WINDOW_LABEL).unwrap();
+        assert_eq!((main.window_id.as_str(), main.number), ("main", 1));
+        let popout = mgr.list_tabs("p-1").unwrap();
+        assert_eq!(popout.number, 2);
+        assert_eq!(popout.window_id, mgr.windows["p-1"].window_id);
     }
 
     // ── 측정 보고 · slot_px (ADR-0227) ───────────────────────────────────────
@@ -3742,7 +4489,7 @@ mod tests {
         let fresh = mgr.create_window("popup-1").unwrap();
         let src = main_active(&mgr);
         let (detached, _) = mgr
-            .prepare_detached_view(src, first_slot_of(&mgr, src), "Tab".into())
+            .prepare_detached_view(src, first_slot_of(&mgr, src))
             .unwrap();
         mgr.attach_view_as_new_window("popup-2", detached).unwrap();
 
@@ -4000,7 +4747,7 @@ mod tests {
             .unwrap();
         let src = main_active(&mgr);
         let (tmp, _) = mgr
-            .prepare_detached_view(src, first_slot_of(&mgr, src), "Tab".into())
+            .prepare_detached_view(src, first_slot_of(&mgr, src))
             .unwrap();
         assert_eq!(mgr.px_context(tmp), Ok(None));
     }
@@ -4598,9 +5345,10 @@ mod tests {
         attrs_rev: u64,
         views: Vec<View>,
         owners: Vec<(ViewId, WindowLabel)>,
-        windows: Vec<(WindowLabel, Vec<ViewId>, ViewId, String, WindowAttrs)>,
+        windows: Vec<(WindowLabel, Vec<ViewId>, ViewId, String, u32, WindowAttrs)>,
         unknown: Vec<(ViewId, Vec<(Uuid, Map<String, Value>)>)>,
         closed: Vec<WindowLabel>,
+        closing: Vec<u32>,
     }
 
     fn model(mgr: &ViewManager) -> Model {
@@ -4621,6 +5369,7 @@ mod tests {
                     w.tabs.clone(),
                     w.active,
                     w.window_id.clone(),
+                    w.number,
                     w.attrs,
                 )
             })
@@ -4646,6 +5395,7 @@ mod tests {
             windows,
             unknown,
             closed,
+            closing: mgr.closing_numbers(),
         }
     }
 
@@ -5129,7 +5879,7 @@ mod tests {
         );
         // 창 없는 임시 View 는 탭이 아니다 — 출처로도 대상으로도.
         let slot = first_slot_of(&mgr, m[0]);
-        let (tmp, _) = mgr.prepare_detached_view(m[0], slot, "tmp".into()).unwrap();
+        let (tmp, _) = mgr.prepare_detached_view(m[0], slot).unwrap();
         for (view, to, want) in [
             (
                 tmp,
@@ -5353,7 +6103,7 @@ mod tests {
 
         // 팝아웃(`slot.popout`)의 phase C 도 묘비 앞에서 멈춘다 — 임시 View 는 그대로 남아 롤백을 기다린다.
         let slot = first_slot_of(&mgr, m[0]);
-        let (tmp, _) = mgr.prepare_detached_view(m[0], slot, "tmp".into()).unwrap();
+        let (tmp, _) = mgr.prepare_detached_view(m[0], slot).unwrap();
         let version = mgr.version;
         assert_eq!(
             mgr.attach_view_as_new_window(FRESH, tmp),
@@ -5365,7 +6115,7 @@ mod tests {
         mgr.drop_detached_view(tmp);
         assert_invariants(&mgr);
         // 묘비 없는 label 은 그대로 붙는다.
-        let (tmp, _) = mgr.prepare_detached_view(m[0], slot, "tmp".into()).unwrap();
+        let (tmp, _) = mgr.prepare_detached_view(m[0], slot).unwrap();
         mgr.attach_view_as_new_window("slot-popup-11", tmp).unwrap();
         assert_invariants(&mgr);
     }
@@ -5495,7 +6245,7 @@ mod tests {
 
     #[test]
     fn the_main_last_tab_leaving_for_another_window_refills_main_with_an_empty_tab() {
-        // PRD R14 · ADR-0057 불변식 4 — 같은 한 번(version +1 하나) 안에서 main 에 빈 탭 「View 1」 이 생겨 활성이 된다.
+        // PRD R14 · ADR-0057 불변식 4 — 같은 한 번(version +1 하나) 안에서 main 에 빈 탭이 생겨 활성이 된다.
         for focus in [FocusPolicy::Keep, FocusPolicy::Reveal] {
             for mode in ["seam", "tab_bar", "new_window"] {
                 let mut mgr = ViewManager::new();
@@ -5524,7 +6274,7 @@ mod tests {
                 );
                 assert_ne!(blank, only, "새 빈 View: {mode} {focus:?}");
                 assert_eq!(main.active, blank, "빈 탭이 활성: {mode} {focus:?}");
-                assert_eq!(mgr.views[&blank].name, "View 1");
+                assert_eq!(mgr.views[&blank].name, TabName::Auto);
                 assert!(matches!(
                     mgr.views[&blank].layout,
                     LayoutNode::Slot {

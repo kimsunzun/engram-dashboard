@@ -1,5 +1,7 @@
 //! 탭 놓기 invoke 껍데기 둘(`tab_drop` · `window_frame`)과 그 Tauri 어댑터 — 끌기가 끝난 뒤의 입력 읽기(platform) ·
 //! 창 게터 · 사건 내기(`tab_drop:done` · `window:frame`). 처리 · 판정 · 장부는 `crate::tab_drop` 이 한다.
+//! `window:frame` 은 자리 기록 말고 그 창의 포커스 사건([`push_window_focus`])에도 밀리고, 몸에 앞 창 칸(`focused`)과
+//! 제목줄 모양(`caption` — platform `caption_style`)을 싣는다(TRD S26-window-chrome §6-5).
 //!
 //! 둘 다 웹뷰 안 배선이라 버스 명령표에 올리지 않는다 — 놓기는 마우스 놓기의 끝이고 입력 상태를 읽는 갈래가 있어 LLM
 //! 이 흉내 낼 것이 아니다. 같은 동작의 LLM 명령은 같은 `layout::apply::dock_tab` 위의 T-65 `tab.dock` 이다.
@@ -17,7 +19,9 @@ use crate::daemon_client::DaemonClient;
 use crate::layout::{LayoutState, WindowAttrs};
 use crate::output_router::OutputRouter;
 use crate::tab_drop::plan::{InputNow, PhysPoint, TopAt};
-use crate::tab_drop::wire::{DropTo, TabDrop, TabDropDone, TabDropReply, WindowFrame};
+use crate::tab_drop::wire::{
+    CaptionChrome, DropTo, TabDrop, TabDropDone, TabDropReply, WindowFrame,
+};
 use crate::tab_drop::{
     self, Arrival, DropBook, DropPorts, DropShell, FrameBook, FrameGeom, FrameSeen,
 };
@@ -89,9 +93,9 @@ pub async fn tab_drop(
 }
 
 /// 부른 창의 창 사실(동기) — `invoke('window_frame')`. 웹뷰가 마운트 때 한 번 당기고, 그 뒤 바뀜은 `window:frame` 이
-/// 민다. 복원 크기 · 최대화 = 모델 값 · 틀 = 지금 게터로 센 값(규칙 = `tab_drop::pull_frame`). 탭 모델에 없는 창이면
-/// `Err`.
-// TRD S21-slot-docking §3-8
+/// 민다. 복원 크기 · 최대화 = 모델 값 · 틀 = 지금 게터로 센 값(규칙 = `tab_drop::pull_frame`) · 앞 창 = 지금 OS 전경 창
+/// 판정. 탭 모델에 없는 창이면 `Err`.
+// TRD S21-slot-docking §3-8 · TRD S26-window-chrome §6-5
 #[tauri::command]
 pub fn window_frame(
     window: Window,
@@ -106,22 +110,53 @@ pub fn window_frame(
         .window_attrs(label)
         .map_err(|e| e.to_string())?; // ← 레이아웃 락 드롭 — 게터는 그 밖이다
     let minimized = window.is_minimized().unwrap_or(false);
-    let geom = geom_of(&window);
-    Ok(tab_drop::pull_frame(
-        &frames,
-        label,
-        FrameSeen {
-            minimized,
-            attrs,
-            geom,
-        },
-    ))
+    let seen = FrameSeen {
+        minimized,
+        attrs,
+        geom: geom_of(&window),
+        focused: crate::commands::window_ctl::is_foreground(&window),
+        caption: caption_chrome(),
+    };
+    Ok(tab_drop::pull_frame(&frames, label, seen))
 }
 
 /// 자리 기록 경로(`state::placement::record`)가 모델에 적은 뒤 부른다 — 그 창의 창 사실이 바뀌었을 때만 그 창에
-/// `window:frame` 을 낸다(규칙 = `tab_drop::push_frame`). ★어느 락도 쥐지 않고 부른다★ — 게터를 부른다.
+/// `window:frame` 을 낸다(규칙 = `tab_drop::push_frame`). 앞 창 = 지금 OS 전경 창 판정. ★어느 락도 쥐지 않고
+/// 부른다★ — 게터를 부른다.
 // TRD S21-slot-docking §3-8
 pub(crate) fn push_window_frame(window: &Window, minimized: bool, attrs: WindowAttrs) {
+    let focused = crate::commands::window_ctl::is_foreground(window);
+    push(window, minimized, attrs, focused);
+}
+
+/// 그 창의 포커스 사건(`WindowEvent::Focused(focused)`)에 부른다 — 앞 창 칸은 ★사건의 값★이다: 사건이 날 때 OS 전경 창
+/// 판정이 아직 바뀌지 않았을 수 있다(차례 미검 · TRD S26-window-chrome §6-5 「`focused` 값의 출처」 · S12). 탭 모델에
+/// 없는 창(예열 창 · 닫힌 뒤 늦게 온 사건)은 건너뛴다. ★어느 락도 쥐지 않고 부른다★.
+pub(crate) fn push_window_focus(window: &Window, focused: bool) {
+    let Some(layout) = window.app_handle().try_state::<LayoutState>() else {
+        return;
+    };
+    // 레이아웃 락은 값만 읽고 곧바로 놓는다 — 게터는 그 밖이다.
+    let attrs = match layout.0.lock() {
+        Ok(mgr) => mgr.window_attrs(window.label()).ok(),
+        Err(_) => {
+            // 독 든 락 로그는 debug 다 — `state::placement::record` 와 같은 까닭.
+            tracing::debug!(
+                module = "tab_drop",
+                label = window.label(),
+                "레이아웃 락에 독이 들어 창 포커스를 밀지 않는다"
+            );
+            None
+        }
+    };
+    let Some(attrs) = attrs else {
+        return;
+    };
+    let minimized = window.is_minimized().unwrap_or(false);
+    push(window, minimized, attrs, focused);
+}
+
+fn push(window: &Window, minimized: bool, attrs: WindowAttrs, focused: bool) {
     let app = window.app_handle();
     let Some(frames) = app.try_state::<Arc<FrameBook>>() else {
         return;
@@ -132,6 +167,8 @@ pub(crate) fn push_window_frame(window: &Window, minimized: bool, attrs: WindowA
         minimized,
         attrs,
         geom,
+        focused,
+        caption: caption_chrome(),
     };
     tab_drop::push_frame(&frames, label, seen, |frame| {
         if let Err(e) = app.emit_to(label, EVT_WINDOW_FRAME, frame) {
@@ -142,6 +179,17 @@ pub(crate) fn push_window_frame(window: &Window, minimized: bool, attrs: WindowA
             );
         }
     });
+}
+
+// 창 사실의 크롬 모양 — platform 의 OS 상수에 셸 빌드의 스냅 오버레이 여부를 더한다(TRD S26-window-chrome §3-2 · §8-4).
+fn caption_chrome() -> CaptionChrome {
+    let style = os::caption_style();
+    CaptionChrome {
+        buttons: style.drawn_buttons,
+        leading_inset: style.leading_inset,
+        // 셸 기능 `snap-overlay` 로 지은 빌드에서만 참(기본 꺼짐 — §8-4) — 참일 때만 웹이 `report_max_button_rect` 를 부른다.
+        snap_overlay: cfg!(feature = "snap-overlay"),
+    }
 }
 
 /// 창이 사라진 뒤(`Destroyed`) 부른다 — 그 창의 마지막 창 사실을 잊는다(규칙 = `tab_drop::FrameBook::forget`).

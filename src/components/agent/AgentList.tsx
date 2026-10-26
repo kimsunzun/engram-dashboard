@@ -30,6 +30,7 @@ import { mergeTreeNodes, type AgentTreeNode } from './mergeTreeNodes'
 import { selectOpenTarget } from './selectOpenTarget'
 import { isFailureBlocked, rowGlyphColor, rowGlyphIcon, rowPhase } from './statusGlyph'
 import { failureLine } from './failureKinds'
+import { useBlurOnDragRegionPress } from '../layout/titleRow/dragRegion'
 import { t } from '../../i18n'
 // 「답을 기다리는 중」기호의 회전(클래스 `engram-glyph-spin`). 키프레임은 스타일시트가 소유한다.
 import './agentGlyph.css'
@@ -83,6 +84,8 @@ export default function AgentList() {
   useEffect(() => {
     if (editingId !== null) inputRef.current?.select()
   }, [editingId])
+  // 창 끌 자리(제목 줄) 누름에도 편집이 끝난다 — 확정은 onBlur 그대로.
+  useBlurOnDragRegionPress(editingId !== null, inputRef)
 
   const agents = useAgentStore(s => s.agents)
   const profiles = useAgentStore(s => s.profiles)
@@ -118,8 +121,9 @@ export default function AgentList() {
       const t = e.target as Node
       if (rowMenuRef.current && !rowMenuRef.current.contains(t)) setRowMenu(null)
     }
-    document.addEventListener('mousedown', h)
-    return () => document.removeEventListener('mousedown', h)
+    // 캡처 단계 — 창 끌 자리 누름은 거품 단계에 닿지 않는다(`layout/titleRow/dragRegion.ts`).
+    document.addEventListener('mousedown', h, true)
+    return () => document.removeEventListener('mousedown', h, true)
   }, [rowMenu])
 
   useEffect(() => {

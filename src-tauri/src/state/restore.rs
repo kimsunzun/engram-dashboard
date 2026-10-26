@@ -756,7 +756,7 @@ impl RestoreCoordinator {
             .filter(|(label, _)| label.as_str() != MAIN_WINDOW_LABEL)
             .map(|(label, window)| (label.clone(), window.attrs))
             .collect();
-        // 같은 접두 + 십진 순번이라 (길이, 글자) 순이 발급 순이다.
+        // 같은 접두 · 같은 실행 표식(한 발급기) + 십진 순번이라 (길이, 글자) 순이 발급 순이다.
         popouts.sort_by_key(|(label, _)| (label.len(), label.clone()));
         {
             let live = self
@@ -909,7 +909,7 @@ impl RestoreCoordinator {
             return;
         };
         for label in labels {
-            if let Err(e) = mgr.close_window(label) {
+            if let Err(e) = mgr.drop_window_gone(label) {
                 tracing::debug!(module = "state", label = %label, error = %e, "이미 모델에 없는 복원 팝아웃");
             }
         }
@@ -1013,6 +1013,7 @@ mod tests {
         TabEntry {
             id: Uuid::new_v4(),
             name: "탭".into(),
+            named: Some(true),
             focused_slot_id: None,
             layout: PersistedNode::Slot {
                 id: Uuid::new_v4(),
@@ -1024,6 +1025,7 @@ mod tests {
     fn window(id: &str, kind: WindowKind) -> WindowEntry {
         WindowEntry {
             id: id.into(),
+            number: None,
             kind,
             theme: None,
             bounds: None,
@@ -1456,8 +1458,7 @@ mod tests {
 
     // ── 복원 조율자 ──
 
-    use crate::commands::popout::PopupCounter;
-    use crate::layout::{tree, WindowPlacement};
+    use crate::layout::{tree, TabName, WindowPlacement};
     use crate::settings::SettingsService;
     use crate::state::convert::to_persisted;
     use crate::theme::{EffectiveThemes, ThemeWindows, UiSettingsPayload, UiTheme};
@@ -1801,12 +1802,24 @@ mod tests {
         }
     }
 
+    // 실행 표식 없는 꼴(`slot-popup-<n>`)로 단조 발급한다 — 이 시험들이 기대 label 을 글자 그대로 적으려고 쓴다. 실
+    //   발급기(`PopupCounter`)의 꼴과 그 꼴에서도 (길이, 글자) 순이 발급 순인 것은 `commands::popout` 시험이 잰다.
+    #[derive(Default)]
+    struct SeqLabels(std::sync::atomic::AtomicU64);
+
+    impl LabelSource for SeqLabels {
+        fn next_label(&self) -> String {
+            let n = self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            format!("slot-popup-{n}")
+        }
+    }
+
     struct Rig {
         coordinator: RestoreCoordinator,
         service: Arc<RestoreService>,
         notices: Arc<Recorder>,
         layout: LayoutState,
-        labels: Arc<PopupCounter>,
+        labels: Arc<SeqLabels>,
         windows: Arc<FakeWindows>,
         events: Arc<FakeEvents>,
         subs: Arc<FakeSubs>,
@@ -1818,12 +1831,12 @@ mod tests {
 
     impl Rig {
         /// `labels` = 조율자의 발급기 — `None` 이면 런타임 팝아웃과 같은 것(`self.labels`).
-        fn new(labels: Option<Arc<PopupCounter>>) -> Self {
+        fn new(labels: Option<Arc<SeqLabels>>) -> Self {
             let service = Arc::new(RestoreService::new());
             let notices = Arc::new(Recorder::default());
             service.set_notifier(notices.clone());
             let layout = LayoutState::new();
-            let shared = Arc::new(PopupCounter::default());
+            let shared = Arc::new(SeqLabels::default());
             let coordinator = RestoreCoordinator::new(
                 service.clone(),
                 layout.clone(),
@@ -1964,7 +1977,10 @@ mod tests {
                 "번호는 지금 값에서 하나씩 오른다"
             );
             let main = &mgr.windows[MAIN_WINDOW_LABEL];
-            assert_eq!(mgr.views[&main.active].name, "지난 탭");
+            assert_eq!(
+                mgr.views[&main.active].name,
+                TabName::Named("지난 탭".into())
+            );
             assert_eq!(main.attrs.bounds, Some(rect(100.0, 80.0, 1200.0, 800.0)));
             assert!(!mgr.views.contains_key(&live_view));
             let popout = &mgr.windows["slot-popup-2"];
@@ -2239,6 +2255,13 @@ mod tests {
         );
         assert!(rig.ports_called_with_the_lock_free());
         assert_eq!(rig.service.status().crash_copy, CrashCopyStatus::Answered);
+        // 사라진 사본 창의 `Destroyed` 는 이미 지나갔다 — 번호를 곧바로 내놓아 다음 새 창이 받는다(TRD S26-window-chrome
+        //   §4-1 · §5-6).
+        let mut mgr = rig.layout.0.lock().unwrap();
+        assert!(mgr.closing_numbers().is_empty());
+        mgr.create_window("slot-popup-9").unwrap();
+        assert_eq!(mgr.windows["slot-popup-9"].number, 2);
+        mgr.assert_number_invariants();
     }
 
     #[test]
@@ -2435,7 +2458,8 @@ mod tests {
             );
             let main = &mgr.windows[MAIN_WINDOW_LABEL];
             assert_ne!(
-                mgr.views[&main.active].name, "지난 탭",
+                mgr.views[&main.active].name,
+                TabName::Named("지난 탭".into()),
                 "main 은 사본으로 안 바뀌었다"
             );
         }
@@ -2452,7 +2476,7 @@ mod tests {
     #[test]
     fn a_label_source_that_collides_with_a_live_popout_fails_before_any_window() {
         // 조율자만 따로 센다 — 떠 있는 `slot-popup-1` 과 같은 label 을 낸다.
-        let rig = Rig::new(Some(Arc::new(PopupCounter::default())));
+        let rig = Rig::new(Some(Arc::new(SeqLabels::default())));
         rig.attach();
         rig.live_popout();
         let windows = previous_screen(1, false);

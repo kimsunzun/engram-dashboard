@@ -100,13 +100,37 @@ pub enum LayoutNode {
     },
 }
 
+/// 탭 이름의 출처(TRD S26-window-chrome §3-1 · PRD R4) — `Auto` = 이름을 정하지 않았다(보이는 이름은 그때그때
+/// `tab_name::effective_tab_name` 이 포커스 슬롯에서 셈한다) · `Named` = 사람 · LLM 이 정한 이름(빈 글자 · 공백뿐인
+/// 글자는 담지 않는다).
+// 자동 탭의 이름을 문자열로 쥐지 않는다 — 낡은 문자열(「View 1」)을 누가 바로 읽으면 OS 제목이 그 글자를 보인다(AC3).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[serde(tag = "type", content = "name", rename_all = "snake_case")]
+#[ts(export)]
+// ADR-0301 — 탭 이름 · OS 제목
+pub enum TabName {
+    Auto,
+    Named(String),
+}
+
+impl TabName {
+    /// 정한 이름 — 빈 글자 · 공백뿐이면 `None`(AC36). 글자는 다듬지 않고 그대로 쥔다.
+    pub fn named(name: String) -> Option<Self> {
+        (!name.trim().is_empty()).then_some(TabName::Named(name))
+    }
+
+    pub fn is_named(&self) -> bool {
+        matches!(self, TabName::Named(_))
+    }
+}
+
 /// 한 View(탭/팝업 하나) = 레이아웃 트리 + 포커스 슬롯.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct View {
     #[ts(type = "string")]
     pub id: Uuid,
-    pub name: String,
+    pub name: TabName,
     pub layout: LayoutNode,
     /// 가리키던 슬롯이 사라지면 트리 첫 슬롯으로 폴백.
     #[ts(type = "string | null")]
@@ -119,7 +143,11 @@ pub struct View {
 pub struct ViewMeta {
     #[ts(type = "string")]
     pub id: Uuid,
+    /// 보이는 이름 — 정한 이름이거나, 정하지 않았으면 그 순간의 자동 이름(포커스 슬롯의 이름).
     pub name: String,
+    /// 이름을 정했나 — 거짓이면 `name` 은 슬롯 내용 · 포커스를 따라 바뀐다. 같은 글자로 이름 바꾸기를 보내면 그
+    /// 이름을 정한 것이 된다(TRD S26-window-chrome §3-1).
+    pub named: bool,
 }
 
 /// `get_view` 응답 + `layout:updated` 페이로드.

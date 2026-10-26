@@ -133,6 +133,11 @@ pub(crate) fn commit(app: &AppHandle, claim: &SpareClaim) {
         );
         return;
     };
+    // 들인 창의 열기 표시는 들임 알림(`spare:adopted`)보다 먼저다 — 알림 · 탭을 받은 페이지가 번호 표식 · 창 단추를 그리며
+    //   처음 보내는 최소 크기 보고가 넓혀 당긴다(TRD S26-window-chrome §7-7). 대기 중 페이지는 창 번호가 없어 보고하지
+    //   않는다(`TitleRow`) — 그래서 날아가던 대기 중 보고가 이 표시를 먼저 거둘 일이 없다(같은 페이지라 보고 순번으로는 대기
+    //   중 보고와 들인 뒤 보고를 가를 수 없다). 확정이 닫기로 끝나면 그 창의 `Destroyed` 가 표시를 잊는다.
+    crate::chrome::mark_opening(app, &claim.label);
     spare.commit(&layout, claim, &TauriCommitPort { app });
 }
 
@@ -303,9 +308,6 @@ mod tests {
     impl LabelSource for Labels {
         fn next_label(&self) -> String {
             format!("slot-popup-{}", self.0.fetch_add(1, Ordering::SeqCst) + 1)
-        }
-        fn tab_name(&self, label: &str) -> String {
-            label.to_owned()
         }
     }
 

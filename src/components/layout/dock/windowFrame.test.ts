@@ -1,4 +1,4 @@
-// TRD S21-slot-docking §3-8: 창 사실 받기 — 구독 뒤 당기기 · 사건이 당기기 답을 이김 · 깨진 몸 거름 · 떼기 · Tauri `target`.
+// TRD S21-slot-docking §3-8: 창 사실 받기 — 구독 뒤 당기기 · 사건이 당기기 답을 이김 · 깨진 몸 거름 · 떼기 · 바뀜 알림 · Tauri `target`.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -18,8 +18,21 @@ import {
   windowFrame,
 } from './windowFrame'
 
-const PULLED: WindowFrame = { restored: { w: 1200, h: 800 }, maximized: false, insets: { t: 31, r: 8, b: 8, l: 8 } }
-const PUSHED: WindowFrame = { restored: { w: 1000, h: 700 }, maximized: true, insets: { t: 31, r: 8, b: 8, l: 8 } }
+const CAPTION = { buttons: true, leading_inset: 0, snap_overlay: false }
+const PULLED: WindowFrame = {
+  restored: { w: 1200, h: 800 },
+  maximized: false,
+  insets: { t: 31, r: 8, b: 8, l: 8 },
+  focused: true,
+  caption: CAPTION,
+}
+const PUSHED: WindowFrame = {
+  restored: { w: 1000, h: 700 },
+  maximized: true,
+  insets: { t: 31, r: 8, b: 8, l: 8 },
+  focused: false,
+  caption: CAPTION,
+}
 
 function fakeIpc() {
   let handler: ((payload: unknown) => void) | undefined
@@ -94,11 +107,14 @@ describe('windowFrame', () => {
       { ...PUSHED, maximized: 'yes' },
       { ...PUSHED, insets: { t: 1, r: 1, b: 1 } },
       { ...PUSHED, restored: { w: 'a', h: 1 } },
+      { ...PUSHED, focused: 'yes' },
+      { ...PUSHED, caption: undefined },
+      { ...PUSHED, caption: { buttons: true, leading_inset: 0 } },
     ]) {
       f.push(bad)
     }
     expect(src.current()).toBeNull()
-    expect(warn).toHaveBeenCalledTimes(5)
+    expect(warn).toHaveBeenCalledTimes(8)
   })
 
   it('떼면 등록을 풀고 그 뒤 값을 바꾸지 않는다 · 등록 전에 떼면 늦은 등록을 곧바로 푼다', async () => {
@@ -121,6 +137,28 @@ describe('windowFrame', () => {
     await flush()
     expect(g.unlisten).toHaveBeenCalledTimes(1)
     expect(g.ipc.invoke).not.toHaveBeenCalled()
+  })
+
+  it('구독자는 받은 값(답 · 사건)마다 불리고 버린 몸에는 안 불린다 · 그 사이 current 는 같은 참조 · 떼면 안 불린다', async () => {
+    const f = fakeIpc()
+    const src = createWindowFrame(f.ipc)
+    const seen: (WindowFrame | null)[] = []
+    const off = src.subscribe(() => seen.push(src.current()))
+    src.install()
+    f.registered()
+    await flush()
+    f.answer(PULLED)
+    await flush()
+    expect(seen).toEqual([PULLED])
+    expect(src.current()).toBe(src.current())
+
+    f.push({ ...PUSHED, focused: 'yes' })
+    f.push(PUSHED)
+    expect(seen).toEqual([PULLED, PUSHED])
+
+    off()
+    f.push({ ...PUSHED, maximized: false })
+    expect(seen).toHaveLength(2)
   })
 
   it('Tauri 어댑터 — 자기 창 label 을 타깃으로 듣고 `window_frame` 을 당긴다', async () => {

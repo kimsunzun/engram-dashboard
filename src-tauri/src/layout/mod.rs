@@ -8,13 +8,18 @@ pub mod dock;
 pub mod drag_size;
 pub mod geometry;
 pub mod manager;
+pub mod numbering;
 pub mod spatial;
+pub mod tab_name;
 pub mod tree;
 pub mod types;
+pub mod window_arg;
+pub mod window_ctl;
 
 pub use apply::{
     AgentSpawner, DockDest, DockOutcome, DockRequest, LabelSource, LayoutEvents, MoveFailed,
-    MoveStep, SlotMove, SpareClaim, SubscriptionSync, WindowHost, WindowPlace, WindowTabsPayload,
+    MoveStep, NewWindow, SlotMove, SpareClaim, SubscriptionSync, WindowHost, WindowPlace,
+    WindowTabsPayload,
 };
 pub use manager::{
     CanvasPx, CloseTabOutcome, LayoutError, SlotPx, SpawnSlotError, SplitRatioResult, ViewManager,
@@ -22,8 +27,8 @@ pub use manager::{
 };
 pub use spatial::{compute_spatial, resolve_spatial, Neighbors, SlotSpatial, SpatialToken};
 pub use types::{
-    LayoutNode, SlotContent, SplitDir, SplitRatioApplied, SplitRatioOutcome, UiMetrics, View,
-    ViewMeta, ViewSnapshot,
+    LayoutNode, SlotContent, SplitDir, SplitRatioApplied, SplitRatioOutcome, TabName, UiMetrics,
+    View, ViewMeta, ViewSnapshot,
 };
 
 use std::sync::{Arc, Mutex};
@@ -37,6 +42,26 @@ pub struct LayoutState(pub Arc<Mutex<ViewManager>>);
 impl LayoutState {
     pub fn new() -> Self {
         Self(Arc::new(Mutex::new(ViewManager::new())))
+    }
+}
+
+/// 팝아웃 OS 창 `label` 의 `Destroyed` 몫의 번호 풀기 — 소멸 정리(`commands::popout::cleanup_popup_window`)를 부를
+/// 상태가 없을 때의 대신이다(TRD S26-window-chrome §4-1). 닫히는 창이면 그 번호를 풀고, 아직 모델에 있던 창이면
+/// 항목째 빼 곧바로 푼다. 라우팅 표 재계산 · 구독 정리 · 묘비는 하지 않는다 — 그래서 정리를 부를 수 있으면 이것을
+/// 부르지 않는다(정리가 번호 풀기를 그 셋과 한 락 안에서 한다). main · 모르는 label · 두 번째 부름은 무동작이고,
+/// 락이 오염됐으면 아무것도 하지 않는다.
+// ADR-0300 — 창 번호
+pub fn release_window_number(state: &LayoutState, label: &str) {
+    if label == MAIN_WINDOW_LABEL {
+        return;
+    }
+    let Ok(mut mgr) = state.0.lock() else {
+        tracing::warn!(label, "창 번호 풀기: lock poisoned — 건너뛴다");
+        return;
+    };
+    mgr.release_closing(label);
+    if mgr.windows.contains_key(label) {
+        let _ = mgr.drop_window_gone(label);
     }
 }
 

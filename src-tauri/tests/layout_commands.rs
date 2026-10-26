@@ -40,7 +40,7 @@ use engram_dashboard_protocol::{
     command_request_id, event_reply_request_id, AgentCommand, AgentEvent,
 };
 
-use engram_dashboard_lib::commands::popout::PopupCounter;
+use engram_dashboard_lib::commands::popout::{popup_label, PopupCounter};
 use engram_dashboard_lib::daemon_client::connection::{
     accept_inbound, outcome_sink, registration_command, ConnectionCommand, OutcomeSender,
 };
@@ -51,10 +51,15 @@ use engram_dashboard_lib::layout::apply;
 use engram_dashboard_lib::layout::commands::{
     make_table, LayoutPorts, RestoreAnswerArgs, RestoreStatusArgs, SettingsGetArgs,
     SettingsResetArgs, SettingsSchemaArgs, SettingsSetArgs, SlotPopoutArgs, SplitListArgs,
-    SplitSetRatioArgs, WindowGetThemeArgs, WindowListArgs, WindowSetThemeArgs, CATALOG_VERSION,
-    COMMAND_SPECS,
+    SplitSetRatioArgs, WindowCloseArgs, WindowGetThemeArgs, WindowHideAllArgs, WindowListArgs,
+    WindowMaximizeArgs, WindowMinimizeArgs, WindowRaiseArgs, WindowSetThemeArgs, WindowShowAllArgs,
+    WindowUnmaximizeArgs, CATALOG_VERSION, COMMAND_SPECS,
 };
 use engram_dashboard_lib::layout::geometry::Insets;
+use engram_dashboard_lib::layout::tab_name::effective_tab_name;
+use engram_dashboard_lib::layout::window_ctl::{
+    Activation, Applied, OsWindowState, WindowAction, WindowControl,
+};
 use engram_dashboard_lib::layout::{
     tree, AgentSpawner, LayoutEvents, LayoutState, MoveFailed, SlotContent, SpareClaim, SplitDir,
     SplitRatioApplied, SplitRatioOutcome, SubscriptionSync, UiMetrics, ViewManager, ViewSnapshot,
@@ -178,6 +183,75 @@ impl WindowHost for Windows {
             .lock()
             .unwrap()
             .push(format!("release:{}", claim.label));
+    }
+}
+
+/// 창 상태 포트 대역 — 부른 차례(`"apply:<label>:<동작>"` · `"apply_unmodeled:<label>:<동작>"` · `"show_all:<갈래>"` ·
+/// `"hide_all"` · `"state:<label>"`)와 부른 스레드를 남기고, 꾸민 답을 낸다. `state` 는 `states` 에 없는 창이면 OS 창이
+/// 없다고 답한다. `unmodeled` = 모델 밖 창으로 답할 label(묻기는 차례에 남기지 않는다 — 모델에 없는 인자마다 불린다).
+#[derive(Default)]
+struct Control {
+    calls: Mutex<Vec<String>>,
+    threads: Mutex<Vec<std::thread::ThreadId>>,
+    answer: Mutex<Option<Result<Applied, String>>>,
+    focused: Mutex<bool>,
+    states: Mutex<BTreeMap<String, OsWindowState>>,
+    unmodeled: Mutex<BTreeSet<String>>,
+}
+
+impl Control {
+    fn note(&self, call: String) {
+        self.calls.lock().unwrap().push(call);
+        self.threads
+            .lock()
+            .unwrap()
+            .push(std::thread::current().id());
+    }
+
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    fn answer_with(&self, answer: Result<Applied, String>) {
+        *self.answer.lock().unwrap() = Some(answer);
+    }
+}
+
+impl WindowControl for Control {
+    fn apply(&self, label: &str, action: WindowAction) -> Result<Applied, String> {
+        self.note(format!("apply:{label}:{action:?}"));
+        self.answer
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or(Ok(Applied::default()))
+    }
+
+    fn show_all(&self, how: Activation) -> bool {
+        self.note(format!("show_all:{how:?}"));
+        *self.focused.lock().unwrap()
+    }
+
+    fn hide_all(&self) {
+        self.note("hide_all".to_string());
+    }
+
+    fn state(&self, label: &str) -> Option<OsWindowState> {
+        self.note(format!("state:{label}"));
+        self.states.lock().unwrap().get(label).copied()
+    }
+
+    fn is_unmodeled(&self, label: &str) -> bool {
+        self.unmodeled.lock().unwrap().contains(label)
+    }
+
+    fn apply_unmodeled(&self, label: &str, action: WindowAction) -> Result<Applied, String> {
+        self.note(format!("apply_unmodeled:{label}:{action:?}"));
+        self.answer
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or(Ok(Applied::default()))
     }
 }
 
@@ -460,6 +534,7 @@ fn envelope(name: &str, args: serde_json::Value, request_id: RequestId) -> Comma
 struct World {
     state: LayoutState,
     windows: Arc<Windows>,
+    control: Arc<Control>,
     /// 표가 쥔 것과 같은 테마 손잡이 — 창 쪽은 `theme_windows`(main · 모델 밖 팝아웃).
     themes: ThemeControl,
     theme_windows: Arc<RecordingWindows>,
@@ -480,6 +555,7 @@ impl World {
     fn build() -> (World, LayoutPorts) {
         let state = LayoutState::new();
         let windows = Arc::new(Windows::new(state.clone()));
+        let control = Arc::new(Control::default());
         let config = ConfigDir::new();
         let settings = config.service();
         let theme_windows = Arc::new(RecordingWindows::new(&[
@@ -510,6 +586,7 @@ impl World {
             windows: Arc::clone(&windows) as Arc<dyn WindowHost>,
             labels,
             spawner: Arc::new(DaemonSpawner { requests: tx }),
+            control: Arc::clone(&control) as Arc<dyn WindowControl>,
             themes: themes.clone(),
             settings: Arc::clone(&settings),
             settings_events: Arc::clone(&settings_events) as Arc<dyn SettingsEvents>,
@@ -519,6 +596,7 @@ impl World {
             World {
                 state,
                 windows,
+                control,
                 themes,
                 theme_windows,
                 settings,
@@ -651,8 +729,14 @@ fn the_table_holds_exactly_the_declared_commands() {
             "window.close",
             "window.create",
             "window.getTheme",
+            "window.hideAll",
             "window.list",
+            "window.maximize",
+            "window.minimize",
+            "window.raise",
             "window.setTheme",
+            "window.showAll",
+            "window.unmaximize",
         ]
     );
     assert_eq!(names.len(), COMMAND_SPECS.len(), "선언은 있는데 안 꽂힌 것");
@@ -678,9 +762,30 @@ fn the_catalog_generation_is_pinned_to_the_declaration_set() {
     //   `window.getTheme` · `restore.status` 것만 바뀌었다). 세대 16 은 `restore.status` 의 `state_file` **어휘**가
     //   늘고(`newer`) `settings.set` · `settings.reset` 의 **오류 선언**에 `CONFLICT` 가 든 세대다(ADR-0291). 세대 17 은
     //   그 둘이 지금 못 읽은 설정 파일을 `INTERNAL` 대신 `CONFLICT` 로 답하는 **답 어휘**와 summary 가 바뀐 세대다
-    //   (ADR-0291 R17).
-    assert_eq!(CATALOG_VERSION, 17);
-    assert_eq!(COMMAND_SPECS.len(), 26);
+    //   (ADR-0291 R17). 세대 18 은 `tab.list` 의 탭 칸에 `named` 가 붙고 `name` 이 보이는 이름이 된
+    //   **답 모양**의 세대다(TRD S26-window-chrome §3-2 · §6-6 · `tab.create` · `tab.rename` 의 summary 와 `name` 앞뒤
+    //   공백 깎기도 같은 세대). 세대 19 는 창 인자가 받는 **어휘**(영속 id)와 **오류 어휘**(숫자만 = `INVALID_ARGUMENT` ·
+    //   앞 실행의 label = `CONFLICT`)가 바뀌고 `window.create` · `slot.popout` 의 **답 모양**에 `window_id` · `number` 가 든
+    //   세대다(TRD S26-window-chrome §4-5 · §5-3 · §6-6). 세대 20 은 이름이 여섯 늘고(창 상태 명령) `window.close` 의
+    //   **인자 · 답 모양**(`if_empty` · `outcome` — main 은 거절 대신 모두 숨기기)과 `window.list` 의 **답 모양**(`details`)이
+    //   바뀐 세대다(TRD S26-window-chrome §6-1 · §6-6).
+    assert_eq!(CATALOG_VERSION, 20);
+    assert_eq!(COMMAND_SPECS.len(), 32);
+    for since in [
+        WindowMinimizeArgs::SPEC.since,
+        WindowMaximizeArgs::SPEC.since,
+        WindowUnmaximizeArgs::SPEC.since,
+        WindowRaiseArgs::SPEC.since,
+        WindowHideAllArgs::SPEC.since,
+        WindowShowAllArgs::SPEC.since,
+    ] {
+        assert_eq!(since, 20);
+    }
+    assert_eq!(
+        WindowCloseArgs::SPEC.since,
+        1,
+        "모양이 바뀐 명령은 처음 들어온 세대를 그대로 광고한다"
+    );
     assert_eq!(
         SlotPopoutArgs::SPEC.since,
         2,
@@ -818,6 +923,138 @@ async fn a_read_command_answers_from_the_same_authority() {
     );
 }
 
+/// `tab.list` 의 탭 칸은 이름을 정했나를 싣는다 — 이름 없이 만든 탭은 자동 이름(포커스 칸의 낱말)이고, 그 글자
+/// 그대로 `tab.rename` 해도 정한 이름이 된다(TRD S26-window-chrome §3-1 · §3-2).
+#[tokio::test]
+async fn tab_list_says_whether_each_tab_name_was_set() {
+    let (world, queue, receiver) = queued();
+    let auto = call(
+        &receiver,
+        &queue,
+        &world.mail,
+        "tab.create",
+        json!({ "window": MAIN_WINDOW_LABEL }),
+    )
+    .await
+    .outcome
+    .expect("자동 이름 탭");
+    let named = call(
+        &receiver,
+        &queue,
+        &Mailbox::default(),
+        "tab.create",
+        json!({ "window": MAIN_WINDOW_LABEL, "name": "작업" }),
+    )
+    .await
+    .outcome
+    .expect("이름을 정한 탭");
+    async fn list(receiver: &InboundReceiver, queue: &Queued) -> serde_json::Value {
+        call(
+            receiver,
+            queue,
+            &Mailbox::default(),
+            "tab.list",
+            json!({ "window": MAIN_WINDOW_LABEL }),
+        )
+        .await
+        .outcome
+        .expect("탭 목록")
+    }
+    let row = |listed: &serde_json::Value, id: &serde_json::Value| {
+        listed["tabs"]
+            .as_array()
+            .expect("배열")
+            .iter()
+            .find(|t| t["id"] == *id)
+            .cloned()
+            .expect("그 탭")
+    };
+
+    let listed = list(&receiver, &queue).await;
+    assert_eq!(
+        row(&listed, &auto["view_id"]),
+        json!({ "id": auto["view_id"], "name": "빈 칸", "named": false })
+    );
+    assert_eq!(
+        row(&listed, &named["view_id"]),
+        json!({ "id": named["view_id"], "name": "작업", "named": true })
+    );
+
+    call(
+        &receiver,
+        &queue,
+        &Mailbox::default(),
+        "tab.rename",
+        json!({ "view_id": auto["view_id"], "name": "빈 칸" }),
+    )
+    .await
+    .outcome
+    .expect("같은 글자로 이름 바꾸기");
+    assert_eq!(
+        row(&list(&receiver, &queue).await, &auto["view_id"]),
+        json!({ "id": auto["view_id"], "name": "빈 칸", "named": true })
+    );
+}
+
+/// `tab.create` · `tab.rename` 은 `name` 앞뒤 공백을 깎아 정한다 — 웹 레지스트리 `tab.rename` · 탭바 편집과 같은 글자가
+/// 된다.
+#[tokio::test]
+async fn tab_create_and_rename_trim_the_name() {
+    let (world, queue, receiver) = queued();
+    let created = call(
+        &receiver,
+        &queue,
+        &world.mail,
+        "tab.create",
+        json!({ "window": MAIN_WINDOW_LABEL, "name": "  작업 \t" }),
+    )
+    .await
+    .outcome
+    .expect("이름을 정한 탭");
+    async fn name_of(
+        receiver: &InboundReceiver,
+        queue: &Queued,
+        id: &serde_json::Value,
+    ) -> serde_json::Value {
+        let listed = call(
+            receiver,
+            queue,
+            &Mailbox::default(),
+            "tab.list",
+            json!({ "window": MAIN_WINDOW_LABEL }),
+        )
+        .await
+        .outcome
+        .expect("탭 목록");
+        listed["tabs"]
+            .as_array()
+            .expect("배열")
+            .iter()
+            .find(|t| t["id"] == *id)
+            .expect("그 탭")["name"]
+            .clone()
+    }
+    assert_eq!(
+        name_of(&receiver, &queue, &created["view_id"]).await,
+        json!("작업")
+    );
+
+    call(
+        &receiver,
+        &queue,
+        &Mailbox::default(),
+        "tab.rename",
+        json!({ "view_id": created["view_id"], "name": " 새 이름  " }),
+    )
+    .await
+    .outcome
+    .expect("이름 바꾸기");
+    assert_eq!(
+        name_of(&receiver, &queue, &created["view_id"]).await,
+        json!("새 이름")
+    );
+}
+
 #[tokio::test]
 async fn an_unknown_command_name_is_answered_not_dropped() {
     let (world, queue, receiver) = queued();
@@ -848,22 +1085,673 @@ async fn a_malformed_id_is_an_invalid_argument() {
 #[tokio::test]
 async fn an_unapplicable_request_keeps_the_services_reason() {
     let (world, queue, receiver) = queued();
+    let before = world.main_tabs();
     let err = error_of(
         call(
             &receiver,
             &queue,
             &world.mail,
-            "window.close",
-            json!({ "window": MAIN_WINDOW_LABEL }),
+            "tab.close",
+            json!({ "window": MAIN_WINDOW_LABEL, "view_id": uuid::Uuid::new_v4().to_string() }),
         )
         .await,
     );
     assert_eq!(err.code(), ErrorCode::Conflict);
     assert!(!err.message().is_empty(), "사유가 비어 나가면 고칠 수 없다");
+    assert_eq!(world.main_tabs(), before, "거절됐으면 아무것도 안 바뀐다");
     assert!(
         world.windows.closed.lock().unwrap().is_empty(),
         "거절됐으면 OS 창도 안 닫는다"
     );
+}
+
+// ── 창 상태 명령(TRD S26-window-chrome §6-1 · §10-2) ──
+
+/// 창 상태 동사는 창 인자를 푼 label 로 창 상태 포트에 가고 그 답 칸을 싣는다 — 포트는 블로킹 풀에서 불린다(실물이
+/// 메인 스레드 일을 기다린다 · §5-2).
+#[tokio::test]
+async fn window_state_verbs_reach_the_port_with_the_resolved_label() {
+    let (world, queue, receiver) = queued();
+    let created = call(&receiver, &queue, &world.mail, "window.create", json!({}))
+        .await
+        .outcome
+        .expect("창 생성");
+    let popout = created["window"].as_str().expect("label").to_string();
+    world.control.answer_with(Ok(Applied {
+        deferred: true,
+        pending: true,
+        shown_all: true,
+        focused: true,
+    }));
+
+    let mut answers = Vec::new();
+    for name in [
+        "window.minimize",
+        "window.maximize",
+        "window.unmaximize",
+        "window.raise",
+    ] {
+        answers.push(
+            call(
+                &receiver,
+                &queue,
+                &Mailbox::default(),
+                name,
+                json!({ "window": created["window_id"] }),
+            )
+            .await
+            .outcome
+            .expect(name),
+        );
+    }
+    assert_eq!(
+        answers,
+        [
+            json!({}),
+            json!({ "deferred": true }),
+            json!({ "deferred": true }),
+            json!({ "shown_all": true, "focused": true, "pending": true }),
+        ]
+    );
+    assert_eq!(
+        world.control.calls(),
+        [
+            format!("apply:{popout}:Minimize"),
+            format!("apply:{popout}:Maximize"),
+            format!("apply:{popout}:Unmaximize"),
+            format!("apply:{popout}:Raise"),
+        ]
+    );
+    let here = std::thread::current().id();
+    assert!(
+        world
+            .control
+            .threads
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|thread| *thread != here),
+        "창 상태 포트는 적용 태스크의 워커가 아니라 블로킹 풀에서 불린다"
+    );
+}
+
+/// 포트가 거절한 동작(보이지 않는 창 · OS 창 없음)은 `CONFLICT` + 그 문구다.
+#[tokio::test]
+async fn a_window_state_refusal_is_a_conflict_with_the_ports_reason() {
+    let (world, queue, receiver) = queued();
+    world.control.answer_with(Err(
+        "숨은 창 — 먼저 window.raise 또는 window.showAll".to_string()
+    ));
+    let err = error_of(
+        call(
+            &receiver,
+            &queue,
+            &world.mail,
+            "window.minimize",
+            json!({ "window": MAIN_WINDOW_LABEL }),
+        )
+        .await,
+    );
+    assert_eq!(err.code(), ErrorCode::Conflict);
+    assert!(err.message().contains("window.raise"), "{}", err.message());
+}
+
+/// `window.hideAll` 은 모두 숨기기, `window.showAll` 은 포커스를 빼앗지 않는 갈래로 모두 보이기에 가고 그 사실을 싣는다.
+#[tokio::test]
+async fn hide_all_and_show_all_reach_the_port() {
+    let (world, queue, receiver) = queued();
+    *world.control.focused.lock().unwrap() = true;
+    let hidden = call(&receiver, &queue, &world.mail, "window.hideAll", json!({}))
+        .await
+        .outcome
+        .expect("모두 숨기기");
+    let shown = call(
+        &receiver,
+        &queue,
+        &Mailbox::default(),
+        "window.showAll",
+        json!({}),
+    )
+    .await
+    .outcome
+    .expect("모두 보이기");
+    assert_eq!((hidden, shown), (json!({}), json!({ "focused": true })));
+    assert_eq!(world.control.calls(), ["hide_all", "show_all:NoSteal"]);
+}
+
+/// main 의 닫기는 거절이 아니라 모두 숨기기이고, 팝아웃의 닫기는 그 창을 닫는다(TRD §5-4).
+#[tokio::test]
+async fn window_close_hides_everything_for_main_and_closes_a_popout() {
+    let (world, queue, receiver) = queued();
+    let main = call(
+        &receiver,
+        &queue,
+        &world.mail,
+        "window.close",
+        json!({ "window": MAIN_WINDOW_LABEL }),
+    )
+    .await
+    .outcome
+    .expect("main 닫기");
+    assert_eq!(main, json!({ "outcome": "HiddenAll" }));
+    assert_eq!(world.control.calls(), ["hide_all"]);
+    assert!(
+        world.windows.closed.lock().unwrap().is_empty(),
+        "main 은 닫지 않는다"
+    );
+
+    let popout = call(
+        &receiver,
+        &queue,
+        &Mailbox::default(),
+        "window.create",
+        json!({}),
+    )
+    .await
+    .outcome
+    .expect("창 생성")["window"]
+        .as_str()
+        .expect("label")
+        .to_string();
+    let closed = call(
+        &receiver,
+        &queue,
+        &Mailbox::default(),
+        "window.close",
+        json!({ "window": popout }),
+    )
+    .await
+    .outcome
+    .expect("팝아웃 닫기");
+    assert_eq!(closed, json!({ "outcome": "Closed" }));
+    assert_eq!(world.windows.closed.lock().unwrap().as_slice(), &[popout]);
+}
+
+/// 모델 밖 창(모델에 없는데 OS 창은 열린 팝아웃 — 부팅 실패 화면의 낡은 팝아웃)의 창 단추가 보내는 명령 — 최소화 ·
+/// 최대화 · 원래 크기는 그 창에 바로 가고(모델 밖 동작) 닫기는 그 창을 거둔다(`Closed`). 앞으로 내기는 그대로 `CONFLICT`
+/// 다(TRD S26-window-chrome §6-2 「모델 밖 창」). 모델은 그대로다.
+#[tokio::test]
+async fn window_buttons_of_an_unmodeled_window_reach_its_os_window() {
+    let (world, queue, receiver) = queued();
+    world
+        .control
+        .unmodeled
+        .lock()
+        .unwrap()
+        .insert(UNMODELED_POPOUT_LABEL.to_string());
+    let before = apply::list_windows(&world.state).unwrap();
+
+    let mut answers = Vec::new();
+    for name in ["window.minimize", "window.maximize", "window.unmaximize"] {
+        answers.push(
+            call(
+                &receiver,
+                &queue,
+                &Mailbox::default(),
+                name,
+                json!({ "window": UNMODELED_POPOUT_LABEL }),
+            )
+            .await
+            .outcome
+            .expect(name),
+        );
+    }
+    assert_eq!(
+        answers,
+        [
+            json!({}),
+            json!({ "deferred": false }),
+            json!({ "deferred": false })
+        ]
+    );
+    let err = error_of(
+        call(
+            &receiver,
+            &queue,
+            &Mailbox::default(),
+            "window.raise",
+            json!({ "window": UNMODELED_POPOUT_LABEL }),
+        )
+        .await,
+    );
+    assert_eq!(err.code(), ErrorCode::Conflict);
+    let closed = call(
+        &receiver,
+        &queue,
+        &world.mail,
+        "window.close",
+        json!({ "window": UNMODELED_POPOUT_LABEL }),
+    )
+    .await
+    .outcome
+    .expect("모델 밖 창 닫기");
+    assert_eq!(closed, json!({ "outcome": "Closed" }));
+
+    assert_eq!(
+        world.control.calls(),
+        [
+            format!("apply_unmodeled:{UNMODELED_POPOUT_LABEL}:Minimize"),
+            format!("apply_unmodeled:{UNMODELED_POPOUT_LABEL}:Maximize"),
+            format!("apply_unmodeled:{UNMODELED_POPOUT_LABEL}:Unmaximize"),
+        ]
+    );
+    assert_eq!(
+        world.windows.closed.lock().unwrap().as_slice(),
+        &[UNMODELED_POPOUT_LABEL.to_string()]
+    );
+    assert_eq!(apply::list_windows(&world.state).unwrap(), before);
+}
+
+/// `if_empty` 는 해석기 앞에서 갈린다 — 모델에 없는 창 · 탭이 있는 창 어느 쪽에도 `CONFLICT` 를 내지 않는다. 숫자만인 인자는
+/// 그보다 먼저 `INVALID_ARGUMENT` 다(TRD §4-5 동사 차례).
+#[tokio::test]
+async fn window_close_if_empty_never_conflicts_but_still_refuses_a_number() {
+    let (world, queue, receiver) = queued();
+    let created = call(&receiver, &queue, &world.mail, "window.create", json!({}))
+        .await
+        .outcome
+        .expect("창 생성");
+    for window in [
+        created["window_id"].clone(),
+        json!(uuid::Uuid::new_v4().to_string()),
+        json!("slot-popup-1"),
+    ] {
+        let kept = call(
+            &receiver,
+            &queue,
+            &Mailbox::default(),
+            "window.close",
+            json!({ "window": window, "if_empty": true }),
+        )
+        .await
+        .outcome
+        .expect("비었으면 닫기");
+        assert_eq!(kept, json!({ "outcome": "Kept" }), "{window}");
+    }
+    assert!(world.windows.closed.lock().unwrap().is_empty());
+
+    let err = error_of(
+        call(
+            &receiver,
+            &queue,
+            &Mailbox::default(),
+            "window.close",
+            json!({ "window": "2", "if_empty": true }),
+        )
+        .await,
+    );
+    assert_eq!(err.code(), ErrorCode::InvalidArgument);
+    assert!(err.message().contains("window_id"), "{}", err.message());
+}
+
+/// `window.list` 는 `windows` 를 그대로 싣고 `details` 를 번호 순으로 더한다 — OS 창을 못 읽은 행은 상태가 모두 false 다.
+#[tokio::test]
+async fn window_list_keeps_windows_and_adds_details_in_number_order() {
+    let (world, queue, receiver) = queued();
+    let mut created = Vec::new();
+    for _ in 0..2 {
+        created.push(
+            call(
+                &receiver,
+                &queue,
+                &Mailbox::default(),
+                "window.create",
+                json!({}),
+            )
+            .await
+            .outcome
+            .expect("창 생성"),
+        );
+    }
+    let second = created[1]["window"].as_str().expect("label").to_string();
+    world.control.states.lock().unwrap().insert(
+        second.clone(),
+        OsWindowState {
+            visible: true,
+            maximized: true,
+            focused: true,
+            ..OsWindowState::default()
+        },
+    );
+
+    let listed = call(&receiver, &queue, &world.mail, "window.list", json!({}))
+        .await
+        .outcome
+        .expect("창 목록");
+    let row = |window: &serde_json::Value, number: u32, main: bool, visible: bool| {
+        json!({
+            "window_id": window["window_id"],
+            "window": window["window"],
+            "number": number,
+            "main": main,
+            "visible": visible,
+            "minimized": false,
+            "maximized": visible,
+            "focused": visible,
+        })
+    };
+    let main = json!({ "window_id": "main", "window": MAIN_WINDOW_LABEL });
+    assert_eq!(
+        listed["details"],
+        json!([
+            row(&main, 1, true, false),
+            row(&created[0], 2, false, false),
+            row(&created[1], 3, false, true),
+        ])
+    );
+    let mut windows: Vec<&str> = listed["windows"]
+        .as_array()
+        .expect("배열")
+        .iter()
+        .map(|v| v.as_str().expect("label"))
+        .collect();
+    windows.sort_unstable();
+    let mut want = vec![
+        MAIN_WINDOW_LABEL,
+        created[0]["window"].as_str().unwrap(),
+        second.as_str(),
+    ];
+    want.sort_unstable();
+    assert_eq!(windows, want);
+}
+
+// ── 창 인자(TRD S26-window-chrome §4-5 · §10-2) ──
+
+/// 창 인자를 받는 버스 동사 전부 — (이름, 창 인자에 `window` 를 넣은 인자). `view` · `slot` = 그 동사가 함께 받는 id.
+fn window_arg_calls(
+    window: &str,
+    view: uuid::Uuid,
+    slot: uuid::Uuid,
+) -> Vec<(&'static str, serde_json::Value)> {
+    let (view, slot) = (view.to_string(), slot.to_string());
+    vec![
+        ("tab.create", json!({ "window": window })),
+        ("tab.switch", json!({ "window": window, "view_id": view })),
+        ("tab.close", json!({ "window": window, "view_id": view })),
+        ("tab.list", json!({ "window": window })),
+        ("window.close", json!({ "window": window })),
+        ("window.minimize", json!({ "window": window })),
+        ("window.maximize", json!({ "window": window })),
+        ("window.unmaximize", json!({ "window": window })),
+        ("window.raise", json!({ "window": window })),
+        ("window.getTheme", json!({ "window": window })),
+        (
+            "window.setTheme",
+            json!({ "window": window, "theme": "light" }),
+        ),
+        (
+            "slot.popout",
+            json!({ "view_id": view, "slot_id": slot, "to_window": window }),
+        ),
+        (
+            "agent.spawnInto",
+            json!({ "window": window, "cwd": "C:/work" }),
+        ),
+        (
+            "slot.resolveSpatial",
+            json!({ "token": "top-left", "window": window }),
+        ),
+    ]
+}
+
+/// 숫자만인 창 인자는 창 번호로 읽혀 `INVALID_ARGUMENT` 다 — 그 번호의 창이 있어도 집지 않고(번호는 다시 쓰인다) 문구가
+/// window_id 로 안내한다. 아무것도 바뀌지 않는다.
+#[tokio::test]
+async fn a_window_number_is_an_invalid_argument_on_every_window_verb() {
+    let (mut world, queue, receiver) = queued();
+    let popout = call(&receiver, &queue, &world.mail, "window.create", json!({}))
+        .await
+        .outcome
+        .expect("창 생성")["window"]
+        .as_str()
+        .expect("label")
+        .to_string();
+    assert_eq!(apply::list_tabs(&world.state, &popout).unwrap().number, 2);
+    let (view, slot) = world.filled_slot();
+    let before = (
+        apply::list_windows(&world.state).unwrap(),
+        world.main_tabs(),
+        world.windows.opened.lock().unwrap().len(),
+    );
+
+    for (name, args) in window_arg_calls("2", view, slot) {
+        let err = error_of(call(&receiver, &queue, &Mailbox::default(), name, args).await);
+        assert_eq!(err.code(), ErrorCode::InvalidArgument, "{name}");
+        assert!(
+            err.message().contains("window_id"),
+            "{name}: {}",
+            err.message()
+        );
+    }
+    assert_eq!(
+        (
+            apply::list_windows(&world.state).unwrap(),
+            world.main_tabs(),
+            world.windows.opened.lock().unwrap().len(),
+        ),
+        before,
+        "번호 인자는 아무것도 바꾸지 않는다"
+    );
+    assert!(world.windows.closed.lock().unwrap().is_empty());
+    assert!(
+        world.control.calls().is_empty(),
+        "창 상태 포트까지 가지 않는다"
+    );
+    assert!(
+        world.spawn_requests.try_recv().is_err(),
+        "스폰까지 가지 않는다"
+    );
+    assert!(world.theme_windows.take().is_empty());
+}
+
+/// 영속 id(window_id)는 그 창의 label 과 같은 창에 닿는다 — 답의 `window` 는 label 이다.
+#[tokio::test]
+async fn a_window_id_reaches_the_same_window_as_its_label() {
+    let (world, queue, receiver) = queued();
+    let created = call(&receiver, &queue, &world.mail, "window.create", json!({}))
+        .await
+        .outcome
+        .expect("창 생성");
+    let popout = created["window"].as_str().expect("label").to_string();
+    let window_id = created["window_id"].as_str().expect("영속 id").to_string();
+    assert_ne!(window_id, popout);
+
+    let created = call(
+        &receiver,
+        &queue,
+        &Mailbox::default(),
+        "tab.create",
+        json!({ "window": window_id.to_uppercase() }),
+    )
+    .await
+    .outcome
+    .expect("영속 id 로 탭 만들기");
+    let listed = call(
+        &receiver,
+        &queue,
+        &Mailbox::default(),
+        "tab.list",
+        json!({ "window": window_id }),
+    )
+    .await
+    .outcome
+    .expect("영속 id 로 탭 목록");
+    assert_eq!(listed["window"].as_str(), Some(popout.as_str()));
+    assert_eq!(listed["active"], created["view_id"]);
+    assert_eq!(listed["tabs"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        call(
+            &receiver,
+            &queue,
+            &Mailbox::default(),
+            "tab.list",
+            json!({ "window": "main" }),
+        )
+        .await
+        .outcome
+        .expect("main")["window"],
+        json!(MAIN_WINDOW_LABEL)
+    );
+}
+
+/// 앞 실행의 label(실행 표식이 없는 옛 꼴 · 다른 실행 표식)과 닫힌 창의 영속 id 는 지금 창을 가리키지 않는다 —
+/// `CONFLICT` 이고 문구가 그 인자를 싣는다.
+#[tokio::test]
+async fn a_label_from_a_previous_run_or_a_closed_window_id_is_a_conflict() {
+    let (world, queue, receiver) = queued();
+    let popout = call(&receiver, &queue, &world.mail, "window.create", json!({}))
+        .await
+        .outcome
+        .expect("창 생성")["window"]
+        .as_str()
+        .expect("label")
+        .to_string();
+    assert_eq!(popout, popup_label(1));
+    let (run, _) = popout
+        .strip_prefix("slot-popup-")
+        .and_then(|rest| rest.split_once('-'))
+        .expect("실행 표식");
+    let other_run = if run == "00000000" {
+        "11111111"
+    } else {
+        "00000000"
+    };
+    let closed = call(
+        &receiver,
+        &queue,
+        &Mailbox::default(),
+        "window.create",
+        json!({}),
+    )
+    .await
+    .outcome
+    .expect("창 생성")["window"]
+        .as_str()
+        .expect("label")
+        .to_string();
+    let closed_id = apply::list_tabs(&world.state, &closed).unwrap().window_id;
+    call(
+        &receiver,
+        &queue,
+        &Mailbox::default(),
+        "window.close",
+        json!({ "window": closed }),
+    )
+    .await
+    .outcome
+    .expect("닫기");
+    let (view, slot) = world.filled_slot();
+
+    for stale in [
+        "slot-popup-1".to_string(),
+        format!("slot-popup-{other_run}-1"),
+        closed_id,
+    ] {
+        for (name, args) in window_arg_calls(&stale, view, slot) {
+            let err = error_of(call(&receiver, &queue, &Mailbox::default(), name, args).await);
+            assert_eq!(err.code(), ErrorCode::Conflict, "{name} {stale}");
+            assert!(err.message().contains(&stale), "{name}: {}", err.message());
+        }
+    }
+    assert!(
+        world.slots(view).contains(&slot),
+        "옮기려던 슬롯은 그 자리에 있다"
+    );
+}
+
+/// 새 창을 여는 버스 동사의 답은 그 창의 영속 id · 번호를 싣는다 — 탭 목록과 같은 값이고, 기존 창으로 옮긴 `slot.popout` 은
+/// 그 창의 것이다(TRD S26-window-chrome §5-3 · §10-2).
+#[tokio::test]
+async fn new_window_answers_carry_the_windows_id_and_number() {
+    let (world, queue, receiver) = queued();
+    let identity = |label: &str| {
+        let tabs = apply::list_tabs(&world.state, label).expect("그 창");
+        (tabs.window_id, tabs.number)
+    };
+    let check = |answer: &serde_json::Value, want_number: u32| {
+        let label = answer["window"].as_str().expect("label");
+        let (window_id, number) = identity(label);
+        assert_eq!(
+            answer["window_id"].as_str(),
+            Some(window_id.as_str()),
+            "{answer}"
+        );
+        assert_eq!(answer["number"], json!(number), "{answer}");
+        assert_eq!(number, want_number, "{answer}");
+        assert!(uuid::Uuid::parse_str(&window_id).is_ok(), "{answer}");
+    };
+
+    let created = call(&receiver, &queue, &world.mail, "window.create", json!({}))
+        .await
+        .outcome
+        .expect("창 생성");
+    check(&created, 2);
+
+    let (view, slot) = world.filled_slot();
+    let popped = call(
+        &receiver,
+        &queue,
+        &Mailbox::default(),
+        "slot.popout",
+        json!({ "view_id": view.to_string(), "slot_id": slot.to_string() }),
+    )
+    .await
+    .outcome
+    .expect("새 창으로 분리");
+    check(&popped, 3);
+
+    let (view, slot) = world.filled_slot();
+    let into = call(
+        &receiver,
+        &queue,
+        &Mailbox::default(),
+        "slot.popout",
+        json!({
+            "view_id": view.to_string(),
+            "slot_id": slot.to_string(),
+            "to_window": created["window_id"],
+        }),
+    )
+    .await
+    .outcome
+    .expect("영속 id 로 기존 창에 분리");
+    assert_eq!(into["window"], created["window"]);
+    check(&into, 2);
+
+    *world.windows.spare.lock().unwrap() = Some(SPARE.to_string());
+    let prewarmed = call(
+        &receiver,
+        &queue,
+        &Mailbox::default(),
+        "window.create",
+        json!({}),
+    )
+    .await
+    .outcome
+    .expect("예열 창으로 생성");
+    assert_eq!(prewarmed["window"].as_str(), Some(SPARE));
+    check(&prewarmed, 4);
+}
+
+/// 창 인자를 받는 동사의 summary 가 받는 꼴(window_id · 같은 실행 안 label)과 번호 거절을 말하고, `window.list` 가 번호를
+/// 다시 쓰는 규칙을 말한다(TRD S26-window-chrome §4-5 「도움말」).
+#[test]
+fn every_window_verb_summary_says_what_the_window_argument_takes() {
+    let any = uuid::Uuid::nil();
+    for (name, _) in window_arg_calls("main", any, any) {
+        let spec = spec_of(name).expect("선언");
+        for want in ["window_id", "label", "번호는 받지 않는다"] {
+            assert!(
+                spec.summary.contains(want),
+                "{name}: {want} 없음 — {}",
+                spec.summary
+            );
+        }
+    }
+    assert!(spec_of("window.list")
+        .expect("선언")
+        .summary
+        .contains("가장 작은 수를 다시 쓴다"));
 }
 
 /// 태그와 곁칸이 어긋나면 조용히 고치지 않는다.
@@ -2240,9 +3128,7 @@ impl World {
 
     fn main_tab_name(&self) -> String {
         let mgr = self.state.0.lock().unwrap();
-        mgr.views[&mgr.windows[MAIN_WINDOW_LABEL].active]
-            .name
-            .clone()
+        effective_tab_name(&mgr, &mgr.views[&mgr.windows[MAIN_WINDOW_LABEL].active])
     }
 }
 
@@ -2504,10 +3390,10 @@ async fn restore_accept_swaps_the_screen_through_the_shared_coordinator_off_the_
     assert_eq!(accepted, json!({"restored_windows": 2, "durable": false}));
     assert_eq!(world.main_tab_name(), "지난 탭");
     let opened = screen.opened.lock().unwrap().clone();
-    assert_eq!(opened, ["slot-popup-1"], "새 팝아웃은 공유 발급기의 label");
+    assert_eq!(opened, [popup_label(1)], "새 팝아웃은 공유 발급기의 label");
     let mut windows = world.state.0.lock().unwrap().list_windows();
     windows.sort();
-    assert_eq!(windows, [MAIN_WINDOW_LABEL, "slot-popup-1"]);
+    assert_eq!(windows, [MAIN_WINDOW_LABEL.to_string(), popup_label(1)]);
     assert_eq!(world.restore.status().crash_copy, CrashCopyStatus::Answered);
     let threads = screen.threads.lock().unwrap().clone();
     assert_eq!(threads.len(), 1);

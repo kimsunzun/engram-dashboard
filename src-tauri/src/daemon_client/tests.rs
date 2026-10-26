@@ -3786,6 +3786,62 @@ impl DaemonEvents for RecordingEvents {
     }
 }
 
+// 이름 장부 포트도 같은 한 줄 기록에 적는다 — 프론트 알림과의 차례를 한 목록으로 잰다.
+impl super::AgentNamesSink for RecordingEvents {
+    fn agents(&self, agents: &[AgentInfo]) {
+        let names: Vec<String> = agents
+            .iter()
+            .map(|agent| format!("{}={}", agent.id, agent.name))
+            .collect();
+        self.record(format!("names:{}", names.join(",")));
+    }
+}
+
+fn wire_agent(id: AgentId, name: &str) -> AgentInfo {
+    use engram_dashboard_protocol::{
+        Capabilities, ControlCaps, InputCaps, ModelCaps, OutputCaps, SessionCaps,
+    };
+    AgentInfo {
+        id,
+        name: name.to_string(),
+        cwd: "C:\\work".to_string(),
+        status: AgentStatus::Running,
+        cols: 80,
+        rows: 24,
+        epoch: 1,
+        capabilities: Capabilities {
+            input: InputCaps {
+                raw: true,
+                message: false,
+                attachment: false,
+            },
+            output: OutputCaps {
+                terminal_bytes: true,
+                structured: false,
+                markdown: false,
+                tool_events: false,
+                usage: false,
+            },
+            control: ControlCaps {
+                resize: true,
+                interrupt: false,
+                cancel: false,
+                graceful_shutdown: false,
+            },
+            session: SessionCaps {
+                resume: false,
+                snapshot: false,
+                cwd_env: false,
+            },
+            model: ModelCaps {
+                select: false,
+                temperature: false,
+                max_tokens: false,
+            },
+        },
+    }
+}
+
 // 핸드셰이크 뒤 broadcast 두 장(목록 갱신 · 상태 전이)을 밀어넣고, **호출자가 놓으라고 할 때까지** 소켓을
 // 쥐고 있는 mock 서버. 반환: (port, 해제 신호 sender).
 // ★request_id 가 없는 이벤트만 보낸다★ — 그래야 pending 매칭을 우회해 `emit_broadcast` 갈래로 간다.
@@ -3798,6 +3854,21 @@ impl DaemonEvents for RecordingEvents {
 async fn spawn_broadcast_mock_server(
     agent_id: AgentId,
     epoch: u32,
+) -> (u16, tokio::sync::oneshot::Sender<()>) {
+    spawn_events_mock_server(vec![
+        AgentEvent::AgentListUpdated { agents: Vec::new() },
+        AgentEvent::StatusChanged {
+            agent_id,
+            status: AgentStatus::Killed,
+            epoch,
+        },
+    ])
+    .await
+}
+
+// [`spawn_broadcast_mock_server`] 의 본체 — 핸드셰이크 뒤 `events` 를 차례로 밀어넣는다(수명 규칙은 그쪽 주석).
+async fn spawn_events_mock_server(
+    events: Vec<AgentEvent>,
 ) -> (u16, tokio::sync::oneshot::Sender<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -3813,14 +3884,7 @@ async fn spawn_broadcast_mock_server(
         })
         .unwrap();
         let _ = ws.send(Message::Text(hello.into())).await;
-        for ev in [
-            AgentEvent::AgentListUpdated { agents: Vec::new() },
-            AgentEvent::StatusChanged {
-                agent_id,
-                status: AgentStatus::Killed,
-                epoch,
-            },
-        ] {
+        for ev in events {
             let text = serde_json::to_string(&ev).unwrap();
             let _ = ws.send(Message::Text(text.into())).await;
         }
@@ -3877,6 +3941,57 @@ async fn recording_events_capture_connected_then_broadcasts() {
     // ★단언을 마친 **뒤에야** 서버가 소켓을 놓는다★ — 순서를 뒤집으면 끊김 → `state:reconnecting` 이
     // 위 목록 뒤에 붙어 일치 단언이 깨진다(그 발화의 자리 = `connection.rs` 의 `LoopExit::Disconnected`).
     // 클라를 먼저 닫아 연결 태스크를 접고, 그 다음 서버를 푼다.
+    client.close();
+    let _ = release_socket.send(());
+}
+
+// 이름 장부 포트(TRD S26-window-chrome §4-3)가 실 소켓 왕복에서 데몬 목록을 받는다 — 목록 갱신마다 프론트 알림
+// **뒤에**, 받은 이름 그대로. 목록이 아닌 broadcast(상태 전이)는 이 포트에 닿지 않는다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_names_sink_receives_each_daemon_list_after_the_frontend_event() {
+    let (a1, a2) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    let (port, release_socket) = spawn_events_mock_server(vec![
+        AgentEvent::AgentListUpdated {
+            agents: vec![wire_agent(a1, "myproj"), wire_agent(a2, "myproj(1)")],
+        },
+        AgentEvent::StatusChanged {
+            agent_id: a1,
+            status: AgentStatus::Killed,
+            epoch: 1,
+        },
+        AgentEvent::AgentListUpdated {
+            agents: vec![wire_agent(a1, "renamed")],
+        },
+    ])
+    .await;
+    let events = Arc::new(RecordingEvents::default());
+    let disco = Arc::new(MockDiscovery::new(None, Ok(info_for(port, "names-record"))));
+    let client = DaemonClient::new_with_events(
+        Handle::current(),
+        disco,
+        super::connection::HANDSHAKE_TIMEOUT,
+        events.clone(),
+    )
+    .with_agent_names(events.clone());
+
+    client.connect().await.expect("connect → connected");
+
+    let arrived = poll_until_realtime(Duration::from_secs(5), || events.seen().len() >= 6).await;
+    assert!(arrived, "발화 6건이 와야: {:?}", events.seen());
+    assert_eq!(
+        events.seen(),
+        vec![
+            "state:connected".to_string(),
+            "agent_list:2".to_string(),
+            format!("names:{a1}=myproj,{a2}=myproj(1)"),
+            format!("status:{a1}:Killed:1"),
+            "agent_list:1".to_string(),
+            format!("names:{a1}=renamed"),
+        ],
+        "발화 내용·순서가 어긋났다"
+    );
+
+    // 놓는 차례 = 형제 시험(`recording_events_capture_connected_then_broadcasts`)과 같다.
     client.close();
     let _ = release_socket.send(());
 }
@@ -5329,10 +5444,12 @@ use super::usage_interest::USAGE_INTEREST_SHRINK_DELAY;
 use crate::commands::layout::{OwnedSubs, RouterSubs};
 use crate::commands::popout::{close_requested_popup_window, drop_window_in_model, PopupCounter};
 use crate::layout::commands::{make_table, LayoutPorts, CATALOG_VERSION};
+use crate::layout::window_ctl::{Activation, Applied, OsWindowState, WindowAction, WindowControl};
 use crate::layout::{
     apply, AgentSpawner, LayoutEvents, LayoutState, MoveFailed, MoveStep, SpareClaim, ViewSnapshot,
     WindowHost, WindowPlace, WindowTabsPayload,
 };
+use crate::output_router::DropCause;
 use crate::settings::{SettingsEvents, SettingsService, SettingsSnapshot};
 use crate::theme::{EffectiveThemes, ThemeControl, ThemeWindows, UiSettingsPayload};
 use crate::tray::actions::{for_each_ui_window, LayoutUsageVisibility, UsageVisibility};
@@ -5372,6 +5489,21 @@ impl WindowHost for NoWindows {
     }
     fn committed(&self, _claim: &SpareClaim) {}
     fn release_spare(&self, _claim: &SpareClaim) {}
+}
+
+struct NoWindowControl;
+
+impl WindowControl for NoWindowControl {
+    fn apply(&self, _label: &str, _action: WindowAction) -> Result<Applied, String> {
+        Err(NO_OS_WINDOW.to_string())
+    }
+    fn show_all(&self, _how: Activation) -> bool {
+        false
+    }
+    fn hide_all(&self) {}
+    fn state(&self, _label: &str) -> Option<OsWindowState> {
+        None
+    }
 }
 
 struct NoSpawner;
@@ -5424,6 +5556,7 @@ fn bus_table(state: &LayoutState, client: &Arc<DaemonClient>) -> CommandTable {
         windows: Arc::new(NoWindows),
         labels: Arc::new(PopupCounter::default()),
         spawner: Arc::new(NoSpawner),
+        control: Arc::new(NoWindowControl),
         themes,
         settings,
         settings_events: Arc::new(NoSettingsEvents),
@@ -5719,7 +5852,7 @@ async fn a_destroyed_popup_leaves_the_interest_after_the_delay() {
     );
 
     assert_eq!(
-        drop_window_in_model(POPUP, &state, &client.router, &client),
+        drop_window_in_model(POPUP, DropCause::Destroyed, &state, &client.router, &client),
         Some(1)
     );
     settle().await;
@@ -5748,7 +5881,7 @@ async fn a_destroyed_popup_forgets_its_hidden_mark_even_when_the_model_never_hel
     }
     .set_visible(POPUP, false);
     assert_eq!(
-        drop_window_in_model(POPUP, &state, &client.router, &client),
+        drop_window_in_model(POPUP, DropCause::Destroyed, &state, &client.router, &client),
         Some(0)
     );
     assert_eq!(nudges(&mut rx), 0);
@@ -5799,10 +5932,77 @@ async fn a_popout_close_request_unsubscribes_once_and_the_later_destroyed_sends_
     );
 
     assert_eq!(
-        drop_window_in_model(POPUP, &state, &client.router, &client),
+        drop_window_in_model(POPUP, DropCause::Destroyed, &state, &client.router, &client),
         Some(0)
     );
     assert!(rx.try_recv().is_err(), "소멸 정리가 명령을 냈다");
+}
+
+// ── 닫기 요청 없이 온 소멸(모델에 남은 팝아웃) — `lib.rs` 의 `Destroyed` 정리가 부르는 모델 몫 한 번이 구독 해제 ·
+//   묘비 · 사용량 관심 줄임 · 창 번호 풀기를 다 한다(TRD S26-window-chrome §4-1) ─────────────────────────
+#[tokio::test(start_paused = true)]
+async fn a_destroyed_popout_still_in_the_model_is_cleaned_up_in_one_pass_and_frees_its_number() {
+    let client = idle_client();
+    let (mut rx, socket) = captured_channel(&client);
+    let state = LayoutState::new();
+    let subs = RouterSubs {
+        router: &client.router,
+        client: &client,
+    };
+    let agent = uuid::Uuid::new_v4();
+    state.0.lock().unwrap().create_window(POPUP).unwrap();
+    let (view, slot) = active_slot(&state, POPUP);
+    apply::assign_agent(
+        &state,
+        &subs,
+        &NoLayoutEvents,
+        view,
+        slot,
+        agent.to_string(),
+    )
+    .expect("팝아웃 슬롯에 배정");
+    apply::create_tab(&state, &subs, &NoLayoutEvents, POPUP, None).expect("팝아웃의 둘째 탭");
+    set_usage_slot(&state, &client, POPUP, true, false);
+    assert_eq!(nudges(&mut rx), 1);
+    assert_eq!(
+        sync_as_the_connection_task(&client, socket),
+        Some(BTreeSet::from([AgentBackendKind::Claude]))
+    );
+
+    assert_eq!(
+        drop_window_in_model(POPUP, DropCause::Destroyed, &state, &client.router, &client),
+        Some(2)
+    );
+    let mut sent = Vec::new();
+    while let Ok(cmd) = rx.try_recv() {
+        sent.push(cmd);
+    }
+    assert!(
+        matches!(sent.as_slice(), [ConnectionCommand::Unsubscribe { agent_id, .. }] if *agent_id == agent),
+        "{sent:?}"
+    );
+    tokio::time::advance(USAGE_INTEREST_SHRINK_DELAY + Duration::from_millis(100)).await;
+    settle().await;
+    assert_eq!(nudges(&mut rx), 1);
+    assert_eq!(
+        sync_as_the_connection_task(&client, socket),
+        Some(BTreeSet::new())
+    );
+
+    let mut mgr = state.0.lock().unwrap();
+    assert!(!mgr.windows.contains_key(POPUP));
+    assert!(mgr.closing_numbers().is_empty());
+    assert_eq!(
+        mgr.create_window(POPUP),
+        Err(crate::layout::LayoutError::WindowClosed(POPUP.to_string())),
+        "묘비가 섰다"
+    );
+    mgr.create_window("slot-popup-8").unwrap();
+    assert_eq!(
+        mgr.windows["slot-popup-8"].number, 2,
+        "풀린 번호를 다음 새 창이 받는다"
+    );
+    mgr.assert_number_invariants();
 }
 
 // ── 닫기 요청이 해제를 낸 뒤 죽어 가는 팝아웃 웹뷰가 replay 를 청해도 Subscribe 는 나가지 않는다 ─────────────

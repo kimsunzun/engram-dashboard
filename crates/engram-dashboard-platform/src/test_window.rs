@@ -70,6 +70,11 @@ impl TestWindow {
     pub(crate) fn handle_only(&self) -> RawHandle {
         RawHandle(self.hwnd.0 as isize)
     }
+
+    /// 이 시험이 짓지 않은 창(다른 프로세스의 창 포함)을 쥐지 않고 가리키는 손잡이.
+    pub(crate) fn borrowed(hwnd: HWND) -> RawHandle {
+        RawHandle(hwnd.0 as isize)
+    }
 }
 
 impl Drop for TestWindow {

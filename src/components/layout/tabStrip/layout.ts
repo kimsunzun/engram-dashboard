@@ -19,6 +19,12 @@ export const TAB_STANDARD_W = 160
  */
 export const TAB_BUTTON_SIZE = 22
 
+/**
+ * `+` 원 앞 틈(CSS px) — 마지막 머리 오른 가에 걸친 구분선(±2.5)에 원이 닿지 않게. `+` 상자 폭 = 이 틈 + `TAB_BUTTON_SIZE`
+ * (`TabBar.tsx` `ADD_STYLE` · 최소 창 폭 셈 `titleRow/metrics.ts`).
+ */
+export const TAB_ADD_GAP = 4
+
 /** 머리 내용 칸의 좌우 패딩(CSS px — `TabBar.tsx` `HEAD_CONTENT`). */
 export const TAB_HEAD_PAD = 12
 

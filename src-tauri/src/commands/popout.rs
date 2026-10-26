@@ -14,7 +14,7 @@
 //! 상태를 갖고 있지 않다).
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use tauri::{
@@ -23,14 +23,15 @@ use tauri::{
 };
 use uuid::Uuid;
 
-use crate::commands::layout::{RouterSubs, TauriEvents};
+use crate::commands::layout::{resolve_window, RouterSubs, TauriEvents};
 use crate::daemon_client::DaemonClient;
 use crate::first_paint::NewWindowShow;
+use crate::layout::tab_name::window_title;
 use crate::layout::{
     apply, LabelSource, LayoutState, MoveFailed, SlotMove, SpareClaim, WindowHost, WindowPlace,
     MAIN_WINDOW_LABEL,
 };
-use crate::output_router::OutputRouter;
+use crate::output_router::{DropCause, OutputRouter};
 use crate::spare::pool::Opening;
 use crate::state::placement::{self, Fallback};
 use crate::webview_env::{Backdrop, WebviewEnv};
@@ -41,31 +42,34 @@ use crate::webview_env::{Backdrop, WebviewEnv};
 // 게이트 is_popup_label 재사용 — 다른 label 이면 cleanup 스킵 → 라우팅/구독/Channel 누수).
 const POPUP_LABEL_PREFIX: &str = "slot-popup-";
 
+// 실행 표식 — 프로세스마다 한 번 뽑는 소문자 hex 8 자(TRD S26-window-chrome §4-5 · 메인 결정 M8). 순번은 실행마다 1 부터
+//   다시 세므로, 표식이 없으면 앞 실행의 label 을 쥔 버스 호출자가 이번 실행의 다른 창을 집는다. 앞 실행과 같은 표식일
+//   확률(2⁻³²)은 받아들인다.
+fn run_marker() -> &'static str {
+    static RUN: OnceLock<String> = OnceLock::new();
+    RUN.get_or_init(|| Uuid::new_v4().simple().to_string()[..8].to_string())
+}
+
+/// 이 실행의 `n` 번째 팝업/런타임 창 label — `slot-popup-<실행 표식>-<n>`. [`PopupCounter`] 가 이 꼴로 발급한다.
+pub fn popup_label(n: u64) -> String {
+    format!("{POPUP_LABEL_PREFIX}{}-{n}", run_marker())
+}
+
 // 팝업/런타임 창 label 발급용 단조 카운터. app-level 공유(app.manage). ★재사용 금지 불변식★: fetch_add
 // 로 단조 증가만 하고 창을 닫아도 되돌리지 않는다(닫힌 label 재-build 에러 회피).
 #[derive(Default)]
 pub struct PopupCounter(pub AtomicU64);
 
 impl PopupCounter {
+    // ADR-0302 — 창 상태 명령(팝아웃 label 재사용 금지)
     fn next_label(&self) -> String {
-        let n = self.0.fetch_add(1, Ordering::Relaxed) + 1;
-        format!("{POPUP_LABEL_PREFIX}{n}")
+        popup_label(self.0.fetch_add(1, Ordering::Relaxed) + 1)
     }
 }
 
 impl LabelSource for PopupCounter {
     fn next_label(&self) -> String {
         PopupCounter::next_label(self)
-    }
-
-    // label 형식(`slot-popup-<n>`)을 아는 쪽이 짓는다 — "slot-popup-3" → "Popup 3".
-    // ★바이트 슬라이싱 금지★: 이건 공개 포트라 어떤 `&str` 이든 들어올 수 있고, 인덱스로 자르면 문자
-    //   경계가 아닌 자리에서 패닉한다 — 셸은 아무것도 가두지 않아 그 패닉이 곧 셸 종료다(훅 · ADR-0292).
-    fn tab_name(&self, label: &str) -> String {
-        format!(
-            "Popup {}",
-            label.strip_prefix(POPUP_LABEL_PREFIX).unwrap_or(label)
-        )
     }
 }
 
@@ -164,6 +168,9 @@ fn open_new_window(
                     crate::first_paint::hold_built(&window, focused, started);
                 }
             }
+            // 새로 지은 창 — 그 창의 첫 최소 크기 보고가 넓혀 당긴다(TRD S26-window-chrome §7-7). 맡긴 예열 창은 확정이
+            //   세운다(`commands::spare::commit`).
+            crate::chrome::mark_opening(app, label);
             tracing::info!(
                 module = "spare",
                 label,
@@ -276,10 +283,12 @@ fn window_url(label: &str) -> String {
     format!("index.html#/popup?window={label}")
 }
 
-// 대각 cascade 위치(창이 겹쳐 뜨는 것 방지).
+// 대각 cascade 위치(창이 겹쳐 뜨는 것 방지) — label 끝 `-<n>` 의 순번으로 고른다. 실행 표식까지 수로 풀면 모든 창이
+//   같은 계단에 선다(TRD S26-window-chrome §4-5).
 fn cascade_position(label: &str) -> (f64, f64) {
     let n: u32 = label
         .strip_prefix(POPUP_LABEL_PREFIX)
+        .and_then(|rest| rest.rsplit('-').next())
         .and_then(|s| s.parse().ok())
         .unwrap_or(1);
     let step = (n.saturating_sub(1) % 8) as f64;
@@ -396,7 +405,8 @@ fn build_window(
         .ok_or_else(|| "런타임 창 생성 실패: 웹뷰 환경이 등록돼 있지 않다".to_owned())?;
     env.finish(
         WebviewWindowBuilder::new(app, label, WebviewUrl::App(window_url(label).into()))
-            .title(format!("Engram — {label}"))
+            // 번호 없는 모델 밖 창(숨은 예열 창 포함)의 제목 — 모델에 들면 탭 알림이 덮는다(TRD S26-window-chrome §4-4).
+            .title(window_title(None, None))
             .inner_size(w, h)
             .position(x, y)
             .visible(false)
@@ -442,6 +452,9 @@ pub async fn move_slot_to_window(
     slot_id: Uuid,
     to_window: Option<String>,
 ) -> Result<SlotMove, String> {
+    let to_window = to_window
+        .map(|window| resolve_window(&state, &window))
+        .transpose()?;
     apply::move_slot_to_window(
         &state,
         &RouterSubs {
@@ -459,7 +472,8 @@ pub async fn move_slot_to_window(
 
 // ★창 Destroyed 정리(수명/누수 임계 — 멀티탭, G1)★. 팝업/런타임 창이 닫히면(titlebar close·강제 destroy·
 // close_tab/close_window 경유 destroy) lib.rs Destroyed arm 이 이걸 부른다. titlebar close 는 닫기 요청
-// ([`close_requested_popup_window`])이 모델을 먼저 지웠으므로 여기서는 재계산 · Channel 떼기만 남는다.
+// ([`close_requested_popup_window`])이 모델을 먼저 지웠으므로 여기서는 재계산 · 닫히는 창 번호 풀기 · Channel 떼기만
+// 남는다. 창 번호는 이것이 푼다 — 부르는 쪽은 번호를 따로 풀지 않는다(TRD S26-window-chrome §4-1).
 //
 // ★현 버그 수정(G1)★: 옛 코드는 단일 바인딩 하나만 정리해 멀티탭 팝업을 강제 종료하면 나머지 탭이 잔류
 // + Unsubscribe 누락.
@@ -480,8 +494,10 @@ pub fn cleanup_popup_window(
         return;
     }
 
-    // 1) 모델 정리 — ViewManager 락 한 번 안(아래 함수). 닫기 요청이 먼저 지웠으면 0.
-    let Some(dropped_views) = drop_window_in_model(label, state, router, client) else {
+    // 1) 모델 정리 · 창 번호 풀기 — ViewManager 락 한 번 안(아래 함수). 닫기 요청이 먼저 지웠으면 0.
+    let Some(dropped_views) =
+        drop_window_in_model(label, DropCause::Destroyed, state, router, client)
+    else {
         return;
     };
 
@@ -499,8 +515,8 @@ pub fn cleanup_popup_window(
 }
 
 /// 팝아웃의 닫기 요청(`lib.rs` 의 `CloseRequested`) — 창 정리의 모델 몫([`drop_window_in_model`] · 묘비 포함)을
-/// 소멸을 기다리지 않고 지금 한다. 뒤이은 `Destroyed` 정리([`cleanup_popup_window`])가 같은 몫을 다시 해도 바뀌는
-/// 것은 없다. main 은 무동작이다(main 의 닫기 요청은 숨기기 — 부르는 쪽 갈래).
+/// 소멸을 기다리지 않고 지금 한다. 뒤이은 `Destroyed` 정리([`cleanup_popup_window`])가 같은 몫을 다시 하면 바뀌는
+/// 것은 그 창 번호 풀기뿐이다. main 은 무동작이다(main 의 닫기 요청은 숨기기 — 부르는 쪽 갈래).
 /// TRD S21-slot-docking 5.8판 §1-2 「닫히는 창」
 pub(crate) fn close_requested_popup_window(
     label: &str,
@@ -509,7 +525,9 @@ pub(crate) fn close_requested_popup_window(
     client: &DaemonClient,
 ) {
     // 0 = 모델이 아직 그 창을 몰랐다(새 창 옮기기의 창 열기와 모델 확정 사이) — 묘비만 선다.
-    if let Some(dropped_views) = drop_window_in_model(label, state, router, client) {
+    if let Some(dropped_views) =
+        drop_window_in_model(label, DropCause::CloseRequested, state, router, client)
+    {
         tracing::info!(
             label,
             dropped_views,
@@ -519,8 +537,8 @@ pub(crate) fn close_requested_popup_window(
 }
 
 // 팝아웃 창 정리의 모델 몫 — 창의 모든 탭 View 드롭 + windows 엔트리 제거 + 라우팅 표 재계산 + 구독 정리 발화 +
-// 사용량 관심 재계산 + label 묘비, ★전부 같은 락 안★. 닫기 요청과 `Destroyed` 가 둘 다 부르고 두 번째는 바뀌는
-// 것이 없다(창이 이미 없으면 재계산만 · 묘비는 집합). 답 = 모델에서 지운 탭 수(창이 이미 없었으면 0) · `None` =
+// 사용량 관심 재계산 + label 묘비, ★전부 같은 락 안★. 닫기 요청과 `Destroyed` 가 둘 다 부르고 두 번째는 닫히는 창
+// 번호 풀기 말고 바뀌는 것이 없다(창이 이미 없으면 재계산만 · 묘비는 집합). 답 = 모델에서 지운 탭 수(창이 이미 없었으면 0) · `None` =
 // 정리하지 않음(main · 락 오염). 창(`AppHandle`) 없이 서므로 셸 단위 시험이 이것을 직접 부른다.
 //   ★F1 REAL 동시성 버그 수정★: 옛 코드는 델타(cleanup_window_core rebuild)를 락 안에서 계산하고
 //   `to_unsubscribe` 발화를 락 드롭 뒤에 했다 → 계산~발화 사이 다른 command(assign_agent/spawn/move)가
@@ -529,8 +547,13 @@ pub(crate) fn close_requested_popup_window(
 //   는 락 안」 조항은 없다★). 이제 적용 서비스(`SubscriptionSync::resync`)·move_slot_to_window 와
 //   일관되게 발화도 락 안이다(unsubscribe 는 동기 try_send — await/network 0, lifecycle 락 독립 →
 //   데드락 없음).
+// 창 번호(TRD S26-window-chrome §4-1) — 닫기 요청이 지운 창은 번호를 그 `Destroyed` 까지 쥐고, `Destroyed` 는 그
+//   번호를 같은 락 안에서 푼다(아직 모델에 있던 창이면 곧바로). ★`Destroyed` 의 번호 풀기를 이 락 밖으로 떼지
+//   않는다★ — 먼저 다른 락에서 모델 창을 빼면 그 틈에 묘비 없이 빠진 창이 보이고 지운 탭 수가 늘 0 이 된다.
+//   이것을 못 부르는 극단(`lib.rs` — 상태가 없다)만 `layout::release_window_number` 가 번호를 푼다.
 pub(crate) fn drop_window_in_model(
     label: &str,
+    cause: DropCause,
     state: &LayoutState,
     router: &OutputRouter,
     client: &DaemonClient,
@@ -548,7 +571,10 @@ pub(crate) fn drop_window_in_model(
     };
     let dropped_views = mgr.windows.get(label).map_or(0, |w| w.tabs.len());
     // 창이 이미 모델에서 지워졌으면 rebuild 만.
-    let delta = crate::output_router::cleanup_window_core(&mut mgr, router, label);
+    let delta = crate::output_router::cleanup_window_core(&mut mgr, router, label, cause);
+    if cause == DropCause::Destroyed {
+        mgr.release_closing(label);
+    }
     // 묘비는 모델 삭제와 같은 락 안 — 이 락 뒤의 도킹 · 새 창 확정은 그 창을 「없음」이나 묘비로 만나 무변경이다
     //   (TRD S21-slot-docking 5.8판 §1-2 「닫히는 창」 (c)).
     mgr.mark_closed(label);
@@ -573,13 +599,49 @@ mod tests {
         let c = PopupCounter::default();
         let a = c.next_label();
         let b = c.next_label();
-        assert_eq!(a, "slot-popup-1");
-        assert_eq!(b, "slot-popup-2");
+        assert_eq!(a, popup_label(1));
+        assert_eq!(b, popup_label(2));
         assert_ne!(a, b, "label 재사용 금지 — 단조 증가");
+    }
+
+    // TRD S26-window-chrome §4-5 · §10-1 — `slot-popup-<소문자 hex 8>-<n>` · 표식은 발급기가 여럿이어도 한 실행에 하나.
+    #[test]
+    fn popup_labels_carry_one_run_marker_per_process() {
+        let a = PopupCounter::default().next_label();
+        let b = PopupCounter::default().next_label();
+        assert_eq!(
+            a, b,
+            "두 발급기의 첫 label 이 같다 — 표식이 프로세스에 하나"
+        );
+        let (run, n) = a
+            .strip_prefix(POPUP_LABEL_PREFIX)
+            .and_then(|rest| rest.split_once('-'))
+            .expect("접두 · 표식 · 순번");
+        assert_eq!(n, "1");
+        assert_eq!(run.len(), 8, "{a}");
+        assert!(
+            run.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "소문자 hex: {a}"
+        );
+        assert_eq!(run, run_marker());
+    }
+
+    // 부팅 · 런타임 복원이 팝아웃을 (길이, 글자) 순으로 세워 발급 순을 되찾는다(`state::placement` · `state::restore`) —
+    //   실행 표식이 붙어도 그 순서가 발급 순이다(자리 수가 느는 9 → 10 포함).
+    #[test]
+    fn popup_labels_sorted_by_length_then_text_come_back_in_issue_order() {
+        let c = PopupCounter::default();
+        let issued: Vec<String> = (0..12).map(|_| c.next_label()).collect();
+        let mut sorted = issued.clone();
+        sorted.reverse();
+        sorted.sort_by_key(|label| (label.len(), label.clone()));
+        assert_eq!(sorted, issued);
     }
 
     #[test]
     fn is_popup_label_matches_prefix_only() {
+        assert!(is_popup_label(&popup_label(1)));
         assert!(is_popup_label("slot-popup-1"));
         assert!(is_popup_label("slot-popup-42"));
         assert!(!is_popup_label("main"));
@@ -597,9 +659,13 @@ mod tests {
 
     #[test]
     fn cascade_position_offsets_by_label_index() {
-        assert_eq!(cascade_position("slot-popup-1"), (140.0, 110.0));
+        assert_eq!(cascade_position(&popup_label(1)), (140.0, 110.0));
+        assert_eq!(cascade_position(&popup_label(2)), (212.0, 170.0));
         // 9번째는 wrap(8개마다).
-        assert_eq!(cascade_position("slot-popup-9"), (140.0, 110.0));
+        assert_eq!(cascade_position(&popup_label(9)), (140.0, 110.0));
+        // 끝 순번을 푼다 — 숫자뿐인 실행 표식을 순번으로 읽지 않는다.
+        assert_eq!(cascade_position("slot-popup-12345678-2"), (212.0, 170.0));
+        assert_eq!(cascade_position("slot-popup-3"), (284.0, 230.0));
     }
 
     // ── 맡긴 예열 창의 자리(TRD S21-slot-docking §3-9 「`open_at`(맡긴 label)」 · I18) ──
@@ -724,9 +790,15 @@ mod close_request_tests {
             close_requested_popup_window(label, &self.state, &self.router, &self.client);
         }
 
-        // `lib.rs` 의 `Destroyed` 정리 중 모델 몫.
+        // `lib.rs` 의 `Destroyed` 정리(상태가 다 있는 갈래) 중 모델 몫 — 운영처럼 이것 하나가 창 번호까지 푼다.
         fn destroyed(&self, label: &str) -> Option<usize> {
-            drop_window_in_model(label, &self.state, &self.router, &self.client)
+            drop_window_in_model(
+                label,
+                DropCause::Destroyed,
+                &self.state,
+                &self.router,
+                &self.client,
+            )
         }
 
         // 런타임 크래시 사본 수락의 모델 몫(`state::restore` — 팝아웃 없는 사본) — 지금 팝아웃은 항목째 빠진다.
@@ -777,7 +849,7 @@ mod close_request_tests {
         }
     }
 
-    // ADR-0057 ① ② — 창 없는 View(롤백이 못 거둔 임시 View 포함)가 남지 않았다.
+    // ADR-0057 ① ② — 창 없는 View(롤백이 못 거둔 임시 View 포함)가 남지 않았다 · 창 번호 불변식(TRD S26-window-chrome §10-1).
     fn assert_owned(mgr: &ViewManager) {
         let tabs: usize = mgr.windows.values().map(|w| w.tabs.len()).sum();
         assert_eq!(mgr.views.len(), tabs, "어느 창의 탭도 아닌 View 가 남았다");
@@ -786,6 +858,7 @@ mod close_request_tests {
                 assert_eq!(mgr.view_owner.get(view), Some(label));
             }
         }
+        mgr.assert_number_invariants();
     }
 
     // pop-out 이 락을 놓은 틈 — 창을 확인(`is_open` → 열려 있음)하거나 연(`open`) 바로 뒤에 사용자가 그 창을 닫는다.
@@ -918,9 +991,16 @@ mod close_request_tests {
         let host = ClosingHost::new(&rig);
         let before = rig.fingerprint();
 
-        let fresh = "slot-popup-1";
-        let err = apply::create_window(&rig.state, &rig.subs(), &host, &PopupCounter::default())
-            .unwrap_err();
+        let fresh = popup_label(1);
+        let fresh = fresh.as_str();
+        let err = apply::create_window(
+            &rig.state,
+            &rig.subs(),
+            &NoEvents,
+            &host,
+            &PopupCounter::default(),
+        )
+        .unwrap_err();
         assert_eq!(err, LayoutError::WindowClosed(fresh.into()).to_string());
         assert_eq!(*host.closed.lock().unwrap(), [fresh], "방금 연 창을 거둔다");
         assert!(
@@ -955,8 +1035,14 @@ mod close_request_tests {
         let host = ClosingHost::with_spare(&rig, claim.clone());
         let before = rig.fingerprint();
 
-        let err = apply::create_window(&rig.state, &rig.subs(), &host, &PopupCounter::default())
-            .unwrap_err();
+        let err = apply::create_window(
+            &rig.state,
+            &rig.subs(),
+            &NoEvents,
+            &host,
+            &PopupCounter::default(),
+        )
+        .unwrap_err();
 
         assert_eq!(err, LayoutError::WindowClosed(spare.clone()).to_string());
         assert_eq!(
@@ -989,10 +1075,17 @@ mod close_request_tests {
         let old_popout = rig.add_tab(POPUP);
         let host = ClosingHost::adopting(&rig);
 
-        let label =
-            apply::create_window(&rig.state, &rig.subs(), &host, &PopupCounter::default()).unwrap();
+        let label = apply::create_window(
+            &rig.state,
+            &rig.subs(),
+            &NoEvents,
+            &host,
+            &PopupCounter::default(),
+        )
+        .unwrap()
+        .window;
 
-        assert_eq!(label, "slot-popup-1");
+        assert_eq!(label, popup_label(1));
         assert!(
             host.closed.lock().unwrap().is_empty(),
             "연 창을 거두지 않는다"
@@ -1044,6 +1137,31 @@ mod close_request_tests {
         assert_eq!(rig.routed(shared), [MAIN_WINDOW_LABEL]);
     }
 
+    // TRD S26-window-chrome §4-1 — 닫기 요청은 번호를 그 창의 `Destroyed` 까지 쥐고 `Destroyed` 가 푼다. 닫기 요청 없이 온
+    //   `Destroyed`(모델에 남은 창)는 곧바로 푼다.
+    #[tokio::test]
+    async fn a_close_request_holds_the_number_until_destroyed_frees_it() {
+        let rig = Rig::new();
+        rig.add_tab("slot-popup-1");
+        rig.add_tab("slot-popup-2");
+        let closing = || rig.state.0.lock().unwrap().closing_numbers();
+
+        rig.close_requested("slot-popup-1");
+        assert_eq!(closing(), [2]);
+        rig.fingerprint();
+        assert_eq!(rig.destroyed("slot-popup-1"), Some(0));
+        assert!(closing().is_empty());
+
+        assert_eq!(rig.destroyed("slot-popup-2"), Some(1));
+        assert!(closing().is_empty());
+        rig.add_tab("slot-popup-3");
+        assert_eq!(
+            rig.state.0.lock().unwrap().windows["slot-popup-3"].number,
+            2
+        );
+        rig.fingerprint();
+    }
+
     #[tokio::test]
     async fn the_model_part_answers_how_many_tabs_it_dropped() {
         let rig = Rig::new();
@@ -1057,7 +1175,7 @@ mod close_request_tests {
         let main = rig.main_tab();
         let slot = rig.first_slot(main);
         let mut mgr = rig.state.0.lock().unwrap();
-        let (tmp, _) = mgr.prepare_detached_view(main, slot, "tmp".into()).unwrap();
+        let (tmp, _) = mgr.prepare_detached_view(main, slot).unwrap();
         assert_eq!(
             mgr.attach_view_as_new_window(fresh, tmp),
             Err(LayoutError::WindowClosed(fresh.into()))
@@ -1106,9 +1224,7 @@ mod close_request_tests {
         }
         // 팝아웃(`slot.popout`)의 새 창 phase C 도 묘비 앞에서 멈춘다.
         let slot = tree::first_slot_id(&mgr.views[&source].layout);
-        let (tmp, _) = mgr
-            .prepare_detached_view(source, slot, "tmp".into())
-            .unwrap();
+        let (tmp, _) = mgr.prepare_detached_view(source, slot).unwrap();
         assert_eq!(
             mgr.attach_view_as_new_window(POPUP, tmp),
             Err(LayoutError::WindowClosed(POPUP.into()))
@@ -1168,7 +1284,8 @@ mod close_request_tests {
         rig.seat(src, agent);
         let slot = rig.first_slot(src);
         let labels = PopupCounter::default();
-        let fresh = "slot-popup-1";
+        let fresh = popup_label(1);
+        let fresh = fresh.as_str();
         let host = ClosingHost::new(&rig);
 
         let out = apply::move_slot_to_window(
@@ -1273,7 +1390,8 @@ mod close_request_tests {
         let host = ClosingHost::new(&rig);
         let before = rig.fingerprint();
 
-        let fresh = "slot-popup-1";
+        let fresh = popup_label(1);
+        let fresh = fresh.as_str();
         assert_eq!(
             dock_to_new_window(&rig, &host, src),
             Err(DockError::WindowClosed(fresh.into()))

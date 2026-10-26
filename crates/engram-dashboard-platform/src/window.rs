@@ -1,5 +1,5 @@
 //! 데스크톱 창의 OS 규칙 — 창 정체 · 자리와 z 순서 · 보임 · 자리 되돌리기 · 커서 밑 맨 위 창 · 창 진단 사실(로그
-//! 몫) · 전경 창이 이 프로세스의 것인가.
+//! 몫) · 전경 창이 이 프로세스의 것인가 · 그 창이 전경 창인가 · 제목 줄 크롬 모양(TRD S26-window-chrome §6-2 · §7-11).
 //!
 //! 창은 `raw-window-handle` 0.6 의 [`HasWindowHandle`] 로 받고 그 핸들의 변이 맞추기(Windows = `Win32` · 그 밖 =
 //! [`WindowError::Unsupported`])를 이 모듈이 한다 — 부르는 쪽이 변이를 맞추면 그것도 이 crate 밖의 런타임 OS
@@ -10,7 +10,10 @@
 //! ★스레드★ — 창을 바꾸는 함수([`place_window`] · [`restore_placement`])는 그 창을 만든 스레드(메인)에서
 //! 부른다. 다른 스레드에서 부르면 Win32 가 그 창 스레드에 메시지를 보내고 답을 기다린다 — 그 스레드가 부른 쪽을
 //! 기다리고 있으면 교착이다. 읽기([`NativeWindow::of`] · [`top_level_at`] · [`describe_window`] ·
-//! [`foreground_is_current_process`])는 어느 스레드에서나 된다.
+//! [`foreground_is_current_process`] · [`is_foreground`])는 어느 스레드에서나 된다.
+//!
+//! 스냅 레이아웃 오버레이(최대화 단추 위 자식 창)는 하위 모듈 `snap` 이고 cargo 기능 `snap-overlay` 뒤다 — 기본 꺼짐(TRD
+//! S26-window-chrome §8-4 · 사용자 결정 Q1 2026-10-24).
 
 // ADR-0266
 // ADR-0295
@@ -19,6 +22,10 @@ use std::fmt;
 use std::io;
 
 use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle};
+
+// ADR-0304 — 스냅 오버레이 feature
+#[cfg(feature = "snap-overlay")]
+pub mod snap;
 
 /// 화면의 물리 px 점. 프로세스가 모니터별 DPI 인식(v2 — tao 가 켠다)이 아니면 OS 가 배율로 가상화한 값이 온다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -114,7 +121,7 @@ fn raw_of(w: &impl HasWindowHandle) -> Result<isize, WindowError> {
 /// - `show` = 거짓이면 보임을 건드리지 않는다(숨기지 않는다).
 /// - `activate` = 참이면 그 창을 전경으로 청한다 — 활성이 되면 `z` 가 [`ZOrder::Keep`] 이어도 맨 위로 온다.
 ///   ★OS 가 거절하면 그대로 두고 `Ok` 다★ — tao 의 `force_window_active` 처럼 Alt 를 합성해 전경을 빼앗지 않는다:
-///   포커스를 빼앗지 않고 올리기만 한다(ADR-0299 결정 5 · TRD S21-slot-docking §9-3 I5 · I29). 거절됐는지는 [`foreground_is_current_process`] 따위로 따로 본다.
+///   포커스를 빼앗지 않고 올리기만 한다(ADR-0299 결정 5 · TRD S21-slot-docking §9-3 I5 · I29). 거절됐는지는 [`is_foreground`](그 창이 전경인가)로 따로 본다.
 ///
 /// Windows 밖 = [`WindowError::Unsupported`].
 // ADR-0295
@@ -260,6 +267,46 @@ pub fn foreground_is_current_process() -> Option<bool> {
     None
 }
 
+/// 그 창이 지금 OS 전경 창인가 — 전경 창은 하나라 많아야 한 창만 참이다. `None` = 이 OS 에서는 답할 수단이 이 crate 에
+/// 없다 — 부르는 쪽이 자기 수단(창 툴킷의 포커스 게터 따위)으로 판정한다([`foreground_is_current_process`] 와 같다).
+///
+/// Windows = `GetForegroundWindow` 가 그 최상위 창인가. 핸들을 못 얻었거나 그 창이 이미 없으면 `Some(false)` 다. 창
+/// 툴킷의 포커스 게터와 다른 답일 수 있다 — WebView2 를 품은 창은 웹뷰가 키보드 포커스를 쥔 동안 그 게터가 거짓이다
+/// (TRD S26-window-chrome §6-2 「앞 창 판정」).
+// ADR-0302 — 창 상태 명령(앞 창 판정)
+pub fn is_foreground(w: &impl HasWindowHandle) -> Option<bool> {
+    #[cfg(windows)]
+    {
+        Some(win::is_foreground(w))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = w;
+        None
+    }
+}
+
+/// 창 제목 줄의 크롬 모양 — [`caption_style`] 의 답.
+///
+/// - `drawn_buttons` = 최소화 · 최대화 · 닫기 단추를 앱이 그린다(OS 틀을 걷는다). 거짓 = OS 가 단추를 그린다.
+/// - `leading_inset` = 제목 줄 왼쪽에서 앱이 비워 둘 폭(CSS px) — OS 가 그 자리에 단추를 그린다.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CaptionStyle {
+    pub drawn_buttons: bool,
+    pub leading_inset: f64,
+}
+
+/// 이 OS 의 제목 줄 크롬 모양(TRD S26-window-chrome §7-11) — 늘 `{ drawn_buttons: true, leading_inset: 0 }` 이다. macOS
+/// 는 신호등 단추를 OS 가 그리므로 `{ false, <신호등 폭> }` 이어야 하는데, 그 폭을 재지 않았고 macOS 를 짓지 않아 그
+/// 갈래를 두지 않았다 — macOS 를 지을 때 이 함수 안에 더한다.
+// ADR-0303 — 크롬식 제목 표시줄
+pub fn caption_style() -> CaptionStyle {
+    CaptionStyle {
+        drawn_buttons: true,
+        leading_inset: 0.0,
+    }
+}
+
 /// 화면 좌표 사각형을 작업 공간 좌표로 — 모니터 왼쪽 위에서 작업 영역 왼쪽 위까지 민 만큼 뺀다. Chromium 이 읽을
 /// 때 쓰는 반대 셈과 같은 꼴이다(hwnd_message_handler.cc `GetWindowPlacement` — `rcWork − rcMonitor` 를 더한다).
 fn screen_to_workspace(rect: PhysRect, monitor: PhysRect, work: PhysRect) -> PhysRect {
@@ -322,13 +369,14 @@ mod win {
         HRGN, MONITORINFO, MONITOR_DEFAULTTONEAREST, RGN_ERROR,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetClassNameW, GetLayeredWindowAttributes, GetTopWindow, GetWindow, GetWindowLongPtrW,
-        GetWindowPlacement, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindow,
-        IsWindowVisible, SetForegroundWindow, SetWindowPlacement, SetWindowPos, GWL_EXSTYLE,
-        GW_HWNDNEXT, HWND_TOP, HWND_TOPMOST, LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA,
-        LWA_COLORKEY, SET_WINDOW_POS_FLAGS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-        SWP_SHOWWINDOW, SW_SHOWMAXIMIZED, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, WINDOWPLACEMENT,
-        WINDOWPLACEMENT_FLAGS, WS_EX_LAYERED, WS_EX_LAYOUTRTL, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+        GetClassNameW, GetForegroundWindow, GetLayeredWindowAttributes, GetTopWindow, GetWindow,
+        GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, GetWindowThreadProcessId, IsIconic,
+        IsWindow, IsWindowVisible, SetForegroundWindow, SetWindowPlacement, SetWindowPos,
+        GWL_EXSTYLE, GW_HWNDNEXT, HWND_TOP, HWND_TOPMOST, LAYERED_WINDOW_ATTRIBUTES_FLAGS,
+        LWA_ALPHA, LWA_COLORKEY, SET_WINDOW_POS_FLAGS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        SWP_NOZORDER, SWP_SHOWWINDOW, SW_SHOWMAXIMIZED, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
+        WINDOWPLACEMENT, WINDOWPLACEMENT_FLAGS, WS_EX_LAYERED, WS_EX_LAYOUTRTL, WS_EX_TOOLWINDOW,
+        WS_EX_TRANSPARENT,
     };
 
     use super::{
@@ -352,6 +400,15 @@ mod win {
 
     fn native(hwnd: HWND) -> NativeWindow {
         NativeWindow(hwnd.0 as isize)
+    }
+
+    pub(super) fn is_foreground(w: &impl HasWindowHandle) -> bool {
+        let Ok(hwnd) = hwnd_of(w) else {
+            return false;
+        };
+        // SAFETY: 인자 없는 조회다.
+        let foreground = unsafe { GetForegroundWindow() };
+        foreground == hwnd
     }
 
     fn os(api: &str, e: windows::core::Error) -> WindowError {
@@ -639,6 +696,17 @@ mod tests {
     // ── 순수 셈 ──
 
     #[test]
+    fn caption_style_has_the_app_draw_the_buttons_with_no_leading_inset() {
+        assert_eq!(
+            caption_style(),
+            CaptionStyle {
+                drawn_buttons: true,
+                leading_inset: 0.0,
+            }
+        );
+    }
+
+    #[test]
     fn workspace_offset_follows_work_area_origin() {
         let monitor = PhysRect {
             x: 0,
@@ -885,6 +953,27 @@ mod tests {
             let w = TestWindow::new(false);
             let n = NativeWindow::of(&w).expect("Win32 핸들");
             assert_eq!(n, NativeWindow(w.hwnd().0 as isize));
+        }
+
+        // 숨은 창 · 사라진 창은 전경이 아니다. 참 갈래는 전경을 빼앗지 않고 지금 전경 창으로 잰다 — 전경 창이 없거나(서비스
+        //   세션) 재는 사이 바뀌면 그 갈래는 건너뛴다.
+        #[test]
+        fn is_foreground_is_true_only_for_the_foreground_window() {
+            use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+            let w = TestWindow::new(true);
+            assert_eq!(is_foreground(&w), Some(false), "숨은 창");
+            let gone = w.handle_only();
+            drop(w);
+            assert_eq!(is_foreground(&gone), Some(false), "사라진 창");
+            // SAFETY: 인자 없는 조회 둘.
+            let (before, answer, after) = unsafe {
+                let before = GetForegroundWindow();
+                let answer = is_foreground(&TestWindow::borrowed(before));
+                (before, answer, GetForegroundWindow())
+            };
+            if !before.is_invalid() && before == after {
+                assert_eq!(answer, Some(true), "지금 전경 창");
+            }
         }
 
         #[test]

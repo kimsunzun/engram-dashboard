@@ -44,6 +44,10 @@ use engram_dashboard_command::{
 };
 
 use super::apply;
+use super::window_arg::{self, WindowArgError};
+use super::window_ctl::{
+    self, Activation, Applied, CloseOutcome, WindowAction, WindowControl, WindowCtlError,
+};
 use super::{
     AgentSpawner, LabelSource, LayoutEvents, LayoutState, SlotContent, SplitDir, SubscriptionSync,
     WindowHost,
@@ -64,6 +68,18 @@ use crate::theme::{ThemeControl, ThemeError, UiTheme, WindowTheme};
 //   `window.setTheme`·`window.getTheme`(화면에는 테마를 바꾸는 UI 가 없다 — TRD S21-storage §10 F7) ·
 //   `split.setRatio`·`split.list`(화면의 구분선 드래그는 Tauri `set_split_ratio` 를 직접 부르고 레지스트리에
 //   이름을 싣지 않는다 — ADR-0227).
+// ★세대 20 = 창 상태 명령 여섯(`window.minimize` · `window.maximize` · `window.unmaximize` · `window.raise` ·
+//   `window.hideAll` · `window.showAll`)이 들고 `window.close` 가 main 을 받는 세대★(TRD S26-window-chrome §6-1 · §6-6) —
+//   `window.close` 는 `if_empty` 를 받고 답이 `outcome` 을 싣는다(main = 모든 창 숨기기 · 지금까지의 `CONFLICT` 대신).
+//   `window.list` 의 답은 `windows` 를 그대로 두고 `details` 를 더했다.
+// ★세대 19 = 창 인자가 영속 id(window_id)도 받고 숫자만인 인자(창 번호)를 `INVALID_ARGUMENT` 로 거절하는 세대★(TRD
+//   S26-window-chrome §4-5 · §6-6) — 이름 · 인자 타입은 그대로고 창 인자를 받는 동사의 받는 어휘 · 오류 어휘(앞 실행의
+//   label = `CONFLICT`)와 summary 가 바뀌었다. `window.list` 의 summary 도 번호를 다시 쓰는 규칙을 말하게 됐다. 같은
+//   세대에 `window.create` · `slot.popout` 의 답이 `window_id` · `number` 를 더했다(§3-2 · §5-3 — §6-6 의 「같은 PR 이면
+//   한 번」으로 두 단위를 한 세대에 묶었다).
+// ★세대 18 = `tab.list` 의 탭 칸에 `named` 가 붙고 `name` 이 보이는 이름(정한 이름 · 아니면 자동 이름)인 세대★(TRD
+//   S26-window-chrome §3-2 · §6-6) — 이름은 그대로고 답 모양이 바뀌었다. 같은 세대에 `tab.create` · `tab.rename` 의
+//   summary 가 자동 이름과 정한 이름의 굳음을 말하게 됐고 두 명령이 `name` 앞뒤 공백을 깎는다.
 // ★세대 17 = `settings.set`·`settings.reset` 이 설정 파일을 지금 못 읽은 쓰기를 `INTERNAL` 대신 `CONFLICT` 로 답하는
 //   세대★(ADR-0291 R17 · 사용자 결정 2026-10-11 — 대개 잠깐 쥔 잠김이라 조금 뒤 다시 하면 된다) — 이름 · 타입 · 오류
 //   선언은 그대로고 그 답 어휘와 summary 가 바뀌었다.
@@ -100,12 +116,13 @@ use crate::theme::{ThemeControl, ThemeError, UiTheme, WindowTheme};
 //   ★wire 프로토콜 판(`engram_dashboard_protocol::PROTOCOL_VERSION`)과 다른 번호다★ — 그쪽은 프레임 계약이고
 //   이쪽은 이 crate 의 어휘 세대다. 하나를 올린다고 다른 하나가 따라 올라가지 않는다.
 declare_commands! {
-    catalog_version: 17;
+    catalog_version: 20;
 
-    /// 탭 바 한 칸.
+    /// 탭 바 한 칸 — `name` = 보이는 이름 · `named` = 이름을 정했나(거짓이면 `name` 은 포커스 칸 내용을 따라 바뀐다).
     struct TabRow {
         id: String,
         name: String,
+        named: bool,
     }
 
     /// 나눌 방향 — 이름이 결과 배치를 말한다(`LeftRight` = 좌/우, `TopBottom` = 위/아래). // ADR-0140
@@ -170,7 +187,32 @@ declare_commands! {
         description: String,
     }
 
-    /// 창에 빈 탭을 하나 더 만들고 활성화한다.
+    /// 창 하나 — window_id = 재시작을 넘어 같은 창(창 인자로 넘길 값) · window = label(그 실행 안에서만) · number = 보이는
+    /// 창 번호(다시 쓰인다 — 창 인자로 받지 않는다) · main = main 창인가 · visible · minimized · maximized = 그 순간의 OS
+    /// 상태 · focused = 그 창이 OS 전경 창인가. OS 창을 못 읽은 창은 넷 다 false 다.
+    struct WindowRow {
+        window_id: String,
+        window: String,
+        number: u32,
+        main: bool,
+        visible: bool,
+        minimized: bool,
+        maximized: bool,
+        focused: bool,
+    }
+
+    /// window.close 의 결말 — Closed = 팝아웃을 닫았다 · HiddenAll = main 이라 닫지 않고 모든 창을 숨겼다 · Kept =
+    /// if_empty 인데 그 창에 탭이 있거나 이미 닫혀 그대로 뒀다.
+    enum WindowCloseOutcome {
+        Closed,
+        HiddenAll,
+        Kept,
+    }
+
+    /// 창에 빈 탭을 하나 더 만들고 활성화한다. name 을 빼면 자동 이름 — 그 탭의 포커스 칸(에이전트면 그 이름)을
+    /// 따라 바뀐다(tab.list 의 named = false). name 을 주면 정한 이름이다(앞뒤 공백은 깎는다).
+    /// window = window.list 의 window_id(재시작을 넘어 같은 창) 또는 같은 실행 안 label. 번호는 받지 않는다(다시
+    /// 쓰인다 — INVALID_ARGUMENT). label 은 그 실행 안에서만 맞는다.
     #[effect(Write)]
     #[since(1)]
     "tab.create" => args TabCreateArgs {
@@ -180,7 +222,8 @@ declare_commands! {
         view_id: String,
     } errors [CONFLICT];
 
-    /// 그 창의 활성 탭을 바꾼다(다른 창은 그대로).
+    /// 그 창의 활성 탭을 바꾼다(다른 창은 그대로). window 는 tab.create 와 같다(window_id 또는 같은 실행 안 label ·
+    /// 번호는 받지 않는다).
     #[effect(Write)]
     #[since(1)]
     "tab.switch" => args TabSwitchArgs {
@@ -188,7 +231,8 @@ declare_commands! {
         view_id: String,
     } -> ok TabSwitchOk {} errors [CONFLICT];
 
-    /// 탭을 닫는다 — 창의 마지막 탭이면 그 창도 닫힌다.
+    /// 탭을 닫는다 — 창의 마지막 탭이면 그 창도 닫힌다. window 는 tab.create 와 같다(window_id 또는 같은 실행 안
+    /// label · 번호는 받지 않는다).
     #[effect(Write)]
     #[since(1)]
     "tab.close" => args TabCloseArgs {
@@ -196,7 +240,9 @@ declare_commands! {
         view_id: String,
     } -> ok TabCloseOk {} errors [CONFLICT];
 
-    /// 탭 이름을 바꾼다(창은 탭 id 에서 파생하므로 안 받는다).
+    /// 탭 이름을 바꾼다(창은 탭 id 에서 파생하므로 안 받는다 · 앞뒤 공백은 깎는다). 그 뒤 이름은 굳는다 — 지금
+    /// 보이는 자동 이름과 같은 글자여도 포커스 칸 · 에이전트 이름을 더는 따라가지 않고, 자동 이름으로 되돌리는
+    /// 명령은 없다.
     #[effect(Write)]
     #[since(1)]
     "tab.rename" => args TabRenameArgs {
@@ -204,7 +250,9 @@ declare_commands! {
         name: String,
     } -> ok TabRenameOk {} errors [CONFLICT];
 
-    /// 그 창의 탭 목록 + 활성 탭 + 버전.
+    /// 그 창의 탭 목록 + 활성 탭 + 버전. 답의 window 는 그 창의 label 이다.
+    /// window = window.list 의 window_id(재시작을 넘어 같은 창) 또는 같은 실행 안 label. 번호는 받지 않는다(다시
+    /// 쓰인다 — INVALID_ARGUMENT). label 은 그 실행 안에서만 맞는다.
     #[effect(Read)]
     #[since(1)]
     "tab.list" => args TabListArgs {
@@ -216,29 +264,97 @@ declare_commands! {
         version: u64,
     } errors [CONFLICT];
 
-    /// 빈 탭 하나를 든 새 창을 연다 — 성공 시 그 창 label.
+    /// 빈 탭 하나를 든 새 창을 연다. 답 = window(label — 그 실행 안에서만 맞는다) · window_id(재시작을 넘어 같은
+    /// 창 — 창 인자로 넘길 값) · number(보이는 창 번호 — 닫힌 창의 번호를 다시 쓰므로 창 인자로 받지 않는다).
     #[effect(Write)]
     #[since(1)]
     "window.create" => args WindowCreateArgs {}
-                    -> ok   WindowCreateOk { window: String }
+                    -> ok   WindowCreateOk { window: String, window_id: String, number: u32 }
                     errors [CONFLICT];
 
-    /// 창을 통째로 닫는다(main 창은 거부된다).
+    /// 창을 닫는다 — 팝아웃은 탭째 닫고(outcome = Closed), main 은 닫지 않고 모든 창을 숨긴다(HiddenAll — window.hideAll
+    /// 과 같다 · window.showAll 이나 트레이 「보이기」가 되살린다). if_empty = true 면 window 는 그 창의 window_id 여야 하고,
+    /// 그 창에 탭이 들어와 있거나 이미 닫혔으면 닫지 않는다(Kept — 오류가 아니다). window 는 tab.create 와 같다(window_id
+    /// 또는 같은 실행 안 label · 번호는 받지 않는다 — if_empty 여도 INVALID_ARGUMENT).
     #[effect(Write)]
     #[since(1)]
     "window.close" => args WindowCloseArgs {
         window: String,
-    } -> ok WindowCloseOk {} errors [CONFLICT];
+        if_empty: Option<bool>,
+    } -> ok WindowCloseOk {
+        outcome: WindowCloseOutcome,
+    } errors [CONFLICT];
 
-    /// 지금 열려 있는 창 label 전량.
+    /// 지금 열려 있는 창. windows = label 전량 · details = 창마다 window_id · label · 번호 · main 인가 · OS 상태(번호 순 ·
+    /// 칸 뜻은 행 모양). 창 번호는 비어 있는 가장 작은 수를 다시 쓴다 — 닫히는 창이 아직 없어지지 않았으면 그 번호는 비지
+    /// 않는다(그 창은 목록에 없다). 창을 가리킬 때는 번호가 아니라 window_id 를 넘긴다.
     #[effect(Read)]
     #[since(1)]
     "window.list" => args WindowListArgs {}
-                  -> ok   WindowListOk { windows: Vec<String> }
+                  -> ok   WindowListOk { windows: Vec<String>, details: Vec<WindowRow> }
                   errors [CONFLICT];
 
+    /// 창을 최소화한다(이미 최소화면 무동작). 보이지 않는 창은 CONFLICT — 숨은 창은 먼저 window.raise 또는
+    /// window.showAll, 아직 첫 화면 전인 창은 곧 보인다. window 는 tab.create 와 같다(window_id 또는 같은 실행 안 label ·
+    /// 번호는 받지 않는다).
+    #[effect(Write)]
+    #[since(20)]
+    "window.minimize" => args WindowMinimizeArgs {
+        window: String,
+    } -> ok WindowMinimizeOk {} errors [CONFLICT];
+
+    /// 창을 최대화한다(이미 최대화면 무동작). 보이지 않는 창(숨김 · 아직 첫 화면 전)은 화면을 건드리지 않고 미뤄 뒀다가
+    /// 그 창이 보일 때 최대화로 보인다 — deferred = true. window 는 tab.create 와 같다(window_id 또는 같은 실행 안 label ·
+    /// 번호는 받지 않는다).
+    #[effect(Write)]
+    #[since(20)]
+    "window.maximize" => args WindowMaximizeArgs {
+        window: String,
+    } -> ok WindowMaximizeOk {
+        deferred: bool,
+    } errors [CONFLICT];
+
+    /// 최대화된 창을 원래 크기로 되돌린다(최대화가 아니면 무동작 · 보이는 최소화된 창도 무동작이다 — 먼저 window.raise). 보이지
+    /// 않는 창(숨김 · 아직 첫 화면 전)은 화면을 건드리지 않고 미뤄 뒀다가 그 창이 보일 때 원래 크기로 보인다 — deferred =
+    /// true. window 는 tab.create 와 같다(window_id 또는 같은 실행 안 label · 번호는 받지 않는다).
+    #[effect(Write)]
+    #[since(20)]
+    "window.unmaximize" => args WindowUnmaximizeArgs {
+        window: String,
+    } -> ok WindowUnmaximizeOk {
+        deferred: bool,
+    } errors [CONFLICT];
+
+    /// 창을 앞으로 낸다 — 숨어 있으면 모든 창을 보이고(shown_all = true), 최소화면 펴고, 맨 위로 올린 뒤 전경을 청한다.
+    /// 빼앗지 않는다: 다른 앱이 앞이면 맨 위로만 올라 focused = false(focused 는 그 뒤 그 창이 OS 전경 창인가 그대로다).
+    /// 아직 첫 화면 전인 창은 손대지 않는다(곧 보인다 — pending = true). window 는 tab.create 와 같다(window_id 또는 같은
+    /// 실행 안 label · 번호는 받지 않는다).
+    #[effect(Write)]
+    #[since(20)]
+    "window.raise" => args WindowRaiseArgs {
+        window: String,
+    } -> ok WindowRaiseOk {
+        shown_all: bool,
+        focused: bool,
+        pending: bool,
+    } errors [CONFLICT];
+
+    /// 모든 창을 숨긴다(트레이로 — main 의 닫기와 같다). 되살리려면 window.showAll 또는 window.raise.
+    #[effect(Write)]
+    #[since(20)]
+    "window.hideAll" => args WindowHideAllArgs {} -> ok WindowHideAllOk {} errors [];
+
+    /// 숨은 창을 모두 보인다 — 포커스를 빼앗지 않는다(다른 앱이 앞이면 보이기만 한다). 아직 첫 화면 전인 창은 건너뛴다(곧
+    /// 저절로 보인다). focused = 그 뒤 main 이 OS 전경 창인가.
+    #[effect(Write)]
+    #[since(20)]
+    "window.showAll" => args WindowShowAllArgs {} -> ok WindowShowAllOk {
+        focused: bool,
+    } errors [];
+
     // ADR-0265
-    /// 창 하나의 테마를 읽는다. window = window.list 의 label.
+    /// 창 하나의 테마를 읽는다. window = window.list 의 window_id(재시작을 넘어 같은 창) 또는 같은 실행 안 label —
+    /// 번호는 받지 않는다(다시 쓰인다 — INVALID_ARGUMENT).
     /// theme = 그 창에만 정한 테마(dark · light · e-ink) — null 이면 정하지 않아 전역 테마(settings 의
     /// theme.default)를 따른다. effective = 지금 그 창에 칠하는 테마(theme 가 null 이면 theme.default).
     /// 없는 창 = CONFLICT.
@@ -253,7 +369,8 @@ declare_commands! {
 
     // ADR-0265
     /// 창 하나에만 테마를 정한다 — theme = dark · light · e-ink(대소문자 무시), 또는 null(그 창의 테마를 지워 전역
-    /// theme.default 를 따르게 한다). theme 칸은 빼면 INVALID_ARGUMENT 다 — 지우려면 null 을 준다.
+    /// theme.default 를 따르게 한다). theme 칸은 빼면 INVALID_ARGUMENT 다 — 지우려면 null 을 준다. window 는
+    /// window.getTheme 과 같다(window_id 또는 같은 실행 안 label · 번호는 받지 않는다).
     /// 화면 상태에 그 창과 함께 저장돼 재시작을 넘기고(창을 닫으면 함께 사라진다 · restore.status 의 saves 가 false 인
     /// 실행은 저장하지 않는다) 그 창에 새 테마를 보낸다 — 슬롯은 다시 마운트하지 않는다(대화가 그대로다). 모든 창을
     /// 한꺼번에 바꾸려면 settings.set theme.default.
@@ -330,10 +447,14 @@ declare_commands! {
     // ★알려진 과도기 분열 — 같은 id 가 두 표면에서 **받는 것도 주는 것도** 다르다★: 프론트 레지스트리에도
     //   `slot.popout` 이 있다(`src/commands/slotCommands.ts`). 받는 것 — 그쪽은 목적지 인자가 없어 **항상 새
     //   창**이고(포커스된 좌표만 쓴다), 여기는 `to_window` 로 기존 창도 고른다. 주는 것 — 그쪽은
-    //   `{window, tab}`, 여기는 `{window, new_view_id}`. 한쪽만 맞춰 고치지 말 것 — 합류는 프론트 자체
+    //   `{window, tab, window_id, number}`, 여기는 `{window, new_view_id, window_id, number}`. 한쪽만 맞춰 고치지 말 것 — 합류는 프론트 자체
     //   레지스트리를 은퇴시키는 후속 스텝(화면 몫 등록) 몫이고, 지금 한쪽을 바꾸면 그 스텝이 옮길 대상만
     //   늘어난다. 반대편에도 같은 메모가 붙어 있다.
     /// 슬롯의 내용을 다른 창의 새 탭으로 옮긴다(원본 슬롯은 닫힌다) — to_window 를 빼면 새 창을 연다.
+    /// to_window = window.list 의 window_id(재시작을 넘어 같은 창) 또는 같은 실행 안 label. 번호는 받지 않는다(다시
+    /// 쓰인다 — INVALID_ARGUMENT). label 은 그 실행 안에서만 맞는다.
+    /// 답 = 옮겨 간 창의 window · window_id · number(window.create 와 같은 뜻 — 기존 창이면 그 창의 것) + new_view_id
+    /// (그 창에 생긴 탭).
     #[effect(Write)]
     #[since(2)]
     "slot.popout" => args SlotPopoutArgs {
@@ -343,6 +464,8 @@ declare_commands! {
     } -> ok SlotPopoutOk {
         window: String,
         new_view_id: String,
+        window_id: String,
+        number: u32,
     } errors [CONFLICT];
 
     /// 포커스를 그 슬롯으로 옮긴다(출력 라우팅은 안 바뀐다).
@@ -384,6 +507,7 @@ declare_commands! {
     /// view_id 를 빼면 새 탭을 만들어 거기 넣는다 — 그 경우 slot_id 는 줄 수 없다.
     /// backend 는 `"claude"` 또는 `"codex"` — 둘 다 이 표면으로 만든다. 모르는 낱말은 스폰 전에
     /// 거부되고, 빼면 데몬이 거절한다(기본 백엔드는 없다).
+    /// window 는 tab.create 와 같다(window_id 또는 같은 실행 안 label · 번호는 받지 않는다).
     #[effect(Write)]
     #[since(1)]
     "agent.spawnInto" => args AgentSpawnIntoArgs {
@@ -397,7 +521,8 @@ declare_commands! {
     } errors [CONFLICT];
 
     /// 공간/방향 낱말(top-left·right·up …)을 슬롯 id 로 푼다. view_id 를 빼면 그 창의 활성 탭이 대상이고,
-    /// window 도 빼면 main 창이다. 그 방향에 슬롯이 없으면 slot_id 는 null 이다.
+    /// window 도 빼면 main 창이다. 그 방향에 슬롯이 없으면 slot_id 는 null 이다. window 는 tab.create 와 같다
+    /// (window_id 또는 같은 실행 안 label · 번호는 받지 않는다).
     #[effect(Read)]
     #[since(1)]
     "slot.resolveSpatial" => args SlotResolveSpatialArgs {
@@ -525,9 +650,9 @@ declare_commands! {
 
 /// 이 표의 핸들러들이 잡는 실물 전량 — ★조립 때 주입된다★(ADR-0155 결정 5 / 규칙 T-1).
 ///
-/// 앞 다섯의 계약(어느 것이 락 안이고 어느 것이 락 밖인가)은 적용 서비스가 소유한다 — 이 구조체는 그것을
-/// **소유형으로** 들고 있을 뿐이다. `#[tauri::command]` 쪽이 빌려 쓰는 어댑터를 `Arc` 로 바꾼 것이 차이의
-/// 전부이고, 그렇게 하는 이유는 표의 핸들러가 `'static` 이어야 하기 때문이다.
+/// 앞 다섯의 계약(어느 것이 락 안이고 어느 것이 락 밖인가)은 적용 서비스가, `control` 의 계약은 `super::window_ctl` 이
+/// 소유한다 — 이 구조체는 그것을 **소유형으로** 들고 있을 뿐이다. `#[tauri::command]` 쪽이 빌려 쓰는 어댑터를 `Arc` 로
+/// 바꾼 것이 차이의 전부이고, 그렇게 하는 이유는 표의 핸들러가 `'static` 이어야 하기 때문이다.
 ///
 /// ★이름이 `Layout` 인데 적용 서비스 밖 포트가 넷 있다★(`themes` · `settings` · `settings_events` · `restore`) —
 /// 표가 하나라 포트 묶음도 하나다(사유 = 모듈 헤더 「레이아웃 밖의 셸 명령도 여기 선다」). 그 포트들은 적용 서비스를
@@ -540,6 +665,9 @@ pub struct LayoutPorts {
     pub windows: Arc<dyn WindowHost>,
     pub labels: Arc<dyn LabelSource>,
     pub spawner: Arc<dyn AgentSpawner>,
+    /// 창 상태(최소화 · 최대화 · 보이기 · 숨기기 · OS 상태 읽기) — 계약은 `super::window_ctl` 이 소유한다. 실물이 메인
+    /// 스레드 일을 기다리므로 이 포트를 부르는 동사는 [`offloaded_handler`] 로 꽂는다.
+    pub control: Arc<dyn WindowControl>,
     /// 창 테마 읽기 · 쓰기 · 밀기 — 설정 알림 · 복원 조율자와 **같은 유효 테마 인스턴스**.
     pub themes: ThemeControl,
     /// 셸 설정 — 사람 경로(Tauri 설정 command)와 **같은 인스턴스**.
@@ -594,17 +722,82 @@ pub fn make_table(ports: LayoutPorts) -> CommandTable {
         "window.create",
         blocking_handler(move |_: WindowCreateArgs| verb_window_create(&p)),
     );
+    // 창 상태 포트를 부르는 동사 — 실물이 메인 스레드 일을 기다린다(TRD S26-window-chrome §5-2). `window.close` 는
+    //   main 이면 모두 숨기기를 기다리고, `window.list` 는 창마다 OS 상태를 읽는다.
     let p = Arc::clone(&ports);
     plug(
         &mut table,
         "window.close",
-        blocking_handler(move |args: WindowCloseArgs| verb_window_close(&p, args)),
+        offloaded_handler(move |args: WindowCloseArgs| verb_window_close(&p, args)),
     );
     let p = Arc::clone(&ports);
     plug(
         &mut table,
         "window.list",
-        blocking_handler(move |_: WindowListArgs| verb_window_list(&p)),
+        offloaded_handler(move |_: WindowListArgs| verb_window_list(&p)),
+    );
+    let p = Arc::clone(&ports);
+    plug(
+        &mut table,
+        "window.minimize",
+        offloaded_handler(move |args: WindowMinimizeArgs| {
+            verb_window_act(&p, &args.window, WindowAction::Minimize).map(|_| WindowMinimizeOk {})
+        }),
+    );
+    let p = Arc::clone(&ports);
+    plug(
+        &mut table,
+        "window.maximize",
+        offloaded_handler(move |args: WindowMaximizeArgs| {
+            verb_window_act(&p, &args.window, WindowAction::Maximize).map(|applied| {
+                WindowMaximizeOk {
+                    deferred: applied.deferred,
+                }
+            })
+        }),
+    );
+    let p = Arc::clone(&ports);
+    plug(
+        &mut table,
+        "window.unmaximize",
+        offloaded_handler(move |args: WindowUnmaximizeArgs| {
+            verb_window_act(&p, &args.window, WindowAction::Unmaximize).map(|applied| {
+                WindowUnmaximizeOk {
+                    deferred: applied.deferred,
+                }
+            })
+        }),
+    );
+    let p = Arc::clone(&ports);
+    plug(
+        &mut table,
+        "window.raise",
+        offloaded_handler(move |args: WindowRaiseArgs| {
+            verb_window_act(&p, &args.window, WindowAction::Raise).map(|applied| WindowRaiseOk {
+                shown_all: applied.shown_all,
+                focused: applied.focused,
+                pending: applied.pending,
+            })
+        }),
+    );
+    let p = Arc::clone(&ports);
+    plug(
+        &mut table,
+        "window.hideAll",
+        offloaded_handler(move |_: WindowHideAllArgs| {
+            p.control.hide_all();
+            Ok(WindowHideAllOk {})
+        }),
+    );
+    let p = Arc::clone(&ports);
+    plug(
+        &mut table,
+        "window.showAll",
+        offloaded_handler(move |_: WindowShowAllArgs| {
+            Ok(WindowShowAllOk {
+                focused: p.control.show_all(Activation::NoSteal),
+            })
+        }),
     );
     let p = Arc::clone(&ports);
     plug(
@@ -793,13 +986,13 @@ where
 // ── 동사 ────────────────────────────────────────────────────────────────────
 
 fn verb_tab_create(ports: &LayoutPorts, args: TabCreateArgs) -> Result<TabCreateOk, CommandError> {
-    let window = text("window", &args.window)?;
-    let name = optional_text("name", args.name.as_deref())?;
+    let window = window_label(ports, "window", &args.window)?;
+    let name = optional_text("name", args.name.as_deref())?.map(str::trim);
     let view_id = apply::create_tab(
         &ports.state,
         ports.subs.as_ref(),
         ports.events.as_ref(),
-        window,
+        &window,
         name.map(str::to_string),
     )
     .map_err(not_applied)?;
@@ -809,13 +1002,13 @@ fn verb_tab_create(ports: &LayoutPorts, args: TabCreateArgs) -> Result<TabCreate
 }
 
 fn verb_tab_switch(ports: &LayoutPorts, args: TabSwitchArgs) -> Result<TabSwitchOk, CommandError> {
-    let window = text("window", &args.window)?;
+    let window = window_label(ports, "window", &args.window)?;
     let view = uuid_arg("view_id", &args.view_id)?;
     apply::switch_tab(
         &ports.state,
         ports.subs.as_ref(),
         ports.events.as_ref(),
-        window,
+        &window,
         view,
     )
     .map_err(not_applied)?;
@@ -823,14 +1016,14 @@ fn verb_tab_switch(ports: &LayoutPorts, args: TabSwitchArgs) -> Result<TabSwitch
 }
 
 fn verb_tab_close(ports: &LayoutPorts, args: TabCloseArgs) -> Result<TabCloseOk, CommandError> {
-    let window = text("window", &args.window)?;
+    let window = window_label(ports, "window", &args.window)?;
     let view = uuid_arg("view_id", &args.view_id)?;
     apply::close_tab(
         &ports.state,
         ports.subs.as_ref(),
         ports.events.as_ref(),
         ports.windows.as_ref(),
-        window,
+        &window,
         view,
     )
     .map_err(not_applied)?;
@@ -839,15 +1032,15 @@ fn verb_tab_close(ports: &LayoutPorts, args: TabCloseArgs) -> Result<TabCloseOk,
 
 fn verb_tab_rename(ports: &LayoutPorts, args: TabRenameArgs) -> Result<TabRenameOk, CommandError> {
     let view = uuid_arg("view_id", &args.view_id)?;
-    let name = text("name", &args.name)?;
+    let name = text("name", &args.name)?.trim();
     apply::rename_tab(&ports.state, ports.events.as_ref(), view, name.to_string())
         .map_err(not_applied)?;
     Ok(TabRenameOk {})
 }
 
 fn verb_tab_list(ports: &LayoutPorts, args: TabListArgs) -> Result<TabListOk, CommandError> {
-    let window = text("window", &args.window)?;
-    let tabs = apply::list_tabs(&ports.state, window).map_err(not_applied)?;
+    let window = window_label(ports, "window", &args.window)?;
+    let tabs = apply::list_tabs(&ports.state, &window).map_err(not_applied)?;
     Ok(TabListOk {
         window: tabs.label,
         tabs: tabs
@@ -856,6 +1049,7 @@ fn verb_tab_list(ports: &LayoutPorts, args: TabListArgs) -> Result<TabListOk, Co
             .map(|meta| TabRow {
                 id: meta.id.to_string(),
                 name: meta.name,
+                named: meta.named,
             })
             .collect(),
         active: tabs.active.to_string(),
@@ -864,43 +1058,87 @@ fn verb_tab_list(ports: &LayoutPorts, args: TabListArgs) -> Result<TabListOk, Co
 }
 
 fn verb_window_create(ports: &LayoutPorts) -> Result<WindowCreateOk, CommandError> {
-    let window = apply::create_window(
+    let created = apply::create_window(
         &ports.state,
         ports.subs.as_ref(),
+        ports.events.as_ref(),
         ports.windows.as_ref(),
         ports.labels.as_ref(),
     )
     .map_err(not_applied)?;
-    Ok(WindowCreateOk { window })
+    Ok(WindowCreateOk {
+        window: created.window,
+        window_id: created.window_id,
+        number: created.number,
+    })
 }
 
+// 창 인자를 해석기에 넘기기 전에 `if_empty` 를 본다 — 그 길의 창은 대개 이미 모델에 없다(차례 = `window_ctl::close`).
 fn verb_window_close(
     ports: &LayoutPorts,
     args: WindowCloseArgs,
 ) -> Result<WindowCloseOk, CommandError> {
     let window = text("window", &args.window)?;
-    apply::close_window(
+    let outcome = window_ctl::close(
         &ports.state,
         ports.subs.as_ref(),
         ports.windows.as_ref(),
+        ports.control.as_ref(),
         window,
+        args.if_empty.unwrap_or(false),
     )
-    .map_err(not_applied)?;
-    Ok(WindowCloseOk {})
+    .map_err(window_ctl_error)?;
+    Ok(WindowCloseOk {
+        outcome: match outcome {
+            CloseOutcome::Closed => WindowCloseOutcome::Closed,
+            CloseOutcome::HiddenAll => WindowCloseOutcome::HiddenAll,
+            CloseOutcome::Kept => WindowCloseOutcome::Kept,
+        },
+    })
 }
 
 fn verb_window_list(ports: &LayoutPorts) -> Result<WindowListOk, CommandError> {
+    let rows = window_ctl::list(&ports.state, ports.control.as_ref()).map_err(not_applied)?;
     Ok(WindowListOk {
-        windows: apply::list_windows(&ports.state).map_err(not_applied)?,
+        windows: rows.iter().map(|row| row.window.clone()).collect(),
+        details: rows
+            .into_iter()
+            .map(|row| WindowRow {
+                window_id: row.window_id,
+                window: row.window,
+                number: row.number,
+                main: row.main,
+                visible: row.os.visible,
+                minimized: row.os.minimized,
+                maximized: row.os.maximized,
+                focused: row.os.focused,
+            })
+            .collect(),
     })
+}
+
+fn verb_window_act(
+    ports: &LayoutPorts,
+    window: &str,
+    action: WindowAction,
+) -> Result<Applied, CommandError> {
+    let window = text("window", window)?;
+    window_ctl::act(&ports.state, ports.control.as_ref(), window, action).map_err(window_ctl_error)
+}
+
+fn window_ctl_error(error: WindowCtlError) -> CommandError {
+    match error {
+        WindowCtlError::Arg(error) => window_arg_error(error),
+        WindowCtlError::NotApplied(detail) => not_applied(detail),
+    }
 }
 
 fn verb_window_get_theme(
     ports: &LayoutPorts,
     args: WindowGetThemeArgs,
 ) -> Result<WindowGetThemeOk, CommandError> {
-    let window = text("window", &args.window)?;
-    let theme = ports.themes.get(window).map_err(theme_error)?;
+    let window = window_label(ports, "window", &args.window)?;
+    let theme = ports.themes.get(&window).map_err(theme_error)?;
     let (theme, effective) = theme_reply(theme);
     Ok(WindowGetThemeOk { theme, effective })
 }
@@ -909,7 +1147,7 @@ fn verb_window_set_theme(
     ports: &LayoutPorts,
     args: WindowSetThemeArgs,
 ) -> Result<WindowSetThemeOk, CommandError> {
-    let window = text("window", &args.window)?;
+    let window = window_label(ports, "window", &args.window)?;
     // wire 로 들어온 부재는 여기까지 못 온다(선언 매크로가 `missing field` 로 반려한다) — 이 갈래는 코드가 인자를
     //   직접 지어 부르는 경로 몫이다(`agent.move` 의 `parent` 와 같다).
     let Some(given) = args.theme.as_ref() else {
@@ -918,7 +1156,7 @@ fn verb_window_set_theme(
         ));
     };
     let theme = given.as_deref().map(theme_arg).transpose()?;
-    let written = ports.themes.set(window, theme).map_err(theme_error)?;
+    let written = ports.themes.set(&window, theme).map_err(theme_error)?;
     let (theme, effective) = theme_reply(written);
     Ok(WindowSetThemeOk { theme, effective })
 }
@@ -1042,7 +1280,7 @@ fn verb_slot_popout(
 ) -> Result<SlotPopoutOk, CommandError> {
     let view = uuid_arg("view_id", &args.view_id)?;
     let slot = uuid_arg("slot_id", &args.slot_id)?;
-    let target = optional_text("to_window", args.to_window.as_deref())?;
+    let target = optional_window_label(ports, "to_window", args.to_window.as_deref())?;
     let moved = apply::move_slot_to_window(
         &ports.state,
         ports.subs.as_ref(),
@@ -1051,7 +1289,7 @@ fn verb_slot_popout(
         ports.labels.as_ref(),
         view,
         slot,
-        target.map(str::to_string),
+        target,
     )
     .map_err(not_applied)?;
     // ★`view_id` 라 부르지 않는다★ — 이 명령의 인자에 이미 `view_id`(떼어낼 **원본** 탭)가 있어서, 답의 같은
@@ -1061,6 +1299,8 @@ fn verb_slot_popout(
     Ok(SlotPopoutOk {
         window: moved.window,
         new_view_id: moved.tab.to_string(),
+        window_id: moved.window_id,
+        number: moved.number,
     })
 }
 
@@ -1133,13 +1373,14 @@ fn verb_resolve_spatial(
     args: SlotResolveSpatialArgs,
 ) -> Result<SlotResolveSpatialOk, CommandError> {
     let token = text("token", &args.token)?;
-    let window = optional_text("window", args.window.as_deref())?;
+    let window = optional_window_label(ports, "window", args.window.as_deref())?;
     let view = args
         .view_id
         .as_deref()
         .map(|raw| uuid_arg("view_id", raw))
         .transpose()?;
-    let slot = apply::resolve_spatial(&ports.state, token, window, view).map_err(not_applied)?;
+    let slot = apply::resolve_spatial(&ports.state, token, window.as_deref(), view)
+        .map_err(not_applied)?;
     Ok(SlotResolveSpatialOk {
         slot_id: slot.map(|id| id.to_string()),
     })
@@ -1302,7 +1543,7 @@ async fn verb_spawn_into(
     ports: &LayoutPorts,
     args: AgentSpawnIntoArgs,
 ) -> Result<AgentSpawnIntoOk, CommandError> {
-    let window = text("window", &args.window)?;
+    let window = window_label(ports, "window", &args.window)?;
     // ★`agent.new`·`agent.spawn --cwd` 와 **같은 철자 규칙**을 받는다★ — 이 문은 그 셋의 공통 등록부
     //   (`agent::commands::register`)를 안 지나므로, 여기서 안 부르면 같은 낱말이 문마다 다르게 읽힌다.
     let cwd = normalize_spelling(text("cwd", &args.cwd)?);
@@ -1323,7 +1564,7 @@ async fn verb_spawn_into(
         ports.subs.as_ref(),
         ports.events.as_ref(),
         ports.spawner.as_ref(),
-        window,
+        &window,
         tab,
         slot,
         args.backend,
@@ -1368,6 +1609,37 @@ fn text<'a>(field: &str, given: &'a str) -> Result<&'a str, CommandError> {
         )));
     }
     Ok(given)
+}
+
+/// 창 인자를 지금 모델 안 창의 label 로 푼다(TRD S26-window-chrome §4-5) — 숫자만 = `INVALID_ARGUMENT` · 모델에 없는
+/// 창(앞 실행의 label 포함) = `CONFLICT`(적용 실패와 같은 코드). 레이아웃 락은 푸는 동안만 쥔다 — 그 뒤 창이 닫히면
+/// 적용 서비스가 같은 `CONFLICT` 로 거절한다.
+fn window_label(ports: &LayoutPorts, field: &str, given: &str) -> Result<String, CommandError> {
+    let given = text(field, given)?;
+    let mgr = ports
+        .state
+        .0
+        .lock()
+        .map_err(|e| not_applied(e.to_string()))?;
+    window_arg::resolve(&mgr, given).map_err(window_arg_error)
+}
+
+fn optional_window_label(
+    ports: &LayoutPorts,
+    field: &str,
+    given: Option<&str>,
+) -> Result<Option<String>, CommandError> {
+    optional_text(field, given)?
+        .map(|given| window_label(ports, field, given))
+        .transpose()
+}
+
+fn window_arg_error(error: WindowArgError) -> CommandError {
+    let message = error.to_string();
+    match error {
+        WindowArgError::NumberGiven => CommandError::invalid_argument(message),
+        WindowArgError::NotFound(_) => not_applied(message),
+    }
 }
 
 fn optional_text<'a>(field: &str, given: Option<&'a str>) -> Result<Option<&'a str>, CommandError> {

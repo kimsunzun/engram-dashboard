@@ -48,7 +48,7 @@ use super::lifecycle::{Lifecycle, ReconnectVerdict};
 use super::protocol_state::{self, CommandFailure, PendingMap, SubState};
 use super::refusal::{RefusalAlerts, RefusalSite};
 use super::replay_flight::{self, RefusalOutcome, ReplayFlightSet, Resolution};
-use super::{ConnectionState, DaemonDiscovery, SharedUsageInterest};
+use super::{AgentNamesSink, ConnectionState, DaemonDiscovery, SharedUsageInterest};
 use crate::output_channel::{self, WindowChannelRegistry};
 use crate::output_router::{OutputRouter, WindowLabel};
 
@@ -278,6 +278,8 @@ pub(crate) async fn run_connection(
     //   Text arm 의 broadcast(request_id 없는 AgentListUpdated/StatusChanged/…)를 전 webview 에 push 한다.
     //   실물은 `events::TauriEmitter`, 창 없는 조립은 `events::NoDaemonEvents`(버림).
     events: Arc<dyn DaemonEvents>,
+    // 데몬 목록의 이름 몫(TRD S26-window-chrome §4-3) — `AgentListUpdated` 팔이 프론트 알림 뒤에 부른다.
+    names: Arc<dyn AgentNamesSink>,
     // 등록 거절 박스의 거르개 — `DaemonClient` 가 쥔 것을 그대로 받는다(사유 = 그 칸 doc).
     refusals: Arc<RefusalAlerts>,
     // ADR-0155 결정 4: 데몬이 배달한 명령의 입구. 늦게 채워지므로 슬롯으로 받는다(`inbound::InboundSlot` doc).
@@ -375,6 +377,7 @@ pub(crate) async fn run_connection(
         router,
         registry,
         events,
+        names,
         refusals,
         inbound,
         usage,
@@ -630,6 +633,7 @@ async fn connected_lifetime(
     router: Arc<OutputRouter>,
     registry: WindowChannelRegistry,
     events: Arc<dyn DaemonEvents>,
+    names: Arc<dyn AgentNamesSink>,
     refusals: Arc<RefusalAlerts>,
     inbound: Arc<InboundSlot>,
     usage: SharedUsageInterest,
@@ -664,6 +668,7 @@ async fn connected_lifetime(
             &router,
             &registry,
             events.as_ref(),
+            names.as_ref(),
             &refusals,
             &inbound,
             &usage,
@@ -945,6 +950,7 @@ async fn main_loop(
     router: &Arc<OutputRouter>,
     registry: &WindowChannelRegistry,
     events: &dyn DaemonEvents,
+    names: &dyn AgentNamesSink,
     refusals: &Arc<RefusalAlerts>,
     inbound: &Arc<InboundSlot>,
     usage: &SharedUsageInterest,
@@ -1079,7 +1085,7 @@ async fn main_loop(
                                                 // ★T7c: request_id 없는 broadcast 를 알림 포트로 전
                                                 //   webview push. 실패는 포트 구현이 삼킨다(webview
                                                 //   없음/채널 오류 등은 치명적이지 않다).
-                                                ev => emit_broadcast(events, &ev),
+                                                ev => emit_broadcast(events, names, &ev),
                                             },
                                         }
                                     }
@@ -1278,10 +1284,13 @@ async fn main_loop(
 // 전송 어댑터의 판정이 아니다. 아래 `Error` 팔은 emit 이 아니라 로깅뿐인데, 이걸 어댑터로 옮기면
 // no-op 조립에서 그 흔적까지 함께 사라진다. 포트가 아는 것은 **무슨 일이 일어났나**뿐이고, 그것이
 // 어떤 Tauri 이벤트 이름으로 나가는지는 어댑터가 안다(`events.rs`).
-fn emit_broadcast(events: &dyn DaemonEvents, ev: &AgentEvent) {
+fn emit_broadcast(events: &dyn DaemonEvents, names: &dyn AgentNamesSink, ev: &AgentEvent) {
     match ev {
+        // 이름 장부는 프론트 알림 뒤다(TRD S26-window-chrome §4-3). 이 자리는 아무 락도 쥐지 않는다 — 장부의 실물이
+        //   레이아웃 락을 잡는다(`AgentNamesSink` doc).
         AgentEvent::AgentListUpdated { agents } => {
             events.agent_list_updated(agents);
+            names.agents(agents);
         }
         AgentEvent::StatusChanged {
             agent_id,
@@ -1480,7 +1489,7 @@ async fn write_usage_on_open(
 /// 데몬 방송 `UsageLimitsUpdated` 한 장 — 대조 → 받을 창에 알림 → 어긋났으면 같은 소켓에 바라는 집합 한 장.
 ///
 /// ★이 팔은 [`emit_broadcast`] 안이 아니라 그 호출 자리에 선다★: 대조에는 관심 상태 · 이 소켓의 표식 · 소켓
-/// 출구가 필요한데 [`emit_broadcast`] 는 `(events, ev)` 만 받는다. 그리로 떨어지면 `_ => {}` 가 조용히
+/// 출구가 필요한데 [`emit_broadcast`] 는 알림 포트 둘과 `ev` 만 받는다. 그리로 떨어지면 `_ => {}` 가 조용히
 /// 삼키고 컴파일러는 못 잡는다 — `tests.rs` 의 「방송 한 줄 → 알림 한 번」 시험이 유일한 벽이다.
 /// ★받을 창이 없으면 알리지 않는다★ — 옛 소켓의 한 장이거나 사용량 슬롯이 있는 창이 없다. 웹뷰는 자기 label 이
 /// 든 것만 받으므로 빈 `labels` 는 아무도 안 받는다.

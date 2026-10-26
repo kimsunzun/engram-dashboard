@@ -104,8 +104,9 @@ export default function SlotContextMenu({ x, y, items, ctx, onClose }: SlotConte
     const handler = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) onClose()
     }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
+    // 캡처 단계 — 창 끌 자리 누름은 거품 단계에 닿지 않는다(`layout/titleRow/dragRegion.ts`).
+    document.addEventListener('mousedown', handler, true)
+    return () => document.removeEventListener('mousedown', handler, true)
   }, [onClose])
 
   // ★역할은 그리기만이다 — 키보드 이동(화살표·Home/End·타입어헤드)은 없다★(알려진 갭 · 이 메뉴 전부).

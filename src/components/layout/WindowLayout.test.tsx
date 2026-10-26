@@ -1,4 +1,4 @@
-import { StrictMode } from 'react'
+import { StrictMode, useEffect, useState } from 'react'
 import { act, cleanup, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -40,12 +40,16 @@ vi.mock('@tauri-apps/api/core', () => ({
 const reportFirstPaintMock = vi.hoisted(() => vi.fn())
 vi.mock('../../theme/firstPaint', () => ({ reportFirstPaint: reportFirstPaintMock }))
 
-// ── getCurrentWindow mock — 0탭 자가닫힘 관측 · 사건 구독 대상 label ──
-const closeMock = vi.fn(async () => undefined)
+// ── getCurrentWindow mock — 사건 구독 대상 label ──
 const currentWindow = vi.hoisted(() => ({ label: 'main' }))
 vi.mock('@tauri-apps/api/window', () => ({
-  getCurrentWindow: () => ({ close: closeMock, label: currentWindow.label }),
+  getCurrentWindow: () => ({ label: currentWindow.label }),
 }))
+
+/** 0탭 자가닫힘 관측 — 셸에 청한 창 닫기(`window_control`). */
+const closeCalls = () => invokeMock.mock.calls.filter(c => c[0] === 'window_control')
+const KEPT = { deferred: false, pending: false, shown_all: false, focused: false, close: 'kept' }
+const CLOSED = { ...KEPT, close: 'closed' }
 
 // ── ViewLayoutRenderer stub — 캔버스 내부는 관심 밖(어느 view 를 그리는지만 관측) + ★mount 카운터★.
 // ★S4-F5 keep-alive no-remount★: 슬롯 컴포넌트가 탭 전환에 remount 되지 않는지(터미널 인스턴스 생존)를
@@ -70,9 +74,11 @@ vi.mock('./ViewLayoutRenderer', async () => {
 
 vi.mock('@tauri-apps/api/app', () => ({ getIdentifier: async () => 'com.engram.test' }))
 
+import '../../commands/tabCommands' // 0탭 자가닫힘이 부르는 `window.close` 등록(운영은 `App.tsx` 의 contributions)
 import WindowLayout from './WindowLayout'
 import { __resetCanvasReportForTest } from './windowCanvasReport'
 import { __resetUiMetricsReportForTest } from './uiMetricsReport'
+import { __resetMinSizeReportForTest, MIN_SIZE_WAIT_CAP_MS } from './titleRow/minSizeReport'
 import { localDrag } from './dock/localDrag'
 import { __resetDragSourceForTest } from './tabStrip/useTabDragSource'
 import { buildTabDragType, buildTabDragValue } from './dock/tabDragData'
@@ -108,24 +114,26 @@ beforeEach(() => {
   windowRoleMock.mockReset()
   windowRoleMock.mockImplementation(async () => ({ role: 'model', generation: null }))
   unlistenMock.mockClear()
-  closeMock.mockClear()
   reportFirstPaintMock.mockReset()
   invokeMock.mockReset()
   mountCounts.clear()
   rendererProps.clear()
   listenShouldReject = false
   rejectListen.clear()
+  __resetMinSizeReportForTest()
   useViewStore.setState({ layouts: {}, windows: {}, renderModeOverride: {} })
   invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
     if (cmd === 'list_tabs') {
       return {
         label: (args as { window: string }).window,
-        tabs: [{ id: 'v1', name: 'Tab 1' }, { id: 'v2', name: 'Tab 2' }],
+        window_id: `wid-${(args as { window: string }).window}`,
+        tabs: [{ id: 'v1', name: 'Tab 1', named: true }, { id: 'v2', name: 'Tab 2', named: true }],
         active: 'v1',
         version: 1,
       }
     }
     if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+    if (cmd === 'window_control') return KEPT
     return undefined
   })
 })
@@ -195,7 +203,7 @@ describe('WindowLayout — mount-race(초기 pull vs 최신 emit, S4-F4)', () =>
 
     emit('window:tabs-updated', {
       label: 'slot-popup-1',
-      tabs: [{ id: 'v1', name: 'Tab 1' }, { id: 'v2', name: 'Tab 2' }],
+      tabs: [{ id: 'v1', name: 'Tab 1', named: true }, { id: 'v2', name: 'Tab 2', named: true }],
       active: 'v2',
       version: 5,
     })
@@ -203,7 +211,7 @@ describe('WindowLayout — mount-race(초기 pull vs 최신 emit, S4-F4)', () =>
 
     resolveListTabs({
       label: 'slot-popup-1',
-      tabs: [{ id: 'v1', name: 'Tab 1' }, { id: 'v2', name: 'Tab 2' }],
+      tabs: [{ id: 'v1', name: 'Tab 1', named: true }, { id: 'v2', name: 'Tab 2', named: true }],
       active: 'v1',
       version: 1,
     })
@@ -228,7 +236,7 @@ describe('WindowLayout — 부팅 pull 재시도/표면화(ADR-0102)', () => {
         if (listTabsCalls <= 2) throw new Error(`state not ready ${listTabsCalls}`)
         return {
           label: (args as { window: string }).window,
-          tabs: [{ id: 'v1', name: 'Tab 1' }],
+          tabs: [{ id: 'v1', name: 'Tab 1', named: true }],
           active: 'v1',
           version: 1,
         }
@@ -298,7 +306,7 @@ describe('WindowLayout — 첫 화면 · 첫 페인트 알림', () => {
     await act(async () =>
       answerTabs({
         label: 'slot-popup-10',
-        tabs: [{ id: 'v1', name: 'Tab 1' }, { id: 'v2', name: 'Tab 2' }],
+        tabs: [{ id: 'v1', name: 'Tab 1', named: true }, { id: 'v2', name: 'Tab 2', named: true }],
         active: 'v1',
         version: 1,
       }),
@@ -324,6 +332,56 @@ describe('WindowLayout — 첫 화면 · 첫 페인트 알림', () => {
     await waitFor(() => expect(reportFirstPaintMock).toHaveBeenCalledTimes(1))
   })
 
+  // TRD S26-window-chrome §7-7 — 셸이 보이기 전에 그 창을 넓히게.
+  it('알림은 제목 줄의 최소 창 크기 보고가 답한 뒤 — 보고가 먼저 나가고 그 답을 기다린다', async () => {
+    let answerReport: () => void = () => {}
+    const order: string[] = []
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'list_tabs') {
+        return { label: 'main', window_id: 'wid-main', number: 1, tabs: [{ id: 'v1', name: 'Tab 1', named: true }], active: 'v1', version: 1 }
+      }
+      if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+      if (cmd === 'report_window_min_width') {
+        const { width, height } = args as { width: number; height: number }
+        order.push(`report:${width}x${height}`)
+        return new Promise<void>(res => (answerReport = res))
+      }
+      return undefined
+    })
+    reportFirstPaintMock.mockImplementation(() => void order.push('first-paint'))
+
+    render(<WindowLayout label="main" />)
+    await waitFor(() => expect(order).toEqual(['report:286x64']))
+    await new Promise(res => setTimeout(res, MIN_SIZE_WAIT_CAP_MS / 3))
+    expect(reportFirstPaintMock).not.toHaveBeenCalled()
+
+    await act(async () => answerReport())
+    await waitFor(() => expect(order).toEqual(['report:286x64', 'first-paint']))
+  })
+
+  it('보고가 답하지 않거나 거절돼도 알림은 상한 뒤에 나간다', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    for (const answer of ['hang', 'reject'] as const) {
+      reportFirstPaintMock.mockReset()
+      __resetMinSizeReportForTest()
+      invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+        if (cmd === 'list_tabs') {
+          return { label: 'main', window_id: 'wid-main', number: 1, tabs: [{ id: 'v1', name: 'Tab 1', named: true }], active: 'v1', version: 1 }
+        }
+        if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+        if (cmd === 'report_window_min_width') {
+          if (answer === 'hang') return new Promise<void>(() => {})
+          throw new Error('거절(시험)')
+        }
+        return undefined
+      })
+      const view = render(<WindowLayout label="main" />)
+      await waitFor(() => expect(reportFirstPaintMock).toHaveBeenCalledTimes(1), { timeout: MIN_SIZE_WAIT_CAP_MS * 3 })
+      view.unmount()
+    }
+    warn.mockRestore()
+  })
+
   // 대기 창은 숨은 채 맡겨질 때를 기다린다 — 빈 틀은 첫 화면이 아니다(TRD S21-slot-docking §3-9 I7).
   it('대기 창은 첫 화면을 알리지 않는다', async () => {
     currentWindow.label = 'slot-popup-7'
@@ -345,7 +403,7 @@ describe('WindowLayout — get_view keep-alive 재시도 self-heal(FIX-3)', () =
       if (cmd === 'list_tabs') {
         return {
           label: (args as { window: string }).window,
-          tabs: [{ id: 'v1', name: 'Tab 1' }],
+          tabs: [{ id: 'v1', name: 'Tab 1', named: true }],
           active: 'v1',
           version: 1,
         }
@@ -380,7 +438,7 @@ describe('WindowLayout — window:tabs-updated 자기 label 필터', () => {
     await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
     emit('window:tabs-updated', {
       label: 'main',
-      tabs: [{ id: 'v1', name: 'Tab 1' }, { id: 'v2', name: 'Tab 2' }],
+      tabs: [{ id: 'v1', name: 'Tab 1', named: true }, { id: 'v2', name: 'Tab 2', named: true }],
       active: 'v2',
       version: 2,
     })
@@ -397,7 +455,7 @@ describe('WindowLayout — window:tabs-updated 자기 label 필터', () => {
     await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
     emit('window:tabs-updated', {
       label: 'slot-popup-9',
-      tabs: [{ id: 'x1', name: 'X' }],
+      tabs: [{ id: 'x1', name: 'X', named: true }],
       active: 'x1',
       version: 99,
     })
@@ -426,7 +484,7 @@ describe('WindowLayout — keep-alive no-remount(ADR-0056, S4-F5)', () => {
 
     emit('window:tabs-updated', {
       label: 'main',
-      tabs: [{ id: 'v1', name: 'Tab 1' }, { id: 'v2', name: 'Tab 2' }],
+      tabs: [{ id: 'v1', name: 'Tab 1', named: true }, { id: 'v2', name: 'Tab 2', named: true }],
       active: 'v2',
       version: 2,
     })
@@ -445,22 +503,63 @@ describe('WindowLayout — keep-alive no-remount(ADR-0056, S4-F5)', () => {
   })
 })
 
-describe('WindowLayout — 0탭 자가닫힘(§5-2/G2)', () => {
-  it('0탭 신호(window:tabs-updated{tabs:[]}) → getCurrentWindow().close()', async () => {
+describe('WindowLayout — 0탭 자가닫힘(§5-2/G2 · TRD S26-window-chrome §5-5)', () => {
+  const CLOSE_IF_EMPTY = ['window_control', { window: 'wid-slot-popup-1', action: 'close', ifEmpty: true }]
+
+  it('0탭 신호(window:tabs-updated{tabs:[]}) → 레지스트리 window.close{if_empty} 를 탭이 있던 때 받은 window_id 로', async () => {
     render(<WindowLayout label="slot-popup-1" />)
     await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
-    emit('window:tabs-updated', { label: 'slot-popup-1', tabs: [], active: 'v1', version: 5 })
-    await waitFor(() => expect(closeMock).toHaveBeenCalledTimes(1))
+    // 0탭 페이로드의 window_id 는 쓰지 않는다 — 탭이 있던 때 받아 둔 값만 쓴다.
+    emit('window:tabs-updated', { label: 'slot-popup-1', window_id: 'other', tabs: [], active: 'v1', version: 5 })
+    await waitFor(() => expect(closeCalls()).toEqual([CLOSE_IF_EMPTY]))
   })
 
-  it('0탭 신호가 두 번 와도 close 는 한 번만(idempotent 재진입 가드)', async () => {
+  it('0탭 신호가 두 번 와도 청하기는 한 번만(idempotent 재진입 가드)', async () => {
     render(<WindowLayout label="slot-popup-1" />)
     await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
     emit('window:tabs-updated', { label: 'slot-popup-1', tabs: [], active: 'v1', version: 5 })
     emit('window:tabs-updated', { label: 'slot-popup-1', tabs: [], active: 'v1', version: 6 })
-    await waitFor(() => expect(closeMock).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(closeCalls()).toHaveLength(1))
     await Promise.resolve()
-    expect(closeMock).toHaveBeenCalledTimes(1)
+    expect(closeCalls()).toHaveLength(1)
+  })
+
+  it('청한 뒤 탭이 다시 오면(셸이 닫지 않았다 — Kept) 다음 0탭에 다시 청한다', async () => {
+    render(<WindowLayout label="slot-popup-1" />)
+    await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
+    emit('window:tabs-updated', { label: 'slot-popup-1', tabs: [], active: 'v1', version: 5 })
+    await waitFor(() => expect(closeCalls()).toHaveLength(1))
+    act(() =>
+      emit('window:tabs-updated', {
+        label: 'slot-popup-1',
+        window_id: 'wid-slot-popup-1',
+        tabs: [{ id: 'v1', name: 'Tab 1', named: true }],
+        active: 'v1',
+        version: 6,
+      }),
+    )
+    emit('window:tabs-updated', { label: 'slot-popup-1', tabs: [], active: 'v1', version: 7 })
+    await waitFor(() => expect(closeCalls()).toEqual([CLOSE_IF_EMPTY, CLOSE_IF_EMPTY]))
+  })
+
+  it.each([
+    ['window_id 없음', undefined],
+    ['0탭 페이로드의 window_id 뿐', 'wid-0tab'],
+  ])('탭이 있던 때의 window_id 가 없으면 청하지 않는다(%s)', async (_case, windowId) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+        if (cmd === 'list_tabs') return { label: 'slot-popup-1', window_id: windowId, tabs: [], active: '', version: 1 }
+        if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+        if (cmd === 'window_control') return KEPT
+        return undefined
+      })
+      render(<WindowLayout label="slot-popup-1" />)
+      await waitFor(() => expect(warn).toHaveBeenCalledWith(expect.stringMatching(/window_id 가 없어 청하지 않는다/)))
+      expect(closeCalls()).toEqual([])
+    } finally {
+      warn.mockRestore()
+    }
   })
 })
 
@@ -579,7 +678,7 @@ describe('WindowLayout — 창 캔버스 보고(ADR-0227, TRD §2d)', () => {
 
     resolveListTabs({
       label: 'main',
-      tabs: [{ id: 'v1', name: 'Tab 1' }, { id: 'v2', name: 'Tab 2' }],
+      tabs: [{ id: 'v1', name: 'Tab 1', named: true }, { id: 'v2', name: 'Tab 2', named: true }],
       active: 'v1',
       version: 1,
     })
@@ -879,7 +978,7 @@ describe('WindowLayout — 창 캔버스 보고(ADR-0227, TRD §2d)', () => {
     act(() =>
       emit('window:tabs-updated', {
         label: 'main',
-        tabs: [{ id: 'v1', name: 'Tab 1' }, { id: 'v2', name: 'Tab 2' }],
+        tabs: [{ id: 'v1', name: 'Tab 1', named: true }, { id: 'v2', name: 'Tab 2', named: true }],
         active: 'v2',
         version: 2,
       }),
@@ -947,6 +1046,201 @@ describe('WindowLayout — 창 캔버스 보고(ADR-0227, TRD §2d)', () => {
   })
 })
 
+// TRD S26-window-chrome §7-1 · §7-5 — 탭바를 놓던 자리에 제목 줄(배치 · 단추 · 흐림의 세부 = `titleRow/TitleRow.test.tsx`).
+describe('WindowLayout — 제목 줄', () => {
+  const FRAME = {
+    restored: { w: 800, h: 600 },
+    maximized: false,
+    insets: { t: 0, r: 0, b: 0, l: 0 },
+    focused: true,
+    caption: { buttons: true, leading_inset: 0, snap_overlay: false },
+  }
+
+  function tabsWithNumber(label: string, number: number) {
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'list_tabs') {
+        return { label, window_id: `wid-${label}`, number, tabs: [{ id: 'v1', name: 'Tab 1', named: true }], active: 'v1', version: 1 }
+      }
+      if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+      if (cmd === 'window_frame') return FRAME
+      if (cmd === 'window_control') return KEPT
+      return undefined
+    })
+  }
+
+  it('main — 제목 줄이 탭바를 품고 · 번호 표식 = 탭 알림의 번호 · 셋째 단추 = 모든 창 숨기기', async () => {
+    tabsWithNumber('main', 3)
+    render(<WindowLayout label="main" />)
+    await waitFor(() => expect(screen.getByTestId('window-number').textContent).toBe('3'))
+    const row = screen.getByTestId('title-row')
+    expect(row.firstElementChild).toBe(screen.getByTestId('tab-bar'))
+    expect(screen.getByTestId('caption-close').getAttribute('aria-label')).toBe('모든 창 숨기기')
+  })
+
+  it('팝아웃 — 셋째 단추 = 창 닫기 · 누르면 이 창 label 로 window_control close', async () => {
+    currentWindow.label = 'slot-popup-4'
+    tabsWithNumber('slot-popup-4', 2)
+    render(<WindowLayout label="slot-popup-4" />)
+    await waitFor(() => expect(screen.getByTestId('window-number').textContent).toBe('2'))
+    const close = screen.getByTestId('caption-close')
+    expect(close.getAttribute('aria-label')).toBe('창 닫기')
+    fireEvent.click(close)
+    expect(closeCalls()).toEqual([['window_control', { window: 'slot-popup-4', action: 'close', ifEmpty: false }]])
+  })
+
+  it('창 사실(window:frame)의 focused · maximized 를 제목 줄이 따라간다', async () => {
+    tabsWithNumber('main', 1)
+    render(<WindowLayout label="main" />)
+    await waitFor(() => expect(listeners.has('window:frame')).toBe(true))
+    act(() => emit('window:frame', { ...FRAME, focused: false, maximized: true }))
+    const row = screen.getByTestId('title-row')
+    expect([row.dataset.windowActive, row.dataset.maximized]).toEqual(['false', 'true'])
+    expect(screen.getByTestId('caption-maximize').getAttribute('aria-label')).toBe('이전 크기로 복원')
+    act(() => emit('window:frame', FRAME))
+    expect([row.dataset.windowActive, row.dataset.maximized]).toEqual(['true', 'false'])
+  })
+})
+
+// 사용자 결정 2026-10-26(T-66): 알림 띠가 제목 줄(창 단추 · 끌 자리)을 덮지 않는다 — 제목 줄 아래 캔버스 칸의 맨 위에 붙는다.
+//   jsdom 은 크기를 재지 못한다 — 자리를 구조로 단언한다(덮는 층 자체의 위치 · z 는 NoticeOverlay.test 몫).
+describe('WindowLayout — 알림 층의 자리', () => {
+  const notices = <div data-testid="notices-probe" />
+
+  it('알림 층은 제목 줄 밖 · 캔버스 칸(positioned) 맨 앞에 붙고, 제목 줄이 그보다 앞이다', async () => {
+    render(<WindowLayout label="main" notices={notices} />)
+    await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
+    const probe = screen.getByTestId('notices-probe')
+    const row = screen.getByTestId('title-row')
+    expect(row.contains(probe)).toBe(false)
+    const canvas = probe.parentElement as HTMLElement
+    expect(canvas.style.position).toBe('relative')
+    expect(canvas.firstElementChild).toBe(probe)
+    expect(canvas.contains(screen.getAllByTestId('tab-canvas')[0])).toBe(true)
+    expect(row.compareDocumentPosition(probe) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  // 로딩 · 부팅 실패 화면도 같은 틀이다 — 제목 줄 → 칸(맨 앞 = 알림 층) → 화면 내용.
+  function expectFrame(content: string): void {
+    const probe = screen.getByTestId('notices-probe')
+    const row = screen.getByTestId('title-row')
+    const box = probe.parentElement as HTMLElement
+    expect(box.style.position).toBe('relative')
+    expect([...box.children].map(el => (el as HTMLElement).dataset.testid)).toEqual(['notices-probe', content])
+    expect(row.nextElementSibling).toBe(box)
+    expect(row.contains(probe)).toBe(false)
+  }
+
+  it('로딩 화면에도 제목 줄(끌 자리 · 창 단추 — 표식은 아직 없다) 아래에 알림 층을 그린다', async () => {
+    invokeMock.mockImplementation(() => new Promise(() => {}))
+    render(<WindowLayout label="main" notices={notices} />)
+    expect(screen.getByTestId('window-loading').textContent).toBe('')
+    expectFrame('window-loading')
+    await waitFor(() => expect(screen.getByTestId('caption-buttons')).toBeTruthy())
+    expect(screen.getByTestId('tab-bar-standin').hasAttribute('data-tauri-drag-region')).toBe(true)
+    expect(screen.queryByTestId('window-number')).toBeNull()
+    expect(screen.queryByTestId('tab-bar')).toBeNull()
+  })
+
+  // 그 창은 모델에 없을 수 있다(낡은 팝아웃) — 창 단추는 window_id 없이 그 label 로 보내고, 셸이 그 label 의 열린 팝아웃
+  //   창에 바로 건다(모델 밖 창 — TRD S26-window-chrome §6-2 · 셸 시험 `window_buttons_of_an_unmodeled_window_reach_its_os_window`).
+  it('부팅 실패 화면에도 제목 줄 아래에 알림 층을 그린다 — 창 단추가 그 label 로 가고 연결 실패 이유도 읽힌다', async () => {
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'list_tabs') throw new Error('backend down')
+      if (cmd === 'window_control') return (args as { action: string }).action === 'close' ? CLOSED : { ...KEPT, close: null }
+      return undefined
+    })
+    render(<WindowLayout label="slot-popup-6" notices={notices} />)
+    await waitFor(() => expect(screen.getByTestId('window-boot-error')).toBeTruthy(), { timeout: 3000 })
+    expectFrame('window-boot-error')
+    fireEvent.click(screen.getByTestId('caption-minimize'))
+    fireEvent.click(screen.getByTestId('caption-maximize'))
+    fireEvent.click(screen.getByTestId('caption-close'))
+    await waitFor(() =>
+      expect(closeCalls()).toEqual([
+        ['window_control', { window: 'slot-popup-6', action: 'minimize', ifEmpty: null }],
+        ['window_control', { window: 'slot-popup-6', action: 'maximize', ifEmpty: null }],
+        ['window_control', { window: 'slot-popup-6', action: 'close', ifEmpty: false }],
+      ]),
+    )
+  })
+
+  it('번호를 받기 전(로딩 · 부팅 실패)에는 최소 창 크기를 보내지 않는다', async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_tabs') throw new Error('backend down')
+      return undefined
+    })
+    render(<WindowLayout label="main" notices={notices} />)
+    await waitFor(() => expect(screen.getByTestId('window-boot-error')).toBeTruthy(), { timeout: 3000 })
+    expect(invokeMock.mock.calls.filter(c => c[0] === 'report_window_min_width')).toEqual([])
+  })
+})
+
+// ADR-0277: ✕ 로 닫은 기억(`ConnectionNotice` · `StateFileNotice` 의 상태)은 걷지 않는다 — 화면이 바뀌어도 알림 층이 다시
+//   마운트되지 않아야 그 기억이 남는다.
+describe('WindowLayout — 화면이 바뀌어도 알림의 닫힘 기억이 남는다', () => {
+  let mounts = 0
+  function DismissableProbe() {
+    const [open, setOpen] = useState(true)
+    useEffect(() => {
+      mounts += 1
+    }, [])
+    return open ? (
+      <button type="button" data-testid="notice-dismiss" onClick={() => setOpen(false)} />
+    ) : (
+      <span data-testid="notice-dismissed" />
+    )
+  }
+  beforeEach(() => {
+    mounts = 0
+  })
+
+  it('로딩 중에 닫고 탭이 오면 닫힌 채다', async () => {
+    let answerTabs: (payload: unknown) => void = () => {}
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'list_tabs') return new Promise(res => (answerTabs = res))
+      if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+      return undefined
+    })
+    render(<WindowLayout label="main" notices={<DismissableProbe />} />)
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('list_tabs', { window: 'main' }))
+    expect(screen.getByTestId('window-loading')).toBeTruthy()
+    fireEvent.click(screen.getByTestId('notice-dismiss'))
+
+    await act(async () =>
+      answerTabs({ label: 'main', window_id: 'wid-main', number: 1, tabs: [{ id: 'v1', name: 'Tab 1', named: true }], active: 'v1', version: 1 }),
+    )
+    await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
+    expect(screen.getByTestId('notice-dismissed')).toBeTruthy()
+    expect(mounts).toBe(1)
+  })
+
+  it('부팅 실패 화면에서 닫고 탭 알림으로 되살아나도 닫힌 채다', async () => {
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'list_tabs') throw new Error('backend down')
+      if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+      return undefined
+    })
+    render(<WindowLayout label="main" notices={<DismissableProbe />} />)
+    await waitFor(() => expect(screen.getByTestId('window-boot-error')).toBeTruthy(), { timeout: 3000 })
+    fireEvent.click(screen.getByTestId('notice-dismiss'))
+
+    act(() =>
+      emit('window:tabs-updated', {
+        label: 'main',
+        window_id: 'wid-main',
+        number: 1,
+        tabs: [{ id: 'v1', name: 'Tab 1', named: true }],
+        active: 'v1',
+        version: 2,
+      }),
+    )
+    await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
+    expect(screen.queryByTestId('window-boot-error')).toBeNull()
+    expect(screen.getByTestId('notice-dismissed')).toBeTruthy()
+    expect(mounts).toBe(1)
+  })
+})
+
 describe('WindowLayout — TabBar 액션 → store 액션(이 label)', () => {
   it('[+] 클릭 → createTab(label) invoke', async () => {
     render(<WindowLayout label="main" />)
@@ -975,8 +1269,8 @@ describe('WindowLayout — TabBar 액션 → store 액션(이 label)', () => {
 // ── ★탭 끌기 배선(TRD S21-slot-docking §4)★ — 뿌리 받기와 안내 층(`useWindowDrop`) · 파일 놓기 막기 ──
 // 탭바 줄 · `+` · 캔버스의 사각형은 손으로 준다(jsdom 은 레이아웃이 없다): 줄 x 0..800 · y 0..28 · `+` 32 · 캔버스 원점 (0, 29).
 const TWO_TABS = [
-  { id: 'v1', name: 'Tab 1' },
-  { id: 'v2', name: 'Tab 2' },
+  { id: 'v1', name: 'Tab 1', named: true },
+  { id: 'v2', name: 'Tab 2', named: true },
 ]
 
 async function mountDockWindow(label: string, tabs = TWO_TABS, active = 'v1') {
@@ -1048,7 +1342,14 @@ describe('WindowLayout — 탭 끌기 배선', () => {
       if (cmd === 'list_tabs') return { label: 'main', tabs: TWO_TABS, active: 'v1', version: 1 }
       if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
       // 뷰포트(jsdom 1024 × 768)와 같은 복원 크기 — 새 창 크기 = 그대로.
-      if (cmd === 'window_frame') return { restored: { w: 1024, h: 768 }, maximized: false, insets: { t: 0, r: 0, b: 0, l: 0 } }
+      if (cmd === 'window_frame')
+        return {
+          restored: { w: 1024, h: 768 },
+          maximized: false,
+          insets: { t: 0, r: 0, b: 0, l: 0 },
+          focused: true,
+          caption: { buttons: true, leading_inset: 0, snap_overlay: false },
+        }
       return undefined
     })
     try {
@@ -1240,6 +1541,10 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
   it('window_role = spare → 빈 틀(탭바 + 빈 캔버스) · list_tabs 를 당기지 않는다 · 부팅 오류 · 로딩 문구 없음', async () => {
     await mountSpare()
     expect(screen.getByTestId('tab-bar')).toBeTruthy()
+    // 제목 줄은 그리되(들일 때 탭바가 다시 마운트되지 않게) 번호 표식 · 창 단추는 없다 — 셸 창 모델 밖이다.
+    expect(screen.getByTestId('title-row').firstElementChild).toBe(screen.getByTestId('tab-bar'))
+    expect(screen.queryByTestId('window-number')).toBeNull()
+    expect(screen.queryByTestId('caption-buttons')).toBeNull()
     expect(screen.queryAllByTestId('tab')).toHaveLength(0)
     expect(screen.queryAllByTestId('tab-canvas')).toHaveLength(0)
     await new Promise(res => setTimeout(res, 50))
@@ -1251,10 +1556,10 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
   it('대기 모드에선 이 창의 0탭 알림이 와도 닫지 않는다', async () => {
     await mountSpare()
     act(() =>
-      useViewStore.getState().applyWindowTabsUpdated({ label: SPARE, tabs: [], active: '', version: 9 }),
+      useViewStore.getState().applyWindowTabsUpdated({ label: SPARE, window_id: 'w-spare', number: 2, title: 'Engram:2', tabs: [], active: '', version: 9 }),
     )
     await new Promise(res => setTimeout(res, 20))
-    expect(closeMock).not.toHaveBeenCalled()
+    expect(closeCalls()).toEqual([])
     expect(screen.getByTestId('spare-canvas')).toBeTruthy()
   })
 
@@ -1278,8 +1583,10 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
 
   it('spare:adopted → 보통 모드: list_tabs 로 들인 탭을 당겨 그리고, 0탭 자가닫힘이 다시 산다', async () => {
     invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
-      if (cmd === 'list_tabs') return { label: SPARE, tabs: [{ id: 'p1', name: 'Pop' }], active: 'p1', version: 3 }
+      if (cmd === 'list_tabs')
+        return { label: SPARE, window_id: 'w-spare', tabs: [{ id: 'p1', name: 'Pop', named: true }], active: 'p1', version: 3 }
       if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+      if (cmd === 'window_control') return KEPT
       return undefined
     })
     await mountSpare()
@@ -1292,15 +1599,24 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
     expect(screen.queryByTestId('spare-canvas')).toBeNull()
 
     emit('window:tabs-updated', { label: SPARE, tabs: [], active: 'p1', version: 4 })
-    await waitFor(() => expect(closeMock).toHaveBeenCalledTimes(1))
+    await waitFor(() =>
+      expect(closeCalls()).toEqual([['window_control', { window: 'w-spare', action: 'close', ifEmpty: true }]]),
+    )
   })
 
   it('대기 창은 창 사실(window_frame)을 당기지 않는다 — 셸 창 모델 밖이다 · 들이면 당긴다', async () => {
     const frameCalls = () => invokeMock.mock.calls.filter(c => c[0] === 'window_frame')
     invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
-      if (cmd === 'list_tabs') return { label: SPARE, tabs: [{ id: 'p1', name: 'Pop' }], active: 'p1', version: 3 }
+      if (cmd === 'list_tabs') return { label: SPARE, tabs: [{ id: 'p1', name: 'Pop', named: true }], active: 'p1', version: 3 }
       if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
-      if (cmd === 'window_frame') return { restored: { w: 800, h: 600 }, maximized: false, insets: { t: 0, r: 0, b: 0, l: 0 } }
+      if (cmd === 'window_frame')
+        return {
+          restored: { w: 800, h: 600 },
+          maximized: false,
+          insets: { t: 0, r: 0, b: 0, l: 0 },
+          focused: true,
+          caption: { buttons: true, leading_inset: 0, snap_overlay: false },
+        }
       return undefined
     })
     await mountSpare()
@@ -1328,7 +1644,7 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
     expect(screen.queryByTestId('window-loading')).toBeNull()
     expect(screen.getByTestId('tab-strip-row')).toBe(row)
 
-    await act(async () => answer({ label: SPARE, tabs: [{ id: 'p1', name: 'Pop' }], active: 'p1', version: 3 }))
+    await act(async () => answer({ label: SPARE, tabs: [{ id: 'p1', name: 'Pop', named: true }], active: 'p1', version: 3 }))
     await waitFor(() => expect(screen.getAllByTestId('tab-canvas')).toHaveLength(1))
     expect(screen.queryByTestId('spare-canvas')).toBeNull()
     expect(screen.getByTestId('tab-strip-row')).toBe(row)
@@ -1345,7 +1661,7 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
     await mountSpare()
 
     act(() =>
-      useViewStore.getState().applyWindowTabsUpdated({ label: SPARE, tabs: [{ id: 'p1', name: 'Pop' }], active: 'p1', version: 7 }),
+      useViewStore.getState().applyWindowTabsUpdated({ label: SPARE, window_id: 'w-spare', number: 2, title: 'Pop - Engram:2', tabs: [{ id: 'p1', name: 'Pop', named: true }], active: 'p1', version: 7 }),
     )
     expect(screen.getByTestId('spare-canvas')).toBeTruthy()
     expect(headIds()).toEqual([])
@@ -1380,21 +1696,21 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
     render(<WindowLayout label={SPARE} />)
     await waitFor(() => expect(ipcOrder).toContain('invoke:window_role'))
     act(() =>
-      useViewStore.getState().applyWindowTabsUpdated({ label: SPARE, tabs: [], active: '', version: 9 }),
+      useViewStore.getState().applyWindowTabsUpdated({ label: SPARE, window_id: 'w-spare', number: 2, title: 'Engram:2', tabs: [], active: '', version: 9 }),
     )
     await new Promise(res => setTimeout(res, 20))
-    expect(closeMock).not.toHaveBeenCalled()
+    expect(closeCalls()).toEqual([])
 
     await act(async () => answer({ role: 'spare', generation: null }))
     expect(screen.getByTestId('spare-canvas')).toBeTruthy()
-    expect(closeMock).not.toHaveBeenCalled()
+    expect(closeCalls()).toEqual([])
   })
 })
 
 // ── 예열 창 채택 · 첫 화면 알림(TRD S21-slot-docking §3-9 I26 · I28) — 채택한 창의 셸 문은 그 채택 번호를 실은 알림만 받는다 ──
 describe('WindowLayout — 채택 번호 · 첫 화면 다시 알림', () => {
   const SPARE = 'slot-popup-7'
-  const TABS = { label: SPARE, tabs: [{ id: 'p1', name: 'Pop' }], active: 'p1', version: 3 }
+  const TABS = { label: SPARE, window_id: 'w-spare', number: 2, title: 'Pop - Engram:2', tabs: [{ id: 'p1', name: 'Pop', named: true }], active: 'p1', version: 3 }
 
   beforeEach(() => {
     currentWindow.label = SPARE

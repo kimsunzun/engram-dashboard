@@ -3,8 +3,10 @@
 /**
  * `tab_drop` 의 답. `duplicate` 밖의 결과는 출처 창(`from`)에 [`TabDropDone`] 으로도 간다.
  *
- * - `applied`: 옮겼다(같은 창 같은 자리면 바뀐 것 없이). `window` = 옮긴 탭이 든 창 · `reused` = 새 창 없이 출처 창을
- *   옮겼다(모델은 그대로).
+ * - `applied`: 옮겼다(같은 창 같은 자리면 바뀐 것 없이). `window` = 옮긴 탭이 든 창의 label · `window_id` · `number`
+ *   = 그 창의 영속 id · 번호(뜻은 `NewWindow` 와 같다 — 새 창이든 기존 창이든 그 창의 것. 창 인자로 넘길 값은
+ *   `window_id` 다) · `reused` = 새 창 없이 출처 창을 옮겼다(모델은 그대로). `window_id` · `number` 는 함께
+ *   `null` 이거나 함께 값이다 — `null` = 재사용 길에서 창을 옮기는 사이 그 창이 닫혔다.
  * - `canceled`: 취소다(Esc · 주 버튼을 쥔 채 끝남 · 커서를 못 읽음) — 셸은 모델을 쓰지 않았다.
  * - `ignored`: 아무 일 없다 — 셸은 모델을 쓰지 않았다. `why` = `no-cursor`(drop 인데 커서를 못 읽음) ·
  *   `lost-drop`(우리 창 위에서 떼었는데 받은 drop 이 없음 — 제목 표시줄 · 테두리 포함) · `accepted-ours`(우리 창이
@@ -15,4 +17,4 @@
  * - `rejected`: 모델이 거절했다 — 모델 그대로. `kind` = 거절 종류 낱말(`TabNotFound` · `WindowNotFound` ·
  *   `SlotNotFound` · `ZeroArea` · `WindowOpen` 따위 — 셸 도킹 오류 문구의 괄호 속 낱말) · `reason` = 사람이 읽는 문장.
  */
-export type TabDropReply = { "type": "applied", window: string, reused: boolean, } | { "type": "canceled" } | { "type": "ignored", why: string, } | { "type": "duplicate" } | { "type": "rejected", kind: string, reason: string, };
+export type TabDropReply = { "type": "applied", window: string, window_id: string | null, number: number | null, reused: boolean, } | { "type": "canceled" } | { "type": "ignored", why: string, } | { "type": "duplicate" } | { "type": "rejected", kind: string, reason: string, };

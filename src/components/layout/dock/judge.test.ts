@@ -75,7 +75,7 @@ describe('탭바 구역 경계', () => {
   const w = windowOf(HALVES)
   const isStrip = (x: number, y: number): boolean => judge(w, { x, y }).type === 'strip'
 
-  it('세로 = 탭바 줄 위아래 STRIP_ZONE_PX(반열림) · 가로 = 끌기 영역(`+` 앞)', () => {
+  it('세로 = 바탕 위아래 STRIP_ZONE_PX(반열림) · 가로 = 바탕 그대로(여기 바탕 = 탭 끌기 영역)', () => {
     expect(isStrip(100, -15)).toBe(true)
     expect(isStrip(100, -15.25)).toBe(false)
     expect(isStrip(100, 42.75)).toBe(true)

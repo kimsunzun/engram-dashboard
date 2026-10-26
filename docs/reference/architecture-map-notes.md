@@ -506,7 +506,7 @@ data_dir: 디버그 = repo 루트 `.engram-data`, 릴리즈 = exe 경로 기준,
 **B. 프로토콜 클라이언트 밖 직접 `invoke`(백엔드 권위 표면)**
 - `store/viewStore.ts:186-225`:
   - 탭: `create_tab` · `close_tab` · `switch_tab` · `rename_tab`
-  - 창: `create_window` · `close_window` · `move_slot_to_window`
+  - 창: `create_window` · `window_control` · `move_slot_to_window`
   - 슬롯: `split_slot` · `set_split_ratio` · `focus_slot` · `close_slot` · `assign_agent` · `set_slot_content`
   - 조회: `list_tabs` :419 · `get_view` :425
 - `commands/slotCommands.ts:128` `resolve_spatial` · `commands/tabCommands.ts:214` `spawn_into`
@@ -1085,7 +1085,7 @@ BASE를 뺀 13개 쌍이 양방향이다. 그중 9개는 **가는 순환**(한 �
 
 | FE 도메인 (파일) | invoke / event | BE 도메인 |
 |---|---|---|
-| SCREEN (viewStore) | create_tab, close_tab, switch_tab, create_window, close_window, split_slot, set_split_ratio, rename_tab, focus_slot, close_slot, set_slot_content, move_slot_to_window, list_tabs, get_view; event `layout:updated`, `window:tabs-updated` | SCREEN |
+| SCREEN (viewStore) | create_tab, close_tab, switch_tab, create_window, window_control, split_slot, set_split_ratio, rename_tab, focus_slot, close_slot, set_slot_content, move_slot_to_window, list_tabs, get_view; event `layout:updated`, `window:tabs-updated` | SCREEN |
 | SCREEN (viewStore) | assign_agent | SCREEN (slot↔agent 바인딩) |
 | SCREEN (WindowLayout, useSplitDrag) | window:tabs-updated, list_tabs, get_view | SCREEN |
 | SCREEN (uiMetricsReport, windowCanvasReport) | report_ui_metrics, report_window_canvas | SCREEN |
@@ -1449,7 +1449,7 @@ B는 순수 잎이다. (확실)
 | R | A (N 터널 `forward_daemon_command` 경유) | WriteStdin(`DomSlot`, `TerminalSlot:388`) · Resize(`TerminalSlot:124…`) · spawnProfile/reparentProfile/deleteProfile(`AgentList.tsx:178,258`) | wire 명령 정의 = `api/protocolClient.ts:858-984` |
 | R | N (api 경유) | subscribeOutput → `subscribe_output` + `request_replay` | `TerminalSlot.tsx:278` · `DomSlot.tsx:121` · `RichSlot.tsx:169` |
 | R | L (viewStore 경유) | `assign_agent` | `AgentList.tsx:212` · `AgentMonitoringPicker.tsx:75` → `viewStore.ts:211` |
-| L | L | invoke: `create_tab` · `close_tab` · `switch_tab` · `create_window` · `close_window` · `split_slot` · `set_split_ratio` · `rename_tab` · `focus_slot` · `close_slot` · `assign_agent` · `set_slot_content` · `move_slot_to_window` · `list_tabs` · `get_view`<br>listen: `layout:updated` · `window:tabs-updated` | `store/viewStore.ts:186-225,384-425` |
+| L | L | invoke: `create_tab` · `close_tab` · `switch_tab` · `create_window` · `window_control` · `split_slot` · `set_split_ratio` · `rename_tab` · `focus_slot` · `close_slot` · `assign_agent` · `set_slot_content` · `move_slot_to_window` · `list_tabs` · `get_view`<br>listen: `layout:updated` · `window:tabs-updated` | `store/viewStore.ts:186-225,384-425` |
 | L | L | invoke: `report_ui_metrics` · `get_view` · `report_window_canvas` · `list_tabs`<br>listen: `window:tabs-updated` | `components/layout/uiMetricsReport.ts:49` · `useSplitDrag.ts:281` · `windowCanvasReport.ts:139` · `WindowLayout.tsx:71,83,124` |
 | L | L | invoke: `get_ui_settings`<br>listen: `ui:settings-updated` | `theme/uiSettings.ts:30,24,125` |
 | C | C | invoke: `report_view_commands` · `report_command_outcome`<br>listen: `command:request` | `commands/viewCommandBridge.ts:21-25,64,116,136` |

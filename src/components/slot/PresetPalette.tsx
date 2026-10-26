@@ -18,6 +18,7 @@ import { refreshPresets } from '../../store/eventBus'
 import { basename } from '../../util/basename'
 import type { Preset } from '../../api/types'
 import { t } from '../../i18n'
+import { useBlurOnDragRegionPress } from '../layout/titleRow/dragRegion'
 
 /**
  * ADR-0061 리치화. 파생은 공용 `basename` 유틸에 위임 — AgentList 행 표시명과 단일 출처를 공유한다
@@ -57,6 +58,8 @@ export default function PresetPalette() {
   useEffect(() => {
     if (editingId !== null) inputRef.current?.select()
   }, [editingId])
+  // 창 끌 자리(제목 줄) 누름에도 편집이 끝난다 — 확정은 onBlur 그대로.
+  useBlurOnDragRegionPress(editingId !== null, inputRef)
 
   useEffect(() => {
     if (!rowMenu) return
@@ -64,8 +67,9 @@ export default function PresetPalette() {
       const target = e.target as Node
       if (rowMenuRef.current && !rowMenuRef.current.contains(target)) setRowMenu(null)
     }
-    document.addEventListener('mousedown', h)
-    return () => document.removeEventListener('mousedown', h)
+    // 캡처 단계 — 창 끌 자리 누름은 거품 단계에 닿지 않는다(`layout/titleRow/dragRegion.ts`).
+    document.addEventListener('mousedown', h, true)
+    return () => document.removeEventListener('mousedown', h, true)
   }, [rowMenu])
 
   useEffect(() => {

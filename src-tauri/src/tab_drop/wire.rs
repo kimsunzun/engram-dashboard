@@ -101,8 +101,10 @@ pub enum DropAnchor {
 
 /// `tab_drop` 의 답. `duplicate` 밖의 결과는 출처 창(`from`)에 [`TabDropDone`] 으로도 간다.
 ///
-/// - `applied`: 옮겼다(같은 창 같은 자리면 바뀐 것 없이). `window` = 옮긴 탭이 든 창 · `reused` = 새 창 없이 출처 창을
-///   옮겼다(모델은 그대로).
+/// - `applied`: 옮겼다(같은 창 같은 자리면 바뀐 것 없이). `window` = 옮긴 탭이 든 창의 label · `window_id` · `number`
+///   = 그 창의 영속 id · 번호(뜻은 `NewWindow` 와 같다 — 새 창이든 기존 창이든 그 창의 것. 창 인자로 넘길 값은
+///   `window_id` 다) · `reused` = 새 창 없이 출처 창을 옮겼다(모델은 그대로). `window_id` · `number` 는 함께
+///   `null` 이거나 함께 값이다 — `null` = 재사용 길에서 창을 옮기는 사이 그 창이 닫혔다.
 /// - `canceled`: 취소다(Esc · 주 버튼을 쥔 채 끝남 · 커서를 못 읽음) — 셸은 모델을 쓰지 않았다.
 /// - `ignored`: 아무 일 없다 — 셸은 모델을 쓰지 않았다. `why` = `no-cursor`(drop 인데 커서를 못 읽음) ·
 ///   `lost-drop`(우리 창 위에서 떼었는데 받은 drop 이 없음 — 제목 표시줄 · 테두리 포함) · `accepted-ours`(우리 창이
@@ -116,11 +118,21 @@ pub enum DropAnchor {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(export)]
 pub enum TabDropReply {
-    Applied { window: String, reused: bool },
+    Applied {
+        window: String,
+        window_id: Option<String>,
+        number: Option<u32>,
+        reused: bool,
+    },
     Canceled,
-    Ignored { why: String },
+    Ignored {
+        why: String,
+    },
     Duplicate,
-    Rejected { kind: String, reason: String },
+    Rejected {
+        kind: String,
+        reason: String,
+    },
 }
 
 /// 사건 `tab_drop:done` 의 몸 — `tab_drop` 처리마다 출처 창(명령의 `from`)에 많아야 한 번. 내지 않는 것 = `duplicate` ·
@@ -151,12 +163,32 @@ pub enum DropOutcome {
 /// - `restored`: 그 창의 보통(복원) 안쪽 크기 — 최대화 중이어도 최대화 전 크기다. 아직 모르면 `null`.
 /// - `maximized`: 최대화돼 있나.
 /// - `insets`: 창 틀 = 바깥 사각형 − 안쪽 사각형(CSS px — 그 창 배율로 나눈 값 · 보이지 않는 크기 조절 테두리 포함).
+/// - `focused`: 그 창이 OS 전경 창인가(제목 줄 흐림 몫 — TRD S26-window-chrome §6-5). 그 창의 포커스 사건이 민 값은
+///   그 사건의 값이고, 당기기 · 그 밖의 밀기는 그때의 OS 전경 창 판정이다 — 두 값이 잠깐 어긋날 수 있다(미검 · S12).
+/// - `caption`: 제목 줄 크롬 모양 — OS 상수라 창마다 · 실행 내내 같다.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
+// ADR-0303 — 크롬식 제목 표시줄
 pub struct WindowFrame {
     pub restored: Option<SizeCss>,
     pub maximized: bool,
     pub insets: Insets,
+    pub focused: bool,
+    pub caption: CaptionChrome,
+}
+
+/// 제목 줄 크롬 모양(TRD S26-window-chrome §3-2 · §7-11).
+///
+/// - `buttons`: 최소화 · 최대화 · 닫기 단추를 웹이 그린다. 거짓 = OS 가 그린다(macOS 몫 — 지금은 늘 참).
+/// - `leading_inset`: 제목 줄 왼쪽에서 웹이 비워 둘 폭(CSS px — OS 가 그 자리에 단추를 그린다 · 지금은 늘 0).
+/// - `snap_overlay`: 셸이 스냅 레이아웃 오버레이를 켠 빌드인가 — 참일 때만 웹이 최대화 단추 사각형을 보고한다(셸 기능
+///   `snap-overlay` 로 지은 빌드만 참 · 기본 꺼짐 · §8-4).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct CaptionChrome {
+    pub buttons: bool,
+    pub leading_inset: f64,
+    pub snap_overlay: bool,
 }
 
 #[cfg(test)]
@@ -239,10 +271,29 @@ mod tests {
         assert_eq!(
             serde_json::to_value(TabDropReply::Applied {
                 window: "slot-popup-2".into(),
+                window_id: Some("w-2".into()),
+                number: Some(2),
                 reused: false
             })
             .unwrap(),
-            json!({ "type": "applied", "window": "slot-popup-2", "reused": false })
+            json!({
+                "type": "applied", "window": "slot-popup-2", "window_id": "w-2", "number": 2,
+                "reused": false,
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(TabDropReply::Applied {
+                window: "slot-popup-2".into(),
+                window_id: None,
+                number: None,
+                reused: true
+            })
+            .unwrap(),
+            json!({
+                "type": "applied", "window": "slot-popup-2", "window_id": null, "number": null,
+                "reused": true,
+            }),
+            "닫힌 재사용 창 — 칸은 빠지지 않고 null 이다"
         );
         assert_eq!(
             serde_json::to_value(TabDropReply::Ignored {
@@ -281,11 +332,19 @@ mod tests {
                     b: 8.0,
                     l: 8.0
                 },
+                focused: true,
+                caption: CaptionChrome {
+                    buttons: true,
+                    leading_inset: 0.0,
+                    snap_overlay: false,
+                },
             })
             .unwrap(),
             json!({
                 "restored": { "w": 640.0, "h": 480.0 }, "maximized": true,
                 "insets": { "t": 31.0, "r": 8.0, "b": 8.0, "l": 8.0 },
+                "focused": true,
+                "caption": { "buttons": true, "leading_inset": 0.0, "snap_overlay": false },
             })
         );
     }

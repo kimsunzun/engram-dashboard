@@ -51,7 +51,9 @@ pub struct SourceWindow {
     pub viewport: SizeCss,
     /// 끄는 창 모니터의 작업 영역(바깥 크기의 한계 — `screen.availWidth` · `availHeight`).
     pub work: SizeCss,
-    /// 크롬 = 뷰포트 − 탭 캔버스(탭바 높이 · 왼쪽 여백 따위).
+    /// 새 창(보통 상태로 뜬다)의 크롬 = 뷰포트 − 탭 캔버스(제목 줄 높이 · 왼쪽 여백 따위) + 제목 줄 높이 차(보통 − 출처의
+    /// 지금 — 출처가 최대화면 0 이 아니다 · TRD S26-window-chrome §7-6). 그 차는 부르는 쪽이 더해 넘긴다 — 웹 거울은 더한다
+    /// (`useTabDragSource` 의 `rowGrowth`). 셸에는 아직 운영 소비자가 없다(골든만 — 첫 소비자는 LLM 명령 T-65).
     pub chrome: SizeCss,
     /// 탭 하나뿐인 팝아웃 — 새 창을 만들지 않고 그 창을 옮긴다(Q34).
     pub single: bool,

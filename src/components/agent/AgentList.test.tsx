@@ -519,6 +519,41 @@ describe('행 우클릭 메뉴', () => {
     fireEvent.keyDown(document.querySelector('[data-agent-row="p2"]') as HTMLElement, { key: 'Enter' })
     expect(clientMock.renameProfile).not.toHaveBeenCalled()
   })
+
+  // Tauri `drag.js` 는 창 끌 자리 누름의 기본 동작(포커스 옮김)을 막는다. 그 흉내 = 먼저 건 document 거품 단계 듣는 쪽 — 뒤
+  //   듣기도 끊는다(jsdom 은 누름으로 포커스를 옮기지 않으니 기본 동작 쪽은 이미 같다).
+  it('이름변경 중 창 끌 자리(제목 줄) 누름 → 포커스 잃음과 같이 확정한다 · 끌 자리 밖 누름은 편집을 둔다', () => {
+    const grab = document.createElement('div')
+    grab.setAttribute('data-tauri-drag-region', '')
+    document.body.appendChild(grab)
+    const dragJs = (e: MouseEvent) => {
+      if (e.target !== grab) return
+      e.preventDefault()
+      e.stopImmediatePropagation()
+    }
+    document.addEventListener('mousedown', dragJs)
+    try {
+      useAgentStore.setState({ profiles: [profile('p1', 'C:/r')] })
+      render(<AgentList />)
+      fireEvent.contextMenu(document.querySelector('[data-agent-row="p1"]') as HTMLElement)
+      fireEvent.click(screen.getByText('이름 변경'))
+      const input = () => document.querySelector('[data-agent-rename-input="p1"]') as HTMLInputElement
+      expect(document.activeElement).toBe(input())
+      // 가상 목록이 입력 칸을 다시 붙일 수 있어 칸은 그때마다 새로 찾는다.
+      fireEvent.change(input(), { target: { value: '  새이름  ' } })
+
+      fireEvent.mouseDown(document.body)
+      expect(document.activeElement).toBe(input())
+      expect(clientMock.renameProfile).not.toHaveBeenCalled()
+
+      fireEvent.mouseDown(grab)
+      expect(clientMock.renameProfile).toHaveBeenCalledWith('p1', '새이름')
+      expect(document.querySelector('[data-agent-rename-input="p1"]')).toBeNull()
+    } finally {
+      document.removeEventListener('mousedown', dragJs)
+      grab.remove()
+    }
+  })
 })
 
 // ── 증상4 회귀 안전망: 한 노드 조작이 형제 노드를 떨어뜨리지 않는다 ────────────────────

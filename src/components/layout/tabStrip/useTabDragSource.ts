@@ -34,10 +34,11 @@ import { localDrag, type StripGeometry } from '../dock/localDrag'
 import { tabDropClient } from '../dock/tabDrop'
 import { buildTabDragType, buildTabDragValue, shapeOf } from '../dock/tabDragData'
 import { windowFrame } from '../dock/windowFrame'
+import { titleRowHeight } from '../titleRow/metrics'
 import { createAppIdentifier } from './appIdentifier'
 import { createDragSource, type DragSource, type DragSourcePorts, type DragSourceSnapshot, type DragStart } from './dragSource'
-import { measureStrip } from './measure'
-import { dragAreaWidth, grabOffset, type StripBounds } from './reorderGeometry'
+import { measureStrip, stripZoneArea } from './measure'
+import { grabOffset, type StripBounds } from './reorderGeometry'
 
 const ports: DragSourcePorts = {
   send: drop => tabDropClient.send(drop),
@@ -101,6 +102,12 @@ export interface UseTabDragSourceOptions {
    * 당기기가 `WindowNotFound` 로 실패한다). `true` 로 바뀔 때마다 새로 당긴다.
    */
   pullFrame?: boolean
+  /**
+   * 이 탭바를 품은 제목 줄(TRD S26-window-chrome §7-9 · R14 · D9) — 있으면 탭바 구역 바탕의 세로가 이 줄의 위 ~ 아래다(탭 · `+`
+   * 위 여백 위에 놓아도 탭바에 든다). 가로는 있든 없든 첫 탭 왼쪽 ~ `+` 오른 끝이다 — 끌 빈 자리 · 번호 표식 · 창 단추 위는
+   * 구역이 아니다(`measure.ts` `stripZoneArea`). 없으면 세로가 탭바 줄이다.
+   */
+  titleRow?: RefObject<HTMLElement | null>
 }
 
 export interface TabDragSourceHandle {
@@ -300,13 +307,16 @@ function plan(
   const maximized = frame?.maximized ?? false
   const single = o.label !== MAIN_WINDOW_LABEL && o.tabs.length === 1
   const viewport: SizeCss = { w: window.innerWidth, h: window.innerHeight }
+  // 새 창(탭 하나뿐인 팝아웃이면 되돌린 그 창)은 보통 상태로 뜬다 — 최대화된 출처의 제목 줄은 위 여백이 없어(TRD S26-window-chrome
+  //   §7-6), 새 창의 크롬과 탭바 세로 자리는 그 차이만큼 더 크고 낮다. 빼면 새 창이 커서에서 그만큼 밀려 뜬다.
+  const rowGrowth = o.titleRow?.current == null ? 0 : titleRowHeight(false) - titleRowHeight(maximized)
   const sizes = dragSizes({
     restored,
     maximized,
     insets: frame?.insets ?? NO_INSETS,
     viewport,
     work: { w: window.screen.availWidth, h: window.screen.availHeight },
-    chrome: chromeOf(o.canvas?.() ?? null, viewport),
+    chrome: chromeOf(o.canvas?.() ?? null, viewport, rowGrowth),
     single,
   })
   // `dragGrab` 의 W1 = 새 창 탭바의 탭 하나 머리 폭 — 새 창(팝아웃)의 탭바 줄이 그 창 안쪽 폭 전체이고 `+` 는 이 창의 것과 같은
@@ -315,7 +325,7 @@ function plan(
   const newWidth = sizes.size !== null ? sizes.size.w : maximized && restored !== null ? restored.w : null
   const addW = o.add.current?.getBoundingClientRect().width ?? 0
   const headRoom = newWidth === null ? null : Math.max(0, newWidth - addW)
-  const grab = dragGrab({ pressed, head, stripLeft, headRoom, single, maximized })
+  const grab = dragGrab({ pressed: { x: pressed.x, y: pressed.y + rowGrowth }, head, stripLeft, headRoom, single, maximized })
 
   const drag = crypto.randomUUID()
   const layout = useViewStore.getState().layouts[view]?.layout
@@ -336,11 +346,11 @@ function plan(
   }
 }
 
-/** 크롬 = 뷰포트 − 탭 캔버스(음수는 0). */
-function chromeOf(canvas: Element | null, viewport: SizeCss): SizeCss {
+/** 새 창의 크롬 = 뷰포트 − 탭 캔버스(음수는 0) · 세로에 `rowGrowth` 를 더한다. 캔버스를 못 재면 0 이다. */
+function chromeOf(canvas: Element | null, viewport: SizeCss, rowGrowth: number): SizeCss {
   const c = canvas?.getBoundingClientRect()
   if (c === undefined || !(c.width > 0 && c.height > 0)) return { w: 0, h: 0 }
-  return { w: Math.max(0, viewport.w - c.width), h: Math.max(0, viewport.h - c.height) }
+  return { w: Math.max(0, viewport.w - c.width), h: Math.max(0, viewport.h - c.height) + rowGrowth }
 }
 
 /** 이 탭바의 판정 재료 — 줄을 그때 잰다(창 크기가 바뀌어도 맞게). */
@@ -348,7 +358,9 @@ function geometryOf(o: UseTabDragSourceOptions, d: DrawnStrip | null): StripGeom
   const row = o.row.current
   if (row === null || d === null) return null
   const m = measureStrip({ row, add: o.add.current })
-  const area = { x0: m.left, y0: m.row.y0, x1: m.left + dragAreaWidth(d.available, d.bounds), y1: m.row.y1 }
+  const title = o.titleRow?.current?.getBoundingClientRect()
+  // 바탕 = 첫 탭 ~ `+` × 제목 줄(없으면 탭바 줄) — 그 오른쪽은 구역이 아니다(`stripZoneArea` · T-66).
+  const area = stripZoneArea(m, d.bounds, title === undefined ? null : { top: title.top, bottom: title.bottom })
   return { left: m.left, bounds: d.bounds, available: d.available, zoneViewport: stripZone(area), tabs: d.order }
 }
 

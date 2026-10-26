@@ -9,10 +9,13 @@ import type { DropOutcome } from '../../../../src-tauri/bindings/DropOutcome'
 import type { EndEffect } from '../../../../src-tauri/bindings/EndEffect'
 import type { TabDrop } from '../../../../src-tauri/bindings/TabDrop'
 import type { TabDropReply } from '../../../../src-tauri/bindings/TabDropReply'
+import { stripZone } from '../dock/bands'
 import { shownTab, stripHeld, type WindowModel } from '../dock/dragOverride'
 import { createLocalDrag, type LocalDrag, type StripGeometry } from '../dock/localDrag'
+import { buildTabDragType } from '../dock/tabDragData'
+import { createWindowDrop, type RootDragEvent } from '../dock/windowDrop'
 import { createDragSource, type DragSource, type DragSourcePorts, type DragSourceSnapshot, type DragStart } from './dragSource'
-import { stripBounds } from './measure'
+import { stripBounds, stripZoneArea } from './measure'
 
 const WIN = 'main'
 const DRAG = 'drag-1'
@@ -30,14 +33,21 @@ const START: DragStart = {
   x: 244,
 }
 
-/** 탭바가 그리는 순서 · 경계 그대로(`TabBar` 의 셈). */
-function geometryOf(snap: DragSourceSnapshot, model: WindowModel): StripGeometry {
+/** `+` 상자 폭(틈 4 + 원 22 — `TabBar.tsx` `ADD_STYLE`). */
+const ADD_W = 26
+
+/**
+ * 탭바가 그리는 순서 · 경계 · 구역 그대로(`TabBar` · `useTabDragSource.geometryOf` 의 셈) — 탭바 줄 x 0..`available` + `+` 폭 ·
+ * y 0..28(제목 줄 없음).
+ */
+function geometryOf(snap: DragSourceSnapshot, model: WindowModel, available = 480): StripGeometry {
   const motion = snap.window === WIN && stripHeld(snap.override, model) ? snap.motion : null
   const others = motion === null ? [...model.tabs] : model.tabs.filter(t => t !== motion.view)
   const order = motion === null ? others : [...others.slice(0, motion.index), motion.view, ...others.slice(motion.index)]
   const at = motion === null ? -1 : order.indexOf(motion.view)
-  const bounds = stripBounds({ available: 480, count: order.length, active: at, dragged: at >= 0 ? at : undefined })
-  return { left: 0, bounds, available: 480, zoneViewport: { x0: 0, y0: -15, x1: 480, y1: 43 }, tabs: order }
+  const bounds = stripBounds({ available, count: order.length, active: at, dragged: at >= 0 ? at : undefined })
+  const m = { row: { x0: 0, y0: 0, x1: available + ADD_W, y1: 28 }, left: 0, available, addWidth: ADD_W }
+  return { left: 0, bounds, available, zoneViewport: stripZone(stripZoneArea(m, bounds, null)), tabs: order }
 }
 
 interface Harness {
@@ -52,7 +62,7 @@ interface Harness {
   shown(): string | null
 }
 
-function harness(over: Partial<Pick<DragSourcePorts, 'send' | 'switchTabIf'>> = {}): Harness {
+function harness(over: Partial<Pick<DragSourcePorts, 'send' | 'switchTabIf'>> = {}, available = 480): Harness {
   const local = createLocalDrag()
   const sends: TabDrop[] = []
   const switches: Array<[string, string, string]> = []
@@ -73,7 +83,7 @@ function harness(over: Partial<Pick<DragSourcePorts, 'send' | 'switchTabIf'>> = 
   const src = createDragSource(ports)
   src.model(WIN, model)
   local.subscribe(() => src.stripChanged())
-  local.registerStripGeometry(() => geometryOf(src.getSnapshot(), model))
+  local.registerStripGeometry(() => geometryOf(src.getSnapshot(), model, available))
   return {
     src,
     local,
@@ -126,6 +136,55 @@ describe('dragSource — 끄는 동안(출처 탭바 판정)', () => {
     h.local.setSourceStrip({ index: 1, left: 170, x: 254 })
     expect(h.shown()).toBe('B')
     expect(h.src.getSnapshot().motion).toEqual({ view: 'B', index: 1, left: 170, settled: false })
+  })
+
+  // 사용자 결정 2026-10-26(T-66 · D-a) — 자기 탭도 커서가 `+` 오른 끝을 넘으면 구역 밖이다(거부한 대안 = 쓸 수 있는 폭 끝까지
+  //   붙여 두기). 판정은 출처 창 뿌리의 `windowDrop` 이 탭바 기하의 구역(`stripZoneArea`)으로 한다.
+  it('가로 넘침 — 커서가 + 오른 끝을 넘으면 구역 밖(순서 이동 멈춤 · 남은 탭) · 돌아오면 순서 이동이 다시 선다', () => {
+    // 머리 셋 160(0..480) · + 480..506 · 쓸 수 있는 폭 600(줄 0..626 — 옛 구역은 600 까지였다) · 캔버스 원점 (0, 28).
+    const h = harness({}, 600)
+    const type = buildTabDragType({ app: 'com.engram.test', drag: DRAG, original: { w: 800, h: 600 }, shape: 'l' })
+    const root = createWindowDrop({
+      app: () => 'com.engram.test',
+      local: h.local,
+      canvasRect: () => ({ left: 0, top: 28, width: 1200, height: 800 }),
+      shownTab: () => h.shown(),
+      view: () => null,
+      model: () => h.model(),
+      send: () => Promise.resolve({ type: 'ignored', why: 'lost-drop' }),
+      setTimer: () => 0,
+      clearTimer: () => {},
+      watchCanvas: () => () => {},
+    })
+    const at = (x: number): RootDragEvent => ({
+      clientX: x,
+      clientY: 14,
+      relatedTarget: null,
+      dataTransfer: { types: [type], dropEffect: 'none', getData: () => '' },
+      preventDefault: () => {},
+      stopPropagation: () => {},
+    })
+    started(h)
+
+    root.dragEnter(at(244))
+    expect(h.local.getSourceStrip()).toEqual({ index: 1, left: 164, x: 244 })
+    expect(h.src.getSnapshot().motion).toEqual({ view: 'B', index: 1, left: 164, settled: false })
+    // + 위는 구역 안 — 끄는 머리는 끝자리(320)에 머문다.
+    root.dragOver(at(500))
+    expect(h.local.getSourceStrip()).toEqual({ index: 2, left: 320, x: 500 })
+    expect(h.src.getSnapshot().motion?.index).toBe(2)
+    // + 오른 끝(506) 너머 빈 곳 — 구역 밖: 순서 이동을 거두고 남은 탭(누르기 전 활성 A)을 보인다.
+    root.dragOver(at(506))
+    expect(h.local.getSourceStrip()).toBeNull()
+    expect(h.src.getSnapshot().motion).toBeNull()
+    expect(h.shown()).toBe('A')
+    root.dragOver(at(590))
+    expect(h.local.getSourceStrip()).toBeNull()
+    // 다시 들면 곧바로 확정(문턱 없이) · 끄는 탭을 다시 보인다.
+    root.dragOver(at(300))
+    expect(h.local.getSourceStrip()).toEqual({ index: 1, left: 220, x: 300 })
+    expect(h.src.getSnapshot().motion).toEqual({ view: 'B', index: 1, left: 220, settled: false })
+    expect(h.shown()).toBe('B')
   })
 
   it('순서 문턱 — 구역에 든 첫 판정은 곧바로 확정 · 그 뒤는 마지막 이동 점에서 문턱(16 px)을 넘어야 판정의 자리로', () => {
@@ -435,7 +494,16 @@ const SCENARIOS: Scenario[] = [
     name: '창 밖 새 창(DragEnd 적용) — 끄는 탭이 떠난다',
     effect: 'none',
     out: true,
-    dragEnd: { reply: { type: 'applied', window: 'slot-popup-9', reused: false }, done: 'applied' },
+    dragEnd: {
+      reply: {
+        type: 'applied',
+        window: 'slot-popup-9',
+        window_id: '7d2f0b8e-1c3a-4f5e-9b6d-2a4c6e8f0a1b',
+        number: 2,
+        reused: false,
+      },
+      done: 'applied',
+    },
     arrivals: [tabsOf('tabs:new-window', { tabs: ['A', 'C'], active: 'A' }, true), layoutNoise],
     releases: true,
     reverts: 0,

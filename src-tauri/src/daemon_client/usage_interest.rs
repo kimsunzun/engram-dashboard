@@ -615,8 +615,7 @@ mod tests {
     fn a_view_owned_by_no_window_drops_out() {
         let (mut mgr, slot) = main_with(true, true);
         let view = main_active(&mgr);
-        mgr.prepare_detached_view(view, slot, "tmp".to_string())
-            .unwrap();
+        mgr.prepare_detached_view(view, slot).unwrap();
         mgr.set_slot_content(view, slot, SlotContent::Empty)
             .unwrap();
         assert_eq!(interest_from_layout(&mgr, &labels(&[])), set(&[]));

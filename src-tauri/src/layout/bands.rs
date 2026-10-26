@@ -41,7 +41,8 @@ pub const BAND_MIN_PX: u32 = 12;
 /// 위면 탭바 밑에 남는 바깥 위 띠는 5 px 다.
 pub const OUTER_BAND_PX: u32 = 20;
 
-/// 탭바 구역 = 탭 끌기 영역을 위아래로 넓히는 폭(CSS px) — Chrome `kVerticalDetachMagnetism`(TDC#401 · 조사 A5).
+/// 탭바 구역 = 바탕 사각형([`strip_zone`] 의 `area` — 웹뷰가 정한다)을 위아래로 넓히는 폭(CSS px) — Chrome
+/// `kVerticalDetachMagnetism`(TDC#401 · 조사 A5).
 /// 터치 값(50)은 쓰지 않는다 — 마우스만 다룬다.
 // ADR-0295
 pub const STRIP_ZONE_PX: f64 = 15.0;
@@ -138,10 +139,10 @@ pub struct SlotZones {
     pub centre: RectCss,
 }
 
-/// 탭바 구역 — `area`(탭 끌기 영역 사각형 · 뷰포트 CSS px)의 가로 그대로 · 세로 위아래 [`STRIP_ZONE_PX`]. 가로는
-/// 탭들 범위다 — 첫 머리 왼쪽부터 보이는 마지막 머리 오른 끝(`+` 앞)까지(웹뷰 `useTabDragSource.ts` `geometryOf` · 사용자 결정
-/// 2026-10-19 「도킹 영역을 + 전까지로」). 세로 판정은 Chrome `DoesTabStripContain`(TDC#1461-1477 ·
-/// `DoesRectContainVerticalPointExpanded` TDC#234) 그대로고, 가로는 Chrome(쓸 수 있는 폭 전체 — TRD S21-slot-docking 6.3판 §14 G7)과 다르다.
+/// 탭바 구역 — `area`(바탕 사각형 · 뷰포트 CSS px)의 가로 그대로 · 세로 위아래 [`STRIP_ZONE_PX`]. 바탕은 웹뷰가 정한다
+/// (`tabStrip/measure.ts` `stripZoneArea`) — 가로 = 첫 머리 왼쪽 ~ `+` 오른 끝(사용자 결정 2026-10-26 · T-66 — 탭이 있는
+/// 곳만 탭바 구역 · TRD S26-window-chrome §7-9) × 세로 = 제목 줄 안의 탭바면 제목 줄 · 아니면 탭바 줄. 세로
+/// 판정은 Chrome `DoesTabStripContain`(TDC#1461-1477 · `DoesRectContainVerticalPointExpanded` TDC#234) 그대로다.
 // ADR-0295
 pub fn strip_zone(area: RectCss) -> RectCss {
     RectCss {

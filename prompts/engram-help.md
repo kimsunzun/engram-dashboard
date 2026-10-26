@@ -86,20 +86,37 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
       답한 뒤에는 window.list · tab.list 를 다시 읽는다 — 수락하면 팝아웃 label 이 새로 매겨지고 view_id 는 사본의 것이 된다.
       awaiting 이 아니거나(사본 없음 · 이미 답함) 다른 답이 처리 중이면 CONFLICT. INTERNAL 이면 아무것도 안 바뀌어 awaiting 그대로다 — 대시보드가 막 뜨는 중에도 그렇다. 잠시 뒤 다시 답한다. TIMEOUT 이면 답이 끝까지 진행됐을 수 있으니 restore.status 로 확인한다
 
-  {tool} window.list
-      열려 있는 창 label 전량
-  {tool} window.create
-      빈 탭 하나를 든 새 창. 그 label 을 돌려준다
-  {tool} window.close --window <label>
-      창을 통째로 닫는다. main 은 거부된다
+아래 <창> 자리(--window · --to_window)에는 window.list 의 details 가 주는 window_id 를 넘긴다 — 재시작을 넘어 같은 창이다. 같은 실행 안에서는 label(windows 의 값)도 받고 main 은 늘 main 이다. 창 번호(창에 보이는 숫자 · number)는 받지 않는다 — 닫힌 창의 번호를 새 창이 다시 쓰므로 숫자만 주면 INVALID_ARGUMENT 다. 없는 창 · 닫힌 창 · 앞 실행의 label 은 CONFLICT 다.
 
-  {tool} tab.list --window <label>
-      그 창의 탭 목록과 활성 탭
-  {tool} tab.create --window <label> [--name <이름>]
-      빈 탭을 더하고 활성화한다. view_id 를 돌려준다
-  {tool} tab.switch --window <label> --view_id <id>
+  {tool} window.list
+      열려 있는 창. windows = label 전량. details = 창마다 window_id · window(label) · number · main · visible · minimized · maximized · focused(그 창이 OS 전경 창인가). number 는 비어 있는 가장 작은 수를 다시 쓰는데, 닫히는 창은 OS 창이 없어질 때까지 번호를 쥔 채 목록에는 안 나온다 — 그 잠깐은 목록에 없는 번호가 비어 있지 않을 수 있다(1 · 2 · 3 에서 닫히는 2 가 아직 있으면 새 창은 4)
+  {tool} window.create
+      빈 탭 하나를 든 새 창. window(label) · window_id · number 를 돌려준다
+  {tool} window.close --window <창> [--if_empty true]
+      팝아웃은 탭째 닫는다(outcome Closed). main 은 닫지 않고 모든 창을 숨긴다(HiddenAll — window.hideAll 과 같다). if_empty 면 window 는 그 창의 window_id 여야 하고, 그 창에 탭이 들어와 있거나 이미 닫혔으면 닫지 않는다(Kept — 오류가 아니다)
+
+  {tool} window.minimize --window <창>
+      최소화한다. 보이지 않는 창은 CONFLICT — 숨은 창은 먼저 window.raise 나 window.showAll, 아직 첫 화면 전인 창은 곧 보인다
+  {tool} window.maximize --window <창>
+  {tool} window.unmaximize --window <창>
+      최대화한다 · 원래 크기로 되돌린다(보이는 최소화 창의 unmaximize 는 무동작 — 먼저 window.raise). 숨은 창이나 아직 첫 화면 전인 창은 화면을 건드리지 않고 바랄 크기를 적어 뒀다가 보일 때 그 크기로 보인다 — 그때 deferred 가 true 다. 이미 그 크기인 창(최소화 아님)은 적을 것이 없어 숨었어도 deferred 가 false 다(예: 원래 크기인 숨은 창의 unmaximize)
+  {tool} window.raise --window <창>
+      앞으로 낸다. 숨어 있으면 모든 창을 보이고(shown_all true), 최소화면 편다. 포커스를 빼앗지 않는다 — 다른 앱이 앞이면 맨 위로만 올라 focused 가 false 다. 아직 첫 화면 전인 창은 손대지 않는다(pending true)
+  {tool} window.hideAll
+      모든 창을 숨긴다(트레이로). main 의 window.close 와 같다
+  {tool} window.showAll
+      숨은 창을 모두 보인다. 포커스를 빼앗지 않는다 — focused 는 그 뒤 main 이 OS 전경 창인가다
+
+창 자리 · 크기를 바꾸는 명령은 없다.
+
+  {tool} tab.list --window <창>
+      그 창의 탭 목록과 활성 탭. 탭마다 id · name · named(이름을 정했나 — false 면 name 이 포커스 칸의 내용을 따라 바뀐다)
+  {tool} tab.create --window <창> [--name <이름>]
+      빈 탭을 더하고 활성화한다. view_id 를 돌려준다. name 을 빼면 자동 이름이다
+  {tool} tab.switch --window <창> --view_id <id>
   {tool} tab.rename --view_id <id> --name <이름>
-  {tool} tab.close --window <label> --view_id <id>
+      그 뒤 이름은 굳는다 — 자동 이름으로 되돌리는 명령은 없다
+  {tool} tab.close --window <창> --view_id <id>
       창의 마지막 탭이면 그 창도 닫힌다
 
   {tool} slot.split --view_id <id> --slot_id <id> --dir <LeftRight|TopBottom>
@@ -108,8 +125,8 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
       형제가 그 자리를 물려받는다
   {tool} slot.focus --view_id <id> --slot_id <id>
       포커스를 그 슬롯으로 옮긴다. 포커스를 되읽는 명령은 없다
-  {tool} slot.popout --view_id <id> --slot_id <id> [--to_window <label>]
-      슬롯의 내용을 다른 창의 새 탭으로 옮긴다. to_window 를 빼면 새 창을 연다
+  {tool} slot.popout --view_id <id> --slot_id <id> [--to_window <창>]
+      슬롯의 내용을 다른 창의 새 탭으로 옮긴다. to_window 를 빼면 새 창을 연다. 옮겨 간 창의 window · window_id · number 와 그 창에 생긴 탭 new_view_id 를 돌려준다
   {tool} layout.setSlotContent --view_id <id> --slot_id <id> --content <Empty|Agent|AgentList|PresetPalette|Usage> [--agent_id <id>] [--show_claude <true|false>] [--show_codex <true|false>]
       슬롯이 무엇을 보여줄지 바꾼다. content 가 Agent 일 때만 agent_id 를, Usage 일 때만 show_claude · show_codex(그 백엔드의 사용량 한도를 보일지)를 함께 준다. 뺀 show 칸은 그 슬롯이 이미 Usage 면 지금 값을 두고, 아니면 true 다
 
@@ -121,14 +138,14 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
       Unchanged   자른 값이 지금 값과 같다
       TooSmall    너무 작아 손대지 않았다
 
-  {tool} agent.spawnInto --window <label> --cwd <폴더> [--view_id <id>] [--slot_id <id>] [--backend <claude|codex>]
+  {tool} agent.spawnInto --window <창> --cwd <폴더> [--view_id <id>] [--slot_id <id>] [--backend <claude|codex>]
       에이전트를 새로 띄우고 그 자리에 배치한다. view_id 를 빼면 새 탭에 놓고, 그때는 slot_id 를 주지 않는다
   {tool} slot.assignAgent --view_id <id> --slot_id <id> --agent_id <id>
       이미 살아 있는 에이전트를 그 슬롯에 붙인다. 새로 띄우지는 않는다
 
 slot_id 는 slot.split 이 돌려준 값이거나, 방향 낱말을 풀어서 얻는다. split_id 는 split.list 가 주고, 그 행의 a_slots·b_slots 도 slot_id 다. 새 탭의 하나뿐인 슬롯은 --view_id 에 tab.create 가 준 값을 주고 top-left 로 푼다. 포커스는 사람이 빈 칸·에이전트 칸을 클릭하거나 포커스 슬롯이 닫혀도 옮는다. 확실히 집을 땐 slot.split 이 준 id 나 모서리 낱말을 쓴다.
 
-  {tool} slot.resolveSpatial --token <낱말> [--window <label>] [--view_id <id>]
+  {tool} slot.resolveSpatial --token <낱말> [--window <창>] [--view_id <id>]
       view_id 를 빼면 그 창의 활성 탭이 대상이고, window 도 빼면 main 창이다
       top-left · top-right · bottom-left · bottom-right   그 탭에서 그 모서리를 차지한 슬롯. 포커스와 무관하다
       left · right · up · down                            포커스 슬롯 옆 슬롯. 여럿이면 가장 넓게 맞닿은 것(같으면 어느 쪽인지 보장하지 않는다), 없으면 null
@@ -137,7 +154,7 @@ slot_id 는 slot.split 이 돌려준 값이거나, 방향 낱말을 풀어서 �
 
   {tool} slot.empty --viewId <id> --slotId <id>
       슬롯을 빈 칸으로 되돌린다. 슬롯 자체는 남는다 — 없애려면 slot.close
-  {tool} tab.next [--window <label>]
+  {tool} tab.next [--window <창>]
       활성 탭을 다음 탭으로 옮긴다. 탭이 하나뿐이면 아무 일도 안 한다
 
 사용량 슬롯(content Usage)이 그리는 한도는 아래 둘로 직접 읽는다. 이 둘은 대시보드 창이 없어도 된다.
@@ -177,11 +194,11 @@ key 는 정확한 키(theme.default)이거나 점으로 끝나는 접두(chat.st
 
 파일은 `<data_dir>/shell/config/settings.json` 이다. 손으로 고치지 않는다 — 쓰는 길은 위 명령뿐이다(실행 중 편집은 다음 시작까지 반영되지 않는다).
 
-창 하나만 다른 테마로 두려면 창 명령을 쓴다. window 는 {tool} window.list 의 label 이다.
+창 하나만 다른 테마로 두려면 창 명령을 쓴다. window 는 {tool} window.list 의 details 가 주는 window_id 다(같은 실행 안에서는 label 도 받는다 · 창 번호는 받지 않는다 — {tool} help window).
 
-  {tool} window.getTheme --window <label>
+  {tool} window.getTheme --window <창>
       theme 은 그 창에만 정한 테마이고 null 이면 정하지 않아 theme.default 를 따른다. effective 는 지금 그 창에 칠한 테마다
-  {tool} window.setTheme --window <label> --theme <dark|light|e-ink|none>
+  {tool} window.setTheme --window <창> --theme <dark|light|e-ink|none>
       그 창에만 테마를 정한다(테마 이름은 대소문자 무시). none 은 소문자 그대로 쳐야 하고, 그 창의 테마를 지워 theme.default 를 따르게 한다. theme 은 뺄 수 없다. 답은 window.getTheme 과 같은 모양이다
 
 창 테마는 화면 상태에 그 창과 함께 저장돼 재시작을 넘기고(restore.status 의 saves 가 false 인 실행은 저장하지 않는다), 창을 닫으면 함께 사라진다. 대시보드 창이 떠 있지 않으면 두 명령은 UNKNOWN_COMMAND 이고, 없는 창은 CONFLICT 다. window.setTheme 이 INTERNAL 이고 문구가 정했지만 그 창에 못 보냈다고 하면 값은 남아 있다(window.getTheme 이 새 값을 답한다). 모든 창을 한꺼번에 바꾸려면 settings.set theme.default 다.

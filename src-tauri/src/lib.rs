@@ -1,3 +1,5 @@
+// 창 크롬 — OS 창 제목(TRD S26-window-chrome §4-4).
+mod chrome;
 pub mod commands;
 pub mod daemon_client;
 pub mod discovery;
@@ -25,6 +27,29 @@ use tauri::Manager;
 
 /// main 창을 못 만든 시작(setup ⑧)의 프로세스 종료 코드.
 const STARTUP_FAILED_EXIT_CODE: i32 = 1;
+
+// 데몬 에이전트 목록 → 탭 자동 이름 장부(TRD S26-window-chrome §4-3) — 연결 태스크가 프론트 알림 뒤에 부른다. 레이아웃은
+//   사람 클릭 · 버스와 같은 인스턴스여야 한다(ADR-0035 레이아웃 권위는 하나).
+struct LayoutAgentNames {
+    layout: crate::layout::LayoutState,
+    app: tauri::AppHandle,
+}
+
+impl crate::daemon_client::AgentNamesSink for LayoutAgentNames {
+    fn agents(&self, agents: &[engram_dashboard_protocol::AgentInfo]) {
+        let names: Vec<(String, String)> = agents
+            .iter()
+            .map(|agent| (agent.id.to_string(), agent.name.clone()))
+            .collect();
+        if let Err(e) = crate::layout::apply::agent_names_updated(
+            &self.layout,
+            &crate::commands::layout::TauriEvents { app: &self.app },
+            &names,
+        ) {
+            tracing::warn!("에이전트 이름 장부를 고치지 못했다(탭 이름은 다음 목록에서): {e}");
+        }
+    }
+}
 
 // ── run() ────────────────────────────────────────────────────────────────────
 
@@ -59,8 +84,9 @@ pub fn run() {
     //   만든다(tauri-plugin-single-instance 2.4.2 `platform_impl/windows.rs:67`). 그래서 identifier 를
     //   공유하는 두 빌드는 서로를 죽인다 — dev 빌드는 `src-tauri/tauri.dev.conf.json` 오버레이로
     //   identifier 를 갈라 릴리즈와 공존한다. ★두 identifier 를 통일하지 말 것★(사유 = 그 파일 주석).
+    // 두 번째 실행 = 사람이 앱을 다시 실행했다 — 트레이 누름과 같은 「누름」 갈래다(TRD S26-window-chrome §6-2).
     builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-        crate::tray::actions::show_main_ui(app);
+        crate::tray::actions::show_main_ui(app, crate::layout::window_ctl::Activation::TrayClick);
     }));
     // ★단일 인스턴스 바로 뒤에 둔다★ — 로그 초기화 · 셸 실행 잠금 · 상태 파일 판정 · 모델 채우기를 관문 뒤 · 어느
     //   창보다 앞에서 한다(TRD S21-storage §6-5 · 정본 = 그 모듈 머리).
@@ -125,6 +151,9 @@ pub fn run() {
     //   (ADR-0102) — 웹뷰의 마운트 때 `window_frame` 당기기와 창의 첫 자리 기록이 이 상태를 본다.
     builder = builder.manage(std::sync::Arc::new(crate::tab_drop::DropBook::default()));
     builder = builder.manage(std::sync::Arc::new(crate::tab_drop::FrameBook::default()));
+    // 창마다 마지막으로 입힌 OS 제목의 판(TRD S26-window-chrome §4-4) — 탭 알림이 오는 어느 길보다 먼저 있어야 한다(없는
+    //   동안 온 제목은 입히지 않고 지나간다).
+    builder = builder.manage(crate::chrome::ChromeState::default());
 
     // ── 셸 설정 + 유효 테마(TRD S21-storage §5-3 · §5-6) ─────────────────────────────
     // ★위 LayoutState 와 같은 이유로 빌더에서 manage 한다(ADR-0102)★ — 웹뷰의 첫 `get_ui_settings` ·
@@ -207,6 +236,10 @@ pub fn run() {
                 router.clone(),
                 registry.clone(),
                 app.handle().clone(),
+                std::sync::Arc::new(LayoutAgentNames {
+                    layout: setup_layout.clone(),
+                    app: app.handle().clone(),
+                }),
             ) {
                 Ok(client) => {
                     let client = std::sync::Arc::new(client);
@@ -266,6 +299,14 @@ pub fn run() {
                 setup_startup_failed.store(true, std::sync::atomic::Ordering::SeqCst);
                 app.handle().exit(STARTUP_FAILED_EXIT_CODE);
                 return Ok(());
+            }
+            // 지은 창마다 OS 제목을 한 번 입힌다(TRD S26-window-chrome §4-4 ③) — ⑨ 가 못 연 팝아웃을 모델에서 지운 뒤라
+            //   남은 창만 알린다. 이것이 없으면 다음 탭 변경까지 창 제목이 지을 때의 「Engram」에 머문다.
+            if let Err(e) = crate::layout::apply::sync_titles(
+                &setup_layout,
+                &crate::commands::layout::TauriEvents { app: app.handle() },
+            ) {
+                tracing::warn!("부팅 뒤 창 제목을 입히지 못했다(다음 탭 변경 때 입는다): {e}");
             }
 
             // ── 부팅 단계 ⑩: 파생 표(라우터 · 사용량 관심)를 마지막 창 묶음으로 한 번 다시 계산한다 ──
@@ -366,12 +407,17 @@ pub fn run() {
                 //   (ADR-0046: 일반 라우팅 메커니즘 정리.)
                 tauri::WindowEvent::Destroyed => {
                     let label = window.label().to_string();
+                    // 아래 팝아웃 · 상태 조건 밖이다 — 그 조건이 걸러도 이 창의 제목 장부 항목은 남지 않는다(TRD
+                    //   S26-window-chrome §4-4).
+                    crate::chrome::forget(window.app_handle(), &label);
                     if crate::commands::popout::is_popup_label(&label) {
                         let app = window.app_handle();
                         crate::state::placement::forget_deferred_maximize(app, &label);
                         crate::first_paint::cancel_hold(app, &label);
                         crate::commands::tab_drop::forget_window_frame(app, &label);
-                        // 하나라도 없으면(초기화 실패 극단 케이스) 조용히 스킵(정리 불가여도 앱은 계속).
+                        // 창 번호는 정리가 묘비 · 구독 정리와 한 락 안에서 푼다. 하나라도 없으면(초기화 실패 극단
+                        //   케이스) 정리는 건너뛰고(앱은 계속) 번호만 푼다 — 안 풀면 번호가 실행 끝까지 잡힌다(TRD
+                        //   S26-window-chrome §4-1).
                         if let (Some(state), Some(router), Some(registry), Some(client)) = (
                             app.try_state::<crate::layout::LayoutState>(),
                             app.try_state::<std::sync::Arc<crate::output_router::OutputRouter>>(),
@@ -381,6 +427,8 @@ pub fn run() {
                             crate::commands::popout::cleanup_popup_window(
                                 &app, &label, &state, &router, &registry, &client,
                             );
+                        } else if let Some(state) = app.try_state::<crate::layout::LayoutState>() {
+                            crate::layout::release_window_number(&state, &label);
                         }
                     }
                     // 예열 창 풀(TRD S21-slot-docking §3-9 「다시 짓기」) — 풀의 창이면 빼고 다시 짓고, 보임을 기다리던 채택
@@ -394,6 +442,18 @@ pub fn run() {
                     if !crate::commands::spare::is_spare_window(window.app_handle(), window.label()) {
                         crate::state::placement::record(window);
                     }
+                    // 최대화 · 최소화에서 보통 크기로 돌아온 창에 적어 둔 OS 최소 크기를 입힌다(TRD S26-window-chrome §7-7
+                    //   — 최대화 · 최소화 동안은 입히지 않는다 · 까닭 = `crate::chrome` 장부 머리). 예열 창도 보고하므로
+                    //   빼지 않는다.
+                    if matches!(event, tauri::WindowEvent::Resized(_)) {
+                        crate::chrome::on_resized(window);
+                    }
+                }
+                // 창 사실의 앞 창 칸(제목 줄 흐림 — TRD S26-window-chrome §6-5) — 그 창의 칸은 사건의 값으로 민다. 다른 우리
+                //   창이 앞으로 오면 그 창의 `Focused(true)` 와 옛 창의 `Focused(false)` 가 둘 다 와 각자 민다. 모델 밖 창
+                //   (예열 창)은 미는 쪽이 건너뛴다.
+                tauri::WindowEvent::Focused(focused) => {
+                    crate::commands::tab_drop::push_window_focus(window, *focused);
                 }
                 _ => {}
             }
@@ -421,7 +481,6 @@ pub fn run() {
             // 탭 끌기의 원래 선택 되돌리기(웹뷰 → 셸 · TRD S21-slot-docking §4-6) — 버스 명령이 아니다.
             commands::switch_tab_if,
             commands::close_tab,
-            commands::close_window,
             commands::split_slot,
             commands::set_split_ratio,
             commands::close_slot,
@@ -446,6 +505,16 @@ pub fn run() {
             //   S21-slot-docking §3-6). 같은 동작의 LLM 명령은 T-65 `tab.dock`.
             commands::tab_drop::tab_drop,
             commands::tab_drop::window_frame,
+            // 창 상태(사람 길 — 웹 단추 · 레지스트리) — 버스 `window.*` 와 같은 서비스(TRD S26-window-chrome §6-4).
+            //   ★창 닫기 전용 invoke 를 따로 두지 않는다★ — main 의 닫기는 모든 창 숨기기라(§5-4) 닫기 길이 둘이면 그 판정이
+            //   갈린다.
+            commands::window_ctl::window_control,
+            // 최소 창 크기 보고(웹뷰 → 셸) — 측정 보고라 버스 명령이 아니다(ADR-0227 · TRD S26-window-chrome §7-7).
+            commands::window_ctl::report_window_min_width,
+            // 최대화 단추 사각형 보고(웹뷰 → 셸) — 스냅 레이아웃 오버레이를 그 자리에 놓는다. 측정 보고라 버스 명령이 아니다
+            //   (ADR-0227). ★셸 기능 `snap-overlay` 뒤(기본 꺼짐 · TRD S26-window-chrome §8-4)★.
+            #[cfg(feature = "snap-overlay")]
+            commands::snap_overlay::report_max_button_rect,
             // 부팅 조회 — 미는 쪽(`window.setTheme` · `theme.default` 쓰기 · 부팅 · 복원 수락)은 따로 있다
             //   (`commands/settings.rs` 「창별 테마를 읽는 자리가 둘인 이유」).
             commands::get_ui_settings,

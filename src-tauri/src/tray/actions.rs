@@ -18,8 +18,10 @@ use super::core::{self, IconState};
 use super::TrayIcons;
 use crate::commands::popout::is_popup_label;
 use crate::commands::spare::is_spare_window;
+use crate::commands::window_ctl::TauriOps;
 use crate::daemon_client::DaemonClient;
-use crate::layout::LayoutState;
+use crate::layout::window_ctl::{self, Activation, WindowOps};
+use crate::layout::{LayoutState, MAIN_WINDOW_LABEL};
 use crate::spare::pool::TrayShow;
 use crate::spare::SpareState;
 
@@ -53,19 +55,35 @@ const STOP_GRACE: Duration = Duration::from_secs(5);
 // downcast(CheckMenuItem)가 번거로워, build_tray 가 만든 핸들을 그대로 state 로 보관해 직접 set_checked 한다.
 pub struct AutostartCheck(pub CheckMenuItem<Wry>);
 
-// 메인과 팝아웃 창을 전부 화면 맨 앞으로 되살린다 — 숨은 창은 보이고 최소화된 창은 펼치고, 이미 떠 있던
-// 창도 다른 앱 위로 올린다. 포커스는 마지막에 메인이 받아 메인이 맨 위, 팝아웃이 그 바로 아래에 온다.
-// 이름에 `main` 이 남은 것은 같은 이름의 command 가 LLM 제어 표면이라서다 — 이름을 바꾸면 표면이 바뀐다.
-//
-// ★창마다 show()→unminimize()→set_focus() 순서가 load-bearing(Windows focus-stealing)★: 이 순서가
-// 아니면 hidden/minimized 에서 작업표시줄 깜빡임만 나고 실제로 안 떠오를 수 있다(TRD §4).
-// ★창 사이 순서(메인이 마지막)도 load-bearing★: 셋 다 창을 활성화하므로(tao 0.35 Windows = `SW_SHOW` ·
-//   `SW_RESTORE` · `SetForegroundWindow`) 메인 뒤에 무엇이든 하면 그 창이 포커스를 가져간다. 순서는
-//   [`core::ui_windows`] 가 정한다.
+// 메인과 팝아웃 창을 전부 되살린다 — 숨은 창은 보이고 최소화된 창은 펼친다. 이름에 `main` 이 남은 것은 같은 이름의
+// command 가 LLM 제어 표면이라서다 — 이름을 바꾸면 표면이 바뀐다. 갈래는 둘이다(TRD S26-window-chrome §6-2 — 누가 어느
+// 갈래인가는 `Activation` 문서):
+// - 누름(`TrayClick`) — 이미 떠 있던 창도 다른 앱 위로 올리고 포커스는 마지막에 메인이 받아 메인이 맨 위, 팝아웃이 그
+//   바로 아래에 온다. 첫 화면을 기다리던 창도 그 기다림을 거두고 보인다(사람이 누른 보이기다 — §2-4 불변식 5).
+// - 포커스를 빼앗지 않기(`NoSteal`) — [`show_main_ui_no_steal`].
+// ★`NoSteal` 은 메인 스레드에서만 부른다★ — 그 갈래가 날 Win32 올리기(`raise_without_activation` 안의 `SetWindowPos`)를
+//   부른다. 버스 · invoke 는 `commands::window_ctl::TauriWindowControl` 의 메인 스레드 일로 들어온다.
 // 창 하나가 실패해도(목록을 뜬 뒤 닫힌 팝아웃 등) 나머지와 메인은 계속 처리한다 — `?` 로 끊지 말 것.
-// 예열 창 풀의 창은 띄우지 않는다 — 그사이 확정으로 풀을 떠난 창만 보통 창처럼 띄운다([`show_ui_windows`]).
+// 예열 창 풀의 창은 두 갈래 다 띄우지 않는다 — 그사이 확정으로 풀을 떠난 창만 보통 창처럼 띄운다([`show_ui_windows`]).
+// ADR-0229 · ADR-0299 · ADR-0302
+pub(crate) fn show_main_ui(app: &AppHandle, how: Activation) {
+    match how {
+        Activation::TrayClick => show_main_ui_on_click(app),
+        Activation::NoSteal => show_main_ui_no_steal(app, &TauriOps::new(app)),
+    }
+}
+
+// ★창마다 show()→unminimize()→바람 입히기→set_focus() 순서가 load-bearing★:
+// - show → unminimize → set_focus(Windows focus-stealing) — 이 순서가 아니면 hidden/minimized 에서 작업표시줄 깜빡임만
+//   나고 실제로 안 떠오를 수 있다(TRD §4).
+// - 바람 입히기는 펴기 뒤다 — 앞에 두면 최소화된 창의 원래 크기 바람을 잃는다(`apply_deferred_maximize` 머리 ·
+//   TRD S26-window-chrome §6-2).
+// ★창 사이 순서(메인이 마지막)도 load-bearing★: 넷 다 창을 활성화하므로(tao 0.35 Windows = `SW_SHOW` ·
+//   `SW_RESTORE` · 바람 입히기의 `SW_MAXIMIZE`/`SW_RESTORE` · `SetForegroundWindow`) 메인 뒤에 무엇이든 하면 그 창이
+//   포커스를 가져간다. 순서는
+//   [`core::ui_windows`] 가 정한다.
 // ADR-0229 · ADR-0299
-pub fn show_main_ui(app: &AppHandle) {
+fn show_main_ui_on_click(app: &AppHandle) {
     let windows = app.webview_windows();
     let show = |label: &str| {
         let Some(w) = windows.get(label) else {
@@ -75,9 +93,8 @@ pub fn show_main_ui(app: &AppHandle) {
         //   뒤에 오는 알림 · 시한이 보인 창을 이 순서 밖에서 한 번 더 보인다(`crate::first_paint`).
         crate::first_paint::cancel_hold(app, label);
         let _ = w.show();
-        // 숨은 동안 미뤄 둔 최대화(main · 복원한 팝아웃)를 보인 직후에 입힌다.
-        crate::state::placement::apply_deferred_maximize(&w.as_ref().window());
         let _ = w.unminimize();
+        crate::state::placement::apply_deferred_maximize(&w.as_ref().window());
         let _ = w.set_focus();
         true
     };
@@ -86,13 +103,48 @@ pub fn show_main_ui(app: &AppHandle) {
             windows.keys().map(String::as_str),
             usage,
             |label| is_spare_window(app, label),
-            |label| {
-                app.try_state::<Arc<SpareState>>()
-                    .map_or(TrayShow::Untouched, |spare| spare.on_tray_show(label))
-            },
+            |label| tray_show(app, label),
             show,
         );
     });
+}
+
+/// 포커스를 빼앗지 않는 모든 창 보이기(`Activation::NoSteal` — TRD S26-window-chrome §6-2) — 누름 갈래와 같은 창 차례
+/// (예열 창 건너뛰기 · 풀을 떠난 예열 창 먼저 · main 이 마지막)로 창마다 `window_ctl::show_one_no_steal` 이다: 첫 화면
+/// 대기 창은 건너뛰고(§2-4 불변식 5 — 그 창은 첫 화면 문이 곧 보인다), 활성화 없이 맨 위로 올려 보이고 · 펴고 · 적어 둔
+/// 최대화 바람을 입힌다. 포커스는 우리 프로세스가 이미 전경을 쥐었을 때 main 에만 준다.
+///
+/// ★메인 스레드에서 부른다★ — `ops` 가 날 Win32 올리기를 부르고, 창마다의 대기 판정 · 보이기가 첫 화면 보이기와
+/// 끼어들지 않아야 한다(§5-2). 버스 · invoke 는 `commands::window_ctl::TauriWindowControl` 의 메인 스레드 일로 부른다.
+// ADR-0299
+pub(crate) fn show_main_ui_no_steal(app: &AppHandle, ops: &dyn WindowOps) {
+    let windows = app.webview_windows();
+    with_usage_visibility(app, |usage| {
+        show_ui_windows_no_steal(
+            windows.keys().map(String::as_str),
+            usage,
+            |label| is_spare_window(app, label),
+            |label| tray_show(app, label),
+            ops,
+        );
+    });
+}
+
+fn show_ui_windows_no_steal<'a>(
+    labels: impl IntoIterator<Item = &'a str>,
+    usage: &dyn UsageVisibility,
+    spare: impl Fn(&str) -> bool,
+    tray_show: impl Fn(&str) -> TrayShow,
+    ops: &dyn WindowOps,
+) {
+    show_ui_windows(labels, usage, spare, tray_show, |label| {
+        window_ctl::show_one_no_steal(ops, label, label == MAIN_WINDOW_LABEL)
+    });
+}
+
+fn tray_show(app: &AppHandle, label: &str) -> TrayShow {
+    app.try_state::<Arc<SpareState>>()
+        .map_or(TrayShow::Untouched, |spare| spare.on_tray_show(label))
 }
 
 // 트레이 보이기의 차례 — [`for_each_ui_window`] 를 보이기로 돌리고, 예열 창 술어(`spare`)로 건너뛴 label 마다 풀에
@@ -237,7 +289,7 @@ pub(crate) fn with_usage_visibility(app: &AppHandle, run: impl FnOnce(&dyn Usage
 // - 보이기 = 관심 먼저 · OS 나중. 보이기가 실패해도 남는 비용은 안 보이는 창 몫의 조회뿐이다.
 // - 숨기기 = OS 먼저 · 숨긴 창만 관심에서 뺀다. 실패한 숨기기를 빼면 **보이는** 창의 값이 멎는다.
 // ★`os` 는 락 밖에서 불린다★ — 운영 구현의 ViewManager 락은 `set_visible` 한 번 안에서 잡혔다 풀린다. 이 함수는
-//   명령 워커 스레드에서도 돌고(`commands/tray.rs`), OS 창 호출을 그 락 안에 두면 창 호스트 포트와 같은 교착
+//   메인 스레드 밖에서도 돌고(`state::placement::TauriRestoreWindows::set_shown`), OS 창 호출을 그 락 안에 두면 창 호스트 포트와 같은 교착
 //   위험이다(`layout::apply` 의 `WindowHost` doc).
 // ADR-0295 · ADR-0299
 pub(crate) fn for_each_ui_window<'a>(
@@ -619,6 +671,113 @@ mod tests {
                 "os:main",
             ]
         );
+    }
+
+    // ── 포커스를 빼앗지 않는 보이기(TRD S26-window-chrome §6-2 · §10-1) ──
+
+    /// 숨은 창들의 OS 대역 — `held` 는 첫 화면 대기 창 · `ours` = 우리 프로세스가 전경을 쥐었다. 상태 명령 몫 조작이 오면
+    /// 터진다(모든 창 보이기는 그것을 부르지 않는다).
+    #[derive(Default)]
+    struct Ops {
+        held: Vec<&'static str>,
+        ours: bool,
+        calls: RefCell<Vec<String>>,
+    }
+
+    impl Ops {
+        fn note(&self, call: &str, label: &str) {
+            self.calls.borrow_mut().push(format!("{call}:{label}"));
+        }
+    }
+
+    impl WindowOps for Ops {
+        fn read(&self, label: &str) -> Option<crate::layout::window_ctl::OsWindowState> {
+            Some(crate::layout::window_ctl::OsWindowState {
+                awaiting_first_paint: self.held.iter().any(|held| *held == label),
+                ..Default::default()
+            })
+        }
+        fn minimize(&self, _: &str) -> Result<(), String> {
+            unreachable!()
+        }
+        fn maximize(&self, _: &str) -> Result<(), String> {
+            unreachable!()
+        }
+        fn unmaximize(&self, _: &str) -> Result<(), String> {
+            unreachable!()
+        }
+        fn defer_maximized(&self, _: &str, _: bool) {
+            unreachable!()
+        }
+        fn drop_deferred(&self, _: &str) {
+            unreachable!()
+        }
+        fn raise_without_activation(&self, label: &str) {
+            self.note("top", label);
+        }
+        fn show(&self, label: &str) -> Result<(), String> {
+            self.note("show", label);
+            Ok(())
+        }
+        fn unminimize(&self, label: &str) -> Result<(), String> {
+            self.note("unminimize", label);
+            Ok(())
+        }
+        fn apply_deferred(&self, label: &str) {
+            self.note("apply", label);
+        }
+        fn foreground_is_ours(&self) -> bool {
+            self.ours
+        }
+        fn set_focus(&self, label: &str) {
+            self.note("focus", label);
+        }
+        fn show_all_no_steal(&self) {
+            unreachable!()
+        }
+    }
+
+    // 누름 갈래와 같은 창 차례(풀을 떠난 예열 창 먼저 · main 이 마지막)로 보이되 첫 화면 대기 창은 건너뛰고, 포커스는
+    // 전경이 우리일 때 main 에만 준다 — 남의 앱이 전경이면 아무 창에도 주지 않는다.
+    #[test]
+    fn no_steal_skips_waiting_windows_and_focuses_only_main_when_the_foreground_is_ours() {
+        for ours in [true, false] {
+            let log = Log::default();
+            let ops = Ops {
+                held: vec!["slot-popup-1"],
+                ours,
+                ..Ops::default()
+            };
+            show_ui_windows_no_steal(
+                ["main", "slot-popup-1", "slot-popup-2", "slot-popup-3"],
+                &log,
+                |label| label == "slot-popup-3",
+                |_| TrayShow::Adopted,
+                &ops,
+            );
+            let mut want: Vec<String> = ["slot-popup-3", "slot-popup-2", "main"]
+                .iter()
+                .flat_map(|label| {
+                    ["top", "show", "apply"]
+                        .iter()
+                        .map(move |call| format!("{call}:{label}"))
+                })
+                .collect();
+            if ours {
+                want.push("focus:main".to_string());
+            }
+            assert_eq!(ops.calls.into_inner(), want, "ours={ours}");
+            assert_eq!(
+                log.0.into_inner(),
+                [
+                    "usage:slot-popup-3:true",
+                    "usage:slot-popup-1:true",
+                    "usage:slot-popup-2:true",
+                    "usage:main:true",
+                ],
+                "ours={ours} — 대기 창도 곧 보인다"
+            );
+        }
     }
 
     // 숨기기 — 술어로 건너뛴 예열 창의 올림도 차례 뒤에 거둔다. 거둠은 팝아웃 label 전부이고 술어를 다시 묻지 않는다.

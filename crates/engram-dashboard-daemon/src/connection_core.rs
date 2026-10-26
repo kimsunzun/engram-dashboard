@@ -1836,7 +1836,14 @@ impl ConnectionCore {
                 name,
                 request_id,
             } => match manager.try_rename_agent(profile_id, name) {
-                Ok(CoreRenameOutcome::Renamed(_) | CoreRenameOutcome::Unchanged(_)) => {
+                Ok(CoreRenameOutcome::Renamed(_)) => {
+                    reply(sink, request_id, Ok(()));
+                    broadcast_profile_list(fanout, manager);
+                    // 산 에이전트면 목록 이름(`AgentInfo.name`)도 바뀐다(잠든 프로필이면 목록은 그대로다) — 셸의 탭 자동
+                    //   이름 · 창 제목은 이 목록에서만 이름을 읽는다(다시 짓지 않는다 · TRD S26-window-chrome §4-3).
+                    broadcast_agent_list(fanout, manager);
+                }
+                Ok(CoreRenameOutcome::Unchanged(_)) => {
                     reply(sink, request_id, Ok(()));
                     broadcast_profile_list(fanout, manager);
                 }
@@ -2467,6 +2474,10 @@ pub(crate) fn broadcast_lease_changed(fanout: &dyn FrameFanout, agent_id: AgentI
 ///   ADR-0236 이 내려놓았다 — 모양은 그대로 둔다.
 /// ★짝 불일치 방지★: 생성자를 통해 **한 조립에서 나온** 팬아웃과 매니저만 묶인다 —
 ///   `DaemonWiring::roster_broadcast` 가 유일한 운영 생성 지점이다(그 struct 주석의 규칙).
+/// ★통지 한 번 = `ProfileListUpdated` 다음 `AgentListUpdated`★: 포트는 어느 동사가 불렀는지 모른다 — 버스 · CLI
+///   `agent.rename` 이 산 에이전트의 목록 이름을 바꿔도 셸의 탭 자동 이름이 따라가게 에이전트 목록을 늘 함께 민다.
+///   다른 동사(띄우기 · 만들기 · 옮기기 · 무변경 개명)가 덧붙여 내는 목록은 이름이 그대로면 셸의 이름 장부가 판도 알림도 없이
+///   넘긴다(TRD S26-window-chrome §4-3).
 pub struct RosterFanout {
     fanout: Arc<dyn FrameFanout>,
     manager: Arc<AgentManager>,
@@ -2481,6 +2492,7 @@ impl RosterFanout {
 impl crate::control::agent::RosterBroadcast for RosterFanout {
     fn roster_changed(&self) {
         broadcast_profile_list(self.fanout.as_ref(), &self.manager);
+        broadcast_agent_list(self.fanout.as_ref(), &self.manager);
     }
 }
 
@@ -2489,6 +2501,12 @@ fn broadcast_profile_list(fanout: &dyn FrameFanout, manager: &Arc<AgentManager>)
         profiles: core_profiles_to_wire(manager.agent_snapshots()),
     };
     if let Some(text) = event_json(&ev) {
+        fanout.broadcast_text(text);
+    }
+}
+
+fn broadcast_agent_list(fanout: &dyn FrameFanout, manager: &Arc<AgentManager>) {
+    if let Some(text) = event_json(&agent_list_event(manager)) {
         fanout.broadcast_text(text);
     }
 }
@@ -6563,6 +6581,189 @@ mod tests {
             Some("alpha".to_string()),
             "이름 그대로"
         );
+    }
+
+    // ══ 개명 뒤 에이전트 목록(TRD S26-window-chrome §4-3) ══
+
+    /// `before` 뒤에 나간 브로드캐스트의 꼴 이름(`AgentListUpdated` 등) — 순서대로.
+    fn broadcast_kinds(
+        fanout: &crate::test_doubles::RecordingFanout,
+        before: usize,
+    ) -> Vec<String> {
+        fanout.texts()[before..]
+            .iter()
+            .map(|text| {
+                let value: serde_json::Value = serde_json::from_str(text).expect("wire 는 JSON");
+                value
+                    .as_object()
+                    .and_then(|o| o.keys().next().cloned())
+                    .expect("외부 태그 하나")
+            })
+            .collect()
+    }
+
+    /// `before` 뒤에 나간 `AgentListUpdated` 마다 그 (id, 이름) 목록 — 순서대로.
+    fn broadcast_agent_lists(
+        fanout: &crate::test_doubles::RecordingFanout,
+        before: usize,
+    ) -> Vec<Vec<(AgentId, String)>> {
+        fanout.texts()[before..]
+            .iter()
+            .filter_map(|text| match serde_json::from_str::<AgentEvent>(text) {
+                Ok(AgentEvent::AgentListUpdated { agents }) => {
+                    Some(agents.into_iter().map(|a| (a.id, a.name)).collect())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn live_profile(raw: &str) -> CoreProfile {
+        CoreProfile::new(
+            raw.into(),
+            CoreSpawnCommand::Shell {
+                program: default_shell().to_string(),
+                args: vec![],
+            },
+            std::env::temp_dir(),
+            vec![],
+            false,
+        )
+    }
+
+    /// 산 에이전트를 개명하면 `list_agents` 의 이름이 바뀌고 — 셸의 탭 자동 이름 · 창 제목이 따르는 그 이름 — 개명
+    /// 뒤 `AgentListUpdated` 가 그 이름을 싣고 나간다.
+    #[tokio::test]
+    async fn renaming_a_live_agent_broadcasts_the_agent_list_with_its_new_name() {
+        let (core, fanout) = test_core_recording();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        let profile = live_profile("live-raw");
+        core.manager
+            .try_create_agent(profile.clone())
+            .expect("등록 성공");
+        core.manager
+            .spawn_agent(&profile, SpawnMode::Fresh)
+            .expect("spawn")
+            .into_started()
+            .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+        let before = fanout.texts().len();
+
+        core.dispatch(
+            AgentCommand::RenameProfile {
+                profile_id: profile.id,
+                name: Some("renamed-live".into()),
+                request_id: rid(),
+            },
+            &session,
+            &mock,
+        )
+        .await;
+
+        let listed = core
+            .manager
+            .list_agents()
+            .into_iter()
+            .find(|a| a.id == profile.id)
+            .map(|a| a.name);
+        let lists = broadcast_agent_lists(&fanout, before);
+        // 끄기도 목록을 낸다 — 끄기 전에 뜬다.
+        let kinds: Vec<String> = broadcast_kinds(&fanout, before)
+            .into_iter()
+            .filter(|kind| kind != "StatusChanged")
+            .collect();
+        core.manager.kill_agent(profile.id).ok();
+
+        assert_eq!(listed.as_deref(), Some("renamed-live"), "목록 이름의 출처");
+        assert_eq!(
+            lists,
+            vec![vec![(profile.id, "renamed-live".to_string())]],
+            "개명 한 번에 에이전트 목록 한 장"
+        );
+        assert_eq!(kinds, ["ProfileListUpdated", "AgentListUpdated"]);
+    }
+
+    /// 버스 · CLI `agent.rename` 은 WS 팔을 지나지 않고 명부 통지 포트(`RosterFanout`)로 알린다 — 그 통지도 프로필 목록
+    /// 뒤에 새 이름을 실은 에이전트 목록을 낸다(셸의 탭 자동 이름이 LLM 의 개명을 따른다).
+    #[tokio::test]
+    async fn the_roster_port_broadcasts_the_agent_list_after_the_profile_list() {
+        use crate::control::agent::RosterBroadcast;
+
+        let (core, fanout) = test_core_recording();
+        let profile = live_profile("bus-raw");
+        core.manager
+            .try_create_agent(profile.clone())
+            .expect("등록 성공");
+        core.manager
+            .spawn_agent(&profile, SpawnMode::Fresh)
+            .expect("spawn")
+            .into_started()
+            .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+        let port = RosterFanout::new(fanout.clone(), core.manager.clone());
+        assert!(
+            matches!(
+                core.manager
+                    .try_rename_agent(profile.id, Some("renamed-by-bus".into())),
+                Ok(CoreRenameOutcome::Renamed(_))
+            ),
+            "개명 확정(이 시험의 전제)"
+        );
+        let before = fanout.texts().len();
+
+        port.roster_changed();
+
+        let lists = broadcast_agent_lists(&fanout, before);
+        // 끄기도 목록을 낸다 — 끄기 전에 뜬다.
+        let kinds: Vec<String> = broadcast_kinds(&fanout, before)
+            .into_iter()
+            .filter(|kind| kind != "StatusChanged")
+            .collect();
+        core.manager.kill_agent(profile.id).ok();
+
+        assert_eq!(
+            lists,
+            vec![vec![(profile.id, "renamed-by-bus".to_string())]],
+            "통지 한 번에 에이전트 목록 한 장"
+        );
+        assert_eq!(kinds, ["ProfileListUpdated", "AgentListUpdated"]);
+    }
+
+    /// 무변경 개명(남이 그 이름을 쥐어 제 계열 이름을 지킨다)은 프로필 목록만 낸다 — 목록 이름이 그대로다.
+    #[tokio::test]
+    async fn an_unchanged_rename_does_not_broadcast_the_agent_list() {
+        let (core, fanout) = test_core_recording();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        let bob = unlaunchable_profile("bob");
+        let twin = unlaunchable_profile("bob(1)");
+        for profile in [&bob, &twin] {
+            core.manager
+                .try_create_agent(profile.clone())
+                .expect("등록 성공");
+        }
+        let before = fanout.texts().len();
+
+        core.dispatch(
+            AgentCommand::RenameProfile {
+                profile_id: twin.id,
+                name: Some("bob".into()),
+                request_id: rid(),
+            },
+            &session,
+            &mock,
+        )
+        .await;
+
+        assert_eq!(
+            core.manager
+                .agent_snapshot(twin.id)
+                .and_then(|p| p.display_name),
+            Some("bob(1)".to_string()),
+            "무변경(이 시험의 전제)"
+        );
+        assert_eq!(broadcast_kinds(&fanout, before), ["ProfileListUpdated"]);
     }
 
     // ── 6. Subscribe 시 conn_tx 에 SubscribeAck → ReplayComplete 순서로 들어가는지 ──

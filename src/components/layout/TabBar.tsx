@@ -30,10 +30,12 @@ import type { ViewMeta } from '../../api/layoutTypes'
 import { t } from '../../i18n'
 import { shownTab, stripHeld } from './dock/dragOverride'
 import { useLocalDrag } from './dock/localDrag'
-import { TAB_BUTTON_SIZE, TAB_HEAD_GAP, TAB_HEAD_PAD, TAB_MIN_ACTIVE_W, TAB_STANDARD_W } from './tabStrip/layout'
-import { measureStrip, stripBounds } from './tabStrip/measure'
+import { TAB_ADD_GAP, TAB_BUTTON_SIZE, TAB_HEAD_GAP, TAB_HEAD_PAD, TAB_MIN_ACTIVE_W, TAB_STANDARD_W } from './tabStrip/layout'
+import { measureStrip, stripBounds, tabsEnd } from './tabStrip/measure'
 import { EASE_OUT_CSS, slideMs, slideTargets } from './tabStrip/reorderGeometry'
 import { useTabDragSource } from './tabStrip/useTabDragSource'
+import { dragProps, useBlurOnDragRegionPress } from './titleRow/dragRegion'
+import { SURFACE_TOP, TAB_BAR_H } from './titleRow/metrics'
 
 interface TabBarProps {
   /** 이 탭바가 속한 창 label(main·slot-popup-N). */
@@ -49,6 +51,8 @@ interface TabBarProps {
   canvas?: () => Element | null
   /** `UseTabDragSourceOptions.pullFrame`. */
   pullFrame?: boolean
+  /** `UseTabDragSourceOptions.titleRow`. */
+  titleRow?: RefObject<HTMLElement | null>
 }
 
 /** 그릴 머리 하나 — `x` = 탭바 줄 왼쪽 기준 CSS px. */
@@ -63,7 +67,18 @@ interface DrawnHead {
 const WIDTH_CAP: number | null = null
 
 // ADR-0295
-export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClose, onRename, canvas, pullFrame }: TabBarProps) {
+export default function TabBar({
+  label,
+  tabs,
+  active,
+  onSwitch,
+  onCreate,
+  onClose,
+  onRename,
+  canvas,
+  pullFrame,
+  titleRow,
+}: TabBarProps) {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   // ★안정 ref★: input 에 매 렌더 새 콜백 ref 를 걸면 React 가 매번 재부착 → select() 가 매 키입력마다
@@ -74,7 +89,12 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
     if (editingId !== null) inputRef.current?.select()
   }, [editingId])
 
+  // 편집을 연 때의 이름 — 확정은 지금 이름이 아니라 이것과 견준다. 편집 중 LLM 이 이름을 바꾸거나 자동 이름이 따라 바뀌어도
+  //   손대지 않은 칸이 옛 이름을 써 넣지 않는다. 확정 글자(`draft.trim()`)와 견주므로 다듬어 둔다 — 앞뒤 공백이 붙은
+  //   이름에서 손대지 않은 칸이 다듬은 글자를 「바뀐 글자」로 보내 자동 이름을 굳히거나 LLM 이 바꾼 이름을 덮지 않게.
+  const seed = useRef('')
   const beginEdit = (tab: ViewMeta) => {
+    seed.current = tab.name.trim()
     setEditingId(tab.id)
     setDraft(tab.name)
   }
@@ -82,15 +102,20 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
   // 마지막 머리 누름이 활성으로 바꾼 탭(바꾸지 않은 누름 = `null`) — 좁은 비활성 머리는 닫기 버튼이 없어, 그 탭의 닫기
   //   버튼은 그 누름 뒤 넓어진 머리에 커서 밑으로 생겼을 수 있다.
   const activatedBy = useRef<string | null>(null)
-  // ★멱등★: editingId 가 이 탭이 아니면 즉시 return — Enter 가 setEditingId(null) 로 input 을 언마운트하면
-  //   브라우저가 blur 를 쏴 onBlur→commitEdit 이 한 번 더 돈다. Enter 후 editingId 는 이미 null 이므로
-  //   blur 의 commitEdit 은 여기서 no-op 이 돼 onRename 이중 호출(중복 rename_tab invoke)을 막는다.
-  const commitEdit = (tab: ViewMeta) => {
+  // Enter 뒤 input 이 빠지며 나는 blur 는 React 에 닿지 않는다 — React 19 는 commit 동안 이벤트 배달을 끄고
+  //   (react-dom `prepareForCommit` 의 `_enabled=false`), 그 뒤의 blur 는 루트 리스너에 닿지 않는 떨어진 노드에 난다.
+  //   첫 줄의 `editingId` 확인은 그래도 commitEdit 이 두 번 불릴 때 onRename 이 두 번 나가지 않게 하는 덧막이다.
+  // `deliberate` = Enter. 같은 글자는 Enter 로만 보낸다 — 자동 이름 탭(`named` 거짓)을 그 글자 그대로 Enter 로 확정하면 그
+  //   이름을 정한 것이고(TRD S26-window-chrome §3-1), 포커스 잃음 · 덮인 이웃 누름은 확정할 뜻이 아니라 바뀐 글자만 보낸다 —
+  //   보내면 편집만 열었다 닫은 자동 이름이 굳는다. 정한 이름 탭의 같은 글자는 바꿀 것이 없다.
+  const commitEdit = (tab: ViewMeta, deliberate: boolean) => {
     if (editingId !== tab.id) return
     const trimmed = draft.trim()
-    if (trimmed.length > 0 && trimmed !== tab.name) onRename(tab.id, trimmed)
+    if (trimmed.length > 0 && (trimmed !== seed.current || (deliberate && !tab.named))) onRename(tab.id, trimmed)
     setEditingId(null)
   }
+  // 창 끌 자리 = 탭 줄 빈 곳 · 제목 줄 · 끌 빈 자리 — 그 누름에도 편집이 끝난다(확정 규칙은 onBlur 그대로).
+  useBlurOnDragRegionPress(editingId !== null, inputRef)
 
   const rowRef = useRef<HTMLDivElement>(null)
   const addRef = useRef<HTMLButtonElement>(null)
@@ -111,6 +136,7 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
     add: addRef,
     canvas,
     pullFrame,
+    titleRow,
   })
   const { snapshot } = source
   const model = { tabs: ids, active }
@@ -170,7 +196,8 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
     const following = motion !== null && i === at && !motion.settled
     heads.push({ id, x, w, transition: following ? 'none' : slide })
   })
-  const end = bounds.lastVisible < 0 ? 0 : bounds.tabs[bounds.lastVisible].x1
+  // `+` 자리 — 탭바 구역의 오른 끝(`stripZoneArea`)과 같은 값이다.
+  const end = tabsEnd(bounds)
   const marker = useLocalDrag(s => s.targetMarker)
 
   const domOrder = useDomOrder(
@@ -249,8 +276,13 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
       style={{
         display: 'flex',
         alignItems: 'stretch',
-        height: '28px',
-        flexShrink: 0,
+        height: TAB_BAR_H,
+        // 제목 줄에서 탭바만 줄어든다 — 줄이 좁아지면 잰 폭(`useStripAvailable`)이 줄어 탭이 먼저 준다(TRD S26-window-chrome §7-1).
+        flex: '1 1 0px',
+        minWidth: 0,
+        // 덧막이 — 줄이 머리 · `+` 보다 좁아도 그 오른쪽(끌 빈 자리 · 번호 표식 · 창 단추) 위에 그리지 않는다. 가로만 자른다 —
+        //   `hidden` 은 세로도 잘라 탭바 아래 1px 선 위에 걸친 활성 면 · 날개(`bottom: -1`)를 지운다.
+        overflowX: 'clip',
         // ★면 규칙 = 활성 탭은 내용과 같은 면(`--tab-active-bg`)이라 아래 캔버스로 이어지고, 바(`--tab-bar-bg`)는 내용과
         //   밝기가 다른 면★ — Chrome 꼴(사용자 결정 2026-10-19 · 값은 테마마다 `styles/theme.css`). 라이트 · e-ink = 바가 내용보다
         //   한 칸 눌린 면 · 다크 = 바가 내용보다 밝아 활성 탭이 가장 어둡다(Zed Ayu Dark 꼴 — ADR-0298 결정 1).
@@ -270,19 +302,22 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
       <div
         ref={rowRef}
         data-testid="tab-strip-row"
+        // 탭 사이 · 마지막 탭 뒤 빈 곳 = 창 끌 자리(자기 자신만 — 머리 · `+` 는 아니다 · TRD S26-window-chrome §7-2).
+        {...dragProps()}
         style={{ position: 'relative', flex: '1 1 0', minWidth: 0 }}
       >
         {domOrder.map(id => {
           const head = headById.get(id)!
           // `placeAt` 은 모델에 없는 끄는 탭도 줄에 넣는다 — 그 머리는 이름 없이 자리 · 폭만 그린다. 순서 이동은 끄기 시작의 탭 목록이
           //   모델과 같을 때만 그려(`stripHeld`) 지금은 닿지 않는 것으로 보인다(미검).
-          const tab = metaById.get(id) ?? { id, name: '' }
+          const tab = metaById.get(id) ?? { id, name: '', named: false }
           const isActive = id === activeId
           const editing = editingId === id
-          // 이름 · × 는 한 전경색 — 활성 · 맴돎이면 `--text`(ADR-0298 결정 8). 한 전경색은 Chrome 꼴이고(`tab.cc` — 탭 제목과
-          //   닫기 단추에 같은 전경색), 맴돎 → `--text` 는 우리 선택이다(Chrome 은 맴돎 전경색을 따로 둔다 —
-          //   `kColorTabForegroundInactiveHoverFrameActive` · `tab_style.cc`).
-          const fg = lit(id) ? 'var(--text)' : 'var(--tab-text-inactive)'
+          // 이름 · × 는 한 전경색 — 활성 · 맴돎이면 `--tab-text`(= `--text` · ADR-0298 결정 8). 한 전경색은 Chrome 꼴이고(`tab.cc`
+          //   — 탭 제목과 닫기 단추에 같은 전경색), 맴돎 → `--text` 는 우리 선택이다(Chrome 은 맴돎 전경색을 따로 둔다 —
+          //   `kColorTabForegroundInactiveHoverFrameActive` · `tab_style.cc`). 두 토큰은 창이 앞 창이 아닐 때 제목 줄이 흐림으로
+          //   갈아 끼운다(`styles/theme.css` · TRD S26-window-chrome §7-5).
+          const fg = lit(id) ? 'var(--tab-text)' : 'var(--tab-text-inactive)'
           return (
             <div
               key={id}
@@ -300,7 +335,7 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
                   const inInput = e.target instanceof Element && e.target.closest('input') !== null
                   const under = e.button === 0 && !inInput ? coveredHead(id, e.clientX) : null
                   if (under === null) return
-                  commitEdit(tab)
+                  commitEdit(tab, false)
                   activate(under, e.button)
                   return
                 }
@@ -372,10 +407,10 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
                     onKeyDown={e => {
                       // ★버블 차단★: 편집 중 키가 전역 키바인딩으로 새면 안 된다.
                       e.stopPropagation()
-                      if (e.key === 'Enter') commitEdit(tab)
+                      if (e.key === 'Enter') commitEdit(tab, true)
                       else if (e.key === 'Escape') cancelEdit()
                     }}
-                    onBlur={() => commitEdit(tab)}
+                    onBlur={() => commitEdit(tab, false)}
                     style={{
                       // ★내용 폭에 맞춤★: field-sizing:content 로 input 이 draft 텍스트 폭만큼만 차지한다
                       //   (기본 input 은 size 속성 폭 ~160px 고정이라 짧은 이름에도 넓게 벌어짐). 브라우저가
@@ -456,10 +491,6 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
   )
 }
 
-// 활성 · 맴돎 면은 머리 위 이만큼 내려앉는다 — 그 위로 바가 보여야 탭이 바에서 솟은 조각으로 읽힌다(Chrome). 머리 상자는 줄
-//   높이 그대로다. 머리 내용 칸과 `+` 상자도 이 높이부터 줄 바닥까지 세워 × 원과 `+` 원의 가운데 높이를 맞춘다.
-const SURFACE_TOP = 4
-
 // 닫기 · `+` 단추 = `TAB_BUTTON_SIZE`(22) px 원 안의 13 px 아이콘(ADR-0298 결정 5 · 사용자 결정 2026-10-21). `+` 원 = Chrome
 //   `tab_strip_control_button.cc` `kButtonSize` 28 을 머리 높이 비율 28/34 로 줄인 자리(셈은 ≈ 23 — 22 는 사용자 결정). × 원 =
 //   같은 22 — Chrome 닫기 단추의 보이는 크기(맴돎 모양 = `layout_constants.cc` `kTabCloseButtonSize` 16 dp · `tab.cc`
@@ -483,9 +514,6 @@ const CLOSE_STYLE: CSSProperties = {
   border: 'none',
   cursor: 'pointer',
 }
-
-/** `+` 원 앞 틈 — 마지막 머리 오른 가에 걸친 구분선(±2.5)에 원이 닿지 않게. */
-const TAB_ADD_GAP = 4
 
 // 가로 여백(margin)을 두지 말 것 — 쓸 수 있는 폭은 줄 폭 − `+` 테두리 상자 폭이다(`measure.ts`). 원 앞 틈은 그래서 margin
 //   이 아니라 왼 패딩이다(상자 = 틈 4 + 원 22). 맴돎 원은 상자가 아니라 안의 원에만 칠한다(Tailwind `group-hover/add`).
@@ -650,8 +678,9 @@ const separatorStyle = (shown: boolean, fadesIn: boolean): CSSProperties => ({
 })
 
 /**
- * 머리들이 쓸 수 있는 폭(줄 폭 − `+` 폭 — 훅이 끌기 때 재는 것과 같은 식) — 줄 크기가 바뀔 때마다 다시 잰다. 줄 폭이 0 이면
- * (재기 전 · 잴 수 없는 환경) `null` = 제한 없음.
+ * 머리들이 쓸 수 있는 폭(줄 폭 − `+` 폭 — 훅이 끌기 때 재는 것과 같은 식) — 줄 크기가 바뀔 때마다 다시 잰다. 줄 높이가 0 이면
+ * 레이아웃이 없다(재기 전 · jsdom · `display: none`) — `null` = 제한 없음. ★폭 0 은 잰 값이다★ — 창이 제목 줄의 최소 폭보다
+ * 좁으면 줄 폭이 0 이 되고, 그때 `null` 로 치면 머리가 다 표준 폭으로 서서 끌 빈 자리 · 번호 표식 · 창 단추를 덮는다.
  */
 function useStripAvailable(
   row: RefObject<HTMLElement | null>,
@@ -663,7 +692,7 @@ function useStripAvailable(
     if (el === null) return
     const measure = () => {
       const m = measureStrip({ row: el, add: add.current })
-      setAvailable(m.row.x1 > m.row.x0 ? m.available : null)
+      setAvailable(m.row.y1 > m.row.y0 ? m.available : null)
     }
     measure()
     if (typeof ResizeObserver === 'undefined') return
