@@ -1,6 +1,6 @@
-# S28 TRD — LLM 레이아웃 명령 (T-65) — 2판 (2026-10-26)
+# S28 TRD — LLM 레이아웃 명령 (T-65) — 3판 (2026-10-26)
 
-- **상태:** 2판 · 메인 작성(사용자 외출 중 자율 진행 「쭉 진행해」 · 명령 세부 = 사용자 위임 2026-10-26 「잘 지시되는쪽으로 알아서」). 1판(`76d29cd0`)을 `/review trd full`(codex Designer · Claude Architect-breaker — 둘 다 FIX) 지적으로 고쳤다 — 고친 것 = §12. 사용자가 돌아오면 볼 결정 = §11.
+- **상태:** 3판 · 메인 작성(사용자 외출 중 자율 진행 「쭉 진행해」 · 명령 세부 = 사용자 위임 2026-10-26 「잘 지시되는쪽으로 알아서」). 1판(`76d29cd0`)을 `/review trd full`(codex Designer · Claude Architect-breaker — 둘 다 FIX) 지적으로, 2판(`61c66724`)을 Claude 재확인(FIX) 지적으로 고쳤다 — 고친 것 = §12. 사용자가 돌아오면 볼 결정 = §11.
 - **규칙:** ADR-0307 · `docs/reference/llm-command-conventions.md`(이하 「규칙」).
 - **옛 설계:** `docs/process/S21-slot-docking/prd.md` R11b(LLM 명령은 창 활성 · 보이는 탭 · 포커스를 안 바꾼다) · R16 · Q10 · D9 · D22(탭 순서 바꾸기도 T-65) · `docs/process/S21-slot-docking/trd.md` §3-6(`FocusPolicy::Keep` · 기본 share · 새 창 크기를 마우스와 같은 함수로 · 예열 창 그대로) · §9-5 · ADR-0297(끄는 중에도 LLM 명령은 막지 않는다).
 
@@ -46,7 +46,8 @@
 
 - args: `tab?` · `tab_of?` · `to_window?` · `after_tab_of?` · `index?: u32`
 - 목적 = `to_window`(그 창 탭 줄 · `index` 자리 — 0 부터 · 없거나 끝을 넘으면 맨 끝) | `after_tab_of`(그 에이전트가 든 탭 **바로 뒤** · `index` 를 같이 주면 `INVALID_ARGUMENT`) | 둘 다 없으면 **원본의 창**(같은 창 안 순서 바꾸기 · `index` 필수).
-- `after_tab_of` 는 **잠금 안에서** 자리로 바꾼다 — `DockDest::TabBar` 에 `after: Option<ViewId>` 를 더한다(원본을 목록에서 뺀 뒤의 자리를 `check_dock` 이 계산 — 같은 창에서 원본이 앞에 있을 때 하나 어긋나는 것을 막는다). 마우스 경로는 `None`.
+- `after_tab_of` 는 **목적도 `Target` 으로**(§5-2 — `AfterTabOf(AgentId)`) 넘겨 **잠금 안에서** 그 에이전트의 탭과 그 탭의 창을 찾고, 원본을 목록에서 뺀 뒤 그 탭 바로 뒤 자리를 계산한다(같은 창에서 원본이 앞에 있을 때 하나 어긋나는 것을 막는다). `DockTo::TabBar`(`check_dock` 이 읽는 쪽)와 `DockDest::TabBar` 에 같은 「뒤에」 칸을 더한다 — 마우스 경로는 비운다.
+- 가장자리: 그 에이전트가 **원본 탭 안**에 있으면(제 뒤에 넣기) `INVALID_ARGUMENT` · 여러 탭에 떠 있으면 `CONFLICT` + 후보.
 
 ### 4-2. `tab.dock` — 칸 옆에 붙이기(분할) (`DockDest::Seam`)
 
@@ -54,13 +55,14 @@
 - `side` = 새로 붙는 탭이 놓일 쪽(`Left` · `Right` · `Top` · `Bottom` — `layout/dock.rs` `DockSide` 와 같은 철자 · 버스 블록에 같은 이름 enum 을 하나 더 둔다 — 매크로는 블록 밖 enum 을 못 쓴다).
 - `whole: true` = 목적 칸이 속한 **탭 전체의 바깥 변**(`DockAnchor::Outer`). 기본 = 그 칸(`DockAnchor::Slot`).
 - `window` 는 `beside_at` 과만 쓴다(다른 것과 함께면 `INVALID_ARGUMENT`).
-- `share` = 붙는 쪽 몫(0.01~0.5 — `InvalidShare` 범위 그대로). 없으면 **마우스와 같은 값**: `bands::attach_share(original, side, 목적 px 틀)` — `original` = `drag_size::drag_sizes(…)` 의 `original`(원본 탭의 화면 크기 — 원본 창이 최대화면 복원 크기 기준 · 마우스와 같다) · 목적 px 틀 = 목적 칸 px(`slot_px`) | `whole` 이면 캔버스. 입력이 모자라면(웹뷰가 크기를 아직 안 알림) **0.5**.
+- `share` = 붙는 쪽 몫(0.01~0.5 — `InvalidShare` 범위 그대로). 없으면 **마우스와 같은 공식** `bands::attach_share(original, side, 목적 px 틀)` — `original` = **원본 탭 창의 캔버스 크기**(셸 모델 `windows[label].canvas`) · 목적 px 틀 = 목적 칸 px(`slot_px`) | `whole` 이면 목적 창 캔버스. 입력이 없으면(웹뷰가 크기를 아직 안 알림) **0.5**. ★마우스와 다른 점★: 마우스는 `original` 을 웹이 잰 `drag_sizes().original`(원본 창이 최대화면 복원 크기)로 쓴다 — 셸 모델에는 그 입력(모니터 작업 영역 · 창 틀 · 뷰포트)이 없어 캔버스로 갈음한다(§11-6).
 - 원본 탭 = 목적 칸이 든 탭이면 `SelfTarget` → `INVALID_ARGUMENT`.
 
 ### 4-3. `tab.detach` — 새 창으로 떼기 (`DockDest::NewWindow`)
 
 - args: `tab?` · `tab_of?`
-- 크기 = **마우스와 같은 함수** `drag_size::drag_sizes(…)` 의 새 창 크기(main 이면 main 복원 크기를 상한까지 · 팝아웃이면 그 크기 — 그 모듈 머리가 「첫 소비자는 LLM 명령 T-65」라 적어 두었다). 입력이 모자라면 `plan_new_window` 기본(팝아웃 기본 크기). 자리 = 커서가 없으므로 label 기본 자리. 예열 창을 그대로 쓴다(활성화 없이 z 만 — `Keep`).
+- 크기 = `plan_new_window` 기본(원본이 팝아웃이면 그 보통 크기 · main 이면 팝아웃 기본 크기). 자리 = 커서가 없으므로 label 기본 자리. 예열 창을 그대로 쓴다(활성화 없이 z 만 — `Keep`). ★마우스와 다른 점★: 마우스는 `drag_size::drag_sizes` 로 main 복원 크기를 상한까지 쓰는데, 그 입력(모니터 작업 영역 · 창 틀 · 뷰포트)이 셸 모델에 없다 — 그 입력을 셸로 올리는 포트는 이번 범위 밖(§11-6).
+- **두 잠금 사이 지킴**: 새 창 적용은 잠금을 두 번 잡는다(계획 → 잠금 밖에서 창 열기 → 커밋 · `apply.rs` 의 `dock_into_window`). 커밋 잠금에서 대상을 **다시 `locate`** 해 첫 잠금 때와 다른 탭이면 연 창을 거두고 `CONFLICT`(아무것도 안 옮김).
 - 원본이 **탭 하나뿐인 팝아웃**이면 `plan_new_window` 가 창째 다시 쓰고(`reused`) 바뀌는 것이 없다 → `ok` + `changed: false`.
 
 ### 4-4. 응답(셋 공통 — 규칙 §1-4)
@@ -77,7 +79,7 @@ TabMoveOk / TabDockOk / TabDetachOk {
 ```
 
 - `DockOutcome` 에 `changed: bool` 을 더한다(지금은 「바뀐 것 없음」이 알림만 빠지는 꼴이라 몸통이 모른다).
-- `DockOutcome.identity == None`(다시 쓴 창이 그 사이 닫힘)이면 `CONFLICT`(「창이 그 사이 닫혔다 — 적용 결과를 `layout.get` 으로 확인」).
+- `DockOutcome.identity == None`(다시 쓴 창이 그 사이 닫힘)이어도 탭은 이미 옮겨졌으므로 **`ok`** — 창 칸은 커밋 뒤 모델에서 다시 읽고, 창이 이미 없으면 `window` · `window_id` 를 빈 문자열 · `number` 0 으로 둔다.
 - `emptied` · `main_refilled` 은 `layout` 에 드러나므로 따로 싣지 않는다.
 
 ### 4-5. `layout.get` — 배치 조회 (#[effect(Read)])
@@ -88,7 +90,7 @@ TabMoveOk / TabDockOk / TabDetachOk {
 ```
 LayoutRow {
   window: String, window_number: u32,
-  tab_name: String, tab_active: bool,         // tab_active = 그 창에서 보이는 탭
+  tab_index: u32, tab_name: String, tab_active: bool,   // tab_index = 그 창 탭 줄 자리(0 부터 · 탭 묶음 열쇠 — 이름은 겹칠 수 있다) · tab_active = 보이는 탭
   content: SlotKind,                          // Empty | Agent | AgentList | PresetPalette | Usage | Unknown
   agent: Option<String>,                      // content = Agent 의 표시 이름(셸 캐시)
   focused: bool,                              // 그 탭의 포커스 칸
@@ -108,20 +110,23 @@ LayoutRow {
 ### 5-1. 이름 → id: 데몬 왕복 한 번
 
 - 처리기가 인자 속 에이전트 말(`tab_of` · `slot_of` · `beside` · `after_tab_of` · `assign` · `agent`)을 **모아 한 번에** `agent.resolve{targets: [...]}` 을 데몬에 보낸다(`DaemonClient::send_command(AgentCommand::Command{envelope})` — `agent.spawnInto` 가 데몬을 기다리는 길과 같은 꼴 · 포트 trait 로 끊어 시험은 가짜로). 셸이 자기 캐시로 이름을 풀지 않는다(ADR-0132 · 규칙 §1-2).
-- 시한: CLI → 데몬 → 셸 배달 시한이 7 초(`crates/engram-dashboard-daemon/src/command_delivery.rs` `DEFAULT_DEADLINE`). 이름 왕복은 **한 번 · 2 초**로 묶는다 — 넘으면 **적용하지 않고** `INTERNAL`(「이름 풀기에 데몬이 답하지 않았다 — 아무것도 바꾸지 않았다」). `TIMEOUT` 은 쓰지 않는다(그 코드는 「결과를 모른다 · 같은 요청 번호로 다시」라는 뜻 — `crates/engram-dashboard-command/src/error.rs`).
+- 시한: CLI → 데몬 → 셸 배달 시한이 7 초(`crates/engram-dashboard-daemon/src/command_delivery.rs` `DEFAULT_DEADLINE`). 이름 왕복은 **한 번 · 2 초**로 묶는다 — 넘으면 **적용하지 않고** `CONFLICT` + 재시도 `AfterCondition`(「이름 풀기에 데몬이 답하지 않았다 — 아무것도 바꾸지 않았다」 · 「아무것도 안 했다 · 잠시 뒤 다시」의 기존 꼴 = `layout/commands.rs` 의 설정 읽기 실패). `TIMEOUT`(결과를 모른다) · `INTERNAL`(재시도 없음 · 패닉 · 직렬화 실패)은 쓰지 않는다.
+- **옛 데몬**: 앱만 새것이고 데몬은 옛것인 조합이 정상으로 생긴다(ADR-0178) — 그 데몬은 `agent.resolve` 를 모른다(`UNKNOWN_COMMAND`). 그때 ① 에이전트 **이름**을 받은 호출은 `CONFLICT`(「데몬이 옛 판이라 이름을 못 푼다 — 데몬을 다시 띄우거나 id 로」) ② **id 만** 준 옛 호출(`agent_id`)은 확인을 건너뛰고 옛 동작대로 적용한다.
 - 에이전트 말이 하나도 없으면 왕복을 건너뛴다.
 
 ### 5-2. id · 공간 낱말 → 칸 · 탭 · 창: 적용과 같은 잠금 안에서
 
 - 이름을 푼 뒤 실제 적용 사이에 다른 명령 · 마우스가 배치를 바꿀 수 있다(TOCTOU). 그래서 **에이전트 id · 공간 낱말 → (창, 탭, 칸) 고르기는 적용 함수 안, 바꾸는 잠금을 쥔 채** 한다.
-  - 적용 서비스에 **대상 꼴** 을 더한다 — `enum Target { Tab(ViewId), TabOf(AgentId), Slot{view: Option<ViewId>, slot: SlotId}, SlotOf(AgentId), At{token, window} }`(이름 · 위치는 구현이 정한다). 적용 함수들(`dock_tab` · 칸 · 탭 동사)이 id 대신 이것을 받고 잠금 안에서 `locate` 로 푼다.
-  - 옛 id 경로(마우스 · 웹)는 `Target::Tab` · `Target::Slot` 로 그대로 지난다.
+  - 적용 서비스에 **대상 꼴** 을 더한다 — `enum Target { Tab(ViewId), TabOf(AgentId), AfterTabOf(AgentId), Slot{view: Option<ViewId>, slot: SlotId}, SlotOf(AgentId), At{token, window} }`(이름 · 위치는 구현이 정한다). **`Target` 을 받는 새 적용 함수**를 두고 잠금 안에서 `locate` 로 푼다.
+  - ★옛 id 시그니처는 그대로 남긴다★ — 마우스 · 웹 · `tab_drop` · 팝아웃 등 기존 호출자(10 파일 남짓)는 손대지 않는다. 옛 함수는 새 함수를 `Target::Tab` · `Target::Slot` 으로 부르는 얇은 겉이거나 그 반대(구현이 고른다). 그래서 U2 가 혼자 빌드된다.
+  - 잠금을 두 번 잡는 적용(새 창 — `dock_into_window`)은 커밋 잠금에서 다시 `locate` 해 같은지 본다(§4-3).
+  - `agent.spawnInto` 는 데몬 스폰을 중간에 기다리는 `async` 적용이라(`apply.rs` 의 `spawn_into`) §8 의 `spawn_blocking` 에서 뺀다 — `at` 은 그 함수의 첫 잠금 안에서 푼다.
 - 풀린 뒤 사라진 것(`TabNotFound` · `SlotNotFound` · `SlotNotInTab` 이 **에이전트 · 낱말로 고른 대상**에서 난 경우)은 호출자 잘못이 아니라 경합이라 `CONFLICT`.
 
 ### 5-3. 오류 코드 대응 · 선언
 
 - `DockError` → 버스: `SelfTarget` · `InvalidShare` → `INVALID_ARGUMENT` · 호출자가 **id 로 준** 탭 · 칸이 없음(`TabNotFound` · `SlotNotFound` · `SlotNotInTab`) → `NOT_FOUND` · **`WindowNotFound` → `CONFLICT`**(ADR-0302 결정 9 · `window_arg_error` 와 같게) · 나머지(`ZeroArea` · `WindowClosed` · `WindowExists` · `SlotIdOverlap` · `WindowOpen`) → `CONFLICT`. 문구는 `DockError` 의 것을 그대로.
-- **새 명령 · 넓힌 명령의 선언 `errors [...]` 에 실제로 내는 코드를 모두 적는다**(ADR-0156 발견 계약 · `spawn_not_applied` 가 선언으로 거른다) — 대개 `[NOT_FOUND, CONFLICT, INTERNAL]`. `commands.rs` 머리의 「적용 실패는 코드 하나로 나간다(CONFLICT)」 문장을 이 대응으로 고친다.
+- **새 명령 · 넓힌 명령의 선언 `errors [...]` 에 실제로 내는 코드를 모두 적는다**(ADR-0156 발견 계약 · `spawn_not_applied` 가 선언으로 거른다) — 대개 `[NOT_FOUND, CONFLICT]`(이름 풀기 시한 넘김 · 옛 데몬도 `CONFLICT`). `commands.rs` 머리의 「적용 실패는 코드 하나로 나간다(CONFLICT)」 문장을 이 대응으로 고친다.
 - **후보 싣기**: `CommandError` 는 코드 · 문구 · 재시도만 싣는다(구조 칸 없음). 후보는 **문구 끝에** `— candidates: a, b, c`(최대 5 · 영어 — 기존 오류 문구가 영어).
 
 ## 6. 데몬 쪽 (묶음 A)
@@ -141,7 +146,7 @@ LayoutRow {
 | `tab.switch` · `tab.close` · `tab.rename` | `tab_of` | `view_id` · **`window`**(탭에서 창을 알 수 있다) | `tab.close` 는 `layout` 더함 |
 | `agent.spawnInto` | `at` (+`window` 그대로) | — | 그대로(+`layout`) |
 
-- `assign` · `agent_id` 가 **풀리지 않으면 거절**한다 — 지금은 없는 id 도 받아 칸이 빈 채 남는다(help 가 적어 둔 함정 · §11-3). `agent_id` 는 id 모양 검사 + 데몬 명부 확인(같은 `agent.resolve` 왕복).
+- `assign` · `agent_id` 가 **풀리지 않으면 거절**한다 — 지금은 없는 id 도 받아 칸이 빈 채 남는다(help 가 적어 둔 함정 · §11-3). `agent_id` 는 id 모양 검사 + 데몬 명부 확인(같은 `agent.resolve` 왕복 · 데몬이 옛 판이면 확인을 건너뛴다 — §5-1).
 - 응답에 `layout` 을 더하는 것은 **덧붙이기**(필드 추가)라 옛 호출자는 그대로다. 규칙 §1-4 · ADR-0307 결정 4(사용자 결정)를 이 명령들에도 지킨다.
 - 인자를 선택으로 바꾸는 것은 id 를 주는 옛 호출자에 그대로 맞는다. 셸 `catalog_version` 을 올린다.
 
@@ -174,6 +179,7 @@ LayoutRow {
 3. **`slot.assignAgent` · `layout.setSlotContent` 가 풀리지 않는 에이전트를 거절**(§7 — 지금은 받아서 빈 칸).
 4. **`Keep` 이어도 보이는 탭이 바뀌는 세 경우**(슬롯 도킹 PRD R11b 의 예외 — 원본 탭이 떠나면 무언가를 보여야 한다): ⓐ 같은 창 안에서 보이던 탭을 옮기면 목적 탭이 보이게 된다 ⓑ 원본 창에서 보이던 탭이 떠나면 이웃 탭이 보인다 ⓒ main 의 마지막 탭이 떠나면 빈 탭이 새로 생겨 보인다(`manager.rs` 의 `dock` 승계).
 5. **끄는 중에 LLM 이 옮긴 탭을 우리 웹뷰 밖에 놓으면 새 창이 안 생긴다**(슬롯 도킹 PRD D9 · TRD §9-5 의 「T-65 가 다시 정한다」) — 이 TRD 는 그 동작을 **그대로 둔다**(드문 겹침 · ADR-0297 「막지 않는다」 유지).
+6. **LLM 의 새 창 크기 · 붙임 몫 기본이 마우스와 조금 다르다**(§4-2 · §4-3 — 원본 창이 최대화일 때 · main 에서 뗄 때). 같게 하려면 모니터 작업 영역 · 창 틀 입력을 셸로 올리는 포트가 필요하다(이번 범위 밖).
 
 ## 12. 1판 → 2판 (리뷰 반영)
 
@@ -192,3 +198,15 @@ LayoutRow {
 - `TIMEOUT` 이 두 뜻 → `INTERNAL`(Claude).
 - 응답 크기 → 바뀐 탭만 · id 는 `ids: true` 일 때만(Claude).
 - 기존 명령 응답 미룸이 사용자 결정(ADR-0307 결정 4)을 어겼다 → 넓힌 명령에도 `layout`(Claude) · §11 에 R11b 예외 · D9 를 올림(Claude).
+
+### 2판 → 3판 (Claude 재확인 반영)
+
+- 새 창 크기 · share 원본을 `drag_sizes` 로 계산한다던 2판도 입력(작업 영역 · 창 틀 · 뷰포트)이 셸에 없어 사실상 거짓 → `plan_new_window` · 캔버스로 갈음하고 차이를 §11-6 에 밝힘.
+- 이름 풀기 시한 넘김 코드 `INTERNAL`(재시도 없음 · 패닉 뜻) → `CONFLICT` + `AfterCondition`.
+- 새 창 적용의 두 잠금 사이 → 커밋 잠금에서 다시 `locate` · 다르면 창을 거두고 `CONFLICT`.
+- `after_tab_of` 를 잠금 밖에서 `ViewId` 로 바꾸던 것 → `Target::AfterTabOf` · `DockTo::TabBar` 에도 칸 · 가장자리(원본 탭 안 · 여러 탭).
+- `layout.get` 줄에 탭 묶음 열쇠가 없었다 → `tab_index`.
+- 옛 데몬(`agent.resolve` 모름)과 붙은 새 셸이 id 만 주는 옛 호출까지 막던 것 → 이름만 `CONFLICT` · id 는 확인 건너뜀.
+- U2 가 혼자 빌드 안 되던 것(적용 시그니처 변경이 호출자 10 파일 남짓을 깸) → 옛 id 시그니처를 남김.
+- `agent.spawnInto` 를 `spawn_blocking` 에 넣을 수 없음 → 예외 · `at` 은 첫 잠금 안.
+- `identity == None` 을 `CONFLICT` 로 → 이미 옮겼으므로 `ok`.
