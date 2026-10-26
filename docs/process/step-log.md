@@ -2154,6 +2154,7 @@
 ## S27 — LLM 명령 규칙 (2026-10-26~, `v0.5.0/docs/llm-command-rules`, 대화 세션) · 설계 폴더 `docs/process/S27-llm-command-rules/`
 
 - 2026-10-26 — 주제 열기(번호 선점). 계기 = T-65(슬롯 도킹 LLM 명령) 착수 전, 사용자가 「한번 정리하면 그 룰대로 쭉 가면 되니」로 LLM 이 부르는 명령의 공용 규칙을 먼저 세우기로 함. 조사 2 건 = `docs/research/llm-command-design-query-vs-action-2026-10-26.md`(medium · codex 적대 리뷰 FIX 반영) · `docs/research/pane-positional-addressing-2026-10-26.md`(light).
+- 2026-10-26 — ADR-0307(`c0dde8ef` 선점) · 정설 `docs/reference/llm-command-conventions.md` 신설 · CLAUDE.md 「LLM-우선 제어」에 그 문서 가리키기 한 줄. 정함 = 명령 한 호출 · 이름 · 공간 낱말 지목(종류마다 인자 따로 · 이름은 데몬 해석기) · 응답에 바뀐 배치 · 조회는 영역별 + 바로 출력 · 묶음/스크립트 · 전 영역 출력은 필요해질 때 · 좌표 지목 기각. 미정 = 칸 번호 지목(ADR-0302 번호 거부 까닭 · 순번이 크기 조절로 바뀜) · 파일 안전장치 자리(ADR-0285 와 부딪힘) · 출력 형식(메인 위임). `/review doc light` FIX 13 건 반영.
 
 ## 다음 (미진행)
 

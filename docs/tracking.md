@@ -11,7 +11,7 @@
 | ID | 제목(짧게) | 구역 | 상태 |
 |---|---|---|---|
 | T-66 | 창 크롬 · 이름(크롬식 제목 표시줄 · 창 번호 재사용 · 창 제목) | 메인 | 진행 — `v0.5.0/feat/window-chrome`(S26) · U1–U9 구현 · U10 문서 착지(2026-10-26) · 사람 손 GUI 확인 2026-10-26(S13 · S14 통과) · 남은 것 = push · CI · master 머지 |
-| T-65 | 슬롯 도킹 LLM 명령(`tab.dock` · `layout.get`) | 메인 | 다음 작업(사용자 결정 2026-10-16) — 외부 조사 먼저 |
+| T-65 | 슬롯 도킹 LLM 명령(`tab.dock` · `layout.get`) | 메인 | 다음 작업(사용자 결정 2026-10-16) — 외부 조사 끝 · 규칙 = ADR-0307 |
 | T-49 | 꺼진 에이전트의 슬롯 쪽 활성화 · 완전한 이어받기 | 메인 | 보류 — 저장 작업 뒤 |
 | T-47 | 크레이트 경계 리팩터링(아키텍처 논의) | 메인 | 0~2단계 · A(데이터 파일 처리 통일) 착지 · 다음 = 패닉 정책 → 우편 id → 3단계 transport |
 | T-44 | 채팅 안 승인(codex) | 메인 | 보류 — 다음 과제 |
@@ -78,7 +78,7 @@
 - **근거:** `research/window-naming-titlebar-2026-10-17.md` · 제목 표시줄 구현 선택지 `research/custom-titlebar-tauri-2026-10-18.md`(추천 = HTML 단추 + `data-tauri-drag-region` · 스냅 메뉴는 `platform` 에 오버레이 — 메뉴 필요 여부는 사용자 결정) · 탭 끌기와의 맞물림(빈 탭바 `app-region: drag` · 탭 하나 창 = 창 이동 — ★이 뒤쪽은 PRD 4.9 Q34 가 대신했다(탭 하나뿐인 팝아웃도 다른 탭처럼 끈다)★) `research/slot-docking-chrome-desktop-drag-2026-10-18.md` B6 · A12(슬롯 도킹 9c 실측 불합격 뒤 데스크톱 Chrome 모델 재조사 · 코드 점검 = `refactoring/slot-docking-drag-code-audit-2026-10-18.md`)
 
 ### T-65. 슬롯 도킹의 LLM 명령(`tab.dock` · `layout.get`) — CLAUDE.md 「LLM-우선 제어」의 의식적 예외
-- **상태:** 다음 작업(사용자 결정 2026-10-16 — 슬롯 도킹 직후 바로). 먼저 외부 조사: 호출 횟수 최소 · 이름 지목.
+- **상태:** 다음 작업(사용자 결정 2026-10-16 — 슬롯 도킹 직후 바로). 외부 조사는 끝났고(2026-10-26) 공용 규칙 = `reference/llm-command-conventions.md`(ADR-0307 · S27) — 명령 설계는 그 규칙을 따른다.
 - **문제:** 슬롯 도킹은 마우스 경로만 만든다(PRD 4.3 Q10 · R16 · R17 · AC10). 적용 서비스 `apply::dock_tab` 은 남아 명령이 그 위에 선다(TRD 7판 §3-6 — 옛 5판 §3). 그 사이 LLM 은 탭을 도킹할 수 없다.
 - **사용자 기준:** 「LLM 시나리오는 여러 번 거치지 않아야 실수가 적다」.
 - **근거:** `process/S21-slot-docking/prd.md` Q10 · `process/S21-slot-docking/trd.md` §3-6(7판 — LLM 경로 · 끄는 중 LLM 이 같은 탭을 옮긴 뒤의 놓기 · 예열 창) · §9-5(그 놓기 결과 — U7 대조 · 2026-10-23 사용자 결정으로 PRD R13c 에 ADR-0297 결정 2 를 적었다 · 우리 웹뷰 밖에서 뗀 경우의 예외는 여전히 TRD 에만) · 메모 `.claude/handoff/attachments/llm-layout-surface-notes-2026-10-16.md` · 외부 조사(조회 vs 명령 · 결과를 밖으로 낼지 · 형식) `research/llm-command-design-query-vs-action-2026-10-26.md` · 칸 위치 지정(좌표 vs 순번 vs 방향) `research/pane-positional-addressing-2026-10-26.md`
