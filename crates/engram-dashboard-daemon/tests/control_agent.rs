@@ -1247,6 +1247,7 @@ async fn the_listing_carries_both_sources_with_the_help_bytes_intact() {
             "agent.move",
             "agent.new",
             "agent.rename",
+            "agent.resolve",
             "agent.spawn",
             "tab.create",
             "usage.get",

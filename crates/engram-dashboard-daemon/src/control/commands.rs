@@ -444,17 +444,18 @@ mod tests {
     /// ★CLI 동사 명단에서 기대값을 **파생**한다★ — 손으로 적으면 agent 에 동사가 늘어도 이 단언이 옛
     ///   명단을 그대로 통과시킨다. 선언 없이 늘어난 동사는 CLI 가 부를 수 없는 채로 남는다.
     /// ★CLI 동사가 없는 이름은 아래 목록에 적은 것뿐이다★ — 대기 목록 두 동사와 끊기(`agent.interrupt` —
-    ///   ADR-0237)는 `engram agent <동사>` 에 올리지 않고(`CLI_AGENT_VERBS` 밖) 버스·범용 호출
-    ///   (`engram <이름> …`)로만 부른다. 목록에 없는 이름이 표에 늘면
+    ///   ADR-0237), 여러 말 풀기(`agent.resolve` — ADR-0307)는 `engram agent <동사>` 에 올리지 않고
+    ///   (`CLI_AGENT_VERBS` 밖) 버스·범용 호출(`engram <이름> …`)로만 부른다. 목록에 없는 이름이 표에 늘면
     ///   CLI 에 올릴지를 정하지 않은 채 늘어난 것이라 여기서 멈춘다. 사용량 두 동사(`usage.*`)는 `agent` 계열이
     ///   아니라 계열 라우트(`/control/agent`)에 애초에 안 닿는다 — 전체 이름으로만 부른다.
     // ADR-0231
     #[test]
     fn the_daemon_table_holds_every_cli_agent_verb() {
-        const BUS_ONLY: [&str; 5] = [
+        const BUS_ONLY: [&str; 6] = [
             "agent.cancelQueuedInput",
             "agent.interrupt",
             "agent.listQueuedInputs",
+            "agent.resolve",
             "usage.get",
             "usage.refresh",
         ];
@@ -991,6 +992,41 @@ mod tests {
         .expect("명부 동사는 임대와 무관");
 
         assert!(lease.asked().is_empty(), "{:?}", lease.asked());
+    }
+
+    /// ★셸이 에이전트 이름을 푸는 문이 배달 1단계로 닿는다(TRD S28 §5-1)★ — 셸은 버스 봉투로 `agent.resolve` 를
+    ///   보내고, 데몬은 그 이름을 자기 표에서 찾아(`claim`) 운영 명부로 답한다. 표에 안 꽂히면 셸은 「모르는 명령」을
+    ///   받고 옛 데몬으로 오인한다.
+    // ADR-0307
+    #[test]
+    fn the_bus_answers_agent_resolve_from_the_roster() {
+        let (manager, ids) = manager_with(&["alpha", "beta"]);
+        let slot = Arc::new(CommandTableSlot::new());
+        slot.set(Arc::new(make_daemon_table(
+            manager,
+            Arc::new(RosterBroadcastSlot::new()),
+            Arc::new(NoInputLeases),
+            Arc::new(NoUsageLimits),
+        )));
+        let bus = DaemonLocalCommands::new(slot);
+
+        assert_eq!(bus.claim("agent.resolve"), Some(Effect::Read));
+        let out = bus
+            .run(
+                "agent.resolve",
+                &mut json!({ "targets": ["beta", ids[0].to_string()] }),
+                "bus",
+                Some(2),
+            )
+            .expect("이 표의 이름")
+            .expect("둘 다 풀린다");
+        assert_eq!(
+            out,
+            json!({ "agents": [
+                { "target": "beta", "id": ids[1].to_string(), "name": "beta", "live": false },
+                { "target": ids[0].to_string(), "id": ids[0].to_string(), "name": "alpha", "live": false },
+            ]})
+        );
     }
 
     /// ★검문은 입력 영향 명령이 **필수 문자열 `target`** 을 갖는다는 데 기대 선다★ — 그 칸이 선택이 되면

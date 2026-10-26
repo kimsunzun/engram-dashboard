@@ -4426,6 +4426,7 @@ mod tests {
                         "agent.move",
                         "agent.new",
                         "agent.rename",
+                        "agent.resolve",
                         "agent.spawn",
                         "tab.create",
                         "usage.get",

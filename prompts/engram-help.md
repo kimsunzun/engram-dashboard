@@ -51,6 +51,9 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
       그 name 이 곧 팀원을 지목하는 이름이고, eg_send 의 to 에 그대로 적는다.
       store 는 명부 파일 둘(agents = agents.json · presets = presets.json)의 상태다. 각각 state 가 Writable(쓸 수 있다) · ReadOnly(데몬이 뜰 때 그 파일을 받지 않았다 — 명부가 비어 있고 이 실행 내내 못 바꾼다) · Refusing(마지막 저장이 거절됐다 — 다음 변경이 다시 보고, 받아들이면 풀린다)이고, 받지 않는 까닭 reason 은 Newer(이 데몬보다 새 판이 쓴 파일 — file_version 이 그 판) · Unreadable(파일을 못 읽음)이다.
 
+  {tool} agent.resolve --targets <JSON 배열 — 이름|id 1~8 개>
+      이름 · id 를 한 번에 푼다(잠든 것 포함). 요청한 차례로 target, id, name, live(true|false). 하나라도 못 풀면 그 자리(targets[i])를 대며 멈춘다.
+
   {tool} agent.new --backend <claude|codex> --cwd <폴더> [--name <이름>]
       만들기만 한다 — 잠든 채로 명부에 오르고 agent_id 를 돌려준다. 백엔드는 만들 때 고르며 바꾸는 명령은 없다.
 
@@ -71,7 +74,7 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
   {tool} agent.cancelQueuedInput --target <이름|id> --input_id <id>
       그 목록의 항목 하나를 취소한다. outcome 은 cancelled(곧바로 거뒀다) 또는 requested(결말은 목록에서 본다).
 
-이름이 겹치는 일이 드물게 생긴다. 그때 이름으로 지목하면 거절되므로 agent.list 가 준 id 를 넘긴다.
+이름이 겹치는 일이 드물게 생긴다. 그때 이름으로 지목하면 CONFLICT 로 거절되고 문구 끝 candidates 에 대개 겹친 것들의 id 가 실린다 — 그 id 를 넘긴다. 없는 이름은 NOT_FOUND 이고 candidates 에 대개 고를 만한 이름이 실린다(명부가 비었으면 none · 명령 도중 에이전트가 사라진 경우엔 candidates 가 없다).
 ## window
 {tool} window — 창 · 탭 · 분할, 그리고 그 자리에 에이전트를 놓는 것.
 
