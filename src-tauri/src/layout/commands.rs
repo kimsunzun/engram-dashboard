@@ -890,8 +890,9 @@ declare_commands! {
     /// 빼면 main) 중 하나. beside_at 의 left · right · up · down = 포커스 칸의 그쪽 이웃 · top-left · top-right · bottom-left
     /// · bottom-right = 그 모서리 칸. window 는 beside_at 과만 쓰고 window_id 또는 같은 실행 안 label(번호는 받지 않는다).
     /// side = 옮긴 탭이 놓일 쪽(Left · Right · Top · Bottom). whole = true 면 그 칸이 든 탭 전체의 바깥 변. share = 붙는 쪽
-    /// 몫(0.01~0.5) — 빼면 마우스와 같은 몫(창 크기를 모르면 0.5).
-    /// 보이는 탭 · 포커스 · 답은 tab.move 와 같다(tab = 붙인 곳의 살아남은 탭).
+    /// 몫(0.01~0.5) — 빼면 마우스 공식으로 잰 몫(크기를 모르면 0.5 · 원본 창이 최대화면 마우스와 조금 다를 수 있다).
+    /// 보이는 탭 · 포커스 · 답은 tab.move 와 같다(tab = 붙인 곳의 살아남은 탭) — 단 같은 창 안에서 보이던 탭을 붙이면 붙인
+    /// 곳의 탭이 보인다.
     /// 오류는 tab.move 와 같다 — beside 가 여러 칸에 있으면 CONFLICT(candidates 의 beside_slot= 값 → beside_slot) · 붙일 칸이
     /// 옮길 탭 안이면 INVALID_ARGUMENT · 낱말이 칸을 못 집으면 NOT_FOUND.
     #[effect(Write)]
@@ -942,10 +943,10 @@ declare_commands! {
     // ADR-0307
     /// 배치를 칸마다 한 줄로 읽는다 — 창 번호 순 → 탭 줄 순 → 탭 안 칸 순. window(window_id 또는 같은 실행 안 label ·
     /// 번호는 받지 않는다)를 주면 그 창만, agent(이름 또는 id)를 주면 그 에이전트가 든 칸만(어느 칸에도 없으면 빈 목록).
-    /// 줄 = window · window_number · tab_index(그 창 탭 줄 자리 · 0 부터 — 같은 탭의 줄을 묶는 열쇠) · tab_name ·
-    /// tab_active(그 창에 보이는 탭) · content(Empty · Agent · AgentList · PresetPalette · Usage · Unknown) · agent(표시
-    /// 이름 — 모르면 빠진다) · focused(그 탭 안의 포커스 칸 — 창 · OS 포커스가 아니다) · x · y · w · h(탭 안 정규 좌표 0~1 —
-    /// 왼쪽 위가 0,0).
+    /// 줄 = window · window_number · tab_index(그 창 탭 줄 자리 · 0 부터 — (window, tab_index) 가 같은 탭의 줄을 묶는
+    /// 열쇠) · tab_name · tab_active(그 창에 보이는 탭) · content(Empty · Agent · AgentList · PresetPalette · Usage ·
+    /// Unknown) · agent(표시 이름 — 모르면 빠진다) · focused(그 탭 안의 포커스 칸 — 창 · OS 포커스가 아니다) · x · y · w ·
+    /// h(탭 안 정규 좌표 0~1 — 왼쪽 위가 0,0).
     /// ids = true 면 window_id · tab(다른 명령이 view_id 라 부르는 그 탭 id) · slot_id · agent_id 도 싣는다(기본은 빠진다 —
     /// 칸은 에이전트 이름 · 공간 낱말로 부른다). 그런 에이전트 이름이 없으면 NOT_FOUND · 이름이 둘 이상이면 CONFLICT(문구 끝
     /// candidates) · 없는 창이면 CONFLICT.

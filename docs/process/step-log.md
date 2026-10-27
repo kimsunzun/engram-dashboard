@@ -2157,7 +2157,15 @@
 - 2026-10-26 — ADR-0307(`c0dde8ef` 선점) · 정설 `docs/reference/llm-command-conventions.md` 신설 · CLAUDE.md 「LLM-우선 제어」에 그 문서 가리키기 한 줄. 정함 = 명령 한 호출 · 이름 · 공간 낱말 지목(종류마다 인자 따로 · 이름은 데몬 해석기) · 응답에 바뀐 배치 · 조회는 영역별 + 바로 출력 · 묶음/스크립트 · 전 영역 출력은 필요해질 때 · 좌표 지목 기각. 미정 = 칸 번호 지목(ADR-0302 번호 거부 까닭 · 순번이 크기 조절로 바뀜) · 파일 안전장치 자리(ADR-0285 와 부딪힘) · 출력 형식(메인 위임). `/review doc light` FIX 13 건 반영.
 - 2026-10-26 — 사용자 결정: 칸은 에이전트 이름 · 공간 낱말로 부르고 칸 번호 지목은 지금 안 함(이름 → 고유 id 전환 T-29 · T-45 가 이름 겹침을 없앤다). 이번에 손댈 코드 = 레이아웃 명령(에이전트 쪽은 이미 이름을 받는다).
 
-## S28 — LLM 레이아웃 명령 (T-65) (2026-10-26~, `v0.5.0/feat/llm-layout-commands`, 대화 세션 · 사용자 외출 중 자율 진행 「쭉 진행해」) · 설계 폴더 `docs/process/S28-llm-layout-commands/`
+## S28 — LLM 레이아웃 명령 (T-65) (2026-10-26~, `v0.5.0/feat/llm-layout-commands`, 대화 세션 · 사용자 외출 중 자율 진행 「쭉 진행해」) · 설계 폴더 `docs/process/S28-llm-layout-commands/` · ADR-0308 · 구현 U1–U3 커밋 · U4 문서 · **GUI 실측 · master 머지 전**
+
+- 2026-10-27 — 구현 착지. 괄호 안 = 그 커밋 본문의 검증:
+  - U1 `7b587e99` — 데몬 `agent.resolve`(이름 · id 1~8 개를 한 번에 → `{target, id, name, live}`) · `resolve_in` 의 NOT_FOUND / CONFLICT 문구 끝에 ` — candidates: …`(모든 target 동사). (`/review code full` · `/qa standard` PASS)
+  - U2 `4cb8caed` — 셸 적용 층: 대상(`Target`)을 적용 잠금 안에서 풀기(`layout/target.rs`) · 배치 줄(`layout/rows.rs`) · 탭 줄 「뒤에」 · `DockOutcome.changed` · 새 창 두 잠금 사이 다시 찾기. 옛 id 함수 · 마우스 경로는 그대로. (`/review code deep` · `/qa standard` PASS)
+  - ADR-0308 `de6f652c` — 데몬은 화면 내용을 모른다 · 에이전트를 고르는 인자는 셸이 `#[agent_ref]` 로 표시하고 데몬이 중계 전에 id 로 바꾼다(ADR-0081 · ADR-0156 부분 개정 · 조사 `docs/research/agent-name-resolution-relay-vs-callback-2026-10-27.md`). 셸이 데몬에 되묻던 이름 풀기(대기 슬롯 정리가 세 라운드 연속 안 닫힘)를 대신한다.
+  - U3 `2710e14f` — 새 명령 넷(`tab.move` · `tab.dock` · `tab.detach` · `layout.get`) · 칸 · 탭 동사가 `slot_of` · `tab_of` · `at`(+`window`) · `assign` 으로 지목 · 배치를 바꾸는 동사의 답에 `layout` · 셸 명령 세대 21 · 표시 인자 19 개를 등록 패킷 `agent_args` 로 싣고 데몬 `command_delivery::deliver` 가 중계 전에 푼다(못 풀면 중계 없이 `<인자>: …` NOT_FOUND / CONFLICT) · 셸의 데몬 되묻기를 걷음 · TRD 4판. (`/review code full` FIX → 반영 · `/qa standard` PASS — 워크스페이스 결과 줄 60 · 5071 통과 · 0 실패 · 35 무시 · 격리 게이트 전부 · tsc · vitest 2802)
+  - U4(문서) — `prompts/engram-help.md` 「## window」 를 이름 · 공간 낱말 기준으로 다시 씀(옛 「agent_id 에 표시 이름을 주면 빈 칸으로 남는다」 함정은 이제 데몬이 이름을 id 로 풀고 없으면 NOT_FOUND 라 걷음) · CLAUDE.md 「LLM-우선 제어」 남은 갭 줄에 탭 옮기기 명령 · tracking T-65.
+  - ★GUI 실측(`/qa full`)은 아직★. U3 까지 push · `2710e14f` CI 진행 중. 남은 것 = U4 문서 커밋 · GUI 실측 · master 머지 · TRD §11 결정 일곱(메인 기본값으로 진행 — 사용자 확인 대기 · tracking T-65).
 
 - 2026-10-26~27 — TRD 1~3판(`/review trd full` + 재확인) · U1 `7b587e99`(데몬 `agent.resolve` · 후보 문구) · U2 `4cb8caed`(셸 적용 층 — 잠금 안 대상 풀기 · 탭 줄 「뒤에」 · 배치 줄) — 둘 다 리뷰 · `/qa standard` PASS · CI 초록. U3a(새 명령 넷) · U3b(기존 명령 넓히기)는 구현 · 리뷰 여러 라운드 뒤 **미커밋**(패치 = 핸드오프 첨부). 되묻기의 대기 슬롯 정리가 세 번 연속 리뷰에서 닫히지 않아 사용자에게 올림 → 사용자 제안으로 이름 풀기를 데몬 중계 쪽으로 옮기기로 결정 = ADR-0308(ADR-0081 · ADR-0156 부분 개정 · 「데몬은 화면 내용을 모른다」가 지킬 원칙 · 데몬이 화면 내용을 알아야 하는 변경은 사용자에게 먼저 묻는다).
 - 2026-10-26 — 주제 열기(번호 선점). 범위 = ADR-0307 규칙대로 레이아웃 명령 다섯 묶음: 기존 명령이 에이전트 이름 · 공간 낱말을 받게 · 셸의 이름 풀기(데몬 해석기) · 탭 옮기기 셋(`tab.move` · `tab.dock` · `tab.detach` — 같은 `apply::dock_tab` · 메인 결정 = 한 명령 + 모드 대신 셋, 사용자 질문에 답함) + 배치 조회 · 응답(바뀐 배치 · 오류 후보) · `prompts/engram-help.md` 창 절 간결히 다시 쓰기.
