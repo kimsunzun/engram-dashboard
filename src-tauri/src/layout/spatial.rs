@@ -182,6 +182,20 @@ impl SpatialToken {
             _ => None,
         }
     }
+
+    /// wire 철자(kebab) — [`Self::parse`] 가 받는 대표 철자다.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TopLeft => "top-left",
+            Self::TopRight => "top-right",
+            Self::BottomLeft => "bottom-left",
+            Self::BottomRight => "bottom-right",
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Up => "up",
+            Self::Down => "down",
+        }
+    }
 }
 
 /// ★edge 토큰이 "우하단"을 정확히 집는가(ADR-0068 수용 기준)★: 각 슬롯 rect 의 해당 코너 좌표까지의

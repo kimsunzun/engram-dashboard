@@ -438,6 +438,7 @@ impl ViewCommandBridge {
             .map(|(name, help)| CommandDecl {
                 name: name.clone(),
                 help: help.clone(),
+                agent_args: Vec::new(),
             })
             .collect();
         let removed = previous
@@ -537,6 +538,7 @@ fn decls_of(map: &BTreeMap<String, String>) -> Vec<CommandDecl> {
         .map(|(name, help)| CommandDecl {
             name: name.clone(),
             help: help.clone(),
+            agent_args: Vec::new(),
         })
         .collect()
 }

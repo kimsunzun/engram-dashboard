@@ -44,6 +44,22 @@
 /// | `Option<Option<T>>` | 값 또는 `null` — ★**부재·`null`·값 셋을 가른다**★ | **불가**(required) |
 /// | 이 블록에서 선언한 struct/enum | 인라인으로 펼쳐진 객체 / 문자열 열거 | **불가**(required) |
 ///
+/// ## 에이전트 참조 칸 — `#[agent_ref]` (ADR-0308)
+///
+/// 인자 struct 의 꼭대기 `String`·`Option<String>` 칸에 doc 주석 **뒤**로 단다:
+///
+/// ```ignore
+///     "slot.focus" => args SlotFocusArgs {
+///         /// 고를 에이전트 — 이름이나 id.
+///         #[agent_ref]
+///         agent: Option<String>,
+///     } -> ok SlotFocusOk { } errors [NOT_FOUND];
+/// ```
+///
+/// 표시한 칸 이름이 [`crate::CommandSpec::agent_args`] → 등록 패킷의 `agent_args` 로 실리고, 데몬이 남의 명령을
+/// 중계하기 전에 그 칸의 문자열을 자기 해석기로 에이전트 id 로 바꾼다 — 받는 쪽 핸들러는 그 칸에서 **id 만** 본다.
+/// 다른 타입 · 블록 안 선언 타입의 칸에 달면 컴파일 에러다. 스키마 · TS 바인딩은 표시와 무관하게 같다.
+///
 /// ★`Option<Option<T>>` 가 있는 이유★: `null` 이 **적극적 지시**인 자리(예: 부모를 떼라)에서 평범한
 /// `Option<T>` 은 「안 줬다」와 「null 을 줬다」를 같은 값으로 접는다 — 오타 필드 하나가 조용히 그 지시로
 /// 실행된다. 바깥은 **실렸나**, 안쪽은 **값이 있나**를 뜻하고, 부재는 역직렬화 단계에서 반려된다.
@@ -299,6 +315,73 @@ macro_rules! __engram_declare {
                       errors [ $($code:ident),* $(,)? ] ;
         $($rest:tt)*
     ) => {
+        // 인자 칸의 `#[agent_ref]` 표시를 먼저 걷어 낸다 — 걷힌 칸 목록과 나머지 선언이 `@command` 로 간다.
+        $crate::__engram_declare!(@agent_refs
+            [ [$($summary)*] $effect $since $name $args $ok [$($ofields)*] [$($code)*] ]
+            [] [] $($afields)* ,);
+
+        $crate::__engram_declare!(@commands [$($declared)* $args] $($rest)*);
+    };
+
+    // ── 에이전트 참조 표시(ADR-0308) ─────────────────────────────────────────────────────────
+    // 칸 하나씩 옮겨 적으며 `#[agent_ref]` 를 떼고 그 칸 이름을 모은다(끝에 붙인 `,` 가 종결 신호).
+    // ★표시는 doc 주석 **뒤**에 단다★ — 앞에 달면 아래 어느 갈래에도 안 맞아 컴파일 에러다.
+    // ★인자 struct 의 꼭대기 칸에서만 걷는다★ — 블록 안 선언 타입(`@struct_def`·`@obj` 가 직접 받는다)에 단
+    //   표시는 갈래가 없어 컴파일 에러다. 데몬은 인자 객체의 꼭대기 칸만 바꾸므로 중첩 칸 표시는 효과가 없다.
+    (@agent_refs $cmd:tt [$($clean:tt)*] [$($refs:ident)*]) => {
+        $crate::__engram_declare!(@command $cmd [$($clean)*] [$($refs)*]);
+    };
+    (@agent_refs $cmd:tt [$($clean:tt)*] [$($refs:ident)*] ,) => {
+        $crate::__engram_declare!(@command $cmd [$($clean)*] [$($refs)*]);
+    };
+    (@agent_refs $cmd:tt [$($clean:tt)*] [$($refs:ident)*]
+        $(#[doc = $fdoc:literal])* #[agent_ref] $field:ident : String , $($rest:tt)*) => {
+        $crate::__engram_declare!(@agent_refs $cmd
+            [$($clean)* $(#[doc = $fdoc])* $field : String ,] [$($refs)* $field] $($rest)*);
+    };
+    (@agent_refs $cmd:tt [$($clean:tt)*] [$($refs:ident)*]
+        $(#[doc = $fdoc:literal])* #[agent_ref] $field:ident : Option < String > , $($rest:tt)*) => {
+        $crate::__engram_declare!(@agent_refs $cmd
+            [$($clean)* $(#[doc = $fdoc])* $field : Option<String> ,] [$($refs)* $field] $($rest)*);
+    };
+    // 데몬은 **문자열 값**만 바꾼다 — 다른 모양에 단 표시는 아무 일도 안 하므로 조용히 받지 않는다.
+    (@agent_refs $cmd:tt [$($clean:tt)*] [$($refs:ident)*]
+        $(#[doc = $fdoc:literal])* #[agent_ref] $field:ident : $($rest:tt)*) => {
+        compile_error!(concat!(
+            "declare_commands!: `#[agent_ref]` 는 `String`·`Option<String>` 칸에만 단다 — `",
+            stringify!($field), "`"
+        ));
+    };
+    (@agent_refs $cmd:tt [$($clean:tt)*] [$($refs:ident)*]
+        $(#[doc = $fdoc:literal])* $field:ident : Option < Option < $ty:ident >> , $($rest:tt)*) => {
+        $crate::__engram_declare!(@agent_refs $cmd
+            [$($clean)* $(#[doc = $fdoc])* $field : Option < Option < $ty >> ,] [$($refs)*] $($rest)*);
+    };
+    (@agent_refs $cmd:tt [$($clean:tt)*] [$($refs:ident)*]
+        $(#[doc = $fdoc:literal])* $field:ident : Option < Vec < $ty:ident >> , $($rest:tt)*) => {
+        $crate::__engram_declare!(@agent_refs $cmd
+            [$($clean)* $(#[doc = $fdoc])* $field : Option < Vec < $ty >> ,] [$($refs)*] $($rest)*);
+    };
+    (@agent_refs $cmd:tt [$($clean:tt)*] [$($refs:ident)*]
+        $(#[doc = $fdoc:literal])* $field:ident : Option < $ty:ident > , $($rest:tt)*) => {
+        $crate::__engram_declare!(@agent_refs $cmd
+            [$($clean)* $(#[doc = $fdoc])* $field : Option < $ty > ,] [$($refs)*] $($rest)*);
+    };
+    (@agent_refs $cmd:tt [$($clean:tt)*] [$($refs:ident)*]
+        $(#[doc = $fdoc:literal])* $field:ident : Vec < $ty:ident > , $($rest:tt)*) => {
+        $crate::__engram_declare!(@agent_refs $cmd
+            [$($clean)* $(#[doc = $fdoc])* $field : Vec < $ty > ,] [$($refs)*] $($rest)*);
+    };
+    (@agent_refs $cmd:tt [$($clean:tt)*] [$($refs:ident)*]
+        $(#[doc = $fdoc:literal])* $field:ident : $ty:ident , $($rest:tt)*) => {
+        $crate::__engram_declare!(@agent_refs $cmd
+            [$($clean)* $(#[doc = $fdoc])* $field : $ty ,] [$($refs)*] $($rest)*);
+    };
+
+    // 명령 하나 — 표시를 걷어 낸 인자 칸과 걷힌 칸 이름을 받는다.
+    (@command [ [$($summary:literal)*] $effect:ident $since:literal $name:literal $args:ident $ok:ident
+                [$($ofields:tt)*] [$($code:ident)*] ]
+        [$($afields:tt)*] [$($refs:ident)*]) => {
         $crate::__engram_declare!(@struct_def $args [] [] $($afields)* ,);
         $crate::__engram_declare!(@struct_def $ok [] [] $($ofields)* ,);
 
@@ -316,12 +399,11 @@ macro_rules! __engram_declare {
                 //   손 목록이면 선언을 늘리는 그 편집이 함께 고쳐 무장 해제된다(`CommandSpec::args_type`).
                 args_type: stringify!($args),
                 ok_type: stringify!($ok),
+                agent_args: &[ $( stringify!($refs) ),* ],
             };
         }
 
         $crate::inventory::submit! { $crate::LinkedSpec(&$args::SPEC) }
-
-        $crate::__engram_declare!(@commands [$($declared)* $args] $($rest)*);
     };
 
     // 오류 코드 표기(SCREAMING) → 어휘. 목록 밖 코드는 여기서 컴파일 에러가 된다.

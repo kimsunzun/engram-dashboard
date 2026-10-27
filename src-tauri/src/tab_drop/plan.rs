@@ -105,6 +105,7 @@ pub fn plan(drop: &TabDrop, caller: &str, input: &InputNow, frame: &SourceFrame)
         DropTo::TabBar { index } => dock(DockDest::TabBar {
             window: caller.to_owned(),
             index: Some(*index as usize),
+            after: None,
         }),
         DropTo::Seam {
             target,
@@ -282,6 +283,7 @@ mod tests {
                 to: DockDest::TabBar {
                     window: POPUP.into(),
                     index: Some(2),
+                    after: None,
                 },
                 focus: FocusPolicy::Reveal,
                 mv: DockMove {

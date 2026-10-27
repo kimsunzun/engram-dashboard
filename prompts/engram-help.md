@@ -17,7 +17,7 @@
 
   {tool} help mail      우편. 팀원에게 보내고 받는다
   {tool} help agent     에이전트. 만들고 띄우고 재배치한다
-  {tool} help window    창 · 탭 · 분할, 그 자리에 에이전트 배치, 사용량 한도(usage.*), 비정상 종료 뒤 화면 복원(restore.*)
+  {tool} help window    창 · 탭 · 분할, 그 자리에 에이전트 배치 · 탭 옮기기 · 배치 읽기(layout.get), 사용량 한도(usage.*), 비정상 종료 뒤 화면 복원(restore.*)
   {tool} help settings  설정. 테마 · 챗 화면 스타일(settings.*) · 창별 테마(window.setTheme)
 
 명령 실행 = `{tool} <name> --flag 값`. 이름 전부는 `{tool} commands`, 한 명령의 인자와 반환은 `{tool} commands <name>`.
@@ -51,6 +51,9 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
       그 name 이 곧 팀원을 지목하는 이름이고, eg_send 의 to 에 그대로 적는다.
       store 는 명부 파일 둘(agents = agents.json · presets = presets.json)의 상태다. 각각 state 가 Writable(쓸 수 있다) · ReadOnly(데몬이 뜰 때 그 파일을 받지 않았다 — 명부가 비어 있고 이 실행 내내 못 바꾼다) · Refusing(마지막 저장이 거절됐다 — 다음 변경이 다시 보고, 받아들이면 풀린다)이고, 받지 않는 까닭 reason 은 Newer(이 데몬보다 새 판이 쓴 파일 — file_version 이 그 판) · Unreadable(파일을 못 읽음)이다.
 
+  {tool} agent.resolve --targets <JSON 배열 — 이름|id 1~8 개>
+      이름 · id 를 한 번에 푼다(잠든 것 포함). 요청한 차례로 target, id, name, live(true|false). 하나라도 못 풀면 그 자리(targets[i])를 대며 멈춘다.
+
   {tool} agent.new --backend <claude|codex> --cwd <폴더> [--name <이름>]
       만들기만 한다 — 잠든 채로 명부에 오르고 agent_id 를 돌려준다. 백엔드는 만들 때 고르며 바꾸는 명령은 없다.
 
@@ -71,9 +74,9 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
   {tool} agent.cancelQueuedInput --target <이름|id> --input_id <id>
       그 목록의 항목 하나를 취소한다. outcome 은 cancelled(곧바로 거뒀다) 또는 requested(결말은 목록에서 본다).
 
-이름이 겹치는 일이 드물게 생긴다. 그때 이름으로 지목하면 거절되므로 agent.list 가 준 id 를 넘긴다.
+이름이 겹치는 일이 드물게 생긴다. 그때 이름으로 지목하면 CONFLICT 로 거절되고 문구 끝 candidates 에 대개 겹친 것들의 id 가 실린다 — 그 id 를 넘긴다. 없는 이름은 NOT_FOUND 이고 candidates 에 대개 고를 만한 이름이 실린다(명부가 비었으면 none · 명령 도중 에이전트가 사라진 경우엔 candidates 가 없다).
 ## window
-{tool} window — 창 · 탭 · 분할, 그리고 그 자리에 에이전트를 놓는 것.
+{tool} window — 창 · 탭 · 칸(분할), 그 자리에 에이전트를 놓고 옮기는 것, 배치 읽기.
 
 대시보드 창이 떠 있지 않으면 이 계열 전부가 UNKNOWN_COMMAND 다. 이름은 보이지만 부를 수 없다.
 
@@ -109,55 +112,90 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
 
 창 자리 · 크기를 바꾸는 명령은 없다.
 
+탭 · 칸은 그 안의 에이전트로 고른다 — id 를 알아내려고 먼저 조회하지 않는다. <에이전트> 자리에는 이름이나 id(agent.list 의 name · id)를 준다. 고르는 말마다 인자가 따로이고 한 자리에 하나만 준다.
+
+  <칸>  --slot_of <에이전트>               그 에이전트가 든 칸
+        --at <낱말> [--window <창>]        그 창(빼면 main)의 보이는 탭에서 낱말이 집는 칸. --window 는 --at 과만 쓴다
+        --slot_id <id> [--view_id <id>]
+  <탭>  --tab_of <에이전트>                그 에이전트가 든 탭
+        --view_id <id>                     tab.list 의 id · layout.get --ids true 의 tab. tab.move · tab.dock · tab.detach 에서는 이름이 --tab 이다
+
+  top-left · top-right · bottom-left · bottom-right   그 모서리 칸
+  left · right · up · down                            포커스 칸의 그쪽 이웃. 포커스는 사람 클릭으로도 옮으니 확실히 집으려면 이름이나 모서리를 쓴다
+
+  {tool} tab.dock --tab_of beta --beside alpha --side Right    beta 의 탭을 alpha 칸 오른쪽에 붙인다
+  {tool} tab.move --tab_of beta --to_window main --index 0     beta 의 탭을 main 탭 줄 맨 앞으로
+  {tool} tab.detach --tab_of beta                              beta 의 탭을 새 창으로 뗀다
+  {tool} slot.split --slot_of alpha --dir TopBottom            alpha 칸을 위아래로 나눈다
+  {tool} slot.focus --at top-left                              main 의 보이는 탭에서 왼쪽 위 칸에 포커스
+  {tool} layout.get --agent beta                               beta 가 어디 있나
+
+<칸> 을 받는 명령과 tab.move · tab.dock · tab.detach · tab.close · agent.spawnInto 는 답에 layout 을 싣는다 — 바뀐 탭의 칸 줄이고 layout.get 의 rows 와 같은 모양(id 없음)이다. 결과를 보려고 다시 조회하지 않는다.
+
+  {tool} layout.get [--window <창>] [--agent <에이전트>] [--ids true]
+      칸마다 한 줄, 창 번호 → 탭 줄 → 탭 안 칸 순. --window 면 그 창만, --agent 면 그 에이전트가 든 칸만(어느 칸에도 없으면 빈 목록)
+      window · window_number · tab_index(탭 줄 자리, 0 부터 — (window, tab_index) 가 같은 탭의 줄을 묶는 열쇠) · tab_name · tab_active(그 창에 보이는 탭) · content(Empty|Agent|AgentList|PresetPalette|Usage|Unknown) · agent(표시 이름) · focused(그 탭의 포커스 칸) · x · y · w · h(탭 안 0~1 좌표, 왼쪽 위가 0,0)
+      --ids true 면 window_id · tab(= view_id) · slot_id · agent_id 도 싣는다 — 에이전트 없는 칸을 id 로 짚을 때만 쓴다
+
+  {tool} tab.move <탭> (--to_window <창> [--index <n>] | --after_tab <id> | --after_tab_of <에이전트> | --index <n>)
+      탭 줄의 다른 자리로(창 안 순서 · 다른 창). after_tab · after_tab_of 는 그 탭 바로 뒤, --index 만 주면 지금 창 안 순서 바꾸기다. index 는 0 부터, 빼거나 넘치면 맨 끝. --window 는 받지 않는다(갈 곳은 --to_window)
+  {tool} tab.dock <탭> (--beside <에이전트> | --beside_at <낱말> [--window <창>] | --beside_slot <id>) --side <Left|Right|Top|Bottom> [--whole true] [--share <0.01~0.5>]
+      붙일 칸의 side 쪽에 붙여 한 탭으로 합친다 — 옮긴 탭은 없어지고 그 칸들이 붙일 칸의 탭에 들어간다. whole 이면 그 칸이 아니라 그 탭 전체의 바깥 변이다. share 를 빼면 마우스 공식으로 잰 몫이다(크기를 모르면 0.5 · 원본 창이 최대화면 마우스와 조금 다를 수 있다)
+  {tool} tab.detach <탭>
+      새 창으로 뗀다. 새 창은 포커스를 가져가지 않는다. 이미 혼자인 팝아웃이면 그대로다(changed false)
+      이 셋은 탭째 옮긴다 — 그 탭의 다른 칸도 함께 간다(칸 하나만은 slot.popout). 보이는 탭 · 포커스를 바꾸지 않는다 — 단 보이던 탭이 떠난 창은 이웃 탭을 보인다(같은 창 안의 tab.dock 이면 붙인 곳의 탭 · main 이 비면 새 빈 탭). 답 = changed(같은 자리면 false) · window · window_id · number(놓인 창) · tab(tab.dock 은 붙인 곳의 탭) · tab_index
+
   {tool} tab.list --window <창>
       그 창의 탭 목록과 활성 탭. 탭마다 id · name · named(이름을 정했나 — false 면 name 이 포커스 칸의 내용을 따라 바뀐다)
   {tool} tab.create --window <창> [--name <이름>]
       빈 탭을 더하고 활성화한다. view_id 를 돌려준다. name 을 빼면 자동 이름이다
-  {tool} tab.switch --window <창> --view_id <id>
-  {tool} tab.rename --view_id <id> --name <이름>
+  {tool} tab.switch <탭>
+      그 창의 보이는 탭을 바꾼다
+  {tool} tab.rename <탭> --name <이름>
       그 뒤 이름은 굳는다 — 자동 이름으로 되돌리는 명령은 없다
-  {tool} tab.close --window <창> --view_id <id>
+  {tool} tab.close <탭>
       창의 마지막 탭이면 그 창도 닫힌다
 
-  {tool} slot.split --view_id <id> --slot_id <id> --dir <LeftRight|TopBottom>
-      슬롯을 반으로 나눈다. 새 슬롯은 LeftRight 면 오른쪽, TopBottom 이면 아래에 생기고 포커스를 받는다. 그 id 를 돌려준다
-  {tool} slot.close --view_id <id> --slot_id <id>
+  {tool} slot.split <칸> --dir <LeftRight|TopBottom>
+      반으로 나눈다. 새 칸은 LeftRight 면 오른쪽, TopBottom 이면 아래에 생기고 포커스를 받는다. 답의 slot_id 가 새 칸이다
+  {tool} slot.close <칸>
       형제가 그 자리를 물려받는다
-  {tool} slot.focus --view_id <id> --slot_id <id>
-      포커스를 그 슬롯으로 옮긴다. 포커스를 되읽는 명령은 없다
-  {tool} slot.popout --view_id <id> --slot_id <id> [--to_window <창>]
-      슬롯의 내용을 다른 창의 새 탭으로 옮긴다. to_window 를 빼면 새 창을 연다. 옮겨 간 창의 window · window_id · number 와 그 창에 생긴 탭 new_view_id 를 돌려준다
-  {tool} layout.setSlotContent --view_id <id> --slot_id <id> --content <Empty|Agent|AgentList|PresetPalette|Usage> [--agent_id <id>] [--show_claude <true|false>] [--show_codex <true|false>]
-      슬롯이 무엇을 보여줄지 바꾼다. content 가 Agent 일 때만 agent_id 를, Usage 일 때만 show_claude · show_codex(그 백엔드의 사용량 한도를 보일지)를 함께 준다. 뺀 show 칸은 그 슬롯이 이미 Usage 면 지금 값을 두고, 아니면 true 다
+  {tool} slot.focus <칸>
+      포커스를 그 칸으로 옮긴다. 보이는 탭은 바꾸지 않는다 — 보이려면 먼저 tab.switch
+  {tool} slot.popout <칸> [--to_window <창>]
+      칸 하나를 다른 창의 새 탭으로 옮긴다(원래 칸은 닫힌다). to_window 를 빼면 새 창을 연다. 답에 옮겨 간 창의 window · window_id · number 와 새 탭 new_view_id. 탭째는 tab.detach
+  {tool} slot.assignAgent <칸> --assign <에이전트>
+      이미 살아 있는 에이전트를 그 칸에 붙인다. 새로 띄우지는 않는다
+  {tool} layout.setSlotContent <칸> --content <Empty|Agent|AgentList|PresetPalette|Usage> [--assign <에이전트>] [--show_claude <true|false>] [--show_codex <true|false>]
+      칸이 무엇을 보여줄지 바꾼다. assign 은 Agent 일 때만, show 둘(그 백엔드의 사용량 한도를 보일지)은 Usage 일 때만 준다. 뺀 show 칸은 그 칸이 이미 Usage 면 지금 값을 두고, 아니면 true 다
+  {tool} agent.spawnInto --cwd <폴더> --backend <claude|codex> [--window <창>] [--at <낱말> | --view_id <id> [--slot_id <id>]]
+      에이전트를 새로 띄워 그 자리에 놓는다. at 이면 window(빼면 main)의 보이는 탭에서 그 낱말이 집는 빈 칸이다(비어 있지 않으면 CONFLICT). 자리를 다 빼면 window(빼면 main)에 새 탭을 만든다. 답 = agent_id
+      에이전트 칸을 나눠 새 반쪽에 띄우기 = slot.split --slot_of alpha --dir LeftRight(답 slot_id = 새 칸) → layout.get --agent alpha --ids true(그 줄의 tab) → agent.spawnInto … --view_id <tab> --slot_id <새 칸>
 
   {tool} split.list --view_id <id>
-      그 탭의 구분선 전량. 행마다 split_id · dir · ratio · a_slots(왼쪽/위 쪽 슬롯) · b_slots(오른쪽/아래 쪽 슬롯). 슬롯 x 와 y 사이 구분선은 x 가 한쪽, y 가 다른 쪽 목록에 든 행이다
+      그 탭의 구분선 전량. 행마다 split_id · dir · ratio · a_slots(왼쪽/위 쪽 칸) · b_slots(오른쪽/아래 쪽 칸). 칸 x 와 y 사이 구분선은 x 가 한쪽, y 가 다른 쪽 목록에 든 행이다
   {tool} split.setRatio --view_id <id> --split_id <id> --ratio <0..1>
       그 구분선을 옮긴다. ratio 는 창 전체가 아니라 그 분할이 나누는 영역 안에서 a 쪽(왼쪽/위)이 갖는 몫이다. 범위 밖 값은 잘라서 적용하고 적용한 값을 돌려준다(Applied 가 아니면 지금 값). 함께 오는 outcome 은 셋이다
       Applied     바꿨다
       Unchanged   자른 값이 지금 값과 같다
       TooSmall    너무 작아 손대지 않았다
 
-  {tool} agent.spawnInto --window <창> --cwd <폴더> [--view_id <id>] [--slot_id <id>] [--backend <claude|codex>]
-      에이전트를 새로 띄우고 그 자리에 배치한다. view_id 를 빼면 새 탭에 놓고, 그때는 slot_id 를 주지 않는다
-  {tool} slot.assignAgent --view_id <id> --slot_id <id> --agent_id <id>
-      이미 살아 있는 에이전트를 그 슬롯에 붙인다. 새로 띄우지는 않는다
+고르기가 빗나가면 아무것도 바뀌지 않는다. <에이전트> 자리가 빗나가면 문구 끝 candidates 가 다음 호출 한 번에 고칠 값을 준다.
 
-slot_id 는 slot.split 이 돌려준 값이거나, 방향 낱말을 풀어서 얻는다. split_id 는 split.list 가 주고, 그 행의 a_slots·b_slots 도 slot_id 다. 새 탭의 하나뿐인 슬롯은 --view_id 에 tab.create 가 준 값을 주고 top-left 로 푼다. 포커스는 사람이 빈 칸·에이전트 칸을 클릭하거나 포커스 슬롯이 닫혀도 옮는다. 확실히 집을 땐 slot.split 이 준 id 나 모서리 낱말을 쓴다.
+  NOT_FOUND         그런 에이전트가 없다(candidates = 고를 만한 이름) · 그 에이전트가 어느 칸에도 없다(candidates = 지금 칸에 떠 있는 이름) · 낱말이 칸을 못 집었다(candidates 대신 고칠 길을 준다)
+  CONFLICT          그 에이전트가 여러 칸(탭을 고를 땐 여러 탭)에 떠 있다 — candidates 의 <인자>=값(slot_id= · tab= 등)을 그 인자에 그대로 준다. 같은 이름의 에이전트가 둘 이상이면 candidates 가 그 id 들이고, 같은 인자에 id 를 준다. 없는 창도 CONFLICT 다
+  INVALID_ARGUMENT  한 자리에 둘을 주거나 하나도 안 줬다 · 탭을 제 뒤나 제 안에 놓으려 했다
 
-  {tool} slot.resolveSpatial --token <낱말> [--window <창>] [--view_id <id>]
-      view_id 를 빼면 그 창의 활성 탭이 대상이고, window 도 빼면 main 창이다
-      top-left · top-right · bottom-left · bottom-right   그 탭에서 그 모서리를 차지한 슬롯. 포커스와 무관하다
-      left · right · up · down                            포커스 슬롯 옆 슬롯. 여럿이면 가장 넓게 맞닿은 것(같으면 어느 쪽인지 보장하지 않는다), 없으면 null
+쥐고 있던 id 가 없어졌으면 candidates 가 없다 — tab.move · tab.dock · tab.detach 는 NOT_FOUND, <칸> 을 받는 명령 · tab.switch · tab.close · tab.rename 은 CONFLICT 다. layout.get --ids true 로 다시 읽는다.
 
-함정 셋. slot.assignAgent 의 agent_id 는 `{tool} agent.list` 가 준 id 여야 한다 — 표시 이름을 주면 거절되지 않은 채 슬롯이 빈 칸으로 남는다. 인자는 `--flag 값` 꼴만 받고 `--flag=값` 은 거절된다. 그리고 아래 둘만 인자 이름이 camelCase 다.
+인자는 --flag 값 꼴만 받고 --flag=값 은 거절된다. 아래 둘은 인자 이름이 camelCase 다.
 
   {tool} slot.empty --viewId <id> --slotId <id>
-      슬롯을 빈 칸으로 되돌린다. 슬롯 자체는 남는다 — 없애려면 slot.close
+      칸을 빈 칸으로 되돌린다(칸은 남는다). 이름으로는 layout.setSlotContent <칸> --content Empty
   {tool} tab.next [--window <창>]
       활성 탭을 다음 탭으로 옮긴다. 탭이 하나뿐이면 아무 일도 안 한다
 
-사용량 슬롯(content Usage)이 그리는 한도는 아래 둘로 직접 읽는다. 이 둘은 대시보드 창이 없어도 된다.
+사용량 칸(content Usage)이 그리는 한도는 아래 둘로 직접 읽는다. 이 둘은 대시보드 창이 없어도 된다.
 
   {tool} usage.get --backend <Claude|Codex>
       그 백엔드의 사용량 한도(5시간 · 주간 · 모델별 주간)와 조회 상태. windows 의 행마다 left_pct 가 남은 양이고 null 은 모른다는 뜻이다

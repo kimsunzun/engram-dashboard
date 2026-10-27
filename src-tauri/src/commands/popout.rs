@@ -1206,6 +1206,7 @@ mod close_request_tests {
                 DockTo::TabBar {
                     window: POPUP.into(),
                     index: None,
+                    after: None,
                 },
                 DockError::WindowNotFound(POPUP.into()),
             ),
@@ -1351,6 +1352,7 @@ mod close_request_tests {
                 DockTo::TabBar {
                     window: MAIN_WINDOW_LABEL.into(),
                     index: None,
+                    after: None,
                 },
                 FocusPolicy::Keep,
                 DockMove::default(),

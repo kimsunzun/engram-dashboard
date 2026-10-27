@@ -37,6 +37,7 @@ use crate::usage::UsageVendorKey;
 // ★성공 응답은 평평하다(사용자 결정 2026-08-13)★: 명령마다 반환을 선언하므로 `{"agent":{…}}` 한 겹을
 //   더 감쌀 이유가 없다.
 declare_commands! {
+    // v8(2026-10-26): 이름 하나가 늘었다 — `agent.resolve`(ADR-0307 · TRD S28 §6).
     // v7(2026-10-10): `agent.list` 의 답에 칸 `store` 가 늘었다 — 명부 저장소 둘(agents · presets)의 상태(ADR-0291
     //   R17 · D6). 이름은 그대로이고 답의 모양이 바뀌었다.
     // v6(2026-09-28·29): 이름 셋이 늘었다 — `agent.interrupt`(ADR-0237) · `usage.get`·`usage.refresh`(TRD S21
@@ -50,7 +51,7 @@ declare_commands! {
     // v3(2026-09-08): `agent.new` 의 `backend` 가 **선택 → 필수**가 됐다. 조용한 claude 기본값을 걷은
     //   깨는 변경이라 세대를 올린다(사유 = 그 칸의 doc). 이 번호는 진단용이고 받는 쪽이 거절에 쓰지
     //   않는다(`connection_core` 의 RegisterCommands 갈래).
-    catalog_version: 7;
+    catalog_version: 8;
 
     /// 명부의 한 행.
     struct AgentRow {
@@ -59,6 +60,17 @@ declare_commands! {
         state: String,
         cwd: String,
         parent: Option<String>,
+    }
+
+    /// `agent.resolve` 답의 한 줄 — 요청한 말 하나가 가리킨 에이전트.
+    struct ResolvedAgentRow {
+        /// 요청에 실린 말 그대로.
+        target: String,
+        id: String,
+        /// 지금 명부의 이름.
+        name: String,
+        /// `agent.list` 의 `state` 가 `live` 인 것과 같은 판정이다.
+        live: bool,
     }
 
     // ── 명부 저장소 상태(`agent.list` 의 `store` — ADR-0291 R17 · D6) ─────────────────────────────────────
@@ -214,6 +226,25 @@ declare_commands! {
     "agent.list" => args AgentListArgs {}
                  -> ok   AgentListOk { agents: Vec<AgentRow>, store: RosterStoreRow }
                  errors [];
+
+    // ADR-0307
+    // ★실패 문구의 머리 `targets[i]: ` 는 계약이다★ — 셸(TRD S28 §5-1)이 이 머리로 실패를 자기 인자 이름에 되짚는다.
+    //   셸은 이 crate 를 의존하지 않아 바뀌어도 컴파일이 안 멈춘다. 머리를 짓는 자리 = `target_failure` · 못 박는 시험 =
+    //   `tests::the_resolve_failure_prefix_is_a_stable_contract`.
+    /// 에이전트를 가리키는 말(이름 또는 id) 1~8 개를 한 번에 푼다 — `agents` 는 요청과 같은 차례다. 푸는 규칙은 `target`
+    /// 을 받는 다른 동사와 같다(id 정확 일치가 먼저 · 그다음 이름 정확 일치 — 대소문자 구분 · 잠든 에이전트 포함).
+    /// `live` = `agent.list` 의 `state` 가 `live`. 하나라도 못 풀면 아무 줄도 돌려주지 않고 실패한다. 말 하나 때문에
+    /// 난 실패의 문구는 언제나 `targets[i]: `(i = 0 부터 센 그 말의 자리)로 시작한다 — INVALID_ARGUMENT = 빈 말(공백뿐) ·
+    /// NOT_FOUND = 그런 에이전트가 없다(문구 끝 `candidates` = 고를 만한 이름, 이름순 · 명부가 비었으면 `none`) ·
+    /// CONFLICT = 그 이름이 둘 이상이다(문구 끝 `candidates` = 그 id 들 — id 로 다시 부른다). 개수가 1~8 밖이면
+    /// 그 머리 없이 INVALID_ARGUMENT 다.
+    #[effect(Read)]
+    #[since(8)]
+    "agent.resolve" => args AgentResolveArgs {
+        targets: Vec<String>,
+    } -> ok AgentResolveOk {
+        agents: Vec<ResolvedAgentRow>,
+    } errors [NOT_FOUND, CONFLICT];
 
     /// 에이전트를 띄운다(잠든 것 깨우기 포함).
     #[effect(Write)]
@@ -834,6 +865,7 @@ pub fn make_table(
     let mut table = CommandTable::new(COMMAND_SPECS);
 
     let list = Arc::clone(&host);
+    let resolve = Arc::clone(&host);
     let spawn = (Arc::clone(&host), Arc::clone(&notify));
     let new = (Arc::clone(&host), Arc::clone(&notify));
     let rename = (Arc::clone(&host), Arc::clone(&notify));
@@ -853,6 +885,12 @@ pub fn make_table(
             blocking_handler(move |_: AgentListArgs| verb_list(list.as_ref())),
         )
         .expect("agent.list 를 표에 꽂지 못했다");
+    table
+        .insert(
+            "agent.resolve",
+            blocking_handler(move |args: AgentResolveArgs| verb_resolve(resolve.as_ref(), args)),
+        )
+        .expect("agent.resolve 를 표에 꽂지 못했다");
     table
         .insert(
             "agent.spawn",
@@ -980,6 +1018,70 @@ fn verb_list(host: &dyn AgentCommandHost) -> Result<AgentListOk, CommandError> {
             presets: store_status_row(store.presets),
         },
     })
+}
+
+// TRD S28 §6 의 상한.
+const RESOLVE_TARGETS_MAX: usize = 8;
+
+// ADR-0307
+fn verb_resolve(
+    host: &dyn AgentCommandHost,
+    args: AgentResolveArgs,
+) -> Result<AgentResolveOk, CommandError> {
+    let count = args.targets.len();
+    if !(1..=RESOLVE_TARGETS_MAX).contains(&count) {
+        return Err(CommandError::invalid_argument(format!(
+            "targets takes 1 to {RESOLVE_TARGETS_MAX} agent names or ids, got {count}"
+        )));
+    }
+    // 빈 말은 전부 모아 한 번에 낸다 — 머리는 첫 자리 하나라 나머지는 문구 끝에 덧붙인다.
+    let blanks: Vec<usize> = args
+        .targets
+        .iter()
+        .enumerate()
+        .filter(|(_, target)| is_blank(Some(target)))
+        .map(|(index, _)| index)
+        .collect();
+    if let Some((&first, rest)) = blanks.split_first() {
+        let mut message = "blank value — an empty argument is usually an unset shell variable; every target needs an agent name or id".to_string();
+        if !rest.is_empty() {
+            let others: Vec<String> = rest
+                .iter()
+                .map(|index| format!("targets[{index}]"))
+                .collect();
+            message.push_str(&format!(" (also blank: {})", others.join(", ")));
+        }
+        return Err(target_failure(
+            first,
+            CommandError::invalid_argument(message),
+        ));
+    }
+    // ★명부 한 장으로 전부 푼다★ — 말마다 다시 읽으면 한 답 안의 줄끼리 다른 순간의 명부를 본다.
+    let roster = host.roster();
+    let mut agents = Vec::with_capacity(count);
+    for (index, target) in args.targets.into_iter().enumerate() {
+        let resolved =
+            resolve_in(&roster, &target).map_err(|error| target_failure(index, error))?;
+        let live = roster
+            .iter()
+            .find(|row| row.id == resolved.id)
+            .is_some_and(|row| state_of(row.live.as_ref()) == AGENT_STATE_LIVE);
+        agents.push(ResolvedAgentRow {
+            target,
+            id: resolved.id.to_string(),
+            name: resolved.name,
+            live,
+        });
+    }
+    Ok(AgentResolveOk { agents })
+}
+
+/// 말 하나 때문에 난 실패에 그 자리의 머리 `targets[i]: ` 를 붙인다 — 코드 · 재시도는 그대로 둔다.
+// ADR-0307
+fn target_failure(index: usize, mut error: CommandError) -> CommandError {
+    let message = format!("targets[{index}]: {}", error.message());
+    error.set_message(message);
+    error
 }
 
 /// 저장소 상태(까닭을 든 태그 enum)를 단어 + 선택 칸으로 편다.
@@ -1661,9 +1763,11 @@ fn state_of(status: Option<&AgentStatus>) -> &'static str {
 
 /// 지목 토큰 → 에이전트 하나.
 ///
-/// ★규칙(우편 입구와 **같아야** 한다)★: ① agent id 문자열 정확 일치를 먼저 본다 — UUID 처럼 생긴
-/// *이름* 이 id 지목을 가로채지 못하게 ② 그다음 이름 **정확** 일치(대소문자 구분 · 접두 매칭 없음 ·
-/// 공백 보정 없음) ③ 같은 이름이 둘 이상이면 아무도 고르지 않고 거부한다.
+/// ★규칙(우편 입구와 **같아야** 한다)★: ① agent id 일치를 먼저 본다 — UUID 처럼 생긴 *이름* 이 id 지목을
+/// 가로채지 못하게 ② 그다음 이름 **정확** 일치(대소문자 구분 · 접두 매칭 없음 · 공백 보정 없음) ③ 같은 이름이
+/// 둘 이상이면 아무도 고르지 않고 거부한다.
+/// ★알고 남긴 불일치 하나 — id 철자★: 여기는 `Uuid` 가 읽는 철자 전부(대문자 · 중괄호 · 하이픈 없음 · `urn:uuid:`)를
+/// id 로 받고, 우편 입구는 정규 철자(소문자 하이픈)만 받는다. 데몬 crate 의 교차 대조 테스트가 그 차이를 양쪽 다 단언한다.
 /// ★관대한 해석기를 들이지 말 것★: 사람과 LLM 은 우편의 수신자 토큰과 제어의 지목 토큰이 같은 X 를
 /// 가리킨다고 읽는다. 두 입구의 해석이 갈리면 편지를 받은 에이전트와 이름이 바뀐 에이전트가 달라진다 —
 /// 그 일치는 데몬 crate 의 교차 대조 테스트가 [`resolve_in`] 을 태워 지킨다.
@@ -1679,29 +1783,91 @@ fn resolve(host: &dyn AgentCommandHost, token: &str) -> Result<ResolvedAgent, Co
 /// 않아도 되고, 사본을 따로 두지 않으므로 재는 것과 도는 것이 갈릴 수 없다. ② 데몬의 입력 임대 검문
 /// (`control::commands::admit_input` — 운영 경로)이 [`INPUT_AFFECTING`] 명령의 `target` 을 동사 본문과 **같은
 /// 규칙으로** 한 번 풀어 그 id 로 임대를 본다. 해석기가 둘이면 검사한 에이전트와 실행하는 에이전트가 갈린다.
-/// ★결말은 코드로 읽는다★: 부재 = `NOT_FOUND` · 동명 둘 이상 = `CONFLICT`(이 함수가 내는 두 코드다).
+/// ★결말은 코드로 읽는다★: 부재 = `NOT_FOUND` · 동명 둘 이상 = `CONFLICT`(이 함수가 내는 두 코드다). 두 문구 끝에
+/// ` — candidates: a, b` 가 붙는다(최대 5 · 정렬) — 부재 = 고를 만한 이름(명부가 비었으면 `none`) · 동명 = 그 id
+/// 들. 문구는 읽는 글이지 계약이 아니다(CLI · 교차 대조는 코드만 본다).
 // ADR-0132
 // ADR-0155
 // ADR-0231
+// ADR-0307
 pub fn resolve_in(roster: &[AgentRosterRow], token: &str) -> Result<ResolvedAgent, CommandError> {
     let found = |row: &AgentRosterRow| ResolvedAgent {
         id: row.id,
         name: row.canonical_name.clone(),
     };
-    if let Some(row) = roster.iter().find(|r| r.id.to_string() == token) {
-        return Ok(found(row));
+    // ★정규 철자로 견주지 않는다★: 데몬이 셸 명령의 에이전트 칸(옛 `agent_id` 포함)을 이 함수로 바꾸므로(ADR-0308)
+    //   정규 철자만 맞추면 대문자 등 다른 철자의 id 를 보내던 옛 호출자가 `NOT_FOUND` 를 받는다. 명부에 없는 id 꼴은
+    //   이름으로 넘어간다.
+    if let Ok(id) = AgentId::parse_str(token) {
+        if let Some(row) = roster.iter().find(|r| r.id == id) {
+            return Ok(found(row));
+        }
     }
-    let mut by_name = roster.iter().filter(|r| r.canonical_name == token);
-    match (by_name.next(), by_name.next()) {
-        (Some(row), None) => Ok(found(row)),
-        (Some(_), Some(_)) => Err(CommandError::of(
-            ErrorCode::Conflict,
-            format!(
-                "more than one agent is called '{token}', so this command would have to guess — use the agent id instead; the roster listing shows both"
-            ),
-        )),
-        _ => Err(not_found(token)),
+    let same_name: Vec<&AgentRosterRow> = roster
+        .iter()
+        .filter(|r| r.canonical_name == token)
+        .collect();
+    match same_name.as_slice() {
+        [row] => Ok(found(row)),
+        [] => Err(CommandError::not_found(with_candidates(
+            not_found_message(token),
+            name_candidates(roster, token),
+        ))),
+        rows => {
+            let mut ids: Vec<String> = rows.iter().map(|row| row.id.to_string()).collect();
+            ids.sort_unstable();
+            ids.truncate(CANDIDATES_MAX);
+            Err(CommandError::of(
+                ErrorCode::Conflict,
+                with_candidates(
+                    format!(
+                        "more than one agent is called '{token}', so this command would have to guess — use the agent id instead; the roster listing shows both"
+                    ),
+                    ids,
+                ),
+            ))
+        }
     }
+}
+
+// TRD S28 §5-3 의 상한.
+const CANDIDATES_MAX: usize = 5;
+
+/// 없는 말에 낼 이름 후보 — 그 말을 (대소문자 무시) 품은 이름이 있으면 그것들, 없으면 전부에서 이름순으로 앞의 것.
+/// 같은 이름은 한 번만 싣는다.
+// ★정렬한다★: 명부의 행 차례는 정해져 있지 않다(잠든 행은 매번 새 HashMap 에서 나온다 — `AgentManager::roster`).
+//   차례대로 자르면 같은 요청이 부를 때마다 다른 후보를 받는다.
+fn name_candidates(roster: &[AgentRosterRow], token: &str) -> Vec<String> {
+    let mut names: Vec<&str> = roster
+        .iter()
+        .map(|row| row.canonical_name.as_str())
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    let folded = token.to_lowercase();
+    let containing: Vec<&str> = names
+        .iter()
+        .copied()
+        .filter(|name| name.to_lowercase().contains(&folded))
+        .collect();
+    let picked = if containing.is_empty() {
+        names
+    } else {
+        containing
+    };
+    picked
+        .into_iter()
+        .take(CANDIDATES_MAX)
+        .map(str::to_string)
+        .collect()
+}
+
+/// 후보가 없으면(빈 명부) `none` — 꼬리를 빼면 「후보가 없다」와 「후보를 싣지 않는 문구」가 구별되지 않는다.
+fn with_candidates(message: String, candidates: Vec<String>) -> String {
+    if candidates.is_empty() {
+        return format!("{message} — candidates: none");
+    }
+    format!("{message} — candidates: {}", candidates.join(", "))
 }
 
 /// 지목이 가리킨 에이전트 — id 와 **그때 명부가 말한 이름**.
@@ -1712,9 +1878,13 @@ pub struct ResolvedAgent {
 }
 
 fn not_found(token: &str) -> CommandError {
-    CommandError::not_found(format!(
+    CommandError::not_found(not_found_message(token))
+}
+
+fn not_found_message(token: &str) -> String {
+    format!(
         "no agent called '{token}' — names are matched exactly, with no case-folding, prefixes or trimming; the roster listing shows the names in use"
-    ))
+    )
 }
 
 /// 공백만 있는 값은 **부재로 접지 않고** 반려한다.
@@ -2107,6 +2277,7 @@ mod tests {
                 "agent.move",
                 "agent.new",
                 "agent.rename",
+                "agent.resolve",
                 "agent.spawn",
                 "usage.get",
                 "usage.refresh"
@@ -4114,6 +4285,403 @@ mod tests {
                 "{miss}"
             );
         }
+    }
+
+    /// ★id 는 `Uuid` 가 읽는 철자 전부로 받는다 — 이름보다 먼저★: 대문자 철자를 이름으로 단 다른 에이전트가 있어도 id 가
+    /// 이긴다. 명부에 없는 id 꼴은 이름으로 넘어가 없음이다.
+    #[test]
+    fn resolve_in_reads_every_uuid_spelling_as_the_id_before_names() {
+        let alpha = AgentId::new_v4();
+        let upper = alpha.to_string().to_uppercase();
+        let row = |id: AgentId, name: &str| AgentRosterRow {
+            id,
+            canonical_name: name.to_string(),
+            cwd: String::new(),
+            parent: None,
+            live: None,
+        };
+        let roster = vec![row(alpha, "alpha"), row(AgentId::new_v4(), &upper)];
+
+        for spelling in [
+            upper.clone(),
+            format!("{{{alpha}}}"),
+            format!("{{{upper}}}"),
+            alpha.simple().to_string(),
+            alpha.simple().to_string().to_uppercase(),
+            alpha.urn().to_string(),
+        ] {
+            assert_eq!(
+                resolve_in(&roster, &spelling).expect("id 철자").id,
+                alpha,
+                "{spelling}"
+            );
+        }
+        let ghost = AgentId::new_v4().to_string().to_uppercase();
+        assert_eq!(
+            resolve_in(&roster, &ghost)
+                .expect_err("명부에 없는 id")
+                .code(),
+            ErrorCode::NotFound
+        );
+        assert_eq!(
+            resolve_in(&roster, &format!(" {alpha}"))
+                .expect_err("공백 보정 없음")
+                .code(),
+            ErrorCode::NotFound
+        );
+    }
+
+    // ── 지목 실패의 후보(TRD S28 §6) ───────────────────────────────────────────────
+
+    /// 명부에 이름 줄을 그대로 심는다 — 후보는 명부 행만 보므로 프로필이 필요 없다.
+    fn roster_of(names: &[&str]) -> Vec<AgentRosterRow> {
+        names
+            .iter()
+            .map(|name| AgentRosterRow {
+                id: AgentId::new_v4(),
+                canonical_name: name.to_string(),
+                cwd: format!("C:/work/{name}"),
+                parent: None,
+                live: None,
+            })
+            .collect()
+    }
+
+    // ADR-0307
+    #[test]
+    fn a_missing_name_lists_the_names_that_contain_it_ignoring_case() {
+        let roster = roster_of(&["alpha-main", "beta", "ALPHA-two", "gamma"]);
+
+        let err = resolve_in(&roster, "alpha").expect_err("정확 일치가 없다");
+        assert_eq!(err.code(), ErrorCode::NotFound);
+        assert!(
+            err.message().starts_with(&not_found_message("alpha")),
+            "옛 문구가 앞에 그대로 남는다: {}",
+            err.message()
+        );
+        // 이름순(바이트 순 — 대문자가 앞).
+        assert!(
+            err.message()
+                .ends_with(" — candidates: ALPHA-two, alpha-main"),
+            "{}",
+            err.message()
+        );
+    }
+
+    /// 품은 이름이 없으면 전부에서 이름순으로 앞의 다섯 — 같은 이름은 한 번.
+    // ADR-0307
+    #[test]
+    fn with_no_containing_name_the_first_five_distinct_names_by_name_are_listed() {
+        let roster = roster_of(&["f", "b", "d", "b", "a", "e", "c"]);
+
+        let err = resolve_in(&roster, "zzz").expect_err("없다");
+        assert_eq!(err.code(), ErrorCode::NotFound);
+        assert!(
+            err.message().ends_with(" — candidates: a, b, c, d, e"),
+            "{}",
+            err.message()
+        );
+    }
+
+    /// ★명부 행의 차례가 후보를 바꾸지 않는다★ — 운영 명부의 잠든 행은 HashMap 차례로 온다.
+    // ADR-0307
+    #[test]
+    fn candidates_do_not_depend_on_roster_row_order() {
+        let forward = roster_of(&["g", "f", "e", "d", "c", "b", "a", "twin", "twin"]);
+        let mut backward: Vec<AgentRosterRow> = forward
+            .iter()
+            .map(|row| AgentRosterRow {
+                id: row.id,
+                canonical_name: row.canonical_name.clone(),
+                cwd: row.cwd.clone(),
+                parent: None,
+                live: None,
+            })
+            .collect();
+        backward.reverse();
+
+        for token in ["zzz", "twin"] {
+            assert_eq!(
+                resolve_in(&forward, token).expect_err("실패").message(),
+                resolve_in(&backward, token).expect_err("실패").message(),
+                "{token}"
+            );
+        }
+    }
+
+    /// 빈 명부는 `none` — 꼬리가 없으면 「후보 없음」과 「후보를 싣지 않는 문구」가 같아 보인다.
+    #[test]
+    fn an_empty_roster_says_there_are_no_candidates() {
+        let err = resolve_in(&[], "alpha").expect_err("없다");
+        assert_eq!(err.code(), ErrorCode::NotFound);
+        assert_eq!(
+            err.message(),
+            format!("{} — candidates: none", not_found_message("alpha"))
+        );
+    }
+
+    /// 동명의 후보는 이름이 아니라 id 다 — 이름을 다시 주면 또 같은 CONFLICT 다.
+    // ADR-0307
+    #[test]
+    fn a_duplicate_name_lists_the_clashing_ids_up_to_five() {
+        let roster = roster_of(&["other", "twin", "twin"]);
+        let err = resolve_in(&roster, "twin").expect_err("동명 둘");
+        assert_eq!(err.code(), ErrorCode::Conflict);
+        assert!(
+            err.message()
+                .starts_with("more than one agent is called 'twin'"),
+            "{}",
+            err.message()
+        );
+        let mut pair = [roster[1].id.to_string(), roster[2].id.to_string()];
+        pair.sort();
+        assert!(
+            err.message()
+                .ends_with(&format!(" — candidates: {}, {}", pair[0], pair[1])),
+            "{}",
+            err.message()
+        );
+
+        let crowd = roster_of(&["twin"; 7]);
+        let err = resolve_in(&crowd, "twin").expect_err("동명 일곱");
+        let mut ids: Vec<String> = crowd.iter().map(|row| row.id.to_string()).collect();
+        ids.sort();
+        ids.truncate(5);
+        assert!(
+            err.message()
+                .ends_with(&format!(" — candidates: {}", ids.join(", "))),
+            "{}",
+            err.message()
+        );
+    }
+
+    /// 후보는 해석기 하나에서 나오므로 `target` 을 받는 동사가 모두 함께 받는다.
+    #[test]
+    fn a_target_verb_carries_the_candidates_too() {
+        let host = FakeHost::new();
+        host.with_agent("alpha", false, false);
+        let (table, _notify) = wiring(&host);
+
+        let err = call(
+            &table,
+            "agent.rename",
+            json!({ "target": "alp", "name": "x" }),
+        )
+        .expect_err("없는 이름");
+        assert_eq!(err.code(), ErrorCode::NotFound);
+        assert!(
+            err.message().ends_with(" — candidates: alpha"),
+            "{}",
+            err.message()
+        );
+    }
+
+    // ── agent.resolve ────────────────────────────────────────────────────────────
+
+    // ADR-0307
+    #[test]
+    fn resolve_answers_every_target_in_order_with_name_id_and_liveness() {
+        let host = FakeHost::new();
+        let alpha = host.with_agent("alpha", true, false);
+        let beta = host.with_agent("beta", false, false);
+        let corpse = host.with_status("gamma", Some(AgentStatus::Killed), false);
+        let (table, notify) = wiring(&host);
+
+        let out = call(
+            &table,
+            "agent.resolve",
+            json!({ "targets": ["beta", alpha.to_string(), "gamma", "alpha"] }),
+        )
+        .expect("전부 풀린다");
+        assert_eq!(
+            out,
+            json!({ "agents": [
+                { "target": "beta", "id": beta.to_string(), "name": "beta", "live": false },
+                { "target": alpha.to_string(), "id": alpha.to_string(), "name": "alpha", "live": true },
+                { "target": "gamma", "id": corpse.to_string(), "name": "gamma", "live": false },
+                { "target": "alpha", "id": alpha.to_string(), "name": "alpha", "live": true },
+            ]})
+        );
+        assert_eq!(*notify.calls.lock().unwrap(), 0, "조회는 명부를 안 바꾼다");
+    }
+
+    /// ★`live` 는 `agent.list` 의 `state` 와 한 판정이다★ — 세션이 남아 있어도 끝난 화신(reaper 가 아직 안 거둠)은
+    /// 산 것이 아니다(ADR-0116).
+    #[test]
+    fn resolve_and_list_agree_on_liveness() {
+        let host = FakeHost::new();
+        host.with_status("exiting", Some(AgentStatus::Exiting), false);
+        host.with_status("exited", Some(AgentStatus::Exited { code: Some(0) }), false);
+        host.with_agent("asleep", false, false);
+        let (table, _notify) = wiring(&host);
+
+        let listed = call(&table, "agent.list", json!({})).expect("조회");
+        let resolved = call(
+            &table,
+            "agent.resolve",
+            json!({ "targets": ["exiting", "exited", "asleep"] }),
+        )
+        .expect("조회");
+        for (row, answer) in listed["agents"]
+            .as_array()
+            .expect("배열")
+            .iter()
+            .zip(resolved["agents"].as_array().expect("배열"))
+        {
+            assert_eq!(
+                answer["live"].as_bool(),
+                Some(row["state"] == AGENT_STATE_LIVE),
+                "{row} / {answer}"
+            );
+        }
+    }
+
+    /// 셸이 읽는 꼴 그대로 — `targets[` + 10진 자리 + `]: `. 꼴이 어긋나면 `None`.
+    fn failing_position(message: &str) -> Option<usize> {
+        let rest = message.strip_prefix("targets[")?;
+        let (digits, after) = rest.split_once(']')?;
+        after.strip_prefix(": ")?;
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        digits.parse().ok()
+    }
+
+    /// ★말 하나 때문에 난 실패는 그 코드 그대로이고 문구가 `targets[i]: ` 로 시작한다 — 셸이 이 머리를 읽는다★
+    /// (선언 머리 주석). 빈 말이 여럿이면 머리는 첫 자리다.
+    // ADR-0307
+    #[test]
+    fn the_resolve_failure_prefix_is_a_stable_contract() {
+        let host = FakeHost::new();
+        host.with_agent("alpha", true, false);
+        host.with_agent("twin", false, false);
+        host.with_agent("twin", false, false);
+        let (table, _notify) = wiring(&host);
+        let fail = |targets: serde_json::Value| {
+            call(&table, "agent.resolve", json!({ "targets": targets })).expect_err("실패")
+        };
+
+        let missing = fail(json!(["alpha", "ghost"]));
+        assert_eq!(missing.code(), ErrorCode::NotFound);
+        assert_eq!(
+            failing_position(missing.message()),
+            Some(1),
+            "{}",
+            missing.message()
+        );
+        assert!(
+            missing
+                .message()
+                .starts_with("targets[1]: no agent called 'ghost'"),
+            "{}",
+            missing.message()
+        );
+        assert!(
+            missing.message().ends_with(" — candidates: alpha, twin"),
+            "{}",
+            missing.message()
+        );
+
+        let ambiguous = fail(json!(["alpha", "alpha", "twin"]));
+        assert_eq!(ambiguous.code(), ErrorCode::Conflict);
+        assert_eq!(
+            failing_position(ambiguous.message()),
+            Some(2),
+            "{}",
+            ambiguous.message()
+        );
+        assert!(
+            ambiguous
+                .message()
+                .starts_with("targets[2]: more than one agent is called 'twin'"),
+            "{}",
+            ambiguous.message()
+        );
+
+        // 빈 말은 해석기에 닿기 전에 본다 — 앞 자리(0)의 없는 이름보다 뒤의 빈 말이 먼저 반려된다.
+        let blank = fail(json!(["ghost", "alpha", "  ", ""]));
+        assert_eq!(blank.code(), ErrorCode::InvalidArgument);
+        assert_eq!(
+            failing_position(blank.message()),
+            Some(2),
+            "{}",
+            blank.message()
+        );
+        assert!(
+            blank.message().starts_with("targets[2]: blank value"),
+            "{}",
+            blank.message()
+        );
+        assert!(
+            blank.message().ends_with("(also blank: targets[3])"),
+            "나머지 빈 자리도 한 번에 댄다: {}",
+            blank.message()
+        );
+    }
+
+    #[test]
+    fn resolve_takes_one_to_eight_targets() {
+        let host = FakeHost::new();
+        host.with_agent("alpha", false, false);
+        let (table, _notify) = wiring(&host);
+
+        for count in [0, RESOLVE_TARGETS_MAX + 1] {
+            let err = call(
+                &table,
+                "agent.resolve",
+                json!({ "targets": vec!["alpha"; count] }),
+            )
+            .expect_err("개수 밖");
+            assert_eq!(err.code(), ErrorCode::InvalidArgument, "{count}");
+            assert_eq!(
+                failing_position(err.message()),
+                None,
+                "개수 반려는 말 하나의 실패가 아니라 머리가 없다: {}",
+                err.message()
+            );
+        }
+        let out = call(
+            &table,
+            "agent.resolve",
+            json!({ "targets": vec!["alpha"; RESOLVE_TARGETS_MAX] }),
+        )
+        .expect("상한까지는 받는다");
+        assert_eq!(
+            out["agents"].as_array().map(Vec::len),
+            Some(RESOLVE_TARGETS_MAX)
+        );
+    }
+
+    /// ★답 모양을 파일에 못 박는다★ — 셸은 이 crate 를 의존하지 않고 답을 타입 없는 JSON 으로 읽으며, 셸 시험의
+    /// 가짜 데몬이 같은 파일로 답을 짓는다(TRD S28 §6). 칸 이름이 바뀌면 여기나 셸 쪽이 빨개진다.
+    // ADR-0307
+    #[test]
+    fn the_resolve_reply_matches_the_golden_fixture() {
+        let golden: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/agent_resolve_ok.json"))
+                .expect("골든은 JSON");
+        let host = FakeHost::new();
+        for (id, name, live) in [
+            ("11111111-1111-4111-8111-111111111111", "alpha", true),
+            ("22222222-2222-4222-8222-222222222222", "beta", false),
+        ] {
+            host.rows.lock().unwrap().push(AgentRosterRow {
+                id: id.parse().expect("고정 id"),
+                canonical_name: name.to_string(),
+                cwd: format!("C:/work/{name}"),
+                parent: None,
+                live: live.then_some(AgentStatus::Running),
+            });
+        }
+        let (table, _notify) = wiring(&host);
+
+        let out = call(
+            &table,
+            "agent.resolve",
+            json!({ "targets": ["alpha", "beta"] }),
+        )
+        .expect("풀린다");
+        assert_eq!(out, golden);
     }
 
     #[test]

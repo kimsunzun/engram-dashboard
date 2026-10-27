@@ -14,7 +14,7 @@ use super::manager::{ViewManager, WindowLabel, MAIN_WINDOW_LABEL};
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WindowArgError {
     /// 숫자만 준 인자 — 창 번호로 읽힌다.
-    #[error("창 번호는 창 인자로 받지 않는다 — 번호는 다시 쓰인다. window.list 의 details 에서 그 번호의 window_id 를 찾아 넘기라")]
+    #[error("창 번호는 창 인자로 받지 않는다 — 번호는 다시 쓰인다. window.list 의 details 에서 그 번호의 window_id 를 찾아 넘기거나, layout.get 줄의 window(label)를 넘기라")]
     NumberGiven,
     /// 지금 모델에 그 창이 없다 — 닫힌 창의 영속 id · 앞 실행의 label · 닫힌 창의 label · 모르는 낱말. 받은 인자를 싣는다.
     #[error("window 없음: {0} — window.list 의 창 label 이나 그 창의 window_id 를 넘기라(label 은 그 실행 안에서만 맞는다)")]
@@ -202,9 +202,9 @@ mod tests {
                 "{number:?}"
             );
         }
-        assert!(WindowArgError::NumberGiven
-            .to_string()
-            .contains("window_id"));
+        let message = WindowArgError::NumberGiven.to_string();
+        assert!(message.contains("window_id"), "{message}");
+        assert!(message.contains("layout.get"), "{message}");
     }
 
     #[test]

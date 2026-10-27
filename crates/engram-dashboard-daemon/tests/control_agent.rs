@@ -264,6 +264,7 @@ impl Fixture {
                 vec![engram_dashboard_command::CommandDecl {
                     name: name.to_string(),
                     help: help.to_string(),
+                    agent_args: Vec::new(),
                 }],
             )
             .expect("붙어 있는 연결의 등록");
@@ -1247,6 +1248,7 @@ async fn the_listing_carries_both_sources_with_the_help_bytes_intact() {
             "agent.move",
             "agent.new",
             "agent.rename",
+            "agent.resolve",
             "agent.spawn",
             "tab.create",
             "usage.get",
@@ -2009,6 +2011,21 @@ mod resolver_alignment {
             mail_resolution(&fixture, padded),
             Resolution::Found(alice),
             "우편 입구는 콤마 분해 잔여 공백을 구제한다(그 trim 을 지우지 말 것)"
+        );
+
+        // ★알고 남긴 불일치 둘째 — id 철자 축★: 제어는 `Uuid` 가 읽는 철자 전부를 id 로 받고(데몬이 셸 명령의 옛
+        //   `agent_id` 도 이 해석기로 바꾸므로 대문자 id 를 보내던 호출자가 막히지 않게 — ADR-0308) 우편은 정규 철자만
+        //   받는다. 이것도 양쪽을 다 단언해 어느 쪽이든 조용히 뒤집히지 않게 한다.
+        let shouted = alice.to_string().to_uppercase();
+        assert_eq!(
+            control_resolution(&fixture, &shouted),
+            Resolution::Found(alice),
+            "제어는 대문자 id 철자도 id 로 읽는다"
+        );
+        assert_eq!(
+            mail_resolution(&fixture, &shouted),
+            Resolution::NotFound,
+            "우편은 정규 철자만 id 로 읽는다"
         );
 
         // 대조가 **무의미하게** 통과하지 않았음을 못박는다 — 세 결말이 실제로 다 나왔어야 한다.

@@ -17,20 +17,29 @@
 //! - **구독 재동기만 락 안** = ADR 이 아니라 `output_router::rebuild` 의 호출 계약(load→계산→store 의
 //!   RMW 직렬화)과 그 위에 얹힌 F1/F2 수정이 근거다. 정본 = 그 함수 주석.
 //!
-//! invalid view_id/slot_id/window → no-op + Err(패닉·부분변경 금지). 오류는 문자열이고, 도킹(`dock_tab`)만 종류로
-//! 가를 수 있는 `DockError` 다.
+//! invalid view_id/slot_id/window → no-op + Err(패닉·부분변경 금지). 오류는 문자열이고, 종류로 가를 수 있는 것은
+//! 도킹(`dock_tab`)의 `DockError` · 대상판 도킹(`dock_target`)의 `TargetDockError` · 대상판 칸 · 탭 쓰기(`*_at`)의
+//! `TargetError` · 낱말판 스폰(`spawn_into_at`)의 `SpawnAtError` 넷이다.
 //!
 //! ## 함수가 받는 포트 = 그 명령이 건드리는 것
 //! 인자에 없는 포트는 **그 경로가 그것을 건드리지 않는다는 뜻**이다 — `focus_slot`·`rename_tab`·
 //! `set_split_ratio` 에 `SubscriptionSync` 가 없는 것은 누락이 아니라 라우팅 불변(ADR-0066)의 표현이고,
 //! `close_window` 에 `LayoutEvents` 가 없는 것은 그 경로가 프론트에 아무것도 안 쏜다는 사실이다.
 //!
-//! read-only 5종(`get_view`·`list_tabs`·`list_windows`·`resolve_spatial`·`list_splits`)은 변형이 없어
-//! 포트를 하나도 받지 않는다(앞 넷은 ADR-0156 결정 2로 v1 명령 범위에 합류 · `list_splits` 는 ADR-0227).
+//! read-only 8종(`get_view`·`list_tabs`·`list_windows`·`resolve_spatial`·`list_splits`·`layout_rows`·
+//! `layout_rows_of`·`agent_places`)은 변형이 없어 포트를 하나도 받지 않는다(앞 넷은 ADR-0156 결정 2로 v1 명령
+//! 범위에 합류 · `list_splits` 는 ADR-0227 · 뒤 셋은 TRD S28 §4-5).
 //!
 //! 측정 보고 2종(`report_window_canvas`·`report_ui_metrics`)도 포트를 받지 않는다 — 셸
 //! 상태에 쓰지만 version·알림·구독 어느 것도 건드리지 않는다(측정이지 제어가 아니다 — ADR-0227).
+//!
+//! ## 대상판(`*_at` · `dock_target`)
+//! id 를 받는 쓰기 곁에 [`Target`](에이전트 · 공간 낱말 · id)을 받는 판이 있다 — LLM 명령이 쓴다(TRD S28 §5-2). 대상은
+//! **바꾸는 그 락 안에서** 풀므로(`target::locate`) 풀고 적용하는 사이에 끼어든 쓰기가 엉뚱한 탭을 바꾸게 하지 못한다.
+//! 배치를 바꾸는 대상판은 바꾼 탭의 배치 줄도 그 락에서 떠 결말([`Wrote`] · [`DockOutcome::rows`])에 싣는다(TRD S28 §7).
+//! id 판은 그대로다 — 마우스 · 웹 · 놓기 명령이 부른다. 두 판의 락 · 포트 규율은 같다.
 
+use std::fmt::Display;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -43,8 +52,10 @@ use super::manager::{
     CloseTabOutcome, DockError, DockMove, DockTo, Docked, FocusPolicy, NewWindowPlan, ViewId,
     ViewManager, WindowLabel, WindowTabsSnapshot, MAIN_WINDOW_LABEL,
 };
+use super::rows::{self, LayoutRow, RowFilter};
 use super::spatial::{resolve_spatial as resolve_spatial_token, SpatialToken};
 use super::tab_name::window_title;
+use super::target::{self, locate, seam_share, LocateError, Located, Place, Target};
 use super::tree::{self, SplitInfo};
 use super::types::{
     SlotContent, SplitDir, SplitRatioApplied, SplitRatioOutcome, UiMetrics, ViewMeta, ViewSnapshot,
@@ -821,6 +832,35 @@ pub async fn spawn_into(
     backend: Option<String>,
     cwd: String,
 ) -> Result<String, String> {
+    spawn_into_placed(
+        state,
+        subs,
+        events,
+        spawner,
+        Some(window),
+        tab,
+        slot,
+        backend,
+        cwd,
+    )
+    .await
+    .map(|placed| placed.out)
+}
+
+/// [`spawn_into`] 의 결말판 — 띄운 에이전트 id(`out`) · 놓인 자리 · 그 탭의 배치 줄(놓은 그 락에서 뜬다 · TRD S28 §7).
+/// `window` = 놓을 창 — `None` 이면 `tab` 을 준 경우 그 탭의 창, 아니면 main. 거절 문구는 `spawn_into` 와 같다.
+// ADR-0307
+pub async fn spawn_into_placed(
+    state: &LayoutState,
+    subs: &dyn SubscriptionSync,
+    events: &dyn LayoutEvents,
+    spawner: &dyn AgentSpawner,
+    window: Option<&str>,
+    tab: Option<Uuid>,
+    slot: Option<Uuid>,
+    backend: Option<String>,
+    cwd: String,
+) -> Result<Wrote<String>, String> {
     // ── 0) 스폰 전 검증(에이전트 생성 이전이라 alive_err 불필요 — 아직 아무것도 안 죽음) ──────────────
     let backend = match backend.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
         None => None,
@@ -832,7 +872,135 @@ pub async fn spawn_into(
                 .to_string(),
         );
     }
+    // 탭을 주면 그 탭의 창에 놓는다 — 창이 그 탭의 주인이 아니면 띄우지 않는다. 띄운 뒤에 알면 놓을 곳 없는 에이전트가
+    //   살아 남는다(아래 배치 락의 같은 판정은 띄우는 사이 탭이 옮겨진 경합 몫이다).
+    let window = {
+        let mgr = state.0.lock().map_err(|e| e.to_string())?;
+        spawn_window(&mgr, window, tab)?
+    }; // ← 락 드롭
+    let window = window.as_str();
 
+    spawn_then_place(state, subs, events, spawner, window, backend, cwd, |mgr| {
+        let view_id = match tab {
+            Some(v) => {
+                if mgr.owner_of(v).map(|l| l.as_str()) != Some(window) {
+                    return Err(format!("view {v} 가 창 {window} 의 탭이 아님"));
+                }
+                v
+            }
+            // tab=None → 새 탭(빈 root 1개). slot 은 위 가드에서 None 확정 → resolve 는 항상 그 빈 root 로
+            // 성공한다(orphan 탭 불가 — FIX 3). create_tab 만이 여기서 유일한 실패 지점(창 부재).
+            None => mgr.create_tab(window, None).map_err(|e| e.to_string())?,
+        };
+        let target_slot = mgr
+            .resolve_spawn_slot(view_id, slot)
+            .map_err(|e| e.to_string())?;
+        Ok((view_id, target_slot))
+    })
+    .await
+}
+
+// 띄울 창 — 탭을 주면 그 탭의 주인 창(`window` 를 줬으면 그 창이어야 한다), 아니면 `window` · main.
+fn spawn_window(
+    mgr: &ViewManager,
+    window: Option<&str>,
+    tab: Option<ViewId>,
+) -> Result<WindowLabel, String> {
+    let Some(view) = tab else {
+        return Ok(window.unwrap_or(MAIN_WINDOW_LABEL).to_string());
+    };
+    let owner = mgr
+        .owner_of(view)
+        .ok_or_else(|| format!("view {view} 없음. 스폰 안 함."))?;
+    match window {
+        Some(window) if window != owner.as_str() => Err(format!(
+            "view {view} 가 창 {window} 의 탭이 아님(그 탭은 창 {owner}). 스폰 안 함."
+        )),
+        _ => Ok(owner.clone()),
+    }
+}
+
+/// [`spawn_into_at`] 의 거절.
+// ADR-0307
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SpawnAtError {
+    /// 스폰 전 — 낱말이 그 창 보이는 탭에서 칸을 못 집었거나(창 없음 포함) 그 칸에 띄울 수 없다(점유). 띄운 것이 없다.
+    #[error("{0}. 스폰 안 함.")]
+    Unplaced(TargetError),
+    /// 그 밖 — 문구는 [`spawn_into`] 의 것과 같은 꼴이다(스폰 전 거절은 「스폰 안 함」, 스폰 뒤 배치 실패는 살아 있는
+    /// 에이전트 id).
+    #[error("{0}")]
+    Failed(String),
+}
+
+/// [`spawn_into`] 의 공간 낱말판 — 창 `window` 의 보이는 탭에서 `at` 이 집는 칸에 띄운다. 그 칸은 비어 있어야 한다
+/// (`resolve_spawn_slot` 의 점유 판정). 결말 = 에이전트 id(`out`) · 푼 자리 · 그 탭의 배치 줄(놓은 그 락에서 뜬다).
+///
+/// 낱말은 두 번 푼다(TRD S28 §5-2): 스폰 전 락에서 한 번 — 못 집거나 점유면 스폰하지 않고 끝낸다 — 그리고 배치 락(스폰 뒤
+/// 첫 락)에서 다시 — 스폰하는 사이 배치가 바뀌어 그때 못 집거나 점유거나 ★확인한 칸과 다른 칸을 집으면★(상대 낱말은 포커스를
+/// 따라간다) 다른 칸에 놓지 않는다. 스폰은 이미 됐으므로 [`spawn_into`] 의 배치 실패와 같은 문구(살아 있는 에이전트 id)다.
+// ADR-0307
+pub async fn spawn_into_at(
+    state: &LayoutState,
+    subs: &dyn SubscriptionSync,
+    events: &dyn LayoutEvents,
+    spawner: &dyn AgentSpawner,
+    window: &str,
+    at: SpatialToken,
+    backend: Option<String>,
+    cwd: String,
+) -> Result<Wrote<String>, SpawnAtError> {
+    let backend = match backend.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
+        None => None,
+        Some(word) => Some(parse_backend(word).map_err(SpawnAtError::Failed)?),
+    };
+    let target = Target::At {
+        token: at,
+        window: Some(window.to_string()),
+    };
+    let checked = {
+        let mgr = lock_for(state).map_err(SpawnAtError::Unplaced)?;
+        spawn_slot_at(&mgr, &target).map_err(SpawnAtError::Unplaced)?
+    }; // ← 락 드롭
+    spawn_then_place(state, subs, events, spawner, window, backend, cwd, |mgr| {
+        let now = spawn_slot_at(mgr, &target).map_err(|e| e.to_string())?;
+        if now != checked {
+            return Err(format!(
+                "'{}' 이 스폰하는 사이 다른 칸을 집는다 — 확인한 칸 {} 대신 {}",
+                at.as_str(),
+                checked.1,
+                now.1
+            ));
+        }
+        Ok(now)
+    })
+    .await
+    .map_err(SpawnAtError::Failed)
+}
+
+// 낱말 대상 `target` 이 집는 칸이 띄울 수 있는 빈 칸인가 — (탭, 칸). 점유 · 없는 칸의 거절 문구는 `resolve_spawn_slot` 의
+//   것 그대로다(`TargetError::Apply`).
+fn spawn_slot_at(mgr: &ViewManager, target: &Target) -> Result<(ViewId, Uuid), TargetError> {
+    let (at, slot) = locate_slot(mgr, target)?;
+    let slot = mgr
+        .resolve_spawn_slot(at.view, Some(slot))
+        .map_err(applied)?;
+    Ok((at.view, slot))
+}
+
+// 스폰(락 미보유 async — 데몬 왕복) 뒤 배치(락 보유 단일 임계구역). `place` = 그 락 안에서 (탭, 빈 칸)을 고른다 —
+//   실패 문구는 살아 있는 에이전트 id 를 붙여 낸다(spawn-first — 위 「실패 가시성」). 결말 = 에이전트 id · 놓인 자리 · 그
+//   탭의 배치 줄(같은 락).
+async fn spawn_then_place(
+    state: &LayoutState,
+    subs: &dyn SubscriptionSync,
+    events: &dyn LayoutEvents,
+    spawner: &dyn AgentSpawner,
+    window: &str,
+    backend: Option<AgentBackendKind>,
+    cwd: String,
+    place: impl FnOnce(&mut ViewManager) -> Result<(ViewId, Uuid), String>,
+) -> Result<Wrote<String>, String> {
     // ── 1) 스폰(락 미보유 async — 데몬 왕복) ──────────────────────────────────────────────────
     let agent_id = spawner.spawn_by_cwd(cwd, backend).await?;
 
@@ -840,30 +1008,14 @@ pub async fn spawn_into(
     let alive_err = |detail: String| {
         format!("배치 실패({detail}) — 에이전트 {agent_id} 는 살아있음(list_agents 로 재부착 가능)")
     };
-    let (view_id, layout, tabs) = {
+    let (view_id, target_slot, layout, tabs, rows) = {
         // 락 획득 실패(mutex poison)도 생존 agent id 를 남긴다(FIX 4 — id 유실 금지).
         let mut mgr = state
             .0
             .lock()
             .map_err(|e| alive_err(format!("레이아웃 락 획득 실패: {e}")))?;
 
-        let view_id = match tab {
-            Some(v) => {
-                if mgr.owner_of(v).map(|l| l.as_str()) != Some(window) {
-                    return Err(alive_err(format!("view {v} 가 창 {window} 의 탭이 아님")));
-                }
-                v
-            }
-            // tab=None → 새 탭(빈 root 1개). slot 은 위 가드에서 None 확정 → resolve 는 항상 그 빈 root 로
-            // 성공한다(orphan 탭 불가 — FIX 3). create_tab 만이 여기서 유일한 실패 지점(창 부재).
-            None => mgr
-                .create_tab(window, None)
-                .map_err(|e| alive_err(e.to_string()))?,
-        };
-
-        let target_slot = mgr
-            .resolve_spawn_slot(view_id, slot)
-            .map_err(|e| alive_err(e.to_string()))?;
+        let (view_id, target_slot) = place(&mut mgr).map_err(alive_err)?;
 
         // 배정(점유 검사는 위 resolve 가 이미 함 — assign 은 빈 슬롯 확정 후에만 닿음).
         mgr.assign_agent(view_id, target_slot, agent_id.clone())
@@ -872,12 +1024,21 @@ pub async fn spawn_into(
         let layout = mgr.snapshot(view_id).ok();
         let tabs = tabs_payload(&mgr, window);
         subs.resync(&mgr);
-        (view_id, layout, tabs)
+        let rows = rows::rows_of_views(&mgr, &[view_id]);
+        (view_id, target_slot, layout, tabs, rows)
     }; // ← 락 드롭
     notify(events, layout, tabs);
 
     tracing::info!(agent = %agent_id, window = %window, view = %view_id, "spawn_into 완료(스폰+배치)");
-    Ok(agent_id)
+    Ok(Wrote {
+        at: Located {
+            window: window.to_string(),
+            view: view_id,
+            slot: Some(target_slot),
+        },
+        out: agent_id,
+        rows,
+    })
 }
 
 /// 슬롯 분리(pop-out)의 결말 — 콘텐츠가 내려앉은 창 label + 그것을 실은 **새 탭**의 View id + 그 창의 영속 id · 번호
@@ -916,6 +1077,61 @@ pub fn move_slot_to_window(
     slot_id: Uuid,
     to_window: Option<String>,
 ) -> Result<SlotMove, String> {
+    move_slot(
+        state,
+        subs,
+        events,
+        host,
+        labels,
+        |_| Ok((view_id, slot_id, ())),
+        to_window,
+        false,
+    )
+    .map(|(moved, (), _)| moved)
+    .map_err(|e| e.to_string())
+}
+
+/// [`move_slot_to_window`] 의 대상판 — 옮길 칸을 phase A(떼어 낼 내용을 뜨는 락) 안에서 푼다. 결말 = 푼 자리 · 옮긴 결말
+/// (`out`) · 원본 탭과 새 탭의 배치 줄(삽입하는 phase C 락에서 뜬다 — 원본 탭이 그 사이 사라졌으면 새 탭 것만). 거절 문구는
+/// id 판과 같다(`TargetError::Apply`).
+// ADR-0307
+pub fn move_slot_to_window_at(
+    state: &LayoutState,
+    subs: &dyn SubscriptionSync,
+    events: &dyn LayoutEvents,
+    host: &dyn WindowHost,
+    labels: &dyn LabelSource,
+    target: &Target,
+    to_window: Option<String>,
+) -> Result<Wrote<SlotMove>, TargetError> {
+    move_slot(
+        state,
+        subs,
+        events,
+        host,
+        labels,
+        |mgr| {
+            let (at, slot) = locate_slot(mgr, target)?;
+            Ok((at.view, slot, at))
+        },
+        to_window,
+        true,
+    )
+    .map(|(out, at, rows)| Wrote { at, out, rows })
+}
+
+// `pick` = phase A 의 락 안에서 옮길 (탭, 칸)과 부르는 쪽에 돌려줄 것을 고른다. `with_rows` = phase C 의 락에서 원본 탭 · 새 탭의
+//   배치 줄을 뜨나(대상판만).
+fn move_slot<T>(
+    state: &LayoutState,
+    subs: &dyn SubscriptionSync,
+    events: &dyn LayoutEvents,
+    host: &dyn WindowHost,
+    labels: &dyn LabelSource,
+    pick: impl FnOnce(&ViewManager) -> Result<(ViewId, Uuid, T), TargetError>,
+    to_window: Option<String>,
+    with_rows: bool,
+) -> Result<(SlotMove, T, Vec<LayoutRow>), TargetError> {
     let is_new_window = to_window.is_none();
     let (target_label, claim) = match to_window {
         Some(label) => (label, None),
@@ -934,18 +1150,15 @@ pub fn move_slot_to_window(
     //   phase C attach(owner 부여) 또는 롤백(`drop_detached_view`) 둘 중 하나다.
     //   ⚠️ 「views 전체를 순회하며 owner 를 요구/가정」하는 코드를 나중에 넣을 때는 이 일시 owner-less View 를
     //   전제로 깔아야 한다(무조건 owner 있음 가정 = 이 op 중 패닉).
-    let detached = state
-        .0
-        .lock()
-        .map_err(|e| e.to_string())
-        .and_then(|mut mgr| {
-            let detached = mgr
-                .prepare_detached_view(view_id, slot_id)
-                .map_err(|e| e.to_string())?;
-            subs.resync(&mgr);
-            Ok(detached)
-        }); // ← 락 드롭
-    let (tmp_view, src_content) = match detached {
+    let detached = lock_for(state).and_then(|mut mgr| {
+        let (view_id, slot_id, picked) = pick(&mgr)?;
+        let detached = mgr
+            .prepare_detached_view(view_id, slot_id)
+            .map_err(applied)?;
+        subs.resync(&mgr);
+        Ok((view_id, slot_id, picked, detached))
+    }); // ← 락 드롭
+    let (view_id, slot_id, picked, (tmp_view, src_content)) = match detached {
         Ok(detached) => detached,
         Err(e) => {
             // 아직 연 창이 없다 — 맡긴 예열 창만 되물린다.
@@ -960,18 +1173,18 @@ pub fn move_slot_to_window(
     if is_new_window {
         if let Err(e) = host.open(&target_label) {
             rollback_detached(state, subs, tmp_view);
-            return Err(e);
+            return Err(TargetError::Apply(e));
         }
     } else if !host.is_open(&target_label) {
         rollback_detached(state, subs, tmp_view);
-        return Err(format!("대상 창 없음: {target_label}"));
+        return Err(TargetError::Apply(format!("대상 창 없음: {target_label}")));
     }
 
     // ── phase C(락): 임시 View 를 타깃 창 탭으로 삽입(★기존창 재검증★) + 소스 슬롯 close ───────────
-    let (src_tabs, tgt_tabs, src_layout) = {
+    let (src_tabs, tgt_tabs, src_layout, rows) = {
         // 락이 오염됐으면 임시 View 는 거두지 못하지만(`rollback_detached` 와 같다) 연 창은 거둔다 — `Err` 면 떠 있는
         //   새 창이 없다(창 포트 계약).
-        let mut mgr = match state.0.lock().map_err(|e| e.to_string()) {
+        let mut mgr = match lock_for(state) {
             Ok(mgr) => mgr,
             Err(e) => {
                 tracing::warn!(
@@ -1003,7 +1216,7 @@ pub fn move_slot_to_window(
             if is_new_window {
                 withdraw_new_window(host, &target_label, claim.as_ref());
             }
-            return Err(format!("탭 삽입 실패(롤백): {e}"));
+            return Err(TargetError::Apply(format!("탭 삽입 실패(롤백): {e}")));
         }
 
         // ★MOVE→COPY 열화는 의도된 best-effort★: phase B(언락) 동안 소스 슬롯이 다른 콘텐츠로 재배정되면
@@ -1031,7 +1244,12 @@ pub fn move_slot_to_window(
         let tgt_tabs = tabs_payload(&mgr, &target_label);
         let src_layout = mgr.snapshot(view_id).ok();
         subs.resync(&mgr);
-        (src_tabs, tgt_tabs, src_layout)
+        let rows = if with_rows {
+            rows::rows_of_views(&mgr, &[view_id, tmp_view])
+        } else {
+            Vec::new()
+        };
+        (src_tabs, tgt_tabs, src_layout, rows)
     }; // ← 락 드롭
 
     announce(
@@ -1047,13 +1265,17 @@ pub fn move_slot_to_window(
     }
 
     tracing::info!(window = %target_label, view = %tmp_view, "슬롯 MOVE 완료(detach)");
-    let target = window_answer(&target_label, tgt_tabs.as_ref())?;
-    Ok(SlotMove {
-        window: target.window,
-        tab: tmp_view,
-        window_id: target.window_id,
-        number: target.number,
-    })
+    let target = window_answer(&target_label, tgt_tabs.as_ref()).map_err(TargetError::Apply)?;
+    Ok((
+        SlotMove {
+            window: target.window,
+            tab: tmp_view,
+            window_id: target.window_id,
+            number: target.number,
+        },
+        picked,
+        rows,
+    ))
 }
 
 // phase A 임시 View 롤백(창 삽입 전이라 tabs 갱신 불필요). 소스 슬롯은 유지 — 사용자가 슬롯을 잃지 않는다.
@@ -1090,6 +1312,7 @@ pub enum DockDest {
     TabBar {
         window: WindowLabel,
         index: Option<usize>,
+        after: Option<ViewId>,
     },
     /// 그 탭만 든 창(PRD R22) — label 은 적용 서비스가 고른다. 출처가 탭 하나뿐인 팝아웃이면 새 창 없이 그 창을
     /// `at` 으로 옮긴다(재사용). `at.size` 가 없으면 새 창 = 출처 팝아웃의 보통 크기(메인이면 팝아웃 기본
@@ -1097,9 +1320,16 @@ pub enum DockDest {
     NewWindow { at: WindowPlace },
 }
 
-/// [`dock_tab`] 의 결말.
+/// [`dock_tab`] · [`dock_target`] 의 결말.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DockOutcome {
+    /// 모델을 바꿨나 — 같은 창 같은 자리의 탭바 놓기 · 재사용(창만 옮긴다)은 거짓이다(TRD S28 §4-4).
+    pub changed: bool,
+    /// 결과 탭 — `Seam` = 살아남은 대상 탭(옮긴 탭은 그 안으로 들어가 지워졌다) · 그 밖 = 옮긴 탭.
+    pub tab: ViewId,
+    /// 배치가 바뀌었거나 새로 보이게 된 탭 — `tab` 먼저, 출처 창에서 새로 보이게 된 탭(main 에 새로 세운 빈 탭 포함)이
+    /// 뒤. 바꾼 것이 없으면 `tab` 하나.
+    pub views: Vec<ViewId>,
     /// 옮긴 것이 든 창.
     pub window: WindowLabel,
     /// 옮긴 탭의 슬롯 id(트리 전위 순) — 옮겨도 id 는 그대로다.
@@ -1115,8 +1345,12 @@ pub struct DockOutcome {
     pub prewarmed: bool,
     /// `window` 의 신원(뜻은 [`NewWindow`] 와 같다 — 새 창이든 기존 창이든 그 창의 것 · TRD S26-window-chrome §3-2).
     /// 결말을 짓는 락에서 뜬다 — 새 창 · `Seam` · `TabBar` 는 늘 `Some`, 재사용은 창을 옮기는 사이 그 창이 닫혔으면
-    /// `None` 이다.
+    /// `None` 이다. `None` 이어도 결말은 성공이다(옮길 것은 이미 다 옮겼다 — TRD S28 §4-4).
     pub identity: Option<NewWindow>,
+    /// `views` 의 배치 줄 — `window` · `tab` · `identity` 와 **같은 락**에서 뜬다(명령 답이 한 순간의 모습이게 — TRD S28
+    /// §4-4). 대상판([`dock_target`])만 채우고 id 판([`dock_tab`])은 비운다(마우스 경로는 줄을 읽지 않는다).
+    // ADR-0307
+    pub rows: Vec<LayoutRow>,
 }
 
 /// 탭 `req.view` 를 `req.to` 로 옮긴다. `Err` 면 모델이 그대로이고 알림도 없다 — 그사이 연 새 창은
@@ -1145,7 +1379,11 @@ pub fn dock_tab(
         focus,
         mv,
     } = req;
-    let ask = DockAsk { view, focus, mv };
+    let ask = DockAsk {
+        focus,
+        mv,
+        rows: false,
+    };
     let (mode, result) = match to {
         DockDest::Seam {
             target,
@@ -1154,39 +1392,62 @@ pub fn dock_tab(
             share,
         } => (
             "seam",
-            dock_in_place(
-                state,
-                subs,
-                events,
-                host,
-                &ask,
-                DockTo::Seam {
-                    target,
-                    anchor,
-                    side,
-                    share,
-                },
-            ),
+            dock_in_place(state, subs, events, host, &ask, |_| {
+                Ok::<_, DockError>((
+                    view,
+                    DockTo::Seam {
+                        target,
+                        anchor,
+                        side,
+                        share,
+                    },
+                ))
+            }),
         ),
-        DockDest::TabBar { window, index } => (
+        DockDest::TabBar {
+            window,
+            index,
+            after,
+        } => (
             "tab_bar",
-            dock_in_place(
-                state,
-                subs,
-                events,
-                host,
-                &ask,
-                DockTo::TabBar { window, index },
-            ),
+            dock_in_place(state, subs, events, host, &ask, |_| {
+                Ok((
+                    view,
+                    DockTo::TabBar {
+                        window,
+                        index,
+                        after,
+                    },
+                ))
+            }),
         ),
         DockDest::NewWindow { at } => (
             "new_window",
-            dock_into_window(state, subs, events, host, labels, &ask, at),
+            dock_into_window(
+                state,
+                subs,
+                events,
+                host,
+                labels,
+                &ask,
+                at,
+                |_| Ok(view),
+                |_, _, _| Ok(()),
+            ),
         ),
     };
-    match &result {
+    log_dock(mode, &view, &result);
+    result.map(|(out, _)| out)
+}
+
+fn log_dock<E: Display>(
+    mode: &str,
+    subject: &dyn std::fmt::Debug,
+    result: &Result<(DockOutcome, DockNotes), E>,
+) {
+    match result {
         Ok((out, notes)) => tracing::info!(
-            view = %view,
+            view = %notes.view,
             mode = if out.reused { "reuse" } else { mode },
             window = %out.window,
             emptied = out.emptied.as_deref(),
@@ -1195,20 +1456,36 @@ pub fn dock_tab(
             changed = notes.unchanged.then_some(false),
             "도킹 적용"
         ),
-        Err(e) => tracing::debug!(view = %view, mode, reason = %e, "도킹 거절 — 모델 그대로"),
+        Err(e) => {
+            tracing::debug!(view = ?subject, mode, reason = %e, "도킹 거절 — 모델 그대로")
+        }
     }
-    result.map(|(out, _)| out)
 }
 
 struct DockAsk {
-    view: ViewId,
     focus: FocusPolicy,
     mv: DockMove,
+    // 결말에 배치 줄을 싣나(`DockOutcome::rows`) — 대상판만.
+    rows: bool,
+}
+
+impl DockAsk {
+    // 결말의 배치 줄 — 결말을 짓는 그 락 안에서 부른다. `views` 가 비면(바꾼 것 없음) `shown` 하나의 줄.
+    fn rows(&self, mgr: &ViewManager, views: &[ViewId], shown: ViewId) -> Vec<LayoutRow> {
+        if !self.rows {
+            return Vec::new();
+        }
+        if views.is_empty() {
+            return rows::rows_of_views(mgr, &[shown]);
+        }
+        rows::rows_of_views(mgr, views)
+    }
 }
 
 // 끝 로그 몫 — 결말(`DockOutcome`)에 싣지 않는 것.
-#[derive(Default)]
 struct DockNotes {
+    // 옮긴 탭.
+    view: ViewId,
     // 같은 창 같은 자리의 탭바 놓기 — 모델이 그대로다.
     unchanged: bool,
 }
@@ -1231,9 +1508,11 @@ impl BeforeDock {
     }
 }
 
-// 성공한 `dock` 이 낼 알림 — 락 안에서 복사한다. 빈 값 = 무변경(같은 창 같은 자리의 탭바 놓기).
+// 성공한 `dock` 이 낼 알림 — 락 안에서 복사한다. 빈 값 = 무변경(같은 창 같은 자리의 탭바 놓기). `views` = `layouts` 의
+//   탭(차례 그대로 — 결말의 `views` 가 된다).
 #[derive(Default)]
 struct DockNews {
+    views: Vec<ViewId>,
     layouts: Vec<ViewSnapshot>,
     tabs: Vec<WindowTabsPayload>,
 }
@@ -1261,6 +1540,7 @@ impl DockNews {
         }
         DockNews {
             layouts: views.iter().filter_map(|v| mgr.snapshot(*v).ok()).collect(),
+            views,
             tabs: windows
                 .into_iter()
                 .filter_map(|label| tabs_payload(mgr, label))
@@ -1270,20 +1550,26 @@ impl DockNews {
 }
 
 // 모델을 바꾼 도킹의 락 밖 몫 — 알림 → 비어 지운 출처 팝아웃의 OS 창 닫기(모델이 먼저 지웠다 —
-// `close_tab` 과 같다). 결말을 돌려준다.
+// `close_tab` 과 같다). 결말을 돌려준다. `shown` = 결과 탭(`DockNews::collect` 의 그것).
 // ADR-0057
 fn finish_docked(
     events: &dyn LayoutEvents,
     host: &dyn WindowHost,
     docked: Docked,
-    news: &DockNews,
+    news: DockNews,
     identity: Option<NewWindow>,
+    shown: ViewId,
+    rows: Vec<LayoutRow>,
 ) -> DockOutcome {
     announce(events, &news.layouts, &news.tabs);
     if let Some(emptied) = &docked.emptied {
         host.close(emptied);
     }
+    let changed = !news.views.is_empty();
     DockOutcome {
+        changed,
+        tab: shown,
+        views: if changed { news.views } else { vec![shown] },
         window: docked.window,
         slot_ids: docked.slot_ids,
         emptied: docked.emptied,
@@ -1291,40 +1577,46 @@ fn finish_docked(
         reused: false,
         prewarmed: false,
         identity,
+        rows,
     }
 }
 
-// `Seam` · `TabBar` — 판정 · 변경 · 스냅숏 · 재동기가 락 한 번이다.
-fn dock_in_place(
+// `Seam` · `TabBar` — 대상 고르기 · 판정 · 변경 · 스냅숏 · 재동기가 락 한 번이다. `pick` = 그 락 안에서 (옮길 탭, 옮길
+//   곳)을 고른다 — 대상판은 거기서 대상을 푼다(TRD S28 §5-2).
+fn dock_in_place<E: From<DockError>>(
     state: &LayoutState,
     subs: &dyn SubscriptionSync,
     events: &dyn LayoutEvents,
     host: &dyn WindowHost,
     ask: &DockAsk,
-    to: DockTo,
-) -> Result<(DockOutcome, DockNotes), DockError> {
-    let shown = match &to {
-        DockTo::Seam { target, .. } => *target,
-        _ => ask.view,
-    };
-    let (docked, news, unchanged, identity) = {
+    pick: impl FnOnce(&ViewManager) -> Result<(ViewId, DockTo), E>,
+) -> Result<(DockOutcome, DockNotes), E> {
+    let (docked, news, identity, view, shown, rows) = {
         let mut mgr = sync::lock(&state.0);
-        let before = BeforeDock::take(&mgr, ask.view);
-        let docked = mgr.dock(ask.view, to, ask.focus, ask.mv.clone())?;
+        let (view, to) = pick(&mgr)?;
+        let shown = match &to {
+            DockTo::Seam { target, .. } => *target,
+            _ => view,
+        };
+        let before = BeforeDock::take(&mgr, view);
+        let docked = mgr.dock(view, to, ask.focus, ask.mv.clone())?;
         let news = DockNews::collect(&mgr, &before, &docked, shown);
-        let unchanged = mgr.version == before.version;
-        if !unchanged {
+        if mgr.version != before.version {
             subs.resync(&mgr);
         }
         let identity = NewWindow::in_model(&mgr, &docked.window);
-        (docked, news, unchanged, identity)
+        let rows = ask.rows(&mgr, &news.views, shown);
+        (docked, news, identity, view, shown, rows)
     }; // ← 락 드롭
-    let out = finish_docked(events, host, docked, &news, identity);
-    Ok((out, DockNotes { unchanged }))
+    let out = finish_docked(events, host, docked, news, identity, shown, rows);
+    let unchanged = !out.changed;
+    Ok((out, DockNotes { view, unchanged }))
 }
 
-// `NewWindow` — phase A(락): 새 창이 필요한가.
-fn dock_into_window(
+// `NewWindow` — phase A(락): 옮길 탭을 고르고(`pick`) 새 창이 필요한가. `recheck` = phase C 의 락에서 그 탭이 아직 옮길
+//   그 탭인가 — 아니면 그 오류로 연 창을 거둔다(대상판 · TRD S28 §4-3). 셋째 인자 = 그 탭이 있어야 할 창(새 창은 `None` —
+//   붙일 때 지금 창에서 뺀다 · 재사용은 다시 쓴 창 — 그 창을 떠났거나 닫혔으면 결말이 그 창을 말할 수 없다).
+fn dock_into_window<E: From<DockError> + Display>(
     state: &LayoutState,
     subs: &dyn SubscriptionSync,
     events: &dyn LayoutEvents,
@@ -1332,17 +1624,33 @@ fn dock_into_window(
     labels: &dyn LabelSource,
     ask: &DockAsk,
     at: WindowPlace,
-) -> Result<(DockOutcome, DockNotes), DockError> {
-    let plan = sync::lock(&state.0).plan_new_window(ask.view)?; // ← 락 드롭
+    pick: impl FnOnce(&ViewManager) -> Result<ViewId, E>,
+    recheck: impl FnOnce(&ViewManager, ViewId, Option<&str>) -> Result<(), E>,
+) -> Result<(DockOutcome, DockNotes), E> {
+    let (view, plan) = {
+        let mgr = sync::lock(&state.0);
+        let view = pick(&mgr)?;
+        (view, mgr.plan_new_window(view)?)
+    }; // ← 락 드롭
     match plan {
-        NewWindowPlan::Reuse { label } => reuse_source_window(state, host, ask, label, &at),
+        NewWindowPlan::Reuse { label } => {
+            reuse_source_window(state, host, ask, view, label, &at, recheck)
+        }
         NewWindowPlan::Create { size } => {
             let place = WindowPlace {
                 pos: at.pos,
                 size: at.size.or(size),
             };
-            let out = open_new_window(state, subs, events, host, labels, ask, &place)?;
-            Ok((out, DockNotes::default()))
+            let out = open_new_window(
+                state, subs, events, host, labels, ask, view, &place, recheck,
+            )?;
+            Ok((
+                out,
+                DockNotes {
+                    view,
+                    unchanged: false,
+                },
+            ))
         }
     }
 }
@@ -1351,41 +1659,48 @@ fn dock_into_window(
 //   묘비가 섰거나 출처 탭이 사라짐) 연 창을 거둔다 — 출처 창은 건드린 적이 없다.
 // ★예열 창은 `focus` 와 상관없이 묻는다★ — `Keep` 이어도 맡긴 창을 쓰고, 활성 여부는 `open_at` 이 그 맡김에 적는다
 //   (TRD S21-slot-docking §3-9 I4 · 사용자 결정 2026-10-21).
+// ★`recheck` 는 붙이는 그 락 안에서 `dock` 보다 먼저다★ — 거기서 실패하면 `dock` 이 거절했을 때와 같이 연 창만 거둔다.
 // ADR-0299
-fn open_new_window(
+fn open_new_window<E: From<DockError> + Display>(
     state: &LayoutState,
     subs: &dyn SubscriptionSync,
     events: &dyn LayoutEvents,
     host: &dyn WindowHost,
     labels: &dyn LabelSource,
     ask: &DockAsk,
+    view: ViewId,
     place: &WindowPlace,
-) -> Result<DockOutcome, DockError> {
+    recheck: impl FnOnce(&ViewManager, ViewId, Option<&str>) -> Result<(), E>,
+) -> Result<DockOutcome, E> {
     let (label, claim) = new_window_label(host, labels);
     if let Err(e) = host.open_at(&label, place, ask.focus == FocusPolicy::Reveal) {
         tracing::warn!(label = %label, "도킹 새 창을 열지 못함 — 모델 그대로: {e}");
-        return Err(DockError::WindowOpen(e));
+        return Err(DockError::WindowOpen(e).into());
     }
 
     let committed = {
         let mut mgr = sync::lock(&state.0);
-        let before = BeforeDock::take(&mgr, ask.view);
-        mgr.dock(
-            ask.view,
-            DockTo::NewWindow {
-                label: label.clone(),
-            },
-            ask.focus,
-            ask.mv.clone(),
-        )
-        .map(|docked| {
-            let news = DockNews::collect(&mgr, &before, &docked, ask.view);
-            let identity = NewWindow::in_model(&mgr, &label);
-            subs.resync(&mgr);
-            (docked, news, identity)
+        recheck(&mgr, view, None).and_then(|()| {
+            let before = BeforeDock::take(&mgr, view);
+            mgr.dock(
+                view,
+                DockTo::NewWindow {
+                    label: label.clone(),
+                },
+                ask.focus,
+                ask.mv.clone(),
+            )
+            .map(|docked| {
+                let news = DockNews::collect(&mgr, &before, &docked, view);
+                let identity = NewWindow::in_model(&mgr, &label);
+                subs.resync(&mgr);
+                let rows = ask.rows(&mgr, &news.views, view);
+                (docked, news, identity, rows)
+            })
+            .map_err(E::from)
         })
     }; // ← 락 드롭
-    let (docked, news, identity) = match committed {
+    let (docked, news, identity, rows) = match committed {
         Ok(done) => done,
         Err(e) => {
             withdraw_new_window(host, &label, claim.as_ref());
@@ -1395,7 +1710,7 @@ fn open_new_window(
     };
     let out = DockOutcome {
         prewarmed: claim.is_some(),
-        ..finish_docked(events, host, docked, &news, identity)
+        ..finish_docked(events, host, docked, news, identity, view, rows)
     };
     settle_new_window(host, &label, claim.as_ref());
     Ok(out)
@@ -1405,14 +1720,19 @@ fn open_new_window(
 //   ★다시 판정하지 않고 되돌리지도 않는다(사용자 결정 2026-10-16)★ — 끄기가 서면 놓은 자리에 둔다. 옮기는 사이 다른 경로가
 //   출처를 바꿨으면(탭 · 슬롯 더함 · 탭 닫힘) 모델은 그 쓰기가 남긴 그대로다 — 탭이 늘었으면 그 창째 옮겨진 것이고, 탭이
 //   닫혔으면 창도 그 닫기가 거둔다.
+// `recheck` = 읽는 그 락 안에서 옮길 대상이 아직 `label` 창의 그 탭인가 — 아니면 결말만 그 오류다(대상판 · 옮긴 창은
+//   되돌리지 않는다 · 대상판은 자리를 비워 부르므로 옮긴 것이 없다). id 판은 늘 통과라 위 규칙 그대로다(그 창이 닫혔으면 `Ok` +
+//   `identity: None`).
 // TRD S21-slot-docking §3-3 「size: None」 · §3-5 재사용
-fn reuse_source_window(
+fn reuse_source_window<E: From<DockError>>(
     state: &LayoutState,
     host: &dyn WindowHost,
     ask: &DockAsk,
+    view: ViewId,
     label: WindowLabel,
     at: &WindowPlace,
-) -> Result<(DockOutcome, DockNotes), DockError> {
+    recheck: impl FnOnce(&ViewManager, ViewId, Option<&str>) -> Result<(), E>,
+) -> Result<(DockOutcome, DockNotes), E> {
     if let Err(failed) = host.move_window(&label, at) {
         tracing::warn!(
             label = %label,
@@ -1423,25 +1743,37 @@ fn reuse_source_window(
         return Err(DockError::WindowOpen(format!(
             "창 옮기기 {:?} 실패 — {}",
             failed.step, failed.error
-        )));
+        ))
+        .into());
     }
 
-    let (slot_ids, identity) = {
+    let (slot_ids, identity, still, rows) = {
         let mgr = sync::lock(&state.0);
         let slot_ids = mgr
             .views
-            .get(&ask.view)
+            .get(&view)
             .map(|v| tree::slot_ids(&v.layout))
             .unwrap_or_default();
-        (slot_ids, NewWindow::in_model(&mgr, &label))
+        let still = recheck(&mgr, view, Some(&label));
+        // 거절될 결말의 줄은 뜨지 않는다.
+        let rows = if still.is_ok() {
+            ask.rows(&mgr, &[view], view)
+        } else {
+            Vec::new()
+        };
+        (slot_ids, NewWindow::in_model(&mgr, &label), still, rows)
     }; // ← 락 드롭
 
     // 그 사이 닫혀 모델에 없는 창은 적을 항목이 없다.
     if identity.is_some() {
         host.record_placement(&label);
     }
+    still?;
     Ok((
         DockOutcome {
+            changed: false,
+            tab: view,
+            views: vec![view],
             window: label,
             slot_ids,
             emptied: None,
@@ -1449,9 +1781,441 @@ fn reuse_source_window(
             reused: true,
             prewarmed: false,
             identity,
+            rows,
         },
-        DockNotes::default(),
+        DockNotes {
+            view,
+            unchanged: false,
+        },
     ))
+}
+
+// ── 도킹 — 대상판(TRD S28 §4 · §5-2) ──────────────────────────────────────────
+
+/// 탭 하나를 옮기는 LLM 요청 — [`dock_target`] 이 받는다. `tab` = 옮길 탭(탭을 고르는 대상이 아니면 그 대상이 든 탭) ·
+/// `focus` · `mv` 의 뜻은 [`DockRequest`] 와 같다.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TargetDockRequest {
+    pub tab: Target,
+    pub to: TargetDest,
+    pub focus: FocusPolicy,
+    pub mv: DockMove,
+}
+
+/// 대상으로 말한 옮길 곳 — 뜻은 [`DockDest`] 의 같은 이름.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TargetDest {
+    /// `beside` 가 짚은 칸의 `side` 쪽 — `whole` 이면 그 칸이 든 탭 전체의 바깥 변(`DockAnchor::Outer` — 이때 `beside`
+    /// 는 탭을 짚어도 된다). `share` = 붙는 쪽 몫 · `None` = [`target::seam_share`].
+    Seam {
+        beside: Target,
+        whole: bool,
+        side: DockSide,
+        share: Option<f64>,
+    },
+    TabBar(TabBarSpot),
+    NewWindow {
+        at: WindowPlace,
+    },
+}
+
+/// 탭 줄의 자리.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TabBarSpot {
+    /// 창 `window`(label · `None` = 옮길 탭의 지금 창)의 `index` 자리 — 뜻은 [`DockTo::TabBar`] 의 `index`.
+    At {
+        window: Option<WindowLabel>,
+        index: Option<usize>,
+    },
+    /// 이 대상이 든 탭 바로 뒤(그 탭의 창 · 출처를 뺀 목록에서 센다). 그 탭이 옮길 탭이면 `SelfTarget` 이다.
+    After(Target),
+}
+
+/// [`dock_target`] 의 거절 — 모델은 그대로다. 문구는 안에 든 오류의 것 그대로.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TargetDockError {
+    /// 옮길 탭(`tab`)을 못 풀었다.
+    #[error("{0}")]
+    Subject(LocateError),
+    /// 옮길 곳(`Seam.beside` · `TabBarSpot::After`)을 못 풀었다.
+    #[error("{0}")]
+    Dest(LocateError),
+    /// `whole` 이 아닌 `Seam` 의 `beside` 가 칸이 아니라 탭을 짚었다.
+    #[error(
+        "붙일 칸이 아니라 탭을 짚었다 — 칸을 짚는 대상을 주거나 탭 전체에 붙이시오 (NotASlot)"
+    )]
+    NotASlot,
+    /// 새 창을 여는(재사용이면 창을 옮기는) 사이 — 락 두 번 사이 — 옮길 대상이 다른 탭이 됐거나 사라졌다. 연 창은 거뒀고
+    /// 모델은 그대로다(TRD S28 §4-3). 재사용의 옮긴 창은 되돌리지 않는다 — 자리를 비워 부르면 옮긴 것도 없다.
+    #[error("새 창을 여는 사이 옮길 탭이 바뀌었다 — 아무것도 옮기지 않았다 (Moved)")]
+    Moved,
+    #[error("{0}")]
+    Dock(#[from] DockError),
+}
+
+/// [`dock_tab`] 의 대상판 — 대상(옮길 탭 · 붙일 칸 · 뒤에 넣을 탭)을 바꾸는 그 락 안에서 푼다. 스레드 · 알림 · 거둠
+/// 규칙은 [`dock_tab`] 과 같다(★`NewWindow` 를 메인 스레드 · 동기 명령 안에서 부르지 말 것★).
+///
+/// - `NewWindow` 는 락을 두 번 잡는다 — 두 번째 락(새 창이면 붙이는 락 · 재사용이면 결말을 읽는 락)에서 옮길 대상을
+///   다시 풀어 처음과 다른 탭이거나 없으면 `Moved` 다(새 창이면 연 창을 거둔다).
+/// - `Seam` 의 `share` 가 없으면 [`target::seam_share`] 를 같은 락 안에서 센다.
+/// - 결말의 [`DockOutcome::rows`] 를 결말을 짓는 그 락에서 뜬다 — 창 · 탭 · 신원 · 줄이 한 순간의 모습이다.
+// ADR-0307
+pub fn dock_target(
+    state: &LayoutState,
+    subs: &dyn SubscriptionSync,
+    events: &dyn LayoutEvents,
+    host: &dyn WindowHost,
+    labels: &dyn LabelSource,
+    req: TargetDockRequest,
+) -> Result<DockOutcome, TargetDockError> {
+    let TargetDockRequest { tab, to, focus, mv } = req;
+    let ask = DockAsk {
+        focus,
+        mv,
+        rows: true,
+    };
+    let subject = |mgr: &ViewManager| locate(mgr, &tab).map_err(TargetDockError::Subject);
+    let (mode, result) = match to {
+        TargetDest::Seam {
+            beside,
+            whole,
+            side,
+            share,
+        } => (
+            "seam",
+            dock_in_place(state, subs, events, host, &ask, |mgr| {
+                let source = subject(mgr)?;
+                let place = locate(mgr, &beside).map_err(TargetDockError::Dest)?;
+                let anchor = if whole {
+                    DockAnchor::Outer
+                } else {
+                    DockAnchor::Slot(place.slot.ok_or(TargetDockError::NotASlot)?)
+                };
+                let share =
+                    share.unwrap_or_else(|| seam_share(mgr, source.view, place.view, anchor, side));
+                Ok((
+                    source.view,
+                    DockTo::Seam {
+                        target: place.view,
+                        anchor,
+                        side,
+                        share,
+                    },
+                ))
+            }),
+        ),
+        TargetDest::TabBar(spot) => (
+            "tab_bar",
+            dock_in_place(state, subs, events, host, &ask, |mgr| {
+                let source = subject(mgr)?;
+                let to = match spot {
+                    TabBarSpot::At { window, index } => DockTo::TabBar {
+                        window: window.unwrap_or(source.window),
+                        index,
+                        after: None,
+                    },
+                    TabBarSpot::After(anchor) => {
+                        let anchor = locate(mgr, &anchor).map_err(TargetDockError::Dest)?;
+                        DockTo::TabBar {
+                            window: anchor.window,
+                            index: None,
+                            after: Some(anchor.view),
+                        }
+                    }
+                };
+                Ok((source.view, to))
+            }),
+        ),
+        TargetDest::NewWindow { at } => (
+            "new_window",
+            dock_into_window(
+                state,
+                subs,
+                events,
+                host,
+                labels,
+                &ask,
+                at,
+                |mgr| subject(mgr).map(|source| source.view),
+                |mgr, view, window| match subject(mgr) {
+                    Ok(now) if now.view == view && window.is_none_or(|w| now.window == w) => Ok(()),
+                    _ => Err(TargetDockError::Moved),
+                },
+            ),
+        ),
+    };
+    log_dock(mode, &tab, &result);
+    result.map(|(out, _)| out)
+}
+
+// ── 칸 · 탭 쓰기 — 대상판(TRD S28 §7) ─────────────────────────────────────────
+
+/// 대상판 칸 · 탭 쓰기의 거절 — 모델은 그대로다.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TargetError {
+    #[error("{0}")]
+    Locate(#[from] LocateError),
+    /// 칸을 바꾸는 쓰기에 칸이 아니라 탭을 짚는 대상(`Tab` · `TabOf`)을 줬다.
+    #[error("칸이 아니라 탭을 짚었다 — 칸을 짚는 대상을 주시오 (NotASlot)")]
+    NotASlot,
+    /// 대상은 풀었으나 적용이 거절됐거나 락이 오염됐다 — 문구는 같은 id 판이 내는 것 그대로.
+    #[error("{0}")]
+    Apply(String),
+}
+
+/// 대상판 쓰기의 결말 — `at` = 푼 자리 · `out` = 그 쓰기의 답 · `rows` = 그 쓰기가 바꾼 탭의 배치 줄. 줄은 쓴 그 락에서
+/// 뜬다 — 명령 답이 한 순간의 모습이게([`DockOutcome::rows`] 와 같다 · TRD S28 §7).
+// ADR-0307
+#[derive(Debug, Clone, PartialEq)]
+pub struct Wrote<T> {
+    pub at: Located,
+    pub out: T,
+    pub rows: Vec<LayoutRow>,
+}
+
+fn lock_for(state: &LayoutState) -> Result<std::sync::MutexGuard<'_, ViewManager>, TargetError> {
+    state
+        .0
+        .lock()
+        .map_err(|e| TargetError::Apply(e.to_string()))
+}
+
+fn applied(e: impl Display) -> TargetError {
+    TargetError::Apply(e.to_string())
+}
+
+// 칸을 짚는 대상 — (푼 자리, 그 칸).
+fn locate_slot(mgr: &ViewManager, target: &Target) -> Result<(Located, Uuid), TargetError> {
+    let at = locate(mgr, target)?;
+    let slot = at.slot.ok_or(TargetError::NotASlot)?;
+    Ok((at, slot))
+}
+
+// 대상 하나를 푼 그 락 안에서 탭 `at.view` 의 칸 쓰기 하나 — 재동기(`subs` 가 있으면) · 그 탭 배치 · 그 창 탭 목록 · 그 탭의
+//   배치 줄까지 같은 락이고 알림은 락 밖이다(id 판과 같은 차례).
+fn slot_write_at<T>(
+    state: &LayoutState,
+    subs: Option<&dyn SubscriptionSync>,
+    events: &dyn LayoutEvents,
+    target: &Target,
+    act: impl FnOnce(&mut ViewManager, &Located, Uuid) -> Result<T, TargetError>,
+) -> Result<Wrote<T>, TargetError> {
+    let (wrote, layout, tabs) = {
+        let mut mgr = lock_for(state)?;
+        let (at, slot) = locate_slot(&mgr, target)?;
+        let out = act(&mut mgr, &at, slot)?;
+        let layout = mgr.snapshot(at.view).ok();
+        let tabs = owner_tabs(&mgr, at.view);
+        if let Some(subs) = subs {
+            subs.resync(&mgr);
+        }
+        let rows = rows::rows_of_views(&mgr, &[at.view]);
+        (Wrote { at, out, rows }, layout, tabs)
+    }; // ← 락 드롭
+    notify(events, layout, tabs);
+    Ok(wrote)
+}
+
+/// [`focus_slot`] 의 대상판(줄 = 그 탭의 칸 — 포커스 칸이 바뀐 모습).
+// ADR-0066 · ADR-0307
+pub fn focus_slot_at(
+    state: &LayoutState,
+    events: &dyn LayoutEvents,
+    target: &Target,
+) -> Result<Wrote<()>, TargetError> {
+    slot_write_at(state, None, events, target, |mgr, at, slot| {
+        mgr.set_focused_slot(at.view, slot).map_err(applied)
+    })
+}
+
+/// [`close_slot`] 의 대상판(푼 자리의 그 칸은 이제 없다 · 줄 = 그 탭의 남은 칸).
+pub fn close_slot_at(
+    state: &LayoutState,
+    subs: &dyn SubscriptionSync,
+    events: &dyn LayoutEvents,
+    target: &Target,
+) -> Result<Wrote<()>, TargetError> {
+    slot_write_at(state, Some(subs), events, target, |mgr, at, slot| {
+        mgr.close_slot(at.view, slot).map_err(applied)
+    })
+}
+
+/// [`split_slot`] 의 대상판 — `out` = 새 칸 id.
+pub fn split_slot_at(
+    state: &LayoutState,
+    subs: &dyn SubscriptionSync,
+    events: &dyn LayoutEvents,
+    target: &Target,
+    dir: SplitDir,
+) -> Result<Wrote<Uuid>, TargetError> {
+    slot_write_at(state, Some(subs), events, target, |mgr, at, slot| {
+        mgr.split_slot(at.view, slot, dir).map_err(applied)
+    })
+}
+
+/// [`assign_agent`] 의 대상판. 넣을 에이전트가 데몬에 있는지는 보지 않는다(부르는 쪽 몫 — TRD S28 §7).
+pub fn assign_agent_at(
+    state: &LayoutState,
+    subs: &dyn SubscriptionSync,
+    events: &dyn LayoutEvents,
+    target: &Target,
+    agent_id: String,
+) -> Result<Wrote<()>, TargetError> {
+    slot_write_at(state, Some(subs), events, target, |mgr, at, slot| {
+        mgr.assign_agent(at.view, slot, agent_id).map_err(applied)
+    })
+}
+
+/// [`set_slot_content`] 의 대상판.
+pub fn set_slot_content_at(
+    state: &LayoutState,
+    subs: &dyn SubscriptionSync,
+    events: &dyn LayoutEvents,
+    target: &Target,
+    content: SlotContent,
+) -> Result<Wrote<()>, TargetError> {
+    slot_write_at(state, Some(subs), events, target, |mgr, at, slot| {
+        mgr.set_slot_content(at.view, slot, content)
+            .map_err(applied)
+    })
+}
+
+/// [`set_usage_slot`] 의 대상판 — 빠진 칸의 지금 값 읽기와 쓰기가 같은 락이다.
+pub fn set_usage_slot_at(
+    state: &LayoutState,
+    subs: &dyn SubscriptionSync,
+    events: &dyn LayoutEvents,
+    target: &Target,
+    show_claude: Option<bool>,
+    show_codex: Option<bool>,
+) -> Result<Wrote<()>, TargetError> {
+    slot_write_at(state, Some(subs), events, target, |mgr, at, slot| {
+        let (claude_now, codex_now) = match mgr.slot_content(at.view, slot).map_err(applied)? {
+            SlotContent::Usage {
+                show_claude,
+                show_codex,
+            } => (show_claude, show_codex),
+            _ => (true, true),
+        };
+        let content = SlotContent::Usage {
+            show_claude: show_claude.unwrap_or(claude_now),
+            show_codex: show_codex.unwrap_or(codex_now),
+        };
+        mgr.set_slot_content(at.view, slot, content)
+            .map_err(applied)
+    })
+}
+
+/// [`switch_tab`] 의 대상판 — `target` 이 든 탭을 그 창의 보이는 탭으로. `window` 를 주면 그 창의 탭이어야 한다(아니면
+/// [`switch_tab`] 과 같은 오류). 푼 자리를 돌려준다.
+pub fn switch_tab_at(
+    state: &LayoutState,
+    subs: &dyn SubscriptionSync,
+    events: &dyn LayoutEvents,
+    window: Option<&str>,
+    target: &Target,
+) -> Result<Located, TargetError> {
+    let (at, layout, tabs) = {
+        let mut mgr = lock_for(state)?;
+        let at = locate(&mgr, target)?;
+        let window = window.unwrap_or(&at.window).to_string();
+        mgr.switch_tab(&window, at.view).map_err(applied)?;
+        let layout = mgr.snapshot(at.view).ok();
+        let tabs = tabs_payload(&mgr, &window);
+        subs.resync(&mgr);
+        (at, layout, tabs)
+    }; // ← 락 드롭
+    notify(events, layout, tabs);
+    Ok(at)
+}
+
+/// [`close_tab`] 의 대상판 — `window` 는 [`switch_tab_at`] 과 같다. `out` = 그 창에 이제 보이는 탭(창째 닫혔으면
+/// `None`) · `rows` = 그 탭의 배치 줄(창째 닫혔으면 비었다).
+pub fn close_tab_at(
+    state: &LayoutState,
+    subs: &dyn SubscriptionSync,
+    events: &dyn LayoutEvents,
+    host: &dyn WindowHost,
+    window: Option<&str>,
+    target: &Target,
+) -> Result<Wrote<Option<ViewId>>, TargetError> {
+    let (at, window, outcome, shown, layout, tabs, rows) = {
+        let mut mgr = lock_for(state)?;
+        let at = locate(&mgr, target)?;
+        let window = window.unwrap_or(&at.window).to_string();
+        let outcome = mgr.close_tab(&window, at.view).map_err(applied)?;
+        let (shown, layout, tabs) = match outcome {
+            CloseTabOutcome::Stayed => {
+                let shown = mgr.list_tabs(&window).ok().map(|s| s.active);
+                let layout = shown.and_then(|a| mgr.snapshot(a).ok());
+                (shown, layout, tabs_payload(&mgr, &window))
+            }
+            CloseTabOutcome::WindowClosed => (None, None, None),
+        };
+        subs.resync(&mgr);
+        let rows = shown
+            .map(|view| rows::rows_of_views(&mgr, &[view]))
+            .unwrap_or_default();
+        (at, window, outcome, shown, layout, tabs, rows)
+    }; // ← 락 드롭
+    match outcome {
+        CloseTabOutcome::Stayed => notify(events, layout, tabs),
+        CloseTabOutcome::WindowClosed => host.close(&window),
+    }
+    Ok(Wrote {
+        at,
+        out: shown,
+        rows,
+    })
+}
+
+/// [`rename_tab`] 의 대상판. 푼 자리를 돌려준다.
+pub fn rename_tab_at(
+    state: &LayoutState,
+    events: &dyn LayoutEvents,
+    target: &Target,
+    name: String,
+) -> Result<Located, TargetError> {
+    let (at, tabs) = {
+        let mut mgr = lock_for(state)?;
+        let at = locate(&mgr, target)?;
+        mgr.rename_tab(at.view, name).map_err(applied)?;
+        let tabs = owner_tabs(&mgr, at.view);
+        (at, tabs)
+    }; // ← 락 드롭
+    announce(events, None::<&ViewSnapshot>, tabs.as_ref());
+    Ok(at)
+}
+
+// ── 배치 줄 · 자리 조회(TRD S28 §4-5) ──────────────────────────────────────────
+
+/// 에이전트 `agent_id` 의 표시 이름(셸 이름 장부) — 장부에 없거나 락이 오염됐으면 `None`. ★오류 문구 같은 보여 주기 몫★ —
+/// 이름으로 에이전트를 고르는 데 쓰지 말 것(해석기는 데몬 하나 — ADR-0132 · ADR-0308).
+pub fn agent_display_name(state: &LayoutState, agent_id: Uuid) -> Option<String> {
+    let mgr = state.0.lock().ok()?;
+    mgr.agent_name(&agent_id.to_string()).map(str::to_owned)
+}
+
+/// [`rows::layout_rows`] 를 락 한 번 안에서 뜬다. ★조회만★ — 변형 · 알림 없음.
+// ADR-0307
+pub fn layout_rows(state: &LayoutState, filter: &RowFilter) -> Result<Vec<LayoutRow>, String> {
+    let mgr = state.0.lock().map_err(|e| e.to_string())?;
+    Ok(rows::layout_rows(&mgr, filter))
+}
+
+/// [`rows::rows_of_views`] 를 락 한 번 안에서 뜬다. ★도킹 명령의 답에 쓰지 말 것★ — 도킹과 다른 락이라 그 사이 쓰기가
+/// 섞인다(답의 줄은 결말의 [`DockOutcome::rows`] — 같은 락이다).
+pub fn layout_rows_of(state: &LayoutState, views: &[ViewId]) -> Result<Vec<LayoutRow>, String> {
+    let mgr = state.0.lock().map_err(|e| e.to_string())?;
+    Ok(rows::rows_of_views(&mgr, views))
+}
+
+/// [`target::agent_places`] 를 락 한 번 안에서 뜬다. ★적용 대상을 고르는 데 쓰지 말 것★ — 락을 놓은 뒤라 그 사이
+/// 바뀔 수 있다(고르기는 대상판 쓰기가 제 락 안에서 한다).
+pub fn agent_places(state: &LayoutState, agent: Uuid) -> Result<Vec<Place>, String> {
+    let mgr = state.0.lock().map_err(|e| e.to_string())?;
+    Ok(target::agent_places(&mgr, agent))
 }
 
 // ── 부팅 제목 ────────────────────────────────────────────────────────────────

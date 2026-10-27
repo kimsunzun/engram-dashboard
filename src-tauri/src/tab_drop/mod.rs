@@ -969,6 +969,7 @@ mod tests {
             to: DockDest::TabBar {
                 window: MAIN.into(),
                 index: None,
+                after: None,
             },
             focus: FocusPolicy::Reveal,
             mv: DockMove::default(),
@@ -1445,6 +1446,7 @@ mod tests {
                 DockTo::TabBar {
                     window: "slot-popup-1".into(),
                     index: None,
+                    after: None,
                 },
                 FocusPolicy::Keep,
                 DockMove::default(),

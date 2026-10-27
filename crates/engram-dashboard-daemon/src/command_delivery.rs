@@ -2,10 +2,12 @@
 //! 연결**에 실어 준다(ADR-0154 · TRD §3-5·§3-8).
 //!
 //! 배달 규칙 자체는 여기 없다 — 도구 crate 의 3단계([`route`])가 전 홉 공통이고(ADR-0155 결정 3) 이
-//! 모듈이 더하는 것은 그 3단계가 필요로 하는 **데몬 몫의 세 조각**뿐이다:
+//! 모듈이 더하는 것은 그 3단계가 필요로 하는 **데몬 몫의 네 조각**뿐이다:
 //! ① 주인 토큰에서 연결로 가는 링크([`OwnerLink`] — 그 자리가 [`CommandRoster::sink_of`]) ·
 //! ② 요청 상관 표([`CommandDeliveries`] — `request_id` → 원 연결 · 마감시각) ·
-//! ③ 데몬이 스스로 답하는 1단계([`LocalCommands`]) — **그 단계만 `route` 밖에서** 돈다(사유 = [`deliver`]).
+//! ③ 데몬이 스스로 답하는 1단계([`LocalCommands`]) — **그 단계만 `route` 밖에서** 돈다(사유 = [`deliver`]) ·
+//! ④ 중계 전 에이전트 참조 칸 변환([`resolve_agent_args`] — ADR-0308). 데몬은 화면 내용을 모른 채, 주인이
+//!    표시한 칸의 이름만 자기 해석기로 id 로 바꾼다.
 //!
 //! ## ★받은 질의 하나에 답장은 정확히 하나★(TRD §4-⑤)
 //!
@@ -97,6 +99,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use engram_dashboard_agent::commands::{resolve_in, AgentRosterRow};
 use engram_dashboard_base::sync;
 use engram_dashboard_base::time::{Clock, SystemClock};
 use engram_dashboard_command::{
@@ -357,6 +360,7 @@ pub struct CommandDeliveries {
     clock: Arc<dyn Clock>,
     deadline: Duration,
     max_local: usize,
+    max_resolving: usize,
 }
 
 /// 표의 속 — 자리들 + 발권 번호 + 닫힘 표식 + 지금 도는 1단계 수.
@@ -379,6 +383,10 @@ struct Seats {
     /// 재무장이 아예 안 돼 **프로세스 수명 내내 한 줄**뿐이다 — 가장 시끄러워야 할 상황이 가장 조용하다.
     /// 시각으로 열면 두 쪽이 같이 풀린다: 최대 [`CEILING_WARN_INTERVAL`] 마다 한 줄, 물린 동안에도 계속.
     ceiling_warned_at: Option<Instant>,
+    /// 지금 blocking 풀에서 도는 에이전트 참조 칸 풀기(명부 읽기)의 수 — 상한 판정의 재료([`MAX_RESOLVING_IN_FLIGHT`]).
+    resolving: usize,
+    /// 풀기 상한 사건을 마지막으로 적은 시각 — 규율은 [`Seats::ceiling_warned_at`] 과 같다.
+    resolve_warned_at: Option<Instant>,
     /// ★이 표에 수거기가 **이미 붙었나**★ — 두 번째를 붙이는 조립을 [`CommandDeliveries::spawn_sweeper`]
     /// 가 이 값으로 거절한다.
     ///
@@ -481,6 +489,7 @@ impl CommandDeliveries {
             clock,
             deadline,
             max_local: MAX_LOCAL_IN_FLIGHT,
+            max_resolving: MAX_RESOLVING_IN_FLIGHT,
         }
     }
 
@@ -492,6 +501,19 @@ impl CommandDeliveries {
     pub(crate) fn with_local_limit(mut self, max_local: usize) -> Self {
         self.max_local = max_local;
         self
+    }
+
+    /// 에이전트 참조 칸 풀기 상한을 낮춰 잡는다 — 형제 [`CommandDeliveries::with_local_limit`] 와 같은 사유의 **시험 전용**.
+    #[cfg(test)]
+    pub(crate) fn with_resolve_limit(mut self, max_resolving: usize) -> Self {
+        self.max_resolving = max_resolving;
+        self
+    }
+
+    /// 지금 도는 풀기 수 — 시험이 「표식은 읽기가 끝나야 풀린다」를 잰다.
+    #[cfg(test)]
+    pub(crate) fn resolving(&self) -> usize {
+        self.lock().resolving
     }
 
     /// 만료 수거 태스크를 띄운다 — 데몬 종료 신호가 오면 **남은 자리를 전부 답하고** 멈춘다.
@@ -778,6 +800,52 @@ impl CommandDeliveries {
         // 표식지기가 정확히 한 번 부르므로 이 뺄셈도 한 번이다 — 그래도 saturating 인 것은 셈이 음수로
         //   돌아 상한이 영원히 열리는 쪽이 한 칸 새는 쪽보다 나쁘기 때문이다.
         table.local_running = table.local_running.saturating_sub(1);
+    }
+
+    /// 에이전트 참조 칸 풀기(명부 읽기)를 시작해도 되나 — 상한 안이면 셈을 올리고 **되돌릴 표식**을 낸다(ADR-0308).
+    ///
+    /// 넘치면 아무것도 읽지 않고 반려하므로 확실성은 「확실히 실패」(봉투는 주인에게 안 갔다)이고, 코드가 `CONFLICT`
+    /// 인 것은 형제 [`CommandDeliveries::reserve_local_slot`] 과 같은 뜻(이 데몬의 **상태**)이다. 로그 규율도 같다.
+    fn reserve_resolve_slot(
+        &self,
+        name: &str,
+        entrance: &'static str,
+    ) -> Result<ResolveGuard, CommandError> {
+        let now = self.clock.now();
+        let mut table = self.lock();
+        if table.resolving >= self.max_resolving {
+            let running = table.resolving;
+            let due = table
+                .resolve_warned_at
+                .is_none_or(|at| now.duration_since(at) >= CEILING_WARN_INTERVAL);
+            if due {
+                table.resolve_warned_at = Some(now);
+                tracing::warn!(
+                    entrance,
+                    command = name,
+                    running,
+                    ceiling = self.max_resolving,
+                    "에이전트 참조 칸 풀기의 동시 상한 — 명부 읽기가 끝나 이 아래로 내려갈 때까지 표시된 명령을 전부 거절한다(잠든 에이전트의 작업 폴더가 응답하지 않으면 늦게 풀린다)"
+                );
+            }
+            return Err(no_retry(
+                ErrorCode::Conflict,
+                format!(
+                    "this daemon is already reading its agent roster for {running} commands and will not queue more, so this command was not sent to its owner and nothing was run — send it again once they finish; if it keeps happening, an agent's working folder is not answering (for example a disconnected network share)"
+                ),
+            ));
+        }
+        table.resolving += 1;
+        Ok(ResolveGuard {
+            deliveries: self.clone(),
+        })
+    }
+
+    /// 명부 읽기가 끝났다 — 셈을 되돌린다. [`ResolveGuard`] 의 소멸자만 부른다(소멸자 경로라 패닉하지 않는다 —
+    /// 근거는 형제 [`CommandDeliveries::release_local_slot`]).
+    fn release_resolve_slot(&self) {
+        let mut table = self.lock_for_cleanup();
+        table.resolving = table.resolving.saturating_sub(1);
     }
 
     /// 적용이 끝난 1단계 자리를 **보유 상태로** 넘긴다 — 자리를 놓지 않고 그 번호를 계속 쥔다.
@@ -1182,6 +1250,17 @@ pub trait LocalCommands: Send + Sync {
 
     /// 이 데몬이 스스로 답하는 이름 전량 — 발견(`ListCommands`)이 명부와 **합쳐서** 내린다.
     fn decls(&self) -> Vec<CommandDecl>;
+
+    /// 남의 명령의 에이전트 참조 칸을 풀 명부(ADR-0308) — 1단계 동사가 지목을 푸는 **그 명부**여야 한다
+    /// (해석기 하나 — ADR-0132). 둘이 갈리면 같은 이름이 입구마다 다른 에이전트로 풀린다.
+    ///
+    /// ★blocking 이다★ — 잠든 프로필의 경로 정규화가 길게 걸릴 수 있다(agent `AgentManager::roster`).
+    /// [`deliver`] 가 blocking 풀에서 부른다.
+    /// ★기본 몸통을 두지 않는다★: 빈 명부를 돌려주는 구현은 표시된 칸을 전부 `NOT_FOUND` 로 반려해 그 명령들을 통째로
+    /// 막는다. 기본값으로 두면 명부가 있는 조립이 이 메서드를 빠뜨려도 컴파일이 통과하고 증상은 런타임의 반려뿐이다 —
+    /// 에이전트를 두지 않는 조립은 빈 명부를 **스스로** 적는다.
+    // ADR-0308
+    fn agent_roster(&self) -> Vec<AgentRosterRow>;
 }
 
 /// 자기 명령이 없는 조립 — 1단계가 언제나 미스다(스모크 bin · 배달 규칙만 재는 하네스).
@@ -1203,6 +1282,11 @@ impl LocalCommands for NoLocalCommands {
     }
 
     fn decls(&self) -> Vec<CommandDecl> {
+        Vec::new()
+    }
+
+    // 에이전트를 두지 않는 조립 — 표시된 칸은 전부 `NOT_FOUND` 로 반려되고 중계되지 않는다.
+    fn agent_roster(&self) -> Vec<AgentRosterRow> {
         Vec::new()
     }
 }
@@ -1236,6 +1320,17 @@ impl LocalCommands for NoLocalCommands {
 ///    `run_accept_loop` 양쪽에 넘겨야 하고, 그건 이번 범위 밖이다. ★그러니 HTTP 표면의 풀 적재는 여전히
 ///    무계다★ — 이 상수가 그것까지 막는다고 읽지 말 것.
 const MAX_LOCAL_IN_FLIGHT: usize = 64;
+
+/// 동시에 blocking 풀에서 돌 수 있는 에이전트 참조 칸 풀기(명부 읽기)의 수(ADR-0308).
+///
+/// ★상한이 없으면 막힌 읽기가 무한히 쌓인다★: 읽기는 `spawn_blocking` 이라 취소되지 않는다 — 그 왕복의 자리가 먼저
+/// 정산되거나(마감 · 종료 · 호출자 이탈) 제어 라우트 호출이 취소돼 기다리는 쪽이 떠나도 끝까지 돈다. 잠든 에이전트의
+/// cwd 가 죽은 네트워크 공유면 그 읽기 하나가 수십 초 막히므로(agent `AgentManager::roster`) 번호가 다른 표시된
+/// 명령마다 막힌 스레드가 하나씩 는다. 그래서 셈의 표식([`ResolveGuard`])은 읽기 클로저 **안으로** 옮겨 가 읽기가
+/// 끝날 때만 풀린다.
+/// 값의 근거: 막힌 읽기는 모두 같은 공유를 기다려 동시성이 처리량을 늘리지 않으므로, 배치 명령 한 차례 몰림을 받을
+/// 만큼(16)만 열고 1단계 상한과 합쳐도 tokio 기본 blocking 풀(512)에 넉넉히 남긴다.
+const MAX_RESOLVING_IN_FLIGHT: usize = 16;
 
 /// 상한 사건을 다시 적기까지의 최소 간격.
 ///
@@ -1282,6 +1377,20 @@ impl Drop for LocalGuard {
         if !self.settled {
             self.deliveries.release_local_slot();
         }
+    }
+}
+
+/// 도는 명부 읽기 하나를 나타내는 표식 — ★읽기 클로저 안에서 떨어진다★([`MAX_RESOLVING_IN_FLIGHT`]).
+///
+/// 기다리는 쪽(배달 태스크)이 들고 있으면 그쪽이 먼저 떠날 때(자리 정산 · 취소) 셈이 풀려, 아직 막혀 있는 읽기가
+/// 상한 밖으로 샌다. `Drop` 이라 읽기가 패닉해도 셈이 돌아온다.
+struct ResolveGuard {
+    deliveries: CommandDeliveries,
+}
+
+impl Drop for ResolveGuard {
+    fn drop(&mut self) {
+        self.deliveries.release_resolve_slot();
     }
 }
 
@@ -1569,6 +1678,9 @@ fn strip_upstream(value: &mut serde_json::Value) {
 ///    (남의 이름은 대조할 선언이 없어 그대로 통과한다) 그 검문은 제어 라우트와 **같은 함수**가 한다 —
 ///    입구가 둘인데 검문이 하나인 것이 요점이다.
 /// 그래서 `route` 에 넘기는 표는 계속 비어 있고, 그 뒤 두 단계(명부 → 오류)는 홉 공통 그대로다.
+///
+/// ★남의 이름은 `route` 에 넘기기 전에 에이전트 참조 칸을 id 로 바꾼다★([`resolve_agent_args`] · ADR-0308)
+/// — 두 입구가 다 이 함수를 지나므로 변환 자리도 여기 하나다. 풀리지 않으면 봉투를 넘기지 않고 그 오류로 답한다.
 pub async fn deliver(
     roster: CommandRoster,
     deliveries: CommandDeliveries,
@@ -1814,6 +1926,24 @@ pub async fn deliver(
         return;
     }
 
+    let mut envelope = envelope;
+    let mut rx = rx;
+    if let Err(reply) = resolve_agent_args(
+        &roster,
+        &deliveries,
+        &locals,
+        origin,
+        &mut envelope,
+        &mut rx,
+        entrance,
+    )
+    .await
+    {
+        send_reply(&roster, origin, &name, reply);
+        deliveries.release(request_id, token);
+        return;
+    }
+
     let link = OwnerLink {
         roster: &roster,
         origin,
@@ -1826,6 +1956,140 @@ pub async fn deliver(
     // ★프레임이 나간 **뒤에** 놓는다★(모듈 헤더 규칙 2) — 그 전에 놓으면 재질의가 봉투를 한 번 더 보낸다.
     //   발권으로 집으므로, 이 자리가 이미 다른 왕복으로 갈렸다면 이 호출은 아무것도 안 한다.
     deliveries.release(request_id, token);
+}
+
+/// 중계 전 에이전트 참조 변환(ADR-0308) — 주인이 등록 때 표시한 칸의 **문자열 값**을 이 데몬의 해석기
+/// ([`resolve_in`] — ADR-0132)로 에이전트 id 로 바꿔 봉투에 다시 적는다.
+///
+/// 데몬이 아는 것은 「이 칸은 내 에이전트를 가리킨다」뿐이다 — 그 칸이 주인 쪽에서 무슨 뜻인지는 모르고
+/// `help` 도 열지 않는다. 칸은 표시 순서대로 풀고, 부재 · `null` · 문자열 아닌 값은 손대지 않는다(주인이
+/// 그 값으로 반려한다).
+/// `Err` = **이 왕복의 답**이고 봉투는 나가지 않는다 — 호출자가 이미 떠남 · 풀기 상한([`MAX_RESOLVING_IN_FLIGHT`]) ·
+/// 해석 실패(코드는 해석기 그대로 · 문구 앞에 `<칸>: `) · 해석 도중 자리가 먼저 정산됨(마감 · 종료 · 호출자 이탈 — 그
+/// 판정의 코드가 답이고 문구는 「주인에게 안 갔다」로 고친다) · 해석 작업의 죽음.
+/// ★자리가 먼저 정산됐으면 중계하지 않는다★: 그대로 넘기면 주인은 명령을 실행하는데 호출자는 이미 낸
+/// `TIMEOUT` 을 받는다.
+/// ★남는 창 — 표시는 여기서 읽고 주인은 `route` 가 다시 찾는다★: 그 사이 같은 이름을 다시 등록한 주인의
+/// 표시가 달라졌으면 그 칸은 이번 왕복에서 덜 바뀌거나 더 바뀐다. 이름이 남으면 주인이 반려하고, id 는
+/// 해석기가 이름보다 먼저 보므로 더 바뀐 칸은 같은 에이전트다.
+// ADR-0308
+async fn resolve_agent_args(
+    roster: &CommandRoster,
+    deliveries: &CommandDeliveries,
+    locals: &Arc<dyn LocalCommands>,
+    origin: ConnId,
+    envelope: &mut CommandEnvelope,
+    rx: &mut oneshot::Receiver<CommandReply>,
+    entrance: &'static str,
+) -> Result<(), CommandReply> {
+    let request_id = envelope.request_id;
+    let command = sanitize_for_log(&envelope.name);
+    let refs: Vec<(String, String)> = roster
+        .agent_args_of(&envelope.name)
+        .into_iter()
+        .filter_map(|arg| {
+            let token = envelope.args.get(&arg)?.as_str()?.to_string();
+            Some((arg, token))
+        })
+        .collect();
+    if refs.is_empty() {
+        return Ok(());
+    }
+    // 떠난 호출자를 위해 읽기를 시작하지 않는다 — 1단계의 이른 검사와 같은 것이다(`deliver` 의 그 갈래 · 출구 사본을
+    //   받지 않는 술어인 사유도 같다).
+    if !roster.is_attached(origin) {
+        return Err(CommandReply::err(
+            request_id,
+            no_retry(ErrorCode::Conflict, CALLER_ALREADY_GONE),
+        ));
+    }
+    let slot = deliveries
+        .reserve_resolve_slot(&command, entrance)
+        .map_err(|refused| CommandReply::err(request_id, refused))?;
+
+    let locals = Arc::clone(locals);
+    let started = Instant::now();
+    let mut job = tokio::task::spawn_blocking(move || {
+        // 표식은 읽기가 끝날 때 떨어진다 — 기다리는 쪽이 먼저 떠나도 막힌 읽기가 상한 안에 남는다([`ResolveGuard`]).
+        let _slot = slot;
+        let agents = locals.agent_roster();
+        refs.into_iter()
+            .map(|(arg, token)| match resolve_in(&agents, &token) {
+                Ok(agent) => Ok((arg, agent.id.to_string())),
+                Err(refused) => Err(no_retry(
+                    refused.code(),
+                    format!("{arg}: {}", refused.message()),
+                )),
+            })
+            .collect::<Result<Vec<_>, CommandError>>()
+    });
+
+    // ★`biased` 로 자리를 먼저 본다★ — 둘 다 준비됐을 때 해석 결과를 고르면 이미 답한 왕복을 중계한다.
+    let joined = tokio::select! {
+        biased;
+        settled = &mut *rx => {
+            let reply = match settled {
+                Ok(reply) => never_sent(reply),
+                Err(_) => CommandReply::err(
+                    request_id,
+                    no_retry(ErrorCode::Conflict, CALLER_ALREADY_GONE),
+                ),
+            };
+            tracing::warn!(
+                entrance,
+                %command,
+                %request_id,
+                elapsed = ?started.elapsed(),
+                code = %reply.outcome.as_ref().err().map_or("ok", |e| e.code().as_str()),
+                "에이전트 참조 칸을 푸는 동안 그 왕복의 자리가 먼저 정산됐다 — 중계하지 않았다"
+            );
+            return Err(reply);
+        }
+        joined = &mut job => joined,
+    };
+    match joined {
+        Ok(Ok(resolved)) => {
+            for (arg, id) in resolved {
+                envelope.args[arg.as_str()] = serde_json::Value::String(id);
+            }
+            Ok(())
+        }
+        Ok(Err(refused)) => Err(CommandReply::err(request_id, refused)),
+        Err(died) => {
+            tracing::error!(
+                entrance,
+                %command,
+                %request_id,
+                panicked = died.is_panic(),
+                "에이전트 참조 칸을 풀던 작업이 답 없이 끝났다 — 봉투는 중계하지 않았다"
+            );
+            Err(CommandReply::err(
+                request_id,
+                no_retry(
+                    ErrorCode::Internal,
+                    "this daemon could not read its agent roster to resolve the agent arguments, so the command was not sent",
+                ),
+            ))
+        }
+    }
+}
+
+/// 에이전트 참조 칸을 푸는 동안 자리를 정산한 답 — 마감([`CommandDeliveries::expire`]) · 종료
+/// ([`CommandDeliveries::drain`])의 문구는 봉투를 보낸 왕복의 사정(「주인이 답하지 않았다」 · 「도는 중에 내려갔다」)이라
+/// 여기서는 거짓이다. 봉투는 주인에게 간 적이 없으므로 확실성은 「아무것도 안 돌았다」(ADR-0159 의 확실성 축)이고, 문구를
+/// 그 사실로 고친다. ★코드는 정산한 쪽이 정한 그대로 둔다★. 그 밖의 답은 손대지 않는다.
+// ADR-0308
+fn never_sent(reply: CommandReply) -> CommandReply {
+    let Err(settled) = &reply.outcome else {
+        return reply;
+    };
+    let code = settled.code();
+    let message = match code {
+        ErrorCode::Timeout => "the deadline passed while this daemon was still resolving the agent arguments, so the command was never sent to its owner and nothing was run",
+        ErrorCode::OutcomeUnknown => "the daemon shut down while it was still resolving the agent arguments, so the command was never sent to its owner and nothing was run",
+        _ => return reply,
+    };
+    CommandReply::err(reply.request_id, no_retry(code, message))
 }
 
 /// 답장 한 장을 **원 연결을 다시 조회해** 내보낸다 — 출구 사본을 왕복 너머로 들지 않기 때문이다(모듈 헤더).
@@ -1891,6 +2155,8 @@ fn send_reply(roster: &CommandRoster, origin: ConnId, name: &str, mut reply: Com
 /// 선다. 중계 왕복 하나는 마감([`CommandDeliveries::DEFAULT_DEADLINE`]) 동안 **태스크 + 자리 + 명부 한
 /// 칸**을 물고, 취소로 떠나도 그 셋이 다 돌아온다(셈은 [`RelaySlot`], 나머지 둘은 [`CallerSeat`]) — 그래서
 /// 이 수가 세는 것이 실제로 「지금 동시에 물고 있는 왕복」이다.
+/// ★넷째가 하나 더 있다 — 에이전트 참조 칸을 표시한 명령의 명부 읽기(blocking 풀)★: 그것은 취소로 돌아오지 않고
+/// 읽기가 끝날 때까지 남는다(`spawn_blocking`). 그래서 이 수로는 못 묶고 [`MAX_RESOLVING_IN_FLIGHT`] 가 따로 묶는다.
 ///
 /// ★바이트 상한을 여기서 주장하지 말 것★: 자리가 드는 것은 요청 바디가 아니라 **파싱된
 /// `serde_json::Value` 사본**이다([`Pending::args`]). 바디는 1 MiB 에서 닫혀 있지만(`mcp_server` 의
@@ -2503,6 +2769,7 @@ pub(crate) mod tests {
                 vec![CommandDecl {
                     name: name.to_string(),
                     help: "{}".to_string(),
+                    agent_args: Vec::new(),
                 }],
             )
             .expect("등록");
@@ -2649,6 +2916,10 @@ pub(crate) mod tests {
         }
 
         fn decls(&self) -> Vec<CommandDecl> {
+            Vec::new()
+        }
+
+        fn agent_roster(&self) -> Vec<AgentRosterRow> {
             Vec::new()
         }
     }
@@ -3436,6 +3707,10 @@ pub(crate) mod tests {
         fn decls(&self) -> Vec<CommandDecl> {
             Vec::new()
         }
+
+        fn agent_roster(&self) -> Vec<AgentRosterRow> {
+            Vec::new()
+        }
     }
 
     /// ★1단계 본문이 **답 없이 죽으면** 서버 쪽에도 흔적이 남아야 한다★
@@ -3800,6 +4075,649 @@ pub(crate) mod tests {
         );
     }
 
+    // ── 중계 전 에이전트 참조 변환(ADR-0308) ─────────────────────────────────────────
+
+    /// 에이전트 명부만 든 1단계 표 — 내 이름은 하나도 없고(그래서 모든 이름이 중계로 간다) 참조 칸을 풀
+    /// 명부만 낸다.
+    struct AgentsOnly {
+        agents: Vec<(uuid::Uuid, &'static str)>,
+        /// 명부를 읽은 스레드 — 배달 태스크 밖(blocking 풀)에서 읽나를 잰다.
+        read_on: Mutex<Option<std::thread::ThreadId>>,
+        /// 명부를 읽기 시작했다는 신호 — 시험이 「푸는 도중」을 결정적으로 겨눈다.
+        entered: Mutex<Option<mpsc::UnboundedSender<()>>>,
+        /// 명부 읽기를 붙잡아 두는 문 — 시험이 열 때까지 안 끝난다.
+        gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        /// 명부를 읽은 횟수.
+        reads: AtomicUsize,
+        /// 참이면 명부 읽기가 (문을 지난 뒤) 패닉한다 — 풀기 작업이 답 없이 죽는 갈래.
+        panics: bool,
+    }
+
+    impl AgentsOnly {
+        fn new(agents: &[(uuid::Uuid, &'static str)]) -> Arc<Self> {
+            Arc::new(Self::build(agents, None, None, false))
+        }
+
+        /// 첫 명부 읽기를 문 앞에 세워 두는 표 — 읽기가 시작되면 셋째 값이 울리고, 둘째 값으로 문을 열어야 끝난다.
+        fn gated(
+            agents: &[(uuid::Uuid, &'static str)],
+        ) -> (
+            Arc<Self>,
+            std::sync::mpsc::Sender<()>,
+            mpsc::UnboundedReceiver<()>,
+        ) {
+            let (open, gate) = std::sync::mpsc::channel::<()>();
+            let (entered, entered_rx) = mpsc::unbounded_channel::<()>();
+            (
+                Arc::new(Self::build(agents, Some(entered), Some(gate), false)),
+                open,
+                entered_rx,
+            )
+        }
+
+        fn panicking() -> Arc<Self> {
+            Arc::new(Self::build(&[], None, None, true))
+        }
+
+        fn build(
+            agents: &[(uuid::Uuid, &'static str)],
+            entered: Option<mpsc::UnboundedSender<()>>,
+            gate: Option<std::sync::mpsc::Receiver<()>>,
+            panics: bool,
+        ) -> Self {
+            Self {
+                agents: agents.to_vec(),
+                read_on: Mutex::new(None),
+                entered: Mutex::new(entered),
+                gate: Mutex::new(gate),
+                reads: AtomicUsize::new(0),
+                panics,
+            }
+        }
+    }
+
+    impl LocalCommands for Arc<AgentsOnly> {
+        fn claim(&self, _name: &str) -> Option<Effect> {
+            None
+        }
+
+        fn run(
+            &self,
+            _name: &str,
+            _args: &mut serde_json::Value,
+            _entrance: &'static str,
+            _caller: Option<ConnId>,
+        ) -> Option<Result<serde_json::Value, CommandError>> {
+            None
+        }
+
+        fn decls(&self) -> Vec<CommandDecl> {
+            Vec::new()
+        }
+
+        fn agent_roster(&self) -> Vec<AgentRosterRow> {
+            *self.read_on.lock().expect("agents poisoned") = Some(std::thread::current().id());
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            if let Some(entered) = self.entered.lock().expect("agents poisoned").as_ref() {
+                let _ = entered.send(());
+            }
+            let gate = self.gate.lock().expect("agents poisoned").take();
+            if let Some(gate) = gate {
+                let _ = gate.recv();
+            }
+            assert!(!self.panics, "the agent roster blew up");
+            self.agents
+                .iter()
+                .map(|(id, name)| AgentRosterRow {
+                    id: *id,
+                    canonical_name: name.to_string(),
+                    cwd: format!("C:/work/{name}"),
+                    parent: None,
+                    live: None,
+                })
+                .collect()
+        }
+    }
+
+    /// 에이전트 참조 칸을 표시한 이름 하나를 얹은 주인.
+    fn roster_with_marked_owner(
+        conn_id: ConnId,
+        name: &str,
+        agent_args: &[&str],
+    ) -> (CommandRoster, mpsc::Receiver<Frame>) {
+        let roster = CommandRoster::new();
+        let (sink, inbox) = sink_with_inbox();
+        roster.attach(conn_id, &sink);
+        roster
+            .register(
+                conn_id,
+                vec![CommandDecl {
+                    name: name.to_string(),
+                    help: "{}".to_string(),
+                    agent_args: agent_args.iter().map(|arg| arg.to_string()).collect(),
+                }],
+            )
+            .expect("등록");
+        (roster, inbox)
+    }
+
+    fn marked_envelope(name: &str, args: serde_json::Value) -> CommandEnvelope {
+        CommandEnvelope {
+            args,
+            ..envelope(name, &OwnerToken::new("whatever"))
+        }
+    }
+
+    /// 중계가 안 되고 답이 왔다 — 그 답의 오류를 돌려준다.
+    async fn refused_without_relay(
+        caller_inbox: &mut mpsc::Receiver<Frame>,
+        owner_inbox: &mut mpsc::Receiver<Frame>,
+        deliveries: &CommandDeliveries,
+        request_id: RequestId,
+    ) -> CommandError {
+        let err = match next_event(caller_inbox).await {
+            AgentEvent::CommandReply { reply } => {
+                assert_eq!(reply.request_id, request_id);
+                reply.outcome.expect_err("풀리지 않았다")
+            }
+            other => panic!("CommandReply 여야 함: {other:?}"),
+        };
+        assert!(
+            owner_inbox.try_recv().is_err(),
+            "풀리지 않은 명령은 주인에게 가지 않는다"
+        );
+        assert_eq!(deliveries.in_flight(), 0, "자리를 놓는다");
+        err
+    }
+
+    /// ★표시한 칸의 이름은 id 로, id 는 그대로, 표시 없는 칸은 손대지 않고 넘긴다★ — 주인은 표시한 칸에서
+    /// id 만 본다. 명부는 배달 태스크 밖에서 읽는다(잠든 프로필 경로 정규화가 길 수 있다).
+    #[tokio::test]
+    async fn a_marked_name_is_relayed_as_the_agent_id() {
+        let lead = uuid::Uuid::new_v4();
+        let worker = uuid::Uuid::new_v4();
+        let agents = AgentsOnly::new(&[(lead, "lead"), (worker, "worker")]);
+        let (roster, mut owner_inbox) =
+            roster_with_marked_owner(1, "slot.focus", &["agent", "after"]);
+        let mut caller_inbox = attach_caller(&roster, 2);
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
+        let env = marked_envelope(
+            "slot.focus",
+            json!({ "agent": "lead", "after": worker.to_string(), "label": "lead", "count": 3 }),
+        );
+        let request_id = env.request_id;
+
+        let round_trip = tokio::spawn(super::deliver(
+            roster.clone(),
+            deliveries.clone(),
+            Arc::new(Arc::clone(&agents)),
+            2,
+            env,
+            ENTRANCE_SOCKET,
+        ));
+
+        match next_event(&mut owner_inbox).await {
+            AgentEvent::CommandRequest { envelope } => {
+                assert_eq!(envelope.request_id, request_id);
+                assert_eq!(
+                    envelope.args,
+                    json!({
+                        "agent": lead.to_string(),
+                        "after": worker.to_string(),
+                        "label": "lead",
+                        "count": 3
+                    }),
+                    "표시한 칸만 id 로 바뀐다"
+                );
+            }
+            other => panic!("주인은 CommandRequest 를 받는다: {other:?}"),
+        }
+        let read_on = agents
+            .read_on
+            .lock()
+            .unwrap()
+            .expect("명부를 읽었어야 한다");
+        assert_ne!(
+            read_on,
+            std::thread::current().id(),
+            "명부는 배달 태스크 밖에서 읽는다"
+        );
+
+        deliveries.complete(CommandReply::ok(request_id, json!({})));
+        finished(round_trip).await;
+        assert!(matches!(
+            next_event(&mut caller_inbox).await,
+            AgentEvent::CommandReply { .. }
+        ));
+    }
+
+    /// ★없는 이름은 중계하지 않고 해석기의 답(후보 포함)을 칸 이름을 앞에 달아 낸다★
+    #[tokio::test]
+    async fn an_unknown_marked_name_is_refused_with_the_arg_name_and_never_relayed() {
+        let agents = AgentsOnly::new(&[
+            (uuid::Uuid::new_v4(), "lead"),
+            (uuid::Uuid::new_v4(), "leader"),
+        ]);
+        let (roster, mut owner_inbox) = roster_with_marked_owner(1, "slot.focus", &["agent"]);
+        let mut caller_inbox = attach_caller(&roster, 2);
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
+        let env = marked_envelope("slot.focus", json!({ "agent": "lea" }));
+        let request_id = env.request_id;
+
+        super::deliver(
+            roster,
+            deliveries.clone(),
+            Arc::new(agents),
+            2,
+            env,
+            ENTRANCE_SOCKET,
+        )
+        .await;
+
+        let err =
+            refused_without_relay(&mut caller_inbox, &mut owner_inbox, &deliveries, request_id)
+                .await;
+        assert_eq!(err.code(), ErrorCode::NotFound);
+        assert!(err.message().starts_with("agent: "), "{}", err.message());
+        assert!(
+            err.message().contains("candidates: lead, leader"),
+            "{}",
+            err.message()
+        );
+    }
+
+    /// ★같은 이름이 둘이면 고르지 않는다★ — 해석기의 `CONFLICT` 그대로이고 후보는 두 id 다.
+    #[tokio::test]
+    async fn a_duplicate_marked_name_is_a_conflict_and_never_relayed() {
+        let twin_a = uuid::Uuid::new_v4();
+        let twin_b = uuid::Uuid::new_v4();
+        let agents = AgentsOnly::new(&[(twin_a, "twin"), (twin_b, "twin")]);
+        let (roster, mut owner_inbox) = roster_with_marked_owner(1, "slot.focus", &["agent"]);
+        let mut caller_inbox = attach_caller(&roster, 2);
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
+        let env = marked_envelope("slot.focus", json!({ "agent": "twin" }));
+        let request_id = env.request_id;
+
+        super::deliver(
+            roster,
+            deliveries.clone(),
+            Arc::new(agents),
+            2,
+            env,
+            ENTRANCE_SOCKET,
+        )
+        .await;
+
+        let err =
+            refused_without_relay(&mut caller_inbox, &mut owner_inbox, &deliveries, request_id)
+                .await;
+        assert_eq!(err.code(), ErrorCode::Conflict);
+        assert!(err.message().starts_with("agent: "), "{}", err.message());
+        assert!(
+            err.message().contains(&twin_a.to_string()),
+            "{}",
+            err.message()
+        );
+        assert!(
+            err.message().contains(&twin_b.to_string()),
+            "{}",
+            err.message()
+        );
+    }
+
+    /// ★칸은 표시 순서대로 푼다★ — 둘 다 안 풀리면 먼저 표시된 칸이 답이 된다(같은 요청에 같은 답).
+    #[tokio::test]
+    async fn marked_args_are_resolved_in_the_order_they_were_marked() {
+        let agents = AgentsOnly::new(&[]);
+        let (roster, mut owner_inbox) =
+            roster_with_marked_owner(1, "tab.move", &["after", "agent"]);
+        let mut caller_inbox = attach_caller(&roster, 2);
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
+        let env = marked_envelope("tab.move", json!({ "agent": "ghost", "after": "phantom" }));
+        let request_id = env.request_id;
+
+        super::deliver(
+            roster,
+            deliveries.clone(),
+            Arc::new(agents),
+            2,
+            env,
+            ENTRANCE_SOCKET,
+        )
+        .await;
+
+        let err =
+            refused_without_relay(&mut caller_inbox, &mut owner_inbox, &deliveries, request_id)
+                .await;
+        assert_eq!(err.code(), ErrorCode::NotFound);
+        assert!(err.message().starts_with("after: "), "{}", err.message());
+        assert!(
+            err.message().contains("candidates: none"),
+            "{}",
+            err.message()
+        );
+    }
+
+    /// ★부재 · `null` · 문자열 아닌 값은 손대지 않고 넘긴다★ — 반려는 그 칸의 계약을 아는 주인 몫이다.
+    /// 빈 명부라 무엇이든 풀려고 했다면 `NOT_FOUND` 가 났을 것이다.
+    #[tokio::test]
+    async fn marked_args_without_a_string_value_are_left_for_the_owner() {
+        let agents = AgentsOnly::new(&[]);
+        let (roster, mut owner_inbox) =
+            roster_with_marked_owner(1, "slot.focus", &["agent", "after", "target"]);
+        let _caller_inbox = attach_caller(&roster, 2);
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
+        let args = json!({ "agent": null, "after": 7, "label": "ghost" });
+        let env = marked_envelope("slot.focus", args.clone());
+        let request_id = env.request_id;
+
+        let round_trip = tokio::spawn(super::deliver(
+            roster.clone(),
+            deliveries.clone(),
+            Arc::new(Arc::clone(&agents)),
+            2,
+            env,
+            ENTRANCE_SOCKET,
+        ));
+
+        match next_event(&mut owner_inbox).await {
+            AgentEvent::CommandRequest { envelope } => {
+                assert_eq!(envelope.args, args, "그대로 통과");
+            }
+            other => panic!("주인은 CommandRequest 를 받는다: {other:?}"),
+        }
+        assert!(
+            agents.read_on.lock().unwrap().is_none(),
+            "풀 칸이 없으면 명부를 읽지 않는다"
+        );
+        deliveries.complete(CommandReply::ok(request_id, json!({})));
+        finished(round_trip).await;
+    }
+
+    /// ★푸는 도중 마감이 지나면 그 `TIMEOUT` 이 답이고 봉투는 나가지 않는다★ — 넘기면 주인은 명령을
+    /// 실행하는데 호출자는 이미 실패를 받았다.
+    #[tokio::test]
+    async fn a_deadline_while_resolving_answers_timeout_and_never_relays() {
+        let clock = Arc::new(ManualClock::new());
+        let (agents, open, mut entered_rx) = AgentsOnly::gated(&[(uuid::Uuid::new_v4(), "lead")]);
+        let (roster, mut owner_inbox) = roster_with_marked_owner(1, "slot.focus", &["agent"]);
+        let mut caller_inbox = attach_caller(&roster, 2);
+        let deliveries = deliveries_with(clock.clone());
+        let env = marked_envelope("slot.focus", json!({ "agent": "lead" }));
+        let request_id = env.request_id;
+
+        let round_trip = tokio::spawn(super::deliver(
+            roster.clone(),
+            deliveries.clone(),
+            Arc::new(Arc::clone(&agents)),
+            2,
+            env,
+            ENTRANCE_SOCKET,
+        ));
+        tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
+            .await
+            .expect("명부 읽기가 시작되지 않는다")
+            .expect("신호");
+
+        clock.advance(CommandDeliveries::DEFAULT_DEADLINE + Duration::from_secs(1));
+        assert_eq!(deliveries.expire(), 1, "푸는 동안에도 마감이 자리를 거둔다");
+        finished(round_trip).await;
+
+        match next_event(&mut caller_inbox).await {
+            AgentEvent::CommandReply { reply } => {
+                assert_eq!(reply.request_id, request_id);
+                let err = reply.outcome.expect_err("마감 초과");
+                assert_eq!(err.code(), ErrorCode::Timeout, "코드는 정산한 쪽 그대로");
+                assert!(
+                    err.message().contains("never sent to its owner"),
+                    "주인이 답하지 않은 것이 아니라 보내지 않았다: {}",
+                    err.message()
+                );
+            }
+            other => panic!("CommandReply 여야 함: {other:?}"),
+        }
+        let _ = open.send(());
+        assert!(
+            owner_inbox.try_recv().is_err(),
+            "답한 왕복의 봉투는 나가지 않는다"
+        );
+    }
+
+    /// 읽기가 끝나 풀기 셈이 `n` 이 될 때까지 기다린다 — 셈은 blocking 풀의 읽기가 끝나야 내려간다.
+    async fn resolving_settles_at(deliveries: &CommandDeliveries, n: usize) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while deliveries.resolving() != n {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("풀기 셈이 안 내려간다");
+    }
+
+    /// ★푸는 도중 데몬이 내려가면 `OUTCOME_UNKNOWN` 그대로이되 「보내지 않았다」고 말한다★ — 봉투는 주인에게 간 적이 없다.
+    #[tokio::test]
+    async fn a_shutdown_while_resolving_says_the_command_was_never_sent() {
+        let (agents, open, mut entered_rx) = AgentsOnly::gated(&[(uuid::Uuid::new_v4(), "lead")]);
+        let (roster, mut owner_inbox) = roster_with_marked_owner(1, "slot.focus", &["agent"]);
+        let mut caller_inbox = attach_caller(&roster, 2);
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
+        let env = marked_envelope("slot.focus", json!({ "agent": "lead" }));
+
+        let round_trip = tokio::spawn(super::deliver(
+            roster.clone(),
+            deliveries.clone(),
+            Arc::new(Arc::clone(&agents)),
+            2,
+            env,
+            ENTRANCE_SOCKET,
+        ));
+        tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
+            .await
+            .expect("명부 읽기가 시작되지 않는다")
+            .expect("신호");
+        assert_eq!(deliveries.drain(), 1);
+        finished(round_trip).await;
+
+        let err = match next_event(&mut caller_inbox).await {
+            AgentEvent::CommandReply { reply } => reply.outcome.expect_err("종료"),
+            other => panic!("CommandReply 여야 함: {other:?}"),
+        };
+        assert_eq!(err.code(), ErrorCode::OutcomeUnknown);
+        assert!(
+            err.message().contains("never sent to its owner"),
+            "{}",
+            err.message()
+        );
+        let _ = open.send(());
+        resolving_settles_at(&deliveries, 0).await;
+        assert!(owner_inbox.try_recv().is_err(), "봉투는 나가지 않는다");
+    }
+
+    /// ★이미 떠난 호출자를 위해 명부를 읽지 않는다★ — 1단계의 이른 검사와 같다. 답은 갈 곳이 없고 자리만 놓인다.
+    #[tokio::test]
+    async fn a_caller_already_gone_starts_no_roster_read() {
+        let agents = AgentsOnly::new(&[(uuid::Uuid::new_v4(), "lead")]);
+        let (roster, mut owner_inbox) = roster_with_marked_owner(1, "slot.focus", &["agent"]);
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
+
+        super::deliver(
+            roster,
+            deliveries.clone(),
+            Arc::new(Arc::clone(&agents)),
+            2,
+            marked_envelope("slot.focus", json!({ "agent": "lead" })),
+            ENTRANCE_SOCKET,
+        )
+        .await;
+
+        assert_eq!(
+            agents.reads.load(Ordering::SeqCst),
+            0,
+            "읽기를 시작하지 않는다"
+        );
+        assert_eq!(deliveries.resolving(), 0, "상한 한 칸도 안 쓴다");
+        assert_eq!(deliveries.in_flight(), 0, "자리를 놓는다");
+        assert!(owner_inbox.try_recv().is_err(), "봉투는 나가지 않는다");
+    }
+
+    /// ★푸는 동안 호출자가 떠나면(자리가 거둬지면) 그 사실이 답이고 봉투는 나가지 않는다★ — 읽기는 끝까지 돌고, 그
+    /// 셈은 읽기가 끝나야 풀린다. 답을 읽으려고 상관 표만 거둔다(운영은 명부에서 먼저 빠져 이 답이 갈 곳이 없다).
+    #[tokio::test]
+    async fn a_caller_leaving_while_resolving_is_answered_gone_and_never_relayed() {
+        let (agents, open, mut entered_rx) = AgentsOnly::gated(&[(uuid::Uuid::new_v4(), "lead")]);
+        let (roster, mut owner_inbox) = roster_with_marked_owner(1, "slot.focus", &["agent"]);
+        let mut caller_inbox = attach_caller(&roster, 2);
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
+        let env = marked_envelope("slot.focus", json!({ "agent": "lead" }));
+        let request_id = env.request_id;
+
+        let round_trip = tokio::spawn(super::deliver(
+            roster.clone(),
+            deliveries.clone(),
+            Arc::new(Arc::clone(&agents)),
+            2,
+            env,
+            ENTRANCE_SOCKET,
+        ));
+        tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
+            .await
+            .expect("명부 읽기가 시작되지 않는다")
+            .expect("신호");
+        assert_eq!(deliveries.drop_origin(2), 1);
+        finished(round_trip).await;
+
+        let err =
+            refused_without_relay(&mut caller_inbox, &mut owner_inbox, &deliveries, request_id)
+                .await;
+        assert_eq!(err.code(), ErrorCode::Conflict);
+        assert_eq!(err.message(), CALLER_ALREADY_GONE);
+        assert_eq!(deliveries.resolving(), 1, "읽기가 끝나기 전엔 셈이 남는다");
+        let _ = open.send(());
+        resolving_settles_at(&deliveries, 0).await;
+        assert!(
+            owner_inbox.try_recv().is_err(),
+            "읽기가 끝나도 봉투는 나가지 않는다"
+        );
+    }
+
+    /// ★풀기 작업이 답 없이 죽으면 `INTERNAL` 이고 중계하지 않는다★ — 셈은 패닉으로도 돌아온다.
+    #[tokio::test]
+    async fn a_resolver_that_dies_answers_internal_and_never_relays() {
+        let agents = AgentsOnly::panicking();
+        let (roster, mut owner_inbox) = roster_with_marked_owner(1, "slot.focus", &["agent"]);
+        let mut caller_inbox = attach_caller(&roster, 2);
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
+        let env = marked_envelope("slot.focus", json!({ "agent": "lead" }));
+        let request_id = env.request_id;
+
+        super::deliver(
+            roster,
+            deliveries.clone(),
+            Arc::new(agents),
+            2,
+            env,
+            ENTRANCE_SOCKET,
+        )
+        .await;
+
+        let err =
+            refused_without_relay(&mut caller_inbox, &mut owner_inbox, &deliveries, request_id)
+                .await;
+        assert_eq!(err.code(), ErrorCode::Internal);
+        resolving_settles_at(&deliveries, 0).await;
+    }
+
+    /// ★풀기 상한을 넘으면 읽지도 중계하지도 않고 `CONFLICT` 로 거절한다 — 셈은 막힌 읽기가 끝나야 풀린다★: 첫 왕복이
+    /// 마감으로 답해 떠난 뒤에도 그 읽기가 막혀 있는 동안은 거절이 이어지고, 읽기가 끝나면 다음 명령이 중계된다.
+    #[tokio::test]
+    async fn resolving_past_the_ceiling_is_refused_until_the_stuck_read_ends() {
+        let lead = uuid::Uuid::new_v4();
+        let clock = Arc::new(ManualClock::new());
+        let (agents, open, mut entered_rx) = AgentsOnly::gated(&[(lead, "lead")]);
+        let (roster, mut owner_inbox) = roster_with_marked_owner(1, "slot.focus", &["agent"]);
+        let mut caller_inbox = attach_caller(&roster, 2);
+        let deliveries = deliveries_with(clock.clone()).with_resolve_limit(1);
+        let locals: Arc<dyn LocalCommands> = Arc::new(Arc::clone(&agents));
+        let marked = || marked_envelope("slot.focus", json!({ "agent": "lead" }));
+        let round_trip = |env: CommandEnvelope| {
+            tokio::spawn(super::deliver(
+                roster.clone(),
+                deliveries.clone(),
+                Arc::clone(&locals),
+                2,
+                env,
+                ENTRANCE_SOCKET,
+            ))
+        };
+
+        let stuck = round_trip(marked());
+        tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
+            .await
+            .expect("명부 읽기가 시작되지 않는다")
+            .expect("신호");
+
+        let env = marked();
+        let request_id = env.request_id;
+        finished(round_trip(env)).await;
+        let err = match next_event(&mut caller_inbox).await {
+            AgentEvent::CommandReply { reply } => {
+                assert_eq!(reply.request_id, request_id);
+                reply.outcome.expect_err("넘쳤다")
+            }
+            other => panic!("CommandReply 여야 함: {other:?}"),
+        };
+        assert!(
+            owner_inbox.try_recv().is_err(),
+            "넘친 명령은 중계하지 않는다"
+        );
+        assert_eq!(
+            deliveries.in_flight(),
+            1,
+            "넘친 명령의 자리는 놓고 막힌 왕복의 자리만 남는다"
+        );
+        assert_eq!(err.code(), ErrorCode::Conflict);
+        assert!(
+            err.message().contains("not sent to its owner"),
+            "{}",
+            err.message()
+        );
+        assert_eq!(
+            agents.reads.load(Ordering::SeqCst),
+            1,
+            "넘친 명령은 명부를 읽지 않는다"
+        );
+
+        clock.advance(CommandDeliveries::DEFAULT_DEADLINE + Duration::from_secs(1));
+        assert_eq!(deliveries.expire(), 1);
+        finished(stuck).await;
+        assert!(matches!(
+            next_event(&mut caller_inbox).await,
+            AgentEvent::CommandReply { .. }
+        ));
+        let env = marked();
+        let request_id = env.request_id;
+        finished(round_trip(env)).await;
+        let err =
+            refused_without_relay(&mut caller_inbox, &mut owner_inbox, &deliveries, request_id)
+                .await;
+        assert_eq!(
+            err.code(),
+            ErrorCode::Conflict,
+            "답한 왕복의 읽기가 아직 막혀 있으면 셈도 남는다"
+        );
+
+        let _ = open.send(());
+        resolving_settles_at(&deliveries, 0).await;
+        let after = round_trip(marked());
+        let envelope = match next_event(&mut owner_inbox).await {
+            AgentEvent::CommandRequest { envelope } => envelope,
+            other => panic!("주인은 CommandRequest 를 받는다: {other:?}"),
+        };
+        assert_eq!(envelope.args["agent"], json!(lead.to_string()));
+        deliveries.complete(CommandReply::ok(envelope.request_id, json!({})));
+        finished(after).await;
+    }
+
     // ── 끊김 정리 ────────────────────────────────────────────────────────────────
 
     /// 물어본 연결이 사라지면 그 연결이 물고 있던 항목이 전부 없어지고, 기다리던 배달도 끝난다.
@@ -3873,6 +4791,7 @@ pub(crate) mod tests {
                 vec![CommandDecl {
                     name: "tab.create".to_string(),
                     help: "{}".to_string(),
+                    agent_args: Vec::new(),
                 }],
             )
             .expect("등록");
@@ -4855,6 +5774,44 @@ pub(crate) mod tests {
             !bus.roster().is_attached(FIRST_CONTROL_CALLER),
             "왕복이 끝났으면 그 가짜 연결도 거둬져야 한다"
         );
+    }
+
+    /// ★제어 라우트도 표시한 칸의 이름을 id 로 바꿔 중계한다★ — 변환은 두 입구가 지나는 `deliver` 한 곳에 있다(ADR-0308).
+    #[tokio::test]
+    async fn the_control_door_relays_a_marked_name_as_the_agent_id() {
+        let lead = uuid::Uuid::new_v4();
+        let (roster, mut owner_inbox) = roster_with_marked_owner(1, "slot.focus", &["slot_of"]);
+        let (bus, _sweeper) = CommandBus::new(
+            roster,
+            deliveries_with(Arc::new(ManualClock::new())),
+            Arc::new(AgentsOnly::new(&[(lead, "lead")])),
+        );
+        let request_id = RequestId::new();
+
+        let call = {
+            let bus = bus.clone();
+            tokio::spawn(async move {
+                bus.invoke(
+                    request_id,
+                    "slot.focus".to_string(),
+                    json!({ "slot_of": "lead", "window": "main" }),
+                )
+                .await
+            })
+        };
+        let envelope = envelope_from(&mut owner_inbox).await;
+        assert_eq!(
+            envelope.args,
+            json!({ "slot_of": lead.to_string(), "window": "main" }),
+            "표시한 칸만 id 로 바뀐다"
+        );
+        bus.deliveries()
+            .complete(CommandReply::ok(request_id, json!({ "ok": true })));
+
+        let reply = answered(call).await;
+        assert_eq!(reply.outcome.expect("주인의 성공")["ok"], true);
+        assert_eq!(bus.deliveries().in_flight(), 0, "자리를 놓는다");
+        assert_eq!(bus.deliveries().resolving(), 0, "풀기 셈도 돌아온다");
     }
 
     /// 아무도 그 이름을 선언하지 않았으면 배달이 「모르는 명령」으로 답한다 — 이 문이 그 갈래를 삼키지

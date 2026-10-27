@@ -216,6 +216,7 @@ mod tests {
         errors: &[],
         args_type: "AgentListArgs",
         ok_type: "AgentListOk",
+        agent_args: &[],
     };
     static DECLARED: &[&CommandSpec] = &[&AGENT_LIST];
 
@@ -286,6 +287,7 @@ mod tests {
                 vec![CommandDecl {
                     name: "tab.create".to_string(),
                     help: "{}".to_string(),
+                    agent_args: Vec::new(),
                 }],
             )
             .expect("한 이름은 상한 안이다");
@@ -318,6 +320,7 @@ mod tests {
                 vec![CommandDecl {
                     name: "tab.create".to_string(),
                     help: "{}".to_string(),
+                    agent_args: Vec::new(),
                 }],
             )
             .expect("한 이름은 상한 안이다");
@@ -456,6 +459,7 @@ mod tests {
                 vec![CommandDecl {
                     name: "tab.create".to_string(),
                     help: "{}".to_string(),
+                    agent_args: Vec::new(),
                 }],
             )
             .expect("한 이름은 상한 안이다");
@@ -509,6 +513,7 @@ mod tests {
                 vec![CommandDecl {
                     name: "tab.create".to_string(),
                     help: "{}".to_string(),
+                    agent_args: Vec::new(),
                 }],
             )
             .expect("한 이름은 상한 안이다");
@@ -560,6 +565,7 @@ mod tests {
                 vec![CommandDecl {
                     name: "tab.create".to_string(),
                     help: "{}".to_string(),
+                    agent_args: Vec::new(),
                 }],
             )
             .expect("한 이름은 상한 안이다");
