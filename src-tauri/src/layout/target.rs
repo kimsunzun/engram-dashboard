@@ -112,8 +112,16 @@ impl LocateError {
     }
 
     /// 다음 호출 한 번에 고칠 단서(영어 — 버스 문구 끝 `— candidates: …` 에 그대로 붙인다 · TRD S28 §5-3). 없는 이름
-    /// = 떠 있는 에이전트 이름 · 모호 = 그 칸들의 `slot_id` · 탭 · 창. [`MAX_CANDIDATES`] 개까지, 그 밖의 오류는 빈 목록.
+    /// = 떠 있는 에이전트 이름 · 모호 = 그 칸들의 `slot_id` · 든 탭(`in_tab=` — 탭 id 인자 `tab` 과 헷갈리지 않게) · 창.
+    /// [`MAX_CANDIDATES`] 개까지, 그 밖의 오류는 빈 목록.
+    /// 칸 id 의 머리는 `slot_id=` 다 — 다른 인자 이름이면 [`Self::candidates_as`].
     pub fn candidates(&self) -> Vec<String> {
+        self.candidates_as("slot_id")
+    }
+
+    /// [`Self::candidates`] 와 같되 모호 후보의 칸 id 머리를 `key=` 로 단다 — 그 값을 넘길 인자 이름(`slot_id` ·
+    /// `beside_slot`)을 쓰면 다음 호출이 그대로 옮겨 적는다.
+    pub fn candidates_as(&self, key: &str) -> Vec<String> {
         match self {
             LocateError::AgentNotShown { shown, .. } => {
                 shown.iter().take(MAX_CANDIDATES).cloned().collect()
@@ -123,7 +131,7 @@ impl LocateError {
                 .take(MAX_CANDIDATES)
                 .map(|p| {
                     format!(
-                        "slot_id={} (tab={} · window={} · window_id={})",
+                        "{key}={} (in_tab={} · window={} · window_id={})",
                         p.slot, p.view, p.window, p.window_id
                     )
                 })

@@ -44,6 +44,12 @@ pub struct CommandSpec {
     pub args_type: &'static str,
     /// 반환 struct 의 타입 이름 — [`CommandSpec::args_type`] 와 같은 쓸모.
     pub ok_type: &'static str,
+    /// 에이전트를 가리키는 인자 칸 이름(선언 순서) — 선언 매크로가 `#[agent_ref]` 표시에서 채운다.
+    ///
+    /// 등록 패킷의 [`CommandDecl::agent_args`] 로 실려, 데몬이 중계 전에 그 칸의 이름을 에이전트 id 로
+    /// 바꾼다(ADR-0308). 칸은 꼭대기 인자의 `String`·`Option<String>` 뿐이다(매크로가 그 밖을 막는다).
+    // ADR-0308
+    pub agent_args: &'static [&'static str],
 }
 
 /// 표가 **모든 명령에** 자동으로 얹는 오류.
@@ -133,6 +139,13 @@ pub(crate) fn find_unique<'a>(
 pub struct CommandDecl {
     pub name: String,
     pub help: String,
+    /// 에이전트를 가리키는 인자 칸 이름 — 데몬은 중계 전에 이 칸의 **문자열 값**만 자기 해석기로 이름 →
+    /// 에이전트 id 로 바꾸고, 풀리지 않으면 중계하지 않는다(ADR-0308). 칸이 그 명령에서 무슨 뜻인지(칸 지목 ·
+    /// 탭 지목)는 데몬이 모른다 — `help` 는 여전히 불투명하다.
+    /// 빈 목록 = 바꿀 칸 없음. 이 칸이 없는 옛 패킷도 그 뜻으로 읽힌다(`default`).
+    // ADR-0308
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_args: Vec<String>,
 }
 
 /// 스키마 항목 하나 — 파생 파일의 원소이자 등록 패킷의 `help`.
@@ -168,11 +181,12 @@ pub fn spec_item_json(spec: &CommandSpec) -> String {
 
 /// 선언 하나가 **광고할 수 있는 모양인지** 본다 — 선언 crate 의 테스트가 부른다.
 ///
-/// ★매크로가 못 잡는 것만 본다★: 알파벳은 컴파일 타임에 닫히지만 두 가지는 그때 안 걸린다 —
+/// ★매크로가 못 잡는 것만 본다★: 알파벳은 컴파일 타임에 닫히지만 세 가지는 그때 안 걸린다 —
 /// ① raw identifier(`r#type`)는 스키마에 `r#` 가 붙은 채 찍히는데 serde 가 쓰는 wire 이름은 `type` 이라
 /// **광고와 실제가 갈린다**(매크로가 문자열을 다듬을 수단이 없다. 필드 이름과 **enum variant** 둘 다다 —
 /// variant 도 `stringify!` 로 찍히고 serde 는 `r#` 를 뗀 이름을 쓴다) ② 스키마 텍스트 자체가 JSON 이
-/// 아닌 경우.
+/// 아닌 경우 ③ 에이전트 참조 칸(`#[agent_ref]`)을 표시하고 `errors` 에 `NOT_FOUND` · `CONFLICT` 를 안 적은 경우 — 데몬이
+/// 그 칸을 못 풀면 이 명령 대신 그 두 코드로 답하므로(ADR-0308) 빠뜨린 선언은 「이 오류는 안 난다」고 거짓 광고를 한다.
 /// ★스키마 **전체**를 훑는다★: 블록 안에서 선언한 struct 는 부모 스키마에 인라인으로 펼쳐지므로
 /// 꼭대기만 보면 중첩 타입의 필드는 한 번도 검사되지 않는다.
 pub fn lint_spec(spec: &CommandSpec) -> Result<(), String> {
@@ -180,6 +194,18 @@ pub fn lint_spec(spec: &CommandSpec) -> Result<(), String> {
         let parsed: serde_json::Value = serde_json::from_str(text)
             .map_err(|e| format!("{}: {label} 스키마가 JSON 이 아니다 — {e}", spec.name))?;
         lint_node(spec.name, label, "", &parsed)?;
+    }
+    if !spec.agent_args.is_empty() {
+        for code in [ErrorCode::NotFound, ErrorCode::Conflict] {
+            if !spec.errors.contains(&code) {
+                return Err(format!(
+                    "{}: 에이전트 참조 칸({})을 표시했는데 errors 에 {} 가 없다 — 데몬이 그 칸을 못 풀면 이 명령 대신 그 코드로 답한다(ADR-0308)",
+                    spec.name,
+                    spec.agent_args.join(", "),
+                    code.as_str()
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -319,6 +345,7 @@ mod tests {
             errors: &[],
             args_type: "LintArgs",
             ok_type: "LintOk",
+            agent_args: &[],
         }
     }
 
@@ -398,6 +425,29 @@ mod tests {
         .expect_err("배열 아닌 required");
     }
 
+    /// ★표시한 칸이 있으면 데몬의 두 거절 코드를 선언해야 한다★(ADR-0308) — 하나만 빠져도 그 코드를 이름으로 든다.
+    #[test]
+    fn an_agent_reference_arg_without_not_found_and_conflict_is_refused() {
+        let schema = "{\"type\":\"object\",\"properties\":{\"slot_of\":{\"type\":\"string\"}},\"required\":[]}";
+        let marked = |errors: &'static [ErrorCode]| CommandSpec {
+            errors,
+            agent_args: &["slot_of"],
+            ..spec(schema)
+        };
+
+        let err = lint_spec(&marked(&[])).expect_err("둘 다 없다");
+        assert!(
+            err.contains("slot_of") && err.contains("NOT_FOUND"),
+            "{err}"
+        );
+        let err = lint_spec(&marked(&[ErrorCode::NotFound])).expect_err("CONFLICT 가 없다");
+        assert!(err.contains("CONFLICT"), "{err}");
+        let err = lint_spec(&marked(&[ErrorCode::Conflict])).expect_err("NOT_FOUND 가 없다");
+        assert!(err.contains("NOT_FOUND"), "{err}");
+        lint_spec(&marked(&[ErrorCode::Conflict, ErrorCode::NotFound])).expect("둘 다 있다");
+        lint_spec(&spec(schema)).expect("표시 없는 선언은 이 규칙에 안 걸린다");
+    }
+
     #[test]
     fn a_schema_that_is_not_json_is_refused() {
         lint_spec(&spec("{not json")).expect_err("깨진 스키마");
@@ -432,6 +482,7 @@ mod tests {
             errors: &[],
             args_type: "OneArgs",
             ok_type: "OneOk",
+            agent_args: &[],
         };
 
         let body = catalog_json(1, &[&ONE]);

@@ -18,8 +18,8 @@
 use std::sync::Arc;
 
 use engram_dashboard_agent::commands::{
-    make_table, resolve_in, AgentBackend, AgentCommandHost, RosterChanged, UsageCommandHost,
-    UsageVendorRow, INPUT_AFFECTING,
+    make_table, resolve_in, AgentBackend, AgentCommandHost, AgentRosterRow, RosterChanged,
+    UsageCommandHost, UsageVendorRow, INPUT_AFFECTING,
 };
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::types::AgentId;
@@ -322,6 +322,16 @@ impl LocalCommands for DaemonLocalCommands {
     fn decls(&self) -> Vec<CommandDecl> {
         self.0.get().map(|table| table.decls()).unwrap_or_default()
     }
+
+    /// 동사 본문 · 임대 검문(`admit_input`)이 지목을 푸는 **그 호스트**의 명부다. 표가 아직 안 꽂혔으면 빈
+    /// 명부 — 그 시점엔 이 데몬이 아는 에이전트가 없다는 사실 그대로다.
+    // ADR-0308
+    fn agent_roster(&self) -> Vec<AgentRosterRow> {
+        self.0
+            .get()
+            .map(|table| table.roster.roster())
+            .unwrap_or_default()
+    }
 }
 
 /// 명부 통지 포트의 데몬 어댑터 — 슬롯을 **부를 때** 읽는다(사유는 [`make_daemon_table`] doc).
@@ -560,6 +570,28 @@ mod tests {
             .run("agent.list", &mut json!({}), "bus", Some(2))
             .is_none());
         assert!(bus.decls().is_empty());
+        assert!(
+            bus.agent_roster().is_empty(),
+            "표가 없으면 아는 에이전트도 없다"
+        );
+    }
+
+    /// ★남의 명령의 에이전트 참조 칸을 푸는 명부 = 동사가 지목을 푸는 그 명부★(ADR-0308 · ADR-0132) —
+    /// 갈리면 같은 이름이 버스 중계와 `agent.*` 에서 다른 에이전트로 풀린다.
+    #[test]
+    fn agent_references_resolve_against_the_verbs_own_roster() {
+        let slot = table_slot();
+        let bus = DaemonLocalCommands::new(slot.clone());
+        register_one(slot.get().expect("표"));
+
+        let rows = bus.agent_roster();
+        assert_eq!(rows.len(), 1, "방금 등록한 에이전트가 보인다");
+        let listed = call(slot.get().expect("표"), "agent.list", json!({})).expect("목록");
+        assert_eq!(
+            listed["agents"][0]["id"],
+            rows[0].id.to_string(),
+            "동사가 보는 명부와 같은 행"
+        );
     }
 
     /// 발견 목록이 싣는 것은 **표에 실제로 꽂힌 것**이다 — 선언만 있고 안 꽂힌 이름을 광고하면 그 이름의
@@ -608,6 +640,7 @@ mod tests {
             errors: &[],
             args_type: "FixturePendingArgs",
             ok_type: "FixturePendingOk",
+            agent_args: &[],
         };
 
     static PENDING_DECLARED: &[&engram_dashboard_command::CommandSpec] = &[&PENDING_SPEC];

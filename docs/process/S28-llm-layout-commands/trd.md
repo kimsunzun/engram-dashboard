@@ -1,7 +1,7 @@
-# S28 TRD — LLM 레이아웃 명령 (T-65) — 3판 (2026-10-26)
+# S28 TRD — LLM 레이아웃 명령 (T-65) — 4판 (2026-10-27)
 
-- **상태:** 3판 · 메인 작성(사용자 외출 중 자율 진행 「쭉 진행해」 · 명령 세부 = 사용자 위임 2026-10-26 「잘 지시되는쪽으로 알아서」). 1판(`76d29cd0`)을 `/review trd full`(codex Designer · Claude Architect-breaker — 둘 다 FIX) 지적으로, 2판(`61c66724`)을 Claude 재확인(FIX) 지적으로 고쳤다 — 고친 것 = §12. 사용자가 돌아오면 볼 결정 = §11.
-- ★**ADR-0308(2026-10-27)이 이름 풀기 경로를 바꿨다**★ — 셸이 데몬에 되묻는 §5-1 대신, 셸이 등록 때 「에이전트 참조」로 표시한 인자를 데몬이 중계 전에 id 로 바꿔 넘긴다. §5-1 · §6 의 되묻기 서술과 미커밋 U3a · U3b 의 되묻기 코드는 다음 세션에서 이 결정대로 고쳐 쓴다(조사 = `docs/research/agent-name-resolution-relay-vs-callback-2026-10-27.md`).
+- **상태:** 4판 · 메인 작성(사용자 외출 중 자율 진행 「쭉 진행해」 · 명령 세부 = 사용자 위임 2026-10-26 「잘 지시되는쪽으로 알아서」). 1판(`76d29cd0`)을 `/review trd full`(codex Designer · Claude Architect-breaker — 둘 다 FIX) 지적으로, 2판(`61c66724`)을 Claude 재확인(FIX) 지적으로 고쳤고, 4판은 ADR-0308 을 구현대로 반영했다 — 고친 것 = §12. 사용자가 돌아오면 볼 결정 = §11.
+- **이름 풀기 = ADR-0308** — 셸은 에이전트를 고르는 인자를 등록 때 「에이전트 참조」로 표시하고, 데몬이 중계 전에 그 칸의 이름을 id 로 바꿔 넘긴다(§5-1 · §6 · 조사 = `docs/research/agent-name-resolution-relay-vs-callback-2026-10-27.md`). 셸은 데몬에 되묻지 않는다.
 - **규칙:** ADR-0307 · `docs/reference/llm-command-conventions.md`(이하 「규칙」).
 - **옛 설계:** `docs/process/S21-slot-docking/prd.md` R11b(LLM 명령은 창 활성 · 보이는 탭 · 포커스를 안 바꾼다) · R16 · Q10 · D9 · D22(탭 순서 바꾸기도 T-65) · `docs/process/S21-slot-docking/trd.md` §3-6(`FocusPolicy::Keep` · 기본 share · 새 창 크기를 마우스와 같은 함수로 · 예열 창 그대로) · §9-5 · ADR-0297(끄는 중에도 LLM 명령은 막지 않는다).
 
@@ -9,8 +9,8 @@
 
 | 묶음 | 내용 |
 |---|---|
-| A | 데몬 명령 `agent.resolve` — 이름/id **여럿을 한 번에** → `{id, name, live}`(데몬 해석기 `resolve_in` 그대로 · ADR-0132) · `resolve_in` 의 NOT_FOUND / CONFLICT 문구에 후보를 싣는다 |
-| B | 셸 대상 풀기 — 에이전트 이름 → (데몬 왕복 한 번) id · **id · 공간 낱말 → 칸 · 탭 · 창은 적용과 같은 잠금 안에서** · 배치 줄 짓기 · `DockError` → 버스 오류 코드 |
+| A | 데몬 — 중계 전 에이전트 참조 칸 변환(ADR-0308 · 해석기 `resolve_in` 그대로 · ADR-0132) · `resolve_in` 의 NOT_FOUND / CONFLICT 문구에 후보를 싣는다 · 명령 `agent.resolve`(이름/id **여럿을 한 번에** → `{id, name, live}` — CLI 편의 · 셸은 부르지 않는다) |
+| B | 셸 대상 풀기 — 에이전트 칸은 `#[agent_ref]` 로 표시(데몬이 id 로 바꿔 넘긴다) · **id · 공간 낱말 → 칸 · 탭 · 창은 적용과 같은 잠금 안에서** · 배치 줄 짓기 · `DockError` → 버스 오류 코드 |
 | C | 새 명령 — `tab.move` · `tab.dock` · `tab.detach`(셋 다 `apply::dock_tab` · `FocusPolicy::Keep`) · `layout.get` |
 | D | 기존 칸 · 탭 명령 넓히기 — 이름 · 공간 낱말로 지목 · 배치를 바꾸면 응답에 바뀐 배치 |
 | E | `prompts/engram-help.md` 「## window」 를 이름 기준으로 간결히 다시 쓰기 · CLAUDE.md 「LLM-우선 제어」 남은 갭 줄 고치기 |
@@ -39,7 +39,8 @@
 - `at` · `beside_at` 은 `window` 의 **보이는 탭**에서 푼다(`apply::resolve_spatial` 그대로 · `window` 없으면 main). 낱말이 칸을 못 집으면 `NOT_FOUND`.
 - 창 인자는 ADR-0302 그대로(영속 id · 같은 실행 label · 번호 거부 — `layout/window_arg.rs`).
 - id 는 버스 매크로 규칙대로 `String`(처리기가 Uuid 로 푼다).
-- 옛 인자 `agent_id`(`slot.assignAgent` · `layout.setSlotContent` 의 넣을 에이전트)는 **받던 그대로 받는다**(옛 호출자) — 새 호출은 `assign`. 둘 다 = `INVALID_ARGUMENT`.
+- 「에이전트로」 열의 인자와 `assign` · 옛 `agent_id` · `layout.get` 의 `agent` 는 선언에 `#[agent_ref]` 로 표시한다(§5-1) — 처리기에는 데몬이 바꿔 넣은 id 로 온다. 「id 로」 · 「공간 낱말로」 열과 창 인자는 표시하지 않는다.
+- 옛 인자 `agent_id`(`slot.assignAgent` · `layout.setSlotContent` 의 넣을 에이전트)도 계속 받는다(옛 호출자) — 새 호출은 `assign`. 둘 다 = `INVALID_ARGUMENT`. 이것도 표시한 칸이라 데몬이 명부로 푼다(§7-1).
 
 ## 4. 새 명령
 
@@ -108,16 +109,16 @@ LayoutRow {
 
 ## 5. 대상 풀기 (묶음 B)
 
-### 5-1. 이름 → id: 데몬 왕복 한 번
+### 5-1. 이름 → id: 데몬이 중계 전에 바꾼다(ADR-0308)
 
-- 처리기가 인자 속 에이전트 말(`tab_of` · `slot_of` · `beside` · `after_tab_of` · `assign` · `agent`)을 **모아 한 번에** `agent.resolve{targets: [...]}` 을 데몬에 보낸다(`DaemonClient::send_command(AgentCommand::Command{envelope})` — `agent.spawnInto` 가 데몬을 기다리는 길과 같은 꼴 · 포트 trait 로 끊어 시험은 가짜로). 셸이 자기 캐시로 이름을 풀지 않는다(ADR-0132 · 규칙 §1-2).
-- 시한: CLI → 데몬 → 셸 배달 시한이 7 초(`crates/engram-dashboard-daemon/src/command_delivery.rs` `DEFAULT_DEADLINE`). 이름 왕복은 **한 번 · 2 초**로 묶는다 — 넘으면 **적용하지 않고** `CONFLICT` + 재시도 `AfterCondition`(「이름 풀기에 데몬이 답하지 않았다 — 아무것도 바꾸지 않았다」 · 「아무것도 안 했다 · 잠시 뒤 다시」의 기존 꼴 = `layout/commands.rs` 의 설정 읽기 실패). `TIMEOUT`(결과를 모른다) · `INTERNAL`(재시도 없음 · 패닉 · 직렬화 실패)은 쓰지 않는다.
-- **옛 데몬**: 앱만 새것이고 데몬은 옛것인 조합이 정상으로 생긴다(ADR-0178) — 그 데몬은 `agent.resolve` 를 모른다(`UNKNOWN_COMMAND`). 그때 ① 에이전트 **이름**을 받은 호출은 `CONFLICT`(「데몬이 옛 판이라 이름을 못 푼다 — 데몬을 다시 띄우거나 id 로」) ② **id 만** 준 옛 호출(`agent_id`)은 확인을 건너뛰고 옛 동작대로 적용한다.
-- 에이전트 말이 하나도 없으면 왕복을 건너뛴다.
+- 셸은 에이전트를 고르는 인자(`tab_of` · `slot_of` · `beside` · `after_tab_of` · `assign` · 옛 `agent_id` · `layout.get` 의 `agent`)를 선언에서 `#[agent_ref]` 로 표시한다 — 등록 패킷의 `CommandDecl.agent_args` 로 실리고 `help` 는 그대로 불투명하다. 데몬이 아는 것은 「이 칸은 내 에이전트를 가리킨다」뿐이다.
+- 데몬은 셸 명령을 중계하기 전에 표시한 칸의 **문자열 값만** 자기 해석기(`resolve_in` — ADR-0132)로 id(정규 철자)로 바꿔 봉투에 다시 적는다(§6). 풀리지 않으면 **중계하지 않고** 해석기의 코드 그대로(없음 = `NOT_FOUND` · 이름 겹침 = `CONFLICT`) `"<칸>: <문구 + 후보>"` 로 답한다 — 셸은 아무것도 받지 않았으므로 아무것도 바뀌지 않는다.
+- 셸 처리기는 표시한 칸에서 **id 만** 본다 — `Uuid` 로 풀고, UUID 가 아니면(데몬을 거치지 않은 호출) `INVALID_ARGUMENT`(「`<칸>` must be an agent id (a UUID) …」). 셸은 이름을 풀지 않는다(ADR-0132 · 규칙 §1-2 — 셸의 이름 캐시 `agent_names` 는 보여 주기 몫).
+- 이름 → id 는 셸의 적용 잠금 밖(데몬)이고 id → 칸은 안이다 — 그 사이의 움직임은 §5-2 가 지킨다.
 
 ### 5-2. id · 공간 낱말 → 칸 · 탭 · 창: 적용과 같은 잠금 안에서
 
-- 이름을 푼 뒤 실제 적용 사이에 다른 명령 · 마우스가 배치를 바꿀 수 있다(TOCTOU). 그래서 **에이전트 id · 공간 낱말 → (창, 탭, 칸) 고르기는 적용 함수 안, 바꾸는 잠금을 쥔 채** 한다.
+- 데몬이 이름을 id 로 바꾼 뒤 셸이 적용하기까지 다른 명령 · 마우스가 배치를 바꿀 수 있다(TOCTOU). 그래서 **에이전트 id · 공간 낱말 → (창, 탭, 칸) 고르기는 적용 함수 안, 바꾸는 잠금을 쥔 채** 한다.
   - 적용 서비스에 **대상 꼴** 을 더한다 — `enum Target { Tab(ViewId), TabOf(AgentId), AfterTabOf(AgentId), Slot{view: Option<ViewId>, slot: SlotId}, SlotOf(AgentId), At{token, window} }`(이름 · 위치는 구현이 정한다). **`Target` 을 받는 새 적용 함수**를 두고 잠금 안에서 `locate` 로 푼다.
   - ★옛 id 시그니처는 그대로 남긴다★ — 마우스 · 웹 · `tab_drop` · 팝아웃 등 기존 호출자(10 파일 남짓)는 손대지 않는다. 옛 함수는 새 함수를 `Target::Tab` · `Target::Slot` 으로 부르는 얇은 겉이거나 그 반대(구현이 고른다). 그래서 U2 가 혼자 빌드된다.
   - 잠금을 두 번 잡는 적용(새 창 — `dock_into_window`)은 커밋 잠금에서 다시 `locate` 해 같은지 본다(§4-3).
@@ -127,15 +128,21 @@ LayoutRow {
 ### 5-3. 오류 코드 대응 · 선언
 
 - `DockError` → 버스: `SelfTarget` · `InvalidShare` → `INVALID_ARGUMENT` · 호출자가 **id 로 준** 탭 · 칸이 없음(`TabNotFound` · `SlotNotFound` · `SlotNotInTab`) → `NOT_FOUND` · **`WindowNotFound` → `CONFLICT`**(ADR-0302 결정 9 · `window_arg_error` 와 같게) · 나머지(`ZeroArea` · `WindowClosed` · `WindowExists` · `SlotIdOverlap` · `WindowOpen`) → `CONFLICT`. 문구는 `DockError` 의 것을 그대로.
-- **새 명령 · 넓힌 명령의 선언 `errors [...]` 에 실제로 내는 코드를 모두 적는다**(ADR-0156 발견 계약 · `spawn_not_applied` 가 선언으로 거른다) — 대개 `[NOT_FOUND, CONFLICT]`(이름 풀기 시한 넘김 · 옛 데몬도 `CONFLICT`). `commands.rs` 머리의 「적용 실패는 코드 하나로 나간다(CONFLICT)」 문장을 이 대응으로 고친다.
+- **새 명령 · 넓힌 명령의 선언 `errors [...]` 에 실제로 내는 코드를 모두 적는다**(ADR-0156 발견 계약 · `spawn_not_applied` 가 선언으로 거른다) — 대개 `[NOT_FOUND, CONFLICT]`. 데몬이 에이전트 칸을 못 풀어 이 명령 대신 낸 답(없음 `NOT_FOUND` · 겹침 `CONFLICT` — §5-1)도 이 명령의 답이라 선언에 든다. `commands.rs` 머리의 「적용 실패는 코드 하나로 나간다(CONFLICT)」 문장을 이 대응으로 고친다.
 - **후보 싣기**: `CommandError` 는 코드 · 문구 · 재시도만 싣는다(구조 칸 없음). 후보는 **문구 끝에** `— candidates: a, b, c`(최대 5 · 영어 — 기존 오류 문구가 영어).
 
 ## 6. 데몬 쪽 (묶음 A)
 
-- `agent.resolve` — `crates/engram-dashboard-agent/src/commands.rs` 에 선언(생산자 옆 · ADR-0155). args `{targets: Vec<String>}`(1~8 개) → ok `{agents: Vec<{target, id, name, live: bool}>}`(같은 순서). 몸통 = 말마다 `resolve_in(roster, target)` 그대로(id 먼저 · 정확한 이름 · 중복 = CONFLICT · 없음 = NOT_FOUND). 하나라도 실패하면 그 코드로 실패하고 문구에 **어느 말**이 실패했는지 적는다. `#[effect(Read)]`.
-- `resolve_in` 의 오류 문구에 후보를 싣는다 — NOT_FOUND: 이름에 그 낱말을 (대소문자 무시) 품은 것 먼저, 없으면 앞에서부터 최대 5 · CONFLICT: 겹친 에이전트들의 id(최대 5). **모든 `target` 동사가 함께 받는다**(규칙 §1-3). 교차 시험은 코드만 비교하고(`control_agent.rs`) CLI 는 문구를 해석하지 않는다(리뷰 확인) — 문구 단언 시험만 고친다.
+- **중계 전 변환(ADR-0308)** — 자리 = `crates/engram-dashboard-daemon/src/command_delivery.rs` 의 `deliver` 에서 남의 이름을 `route` 에 넘기기 직전(소켓 · 제어 라우트 두 입구가 다 지나는 한 곳 · `resolve_agent_args`).
+  - 표시는 명부에서 읽는다(`CommandRoster::agent_args_of` — 주인이 등록한 `agent_args`). 표시한 칸 중 문자열 값만 바꾸고, 부재 · `null` · 문자열 아닌 값은 손대지 않는다(주인이 반려한다).
+  - 해석기 명부(`LocalCommands::agent_roster` — `agent.*` 동사가 지목을 푸는 그 명부)는 **`spawn_blocking`** 에서 읽는다 — 잠든 프로필의 경로 정규화가 길 수 있다(`AgentManager::roster`). 읽기는 취소되지 않으므로 동시 상한(`MAX_RESOLVING_IN_FLIGHT` = 16)을 두고 셈은 읽기가 끝날 때 풀린다 · 넘치면 중계 없이 `CONFLICT` · 이미 떠난 호출자면 읽지 않는다.
+  - 실패 = `resolve_in` 의 코드 그대로 · 문구 앞에 `"<칸>: "` · 중계하지 않는다. 해석 도중 그 왕복의 자리가 먼저 정산되면(마감 · 종료 · 호출자 이탈) 그 판정의 코드가 답이고(문구는 「주인에게 보내지 않았다」) 중계하지 않는다 · 해석 작업이 죽으면 `INTERNAL`.
+  - 데몬은 그 칸이 칸 지목인지 탭 지목인지 모른다 — `help` 도 열지 않는다(ADR-0308 결정 2 · 3).
+- 표시 칸: 명령 도구 crate(`command`)의 선언 매크로가 `#[agent_ref]`(꼭대기 인자의 `String` · `Option<String>` 만 — 그 밖은 컴파일 에러)를 `CommandSpec.agent_args` → `CommandDecl.agent_args` 로 싣는다. 이 칸이 없는 옛 패킷은 빈 목록으로 읽힌다.
+- `agent.resolve` — `crates/engram-dashboard-agent/src/commands.rs` 에 선언(생산자 옆 · ADR-0155). args `{targets: Vec<String>}`(1~8 개) → ok `{agents: Vec<{target, id, name, live: bool}>}`(같은 순서). 몸통 = 말마다 `resolve_in(roster, target)` 그대로(id 먼저 · 정확한 이름 · 중복 = CONFLICT · 없음 = NOT_FOUND). 하나라도 실패하면 그 코드로 실패하고 문구에 **어느 말**이 실패했는지 적는다. `#[effect(Read)]`. ★CLI 편의 명령이다 — 셸은 부르지 않는다★(이름 풀기는 위 중계 전 변환).
+- `resolve_in` 의 오류 문구에 후보를 싣는다 — NOT_FOUND: 이름에 그 낱말을 (대소문자 무시) 품은 것 먼저, 없으면 앞에서부터 최대 5 · CONFLICT: 겹친 에이전트들의 id(최대 5). **모든 `target` 동사와 중계 전 변환이 함께 받는다**(규칙 §1-3). 교차 시험은 코드만 비교하고(`control_agent.rs`) CLI 는 문구를 해석하지 않는다(리뷰 확인) — 문구 단언 시험만 고친다.
 - agent crate 의 `catalog_version` 을 올린다.
-- **응답 모양 고정**: 셸은 agent crate 를 의존하지 않아(ADR-0270) 답을 타입 없는 JSON 으로 읽는다. 그래서 `agent.resolve` 의 답 JSON 골든 파일을 agent crate 시험에 두고(그 시험이 직렬화 결과와 대조) **셸 시험의 가짜 데몬도 같은 파일을 읽어** 답을 만든다 — 필드 이름이 바뀌면 둘 중 하나가 빨개진다.
+- `agent.resolve` 의 답 JSON 골든(`crates/engram-dashboard-agent/tests/fixtures/agent_resolve_ok.json`)은 agent crate 시험이 직렬화 결과와 대조한다 — 셸 시험은 읽지 않는다.
 - TS 바인딩: agent crate 는 명령 타입을 명시 내보낸다(`crates/engram-dashboard-agent/tests/ts_export.rs`) — 새 타입도 더하고 생성물을 커밋한다(CI 동기 게이트).
 
 ## 7. 기존 명령 넓히기 (묶음 D)
@@ -147,31 +154,33 @@ LayoutRow {
 | `tab.switch` · `tab.close` · `tab.rename` | `tab_of` | `view_id` · **`window`**(탭에서 창을 알 수 있다) | `tab.close` 는 `layout` 더함 |
 | `agent.spawnInto` | `at` (+`window` 그대로) | — | 그대로(+`layout`) |
 
-- `assign` · `agent_id` 가 **풀리지 않으면 거절**한다 — 지금은 없는 id 도 받아 칸이 빈 채 남는다(help 가 적어 둔 함정 · §11-3). `agent_id` 는 id 모양 검사 + 데몬 명부 확인(같은 `agent.resolve` 왕복 · 데몬이 옛 판이면 확인을 건너뛴다 — §5-1).
+- `assign` · `agent_id` 가 **풀리지 않으면 거절**한다 — 지금은 없는 id 도 받아 칸이 빈 채 남는다(help 가 적어 둔 함정 · §11-3). 둘 다 에이전트 칸이라 데몬이 중계 전에 명부로 풀고, 없으면 데몬이 `NOT_FOUND` 로 답해 셸에 오지 않는다(§5-1).
 - 응답에 `layout` 을 더하는 것은 **덧붙이기**(필드 추가)라 옛 호출자는 그대로다. 규칙 §1-4 · ADR-0307 결정 4(사용자 결정)를 이 명령들에도 지킨다.
 - 인자를 선택으로 바꾸는 것은 id 를 주는 옛 호출자에 그대로 맞는다. 셸 `catalog_version` 을 올린다.
 
 ### 7-1. 기존 호출자에게 보이는 변화(구현 · 리뷰 실측 — 코드 · 결정 없이 기록만)
 
-- `agent_id`(`slot.assignAgent` · `layout.setSlotContent` 의 Agent)가 데몬 왕복으로 확인된다 — 모양이 UUID 가 아니면 `INVALID_ARGUMENT` · 명부에 없으면 `NOT_FOUND` · 데몬이 답하지 않으면 `CONFLICT`(예전엔 성공) · 옛 데몬이면 확인을 건너뛰고 받은 그대로 적는다 · 성공하면 데몬의 정규 철자로 적는다(§11-3).
+- `agent_id`(`slot.assignAgent` · `layout.setSlotContent` 의 Agent)도 에이전트 칸이라 데몬이 중계 전에 명부로 푼다 — 명부에 있는 id · 이름이면 그 id(정규 철자)로 바꿔 넘기고, 없으면 `NOT_FOUND` · 이름이 겹치면 `CONFLICT` 로 데몬이 답한다(예전엔 받은 그대로 적었다 · §11-3). 해석기는 id 를 `Uuid` 가 읽는 철자 전부(대문자 · 중괄호 · 하이픈 없음 · `urn:uuid:`)로 이름보다 먼저 맞추므로 대문자 UUID 를 보내던 옛 호출자도 그대로 풀린다(우편 입구는 정규 철자만 — 알고 남긴 불일치 · 교차 대조 시험이 양쪽을 단언한다). 빈 값 · 엉뚱한 값도 셸의 검문(`INVALID_ARGUMENT` — 빈 값 · 내용이 Agent 가 아닌데 준 `agent_id`)에 닿기 전에 데몬의 `NOT_FOUND` 다. 데몬을 거치지 않은 호출은 UUID 가 아니면 셸이 `INVALID_ARGUMENT` 로 반려한다.
 - 예전엔 무시되던 엉뚱한 인자가 이제 효력을 낸다 — 칸 동사에 `window` 만 주면 `INVALID_ARGUMENT`(「window 는 at 과만」) · `at` · `slot_of` · `assign` · `tab_of` 도 같다(알 수 없는 인자는 무시한다는 버스 규칙 — ADR-0157 — 에서 그 이름이 이제 「아는 인자」가 되었기 때문).
-- 이름 풀기가 칸 · 탭 존재 확인보다 먼저 돈다 — 없는 칸 + 모르는 `agent_id` 는 칸의 `CONFLICT` 대신 에이전트의 `NOT_FOUND`.
-- 같은 코드 · 다른 문구: 필수 id 빠짐(serde 「missing field」 → 「the slot/tab is missing — give one of …」) · 빈 id 문자열 · 내용이 Agent 가 아닌데 모양이 틀린 `agent_id` · 숫자 창 + 모양이 틀린 `view_id`(UUID 문구가 먼저).
+- 데몬의 에이전트 칸 풀기가 셸의 모든 검문보다 먼저 돈다 — 없는 칸 + 모르는 `agent_id` 는 칸의 `CONFLICT` 대신 에이전트의 `NOT_FOUND` · 셸이 반려할 인자 조합이어도 모르는 에이전트면 `NOT_FOUND` 가 먼저다.
+- 같은 코드 · 다른 문구: 필수 id 빠짐(serde 「missing field」 → 「the slot/tab is missing — give one of …」) · 빈 탭 · 칸 id 문자열 · 숫자 창 + 모양이 틀린 `view_id`(UUID 문구가 먼저).
 - 탭 동사의 `window` 가 선택이 됐다 — 주면 그 창의 탭이어야 한다(옛 오류 그대로).
-- 대기 슬롯 정리가 모든 버려진 데몬 왕복에 걸린다 — 늦은 답은 예전처럼 짝 없이 버려지고, 앞 대기자가 이미 사라진 경우의 「같은 요청 번호」 경고는 더는 안 난다.
 
 ## 8. 처리기 · 스레드
 
-- 에이전트 말을 받는 명령(새 넷 + 넓힌 것)은 데몬을 기다려야 하므로 **비동기 처리기**(`SpawnInto` 꼴 — `CommandHandler` 를 직접 구현)로 꽂는다. 기다리는 동안 레이아웃 잠금을 쥐지 않는다.
-- 적용(잠금 + 고르기 + 바꾸기)은 **`spawn_blocking`** 으로 옮긴다 — `NewWindow` 는 main 스레드 · 동기 명령에서 부르면 창 짓기가 교착하고(`apply.rs` 의 `dock_tab` 문서), 예열 창 대기(~1 초) 동안 tokio 일꾼을 막지 않게.
+- 대상을 받는 명령(새 넷 + 넓힌 칸 · 탭 동사)은 처리기 `targeted_handler`(`layout/commands.rs`)로 꽂는다 — 본문 전체(인자 검문 · 창 인자 풀기 · 적용 = 잠금 + 고르기 + 바꾸기)를 **`spawn_blocking`** 에서 돌리고 답은 `null` 칸을 뺀 JSON 이다. 셸 쪽에는 데몬 왕복이 없어 기다릴 것이 없다(이름은 데몬이 중계 전에 바꿨다 — §5-1).
+- 블로킹 풀인 이유 — `NewWindow` 는 main 스레드 · 동기 명령에서 부르면 창 짓기가 교착하고(`apply.rs` 의 `dock_tab` 문서), 예열 창 대기(~1 초) 동안 tokio 일꾼을 막지 않게.
+- `agent.spawnInto` 는 그대로 비동기 처리기(`SpawnInto`)다 — 적용 안에서 데몬 스폰을 기다린다(§5-2).
 - 끄는 중(마우스 탭 끌기)에도 막지 않는다(ADR-0297) — 놓기가 옮겨진 탭을 다시 찾는다.
 
 ## 9. 시험
 
 - 데몬(agent crate): `agent.resolve` 의 id · 이름 · 중복 · 없음 · 여럿 · 후보 문구 · 답 골든 JSON.
-- 셸 `src-tauri/tests/layout_commands.rs`: 새 명령 넷 + 넓힌 인자 — 가짜 데몬이 골든 JSON 으로 `agent.resolve` 를 답한다 · 표 이름 골든 목록 갱신 · 인자 배타(둘 다 / 없음) · 후보 문구 · 오류 코드 대응(WindowNotFound = CONFLICT 포함) · 선언 `errors` 와 실제 코드 일치 · `Keep`(보이는 탭 · 포커스 불변 — 예외 셋 §11-4) · `tab.detach` 의 `reused` → `changed: false` · `tab.dock` 의 응답 `tab` = 목적 탭 · 이름 왕복 시한 넘김 → 적용 없음 · NewWindow 는 가짜 `WindowHost` 로 headless.
-- 셸 `src-tauri/tests/layout_apply.rs`: `Target` 풀기(잠금 안) · **끼어들기 시험**(데몬이 이름을 푼 뒤 · 적용 전에 그 에이전트가 옮겨지면 적용 잠금 안에서 **지금 자리**로 풀린다 — 옮겨 간 탭이 움직이고 떠난 탭은 안 건드린다 · 어느 칸에도 없으면 `NOT_FOUND` · 새 창 두 잠금 사이에 옮겨지면 연 창을 거두고 `CONFLICT`) · `after_tab_of` 자리(같은 창에서 원본이 앞 · 뒤) · `LayoutRow` 짓기(창 · 탭 · 칸 순서 · 좌표 · 다중 표시 · 빈 탭).
-- 명령: `cargo test -p engram-dashboard --test layout_commands` · `--test layout_apply` · `--test lib_unit` · `cargo test -p engram-dashboard-agent -- --test-threads=4` · CI 생성물 동기.
+- 데몬(daemon crate · `command_delivery.rs`): 중계 전 변환 — 표시한 칸의 이름 → id · id 는 그대로 · 표시 없는 칸 · 문자열 아닌 값은 손대지 않음 · 표시 순서 · 없음 `NOT_FOUND` · 겹침 `CONFLICT`(문구 머리 `<칸>: `)이면 중계 안 함 · 명부를 blocking 풀에서 읽음 · 풀던 중 마감이면 `TIMEOUT` 이고 중계 안 함.
+- 명령 도구(command crate): `#[agent_ref]` → `CommandSpec.agent_args`(선언 순서 · 스키마 불변 — agent crate `tests/command_alphabet.rs`) · 등록 패킷이 `help` 밖 칸으로 싣는다(`table.rs`).
+- 셸 `src-tauri/tests/layout_commands.rs`: 새 명령 넷 + 넓힌 인자 — 에이전트 칸에는 id 를 직접 준다(이름 → id 는 데몬 시험 몫) · 등록 패킷의 `agent_args` 가 명령마다 표시한 칸 그대로 · 표시한 칸의 UUID 아닌 값 = `INVALID_ARGUMENT` · 표 이름 골든 목록 갱신 · 인자 배타(둘 다 / 없음) · 후보 문구 · 오류 코드 대응(WindowNotFound = CONFLICT 포함) · 선언 `errors` 와 실제 코드 일치 · `Keep`(보이는 탭 · 포커스 불변 — 예외 셋 §11-4) · `tab.detach` 의 `reused` → `changed: false` · `tab.dock` 의 응답 `tab` = 목적 탭 · NewWindow 는 가짜 `WindowHost` 로 headless.
+- 셸 `src-tauri/tests/layout_apply.rs`: `Target` 풀기(잠금 안) · **끼어들기 시험**(데몬이 이름을 id 로 바꾼 뒤 · 셸이 적용하기 전에 그 에이전트가 옮겨지면 적용 잠금 안에서 **지금 자리**로 풀린다 — 옮겨 간 탭이 움직이고 떠난 탭은 안 건드린다 · 어느 칸에도 없으면 `NOT_FOUND` · 새 창 두 잠금 사이에 옮겨지면 연 창을 거두고 `CONFLICT`) · `after_tab_of` 자리(같은 창에서 원본이 앞 · 뒤) · `LayoutRow` 짓기(창 · 탭 · 칸 순서 · 좌표 · 다중 표시 · 빈 탭).
+- 명령: `cargo test -p engram-dashboard --test layout_commands` · `--test layout_apply` · `--test lib_unit` · `cargo test -p engram-dashboard-command` · `cargo test -p engram-dashboard-daemon -- --test-threads=4` · `cargo test -p engram-dashboard-agent -- --test-threads=4` · CI 생성물 동기.
 
 ## 10. 구현 단위(파일 겹침으로 가른다 · 단위마다 빌드가 선다)
 
@@ -179,7 +188,8 @@ LayoutRow {
 |---|---|---|
 | U1 데몬 `agent.resolve` + 후보 문구 + 골든 | agent crate `commands.rs` · 그 시험 · `tests/ts_export.rs` · 바인딩 | 없음 |
 | U2 셸 적용 층 — `Target` · `locate` · `DockDest::TabBar.after` · `DockOutcome.changed` · `LayoutRow` 짓기 · 크기 계산 연결 | `src-tauri/src/layout/{apply.rs, manager.rs, dock.rs}` + 새 모듈 · `tests/layout_apply.rs` | 없음(U1 과 병렬) |
-| U3 셸 버스 — 이름 왕복 포트 · 새 명령 넷 · 오류 대응 · 넓힌 명령 | `src-tauri/src/layout/commands.rs` · `src-tauri/src/commands/layout.rs` · `tests/layout_commands.rs` | U1(골든 파일) · U2 |
+| U3 데몬 몫 — 표시 칸(`#[agent_ref]` · `agent_args`) · 중계 전 변환(ADR-0308) | `crates/engram-dashboard-command/src/{macros.rs, spec.rs, table.rs, roster.rs}` · `crates/engram-dashboard-daemon/src/{command_delivery.rs, command_roster.rs, control/commands.rs}` · 프로토콜 등록 패킷 · 그 시험 | U1 |
+| U3 셸 몫 — 에이전트 칸 표시 · 새 명령 넷 · 오류 대응 · 넓힌 명령 | `src-tauri/src/layout/{commands.rs, apply.rs, manager.rs, rows.rs, target.rs, window_arg.rs}` · `src-tauri/src/view_commands.rs` · `src-tauri/tests/{layout_commands.rs, layout_apply.rs}` | U2 · U3 데몬 몫 |
 | U4 help · CLAUDE.md · step-log · tracking | `prompts/engram-help.md` · `CLAUDE.md` · `docs/` | U3 |
 
 ## 11. 사용자가 돌아오면 볼 결정(메인이 기본값으로 진행)
@@ -221,3 +231,15 @@ LayoutRow {
 - U2 가 혼자 빌드 안 되던 것(적용 시그니처 변경이 호출자 10 파일 남짓을 깸) → 옛 id 시그니처를 남김.
 - `agent.spawnInto` 를 `spawn_blocking` 에 넣을 수 없음 → 예외 · `at` 은 첫 잠금 안.
 - `identity == None` 을 `CONFLICT` 로 → 이미 옮겼으므로 `ok`.
+
+### 3판 → 4판 (ADR-0308 적용 · 구현대로)
+
+- 셸이 처리 중 데몬에 `agent.resolve` 로 되묻던 이름 풀기(포트 · 2 초 시한 · 그 실패 코드 · 버려진 대기 슬롯 정리) → 셸은 에이전트 칸을 `#[agent_ref]` 로 표시하고 데몬이 중계 전에 id 로 바꾼다 · 못 풀면 데몬이 중계 없이 답한다(§5-1 · §6). 거부 사유 = ADR-0308.
+- 셸 처리기: 표시한 칸은 id 만 받는다 · UUID 가 아니면 `INVALID_ARGUMENT` · 비동기 처리기 → 본문 전체를 `spawn_blocking` 에서(`targeted_handler` · §8).
+- 선언 `errors` 의 근거를 데몬의 에이전트 칸 거절로 고침(§5-3) · `agent_id` 확인 · 기존 호출자 변화를 데몬 변환 기준으로 다시 씀(§7 · §7-1).
+- 셸 시험이 가짜 데몬 · `agent.resolve` 골든을 읽지 않는다 — 에이전트 칸에 id 를 준다 · 표시 목록과 UUID 아닌 값 반려를 잰다(§9) · 구현 단위에 데몬 몫을 더함(§10).
+
+### 4판 코드 리뷰(FIX) 반영
+
+- 데몬: 명부 읽기 동시 상한(`MAX_RESOLVING_IN_FLIGHT` 16 — 표식이 읽기 안에서 풀린다 · 넘치면 중계 없이 `CONFLICT`) · 읽기 전 호출자 이탈 확인 · 푸는 동안 정산된 `TIMEOUT` · `OUTCOME_UNKNOWN` 은 코드를 두고 「주인에게 보내지 않았다」로 문구를 고침 + warn · `LocalCommands::agent_roster` 기본 몸통 제거 · `resolve_in` 이 UUID 철자 전부를 id 로(§7-1) · `lint_spec` 이 표시한 명령의 `NOT_FOUND` · `CONFLICT` 선언을 요구.
+- 셸: 에이전트 칸 오류 머리에 표시 이름(`slot_of 'beta' (<id>)` — 장부에 없으면 id) · `agent_arg` 반려에 「이름이나 id 를 주라」 · 등록 시험이 칸 수 · 칸 이름 길이 · 광고 코드 · 에이전트 이름꼴 인자의 표시 누락을 잰다.

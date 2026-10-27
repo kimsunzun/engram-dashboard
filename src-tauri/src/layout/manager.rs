@@ -1880,12 +1880,12 @@ pub(crate) fn check_metrics(m: &UiMetrics) -> Result<(), LayoutError> {
 // `spawn_into`(D-7) 슬롯 해소 실패 사유(TRD §6 G9). command 레이어가 문자열로 옮긴다.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SpawnSlotError {
-    #[error("슬롯 {0} 이미 점유됨(덮어쓰기 금지 — split_slot 으로 빈 슬롯을 만든 뒤 재시도)")]
+    #[error("슬롯 {0} 이미 점유됨(덮어쓰기 금지 — slot.split 으로 빈 슬롯을 만든 뒤 재시도)")]
     SlotOccupied(Uuid),
     #[error("슬롯 {0} 없음")]
     SlotNotFound(Uuid),
     // USER DECISION 2b — 자동 split/덮어쓰기 안 함. // ADR-0059
-    #[error("이 탭에 빈 슬롯 없음(slot 미지정 — split_slot 으로 빈 슬롯을 만들거나 다른 탭 사용)")]
+    #[error("이 탭에 빈 슬롯 없음(slot 미지정 — slot.split 으로 빈 슬롯을 만들거나 다른 탭 사용)")]
     NoEmptySlot,
     #[error("view {0} 없음")]
     ViewNotFound(Uuid),

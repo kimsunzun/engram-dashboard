@@ -2535,11 +2535,13 @@ async fn spawn_into_rejects_slot_without_tab_before_spawning() {
     assert_eq!(spawner.calls(), 0, "orphan 탭 방지 가드 = pre-spawn");
 }
 
+// 배치 실패를 점유 칸으로 낸다 — 남의 창 탭은 이제 스폰 전에 거절된다(아래 시험).
 #[tokio::test]
 async fn spawn_into_reports_live_agent_when_placement_fails() {
     let w = World::new();
-    let label = w.popup();
-    let foreign_tab = apply::list_tabs(&w.state, &label).unwrap().active;
+    let main = w.main_active();
+    let taken = w.empty_slot(main);
+    w.put_agent(main, taken);
     let agent = Uuid::new_v4();
     let spawner = Spawner::ok(&w.state, agent);
 
@@ -2549,8 +2551,8 @@ async fn spawn_into_reports_live_agent_when_placement_fails() {
         &w.ev,
         &spawner,
         MAIN_WINDOW_LABEL,
-        Some(foreign_tab),
-        None,
+        Some(main),
+        Some(taken),
         None,
         "C:/tmp".to_string(),
     )
@@ -2562,6 +2564,62 @@ async fn spawn_into_reports_live_agent_when_placement_fails() {
         err.contains(&agent.to_string()),
         "생존 agent id 를 오류에 박아 invisible 에이전트를 막는다: err={err}"
     );
+}
+
+/// 탭을 주면 그 탭의 창에 놓는다 — 창을 빼면 그 탭의 창이고, 다른 창 · 없는 탭이면 띄우지 않는다(놓을 곳 없는 에이전트가
+/// 살아 남지 않게 — TRD S28 §7).
+#[tokio::test]
+async fn spawn_into_takes_the_window_from_the_tab_and_refuses_a_foreign_one_before_spawning() {
+    let w = World::new();
+    let label = w.popup();
+    let foreign_tab = apply::list_tabs(&w.state, &label).unwrap().active;
+
+    for (window, tab) in [
+        (MAIN_WINDOW_LABEL, foreign_tab),
+        (MAIN_WINDOW_LABEL, Uuid::new_v4()),
+    ] {
+        let never = Spawner::ok(&w.state, Uuid::new_v4());
+        let version = w.version();
+        let err = apply::spawn_into(
+            &w.state,
+            &w.subs,
+            &w.ev,
+            &never,
+            window,
+            Some(tab),
+            None,
+            None,
+            "C:/tmp".to_string(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(never.calls(), 0, "{tab}: 스폰하지 않는다");
+        assert!(err.contains("스폰 안 함"), "err={err}");
+        assert_eq!(w.version(), version);
+    }
+
+    let agent = Uuid::new_v4();
+    let spawner = Spawner::ok(&w.state, agent);
+    let placed = apply::spawn_into_placed(
+        &w.state,
+        &w.subs,
+        &w.ev,
+        &spawner,
+        None,
+        Some(foreign_tab),
+        None,
+        None,
+        "C:/tmp".to_string(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(placed.out, agent.to_string());
+    assert_eq!(
+        (placed.at.window.as_str(), placed.at.view),
+        (label.as_str(), foreign_tab)
+    );
+    assert_eq!(placed.rows.len(), 1, "놓인 탭의 줄");
+    assert_invariants(&w);
 }
 
 #[tokio::test]
@@ -3608,6 +3666,7 @@ fn dock_tab_seam_moves_the_tab_under_one_lock_and_notifies_after_it() {
                 window_id: MAIN_WINDOW_LABEL.to_string(),
                 number: 1,
             }),
+            rows: Vec::new(),
         }
     );
     assert_eq!(w.resyncs(), resyncs + 1, "재동기 한 번 — 락 안(프로브)");
@@ -4297,6 +4356,7 @@ fn dock_tab_reuse_moves_the_source_window_once_and_keeps_the_model() {
                 window_id: source.window_id,
                 number: source.number,
             }),
+            rows: Vec::new(),
         }
     );
     assert_eq!(&*w.host.moves.lock().unwrap(), &[(label.clone(), AT)]);
@@ -5799,7 +5859,7 @@ fn slot_writes_by_target_resolve_inside_their_own_lock() {
     let agent = w.put_agent(main, left);
     w.forget();
 
-    let (found, right) = apply::split_slot_at(
+    let split = apply::split_slot_at(
         &w.state,
         &w.subs,
         &w.ev,
@@ -5807,6 +5867,7 @@ fn slot_writes_by_target_resolve_inside_their_own_lock() {
         SplitDir::LeftRight,
     )
     .unwrap();
+    let (found, right) = (split.at, split.out);
     assert_eq!(found, at(MAIN_WINDOW_LABEL, main, Some(left)));
     assert_eq!(w.slots(main), [left, right]);
     assert_notified(&w, "split_slot_at");
@@ -5881,7 +5942,7 @@ fn slot_writes_by_target_resolve_inside_their_own_lock() {
     assert_eq!(w.ev.take_order(), Vec::<&str>::new());
 
     let closed = apply::close_slot_at(&w.state, &w.subs, &w.ev, &Target::SlotOf(other)).unwrap();
-    assert_eq!(closed.slot, Some(right));
+    assert_eq!(closed.at.slot, Some(right));
     assert_eq!(w.slots(main), [left]);
     assert_invariants(&w);
 }
@@ -5918,7 +5979,7 @@ fn tab_writes_by_target_take_the_window_from_the_tab() {
     let names = apply::list_tabs(&w.state, MAIN_WINDOW_LABEL).unwrap();
     assert_eq!(names.tabs[0].name, "작업");
 
-    let (found, shown) = apply::close_tab_at(
+    let closed = apply::close_tab_at(
         &w.state,
         &w.subs,
         &w.ev,
@@ -5927,14 +5988,14 @@ fn tab_writes_by_target_take_the_window_from_the_tab() {
         &Target::TabOf(agent),
     )
     .unwrap();
-    assert_eq!(found.view, main);
-    assert_eq!(shown, Some(t), "그 창에 이제 보이는 탭");
+    assert_eq!(closed.at.view, main);
+    assert_eq!(closed.out, Some(t), "그 창에 이제 보이는 탭");
     assert_eq!(w.tabs_of(MAIN_WINDOW_LABEL), [t]);
 
     let only = w.active_of(&label);
-    let (_, shown) =
+    let closed =
         apply::close_tab_at(&w.state, &w.subs, &w.ev, &w.host, None, &Target::Tab(only)).unwrap();
-    assert_eq!(shown, None, "마지막 탭이면 창째 닫힌다");
+    assert_eq!(closed.out, None, "마지막 탭이면 창째 닫힌다");
     assert_eq!(&*w.host.closed.lock().unwrap(), &[label.clone()]);
     assert_invariants(&w);
 }
@@ -5947,7 +6008,7 @@ fn a_slot_popout_by_agent_moves_that_slot_and_a_miss_gives_the_prewarmed_window_
     let right = w.split(main, left, SplitDir::LeftRight);
     let agent = w.put_agent(main, right);
 
-    let (found, moved) = apply::move_slot_to_window_at(
+    let popped = apply::move_slot_to_window_at(
         &w.state,
         &w.subs,
         &w.ev,
@@ -5957,6 +6018,7 @@ fn a_slot_popout_by_agent_moves_that_slot_and_a_miss_gives_the_prewarmed_window_
         None,
     )
     .unwrap();
+    let (found, moved) = (popped.at, popped.out);
     assert_eq!(found, at(MAIN_WINDOW_LABEL, main, Some(right)));
     assert_eq!(w.slots(main), [left]);
     assert_eq!(w.owner(moved.tab), Some(moved.window.clone()));
@@ -6005,7 +6067,7 @@ async fn spawn_into_at_places_the_agent_in_the_slot_the_word_picks() {
     let agent = Uuid::new_v4();
     let spawner = Spawner::ok(&w.state, agent);
 
-    let (id, found) = apply::spawn_into_at(
+    let placed = apply::spawn_into_at(
         &w.state,
         &w.subs,
         &w.ev,
@@ -6017,6 +6079,7 @@ async fn spawn_into_at_places_the_agent_in_the_slot_the_word_picks() {
     )
     .await
     .unwrap();
+    let (id, found) = (placed.out, placed.at);
     assert_eq!(id, agent.to_string());
     assert_eq!(found, at(MAIN_WINDOW_LABEL, main, Some(right)));
     assert_eq!(
@@ -6047,7 +6110,8 @@ async fn spawn_into_at_places_the_agent_in_the_slot_the_word_picks() {
         .await
         .unwrap_err();
         assert_eq!(never.calls(), 0, "{token:?} {window}: 스폰하지 않는다");
-        assert!(err.contains("스폰 안 함"), "{err}");
+        assert!(matches!(err, apply::SpawnAtError::Unplaced(_)), "{err}");
+        assert!(err.to_string().contains("스폰 안 함"), "{err}");
         assert_eq!(w.version(), version);
     }
 
@@ -6076,7 +6140,7 @@ async fn spawn_into_at_places_the_agent_in_the_slot_the_word_picks() {
     let err = call.await.unwrap_err();
     assert_eq!(raced.calls(), 1, "스폰은 됐다");
     assert!(
-        err.contains("살아있음"),
+        matches!(err, apply::SpawnAtError::Failed(_)) && err.to_string().contains("살아있음"),
         "점유 칸 — 살아 있는 id 를 남긴다: {err}"
     );
     assert_eq!(
@@ -6285,6 +6349,67 @@ fn a_dock_outcomes_views_give_the_changed_tabs_rows() {
         ]
     );
     assert!(rows[1].y > rows[0].y, "아래에 붙었다");
+    assert_eq!(
+        out.rows, rows,
+        "결말의 줄 = 그 탭들의 줄(끼어든 쓰기가 없으면)"
+    );
+}
+
+/// 결말의 줄(`DockOutcome::rows`)은 대상판만 싣는다 — 새 창 · 재사용 갈래도 그 탭의 줄이고, id 판(마우스)은 비운다.
+#[test]
+fn a_target_dock_carries_the_rows_of_its_views_and_the_id_dock_does_not() {
+    let w = World::new();
+    let main = w.main_active();
+    let (label, tabs) = w.popup_with(2);
+
+    let out = w
+        .dock_t(
+            Target::Tab(tabs[1]),
+            TargetDest::NewWindow { at: NO_PLACE },
+            FocusPolicy::Keep,
+        )
+        .unwrap();
+    assert!(!out.reused);
+    assert_eq!(
+        out.rows
+            .iter()
+            .map(|r| (r.window.clone(), r.tab))
+            .collect::<Vec<_>>(),
+        [(label, tabs[0]), (out.window.clone(), tabs[1])],
+        "새 창 갈래 — 옮긴 탭 + 출처 창에 새로 보이게 된 탭의 줄(창 번호 순)"
+    );
+
+    let (lone_label, lone) = w.lone_popout();
+    let out = w
+        .dock_t(
+            Target::Tab(lone),
+            TargetDest::NewWindow { at: NO_PLACE },
+            FocusPolicy::Keep,
+        )
+        .unwrap();
+    assert!(out.reused);
+    assert_eq!(
+        out.rows
+            .iter()
+            .map(|r| (r.window.clone(), r.tab))
+            .collect::<Vec<_>>(),
+        [(lone_label, lone)],
+        "재사용 갈래 — 그 탭의 줄"
+    );
+
+    let out = w
+        .dock(
+            tabs[0],
+            DockDest::TabBar {
+                window: MAIN_WINDOW_LABEL.to_string(),
+                index: None,
+                after: Some(main),
+            },
+            FocusPolicy::Keep,
+        )
+        .unwrap();
+    assert!(out.changed);
+    assert!(out.rows.is_empty(), "id 판은 줄을 싣지 않는다");
 }
 
 #[tokio::test]
@@ -6315,7 +6440,10 @@ async fn spawn_into_at_does_not_place_elsewhere_when_the_word_picks_another_slot
     .unwrap_err();
 
     assert_eq!(spawner.calls(), 1, "스폰은 됐다");
-    assert!(err.contains("살아있음"), "{err}");
+    assert!(
+        matches!(err, apply::SpawnAtError::Failed(_)) && err.to_string().contains("살아있음"),
+        "{err}"
+    );
     for slot in [a, b, c] {
         assert_eq!(w.content(main, slot), SlotContent::Empty, "{slot}");
     }

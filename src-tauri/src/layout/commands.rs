@@ -16,22 +16,36 @@
 //! 선언 매크로의 타입 알파벳이 `Uuid`·중첩 enum·재귀 타입을 못 실어서 생긴 번역이다 — 매크로 제약이
 //! 원인이고 계약을 새로 만든 것이 아니다.
 //! - **id 는 전부 `String`** 이고 핸들러가 파싱한다(형식 불량 = `INVALID_ARGUMENT`).
-//! - **`SlotContent` 는 태그 + `agent_id` · `show_claude` · `show_codex` 곁칸으로 펴서 받는다** — 매크로의
+//! - **`SlotContent` 는 태그 + `agent_id` · `assign` · `show_claude` · `show_codex` 곁칸으로 펴서 받는다** — 매크로의
 //!   enum 은 필드 없는 variant 만 싣는다. 조합 검사는 [`slot_content`] 가 한다.
 //! - **`get_view` 는 선언에 없다** — 반환이 `ViewSnapshot`(재귀 `LayoutNode`)이고 매크로가 재귀 타입에서
 //!   컴파일 에러로 멈춘다. 그래서 v1 조회는 `tab.list`·`window.list`·`slot.resolveSpatial` 셋이다.
 //!
-//! ## ★적용 실패는 코드 하나로 나간다(`CONFLICT`)★ — 레이아웃 명령만
+//! ## ★적용 실패의 코드★ — 레이아웃 명령만
 //! `window.*Theme` · `settings.*` · `restore.answer` 는 서비스가 타입드 오류를 내므로 종류대로 옮긴다
 //! ([`theme_error`] · [`settings_error`] · [`restore_error`]). 아래는 적용 서비스 몫이다.
 //!
-//! 적용 서비스가 실패를 `String` 으로만 주므로 여기서 종류를 가를 재료가 없다. 문구로 코드를 합성하는
-//! 것은 금지다(TRD §4-⑦ — `message` 로 기계 분기하지 않는다. CLI 의 문자열 패턴매칭을 끝내려고 둔 계약이
-//! 바로 그것이다). 그래서 **모든 실패에 참인 코드**를 고른다: `CONFLICT` = 「지금 상태로는 그 요청을 적용할
-//! 수 없다」. `NOT_FOUND` 는 main 창 거부에 거짓이고 `INTERNAL` 은 오타 난 id 에 거짓이다. 사유는 문구가
-//! 그대로 나른다. 종류를 가르려면 적용 서비스가 타입드 오류를 내야 하고 그건 이 파일의 결정이 아니다.
+//! - **id 를 받는 동사**(적용 서비스의 id 판을 부르는 것 — `tab.create` · `split.setRatio` 등)는 실패를 `String` 으로만
+//!   받아 종류를 가를 재료가 없다. 문구로 코드를 합성하는 것은 금지다(TRD §4-⑦ — `message` 로 기계 분기하지 않는다. CLI 의
+//!   문자열 패턴매칭을 끝내려고 둔 계약이 바로 그것이다). 그래서 **모든 실패에 참인 코드**를 고른다: `CONFLICT` =
+//!   「지금 상태로는 그 요청을 적용할 수 없다」. `NOT_FOUND` 는 main 창 거부에 거짓이고 `INTERNAL` 은 오타 난 id 에
+//!   거짓이다. 사유는 문구가 그대로 나른다.
+//! - **대상을 받는 도킹 동사**(`tab.move` · `tab.dock` · `tab.detach`)는 적용 서비스의 대상판이 타입드 오류를 내므로
+//!   종류대로 옮긴다(TRD S28 §5-3) — 대응의 정본 = [`dock_target_error`] · [`locate_error`]. 조회 `layout.get` 은 적용
+//!   실패가 없고 창 인자 오류([`window_arg_error`])만 낸다.
+//! - **넓힌 칸 · 탭 동사**(`slot.*` · `layout.setSlotContent` · `tab.switch` · `tab.close` · `tab.rename` — TRD S28 §7)도
+//!   대상판을 부르고 그 거절을 [`target_error`] 로 옮긴다. ★단 id 로 준 탭 · 칸이 없으면 넓히기 전 id 판이 내던 그대로다★
+//!   (`CONFLICT` + 관리자 문구 — 옛 호출자가 보던 답 · [`id_miss`]). 에이전트 · 낱말로 고른 것은 [`locate_error`] 다.
+//!
+//! ## ★에이전트를 고르는 인자는 id 로만 들어온다★
+//! 그 칸(`tab_of` · `slot_of` · `assign` 등)은 선언에 `#[agent_ref]` 로 표시한다 — 데몬이 중계 전에 자기 해석기로 이름을
+//! id 로 바꾸고, 풀리지 않으면(없음 = NOT_FOUND · 겹침 = CONFLICT) 중계하지 않고 그 거절로 답한다(ADR-0308). 그래서 이
+//! 표의 처리기는 그 칸에서 id 만 보고, UUID 가 아니면 데몬을 거치지 않은 호출이라 INVALID_ARGUMENT 다([`agent_arg`]).
+//! 셸은 이름을 풀지 않는다 — 셸의 표시 이름 캐시는 보여 주기 몫이다(ADR-0132).
 // ADR-0155
 // ADR-0081
+// ADR-0307
+// ADR-0308
 
 use std::sync::Arc;
 
@@ -43,14 +57,23 @@ use engram_dashboard_command::{
     ErrorCode, RetryMode,
 };
 
-use super::apply;
+use super::apply::{
+    self, DockOutcome, SpawnAtError, TabBarSpot, TargetDest, TargetDockError, TargetDockRequest,
+    TargetError, WindowPlace,
+};
+use super::dock;
+use super::manager::{DockError, DockMove, FocusPolicy, LayoutError};
+use super::rows::{self, RowFilter};
+use super::spatial::SpatialToken;
+use super::target::{self, LocateError, Place, Target};
+use super::tree;
 use super::window_arg::{self, WindowArgError};
 use super::window_ctl::{
     self, Activation, Applied, CloseOutcome, WindowAction, WindowControl, WindowCtlError,
 };
 use super::{
     AgentSpawner, LabelSource, LayoutEvents, LayoutState, SlotContent, SplitDir, SubscriptionSync,
-    WindowHost,
+    WindowHost, MAIN_WINDOW_LABEL,
 };
 use crate::settings::{
     reset_and_notify, set_and_notify, SettingsError, SettingsEvents, SettingsService,
@@ -68,6 +91,14 @@ use crate::theme::{ThemeControl, ThemeError, UiTheme, WindowTheme};
 //   `window.setTheme`·`window.getTheme`(화면에는 테마를 바꾸는 UI 가 없다 — TRD S21-storage §10 F7) ·
 //   `split.setRatio`·`split.list`(화면의 구분선 드래그는 Tauri `set_split_ratio` 를 직접 부르고 레지스트리에
 //   이름을 싣지 않는다 — ADR-0227).
+// ★세대 21 = LLM 레이아웃 명령의 세대★(TRD S28 §4 · §7 · ADR-0307) — 에이전트 이름 · 공간 낱말로 탭 · 칸을 고르고 바꾼
+//   뒤의 배치를 답에 싣는다. 이름이 넷 늘었고(`tab.move` · `tab.dock` · `tab.detach` · `layout.get`), 칸 동사(`slot.focus` ·
+//   `slot.close` · `slot.split` · `slot.popout` · `slot.assignAgent` · `layout.setSlotContent`)가 `slot_of` · `at` · `window`
+//   를, 탭 동사(`tab.switch` · `tab.close` · `tab.rename`)가 `tab_of` 를, `agent.spawnInto` 가 `at` 을 받고 id 인자 · 탭
+//   동사와 `agent.spawnInto` 의 `window` 가 선택이 됐다. 넣을 에이전트는 `assign` 도 받고 데몬 명부에 없으면 거절한다. 그
+//   동사들의 답에 `layout` 이 붙고 오류 선언에 `NOT_FOUND` 가 들었다. 에이전트를 고르는 칸(옛 `agent_id` 포함)은
+//   `#[agent_ref]` 로 표시해 데몬이 중계 전에 id 로 바꾼다(ADR-0308 — 등록 패킷의 `agent_args`). 한 커밋에 들어 세대 하나로
+//   묶었다.
 // ★세대 20 = 창 상태 명령 여섯(`window.minimize` · `window.maximize` · `window.unmaximize` · `window.raise` ·
 //   `window.hideAll` · `window.showAll`)이 들고 `window.close` 가 main 을 받는 세대★(TRD S26-window-chrome §6-1 · §6-6) —
 //   `window.close` 는 `if_empty` 를 받고 답이 `outcome` 을 싣는다(main = 모든 창 숨기기 · 지금까지의 `CONFLICT` 대신).
@@ -116,7 +147,7 @@ use crate::theme::{ThemeControl, ThemeError, UiTheme, WindowTheme};
 //   ★wire 프로토콜 판(`engram_dashboard_protocol::PROTOCOL_VERSION`)과 다른 번호다★ — 그쪽은 프레임 계약이고
 //   이쪽은 이 crate 의 어휘 세대다. 하나를 올린다고 다른 하나가 따라 올라가지 않는다.
 declare_commands! {
-    catalog_version: 20;
+    catalog_version: 21;
 
     /// 탭 바 한 칸 — `name` = 보이는 이름 · `named` = 이름을 정했나(거짓이면 `name` 은 포커스 칸 내용을 따라 바뀐다).
     struct TabRow {
@@ -209,6 +240,49 @@ declare_commands! {
         Kept,
     }
 
+    /// 칸에 든 것의 종류 — Unknown = 이 판이 모르는 내용(더 새 판이 저장한 칸). 셸 안쪽 쌍둥이는 `rows::SlotKind` 다.
+    // ADR-0307
+    enum SlotKind {
+        Empty,
+        Agent,
+        AgentList,
+        PresetPalette,
+        Usage,
+        Unknown,
+    }
+
+    /// 붙는 탭이 놓일 쪽 — 붙일 칸(또는 탭 전체)의 그 변에 붙는다. 셸 안쪽 쌍둥이는 `dock::DockSide` 다(매크로가 블록
+    /// 밖 enum 을 못 실어 같은 철자로 하나 더 둔다).
+    // ADR-0307
+    enum DockSide {
+        Left,
+        Right,
+        Top,
+        Bottom,
+    }
+
+    /// 칸 하나의 줄 — 칸 뜻은 layout.get 의 summary. id 넷(window_id · tab · slot_id · agent_id)은 layout.get 의
+    /// ids = true 에서만 싣는다 — 빠진 칸은 답에서 아예 빠진다(null 이 아니다).
+    // ADR-0307
+    struct LayoutRow {
+        window: String,
+        window_number: u32,
+        tab_index: u32,
+        tab_name: String,
+        tab_active: bool,
+        content: SlotKind,
+        agent: Option<String>,
+        focused: bool,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        window_id: Option<String>,
+        tab: Option<String>,
+        slot_id: Option<String>,
+        agent_id: Option<String>,
+    }
+
     /// 창에 빈 탭을 하나 더 만들고 활성화한다. name 을 빼면 자동 이름 — 그 탭의 포커스 칸(에이전트면 그 이름)을
     /// 따라 바뀐다(tab.list 의 named = false). name 을 주면 정한 이름이다(앞뒤 공백은 깎는다).
     /// window = window.list 의 window_id(재시작을 넘어 같은 창) 또는 같은 실행 안 label. 번호는 받지 않는다(다시
@@ -222,33 +296,56 @@ declare_commands! {
         view_id: String,
     } errors [CONFLICT];
 
-    /// 그 창의 활성 탭을 바꾼다(다른 창은 그대로). window 는 tab.create 와 같다(window_id 또는 같은 실행 안 label ·
-    /// 번호는 받지 않는다).
+    // ADR-0307
+    /// 그 창의 보이는 탭을 바꾼다(다른 창은 그대로). 탭 = view_id | tab_of(그 에이전트가 든 탭 — 이름 또는 id) 중 하나.
+    /// window 는 빼도 된다(탭에서 안다) — 주면 그 창의 탭이어야 하고 window_id 또는 같은 실행 안 label 이다(번호는 받지
+    /// 않는다).
+    /// 오류: tab_of 가 어느 칸에도 없거나 그 이름이 없으면 NOT_FOUND · 여러 탭에 떠 있으면 CONFLICT(문구 끝 candidates 의
+    /// view_id= 값을 view_id 로 다시) · 그 이름의 에이전트가 둘 이상이면 CONFLICT(candidates = 에이전트 id — tab_of 로 다시) ·
+    /// 없는 view_id 는 CONFLICT.
     #[effect(Write)]
     #[since(1)]
     "tab.switch" => args TabSwitchArgs {
-        window: String,
-        view_id: String,
-    } -> ok TabSwitchOk {} errors [CONFLICT];
+        window: Option<String>,
+        view_id: Option<String>,
+        #[agent_ref]
+        tab_of: Option<String>,
+    } -> ok TabSwitchOk {} errors [NOT_FOUND, CONFLICT];
 
-    /// 탭을 닫는다 — 창의 마지막 탭이면 그 창도 닫힌다. window 는 tab.create 와 같다(window_id 또는 같은 실행 안
-    /// label · 번호는 받지 않는다).
+    // ADR-0307
+    /// 탭을 닫는다 — 창의 마지막 탭이면 그 창도 닫힌다. 탭 = view_id | tab_of(그 에이전트가 든 탭 — 이름 또는 id) 중
+    /// 하나. window 는 빼도 된다(탭에서 안다) — 주면 그 창의 탭이어야 하고 window_id 또는 같은 실행 안 label 이다(번호는
+    /// 받지 않는다).
+    /// 답 = layout(그 창에 이제 보이는 탭의 칸 줄 — layout.get rows 모양 · id 없음 · 창째 닫혔으면 빈 목록).
+    /// 오류: tab_of 가 어느 칸에도 없거나 그 이름이 없으면 NOT_FOUND · 여러 탭에 떠 있으면 CONFLICT(문구 끝 candidates 의
+    /// view_id= 값을 view_id 로 다시) · 그 이름의 에이전트가 둘 이상이면 CONFLICT(candidates = 에이전트 id — tab_of 로 다시) ·
+    /// 없는 view_id 는 CONFLICT.
     #[effect(Write)]
     #[since(1)]
     "tab.close" => args TabCloseArgs {
-        window: String,
-        view_id: String,
-    } -> ok TabCloseOk {} errors [CONFLICT];
+        window: Option<String>,
+        view_id: Option<String>,
+        #[agent_ref]
+        tab_of: Option<String>,
+    } -> ok TabCloseOk {
+        layout: Vec<LayoutRow>,
+    } errors [NOT_FOUND, CONFLICT];
 
-    /// 탭 이름을 바꾼다(창은 탭 id 에서 파생하므로 안 받는다 · 앞뒤 공백은 깎는다). 그 뒤 이름은 굳는다 — 지금
-    /// 보이는 자동 이름과 같은 글자여도 포커스 칸 · 에이전트 이름을 더는 따라가지 않고, 자동 이름으로 되돌리는
-    /// 명령은 없다.
+    // ADR-0307
+    /// 탭 이름을 바꾼다(앞뒤 공백은 깎는다 · 창은 탭에서 안다). 탭 = view_id | tab_of(그 에이전트가 든 탭 — 이름 또는 id)
+    /// 중 하나. 그 뒤 이름은 굳는다 — 지금 보이는 자동 이름과 같은 글자여도 포커스 칸 · 에이전트 이름을 더는 따라가지
+    /// 않고, 자동 이름으로 되돌리는 명령은 없다.
+    /// 오류: tab_of 가 어느 칸에도 없거나 그 이름이 없으면 NOT_FOUND · 여러 탭에 떠 있으면 CONFLICT(문구 끝 candidates 의
+    /// view_id= 값을 view_id 로 다시) · 그 이름의 에이전트가 둘 이상이면 CONFLICT(candidates = 에이전트 id — tab_of 로 다시) ·
+    /// 없는 view_id 는 CONFLICT.
     #[effect(Write)]
     #[since(1)]
     "tab.rename" => args TabRenameArgs {
-        view_id: String,
+        view_id: Option<String>,
+        #[agent_ref]
+        tab_of: Option<String>,
         name: String,
-    } -> ok TabRenameOk {} errors [CONFLICT];
+    } -> ok TabRenameOk {} errors [NOT_FOUND, CONFLICT];
 
     /// 그 창의 탭 목록 + 활성 탭 + 버전. 답의 window 는 그 창의 label 이다.
     /// window = window.list 의 window_id(재시작을 넘어 같은 창) 또는 같은 실행 안 label. 번호는 받지 않는다(다시
@@ -387,24 +484,51 @@ declare_commands! {
         effective: String,
     } errors [CONFLICT];
 
-    /// 슬롯을 둘로 나눈다 — 성공 시 새로 생긴 슬롯 id.
+    // ADR-0307
+    /// 칸을 둘로 나눈다 — dir = LeftRight(좌/우 두 칸) · TopBottom(위/아래 두 칸). 칸 = slot_id(view_id 를 함께 주면 그 탭의
+    /// 칸이어야 한다) | slot_of(그 에이전트가 든 칸 — 이름 또는 id) | at(공간 낱말 — window 의 보이는 탭에서 · window 를
+    /// 빼면 main) 중 하나. at = top-left · top-right · bottom-left · bottom-right(그 모서리 칸) · left · right · up ·
+    /// down(포커스 칸의 그쪽 이웃). window 는 at 과만 쓰고 window_id 또는 같은 실행 안 label 이다(번호는 받지 않는다).
+    /// 답 = slot_id(새로 생긴 칸) · layout(그 탭의 칸 줄 — layout.get rows 모양 · id 없음).
+    /// 오류: slot_of 가 어느 칸에도 없거나 그 이름이 없으면 · 낱말이 칸을 못 집으면 NOT_FOUND · slot_of 가 여러 칸에 떠
+    /// 있으면 CONFLICT(문구 끝 candidates 의 slot_id= 값을 slot_id 로 다시) · 그 이름의 에이전트가 둘 이상이면
+    /// CONFLICT(candidates = 에이전트 id — slot_of 로 다시) · 없는 slot_id · view_id 는 CONFLICT.
     #[effect(Write)]
     #[since(1)]
     "slot.split" => args SlotSplitArgs {
-        view_id: String,
-        slot_id: String,
+        view_id: Option<String>,
+        slot_id: Option<String>,
         dir: SplitDirection,
+        #[agent_ref]
+        slot_of: Option<String>,
+        at: Option<String>,
+        window: Option<String>,
     } -> ok SlotSplitOk {
         slot_id: String,
-    } errors [CONFLICT];
+        layout: Vec<LayoutRow>,
+    } errors [NOT_FOUND, CONFLICT];
 
-    /// 슬롯을 닫는다(형제가 그 자리를 물려받는다).
+    // ADR-0307
+    /// 칸을 닫는다(형제가 그 자리를 물려받는다). 칸 = slot_id(view_id 를 함께 주면 그 탭의 칸이어야 한다) | slot_of(그
+    /// 에이전트가 든 칸 — 이름 또는 id) | at(공간 낱말 — window 의 보이는 탭에서 · window 를 빼면 main) 중 하나. at =
+    /// top-left · top-right · bottom-left · bottom-right(그 모서리 칸) · left · right · up · down(포커스 칸의 그쪽 이웃).
+    /// window 는 at 과만 쓰고 window_id 또는 같은 실행 안 label 이다(번호는 받지 않는다).
+    /// 답 = layout(그 탭의 남은 칸 줄 — layout.get rows 모양 · id 없음).
+    /// 오류: slot_of 가 어느 칸에도 없거나 그 이름이 없으면 · 낱말이 칸을 못 집으면 NOT_FOUND · slot_of 가 여러 칸에 떠
+    /// 있으면 CONFLICT(문구 끝 candidates 의 slot_id= 값을 slot_id 로 다시) · 그 이름의 에이전트가 둘 이상이면
+    /// CONFLICT(candidates = 에이전트 id — slot_of 로 다시) · 없는 slot_id · view_id 는 CONFLICT.
     #[effect(Write)]
     #[since(1)]
     "slot.close" => args SlotCloseArgs {
-        view_id: String,
-        slot_id: String,
-    } -> ok SlotCloseOk {} errors [CONFLICT];
+        view_id: Option<String>,
+        slot_id: Option<String>,
+        #[agent_ref]
+        slot_of: Option<String>,
+        at: Option<String>,
+        window: Option<String>,
+    } -> ok SlotCloseOk {
+        layout: Vec<LayoutRow>,
+    } errors [NOT_FOUND, CONFLICT];
 
     // ADR-0227
     // ADR-0140
@@ -450,75 +574,146 @@ declare_commands! {
     //   `{window, tab, window_id, number}`, 여기는 `{window, new_view_id, window_id, number}`. 한쪽만 맞춰 고치지 말 것 — 합류는 프론트 자체
     //   레지스트리를 은퇴시키는 후속 스텝(화면 몫 등록) 몫이고, 지금 한쪽을 바꾸면 그 스텝이 옮길 대상만
     //   늘어난다. 반대편에도 같은 메모가 붙어 있다.
-    /// 슬롯의 내용을 다른 창의 새 탭으로 옮긴다(원본 슬롯은 닫힌다) — to_window 를 빼면 새 창을 연다.
+    // ADR-0307
+    /// 칸의 내용을 다른 창의 새 탭으로 옮긴다(원본 칸은 닫힌다) — to_window 를 빼면 새 창을 연다. 칸 하나만 옮긴다 — 탭째는
+    /// tab.detach.
     /// to_window = window.list 의 window_id(재시작을 넘어 같은 창) 또는 같은 실행 안 label. 번호는 받지 않는다(다시
     /// 쓰인다 — INVALID_ARGUMENT). label 은 그 실행 안에서만 맞는다.
+    /// 칸 = slot_id(view_id 를 함께 주면 그 탭의 칸이어야 한다) | slot_of(그 에이전트가 든 칸 — 이름 또는 id) | at(공간
+    /// 낱말 — window 의 보이는 탭에서 · window 를 빼면 main) 중 하나. at = top-left · top-right · bottom-left ·
+    /// bottom-right(그 모서리 칸) · left · right · up · down(포커스 칸의 그쪽 이웃). window 는 at 과만 쓰고 to_window 와 같은
+    /// 꼴이다.
     /// 답 = 옮겨 간 창의 window · window_id · number(window.create 와 같은 뜻 — 기존 창이면 그 창의 것) + new_view_id
-    /// (그 창에 생긴 탭).
+    /// (그 창에 생긴 탭) + layout(원본 탭 · 새 탭의 칸 줄 — layout.get rows 모양 · id 없음).
+    /// 오류: slot_of 가 어느 칸에도 없거나 그 이름이 없으면 · 낱말이 칸을 못 집으면 NOT_FOUND · slot_of 가 여러 칸에 떠
+    /// 있으면 CONFLICT(문구 끝 candidates 의 slot_id= 값을 slot_id 로 다시) · 그 이름의 에이전트가 둘 이상이면
+    /// CONFLICT(candidates = 에이전트 id — slot_of 로 다시) · 없는 slot_id · view_id · to_window 는 CONFLICT.
     #[effect(Write)]
     #[since(2)]
     "slot.popout" => args SlotPopoutArgs {
-        view_id: String,
-        slot_id: String,
+        view_id: Option<String>,
+        slot_id: Option<String>,
         to_window: Option<String>,
+        #[agent_ref]
+        slot_of: Option<String>,
+        at: Option<String>,
+        window: Option<String>,
     } -> ok SlotPopoutOk {
         window: String,
         new_view_id: String,
         window_id: String,
         number: u32,
-    } errors [CONFLICT];
+        layout: Vec<LayoutRow>,
+    } errors [NOT_FOUND, CONFLICT];
 
-    /// 포커스를 그 슬롯으로 옮긴다(출력 라우팅은 안 바뀐다).
+    // ADR-0307
+    /// 포커스를 그 칸으로 옮긴다(출력 라우팅은 안 바뀐다). 보이는 탭은 안 바꾼다 — 그 탭을 보이려면 먼저 tab.switch tab_of.
+    /// 답 = layout(그 탭의 칸 줄 — layout.get rows 모양 · id 없음).
+    /// 칸 = slot_id(view_id 를 함께 주면 그 탭의 칸이어야 한다) |
+    /// slot_of(그 에이전트가 든 칸 — 이름 또는 id) | at(공간 낱말 — window 의 보이는 탭에서 · window 를 빼면 main) 중 하나.
+    /// at = top-left · top-right · bottom-left · bottom-right(그 모서리 칸) · left · right · up · down(포커스 칸의 그쪽 이웃).
+    /// window 는 at 과만 쓰고 window_id 또는 같은 실행 안 label 이다(번호는 받지 않는다).
+    /// 오류: slot_of 가 어느 칸에도 없거나 그 이름이 없으면 · 낱말이 칸을 못 집으면 NOT_FOUND · slot_of 가 여러 칸에 떠
+    /// 있으면 CONFLICT(문구 끝 candidates 의 slot_id= 값을 slot_id 로 다시) · 그 이름의 에이전트가 둘 이상이면
+    /// CONFLICT(candidates = 에이전트 id — slot_of 로 다시) · 없는 slot_id · view_id 는 CONFLICT.
     #[effect(Write)]
     #[since(1)]
     "slot.focus" => args SlotFocusArgs {
-        view_id: String,
-        slot_id: String,
-    } -> ok SlotFocusOk {} errors [CONFLICT];
+        view_id: Option<String>,
+        slot_id: Option<String>,
+        #[agent_ref]
+        slot_of: Option<String>,
+        at: Option<String>,
+        window: Option<String>,
+    } -> ok SlotFocusOk {
+        layout: Vec<LayoutRow>,
+    } errors [NOT_FOUND, CONFLICT];
 
-    /// 이미 살아 있는 에이전트를 그 슬롯에 붙인다(새로 띄우지 않는다 — 띄우려면 agent.spawnInto).
-    /// ★agent_id 는 UUID 다 — 표시 이름을 넘기지 말 것★: 이 층은 데몬에 실재하는지 확인하지 않고
-    /// (레이아웃이 에이전트 상태를 모르는 것이 격리 규약이다 — ADR-0035) 받은 문자열을 그대로 슬롯에
-    /// 넣는다. 그래서 이름을 넘기면 **거부되지 않고 슬롯만 비어 보인다** — 오류가 없어 원인을 못 찾는다.
-    /// id 는 agent.list 가 준다(실발생 2026-08-20).
+    // ADR-0307
+    /// 이미 살아 있는 에이전트를 그 칸에 붙인다(새로 띄우지 않는다 — 띄우려면 agent.spawnInto). 붙일 에이전트 = assign(이름
+    /// 또는 id) | agent_id(id) 중 하나 — 데몬 명부에 없으면 NOT_FOUND 이고 아무것도 안 바뀐다.
+    /// 칸 = slot_id(view_id 를 함께 주면 그 탭의 칸이어야 한다) | slot_of(그 에이전트가 든 칸 — 이름 또는 id) | at(공간
+    /// 낱말 — window 의 보이는 탭에서 · window 를 빼면 main) 중 하나. at = top-left · top-right · bottom-left ·
+    /// bottom-right(그 모서리 칸) · left · right · up · down(포커스 칸의 그쪽 이웃). window 는 at 과만 쓰고 window_id 또는
+    /// 같은 실행 안 label 이다(번호는 받지 않는다).
+    /// 답 = layout(그 탭의 칸 줄 — layout.get rows 모양 · id 없음).
+    /// 오류: 에이전트(slot_of · assign · agent_id)가 데몬 명부에 없거나 slot_of 가 어느 칸에도 없으면 · 낱말이 칸을 못 집으면
+    /// NOT_FOUND · slot_of 가 여러 칸에 떠 있으면 CONFLICT(문구 끝 candidates 의 slot_id= 값을 slot_id 로 다시) · 그 이름의
+    /// 에이전트가 둘 이상이면 CONFLICT(candidates = 에이전트 id — 그 인자(slot_of · assign)로 다시) · 없는 slot_id · view_id 는
+    /// CONFLICT.
     #[effect(Write)]
     #[since(1)]
     "slot.assignAgent" => args SlotAssignAgentArgs {
-        view_id: String,
-        slot_id: String,
-        agent_id: String,
-    } -> ok SlotAssignAgentOk {} errors [CONFLICT];
+        view_id: Option<String>,
+        slot_id: Option<String>,
+        #[agent_ref]
+        agent_id: Option<String>,
+        #[agent_ref]
+        slot_of: Option<String>,
+        at: Option<String>,
+        window: Option<String>,
+        #[agent_ref]
+        assign: Option<String>,
+    } -> ok SlotAssignAgentOk {
+        layout: Vec<LayoutRow>,
+    } errors [NOT_FOUND, CONFLICT];
 
-    /// 슬롯이 무엇을 보여줄지 바꾼다. content=Agent 일 때만 agent_id 를 함께 준다.
-    /// content=Usage 일 때만 show_claude·show_codex(그 회사를 보일지)를 줄 수 있다 — 뺀 칸은 그 슬롯이
-    /// 이미 Usage 면 지금 값을 그대로 두고, 아니면 true 다.
+    // ADR-0307
+    /// 칸이 무엇을 보여줄지 바꾼다. content=Agent 일 때만 assign(이름 또는 id) | agent_id(id) 중 하나를 준다 — 데몬 명부에
+    /// 없으면 NOT_FOUND 이고 아무것도 안 바뀐다. content=Usage 일 때만 show_claude·show_codex(그 회사를 보일지)를 줄 수
+    /// 있다 — 뺀 칸은 그 칸이 이미 Usage 면 지금 값을 그대로 두고, 아니면 true 다.
+    /// 칸 = slot_id(view_id 를 함께 주면 그 탭의 칸이어야 한다) | slot_of(그 에이전트가 든 칸 — 이름 또는 id) | at(공간
+    /// 낱말 — window 의 보이는 탭에서 · window 를 빼면 main) 중 하나. at = top-left · top-right · bottom-left ·
+    /// bottom-right(그 모서리 칸) · left · right · up · down(포커스 칸의 그쪽 이웃). window 는 at 과만 쓰고 window_id 또는
+    /// 같은 실행 안 label 이다(번호는 받지 않는다).
+    /// 답 = layout(그 탭의 칸 줄 — layout.get rows 모양 · id 없음).
+    /// 오류: 에이전트(slot_of · assign · agent_id)가 데몬 명부에 없거나 slot_of 가 어느 칸에도 없으면 · 낱말이 칸을 못 집으면
+    /// NOT_FOUND · slot_of 가 여러 칸에 떠 있으면 CONFLICT(문구 끝 candidates 의 slot_id= 값을 slot_id 로 다시) · 그 이름의
+    /// 에이전트가 둘 이상이면 CONFLICT(candidates = 에이전트 id — 그 인자(slot_of · assign)로 다시) · 없는 slot_id · view_id 는
+    /// CONFLICT.
     #[effect(Write)]
     #[since(1)]
     "layout.setSlotContent" => args LayoutSetSlotContentArgs {
-        view_id: String,
-        slot_id: String,
+        view_id: Option<String>,
+        slot_id: Option<String>,
         content: SlotContentKind,
+        #[agent_ref]
         agent_id: Option<String>,
         show_claude: Option<bool>,
         show_codex: Option<bool>,
-    } -> ok LayoutSetSlotContentOk {} errors [CONFLICT];
+        #[agent_ref]
+        slot_of: Option<String>,
+        at: Option<String>,
+        window: Option<String>,
+        #[agent_ref]
+        assign: Option<String>,
+    } -> ok LayoutSetSlotContentOk {
+        layout: Vec<LayoutRow>,
+    } errors [NOT_FOUND, CONFLICT];
 
+    // ADR-0307
     /// 에이전트를 새로 띄우고 그 자리에 배치한다(스폰 + 필요하면 새 탭 + 슬롯 배정).
-    /// view_id 를 빼면 새 탭을 만들어 거기 넣는다 — 그 경우 slot_id 는 줄 수 없다.
+    /// view_id 를 빼면 새 탭을 만들어 거기 넣는다 — 그 경우 slot_id 는 줄 수 없다. at(공간 낱말 top-left · top-right ·
+    /// bottom-left · bottom-right · left · right · up · down)을 주면 window 의 보이는 탭에서 그 낱말이 집는 빈 칸에 넣는다 —
+    /// view_id · slot_id 와 함께 못 주고, 못 집으면 NOT_FOUND · 비어 있지 않으면 CONFLICT(둘 다 스폰 전에 거절한다).
     /// backend 는 `"claude"` 또는 `"codex"` — 둘 다 이 표면으로 만든다. 모르는 낱말은 스폰 전에
     /// 거부되고, 빼면 데몬이 거절한다(기본 백엔드는 없다).
-    /// window 는 tab.create 와 같다(window_id 또는 같은 실행 안 label · 번호는 받지 않는다).
+    /// window = window_id 또는 같은 실행 안 label(번호는 받지 않는다) — 빼면 view_id 를 준 경우 그 탭의 창, 아니면 main.
+    /// view_id 가 window 의 탭이 아니면 스폰 전에 CONFLICT 다.
+    /// 답 = agent_id · layout(놓인 탭의 칸 줄 — layout.get rows 모양 · id 없음).
     #[effect(Write)]
     #[since(1)]
     "agent.spawnInto" => args AgentSpawnIntoArgs {
-        window: String,
+        window: Option<String>,
         cwd: String,
         view_id: Option<String>,
         slot_id: Option<String>,
         backend: Option<String>,
+        at: Option<String>,
     } -> ok AgentSpawnIntoOk {
         agent_id: String,
-    } errors [CONFLICT];
+        layout: Vec<LayoutRow>,
+    } errors [NOT_FOUND, CONFLICT];
 
     /// 공간/방향 낱말(top-left·right·up …)을 슬롯 id 로 푼다. view_id 를 빼면 그 창의 활성 탭이 대상이고,
     /// window 도 빼면 main 창이다. 그 방향에 슬롯이 없으면 slot_id 는 null 이다. window 는 tab.create 와 같다
@@ -646,6 +841,124 @@ declare_commands! {
         restored_windows: u32,
         durable: bool,
     } errors [CONFLICT];
+
+    // ── 대상을 받는 명령(TRD S28 §4) — 에이전트 이름은 데몬 명부의 해석기 하나가 푼다(ADR-0132) ──
+    // ★errors 에 데몬의 이름 풀기 거절 코드도 든다★ — `#[agent_ref]` 칸은 데몬이 중계 전에 id 로 바꾸고, 그 이름이 없으면
+    //   NOT_FOUND · 둘 이상이면 CONFLICT 로 이 명령 대신 답한다(ADR-0308 · ADR-0156 발견 계약 — 실제로 나가는 코드를 다
+    //   적는다).
+    // ★summary 는 등록 help 상한(명부 4096 바이트) 안이어야 한다★ — 시험 `every_registered_declaration_fits_the_roster_help_cap`.
+
+    // ADR-0307
+    /// 탭 하나를 탭 줄의 다른 자리로 옮긴다(창 안 순서 · 다른 창). 옮길 탭 = tab(탭 id) | tab_of(그 에이전트가 든 탭 — 이름
+    /// 또는 id) 중 하나. tab_of 의 탭에 다른 칸이 있으면 함께 간다 — 그 칸 하나만은 slot.popout.
+    /// 갈 곳 = to_window(그 창의 index 자리) | after_tab(그 탭 id 바로 뒤) | after_tab_of(그 에이전트가 든 탭 바로 뒤) 중
+    /// 하나 — 셋 다 없으면 지금 창의 index 자리. index 는 to_window 와 그때만(0 부터 · 빼거나 넘치면 맨 끝 · 셋 다 없으면
+    /// 필수). to_window = window_id 또는 같은 실행 안 label(번호는 받지 않는다). window 인자는 INVALID_ARGUMENT(갈 곳은
+    /// to_window).
+    /// 보이는 탭 · 포커스를 바꾸지 않는다 — 단 보이던 탭이 떠난 창은 이웃 탭을(main 이 비면 새 빈 탭을) 보인다.
+    /// 답 = changed(같은 자리면 false) · window · window_id · number(놓인 창) · tab · tab_index(그 탭 · 탭 줄 자리) ·
+    /// layout(바뀐 탭의 칸 줄 — layout.get rows 모양 · id 없음).
+    /// 오류: 에이전트가 어느 칸에도 없거나 그 이름이 없으면 NOT_FOUND · 여러 탭에 있거나 이름이 둘 이상이면 CONFLICT — 문구
+    /// 끝 candidates 로 다시 부른다(tab= 값 → tab · after_tab= 값 → after_tab, 에이전트 id → tab_of · after_tab_of).
+    /// after_tab(_of) 가 옮길 탭이면 INVALID_ARGUMENT.
+    #[effect(Write)]
+    #[since(21)]
+    "tab.move" => args TabMoveArgs {
+        tab: Option<String>,
+        #[agent_ref]
+        tab_of: Option<String>,
+        to_window: Option<String>,
+        after_tab: Option<String>,
+        #[agent_ref]
+        after_tab_of: Option<String>,
+        index: Option<u32>,
+        window: Option<String>,
+    } -> ok TabMoveOk {
+        changed: bool,
+        window: String,
+        window_id: String,
+        number: u32,
+        tab: String,
+        tab_index: Option<u32>,
+        layout: Vec<LayoutRow>,
+    } errors [NOT_FOUND, CONFLICT];
+
+    // ADR-0307
+    /// 탭 하나를 다른 탭의 칸 옆에 붙인다(분할) — 옮긴 탭의 칸들이 그 탭 안으로 들어가고 옮긴 탭은 없어진다. 옮길 탭 =
+    /// tab | tab_of(tab.move 와 같다). tab_of 의 탭에 다른 칸이 있으면 함께 간다 — 그 칸 하나만은 slot.popout.
+    /// 붙일 칸 = beside_slot(칸 id) | beside(그 에이전트가 든 칸) | beside_at(공간 낱말 — window 의 보이는 탭에서 · window 를
+    /// 빼면 main) 중 하나. beside_at 의 left · right · up · down = 포커스 칸의 그쪽 이웃 · top-left · top-right · bottom-left
+    /// · bottom-right = 그 모서리 칸. window 는 beside_at 과만 쓰고 window_id 또는 같은 실행 안 label(번호는 받지 않는다).
+    /// side = 옮긴 탭이 놓일 쪽(Left · Right · Top · Bottom). whole = true 면 그 칸이 든 탭 전체의 바깥 변. share = 붙는 쪽
+    /// 몫(0.01~0.5) — 빼면 마우스와 같은 몫(창 크기를 모르면 0.5).
+    /// 보이는 탭 · 포커스 · 답은 tab.move 와 같다(tab = 붙인 곳의 살아남은 탭).
+    /// 오류는 tab.move 와 같다 — beside 가 여러 칸에 있으면 CONFLICT(candidates 의 beside_slot= 값 → beside_slot) · 붙일 칸이
+    /// 옮길 탭 안이면 INVALID_ARGUMENT · 낱말이 칸을 못 집으면 NOT_FOUND.
+    #[effect(Write)]
+    #[since(21)]
+    "tab.dock" => args TabDockArgs {
+        tab: Option<String>,
+        #[agent_ref]
+        tab_of: Option<String>,
+        beside_slot: Option<String>,
+        #[agent_ref]
+        beside: Option<String>,
+        beside_at: Option<String>,
+        window: Option<String>,
+        side: DockSide,
+        whole: Option<bool>,
+        share: Option<f64>,
+    } -> ok TabDockOk {
+        changed: bool,
+        window: String,
+        window_id: String,
+        number: u32,
+        tab: String,
+        tab_index: Option<u32>,
+        layout: Vec<LayoutRow>,
+    } errors [NOT_FOUND, CONFLICT];
+
+    // ADR-0307
+    /// 탭 하나를 새 창으로 뗀다 — 새 창은 포커스를 가져가지 않는다. 옮길 탭 = tab | tab_of(tab.move 와 같다). tab_of 의
+    /// 탭에 다른 칸이 있으면 함께 간다 — 그 칸 하나만은 slot.popout. 이미 혼자인 팝아웃이면 아무것도 안 바뀐다(changed =
+    /// false). 새 창 크기 = 원래 창이 팝아웃이면 그 크기 · main 이면 팝아웃 기본 크기. 답 · 오류는 tab.move 와 같다
+    /// (window = 새 창).
+    #[effect(Write)]
+    #[since(21)]
+    "tab.detach" => args TabDetachArgs {
+        tab: Option<String>,
+        #[agent_ref]
+        tab_of: Option<String>,
+    } -> ok TabDetachOk {
+        changed: bool,
+        window: String,
+        window_id: String,
+        number: u32,
+        tab: String,
+        tab_index: Option<u32>,
+        layout: Vec<LayoutRow>,
+    } errors [NOT_FOUND, CONFLICT];
+
+    // ADR-0307
+    /// 배치를 칸마다 한 줄로 읽는다 — 창 번호 순 → 탭 줄 순 → 탭 안 칸 순. window(window_id 또는 같은 실행 안 label ·
+    /// 번호는 받지 않는다)를 주면 그 창만, agent(이름 또는 id)를 주면 그 에이전트가 든 칸만(어느 칸에도 없으면 빈 목록).
+    /// 줄 = window · window_number · tab_index(그 창 탭 줄 자리 · 0 부터 — 같은 탭의 줄을 묶는 열쇠) · tab_name ·
+    /// tab_active(그 창에 보이는 탭) · content(Empty · Agent · AgentList · PresetPalette · Usage · Unknown) · agent(표시
+    /// 이름 — 모르면 빠진다) · focused(그 탭 안의 포커스 칸 — 창 · OS 포커스가 아니다) · x · y · w · h(탭 안 정규 좌표 0~1 —
+    /// 왼쪽 위가 0,0).
+    /// ids = true 면 window_id · tab(다른 명령이 view_id 라 부르는 그 탭 id) · slot_id · agent_id 도 싣는다(기본은 빠진다 —
+    /// 칸은 에이전트 이름 · 공간 낱말로 부른다). 그런 에이전트 이름이 없으면 NOT_FOUND · 이름이 둘 이상이면 CONFLICT(문구 끝
+    /// candidates) · 없는 창이면 CONFLICT.
+    #[effect(Read)]
+    #[since(21)]
+    "layout.get" => args LayoutGetArgs {
+        window: Option<String>,
+        #[agent_ref]
+        agent: Option<String>,
+        ids: Option<bool>,
+    } -> ok LayoutGetOk {
+        rows: Vec<LayoutRow>,
+    } errors [NOT_FOUND, CONFLICT];
 }
 
 /// 이 표의 핸들러들이 잡는 실물 전량 — ★조립 때 주입된다★(ADR-0155 결정 5 / 규칙 T-1).
@@ -692,23 +1005,22 @@ pub fn make_table(ports: LayoutPorts) -> CommandTable {
         "tab.create",
         blocking_handler(move |args: TabCreateArgs| verb_tab_create(&p, args)),
     );
-    let p = Arc::clone(&ports);
+    // 탭 · 칸을 에이전트로 고를 수 있는 동사 — 적용을 블로킹 풀에서 돈다(`targeted_handler` · 아래 칸 동사 · `tab.move` 도
+    //   같다).
     plug(
         &mut table,
         "tab.switch",
-        blocking_handler(move |args: TabSwitchArgs| verb_tab_switch(&p, args)),
+        targeted_handler(&ports, verb_tab_switch),
     );
-    let p = Arc::clone(&ports);
     plug(
         &mut table,
         "tab.close",
-        blocking_handler(move |args: TabCloseArgs| verb_tab_close(&p, args)),
+        targeted_handler(&ports, verb_tab_close),
     );
-    let p = Arc::clone(&ports);
     plug(
         &mut table,
         "tab.rename",
-        blocking_handler(move |args: TabRenameArgs| verb_tab_rename(&p, args)),
+        targeted_handler(&ports, verb_tab_rename),
     );
     let p = Arc::clone(&ports);
     plug(
@@ -811,17 +1123,15 @@ pub fn make_table(ports: LayoutPorts) -> CommandTable {
         "window.setTheme",
         blocking_handler(move |args: WindowSetThemeArgs| verb_window_set_theme(&p, args)),
     );
-    let p = Arc::clone(&ports);
     plug(
         &mut table,
         "slot.split",
-        blocking_handler(move |args: SlotSplitArgs| verb_slot_split(&p, args)),
+        targeted_handler(&ports, verb_slot_split),
     );
-    let p = Arc::clone(&ports);
     plug(
         &mut table,
         "slot.close",
-        blocking_handler(move |args: SlotCloseArgs| verb_slot_close(&p, args)),
+        targeted_handler(&ports, verb_slot_close),
     );
     let p = Arc::clone(&ports);
     plug(
@@ -835,29 +1145,25 @@ pub fn make_table(ports: LayoutPorts) -> CommandTable {
         "split.list",
         blocking_handler(move |args: SplitListArgs| verb_split_list(&p, args)),
     );
-    let p = Arc::clone(&ports);
     plug(
         &mut table,
         "slot.popout",
-        blocking_handler(move |args: SlotPopoutArgs| verb_slot_popout(&p, args)),
+        targeted_handler(&ports, verb_slot_popout),
     );
-    let p = Arc::clone(&ports);
     plug(
         &mut table,
         "slot.focus",
-        blocking_handler(move |args: SlotFocusArgs| verb_slot_focus(&p, args)),
+        targeted_handler(&ports, verb_slot_focus),
     );
-    let p = Arc::clone(&ports);
     plug(
         &mut table,
         "slot.assignAgent",
-        blocking_handler(move |args: SlotAssignAgentArgs| verb_slot_assign_agent(&p, args)),
+        targeted_handler(&ports, verb_slot_assign_agent),
     );
-    let p = Arc::clone(&ports);
     plug(
         &mut table,
         "layout.setSlotContent",
-        blocking_handler(move |args: LayoutSetSlotContentArgs| verb_set_slot_content(&p, args)),
+        targeted_handler(&ports, verb_set_slot_content),
     );
     let p = Arc::clone(&ports);
     plug(
@@ -910,6 +1216,26 @@ pub fn make_table(ports: LayoutPorts) -> CommandTable {
             ports: Arc::clone(&ports),
         }),
     );
+    plug(
+        &mut table,
+        "tab.move",
+        targeted_handler(&ports, verb_tab_move),
+    );
+    plug(
+        &mut table,
+        "tab.dock",
+        targeted_handler(&ports, verb_tab_dock),
+    );
+    plug(
+        &mut table,
+        "tab.detach",
+        targeted_handler(&ports, verb_tab_detach),
+    );
+    plug(
+        &mut table,
+        "layout.get",
+        targeted_handler(&ports, verb_layout_get),
+    );
 
     table
 }
@@ -959,27 +1285,93 @@ where
         Box::pin(async move {
             let parsed: A = serde_json::from_value(args)
                 .map_err(|e| CommandError::invalid_argument(e.to_string()))?;
-            let ok = match tokio::runtime::Handle::try_current() {
-                Ok(runtime) => {
-                    runtime
-                        .spawn_blocking(move || run(parsed))
-                        .await
-                        .map_err(|e| {
-                            // 버스 경로의 패닉 그물(`handler_panicked`)과 같은 문구 — 본문이 블로킹
-                            //   풀에서 터지면 그 그물이 못 보고 여기로 온다. 운영 셸에선 훅이 먼저 셸을
-                            //   끝내 `is_panic` 갈래에 닿지 않는다 — 훅 없는 시험 빌드에서만 산다(ADR-0292).
-                            let what = if e.is_panic() {
-                                "panicked"
-                            } else {
-                                "was cancelled"
-                            };
-                            CommandError::internal(format!("command handler {what}: {e}"))
-                        })??
-                }
-                Err(_) => run(parsed)?,
-            };
+            let ok = off_thread(move || run(parsed)).await?;
             serde_json::to_value(ok).map_err(|e| CommandError::internal(e.to_string()))
         })
+    }
+}
+
+/// 막는 본문을 블로킹 풀에서 돌린다 — tokio 런타임 밖에서 폴링되면 그 자리에서 돈다(막을 워커가 없다). 사유는
+/// [`offloaded_handler`] 와 같다. ★답보다 본문이 오래 산다★ — 기다리던 future 가 버려져도 본문은 끝까지 돈다.
+async fn off_thread<T: Send + 'static>(
+    body: impl FnOnce() -> Result<T, CommandError> + Send + 'static,
+) -> Result<T, CommandError> {
+    match tokio::runtime::Handle::try_current() {
+        Ok(runtime) => runtime.spawn_blocking(body).await.map_err(|e| {
+            // 버스 경로의 패닉 그물(`handler_panicked`)과 같은 문구 — 본문이 블로킹 풀에서 터지면 그 그물이 못 보고
+            //   여기로 온다. 운영 셸에선 훅이 먼저 셸을 끝내 `is_panic` 갈래에 닿지 않는다 — 훅 없는 시험 빌드에서만
+            //   산다(ADR-0292).
+            let what = if e.is_panic() {
+                "panicked"
+            } else {
+                "was cancelled"
+            };
+            CommandError::internal(format!("command handler {what}: {e}"))
+        })?,
+        Err(_) => body(),
+    }
+}
+
+/// 탭 · 칸을 고르는 동사의 핸들러 — [`offloaded_handler`] 처럼 본문을 블로킹 풀에서 돌리고, 답은 `null` 칸을 뺀 JSON 이다
+/// ([`without_nulls`]).
+///
+/// ★블로킹 풀인 이유★(TRD S28 §8): 새 창 도킹(`tab.detach` · 새 창 `slot.popout`)은 main 스레드 · 동기 명령에서 부르면 창
+/// 짓기가 교착하고(`apply::dock_tab` 문서), 예열 창을 기다리는 동안(~1 초) tokio 일꾼을 막는다. 같은 줄의 동사가 함께 쓴다.
+// ADR-0307
+fn targeted_handler<A, O, F>(ports: &Arc<LayoutPorts>, run: F) -> Arc<dyn CommandHandler>
+where
+    F: Fn(&LayoutPorts, A) -> Result<O, CommandError> + Send + Sync + 'static,
+    A: serde::de::DeserializeOwned + Send + 'static,
+    O: serde::Serialize + Send + 'static,
+{
+    Arc::new(Targeted {
+        ports: Arc::clone(ports),
+        run: Arc::new(run),
+        _types: std::marker::PhantomData,
+    })
+}
+
+struct Targeted<F, A, O> {
+    ports: Arc<LayoutPorts>,
+    run: Arc<F>,
+    _types: std::marker::PhantomData<fn(A) -> O>,
+}
+
+impl<F, A, O> CommandHandler for Targeted<F, A, O>
+where
+    F: Fn(&LayoutPorts, A) -> Result<O, CommandError> + Send + Sync + 'static,
+    A: serde::de::DeserializeOwned + Send + 'static,
+    O: serde::Serialize + Send + 'static,
+{
+    fn call(&self, args: serde_json::Value) -> CommandFuture {
+        let ports = Arc::clone(&self.ports);
+        let run = Arc::clone(&self.run);
+        Box::pin(async move {
+            let parsed: A = serde_json::from_value(args)
+                .map_err(|e| CommandError::invalid_argument(e.to_string()))?;
+            let ok = off_thread(move || run(&ports, parsed)).await?;
+            serde_json::to_value(ok)
+                .map(without_nulls)
+                .map_err(|e| CommandError::internal(e.to_string()))
+        })
+    }
+}
+
+/// 객체의 `null` 칸을 (깊이 끝까지) 뺀다 — 대상을 받는 명령의 답이 선택 칸(줄의 id 넷 · 모르는 표시 이름)을 `null` 로
+/// 싣지 않게 한다(규칙 §4 — 크기). 그 칸들은 선언 스키마에서 필수가 아니라 빠져도 계약 안이다.
+// ADR-0307
+fn without_nulls(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.into_iter()
+                .filter(|(_, v)| !v.is_null())
+                .map(|(k, v)| (k, without_nulls(v)))
+                .collect(),
+        ),
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(without_nulls).collect())
+        }
+        other => other,
     }
 }
 
@@ -999,43 +1391,6 @@ fn verb_tab_create(ports: &LayoutPorts, args: TabCreateArgs) -> Result<TabCreate
     Ok(TabCreateOk {
         view_id: view_id.to_string(),
     })
-}
-
-fn verb_tab_switch(ports: &LayoutPorts, args: TabSwitchArgs) -> Result<TabSwitchOk, CommandError> {
-    let window = window_label(ports, "window", &args.window)?;
-    let view = uuid_arg("view_id", &args.view_id)?;
-    apply::switch_tab(
-        &ports.state,
-        ports.subs.as_ref(),
-        ports.events.as_ref(),
-        &window,
-        view,
-    )
-    .map_err(not_applied)?;
-    Ok(TabSwitchOk {})
-}
-
-fn verb_tab_close(ports: &LayoutPorts, args: TabCloseArgs) -> Result<TabCloseOk, CommandError> {
-    let window = window_label(ports, "window", &args.window)?;
-    let view = uuid_arg("view_id", &args.view_id)?;
-    apply::close_tab(
-        &ports.state,
-        ports.subs.as_ref(),
-        ports.events.as_ref(),
-        ports.windows.as_ref(),
-        &window,
-        view,
-    )
-    .map_err(not_applied)?;
-    Ok(TabCloseOk {})
-}
-
-fn verb_tab_rename(ports: &LayoutPorts, args: TabRenameArgs) -> Result<TabRenameOk, CommandError> {
-    let view = uuid_arg("view_id", &args.view_id)?;
-    let name = text("name", &args.name)?.trim();
-    apply::rename_tab(&ports.state, ports.events.as_ref(), view, name.to_string())
-        .map_err(not_applied)?;
-    Ok(TabRenameOk {})
 }
 
 fn verb_tab_list(ports: &LayoutPorts, args: TabListArgs) -> Result<TabListOk, CommandError> {
@@ -1178,50 +1533,15 @@ fn theme_arg(raw: &str) -> Result<UiTheme, CommandError> {
     })
 }
 
-/// 창 테마 서비스의 오류 종류를 코드로 — 모르는 창은 이웃 `window.*` 명령과 같은 `CONFLICT` 다(헤더 「적용 실패는
-/// 코드 하나로 나간다」). 그 창에 못 보낸 쓰기는 `INTERNAL` 이다 — 값은 이미 적혀 `CONFLICT`(「지금 상태로는 적용할
-/// 수 없다」)가 거짓이다.
+/// 창 테마 서비스의 오류 종류를 코드로 — 모르는 창은 이웃 `window.*` 명령과 같은 `CONFLICT` 다(헤더 「적용 실패의
+/// 코드」). 그 창에 못 보낸 쓰기는 `INTERNAL` 이다 — 값은 이미 적혀 `CONFLICT`(「지금 상태로는 적용할 수 없다」)가
+/// 거짓이다.
 fn theme_error(error: ThemeError) -> CommandError {
     let message = error.to_string();
     match error {
         ThemeError::UnknownWindow(_) => CommandError::of(ErrorCode::Conflict, message),
         ThemeError::Poisoned | ThemeError::Undelivered { .. } => CommandError::internal(message),
     }
-}
-
-fn verb_slot_split(ports: &LayoutPorts, args: SlotSplitArgs) -> Result<SlotSplitOk, CommandError> {
-    let view = uuid_arg("view_id", &args.view_id)?;
-    let slot = uuid_arg("slot_id", &args.slot_id)?;
-    let dir = match args.dir {
-        SplitDirection::LeftRight => SplitDir::LeftRight,
-        SplitDirection::TopBottom => SplitDir::TopBottom,
-    };
-    let new_slot = apply::split_slot(
-        &ports.state,
-        ports.subs.as_ref(),
-        ports.events.as_ref(),
-        view,
-        slot,
-        dir,
-    )
-    .map_err(not_applied)?;
-    Ok(SlotSplitOk {
-        slot_id: new_slot.to_string(),
-    })
-}
-
-fn verb_slot_close(ports: &LayoutPorts, args: SlotCloseArgs) -> Result<SlotCloseOk, CommandError> {
-    let view = uuid_arg("view_id", &args.view_id)?;
-    let slot = uuid_arg("slot_id", &args.slot_id)?;
-    apply::close_slot(
-        &ports.state,
-        ports.subs.as_ref(),
-        ports.events.as_ref(),
-        view,
-        slot,
-    )
-    .map_err(not_applied)?;
-    Ok(SlotCloseOk {})
 }
 
 // ADR-0227
@@ -1272,100 +1592,6 @@ fn verb_split_list(ports: &LayoutPorts, args: SplitListArgs) -> Result<SplitList
             })
             .collect(),
     })
-}
-
-fn verb_slot_popout(
-    ports: &LayoutPorts,
-    args: SlotPopoutArgs,
-) -> Result<SlotPopoutOk, CommandError> {
-    let view = uuid_arg("view_id", &args.view_id)?;
-    let slot = uuid_arg("slot_id", &args.slot_id)?;
-    let target = optional_window_label(ports, "to_window", args.to_window.as_deref())?;
-    let moved = apply::move_slot_to_window(
-        &ports.state,
-        ports.subs.as_ref(),
-        ports.events.as_ref(),
-        ports.windows.as_ref(),
-        ports.labels.as_ref(),
-        view,
-        slot,
-        target,
-    )
-    .map_err(not_applied)?;
-    // ★`view_id` 라 부르지 않는다★ — 이 명령의 인자에 이미 `view_id`(떼어낼 **원본** 탭)가 있어서, 답의 같은
-    //   이름은 반대쪽을 뜻하게 된다. 답을 그대로 되먹여 두 번 부르는 호출자는 원본 대신 방금 만든 탭을
-    //   집어 엉뚱한 뷰에서 슬롯을 떼어낸다. `new_` 접두는 그 혼동을 막으면서도 값이 view id 임을 남겨
-    //   `tab.rename`·`tab.switch` 의 `view_id` 에 그대로 꽂힌다. 서비스 쪽 이름은 `tab` 이다(프론트 wire).
-    Ok(SlotPopoutOk {
-        window: moved.window,
-        new_view_id: moved.tab.to_string(),
-        window_id: moved.window_id,
-        number: moved.number,
-    })
-}
-
-fn verb_slot_focus(ports: &LayoutPorts, args: SlotFocusArgs) -> Result<SlotFocusOk, CommandError> {
-    let view = uuid_arg("view_id", &args.view_id)?;
-    let slot = uuid_arg("slot_id", &args.slot_id)?;
-    apply::focus_slot(&ports.state, ports.events.as_ref(), view, slot).map_err(not_applied)?;
-    Ok(SlotFocusOk {})
-}
-
-fn verb_slot_assign_agent(
-    ports: &LayoutPorts,
-    args: SlotAssignAgentArgs,
-) -> Result<SlotAssignAgentOk, CommandError> {
-    let view = uuid_arg("view_id", &args.view_id)?;
-    let slot = uuid_arg("slot_id", &args.slot_id)?;
-    let agent = text("agent_id", &args.agent_id)?;
-    apply::assign_agent(
-        &ports.state,
-        ports.subs.as_ref(),
-        ports.events.as_ref(),
-        view,
-        slot,
-        agent.to_string(),
-    )
-    .map_err(not_applied)?;
-    Ok(SlotAssignAgentOk {})
-}
-
-fn verb_set_slot_content(
-    ports: &LayoutPorts,
-    args: LayoutSetSlotContentArgs,
-) -> Result<LayoutSetSlotContentOk, CommandError> {
-    let view = uuid_arg("view_id", &args.view_id)?;
-    let slot = uuid_arg("slot_id", &args.slot_id)?;
-    let write = slot_content(
-        args.content,
-        args.agent_id.as_deref(),
-        args.show_claude,
-        args.show_codex,
-    )?;
-    match write {
-        SlotContentWrite::Replace(content) => apply::set_slot_content(
-            &ports.state,
-            ports.subs.as_ref(),
-            ports.events.as_ref(),
-            view,
-            slot,
-            content,
-        ),
-        SlotContentWrite::Usage {
-            show_claude,
-            show_codex,
-        } => apply::set_usage_slot(
-            &ports.state,
-            ports.subs.as_ref(),
-            ports.events.as_ref(),
-            view,
-            slot,
-            show_claude,
-            show_codex,
-        ),
-    }
-    .map_err(not_applied)?;
-    Ok(LayoutSetSlotContentOk {})
 }
 
 fn verb_resolve_spatial(
@@ -1519,10 +1745,13 @@ fn settings_error(error: SettingsError) -> CommandError {
     }
 }
 
-/// `agent.spawnInto` 의 핸들러 — ★async 라 [`blocking_handler`] 를 못 쓴다★.
+/// `agent.spawnInto` 의 핸들러 — ★async 라 [`blocking_handler`] 를 못 쓴다★. 답은 `null` 칸을 뺀 JSON 이다
+/// ([`without_nulls`] — 배치 줄의 id 칸).
 ///
 /// 본문을 `call` 안이 아니라 future 안에서 도는 것은 계약이다(마감시각이 그 형태 위에 선다 —
 /// `blocking_handler` 의 같은 조항).
+/// ★[`targeted_handler`] 와 달리 적용을 블로킹 풀로 옮기지 않는다★ — 적용이 데몬 스폰을 중간에 기다리는 async 다(TRD S28
+/// §5-2 · §8).
 struct SpawnInto {
     ports: Arc<LayoutPorts>,
 }
@@ -1534,7 +1763,9 @@ impl CommandHandler for SpawnInto {
             let args: AgentSpawnIntoArgs = serde_json::from_value(args)
                 .map_err(|e| CommandError::invalid_argument(e.to_string()))?;
             let ok = verb_spawn_into(&ports, args).await?;
-            serde_json::to_value(ok).map_err(|e| CommandError::internal(e.to_string()))
+            serde_json::to_value(ok)
+                .map(without_nulls)
+                .map_err(|e| CommandError::internal(e.to_string()))
         })
     }
 }
@@ -1543,41 +1774,1137 @@ async fn verb_spawn_into(
     ports: &LayoutPorts,
     args: AgentSpawnIntoArgs,
 ) -> Result<AgentSpawnIntoOk, CommandError> {
-    let window = window_label(ports, "window", &args.window)?;
+    // 빼면 낱말판은 main 을, id 판은 view_id 의 창을 쓴다(적용 서비스가 스폰 전에 고른다).
+    let window = optional_window_label(ports, "window", args.window.as_deref())?;
     // ★`agent.new`·`agent.spawn --cwd` 와 **같은 철자 규칙**을 받는다★ — 이 문은 그 셋의 공통 등록부
     //   (`agent::commands::register`)를 안 지나므로, 여기서 안 부르면 같은 낱말이 문마다 다르게 읽힌다.
     let cwd = normalize_spelling(text("cwd", &args.cwd)?);
     let tab = args
         .view_id
         .as_deref()
-        .map(|raw| uuid_arg("view_id", raw))
+        .map(|raw| uuid_arg_from("view_id", raw, LAYOUT_IDS))
         .transpose()?;
     let slot = args
         .slot_id
         .as_deref()
-        .map(|raw| uuid_arg("slot_id", raw))
+        .map(|raw| uuid_arg_from("slot_id", raw, LAYOUT_IDS))
+        .transpose()?;
+    let at = optional_text("at", args.at.as_deref())?
+        .map(|word| Ok::<_, CommandError>((spatial_token("at", word)?, word)))
         .transpose()?;
     // ★backend 를 여기서 정규화하지 않는다★ — 「명시된 backend 는 스폰 전에 거부」가 적용 서비스의 조항이라
     //   (ADR-0058) 빈 문자열을 부재로 접으면 그 거부가 이 입구에서만 느슨해진다.
-    let agent_id = apply::spawn_into(
+    let placed = match at {
+        // 낱말이 칸을 집으므로 탭 · 칸 id 와 함께 받으면 어느 쪽이 이기는지 모르게 된다.
+        Some(_) if tab.is_some() || slot.is_some() => {
+            return Err(CommandError::invalid_argument(
+                "at picks a slot in window's shown tab — give it without view_id and slot_id",
+            ))
+        }
+        Some((token, word)) => apply::spawn_into_at(
+            &ports.state,
+            ports.subs.as_ref(),
+            ports.events.as_ref(),
+            ports.spawner.as_ref(),
+            window.as_deref().unwrap_or(MAIN_WINDOW_LABEL),
+            token,
+            args.backend,
+            cwd,
+        )
+        .await
+        .map_err(|error| {
+            spawn_at_error(
+                &ports.state,
+                error,
+                &Choice::spatial("at", "slot_id", None, word, token),
+            )
+        })?,
+        None => apply::spawn_into_placed(
+            &ports.state,
+            ports.subs.as_ref(),
+            ports.events.as_ref(),
+            ports.spawner.as_ref(),
+            window.as_deref(),
+            tab,
+            slot,
+            args.backend,
+            cwd,
+        )
+        .await
+        .map_err(spawn_not_applied)?,
+    };
+    Ok(AgentSpawnIntoOk {
+        agent_id: placed.out,
+        layout: layout_of(placed.rows),
+    })
+}
+
+/// 낱말판 스폰의 거절 → 버스 오류. 낱말이 칸을 못 집었으면(창 없음 포함) [`locate_error`] 의 코드 · 문구에 「띄운 것이
+/// 없다」를 붙인다 · 스폰 전 그 밖의 거절(점유) = CONFLICT · 스폰 뒤 실패는 id 판과 같다([`spawn_not_applied`]).
+// ADR-0307
+fn spawn_at_error(state: &LayoutState, error: SpawnAtError, said: &Choice) -> CommandError {
+    match error {
+        SpawnAtError::Unplaced(TargetError::Locate(error)) => {
+            let refused = locate_error(state, said, error);
+            CommandError::of(
+                refused.code(),
+                format!("{} — nothing was spawned", refused.message()),
+            )
+        }
+        unplaced @ SpawnAtError::Unplaced(_) => not_applied(unplaced.to_string()),
+        SpawnAtError::Failed(detail) => spawn_not_applied(detail),
+    }
+}
+
+// ── 대상을 받는 동사(TRD S28 §4 · §5 · §7) ──────────────────────────────────────
+//
+// 차례 = 인자 검문(락 없음) → 창 인자 풀기 + 적용 — 본문 전체가 블로킹 풀에서 돈다([`targeted_handler`]). 에이전트 칸은 데몬이
+// 중계 전에 이미 id 로 바꿨다([`agent_arg`] · ADR-0308). 대상(id · 에이전트 · 낱말 → 탭 · 칸)은 적용 서비스가 **바꾸는 그 락
+// 안에서** 풀고, 답의 창 · 탭 · 배치 줄도 결말을 짓는 그 락에서 뜬다(`apply::dock_target` · `DockOutcome::rows` ·
+// `apply::Wrote`).
+// ADR-0307
+
+// 넓힌 칸 · 탭 동사와 `agent.spawnInto` 의 id 반려 문구가 안내하는 출처 — 탭 · 칸 id 를 함께 주는 조회.
+const LAYOUT_IDS: &str = "layout.get with ids";
+
+fn verb_tab_move(ports: &LayoutPorts, args: TabMoveArgs) -> Result<TabMoveOk, CommandError> {
+    // `tab.dock` 의 `window` 와 헷갈린 호출이 말없이 제자리 순서 바꾸기가 되지 않게 받아서 거절한다.
+    if args.window.is_some() {
+        return Err(CommandError::invalid_argument(
+            "tab.move's destination is to_window — it takes no window argument",
+        ));
+    }
+    let subject = tab_choice(args.tab.as_deref(), args.tab_of.as_deref())?;
+    let to_window = optional_window_arg("to_window", args.to_window.as_deref())?;
+    let after = after_choice(args.after_tab.as_deref(), args.after_tab_of.as_deref())?;
+    let index = args.index.map(|i| usize::try_from(i).unwrap_or(usize::MAX));
+    match (&to_window, &after, index) {
+        (Some(_), Some(after), _) => {
+            return Err(CommandError::invalid_argument(format!(
+                "give only one of to_window, after_tab, after_tab_of — they all say where the tab goes, got to_window and {}",
+                after.arg
+            )))
+        }
+        (None, Some(after), Some(_)) => {
+            return Err(CommandError::invalid_argument(format!(
+                "index does not apply with {} — the tab goes right after that tab",
+                after.arg
+            )))
+        }
+        (None, None, None) => {
+            return Err(CommandError::invalid_argument(
+                "say where the tab goes: to_window, after_tab, after_tab_of, or index (a place in its own window's tab bar, from 0)",
+            ))
+        }
+        _ => {}
+    }
+    let tab = subject.tab_target()?;
+    let spot = match &after {
+        Some(after) => TabBarSpot::After(after.tab_target()?),
+        None => TabBarSpot::At {
+            window: to_window
+                .as_deref()
+                .map(|given| window_label(ports, "to_window", given))
+                .transpose()?,
+            index,
+        },
+    };
+    let said = DockSaid {
+        command: "tab.move",
+        subject,
+        dest: after,
+    };
+    let m = dock_by_target(ports, tab, TargetDest::TabBar(spot), &said)?;
+    Ok(TabMoveOk {
+        changed: m.changed,
+        window: m.window,
+        window_id: m.window_id,
+        number: m.number,
+        tab: m.tab,
+        tab_index: m.tab_index,
+        layout: m.layout,
+    })
+}
+
+fn verb_tab_dock(ports: &LayoutPorts, args: TabDockArgs) -> Result<TabDockOk, CommandError> {
+    let subject = tab_choice(args.tab.as_deref(), args.tab_of.as_deref())?;
+    let beside = beside_choice(
+        args.beside_slot.as_deref(),
+        args.beside.as_deref(),
+        args.beside_at.as_deref(),
+    )?;
+    let window = optional_window_arg("window", args.window.as_deref())?;
+    if window.is_some() && !matches!(beside.by, ChoiceBy::At(_)) {
+        return Err(CommandError::invalid_argument(
+            "window only goes with beside_at — it names the window whose shown tab the word is read in",
+        ));
+    }
+    let share = args.share.map(share_arg).transpose()?;
+    let whole = args.whole.unwrap_or(false);
+    let side = match args.side {
+        DockSide::Left => dock::DockSide::Left,
+        DockSide::Right => dock::DockSide::Right,
+        DockSide::Top => dock::DockSide::Top,
+        DockSide::Bottom => dock::DockSide::Bottom,
+    };
+    let tab = subject.tab_target()?;
+    let window = window
+        .as_deref()
+        .map(|given| window_label(ports, "window", given))
+        .transpose()?;
+    let to = TargetDest::Seam {
+        beside: beside.slot_target(whole, window)?,
+        whole,
+        side,
+        share,
+    };
+    let said = DockSaid {
+        command: "tab.dock",
+        subject,
+        dest: Some(beside),
+    };
+    let m = dock_by_target(ports, tab, to, &said)?;
+    Ok(TabDockOk {
+        changed: m.changed,
+        window: m.window,
+        window_id: m.window_id,
+        number: m.number,
+        tab: m.tab,
+        tab_index: m.tab_index,
+        layout: m.layout,
+    })
+}
+
+fn verb_tab_detach(ports: &LayoutPorts, args: TabDetachArgs) -> Result<TabDetachOk, CommandError> {
+    let subject = tab_choice(args.tab.as_deref(), args.tab_of.as_deref())?;
+    let tab = subject.tab_target()?;
+    // 자리 · 크기를 고르지 않는다 — 새 창은 label 기본 자리 · 적용 서비스가 고른 크기이고, 혼자인 팝아웃(재사용)은 받은
+    //   자리로 창을 옮기므로 비워야 그 창이 제자리에 남는다(TRD S28 §4-3).
+    let to = TargetDest::NewWindow {
+        at: WindowPlace {
+            pos: None,
+            size: None,
+        },
+    };
+    let said = DockSaid {
+        command: "tab.detach",
+        subject,
+        dest: None,
+    };
+    let m = dock_by_target(ports, tab, to, &said)?;
+    Ok(TabDetachOk {
+        changed: m.changed,
+        window: m.window,
+        window_id: m.window_id,
+        number: m.number,
+        tab: m.tab,
+        tab_index: m.tab_index,
+        layout: m.layout,
+    })
+}
+
+fn verb_layout_get(ports: &LayoutPorts, args: LayoutGetArgs) -> Result<LayoutGetOk, CommandError> {
+    let window = optional_window_arg("window", args.window.as_deref())?;
+    let agent = optional_text("agent", args.agent.as_deref())?
+        .map(|given| agent_arg("agent", given))
+        .transpose()?;
+    let with_ids = args.ids.unwrap_or(false);
+    let window = window
+        .as_deref()
+        .map(|given| window_label(ports, "window", given))
+        .transpose()?;
+    // 이 읽기의 실패는 락 오염뿐이다 — 상태 탓(CONFLICT)이 아니다.
+    let rows = apply::layout_rows(&ports.state, &RowFilter { window, agent })
+        .map_err(CommandError::internal)?;
+    Ok(LayoutGetOk {
+        rows: rows.into_iter().map(|row| row_of(row, with_ids)).collect(),
+    })
+}
+
+// ── 넓힌 탭 동사(TRD S28 §7) — 탭 = view_id | tab_of · window 는 빼면 탭에서 안다 ──
+
+fn verb_tab_switch(ports: &LayoutPorts, args: TabSwitchArgs) -> Result<TabSwitchOk, CommandError> {
+    let tab = view_choice(args.view_id.as_deref(), args.tab_of.as_deref())?;
+    let window = optional_window_arg("window", args.window.as_deref())?;
+    let target = tab.tab_target()?;
+    let window = window
+        .as_deref()
+        .map(|given| window_label(ports, "window", given))
+        .transpose()?;
+    apply::switch_tab_at(
         &ports.state,
         ports.subs.as_ref(),
         ports.events.as_ref(),
-        ports.spawner.as_ref(),
-        &window,
-        tab,
-        slot,
-        args.backend,
-        cwd,
+        window.as_deref(),
+        &target,
     )
-    .await
-    .map_err(spawn_not_applied)?;
-    Ok(AgentSpawnIntoOk { agent_id })
+    .map_err(|error| target_error(&ports.state, error, &tab))?;
+    Ok(TabSwitchOk {})
+}
+
+fn verb_tab_close(ports: &LayoutPorts, args: TabCloseArgs) -> Result<TabCloseOk, CommandError> {
+    let tab = view_choice(args.view_id.as_deref(), args.tab_of.as_deref())?;
+    let window = optional_window_arg("window", args.window.as_deref())?;
+    let target = tab.tab_target()?;
+    let window = window
+        .as_deref()
+        .map(|given| window_label(ports, "window", given))
+        .transpose()?;
+    let closed = apply::close_tab_at(
+        &ports.state,
+        ports.subs.as_ref(),
+        ports.events.as_ref(),
+        ports.windows.as_ref(),
+        window.as_deref(),
+        &target,
+    )
+    .map_err(|error| target_error(&ports.state, error, &tab))?;
+    Ok(TabCloseOk {
+        layout: layout_of(closed.rows),
+    })
+}
+
+fn verb_tab_rename(ports: &LayoutPorts, args: TabRenameArgs) -> Result<TabRenameOk, CommandError> {
+    let tab = view_choice(args.view_id.as_deref(), args.tab_of.as_deref())?;
+    let name = text("name", &args.name)?.trim().to_string();
+    let target = tab.tab_target()?;
+    apply::rename_tab_at(&ports.state, ports.events.as_ref(), &target, name)
+        .map_err(|error| target_error(&ports.state, error, &tab))?;
+    Ok(TabRenameOk {})
+}
+
+// ── 넓힌 칸 동사(TRD S28 §7) — 칸 = slot_id(+view_id) | slot_of | at(+window) ──
+
+fn verb_slot_focus(ports: &LayoutPorts, args: SlotFocusArgs) -> Result<SlotFocusOk, CommandError> {
+    let pick = SlotPick::read(
+        args.view_id.as_deref(),
+        args.slot_id.as_deref(),
+        args.slot_of.as_deref(),
+        args.at.as_deref(),
+        args.window.as_deref(),
+    )?;
+    let target = pick.target(ports)?;
+    let focused = apply::focus_slot_at(&ports.state, ports.events.as_ref(), &target)
+        .map_err(|error| target_error(&ports.state, error, &pick.said))?;
+    Ok(SlotFocusOk {
+        layout: layout_of(focused.rows),
+    })
+}
+
+fn verb_slot_split(ports: &LayoutPorts, args: SlotSplitArgs) -> Result<SlotSplitOk, CommandError> {
+    let pick = SlotPick::read(
+        args.view_id.as_deref(),
+        args.slot_id.as_deref(),
+        args.slot_of.as_deref(),
+        args.at.as_deref(),
+        args.window.as_deref(),
+    )?;
+    let dir = match args.dir {
+        SplitDirection::LeftRight => SplitDir::LeftRight,
+        SplitDirection::TopBottom => SplitDir::TopBottom,
+    };
+    let target = pick.target(ports)?;
+    let split = apply::split_slot_at(
+        &ports.state,
+        ports.subs.as_ref(),
+        ports.events.as_ref(),
+        &target,
+        dir,
+    )
+    .map_err(|error| target_error(&ports.state, error, &pick.said))?;
+    Ok(SlotSplitOk {
+        slot_id: split.out.to_string(),
+        layout: layout_of(split.rows),
+    })
+}
+
+fn verb_slot_close(ports: &LayoutPorts, args: SlotCloseArgs) -> Result<SlotCloseOk, CommandError> {
+    let pick = SlotPick::read(
+        args.view_id.as_deref(),
+        args.slot_id.as_deref(),
+        args.slot_of.as_deref(),
+        args.at.as_deref(),
+        args.window.as_deref(),
+    )?;
+    let target = pick.target(ports)?;
+    let closed = apply::close_slot_at(
+        &ports.state,
+        ports.subs.as_ref(),
+        ports.events.as_ref(),
+        &target,
+    )
+    .map_err(|error| target_error(&ports.state, error, &pick.said))?;
+    Ok(SlotCloseOk {
+        layout: layout_of(closed.rows),
+    })
+}
+
+fn verb_slot_popout(
+    ports: &LayoutPorts,
+    args: SlotPopoutArgs,
+) -> Result<SlotPopoutOk, CommandError> {
+    let pick = SlotPick::read(
+        args.view_id.as_deref(),
+        args.slot_id.as_deref(),
+        args.slot_of.as_deref(),
+        args.at.as_deref(),
+        args.window.as_deref(),
+    )?;
+    let to_window = optional_window_arg("to_window", args.to_window.as_deref())?;
+    let target = pick.target(ports)?;
+    let to_window = to_window
+        .as_deref()
+        .map(|given| window_label(ports, "to_window", given))
+        .transpose()?;
+    let popped = apply::move_slot_to_window_at(
+        &ports.state,
+        ports.subs.as_ref(),
+        ports.events.as_ref(),
+        ports.windows.as_ref(),
+        ports.labels.as_ref(),
+        &target,
+        to_window,
+    )
+    .map_err(|error| target_error(&ports.state, error, &pick.said))?;
+    // ★`view_id` 라 부르지 않는다★ — 이 명령의 인자에 이미 `view_id`(떼어낼 **원본** 탭)가 있어서, 답의 같은
+    //   이름은 반대쪽을 뜻하게 된다. 답을 그대로 되먹여 두 번 부르는 호출자는 원본 대신 방금 만든 탭을
+    //   집어 엉뚱한 뷰에서 슬롯을 떼어낸다. `new_` 접두는 그 혼동을 막으면서도 값이 view id 임을 남겨
+    //   `tab.rename`·`tab.switch` 의 `view_id` 에 그대로 꽂힌다. 서비스 쪽 이름은 `tab` 이다(프론트 wire).
+    Ok(SlotPopoutOk {
+        window: popped.out.window,
+        new_view_id: popped.out.tab.to_string(),
+        window_id: popped.out.window_id,
+        number: popped.out.number,
+        layout: layout_of(popped.rows),
+    })
+}
+
+fn verb_slot_assign_agent(
+    ports: &LayoutPorts,
+    args: SlotAssignAgentArgs,
+) -> Result<SlotAssignAgentOk, CommandError> {
+    let pick = SlotPick::read(
+        args.view_id.as_deref(),
+        args.slot_id.as_deref(),
+        args.slot_of.as_deref(),
+        args.at.as_deref(),
+        args.window.as_deref(),
+    )?;
+    let agent = Assignee::read(args.agent_id.as_deref(), args.assign.as_deref())?.ok_or_else(
+        || {
+            CommandError::invalid_argument(
+                "the agent to put in the slot is missing — give one of assign (its name or id), agent_id",
+            )
+        },
+    )?;
+    let target = pick.target(ports)?;
+    let assigned = apply::assign_agent_at(
+        &ports.state,
+        ports.subs.as_ref(),
+        ports.events.as_ref(),
+        &target,
+        agent.id.to_string(),
+    )
+    .map_err(|error| target_error(&ports.state, error, &pick.said))?;
+    Ok(SlotAssignAgentOk {
+        layout: layout_of(assigned.rows),
+    })
+}
+
+fn verb_set_slot_content(
+    ports: &LayoutPorts,
+    args: LayoutSetSlotContentArgs,
+) -> Result<LayoutSetSlotContentOk, CommandError> {
+    let pick = SlotPick::read(
+        args.view_id.as_deref(),
+        args.slot_id.as_deref(),
+        args.slot_of.as_deref(),
+        args.at.as_deref(),
+        args.window.as_deref(),
+    )?;
+    let agent = Assignee::read(args.agent_id.as_deref(), args.assign.as_deref())?;
+    let write = slot_content(args.content, agent, args.show_claude, args.show_codex)?;
+    let target = pick.target(ports)?;
+    let (state, subs, events) = (&ports.state, ports.subs.as_ref(), ports.events.as_ref());
+    let written = match write {
+        SlotContentWrite::Replace(content) => {
+            apply::set_slot_content_at(state, subs, events, &target, content)
+        }
+        SlotContentWrite::Usage {
+            show_claude,
+            show_codex,
+        } => apply::set_usage_slot_at(state, subs, events, &target, show_claude, show_codex),
+    }
+    .map_err(|error| target_error(&ports.state, error, &pick.said))?;
+    Ok(LayoutSetSlotContentOk {
+        layout: layout_of(written.rows),
+    })
+}
+
+// ── 고른 말 ──
+
+/// 탭 · 칸을 고른 말 — 같은 것을 고르는 인자 한 줄에서 정확히 하나를 받은 것. `arg` · `word` = 받은 인자 이름과 받은
+/// 그대로의 값(오류 문구가 되짚는다) · `id_arg` = 그 줄의 id 인자(모호할 때 후보를 넣을 자리 — 탭 줄이면 후보가 탭 단위다) ·
+/// `agent_arg` = 그 줄에서 에이전트로 고르는 인자(낱말이 칸을 못 집었을 때 권한다 — 없으면 `None`).
+struct Choice {
+    arg: &'static str,
+    id_arg: &'static str,
+    agent_arg: Option<&'static str>,
+    word: String,
+    by: ChoiceBy,
+}
+
+#[derive(Clone, Copy)]
+enum ChoiceBy {
+    Id(Uuid),
+    /// 그 에이전트가 든 탭 · 칸 — 데몬이 이름을 바꿔 넣은 에이전트 id(ADR-0308).
+    Agent(Uuid),
+    At(SpatialToken),
+}
+
+impl Choice {
+    fn spatial(
+        arg: &'static str,
+        id_arg: &'static str,
+        agent_arg: Option<&'static str>,
+        word: &str,
+        token: SpatialToken,
+    ) -> Self {
+        Choice {
+            arg,
+            id_arg,
+            agent_arg,
+            word: word.to_string(),
+            by: ChoiceBy::At(token),
+        }
+    }
+
+    // 탭을 고르는 줄인가 — 모호 후보를 탭 단위로 싣는다.
+    fn names_a_tab(&self) -> bool {
+        matches!(self.id_arg, "tab" | "after_tab" | "view_id")
+    }
+
+    fn tab_target(&self) -> Result<Target, CommandError> {
+        match self.by {
+            ChoiceBy::Id(id) => Ok(Target::Tab(id)),
+            ChoiceBy::Agent(agent) => Ok(Target::TabOf(agent)),
+            ChoiceBy::At(_) => Err(CommandError::internal(format!(
+                "{} cannot name a tab",
+                self.arg
+            ))),
+        }
+    }
+
+    // `window` = 낱말을 읽을 창(이미 푼 label · `None` = main).
+    fn slot_target(&self, whole: bool, window: Option<String>) -> Result<Target, CommandError> {
+        match self.by {
+            ChoiceBy::Id(slot) => Ok(Target::Slot { view: None, slot }),
+            // 탭 전체의 바깥 변에 붙이면 기준이 탭이라 그 탭 안 여러 칸에 떠 있어도 모호하지 않다.
+            ChoiceBy::Agent(agent) if whole => Ok(Target::TabOf(agent)),
+            ChoiceBy::Agent(agent) => Ok(Target::SlotOf(agent)),
+            ChoiceBy::At(token) => Ok(Target::At { token, window }),
+        }
+    }
+}
+
+/// 탭을 고르는 줄 — `id_arg`(그 명령의 탭 id 인자) · `tab_of` 중 정확히 하나. `what` = 그 줄이 고르는 것(문구용) · `source` =
+/// 그 id 를 돌려주는 명령(반려 문구가 안내한다).
+fn tab_line(
+    id_arg: &'static str,
+    what: &str,
+    source: &str,
+    id: Option<&str>,
+    tab_of: Option<&str>,
+) -> Result<Choice, CommandError> {
+    let (index, arg, word) = one_of(&[(id_arg, id), ("tab_of", tab_of)], what)?;
+    let by = match index {
+        0 => ChoiceBy::Id(id_choice(
+            arg,
+            word,
+            source,
+            "tab_of (an agent shown in that tab)",
+        )?),
+        _ => ChoiceBy::Agent(agent_arg(arg, word)?),
+    };
+    Ok(Choice {
+        arg,
+        id_arg,
+        agent_arg: Some("tab_of"),
+        word: word.to_string(),
+        by,
+    })
+}
+
+/// 옮길 탭 줄(`tab` · `tab_of`) — 도킹 동사.
+fn tab_choice(tab: Option<&str>, tab_of: Option<&str>) -> Result<Choice, CommandError> {
+    tab_line(
+        "tab",
+        "the tab to move",
+        "tab.list / layout.get with ids",
+        tab,
+        tab_of,
+    )
+}
+
+/// 바꿀 탭 줄(`view_id` · `tab_of`) — 넓힌 탭 동사.
+fn view_choice(view_id: Option<&str>, tab_of: Option<&str>) -> Result<Choice, CommandError> {
+    tab_line("view_id", "the tab", LAYOUT_IDS, view_id, tab_of)
+}
+
+/// 「그 탭 바로 뒤」 줄(`after_tab` · `after_tab_of`) — 하나도 없으면 `None`(갈 곳 줄의 나머지는 `to_window` · `index`).
+fn after_choice(
+    after_tab: Option<&str>,
+    after_tab_of: Option<&str>,
+) -> Result<Option<Choice>, CommandError> {
+    let after_tab = optional_text("after_tab", after_tab)?;
+    let after_tab_of = optional_text("after_tab_of", after_tab_of)?;
+    let (arg, word, by) = match (after_tab, after_tab_of) {
+        (None, None) => return Ok(None),
+        (Some(_), Some(_)) => {
+            return Err(CommandError::invalid_argument(
+                "give only one of to_window, after_tab, after_tab_of — they all say where the tab goes, got after_tab and after_tab_of",
+            ))
+        }
+        (Some(word), None) => (
+            "after_tab",
+            word,
+            ChoiceBy::Id(id_choice(
+                "after_tab",
+                word,
+                "tab.list / layout.get with ids",
+                "after_tab_of (an agent shown in that tab)",
+            )?),
+        ),
+        (None, Some(word)) => (
+            "after_tab_of",
+            word,
+            ChoiceBy::Agent(agent_arg("after_tab_of", word)?),
+        ),
+    };
+    Ok(Some(Choice {
+        arg,
+        id_arg: "after_tab",
+        agent_arg: Some("after_tab_of"),
+        word: word.to_string(),
+        by,
+    }))
+}
+
+/// 붙일 칸 줄(`beside_slot` · `beside` · `beside_at`).
+fn beside_choice(
+    slot: Option<&str>,
+    agent: Option<&str>,
+    at: Option<&str>,
+) -> Result<Choice, CommandError> {
+    let (index, arg, word) = one_of(
+        &[("beside_slot", slot), ("beside", agent), ("beside_at", at)],
+        "the slot to attach beside",
+    )?;
+    let by = match index {
+        0 => ChoiceBy::Id(id_choice(
+            arg,
+            word,
+            "layout.get with ids",
+            "beside (an agent shown in that slot) or beside_at (a spatial word)",
+        )?),
+        1 => ChoiceBy::Agent(agent_arg(arg, word)?),
+        _ => ChoiceBy::At(spatial_token(arg, word)?),
+    };
+    Ok(Choice {
+        arg,
+        id_arg: "beside_slot",
+        agent_arg: Some("beside"),
+        word: word.to_string(),
+        by,
+    })
+}
+
+/// 칸을 고르는 줄(`slot_id` · `slot_of` · `at`)과 그 곁 인자 — 넓힌 칸 동사가 함께 쓴다(TRD S28 §7). `view` = `slot_id` 와
+/// 함께 준 `view_id`(그 탭의 칸이어야 한다) · `window` = `at` 을 읽을 창(모양만 본 인자 — 모델 안 창으로는 적용 직전에 푼다).
+struct SlotPick {
+    said: Choice,
+    view: Option<Uuid>,
+    window: Option<String>,
+}
+
+impl SlotPick {
+    fn read(
+        view_id: Option<&str>,
+        slot_id: Option<&str>,
+        slot_of: Option<&str>,
+        at: Option<&str>,
+        window: Option<&str>,
+    ) -> Result<Self, CommandError> {
+        // 탭 id 를 먼저 본다 — 넓히기 전 id 호출자의 검문 차례 그대로.
+        let view = optional_text("view_id", view_id)?
+            .map(|raw| uuid_arg_from("view_id", raw, LAYOUT_IDS))
+            .transpose()?;
+        let (index, arg, word) = one_of(
+            &[("slot_id", slot_id), ("slot_of", slot_of), ("at", at)],
+            "the slot",
+        )?;
+        let by = match index {
+            0 => ChoiceBy::Id(id_choice(
+                arg,
+                word,
+                LAYOUT_IDS,
+                "slot_of (an agent shown in that slot) or at (a spatial word)",
+            )?),
+            1 => ChoiceBy::Agent(agent_arg(arg, word)?),
+            _ => ChoiceBy::At(spatial_token(arg, word)?),
+        };
+        if view.is_some() && !matches!(by, ChoiceBy::Id(_)) {
+            return Err(CommandError::invalid_argument(
+                "view_id only goes with slot_id — it names the tab that slot is in",
+            ));
+        }
+        let window = optional_window_arg("window", window)?;
+        if window.is_some() && !matches!(by, ChoiceBy::At(_)) {
+            return Err(CommandError::invalid_argument(
+                "window only goes with at — it names the window whose shown tab the word is read in",
+            ));
+        }
+        Ok(SlotPick {
+            said: Choice {
+                arg,
+                id_arg: "slot_id",
+                agent_arg: Some("slot_of"),
+                word: word.to_string(),
+                by,
+            },
+            view,
+            window,
+        })
+    }
+
+    // 적용 직전 — 창 인자를 모델 안 창으로 풀어 대상을 짓는다.
+    fn target(&self, ports: &LayoutPorts) -> Result<Target, CommandError> {
+        if let ChoiceBy::Id(slot) = self.said.by {
+            return Ok(Target::Slot {
+                view: self.view,
+                slot,
+            });
+        }
+        let window = self
+            .window
+            .as_deref()
+            .map(|given| window_label(ports, "window", given))
+            .transpose()?;
+        self.said.slot_target(false, window)
+    }
+}
+
+/// 칸에 넣을 에이전트 — `assign` | `agent_id`(넓히기 전 인자) 중 하나. 둘 다 `#[agent_ref]` 라 데몬이 명부로 풀어 id 를
+/// 넣고, 명부에 없으면 데몬이 거절해 여기 오지 않는다(ADR-0308). `arg` = 받은 인자 이름(문구용).
+struct Assignee {
+    arg: &'static str,
+    id: Uuid,
+}
+
+impl Assignee {
+    fn read(agent_id: Option<&str>, assign: Option<&str>) -> Result<Option<Self>, CommandError> {
+        let agent_id = optional_text("agent_id", agent_id)?;
+        let assign = optional_text("assign", assign)?;
+        let (arg, word) = match (agent_id, assign) {
+            (None, None) => return Ok(None),
+            (Some(_), Some(_)) => return Err(CommandError::invalid_argument(
+                "give only one of assign, agent_id — they both name the agent to put in the slot",
+            )),
+            (Some(word), None) => ("agent_id", word),
+            (None, Some(word)) => ("assign", word),
+        };
+        Ok(Some(Assignee {
+            arg,
+            id: agent_arg(arg, word)?,
+        }))
+    }
+}
+
+/// `#[agent_ref]` 칸의 값 → 에이전트 id. 데몬이 중계 전에 이름을 id 로 바꿔 넣으므로(ADR-0308) UUID 가 아니면 데몬을
+/// 거치지 않은 호출이다 — 셸은 이름을 풀지 않고 반려한다(해석기는 데몬 하나 — ADR-0132).
+// ADR-0308
+fn agent_arg(field: &str, given: &str) -> Result<Uuid, CommandError> {
+    Uuid::parse_str(given.trim()).map_err(|_| {
+        CommandError::invalid_argument(format!(
+            "{field} must be an agent id (a UUID) here, got {given:?} — give the agent's name or id; names are turned into ids by the daemon before a command reaches this app"
+        ))
+    })
+}
+
+/// id 인자 — UUID 가 아니면 [`uuid_arg_from`] 의 반려 끝에 이름 · 낱말로 고르는 짝 인자(`alternative`)를 단다(이름을
+/// id 칸에 넣은 호출이 다음 한 번에 고치게).
+fn id_choice(
+    field: &str,
+    given: &str,
+    source: &str,
+    alternative: &str,
+) -> Result<Uuid, CommandError> {
+    uuid_arg_from(field, given, source).map_err(|error| {
+        CommandError::invalid_argument(format!(
+            "{} — to name it another way, use {alternative}",
+            error.message()
+        ))
+    })
+}
+
+/// 공간 낱말 — 모르는 낱말이면 받는 낱말을 나열해 반려한다.
+fn spatial_token(arg: &str, word: &str) -> Result<SpatialToken, CommandError> {
+    SpatialToken::parse(word).ok_or_else(|| {
+        CommandError::invalid_argument(format!(
+            "{arg} must be one of top-left, top-right, bottom-left, bottom-right, left, right, up, down — got {word:?}"
+        ))
+    })
+}
+
+/// 같은 것을 고르는 인자 한 줄에서 정확히 하나 — (줄 안 자리, 인자 이름, 값). 빈 값은 [`optional_text`] 처럼 반려한다.
+/// `what` = 그 줄이 고르는 것(문구용).
+fn one_of<'a>(
+    fields: &[(&'static str, Option<&'a str>)],
+    what: &str,
+) -> Result<(usize, &'static str, &'a str), CommandError> {
+    let mut given = Vec::new();
+    for (index, (field, value)) in fields.iter().enumerate() {
+        if let Some(value) = optional_text(field, *value)? {
+            given.push((index, *field, value));
+        }
+    }
+    let all = || {
+        fields
+            .iter()
+            .map(|(field, _)| *field)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match given.as_slice() {
+        [one] => Ok(*one),
+        [] => Err(CommandError::invalid_argument(format!(
+            "{what} is missing — give one of {}",
+            all()
+        ))),
+        many => Err(CommandError::invalid_argument(format!(
+            "give only one of {} — they all name {what}, got {}",
+            all(),
+            many.iter()
+                .map(|(_, field, _)| *field)
+                .collect::<Vec<_>>()
+                .join(" and ")
+        ))),
+    }
+}
+
+/// 창 인자의 모양만 먼저 본다(빈 값 · 번호 = `INVALID_ARGUMENT`) — 모델 안 창으로 푸는 것은 적용 직전의 [`window_label`]
+/// 이다(그때 없는 창 = `CONFLICT`).
+fn optional_window_arg(field: &str, given: Option<&str>) -> Result<Option<String>, CommandError> {
+    let Some(given) = optional_text(field, given)? else {
+        return Ok(None);
+    };
+    window_arg::reject_number(given).map_err(window_arg_error)?;
+    Ok(Some(given.to_string()))
+}
+
+// 범위는 모델 계약(`tree::RATIO_MIN..=dock::SHARE_MAX`) 그대로다 — 적용 서비스도 같은 범위로 거절하지만(`InvalidShare`)
+//   적용 락을 잡기 전에 반려한다.
+fn share_arg(share: f64) -> Result<f64, CommandError> {
+    if share.is_finite() && (tree::RATIO_MIN..=dock::SHARE_MAX).contains(&share) {
+        return Ok(share);
+    }
+    Err(CommandError::invalid_argument(format!(
+        "share is the attached side's part, from {} to {}, got {share}",
+        tree::RATIO_MIN,
+        dock::SHARE_MAX
+    )))
+}
+
+// ── 대상판 도킹의 결말 · 거절 ──
+
+/// 대상판 도킹 거절을 코드 · 문구로 옮길 재료 — 어느 명령이 옮길 탭과 갈 곳을 무슨 말로 골랐나. `dest` = 갈 곳을 대상으로
+/// 고른 말(`after_tab` · `after_tab_of` · 붙일 칸 줄 — 창 · 새 창은 `None`).
+struct DockSaid {
+    command: &'static str,
+    subject: Choice,
+    dest: Option<Choice>,
+}
+
+impl DockSaid {
+    // 호출자가 id 로 준 것.
+    fn gave_id(&self, id: Uuid) -> bool {
+        std::iter::once(&self.subject)
+            .chain(self.dest.as_ref())
+            .any(|choice| matches!(choice.by, ChoiceBy::Id(given) if given == id))
+    }
+}
+
+/// 세 도킹 명령이 함께 싣는 답 칸 — 전부 결말을 짓는 그 락의 한 모습이다(`DockOutcome::rows` · `identity`).
+struct Moved {
+    changed: bool,
+    window: String,
+    window_id: String,
+    number: u32,
+    tab: String,
+    tab_index: Option<u32>,
+    layout: Vec<LayoutRow>,
+}
+
+// PRD S21-slot-docking R11b: LLM 명령은 창 활성 · 보이는 탭 · 포커스를 안 바꾼다(`Keep` — 예외는 적용 서비스의 `dock` 승계).
+fn dock_by_target(
+    ports: &LayoutPorts,
+    tab: Target,
+    to: TargetDest,
+    said: &DockSaid,
+) -> Result<Moved, CommandError> {
+    let outcome = apply::dock_target(
+        &ports.state,
+        ports.subs.as_ref(),
+        ports.events.as_ref(),
+        ports.windows.as_ref(),
+        ports.labels.as_ref(),
+        TargetDockRequest {
+            tab,
+            to,
+            focus: FocusPolicy::Keep,
+            mv: DockMove::default(),
+        },
+    )
+    .map_err(|error| dock_target_error(&ports.state, error, said))?;
+    moved(outcome)
+}
+
+fn moved(outcome: DockOutcome) -> Result<Moved, CommandError> {
+    // 대상판은 결말을 짓는 락에서 옮긴 탭을 다시 찾고, 그 창이 사라졌으면 이미 `Moved` 로 거절했다(TRD S28 §4-4) — 이
+    //   갈래는 그 계약이 깨졌을 때의 그물이다.
+    let Some(identity) = outcome.identity else {
+        return Err(CommandError::of(
+            ErrorCode::Conflict,
+            TargetDockError::Moved.to_string(),
+        ));
+    };
+    // 결말의 줄은 `tab` 을 늘 싣는다(`views` 의 첫 탭 · 같은 락) — 없으면 그 계약이 깨진 것이다. 그래도 옮기기는 이미
+    //   됐으므로 오류로 답하지 않는다(적용된 쓰기를 실패로 읽히게 하지 않는다 — ADR-0159) — 그 칸만 빼고 성공이다.
+    let tab_index = outcome
+        .rows
+        .iter()
+        .find(|row| row.tab == outcome.tab)
+        .map(|row| row.tab_index);
+    if tab_index.is_none() {
+        tracing::warn!(
+            tab = %outcome.tab,
+            "도킹 결말의 줄에 결과 탭이 없다 — tab_index 를 빼고 성공으로 답한다"
+        );
+    }
+    Ok(Moved {
+        changed: outcome.changed,
+        window: identity.window,
+        window_id: identity.window_id,
+        number: identity.number,
+        tab: outcome.tab.to_string(),
+        tab_index,
+        layout: layout_of(outcome.rows),
+    })
+}
+
+/// 대상판 도킹의 거절 → 버스 오류(TRD S28 §5-3).
+///
+/// - 대상을 못 풀었다 = [`locate_error`].
+/// - `NotASlot` · `SelfTarget` · `InvalidShare` = INVALID_ARGUMENT — 인자 조합이 스스로 어긋난다. `SelfTarget` 문구는 명령마다
+///   고칠 길을 말한다(`tab.dock` = 칸 하나는 `slot.popout` 으로 먼저 뺀다).
+/// - 호출자가 **id 로 준** 탭 · 칸이 없음(`TabNotFound` · `SlotNotFound` · `SlotNotInTab`) = NOT_FOUND · 에이전트 · 낱말에서
+///   나온 id 면 CONFLICT(풀린 뒤 사라졌다 — 경합).
+/// - `WindowNotFound` = CONFLICT(ADR-0302 결정 9 — [`window_arg_error`] 와 같다) · `Moved` 와 나머지 = CONFLICT.
+// ADR-0307
+fn dock_target_error(state: &LayoutState, error: TargetDockError, said: &DockSaid) -> CommandError {
+    let message = error.to_string();
+    match error {
+        TargetDockError::Subject(e) => locate_error(state, &said.subject, e),
+        TargetDockError::Dest(e) => {
+            locate_error(state, said.dest.as_ref().unwrap_or(&said.subject), e)
+        }
+        TargetDockError::NotASlot => CommandError::invalid_argument(message),
+        TargetDockError::Moved => CommandError::of(ErrorCode::Conflict, message),
+        TargetDockError::Dock(e) => dock_error(state, e, said),
+    }
+}
+
+fn dock_error(state: &LayoutState, error: DockError, said: &DockSaid) -> CommandError {
+    let code = match &error {
+        DockError::SelfTarget | DockError::InvalidShare(_) => ErrorCode::InvalidArgument,
+        DockError::TabNotFound(id)
+        | DockError::SlotNotFound(id)
+        | DockError::SlotNotInTab { slot: id, .. }
+            if said.gave_id(*id) =>
+        {
+            ErrorCode::NotFound
+        }
+        _ => ErrorCode::Conflict,
+    };
+    let message = match (&error, &said.dest) {
+        (DockError::SelfTarget, Some(dest)) if said.command == "tab.dock" => format!(
+            "{}: both are in one tab; tab.dock moves whole tabs — slot.popout that slot first, then tab.dock",
+            said_head(state, dest)
+        ),
+        (DockError::SelfTarget, Some(dest)) => format!(
+            "{}: that is the tab being moved — a tab cannot go right after itself",
+            said_head(state, dest)
+        ),
+        _ => error.to_string(),
+    };
+    CommandError::of(code, message)
+}
+
+/// 대상을 못 풀었다 → 버스 오류(TRD S28 §5-2 · §5-3). 문구 = [`said_head`] + `: <사유>` + 꼬리.
+///
+/// - 에이전트가 어느 칸에도 없음 = NOT_FOUND + ` — candidates: <떠 있는 이름>`(없으면 `none`).
+/// - 에이전트가 여러 곳 = CONFLICT + 그 줄의 id 인자로 고치라는 안내 + 후보(최대 5). 후보 머리 = 그 id 인자 이름이라 값을
+///   그대로 옮겨 적는다 — 탭 줄(`tab` · `after_tab` · `view_id`)은 탭마다 한 줄 `<인자>=<id> (window=<label>, tab_index=<n>)` ·
+///   칸 줄(`slot_id` · `beside_slot`)은 칸마다 `<인자>=<id> (…)`.
+/// - 낱말이 칸을 못 집음 = NOT_FOUND + 모서리 낱말 · 그 줄의 에이전트 인자(`beside` · `slot_of`) 안내 · 창이 없음 =
+///   CONFLICT(ADR-0302 결정 9).
+/// - id 로 준 탭 · 칸이 없음 = NOT_FOUND — 이 셋은 id 대상에서만 난다(풀린 뒤 사라진 것은 적용 단계의 [`dock_error`] 몫).
+// ADR-0307
+fn locate_error(state: &LayoutState, said: &Choice, error: LocateError) -> CommandError {
+    let head = format!("{}: {error}", said_head(state, said));
+    let (code, message) = match &error {
+        LocateError::AgentNotShown { .. } => (
+            ErrorCode::NotFound,
+            format!("{head}{}", candidates_tail(&error.candidates_as(said.id_arg))),
+        ),
+        LocateError::AgentAmbiguous { places, .. } => {
+            let candidates = if said.names_a_tab() {
+                tab_candidates(said.id_arg, places)
+            } else {
+                error.candidates_as(said.id_arg)
+            };
+            (
+                ErrorCode::Conflict,
+                format!(
+                    "{head}; pass one of these as {}{}",
+                    said.id_arg,
+                    candidates_tail(&candidates)
+                ),
+            )
+        }
+        LocateError::NoSlotAt { .. } => (
+            ErrorCode::NotFound,
+            format!(
+                "{head} — left/right/up/down are read from the focused slot; try a corner word (top-left, top-right, bottom-left, bottom-right){}",
+                said.agent_arg.map(|agent| format!(" or {agent}")).unwrap_or_default()
+            ),
+        ),
+        LocateError::WindowNotFound(_) => (ErrorCode::Conflict, head),
+        LocateError::TabNotFound(_)
+        | LocateError::SlotNotFound(_)
+        | LocateError::SlotNotInTab { .. } => (ErrorCode::NotFound, head),
+    };
+    CommandError::of(code, message)
+}
+
+/// 받은 말 머리 `<인자> '<받은 말>'` — 에이전트 칸이면 데몬이 바꿔 넣은 id 대신 `<인자> '<표시 이름>' (<id>)` 로 적는다(셸 이름
+/// 장부 — 보여 주기 몫이지 풀이가 아니다 · ADR-0132). 장부에 없으면 id 만.
+// ★락을 쥔 채 부르지 말 것★ — 이름 장부를 읽으려고 레이아웃 락을 잡는다(적용이 돌려준 뒤의 오류 매핑에서만 부른다).
+fn said_head(state: &LayoutState, said: &Choice) -> String {
+    match said.by {
+        ChoiceBy::Agent(id) => match apply::agent_display_name(state, id) {
+            Some(name) => format!("{} '{name}' ({id})", said.arg),
+            None => format!("{} '{}'", said.arg, said.word),
+        },
+        ChoiceBy::Id(_) | ChoiceBy::At(_) => format!("{} '{}'", said.arg, said.word),
+    }
+}
+
+// 탭 단위 모호 후보 — 탭마다 한 줄(그 탭의 첫 칸 자리), 최대 [`target::MAX_CANDIDATES`]. `key` = 그 값을 넘길 인자 이름.
+fn tab_candidates(key: &str, places: &[Place]) -> Vec<String> {
+    let mut seen: Vec<Uuid> = Vec::new();
+    places
+        .iter()
+        .filter(|place| {
+            let first = !seen.contains(&place.view);
+            seen.push(place.view);
+            first
+        })
+        .take(target::MAX_CANDIDATES)
+        .map(|place| {
+            format!(
+                "{key}={} (window={}, tab_index={})",
+                place.view, place.window, place.tab_index
+            )
+        })
+        .collect()
+}
+
+// 데몬 해석기 문구와 같은 꼴의 후보 꼬리 — 비면 `none`(꼬리를 빼면 「후보가 없다」와 「후보를 싣지 않는 문구」가 갈리지
+//   않는다).
+fn candidates_tail(candidates: &[String]) -> String {
+    if candidates.is_empty() {
+        return " — candidates: none".to_string();
+    }
+    format!(" — candidates: {}", candidates.join(", "))
+}
+
+/// 대상판 칸 · 탭 쓰기의 거절 → 버스 오류(TRD S28 §5-3 · §7).
+///
+/// - id 로 준 탭 · 칸이 없음 = [`id_miss`](넓히기 전 답 그대로) · 에이전트 · 낱말로 고른 대상을 못 풀었음 = [`locate_error`].
+/// - 대상은 풀었으나 적용이 거절됐음 = CONFLICT + 서비스 문구(id 판과 같다 — [`not_applied`]).
+/// - 칸 쓰기에 탭 대상 = INTERNAL — 칸 동사는 칸 대상만 짓는다(그 계약이 깨졌을 때의 그물).
+// ADR-0307
+fn target_error(state: &LayoutState, error: TargetError, said: &Choice) -> CommandError {
+    match error {
+        TargetError::Locate(error) if matches!(said.by, ChoiceBy::Id(_)) => id_miss(error),
+        TargetError::Locate(error) => locate_error(state, said, error),
+        TargetError::NotASlot => CommandError::internal(TargetError::NotASlot.to_string()),
+        TargetError::Apply(detail) => not_applied(detail),
+    }
+}
+
+/// id 로 준 탭 · 칸이 없다 — 넓히기 전 id 판(관리자 쓰기)이 내던 문구 · 코드 그대로다(CONFLICT — 모듈 머리 「적용 실패의
+/// 코드」): 없는 탭 = `ViewNotFound` · 그 탭에 없는 칸 = `SlotNotFound`. 대상판은 그 판정을 쓰기 전에 `locate` 로 먼저 하므로
+/// 문구만 관리자의 것으로 되돌린다 — 짝이 갈리면 `tests/layout_commands.rs` 의 옛 문구 대조가 빨개진다.
+fn id_miss(error: LocateError) -> CommandError {
+    let detail = match error {
+        LocateError::TabNotFound(view) => LayoutError::ViewNotFound(view).to_string(),
+        LocateError::SlotNotFound(slot) | LocateError::SlotNotInTab { slot, .. } => {
+            LayoutError::SlotNotFound(slot).to_string()
+        }
+        other => other.to_string(),
+    };
+    not_applied(detail)
+}
+
+// 쓰기가 바꾼 탭의 줄 — id 없이(규칙 §4 · 칸을 이름 · 낱말로 부른다).
+fn layout_of(rows: Vec<rows::LayoutRow>) -> Vec<LayoutRow> {
+    rows.into_iter().map(|row| row_of(row, false)).collect()
+}
+
+// ids = false 면 id 넷을 비운다 — 답에서 그 칸은 아예 빠진다([`without_nulls`]).
+fn row_of(row: rows::LayoutRow, ids: bool) -> LayoutRow {
+    LayoutRow {
+        window: row.window,
+        window_number: row.window_number,
+        tab_index: row.tab_index,
+        tab_name: row.tab_name,
+        tab_active: row.tab_active,
+        content: match row.content {
+            rows::SlotKind::Empty => SlotKind::Empty,
+            rows::SlotKind::Agent => SlotKind::Agent,
+            rows::SlotKind::AgentList => SlotKind::AgentList,
+            rows::SlotKind::PresetPalette => SlotKind::PresetPalette,
+            rows::SlotKind::Usage => SlotKind::Usage,
+            rows::SlotKind::Unknown => SlotKind::Unknown,
+        },
+        agent: row.agent,
+        focused: row.focused,
+        x: row.x,
+        y: row.y,
+        w: row.w,
+        h: row.h,
+        window_id: ids.then_some(row.window_id),
+        tab: ids.then(|| row.tab.to_string()),
+        slot_id: ids.then(|| row.slot.to_string()),
+        agent_id: row.agent_id.filter(|_| ids),
+    }
 }
 
 // ── 인자 검문 ────────────────────────────────────────────────────────────────
 
-/// 적용 서비스의 실패 문구를 그대로 실어 나른다(헤더 「적용 실패는 코드 하나로 나간다」).
+/// 적용 서비스의 실패 문구를 그대로 실어 나른다 — id 를 받는 동사의 갈래(헤더 「적용 실패의 코드」).
 fn not_applied(detail: String) -> CommandError {
     CommandError::of(ErrorCode::Conflict, detail)
 }
@@ -1655,7 +2982,7 @@ fn optional_text<'a>(field: &str, given: Option<&'a str>) -> Result<Option<&'a s
 /// ★형식 불량은 적용 전에 반려한다★ — 파싱에 실패한 id 로 적용을 부르면 「없는 id」와 「형식이 깨진 id」가
 /// 같은 답을 받아, 호출자는 멀쩡한 탭을 지웠나 의심하며 목록부터 다시 뒤진다.
 fn uuid_arg(field: &str, given: &str) -> Result<Uuid, CommandError> {
-    uuid_arg_from(field, given, "tab.list / slot.resolveSpatial")
+    uuid_arg_from(field, given, "tab.list / layout.get with ids")
 }
 
 /// `source` = 그 id 를 돌려주는 명령 — 반려 문구가 호출자를 거기로 안내한다.
@@ -1668,7 +2995,7 @@ fn uuid_arg_from(field: &str, given: &str, source: &str) -> Result<Uuid, Command
 }
 
 /// 버스 한 번이 슬롯에 쓰는 것. `Usage` 는 뺀 칸을 슬롯의 지금 값으로 채워야 해서 ViewManager 락 안에서야
-/// [`SlotContent`] 가 된다(`apply::set_usage_slot`).
+/// [`SlotContent`] 가 된다(`apply::set_usage_slot_at`).
 enum SlotContentWrite {
     Replace(SlotContent),
     Usage {
@@ -1677,32 +3004,32 @@ enum SlotContentWrite {
     },
 }
 
-/// 태그 + 곁칸(`agent_id` · `show_claude`·`show_codex`) → 슬롯에 쓸 것.
+/// 태그 + 곁칸(넣을 에이전트 `assign` · `agent_id` · `show_claude`·`show_codex`) → 슬롯에 쓸 것.
 ///
-/// ★어긋난 조합을 조용히 고치지 않는다★: `Agent` 인데 id 가 없으면 빈 슬롯이 되고, `Empty` 인데 id 가
+/// ★어긋난 조합을 조용히 고치지 않는다★: `Agent` 인데 에이전트가 없으면 빈 슬롯이 되고, `Empty` 인데 에이전트가
 /// 붙어 있으면 호출자는 그 에이전트가 붙은 줄 안다. `Usage` 가 아닌데 `show_*` 가 붙어 있으면 호출자는 그
 /// 회사를 켠 줄 안다. 셋 다 반려한다.
 fn slot_content(
     kind: SlotContentKind,
-    agent_id: Option<&str>,
+    agent: Option<Assignee>,
     show_claude: Option<bool>,
     show_codex: Option<bool>,
 ) -> Result<SlotContentWrite, CommandError> {
-    let agent_id = optional_text("agent_id", agent_id)?;
     let shows = show_claude.is_some() || show_codex.is_some();
-    let replace = match (kind, agent_id) {
-        (SlotContentKind::Agent, Some(id)) => SlotContent::Agent {
-            agent_id: id.to_string(),
-        },
+    let write = match (kind, agent) {
+        (SlotContentKind::Agent, Some(agent)) => SlotContentWrite::Replace(SlotContent::Agent {
+            agent_id: agent.id.to_string(),
+        }),
         (SlotContentKind::Agent, None) => {
             return Err(CommandError::invalid_argument(
-                "content=Agent needs agent_id — use slot.assignAgent if you only want to attach a running agent",
+                "content=Agent needs assign (the agent's name or id) or agent_id — use slot.assignAgent if you only want to attach a running agent",
             ))
         }
-        (_, Some(_)) => {
-            return Err(CommandError::invalid_argument(
-                "agent_id only applies to content=Agent, so drop this field",
-            ))
+        (_, Some(agent)) => {
+            return Err(CommandError::invalid_argument(format!(
+                "{} only applies to content=Agent, so drop this field",
+                agent.arg
+            )))
         }
         (SlotContentKind::Usage, None) => {
             return Ok(SlotContentWrite::Usage {
@@ -1710,19 +3037,66 @@ fn slot_content(
                 show_codex,
             })
         }
-        (SlotContentKind::Empty, None) => SlotContent::Empty,
-        (SlotContentKind::AgentList, None) => SlotContent::AgentList,
-        (SlotContentKind::PresetPalette, None) => SlotContent::PresetPalette,
+        (SlotContentKind::Empty, None) => SlotContentWrite::Replace(SlotContent::Empty),
+        (SlotContentKind::AgentList, None) => SlotContentWrite::Replace(SlotContent::AgentList),
+        (SlotContentKind::PresetPalette, None) => {
+            SlotContentWrite::Replace(SlotContent::PresetPalette)
+        }
     };
     if shows {
         return Err(CommandError::invalid_argument(
             "show_claude/show_codex only apply to content=Usage, so drop these fields",
         ));
     }
-    Ok(SlotContentWrite::Replace(replace))
+    Ok(write)
 }
 
-// ★단위 테스트가 이 파일에 없는 것은 「둘 수 없어서」가 아니라 「아직 안 두어서」다★. 이 패키지의
-//   `#[cfg(test)]` 단언은 `cargo test -p engram-dashboard --test lib_unit` 으로 돈다(현황 = CLAUDE.md
-//   「빌드·검증 명령」의 그 줄 · 그 타깃을 세운 결정 = ADR-0174). 지금 단언은 `tests/layout_commands.rs` 에
-//   있고 배치는 건드리지 않았다 — 여기 단위 테스트를 둘지는 열린 선택이다.
+// ★단언은 대부분 `tests/layout_commands.rs` 에 있다★ — 봉투가 표를 지나는 길로 잰다. 여기 단위 테스트는 그 길로
+//   만들 수 없는 결말(적용 서비스 계약이 깨진 그물)만 잰다. 이 패키지의 `#[cfg(test)]` 단언은
+//   `cargo test -p engram-dashboard --test lib_unit` 으로 돈다(현황 = CLAUDE.md 「빌드·검증 명령」의 그 줄 · 그 타깃을 세운
+//   결정 = ADR-0174).
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 결말의 줄에 결과 탭이 없어도(적용 서비스 계약이 깨진 그물) 이미 옮긴 도킹은 성공으로 답한다 — 그 칸만 빠진다.
+    #[test]
+    fn a_dock_whose_rows_miss_its_tab_still_answers_success_without_tab_index() {
+        let tab = Uuid::new_v4();
+        let outcome = DockOutcome {
+            changed: true,
+            tab,
+            views: vec![tab],
+            window: "main".to_string(),
+            slot_ids: Vec::new(),
+            emptied: None,
+            main_refilled: None,
+            reused: false,
+            prewarmed: false,
+            identity: Some(apply::NewWindow {
+                window: "main".to_string(),
+                window_id: "main".to_string(),
+                number: 1,
+            }),
+            rows: Vec::new(),
+        };
+
+        let m = moved(outcome).expect("성공");
+
+        assert!(m.changed);
+        assert_eq!(m.tab, tab.to_string());
+        assert_eq!(m.tab_index, None);
+        let answer = serde_json::to_value(TabMoveOk {
+            changed: m.changed,
+            window: m.window,
+            window_id: m.window_id,
+            number: m.number,
+            tab: m.tab,
+            tab_index: m.tab_index,
+            layout: m.layout,
+        })
+        .map(without_nulls)
+        .expect("JSON");
+        assert!(answer.get("tab_index").is_none(), "{answer}");
+    }
+}

@@ -161,6 +161,7 @@ impl Fixture {
                 vec![engram_dashboard_command::CommandDecl {
                     name: name.to_string(),
                     help: "{}".to_string(),
+                    agent_args: Vec::new(),
                 }],
             )
             .expect("붙어 있는 연결의 등록");

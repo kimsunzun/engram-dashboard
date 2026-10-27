@@ -4152,6 +4152,7 @@ mod tests {
         CommandDecl {
             name: name.to_string(),
             help: format!("{{\"name\":\"{name}\"}}"),
+            agent_args: Vec::new(),
         }
     }
 
@@ -4322,6 +4323,7 @@ mod tests {
                 vec![CommandDecl {
                     name: "tab.create".to_string(),
                     help: opaque.to_string(),
+                    agent_args: Vec::new(),
                 }],
                 rid(),
             ),
@@ -4380,6 +4382,7 @@ mod tests {
                     CommandDecl {
                         name: "agent.list".to_string(),
                         help: "stolen".to_string(),
+                        agent_args: Vec::new(),
                     },
                 ],
                 rid(),
@@ -4888,6 +4891,7 @@ mod tests {
         let too_long = CommandDecl {
             name: "n".repeat(Roster::MAX_NAME_BYTES + 1),
             help: "{}".to_string(),
+            agent_args: Vec::new(),
         };
 
         core.dispatch(register(vec![too_long], req), &session, &mock)

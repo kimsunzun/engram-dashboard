@@ -49,11 +49,12 @@ use engram_dashboard_lib::daemon_client::inbound::{
 };
 use engram_dashboard_lib::layout::apply;
 use engram_dashboard_lib::layout::commands::{
-    make_table, LayoutPorts, RestoreAnswerArgs, RestoreStatusArgs, SettingsGetArgs,
+    make_table, LayoutGetArgs, LayoutPorts, RestoreAnswerArgs, RestoreStatusArgs, SettingsGetArgs,
     SettingsResetArgs, SettingsSchemaArgs, SettingsSetArgs, SlotPopoutArgs, SplitListArgs,
-    SplitSetRatioArgs, WindowCloseArgs, WindowGetThemeArgs, WindowHideAllArgs, WindowListArgs,
-    WindowMaximizeArgs, WindowMinimizeArgs, WindowRaiseArgs, WindowSetThemeArgs, WindowShowAllArgs,
-    WindowUnmaximizeArgs, CATALOG_VERSION, COMMAND_SPECS,
+    SplitSetRatioArgs, TabDetachArgs, TabDockArgs, TabMoveArgs, WindowCloseArgs,
+    WindowGetThemeArgs, WindowHideAllArgs, WindowListArgs, WindowMaximizeArgs, WindowMinimizeArgs,
+    WindowRaiseArgs, WindowSetThemeArgs, WindowShowAllArgs, WindowUnmaximizeArgs, CATALOG_VERSION,
+    COMMAND_SPECS,
 };
 use engram_dashboard_lib::layout::geometry::Insets;
 use engram_dashboard_lib::layout::tab_name::effective_tab_name;
@@ -95,6 +96,32 @@ impl LayoutEvents for Events {
     fn window_tabs_updated(&self, _tabs: &WindowTabsPayload) {}
 }
 
+/// 표가 쥔 알림 포트 — 다음 알림 한 번 전에 `hook` 을 돈다. 알림은 쓰기가 락을 놓은 뒤에 나가므로, 결말을 지은 락과 명령
+/// 답 사이에 끼어든 쓰기를 흉내 낸다.
+#[derive(Default)]
+struct HookedEvents {
+    hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl HookedEvents {
+    fn fire(&self) {
+        let hook = self.hook.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+}
+
+impl LayoutEvents for HookedEvents {
+    fn layout_updated(&self, _snapshot: &ViewSnapshot) {
+        self.fire();
+    }
+
+    fn window_tabs_updated(&self, _tabs: &WindowTabsPayload) {
+        self.fire();
+    }
+}
+
 #[derive(Default)]
 struct Subs;
 
@@ -111,6 +138,10 @@ struct Windows {
     spare: Mutex<Option<String>>,
     /// 예열 창 셋이 불린 차례 — `"claim:<label>"` · `"committed:<label>"` · `"release:<label>"`.
     spare_calls: Mutex<Vec<String>>,
+    /// `open_at` 이 받은 (label, 자리, 활성) — 명령이 포커스를 가져가는지 본다.
+    placed: Mutex<Vec<(String, WindowPlace, bool)>>,
+    /// 다음 `open_at` 이 창을 열기 전에 한 번 — 새 창 도킹의 두 락 사이에 끼어든 쓰기.
+    on_open: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Windows {
@@ -121,6 +152,8 @@ impl Windows {
             closed: Mutex::new(Vec::new()),
             spare: Mutex::new(None),
             spare_calls: Mutex::new(Vec::new()),
+            placed: Mutex::new(Vec::new()),
+            on_open: Mutex::new(None),
         }
     }
 }
@@ -140,7 +173,15 @@ impl WindowHost for Windows {
         Ok(())
     }
 
-    fn open_at(&self, label: &str, _at: &WindowPlace, _activate: bool) -> Result<(), String> {
+    fn open_at(&self, label: &str, at: &WindowPlace, activate: bool) -> Result<(), String> {
+        let meddle = self.on_open.lock().unwrap().take();
+        if let Some(meddle) = meddle {
+            meddle();
+        }
+        self.placed
+            .lock()
+            .unwrap()
+            .push((label.to_string(), *at, activate));
         self.open(label)
     }
 
@@ -284,6 +325,15 @@ impl AgentSpawner for DaemonSpawner {
                 .map_err(|_| "테스트 스폰 응답이 없다".to_string())?
         })
     }
+}
+
+/// 시험 에이전트 id — 데몬이 이름을 바꿔 넣은 꼴 그대로다. 셸 명령의 `#[agent_ref]` 칸은 id 만 받는다(ADR-0308 · 이름 → id
+/// 는 데몬 시험이 잰다). 표시 이름(`alpha` · `beta`)은 셸 이름 캐시에만 적는다(`World::show` · `World::name`).
+const ALPHA: &str = "aaaaaaaa-0000-4000-8000-000000000001";
+const BETA: &str = "bbbbbbbb-0000-4000-8000-000000000002";
+
+fn agent_id(id: &str) -> uuid::Uuid {
+    uuid::Uuid::parse_str(id).expect("UUID")
 }
 
 /// 테마 밀기의 창 쪽 대역 — 창 명단을 정해 두고 보낸 것을 순서대로 남긴다. `refuse` = 받지 못하는 창(시도는
@@ -549,6 +599,10 @@ struct World {
     restore_service: Arc<RestoreService>,
     /// 표가 쥔 것과 같은 조율자 — 시험이 셸 setup 끝처럼 포트를 꽂는다.
     restore: Arc<RestoreCoordinator>,
+    /// 표가 쥔 것과 같은 label 발급기 — 시험이 명령 밖에서 팝아웃을 연다.
+    labels: Arc<PopupCounter>,
+    /// 표가 쥔 알림 포트.
+    events: Arc<HookedEvents>,
 }
 
 impl World {
@@ -579,12 +633,13 @@ impl World {
             Arc::new(StateSession::default()),
             labels.clone(),
         ));
+        let events = Arc::new(HookedEvents::default());
         let ports = LayoutPorts {
             state: state.clone(),
             subs: Arc::new(Subs),
-            events: Arc::new(Events),
+            events: Arc::clone(&events) as Arc<dyn LayoutEvents>,
             windows: Arc::clone(&windows) as Arc<dyn WindowHost>,
-            labels,
+            labels: labels.clone(),
             spawner: Arc::new(DaemonSpawner { requests: tx }),
             control: Arc::clone(&control) as Arc<dyn WindowControl>,
             themes: themes.clone(),
@@ -606,6 +661,8 @@ impl World {
                 spawn_requests,
                 restore_service,
                 restore,
+                labels,
+                events,
             },
             ports,
         )
@@ -706,6 +763,7 @@ fn the_table_holds_exactly_the_declared_commands() {
         names,
         vec![
             "agent.spawnInto",
+            "layout.get",
             "layout.setSlotContent",
             "restore.answer",
             "restore.status",
@@ -723,7 +781,10 @@ fn the_table_holds_exactly_the_declared_commands() {
             "split.setRatio",
             "tab.close",
             "tab.create",
+            "tab.detach",
+            "tab.dock",
             "tab.list",
+            "tab.move",
             "tab.rename",
             "tab.switch",
             "window.close",
@@ -768,9 +829,20 @@ fn the_catalog_generation_is_pinned_to_the_declaration_set() {
     //   앞 실행의 label = `CONFLICT`)가 바뀌고 `window.create` · `slot.popout` 의 **답 모양**에 `window_id` · `number` 가 든
     //   세대다(TRD S26-window-chrome §4-5 · §5-3 · §6-6). 세대 20 은 이름이 여섯 늘고(창 상태 명령) `window.close` 의
     //   **인자 · 답 모양**(`if_empty` · `outcome` — main 은 거절 대신 모두 숨기기)과 `window.list` 의 **답 모양**(`details`)이
-    //   바뀐 세대다(TRD S26-window-chrome §6-1 · §6-6).
-    assert_eq!(CATALOG_VERSION, 20);
-    assert_eq!(COMMAND_SPECS.len(), 32);
+    //   바뀐 세대다(TRD S26-window-chrome §6-1 · §6-6). 세대 21 은 이름이 넷 늘고(대상을 받는 `tab.move` · `tab.dock` ·
+    //   `tab.detach` · `layout.get` — TRD S28 §4) 칸 · 탭 동사의 **인자**(`slot_of` · `at` · `tab_of` · `assign` — id 인자는
+    //   선택) · **답 모양**(`layout`) · **오류 선언**(`NOT_FOUND`)이 바뀌고 에이전트 칸에 표시(`agent_args` — ADR-0308)가 든
+    //   세대다(TRD S28 §7 — 한 커밋이라 한 세대).
+    assert_eq!(CATALOG_VERSION, 21);
+    assert_eq!(COMMAND_SPECS.len(), 36);
+    for since in [
+        TabMoveArgs::SPEC.since,
+        TabDockArgs::SPEC.since,
+        TabDetachArgs::SPEC.since,
+        LayoutGetArgs::SPEC.since,
+    ] {
+        assert_eq!(since, 21);
+    }
     for since in [
         WindowMinimizeArgs::SPEC.since,
         WindowMaximizeArgs::SPEC.since,
@@ -816,6 +888,7 @@ fn ui_refresh_is_gone_from_the_catalog() {
 /// ★등록 패킷의 `help` 하나가 명부 상한을 넘으면 데몬이 패킷을 통째로 거절한다★(`Roster::register` — 한 이름도
 /// 넣지 않는다) — 그러면 셸의 명령 전부가 `UNKNOWN_COMMAND` 다. 요약(선언의 doc 주석)이 자라는 쪽은 셸이고 상한은
 /// 데몬에만 있어, 여기서 재지 않으면 실제로 붙어 봐야 드러난다. 재는 것은 등록이 싣는 문자열 그대로다(`decls`).
+/// 에이전트 참조 칸(`agent_args`)의 수와 칸 이름 길이도 같은 거절을 부르므로 함께 잰다.
 #[test]
 fn every_registered_declaration_fits_the_roster_help_cap() {
     let (_world, ports) = World::build();
@@ -827,6 +900,22 @@ fn every_registered_declaration_fits_the_roster_help_cap() {
             decl.help.len(),
             Roster::MAX_HELP_BYTES
         );
+        assert!(
+            decl.agent_args.len() <= Roster::MAX_AGENT_ARGS,
+            "{}: 에이전트 참조 칸 {} 개 > 상한 {}",
+            decl.name,
+            decl.agent_args.len(),
+            Roster::MAX_AGENT_ARGS
+        );
+        for arg in &decl.agent_args {
+            assert!(
+                arg.len() <= Roster::MAX_NAME_BYTES,
+                "{}: 에이전트 참조 칸 이름 {arg} 가 {} 바이트 > 상한 {}",
+                decl.name,
+                arg.len(),
+                Roster::MAX_NAME_BYTES
+            );
+        }
     }
 }
 
@@ -1491,6 +1580,28 @@ fn window_arg_calls(
             "slot.resolveSpatial",
             json!({ "token": "top-left", "window": window }),
         ),
+        ("tab.move", json!({ "tab": view, "to_window": window })),
+        (
+            "tab.dock",
+            json!({ "tab": view, "beside_at": "top-left", "window": window, "side": "Left" }),
+        ),
+        ("layout.get", json!({ "window": window })),
+        // 칸 동사의 `window` — `at` 을 읽을 창(TRD S28 §7).
+        ("slot.focus", json!({ "at": "top-left", "window": window })),
+        ("slot.close", json!({ "at": "top-left", "window": window })),
+        (
+            "slot.split",
+            json!({ "at": "top-left", "window": window, "dir": "LeftRight" }),
+        ),
+        ("slot.popout", json!({ "at": "top-left", "window": window })),
+        (
+            "slot.assignAgent",
+            json!({ "at": "top-left", "window": window, "assign": ALPHA }),
+        ),
+        (
+            "layout.setSlotContent",
+            json!({ "at": "top-left", "window": window, "content": "Empty" }),
+        ),
     ]
 }
 
@@ -1518,7 +1629,7 @@ async fn a_window_number_is_an_invalid_argument_on_every_window_verb() {
         let err = error_of(call(&receiver, &queue, &Mailbox::default(), name, args).await);
         assert_eq!(err.code(), ErrorCode::InvalidArgument, "{name}");
         assert!(
-            err.message().contains("window_id"),
+            err.message().contains("window_id") && err.message().contains("layout.get"),
             "{name}: {}",
             err.message()
         );
@@ -5349,4 +5460,2100 @@ async fn a_dropped_task_still_answers() {
     let reply = world.mail.only();
     assert_eq!(reply.request_id, request_id);
     assert_eq!(error_of(reply).code(), ErrorCode::Internal);
+}
+
+// ── (S28) 대상을 받는 명령 — 에이전트(데몬이 바꿔 넣은 id) · 공간 낱말로 고르고 바뀐 배치를 답한다(TRD S28 §4 · §5) ─────────────
+
+impl World {
+    /// 칸에 에이전트를 놓고 셸 이름 장부에 그 표시 이름을 적는다(후보 · 배치 줄이 그 이름을 쓴다).
+    fn show(&self, view: uuid::Uuid, slot: uuid::Uuid, agent: uuid::Uuid, name: &str) {
+        apply::assign_agent(&self.state, &Subs, &Events, view, slot, agent.to_string())
+            .expect("에이전트 배치");
+        apply::agent_names_updated(
+            &self.state,
+            &Events,
+            &[(agent.to_string(), name.to_string())],
+        )
+        .expect("이름 장부");
+    }
+
+    /// 탭 하나를 든 새 팝아웃 — (label, 그 탭).
+    fn popout(&self) -> (String, uuid::Uuid) {
+        let created = apply::create_window(
+            &self.state,
+            &Subs,
+            &Events,
+            self.windows.as_ref(),
+            self.labels.as_ref(),
+        )
+        .expect("팝아웃");
+        let tab = self.tabs(&created.window).active;
+        (created.window, tab)
+    }
+
+    /// 창에 빈 탭을 더한다 — 보이는 탭은 `shown` 으로 되돌린다(새 탭은 보이게 만들어진다).
+    fn add_tab(&self, window: &str, shown: uuid::Uuid) -> uuid::Uuid {
+        let tab = apply::create_tab(&self.state, &Subs, &Events, window, None).expect("탭");
+        apply::switch_tab(&self.state, &Subs, &Events, window, shown).expect("보이는 탭");
+        tab
+    }
+
+    fn tabs(&self, window: &str) -> WindowTabsPayload {
+        apply::list_tabs(&self.state, window).expect("창")
+    }
+
+    fn tab_ids(&self, window: &str) -> Vec<uuid::Uuid> {
+        self.tabs(window).tabs.iter().map(|meta| meta.id).collect()
+    }
+
+    fn version(&self) -> u64 {
+        self.state.0.lock().unwrap().version
+    }
+
+    fn focused(&self, view: uuid::Uuid) -> Option<uuid::Uuid> {
+        apply::get_view(&self.state, view)
+            .expect("view")
+            .focused_slot_id
+    }
+}
+
+/// 이 명령이 광고하는 오류에 `code` 가 드나 — 데몬 · CLI 가 그 선언으로 코드를 거른다(ADR-0156).
+fn assert_declared(name: &str, code: ErrorCode) {
+    let spec = COMMAND_SPECS
+        .iter()
+        .find(|spec| spec.name == name)
+        .unwrap_or_else(|| panic!("{name} 선언"));
+    assert!(
+        spec.advertised_errors().contains(&code),
+        "{name} 이 {code} 를 광고하지 않는다"
+    );
+}
+
+async fn ok_of(
+    receiver: &InboundReceiver,
+    queue: &Queued,
+    name: &str,
+    args: serde_json::Value,
+) -> serde_json::Value {
+    call(receiver, queue, &Mailbox::default(), name, args)
+        .await
+        .outcome
+        .unwrap_or_else(|e| panic!("{name}: {e:?}"))
+}
+
+/// 오류 답 — 그 코드가 선언에 드는지도 본다.
+async fn refused(
+    receiver: &InboundReceiver,
+    queue: &Queued,
+    name: &str,
+    args: serde_json::Value,
+) -> CommandError {
+    let error = error_of(call(receiver, queue, &Mailbox::default(), name, args).await);
+    assert_declared(name, error.code());
+    error
+}
+
+fn rows(answer: &serde_json::Value, field: &str) -> Vec<serde_json::Value> {
+    answer[field].as_array().expect("줄 목록").clone()
+}
+
+/// 기본 답의 줄은 id 칸을 아예 싣지 않는다 — `null` 도 아니다(규칙 §4 — 크기).
+fn assert_no_ids(rows: &[serde_json::Value]) {
+    for row in rows {
+        for key in ["window_id", "tab", "slot_id", "agent_id"] {
+            assert!(row.get(key).is_none(), "{key} 가 실렸다: {row}");
+        }
+    }
+}
+
+#[test]
+fn the_new_names_are_kept_off_the_webview_registry() {
+    let reserved = reserved_names();
+    for name in ["tab.move", "tab.dock", "tab.detach", "layout.get"] {
+        assert!(reserved.contains(name), "{name}");
+    }
+}
+
+/// 에이전트를 고르는 칸 — 명령마다 `#[agent_ref]` 로 표시한 인자(선언 순서). 데몬은 등록 패킷의 이 목록만 보고 이름을 id 로
+/// 바꾼다(ADR-0308) — 빠지면 그 칸의 이름이 셸까지 와 INVALID_ARGUMENT 가 되고, 엉뚱한 칸이 들면 데몬이 id 칸을 이름으로
+/// 풀려다 거절한다.
+fn marked_agent_args() -> BTreeMap<&'static str, Vec<&'static str>> {
+    BTreeMap::from([
+        ("tab.switch", vec!["tab_of"]),
+        ("tab.close", vec!["tab_of"]),
+        ("tab.rename", vec!["tab_of"]),
+        ("slot.split", vec!["slot_of"]),
+        ("slot.close", vec!["slot_of"]),
+        ("slot.popout", vec!["slot_of"]),
+        ("slot.focus", vec!["slot_of"]),
+        ("slot.assignAgent", vec!["agent_id", "slot_of", "assign"]),
+        (
+            "layout.setSlotContent",
+            vec!["agent_id", "slot_of", "assign"],
+        ),
+        ("tab.move", vec!["tab_of", "after_tab_of"]),
+        ("tab.dock", vec!["tab_of", "beside"]),
+        ("tab.detach", vec!["tab_of"]),
+        ("layout.get", vec!["agent"]),
+    ])
+}
+
+/// 등록 패킷(`decls`)이 그 표시를 `help` 밖의 칸으로 싣는다 — 표시 없는 명령은 빈 목록이다.
+/// ★표시한 명령은 데몬의 두 거절 코드를 광고한다★(데몬이 그 칸을 못 풀면 이 명령 대신 `NOT_FOUND` · `CONFLICT` 로 답한다 —
+/// ADR-0308) · ★에이전트를 받는 이름꼴의 인자는 빠짐없이 표시한다★(`*_of` · `beside` · `assign` · `agent` · `agent_id` —
+/// 표시를 잊은 새 칸은 이름이 셸까지 와 INVALID_ARGUMENT 가 된다).
+#[test]
+fn the_registration_carries_each_commands_agent_reference_args() {
+    let (_world, ports) = World::build();
+    let want = marked_agent_args();
+    let decls = make_table(ports).decls();
+    assert_eq!(decls.len(), COMMAND_SPECS.len());
+    let names_an_agent = |arg: &str| {
+        arg.ends_with("_of") || matches!(arg, "beside" | "assign" | "agent" | "agent_id")
+    };
+    for decl in &decls {
+        let expected = want.get(decl.name.as_str()).cloned().unwrap_or_default();
+        assert_eq!(decl.agent_args, expected, "{}", decl.name);
+        assert!(!decl.help.contains("agent_ref"), "{}", decl.name);
+
+        let help: serde_json::Value = serde_json::from_str(&decl.help).expect("help 는 JSON");
+        if !decl.agent_args.is_empty() {
+            let errors = help["errors"].as_array().expect("errors 배열");
+            for code in ["NOT_FOUND", "CONFLICT"] {
+                assert!(
+                    errors.iter().any(|e| e == code),
+                    "{}: 표시한 칸이 있는데 {code} 를 광고하지 않는다 — {errors:?}",
+                    decl.name
+                );
+            }
+        }
+        let args = help["args"]["properties"]
+            .as_object()
+            .expect("args 는 객체 스키마");
+        for arg in args.keys().filter(|arg| names_an_agent(arg)) {
+            assert!(
+                decl.agent_args.iter().any(|marked| marked == arg),
+                "{}: 에이전트를 받는 인자 {arg} 가 표시되지 않았다",
+                decl.name
+            );
+        }
+    }
+    for name in want.keys() {
+        assert!(
+            decls.iter().any(|decl| decl.name == *name),
+            "{name} 가 표에 없다"
+        );
+    }
+}
+
+/// 표시한 칸에 UUID 가 아닌 것(데몬을 거치지 않아 이름이 그대로 온 호출)은 셸이 풀지 않고 INVALID_ARGUMENT 로 반려한다 —
+/// 아무것도 안 바뀐다.
+#[tokio::test]
+async fn a_name_in_an_agent_reference_arg_is_an_invalid_argument_here() {
+    let (world, queue, receiver) = queued();
+    let a = world.main_tabs().active;
+    let (tab, slot) = (a.to_string(), world.empty_slot(a).to_string());
+    world.add_tab(MAIN_WINDOW_LABEL, a);
+    let version = world.version();
+
+    // (명령, 표시한 칸 말고 앞 검문을 지나게 하는 인자)
+    let others = |name: &str, arg: &str| match (name, arg) {
+        ("tab.move", "tab_of") => json!({ "index": 0 }),
+        ("tab.move", "after_tab_of") => json!({ "tab": tab }),
+        ("tab.dock", "tab_of") => json!({ "beside_at": "top-left", "side": "Left" }),
+        ("tab.dock", "beside") => json!({ "tab": tab, "side": "Left" }),
+        ("tab.rename", _) => json!({ "name": "작업" }),
+        ("slot.split", _) => json!({ "dir": "LeftRight" }),
+        ("slot.assignAgent", "slot_of") => json!({ "assign": BETA }),
+        ("slot.assignAgent", _) => json!({ "slot_id": slot }),
+        ("layout.setSlotContent", "slot_of") => json!({ "content": "Empty" }),
+        ("layout.setSlotContent", _) => json!({ "slot_id": slot, "content": "Agent" }),
+        _ => json!({}),
+    };
+    let mut checked = 0;
+    for (name, args) in marked_agent_args() {
+        for arg in args {
+            let call_args = with(&others(name, arg), json!({ arg: "alpha" }));
+            let error = refused(&receiver, &queue, name, call_args.clone()).await;
+            assert_eq!(
+                error.code(),
+                ErrorCode::InvalidArgument,
+                "{name} {call_args}"
+            );
+            assert!(
+                error
+                    .message()
+                    .starts_with(&format!("{arg} must be an agent id (a UUID)")),
+                "{name} {call_args}: {}",
+                error.message()
+            );
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 19);
+    assert_eq!(world.version(), version, "아무것도 안 바뀐다");
+}
+
+// ── tab.move ──
+
+#[tokio::test]
+async fn tab_move_by_agent_carries_its_tab_into_another_window_keeping_what_is_shown() {
+    let (world, queue, receiver) = queued();
+    let a = world.main_tabs().active;
+    world.show(a, world.empty_slot(a), agent_id(ALPHA), "alpha");
+    let b = world.add_tab(MAIN_WINDOW_LABEL, a);
+    let (pop, p0) = world.popout();
+    let p1 = world.add_tab(&pop, p0);
+
+    let answer = ok_of(
+        &receiver,
+        &queue,
+        "tab.move",
+        json!({ "tab_of": ALPHA, "to_window": pop, "index": 1 }),
+    )
+    .await;
+
+    assert_eq!(world.tab_ids(&pop), [p0, a, p1]);
+    assert_eq!(world.tab_ids(MAIN_WINDOW_LABEL), [b]);
+    assert_eq!(world.tabs(&pop).active, p0, "목적 창의 보이는 탭은 그대로");
+    assert_eq!(
+        world.main_tabs().active,
+        b,
+        "보이던 탭이 떠난 창은 이웃 탭을 보인다"
+    );
+    assert_eq!(answer["changed"], true);
+    assert_eq!(answer["window"], json!(pop));
+    assert_eq!(answer["window_id"], json!(world.tabs(&pop).window_id));
+    assert_eq!(answer["number"], 2);
+    assert_eq!(answer["tab"], json!(a.to_string()));
+    assert_eq!(answer["tab_index"], 1, "놓인 탭 줄 자리");
+    let layout = rows(&answer, "layout");
+    assert_no_ids(&layout);
+    // 바뀐 탭 = 옮긴 탭 + 원본 창에서 새로 보이게 된 탭 — 창 번호 순.
+    assert_eq!(
+        layout
+            .iter()
+            .map(|row| (
+                row["window"].clone(),
+                row["tab_index"].clone(),
+                row["tab_active"].clone()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (json!(MAIN_WINDOW_LABEL), json!(0), json!(true)),
+            (json!(pop), json!(1), json!(false)),
+        ]
+    );
+    assert_eq!(layout[1]["agent"], "alpha");
+    assert_eq!(layout[1]["content"], "Agent");
+    assert!(layout[0].get("agent").is_none(), "빈 칸은 agent 칸이 없다");
+}
+
+#[tokio::test]
+async fn tab_move_by_tab_id_reorders_its_own_window() {
+    let (world, queue, receiver) = queued();
+    let a = world.main_tabs().active;
+    let b = world.add_tab(MAIN_WINDOW_LABEL, a);
+    let c = world.add_tab(MAIN_WINDOW_LABEL, a);
+
+    let answer = ok_of(
+        &receiver,
+        &queue,
+        "tab.move",
+        json!({ "tab": c.to_string(), "index": 0 }),
+    )
+    .await;
+
+    assert_eq!(world.tab_ids(MAIN_WINDOW_LABEL), [c, a, b]);
+    assert_eq!(world.main_tabs().active, a, "보이는 탭은 그대로");
+    assert_eq!(answer["changed"], true);
+    assert_eq!(answer["window"], MAIN_WINDOW_LABEL);
+    assert_eq!(answer["window_id"], MAIN_WINDOW_LABEL);
+    assert_eq!(answer["number"], 1);
+    assert_eq!(answer["tab"], json!(c.to_string()));
+
+    let version = world.version();
+    let again = ok_of(
+        &receiver,
+        &queue,
+        "tab.move",
+        json!({ "tab": c.to_string(), "index": 0 }),
+    )
+    .await;
+    assert_eq!(again["changed"], false, "같은 자리");
+    assert_eq!(world.version(), version);
+    assert_eq!(rows(&again, "layout").len(), 1, "그 탭 하나의 줄");
+}
+
+/// 옮길 탭 · 뒤에 넣을 탭을 둘 다 에이전트로 고른다.
+#[tokio::test]
+async fn tab_move_after_another_agents_tab_goes_right_after_it() {
+    let (world, queue, receiver) = queued();
+    let a = world.main_tabs().active;
+    world.show(a, world.empty_slot(a), agent_id(ALPHA), "alpha");
+    let b = world.add_tab(MAIN_WINDOW_LABEL, a);
+    let (pop, p0) = world.popout();
+    world.show(p0, world.empty_slot(p0), agent_id(BETA), "beta");
+    let p1 = world.add_tab(&pop, p0);
+
+    let answer = ok_of(
+        &receiver,
+        &queue,
+        "tab.move",
+        json!({ "tab_of": ALPHA, "after_tab_of": BETA }),
+    )
+    .await;
+
+    assert_eq!(world.tab_ids(&pop), [p0, a, p1]);
+    assert_eq!(world.tab_ids(MAIN_WINDOW_LABEL), [b]);
+    assert_eq!(answer["window"], json!(pop));
+    assert_eq!(answer["tab"], json!(a.to_string()));
+}
+
+/// 에이전트가 앞서 있던 탭을 떠나 다른 탭으로 옮겨 간 뒤의 `tab_of` 는 **지금 든 탭**을 옮기고 떠난 탭은 건드리지 않는다 —
+/// 대상은 부를 때의 배치에서 찾는다. (데몬 변환과 셸 적용 사이의 끼어들기 자체는 셸 명령으로 재현할 수 없어
+/// `layout_apply.rs` 가 적용 잠금 안 풀기로 잰다 — TRD S28 §5-2.)
+#[tokio::test]
+async fn tab_move_by_agent_moves_the_tab_it_is_in_now_not_the_one_it_left() {
+    let (world, queue, receiver) = queued();
+    let alpha = agent_id(ALPHA);
+    let a = world.main_tabs().active;
+    let a_slot = world.empty_slot(a);
+    world.show(a, a_slot, alpha, "alpha");
+    let b = world.add_tab(MAIN_WINDOW_LABEL, a);
+    let b_slot = world.empty_slot(b);
+    let (pop, p0) = world.popout();
+
+    apply::set_slot_content(&world.state, &Subs, &Events, a, a_slot, SlotContent::Empty)
+        .expect("떠남");
+    apply::assign_agent(&world.state, &Subs, &Events, b, b_slot, alpha.to_string()).expect("옮김");
+
+    ok_of(
+        &receiver,
+        &queue,
+        "tab.move",
+        json!({ "tab_of": ALPHA, "to_window": pop }),
+    )
+    .await;
+
+    assert_eq!(
+        world.tab_ids(&pop),
+        [p0, b],
+        "지금 그 에이전트가 든 탭이 간다"
+    );
+    assert_eq!(world.tab_ids(MAIN_WINDOW_LABEL), [a], "떠난 탭은 그대로");
+}
+
+#[tokio::test]
+async fn tab_move_refuses_argument_combinations_before_applying() {
+    let (world, queue, receiver) = queued();
+    let a = world.main_tabs().active;
+    world.show(a, world.empty_slot(a), agent_id(ALPHA), "alpha");
+    let version = world.version();
+
+    let a_id = a.to_string();
+    for args in [
+        json!({ "tab_of": ALPHA, "after_tab_of": BETA, "index": 0 }),
+        json!({ "tab_of": ALPHA, "after_tab": a_id, "index": 0 }),
+        json!({ "tab_of": ALPHA, "to_window": "main", "after_tab_of": BETA }),
+        json!({ "tab_of": ALPHA, "to_window": "main", "after_tab": a_id }),
+        json!({ "tab_of": ALPHA, "after_tab": a_id, "after_tab_of": BETA }),
+        json!({ "tab_of": ALPHA }),
+        json!({ "tab": a_id, "tab_of": ALPHA, "index": 0 }),
+        json!({ "index": 0 }),
+        json!({ "tab": "not-a-uuid", "index": 0 }),
+        json!({ "tab_of": ALPHA, "after_tab": "beta" }),
+        json!({ "tab_of": "   ", "index": 0 }),
+        json!({ "tab_of": ALPHA, "to_window": "2" }),
+        json!({ "tab_of": ALPHA, "after_tab_of": "" }),
+        json!({ "tab_of": ALPHA, "window": "main", "index": 0 }),
+    ] {
+        let error = refused(&receiver, &queue, "tab.move", args.clone()).await;
+        assert_eq!(error.code(), ErrorCode::InvalidArgument, "{args}");
+    }
+    assert_eq!(world.version(), version, "아무것도 안 바뀐다");
+}
+
+/// `tab.dock` 의 `window` 와 헷갈린 호출이 말없이 제자리 순서 바꾸기가 되지 않는다 — 받아서 갈 곳 인자를 알린다.
+#[tokio::test]
+async fn tab_move_refuses_a_window_argument_and_names_to_window() {
+    let (world, queue, receiver) = queued();
+    let a = world.main_tabs().active;
+    world.add_tab(MAIN_WINDOW_LABEL, a);
+    let version = world.version();
+
+    let error = refused(
+        &receiver,
+        &queue,
+        "tab.move",
+        json!({ "tab": a.to_string(), "window": "main", "index": 1 }),
+    )
+    .await;
+
+    assert_eq!(error.code(), ErrorCode::InvalidArgument);
+    assert!(
+        error
+            .message()
+            .starts_with("tab.move's destination is to_window"),
+        "{}",
+        error.message()
+    );
+    assert_eq!(world.version(), version);
+}
+
+/// id 칸에 UUID 가 아닌 것(대개 에이전트 이름)을 넣으면 반려 문구가 이름 · 낱말로 고르는 짝 인자를 댄다.
+#[tokio::test]
+async fn a_non_uuid_in_an_id_argument_names_the_argument_that_takes_a_name() {
+    let (world, queue, receiver) = queued();
+    let a = world.main_tabs().active.to_string();
+    for (name, args, alternative) in [
+        (
+            "tab.move",
+            json!({ "tab": "alpha", "index": 0 }),
+            "use tab_of (",
+        ),
+        (
+            "tab.move",
+            json!({ "tab": a, "after_tab": "alpha" }),
+            "use after_tab_of (",
+        ),
+        (
+            "tab.dock",
+            json!({ "tab": a, "beside_slot": "alpha", "side": "Left" }),
+            "use beside (",
+        ),
+        (
+            "tab.dock",
+            json!({ "tab": a, "beside_slot": "alpha", "side": "Left" }),
+            "or beside_at (",
+        ),
+        ("tab.detach", json!({ "tab": "alpha" }), "use tab_of ("),
+    ] {
+        let error = refused(&receiver, &queue, name, args.clone()).await;
+        assert_eq!(error.code(), ErrorCode::InvalidArgument, "{args}");
+        assert!(
+            error.message().contains("to name it another way")
+                && error.message().contains(alternative),
+            "{name} {args}: {}",
+            error.message()
+        );
+    }
+}
+
+#[tokio::test]
+async fn tab_move_after_a_tab_id_goes_right_after_it() {
+    let (world, queue, receiver) = queued();
+    let a = world.main_tabs().active;
+    let b = world.add_tab(MAIN_WINDOW_LABEL, a);
+    let (pop, p0) = world.popout();
+    let p1 = world.add_tab(&pop, p0);
+
+    let answer = ok_of(
+        &receiver,
+        &queue,
+        "tab.move",
+        json!({ "tab": b.to_string(), "after_tab": p0.to_string() }),
+    )
+    .await;
+
+    assert_eq!(world.tab_ids(&pop), [p0, b, p1]);
+    assert_eq!(answer["window"], json!(pop));
+    assert_eq!(answer["tab_index"], 1);
+
+    let error = refused(
+        &receiver,
+        &queue,
+        "tab.move",
+        json!({ "tab": b.to_string(), "after_tab": b.to_string() }),
+    )
+    .await;
+    assert_eq!(error.code(), ErrorCode::InvalidArgument);
+    assert!(
+        error.message().starts_with(&format!("after_tab '{b}': ")),
+        "{}",
+        error.message()
+    );
+}
+
+#[tokio::test]
+async fn tab_move_after_an_agent_inside_the_moving_tab_is_an_invalid_argument() {
+    let (world, queue, receiver) = queued();
+    let a = world.main_tabs().active;
+    world.show(a, world.empty_slot(a), agent_id(ALPHA), "alpha");
+    world.add_tab(MAIN_WINDOW_LABEL, a);
+
+    let error = refused(
+        &receiver,
+        &queue,
+        "tab.move",
+        json!({ "tab_of": ALPHA, "after_tab_of": ALPHA }),
+    )
+    .await;
+
+    assert_eq!(error.code(), ErrorCode::InvalidArgument);
+    assert!(
+        error
+            .message()
+            .starts_with(&format!("after_tab_of 'alpha' ({ALPHA}): ")),
+        "{}",
+        error.message()
+    );
+}
+
+/// 데몬이 아는 이름이 어느 칸에도 없으면 `NOT_FOUND` + 지금 칸에 떠 있는 이름 · 여러 탭에 떠 있으면 `CONFLICT` + 그
+/// 칸들의 id — 다음 호출 한 번에 고칠 단서다(규칙 §1-3).
+#[tokio::test]
+async fn tab_move_names_an_agent_not_shown_or_shown_in_two_tabs_with_candidates() {
+    let (world, queue, receiver) = queued();
+    let alpha = agent_id(ALPHA);
+    let a = world.main_tabs().active;
+    let a_slot = world.empty_slot(a);
+    world.show(a, a_slot, alpha, "alpha");
+
+    let error = refused(
+        &receiver,
+        &queue,
+        "tab.move",
+        json!({ "tab_of": BETA, "index": 0 }),
+    )
+    .await;
+    assert_eq!(error.code(), ErrorCode::NotFound);
+    assert!(
+        error.message().starts_with(&format!("tab_of '{BETA}': ")),
+        "{}",
+        error.message()
+    );
+    assert!(
+        error.message().ends_with(" — candidates: alpha"),
+        "{}",
+        error.message()
+    );
+
+    let (pop, p0) = world.popout();
+    let p0_slot = world.empty_slot(p0);
+    world.show(p0, p0_slot, alpha, "alpha");
+    let version = world.version();
+    let error = refused(
+        &receiver,
+        &queue,
+        "tab.move",
+        json!({ "tab_of": ALPHA, "index": 0 }),
+    )
+    .await;
+    assert_eq!(error.code(), ErrorCode::Conflict);
+    assert!(
+        error
+            .message()
+            .contains("; pass one of these as tab — candidates: "),
+        "{}",
+        error.message()
+    );
+    for (tab, window) in [(a, MAIN_WINDOW_LABEL), (p0, pop.as_str())] {
+        assert!(
+            error
+                .message()
+                .contains(&format!("tab={tab} (window={window}, tab_index=0)")),
+            "{}",
+            error.message()
+        );
+    }
+    assert!(
+        !error.message().contains("slot_id="),
+        "탭 줄은 탭 단위 후보"
+    );
+    assert_eq!(world.version(), version);
+}
+
+/// 탭 단위 모호 후보는 탭마다 한 줄이다(한 탭의 두 칸 = 한 줄) · `after_tab_of` 의 모호는 `after_tab` 으로 고치라고 한다.
+#[tokio::test]
+async fn tab_level_ambiguity_lists_each_tab_once_and_names_the_id_argument_of_its_row() {
+    let (world, queue, receiver) = queued();
+    let alpha = agent_id(ALPHA);
+    let a = world.main_tabs().active;
+    let first = world.empty_slot(a);
+    let second = apply::split_slot(&world.state, &Subs, &Events, a, first, SplitDir::LeftRight)
+        .expect("분할");
+    world.show(a, first, alpha, "alpha");
+    world.show(a, second, alpha, "alpha");
+    let b = world.add_tab(MAIN_WINDOW_LABEL, a);
+    let b_slot = world.empty_slot(b);
+    world.show(b, b_slot, alpha, "alpha");
+    let c = world.add_tab(MAIN_WINDOW_LABEL, a);
+
+    let error = refused(
+        &receiver,
+        &queue,
+        "tab.move",
+        json!({ "tab": c.to_string(), "after_tab_of": ALPHA }),
+    )
+    .await;
+
+    assert_eq!(error.code(), ErrorCode::Conflict);
+    assert!(
+        error
+            .message()
+            .starts_with(&format!("after_tab_of 'alpha' ({ALPHA}): ")),
+        "{}",
+        error.message()
+    );
+    assert!(
+        error.message().ends_with(&format!(
+            "; pass one of these as after_tab — candidates: after_tab={a} (window={MAIN_WINDOW_LABEL}, tab_index=0), after_tab={b} (window={MAIN_WINDOW_LABEL}, tab_index=1)"
+        )),
+        "{}",
+        error.message()
+    );
+}
+
+#[tokio::test]
+async fn tab_move_of_a_tab_id_that_does_not_exist_is_not_found() {
+    let (_world, queue, receiver) = queued();
+    let ghost = uuid::Uuid::new_v4();
+    let error = refused(
+        &receiver,
+        &queue,
+        "tab.move",
+        json!({ "tab": ghost.to_string(), "index": 0 }),
+    )
+    .await;
+    assert_eq!(error.code(), ErrorCode::NotFound);
+    assert!(
+        error.message().starts_with(&format!("tab '{ghost}': ")),
+        "{}",
+        error.message()
+    );
+}
+
+// ── tab.dock ──
+
+/// 붙인 탭은 없어지고 답의 `tab` 은 살아남은 목적 탭이다 · 배치 줄이 좌우와 몫을 드러낸다 · 보이는 탭 · 포커스는 그대로.
+#[tokio::test]
+async fn tab_dock_by_agents_attaches_beside_the_agents_slot_and_answers_the_surviving_tab() {
+    let (world, queue, receiver) = queued();
+    let a = world.main_tabs().active;
+    let beta_slot = world.empty_slot(a);
+    world.show(a, beta_slot, agent_id(BETA), "beta");
+    let b = world.add_tab(MAIN_WINDOW_LABEL, a);
+    world.show(b, world.empty_slot(b), agent_id(ALPHA), "alpha");
+
+    let answer = ok_of(
+        &receiver,
+        &queue,
+        "tab.dock",
+        json!({ "tab_of": ALPHA, "beside": BETA, "side": "Left", "share": 0.25 }),
+    )
+    .await;
+
+    assert_eq!(world.tab_ids(MAIN_WINDOW_LABEL), [a], "붙인 탭은 없어진다");
+    assert_eq!(world.main_tabs().active, a);
+    assert_eq!(world.focused(a), Some(beta_slot), "포커스는 그대로");
+    assert_eq!(answer["changed"], true);
+    assert_eq!(answer["tab"], json!(a.to_string()), "살아남은 목적 탭");
+    assert_eq!(answer["tab_index"], 0);
+    assert_eq!(answer["window"], MAIN_WINDOW_LABEL);
+    let layout = rows(&answer, "layout");
+    assert_no_ids(&layout);
+    assert_eq!(
+        layout
+            .iter()
+            .map(|row| (
+                row["agent"].clone(),
+                row["x"].clone(),
+                row["w"].clone(),
+                row["focused"].clone()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (json!("alpha"), json!(0.0), json!(0.25), json!(false)),
+            (json!("beta"), json!(0.25), json!(0.75), json!(true)),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn tab_dock_by_a_spatial_word_reads_it_in_the_named_windows_shown_tab() {
+    let (world, queue, receiver) = queued();
+    let a = world.main_tabs().active;
+    let b = world.add_tab(MAIN_WINDOW_LABEL, a);
+    let (pop, p0) = world.popout();
+    let left = world.empty_slot(p0);
+    apply::split_slot(&world.state, &Subs, &Events, p0, left, SplitDir::LeftRight).expect("분할");
+
+    let answer = ok_of(
+        &receiver,
+        &queue,
+        "tab.dock",
+        json!({ "tab": b.to_string(), "beside_at": "top-right", "window": pop, "side": "Bottom" }),
+    )
+    .await;
+
+    assert_eq!(answer["window"], json!(pop));
+    assert_eq!(answer["tab"], json!(p0.to_string()));
+    assert_eq!(world.tab_ids(MAIN_WINDOW_LABEL), [a]);
+    let layout = rows(&answer, "layout");
+    assert_eq!(layout.len(), 3);
+    let right_column = layout.iter().filter(|row| row["x"] == json!(0.5)).count();
+    assert_eq!(right_column, 2, "오른쪽 칸이 위아래로 나뉜다: {layout:?}");
+}
+
+#[tokio::test]
+async fn tab_dock_on_a_whole_tab_puts_the_tab_along_its_outer_edge() {
+    let (world, queue, receiver) = queued();
+    let a = world.main_tabs().active;
+    let a_slot = world.empty_slot(a);
+    apply::split_slot(&world.state, &Subs, &Events, a, a_slot, SplitDir::LeftRight).expect("분할");
+    let b = world.add_tab(MAIN_WINDOW_LABEL, a);
+
+    let answer = ok_of(
+        &receiver,
+        &queue,
+        "tab.dock",
+        json!({
+            "tab": b.to_string(),
+            "beside_slot": a_slot.to_string(),
+            "whole": true,
+            "side": "Top",
+            "share": 0.5,
+        }),
+    )
+    .await;
+
+    let layout = rows(&answer, "layout");
+    assert_eq!(layout.len(), 3);
+    assert_eq!(
+        (
+            layout[0]["y"].clone(),
+            layout[0]["w"].clone(),
+            layout[0]["h"].clone()
+        ),
+        (json!(0.0), json!(1.0), json!(0.5)),
+        "붙인 탭이 위 절반 전체"
+    );
+}
+
+/// 그 에이전트가 한 탭의 두 칸에 떠 있으면 칸 옆은 모호하다(후보 = 그 칸들) — 탭 전체에 붙이면 기준이 탭이라 모호하지 않다.
+#[tokio::test]
+async fn tab_dock_beside_an_agent_in_two_slots_is_ambiguous_unless_it_takes_the_whole_tab() {
+    let (world, queue, receiver) = queued();
+    let alpha = agent_id(ALPHA);
+    let a = world.main_tabs().active;
+    let first = world.empty_slot(a);
+    let second = apply::split_slot(&world.state, &Subs, &Events, a, first, SplitDir::LeftRight)
+        .expect("분할");
+    world.show(a, first, alpha, "alpha");
+    world.show(a, second, alpha, "alpha");
+    let b = world.add_tab(MAIN_WINDOW_LABEL, a);
+
+    let error = refused(
+        &receiver,
+        &queue,
+        "tab.dock",
+        json!({ "tab": b.to_string(), "beside": ALPHA, "side": "Right" }),
+    )
+    .await;
+    assert_eq!(error.code(), ErrorCode::Conflict);
+    assert!(
+        error
+            .message()
+            .starts_with(&format!("beside 'alpha' ({ALPHA}): ")),
+        "{}",
+        error.message()
+    );
+    for slot in [first, second] {
+        assert!(
+            error.message().contains(&format!("beside_slot={slot}")),
+            "{}",
+            error.message()
+        );
+    }
+
+    let answer = ok_of(
+        &receiver,
+        &queue,
+        "tab.dock",
+        json!({ "tab": b.to_string(), "beside": ALPHA, "whole": true, "side": "Right" }),
+    )
+    .await;
+    assert_eq!(answer["tab"], json!(a.to_string()));
+}
+
+#[tokio::test]
+async fn tab_dock_maps_each_refusal_to_its_code() {
+    let (world, queue, receiver) = queued();
+    let a = world.main_tabs().active;
+    world.show(a, world.empty_slot(a), agent_id(ALPHA), "alpha");
+    let b = world.add_tab(MAIN_WINDOW_LABEL, a);
+    let (b_id, a_id) = (b.to_string(), a.to_string());
+    let version = world.version();
+
+    const SAME_TAB: &str =
+        "both are in one tab; tab.dock moves whole tabs — slot.popout that slot first, then tab.dock";
+    const CORNERS: &str =
+        "try a corner word (top-left, top-right, bottom-left, bottom-right) or beside";
+    // (인자, 코드, 문구 머리, 문구에 들 것)
+    let (alpha_head, beta_head) = (
+        format!("beside 'alpha' ({ALPHA}): "),
+        format!("beside '{BETA}': "),
+    );
+    for (args, code, head, says) in [
+        (
+            json!({ "tab_of": ALPHA, "beside": ALPHA, "side": "Left" }),
+            ErrorCode::InvalidArgument,
+            alpha_head.as_str(),
+            SAME_TAB,
+        ),
+        (
+            json!({ "tab": b_id, "beside_at": "left", "side": "Left" }),
+            ErrorCode::NotFound,
+            "beside_at 'left': ",
+            CORNERS,
+        ),
+        (
+            json!({ "tab": b_id, "beside_slot": uuid::Uuid::nil().to_string(), "side": "Left" }),
+            ErrorCode::NotFound,
+            "beside_slot '",
+            "(SlotNotFound)",
+        ),
+        (
+            json!({ "tab": b_id, "beside": BETA, "side": "Left" }),
+            ErrorCode::NotFound,
+            beta_head.as_str(),
+            " — candidates: alpha",
+        ),
+        (
+            json!({ "tab": a_id, "beside_at": "top-left", "side": "Left" }),
+            ErrorCode::InvalidArgument,
+            "beside_at 'top-left': ",
+            SAME_TAB,
+        ),
+    ] {
+        let error = refused(&receiver, &queue, "tab.dock", args.clone()).await;
+        assert_eq!(error.code(), code, "{args}: {}", error.message());
+        assert!(
+            error.message().starts_with(head) && error.message().contains(says),
+            "{args}: {}",
+            error.message()
+        );
+    }
+    assert_eq!(world.version(), version);
+}
+
+#[tokio::test]
+async fn tab_dock_refuses_argument_combinations_before_applying() {
+    let (world, queue, receiver) = queued();
+    let a = world.main_tabs().active;
+    let slot = world.empty_slot(a).to_string();
+    let b = world.add_tab(MAIN_WINDOW_LABEL, a).to_string();
+
+    for args in [
+        json!({ "tab": b, "beside": ALPHA, "window": "main", "side": "Left" }),
+        json!({ "tab": b, "beside": ALPHA, "beside_slot": slot, "side": "Left" }),
+        json!({ "tab": b, "side": "Left" }),
+        json!({ "tab": b, "beside_at": "middle", "side": "Left" }),
+        json!({ "tab": b, "beside": ALPHA, "side": "Left", "share": 0.9 }),
+        json!({ "tab": b, "beside": ALPHA, "side": "Left", "share": 0.0 }),
+        json!({ "tab": b, "beside": ALPHA }),
+        json!({ "tab": b, "beside": ALPHA, "side": "Diagonal" }),
+        json!({ "tab_of": ALPHA, "beside_at": "left", "window": "2", "side": "Left" }),
+    ] {
+        let error = refused(&receiver, &queue, "tab.dock", args.clone()).await;
+        assert_eq!(error.code(), ErrorCode::InvalidArgument, "{args}");
+    }
+}
+
+// ── tab.detach ──
+
+#[tokio::test]
+async fn tab_detach_opens_a_new_window_without_changing_what_is_shown() {
+    let (world, queue, receiver) = queued();
+    let a = world.main_tabs().active;
+    let b = world.add_tab(MAIN_WINDOW_LABEL, a);
+    world.show(b, world.empty_slot(b), agent_id(ALPHA), "alpha");
+
+    let answer = ok_of(&receiver, &queue, "tab.detach", json!({ "tab_of": ALPHA })).await;
+
+    let window = answer["window"].as_str().expect("새 창").to_string();
+    assert_ne!(window, MAIN_WINDOW_LABEL);
+    assert_eq!(
+        world.windows.opened.lock().unwrap().as_slice(),
+        [window.clone()]
+    );
+    assert_eq!(answer["changed"], true);
+    assert_eq!(answer["number"], 2);
+    assert_eq!(answer["window_id"], json!(world.tabs(&window).window_id));
+    assert_eq!(answer["tab"], json!(b.to_string()));
+    assert_eq!(answer["tab_index"], 0);
+    assert_eq!(world.tab_ids(&window), [b]);
+    assert_eq!(world.tab_ids(MAIN_WINDOW_LABEL), [a]);
+    assert_eq!(world.main_tabs().active, a, "보이는 탭은 그대로");
+    assert_eq!(
+        world.windows.placed.lock().unwrap().as_slice(),
+        [(
+            window.clone(),
+            WindowPlace {
+                pos: None,
+                size: None
+            },
+            false
+        )],
+        "기본 자리 · 포커스를 가져가지 않는다"
+    );
+    let layout = rows(&answer, "layout");
+    assert_eq!(layout.len(), 1);
+    assert_eq!(layout[0]["window"], json!(window));
+    assert_eq!(layout[0]["agent"], "alpha");
+}
+
+/// 새 창을 여는 사이(두 락 사이) 그 에이전트가 다른 탭으로 옮겨지면 연 창을 거두고 `CONFLICT` — 아무것도 안 옮긴다
+/// (TRD S28 §4-3).
+#[tokio::test]
+async fn tab_detach_whose_agent_moves_while_the_window_opens_withdraws_it_as_a_conflict() {
+    let (world, queue, receiver) = queued();
+    let alpha = agent_id(ALPHA);
+    let a = world.main_tabs().active;
+    let b = world.add_tab(MAIN_WINDOW_LABEL, a);
+    let b_slot = world.empty_slot(b);
+    world.show(b, b_slot, alpha, "alpha");
+    let c = world.add_tab(MAIN_WINDOW_LABEL, a);
+    let c_slot = world.empty_slot(c);
+    let state = world.state.clone();
+    *world.windows.on_open.lock().unwrap() = Some(Box::new(move || {
+        apply::set_slot_content(&state, &Subs, &Events, b, b_slot, SlotContent::Empty)
+            .expect("떠남");
+        apply::assign_agent(&state, &Subs, &Events, c, c_slot, alpha.to_string()).expect("옮김");
+    }));
+
+    let error = refused(&receiver, &queue, "tab.detach", json!({ "tab_of": ALPHA })).await;
+
+    assert_eq!(error.code(), ErrorCode::Conflict);
+    assert!(error.message().contains("(Moved)"), "{}", error.message());
+    let opened = world.windows.opened.lock().unwrap().clone();
+    assert_eq!(opened.len(), 1, "창은 열었다");
+    assert_eq!(
+        world.windows.closed.lock().unwrap().as_slice(),
+        opened.as_slice(),
+        "연 창을 거뒀다"
+    );
+    assert_eq!(
+        world.tab_ids(MAIN_WINDOW_LABEL),
+        [a, b, c],
+        "아무것도 안 옮겼다"
+    );
+    assert_eq!(
+        apply::list_windows(&world.state).unwrap(),
+        [MAIN_WINDOW_LABEL]
+    );
+}
+
+#[tokio::test]
+async fn tab_detach_of_a_lone_popout_tab_changes_nothing() {
+    let (world, queue, receiver) = queued();
+    let (pop, p0) = world.popout();
+    world.show(p0, world.empty_slot(p0), agent_id(BETA), "beta");
+    let opened = world.windows.opened.lock().unwrap().len();
+    let version = world.version();
+
+    let answer = ok_of(&receiver, &queue, "tab.detach", json!({ "tab_of": BETA })).await;
+
+    assert_eq!(answer["changed"], false);
+    assert_eq!(answer["window"], json!(pop));
+    assert_eq!(answer["tab"], json!(p0.to_string()));
+    assert_eq!(
+        world.windows.opened.lock().unwrap().len(),
+        opened,
+        "새 창 없음"
+    );
+    assert_eq!(world.version(), version);
+}
+
+#[tokio::test]
+async fn tab_detach_needs_exactly_one_tab() {
+    let (world, queue, receiver) = queued();
+    let a = world.main_tabs().active.to_string();
+    for args in [json!({}), json!({ "tab": a, "tab_of": ALPHA })] {
+        let error = refused(&receiver, &queue, "tab.detach", args.clone()).await;
+        assert_eq!(error.code(), ErrorCode::InvalidArgument, "{args}");
+    }
+}
+
+// ── layout.get ──
+
+#[tokio::test]
+async fn layout_get_lists_every_slot_in_window_tab_tree_order_without_ids() {
+    let (world, queue, receiver) = queued();
+    let a = world.main_tabs().active;
+    let left = world.empty_slot(a);
+    apply::split_slot(&world.state, &Subs, &Events, a, left, SplitDir::LeftRight).expect("분할");
+    world.show(a, left, agent_id(ALPHA), "alpha");
+    apply::focus_slot(&world.state, &Events, a, left).expect("포커스");
+    let (pop, _p0) = world.popout();
+
+    let answer = ok_of(&receiver, &queue, "layout.get", json!({})).await;
+
+    let rows = rows(&answer, "rows");
+    assert_no_ids(&rows);
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        rows[0],
+        json!({
+            "window": MAIN_WINDOW_LABEL,
+            "window_number": 1,
+            "tab_index": 0,
+            "tab_name": rows[0]["tab_name"],
+            "tab_active": true,
+            "content": "Agent",
+            "agent": "alpha",
+            "focused": true,
+            "x": 0.0, "y": 0.0, "w": 0.5, "h": 1.0,
+        })
+    );
+    assert_eq!(rows[1]["content"], "Empty");
+    assert!(rows[1].get("agent").is_none());
+    assert_eq!(rows[1]["x"], json!(0.5));
+    assert_eq!(rows[1]["focused"], false);
+    assert_eq!(rows[2]["window"], json!(pop));
+    assert_eq!(rows[2]["window_number"], 2);
+}
+
+#[tokio::test]
+async fn layout_get_with_ids_adds_the_four_ids() {
+    let (world, queue, receiver) = queued();
+    let alpha = agent_id(ALPHA);
+    let a = world.main_tabs().active;
+    let left = world.empty_slot(a);
+    let right = apply::split_slot(&world.state, &Subs, &Events, a, left, SplitDir::LeftRight)
+        .expect("분할");
+    world.show(a, left, alpha, "alpha");
+
+    let answer = ok_of(&receiver, &queue, "layout.get", json!({ "ids": true })).await;
+
+    let rows = rows(&answer, "rows");
+    assert_eq!(rows[0]["window_id"], MAIN_WINDOW_LABEL);
+    assert_eq!(rows[0]["tab"], json!(a.to_string()));
+    assert_eq!(rows[0]["slot_id"], json!(left.to_string()));
+    assert_eq!(rows[0]["agent_id"], json!(alpha.to_string()));
+    assert_eq!(rows[1]["slot_id"], json!(right.to_string()));
+    assert!(
+        rows[1].get("agent_id").is_none(),
+        "빈 칸은 에이전트 id 가 없다"
+    );
+}
+
+#[tokio::test]
+async fn layout_get_filters_by_window_and_by_agent() {
+    let (world, queue, receiver) = queued();
+    let a = world.main_tabs().active;
+    let left = world.empty_slot(a);
+    apply::split_slot(&world.state, &Subs, &Events, a, left, SplitDir::LeftRight).expect("분할");
+    world.show(a, left, agent_id(ALPHA), "alpha");
+    let (pop, _p0) = world.popout();
+    let pop_id = world.tabs(&pop).window_id;
+
+    for window in [pop.clone(), pop_id] {
+        let answer = ok_of(&receiver, &queue, "layout.get", json!({ "window": window })).await;
+        let rows = rows(&answer, "rows");
+        assert_eq!(rows.len(), 1, "{window}");
+        assert_eq!(rows[0]["window"], json!(pop));
+    }
+
+    let answer = ok_of(&receiver, &queue, "layout.get", json!({ "agent": ALPHA })).await;
+    let alpha_rows = rows(&answer, "rows");
+    assert_eq!(alpha_rows.len(), 1);
+    assert_eq!(alpha_rows[0]["agent"], "alpha");
+
+    let answer = ok_of(&receiver, &queue, "layout.get", json!({ "agent": BETA })).await;
+    assert!(
+        rows(&answer, "rows").is_empty(),
+        "칸에 없는 에이전트 = 빈 목록"
+    );
+}
+
+/// 답의 창 · 탭 · 배치 줄은 결말을 지은 그 락의 한 모습이다 — 락을 놓은 뒤(알림 사이) 끼어든 쓰기가 답에 섞이지 않는다.
+#[tokio::test]
+async fn a_dock_reply_is_the_snapshot_of_the_lock_that_committed_it() {
+    let (world, queue, receiver) = queued();
+    let a = world.main_tabs().active;
+    let b = world.add_tab(MAIN_WINDOW_LABEL, a);
+    let b_slot = world.empty_slot(b);
+    let (pop, _p0) = world.popout();
+    let state = world.state.clone();
+    *world.events.hook.lock().unwrap() = Some(Box::new(move || {
+        apply::split_slot(&state, &Subs, &Events, b, b_slot, SplitDir::LeftRight)
+            .expect("끼어든 분할");
+    }));
+
+    let answer = ok_of(
+        &receiver,
+        &queue,
+        "tab.move",
+        json!({ "tab": b.to_string(), "to_window": pop }),
+    )
+    .await;
+
+    assert_eq!(world.slots(b).len(), 2, "끼어든 쓰기는 모델에 들었다");
+    let moved: Vec<_> = rows(&answer, "layout")
+        .into_iter()
+        .filter(|row| row["window"] == json!(pop))
+        .collect();
+    assert_eq!(moved.len(), 1, "답은 옮긴 그 순간의 칸 하나다: {moved:?}");
+    assert_eq!(moved[0]["w"], json!(1.0));
+}
+
+// ── (S28) 넓힌 칸 · 탭 동사 — 에이전트 · 공간 낱말로 고르고 바꾼 탭의 배치를 답한다(TRD S28 §7) ─────────────────────
+
+impl World {
+    /// 셸 이름 장부에 표시 이름만 적는다(칸에는 놓지 않는다).
+    fn name(&self, agent: uuid::Uuid, name: &str) {
+        apply::agent_names_updated(
+            &self.state,
+            &Events,
+            &[(agent.to_string(), name.to_string())],
+        )
+        .expect("이름 장부");
+    }
+
+    fn content(&self, view: uuid::Uuid, slot: uuid::Uuid) -> Option<SlotContent> {
+        tree::find_slot(
+            &apply::get_view(&self.state, view).expect("view").layout,
+            slot,
+        )
+        .cloned()
+    }
+}
+
+/// 칸 동사 전부 — (이름, 칸 줄 밖의 인자). 칸 줄(`slot_id` · `slot_of` · `at` · `view_id` · `window`)은 시험이 더한다.
+fn slot_verbs() -> Vec<(&'static str, serde_json::Value)> {
+    vec![
+        ("slot.focus", json!({})),
+        ("slot.close", json!({})),
+        ("slot.split", json!({ "dir": "LeftRight" })),
+        ("slot.popout", json!({})),
+        ("slot.assignAgent", json!({ "assign": BETA })),
+        ("layout.setSlotContent", json!({ "content": "Empty" })),
+    ]
+}
+
+/// `base` 에 `extra` 의 칸을 더한 인자.
+fn with(base: &serde_json::Value, extra: serde_json::Value) -> serde_json::Value {
+    let mut args = base.clone();
+    args.as_object_mut()
+        .expect("객체")
+        .extend(extra.as_object().expect("객체").clone());
+    args
+}
+
+// 줄들의 (창, 에이전트 표시 이름) — 칸 순서 그대로.
+fn row_agents(layout: &[serde_json::Value]) -> Vec<(serde_json::Value, serde_json::Value)> {
+    layout
+        .iter()
+        .map(|row| {
+            (
+                row["window"].clone(),
+                row.get("agent").cloned().unwrap_or(json!(null)),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn slot_verbs_take_exactly_one_way_to_name_the_slot_before_applying() {
+    let (world, queue, receiver) = queued();
+    let a = world.main_tabs().active;
+    let (view, slot) = (a.to_string(), world.empty_slot(a).to_string());
+    let version = world.version();
+
+    for (name, base) in slot_verbs() {
+        for line in [
+            json!({}),
+            json!({ "slot_id": slot, "slot_of": ALPHA }),
+            json!({ "slot_of": ALPHA, "at": "top-left" }),
+            json!({ "view_id": view, "slot_of": ALPHA }),
+            json!({ "view_id": view, "at": "top-left" }),
+            json!({ "view_id": view }),
+            json!({ "slot_id": slot, "window": "main" }),
+            json!({ "slot_of": ALPHA, "window": "main" }),
+            json!({ "at": "middle" }),
+            json!({ "slot_of": "  " }),
+            json!({ "at": "top-left", "window": "2" }),
+        ] {
+            let args = with(&base, line);
+            let error = refused(&receiver, &queue, name, args.clone()).await;
+            assert_eq!(error.code(), ErrorCode::InvalidArgument, "{name} {args}");
+        }
+        // id 칸에 이름을 넣으면 옛 반려 문구 뒤에 이름 · 낱말로 고르는 짝 인자를 댄다.
+        let error = refused(
+            &receiver,
+            &queue,
+            name,
+            with(&base, json!({ "view_id": view, "slot_id": "alpha" })),
+        )
+        .await;
+        assert!(
+            error.message().starts_with(
+                "slot_id must be a UUID (the id shown by layout.get with ids), got \"alpha\" — to name it another way, use slot_of ("
+            ),
+            "{name}: {}",
+            error.message()
+        );
+    }
+    assert_eq!(world.version(), version, "아무것도 안 바뀐다");
+}
+
+/// 칸 동사는 에이전트 · 공간 낱말로 칸을 고르고, 배치를 바꾸면 그 탭의 칸 줄을 답한다(id 없이 — 줄의 에이전트는 표시 이름).
+#[tokio::test]
+async fn slot_verbs_by_agent_or_spatial_word_change_that_slot_and_answer_its_tab() {
+    let (world, queue, receiver) = queued();
+    let (alpha, beta) = (agent_id(ALPHA), agent_id(BETA));
+    let a = world.main_tabs().active;
+    let left = world.empty_slot(a);
+    let right = apply::split_slot(&world.state, &Subs, &Events, a, left, SplitDir::LeftRight)
+        .expect("분할");
+    world.show(a, left, alpha, "alpha");
+    world.name(beta, "beta");
+    assert_eq!(world.focused(a), Some(right), "분할은 새 칸에 포커스");
+
+    let answer = ok_of(&receiver, &queue, "slot.focus", json!({ "slot_of": ALPHA })).await;
+    assert_eq!(world.focused(a), Some(left));
+    let layout = rows(&answer, "layout");
+    assert_no_ids(&layout);
+    assert_eq!(
+        layout
+            .iter()
+            .map(|row| row["focused"].clone())
+            .collect::<Vec<_>>(),
+        [json!(true), json!(false)],
+        "그 탭의 줄 — 포커스 칸이 바뀐 모습"
+    );
+
+    let answer = ok_of(
+        &receiver,
+        &queue,
+        "slot.assignAgent",
+        json!({ "at": "top-right", "assign": BETA }),
+    )
+    .await;
+    assert_eq!(
+        world.content(a, right),
+        Some(SlotContent::Agent {
+            agent_id: beta.to_string()
+        })
+    );
+    let layout = rows(&answer, "layout");
+    assert_no_ids(&layout);
+    assert_eq!(
+        row_agents(&layout),
+        [
+            (json!(MAIN_WINDOW_LABEL), json!("alpha")),
+            (json!(MAIN_WINDOW_LABEL), json!("beta"))
+        ]
+    );
+    assert_eq!(layout[0]["focused"], true);
+
+    let answer = ok_of(
+        &receiver,
+        &queue,
+        "slot.split",
+        json!({ "slot_of": BETA, "dir": "TopBottom" }),
+    )
+    .await;
+    let below = uuid::Uuid::parse_str(answer["slot_id"].as_str().expect("새 칸")).expect("UUID");
+    assert_eq!(
+        world.slots(a).into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([left, right, below])
+    );
+    let layout = rows(&answer, "layout");
+    assert_eq!(layout.len(), 3);
+    assert_eq!(
+        (layout[2]["x"].clone(), layout[2]["y"].clone()),
+        (json!(0.5), json!(0.5)),
+        "새 칸은 오른쪽 아래"
+    );
+
+    let answer = ok_of(
+        &receiver,
+        &queue,
+        "layout.setSlotContent",
+        json!({ "slot_id": below.to_string(), "content": "PresetPalette" }),
+    )
+    .await;
+    assert_eq!(world.content(a, below), Some(SlotContent::PresetPalette));
+    assert_eq!(rows(&answer, "layout")[2]["content"], "PresetPalette");
+
+    let answer = ok_of(
+        &receiver,
+        &queue,
+        "slot.close",
+        json!({ "at": "bottom-right" }),
+    )
+    .await;
+    assert_eq!(
+        world.slots(a).into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([left, right])
+    );
+    assert_eq!(rows(&answer, "layout").len(), 2);
+
+    let answer = ok_of(
+        &receiver,
+        &queue,
+        "slot.popout",
+        json!({ "slot_of": ALPHA }),
+    )
+    .await;
+    let window = answer["window"].as_str().expect("새 창").to_string();
+    assert_ne!(window, MAIN_WINDOW_LABEL);
+    assert_eq!(world.slots(a), [right]);
+    let layout = rows(&answer, "layout");
+    assert_no_ids(&layout);
+    assert_eq!(
+        row_agents(&layout),
+        [
+            (json!(MAIN_WINDOW_LABEL), json!("beta")),
+            (json!(window), json!("alpha"))
+        ],
+        "원본 탭 + 새 탭의 줄(창 번호 순)"
+    );
+}
+
+/// 에이전트가 앞서 있던 칸을 떠나 다른 칸으로 옮겨 간 뒤의 `slot_of` 는 **지금 든 칸**에 쓰고 떠난 칸은 건드리지 않는다
+/// (끼어들기 자체는 `layout_apply.rs` 몫 — `tab_move_by_agent_moves_the_tab_it_is_in_now_not_the_one_it_left` 와 같다).
+#[tokio::test]
+async fn slot_of_writes_to_the_slot_the_agent_is_in_now_not_the_one_it_left() {
+    let (world, queue, receiver) = queued();
+    let alpha = agent_id(ALPHA);
+    let a = world.main_tabs().active;
+    let left = world.empty_slot(a);
+    let right = apply::split_slot(&world.state, &Subs, &Events, a, left, SplitDir::LeftRight)
+        .expect("분할");
+    world.show(a, left, alpha, "alpha");
+    apply::set_slot_content(&world.state, &Subs, &Events, a, left, SlotContent::Empty)
+        .expect("떠남");
+    apply::assign_agent(&world.state, &Subs, &Events, a, right, alpha.to_string()).expect("옮김");
+
+    ok_of(
+        &receiver,
+        &queue,
+        "layout.setSlotContent",
+        json!({ "slot_of": ALPHA, "content": "AgentList" }),
+    )
+    .await;
+
+    assert_eq!(world.content(a, right), Some(SlotContent::AgentList));
+    assert_eq!(
+        world.content(a, left),
+        Some(SlotContent::Empty),
+        "떠난 칸은 그대로"
+    );
+}
+
+/// 넓히기 전 꼴(id 로 준 탭 · 칸)의 거절은 그 id 판이 같은 입력에 내던 답 그대로다 — `CONFLICT` + 관리자 문구.
+#[tokio::test]
+async fn old_id_calls_refuse_exactly_as_the_id_service_did() {
+    let (world, queue, receiver) = queued();
+    let a = world.main_tabs().active;
+    let slot = world.empty_slot(a);
+    let (_pop, p0) = world.popout();
+    let pop_slot = world.empty_slot(p0);
+    let ghost = uuid::Uuid::new_v4();
+    let alpha = agent_id(ALPHA);
+    let (state, windows, labels) = (
+        world.state.clone(),
+        Arc::clone(&world.windows),
+        Arc::clone(&world.labels),
+    );
+    let old = |result: Result<(), String>| result.expect_err("옛 id 판도 거절한다");
+    let id = |id: uuid::Uuid| id.to_string();
+    let cases = [
+        (
+            "slot.focus",
+            json!({ "view_id": id(ghost), "slot_id": id(slot) }),
+            old(apply::focus_slot(&state, &Events, ghost, slot)),
+        ),
+        (
+            "slot.close",
+            json!({ "view_id": id(a), "slot_id": id(pop_slot) }),
+            old(apply::close_slot(&state, &Subs, &Events, a, pop_slot)),
+        ),
+        (
+            "slot.split",
+            json!({ "view_id": id(a), "slot_id": id(ghost), "dir": "LeftRight" }),
+            old(
+                apply::split_slot(&state, &Subs, &Events, a, ghost, SplitDir::LeftRight)
+                    .map(|_| ()),
+            ),
+        ),
+        (
+            "slot.popout",
+            json!({ "view_id": id(a), "slot_id": id(ghost) }),
+            old(apply::move_slot_to_window(
+                &state,
+                &Subs,
+                &Events,
+                windows.as_ref(),
+                labels.as_ref(),
+                a,
+                ghost,
+                None,
+            )
+            .map(|_| ())),
+        ),
+        (
+            "slot.assignAgent",
+            json!({ "view_id": id(ghost), "slot_id": id(slot), "agent_id": id(alpha) }),
+            old(apply::assign_agent(
+                &state,
+                &Subs,
+                &Events,
+                ghost,
+                slot,
+                id(alpha),
+            )),
+        ),
+        (
+            "layout.setSlotContent",
+            json!({ "view_id": id(a), "slot_id": id(ghost), "content": "Empty" }),
+            old(apply::set_slot_content(
+                &state,
+                &Subs,
+                &Events,
+                a,
+                ghost,
+                SlotContent::Empty,
+            )),
+        ),
+        (
+            "layout.setSlotContent",
+            json!({ "view_id": id(ghost), "slot_id": id(slot), "content": "Usage" }),
+            old(apply::set_usage_slot(
+                &state, &Subs, &Events, ghost, slot, None, None,
+            )),
+        ),
+        (
+            "tab.switch",
+            json!({ "window": MAIN_WINDOW_LABEL, "view_id": id(ghost) }),
+            old(apply::switch_tab(
+                &state,
+                &Subs,
+                &Events,
+                MAIN_WINDOW_LABEL,
+                ghost,
+            )),
+        ),
+        (
+            "tab.switch",
+            json!({ "window": MAIN_WINDOW_LABEL, "view_id": id(p0) }),
+            old(apply::switch_tab(
+                &state,
+                &Subs,
+                &Events,
+                MAIN_WINDOW_LABEL,
+                p0,
+            )),
+        ),
+        (
+            "tab.close",
+            json!({ "window": MAIN_WINDOW_LABEL, "view_id": id(ghost) }),
+            old(apply::close_tab(
+                &state,
+                &Subs,
+                &Events,
+                windows.as_ref(),
+                MAIN_WINDOW_LABEL,
+                ghost,
+            )),
+        ),
+        (
+            "tab.rename",
+            json!({ "view_id": id(ghost), "name": "작업" }),
+            old(apply::rename_tab(
+                &state,
+                &Events,
+                ghost,
+                "작업".to_string(),
+            )),
+        ),
+    ];
+    let version = world.version();
+
+    for (name, args, want) in cases {
+        let error = refused(&receiver, &queue, name, args.clone()).await;
+        assert_eq!(error.code(), ErrorCode::Conflict, "{name} {args}");
+        assert_eq!(error.message(), want, "{name} {args}");
+    }
+    assert_eq!(world.version(), version, "아무것도 안 바뀐다");
+    assert!(
+        world.windows.opened.lock().unwrap().len() <= 1,
+        "팝아웃 하나 말고는 창을 안 연다"
+    );
+}
+
+/// 넓히기 전 꼴의 성공도 그대로다 — 답에 그 탭의 줄이 더해진다(넣을 id 의 명부 확인은 데몬이 중계 전에 한다 — ADR-0308).
+#[tokio::test]
+async fn old_id_calls_still_apply_and_gain_the_layout_field() {
+    let (world, queue, receiver) = queued();
+    let alpha = agent_id(ALPHA);
+    let a = world.main_tabs().active;
+    let slot = world.empty_slot(a);
+    world.name(alpha, "alpha");
+
+    let answer = ok_of(
+        &receiver,
+        &queue,
+        "slot.assignAgent",
+        json!({ "view_id": a.to_string(), "slot_id": slot.to_string(), "agent_id": alpha.to_string() }),
+    )
+    .await;
+
+    assert_eq!(
+        world.content(a, slot),
+        Some(SlotContent::Agent {
+            agent_id: alpha.to_string()
+        })
+    );
+    assert_eq!(
+        row_agents(&rows(&answer, "layout")),
+        [(json!(MAIN_WINDOW_LABEL), json!("alpha"))]
+    );
+
+    let b = world.add_tab(MAIN_WINDOW_LABEL, a);
+    let answer = ok_of(
+        &receiver,
+        &queue,
+        "tab.close",
+        json!({ "window": MAIN_WINDOW_LABEL, "view_id": b.to_string() }),
+    )
+    .await;
+    assert_eq!(world.tab_ids(MAIN_WINDOW_LABEL), [a]);
+    let layout = rows(&answer, "layout");
+    assert_eq!(layout.len(), 1, "그 창에 이제 보이는 탭의 줄");
+    assert_eq!(layout[0]["tab_active"], true);
+}
+
+/// `slot_of` 가 여러 칸에 떠 있으면 CONFLICT + 그 칸들의 `slot_id`(그 값으로 다시 부른다) · 어느 칸에도 없으면 NOT_FOUND + 떠
+/// 있는 이름 · 낱말이 칸을 못 집으면 NOT_FOUND + 모서리 낱말 · `slot_of` 안내.
+#[tokio::test]
+async fn slot_verbs_name_ambiguous_or_missing_agents_and_unpickable_words_with_candidates() {
+    let (world, queue, receiver) = queued();
+    let alpha = agent_id(ALPHA);
+    let a = world.main_tabs().active;
+    let left = world.empty_slot(a);
+    let right = apply::split_slot(&world.state, &Subs, &Events, a, left, SplitDir::LeftRight)
+        .expect("분할");
+    world.show(a, left, alpha, "alpha");
+    world.show(a, right, alpha, "alpha");
+    let version = world.version();
+
+    let error = refused(&receiver, &queue, "slot.focus", json!({ "slot_of": ALPHA })).await;
+    assert_eq!(error.code(), ErrorCode::Conflict);
+    assert!(
+        error
+            .message()
+            .starts_with(&format!("slot_of 'alpha' ({ALPHA}): "))
+            && error
+                .message()
+                .contains("; pass one of these as slot_id — candidates: "),
+        "{}",
+        error.message()
+    );
+    for slot in [left, right] {
+        assert!(
+            error
+                .message()
+                .contains(&format!("slot_id={slot} (in_tab={a}")),
+            "{}",
+            error.message()
+        );
+    }
+    assert_eq!(world.version(), version);
+    ok_of(
+        &receiver,
+        &queue,
+        "slot.focus",
+        json!({ "slot_id": left.to_string() }),
+    )
+    .await;
+    assert_eq!(
+        world.focused(a),
+        Some(left),
+        "후보의 slot_id 로 다시 부르면 된다"
+    );
+
+    let error = refused(&receiver, &queue, "slot.close", json!({ "slot_of": BETA })).await;
+    assert_eq!(error.code(), ErrorCode::NotFound);
+    assert!(
+        error.message().starts_with(&format!("slot_of '{BETA}': "))
+            && error.message().ends_with(" — candidates: alpha"),
+        "{}",
+        error.message()
+    );
+
+    let error = refused(
+        &receiver,
+        &queue,
+        "slot.split",
+        json!({ "at": "left", "dir": "LeftRight" }),
+    )
+    .await;
+    assert_eq!(error.code(), ErrorCode::NotFound);
+    assert!(
+        error.message().starts_with("at 'left': ")
+            && error.message().ends_with(
+                "try a corner word (top-left, top-right, bottom-left, bottom-right) or slot_of"
+            ),
+        "{}",
+        error.message()
+    );
+    assert_eq!(
+        world.slots(a).into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([left, right]),
+        "아무것도 안 바뀐다"
+    );
+}
+
+/// 넣을 에이전트 칸 검문 — `assign` · `agent_id` 는 하나만 · Agent 가 아닌 내용에는 못 준다 · 둘 다 에이전트 id 다(이름은 데몬이
+/// 중계 전에 id 로 바꾸고, 명부에 없으면 데몬이 거절해 칸이 그대로다 — ADR-0308 · TRD S28 §11-3).
+#[tokio::test]
+async fn the_agent_to_put_in_a_slot_is_one_agent_id_and_only_for_agent_content() {
+    let (world, queue, receiver) = queued();
+    let (alpha, beta) = (agent_id(ALPHA), agent_id(BETA));
+    let a = world.main_tabs().active;
+    let slot = world.empty_slot(a);
+    let slot_id = slot.to_string();
+    let version = world.version();
+
+    for (name, args, says) in [
+        (
+            "slot.assignAgent",
+            json!({ "slot_id": slot_id, "agent_id": "alpha" }),
+            "agent_id must be an agent id (a UUID)",
+        ),
+        (
+            "slot.assignAgent",
+            json!({ "slot_id": slot_id, "agent_id": alpha.to_string(), "assign": ALPHA }),
+            "give only one of assign, agent_id",
+        ),
+        (
+            "slot.assignAgent",
+            json!({ "slot_id": slot_id }),
+            "the agent to put in the slot is missing",
+        ),
+        (
+            "layout.setSlotContent",
+            json!({ "slot_id": slot_id, "content": "Empty", "assign": ALPHA }),
+            "assign only applies to content=Agent",
+        ),
+        (
+            "layout.setSlotContent",
+            json!({ "slot_id": slot_id, "content": "Agent" }),
+            "content=Agent needs assign",
+        ),
+    ] {
+        let error = refused(&receiver, &queue, name, args.clone()).await;
+        assert_eq!(error.code(), ErrorCode::InvalidArgument, "{name} {args}");
+        assert!(
+            error.message().contains(says),
+            "{name} {args}: {}",
+            error.message()
+        );
+    }
+    assert_eq!(world.version(), version, "칸은 그대로");
+
+    ok_of(
+        &receiver,
+        &queue,
+        "layout.setSlotContent",
+        json!({ "slot_id": slot_id, "content": "Agent", "assign": BETA }),
+    )
+    .await;
+    assert_eq!(
+        world.content(a, slot),
+        Some(SlotContent::Agent {
+            agent_id: beta.to_string()
+        }),
+        "받은 id 그대로 들어간다"
+    );
+}
+
+/// 탭 동사는 `tab_of` 로 탭을 고르고 창은 그 탭에서 안다 · `window` 를 주면 그 창의 탭이어야 한다 · `tab.close` 는 그 창에 이제
+/// 보이는 탭의 줄을 답한다(창째 닫혔으면 빈 목록).
+#[tokio::test]
+async fn tab_verbs_pick_their_tab_by_agent_and_take_the_window_from_it() {
+    let (world, queue, receiver) = queued();
+    let (alpha, beta) = (agent_id(ALPHA), agent_id(BETA));
+    let a = world.main_tabs().active;
+    world.show(a, world.empty_slot(a), alpha, "alpha");
+    let b = world.add_tab(MAIN_WINDOW_LABEL, a);
+    let (pop, p0) = world.popout();
+    let p1 = world.add_tab(&pop, p0);
+    world.show(p1, world.empty_slot(p1), beta, "beta");
+
+    assert_eq!(
+        ok_of(&receiver, &queue, "tab.switch", json!({ "tab_of": BETA })).await,
+        json!({})
+    );
+    assert_eq!(world.tabs(&pop).active, p1);
+    assert_eq!(world.main_tabs().active, a, "다른 창은 그대로");
+
+    ok_of(
+        &receiver,
+        &queue,
+        "tab.rename",
+        json!({ "tab_of": ALPHA, "name": " 작업 " }),
+    )
+    .await;
+    assert_eq!(world.main_tabs().tabs[0].name, "작업");
+
+    ok_of(
+        &receiver,
+        &queue,
+        "tab.switch",
+        json!({ "view_id": b.to_string() }),
+    )
+    .await;
+    assert_eq!(world.main_tabs().active, b, "window 없이 id 로");
+
+    let version = world.version();
+    let error = refused(
+        &receiver,
+        &queue,
+        "tab.close",
+        json!({ "view_id": p1.to_string(), "window": MAIN_WINDOW_LABEL }),
+    )
+    .await;
+    assert_eq!(error.code(), ErrorCode::Conflict);
+    assert_eq!(
+        error.message(),
+        format!("view 없음: {p1}"),
+        "그 창의 탭이 아니다"
+    );
+    assert_eq!(world.version(), version);
+
+    let answer = ok_of(&receiver, &queue, "tab.close", json!({ "tab_of": BETA })).await;
+    assert_eq!(world.tab_ids(&pop), [p0]);
+    let layout = rows(&answer, "layout");
+    assert_no_ids(&layout);
+    assert_eq!(layout.len(), 1);
+    assert_eq!(
+        (layout[0]["window"].clone(), layout[0]["tab_active"].clone()),
+        (json!(pop), json!(true))
+    );
+
+    let answer = ok_of(
+        &receiver,
+        &queue,
+        "tab.close",
+        json!({ "view_id": p0.to_string() }),
+    )
+    .await;
+    assert!(rows(&answer, "layout").is_empty(), "창째 닫혔다");
+    assert_eq!(world.windows.closed.lock().unwrap().as_slice(), [pop]);
+}
+
+#[tokio::test]
+async fn tab_verbs_take_exactly_one_tab_and_name_ambiguous_or_missing_agents() {
+    let (world, queue, receiver) = queued();
+    let alpha = agent_id(ALPHA);
+    let a = world.main_tabs().active;
+    world.show(a, world.empty_slot(a), alpha, "alpha");
+    let b = world.add_tab(MAIN_WINDOW_LABEL, a);
+    world.show(b, world.empty_slot(b), alpha, "alpha");
+    let version = world.version();
+
+    for (name, base) in [
+        ("tab.switch", json!({})),
+        ("tab.close", json!({})),
+        ("tab.rename", json!({ "name": "작업" })),
+    ] {
+        for line in [
+            json!({}),
+            json!({ "view_id": a.to_string(), "tab_of": ALPHA }),
+            json!({ "tab_of": "" }),
+            json!({ "view_id": "alpha" }),
+        ] {
+            let args = with(&base, line);
+            let error = refused(&receiver, &queue, name, args.clone()).await;
+            assert_eq!(error.code(), ErrorCode::InvalidArgument, "{name} {args}");
+        }
+    }
+    for name in ["tab.switch", "tab.close"] {
+        let error = refused(
+            &receiver,
+            &queue,
+            name,
+            json!({ "tab_of": ALPHA, "window": "2" }),
+        )
+        .await;
+        assert_eq!(error.code(), ErrorCode::InvalidArgument, "{name}");
+    }
+
+    let error = refused(&receiver, &queue, "tab.switch", json!({ "tab_of": ALPHA })).await;
+    assert_eq!(error.code(), ErrorCode::Conflict);
+    assert!(
+        error.message().starts_with(&format!("tab_of 'alpha' ({ALPHA}): "))
+            && error.message().ends_with(&format!(
+                "; pass one of these as view_id — candidates: view_id={a} (window={MAIN_WINDOW_LABEL}, tab_index=0), view_id={b} (window={MAIN_WINDOW_LABEL}, tab_index=1)"
+            )),
+        "{}",
+        error.message()
+    );
+    let error = refused(
+        &receiver,
+        &queue,
+        "tab.rename",
+        json!({ "tab_of": BETA, "name": "작업" }),
+    )
+    .await;
+    assert_eq!(error.code(), ErrorCode::NotFound);
+    assert!(
+        error.message().starts_with(&format!("tab_of '{BETA}': "))
+            && error.message().ends_with(" — candidates: alpha"),
+        "{}",
+        error.message()
+    );
+    assert_eq!(world.version(), version);
+}
+
+// 실 런타임 표 — 스폰 답을 시험 태스크가 넣는다(`a_composite_command_does_not_wait_on_its_caller` 와 같다).
+async fn spawn_reply(
+    world: &mut World,
+    receiver: &InboundReceiver,
+    args: serde_json::Value,
+    spawned: Option<String>,
+) -> CommandReply {
+    world.mail.clear();
+    let request_id = RequestId::new();
+    receiver.on_command(
+        envelope("agent.spawnInto", args, request_id),
+        world.mail.sink(request_id),
+    );
+    if let Some(agent) = spawned {
+        let (_cwd, _backend, answer) =
+            tokio::time::timeout(Duration::from_secs(5), world.spawn_requests.recv())
+                .await
+                .expect("스폰 요청이 온다")
+                .expect("스폰 요청이 온다");
+        answer.send(Ok(agent)).expect("스폰 답을 넣는다");
+    }
+    world.mail.settle(1).await;
+    world.mail.only()
+}
+
+/// `agent.spawnInto` 의 `at` — window 의 보이는 탭에서 그 낱말이 집는 빈 칸에 띄운다. 못 집거나 · 차 있거나 · 탭 · 칸 id 와 함께면
+/// 스폰 전에 거절한다. 답에 놓인 탭의 줄이 붙는다(id 판도 같다).
+#[tokio::test]
+async fn spawn_into_at_places_the_new_agent_in_the_slot_the_word_picks() {
+    let (mut world, ports) = World::build();
+    let receiver = InboundReceiver::new(
+        make_table(ports),
+        Arc::new(RuntimeSpawner(tokio::runtime::Handle::current())) as Arc<dyn TaskSpawner>,
+        CATALOG_VERSION,
+    );
+    let a = world.main_tabs().active;
+    let left = world.empty_slot(a);
+    let right = apply::split_slot(&world.state, &Subs, &Events, a, left, SplitDir::LeftRight)
+        .expect("분할");
+    apply::focus_slot(&world.state, &Events, a, left).expect("포커스");
+    let base = json!({ "window": MAIN_WINDOW_LABEL, "cwd": "C:/work", "backend": "claude" });
+
+    for (extra, code, says) in [
+        (
+            json!({ "at": "top-left", "view_id": a.to_string() }),
+            ErrorCode::InvalidArgument,
+            "without view_id and slot_id",
+        ),
+        (
+            json!({ "at": "middle" }),
+            ErrorCode::InvalidArgument,
+            "must be one of",
+        ),
+        (
+            json!({ "at": "left" }),
+            ErrorCode::NotFound,
+            "nothing was spawned",
+        ),
+    ] {
+        let reply = spawn_reply(&mut world, &receiver, with(&base, extra.clone()), None).await;
+        let error = error_of(reply);
+        assert_eq!(error.code(), code, "{extra}: {}", error.message());
+        assert_declared("agent.spawnInto", code);
+        assert!(
+            error.message().contains(says),
+            "{extra}: {}",
+            error.message()
+        );
+    }
+    apply::set_slot_content(
+        &world.state,
+        &Subs,
+        &Events,
+        a,
+        left,
+        SlotContent::AgentList,
+    )
+    .expect("채움");
+    let error = error_of(
+        spawn_reply(
+            &mut world,
+            &receiver,
+            with(&base, json!({ "at": "top-left" })),
+            None,
+        )
+        .await,
+    );
+    assert_eq!(error.code(), ErrorCode::Conflict, "{}", error.message());
+    assert!(
+        error.message().contains("스폰 안 함") && error.message().contains("slot.split 으로"),
+        "{}",
+        error.message()
+    );
+    assert!(
+        world.spawn_requests.try_recv().is_err(),
+        "어느 것도 스폰하지 않았다"
+    );
+
+    let agent = uuid::Uuid::new_v4();
+    let ok = spawn_reply(
+        &mut world,
+        &receiver,
+        with(&base, json!({ "at": "top-right" })),
+        Some(agent.to_string()),
+    )
+    .await
+    .outcome
+    .expect("배치 성공");
+    assert_eq!(ok["agent_id"], json!(agent.to_string()));
+    assert_eq!(
+        world.content(a, right),
+        Some(SlotContent::Agent {
+            agent_id: agent.to_string()
+        })
+    );
+    let layout = rows(&ok, "layout");
+    assert_no_ids(&layout);
+    assert_eq!(
+        layout
+            .iter()
+            .map(|row| row["content"].clone())
+            .collect::<Vec<_>>(),
+        [json!("AgentList"), json!("Agent")]
+    );
+
+    // window 를 빼면 main — 칸 동사와 같다.
+    let ok = spawn_reply(
+        &mut world,
+        &receiver,
+        json!({ "cwd": "C:/work", "backend": "claude" }),
+        Some(uuid::Uuid::new_v4().to_string()),
+    )
+    .await
+    .outcome
+    .expect("새 탭에 배치");
+    let layout = rows(&ok, "layout");
+    assert_eq!(layout.len(), 1, "id 판(새 탭)도 놓인 탭의 줄을 싣는다");
+    assert_eq!(
+        (layout[0]["window"].clone(), layout[0]["tab_index"].clone()),
+        (json!(MAIN_WINDOW_LABEL), json!(1))
+    );
+    assert_eq!(world.tab_ids(MAIN_WINDOW_LABEL).len(), 2);
+}
+
+/// 칸 쓰기의 답 줄은 쓴 그 락의 한 모습이다 — 락을 놓은 뒤(알림 사이) 끼어든 쓰기가 답에 섞이지 않는다.
+#[tokio::test]
+async fn a_slot_write_reply_is_the_snapshot_of_the_lock_that_wrote_it() {
+    let (world, queue, receiver) = queued();
+    let a = world.main_tabs().active;
+    let first = world.empty_slot(a);
+    let state = world.state.clone();
+    *world.events.hook.lock().unwrap() = Some(Box::new(move || {
+        apply::split_slot(&state, &Subs, &Events, a, first, SplitDir::TopBottom)
+            .expect("끼어든 분할");
+    }));
+
+    let answer = ok_of(
+        &receiver,
+        &queue,
+        "slot.split",
+        json!({ "at": "top-left", "dir": "LeftRight" }),
+    )
+    .await;
+
+    assert_eq!(world.slots(a).len(), 3, "끼어든 쓰기는 모델에 들었다");
+    assert_eq!(
+        rows(&answer, "layout").len(),
+        2,
+        "답은 나눈 그 순간의 칸 둘이다"
+    );
+}
+
+/// 에이전트 칸의 UUID 는 다른 철자(대문자)로 와도 칸에는 정규 철자로 적는다 — 다른 칸 · 명부가 그 id 를 정규 철자로 맞춘다.
+#[tokio::test]
+async fn an_agent_id_in_another_uuid_spelling_is_written_in_its_canonical_spelling() {
+    let (world, queue, receiver) = queued();
+    let alpha = agent_id(ALPHA);
+    let a = world.main_tabs().active;
+    let slot = world.empty_slot(a);
+
+    ok_of(
+        &receiver,
+        &queue,
+        "slot.assignAgent",
+        json!({ "slot_id": slot.to_string(), "agent_id": alpha.to_string().to_uppercase() }),
+    )
+    .await;
+
+    assert_eq!(
+        world.content(a, slot),
+        Some(SlotContent::Agent {
+            agent_id: alpha.to_string()
+        })
+    );
+}
+
+/// `agent.spawnInto` 에 `view_id` 만 주면 그 탭의 창에 놓는다 · 그 탭의 창이 아닌 `window` 를 주면 스폰 전에 거절한다 — 놓을
+/// 곳 없는 에이전트가 살아 남지 않는다.
+#[tokio::test]
+async fn spawn_into_a_tab_takes_its_window_and_refuses_another_before_spawning() {
+    let (mut world, ports) = World::build();
+    let receiver = InboundReceiver::new(
+        make_table(ports),
+        Arc::new(RuntimeSpawner(tokio::runtime::Handle::current())) as Arc<dyn TaskSpawner>,
+        CATALOG_VERSION,
+    );
+    let (pop, p0) = world.popout();
+
+    let error = error_of(
+        spawn_reply(
+            &mut world,
+            &receiver,
+            json!({ "window": MAIN_WINDOW_LABEL, "view_id": p0.to_string(), "cwd": "C:/work", "backend": "claude" }),
+            None,
+        )
+        .await,
+    );
+    assert_eq!(error.code(), ErrorCode::Conflict, "{}", error.message());
+    assert!(
+        error.message().contains("스폰 안 함"),
+        "{}",
+        error.message()
+    );
+    assert!(world.spawn_requests.try_recv().is_err(), "스폰하지 않았다");
+
+    let agent = uuid::Uuid::new_v4();
+    let ok = spawn_reply(
+        &mut world,
+        &receiver,
+        json!({ "view_id": p0.to_string(), "cwd": "C:/work", "backend": "claude" }),
+        Some(agent.to_string()),
+    )
+    .await
+    .outcome
+    .expect("그 탭의 창에 배치");
+    assert_eq!(
+        world.content(p0, world.slots(p0)[0]),
+        Some(SlotContent::Agent {
+            agent_id: agent.to_string()
+        })
+    );
+    let layout = rows(&ok, "layout");
+    assert_eq!(layout.len(), 1);
+    assert_eq!(layout[0]["window"], json!(pop));
 }

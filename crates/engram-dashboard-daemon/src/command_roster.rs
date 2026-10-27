@@ -389,6 +389,13 @@ impl CommandRoster {
         self.lock().roster.entries().collect()
     }
 
+    /// 이 이름의 주인이 표시한 에이전트 참조 칸(등록 순서)의 사본 — 배달이 중계 전에 읽는다
+    /// ([`Roster::agent_args`]). 잠금은 이 호출 안에서 끝난다.
+    // ADR-0308
+    pub fn agent_args_of(&self, name: &str) -> Vec<String> {
+        self.lock().roster.agent_args(name).to_vec()
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Shared> {
         self.inner.lock().expect("command roster poisoned")
     }
@@ -462,6 +469,7 @@ mod tests {
         CommandDecl {
             name: name.to_string(),
             help: "{}".to_string(),
+            agent_args: Vec::new(),
         }
     }
 

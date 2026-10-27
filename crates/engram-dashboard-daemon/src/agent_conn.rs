@@ -1171,6 +1171,7 @@ mod tests {
             decls: vec![CommandDecl {
                 name: "tab.create".to_string(),
                 help: "{}".to_string(),
+                agent_args: Vec::new(),
             }],
             catalog_version: 1,
             request_id: RequestId(uuid::Uuid::new_v4()),
@@ -1259,6 +1260,7 @@ mod tests {
             decls: vec![CommandDecl {
                 name: "tab.create".to_string(),
                 help: "{}".to_string(),
+                agent_args: Vec::new(),
             }],
             catalog_version: 1,
             request_id: engram_dashboard_protocol::RequestId(uuid::Uuid::new_v4()),

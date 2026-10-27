@@ -53,7 +53,7 @@ impl OwnerLookupSource for Roster {
 /// ★단 그것만으로 크기가 묶이지는 않는다★ — 이름은 등록 패킷이 실어 온 **문자열**이라(빌드 상수가
 /// 아니다) 붙어 있는 주인 하나가 얼마든 많은 이름을 보낼 수 있다. 그 축은 개수·길이 상한이 닫는다
 /// ([`Roster::MAX_NAMES_PER_OWNER`] · [`Roster::MAX_NAMES`] · [`Roster::MAX_NAME_BYTES`] ·
-/// [`Roster::MAX_HELP_BYTES`]).
+/// [`Roster::MAX_HELP_BYTES`] · [`Roster::MAX_AGENT_ARGS`]).
 /// ★이름 하나에 주인은 하나다★ — 뒤에 등록한 쪽이 이긴다. 서로 다른 두 주인이 같은 이름을 얹으면 앞
 /// 주인은 그 이름을 잃고, 나중 주인이 끊길 때 그 이름은 앞 주인에게 돌아가지 않고 사라진다. 이름 하나에
 /// 주인 여럿은 유보된 안건이다(ADR-0150 대안 G).
@@ -69,6 +69,8 @@ pub struct Roster {
 struct Registration {
     owner: OwnerToken,
     help: String,
+    /// 등록 패킷이 표시한 에이전트 참조 칸 — 배달이 중계 전에 읽는다([`Roster::agent_args`]).
+    agent_args: Vec<String>,
 }
 
 impl Roster {
@@ -96,8 +98,17 @@ impl Roster {
     /// 메모리를 통째로 먹는다.
     /// 값의 근거: 지금 가장 큰 항목이 `agent.spawn` 의 591바이트다(`agent/bindings/commands.schema.json`
     /// 실측). 4096 = 그 일곱 배로, 중첩 struct 를 몇 겹 더 편 선언도 넉넉히 든다.
-    /// 두 상한을 합치면 명부의 상주 상한이 [`Roster::MAX_NAMES`] × (128 + 4096) ≈ 16 MiB 로 닫힌다.
+    /// 이 상한과 이름 · 에이전트 참조 칸 상한을 합치면 명부의 상주 상한이 [`Roster::MAX_NAMES`] ×
+    /// (128 + 4096 + 8 × 128) ≈ 20 MiB 로 닫힌다.
     pub const MAX_HELP_BYTES: usize = 4096;
+
+    /// 이름 하나가 표시할 수 있는 에이전트 참조 칸 수(ADR-0308). 칸 이름 한 개의 길이는
+    /// [`Roster::MAX_NAME_BYTES`] 로 함께 묶는다.
+    ///
+    /// ★이 칸도 등록 패킷이 실어 온 문자열이라 상주한다★ — 상한이 없으면 `help` 상한을 비켜 명부를 부풀린다.
+    /// 값의 근거: 한 명령이 에이전트를 가리키는 칸은 지금 많아야 셋이다(`slot.assignAgent` · `layout.setSlotContent` —
+    /// 넣을 에이전트 `assign` · 그 옛 이름 `agent_id` · 칸 지목 `slot_of`). 8 = 그 두 배 남짓.
+    pub const MAX_AGENT_ARGS: usize = 8;
 
     pub fn new() -> Self {
         Self::default()
@@ -133,6 +144,7 @@ impl Roster {
                 Registration {
                     owner: owner.clone(),
                     help: decl.help,
+                    agent_args: decl.agent_args,
                 },
             );
         }
@@ -190,6 +202,7 @@ impl Roster {
                 Registration {
                     owner: owner.clone(),
                     help: decl.help,
+                    agent_args: decl.agent_args,
                 },
             );
         }
@@ -294,6 +307,25 @@ impl Roster {
                     decl.help.len()
                 )));
             }
+            if decl.agent_args.len() > Self::MAX_AGENT_ARGS {
+                return Err(CommandError::invalid_argument(format!(
+                    "'{}' may mark at most {} agent-reference arguments (got {})",
+                    decl.name,
+                    Self::MAX_AGENT_ARGS,
+                    decl.agent_args.len()
+                )));
+            }
+            if decl
+                .agent_args
+                .iter()
+                .any(|arg| arg.len() > Self::MAX_NAME_BYTES)
+            {
+                return Err(CommandError::invalid_argument(format!(
+                    "an agent-reference argument name marked by '{}' may be at most {} bytes",
+                    decl.name,
+                    Self::MAX_NAME_BYTES
+                )));
+            }
         }
         let names: BTreeSet<&str> = decls.iter().map(|d| d.name.as_str()).collect();
         let kept = self
@@ -346,6 +378,15 @@ impl Roster {
         }
     }
 
+    /// 이 이름의 주인이 표시한 에이전트 참조 칸(등록 순서). 모르는 이름 · 표시 없음 = 빈 슬라이스.
+    // ADR-0308
+    pub fn agent_args(&self, name: &str) -> &[String] {
+        self.entries
+            .get(name)
+            .map(|reg| reg.agent_args.as_slice())
+            .unwrap_or(&[])
+    }
+
     pub fn entries(&self) -> impl Iterator<Item = RosterEntry> + '_ {
         self.entries.iter().map(|(name, reg)| RosterEntry {
             name: name.clone(),
@@ -386,6 +427,7 @@ mod tests {
         CommandDecl {
             name: name.to_string(),
             help: format!("{{\"name\":\"{name}\"}}"),
+            agent_args: Vec::new(),
         }
     }
 
@@ -464,6 +506,7 @@ mod tests {
                 vec![CommandDecl {
                     name: "tab.create".to_string(),
                     help: "{\"name\":\"tab.create\",\"since\":2}".to_string(),
+                    agent_args: Vec::new(),
                 }],
             )
             .expect("상한 안");
@@ -561,6 +604,7 @@ mod tests {
         let at_cap = CommandDecl {
             name: "n".repeat(Roster::MAX_NAME_BYTES),
             help: "h".repeat(Roster::MAX_HELP_BYTES),
+            agent_args: Vec::new(),
         };
         roster
             .register(&owner, vec![at_cap])
@@ -570,6 +614,7 @@ mod tests {
         let long_name = CommandDecl {
             name: "n".repeat(Roster::MAX_NAME_BYTES + 1),
             help: "{}".to_string(),
+            agent_args: Vec::new(),
         };
         let err = roster
             .register(&owner, vec![long_name])
@@ -579,6 +624,7 @@ mod tests {
         let long_help = CommandDecl {
             name: "tab.create".to_string(),
             help: "h".repeat(Roster::MAX_HELP_BYTES + 1),
+            agent_args: Vec::new(),
         };
         let err = roster
             .register(&owner, vec![decl("tab.close"), long_help])
@@ -587,6 +633,113 @@ mod tests {
 
         assert_eq!(roster.len(), 1, "실패한 등록은 명부를 건드리지 않는다");
         assert_eq!(roster.lookup("tab.close"), OwnerLookup::Unknown);
+    }
+
+    fn marked(name: &str, agent_args: &[&str]) -> CommandDecl {
+        CommandDecl {
+            agent_args: agent_args.iter().map(|arg| arg.to_string()).collect(),
+            ..decl(name)
+        }
+    }
+
+    // ── 에이전트 참조 칸(ADR-0308) ───────────────────────────────────────────────────
+
+    /// 배달이 중계 전에 읽는 값 — 등록 · 차분 · 재등록이 모두 그 이름의 표시를 갈아 끼운다.
+    #[test]
+    fn agent_args_follow_register_and_update() {
+        let owner = OwnerToken::new("shell-1");
+        let mut roster = Roster::new();
+        roster
+            .register(
+                &owner,
+                vec![marked("slot.focus", &["agent", "after"]), decl("tab.close")],
+            )
+            .expect("상한 안");
+
+        assert_eq!(roster.agent_args("slot.focus"), ["agent", "after"]);
+        assert!(roster.agent_args("tab.close").is_empty(), "표시 없음");
+        assert!(roster.agent_args("never.seen").is_empty(), "모르는 이름");
+
+        roster
+            .update(
+                &owner,
+                vec![
+                    marked("slot.focus", &["target"]),
+                    marked("tab.move", &["agent"]),
+                ],
+                vec!["tab.close".to_string()],
+            )
+            .expect("자기 이름의 차분");
+        assert_eq!(
+            roster.agent_args("slot.focus"),
+            ["target"],
+            "차분이 표시를 갈아 끼운다"
+        );
+        assert_eq!(roster.agent_args("tab.move"), ["agent"]);
+
+        roster
+            .register(&owner, vec![decl("slot.focus")])
+            .expect("전량 재등록");
+        assert!(
+            roster.agent_args("slot.focus").is_empty(),
+            "재등록이 표시를 뺐으면 빠진다"
+        );
+        assert!(roster.agent_args("tab.move").is_empty(), "내려간 이름");
+
+        roster.disconnect(&owner);
+        assert!(
+            roster.agent_args("slot.focus").is_empty(),
+            "끊긴 주인의 표시는 안 남는다"
+        );
+    }
+
+    /// 표시 칸도 상주하는 패킷 문자열이다 — 개수 · 길이를 재고, 넘으면 통째 반려한다.
+    #[test]
+    fn oversized_agent_args_are_refused_whole() {
+        let owner = OwnerToken::new("shell-1");
+        let mut roster = Roster::new();
+
+        let at_cap: Vec<String> = (0..Roster::MAX_AGENT_ARGS)
+            .map(|i| format!("{i}{}", "a".repeat(Roster::MAX_NAME_BYTES - 1)))
+            .collect();
+        roster
+            .register(
+                &owner,
+                vec![CommandDecl {
+                    agent_args: at_cap,
+                    ..decl("slot.focus")
+                }],
+            )
+            .expect("상한 자체는 통과한다");
+
+        let too_many: Vec<&str> = vec!["a"; Roster::MAX_AGENT_ARGS + 1];
+        let err = roster
+            .register(
+                &owner,
+                vec![decl("tab.close"), marked("tab.move", &too_many)],
+            )
+            .expect_err("칸 수가 상한을 넘는다");
+        assert_eq!(err.code(), crate::ErrorCode::InvalidArgument);
+
+        let too_long = "a".repeat(Roster::MAX_NAME_BYTES + 1);
+        let err = roster
+            .update(
+                &owner,
+                vec![marked("tab.move", &[too_long.as_str()])],
+                vec![],
+            )
+            .expect_err("칸 이름이 상한을 넘는다");
+        assert_eq!(err.code(), crate::ErrorCode::InvalidArgument);
+
+        assert_eq!(
+            roster.len(),
+            1,
+            "실패한 등록 · 차분은 명부를 건드리지 않는다"
+        );
+        assert_eq!(
+            roster.agent_args("slot.focus").len(),
+            Roster::MAX_AGENT_ARGS
+        );
     }
 
     /// 주인당 상한만 두면 주인 수로 우회된다 — 전체 상한이 그 축을 닫는다.

@@ -1763,9 +1763,11 @@ fn state_of(status: Option<&AgentStatus>) -> &'static str {
 
 /// 지목 토큰 → 에이전트 하나.
 ///
-/// ★규칙(우편 입구와 **같아야** 한다)★: ① agent id 문자열 정확 일치를 먼저 본다 — UUID 처럼 생긴
-/// *이름* 이 id 지목을 가로채지 못하게 ② 그다음 이름 **정확** 일치(대소문자 구분 · 접두 매칭 없음 ·
-/// 공백 보정 없음) ③ 같은 이름이 둘 이상이면 아무도 고르지 않고 거부한다.
+/// ★규칙(우편 입구와 **같아야** 한다)★: ① agent id 일치를 먼저 본다 — UUID 처럼 생긴 *이름* 이 id 지목을
+/// 가로채지 못하게 ② 그다음 이름 **정확** 일치(대소문자 구분 · 접두 매칭 없음 · 공백 보정 없음) ③ 같은 이름이
+/// 둘 이상이면 아무도 고르지 않고 거부한다.
+/// ★알고 남긴 불일치 하나 — id 철자★: 여기는 `Uuid` 가 읽는 철자 전부(대문자 · 중괄호 · 하이픈 없음 · `urn:uuid:`)를
+/// id 로 받고, 우편 입구는 정규 철자(소문자 하이픈)만 받는다. 데몬 crate 의 교차 대조 테스트가 그 차이를 양쪽 다 단언한다.
 /// ★관대한 해석기를 들이지 말 것★: 사람과 LLM 은 우편의 수신자 토큰과 제어의 지목 토큰이 같은 X 를
 /// 가리킨다고 읽는다. 두 입구의 해석이 갈리면 편지를 받은 에이전트와 이름이 바뀐 에이전트가 달라진다 —
 /// 그 일치는 데몬 crate 의 교차 대조 테스트가 [`resolve_in`] 을 태워 지킨다.
@@ -1793,8 +1795,13 @@ pub fn resolve_in(roster: &[AgentRosterRow], token: &str) -> Result<ResolvedAgen
         id: row.id,
         name: row.canonical_name.clone(),
     };
-    if let Some(row) = roster.iter().find(|r| r.id.to_string() == token) {
-        return Ok(found(row));
+    // ★정규 철자로 견주지 않는다★: 데몬이 셸 명령의 에이전트 칸(옛 `agent_id` 포함)을 이 함수로 바꾸므로(ADR-0308)
+    //   정규 철자만 맞추면 대문자 등 다른 철자의 id 를 보내던 옛 호출자가 `NOT_FOUND` 를 받는다. 명부에 없는 id 꼴은
+    //   이름으로 넘어간다.
+    if let Ok(id) = AgentId::parse_str(token) {
+        if let Some(row) = roster.iter().find(|r| r.id == id) {
+            return Ok(found(row));
+        }
     }
     let same_name: Vec<&AgentRosterRow> = roster
         .iter()
@@ -4278,6 +4285,50 @@ mod tests {
                 "{miss}"
             );
         }
+    }
+
+    /// ★id 는 `Uuid` 가 읽는 철자 전부로 받는다 — 이름보다 먼저★: 대문자 철자를 이름으로 단 다른 에이전트가 있어도 id 가
+    /// 이긴다. 명부에 없는 id 꼴은 이름으로 넘어가 없음이다.
+    #[test]
+    fn resolve_in_reads_every_uuid_spelling_as_the_id_before_names() {
+        let alpha = AgentId::new_v4();
+        let upper = alpha.to_string().to_uppercase();
+        let row = |id: AgentId, name: &str| AgentRosterRow {
+            id,
+            canonical_name: name.to_string(),
+            cwd: String::new(),
+            parent: None,
+            live: None,
+        };
+        let roster = vec![row(alpha, "alpha"), row(AgentId::new_v4(), &upper)];
+
+        for spelling in [
+            upper.clone(),
+            format!("{{{alpha}}}"),
+            format!("{{{upper}}}"),
+            alpha.simple().to_string(),
+            alpha.simple().to_string().to_uppercase(),
+            alpha.urn().to_string(),
+        ] {
+            assert_eq!(
+                resolve_in(&roster, &spelling).expect("id 철자").id,
+                alpha,
+                "{spelling}"
+            );
+        }
+        let ghost = AgentId::new_v4().to_string().to_uppercase();
+        assert_eq!(
+            resolve_in(&roster, &ghost)
+                .expect_err("명부에 없는 id")
+                .code(),
+            ErrorCode::NotFound
+        );
+        assert_eq!(
+            resolve_in(&roster, &format!(" {alpha}"))
+                .expect_err("공백 보정 없음")
+                .code(),
+            ErrorCode::NotFound
+        );
     }
 
     // ── 지목 실패의 후보(TRD S28 §6) ───────────────────────────────────────────────
