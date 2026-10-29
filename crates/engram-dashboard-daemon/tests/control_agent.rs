@@ -1865,7 +1865,7 @@ mod resolver_alignment {
             AddressingSources {
                 roster: self.live_agents(),
                 // 잠든 층을 비워 두 해석기의 정의역을 맞춘다(위 모듈 주석).
-                dormant_names: vec![],
+                dormant: vec![],
             }
         }
         fn is_agent_live(&self, id: PeerId) -> bool {

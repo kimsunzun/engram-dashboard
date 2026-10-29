@@ -40,6 +40,19 @@ pub mod service;
 ///   그대로 버틴다.
 pub type PeerId = uuid::Uuid;
 
+/// 시험용 결정적 id — 같은 이름이면 늘 같은 id 다. 같은 이름으로 다시 띄운 에이전트를 「같은 에이전트의
+/// 새 화신」으로 읽게 한다(ADR-0309 — 우편 키가 id). 서로 다른 실체여야 하는 동명은 이걸 쓰지 않는다.
+/// std 만 쓰는 FNV-1a 128 이다 — uuid `v5` 기능을 들이면 의존 상한(ADR-0110)이 바뀐다.
+#[cfg(test)]
+pub(crate) fn tid(name: &str) -> PeerId {
+    const OFFSET: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
+    const PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
+    let hash = name
+        .bytes()
+        .fold(OFFSET, |h, b| (h ^ u128::from(b)).wrapping_mul(PRIME));
+    PeerId::from_u128(hash)
+}
+
 /// ★왜 데몬의 `BoundIdentity` 를 안 쓰나★: 그건 제어 채널 토큰 바인딩 개념(호스트 인증의 산물)이라
 ///   메시징 커널이 알 이유가 없다. 커널이 쓰는 건 "누가·어느 세대로 보냈나" 두 필드뿐이다. 호스트가
 ///   경계에서 2필드 복사로 변환한다(데몬 측 `From<BoundIdentity>`).

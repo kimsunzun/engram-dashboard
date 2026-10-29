@@ -53,7 +53,7 @@ pub struct MemberPools<'a> {
     pub live: &'a [String],
     /// 잠든 이름들(프로필 실재·그 세션은 살아 있지 않음) — **`@all` 만** 이걸 함께 읽는다.
     ///   ★중복을 접지 않은 채 온다★: 이 층의 계약이 **호출자가 준 풀을 verbatim 돌려준다**(정렬·dedup·필터
-    ///   금지)라서다. 동명 판정은 상위가 `AddressingSources.dormant_names` 를 직접 세어 하므로
+    ///   금지)라서다. 동명 판정은 상위가 `AddressingSources.dormant` 를 직접 세어 하므로
     ///   (service.rs `push_recipient`) 여기서 접든 안 접든 결과 행은 같지만, 판정 지식을 이 층에 흘리지
     ///   않는 것 자체가 seam 계약이다.
     pub dormant: &'a [String],

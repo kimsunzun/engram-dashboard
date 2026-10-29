@@ -65,7 +65,8 @@ use engram_dashboard_agent::types::{
 use engram_dashboard_messaging::busy::{BusyGate, BusyPolicy, IdleNotifier, TurnFact, TurnFacts};
 use engram_dashboard_messaging::envelope::{DeliveryObservation, EnvelopeFormat};
 use engram_dashboard_messaging::service::{
-    AddressingSources, ControlPlanePort, DeliveryPort, InjectReceipt, LiveAgent, MessagingService,
+    AddressingSources, ControlPlanePort, DeliveryPort, DormantAgent, InjectReceipt, LiveAgent,
+    MessagingService,
 };
 use engram_dashboard_messaging::PeerId;
 
@@ -176,11 +177,13 @@ impl DeliveryPort for ManagerDeliveryPort {
     /// ★차집합 계산은 여기 없다(ADR-0119 결정 2)★: 옛날엔 이 함수가 산 목록과 프로필 목록을 각자 떠서
     ///   id 차집합으로 잠든 이름을 만들었다 — 그 합성이 프론트에도 사본으로 있어 한쪽만 고쳐지는 drift 가
     ///   확정적이었다. 이제 합성은 매니저 한 곳이고 여기는 포워딩이다. **여기서 다시 합치지 말 것.**
-    /// ★정렬★: 잠든 이름도 `@all` 결정성 때문에 정렬해 둔다(위 `live_agents` doc).
+    /// ★정렬★: 잠든 쪽도 `@all` 결정성 때문에 (이름, id) 로 정렬해 둔다(위 `live_agents` doc · `sort_key` 와
+    ///   같은 2차 키).
     // ADR-0119 (명부 단일 입구 — 이 함수는 포워더)
+    // ADR-0309 (결정 3 — 잠든 쪽은 (id, 이름) 쌍)
     fn addressing_sources(&self) -> AddressingSources {
         let mut roster: Vec<LiveAgent> = Vec::new();
-        let mut dormant_names: Vec<String> = Vec::new();
+        let mut dormant: Vec<DormantAgent> = Vec::new();
         for entry in self.manager.roster() {
             match entry.live {
                 // 산 명단은 `live_agents` 와 **같은 술어**여야 한다(위 doc) — 여기만 걸고 한쪽을 빠뜨리면
@@ -191,15 +194,15 @@ impl DeliveryPort for ManagerDeliveryPort {
                 //   만료). 여기까지 거르면 셸 프로필을 산 에이전트 대역으로 쓰는 기존 통합 테스트의 전제가
                 //   무너진다 — 그 fixture 전략은 별도 결정 사항이라 이 수정에서 건드리지 않는다.
                 Some(_) => {}
-                None => dormant_names.push(entry.canonical_name),
+                None => dormant.push(DormantAgent {
+                    id: entry.id,
+                    name: entry.canonical_name,
+                }),
             }
         }
         roster.sort_by(sort_key);
-        dormant_names.sort();
-        AddressingSources {
-            roster,
-            dormant_names,
-        }
+        dormant.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+        AddressingSources { roster, dormant }
     }
 
     fn is_agent_live(&self, id: PeerId) -> bool {
@@ -1223,8 +1226,21 @@ mod tests {
             // ★하네스 seam 으로 심는다(ADR-0120)★: 정상 경로(`try_create_agent`)는 명부 전역 이름 유일성을
             //   강제해 동명 2건을 **만들 수 없다**. 유일성이 데이터 전체에 적용되기 전(기존 agents.json)엔
             //   이 상태가 실재할 수 있다.
-            manager.seed_agent_bypassing_uniqueness(profile("raw-twin-a", "twin"));
-            manager.seed_agent_bypassing_uniqueness(profile("raw-twin-b", "twin"));
+            let twin_a = profile("raw-twin-a", "twin");
+            let twin_b = profile("raw-twin-b", "twin");
+            let mut expected = vec![
+                DormantAgent {
+                    id: twin_a.id,
+                    name: "twin".to_string(),
+                },
+                DormantAgent {
+                    id: twin_b.id,
+                    name: "twin".to_string(),
+                },
+            ];
+            expected.sort_by_key(|d| d.id);
+            manager.seed_agent_bypassing_uniqueness(twin_a);
+            manager.seed_agent_bypassing_uniqueness(twin_b);
 
             let sources = port.addressing_sources();
             assert!(
@@ -1232,9 +1248,43 @@ mod tests {
                 "스폰이 없으므로 로스터는 비어야: {sources:?}"
             );
             assert_eq!(
-                sources.dormant_names,
-                vec!["twin".to_string(), "twin".to_string()],
-                "동명 잠듦 2건은 canonical 이름 그대로 2건 올라와야: {sources:?}"
+                sources.dormant, expected,
+                "동명 잠듦 2건은 각자의 id 와 canonical 이름 그대로 2건 올라와야(이름 · id 순): {sources:?}"
+            );
+        }
+
+        /// ★잠든 에이전트를 개명해도 id 는 그대로다(ADR-0309 결정 1)★ — 대기 우편 · 계약이 그 id 에 묶이므로,
+        ///   어댑터가 넘기는 쌍의 id 가 개명으로 바뀌면 그 에이전트가 자기 우편 · 의무를 잃는다.
+        #[test]
+        fn a_renamed_dormant_profile_is_reported_with_the_same_id_and_the_new_name() {
+            let manager = manager("dormant-rename");
+            let port = ManagerDeliveryPort::new(manager.clone());
+            let sleeper = profile("raw-sleeper", "before");
+            let id = sleeper.id;
+            manager.seed_agent_bypassing_uniqueness(sleeper);
+            assert_eq!(
+                port.addressing_sources().dormant,
+                vec![DormantAgent {
+                    id,
+                    name: "before".to_string()
+                }],
+                "전제: 잠든 쌍"
+            );
+
+            let outcome = manager
+                .try_rename_agent(id, Some("after".to_string()))
+                .expect("저장 성공");
+            assert!(
+                matches!(&outcome, engram_dashboard_agent::manager::RenameOutcome::Renamed(n) if n == "after"),
+                "전제: 개명이 확정됐다: {outcome:?}"
+            );
+            assert_eq!(
+                port.addressing_sources().dormant,
+                vec![DormantAgent {
+                    id,
+                    name: "after".to_string()
+                }],
+                "같은 id · 새 이름이어야"
             );
         }
 
@@ -1257,15 +1307,20 @@ mod tests {
                 .any(|a| a.id == info.id)));
             // ★하네스 seam★: 산 `twin` 이 이미 명부에 있으므로 정상 경로면 `twin(1)` 로 개명된다
             //   (ADR-0120). 이 테스트가 보는 건 **차집합 축이 id 라는 사실**이라 이름이 같아야 성립한다.
-            manager.seed_agent_bypassing_uniqueness(profile("raw-dormant-twin", "twin"));
+            let dormant_twin = profile("raw-dormant-twin", "twin");
+            let dormant_id = dormant_twin.id;
+            manager.seed_agent_bypassing_uniqueness(dormant_twin);
 
             let sources = port.addressing_sources();
             // ★전제가 바뀌었다★: 산 쪽은 셸이라 배달 명단엔 안 오른다(`reads_messages`). 그래도 이 테스트가
             //   보는 축은 그대로다 — 차집합은 **agent `roster()`** 가 id 로 끝내고 어댑터는 그 뒤에서 거를
             //   뿐이라, 이름 축으로 빼는 회귀가 생기면 산 `twin` 이 잠든 `twin` 을 삼켜 아래가 비어 버린다.
             assert_eq!(
-                sources.dormant_names,
-                vec!["twin".to_string()],
+                sources.dormant,
+                vec![DormantAgent {
+                    id: dormant_id,
+                    name: "twin".to_string()
+                }],
                 "산 쪽은 id 로 빠지고 잠든 동명은 남아야(이름 축으로 빼면 비어 버린다): {sources:?}"
             );
 
@@ -1733,7 +1788,7 @@ mod tests {
         fn addressing_sources(&self) -> AddressingSources {
             AddressingSources {
                 roster: self.agents(),
-                dormant_names: vec![],
+                dormant: vec![],
             }
         }
         fn is_agent_live(&self, id: PeerId) -> bool {

@@ -6075,7 +6075,7 @@ mod tests {
             )
             .expect("행 응답");
         assert_eq!(
-            messaging.contract_outcome_for_test("m-out", "sleepy"),
+            messaging.contract_outcome_for_test("m-out", sleepy.id),
             Some("awaiting_reply"),
             "boss 가 요청자인 계약이 열렸다"
         );
@@ -6113,7 +6113,7 @@ mod tests {
             "★D1★ 산 세션의 파킹 메일이 삭제 정리에 죽었다(게이트가 이름 축이면 여기서 0이 된다)"
         );
         assert_eq!(
-            messaging.contract_outcome_for_test("m-out", "sleepy"),
+            messaging.contract_outcome_for_test("m-out", sleepy.id),
             Some("awaiting_reply"),
             "★D1★ 산 세션이 요청자인 계약이 실패 종결됐다(ADR-0118 결정 2 위반)"
         );
