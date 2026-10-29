@@ -6059,7 +6059,7 @@ mod tests {
             engram_dashboard_messaging::service::SendStatus::Pending,
             "잠든 프로필 이름 앞으로 파킹된다: {rows:?}"
         );
-        assert_eq!(messaging.parked_len("boss"), 1);
+        assert_eq!(messaging.parked_len(boss.id), 1);
         messaging
             .handle_send(
                 "m-out",
@@ -6108,7 +6108,7 @@ mod tests {
 
         // (6) 보호 단언.
         assert_eq!(
-            messaging.parked_len("boss"),
+            messaging.parked_len(boss.id),
             1,
             "★D1★ 산 세션의 파킹 메일이 삭제 정리에 죽었다(게이트가 이름 축이면 여기서 0이 된다)"
         );
@@ -6144,7 +6144,7 @@ mod tests {
         )
         .await;
         assert_eq!(
-            messaging.parked_len("sleepy"),
+            messaging.parked_len(sleepy.id),
             0,
             "잠든 프로필 삭제는 정리가 발동해야(이름을 제거 전에 뽑았다는 증거)"
         );
@@ -6254,7 +6254,7 @@ mod tests {
             core.manager.agent_snapshot(sleepy.id).is_some(),
             "지우지 않았다"
         );
-        assert_eq!(messaging.parked_len("sleepy"), 1, "정리 훅이 돌지 않았다");
+        assert_eq!(messaging.parked_len(sleepy.id), 1, "정리 훅이 돌지 않았다");
         assert_eq!(fanout.texts().len(), before, "브로드캐스트 0");
 
         // 대조 — 저장되면 같은 요청이 지우고 훅이 그 우편을 정리한다.
@@ -6273,7 +6273,7 @@ mod tests {
             "{:?}",
             mock.events()
         );
-        assert_eq!(messaging.parked_len("sleepy"), 0, "저장되면 훅이 돈다");
+        assert_eq!(messaging.parked_len(sleepy.id), 0, "저장되면 훅이 돈다");
         assert!(fanout.texts().len() > before, "저장되면 명부를 민다");
     }
 
