@@ -472,7 +472,7 @@ struct MessagingState {
     /// ★집합이면 충분하다(refcount 아님)★: 한 드레인은 타깃마다 최대 1회 등록하고(그룹이 타깃별로
     /// 유일하다), 두 드레인이 같은 타깃을 동시에 잡는 것이 바로 이 가드가 막는 것이다.
     /// ★해제는 `FlightSettle` 이 단독으로 진다★ — 누수 = 그 세션이 **영영** 메일을 못 받는다.
-    /// ★이 축에는 fail-open 도 sweep 도 없다(의도 — 이웃 축과 다르다)★: 이름 축 분모는 `saturating_sub` 로
+    /// ★이 축에는 fail-open 도 sweep 도 없다(의도 — 이웃 축과 다르다)★: 수신자 id 축 분모는 `saturating_sub` 로
     /// 수렴하고 busy 게이트는 `BUSY_MAX_TURN` 상한이 깨우지만, 여기 갇히면 **조용히 영구**다. 그것을 막는
     /// 불변식은 하나뿐이다 — **`insert` 가 실행된 경로에서는, 그 해제를 소유하는 `FlightSettle` 이 생성되기
     /// 전까지 실패할 수 있는 것(early return · `?` · 패닉하는 호출)이 하나도 없어야 한다**(생성 뒤로는 어느
@@ -1921,11 +1921,10 @@ impl MessagingService {
             .collect()
     }
 
-    /// 특정 msg_id 의 배달기록 **종점 키**(수신자 키) 목록, 오래된 순.
+    /// 특정 msg_id 의 배달기록 수신자 이름(`to`) 목록, 오래된 순.
     ///
-    /// ★왜 상태가 아니라 키를 보나★: 한 발송의 행마다 장부 종점이 **정확히 하나**여야 한다(spec §8). 상태
-    ///   목록만 보면 "행 수 == 레코드 수" 는 확인되지만 **두 행이 같은 키를 발급받아 서로를 덮는** 충돌은
-    ///   보이지 않는다(F2 의 (b) 갈래). 그래서 키 자체를 노출한다.
+    /// ★종점 키가 아니다★: 장부 종점 키는 `(msg_id, to_id)` 다(ADR-0309). 동명 쌍둥이는 같은 `to` 를 가질 수
+    ///   있으므로, 이 목록의 중복은 키 충돌이 아니다 — 행마다 종점이 하나인지는 `ledger_statuses` 로 본다.
     #[cfg(any(test, feature = "test-harness"))]
     pub fn ledger_endpoint_keys(&self, msg_id: &str) -> Vec<String> {
         let st = self.state.lock().expect("messaging state poisoned");
@@ -2859,7 +2858,7 @@ fn ambiguous_hint(display: &str, count: usize, layer: &str) -> String {
 
 /// ★삭제 정리로 종결된 파킹분의 조회 힌트(spec §6 `RECIPIENT_DELETED`)★ — 코드 옆에 다음 행동까지 실어 준다.
 fn deleted_hint() -> String {
-    "The recipient was deleted while this message was still parked, so it was closed as undelivered — that name no longer exists, resending is pointless. Tell the user if this still matters.".to_string()
+    "The recipient was deleted while this message was still parked, so it was closed as undelivered. The name may now belong to a different agent — do not resend automatically; tell the user.".to_string()
 }
 
 /// 잠듦 파킹 hint(spec §5 분기 3 — ADR-0116 결정 1). 발신자가 "왜 pending 인가" 와 결말을 읽게 한다.
@@ -3148,7 +3147,7 @@ fn log_evicted_transitions(evicted: &[EvictedTransition]) {
 ///   분모를 **어떤 경로로 flush 를 빠져나가든** 반드시 내린다.
 ///
 /// ★왜 스택 가드인가★: 배달 루프는 타깃마다 early break 가 있고 중간에 외부 호출(inject)이 섞여 있다.
-///   정산을 갈래마다 흩뿌리면 한 곳만 놓쳐도 그 수신자 레인의 분모가 **영구히** 부풀어(누수) 그 이름 앞
+///   정산을 갈래마다 흩뿌리면 한 곳만 놓쳐도 그 수신자 레인의 분모가 **영구히** 부풀어(누수) 그 id 앞
 ///   메일이 영영 안 들어간다 — 조용한 유실보다 고치기 어려운 실패 모드다. 그래서 "남은 건 Drop 이 갚는다"
 ///   로 뒤집어, 갈래별 정산은 **최적화**(분모를 실제 미결 건수에 맞추기)일 뿐 정확성 조건이 아니게 만든다.
 /// ★Drop 에서 락 실패를 삼키는 이유★: 언와인딩 중일 수 있고, 그때 messaging 락은 이미 poisoned 다. 거기서
@@ -3160,7 +3159,7 @@ struct FlightSettle<'a> {
     svc: &'a MessagingService,
     recipient: PeerId,
     owed: FlightTicket,
-    /// 이 배치가 잡고 있는 **해석된 타깃** id — 이름 축 영수증과 같은 가드가 함께 놓는다.
+    /// 이 배치가 잡고 있는 **해석된 타깃** id — 수신자 id 축 영수증과 같은 가드가 함께 놓는다.
     ///   ★누수하면 그 세션은 영영 메일을 못 받는다★(모든 후속 드레인이 타깃 축에서 물러난다).
     // ADR-0142
     targets: Vec<PeerId>,
@@ -9509,6 +9508,47 @@ mod tests {
         );
     }
 
+    /// ★못 풀린 토큰의 반복도 한 행으로 접힌다★ — 행 키가 id 가 없을 때는 표기라(`same_row`), 같은 표기의
+    ///   없음 · 모호 토큰은 실패 행과 장부 행을 하나씩만 남긴다.
+    #[test]
+    fn a_repeated_unresolved_token_yields_exactly_one_failed_row() {
+        let (svc, port) = svc();
+        let (from, me) = live_sender("alice");
+        port.set_roster(vec![me]);
+        let out = send(&svc, "m1", from, "alice", &["ghost", "ghost"]).expect("ok");
+        assert_eq!(
+            rows(&out),
+            vec![(
+                "ghost".to_string(),
+                SendStatus::Failed,
+                Some(FailCode::RecipientNotFound)
+            )],
+            "없는 이름의 반복은 실패 행 하나: {out:?}"
+        );
+        assert_eq!(svc.ledger_statuses("m1"), vec![DeliveryStatus::Failed]);
+
+        let (svc2, port2) = super::tests::svc();
+        let (from2, me2) = live_sender("alice");
+        let (_d1, dup1) = live_distinct("dup");
+        let (_d2, dup2) = live_distinct("dup");
+        port2.set_roster(vec![me2, dup1, dup2]);
+        let out2 = send(&svc2, "m2", from2, "alice", &["dup", "dup"]).expect("ok");
+        assert_eq!(
+            rows(&out2),
+            vec![(
+                "dup".to_string(),
+                SendStatus::Failed,
+                Some(FailCode::RecipientAmbiguous)
+            )],
+            "모호한 이름의 반복은 실패 행 하나: {out2:?}"
+        );
+        assert_eq!(svc2.ledger_statuses("m2"), vec![DeliveryStatus::Failed]);
+        assert!(
+            port2.injected_targets().is_empty(),
+            "아무에게도 주입하지 않는다"
+        );
+    }
+
     /// ★id 가 먼저, 그다음 이름(제어 입구 `resolve_in` 과 같은 순서)★ — UUID 처럼 생긴 이름은 남의 id 지목을
     ///   가로채지 못하고, 명부에 없는 id 꼴이면 그 이름으로 풀린다.
     #[test]
@@ -10224,7 +10264,7 @@ mod tests {
                 .hint
                 .as_deref()
                 .unwrap_or("")
-                .contains("resending is pointless"),
+                .contains("do not resend automatically"),
             "조회 힌트가 다음 행동을 말해야: {:?}",
             view.rows[0].hint
         );

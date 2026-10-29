@@ -139,9 +139,9 @@ pub struct MessageRecord {
     pub from: String,
     /// 발신자 에이전트 id. 데몬 통지(`<notice>`)는 nil(service `daemon_identity`).
     pub from_id: PeerId,
-    /// 수신자 이름 — 보낼 때 스냅숏. 받는 이를 못 찾은 실패 행이면 발신자가 쓴 표기(또는 그 내부 키)다.
+    /// 수신자 이름 — 보낼 때 스냅숏. 받는 이를 못 찾은 실패 행이면 발신자가 쓴 표기다.
     pub to: String,
-    /// 수신자 에이전트 id. `None` = 받는 이를 못 찾은 실패 행(없음 · 동명 · 접힌 중복) — 그 행은 이미 종점이라
+    /// 수신자 에이전트 id. `None` = 받는 이를 못 찾은 실패 행(없음 · 동명) — 그 행은 이미 종점이라
     ///   id 로 다시 고를 일이 없다.
     // ADR-0309 (결정 1 · 4)
     pub to_id: Option<PeerId>,
