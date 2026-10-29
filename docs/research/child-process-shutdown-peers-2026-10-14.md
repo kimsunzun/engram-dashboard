@@ -1,6 +1,6 @@
 # 자식 프로세스 종료 방식 — 피어 서베이 (2026-10-14)
 
-- **상태:** 조사 완료 · 결정 없음(사용자 판단 대기)
+- **상태:** 조사 완료 · 결정 = C(Engram 이 띄우는 claude 자식 env 에 `DISABLE_AUTOUPDATER=1` — 사용자 2026-10-20) · 구현 2026-10-30(`crates/engram-dashboard-agent/src/backend/claude/mod.rs` 의 `NO_AUTOUPDATE_ENV` — 에이전트 스폰 · 사용량 조회 둘 다 · 프로필에 같은 키가 있으면 그 값이 이긴다) · ★그 env 가 실제로 업데이트를 막는지는 실 claude 로 재지 않았다★(문서 근거 — 아래 §3)
 - **방법:** research 스킬 medium — 수집자 4갈래(멀티플렉서 소스 · 에이전트 매니저 소스 · Windows 콘솔/터미널 문서 · claude 업데이터 문서/이슈) → 메인 grounding(로컬 클론 `파일:줄` 재열람 5건 · `gh issue view` 1건) → cross-family 적대 리뷰(결과는 아래 「적대 리뷰」 절)
 - **확신도 범례:** 확실 = 독립 출처 둘 이상 또는 코드 직접 확인 · 가능성 높음 = 단일 출처로 지지 · 불확실 = 근거 약함 · 모름 = 못 찾음
 - **계기:** Engram 이 claude 를 강제 종료할 때 claude 의 백그라운드 자동 업데이트가 중간에 끊겨 설치가 깨진다는 사용자 관찰. 질문 = 「Engram 이 대응해야 하나, claude 자체 문제인가」 · 「다른 곳은 어떻게 끄나」.

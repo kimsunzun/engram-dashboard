@@ -799,7 +799,7 @@ fn advance_lane(
 /// ★주입 타깃 = 도어벨 id★: 커널 `MessagingService::drain_queue` 는 명부에서 id 가 그 큐 id 와 같은 항목에만
 ///   주입한다(ADR-0309) — 큐 id = 도어벨 id 라 도어벨 id 가 다른 두 레인이 한 세션으로 수렴하지 않는다.
 ///   커널의 **타깃 축 in-flight 가드**(ADR-0142)는 남아 있지만 그 축을 세운 계기(다른 두 큐가 한 세션으로
-///   수렴)는 이제 생기지 않는다 — 걷을지는 `docs/tracking.md` T-29 가 맡는다.
+///   수렴)는 이제 생기지 않는다 — 걷을지는 `docs/tracking.md` T-30 이 맡는다.
 ///
 /// ★디스패처 자신은 막지 않는다★: 띄운 blocking task 를 **인라인 await 하지 않는다**. 완료는 별도 채널로
 ///   돌아오고(`DeliveryDone`), 그 사이에도 `lane_rx` 를 계속 비운다 — 이 성질이 깨지면 수신자별 직렬화만
