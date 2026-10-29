@@ -1713,25 +1713,34 @@ mod tests {
 
     // ── 9c. 배달 레인: 수신자별 직렬 · 수신자 간 병렬 ─────────────────────────────────────────
 
-    /// 배달 클로저의 진입/이탈 표식. Appear/Idle 이 서로 **다른 포트 조회**로 시작하므로 같은 수신자
-    /// 앞에서도 두 배달을 구분할 수 있다.
+    use engram_dashboard_messaging::envelope::Entrance;
+    use engram_dashboard_messaging::service::{SendMeta, SendStatus};
+    use engram_dashboard_messaging::SenderIdentity;
+
+    /// 배달 클로저의 진입/이탈 표식. 로스터 조회 표식엔 수신자가 없고 주입 표식엔 있다(`LaneProbe` 헤더).
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Probe {
-        EnterAppear,
-        ExitAppear,
-        EnterIdle(AgentId),
-        ExitIdle(AgentId),
+        EnterDrain,
+        ExitDrain,
+        EnterInject(AgentId),
+        ExitInject(AgentId),
     }
 
     /// 배달 클로저의 진입/이탈을 관측하고 **시점을 테스트가 통제**하게 하는 fake DeliveryPort.
     ///
-    /// ★관측점이 하필 로스터 조회인 이유(커널 코드가 정하는 외부 사실)★: 파킹이 비어 있는 수신자의 비동기
-    ///   flush 는 이 포트를 **정확히 한 번** 부른 뒤 조기 반환한다 — `flush_for_agent` 는 `canonical_name`
-    ///   (그 뒤 빈 큐 조기 반환), `flush_for` 는 `drain_queue` 의 `live_agents`(그 뒤 빈 배치). 그래서 그 두
-    ///   조회가 "이 배달 클로저가 지금 blocking pool 에서 돌고 있다" 의 표식이 된다 — 파킹·게이트·실
-    ///   에이전트 조립 없이 배달의 시작과 끝을 잡을 수 있다.
+    /// ★관측점 둘(커널 코드가 정하는 외부 사실)★
+    ///   - **로스터 조회(`live_agents`)** — 그 수신자 큐에 편지가 있으면 Appear(`flush_for`)든 Idle
+    ///     (`flush_for_agent`)든 드레인 머리에서 이 포트를 정확히 한 번 부른다. ★큐가 빈 수신자의 Idle 은 포트를
+    ///     한 번도 부르지 않는다★(`flush_for_agent` 의 빈 큐 조기 반환) — Appear 는 큐와 무관하게 부른다. 같은
+    ///     수신자 앞 두 배달의 순서는 이 차이로 가린다.
+    ///   - **주입(`inject`)** — 받는 이가 깨어 있으면 드레인이 그 id 로 부른다. 수신자가 실리는 표식은 이것뿐이다.
+    ///
+    /// ★편지는 잠든 동안 맡긴다(`park_while_asleep`)★: 깨어 있는 수신자 앞 발송은 테스트 스레드에서 곧장
+    ///   드레인해 표식이 레인 밖에서 찍힌다. 잠든 수신자 앞 발송은 파킹만 하고 flush 를 부르지 않는다.
     struct LaneProbe {
-        roster: Vec<(AgentId, String)>,
+        agents: Vec<(AgentId, String)>,
+        /// 거짓 = 전원 잠듦(로스터가 비고 잠든 쪽에만 보인다) · 참 = 전원 깨어 있음.
+        awake: std::sync::atomic::AtomicBool,
         events: mpsc::UnboundedSender<Probe>,
         /// 이 표식으로 진입한 클로저는 허가를 받을 때까지 막힌다.
         blocked: Vec<Probe>,
@@ -1745,7 +1754,10 @@ mod tests {
 
     impl LaneProbe {
         fn agents(&self) -> Vec<LiveAgent> {
-            self.roster
+            if !self.awake.load(std::sync::atomic::Ordering::SeqCst) {
+                return Vec::new();
+            }
+            self.agents
                 .iter()
                 .map(|(id, name)| LiveAgent {
                     id: *id,
@@ -1754,6 +1766,10 @@ mod tests {
                     turn_signal: false,
                 })
                 .collect()
+        }
+
+        fn wake(&self) {
+            self.awake.store(true, std::sync::atomic::Ordering::SeqCst);
         }
 
         fn checkpoint(&self, enter: Probe, exit: Probe) {
@@ -1778,34 +1794,48 @@ mod tests {
     }
 
     impl DeliveryPort for LaneProbe {
-        fn inject(&self, _to_id: PeerId, _bytes: &[u8]) -> Result<InjectReceipt, String> {
-            unreachable!("파킹이 비어 있으므로 주입까지 가지 않는다")
+        fn inject(&self, to_id: PeerId, bytes: &[u8]) -> Result<InjectReceipt, String> {
+            self.checkpoint(Probe::EnterInject(to_id), Probe::ExitInject(to_id));
+            Ok(InjectReceipt {
+                bytes_requested: bytes.len(),
+                bytes_written: bytes.len(),
+                msg_uuid: PeerId::new_v4(),
+                epoch: 0,
+            })
         }
         fn live_agents(&self) -> Vec<LiveAgent> {
-            self.checkpoint(Probe::EnterAppear, Probe::ExitAppear);
+            self.checkpoint(Probe::EnterDrain, Probe::ExitDrain);
             self.agents()
         }
         fn addressing_sources(&self) -> AddressingSources {
-            AddressingSources {
-                roster: self.agents(),
-                dormant: vec![],
-            }
+            let roster = self.agents();
+            let dormant = if roster.is_empty() {
+                self.agents
+                    .iter()
+                    .map(|(id, name)| DormantAgent {
+                        id: *id,
+                        name: name.clone(),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            AddressingSources { roster, dormant }
         }
         fn is_agent_live(&self, id: PeerId) -> bool {
-            self.roster.iter().any(|(rid, _)| *rid == id)
+            self.agents().iter().any(|a| a.id == id)
         }
         fn live_id_for_name(&self, name: &str) -> Option<PeerId> {
-            self.roster
-                .iter()
-                .find(|(_, n)| n == name)
-                .map(|(id, _)| *id)
+            self.agents()
+                .into_iter()
+                .find(|a| a.name == name)
+                .map(|a| a.id)
         }
         fn canonical_name(&self, id: PeerId) -> Option<String> {
-            self.checkpoint(Probe::EnterIdle(id), Probe::ExitIdle(id));
-            self.roster
-                .iter()
-                .find(|(rid, _)| *rid == id)
-                .map(|(_, n)| n.clone())
+            self.agents()
+                .into_iter()
+                .find(|a| a.id == id)
+                .map(|a| a.name)
         }
     }
 
@@ -1815,25 +1845,55 @@ mod tests {
         events: mpsc::UnboundedReceiver<Probe>,
         release: std::sync::mpsc::Sender<()>,
         probe: Arc<LaneProbe>,
+        svc: Arc<MessagingService>,
+    }
+
+    impl LaneHarness {
+        /// 잠든 수신자 앞에 편지 한 통을 맡긴다 — 파킹만 하고 flush 를 부르지 않는다(`LaneProbe` 헤더).
+        fn park_while_asleep(&self, name: &str) {
+            let rows = self
+                .svc
+                .handle_send(
+                    &format!("m-{name}"),
+                    SenderIdentity {
+                        peer_id: PeerId::new_v4(),
+                        epoch: 0,
+                    },
+                    "sender",
+                    &[name.to_string()],
+                    "hi",
+                    Entrance::Mcp,
+                    &SendMeta::default(),
+                )
+                .expect("발송 수락");
+            assert_eq!(
+                rows[0].status,
+                SendStatus::Pending,
+                "잠든 수신자 → 파킹: {rows:?}"
+            );
+        }
     }
 
     /// 실 `MessagingService`(fake 포트) + 실 2-레인 worker 조립 — 레인 스케줄링만 관측 대상으로 남긴다.
-    fn lane_harness(roster: Vec<(AgentId, String)>, blocked: Vec<Probe>) -> LaneHarness {
+    ///   수신자는 전원 잠든 채 시작한다(`LaneProbe::wake` 로 깨운다).
+    fn lane_harness(agents: Vec<(AgentId, String)>, blocked: Vec<Probe>) -> LaneHarness {
         let (ev_tx, events) = mpsc::unbounded_channel::<Probe>();
         let (release, release_rx) = std::sync::mpsc::channel::<()>();
         let probe = Arc::new(LaneProbe {
-            roster,
+            agents,
+            awake: std::sync::atomic::AtomicBool::new(false),
             events: ev_tx,
             blocked,
             release: Mutex::new(release_rx),
             inflight: std::sync::atomic::AtomicUsize::new(0),
             peak_inflight: std::sync::atomic::AtomicUsize::new(0),
         });
-        let slot = Arc::new(crate::control::mcp_server::MessagingSlot::new());
-        slot.set(Arc::new(MessagingService::new(
+        let svc = Arc::new(MessagingService::new(
             probe.clone(),
             Arc::new(ControlRegistry::new()),
-        )));
+        ));
+        let slot = Arc::new(crate::control::mcp_server::MessagingSlot::new());
+        slot.set(svc.clone());
         let (tx, rx) = mpsc::unbounded_channel::<FlushMsg>();
         let handles = spawn_flush_worker(
             rx,
@@ -1848,6 +1908,7 @@ mod tests {
             events,
             release,
             probe,
+            svc,
         }
     }
 
@@ -1861,29 +1922,36 @@ mod tests {
     }
 
     /// ★막힌 수신자가 다른 수신자의 배달을 막지 않는다★ — 배달 1건은 제출 페이싱으로 0.5초 넘게 잡혀 있고,
-    /// 그 뒤에 전원이 줄을 서면 페이싱이 필요 없는 수신자까지 그 시간을 낸다.
+    /// 그 뒤에 전원이 줄을 서면 페이싱이 필요 없는 수신자까지 그 시간을 낸다. a 의 주입을 막아 두고 b 가
+    /// 주입까지 완주하는지 본다.
     #[tokio::test]
-    #[ignore = "S29 U2a-2: rewrite"]
     async fn a_stalled_recipient_does_not_hold_up_another_recipients_delivery() {
         let a = AgentId::new_v4();
         let b = AgentId::new_v4();
         let mut h = lane_harness(
             vec![(a, "alpha".to_string()), (b, "bravo".to_string())],
-            vec![Probe::EnterIdle(a)],
+            vec![Probe::EnterInject(a)],
         );
+        h.park_while_asleep("alpha");
+        h.park_while_asleep("bravo");
+        h.probe.wake();
 
         h.tx.send(FlushMsg::Idle { id: a }).expect("수신 레인 수신");
-        assert_eq!(next_probe(&mut h.events).await, Probe::EnterIdle(a));
+        assert_eq!(next_probe(&mut h.events).await, Probe::EnterDrain);
+        assert_eq!(next_probe(&mut h.events).await, Probe::ExitDrain);
+        assert_eq!(next_probe(&mut h.events).await, Probe::EnterInject(a));
         h.tx.send(FlushMsg::Idle { id: b }).expect("수신 레인 수신");
 
         assert_eq!(
             next_probe(&mut h.events).await,
-            Probe::EnterIdle(b),
+            Probe::EnterDrain,
             "a 가 막혀 있어도 b 의 배달은 시작해야"
         );
+        assert_eq!(next_probe(&mut h.events).await, Probe::ExitDrain);
+        assert_eq!(next_probe(&mut h.events).await, Probe::EnterInject(b));
         assert_eq!(
             next_probe(&mut h.events).await,
-            Probe::ExitIdle(b),
+            Probe::ExitInject(b),
             "a 가 아직 막혀 있는 동안 b 는 완주해야"
         );
         assert!(
@@ -1892,23 +1960,24 @@ mod tests {
         );
 
         h.release.send(()).expect("허가");
-        assert_eq!(next_probe(&mut h.events).await, Probe::ExitIdle(a));
+        assert_eq!(next_probe(&mut h.events).await, Probe::ExitInject(a));
         h.handles.shutdown().await;
     }
 
     /// ★같은 도어벨 id 의 배달은 겹치지 않고 디스패치 순서로 돈다★ — 이 축이 배치의 "오래된 순" 을 떠받친다.
     /// (같은 **세션**에 두 배달이 겹치지 않는 보장은 여기 축이 아니다 — `run_flush_lane` 헤더가 가리키는
     /// 커널의 타깃 축 가드 몫이고, 그쪽 회귀는 커널 테스트가 진다.)
+    ///
+    /// ★순서를 가리는 법★: 큐가 빈 채 Appear · Idle 을 차례로 넣는다. Appear 는 빈 큐에도 로스터를 뜨고(첫
+    ///   표식), 그 Appear 가 막혀 있는 동안 편지를 맡긴다. 그래서 둘째 표식은 **큐가 찬 뒤에 시작한 Idle** 만 낼
+    ///   수 있다 — Idle 이 먼저 돌았다면 빈 큐라 표식 없이 끝나 둘째 표식이 오지 않고, 겹쳐 돌았다면 첫 표식이
+    ///   풀리기 전에 둘째가 온다.
     #[tokio::test]
-    #[ignore = "S29 U2a-2: rewrite"]
     async fn same_recipient_deliveries_are_serialized_in_dispatch_order() {
         let a = AgentId::new_v4();
-        let mut h = lane_harness(
-            vec![(a, "alpha".to_string())],
-            vec![Probe::EnterAppear, Probe::EnterIdle(a)],
-        );
+        let mut h = lane_harness(vec![(a, "alpha".to_string())], vec![Probe::EnterDrain]);
 
-        // 둘을 **먼저 다 넣는다** — 직렬화가 없으면 두 배달이 함께 in-flight 가 되어 아래 peak 단언이 잡는다.
+        // 둘을 **먼저 다 넣는다** — 직렬화가 없으면 두 배달이 함께 in-flight 가 되어 아래 단언이 잡는다.
         h.tx.send(FlushMsg::Appear {
             name: "alpha".to_string(),
             id: a,
@@ -1918,18 +1987,19 @@ mod tests {
 
         assert_eq!(
             next_probe(&mut h.events).await,
-            Probe::EnterAppear,
-            "먼저 디스패치한 Appear 가 먼저 시작"
+            Probe::EnterDrain,
+            "먼저 디스패치한 Appear 가 먼저 시작(빈 큐의 Idle 은 표식을 내지 않는다)"
         );
+        h.park_while_asleep("alpha");
         h.release.send(()).expect("허가");
-        assert_eq!(next_probe(&mut h.events).await, Probe::ExitAppear);
+        assert_eq!(next_probe(&mut h.events).await, Probe::ExitDrain);
         assert_eq!(
             next_probe(&mut h.events).await,
-            Probe::EnterIdle(a),
-            "앞 배달이 끝난 뒤에야 다음 배달이 시작"
+            Probe::EnterDrain,
+            "앞 배달이 끝난 뒤에야 다음 배달(Idle — 큐가 찼다)이 시작"
         );
         h.release.send(()).expect("허가");
-        assert_eq!(next_probe(&mut h.events).await, Probe::ExitIdle(a));
+        assert_eq!(next_probe(&mut h.events).await, Probe::ExitDrain);
 
         assert_eq!(
             h.probe.peak(),
