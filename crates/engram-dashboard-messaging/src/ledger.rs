@@ -1018,8 +1018,8 @@ impl Ledger {
         ReplyFailOutcome::Failed
     }
 
-    /// ★요청자 프로필 삭제 정리 — 그 이름이 **요청자**인 오픈 계약을 `reply_failed` 로 종결한다★
-    /// (spec §5 삭제 정리 ② · ADR-0116 결정 3).
+    /// ★요청자 프로필 삭제 정리 — 그 id 가 **요청자**인 오픈 계약을 `reply_failed` 로 종결한다★
+    /// (spec §5 삭제 정리 ② · ADR-0116 결정 3 · ADR-0309 결정 6).
     ///
     /// ★대상 = 요청자(`sender`) 쪽만★: 회신이 갈 곳이 사라졌으므로 그 계약은 결말이 확정됐다. **회신자
     ///   (`recipient`) 쪽이 삭제된 계약은 유지한다** — 발신자는 기한 통지(spec §3 항목 4~5)로 무응답을 알게
@@ -1029,16 +1029,15 @@ impl Ledger {
     ///   `!closed` 필터가 그 규칙을 구조적으로 보장한다.
     /// ★가드 우선(ADR-0118 결정 3)★: 잠정·은퇴 예정 표시 계약은 건너뛰고 그 수를 함께 돌려준다(정산 후
     ///   재발화는 **하지 않는다** — 삭제 정리는 삭제 시점 단발이고, 그 잔여의 결말은 TTL 이다. spec §5).
-    /// ★이름 기준 매칭★: 계약의 `sender` 는 **발송 시점 표시 이름**이라, 개명 전 이름으로 열린 계약은 여기서
-    ///   놓친다(계약은 `sender_id` 도 들고 있다 — 파킹 큐 정리는 이미 id 로 한다, service `handle_profile_deleted`).
-    ///   ★발동 게이트는 그 위에서 id 로 판정한다(리뷰 fix D1 — `service::handle_profile_deleted`)★: 여기까지
-    ///   왔다는 것은 이미 "그 프로필의 세션이 살아 있지 않다" 가 확정됐다는 뜻이다. 게이트(정확성)와 대상
-    ///   선택(이름 축)이 서로 다른 축을 쓰는 것은 의도된 분업이다.
-    // ADR-0116 (결정 3) / ADR-0118 (결정 3)
-    pub fn fail_open_requests_from(&mut self, sender: &str) -> RequesterCleanup {
+    /// ★`sender_id` 로 대조한다 — 이름(`sender`)을 보지 않는다(ADR-0309 결정 6)★: `sender` 는 발송 시점
+    ///   표시 이름이라, 이름으로 고르면 개명 전 이름으로 열린 계약을 놓치고 같은 이름을 가진 다른 에이전트의
+    ///   계약까지 닫는다. 발동 게이트(그 프로필의 세션이 살아 있지 않음)는 호출자가 같은 id 로 먼저 판정한다
+    ///   (`service::handle_profile_deleted`).
+    // ADR-0116 (결정 3) / ADR-0118 (결정 3) / ADR-0309 (결정 6)
+    pub fn fail_open_requests_from(&mut self, sender_id: PeerId) -> RequesterCleanup {
         let mut out = RequesterCleanup::default();
         for r in self.requests.iter_mut() {
-            if r.closed || r.sender != sender {
+            if r.closed || r.sender_id != sender_id {
                 continue;
             }
             if r.provisional || r.pending_retirement {
@@ -1395,7 +1394,7 @@ mod tests {
         reply_by: Option<(Duration, String)>,
         now: Instant,
     ) -> OpenOutcome {
-        let out = l.open_request(id, "alice", sid(), "bob", tid("bob"), reply_by, now);
+        let out = l.open_request(id, "alice", tid("alice"), "bob", tid("bob"), reply_by, now);
         commit(l, Some(id), None);
         out
     }
@@ -3464,7 +3463,15 @@ mod tests {
             MAX_OPEN_REQUESTS,
             "전원 통지 완료 = 은퇴 가능"
         );
-        let marked = match l.open_request("over", "alice", sid(), "bob2", tid("bob2"), None, over) {
+        let marked = match l.open_request(
+            "over",
+            "alice",
+            tid("alice"),
+            "bob2",
+            tid("bob2"),
+            None,
+            over,
+        ) {
             OpenOutcome::OpenedAfterMarking(r) => r,
             other => panic!("표시 후 수용이어야: {other:?}"),
         };
@@ -3481,7 +3488,7 @@ mod tests {
             Some("awaiting_reply")
         );
 
-        let out = l.fail_open_requests_from("alice");
+        let out = l.fail_open_requests_from(tid("alice"));
         assert!(
             !out.failed.iter().any(|(id, _)| id == "r0" || id == "over"),
             "표시된 계약(r0=은퇴 예정 · over=잠정)은 종결 목록에 없어야: {out:?}"
@@ -3591,12 +3598,33 @@ mod tests {
         l.open_request("m-prov", "gone", gone, "w3", c, None, now);
         l.open_request("m-other", "someone", a, "w4", tid("w4"), None, now);
         l.commit_open(Some(("m-other", tid("w4"))), None);
+        // ★id 로 고른다(ADR-0309 결정 6)★: 개명 전 이름으로 연 자기 계약은 잡고, 같은 이름의 남의 계약은 안 닫는다.
+        l.open_request("m-old-name", "old-name", gone, "w5", tid("w5"), None, now);
+        l.commit_open(Some(("m-old-name", tid("w5"))), None);
+        l.open_request(
+            "m-namesake",
+            "gone",
+            tid("namesake"),
+            "w6",
+            tid("w6"),
+            None,
+            now,
+        );
+        l.commit_open(Some(("m-namesake", tid("w6"))), None);
 
-        let out = l.fail_open_requests_from("gone");
+        let out = l.fail_open_requests_from(gone);
         assert_eq!(
             out.failed,
-            vec![("m-open".to_string(), tid("w1"))],
-            "오픈 계약 하나만 종결: {out:?}"
+            vec![
+                ("m-open".to_string(), tid("w1")),
+                ("m-old-name".to_string(), tid("w5")),
+            ],
+            "그 id 가 요청자인 오픈 계약만 종결 — 보낼 때 이름과 무관: {out:?}"
+        );
+        assert_eq!(
+            l.contract_outcome_for_test("m-namesake", tid("w6")),
+            Some("awaiting_reply"),
+            "같은 이름의 다른 에이전트가 요청자인 계약은 그대로"
         );
         assert_eq!(out.guard_held, 1, "잠정 계약은 건너뛴 수로 보고된다");
         assert_eq!(
@@ -3620,8 +3648,8 @@ mod tests {
         );
         assert_eq!(
             l.occupied_slots(),
-            2,
-            "m-prov(잠정) + m-other 만 자리를 차지한다"
+            3,
+            "m-prov(잠정) + m-other + m-namesake 만 자리를 차지한다"
         );
     }
 }

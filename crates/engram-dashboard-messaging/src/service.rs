@@ -250,13 +250,12 @@ pub enum SendReject {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ProfileDeletedOutcome {
-    /// ★조건 미성립★ — 게이트 두 축 중 하나라도 "아직 살아 있다" 여서 아무것도 하지 않았다.
-    ///   어느 축이 막았는지는 이 값으로 구분되지 않는다(로그가 구분한다).
+    /// ★조건 미성립★ — 그 프로필 id 의 세션이 아직 살아 있어서 아무것도 하지 않았다.
     ///   이 값이 `true` 면 나머지 필드는 전부 0이다.
     pub skipped_live: bool,
     /// `failed` + `RECIPIENT_DELETED` 로 종결한 파킹분 수(레인 무관 — notice 포함).
     pub failed_parked: usize,
-    /// `reply_failed` 로 종결한 오픈 계약 수(그 이름이 **요청자**인 것만).
+    /// `reply_failed` 로 종결한 오픈 계약 수(그 프로필 id 가 **요청자**인 것만).
     pub failed_contracts: usize,
     /// 가드(잠정·은퇴 예정) 때문에 건너뛴 계약 수.
     pub guard_held_contracts: usize,
@@ -361,7 +360,7 @@ pub trait DeliveryPort: Send + Sync {
     // ADR-0309 (결정 3 — 잠든 쪽도 (id, 이름) 쌍)
     fn addressing_sources(&self) -> AddressingSources;
 
-    /// ★이 id 의 세션이 **지금 살아 있나**(`Running`|`Exiting` = 로스터와 같은 술어)★.
+    /// ★이 id 의 세션이 **지금 살아 있나**(`Running`|`Exiting` = 로스터와 같은 상태 술어 — 우편 자격은 보지 않는다)★.
     ///
     /// ★존재 이유 = 삭제 정리 게이트(spec §5 · ADR-0116 결정 3 — 리뷰 fix D1)★. 게이트가 **id 축**이어야
     ///   하는 근거(개명 면역)는 `handle_profile_deleted` doc 이 정본이다. 프로필 id 는 세션 id 와 같고
@@ -369,21 +368,11 @@ pub trait DeliveryPort: Send + Sync {
     /// ★`addressing_sources().roster` 를 쓰지 않는 이유★: 그쪽은 프로필 목록 조회 + 잠든 이름 파생(경우에
     ///   따라 fs 접근)까지 딸린 **발송용** 한 장이다. 게이트는 단일 술어 하나만 필요하므로 좁은 동사를 따로
     ///   둔다(어댑터는 같은 `is_live` 술어를 공유해 두 판정이 갈리지 않게 한다).
+    /// ★`live_agents()` 로 대신하지 마라★: 그쪽은 **수신자 명단**이라 호스트가 우편 자격으로 걸러 낸 산
+    ///   세션(셸 등)이 빠져 있다. 이 질문은 "편지를 받나" 가 아니라 "살아 있나" 다 — 명단으로 물으면 그런
+    ///   세션의 프로필을 지울 때 그 세션이 아직 기다리는 계약(셸에서 CLI 로 건 요청 등)이 실패로 닫힌다.
     // ADR-0116 (결정 3 — 삭제 정리 게이트) / 리뷰 fix D1
     fn is_agent_live(&self, id: PeerId) -> bool;
-
-    /// ★이 **이름**을 쥔 산 세션이 있으면 그 id(삭제 정리 게이트의 이름 축 — 리뷰 fix N1)★.
-    ///
-    /// ★`live_agents()` 로 대신하지 마라(실제로 뚫렸던 회귀)★: 그쪽은 **수신자 명단**이라 호스트가 우편
-    ///   자격으로 걸러 낸 부류가 빠져 있다. 이 질문은 "편지를 받나" 가 아니라 **"그 이름을 쥔 산 세션이
-    ///   있나"** 다 — 아래 정리가 지우는 게 id 가 아니라 **이름 전체**라, 명단에 없는 산 세션이라도 그
-    ///   이름의 계약·파킹을 함께 잃는다(`handle_profile_deleted` doc ②). 두 술어는 다른 질문이므로
-    ///   합치지 말 것.
-    /// ★비교는 정확 일치★: 로스터 해석(`resolve_live`)과 같은 축이어야 판정이 갈리지 않는다.
-    fn live_id_for_name(&self, name: &str) -> Option<PeerId>;
-
-    /// id → canonical 표시 이름(봉투 sender·수신자 이름 단일 출처, ADR-0101). 없으면 None.
-    fn canonical_name(&self, id: PeerId) -> Option<String>;
 }
 
 /// ★입구 판정 소스 한 장(spec §5 3분기 · ADR-0116)★ — `DeliveryPort::addressing_sources` 의 산출물.
@@ -1087,37 +1076,27 @@ impl MessagingService {
         }
     }
 
-    /// ★프로필 삭제 일괄 정리(spec §5 · ADR-0116 결정 3)★ — 호스트(데몬)가 프로필을 지운 **직후** 부른다.
+    /// ★프로필 삭제 일괄 정리(spec §5 · ADR-0116 결정 3 · ADR-0309 결정 6)★ — 호스트(데몬)가 프로필을 지운
+    ///   **직후** 부른다.
     ///
-    /// ★발동 조건 = 삭제 ∧ **그 프로필 id 의 세션이 살아 있지 않음** ∧ **그 이름을 지닌 산 세션도 없음**
-    ///   (사용자 결정 2026-07-30 · 리뷰 fix D1 = id 축 · 리뷰 fix N1 = 이름 축 — load-bearing)★: 프로필 삭제
-    ///   커맨드는 실행 중 세션을 죽이지 않으므로 "트리 항목만 지웠고 프로세스는 살아 있는" 상태가 존재한다.
-    ///   그 상대는 **곧 idle 이 되면 받을 수 있는 산 수신자**라 정리 대상이 아니다 — 정리하면 배달될 메일을
-    ///   죽이고 성립할 계약을 실패로 적는다(이 개정 취지의 정반대). 그 세션이 실제로 사라지는 시점엔 프로필도
-    ///   없으므로 자연히 "없음" 부류로 수렴한다.
-    /// ★게이트는 **두 축**이고 둘 다 "죽었다" 여야 정리가 발동한다(load-bearing)★ — 술어는 양쪽 모두
-    ///   **산 명단**(`Running|Exiting`)이다:
-    ///   - **① id 축(`is_agent_live(profile_id)`) — 개명 면역**: 이 함수는 프로필이 **지워진 뒤** 불리는데,
-    ///     프로필이 없으면 그 산 세션의 canonical 이름이 `display_name` → `basename(session.cwd)` 로
-    ///     **바뀐다**. 그래서 삭제 전에 뽑은 이름(= `display_name`)으로만 삭제 후 명단을 찾으면 절대 매치되지
-    ///     않고 정리가 **항상** 발동한다 — `RenameProfile` 한 번이면 재현되는 평범한 경로다.
-    ///   - **② 이름 축(`live_id_for_name(name)` — 그 이름을 쥔 산 세션이 있나) — 파괴의 축이 이름이기
-    ///     때문이다(리뷰 fix N1)**. ★`live_agents()` 로 되돌리지 말 것★: 그쪽은 **우편 자격 필터**가 걸려
-    ///     있어 셸처럼 편지를 안 받는 산 세션이 안 보인다 — 이 축이 묻는 것은 "편지를 받나" 가 아니라
-    ///     "살아 있나" 다(두 술어를 합치면 아래 결말이 그대로 재현된다, 2026-08-17 리뷰):
-    ///     아래 계약 정리가 지우는 것은 id 가 아니라 **이름 전체**(`fail_open_requests_from(name)`)다(파킹 큐는
-    ///     id 로 쓸어 간다 — ADR-0309). 그래서 id 축만 보면 **그 이름을 공유하는 다른 산 세션**이 요청자인
-    ///     오픈 계약이 `reply_failed` 로 닫혀 대기 목록·기한 통지에서 사라진다 — ADR-0118 결정 2·spec §5 가
-    ///     금지한 그 결말이고, 유계 잔여로 문서화된 적도 없다. **재현은 지원되는 조작뿐이다**(이름 유일성
-    ///     강제는 ADR-0115 소관이라 아직 없다): 프로필 둘을 같은 `display_name` 으로 개명 → 한쪽만 스폰 →
-    ///     잠든 쪽을 삭제하면 id 축은 거짓이라 통과한다.
-    ///   - **왜 fail-safe(건너뛰기) 방향인가**: 건너뛴 정리의 잔여는 **이미 문서화된 결말**(삭제 시점 단발 +
-    ///     TTL 24h `expired` — 아래 항목)이다. 반대 방향(오정리)은 산 에이전트의 배달될 메일·계약을 죽이는
-    ///     비가역 손실이다. 두 축의 port 호출이 원자적이지 않은 것도 같은 이유로 무해하다 — 그 사이 명단이
-    ///     바뀌면 결과는 "건너뜀"(안전) 쪽으로만 기울고, 정리는 **양쪽 다 죽었을 때만** 나온다.
+    /// ★발동 조건 = 삭제 ∧ **그 프로필 id 의 세션이 살아 있지 않음**(사용자 결정 2026-07-30 · 리뷰 fix D1 —
+    ///   load-bearing)★: 프로필 삭제 커맨드는 실행 중 세션을 죽이지 않으므로 "트리 항목만 지웠고 프로세스는
+    ///   살아 있는" 상태가 존재한다. 그 상대는 **곧 idle 이 되면 받을 수 있는 산 수신자**라 정리 대상이 아니다 —
+    ///   정리하면 배달될 메일을 죽이고 성립할 계약을 실패로 적는다(이 개정 취지의 정반대). 그 세션이 실제로
+    ///   사라지는 시점엔 프로필도 없으므로 자연히 "없음" 부류로 수렴한다.
+    /// ★게이트는 id 축(`is_agent_live(profile_id)`)이다 — 개명 면역★: 이 함수는 프로필이 **지워진 뒤** 불리는데,
+    ///   프로필이 없으면 그 산 세션의 canonical 이름이 `display_name` → `basename(session.cwd)` 로 **바뀐다**.
+    ///   그래서 삭제 전에 뽑은 이름으로 삭제 후 명단을 찾으면 절대 매치되지 않고 정리가 **항상** 발동한다 —
+    ///   `RenameProfile` 한 번이면 재현되는 평범한 경로다. 술어는 **생존**(`Running|Exiting`)이지 수신자 명단이
+    ///   아니다(`is_agent_live` doc).
+    /// ★정리도 id 로 쓸어 간다 — 그래서 이름 축 게이트가 없다(ADR-0309 결정 6)★: 대상 ①(그 id 앞 파킹분)과
+    ///   ②(그 id 가 요청자인 오픈 계약)를 둘 다 id 로 찾는다. 같은 이름의 **다른** 에이전트(산 동명 · 옛 이름을
+    ///   새로 가진 에이전트)의 몫은 키가 달라 닿지 않고, 개명 전 이름으로 쌓인 몫도 빠짐없이 잡힌다. 예전엔
+    ///   계약을 이름으로 지워서 「그 이름을 쥔 산 세션이 있나」를 둘째 게이트로 물었다(리뷰 fix N1). ★그 게이트를
+    ///   되살리지 말 것★: 산 동명이 있으면 지운 프로필의 몫까지 통째로 건너뛰어 TTL 로 흘린다.
     /// ★하는 일 두 가지★: ① 그 프로필 id 앞 **파킹분 전량**을 `failed` + `RECIPIENT_DELETED` 로 종결(장부 종점 +
     ///   조회 힌트 — 대기열에서만 사라지고 이력은 남아 발신자가 `eg_messages{id}` 로 사유를 본다. "산 메일
-    ///   조용히 버리기 금지" 불변식 유지) ② 그 이름이 **요청자**인 오픈 계약을 `reply_failed` 로 종결(회신
+    ///   조용히 버리기 금지" 불변식 유지) ② 그 id 가 **요청자**인 오픈 계약을 `reply_failed` 로 종결(회신
     ///   도달 불가 확정). 이미 `replied` 인 계약은 되돌리지 않고, **회신자 쪽이 삭제된 계약은 유지**한다
     ///   (발신자는 기한 통지로 무응답을 알게 되는 기존 경로가 살아 있다).
     /// ★삭제 시점 **단발**이다 — 재평가 트리거를 두지 않는다(정직 명시 · spec §5)★: 발동 조건은 삭제 그
@@ -1125,33 +1104,16 @@ impl MessagingService {
     ///   지운 산 세션이 나중에 죽어도 거둬갈 사건이 없다 — **그 잔여의 결말은 TTL 24h `expired`** 이고
     ///   `RECIPIENT_DELETED` 가 아니다(알고 수용한 성질). 대칭 트리거·삽입 시점 tombstone 은 **비채택**
     ///   (ADR-0116 거부한 대안) — 되살리려면 새 결정이 먼저다.
-    /// ★호출자 의무 둘(ADR-0006)★: ① **프로필 레지스트리 락을 해제한 뒤에** 부른다(레지스트리 락 보유 중
-    ///   메시징 락을 잡으면 락 순서가 뒤집힌다 — spec §5) ② `name` 은 **프로필 제거 전에**
-    ///   `AgentProfile::canonical_name_when_live()` 로 파생한 값이어야 한다(제거 후엔 파생 재료 자체가 없고,
-    ///   그 값이 이름 축 게이트와 계약 정리의 키다).
-    // ADR-0116 (결정 3) / ADR-0118 (결정 3 — 가드 우선) / 리뷰 fix D1 (id 축) / 리뷰 fix N1 (이름 축)
+    /// ★호출자 의무(ADR-0006)★: **프로필 레지스트리 락을 해제한 뒤에** 부른다(레지스트리 락 보유 중 메시징 락을
+    ///   잡으면 락 순서가 뒤집힌다 — spec §5). `name` 은 **로그 전용**이다 — 판정도 정리도 이 값을 보지 않는다.
+    // ADR-0116 (결정 3) / ADR-0118 (결정 3 — 가드 우선) / 리뷰 fix D1 (id 축) / ADR-0309 (결정 6)
     pub fn handle_profile_deleted(&self, profile_id: PeerId, name: &str) -> ProfileDeletedOutcome {
-        // 1-a) id 축(위 doc ①).
+        // 게이트 = id 축 하나(위 doc).
         if self.port.is_agent_live(profile_id) {
             tracing::debug!(
                 deleted = %name,
                 profile = %profile_id,
                 "프로필 삭제 정리 건너뜀 — 그 프로필의 세션이 아직 살아 있다(트리 항목만 지운 상태). 파킹분·계약은 그대로 두고 idle 전이 시 정상 배달된다(spec §5)"
-            );
-            return ProfileDeletedOutcome {
-                skipped_live: true,
-                ..Default::default()
-            };
-        }
-        // 1-b) 이름 축(위 doc ② · 리뷰 fix N1). ★수신자 명단(`live_agents`)이 아니라 **생존 조회**를
-        //      쓴다★ — 명단에서 빠진 부류(호스트가 우편 자격으로 거른 것)도 이 이름의 계약·파킹을 함께
-        //      잃기 때문이다(`live_id_for_name` doc).
-        if let Some(live_id) = self.port.live_id_for_name(name) {
-            tracing::debug!(
-                deleted = %name,
-                profile = %profile_id,
-                live_id = %live_id,
-                "프로필 삭제 정리 건너뜀 — 같은 canonical 이름의 **다른 산 세션**이 있다(과도기 동명 — ADR-0115 전). 이름 축으로 지우면 그 산 세션의 메일·계약이 죽는다(리뷰 fix N1). 잔여는 삭제 시점 단발 + TTL 24h 소관(spec §5)"
             );
             return ProfileDeletedOutcome {
                 skipped_live: true,
@@ -1164,7 +1126,7 @@ impl MessagingService {
         let mut illegal = 0usize;
         let (purged, contracts) = {
             let mut st = self.state.lock().expect("messaging state poisoned");
-            // ADR-0309 (결정 6 — 큐 · 배달기록은 프로필 id 로 쓸어 간다)
+            // ADR-0309 (결정 6 — 큐 · 배달기록 · 계약을 전부 프로필 id 로 쓸어 간다)
             let purged = st.mailbox.purge_recipient(profile_id);
             for m in &purged {
                 // ★`pending → failed`(삭제 정리 한정 간선 — spec §6)★: 전용 동사라 범용 전이로는 못 만든다.
@@ -1183,7 +1145,7 @@ impl MessagingService {
                     Err(TransitionError::Illegal { .. }) => illegal += 1,
                 }
             }
-            let contracts = st.ledger.fail_open_requests_from(name);
+            let contracts = st.ledger.fail_open_requests_from(profile_id);
             (purged, contracts)
         };
 
@@ -1201,7 +1163,7 @@ impl MessagingService {
                 parked_failed = purged.len(),
                 contracts_failed = contracts.failed.len(),
                 guard_held = contracts.guard_held,
-                "프로필 삭제 정리 — 파킹분을 RECIPIENT_DELETED 로 종결하고 그 이름이 요청자인 오픈 계약을 reply_failed 로 종결(ADR-0116 결정 3)"
+                "프로필 삭제 정리 — 파킹분을 RECIPIENT_DELETED 로 종결하고 그 프로필이 요청자인 오픈 계약을 reply_failed 로 종결(ADR-0116 결정 3 · ADR-0309 결정 6)"
             );
         }
         if contracts.guard_held > 0 {
@@ -2112,23 +2074,20 @@ impl MessagingService {
     ///   ① 내가 보냈는데 아직 안 꽂힌 것(`from=me` + `pending`) ② 내가 건 request 의 회신 대기
     ///   (`from=me` + awaiting_reply) ③ 내가 받은 request 중 아직 답 안 한 것(`to=me` + awaiting_reply).
     ///
-    /// ★호출자 = (이름, PeerId) 둘 다 받는다(D 리뷰 B1)★. 축마다 매칭 규칙이 다르다:
-    ///   - **회신 계약(②③)** = **id 로만** 대조한다(ADR-0309) — 계약의 두 당사자가 늘 id 를 든다. 이름을
-    ///     보지 않으므로 동명 쌍둥이 · 개명 뒤에도 의무가 그 에이전트에게 남는다. epoch 는 보지 않는다(같은
-    ///     에이전트의 재시작은 여전히 답할 주체다 — ADR-0007).
-    ///   - **미배달 통보(①)** = 이름 매칭(아래 주석의 문서화된 잔여).
+    /// ★호출자는 PeerId 하나로 고른다 — 세 갈래 모두 id 대조다(ADR-0309 결정 4 · 5)★: 장부 행과 계약이
+    ///   당사자의 id 를 들므로 이름을 보지 않는다. 그래서 동명 쌍둥이의 몫이 섞이지 않고, 개명해도 개명 전에
+    ///   보낸 대기분 · 걸어 둔 계약 · 답할 의무가 그 에이전트 목록에 남는다. 행에 보이는 `from` · `to` 는
+    ///   **보낼 때 이름**이다(결정 4). epoch 는 보지 않는다(같은 에이전트의 재시작은 여전히 같은 주체다 —
+    ///   ADR-0007).
     /// ★정렬 = 오래된 순★: 오래 묵은 것이 먼저 처리돼야 할 일이다(메일박스 flush 규칙과 같은 방향).
-    // 리뷰 B1
-    pub fn open_items_for(&self, me: &str, me_id: PeerId, now: Instant) -> Vec<OpenItemView> {
+    // 리뷰 B1 / ADR-0309
+    pub fn open_items_for(&self, me_id: PeerId, now: Instant) -> Vec<OpenItemView> {
         let st = self.state.lock().expect("messaging state poisoned");
         let mut items: Vec<OpenItemView> = Vec::new();
-        // ① 내가 보낸 미배달분.
-        // ★잔여(문서화된 한계 — 리뷰 B1 의 범위 밖)★: 이 갈래는 행의 `from_id` 가 아니라 보낼 때 이름
-        //   (`from`)으로 대조한다. 그래서 같은 이름의 발신자가 둘이면 서로의 미배달 통보가 이 목록에 섞여
-        //   보이고, 개명한 발신자에게선 개명 전 대기분이 빠진다. 오귀속의 피해는 계약(②③)과 다르다: 통보는
-        //   "누가 답할 의무를 지나" 가 아니라 관측 정보다.
+        // ① 내가 보낸 미배달분 — 발신자 id(`from_id`)로 대조한다. 데몬 통지 행의 `from_id` 는 nil 이라
+        //    어느 에이전트에게도 잡히지 않는다.
         for r in st.ledger.all_records() {
-            if r.from == me && r.status == DeliveryStatus::Pending {
+            if r.from_id == me_id && r.status == DeliveryStatus::Pending {
                 items.push(OpenItemView {
                     direction: Direction::OutboundPending,
                     id: r.msg_id.clone(),
@@ -3673,8 +3632,6 @@ mod tests {
         ///   flush 가 되울려 그 자리에서 배달). Box 를 락 가드 아래에서 호출하면 그 재진입이 이 뮤텍스에
         ///   걸려 **데드락**(std Mutex 는 비재진입)이라, 복제 가능한 Arc 로 바꿔 락을 놓고 부른다.
         on_inject: StdMutex<Option<Arc<dyn Fn(usize) + Send + Sync>>>,
-        /// roster 밖 id 의 canonical_name override(비-도달 수신자 = TUI 시나리오 — finding 4).
-        canonical_overrides: StdMutex<std::collections::HashMap<PeerId, String>>,
         /// live_agents 조회 횟수 — "발송 1회당 스냅샷 1장"(ADR-0111 결정 2) 회귀가 세는 축(fix 8).
         roster_calls: StdMutex<usize>,
         /// 세팅되면 **첫 조회 이후**부터 이 roster 를 돌려준다 — finding 3 TOCTOU self-heal 재현용.
@@ -3691,10 +3648,6 @@ mod tests {
         /// ★로스터와 **따로** 스크립트한다(의도)★: 게이트는 그 좁은 동사로 물으므로, 로스터에서 유도해 버리면
         ///   "게이트가 로스터를 본다" 는 배선을 fake 가 대신 만들어 버려 테스트가 실물 배선을 못 본다.
         live_ids: StdMutex<Vec<PeerId>>,
-        /// ★로스터에 **없으면서** 살아 있는 이름들(이름 축 게이트 시나리오)★ — 호스트가 우편 자격으로
-        ///   명단에서 걸러 낸 산 세션(셸 등)을 모사한다. `live_id_for_name` 은 로스터 ∪ 이 목록을 본다:
-        ///   전자만 보면 그게 곧 `live_agents()` 라 두 술어를 합치는 회귀를 fake 가 덮어 준다.
-        extra_live_names: StdMutex<Vec<(String, PeerId)>>,
     }
 
     impl FakeDeliveryPort {
@@ -3705,18 +3658,12 @@ mod tests {
                 call_count: StdMutex::new(0),
                 fail_at_call: StdMutex::new(Vec::new()),
                 on_inject: StdMutex::new(None),
-                canonical_overrides: StdMutex::new(std::collections::HashMap::new()),
                 roster_calls: StdMutex::new(0),
                 roster_after_first: StdMutex::new(None),
                 on_roster: StdMutex::new(None),
                 dormant: StdMutex::new(Vec::new()),
                 live_ids: StdMutex::new(Vec::new()),
-                extra_live_names: StdMutex::new(Vec::new()),
             }
-        }
-        fn set_extra_live_names(&self, entries: &[(&str, PeerId)]) {
-            *self.extra_live_names.lock().unwrap() =
-                entries.iter().map(|(n, id)| (n.to_string(), *id)).collect();
         }
         /// 이름마다 `tid(이름)` 을 id 로 싣는다 — 같은 이름으로 `live` 를 띄우면 그 에이전트가 깨어난 것이다.
         fn set_dormant(&self, names: &[&str]) {
@@ -3863,41 +3810,6 @@ mod tests {
 
         fn is_agent_live(&self, id: PeerId) -> bool {
             self.live_ids.lock().unwrap().contains(&id)
-        }
-        /// 로스터 ∪ `extra_live_names` — 후자가 "산 세션인데 수신자 명단엔 없는" 부류다(그 필드 doc).
-        fn live_id_for_name(&self, name: &str) -> Option<PeerId> {
-            self.roster
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|a| a.name == name)
-                .map(|a| a.id)
-                .or_else(|| {
-                    self.extra_live_names
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .find(|(n, _)| n == name)
-                        .map(|(_, id)| *id)
-                })
-        }
-        fn canonical_name(&self, id: PeerId) -> Option<String> {
-            let by_roster = self
-                .roster
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|a| a.id == id)
-                .map(|a| a.name.clone());
-            by_roster
-                .or_else(|| {
-                    self.roster_after_first
-                        .lock()
-                        .unwrap()
-                        .as_ref()
-                        .and_then(|r| r.iter().find(|a| a.id == id).map(|a| a.name.clone()))
-                })
-                .or_else(|| self.canonical_overrides.lock().unwrap().get(&id).cloned())
         }
     }
 
@@ -7484,7 +7396,7 @@ mod tests {
         )
         .expect("남의 request");
 
-        let items = svc.open_items_for("alice", alice_from.peer_id, t0);
+        let items = svc.open_items_for(alice_from.peer_id, t0);
         let tags: Vec<(&str, &str)> = items
             .iter()
             .map(|i| (i.direction.as_str(), i.id.as_str()))
@@ -7501,7 +7413,7 @@ mod tests {
         assert_eq!(items[0].reply_by.as_deref(), Some("10m"), "기한 표기 원본");
         assert_eq!(items[2].from, "carol", "내가 답할 상대");
         assert!(items.iter().all(|i| !i.timed_out));
-        let bob_items = svc.open_items_for("bob", bob_from.peer_id, t0);
+        let bob_items = svc.open_items_for(bob_from.peer_id, t0);
         let bob_tags: Vec<(&str, &str)> = bob_items
             .iter()
             .map(|i| (i.direction.as_str(), i.id.as_str()))
@@ -7558,7 +7470,7 @@ mod tests {
         .expect("회신");
         svc.sweep(t0 + Duration::from_secs(601));
 
-        let items = svc.open_items_for("alice", alice_from.peer_id, t0 + Duration::from_secs(601));
+        let items = svc.open_items_for(alice_from.peer_id, t0 + Duration::from_secs(601));
         let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids, vec!["m-b"], "회신 온 계약만 빠진다: {items:?}");
         assert!(
@@ -7587,7 +7499,7 @@ mod tests {
         )
         .expect("exact-id request");
 
-        let a_items = svc.open_items_for("worker", twin_a_from.peer_id, t0);
+        let a_items = svc.open_items_for(twin_a_from.peer_id, t0);
         assert_eq!(
             a_items
                 .iter()
@@ -7596,18 +7508,63 @@ mod tests {
             vec![("reply_owed_by_me", "m-req")],
             "지목된 쌍둥이 A 는 의무를 진다: {a_items:?}"
         );
-        let b_items = svc.open_items_for("worker", twin_b_from.peer_id, t0);
+        let b_items = svc.open_items_for(twin_b_from.peer_id, t0);
         assert!(
             b_items.is_empty(),
             "받은 적 없는 쌍둥이 B 에게 의무가 붙으면 안 된다(B1): {b_items:?}"
         );
-        let boss_items = svc.open_items_for("boss", boss_from.peer_id, t0);
+        let boss_items = svc.open_items_for(boss_from.peer_id, t0);
         assert_eq!(
             boss_items
                 .iter()
                 .map(|i| i.direction.as_str())
                 .collect::<Vec<_>>(),
             vec!["awaiting_their_reply"]
+        );
+    }
+
+    /// ★보낸 대기분은 발신자 id 로 찾는다 — 개명해도 목록에 남고 행은 보낼 때 이름을 보인다(ADR-0309 결정 4 ·
+    ///   5 · TRD S29 B3)★. 이름으로 대조하던 시절엔 개명한 발신자에게서 개명 전 대기분이 빠지고, 옛 이름을 새로
+    ///   가진 에이전트에게 그것이 보였다.
+    #[test]
+    fn a_renamed_sender_still_sees_its_parked_outbound_mail_under_the_send_time_name() {
+        let (svc, port) = svc();
+        let (alice_from, alice) = live_sender("alice");
+        port.set_roster(vec![alice]);
+        port.set_dormant(&["bob"]);
+        svc.handle_send(
+            "m-out",
+            alice_from,
+            "alice",
+            &["bob".to_string()],
+            "hi",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("파킹");
+        assert_eq!(svc.parked_len(tid("bob")), 1, "전제: 잠든 bob 앞 파킹");
+
+        // alice 개명 — 같은 id, 새 이름. 옛 이름은 다른 에이전트가 가져갔다.
+        let (_, renamed) = live_with_id(alice_from.peer_id, "alice2");
+        let (other_id, other) = live_distinct("alice");
+        port.set_roster(vec![renamed, other]);
+        let items = svc.open_items_for(alice_from.peer_id, Instant::now());
+        assert_eq!(
+            items
+                .iter()
+                .map(|i| (
+                    i.direction.as_str(),
+                    i.id.as_str(),
+                    i.from.as_str(),
+                    i.to.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![("outbound_pending", "m-out", "alice", "bob")],
+            "개명 전에 보낸 대기분이 남고 행은 보낼 때 이름이다: {items:?}"
+        );
+        assert!(
+            svc.open_items_for(other_id, Instant::now()).is_empty(),
+            "옛 이름을 새로 가진 다른 에이전트에게는 보이지 않는다"
         );
     }
 
@@ -7622,7 +7579,7 @@ mod tests {
     fn fill_open_request_cap_leaving_one_free(svc: &Arc<MessagingService>, from: SenderIdentity) {
         fill_open_request_cap(svc, from);
         let last = svc
-            .open_items_for("boss", from.peer_id, Instant::now())
+            .open_items_for(from.peer_id, Instant::now())
             .into_iter()
             .filter(|i| i.direction == Direction::AwaitingTheirReply)
             .last()
@@ -7710,12 +7667,12 @@ mod tests {
         );
         assert_eq!(svc.parked_len(a_agent.id), 1, "A 의 큐에 그대로");
 
-        let b_items = svc.open_items_for("worker", b_from.peer_id, t0);
+        let b_items = svc.open_items_for(b_from.peer_id, t0);
         assert!(
             b_items.is_empty(),
             "요청을 받은 적 없는 동명 B 에게 의무가 붙으면 안 된다: {b_items:?}"
         );
-        let a_items = svc.open_items_for("worker", a_from.peer_id, t0);
+        let a_items = svc.open_items_for(a_from.peer_id, t0);
         assert_eq!(
             a_items
                 .iter()
@@ -7739,7 +7696,7 @@ mod tests {
             Some("awaiting_reply"),
             "B 의 회신은 A 의 계약을 닫지 못한다"
         );
-        let boss_items = svc.open_items_for("boss", boss_from.peer_id, t0);
+        let boss_items = svc.open_items_for(boss_from.peer_id, t0);
         assert_eq!(
             boss_items
                 .iter()
@@ -7831,11 +7788,11 @@ mod tests {
             "주입 도중 도착한 회신이 계약을 닫았어야"
         );
         assert!(
-            svc.open_items_for("worker", b_id, t0).is_empty(),
+            svc.open_items_for(b_id, t0).is_empty(),
             "회신한 쪽에 남은 의무도 없다"
         );
         assert!(
-            svc.open_items_for("boss", boss_from.peer_id, t0).is_empty(),
+            svc.open_items_for(boss_from.peer_id, t0).is_empty(),
             "발신자도 더 기다리지 않는다"
         );
 
@@ -7895,8 +7852,7 @@ mod tests {
         )
         .expect("배달 완료");
         assert!(
-            svc.open_items_for("alice", from.peer_id, Instant::now())
-                .is_empty(),
+            svc.open_items_for(from.peer_id, Instant::now()).is_empty(),
             "배달된 통보는 미결이 아니다"
         );
     }
@@ -8529,7 +8485,7 @@ mod tests {
             slots_before - 1,
             "512 계수에서 빠진다(ADR-0118 결정 4 — 좀비가 상한을 먹지 않게)"
         );
-        let owed = svc.open_items_for("worker", w_id, Instant::now());
+        let owed = svc.open_items_for(w_id, Instant::now());
         assert!(
             !owed.iter().any(|i| i.id == "m-req"),
             "종결된 계약은 미결 목록에 없어야: {owed:?}"
@@ -8992,7 +8948,7 @@ mod tests {
             .filter(|r| r.status != SendStatus::Failed)
             .count();
         let mine = svc
-            .open_items_for("boss", from.peer_id, Instant::now())
+            .open_items_for(from.peer_id, Instant::now())
             .into_iter()
             .filter(|i| i.direction == Direction::AwaitingTheirReply && i.id == "m-two")
             .count();
@@ -9127,7 +9083,7 @@ mod tests {
             .filter(|r| r.status != SendStatus::Failed)
             .count();
         let mine = svc
-            .open_items_for("boss", from.peer_id, Instant::now())
+            .open_items_for(from.peer_id, Instant::now())
             .into_iter()
             .filter(|i| i.direction == Direction::AwaitingTheirReply && i.id == "m-park")
             .count();
@@ -9215,7 +9171,7 @@ mod tests {
             "소유자가 살아 있는 예약을 sweep 이 회수하면 안 된다(R1)"
         );
         let sender_side: Vec<String> = svc
-            .open_items_for("boss", from.peer_id, Instant::now())
+            .open_items_for(from.peer_id, Instant::now())
             .into_iter()
             .filter(|i| i.id == "m-slow")
             .map(|i| i.direction.as_str().to_string())
@@ -9226,7 +9182,7 @@ mod tests {
             "발신자는 회신을 기다려야: {sender_side:?}"
         );
         let recipient_side: Vec<String> = svc
-            .open_items_for("worker", w_id, Instant::now())
+            .open_items_for(w_id, Instant::now())
             .into_iter()
             .filter(|i| i.id == "m-slow")
             .map(|i| i.direction.as_str().to_string())
@@ -9258,13 +9214,13 @@ mod tests {
         .expect("회신 발송");
         // 닫힘의 관측면 = **미결 조회**(추적 항목 자체는 이력과 함께 정리될 때까지 남는다).
         assert!(
-            svc.open_items_for("boss", from.peer_id, Instant::now())
+            svc.open_items_for(from.peer_id, Instant::now())
                 .iter()
                 .all(|i| i.id != "m-slow"),
             "회신이 계약을 닫아야 — 발신자의 미결에서 사라진다(옛 구멍에선 NoMatch 라 영원히 남았다)"
         );
         assert!(
-            svc.open_items_for("worker", w_id, Instant::now())
+            svc.open_items_for(w_id, Instant::now())
                 .iter()
                 .all(|i| i.id != "m-slow"),
             "회신자의 의무도 사라져야"
@@ -10353,20 +10309,23 @@ mod tests {
         );
     }
 
+    /// ★산 동명이 있어도 지운 프로필 몫은 정리되고 동명의 몫은 그대로다(ADR-0309 결정 6 · TRD S29 B4)★ — 정리가
+    ///   id 로 쓸어 가므로 이름이 같다는 사실은 판정에도 대상 선택에도 끼지 않는다. 이름 축 게이트를 되살리면
+    ///   정리가 통째로 건너뛰어져 지운 쪽 파킹분 · 계약이 TTL 까지 남는다.
     #[test]
-    fn deleting_a_dormant_profile_spares_a_live_namesakes_mail_and_contracts() {
+    fn deleting_a_dormant_profile_cleans_its_share_even_with_a_live_namesake() {
         let (svc, port, gate) = svc_gated();
         let (alice_from, alice) = live_sender("alice");
-        let (boss_id, boss) = live("boss");
-        port.set_roster(vec![alice.clone(), boss.clone()]);
-        let boss_from = SenderIdentity {
-            peer_id: boss_id,
-            epoch: 0,
-        };
-
+        // 지울 프로필 P(이름 boss) — 깨어 있던 동안 alice 에게 요청을 걸고 잠든다.
+        let p = PeerId::new_v4();
+        let (_, p_live) = live_with_id(p, "boss");
+        port.set_roster(vec![alice.clone(), p_live]);
         svc.handle_send(
-            "m-out",
-            boss_from,
+            "m-p-req",
+            SenderIdentity {
+                peer_id: p,
+                epoch: 0,
+            },
             "boss",
             &["alice".to_string()],
             "해줘",
@@ -10374,94 +10333,196 @@ mod tests {
             &req_meta("10m", 600),
         )
         .expect("배달");
-
-        gate.set_busy(boss_id, 0);
+        port.set_roster(vec![alice.clone()]);
+        port.set_dormant_agents(&[(p, "boss")]);
         svc.handle_send(
-            "m-in",
+            "m-to-p",
             alice_from,
             "alice",
             &["boss".to_string()],
+            "잠든 P 에게",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("파킹");
+        assert_eq!(svc.parked_len(p), 1, "전제: 잠든 P 앞 파킹");
+
+        // 같은 이름의 다른 에이전트 Q 가 떠 있다(산 층이 잠듦 층을 이긴다) — Q 도 요청을 걸고, 바쁜 Q 앞에도
+        //   파킹이 쌓인다.
+        let (q, q_live) = live_distinct("boss");
+        port.set_roster(vec![alice.clone(), q_live]);
+        svc.handle_send(
+            "m-q-req",
+            SenderIdentity {
+                peer_id: q,
+                epoch: 0,
+            },
+            "boss",
+            &["alice".to_string()],
             "해줘",
             Entrance::Mcp,
             &req_meta("10m", 600),
         )
+        .expect("배달");
+        gate.set_busy(q, 0);
+        svc.handle_send(
+            "m-to-q",
+            alice_from,
+            "alice",
+            &["boss".to_string()],
+            "산 Q 에게",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
         .expect("파킹");
-        assert_eq!(svc.parked_len(tid("boss")), 1);
+        assert_eq!(svc.parked_len(q), 1, "전제: 바쁜 Q 앞 파킹");
 
-        let dormant_p1 = PeerId::new_v4();
-        port.set_dormant(&[]);
-        port.set_live_ids(&[boss_id]);
-        let out = svc.handle_profile_deleted(dormant_p1, "boss");
+        // P 삭제 — 넘기는 이름이 산 동명의 이름과 같다.
+        port.set_dormant_agents(&[]);
+        port.set_live_ids(&[q]);
+        let out = svc.handle_profile_deleted(p, "boss");
 
-        assert!(
-            out.skipped_live,
-            "동명 산 세션이 있으면 정리를 **통째로** 건너뛴다(fail-safe — 잔여는 단발+TTL 소관): {out:?}"
-        );
-        assert_eq!(out.failed_parked, 0, "산 동명의 파킹분을 건드리지 않는다");
+        assert!(!out.skipped_live, "산 동명은 정리를 막지 않는다: {out:?}");
+        assert_eq!(out.failed_parked, 1, "P 앞 파킹분만 종결: {out:?}");
         assert_eq!(
-            out.failed_contracts, 0,
-            "산 동명이 요청자인 계약을 닫지 않는다"
+            out.failed_contracts, 1,
+            "P 가 요청자인 계약만 종결: {out:?}"
         );
-        assert_eq!(svc.parked_len(tid("boss")), 1, "대기열 보존");
+        assert_eq!(svc.parked_len(p), 0);
+        assert_eq!(svc.ledger_statuses("m-to-p"), vec![DeliveryStatus::Failed]);
         assert_eq!(
-            svc.ledger_statuses("m-in"),
+            svc.contract_outcome_for_test("m-p-req", tid("alice")),
+            Some("reply_failed")
+        );
+
+        assert_eq!(svc.parked_len(q), 1, "산 동명의 파킹분은 그대로");
+        assert_eq!(
+            svc.ledger_statuses("m-to-q"),
             vec![DeliveryStatus::Pending],
-            "★거짓 사유 금지★ — 삭제되지 않은 수신자의 메일이 RECIPIENT_DELETED 로 죽으면 안 된다"
+            "★거짓 사유 금지★ — 삭제되지 않은 Q 의 메일이 RECIPIENT_DELETED 로 죽으면 안 된다"
         );
         assert_eq!(
-            svc.contract_outcome_for_test("m-out", tid("alice")),
+            svc.contract_outcome_for_test("m-q-req", tid("alice")),
             Some("awaiting_reply"),
-            "산 동명이 요청자인 오픈 계약은 유지된다(대기 목록·기한 통지에서 사라지면 안 된다 — ADR-0118 결정 2)"
+            "산 동명이 요청자인 오픈 계약은 유지된다(ADR-0118 결정 2)"
         );
 
         gate.clear();
-        svc.flush_for(boss_id);
-        assert_eq!(svc.ledger_statuses("m-in"), vec![DeliveryStatus::Delivered]);
+        svc.flush_for(q);
+        assert_eq!(
+            svc.ledger_statuses("m-to-q"),
+            vec![DeliveryStatus::Delivered]
+        );
     }
 
-    /// ★이름 축 게이트는 **수신자 명단이 아니라 생존**을 물어야 한다(리뷰 fix N1 의 회귀 방어)★.
-    ///
-    /// 호스트가 우편 자격으로 명단에서 걸러 낸 산 세션(셸 등)은 `live_agents()` 에 없다. 그 술어로 이름 축을
-    /// 물으면 **그 산 세션이 요청자인 오픈 계약이 `reply_failed` 로 닫히고** 그 이름 앞 파킹분이 거짓 사유로
-    /// 죽는다 — ADR-0118 결정 2·spec §5 가 금지한 결말이다. 재현은 지원되는 조작뿐이다: 프로필 둘을 같은
-    /// 이름으로 개명 → 명단 밖 부류만 스폰 → 잠든 쪽 삭제.
+    /// ★잠든 채 개명한 프로필을 지워도 옛 이름으로 쌓인 몫까지 id 로 쓸어 가고, 그 옛 이름을 새로 가진 산
+    ///   에이전트의 몫은 건드리지 않는다(ADR-0309 결정 6 · TRD S29 B4)★. 넘기는 이름은 제거 직전의 새 이름이라
+    ///   그 이름으로는 옛 이름으로 열린 계약을 찾을 수 없다 — 이름으로 고르는 갈래가 되살아나면 X 의 계약이 남고,
+    ///   옛 이름으로 고르면 Y 의 몫이 죽는다.
     #[test]
-    fn the_name_axis_gate_sees_a_live_session_that_is_not_in_the_mail_roster() {
-        let (svc, port) = svc();
-        let (_alice_from, alice) = live_sender("alice");
-        // 산 동명은 **로스터에 넣지 않는다** — 명단에서 걸러진 부류를 모사한다.
-        let shell_id = PeerId::new_v4();
-        port.set_roster(vec![alice.clone()]);
-        port.set_extra_live_names(&[("boss", shell_id)]);
-
-        let boss_from = SenderIdentity {
-            peer_id: shell_id,
-            epoch: 0,
-        };
+    fn deleting_a_renamed_dormant_profile_cleans_by_id_and_spares_the_new_holder_of_its_old_name() {
+        let (svc, port, gate) = svc_gated();
+        let (carol_from, carol) = live_sender("carol");
+        // X(이름 a) — 깨어 있던 동안 carol 에게 요청을 걸고 잠든 뒤, 잠든 X 앞에 파킹이 쌓인다.
+        let x = PeerId::new_v4();
+        let (_, x_live) = live_with_id(x, "a");
+        port.set_roster(vec![carol.clone(), x_live]);
         svc.handle_send(
-            "m-out",
-            boss_from,
-            "boss",
-            &["alice".to_string()],
+            "m-x-req",
+            SenderIdentity {
+                peer_id: x,
+                epoch: 0,
+            },
+            "a",
+            &["carol".to_string()],
             "해줘",
-            Entrance::Cli,
+            Entrance::Mcp,
             &req_meta("10m", 600),
         )
         .expect("배달");
+        port.set_roster(vec![carol.clone()]);
+        port.set_dormant_agents(&[(x, "a")]);
+        svc.handle_send(
+            "m-to-x",
+            carol_from,
+            "carol",
+            &["a".to_string()],
+            "잠든 X 에게",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("파킹");
+        assert_eq!(svc.parked_len(x), 1, "전제: 잠든 X 앞 파킹");
 
-        // id 축은 다른 id 라 통과한다(잠든 쪽 프로필 삭제) → 이름 축만이 마지막 방어선이다.
-        let dormant_p = PeerId::new_v4();
-        port.set_live_ids(&[shell_id]);
-        let out = svc.handle_profile_deleted(dormant_p, "boss");
+        // X 가 잠든 채 b 로 개명하고, 다른 에이전트 Y 가 a 로 떠 있다 — Y 도 요청을 걸고 바쁜 Y 앞에 파킹이 쌓인다.
+        let (y, y_live) = live_distinct("a");
+        port.set_dormant_agents(&[(x, "b")]);
+        port.set_roster(vec![carol.clone(), y_live]);
+        svc.handle_send(
+            "m-y-req",
+            SenderIdentity {
+                peer_id: y,
+                epoch: 0,
+            },
+            "a",
+            &["carol".to_string()],
+            "해줘",
+            Entrance::Mcp,
+            &req_meta("10m", 600),
+        )
+        .expect("배달");
+        gate.set_busy(y, 0);
+        svc.handle_send(
+            "m-to-y",
+            carol_from,
+            "carol",
+            &["a".to_string()],
+            "산 Y 에게",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("파킹");
+        assert_eq!(svc.parked_len(y), 1, "전제: 바쁜 Y 앞 파킹");
 
-        assert!(
-            out.skipped_live,
-            "명단 밖이어도 그 이름을 쥔 산 세션이 있으면 정리를 건너뛴다: {out:?}"
-        );
+        // X 삭제 — 넘기는 이름은 제거 직전 이름 b 다.
+        port.set_dormant_agents(&[]);
+        port.set_live_ids(&[y]);
+        let out = svc.handle_profile_deleted(x, "b");
+
+        assert!(!out.skipped_live, "{out:?}");
         assert_eq!(
-            svc.contract_outcome_for_test("m-out", tid("alice")),
+            out.failed_parked, 1,
+            "옛 이름 앞으로 쌓인 X 의 파킹분: {out:?}"
+        );
+        assert_eq!(out.failed_contracts, 1, "옛 이름으로 연 X 의 계약: {out:?}");
+        assert_eq!(svc.parked_len(x), 0);
+        let view = svc
+            .message_state("m-to-x", Instant::now())
+            .expect("조회 가능");
+        assert_eq!(view.rows[0].code, Some("RECIPIENT_DELETED"));
+        assert_eq!(view.rows[0].to, "a", "행은 보낼 때 이름을 보인다(결정 4)");
+        assert_eq!(
+            svc.contract_outcome_for_test("m-x-req", tid("carol")),
+            Some("reply_failed")
+        );
+
+        assert_eq!(
+            svc.parked_len(y),
+            1,
+            "옛 이름의 새 주인 Y 의 파킹분은 그대로"
+        );
+        assert_eq!(svc.ledger_statuses("m-to-y"), vec![DeliveryStatus::Pending]);
+        assert_eq!(
+            svc.contract_outcome_for_test("m-y-req", tid("carol")),
             Some("awaiting_reply"),
-            "★그 산 세션이 요청자인 오픈 계약이 닫히면 안 된다(ADR-0118 결정 2)★"
+            "Y 가 요청자인 오픈 계약은 유지된다"
+        );
+
+        gate.clear();
+        svc.flush_for(y);
+        assert_eq!(
+            svc.ledger_statuses("m-to-y"),
+            vec![DeliveryStatus::Delivered]
         );
     }
 
@@ -10609,7 +10670,7 @@ mod tests {
         let (_, renamed) = live_with_id(sleepy_id, "renamed");
         port.set_roster(vec![me, renamed]);
         port.set_dormant(&[]);
-        let items = svc.open_items_for("renamed", sleepy_id, Instant::now());
+        let items = svc.open_items_for(sleepy_id, Instant::now());
         assert_eq!(
             items
                 .iter()

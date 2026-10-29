@@ -1684,7 +1684,8 @@ impl ConnectionCore {
                 request_id,
             } => {
                 // ★삭제 정리 훅(ADR-0116 결정 3)★: 여기가 유일한 프로필 제거 지점이라 훅도 여기 하나다.
-                //   호출자 의무(이름 파생 시점·락 순서·게이트 축)는 `handle_profile_deleted` 가 정본이다.
+                //   호출자 의무(락 순서)와 게이트 축은 `handle_profile_deleted` 가 정본이다. 판정 · 정리는 프로필
+                //   id 하나로 하고, 제거 전에 뽑는 이름은 로그 전용이다(ADR-0309 결정 6).
                 // ★발동 조건(로스터 부재)은 커널이 판정한다★: 로스터는 커널의 DeliveryPort 소유 축이고, 여기서
                 //   미리 보면 조건이 두 곳에 갈린다(그 판정이 곧 정책 — spec §5).
                 let deleted_name = manager
@@ -5971,9 +5972,11 @@ mod tests {
     // ══════════════════════════════════════════════════════════════════════════════════════════
 
     /// ★왜 데몬 통합인가(가짜 포트 단위 테스트가 원리적으로 못 잡는다)★: 이 결함은 **두 배선**의 순서·축에
-    /// 있었다 — ① 정리 대상 이름을 프로필 **제거 전에** 뽑나 ② 발동 게이트를 **id** 로 거나. 커널 단위
-    /// 테스트는 그 둘을 하네스가 대신 정해 주므로(이름·게이트를 테스트가 직접 스크립트한다) 배선이 뒤바뀐 걸
-    /// 볼 수 없다. 여기서는 실제 프로필·실제 spawn·실물 `ManagerDeliveryPort` 로 dispatch 를 태운다.
+    /// 있었다 — ① 훅이 프로필 **제거 전에** 그 스냅숏(로그용 이름)을 뜨나(제거 뒤에 뜨면 스냅숏이 없어 훅이
+    /// 아예 안 돈다) ② 발동 게이트를 **id** 로 거나. 커널 단위 테스트는 그 둘을 하네스가 대신 정해 주므로
+    /// (이름·게이트를 테스트가 직접 스크립트한다) 배선이 뒤바뀐 걸 볼 수 없다. 여기서는 실제 프로필·실제
+    /// spawn·실물 `ManagerDeliveryPort` 로 dispatch 를 태운다. 끝에서 잠든 채 개명한 프로필의 삭제가 옛 이름으로
+    /// 쌓인 몫까지 id 로 쓸어 가는지도 본다(ADR-0309 결정 6 — 훅이 넘기는 이름은 새 이름이다).
     #[tokio::test]
     async fn deleting_a_renamed_profile_whose_session_is_live_keeps_its_mail_and_contracts() {
         use engram_dashboard_messaging::envelope::Entrance;
@@ -6118,7 +6121,18 @@ mod tests {
             "★D1★ 산 세션이 요청자인 계약이 실패 종결됐다(ADR-0118 결정 2 위반)"
         );
 
-        // (7) ★반대 방향도 못 박는다 — 이름은 **제거 전에** 뽑아야 한다★.
+        // (7) ★반대 방향도 못 박는다 — 스냅숏은 **제거 전에** 떠야 훅이 돈다★. 그리고 잠든 채 개명한 프로필:
+        //   sleepy 앞 파킹과 sleepy 가 요청자인 계약을 쌓은 뒤 sleepy 를 drowsy 로 개명하고, 옛 이름 sleepy 는 새
+        //   프로필 heir 가 가져간다. 삭제는 id 로 쓸어 가야 한다 — 훅이 넘기는 이름은 drowsy 라 이름으로 고르면
+        //   sleepy 로 연 계약을 놓치고, 옛 이름으로 고르면 heir 의 몫이 죽는다(ADR-0309 결정 6).
+        let helper = {
+            let mut p = mk("helper-raw");
+            p.display_name = Some("helper".into());
+            p
+        };
+        core.manager
+            .try_create_agent(helper.clone())
+            .expect("등록 성공");
         let rows2 = messaging
             .handle_send(
                 "m-sleep",
@@ -6134,6 +6148,71 @@ mod tests {
             rows2[0].status,
             engram_dashboard_messaging::service::SendStatus::Pending
         );
+        messaging
+            .handle_send(
+                "m-sleep-req",
+                SenderIdentity {
+                    peer_id: sleepy.id,
+                    epoch: 0,
+                },
+                "sleepy",
+                &["helper".to_string()],
+                "해줘",
+                Entrance::Cli,
+                &req,
+            )
+            .expect("행 응답");
+        assert_eq!(
+            messaging.contract_outcome_for_test("m-sleep-req", helper.id),
+            Some("awaiting_reply"),
+            "sleepy 가 요청자인 계약이 열렸다"
+        );
+        core.dispatch(
+            AgentCommand::RenameProfile {
+                profile_id: sleepy.id,
+                name: Some("drowsy".into()),
+                request_id: engram_dashboard_protocol::RequestId(uuid::Uuid::new_v4()),
+            },
+            &session,
+            &sink,
+        )
+        .await;
+        assert_eq!(
+            core.manager
+                .agent_snapshot(sleepy.id)
+                .expect("프로필")
+                .canonical_name_when_live(),
+            "drowsy",
+            "잠든 채 개명했다(이 단계의 전제)"
+        );
+        let heir = {
+            let mut p = mk("heir-raw");
+            p.display_name = Some("sleepy".into());
+            p
+        };
+        core.manager
+            .try_create_agent(heir.clone())
+            .expect("등록 성공");
+        let rows3 = messaging
+            .handle_send(
+                "m-heir",
+                sender,
+                "outsider",
+                &["sleepy".to_string()],
+                "새 sleepy 에게",
+                Entrance::Cli,
+                &SendMeta::default(),
+            )
+            .expect("행 응답");
+        assert_eq!(
+            rows3[0].status,
+            engram_dashboard_messaging::service::SendStatus::Pending
+        );
+        assert_eq!(
+            messaging.parked_len(heir.id),
+            1,
+            "옛 이름 앞 새 우편은 그 이름의 새 주인에게 맡겨진다"
+        );
         core.dispatch(
             AgentCommand::DeleteProfile {
                 profile_id: sleepy.id,
@@ -6146,7 +6225,7 @@ mod tests {
         assert_eq!(
             messaging.parked_len(sleepy.id),
             0,
-            "잠든 프로필 삭제는 정리가 발동해야(이름을 제거 전에 뽑았다는 증거)"
+            "잠든 프로필 삭제는 정리가 발동해야(스냅숏을 제거 전에 떴다는 증거)"
         );
         let view = messaging
             .message_state("m-sleep", std::time::Instant::now())
@@ -6155,6 +6234,16 @@ mod tests {
             view.rows[0].code,
             Some("RECIPIENT_DELETED"),
             "장부 종점 + 사유 코드가 남는다(조용히 버리지 않는다): {view:?}"
+        );
+        assert_eq!(
+            messaging.contract_outcome_for_test("m-sleep-req", helper.id),
+            Some("reply_failed"),
+            "개명 전 이름으로 연 계약도 id 로 닫힌다"
+        );
+        assert_eq!(
+            messaging.parked_len(heir.id),
+            1,
+            "옛 이름의 새 주인 몫은 그대로"
         );
 
         core.manager.kill_agent(boss.id).ok();

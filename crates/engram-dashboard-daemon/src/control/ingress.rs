@@ -569,7 +569,7 @@ pub fn handle_messages(
         None => {
             let me = sender_display_name(manager, from);
             let open: Vec<serde_json::Value> = messaging
-                .open_items_for(&me, from.agent_id, now)
+                .open_items_for(from.agent_id, now)
                 .iter()
                 .map(|i| {
                     let mut obj = serde_json::json!({
