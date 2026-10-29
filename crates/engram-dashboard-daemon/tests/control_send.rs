@@ -358,7 +358,7 @@ async fn control_send_shell_recipient_is_not_a_mail_recipient() {
         "명단에 없는 이름과 같은 결말 — 발신자는 주소를 고쳐 다시 보내면 된다: {body}"
     );
     assert_eq!(
-        messaging.parked_len("sheller"),
+        messaging.parked_total_for_test(),
         0,
         "파킹도 되면 안 된다(깨어날 일 없는 이름 앞에 편지가 쌓인다): {body}"
     );
@@ -1439,7 +1439,7 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
     //   답하고(ADR-0125), 그 편지는 이긴 쪽 배치나 되울린 도어벨로 뒤늦게 나간다. 그래서 단언 축은
     //   차수와 무관하게 유실·중복 없음 + 봉투 바이트 무결이다.
     for _ in 0..600 {
-        if seen.lock().unwrap().len() >= N && messaging.parked_len(&to_name) == 0 {
+        if seen.lock().unwrap().len() >= N && messaging.parked_len(b_id) == 0 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1970,7 +1970,7 @@ async fn c2_busy_recipient_parks_then_batch_flushes_on_turn_end() {
         seen.lock().unwrap().is_empty(),
         "주입이 없으므로 배달 관측도 없다(유령 delivered 금지)"
     );
-    assert_eq!(messaging.parked_len(&to_name), 2, "2건이 메일박스에 대기");
+    assert_eq!(messaging.parked_len(b_id), 2, "2건이 메일박스에 대기");
     for id in &ids {
         assert_eq!(messaging.ledger_statuses(id), vec![DeliveryStatus::Pending]);
     }
@@ -2018,7 +2018,7 @@ async fn c2_busy_recipient_parks_then_batch_flushes_on_turn_end() {
             "flush 주입 후 pending→delivered 전이"
         );
     }
-    assert_eq!(messaging.parked_len(&to_name), 0, "flush 후 큐 비움");
+    assert_eq!(messaging.parked_len(b_id), 0, "flush 후 큐 비움");
     assert_eq!(
         seen.lock()
             .unwrap()
@@ -2086,7 +2086,7 @@ async fn c2_a_resumed_transcript_never_bootstraps_busy() {
         v["results"][0]["status"], "delivered",
         "부트스트랩이 없으니 즉시 배달: {v}"
     );
-    assert_eq!(messaging.parked_len(&to_name), 0, "파킹 0");
+    assert_eq!(messaging.parked_len(b_id), 0, "파킹 0");
 
     assert!(
         obs_seam::all_written(&captured).len() > written_before,
@@ -2226,7 +2226,7 @@ async fn c2_live_mid_turn_send_parks_and_delivers_after_turn_end() {
         "실 claude 턴 진행 중 도착은 파킹: {v2}"
     );
     let msg2 = v2["id"].as_str().expect("msg id").to_string();
-    assert_eq!(messaging.parked_len(target), 1, "턴 중 도착분이 대기");
+    assert_eq!(messaging.parked_len(info.id), 1, "턴 중 도착분이 대기");
 
     let delivered = wait_until(Duration::from_secs(90), || {
         seen.lock().unwrap().iter().any(
@@ -2239,9 +2239,9 @@ async fn c2_live_mid_turn_send_parks_and_delivers_after_turn_end() {
         delivered,
         "[c2_live] 턴 종료(result) 후 파킹 배달이 90s 내 관측되지 않음(parked={}) — \
          턴 이벤트 관측/idle flush 회귀 또는 실 claude 응답 지연",
-        messaging.parked_len(target)
+        messaging.parked_len(info.id)
     );
-    assert_eq!(messaging.parked_len(target), 0, "턴 종료 flush 로 큐 비움");
+    assert_eq!(messaging.parked_len(info.id), 0, "턴 종료 flush 로 큐 비움");
 
     manager.kill_agent(info.id).ok();
     let _ = wait_until(Duration::from_secs(5), || manager.list_agents().is_empty());
@@ -3387,7 +3387,7 @@ async fn c4_leading_whitespace_in_the_destination_does_not_change_routing() {
     );
     assert_eq!(v["results"][0]["status"], "delivered", "{body}");
     assert_eq!(
-        messaging.parked_len(" @all"),
+        messaging.parked_total_for_test(),
         0,
         "공백 이름 앞으로 부재 파킹되지 않는다(조용한 유실 방지)"
     );
@@ -3416,7 +3416,7 @@ async fn c4_leading_whitespace_in_the_destination_does_not_change_routing() {
         "결과 `to` 는 트림된 토큰(발신자 표기) 그대로: {body}"
     );
     assert_eq!(
-        messaging.parked_len(&padded),
+        messaging.parked_total_for_test(),
         0,
         "공백 이름 앞으로 유령 큐가 생기지 않는다"
     );

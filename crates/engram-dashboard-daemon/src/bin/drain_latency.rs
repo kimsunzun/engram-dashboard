@@ -372,7 +372,7 @@ fn measure_burst(parked: usize) -> Result<BurstPoint, String> {
                 &format!("prefill-{i}"),
             );
         }
-        let actually_parked = st.messaging.parked_len(&recipient.name);
+        let actually_parked = st.messaging.parked_len(recipient.id);
         if actually_parked != parked {
             return Err(format!(
                 "프리필 불일치(rep {rep}): {parked} 건을 요청했는데 큐엔 {actually_parked} 건 — 측정 전제 붕괴"
@@ -633,7 +633,7 @@ mod tests {
             );
         }
 
-        assert_eq!(st.messaging.parked_len(&recipient.name), 7);
+        assert_eq!(st.messaging.parked_len(recipient.id), 7);
         assert_eq!(
             written_len(&recipient),
             0,
@@ -661,6 +661,6 @@ mod tests {
 
         assert_eq!(rows(&result), vec![("delivered", None)]);
         assert_eq!(written_len(&recipient), 5, "묵은 4건 + 이번 1건");
-        assert_eq!(st.messaging.parked_len(&recipient.name), 0);
+        assert_eq!(st.messaging.parked_len(recipient.id), 0);
     }
 }

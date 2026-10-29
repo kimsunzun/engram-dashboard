@@ -1810,7 +1810,7 @@ async fn without_the_command_table_the_call_is_unavailable_but_discovery_still_a
 
 /// ★두 입구의 지목 해석이 같은지를 **우편 입구를 실제로 태워** 확인한다★.
 ///
-/// 비교 대상은 우편 커널의 `resolve_live`(private)이므로 직접 부르지 않고, 그것이 유일한 해석기인 공개
+/// 비교 대상은 우편 커널의 `resolve_token`(private)이므로 직접 부르지 않고, 그것이 유일한 해석기인 공개
 /// 경로(`MessagingService::handle_send`)에 같은 로스터를 물려 결말을 읽는다 — 배달됐으면 그 수신자로
 /// 해석된 것이고, `RECIPIENT_NOT_FOUND`/`RECIPIENT_AMBIGUOUS` 면 각각 부재·모호로 해석된 것이다.
 ///
@@ -1865,23 +1865,11 @@ mod resolver_alignment {
             AddressingSources {
                 roster: self.live_agents(),
                 // 잠든 층을 비워 두 해석기의 정의역을 맞춘다(위 모듈 주석).
-                dormant_names: vec![],
+                dormant: vec![],
             }
         }
         fn is_agent_live(&self, id: PeerId) -> bool {
             self.roster.iter().any(|(rid, _)| *rid == id)
-        }
-        fn live_id_for_name(&self, name: &str) -> Option<PeerId> {
-            self.roster
-                .iter()
-                .find(|(_, n)| n == name)
-                .map(|(id, _)| *id)
-        }
-        fn canonical_name(&self, id: PeerId) -> Option<String> {
-            self.roster
-                .iter()
-                .find(|(rid, _)| *rid == id)
-                .map(|(_, n)| n.clone())
         }
     }
 
@@ -1983,6 +1971,12 @@ mod resolver_alignment {
             "nobody".to_string(), // 부재
             "ALICE".to_string(),  // 대소문자 — 관대한 해석기라면 여기서 갈린다
             "ali".to_string(),    // 접두 — 유일 접두 매칭이 있으면 여기서 갈린다
+            // id 철자 — `Uuid` 가 읽는 철자 전부가 id 다(ADR-0309 · TRD S29 §4 B7).
+            alice.to_string().to_uppercase(),
+            alice.braced().to_string(),
+            alice.simple().to_string(),
+            alice.urn().to_string(),
+            bob.to_string().to_uppercase(), // 남의 이름(impostor)과 철자만 다른 id 도 id 가 먼저다
         ];
 
         let mut agreed = 0;
@@ -2013,21 +2007,6 @@ mod resolver_alignment {
             "우편 입구는 콤마 분해 잔여 공백을 구제한다(그 trim 을 지우지 말 것)"
         );
 
-        // ★알고 남긴 불일치 둘째 — id 철자 축★: 제어는 `Uuid` 가 읽는 철자 전부를 id 로 받고(데몬이 셸 명령의 옛
-        //   `agent_id` 도 이 해석기로 바꾸므로 대문자 id 를 보내던 호출자가 막히지 않게 — ADR-0308) 우편은 정규 철자만
-        //   받는다. 이것도 양쪽을 다 단언해 어느 쪽이든 조용히 뒤집히지 않게 한다.
-        let shouted = alice.to_string().to_uppercase();
-        assert_eq!(
-            control_resolution(&fixture, &shouted),
-            Resolution::Found(alice),
-            "제어는 대문자 id 철자도 id 로 읽는다"
-        );
-        assert_eq!(
-            mail_resolution(&fixture, &shouted),
-            Resolution::NotFound,
-            "우편은 정규 철자만 id 로 읽는다"
-        );
-
         // 대조가 **무의미하게** 통과하지 않았음을 못박는다 — 세 결말이 실제로 다 나왔어야 한다.
         assert_eq!(
             control_resolution(&fixture, "alice"),
@@ -2037,6 +2016,11 @@ mod resolver_alignment {
             control_resolution(&fixture, &bob.to_string()),
             Resolution::Found(bob),
             "id 가 UUID 를 닮은 이름을 이긴다"
+        );
+        assert_eq!(
+            control_resolution(&fixture, &alice.braced().to_string()),
+            Resolution::Found(alice),
+            "정규 밖 id 철자도 실제로 id 로 풀렸다"
         );
         assert_eq!(control_resolution(&fixture, "twin"), Resolution::Ambiguous);
         assert_eq!(control_resolution(&fixture, "nobody"), Resolution::NotFound);
