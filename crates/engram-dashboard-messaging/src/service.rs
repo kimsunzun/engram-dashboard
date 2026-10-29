@@ -70,7 +70,9 @@ use super::envelope::{
     new_msg_id, wrap_message, wrap_notice, DeliveryObservation, Entrance, EnvelopeFields,
     EnvelopeFormat,
 };
-use super::groups::{normalize_group_name, BuiltinGroups, GroupError, GroupSource, MemberPools};
+use super::groups::{
+    normalize_group_name, BuiltinGroups, GroupError, GroupMember, GroupSource, MemberPools,
+};
 use super::ledger::{
     DeliveryStatus, DueTimeout, Ledger, OpenOutcome, ReplyFailOutcome, ReplyOutcome,
     ReservationLiveness, RetiredContract, TransitionError,
@@ -385,9 +387,9 @@ pub struct AddressingSources {
     /// **`@here` 펼침이 보는 유일한 소스**다(spec §4 — "지금 여기 있는 전원"). `@all` 은 여기에
     ///   `dormant` 를 **더해서** 본다(ADR-0121 결정 1 — 두 어휘가 같은 소스를 보면 그 결정 위반이다).
     pub roster: Vec<LiveAgent>,
-    /// ★**중복을 접지 않는다** — 이게 동명 판정의 입력이다★: `push_recipient` 는 이 목록에서 같은 이름의
-    ///   개수를 **직접 세어** `RECIPIENT_AMBIGUOUS` 를 낸다(펼침 결과를 세는 게 아니다). 그래서 `@all` 펼침이
-    ///   같은 이름을 두 번 내도 행은 하나로 접히고 결말은 달라지지 않는다 — 판정이 걸려 있는 곳은 **이 필드**다.
+    /// ★**중복을 접지 않는다** — 이름 지목의 동명 판정 입력이다★: 같은 이름이 둘이면 그 이름으로 부른 수신자는
+    ///   `RECIPIENT_AMBIGUOUS` 다. `@all` 펼침은 이름이 아니라 id 로 풀리므로 그 둘은 각자 행을 얻는다
+    ///   (ADR-0309 · TRD S29 §4 X1).
     pub dormant: Vec<DormantAgent>,
 }
 
@@ -658,7 +660,7 @@ impl MessagingService {
         };
 
         // 2) 주소 해석(순수).
-        let addressing = resolve_addressing(&self.groups, to, from, sender_name, &sources)?;
+        let addressing = resolve_addressing(&self.groups, to, from, &sources)?;
         // 이 발송이 남길 배달기록 총수 = **실패 행 포함** 수신자 수(spec §5 "실패 수신자도 장부에 남는다").
         //   조회의 잘림 판정(`may_be_truncated`)이 이 값과 남은 행 수를 비교하므로 모든 행이 같은 값을 든다.
         let expected_rows = u16::try_from(addressing.recipients.len()).unwrap_or(u16::MAX);
@@ -684,35 +686,26 @@ impl MessagingService {
 
             // ── pass A: 수신자별 수용 판정 ────────────────
             for r in &addressing.recipients {
-                // 2-a) 입구 3분기(spec §5 · ADR-0116 결정 1).
-                let target = match r.target.clone() {
-                    Some(t) => Some(t),
-                    None => match absent_disposition(r, &roster_names) {
-                        AbsentDisposition::Failed { code, hint } => {
-                            // ★실패 수신자도 장부에 남는다(spec §5)★ — 종점 행이라 더 움직이지 않는다.
-                            st.ledger.record_with_expected(
-                                msg_id,
-                                sender_name,
-                                from.peer_id,
-                                &r.key,
-                                r.id(),
-                                body,
-                                DeliveryStatus::Failed,
-                                now,
-                                expected_rows,
-                            );
-                            plans.push(RecipientPlan::Failed { code, hint });
-                            continue;
-                        }
-                        // ★잠듦 = 수용(ADR-0116 결정 1)★ — 도어벨은 없다(산 세션이 없다 — 재등장 flush 가
-                        //   집는다).
-                        AbsentDisposition::Dormant => None,
-                    },
-                };
-                // ★수용된 수신자는 id 가 있다(ADR-0309)★: 산이면 그 세션 id, 잠듦이면 `absent_disposition` 이
-                //   잠든 id 하나를 잡았을 때만 `Dormant` 를 낸다.
-                let Some(recipient_id) = r.id() else {
-                    unreachable!("수용된 수신자는 산 id 또는 잠든 id 를 든다(absent_disposition)");
+                // 2-a) 입구 3분기(spec §5 · ADR-0116 결정 1). ★잠듦 = 수용★ — 도어벨은 없다(산 세션이
+                //      없다 — 재등장 flush 가 집는다).
+                let (recipient_id, live) = match admission(r, &roster_names) {
+                    Ok(admitted) => admitted,
+                    Err((code, hint)) => {
+                        // ★실패 수신자도 장부에 남는다(spec §5)★ — 종점 행이라 더 움직이지 않는다.
+                        st.ledger.record_with_expected(
+                            msg_id,
+                            sender_name,
+                            from.peer_id,
+                            r.name(),
+                            None,
+                            body,
+                            DeliveryStatus::Failed,
+                            now,
+                            expected_rows,
+                        );
+                        plans.push(RecipientPlan::Failed { code, hint });
+                        continue;
+                    }
                 };
 
                 // 2-b) ★파킹도 계약을 연다 — 잠듦 포함(spec §3 항목 2 · ADR-0116 결정 1)★: 언젠가 주입될
@@ -724,7 +717,7 @@ impl MessagingService {
                         msg_id,
                         sender_name,
                         from.peer_id,
-                        &r.key,
+                        r.name(),
                         recipient_id,
                         reply_by,
                         now,
@@ -745,14 +738,14 @@ impl MessagingService {
                             ))
                         }
                         // 수신자는 해석 단계에서 이미 중복 제거되므로 `(id, 수신자)` 중복은 도달 불가다.
-                        OpenOutcome::DuplicateId => duplicate_contracts.push(r.key.clone()),
+                        OpenOutcome::DuplicateId => duplicate_contracts.push(r.name().to_string()),
                         OpenOutcome::Full => {
                             st.ledger.record_with_expected(
                                 msg_id,
                                 sender_name,
                                 from.peer_id,
-                                &r.key,
-                                r.id(),
+                                r.name(),
+                                Some(recipient_id),
                                 body,
                                 DeliveryStatus::Failed,
                                 now,
@@ -782,7 +775,7 @@ impl MessagingService {
                     plans.push(RecipientPlan::Park {
                         recipient_id,
                         contract,
-                        live: target.is_some(),
+                        live,
                     });
                     continue;
                 }
@@ -794,8 +787,8 @@ impl MessagingService {
                     msg_id,
                     sender_name,
                     from.peer_id,
-                    &r.key,
-                    r.id(),
+                    r.name(),
+                    Some(recipient_id),
                     body,
                     DeliveryStatus::Failed,
                     now,
@@ -846,7 +839,7 @@ impl MessagingService {
                         from,
                         entrance,
                         recipient: recipient_id,
-                        recipient_name: &r.key,
+                        recipient_name: r.name(),
                         body,
                         kind: ParkKind::Message,
                         meta: &fanout_meta,
@@ -871,8 +864,8 @@ impl MessagingService {
                             msg_id,
                             sender_name,
                             from.peer_id,
-                            &r.key,
-                            r.id(),
+                            r.name(),
+                            Some(recipient_id),
                             body,
                             DeliveryStatus::Failed,
                             now,
@@ -2457,54 +2450,88 @@ fn rollback_reservation(
 /// 아직 정산되지 않은 예약(계약이 없는 통보/회신은 `None`).
 type PendingContract<'a> = Option<Reservation<'a>>;
 
-struct ResolvedRecipient {
-    /// 응답 행에 실을 **발신자 표기**(트림만 — WYSIWYA, ADR-0101). `@` 펼침 결과면 로스터 이름이다.
-    display: String,
-    /// 행 접기 키이자 장부 행의 받는 이 이름 스냅숏. 해석되면 canonical 이름, 못 하면 표기 그대로.
-    ///   파킹 큐 키는 이것이 아니라 `id()` 다(ADR-0309).
-    ///
-    /// ★왜 표기와 키를 나누나★: 발신자는 exact PeerId 로도 지목할 수 있는데, 장부 · 봉투 `to` 에 남는 이름은
-    ///   canonical 이름이어야 한다. 그래서 해석되면 canonical 이름을 키로 쓰고, 응답에는 발신자가 쓴 표기를
-    ///   그대로 돌려준다(둘은 정상 경로에서 동일하다).
-    key: String,
-    /// ★해석된 산 수신자(발송 순간 스냅샷 기준)★ — `None` = 부재 또는 동명 다수.
-    ///
-    /// ★왜 여기 들고 다니나(load-bearing)★: 해석을 **한 번만** 한다(ADR-0111 결정 2 "스냅샷 한 장"). 판정
-    ///   단계에서 `key` 로 다시 풀면 **exact-PeerId 지목이 이름 해석으로 강등**돼, 동명 다수를 의도적으로
-    ///   통과하던 id 지목이 `RECIPIENT_AMBIGUOUS` 로 뒤집힌다(같은 스냅샷인데 답이 갈리는 자기모순).
-    target: Option<LiveAgent>,
-    live_count: usize,
-    // ADR-0116 (결정 1 — 잠듦 파킹 · 잠듦 층 동명)
-    dormant_count: usize,
-    /// 잠든 쪽 이름이 **정확히 하나**로 풀렸을 때 그 프로필 id(`dormant_count == 1` 일 때만 `Some`).
-    // ADR-0309 (결정 3 — 잠든 쪽도 id 로 넘어온다)
-    dormant_id: Option<PeerId>,
-    /// ★자기 행을 가질 수 없는 중복 지목(M3 · ADR-0116 결정 5)★ — `Some(접힌 키)` 면 이 토큰은 **다른
-    ///   실체**를 가리키는데 park/장부 키(= 이름)가 앞선 행과 같아 자기 자리를 만들 수 없다. 그 사실을
-    ///   `RECIPIENT_AMBIGUOUS` **실패 행**으로 드러낸다(조용히 사라지지 않게 — `push_recipient` 주석).
-    dup_of: Option<String>,
+/// 수신자 하나의 해석 결과 — 발송 순간 스냅샷 한 장으로 **한 번만** 푼다(ADR-0111 결정 2). 판정 단계에서
+/// 이름으로 다시 풀면 id 지목이 이름 해석으로 강등돼 같은 스냅샷에서 답이 갈린다.
+// ADR-0309 (결정 3 — 이름 → id 는 이 입구에서만)
+enum Resolution {
+    Live(LiveAgent),
+    /// 잠든 프로필 하나 — 파킹(spec §5 분기 3 · ADR-0116 결정 1).
+    Dormant {
+        id: PeerId,
+        name: String,
+    },
+    /// 이름이 한 층에서 둘 이상과 맞았다 → `RECIPIENT_AMBIGUOUS`.
+    Ambiguous {
+        count: usize,
+        layer: NameLayer,
+    },
+    /// 어디에도 없다 → `RECIPIENT_NOT_FOUND`(파킹 없음 — ADR-0116 결정 1).
+    NotFound,
 }
 
-impl ResolvedRecipient {
-    /// 이 수신자의 에이전트 id — 산 수신자면 그 세션 id, 잠든 하나로 풀렸으면 그 프로필 id. 못 풀렸으면
-    /// (부재 · 동명 다수 · 접힌 중복) `None`.
-    // ADR-0309 (결정 3 — 이름 → id 는 이 입구에서만)
-    fn id(&self) -> Option<PeerId> {
-        self.target.as_ref().map(|t| t.id).or(self.dormant_id)
+/// 동명이 걸린 층 — 힌트의 수와 라벨이 같은 층을 가리켜야 한다(`ambiguous_hint`).
+#[derive(Debug, Clone, Copy)]
+enum NameLayer {
+    Live,
+    Saved,
+}
+
+impl NameLayer {
+    fn label(self) -> &'static str {
+        match self {
+            NameLayer::Live => "live",
+            NameLayer::Saved => "saved",
+        }
     }
 }
 
-/// 입력 토큰 하나(입력 순서 보존) — 봉투 `to` 조립의 순서 축이자 **그 토큰이 기여한 수신자 키**의 출처.
+struct ResolvedRecipient {
+    /// 응답 행에 실을 **발신자 표기**(트림만 — WYSIWYA, ADR-0101). `@` 펼침 결과면 명부 이름이다.
+    display: String,
+    to: Resolution,
+}
+
+impl ResolvedRecipient {
+    /// 받는 이 id — 산이면 세션 id, 잠듦이면 프로필 id. 못 풀렸으면 `None`.
+    fn id(&self) -> Option<PeerId> {
+        match &self.to {
+            Resolution::Live(a) => Some(a.id),
+            Resolution::Dormant { id, .. } => Some(*id),
+            Resolution::Ambiguous { .. } | Resolution::NotFound => None,
+        }
+    }
+
+    /// 장부 행 · 파킹 항목 · 봉투 `to` 에 적는 이름 — 풀렸으면 명부 이름(id 로 지목해도 이름이 남는다),
+    /// 못 풀렸으면 표기.
+    fn name(&self) -> &str {
+        match &self.to {
+            Resolution::Live(a) => &a.name,
+            Resolution::Dormant { name, .. } => name,
+            Resolution::Ambiguous { .. } | Resolution::NotFound => &self.display,
+        }
+    }
+
+    /// 같은 행인가 — 풀렸으면 같은 id, 못 풀렸으면 같은 표기(`push_recipient`).
+    fn same_row(&self, other: &ResolvedRecipient) -> bool {
+        match (self.id(), other.id()) {
+            (Some(a), Some(b)) => a == b,
+            (None, None) => self.display == other.display,
+            _ => false,
+        }
+    }
+}
+
+/// 입력 토큰 하나(입력 순서 보존) — 봉투 `to` 조립의 순서 축이자 **그 토큰이 기여한 행**의 출처
+/// (`Addressing.recipients` 의 자리).
 ///
-/// ★왜 "기여한 키" 를 토큰이 들고 있나(A5 회귀 · load-bearing)★: 옛 구현은 `to` 속성 포함 여부를 "그 토큰이
-///   중복 제거를 통과해 **행을 만들었나**" 로 판정했다. 그러면 `["bob","carol","@all"]` 처럼 `@all` 의 펼침이
-///   앞선 명시 지목에 **완전히 흡수**된 경우 `@all` 이 통째로 빠진다(`to="bob,carol"`). spec §1 은 값이
-///   **발신자가 쓴 토큰**의 나열이고 빠지는 건 **실패한 토큰**뿐이라고 못 박는다 — 흡수는 실패가 아니다.
-///   그래서 토큰마다 자기가 해석해 낸 키 전부를 (중복 제거 **이전**에) 기록하고, 포함 조건을 "그 키들 중
-///   하나라도 수용 판정됐나" 로 바꾼다.
+/// ★왜 "기여한 행" 을 토큰이 들고 있나(A5 회귀 · load-bearing)★: `to` 속성 포함 여부를 "그 토큰이 중복
+///   제거를 통과해 **행을 만들었나**" 로 판정하면 `["bob","carol","@all"]` 처럼 `@all` 의 펼침이 앞선 명시
+///   지목에 **완전히 흡수**된 경우 `@all` 이 통째로 빠진다(`to="bob,carol"`). spec §1 은 값이 **발신자가 쓴
+///   토큰**의 나열이고 빠지는 건 **실패한 토큰**뿐이라고 못 박는다 — 흡수는 실패가 아니다. 그래서 토큰마다
+///   자기가 해석해 낸 행 전부를 기록하고, 포함 조건을 "그 행들 중 하나라도 수용 판정됐나" 로 둔다.
 enum AddressToken {
-    Name { key: String },
-    Group { label: String, keys: Vec<String> },
+    Name { row: usize },
+    Group { label: String, rows: Vec<usize> },
 }
 
 struct Addressing {
@@ -2512,16 +2539,15 @@ struct Addressing {
     tokens: Vec<AddressToken>,
 }
 
-/// ★수신자 해석(spec §5 해석 순서 · 순수 — 로스터 스냅샷만 본다)★.
+/// ★수신자 해석(spec §5 해석 순서 · 순수 — 입구 판정 소스 스냅샷만 본다)★.
 ///
 /// 순서: ① 트림(콤마 분해는 **CLI 입구 전용**이라 이미 끝나 있다) → ② `@` 원소 펼침(**발신자 제외**) →
-/// ③ 이름 원소와 합류 → ④ 중복 제거(수신자 1명 = 배달 1회·결과 1행) → ⑤ 로스터 대조는 호출자가 한다.
+/// ③ 이름 원소와 합류 → ④ 중복 제거(수신자 1명 = 배달 1회·결과 1행) → ⑤ 3분기 판정은 호출자가 한다
+/// (`admission`).
 ///
 /// ★행 순서 = 결정적(테스트 고정 — spec §5)★: ① 입력에 적힌 **명시 토큰을 적힌 순서대로**, ② 그 뒤에
 ///   `@`주소 **펼침 결과를 이름 사전순**으로 잇는다. 중복 제거는 **먼저 나온 것을 남긴다**(명시 지목이
 ///   펼침 결과보다 항상 앞서므로, 겹친 수신자의 행 위치는 명시 위치를 따른다).
-/// ★중복 제거 축 = 해석된 canonical 이름(`ResolvedRecipient.key`)★: 표기 문자열이 아니라 키로 접어야 `@all` 이 낸 이름과
-///   같은 에이전트를 가리키는 exact-id 지목이 두 행으로 갈리지 않는다.
 /// ★`@`주소 오류 = 발송 단위 전체 반려(ADR-0114 결정 3)★: `@all` 이 아닌 `@이름`·규약 위반은
 ///   `GROUP_NOT_FOUND` 다(혼용 `to` 여도 나머지 수신자에게 가지 않는다). **최종 집합이 비면**
 ///   `GROUP_EMPTY` — 원소 단위가 아니라 펼침 ∪ 명시 지목의 결과로 판정한다.
@@ -2536,40 +2562,41 @@ fn resolve_addressing(
     groups: &dyn GroupSource,
     to: &[String],
     from: SenderIdentity,
-    sender_name: &str,
     sources: &AddressingSources,
 ) -> Result<Addressing, SendReject> {
     // ★어느 어휘가 어느 풀을 읽는지는 **소스**가 정한다(`groups::MemberPools`)★ — 여기서 하는 일은 풀을
     //   만들고 **발신자를 빼는 것**뿐이다(ADR-0121 결정 1).
-    //   ★산 풀에서 id 로 빼는 이유★: 이름은 겹칠 수 있어 동명 타인까지 함께 빠지면 안 된다(그 타인은 동명
-    //   규칙으로 따로 판정된다 — ADR-0114 결정 4).
-    //   ★턴 신호 없는 산 세션은 산 풀에 **들어온다**★ — 로스터 자격에 capability 조건이 없으므로(ADR-0116
+    // ★발신자는 id 로만 뺀다(ADR-0309 · TRD S29 §4 X3)★: 이름으로 빼면 발신자와 이름만 같은 다른 에이전트
+    //   (산 쌍둥이 · 잠든 동명 프로필)까지 방송에서 빠진다. 펼친 멤버는 id 로 바로 풀리므로 잠든 동명이 발신자
+    //   자신의 산 세션으로 풀려 자기 방송을 받는 경로도 없다.
+    // ★턴 신호 없는 산 세션은 산 풀에 **들어온다**★ — 로스터 자격에 capability 조건이 없으므로(ADR-0116
     //   결정 7) 방송이 그 부류를 빼지 않는다(게이트 없이 즉시 주입된다).
-    let live_names: Vec<String> = sources
+    let live_pool: Vec<GroupMember> = sources
         .roster
         .iter()
         .filter(|a| a.id != from.peer_id)
-        .map(|a| a.name.clone())
+        .map(|a| GroupMember {
+            id: a.id,
+            name: a.name.clone(),
+        })
         .collect();
-    // ★잠듦 풀에서는 **이름으로** 뺀다(load-bearing — 발신자 제외를 뚫는 경로 차단)★: 발신자와 같은 이름의
-    //   잠든 프로필이 있으면 그 이름이 `@all` 펼침에 들어오고, 상위 해석은 "산 쪽이 이긴다" 규칙에 따라 그
-    //   이름을 **발신자 자신의 산 세션**으로 풀어 자기 편지를 배달한다(spec §4 발신자 제외 위반). 이름 유일성
-    //   (ADR-0120)이 그런 프로필의 존재를 막지만, 그 보증이 깨졌을 때 무너지는 쪽이 자기 방송 메아리라
-    //   여기서 한 번 더 막는다. 잠듦 층 동명은 여전히 접지 않는다(같은 이름 2개 → `RECIPIENT_AMBIGUOUS`).
-    let dormant_names: Vec<String> = sources
+    let dormant_pool: Vec<GroupMember> = sources
         .dormant
         .iter()
-        .filter(|d| d.name != sender_name)
-        .map(|d| d.name.clone())
+        .filter(|d| d.id != from.peer_id)
+        .map(|d| GroupMember {
+            id: d.id,
+            name: d.name.clone(),
+        })
         .collect();
     let pools = MemberPools {
-        live: &live_names,
-        dormant: &dormant_names,
+        live: &live_pool,
+        dormant: &dormant_pool,
     };
 
     let mut tokens: Vec<AddressToken> = Vec::with_capacity(to.len());
     let mut recipients: Vec<ResolvedRecipient> = Vec::new();
-    let mut expanded: Vec<(usize, String)> = Vec::new();
+    let mut expanded: Vec<(usize, GroupMember)> = Vec::new();
 
     for (i, raw) in to.iter().enumerate() {
         let token = raw.trim();
@@ -2583,19 +2610,34 @@ fn resolve_addressing(
             }
             tokens.push(AddressToken::Group {
                 label: norm,
-                keys: Vec::new(),
+                rows: Vec::new(),
             });
         } else {
-            let key = push_recipient(&mut recipients, token.to_string(), sources);
-            tokens.push(AddressToken::Name { key });
+            let row = push_recipient(
+                &mut recipients,
+                ResolvedRecipient {
+                    display: token.to_string(),
+                    to: resolve_token(token, sources),
+                },
+            );
+            tokens.push(AddressToken::Name { row });
         }
     }
-    expanded.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
-    for (i, name) in expanded {
-        let key = push_recipient(&mut recipients, name, sources);
-        if let AddressToken::Group { keys, .. } = &mut tokens[i] {
-            if !keys.contains(&key) {
-                keys.push(key);
+    expanded.sort_by(|a, b| a.1.name.cmp(&b.1.name).then(a.0.cmp(&b.0)));
+    for (i, member) in expanded {
+        // ★펼친 멤버는 id 로 바로 푼다(ADR-0309 결정 3)★ — 이름으로 다시 풀면 동명 쌍둥이가 `RECIPIENT_AMBIGUOUS`
+        //   한 행으로 접힌다(TRD S29 §4 X1). 풀에 없는 id 는 소스 결함이라 없음으로 드러낸다.
+        let to = resolve_id(member.id, sources).unwrap_or(Resolution::NotFound);
+        let row = push_recipient(
+            &mut recipients,
+            ResolvedRecipient {
+                display: member.name,
+                to,
+            },
+        );
+        if let AddressToken::Group { rows, .. } = &mut tokens[i] {
+            if !rows.contains(&row) {
+                rows.push(row);
             }
         }
     }
@@ -2608,115 +2650,81 @@ fn resolve_addressing(
     Ok(Addressing { recipients, tokens })
 }
 
-/// 해석된 수신자 1명을 행 목록에 추가하고 **그 수신자의 행 키**(`ResolvedRecipient.key`)를 돌려준다 — 키 기준
-/// 중복 제거.
+/// ★토큰 하나 → 받는 이(spec §5)★ — 제어 입구의 `resolve_in`(agent crate)과 **같은 규칙**이다.
 ///
-/// ★중복 제거 = 먼저 나온 자리를 남긴다(spec §5)★ — 겹친 수신자의 **행 위치**는 명시 지목 자리를 따른다.
-/// ★자기 행을 못 갖는 중복은 **보이게 실패시킨다**(M3)★: 두 토큰이 **서로 다른 산 실체**를
-///   exact-id 로 지목했는데 그 둘의 canonical 이름이 같으면(동명), 뒤 토큰은 park·장부 키를 앞 행과 공유할 수
-///   없어 자기 자리를 만들 수 없다 — 옛 구현은 그 토큰을 **행 없이 조용히 삼켰다**(spec §6 "수신자 1명 = 1행"
-///   위반). 실체 키 병행 트랙은 비용 과다로 거부됐으므로(ADR-0114 거부 대안), **가시적 실패**로 강등한다.
-/// ★단 하나의 예외: 해석된 쪽이 이긴다(A8)★ — 두 토큰이 같은 키로 접힐 때 한쪽만 `target` 을 갖고 있으면
-///   (= exact-PeerId 지목은 동명 다수를 의도적으로 통과한다) **행 위치는 앞선 것을 유지하면서 해석 결과만
-///   그쪽으로 갈아끼운다**. 왜: 그러지 않으면 `["dup", "<dup1의 id>"]` 가 `RECIPIENT_AMBIGUOUS` 로 끝나고,
-///   순서를 뒤집으면 배달되는 비대칭이 생긴다. 표기(`display`)는 먼저 쓴 것을 남긴다 — 응답의 `to` 는
-///   발신자가 처음 쓴 표기라는 WYSIWYA 계약을 지킨다.
-/// ★위 두 규칙의 지위(ADR-0116 결정 5 — 재가 완료)★: **정책으로 승격하지 않는다**(spec 문구화 없음).
-///   동명이인 자체가 **미지원**이고 뿌리 제거는 ADR-0115(스폰 이름 유일성)가 한다 — 그때까지 이 코드는
-///   "조용한 행 소멸 방지" 라는 **과도기 방어**로만 존치한다(그래서 힌트도 exact-id 재발송을 가르치지 않고
-///   사용자 에스컬레이션을 가리킨다 — `ambiguous_hint`). 사용자 재가 대기 상태가 아니다.
-fn push_recipient(
-    recipients: &mut Vec<ResolvedRecipient>,
-    display: String,
-    sources: &AddressingSources,
-) -> String {
-    // ★① 같은 **raw 토큰**을 두 번 적었으면 행은 하나다(F2-a)★: 표기가 글자 그대로 같으면 정보가 0 인
-    //   중복이다. 이 검사를 앞에 두지 않으면 반복된 exact-id 토큰이 아래 M3 갈래를 매번 새로 타서 **같은
-    //   실패 행이 여러 줄** 나온다(`[A-id, B-id, B-id]` → B 행 2줄).
-    if let Some(existing) = recipients.iter().find(|r| r.display == display) {
-        return existing.key.clone();
-    }
-    let target = resolve_live(&display, &sources.roster);
-    let key = target
-        .as_ref()
-        .map(|a| a.name.clone())
-        .unwrap_or_else(|| display.clone());
-    // ★② 자리 다툼은 **실 수신자 행**끼리만 한다(F2-b)★: loser 행(`dup_of`)은 이름 공간의 점유자가 아니다 —
-    //   그걸 후보에 넣으면 뒤 토큰이 loser 행의 자리를 물려받아(A8 승격 경로) 그 실패가 사라지고 남의 표기로
-    //   배달이 보고된다. loser 키는 애초에 이름 공간 밖이지만(아래 `loser_key`), 검색 조건도 명시해 둔다.
-    if let Some(pos) = recipients
-        .iter()
-        .position(|r| r.dup_of.is_none() && r.key == key)
-    {
-        let existing_target = recipients[pos].target.as_ref().map(|a| a.id);
-        let new_target = target.as_ref().map(|a| a.id);
-        match (existing_target, new_target) {
-            (None, Some(_)) => {
-                recipients[pos].live_count =
-                    sources.roster.iter().filter(|a| a.name == key).count();
-                recipients[pos].target = target;
-                // 로스터로 해석됐으므로 로스터 밖 축(잠듦)은 더 이상 의미가 없다 — 지운다.
-                //   (안 지우면 앞 행이 잠듦으로 판정됐던 흔적이 남아 3분기가 두 갈래를 동시에 본다.)
-                recipients[pos].dormant_count = 0;
-                recipients[pos].dormant_id = None;
-            }
-            (Some(e), Some(n)) if e != n => {
-                let lkey = loser_key(&display);
-                recipients.push(ResolvedRecipient {
-                    key: lkey.clone(),
-                    display,
-                    target: None,
-                    live_count: 0,
-                    dormant_count: 0,
-                    dormant_id: None,
-                    dup_of: Some(key),
-                });
-                // 봉투 `to` 판정이 이 토큰을 "수용" 으로 세지 않게 **loser 키**를 돌려준다(`loser_key`).
-                return lkey;
-            }
-            _ => {}
+/// ① UUID 로 읽히면(`PeerId::parse_str` — 대문자 · 중괄호 · 하이픈 없음 · `urn:uuid:` 철자 포함) 산 id → 잠든
+///    id 순으로 찾고, 없으면 이름으로 넘어간다. id 가 먼저라 UUID 처럼 생긴 **이름**이 남의 id 지목을 가로채지
+///    못하고, 명부에 없는 id 꼴은 그런 이름으로 풀린다.
+/// ② 이름(정확 일치 — 대소문자 구분 · 접두 매칭 없음): 산 1 = 산 · 산 2+ = 모호(산) · 산 0 에서 잠든 1 = 잠듦 ·
+///    잠든 2+ = 모호(저장) · 0 = 없음. ★산 층에 하나라도 있으면 잠든 층은 보지 않는다(spec §5 분기 순서)★ —
+///    그래야 "산 1 + 잠든 1 동명 → 산 쪽으로 배달" 이 성립한다.
+/// ★두 입구가 갈리면 편지를 받은 에이전트와 제어 명령이 닿은 에이전트가 달라진다★ — 데몬 crate 의 교차
+///   대조 테스트(`tests/control_agent.rs` `resolver_alignment`)가 이 함수를 `handle_send` 로 태워 지킨다.
+///   정의역은 다르다: 제어는 산 · 잠든 에이전트를 한 명부로 보고, 우편은 산 층이 잠든 층을 이긴다.
+// ADR-0116 (결정 1 — 3분기 · 잠듦 층 동명)
+// ADR-0120 (산 층이 잠듦 층을 이긴다 · 잠듦 층 동명 차단 — 이름 지목 규칙으로 남는다)
+// ADR-0309 (결정 3 — 잠든 쪽도 id 로 지목된다 · id 철자는 `resolve_in` 과 같게)
+fn resolve_token(token: &str, sources: &AddressingSources) -> Resolution {
+    if let Ok(id) = PeerId::parse_str(token) {
+        if let Some(found) = resolve_id(id, sources) {
+            return found;
         }
-        return key;
     }
-    let live_count = sources.roster.iter().filter(|a| a.name == key).count();
-    // ★잠듦 축은 **로스터 판정이 끝난 뒤에만** 계산한다(spec §5 분기 순서 — 산 쪽이 이긴다)★:
-    //   로스터로 해석됐거나(target) 로스터 동명(live_count ≥ 2)이면 결말이 이미 정해졌으므로 프로필 층을
-    //   보지 않는다. 그래야 "산 1 + 잠든 1 동명 → 산 쪽으로 배달" 이 성립한다(잠듦 판정이 끼어들 여지 없음).
-    let dormant: Vec<&DormantAgent> = if target.is_some() || live_count > 0 {
-        Vec::new()
-    } else {
-        sources.dormant.iter().filter(|d| d.name == key).collect()
-    };
-    let dormant_id = match dormant.as_slice() {
-        [only] => Some(only.id),
-        _ => None,
-    };
-    recipients.push(ResolvedRecipient {
-        display,
-        key: key.clone(),
-        target,
-        live_count,
-        dormant_count: dormant.len(),
-        dormant_id,
-        dup_of: None,
-    });
-    key
+    let live: Vec<&LiveAgent> = sources.roster.iter().filter(|a| a.name == token).collect();
+    match live.as_slice() {
+        [] => {}
+        [only] => return Resolution::Live((*only).clone()),
+        many => {
+            return Resolution::Ambiguous {
+                count: many.len(),
+                layer: NameLayer::Live,
+            }
+        }
+    }
+    let dormant: Vec<&DormantAgent> = sources.dormant.iter().filter(|d| d.name == token).collect();
+    match dormant.as_slice() {
+        [] => Resolution::NotFound,
+        [only] => Resolution::Dormant {
+            id: only.id,
+            name: only.name.clone(),
+        },
+        many => Resolution::Ambiguous {
+            count: many.len(),
+            layer: NameLayer::Saved,
+        },
+    }
 }
 
-/// ★자기 행을 못 갖는 중복 지목(loser 행)의 **장부·판정 키**(F2 — load-bearing)★.
+/// 명부의 id 하나 → 받는 이. 산 · 잠듦 어디에도 없으면 `None`.
+fn resolve_id(id: PeerId, sources: &AddressingSources) -> Option<Resolution> {
+    if let Some(a) = sources.roster.iter().find(|a| a.id == id) {
+        return Some(Resolution::Live(a.clone()));
+    }
+    sources
+        .dormant
+        .iter()
+        .find(|d| d.id == id)
+        .map(|d| Resolution::Dormant {
+            id: d.id,
+            name: d.name.clone(),
+        })
+}
+
+/// 수신자 하나를 행 목록에 넣고 그 행의 자리를 돌려준다 — 같은 행이 이미 있으면 그 자리.
 ///
-/// ★왜 표기(`display`)를 그대로 쓰면 안 되나(실측 세 갈래)★: 표기는 **canonical 이름 공간과 같은 공간**이다.
-///   ① 어떤 에이전트 C 의 canonical 이름이 우연히 문자열 `"<B의 uuid>"` 와 같으면, C 를 지목한 토큰이 B 의
-///   loser 행을 자기 자리로 착각해(또는 그 반대로) B 의 실패가 사라지고 C 의 배달이 B 의 표기로 보고된다
-///   ② 순서를 뒤집으면 장부 키 `(msg_id, "<B의 uuid>")` 가 **두 행**에 중복 발급된다 ③ `build_to_attr` 의
-///   키 조회가 실패 행을 수용 행으로 오독할 수 있다.
-/// ★해법 = 이름 공간 밖의 키★: `U+0001`(제어문자) 접두를 붙인다. canonical 이름은 display_name 또는 경로
-///   basename 에서 오고 그 어느 쪽도 제어문자를 담을 수 없으므로(파일시스템·표시 이름 모두 금지) 이 접두가
-///   붙은 문자열은 **어떤 에이전트의 이름도 될 수 없다** — 즉 충돌이 구조적으로 불가능하다.
-/// ★행마다 유일★: 표기별로 유일하고(같은 표기는 위 ① 검사에서 이미 접힌다) 그래서 장부 종점 키도 행마다
-///   하나씩이다. 응답 `results[].to` 는 여전히 **발신자 표기**라 이 내부 키는 발신 LLM 에게 보이지 않는다.
-fn loser_key(display: &str) -> String {
-    format!("\u{1}ambiguous:{display}")
+/// ★중복 제거 = 먼저 나온 자리를 남긴다(spec §5)★ — 겹친 수신자의 **행 위치와 표기**는 먼저 쓴 토큰을 따른다
+///   (응답의 `to` 는 발신자가 처음 쓴 표기 — WYSIWYA).
+/// ★같은 행 = 풀렸으면 같은 id, 못 풀렸으면 같은 표기(ADR-0309)★: 같은 에이전트를 이름 · id · `@all` 로 겹쳐
+///   지목해도 한 행이고, 서로 다른 에이전트는 이름이 같아도 각자 행이다 — 동명 쌍둥이를 각각 id 로 지목하면
+///   둘 다 배달된다(TRD S29 §4 X2). ★이름으로 접지 말 것★ — 쌍둥이 하나가 행 없이 사라진다(spec §6 "수신자
+///   1명 = 1행" 위반). 못 풀린 표기는 풀린 행과 섞이지 않아 `["dup", "<dup1 id>"]` 는 이름 행
+///   `RECIPIENT_AMBIGUOUS` + id 행 배달 두 행이다.
+fn push_recipient(recipients: &mut Vec<ResolvedRecipient>, candidate: ResolvedRecipient) -> usize {
+    if let Some(pos) = recipients.iter().position(|r| r.same_row(&candidate)) {
+        return pos;
+    }
+    recipients.push(candidate);
+    recipients.len() - 1
 }
 
 /// `@`주소 해석 에러 → 발송 단위 반려. 규약 위반도 "그런 주소는 없다" 로 접는다 — 발신자에게 맞는 사실이고
@@ -2737,28 +2745,24 @@ fn group_reject(e: GroupError, raw: &str) -> SendReject {
 ///   판정 축은 "행을 만들었나" 가 **아니다**. 중복 제거로 흡수된 토큰(`["bob","carol","@all"]` 의 `@all`)은
 ///   행을 만들지 않지만 **실패한 것도 아니다** — 그 수신자들은 다른 토큰 자리에서 정상 배달된다. spec §1 이
 ///   빼라고 한 건 **실패한 토큰**뿐이므로, 흡수는 포함 사유를 잃게 하지 않는다.
-/// ★같은 값은 한 번만 적는다(M4)★: 표기 중복(`["bob","bob"]`)이나 접힌 지목(`["<dup1 id>","dup"]`)은
-///   **같은 수신자 하나**를 가리키므로 `to="bob,bob"` 은 수신 LLM 에게 거짓 인원수를 알린다. 먼저 나온
-///   자리를 남기고 뒤 중복을 접는다(행 순서 규칙과 같은 방향).
+/// ★같은 값은 한 번만 적는다(M4)★: 표기 중복(`["bob","bob"]`)이나 같은 에이전트의 이름 · id 지목
+///   (`["<bob id>","bob"]`)이 `to="bob,bob"` 으로 나오면 수신 LLM 에게 거짓 인원수를 알린다. 먼저 나온 자리를
+///   남기고 뒤 중복을 접는다(행 순서 규칙과 같은 방향). 값을 견주므로 동명 쌍둥이 둘이 수용돼도 이름은 한
+///   번 적힌다.
 /// ★펼친 명단을 대신 싣지 않는다★ — 수신자 명단·역할 공개(cc)는 v2 다(spec §8).
 fn build_to_attr(addr: &Addressing, admitted: &[bool]) -> String {
     // `admitted` 의 인덱스는 `recipients` 순서와 같다.
-    let admitted_key = |key: &str| {
-        addr.recipients
-            .iter()
-            .position(|r| r.key == key)
-            .is_some_and(|pos| admitted[pos])
-    };
     let mut parts: Vec<String> = Vec::new();
     for token in &addr.tokens {
         match token {
-            AddressToken::Name { key } => {
-                if admitted_key(key) && !parts.iter().any(|p| p == key) {
-                    parts.push(key.clone());
+            AddressToken::Name { row } => {
+                let name = addr.recipients[*row].name();
+                if admitted[*row] && !parts.iter().any(|p| p == name) {
+                    parts.push(name.to_string());
                 }
             }
-            AddressToken::Group { label, keys } => {
-                if keys.iter().any(|k| admitted_key(k)) && !parts.iter().any(|p| p == label) {
+            AddressToken::Group { label, rows } => {
+                if rows.iter().any(|r| admitted[*r]) && !parts.iter().any(|p| p == label) {
                     parts.push(label.clone());
                 }
             }
@@ -2778,56 +2782,30 @@ fn live_names_hint(roster: &[LiveAgent]) -> String {
         .join(", ")
 }
 
-/// ★로스터 밖 수신자의 결말(spec §5 분기 1/3 — ADR-0116 결정 1)★. `Failed` = 실패 행(파킹 없음) ·
-/// `Dormant` = 잠듦 파킹(수용).
-enum AbsentDisposition {
-    Failed { code: FailCode, hint: String },
-    Dormant,
-}
-
-/// ★로스터 밖 수신자를 3분기의 나머지 두 갈래로 가르는 **단일 판정점**(spec §5 · ADR-0116 결정 1)★.
-///
-/// 판정 순서가 곧 정책이다(순서를 바꾸면 결말이 바뀐다):
-///   ① **접힌 중복 지목**(`dup_of`) → `RECIPIENT_AMBIGUOUS`(과도기 방어 — `push_recipient` 헤더)
-///   ② **로스터 동명 다수** → `RECIPIENT_AMBIGUOUS`(산 층)
-///   ③ **잠듦 동명 다수** → `RECIPIENT_AMBIGUOUS`(잠듦 층 — 이름으로는 받는 이를 하나로
-///      고를 수 없다)
-///   ④ **잠듦 1개** → 파킹(수용) · ⑤ **아무 데도 없음** → `RECIPIENT_NOT_FOUND`
-/// ★로스터 판정이 이 함수보다 먼저다(호출자)★: 로스터에 있으면 여기 오지 않는다 — 턴 신호가 없어도 그건
-///   배달 대상이다(ADR-0116 결정 7. 옛 `RECIPIENT_UNREACHABLE` 갈래는 폐기 — 되살리지 말 것).
+/// ★입구 3분기의 **단일 판정점**(spec §5 · ADR-0116 결정 1)★ — 수용이면 (받는 이 id, 산인가), 실패면
+/// (코드, 힌트). 산 = 배달 대상 · 잠듦 = 파킹(수용) · 동명 다수 = `RECIPIENT_AMBIGUOUS` · 없음 =
+/// `RECIPIENT_NOT_FOUND`(파킹 없음).
+/// ★산 세션은 턴 신호가 없어도 배달 대상이다(ADR-0116 결정 7)★ — 옛 `RECIPIENT_UNREACHABLE` 갈래는 폐기됐다.
+///   되살리지 말 것.
 // ADR-0116 (결정 1 — 3분기 판정)
-fn absent_disposition(r: &ResolvedRecipient, roster_names: &str) -> AbsentDisposition {
-    if let Some(folded) = &r.dup_of {
-        return AbsentDisposition::Failed {
-            code: FailCode::RecipientAmbiguous,
-            hint: format!(
-                "'{}' resolves to a different agent that shares the name '{folded}' with another recipient of this send — the broker addresses mailboxes by name, so only one of them can be a recipient here. {}",
-                r.display, AMBIGUOUS_ESCALATION
+fn admission(
+    r: &ResolvedRecipient,
+    roster_names: &str,
+) -> Result<(PeerId, bool), (FailCode, String)> {
+    match &r.to {
+        Resolution::Live(a) => Ok((a.id, true)),
+        Resolution::Dormant { id, .. } => Ok((*id, false)),
+        Resolution::Ambiguous { count, layer } => Err((
+            FailCode::RecipientAmbiguous,
+            ambiguous_hint(&r.display, *count, layer.label()),
+        )),
+        Resolution::NotFound => Err((
+            FailCode::RecipientNotFound,
+            format!(
+                "No agent named '{}' exists right now — not running and no saved agent by that name, so nothing was queued for it (fix the name, or create/spawn it and send again). Live agents: {roster_names}.",
+                r.display
             ),
-        };
-    }
-    if r.live_count >= 2 {
-        return AbsentDisposition::Failed {
-            code: FailCode::RecipientAmbiguous,
-            hint: ambiguous_hint(&r.display, r.live_count, "live"),
-        };
-    }
-    if r.dormant_count >= 2 {
-        return AbsentDisposition::Failed {
-            code: FailCode::RecipientAmbiguous,
-            hint: ambiguous_hint(&r.display, r.dormant_count, "saved"),
-        };
-    }
-    // 잠든 하나 = 그 프로필 id 를 잡은 경우뿐이다 — 수용된 수신자는 늘 id 를 든다는 `handle_send` 의 전제.
-    if r.dormant_id.is_some() {
-        return AbsentDisposition::Dormant;
-    }
-    AbsentDisposition::Failed {
-        code: FailCode::RecipientNotFound,
-        hint: format!(
-            "No agent named '{}' exists right now — not running and no saved agent by that name, so nothing was queued for it (fix the name, or create/spawn it and send again). Live agents: {roster_names}.",
-            r.display
-        ),
+        )),
     }
 }
 
@@ -3583,18 +3561,6 @@ struct DrawnMsgId {
 //   발신자 표기를 원본째 보관하고(ledger.rs `RequestEntry.reply_by`) 통지는 그걸 그대로 쓴다 — 역산 함수가
 //   다시 생기면 같은 불일치가 재발한다.
 
-fn resolve_live(to: &str, roster: &[LiveAgent]) -> Option<LiveAgent> {
-    // F2: PeerId 문자열 정확 일치 우선(이름=UUID 충돌이 ID 지목을 가로채지 못하게 — ingress 미러).
-    if let Some(a) = roster.iter().find(|a| a.id.to_string() == to) {
-        return Some(a.clone());
-    }
-    let by_name: Vec<&LiveAgent> = roster.iter().filter(|a| a.name == to).collect();
-    if by_name.len() == 1 {
-        return Some(by_name[0].clone());
-    }
-    None
-}
-
 // ★제거됨(C4 — ADR-0104 앵커 해소)★: 옛 `transition_expired_by_msg_id` 는 sweep 만료분을 msg_id 만으로
 //   장부에서 역조회해 "첫 pending 레코드" 를 expired 로 전이했다. 그 선택은 **단일 수신자에서만** 옳다 —
 //   그룹 방송은 한 msg_id 에 수신자별 레코드가 N개라 엉뚱한 멤버를 만료시킬 수 있고, 무엇보다 이력 삽입
@@ -3920,7 +3886,11 @@ mod tests {
             // ★로스터를 **먼저** 본다(load-bearing)★: 운영 경로를 태운 뒤 실패 행을 보고 되돌리면 그
             //   반려가 남긴 장부 종점 행(`failed`)이 큐 항목과 겹쳐 조회가 2행이 된다. 부재가 확실할 때만
             //   진입을 우회한다.
-            let absent = resolve_live(to, &self.port.live_agents()).is_none();
+            let live_only = AddressingSources {
+                roster: self.port.live_agents(),
+                dormant: Vec::new(),
+            };
+            let absent = !matches!(resolve_token(to, &live_only), Resolution::Live(_));
             match absent {
                 true => {
                     // id 충돌 검사는 운영과 같은 자리(첫 부작용 지점)에서 — 우회 경로도 부작용 0 반려다.
@@ -8042,32 +8012,27 @@ mod tests {
     }
 
     #[test]
-    fn at_all_reports_a_duplicate_live_name_as_an_ambiguous_row_and_still_delivers_the_rest() {
+    fn at_all_delivers_to_each_live_twin_in_its_own_row() {
+        // ★펼침은 명부 id 로 바로 푼다(ADR-0309 결정 3 · TRD S29 §4 X1)★ — 같은 이름의 두 산 세션은 서로 다른
+        //   수신자다. 이름으로 다시 풀면 한 행 `RECIPIENT_AMBIGUOUS` 로 접혀 둘 다 못 받는다.
         let (svc, port) = svc();
         let (from, me) = live_sender("alice");
-        let (_d1, dup1) = live_distinct("dup");
-        let (_d2, dup2) = live_distinct("dup");
-        let (_z, zed) = live("zed");
+        let (d1, dup1) = live_distinct("dup");
+        let (d2, dup2) = live_distinct("dup");
+        let (z, zed) = live("zed");
         port.set_roster(vec![me, dup1, dup2, zed]);
 
         let out = send(&svc, "m1", from, "alice", &["@all"]).expect("ok");
         assert_eq!(
             rows(&out),
             vec![
-                (
-                    "dup".to_string(),
-                    SendStatus::Failed,
-                    Some(FailCode::RecipientAmbiguous)
-                ),
+                ("dup".to_string(), SendStatus::Delivered, None),
+                ("dup".to_string(), SendStatus::Delivered, None),
                 ("zed".to_string(), SendStatus::Delivered, None),
             ],
-            "동명은 실패 행 1줄(두 줄로 부풀지 않는다) · 나머지는 배달"
+            "쌍둥이는 각자 행 · 둘 다 배달"
         );
-        assert_eq!(
-            port.injected_bodies().len(),
-            1,
-            "동명에겐 한 통도 안 나간다"
-        );
+        assert_eq!(port.injected_targets(), vec![d1, d2, z]);
     }
 
     #[test]
@@ -9370,32 +9335,28 @@ mod tests {
         // ★왜 화이트박스인가★: "`@`토큰의 펼침이 **전원 실패**" 는 `@all` 이 유일한 소스인 v1 에선 블랙박스로
         //   만들 수 없다 — `@all` 의 키가 곧 산 로스터라 봉투가 나가는 조건(수용 2인 이상)과 양립하지 않는다.
         //   미래 소스(폴더 그룹)가 곧 쓸 규칙이라 판정 함수를 직접 못 박는다.
-        let tok_name = |k: &str| AddressToken::Name { key: k.to_string() };
-        let tok_group = |l: &str, keys: &[&str]| AddressToken::Group {
+        let tok_name = |row: usize| AddressToken::Name { row };
+        let tok_group = |l: &str, rows: &[usize]| AddressToken::Group {
             label: l.to_string(),
-            keys: keys.iter().map(|k| k.to_string()).collect(),
+            rows: rows.to_vec(),
         };
+        // 이 함수는 수용 여부를 `admitted` 로만 보므로 해석 결과는 이름(못 풀린 행 = 표기)만 나른다.
         let rcpt = |k: &str| ResolvedRecipient {
             display: k.to_string(),
-            key: k.to_string(),
-            target: None,
-            live_count: 0,
-            dormant_count: 0,
-            dormant_id: None,
-            dup_of: None,
+            to: Resolution::NotFound,
         };
 
         // ① Name 토큰: 수용은 싣고 실패는 뺀다.
         let addr = Addressing {
             recipients: vec![rcpt("bob"), rcpt("ghost")],
-            tokens: vec![tok_name("bob"), tok_name("ghost")],
+            tokens: vec![tok_name(0), tok_name(1)],
         };
         assert_eq!(build_to_attr(&addr, &[true, false]), "bob");
 
         // ② M4: 표기 중복은 **한 번만** 적는다(먼저 나온 자리 유지).
         let addr = Addressing {
             recipients: vec![rcpt("bob"), rcpt("carol")],
-            tokens: vec![tok_name("bob"), tok_name("bob"), tok_name("carol")],
+            tokens: vec![tok_name(0), tok_name(0), tok_name(1)],
         };
         assert_eq!(
             build_to_attr(&addr, &[true, true]),
@@ -9406,7 +9367,7 @@ mod tests {
         // ③ M6: `@`토큰의 펼침이 **전원 실패**.
         let addr = Addressing {
             recipients: vec![rcpt("carol"), rcpt("dup")],
-            tokens: vec![tok_name("carol"), tok_group("@all", &["dup"])],
+            tokens: vec![tok_name(0), tok_group("@all", &[1])],
         };
         assert_eq!(
             build_to_attr(&addr, &[true, false]),
@@ -9417,11 +9378,7 @@ mod tests {
         // ④ 하나라도 수용되면 남는다(A5 — 흡수 포함).
         let addr = Addressing {
             recipients: vec![rcpt("bob"), rcpt("carol")],
-            tokens: vec![
-                tok_name("bob"),
-                tok_name("carol"),
-                tok_group("@all", &["bob", "carol"]),
-            ],
+            tokens: vec![tok_name(0), tok_name(1), tok_group("@all", &[0, 1])],
         };
         assert_eq!(
             build_to_attr(&addr, &[true, true]),
@@ -9432,9 +9389,23 @@ mod tests {
         // ⑤ M4(그룹 축): 같은 라벨이 두 번 적히지 않는다.
         let addr = Addressing {
             recipients: vec![rcpt("bob")],
-            tokens: vec![tok_group("@all", &["bob"]), tok_group("@all", &["bob"])],
+            tokens: vec![tok_group("@all", &[0]), tok_group("@all", &[0])],
         };
         assert_eq!(build_to_attr(&addr, &[true]), "@all");
+
+        // ⑥ id 로 지목해도 봉투에는 명부 이름이 적힌다(ADR-0309 결정 2 — 가장자리는 이름).
+        let (_b, bob) = live("bob");
+        let addr = Addressing {
+            recipients: vec![
+                ResolvedRecipient {
+                    display: bob.id.to_string(),
+                    to: Resolution::Live(bob),
+                },
+                rcpt("carol"),
+            ],
+            tokens: vec![tok_name(0), tok_name(1)],
+        };
+        assert_eq!(build_to_attr(&addr, &[true, true]), "bob,carol");
     }
 
     #[test]
@@ -9461,23 +9432,24 @@ mod tests {
         let (d2, dup2) = live_distinct("dup");
         port.set_roster(vec![me, dup1, dup2]);
 
-        // ① 두 exact id
+        // ① 두 exact id — 행 키가 id 라 서로 다른 실체는 행을 다투지 않는다(ADR-0309 · TRD S29 §4 X2).
         let (id1, id2) = (d1.to_string(), d2.to_string());
         let out = send(&svc, "m1", from, "alice", &[&id1, &id2]).expect("ok");
         assert_eq!(
-            out.len(),
-            2,
-            "토큰마다 행이 있어야(조용한 삼킴 금지): {out:?}"
+            rows(&out),
+            vec![
+                (id1.clone(), SendStatus::Delivered, None),
+                (id2.clone(), SendStatus::Delivered, None),
+            ],
+            "토큰마다 자기 행 · 둘 다 배달: {out:?}"
         );
-        assert_eq!(out[0].status, SendStatus::Delivered);
         assert_eq!(
-            (out[1].status, out[1].code),
-            (SendStatus::Failed, Some(FailCode::RecipientAmbiguous)),
-            "뒤 토큰은 보이는 실패: {out:?}"
+            port.injected_targets(),
+            vec![d1, d2],
+            "쌍둥이 각자에게 한 통씩"
         );
-        assert_eq!(port.injected_bodies().len(), 1, "배달은 한 통");
 
-        // ② 이름 + 두 exact id(3토큰)
+        // ② 이름 + 두 exact id(3토큰) — 이름 행은 이름 해석 규칙 그대로 모호하고, id 행은 각자 배달된다.
         let (svc2, port2) = super::tests::svc();
         let (from2, me2) = live_sender("alice");
         let (e1, t1) = live_distinct("dup");
@@ -9492,20 +9464,19 @@ mod tests {
         )
         .expect("ok");
         assert_eq!(
-            out2.len(),
-            2,
-            "이름 토큰과 첫 id 는 접히고, 둘째 id 가 행을 얻는다: {out2:?}"
+            rows(&out2),
+            vec![
+                (
+                    "dup".to_string(),
+                    SendStatus::Failed,
+                    Some(FailCode::RecipientAmbiguous)
+                ),
+                (e1.to_string(), SendStatus::Delivered, None),
+                (e2.to_string(), SendStatus::Delivered, None),
+            ],
+            "{out2:?}"
         );
-        assert_eq!(
-            out2[0].status,
-            SendStatus::Delivered,
-            "이름 자리가 첫 id 의 해석을 물려받아 배달된다(A8): {out2:?}"
-        );
-        assert_eq!(
-            (out2[1].status, out2[1].code),
-            (SendStatus::Failed, Some(FailCode::RecipientAmbiguous))
-        );
-        assert_eq!(port2.injected_bodies().len(), 1);
+        assert_eq!(port2.injected_targets(), vec![e1, e2]);
     }
 
     #[test]
@@ -9522,130 +9493,51 @@ mod tests {
             rows(&out),
             vec![
                 (id1.clone(), SendStatus::Delivered, None),
-                (
-                    id2.clone(),
-                    SendStatus::Failed,
-                    Some(FailCode::RecipientAmbiguous)
-                ),
+                (id2.clone(), SendStatus::Delivered, None),
             ],
-            "반복 토큰은 접히고 행은 2개(수용 1 + loser 1): {out:?}"
+            "반복 토큰은 접히고 행은 쌍둥이마다 하나: {out:?}"
         );
-        let keys = svc.ledger_endpoint_keys("m1");
-        assert_eq!(keys.len(), 2, "장부 종점도 행 수와 같아야: {keys:?}");
-        assert_ne!(keys[0], keys[1], "두 행이 같은 키를 쓰면 서로를 덮는다");
-        assert_eq!(port.injected_bodies().len(), 1, "배달은 한 통");
+        // 장부 전이는 `(msg_id, 받는 이 id)` 로 찾는다 — 두 행이 한 키를 썼다면 하나는 pending 에 남는다.
+        assert_eq!(
+            svc.ledger_statuses("m1"),
+            vec![DeliveryStatus::Delivered, DeliveryStatus::Delivered]
+        );
+        assert_eq!(
+            port.injected_targets(),
+            vec![d1, d2],
+            "배달은 쌍둥이마다 한 통"
+        );
     }
 
+    /// ★id 가 먼저, 그다음 이름(제어 입구 `resolve_in` 과 같은 순서)★ — UUID 처럼 생긴 이름은 남의 id 지목을
+    ///   가로채지 못하고, 명부에 없는 id 꼴이면 그 이름으로 풀린다.
     #[test]
-    fn a_loser_row_never_collides_with_an_agent_whose_name_is_another_agents_id() {
-        for order in 0..2 {
-            let (svc, port) = svc();
-            let (from, me) = live_sender("alice");
-            let (d1, dup1) = live_distinct("dup");
-            let (d2, dup2) = live_distinct("dup");
-            // C 의 이름 = B(=d2)의 id 문자열 → 이 토큰은 B 를 가리킨다.
-            let evil_name = d2.to_string();
-            let (c, mut trap) = live("placeholder");
-            trap.name = evil_name.clone();
-            port.set_roster(vec![me, dup1, dup2, trap]);
-            let id1 = d1.to_string();
-
-            let list: Vec<&str> = if order == 0 {
-                vec![id1.as_str(), evil_name.as_str()]
-            } else {
-                vec![evil_name.as_str(), id1.as_str()]
-            };
-            let out = send(&svc, "m1", from, "alice", &list).expect("ok");
-            assert_eq!(out.len(), 2, "행 2개(order={order}): {out:?}");
-            let statuses: Vec<SendStatus> = out.iter().map(|r| r.status).collect();
-            assert_eq!(
-                statuses,
-                vec![SendStatus::Delivered, SendStatus::Failed],
-                "먼저 쓴 토큰이 수용, 뒤가 loser(order={order}): {out:?}"
-            );
-            assert_eq!(
-                out[1].code,
-                Some(FailCode::RecipientAmbiguous),
-                "order={order}"
-            );
-            assert_eq!(
-                out.iter().map(|r| r.to.clone()).collect::<Vec<_>>(),
-                list.iter().map(|t| t.to_string()).collect::<Vec<_>>(),
-                "표기는 입력 그대로(WYSIWYA · order={order})"
-            );
-
-            let keys = svc.ledger_endpoint_keys("m1");
-            assert_eq!(keys.len(), 2, "종점 2개(order={order}): {keys:?}");
-            assert_ne!(
-                keys[0], keys[1],
-                "loser 키가 이름 공간과 겹치면 두 행이 한 종점을 공유한다(order={order}): {keys:?}"
-            );
-            assert!(
-                keys.iter().all(|k| *k != evil_name || k == &keys[0]),
-                "order={order}: {keys:?}"
-            );
-            let body = &port.injected_bodies()[0];
-            assert!(
-                !body.contains(" to=\""),
-                "수용 1명이면 `to` 속성은 나오지 않는다(loser 를 세면 2명이 된다 · order={order}): {body}"
-            );
-            assert_eq!(svc.parked_len(tid(&evil_name)), 0, "order={order}");
-            assert_eq!(port.injected_bodies().len(), 1, "order={order}");
-            let _ = c;
-        }
-    }
-
-    #[test]
-    fn the_loser_key_prefix_keeps_it_outside_the_agent_name_space() {
-        // ① 성질: loser 키에는 canonical 이름이 담을 수 없는 문자(제어문자)가 반드시 들어 있다.
-        assert!(
-            loser_key("anything").chars().any(char::is_control),
-            "제어문자 접두가 없으면 loser 키가 이름 공간 **안**으로 들어온다"
-        );
-
-        // ② 병리적 로스터: 어떤 에이전트의 canonical 이름이 **접두를 뗀 loser 키와 글자 그대로 같다**.
+    fn a_uuid_shaped_token_is_read_as_an_id_first_and_as_a_name_otherwise() {
         let (svc, port) = svc();
         let (from, me) = live_sender("alice");
-        let (d1, dup1) = live_distinct("dup");
-        let (d2, dup2) = live_distinct("dup");
-        let unprefixed = loser_key(&d2.to_string()).replace('\u{1}', "");
-        let (_t, mut trap) = live("placeholder");
-        trap.name = unprefixed.clone();
-        port.set_roster(vec![me, dup1, dup2, trap]);
+        let (bob_id, bob) = live("bob");
+        let (_i, mut impostor) = live_distinct("placeholder");
+        impostor.name = bob_id.to_string();
+        let free_uuid = PeerId::new_v4().to_string();
+        let (named_id, mut named) = live_distinct("placeholder");
+        named.name = free_uuid.clone();
+        port.set_roster(vec![me, bob, impostor, named]);
 
-        let (id1, id2) = (d1.to_string(), d2.to_string());
-        let out = send(
-            &svc,
-            "m1",
-            from,
-            "alice",
-            &[&id1, &id2, unprefixed.as_str()],
-        )
-        .expect("ok");
+        let bob_token = bob_id.to_string();
+        let out = send(&svc, "m1", from, "alice", &[&bob_token, &free_uuid]).expect("ok");
         assert_eq!(
             rows(&out),
             vec![
-                (id1.clone(), SendStatus::Delivered, None),
-                (
-                    id2.clone(),
-                    SendStatus::Failed,
-                    Some(FailCode::RecipientAmbiguous)
-                ),
-                (unprefixed.clone(), SendStatus::Delivered, None),
+                (bob_token.clone(), SendStatus::Delivered, None),
+                (free_uuid.clone(), SendStatus::Delivered, None),
             ],
-            "세 토큰이 각자 자기 행을 가져야 — 접두가 없으면 셋째가 loser 행에 흡수된다: {out:?}"
+            "{out:?}"
         );
-        let keys = svc.ledger_endpoint_keys("m1");
-        assert_eq!(keys.len(), 3, "종점도 행마다 하나: {keys:?}");
-        let mut uniq = keys.clone();
-        uniq.sort();
-        uniq.dedup();
         assert_eq!(
-            uniq.len(),
-            3,
-            "종점 키가 중복 발급되면 행이 서로를 덮는다: {keys:?}"
+            port.injected_targets(),
+            vec![bob_id, named_id],
+            "bob 의 id 는 bob 에게(이름이 같은 impostor 가 아니라) · 명부에 없는 UUID 는 그 이름의 주인에게"
         );
-        assert_eq!(port.injected_bodies().len(), 2, "배달은 두 통(d1 + trap)");
     }
 
     #[test]
@@ -9707,7 +9599,9 @@ mod tests {
     }
 
     #[test]
-    fn an_exact_id_token_rescues_an_ambiguous_name_in_the_same_to_list() {
+    fn an_exact_id_token_and_an_ambiguous_name_in_the_same_to_list_get_separate_rows() {
+        // ★이름 행은 id 행에 흡수되지 않는다(ADR-0309 · TRD S29 §4 X2)★ — 못 풀린 이름은 어느 쌍둥이도 가리키지
+        //   않으므로 id 로 풀린 행과 같은 행이 아니다. 순서를 뒤집어도 결말이 같다.
         for order in 0..2 {
             let (svc, port) = svc();
             let (from, me) = live_sender("alice");
@@ -9721,16 +9615,19 @@ mod tests {
                 vec![id.as_str(), "dup"]
             };
             let out = send(&svc, "m1", from, "alice", &list).expect("ok");
-            assert_eq!(out.len(), 1, "같은 수신자라 행 1개(order={order})");
-            assert_eq!(
-                out[0].status,
-                SendStatus::Delivered,
-                "exact-id 가 동명 모호성을 통과시킨다(order={order}): {out:?}"
+            let ambiguous = (
+                "dup".to_string(),
+                SendStatus::Failed,
+                Some(FailCode::RecipientAmbiguous),
             );
-            assert_eq!(
-                out[0].to, list[0],
-                "표기는 **먼저 쓴 토큰**을 남긴다(WYSIWYA · order={order})"
-            );
+            let delivered = (id.clone(), SendStatus::Delivered, None);
+            let expected = if order == 0 {
+                vec![ambiguous, delivered]
+            } else {
+                vec![delivered, ambiguous]
+            };
+            assert_eq!(rows(&out), expected, "order={order}");
+            assert_eq!(port.injected_targets(), vec![d1], "order={order}");
         }
     }
 
@@ -9905,28 +9802,48 @@ mod tests {
 
     #[test]
     fn neither_broadcast_vocabulary_ever_reaches_the_sender() {
+        // ★발신자는 id 로만 빠진다(ADR-0309 · TRD S29 §4 X3)★ — 발신자와 이름만 같은 **다른** 에이전트(산 쌍둥이 ·
+        //   잠든 동명 프로필)는 방송을 받는다.
         let (svc, port) = svc();
         let (from, me) = live_sender("alice");
-        let (_b, bob) = live("bob");
-        port.set_roster(vec![me, bob]);
-        // 잠든 alice 는 발신자와 이름만 같은 **다른** 프로필이다.
-        port.set_dormant_agents(&[(PeerId::new_v4(), "alice"), (tid("sleepy"), "sleepy")]);
+        let (twin_id, twin) = live_distinct("alice");
+        let (bob_id, bob) = live("bob");
+        port.set_roster(vec![me, twin, bob]);
+        let sleeper = PeerId::new_v4();
+        port.set_dormant_agents(&[(sleeper, "alice"), (tid("sleepy"), "sleepy")]);
 
-        for (msg_id, token) in [("m-all", "@all"), ("m-here", "@here")] {
-            let out = send(&svc, msg_id, from, "alice", &[token]).expect("반려 아님");
-            assert!(
-                !out.iter().any(|r| r.to == "alice"),
-                "{token} 펼침에 발신자 행이 있다(자기 방송 메아리): {out:?}"
-            );
-        }
+        let all = send(&svc, "m-all", from, "alice", &["@all"]).expect("반려 아님");
         assert_eq!(
-            svc.parked_len(tid("alice")),
-            0,
-            "발신자 이름 앞으로 파킹도 생기지 않는다"
+            rows(&all),
+            vec![
+                ("alice".to_string(), SendStatus::Delivered, None),
+                ("alice".to_string(), SendStatus::Pending, None),
+                ("bob".to_string(), SendStatus::Delivered, None),
+                ("sleepy".to_string(), SendStatus::Pending, None),
+            ],
+            "산 쌍둥이는 배달 · 잠든 동명은 그 id 로 파킹 · 발신자 행은 없다: {all:?}"
         );
-        assert!(
-            !port.injected_targets().contains(&from.peer_id),
-            "발신자 stdin 에 아무것도 쓰이지 않는다"
+        assert_eq!(svc.parked_len(sleeper), 1, "잠든 동명 몫은 그 id 큐에");
+
+        let here = send(&svc, "m-here", from, "alice", &["@here"]).expect("반려 아님");
+        assert_eq!(
+            rows(&here),
+            vec![
+                ("alice".to_string(), SendStatus::Delivered, None),
+                ("bob".to_string(), SendStatus::Delivered, None),
+            ],
+            "{here:?}"
+        );
+
+        assert_eq!(
+            port.injected_targets(),
+            vec![twin_id, bob_id, twin_id, bob_id],
+            "발신자 stdin 에는 아무것도 쓰이지 않는다"
+        );
+        assert_eq!(
+            svc.parked_len(from.peer_id),
+            0,
+            "발신자 id 앞으로 파킹도 생기지 않는다"
         );
     }
 
@@ -9970,7 +9887,8 @@ mod tests {
         let (svc, port) = svc();
         let (from, me) = live_sender("alice");
         port.set_roster(vec![me]);
-        port.set_dormant(&["twin", "twin"]);
+        let (t1, t2) = (PeerId::new_v4(), PeerId::new_v4());
+        port.set_dormant_agents(&[(t1, "twin"), (t2, "twin")]);
 
         let out = send(&svc, "m1", from, "alice", &["twin"]).expect("행 응답");
         assert_eq!(
@@ -9978,12 +9896,24 @@ mod tests {
             (SendStatus::Failed, Some(FailCode::RecipientAmbiguous)),
             "잠듦 층 동명은 파킹이 아니라 실패 행: {out:?}"
         );
-        assert_eq!(svc.parked_len(tid("twin")), 0, "조용히 받는 경로가 없어야");
+        assert_eq!(svc.parked_total_for_test(), 0, "조용히 받는 경로가 없어야");
         assert_eq!(
             svc.ledger_statuses("m1"),
             vec![DeliveryStatus::Failed],
             "실패 행도 장부 종점으로 남는다"
         );
+
+        // `@all` 은 이름이 아니라 id 로 펼친다 — 두 프로필 각자에게 파킹(ADR-0309 · TRD S29 §4 X1).
+        let all = send(&svc, "m2", from, "alice", &["@all"]).expect("행 응답");
+        assert_eq!(
+            rows(&all),
+            vec![
+                ("twin".to_string(), SendStatus::Pending, None),
+                ("twin".to_string(), SendStatus::Pending, None),
+            ],
+            "{all:?}"
+        );
+        assert_eq!((svc.parked_len(t1), svc.parked_len(t2)), (1, 1));
     }
 
     #[test]
@@ -9993,7 +9923,8 @@ mod tests {
         let (_d, dup) = live("dup");
         port.set_roster(vec![me, dup]);
         // 잠든 동명은 산 dup 과 **다른** 에이전트다.
-        port.set_dormant_agents(&[(PeerId::new_v4(), "dup")]);
+        let sleeper = PeerId::new_v4();
+        port.set_dormant_agents(&[(sleeper, "dup")]);
 
         let out = send(&svc, "m1", from, "alice", &["dup"]).expect("행 응답");
         assert_eq!(
@@ -10002,7 +9933,95 @@ mod tests {
             "산 쪽이 이긴다: {out:?}"
         );
         assert_eq!(port.injected_bodies().len(), 1);
-        assert_eq!(svc.parked_len(tid("dup")), 0);
+        assert_eq!(svc.parked_total_for_test(), 0);
+
+        // 이름 지목의 규칙일 뿐이다 — `@all` 은 id 로 펼쳐 잠든 동명도 자기 몫을 받는다(ADR-0309 · TRD S29 §4 X1).
+        let all = send(&svc, "m2", from, "alice", &["@all"]).expect("행 응답");
+        assert_eq!(
+            rows(&all),
+            vec![
+                ("dup".to_string(), SendStatus::Delivered, None),
+                ("dup".to_string(), SendStatus::Pending, None),
+            ],
+            "{all:?}"
+        );
+        assert_eq!(svc.parked_len(sleeper), 1);
+    }
+
+    /// ★잠든 에이전트도 정확한 id 로 부를 수 있다(ADR-0309 결정 3 · TRD S29 §4 B6)★ — 장부에는 표기(id)가 아니라
+    ///   명부 이름이 남는다.
+    #[test]
+    fn a_dormant_agent_addressed_by_its_exact_id_is_parked_and_delivered_on_wake() {
+        let (svc, port) = svc();
+        let (from, me) = live_sender("alice");
+        port.set_roster(vec![me.clone()]);
+        port.set_dormant(&["sleepy"]);
+        let token = tid("sleepy").to_string();
+
+        let out = send(&svc, "m1", from, "alice", &[&token]).expect("행 응답");
+        assert_eq!(
+            rows(&out),
+            vec![(token.clone(), SendStatus::Pending, None)],
+            "{out:?}"
+        );
+        assert_eq!(svc.parked_len(tid("sleepy")), 1);
+        assert_eq!(
+            svc.ledger_endpoint_keys("m1"),
+            vec!["sleepy".to_string()],
+            "장부의 받는 이 = 명부 이름"
+        );
+
+        let (late_id, late) = live("sleepy");
+        port.set_roster(vec![me, late]);
+        port.set_dormant(&[]);
+        svc.flush_for(late_id);
+        assert_eq!(svc.ledger_statuses("m1"), vec![DeliveryStatus::Delivered]);
+        assert_eq!(port.injected_targets(), vec![late_id]);
+    }
+
+    /// ★id 철자는 제어 입구(`resolve_in`)와 같게 읽는다(TRD S29 §4 B7)★ — 대문자 · 중괄호 · 하이픈 없음 ·
+    ///   `urn:uuid:` 도 id 다. 같은 에이전트를 이름과 다른 철자의 id 로 겹쳐 적으면 한 행이다.
+    #[test]
+    fn every_uuid_spelling_addresses_live_and_dormant_recipients() {
+        let spellings = |id: PeerId| {
+            vec![
+                id.to_string().to_uppercase(),
+                id.braced().to_string(),
+                id.simple().to_string(),
+                id.urn().to_string(),
+            ]
+        };
+        let (svc, port) = svc();
+        let (from, me) = live_sender("alice");
+        let (bob_id, bob) = live("bob");
+        port.set_roster(vec![me, bob]);
+        port.set_dormant(&["sleepy"]);
+        let sleepy_id = tid("sleepy");
+
+        for (i, (live_token, dormant_token)) in spellings(bob_id)
+            .into_iter()
+            .zip(spellings(sleepy_id))
+            .enumerate()
+        {
+            let out = send(
+                &svc,
+                &format!("m{i}"),
+                from,
+                "alice",
+                &[&live_token, &dormant_token, "bob"],
+            )
+            .expect("행 응답");
+            assert_eq!(
+                rows(&out),
+                vec![
+                    (live_token.clone(), SendStatus::Delivered, None),
+                    (dormant_token.clone(), SendStatus::Pending, None),
+                ],
+                "{out:?}"
+            );
+        }
+        assert_eq!(port.injected_targets(), vec![bob_id; 4]);
+        assert_eq!(svc.parked_len(sleepy_id), 4);
     }
 
     #[test]
@@ -10069,7 +10088,7 @@ mod tests {
         let (_a, dup1) = live_distinct("dup");
         let (_b, dup2) = live_distinct("dup");
         port.set_roster(vec![me, dup1, dup2]);
-        port.set_dormant(&["twin", "twin"]);
+        port.set_dormant_agents(&[(PeerId::new_v4(), "twin"), (PeerId::new_v4(), "twin")]);
 
         let live_row = send(&svc, "m1", from, "alice", &["dup"]).expect("행")[0]
             .hint

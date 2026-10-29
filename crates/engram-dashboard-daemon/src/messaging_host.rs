@@ -1242,9 +1242,9 @@ mod tests {
         #[cfg(windows)]
         #[test]
         fn a_live_namesake_does_not_hide_a_dormant_profile_with_the_same_name() {
-            // ★정직 명시 — 이 fixture 의 발송 결말은 뮤테이션과 무관하게 같다★: 산 동명이 있으면 잠듦 축은
-            //   조회조차 되지 않는다(산 쪽이 이긴다 — `service.rs::a_live_agent_wins_over_a_dormant_namesake`).
-            //   즉 이건 어댑터 산출물의 white-box 봉인이지 발송 결말 회귀가 아니다.
+            // ★발송 결말과의 관계★: 이름으로 부르면 산 동명이 이겨 잠듦 축이 결말에 닿지 않는다. `@all` 은 id 로
+            //   펼치므로 잠든 동명도 자기 몫을 받는다(`service.rs::a_live_agent_wins_over_a_dormant_namesake` ·
+            //   ADR-0309) — 이름 축으로 빼는 회귀는 그 몫을 조용히 잃게 한다.
             let manager = manager("live-namesake");
             let port = ManagerDeliveryPort::new(manager.clone());
             let info = manager

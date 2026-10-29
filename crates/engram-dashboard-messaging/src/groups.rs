@@ -1,16 +1,17 @@
 //! groups — `@`주소 해석 seam(spec §4 · ADR-0104 결정 1 · **ADR-0111 결정 4 · ADR-0112 결정 1 ·
 //! ADR-0121 결정 1**).
 //!
-//! ★역할★: "`@`주소 → 멤버 이름 목록" 을 펼친다. **v1 소스는 내장 하나뿐이고 그 안의 어휘가 둘**이다
-//!   (ADR-0121): **`@here`** = 지금 살아 있는 전원 · **`@all`** = 명부 전원(산 것 **+ 잠든 것**). 멤버십은
-//!   **이름 기반**(id 아님 — WYSIWYA, ADR-0101 · 재스폰 생존).
+//! ★역할★: "`@`주소 → 멤버(id · 이름) 목록" 을 펼친다. **v1 소스는 내장 하나뿐이고 그 안의 어휘가 둘**이다
+//!   (ADR-0121): **`@here`** = 지금 살아 있는 전원 · **`@all`** = 명부 전원(산 것 **+ 잠든 것**). 펼친 멤버는
+//!   **명부의 id 를 그대로** 든다(ADR-0309 결정 3 — 이름 → id 왕복 없음). 같은 프로필은 다시 띄워도 id 가
+//!   같아 재스폰을 넘어 같은 멤버이고, 주소(`@all`)와 응답 표기는 이름이다(ADR-0101).
 //!
 //! ★두 어휘가 **다른 명단 풀**을 읽는 것이 결정 그 자체다(load-bearing — ADR-0121 §영향)★: 같은 풀을
 //!   보게 만들면 "all" 이 다시 거짓 이름이 되고(잠든 상대를 놓친 채 발신 LLM 은 "전원에게 알렸다" 고 믿는다)
 //!   `@here` 는 존재 이유를 잃는다. 그래서 아래 계약 스위트가 두 어휘의 소스 분리를 축으로 단언한다.
 //!
 //! ★그룹은 발송 경로가 아니라 **주소 해석 매크로**다(ADR-0111 결정 4 — 이 모듈의 존재 이유)★: 펼친
-//!   이름들은 직접 지목한 수신자와 **완전히 같은** 경로로 흐른다(spec §5 다중 수신자 fan-out). 그룹 전용
+//!   멤버들은 직접 지목한 수신자와 **완전히 같은** 경로로 흐른다(spec §5 다중 수신자 fan-out). 그룹 전용
 //!   배달 규칙(죽은 멤버 skip · 발송 순간 `(id,epoch)` 결박 · 전용 fan-out 분기)은 **전부 폐지**됐다 —
 //!   되살리면 ADR-0111 위반이다.
 //!
@@ -23,12 +24,14 @@
 //!   메시징 파이프라인을 건드리지 않고 추가할 수 있게 `GroupSource` 확장점을 남긴다. v1 구현은
 //!   `BuiltinGroups`(= `@all`·`@here`) 하나다. **over-build 금지** — 폴더/계층 구현은 지금 만들지 않는다.
 //!
-//! ★순수·기계적 해석(load-bearing 경계, ADR-0104)★: `resolve` 는 이름 목록으로 **펼치기만** 한다 —
+//! ★순수·기계적 해석(load-bearing 경계, ADR-0104)★: `resolve` 는 멤버 목록으로 **펼치기만** 한다 —
 //!   살아있음 판정·발신자 제외·중복 제거·로스터 대조는 전부 상위(`MessagingService`)의 몫이다. 특히
 //!   **"펼침 결과 0명" 은 여기서 에러가 아니다**(빈 목록을 그대로 돌려준다): `GROUP_EMPTY` 는 펼침 + 명시
 //!   지목을 합친 **최종 수신자 집합**이 비었을 때만 나는 판정이라(ADR-0114 결정 3) 이 층에서 알 수 없다.
 // ADR-0111
 // ADR-0112
+
+use crate::PeerId;
 
 /// 내장 어휘 `@all` — **명부 전원**(산 것 + 잠든 것) **− 발신자**(spec §4 · ADR-0121 결정 1).
 pub const ALL_GROUP: &str = "@all";
@@ -38,6 +41,17 @@ pub const ALL_GROUP: &str = "@all";
 /// ★어휘 선택 근거★: Slack 이 같은 구분을 쓴다(`@channel` = 전원 / `@here` = 지금 활성) — 에이전트를
 ///   구동하는 LLM 이 그 관례를 이미 알고 있을 가능성이 높다(ADR-0121 §근거).
 pub const HERE_GROUP: &str = "@here";
+
+/// 펼침의 멤버 하나 — 명부가 준 id 와 그 순간 이름.
+///
+/// 상위는 이 id 로 받는 이를 바로 잡는다 — 이름으로 다시 풀면 동명 쌍둥이(서로 다른 에이전트)가 한
+/// 수신자로 접히거나 `RECIPIENT_AMBIGUOUS` 가 된다(ADR-0309 결정 3 · TRD S29 §4 X1).
+// ADR-0309
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupMember {
+    pub id: PeerId,
+    pub name: String,
+}
 
 /// 해석기가 읽는 **명단 풀 두 개**(ADR-0121 결정 1) — 호출자가 락 밖 스냅샷에서 만들어 주입한다.
 ///
@@ -49,14 +63,12 @@ pub const HERE_GROUP: &str = "@here";
 ///   아니라 spec 이라는 점이 load-bearing: 0111 결정 4 에 그 문구가 없어 거기만 보면 빠뜨린다).
 #[derive(Debug, Clone, Copy)]
 pub struct MemberPools<'a> {
-    /// 지금 살아 있는 이름들 — `@here` 의 명단이자 `@all` 의 앞부분.
-    pub live: &'a [String],
-    /// 잠든 이름들(프로필 실재·그 세션은 살아 있지 않음) — **`@all` 만** 이걸 함께 읽는다.
-    ///   ★중복을 접지 않은 채 온다★: 이 층의 계약이 **호출자가 준 풀을 verbatim 돌려준다**(정렬·dedup·필터
-    ///   금지)라서다. 동명 판정은 상위가 `AddressingSources.dormant` 를 직접 세어 하므로
-    ///   (service.rs `push_recipient`) 여기서 접든 안 접든 결과 행은 같지만, 판정 지식을 이 층에 흘리지
-    ///   않는 것 자체가 seam 계약이다.
-    pub dormant: &'a [String],
+    /// 지금 살아 있는 멤버들 — `@here` 의 명단이자 `@all` 의 앞부분.
+    pub live: &'a [GroupMember],
+    /// 잠든 멤버들(프로필 실재·그 세션은 살아 있지 않음) — **`@all` 만** 이걸 함께 읽는다.
+    ///   ★동명을 접지 않은 채 온다★: 이 층의 계약이 **호출자가 준 풀을 verbatim 돌려준다**(정렬·dedup·필터
+    ///   금지)라서다 — 같은 이름의 두 멤버는 서로 다른 수신자다(ADR-0309 · TRD S29 §4 X1).
+    pub dormant: &'a [GroupMember],
 }
 
 /// `@`주소 해석 에러 — 상위가 wire 에러 코드로 매핑한다(spec §4).
@@ -95,10 +107,10 @@ pub fn normalize_group_name(name: &str) -> Result<String, GroupError> {
     Ok(format!("@{body}"))
 }
 
-/// 그룹 해석 소스(seam — ADR-0104 결정 1). "`@`주소 → 멤버 이름 목록" 해석기의 확장점.
+/// 그룹 해석 소스(seam — ADR-0104 결정 1). "`@`주소 → 멤버 목록" 해석기의 확장점.
 pub trait GroupSource {
     /// 이 소스가 그 주소를 모르면 `NotFound`.
-    fn resolve(&self, group: &str, pools: MemberPools<'_>) -> Result<Vec<String>, GroupError>;
+    fn resolve(&self, group: &str, pools: MemberPools<'_>) -> Result<Vec<GroupMember>, GroupError>;
 }
 
 /// v1 유일 소스 — 내장 두 어휘(`@all`·`@here`)만 안다(무저장 즉석 계산, ADR-0111 결정 4 · ADR-0121 결정 1).
@@ -107,7 +119,7 @@ pub struct BuiltinGroups;
 
 impl GroupSource for BuiltinGroups {
     // ADR-0121
-    fn resolve(&self, group: &str, pools: MemberPools<'_>) -> Result<Vec<String>, GroupError> {
+    fn resolve(&self, group: &str, pools: MemberPools<'_>) -> Result<Vec<GroupMember>, GroupError> {
         let norm = normalize_group_name(group)?;
         if norm == HERE_GROUP {
             return Ok(pools.live.to_vec());
@@ -136,7 +148,8 @@ impl GroupSource for BuiltinGroups {
 ///   수정은 곧 계약 변경이다 — 사용자 재가 없이 완화하지 말 것.
 #[cfg(any(test, feature = "test-harness"))]
 pub mod contract {
-    use super::{GroupError, GroupSource, MemberPools, ALL_GROUP, HERE_GROUP};
+    use super::{GroupError, GroupMember, GroupSource, MemberPools, ALL_GROUP, HERE_GROUP};
+    use crate::PeerId;
 
     #[derive(Debug, Clone)]
     pub struct GroupSourceFixture {
@@ -147,8 +160,16 @@ pub mod contract {
         pub handles_builtins: bool,
     }
 
-    fn owned(v: &[&str]) -> Vec<String> {
-        v.iter().map(|s| s.to_string()).collect()
+    /// 멤버마다 서로 다른 id(`base` 부터 순번) — 같은 이름이 여럿이면 그것이 동명 쌍둥이다.
+    fn members(base: u128, names: &[&str]) -> Vec<GroupMember> {
+        names
+            .iter()
+            .zip(base..)
+            .map(|(name, n)| GroupMember {
+                id: PeerId::from_u128(n),
+                name: name.to_string(),
+            })
+            .collect()
     }
 
     /// ★`GroupSource` 해석 의미론 계약 — 어떤 구현이든 이걸 통과해야 한다(spec §4 · ADR-0111/0114/0121)★.
@@ -158,10 +179,10 @@ pub mod contract {
     ///   문자열이 여러 축에 겹치면 엉뚱한 축이 먼저 터져도 초록이 된다. **토큰을 바꾸면 핀도 함께 고칠 것.**
     pub fn assert_group_source_contract(src: &dyn GroupSource, fx: &GroupSourceFixture) {
         // ── 1·1b·1c·2. 내장 어휘 축 ────────────────────────────────────────────────────────
-        // 정렬하면 상위의 행 순서 규칙(명시 토큰 → 펼침 사전순)이 두 층에 흩어지고, dedup 하면 산 층
-        //   동명 다수(RECIPIENT_AMBIGUOUS 사유)가 소스 단계에서 지워져 상위가 그 사실을 못 본다.
-        let live = owned(&["zeta", "alpha", "zeta", "mid"]);
-        let dormant = owned(&["sleepy", "twin", "twin"]);
+        // 정렬하면 상위의 행 순서 규칙(명시 토큰 → 펼침 사전순)이 두 층에 흩어지고, 이름으로 dedup 하면
+        //   동명 쌍둥이(서로 다른 id)가 소스 단계에서 한 수신자로 접힌다(ADR-0309 · TRD S29 §4 X1).
+        let live = members(1, &["zeta", "alpha", "zeta", "mid"]);
+        let dormant = members(100, &["sleepy", "twin", "twin"]);
         let pools = MemberPools {
             live: &live,
             dormant: &dormant,
@@ -251,33 +272,41 @@ mod tests {
     use super::contract::{assert_group_source_contract, GroupSourceFixture};
     use super::*;
 
-    fn names(v: &[&str]) -> Vec<String> {
-        v.iter().map(|s| s.to_string()).collect()
+    /// 멤버마다 무작위 id — 같은 이름을 두 번 적으면 동명 쌍둥이다.
+    fn members(v: &[&str]) -> Vec<GroupMember> {
+        v.iter()
+            .map(|s| GroupMember {
+                id: PeerId::new_v4(),
+                name: s.to_string(),
+            })
+            .collect()
     }
 
-    fn pools<'a>(live: &'a [String], dormant: &'a [String]) -> MemberPools<'a> {
+    fn pools<'a>(live: &'a [GroupMember], dormant: &'a [GroupMember]) -> MemberPools<'a> {
         MemberPools { live, dormant }
     }
 
     #[test]
     fn here_resolves_to_the_live_snapshot_verbatim() {
-        let live = names(&["zeta", "alpha", "zeta"]);
-        let dormant = names(&["sleepy"]);
+        let live = members(&["zeta", "alpha", "zeta"]);
+        let dormant = members(&["sleepy"]);
         assert_eq!(
             BuiltinGroups.resolve("@here", pools(&live, &dormant)),
-            Ok(live),
-            "@here 는 산 명단만 본다(잠든 이름 불포함 — ADR-0121 결정 1)"
+            Ok(live.clone()),
+            "@here 는 산 명단만 본다(잠든 멤버 불포함 — ADR-0121 결정 1)"
         );
     }
 
     #[test]
-    fn all_appends_the_dormant_names_to_the_live_snapshot() {
-        let live = names(&["zeta", "alpha"]);
-        let dormant = names(&["sleepy", "twin", "twin"]);
+    fn all_appends_the_dormant_members_to_the_live_snapshot() {
+        let live = members(&["zeta", "alpha"]);
+        let dormant = members(&["sleepy", "twin", "twin"]);
+        let mut expected = live.clone();
+        expected.extend(dormant.clone());
         assert_eq!(
             BuiltinGroups.resolve("@all", pools(&live, &dormant)),
-            Ok(names(&["zeta", "alpha", "sleepy", "twin", "twin"])),
-            "풀은 verbatim 이다 — 이 층은 가공하지 않는다(동명 판정은 상위가 dormant_names 로 직접 한다)"
+            Ok(expected),
+            "풀은 verbatim 이다 — 동명 쌍둥이도 id 가 달라 둘 다 남는다(ADR-0309 · TRD S29 §4 X1)"
         );
     }
 
@@ -295,7 +324,7 @@ mod tests {
 
     #[test]
     fn unknown_at_address_is_not_found() {
-        let live = names(&["alice"]);
+        let live = members(&["alice"]);
         assert_eq!(
             BuiltinGroups.resolve("@coders", pools(&live, &[])),
             Err(GroupError::NotFound {
@@ -337,14 +366,18 @@ mod tests {
 
     struct SortingSource;
     impl GroupSource for SortingSource {
-        fn resolve(&self, group: &str, pools: MemberPools<'_>) -> Result<Vec<String>, GroupError> {
+        fn resolve(
+            &self,
+            group: &str,
+            pools: MemberPools<'_>,
+        ) -> Result<Vec<GroupMember>, GroupError> {
             let norm = normalize_group_name(group)?;
             if norm == ALL_GROUP || norm == HERE_GROUP {
                 let mut v = pools.live.to_vec();
                 if norm == ALL_GROUP {
                     v.extend_from_slice(pools.dormant);
                 }
-                v.sort();
+                v.sort_by(|a, b| a.name.cmp(&b.name));
                 return Ok(v);
             }
             Err(GroupError::NotFound { name: norm })
@@ -357,10 +390,47 @@ mod tests {
         assert_group_source_contract(&SortingSource, &builtin_fixture());
     }
 
+    /// ★ADR-0309 그물★ — 이름으로 접는 소스(동명 쌍둥이 중 하나가 펼침에서 사라진다).
+    struct NameFoldingSource;
+    impl GroupSource for NameFoldingSource {
+        fn resolve(
+            &self,
+            group: &str,
+            pools: MemberPools<'_>,
+        ) -> Result<Vec<GroupMember>, GroupError> {
+            let norm = normalize_group_name(group)?;
+            if norm == ALL_GROUP || norm == HERE_GROUP {
+                let dormant: &[GroupMember] = if norm == ALL_GROUP {
+                    pools.dormant
+                } else {
+                    &[]
+                };
+                let mut v: Vec<GroupMember> = Vec::new();
+                for m in pools.live.iter().chain(dormant) {
+                    if !v.iter().any(|seen| seen.name == m.name) {
+                        v.push(m.clone());
+                    }
+                }
+                return Ok(v);
+            }
+            Err(GroupError::NotFound { name: norm })
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "axis1-all-verbatim")]
+    fn contract_suite_catches_a_source_that_folds_namesakes() {
+        assert_group_source_contract(&NameFoldingSource, &builtin_fixture());
+    }
+
     /// ★ADR-0121 그물★ — 옛 `@all`(로스터만 읽는 것) 회귀.
     struct LiveOnlyAllSource;
     impl GroupSource for LiveOnlyAllSource {
-        fn resolve(&self, group: &str, pools: MemberPools<'_>) -> Result<Vec<String>, GroupError> {
+        fn resolve(
+            &self,
+            group: &str,
+            pools: MemberPools<'_>,
+        ) -> Result<Vec<GroupMember>, GroupError> {
             let norm = normalize_group_name(group)?;
             if norm == ALL_GROUP || norm == HERE_GROUP {
                 return Ok(pools.live.to_vec());
@@ -378,7 +448,11 @@ mod tests {
     /// ★ADR-0121 그물(반대 방향)★ — `@here` 가 dormant 를 읽는 회귀.
     struct HereReadsDormantSource;
     impl GroupSource for HereReadsDormantSource {
-        fn resolve(&self, group: &str, pools: MemberPools<'_>) -> Result<Vec<String>, GroupError> {
+        fn resolve(
+            &self,
+            group: &str,
+            pools: MemberPools<'_>,
+        ) -> Result<Vec<GroupMember>, GroupError> {
             let norm = normalize_group_name(group)?;
             if norm == ALL_GROUP || norm == HERE_GROUP {
                 let mut v = pools.live.to_vec();
@@ -398,7 +472,11 @@ mod tests {
     /// 옛 `GroupError::Empty` 회귀 그물 — axis2 가 물어야 한다.
     struct EmptyRejectingSource;
     impl GroupSource for EmptyRejectingSource {
-        fn resolve(&self, group: &str, pools: MemberPools<'_>) -> Result<Vec<String>, GroupError> {
+        fn resolve(
+            &self,
+            group: &str,
+            pools: MemberPools<'_>,
+        ) -> Result<Vec<GroupMember>, GroupError> {
             let norm = normalize_group_name(group)?;
             if norm == ALL_GROUP || norm == HERE_GROUP {
                 if pools.live.is_empty() && pools.dormant.is_empty() {
