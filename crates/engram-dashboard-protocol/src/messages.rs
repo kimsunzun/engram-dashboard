@@ -275,7 +275,7 @@ pub enum AgentCommand {
     RegisterCommands {
         #[ts(type = "string")]
         owner: OwnerToken,
-        #[ts(type = "Array<{ name: string, help: string }>")]
+        #[ts(type = "Array<{ name: string, help: string, agent_args?: Array<string> }>")]
         decls: Vec<CommandDecl>,
         catalog_version: u32,
         request_id: RequestId,
@@ -290,7 +290,7 @@ pub enum AgentCommand {
     UpdateCommands {
         #[ts(type = "string")]
         owner: OwnerToken,
-        #[ts(type = "Array<{ name: string, help: string }>")]
+        #[ts(type = "Array<{ name: string, help: string, agent_args?: Array<string> }>")]
         added: Vec<CommandDecl>,
         removed: Vec<String>,
         request_id: RequestId,
@@ -1792,10 +1792,10 @@ mod tests {
     /// 하게 되므로, 여기서 둘을 대조한다.
     #[test]
     fn command_decl_hand_written_ts_matches_rust_shape() {
-        use std::collections::BTreeSet;
+        use std::collections::{BTreeMap, BTreeSet};
 
         // 두 attribute(`RegisterCommands.decls` · `UpdateCommands.added`)에 적은 것과 같은 문자열.
-        const DECLS_TS: &str = "Array<{ name: string, help: string }>";
+        const DECLS_TS: &str = "Array<{ name: string, help: string, agent_args?: Array<string> }>";
 
         let inlined = <AgentCommand as TS>::inline();
         assert!(
@@ -1803,22 +1803,41 @@ mod tests {
             "생성 TS 가 손으로 적은 텍스트와 불일치(등록 2자리) — attribute 를 고쳤으면 여기도 고친다:\n{inlined}"
         );
 
+        // 칸마다 값을 채운다 — 비면 직렬화에서 빠지는 칸(`agent_args`)도 타입을 대조할 수 있게.
         let decl = CommandDecl {
             name: "agent.spawn".into(),
             help: r#"{"name":"agent.spawn"}"#.into(),
+            agent_args: vec!["target".into()],
         };
-        let json = serde_json::to_value(&decl).expect("CommandDecl 직렬화");
-        let rust_fields: BTreeSet<String> = json
-            .as_object()
-            .expect("CommandDecl 은 JSON object 로 나간다")
+        let ts_type_of = |key: &str, value: &serde_json::Value| -> &'static str {
+            match value {
+                serde_json::Value::String(_) => "string",
+                serde_json::Value::Array(items) if items.iter().all(|item| item.is_string()) => {
+                    "Array<string>"
+                }
+                other => panic!("{key} = {other} — 위 TS 텍스트가 이 모양을 적지 않는다"),
+            }
+        };
+        let object_of = |decl: &CommandDecl| {
+            serde_json::to_value(decl)
+                .expect("CommandDecl 직렬화")
+                .as_object()
+                .expect("CommandDecl 은 JSON object 로 나간다")
+                .clone()
+        };
+        let rust_fields: BTreeMap<String, &'static str> = object_of(&decl)
             .iter()
-            .map(|(k, v)| {
-                assert!(
-                    v.is_string(),
-                    "{k} 가 string 이 아니면 위 TS 텍스트가 거짓말이다"
-                );
-                k.clone()
-            })
+            .map(|(k, v)| (k.clone(), ts_type_of(k, v)))
+            .collect();
+        // 비었을 때 직렬화에서 빠지는 칸 — TS 쪽에서는 `?` 로 적혀야 한다.
+        let sparse = object_of(&CommandDecl {
+            agent_args: Vec::new(),
+            ..decl.clone()
+        });
+        let skipped_when_empty: BTreeSet<String> = rust_fields
+            .keys()
+            .filter(|k| !sparse.contains_key(*k))
+            .cloned()
             .collect();
 
         // ★위 rust_fields 만으론 안 잡히는 구멍★: `#[serde(skip_serializing_if = "Option::is_none")]`
@@ -1840,25 +1859,38 @@ mod tests {
             })
             .collect();
 
-        // 손으로 적은 텍스트에서 `<이름>: <타입>` 의 이름만 뽑는다.
-        let ts_fields: BTreeSet<String> = DECLS_TS
+        // 손으로 적은 텍스트에서 `<이름>[?]: <타입>` 을 뽑는다.
+        let mut ts_optional: BTreeSet<String> = BTreeSet::new();
+        let ts_fields: BTreeMap<String, &'static str> = DECLS_TS
             .trim_start_matches("Array<{")
             .trim_end_matches("}>")
             .split(',')
             .filter(|s| !s.trim().is_empty())
             .map(|pair| {
                 let (name, ty) = pair.split_once(':').expect("`이름: 타입` 형태");
-                assert_eq!(ty.trim(), "string", "{name} 의 TS 타입이 string 이 아니다");
-                name.trim().to_string()
+                let name = name.trim();
+                let name = match name.strip_suffix('?') {
+                    Some(optional) => {
+                        ts_optional.insert(optional.to_string());
+                        optional
+                    }
+                    None => name,
+                };
+                (name.to_string(), ty.trim())
             })
             .collect();
 
         assert_eq!(
             rust_fields, ts_fields,
-            "CommandDecl 의 Rust 필드와 손으로 적은 TS 필드가 갈렸다"
+            "CommandDecl 의 Rust 필드 · 타입과 손으로 적은 TS 필드 · 타입이 갈렸다"
         );
         assert_eq!(
-            debug_fields, ts_fields,
+            skipped_when_empty, ts_optional,
+            "비면 직렬화에서 빠지는 칸과 TS 의 `?` 칸이 갈렸다 — 빠지는 칸을 필수로 적으면 TS 가 거짓말을 한다"
+        );
+        let ts_names: BTreeSet<String> = ts_fields.keys().cloned().collect();
+        assert_eq!(
+            debug_fields, ts_names,
             "CommandDecl 의 실제 필드(Debug 기준, skip_serializing_if 로도 안 가려짐)와 손으로 적은 \
              TS 필드가 갈렸다 — 위 rust_fields 비교는 값이 None 이라 직렬화에서 빠진 필드를 못 잡는다"
         );
@@ -1873,6 +1905,7 @@ mod tests {
             decls: vec![CommandDecl {
                 name: "agent.spawn".into(),
                 help: help.into(),
+                agent_args: Vec::new(),
             }],
             catalog_version: 1,
             request_id: RequestId(Uuid::nil()),
@@ -1907,6 +1940,7 @@ mod tests {
             added: vec![CommandDecl {
                 name: "chat.get".into(),
                 help: "{}".into(),
+                agent_args: Vec::new(),
             }],
             removed: vec!["chat.reset".into()],
             request_id: RequestId(Uuid::nil()),
@@ -1916,6 +1950,38 @@ mod tests {
             json,
             r#"{"UpdateCommands":{"owner":"shell","added":[{"name":"chat.get","help":"{}"}],"removed":["chat.reset"],"request_id":"00000000-0000-0000-0000-000000000000"}}"#,
             "UpdateCommands wire 형태가 golden 과 불일치"
+        );
+        let back: AgentCommand = serde_json::from_str(&json).unwrap();
+        assert_eq!(json, serde_json::to_string(&back).unwrap());
+    }
+
+    /// ★에이전트 참조 칸(ADR-0308)은 있을 때만 실린다★ — 없는 옛 패킷은 「바꿀 칸 없음」으로 읽히고, 칸이
+    /// 비면 wire 에서 빠져 위 두 골든(표시 없는 등록)이 그대로 선다.
+    #[test]
+    fn decl_agent_args_are_optional_on_the_wire() {
+        let old = r#"{"RegisterCommands":{"owner":"shell","decls":[{"name":"tab.focus","help":"{}"}],"catalog_version":1,"request_id":"00000000-0000-0000-0000-000000000000"}}"#;
+        match serde_json::from_str::<AgentCommand>(old).expect("옛 패킷") {
+            AgentCommand::RegisterCommands { decls, .. } => {
+                assert!(decls[0].agent_args.is_empty(), "칸이 없으면 빈 목록");
+            }
+            other => panic!("variant 불일치: {other:?}"),
+        }
+
+        let cmd = AgentCommand::UpdateCommands {
+            owner: OwnerToken::new("shell"),
+            added: vec![CommandDecl {
+                name: "slot.focus".into(),
+                help: "{}".into(),
+                agent_args: vec!["agent".into(), "after_tab".into()],
+            }],
+            removed: vec![],
+            request_id: RequestId(Uuid::nil()),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert_eq!(
+            json,
+            r#"{"UpdateCommands":{"owner":"shell","added":[{"name":"slot.focus","help":"{}","agent_args":["agent","after_tab"]}],"removed":[],"request_id":"00000000-0000-0000-0000-000000000000"}}"#,
+            "표시가 있으면 선언 순서 그대로 실린다"
         );
         let back: AgentCommand = serde_json::from_str(&json).unwrap();
         assert_eq!(json, serde_json::to_string(&back).unwrap());

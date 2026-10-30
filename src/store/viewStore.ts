@@ -25,12 +25,12 @@
 //     그 창의 모든 탭 layout 을 담아야 한다(숨은 탭도 렌더 유지). 각 슬롯 캔버스가 자기 view_id 캐시를 본다.
 
 import { invoke } from '@tauri-apps/api/core'
-import { getCurrentWindow } from '@tauri-apps/api/window'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { create } from 'zustand'
 
 import type {
   LayoutNode,
+  NewWindow,
   SlotContent,
   SlotRect,
   SplitDir,
@@ -38,6 +38,8 @@ import type {
   SplitRect,
   ViewMeta,
   ViewSnapshot,
+  WindowControlAction,
+  WindowControlOutcome,
 } from '../api/layoutTypes'
 import { isRenderMode, type RenderMode } from '../components/slot/renderMode'
 import { retryAsync } from '../util/retryInvoke'
@@ -48,19 +50,27 @@ export const MAIN_WINDOW_LABEL = 'main'
 /** 사용량 슬롯에 쓸 표시 칸 — 빠진 칸은 셸이 그 슬롯의 지금 값으로 지킨다(`setUsageSlot`). */
 export type UsageShows = Partial<Pick<Extract<SlotContent, { type: 'usage' }>, 'show_claude' | 'show_codex'>>
 
-/**
- * window:tabs-updated / list_tabs 페이로드(WindowTabsPayload 미러, layout/apply.rs).
- * 옛 ViewListPayload{views, active_view_id}(전역) → 창별 {label, tabs, active, version}(ADR-0057).
- */
+/** window:tabs-updated / list_tabs 페이로드 — layout/apply.rs `WindowTabsPayload` 의 미러. 칸 이름이 wire 계약이다(ADR-0057). */
 export interface WindowTabsPayload {
   label: string
+  /** 그 창의 영속 신원 — main = `main`, 팝아웃 = UUID. */
+  window_id: string
+  /** 창 번호 — main = 1, 팝아웃 = 2 이상(TRD S26-window-chrome §4-1). */
+  number: number
+  /** OS 창 제목 — 셸이 OS 창에 입히는 몫이라 웹은 읽지 않는다(TRD S26-window-chrome §4-4). */
+  title: string
   tabs: ViewMeta[]
   active: string
   version: number
 }
 
-/** 한 창의 탭 상태(프론트 미러). version = 전역 단조(stale emit 폐기용). */
+/** `move_slot_to_window` 의 답 — layout/apply.rs `SlotMove` 의 미러. `tab` = 옮겨 간 창에 생긴 탭. */
+export type SlotMove = NewWindow & { tab: string }
+
+/** 한 창의 탭 상태(프론트 미러). version = 전역 단조(stale emit 폐기용). `windowId` · `number` = 페이로드 그대로. */
 export interface WindowTabs {
+  windowId: string
+  number: number
   tabs: ViewMeta[]
   active: string
   version: number
@@ -106,16 +116,35 @@ interface ViewState {
   /** 창 `window` 의 활성 탭 변경(그 창만). */
   switchTab: (window: string, viewId: string) => Promise<void>
   /**
+   * 창 `window` 의 활성이 `expect` 일 때만 `viewId` 로 바꾼다 — 바꿨으면 `true`, 활성이 달라 안 바꿨으면 `false`. 오류는
+   * `switchTab` 과 같다. 탭 끌기의 원래 선택 되돌리기 전용(TRD S21-slot-docking §4-6 — 되돌리기가 닿기 전에 사용자 · LLM 이
+   * 고른 탭을 덮지 않는다). ★LLM 표면에 올리지 않는다★ — LLM 은 `tab.switch`(TRD §3-6).
+   */
+  switchTabIf: (window: string, viewId: string, expect: string) => Promise<boolean>
+  /**
    * 탭(View) 이름 교체. view_id 전역 유니크라 window 는 안 받는다(백엔드 view_owner 파생). 백엔드
    * rename_tab 을 invoke 하고 실제 이름 반영은 window:tabs-updated emit 으로만(낙관 갱신 X — 이름 권위
    * = src-tauri, ADR-0035). §5 단일 표면: 사람 더블클릭 인라인 편집(TabBar)·LLM(__engramCmd → tab.rename)이
    * 같은 이 핸들로 수렴한다. 이름 정규화(trim/공백거부)는 호출부 경계(TabBar·tab.rename)가 담당.
    */
   renameTab: (viewId: string, name: string) => Promise<void>
-  /** 빈 새 창(빈 탭 1개) 생성 → 새 창 label 반환(D-6). */
-  createWindow: () => Promise<string>
-  /** 창 `window` 통째 닫기(main 금지). */
-  closeWindow: (window: string) => Promise<void>
+  /**
+   * 빈 새 창(빈 탭 1개) 생성(D-6) → 그 창의 `{window, window_id, number}`(뜻 = 바인딩 `NewWindow` — TRD S26-window-chrome
+   * §5-3). 창을 다시 가리킬 땐 `window_id` 를 쓴다 — 번호는 닫힌 창의 것을 다시 쓴다.
+   */
+  createWindow: () => Promise<NewWindow>
+  /**
+   * 창 상태 동작 하나 — invoke `window_control`(TRD S26-window-chrome §6-4 · 버스 `window.*` 와 같은 서비스). `window` 는
+   * 셸이 푸는 창 인자(window_id 또는 같은 실행 안 label — 번호는 거절)이고, `hide_all` · `show_all` 은 창을 가리지 않는다
+   * (셸은 숫자 거절만 본다). `ifEmpty` 는 `close` 에만 — 그때 `window` 는 그 창의 window_id 다(§5-5). 거절 = 셸 문구
+   * (문자열 — Error 가 아니다)로 reject — 명령 이름은 레지스트리 `window.*` 가 붙인다. ★창 닫기도 이 길이다★ — main 의
+   * `close` 는 모든 창 숨기기다(답 `close: 'hidden_all'`).
+   */
+  controlWindow: (
+    window: string,
+    action: WindowControlAction,
+    ifEmpty?: boolean,
+  ) => Promise<WindowControlOutcome>
 
   // ── View 내부 조작(view_id 전역 유니크라 시그니처 유지 — 소속 창은 백엔드 view_owner 파생) ──
   /** slot 분할 → 새 slot_id 반환. */
@@ -154,7 +183,8 @@ interface ViewState {
   /**
    * slot 의 agent 를 다른 창의 새 탭으로 MOVE(detach, not mirror). 백엔드 move_slot_to_window 가 새 View
    * 생성 → agent 이전 → 대상 창(미지정 시 새 팝업 창) 새 탭 삽입 → 원본 슬롯 제거를 한다. 원본 슬롯 제거는
-   * emit(layout:updated)으로 반영된다(낙관 갱신 X — 백엔드 권위, ADR-0035). 반환 = {window, tab}(G4).
+   * emit(layout:updated)으로 반영된다(낙관 갱신 X — 백엔드 권위, ADR-0035). 반환 = {window, tab}(G4) + 옮겨 간 창의
+   * window_id · number(`createWindow` 와 같은 뜻 — 기존 창이면 그 창의 것).
    * §5: `slot.popout` command 로 LLM 도 호출 — ★그 command 는 toWindow 를 안 넘겨 항상 새 창이다★.
    * 그래서 `toWindow` 는 프로덕션 호출부가 없고 `viewStore.test.ts` 만 그 갈래를 잰다. 기존 창을 목적지로
    * 고르는 갈래는 셸의 버스 선언(`slot.popout` 의 `to_window`)이 쥐고 있고, 두 표면이 받는 것도 주는 것도
@@ -169,7 +199,7 @@ interface ViewState {
     viewId: string,
     slotId: string,
     toWindow?: string,
-  ) => Promise<{ window: string; tab: string }>
+  ) => Promise<SlotMove>
 
   // ── ★렌더 모드 오버라이드(§5)★ 지정/해제(프론트 전용, invoke 안 탐) ──────────────────────────
   /** slot 의 렌더러를 mode 로 강제(caps 유도 기본을 덮음). */
@@ -200,8 +230,10 @@ export const useViewStore = create<ViewState>((set, get) => ({
   createTab: (window, name) => invoke<string>('create_tab', { window, name: name ?? null }),
   closeTab: (window, viewId) => invoke<void>('close_tab', { window, view: viewId }),
   switchTab: (window, viewId) => invoke<void>('switch_tab', { window, view: viewId }),
-  createWindow: () => invoke<string>('create_window'),
-  closeWindow: window => invoke<void>('close_window', { window }),
+  switchTabIf: (window, viewId, expect) => invoke<boolean>('switch_tab_if', { window, view: viewId, expect }),
+  createWindow: () => invoke<NewWindow>('create_window'),
+  controlWindow: (window, action, ifEmpty) =>
+    invoke<WindowControlOutcome>('window_control', { window, action, ifEmpty: ifEmpty ?? null }),
 
   split: (viewId, slotId, dir) => invoke<string>('split_slot', { viewId, slotId, dir }),
   setSplitRatio: (viewId, splitId, ratio) =>
@@ -247,7 +279,7 @@ export const useViewStore = create<ViewState>((set, get) => ({
     // 프론트 전용 상태라 emit 루프 밖). 실제 슬롯 제거·대상 창 탭 삽입은 백엔드 move_slot_to_window 가
     // 하고 emit(양 창 window:tabs-updated + 원본 layout:updated)으로 반영된다.
     get().clearRenderMode(slotId)
-    return invoke<{ window: string; tab: string }>('move_slot_to_window', {
+    return invoke<SlotMove>('move_slot_to_window', {
       viewId,
       slotId,
       toWindow: toWindow ?? null,
@@ -316,6 +348,8 @@ export const useViewStore = create<ViewState>((set, get) => ({
       windows: {
         ...state.windows,
         [payload.label]: {
+          windowId: payload.window_id,
+          number: payload.number,
           tabs: payload.tabs,
           active: payload.active,
           version: payload.version,
@@ -451,6 +485,3 @@ export async function initMainWindowFromBackend(): Promise<void> {
   )
   useViewStore.getState().applyLayoutUpdated(snap)
 }
-
-// getCurrentWindow 를 여기서 재노출 — 팝업 자가닫힘(0탭)에서 창 close 에 쓴다(§7-1). import 경로 통일.
-export { getCurrentWindow }

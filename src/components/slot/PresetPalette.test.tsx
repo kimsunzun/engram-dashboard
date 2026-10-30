@@ -31,7 +31,8 @@ beforeEach(() => {
   clientMock.deletePreset.mockClear()
   clientMock.renamePreset.mockClear()
   refreshPresetsMock.mockClear()
-  useAgentStore.setState({ presets: [] })
+  // 기본은 「목록 받음」 — 미수신 구간은 그 시험이 플래그를 직접 내린다.
+  useAgentStore.setState({ presets: [], presetsLoaded: true })
 })
 
 afterEach(() => {
@@ -92,6 +93,14 @@ describe('presetDisplayName (name override ?? basename 파생 — ADR-0061 리�
 describe('PresetPalette 렌더', () => {
   it('빈 목록 → 안내 문구', () => {
     render(<PresetPalette />)
+    expect(screen.getByText(/프리셋 없음/)).toBeTruthy()
+  })
+
+  it('첫 목록 수신 전 → 빈 목록 안내를 그리지 않고, 빈 목록을 받으면 그때 그린다', () => {
+    useAgentStore.setState({ presetsLoaded: false })
+    render(<PresetPalette />)
+    expect(screen.queryByText(/프리셋 없음/)).toBeNull()
+    act(() => useAgentStore.getState().setPresets([]))
     expect(screen.getByText(/프리셋 없음/)).toBeTruthy()
   })
 
@@ -185,6 +194,40 @@ describe('PresetPalette 렌더', () => {
     const input = document.querySelector('[data-preset-rename-input="pr1"]') as HTMLInputElement
     fireEvent.keyDown(input, { key: 'Enter' }) // draft = 시드된 '고정' 그대로
     expect(clientMock.renamePreset).not.toHaveBeenCalled()
+  })
+
+  // Tauri `drag.js` 는 창 끌 자리 누름의 기본 동작(포커스 옮김)을 막는다. 그 흉내 = 먼저 건 document 거품 단계 듣는 쪽 — 뒤
+  //   듣기도 끊는다(jsdom 은 누름으로 포커스를 옮기지 않으니 기본 동작 쪽은 이미 같다).
+  it('이름 변경 중 창 끌 자리(제목 줄) 누름 → 포커스 잃음과 같이 확정한다 · 끌 자리 밖 누름은 편집을 둔다', () => {
+    const grab = document.createElement('div')
+    grab.setAttribute('data-tauri-drag-region', '')
+    document.body.appendChild(grab)
+    const dragJs = (e: MouseEvent) => {
+      if (e.target !== grab) return
+      e.preventDefault()
+      e.stopImmediatePropagation()
+    }
+    document.addEventListener('mousedown', dragJs)
+    try {
+      seedPresets(preset('pr1', 'C:/work/engram'))
+      render(<PresetPalette />)
+      fireEvent.contextMenu(document.querySelector('[data-preset-id="pr1"]') as HTMLElement)
+      fireEvent.click(screen.getByText('이름 변경'))
+      const input = document.querySelector('[data-preset-rename-input="pr1"]') as HTMLInputElement
+      expect(document.activeElement).toBe(input)
+      fireEvent.change(input, { target: { value: '  새 이름  ' } })
+
+      fireEvent.mouseDown(document.body)
+      expect(document.activeElement).toBe(input)
+      expect(clientMock.renamePreset).not.toHaveBeenCalled()
+
+      fireEvent.mouseDown(grab)
+      expect(clientMock.renamePreset).toHaveBeenCalledWith('pr1', '새 이름')
+      expect(document.querySelector('[data-preset-rename-input="pr1"]')).toBeNull()
+    } finally {
+      document.removeEventListener('mousedown', dragJs)
+      grab.remove()
+    }
   })
 
   it('스타일 = 변수-only(하드코딩 색 없음) — 루트 background 가 var(...) 참조', () => {

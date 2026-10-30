@@ -66,6 +66,11 @@ use crate::usage::UsageObservation;
 
 const CLAUDE_PROGRAM: &str = "claude";
 
+/// 우리가 띄우는 claude 전부에 싣는 env — 백그라운드 자동 업데이트만 끈다(수동 `claude update` 는 그대로).
+/// 우리는 claude 를 강제로 끝내는데(Job Object terminate), 업데이트 도중에 끊겨 공유 설치본이 깨졌다는 사용자 관찰이 있다.
+/// 근거 · 버린 대안 = `docs/research/child-process-shutdown-peers-2026-10-14.md` §5(고른 것 = C · 사용자 2026-10-20).
+const NO_AUTOUPDATE_ENV: (&str, &str) = ("DISABLE_AUTOUPDATER", "1");
+
 /// claude 가 `--output-format stream-json` 으로 뜨나 = 이 폴더 안의 네 축(통로·입력 인코딩·출력
 /// decoder·transcript seed)이 함께 갈리는 지점.
 ///
@@ -184,6 +189,11 @@ impl AgentBackend for ClaudeBackend {
                 // ADR-0097
                 args.push("--permission-mode".to_string());
                 args.push("bypassPermissions".to_string());
+                // 프로필이 같은 키를 이미 넣었으면 건너뛴다 — 아래 MAX_THINKING_TOKENS 와 같은 프로필 우선 규칙.
+                let (key, value) = NO_AUTOUPDATE_ENV;
+                if !env.iter().any(|(k, _)| env_key_eq(k, key)) {
+                    env.push((key.to_string(), value.to_string()));
+                }
                 match output_format {
                     // ── 터미널(PTY 대화형) — 바이트/인자 동결(회귀 금지) ──
                     AgentOutputFormat::Terminal => {
@@ -3209,7 +3219,47 @@ mod tests {
             None,
         );
         assert_eq!(s.cwd, cwd);
-        assert_eq!(s.env, env);
+        assert_eq!(s.env, [env[0].clone(), owned(NO_AUTOUPDATE_ENV)]);
+    }
+
+    fn owned((k, v): (&str, &str)) -> (String, String) {
+        (k.to_string(), v.to_string())
+    }
+
+    fn autoupdate_values(s: &CommandSpec) -> Vec<&str> {
+        s.env
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case("DISABLE_AUTOUPDATER"))
+            .map(|(_, v)| v.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn every_claude_spawn_disables_the_autoupdater() {
+        for command in [terminal(vec![]), json(vec![])] {
+            for control in [None, Some(ep())] {
+                let s = spec_with_env(&command, control.clone(), vec![]);
+                assert_eq!(autoupdate_values(&s), ["1"], "{command:?} / {control:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn profile_autoupdater_value_wins_over_the_default() {
+        for command in [terminal(vec![]), json(vec![])] {
+            // 같은 철자는 어느 OS 에서나 프로필 값 하나만 남는다 — 건너뛰기 가드를 지우면 여기서 깨진다.
+            let exact = vec![("DISABLE_AUTOUPDATER".to_string(), "0".to_string())];
+            let s = spec_with_env(&command, None, exact);
+            assert_eq!(autoupdate_values(&s), ["0"], "{command:?}");
+            let profile = vec![("disable_autoupdater".to_string(), "0".to_string())];
+            let s = spec_with_env(&command, None, profile);
+            let expected: &[&str] = if env_key_eq("disable_autoupdater", "DISABLE_AUTOUPDATER") {
+                &["0"]
+            } else {
+                &["0", "1"]
+            };
+            assert_eq!(autoupdate_values(&s), expected, "{command:?}");
+        }
     }
 
     // ── ADR-0044: json(stream-json) 모드 build_spec 골든 ─────────────────────────

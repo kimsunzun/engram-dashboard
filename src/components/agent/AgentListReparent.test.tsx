@@ -114,7 +114,9 @@ beforeEach(() => {
   captured.onMove = undefined
   captured.disableDrag = undefined
   captured.disableDrop = undefined
-  useAgentStore.setState({ agents: [], profiles: [], presets: [], selectedAgentId: null })
+  useAgentStore.setState({
+    agents: [], agentsLoaded: true, profiles: [], profilesLoaded: true, presets: [], selectedAgentId: null,
+  })
 })
 afterEach(() => {
   cleanup()

@@ -3,13 +3,17 @@
 //! 데몬 켜기/끄기는 기존 daemon_start/daemon_stop/daemon_status(commands/discovery.rs)를 재사용하므로
 //! 여기 없음.
 
+use crate::commands::window_ctl::TauriWindowControl;
+use crate::layout::window_ctl::{Activation, WindowControl};
 use crate::tray::actions;
 
-/// 메인과 팝아웃 창 전부를 화면 맨 앞으로 되살리고 마지막에 메인에 포커스 — 트레이 좌클릭과 같은
-/// 동작(ADR-0229).
+/// 메인과 팝아웃 창 전부를 되살린다 — 버스 `window.showAll` 과 같은 포커스를 빼앗지 않는 보이기다(ADR-0229 · TRD
+/// S26-window-chrome §6-2 「누가 어느 갈래인가」): 첫 화면 전인 창은 건너뛰고, 포커스는 우리 앱이 이미 전경일 때 main 에만
+/// 준다. ★트레이 좌클릭(누름 갈래)으로 되돌리지 말 것★ — LLM · cdp 가 부르는 표면이라, 누름 갈래면 남의 앱 전경을
+/// 빼앗는 두 번째 길이 된다.
 #[tauri::command]
 pub fn show_main_ui(app: tauri::AppHandle) {
-    actions::show_main_ui(&app);
+    TauriWindowControl::new(app).show_all(Activation::NoSteal);
 }
 
 /// 메인과 팝아웃 창 전부를 숨긴다 — 메인 X 와 같은 동작(ADR-0229).

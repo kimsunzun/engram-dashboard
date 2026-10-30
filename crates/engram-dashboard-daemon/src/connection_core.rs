@@ -1684,7 +1684,8 @@ impl ConnectionCore {
                 request_id,
             } => {
                 // ★삭제 정리 훅(ADR-0116 결정 3)★: 여기가 유일한 프로필 제거 지점이라 훅도 여기 하나다.
-                //   호출자 의무(이름 파생 시점·락 순서·게이트 축)는 `handle_profile_deleted` 가 정본이다.
+                //   호출자 의무(락 순서)와 게이트 축은 `handle_profile_deleted` 가 정본이다. 판정 · 정리는 프로필
+                //   id 하나로 하고, 제거 전에 뽑는 이름은 로그 전용이다(ADR-0309 결정 6).
                 // ★발동 조건(로스터 부재)은 커널이 판정한다★: 로스터는 커널의 DeliveryPort 소유 축이고, 여기서
                 //   미리 보면 조건이 두 곳에 갈린다(그 판정이 곧 정책 — spec §5).
                 let deleted_name = manager
@@ -1836,7 +1837,14 @@ impl ConnectionCore {
                 name,
                 request_id,
             } => match manager.try_rename_agent(profile_id, name) {
-                Ok(CoreRenameOutcome::Renamed(_) | CoreRenameOutcome::Unchanged(_)) => {
+                Ok(CoreRenameOutcome::Renamed(_)) => {
+                    reply(sink, request_id, Ok(()));
+                    broadcast_profile_list(fanout, manager);
+                    // 산 에이전트면 목록 이름(`AgentInfo.name`)도 바뀐다(잠든 프로필이면 목록은 그대로다) — 셸의 탭 자동
+                    //   이름 · 창 제목은 이 목록에서만 이름을 읽는다(다시 짓지 않는다 · TRD S26-window-chrome §4-3).
+                    broadcast_agent_list(fanout, manager);
+                }
+                Ok(CoreRenameOutcome::Unchanged(_)) => {
                     reply(sink, request_id, Ok(()));
                     broadcast_profile_list(fanout, manager);
                 }
@@ -2467,6 +2475,10 @@ pub(crate) fn broadcast_lease_changed(fanout: &dyn FrameFanout, agent_id: AgentI
 ///   ADR-0236 이 내려놓았다 — 모양은 그대로 둔다.
 /// ★짝 불일치 방지★: 생성자를 통해 **한 조립에서 나온** 팬아웃과 매니저만 묶인다 —
 ///   `DaemonWiring::roster_broadcast` 가 유일한 운영 생성 지점이다(그 struct 주석의 규칙).
+/// ★통지 한 번 = `ProfileListUpdated` 다음 `AgentListUpdated`★: 포트는 어느 동사가 불렀는지 모른다 — 버스 · CLI
+///   `agent.rename` 이 산 에이전트의 목록 이름을 바꿔도 셸의 탭 자동 이름이 따라가게 에이전트 목록을 늘 함께 민다.
+///   다른 동사(띄우기 · 만들기 · 옮기기 · 무변경 개명)가 덧붙여 내는 목록은 이름이 그대로면 셸의 이름 장부가 판도 알림도 없이
+///   넘긴다(TRD S26-window-chrome §4-3).
 pub struct RosterFanout {
     fanout: Arc<dyn FrameFanout>,
     manager: Arc<AgentManager>,
@@ -2481,6 +2493,7 @@ impl RosterFanout {
 impl crate::control::agent::RosterBroadcast for RosterFanout {
     fn roster_changed(&self) {
         broadcast_profile_list(self.fanout.as_ref(), &self.manager);
+        broadcast_agent_list(self.fanout.as_ref(), &self.manager);
     }
 }
 
@@ -2489,6 +2502,12 @@ fn broadcast_profile_list(fanout: &dyn FrameFanout, manager: &Arc<AgentManager>)
         profiles: core_profiles_to_wire(manager.agent_snapshots()),
     };
     if let Some(text) = event_json(&ev) {
+        fanout.broadcast_text(text);
+    }
+}
+
+fn broadcast_agent_list(fanout: &dyn FrameFanout, manager: &Arc<AgentManager>) {
+    if let Some(text) = event_json(&agent_list_event(manager)) {
         fanout.broadcast_text(text);
     }
 }
@@ -4134,6 +4153,7 @@ mod tests {
         CommandDecl {
             name: name.to_string(),
             help: format!("{{\"name\":\"{name}\"}}"),
+            agent_args: Vec::new(),
         }
     }
 
@@ -4304,6 +4324,7 @@ mod tests {
                 vec![CommandDecl {
                     name: "tab.create".to_string(),
                     help: opaque.to_string(),
+                    agent_args: Vec::new(),
                 }],
                 rid(),
             ),
@@ -4362,6 +4383,7 @@ mod tests {
                     CommandDecl {
                         name: "agent.list".to_string(),
                         help: "stolen".to_string(),
+                        agent_args: Vec::new(),
                     },
                 ],
                 rid(),
@@ -4408,6 +4430,7 @@ mod tests {
                         "agent.move",
                         "agent.new",
                         "agent.rename",
+                        "agent.resolve",
                         "agent.spawn",
                         "tab.create",
                         "usage.get",
@@ -4869,6 +4892,7 @@ mod tests {
         let too_long = CommandDecl {
             name: "n".repeat(Roster::MAX_NAME_BYTES + 1),
             help: "{}".to_string(),
+            agent_args: Vec::new(),
         };
 
         core.dispatch(register(vec![too_long], req), &session, &mock)
@@ -5948,9 +5972,11 @@ mod tests {
     // ══════════════════════════════════════════════════════════════════════════════════════════
 
     /// ★왜 데몬 통합인가(가짜 포트 단위 테스트가 원리적으로 못 잡는다)★: 이 결함은 **두 배선**의 순서·축에
-    /// 있었다 — ① 정리 대상 이름을 프로필 **제거 전에** 뽑나 ② 발동 게이트를 **id** 로 거나. 커널 단위
-    /// 테스트는 그 둘을 하네스가 대신 정해 주므로(이름·게이트를 테스트가 직접 스크립트한다) 배선이 뒤바뀐 걸
-    /// 볼 수 없다. 여기서는 실제 프로필·실제 spawn·실물 `ManagerDeliveryPort` 로 dispatch 를 태운다.
+    /// 있었다 — ① 훅이 프로필 **제거 전에** 그 스냅숏(로그용 이름)을 뜨나(제거 뒤에 뜨면 스냅숏이 없어 훅이
+    /// 아예 안 돈다) ② 발동 게이트를 **id** 로 거나. 커널 단위 테스트는 그 둘을 하네스가 대신 정해 주므로
+    /// (이름·게이트를 테스트가 직접 스크립트한다) 배선이 뒤바뀐 걸 볼 수 없다. 여기서는 실제 프로필·실제
+    /// spawn·실물 `ManagerDeliveryPort` 로 dispatch 를 태운다. 끝에서 잠든 채 개명한 프로필의 삭제가 옛 이름으로
+    /// 쌓인 몫까지 id 로 쓸어 가는지도 본다(ADR-0309 결정 6 — 훅이 넘기는 이름은 새 이름이다).
     #[tokio::test]
     async fn deleting_a_renamed_profile_whose_session_is_live_keeps_its_mail_and_contracts() {
         use engram_dashboard_messaging::envelope::Entrance;
@@ -6036,7 +6062,7 @@ mod tests {
             engram_dashboard_messaging::service::SendStatus::Pending,
             "잠든 프로필 이름 앞으로 파킹된다: {rows:?}"
         );
-        assert_eq!(messaging.parked_len("boss"), 1);
+        assert_eq!(messaging.parked_len(boss.id), 1);
         messaging
             .handle_send(
                 "m-out",
@@ -6052,7 +6078,7 @@ mod tests {
             )
             .expect("행 응답");
         assert_eq!(
-            messaging.contract_outcome_for_test("m-out", "sleepy"),
+            messaging.contract_outcome_for_test("m-out", sleepy.id),
             Some("awaiting_reply"),
             "boss 가 요청자인 계약이 열렸다"
         );
@@ -6085,17 +6111,28 @@ mod tests {
 
         // (6) 보호 단언.
         assert_eq!(
-            messaging.parked_len("boss"),
+            messaging.parked_len(boss.id),
             1,
             "★D1★ 산 세션의 파킹 메일이 삭제 정리에 죽었다(게이트가 이름 축이면 여기서 0이 된다)"
         );
         assert_eq!(
-            messaging.contract_outcome_for_test("m-out", "sleepy"),
+            messaging.contract_outcome_for_test("m-out", sleepy.id),
             Some("awaiting_reply"),
             "★D1★ 산 세션이 요청자인 계약이 실패 종결됐다(ADR-0118 결정 2 위반)"
         );
 
-        // (7) ★반대 방향도 못 박는다 — 이름은 **제거 전에** 뽑아야 한다★.
+        // (7) ★반대 방향도 못 박는다 — 스냅숏은 **제거 전에** 떠야 훅이 돈다★. 그리고 잠든 채 개명한 프로필:
+        //   sleepy 앞 파킹과 sleepy 가 요청자인 계약을 쌓은 뒤 sleepy 를 drowsy 로 개명하고, 옛 이름 sleepy 는 새
+        //   프로필 heir 가 가져간다. 삭제는 id 로 쓸어 가야 한다 — 훅이 넘기는 이름은 drowsy 라 이름으로 고르면
+        //   sleepy 로 연 계약을 놓치고, 옛 이름으로 고르면 heir 의 몫이 죽는다(ADR-0309 결정 6).
+        let helper = {
+            let mut p = mk("helper-raw");
+            p.display_name = Some("helper".into());
+            p
+        };
+        core.manager
+            .try_create_agent(helper.clone())
+            .expect("등록 성공");
         let rows2 = messaging
             .handle_send(
                 "m-sleep",
@@ -6111,6 +6148,71 @@ mod tests {
             rows2[0].status,
             engram_dashboard_messaging::service::SendStatus::Pending
         );
+        messaging
+            .handle_send(
+                "m-sleep-req",
+                SenderIdentity {
+                    peer_id: sleepy.id,
+                    epoch: 0,
+                },
+                "sleepy",
+                &["helper".to_string()],
+                "해줘",
+                Entrance::Cli,
+                &req,
+            )
+            .expect("행 응답");
+        assert_eq!(
+            messaging.contract_outcome_for_test("m-sleep-req", helper.id),
+            Some("awaiting_reply"),
+            "sleepy 가 요청자인 계약이 열렸다"
+        );
+        core.dispatch(
+            AgentCommand::RenameProfile {
+                profile_id: sleepy.id,
+                name: Some("drowsy".into()),
+                request_id: engram_dashboard_protocol::RequestId(uuid::Uuid::new_v4()),
+            },
+            &session,
+            &sink,
+        )
+        .await;
+        assert_eq!(
+            core.manager
+                .agent_snapshot(sleepy.id)
+                .expect("프로필")
+                .canonical_name_when_live(),
+            "drowsy",
+            "잠든 채 개명했다(이 단계의 전제)"
+        );
+        let heir = {
+            let mut p = mk("heir-raw");
+            p.display_name = Some("sleepy".into());
+            p
+        };
+        core.manager
+            .try_create_agent(heir.clone())
+            .expect("등록 성공");
+        let rows3 = messaging
+            .handle_send(
+                "m-heir",
+                sender,
+                "outsider",
+                &["sleepy".to_string()],
+                "새 sleepy 에게",
+                Entrance::Cli,
+                &SendMeta::default(),
+            )
+            .expect("행 응답");
+        assert_eq!(
+            rows3[0].status,
+            engram_dashboard_messaging::service::SendStatus::Pending
+        );
+        assert_eq!(
+            messaging.parked_len(heir.id),
+            1,
+            "옛 이름 앞 새 우편은 그 이름의 새 주인에게 맡겨진다"
+        );
         core.dispatch(
             AgentCommand::DeleteProfile {
                 profile_id: sleepy.id,
@@ -6121,9 +6223,9 @@ mod tests {
         )
         .await;
         assert_eq!(
-            messaging.parked_len("sleepy"),
+            messaging.parked_len(sleepy.id),
             0,
-            "잠든 프로필 삭제는 정리가 발동해야(이름을 제거 전에 뽑았다는 증거)"
+            "잠든 프로필 삭제는 정리가 발동해야(스냅숏을 제거 전에 떴다는 증거)"
         );
         let view = messaging
             .message_state("m-sleep", std::time::Instant::now())
@@ -6132,6 +6234,16 @@ mod tests {
             view.rows[0].code,
             Some("RECIPIENT_DELETED"),
             "장부 종점 + 사유 코드가 남는다(조용히 버리지 않는다): {view:?}"
+        );
+        assert_eq!(
+            messaging.contract_outcome_for_test("m-sleep-req", helper.id),
+            Some("reply_failed"),
+            "개명 전 이름으로 연 계약도 id 로 닫힌다"
+        );
+        assert_eq!(
+            messaging.parked_len(heir.id),
+            1,
+            "옛 이름의 새 주인 몫은 그대로"
         );
 
         core.manager.kill_agent(boss.id).ok();
@@ -6231,7 +6343,7 @@ mod tests {
             core.manager.agent_snapshot(sleepy.id).is_some(),
             "지우지 않았다"
         );
-        assert_eq!(messaging.parked_len("sleepy"), 1, "정리 훅이 돌지 않았다");
+        assert_eq!(messaging.parked_len(sleepy.id), 1, "정리 훅이 돌지 않았다");
         assert_eq!(fanout.texts().len(), before, "브로드캐스트 0");
 
         // 대조 — 저장되면 같은 요청이 지우고 훅이 그 우편을 정리한다.
@@ -6250,7 +6362,7 @@ mod tests {
             "{:?}",
             mock.events()
         );
-        assert_eq!(messaging.parked_len("sleepy"), 0, "저장되면 훅이 돈다");
+        assert_eq!(messaging.parked_len(sleepy.id), 0, "저장되면 훅이 돈다");
         assert!(fanout.texts().len() > before, "저장되면 명부를 민다");
     }
 
@@ -6563,6 +6675,189 @@ mod tests {
             Some("alpha".to_string()),
             "이름 그대로"
         );
+    }
+
+    // ══ 개명 뒤 에이전트 목록(TRD S26-window-chrome §4-3) ══
+
+    /// `before` 뒤에 나간 브로드캐스트의 꼴 이름(`AgentListUpdated` 등) — 순서대로.
+    fn broadcast_kinds(
+        fanout: &crate::test_doubles::RecordingFanout,
+        before: usize,
+    ) -> Vec<String> {
+        fanout.texts()[before..]
+            .iter()
+            .map(|text| {
+                let value: serde_json::Value = serde_json::from_str(text).expect("wire 는 JSON");
+                value
+                    .as_object()
+                    .and_then(|o| o.keys().next().cloned())
+                    .expect("외부 태그 하나")
+            })
+            .collect()
+    }
+
+    /// `before` 뒤에 나간 `AgentListUpdated` 마다 그 (id, 이름) 목록 — 순서대로.
+    fn broadcast_agent_lists(
+        fanout: &crate::test_doubles::RecordingFanout,
+        before: usize,
+    ) -> Vec<Vec<(AgentId, String)>> {
+        fanout.texts()[before..]
+            .iter()
+            .filter_map(|text| match serde_json::from_str::<AgentEvent>(text) {
+                Ok(AgentEvent::AgentListUpdated { agents }) => {
+                    Some(agents.into_iter().map(|a| (a.id, a.name)).collect())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn live_profile(raw: &str) -> CoreProfile {
+        CoreProfile::new(
+            raw.into(),
+            CoreSpawnCommand::Shell {
+                program: default_shell().to_string(),
+                args: vec![],
+            },
+            std::env::temp_dir(),
+            vec![],
+            false,
+        )
+    }
+
+    /// 산 에이전트를 개명하면 `list_agents` 의 이름이 바뀌고 — 셸의 탭 자동 이름 · 창 제목이 따르는 그 이름 — 개명
+    /// 뒤 `AgentListUpdated` 가 그 이름을 싣고 나간다.
+    #[tokio::test]
+    async fn renaming_a_live_agent_broadcasts_the_agent_list_with_its_new_name() {
+        let (core, fanout) = test_core_recording();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        let profile = live_profile("live-raw");
+        core.manager
+            .try_create_agent(profile.clone())
+            .expect("등록 성공");
+        core.manager
+            .spawn_agent(&profile, SpawnMode::Fresh)
+            .expect("spawn")
+            .into_started()
+            .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+        let before = fanout.texts().len();
+
+        core.dispatch(
+            AgentCommand::RenameProfile {
+                profile_id: profile.id,
+                name: Some("renamed-live".into()),
+                request_id: rid(),
+            },
+            &session,
+            &mock,
+        )
+        .await;
+
+        let listed = core
+            .manager
+            .list_agents()
+            .into_iter()
+            .find(|a| a.id == profile.id)
+            .map(|a| a.name);
+        let lists = broadcast_agent_lists(&fanout, before);
+        // 끄기도 목록을 낸다 — 끄기 전에 뜬다.
+        let kinds: Vec<String> = broadcast_kinds(&fanout, before)
+            .into_iter()
+            .filter(|kind| kind != "StatusChanged")
+            .collect();
+        core.manager.kill_agent(profile.id).ok();
+
+        assert_eq!(listed.as_deref(), Some("renamed-live"), "목록 이름의 출처");
+        assert_eq!(
+            lists,
+            vec![vec![(profile.id, "renamed-live".to_string())]],
+            "개명 한 번에 에이전트 목록 한 장"
+        );
+        assert_eq!(kinds, ["ProfileListUpdated", "AgentListUpdated"]);
+    }
+
+    /// 버스 · CLI `agent.rename` 은 WS 팔을 지나지 않고 명부 통지 포트(`RosterFanout`)로 알린다 — 그 통지도 프로필 목록
+    /// 뒤에 새 이름을 실은 에이전트 목록을 낸다(셸의 탭 자동 이름이 LLM 의 개명을 따른다).
+    #[tokio::test]
+    async fn the_roster_port_broadcasts_the_agent_list_after_the_profile_list() {
+        use crate::control::agent::RosterBroadcast;
+
+        let (core, fanout) = test_core_recording();
+        let profile = live_profile("bus-raw");
+        core.manager
+            .try_create_agent(profile.clone())
+            .expect("등록 성공");
+        core.manager
+            .spawn_agent(&profile, SpawnMode::Fresh)
+            .expect("spawn")
+            .into_started()
+            .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+        let port = RosterFanout::new(fanout.clone(), core.manager.clone());
+        assert!(
+            matches!(
+                core.manager
+                    .try_rename_agent(profile.id, Some("renamed-by-bus".into())),
+                Ok(CoreRenameOutcome::Renamed(_))
+            ),
+            "개명 확정(이 시험의 전제)"
+        );
+        let before = fanout.texts().len();
+
+        port.roster_changed();
+
+        let lists = broadcast_agent_lists(&fanout, before);
+        // 끄기도 목록을 낸다 — 끄기 전에 뜬다.
+        let kinds: Vec<String> = broadcast_kinds(&fanout, before)
+            .into_iter()
+            .filter(|kind| kind != "StatusChanged")
+            .collect();
+        core.manager.kill_agent(profile.id).ok();
+
+        assert_eq!(
+            lists,
+            vec![vec![(profile.id, "renamed-by-bus".to_string())]],
+            "통지 한 번에 에이전트 목록 한 장"
+        );
+        assert_eq!(kinds, ["ProfileListUpdated", "AgentListUpdated"]);
+    }
+
+    /// 무변경 개명(남이 그 이름을 쥐어 제 계열 이름을 지킨다)은 프로필 목록만 낸다 — 목록 이름이 그대로다.
+    #[tokio::test]
+    async fn an_unchanged_rename_does_not_broadcast_the_agent_list() {
+        let (core, fanout) = test_core_recording();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        let bob = unlaunchable_profile("bob");
+        let twin = unlaunchable_profile("bob(1)");
+        for profile in [&bob, &twin] {
+            core.manager
+                .try_create_agent(profile.clone())
+                .expect("등록 성공");
+        }
+        let before = fanout.texts().len();
+
+        core.dispatch(
+            AgentCommand::RenameProfile {
+                profile_id: twin.id,
+                name: Some("bob".into()),
+                request_id: rid(),
+            },
+            &session,
+            &mock,
+        )
+        .await;
+
+        assert_eq!(
+            core.manager
+                .agent_snapshot(twin.id)
+                .and_then(|p| p.display_name),
+            Some("bob(1)".to_string()),
+            "무변경(이 시험의 전제)"
+        );
+        assert_eq!(broadcast_kinds(&fanout, before), ["ProfileListUpdated"]);
     }
 
     // ── 6. Subscribe 시 conn_tx 에 SubscribeAck → ReplayComplete 순서로 들어가는지 ──

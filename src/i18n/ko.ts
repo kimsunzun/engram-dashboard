@@ -50,7 +50,18 @@ export const ko = {
   window: {
     create: '새 창',
     close: '창 닫기',
-    loading: '창 로딩 중… (label: {label})',
+    minimize: '창 최소화',
+    maximize: '창 최대화',
+    unmaximize: '창 원래 크기로',
+    raise: '창 앞으로 내기',
+    hideAll: '모든 창 숨기기',
+    showAll: '모든 창 보이기',
+    // 제목 줄 창 단추의 접근성 이름 · 툴팁(TRD S26-window-chrome §7-4) — 위 명령 제목과 따로 둔다(Windows 캡션 단추의 낱말).
+    captionMinimize: '최소화',
+    captionMaximize: '최대화',
+    captionRestore: '이전 크기로 복원',
+    captionHideAll: '모든 창 숨기기',
+    captionClose: '창 닫기',
     // ADR-0102: 부팅 pull(list_tabs) 유계 재시도 소진 후 최종 실패 표면화(조용히 로딩에 고착 금지).
     loadFailed: '창을 불러오지 못했습니다 (label: {label}). 백엔드 연결을 확인하세요.',
     renderFailed: '화면을 그리는 중 오류가 났습니다',
@@ -292,7 +303,7 @@ export const ko = {
     // 반복 placeholder 시드 — 같은 토큰 2회. 전역 치환(global replace) 회귀 검증용(index.test.ts). ADR-0069.
     duplicatePreview: '{name} / {name}',
     viewLoading: 'View 로딩 중…',
-    // LoadingPanel 의 화면 밖 이름(aria-label) — 보이는 텍스트가 아니다. window.loading 은 인자가 달라 따로 둔다.
+    // LoadingPanel 의 화면 밖 이름(aria-label) — 보이는 텍스트가 아니다.
     loading: '로딩 중…',
     emptyResult: '(빈 결과)',
     copied: '복사됨',

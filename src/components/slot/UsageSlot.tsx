@@ -973,11 +973,13 @@ function UsagePopup({
       if (!inPopup(target) && !inOwner(target)) onClose(false)
     }
     document.addEventListener('keydown', onKey)
-    document.addEventListener('mousedown', onDown)
+    // 캡처 단계 — 창 끌 자리 누름은 거품 단계에 닿지 않는다(`layout/titleRow/dragRegion.ts`). 그 누름은 포커스도 옮기지 않아
+    //   아래 focusin 도 오지 않는다.
+    document.addEventListener('mousedown', onDown, true)
     document.addEventListener('focusin', onFocusIn)
     return () => {
       document.removeEventListener('keydown', onKey)
-      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('mousedown', onDown, true)
       document.removeEventListener('focusin', onFocusIn)
     }
   }, [onClose, ownerRef])

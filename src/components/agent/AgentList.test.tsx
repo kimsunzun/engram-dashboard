@@ -116,7 +116,10 @@ beforeEach(() => {
   })
   currentViewIdMock.mockReset()
   currentViewIdMock.mockReturnValue('main-view')
-  useAgentStore.setState({ agents: [], profiles: [], presets: [], selectedAgentId: null })
+  // 기본은 「명부 · 프로필 둘 다 받음」 — 미수신 구간은 그 시험이 플래그를 직접 내린다.
+  useAgentStore.setState({
+    agents: [], agentsLoaded: true, profiles: [], profilesLoaded: true, presets: [], selectedAgentId: null,
+  })
 })
 afterEach(() => {
   cleanup()
@@ -277,6 +280,53 @@ describe('rowPhase / rowGlyphIcon / rowGlyphColor (시연 층, pure)', () => {
       expect(statusGlyphIcon(s).shape).not.toBe('pending')
       expect(statusGlyphIcon(s, 'SpawnFailed').shape).not.toBe('pending')
     }
+  })
+})
+
+// ── 첫 목록 수신 전(새 창) — 중간 화면을 그리지 않는다 ──────────────────────────
+describe('AgentList 첫 목록 수신 전', () => {
+  beforeEach(() => {
+    useAgentStore.setState({ agentsLoaded: false, profilesLoaded: false })
+  })
+
+  it('둘 다 못 받음 → 빈 목록 안내도 트리도 없다(라벨만)', () => {
+    render(<AgentList />)
+    expect(screen.queryByText(/에이전트 없음/)).toBeNull()
+    expect(document.querySelector('[data-testid="agent-tree"]')).toBeNull()
+    expect(document.querySelector('[data-slot-label="agent-list"]')).toBeTruthy()
+  })
+
+  it('명부만 빈 채로 받음(프로필 대기) → 아직 빈 목록 안내를 그리지 않는다', () => {
+    render(<AgentList />)
+    act(() => useAgentStore.getState().setAgents([]))
+    expect(screen.queryByText(/에이전트 없음/)).toBeNull()
+  })
+
+  it('프로필만 받음(명부 대기) → 예약 행을 먼저 그리지 않는다', () => {
+    render(<AgentList />)
+    act(() => useAgentStore.getState().setProfiles([profile('p1', 'C:/r')]))
+    expect(document.querySelector('[data-agent-row="p1"]')).toBeNull()
+  })
+
+  it('둘 다 빈 채로 받음 → 그때 빈 목록 안내', () => {
+    render(<AgentList />)
+    act(() => {
+      useAgentStore.getState().setAgents([])
+      useAgentStore.getState().setProfiles([])
+    })
+    expect(screen.getByText(/에이전트 없음/)).toBeTruthy()
+  })
+
+  it('둘 다 받음 + 비지 않음 → 트리 행, 빈 목록 안내는 끝내 나오지 않는다', () => {
+    render(<AgentList />)
+    act(() => {
+      useAgentStore.getState().setAgents([agent('a1', 'C:/w')])
+      useAgentStore.getState().setProfiles([profile('p1', 'C:/r')])
+    })
+    const tree = document.querySelector('[data-testid="agent-tree"]')
+    expect(tree?.querySelector('[data-agent-row="a1"]')).toBeTruthy()
+    expect(tree?.querySelector('[data-agent-row="p1"]')).toBeTruthy()
+    expect(screen.queryByText(/에이전트 없음/)).toBeNull()
   })
 })
 
@@ -468,6 +518,41 @@ describe('행 우클릭 메뉴', () => {
     // 시드된 draft = 현재 표시명('고정명').
     fireEvent.keyDown(document.querySelector('[data-agent-row="p2"]') as HTMLElement, { key: 'Enter' })
     expect(clientMock.renameProfile).not.toHaveBeenCalled()
+  })
+
+  // Tauri `drag.js` 는 창 끌 자리 누름의 기본 동작(포커스 옮김)을 막는다. 그 흉내 = 먼저 건 document 거품 단계 듣는 쪽 — 뒤
+  //   듣기도 끊는다(jsdom 은 누름으로 포커스를 옮기지 않으니 기본 동작 쪽은 이미 같다).
+  it('이름변경 중 창 끌 자리(제목 줄) 누름 → 포커스 잃음과 같이 확정한다 · 끌 자리 밖 누름은 편집을 둔다', () => {
+    const grab = document.createElement('div')
+    grab.setAttribute('data-tauri-drag-region', '')
+    document.body.appendChild(grab)
+    const dragJs = (e: MouseEvent) => {
+      if (e.target !== grab) return
+      e.preventDefault()
+      e.stopImmediatePropagation()
+    }
+    document.addEventListener('mousedown', dragJs)
+    try {
+      useAgentStore.setState({ profiles: [profile('p1', 'C:/r')] })
+      render(<AgentList />)
+      fireEvent.contextMenu(document.querySelector('[data-agent-row="p1"]') as HTMLElement)
+      fireEvent.click(screen.getByText('이름 변경'))
+      const input = () => document.querySelector('[data-agent-rename-input="p1"]') as HTMLInputElement
+      expect(document.activeElement).toBe(input())
+      // 가상 목록이 입력 칸을 다시 붙일 수 있어 칸은 그때마다 새로 찾는다.
+      fireEvent.change(input(), { target: { value: '  새이름  ' } })
+
+      fireEvent.mouseDown(document.body)
+      expect(document.activeElement).toBe(input())
+      expect(clientMock.renameProfile).not.toHaveBeenCalled()
+
+      fireEvent.mouseDown(grab)
+      expect(clientMock.renameProfile).toHaveBeenCalledWith('p1', '새이름')
+      expect(document.querySelector('[data-agent-rename-input="p1"]')).toBeNull()
+    } finally {
+      document.removeEventListener('mousedown', dragJs)
+      grab.remove()
+    }
   })
 })
 

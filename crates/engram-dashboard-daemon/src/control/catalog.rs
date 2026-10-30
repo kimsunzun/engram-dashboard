@@ -497,12 +497,17 @@ mod tests {
         fn decls(&self) -> Vec<CommandDecl> {
             vec![decl(self.0, "{}")]
         }
+
+        fn agent_roster(&self) -> Vec<engram_dashboard_agent::commands::AgentRosterRow> {
+            Vec::new()
+        }
     }
 
     fn decl(name: &str, help: &str) -> CommandDecl {
         CommandDecl {
             name: name.to_string(),
             help: help.to_string(),
+            agent_args: Vec::new(),
         }
     }
 
@@ -706,6 +711,9 @@ mod tests {
                 None
             }
             fn decls(&self) -> Vec<CommandDecl> {
+                Vec::new()
+            }
+            fn agent_roster(&self) -> Vec<engram_dashboard_agent::commands::AgentRosterRow> {
                 Vec::new()
             }
         }

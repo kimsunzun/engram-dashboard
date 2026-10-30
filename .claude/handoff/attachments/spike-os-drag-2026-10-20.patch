@@ -1,0 +1,513 @@
+diff --git a/crates/engram-dashboard-platform/src/input.rs b/crates/engram-dashboard-platform/src/input.rs
+index 0b762cf0..f5421d85 100644
+--- a/crates/engram-dashboard-platform/src/input.rs
++++ b/crates/engram-dashboard-platform/src/input.rs
+@@ -79,3 +79,18 @@ mod tests {
+         );
+     }
+ }
++
++/// SPIKE (throwaway): async key state of a virtual key (e.g. 0x1B Esc, 0x01 LBUTTON).
++pub fn spike_key_down(vk: i32) -> bool {
++    #[cfg(windows)]
++    {
++        use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
++        // SAFETY: value-only query.
++        unsafe { (GetAsyncKeyState(vk) as u16 & 0x8000) != 0 }
++    }
++    #[cfg(not(windows))]
++    {
++        let _ = vk;
++        false
++    }
++}
+diff --git a/src-tauri/capabilities/default.json b/src-tauri/capabilities/default.json
+index b3e44ac0..e7455d05 100644
+--- a/src-tauri/capabilities/default.json
++++ b/src-tauri/capabilities/default.json
+@@ -6,6 +6,11 @@
+   "permissions": [
+     "core:default",
+     "core:event:default",
++    "core:window:allow-set-focus",
++    "core:window:allow-set-position",
++    "core:window:allow-set-size",
++    "core:window:allow-start-dragging",
++    "core:window:allow-set-always-on-top",
+     "dialog:allow-open"
+   ]
+ }
+diff --git a/src-tauri/capabilities/popup.json b/src-tauri/capabilities/popup.json
+index 3e96ca51..ef02c098 100644
+--- a/src-tauri/capabilities/popup.json
++++ b/src-tauri/capabilities/popup.json
+@@ -6,6 +6,11 @@
+   "permissions": [
+     "core:default",
+     "core:event:default",
++    "core:window:allow-set-focus",
++    "core:window:allow-set-position",
++    "core:window:allow-set-size",
++    "core:window:allow-start-dragging",
++    "core:window:allow-set-always-on-top",
+     "core:window:allow-close",
+     "dialog:allow-open"
+   ]
+diff --git a/src-tauri/gen/schemas/capabilities.json b/src-tauri/gen/schemas/capabilities.json
+index c62b2ebd..5c511b20 100644
+--- a/src-tauri/gen/schemas/capabilities.json
++++ b/src-tauri/gen/schemas/capabilities.json
+@@ -1 +1 @@
+-{"default":{"identifier":"default","description":"Engram Dashboard 기본 권한 — core 이벤트 listen/emit 허용(agent-list-updated 등 상태 브로드캐스트 수신에 필요).","local":true,"windows":["main"],"permissions":["core:default","core:event:default","dialog:allow-open"]},"dock-overlay":{"identifier":"dock-overlay","description":"슬롯 도킹의 안내 창(dock-overlay — TRD S21-slot-docking §2-5)의 권한 — 셸이 미는 그림 내용(dock:overlay)을 듣기만 한다. 창을 닫거나 옮기는 것은 셸 몫이라 core:window 권한을 주지 않는다. 듣기를 걷을 수 있게 unlisten 을 함께 준다.","local":true,"windows":["dock-overlay"],"permissions":["core:event:allow-listen","core:event:allow-unlisten"]},"popup":{"identifier":"popup","description":"슬롯 팝업 분리(pop-out)로 런타임 생성되는 창(slot-popup-*)의 권한 — 메인 창과 동일한 IPC 표면(subscribe_output/request_replay/forward_daemon_command/layout 조회)을 쓸 수 있어야 자기 View 를 구독·렌더한다. core:default(invoke/window) + core:event:default(layout:updated 등 emit listen) + core:window:allow-close(PopoutPage가 자기 View가 닫힐 때 view:closed 이벤트 수신 후 getCurrentWindow().close()로 자기 창을 닫는 self-close 동작 및 §5 LLM/프로그래밍 방식 팝업 닫기에 필요). dialog:allow-open — PresetPalette variant 는 팝업 슬롯에도 배치될 수 있어(set_slot_content) 우클릭 '추가' 폴더 픽커가 팝업 창에서도 동작해야 한다(최소 권한: open 만). 사용량 슬롯 링크의 opener 권한은 usage-links.json 이 main 과 함께 이 창들에도 준다.","local":true,"windows":["slot-popup-*"],"permissions":["core:default","core:event:default","core:window:allow-close","dialog:allow-open"]},"usage-links":{"identifier":"usage-links","description":"사용량 슬롯의 「사용량 페이지 ↗」 링크 — opener:allow-open-url 을 두 주소(Claude·Codex 사용량 설정 페이지)로만 좁힌다(TRD S21 usage-limit-slot §1-7). 창은 main 과 팝아웃(slot-popup-*) — 슬롯을 담는 창은 그 둘뿐이다. 두 주소 목록은 이 파일 하나에만 둔다(default.json·popup.json 에 opener 권한을 따로 두지 않는다).","local":true,"windows":["main","slot-popup-*"],"permissions":[{"identifier":"opener:allow-open-url","allow":[{"url":"https://claude.ai/settings/usage"},{"url":"https://chatgpt.com/codex/settings/usage"}]}]}}
+\ No newline at end of file
++{"default":{"identifier":"default","description":"Engram Dashboard 기본 권한 — core 이벤트 listen/emit 허용(agent-list-updated 등 상태 브로드캐스트 수신에 필요).","local":true,"windows":["main"],"permissions":["core:default","core:event:default","core:window:allow-set-focus","core:window:allow-set-position","core:window:allow-set-size","core:window:allow-start-dragging","core:window:allow-set-always-on-top","dialog:allow-open"]},"dock-overlay":{"identifier":"dock-overlay","description":"슬롯 도킹의 안내 창(dock-overlay — TRD S21-slot-docking §2-5)의 권한 — 셸이 미는 그림 내용(dock:overlay)을 듣기만 한다. 창을 닫거나 옮기는 것은 셸 몫이라 core:window 권한을 주지 않는다. 듣기를 걷을 수 있게 unlisten 을 함께 준다.","local":true,"windows":["dock-overlay"],"permissions":["core:event:allow-listen","core:event:allow-unlisten"]},"popup":{"identifier":"popup","description":"슬롯 팝업 분리(pop-out)로 런타임 생성되는 창(slot-popup-*)의 권한 — 메인 창과 동일한 IPC 표면(subscribe_output/request_replay/forward_daemon_command/layout 조회)을 쓸 수 있어야 자기 View 를 구독·렌더한다. core:default(invoke/window) + core:event:default(layout:updated 등 emit listen) + core:window:allow-close(PopoutPage가 자기 View가 닫힐 때 view:closed 이벤트 수신 후 getCurrentWindow().close()로 자기 창을 닫는 self-close 동작 및 §5 LLM/프로그래밍 방식 팝업 닫기에 필요). dialog:allow-open — PresetPalette variant 는 팝업 슬롯에도 배치될 수 있어(set_slot_content) 우클릭 '추가' 폴더 픽커가 팝업 창에서도 동작해야 한다(최소 권한: open 만). 사용량 슬롯 링크의 opener 권한은 usage-links.json 이 main 과 함께 이 창들에도 준다.","local":true,"windows":["slot-popup-*"],"permissions":["core:default","core:event:default","core:window:allow-set-focus","core:window:allow-set-position","core:window:allow-set-size","core:window:allow-start-dragging","core:window:allow-set-always-on-top","core:window:allow-close","dialog:allow-open"]},"usage-links":{"identifier":"usage-links","description":"사용량 슬롯의 「사용량 페이지 ↗」 링크 — opener:allow-open-url 을 두 주소(Claude·Codex 사용량 설정 페이지)로만 좁힌다(TRD S21 usage-limit-slot §1-7). 창은 main 과 팝아웃(slot-popup-*) — 슬롯을 담는 창은 그 둘뿐이다. 두 주소 목록은 이 파일 하나에만 둔다(default.json·popup.json 에 opener 권한을 따로 두지 않는다).","local":true,"windows":["main","slot-popup-*"],"permissions":[{"identifier":"opener:allow-open-url","allow":[{"url":"https://claude.ai/settings/usage"},{"url":"https://chatgpt.com/codex/settings/usage"}]}]}}
+\ No newline at end of file
+diff --git a/src-tauri/src/commands/mod.rs b/src-tauri/src/commands/mod.rs
+index cb92b48f..5d8a9b21 100644
+--- a/src-tauri/src/commands/mod.rs
++++ b/src-tauri/src/commands/mod.rs
+@@ -9,6 +9,7 @@ pub mod drag_window;
+ pub mod layout;
+ pub mod popout;
+ pub mod settings;
++pub mod spike;
+ pub mod state;
+ pub mod tray;
+ pub mod usage;
+diff --git a/src-tauri/src/commands/spike.rs b/src-tauri/src/commands/spike.rs
+new file mode 100644
+index 00000000..d673139a
+--- /dev/null
++++ b/src-tauri/src/commands/spike.rs
+@@ -0,0 +1,30 @@
++// SPIKE (throwaway, OS-drag measurement 2026-10-20): read cursor + key state right after an HTML5 dragend.
++use engram_dashboard_platform::input;
++
++#[derive(serde::Serialize)]
++pub struct SpikeInputState {
++    pub t: f64,
++    pub x: i32,
++    pub y: i32,
++    pub lbutton: bool,
++    pub rbutton: bool,
++    pub esc: bool,
++    pub t_end: f64,
++}
++
++fn now_ms() -> f64 {
++    std::time::SystemTime::now()
++        .duration_since(std::time::UNIX_EPOCH)
++        .map(|d| d.as_secs_f64() * 1000.0)
++        .unwrap_or(0.0)
++}
++
++#[tauri::command]
++pub fn spike_input_state() -> SpikeInputState {
++    let t = now_ms();
++    let p = input::cursor_pos().unwrap_or_default();
++    let lbutton = input::spike_key_down(0x01);
++    let rbutton = input::spike_key_down(0x02);
++    let esc = input::spike_key_down(0x1B);
++    SpikeInputState { t, x: p.x, y: p.y, lbutton, rbutton, esc, t_end: now_ms() }
++}
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index 9f0b11a8..8effe372 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -467,6 +467,7 @@ pub fn run() {
+             commands::subscribe_output,
+             commands::request_replay,
+             commands::move_slot_to_window,
++            commands::spike::spike_input_state,
+         ])
+         .build(tauri::generate_context!())
+         .expect("error while building tauri application")
+diff --git a/src/components/layout/TabBar.tsx b/src/components/layout/TabBar.tsx
+index ebf0f5aa..712050c2 100644
+--- a/src/components/layout/TabBar.tsx
++++ b/src/components/layout/TabBar.tsx
+@@ -28,6 +28,7 @@ import { TAB_MIN_ACTIVE_W, TAB_STANDARD_W } from './tabStrip/layout'
+ import { measureStrip, stripBounds } from './tabStrip/measure'
+ import { EASE_OUT_CSS } from './tabStrip/reorderGeometry'
+ import { useTabDrag } from './tabStrip/useTabDrag'
++import { spikeDragStart } from '../../spikeOsDrag'
+ 
+ interface TabBarProps {
+   /** 이 탭바가 속한 창 label(main·slot-popup-N). */
+@@ -196,6 +197,8 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
+               data-testid="tab"
+               data-view-id={id}
+               data-active={isActive ? 'true' : 'false'}
++              draggable={!editing}
++              onDragStart={e => spikeDragStart(e, id, tab.name, label, tabs.length)}
+               // 누르는 순간 활성(TRD §2-2) — 훅이 누르기 전 활성(`initial_active`)을 먼저 적게 전환은 그 뒤에 부른다.
+               //   편집 중인 머리의 누름은 끌기 후보가 아니고, 덮인 이웃 자리의 누름은 편집을 확정하고 그 이웃으로 전환만 한다.
+               onPointerDown={e => {
+@@ -207,7 +210,8 @@ export default function TabBar({ label, tabs, active, onSwitch, onCreate, onClos
+                   activate(under, e.button)
+                   return
+                 }
+-                onPointerDown(e, id)
++                // SPIKE: OS drag replaces the pointer-capture drag hook
++                void onPointerDown
+                 activate(id, e.button)
+               }}
+               // 머리 어디든(이름 칸 폭이 0 인 좁은 활성 머리 포함) — 닫기 버튼 위는 그 버튼이 닫지 않는 클릭일 때만.
+diff --git a/src/main.tsx b/src/main.tsx
+index 162f7da1..0c439d1f 100644
+--- a/src/main.tsx
++++ b/src/main.tsx
+@@ -7,6 +7,8 @@ import { useAgentStore } from "./store/agentStore";
+ import { themeManager } from "./theme/ThemeManager";
+ import { settingsClient } from "./api/settingsClient";
+ import { installChatStyleApplier } from "./store/chatStyleStore";
++import { installSpike } from "./spikeOsDrag";
++installSpike();
+ 
+ // ADR-0265: 셸 설정을 받아 챗 스타일을 칠한다 — 데몬 bootstrap 과 무관하게(설정의 주인은 셸) 첫 렌더 전에 건다.
+ // 값은 비동기로 오고 그 전의 첫 페인트는 `theme.css` 의 `--chat-*` fallback 이다(TRD S21-storage §10 F6 (a)).
+diff --git a/src/spikeOsDrag.ts b/src/spikeOsDrag.ts
+new file mode 100644
+index 00000000..d1acefda
+--- /dev/null
++++ b/src/spikeOsDrag.ts
+@@ -0,0 +1,339 @@
++// SPIKE (throwaway — OS/HTML5 tab drag measurement 2026-10-20). Not production code.
++// Installs document-level listeners that LOG every drag event (+ timing), accept our custom MIME, and draw a
++// preview overlay (tab-strip insertion marker / 10% dock band rectangle) from the target window's own dragover.
++// Collected via CDP: window.__SPK.pull().
++import { invoke } from '@tauri-apps/api/core'
++
++export const MIME = 'application/x-engram-tab'
++
++type Entry = Record<string, unknown>
++const now = (): number => Math.round((performance.timeOrigin + performance.now()) * 100) / 100
++
++interface Spk {
++  log: Entry[]
++  cfg: { singleTabMoveWindow: boolean; overlay: boolean; dragImage: 'label' | 'none' | 'element' }
++  pull: () => Entry[]
++  clear: () => void
++  frames: number[]
++}
++
++const spk: Spk = {
++  log: [],
++  cfg: { singleTabMoveWindow: false, overlay: true, dragImage: 'label' },
++  pull() {
++    const out = spk.log
++    spk.log = []
++    return out
++  },
++  clear() {
++    spk.log = []
++    spk.frames = []
++  },
++  frames: [],
++}
++
++function push(e: Entry): void {
++  if (spk.log.length > 50000) spk.log.shift()
++  spk.log.push(e)
++}
++
++function tgtOf(t: EventTarget | null): string {
++  if (!(t instanceof Element)) return String(t)
++  const slot = t.closest('[data-slot-id]')
++  const tid = t.closest('[data-testid]')
++  const parts: string[] = []
++  if (tid) parts.push(tid.getAttribute('data-testid') ?? '')
++  const v = t.closest('[data-view-id]')
++  if (v) parts.push('v=' + v.getAttribute('data-view-id'))
++  if (slot) parts.push('slot=' + slot.getAttribute('data-slot-id'))
++  return parts.join('|')
++}
++
++function base(ev: string, e: DragEvent | MouseEvent): Entry {
++  const dt = (e as DragEvent).dataTransfer ?? null
++  return {
++    t: now(),
++    ev,
++    x: Math.round(e.clientX * 10) / 10,
++    y: Math.round(e.clientY * 10) / 10,
++    sx: e.screenX,
++    sy: e.screenY,
++    btn: e.buttons,
++    tgt: tgtOf(e.target),
++    types: dt ? Array.from(dt.types) : undefined,
++    de: dt ? dt.dropEffect : undefined,
++    ea: dt ? dt.effectAllowed : undefined,
++  }
++}
++
++// ---------- overlay ----------
++let overlay: HTMLDivElement | null = null
++let marker: HTMLDivElement | null = null
++function ensureOverlay(): void {
++  if (overlay) return
++  overlay = document.createElement('div')
++  overlay.style.cssText =
++    'position:fixed;pointer-events:none;z-index:99999;background:rgba(80,140,255,0.25);border:2px solid rgba(80,140,255,0.9);display:none;box-sizing:border-box'
++  marker = document.createElement('div')
++  marker.style.cssText =
++    'position:fixed;pointer-events:none;z-index:99999;background:#4a8cff;width:2px;display:none'
++  document.body.appendChild(overlay)
++  document.body.appendChild(marker)
++}
++function hide(): void {
++  if (overlay) overlay.style.display = 'none'
++  if (marker) marker.style.display = 'none'
++}
++
++interface Zone {
++  kind: 'strip' | 'band' | 'center' | 'other'
++  index?: number
++  side?: string
++  slot?: string
++  rect?: [number, number, number, number]
++}
++
++function zoneAt(e: DragEvent): Zone {
++  const t = e.target instanceof Element ? e.target : null
++  if (t === null) return { kind: 'other' }
++  const row = t.closest('[data-testid="tab-bar"]')?.querySelector('[data-testid="tab-strip-row"]') ?? null
++  if (row) {
++    const heads = Array.from(row.querySelectorAll('[data-testid="tab"]')) as HTMLElement[]
++    const rs = heads.map(h => h.getBoundingClientRect()).sort((a, b) => a.left - b.left)
++    let index = rs.length
++    for (let i = 0; i < rs.length; i++) {
++      if (e.clientX < rs[i].left + rs[i].width / 2) {
++        index = i
++        break
++      }
++    }
++    const rr = row.getBoundingClientRect()
++    const x = index < rs.length ? rs[index].left : rs.length ? rs[rs.length - 1].right : rr.left
++    return { kind: 'strip', index, rect: [x, rr.top, 2, rr.height] }
++  }
++  const slot = t.closest('[data-slot-id]') as HTMLElement | null
++  if (slot) {
++    const r = slot.getBoundingClientRect()
++    const fx = (e.clientX - r.left) / r.width
++    const fy = (e.clientY - r.top) / r.height
++    const id = slot.getAttribute('data-slot-id') ?? ''
++    const B = 0.1
++    let side: string | null = null
++    if (fx < B) side = 'left'
++    else if (fx > 1 - B) side = 'right'
++    else if (fy < B) side = 'top'
++    else if (fy > 1 - B) side = 'bottom'
++    if (side === null) return { kind: 'center', slot: id }
++    // preview = half of the slot on that side (cap) — spike only
++    const rect: [number, number, number, number] =
++      side === 'left'
++        ? [r.left, r.top, r.width / 2, r.height]
++        : side === 'right'
++          ? [r.left + r.width / 2, r.top, r.width / 2, r.height]
++          : side === 'top'
++            ? [r.left, r.top, r.width, r.height / 2]
++            : [r.left, r.top + r.height / 2, r.width, r.height / 2]
++    return { kind: 'band', side, slot: id, rect }
++  }
++  return { kind: 'other' }
++}
++
++function draw(z: Zone): void {
++  if (!spk.cfg.overlay) return
++  ensureOverlay()
++  if (z.kind === 'strip' && z.rect && marker) {
++    if (overlay) overlay.style.display = 'none'
++    marker.style.display = 'block'
++    marker.style.left = z.rect[0] - 1 + 'px'
++    marker.style.top = z.rect[1] + 'px'
++    marker.style.height = z.rect[3] + 'px'
++  } else if (z.kind === 'band' && z.rect && overlay) {
++    if (marker) marker.style.display = 'none'
++    overlay.style.display = 'block'
++    overlay.style.left = z.rect[0] + 'px'
++    overlay.style.top = z.rect[1] + 'px'
++    overlay.style.width = z.rect[2] + 'px'
++    overlay.style.height = z.rect[3] + 'px'
++  } else hide()
++}
++
++// ---------- rAF frame monitor during a drag (this window) ----------
++let rafOn = false
++let lastFrame = 0
++function frameLoop(ts: number): void {
++  if (!rafOn) return
++  if (lastFrame) spk.frames.push(Math.round((ts - lastFrame) * 10) / 10)
++  lastFrame = ts
++  requestAnimationFrame(frameLoop)
++}
++function startFrames(): void {
++  if (rafOn) return
++  rafOn = true
++  lastFrame = 0
++  requestAnimationFrame(frameLoop)
++}
++function stopFrames(): void {
++  rafOn = false
++}
++
++function ours(e: DragEvent): boolean {
++  return !!e.dataTransfer && Array.from(e.dataTransfer.types).includes(MIME)
++}
++
++let lastZoneKey = ''
++
++export function installSpike(): void {
++  ;(window as unknown as { __SPK: Spk }).__SPK = spk
++  push({ t: now(), ev: 'install', href: location.href })
++
++  // source-side start (from TabBar)
++  document.addEventListener(
++    'dragenter',
++    e => {
++      const zz = ours(e) ? zoneAt(e) : undefined
++      push({ ...base('dragenter', e), rt: tgtOf(e.relatedTarget), zone: zz?.kind })
++      if (ours(e)) {
++        e.preventDefault()
++        e.dataTransfer!.dropEffect = 'move'
++        startFrames()
++      }
++    },
++    true,
++  )
++  document.addEventListener(
++    'dragover',
++    e => {
++      const h0 = performance.now()
++      if (ours(e)) {
++        e.preventDefault()
++        e.dataTransfer!.dropEffect = 'move'
++        const z = zoneAt(e)
++        draw(z)
++        const key = `${z.kind}:${z.index ?? ''}:${z.side ?? ''}:${z.slot ?? ''}`
++        const changed = key !== lastZoneKey
++        lastZoneKey = key
++        push({ ...base('dragover', e), zone: z.kind, idx: z.index, side: z.side, slot: z.slot, zc: changed ? 1 : 0, hms: Math.round((performance.now() - h0) * 100) / 100 })
++      } else {
++        push({ ...base('dragover', e) })
++      }
++    },
++    true,
++  )
++  document.addEventListener(
++    'dragleave',
++    e => {
++      push({ ...base('dragleave', e), rt: tgtOf(e.relatedTarget) })
++      // leaving the document (relatedTarget null) — hide preview
++      if (e.relatedTarget === null) {
++        hide()
++        lastZoneKey = ''
++      }
++    },
++    true,
++  )
++  document.addEventListener(
++    'drop',
++    e => {
++      const dt = e.dataTransfer
++      const z = ours(e) ? zoneAt(e) : undefined
++      const entry: Entry = {
++        ...base('drop', e),
++        zone: z?.kind,
++        idx: z?.index,
++        side: z?.side,
++        slot: z?.slot,
++        data: dt ? dt.getData(MIME) : undefined,
++        plain: dt ? dt.getData('text/plain') : undefined,
++        uri: dt ? dt.getData('text/uri-list') : undefined,
++        html: dt ? dt.getData('text/html') : undefined,
++        files: dt ? dt.files.length : undefined,
++        items: dt ? Array.from(dt.items).map(i => `${i.kind}:${i.type}`) : undefined,
++      }
++      push(entry)
++      if (ours(e)) e.preventDefault()
++      hide()
++      lastZoneKey = ''
++      stopFrames()
++    },
++    true,
++  )
++  // source side
++  let dragN = 0
++  document.addEventListener(
++    'drag',
++    e => {
++      dragN++
++      // log every drag event (rate) but compact
++      push({ t: now(), ev: 'drag', x: e.clientX, y: e.clientY, sx: e.screenX, sy: e.screenY })
++    },
++    true,
++  )
++  document.addEventListener(
++    'dragend',
++    e => {
++      const tEnd = now()
++      const entry = { ...base('dragend', e), dragN }
++      dragN = 0
++      push(entry)
++      hide()
++      lastZoneKey = ''
++      stopFrames()
++      const t0 = now()
++      invoke<Record<string, unknown>>('spike_input_state')
++        .then(r => push({ ev: 'shellstate', tReq: t0, tEnd, ...r, tJs: now() }))
++        .catch(err => push({ t: now(), ev: 'shellstate-err', err: String(err) }))
++      setTimeout(() => {
++        const t1 = now()
++        invoke<Record<string, unknown>>('spike_input_state')
++          .then(r => push({ ev: 'shellstate30', tReq: t1, ...r, tJs: now() }))
++          .catch(() => {})
++      }, 30)
++    },
++    true,
++  )
++  for (const ev of ['pointerdown', 'pointerup', 'click', 'dblclick', 'mousedown'] as const) {
++    document.addEventListener(
++      ev,
++      e => {
++        const t = e.target instanceof Element ? e.target : null
++        if (t && t.closest('[data-testid="tab-bar"]')) push(base(ev, e as MouseEvent))
++      },
++      true,
++    )
++  }
++  window.addEventListener('keydown', e => push({ t: now(), ev: 'keydown', key: e.key }), true)
++  window.addEventListener('blur', () => push({ t: now(), ev: 'winblur' }))
++  window.addEventListener('focus', () => push({ t: now(), ev: 'winfocus' }))
++  window.addEventListener('beforeunload', () => push({ t: now(), ev: 'beforeunload' }))
++}
++
++/** Called from TabBar's head onDragStart. */
++export function spikeDragStart(e: React.DragEvent, view: string, name: string, label: string, tabCount: number): void {
++  const dt = e.dataTransfer
++  push({ ...base('dragstart', e.nativeEvent), view, label, tabCount })
++  if (spk.cfg.singleTabMoveWindow && tabCount === 1) {
++    e.preventDefault()
++    push({ t: now(), ev: 'startDragging-request' })
++    import('@tauri-apps/api/window').then(({ getCurrentWindow }) =>
++      getCurrentWindow()
++        .startDragging()
++        .then(() => push({ t: now(), ev: 'startDragging-resolved' }))
++        .catch(err => push({ t: now(), ev: 'startDragging-err', err: String(err) })),
++    )
++    return
++  }
++  dt.setData(MIME, JSON.stringify({ view, label }))
++  dt.effectAllowed = 'move'
++  if (spk.cfg.dragImage === 'label') {
++    // VS Code style: a small label element, appended, used as drag image, removed next tick
++    const el = document.createElement('div')
++    el.textContent = name || view
++    el.style.cssText =
++      'position:absolute;top:-1000px;left:-1000px;padding:4px 10px;font:12px var(--font-ui, sans-serif);background:var(--bg-secondary,#222);color:var(--text,#ddd);border:1px solid var(--border,#555);border-radius:4px;white-space:nowrap'
++    document.body.appendChild(el)
++    const r = el.getBoundingClientRect()
++    dt.setDragImage(el, -10, -10)
++    push({ t: now(), ev: 'dragimage', w: r.width, h: r.height, dpr: window.devicePixelRatio })
++    setTimeout(() => el.remove(), 0)
++  }
++}

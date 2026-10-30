@@ -1,14 +1,15 @@
 //! mailbox — 인메모리 파킹 저장소(spec §5 · ADR-0103 결정 5 · ADR-0104 idle 게이트 · **ADR-0111/0114**).
 //!
-//! ★역할★: 수신자별(이름 기반) FIFO 큐로 **아직 주입 못 한 메시지**를 잡아 둔다. 파킹 사유는 **셋**이다:
+//! ★역할★: 수신자별 FIFO 큐로 **아직 주입 못 한 메시지**를 잡아 둔다. 큐 키 = 수신자 **에이전트 id**
+//!   (ADR-0309 — 이름은 입구에서 id 로 바뀌고 여기엔 오지 않는다). 파킹 사유는 **셋**이다:
 //!     ① busy 계열 — 수신자가 턴 진행 중이거나 선행 파킹분 뒤에 FIFO 로 합류. idle 진입 때 일괄 flush.
 //!     ② 주입(write) 실패 — 그 순간 도달 불가. 다음 flush 계기(idle 진입·재등장)까지 대기.
-//!     ③ **잠듦** — 프로세스는 닫혔지만 **프로필이 실재하는**(복원 가능한) 이름. flush 계기 = 재등장
+//!     ③ **잠듦** — 프로세스는 닫혔지만 **프로필이 실재하는**(복원 가능한) 에이전트. flush 계기 = 재등장
 //!        (스폰/복원/epoch — 기존 로스터 diff 기계 재사용).
 //!   등장(스폰/epoch)·idle 진입 시 상위 서비스가 `drain` 으로 큐를 통째 비워 오래된 순으로 일괄 주입한다.
 //!   ★**여전히 들어오지 않는 부류**(ADR-0116 결정 1 — 3분기)★: **어디에도 없는 이름**(로스터·프로필 둘 다에
 //!   없다 — 오타·미스폰·삭제됨)은 `RECIPIENT_NOT_FOUND` 실패 행이고, **동명 다수**는 어느 층에서든
-//!   `RECIPIENT_AMBIGUOUS` 실패 행이다(이름 키 파킹은 "먼저 복원된 쪽이 조용히 받는" 구멍이 된다).
+//!   `RECIPIENT_AMBIGUOUS` 실패 행이다(이름으로는 받는 이를 하나로 고를 수 없다).
 //!   이 둘을 파킹으로 되돌리면 ADR-0116 위반이다.
 //!   ★**턴 신호 없는 산 세션은 파킹 부류가 아니다 — 배달 부류다**(ADR-0116 결정 7)★: 게이트 없이 즉시
 //!   주입되므로 busy 파킹이 없고, 그 부류가 이 큐에 들어오는 유일한 경로는 ②(주입 실패)다.
@@ -34,8 +35,8 @@
 //!     (실측 시나리오·불변식 증명은 `MAILBOX_CAP` 주석.)
 //!   - **TTL = 24h** — 초과 항목은 `sweep_expired` 가 걷어내 상위가 장부에 `expired` 로 남긴다(ADR-0105).
 //!   - **순수 + 주입 시계** — 만료 판정은 `park` 시각과 인자 `now` 의 차로만 한다(모듈 헤더 순수성 불변식).
-//!   - **incarnation 결박(`bound_incarnation`)은 폐지됐다(ADR-0111 결정 6)** — 파킹분은 **같은 이름의 새
-//!     화신(epoch)에게도 배달**된다(개인 편지와 동일 규칙). 그래서 이 저장소엔 결박 축도, 그 축을 보는
+//!   - **incarnation 결박(`bound_incarnation`)은 폐지됐다(ADR-0111 결정 6)** — 파킹분은 **같은 에이전트(같은
+//!     id)의 새 화신(epoch)에게도 배달**된다(개인 편지와 동일 규칙 — ADR-0309 결정 1). 그래서 이 저장소엔 결박 축도, 그 축을 보는
 //!     가시성 필터(`visible_to`)도, 생사 스냅샷 인자도 없다. "그룹 방송은 발송 순간 화신에게만" 이 다시
 //!     필요해지면 v2 개인 메일 옵션으로 무파괴 추가한다(spec §8) — 그룹 전용 규칙으로 되살리기 금지.
 //!   - **순서 = 적재 순서(ADR-0125 — 7차)** — 발송은 예외 없이 큐 꼬리에 적재되고(직발송 지름길 없음),
@@ -145,23 +146,6 @@ pub struct ParkedMessage {
     ///   **같은 값**이 돼 순서가 결정 불가다. 순번은 저장소 안에서 락 보유 중 부여되므로 두 문제 모두 없다 —
     ///   그래서 `restore_ordered` 의 merge 키는 순번이고, 큐는 항상 순번 강한 증가다.
     pub admission_seq: u64,
-    /// ★해석된 수신자 id 힌트(있을 때만 — C2 리뷰 fix 2)★: 이 메시지를 park 할 때 발송이 **구체적인 산
-    ///   수신자를 이미 해석했다면** 그 PeerId. busy 대기·주입 실패 파킹은 **항상** 값이 있고, 데몬
-    ///   통지(notice)는 요청 발신자 id 를 싣는다.
-    /// ★**잠듦 파킹은 `None` 이다**(4차 — ADR-0116 결정 1)★: 그 순간 산 incarnation 이 없어 힌트로 실을 id 가
-    ///   존재하지 않는다. 그래서 그 항목은 **이름 큐로만** 열리고, 복원된 세션의 canonical 이름이 파킹 키와
-    ///   같아야 배달된다 — 잠듦 이름을 산 세션과 **같은 규칙으로** 파생하는 것이 load-bearing 인 이유다
-    ///   (spec §5 "프로필 쪽 이름 = 산 세션과 동일한 파생 규칙").
-    ///
-    /// ★왜 필요한가(이름-키 파킹의 사각지대)★: 파킹의 주소 단위는 **이름**이다(respawn 생존 —
-    ///   근거는 `ResolvedRecipient.key` 주석). 그런데 flush 는 "그 이름의 도달 후보가 **정확히 1개**" 일 때만 배달한다(동명
-    ///   다수는 보류). 여기서 구멍이 생긴다: exact-PeerId 로 지목한 발송은 동명 모호성을 **의도적으로
-    ///   통과**하는데(id 가 명시적 승자), 그 수신자가 turn 중이라 이름-키로 park 되면 동명이 둘인 동안
-    ///   flush 가 영영 보류돼 TTL 까지 blackhole 이 된다. 그래서 park 시점에 해석된 id 를 힌트로 함께
-    ///   보관해, flush 가 **그 id 가 아직 살아 있으면 이름 유일성과 무관하게** 그쪽으로 배달한다.
-    /// ★힌트는 권위가 아니라 우선순위다★: 그 id 가 죽었으면(재스폰 등) 무시하고 이름 규칙으로 되돌아간다
-    ///   — 그래서 "재스폰된 동명이 파킹을 이어받는다" 는 이름-키 설계가 그대로 유지된다.
-    pub hinted_id: Option<PeerId>,
 }
 
 impl ParkedMessage {
@@ -215,14 +199,14 @@ pub struct DrainOutcome {
 }
 
 /// ★왜 recipient 를 함께 돌려주나(load-bearing — 1 msg_id : N 배달기록, spec §4 · ADR-0104)★: 장부 레코드의
-///   키는 `(msg_id, recipient)` 다. 그룹 방송은 한 msg_id 에 수신자별 레코드가 **N개** 있으므로, 만료된
+///   키는 `(msg_id, 수신자 id)` 다. 그룹 방송은 한 msg_id 에 수신자별 레코드가 **N개** 있으므로, 만료된
 ///   항목이 어느 레코드인지 msg_id 만으로는 특정할 수 없다 — 상위가 msg_id 로 "첫 pending 레코드" 를 역조회
 ///   하면 **엉뚱한 멤버의 레코드**를 expired 로 전이할 수 있다(C1 시절 헬퍼의 위험, 그 앵커가 지목한 결함).
 ///   저장소는 항목이 어느 큐에 있었는지 아는 유일한 지점이라, 여기서 그 사실을 함께 실어 보낸다.
 #[derive(Debug, Clone)]
 pub struct ExpiredParked {
-    /// 이 항목이 있던 수신자 큐 키(= 장부 레코드의 `to`).
-    pub recipient: String,
+    /// 이 항목이 있던 수신자 큐 키(= 장부 레코드의 `to_id`).
+    pub recipient: PeerId,
     pub msg: ParkedMessage,
 }
 
@@ -278,15 +262,15 @@ impl FlightTicket {
     }
 }
 
-/// 수신자 이름(String, WYSIWYA — ADR-0101) → FIFO 큐 저장소.
+/// 수신자 에이전트 id → FIFO 큐 저장소.
+// ADR-0309 (결정 1 — 큐 키 = 에이전트 id)
 #[derive(Debug, Default)]
 pub struct Mailbox {
-    queues: HashMap<String, std::collections::VecDeque<ParkedMessage>>,
+    queues: HashMap<PeerId, std::collections::VecDeque<ParkedMessage>>,
     /// ★수신자별 in-flight 건수(F1)★ — 큐에서 나갔지만 아직 종점(배달/복원)이 확정되지 않은 몫.
-    in_flight: HashMap<String, FlightTicket>,
-    /// 다음 admission 순번(전 수신자 공유 단조 카운터 — `ParkedMessage.admission_seq` 부여자).
-    ///   수신자별이 아니라 저장소 전역인 이유: 한 이름 큐에 여러 타깃 몫이 섞여도(동명 다수) 순번 하나로
-    ///   전역 수용 순서를 표현할 수 있고, u64 라 실질적으로 소진되지 않는다.
+    in_flight: HashMap<PeerId, FlightTicket>,
+    /// 다음 admission 순번(전 수신자 공유 단조 카운터 — `ParkedMessage.admission_seq` 부여자). u64 라
+    ///   실질적으로 소진되지 않는다.
     next_seq: u64,
 }
 
@@ -337,17 +321,17 @@ impl Mailbox {
     ///   상한을 넘을 수 있다. 그래서 "1자리 확보" 가 아니라 **초과분 전체**를 계산해 한 번에 정리한다.
     pub fn park(
         &mut self,
-        recipient: &str,
+        recipient: PeerId,
         mut msg: ParkedMessage,
     ) -> Result<ParkAdmitted, ParkError> {
         let kind = msg.kind;
         // 필드가 서로 달라 queues 의 가변 대여와 공존한다(disjoint field borrow).
         let in_flight = self
             .in_flight
-            .get(recipient)
+            .get(&recipient)
             .map(|t| t.lane(kind))
             .unwrap_or(0);
-        let queue = self.queues.entry(recipient.to_string()).or_default();
+        let queue = self.queues.entry(recipient).or_default();
         let lane_len = queue.iter().filter(|m| m.kind == kind).count() + in_flight;
         let cap = match kind {
             ParkKind::Message => MAILBOX_CAP,
@@ -378,19 +362,19 @@ impl Mailbox {
     ///   알아야 한다. 압력 회수가 있던 시절엔 이 예측이 불가능했지만(회수 여부가 park 안에서 정해졌다),
     ///   회수가 폐지되면서 판정이 순수 산술이 됐다 — 그래서 예측과 실제가 **절대 갈리지 않는다**(같은 락
     ///   구간 안에서 부르는 한).
-    pub fn can_admit(&self, recipient: &str, kind: ParkKind) -> bool {
+    pub fn can_admit(&self, recipient: PeerId, kind: ParkKind) -> bool {
         let cap = match kind {
             ParkKind::Message => MAILBOX_CAP,
             ParkKind::Notice => return true,
         };
         let in_flight = self
             .in_flight
-            .get(recipient)
+            .get(&recipient)
             .map(|t| t.lane(kind))
             .unwrap_or(0);
         let queued = self
             .queues
-            .get(recipient)
+            .get(&recipient)
             .map(|q| q.iter().filter(|m| m.kind == kind).count())
             .unwrap_or(0);
         queued + in_flight < cap
@@ -417,12 +401,10 @@ impl Mailbox {
     ///   ★되돌아오는 배치를 줄이는 것도 그대로다★: flush 는 로스터를 손에 쥔 유일한 지점이라, 복원 **전에**
     ///   확정 사망 결박분(같은 PeerId 의 더 높은 epoch)을 걷어내고 장부에 `skipped` 를 찍는다(service.rs
     ///   `flush_for`) — 즉 되돌아오는 배치에는 증거 있는 사망분이 이미 빠져 있다.
-    /// ★왜 단순 FRONT 삽입이 아니라 merge 인가(전역 오래된 순 — round-4 finding 1)★: 한 flush 는 같은 이름
-    ///   큐에 대해 **재파킹을 여러 번** 부를 수 있다 — ① busy/도달불가 스킵분(락 안, 배치 시작 전) ② 타깃별
-    ///   inject 실패분(락 밖, 타깃마다 따로). 한 이름 큐에 동명 다수의 몫이 섞여 있으면(exact-id 발송 + 동명
-    ///   respawn) 이 호출들이 **각각** 앞쪽에 꽂히는데, 그러면 나중 호출이 앞선 호출보다 앞에 놓여 호출 간
-    ///   나이 순서가 **뒤집힌다**(예: A 몫 [m0,m2] 복원 → B 몫 [m1,m3] 복원 = [m1,m3,m0,m2]). 그래서 앞쪽
-    ///   삽입 대신 **admission 순번 기준 merge** 로 되꽂아, 몇 번을 부르든 큐가 항상 전역 수용 순서(오래된
+    /// ★왜 단순 FRONT 삽입이 아니라 merge 인가(전역 오래된 순 — round-4 finding 1)★: 복원 사이에 큐에 새
+    ///   항목이 들어올 수 있고, 같은 큐에 재파킹이 **여러 번** 불리면 앞쪽 삽입은 나중 호출을 앞선 호출보다
+    ///   앞에 놓아 호출 간 나이 순서가 **뒤집힌다**(예: [m0,m2] 복원 → [m1,m3] 복원 = [m1,m3,m0,m2]). 그래서
+    ///   앞쪽 삽입 대신 **admission 순번 기준 merge** 로 되꽂아, 몇 번을 부르든 큐가 항상 전역 수용 순서(오래된
     ///   순)를 유지하게 한다. 재파킹분은 신규 park 분보다 순번이 작으므로, 단일 호출·빈 큐 케이스에선
     ///   merge 결과가 옛 FRONT 삽입과 동일하다(동작 회귀 없음).
     /// ★왜 순서가 정확해야 하나(두 가지 손해)★: ① 수신자가 보는 배달 순서가 뒤집힌다(ADR-0104 "오래된 순
@@ -435,11 +417,11 @@ impl Mailbox {
     /// ★`parked_at`·순번 모두 원래 값 유지★: 호출자가 원본 ParkedMessage 를 그대로 넘긴다 — TTL 이 연장되지
     ///   않고(오배송 방어) 수용 순서도 재부여되지 않는다(뒤로 밀리지 않는다).
     /// ★notice/message 무관 무조건 수용★: 재파킹은 kind 를 안 본다(이미 admitted). cap 회계는 신규 park 만.
-    pub fn restore_ordered(&mut self, recipient: &str, items: Vec<ParkedMessage>) {
+    pub fn restore_ordered(&mut self, recipient: PeerId, items: Vec<ParkedMessage>) {
         if items.is_empty() {
             return;
         }
-        let queue = self.queues.entry(recipient.to_string()).or_default();
+        let queue = self.queues.entry(recipient).or_default();
         if queue.is_empty() {
             // 흔한 경로(락 안 복원 = drain 직후라 큐가 비어 있다) — merge 불요.
             queue.extend(items);
@@ -469,9 +451,9 @@ impl Mailbox {
 
     /// 수신자 큐를 통째로 비워 주입 가능분·만료분을 **둘 다** 오래된 순으로 반환(flush primitive).
     ///   주입은 `deliverable`(미만료, 오래된 순)만 한다(ADR-0104 일괄 flush · 근거는 `DrainOutcome` 주석).
-    /// ★큐 제거★: 비운 뒤 빈 큐는 맵에서 없앤다(빈 이름이 무한 누적되지 않게).
-    pub fn drain(&mut self, recipient: &str, now: Instant) -> DrainOutcome {
-        let Some(queue) = self.queues.remove(recipient) else {
+    /// ★큐 제거★: 비운 뒤 빈 큐는 맵에서 없앤다(빈 큐가 무한 누적되지 않게).
+    pub fn drain(&mut self, recipient: PeerId, now: Instant) -> DrainOutcome {
+        let Some(queue) = self.queues.remove(&recipient) else {
             return DrainOutcome::default();
         };
         let mut outcome = DrainOutcome::default();
@@ -498,7 +480,7 @@ impl Mailbox {
     ///   (service.rs `FlightSettle` — early break·언와인딩까지 덮는다).
     pub fn take_in_flight<'m>(
         &mut self,
-        recipient: &str,
+        recipient: PeerId,
         batch: impl IntoIterator<Item = &'m ParkedMessage>,
     ) -> FlightTicket {
         let mut ticket = FlightTicket::default();
@@ -506,7 +488,7 @@ impl Mailbox {
             ticket.add(m.kind);
         }
         if !ticket.is_zero() {
-            let slot = self.in_flight.entry(recipient.to_string()).or_default();
+            let slot = self.in_flight.entry(recipient).or_default();
             slot.message += ticket.message;
             slot.notice += ticket.notice;
         }
@@ -516,17 +498,17 @@ impl Mailbox {
     /// ★saturating 인 이유★: 여기서 패닉하면 언와인딩 중 이중 패닉으로 프로세스가 죽는다. 과다 반납은
     ///   영수증 쪽(`FlightTicket::split`)이 구조적으로 막고 있으므로, 만에 하나 어긋나면 **분모를 0 으로
     ///   수렴시키는 쪽**(= 유입을 막지 않는 쪽)이 안전하다 — 반대로 남겨 두면 그 수신자가 영영 메일을 못 받는다.
-    pub fn settle_in_flight(&mut self, recipient: &str, ticket: FlightTicket) {
+    pub fn settle_in_flight(&mut self, recipient: PeerId, ticket: FlightTicket) {
         if ticket.is_zero() {
             return;
         }
-        let Some(slot) = self.in_flight.get_mut(recipient) else {
+        let Some(slot) = self.in_flight.get_mut(&recipient) else {
             return;
         };
         slot.message = slot.message.saturating_sub(ticket.message);
         slot.notice = slot.notice.saturating_sub(ticket.notice);
         if slot.is_zero() {
-            self.in_flight.remove(recipient);
+            self.in_flight.remove(&recipient);
         }
     }
 
@@ -535,9 +517,9 @@ impl Mailbox {
     ///   된 뒤로 이것이 "배달 순서 = 적재 순서" 를 성립시키는 장치이고, **동기 드레인에서는 두 발신 스레드가
     ///   같은 수신자를 동시에 드레인하는 것이 상시 경우라 더 중요하다**(ADR-0125 §영향 — 제거 금지).
     ///   테스트에서는 정산 누수 단언에도 쓴다.
-    pub fn in_flight_len(&self, recipient: &str) -> usize {
+    pub fn in_flight_len(&self, recipient: PeerId) -> usize {
         self.in_flight
-            .get(recipient)
+            .get(&recipient)
             .map(|t| t.message + t.notice)
             .unwrap_or(0)
     }
@@ -563,7 +545,7 @@ impl Mailbox {
             for m in scanned {
                 if m.is_expired(now) {
                     expired.push(ExpiredParked {
-                        recipient: recipient.clone(),
+                        recipient: *recipient,
                         msg: m,
                     });
                 } else {
@@ -578,63 +560,50 @@ impl Mailbox {
     /// ★수신자 큐를 통째로 비워 항목을 돌려준다 — **프로필 삭제 정리 전용**(spec §5 · ADR-0116 결정 3)★.
     ///
     /// ★`drain` 과 다른 점(둘을 합치지 말 것)★: `drain` 은 "지금 주입할 몫을 꺼낸다" 라 만료/미만료를 갈라
-    ///   돌려주고 되돌아올 여지를 남긴다. 이쪽은 **그 이름이 세상에서 사라졌다**는 통보라 갈래가 없다 —
+    ///   돌려주고 되돌아올 여지를 남긴다. 이쪽은 **그 에이전트(프로필)가 세상에서 사라졌다**는 통보라 갈래가 없다 —
     ///   전량을 종점 처리 대상으로 넘긴다(상위가 장부에 `failed` + `RECIPIENT_DELETED` 로 남긴다).
     /// ★반환값으로 유실을 막는다(이 모듈의 기존 규율)★: 저장소는 순수라 장부를 모른다. 조용히 비우면
     ///   "장부엔 `pending` 인데 큐엔 없는" 유령 pending 이 남으므로 항목째 돌려준다("산 메일 조용히 버리기
     ///   금지" — spec §5 불변식).
-    /// ★notice 도 함께 치운다★: 그 이름 앞 통지도 받을 주체가 없어졌다 — 레인을 가리지 않는다(장부 종점은
+    /// ★notice 도 함께 치운다★: 그 에이전트 앞 통지도 받을 주체가 없어졌다 — 레인을 가리지 않는다(장부 종점은
     ///   상위가 같은 코드로 남긴다).
     /// ★in-flight 는 건드리지 않는다(load-bearing)★: 지금 flush 가 락 밖으로 들고 나간 몫은 **영수증
     ///   보유자의 것**이다(`FlightTicket` 계약). 여기서 회계를 손대면 그쪽 정산과 이중으로 어긋난다. 그
     ///   몫의 결말은 원래 경로가 정하고(배달 성공 또는 복원), 복원된 잔여는 **TTL 소관**이다 — 삭제 정리가
     ///   삭제 시점 단발이라는 spec §5 의 수용된 잔여와 같은 성질이다.
-    pub fn purge_recipient(&mut self, recipient: &str) -> Vec<ParkedMessage> {
+    pub fn purge_recipient(&mut self, recipient: PeerId) -> Vec<ParkedMessage> {
         self.queues
-            .remove(recipient)
+            .remove(&recipient)
             .map(|q| q.into_iter().collect())
             .unwrap_or_default()
     }
 
     /// ★용량 회계와는 다르다★: cap 은 레인별 계수이고 in-flight 를 함께 본다(`park`/`can_admit`).
-    pub fn len(&self, recipient: &str) -> usize {
-        self.queues.get(recipient).map(|q| q.len()).unwrap_or(0)
+    pub fn len(&self, recipient: PeerId) -> usize {
+        self.queues.get(&recipient).map(|q| q.len()).unwrap_or(0)
     }
 
     /// 순서 단언용 — 길이만으로는 재파킹의 나이 순서 역전이 안 잡힌다(round-4 finding 1).
-    pub fn msg_ids(&self, recipient: &str) -> Vec<String> {
+    pub fn msg_ids(&self, recipient: PeerId) -> Vec<String> {
         self.queues
-            .get(recipient)
+            .get(&recipient)
             .map(|q| q.iter().map(|m| m.msg_id.clone()).collect())
             .unwrap_or_default()
-    }
-
-    /// ★이 id 를 힌트로 지목한 항목이 있는 큐 이름 목록(round-3 finding 2 — rename 고아 방지)★.
-    ///
-    /// ★왜 필요한가★: 파킹의 주소 축은 **이름**이라(service.rs `ResolvedRecipient.key`) busy 파킹은 **발송
-    ///   시점의** canonical 이름 큐에 들어간다. 그런데 턴 종료 flush 는 그 에이전트의 **현재** 이름으로
-    ///   진입하므로(턴 종료 통지는 id 만 안다), 턴 중에 이름이 바뀌면(display_name 변경·cwd 파생 이름 변화) 옛 이름
-    ///   큐를 아무도 열지 않아 그 배치가 TTL 까지 고아가 된다. 힌트로 역방향 조회를 하면 그 큐를 찾아낸다
-    ///   (항목별 힌트 우선 해석은 flush 가 이미 하므로, 여기선 **어느 큐를 열어야 하나**만 답한다).
-    /// ★비용(의도적 선택 — 인덱스 안 만든다)★: 전 큐 × 전 항목 선형 스캔이다. 규모가 극소하기 때문이다 —
-    ///   큐는 파킹된 수신자 수(사람 대화 수준의 소수), 항목은 수신자당 cap 100. 별도 (id→큐) 인덱스를 두면
-    ///   park/drain/restore_ordered/sweep 네 경로가 모두 인덱스를 정확히 갱신해야 하고, 한 곳만 놓쳐도 배달이
-    ///   조용히 멈춘다(무손실 불변식과 정면 충돌). 유지 비용 대비 이득이 없어 스캔을 택했다.
-    pub fn queues_with_hint(&self, id: PeerId) -> Vec<String> {
-        self.queues
-            .iter()
-            .filter(|(_, q)| q.iter().any(|m| m.hinted_id == Some(id)))
-            .map(|(name, _)| name.clone())
-            .collect()
     }
 
     pub fn is_empty(&self) -> bool {
         self.queues.is_empty()
     }
 
+    /// 전 수신자 큐 항목 합(in-flight 제외) — 「어느 큐에도 안 들어갔다」 단언용.
+    #[cfg(any(test, feature = "test-harness"))]
+    pub fn total_len(&self) -> usize {
+        self.queues.values().map(|q| q.len()).sum()
+    }
+
     /// 테스트 편의 — 회수가 없는 정상 park(대부분의 테스트가 레인 상한 아래에서 돈다).
     #[cfg(test)]
-    fn park_ok(&mut self, recipient: &str, msg: ParkedMessage) -> Result<(), ParkError> {
+    fn park_ok(&mut self, recipient: PeerId, msg: ParkedMessage) -> Result<(), ParkError> {
         self.park(recipient, msg).map(|admitted| {
             assert!(
                 admitted.retired.is_empty(),
@@ -647,8 +616,8 @@ impl Mailbox {
     ///   깨진 상황(형식 드리프트·메모리 손상)에서 **그 항목 하나만 열화되고 배치는
     ///   계속 나가는지**를 실제 flush 경로로 단언하기 위한 seam 이다. 운영 코드에서 부르지 않는다.
     #[cfg(any(test, feature = "test-harness"))]
-    pub fn corrupt_envelope_for_test(&mut self, recipient: &str, idx: usize, envelope: String) {
-        if let Some(q) = self.queues.get_mut(recipient) {
+    pub fn corrupt_envelope_for_test(&mut self, recipient: PeerId, idx: usize, envelope: String) {
+        if let Some(q) = self.queues.get_mut(&recipient) {
             if let Some(m) = q.get_mut(idx) {
                 m.envelope = envelope;
             }
@@ -659,6 +628,7 @@ impl Mailbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tid;
 
     /// `admission_seq` 는 `park` 이 덮어쓰므로 여기선 0(placeholder).
     fn parked(id: &str, kind: ParkKind, at: Instant) -> ParkedMessage {
@@ -667,57 +637,8 @@ mod tests {
             envelope: format!("<message>{id}</message>"),
             kind,
             parked_at: at,
-            hinted_id: None,
             admission_seq: 0,
         }
-    }
-
-    #[test]
-    fn hinted_id_survives_park_drain_and_restore_ordered() {
-        let mut mb = Mailbox::new();
-        let t0 = Instant::now();
-        let hint = PeerId::new_v4();
-        let mut m = parked("m0", ParkKind::Message, t0);
-        m.hinted_id = Some(hint);
-        mb.park_ok("alice", m).expect("park");
-        let drained = mb.drain("alice", t0);
-        assert_eq!(drained.deliverable[0].hinted_id, Some(hint), "drain 보존");
-        mb.restore_ordered("alice", drained.deliverable);
-        let again = mb.drain("alice", t0);
-        assert_eq!(
-            again.deliverable[0].hinted_id,
-            Some(hint),
-            "restore_ordered 왕복 후에도 보존"
-        );
-    }
-
-    #[test]
-    fn queues_with_hint_finds_only_queues_holding_that_id() {
-        let mut mb = Mailbox::new();
-        let t0 = Instant::now();
-        let target = PeerId::new_v4();
-        let other = PeerId::new_v4();
-        let mut hinted = parked("m0", ParkKind::Message, t0);
-        hinted.hinted_id = Some(target);
-        mb.park_ok("old-name", hinted).unwrap();
-        let mut other_hint = parked("m1", ParkKind::Message, t0);
-        other_hint.hinted_id = Some(other);
-        mb.park_ok("someone-else", other_hint).unwrap();
-        // 힌트 없는 파킹(= 잠듦 파킹)은 잡히지 않아야(그건 이름 규칙으로만 배달된다).
-        mb.park_ok("absent-name", parked("m2", ParkKind::Message, t0))
-            .unwrap();
-
-        assert_eq!(
-            mb.queues_with_hint(target),
-            vec!["old-name".to_string()],
-            "그 id 를 힌트로 든 큐만"
-        );
-        assert!(
-            mb.queues_with_hint(PeerId::new_v4()).is_empty(),
-            "무관한 id 는 빈 목록"
-        );
-        let _ = mb.drain("old-name", t0);
-        assert!(mb.queues_with_hint(target).is_empty());
     }
 
     #[test]
@@ -725,20 +646,21 @@ mod tests {
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
         for i in 0..MAILBOX_CAP {
-            mb.park("w", parked(&format!("m{i}"), ParkKind::Message, t0))
+            mb.park(tid("w"), parked(&format!("m{i}"), ParkKind::Message, t0))
                 .unwrap_or_else(|_| panic!("{i}번째"));
         }
         assert_eq!(
-            mb.park("w", parked("m-new", ParkKind::Message, t0)).err(),
+            mb.park(tid("w"), parked("m-new", ParkKind::Message, t0))
+                .err(),
             Some(ParkError::MailboxFull),
             "회수할 stale 이 없으면 반려"
         );
         assert_eq!(
-            mb.len("w"),
+            mb.len(tid("w")),
             MAILBOX_CAP,
             "반려 경로는 큐를 건드리지 않는다(부작용 0)"
         );
-        assert_eq!(mb.msg_ids("w")[0], "m0", "아무것도 걷어내지 않았다");
+        assert_eq!(mb.msg_ids(tid("w"))[0], "m0", "아무것도 걷어내지 않았다");
     }
 
     // ── round-6: notice 레인(독립 상한 + 반려 없음) ─────────────────────────────────────────
@@ -747,13 +669,13 @@ mod tests {
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
         for i in 0..NOTICE_CAP {
-            mb.park_ok("w", parked(&format!("n{i}"), ParkKind::Notice, t0))
+            mb.park_ok(tid("w"), parked(&format!("n{i}"), ParkKind::Notice, t0))
                 .unwrap_or_else(|_| panic!("{i}번째 notice(레인 이내)"));
         }
-        assert_eq!(mb.len("w"), NOTICE_CAP);
+        assert_eq!(mb.len(tid("w")), NOTICE_CAP);
 
         let admitted = mb
-            .park("w", parked("n-new", ParkKind::Notice, t0))
+            .park(tid("w"), parked("n-new", ParkKind::Notice, t0))
             .expect("notice 는 절대 반려되지 않는다");
         assert_eq!(
             admitted
@@ -764,7 +686,7 @@ mod tests {
             vec!["n0"],
             "가장 오래된 통지 1건이 회수돼 장부에 남는다(조용한 유실 금지)"
         );
-        let ids = mb.msg_ids("w");
+        let ids = mb.msg_ids(tid("w"));
         assert_eq!(ids.len(), NOTICE_CAP, "notice 레인은 상한을 넘지 않는다");
         assert_eq!(ids.first().unwrap(), "n1");
         assert_eq!(ids.last().unwrap(), "n-new");
@@ -775,34 +697,36 @@ mod tests {
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
         for i in 0..MAILBOX_CAP {
-            mb.park("w", parked(&format!("m{i}"), ParkKind::Message, t0))
+            mb.park(tid("w"), parked(&format!("m{i}"), ParkKind::Message, t0))
                 .unwrap();
         }
         assert_eq!(
-            mb.park("w", parked("m-over", ParkKind::Message, t0)).err(),
+            mb.park(tid("w"), parked("m-over", ParkKind::Message, t0))
+                .err(),
             Some(ParkError::MailboxFull)
         );
         for i in 0..NOTICE_CAP {
             let admitted = mb
-                .park("w", parked(&format!("n{i}"), ParkKind::Notice, t0))
+                .park(tid("w"), parked(&format!("n{i}"), ParkKind::Notice, t0))
                 .unwrap_or_else(|_| panic!("가득 찬 message 큐가 notice 를 막으면 안 된다({i})"));
             assert!(
                 admitted.retired.is_empty(),
                 "notice 레인은 아직 여유가 있다"
             );
         }
-        assert_eq!(mb.len("w"), MAILBOX_CAP + NOTICE_CAP);
+        assert_eq!(mb.len(tid("w")), MAILBOX_CAP + NOTICE_CAP);
         assert_eq!(
-            mb.park("w", parked("m-over2", ParkKind::Message, t0)).err(),
+            mb.park(tid("w"), parked("m-over2", ParkKind::Message, t0))
+                .err(),
             Some(ParkError::MailboxFull),
             "notice 가 message 분모를 부풀리지 않는다(반려 사유는 message 백로그뿐)"
         );
         let admitted = mb
-            .park("w", parked("n-new", ParkKind::Notice, t0))
+            .park(tid("w"), parked("n-new", ParkKind::Notice, t0))
             .expect("notice 반려 없음");
         assert_eq!(admitted.retired.len(), 1);
         assert_eq!(
-            mb.len("w"),
+            mb.len(tid("w")),
             MAILBOX_CAP + NOTICE_CAP,
             "두 레인 합이 큐 총량의 상한이다(물리 상한 상수 불요)"
         );
@@ -814,24 +738,24 @@ mod tests {
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
         for i in 0..MAILBOX_CAP {
-            mb.park_ok("w", parked(&format!("m{i}"), ParkKind::Message, t0))
+            mb.park_ok(tid("w"), parked(&format!("m{i}"), ParkKind::Message, t0))
                 .unwrap_or_else(|_| panic!("{i}번째"));
         }
-        let batch = mb.drain("w", t0).deliverable;
-        assert_eq!(mb.len("w"), 0, "전제: drain 이 큐를 통째로 비웠다");
-        let ticket = mb.take_in_flight("w", batch.iter());
-        assert_eq!(mb.in_flight_len("w"), MAILBOX_CAP);
+        let batch = mb.drain(tid("w"), t0).deliverable;
+        assert_eq!(mb.len(tid("w")), 0, "전제: drain 이 큐를 통째로 비웠다");
+        let ticket = mb.take_in_flight(tid("w"), batch.iter());
+        assert_eq!(mb.in_flight_len(tid("w")), MAILBOX_CAP);
 
         assert_eq!(
-            mb.park("w", parked("c0", ParkKind::Message, t0)).err(),
+            mb.park(tid("w"), parked("c0", ParkKind::Message, t0)).err(),
             Some(ParkError::MailboxFull),
             "큐가 비어 보여도 분모는 in-flight 를 센다(옛 구현 = 100건 더 수용)"
         );
-        mb.settle_in_flight("w", ticket);
-        assert_eq!(mb.in_flight_len("w"), 0);
-        mb.park("w", parked("c1", ParkKind::Message, t0))
+        mb.settle_in_flight(tid("w"), ticket);
+        assert_eq!(mb.in_flight_len(tid("w")), 0);
+        mb.park(tid("w"), parked("c1", ParkKind::Message, t0))
             .expect("정산 뒤에는 수용");
-        assert_eq!(mb.len("w"), 1);
+        assert_eq!(mb.len(tid("w")), 1);
     }
 
     // ── round-7 → ADR-0125: 진행 중인 배치의 관측 수단(드레인 중복 진입 가드의 저장소 층) ──────────
@@ -839,21 +763,21 @@ mod tests {
     fn an_out_of_lock_batch_stays_observable_until_it_settles() {
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
-        mb.park_ok("w", parked("m0", ParkKind::Message, t0))
+        mb.park_ok(tid("w"), parked("m0", ParkKind::Message, t0))
             .expect("park");
 
-        let batch = mb.drain("w", t0).deliverable;
-        assert_eq!(mb.len("w"), 0, "큐 항은 0(= 큐만 보는 판정의 전부)");
-        let ticket = mb.take_in_flight("w", batch.iter());
+        let batch = mb.drain(tid("w"), t0).deliverable;
+        assert_eq!(mb.len(tid("w")), 0, "큐 항은 0(= 큐만 보는 판정의 전부)");
+        let ticket = mb.take_in_flight(tid("w"), batch.iter());
         assert_eq!(
-            mb.in_flight_len("w"),
+            mb.in_flight_len(tid("w")),
             1,
             "큐를 떠났어도 아직 수신자에게 닿지 않았다 — 진행 중인 배치가 보여야 한다"
         );
 
-        mb.settle_in_flight("w", ticket);
+        mb.settle_in_flight(tid("w"), ticket);
         assert_eq!(
-            mb.in_flight_len("w"),
+            mb.in_flight_len(tid("w")),
             0,
             "정산되면(배달 완료) 비로소 그 이름 앞이 빈다"
         );
@@ -864,31 +788,34 @@ mod tests {
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
         for i in 0..MAILBOX_CAP {
-            mb.park_ok("w", parked(&format!("m{i}"), ParkKind::Message, t0))
+            mb.park_ok(tid("w"), parked(&format!("m{i}"), ParkKind::Message, t0))
                 .unwrap_or_else(|_| panic!("{i}번째"));
         }
         for cycle in 0..4 {
-            let batch = mb.drain("w", t0).deliverable;
-            let ticket = mb.take_in_flight("w", batch.iter());
+            let batch = mb.drain(tid("w"), t0).deliverable;
+            let ticket = mb.take_in_flight(tid("w"), batch.iter());
             let admitted = (0..20)
                 .filter(|i| {
-                    mb.park("w", parked(&format!("c{cycle}-{i}"), ParkKind::Message, t0))
-                        .is_ok()
+                    mb.park(
+                        tid("w"),
+                        parked(&format!("c{cycle}-{i}"), ParkKind::Message, t0),
+                    )
+                    .is_ok()
                 })
                 .count();
             assert_eq!(
                 admitted, 0,
                 "사이클 {cycle}: 이미 cap 만큼 나가 있으므로 창이 열려 있어도 한 건도 못 받는다"
             );
-            mb.restore_ordered("w", batch);
-            mb.settle_in_flight("w", ticket);
+            mb.restore_ordered(tid("w"), batch);
+            mb.settle_in_flight(tid("w"), ticket);
             assert_eq!(
-                mb.len("w"),
+                mb.len(tid("w")),
                 MAILBOX_CAP,
                 "사이클 {cycle}: 큐 + in-flight 합이 cap 을 넘지 않는다"
             );
         }
-        assert_eq!(mb.in_flight_len("w"), 0, "정산 누수 없음");
+        assert_eq!(mb.in_flight_len(tid("w")), 0, "정산 누수 없음");
     }
 
     #[test]
@@ -896,23 +823,27 @@ mod tests {
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
         for i in 0..3 {
-            mb.park_ok("w", parked(&format!("m{i}"), ParkKind::Message, t0))
+            mb.park_ok(tid("w"), parked(&format!("m{i}"), ParkKind::Message, t0))
                 .unwrap();
         }
-        let batch = mb.drain("w", t0).deliverable;
-        let mut ticket = mb.take_in_flight("w", batch.iter());
-        assert_eq!(mb.in_flight_len("w"), 3);
+        let batch = mb.drain(tid("w"), t0).deliverable;
+        let mut ticket = mb.take_in_flight(tid("w"), batch.iter());
+        assert_eq!(mb.in_flight_len(tid("w")), 3);
 
         let one = ticket.split([ParkKind::Message]);
-        mb.settle_in_flight("w", one);
-        assert_eq!(mb.in_flight_len("w"), 2, "배달된 1건만 분모에서 빠진다");
+        mb.settle_in_flight(tid("w"), one);
+        assert_eq!(
+            mb.in_flight_len(tid("w")),
+            2,
+            "배달된 1건만 분모에서 빠진다"
+        );
 
         let rest = ticket.split([ParkKind::Message; 5]);
-        mb.settle_in_flight("w", rest);
-        assert_eq!(mb.in_flight_len("w"), 0);
+        mb.settle_in_flight(tid("w"), rest);
+        assert_eq!(mb.in_flight_len(tid("w")), 0);
         assert!(ticket.is_zero(), "영수증은 잔량 이상을 발급하지 않는다");
-        mb.settle_in_flight("w", mb_ticket_of(2));
-        assert_eq!(mb.in_flight_len("w"), 0);
+        mb.settle_in_flight(tid("w"), mb_ticket_of(2));
+        assert_eq!(mb.in_flight_len(tid("w")), 0);
     }
 
     fn mb_ticket_of(n: usize) -> FlightTicket {
@@ -928,20 +859,20 @@ mod tests {
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
         for i in 0..NOTICE_CAP {
-            mb.park_ok("w", parked(&format!("n{i}"), ParkKind::Notice, t0))
+            mb.park_ok(tid("w"), parked(&format!("n{i}"), ParkKind::Notice, t0))
                 .unwrap_or_else(|_| panic!("{i}번째"));
         }
-        let batch = mb.drain("w", t0).deliverable;
-        let ticket = mb.take_in_flight("w", batch.iter());
+        let batch = mb.drain(tid("w"), t0).deliverable;
+        let ticket = mb.take_in_flight(tid("w"), batch.iter());
         let mut retired_total = 0usize;
         for i in 0..5 {
             let admitted = mb
-                .park("w", parked(&format!("x{i}"), ParkKind::Notice, t0))
+                .park(tid("w"), parked(&format!("x{i}"), ParkKind::Notice, t0))
                 .expect("통지는 절대 반려되지 않는다");
             retired_total += admitted.retired.len();
         }
         assert_eq!(
-            mb.len("w") + mb.in_flight_len("w"),
+            mb.len(tid("w")) + mb.in_flight_len(tid("w")),
             NOTICE_CAP + 1,
             "일시 초과는 +1 에서 멈춘다(다음 park 이 초과분 전체를 걷어낸다)"
         );
@@ -949,8 +880,8 @@ mod tests {
             retired_total, 4,
             "밀려난 통지는 전부 반환돼 장부에 남는다(조용한 유실 0)"
         );
-        mb.settle_in_flight("w", ticket);
-        assert_eq!(mb.in_flight_len("w"), 0);
+        mb.settle_in_flight(tid("w"), ticket);
+        assert_eq!(mb.in_flight_len(tid("w")), 0);
     }
 
     #[test]
@@ -958,10 +889,13 @@ mod tests {
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
         for i in 0..5 {
-            mb.park_ok("alice", parked(&format!("m{i}"), ParkKind::Message, t0))
-                .expect("park 성공");
+            mb.park_ok(
+                tid("alice"),
+                parked(&format!("m{i}"), ParkKind::Message, t0),
+            )
+            .expect("park 성공");
         }
-        let drained = mb.drain("alice", t0);
+        let drained = mb.drain(tid("alice"), t0);
         let ids: Vec<&str> = drained
             .deliverable
             .iter()
@@ -979,18 +913,18 @@ mod tests {
     fn drain_empties_the_queue() {
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
-        mb.park_ok("alice", parked("m0", ParkKind::Message, t0))
+        mb.park_ok(tid("alice"), parked("m0", ParkKind::Message, t0))
             .unwrap();
-        assert_eq!(mb.len("alice"), 1);
-        let _ = mb.drain("alice", t0);
-        assert_eq!(mb.len("alice"), 0, "drain 후 큐가 비어야");
+        assert_eq!(mb.len(tid("alice")), 1);
+        let _ = mb.drain(tid("alice"), t0);
+        assert_eq!(mb.len(tid("alice")), 0, "drain 후 큐가 비어야");
         assert!(mb.is_empty(), "빈 큐는 맵에서 제거돼야");
     }
 
     #[test]
     fn drain_absent_recipient_is_empty() {
         let mut mb = Mailbox::new();
-        let drained = mb.drain("nobody", Instant::now());
+        let drained = mb.drain(tid("nobody"), Instant::now());
         assert!(
             drained.deliverable.is_empty(),
             "없는 수신자 drain 은 빈 목록"
@@ -1003,17 +937,21 @@ mod tests {
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
         for i in 0..MAILBOX_CAP {
-            mb.park_ok("bob", parked(&format!("m{i}"), ParkKind::Message, t0))
+            mb.park_ok(tid("bob"), parked(&format!("m{i}"), ParkKind::Message, t0))
                 .unwrap_or_else(|_| panic!("{i}번째(cap 이내)는 수용해야"));
         }
-        assert_eq!(mb.len("bob"), MAILBOX_CAP);
-        let over = mb.park_ok("bob", parked("overflow", ParkKind::Message, t0));
+        assert_eq!(mb.len(tid("bob")), MAILBOX_CAP);
+        let over = mb.park_ok(tid("bob"), parked("overflow", ParkKind::Message, t0));
         assert_eq!(
             over,
             Err(ParkError::MailboxFull),
             "cap 초과 message 는 MailboxFull 반려"
         );
-        assert_eq!(mb.len("bob"), MAILBOX_CAP, "반려된 항목은 큐에 안 들어감");
+        assert_eq!(
+            mb.len(tid("bob")),
+            MAILBOX_CAP,
+            "반려된 항목은 큐에 안 들어감"
+        );
     }
 
     #[test]
@@ -1021,20 +959,23 @@ mod tests {
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
         for i in 0..MAILBOX_CAP {
-            mb.park_ok("carol", parked(&format!("m{i}"), ParkKind::Message, t0))
-                .unwrap();
+            mb.park_ok(
+                tid("carol"),
+                parked(&format!("m{i}"), ParkKind::Message, t0),
+            )
+            .unwrap();
         }
         assert_eq!(
-            mb.park_ok("carol", parked("msg-over", ParkKind::Message, t0)),
+            mb.park_ok(tid("carol"), parked("msg-over", ParkKind::Message, t0)),
             Err(ParkError::MailboxFull)
         );
         for i in 0..3 {
-            mb.park_ok("carol", parked(&format!("n{i}"), ParkKind::Notice, t0))
+            mb.park_ok(tid("carol"), parked(&format!("n{i}"), ParkKind::Notice, t0))
                 .unwrap_or_else(|_| panic!("가득 찬 message 큐가 notice 를 막으면 안 됨({i})"));
         }
-        assert_eq!(mb.len("carol"), MAILBOX_CAP + 3);
+        assert_eq!(mb.len(tid("carol")), MAILBOX_CAP + 3);
         assert_eq!(
-            mb.park_ok("carol", parked("msg-over2", ParkKind::Message, t0)),
+            mb.park_ok(tid("carol"), parked("msg-over2", ParkKind::Message, t0)),
             Err(ParkError::MailboxFull),
             "notice 가 message 분모를 부풀리면 안 됨"
         );
@@ -1044,10 +985,10 @@ mod tests {
     fn ttl_boundary_exactly_at_ttl_is_expired() {
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
-        mb.park_ok("d", parked("m0", ParkKind::Message, t0))
+        mb.park_ok(tid("d"), parked("m0", ParkKind::Message, t0))
             .unwrap();
         let at_ttl = t0 + PARK_TTL;
-        let drained = mb.drain("d", at_ttl);
+        let drained = mb.drain(tid("d"), at_ttl);
         assert!(
             drained.deliverable.is_empty(),
             "정확히 TTL 인 순간은 만료(경계 포함) — deliverable 아님"
@@ -1064,10 +1005,10 @@ mod tests {
     fn ttl_boundary_just_over_ttl_is_expired() {
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
-        mb.park_ok("d", parked("m0", ParkKind::Message, t0))
+        mb.park_ok(tid("d"), parked("m0", ParkKind::Message, t0))
             .unwrap();
         let over = t0 + PARK_TTL + Duration::from_nanos(1);
-        let drained = mb.drain("d", over);
+        let drained = mb.drain(tid("d"), over);
         assert!(
             drained.deliverable.is_empty(),
             "TTL 초과분은 주입 대상 아님"
@@ -1080,15 +1021,15 @@ mod tests {
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
         // old 는 만료되게(t0), recent 는 살아 있게(t0 + 30m). now = t0 + TTL.
-        mb.park_ok("h", parked("old", ParkKind::Message, t0))
+        mb.park_ok(tid("h"), parked("old", ParkKind::Message, t0))
             .unwrap();
         mb.park_ok(
-            "h",
+            tid("h"),
             parked("recent", ParkKind::Message, t0 + Duration::from_secs(1800)),
         )
         .unwrap();
         let now = t0 + PARK_TTL;
-        let drained = mb.drain("h", now);
+        let drained = mb.drain(tid("h"), now);
         let deliverable: Vec<&str> = drained
             .deliverable
             .iter()
@@ -1109,10 +1050,10 @@ mod tests {
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
         // 오래된 것(t0) + 최근 것(t0 + 30m). now = t0 + TTL + 1ns 면 오래된 것만 만료.
-        mb.park_ok("e", parked("old", ParkKind::Message, t0))
+        mb.park_ok(tid("e"), parked("old", ParkKind::Message, t0))
             .unwrap();
         mb.park_ok(
-            "e",
+            tid("e"),
             parked("recent", ParkKind::Message, t0 + Duration::from_secs(1800)),
         )
         .unwrap();
@@ -1121,11 +1062,12 @@ mod tests {
         assert_eq!(expired.len(), 1, "만료분 1건만 반환");
         assert_eq!(expired[0].msg.msg_id, "old");
         assert_eq!(
-            expired[0].recipient, "e",
+            expired[0].recipient,
+            tid("e"),
             "만료 항목이 있던 수신자 큐 키를 함께 돌려줘야(1:N 장부 전이 — C4)"
         );
-        assert_eq!(mb.len("e"), 1, "최근 것은 큐에 잔존");
-        let rest = mb.drain("e", now);
+        assert_eq!(mb.len(tid("e")), 1, "최근 것은 큐에 잔존");
+        let rest = mb.drain(tid("e"), now);
         assert_eq!(rest.deliverable[0].msg_id, "recent");
         assert!(rest.expired.is_empty());
     }
@@ -1134,7 +1076,7 @@ mod tests {
     fn sweep_expired_removes_empty_queues() {
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
-        mb.park_ok("f", parked("only", ParkKind::Message, t0))
+        mb.park_ok(tid("f"), parked("only", ParkKind::Message, t0))
             .unwrap();
         let now = t0 + PARK_TTL + Duration::from_nanos(1);
         let expired = mb.sweep_expired(now);
@@ -1146,16 +1088,19 @@ mod tests {
     fn sweep_expired_labels_each_item_with_its_own_recipient() {
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
-        mb.park_ok("alice", parked("g1", ParkKind::Message, t0))
+        mb.park_ok(tid("alice"), parked("g1", ParkKind::Message, t0))
             .unwrap();
-        mb.park_ok("bob", parked("g1", ParkKind::Message, t0))
+        mb.park_ok(tid("bob"), parked("g1", ParkKind::Message, t0))
             .unwrap();
         let now = t0 + PARK_TTL;
-        let mut expired = mb.sweep_expired(now);
-        expired.sort_by(|a, b| a.recipient.cmp(&b.recipient)); // 큐 간 순서는 HashMap 이라 비결정.
+        let expired = mb.sweep_expired(now);
         assert_eq!(expired.len(), 2, "두 멤버 큐의 같은 msg_id 가 각각 만료");
-        assert_eq!(expired[0].recipient, "alice");
-        assert_eq!(expired[1].recipient, "bob");
+        // 큐 간 순서는 HashMap 이라 비결정 — 집합으로 본다.
+        let mut got: Vec<PeerId> = expired.iter().map(|e| e.recipient).collect();
+        let mut want = vec![tid("alice"), tid("bob")];
+        got.sort();
+        want.sort();
+        assert_eq!(got, want);
         assert!(
             expired.iter().all(|e| e.msg.msg_id == "g1"),
             "둘 다 같은 논리 메시지(1 msg_id : N 배달기록)"
@@ -1168,21 +1113,21 @@ mod tests {
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
         for i in 0..MAILBOX_CAP {
-            mb.park_ok("r", parked(&format!("new{i}"), ParkKind::Message, t0))
+            mb.park_ok(tid("r"), parked(&format!("new{i}"), ParkKind::Message, t0))
                 .unwrap();
         }
-        assert_eq!(mb.len("r"), MAILBOX_CAP);
+        assert_eq!(mb.len(tid("r")), MAILBOX_CAP);
         assert_eq!(
-            mb.park_ok("r", parked("would-reject", ParkKind::Message, t0)),
+            mb.park_ok(tid("r"), parked("would-reject", ParkKind::Message, t0)),
             Err(ParkError::MailboxFull)
         );
         let older = vec![
             parked("old0", ParkKind::Message, t0),
             parked("old1", ParkKind::Message, t0),
         ];
-        mb.restore_ordered("r", older);
+        mb.restore_ordered(tid("r"), older);
         assert_eq!(
-            mb.len("r"),
+            mb.len(tid("r")),
             MAILBOX_CAP + 2,
             "재파킹은 cap 을 우회해 admitted 항목을 되돌린다(유실 0)"
         );
@@ -1195,12 +1140,12 @@ mod tests {
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
         mb.park_ok(
-            "r",
+            tid("r"),
             parked("new0", ParkKind::Message, t0 + Duration::from_secs(10)),
         )
         .unwrap();
         mb.park_ok(
-            "r",
+            tid("r"),
             parked("new1", ParkKind::Message, t0 + Duration::from_secs(11)),
         )
         .unwrap();
@@ -1208,8 +1153,8 @@ mod tests {
             parked("old1", ParkKind::Message, t0 + Duration::from_secs(1)),
             parked("old2", ParkKind::Message, t0 + Duration::from_secs(2)),
         ];
-        mb.restore_ordered("r", older);
-        let drained = mb.drain("r", t0 + Duration::from_secs(20));
+        mb.restore_ordered(tid("r"), older);
+        let drained = mb.drain(tid("r"), t0 + Duration::from_secs(20));
         let ids: Vec<&str> = drained
             .deliverable
             .iter()
@@ -1227,10 +1172,10 @@ mod tests {
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
         for i in 0..4 {
-            mb.park_ok("dup", parked(&format!("m{i}"), ParkKind::Message, t0))
+            mb.park_ok(tid("dup"), parked(&format!("m{i}"), ParkKind::Message, t0))
                 .unwrap();
         }
-        let drained = mb.drain("dup", t0).deliverable;
+        let drained = mb.drain(tid("dup"), t0).deliverable;
         let group_a: Vec<ParkedMessage> = drained.iter().step_by(2).cloned().collect();
         let group_b: Vec<ParkedMessage> = drained.iter().skip(1).step_by(2).cloned().collect();
         assert_eq!(
@@ -1240,17 +1185,17 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["m0", "m2"]
         );
-        mb.restore_ordered("dup", group_a);
-        mb.restore_ordered("dup", group_b);
+        mb.restore_ordered(tid("dup"), group_a);
+        mb.restore_ordered(tid("dup"), group_b);
         assert_eq!(
-            mb.msg_ids("dup"),
+            mb.msg_ids(tid("dup")),
             vec!["m0", "m1", "m2", "m3"],
             "여러 번 복원해도 큐는 전역 수용 순서(오래된 순)를 유지해야"
         );
-        mb.park_ok("dup", parked("new", ParkKind::Message, t0))
+        mb.park_ok(tid("dup"), parked("new", ParkKind::Message, t0))
             .unwrap();
         assert_eq!(
-            mb.msg_ids("dup"),
+            mb.msg_ids(tid("dup")),
             vec!["m0", "m1", "m2", "m3", "new"],
             "재파킹분이 신규분보다 앞"
         );
@@ -1261,15 +1206,15 @@ mod tests {
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
         for i in 0..3 {
-            mb.park_ok("r", parked(&format!("old{i}"), ParkKind::Message, t0))
+            mb.park_ok(tid("r"), parked(&format!("old{i}"), ParkKind::Message, t0))
                 .unwrap();
         }
-        let drained = mb.drain("r", t0).deliverable; // old0..old2 (순번 0..2)
-        mb.park_ok("r", parked("new0", ParkKind::Message, t0))
+        let drained = mb.drain(tid("r"), t0).deliverable; // old0..old2 (순번 0..2)
+        mb.park_ok(tid("r"), parked("new0", ParkKind::Message, t0))
             .unwrap(); // 순번 3
-        mb.restore_ordered("r", drained);
+        mb.restore_ordered(tid("r"), drained);
         assert_eq!(
-            mb.msg_ids("r"),
+            mb.msg_ids(tid("r")),
             vec!["old0", "old1", "old2", "new0"],
             "동시 park 된 신규분은 재파킹분 뒤"
         );
@@ -1281,11 +1226,11 @@ mod tests {
         let t0 = Instant::now();
         // 수용 순서는 newer → older(역전) — front 는 미만료, 그 뒤가 만료.
         mb.park_ok(
-            "z",
+            tid("z"),
             parked("newer", ParkKind::Message, t0 + Duration::from_secs(3600)),
         )
         .unwrap();
-        mb.park_ok("z", parked("older", ParkKind::Message, t0))
+        mb.park_ok(tid("z"), parked("older", ParkKind::Message, t0))
             .unwrap();
         let now = t0 + PARK_TTL;
         let expired = mb.sweep_expired(now);
@@ -1298,7 +1243,7 @@ mod tests {
             "미만료 항목 뒤에 숨은 만료분도 sweep 이 걷어내야(전량 스캔)"
         );
         assert_eq!(
-            mb.msg_ids("z"),
+            mb.msg_ids(tid("z")),
             vec!["newer"],
             "미만료분은 순서 그대로 잔존"
         );
@@ -1307,7 +1252,7 @@ mod tests {
     #[test]
     fn restore_ordered_empty_is_noop() {
         let mut mb = Mailbox::new();
-        mb.restore_ordered("r", Vec::new());
+        mb.restore_ordered(tid("r"), Vec::new());
         assert!(mb.is_empty(), "빈 재파킹은 큐를 만들지 않는다");
     }
 
@@ -1316,15 +1261,15 @@ mod tests {
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
         // 세 건 모두 만료되게(오래된 순으로 park).
-        mb.park_ok("g", parked("first", ParkKind::Message, t0))
+        mb.park_ok(tid("g"), parked("first", ParkKind::Message, t0))
             .unwrap();
         mb.park_ok(
-            "g",
+            tid("g"),
             parked("second", ParkKind::Message, t0 + Duration::from_secs(1)),
         )
         .unwrap();
         mb.park_ok(
-            "g",
+            tid("g"),
             parked("third", ParkKind::Message, t0 + Duration::from_secs(2)),
         )
         .unwrap();

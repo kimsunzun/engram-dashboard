@@ -129,12 +129,22 @@ impl DeliveryStatus {
 /// ★body 는 요약이 아니라 full 보관(설계 결정)★: 인메모리 단계라 별도 저장소가 없고, 파킹된 봉투 재주입·
 ///   장부 조회(`messages { id }` — spec §6)에 원문이 필요하다. 요약본만 두면 재주입·감사 때 원문 손실이다.
 ///   메모리는 링 용량(HISTORY_CAPACITY)이 상한 — v2 영속화(SQLite) 때 요약/오프로드를 재검토한다(무파괴).
+/// ★누구인지는 id 로, 보이는 것은 보낼 때 이름으로(ADR-0309 결정 4)★: 행을 고르는 축(`transition` ·
+///   `fail_pending`)은 `(msg_id, to_id)` 이고, `from` · `to` 는 **보낼 때 이름 스냅숏**이라 그 뒤 개명해도 조회
+///   표시가 바뀌지 않는다.
 #[derive(Debug, Clone)]
 pub struct MessageRecord {
     pub msg_id: String,
-    /// 발신자 이름(WYSIWYA — ADR-0101).
+    /// 발신자 이름 — 보낼 때 스냅숏(WYSIWYA — ADR-0101).
     pub from: String,
+    /// 발신자 에이전트 id. 데몬 통지(`<notice>`)는 nil(service `daemon_identity`).
+    pub from_id: PeerId,
+    /// 수신자 이름 — 보낼 때 스냅숏. 받는 이를 못 찾은 실패 행이면 발신자가 쓴 표기다.
     pub to: String,
+    /// 수신자 에이전트 id. `None` = 받는 이를 못 찾은 실패 행(없음 · 동명) — 그 행은 이미 종점이라
+    ///   id 로 다시 고를 일이 없다.
+    // ADR-0309 (결정 1 · 4)
+    pub to_id: Option<PeerId>,
     pub body: String,
     pub status: DeliveryStatus,
     pub created_at: Instant,
@@ -176,29 +186,19 @@ struct RequestEntry {
     request_id: String,
     /// **발송 시점의** 표시 이름이다.
     sender: String,
-    /// ★요청 발신자의 PeerId(C3 리뷰 fix 2 — load-bearing)★: 이름은 발송 후 바뀔 수 있고(display_name
-    ///   변경), 그러면 이름-키 파킹만으로는 notice 가 옛 이름 큐에 갇혀 **영영 배달되지 않는다**(통지는
-    ///   `notified` 라 재발화도 없다 = 계약이 조용히 반쪽). id 를 함께 들고 있으면 상위가 그걸 파킹 힌트로
-    ///   실어 이름과 무관하게 그 incarnation 으로 배달할 수 있다.
+    /// ★요청 발신자의 PeerId(C3 리뷰 fix 2 — load-bearing)★: 기한 초과 notice 를 맡겨 두는 큐 키다(ADR-0309 —
+    ///   큐 키가 id 라 발신자가 그 사이 개명해도 통지가 그에게 간다. 통지는 `notified` 라 재발화가 없으므로
+    ///   여기서 놓치면 계약이 조용히 반쪽 난다).
     sender_id: PeerId,
+    /// **발송 시점의** 수신자 이름(조회 · 기한 통지 본문 표시용). 계약을 고르는 축은 `recipient_id` 다.
     recipient: String,
-    /// ★해석된 수신자 PeerId(D 리뷰 B1 — load-bearing)★: 발송 시점에 수신자가 **산 에이전트로 해석됐으면**
-    /// 그 PeerId.
-    /// ★`None` 은 4차부터 **운영 경로에 다시 존재한다**(ADR-0116 결정 1 — 잠듦 파킹 부활)★: 잠든(프로필만
-    /// 있는) 수신자에게 건 request 는 계약을 열지만 그 순간 산 incarnation 이 없어 id 를 못 붙인다. 그
-    /// 계약은 **이름으로** 의무를 귀속하다가(아래 폴백), 복원 후 실제 배달 시점에
-    /// `rebind_request_recipient` 가 착지 incarnation 의 id 를 박는다.
-    ///
-    /// ★왜 이름만으로는 안 되나★: 같은 이름의 산 에이전트가 둘일 때(동명 다수) 발신자는 exact PeerId 로
-    ///   지목해 한쪽에만 request 를 보낼 수 있는데, 계약은 이름(`recipient`)으로만 기록됐다 — 그러면
-    ///   **메시지를 받은 적도 없는 쌍둥이**가 미결 조회에서 그 의무를 자기 것으로 본다(잘못된 의무 귀속).
-    ///   id 를 함께 붙들면 "누가 답해야 하나" 를 정확히 가를 수 있다.
+    /// ★계약 키의 수신자 축 = 에이전트 id(ADR-0309 결정 1 · 7)★ — 산 수신자면 그 id, **잠든 수신자도 열 때부터
+    /// 그 프로필 id** 다(데몬이 잠든 쪽을 (id, 이름) 쌍으로 넘긴다). 그래서 이름 폴백 대조가 없다 — 개명해도,
+    /// 같은 이름의 다른 에이전트가 생겨도 의무는 이 id 에 남는다.
     /// ★epoch 는 담지 않는다★: 같은 에이전트의 재시작은 PeerId 를 유지하고 epoch 만 올린다(ADR-0007) —
     ///   재시작한 그 에이전트는 여전히 답할 주체이므로 epoch 로 좁히면 의무가 부당하게 사라진다.
-    /// ★None 의 의미 = 이름 폴백★: 아직 뜨지 않은 이름 앞으로 건 request 는 나중에 그 이름으로 등장한
-    ///   에이전트가 답할 주체다(WYSIWYA — ADR-0101). 그래서 id 가 없으면 이름으로만 매칭한다.
-    // 리뷰 B1
-    recipient_id: Option<PeerId>,
+    // ADR-0309
+    recipient_id: PeerId,
     /// 회신 기한 = (발송 기준 오프셋, **발신자가 쓴 표기 원본**). `None` = 기한 없음(타임아웃 없음).
     ///
     /// ★왜 표기를 함께 보관하나(C3 리뷰 fix 6)★: 예전엔 Duration 만 두고 통지 문구를 만들 때 상위가 표기를
@@ -239,13 +239,13 @@ struct RequestEntry {
     ///   전부 `NoMatch`). 그래서 희생자 선정에서 명시적으로 제외한다.
     // round-5 mark-and-sweep
     provisional: bool,
-    /// ★이 예약이 **은퇴 예정 표시를 붙인 희생자**의 계약 키(F1)★ — `Some((msg_id, recipient))`.
+    /// ★이 예약이 **은퇴 예정 표시를 붙인 희생자**의 계약 키(F1)★ — `Some((msg_id, recipient_id))`.
     ///
     /// ★왜 기억하나(load-bearing)★: 정산 없이 남은 예약을 **주기 sweep 이 스스로 회수**할 수 있어야 한다
     ///   (RAII Drop 은 `try_lock` 이 실패하면 아무 것도 못 한다 — `service::Reservation` 헤더). 그때 sweep 은
     ///   "이 예약이 누구에게 표시를 붙였나" 를 알아야 그 표시만 정확히 풀 수 있다. 호출자가 들고 다니던
     ///   값(`RetiredContract`)은 예약이 유실되면 함께 사라지므로, 장부 안에 남겨 둔다.
-    marked_victim: Option<(String, String)>,
+    marked_victim: Option<(String, PeerId)>,
     /// ★이 예약의 **소유자 생존 토큰**(R1)★ — `Some(weak)` = 가드가 붙어 있다, `None` = 붙은 적 없다.
     ///
     /// sweep 의 회수 기준이다(`reclaim_abandoned_reservations`): upgrade 되면 소유자가 아직 일하는 중이므로
@@ -337,8 +337,8 @@ pub enum ReplyFailOutcome {
 /// ★요청자 삭제 정리가 계약 축에서 한 일(spec §5 삭제 정리 ②)★ — 호출자가 **락 밖에서** 로그로 남긴다.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RequesterCleanup {
-    /// `reply_failed` 로 종결한 계약 키 `(request_id, recipient)`.
-    pub failed: Vec<(String, String)>,
+    /// `reply_failed` 로 종결한 계약 키 `(request_id, recipient_id)`.
+    pub failed: Vec<(String, PeerId)>,
     /// 가드(잠정·은퇴 예정) 때문에 건너뛴 계약 수 — 재발화하지 않는다(삭제 시점 단발, spec §5).
     pub guard_held: usize,
 }
@@ -371,6 +371,7 @@ pub struct RetiredContract {
     pub request_id: String,
     pub sender: String,
     pub recipient: String,
+    pub recipient_id: PeerId,
     /// 표시 시점 기준 나이(로그용 — 벽시계가 아니라 경과).
     pub age: Duration,
 }
@@ -461,10 +462,13 @@ pub struct DueTimeout {
     pub request_id: String,
     /// notice 를 받을 발신자 이름(**발송 시점** 표시 이름 — 그 뒤 개명됐을 수 있다).
     pub sender: String,
-    /// ★notice 배달용 발신자 id(C3 리뷰 fix 2)★ — 이름이 바뀌었어도 이 id 로 배달 경로를 찾는다
-    ///   (`RequestEntry.sender_id` 주석). 상위가 파킹 힌트 + flush 도어벨 대상으로 쓴다.
+    /// ★notice 배달용 발신자 id(C3 리뷰 fix 2)★ — 상위가 notice 를 맡겨 둘 큐 키 + flush 도어벨 대상으로
+    ///   쓴다(`RequestEntry.sender_id` 주석).
     pub sender_id: PeerId,
+    /// 수신자 이름(**발송 시점** — notice 본문용).
     pub recipient: String,
+    /// 계약 키의 수신자 축 — 통지 직전 「그 사이 닫혔나」 재확인이 이 키로 계약을 찾는다.
+    pub recipient_id: PeerId,
     /// ★초과된 기한의 **표기 원본**(C3 리뷰 fix 6 — notice 문구용)★: spec §1 notice 템플릿이
     ///   `기한({reply_by})` 을 그대로 노출하므로, 발신자가 쓴 표기(`"60m"`)를 **그대로** 싣는다.
     pub reply_by_raw: String,
@@ -485,7 +489,8 @@ pub struct OpenRequestView {
     /// 요청 발신자의 PeerId — 미결 조회가 "내가 건 요청" 을 **이름이 아니라 id 로** 가르는 축(리뷰 B1).
     pub sender_id: PeerId,
     pub recipient: String,
-    pub recipient_id: Option<PeerId>,
+    /// 미결 조회가 「내가 답할 의무」를 가르는 축(ADR-0309 — 이름으로 가르지 않는다).
+    pub recipient_id: PeerId,
     pub reply_by_raw: Option<String>,
     pub created_at: Instant,
     pub notified: bool,
@@ -534,16 +539,20 @@ impl Ledger {
     ///   증발**했다(리뷰 B3 — `RequestEntry::is_live` 주석에 시퀀스). 계약의 정본은 추적이지 이력이 아니므로
     ///   (ReplyOutcome 주석), 이력 용량이 계약을 죽이면 안 된다. 미회신 계약의 유계는 `MAX_OPEN_REQUESTS`
     ///   (open_request 의 `Full`)가 따로 준다.
+    /// ★당사자 = (보낼 때 이름, id) 쌍★: 필드 의미는 `MessageRecord` 가 정본이다.
+    #[allow(clippy::too_many_arguments)]
     pub fn record(
         &mut self,
         msg_id: &str,
         from: &str,
+        from_id: PeerId,
         to: &str,
+        to_id: Option<PeerId>,
         body: &str,
         status: DeliveryStatus,
         now: Instant,
     ) {
-        self.record_with_expected(msg_id, from, to, body, status, now, 1);
+        self.record_with_expected(msg_id, from, from_id, to, to_id, body, status, now, 1);
     }
 
     /// `record` + **기대 배달기록 수**(round-2 리뷰 F3). 그룹 fan-out 은 두 단계(계획 락 / 멤버별 구간)로
@@ -553,7 +562,9 @@ impl Ledger {
         &mut self,
         msg_id: &str,
         from: &str,
+        from_id: PeerId,
         to: &str,
+        to_id: Option<PeerId>,
         body: &str,
         status: DeliveryStatus,
         now: Instant,
@@ -562,7 +573,9 @@ impl Ledger {
         self.history.push_back(MessageRecord {
             msg_id: msg_id.to_string(),
             from: from.to_string(),
+            from_id,
             to: to.to_string(),
+            to_id,
             body: body.to_string(),
             status,
             created_at: now,
@@ -612,19 +625,22 @@ impl Ledger {
             .retain(|r| r.is_live() || r.provisional || live_ids.contains(r.request_id.as_str()));
     }
 
-    /// ★왜 (msg_id, to) 로 지목★: 그룹 방송은 한 msg_id 에 수신자별 레코드가 N개라 msg_id 만으로는 어느
-    ///   배달인지 특정 못 한다 — 수신자까지 함께 지목해 정확히 한 레코드를 전이한다(1:N 회계, spec §4).
+    /// ★왜 (msg_id, 수신자 id) 로 지목★: 그룹 방송은 한 msg_id 에 수신자별 레코드가 N개라 msg_id 만으로는
+    ///   어느 배달인지 특정 못 한다 — 수신자까지 함께 지목해 정확히 한 레코드를 전이한다(1:N 회계, spec §4).
+    ///   수신자 축이 이름이 아니라 id 인 것은 보낼 때 이름과 지금 이름이 갈려도 같은 행을 집기 위해서다
+    ///   (ADR-0309).
+    // ADR-0309
     pub fn transition(
         &mut self,
         msg_id: &str,
-        to: &str,
+        to_id: PeerId,
         status: DeliveryStatus,
         now: Instant,
     ) -> Result<(), TransitionError> {
         let Some(rec) = self
             .history
             .iter_mut()
-            .find(|r| r.msg_id == msg_id && r.to == to)
+            .find(|r| r.msg_id == msg_id && r.to_id == Some(to_id))
         else {
             return Err(TransitionError::NotFound);
         };
@@ -648,14 +664,14 @@ impl Ledger {
     pub fn fail_pending(
         &mut self,
         msg_id: &str,
-        to: &str,
+        to_id: PeerId,
         code: &'static str,
         now: Instant,
     ) -> Result<(), TransitionError> {
         let Some(rec) = self
             .history
             .iter_mut()
-            .find(|r| r.msg_id == msg_id && r.to == to)
+            .find(|r| r.msg_id == msg_id && r.to_id == Some(to_id))
         else {
             return Err(TransitionError::NotFound);
         };
@@ -671,7 +687,8 @@ impl Ledger {
         Ok(())
     }
 
-    /// request 오픈 — `awaiting_reply` 추적 시작(spec §3 단계 2). **계약 키 = `(request_id, recipient)`**.
+    /// request 오픈 — `awaiting_reply` 추적 시작(spec §3 단계 2). **계약 키 = `(request_id, recipient_id)`**
+    /// (ADR-0309 — `recipient` 는 발송 시점 이름 스냅숏일 뿐 키가 아니다).
     ///
     /// ★다중 수신자 request = 독립 계약 N개(ADR-0111 결정 5 · load-bearing)★: 메시지 id 는 N계약 공통이고
     ///   (장부 = 메시지 1 : 배달기록 N 원칙 유지) **회신자가 누구냐로 계약이 갈린다**. 그래서 이 함수는 같은
@@ -681,7 +698,7 @@ impl Ledger {
     /// ★reply_by 시계 = 발송 기준(spec §3·§5 · ADR-0104)★: 절대 기한 = `created_at(now) + reply_by`. 수신
     ///   지연과 무관한 발신자 관점 계약이라 now(발송 시각)를 기준으로 굳힌다.
     /// ★중복 **키** 거부 — 오픈이든 닫힘이든 존재하면 거부(load-bearing · finding 2)★: 같은
-    ///   `(request_id, recipient)` 가 추적에 **하나라도 있으면**(open OR closed) `DuplicateId` 로 거부한다
+    ///   `(request_id, recipient_id)` 가 추적에 **하나라도 있으면**(open OR closed) `DuplicateId` 로 거부한다
     ///   (no-op). 메시지 id 는 **데몬이 생성하는 유일 값**이고 수신자는 발송 해석 단계에서 이미 중복 제거되므로
     ///   (spec §5 해석 순서 ④) 이 조합의 재사용은 non-scenario 다. ★파킹된 수신자도 계약을 연다(spec §3
     ///   항목 2)★ — busy 든 **잠듦**(ADR-0116 결정 1)이든 수용은 수용이라 회신 의무가 성립하고 기한 스윕도
@@ -703,11 +720,7 @@ impl Ledger {
     ///   진 빚**(기한 초과 시 notice)이다. 그걸 지우면 약속한 통지가 영영 안 나가는 조용한 위약이 된다.
     /// ★이력 링의 행은 손대지 않는다★(링이 자기 수명을 소유 — 은퇴는 **계약 추적**만의 일이다).
     // round-2 리뷰 F1 / 사용자 결정 2026-07-27
-    /// ★인자 `recipient_id` 의 `None` 은 운영 경로에 실재한다(4차 — ADR-0116 결정 1)★:
-    ///   **잠든 수신자**에게 파킹되는 request 는 산 incarnation 이 없어 `None` 으로 열린다
-    ///   (`service::handle_send` 의 잠듦 갈래). 그 구간의 계약을 닫는 유일한 경로가 `close_on_reply` 의
-    ///   **이름 폴백**이므로 그 팔을 "죽은 코드" 로 읽고 지우면 잠든 요청자 계약이 영영 안 닫힌다.
-    ///   복원 후 실제 주입 시점에 `rebind_request_recipient` 가 착지 id 를 박아 그 뒤로는 id 축이 산다.
+    // ADR-0309 (계약 키 = 수신자 id)
     #[allow(clippy::too_many_arguments)]
     pub fn open_request(
         &mut self,
@@ -715,14 +728,14 @@ impl Ledger {
         sender: &str,
         sender_id: PeerId,
         recipient: &str,
-        recipient_id: Option<PeerId>,
+        recipient_id: PeerId,
         reply_by: Option<(Duration, String)>,
         now: Instant,
     ) -> OpenOutcome {
         if self
             .requests
             .iter()
-            .any(|r| r.request_id == request_id && r.recipient == recipient)
+            .any(|r| r.request_id == request_id && r.recipient_id == recipient_id)
         {
             return OpenOutcome::DuplicateId;
         }
@@ -749,6 +762,7 @@ impl Ledger {
                         request_id: v.request_id.clone(),
                         sender: v.sender.clone(),
                         recipient: v.recipient.clone(),
+                        recipient_id: v.recipient_id,
                         age: now.saturating_duration_since(v.created_at),
                     });
                 }
@@ -772,7 +786,7 @@ impl Ledger {
             provisional: true,
             marked_victim: retired
                 .as_ref()
-                .map(|r: &RetiredContract| (r.request_id.clone(), r.recipient.clone())),
+                .map(|r: &RetiredContract| (r.request_id.clone(), r.recipient_id)),
             reservation_token: None,
         });
         match retired {
@@ -790,13 +804,13 @@ impl Ledger {
     pub fn attach_reservation_liveness(
         &mut self,
         request_id: &str,
-        recipient: &str,
+        recipient_id: PeerId,
         watch: Weak<()>,
     ) {
         if let Some(e) = self
             .requests
             .iter_mut()
-            .find(|r| r.request_id == request_id && r.recipient == recipient && r.provisional)
+            .find(|r| r.request_id == request_id && r.recipient_id == recipient_id && r.provisional)
         {
             e.reservation_token = Some(watch);
         }
@@ -812,18 +826,18 @@ impl Ledger {
     // round-5 mark-and-sweep
     pub fn commit_open(
         &mut self,
-        provisional: Option<(&str, &str)>,
-        retired: Option<(&str, &str)>,
+        provisional: Option<(&str, PeerId)>,
+        retired: Option<(&str, PeerId)>,
     ) -> CommitOutcome {
         let mut out = CommitOutcome {
             confirmed: false,
             retired: false,
         };
-        if let Some((id, recipient)) = provisional {
+        if let Some((id, recipient_id)) = provisional {
             if let Some(e) = self
                 .requests
                 .iter_mut()
-                .find(|r| r.request_id == id && r.recipient == recipient)
+                .find(|r| r.request_id == id && r.recipient_id == recipient_id)
             {
                 e.provisional = false;
                 // 확정됐으니 표시 기억·생존 토큰은 더 필요 없다(희생자는 아래에서 물리 제거된다).
@@ -832,10 +846,10 @@ impl Ledger {
                 out.confirmed = true;
             }
         }
-        if let Some((id, recipient)) = retired {
+        if let Some((id, recipient_id)) = retired {
             let before = self.requests.len();
             self.requests.retain(|r| {
-                !(r.request_id == id && r.recipient == recipient && r.pending_retirement)
+                !(r.request_id == id && r.recipient_id == recipient_id && r.pending_retirement)
             });
             // ★purge **전에** 판정한다(R2)★: purge 도 항목을 지우므로 뒤에서 길이를 비교하면 "내가 은퇴시킨
             //   것" 과 "좀비 정리로 사라진 것" 이 섞인다.
@@ -867,46 +881,17 @@ impl Ledger {
     // round-5 mark-and-sweep
     pub fn rollback_open(
         &mut self,
-        provisional: Option<(&str, &str)>,
-        retired: Option<(&str, &str)>,
+        provisional: Option<(&str, PeerId)>,
+        retired: Option<(&str, PeerId)>,
     ) -> Option<DropOutcome> {
-        if let Some((id, recipient)) = retired {
-            if let Some(e) = self
-                .requests
-                .iter_mut()
-                .find(|r| r.request_id == id && r.recipient == recipient && r.pending_retirement)
-            {
+        if let Some((id, recipient_id)) = retired {
+            if let Some(e) = self.requests.iter_mut().find(|r| {
+                r.request_id == id && r.recipient_id == recipient_id && r.pending_retirement
+            }) {
                 e.pending_retirement = false;
             }
         }
-        provisional.map(|(id, recipient)| self.drop_request(id, recipient))
-    }
-
-    /// ★실제 배달된 수신자로 계약의 `recipient_id` 를 고쳐 박는다(round-2 리뷰 F2 · load-bearing)★.
-    /// 그런 계약이 없으면(통보였거나 이미 닫힘) no-op.
-    ///
-    /// ★막는 것 = 배달자/의무자 불일치★: exact PeerId 로 건 request 가 그 순간 busy 라 **이름 키**로
-    ///   파킹되면, 봉투는 이름 큐에 놓이고 id 는 힌트일 뿐이다. 그 뒤 A 가 죽고 같은 이름의 B 가 뜨면
-    ///   flush 의 이름 폴백이 **B 에게 배달**한다(단일 발송은 재스폰 이어받기가 기능이다 — ADR-0101).
-    ///   그런데 계약의 `recipient_id` 는 여전히 A 라, id 기준 매처(`matches_contract_party`)에서 B 의 미결
-    ///   조회는 그 의무를 **못 본다** — 봉투를 실제로 받은 쪽이 "답할 게 없다" 고 읽는 최악의 조합이다.
-    ///   그래서 **봉투가 실제로 꽂힌 시점**(pending→delivered 전이 자리, 착지 incarnation 을 아는 유일한
-    ///   지점)에 의무를 그 수신자에게 옮긴다 — "의무는 봉투를 받은 자를 따른다".
-    /// ★닫힌 계약은 건드리지 않는다★: 이미 회신이 온 계약의 상대를 뒤늦게 바꾸면 이력이 오염된다.
-    // round-2 리뷰 F2
-    pub fn rebind_request_recipient(
-        &mut self,
-        request_id: &str,
-        recipient: &str,
-        delivered_to: PeerId,
-    ) {
-        if let Some(r) = self
-            .requests
-            .iter_mut()
-            .find(|r| r.request_id == request_id && r.recipient == recipient && !r.closed)
-        {
-            r.recipient_id = Some(delivered_to);
-        }
+        provisional.map(|(id, recipient_id)| self.drop_request(id, recipient_id))
     }
 
     /// ★왜 모든 발송이 이걸 보나(C3 리뷰 fix 12 · load-bearing)★: 예전엔 id 충돌을 **request 발송만**
@@ -932,10 +917,10 @@ impl Ledger {
     ///   제거**되므로(좀비 방지) 그 뒤 이 조회는 false 다 — 즉 "산출 후 회신 도착" 취소가 그 좁은 경우엔
     ///   안 걸리고 통지가 한 번 더 나갈 수 있다. 이력 용량(HISTORY_CAPACITY)만큼이 밀려난 뒤 마이크로초 창에서만 성립하는
     ///   경로라, 여기서 유계(좀비 제거)를 택했다.
-    pub fn is_request_closed(&self, request_id: &str, recipient: &str) -> bool {
+    pub fn is_request_closed(&self, request_id: &str, recipient_id: PeerId) -> bool {
         self.requests
             .iter()
-            .any(|r| r.request_id == request_id && r.recipient == recipient && r.closed)
+            .any(|r| r.request_id == request_id && r.recipient_id == recipient_id && r.closed)
     }
 
     /// ★표시(은퇴 예정·잠정)는 매칭을 가리지 않는다(round-5 mark-and-sweep · load-bearing)★: 두 표시는
@@ -946,50 +931,30 @@ impl Ledger {
     /// ★회신자로 계약을 고른다(ADR-0111 결정 5)★: 한 `request_id` 아래
     ///   계약이 **여러 개**일 수 있으므로(다중 수신자 request) `in_reply_to` 만으로는 어느 계약을 닫을지
     ///   특정할 수 없다. spec §3 은 "그 **회신자의 계약만** 닫힌다(다른 수신자 계약은 오픈 유지 — 전체회신
-    ///   없음)" 이므로, 매칭 키는 `(request_id, 회신자)` 다.
+    ///   없음)" 이므로, 매칭 키는 `(request_id, 회신자 id)` 다.
     /// ★"내 계약이 아니다" = `NoMatch` = **배달은 그대로**(spec §3 항목 7-②)★: 모르는 id·이미 닫힌 계약·
     ///   나에게 없는 계약 어느 쪽이든 **계약 쪽만 무동작**이고 회신 메시지 자체는 정상 배달된다. 회신이
     ///   통째로 사라지는 편이 더 나쁘다.
     // L1
+    // ADR-0309 (결정 7 — 이름 폴백 대조 없음)
     pub fn close_on_reply(
         &mut self,
         in_reply_to: &str,
-        replier_name: &str,
         replier_id: PeerId,
-        allow_name_fallback: bool,
         now: Instant,
     ) -> ReplyOutcome {
-        // 1) 추적 항목을 닫는다(정본). recipient 를 꺼내 뒤이어 이력 전이에 쓴다(borrow 분리).
-        // ★계약 선택 = **두 패스**(id 먼저, 없으면 이름) — load-bearing(A6 회귀)★.
-        //
-        // ★왜 한 패스 OR 이 틀렸나★: `find` 는 **먼저 만나는 항목**을 집는다. 그래서 계약 A(recipient
-        //   "alice", id a1)가 목록에서 앞서고 계약 B(개명·쌍둥이로 recipient 도 "alice", id b1)가 뒤에 있으면,
-        //   **b1 이 보낸 회신이 이름 매치로 A 를 먼저 닫는다** — 자기 계약이 아닌 것을 닫는다. 게다가 미결
-        //   조회의 귀속 판정(`matches_contract_party`)은 **id 단독**이라, 그 에이전트는 자기 화면에 보이지도
-        //   않는 의무를 닫아 버리는 비대칭이 생긴다.
-        // ★두 패스면 그 비대칭이 사라진다★: id 로 지목된 계약이 있으면 그게 유일한 정답이고(조회 축과 동일),
-        //   id 매치가 하나도 없을 때만 이름으로 떨어진다 — 재스폰(새 PeerId)·잠듦 파킹처럼 계약이 id 를 들고
-        //   있지 않은 경우의 정상 회신 경로를 그대로 살린다.
-        // ★남는 위험을 **한 겹 더 좁혔다**(리뷰 fix D4)★: 계약이 id 를 안 들고 있는 구간(**잠듦 파킹** —
-        //   운영 경로에 실재한다)에서 동명 쌍둥이가 이름으로 남의 계약을 닫는 경로가 있었다. 이제 상위가
-        //   "그 이름이 산 세션 2개 이상에 걸리나" 를 판정해 `allow_name_fallback = false` 로 내려보내고,
-        //   그때는 이름 폴백을 아예 타지 않는다(무동작 = 계약 오픈 유지 — 잘못 닫는 것보다 안 닫는 게 낫다).
-        //   근본 제거는 여전히 ADR-0115(스폰 이름 유일성)다.
-        let matched = self.match_contract_for_replier(
-            in_reply_to,
-            replier_name,
-            replier_id,
-            allow_name_fallback,
-        );
-        let recipient = match matched.map(|i| &mut self.requests[i]) {
+        // 추적 항목을 닫는다(정본). 이력 행은 계약과 같은 키 `(msg_id, 수신자 id)` 로 지목한다(ADR-0309).
+        let matched = self.match_contract_for_replier(in_reply_to, replier_id);
+        let recipient_id = match matched.map(|i| &mut self.requests[i]) {
             Some(r) if r.closed => return ReplyOutcome::AlreadyClosed,
             Some(r) => {
                 r.closed = true;
-                r.recipient.clone()
+                r.recipient_id
             }
             None => return ReplyOutcome::NoMatch,
         };
-        let outcome = match self.transition(in_reply_to, &recipient, DeliveryStatus::Replied, now) {
+        let outcome = match self.transition(in_reply_to, recipient_id, DeliveryStatus::Replied, now)
+        {
             Ok(()) => ReplyOutcome::Closed,
             Err(TransitionError::NotFound) => ReplyOutcome::Closed,
             Err(TransitionError::Illegal { from, .. }) => {
@@ -1000,33 +965,20 @@ impl Ledger {
         outcome
     }
 
-    /// ★회신자의 계약을 고르는 **단일 규칙**(id 우선 → 이름 폴백) — `close_on_reply` 와
-    /// `fail_on_undeliverable_reply` 가 **같은 함수**를 쓴다(load-bearing)★.
+    /// ★회신자의 계약을 고르는 **단일 규칙** — `close_on_reply` 와 `fail_on_undeliverable_reply` 가 **같은
+    /// 함수**를 쓴다(load-bearing)★.
     ///
     /// ★왜 함수로 묶나★: 두 동사는 같은 회신 1건의 두 결말(수용 → `replied` / 도달 불가 확정 →
     ///   `reply_failed`)이다. 선택 규칙이 갈리면 **같은 회신이 서로 다른 계약을 지목**해, 성공 경로가 닫은
     ///   계약과 실패 경로가 종결한 계약이 어긋난다(A6 가 잡은 부류의 재발 — 그때도 원인은 "한 규칙을 두 곳에
-    ///   따로 쓴 것" 이었다). 규칙 본문의 근거·수용된 잔여는 `close_on_reply` 헤더가 정본이다.
-    fn match_contract_for_replier(
-        &self,
-        in_reply_to: &str,
-        replier_name: &str,
-        replier_id: PeerId,
-        allow_name_fallback: bool,
-    ) -> Option<usize> {
+    ///   따로 쓴 것" 이었다).
+    /// ★id 하나로만 고른다 — 이름으로 떨어지지 않는다(ADR-0309 결정 7)★: 계약은 잠든 수신자 앞이어도 열 때부터
+    ///   id 를 든다. 이름 폴백을 되살리면 동명 쌍둥이 · 옛 이름을 새로 가진 다른 에이전트가 남의 계약을 닫는다.
+    // ADR-0309
+    fn match_contract_for_replier(&self, in_reply_to: &str, replier_id: PeerId) -> Option<usize> {
         self.requests
             .iter()
-            .position(|r| r.request_id == in_reply_to && r.recipient_id == Some(replier_id))
-            .or_else(|| {
-                if !allow_name_fallback {
-                    return None;
-                }
-                self.requests.iter().position(|r| {
-                    r.request_id == in_reply_to
-                        && r.recipient_id.is_none()
-                        && r.recipient == replier_name
-                })
-            })
+            .position(|r| r.request_id == in_reply_to && r.recipient_id == replier_id)
     }
 
     /// ★회신이 **도달 불가 확정**이라 계약을 실패 종결한다(spec §3 항목 7-④ · ADR-0116 결정 2 · ADR-0118)★ —
@@ -1048,16 +1000,9 @@ impl Ledger {
     pub fn fail_on_undeliverable_reply(
         &mut self,
         in_reply_to: &str,
-        replier_name: &str,
         replier_id: PeerId,
-        allow_name_fallback: bool,
     ) -> ReplyFailOutcome {
-        let Some(idx) = self.match_contract_for_replier(
-            in_reply_to,
-            replier_name,
-            replier_id,
-            allow_name_fallback,
-        ) else {
+        let Some(idx) = self.match_contract_for_replier(in_reply_to, replier_id) else {
             return ReplyFailOutcome::NoMatch;
         };
         let entry = &mut self.requests[idx];
@@ -1073,8 +1018,8 @@ impl Ledger {
         ReplyFailOutcome::Failed
     }
 
-    /// ★요청자 프로필 삭제 정리 — 그 이름이 **요청자**인 오픈 계약을 `reply_failed` 로 종결한다★
-    /// (spec §5 삭제 정리 ② · ADR-0116 결정 3).
+    /// ★요청자 프로필 삭제 정리 — 그 id 가 **요청자**인 오픈 계약을 `reply_failed` 로 종결한다★
+    /// (spec §5 삭제 정리 ② · ADR-0116 결정 3 · ADR-0309 결정 6).
     ///
     /// ★대상 = 요청자(`sender`) 쪽만★: 회신이 갈 곳이 사라졌으므로 그 계약은 결말이 확정됐다. **회신자
     ///   (`recipient`) 쪽이 삭제된 계약은 유지한다** — 발신자는 기한 통지(spec §3 항목 4~5)로 무응답을 알게
@@ -1084,17 +1029,15 @@ impl Ledger {
     ///   `!closed` 필터가 그 규칙을 구조적으로 보장한다.
     /// ★가드 우선(ADR-0118 결정 3)★: 잠정·은퇴 예정 표시 계약은 건너뛰고 그 수를 함께 돌려준다(정산 후
     ///   재발화는 **하지 않는다** — 삭제 정리는 삭제 시점 단발이고, 그 잔여의 결말은 TTL 이다. spec §5).
-    /// ★이름 기준 매칭★: 계약의 발신자 축은 이름(+id)이지만 삭제된 프로필의 **id 로 매칭하지 않는다** —
-    ///   계약의 `sender` 는 **발송 시점 표시 이름**이고 파킹 큐 키도 이름이므로, 같은 축으로 판정해야 정리
-    ///   대상이 갈리지 않는다(id 로 바꾸면 개명 전 이름으로 열린 계약을 놓친다).
-    ///   ★발동 게이트는 그 위에서 id 로 판정한다(리뷰 fix D1 — `service::handle_profile_deleted`)★: 여기까지
-    ///   왔다는 것은 이미 "그 프로필의 세션이 살아 있지 않다" 가 확정됐다는 뜻이다. 게이트(정확성)와 대상
-    ///   선택(이름 축)이 서로 다른 축을 쓰는 것은 의도된 분업이다.
-    // ADR-0116 (결정 3) / ADR-0118 (결정 3)
-    pub fn fail_open_requests_from(&mut self, sender: &str) -> RequesterCleanup {
+    /// ★`sender_id` 로 대조한다 — 이름(`sender`)을 보지 않는다(ADR-0309 결정 6)★: `sender` 는 발송 시점
+    ///   표시 이름이라, 이름으로 고르면 개명 전 이름으로 열린 계약을 놓치고 같은 이름을 가진 다른 에이전트의
+    ///   계약까지 닫는다. 발동 게이트(그 프로필의 세션이 살아 있지 않음)는 호출자가 같은 id 로 먼저 판정한다
+    ///   (`service::handle_profile_deleted`).
+    // ADR-0116 (결정 3) / ADR-0118 (결정 3) / ADR-0309 (결정 6)
+    pub fn fail_open_requests_from(&mut self, sender_id: PeerId) -> RequesterCleanup {
         let mut out = RequesterCleanup::default();
         for r in self.requests.iter_mut() {
-            if r.closed || r.sender != sender {
+            if r.closed || r.sender_id != sender_id {
                 continue;
             }
             if r.provisional || r.pending_retirement {
@@ -1103,7 +1046,7 @@ impl Ledger {
             }
             r.closed = true;
             r.reply_failed = true;
-            out.failed.push((r.request_id.clone(), r.recipient.clone()));
+            out.failed.push((r.request_id.clone(), r.recipient_id));
         }
         if !out.failed.is_empty() {
             self.purge_finished_without_history();
@@ -1119,11 +1062,11 @@ impl Ledger {
     ///   이력 레코드가 애초에 없다(park 조차 안 됐다) — 그래서 닫기만 하면 그 항목을 evict 할 계기가 영영
     ///   없어 반려가 반복될수록 추적 목록이 무계 증식한다. 반려는 "계약이 이행됨" 이 아니라 "계약이 성립한
     ///   적 없음" 이므로, 이력을 남기지 않고 흔적째 지우는 게 의미상으로도 맞다.
-    pub fn drop_request(&mut self, request_id: &str, recipient: &str) -> DropOutcome {
+    pub fn drop_request(&mut self, request_id: &str, recipient_id: PeerId) -> DropOutcome {
         let Some(idx) = self
             .requests
             .iter()
-            .position(|r| r.request_id == request_id && r.recipient == recipient)
+            .position(|r| r.request_id == request_id && r.recipient_id == recipient_id)
         else {
             return DropOutcome::NotFound;
         };
@@ -1147,8 +1090,8 @@ impl Ledger {
     /// ★회수는 파괴적이지 않다★: 잠정 계약은 **아직 발신자에게 접수를 보고하지 않은** 예약이거나(패닉으로
     ///   응답이 사라진 경우) 이미 실패 행으로 보고된 것이다. 어느 쪽이든 되돌리는 게 옳다.
     // ADR-0108 (mark-and-sweep — 예약 회수의 보증 계층)
-    pub fn reclaim_abandoned_reservations(&mut self) -> Vec<(String, String)> {
-        let abandoned: Vec<(String, String, Option<(String, String)>)> = self
+    pub fn reclaim_abandoned_reservations(&mut self) -> Vec<(String, PeerId)> {
+        let abandoned: Vec<(String, PeerId, Option<(String, PeerId)>)> = self
             .requests
             .iter()
             .filter(|r| {
@@ -1160,25 +1103,25 @@ impl Ledger {
             .map(|r| {
                 (
                     r.request_id.clone(),
-                    r.recipient.clone(),
+                    r.recipient_id,
                     r.marked_victim.clone(),
                 )
             })
             .collect();
         let mut reclaimed = Vec::with_capacity(abandoned.len());
-        for (id, recipient, victim) in abandoned {
+        for (id, recipient_id, victim) in abandoned {
             // 표시 해제 + 잠정 계약 제거 = 롤백과 **같은 규칙**(두 곳이 갈리지 않게 같은 동사를 쓴다).
-            if let Some((vid, vrecipient)) = &victim {
+            if let Some((vid, vrecipient_id)) = &victim {
                 if let Some(v) = self
                     .requests
                     .iter_mut()
-                    .find(|r| &r.request_id == vid && &r.recipient == vrecipient)
+                    .find(|r| &r.request_id == vid && r.recipient_id == *vrecipient_id)
                 {
                     v.pending_retirement = false;
                 }
             }
-            self.drop_request(&id, &recipient);
-            reclaimed.push((id, recipient));
+            self.drop_request(&id, recipient_id);
+            reclaimed.push((id, recipient_id));
         }
         reclaimed
     }
@@ -1215,6 +1158,7 @@ impl Ledger {
                     sender: r.sender.clone(),
                     sender_id: r.sender_id,
                     recipient: r.recipient.clone(),
+                    recipient_id: r.recipient_id,
                     reply_by_raw,
                 });
             }
@@ -1273,11 +1217,11 @@ impl Ledger {
 
     /// 테스트 전용(H2 픽스처) — 그 계약을 회신 없이 닫는다(슬롯 비우기 — 픽스처 전용 지름길).
     #[cfg(any(test, feature = "test-harness"))]
-    pub fn close_for_test(&mut self, request_id: &str, recipient: &str, now: Instant) {
+    pub fn close_for_test(&mut self, request_id: &str, recipient_id: PeerId, now: Instant) {
         if let Some(r) = self
             .requests
             .iter_mut()
-            .find(|r| r.request_id == request_id && r.recipient == recipient)
+            .find(|r| r.request_id == request_id && r.recipient_id == recipient_id)
         {
             r.closed = true;
         }
@@ -1305,11 +1249,11 @@ impl Ledger {
     pub fn contract_outcome_for_test(
         &self,
         request_id: &str,
-        recipient: &str,
+        recipient_id: PeerId,
     ) -> Option<&'static str> {
         self.requests
             .iter()
-            .find(|r| r.request_id == request_id && r.recipient == recipient)
+            .find(|r| r.request_id == request_id && r.recipient_id == recipient_id)
             .map(|r| match (r.closed, r.reply_failed) {
                 (true, true) => "reply_failed",
                 (true, false) => "replied",
@@ -1317,38 +1261,22 @@ impl Ledger {
             })
     }
 
-    /// ★계약에 박힌 수신자 id 관측(리뷰 fix D4)★ — `None` = 아직 이름으로만 귀속된 계약(잠듦 파킹 구간).
-    ///
-    /// ★왜 필요한가★: "복원 후 실제 주입 시점에 착지 id 를 박는다"(`rebind_request_recipient`)는 **상태로만**
-    ///   확인할 수 있고, 그 배선이 빠지면 동명 세션이 남의 계약을 이름으로 닫는 경로가 열린다.
-    #[cfg(any(test, feature = "test-harness"))]
-    pub fn contract_recipient_id_for_test(
-        &self,
-        request_id: &str,
-        recipient: &str,
-    ) -> Option<PeerId> {
-        self.requests
-            .iter()
-            .find(|r| r.request_id == request_id && r.recipient == recipient)
-            .and_then(|r| r.recipient_id)
-    }
-
     /// 테스트 전용(C2) — 그 계약 키가 추적 목록에 존재하나(닫힘·은퇴 표시 무관). 잠정/은퇴 창의 관측축.
     #[cfg(any(test, feature = "test-harness"))]
-    pub fn is_tracked_for_test(&self, request_id: &str, recipient: &str) -> bool {
+    pub fn is_tracked_for_test(&self, request_id: &str, recipient_id: PeerId) -> bool {
         self.requests
             .iter()
-            .any(|r| r.request_id == request_id && r.recipient == recipient)
+            .any(|r| r.request_id == request_id && r.recipient_id == recipient_id)
     }
 
     /// ★왜 테스트에만★: 운영 호출부는 계약 키를 **둘 다** 손에 쥔 채 부른다(발송·회신 경로가 수신자를
     ///   이미 안다) — 이 역조회는 옛 "id 하나짜리 계약" 시절 테스트를 새 키에 맞추는 편의일 뿐이다.
     #[cfg(test)]
-    fn party_of(&self, request_id: &str) -> Option<(String, Option<PeerId>)> {
+    fn party_of(&self, request_id: &str) -> Option<PeerId> {
         self.requests
             .iter()
             .find(|r| r.request_id == request_id)
-            .map(|r| (r.recipient.clone(), r.recipient_id))
+            .map(|r| r.recipient_id)
     }
 
     /// 오픈(미회신) request 수(관측/테스트).
@@ -1382,7 +1310,7 @@ impl Ledger {
     /// ★포함 기준 = `!closed`(= `is_live()`) — load-bearing★: 통지 여부는 **필드로 노출**하고 목록에서
     ///   제외하지 않는다. **여기 기준을 바꾸면 `is_live()` 도 함께 바꿔야 한다**(갈리면 같은 버그가 재발 —
     ///   `is_live` 주석의 4단계 시퀀스).
-    /// ★필터는 상위가★: 이름별(발신/수신) 갈래는 호출자가 정한다 — 장부는 이름 규약을 모른다.
+    /// ★필터는 상위가★: 발신/수신 갈래는 호출자가 정한다.
     // ADR-0103 (spec §6 eg_messages 무인자 = 내 미결)
     pub fn open_requests(&self) -> Vec<OpenRequestView> {
         let mut out: Vec<OpenRequestView> = self
@@ -1408,39 +1336,29 @@ impl Ledger {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tid;
 
     /// 옛 "id 하나 = 계약 하나" 테스트를 계약 키(ADR-0111 결정 5)에 얹는 어댑터 — 그 계약의
     /// **수신자 본인이 회신했다** 로 해석한다.
     fn reply(l: &mut Ledger, id: &str, now: Instant) -> ReplyOutcome {
-        match l.party_of(id) {
-            Some((name, pid)) => {
-                l.close_on_reply(id, &name, pid.unwrap_or_else(PeerId::nil), true, now)
-            }
-            None => l.close_on_reply(id, "nobody", PeerId::nil(), true, now),
-        }
+        let replier = l.party_of(id).unwrap_or_else(PeerId::nil);
+        l.close_on_reply(id, replier, now)
     }
 
     fn drop_req(l: &mut Ledger, id: &str) -> DropOutcome {
-        match l.party_of(id) {
-            Some((name, _)) => l.drop_request(id, &name),
-            None => l.drop_request(id, "nobody"),
-        }
+        let party = l.party_of(id).unwrap_or_else(PeerId::nil);
+        l.drop_request(id, party)
     }
 
     fn closed(l: &Ledger, id: &str) -> bool {
-        match l.party_of(id) {
-            Some((name, _)) => l.is_request_closed(id, &name),
-            None => false,
-        }
+        l.party_of(id)
+            .is_some_and(|party| l.is_request_closed(id, party))
     }
 
     fn commit(l: &mut Ledger, provisional: Option<&str>, retired: Option<&str>) {
-        let pv = provisional.and_then(|id| l.party_of(id).map(|(n, _)| (id.to_string(), n)));
-        let rt = retired.and_then(|id| l.party_of(id).map(|(n, _)| (id.to_string(), n)));
-        l.commit_open(
-            pv.as_ref().map(|(i, n)| (i.as_str(), n.as_str())),
-            rt.as_ref().map(|(i, n)| (i.as_str(), n.as_str())),
-        );
+        let pv = provisional.and_then(|id| l.party_of(id).map(|p| (id, p)));
+        let rt = retired.and_then(|id| l.party_of(id).map(|p| (id, p)));
+        l.commit_open(pv, rt);
     }
 
     fn rollback(
@@ -1448,12 +1366,9 @@ mod tests {
         provisional: Option<&str>,
         retired: Option<&str>,
     ) -> Option<DropOutcome> {
-        let pv = provisional.and_then(|id| l.party_of(id).map(|(n, _)| (id.to_string(), n)));
-        let rt = retired.and_then(|id| l.party_of(id).map(|(n, _)| (id.to_string(), n)));
-        l.rollback_open(
-            pv.as_ref().map(|(i, n)| (i.as_str(), n.as_str())),
-            rt.as_ref().map(|(i, n)| (i.as_str(), n.as_str())),
-        )
+        let pv = provisional.and_then(|id| l.party_of(id).map(|p| (id, p)));
+        let rt = retired.and_then(|id| l.party_of(id).map(|p| (id, p)));
+        l.rollback_open(pv, rt)
     }
 
     fn t0() -> Instant {
@@ -1479,7 +1394,7 @@ mod tests {
         reply_by: Option<(Duration, String)>,
         now: Instant,
     ) -> OpenOutcome {
-        let out = l.open_request(id, "alice", sid(), "bob", None, reply_by, now);
+        let out = l.open_request(id, "alice", tid("alice"), "bob", tid("bob"), reply_by, now);
         commit(l, Some(id), None);
         out
     }
@@ -1492,11 +1407,20 @@ mod tests {
         reply_by: Option<(Duration, String)>,
         now: Instant,
     ) {
-        l.record(id, "alice", "bob", "q", DeliveryStatus::Pending, now);
-        l.open_request(id, "alice", sid(), "bob", None, reply_by, now);
+        l.record(
+            id,
+            "alice",
+            tid("alice"),
+            "bob",
+            Some(tid("bob")),
+            "q",
+            DeliveryStatus::Pending,
+            now,
+        );
+        l.open_request(id, "alice", sid(), "bob", tid("bob"), reply_by, now);
         commit(l, Some(id), None);
         assert_eq!(
-            l.transition(id, "bob", DeliveryStatus::Delivered, now),
+            l.transition(id, tid("bob"), DeliveryStatus::Delivered, now),
             Ok(()),
             "전제: 주입까지 끝난 계약"
         );
@@ -1507,7 +1431,16 @@ mod tests {
     fn record_appends_and_reports_status() {
         let mut l = Ledger::new();
         let now = t0();
-        l.record("m1", "alice", "bob", "hi", DeliveryStatus::Pending, now);
+        l.record(
+            "m1",
+            "alice",
+            tid("alice"),
+            "bob",
+            Some(tid("bob")),
+            "hi",
+            DeliveryStatus::Pending,
+            now,
+        );
         let recs = l.records_for("m1");
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].status, DeliveryStatus::Pending);
@@ -1523,7 +1456,9 @@ mod tests {
             l.record(
                 &format!("m{i}"),
                 "a",
+                tid("a"),
                 "b",
+                Some(tid("b")),
                 "x",
                 DeliveryStatus::Delivered,
                 now,
@@ -1539,10 +1474,19 @@ mod tests {
     fn transition_records_timestamp_and_status() {
         let mut l = Ledger::new();
         let now = t0();
-        l.record("m1", "a", "b", "x", DeliveryStatus::Pending, now);
+        l.record(
+            "m1",
+            "a",
+            tid("a"),
+            "b",
+            Some(tid("b")),
+            "x",
+            DeliveryStatus::Pending,
+            now,
+        );
         let later = now + Duration::from_secs(5);
         assert_eq!(
-            l.transition("m1", "b", DeliveryStatus::Delivered, later),
+            l.transition("m1", tid("b"), DeliveryStatus::Delivered, later),
             Ok(())
         );
         let rec = l.records_for("m1")[0];
@@ -1555,12 +1499,39 @@ mod tests {
     fn transition_targets_recipient_for_group_broadcast() {
         let mut l = Ledger::new();
         let now = t0();
-        l.record("g1", "boss", "a", "rebase", DeliveryStatus::Pending, now);
-        l.record("g1", "boss", "b", "rebase", DeliveryStatus::Pending, now);
-        l.record("g1", "boss", "c", "rebase", DeliveryStatus::Skipped, now);
+        l.record(
+            "g1",
+            "boss",
+            tid("boss"),
+            "a",
+            Some(tid("a")),
+            "rebase",
+            DeliveryStatus::Pending,
+            now,
+        );
+        l.record(
+            "g1",
+            "boss",
+            tid("boss"),
+            "b",
+            Some(tid("b")),
+            "rebase",
+            DeliveryStatus::Pending,
+            now,
+        );
+        l.record(
+            "g1",
+            "boss",
+            tid("boss"),
+            "c",
+            Some(tid("c")),
+            "rebase",
+            DeliveryStatus::Skipped,
+            now,
+        );
         let later = now + Duration::from_secs(1);
         assert_eq!(
-            l.transition("g1", "a", DeliveryStatus::Delivered, later),
+            l.transition("g1", tid("a"), DeliveryStatus::Delivered, later),
             Ok(())
         );
         let recs = l.records_for("g1");
@@ -1577,7 +1548,7 @@ mod tests {
     fn transition_missing_record_returns_not_found() {
         let mut l = Ledger::new();
         assert_eq!(
-            l.transition("nope", "b", DeliveryStatus::Delivered, t0()),
+            l.transition("nope", tid("b"), DeliveryStatus::Delivered, t0()),
             Err(TransitionError::NotFound)
         );
     }
@@ -1587,16 +1558,25 @@ mod tests {
         let mut l = Ledger::new();
         let now = t0();
 
-        l.record("e1", "a", "b", "x", DeliveryStatus::Pending, now);
+        l.record(
+            "e1",
+            "a",
+            tid("a"),
+            "b",
+            Some(tid("b")),
+            "x",
+            DeliveryStatus::Pending,
+            now,
+        );
         assert_eq!(
-            l.transition("e1", "b", DeliveryStatus::Expired, now),
+            l.transition("e1", tid("b"), DeliveryStatus::Expired, now),
             Ok(()),
             "Pending → Expired 는 합법"
         );
         assert_eq!(
             l.transition(
                 "e1",
-                "b",
+                tid("b"),
                 DeliveryStatus::Delivered,
                 now + Duration::from_secs(1)
             ),
@@ -1612,9 +1592,18 @@ mod tests {
             "불법 전이는 상태를 안 바꿈"
         );
 
-        l.record("p1", "a", "b", "x", DeliveryStatus::Pending, now);
+        l.record(
+            "p1",
+            "a",
+            tid("a"),
+            "b",
+            Some(tid("b")),
+            "x",
+            DeliveryStatus::Pending,
+            now,
+        );
         assert_eq!(
-            l.transition("p1", "b", DeliveryStatus::Replied, now),
+            l.transition("p1", tid("b"), DeliveryStatus::Replied, now),
             Err(TransitionError::Illegal {
                 from: DeliveryStatus::Pending,
                 to: DeliveryStatus::Replied
@@ -1622,17 +1611,26 @@ mod tests {
             "Pending → Replied 는 불법(Delivered 경유 필요)"
         );
 
-        l.record("r1", "a", "b", "x", DeliveryStatus::Pending, now);
+        l.record(
+            "r1",
+            "a",
+            tid("a"),
+            "b",
+            Some(tid("b")),
+            "x",
+            DeliveryStatus::Pending,
+            now,
+        );
         assert_eq!(
-            l.transition("r1", "b", DeliveryStatus::Delivered, now),
+            l.transition("r1", tid("b"), DeliveryStatus::Delivered, now),
             Ok(())
         );
         assert_eq!(
-            l.transition("r1", "b", DeliveryStatus::Replied, now),
+            l.transition("r1", tid("b"), DeliveryStatus::Replied, now),
             Ok(())
         );
         assert_eq!(
-            l.transition("r1", "b", DeliveryStatus::Pending, now),
+            l.transition("r1", tid("b"), DeliveryStatus::Pending, now),
             Err(TransitionError::Illegal {
                 from: DeliveryStatus::Replied,
                 to: DeliveryStatus::Pending
@@ -1640,9 +1638,18 @@ mod tests {
             "Replied → Pending 은 불법(terminal 되돌림)"
         );
 
-        l.record("s1", "a", "b", "x", DeliveryStatus::Skipped, now);
+        l.record(
+            "s1",
+            "a",
+            tid("a"),
+            "b",
+            Some(tid("b")),
+            "x",
+            DeliveryStatus::Skipped,
+            now,
+        );
         assert_eq!(
-            l.transition("s1", "b", DeliveryStatus::Pending, now),
+            l.transition("s1", tid("b"), DeliveryStatus::Pending, now),
             Err(TransitionError::Illegal {
                 from: DeliveryStatus::Skipped,
                 to: DeliveryStatus::Pending
@@ -1655,30 +1662,69 @@ mod tests {
     fn transition_accepts_legal_edges() {
         let now = t0();
         let mut l = Ledger::new();
-        l.record("m", "a", "b", "x", DeliveryStatus::Pending, now);
+        l.record(
+            "m",
+            "a",
+            tid("a"),
+            "b",
+            Some(tid("b")),
+            "x",
+            DeliveryStatus::Pending,
+            now,
+        );
         assert_eq!(
-            l.transition("m", "b", DeliveryStatus::Delivered, now),
+            l.transition("m", tid("b"), DeliveryStatus::Delivered, now),
             Ok(())
         );
-        assert_eq!(l.transition("m", "b", DeliveryStatus::Replied, now), Ok(()));
+        assert_eq!(
+            l.transition("m", tid("b"), DeliveryStatus::Replied, now),
+            Ok(())
+        );
         let mut l2 = Ledger::new();
-        l2.record("a", "x", "y", "b", DeliveryStatus::Pending, now);
+        l2.record(
+            "a",
+            "x",
+            tid("x"),
+            "y",
+            Some(tid("y")),
+            "b",
+            DeliveryStatus::Pending,
+            now,
+        );
         assert_eq!(
-            l2.transition("a", "y", DeliveryStatus::Skipped, now),
+            l2.transition("a", tid("y"), DeliveryStatus::Skipped, now),
             Ok(())
         );
-        l2.record("c", "x", "y", "b", DeliveryStatus::Pending, now);
+        l2.record(
+            "c",
+            "x",
+            tid("x"),
+            "y",
+            Some(tid("y")),
+            "b",
+            DeliveryStatus::Pending,
+            now,
+        );
         assert_eq!(
-            l2.transition("c", "y", DeliveryStatus::Delivered, now),
+            l2.transition("c", tid("y"), DeliveryStatus::Delivered, now),
             Ok(())
         );
         assert_eq!(
-            l2.transition("c", "y", DeliveryStatus::Skipped, now),
+            l2.transition("c", tid("y"), DeliveryStatus::Skipped, now),
             Ok(())
         );
-        l2.record("d", "x", "y", "b", DeliveryStatus::Pending, now);
+        l2.record(
+            "d",
+            "x",
+            tid("x"),
+            "y",
+            Some(tid("y")),
+            "b",
+            DeliveryStatus::Pending,
+            now,
+        );
         assert_eq!(
-            l2.transition("d", "y", DeliveryStatus::Expired, now),
+            l2.transition("d", tid("y"), DeliveryStatus::Expired, now),
             Ok(())
         );
     }
@@ -1689,7 +1735,7 @@ mod tests {
         let mut l = Ledger::new();
         let now = t0();
         assert_eq!(
-            l.open_request("req-1", "alice", sid(), "bob", None, None, now),
+            l.open_request("req-1", "alice", sid(), "bob", tid("bob"), None, now),
             OpenOutcome::Opened
         );
         assert_eq!(l.open_request_count(), 1);
@@ -1701,7 +1747,7 @@ mod tests {
     fn strict_reply_wrong_id_does_not_close() {
         let mut l = Ledger::new();
         let now = t0();
-        l.open_request("req-1", "alice", sid(), "bob", None, None, now);
+        l.open_request("req-1", "alice", sid(), "bob", tid("bob"), None, now);
         assert_eq!(reply(&mut l, "req-999", now), ReplyOutcome::NoMatch);
         assert_eq!(l.open_request_count(), 1, "틀린 id 는 request 를 안 닫아야");
     }
@@ -1721,16 +1767,16 @@ mod tests {
         let mut l = Ledger::new();
         let now = t0();
         assert_eq!(
-            l.open_request("req-1", "alice", sid(), "bob", None, None, now),
+            l.open_request("req-1", "alice", sid(), "bob", tid("bob"), None, now),
             OpenOutcome::Opened
         );
         assert_eq!(
-            l.open_request("req-1", "alice", sid(), "carol", None, None, now),
+            l.open_request("req-1", "alice", sid(), "carol", tid("carol"), None, now),
             OpenOutcome::Opened,
             "같은 메시지 id 의 **다른 수신자** = 독립 계약(다중 수신자 request)"
         );
         assert_eq!(
-            l.open_request("req-1", "alice", sid(), "bob", None, None, now),
+            l.open_request("req-1", "alice", sid(), "bob", tid("bob"), None, now),
             OpenOutcome::DuplicateId,
             "같은 계약 키(id, 수신자)의 재오픈은 거부"
         );
@@ -1748,7 +1794,7 @@ mod tests {
         open_delivered_request(&mut l, "req-1", None, now);
         assert_eq!(reply(&mut l, "req-1", now), ReplyOutcome::Closed);
         assert_eq!(
-            l.open_request("req-1", "alice", sid(), "bob", None, None, now),
+            l.open_request("req-1", "alice", sid(), "bob", tid("bob"), None, now),
             OpenOutcome::DuplicateId,
             "닫힌 id 재오픈은 거부(유일성 전제)"
         );
@@ -1767,16 +1813,18 @@ mod tests {
         l.record(
             "req-1",
             "alice",
+            tid("alice"),
             "bob",
+            Some(tid("bob")),
             "질문",
             DeliveryStatus::Pending,
             now,
         );
-        l.open_request("req-1", "alice", sid(), "bob", None, None, now);
+        l.open_request("req-1", "alice", sid(), "bob", tid("bob"), None, now);
         // 주입(Delivered) — Delivered → Replied 만 합법이므로 선행 필요.
         let delivered_at = now + Duration::from_secs(1);
         assert_eq!(
-            l.transition("req-1", "bob", DeliveryStatus::Delivered, delivered_at),
+            l.transition("req-1", tid("bob"), DeliveryStatus::Delivered, delivered_at),
             Ok(())
         );
         let reply_at = now + Duration::from_secs(30);
@@ -1793,8 +1841,17 @@ mod tests {
     fn close_on_reply_against_pending_history_is_anomaly_but_still_closes() {
         let mut l = Ledger::new();
         let now = t0();
-        l.record("req-1", "alice", "bob", "q", DeliveryStatus::Pending, now);
-        l.open_request("req-1", "alice", sid(), "bob", None, None, now);
+        l.record(
+            "req-1",
+            "alice",
+            tid("alice"),
+            "bob",
+            Some(tid("bob")),
+            "q",
+            DeliveryStatus::Pending,
+            now,
+        );
+        l.open_request("req-1", "alice", sid(), "bob", tid("bob"), None, now);
         assert_eq!(
             reply(&mut l, "req-1", now),
             ReplyOutcome::ClosedHistoryAnomaly {
@@ -1819,8 +1876,17 @@ mod tests {
         let mut l = Ledger::with_capacity(1);
         let now = t0();
         // 추적은 이력과 별도 맵이라 `record` 없이 계약만 열 수 있다 — req-1 은 가리킬 이력 행이 처음부터 없다.
-        l.open_request("req-1", "alice", sid(), "bob", None, None, now);
-        l.record("other", "x", "y", "z", DeliveryStatus::Delivered, now);
+        l.open_request("req-1", "alice", sid(), "bob", tid("bob"), None, now);
+        l.record(
+            "other",
+            "x",
+            tid("x"),
+            "y",
+            Some(tid("y")),
+            "z",
+            DeliveryStatus::Delivered,
+            now,
+        );
         assert_eq!(
             reply(&mut l, "req-1", now),
             ReplyOutcome::Closed,
@@ -1859,7 +1925,7 @@ mod tests {
             "alice",
             sender,
             "bob",
-            None,
+            tid("bob"),
             Some((reply_by, "60m".to_string())),
             now,
         );
@@ -1892,7 +1958,15 @@ mod tests {
         let mut l = Ledger::new();
         let now = t0();
         let reply_by = Duration::from_secs(600);
-        l.open_request("req-1", "alice", sid(), "bob", None, rb(reply_by), now);
+        l.open_request(
+            "req-1",
+            "alice",
+            sid(),
+            "bob",
+            tid("bob"),
+            rb(reply_by),
+            now,
+        );
         assert_eq!(reply(&mut l, "req-1", now), ReplyOutcome::Closed);
         let over = now + reply_by + Duration::from_secs(60);
         assert!(
@@ -1910,12 +1984,28 @@ mod tests {
         open_delivered_request(&mut l, "closed-1", rb(reply_by), now);
         assert_eq!(reply(&mut l, "closed-1", now), ReplyOutcome::Closed);
         assert_eq!(
-            l.open_request("closed-1", "alice", sid(), "bob", None, rb(reply_by), now),
+            l.open_request(
+                "closed-1",
+                "alice",
+                sid(),
+                "bob",
+                tid("bob"),
+                rb(reply_by),
+                now
+            ),
             OpenOutcome::DuplicateId,
             "닫힌 항목은 추적에 남아 재오픈을 막는다"
         );
 
-        l.open_request("dropped-1", "alice", sid(), "bob", None, rb(reply_by), now);
+        l.open_request(
+            "dropped-1",
+            "alice",
+            sid(),
+            "bob",
+            tid("bob"),
+            rb(reply_by),
+            now,
+        );
         assert_eq!(
             drop_req(&mut l, "dropped-1"),
             DropOutcome::Removed { notified: false },
@@ -1927,7 +2017,15 @@ mod tests {
             "멱등 — 두 번째는 NotFound"
         );
         assert_eq!(
-            l.open_request("dropped-1", "alice", sid(), "bob", None, rb(reply_by), now),
+            l.open_request(
+                "dropped-1",
+                "alice",
+                sid(),
+                "bob",
+                tid("bob"),
+                rb(reply_by),
+                now
+            ),
             OpenOutcome::Opened,
             "제거된 id 는 다시 열 수 있다(계약 미성립 = 흔적 없음)"
         );
@@ -1938,7 +2036,7 @@ mod tests {
     fn request_without_reply_by_never_times_out() {
         let mut l = Ledger::new();
         let now = t0();
-        l.open_request("req-1", "alice", sid(), "bob", None, None, now);
+        l.open_request("req-1", "alice", sid(), "bob", tid("bob"), None, now);
         let far = now + Duration::from_secs(100_000);
         assert!(
             l.due_timeouts(far).is_empty(),
@@ -1950,7 +2048,16 @@ mod tests {
     fn skipped_status_for_group_dead_member() {
         let mut l = Ledger::new();
         let now = t0();
-        l.record("g1", "boss", "dead", "msg", DeliveryStatus::Skipped, now);
+        l.record(
+            "g1",
+            "boss",
+            tid("boss"),
+            "dead",
+            Some(tid("dead")),
+            "msg",
+            DeliveryStatus::Skipped,
+            now,
+        );
         assert_eq!(l.records_for("g1")[0].status, DeliveryStatus::Skipped);
     }
 
@@ -1960,7 +2067,16 @@ mod tests {
         let cap = 2;
         let mut l = Ledger::with_capacity(cap);
         let now = t0();
-        l.record("done", "alice", "bob", "q", DeliveryStatus::Pending, now);
+        l.record(
+            "done",
+            "alice",
+            tid("alice"),
+            "bob",
+            Some(tid("bob")),
+            "q",
+            DeliveryStatus::Pending,
+            now,
+        );
         open_committed(&mut l, "done", None, now);
         assert!(matches!(
             reply(&mut l, "done", now),
@@ -1970,7 +2086,9 @@ mod tests {
             l.record(
                 &format!("x{i}"),
                 "alice",
+                tid("alice"),
                 "bob",
+                Some(tid("bob")),
                 "q",
                 DeliveryStatus::Delivered,
                 now,
@@ -1993,13 +2111,24 @@ mod tests {
         let mut l = Ledger::with_capacity(cap);
         let now = t0();
         let reply_by = Duration::from_secs(600);
-        l.record("req-1", "alice", "bob", "q", DeliveryStatus::Pending, now);
+        l.record(
+            "req-1",
+            "alice",
+            tid("alice"),
+            "bob",
+            Some(tid("bob")),
+            "q",
+            DeliveryStatus::Pending,
+            now,
+        );
         open_committed(&mut l, "req-1", rb(reply_by), now);
         for i in 0..cap {
             l.record(
                 &format!("x{i}"),
                 "alice",
+                tid("alice"),
                 "bob",
+                Some(tid("bob")),
                 "q",
                 DeliveryStatus::Delivered,
                 now,
@@ -2017,13 +2146,24 @@ mod tests {
 
         // 다른 장부로 재현 — 위에서 이미 통지된 항목과 섞지 않으려고 분리한다.
         let mut l2 = Ledger::with_capacity(cap);
-        l2.record("req-2", "alice", "bob", "q", DeliveryStatus::Pending, now);
+        l2.record(
+            "req-2",
+            "alice",
+            tid("alice"),
+            "bob",
+            Some(tid("bob")),
+            "q",
+            DeliveryStatus::Pending,
+            now,
+        );
         open_committed(&mut l2, "req-2", rb(reply_by), now);
         for i in 0..cap {
             l2.record(
                 &format!("y{i}"),
                 "alice",
+                tid("alice"),
                 "bob",
+                Some(tid("bob")),
                 "q",
                 DeliveryStatus::Delivered,
                 now,
@@ -2044,14 +2184,25 @@ mod tests {
         now: Instant,
     ) -> Ledger {
         let mut l = Ledger::with_capacity(cap);
-        l.record(id, "alice", "bob", "q", DeliveryStatus::Pending, now);
-        l.open_request(id, "alice", sid(), "bob", None, reply_by, now);
+        l.record(
+            id,
+            "alice",
+            tid("alice"),
+            "bob",
+            Some(tid("bob")),
+            "q",
+            DeliveryStatus::Pending,
+            now,
+        );
+        l.open_request(id, "alice", sid(), "bob", tid("bob"), reply_by, now);
         commit(&mut l, Some(id), None);
         for i in 0..cap {
             l.record(
                 &format!("filler{i}"),
                 "alice",
+                tid("alice"),
                 "bob",
+                Some(tid("bob")),
                 "x",
                 DeliveryStatus::Delivered,
                 now,
@@ -2107,13 +2258,24 @@ mod tests {
         let reply_by = Duration::from_secs(60);
         for i in 0..50 {
             let id = format!("r{i}");
-            l.record(&id, "alice", "bob", "q", DeliveryStatus::Pending, now);
+            l.record(
+                &id,
+                "alice",
+                tid("alice"),
+                "bob",
+                Some(tid("bob")),
+                "q",
+                DeliveryStatus::Pending,
+                now,
+            );
             open_committed(&mut l, &id, rb(reply_by), now);
             for j in 0..cap {
                 l.record(
                     &format!("f{i}-{j}"),
                     "alice",
+                    tid("alice"),
                     "bob",
+                    Some(tid("bob")),
                     "x",
                     DeliveryStatus::Delivered,
                     now,
@@ -2137,7 +2299,16 @@ mod tests {
         let over = now + reply_by + Duration::from_secs(1);
         for i in 0..MAX_OPEN_REQUESTS {
             let id = format!("r{i}");
-            l.record(&id, "alice", "bob", "q", DeliveryStatus::Pending, now);
+            l.record(
+                &id,
+                "alice",
+                tid("alice"),
+                "bob",
+                Some(tid("bob")),
+                "q",
+                DeliveryStatus::Pending,
+                now,
+            );
             assert_eq!(
                 open_committed(&mut l, &id, rb(reply_by), now),
                 OpenOutcome::Opened
@@ -2154,7 +2325,7 @@ mod tests {
             "통지돼도 미회신이면 남는다(B3)"
         );
 
-        let outcome = l.open_request("over", "alice", sid(), "bob", None, None, over);
+        let outcome = l.open_request("over", "alice", sid(), "bob", tid("bob"), None, over);
         match outcome {
             OpenOutcome::OpenedAfterMarking(r) => {
                 assert_eq!(r.request_id, "r0", "가장 오래된 것부터 은퇴 표시");
@@ -2191,7 +2362,7 @@ mod tests {
                 OpenOutcome::Opened
             );
         }
-        let outcome = l.open_request("over", "alice", sid(), "bob", None, None, now);
+        let outcome = l.open_request("over", "alice", sid(), "bob", tid("bob"), None, now);
         assert!(
             matches!(outcome, OpenOutcome::OpenedAfterMarking(ref r) if r.request_id == "r0"),
             "기한 없는 계약은 통지 빚이 없어 은퇴 가능: {outcome:?}"
@@ -2213,7 +2384,7 @@ mod tests {
         }
         assert!(l.due_timeouts(now).is_empty(), "전제: 기한 전");
         assert_eq!(
-            l.open_request("over", "alice", sid(), "bob", None, rb(reply_by), now),
+            l.open_request("over", "alice", sid(), "bob", tid("bob"), rb(reply_by), now),
             OpenOutcome::Full,
             "은퇴 가능한 계약이 없으면 반려(통지 약속을 어기지 않는다)"
         );
@@ -2225,7 +2396,7 @@ mod tests {
         let over = now + reply_by + Duration::from_secs(1);
         assert_eq!(l.due_timeouts(over).len(), MAX_OPEN_REQUESTS);
         assert!(matches!(
-            l.open_request("over", "alice", sid(), "bob", None, None, over),
+            l.open_request("over", "alice", sid(), "bob", tid("bob"), None, over),
             OpenOutcome::OpenedAfterMarking(_)
         ));
     }
@@ -2236,21 +2407,39 @@ mod tests {
         let now = t0();
         let sender = sid();
         let recipient = sid();
-        l.record("r1", "alice", "worker", "q", DeliveryStatus::Pending, now);
-        l.open_request("r1", "alice", sender, "worker", Some(recipient), None, now);
-        l.record("r2", "alice", "ghost", "q", DeliveryStatus::Pending, now);
-        l.open_request("r2", "alice", sender, "ghost", None, None, now);
+        l.record(
+            "r1",
+            "alice",
+            tid("alice"),
+            "worker",
+            Some(tid("worker")),
+            "q",
+            DeliveryStatus::Pending,
+            now,
+        );
+        l.open_request("r1", "alice", sender, "worker", recipient, None, now);
+        l.record(
+            "r2",
+            "alice",
+            tid("alice"),
+            "ghost",
+            Some(tid("ghost")),
+            "q",
+            DeliveryStatus::Pending,
+            now,
+        );
+        l.open_request("r2", "alice", sender, "ghost", tid("ghost"), None, now);
 
         let open = l.open_requests();
         assert_eq!(open[0].sender_id, sender);
         assert_eq!(
-            open[0].recipient_id,
-            Some(recipient),
+            open[0].recipient_id, recipient,
             "해석된 수신자는 id 를 남긴다(동명 다수 오귀속 차단의 재료)"
         );
         assert_eq!(
-            open[1].recipient_id, None,
-            "잠듦 파킹은 id 가 없다 — 나중에 그 이름으로 등장한 쪽이 답할 주체(WYSIWYA)"
+            open[1].recipient_id,
+            tid("ghost"),
+            "잠듦 파킹도 열 때부터 그 프로필 id 를 든다(ADR-0309)"
         );
     }
 
@@ -2258,25 +2447,101 @@ mod tests {
     fn records_for_detailed_compares_surviving_rows_against_the_expected_count() {
         let now = t0();
         let mut l = Ledger::with_capacity(8);
-        l.record("m1", "a", "b", "x", DeliveryStatus::Delivered, now);
+        l.record(
+            "m1",
+            "a",
+            tid("a"),
+            "b",
+            Some(tid("b")),
+            "x",
+            DeliveryStatus::Delivered,
+            now,
+        );
         let (rows, truncated) = l.records_for_detailed("m1");
         assert_eq!(rows.len(), 1);
         assert!(!truncated, "기대 1행이 그대로 있으면 완전");
 
         for to in ["x", "y", "z"] {
-            l.record_with_expected("g1", "a", to, "b", DeliveryStatus::Delivered, now, 3);
+            l.record_with_expected(
+                "g1",
+                "a",
+                tid("a"),
+                to,
+                Some(tid(to)),
+                "b",
+                DeliveryStatus::Delivered,
+                now,
+                3,
+            );
         }
         let (rows, truncated) = l.records_for_detailed("g1");
         assert_eq!(rows.len(), 3);
         assert!(!truncated, "3/3 이면 완전");
 
         let mut l2 = Ledger::with_capacity(4);
-        l2.record_with_expected("g2", "a", "m1", "b", DeliveryStatus::Pending, now, 3);
-        l2.record_with_expected("g2", "a", "m2", "b", DeliveryStatus::Pending, now, 3);
-        l2.record("other1", "a", "z", "x", DeliveryStatus::Delivered, now);
-        l2.record_with_expected("g2", "a", "m3", "b", DeliveryStatus::Delivered, now, 3);
-        l2.record("other2", "a", "z", "x", DeliveryStatus::Delivered, now);
-        l2.record("other3", "a", "z", "x", DeliveryStatus::Delivered, now);
+        l2.record_with_expected(
+            "g2",
+            "a",
+            tid("a"),
+            "m1",
+            Some(tid("m1")),
+            "b",
+            DeliveryStatus::Pending,
+            now,
+            3,
+        );
+        l2.record_with_expected(
+            "g2",
+            "a",
+            tid("a"),
+            "m2",
+            Some(tid("m2")),
+            "b",
+            DeliveryStatus::Pending,
+            now,
+            3,
+        );
+        l2.record(
+            "other1",
+            "a",
+            tid("a"),
+            "z",
+            Some(tid("z")),
+            "x",
+            DeliveryStatus::Delivered,
+            now,
+        );
+        l2.record_with_expected(
+            "g2",
+            "a",
+            tid("a"),
+            "m3",
+            Some(tid("m3")),
+            "b",
+            DeliveryStatus::Delivered,
+            now,
+            3,
+        );
+        l2.record(
+            "other2",
+            "a",
+            tid("a"),
+            "z",
+            Some(tid("z")),
+            "x",
+            DeliveryStatus::Delivered,
+            now,
+        );
+        l2.record(
+            "other3",
+            "a",
+            tid("a"),
+            "z",
+            Some(tid("z")),
+            "x",
+            DeliveryStatus::Delivered,
+            now,
+        );
         let (rows, truncated) = l2.records_for_detailed("g2");
         assert_eq!(rows.len(), 1, "g2 는 3행 중 1행만 남았다: {rows:?}");
         assert_ne!(
@@ -2301,14 +2566,14 @@ mod tests {
             );
         }
         assert_eq!(
-            l.open_request("over", "alice", sid(), "bob", None, rb(reply_by), now),
+            l.open_request("over", "alice", sid(), "bob", tid("bob"), rb(reply_by), now),
             OpenOutcome::Full,
             "cap 도달 + 은퇴 가능분 없음 → Full"
         );
         assert_eq!(l.open_request_count(), MAX_OPEN_REQUESTS, "기존 계약 불변");
         assert_eq!(reply(&mut l, "r0", now), ReplyOutcome::Closed);
         assert_eq!(
-            l.open_request("over", "alice", sid(), "bob", None, rb(reply_by), now),
+            l.open_request("over", "alice", sid(), "bob", tid("bob"), rb(reply_by), now),
             OpenOutcome::Opened,
             "닫힌 계약은 cap 계수에서 빠진다"
         );
@@ -2332,7 +2597,7 @@ mod tests {
             .collect();
 
         let OpenOutcome::OpenedAfterMarking(victim) =
-            l.open_request("new", "alice", sid(), "bob", None, None, over)
+            l.open_request("new", "alice", sid(), "bob", tid("bob"), None, over)
         else {
             panic!("전제: 표시 후 수용");
         };
@@ -2353,7 +2618,7 @@ mod tests {
         assert!(r0.notified, "통지 플래그 불변(건드린 적이 없다)");
         assert_eq!(r0.created_at, now, "나이 불변");
         assert!(matches!(
-            l.open_request("new2", "alice", sid(), "bob", None, None, over),
+            l.open_request("new2", "alice", sid(), "bob", tid("bob"), None, over),
             OpenOutcome::OpenedAfterMarking(ref v) if v.request_id == "r0"
         ));
     }
@@ -2376,7 +2641,7 @@ mod tests {
         // ── 롤백 갈래 ──────────────────────────────────────────────────────────────
         let mut l = build();
         let OpenOutcome::OpenedAfterMarking(v1) =
-            l.open_request("PA", "alice", sid(), "bob", None, None, now)
+            l.open_request("PA", "alice", sid(), "bob", tid("bob"), None, now)
         else {
             panic!("전제: 표시 후 수용");
         };
@@ -2388,7 +2653,7 @@ mod tests {
             cap,
             "닫힌 잠정 계약도 정산 전까지 자리를 지킨다(round-6 I1)"
         );
-        let b = l.open_request("PB", "carol", sid(), "dave", None, None, now);
+        let b = l.open_request("PB", "carol", sid(), "dave", tid("dave"), None, now);
         assert!(
             matches!(b, OpenOutcome::OpenedAfterMarking(ref v) if v.request_id == "c1"),
             "B 도 자기 몫의 희생자를 표시해야: {b:?}"
@@ -2406,7 +2671,7 @@ mod tests {
         // ── 커밋 갈래 ──────────────────────────────────────────────────────────────
         let mut l = build();
         let OpenOutcome::OpenedAfterMarking(v1) =
-            l.open_request("PA", "alice", sid(), "bob", None, None, now)
+            l.open_request("PA", "alice", sid(), "bob", tid("bob"), None, now)
         else {
             panic!("전제");
         };
@@ -2431,7 +2696,7 @@ mod tests {
         let now = t0();
         let reply_by = Duration::from_secs(60);
         let over = now + reply_by + Duration::from_secs(1);
-        l.open_request("p", "alice", sid(), "bob", None, rb(reply_by), now);
+        l.open_request("p", "alice", sid(), "bob", tid("bob"), rb(reply_by), now);
         assert!(
             l.due_timeouts(over).is_empty(),
             "잠정 계약은 sweep 대상이 아니다(round-6 I2)"
@@ -2449,7 +2714,7 @@ mod tests {
         );
 
         let mut l = Ledger::new();
-        l.open_request("q", "alice", sid(), "bob", None, rb(reply_by), now);
+        l.open_request("q", "alice", sid(), "bob", tid("bob"), rb(reply_by), now);
         assert!(l.due_timeouts(over).is_empty());
         rollback(&mut l, Some("q"), None);
         assert!(
@@ -2472,11 +2737,11 @@ mod tests {
         }
         let a_at = base + Duration::from_secs(1000);
         assert!(matches!(
-            l.open_request("A", "alice", sid(), "bob", None, None, a_at),
+            l.open_request("A", "alice", sid(), "bob", tid("bob"), None, a_at),
             OpenOutcome::OpenedAfterMarking(ref r) if r.request_id == "evictable"
         ));
 
-        let b = l.open_request("B", "carol", sid(), "dave", None, None, a_at);
+        let b = l.open_request("B", "carol", sid(), "dave", tid("dave"), None, a_at);
         assert_eq!(
             b,
             OpenOutcome::Full,
@@ -2496,7 +2761,7 @@ mod tests {
         for k in 0..50 {
             let provisional = format!("p{k}");
             let OpenOutcome::OpenedAfterMarking(victim) =
-                l.open_request(&provisional, "alice", sid(), "bob", None, None, now)
+                l.open_request(&provisional, "alice", sid(), "bob", tid("bob"), None, now)
             else {
                 panic!("전제: 매 사이클 표시 후 수용");
             };
@@ -2540,13 +2805,13 @@ mod tests {
         let tracking_before = l.tracking_len();
 
         let OpenOutcome::OpenedAfterMarking(victim) =
-            l.open_request("p-live", "alice", sid(), "bob", None, None, now)
+            l.open_request("p-live", "alice", sid(), "bob", tid("bob"), None, now)
         else {
             panic!("전제: 상한 압력으로 표시 후 수용");
         };
         assert_eq!(victim.request_id, "r0");
         let live = ReservationLiveness::new();
-        l.attach_reservation_liveness("p-live", "bob", live.watch());
+        l.attach_reservation_liveness("p-live", tid("bob"), live.watch());
         assert_eq!(l.marked_retirement_count_for_test(), 1, "표시 1건");
 
         for round in 0..3 {
@@ -2555,18 +2820,21 @@ mod tests {
                 "round {round}: 소유자 생존 예약은 sweep 대상이 아니다"
             );
         }
-        assert!(l.is_tracked_for_test("p-live", "bob"), "그대로 남아 있어야");
+        assert!(
+            l.is_tracked_for_test("p-live", tid("bob")),
+            "그대로 남아 있어야"
+        );
         assert_eq!(l.marked_retirement_count_for_test(), 1, "표시도 그대로");
 
         drop(live);
         let reclaimed = l.reclaim_abandoned_reservations();
         assert_eq!(
             reclaimed,
-            vec![("p-live".to_string(), "bob".to_string())],
+            vec![("p-live".to_string(), tid("bob"))],
             "회수한 계약 키를 호출자에게 알려야(락 밖 기록용): {reclaimed:?}"
         );
         assert!(
-            !l.is_tracked_for_test("p-live", "bob"),
+            !l.is_tracked_for_test("p-live", tid("bob")),
             "잠정 계약이 제거돼야"
         );
         assert_eq!(
@@ -2588,14 +2856,24 @@ mod tests {
     fn a_settled_reservation_is_never_reclaimed_even_after_its_guard_is_gone() {
         let mut l = Ledger::new();
         let now = t0();
-        l.record("p-ok", "alice", "bob", "q", DeliveryStatus::Pending, now);
-        let OpenOutcome::Opened = l.open_request("p-ok", "alice", sid(), "bob", None, None, now)
+        l.record(
+            "p-ok",
+            "alice",
+            tid("alice"),
+            "bob",
+            Some(tid("bob")),
+            "q",
+            DeliveryStatus::Pending,
+            now,
+        );
+        let OpenOutcome::Opened =
+            l.open_request("p-ok", "alice", sid(), "bob", tid("bob"), None, now)
         else {
             panic!("전제: 여유 상태에서 오픈");
         };
         let live = ReservationLiveness::new();
-        l.attach_reservation_liveness("p-ok", "bob", live.watch());
-        let committed = l.commit_open(Some(("p-ok", "bob")), None);
+        l.attach_reservation_liveness("p-ok", tid("bob"), live.watch());
+        let committed = l.commit_open(Some(("p-ok", tid("bob"))), None);
         assert!(committed.confirmed, "전제: 커밋이 항목을 찾았다");
         drop(live);
 
@@ -2604,7 +2882,7 @@ mod tests {
             "정산된 계약을 회수하면 접수 보고한 request 가 계약 없이 남는다"
         );
         assert!(
-            l.is_tracked_for_test("p-ok", "bob"),
+            l.is_tracked_for_test("p-ok", tid("bob")),
             "계약은 그대로 살아 있어야"
         );
     }
@@ -2618,13 +2896,13 @@ mod tests {
             open_committed(&mut l, &format!("r{i}"), None, now);
         }
         let OpenOutcome::OpenedAfterMarking(v) =
-            l.open_request("p1", "alice", sid(), "bob", None, None, now)
+            l.open_request("p1", "alice", sid(), "bob", tid("bob"), None, now)
         else {
             panic!("전제: 표시 후 수용");
         };
         let out = l.commit_open(
-            Some(("p1", "bob")),
-            Some((v.request_id.as_str(), v.recipient.as_str())),
+            Some(("p1", tid("bob"))),
+            Some((v.request_id.as_str(), v.recipient_id)),
         );
         assert_eq!(
             out,
@@ -2636,18 +2914,18 @@ mod tests {
         );
 
         let OpenOutcome::OpenedAfterMarking(v2) =
-            l.open_request("p2", "alice", sid(), "bob2", None, None, now)
+            l.open_request("p2", "alice", sid(), "bob2", tid("bob2"), None, now)
         else {
             panic!("전제: 표시 후 수용");
         };
         // 표시된 희생자를 밖에서 제거해 "커밋 시점엔 이미 없다" 를 만든다(purge 경로와 같은 결과 모양).
         assert!(matches!(
-            l.drop_request(&v2.request_id, &v2.recipient),
+            l.drop_request(&v2.request_id, v2.recipient_id),
             DropOutcome::Removed { .. }
         ));
         let out2 = l.commit_open(
-            Some(("p2", "bob2")),
-            Some((v2.request_id.as_str(), v2.recipient.as_str())),
+            Some(("p2", tid("bob2"))),
+            Some((v2.request_id.as_str(), v2.recipient_id)),
         );
         assert_eq!(
             out2,
@@ -2658,7 +2936,7 @@ mod tests {
             "계약은 확정됐지만 은퇴는 없었다 — 이 값이 계측의 조건이다(R2)"
         );
 
-        let out3 = l.commit_open(Some(("nope", "nobody")), None);
+        let out3 = l.commit_open(Some(("nope", tid("nobody"))), None);
         assert_eq!(
             out3,
             CommitOutcome {
@@ -2673,10 +2951,19 @@ mod tests {
         let base = t0();
         let reply_by = Duration::from_secs(600);
         let mut l = Ledger::new();
-        l.record("v", "alice", "bob", "q", DeliveryStatus::Pending, base);
+        l.record(
+            "v",
+            "alice",
+            tid("alice"),
+            "bob",
+            Some(tid("bob")),
+            "q",
+            DeliveryStatus::Pending,
+            base,
+        );
         open_committed(&mut l, "v", rb(reply_by), base);
         assert_eq!(
-            l.transition("v", "bob", DeliveryStatus::Delivered, base),
+            l.transition("v", tid("bob"), DeliveryStatus::Delivered, base),
             Ok(())
         );
         // v 를 은퇴 가능하게 만든다(기한 초과 통지 발화) 뒤 cap 을 채운다.
@@ -2691,7 +2978,7 @@ mod tests {
         }
         let win = base + Duration::from_secs(9000);
         assert!(matches!(
-            l.open_request("new", "alice", sid(), "bob", None, None, win),
+            l.open_request("new", "alice", sid(), "bob", tid("bob"), None, win),
             OpenOutcome::OpenedAfterMarking(ref r) if r.request_id == "v"
         ));
         assert_eq!(
@@ -2727,7 +3014,7 @@ mod tests {
             open_committed(&mut l, &format!("f{i}"), None, at);
         }
         assert!(matches!(
-            l.open_request("new", "alice", sid(), "bob", None, None, win),
+            l.open_request("new", "alice", sid(), "bob", tid("bob"), None, win),
             OpenOutcome::OpenedAfterMarking(ref r) if r.request_id == "v"
         ));
         assert_eq!(reply(&mut l, "v", win), ReplyOutcome::Closed);
@@ -2747,14 +3034,25 @@ mod tests {
         let now = t0();
         for i in 0..MAX_OPEN_REQUESTS {
             let id = format!("r{i}");
-            l.record(&id, "alice", "bob", "q", DeliveryStatus::Pending, now);
+            l.record(
+                &id,
+                "alice",
+                tid("alice"),
+                "bob",
+                Some(tid("bob")),
+                "q",
+                DeliveryStatus::Pending,
+                now,
+            );
             open_committed(&mut l, &id, None, now);
         }
         for j in 0..cap {
             l.record(
                 &format!("f{j}"),
                 "alice",
+                tid("alice"),
                 "bob",
+                Some(tid("bob")),
                 "x",
                 DeliveryStatus::Delivered,
                 now,
@@ -2763,7 +3061,7 @@ mod tests {
         assert!(l.records_for("r0").is_empty(), "전제: 이력 evict");
 
         assert!(matches!(
-            l.open_request("new", "alice", sid(), "bob", None, None, now),
+            l.open_request("new", "alice", sid(), "bob", tid("bob"), None, now),
             OpenOutcome::OpenedAfterMarking(ref r) if r.request_id == "r0"
         ));
         assert!(
@@ -2818,7 +3116,7 @@ mod tests {
             "alice",
             sid(),
             "bob",
-            None,
+            tid("bob"),
             None,
             base + Duration::from_secs(9999),
         ) else {
@@ -2842,30 +3140,43 @@ mod tests {
         );
     }
 
+    /// ★계약은 회신자 id 로만 고른다(ADR-0309 결정 7)★ — 같은 이름 스냅숏을 든 두 계약이 있어도 다른 id 의 회신은
+    ///   어느 쪽도 닫지 못하고, 같은 이름의 다른 에이전트가 보낸 회신도 닫지 못한다.
     #[test]
-    fn rebind_request_recipient_moves_the_obligation_to_the_actual_deliveree() {
+    fn a_reply_closes_only_the_contract_keyed_by_its_own_id() {
         let mut l = Ledger::new();
         let now = t0();
         let a = sid();
         let b = sid();
-        l.record("r1", "boss", "worker", "q", DeliveryStatus::Pending, now);
-        l.open_request("r1", "boss", sid(), "worker", Some(a), None, now);
-        // 전제: 봉투가 실제로 꽂혀 이력이 delivered 다(회신이 정상 간선을 타게).
-        assert_eq!(
-            l.transition("r1", "worker", DeliveryStatus::Delivered, now),
-            Ok(())
+        l.record(
+            "r1",
+            "boss",
+            tid("boss"),
+            "worker",
+            Some(tid("worker")),
+            "q",
+            DeliveryStatus::Delivered,
+            now,
         );
-        assert_eq!(l.open_requests()[0].recipient_id, Some(a));
-        l.rebind_request_recipient("r1", "worker", b);
+        l.open_request("r1", "boss", sid(), "worker", a, None, now);
+        l.open_request("r1", "boss", sid(), "worker", b, None, now);
         assert_eq!(
-            l.open_requests()[0].recipient_id,
-            Some(b),
-            "의무는 봉투를 실제로 받은 자를 따른다(F2)"
+            l.close_on_reply("r1", sid(), now),
+            ReplyOutcome::NoMatch,
+            "이름만 같은 제3자는 닫지 못한다"
         );
-        assert_eq!(reply(&mut l, "r1", now), ReplyOutcome::Closed);
-        l.rebind_request_recipient("r1", "worker", a);
-        assert!(l.open_requests().is_empty(), "닫힌 계약은 미결이 아니다");
-        l.rebind_request_recipient("nope", "worker", a);
+        assert_eq!(
+            l.fail_on_undeliverable_reply("r1", sid()),
+            ReplyFailOutcome::NoMatch,
+            "실패 종결도 같은 규칙"
+        );
+        assert_eq!(l.close_on_reply("r1", b, now), ReplyOutcome::Closed);
+        assert_eq!(l.contract_outcome_for_test("r1", b), Some("replied"));
+        assert_eq!(
+            l.contract_outcome_for_test("r1", a),
+            Some("awaiting_reply"),
+            "다른 id 의 계약은 그대로 열려 있다"
+        );
     }
 
     #[test]
@@ -2873,9 +3184,18 @@ mod tests {
         let mut l = Ledger::new();
         let now = t0();
         assert!(!l.msg_id_in_use("m1"), "미사용 id");
-        l.record("m1", "a", "b", "x", DeliveryStatus::Delivered, now);
+        l.record(
+            "m1",
+            "a",
+            tid("a"),
+            "b",
+            Some(tid("b")),
+            "x",
+            DeliveryStatus::Delivered,
+            now,
+        );
         assert!(l.msg_id_in_use("m1"), "이력에 있으면 사용 중");
-        l.open_request("r1", "a", sid(), "b", None, None, now);
+        l.open_request("r1", "a", sid(), "b", tid("b"), None, now);
         assert!(l.msg_id_in_use("r1"), "추적에만 있어도 사용 중");
         open_delivered_request(&mut l, "r2", None, now);
         assert_eq!(reply(&mut l, "r2", now), ReplyOutcome::Closed);
@@ -2920,19 +3240,37 @@ mod tests {
     fn open_requests_lists_unanswered_contracts_oldest_first_with_notation() {
         let mut l = Ledger::new();
         let now = t0();
-        l.record("r1", "alice", "bob", "q1", DeliveryStatus::Pending, now);
+        l.record(
+            "r1",
+            "alice",
+            tid("alice"),
+            "bob",
+            Some(tid("bob")),
+            "q1",
+            DeliveryStatus::Pending,
+            now,
+        );
         l.open_request(
             "r1",
             "alice",
             sid(),
             "bob",
-            None,
+            tid("bob"),
             rb(Duration::from_secs(600)),
             now,
         );
         let later = now + Duration::from_secs(5);
-        l.record("r2", "carol", "alice", "q2", DeliveryStatus::Pending, later);
-        l.open_request("r2", "carol", sid(), "alice", None, None, later);
+        l.record(
+            "r2",
+            "carol",
+            tid("carol"),
+            "alice",
+            Some(tid("alice")),
+            "q2",
+            DeliveryStatus::Pending,
+            later,
+        );
+        l.open_request("r2", "carol", sid(), "alice", tid("alice"), None, later);
 
         let open = l.open_requests();
         assert_eq!(open.len(), 2);
@@ -2976,7 +3314,16 @@ mod tests {
     fn open_requests_is_empty_without_any_contract() {
         let mut l = Ledger::new();
         let now = t0();
-        l.record("m1", "alice", "bob", "hi", DeliveryStatus::Delivered, now);
+        l.record(
+            "m1",
+            "alice",
+            tid("alice"),
+            "bob",
+            Some(tid("bob")),
+            "hi",
+            DeliveryStatus::Delivered,
+            now,
+        );
         assert!(l.open_requests().is_empty());
     }
 
@@ -2986,16 +3333,28 @@ mod tests {
     fn pending_to_failed_is_legal_only_through_the_cleanup_verb() {
         let mut l = Ledger::new();
         let now = t0();
-        l.record("m1", "a", "b", "x", DeliveryStatus::Pending, now);
+        l.record(
+            "m1",
+            "a",
+            tid("a"),
+            "b",
+            Some(tid("b")),
+            "x",
+            DeliveryStatus::Pending,
+            now,
+        );
         assert_eq!(
-            l.transition("m1", "b", DeliveryStatus::Failed, now),
+            l.transition("m1", tid("b"), DeliveryStatus::Failed, now),
             Err(TransitionError::Illegal {
                 from: DeliveryStatus::Pending,
                 to: DeliveryStatus::Failed
             }),
             "임의 pending→failed 호출은 거부된다(간선은 전용 동사에만 열려 있다)"
         );
-        assert_eq!(l.fail_pending("m1", "b", "RECIPIENT_DELETED", now), Ok(()));
+        assert_eq!(
+            l.fail_pending("m1", tid("b"), "RECIPIENT_DELETED", now),
+            Ok(())
+        );
         let rows = l.records_for("m1");
         assert_eq!(rows[0].status, DeliveryStatus::Failed);
         assert_eq!(
@@ -3004,9 +3363,18 @@ mod tests {
             "사유 코드가 레코드에 남아 조회가 이유를 답할 수 있다"
         );
 
-        l.record("m2", "a", "b", "x", DeliveryStatus::Delivered, now);
+        l.record(
+            "m2",
+            "a",
+            tid("a"),
+            "b",
+            Some(tid("b")),
+            "x",
+            DeliveryStatus::Delivered,
+            now,
+        );
         assert_eq!(
-            l.fail_pending("m2", "b", "RECIPIENT_DELETED", now),
+            l.fail_pending("m2", tid("b"), "RECIPIENT_DELETED", now),
             Err(TransitionError::Illegal {
                 from: DeliveryStatus::Delivered,
                 to: DeliveryStatus::Failed
@@ -3014,7 +3382,7 @@ mod tests {
             "delivered→failed 는 여전히 불법"
         );
         assert_eq!(
-            l.fail_pending("nope", "b", "RECIPIENT_DELETED", now),
+            l.fail_pending("nope", tid("b"), "RECIPIENT_DELETED", now),
             Err(TransitionError::NotFound)
         );
     }
@@ -3023,33 +3391,42 @@ mod tests {
     fn a_failed_reply_never_touches_a_guard_marked_contract() {
         let mut l = Ledger::new();
         let now = t0();
-        let w = PeerId::new_v4();
-        l.record("m1", "boss", "worker", "q", DeliveryStatus::Delivered, now);
-        l.open_request("m1", "boss", PeerId::new_v4(), "worker", Some(w), None, now);
+        let w = tid("worker");
+        l.record(
+            "m1",
+            "boss",
+            tid("boss"),
+            "worker",
+            Some(tid("worker")),
+            "q",
+            DeliveryStatus::Delivered,
+            now,
+        );
+        l.open_request("m1", "boss", PeerId::new_v4(), "worker", w, None, now);
         assert_eq!(
-            l.fail_on_undeliverable_reply("m1", "worker", w, true),
+            l.fail_on_undeliverable_reply("m1", w),
             ReplyFailOutcome::GuardHeld,
             "잠정 계약은 건드리지 않는다"
         );
         assert_eq!(
-            l.contract_outcome_for_test("m1", "worker"),
+            l.contract_outcome_for_test("m1", tid("worker")),
             Some("awaiting_reply")
         );
-        l.commit_open(Some(("m1", "worker")), None);
+        l.commit_open(Some(("m1", tid("worker"))), None);
         assert_eq!(
-            l.fail_on_undeliverable_reply("m1", "worker", w, true),
+            l.fail_on_undeliverable_reply("m1", w),
             ReplyFailOutcome::Failed
         );
         assert_eq!(
-            l.contract_outcome_for_test("m1", "worker"),
+            l.contract_outcome_for_test("m1", tid("worker")),
             Some("reply_failed")
         );
         assert_eq!(
-            l.fail_on_undeliverable_reply("m1", "worker", w, true),
+            l.fail_on_undeliverable_reply("m1", w),
             ReplyFailOutcome::AlreadyClosed
         );
         assert_eq!(
-            l.fail_on_undeliverable_reply("nope", "worker", w, true),
+            l.fail_on_undeliverable_reply("nope", w),
             ReplyFailOutcome::NoMatch
         );
     }
@@ -3066,7 +3443,16 @@ mod tests {
         let over = now + reply_by + Duration::from_secs(1);
         for i in 0..MAX_OPEN_REQUESTS {
             let id = format!("r{i}");
-            l.record(&id, "alice", "bob", "q", DeliveryStatus::Pending, now);
+            l.record(
+                &id,
+                "alice",
+                tid("alice"),
+                "bob",
+                Some(tid("bob")),
+                "q",
+                DeliveryStatus::Pending,
+                now,
+            );
             assert_eq!(
                 open_committed(&mut l, &id, rb(reply_by), now),
                 OpenOutcome::Opened
@@ -3077,7 +3463,15 @@ mod tests {
             MAX_OPEN_REQUESTS,
             "전원 통지 완료 = 은퇴 가능"
         );
-        let marked = match l.open_request("over", "alice", sid(), "bob2", None, None, over) {
+        let marked = match l.open_request(
+            "over",
+            "alice",
+            tid("alice"),
+            "bob2",
+            tid("bob2"),
+            None,
+            over,
+        ) {
             OpenOutcome::OpenedAfterMarking(r) => r,
             other => panic!("표시 후 수용이어야: {other:?}"),
         };
@@ -3085,16 +3479,16 @@ mod tests {
         assert_eq!(l.marked_retirement_count_for_test(), 1);
 
         assert_eq!(
-            l.fail_on_undeliverable_reply("r0", "bob", PeerId::new_v4(), true),
+            l.fail_on_undeliverable_reply("r0", tid("bob")),
             ReplyFailOutcome::GuardHeld,
             "은퇴 예정 표시 계약은 실패 종결 대상이 아니다(ADR-0118 결정 3)"
         );
         assert_eq!(
-            l.contract_outcome_for_test("r0", "bob"),
+            l.contract_outcome_for_test("r0", tid("bob")),
             Some("awaiting_reply")
         );
 
-        let out = l.fail_open_requests_from("alice");
+        let out = l.fail_open_requests_from(tid("alice"));
         assert!(
             !out.failed.iter().any(|(id, _)| id == "r0" || id == "over"),
             "표시된 계약(r0=은퇴 예정 · over=잠정)은 종결 목록에 없어야: {out:?}"
@@ -3104,12 +3498,12 @@ mod tests {
             "두 표시가 모두 건너뛴 수로 보고돼야: {out:?}"
         );
         assert_eq!(
-            l.contract_outcome_for_test("r0", "bob"),
+            l.contract_outcome_for_test("r0", tid("bob")),
             Some("awaiting_reply"),
             "은퇴 예정 표시 계약의 수명은 그 가드 소유다"
         );
         assert_eq!(
-            l.contract_outcome_for_test("over", "bob2"),
+            l.contract_outcome_for_test("over", tid("bob2")),
             Some("awaiting_reply"),
             "잠정 계약도 그대로(기존 커버리지 유지)"
         );
@@ -3121,9 +3515,18 @@ mod tests {
         //   메시징 전 테스트가 초록이었다(기존 불법-간선 테스트는 무관한 세 간선만 봤다).
         let mut l = Ledger::new();
         let now = t0();
-        l.record("m-del", "a", "b", "x", DeliveryStatus::Delivered, now);
+        l.record(
+            "m-del",
+            "a",
+            tid("a"),
+            "b",
+            Some(tid("b")),
+            "x",
+            DeliveryStatus::Delivered,
+            now,
+        );
         assert_eq!(
-            l.transition("m-del", "b", DeliveryStatus::Failed, now),
+            l.transition("m-del", tid("b"), DeliveryStatus::Failed, now),
             Err(TransitionError::Illegal {
                 from: DeliveryStatus::Delivered,
                 to: DeliveryStatus::Failed
@@ -3135,9 +3538,18 @@ mod tests {
             DeliveryStatus::Delivered,
             "거부된 전이는 상태를 바꾸지 않는다"
         );
-        l.record("m-park", "a", "b", "x", DeliveryStatus::Pending, now);
+        l.record(
+            "m-park",
+            "a",
+            tid("a"),
+            "b",
+            Some(tid("b")),
+            "x",
+            DeliveryStatus::Pending,
+            now,
+        );
         assert_eq!(
-            l.transition("m-park", "b", DeliveryStatus::Failed, now),
+            l.transition("m-park", tid("b"), DeliveryStatus::Failed, now),
             Err(TransitionError::Illegal {
                 from: DeliveryStatus::Pending,
                 to: DeliveryStatus::Failed
@@ -3155,53 +3567,89 @@ mod tests {
     fn the_requester_cleanup_closes_open_contracts_but_respects_guards_and_replied() {
         let mut l = Ledger::new();
         let now = t0();
-        let (a, b, c) = (PeerId::new_v4(), PeerId::new_v4(), PeerId::new_v4());
+        let (a, b, c) = (tid("w1"), tid("w2"), tid("w3"));
         let gone = PeerId::new_v4();
-        l.record("m-open", "gone", "w1", "q", DeliveryStatus::Delivered, now);
-        l.open_request("m-open", "gone", gone, "w1", Some(a), None, now);
-        l.commit_open(Some(("m-open", "w1")), None);
-        l.open_request("m-done", "gone", gone, "w2", Some(b), None, now);
-        l.commit_open(Some(("m-done", "w2")), None);
-        l.record("m-done", "gone", "w2", "x", DeliveryStatus::Delivered, now);
-        assert_eq!(
-            l.close_on_reply("m-done", "w2", b, true, now),
-            ReplyOutcome::Closed
+        l.record(
+            "m-open",
+            "gone",
+            tid("gone"),
+            "w1",
+            Some(tid("w1")),
+            "q",
+            DeliveryStatus::Delivered,
+            now,
         );
+        l.open_request("m-open", "gone", gone, "w1", a, None, now);
+        l.commit_open(Some(("m-open", tid("w1"))), None);
+        l.open_request("m-done", "gone", gone, "w2", b, None, now);
+        l.commit_open(Some(("m-done", tid("w2"))), None);
+        l.record(
+            "m-done",
+            "gone",
+            tid("gone"),
+            "w2",
+            Some(tid("w2")),
+            "x",
+            DeliveryStatus::Delivered,
+            now,
+        );
+        assert_eq!(l.close_on_reply("m-done", b, now), ReplyOutcome::Closed);
         // 잠정 계약 — 커밋하지 않아 가드가 남는다.
-        l.open_request("m-prov", "gone", gone, "w3", Some(c), None, now);
-        l.open_request("m-other", "someone", a, "w4", Some(a), None, now);
-        l.commit_open(Some(("m-other", "w4")), None);
+        l.open_request("m-prov", "gone", gone, "w3", c, None, now);
+        l.open_request("m-other", "someone", a, "w4", tid("w4"), None, now);
+        l.commit_open(Some(("m-other", tid("w4"))), None);
+        // ★id 로 고른다(ADR-0309 결정 6)★: 개명 전 이름으로 연 자기 계약은 잡고, 같은 이름의 남의 계약은 안 닫는다.
+        l.open_request("m-old-name", "old-name", gone, "w5", tid("w5"), None, now);
+        l.commit_open(Some(("m-old-name", tid("w5"))), None);
+        l.open_request(
+            "m-namesake",
+            "gone",
+            tid("namesake"),
+            "w6",
+            tid("w6"),
+            None,
+            now,
+        );
+        l.commit_open(Some(("m-namesake", tid("w6"))), None);
 
-        let out = l.fail_open_requests_from("gone");
+        let out = l.fail_open_requests_from(gone);
         assert_eq!(
             out.failed,
-            vec![("m-open".to_string(), "w1".to_string())],
-            "오픈 계약 하나만 종결: {out:?}"
+            vec![
+                ("m-open".to_string(), tid("w1")),
+                ("m-old-name".to_string(), tid("w5")),
+            ],
+            "그 id 가 요청자인 오픈 계약만 종결 — 보낼 때 이름과 무관: {out:?}"
+        );
+        assert_eq!(
+            l.contract_outcome_for_test("m-namesake", tid("w6")),
+            Some("awaiting_reply"),
+            "같은 이름의 다른 에이전트가 요청자인 계약은 그대로"
         );
         assert_eq!(out.guard_held, 1, "잠정 계약은 건너뛴 수로 보고된다");
         assert_eq!(
-            l.contract_outcome_for_test("m-open", "w1"),
+            l.contract_outcome_for_test("m-open", tid("w1")),
             Some("reply_failed")
         );
         assert_eq!(
-            l.contract_outcome_for_test("m-done", "w2"),
+            l.contract_outcome_for_test("m-done", tid("w2")),
             Some("replied"),
             "★되돌리지 않는다★ — 수용 = 완료(spec §3 항목 7-④)"
         );
         assert_eq!(
-            l.contract_outcome_for_test("m-prov", "w3"),
+            l.contract_outcome_for_test("m-prov", tid("w3")),
             Some("awaiting_reply"),
             "가드 보유 계약은 그대로"
         );
         assert_eq!(
-            l.contract_outcome_for_test("m-other", "w4"),
+            l.contract_outcome_for_test("m-other", tid("w4")),
             Some("awaiting_reply"),
             "남의 계약은 무관"
         );
         assert_eq!(
             l.occupied_slots(),
-            2,
-            "m-prov(잠정) + m-other 만 자리를 차지한다"
+            3,
+            "m-prov(잠정) + m-other + m-namesake 만 자리를 차지한다"
         );
     }
 }

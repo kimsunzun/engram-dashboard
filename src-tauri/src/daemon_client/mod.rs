@@ -41,7 +41,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use engram_dashboard_base::sync;
-use engram_dashboard_protocol::{AgentCommand, AgentEvent, AgentId, DaemonInfo};
+use engram_dashboard_protocol::{AgentCommand, AgentEvent, AgentId, AgentInfo, DaemonInfo};
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, watch};
 
@@ -82,7 +82,8 @@ pub enum ConnectionState {
 ///
 /// ★락 차례 = `ViewManager → 이 락 → lifecycle`★ — 잎이 아니다: 이 락 안에서 넛지
 /// ([`DaemonClient::nudge_usage_interest`])를 넣으면 그 안에서 lifecycle 락을 잡는다. lifecycle 은 어느 쪽으로도
-/// 되부르지 않고 연결 태스크는 ViewManager 락을 잡지 않아 역순이 없다. 이 락 안에서는 [`UsageInterest`] 의
+/// 되부르지 않고, 연결 태스크가 ViewManager 락을 잡는 자리([`AgentNamesSink`])는 이 락도 lifecycle 도 쥐지 않은
+/// 때라 역순이 없다. 이 락 안에서는 [`UsageInterest`] 의
 /// 메서드와 그 넛지만 부르고, ★소켓 쓰기·emit 은 락을 놓은 뒤에 한다★(ADR-0006).
 ///
 /// ★오염돼도 되찾는다★: 그 메서드 안에서 패닉이 나 상태가 반쯤 고쳐진 채 남아도 결과는 데몬과 어긋난 구독이나
@@ -95,6 +96,31 @@ impl SharedUsageInterest {
     pub fn lock(&self) -> MutexGuard<'_, UsageInterest> {
         sync::lock(&self.0)
     }
+}
+
+/// 데몬 `AgentListUpdated` 의 이름 몫을 받는 포트 — 탭 자동 이름이 읽는 에이전트 이름 장부를 채운다(TRD
+/// S26-window-chrome §4-3). 실물 = 셸 조립(`lib.rs`)이 레이아웃 적용 서비스 `layout::apply::agent_names_updated` 를
+/// 부르는 것, 하네스 = 버림(`NoAgentNames`) · 기록형.
+///
+/// - 알림 포트 `events::DaemonEvents` 를 넓히지 않고 따로 끊은 형제다(그 doc 이 넓히기를 금한다) — 그 포트는 프론트에
+///   알리기만 하고, 이 포트의 실물은 셸 상태(레이아웃 락 안의 장부)를 고친다.
+/// - ★연결 태스크가 아무 락도 쥐지 않은 채 부른다★ — 실물이 레이아웃 락을 잡고, 그 락 안에서 사용량 관심 · lifecycle
+///   락을 잡는 차례가 있다([`SharedUsageInterest`] doc). 그 둘을 쥔 채 부르면 역순이다.
+/// - 구현은 레이아웃 락의 짧은 임계구역 말고는 막지 않고 실패를 삼킨다 — 장부를 못 고친 것은 연결을 되돌릴 사유가
+///   아니고, 다음 목록이 다시 채운다.
+pub trait AgentNamesSink: Send + Sync {
+    /// `AgentListUpdated` 마다 그 목록 그대로 — 프론트 알림(`agent_list_updated`)을 낸 뒤에 불린다.
+    fn agents(&self, agents: &[AgentInfo]);
+}
+
+/// 이름 장부 포트를 버리는 조립 — ★하네스 전용이다★. `#[cfg(test)]` 인 이유는 `events::NoDaemonEvents` 와 같다 —
+/// 운영 빌드에 두면 데몬 목록이 와도 탭 이름이 「에이전트」에 머무는 클라이언트를 조용히 조립할 길이 열린다.
+#[cfg(test)]
+pub(crate) struct NoAgentNames;
+
+#[cfg(test)]
+impl AgentNamesSink for NoAgentNames {
+    fn agents(&self, _agents: &[AgentInfo]) {}
 }
 
 // 데몬 발견 경계(seam). connect 경로는 spawn 가능(`ensure_spawn`), ensure 경로는 no-spawn
@@ -186,6 +212,9 @@ pub struct DaemonClient {
     /// ★클라이언트가 쥐고 연결 task 마다 clone 해 넘긴다 — 연결마다 새로 만들지 말 것★: 되풀이 억제의 수명이
     /// 셸 프로세스라(`RefusalAlerts` doc) 연결마다 만들면 재연결이 같은 거절을 받을 때마다 박스가 다시 뜬다.
     refusals: Arc<RefusalAlerts>,
+    /// 데몬 에이전트 목록의 이름 몫([`AgentNamesSink`]). 운영 = 셸 조립(`lib.rs`)이 넘긴 실물, 하네스 =
+    /// `NoAgentNames`(기록하려면 [`Self::with_agent_names`]). 연결 task 마다 clone 해 넘긴다.
+    names: Arc<dyn AgentNamesSink>,
     // 현재 연결 상태 빠른 읽기(watch). 여러 구독자가 락 없이 현재값을 본다. 송신은 항상 lifecycle
     // 락 아래서만(가드된 전이) — 그래야 "세대 체크 + watch send" 가 원자적이다. 이 rx 는 borrow 만.
     state_rx: watch::Receiver<ConnectionState>,
@@ -269,6 +298,7 @@ impl DaemonClient {
             inbound: Arc::new(InboundSlot::new()),
             events,
             refusals: Arc::new(RefusalAlerts::new(Arc::new(NoRefusalNotice))),
+            names: Arc::new(NoAgentNames),
             usage: SharedUsageInterest::default(),
         }
     }
@@ -278,6 +308,14 @@ impl DaemonClient {
     #[cfg(test)]
     pub(crate) fn with_refusal_notice(mut self, port: Arc<dyn RefusalNotice>) -> Self {
         self.refusals = Arc::new(RefusalAlerts::new(port));
+        self
+    }
+
+    /// 이름 장부 포트를 갈아 끼운다 — ★연결 전에 부른다★([`Self::with_refusal_notice`] 와 같은 까닭). 기록형 대역으로
+    /// 실 소켓 왕복 위에서 목록이 이 포트에 닿는지 단언하는 자리다.
+    #[cfg(test)]
+    pub(crate) fn with_agent_names(mut self, port: Arc<dyn AgentNamesSink>) -> Self {
+        self.names = port;
         self
     }
 
@@ -310,6 +348,7 @@ impl DaemonClient {
             inbound: Arc::new(InboundSlot::new()),
             events: Arc::new(NoDaemonEvents),
             refusals: Arc::new(RefusalAlerts::new(Arc::new(NoRefusalNotice))),
+            names: Arc::new(NoAgentNames),
             usage: SharedUsageInterest::default(),
         }
     }
@@ -337,6 +376,7 @@ impl DaemonClient {
             inbound: Arc::new(InboundSlot::new()),
             events: Arc::new(NoDaemonEvents),
             refusals: Arc::new(RefusalAlerts::new(Arc::new(NoRefusalNotice))),
+            names: Arc::new(NoAgentNames),
             usage: SharedUsageInterest::default(),
         }
     }
@@ -349,6 +389,7 @@ impl DaemonClient {
         router: Arc<OutputRouter>,
         registry: WindowChannelRegistry,
         app: tauri::AppHandle,
+        names: Arc<dyn AgentNamesSink>,
     ) -> std::io::Result<Self> {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -372,6 +413,7 @@ impl DaemonClient {
             refusals: Arc::new(RefusalAlerts::new(Arc::new(TauriRefusalBox(app.clone())))),
             // ★T7c★: broadcast 이벤트를 전 webview 에 push 하는 emit 경로(실물 어댑터).
             events: Arc::new(TauriEmitter(app)),
+            names,
             usage: SharedUsageInterest::default(),
         })
     }
@@ -601,6 +643,7 @@ impl DaemonClient {
             self.router.clone(),
             self.registry.clone(),
             self.events.clone(),
+            self.names.clone(),
             self.refusals.clone(),
             self.inbound.clone(),
             self.usage.clone(),
@@ -1018,7 +1061,8 @@ impl DaemonClient {
     // task 가 ReplayComplete 각인 시 같은 출력 Channel 로 흘린다.
     //
     // ★계약★: 비연결이면 Err(프론트 재요청 구동자는 connected 전이 — M2). 연결 task 에 `RequestReplay` 를
-    //   보내고 oneshot 으로 gen 을 회수한다(actor 가 single-flight 상태를 단독 소유 → 직렬).
+    //   보내고 oneshot 으로 gen 을 회수한다(actor 가 single-flight 상태를 단독 소유 → 직렬). 그 에이전트를 보이는
+    //   창이 없으면 Subscribe 없이 Err(연결 task 의 `RequestReplay` 팔 — 사유 정본 그 주석).
     pub async fn request_replay(&self, agent_id: AgentId) -> Result<u64, String> {
         let Some((cmd_tx, socket)) = self.lifecycle.current_cmd_tx() else {
             return Err(NOT_CONNECTED.to_string());
@@ -1047,10 +1091,12 @@ impl DaemonClient {
         //   구간은 안 탄다.
         // ★ADR-0195 도 같은 자리로 떨어진다★: 옛 소켓 몫으로 판정된 요청은 연결 task 가 이 oneshot 을
         //   그냥 drop 한다 — 나를 통로는 `u64` 뿐이라 실어 보낼 오류값이 없다. 그래서 아래 문구가 그
-        //   경로의 **유일한** 관측이고, 「미전송 · 재요청 안전」이라 그 경우에도 정직하다.
-        reply_rx
-            .await
-            .map_err(|_| "replay 요청 미전송(연결 끊김) — 프론트 재요청 안전".to_string())
+        //   경로의 **유일한** 관측이고, 「미전송 · 재요청 안전」이라 그 경우에도 정직하다. 보이는 창이 없는 요청도
+        //   같은 drop 으로 온다.
+        reply_rx.await.map_err(|_| {
+            "replay 요청 미전송(연결 끊김 · 그 에이전트를 보이는 창 없음) — 프론트 재요청 안전"
+                .to_string()
+        })
     }
 
     fn try_enqueue(&self, make: impl FnOnce(u64) -> ConnectionCommand, kind: &str) {

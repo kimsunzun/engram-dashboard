@@ -13,7 +13,7 @@
 //!   호출 금지(§6-3 · `layout/apply.rs` 머리 「락 규율」).
 //! - 패닉하지 않는다 — 창 사건 처리기에서 불리고, 셸의 패닉은 훅이 곧 셸 종료로 만든다(ADR-0292).
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard};
 
 use engram_dashboard_base::sync;
@@ -23,9 +23,13 @@ use tauri::{
 };
 
 use super::restore::RestoreWindows;
-use crate::layout::{LayoutState, WindowAttrs, WindowBounds, WindowPlacement, MAIN_WINDOW_LABEL};
+use crate::commands::popout::POPOUT_DEFAULT_SIZE;
+use crate::layout::{
+    LayoutState, MoveFailed, MoveStep, WindowAttrs, WindowBounds, WindowPlace, WindowPlacement,
+    MAIN_WINDOW_LABEL,
+};
 use crate::theme::ThemeControl;
-use crate::webview_env::WebviewEnv;
+use crate::webview_env::{Backdrop, WebviewEnv};
 
 /// 모니터 하나 — OS 가 알려 준 물리 픽셀 사각형과 그 배율.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -116,7 +120,7 @@ pub fn open_restored_popouts(
             return Vec::new();
         }
     };
-    // 같은 접두 + 십진 순번이라 (길이, 글자) 순이 발급 순이다 — 저장된 순서대로 쌓인다.
+    // 같은 접두 · 같은 실행 표식(한 발급기) + 십진 순번이라 (길이, 글자) 순이 발급 순이다 — 저장된 순서대로 쌓인다.
     popouts.sort_by_key(|(label, _)| (label.len(), label.clone()));
 
     let failed: Vec<String> = popouts
@@ -138,7 +142,7 @@ pub fn open_restored_popouts(
         match layout.0.lock() {
             Ok(mut mgr) => {
                 for label in &failed {
-                    let _ = mgr.close_window(label);
+                    let _ = mgr.drop_window_gone(label);
                 }
             }
             Err(_) => tracing::error!(
@@ -164,72 +168,120 @@ fn open_popouts_then_push_themes(
     failed
 }
 
-/// 저장된 최대화를 그 창이 처음 보일 때로 미룬 창의 label 들.
+/// 그 창이 보일 때 입힐 최대화 바람 — label 마다 하나(참 = 최대화 · 거짓 = 원래 크기 · 뒤에 적은 것이 앞의 것을 덮는다).
 ///
-/// - 세우는 쪽 = main 에 자리 · 최대화를 입히는 길(부팅 ⑧ [`restore_windows`] · 런타임 복원 수락
+/// - 적는 쪽 = main 에 자리 · 최대화를 입히는 길(부팅 ⑧ [`restore_windows`] · 런타임 복원 수락
 ///   [`TauriRestoreWindows`] — main 이 숨어 있으면 보일 때까지, 보이면 그 자리에서 입혀질 때까지 —
-///   [`DeferredMaximize::apply_now`]) · 런타임 복원 수락이 숨긴 채 만든 최대화 팝아웃
-///   (`RestoreWindows::open_hidden`). 거두는 쪽 = 입히기에 성공한 그 길 · [`apply_deferred_maximize`](보이기 경로 —
-///   `tray::actions::show_main_ui` · 복원 수락의 `set_shown`) · 최대화가 아닌 사본을 입히는 런타임 복원(main) ·
-///   창 소멸([`forget_deferred_maximize`]).
+///   [`DeferredMaximize::apply_now`]) · 숨긴 채 만든 최대화 팝아웃(부팅 복원 [`open_popout`] · 런타임 복원 수락
+///   `RestoreWindows::open_hidden`) — 여기까지는 늘 참이다 · 보이지 않는 창의 창 상태 명령(`window.maximize` ·
+///   `window.unmaximize` — [`defer_maximize`] · TRD S26-window-chrome §5-2). 거두는 쪽 = 입히기에 성공한 그 길 · 보이는
+///   길 모두(첫 화면의 보이기 [`show_placed`] · `first_paint` 의 포커스 없는 보이기 · 트레이 보이기 · 포커스를 빼앗지 않는
+///   보이기 — 다 [`apply_deferred_maximize`] 를 지난다) · 이미 그 크기인 창의 창 상태 명령([`drop_deferred_maximize`]) ·
+///   최대화가 아닌 사본을 입히는 런타임 복원(main) · 창 소멸([`forget_deferred_maximize`]).
 /// - 숨은 창을 최대화하면 tao 가 `SW_MAXIMIZE`(창을 보이고 활성화한다)를 낸 뒤에야 `SW_HIDE` 로 되숨긴다(tao 0.35.3
-///   `platform_impl/windows/window_state.rs` `apply_diff`) — `--hidden` 부팅에 main 이 번쩍이고 포커스를 가져간다.
-/// - 서 있는 동안은 그 창의 자리를 적지 않는다([`record`]) — 숨은 동안 오는 `Moved` · `Resized` 는 복원이 입힌 보통
-///   자리를 「최대화 아님」으로 읽어, 적으면 모델의 최대화 표식이 내려간다(보이기 전에 끝내면 다음 부팅이 최대화를
-///   잃는다).
-/// - 부팅은 `--hidden` 이면 main 을 숨긴 채 만들어([`restore_windows`]) 보일 때까지 남고, 아니면 보인 채 만들어
-///   최대화를 못 입혔을 때만 남는다. 런타임 복원 수락은 숨은 main(트레이 숨기기 · `--hidden` 부팅 뒤 LLM 의 답)에
-///   보일 때까지 남는다.
+///   `platform_impl/windows/window_state.rs` `apply_diff`) — `--hidden` 부팅에 main 이 번쩍이고 포커스를 가져간다. 풀기도
+///   같은 까닭으로 바람에 적는다(TRD §5-2).
+/// - 바람이 있는 동안은(값과 무관하게) 그 창의 자리를 적지 않는다([`record`]) — 숨은 동안 오는 `Moved` · `Resized` 는
+///   복원이 입힌 보통 자리를 「최대화 아님」으로 읽어, 적으면 모델의 최대화 표식이 내려간다(보이기 전에 끝내면 다음
+///   부팅이 최대화를 잃는다). 그래서 바람이 홀로 남으면 그 창의 자리 기록과 `window:frame` 밀기가 멈춘다.
+/// - 부팅은 main · 팝아웃을 늘 숨긴 채 만들어([`restore_windows`]) 보일 때까지 남는다 — 보이는 부팅은 첫 화면의
+///   보이기까지, `--hidden` 부팅은 트레이 보이기까지. 런타임 복원 수락은 숨은 main(트레이 숨기기 · `--hidden` 부팅 뒤
+///   LLM 의 답)에 보일 때까지 남는다.
 /// - 락은 잎이다 — 쥔 채 창 호출 · 로그 · 다른 락을 하지 않는다.
 #[derive(Debug, Default)]
-pub struct DeferredMaximize(Mutex<BTreeSet<String>>);
+pub struct DeferredMaximize(Mutex<Wishes>);
+
+#[derive(Debug, Default)]
+struct Wishes {
+    // 적을 때마다 하나씩 오른다 — 같은 값을 다시 적어도(참 → 거짓 → 참 포함) 판이 갈린다.
+    next_rev: u64,
+    by_label: BTreeMap<String, Wish>,
+}
+
+// `rev` = 이 바람을 적은 판. 락 밖에서 입히는 쪽은 읽은 판이 그대로일 때만 거둔다 — 값만 보면 그 사이 다시 적힌 같은
+//   값의 바람을 지운다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Wish {
+    maximized: bool,
+    rev: u64,
+}
 
 impl DeferredMaximize {
-    fn labels(&self) -> MutexGuard<'_, BTreeSet<String>> {
-        // 칸이 집합 하나라 반쯤 바뀐 상태가 없다 — 창 사건 처리기에서 불려 패닉하면 안 된다(모듈 머리).
+    fn wishes(&self) -> MutexGuard<'_, Wishes> {
+        // 칸이 표 하나라 반쯤 바뀐 상태가 없다 — 창 사건 처리기에서 불려 패닉하면 안 된다(모듈 머리).
         sync::lock(&self.0)
     }
 
-    fn defer(&self, label: &str) {
-        self.labels().insert(label.to_string());
+    fn defer(&self, label: &str, maximized: bool) -> Wish {
+        let mut wishes = self.wishes();
+        let wish = Wish {
+            maximized,
+            rev: wishes.next_rev,
+        };
+        wishes.next_rev = wishes.next_rev.wrapping_add(1);
+        wishes.by_label.insert(label.to_string(), wish);
+        wish
+    }
+
+    fn wish(&self, label: &str) -> Option<Wish> {
+        self.wishes().by_label.get(label).copied()
     }
 
     fn is_pending(&self, label: &str) -> bool {
-        self.labels().contains(label)
+        self.wish(label).is_some()
     }
 
-    /// 서 있었으면 내리고 `true` — 미룬 최대화는 한 번만 입힌다. 창 소멸의 거두기도 이것이다.
-    fn take(&self, label: &str) -> bool {
-        self.labels().remove(label)
+    /// 있었으면 거두고 그 값 — 창 소멸의 거두기도 이것이다.
+    fn take(&self, label: &str) -> Option<bool> {
+        self.wishes()
+            .by_label
+            .remove(label)
+            .map(|wish| wish.maximized)
     }
 
-    /// 서 있으면 `maximize` 로 입히고, 입혀졌을 때만 내린다 — `true` = 이번에 입히고 내렸다(부르는 쪽이 자리를
-    /// 적는다). ★못 입혔으면 남긴다★ — 내리면 보통 자리를 「최대화 아님」으로 적어 모델의 최대화가 지워지고 다시
-    /// 입힐 길도 없다. 남기면 다음 보이기가 다시 입힌다. `maximize` 는 락 밖에서 부른다.
-    fn apply(&self, label: &str, maximize: impl FnOnce() -> bool) -> bool {
-        self.is_pending(label) && maximize() && self.take(label)
+    // 읽은 그 바람이 그대로 남아 있을 때만 거둔다 — 입히는 사이 다른 스레드(런타임 복원 수락 · 창 상태 명령)가 새로 적은
+    //   바람을 지우지 않게.
+    fn take_if_unchanged(&self, label: &str, seen: Wish) -> bool {
+        let mut wishes = self.wishes();
+        let unchanged = wishes.by_label.get(label) == Some(&seen);
+        if unchanged {
+            wishes.by_label.remove(label);
+        }
+        unchanged
     }
 
-    /// 보이는 창에 지금 입힌다 — 세운 채 `place`(보통 자리)와 `maximize` 를 부르고, 입혀졌을 때만 내린다. `true` =
-    /// 입혔다. ★못 입혔으면 남긴다★ — [`record`] 가 그 창을 「최대화 아님」으로 적지 않고(런타임 복원 수락 뒤의 자리
-    /// 기록 포함) 다음 보이기가 다시 입힌다([`Self::apply`] 와 같은 까닭). `place` · `maximize` 는 락 밖에서 부른다.
-    /// - ★`place` 보다 먼저 세운다★ — 자리 입히기가 낸 `Moved` · `Resized` 가 보통 자리를 「최대화 아님」으로 적지
+    /// 바람이 있으면 `set(바람)` 으로 입히고, 입혀졌을 때만 거둔다 — `true` = 이번에 입히고 거뒀다(부르는 쪽이 자리를
+    /// 적는다). ★못 입혔으면 남긴다★ — 거두면 보통 자리를 「최대화 아님」으로 적어 모델의 최대화가 지워지고 다시
+    /// 입힐 길도 없다. 남기면 다음 보이기가 다시 입힌다. `set` 은 락 밖에서 부른다 — 그 사이 바람이 다시 적혔으면(같은
+    /// 값이어도) 새 바람을 남기고 `false`.
+    fn apply(&self, label: &str, set: impl FnOnce(bool) -> bool) -> bool {
+        let Some(seen) = self.wish(label) else {
+            return false;
+        };
+        set(seen.maximized) && self.take_if_unchanged(label, seen)
+    }
+
+    /// 보이는 창에 지금 최대화를 입힌다 — 참 바람을 적은 채 `place`(보통 자리)와 `maximize` 를 부르고, 입혀졌을 때만
+    /// 거둔다. `true` = 입혔다. ★못 입혔으면 남긴다★ — [`record`] 가 그 창을 「최대화 아님」으로 적지 않고(런타임 복원
+    /// 수락 뒤의 자리 기록 포함) 다음 보이기가 다시 입힌다([`Self::apply`] 와 같은 까닭). `place` · `maximize` 는 락
+    /// 밖에서 부른다.
+    /// - ★`place` 보다 먼저 적는다★ — 자리 입히기가 낸 `Moved` · `Resized` 가 보통 자리를 「최대화 아님」으로 적지
     ///   않게.
-    /// - ★사이에 보이기가 미룸을 입히고 거뒀어도 `maximize` 를 부른다★ — 그 뒤의 위치 세터가 최대화를 내렸다(F8).
-    ///   못 입혔으면 그래서 다시 세운다.
+    /// - ★사이에 보이기가 바람을 입히고 거뒀어도 `maximize` 를 부른다★ — 그 뒤의 위치 세터가 최대화를 내렸다(F8).
+    ///   못 입혔으면 그래서 다시 적는다.
     fn apply_now(
         &self,
         label: &str,
         place: impl FnOnce(),
         maximize: impl FnOnce() -> bool,
     ) -> bool {
-        self.defer(label);
+        let seen = self.defer(label, true);
         place();
         let applied = maximize();
         if applied {
-            self.take(label);
+            self.take_if_unchanged(label, seen);
         } else {
-            self.defer(label);
+            self.defer(label, true);
         }
         applied
     }
@@ -244,8 +296,9 @@ impl DeferredMaximize {
 ///
 /// - ★실행 표식(⑤) 뒤에 부른다(I6)★ — 창을 만들다 앱이 죽어도 다음 부팅이 비정상으로 읽는다. 사용자 setup 은 부팅
 ///   단계 플러그인보다 늘 뒤라 setup 안이면 선다.
-/// - `boot_hidden` = `--hidden` 부팅 — main 을 처음부터 숨긴 채 만든다. 팝아웃은 그래도 보인 채 열고 부르는 쪽의
-///   숨기기가 main 과 함께 숨긴다(사용자 결정 F13).
+/// - `boot_hidden` = `--hidden` 부팅 — main 은 첫 화면에도 보이지 않고 트레이 보이기를 기다린다. 팝아웃은 그래도
+///   첫 화면에 보이도록 올리고, 부르는 쪽의 숨기기가 그 올림을 거둬 main 과 함께 숨긴 채 둔다(사용자 결정 F13 ·
+///   `crate::first_paint`).
 /// - `Err` = main 을 못 만들었다 — 그 자리에서 멈추고(팝아웃 · 테마 밀기 없음) 부르는 쪽이 앱을 끝낸다(사용자 결정
 ///   2026-10-07).
 ///
@@ -339,7 +392,13 @@ fn open_static(app: &AppHandle, env: &WebviewEnv, window: StaticWindow) -> Resul
         hide,
     } = window;
     let built = build_static(app, env, MAIN_WINDOW_LABEL, at.map(first_place), hide)?;
+    // 저장된 크기가 최소 폭보다 좁으면 첫 최소 크기 보고가 넓혀 당긴다(TRD S26-window-chrome §7-7 · D14).
+    crate::chrome::mark_opening(app, MAIN_WINDOW_LABEL);
     place_main(app, &built.as_ref().window(), at, maximized);
+    // 보이는 부팅은 자리를 입힌(최대화는 미룬) 뒤 첫 화면에 보인다. `--hidden` 부팅은 트레이 보이기를 기다린다.
+    if !hide {
+        crate::first_paint::hold_window(&built);
+    }
     Ok(())
 }
 
@@ -366,17 +425,24 @@ fn build_static(
             .position(position.x, position.y)
             .inner_size(size.width, size.height);
     }
-    // 숨긴 채 만드는 창은 포커스를 받지 않는다 — 받으면 숨은 창이 만들어진 직후 보이는 창의 전경을 가져간다. 이 규칙의
+    // ★늘 숨긴 채 만든다★ — 보이는 부팅도 자리를 입힌 뒤 첫 화면에 보인다(`crate::first_paint`).
+    builder = builder.visible(false);
+    // 숨긴 채 두는 창은 포커스를 받지 않는다 — 받으면 숨은 창이 만들어진 직후 보이는 창의 전경을 가져간다. 이 규칙의
     //   출처는 지금은 걷힌 숨은 트리 창이다(ADR-0225 · QA 관측 2026-10-07 — 보이는 부팅 3/3, 그 창이 main 의 전경을
     //   가져갔다). 남은 쓰임은 `--hidden` 부팅의 main 하나이고, 그 이득(자동 시작 때 다른 앱의 전경을 뺏지 않는다)은
     //   [미검 — GUI]. wry 0.55.1 은 `focused` 인 웹뷰를 만들자마자 `MoveFocus` 로 키보드 포커스를 그 안에 넣는다
     //   (`webview2/mod.rs` 의 만들기 끝) — 그것이 원인이라는 것은 소스 독해다 [미검 — GUI]. 보일 때는 창의 `WM_SETFOCUS`
-    //   가 웹뷰로 포커스를 넘긴다(같은 파일의 부모 창 서브클래스). tao 0.35.3 은 이 창의 첫 보이기를 활성화 없이
+    //   가 웹뷰로 포커스를 넘긴다(같은 파일의 부모 창 서브클래스). tao 0.35.3 은 이 창의 보이기를 활성화 없이
     //   (`SW_SHOWNOACTIVATE`) 한다 — 트레이 보이기는 그 뒤 `set_focus` 로 앞에 둔다.
+    // 보이는 부팅의 main 은 설정대로 포커스를 받는다 — 숨은 동안 이미 받고(위 `MoveFocus`), 첫 화면의 보이기가 활성화한다.
+    //   ★그 보이기가 활성화하는 보이기(`SW_SHOW`)여야 미룬 최대화를 보통 크기 틀 없이 입힌다★([`show_placed`]).
     if hide {
-        builder = builder.focused(false).visible(false);
+        builder = builder.focused(false);
     }
-    let built = env.finish(builder).build().map_err(|e| e.to_string())?;
+    let built = env
+        .finish(builder, Backdrop::for_window(app, label))
+        .build()
+        .map_err(|e| e.to_string())?;
     confirm_created(built.is_visible().map_err(|e| e.to_string()), || {
         tauri::webview_version().map_err(|e| e.to_string())
     })?;
@@ -412,21 +478,36 @@ fn open_popout(
     let saved = attrs.bounds.and_then(|bounds| {
         land(label, bounds, monitors, Fallback::DefaultPlace).map(|at| (bounds, at))
     });
-    let window = crate::commands::popout::build_runtime_window(app, label, saved.map(first_place))?;
-    let window = window.as_ref().window();
+    let built = crate::commands::popout::build_runtime_window(app, label, saved.map(first_place))?;
+    // 저장된 크기가 최소 폭보다 좁으면 첫 최소 크기 보고가 넓혀 당긴다(TRD S26-window-chrome §7-7 · D14).
+    crate::chrome::mark_opening(app, label);
+    let window = built.as_ref().window();
     if let Some((bounds, at)) = saved {
         place(&window, bounds, at);
     }
+    // 숨은 창이라 최대화는 첫 화면의 보이기로 미룬다([`DeferredMaximize`] · [`show_placed`]).
     if attrs.maximized {
-        maximize(&window);
+        match app.try_state::<DeferredMaximize>() {
+            Some(deferred) => {
+                deferred.defer(label, true);
+            }
+            None => tracing::warn!(
+                module = "state",
+                label,
+                "미룬 최대화 표가 등록돼 있지 않아 그 창의 최대화를 입히지 않는다"
+            ),
+        }
     }
     record(&window);
+    crate::first_paint::hold_window(&built);
     Ok(())
 }
 
 // 팝아웃 빌더의 첫 자리 — 고른 모니터의 배율로 푼 논리 위치 · 논리 크기. 정확한 자리는 만든 뒤 [`place`] 가 놓는다
 //   (`build_runtime_window` 의 `at` 인자).
-fn first_place((bounds, at): (WindowBounds, Landing)) -> (LogicalPosition<f64>, LogicalSize<f64>) {
+pub(crate) fn first_place(
+    (bounds, at): (WindowBounds, Landing),
+) -> (LogicalPosition<f64>, LogicalSize<f64>) {
     (
         LogicalPosition::new(f64::from(at.x) / at.scale, f64::from(at.y) / at.scale),
         LogicalSize::new(bounds.w(), bounds.h()),
@@ -435,7 +516,7 @@ fn first_place((bounds, at): (WindowBounds, Landing)) -> (LogicalPosition<f64>, 
 
 /// 저장된 자리를 버리면 창이 어디로 가나 — [`land`] 의 로그 문구만 가른다.
 #[derive(Debug, Clone, Copy)]
-pub(super) enum Fallback {
+pub(crate) enum Fallback {
     /// 새로 여는 창 — 기본 자리로 연다(팝아웃 = label 의 계단 자리 · 부팅의 정적 창 = 설정의 자리).
     DefaultPlace,
     /// 이미 있는 창(런타임 복원 수락의 main) — 지금 자리에 남는다.
@@ -443,7 +524,7 @@ pub(super) enum Fallback {
 }
 
 /// [`locate`] 에 로그 한 줄을 더한 것 — 어느 모니터에도 안 걸쳐 버린 자리를 info 로 남긴다.
-pub(super) fn land(
+pub(crate) fn land(
     label: &str,
     bounds: WindowBounds,
     monitors: &[MonitorArea],
@@ -467,7 +548,7 @@ pub(super) fn land(
     at
 }
 
-fn place(window: &Window, bounds: WindowBounds, at: Landing) {
+pub(crate) fn place(window: &Window, bounds: WindowBounds, at: Landing) {
     let label = window.label();
     // 위치를 먼저, 크기를 뒤에 — tao 는 논리 크기를 창이 그때 가진 배율로 풀고(`set_inner_size`) 그 배율은
     //   WM_DPICHANGED 처리에서 갈린다. 크기를 뒤에 놓아야 도착한 모니터의 배율로 풀린다. tauri-plugin-window-state
@@ -494,6 +575,163 @@ fn maximize(window: &Window) -> bool {
     }
 }
 
+// 원래 크기 바람을 입힌다 — `false` = 못 입혔다.
+fn unmaximize(window: &Window) -> bool {
+    match window.unmaximize() {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(module = "state", label = window.label(), error = %e, "원래 크기 바람을 못 입혔다");
+            false
+        }
+    }
+}
+
+// ── 결과를 돌려주는 자리 입히기 — 도킹의 창 포트 몫(TRD S21-slot-docking 5.8판 §1-2 「적용 서비스」) ──────────
+//
+// [`place`] 는 실패를 로그로만 남긴다 — 부팅 · 복원은 거기서 더 할 것이 없다. 도킹은 못 입힌 걸음을 알아야 새 창을
+// 거두거나 옮기기 실패로 답하므로 세터마다 결과를 돌려준다. 순서는 같다 — 위치 → 크기(까닭 = [`place`]).
+
+/// 창 세터 둘 — [`move_steps`] 가 창 없이 시험되게 끊은 자리. 위치 = 물리 바깥 왼쪽 위 · 크기 = 논리 안쪽(모듈 머리).
+pub(crate) trait Setters {
+    fn set_position(&self, x: i32, y: i32) -> Result<(), String>;
+    fn set_size(&self, w: f64, h: f64) -> Result<(), String>;
+}
+
+impl Setters for Window {
+    fn set_position(&self, x: i32, y: i32) -> Result<(), String> {
+        Window::set_position(self, PhysicalPosition::new(x, y)).map_err(|e| e.to_string())
+    }
+
+    fn set_size(&self, w: f64, h: f64) -> Result<(), String> {
+        Window::set_size(self, LogicalSize::new(w, h)).map_err(|e| e.to_string())
+    }
+}
+
+/// 위치 → 크기 — ★첫 실패에서 멈추고★ 그 걸음을 돌려준다. `None` 인 걸음은 건너뛴다.
+pub(crate) fn move_steps(
+    window: &impl Setters,
+    pos: Option<(i32, i32)>,
+    size: Option<(f64, f64)>,
+) -> Result<(), MoveFailed> {
+    if let Some((x, y)) = pos {
+        window.set_position(x, y).map_err(|error| MoveFailed {
+            step: MoveStep::Position,
+            error,
+        })?;
+    }
+    if let Some((w, h)) = size {
+        window.set_size(w, h).map_err(|error| MoveFailed {
+            step: MoveStep::Size,
+            error,
+        })?;
+    }
+    Ok(())
+}
+
+/// 유한한 양수 둘인 논리 크기만 — 아니면 `None`(부르는 쪽의 기본 크기 · 크기 걸음 없음).
+pub(crate) fn usable_size(size: Option<(f64, f64)>) -> Option<(f64, f64)> {
+    size.filter(|&(w, h)| WindowBounds::new(0.0, 0.0, w, h).is_some())
+}
+
+/// 도킹이 고른 자리를 모니터에 대 본다 — `at.pos` 에 크기(`at.size` · 쓸 수 없으면 `default_size`)를 붙인 사각형이
+/// 어느 모니터에 걸치면 그 보통 자리와 착지([`locate`]). 위치가 없거나 어디에도 안 걸치면 `None` 이고, 안 걸친 것은
+/// [`land`] 가 `fallback` 문구로 남긴다.
+pub(crate) fn resolve_place(
+    label: &str,
+    at: &WindowPlace,
+    default_size: (f64, f64),
+    monitors: &[MonitorArea],
+    fallback: Fallback,
+) -> Option<(WindowBounds, Landing)> {
+    let (x, y) = at.pos?;
+    let (w, h) = usable_size(at.size).unwrap_or(default_size);
+    let bounds = WindowBounds::new(f64::from(x), f64::from(y), w, h)?;
+    land(label, bounds, monitors, fallback).map(|landing| (bounds, landing))
+}
+
+/// 넓혀 당기기(TRD S26-window-chrome §7-7 · D14) — 창을 열 때 한 번, 보통 자리 `bounds` 의 폭이 웹이 보고한 최소 폭
+/// `min_w`(논리 안쪽 px)보다 좁으면 그 폭으로 넓히고, 넓힌 창의 ★보이는 오른쪽 가장자리★가 작업 영역 `work`(그 창이 놓인
+/// 모니터의 작업 영역 — 물리 px · `scale` = 그 창의 배율)의 오른쪽을 넘으면 작업 영역 안으로 당긴다. 작업 영역이 창보다
+/// 좁으면 보이는 왼쪽 가장자리를 작업 영역 왼쪽 끝에 댄다(R20). `frame` = 바깥 폭 − 안쪽 폭(물리 px — OS 틀을 걷은 창에도
+/// 크기 조절용 보이지 않는 테두리가 남는다). 보이는 가장자리 = 바깥 가장자리에서 그 테두리 한쪽(`frame` / 2 — tao 0.35.3 은
+/// 좌우를 같은 두께로 둔다 · `calculate_insets_for_dpi`)만큼 안쪽 — 바깥 가장자리를 맞추면 보이는 창이 작업 영역 가장자리에서
+/// 그만큼(100 % 에서 약 8 px) 떨어진다.
+///
+/// 넓힐 일이 없으면 그대로 돌려준다 — 화면 밖에 걸친 자리여도 옮기지 않는다(넓혀 당기기의 일이 아니다). 높이 · 세로 위치는
+/// 건드리지 않는다. 배율이 유한한 양수가 아니면 넓히기만 하고 당기지 않는다.
+// ADR-0303 — 크롬식 제목 표시줄
+pub(crate) fn fit_min_width(
+    bounds: WindowBounds,
+    min_w: f64,
+    work: MonitorArea,
+    frame: f64,
+) -> WindowBounds {
+    // NaN 인 `min_w` 도 여기서 걸러진다.
+    if !(bounds.w() < min_w) {
+        return bounds;
+    }
+    let x = if work.scale.is_finite() && work.scale > 0.0 {
+        let side = frame.max(0.0) / 2.0;
+        let left = f64::from(work.x);
+        let right = left + f64::from(work.w);
+        // 바깥 x 의 범위 — 보이는 오른쪽(x + side + 안쪽 폭) ≤ 작업 영역 오른쪽 · 보이는 왼쪽(x + side) ≥ 작업 영역 왼쪽.
+        //   오른쪽을 먼저 맞추고 왼쪽이 이긴다 — 둘 다 못 맞추면(작업 영역이 좁다) 보이는 왼쪽 끝이다.
+        let max_x = (right - side - min_w * work.scale).floor();
+        let min_x = (left - side).ceil();
+        bounds.x().min(max_x).max(min_x)
+    } else {
+        bounds.x()
+    };
+    WindowBounds::new(x, bounds.y(), min_w, bounds.h()).unwrap_or(bounds)
+}
+
+/// 창 포트 `move_window` 의 Tauri 실물(계약 = `layout::apply::WindowHost`). 위치가 어느 모니터에도 안 걸치면 그
+/// 걸음을 건너뛴다 — 떠 있는 창을 기본 자리로 옮기지 않는다.
+pub(crate) fn move_window(
+    app: &AppHandle,
+    label: &str,
+    at: &WindowPlace,
+) -> Result<(), MoveFailed> {
+    let Some(window) = app.get_webview_window(label) else {
+        return Err(MoveFailed {
+            step: MoveStep::Position,
+            error: "옮길 창이 없다".to_string(),
+        });
+    };
+    let window = window.as_ref().window();
+    let size = usable_size(at.size);
+    let pos = match at.pos {
+        Some(_) => {
+            let landing_size = size
+                .or_else(|| kept_size(app, &window, label))
+                .unwrap_or(POPOUT_DEFAULT_SIZE);
+            resolve_place(label, at, landing_size, &monitors(app), Fallback::StayPut)
+                .map(|(_, landing)| (landing.x, landing.y))
+        }
+        None => None,
+    };
+    move_steps(&window, pos, size)
+}
+
+// 크기를 고르지 않은 옮기기가 걸침을 잴 크기(논리) — 그 창이 옮긴 뒤 가질 크기다. 팝아웃 기본 크기로 재면 그보다 작은
+//   창이 걸친다고 판정된 채 화면 밖에 놓인다. 모델의 보통 자리 크기가 먼저다 — 최대화된 창의 게터는 최대화 크기인데
+//   위치 세터가 최대화를 풀면 보통 크기로 돌아간다(F8). 모델에 없으면 지금 안쪽 크기. ★레이아웃 락은 값만 읽고
+//   곧바로 놓는다★ — 게터는 그 밖이다(모듈 머리).
+fn kept_size(app: &AppHandle, window: &Window, label: &str) -> Option<(f64, f64)> {
+    if let Some(layout) = app.try_state::<LayoutState>() {
+        let modeled = sync::lock(&layout.0)
+            .window_attrs(label)
+            .ok()
+            .and_then(|attrs| attrs.bounds);
+        if let Some(bounds) = modeled {
+            return Some((bounds.w(), bounds.h()));
+        }
+    }
+    let scale = window.scale_factor().ok()?;
+    let size = window.inner_size().ok()?;
+    saved_bounds(0, 0, size.width, size.height, scale).map(|b| (b.w(), b.h()))
+}
+
 // main 에 보통 자리와 최대화를 입힌다 — 계약은 `RestoreWindows::place_main`(부팅 ⑧ 도 같은 길). 보임 여부를 못
 //   읽으면 보이는 것으로 친다 — 보이는 창에 미루면 보이기 경로가 다시 불릴 때까지 최대화가 안 된다.
 fn place_main(
@@ -509,11 +747,12 @@ fn place_main(
     };
     let deferred = app.try_state::<DeferredMaximize>();
     if !maximized {
-        // 미룸을 먼저 거둔다 — 그래야 아래 자리 입히기가 낸 `Moved` · `Resized` 가 적힌다([`record`]).
-        if deferred.is_some_and(|deferred| deferred.take(MAIN_WINDOW_LABEL)) {
+        // 바람을 먼저 거둔다 — 그래야 아래 자리 입히기가 낸 `Moved` · `Resized` 가 적힌다([`record`]). 먼저 적힌 바람이
+        //   어느 값이든 사본이 이긴다.
+        if deferred.is_some_and(|deferred| deferred.take(MAIN_WINDOW_LABEL).is_some()) {
             tracing::debug!(
                 module = "state",
-                "사본의 main 이 최대화가 아니라 미뤄 둔 최대화를 거둔다"
+                "사본의 main 이 최대화가 아니라 적어 둔 최대화 바람을 거둔다"
             );
         }
         place_at();
@@ -529,13 +768,13 @@ fn place_main(
     let hidden = matches!(window.is_visible(), Ok(false));
     match deferred {
         Some(deferred) if hidden => {
-            deferred.defer(MAIN_WINDOW_LABEL);
+            let seen = deferred.defer(MAIN_WINDOW_LABEL, true);
             place_at();
             // 보임을 읽은 뒤 트레이 「보이기」가 끼어들어 미룬 최대화를 이미 입혔으면, 그 뒤의 위치 세터가 최대화를
             //   내렸다(F8) — 보이게 된 main 에는 여기서 입히고 미룸을 거둔다. 그 보이기가 이 뒤에 오면 미룸이 남아
             //   그쪽이 입힌다. 못 입혔으면 미룸을 남긴다([`DeferredMaximize::apply`] 와 같은 까닭).
             if matches!(window.is_visible(), Ok(true)) && maximize(window) {
-                deferred.take(MAIN_WINDOW_LABEL);
+                deferred.take_if_unchanged(MAIN_WINDOW_LABEL, seen);
             }
         }
         Some(deferred) => {
@@ -548,17 +787,115 @@ fn place_main(
     }
 }
 
-/// 보이기 경로가 창을 보인 직후 부른다 — 그 창의 미룬 최대화가 있으면 입히고 지금 자리를 적는다
-/// ([`DeferredMaximize`]). 미룬 동안 적지 않은 자리를 여기서 메운다. 못 입혔으면 미룸을 남기고 적지 않는다
-/// ([`DeferredMaximize::apply`]).
+/// 보이기 경로가 창을 보이고 ★펴기(`unminimize`)까지 한 뒤★ 부른다 — 그 창의 최대화 바람이 있으면 입히고(참 =
+/// 최대화 · 거짓 = 원래 크기) 지금 자리를 적는다([`DeferredMaximize`]). 바람이 있던 동안 적지 않은 자리를 여기서
+/// 메운다. 못 입혔으면 바람을 남기고 적지 않는다([`DeferredMaximize::apply`]). 바람이 없으면 무동작.
+///
+/// ★펴기 앞에 부르지 말 것★ — tao 0.35.3 은 최소화된 창의 최대화 깃발을 내려 두어 원래 크기 입히기가 아무것도 하지
+/// 않고 바람만 거두고, 뒤의 펴기(`SW_RESTORE`)가 최소화 전 최대화로 돌아가 바람을 잃는다(TRD S26-window-chrome §6-2 ⓑ).
+// TRD S26-window-chrome §5-2 「모든 보이기 갈래가 미룬 최대화를 입힌다」
 pub fn apply_deferred_maximize(window: &Window) {
     if window
         .app_handle()
         .try_state::<DeferredMaximize>()
-        .is_some_and(|deferred| deferred.apply(window.label(), || maximize(window)))
+        .is_some_and(|deferred| {
+            deferred.apply(window.label(), |maximized| {
+                if maximized {
+                    maximize(window)
+                } else {
+                    unmaximize(window)
+                }
+            })
+        })
     {
         record(window);
     }
+}
+
+/// 보이지 않는 창의 창 상태 명령(`window.maximize` · `window.unmaximize`)이 바랄 최대화 상태를 적는다 — 먼저 적은 것을
+/// 덮는다. 그 창을 보이는 길이 [`apply_deferred_maximize`] 로 입힌다(TRD S26-window-chrome §5-2). 표가 등록돼 있지
+/// 않으면 아무것도 하지 않는다.
+pub(crate) fn defer_maximize(app: &AppHandle, label: &str, maximized: bool) {
+    match app.try_state::<DeferredMaximize>() {
+        Some(deferred) => {
+            deferred.defer(label, maximized);
+        }
+        None => tracing::warn!(
+            module = "state",
+            label,
+            "미룬 최대화 표가 등록돼 있지 않아 그 창의 최대화 바람을 적지 않는다"
+        ),
+    }
+}
+
+/// 적어 둔 최대화 바람을 거둔다(없으면 무동작) — OS 창이 이미 그 크기가 됐거나 될 창의 창 상태 명령이 부른다(TRD
+/// S26-window-chrome §5-2 「이미 그 크기면 바람을 거둔다」).
+pub(crate) fn drop_deferred_maximize(app: &AppHandle, label: &str) {
+    if let Some(deferred) = app.try_state::<DeferredMaximize>() {
+        deferred.take(label);
+    }
+}
+
+/// 숨긴 채 짓고 자리를 입힌 창을 처음 보인다 — 첫 화면의 보이기(`crate::first_paint`). 최대화 바람이 참이면 보통 크기
+/// 틀을 거치지 않고 곧바로 최대화로 보이고(platform `restore_placement` — 지금 보통 자리를 되돌릴 자리로 둔다) 자리를
+/// 적는다. 그 보이기가 실패하면(Windows 밖 포함) 보통으로 보인 뒤 최대화한다 — 트레이 보이기와 같은 길이라 보통 크기
+/// 틀이 한 번 보인다. 바람이 거짓이면 보통으로 보인 뒤 원래 크기를 입힌다([`apply_deferred_maximize`]). ★메인 스레드에서
+/// 부른다★.
+///
+/// 보이며 활성화한다.
+///
+/// ★최대화로 보일 창은 포커스를 받는 빌더(`focused(true)`)로 지은 창이어야 한다★ — 날 Win32 로 보인 뒤 tao 보임 깃발을
+/// 맞추는 Tauri `show` 가, 포커스 없이 지은 창에서는 `SW_SHOWNOACTIVATE` 를 낸다(tao 0.35.3 `window_state.rs`
+/// `apply_diff` — 그 표식은 지운다는 코드가 사본에만 닿아 남는다 · 소스 독해). 그 명령은 `SW_SHOWNORMAL` 처럼 최대화를
+/// 되돌릴 수 있다 [미검]. 이 길로 보이는 창(보이는 부팅의 main · 복원 팝아웃 · 창 포트가 활성으로 지은 팝아웃)은 모두
+/// 포커스를 받는 빌더로 지었다.
+pub(crate) fn show_placed(window: &Window) {
+    let label = window.label();
+    let app = window.app_handle();
+    let deferred = app.try_state::<DeferredMaximize>();
+    let seen = deferred
+        .as_ref()
+        .and_then(|deferred| deferred.wish(label))
+        .filter(|wish| wish.maximized);
+    if let Some(seen) = seen {
+        match show_maximized(window) {
+            Ok(()) => {
+                // tao 보임 깃발을 맞춘다 — 거짓으로 남으면 다음 깃발 setter 가 창을 숨기고 트레이 숨기기가 아무것도 하지
+                //   않는다(바뀐 깃발이 없으면 tao 0.35.3 `apply_diff` 가 돌아간다 · 소스 독해).
+                if let Err(e) = window.show() {
+                    tracing::warn!(module = "state", label, error = %e, "최대화로 보인 창의 보임 깃발을 맞추지 못했다");
+                }
+                if deferred.is_some_and(|deferred| deferred.take_if_unchanged(label, seen)) {
+                    record(window);
+                }
+                return;
+            }
+            Err(e) => tracing::warn!(
+                module = "state",
+                label,
+                "곧바로 최대화로 보이지 못해 보통으로 보인 뒤 최대화한다: {e}"
+            ),
+        }
+    }
+    if let Err(e) = window.show() {
+        tracing::warn!(module = "state", label, error = %e, "숨긴 창을 보이지 못했다");
+        return;
+    }
+    apply_deferred_maximize(window);
+}
+
+// 숨은 창의 지금 바깥 사각형(물리 화면 좌표)을 보통 자리로 두고 최대화로 보인다.
+fn show_maximized(window: &Window) -> Result<(), String> {
+    let at = window.outer_position().map_err(|e| e.to_string())?;
+    let size = window.outer_size().map_err(|e| e.to_string())?;
+    let normal = engram_dashboard_platform::window::PhysRect {
+        x: at.x,
+        y: at.y,
+        width: i32::try_from(size.width).map_err(|e| e.to_string())?,
+        height: i32::try_from(size.height).map_err(|e| e.to_string())?,
+    };
+    engram_dashboard_platform::window::restore_placement(window, normal, true, true)
+        .map_err(|e| e.to_string())
 }
 
 /// 창이 소멸했다(`WindowEvent::Destroyed`) — 그 창의 미룬 최대화를 거둔다. 팝아웃 label 은 재사용되지 않아 남겨도 다른
@@ -566,7 +903,7 @@ pub fn apply_deferred_maximize(window: &Window) {
 pub fn forget_deferred_maximize(app: &AppHandle, label: &str) {
     if app
         .try_state::<DeferredMaximize>()
-        .is_some_and(|deferred| deferred.take(label))
+        .is_some_and(|deferred| deferred.take(label).is_some())
     {
         tracing::debug!(
             module = "state",
@@ -617,39 +954,49 @@ impl RestoreWindows for TauriRestoreWindows {
     ) -> Result<(), String> {
         let deferred = if maximized {
             let deferred = self.app.try_state::<DeferredMaximize>();
-            match &deferred {
-                Some(deferred) => deferred.defer(label),
-                None => tracing::debug!(
-                    module = "state",
-                    label,
-                    "미룬 최대화 표가 등록돼 있지 않아 그 창의 최대화를 입히지 않는다"
-                ),
+            match deferred {
+                Some(deferred) => {
+                    let seen = deferred.defer(label, true);
+                    Some((deferred, seen))
+                }
+                None => {
+                    tracing::debug!(
+                        module = "state",
+                        label,
+                        "미룬 최대화 표가 등록돼 있지 않아 그 창의 최대화를 입히지 않는다"
+                    );
+                    None
+                }
             }
-            deferred
         } else {
             None
         };
-        let window = match crate::commands::popout::build_hidden_runtime_window(
+        let built = match crate::commands::popout::build_runtime_window(
             &self.app,
             label,
             at.map(first_place),
         ) {
-            Ok(window) => window.as_ref().window(),
+            Ok(built) => built,
             Err(e) => {
-                if let Some(deferred) = deferred {
+                if let Some((deferred, _)) = deferred {
                     deferred.take(label);
                 }
                 return Err(e);
             }
         };
+        // 보일지는 모델에 넣은 뒤 정한다([`RestoreWindows::set_shown`]) — 그 전에 온 첫 화면 알림을 받아 둔다.
+        crate::first_paint::hold_window_unarmed(&built);
+        // 사본의 크기가 최소 폭보다 좁으면 첫 최소 크기 보고가 넓혀 당긴다(TRD S26-window-chrome §7-7 · D14).
+        crate::chrome::mark_opening(&self.app, label);
+        let window = built.as_ref().window();
         if let Some((bounds, at)) = at {
             place(&window, bounds, at);
             // 만든 뒤 트레이 「보이기」가 끼어들어 미룬 최대화를 이미 입혔으면 방금의 위치 세터가 그 최대화를 내렸다(F8)
             //   — 보이게 된 창에는 여기서 다시 입힌다(`place_main` 과 같은 까닭). 그 보이기가 이 뒤에 오면 미룸이 남아
             //   그쪽이 입힌다.
             if maximized && matches!(window.is_visible(), Ok(true)) && maximize(&window) {
-                if let Some(deferred) = &deferred {
-                    deferred.take(label);
+                if let Some((deferred, seen)) = &deferred {
+                    deferred.take_if_unchanged(label, *seen);
                 }
             }
         }
@@ -671,7 +1018,13 @@ impl RestoreWindows for TauriRestoreWindows {
 
     fn place_main(&self, at: Option<(WindowBounds, Landing)>, maximized: bool) {
         if let Some(window) = self.window(MAIN_WINDOW_LABEL) {
+            // 사본의 main 폭이 최소 폭보다 좁으면 넓혀 당긴다(TRD S26-window-chrome §7-7 · D14 · PRD AC34 「사본 수락」).
+            //   main 은 다시 짓지 않아 그 페이지가 다시 보고하지 않고, 이미 입은 OS 최소 크기가 좁은 자리를 왼쪽 끝을 둔 채
+            //   키운다 — 그래서 자리 앞에 그 최소 크기를 걷고, 자리 뒤의 열기 표시가 받아 둔 값으로 넓혀 당긴 뒤 다시 입힌다.
+            //   ★걷기 일을 자리 세터보다 먼저 넘긴다★ — 둘 다 메인 스레드 줄에 넘긴 차례대로 선다(`crate::chrome::lift_min`).
+            crate::chrome::lift_min(&self.app, MAIN_WINDOW_LABEL);
             place_main(&self.app, &window, at, maximized);
+            crate::chrome::mark_opening(&self.app, MAIN_WINDOW_LABEL);
         }
     }
 
@@ -680,21 +1033,28 @@ impl RestoreWindows for TauriRestoreWindows {
             return;
         };
         crate::tray::actions::with_usage_visibility(&self.app, |usage| {
-            crate::tray::actions::for_each_ui_window([label], shown, usage, |label| {
-                let result = if shown { window.show() } else { window.hide() };
-                match result {
-                    // 보인 창에만 — 숨은 창을 최대화하면 보였다 숨는다.
-                    Ok(()) if shown => {
-                        apply_deferred_maximize(&window);
-                        true
+            crate::tray::actions::for_each_ui_window(
+                [label],
+                shown,
+                usage,
+                |_| false,
+                |_| {},
+                |label| {
+                    // 보이기는 첫 화면 뒤다 — 미룬 최대화도 그 보이기가 입힌다([`show_placed`]).
+                    if shown {
+                        crate::first_paint::reveal_held(&self.app, label);
+                        return true;
                     }
-                    Ok(()) => true,
-                    Err(e) => {
-                        tracing::warn!(module = "state", label, shown, error = %e, "복원한 창의 보임을 바꾸지 못했다");
-                        false
+                    crate::first_paint::cancel_hold(&self.app, label);
+                    match window.hide() {
+                        Ok(()) => true,
+                        Err(e) => {
+                            tracing::warn!(module = "state", label, error = %e, "복원한 창을 숨기지 못했다");
+                            false
+                        }
                     }
-                }
-            });
+                },
+            );
         });
     }
 
@@ -725,7 +1085,7 @@ impl RestoreWindows for TauriRestoreWindows {
 //   웹뷰의 GotFocus · LostFocus 에서 만든다. [미검증 — 소스 독해. GUI 실측 몫]
 // 그 밖의 OS 는 그 게터를 그대로 쓴다 — OS 층이 답할 수단이 없다고(`None`) 할 때다. [미검증 — 그 갈래는 Windows
 //   에서 돌지 않는다] OS 분기는 OS 층 crate 에 있다(ADR-0266 — 셸에 `#[cfg(windows)]` 를 두지 않는다).
-fn foreground_is_ours(app: &AppHandle) -> bool {
+pub(crate) fn foreground_is_ours(app: &AppHandle) -> bool {
     engram_dashboard_platform::window::foreground_is_current_process().unwrap_or_else(|| {
         app.webview_windows()
             .values()
@@ -733,7 +1093,7 @@ fn foreground_is_ours(app: &AppHandle) -> bool {
     })
 }
 
-fn monitors(app: &AppHandle) -> Vec<MonitorArea> {
+pub(crate) fn monitors(app: &AppHandle) -> Vec<MonitorArea> {
     match app.available_monitors() {
         Ok(list) => list
             .iter()
@@ -800,7 +1160,8 @@ fn read(window: &Window) -> Option<WindowPlacement> {
 /// 창 하나의 지금 자리를 레이아웃 모델의 그 label 항목에 적는다. 모델에
 /// 없는 label(닫힌 뒤 늦게 온 사건 · 모델에 들기 전의 새 창)은 버린다 — 팝아웃 label 은 재사용되지 않아 다른 창에
 /// 잘못 적히지 않는다(`PopupCounter`). 최대화를 미뤄 둔 동안의 창도 적지 않는다([`DeferredMaximize`]).
-/// 규칙(최소화 · 최대화)은 [`WindowAttrs`] 의 `observe`.
+/// 규칙(최소화 · 최대화)은 [`WindowAttrs`] 의 `observe`. 적었으면 락을 놓은 뒤 그 창의 창 사실(`window:frame`)을 바뀔
+/// 때만 민다(`commands::tab_drop::push_window_frame`).
 pub fn record(window: &Window) {
     let label = window.label();
     let app = window.app_handle();
@@ -835,8 +1196,18 @@ pub fn record(window: &Window) {
         );
         return;
     };
-    if let Err(e) = mgr.observe_window_placement(label, seen) {
-        tracing::debug!(module = "state", label, error = %e, "모델에 없는 창의 자리라 버린다");
+    let attrs = match mgr.observe_window_placement(label, seen) {
+        Ok(()) => mgr.window_attrs(label).ok(),
+        Err(e) => {
+            tracing::debug!(module = "state", label, error = %e, "모델에 없는 창의 자리라 버린다");
+            None
+        }
+    };
+    // 레이아웃 락을 놓은 뒤에 민다 — 창 사실 밀기는 게터를 부른다.
+    // TRD S21-slot-docking §3-8
+    drop(mgr);
+    if let Some(attrs) = attrs {
+        crate::commands::tab_drop::push_window_frame(window, seen.minimized, attrs);
     }
 }
 
@@ -1063,7 +1434,7 @@ mod tests {
         });
 
         assert_eq!(removed, ["slot-popup-1"]);
-        let mgr = layout.0.lock().unwrap();
+        let mut mgr = layout.0.lock().unwrap();
         let mut windows = mgr.list_windows();
         windows.sort();
         assert_eq!(windows, [MAIN_WINDOW_LABEL, "slot-popup-2"]);
@@ -1071,6 +1442,11 @@ mod tests {
             mgr.version > version,
             "지운 것이 레이아웃 변경이라 기록기가 싣는다"
         );
+        // 못 연 창의 `Destroyed` 는 오지 않는다 — 번호를 곧바로 내놓아 다음 새 창이 받는다(TRD S26-window-chrome §4-1).
+        assert!(mgr.closing_numbers().is_empty());
+        mgr.create_window("slot-popup-3").unwrap();
+        assert_eq!(mgr.windows["slot-popup-3"].number, 2);
+        mgr.assert_number_invariants();
     }
 
     #[test]
@@ -1357,35 +1733,102 @@ mod tests {
     fn a_deferred_maximize_is_applied_once() {
         let deferred = DeferredMaximize::default();
         assert!(!deferred.is_pending(MAIN_WINDOW_LABEL));
-        assert!(
-            !deferred.take(MAIN_WINDOW_LABEL),
+        assert_eq!(
+            deferred.take(MAIN_WINDOW_LABEL),
+            None,
             "미룬 것이 없으면 입히지 않는다"
         );
 
-        deferred.defer(MAIN_WINDOW_LABEL);
+        deferred.defer(MAIN_WINDOW_LABEL, true);
         assert!(
             deferred.is_pending(MAIN_WINDOW_LABEL),
             "서 있는 동안 main 의 자리를 적지 않는다"
         );
-        assert!(deferred.take(MAIN_WINDOW_LABEL));
+        assert_eq!(deferred.take(MAIN_WINDOW_LABEL), Some(true));
         assert!(!deferred.is_pending(MAIN_WINDOW_LABEL));
-        assert!(
-            !deferred.take(MAIN_WINDOW_LABEL),
+        assert_eq!(
+            deferred.take(MAIN_WINDOW_LABEL),
+            None,
             "다음 보이기는 다시 최대화하지 않는다"
         );
+    }
+
+    // 바람은 label 마다 하나다 — 뒤에 적은 값이 앞의 것을 덮고, 입히기는 그 값을 받는다. 원래 크기 바람도 서 있는 동안 자리
+    //   기록을 멈춘다(`record` — 값과 무관하다).
+    #[test]
+    fn a_later_wish_overwrites_an_earlier_one_and_is_applied_with_its_value() {
+        let deferred = DeferredMaximize::default();
+        deferred.defer("slot-popup-5", true);
+        deferred.defer("slot-popup-5", false);
+        assert!(deferred.is_pending("slot-popup-5"), "원래 크기 바람");
+        let mut applied = Vec::new();
+        assert!(deferred.apply("slot-popup-5", |maximized| {
+            applied.push(maximized);
+            true
+        }));
+        assert_eq!(applied, [false]);
+        assert!(!deferred.is_pending("slot-popup-5"));
+    }
+
+    // 입히는 사이 다른 쪽이 새 바람을 적으면 그 바람을 남긴다 — 다음 보이기가 그것을 입힌다.
+    #[test]
+    fn a_wish_written_while_applying_is_kept() {
+        let deferred = DeferredMaximize::default();
+        deferred.defer("slot-popup-5", true);
+        assert!(!deferred.apply("slot-popup-5", |_| {
+            deferred.defer("slot-popup-5", false);
+            true
+        }));
+        assert_eq!(
+            deferred.wish("slot-popup-5").map(|wish| wish.maximized),
+            Some(false)
+        );
+    }
+
+    // 입히는 사이 같은 값을 다시 적어도 그 바람은 새 것이다 — 값만 보고 거두면 지워진다.
+    #[test]
+    fn a_same_value_wish_rewritten_while_applying_is_kept() {
+        let deferred = DeferredMaximize::default();
+        deferred.defer("slot-popup-5", true);
+        assert!(!deferred.apply("slot-popup-5", |_| {
+            deferred.defer("slot-popup-5", true);
+            true
+        }));
+        assert_eq!(
+            deferred.wish("slot-popup-5").map(|wish| wish.maximized),
+            Some(true)
+        );
+    }
+
+    // 참 → 거짓 → 참으로 되돌아온 바람도 입히는 동안 적힌 새 바람이다(ABA).
+    #[test]
+    fn a_wish_that_returns_to_the_applied_value_while_applying_is_kept() {
+        let deferred = DeferredMaximize::default();
+        deferred.defer("slot-popup-5", true);
+        assert!(!deferred.apply("slot-popup-5", |_| {
+            deferred.defer("slot-popup-5", false);
+            deferred.defer("slot-popup-5", true);
+            true
+        }));
+        assert!(deferred.is_pending("slot-popup-5"));
+        assert!(
+            deferred.apply("slot-popup-5", |maximized| maximized),
+            "다음 보이기가 남은 바람을 입힌다"
+        );
+        assert!(!deferred.is_pending("slot-popup-5"));
     }
 
     #[test]
     fn a_deferred_maximize_that_fails_to_apply_stays_pending_for_the_next_show() {
         let deferred = DeferredMaximize::default();
         assert!(
-            !deferred.apply("slot-popup-5", || panic!("미룬 것이 없으면 입히지 않는다")),
+            !deferred.apply("slot-popup-5", |_| panic!("미룬 것이 없으면 입히지 않는다")),
             "미룬 것이 없다"
         );
 
-        deferred.defer("slot-popup-5");
+        deferred.defer("slot-popup-5", true);
         assert!(
-            !deferred.apply("slot-popup-5", || false),
+            !deferred.apply("slot-popup-5", |_| false),
             "못 입혔으면 자리를 적지 않는다"
         );
         assert!(
@@ -1394,12 +1837,12 @@ mod tests {
         );
 
         assert!(
-            deferred.apply("slot-popup-5", || true),
+            deferred.apply("slot-popup-5", |_| true),
             "다음 보이기가 다시 입힌다"
         );
         assert!(!deferred.is_pending("slot-popup-5"));
         assert!(
-            !deferred.apply("slot-popup-5", || panic!("한 번만 입힌다")),
+            !deferred.apply("slot-popup-5", |_| panic!("한 번만 입힌다")),
             "입힌 뒤에는 다시 입히지 않는다"
         );
     }
@@ -1421,7 +1864,7 @@ mod tests {
         );
 
         assert!(
-            deferred.apply(MAIN_WINDOW_LABEL, || true),
+            deferred.apply(MAIN_WINDOW_LABEL, |_| true),
             "다음 보이기가 다시 입힌다"
         );
         assert!(!deferred.is_pending(MAIN_WINDOW_LABEL));
@@ -1440,7 +1883,7 @@ mod tests {
         assert!(!deferred.apply_now(
             MAIN_WINDOW_LABEL,
             // 트레이 「보이기」가 끼어들어 미룬 최대화를 입히고 거뒀다 — 그 뒤의 위치 세터가 그 최대화를 내린다(F8).
-            || assert!(deferred.apply(MAIN_WINDOW_LABEL, || true)),
+            || assert!(deferred.apply(MAIN_WINDOW_LABEL, |_| true)),
             || {
                 maximized = true;
                 false
@@ -1456,23 +1899,301 @@ mod tests {
     #[test]
     fn deferred_maximizes_are_kept_per_window() {
         let deferred = DeferredMaximize::default();
-        deferred.defer("slot-popup-3");
-        deferred.defer("slot-popup-4");
+        deferred.defer("slot-popup-3", true);
+        deferred.defer("slot-popup-4", false);
 
         assert!(
             !deferred.is_pending(MAIN_WINDOW_LABEL),
             "다른 창은 그대로 적힌다"
         );
-        assert!(deferred.take("slot-popup-3"), "보인 창 하나만 입힌다");
+        assert_eq!(
+            deferred.take("slot-popup-3"),
+            Some(true),
+            "보인 창 하나만 입힌다"
+        );
         assert!(!deferred.is_pending("slot-popup-3"));
         assert!(
             deferred.is_pending("slot-popup-4"),
             "아직 숨은 창의 미룸은 남는다"
         );
-        assert!(
+        assert_eq!(
             deferred.take("slot-popup-4"),
-            "창 소멸도 같은 거두기다 — 거둔 뒤 집합이 빈다"
+            Some(false),
+            "창 소멸도 같은 거두기다 — 거둔 뒤 표가 빈다"
         );
-        assert!(deferred.labels().is_empty());
+        assert!(deferred.wishes().by_label.is_empty());
+    }
+
+    // ── 넓혀 당기기(TRD S26-window-chrome §7-7 · D14) ──
+
+    /// 작업 영역 = PRIMARY 에서 아래 작업 표시줄 48 px 를 뺀 것. 바깥 틀 = 좌우 보이지 않는 테두리 8 px 씩.
+    const WORK: MonitorArea = MonitorArea {
+        x: 0,
+        y: 0,
+        w: 1920,
+        h: 1032,
+        scale: 1.0,
+    };
+    const FRAME: f64 = 16.0;
+
+    #[test]
+    fn a_narrow_saved_width_is_widened_to_the_min_in_place() {
+        assert_eq!(
+            fit_min_width(rect(300.0, 200.0, 200.0, 500.0), 286.0, WORK, FRAME),
+            rect(300.0, 200.0, 286.0, 500.0),
+            "넓힌 창이 작업 영역 안이면 자리는 그대로다"
+        );
+    }
+
+    #[test]
+    fn a_wide_enough_window_is_left_alone_even_off_the_work_area() {
+        let off = rect(1800.0, 200.0, 600.0, 500.0);
+        assert_eq!(fit_min_width(off, 286.0, WORK, FRAME), off);
+        let exact = rect(1700.0, 200.0, 286.0, 500.0);
+        assert_eq!(fit_min_width(exact, 286.0, WORK, FRAME), exact);
+    }
+
+    #[test]
+    fn a_widened_window_past_the_work_area_right_edge_is_pulled_back_in() {
+        // 보이는 오른 끝 = 바깥 x + 8 + 286 = 1920 이 되도록 바깥 x = 1626(보이지 않는 오른쪽 테두리 8 px 는 작업 영역 밖).
+        assert_eq!(
+            fit_min_width(rect(1800.0, 200.0, 120.0, 500.0), 286.0, WORK, FRAME),
+            rect(1626.0, 200.0, 286.0, 500.0)
+        );
+    }
+
+    #[test]
+    fn the_pull_uses_the_window_scale_for_the_visible_width() {
+        // 150 % — 보이는 폭 = 286 × 1.5 = 429 · 한쪽 테두리 = 24 / 2 = 12 → 보이는 오른 끝 1920 + 2560 = 4480 에 맞춰
+        //   바깥 x = 4480 − 12 − 429 = 4039.
+        let work = monitor(1920, 0, 2560, 1392, 1.5);
+        assert_eq!(
+            fit_min_width(rect(4400.0, 100.0, 200.0, 400.0), 286.0, work, 24.0),
+            rect(4039.0, 100.0, 286.0, 400.0)
+        );
+    }
+
+    #[test]
+    fn a_work_area_narrower_than_the_min_aligns_the_visible_left_edge() {
+        let tiny = monitor(-640, 0, 280, 480, 1.0);
+        assert_eq!(
+            fit_min_width(rect(-500.0, 40.0, 120.0, 300.0), 286.0, tiny, FRAME),
+            rect(-648.0, 40.0, 286.0, 300.0),
+            "보이는 폭 286 > 작업 영역 280 — 보이는 왼쪽 끝(바깥 x + 8) = 작업 영역 왼쪽 끝"
+        );
+    }
+
+    #[test]
+    fn a_window_left_of_the_work_area_is_pulled_to_the_visible_left_edge() {
+        assert_eq!(
+            fit_min_width(rect(-300.0, 200.0, 120.0, 500.0), 286.0, WORK, FRAME),
+            rect(-8.0, 200.0, 286.0, 500.0),
+            "넓힐 때는 왼쪽 밖 자리도 보이는 왼쪽 끝 = 작업 영역 왼쪽 끝으로 당긴다"
+        );
+    }
+
+    #[test]
+    fn an_odd_frame_keeps_the_visible_edges_inside_the_work_area() {
+        // 한쪽 테두리 = 8.5 — 오른쪽 범위는 내림 · 왼쪽 범위는 올림이라 반 px 가 작업 영역 밖으로 나가지 않는다.
+        assert_eq!(
+            fit_min_width(rect(1800.0, 200.0, 120.0, 500.0), 286.0, WORK, 17.0),
+            rect(1625.0, 200.0, 286.0, 500.0)
+        );
+        let tiny = monitor(-640, 0, 280, 480, 1.0);
+        assert_eq!(
+            fit_min_width(rect(-500.0, 40.0, 120.0, 300.0), 286.0, tiny, 17.0),
+            rect(-648.0, 40.0, 286.0, 300.0)
+        );
+    }
+
+    #[test]
+    fn an_unusable_scale_widens_without_pulling() {
+        let broken = monitor(0, 0, 1920, 1032, f64::NAN);
+        assert_eq!(
+            fit_min_width(rect(1800.0, 200.0, 120.0, 500.0), 286.0, broken, FRAME),
+            rect(1800.0, 200.0, 286.0, 500.0)
+        );
+    }
+
+    // ── 결과를 돌려주는 자리 입히기(도킹의 창 포트) ──
+
+    /// 세터 가짜 — 부른 걸음을 적고 `fail` 에 든 걸음은 실패한다.
+    #[derive(Default)]
+    struct FakeSetters {
+        calls: Mutex<Vec<String>>,
+        fail: Vec<MoveStep>,
+    }
+
+    impl FakeSetters {
+        fn failing(fail: &[MoveStep]) -> Self {
+            FakeSetters {
+                fail: fail.to_vec(),
+                ..FakeSetters::default()
+            }
+        }
+
+        fn call(&self, step: MoveStep, what: String) -> Result<(), String> {
+            self.calls.lock().unwrap().push(what);
+            if self.fail.contains(&step) {
+                return Err(format!("{step:?} 실패(시험)"));
+            }
+            Ok(())
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl Setters for FakeSetters {
+        fn set_position(&self, x: i32, y: i32) -> Result<(), String> {
+            self.call(MoveStep::Position, format!("position {x},{y}"))
+        }
+
+        fn set_size(&self, w: f64, h: f64) -> Result<(), String> {
+            self.call(MoveStep::Size, format!("size {w}x{h}"))
+        }
+    }
+
+    #[test]
+    fn moving_sets_the_position_before_the_size() {
+        let window = FakeSetters::default();
+        assert_eq!(
+            move_steps(&window, Some((10, -20)), Some((300.0, 200.5))),
+            Ok(())
+        );
+        assert_eq!(window.calls(), ["position 10,-20", "size 300x200.5"]);
+    }
+
+    #[test]
+    fn moving_stops_at_the_first_failed_step() {
+        let window = FakeSetters::failing(&[MoveStep::Position]);
+        let err = move_steps(&window, Some((10, 20)), Some((300.0, 200.0))).unwrap_err();
+        assert_eq!(err.step, MoveStep::Position);
+        assert!(err.error.contains("Position"), "{err:?}");
+        assert_eq!(window.calls(), ["position 10,20"], "크기는 안 불린다");
+
+        let window = FakeSetters::failing(&[MoveStep::Size]);
+        let err = move_steps(&window, Some((10, 20)), Some((300.0, 200.0))).unwrap_err();
+        assert_eq!(err.step, MoveStep::Size);
+        assert_eq!(window.calls().len(), 2);
+    }
+
+    #[test]
+    fn moving_skips_a_step_without_a_value() {
+        let window = FakeSetters::failing(&[MoveStep::Position]);
+        assert_eq!(move_steps(&window, None, Some((300.0, 200.0))), Ok(()));
+        assert_eq!(window.calls(), ["size 300x200"]);
+
+        let window = FakeSetters::default();
+        assert_eq!(move_steps(&window, None, None), Ok(()));
+        assert!(window.calls().is_empty());
+    }
+
+    #[test]
+    fn only_finite_positive_sizes_are_usable() {
+        assert_eq!(usable_size(Some((300.0, 200.0))), Some((300.0, 200.0)));
+        for bad in [
+            (0.0, 200.0),
+            (300.0, -1.0),
+            (f64::NAN, 200.0),
+            (300.0, f64::INFINITY),
+        ] {
+            assert_eq!(usable_size(Some(bad)), None, "{bad:?}");
+        }
+        assert_eq!(usable_size(None), None);
+    }
+
+    #[test]
+    fn a_dock_place_on_a_monitor_lands_with_its_size_or_the_default() {
+        let at = WindowPlace {
+            pos: Some((1700, 100)),
+            size: Some((400.0, 300.0)),
+        };
+        assert_eq!(
+            resolve_place(
+                "slot-popup-1",
+                &at,
+                (720.0, 500.0),
+                &[PRIMARY, RIGHT],
+                Fallback::DefaultPlace
+            ),
+            Some((
+                rect(1700.0, 100.0, 400.0, 300.0),
+                Landing {
+                    x: 1700,
+                    y: 100,
+                    scale: 1.5
+                }
+            ))
+        );
+        for size in [None, Some((0.0, 300.0))] {
+            let at = WindowPlace {
+                pos: Some((80, 60)),
+                size,
+            };
+            assert_eq!(
+                resolve_place(
+                    "slot-popup-1",
+                    &at,
+                    (720.0, 500.0),
+                    &[PRIMARY],
+                    Fallback::DefaultPlace
+                ),
+                Some((
+                    rect(80.0, 60.0, 720.0, 500.0),
+                    Landing {
+                        x: 80,
+                        y: 60,
+                        scale: 1.0
+                    }
+                )),
+                "{size:?} — 기본 크기"
+            );
+        }
+    }
+
+    // 크기를 고르지 않은 옮기기는 창이 갖고 갈 크기로 걸침을 잰다(`move_window` 의 `kept_size`) — 팝아웃 기본 크기로
+    //   재면 그보다 작은 창이 걸친다고 판정된 채 화면 밖에 놓인다.
+    #[test]
+    fn a_small_window_left_of_the_monitor_does_not_land_though_the_default_size_would() {
+        let at = WindowPlace {
+            pos: Some((-650, 100)),
+            size: None,
+        };
+        let land_with =
+            |size| resolve_place("slot-popup-1", &at, size, &[PRIMARY], Fallback::StayPut);
+        assert_eq!(land_with((300.0, 200.0)), None, "창 크기로 재면 화면 밖");
+        assert!(
+            land_with((720.0, 500.0)).is_some(),
+            "전제: 기본 크기로 재면 걸친다"
+        );
+    }
+
+    #[test]
+    fn a_dock_place_off_every_monitor_or_without_a_position_does_not_land() {
+        let off = WindowPlace {
+            pos: Some((-3000, 100)),
+            size: Some((400.0, 300.0)),
+        };
+        let unplaced = WindowPlace {
+            pos: None,
+            size: Some((400.0, 300.0)),
+        };
+        for at in [off, unplaced] {
+            for fallback in [Fallback::DefaultPlace, Fallback::StayPut] {
+                assert_eq!(
+                    resolve_place(
+                        "slot-popup-1",
+                        &at,
+                        (720.0, 500.0),
+                        &[PRIMARY, RIGHT],
+                        fallback
+                    ),
+                    None,
+                    "{at:?}"
+                );
+            }
+        }
     }
 }

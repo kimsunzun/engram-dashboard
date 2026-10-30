@@ -9,9 +9,12 @@
 //! - **그 창만 건너뛴다** — 모르는 `kind` · 못 읽는 창 칸(탭 칸 포함).
 //! - **그 탭만 건너뛴다** — 못 읽는 탭(모르는 노드 종류 · 객체가 아닌 슬롯 내용 등).
 //!
-//! 창의 `theme` 이 모르는 값이면 창은 살리고 그 칸만 `None`(전역 테마)으로 접는다. `bounds` 가 없거나 `null` 이면
-//! `None`(자리를 본 적 없는 창)이다 — 경고가 아니다. 건너뛰고 접은 것은 [`DecodeWarning`] 으로 돌려준다 — 로그는
-//! 부르는 쪽이 낸다.
+//! 창의 `theme` 이 모르는 값 · `number` 가 `1..=MAX_SAVED_NUMBER` 정수가 아닌 값이면 창은 살리고 그 칸만
+//! `None`(전역 테마 · 번호 없음)으로 접는다. `bounds` · `number` 가 없거나 `null` 이면 `None`(자리를 본 적 없는 창 ·
+//! 번호를 적지 않은 파일)이다 — 경고가 아니다. main 의 `number` 는 복원이 보지 않으므로(D3) 무슨 값이든 경고하지
+//! 않는다. 탭의 `named` 가 없거나 불이 아니면 그 탭은 살리고 `None`(자동 이름)으로 읽는다 — 이것도 경고가 아니다(TRD
+//! S26-window-chrome §3-3 · 판정은 `schema::TabEntry` 의 serde 가 한다). 건너뛰고 접은 것은 [`DecodeWarning`] 으로
+//! 돌려준다 — 로그는 부르는 쪽이 낸다.
 
 use std::fmt;
 
@@ -23,6 +26,7 @@ use uuid::Uuid;
 use super::schema::{
     Bounds, StateFile, TabEntry, TabStrip, WindowEntry, WindowKind, STATE_VERSION,
 };
+use crate::layout::numbering;
 use crate::theme::UiTheme;
 
 /// 읽기 상한이자 쓰기 상한 — 넘는 글을 쓰면 다음 부팅이 그 파일 전체를 못 쓴다고 접는다(I4). 부르는 쪽은 이
@@ -75,8 +79,13 @@ pub enum DecodeWarning {
         index: usize,
         reason: String,
     },
-    /// `raw` = 받은 값의 JSON 원문.
+    /// `raw` = 받은 값의 JSON 원문 — 앞 `WARNING_RAW_MAX_CHARS` 글자까지(넘으면 `…` 로 끝난다).
     ThemeDropped { window_id: String, raw: String },
+    /// 팝아웃의 창 번호 칸에 값이 있는데 `1..=MAX_SAVED_NUMBER` 정수가 아니다 — 그 칸만 `None` 으로 접고 창은
+    /// 살린다(TRD S26-window-chrome §3-3). 칸 없음 · `null` · main 의 칸은 이 경고를 내지 않는다. `raw` = 받은 값의
+    /// JSON 원문 — `ThemeDropped` 와 같은 상한.
+    // ADR-0300 — 창 번호
+    NumberDropped { window_id: String, raw: String },
 }
 
 impl fmt::Display for DecodeWarning {
@@ -96,6 +105,9 @@ impl fmt::Display for DecodeWarning {
                     f,
                     "창 {window_id} 의 모르는 테마 {raw} — 전역 테마를 따른다"
                 )
+            }
+            DecodeWarning::NumberDropped { window_id, raw } => {
+                write!(f, "창 {window_id} 의 번호 {raw} 를 쓸 수 없다 — 버린다")
             }
         }
     }
@@ -208,6 +220,8 @@ enum KindTag {
 struct WindowHead {
     id: String,
     #[serde(default)]
+    number: Value,
+    #[serde(default)]
     theme: Value,
     // 없음 · `null` = `None`. 객체가 아니거나 칸이 수가 아니면(유한하지 않은 실수는 `null` 로 나간다) 그 창의 읽기
     // 실패다 — 이 판의 쓰기는 그런 값을 내지 않는다(`WindowBounds` 가 유한한 값만 쥔다).
@@ -277,19 +291,38 @@ fn decode_window(
             None => {
                 warnings.push(DecodeWarning::ThemeDropped {
                     window_id: head.id.clone(),
-                    raw: raw.to_string(),
+                    raw: raw_for_warning(raw),
                 });
                 None
             }
         },
     };
+    let number = numbering::saved_number(&head.number);
+    if number.is_none() && !head.number.is_null() && matches!(kind, WindowKind::Popout(_)) {
+        warnings.push(DecodeWarning::NumberDropped {
+            window_id: head.id.clone(),
+            raw: raw_for_warning(&head.number),
+        });
+    }
     Some(WindowEntry {
         id: head.id,
+        number,
         kind,
         theme,
         bounds: head.bounds,
         maximized: head.maximized,
     })
+}
+
+// 경고에 싣는 원문의 상한(글자) — 칸 하나에 큰 값이 들어 있어도 로그 한 줄이 그만큼 커지지 않게 한다.
+const WARNING_RAW_MAX_CHARS: usize = 64;
+
+fn raw_for_warning(value: &Value) -> String {
+    let raw = value.to_string();
+    match raw.char_indices().nth(WARNING_RAW_MAX_CHARS) {
+        Some((cut, _)) => format!("{}…", &raw[..cut]),
+        None => raw,
+    }
 }
 
 /// `Err` = 탭 칸 자체(`active_tab` · `tabs` 배열)를 못 읽는다 — 그 창째 건너뛴다.
@@ -328,7 +361,7 @@ mod tests {
 
     use super::{
         crash_copy_hash, decode, encode, fnv1a_64, fnv1a_hex, DecodeWarning, EncodeError, Unusable,
-        STATE_READ_CAP,
+        STATE_READ_CAP, WARNING_RAW_MAX_CHARS,
     };
     use crate::layout::{SlotContent, SplitDir};
     use crate::state::schema::{
@@ -357,6 +390,7 @@ mod tests {
         TabEntry {
             id: Uuid::new_v4(),
             name: name.to_string(),
+            named: Some(true),
             focused_slot_id: None,
             layout,
         }
@@ -366,7 +400,8 @@ mod tests {
         let focused = Uuid::new_v4();
         let first = TabEntry {
             id: Uuid::new_v4(),
-            name: "View 1".to_string(),
+            name: "빈 칸".to_string(),
+            named: Some(false),
             focused_slot_id: Some(focused),
             layout: PersistedNode::Split {
                 id: Uuid::new_v4(),
@@ -400,6 +435,7 @@ mod tests {
             windows: vec![
                 WindowEntry {
                     id: "main".to_string(),
+                    number: Some(1),
                     kind: WindowKind::Main(TabStrip {
                         active_tab: second.id,
                         tabs: vec![first, second],
@@ -410,6 +446,7 @@ mod tests {
                 },
                 WindowEntry {
                     id: Uuid::new_v4().to_string(),
+                    number: Some(2),
                     kind: WindowKind::Popout(TabStrip {
                         active_tab: popout.id,
                         tabs: vec![popout],
@@ -439,7 +476,7 @@ mod tests {
 
     fn window(id: &str, kind: &str) -> Value {
         json!({
-            "id": id, "kind": kind, "theme": null,
+            "id": id, "kind": kind, "number": 2, "theme": null,
             "bounds": { "x": 0, "y": 0, "w": 800, "h": 600 }, "maximized": false,
         })
     }
@@ -458,7 +495,7 @@ mod tests {
 
     fn tab_json(content: Value) -> Value {
         json!({
-            "id": Uuid::new_v4(), "name": "t", "focused_slot_id": null,
+            "id": Uuid::new_v4(), "name": "t", "named": false, "focused_slot_id": null,
             "layout": { "type": "slot", "id": Uuid::new_v4(), "content": content },
         })
     }
@@ -512,6 +549,7 @@ mod tests {
         assert_eq!(doc["version"], 1);
         let main = &doc["windows"][0];
         assert_eq!(main["kind"], "main");
+        assert_eq!(main["number"], 1);
         assert_eq!(main["theme"], "light");
         assert_eq!(
             main["bounds"],
@@ -522,9 +560,12 @@ mod tests {
         assert_eq!(main["tabs"].as_array().unwrap().len(), 2);
         assert_eq!(main["tabs"][0]["layout"]["type"], "split");
         assert_eq!(main["tabs"][0]["layout"]["dir"], "left_right");
+        assert_eq!(main["tabs"][0]["named"], false);
+        assert_eq!(main["tabs"][1]["named"], true);
 
         let popout = &doc["windows"][1];
         assert_eq!(popout["kind"], "popout");
+        assert_eq!(popout["number"], 2);
         assert_eq!(popout["theme"], Value::Null);
     }
 
@@ -689,6 +730,46 @@ mod tests {
         assert_eq!(skipped, [0, 2, 3]);
     }
 
+    // TRD S26-window-chrome §3-3 — `named` 가 불이 아니어도 탭은 살리고 `None`(자동 이름)으로 읽는다. 경고하지 않는다.
+    #[test]
+    fn a_tab_named_flag_that_is_not_a_bool_reads_as_none_and_keeps_the_tab() {
+        let flags = [
+            None,
+            Some(json!(null)),
+            Some(json!(true)),
+            Some(json!(false)),
+            Some(json!("true")),
+            Some(json!(1)),
+            Some(json!({ "named": true })),
+            Some(json!([true])),
+        ];
+        let tabs = flags
+            .iter()
+            .map(|flag| {
+                let mut tab = tab_json(json!({ "type": "empty" }));
+                match flag {
+                    None => {
+                        tab.as_object_mut().unwrap().remove("named");
+                    }
+                    Some(raw) => tab["named"] = raw.clone(),
+                }
+                tab
+            })
+            .collect();
+        let (mut state, warnings) = decode_value(&file(vec![tabbed("main", "main", tabs)]));
+
+        assert_eq!(warnings, vec![]);
+        let named: Vec<Option<bool>> = main_strip(&mut state)
+            .tabs
+            .iter()
+            .map(|t| t.named)
+            .collect();
+        assert_eq!(
+            named,
+            [None, None, Some(true), Some(false), None, None, None, None]
+        );
+    }
+
     #[test]
     fn an_unknown_theme_keeps_the_window_and_drops_the_theme() {
         let mut odd = readable("w-0");
@@ -706,6 +787,113 @@ mod tests {
                 window_id: "w-0".to_string(),
                 raw: "\"sepia\"".to_string(),
             }]
+        );
+    }
+
+    #[test]
+    fn a_number_that_is_not_a_saved_number_keeps_the_window_and_drops_the_number() {
+        // 앞 둘(칸 없음 · `null`) = 번호를 적지 않은 파일 — 경고 없이 접는다.
+        let bad = [
+            None,
+            Some(Value::Null),
+            Some(json!(0)),
+            Some(json!(-1)),
+            Some(json!(2.5)),
+            Some(json!(2.0)),
+            Some(json!("3")),
+            Some(json!(true)),
+            Some(json!(1000)),
+            Some(json!(u64::MAX)),
+        ];
+        let windows: Vec<Value> = bad
+            .iter()
+            .enumerate()
+            .map(|(i, raw)| {
+                let mut w = readable(&format!("w-{i}"));
+                match raw {
+                    None => {
+                        w.as_object_mut().unwrap().remove("number");
+                    }
+                    Some(raw) => w["number"] = raw.clone(),
+                }
+                w
+            })
+            .collect();
+        let (state, warnings) = decode_value(&file(windows));
+        assert_eq!(state.windows.len(), bad.len(), "창을 건너뛰지 않는다");
+        assert!(state.windows.iter().all(|w| w.number.is_none()));
+        assert!(
+            state
+                .windows
+                .iter()
+                .all(|w| matches!(&w.kind, WindowKind::Popout(strip) if strip.tabs.len() == 1)),
+            "탭도 그대로"
+        );
+        let dropped: Vec<(String, String)> = warnings
+            .iter()
+            .map(|w| match w {
+                DecodeWarning::NumberDropped { window_id, raw } => (window_id.clone(), raw.clone()),
+                other => panic!("번호 버림이어야 한다: {other}"),
+            })
+            .collect();
+        let want: Vec<(String, String)> = bad
+            .iter()
+            .enumerate()
+            .skip(2)
+            .map(|(i, raw)| (format!("w-{i}"), raw.as_ref().unwrap().to_string()))
+            .collect();
+        assert_eq!(dropped, want);
+
+        let mut edge = readable("w-max");
+        edge["number"] = json!(999);
+        let mut main = readable("main");
+        main["kind"] = json!("main");
+        main["number"] = json!(1);
+        let (state, warnings) = decode_value(&file(vec![main, edge]));
+        assert_eq!(warnings, vec![]);
+        let numbers: Vec<Option<u32>> = state.windows.iter().map(|w| w.number).collect();
+        assert_eq!(numbers, [Some(1), Some(999)]);
+    }
+
+    #[test]
+    fn mains_number_is_never_warned_about() {
+        for raw in [json!(0), json!(7), json!("1"), Value::Null] {
+            let mut main = readable("main");
+            main["kind"] = json!("main");
+            main["number"] = raw.clone();
+            let (state, warnings) = decode_value(&file(vec![main]));
+            assert_eq!(warnings, vec![], "{raw}");
+            assert_eq!(state.windows.len(), 1);
+        }
+    }
+
+    #[test]
+    fn a_long_raw_value_is_cut_in_the_warning() {
+        let mut long_number = readable("w-0");
+        long_number["number"] = json!("x".repeat(500));
+        let mut long_theme = readable("w-1");
+        long_theme["theme"] = json!("y".repeat(500));
+        let mut edge = readable("w-2");
+        let edge_raw = json!("z".repeat(WARNING_RAW_MAX_CHARS - 2));
+        edge["number"] = edge_raw.clone();
+        let (_, warnings) = decode_value(&file(vec![long_number, long_theme, edge]));
+        let raws: Vec<&str> = warnings
+            .iter()
+            .map(|w| match w {
+                DecodeWarning::NumberDropped { raw, .. }
+                | DecodeWarning::ThemeDropped { raw, .. } => raw.as_str(),
+                other => panic!("번호 · 테마 버림이어야 한다: {other}"),
+            })
+            .collect();
+        let cut = |c: char| format!("\"{}…", c.to_string().repeat(WARNING_RAW_MAX_CHARS - 1));
+        assert_eq!(
+            raws,
+            [
+                cut('x').as_str(),
+                cut('y').as_str(),
+                edge_raw.to_string().as_str(),
+            ],
+            "상한까지는 그대로 싣는다"
         );
     }
 
@@ -897,6 +1085,7 @@ mod tests {
             resolved_crash_copy: None,
             windows: vec![WindowEntry {
                 id: "main".to_string(),
+                number: Some(1),
                 kind: WindowKind::Main(TabStrip {
                     active_tab: only.id,
                     tabs: vec![only],

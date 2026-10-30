@@ -1,6 +1,6 @@
 [package]
 name = "engram-dashboard"
-version = "0.3.2"
+version = "0.4.0"
 description = "Engram Dashboard"
 authors = []
 edition = "2021"
@@ -35,6 +35,17 @@ path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+# ★snap-overlay — 기본 OFF(사용자 결정 Q1 2026-10-24 · TRD S26-window-chrome §8-4)★: Windows 11 스냅 레이아웃 메뉴를 웹이
+#   그린 최대화 단추에서 뜨게 하는 오버레이(platform `window::snap`)와 그 invoke `report_max_button_rect`
+#   (`src/commands/snap_overlay.rs`)를 컴파일에 넣는다. 켠 빌드의 컴파일 확인 = `cargo check -p engram-dashboard --features
+#   snap-overlay`. ★`cargo build` 로 지은 셸 exe 는 띄우지 않는다★(CLAUDE.md 「빌드·검증 명령」의 `cargo build` 줄 ·
+#   ADR-0137) — 띄울 exe 를 짓는 `scripts/build-client-shell.mjs` 는 기능 인자를 받지 않는다. 띄울 수 있는 켠 빌드는 이
+#   기능을 켜는 날 그 스크립트에 기능 넘기기를 더해서 짓는다(지금은 없다).
+#   꺼진 빌드에서 창 사실 `caption.snap_overlay` 는 늘 거짓이라 웹이 그 invoke 를 부르지 않는다. 운영 그래프에 이 기능이
+#   없다는 것과 켠 빌드가 컴파일된다는 것은 CI 가 잰다(`ci.yml` 의 `snap-overlay gate 1` · `2`). ADR-0304
+[features]
+snap-overlay = ["engram-dashboard-platform/snap-overlay"]
 
 [dependencies]
 # caret resolve(현재 2.11.3 = 최신 2.x). 2.11.3에서 channel-data 데드락 수정 흡수
@@ -90,6 +101,7 @@ engram-dashboard-net = { path = "../crates/engram-dashboard-net" }
 #   화면 상태(`crate::state`) — 상태 폴더 임시 파일 쓸기의 주인 생존 판정(`process::pid_alive` — `state::boot` 의
 #   `sweep_temps`) · 런타임 복원 수락 끝에 main 에 포커스를 줄지 가르는 전경 창 판정
 #   (`window::foreground_is_current_process` — `state::placement` 의 `foreground_is_ours`).
+#   스냅 레이아웃 오버레이(`window::snap`)는 위 `[features] snap-overlay` 를 켤 때만 — 그 기능이 platform 의 같은 이름을 켠다.
 #   ★`windows` 를 이 셸에 직접 되살리지 말 것★ — OS crate 운영 의존은 platform 하나에만 둔다(CI `platform gate 5`).
 #   ★운영 의존에서 `test-support` 를 켜지 않는다★(CI `platform gate 3` — 시험 기능은 아래 dev 재선언에서만).
 engram-dashboard-platform = { path = "../crates/engram-dashboard-platform" }
@@ -132,5 +144,9 @@ tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread", "
 engram-dashboard-platform = { path = "../crates/engram-dashboard-platform", features = ["test-support"] }
 # 실 데몬 graceful 끄기 왕복 시험(`tests/stop_smoke.rs` · `#[ignore]`)의 임시 데이터 폴더 격리.
 tempfile = "3"
+# feature-only 재선언 — 도킹 골든(`src/layout/bands_golden.json`)을 비트 단위로 읽는다. 이 기능이 없으면 serde_json 이
+#   17 자리 소수를 1 ULP 어긋나게 읽어(실측 2026-10-20 — 0.20833333333333334 → …37) 골든 단언이 거짓으로 빨개진다.
+#   새 패키지는 없고 dev 그래프에만 있어 운영 바이너리의 파싱은 그대로다.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 
 # profile.release 는 workspace 루트(../Cargo.toml)로 이동(멤버에 두면 무시됨).

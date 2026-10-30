@@ -3,14 +3,15 @@
 // 배선 전체(AppLayout + restoreClient + 단축키 디스패처)를 가짜 IPC 위에서 돌린다 — 모달 홀로는 「main 을 막는다」를
 // 잴 수 없다(잠금은 AppLayout 의 `inert` 와 모달의 포커스 · 멈춤이 한 벌이다).
 
-import { StrictMode } from 'react'
+import { StrictMode, type ReactNode } from 'react'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 
-// 캔버스는 관심 밖 — 그 아래 입력이 잠기는지만 본다.
+// 캔버스는 관심 밖 — 그 아래 입력이 잠기는지만 본다. 알림 층은 `notices` 로 받아 그 안에 그린다.
 vi.mock('./WindowLayout', () => ({
-  default: () => (
+  default: ({ notices }: { notices?: ReactNode }) => (
     <div data-testid="window-layout">
+      {notices}
       <input data-testid="under-input" />
     </div>
   ),
