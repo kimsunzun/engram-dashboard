@@ -1,0 +1,972 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>transport 3단계 확대도</title>
+<meta name="description" content="경계 리팩터링 3단계(transport)를 큰 그림 한 장에서 시작해 부분마다 확대해 보는 그림 위주 문서 — TRD 5판 권고안 기준 · 결정 전">
+<style>
+  :root {
+    --ground: #F5F7F9;
+    --surface: #FFFFFF;
+    --surface-2: #EEF2F5;
+    --ink: #131C24;
+    --ink-2: #45525E;
+    --muted: #66737F;
+    --line: #D9E1E8;
+    --line-strong: #B9C6D1;
+    --accent: #0C6F79;
+    --accent-soft: #DCEEF0;
+    --accent-ink: #095057;
+    --warn: #9A5B00;
+    --warn-soft: #F7EBD8;
+    --ok: #2C7A4B;
+    --ok-soft: #DDF0E4;
+    --shadow: 0 1px 2px rgba(19,28,36,.06), 0 8px 24px -12px rgba(19,28,36,.18);
+    --mono: ui-monospace, "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0E1319; --surface: #151C24; --surface-2: #1B242E;
+      --ink: #E4ECF3; --ink-2: #B4C2CE; --muted: #8E9CAA;
+      --line: #24303B; --line-strong: #3A4955;
+      --accent: #3FC3CE; --accent-soft: #10333A; --accent-ink: #7EDCE4;
+      --warn: #DFA646; --warn-soft: #33280F;
+      --ok: #5CC489; --ok-soft: #12301F;
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 28px -14px rgba(0,0,0,.7);
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #0E1319; --surface: #151C24; --surface-2: #1B242E;
+    --ink: #E4ECF3; --ink-2: #B4C2CE; --muted: #8E9CAA;
+    --line: #24303B; --line-strong: #3A4955;
+    --accent: #3FC3CE; --accent-soft: #10333A; --accent-ink: #7EDCE4;
+    --warn: #DFA646; --warn-soft: #33280F;
+    --ok: #5CC489; --ok-soft: #12301F;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 28px -14px rgba(0,0,0,.7);
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.6;
+    word-break: keep-all;
+    overflow-wrap: break-word;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); }
+
+  /* banner */
+  .banner {
+    position: sticky; top: 0; z-index: 30;
+    display: flex; align-items: center; justify-content: center; gap: 8px 14px; flex-wrap: wrap;
+    background: var(--warn-soft); color: var(--warn);
+    border-bottom: 1px solid var(--warn);
+    padding: 6px 16px; font-size: 13.5px; font-weight: 680; text-align: center;
+  }
+  .banner span { font-weight: 450; color: var(--ink-2); }
+  .banner button {
+    font: inherit; font-size: 12.5px; font-weight: 600;
+    color: var(--ink-2); background: var(--surface); border: 1px solid var(--line-strong);
+    border-radius: 6px; padding: 2px 10px; cursor: pointer;
+  }
+  .banner button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* sections */
+  .sec { padding: clamp(30px, 5vw, 60px) 16px; border-bottom: 1px solid var(--line); scroll-margin-top: 40px; }
+  .inner { width: 100%; max-width: 1000px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+  .eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: .12em; color: var(--accent); display: flex; gap: 10px; flex-wrap: wrap; }
+  .eyebrow .num { color: var(--muted); }
+  h1 { font-size: clamp(28px, 5vw, 46px); line-height: 1.1; letter-spacing: -.02em; margin: 0; font-weight: 720; }
+  h2 { font-size: clamp(21px, 3vw, 29px); line-height: 1.25; letter-spacing: -.012em; margin: 0; font-weight: 690; text-wrap: balance; }
+  p { margin: 0; }
+  .ans {
+    font-size: clamp(19px, 2.7vw, 26px); font-weight: 720; color: var(--accent-ink);
+    border-left: 4px solid var(--accent); padding: 4px 0 4px 14px; line-height: 1.35;
+  }
+  .ans span { color: var(--ink-2); font-weight: 560; }
+  .cap { font-size: 14px; color: var(--ink-2); max-width: 82ch; overflow-wrap: anywhere; }
+  .cap b { color: var(--accent-ink); }
+
+  /* zoom nav */
+  .znav { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+  .znav a {
+    display: inline-flex; align-items: center; gap: 6px; text-decoration: none;
+    font-size: 13px; color: var(--ink-2); border: 1px solid var(--line-strong);
+    background: var(--surface); border-radius: 999px; padding: 3px 11px;
+  }
+  .znav a span { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+  .znav a:hover { border-color: var(--accent); color: var(--accent-ink); }
+
+  /* figure boxes */
+  .fbox { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); padding: 14px; box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 8px; min-width: 0; margin: 0; }
+  .fbox svg { display: block; width: 100%; height: auto; }
+  .fbox.acc { border-color: var(--accent); border-width: 1.5px; }
+  .fh { font-size: 14px; font-weight: 690; color: var(--ink); display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; line-height: 1.35; }
+  .fh .n { font-family: var(--mono); font-weight: 750; color: var(--warn); }
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 14px; }
+  .grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 290px), 1fr)); gap: 14px; }
+  .center { max-width: var(--maxw, 560px); width: 100%; margin: 0 auto; }
+  @media (max-width: 560px) { .fbox { padding: 10px; } }
+
+  /* svg text + shapes */
+  .fbox svg text { font-family: var(--sans); fill: var(--ink); font-size: 13.5px; }
+  .fbox svg .t-l { font-size: 16px; font-weight: 720; }
+  .fbox svg .t-b { font-weight: 680; }
+  .fbox svg .t-s { font-size: 13px; fill: var(--ink-2); }
+  .fbox svg .t-m { font-size: 12.5px; fill: var(--muted); }
+  .fbox svg .t-x { font-size: 12px; fill: var(--ink-2); }
+  .fbox svg .t-ink { fill: var(--ink); }
+  .fbox svg .t-a { fill: var(--accent-ink); }
+  .fbox svg .t-w { fill: var(--warn); }
+  .fbox svg .t-o { fill: var(--ok); }
+  .fbox svg .t-c { text-anchor: middle; }
+  .fbox svg .t-e { text-anchor: end; }
+  .fbox svg .t-x16 { font-size: 16px; }
+  .s-b { fill: var(--surface); stroke: var(--line-strong); stroke-width: 1.2; }
+  .s-b2 { fill: var(--surface-2); stroke: var(--line); stroke-width: 1; }
+  .s-acc { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.4; }
+  .s-warn { fill: var(--warn-soft); stroke: var(--warn); stroke-width: 1.2; }
+  .s-ok { fill: var(--ok-soft); stroke: var(--ok); stroke-width: 1.1; }
+  .s-ghost { fill: none; stroke: var(--line-strong); stroke-width: 1.3; stroke-dasharray: 5 4; }
+  .s-slot { fill: var(--warn-soft); stroke: var(--warn); stroke-width: 1.2; stroke-dasharray: 6 4; }
+  .cell { fill: var(--muted); opacity: .42; }
+  .cell-ok { fill: var(--ok); opacity: .45; }
+  .l { stroke: var(--muted); stroke-width: 1.4; fill: none; }
+  .l-acc { stroke: var(--accent); stroke-width: 1.7; fill: none; }
+  .l-warn { stroke: var(--warn); stroke-width: 1.5; fill: none; }
+  .l-ok { stroke: var(--ok); stroke-width: 1.5; fill: none; }
+  .l-life { stroke: var(--line-strong); stroke-width: 1.2; stroke-dasharray: 3 4; fill: none; }
+  .l-thick { stroke-width: 3.2; }
+  .dash { stroke-dasharray: 6 4; }
+  .mk { fill: var(--muted); }
+  .mk-acc { fill: var(--accent); }
+  .mk-warn { fill: var(--warn); }
+  .mk-ok { fill: var(--ok); }
+  svg g.qb circle { fill: var(--accent); }
+  svg g.qb text { fill: var(--surface); font-weight: 750; font-size: 12.5px; text-anchor: middle; font-family: var(--mono); }
+  .hl { fill: var(--accent); fill-opacity: .16; stroke: var(--accent); stroke-width: 2.6; }
+  .mt { font-family: var(--sans); font-size: 11px; fill: var(--ink-2); text-anchor: middle; }
+
+  /* letter badge (html) */
+  .bd { display: inline-flex; flex: none; width: 20px; height: 20px; border-radius: 50%; background: var(--accent); color: var(--surface); font-family: var(--mono); font-weight: 750; font-size: 12px; align-items: center; justify-content: center; line-height: 1; text-decoration: none; }
+  .zlegend { display: flex; flex-wrap: wrap; gap: 8px 10px; }
+  .zlegend a { display: inline-flex; align-items: center; gap: 8px; padding: 3px 12px 3px 4px; border: 1px solid var(--line-strong); border-radius: 999px; background: var(--surface); color: var(--ink-2); text-decoration: none; font-size: 14px; }
+  .zlegend a:hover { border-color: var(--accent); color: var(--accent-ink); }
+
+  /* zoom section head with thumbnail */
+  .zhead { display: flex; gap: 16px; align-items: center; }
+  .zhead > div { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .mini { width: 150px; flex: none; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); padding: 5px; display: block; }
+  @media (max-width: 560px) {
+    .zhead { flex-direction: column; align-items: flex-start; gap: 10px; }
+    .mini { width: 128px; }
+  }
+
+  /* track (where are we) */
+  .track { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(var(--n, 6), minmax(0, 1fr)); gap: 0; }
+  .track li { position: relative; display: flex; flex-direction: column; align-items: center; text-align: center; gap: 6px; padding: 0 4px; min-width: 0; }
+  .track li::before { content: ""; position: absolute; top: 15px; right: 50%; width: 100%; height: 3px; background: var(--ok); z-index: 0; }
+  .track li:first-child::before { display: none; }
+  .track li.todo::before { background: var(--line-strong); }
+  .track .dot { position: relative; z-index: 1; width: 32px; height: 32px; flex: none; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 750; font-size: 14px; background: var(--ok-soft); color: var(--ok); border: 2px solid var(--ok); }
+  .track li.now .dot { background: var(--accent); color: var(--surface); border-color: var(--accent); box-shadow: 0 0 0 5px var(--accent-soft); }
+  .track li.todo .dot { background: var(--surface); color: var(--muted); border: 2px dashed var(--line-strong); }
+  .track li.next .dot { background: var(--surface); color: var(--warn); border: 2px dashed var(--warn); }
+  .track .lb { font-size: 13.5px; color: var(--ink-2); line-height: 1.35; overflow-wrap: anywhere; }
+  .track .lb .cd { display: block; font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+  .track li.now .lb { color: var(--accent-ink); font-weight: 700; }
+  .track li.next .lb { color: var(--warn); font-weight: 650; }
+  .prog { display: block; width: 72px; max-width: 100%; height: 6px; margin: 4px auto 0; border-radius: 99px; background: var(--surface-2); border: 1px solid var(--line-strong); overflow: hidden; }
+  .prog i { display: block; height: 100%; width: 3.85%; min-width: 4px; background: var(--ok); }
+  .zoombox { position: relative; border: 1.5px solid var(--accent); border-radius: 12px; background: var(--surface); padding: 16px 14px 14px; display: flex; flex-direction: column; gap: 14px; box-shadow: var(--shadow); }
+  .zoombox::before { content: ""; position: absolute; top: -10px; right: var(--notch, 10%); margin-right: -10px; border-left: 10px solid transparent; border-right: 10px solid transparent; border-bottom: 10px solid var(--accent); }
+  .zoombox.next { border-color: var(--warn); border-style: dashed; }
+  .zoombox.next::before { border-bottom-color: var(--warn); }
+  .zk { font-size: 13px; font-weight: 700; color: var(--accent-ink); display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+  .zoombox.next .zk { color: var(--warn); }
+  .tag { display: inline-block; font-size: 11.5px; font-weight: 700; padding: 0 8px; border-radius: 999px; line-height: 1.7; white-space: nowrap; }
+  .tag.ok { background: var(--ok-soft); color: var(--ok); }
+  .tag.acc { background: var(--accent); color: var(--surface); }
+  .tag.warn { background: transparent; color: var(--warn); border: 1px dashed var(--warn); }
+  .tag.mut { background: var(--surface-2); color: var(--muted); border: 1px solid var(--line-strong); }
+  .wants { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: 8px; }
+  .wants li { border: 1px dashed var(--warn); border-radius: 10px; padding: 8px 10px; font-size: 14px; color: var(--ink-2); background: var(--warn-soft); line-height: 1.4; }
+  @media (max-width: 640px) {
+    .track { grid-template-columns: 1fr; gap: 10px; }
+    .track li { flex-direction: row; text-align: left; align-items: center; gap: 12px; padding: 0; }
+    .track li::before { top: auto; bottom: 50%; right: auto; left: 14.5px; width: 3px; height: calc(100% + 10px); }
+    .track .lb .cd { display: inline; margin-right: 6px; }
+    .prog { margin: 4px 0 0; }
+    .zoombox::before { display: none; }
+  }
+
+  /* flow (L1) */
+  .flow { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 10px; }
+  .fcol { display: flex; flex-direction: column; gap: 6px; }
+  .par { text-align: center; font-size: 13px; font-weight: 700; color: var(--accent-ink); }
+  .farrow { font-size: 26px; line-height: 1; color: var(--accent); justify-self: center; }
+  .step { border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface); padding: 12px 13px; display: flex; flex-direction: column; gap: 4px; box-shadow: var(--shadow); min-width: 0; }
+  .step.acc { border-color: var(--accent); background: var(--accent-soft); box-shadow: none; }
+  .step .sh { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .step .sn { font-family: var(--mono); font-weight: 750; font-size: 15px; color: var(--accent-ink); }
+  .step b { font-size: 15.5px; line-height: 1.3; }
+  .step .sd { font-size: 13px; color: var(--ink-2); line-height: 1.4; }
+  .step .zl { display: inline-flex; gap: 4px; }
+  .step .zl .bd { width: 18px; height: 18px; font-size: 11px; }
+  .nextstep { margin-top: 2px; border: 1.5px dashed var(--warn); border-radius: 12px; padding: 9px 13px; font-size: 14px; color: var(--warn); font-weight: 650; text-align: center; }
+  @media (max-width: 760px) {
+    .flow { grid-template-columns: 1fr; }
+    .farrow { transform: rotate(90deg); }
+  }
+
+  /* multi-daemon lists */
+  .md-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 14px; align-items: start; }
+  @media (max-width: 760px) { .md-grid { grid-template-columns: 1fr; } }
+  .md-lists { display: flex; flex-direction: column; gap: 12px; }
+  .mlist { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; box-shadow: var(--shadow); }
+  .mlist.ok { border-color: var(--ok); }
+  .mlist.next { border: 1.5px dashed var(--warn); box-shadow: none; }
+  .mlist .k { font-size: 13px; font-weight: 700; color: var(--ink-2); display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .mlist ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+  .mlist li { font-size: 14px; color: var(--ink-2); padding-left: 22px; position: relative; line-height: 1.4; }
+  .mlist li::before { position: absolute; left: 0; top: 0; font-weight: 800; }
+  .mlist.ok li::before { content: "✓"; color: var(--ok); }
+  .mlist.next li::before { content: "→"; color: var(--warn); }
+  .mlist li.gap { color: var(--warn); font-weight: 650; }
+  .note { border: 1px solid var(--warn); background: var(--warn-soft); border-radius: 10px; padding: 9px 13px; font-size: 14px; color: var(--ink-2); line-height: 1.45; }
+  .note b { color: var(--warn); }
+
+  /* decision map */
+  .dmap { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 14px; align-items: start; }
+  .dgrp { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); padding: 14px; display: flex; flex-direction: column; gap: 10px; box-shadow: var(--shadow); min-width: 0; }
+  .dgrp.wide { grid-column: 1 / -1; }
+  .gh { font-size: 13.5px; font-weight: 700; color: var(--ink-2); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .sw { width: 12px; height: 12px; border-radius: 3px; flex: none; }
+  .sw.ok { background: var(--ok); }
+  .sw.acc { background: var(--accent); }
+  .sw.mut { background: var(--line-strong); }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; list-style: none; margin: 0; padding: 0; }
+  .chip { display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px; border-radius: 14px; font-size: 13.5px; line-height: 1.35; border: 1px solid var(--line); background: var(--surface-2); color: var(--muted); max-width: 100%; }
+  .chip b { font-family: var(--mono); font-size: 12.5px; color: var(--ink-2); white-space: nowrap; flex: none; }
+  .chip em { font-style: normal; font-size: 11.5px; font-weight: 700; color: var(--accent-ink); white-space: nowrap; flex: none; }
+  .chip.ok { background: var(--ok-soft); border-color: var(--ok); color: var(--ink); }
+  .chip.ok b, .chip.ok em { color: var(--ok); }
+  .chip.hot { background: var(--accent-soft); border: 1.5px solid var(--accent); color: var(--ink); }
+  .chip.hot b { color: var(--accent-ink); }
+  .seq { flex-direction: column; align-items: stretch; }
+  .seq li { position: relative; }
+  .seq li:not(:last-child)::after { content: ""; position: absolute; left: 22px; top: 100%; width: 2px; height: 8px; background: var(--accent); }
+  .seq .no { width: 22px; height: 22px; flex: none; border-radius: 50%; background: var(--accent); color: var(--surface); display: inline-flex; align-items: center; justify-content: center; font-weight: 750; font-size: 12px; font-family: var(--mono); }
+  .seq .chip { width: 100%; padding-left: 6px; }
+  .seq .chip span.t { flex: 1 1 auto; min-width: 0; }
+
+  footer { padding: 26px 16px 44px; }
+  footer .inner { font-size: 13.5px; color: var(--muted); gap: 6px; }
+</style>
+</head>
+<body>
+
+<div class="banner" role="status">TRD 5판 · 결정 1 / 26 <span>· 그림은 권고안 기준 · 코드 변경 0</span> <button type="button" id="themeBtn" aria-label="밝게 / 어둡게 전환">밝게 · 어둡게</button></div>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mk" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mk-acc" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-warn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mk-warn" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="ah-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mk-ok" d="M0,0 L10,5 L0,10 z"/></marker>
+  </defs>
+  <!-- small copy of the L0 "after" picture, reused as the zoom thumbnail -->
+  <symbol id="mini" viewBox="0 0 220 130">
+    <rect class="s-b2" x="160" y="3" width="52" height="14" rx="7"/>
+    <text class="mt" x="186" y="13.5">결정</text>
+    <rect class="s-b" x="8" y="22" width="72" height="28" rx="5"/>
+    <text class="mt" x="44" y="40">셸</text>
+    <rect class="s-b" x="140" y="22" width="72" height="28" rx="5"/>
+    <text class="mt" x="176" y="40">데몬</text>
+    <line class="l-acc" x1="80" y1="36" x2="140" y2="36"/>
+    <line class="l-acc" x1="44" y1="50" x2="44" y2="60"/>
+    <line class="l-acc" x1="176" y1="50" x2="176" y2="60"/>
+    <rect class="s-acc" x="8" y="60" width="204" height="28" rx="5"/>
+    <text class="mt" x="110" y="78">transport</text>
+    <line class="l dash" x1="125" y1="88" x2="125" y2="100"/>
+    <line class="l dash" x1="185" y1="88" x2="185" y2="100"/>
+    <rect class="s-ghost" x="98" y="100" width="54" height="22" rx="5"/>
+    <rect class="s-ghost" x="158" y="100" width="54" height="22" rx="5"/>
+  </symbol>
+</svg>
+
+<main>
+
+<!-- ═════ L0 큰 그림 ═════ -->
+<section class="sec" id="l0">
+  <div class="inner">
+    <div class="eyebrow"><span>S21 · 경계 리팩터링 3단계</span><span class="num">L0 · 큰 그림</span></div>
+    <h1>transport 3단계</h1>
+    <ul class="znav" aria-label="확대 단계">
+      <li><a href="#l0"><span>L0</span>큰 그림</a></li>
+      <li><a href="#l05"><span>L0.5</span>지금 어디</a></li>
+      <li><a href="#l1"><span>L1</span>네 단계</a></li>
+      <li><a href="#za"><span>L2</span>a · b · c · d · e</a></li>
+    </ul>
+
+    <div class="grid2">
+      <figure class="fbox">
+        <svg viewBox="0 0 440 268" role="img" aria-label="지금: 셸은 손으로 짠 연결 루프를 쓰고, 데몬은 net 위에서 연결을 처리한다. 셸은 net 에서 인증 모양만 빌린다. transport 는 쓰는 곳이 없다">
+          <text class="t-l" x="16" y="26">지금</text>
+          <rect class="s-b" x="16" y="44" width="150" height="56" rx="8"/>
+          <text class="t-b" x="30" y="77">셸</text>
+          <rect class="s-b" x="274" y="44" width="150" height="56" rx="8"/>
+          <text class="t-b" x="288" y="77">데몬</text>
+          <line class="l" x1="170" y1="72" x2="270" y2="72" marker-start="url(#ah)" marker-end="url(#ah)"/>
+          <text class="t-m t-c" x="220" y="64">WS</text>
+          <line class="l" x1="91" y1="100" x2="91" y2="116"/>
+          <line class="l" x1="349" y1="100" x2="349" y2="116"/>
+          <rect class="s-b2" x="16" y="116" width="150" height="58" rx="8"/>
+          <text class="t-s t-b" x="30" y="140">손으로 짠 연결</text>
+          <text class="t-m" x="30" y="161">+ 따로 짠 정지 클라</text>
+          <rect class="s-warn" x="274" y="116" width="150" height="58" rx="8"/>
+          <text class="t-b t-w" x="288" y="140">net</text>
+          <text class="t-x" x="288" y="161">서버 · 인증 · 데몬 살림</text>
+          <path class="l dash" d="M166,147 L272,147" marker-end="url(#ah)"/>
+          <text class="t-x t-c" x="219" y="139">인증 모양만</text>
+          <rect class="s-ghost" x="16" y="200" width="408" height="50" rx="8"/>
+          <text class="t-m t-c" x="220" y="230"><tspan class="t-ink t-b">transport</tspan> — 혼자 섰지만 쓰는 곳 0</text>
+        </svg>
+      </figure>
+      <figure class="fbox acc">
+        <svg viewBox="0 0 440 268" role="img" aria-label="3단계 뒤: 셸과 데몬이 둘 다 transport 위에 서고 net 은 지운다. 아래 점선 데몬 B, C 는 다음 단계인 다중 데몬 자리. 글자 a 부터 e 는 아래 확대 절 번호">
+          <text class="t-l" x="16" y="26">3단계 뒤</text>
+          <rect class="s-b2" x="330" y="9" width="94" height="24" rx="12"/>
+          <text class="t-x t-c" x="384" y="26">결정 1 / 26</text>
+          <g class="qb"><circle cx="330" cy="21" r="10"/><text x="330" y="25.5">e</text></g>
+          <rect class="s-b" x="16" y="44" width="150" height="56" rx="8"/>
+          <text class="t-b" x="30" y="77">셸</text>
+          <rect class="s-b" x="274" y="44" width="150" height="56" rx="8"/>
+          <text class="t-b" x="288" y="77">데몬</text>
+          <line class="l-acc" x1="170" y1="72" x2="270" y2="72" marker-start="url(#ah-acc)" marker-end="url(#ah-acc)"/>
+          <text class="t-m t-c" x="220" y="64">WS</text>
+          <g class="qb"><circle cx="220" cy="89" r="10"/><text x="220" y="93.5">d</text></g>
+          <line class="l-acc" x1="91" y1="100" x2="91" y2="116"/>
+          <line class="l-acc" x1="349" y1="100" x2="349" y2="116"/>
+          <g class="qb"><circle cx="373" cy="108" r="10"/><text x="373" y="112.5">b</text></g>
+          <rect class="s-acc" x="16" y="116" width="408" height="58" rx="8"/>
+          <text class="t-b t-a t-c" x="220" y="140">transport — 연결 살림 한 벌</text>
+          <text class="t-m t-c" x="220" y="161">셸도 데몬도 이 crate 로 · 3-0 에서 먼저 고침</text>
+          <g class="qb"><circle cx="40" cy="145" r="10"/><text x="40" y="149.5">a</text></g>
+          <line class="l dash" x1="250" y1="174" x2="250" y2="200"/>
+          <line class="l dash" x1="370" y1="174" x2="370" y2="200"/>
+          <rect class="s-ghost" x="196" y="200" width="108" height="50" rx="8"/>
+          <text class="t-m t-c" x="250" y="230">데몬 B</text>
+          <rect class="s-ghost" x="316" y="200" width="108" height="50" rx="8"/>
+          <text class="t-m t-c" x="370" y="230">데몬 C</text>
+          <text class="t-s t-b t-w" x="18" y="222">다음 단계 —</text>
+          <text class="t-s t-w" x="18" y="241">3단계 끝나면 바로</text>
+          <g class="qb"><circle cx="424" cy="200" r="10"/><text x="424" y="204.5">c</text></g>
+        </svg>
+      </figure>
+    </div>
+
+    <p class="ans">동작은 1:1 <span>· 구조만 여럿 가능 · 다중 데몬은 바로 다음 단계</span></p>
+    <p class="cap">같은 일(걸기 · 다시 걸기 · 안부 · 짝 맞추기)을 하던 세 벌이 transport 한 벌로. net 은 지운다.</p>
+
+    <nav class="zlegend" aria-label="확대 절">
+      <a href="#za"><span class="bd">a</span>3-0 transport 수리</a>
+      <a href="#zb"><span class="bd">b</span>받는 구조</a>
+      <a href="#zc"><span class="bd">c</span>다중 데몬 자리</a>
+      <a href="#zd"><span class="bd">d</span>보안</a>
+      <a href="#ze"><span class="bd">e</span>결정 지도</a>
+    </nav>
+  </div>
+</section>
+
+<!-- ═════ L0.5 지금 어디 ═════ -->
+<section class="sec" id="l05">
+  <div class="inner">
+    <div class="eyebrow"><span class="num">L0.5</span><span>지금 어디</span></div>
+    <h2>경계 리팩터링 — 3단계 transport 의 결정 단계</h2>
+
+    <ol class="track" style="--n:7" aria-label="경계 리팩터링 진행">
+      <li><span class="dot">✓</span><span class="lb"><span class="cd">0</span>결정</span></li>
+      <li><span class="dot">✓</span><span class="lb"><span class="cd">1</span>base · platform</span></li>
+      <li><span class="dot">✓</span><span class="lb"><span class="cd">2</span>셸/agent 절단 · discovery · cli</span></li>
+      <li><span class="dot">✓</span><span class="lb"><span class="cd">A</span>데이터 파일</span></li>
+      <li><span class="dot">✓</span><span class="lb"><span class="cd">—</span>패닉 정책</span></li>
+      <li class="now"><span class="dot">3</span><span class="lb"><span class="cd">3 · 지금</span>transport</span></li>
+      <li class="next todo"><span class="dot">→</span><span class="lb"><span class="cd">다음</span>다중 데몬</span></li>
+    </ol>
+
+    <div class="zoombox" style="--notch:21.43%">
+      <div class="zk">3 안을 확대 — transport</div>
+      <ol class="track" style="--n:5" aria-label="3단계 안 진행">
+        <li><span class="dot">✓</span><span class="lb">리서치</span></li>
+        <li><span class="dot">✓</span><span class="lb">TRD 5판</span></li>
+        <li class="now"><span class="dot">●</span><span class="lb"><span class="cd">지금 · 1 / 26</span>결정<span class="prog" aria-hidden="true"><i></i></span></span></li>
+        <li class="todo"><span class="dot">·</span><span class="lb">ADR</span></li>
+        <li class="todo"><span class="dot">·</span><span class="lb"><span class="cd">3-0 → 3-3</span>구현</span></li>
+      </ol>
+    </div>
+
+    <div class="zoombox next" style="--notch:7.14%">
+      <div class="zk">다음 — 다중 데몬 <span class="tag warn">설계 전 · PRD 부터</span></div>
+      <ul class="wants" aria-label="사용자가 그리는 모습">
+        <li>데몬끼리 오케스트레이션</li>
+        <li>클라이언트가 데몬 여러 개 등록 · 연결 · 모니터링 (다른 PC 포함)</li>
+        <li>데몬만 도는 PC 를 UI 로 보기</li>
+        <li>터미널만으로 상황 파악</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ═════ L1 네 단계 ═════ -->
+<section class="sec" id="l1">
+  <div class="inner">
+    <div class="eyebrow"><span class="num">L1</span><span>네 단계</span></div>
+    <h2>3-0 ∥ 3-1 → 3-2 → 3-3</h2>
+
+    <div class="flow" role="img" aria-label="3-0 transport 수리와 3-1 protocol 정리가 나란히 가고, 3-2 셸 부착, 3-3 데몬 부착과 net 삭제로 이어진다. 그 뒤 다음 단계는 다중 데몬">
+      <div class="fcol">
+        <div class="step acc">
+          <div class="sh"><span class="sn">3-0</span><span class="zl"><a class="bd" href="#za">a</a><a class="bd" href="#zb">b</a><a class="bd" href="#zd">d</a></span></div>
+          <b>transport 먼저 고치기</b>
+          <span class="sd">쓰는 곳 0 인 지금 · 7 단위 <span class="tag ok">D19 ✓</span></span>
+        </div>
+        <div class="par">∥ 나란히</div>
+        <div class="step">
+          <div class="sh"><span class="sn">3-1</span></div>
+          <b>protocol 정리</b>
+          <span class="sd">인증 모양 이사 · 5 단위</span>
+        </div>
+      </div>
+      <div class="farrow" aria-hidden="true">→</div>
+      <div class="step">
+        <div class="sh"><span class="sn">3-2</span><span class="zl"><a class="bd" href="#zb">b</a><a class="bd" href="#zc">c</a><a class="bd" href="#zd">d</a></span></div>
+        <b>셸을 transport 에</b>
+        <span class="sd">옆에 세우고 한 줄 전환 · 5 단위</span>
+      </div>
+      <div class="farrow" aria-hidden="true">→</div>
+      <div class="step">
+        <div class="sh"><span class="sn">3-3</span><span class="zl"><a class="bd" href="#zb">b</a><a class="bd" href="#zc">c</a><a class="bd" href="#zd">d</a></span></div>
+        <b>데몬을 transport 에 · net 삭제</b>
+        <span class="sd">net 연결별 처리를 옮김 · 6 단위</span>
+      </div>
+    </div>
+    <div class="nextstep">→ 그다음: 다중 데몬 (PRD 부터)</div>
+    <p class="cap">모든 커밋이 빌드 · 시험 · 검사 초록인 채로 끊는다 · 3-3 은 3-0 이 다 선 뒤. 상자 속 글자 = 아래 확대 절.</p>
+  </div>
+</section>
+
+<!-- ═════ L2-a 3-0 수리 ═════ -->
+<section class="sec" id="za">
+  <div class="inner">
+    <div class="zhead">
+      <svg class="mini" viewBox="0 0 220 130" role="img" aria-label="큰 그림에서 transport 자리">
+        <use href="#mini"/>
+        <rect class="hl" x="3" y="56" width="214" height="36" rx="7"/>
+        <g class="qb"><circle cx="14" cy="57" r="9"/><text x="14" y="61">a</text></g>
+      </svg>
+      <div>
+        <div class="eyebrow"><span class="num">L2 · a</span><span>3-0 · transport 수리</span></div>
+        <h2>붙이면 깨질 다섯 — 지금 → 고친 뒤</h2>
+      </div>
+    </div>
+
+    <div class="grid3">
+      <figure class="fbox">
+        <div class="fh"><span class="n">①</span>받는 줄이 차면 버린다</div>
+        <svg viewBox="0 0 320 206" role="img" aria-label="지금: 모든 상대가 같이 쓰는 받는 줄이 가득 차면 새 메시지를 버리고 개수만 센다. 고친 뒤: 상대마다 버리지 않는 줄, 차면 그 상대의 소켓 읽기를 멈춘다">
+          <rect class="s-warn" x="6" y="4" width="40" height="18" rx="9"/><text class="t-x t-w t-b t-c" x="26" y="17">지금</text>
+          <rect class="s-b" x="10" y="40" width="48" height="28" rx="5"/><text class="t-x t-c" x="34" y="58">상대</text>
+          <line class="l" x1="58" y1="54" x2="90" y2="54" marker-end="url(#ah)"/>
+          <text class="t-x t-c" x="160" y="32">같이 쓰는 줄 · 가득</text>
+          <rect class="s-b" x="92" y="38" width="136" height="32" rx="5"/>
+          <rect class="cell" x="98" y="43" width="20" height="22" rx="2"/><rect class="cell" x="124" y="43" width="20" height="22" rx="2"/><rect class="cell" x="150" y="43" width="20" height="22" rx="2"/><rect class="cell" x="176" y="43" width="20" height="22" rx="2"/><rect class="cell" x="202" y="43" width="20" height="22" rx="2"/>
+          <line class="l" x1="228" y1="54" x2="252" y2="54" marker-end="url(#ah)"/>
+          <rect class="s-b" x="254" y="40" width="58" height="28" rx="5"/><text class="t-x t-c" x="283" y="58">받는 쪽</text>
+          <path class="l-warn dash" d="M74,57 L74,80" marker-end="url(#ah-warn)"/>
+          <text class="t-x t-w" x="84" y="90">✕ 버림 — 개수만 센다</text>
+          <line class="l-life" x1="6" y1="102" x2="314" y2="102"/>
+          <rect class="s-ok" x="6" y="110" width="58" height="18" rx="9"/><text class="t-x t-o t-b t-c" x="35" y="123">고친 뒤</text>
+          <rect class="s-b" x="10" y="148" width="48" height="28" rx="5"/><text class="t-x t-c" x="34" y="166">상대</text>
+          <line class="l" x1="58" y1="162" x2="90" y2="162" marker-end="url(#ah)"/>
+          <rect class="mk-warn" x="68" y="153" width="3.5" height="18"/><rect class="mk-warn" x="75" y="153" width="3.5" height="18"/>
+          <text class="t-x t-c" x="160" y="140">그 상대의 줄 · 안 버림</text>
+          <rect class="s-ok" x="92" y="146" width="136" height="32" rx="5"/>
+          <rect class="cell-ok" x="98" y="151" width="20" height="22" rx="2"/><rect class="cell-ok" x="124" y="151" width="20" height="22" rx="2"/><rect class="cell-ok" x="150" y="151" width="20" height="22" rx="2"/><rect class="cell-ok" x="176" y="151" width="20" height="22" rx="2"/><rect class="cell-ok" x="202" y="151" width="20" height="22" rx="2"/>
+          <line class="l" x1="228" y1="162" x2="252" y2="162" marker-end="url(#ah)"/>
+          <rect class="s-b" x="254" y="148" width="58" height="28" rx="5"/><text class="t-x t-c" x="283" y="166">받는 쪽</text>
+          <text class="t-x t-a" x="10" y="198">소켓 읽기 멈춤 = 배압</text>
+          <text class="t-x t-o t-b t-e" x="312" y="198">버림 0</text>
+        </svg>
+      </figure>
+
+      <figure class="fbox">
+        <div class="fh"><span class="n">②</span>연결 소식도 같은 줄에서 사라진다</div>
+        <svg viewBox="0 0 320 206" role="img" aria-label="지금: 끊김 같은 연결 소식도 같은 줄을 타서 줄이 차면 사라진다. 고친 뒤: 소식은 순서 칸에 머물렀다가 자리가 나면 넘어간다">
+          <rect class="s-warn" x="6" y="4" width="40" height="18" rx="9"/><text class="t-x t-w t-b t-c" x="26" y="17">지금</text>
+          <rect class="s-acc" x="10" y="42" width="56" height="24" rx="12"/><text class="t-x t-a t-b t-c" x="38" y="58">끊김</text>
+          <line class="l-warn dash" x1="66" y1="54" x2="102" y2="54" marker-end="url(#ah-warn)"/>
+          <text class="t-w t-b t-c t-x16" x="116" y="60">✕</text>
+          <text class="t-x t-c" x="215" y="32">같이 쓰는 줄 · 가득</text>
+          <rect class="s-b" x="130" y="38" width="170" height="32" rx="5"/>
+          <rect class="cell" x="136" y="43" width="22" height="22" rx="2"/><rect class="cell" x="163" y="43" width="22" height="22" rx="2"/><rect class="cell" x="190" y="43" width="22" height="22" rx="2"/><rect class="cell" x="217" y="43" width="22" height="22" rx="2"/><rect class="cell" x="244" y="43" width="22" height="22" rx="2"/><rect class="cell" x="271" y="43" width="22" height="22" rx="2"/>
+          <text class="t-x t-w" x="10" y="90">✕ 「끊김」 소식 유실 → 상태를 모름</text>
+          <line class="l-life" x1="6" y1="102" x2="314" y2="102"/>
+          <rect class="s-ok" x="6" y="110" width="58" height="18" rx="9"/><text class="t-x t-o t-b t-c" x="35" y="123">고친 뒤</text>
+          <rect class="s-acc" x="10" y="150" width="56" height="24" rx="12"/><text class="t-x t-a t-b t-c" x="38" y="166">끊김</text>
+          <line class="l" x1="66" y1="162" x2="90" y2="162" marker-end="url(#ah)"/>
+          <rect class="s-acc" x="92" y="146" width="84" height="32" rx="6"/><text class="t-x t-b t-c" x="134" y="167">순서 칸</text>
+          <line class="l" x1="176" y1="162" x2="200" y2="162" marker-end="url(#ah)"/>
+          <rect class="s-ok" x="202" y="146" width="108" height="32" rx="6"/><text class="t-x t-c" x="256" y="167">받는 줄</text>
+          <text class="t-x t-o" x="10" y="198">자리 나면 넘김 · 손실 0 · 순서 그대로</text>
+        </svg>
+      </figure>
+
+      <figure class="fbox">
+        <div class="fh"><span class="n">③</span>다시 붙는 사이 명령이 새 연결로</div>
+        <svg viewBox="0 0 320 206" role="img" aria-label="지금: 연결 세대 1 이 끊긴 사이에 낸 명령이 다시 붙은 세대 2 연결로 나간다. 고친 뒤: 명령에 낸 때의 세대를 찍고, 쓰기 직전 지금 세대와 다르면 안 보낸다">
+          <rect class="s-warn" x="6" y="4" width="40" height="18" rx="9"/><text class="t-x t-w t-b t-c" x="26" y="17">지금</text>
+          <text class="t-x t-c" x="66" y="36">세대 1</text>
+          <line class="l-acc l-thick" x1="16" y1="46" x2="112" y2="46"/>
+          <text class="t-w t-b t-c t-x16" x="128" y="52">✕</text>
+          <text class="t-x t-c" x="228" y="36">세대 2</text>
+          <line class="l-acc l-thick" x1="146" y1="46" x2="310" y2="46"/>
+          <rect class="s-b" x="92" y="60" width="72" height="22" rx="11"/><text class="t-x t-c" x="128" y="75">명령</text>
+          <path class="l-warn" d="M164,71 C190,71 198,56 210,51" marker-end="url(#ah-warn)"/>
+          <text class="t-x t-w" x="10" y="96">끊긴 사이 낸 명령이 새 연결로 나감</text>
+          <line class="l-life" x1="6" y1="102" x2="314" y2="102"/>
+          <rect class="s-ok" x="6" y="110" width="58" height="18" rx="9"/><text class="t-x t-o t-b t-c" x="35" y="123">고친 뒤</text>
+          <text class="t-x t-c" x="66" y="144">세대 1</text>
+          <line class="l-acc l-thick" x1="16" y1="154" x2="112" y2="154"/>
+          <text class="t-w t-b t-c t-x16" x="128" y="160">✕</text>
+          <text class="t-x t-c" x="228" y="144">세대 2</text>
+          <line class="l-acc l-thick" x1="146" y1="154" x2="310" y2="154"/>
+          <rect class="s-b" x="80" y="166" width="96" height="22" rx="11"/><text class="t-x t-c" x="128" y="181">명령 · 도장 1</text>
+          <text class="t-x t-o t-b" x="184" y="181">→ 세대가 달라 안 보냄</text>
+          <text class="t-x t-o" x="10" y="202">쓰기 직전 도장과 지금 세대를 대조</text>
+        </svg>
+      </figure>
+
+      <figure class="fbox">
+        <div class="fh"><span class="n">④</span>닫을 때 마지막 답이 사라진다</div>
+        <svg viewBox="0 0 320 206" role="img" aria-label="지금: 닫기가 앞질러 소켓을 닫아 줄에 남은 정지 응답과 오류가 사라진다. 고친 뒤: 닫기 표지를 줄 끝에 넣어 앞의 것을 다 보낸 뒤 닫는다">
+          <rect class="s-warn" x="6" y="4" width="40" height="18" rx="9"/><text class="t-x t-w t-b t-c" x="26" y="17">지금</text>
+          <rect class="s-b" x="10" y="40" width="48" height="32" rx="5"/><text class="t-x t-c" x="34" y="60">데몬</text>
+          <line class="l" x1="58" y1="56" x2="80" y2="56" marker-end="url(#ah)"/>
+          <rect class="s-b" x="82" y="38" width="160" height="36" rx="6"/>
+          <rect class="s-b2" x="88" y="45" width="76" height="22" rx="4"/><text class="t-x t-c" x="126" y="60">정지 응답</text>
+          <rect class="s-b2" x="170" y="45" width="66" height="22" rx="4"/><text class="t-x t-c" x="203" y="60">오류</text>
+          <line class="l dash" x1="242" y1="56" x2="264" y2="56"/>
+          <rect class="s-b" x="266" y="40" width="46" height="32" rx="5"/><text class="t-x t-c" x="289" y="60">소켓</text>
+          <rect class="s-warn" x="196" y="8" width="52" height="20" rx="10"/><text class="t-x t-w t-b t-c" x="222" y="22">닫기</text>
+          <path class="l-warn" d="M248,18 C272,18 285,24 289,38" marker-end="url(#ah-warn)"/>
+          <text class="t-x t-w" x="10" y="94">닫기가 앞질러 → 정지 응답 · 오류 유실</text>
+          <line class="l-life" x1="6" y1="102" x2="314" y2="102"/>
+          <rect class="s-ok" x="6" y="110" width="58" height="18" rx="9"/><text class="t-x t-o t-b t-c" x="35" y="123">고친 뒤</text>
+          <rect class="s-b" x="10" y="148" width="48" height="32" rx="5"/><text class="t-x t-c" x="34" y="168">데몬</text>
+          <line class="l" x1="58" y1="164" x2="78" y2="164" marker-end="url(#ah)"/>
+          <rect class="s-ok" x="80" y="144" width="178" height="40" rx="6"/>
+          <rect class="s-b2" x="86" y="153" width="68" height="22" rx="4"/><text class="t-x t-c" x="120" y="168">정지 응답</text>
+          <rect class="s-b2" x="158" y="153" width="40" height="22" rx="4"/><text class="t-x t-c" x="178" y="168">오류</text>
+          <rect class="s-warn" x="202" y="153" width="50" height="22" rx="4"/><text class="t-x t-w t-c" x="227" y="168">닫기</text>
+          <line class="l" x1="258" y1="164" x2="270" y2="164" marker-end="url(#ah)"/>
+          <rect class="s-b" x="272" y="148" width="40" height="32" rx="5"/><text class="t-x t-c" x="292" y="168">소켓</text>
+          <text class="t-x t-o" x="10" y="202">앞의 것을 다 보낸 뒤 닫음 · 전체 시한 하나</text>
+        </svg>
+      </figure>
+
+      <figure class="fbox">
+        <div class="fh"><span class="n">⑤</span>모든 인증 거절을 「포기」로</div>
+        <svg viewBox="0 0 320 206" role="img" aria-label="지금: 토큰이 낡은 거절도 버전이 다른 거절도 전부 포기. 고친 뒤: 닫기 코드로 갈라 토큰 거절은 daemon.json 을 다시 읽고 다시 시도, 버전 거절은 고정 문구 팝업으로 끝">
+          <rect class="s-warn" x="6" y="4" width="40" height="18" rx="9"/><text class="t-x t-w t-b t-c" x="26" y="17">지금</text>
+          <rect class="s-b2" x="10" y="28" width="84" height="24" rx="12"/><text class="t-x t-c" x="52" y="44">토큰 낡음</text>
+          <rect class="s-b2" x="10" y="58" width="84" height="24" rx="12"/><text class="t-x t-c" x="52" y="74">버전 다름</text>
+          <path class="l" d="M94,40 C140,40 150,52 196,53" marker-end="url(#ah)"/>
+          <path class="l" d="M94,70 C140,70 150,60 196,59" marker-end="url(#ah)"/>
+          <rect class="s-warn" x="198" y="40" width="114" height="32" rx="6"/><text class="t-x t-w t-b t-c" x="255" y="60">포기</text>
+          <text class="t-x t-w" x="10" y="96">다시 읽으면 될 낡은 토큰도 영영 포기</text>
+          <line class="l-life" x1="6" y1="102" x2="314" y2="102"/>
+          <rect class="s-ok" x="6" y="110" width="58" height="18" rx="9"/><text class="t-x t-o t-b t-c" x="35" y="123">고친 뒤</text>
+          <text class="t-x t-a" x="72" y="123">종류는 닫기 코드로 가른다</text>
+          <rect class="s-b2" x="10" y="136" width="84" height="24" rx="12"/><text class="t-x t-c" x="52" y="152">토큰 낡음</text>
+          <rect class="s-b2" x="10" y="168" width="84" height="24" rx="12"/><text class="t-x t-c" x="52" y="184">버전 다름</text>
+          <line class="l" x1="94" y1="148" x2="116" y2="148" marker-end="url(#ah)"/>
+          <line class="l" x1="94" y1="180" x2="116" y2="180" marker-end="url(#ah)"/>
+          <rect class="s-ok" x="118" y="134" width="194" height="28" rx="6"/><text class="t-x t-o t-c" x="215" y="152">재시도 · daemon.json 다시 읽기</text>
+          <rect class="s-warn" x="118" y="166" width="194" height="28" rx="6"/><text class="t-x t-w t-c" x="215" y="184">끝 · 고정 문구 팝업</text>
+        </svg>
+      </figure>
+
+      <figure class="fbox">
+        <div class="fh"><span class="n">+</span>없던 것 — 받는 창구 · 수락 검사</div>
+        <svg viewBox="0 0 320 206" role="img" aria-label="지금: transport 는 거는 쪽만 있고 받은 연결을 명부에 붙일 창구가 없으며 수락은 검사 없이 한다. 고친 뒤: 접속이 Origin, Host, 시한, 상한, 크기 검사를 거쳐 받는 창구로 들어와 명부에 붙는다">
+          <rect class="s-warn" x="6" y="4" width="40" height="18" rx="9"/><text class="t-x t-w t-b t-c" x="26" y="17">지금</text>
+          <rect class="s-b" x="10" y="34" width="106" height="44" rx="6"/>
+          <text class="t-x t-b t-c" x="63" y="52">transport</text>
+          <text class="t-x t-c" x="63" y="69">거는 쪽만</text>
+          <line class="l dash" x1="116" y1="56" x2="146" y2="56"/>
+          <rect class="s-ghost" x="148" y="34" width="164" height="44" rx="6"/>
+          <text class="t-x t-c" x="230" y="52">명부에 붙일 창구 없음</text>
+          <text class="t-x t-w t-c" x="230" y="69">수락은 검사 없이</text>
+          <text class="t-x t-w" x="10" y="96">데몬이 받은 연결을 명부에 못 올린다</text>
+          <line class="l-life" x1="6" y1="102" x2="314" y2="102"/>
+          <rect class="s-ok" x="6" y="110" width="58" height="18" rx="9"/><text class="t-x t-o t-b t-c" x="35" y="123">고친 뒤</text>
+          <text class="t-x t-a" x="72" y="123">받은 상대는 다시 안 건다</text>
+          <rect class="s-b" x="8" y="146" width="46" height="30" rx="5"/><text class="t-x t-c" x="31" y="166">접속</text>
+          <line class="l" x1="54" y1="161" x2="68" y2="161" marker-end="url(#ah)"/>
+          <rect class="s-acc" x="70" y="134" width="124" height="58" rx="6"/>
+          <text class="t-x t-b t-c" x="132" y="151">수락 검사</text>
+          <text class="t-x t-c" x="132" y="167">Origin · Host</text>
+          <text class="t-x t-c" x="132" y="183">시한 · 상한 · 크기</text>
+          <line class="l" x1="194" y1="161" x2="208" y2="161" marker-end="url(#ah)"/>
+          <rect class="s-ok" x="210" y="140" width="102" height="44" rx="6"/>
+          <text class="t-x t-b t-c" x="261" y="158">받는 창구</text>
+          <text class="t-x t-c" x="261" y="175">→ 명부에 붙임</text>
+        </svg>
+      </figure>
+    </div>
+    <p class="cap">다섯 다 transport 안에서 생겨 붙이는 쪽이 못 메운다 → <b>쓰는 곳 0 인 지금 한꺼번에 고친다(D19 ① 결정)</b>.</p>
+  </div>
+</section>
+
+<!-- ═════ L2-b 받는 구조 ═════ -->
+<section class="sec" id="zb">
+  <div class="inner">
+    <div class="zhead">
+      <svg class="mini" viewBox="0 0 220 130" role="img" aria-label="큰 그림에서 transport 와 데몬이 만나는 자리">
+        <use href="#mini"/>
+        <rect class="hl" x="134" y="18" width="82" height="74" rx="7"/>
+        <g class="qb"><circle cx="134" cy="19" r="9"/><text x="134" y="23">b</text></g>
+      </svg>
+      <div>
+        <div class="eyebrow"><span class="num">L2 · b</span><span>받는 구조 · D11 · D24</span></div>
+        <h2>상대마다 줄 하나 — 막히면 그 상대만</h2>
+      </div>
+    </div>
+
+    <div class="grid3">
+      <figure class="fbox acc">
+        <div class="fh"><span class="tag acc">권고 ②′ · ②</span>상대마다 줄 · 처리는 net 그대로</div>
+        <svg viewBox="0 0 320 326" role="img" aria-label="권고안: transport 가 상대 A, B 마다 버리지 않는 줄을 주고 차면 그 상대의 읽기만 멈춘다. 데몬은 연결마다 net 의 처리를 그대로 옮겨 읽기, 보통 줄 차례 처리, 우선 줄 취소와 Kill 을 둔다">
+          <rect class="s-b" x="30" y="10" width="100" height="30" rx="6"/><text class="t-x t-c" x="80" y="30">상대 A</text>
+          <rect class="s-b" x="190" y="10" width="100" height="30" rx="6"/><text class="t-x t-c" x="240" y="30">상대 B</text>
+          <rect class="s-b2" x="8" y="54" width="304" height="86" rx="10"/>
+          <text class="t-m" x="16" y="72">transport</text>
+          <line class="l" x1="80" y1="40" x2="80" y2="86" marker-end="url(#ah)"/>
+          <line class="l" x1="240" y1="40" x2="240" y2="86" marker-end="url(#ah)"/>
+          <rect class="s-ok" x="30" y="88" width="100" height="42" rx="6"/>
+          <text class="t-x t-b t-c" x="80" y="106">A 의 줄</text>
+          <text class="t-x t-o t-c" x="80" y="122">안 버림</text>
+          <rect class="s-ok" x="190" y="88" width="100" height="42" rx="6"/>
+          <text class="t-x t-b t-c" x="240" y="106">B 의 줄</text>
+          <text class="t-x t-o t-c" x="240" y="122">안 버림</text>
+          <text class="t-x t-a t-b t-c" x="160" y="158">차면 그 상대의 읽기만 멈춤</text>
+          <rect class="s-b2" x="8" y="170" width="304" height="148" rx="10"/>
+          <line class="l" x1="80" y1="130" x2="80" y2="194" marker-end="url(#ah)"/>
+          <line class="l" x1="240" y1="130" x2="240" y2="194" marker-end="url(#ah)"/>
+          <rect class="s-b" x="30" y="196" width="100" height="26" rx="5"/><text class="t-x t-c" x="80" y="213">읽기</text>
+          <line class="l" x1="80" y1="222" x2="80" y2="234"/>
+          <rect class="s-b" x="18" y="234" width="124" height="24" rx="5"/><text class="t-x t-c" x="80" y="250">보통 → 차례대로</text>
+          <rect class="s-warn" x="18" y="264" width="124" height="24" rx="5"/><text class="t-x t-w t-c" x="80" y="280">우선 → 취소 · Kill</text>
+          <rect class="s-b" x="190" y="196" width="100" height="26" rx="5"/><text class="t-x t-c" x="240" y="213">읽기</text>
+          <line class="l" x1="240" y1="222" x2="240" y2="234"/>
+          <rect class="s-b" x="178" y="234" width="124" height="24" rx="5"/><text class="t-x t-c" x="240" y="250">보통 → 차례대로</text>
+          <rect class="s-warn" x="178" y="264" width="124" height="24" rx="5"/><text class="t-x t-w t-c" x="240" y="280">우선 → 취소 · Kill</text>
+          <text class="t-m" x="16" y="308">데몬 — 연결마다 net 처리 그대로</text>
+        </svg>
+      </figure>
+
+      <figure class="fbox">
+        <div class="fh"><span class="tag mut">①</span>처분 규칙까지 transport 안에</div>
+        <svg viewBox="0 0 320 326" role="img" aria-label="대안 1: 상대마다 줄을 두고, 넘칠 때의 처분 규칙(거절, 우회, 바이트 예산)까지 transport 안에 둔다. 데몬 사정이 crate 안으로 들어오고 표면이 가장 넓게 바뀐다">
+          <rect class="s-b" x="30" y="10" width="100" height="30" rx="6"/><text class="t-x t-c" x="80" y="30">상대 A</text>
+          <rect class="s-b" x="190" y="10" width="100" height="30" rx="6"/><text class="t-x t-c" x="240" y="30">상대 B</text>
+          <rect class="s-b2" x="8" y="54" width="304" height="150" rx="10"/>
+          <text class="t-m" x="16" y="72">transport</text>
+          <line class="l" x1="80" y1="40" x2="80" y2="80" marker-end="url(#ah)"/>
+          <line class="l" x1="240" y1="40" x2="240" y2="80" marker-end="url(#ah)"/>
+          <rect class="s-ok" x="30" y="82" width="100" height="30" rx="6"/><text class="t-x t-c" x="80" y="102">A 의 줄</text>
+          <rect class="s-ok" x="190" y="82" width="100" height="30" rx="6"/><text class="t-x t-c" x="240" y="102">B 의 줄</text>
+          <line class="l" x1="80" y1="112" x2="80" y2="128" marker-end="url(#ah)"/>
+          <line class="l" x1="240" y1="112" x2="240" y2="128" marker-end="url(#ah)"/>
+          <rect class="s-warn" x="30" y="130" width="260" height="58" rx="6"/>
+          <text class="t-x t-w t-b t-c" x="160" y="153">처분 규칙도 여기</text>
+          <text class="t-x t-c" x="160" y="173">거절 · 우회 · 바이트 예산</text>
+          <rect class="s-b2" x="8" y="218" width="304" height="100" rx="10"/>
+          <line class="l" x1="80" y1="188" x2="80" y2="232" marker-end="url(#ah)"/>
+          <line class="l" x1="240" y1="188" x2="240" y2="232" marker-end="url(#ah)"/>
+          <rect class="s-b" x="30" y="234" width="100" height="28" rx="5"/><text class="t-x t-c" x="80" y="253">연결 A 처리</text>
+          <rect class="s-b" x="190" y="234" width="100" height="28" rx="5"/><text class="t-x t-c" x="240" y="253">연결 B 처리</text>
+          <text class="t-x t-w" x="16" y="286">데몬 사정이 transport 안으로</text>
+          <text class="t-m" x="16" y="306">표면이 가장 넓게 바뀜</text>
+        </svg>
+      </figure>
+
+      <figure class="fbox">
+        <div class="fh"><span class="tag mut">②</span>합친 줄 + 공용 전달</div>
+        <svg viewBox="0 0 320 326" role="img" aria-label="대안 2: 모든 상대의 메시지를 합친 줄 하나에 넣고 데몬의 공용 전달 담당이 연결별로 나눈다. 시끄러운 A 가 몰리면 B 도 늦어지고, 우선 줄이 차면 닫혀 Kill 연타에 끊긴다">
+          <rect class="s-warn" x="30" y="10" width="100" height="30" rx="6"/><text class="t-x t-w t-c" x="80" y="30">A · 폭주</text>
+          <rect class="s-b" x="190" y="10" width="100" height="30" rx="6"/><text class="t-x t-c" x="240" y="30">B · 조용</text>
+          <rect class="s-b2" x="8" y="54" width="304" height="76" rx="10"/>
+          <text class="t-m" x="16" y="72">transport</text>
+          <line class="l-warn" x1="70" y1="40" x2="116" y2="82" marker-end="url(#ah-warn)"/>
+          <line class="l-warn" x1="82" y1="40" x2="128" y2="82" marker-end="url(#ah-warn)"/>
+          <line class="l-warn" x1="94" y1="40" x2="140" y2="82" marker-end="url(#ah-warn)"/>
+          <line class="l" x1="240" y1="40" x2="200" y2="82" marker-end="url(#ah)"/>
+          <rect class="s-ok" x="70" y="84" width="180" height="34" rx="6"/><text class="t-x t-b t-c" x="160" y="106">합친 줄 하나</text>
+          <rect class="s-b2" x="8" y="142" width="304" height="176" rx="10"/>
+          <line class="l" x1="160" y1="118" x2="160" y2="158" marker-end="url(#ah)"/>
+          <rect class="s-warn" x="60" y="160" width="200" height="46" rx="6"/>
+          <text class="t-x t-w t-b t-c" x="160" y="179">공용 전달 담당 하나</text>
+          <text class="t-x t-c" x="160" y="197">기다릴 수 없음</text>
+          <line class="l" x1="120" y1="206" x2="82" y2="226" marker-end="url(#ah)"/>
+          <line class="l" x1="200" y1="206" x2="238" y2="226" marker-end="url(#ah)"/>
+          <rect class="s-b" x="30" y="228" width="100" height="26" rx="5"/><text class="t-x t-c" x="80" y="245">연결 A</text>
+          <rect class="s-b" x="190" y="228" width="100" height="26" rx="5"/><text class="t-x t-c" x="240" y="245">연결 B</text>
+          <text class="t-x t-w" x="16" y="282">✕ A 가 몰리면 B 도 늦어짐</text>
+          <text class="t-x t-w" x="16" y="302">✕ 우선 줄 차면 닫힘 → Kill 연타에 끊김</text>
+        </svg>
+      </figure>
+    </div>
+    <p class="cap">가르는 기준 하나 — <b>상대끼리 함께 쓰는 처리가 있으면 한 상대의 막힘이 모두에게 번진다.</b> 셸도 데몬마다 받는 줄(D24 ②).</p>
+  </div>
+</section>
+
+<!-- ═════ L2-c 다중 데몬 자리 ═════ -->
+<section class="sec" id="zc">
+  <div class="inner">
+    <div class="zhead">
+      <svg class="mini" viewBox="0 0 220 130" role="img" aria-label="큰 그림에서 점선 데몬 자리">
+        <use href="#mini"/>
+        <rect class="hl" x="93" y="95" width="124" height="32" rx="7"/>
+        <g class="qb"><circle cx="93" cy="96" r="9"/><text x="93" y="100">c</text></g>
+      </svg>
+      <div>
+        <div class="eyebrow"><span class="num">L2 · c</span><span>다중 데몬 자리 · D3 · D4 · D5</span></div>
+        <h2>3단계는 1:1 — 다중 데몬은 바로 다음</h2>
+      </div>
+    </div>
+
+    <div class="md-grid">
+      <figure class="fbox">
+        <svg viewBox="0 0 360 312" role="img" aria-label="셸 안 윗층은 주 데몬 하나만 본다. 셸 명부에는 상대 N 칸이 있고 칸 1 이 로컬 데몬 A 와 실제로 이어진다. 데몬 A 는 Hello 에 데몬 ID 를 싣는다. 데몬 B, C 는 점선 — 다음 단계. 데몬끼리는 뼈대만">
+          <rect class="s-b" x="8" y="8" width="160" height="284" rx="10"/>
+          <text class="t-l" x="22" y="34">셸</text>
+          <rect class="s-b2" x="22" y="48" width="132" height="46" rx="6"/>
+          <text class="t-x t-b t-c" x="88" y="67">윗층 · 화면 · 명령</text>
+          <text class="t-x t-a t-c" x="88" y="85">주 데몬 하나만 본다</text>
+          <rect class="s-b2" x="22" y="108" width="132" height="172" rx="6"/>
+          <text class="t-x t-b" x="32" y="126">명부 — 상대 N 칸</text>
+          <rect class="s-acc" x="32" y="136" width="112" height="42" rx="6"/>
+          <text class="t-x t-b t-c" x="88" y="154">칸 1 = 주 데몬</text>
+          <text class="t-x t-c" x="88" y="170">데몬마다 받는 줄</text>
+          <rect class="s-ghost" x="32" y="186" width="112" height="38" rx="6"/>
+          <text class="t-m t-c" x="88" y="210">칸 2</text>
+          <rect class="s-ghost" x="32" y="232" width="112" height="38" rx="6"/>
+          <text class="t-m t-c" x="88" y="256">칸 N</text>
+          <line class="l-acc" x1="136" y1="136" x2="136" y2="98" marker-end="url(#ah-acc)"/>
+          <rect class="s-acc" x="200" y="36" width="152" height="88" rx="10"/>
+          <text class="t-b t-a" x="214" y="60">데몬 A — 로컬</text>
+          <text class="t-x" x="214" y="82">Hello 에 데몬 ID (D3)</text>
+          <text class="t-x t-a" x="214" y="104">실제로 붙는 단 하나</text>
+          <path class="l-acc" d="M144,157 C176,157 172,82 198,82" marker-end="url(#ah-acc)"/>
+          <line class="l dash" x1="344" y1="126" x2="344" y2="168" marker-start="url(#ah)" marker-end="url(#ah)"/>
+          <text class="t-x t-e" x="336" y="152">데몬끼리 = 뼈대만 (D5)</text>
+          <rect class="s-ghost" x="200" y="170" width="152" height="40" rx="8"/>
+          <text class="t-m t-c" x="276" y="195">데몬 B</text>
+          <rect class="s-ghost" x="200" y="222" width="152" height="40" rx="8"/>
+          <text class="t-m t-c" x="276" y="247">데몬 C</text>
+          <path class="l dash" d="M144,205 C172,205 172,190 198,190" marker-end="url(#ah)"/>
+          <path class="l dash" d="M144,251 C172,251 172,242 198,242" marker-end="url(#ah)"/>
+          <text class="t-x t-b t-w t-c" x="276" y="284">다음 단계 —</text>
+          <text class="t-x t-b t-w t-c" x="276" y="301">3단계 끝나면 바로</text>
+        </svg>
+      </figure>
+
+      <div class="md-lists">
+        <div class="mlist ok">
+          <span class="k">3단계가 짓는 것 <span class="tag mut">권고안 기준</span></span>
+          <ul>
+            <li>데몬 ID — Hello 한 칸</li>
+            <li>셸 명부에 상대 N 칸 · 데몬마다 받는 줄</li>
+            <li>윗층은 주 데몬 하나만</li>
+            <li>시험: 가짜 데몬 둘 · 메모리 안 두 명부</li>
+          </ul>
+        </div>
+        <div class="mlist next">
+          <span class="k">다중 데몬 단계 몫 <span class="tag warn">설계 전</span></span>
+          <ul>
+            <li class="gap">다른 PC 의 데몬 — TLS · 원격 인증 (3단계가 비워 둠)</li>
+            <li>여러 데몬 화면 · 데몬 고르기</li>
+            <li>데몬끼리 오케스트레이션 · 우편 중계</li>
+            <li>자동 발견 · 페어링</li>
+          </ul>
+        </div>
+        <div class="note"><b>다시 보는 중</b> — 다중 데몬이 바로 뒤라 D4 · D5 권고를 다시 본다. 새 권고는 아직 없다.</div>
+      </div>
+    </div>
+    <p class="cap">그림의 깊이(가짜 데몬 둘 · 메모리 안 두 명부)는 TRD 권고 ① — D4 · D5 는 아직 물을 차례.</p>
+  </div>
+</section>
+
+<!-- ═════ L2-d 보안 ═════ -->
+<section class="sec" id="zd">
+  <div class="inner">
+    <div class="zhead">
+      <svg class="mini" viewBox="0 0 220 130" role="img" aria-label="큰 그림에서 셸과 데몬 사이 연결">
+        <use href="#mini"/>
+        <rect class="hl" x="3" y="18" width="214" height="36" rx="7"/>
+        <g class="qb"><circle cx="110" cy="36" r="9"/><text x="110" y="40">d</text></g>
+      </svg>
+      <div>
+        <div class="eyebrow"><span class="num">L2 · d</span><span>보안</span></div>
+        <h2>누가 데몬을 찌를 수 있나</h2>
+      </div>
+    </div>
+
+    <figure class="fbox center" style="--maxw:540px">
+      <svg viewBox="0 0 400 478" role="img" aria-label="이 PC 안에 셸과 데몬, daemon.json 이 있다. 가짜 데몬과 포트 가로채기는 셸을 노리고 옛 주소 폴백을 좁혀 막는다(D25). 브라우저 속 웹페이지는 Origin 검사에서 거부된다(D21, D8). 화면 속 스크립트에는 토큰을 넘기지 않는다(D23). 같은 PC 의 다른 OS 사용자는 실측상 daemon.json 을 읽고 고칠 수 있다(D26, D22 — 권고는 범위 밖으로 기록). 데몬은 연결마다 누구냐를 기록하고(D6), 거절 종류는 닫기 코드로 나른다(D20). 다른 PC 에선 닿지 않는다">
+        <rect class="s-b2" x="8" y="8" width="384" height="462" rx="14"/>
+        <text class="t-l" x="22" y="34">이 PC</text>
+        <text class="t-x t-e" x="380" y="33">다른 PC 에선 닿지 않음</text>
+
+        <rect class="s-warn" x="22" y="52" width="150" height="54" rx="8"/>
+        <text class="t-x t-b" x="32" y="73">포트 가로채기</text>
+        <text class="t-x t-w t-b" x="32" y="94">가짜 데몬 · D25</text>
+        <text class="t-x t-o" x="32" y="124">→ 옛 주소는 공유 위반일 때만</text>
+        <path class="l-warn dash" d="M97,132 L97,188" marker-end="url(#ah-warn)"/>
+
+        <rect class="s-warn" x="228" y="52" width="150" height="54" rx="8"/>
+        <text class="t-x t-b" x="238" y="73">브라우저 속 웹페이지</text>
+        <text class="t-x t-w t-b" x="238" y="94">D21 · D8</text>
+        <text class="t-x t-o" x="238" y="124">→ Origin 달리면 거부</text>
+        <path class="l-warn dash" d="M303,132 L303,164"/>
+        <text class="t-w t-b t-c t-x16" x="303" y="182">✕</text>
+
+        <rect class="s-b" x="22" y="192" width="150" height="56" rx="8"/>
+        <text class="t-b" x="36" y="216">셸</text>
+        <text class="t-x" x="36" y="236">토큰으로 붙는다</text>
+        <rect class="s-acc" x="228" y="192" width="150" height="56" rx="8"/>
+        <text class="t-b t-a" x="242" y="216">데몬</text>
+        <text class="t-x" x="242" y="236">D6 「누구냐」만 기록</text>
+        <line class="l-acc" x1="174" y1="222" x2="226" y2="222" marker-start="url(#ah-acc)" marker-end="url(#ah-acc)"/>
+        <text class="t-x t-a t-c" x="200" y="214">토큰</text>
+        <text class="t-x t-c" x="200" y="270">D20 거절 종류 = 닫기 코드</text>
+
+        <rect class="s-warn" x="22" y="296" width="150" height="54" rx="8"/>
+        <text class="t-x t-b" x="32" y="317">WebView 속 스크립트</text>
+        <text class="t-x t-w t-b" x="32" y="338">D23</text>
+        <path class="l-warn dash" d="M97,294 L97,252" marker-end="url(#ah-warn)"/>
+        <text class="t-x t-o" x="32" y="370">→ 토큰을 안 넘긴다</text>
+
+        <line class="l" x1="311" y1="248" x2="311" y2="294" marker-end="url(#ah)"/>
+        <text class="t-x" x="318" y="276">쓴다</text>
+        <path class="s-b" d="M266,296 h76 l14,14 v40 h-90 z"/>
+        <path class="l" d="M342,296 v14 h14"/>
+        <text class="t-x t-b t-c" x="311" y="321">daemon.json</text>
+        <text class="t-x t-c" x="311" y="339">토큰 · 주소</text>
+
+        <path class="l-warn dash" d="M311,388 L311,356" marker-end="url(#ah-warn)"/>
+        <rect class="s-slot" x="22" y="388" width="356" height="72" rx="8"/>
+        <text class="t-x t-b" x="32" y="409">같은 PC 의 다른 OS 사용자 · D26 · D22</text>
+        <text class="t-x t-w t-b" x="32" y="429">실측: daemon.json 을 읽고 고칠 수 있다</text>
+        <text class="t-x" x="32" y="449">권고: 3단계 범위 밖 · 알려진 한계로 기록</text>
+      </svg>
+    </figure>
+    <p class="cap">주황 점선 = 위협 · 초록 = 3단계 대응(권고안). D26 은 실측(개발 데이터 폴더 · 상속 권한)으로 「지금도 열려 있음」이 확인됐다.</p>
+  </div>
+</section>
+
+<!-- ═════ L2-e 결정 지도 ═════ -->
+<section class="sec" id="ze">
+  <div class="inner">
+    <div class="zhead">
+      <svg class="mini" viewBox="0 0 220 130" role="img" aria-label="큰 그림에서 결정 표시">
+        <use href="#mini"/>
+        <rect class="hl" x="156" y="0" width="60" height="20" rx="7"/>
+        <g class="qb"><circle cx="150" cy="10" r="9"/><text x="150" y="14">e</text></g>
+      </svg>
+      <div>
+        <div class="eyebrow"><span class="num">L2 · e</span><span>결정 지도 · 26</span></div>
+        <h2>하나 정했고, 열 개를 이 순서로 묻는다</h2>
+      </div>
+    </div>
+
+    <div class="dmap">
+      <div class="dgrp">
+        <div class="gh"><span class="sw ok"></span>결정됨 · 1</div>
+        <div class="chips">
+          <span class="chip ok"><b>D19</b>transport 수리는 3-0 에 한꺼번에<em>① ✓</em></span>
+        </div>
+        <div class="gh" style="margin-top:6px"><span class="sw acc"></span>다음에 물을 것 · 이 순서로 · 10</div>
+        <ol class="chips seq">
+          <li class="chip hot"><span class="no">1</span><b>D11 · D24</b><span class="t">받는 구조 — 상대마다 버리지 않는 줄</span><em>②′ · ②</em></li>
+          <li class="chip hot"><span class="no">2</span><b>D4 · D5</b><span class="t">다중 데몬 · 데몬끼리 얼마나 깊이</span><em>재검토</em></li>
+          <li class="chip hot"><span class="no">3</span><b>D26 · D22</b><span class="t">다른 OS 사용자를 막나 · 폴더 권한</span><em>② · ②</em></li>
+          <li class="chip hot"><span class="no">4</span><b>D25</b><span class="t">셸이 옛 주소로 거는 조건</span><em>①</em></li>
+          <li class="chip hot"><span class="no">5</span><b>D20</b><span class="t">거절 분류 — 토큰 재시도 · 버전 끝</span><em>①</em></li>
+          <li class="chip hot"><span class="no">6</span><b>D6</b><span class="t">인가 — 「누구냐」만 지금 기록</span><em>②′</em></li>
+          <li class="chip hot"><span class="no">7</span><b>D23</b><span class="t">화면 쪽으로 토큰을 넘기나</span><em>① 뺀다</em></li>
+        </ol>
+      </div>
+      <div class="dgrp">
+        <div class="gh"><span class="sw mut"></span>일괄 승인 묶음 · 권고 ① 그대로 · 15</div>
+        <div class="chips">
+          <span class="chip"><b>D1</b>받는 창구 + 받은 상대</span>
+          <span class="chip"><b>D2</b>관계마다 어휘 · 명부 · 창구 따로</span>
+          <span class="chip"><b>D3</b>데몬 ID 를 Hello 에</span>
+          <span class="chip"><b>D7</b>인증 판정은 데몬 안 모듈</span>
+          <span class="chip"><b>D8</b>Origin · Host 검사는 transport 수락 설정</span>
+          <span class="chip"><b>D9</b>새 방어 — 시한 · 상한 · 크기 · Host</span>
+          <span class="chip"><b>D10</b>transport 스트림 층 안 씀</span>
+          <span class="chip"><b>D12</b>끊김 오류에 「보냈나」 칸</span>
+          <span class="chip"><b>D13</b>보낼 줄 가득 → 끊고 전량 되감기</span>
+          <span class="chip"><b>D14</b>재연결 5회 · 버튼 생기면 3회</span>
+          <span class="chip"><b>D15</b>요청 시한 30초 공용</span>
+          <span class="chip"><b>D16</b>데몬 보낼 줄 크기 그대로</span>
+          <span class="chip"><b>D17</b>명령 주인 표지 protocol 사본</span>
+          <span class="chip"><b>D18</b>원문 칸 TS 타입 그대로</span>
+          <span class="chip"><b>D21</b>릴리스는 Origin 달린 연결 거부</span>
+        </div>
+      </div>
+    </div>
+    <p class="cap">칩 끝 = TRD 권고안(결정 아님). D4 · D5 는 다중 데몬이 바로 뒤라 권고를 다시 보는 중.</p>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="inner">
+    <div>그림은 TRD 5판 권고안 기준 · 결정은 D19 하나 · 코드는 아직 안 바뀌었다.</div>
+    <div><a href="trd-3-transport.md">TRD 원문</a> · <a href="trd-3-transport-brief.html">개념 브리핑(글)</a> · <a href="trd-3-transport.html">그림 설명(상세)</a> · <a href="../../research/transport-stage3-measurements-2026-10-13.md">실측 2026-10-13</a></div>
+  </div>
+</footer>
+
+<script>
+  (function () {
+    var btn = document.getElementById('themeBtn');
+    if (!btn) return;
+    btn.addEventListener('click', function () {
+      var root = document.documentElement;
+      var cur = root.getAttribute('data-theme');
+      if (!cur) {
+        cur = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+      }
+      root.setAttribute('data-theme', cur === 'dark' ? 'light' : 'dark');
+    });
+  })();
+</script>
+</body>
+</html>
