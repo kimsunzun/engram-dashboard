@@ -40,8 +40,8 @@ use super::ingress::ControlQueryResult;
 
 /// 명부가 바뀌었음을 붙어 있는 클라이언트 전원에게 알리는 출구(포트).
 ///
-/// ★왜 포트인가★: 실제 통지는 전-연결 팬아웃으로 `ProfileListUpdated` 를 미는 것인데, 그 조립은
-///   `connection_core` 소유다. 이 포트를 세운 사유는 ADR-0130 의 잎 성질(`control/` 에서 다른 데몬 모듈로
+/// ★왜 포트인가★: 실제 통지는 전-연결 팬아웃으로 `ProfileListUpdated` · `AgentListUpdated` 를 미는 것인데(둘 다인
+///   까닭 = 실물 `connection_core::RosterFanout` doc), 그 조립은 `connection_core` 소유다. 이 포트를 세운 사유는 ADR-0130 의 잎 성질(`control/` 에서 다른 데몬 모듈로
 ///   나가는 간선 0)이었고 그 성질은 ADR-0236 이 내려놓았다. 소비자인 여기가 좁은 trait 만 소유하고 실물
 ///   어댑터는 조립부가 주는 모양은 그대로 둔다 — 메시징 커널의 포트 규율(ADR-0110)과 같은 모양이다.
 /// ★이게 없으면 나는 증상★: 에이전트가 이름을 바꾸거나 형제를 띄워도 대시보드 트리는 **무관한 이벤트가

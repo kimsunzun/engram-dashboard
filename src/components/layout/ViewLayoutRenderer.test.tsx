@@ -832,7 +832,9 @@ describe('ViewLayoutRenderer — click-to-focus 게이트(제어 슬롯 포커�
     focusSlotSpy.mockClear()
     window.location.hash = '#/'
     useViewStore.setState({
-      windows: { main: { tabs: [{ id: FOCUS_VIEW, name: 'View' }], active: FOCUS_VIEW, version: 1 } },
+      windows: {
+        main: { windowId: 'main', number: 1, tabs: [{ id: FOCUS_VIEW, name: 'View', named: true }], active: FOCUS_VIEW, version: 1 },
+      },
       focusSlot: focusSlotSpy,
     })
   })
@@ -905,7 +907,12 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
   const closeSlotSpy = vi.fn(async () => undefined)
   const assignAgentSpy = vi.fn(async () => undefined)
   const setSlotContentSpy = vi.fn(async () => undefined)
-  const moveSlotToWindowSpy = vi.fn(async () => ({ window: 'slot-popup-1', tab: 'v-new' }))
+  const moveSlotToWindowSpy = vi.fn(async () => ({
+    window: 'slot-popup-1',
+    tab: 'v-new',
+    window_id: '7d2f0b8e-1c3a-4f5e-9b6d-2a4c6e8f0a1b',
+    number: 2,
+  }))
   const origHash = window.location.hash
 
   beforeEach(() => {
@@ -923,7 +930,9 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     //   를 주입 → 폴백 경로가 ACTIVE_VIEW 를 집는다. 레이아웃 액션도 store 에 주입(단일 표면).
     window.location.hash = '#/'
     useViewStore.setState({
-      windows: { main: { tabs: [{ id: ACTIVE_VIEW, name: 'View' }], active: ACTIVE_VIEW, version: 1 } },
+      windows: {
+        main: { windowId: 'main', number: 1, tabs: [{ id: ACTIVE_VIEW, name: 'View', named: true }], active: ACTIVE_VIEW, version: 1 },
+      },
       split: splitSpy,
       closeSlot: closeSlotSpy,
       assignAgent: assignAgentSpy,

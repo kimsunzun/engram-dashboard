@@ -23,7 +23,7 @@ use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use super::usage::USAGE_VENDOR;
-use super::CLAUDE_PROGRAM;
+use super::{CLAUDE_PROGRAM, NO_AUTOUPDATE_ENV};
 use crate::usage::{
     display_text, finish_after_answer, has_word, resets_at_from_epoch_secs, used_pct_from_percent,
     ProbeChild, ProbeCommand, ProbeEnv, ProbeError, ProbeFailure, ScopedWindowObs, ScratchDir,
@@ -63,13 +63,15 @@ const MCP_CONFIG_JSON: &str = r#"{"mcpServers":{}}"#;
 const KEPT_CLAUDE_ENV: [&str; 2] = ["CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN"];
 const STRIPPED_ENV_PREFIX: &str = "CLAUDE";
 
-/// 조회 프로세스에 더하는 env — 탐침(`get-usage-probe.mjs`)이 실측한 조합 그대로다(`MAX_THINKING_TOKENS` 는
-/// 에이전트 스폰의 stream-json 모드와 같은 값). ★각 키가 무엇을 끄는지는 이름 이상으로 확인하지 않았다★.
-const PROBE_ENV: [(&str, &str); 4] = [
+/// 조회 프로세스에 더하는 env — 앞의 넷은 탐침(`get-usage-probe.mjs`)이 실측한 조합 그대로다(`MAX_THINKING_TOKENS` 는
+/// 에이전트 스폰의 stream-json 모드와 같은 값). ★그 넷이 각각 무엇을 끄는지는 이름 이상으로 확인하지 않았다★.
+/// 마지막 [`NO_AUTOUPDATE_ENV`] 는 탐침 조합 밖이다 — 에이전트 스폰과 같은 이유로 더한다(이 다섯 조합은 실 claude 로 돌려 보지 않았다).
+const PROBE_ENV: [(&str, &str); 5] = [
     ("MAX_THINKING_TOKENS", "8000"),
     ("ENABLE_CLAUDEAI_MCP_SERVERS", "false"),
     ("CLAUDE_CODE_AUTO_CONNECT_IDE", "0"),
     ("CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL", "1"),
+    NO_AUTOUPDATE_ENV,
 ];
 
 /// 외부 문자열(plan·모델 이름) 칸의 글자 수 상한 — 표시용 이름이라 이보다 길면 잘라 싣는다.
@@ -1572,6 +1574,7 @@ mod tests {
                 ("ENABLE_CLAUDEAI_MCP_SERVERS", "false"),
                 ("CLAUDE_CODE_AUTO_CONNECT_IDE", "0"),
                 ("CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL", "1"),
+                ("DISABLE_AUTOUPDATER", "1"),
             ]
         );
     }

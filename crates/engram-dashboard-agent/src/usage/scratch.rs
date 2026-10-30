@@ -2,15 +2,15 @@
 //!
 //! ★배타 생성이다★ — 이름은 무작위이고, 이미 있는 이름이면 그 폴더를 쓰지 않고 새 이름을 뽑는다. 자식이
 //!   믿고 읽는 파일이 이 안에 놓이므로, 남이 미리 심어 둔 폴더를 재사용하면 그 파일을 바꿔치기당한다.
-//! ★지우기 실패는 (짧게 다시 해 본 뒤) 무시한다★ — 남은 폴더는 받는 쪽이 기동 때 [`sweep_stale_scratch`] 로 쓸어 낸다.
+//! ★지우기 실패는 (잠김이면 짧게 다시 해 본 뒤) 무시한다★ — 남은 폴더는 받는 쪽이 기동 때 [`sweep_stale_scratch`] 로 쓸어 낸다.
 //!   (Windows 는 누가 열고 있는 파일·작업 폴더를 못 지운다 — 그래서 자식을 먼저 죽이고 기다린다.)
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use engram_dashboard_platform::fs::{retry_busy, Retry};
 use uuid::Uuid;
 
 use super::ProbeError;
@@ -63,27 +63,29 @@ impl ScratchDir {
     }
 }
 
-/// drop 이 지우기를 다시 해 보는 총 시간과 그 사이 간격.
+/// drop 이 지우기를 다시 해 보는 횟수와 간격 — 첫 시도 + 19 번 × 10 ms(약 200 ms).
 ///
-/// 직접 자식이 끝난 직후에는 손자가 아직 작업 폴더를 쥐고 있을 수 있다 — 그때 곧바로 지우면 실패하고 몇 ms 뒤에는
-/// 된다(실측 2026-09-27, 40/40 회 · 약 5 ms 뒤 성공).
-const DELETE_RETRY_BUDGET: Duration = Duration::from_millis(200);
-const DELETE_RETRY_GAP: Duration = Duration::from_millis(10);
+/// 직접 자식이 끝난 직후에는 손자가 아직 작업 폴더를 쥐고 있을 수 있다 — 그때 곧바로 지우면 실패하고 몇 ms
+/// 뒤에는 된다(실측 2026-09-27, 40/40 회 · 약 5 ms 뒤 성공 — 예산 약 200 ms 의 근거. 조회기의 Job 트리
+/// 종료 기다리기(`wait_tree_gone`)와 같은 커밋 c7dcba33 에 실렸고, 그 기다리기 앞뒤 어느 쪽 측정인지는 기록이 없다).
+// ADR-0291 R14: 파일럿 2026-10-10(rustc 1.95 · NTFS) — 손자가 작업 폴더를 쥔 합성 재현은 OS 오류 32
+//   (`ERROR_SHARING_VIOLATION` — `is_busy` 가 문다)로만 실패했고 145 는 나오지 않았다. 실 조회 경로는 Job 트리가
+//   다 끝난 뒤에 폴더를 놓으므로 6/6 회 첫 시도에 지워졌다 — 그래서 판정을 넓히지 않는다. FAT/exFAT 의 삭제
+//   대기(145)는 재지 않았다 — 그렇게 남은 폴더는 기동 때 쓸기가 거둔다.
+const DELETE_RETRY: Retry = Retry {
+    retries: 19,
+    pause: Duration::from_millis(10),
+};
 
 impl Drop for ScratchDir {
     fn drop(&mut self) {
-        let until = Instant::now() + DELETE_RETRY_BUDGET;
-        loop {
-            let err = match fs::remove_dir_all(&self.path) {
-                Ok(()) => return,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => return,
-                Err(e) => e,
-            };
-            if Instant::now() + DELETE_RETRY_GAP > until {
-                tracing::debug!(path = %self.path.display(), "임시 폴더 삭제 실패 — 기동 때 쓸기가 거둔다: {err}");
-                return;
-            }
-            thread::sleep(DELETE_RETRY_GAP);
+        // ADR-0291: 없는 폴더는 성공이고, 잠김 아닌 오류는 다시 하지 않는다.
+        let outcome = retry_busy(DELETE_RETRY, || match fs::remove_dir_all(&self.path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        });
+        if let Err(err) = outcome {
+            tracing::debug!(path = %self.path.display(), "임시 폴더 삭제 실패 — 기동 때 쓸기가 거둔다: {err}");
         }
     }
 }
@@ -137,6 +139,7 @@ pub fn sweep_stale_scratch(root: &Path) {
 mod tests {
     use super::*;
     use crate::usage::testing::TempRoot;
+    use std::thread;
 
     #[test]
     fn create_makes_a_fresh_dir_with_the_sweepable_name_and_drop_removes_it() {

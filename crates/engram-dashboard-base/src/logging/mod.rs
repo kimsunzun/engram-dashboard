@@ -23,11 +23,12 @@
 //! 여기서 옮기는 것은 상태가 없는 사유 한 장뿐이다. 둘 다 실패하면 정말 남는 곳이 없고, 그 경우의
 //! 주인은 클라이언트가 spawn 전에 도는 사전 점검이다(ADR-0135 — 데몬이 아니라 창에 사유를 띄운다).
 
+use std::cell::Cell;
 use std::fs::File;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Mutex, MutexGuard, OnceLock, TryLockError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use regex::Regex;
 use tracing_subscriber::fmt::MakeWriter;
@@ -107,28 +108,85 @@ static LOG_FILE: OnceLock<Mutex<File>> = OnceLock::new();
 /// panic hook 이 있다. 한 번 poison 되면 그 hook 의 로그가 다시 panic 해(panic-in-panic → abort)
 /// **정작 남겨야 할 죽음의 이유가 사라진다.** 잠금이 지키는 건 줄 섞임뿐이라 뒤엎어도 안전하다.
 ///
-/// ★알려진 미수정 — 이 잠금을 쥔 채 panic 하면 hook 이 자기 자신을 기다린다★: panic hook 은 되감기
-/// **전에, panic 한 그 스레드에서** 돌고(데몬 `install_panic_hook`), 그 안의 `error!` 가 같은
-/// `Mutex` 를 다시 잠근다 → 자기교착(프로세스가 멎는다 — abort 보다 나쁘다). 창은 `write_all` 안에서
-/// panic 할 때뿐이라(디스크 I/O 중 std 가 panic 하는 경우) 실측된 적이 없고, 없애려면 잠금 없는
-/// 쓰기(줄 섞임)나 hook 전용 우회 경로가 필요해 대가가 더 크다. 재진입을 감지해 건너뛰는 손질은
-/// 이 파일이 아니라 hook 쪽에서 해야 한다.
+/// ★같은 스레드가 writer 를 쥔 채 다시 오면 그 줄은 파일에 남기지 않는다★: panic hook 은 되감기
+/// **전에, panic 한 그 스레드에서** 돌고 그 안의 로그가 이 sink 를 다시 부른다. writer 를 쥔 채
+/// (`write_all` 안에서) panic 하면 그 재진입이 같은 `Mutex` 를 다시 잠가 자기교착한다(프로세스가 멎는다 —
+/// abort 보다 나쁘다). 그래서 writer 를 쥔 동안 [`WRITING`] 표지를 세우고, 표지가 선 스레드에는
+/// 잠그지 않고 버리는 writer 를 준다(stdout layer 는 그대로 받는다).
+///
+/// ★panic 중인 스레드는 다른 스레드가 쥔 잠금을 [`PANICKING_LOCK_WAIT`] 까지만 기다리고 그 줄을 버린다★:
+/// 쥔 스레드가 멎어 있으면 hook 이 끝내기(abort)에 닿기 전에 같이 멎기 때문이다. panic 중이 아닌 쓰기는
+/// 그대로 기다린다(모든 로그 호출과 같다). 되감기 중 소멸자가 내는 줄도 panic 중이라 같은 길을 탄다.
+// ADR-0292
 struct FileSink(&'static OnceLock<Mutex<File>>);
 
+/// panic 중인 스레드가 파일 잠금을 기다리는 상한. 평상시 잠금은 한 줄을 쓰는 동안만 쥐어지므로 흔한 경합에서는
+/// 줄을 남기기에 넉넉하고, 쥔 이가 멎었을 때 끝내기(abort)를 늦추는 양은 사람이 못 느낄 만큼으로 둔다.
+const PANICKING_LOCK_WAIT: Duration = Duration::from_millis(100);
+
+thread_local! {
+    /// 이 스레드가 지금 [`FileSink`] 의 파일 잠금을 쥐고 있나. const + `Drop` 없는 값이라 스레드 해체 중에도
+    /// 읽힌다고 보지만 이는 std 구현의 동작이지 문서화된 보장이 아니다 — 못 읽으면 「쥐고 있지 않음」으로 읽는다.
+    static WRITING: Cell<bool> = const { Cell::new(false) };
+}
+
 enum FileSinkWriter<'a> {
-    Live(MutexGuard<'a, File>),
-    /// 파일이 아직(또는 끝내) 안 열린 상태 — 조용히 버린다. stdout layer 는 그대로 받는다.
+    Live(Held<'a>),
+    /// 파일이 아직(또는 끝내) 안 열린 상태이거나, 이 스레드가 이미 쓰는 중 — 조용히 버린다. stdout layer 는
+    /// 그대로 받는다.
     Void,
+}
+
+/// 파일 잠금 + 그동안 선 [`WRITING`] 표지. drop 이 표지를 내린다 — 되감기로 버려져도 내려간다.
+struct Held<'a>(MutexGuard<'a, File>);
+
+impl<'a> Held<'a> {
+    fn new(guard: MutexGuard<'a, File>) -> Self {
+        let _ = WRITING.try_with(|w| w.set(true));
+        Self(guard)
+    }
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        let _ = WRITING.try_with(|w| w.set(false));
+    }
 }
 
 impl<'a> MakeWriter<'a> for FileSink {
     type Writer = FileSinkWriter<'a>;
 
     fn make_writer(&'a self) -> Self::Writer {
-        match self.0.get() {
-            // 같은 crate 의 `sync` 입주자를 부르지 않는다 — 입주자끼리 무참조(lib.rs 게이트 ③ · ADR-0275).
-            Some(m) => FileSinkWriter::Live(m.lock().unwrap_or_else(|e| e.into_inner())),
-            None => FileSinkWriter::Void,
+        let Some(m) = self.0.get() else {
+            return FileSinkWriter::Void;
+        };
+        if WRITING.try_with(Cell::get).unwrap_or(false) {
+            return FileSinkWriter::Void;
+        }
+        // 같은 crate 의 `sync` 입주자를 부르지 않는다 — 입주자끼리 무참조(lib.rs 게이트 ③ · ADR-0275).
+        let guard = if std::thread::panicking() {
+            match lock_within(m, PANICKING_LOCK_WAIT) {
+                Some(guard) => guard,
+                None => return FileSinkWriter::Void,
+            }
+        } else {
+            m.lock().unwrap_or_else(|e| e.into_inner())
+        };
+        FileSinkWriter::Live(Held::new(guard))
+    }
+}
+
+/// `limit` 안에 잠금을 얻으면 그 가드, 못 얻으면 `None`. poison 은 위 [`FileSink`] 와 같은 까닭으로 무시한다.
+fn lock_within(m: &Mutex<File>, limit: Duration) -> Option<MutexGuard<'_, File>> {
+    let deadline = Instant::now() + limit;
+    loop {
+        match m.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(TryLockError::Poisoned(e)) => return Some(e.into_inner()),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(TryLockError::WouldBlock) => return None,
         }
     }
 }
@@ -136,14 +194,14 @@ impl<'a> MakeWriter<'a> for FileSink {
 impl io::Write for FileSinkWriter<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
-            Self::Live(f) => f.write(buf),
+            Self::Live(held) => held.0.write(buf),
             Self::Void => Ok(buf.len()),
         }
     }
 
     fn flush(&mut self) -> io::Result<()> {
         match self {
-            Self::Live(f) => f.flush(),
+            Self::Live(held) => held.0.flush(),
             Self::Void => Ok(()),
         }
     }
@@ -694,5 +752,110 @@ mod tests {
     fn file_sink_writer_discards_lines_before_the_file_exists() {
         let sink = FileSink(leaked_slot());
         sink.make_writer().write_all(b"nowhere\n").expect("삼켜야");
+    }
+
+    /// writer 를 쥔 스레드가 다시 오면(쥔 채 panic 한 스레드의 hook 로그) 그 줄은 버리고 자기를 기다리지
+    /// 않는다. 다른 스레드에서 돌려 시한을 거는 것은 회귀가 영영 멈춤으로 나타나기 때문이다.
+    #[test]
+    fn file_sink_drops_the_line_of_a_thread_already_writing() {
+        let data_dir = temp_dir("reentry");
+        let opened = open_run_log(&data_dir, LogKind::App).expect("열려야");
+        let slot = leaked_slot();
+        assert!(slot.set(Mutex::new(opened.file)).is_ok(), "칸 채우기");
+        let sink = FileSink(slot);
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut outer = sink.make_writer();
+            outer.write_all(b"outer-1\n").expect("써야");
+            let mut inner = sink.make_writer();
+            let inner_void = matches!(inner, FileSinkWriter::Void);
+            inner.write_all(b"inner\n").expect("삼켜야");
+            drop(inner);
+            outer.write_all(b"outer-2\n").expect("써야");
+            drop(outer);
+            sink.make_writer().write_all(b"after\n").expect("써야");
+            let _ = done_tx.send(inner_void);
+        });
+
+        let inner_void = done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("같은 스레드의 두 번째 writer 가 자기 잠금을 기다렸다");
+        assert!(inner_void, "두 번째 writer 는 버리는 쪽이어야");
+        assert!(std::fs::read_to_string(&opened.path)
+            .expect("읽기")
+            .ends_with("outer-1\nouter-2\nafter\n"));
+    }
+
+    /// 다른 스레드가 쥔 채 멎은 잠금 앞에서 panic 중인 스레드(hook · 되감기 중 소멸자)는 상한만 기다리고 그 줄을
+    /// 버린다. 회귀는 영영 멈춤이라 시한을 건다.
+    #[test]
+    fn a_panicking_thread_gives_up_on_a_lock_held_by_another_thread() {
+        let data_dir = temp_dir("held-elsewhere");
+        let opened = open_run_log(&data_dir, LogKind::App).expect("열려야");
+        let slot = leaked_slot();
+        assert!(slot.set(Mutex::new(opened.file)).is_ok(), "칸 채우기");
+
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let _guard = slot.get().expect("칸").lock().expect("lock");
+            held_tx.send(()).expect("알림");
+            let _ = release_rx.recv();
+        });
+        held_rx.recv().expect("쥔 스레드가 잠갔다");
+
+        struct LogWhileUnwinding(FileSink, std::sync::mpsc::Sender<(bool, Duration)>);
+        impl Drop for LogWhileUnwinding {
+            fn drop(&mut self) {
+                let started = Instant::now();
+                let mut writer = self.0.make_writer();
+                let void = matches!(writer, FileSinkWriter::Void);
+                let _ = writer.write_all(b"while-panicking\n");
+                let _ = self.1.send((void, started.elapsed()));
+            }
+        }
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _log = LogWhileUnwinding(FileSink(slot), done_tx);
+                panic!("쥔 이가 따로 있는 동안 panic");
+            }));
+        });
+
+        let outcome = done_rx.recv_timeout(Duration::from_secs(10));
+        let _ = release_tx.send(());
+        holder.join().expect("쥔 스레드");
+        let (void, waited) = outcome.expect("panic 중인 스레드가 남이 쥔 잠금을 끝없이 기다렸다");
+        assert!(void, "상한 뒤에는 버리는 writer 여야");
+        assert!(
+            waited >= PANICKING_LOCK_WAIT,
+            "상한까지는 기다려야: {waited:?}"
+        );
+        assert!(!std::fs::read_to_string(&opened.path)
+            .expect("읽기")
+            .contains("while-panicking"));
+    }
+
+    #[test]
+    fn file_sink_lowers_the_writing_mark_when_a_writer_unwinds() {
+        let data_dir = temp_dir("unwind");
+        let opened = open_run_log(&data_dir, LogKind::App).expect("열려야");
+        let slot = leaked_slot();
+        assert!(slot.set(Mutex::new(opened.file)).is_ok(), "칸 채우기");
+        let sink = FileSink(slot);
+
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _writer = sink.make_writer();
+            panic!("쥔 채 panic");
+        }));
+
+        assert!(unwound.is_err());
+        sink.make_writer()
+            .write_all(b"after-unwind\n")
+            .expect("써야");
+        assert!(std::fs::read_to_string(&opened.path)
+            .expect("읽기")
+            .ends_with("after-unwind\n"));
     }
 }

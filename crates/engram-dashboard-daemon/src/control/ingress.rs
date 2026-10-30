@@ -504,9 +504,9 @@ impl ControlQueryResult {
 /// - `reply_by`·`timed_out` 은 request 줄에만 실린다.
 /// - 미결이 없으면 `open: []`.
 ///
-/// ★호출자 이름 = canonical(WYSIWYA — ADR-0101)★: 장부는 이름으로 기록되므로 신원(BoundIdentity)을 발송
-///   봉투와 **같은 계산**으로 표시 이름으로 바꿔 매칭한다(`sender_display_name` 재사용 — 두 곳이 갈리면
-///   "내 미결" 이 남의 것으로 보이거나 통째로 비어 버린다).
+/// ★호출자 매칭 = id(ADR-0309)★: 미결은 호출자 신원의 에이전트 id 로 고른다(`open_items_for(from.agent_id, …)`).
+///   표시 이름(`sender_display_name` — 발송 봉투와 같은 계산 · WYSIWYA — ADR-0101)은 출력에만 쓰고 매칭에는
+///   쓰지 않는다.
 pub fn handle_messages(
     manager: &Arc<AgentManager>,
     messaging: &Arc<engram_dashboard_messaging::service::MessagingService>,
@@ -569,7 +569,7 @@ pub fn handle_messages(
         None => {
             let me = sender_display_name(manager, from);
             let open: Vec<serde_json::Value> = messaging
-                .open_items_for(&me, from.agent_id, now)
+                .open_items_for(from.agent_id, now)
                 .iter()
                 .map(|i| {
                     let mut obj = serde_json::json!({

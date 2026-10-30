@@ -1,7 +1,7 @@
 # ADR-0233: codex JSON 세션 id 는 상대가 첫 유저 메시지를 되울릴 때 영속한다 — 보내고 되울림 전에 죽으면 다음 활성화는 새 대화
 
-- 상태: 확정 (2026-09-26, 근거: 사용자 결정 2026-09-26(TRD §10-1 24) + P2 로컬 QA full 실측(격리 release — 첫 되울림에서 영속 확인))
-- 관련: Amends ADR-0226 (결정 2 방아쇠와 결정 11 예외 및 영향의 불변식을 codex JSON 에서 첫 유저 메시지 되울림 기준으로) · Amends ADR-0231 (결정 9 끝의 codex 연결 중 거둔 첫 입력 id 영속 입구를 닫음) · Amends ADR-0185 (영향의 Phase 2 요구 첫 턴 전 persist 를 codex JSON 에서 거둠) · TRD `docs/process/S21-codex-backend/trd-mid-turn-input-queue.md`(§5-8 · §10-1 24 · §10-6 첫 행) · `docs/reference/backend-capabilities.md` §1 「codex 에만 있는 위험」 · 관련 ADR-0218(codex 터미널의 락 회수 — 결정 11 의 그 칸은 그대로) · ADR-0071(프로필 저장 락 규율 — commit 이 도는 스레드가 바뀐다) · ADR-0004(첫 턴 포트는 backend 가 꽂을지 정한다) · step-log S21
+- 상태: 확정 (2026-09-26, 근거: 사용자 결정 2026-09-26(TRD §10-1 24) + P2 로컬 QA full 실측(격리 release — 첫 되울림에서 영속 확인)) · 부분 폐기 by ADR-0292 (리더 포트 패닉의 펌프 Failed 서술)
+- 관련: Amends ADR-0226 (결정 2 방아쇠와 결정 11 예외 및 영향의 불변식을 codex JSON 에서 첫 유저 메시지 되울림 기준으로) · Amends ADR-0231 (결정 9 끝의 codex 연결 중 거둔 첫 입력 id 영속 입구를 닫음) · Amends ADR-0185 (영향의 Phase 2 요구 첫 턴 전 persist 를 codex JSON 에서 거둠) · TRD `docs/process/S21-codex-backend/trd-mid-turn-input-queue.md`(§5-8 · §10-1 24 · §10-6 첫 행) · `docs/reference/backend-capabilities.md` §1 「codex 에만 있는 위험」 · 관련 ADR-0218(codex 터미널의 락 회수 — 결정 11 의 그 칸은 그대로) · ADR-0071(프로필 저장 락 규율 — commit 이 도는 스레드가 바뀐다) · ADR-0004(첫 턴 포트는 backend 가 꽂을지 정한다) · step-log S21 · Amended by ADR-0292 (리더 포트 패닉의 펌프 Failed 서술)
 
 ## 맥락
 ADR-0226 은 세션 id 를 화신의 「첫 제출 래치」가 commit 할 때만 영속하게 했다 — 입력 둘(`offer` = id 가 알려졌다 · `note_submission` = 첫 사용자 턴이 나가기 직전)이 다 선 첫 순간이고, 제출은 세션의 입력 동사가 `send_input` **앞에서** 센다(그 ADR 결정 2). 그 전제는 「세션이 통로에 넘긴 글은 곧 상대에게 간다」였다.

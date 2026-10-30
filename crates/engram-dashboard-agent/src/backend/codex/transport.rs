@@ -74,15 +74,14 @@
 //!     파이프 backpressure 로 멈추고, 거기서 빠져나오는 길은 `shutdown()` 의 kill 뿐이다. 시한도
 //!     조건변수도 그 한 번의 쓰기 안쪽에는 닿지 않는다. ★이것이 이 파일 전체에 걸리는 한계이지
 //!     핸드셰이크만의 것이 아니다★.
-//!   - **라이터의 panic 봉쇄는 한 자리뿐이다** — 세션 id 기록 호출을 감싼 [`record_session_id`] 의
-//!     `catch_unwind` 가 그것이고(pump 에도 따로 있다), **그 밖의 라이터 코드에는 없다.** 봉쇄 밖에서
+//!   - **codex 라이터([`writer_loop`])는 가두지 않는다(ADR-0292)** — 운영 프로세스에서 라이터 panic 은
+//!     어디서 나든 훅이 프로세스를 끝낸다. 아래는 훅 없는 시험 빌드에서만 서는 모양이다: 봉쇄는 세션 id 기록 호출을 감싼
+//!     [`record_session_id`] 의 `catch_unwind` 한 자리뿐이고, **그 밖의 라이터 코드에는 없다.** 봉쇄 밖에서
 //!     라이터가 panic 하면 그 시점에 이미 선 상태가 남는다: 핸드셰이크 **전**이면 link 는 `Connecting`
 //!     이고 닫힘 표식도 안 서서 [`AgentTransport::send_input`] 이 계속 `Ok` 를 돌려주며 큐를 상한까지
 //!     채우고 그 정지를 "큐가 찼다" 로 신고한다(위 첫 항목과 같은 사유 어긋남). 핸드셰이크 **뒤**면 link
 //!     는 이미 `Ready` 라 같은 증상이 턴 경로에서 난다. ★어느 쪽이든 닫힘 표식은 안 서므로 pump 도
 //!     reaper 도 움직이지 않는다★.
-//!   - ★**위 봉쇄는 unwind 빌드에서만 선다**★ — 워크스페이스 루트 `Cargo.toml` 의 `[profile.release]` 가
-//!     `panic = "abort"` 라, 릴리스에서는 `catch_unwind` 가 아무것도 잡지 않고 프로세스가 죽는다.
 //!   - **응답보다 먼저 온 종료를 붙들어 두는 칸은 [`EARLY_COMPLETION_SLOTS`] 개다**(그 칸에는 turn id
 //!     와 **그 줄이 만든 턴 경계**가 함께 실린다 — [`EarlyCompletion`]). 한 응답을 기다리는
 //!     동안 그보다 많은 종료가 흘러오면 가장 오래된 것부터 버려지고, 버려진 것이 우리 턴의 것이었다면 그
@@ -109,12 +108,12 @@
 //!     세워 세션은 수거되는데 자식은 살아 있다. Windows 는 통로가 drop 될 때 Job 핸들이 닫히며
 //!     `KILL_ON_JOB_CLOSE` 가 트리를 거두지만, **비-Windows 에는 그 backstop 이 없어 고아가 남는다**
 //!     (이 헤더가 이미 적는 「비-Windows 에는 손자를 거두는 수단이 없다」의 부모 판이다).
-//!     ★**릴리스 도달성이 갈래마다 다르다 — 「전부 죽은 코드」로도 「전부 돈다」로도 읽지 말 것**★:
-//!     세션 id **기록** 실패는 [`record_session_id`] 가 잡은 패닉에서만 나오는데 워크스페이스 루트의
-//!     `[profile.release]` 가 `panic = "abort"` 라 릴리스에서는 그 자리에서 프로세스가 죽는다 — 그래서
+//!     ★**운영 도달성이 갈래마다 다르다 — 「전부 죽은 코드」로도 「전부 돈다」로도 읽지 말 것**★:
+//!     세션 id **기록** 실패는 [`record_session_id`] 가 잡은 패닉에서만 나오는데 그 자리는 가둠 표시
+//!     밖이라 운영 프로세스에서는 훅이 그 자리에서 프로세스를 끝낸다(ADR-0292) — 그래서
 //!     [`HandshakeFailure::headline`] 의 「세션 id 기록 실패」 머리말과 「이 화신을 쓰지 않는다」 `detail`
-//!     은 unwind 빌드에서만 관측된다. **stdin 닫기는 다르다** — 왕복 실패(시한·해독 실패·그리고 상대의
-//!     **거절**)로 릴리스에서도 닿는다. ★**서수로 가리키지 말 것**★ — 갈래 순서는 바뀐다.
+//!     은 훅 없는 시험 빌드에서만 관측된다. **stdin 닫기는 다르다** — 왕복 실패(시한·해독 실패·그리고 상대의
+//!     **거절**)로 운영에서도 닿는다. ★**서수로 가리키지 말 것**★ — 갈래 순서는 바뀐다.
 //!   - **핸드셰이크 실패 뒤의 회수는 첫 고리가 *상대의* 행동이고, 그것이 안 오면 끊는 것은 매니저다** —
 //!     stdin 을 놓은 뒤 실제로 세션을 끝내는 것은 「상대가 EOF 를 보고 스스로 exit 한다」이며(실측
 //!     41–51ms — ★그 수치는 **기록 실패 갈래**에서 잰 것이고 거절 갈래는 미측정★), 그것이 일어나야
@@ -151,16 +150,16 @@
 //! tauri import 0.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use std::io::{Read, Write};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use engram_dashboard_base::logging::mask_secrets;
+use engram_dashboard_base::panic::{contain, uncontained, Caught};
 use engram_dashboard_base::sync;
 use engram_dashboard_platform::group::GroupOwner;
-use engram_dashboard_platform::spawn::hide_console_window;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
@@ -177,6 +176,7 @@ use super::protocol::{
 };
 use crate::backend::{FirstTurnSink, SessionIdSink};
 use crate::output_core::{estimate_cost_bytes, OutputCore, REPLAY_MAX_BYTES, REPLAY_MAX_EVENTS};
+use crate::transport::spawn::{drain_stderr, spawn_piped, PipedChild};
 use crate::transport::{AgentTransport, LinkResolution, LinkSink, OutputDecoder};
 use crate::types::{
     AgentId, CommandSpec, ControlCaps, DeliveryAck, DropCause, InputCaps, InputEvent, InputOrigin,
@@ -1399,27 +1399,6 @@ pub(crate) struct CodexAppServerTransport {
     group: GroupOwner,
 }
 
-/// spawn 뒤 실패 경로에서 자식을 확실히 거두는 가드.
-///
-/// ★왜 필요한가★: `Child` 는 drop 으로 자식을 죽이지 않는다. spawn 뒤의 `?` 하나가 **이미 돌고 있는**
-/// 자식을 남긴 채 돌아가면, 그 자식은 아직 Job 에 들어가지도 않아 나중에 아무도 닿을 수 없다.
-struct ChildGuard(Option<Child>);
-
-impl ChildGuard {
-    fn into_inner(mut self) -> Child {
-        self.0.take().expect("ChildGuard 는 한 번만 회수된다")
-    }
-}
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.0.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-}
-
 impl CodexAppServerTransport {
     /// **pump 는 아직 안 띄운다**(`start` 에서). `child_pid` 를 함께 돌려준다.
     ///
@@ -1435,37 +1414,17 @@ impl CodexAppServerTransport {
         sid_sink: Option<SessionIdSink>,
         link_sink: Option<LinkSink>,
     ) -> Result<(CodexAppServerTransport, Option<u32>), PtyError> {
-        let mut cmd = Command::new(&spec.program);
-        cmd.args(&spec.args);
-        cmd.current_dir(&spec.cwd);
-        for (k, v) in &spec.env {
-            cmd.env(k, v);
-        }
-        cmd.stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        hide_console_window(&mut cmd);
-
-        let child = cmd
-            .spawn()
-            .map_err(|e| PtyError::SpawnFailed(format!("codex app-server spawn: {e}")))?;
-
-        // ★여기부터 모든 조기 반환은 자식을 거두고 나간다★ — 가드가 그것을 진다.
-        let mut guard = ChildGuard(Some(child));
-        let child_ref = guard.0.as_mut().expect("방금 담았다");
-        let child_pid = Some(child_ref.id());
-        let stdin = child_ref.stdin.take();
-        let stdout = child_ref.stdout.take();
-        let stderr = child_ref.stderr.take();
-
-        let group = GroupOwner::new()?;
-        if let Some(pid) = child_pid {
-            group.adopt(pid)?;
-        }
+        let PipedChild {
+            child,
+            stdin,
+            stdout,
+            stderr,
+            group,
+        } = spawn_piped(spec, "codex app-server")?;
+        let child_pid = Some(child.id());
 
         let transport = CodexAppServerTransport {
-            child: Arc::new(Mutex::new(guard.into_inner())),
+            child: Arc::new(Mutex::new(child)),
             stdin: Arc::new(Mutex::new(stdin)),
             stdout: Mutex::new(stdout),
             stderr: Mutex::new(stderr),
@@ -1509,17 +1468,10 @@ impl CodexAppServerTransport {
 }
 
 /// pump 스레드가 어디서든 panic 하면 그 agent 가 영구 silent 정지하므로 Failed 로 가시화한다.
-fn resolve_pump_reason(result: std::thread::Result<TerminalReason>) -> TerminalReason {
+fn resolve_pump_reason(result: Result<TerminalReason, Caught>) -> TerminalReason {
     match result {
         Ok(reason) => reason,
-        Err(payload) => {
-            let msg = payload
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| payload.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "<non-string panic payload>".to_string());
-            TerminalReason::Error(format!("pump panicked: {msg}"))
-        }
+        Err(caught) => TerminalReason::Error(format!("pump panicked: {caught}")),
     }
 }
 
@@ -2417,17 +2369,16 @@ fn sweep_deadlines(state: &SharedState, pending: &Pending, core: &OutputCore) {
 ///
 /// ★`catch_unwind` 가 실제로 사는 값을 부풀리지 말 것 — 「기록이 터져도 안전하다」가 아니다★.
 /// 이 포트 아래의 호출 그래프에는 **우리 코드가 만드는 패닉원이 없다**(해독은 `Result` 로 돌아오고,
-/// base `now_epoch_ms` 는 `unwrap_or(0)` 이며, `normalize_hierarchy` 는 인덱싱을 안 하고, 저장소는 IO 오류를
-/// 자기 안에서 삼킨다). 닿을 수 있는 것은 **poison 가드**(`expect`)들이고 — 레지스트리 맵 락과, 쓰기가
-/// 실제로 일어날 때 그 아래에서 잡히는 저장소 락, 서로 다른 모듈에 하나씩 — 어느 쪽이든 서려면 **먼저
-/// 다른 패닉이 그 락을 오염시켜 놓았어야** 한다. 그러니 이 봉쇄가 사는 것은 딱 하나다:
+/// base `now_epoch_ms` 는 `unwrap_or(0)` 이며, `normalize_hierarchy` 는 인덱싱을 안 하고, 저장 실패는 `Err` 로
+/// 돌아와 레지스트리가 로그로 끝낸다). 닿을 수 있는 것은 레지스트리 맵 락의 **poison 가드**(`expect`)이고 —
+/// 저장소 상태 칸은 독을 되찾아 패닉하지 않는다 — 그것이 서려면 **먼저 다른 패닉이 그 락을 오염시켜
+/// 놓았어야** 한다. 그러니 이 봉쇄가 사는 것은 딱 하나다:
 /// ★이미 남의 패닉으로 레지스트리가 망가진 상태에서, codex 라이터가 **그 위에 겹쳐 죽지는 않는다**★.
-/// ★**게다가 릴리스에서는 이 갈래가 죽은 코드다**★ — 워크스페이스 루트 `Cargo.toml` 의
-/// `[profile.release]` 가 `panic = "abort"` 라 [`std::panic::catch_unwind`] 가 아무것도 잡지 않고
-/// 프로세스가 그대로 죽는다. 즉 `Err` 로 도는 결말은 unwind 빌드(개발·테스트)에서만 관측된다.
-/// 그래도 두는 이유 둘 — 그 빌드에서는 실제로 서고, 패닉 전략이 바뀌면 방어가 저절로 산다.
+/// ★**게다가 운영 프로세스에서는 이 갈래가 닿지 않는다**★ — 라이터는 가둠 표시 밖이라 이 안의 패닉은
+/// 훅이 그 자리에서 프로세스를 끝낸다(ADR-0292). 즉 `Err` 로 도는 결말은 훅 없는 시험 빌드에서만 관측된다.
+/// 그래도 두는 이유 둘 — 그 빌드에서는 실제로 서고, 이 자리를 가두게 되면 방어가 저절로 산다.
 ///
-/// unwind 빌드에서 이것이 막는 것: 여기서 unwind 가 올라가면 [`Link::Ready`] 도 [`Link::Down`] 도 서지
+/// 훅 없는 빌드에서 이것이 막는 것: 여기서 unwind 가 올라가면 [`Link::Ready`] 도 [`Link::Down`] 도 서지
 /// 않아 링크가 `Connecting` 에 멈추고, 그 상태에서 [`AgentTransport::send_input`] 은 닫힘 표식도 `Down`
 /// 도 못 보고 **`Ok` 를 돌려주며 큐가 상한까지 찬다** — 에이전트는 Running 으로 보이는데 벙어리가 되고
 /// kill 말고는 복구가 없다(ADR-0190 의 「조용히 통과시키지 않는다」가 「조용히 멈춘다」로 무너지는 자리).
@@ -2709,8 +2660,8 @@ fn writer_loop(
             //   어차피 전부 실패한다), 살아 있으면 EOF 를 받는다 — **양쪽 다 안전하다.** 반대로 닫지 않는
             //   쪽에는 안전한 결말이 없다: 왕복이 실패했는데 상대는 멀쩡히 사는 조합이 실재하고, 그것이
             //   ★codex 가 `thread/resume` 을 JSON-RPC 오류로 **거절**하는 경우★다(거절은 stdout 으로 오고
-            //   자식은 죽지 않는다). 그 조합이 위 wedge 그대로이며 — ★기록 실패 갈래와 달리 **릴리스에서
-            //   닿는다**★(그쪽은 `catch_unwind` 뒤라 `panic = "abort"` 에서 죽은 코드다) — 부팅 복원이면
+            //   자식은 죽지 않는다). 그 조합이 위 wedge 그대로이며 — ★기록 실패 갈래와 달리 **운영에서
+            //   닿는다**★(그쪽은 표시 밖 패닉이라 운영 프로세스에서는 훅이 먼저 끝낸다 — ADR-0292) — 부팅 복원이면
             //   이어받을 수 있는 codex 프로필 수만큼 한꺼번에 선다.
             // ★그래도 **사유 문장은 갈린 채로 둔다**★ — 바뀐 것은 stdin 의 처분이지 진단이 아니다
             //   ([`HandshakeFailure::headline`] 과 위 `detail`). 왕복 갈래는 연결이 못 섰고, 기록 갈래는
@@ -2926,7 +2877,7 @@ impl LineSplitter {
 
 /// 리더가 **어떻게 끝나든** 통로를 닫는다 — 정상 EOF 든, `handle_line` 안에서 올라온 panic 이든.
 ///
-/// ★`Drop` 이어야 하는 이유★: `catch_unwind` 는 리더 루프를 **밖에서** 감싸므로, 루프 꼬리에 적어 둔
+/// ★`Drop` 이어야 하는 이유★: `contain` 은 리더 루프를 **밖에서** 감싸므로, 루프 꼬리에 적어 둔
 ///   정리는 unwind 가 그냥 지나간다. 그 경로는 가정이 아니다 — `core.emit` 안에서 구독자가 panic 하거나
 ///   `OutputCore` 의 뮤텍스가 poison 되면(그쪽은 `.expect` 다) 바로 거기로 간다. 그러면 닫힘 표식이 안
 ///   서고 라이터 스레드가 core·stdin·대기표를 든 채 영원히 돈다.
@@ -3709,7 +3660,8 @@ impl Reader {
             return;
         }
         if let Some(sink) = self.first_turn.take() {
-            sink();
+            // ADR-0292 결정 3: 래치 commit 은 여러 에이전트가 쓰는 프로필 표를 고친다 — 펌프의 가둠 안이어도 표시를 끈다.
+            uncontained(|| sink());
         }
     }
 
@@ -3991,29 +3943,10 @@ impl AgentTransport for CodexAppServerTransport {
         let _ = self.core.set(core.clone());
 
         // ── stderr drain ──
-        // 비우지 않으면 자식이 stderr 버퍼 full 로 블록한다. 이 스트림에는 상대의 진단 텍스트가
-        //   오므로(실측 0.154.0 — 오류는 stdout 이 아니라 이쪽으로 갔다) 활성화 실패의 유일한 증거다.
+        // 이 스트림에는 상대의 진단 텍스트가 오므로(실측 0.154.0 — 오류는 stdout 이 아니라 이쪽으로 갔다) 활성화
+        //   실패의 유일한 증거다.
         if let Some(stderr) = sync::lock(&self.stderr).take() {
-            let diag_core = core.clone();
-            let spawn_result = std::thread::Builder::new()
-                .name("engram-codex-stderr".into())
-                .spawn(move || {
-                    let reader = BufReader::new(stderr);
-                    for line in reader.lines() {
-                        match line {
-                            Ok(l) if !l.is_empty() => {
-                                let masked = mask_secrets(&l);
-                                diag_core.push_diagnostic(&masked);
-                                tracing::debug!(target: "agent_stderr", agent = %agent_id, "{}", masked)
-                            }
-                            Ok(_) => {}
-                            Err(_) => break,
-                        }
-                    }
-                });
-            if let Err(e) = spawn_result {
-                tracing::warn!(agent = %agent_id, "codex stderr drain 스레드 기동 실패: {e}");
-            }
+            drain_stderr(stderr, &core, "engram-codex-stderr", "codex");
         }
 
         // ── 라이터 ──
@@ -4075,7 +4008,8 @@ impl AgentTransport for CodexAppServerTransport {
         let child = self.child.clone();
         let shutdown = self.shutdown.clone();
         let handle = std::thread::spawn(move || {
-            let normal_reason = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // ADR-0292: finish 는 표시 밖이다 — 클로저 안으로 옮기지 말 것(사유 = `transport/pty.rs` 의 같은 자리).
+            let normal_reason = contain(std::panic::AssertUnwindSafe(|| {
                 reader_loop(stdout, shutdown, reader, child)
             }));
             pump_core.finish(resolve_pump_reason(normal_reason));
@@ -6016,7 +5950,7 @@ mod tests {
     /// ★기록이 패닉해도 라이터를 데려가지 않는다★ — unwind 가 올라가면 `Ready` 도 `Down` 도 서지 않아
     /// 링크가 `Connecting` 에 멈추고, 그 상태에서 [`AgentTransport::send_input`] 은 닫힘도 `Down` 도 못
     /// 보고 `Ok` 를 돌려주며 큐만 찬다(ADR-0190 이 금한 「조용히 멈춤」). `Err` 로 바뀌어야 라이터가
-    /// 실패 갈래로 가 링크를 내린다.
+    /// 실패 갈래로 가 링크를 내린다. 훅 없는 빌드의 갈래다 — 운영 프로세스에서는 훅이 끝낸다(ADR-0292).
     #[test]
     fn a_panicking_sink_becomes_a_failure_instead_of_unwinding() {
         let state = shared();
@@ -6384,30 +6318,6 @@ mod tests {
         );
     }
 
-    /// ★spawn 뒤 실패 경로에서 자식이 남으면 아무도 닿을 수 없다★ — `Child` 는 drop 으로 죽이지 않는다.
-    ///
-    /// ★이 항목이 덮는 것과 안 덮는 것★: 재는 것은 **가드 자체의 `Drop` 이 자식을 거둔다**는 것뿐이고,
-    /// **가드가 [`CodexAppServerTransport::open`] 안에서 충분히 이른 자리에 서 있는가**는 아니다. 그
-    /// 배치는 아래 [`the_child_guard_is_armed_before_the_first_fallible_step_after_spawn`] 이 소스에서
-    /// 잰다 — 가드를 Job 생성·편입 `?` 아래로 내리면 그쪽이 빨개진다.
-    #[cfg(windows)]
-    #[test]
-    fn the_child_guard_reaps_the_child_on_an_early_return() {
-        let mut cmd = Command::new("cmd.exe");
-        cmd.args(["/c", "ping", "-n", "30", "127.0.0.1"]);
-        cmd.stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let child = cmd.spawn().expect("spawn");
-        let pid = child.id();
-        assert!(engram_dashboard_platform::process::pid_alive(pid));
-        drop(ChildGuard(Some(child)));
-        assert!(
-            !engram_dashboard_platform::process::pid_alive(pid),
-            "조기 반환 경로에서 자식이 샜다"
-        );
-    }
-
     /// ★상대가 스스로 끝나도 라이터 스레드가 끝나야 한다★ — 안 끝나면 그 스레드가 core·stdin·대기표의
     /// `Arc` 를 든 채 남아 세션 하나치 메모리가 함께 남는다. `shutdown()` 은 이 경로에서 불리지 않는다
     /// (reaper 는 세션을 명부에서 뺄 뿐이다).
@@ -6434,7 +6344,7 @@ mod tests {
         );
     }
 
-    /// ★같은 표식이 리더 **panic** 도 살아남아야 한다★ — `catch_unwind` 는 리더 루프를 밖에서 감싸므로,
+    /// ★같은 표식이 리더 **panic** 도 살아남아야 한다★ — `contain` 은 리더 루프를 밖에서 감싸므로,
     /// 루프 꼬리에 적어 둔 정리는 unwind 가 그냥 지나간다. 그 경로에서 표식이 안 서면 라이터가 core·
     /// stdin·대기표를 든 채 영원히 돌고, 그것이 정상 EOF 항목이 못 보는 나머지 절반이다.
     ///
@@ -6462,6 +6372,26 @@ mod tests {
             "리더가 panic 으로 끝나자 닫힘 표식이 안 섰다"
         );
         await_writer_end(&t, "리더 panic 뒤 라이터 스레드가 안 끝났다");
+        drop(probe);
+    }
+
+    /// 가둔 리더 panic 은 `Failed` 로 접히고 `finish` 는 표시 밖에서 돈다 — 운영 리더 클로저 그대로.
+    // ADR-0292
+    #[cfg(windows)]
+    #[test]
+    fn a_contained_reader_panic_fails_the_agent_and_finish_runs_unmarked() {
+        use crate::transport::pump_marks::{self, Marks};
+
+        let probe = NotificationFile::new("marks");
+        let (t, _) = open_probe_owned(probe.args());
+        *t.decoder.lock().unwrap_or_else(|p| p.into_inner()) = Some(Box::new(EmittingDecoder));
+        let marks = Arc::new(Marks::default());
+        let core = pump_marks::core(&marks);
+        t.start(core.clone());
+        core.join_pump(Duration::from_secs(10));
+
+        pump_marks::assert_contained_body_and_unmarked_finish(&marks);
+        t.shutdown();
         drop(probe);
     }
 
@@ -6604,33 +6534,6 @@ mod tests {
         );
     }
 
-    /// ★가드는 spawn 뒤 **첫 실패 가능 단계보다 먼저** 서 있어야 한다★ — 그 아래로 내려가면 그 사이의
-    /// `?` 가 이미 도는 자식을 남긴 채 돌아가고, 그 자식은 아직 어느 Job 에도 안 들어가 아무도 닿을 수 없다.
-    ///
-    /// 소스에서 재는 이유 = 그 배치는 **실패를 주입할 수 없는 자리**다(`GroupOwner::new` 를 실패시키는
-    /// seam 이 없다). 위 `Drop` 항목은 가드가 도는 것만 재고 어디에 서 있는지는 못 본다.
-    #[test]
-    fn the_child_guard_is_armed_before_the_first_fallible_step_after_spawn() {
-        let src = include_str!("transport.rs");
-        let production = src.split("mod tests {").next().expect("운영 구획");
-        let open_body = production
-            .split("pub(crate) fn open(")
-            .nth(1)
-            .expect("open 본문");
-        let armed = open_body
-            .find("ChildGuard(Some(child))")
-            .expect("가드 무장 지점");
-        for step in ["GroupOwner::new()?", "group.adopt(pid)?"] {
-            let at = open_body
-                .find(step)
-                .unwrap_or_else(|| panic!("`{step}` 가 open 안에 없다 — 이 항목의 전제가 낡았다"));
-            assert!(
-                armed < at,
-                "가드가 `{step}` 보다 뒤에 선다 — 그 사이의 실패가 자식을 남긴다"
-            );
-        }
-    }
-
     /// ★기록 호출은 게이트가 열리기 **전에** 나와야 한다★ — 이것이 한 동사 포트의 존재 근거다
     /// ([`crate::backend::SessionIdSink`]: 「적혔나」를 되묻는 둘째 동사가 없는 이유가 이 순서다).
     /// 뒤집히면 기록되기 전에 그 세션으로 턴이 나가고, 포트는 **아무것도 보장하지 않는 통보**가 된다.
@@ -6639,7 +6542,7 @@ mod tests {
     /// 이 항목이 지키려는 바로 그 한 동사 계약을 깨야 한다. 게이트의 반대쪽 절반(「`Ready` 여야 턴이
     /// 나간다」)은 [`tests::nothing_is_sent_before_the_link_is_ready_even_when_the_thread_id_is_known`]
     /// 이 실제로 돌려서 잰다 — 둘이 합쳐 「기록 → 게이트 → 전송」 순서를 덮는다.
-    /// 선례·같은 사유 = [`tests::the_child_guard_is_armed_before_the_first_fallible_step_after_spawn`].
+    /// 선례·같은 사유 = `crate::transport::spawn` 시험의 `the_guard_is_armed_and_the_child_adopted_first_after_spawn`.
     /// ★이 항목이 핀하는 것은 「게이트 전에 포트에 **건넸다**」까지다(ADR-0226)★ — 포트 뒤는 첫 제출
     ///   래치라, 영속은 제출에 매인다. 「첫 턴 전에 영속」은 래치 단위 시험(진행 중 commit 뒤에 줄 서기) ·
     ///   세션의 제출 세기 순서 시험 · 조립점의 배선 구조 시험(`manager` 의
@@ -10190,6 +10093,34 @@ mod tests {
                 .any(|e| matches!(e, OutputEvent::Structured { .. })),
             "되울린 말풍선이 올라가지 않았다"
         );
+    }
+
+    /// 첫 턴 포트는 표시 밖에서 불린다 — 리더는 펌프의 가둠 안에서 돌지만 래치 commit 은 공유 프로필 표를 고친다.
+    // ADR-0292
+    #[test]
+    fn the_first_turn_port_runs_outside_the_contain_mark() {
+        use engram_dashboard_base::panic::is_contained;
+
+        let mut h = harness_with_real_decoder();
+        make_ready(&h.state, "T");
+        activate(&h.state, 1, None);
+        let marks = Arc::new(Mutex::new(Vec::new()));
+        let port: FirstTurnSink = {
+            let marks = marks.clone();
+            Arc::new(move || marks.lock().unwrap().push(is_contained()))
+        };
+        h.reader.first_turn = Some(port);
+
+        let inside = contain(std::panic::AssertUnwindSafe(|| {
+            h.reader.handle_line(
+                anonymous_echo_line(method::ITEM_STARTED, "T", "U1", "codex-1").as_bytes(),
+            );
+            is_contained()
+        }))
+        .expect("panic 없음");
+
+        assert!(inside, "시험 전제 — 포트를 부른 뒤에도 리더는 표시 안이다");
+        assert_eq!(*marks.lock().unwrap(), vec![false]);
     }
 
     // ── 턴 끝에서 쥔 자리로 되돌림 (ADR-0231 · TRD §5-5) ──────────────────────────

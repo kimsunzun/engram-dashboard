@@ -13,8 +13,9 @@
 use engram_dashboard_agent::commands::{
     AgentCancelQueuedInputArgs, AgentCancelQueuedInputOk, AgentInterruptArgs, AgentInterruptOk,
     AgentListArgs, AgentListOk, AgentListQueuedInputsArgs, AgentListQueuedInputsOk, AgentMoveArgs,
-    AgentMoveOk, AgentNewArgs, AgentNewOk, AgentRenameArgs, AgentRenameOk, AgentSpawnArgs,
-    AgentSpawnOk, UsageGetArgs, UsageRefreshArgs, UsageRefreshOk, UsageVendorRow, CATALOG_VERSION,
+    AgentMoveOk, AgentNewArgs, AgentNewOk, AgentRenameArgs, AgentRenameOk, AgentResolveArgs,
+    AgentResolveOk, AgentSpawnArgs, AgentSpawnOk, UsageGetArgs, UsageRefreshArgs, UsageRefreshOk,
+    UsageVendorRow, CATALOG_VERSION,
 };
 use engram_dashboard_command::{catalog_json, command_specs, CommandSpec};
 use ts_rs::TS;
@@ -50,6 +51,8 @@ fn export_typescript_bindings() {
     // 전이 의존(AgentRow 등)은 export_all_to 가 따라 데려온다.
     AgentListArgs::export_all_to(out).expect("AgentListArgs 바인딩 export 실패");
     AgentListOk::export_all_to(out).expect("AgentListOk 바인딩 export 실패");
+    AgentResolveArgs::export_all_to(out).expect("AgentResolveArgs 바인딩 export 실패");
+    AgentResolveOk::export_all_to(out).expect("AgentResolveOk 바인딩 export 실패");
     AgentSpawnArgs::export_all_to(out).expect("AgentSpawnArgs 바인딩 export 실패");
     AgentSpawnOk::export_all_to(out).expect("AgentSpawnOk 바인딩 export 실패");
     AgentNewArgs::export_all_to(out).expect("AgentNewArgs 바인딩 export 실패");

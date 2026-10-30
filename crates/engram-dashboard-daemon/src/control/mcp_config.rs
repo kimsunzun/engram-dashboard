@@ -101,6 +101,13 @@ pub fn render_config(url: &str, token: &str) -> String {
     serde_json::to_string_pretty(&root).unwrap_or_default()
 }
 
+/// (새 데이터 루트엔 폴더가 없다 — 원자 쓰기가 만든다.)
+// ADR-0291: 원자 쓰기의 임시 파일도 같은 폴더에 놓여 토큰이 거기 잠깐 실린다 — 같은 ACL 이고, 꺼짐이나 지우기
+//   실패로 남은 것은 부팅 스윕(폴더 안 파일 전부)이 거둔다.
+fn write_attached(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    engram_dashboard_base::file::write_atomic(path, bytes, crate::file_hooks::OS_HOOKS)
+}
+
 pub fn write_config(
     mcp_dir: &McpDir,
     id: AgentId,
@@ -109,10 +116,7 @@ pub fn write_config(
     token: &str,
 ) -> std::io::Result<PathBuf> {
     let path = config_path(mcp_dir, id, epoch);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&path, render_config(url, token))?;
+    write_attached(&path, render_config(url, token).as_bytes())?;
     tracing::info!(agent = %id, epoch, path = %path.display(), "mcp-config 기록(ADR-0086)");
     Ok(path)
 }
@@ -156,10 +160,7 @@ pub fn render_settings() -> String {
 
 pub fn write_settings(mcp_dir: &McpDir, id: AgentId, epoch: u32) -> std::io::Result<PathBuf> {
     let path = settings_path(mcp_dir, id, epoch);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&path, render_settings())?;
+    write_attached(&path, render_settings().as_bytes())?;
     tracing::info!(agent = %id, epoch, path = %path.display(), "세션 설정 조각 기록(spec §6)");
     Ok(path)
 }
@@ -274,6 +275,39 @@ mod tests {
         remove_config(&dir, id, 0);
         assert!(!path.exists(), "revoke 시 파일이 지워져야 함");
         remove_config(&dir, id, 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 새 데이터 루트엔 폴더가 아직 없다 — 쓰기가 루트까지 만들어야 첫 스폰이 선다(ADR-0291 R11).
+    #[test]
+    fn writes_into_a_folder_that_does_not_exist_yet() {
+        let root = std::env::temp_dir().join(format!("engram-mcpcfg-fresh-{}", AgentId::new_v4()));
+        let dir = McpDir::new(root.join("run").join("mcp"));
+        let id = AgentId::new_v4();
+        let cfg = write_config(&dir, id, 0, "http://127.0.0.1:6000/mcp", "tok").expect("config");
+        let set = write_settings(&dir, id, 0).expect("settings");
+        assert!(cfg.is_file() && set.is_file());
+        let names: Vec<_> = std::fs::read_dir(dir.as_path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names.len(), 2, "임시 파일이 남았다: {names:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 꺼짐으로 남은 원자 쓰기 임시 파일(토큰이 실렸을 수 있다)도 부팅 스윕이 거둔다.
+    #[test]
+    fn boot_sweep_collects_a_leftover_atomic_write_temp() {
+        let root = std::env::temp_dir().join(format!("engram-mcpcfg-tmp-{}", AgentId::new_v4()));
+        let dir = McpDir::new(root.join("mcp"));
+        std::fs::create_dir_all(dir.as_path()).unwrap();
+        let id = AgentId::new_v4();
+        let temp = dir
+            .as_path()
+            .join(format!("{id}-0.json.tmp{}.0", std::process::id()));
+        std::fs::write(&temp, "Bearer tok-leftover").unwrap();
+        sweep_stale_configs(&dir);
+        assert!(!temp.exists(), "토큰이 실린 임시 파일이 남았다");
         let _ = std::fs::remove_dir_all(&root);
     }
 

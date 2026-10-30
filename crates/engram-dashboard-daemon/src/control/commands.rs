@@ -18,8 +18,8 @@
 use std::sync::Arc;
 
 use engram_dashboard_agent::commands::{
-    make_table, resolve_in, AgentBackend, AgentCommandHost, RosterChanged, UsageCommandHost,
-    UsageVendorRow, INPUT_AFFECTING,
+    make_table, resolve_in, AgentBackend, AgentCommandHost, AgentRosterRow, RosterChanged,
+    UsageCommandHost, UsageVendorRow, INPUT_AFFECTING,
 };
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::types::AgentId;
@@ -149,9 +149,15 @@ impl UsageCommandHost for NoUsageLimits {
 ///
 /// ★blocking 함수다(호출자 계약)★: 이 표의 핸들러는 전부 blocking 이다 — resume 모드의 조기 종료를 약
 ///   3초 폴링하고, 이름 변경·계층 이동은 프로필 락을 쥔 채 디스크에 저장한다(agent `make_table` doc).
-///   그래서 async 런타임 스레드가 아니라 blocking 풀에서 불러야 한다 — 제어 라우트는
-///   `mcp_server::control_agent_handler` 의 `spawn_blocking`, 배달은 `command_delivery::run_locally` 가
-///   그 자리다.
+///   그래서 async 런타임 스레드가 아니라 blocking 풀에서 불러야 한다 — 제어 라우트 둘은
+///   `mcp_server` 의 `control_agent_handler` · `control_call_handler` 의 `spawn_blocking`, 배달은
+///   `command_delivery::spawn_local` 이 그 자리다.
+/// ★어느 이름도 패닉을 가두지 않는다(ADR-0293)★: 표 호출(인자 보정 · future 만들기)과 본문 몰기는 가둠 표시
+///   밖이라, 운영 프로세스에서는 그 패닉에 훅이 사유 줄을 남기고 데몬을 끝낸다(훅 없는 시험 빌드에선 본문
+///   패닉을 도구 crate 의 본문 그물이 `INTERNAL` 로 접는다). 이름 하나를 다시 가두는 것은 새 결정이고, 그때의
+///   조건은 둘이다: 본문에 효과가 없을 것(가둔 패닉을 `INTERNAL` 로 접는 근거 — 효과가 있는 본문이면 그 접기가
+///   `OUTCOME_UNKNOWN` 이어야 한다 · `command_delivery::fold_local`) · 선언된 효과로 가르지 않을 것(`usage.get` 은
+///   `Read` 인데 공유 사용량 책을 바꾼다).
 /// ★`entrance` 는 로그 라벨이다★ — 아래 계약 위반(async 핸들러 반입)은 오류 답장 하나로만 보이므로,
 ///   어느 표면에서 났는지가 로그에 없으면 원인을 못 찾는다.
 /// ★입력 임대 검문도 여기 하나다(ADR-0231)★: [`INPUT_AFFECTING`] 명령은 인자 검문 다음에 `admit_input` 을
@@ -160,6 +166,7 @@ impl UsageCommandHost for NoUsageLimits {
 // ADR-0155
 // ADR-0157
 // ADR-0231
+// ADR-0293
 pub fn call_daemon_command(
     table: &DaemonTable,
     name: &str,
@@ -315,6 +322,16 @@ impl LocalCommands for DaemonLocalCommands {
     fn decls(&self) -> Vec<CommandDecl> {
         self.0.get().map(|table| table.decls()).unwrap_or_default()
     }
+
+    /// 동사 본문 · 임대 검문(`admit_input`)이 지목을 푸는 **그 호스트**의 명부다. 표가 아직 안 꽂혔으면 빈
+    /// 명부 — 그 시점엔 이 데몬이 아는 에이전트가 없다는 사실 그대로다.
+    // ADR-0308
+    fn agent_roster(&self) -> Vec<AgentRosterRow> {
+        self.0
+            .get()
+            .map(|table| table.roster.roster())
+            .unwrap_or_default()
+    }
 }
 
 /// 명부 통지 포트의 데몬 어댑터 — 슬롯을 **부를 때** 읽는다(사유는 [`make_daemon_table`] doc).
@@ -340,7 +357,9 @@ mod tests {
     use std::time::Duration;
 
     use engram_dashboard_agent::preset::{Preset, PresetRegistry, PresetStore};
-    use engram_dashboard_agent::profile::{AgentProfile, ProfileRegistry, ProfileStore};
+    use engram_dashboard_agent::profile::{
+        AgentProfile, ProfileRegistry, ProfileStore, StoreError,
+    };
     use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
     use engram_dashboard_agent::types::{
         AgentId, AgentInfo, AgentStatus, StatusSink, CLI_AGENT_VERBS,
@@ -358,8 +377,9 @@ mod tests {
         saved: Mutex<Vec<AgentProfile>>,
     }
     impl ProfileStore for MemProfileStore {
-        fn save(&self, profiles: &[AgentProfile]) {
+        fn save(&self, profiles: &[AgentProfile]) -> Result<(), StoreError> {
             *self.saved.lock().expect("store poisoned") = profiles.to_vec();
+            Ok(())
         }
         fn load(&self) -> Vec<AgentProfile> {
             self.saved.lock().expect("store poisoned").clone()
@@ -368,7 +388,9 @@ mod tests {
 
     struct NoPresets;
     impl PresetStore for NoPresets {
-        fn save(&self, _presets: &[Preset]) {}
+        fn save(&self, _presets: &[Preset]) -> Result<(), StoreError> {
+            Ok(())
+        }
         fn load(&self) -> Vec<Preset> {
             Vec::new()
         }
@@ -432,17 +454,18 @@ mod tests {
     /// ★CLI 동사 명단에서 기대값을 **파생**한다★ — 손으로 적으면 agent 에 동사가 늘어도 이 단언이 옛
     ///   명단을 그대로 통과시킨다. 선언 없이 늘어난 동사는 CLI 가 부를 수 없는 채로 남는다.
     /// ★CLI 동사가 없는 이름은 아래 목록에 적은 것뿐이다★ — 대기 목록 두 동사와 끊기(`agent.interrupt` —
-    ///   ADR-0237)는 `engram agent <동사>` 에 올리지 않고(`CLI_AGENT_VERBS` 밖) 버스·범용 호출
-    ///   (`engram <이름> …`)로만 부른다. 목록에 없는 이름이 표에 늘면
+    ///   ADR-0237), 여러 말 풀기(`agent.resolve` — ADR-0307)는 `engram agent <동사>` 에 올리지 않고
+    ///   (`CLI_AGENT_VERBS` 밖) 버스·범용 호출(`engram <이름> …`)로만 부른다. 목록에 없는 이름이 표에 늘면
     ///   CLI 에 올릴지를 정하지 않은 채 늘어난 것이라 여기서 멈춘다. 사용량 두 동사(`usage.*`)는 `agent` 계열이
     ///   아니라 계열 라우트(`/control/agent`)에 애초에 안 닿는다 — 전체 이름으로만 부른다.
     // ADR-0231
     #[test]
     fn the_daemon_table_holds_every_cli_agent_verb() {
-        const BUS_ONLY: [&str; 5] = [
+        const BUS_ONLY: [&str; 6] = [
             "agent.cancelQueuedInput",
             "agent.interrupt",
             "agent.listQueuedInputs",
+            "agent.resolve",
             "usage.get",
             "usage.refresh",
         ];
@@ -547,6 +570,28 @@ mod tests {
             .run("agent.list", &mut json!({}), "bus", Some(2))
             .is_none());
         assert!(bus.decls().is_empty());
+        assert!(
+            bus.agent_roster().is_empty(),
+            "표가 없으면 아는 에이전트도 없다"
+        );
+    }
+
+    /// ★남의 명령의 에이전트 참조 칸을 푸는 명부 = 동사가 지목을 푸는 그 명부★(ADR-0308 · ADR-0132) —
+    /// 갈리면 같은 이름이 버스 중계와 `agent.*` 에서 다른 에이전트로 풀린다.
+    #[test]
+    fn agent_references_resolve_against_the_verbs_own_roster() {
+        let slot = table_slot();
+        let bus = DaemonLocalCommands::new(slot.clone());
+        register_one(slot.get().expect("표"));
+
+        let rows = bus.agent_roster();
+        assert_eq!(rows.len(), 1, "방금 등록한 에이전트가 보인다");
+        let listed = call(slot.get().expect("표"), "agent.list", json!({})).expect("목록");
+        assert_eq!(
+            listed["agents"][0]["id"],
+            rows[0].id.to_string(),
+            "동사가 보는 명부와 같은 행"
+        );
     }
 
     /// 발견 목록이 싣는 것은 **표에 실제로 꽂힌 것**이다 — 선언만 있고 안 꽂힌 이름을 광고하면 그 이름의
@@ -595,6 +640,7 @@ mod tests {
             errors: &[],
             args_type: "FixturePendingArgs",
             ok_type: "FixturePendingOk",
+            agent_args: &[],
         };
 
     static PENDING_DECLARED: &[&engram_dashboard_command::CommandSpec] = &[&PENDING_SPEC];
@@ -981,6 +1027,41 @@ mod tests {
         assert!(lease.asked().is_empty(), "{:?}", lease.asked());
     }
 
+    /// ★셸이 에이전트 이름을 푸는 문이 배달 1단계로 닿는다(TRD S28 §5-1)★ — 셸은 버스 봉투로 `agent.resolve` 를
+    ///   보내고, 데몬은 그 이름을 자기 표에서 찾아(`claim`) 운영 명부로 답한다. 표에 안 꽂히면 셸은 「모르는 명령」을
+    ///   받고 옛 데몬으로 오인한다.
+    // ADR-0307
+    #[test]
+    fn the_bus_answers_agent_resolve_from_the_roster() {
+        let (manager, ids) = manager_with(&["alpha", "beta"]);
+        let slot = Arc::new(CommandTableSlot::new());
+        slot.set(Arc::new(make_daemon_table(
+            manager,
+            Arc::new(RosterBroadcastSlot::new()),
+            Arc::new(NoInputLeases),
+            Arc::new(NoUsageLimits),
+        )));
+        let bus = DaemonLocalCommands::new(slot);
+
+        assert_eq!(bus.claim("agent.resolve"), Some(Effect::Read));
+        let out = bus
+            .run(
+                "agent.resolve",
+                &mut json!({ "targets": ["beta", ids[0].to_string()] }),
+                "bus",
+                Some(2),
+            )
+            .expect("이 표의 이름")
+            .expect("둘 다 풀린다");
+        assert_eq!(
+            out,
+            json!({ "agents": [
+                { "target": "beta", "id": ids[1].to_string(), "name": "beta", "live": false },
+                { "target": ids[0].to_string(), "id": ids[0].to_string(), "name": "alpha", "live": false },
+            ]})
+        );
+    }
+
     /// ★검문은 입력 영향 명령이 **필수 문자열 `target`** 을 갖는다는 데 기대 선다★ — 그 칸이 선택이 되면
     /// 빠진 요청이 검문을 지나 본문에 닿고, 본문이 기본 대상을 고르는 순간 임대 없이 실행된다. 이름이 표에
     /// 없으면 검문이 아무것도 안 지킨다.
@@ -1101,5 +1182,64 @@ mod tests {
                 "{name}: {err}"
             );
         }
+    }
+
+    /// ★어느 이름의 본문도 가둠 표시 밖에서 돈다(ADR-0293)★ — ADR-0292 가 가두던 두 조회(`agent.list` ·
+    /// `agent.listQueuedInputs`)도 같다 — 다시 가두면 이 시험이 빨개진다. 훅 없는 이 시험 빌드에선 본문 패닉을 본문 그물이 `INTERNAL` 로 접는다
+    /// (운영 프로세스에선 훅이 데몬을 끝낸다). 본문은 운영과 같은 `blocking_handler` 다.
+    // ADR-0293
+    #[test]
+    fn no_command_body_runs_under_the_containment_mark() {
+        let mut table = CommandTable::new(engram_dashboard_agent::commands::COMMAND_SPECS);
+        for name in ["agent.listQueuedInputs", "usage.get", "agent.rename"] {
+            table
+                .insert(
+                    name,
+                    engram_dashboard_command::blocking_handler(|_: serde_json::Value| {
+                        Ok::<_, CommandError>(engram_dashboard_base::panic::is_contained())
+                    }),
+                )
+                .expect("선언된 이름");
+        }
+        table
+            .insert(
+                "agent.list",
+                engram_dashboard_command::blocking_handler(
+                    |_: serde_json::Value| -> Result<bool, CommandError> {
+                        panic!(
+                            "본문 패닉 · 표시 {}",
+                            engram_dashboard_base::panic::is_contained()
+                        )
+                    },
+                ),
+            )
+            .expect("선언된 이름");
+        let table = DaemonTable {
+            table,
+            roster: manager(),
+            lease: Arc::new(NoInputLeases),
+        };
+
+        for (name, mut args) in [
+            ("agent.listQueuedInputs", json!({ "target": "alpha" })),
+            ("usage.get", json!({ "backend": "Claude" })),
+            ("agent.rename", json!({ "target": "alpha", "name": "beta" })),
+        ] {
+            let contained = call_daemon_command(&table, name, &mut args, "test", None)
+                .expect("이 표의 이름")
+                .expect("본문의 답");
+            assert_eq!(contained, json!(false), "{name}");
+        }
+
+        let err = engram_dashboard_command::testing::with_quiet_panic_hook(|| {
+            call_daemon_command(&table, "agent.list", &mut json!({}), "test", None)
+                .expect("이 표의 이름")
+                .expect_err("본문 패닉")
+        });
+        assert_eq!(err.code(), ErrorCode::Internal);
+        assert_eq!(
+            err.message(),
+            "command handler panicked: 본문 패닉 · 표시 false"
+        );
     }
 }

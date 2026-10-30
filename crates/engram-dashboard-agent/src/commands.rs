@@ -18,15 +18,16 @@ use std::sync::Arc;
 
 use engram_dashboard_base::path::normalize_spelling;
 use engram_dashboard_command::{
-    blocking_handler, declare_commands, CommandError, CommandTable, ErrorCode,
+    blocking_handler, declare_commands, CommandError, CommandTable, ErrorCode, RetryMode,
 };
 
 use crate::manager::{AgentManager, RenameOutcome};
+use crate::persistence::AGENTS_FILE;
 use crate::preset::PresetId;
 use crate::queued_input::{ListedState, QueuedListing};
 // 코어 enum과 아래 동명 선언 어휘를 구분하는 별칭.
 use crate::profile::AgentOutputFormat as CoreAgentOutputFormat;
-use crate::profile::{AgentCommand, AgentProfile, SpawnMode};
+use crate::profile::{AgentCommand, AgentProfile, Refusal, SpawnMode, StoreError, StoreStatus};
 use crate::types::{
     AgentId, AgentStatus, CancelError, CancelOutcome, PtyError, AGENT_STATE_LIVE,
     AGENT_STATE_SLEEPING, RENAME_OUTCOME_RENAMED, RENAME_OUTCOME_UNCHANGED,
@@ -36,6 +37,9 @@ use crate::usage::UsageVendorKey;
 // ★성공 응답은 평평하다(사용자 결정 2026-08-13)★: 명령마다 반환을 선언하므로 `{"agent":{…}}` 한 겹을
 //   더 감쌀 이유가 없다.
 declare_commands! {
+    // v8(2026-10-26): 이름 하나가 늘었다 — `agent.resolve`(ADR-0307 · TRD S28 §6).
+    // v7(2026-10-10): `agent.list` 의 답에 칸 `store` 가 늘었다 — 명부 저장소 둘(agents · presets)의 상태(ADR-0291
+    //   R17 · D6). 이름은 그대로이고 답의 모양이 바뀌었다.
     // v6(2026-09-28·29): 이름 셋이 늘었다 — `agent.interrupt`(ADR-0237) · `usage.get`·`usage.refresh`(TRD S21
     //   usage-limit-slot §1-6). 두 갈래가 따로 6 으로 올렸고 v6 은 어느 릴리스(태그)에도 실린 적이 없어 한 판으로 합쳤다.
     // v5(2026-09-26): 이름 둘이 늘었다 — `agent.listQueuedInputs`·`agent.cancelQueuedInput`(ADR-0231).
@@ -47,7 +51,7 @@ declare_commands! {
     // v3(2026-09-08): `agent.new` 의 `backend` 가 **선택 → 필수**가 됐다. 조용한 claude 기본값을 걷은
     //   깨는 변경이라 세대를 올린다(사유 = 그 칸의 doc). 이 번호는 진단용이고 받는 쪽이 거절에 쓰지
     //   않는다(`connection_core` 의 RegisterCommands 갈래).
-    catalog_version: 6;
+    catalog_version: 8;
 
     /// 명부의 한 행.
     struct AgentRow {
@@ -58,6 +62,54 @@ declare_commands! {
         parent: Option<String>,
     }
 
+    /// `agent.resolve` 답의 한 줄 — 요청한 말 하나가 가리킨 에이전트.
+    struct ResolvedAgentRow {
+        /// 요청에 실린 말 그대로.
+        target: String,
+        id: String,
+        /// 지금 명부의 이름.
+        name: String,
+        /// `agent.list` 의 `state` 가 `live` 인 것과 같은 판정이다.
+        live: bool,
+    }
+
+    // ── 명부 저장소 상태(`agent.list` 의 `store` — ADR-0291 R17 · D6) ─────────────────────────────────────
+    // ★매크로 enum 은 문자열 열거뿐이라 저장소 상태(까닭을 든 태그 enum `profile::StoreStatus`)를 단어 + 선택 칸으로
+    //   편다★ — 사용량 행과 같은 꼴이다.
+
+    /// 저장소 파일 하나의 상태 — `Writable`(쓸 수 있다) | `ReadOnly`(데몬이 뜰 때 그 파일을 받지 않았다 — 명부가
+    /// 비어 있고 이 실행 내내 명부를 바꾸는 요청은 `CONFLICT` 다(지목할 항목이 없으면 `NOT_FOUND`). 파일을 고치거나
+    /// 바꾼 뒤 데몬을 다시 띄워야 풀린다) |
+    /// `Refusing`(마지막 저장이 거절됐다 — 다음 변경이 다시 판정하고, 받아들이면 풀린다. 그 사이 파일이 고쳐졌으면
+    /// 이 값은 낡았다).
+    enum StoreStateWord {
+        Writable,
+        ReadOnly,
+        Refusing,
+    }
+
+    /// 저장소가 받지 않는 까닭 — `Newer`(이 데몬보다 새 판이 쓴 파일) | `Unreadable`(파일을 못 읽었다 — 잠김 ·
+    /// 권한 등).
+    enum StoreRefusalWord {
+        Newer,
+        Unreadable,
+    }
+
+    /// 저장소 파일 하나의 상태 행.
+    struct StoreStatusRow {
+        state: StoreStateWord,
+        /// `ReadOnly` · `Refusing` 의 까닭 — `Writable` 이면 `null`.
+        reason: Option<StoreRefusalWord>,
+        /// `Newer` 일 때 그 파일이 적은 판 번호 — 그 밖은 `null`.
+        file_version: Option<u64>,
+    }
+
+    /// 명부 저장소 둘 — `agents`(agents.json · 에이전트 명부) · `presets`(presets.json · 경로 북마크).
+    struct RosterStoreRow {
+        agents: StoreStatusRow,
+        presets: StoreStatusRow,
+    }
+
     /// 새 에이전트를 돌릴 백엔드 — ★오늘 받는 값은 `Claude` 와 `Codex` 둘이다★(2026-09-22 에 codex 가
     /// 들어왔다).
     ///
@@ -66,9 +118,10 @@ declare_commands! {
     /// 바뀌지 않게).
     /// ★변형을 더하는 값어치는 **짝이 이미 있나**가 가른다★: 실행 명령(`AgentCommand`)은
     /// `#[serde(tag = "kind")]` 로 **`agents.json` 에 그대로 적히고**, 모르는 kind 를 만난 옛 빌드는 그
-    /// 파일을 **한 덩이로** 파싱하다 실패해 `.corrupt` 로 밀어내고 **빈 명부로 뜬다**(persistence
-    /// `FileProfileStore::load`). 그러니 `AgentCommand` 에 **아직 없는** 백엔드를 여기 더하는 것은
-    /// 디스크 호환을 깨는 이주이고, 짝이 **이미 있는** 백엔드를 더하는 것은 이주가 아니다.
+    /// 파일을 **한 덩이로** 손상으로 보고 **빈 명부로 뜬다** — 첫 저장이 그 파일을 `.corrupt` 로 떠 두고 덮는다
+    /// (persistence `FileProfileStore::load` · 그보다 옛 빌드는 적재 때 `.corrupt-<ms>` 로 옮긴다). 그러니
+    /// `AgentCommand` 에 **아직 없는** 백엔드를 여기 더하는 것은 디스크 호환을 깨는 이주이고, 짝이 **이미
+    /// 있는** 백엔드를 더하는 것은 이주가 아니다.
     /// ★`Codex` 는 후자였다★ — `AgentCommand::Codex { extra_args, output_format }` 는 그 전부터 있었고
     /// 사람 메뉴(`agentlist.createCodex`·`createCodexJson`)가 **그 모양 그대로** `agents.json` 에 이미
     /// 쓰고 있었다. 이 문을 연 것은 새 kind 도 새 칸도 스키마 상향도 아니다 — ★한때 이 자리에 「codex 를
@@ -167,12 +220,31 @@ declare_commands! {
     // errors 에는 **이 명령 고유의** 코드만 적는다 — 인자 반려(INVALID_ARGUMENT)와 내부 실패(INTERNAL)는
     //   표가 내는 것이라 `CommandSpec::advertised_errors` 가 자동으로 얹는다.
 
-    /// 명부 전량 — 이름·생사·작업 폴더·부모.
+    /// 명부 전량 — 이름·생사·작업 폴더·부모 — 와 명부 저장소 둘의 상태(`store`).
     #[effect(Read)]
     #[since(1)]
     "agent.list" => args AgentListArgs {}
-                 -> ok   AgentListOk { agents: Vec<AgentRow> }
+                 -> ok   AgentListOk { agents: Vec<AgentRow>, store: RosterStoreRow }
                  errors [];
+
+    // ADR-0307
+    // ★실패 문구의 머리 `targets[i]: ` 는 계약이다★ — 셸(TRD S28 §5-1)이 이 머리로 실패를 자기 인자 이름에 되짚는다.
+    //   셸은 이 crate 를 의존하지 않아 바뀌어도 컴파일이 안 멈춘다. 머리를 짓는 자리 = `target_failure` · 못 박는 시험 =
+    //   `tests::the_resolve_failure_prefix_is_a_stable_contract`.
+    /// 에이전트를 가리키는 말(이름 또는 id) 1~8 개를 한 번에 푼다 — `agents` 는 요청과 같은 차례다. 푸는 규칙은 `target`
+    /// 을 받는 다른 동사와 같다(id 정확 일치가 먼저 · 그다음 이름 정확 일치 — 대소문자 구분 · 잠든 에이전트 포함).
+    /// `live` = `agent.list` 의 `state` 가 `live`. 하나라도 못 풀면 아무 줄도 돌려주지 않고 실패한다. 말 하나 때문에
+    /// 난 실패의 문구는 언제나 `targets[i]: `(i = 0 부터 센 그 말의 자리)로 시작한다 — INVALID_ARGUMENT = 빈 말(공백뿐) ·
+    /// NOT_FOUND = 그런 에이전트가 없다(문구 끝 `candidates` = 고를 만한 이름, 이름순 · 명부가 비었으면 `none`) ·
+    /// CONFLICT = 그 이름이 둘 이상이다(문구 끝 `candidates` = 그 id 들 — id 로 다시 부른다). 개수가 1~8 밖이면
+    /// 그 머리 없이 INVALID_ARGUMENT 다.
+    #[effect(Read)]
+    #[since(8)]
+    "agent.resolve" => args AgentResolveArgs {
+        targets: Vec<String>,
+    } -> ok AgentResolveOk {
+        agents: Vec<ResolvedAgentRow>,
+    } errors [NOT_FOUND, CONFLICT];
 
     /// 에이전트를 띄운다(잠든 것 깨우기 포함).
     #[effect(Write)]
@@ -385,6 +457,14 @@ pub struct AgentRosterRow {
     pub live: Option<AgentStatus>,
 }
 
+/// 명부 저장소 둘의 지금 상태 — `agent.list` 가 [`RosterStoreRow`] 로 편다.
+// ADR-0291 R17 (D6)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RosterStoreStatus {
+    pub agents: StoreStatus,
+    pub presets: StoreStatus,
+}
+
 /// 띄우기 결과 — 이 표가 보는 세 칸.
 pub struct StartedAgent {
     pub id: AgentId,
@@ -403,17 +483,26 @@ pub struct StartedAgent {
 // ADR-0012
 pub trait AgentCommandHost: Send + Sync {
     fn roster(&self) -> Vec<AgentRosterRow>;
+    /// 명부 저장소 둘(agents · presets)의 지금 상태.
+    // ADR-0291 R17 (D6)
+    fn store_status(&self) -> RosterStoreStatus;
     fn agent_snapshot(&self, id: AgentId) -> Option<AgentProfile>;
+    /// ★명부를 바꾸는 셋(`create_agent` · `rename_agent` · `reparent_agent`)은 부르는 쪽 있는 변경이다★ — 저장소가
+    ///   그 변경을 받지 않으면 명부를 그대로 두고 [`PtyError::Store`] 다(매니저의 `try_` 판 · ADR-0291 R17).
     fn create_agent(&self, profile: AgentProfile) -> Result<AgentProfile, PtyError>;
     fn activate_profile(
         &self,
         profile: &AgentProfile,
         mode: SpawnMode,
     ) -> Result<StartedAgent, PtyError>;
-    fn rename_agent(&self, id: AgentId, display_name: Option<String>) -> RenameOutcome;
-    /// ★`false` 는 사유를 말해 주지 않는다★ — 매니저가 bool 하나만 준다(`ProfileRegistry::reparent`).
+    fn rename_agent(
+        &self,
+        id: AgentId,
+        display_name: Option<String>,
+    ) -> Result<RenameOutcome, PtyError>;
+    /// ★`Ok(false)` 는 사유를 말해 주지 않는다★ — 매니저가 bool 하나만 준다(`ProfileRegistry::try_reparent`).
     /// 부재와 구조 충돌은 핸들러가 **명부 재조회로** 가른다(`verb_move`).
-    fn reparent_agent(&self, child: AgentId, parent: Option<AgentId>) -> bool;
+    fn reparent_agent(&self, child: AgentId, parent: Option<AgentId>) -> Result<bool, PtyError>;
     /// 등록된 경로 북마크(프리셋, ADR-0061) 하나의 작업 폴더.
     ///
     /// ★지목은 **id 정확 일치**뿐이다★ — 이름으로는 못 찾는다(프리셋 이름은 유일하지 않다). 없는 id 와
@@ -525,12 +614,20 @@ impl AgentCommandHost for AgentManager {
             .collect()
     }
 
+    fn store_status(&self) -> RosterStoreStatus {
+        RosterStoreStatus {
+            agents: self.agents_store_status(),
+            presets: self.presets().store_status(),
+        }
+    }
+
     fn agent_snapshot(&self, id: AgentId) -> Option<AgentProfile> {
         AgentManager::agent_snapshot(self, id)
     }
 
+    // ADR-0291 R17
     fn create_agent(&self, profile: AgentProfile) -> Result<AgentProfile, PtyError> {
-        AgentManager::create_agent(self, profile)
+        AgentManager::try_create_agent(self, profile)
     }
 
     fn activate_profile(
@@ -545,12 +642,16 @@ impl AgentCommandHost for AgentManager {
         })
     }
 
-    fn rename_agent(&self, id: AgentId, display_name: Option<String>) -> RenameOutcome {
-        AgentManager::rename_agent(self, id, display_name)
+    fn rename_agent(
+        &self,
+        id: AgentId,
+        display_name: Option<String>,
+    ) -> Result<RenameOutcome, PtyError> {
+        AgentManager::try_rename_agent(self, id, display_name)
     }
 
-    fn reparent_agent(&self, child: AgentId, parent: Option<AgentId>) -> bool {
-        AgentManager::reparent_agent(self, child, parent)
+    fn reparent_agent(&self, child: AgentId, parent: Option<AgentId>) -> Result<bool, PtyError> {
+        AgentManager::try_reparent_agent(self, child, parent)
     }
 
     fn preset_cwd(&self, id: &str) -> Option<String> {
@@ -764,6 +865,7 @@ pub fn make_table(
     let mut table = CommandTable::new(COMMAND_SPECS);
 
     let list = Arc::clone(&host);
+    let resolve = Arc::clone(&host);
     let spawn = (Arc::clone(&host), Arc::clone(&notify));
     let new = (Arc::clone(&host), Arc::clone(&notify));
     let rename = (Arc::clone(&host), Arc::clone(&notify));
@@ -783,6 +885,12 @@ pub fn make_table(
             blocking_handler(move |_: AgentListArgs| verb_list(list.as_ref())),
         )
         .expect("agent.list 를 표에 꽂지 못했다");
+    table
+        .insert(
+            "agent.resolve",
+            blocking_handler(move |args: AgentResolveArgs| verb_resolve(resolve.as_ref(), args)),
+        )
+        .expect("agent.resolve 를 표에 꽂지 못했다");
     table
         .insert(
             "agent.spawn",
@@ -901,7 +1009,100 @@ fn verb_list(host: &dyn AgentCommandHost) -> Result<AgentListOk, CommandError> {
             parent: row.parent.map(|p| p.to_string()),
         })
         .collect();
-    Ok(AgentListOk { agents })
+    // 명부 한 장과 같은 순간의 값은 아니다 — 저장소 상태는 마지막 저장 시도 기준이라 원래 그 정도로만 맞는다.
+    let store = host.store_status();
+    Ok(AgentListOk {
+        agents,
+        store: RosterStoreRow {
+            agents: store_status_row(store.agents),
+            presets: store_status_row(store.presets),
+        },
+    })
+}
+
+// TRD S28 §6 의 상한.
+const RESOLVE_TARGETS_MAX: usize = 8;
+
+// ADR-0307
+fn verb_resolve(
+    host: &dyn AgentCommandHost,
+    args: AgentResolveArgs,
+) -> Result<AgentResolveOk, CommandError> {
+    let count = args.targets.len();
+    if !(1..=RESOLVE_TARGETS_MAX).contains(&count) {
+        return Err(CommandError::invalid_argument(format!(
+            "targets takes 1 to {RESOLVE_TARGETS_MAX} agent names or ids, got {count}"
+        )));
+    }
+    // 빈 말은 전부 모아 한 번에 낸다 — 머리는 첫 자리 하나라 나머지는 문구 끝에 덧붙인다.
+    let blanks: Vec<usize> = args
+        .targets
+        .iter()
+        .enumerate()
+        .filter(|(_, target)| is_blank(Some(target)))
+        .map(|(index, _)| index)
+        .collect();
+    if let Some((&first, rest)) = blanks.split_first() {
+        let mut message = "blank value — an empty argument is usually an unset shell variable; every target needs an agent name or id".to_string();
+        if !rest.is_empty() {
+            let others: Vec<String> = rest
+                .iter()
+                .map(|index| format!("targets[{index}]"))
+                .collect();
+            message.push_str(&format!(" (also blank: {})", others.join(", ")));
+        }
+        return Err(target_failure(
+            first,
+            CommandError::invalid_argument(message),
+        ));
+    }
+    // ★명부 한 장으로 전부 푼다★ — 말마다 다시 읽으면 한 답 안의 줄끼리 다른 순간의 명부를 본다.
+    let roster = host.roster();
+    let mut agents = Vec::with_capacity(count);
+    for (index, target) in args.targets.into_iter().enumerate() {
+        let resolved =
+            resolve_in(&roster, &target).map_err(|error| target_failure(index, error))?;
+        let live = roster
+            .iter()
+            .find(|row| row.id == resolved.id)
+            .is_some_and(|row| state_of(row.live.as_ref()) == AGENT_STATE_LIVE);
+        agents.push(ResolvedAgentRow {
+            target,
+            id: resolved.id.to_string(),
+            name: resolved.name,
+            live,
+        });
+    }
+    Ok(AgentResolveOk { agents })
+}
+
+/// 말 하나 때문에 난 실패에 그 자리의 머리 `targets[i]: ` 를 붙인다 — 코드 · 재시도는 그대로 둔다.
+// ADR-0307
+fn target_failure(index: usize, mut error: CommandError) -> CommandError {
+    let message = format!("targets[{index}]: {}", error.message());
+    error.set_message(message);
+    error
+}
+
+/// 저장소 상태(까닭을 든 태그 enum)를 단어 + 선택 칸으로 편다.
+// ADR-0291 R17 (D6)
+fn store_status_row(status: StoreStatus) -> StoreStatusRow {
+    let (state, refusal) = match status {
+        StoreStatus::Writable => (StoreStateWord::Writable, None),
+        StoreStatus::ReadOnly(refusal) => (StoreStateWord::ReadOnly, Some(refusal)),
+        StoreStatus::Refusing(refusal) => (StoreStateWord::Refusing, Some(refusal)),
+    };
+    StoreStatusRow {
+        state,
+        reason: refusal.map(|refusal| match refusal {
+            Refusal::Newer { .. } => StoreRefusalWord::Newer,
+            Refusal::Unreadable => StoreRefusalWord::Unreadable,
+        }),
+        file_version: match refusal {
+            Some(Refusal::Newer { found }) => Some(found),
+            _ => None,
+        },
+    }
 }
 
 fn verb_spawn(
@@ -972,9 +1173,23 @@ fn wake_existing(
         SpawnMode::Fresh
     };
     let started = host.activate_profile(&profile, mode);
+    // ★실패 때도 알린다 — 저장 거절이어도★: 활성화 실패는 그 항목의 「마지막 실패」를 적는다(ADR-0172 ·
+    //   ADR-0291 E2 — 「변경 뒤 부수효과는 `Ok` 일 때만」에서 이 통지는 뺐다).
     notify.roster_changed();
-    let started = started
-        .map_err(|e| CommandError::internal(format!("could not start agent '{token}': {e}")))?;
+    let started = started.map_err(|e| match e {
+        PtyError::Store(error) => store_error(
+            "start",
+            &error,
+            store_command_error(
+                &error,
+                format!(
+                    "could not start agent '{token}': {}",
+                    store_error_reason(AGENTS_FILE, &error)
+                ),
+            ),
+        ),
+        other => CommandError::internal(format!("could not start agent '{token}': {other}")),
+    })?;
     Ok(started_payload(started, false))
 }
 
@@ -1012,11 +1227,29 @@ fn create_and_start(
             // ★회복 경로를 문구가 나른다★: 만들어진 에이전트는 명부에 남아 있으므로 호출자가 할 일은
             //   「다시 만들기」가 아니라 **그 이름으로 다시 띄우기**다. 안 적으면 같은 cwd 로 또 만들어
             //   이름이 하나씩 늘어난다.
-            CommandError::internal(format!(
-                "agent '{}' ({}) was created but did not start: {e} — it is registered and asleep, so start it again by that name instead of creating another",
-                stored.canonical_name_when_live(),
-                stored.id
-            ))
+            let created_but = |reason: String| {
+                format!(
+                    "agent '{}' ({}) was created but did not start: {reason} — it is registered and asleep, so start it again by that name (in a moment) instead of creating another",
+                    stored.canonical_name_when_live(),
+                    stored.id
+                )
+            };
+            match e {
+                // ★사유는 까닭만 싣는다([`store_error_cause`]) — 할 일 지시를 붙이지 않는다★: 여기서 「조금 뒤
+                //   다시」는 같은 `--cwd` 로 또 만들라는 말로 읽혀 중복을 낳고, 「다시 해도 소용없다」는 뒤의 「그
+                //   이름으로 다시 띄우라」와 어긋난다. 할 일은 뒤 꼬리 하나가 댄다.
+                // ★저장 거절이어도 `CONFLICT` 로 싣지 않는다 — 이 갈래는 이미 에이전트를 만들었다★: 데몬은
+                //   `CONFLICT` 를 「아무것도 적용 안 된 반려」로 읽어 그 요청 번호를 놓는다(daemon
+                //   `command_delivery::retains_the_id`). 놓으면 같은 번호의 재시도가 또 만들어 지울 수 없는
+                //   중복이 남는다(ADR-0122) — `INTERNAL` 이라야 번호를 붙든다.
+                // ADR-0291 R17
+                PtyError::Store(error) => store_error(
+                    "start",
+                    &error,
+                    CommandError::internal(created_but(store_error_cause(AGENTS_FILE, &error))),
+                ),
+                other => CommandError::internal(created_but(other.to_string())),
+            }
         })?;
     Ok(started_payload(started, true))
 }
@@ -1147,6 +1380,17 @@ fn register(
             ErrorCode::Conflict,
             format!("could not register a new agent: {reason}"),
         ),
+        PtyError::Store(error) => store_error(
+            "register",
+            &error,
+            store_command_error(
+                &error,
+                format!(
+                    "could not register a new agent: {} — nothing was registered",
+                    store_error_reason(AGENTS_FILE, &error)
+                ),
+            ),
+        ),
         other => CommandError::internal(format!("could not register a new agent: {other}")),
     })
 }
@@ -1162,9 +1406,26 @@ fn verb_rename(
         ("name", Some(name), Blank::NeedsValue),
     ])?;
     let id = resolve(host, token)?.id;
+    // ★저장소가 받지 않은 개명은 통지 없이 오류다★ — 이름은 그대로라 알릴 변화가 없다(ADR-0291 D3).
+    let outcome = host
+        .rename_agent(id, Some(name.to_string()))
+        .map_err(|e| match e {
+            PtyError::Store(error) => store_error(
+                "rename",
+                &error,
+                store_command_error(
+                    &error,
+                    format!(
+                        "could not rename '{token}': {} — the name was left as it is",
+                        store_error_reason(AGENTS_FILE, &error)
+                    ),
+                ),
+            ),
+            other => CommandError::internal(format!("could not rename '{token}': {other}")),
+        })?;
     // ★네 결말을 뭉개지 않는다★: 확정된 이름 · 이미 그 계열을 쥐어 무변경 · 부재 · 이름 공간 소진.
     //   앞 둘은 성공이지만 다른 사실이라 outcome 으로 갈라 싣는다.
-    match host.rename_agent(id, Some(name.to_string())) {
+    match outcome {
         RenameOutcome::Renamed(committed) => {
             notify.roster_changed();
             Ok(AgentRenameOk {
@@ -1222,10 +1483,25 @@ fn verb_move(
         None => None,
         Some(p) => Some(resolve(host, p)?.id),
     };
-    if !host.reparent_agent(child.id, parent) {
+    // ★저장소가 받지 않은 이동은 통지 없이 오류다★ — 계층은 그대로라 알릴 변화가 없다(ADR-0291 D3).
+    let moved = host.reparent_agent(child.id, parent).map_err(|e| match e {
+        PtyError::Store(error) => store_error(
+            "move",
+            &error,
+            store_command_error(
+                &error,
+                format!(
+                    "could not move '{token}': {} — it was left where it was",
+                    store_error_reason(AGENTS_FILE, &error)
+                ),
+            ),
+        ),
+        other => CommandError::internal(format!("could not move '{token}': {other}")),
+    })?;
+    if !moved {
         // ★`false` 하나로는 사유를 모른다★: 방금 해석한 대상이 그 사이 사라졌을 수도 있고(NOT_FOUND),
         //   트리 구조가 거부했을 수도 있다(CONFLICT). 둘은 호출자가 할 일이 다르므로 명부를 다시 보고
-        //   가른다 — 사유 목록은 `ProfileRegistry::reparent` 의 거부 조건과 한 줄씩 대응한다.
+        //   가른다 — 사유 목록은 `ProfileRegistry::try_reparent` 의 거부 조건과 한 줄씩 대응한다.
         // ★사라진 쪽의 이름을 댄다★: 둘 중 어느 쪽이 없어졌든 자식 이름을 대면, 부모만 사라진 경우에
         //   호출자는 **멀쩡히 있는** 에이전트를 없다고 듣고 엉뚱한 데를 뒤진다.
         let roster = host.roster();
@@ -1365,6 +1641,91 @@ fn verb_interrupt(
     }
 }
 
+/// 저장소(프로필 · 프리셋)가 받지 않은 부르는 쪽 변경 → 호출자 오류(코드 + 재시도 지시). 버스와 WS(daemon
+/// `connection_core`)가 이 하나를 쓰고, 셸 설정(`settings.set` · `settings.reset`)도 같은 나눔을 따른다(사용자 결정
+/// 2026-10-11):
+/// - 적재 때 거절된 저장소(이 실행 내내 읽기 전용 — 까닭 무관) = `CONFLICT` · `never` — 파일을 고치거나 바꾸고 데몬을
+///   다시 띄워야 풀린다.
+/// - 쓰기 직전 재판정의 거절 — 새 판이 쓴 파일 = `CONFLICT` · `never`(그 파일이 그대로면 다시 해도 같다) · 못 읽음 =
+///   `CONFLICT` · `after-condition`(대개 잠깐 쥔 잠김이라 조금 뒤 다시 하면 된다).
+/// - 쓰기 실패 = `INTERNAL`.
+///
+/// ★셋 다 명부는 그대로다★ — 부르는 쪽 있는 변경은 저장이 성공해야 커밋한다(레지스트리 · 매니저의 `try_` 판). 그래서
+///   `CONFLICT` 는 데몬이 「아무것도 적용 안 된 반려」로 읽는 그 뜻 그대로다(daemon
+///   `command_delivery::retains_the_id`).
+/// ★오늘 그 재시도 지시는 부르는 쪽에 닿지 않는다★ — 소켓 버스의 출구가 `never` 로 내리고(daemon
+///   `command_delivery::send_reply` · ADR-0159) 제어 라우트의 답은 그 칸을 싣지 않는다. 그래서 「조금 뒤 다시」는
+///   문구([`store_error_reason`])와 도움말이 함께 나른다.
+// ADR-0291 R17
+pub fn store_command_error(error: &StoreError, message: String) -> CommandError {
+    match error {
+        StoreError::Refused(Refusal::Unreadable) => {
+            CommandError::with_retry(ErrorCode::Conflict, message, RetryMode::AfterCondition)
+        }
+        StoreError::ReadOnly(_) | StoreError::Refused(Refusal::Newer { .. }) => {
+            CommandError::of(ErrorCode::Conflict, message)
+        }
+        StoreError::Io(_) => CommandError::internal(message),
+    }
+}
+
+/// 호출자 문구에 싣는 사유 — 어느 파일(`file`)이 왜 받지 않았나와 호출자가 할 일. ★LLM 이 읽는 표면이라 영어다★ —
+/// 저장소 오류의 한국어 `Display` 는 로그 몫이다.
+// ADR-0291 R17
+pub fn store_error_reason(file: &str, error: &StoreError) -> String {
+    let cause = store_error_cause(file, error);
+    match error {
+        StoreError::ReadOnly(Refusal::Newer { .. }) => format!(
+            "{cause}; retrying will not help (use the newer build or replace the file, then restart the daemon)"
+        ),
+        StoreError::ReadOnly(Refusal::Unreadable) => format!(
+            "{cause}; retrying will not help (fix or replace the file, then restart the daemon)"
+        ),
+        StoreError::Refused(Refusal::Newer { .. }) => {
+            format!("{cause}; retrying will not help while that file is there")
+        }
+        StoreError::Refused(Refusal::Unreadable) => {
+            format!("{cause}; this is usually a brief lock, so retry in a moment")
+        }
+        StoreError::Io(_) => cause,
+    }
+}
+
+/// 같은 사유에서 까닭만 — 어느 파일(`file`)이 왜 받지 않았나. 할 일 지시가 그 요청에 맞지 않는 자리(이미 만든 뒤의
+/// 띄우기 실패 — 할 일은 그 문구의 꼬리가 댄다)가 쓴다.
+// ADR-0291 R17
+fn store_error_cause(file: &str, error: &StoreError) -> String {
+    match error {
+        StoreError::ReadOnly(Refusal::Newer { found }) => format!(
+            "{file} was written by a newer build (version {found}) and is read-only for this daemon run"
+        ),
+        StoreError::ReadOnly(Refusal::Unreadable) => format!(
+            "{file} could not be read when the daemon started and is read-only for this run"
+        ),
+        StoreError::Refused(Refusal::Newer { found }) => format!(
+            "{file} was written by a newer build (version {found}) and was not overwritten"
+        ),
+        StoreError::Refused(Refusal::Unreadable) => {
+            format!("{file} could not be read just now and was not overwritten")
+        }
+        StoreError::Io(io) => format!("writing {file} failed: {io}"),
+    }
+}
+
+/// 저장소가 받지 않은 변경의 호출자 오류(`failure`)를 그대로 돌려주며 남긴다 — ★거절을 남기는 한 줄이 여기
+/// 하나다★(이 표면에서 그 요청이 오류가 되는 자리). 저장소의 로그는 파일 쪽 사실(무엇이 막았나)이고 이 줄은 요청 쪽
+/// 사실(어느 요청이 막혔나)이다. `action` = 무엇을 하려다 막혔나. 호출자가 친 값(이름 · 경로)은 로그에 싣지 않는다.
+// ADR-0291 R17
+fn store_error(action: &'static str, error: &StoreError, failure: CommandError) -> CommandError {
+    tracing::warn!(
+        action,
+        file = AGENTS_FILE,
+        %error,
+        "저장소가 받지 않아 이 요청을 오류로 돌려준다(명령 버스)"
+    );
+    failure
+}
+
 /// 명부에는 있는데 산 세션이 없다 — 대기 목록은 산 화신만 쥔다.
 fn not_running(token: &str) -> CommandError {
     CommandError::not_found(format!(
@@ -1402,9 +1763,9 @@ fn state_of(status: Option<&AgentStatus>) -> &'static str {
 
 /// 지목 토큰 → 에이전트 하나.
 ///
-/// ★규칙(우편 입구와 **같아야** 한다)★: ① agent id 문자열 정확 일치를 먼저 본다 — UUID 처럼 생긴
-/// *이름* 이 id 지목을 가로채지 못하게 ② 그다음 이름 **정확** 일치(대소문자 구분 · 접두 매칭 없음 ·
-/// 공백 보정 없음) ③ 같은 이름이 둘 이상이면 아무도 고르지 않고 거부한다.
+/// ★규칙(우편 입구와 **같아야** 한다)★: ① agent id 일치를 먼저 본다 — UUID 처럼 생긴 *이름* 이 id 지목을
+/// 가로채지 못하게 ② 그다음 이름 **정확** 일치(대소문자 구분 · 접두 매칭 없음 · 공백 보정 없음) ③ 같은 이름이
+/// 둘 이상이면 아무도 고르지 않고 거부한다.
 /// ★관대한 해석기를 들이지 말 것★: 사람과 LLM 은 우편의 수신자 토큰과 제어의 지목 토큰이 같은 X 를
 /// 가리킨다고 읽는다. 두 입구의 해석이 갈리면 편지를 받은 에이전트와 이름이 바뀐 에이전트가 달라진다 —
 /// 그 일치는 데몬 crate 의 교차 대조 테스트가 [`resolve_in`] 을 태워 지킨다.
@@ -1420,29 +1781,91 @@ fn resolve(host: &dyn AgentCommandHost, token: &str) -> Result<ResolvedAgent, Co
 /// 않아도 되고, 사본을 따로 두지 않으므로 재는 것과 도는 것이 갈릴 수 없다. ② 데몬의 입력 임대 검문
 /// (`control::commands::admit_input` — 운영 경로)이 [`INPUT_AFFECTING`] 명령의 `target` 을 동사 본문과 **같은
 /// 규칙으로** 한 번 풀어 그 id 로 임대를 본다. 해석기가 둘이면 검사한 에이전트와 실행하는 에이전트가 갈린다.
-/// ★결말은 코드로 읽는다★: 부재 = `NOT_FOUND` · 동명 둘 이상 = `CONFLICT`(이 함수가 내는 두 코드다).
+/// ★결말은 코드로 읽는다★: 부재 = `NOT_FOUND` · 동명 둘 이상 = `CONFLICT`(이 함수가 내는 두 코드다). 두 문구 끝에
+/// ` — candidates: a, b` 가 붙는다(최대 5 · 정렬) — 부재 = 고를 만한 이름(명부가 비었으면 `none`) · 동명 = 그 id
+/// 들. 문구는 읽는 글이지 계약이 아니다(CLI · 교차 대조는 코드만 본다).
 // ADR-0132
 // ADR-0155
 // ADR-0231
+// ADR-0307
 pub fn resolve_in(roster: &[AgentRosterRow], token: &str) -> Result<ResolvedAgent, CommandError> {
     let found = |row: &AgentRosterRow| ResolvedAgent {
         id: row.id,
         name: row.canonical_name.clone(),
     };
-    if let Some(row) = roster.iter().find(|r| r.id.to_string() == token) {
-        return Ok(found(row));
+    // ★정규 철자로 견주지 않는다★: 데몬이 셸 명령의 에이전트 칸(옛 `agent_id` 포함)을 이 함수로 바꾸므로(ADR-0308)
+    //   정규 철자만 맞추면 대문자 등 다른 철자의 id 를 보내던 옛 호출자가 `NOT_FOUND` 를 받는다. 명부에 없는 id 꼴은
+    //   이름으로 넘어간다.
+    if let Ok(id) = AgentId::parse_str(token) {
+        if let Some(row) = roster.iter().find(|r| r.id == id) {
+            return Ok(found(row));
+        }
     }
-    let mut by_name = roster.iter().filter(|r| r.canonical_name == token);
-    match (by_name.next(), by_name.next()) {
-        (Some(row), None) => Ok(found(row)),
-        (Some(_), Some(_)) => Err(CommandError::of(
-            ErrorCode::Conflict,
-            format!(
-                "more than one agent is called '{token}', so this command would have to guess — use the agent id instead; the roster listing shows both"
-            ),
-        )),
-        _ => Err(not_found(token)),
+    let same_name: Vec<&AgentRosterRow> = roster
+        .iter()
+        .filter(|r| r.canonical_name == token)
+        .collect();
+    match same_name.as_slice() {
+        [row] => Ok(found(row)),
+        [] => Err(CommandError::not_found(with_candidates(
+            not_found_message(token),
+            name_candidates(roster, token),
+        ))),
+        rows => {
+            let mut ids: Vec<String> = rows.iter().map(|row| row.id.to_string()).collect();
+            ids.sort_unstable();
+            ids.truncate(CANDIDATES_MAX);
+            Err(CommandError::of(
+                ErrorCode::Conflict,
+                with_candidates(
+                    format!(
+                        "more than one agent is called '{token}', so this command would have to guess — use the agent id instead; the roster listing shows both"
+                    ),
+                    ids,
+                ),
+            ))
+        }
     }
+}
+
+// TRD S28 §5-3 의 상한.
+const CANDIDATES_MAX: usize = 5;
+
+/// 없는 말에 낼 이름 후보 — 그 말을 (대소문자 무시) 품은 이름이 있으면 그것들, 없으면 전부에서 이름순으로 앞의 것.
+/// 같은 이름은 한 번만 싣는다.
+// ★정렬한다★: 명부의 행 차례는 정해져 있지 않다(잠든 행은 매번 새 HashMap 에서 나온다 — `AgentManager::roster`).
+//   차례대로 자르면 같은 요청이 부를 때마다 다른 후보를 받는다.
+fn name_candidates(roster: &[AgentRosterRow], token: &str) -> Vec<String> {
+    let mut names: Vec<&str> = roster
+        .iter()
+        .map(|row| row.canonical_name.as_str())
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    let folded = token.to_lowercase();
+    let containing: Vec<&str> = names
+        .iter()
+        .copied()
+        .filter(|name| name.to_lowercase().contains(&folded))
+        .collect();
+    let picked = if containing.is_empty() {
+        names
+    } else {
+        containing
+    };
+    picked
+        .into_iter()
+        .take(CANDIDATES_MAX)
+        .map(str::to_string)
+        .collect()
+}
+
+/// 후보가 없으면(빈 명부) `none` — 꼬리를 빼면 「후보가 없다」와 「후보를 싣지 않는 문구」가 구별되지 않는다.
+fn with_candidates(message: String, candidates: Vec<String>) -> String {
+    if candidates.is_empty() {
+        return format!("{message} — candidates: none");
+    }
+    format!("{message} — candidates: {}", candidates.join(", "))
 }
 
 /// 지목이 가리킨 에이전트 — id 와 **그때 명부가 말한 이름**.
@@ -1453,9 +1876,13 @@ pub struct ResolvedAgent {
 }
 
 fn not_found(token: &str) -> CommandError {
-    CommandError::not_found(format!(
+    CommandError::not_found(not_found_message(token))
+}
+
+fn not_found_message(token: &str) -> String {
+    format!(
         "no agent called '{token}' — names are matched exactly, with no case-folding, prefixes or trimming; the roster listing shows the names in use"
-    ))
+    )
 }
 
 /// 공백만 있는 값은 **부재로 접지 않고** 반려한다.
@@ -1530,6 +1957,12 @@ mod tests {
         reparent_ok: Mutex<bool>,
         start_fails: Mutex<bool>,
         create_fails: Mutex<Option<PtyError>>,
+        /// 켜져 있으면 명부를 바꾸는 셋과 활성화가 저장 거절(새 판이 쓴 파일)로 돌아온다 — 명부는 그대로다.
+        // ADR-0291 R17
+        store_refuses: Mutex<bool>,
+        /// `agent.list` 가 싣는 저장소 상태 — 기본은 둘 다 쓸 수 있음.
+        // ADR-0291 R17 (D6)
+        store_status: Mutex<RosterStoreStatus>,
         /// reparent 호출 **안에서** 명부에서 지울 대상 — 「그 사이 사라졌다」를 재현한다(자식이든 부모든).
         /// ★적용 성패와 무관하게 지운다★: 실패 뒤 사라짐은 사유 분기를, 성공 뒤 사라짐은 응답 이름의
         /// fallback 을 태운다 — 한쪽에만 걸면 다른 쪽 코드에 어떤 테스트도 못 닿는다.
@@ -1604,6 +2037,16 @@ mod tests {
                 reparent_ok: Mutex::new(true),
                 ..Self::default()
             })
+        }
+
+        /// 저장 거절이 켜져 있으면 매니저의 `try_` 판처럼 명부를 건드리기 전에 돌아온다.
+        fn refuse_if_set(&self) -> Result<(), PtyError> {
+            if *self.store_refuses.lock().unwrap() {
+                return Err(PtyError::Store(StoreError::ReadOnly(
+                    crate::profile::Refusal::Newer { found: 2 },
+                )));
+            }
+            Ok(())
         }
 
         fn with_agent(self: &Arc<Self>, name: &str, live: bool, resumable: bool) -> AgentId {
@@ -1686,6 +2129,10 @@ mod tests {
                 .collect()
         }
 
+        fn store_status(&self) -> RosterStoreStatus {
+            *self.store_status.lock().unwrap()
+        }
+
         fn agent_snapshot(&self, id: AgentId) -> Option<AgentProfile> {
             self.profiles.lock().unwrap().get(&id).cloned()
         }
@@ -1694,6 +2141,7 @@ mod tests {
             if let Some(failure) = self.create_fails.lock().unwrap().take() {
                 return Err(failure);
             }
+            self.refuse_if_set()?;
             let id = profile.id;
             let name = profile.canonical_name_when_live();
             self.profiles.lock().unwrap().insert(id, profile.clone());
@@ -1715,6 +2163,7 @@ mod tests {
             if *self.start_fails.lock().unwrap() {
                 return Err(PtyError::SpawnFailed("fake".to_string()));
             }
+            self.refuse_if_set()?;
             let resumed = matches!(mode, SpawnMode::Resume);
             self.started.lock().unwrap().push((profile.id, resumed));
             let status = self
@@ -1730,15 +2179,26 @@ mod tests {
             })
         }
 
-        fn rename_agent(&self, _id: AgentId, display_name: Option<String>) -> RenameOutcome {
-            self.rename_result
+        fn rename_agent(
+            &self,
+            _id: AgentId,
+            display_name: Option<String>,
+        ) -> Result<RenameOutcome, PtyError> {
+            self.refuse_if_set()?;
+            Ok(self
+                .rename_result
                 .lock()
                 .unwrap()
                 .take()
-                .unwrap_or_else(|| RenameOutcome::Renamed(display_name.unwrap_or_default()))
+                .unwrap_or_else(|| RenameOutcome::Renamed(display_name.unwrap_or_default())))
         }
 
-        fn reparent_agent(&self, child: AgentId, _parent: Option<AgentId>) -> bool {
+        fn reparent_agent(
+            &self,
+            child: AgentId,
+            _parent: Option<AgentId>,
+        ) -> Result<bool, PtyError> {
+            self.refuse_if_set()?;
             let ok = *self.reparent_ok.lock().unwrap();
             // ★적용 성패와 무관하게 사라진다★: 성공 **뒤** 사라지는 창이 응답 이름의 fallback 을 태우는
             //   유일한 경로다. 실패 쪽에만 걸면 그 fallback 은 어떤 테스트로도 못 닿는다.
@@ -1753,7 +2213,7 @@ mod tests {
                     }
                 }
             }
-            ok
+            Ok(ok)
         }
 
         fn preset_cwd(&self, id: &str) -> Option<String> {
@@ -1815,6 +2275,7 @@ mod tests {
                 "agent.move",
                 "agent.new",
                 "agent.rename",
+                "agent.resolve",
                 "agent.spawn",
                 "usage.get",
                 "usage.refresh"
@@ -1850,6 +2311,114 @@ mod tests {
         assert_eq!(agents[0]["state"], "live");
         assert_eq!(agents[1]["state"], "sleeping");
         assert_eq!(agents[0]["parent"], serde_json::Value::Null);
+    }
+
+    /// ★저장소 상태 셋이 까닭과 함께 `agent.list` 에 실린다(D6)★ — `Refusing` 이 없으면 실행 중 거절은 `Writable` 로
+    ///   보이는데 바꾸는 요청은 `CONFLICT` 로 돌아와, 호출자가 그 오류를 설명할 상태를 못 본다.
+    // ADR-0291 R17 (D6)
+    #[test]
+    fn list_reports_each_store_status_with_its_reason() {
+        let host = FakeHost::new();
+        let (table, _notify) = wiring(&host);
+        let writable = json!({ "state": "Writable", "reason": null, "file_version": null });
+
+        let out = call(&table, "agent.list", json!({})).expect("조회 성공");
+        assert_eq!(
+            out["store"],
+            json!({ "agents": writable, "presets": writable })
+        );
+
+        for (status, expected_agents, expected_presets) in [
+            (
+                RosterStoreStatus {
+                    agents: StoreStatus::ReadOnly(Refusal::Newer { found: 3 }),
+                    presets: StoreStatus::Refusing(Refusal::Unreadable),
+                },
+                json!({ "state": "ReadOnly", "reason": "Newer", "file_version": 3 }),
+                json!({ "state": "Refusing", "reason": "Unreadable", "file_version": null }),
+            ),
+            (
+                RosterStoreStatus {
+                    agents: StoreStatus::Refusing(Refusal::Newer { found: 4 }),
+                    presets: StoreStatus::ReadOnly(Refusal::Unreadable),
+                },
+                json!({ "state": "Refusing", "reason": "Newer", "file_version": 4 }),
+                json!({ "state": "ReadOnly", "reason": "Unreadable", "file_version": null }),
+            ),
+        ] {
+            *host.store_status.lock().unwrap() = status;
+            let out = call(&table, "agent.list", json!({})).expect("조회 성공");
+            assert_eq!(out["store"]["agents"], expected_agents, "{status:?}");
+            assert_eq!(out["store"]["presets"], expected_presets, "{status:?}");
+        }
+    }
+
+    /// ★실 매니저가 두 저장소의 상태를 각자 자리에 싣는다(D6)★ — 가짜 매니저는 심은 칸을 돌려줄 뿐이라, 매니저 쪽
+    ///   구현이 둘을 뒤바꾸거나 한쪽을 늘 `Writable` 로 두는 것은 실물로만 잡힌다.
+    // ADR-0291 R17 (D6)
+    #[test]
+    fn a_real_manager_reports_each_store_in_its_own_slot() {
+        use crate::preset::{Preset, PresetRegistry, PresetStore};
+        use crate::profile::{ProfileRegistry, ProfileStore};
+        use crate::session_tracker::{SessionTracker, TrackerConfig};
+        use crate::types::{AgentInfo, StatusSink};
+
+        struct NoStatus;
+        impl StatusSink for NoStatus {
+            fn status_changed(&self, _id: AgentId, _s: AgentStatus, _e: u32) {}
+            fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
+        }
+        struct NewerAgents;
+        impl ProfileStore for NewerAgents {
+            fn save(&self, _profiles: &[AgentProfile]) -> Result<(), StoreError> {
+                Err(StoreError::ReadOnly(Refusal::Newer { found: 9 }))
+            }
+            fn load(&self) -> Vec<AgentProfile> {
+                vec![]
+            }
+            fn status(&self) -> StoreStatus {
+                StoreStatus::ReadOnly(Refusal::Newer { found: 9 })
+            }
+        }
+        struct RefusingPresets;
+        impl PresetStore for RefusingPresets {
+            fn save(&self, _presets: &[Preset]) -> Result<(), StoreError> {
+                Err(StoreError::Refused(Refusal::Unreadable))
+            }
+            fn load(&self) -> Vec<Preset> {
+                vec![]
+            }
+            fn status(&self) -> StoreStatus {
+                StoreStatus::Refusing(Refusal::Unreadable)
+            }
+        }
+
+        let manager = Arc::new(AgentManager::new(
+            Arc::new(NoStatus),
+            Arc::new(ProfileRegistry::new(Arc::new(NewerAgents))),
+            Arc::new(PresetRegistry::new(Arc::new(RefusingPresets))),
+            Arc::new(SessionTracker::new(
+                TrackerConfig {
+                    enabled: false,
+                    poll_interval: std::time::Duration::from_secs(1),
+                },
+                Arc::new(|_, _| {}),
+            )),
+        ));
+        let table = make_table(
+            manager as Arc<dyn AgentCommandHost>,
+            Arc::new(FakeNotify::default()) as Arc<dyn RosterChanged>,
+            Arc::new(FakeUsage::default()) as Arc<dyn UsageCommandHost>,
+        );
+
+        let out = call(&table, "agent.list", json!({})).expect("조회 성공");
+        assert_eq!(
+            out["store"],
+            json!({
+                "agents": { "state": "ReadOnly", "reason": "Newer", "file_version": 9 },
+                "presets": { "state": "Refusing", "reason": "Unreadable", "file_version": null },
+            })
+        );
     }
 
     #[test]
@@ -2106,9 +2675,10 @@ mod tests {
         }
     }
 
-    /// 등록 실패는 사유마다 다른 코드로 나간다 — 호출자가 할 일이 갈리기 때문이다.
+    /// 등록 실패는 사유마다 다른 코드 · 재시도 지시로 나간다 — 호출자가 할 일이 갈리기 때문이다.
     #[test]
     fn registration_failures_map_to_distinct_codes() {
+        use crate::profile::Refusal;
         let cases = [
             (
                 PtyError::RosterFull {
@@ -2116,15 +2686,51 @@ mod tests {
                     limit: 40,
                 },
                 ErrorCode::Conflict,
+                RetryMode::Never,
             ),
-            (PtyError::CwdDenied, ErrorCode::InvalidArgument),
+            (
+                PtyError::CwdDenied,
+                ErrorCode::InvalidArgument,
+                RetryMode::Never,
+            ),
             (
                 PtyError::SpawnFailed("disk on fire".to_string()),
                 ErrorCode::Internal,
+                RetryMode::Never,
+            ),
+            // ADR-0291 R17 — 거절은 `CONFLICT` 이고 재시도 지시는 어디서 났나 · 까닭이 가른다(사용자 결정
+            //   2026-10-11): 적재 거절 = `never`(데몬을 다시 띄워야 풀린다) · 재판정의 새 판 = `never` · 재판정의 못 읽음
+            //   = `after-condition`(대개 잠깐 쥔 잠김). 쓰기 실패는 `INTERNAL`.
+            (
+                PtyError::Store(StoreError::ReadOnly(Refusal::Newer { found: 2 })),
+                ErrorCode::Conflict,
+                RetryMode::Never,
+            ),
+            (
+                PtyError::Store(StoreError::ReadOnly(Refusal::Unreadable)),
+                ErrorCode::Conflict,
+                RetryMode::Never,
+            ),
+            (
+                PtyError::Store(StoreError::Refused(Refusal::Newer { found: 2 })),
+                ErrorCode::Conflict,
+                RetryMode::Never,
+            ),
+            (
+                PtyError::Store(StoreError::Refused(Refusal::Unreadable)),
+                ErrorCode::Conflict,
+                RetryMode::AfterCondition,
+            ),
+            (
+                PtyError::Store(StoreError::Io(std::io::Error::other("disk full"))),
+                ErrorCode::Internal,
+                RetryMode::Never,
             ),
         ];
 
-        for (failure, expected) in cases {
+        for (failure, expected, retry) in cases {
+            let label = format!("{failure:?}");
+            let from_store = matches!(failure, PtyError::Store(_));
             let host = FakeHost::new();
             *host.create_fails.lock().unwrap() = Some(failure);
             let (table, notify) = wiring(&host);
@@ -2135,13 +2741,56 @@ mod tests {
                 json!({ "cwd": "C:/work/delta", "backend": "Claude" }),
             )
             .expect_err("등록 실패");
-            assert_eq!(err.code(), expected);
+            assert_eq!(err.code(), expected, "{label}");
+            assert_eq!(err.retry(), retry, "{label}");
             assert_eq!(
                 *notify.calls.lock().unwrap(),
                 0,
                 "실패했으면 명부는 안 바뀌었다"
             );
+            if from_store {
+                // 어느 파일이 왜 받지 않았나를 문구가 댄다 — 호출자가 고칠 자리를 찾게.
+                assert!(
+                    err.message().contains("agents.json")
+                        && err.message().contains("nothing was registered"),
+                    "{}",
+                    err.message()
+                );
+            }
         }
+    }
+
+    /// ★저장소 거절의 사유는 영어로, 할 일까지 댄다★ — LLM 이 읽는 표면이다. 적재 거절은 다시 띄우기를, 재판정의 못
+    ///   읽음은 조금 뒤 다시를 말한다(재시도 지시는 데몬 출구에서 내려가므로 문구가 그 몫을 진다).
+    // ADR-0291 R17
+    #[test]
+    fn store_refusal_reasons_are_english_and_name_the_way_out() {
+        use crate::profile::Refusal;
+        let at_load = store_error_reason("agents.json", &StoreError::ReadOnly(Refusal::Unreadable));
+        assert!(
+            at_load.starts_with("agents.json could not be read")
+                && at_load.contains("restart the daemon"),
+            "{at_load}"
+        );
+        let newer = store_error_reason(
+            "presets.json",
+            &StoreError::Refused(Refusal::Newer { found: 3 }),
+        );
+        assert!(
+            newer.starts_with("presets.json was written by a newer build (version 3)")
+                && newer.contains("retrying will not help"),
+            "{newer}"
+        );
+        let transient =
+            store_error_reason("agents.json", &StoreError::Refused(Refusal::Unreadable));
+        assert!(transient.contains("retry in a moment"), "{transient}");
+        assert_eq!(
+            store_error_reason(
+                "agents.json",
+                &StoreError::Io(std::io::Error::other("disk full"))
+            ),
+            "writing agents.json failed: disk full"
+        );
     }
 
     /// ★대화상자 없이 등록되는 길★ — 프리셋 id 하나로 작업 폴더가 정해진다(ADR-0061 의 경로 북마크).
@@ -2353,7 +3002,366 @@ mod tests {
             );
             assert_eq!(snapshot(), before, "{name}: 반려가 명부를 바꿨다 — {args}");
         }
+        // ★저장소가 받지 않은 변경도 같다★ — 매니저의 `try_` 판은 저장이 성공해야 커밋하므로 `CONFLICT` 가 「손대기
+        //   전」이라는 데몬의 전제가 그대로 선다.
+        // ADR-0291 R17
+        *host.store_refuses.lock().unwrap() = true;
+        for (name, args) in [
+            (
+                "agent.new",
+                json!({ "cwd": "C:/work/delta", "backend": "Claude" }),
+            ),
+            ("agent.rename", json!({ "target": "alpha", "name": "beta" })),
+            ("agent.move", json!({ "target": "alpha", "parent": "lead" })),
+        ] {
+            let err = call(&table, name, args.clone()).expect_err("저장 거절이어야: {name} {args}");
+            assert_eq!(err.code(), ErrorCode::Conflict, "{name}: {args}");
+            assert_eq!(
+                snapshot(),
+                before,
+                "{name}: 저장 거절이 명부를 바꿨다 — {args}"
+            );
+        }
         assert_eq!(*notify.calls.lock().unwrap(), 0, "반려는 통지하지 않는다");
+    }
+
+    /// ★저장소가 받지 않은 개명 · 이동은 `CONFLICT` 이고 통지가 없다★ — 이름 · 계층이 그대로라 알릴 변화가 없다.
+    ///   개명이 `Renamed` 로 답하면 호출자는 바뀐 이름으로 다음 명령을 친다.
+    // ADR-0291 R17 (D3)
+    #[test]
+    fn a_rename_or_move_the_store_refuses_is_a_conflict_that_announces_nothing() {
+        let host = FakeHost::new();
+        host.with_agent("alpha", false, false);
+        host.with_agent("lead", false, false);
+        *host.store_refuses.lock().unwrap() = true;
+        let (table, notify) = wiring(&host);
+
+        let err = call(
+            &table,
+            "agent.rename",
+            json!({ "target": "alpha", "name": "beta" }),
+        )
+        .expect_err("개명은 저장 거절로 돌아온다 — Renamed 가 아니다");
+        assert_eq!(err.code(), ErrorCode::Conflict);
+        assert!(
+            err.message().contains("agents.json")
+                && err.message().contains("the name was left as it is"),
+            "{}",
+            err.message()
+        );
+
+        let err = call(
+            &table,
+            "agent.move",
+            json!({ "target": "alpha", "parent": "lead" }),
+        )
+        .expect_err("이동은 저장 거절로 돌아온다");
+        assert_eq!(err.code(), ErrorCode::Conflict);
+        assert!(err.message().contains("agents.json"), "{}", err.message());
+
+        assert_eq!(*notify.calls.lock().unwrap(), 0, "바뀐 것이 없다");
+    }
+
+    /// ★깨우기는 저장 거절이어도 명부를 알린다(E2)★ — 활성화 실패가 그 항목의 「마지막 실패」를 적고, 그 축은
+    ///   명부 통지로만 화면에 닿는다(ADR-0172). 코드는 `CONFLICT` 다.
+    // ADR-0291 R17 (E2)
+    #[test]
+    fn a_wake_the_store_refuses_is_a_conflict_that_still_announces_the_roster() {
+        let host = FakeHost::new();
+        host.with_agent("alpha", false, false);
+        *host.store_refuses.lock().unwrap() = true;
+        let (table, notify) = wiring(&host);
+
+        let err = call(&table, "agent.spawn", json!({ "target": "alpha" }))
+            .expect_err("깨우기는 저장 거절로 돌아온다");
+
+        assert_eq!(err.code(), ErrorCode::Conflict);
+        assert!(
+            err.message().contains("could not start agent 'alpha'")
+                && err.message().contains("agents.json"),
+            "{}",
+            err.message()
+        );
+        assert!(host.started.lock().unwrap().is_empty(), "뜬 것이 없다");
+        assert_eq!(*notify.calls.lock().unwrap(), 1);
+    }
+
+    /// ★만들고 띄우기의 만들기가 거절되면 띄우기에 닿지 않는다(§3-9 ⓐ)★ — 명부 그대로 · 띄우기 시도 0 · 통지 0.
+    ///   다시 해도 중복이 생기지 않는다(만들기도 거절된다).
+    // ADR-0291 R17
+    #[test]
+    fn a_create_and_start_whose_create_the_store_refuses_starts_nothing_and_announces_nothing() {
+        let host = FakeHost::new();
+        *host.store_refuses.lock().unwrap() = true;
+        let (table, notify) = wiring(&host);
+
+        let err = call(
+            &table,
+            "agent.spawn",
+            json!({ "cwd": "C:/work/gamma", "name": "gamma" }),
+        )
+        .expect_err("만들기가 저장 거절로 돌아온다");
+
+        assert_eq!(err.code(), ErrorCode::Conflict);
+        assert!(
+            err.message().contains("nothing was registered"),
+            "{}",
+            err.message()
+        );
+        assert!(host.rows.lock().unwrap().is_empty(), "명부 그대로");
+        assert!(host.started.lock().unwrap().is_empty(), "띄우기 시도 0");
+        assert_eq!(*notify.calls.lock().unwrap(), 0);
+    }
+
+    /// ★만든 뒤 띄우기를 저장소가 거절해도 `INTERNAL` 이다(§3-9 ⓑ)★ — 이미 만든 에이전트가 남으므로 데몬이
+    ///   「손대기 전 반려」(`CONFLICT`)로 읽어 요청 번호를 놓으면 같은 번호의 재시도가 또 만든다. 문구는 회복 길
+    ///   (그 이름으로 다시 띄우기)을 그대로 나르고 저장소의 사유는 까닭만 싣는다 — 「조금 뒤 다시」·「다시 해도
+    ///   소용없다」 같은 할 일 지시가 섞이면 같은 `--cwd` 로 또 만들거나 꼬리와 어긋난다. 거절의 까닭마다 잰다.
+    // ADR-0291 R17
+    #[test]
+    fn a_created_agent_whose_start_the_store_refuses_stays_internal_with_the_recovery_hint() {
+        // 만들기는 저장되고 띄우기의 등록에서 거절된다 — 그 사이에 파일이 바뀐 모양. 둘째 칸이 거절의 까닭을 만든다.
+        struct RefuseOnStart(Arc<FakeHost>, fn() -> StoreError);
+        impl AgentCommandHost for RefuseOnStart {
+            fn roster(&self) -> Vec<AgentRosterRow> {
+                self.0.roster()
+            }
+            fn store_status(&self) -> RosterStoreStatus {
+                self.0.store_status()
+            }
+            fn agent_snapshot(&self, id: AgentId) -> Option<AgentProfile> {
+                self.0.agent_snapshot(id)
+            }
+            fn create_agent(&self, profile: AgentProfile) -> Result<AgentProfile, PtyError> {
+                let stored = self.0.create_agent(profile)?;
+                *self.0.store_refuses.lock().unwrap() = true;
+                Ok(stored)
+            }
+            fn activate_profile(
+                &self,
+                profile: &AgentProfile,
+                mode: SpawnMode,
+            ) -> Result<StartedAgent, PtyError> {
+                if *self.0.store_refuses.lock().unwrap() {
+                    return Err(PtyError::Store((self.1)()));
+                }
+                self.0.activate_profile(profile, mode)
+            }
+            fn rename_agent(
+                &self,
+                id: AgentId,
+                display_name: Option<String>,
+            ) -> Result<RenameOutcome, PtyError> {
+                self.0.rename_agent(id, display_name)
+            }
+            fn reparent_agent(
+                &self,
+                child: AgentId,
+                parent: Option<AgentId>,
+            ) -> Result<bool, PtyError> {
+                self.0.reparent_agent(child, parent)
+            }
+            fn preset_cwd(&self, id: &str) -> Option<String> {
+                self.0.preset_cwd(id)
+            }
+            fn list_queued_inputs(&self, id: AgentId) -> Option<QueuedListing> {
+                self.0.list_queued_inputs(id)
+            }
+            fn cancel_queued_input(
+                &self,
+                id: AgentId,
+                input_id: &str,
+            ) -> Result<CancelOutcome, CancelError> {
+                self.0.cancel_queued_input(id, input_id)
+            }
+            fn interrupt_agent(&self, id: AgentId) -> Result<(), PtyError> {
+                self.0.interrupt_agent(id)
+            }
+        }
+        use crate::profile::Refusal;
+        let causes: [(fn() -> StoreError, &str); 3] = [
+            (
+                || StoreError::Refused(Refusal::Unreadable),
+                "agents.json could not be read just now",
+            ),
+            (
+                || StoreError::Refused(Refusal::Newer { found: 2 }),
+                "agents.json was written by a newer build (version 2)",
+            ),
+            (
+                || StoreError::Io(std::io::Error::other("disk full")),
+                "writing agents.json failed: disk full",
+            ),
+        ];
+
+        for (refusal, cause) in causes {
+            let host = FakeHost::new();
+            let notify = Arc::new(FakeNotify::default());
+            let table = make_table(
+                Arc::new(RefuseOnStart(Arc::clone(&host), refusal)) as Arc<dyn AgentCommandHost>,
+                Arc::clone(&notify) as Arc<dyn RosterChanged>,
+                Arc::new(FakeUsage::default()) as Arc<dyn UsageCommandHost>,
+            );
+
+            let err = call(
+                &table,
+                "agent.spawn",
+                json!({ "cwd": "C:/work/gamma", "name": "gamma" }),
+            )
+            .expect_err("띄우기가 저장 거절로 돌아온다");
+
+            let message = err.message();
+            assert_eq!(err.code(), ErrorCode::Internal, "{message}");
+            assert!(
+                message.contains("was created but did not start")
+                    && message.contains(cause)
+                    && message.contains(
+                        "start it again by that name (in a moment) instead of creating another"
+                    ),
+                "{message}"
+            );
+            // 까닭만 — 할 일 지시는 꼬리 하나다.
+            assert!(
+                !message.contains("retry in a moment")
+                    && !message.contains("retrying will not help")
+                    && !message.contains("restart the daemon"),
+                "{message}"
+            );
+            assert_eq!(host.rows.lock().unwrap().len(), 1, "만든 에이전트는 남는다");
+            assert!(host.started.lock().unwrap().is_empty());
+            assert_eq!(
+                *notify.calls.lock().unwrap(),
+                2,
+                "만든 뒤 · 활성화 뒤(E2) — 지금 계약 그대로"
+            );
+        }
+    }
+
+    /// ★실 매니저 · 받지 않는 저장소로 버스를 지난다★ — 가짜 매니저는 `try_` 판을 흉내 낼 뿐이라, 표가 정말 매니저의
+    ///   부르는 쪽 입구를 부르는지(옛 판이면 메모리에 서고 `Ok` 다)는 실물로만 잰다. 판정 거절 = `CONFLICT` · 쓰기
+    ///   실패 = `INTERNAL` 이고, 어느 쪽이든 명부 그대로 · 뜬 것 없음 · 통지는 깨우기의 활성화 뒤 하나뿐이다(E2).
+    /// ★프로세스를 띄우지 않는다★ — 띄우기는 등록(①)에서 멈춘다. 회귀해 지나쳐도 없는 프로그램을 부르는 셸이라
+    ///   실패로 끝난다.
+    // ADR-0291 R17 (D3 · E2)
+    #[test]
+    fn a_real_manager_behind_the_bus_changes_nothing_while_its_store_does_not_save() {
+        use crate::preset::{Preset, PresetRegistry, PresetStore};
+        use crate::profile::scripted_store::{Outcome, ScriptedStore, FAILURES};
+        use crate::profile::ProfileRegistry;
+        use crate::session_tracker::{SessionTracker, TrackerConfig};
+        use crate::types::{AgentInfo, StatusSink};
+
+        struct NoStatus;
+        impl StatusSink for NoStatus {
+            fn status_changed(&self, _id: AgentId, _s: AgentStatus, _e: u32) {}
+            fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
+        }
+        struct NoPresets;
+        impl PresetStore for NoPresets {
+            fn save(&self, _presets: &[Preset]) -> Result<(), StoreError> {
+                Ok(())
+            }
+            fn load(&self) -> Vec<Preset> {
+                vec![]
+            }
+        }
+
+        for failure in FAILURES {
+            let expected = match failure {
+                Outcome::FailsIo => ErrorCode::Internal,
+                _ => ErrorCode::Conflict,
+            };
+            let store = ScriptedStore::new();
+            let manager = Arc::new(AgentManager::new(
+                Arc::new(NoStatus),
+                Arc::new(ProfileRegistry::new(store.clone())),
+                Arc::new(PresetRegistry::new(Arc::new(NoPresets))),
+                Arc::new(SessionTracker::new(
+                    TrackerConfig {
+                        enabled: false,
+                        poll_interval: std::time::Duration::from_secs(1),
+                    },
+                    Arc::new(|_, _| {}),
+                )),
+            ));
+            let program = format!("engram-not-a-real-program-{}.exe", uuid::Uuid::new_v4());
+            let shell = |name: &str| {
+                let cwd = format!("C:/bus-store/{name}");
+                let mut profile = AgentProfile::new(
+                    cwd.clone(),
+                    AgentCommand::Shell {
+                        program: program.clone(),
+                        args: vec![],
+                    },
+                    PathBuf::from(cwd),
+                    vec![],
+                    false,
+                );
+                profile.display_name = Some(name.to_string());
+                profile
+            };
+            let alpha = manager
+                .try_create_agent(shell("alpha"))
+                .expect("저장되면 등록");
+            manager
+                .try_create_agent(shell("lead"))
+                .expect("저장되면 등록");
+            let roster = |m: &AgentManager| -> Vec<(AgentId, Option<String>, Option<AgentId>)> {
+                let mut rows: Vec<_> = m
+                    .agent_snapshots()
+                    .into_iter()
+                    .map(|p| (p.id, p.display_name, p.parent_id))
+                    .collect();
+                rows.sort();
+                rows
+            };
+            let before = roster(&manager);
+            store.set(failure);
+            let notify = Arc::new(FakeNotify::default());
+            let table = make_table(
+                manager.clone() as Arc<dyn AgentCommandHost>,
+                Arc::clone(&notify) as Arc<dyn RosterChanged>,
+                Arc::new(FakeUsage::default()) as Arc<dyn UsageCommandHost>,
+            );
+
+            for (name, args) in [
+                (
+                    "agent.new",
+                    json!({ "cwd": "C:/bus-store/delta", "backend": "Claude" }),
+                ),
+                ("agent.rename", json!({ "target": "alpha", "name": "beta" })),
+                ("agent.move", json!({ "target": "alpha", "parent": "lead" })),
+                ("agent.spawn", json!({ "cwd": "C:/bus-store/gamma" })),
+                ("agent.spawn", json!({ "target": "alpha" })),
+            ] {
+                let err = call(&table, name, args.clone())
+                    .expect_err("저장소가 받지 않으면 오류다: {name} {args}");
+                assert_eq!(err.code(), expected, "{failure:?} · {name} {args}");
+                assert!(
+                    err.message().contains("agents.json"),
+                    "{failure:?} · {name}: {}",
+                    err.message()
+                );
+            }
+
+            assert_eq!(roster(&manager), before, "{failure:?}: 명부 그대로");
+            assert!(
+                manager.list_agents().is_empty(),
+                "{failure:?}: 뜬 것이 없다"
+            );
+            assert_eq!(
+                *notify.calls.lock().unwrap(),
+                1,
+                "{failure:?}: 깨우기의 활성화 뒤 통지(E2) 하나뿐"
+            );
+            assert_eq!(
+                manager
+                    .agent_snapshot(alpha.id)
+                    .and_then(|p| p.last_failure),
+                Some(crate::failure::AgentFailureKind::Other),
+                "{failure:?}: 띄우기 실패가 아니라 「그 밖」으로 적는다"
+            );
+        }
     }
 
     /// ★[`NEW_AGENT_OUTPUT_FORMAT`] 의 **값 자체**를 글자로 못 박는다★ — 이 상수를 읽는 자리는 전부
@@ -3275,6 +4283,403 @@ mod tests {
                 "{miss}"
             );
         }
+    }
+
+    /// ★id 는 `Uuid` 가 읽는 철자 전부로 받는다 — 이름보다 먼저★: 대문자 철자를 이름으로 단 다른 에이전트가 있어도 id 가
+    /// 이긴다. 명부에 없는 id 꼴은 이름으로 넘어가 없음이다.
+    #[test]
+    fn resolve_in_reads_every_uuid_spelling_as_the_id_before_names() {
+        let alpha = AgentId::new_v4();
+        let upper = alpha.to_string().to_uppercase();
+        let row = |id: AgentId, name: &str| AgentRosterRow {
+            id,
+            canonical_name: name.to_string(),
+            cwd: String::new(),
+            parent: None,
+            live: None,
+        };
+        let roster = vec![row(alpha, "alpha"), row(AgentId::new_v4(), &upper)];
+
+        for spelling in [
+            upper.clone(),
+            format!("{{{alpha}}}"),
+            format!("{{{upper}}}"),
+            alpha.simple().to_string(),
+            alpha.simple().to_string().to_uppercase(),
+            alpha.urn().to_string(),
+        ] {
+            assert_eq!(
+                resolve_in(&roster, &spelling).expect("id 철자").id,
+                alpha,
+                "{spelling}"
+            );
+        }
+        let ghost = AgentId::new_v4().to_string().to_uppercase();
+        assert_eq!(
+            resolve_in(&roster, &ghost)
+                .expect_err("명부에 없는 id")
+                .code(),
+            ErrorCode::NotFound
+        );
+        assert_eq!(
+            resolve_in(&roster, &format!(" {alpha}"))
+                .expect_err("공백 보정 없음")
+                .code(),
+            ErrorCode::NotFound
+        );
+    }
+
+    // ── 지목 실패의 후보(TRD S28 §6) ───────────────────────────────────────────────
+
+    /// 명부에 이름 줄을 그대로 심는다 — 후보는 명부 행만 보므로 프로필이 필요 없다.
+    fn roster_of(names: &[&str]) -> Vec<AgentRosterRow> {
+        names
+            .iter()
+            .map(|name| AgentRosterRow {
+                id: AgentId::new_v4(),
+                canonical_name: name.to_string(),
+                cwd: format!("C:/work/{name}"),
+                parent: None,
+                live: None,
+            })
+            .collect()
+    }
+
+    // ADR-0307
+    #[test]
+    fn a_missing_name_lists_the_names_that_contain_it_ignoring_case() {
+        let roster = roster_of(&["alpha-main", "beta", "ALPHA-two", "gamma"]);
+
+        let err = resolve_in(&roster, "alpha").expect_err("정확 일치가 없다");
+        assert_eq!(err.code(), ErrorCode::NotFound);
+        assert!(
+            err.message().starts_with(&not_found_message("alpha")),
+            "옛 문구가 앞에 그대로 남는다: {}",
+            err.message()
+        );
+        // 이름순(바이트 순 — 대문자가 앞).
+        assert!(
+            err.message()
+                .ends_with(" — candidates: ALPHA-two, alpha-main"),
+            "{}",
+            err.message()
+        );
+    }
+
+    /// 품은 이름이 없으면 전부에서 이름순으로 앞의 다섯 — 같은 이름은 한 번.
+    // ADR-0307
+    #[test]
+    fn with_no_containing_name_the_first_five_distinct_names_by_name_are_listed() {
+        let roster = roster_of(&["f", "b", "d", "b", "a", "e", "c"]);
+
+        let err = resolve_in(&roster, "zzz").expect_err("없다");
+        assert_eq!(err.code(), ErrorCode::NotFound);
+        assert!(
+            err.message().ends_with(" — candidates: a, b, c, d, e"),
+            "{}",
+            err.message()
+        );
+    }
+
+    /// ★명부 행의 차례가 후보를 바꾸지 않는다★ — 운영 명부의 잠든 행은 HashMap 차례로 온다.
+    // ADR-0307
+    #[test]
+    fn candidates_do_not_depend_on_roster_row_order() {
+        let forward = roster_of(&["g", "f", "e", "d", "c", "b", "a", "twin", "twin"]);
+        let mut backward: Vec<AgentRosterRow> = forward
+            .iter()
+            .map(|row| AgentRosterRow {
+                id: row.id,
+                canonical_name: row.canonical_name.clone(),
+                cwd: row.cwd.clone(),
+                parent: None,
+                live: None,
+            })
+            .collect();
+        backward.reverse();
+
+        for token in ["zzz", "twin"] {
+            assert_eq!(
+                resolve_in(&forward, token).expect_err("실패").message(),
+                resolve_in(&backward, token).expect_err("실패").message(),
+                "{token}"
+            );
+        }
+    }
+
+    /// 빈 명부는 `none` — 꼬리가 없으면 「후보 없음」과 「후보를 싣지 않는 문구」가 같아 보인다.
+    #[test]
+    fn an_empty_roster_says_there_are_no_candidates() {
+        let err = resolve_in(&[], "alpha").expect_err("없다");
+        assert_eq!(err.code(), ErrorCode::NotFound);
+        assert_eq!(
+            err.message(),
+            format!("{} — candidates: none", not_found_message("alpha"))
+        );
+    }
+
+    /// 동명의 후보는 이름이 아니라 id 다 — 이름을 다시 주면 또 같은 CONFLICT 다.
+    // ADR-0307
+    #[test]
+    fn a_duplicate_name_lists_the_clashing_ids_up_to_five() {
+        let roster = roster_of(&["other", "twin", "twin"]);
+        let err = resolve_in(&roster, "twin").expect_err("동명 둘");
+        assert_eq!(err.code(), ErrorCode::Conflict);
+        assert!(
+            err.message()
+                .starts_with("more than one agent is called 'twin'"),
+            "{}",
+            err.message()
+        );
+        let mut pair = [roster[1].id.to_string(), roster[2].id.to_string()];
+        pair.sort();
+        assert!(
+            err.message()
+                .ends_with(&format!(" — candidates: {}, {}", pair[0], pair[1])),
+            "{}",
+            err.message()
+        );
+
+        let crowd = roster_of(&["twin"; 7]);
+        let err = resolve_in(&crowd, "twin").expect_err("동명 일곱");
+        let mut ids: Vec<String> = crowd.iter().map(|row| row.id.to_string()).collect();
+        ids.sort();
+        ids.truncate(5);
+        assert!(
+            err.message()
+                .ends_with(&format!(" — candidates: {}", ids.join(", "))),
+            "{}",
+            err.message()
+        );
+    }
+
+    /// 후보는 해석기 하나에서 나오므로 `target` 을 받는 동사가 모두 함께 받는다.
+    #[test]
+    fn a_target_verb_carries_the_candidates_too() {
+        let host = FakeHost::new();
+        host.with_agent("alpha", false, false);
+        let (table, _notify) = wiring(&host);
+
+        let err = call(
+            &table,
+            "agent.rename",
+            json!({ "target": "alp", "name": "x" }),
+        )
+        .expect_err("없는 이름");
+        assert_eq!(err.code(), ErrorCode::NotFound);
+        assert!(
+            err.message().ends_with(" — candidates: alpha"),
+            "{}",
+            err.message()
+        );
+    }
+
+    // ── agent.resolve ────────────────────────────────────────────────────────────
+
+    // ADR-0307
+    #[test]
+    fn resolve_answers_every_target_in_order_with_name_id_and_liveness() {
+        let host = FakeHost::new();
+        let alpha = host.with_agent("alpha", true, false);
+        let beta = host.with_agent("beta", false, false);
+        let corpse = host.with_status("gamma", Some(AgentStatus::Killed), false);
+        let (table, notify) = wiring(&host);
+
+        let out = call(
+            &table,
+            "agent.resolve",
+            json!({ "targets": ["beta", alpha.to_string(), "gamma", "alpha"] }),
+        )
+        .expect("전부 풀린다");
+        assert_eq!(
+            out,
+            json!({ "agents": [
+                { "target": "beta", "id": beta.to_string(), "name": "beta", "live": false },
+                { "target": alpha.to_string(), "id": alpha.to_string(), "name": "alpha", "live": true },
+                { "target": "gamma", "id": corpse.to_string(), "name": "gamma", "live": false },
+                { "target": "alpha", "id": alpha.to_string(), "name": "alpha", "live": true },
+            ]})
+        );
+        assert_eq!(*notify.calls.lock().unwrap(), 0, "조회는 명부를 안 바꾼다");
+    }
+
+    /// ★`live` 는 `agent.list` 의 `state` 와 한 판정이다★ — 세션이 남아 있어도 끝난 화신(reaper 가 아직 안 거둠)은
+    /// 산 것이 아니다(ADR-0116).
+    #[test]
+    fn resolve_and_list_agree_on_liveness() {
+        let host = FakeHost::new();
+        host.with_status("exiting", Some(AgentStatus::Exiting), false);
+        host.with_status("exited", Some(AgentStatus::Exited { code: Some(0) }), false);
+        host.with_agent("asleep", false, false);
+        let (table, _notify) = wiring(&host);
+
+        let listed = call(&table, "agent.list", json!({})).expect("조회");
+        let resolved = call(
+            &table,
+            "agent.resolve",
+            json!({ "targets": ["exiting", "exited", "asleep"] }),
+        )
+        .expect("조회");
+        for (row, answer) in listed["agents"]
+            .as_array()
+            .expect("배열")
+            .iter()
+            .zip(resolved["agents"].as_array().expect("배열"))
+        {
+            assert_eq!(
+                answer["live"].as_bool(),
+                Some(row["state"] == AGENT_STATE_LIVE),
+                "{row} / {answer}"
+            );
+        }
+    }
+
+    /// 셸이 읽는 꼴 그대로 — `targets[` + 10진 자리 + `]: `. 꼴이 어긋나면 `None`.
+    fn failing_position(message: &str) -> Option<usize> {
+        let rest = message.strip_prefix("targets[")?;
+        let (digits, after) = rest.split_once(']')?;
+        after.strip_prefix(": ")?;
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        digits.parse().ok()
+    }
+
+    /// ★말 하나 때문에 난 실패는 그 코드 그대로이고 문구가 `targets[i]: ` 로 시작한다 — 셸이 이 머리를 읽는다★
+    /// (선언 머리 주석). 빈 말이 여럿이면 머리는 첫 자리다.
+    // ADR-0307
+    #[test]
+    fn the_resolve_failure_prefix_is_a_stable_contract() {
+        let host = FakeHost::new();
+        host.with_agent("alpha", true, false);
+        host.with_agent("twin", false, false);
+        host.with_agent("twin", false, false);
+        let (table, _notify) = wiring(&host);
+        let fail = |targets: serde_json::Value| {
+            call(&table, "agent.resolve", json!({ "targets": targets })).expect_err("실패")
+        };
+
+        let missing = fail(json!(["alpha", "ghost"]));
+        assert_eq!(missing.code(), ErrorCode::NotFound);
+        assert_eq!(
+            failing_position(missing.message()),
+            Some(1),
+            "{}",
+            missing.message()
+        );
+        assert!(
+            missing
+                .message()
+                .starts_with("targets[1]: no agent called 'ghost'"),
+            "{}",
+            missing.message()
+        );
+        assert!(
+            missing.message().ends_with(" — candidates: alpha, twin"),
+            "{}",
+            missing.message()
+        );
+
+        let ambiguous = fail(json!(["alpha", "alpha", "twin"]));
+        assert_eq!(ambiguous.code(), ErrorCode::Conflict);
+        assert_eq!(
+            failing_position(ambiguous.message()),
+            Some(2),
+            "{}",
+            ambiguous.message()
+        );
+        assert!(
+            ambiguous
+                .message()
+                .starts_with("targets[2]: more than one agent is called 'twin'"),
+            "{}",
+            ambiguous.message()
+        );
+
+        // 빈 말은 해석기에 닿기 전에 본다 — 앞 자리(0)의 없는 이름보다 뒤의 빈 말이 먼저 반려된다.
+        let blank = fail(json!(["ghost", "alpha", "  ", ""]));
+        assert_eq!(blank.code(), ErrorCode::InvalidArgument);
+        assert_eq!(
+            failing_position(blank.message()),
+            Some(2),
+            "{}",
+            blank.message()
+        );
+        assert!(
+            blank.message().starts_with("targets[2]: blank value"),
+            "{}",
+            blank.message()
+        );
+        assert!(
+            blank.message().ends_with("(also blank: targets[3])"),
+            "나머지 빈 자리도 한 번에 댄다: {}",
+            blank.message()
+        );
+    }
+
+    #[test]
+    fn resolve_takes_one_to_eight_targets() {
+        let host = FakeHost::new();
+        host.with_agent("alpha", false, false);
+        let (table, _notify) = wiring(&host);
+
+        for count in [0, RESOLVE_TARGETS_MAX + 1] {
+            let err = call(
+                &table,
+                "agent.resolve",
+                json!({ "targets": vec!["alpha"; count] }),
+            )
+            .expect_err("개수 밖");
+            assert_eq!(err.code(), ErrorCode::InvalidArgument, "{count}");
+            assert_eq!(
+                failing_position(err.message()),
+                None,
+                "개수 반려는 말 하나의 실패가 아니라 머리가 없다: {}",
+                err.message()
+            );
+        }
+        let out = call(
+            &table,
+            "agent.resolve",
+            json!({ "targets": vec!["alpha"; RESOLVE_TARGETS_MAX] }),
+        )
+        .expect("상한까지는 받는다");
+        assert_eq!(
+            out["agents"].as_array().map(Vec::len),
+            Some(RESOLVE_TARGETS_MAX)
+        );
+    }
+
+    /// ★답 모양을 파일에 못 박는다★ — 셸은 이 crate 를 의존하지 않고 답을 타입 없는 JSON 으로 읽으며, 셸 시험의
+    /// 가짜 데몬이 같은 파일로 답을 짓는다(TRD S28 §6). 칸 이름이 바뀌면 여기나 셸 쪽이 빨개진다.
+    // ADR-0307
+    #[test]
+    fn the_resolve_reply_matches_the_golden_fixture() {
+        let golden: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/agent_resolve_ok.json"))
+                .expect("골든은 JSON");
+        let host = FakeHost::new();
+        for (id, name, live) in [
+            ("11111111-1111-4111-8111-111111111111", "alpha", true),
+            ("22222222-2222-4222-8222-222222222222", "beta", false),
+        ] {
+            host.rows.lock().unwrap().push(AgentRosterRow {
+                id: id.parse().expect("고정 id"),
+                canonical_name: name.to_string(),
+                cwd: format!("C:/work/{name}"),
+                parent: None,
+                live: live.then_some(AgentStatus::Running),
+            });
+        }
+        let (table, _notify) = wiring(&host);
+
+        let out = call(
+            &table,
+            "agent.resolve",
+            json!({ "targets": ["alpha", "beta"] }),
+        )
+        .expect("풀린다");
+        assert_eq!(out, golden);
     }
 
     #[test]

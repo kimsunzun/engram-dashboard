@@ -38,8 +38,11 @@ use engram_dashboard_platform::shell::default_shell;
 
 use engram_dashboard_agent::backend::usage_probe_for;
 use engram_dashboard_agent::commands::llm_creation_refusal;
+use engram_dashboard_agent::commands::{store_command_error, store_error_reason};
 use engram_dashboard_agent::failure::AgentFailureKind as CoreFailureKind;
+use engram_dashboard_agent::persistence::{AGENTS_FILE, PRESETS_FILE};
 use engram_dashboard_agent::preset::Preset as CorePreset;
+use engram_dashboard_agent::profile::StoreError;
 use engram_dashboard_agent::profile::{
     AgentCommand as CoreSpawnCommand, AgentOutputFormat as CoreAgentOutputFormat,
     AgentProfile as CoreProfile, RestartPolicy as CoreRestartPolicy,
@@ -1001,6 +1004,44 @@ fn cancel_error_text(agent_id: AgentId, input_id: &str, e: CancelError) -> Strin
     .to_string()
 }
 
+/// 저장소가 이 요청의 변경을 받지 않았다 → `Error` 문구(`CODE: 문구`). 코드 나눔(거절 = `CONFLICT` · 쓰기 실패 =
+/// `INTERNAL`)과 사유 문구는 명령 버스와 같은 것을 쓴다(agent `store_command_error` · `store_error_reason`). WS 문구는
+/// 재시도 지시를 싣지 않으므로 「조금 뒤 다시」는 그 사유 문구가 나른다. `what` = 무엇이 안 됐나 · `file` = 받지 않은
+/// 파일.
+/// ★거절을 남기는 한 줄이 여기 하나다★(WS 에서 그 요청이 오류가 되는 자리) — 저장소의 로그는 파일 쪽 사실(무엇이
+///   막았나)이고 이 줄은 요청 쪽 사실(어느 요청이 막혔나)이다. 호출자가 보낸 값(이름 · 경로)은 싣지 않는다.
+// ADR-0291 R17
+fn store_error_text(
+    conn_id: ConnId,
+    verb: &'static str,
+    file: &'static str,
+    what: &str,
+    error: &StoreError,
+) -> String {
+    tracing::warn!(
+        conn = conn_id,
+        verb,
+        file,
+        %error,
+        "저장소가 받지 않아 이 요청을 오류로 돌려준다(WS)"
+    );
+    store_command_error(
+        error,
+        format!("{what}: {}", store_error_reason(file, error)),
+    )
+    .to_string()
+}
+
+/// 프로필 쪽 요청(매니저의 `try_` 판 · 활성화)의 실패 → `Error` 문구. `agents.json` 의 저장 `Err` 만
+/// [`store_error_text`] 로 — 나머지는 `PtyError` 의 Display 그대로다.
+// ADR-0291 R17
+fn profile_error_text(conn_id: ConnId, verb: &'static str, what: &str, e: PtyError) -> String {
+    match e {
+        PtyError::Store(error) => store_error_text(conn_id, verb, AGENTS_FILE, what, &error),
+        other => other.to_string(),
+    }
+}
+
 /// 도구 종류 도메인 → wire. ★`_` 갈래를 쓰지 않는다★ — 종류가 늘면 여기가 컴파일 에러로 서야 새 종류가
 /// 조용히 다른 종류로 접히지 않는다. 데몬은 벤더 도구 이름을 모른다 — 판정은 각 backend 번역기가 끝냈다.
 // ADR-0239
@@ -1323,12 +1364,24 @@ impl ConnectionCore {
                         //   이 WS 표면뿐이다.
                         let mgr = manager.clone();
                         let started = tokio::task::spawn_blocking(move || {
-                            mgr.activate_profile(&profile, SpawnMode::Fresh)
-                                .map(|_| ())
-                                .map_err(|e| e.to_string())
+                            mgr.activate_profile(&profile, SpawnMode::Fresh).map(|_| ())
                         })
                         .await
-                        .unwrap_or_else(|e| Err(format!("activation task failed: {e}")));
+                        .unwrap_or_else(|e| {
+                            Err(PtyError::SpawnFailed(format!(
+                                "activation task failed: {e}"
+                            )))
+                        })
+                        .map_err(|e| {
+                            profile_error_text(
+                                conn_id,
+                                "Spawn",
+                                &format!("agent {profile_id} was not started"),
+                                e,
+                            )
+                        });
+                        // ★결말과 무관하게 민다 — 저장 거절이어도★: 활성화 실패는 그 항목의 「마지막 실패」를
+                        //   적는다(ADR-0172 · ADR-0291 E2).
                         broadcast_profile_list(fanout, manager);
                         started
                     }
@@ -1555,7 +1608,16 @@ impl ConnectionCore {
                             Err("ad-hoc spawn produced no session".to_string()),
                         ),
                     },
-                    Err(e) => reply(sink, request_id, Err(e.to_string())),
+                    Err(e) => reply(
+                        sink,
+                        request_id,
+                        Err(profile_error_text(
+                            conn_id,
+                            "SpawnByCwd",
+                            "the agent was not created or started",
+                            e,
+                        )),
+                    ),
                 }
             }
 
@@ -1592,7 +1654,9 @@ impl ConnectionCore {
                     env,
                     auto_restore,
                 );
-                match manager.create_agent(profile) {
+                // ★부르는 쪽 있는 판이다 — 저장소가 받지 않으면 등록하지 않고 오류다(브로드캐스트 없음)★.
+                // ADR-0291 R17 (D3)
+                match manager.try_create_agent(profile) {
                     Ok(stored) => {
                         let wire = profile_to_wire(&stored);
                         // Created 하나로 응답한다 — Ack 는 보내지 않는다(중복 resolve 방지).
@@ -1602,7 +1666,16 @@ impl ConnectionCore {
                         }));
                         broadcast_profile_list(fanout, manager);
                     }
-                    Err(e) => reply(sink, request_id, Err(e.to_string())),
+                    Err(e) => reply(
+                        sink,
+                        request_id,
+                        Err(profile_error_text(
+                            conn_id,
+                            "CreateProfile",
+                            "the profile was not created",
+                            e,
+                        )),
+                    ),
                 }
             }
 
@@ -1611,13 +1684,26 @@ impl ConnectionCore {
                 request_id,
             } => {
                 // ★삭제 정리 훅(ADR-0116 결정 3)★: 여기가 유일한 프로필 제거 지점이라 훅도 여기 하나다.
-                //   호출자 의무(이름 파생 시점·락 순서·게이트 축)는 `handle_profile_deleted` 가 정본이다.
+                //   호출자 의무(락 순서)와 게이트 축은 `handle_profile_deleted` 가 정본이다. 판정 · 정리는 프로필
+                //   id 하나로 하고, 제거 전에 뽑는 이름은 로그 전용이다(ADR-0309 결정 6).
                 // ★발동 조건(로스터 부재)은 커널이 판정한다★: 로스터는 커널의 DeliveryPort 소유 축이고, 여기서
                 //   미리 보면 조건이 두 곳에 갈린다(그 판정이 곧 정책 — spec §5).
                 let deleted_name = manager
                     .agent_snapshot(profile_id)
                     .map(|p| p.canonical_name_when_live());
-                manager.delete_agent(profile_id);
+                // ★저장소가 받지 않으면 지우지 않았다 — `Ack` · 브로드캐스트 · 정리 훅 없이 오류로 답한다★: 지우지
+                //   못한 프로필의 파킹 우편 · 계약을 정리하면 산 프로필의 메시징이 깨진다.
+                // ADR-0291 R17 (D3)
+                if let Err(e) = manager.try_delete_agent(profile_id) {
+                    let message = profile_error_text(
+                        conn_id,
+                        "DeleteProfile",
+                        &format!("profile {profile_id} was not deleted"),
+                        e,
+                    );
+                    reply(sink, request_id, Err(message));
+                    return DispatchFlow::Continue;
+                }
                 reply(sink, request_id, Ok(()));
                 broadcast_profile_list(fanout, manager);
                 if let (Some(name), Some(messaging)) = (deleted_name, self.messaging.get()) {
@@ -1688,6 +1774,7 @@ impl ConnectionCore {
                         //   ★같은 일을 명령 버스 쪽 `agent.spawn` 도 해야 한다★ — 두 핸들이 같은 것을
                         //   흔들어야 한다(CLAUDE.md 「LLM-우선 제어」). 그쪽 짝은
                         //   `core::agent::commands::{wake_existing, create_and_start}`.
+                        //   ★저장 거절도 그 실패다★ — 그대로 민다(ADR-0291 E2).
                         match started {
                             Ok(info) => {
                                 let _ = sink.enqueue(Outbound::event(AgentEvent::Spawned {
@@ -1695,7 +1782,16 @@ impl ConnectionCore {
                                     agent: agent_info_to_wire(&info),
                                 }));
                             }
-                            Err(e) => reply(sink, request_id, Err(e.to_string())),
+                            Err(e) => reply(
+                                sink,
+                                request_id,
+                                Err(profile_error_text(
+                                    conn_id,
+                                    "SpawnProfile",
+                                    &format!("agent {profile_id} was not started"),
+                                    e,
+                                )),
+                            ),
                         }
                         broadcast_profile_list(fanout, manager);
                     }
@@ -1707,43 +1803,71 @@ impl ConnectionCore {
                 }
             }
 
+            // ★아래 셋 · 프리셋 셋은 부르는 쪽 있는 판이다★ — 저장소가 받지 않으면 바꾸지 않고 오류로 답하며 브로드캐스트를
+            //   내지 않는다(바뀐 것이 없다).
+            // ADR-0291 R17 (D3)
             AgentCommand::SetProfileAutoRestore {
                 profile_id,
                 auto_restore,
                 request_id,
-            } => {
-                let ok = manager.set_agent_auto_restore(profile_id, auto_restore);
-                if ok {
+            } => match manager.try_set_agent_auto_restore(profile_id, auto_restore) {
+                Ok(true) => {
                     reply(sink, request_id, Ok(()));
                     broadcast_profile_list(fanout, manager);
-                } else {
-                    reply(
-                        sink,
-                        request_id,
-                        Err(format!("profile not found: {profile_id}")),
-                    );
                 }
-            }
+                Ok(false) => reply(
+                    sink,
+                    request_id,
+                    Err(format!("profile not found: {profile_id}")),
+                ),
+                Err(e) => reply(
+                    sink,
+                    request_id,
+                    Err(profile_error_text(
+                        conn_id,
+                        "SetProfileAutoRestore",
+                        &format!("the auto-restore flag of profile {profile_id} was not changed"),
+                        e,
+                    )),
+                ),
+            },
 
             AgentCommand::RenameProfile {
                 profile_id,
                 name,
                 request_id,
-            } => match manager.rename_agent(profile_id, name) {
-                CoreRenameOutcome::Renamed(_) | CoreRenameOutcome::Unchanged(_) => {
+            } => match manager.try_rename_agent(profile_id, name) {
+                Ok(CoreRenameOutcome::Renamed(_)) => {
+                    reply(sink, request_id, Ok(()));
+                    broadcast_profile_list(fanout, manager);
+                    // 산 에이전트면 목록 이름(`AgentInfo.name`)도 바뀐다(잠든 프로필이면 목록은 그대로다) — 셸의 탭 자동
+                    //   이름 · 창 제목은 이 목록에서만 이름을 읽는다(다시 짓지 않는다 · TRD S26-window-chrome §4-3).
+                    broadcast_agent_list(fanout, manager);
+                }
+                Ok(CoreRenameOutcome::Unchanged(_)) => {
                     reply(sink, request_id, Ok(()));
                     broadcast_profile_list(fanout, manager);
                 }
-                CoreRenameOutcome::NotFound => reply(
+                Ok(CoreRenameOutcome::NotFound) => reply(
                     sink,
                     request_id,
                     Err(format!("profile not found: {profile_id}")),
                 ),
-                CoreRenameOutcome::Exhausted => reply(
+                Ok(CoreRenameOutcome::Exhausted) => reply(
                     sink,
                     request_id,
                     Err(format!(
                         "name suffix space exhausted — cannot assign a unique name: {profile_id}"
+                    )),
+                ),
+                Err(e) => reply(
+                    sink,
+                    request_id,
+                    Err(profile_error_text(
+                        conn_id,
+                        "RenameProfile",
+                        &format!("profile {profile_id} was not renamed"),
+                        e,
                     )),
                 ),
             },
@@ -1752,21 +1876,29 @@ impl ConnectionCore {
                 child_id,
                 parent_id,
                 request_id,
-            } => {
-                let ok = manager.reparent_agent(child_id, parent_id);
-                if ok {
+            } => match manager.try_reparent_agent(child_id, parent_id) {
+                Ok(true) => {
                     reply(sink, request_id, Ok(()));
                     broadcast_profile_list(fanout, manager);
-                } else {
-                    reply(
-                        sink,
-                        request_id,
-                        Err(format!(
-                            "reparent rejected (missing/self-parent/cycle/2-level): child={child_id}"
-                        )),
-                    );
                 }
-            }
+                Ok(false) => reply(
+                    sink,
+                    request_id,
+                    Err(format!(
+                        "reparent rejected (missing/self-parent/cycle/2-level): child={child_id}"
+                    )),
+                ),
+                Err(e) => reply(
+                    sink,
+                    request_id,
+                    Err(profile_error_text(
+                        conn_id,
+                        "ReparentProfile",
+                        &format!("profile {child_id} was not moved"),
+                        e,
+                    )),
+                ),
+            },
 
             AgentCommand::GetSnapshot {
                 agent_id,
@@ -1794,29 +1926,68 @@ impl ConnectionCore {
             }
 
             AgentCommand::CreatePreset { cwd, request_id } => {
-                manager.presets().create(std::path::PathBuf::from(cwd));
-                reply(sink, request_id, Ok(()));
-                broadcast_preset_list(fanout, manager);
+                match manager.presets().try_create(std::path::PathBuf::from(cwd)) {
+                    Ok(_) => {
+                        reply(sink, request_id, Ok(()));
+                        broadcast_preset_list(fanout, manager);
+                    }
+                    Err(error) => reply(
+                        sink,
+                        request_id,
+                        Err(store_error_text(
+                            conn_id,
+                            "CreatePreset",
+                            PRESETS_FILE,
+                            "the preset was not created",
+                            &error,
+                        )),
+                    ),
+                }
             }
 
             AgentCommand::DeletePreset {
                 preset_id,
                 request_id,
-            } => {
-                manager.presets().remove(preset_id);
-                reply(sink, request_id, Ok(()));
-                broadcast_preset_list(fanout, manager);
-            }
+            } => match manager.presets().try_remove(preset_id) {
+                Ok(()) => {
+                    reply(sink, request_id, Ok(()));
+                    broadcast_preset_list(fanout, manager);
+                }
+                Err(error) => reply(
+                    sink,
+                    request_id,
+                    Err(store_error_text(
+                        conn_id,
+                        "DeletePreset",
+                        PRESETS_FILE,
+                        &format!("preset {preset_id} was not deleted"),
+                        &error,
+                    )),
+                ),
+            },
 
+            // 없는 id 는 오류가 아니라 `Ack` 다(`Ok(false)` — 바꾼 것이 없을 뿐이다).
             AgentCommand::RenamePreset {
                 preset_id,
                 name,
                 request_id,
-            } => {
-                manager.presets().rename(preset_id, name);
-                reply(sink, request_id, Ok(()));
-                broadcast_preset_list(fanout, manager);
-            }
+            } => match manager.presets().try_rename(preset_id, name) {
+                Ok(_) => {
+                    reply(sink, request_id, Ok(()));
+                    broadcast_preset_list(fanout, manager);
+                }
+                Err(error) => reply(
+                    sink,
+                    request_id,
+                    Err(store_error_text(
+                        conn_id,
+                        "RenamePreset",
+                        PRESETS_FILE,
+                        &format!("preset {preset_id} was not renamed"),
+                        &error,
+                    )),
+                ),
+            },
 
             AgentCommand::SetEnvelopeFormat { format, request_id } => {
                 // broadcast 하지 않는다 — 전역 상태는 다음 메시지에서 관측되지 목록 push 대상이 아니다.
@@ -2304,6 +2475,10 @@ pub(crate) fn broadcast_lease_changed(fanout: &dyn FrameFanout, agent_id: AgentI
 ///   ADR-0236 이 내려놓았다 — 모양은 그대로 둔다.
 /// ★짝 불일치 방지★: 생성자를 통해 **한 조립에서 나온** 팬아웃과 매니저만 묶인다 —
 ///   `DaemonWiring::roster_broadcast` 가 유일한 운영 생성 지점이다(그 struct 주석의 규칙).
+/// ★통지 한 번 = `ProfileListUpdated` 다음 `AgentListUpdated`★: 포트는 어느 동사가 불렀는지 모른다 — 버스 · CLI
+///   `agent.rename` 이 산 에이전트의 목록 이름을 바꿔도 셸의 탭 자동 이름이 따라가게 에이전트 목록을 늘 함께 민다.
+///   다른 동사(띄우기 · 만들기 · 옮기기 · 무변경 개명)가 덧붙여 내는 목록은 이름이 그대로면 셸의 이름 장부가 판도 알림도 없이
+///   넘긴다(TRD S26-window-chrome §4-3).
 pub struct RosterFanout {
     fanout: Arc<dyn FrameFanout>,
     manager: Arc<AgentManager>,
@@ -2318,6 +2493,7 @@ impl RosterFanout {
 impl crate::control::agent::RosterBroadcast for RosterFanout {
     fn roster_changed(&self) {
         broadcast_profile_list(self.fanout.as_ref(), &self.manager);
+        broadcast_agent_list(self.fanout.as_ref(), &self.manager);
     }
 }
 
@@ -2326,6 +2502,12 @@ fn broadcast_profile_list(fanout: &dyn FrameFanout, manager: &Arc<AgentManager>)
         profiles: core_profiles_to_wire(manager.agent_snapshots()),
     };
     if let Some(text) = event_json(&ev) {
+        fanout.broadcast_text(text);
+    }
+}
+
+fn broadcast_agent_list(fanout: &dyn FrameFanout, manager: &Arc<AgentManager>) {
+    if let Some(text) = event_json(&agent_list_event(manager)) {
         fanout.broadcast_text(text);
     }
 }
@@ -2392,6 +2574,7 @@ mod tests {
     use super::*;
     use engram_dashboard_net::frame_port;
     use engram_dashboard_protocol::{CommandListEntry, RequestId};
+    use std::sync::atomic::AtomicU8;
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
 
@@ -2761,17 +2944,67 @@ mod tests {
         watch::Receiver<bool>,
         Arc<crate::test_doubles::RecordingFanout>,
     ) {
+        test_core_on_stores(deliveries, locals, Arc::default())
+    }
+
+    /// [`test_core_refusable`] 의 저장소 스위치 값 — 받음 · 적재 때 거절(새 판) · 쓰기 실패. 어느 쪽이든 실패면
+    /// 아무것도 안 남긴다.
+    const STORE_SAVES: u8 = 0;
+    const STORE_REFUSES: u8 = 1;
+    const STORE_FAILS_IO: u8 = 2;
+
+    /// 저장소 결말을 바꾸는 조립 — 스위치([`STORE_SAVES`] · [`STORE_REFUSES`] · [`STORE_FAILS_IO`])가 두
+    /// 저장소(프로필 · 프리셋)에 함께 걸린다. 팬아웃 기록과 그 스위치를 함께 돌려준다.
+    // ADR-0291 R17
+    fn test_core_refusable() -> (
+        ConnectionCore,
+        Arc<crate::test_doubles::RecordingFanout>,
+        Arc<AtomicU8>,
+    ) {
+        let refusing = Arc::new(AtomicU8::new(STORE_SAVES));
+        let (core, _rx, fanout) = test_core_on_stores(
+            CommandDeliveries::new(),
+            &|_, _| Arc::new(crate::command_delivery::NoLocalCommands),
+            refusing.clone(),
+        );
+        (core, fanout, refusing)
+    }
+
+    /// [`test_core_built`] 의 본체 — `refusing` 이 [`STORE_SAVES`] 가 아닌 동안 두 저장소가 저장에 실패한다.
+    fn test_core_on_stores(
+        deliveries: CommandDeliveries,
+        locals: &dyn Fn(&Arc<AgentManager>, &MultiViewState) -> Arc<dyn LocalCommands>,
+        refusing: Arc<AtomicU8>,
+    ) -> (
+        ConnectionCore,
+        watch::Receiver<bool>,
+        Arc<crate::test_doubles::RecordingFanout>,
+    ) {
         use engram_dashboard_agent::preset::{PresetRegistry, PresetStore};
-        use engram_dashboard_agent::profile::{ProfileRegistry, ProfileStore};
+        use engram_dashboard_agent::profile::{ProfileRegistry, ProfileStore, Refusal};
         use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
+
+        fn refused(switch: &AtomicU8) -> Result<(), StoreError> {
+            match switch.load(Ordering::SeqCst) {
+                STORE_REFUSES => Err(StoreError::ReadOnly(Refusal::Newer { found: 2 })),
+                STORE_FAILS_IO => Err(StoreError::Io(std::io::Error::other("disk full"))),
+                _ => Ok(()),
+            }
+        }
 
         #[derive(Default)]
         struct MemStore {
             saved: StdMutex<Vec<engram_dashboard_agent::profile::AgentProfile>>,
+            refusing: Arc<AtomicU8>,
         }
         impl ProfileStore for MemStore {
-            fn save(&self, p: &[engram_dashboard_agent::profile::AgentProfile]) {
+            fn save(
+                &self,
+                p: &[engram_dashboard_agent::profile::AgentProfile],
+            ) -> Result<(), StoreError> {
+                refused(&self.refusing)?;
                 *self.saved.lock().unwrap() = p.to_vec();
+                Ok(())
             }
             fn load(&self) -> Vec<engram_dashboard_agent::profile::AgentProfile> {
                 self.saved.lock().unwrap().clone()
@@ -2781,10 +3014,13 @@ mod tests {
         #[derive(Default)]
         struct MemPresetStore {
             saved: StdMutex<Vec<engram_dashboard_agent::preset::Preset>>,
+            refusing: Arc<AtomicU8>,
         }
         impl PresetStore for MemPresetStore {
-            fn save(&self, p: &[engram_dashboard_agent::preset::Preset]) {
+            fn save(&self, p: &[engram_dashboard_agent::preset::Preset]) -> Result<(), StoreError> {
+                refused(&self.refusing)?;
                 *self.saved.lock().unwrap() = p.to_vec();
+                Ok(())
             }
             fn load(&self) -> Vec<engram_dashboard_agent::preset::Preset> {
                 self.saved.lock().unwrap().clone()
@@ -2793,8 +3029,14 @@ mod tests {
 
         let recording = Arc::new(crate::test_doubles::RecordingFanout::new());
         let fanout: Arc<dyn FrameFanout> = recording.clone();
-        let store: Arc<dyn ProfileStore> = Arc::new(MemStore::default());
-        let preset_store: Arc<dyn PresetStore> = Arc::new(MemPresetStore::default());
+        let store: Arc<dyn ProfileStore> = Arc::new(MemStore {
+            refusing: refusing.clone(),
+            ..MemStore::default()
+        });
+        let preset_store: Arc<dyn PresetStore> = Arc::new(MemPresetStore {
+            refusing,
+            ..MemPresetStore::default()
+        });
         let status_sink = Arc::new(crate::status_fanout::DaemonStatusSink::new(fanout.clone()));
         let profiles = Arc::new(ProfileRegistry::new(store));
         let presets = Arc::new(PresetRegistry::new(preset_store));
@@ -2846,7 +3088,7 @@ mod tests {
             vec![],
             false,
         );
-        let created = core.manager.create_agent(profile).expect("등록");
+        let created = core.manager.try_create_agent(profile).expect("등록");
         let before = fanout.texts().len();
 
         let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
@@ -2896,7 +3138,7 @@ mod tests {
         );
         // 이어받을 수 없는 명령에 sid 가 남아 있는 상태 — 손으로 고친 `agents.json` 이 오늘 만든다.
         profile.backend_session_id = Some(uuid::Uuid::new_v4());
-        let created = core.manager.create_agent(profile).expect("등록");
+        let created = core.manager.try_create_agent(profile).expect("등록");
         assert!(
             core.manager
                 .agent_snapshot(created.id)
@@ -2949,7 +3191,7 @@ mod tests {
             false,
         );
         profile.backend_session_id = Some(uuid::Uuid::new_v4());
-        let created = core.manager.create_agent(profile).expect("등록");
+        let created = core.manager.try_create_agent(profile).expect("등록");
 
         let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
@@ -3420,7 +3662,7 @@ mod tests {
             false,
         );
         let cid = child.id;
-        core.manager.create_agent(child).expect("등록 성공");
+        core.manager.try_create_agent(child).expect("등록 성공");
 
         let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
@@ -3911,6 +4153,7 @@ mod tests {
         CommandDecl {
             name: name.to_string(),
             help: format!("{{\"name\":\"{name}\"}}"),
+            agent_args: Vec::new(),
         }
     }
 
@@ -4081,6 +4324,7 @@ mod tests {
                 vec![CommandDecl {
                     name: "tab.create".to_string(),
                     help: opaque.to_string(),
+                    agent_args: Vec::new(),
                 }],
                 rid(),
             ),
@@ -4139,6 +4383,7 @@ mod tests {
                     CommandDecl {
                         name: "agent.list".to_string(),
                         help: "stolen".to_string(),
+                        agent_args: Vec::new(),
                     },
                 ],
                 rid(),
@@ -4185,6 +4430,7 @@ mod tests {
                         "agent.move",
                         "agent.new",
                         "agent.rename",
+                        "agent.resolve",
                         "agent.spawn",
                         "tab.create",
                         "usage.get",
@@ -4646,6 +4892,7 @@ mod tests {
         let too_long = CommandDecl {
             name: "n".repeat(Roster::MAX_NAME_BYTES + 1),
             help: "{}".to_string(),
+            agent_args: Vec::new(),
         };
 
         core.dispatch(register(vec![too_long], req), &session, &mock)
@@ -5725,9 +5972,11 @@ mod tests {
     // ══════════════════════════════════════════════════════════════════════════════════════════
 
     /// ★왜 데몬 통합인가(가짜 포트 단위 테스트가 원리적으로 못 잡는다)★: 이 결함은 **두 배선**의 순서·축에
-    /// 있었다 — ① 정리 대상 이름을 프로필 **제거 전에** 뽑나 ② 발동 게이트를 **id** 로 거나. 커널 단위
-    /// 테스트는 그 둘을 하네스가 대신 정해 주므로(이름·게이트를 테스트가 직접 스크립트한다) 배선이 뒤바뀐 걸
-    /// 볼 수 없다. 여기서는 실제 프로필·실제 spawn·실물 `ManagerDeliveryPort` 로 dispatch 를 태운다.
+    /// 있었다 — ① 훅이 프로필 **제거 전에** 그 스냅숏(로그용 이름)을 뜨나(제거 뒤에 뜨면 스냅숏이 없어 훅이
+    /// 아예 안 돈다) ② 발동 게이트를 **id** 로 거나. 커널 단위 테스트는 그 둘을 하네스가 대신 정해 주므로
+    /// (이름·게이트를 테스트가 직접 스크립트한다) 배선이 뒤바뀐 걸 볼 수 없다. 여기서는 실제 프로필·실제
+    /// spawn·실물 `ManagerDeliveryPort` 로 dispatch 를 태운다. 끝에서 잠든 채 개명한 프로필의 삭제가 옛 이름으로
+    /// 쌓인 몫까지 id 로 쓸어 가는지도 본다(ADR-0309 결정 6 — 훅이 넘기는 이름은 새 이름이다).
     #[tokio::test]
     async fn deleting_a_renamed_profile_whose_session_is_live_keeps_its_mail_and_contracts() {
         use engram_dashboard_messaging::envelope::Entrance;
@@ -5758,9 +6007,11 @@ mod tests {
             p.display_name = Some("sleepy".into());
             p
         };
-        core.manager.create_agent(boss.clone()).expect("등록 성공");
         core.manager
-            .create_agent(sleepy.clone())
+            .try_create_agent(boss.clone())
+            .expect("등록 성공");
+        core.manager
+            .try_create_agent(sleepy.clone())
             .expect("등록 성공");
 
         // (2) ★개명(RenameProfile)★
@@ -5811,7 +6062,7 @@ mod tests {
             engram_dashboard_messaging::service::SendStatus::Pending,
             "잠든 프로필 이름 앞으로 파킹된다: {rows:?}"
         );
-        assert_eq!(messaging.parked_len("boss"), 1);
+        assert_eq!(messaging.parked_len(boss.id), 1);
         messaging
             .handle_send(
                 "m-out",
@@ -5827,7 +6078,7 @@ mod tests {
             )
             .expect("행 응답");
         assert_eq!(
-            messaging.contract_outcome_for_test("m-out", "sleepy"),
+            messaging.contract_outcome_for_test("m-out", sleepy.id),
             Some("awaiting_reply"),
             "boss 가 요청자인 계약이 열렸다"
         );
@@ -5860,17 +6111,28 @@ mod tests {
 
         // (6) 보호 단언.
         assert_eq!(
-            messaging.parked_len("boss"),
+            messaging.parked_len(boss.id),
             1,
             "★D1★ 산 세션의 파킹 메일이 삭제 정리에 죽었다(게이트가 이름 축이면 여기서 0이 된다)"
         );
         assert_eq!(
-            messaging.contract_outcome_for_test("m-out", "sleepy"),
+            messaging.contract_outcome_for_test("m-out", sleepy.id),
             Some("awaiting_reply"),
             "★D1★ 산 세션이 요청자인 계약이 실패 종결됐다(ADR-0118 결정 2 위반)"
         );
 
-        // (7) ★반대 방향도 못 박는다 — 이름은 **제거 전에** 뽑아야 한다★.
+        // (7) ★반대 방향도 못 박는다 — 스냅숏은 **제거 전에** 떠야 훅이 돈다★. 그리고 잠든 채 개명한 프로필:
+        //   sleepy 앞 파킹과 sleepy 가 요청자인 계약을 쌓은 뒤 sleepy 를 drowsy 로 개명하고, 옛 이름 sleepy 는 새
+        //   프로필 heir 가 가져간다. 삭제는 id 로 쓸어 가야 한다 — 훅이 넘기는 이름은 drowsy 라 이름으로 고르면
+        //   sleepy 로 연 계약을 놓치고, 옛 이름으로 고르면 heir 의 몫이 죽는다(ADR-0309 결정 6).
+        let helper = {
+            let mut p = mk("helper-raw");
+            p.display_name = Some("helper".into());
+            p
+        };
+        core.manager
+            .try_create_agent(helper.clone())
+            .expect("등록 성공");
         let rows2 = messaging
             .handle_send(
                 "m-sleep",
@@ -5886,6 +6148,71 @@ mod tests {
             rows2[0].status,
             engram_dashboard_messaging::service::SendStatus::Pending
         );
+        messaging
+            .handle_send(
+                "m-sleep-req",
+                SenderIdentity {
+                    peer_id: sleepy.id,
+                    epoch: 0,
+                },
+                "sleepy",
+                &["helper".to_string()],
+                "해줘",
+                Entrance::Cli,
+                &req,
+            )
+            .expect("행 응답");
+        assert_eq!(
+            messaging.contract_outcome_for_test("m-sleep-req", helper.id),
+            Some("awaiting_reply"),
+            "sleepy 가 요청자인 계약이 열렸다"
+        );
+        core.dispatch(
+            AgentCommand::RenameProfile {
+                profile_id: sleepy.id,
+                name: Some("drowsy".into()),
+                request_id: engram_dashboard_protocol::RequestId(uuid::Uuid::new_v4()),
+            },
+            &session,
+            &sink,
+        )
+        .await;
+        assert_eq!(
+            core.manager
+                .agent_snapshot(sleepy.id)
+                .expect("프로필")
+                .canonical_name_when_live(),
+            "drowsy",
+            "잠든 채 개명했다(이 단계의 전제)"
+        );
+        let heir = {
+            let mut p = mk("heir-raw");
+            p.display_name = Some("sleepy".into());
+            p
+        };
+        core.manager
+            .try_create_agent(heir.clone())
+            .expect("등록 성공");
+        let rows3 = messaging
+            .handle_send(
+                "m-heir",
+                sender,
+                "outsider",
+                &["sleepy".to_string()],
+                "새 sleepy 에게",
+                Entrance::Cli,
+                &SendMeta::default(),
+            )
+            .expect("행 응답");
+        assert_eq!(
+            rows3[0].status,
+            engram_dashboard_messaging::service::SendStatus::Pending
+        );
+        assert_eq!(
+            messaging.parked_len(heir.id),
+            1,
+            "옛 이름 앞 새 우편은 그 이름의 새 주인에게 맡겨진다"
+        );
         core.dispatch(
             AgentCommand::DeleteProfile {
                 profile_id: sleepy.id,
@@ -5896,9 +6223,9 @@ mod tests {
         )
         .await;
         assert_eq!(
-            messaging.parked_len("sleepy"),
+            messaging.parked_len(sleepy.id),
             0,
-            "잠든 프로필 삭제는 정리가 발동해야(이름을 제거 전에 뽑았다는 증거)"
+            "잠든 프로필 삭제는 정리가 발동해야(스냅숏을 제거 전에 떴다는 증거)"
         );
         let view = messaging
             .message_state("m-sleep", std::time::Instant::now())
@@ -5908,8 +6235,629 @@ mod tests {
             Some("RECIPIENT_DELETED"),
             "장부 종점 + 사유 코드가 남는다(조용히 버리지 않는다): {view:?}"
         );
+        assert_eq!(
+            messaging.contract_outcome_for_test("m-sleep-req", helper.id),
+            Some("reply_failed"),
+            "개명 전 이름으로 연 계약도 id 로 닫힌다"
+        );
+        assert_eq!(
+            messaging.parked_len(heir.id),
+            1,
+            "옛 이름의 새 주인 몫은 그대로"
+        );
 
         core.manager.kill_agent(boss.id).ok();
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    // 저장 거절 — WS 의 부르는 쪽 변경(ADR-0291 R17 · D3 · E2)
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+
+    /// 실행해도 바로 실패하는 셸 프로필(없는 프로그램) — 저장 거절이 회귀해 띄우기까지 가도 아무것도 안 뜬다.
+    fn unlaunchable_profile(name: &str) -> CoreProfile {
+        let mut profile = CoreProfile::new(
+            format!("{name}-raw"),
+            CoreSpawnCommand::Shell {
+                program: format!("engram-not-a-real-program-{}.exe", uuid::Uuid::new_v4()),
+                args: vec![],
+            },
+            std::env::temp_dir(),
+            vec![],
+            false,
+        );
+        profile.display_name = Some(name.to_string());
+        profile
+    }
+
+    /// ★저장소가 받지 않은 `DeleteProfile` 은 오류로 답하고 정리 훅 · 브로드캐스트를 내지 않는다(D3)★ — 지우지 못한
+    ///   프로필의 파킹 우편 · 계약을 정리하면 산 프로필의 메시징이 깨진다(ADR-0116 결정 3 「유일한 프로필 제거
+    ///   지점」). 훅이 안 돈 것은 파킹 우편이 남은 것으로 보고, 저장되면 같은 요청이 그 우편을 정리하는 것으로 그
+    ///   관측이 헛되지 않음을 함께 잰다.
+    // ADR-0291 R17 (D3)
+    #[tokio::test]
+    async fn a_delete_profile_the_store_refuses_answers_an_error_without_the_hook_or_a_broadcast() {
+        use engram_dashboard_messaging::envelope::Entrance;
+        use engram_dashboard_messaging::service::{SendMeta, SendStatus};
+        use engram_dashboard_messaging::SenderIdentity;
+
+        let (core, fanout, refusing) = test_core_refusable();
+        let messaging = Arc::new(crate::messaging_host::messaging_for_manager(
+            core.manager.clone(),
+            core.control_registry.clone(),
+        ));
+        core.messaging.set(messaging.clone());
+        let (tx, _rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(64);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        let sleepy = unlaunchable_profile("sleepy");
+        core.manager
+            .try_create_agent(sleepy.clone())
+            .expect("저장되면 등록");
+        let rows = messaging
+            .handle_send(
+                "m-park",
+                SenderIdentity {
+                    peer_id: uuid::Uuid::new_v4(),
+                    epoch: 0,
+                },
+                "outsider",
+                &["sleepy".to_string()],
+                "쌓아둔다",
+                Entrance::Cli,
+                &SendMeta::default(),
+            )
+            .expect("행 응답");
+        assert_eq!(
+            rows[0].status,
+            SendStatus::Pending,
+            "전제: 잠든 프로필 앞으로 파킹된다"
+        );
+
+        refusing.store(STORE_REFUSES, Ordering::SeqCst);
+        let before = fanout.texts().len();
+        let req = rid();
+        core.dispatch(
+            AgentCommand::DeleteProfile {
+                profile_id: sleepy.id,
+                request_id: req,
+            },
+            &session,
+            &mock,
+        )
+        .await;
+
+        match mock.events().as_slice() {
+            [AgentEvent::Error {
+                request_id: Some(r),
+                message,
+            }] => {
+                assert_eq!(*r, req);
+                assert!(
+                    message.starts_with("CONFLICT:") && message.contains("agents.json"),
+                    "{message}"
+                );
+            }
+            other => panic!("Ack 가 아니라 Error 1건이어야: {other:?}"),
+        }
+        assert!(
+            core.manager.agent_snapshot(sleepy.id).is_some(),
+            "지우지 않았다"
+        );
+        assert_eq!(messaging.parked_len(sleepy.id), 1, "정리 훅이 돌지 않았다");
+        assert_eq!(fanout.texts().len(), before, "브로드캐스트 0");
+
+        // 대조 — 저장되면 같은 요청이 지우고 훅이 그 우편을 정리한다.
+        refusing.store(STORE_SAVES, Ordering::SeqCst);
+        core.dispatch(
+            AgentCommand::DeleteProfile {
+                profile_id: sleepy.id,
+                request_id: rid(),
+            },
+            &session,
+            &mock,
+        )
+        .await;
+        assert!(
+            matches!(mock.events().last(), Some(AgentEvent::Ack { .. })),
+            "{:?}",
+            mock.events()
+        );
+        assert_eq!(messaging.parked_len(sleepy.id), 0, "저장되면 훅이 돈다");
+        assert!(fanout.texts().len() > before, "저장되면 명부를 민다");
+    }
+
+    /// ★저장소가 받지 않은 명부 · 프리셋 변경은 전부 오류로 답하고 브로드캐스트를 내지 않는다(D3)★ — 바뀐 것이
+    ///   없다. 문구는 코드(`CONFLICT` — 버스와 같은 나눔)와 받지 않은 파일(`agents.json` · `presets.json`)을 댄다.
+    ///   프리셋 셋도 저장소가 받아야만 `Ack` 다.
+    // ADR-0291 R17 (D3)
+    #[tokio::test]
+    async fn every_ws_roster_or_preset_change_the_store_refuses_answers_an_error_and_broadcasts_nothing(
+    ) {
+        let (core, fanout, refusing) = test_core_refusable();
+        let session = ConnectionSession::new(1);
+        let alpha = unlaunchable_profile("alpha");
+        let lead = unlaunchable_profile("lead");
+        core.manager
+            .try_create_agent(alpha.clone())
+            .expect("저장되면 등록");
+        core.manager
+            .try_create_agent(lead.clone())
+            .expect("저장되면 등록");
+        let preset = core
+            .manager
+            .presets()
+            .try_create(std::env::temp_dir())
+            .expect("저장되면 프리셋");
+        let profiles = || {
+            let mut rows: Vec<_> = core
+                .manager
+                .agent_snapshots()
+                .into_iter()
+                .map(|p| (p.id, p.display_name, p.parent_id, p.auto_restore))
+                .collect();
+            rows.sort();
+            rows
+        };
+        let presets = || {
+            let mut rows: Vec<_> = core
+                .manager
+                .presets()
+                .list()
+                .into_iter()
+                .map(|p| (p.id, p.name))
+                .collect();
+            rows.sort();
+            rows
+        };
+        let (profiles_before, presets_before) = (profiles(), presets());
+        refusing.store(STORE_REFUSES, Ordering::SeqCst);
+        let before = fanout.texts().len();
+        let temp = std::env::temp_dir().to_string_lossy().into_owned();
+
+        let cases = [
+            (
+                "CreateProfile",
+                "agents.json",
+                AgentCommand::CreateProfile {
+                    name: "new".into(),
+                    cwd: temp.clone(),
+                    extra_args: vec![],
+                    env: vec![],
+                    auto_restore: false,
+                    output_format: WireAgentOutputFormat::Terminal,
+                    backend: Some(WireBackendKind::Claude),
+                    request_id: rid(),
+                },
+            ),
+            (
+                "RenameProfile",
+                "agents.json",
+                AgentCommand::RenameProfile {
+                    profile_id: alpha.id,
+                    name: Some("beta".into()),
+                    request_id: rid(),
+                },
+            ),
+            (
+                "ReparentProfile",
+                "agents.json",
+                AgentCommand::ReparentProfile {
+                    child_id: alpha.id,
+                    parent_id: Some(lead.id),
+                    request_id: rid(),
+                },
+            ),
+            (
+                "SetProfileAutoRestore",
+                "agents.json",
+                AgentCommand::SetProfileAutoRestore {
+                    profile_id: alpha.id,
+                    auto_restore: true,
+                    request_id: rid(),
+                },
+            ),
+            (
+                "CreatePreset",
+                "presets.json",
+                AgentCommand::CreatePreset {
+                    cwd: temp.clone(),
+                    request_id: rid(),
+                },
+            ),
+            (
+                "DeletePreset",
+                "presets.json",
+                AgentCommand::DeletePreset {
+                    preset_id: preset.id,
+                    request_id: rid(),
+                },
+            ),
+            (
+                "RenamePreset",
+                "presets.json",
+                AgentCommand::RenamePreset {
+                    preset_id: preset.id,
+                    name: Some("renamed".into()),
+                    request_id: rid(),
+                },
+            ),
+        ];
+        for (label, file, cmd) in cases {
+            let (tx, _rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+            let mock = MockOutboundSink::new(tx);
+            core.dispatch(cmd, &session, &mock).await;
+            match mock.events().as_slice() {
+                [AgentEvent::Error {
+                    request_id: Some(_),
+                    message,
+                }] => assert!(
+                    message.starts_with("CONFLICT:") && message.contains(file),
+                    "{label}: {message}"
+                ),
+                other => panic!("{label}: Error 1건이어야: {other:?}"),
+            }
+        }
+
+        assert_eq!(fanout.texts().len(), before, "브로드캐스트 0");
+        assert_eq!(profiles(), profiles_before, "명부 그대로");
+        assert_eq!(presets(), presets_before, "프리셋 그대로");
+    }
+
+    /// ★WS 활성화는 저장 거절이어도 프로필 목록을 민다(E2)★ — 활성화 실패가 그 항목의 「마지막 실패」를 적고, 그
+    ///   축은 프로필 목록으로만 화면에 닿는다(ADR-0172). 답은 코드를 실은 오류다.
+    // ADR-0291 R17 (E2)
+    #[tokio::test]
+    async fn a_ws_spawn_profile_the_store_refuses_answers_conflict_and_still_announces_the_list() {
+        let (core, fanout, refusing) = test_core_refusable();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        let profile = unlaunchable_profile("waker");
+        core.manager
+            .try_create_agent(profile.clone())
+            .expect("저장되면 등록");
+        refusing.store(STORE_REFUSES, Ordering::SeqCst);
+        let before = fanout.texts().len();
+
+        core.dispatch(
+            AgentCommand::SpawnProfile {
+                profile_id: profile.id,
+                resume: false,
+                request_id: rid(),
+            },
+            &session,
+            &mock,
+        )
+        .await;
+
+        match mock.events().as_slice() {
+            [AgentEvent::Error { message, .. }] => assert!(
+                message.starts_with("CONFLICT:") && message.contains("agents.json"),
+                "{message}"
+            ),
+            other => panic!("Error 1건이어야: {other:?}"),
+        }
+        assert!(core.manager.list_agents().is_empty(), "뜬 것이 없다");
+        assert_eq!(
+            fanout.texts().len(),
+            before + 1,
+            "결말과 무관하게 한 번 민다"
+        );
+        assert_eq!(
+            core.manager
+                .agent_snapshot(profile.id)
+                .and_then(|p| p.last_failure),
+            Some(CoreFailureKind::Other)
+        );
+    }
+
+    /// ★WS `Spawn{profile_id}` 도 저장 거절이면 `CONFLICT` 이고 뜬 것이 없다★ — 같은 활성화 입구를 지나므로
+    ///   `SpawnProfile` 과 같은 답 · 같은 알림이어야 한다(한쪽만 다른 코드면 두 WS 문이 갈린다).
+    // ADR-0291 R17 (E2)
+    #[tokio::test]
+    async fn a_ws_spawn_by_profile_id_the_store_refuses_answers_conflict_and_still_announces_the_list(
+    ) {
+        let (core, fanout, refusing) = test_core_refusable();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        let profile = unlaunchable_profile("fresh-waker");
+        core.manager
+            .try_create_agent(profile.clone())
+            .expect("저장되면 등록");
+        refusing.store(STORE_REFUSES, Ordering::SeqCst);
+        let before = fanout.texts().len();
+
+        core.dispatch(
+            AgentCommand::Spawn {
+                profile_id: profile.id,
+                request_id: rid(),
+            },
+            &session,
+            &mock,
+        )
+        .await;
+
+        match mock.events().as_slice() {
+            [AgentEvent::Error { message, .. }] => assert!(
+                message.starts_with("CONFLICT:")
+                    && message.contains("agents.json")
+                    && message.contains("restart the daemon"),
+                "{message}"
+            ),
+            other => panic!("Error 1건이어야: {other:?}"),
+        }
+        assert!(core.manager.list_agents().is_empty(), "뜬 것이 없다");
+        assert_eq!(
+            fanout.texts().len(),
+            before + 1,
+            "결말과 무관하게 한 번 민다"
+        );
+    }
+
+    /// ★WS `SpawnByCwd` 는 저장 거절이면 `CONFLICT` 이고 등록도 띄우기도 없다★ — 즉석 프로필은 띄우기 전에 등록되고
+    ///   그 등록이 거절된다. 없는 폴더를 cwd 로 주어, 거절이 회귀해 띄우기까지 가도 프로세스가 서지 않게 한다.
+    // ADR-0291 R17
+    #[tokio::test]
+    async fn a_ws_spawn_by_cwd_the_store_refuses_answers_conflict_and_registers_nothing() {
+        let (core, _fanout, refusing) = test_core_refusable();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        refusing.store(STORE_REFUSES, Ordering::SeqCst);
+        let missing =
+            std::env::temp_dir().join(format!("engram-no-such-dir-{}", uuid::Uuid::new_v4()));
+
+        core.dispatch(
+            AgentCommand::SpawnByCwd {
+                cwd: missing.to_string_lossy().into_owned(),
+                backend: Some(WireBackendKind::Claude),
+                request_id: rid(),
+            },
+            &session,
+            &mock,
+        )
+        .await;
+
+        match mock.events().as_slice() {
+            [AgentEvent::Error { message, .. }] => assert!(
+                message.starts_with("CONFLICT: the agent was not created or started: agents.json"),
+                "{message}"
+            ),
+            other => panic!("Error 1건이어야: {other:?}"),
+        }
+        assert!(core.manager.list_agents().is_empty(), "뜬 것이 없다");
+        assert!(
+            core.manager.agent_snapshots().is_empty(),
+            "명부에 오른 것이 없다"
+        );
+    }
+
+    /// ★WS 의 저장 쓰기 실패는 `INTERNAL:` 이다★ — 거절(`CONFLICT`)과 같은 문구 꼴이되 코드가 다르다(버스와 같은 나눔).
+    // ADR-0291 R17
+    #[tokio::test]
+    async fn a_ws_change_whose_store_write_fails_answers_internal() {
+        let (core, fanout, refusing) = test_core_refusable();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        let alpha = unlaunchable_profile("alpha");
+        core.manager
+            .try_create_agent(alpha.clone())
+            .expect("저장되면 등록");
+        refusing.store(STORE_FAILS_IO, Ordering::SeqCst);
+        let before = fanout.texts().len();
+
+        core.dispatch(
+            AgentCommand::RenameProfile {
+                profile_id: alpha.id,
+                name: Some("beta".into()),
+                request_id: rid(),
+            },
+            &session,
+            &mock,
+        )
+        .await;
+
+        match mock.events().as_slice() {
+            [AgentEvent::Error { message, .. }] => assert!(
+                message.starts_with("INTERNAL:")
+                    && message.contains("writing agents.json failed: disk full"),
+                "{message}"
+            ),
+            other => panic!("Error 1건이어야: {other:?}"),
+        }
+        assert_eq!(fanout.texts().len(), before, "브로드캐스트 0");
+        assert_eq!(
+            core.manager
+                .agent_snapshot(alpha.id)
+                .and_then(|p| p.display_name),
+            Some("alpha".to_string()),
+            "이름 그대로"
+        );
+    }
+
+    // ══ 개명 뒤 에이전트 목록(TRD S26-window-chrome §4-3) ══
+
+    /// `before` 뒤에 나간 브로드캐스트의 꼴 이름(`AgentListUpdated` 등) — 순서대로.
+    fn broadcast_kinds(
+        fanout: &crate::test_doubles::RecordingFanout,
+        before: usize,
+    ) -> Vec<String> {
+        fanout.texts()[before..]
+            .iter()
+            .map(|text| {
+                let value: serde_json::Value = serde_json::from_str(text).expect("wire 는 JSON");
+                value
+                    .as_object()
+                    .and_then(|o| o.keys().next().cloned())
+                    .expect("외부 태그 하나")
+            })
+            .collect()
+    }
+
+    /// `before` 뒤에 나간 `AgentListUpdated` 마다 그 (id, 이름) 목록 — 순서대로.
+    fn broadcast_agent_lists(
+        fanout: &crate::test_doubles::RecordingFanout,
+        before: usize,
+    ) -> Vec<Vec<(AgentId, String)>> {
+        fanout.texts()[before..]
+            .iter()
+            .filter_map(|text| match serde_json::from_str::<AgentEvent>(text) {
+                Ok(AgentEvent::AgentListUpdated { agents }) => {
+                    Some(agents.into_iter().map(|a| (a.id, a.name)).collect())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn live_profile(raw: &str) -> CoreProfile {
+        CoreProfile::new(
+            raw.into(),
+            CoreSpawnCommand::Shell {
+                program: default_shell().to_string(),
+                args: vec![],
+            },
+            std::env::temp_dir(),
+            vec![],
+            false,
+        )
+    }
+
+    /// 산 에이전트를 개명하면 `list_agents` 의 이름이 바뀌고 — 셸의 탭 자동 이름 · 창 제목이 따르는 그 이름 — 개명
+    /// 뒤 `AgentListUpdated` 가 그 이름을 싣고 나간다.
+    #[tokio::test]
+    async fn renaming_a_live_agent_broadcasts_the_agent_list_with_its_new_name() {
+        let (core, fanout) = test_core_recording();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        let profile = live_profile("live-raw");
+        core.manager
+            .try_create_agent(profile.clone())
+            .expect("등록 성공");
+        core.manager
+            .spawn_agent(&profile, SpawnMode::Fresh)
+            .expect("spawn")
+            .into_started()
+            .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+        let before = fanout.texts().len();
+
+        core.dispatch(
+            AgentCommand::RenameProfile {
+                profile_id: profile.id,
+                name: Some("renamed-live".into()),
+                request_id: rid(),
+            },
+            &session,
+            &mock,
+        )
+        .await;
+
+        let listed = core
+            .manager
+            .list_agents()
+            .into_iter()
+            .find(|a| a.id == profile.id)
+            .map(|a| a.name);
+        let lists = broadcast_agent_lists(&fanout, before);
+        // 끄기도 목록을 낸다 — 끄기 전에 뜬다.
+        let kinds: Vec<String> = broadcast_kinds(&fanout, before)
+            .into_iter()
+            .filter(|kind| kind != "StatusChanged")
+            .collect();
+        core.manager.kill_agent(profile.id).ok();
+
+        assert_eq!(listed.as_deref(), Some("renamed-live"), "목록 이름의 출처");
+        assert_eq!(
+            lists,
+            vec![vec![(profile.id, "renamed-live".to_string())]],
+            "개명 한 번에 에이전트 목록 한 장"
+        );
+        assert_eq!(kinds, ["ProfileListUpdated", "AgentListUpdated"]);
+    }
+
+    /// 버스 · CLI `agent.rename` 은 WS 팔을 지나지 않고 명부 통지 포트(`RosterFanout`)로 알린다 — 그 통지도 프로필 목록
+    /// 뒤에 새 이름을 실은 에이전트 목록을 낸다(셸의 탭 자동 이름이 LLM 의 개명을 따른다).
+    #[tokio::test]
+    async fn the_roster_port_broadcasts_the_agent_list_after_the_profile_list() {
+        use crate::control::agent::RosterBroadcast;
+
+        let (core, fanout) = test_core_recording();
+        let profile = live_profile("bus-raw");
+        core.manager
+            .try_create_agent(profile.clone())
+            .expect("등록 성공");
+        core.manager
+            .spawn_agent(&profile, SpawnMode::Fresh)
+            .expect("spawn")
+            .into_started()
+            .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+        let port = RosterFanout::new(fanout.clone(), core.manager.clone());
+        assert!(
+            matches!(
+                core.manager
+                    .try_rename_agent(profile.id, Some("renamed-by-bus".into())),
+                Ok(CoreRenameOutcome::Renamed(_))
+            ),
+            "개명 확정(이 시험의 전제)"
+        );
+        let before = fanout.texts().len();
+
+        port.roster_changed();
+
+        let lists = broadcast_agent_lists(&fanout, before);
+        // 끄기도 목록을 낸다 — 끄기 전에 뜬다.
+        let kinds: Vec<String> = broadcast_kinds(&fanout, before)
+            .into_iter()
+            .filter(|kind| kind != "StatusChanged")
+            .collect();
+        core.manager.kill_agent(profile.id).ok();
+
+        assert_eq!(
+            lists,
+            vec![vec![(profile.id, "renamed-by-bus".to_string())]],
+            "통지 한 번에 에이전트 목록 한 장"
+        );
+        assert_eq!(kinds, ["ProfileListUpdated", "AgentListUpdated"]);
+    }
+
+    /// 무변경 개명(남이 그 이름을 쥐어 제 계열 이름을 지킨다)은 프로필 목록만 낸다 — 목록 이름이 그대로다.
+    #[tokio::test]
+    async fn an_unchanged_rename_does_not_broadcast_the_agent_list() {
+        let (core, fanout) = test_core_recording();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        let bob = unlaunchable_profile("bob");
+        let twin = unlaunchable_profile("bob(1)");
+        for profile in [&bob, &twin] {
+            core.manager
+                .try_create_agent(profile.clone())
+                .expect("등록 성공");
+        }
+        let before = fanout.texts().len();
+
+        core.dispatch(
+            AgentCommand::RenameProfile {
+                profile_id: twin.id,
+                name: Some("bob".into()),
+                request_id: rid(),
+            },
+            &session,
+            &mock,
+        )
+        .await;
+
+        assert_eq!(
+            core.manager
+                .agent_snapshot(twin.id)
+                .and_then(|p| p.display_name),
+            Some("bob(1)".to_string()),
+            "무변경(이 시험의 전제)"
+        );
+        assert_eq!(broadcast_kinds(&fanout, before), ["ProfileListUpdated"]);
     }
 
     // ── 6. Subscribe 시 conn_tx 에 SubscribeAck → ReplayComplete 순서로 들어가는지 ──

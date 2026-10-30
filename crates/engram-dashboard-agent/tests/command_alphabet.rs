@@ -42,6 +42,24 @@ declare_commands! {
     } -> ok AlphabetOk {
         echoed: String,
     } errors [INVALID_ARGUMENT, UNSUPPORTED];
+
+    /// 에이전트 참조 표시(ADR-0308) — 표시한 칸 이름만 `agent_args` 로 나가고 스키마 · 타입은 그대로다.
+    #[effect(Write)]
+    #[since(1)]
+    "fixture.agentRefs" => args AgentRefsArgs {
+        /// 고를 에이전트 — 이름이나 id.
+        #[agent_ref]
+        target: String,
+        label: String,
+        #[agent_ref]
+        after: Option<String>,
+        maybe: Option<String>,
+        nested: Sample,
+        reparent: Option<Option<String>>,
+        many: Vec<String>,
+        maybe_many: Option<Vec<String>>,
+    } -> ok AgentRefsOk {
+    } errors [NOT_FOUND];
 }
 
 fn args_schema() -> serde_json::Value {
@@ -152,6 +170,44 @@ fn absent_option_fields_are_none() {
 #[test]
 fn catalog_version_is_per_block() {
     assert_eq!(CATALOG_VERSION, 7);
-    assert_eq!(COMMAND_SPECS.len(), 1);
+    assert_eq!(COMMAND_SPECS.len(), 2);
     assert_eq!(AlphabetArgs::SPEC.since, 3);
+}
+
+// ── 에이전트 참조 표시(ADR-0308) ───────────────────────────────────────────────────────
+
+#[test]
+fn marked_fields_become_agent_args_in_declaration_order() {
+    assert_eq!(AgentRefsArgs::SPEC.agent_args, ["target", "after"]);
+    assert!(
+        AlphabetArgs::SPEC.agent_args.is_empty(),
+        "표시 없는 선언은 빈 목록"
+    );
+}
+
+/// 표시는 데몬에게 주는 신호일 뿐 — 광고 스키마 · Rust 타입 · wire 모양은 표시 없는 칸과 같다.
+#[test]
+fn the_mark_leaves_the_schema_and_the_type_alone() {
+    let schema: serde_json::Value =
+        serde_json::from_str(AgentRefsArgs::SPEC.args_schema).expect("args 스키마는 JSON");
+    let props = &schema["properties"];
+    assert_eq!(props["target"], props["label"]);
+    assert_eq!(props["after"], props["maybe"]);
+    assert_eq!(
+        schema["required"],
+        serde_json::json!(["target", "label", "nested", "reparent", "many"])
+    );
+
+    let value = serde_json::json!({
+        "target": "lead",
+        "label": "x",
+        "after": "worker",
+        "nested": { "flag": false, "count": 1, "offset": 0, "ratio": 1.0, "tags": [] },
+        "reparent": null,
+        "many": []
+    });
+    let parsed: AgentRefsArgs = serde_json::from_value(value).expect("역직렬화");
+    assert_eq!(parsed.target, "lead");
+    assert_eq!(parsed.after.as_deref(), Some("worker"));
+    assert_eq!(parsed.reparent, Some(None));
 }

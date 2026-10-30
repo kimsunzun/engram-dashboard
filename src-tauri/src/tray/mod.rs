@@ -106,7 +106,8 @@ pub fn build_tray(app: &App) -> tauri::Result<()> {
         .on_menu_event(|app, event| dispatch_menu(app, event.id.as_ref()))
         // 트레이 좌클릭(단발) = 모든 UI 창 되살리기(사용자 요청, ADR-0229). Left + Up(뗄 때)만 처리 —
         // Click 은 Down·Up 둘 다 발화하므로 Up 으로 한정해 1회만(중복 표시 방지). 우클릭/Enter/Move/
-        // Leave 무시. show_main_ui 는 command·단일 인스턴스 재실행과 같은 actions 함수 공유(CLAUDE.md §5).
+        // Leave 무시. show_main_ui 는 command·단일 인스턴스 재실행과 같은 actions 함수 공유(CLAUDE.md §5). 사람의
+        // 누름이라 「누름」 갈래다(TRD S26-window-chrome §6-2 「누가 어느 갈래인가」).
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
@@ -114,7 +115,10 @@ pub fn build_tray(app: &App) -> tauri::Result<()> {
                 ..
             } = event
             {
-                actions::show_main_ui(tray.app_handle());
+                actions::show_main_ui(
+                    tray.app_handle(),
+                    crate::layout::window_ctl::Activation::TrayClick,
+                );
             }
         })
         .build(app)?;
@@ -136,10 +140,11 @@ pub fn build_tray(app: &App) -> tauri::Result<()> {
 // icon_state_for_stop_outcome(probe 우회 즉시 회색)가 막고, 이 옵저버는 그걸 **대체하지 않고 보완**한다
 // — 즉시성은 StopOutcome, 외부 변화(부팅 후 데몬 등장·크래시)는 옵저버가 ≤PROBE_INTERVAL 내 반영.
 //
-// panic/종료 격리: probe·publish 어느 것도 옵저버 스레드를 죽이지 않게 결과를 무시(에러는 내부 warn)
-// 하고 무한 루프를 돈다. 변화 판정·중복차단·억제창은 publish_daemon_liveness(LivenessState)가 소유 —
-// 옵저버는 probe→publish 만 한다. 초기 아이콘은 build_tray refresh 가 publish 로 last 를 먼저 세팅하므로
-// 옵저버 첫 루프가 같은 값이면 publish 가 자동 무시(변화 없음).
+// 오류 격리: probe·publish 어느 것도 옵저버 스레드를 죽이지 않게 결과를 무시(에러는 내부 warn)
+// 하고 무한 루프를 돈다(panic 은 잡지 않는다 — 셸의 panic 은 훅이 곧 셸 종료로 만든다 · ADR-0292).
+// 변화 판정·중복차단·억제창은 publish_daemon_liveness(LivenessState)가 소유 — 옵저버는 probe→publish 만 한다.
+// 초기 아이콘은 build_tray refresh 가 publish 로 last 를 먼저 세팅하므로 옵저버 첫 루프가 같은 값이면
+// publish 가 자동 무시(변화 없음).
 pub fn spawn_daemon_observer(app: &AppHandle) {
     // probe 주기. 응답성(외부 변화 반영 지연)과 부하(daemon.json 읽기+PID probe) 절충 — 3초.
     const PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
@@ -192,11 +197,10 @@ enum DaemonOp {
 // detached/breakaway 자동충족. 여기서 Command 직접 spawn 하면 앱 종료 시 데몬 동반 사살.
 fn spawn_daemon_action(app: &AppHandle, op: DaemonOp) {
     let app = app.clone();
-    // ★워커 panic 시 아이콘 갱신 누락 한계(reviewer Minor, 의도적 미가드)★: 아래 클로저가
-    // set/refresh 도달 전에 panic 하면 이번 클릭의 아이콘 갱신은 일어나지 않는다. RAII drop 가드
-    // (SignalOnDrop) 복원까지는 과하다 판단 — (1) 클로저 본문은 send_stop/ensure 호출 후 단순
-    // match 뿐이라 panic 면이 거의 없고, (2) 일방 발사 재발사 모델이라 다음 켜기/끄기 클릭이 probe
-    // 로 상태를 회수한다(아이콘 영구 고착 아님, 한 클릭 누락에 그침). 심각도 낮음 — 한계만 명시.
+    // ★워커 panic 은 가드하지 않는다(의도)★: 운영 셸에선 아래 클로저의 panic 을 훅이 셸 종료로 만든다
+    // (ADR-0292) — RAII drop 가드(SignalOnDrop)로 아이콘 갱신을 되살릴 자리가 없다. 훅 없는 시험 빌드에선
+    // set/refresh 도달 전 panic 이 그 클릭의 아이콘 갱신만 빠뜨리고, 일방 발사 재발사 모델이라 다음
+    // 켜기/끄기 클릭의 probe 가 상태를 회수한다.
     tauri::async_runtime::spawn_blocking(move || {
         let data_dir = crate::discovery::default_data_dir();
         match op {

@@ -104,8 +104,8 @@ pub fn ui_windows<'a>(
     windows
 }
 
-// 번호 = 마지막 `-` 뒤 꼬리. 발급 라벨(`slot-popup-<n>`)에선 접두 뒤 꼬리와 같다 — 접두 상수는 Tauri 에 묶인
-// `commands::popout` 에 있어 여기서 쓰지 않는다. 빈 꼬리·숫자 아님·u64 초과는 `None`.
+// 번호 = 마지막 `-` 뒤 꼬리. 발급 라벨(`slot-popup-<실행 표식>-<n>` — TRD S26-window-chrome §4-5)에선 발급 순번 n 이다 —
+// 접두 상수는 Tauri 에 묶인 `commands::popout` 에 있어 여기서 쓰지 않는다. 빈 꼬리·숫자 아님·u64 초과는 `None`.
 fn popout_number(label: &str) -> Option<u64> {
     label.rsplit_once('-')?.1.parse().ok()
 }
@@ -254,6 +254,23 @@ mod tests {
         assert_eq!(
             ui_windows(labels, is_popup_label),
             ["slot-popup-1", "slot-popup-2", "slot-popup-10", "main"],
+        );
+    }
+
+    // 발급 라벨에는 실행 표식이 붙는다 — 순서는 그 뒤 순번으로 정한다(표식이 숫자뿐이어도).
+    #[test]
+    fn ui_windows_orders_issued_popouts_by_their_trailing_number() {
+        use crate::commands::popout::popup_label;
+        let (ten, two) = (popup_label(10), popup_label(2));
+        let labels = [ten.as_str(), "main", two.as_str()];
+        assert_eq!(
+            ui_windows(labels, is_popup_label),
+            [two.as_str(), ten.as_str(), "main"],
+        );
+        let digits = ["slot-popup-12345678-10", "slot-popup-12345678-9"];
+        assert_eq!(
+            ui_windows(digits, is_popup_label),
+            ["slot-popup-12345678-9", "slot-popup-12345678-10"],
         );
     }
 

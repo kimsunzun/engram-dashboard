@@ -50,7 +50,18 @@ export const ko = {
   window: {
     create: '새 창',
     close: '창 닫기',
-    loading: '창 로딩 중… (label: {label})',
+    minimize: '창 최소화',
+    maximize: '창 최대화',
+    unmaximize: '창 원래 크기로',
+    raise: '창 앞으로 내기',
+    hideAll: '모든 창 숨기기',
+    showAll: '모든 창 보이기',
+    // 제목 줄 창 단추의 접근성 이름 · 툴팁(TRD S26-window-chrome §7-4) — 위 명령 제목과 따로 둔다(Windows 캡션 단추의 낱말).
+    captionMinimize: '최소화',
+    captionMaximize: '최대화',
+    captionRestore: '이전 크기로 복원',
+    captionHideAll: '모든 창 숨기기',
+    captionClose: '창 닫기',
     // ADR-0102: 부팅 pull(list_tabs) 유계 재시도 소진 후 최종 실패 표면화(조용히 로딩에 고착 금지).
     loadFailed: '창을 불러오지 못했습니다 (label: {label}). 백엔드 연결을 확인하세요.',
     renderFailed: '화면을 그리는 중 오류가 났습니다',
@@ -255,8 +266,8 @@ export const ko = {
     accept: '이전 화면 복원',
     reject: '새로 시작',
     rejectWarning: '「새로 시작」을 고르면 저장된 이전 화면을 지웁니다. 되돌릴 수 없습니다.',
-    // `durable:false` — 이 실행은 아무것도 저장하지 않아 거절이 사본을 지우지 못한다. 원인은 둘이라(`state.json` 을
-    //   못 읽음 · 사본을 못 뜸) 파일 이름을 대지 않는다.
+    // `durable:false` — 이 실행은 아무것도 저장하지 않아 거절이 사본을 지우지 못한다. 원인이 여럿이라(`state.json` 을
+    //   못 읽음 · 새 버전이 저장한 `state.json` · 사본을 못 뜸) 파일 이름을 대지 않는다.
     rejectWarningNotSaving:
       '이번 실행은 화면 상태를 저장하지 않습니다. 「새로 시작」을 골라도 저장된 이전 화면은 그대로 남고, 다음 실행 때 다시 묻습니다.',
     working: '처리 중…',
@@ -264,12 +275,16 @@ export const ko = {
     answerFailed: '답을 처리하지 못했습니다. 잠시 뒤 다시 시도해 주세요.',
     stateFileUnreadable:
       '화면 상태 파일(state.json)을 읽지 못해 기본 화면으로 시작했습니다. 이번 실행에서는 화면 상태를 저장하지 않으며, 다음 실행 때 다시 읽습니다.',
-    // 「못 쓰는 파일」은 손상만이 아니다 — 새 판의 형식 · 크기 상한 초과 등도 든다. 원인을 하나로 단정하지 않는다.
+    // ADR-0291: 새 판이 쓴 파일은 떠 두지도 덮지도 않는다 — 가드라 이 실행은 저장하지 않는다(`saves:false`).
+    stateFileNewer:
+      '화면 상태 파일(state.json)이 이 앱보다 새 버전에서 저장한 것이라 기본 화면으로 시작했습니다. 이번 실행에서는 화면 상태를 저장하지 않으며, 파일은 그대로 둡니다.',
+    // 「못 쓰는 파일」은 손상만이 아니다 — 알 수 없는 형식 · 크기 상한 초과 등도 든다. 원인을 하나로 단정하지 않는다.
+    //   새 버전이 저장한 파일은 이 길로 오지 않는다(`stateFileNewer`).
     stateFileCorruptCopiedAside:
-      '화면 상태 파일(state.json)이 사용할 수 없는 상태(손상 · 다른 버전의 형식 등)라 기본 화면으로 시작했습니다. 원래 파일 내용은 같은 폴더의 state.json.corrupt 에 남겨 두었습니다.',
+      '화면 상태 파일(state.json)이 사용할 수 없는 상태(손상 · 알 수 없는 형식 등)라 기본 화면으로 시작했습니다. 원래 파일 내용은 같은 폴더의 state.json.corrupt 에 남겨 두었습니다.',
     // ★이 경우의 `.corrupt` 를 이번 실행의 백업으로 말하지 말 것★ — 그 이름의 파일은 앞선 실행이 떠 둔 것이다.
     stateFileCorruptNotCopied:
-      '화면 상태 파일(state.json)이 사용할 수 없는 상태(손상 · 다른 버전의 형식 등)라 기본 화면으로 시작했습니다. 원래 파일은 따로 보관하지 못했습니다. 같은 폴더에 state.json.corrupt 가 있다면 이전 실행에서 남긴 것이며, 이번 파일의 백업이 아닙니다.',
+      '화면 상태 파일(state.json)이 사용할 수 없는 상태(손상 · 알 수 없는 형식 등)라 기본 화면으로 시작했습니다. 원래 파일은 따로 보관하지 못했습니다. 같은 폴더에 state.json.corrupt 가 있다면 이전 실행에서 남긴 것이며, 이번 파일의 백업이 아닙니다.',
     // 가드 ⅱ(`saves:false` · `state_file:'ok'`). 원인이 여럿이라(쓰기 실패 · 사본을 못 읽음 · 새 판의 사본이 그 자리에
     //   있음) 하나로 단정하지 않는다. 「다시 묻는다」 = 이 실행이 `state.json` 을 건드리지 않아 정상 종료 표시가 없는
     //   채로 남고, 다음 부팅이 그것을 다시 판정한다.
@@ -288,7 +303,7 @@ export const ko = {
     // 반복 placeholder 시드 — 같은 토큰 2회. 전역 치환(global replace) 회귀 검증용(index.test.ts). ADR-0069.
     duplicatePreview: '{name} / {name}',
     viewLoading: 'View 로딩 중…',
-    // LoadingPanel 의 화면 밖 이름(aria-label) — 보이는 텍스트가 아니다. window.loading 은 인자가 달라 따로 둔다.
+    // LoadingPanel 의 화면 밖 이름(aria-label) — 보이는 텍스트가 아니다.
     loading: '로딩 중…',
     emptyResult: '(빈 결과)',
     copied: '복사됨',

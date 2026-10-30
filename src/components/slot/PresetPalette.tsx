@@ -18,6 +18,7 @@ import { refreshPresets } from '../../store/eventBus'
 import { basename } from '../../util/basename'
 import type { Preset } from '../../api/types'
 import { t } from '../../i18n'
+import { useBlurOnDragRegionPress } from '../layout/titleRow/dragRegion'
 
 /**
  * ADR-0061 리치화. 파생은 공용 `basename` 유틸에 위임 — AgentList 행 표시명과 단일 출처를 공유한다
@@ -31,6 +32,8 @@ type RowMenu = { x: number; y: number; presetId: string }
 
 export default function PresetPalette() {
   const presets = useAgentStore(s => s.presets)
+  // 받기 전엔 목록 칸을 비워 둔다 — 새 창에서 목록이 오기 전 빈 목록 안내가 잠깐 보이지 않게(AgentList 와 같은 규칙).
+  const presetsLoaded = useAgentStore(s => s.presetsLoaded)
   const rowMenuRef = useRef<HTMLDivElement>(null)
   const [rowMenu, setRowMenu] = useState<RowMenu | null>(null)
 
@@ -55,6 +58,8 @@ export default function PresetPalette() {
   useEffect(() => {
     if (editingId !== null) inputRef.current?.select()
   }, [editingId])
+  // 창 끌 자리(제목 줄) 누름에도 편집이 끝난다 — 확정은 onBlur 그대로.
+  useBlurOnDragRegionPress(editingId !== null, inputRef)
 
   useEffect(() => {
     if (!rowMenu) return
@@ -62,8 +67,9 @@ export default function PresetPalette() {
       const target = e.target as Node
       if (rowMenuRef.current && !rowMenuRef.current.contains(target)) setRowMenu(null)
     }
-    document.addEventListener('mousedown', h)
-    return () => document.removeEventListener('mousedown', h)
+    // 캡처 단계 — 창 끌 자리 누름은 거품 단계에 닿지 않는다(`layout/titleRow/dragRegion.ts`).
+    document.addEventListener('mousedown', h, true)
+    return () => document.removeEventListener('mousedown', h, true)
   }, [rowMenu])
 
   useEffect(() => {
@@ -182,9 +188,11 @@ export default function PresetPalette() {
       {/* 공용 ScrollArea seam(ADR-0053)으로 스크롤. 평면 목록(가상화 없음)이라 Viewport 로 감싸도 무해. */}
       <ScrollArea style={{ flex: 1, minHeight: 0 }}>
         {presets.length === 0 ? (
-          <div style={{ padding: '12px', color: 'var(--text-muted)', fontSize: '12px' }}>
-            {t('preset.empty')}
-          </div>
+          presetsLoaded && (
+            <div style={{ padding: '12px', color: 'var(--text-muted)', fontSize: '12px' }}>
+              {t('preset.empty')}
+            </div>
+          )
         ) : (
           presets.map(preset => {
             const isBusy = deleting.has(preset.id) || renaming.has(preset.id)

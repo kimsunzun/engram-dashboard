@@ -15,9 +15,12 @@ import { t } from '../../i18n'
 
 function messageOf(stateFile: StateFileStatus | undefined, saves: boolean | undefined): string | null {
   switch (stateFile) {
-    // 가드 ⅰ 도 `saves:false` 지만 이 문구가 「저장하지 않는다」를 이미 싣는다 — 가드 ⅱ 문구를 겹쳐 띄우지 않는다.
+    // 가드 ⅰ(못 읽음 · 새 판)도 `saves:false` 지만 이 두 문구가 「저장하지 않는다」를 이미 싣는다 — 가드 ⅱ 문구를
+    //   겹쳐 띄우지 않는다.
     case 'unreadable':
       return t('restore.stateFileUnreadable')
+    case 'newer':
+      return t('restore.stateFileNewer')
     case 'corrupt_copied_aside':
       return t('restore.stateFileCorruptCopiedAside')
     case 'corrupt_not_copied':

@@ -1,43 +1,54 @@
 //! `state.json` 의 글 ↔ [`StateFile`] — 읽기 관용과 쓰기 상한(크기 · 중첩 — TRD S21-storage §6-2 · §6-4 I4).
-//! 파일은 열지 않는다 — 읽기 · 쓰기는 부르는 쪽이 `fsutil` 로 한다.
+//! 파일은 열지 않는다 — 읽기 · 쓰기는 부르는 쪽이 base `file` 로 한다. 통째로 읽을 수 있나는 base `file` 의
+//! 판정 하나다 — 이 모듈의 몫은 [`STATE_SPEC`](버전 키 · 판 · 상한 · 머리 모양 검사)과 창 해석이다.
 //!
 //! 읽기는 세 층으로 접는다:
-//! - **통째로 못 쓴다**([`Unusable`]) — JSON 이 아니다 · 머리(`version` · `saved_at_ms` · `clean_exit` ·
-//!   `resolved_crash_copy` · `windows` 배열)를 못 읽는다 · 이 셸보다 새 `version` 이다. 원문의 상한 초과 ·
-//!   UTF-8 아님도 이쪽이다([`unusable_read`]).
+//! - **통째로 못 쓴다**([`Unusable`]) — 손상(JSON 이 아니다 · 객체가 아니다 · `version` 꼴이 틀리다 · 머리
+//!   (`saved_at_ms` · `clean_exit` · `resolved_crash_copy` · `windows` 배열)를 못 읽는다 · 원문의 상한 초과 ·
+//!   UTF-8 아님) 이거나 이 셸보다 새 `version` 이다. `version` 이 없으면 1 판이다.
 //! - **그 창만 건너뛴다** — 모르는 `kind` · 못 읽는 창 칸(탭 칸 포함).
 //! - **그 탭만 건너뛴다** — 못 읽는 탭(모르는 노드 종류 · 객체가 아닌 슬롯 내용 등).
 //!
-//! 창의 `theme` 이 모르는 값이면 창은 살리고 그 칸만 `None`(전역 테마)으로 접는다. `bounds` 가 없거나 `null` 이면
-//! `None`(자리를 본 적 없는 창)이다 — 경고가 아니다. 건너뛰고 접은 것은 [`DecodeWarning`] 으로 돌려준다 — 로그는
-//! 부르는 쪽이 낸다.
+//! 창의 `theme` 이 모르는 값 · `number` 가 `1..=MAX_SAVED_NUMBER` 정수가 아닌 값이면 창은 살리고 그 칸만
+//! `None`(전역 테마 · 번호 없음)으로 접는다. `bounds` · `number` 가 없거나 `null` 이면 `None`(자리를 본 적 없는 창 ·
+//! 번호를 적지 않은 파일)이다 — 경고가 아니다. main 의 `number` 는 복원이 보지 않으므로(D3) 무슨 값이든 경고하지
+//! 않는다. 탭의 `named` 가 없거나 불이 아니면 그 탭은 살리고 `None`(자동 이름)으로 읽는다 — 이것도 경고가 아니다(TRD
+//! S26-window-chrome §3-3 · 판정은 `schema::TabEntry` 의 serde 가 한다). 건너뛰고 접은 것은 [`DecodeWarning`] 으로
+//! 돌려준다 — 로그는 부르는 쪽이 낸다.
 
 use std::fmt;
-use std::io;
 
+use engram_dashboard_base::file::{self, Parsed};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use super::schema::{
     Bounds, StateFile, TabEntry, TabStrip, WindowEntry, WindowKind, STATE_VERSION,
 };
+use crate::layout::numbering;
 use crate::theme::UiTheme;
 
 /// 읽기 상한이자 쓰기 상한 — 넘는 글을 쓰면 다음 부팅이 그 파일 전체를 못 쓴다고 접는다(I4). 부르는 쪽은 이
-/// 값으로 `fsutil::read_file_capped` 한다.
+/// 값으로 `engram_dashboard_base::file::read_file_capped` 한다.
 pub const STATE_READ_CAP: u64 = 4 * 1024 * 1024;
+
+/// `state.json` · `state.crash.json` 의 읽기 규칙 — 모양 검사는 머리 해석이다(창 하나하나는 관용이라 보지 않는다).
+/// 부팅 판정 · 기록기의 저장 직전 재판정이 같은 정의를 쓴다.
+// ADR-0291 R1~R7
+pub const STATE_SPEC: file::Spec = file::Spec {
+    version_key: "version",
+    current: STATE_VERSION as u64,
+    cap: STATE_READ_CAP,
+    shape: head_shape,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Unusable {
-    /// 상한 초과 · UTF-8 아님 — 원문을 못 가져왔다([`unusable_read`]).
-    #[error("원문을 못 읽는다: {0}")]
-    Unreadable(String),
-    #[error("JSON 이 아니다: {0}")]
-    NotJson(String),
-    /// JSON 이지만 상태 파일의 머리를 못 읽는다.
-    #[error("상태 파일 모양이 아니다: {0}")]
-    NotStateFile(String),
+    /// 손상 — base `file` 판정의 사유 문구 그대로(상한 초과 · UTF-8 아님 · JSON 아님 · 객체 아님 · `version` 꼴 ·
+    /// 머리를 못 읽는다).
+    #[error("{0}")]
+    Corrupt(String),
     #[error("이 셸보다 새 형식이다(version {found} — 이 셸은 {STATE_VERSION} 까지)")]
     NewerVersion { found: u64 },
 }
@@ -68,8 +79,13 @@ pub enum DecodeWarning {
         index: usize,
         reason: String,
     },
-    /// `raw` = 받은 값의 JSON 원문.
+    /// `raw` = 받은 값의 JSON 원문 — 앞 `WARNING_RAW_MAX_CHARS` 글자까지(넘으면 `…` 로 끝난다).
     ThemeDropped { window_id: String, raw: String },
+    /// 팝아웃의 창 번호 칸에 값이 있는데 `1..=MAX_SAVED_NUMBER` 정수가 아니다 — 그 칸만 `None` 으로 접고 창은
+    /// 살린다(TRD S26-window-chrome §3-3). 칸 없음 · `null` · main 의 칸은 이 경고를 내지 않는다. `raw` = 받은 값의
+    /// JSON 원문 — `ThemeDropped` 와 같은 상한.
+    // ADR-0300 — 창 번호
+    NumberDropped { window_id: String, raw: String },
 }
 
 impl fmt::Display for DecodeWarning {
@@ -90,30 +106,28 @@ impl fmt::Display for DecodeWarning {
                     "창 {window_id} 의 모르는 테마 {raw} — 전역 테마를 따른다"
                 )
             }
+            DecodeWarning::NumberDropped { window_id, raw } => {
+                write!(f, "창 {window_id} 의 번호 {raw} 를 쓸 수 없다 — 버린다")
+            }
         }
     }
 }
 
+/// 원문 하나를 읽는다 — [`decode_parsed`] 에 base 판정(`file::parse` · [`STATE_SPEC`])을 넣은 것.
 pub fn decode(text: &str) -> Result<(StateFile, Vec<DecodeWarning>), Unusable> {
-    // 메모장 · PowerShell 은 UTF-8 로 저장하면 BOM 을 붙인다 — 손으로 고친 파일이 그것만으로 못 쓰게 되지 않게.
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    let doc = parse(text).map_err(|e| Unusable::NotJson(e.to_string()))?;
-    if !doc.is_object() {
-        return Err(Unusable::NotStateFile("JSON 객체가 아니다".to_string()));
-    }
-    // 머리보다 먼저 본다 — 새 형식은 머리 모양부터 다를 수 있고, 그때도 「새 형식」으로 알려야 한다.
-    match doc.get("version").and_then(version_number) {
-        Some(found) if found == u64::from(STATE_VERSION) => {}
-        Some(found) if found > u64::from(STATE_VERSION) => {
-            return Err(Unusable::NewerVersion { found })
-        }
-        _ => {
-            return Err(Unusable::NotStateFile(
-                "`version` 이 없거나 이 셸이 쓴 적 없는 값이다".to_string(),
-            ))
-        }
-    }
-    let head = Head::deserialize(doc).map_err(|e| Unusable::NotStateFile(e.to_string()))?;
+    decode_parsed(file::parse(text, &STATE_SPEC))
+}
+
+/// base 판정 하나를 상태 파일로 — 쓸 수 있는 판정이면 창 · 탭을 관용으로 읽는다(모듈 헤더).
+pub fn decode_parsed(parsed: Parsed) -> Result<(StateFile, Vec<DecodeWarning>), Unusable> {
+    let doc = match parsed {
+        Parsed::Usable { doc, .. } => doc,
+        Parsed::Unusable(reason) => return Err(Unusable::Corrupt(reason)),
+        Parsed::Newer { found } => return Err(Unusable::NewerVersion { found }),
+    };
+    // 모양 검사([`head_shape`])를 이미 지난 머리다 — 값을 얻으려고 한 번 더 읽는다.
+    let head = Head::deserialize(Value::Object(doc))
+        .map_err(|e| Unusable::Corrupt(not_a_state_file(&e)))?;
 
     let mut warnings = Vec::new();
     let windows = head
@@ -137,50 +151,53 @@ pub fn encode(state: &StateFile) -> Result<String, EncodeError> {
     let mut text = serde_json::to_string_pretty(state)
         .expect("문자열 키와 실패하지 않는 직렬화기뿐이라 JSON 직렬화가 실패할 수 없다");
     text.push('\n');
-    if text.len() as u64 > STATE_READ_CAP {
+    if file::check_cap(text.len(), &STATE_SPEC).is_err() {
         return Err(EncodeError::TooLarge { len: text.len() });
     }
-    parse(&text).map_err(|e| EncodeError::Unparsable {
-        reason: e.to_string(),
-    })?;
+    // ★다시 읽기는 [`decode`] 와 같은 판정(`file::parse`)으로 한다 — 다른 파서로 바꾸지 말 것★: 중첩 깊이를 재지
+    //   않는 길(`IgnoredAny` 등)로 재면 다시 읽기를 통과한 글을 `decode` 가 못 읽는다.
+    if let Parsed::Unusable(reason) = file::parse(&text, &STATE_SPEC) {
+        return Err(EncodeError::Unparsable { reason });
+    }
     Ok(text)
 }
 
-/// [`decode`] 와 [`encode`] 의 다시 읽기가 함께 쓰는 파서 — 둘이 같은 중첩 상한을 본다.
-// ★`IgnoredAny` 로 바꾸지 말 것 · 상한을 끄지 말 것★ — `IgnoredAny` 로 건너뛰는 경로는 중첩 깊이를 재지 않아,
-//   다시 읽기를 통과한 글을 `decode` 가 못 읽는다. 상한을 끄면 깊은 중첩의 파일이 스택을 넘친다.
-fn parse(text: &str) -> serde_json::Result<Value> {
-    serde_json::from_str(text)
+/// [`STATE_SPEC`] 의 모양 검사 — 머리를 읽을 수 있나. 창 하나하나는 보지 않는다(그 창만 건너뛰는 관용).
+fn head_shape(version: u64, doc: &Map<String, Value>) -> Result<(), String> {
+    // 앞 판을 읽는 리더가 없다 — 앞 판 파일을 이 판으로 읽으면 칸 뜻이 어긋난다(`schema` 머리 「칸 더하기 규칙」).
+    if version != u64::from(STATE_VERSION) {
+        return Err(format!(
+            "version {version} 을 읽는 리더가 없다(이 셸은 {STATE_VERSION})"
+        ));
+    }
+    Head::deserialize(doc)
+        .map(drop)
+        .map_err(|e| not_a_state_file(&e))
 }
 
-/// 정수 값인 실수(`1.0`)도 받는다 — JSON 도구가 수를 실수로 다시 쓰기도 한다(설정 파일과 같은 관용). 음수 ·
-/// 소수 · `u64` 범위 밖 · 수가 아닌 값은 `None`.
-fn version_number(raw: &Value) -> Option<u64> {
-    // 2^64 — `u64::MAX as f64` 와 같은 값이라 그 자체는 범위 밖이다. `as u64` 는 범위 밖을 u64::MAX 로 눌러
-    //   없는 「새 형식」을 지어내므로 자르기 전에 거른다.
-    const U64_END: f64 = 18_446_744_073_709_551_616.0;
-    raw.as_u64().or_else(|| {
-        let float = raw.as_f64()?;
-        (0.0..U64_END)
-            .contains(&float)
-            .then_some(float)
-            .filter(|float| float.fract() == 0.0)
-            .map(|float| float as u64)
-    })
-}
-
-/// `fsutil::read_file_capped` 의 오류 중 파일 내용이 못 쓸 것인 경우 — 상한 초과 · UTF-8 아님(`InvalidData`).
-///
-/// `None` = 내용이 아니라 읽기 자체가 실패했다(없음 · 잠김 · 권한). ★못 쓸 파일과 섞지 않는다★ — 잠깐 잠긴
-/// 멀쩡한 파일을 떠 두거나 덮지 않는다(TRD §6-2 I3).
-pub fn unusable_read(err: &io::Error) -> Option<Unusable> {
-    (err.kind() == io::ErrorKind::InvalidData).then(|| Unusable::Unreadable(err.to_string()))
+fn not_a_state_file(error: &serde_json::Error) -> String {
+    format!("상태 파일 모양이 아니다: {error}")
 }
 
 /// 크래시 사본의 신원 — [`StateFile::resolved_crash_copy`] 에 싣는 값. 읽은 원문 바이트 그대로를 잰다 — 부팅과
 /// 기록기가 모두 이 함수로 재야 같은 사본을 같다고 본다.
 pub fn crash_copy_hash(text: &str) -> String {
-    crate::fsutil::fnv1a_hex(text.as_bytes())
+    fnv1a_hex(text.as_bytes())
+}
+
+/// 64비트 FNV-1a — 같은 바이트면 빌드 · 실행이 달라도 같은 값이다(std `DefaultHasher` 는 그것을 약속하지
+/// 않는다). 같은 내용인가를 가리는 용도이지 보안용이 아니다 — 일부러 맞춘 충돌은 못 막는다.
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    bytes.iter().fold(OFFSET_BASIS, |hash, &byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(PRIME)
+    })
+}
+
+/// [`fnv1a_64`] 를 소문자 16진 16자리로 — 앞자리 0 을 채워 길이가 늘 같다.
+fn fnv1a_hex(bytes: &[u8]) -> String {
+    format!("{:016x}", fnv1a_64(bytes))
 }
 
 #[derive(Deserialize)]
@@ -202,6 +219,8 @@ enum KindTag {
 #[derive(Deserialize)]
 struct WindowHead {
     id: String,
+    #[serde(default)]
+    number: Value,
     #[serde(default)]
     theme: Value,
     // 없음 · `null` = `None`. 객체가 아니거나 칸이 수가 아니면(유한하지 않은 실수는 `null` 로 나간다) 그 창의 읽기
@@ -272,19 +291,38 @@ fn decode_window(
             None => {
                 warnings.push(DecodeWarning::ThemeDropped {
                     window_id: head.id.clone(),
-                    raw: raw.to_string(),
+                    raw: raw_for_warning(raw),
                 });
                 None
             }
         },
     };
+    let number = numbering::saved_number(&head.number);
+    if number.is_none() && !head.number.is_null() && matches!(kind, WindowKind::Popout(_)) {
+        warnings.push(DecodeWarning::NumberDropped {
+            window_id: head.id.clone(),
+            raw: raw_for_warning(&head.number),
+        });
+    }
     Some(WindowEntry {
         id: head.id,
+        number,
         kind,
         theme,
         bounds: head.bounds,
         maximized: head.maximized,
     })
+}
+
+// 경고에 싣는 원문의 상한(글자) — 칸 하나에 큰 값이 들어 있어도 로그 한 줄이 그만큼 커지지 않게 한다.
+const WARNING_RAW_MAX_CHARS: usize = 64;
+
+fn raw_for_warning(value: &Value) -> String {
+    let raw = value.to_string();
+    match raw.char_indices().nth(WARNING_RAW_MAX_CHARS) {
+        Some((cut, _)) => format!("{}…", &raw[..cut]),
+        None => raw,
+    }
 }
 
 /// `Err` = 탭 칸 자체(`active_tab` · `tabs` 배열)를 못 읽는다 — 그 창째 건너뛴다.
@@ -318,14 +356,12 @@ fn decode_strip(
 
 #[cfg(test)]
 mod tests {
-    use std::io;
-
     use serde_json::{json, Value};
     use uuid::Uuid;
 
     use super::{
-        crash_copy_hash, decode, encode, unusable_read, DecodeWarning, EncodeError, Unusable,
-        STATE_READ_CAP,
+        crash_copy_hash, decode, encode, fnv1a_64, fnv1a_hex, DecodeWarning, EncodeError, Unusable,
+        STATE_READ_CAP, WARNING_RAW_MAX_CHARS,
     };
     use crate::layout::{SlotContent, SplitDir};
     use crate::state::schema::{
@@ -354,6 +390,7 @@ mod tests {
         TabEntry {
             id: Uuid::new_v4(),
             name: name.to_string(),
+            named: Some(true),
             focused_slot_id: None,
             layout,
         }
@@ -363,7 +400,8 @@ mod tests {
         let focused = Uuid::new_v4();
         let first = TabEntry {
             id: Uuid::new_v4(),
-            name: "View 1".to_string(),
+            name: "빈 칸".to_string(),
+            named: Some(false),
             focused_slot_id: Some(focused),
             layout: PersistedNode::Split {
                 id: Uuid::new_v4(),
@@ -397,6 +435,7 @@ mod tests {
             windows: vec![
                 WindowEntry {
                     id: "main".to_string(),
+                    number: Some(1),
                     kind: WindowKind::Main(TabStrip {
                         active_tab: second.id,
                         tabs: vec![first, second],
@@ -407,6 +446,7 @@ mod tests {
                 },
                 WindowEntry {
                     id: Uuid::new_v4().to_string(),
+                    number: Some(2),
                     kind: WindowKind::Popout(TabStrip {
                         active_tab: popout.id,
                         tabs: vec![popout],
@@ -436,7 +476,7 @@ mod tests {
 
     fn window(id: &str, kind: &str) -> Value {
         json!({
-            "id": id, "kind": kind, "theme": null,
+            "id": id, "kind": kind, "number": 2, "theme": null,
             "bounds": { "x": 0, "y": 0, "w": 800, "h": 600 }, "maximized": false,
         })
     }
@@ -455,7 +495,7 @@ mod tests {
 
     fn tab_json(content: Value) -> Value {
         json!({
-            "id": Uuid::new_v4(), "name": "t", "focused_slot_id": null,
+            "id": Uuid::new_v4(), "name": "t", "named": false, "focused_slot_id": null,
             "layout": { "type": "slot", "id": Uuid::new_v4(), "content": content },
         })
     }
@@ -509,6 +549,7 @@ mod tests {
         assert_eq!(doc["version"], 1);
         let main = &doc["windows"][0];
         assert_eq!(main["kind"], "main");
+        assert_eq!(main["number"], 1);
         assert_eq!(main["theme"], "light");
         assert_eq!(
             main["bounds"],
@@ -519,9 +560,12 @@ mod tests {
         assert_eq!(main["tabs"].as_array().unwrap().len(), 2);
         assert_eq!(main["tabs"][0]["layout"]["type"], "split");
         assert_eq!(main["tabs"][0]["layout"]["dir"], "left_right");
+        assert_eq!(main["tabs"][0]["named"], false);
+        assert_eq!(main["tabs"][1]["named"], true);
 
         let popout = &doc["windows"][1];
         assert_eq!(popout["kind"], "popout");
+        assert_eq!(popout["number"], 2);
         assert_eq!(popout["theme"], Value::Null);
     }
 
@@ -540,11 +584,18 @@ mod tests {
     #[test]
     fn crash_copy_hash_is_the_fnv1a_of_the_raw_text() {
         let text = "\u{feff}{\"version\":1}\r\n";
-        assert_eq!(
-            crash_copy_hash(text),
-            crate::fsutil::fnv1a_hex(text.as_bytes())
-        );
+        assert_eq!(crash_copy_hash(text), fnv1a_hex(text.as_bytes()));
         assert_ne!(crash_copy_hash(text), crash_copy_hash(&text[3..]));
+    }
+
+    #[test]
+    fn fnv1a_matches_the_published_vectors() {
+        assert_eq!(fnv1a_64(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv1a_64(b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(fnv1a_64(b"foobar"), 0x8594_4171_f739_67e8);
+        assert_eq!(fnv1a_hex(b""), "cbf29ce484222325");
+        assert_eq!(fnv1a_hex(b"a"), "af63dc4c8601ec8c");
+        assert_eq!(fnv1a_hex(b"foobar"), "85944171f73967e8");
     }
 
     // ── 모르는 슬롯 내용(ADR-0060) ──
@@ -679,6 +730,46 @@ mod tests {
         assert_eq!(skipped, [0, 2, 3]);
     }
 
+    // TRD S26-window-chrome §3-3 — `named` 가 불이 아니어도 탭은 살리고 `None`(자동 이름)으로 읽는다. 경고하지 않는다.
+    #[test]
+    fn a_tab_named_flag_that_is_not_a_bool_reads_as_none_and_keeps_the_tab() {
+        let flags = [
+            None,
+            Some(json!(null)),
+            Some(json!(true)),
+            Some(json!(false)),
+            Some(json!("true")),
+            Some(json!(1)),
+            Some(json!({ "named": true })),
+            Some(json!([true])),
+        ];
+        let tabs = flags
+            .iter()
+            .map(|flag| {
+                let mut tab = tab_json(json!({ "type": "empty" }));
+                match flag {
+                    None => {
+                        tab.as_object_mut().unwrap().remove("named");
+                    }
+                    Some(raw) => tab["named"] = raw.clone(),
+                }
+                tab
+            })
+            .collect();
+        let (mut state, warnings) = decode_value(&file(vec![tabbed("main", "main", tabs)]));
+
+        assert_eq!(warnings, vec![]);
+        let named: Vec<Option<bool>> = main_strip(&mut state)
+            .tabs
+            .iter()
+            .map(|t| t.named)
+            .collect();
+        assert_eq!(
+            named,
+            [None, None, Some(true), Some(false), None, None, None, None]
+        );
+    }
+
     #[test]
     fn an_unknown_theme_keeps_the_window_and_drops_the_theme() {
         let mut odd = readable("w-0");
@@ -696,6 +787,113 @@ mod tests {
                 window_id: "w-0".to_string(),
                 raw: "\"sepia\"".to_string(),
             }]
+        );
+    }
+
+    #[test]
+    fn a_number_that_is_not_a_saved_number_keeps_the_window_and_drops_the_number() {
+        // 앞 둘(칸 없음 · `null`) = 번호를 적지 않은 파일 — 경고 없이 접는다.
+        let bad = [
+            None,
+            Some(Value::Null),
+            Some(json!(0)),
+            Some(json!(-1)),
+            Some(json!(2.5)),
+            Some(json!(2.0)),
+            Some(json!("3")),
+            Some(json!(true)),
+            Some(json!(1000)),
+            Some(json!(u64::MAX)),
+        ];
+        let windows: Vec<Value> = bad
+            .iter()
+            .enumerate()
+            .map(|(i, raw)| {
+                let mut w = readable(&format!("w-{i}"));
+                match raw {
+                    None => {
+                        w.as_object_mut().unwrap().remove("number");
+                    }
+                    Some(raw) => w["number"] = raw.clone(),
+                }
+                w
+            })
+            .collect();
+        let (state, warnings) = decode_value(&file(windows));
+        assert_eq!(state.windows.len(), bad.len(), "창을 건너뛰지 않는다");
+        assert!(state.windows.iter().all(|w| w.number.is_none()));
+        assert!(
+            state
+                .windows
+                .iter()
+                .all(|w| matches!(&w.kind, WindowKind::Popout(strip) if strip.tabs.len() == 1)),
+            "탭도 그대로"
+        );
+        let dropped: Vec<(String, String)> = warnings
+            .iter()
+            .map(|w| match w {
+                DecodeWarning::NumberDropped { window_id, raw } => (window_id.clone(), raw.clone()),
+                other => panic!("번호 버림이어야 한다: {other}"),
+            })
+            .collect();
+        let want: Vec<(String, String)> = bad
+            .iter()
+            .enumerate()
+            .skip(2)
+            .map(|(i, raw)| (format!("w-{i}"), raw.as_ref().unwrap().to_string()))
+            .collect();
+        assert_eq!(dropped, want);
+
+        let mut edge = readable("w-max");
+        edge["number"] = json!(999);
+        let mut main = readable("main");
+        main["kind"] = json!("main");
+        main["number"] = json!(1);
+        let (state, warnings) = decode_value(&file(vec![main, edge]));
+        assert_eq!(warnings, vec![]);
+        let numbers: Vec<Option<u32>> = state.windows.iter().map(|w| w.number).collect();
+        assert_eq!(numbers, [Some(1), Some(999)]);
+    }
+
+    #[test]
+    fn mains_number_is_never_warned_about() {
+        for raw in [json!(0), json!(7), json!("1"), Value::Null] {
+            let mut main = readable("main");
+            main["kind"] = json!("main");
+            main["number"] = raw.clone();
+            let (state, warnings) = decode_value(&file(vec![main]));
+            assert_eq!(warnings, vec![], "{raw}");
+            assert_eq!(state.windows.len(), 1);
+        }
+    }
+
+    #[test]
+    fn a_long_raw_value_is_cut_in_the_warning() {
+        let mut long_number = readable("w-0");
+        long_number["number"] = json!("x".repeat(500));
+        let mut long_theme = readable("w-1");
+        long_theme["theme"] = json!("y".repeat(500));
+        let mut edge = readable("w-2");
+        let edge_raw = json!("z".repeat(WARNING_RAW_MAX_CHARS - 2));
+        edge["number"] = edge_raw.clone();
+        let (_, warnings) = decode_value(&file(vec![long_number, long_theme, edge]));
+        let raws: Vec<&str> = warnings
+            .iter()
+            .map(|w| match w {
+                DecodeWarning::NumberDropped { raw, .. }
+                | DecodeWarning::ThemeDropped { raw, .. } => raw.as_str(),
+                other => panic!("번호 · 테마 버림이어야 한다: {other}"),
+            })
+            .collect();
+        let cut = |c: char| format!("\"{}…", c.to_string().repeat(WARNING_RAW_MAX_CHARS - 1));
+        assert_eq!(
+            raws,
+            [
+                cut('x').as_str(),
+                cut('y').as_str(),
+                edge_raw.to_string().as_str(),
+            ],
+            "상한까지는 그대로 싣는다"
         );
     }
 
@@ -777,10 +975,27 @@ mod tests {
         assert_eq!(warnings, vec![]);
     }
 
+    /// ADR-0291 R1: `version` 이 없는 파일은 1 판이다.
+    #[test]
+    fn a_missing_version_reads_as_the_first_version() {
+        let mut doc = file(vec![readable("w-0")]);
+        doc.as_object_mut().unwrap().remove("version");
+        let (state, warnings) = decode_value(&doc);
+        assert_eq!((state.version, state.windows.len()), (STATE_VERSION, 1));
+        assert_eq!(warnings, vec![]);
+    }
+
+    fn corrupt_reason(text: &str) -> String {
+        match decode(text) {
+            Err(Unusable::Corrupt(reason)) => reason,
+            other => panic!("손상이어야 한다: {other:?}"),
+        }
+    }
+
     #[test]
     fn not_json_is_unusable() {
-        assert!(matches!(decode("{BROKEN"), Err(Unusable::NotJson(_))));
-        assert!(matches!(decode(""), Err(Unusable::NotJson(_))));
+        assert!(corrupt_reason("{BROKEN").contains("JSON 이 아니다"));
+        assert!(corrupt_reason("").contains("JSON 이 아니다"));
     }
 
     #[test]
@@ -797,7 +1012,6 @@ mod tests {
         };
         for doc in [
             json!([1, 2]),
-            without("version"),
             without("saved_at_ms"),
             without("clean_exit"),
             without("windows"),
@@ -811,10 +1025,14 @@ mod tests {
             with("resolved_crash_copy", json!(3)),
         ] {
             assert!(
-                matches!(decode(&doc.to_string()), Err(Unusable::NotStateFile(_))),
+                matches!(decode(&doc.to_string()), Err(Unusable::Corrupt(_))),
                 "{doc}"
             );
         }
+        assert!(
+            corrupt_reason(&without("windows").to_string()).contains("상태 파일 모양이 아니다"),
+            "머리를 못 읽는 사유는 모양 검사의 문구다"
+        );
     }
 
     #[test]
@@ -824,27 +1042,6 @@ mod tests {
             decode(&format!("\u{feff}{text}")).unwrap(),
             decode(&text).unwrap()
         );
-    }
-
-    #[test]
-    fn only_invalid_data_read_errors_are_unusable() {
-        let over = crate::fsutil::read_capped(&b"0123456789"[..], 4).unwrap_err();
-        assert!(matches!(
-            unusable_read(&over),
-            Some(Unusable::Unreadable(_))
-        ));
-        let not_utf8 = crate::fsutil::read_capped(&[0xff, 0xfe, 0x00][..], 16).unwrap_err();
-        assert!(matches!(
-            unusable_read(&not_utf8),
-            Some(Unusable::Unreadable(_))
-        ));
-        for kind in [
-            io::ErrorKind::NotFound,
-            io::ErrorKind::PermissionDenied,
-            io::ErrorKind::Other,
-        ] {
-            assert_eq!(unusable_read(&io::Error::from(kind)), None, "{kind:?}");
-        }
     }
 
     // ── 쓰기 상한 ──
@@ -888,6 +1085,7 @@ mod tests {
             resolved_crash_copy: None,
             windows: vec![WindowEntry {
                 id: "main".to_string(),
+                number: Some(1),
                 kind: WindowKind::Main(TabStrip {
                     active_tab: only.id,
                     tabs: vec![only],
@@ -907,7 +1105,7 @@ mod tests {
 
         let too_deep = nested_splits(121);
         let written = serde_json::to_string_pretty(&too_deep).unwrap();
-        assert!(matches!(decode(&written), Err(Unusable::NotJson(_))));
+        assert!(corrupt_reason(&written).contains("JSON 이 아니다"));
         assert!(matches!(
             encode(&too_deep),
             Err(EncodeError::Unparsable { .. })

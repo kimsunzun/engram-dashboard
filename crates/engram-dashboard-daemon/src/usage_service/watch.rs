@@ -202,7 +202,8 @@ impl UsageWatch {
     fn lock(&self) -> MutexGuard<'_, HashMap<ConnId, Entry>> {
         // poison 을 견딘다 — 이 명부는 pump 스레드의 발행 경로에 있다. 락 안의 변경은 넣기·빼기·집합 한 번
         //   바꾸기뿐이라 칸은 늘 온전하다: `first_sheets` 가 패닉하면 새 집합이 선 채 그 첫 한 장만 안 나간다
-        //   (다음 revision 발행이 닿는다). 릴리즈는 `panic = "abort"` 라 debug·시험에서만 서는 갈래다.
+        //   (다음 revision 발행이 닿는다). 이 락을 쥔 패닉은 가둠 표시 밖이라(pump 쪽은 표시 끔 안) 운영
+        //   프로세스에서는 훅이 되감기 전에 끝낸다 — 훅 없는 시험 빌드에서만 서는 갈래다(ADR-0292).
         sync::lock(&self.entries)
     }
 }

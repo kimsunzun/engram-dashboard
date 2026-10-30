@@ -4,28 +4,38 @@
 //! 여부 하나로 판정한다 — 소비자 수가 아니다(결정 2). 부르는 쪽은 이 crate 의 함수와 핸들 타입만 부르고,
 //! OS 분기(`#[cfg(windows)]` · `cfg!(windows)` · `#[cfg(unix)]` 따위)는 이 crate 안에만 둔다. 시험 · 시험
 //! 하네스 bin · `examples/` 의 OS 분기는 그쪽에 남는다 — 운영 빌드에 들어가지 않는다(ADR-0266 「근거」).
-//! 이 불변식의 기계 게이트는 아래 ④(`cfg` 위치) · ⑤(OS crate 의존) · ⑥(`std::os` 경로)다. 다른 crate 에 남은 `cfg`
-//! 운영 OS 분기는 시한부 예외 하나뿐이다 —
-//! `src-tauri/src/fsutil.rs` 의 `cfg!(windows)`(ADR-0275 결정 15). `cfg` 없이 런타임에 OS 규칙을 쓰는 자리는
-//! 이 셈에 들지 않는다(④ 의 한계).
+//! 이 불변식의 기계 게이트는 아래 ④(`cfg` 위치) · ⑤(OS crate 의존) · ⑥(`std::os` 경로)다. 다른 crate 에 `cfg`
+//! 운영 OS 분기는 없다(ADR-0291 이 ADR-0275 결정 15 의 시한부 예외를 닫았다). `cfg` 없이 런타임에 OS 규칙을
+//! 쓰는 자리는 이 셈에 들지 않는다(④ 의 한계).
 //!
-//! 지금 입주자는 여덟이다 — [`process`](PID liveness · 프로세스 시작시각과 그 세 갈래 판정 · 프로세스 표 ·
+//! 지금 입주자는 아홉이다 — [`process`](PID liveness · 프로세스 시작시각과 그 세 갈래 판정 · 프로세스 표 ·
 //! 자식 PID 열거 · 한 뿌리 아래 신원 목록 · 한 프로세스 트리 끄기 — Windows `taskkill`) · [`group`](프로세스
 //! 무리의 강한 주인 · 약한 손잡이 · 붙든 멤버 · 가입 알림 포트 — Windows Job Object) ·
 //! [`file_holders`](이 파일을 지금 연 프로세스 — Restart Manager) ·
-//! [`fs`](남의 쓰기를 막은 채 여는 열기 · 그 실패의 분류 — 공유 위반 · 접근 거부) ·
+//! [`fs`](남의 쓰기를 막은 채 여는 열기 · 그 실패의 분류 — 공유 위반 · 접근 거부 · 남이 잠깐 쥐어 난 실패의
+//! 판정과 다시 하기 · 폴더 동기화) ·
 //! [`spawn`](창 없이 띄우기 · 트리 뿌리로 띄우기와 그 트리 kill 손잡이 — Windows = 멈춘 채 띄워 무리에 넣은 뒤
 //! 깨우기 · 실패한 셸의 「프로그램 없음」 판정 · 이 프로세스의 Job 밖에서 띄우기 — Windows = WMI) ·
 //! [`shell`](대화형 기본 셸 · CLI 를 콘솔 셸로 감싸기) ·
 //! [`env`](홈 디렉터리 · 실행 파일 이름 · 지금 실행 파일 옆 실행 파일 경로 · 환경변수 이름 비교) ·
-//! [`window`](전경 창이 이 프로세스의 것인가 — Windows `GetForegroundWindow`). 모듈 헤더와 공개 함수 문서가 그
+//! [`window`](창 정체 · 자리와 z 순서 한 번에 놓기 · 자리 되돌리기 · 커서 밑 맨 위 창 — 탭 놓기 끝 판정 · 창 진단
+//! 사실 · 전경 창이 이 프로세스의 것인가 · 그 창이 전경 창인가 · 제목 줄 크롬 모양 · 스냅 레이아웃 오버레이 — 기능
+//! `snap-overlay` 뒤) · [`input`](커서 자리 · 주 버튼 · Esc
+//! 상태). 모듈 헤더와 공개 함수 문서가 그
 //! 책임의 정본이다.
+//! 창을 받는 함수는 `raw-window-handle` 의 `HasWindowHandle` 를 받고 그 변이 맞추기도 여기서 한다(TRD
+//! S21-slot-docking 6.3판 §8 · B10 · 7판 §5-1).
 //!
 //! ★`testing`(실프로세스 시험 도우미) · `group::GroupRef::gone`(주인이 처음부터 없는 손잡이) ·
 //! `spawn::wmi_create_raw`(WMI 띄우기의 원시 호출 — 진단 시험 몫)는 cargo 기능 `test-support` 뒤다★
 //! (TRD 1-3 §3-8 · 이름은 base 의 ADR-0275 결정 5 와 같다) — 선언이 `#[cfg(any(test, feature = "test-support"))]` 라 이 crate 자기 시험과 그 기능을 dev 의존으로 켠 소비자 시험만
 //! 본다. 그 기능이 데몬 · 셸 · CLI 의 운영 의존 그래프에 없다는 것은 CI 게이트 ③ 이 잰다(0줄 기대와 짝인 1줄
-//! 이상 기대) — 아래 격리 게이트 ①② 와 별개인 시험 기능 누수 게이트이고, 명령 · 기대값의 정본은 `/qa` 바인딩이다. 이 crate 의 cargo 기능은 그것 하나뿐이다(ADR-0275 결정 13).
+//! 이상 기대) — 아래 격리 게이트 ①② 와 별개인 시험 기능 누수 게이트이고, 명령 · 기대값의 정본은 `/qa` 바인딩이다.
+//!
+//! ★`window::snap`(스냅 레이아웃 오버레이)은 cargo 기능 `snap-overlay` 뒤다 · 기본 꺼짐★(TRD S26-window-chrome §8-4 · 사용자
+//! 결정 Q1 2026-10-24) — 켜는 것은 셸 기능 `snap-overlay` 하나뿐이고, 그 기능이 셸 운영 그래프에 없다는 것(0줄 기대와 짝인
+//! 1줄 이상 기대)과 켠 빌드가 컴파일된다는 것은 CI 가 잰다. 이 crate 의 cargo 기능은 이 둘뿐이다 — ADR-0275 결정 13 의
+//! 「`test-support` 하나」를 넓힌다. 둘 다 코드만 여닫고 `windows` 바인딩을 켜지 않는다(아래 「의존」).
 //!
 //! ## 들이는 규칙
 //!
@@ -39,7 +49,7 @@
 //! 3. **Windows 밖 갈래는 자리채움이다**(ADR-0266 결정 7). 이 crate 가 다른 OS 구현을 새로 만들지 않는다 —
 //!    옮겨 올 때 있던 갈래(빈 답이든 `bash` · `HOME` 같은 한 줄이든)가 한 자리에 모여 보일 뿐이다. ★`#[cfg]`
 //!    로 가른 그 갈래는 여기서도 컴파일 검증을 받지 않는다★ — 개발 · CI 가 Windows 뿐이다(ADR-0230 현황).
-//!    `cfg!(windows)` 로 가른 갈래(`env::env_key_eq` · `fs` 의 실패 분류 둘)는 양쪽 다 타입 검사를 받지만 그
+//!    `cfg!(windows)` 로 가른 갈래(`env::env_key_eq` · `fs` 의 실패 분류 셋)는 양쪽 다 타입 검사를 받지만 그
 //!    밖의 OS 에서 돌려 본 적은 없다.
 //! 4. **로그는 결과를 돌려줄 길이 없는 경로(`Drop`)에서만 찍는다**(TRD 1-3 §3-7 —
 //!    `docs/process/S21-crate-boundaries/trd-1-3-platform-crate.md`). 나머지 실패는 값으로 돌려주고 부르는
@@ -50,9 +60,11 @@
 //!
 //! - **워크스페이스 crate 의존 0 — base 도 아니다**(ADR-0266 「거부한 대안」 둘째 · ADR-0268). 아래 게이트
 //!   ①이 그 벽이다 — 컴파일러는 잎 성질을 강제하지 않는다.
-//! - **운영 의존의 서드파티는 `windows`(Windows 대상만)와 `tracing` facade 만 들인다**(TRD 1-3 §0 ①) —
-//!   시험 전용 dev 의존은 이 규칙 밖이다. `windows` 는 의존 하나에 쓰는 바인딩 feature 의 합집합을 켜고, 기능별 cargo
-//!   feature 로 쪼개지 않는다(ADR-0275 결정 13). `tracing` 은 규칙 4 의 `Drop` 경로가 찍는 데만 쓴다.
+//! - **운영 의존의 서드파티는 `windows`(Windows 대상만) · `tracing` facade · `raw-window-handle` 만 들인다**(TRD 1-3
+//!   §0 ① · TRD S21-slot-docking 6.3판 §8 · B10 · 7판 §5-1) — 시험 전용 dev 의존은 이 규칙 밖이다. `windows` 는 의존 하나에 쓰는 바인딩
+//!   feature 의 합집합을 켜고, 기능별 cargo feature 로 쪼개지 않는다(ADR-0275 결정 13). `tracing` 은 규칙 4 의 경로가
+//!   찍는 데만 쓴다. `raw-window-handle` 은 창을 받는 함수의 인자 트레이트(`HasWindowHandle`) 하나 몫이다 — 의존이
+//!   없는 잎 crate 이고 OS crate 가 아니다(게이트 ⑤ 목록 밖).
 //! - ★**async 런타임(`tokio` 등)을 들이지 않는다**★ — 동기 crate 도 OS 층을 부른다(지금 agent). 여기 든
 //!   런타임은 그 동기 소비자로 조용히 번지고, 아래 게이트 ⑦ 이 그것을 빨갛게 만든다.
 //!
@@ -105,7 +117,7 @@
 //!     문자열 · raw 문자열 · `target_os /* … */ =` · 줄이 갈린 `target_os` 와 `=` 는 걸린다.
 //!   - Windows 의 rg 는 경로를 `\` 로 찍으므로 `/` 로 맞춘 뒤 정렬해 명단과 대조한다.
 //! - **명단에 드는 부류** = 시험 분기뿐인 파일(`#[cfg(test)]` 모듈 · `#[cfg(all(test, …))]` 항목 아래) ·
-//!   `tests/` · 시험 하네스 bin · `examples/` · 위 시한부 운영 예외.
+//!   `tests/` · 시험 하네스 bin · `examples/`.
 //! - **판정은 양방향이다** — 명단 밖 파일이 걸리면(운영 분기면 이 crate 로 옮기고, 시험 · 하네스면 명단에
 //!   더한다) 빨개지고, 명단의 파일이 안 걸려도(분기를 걷었거나 옮겼다 — 명단에서 뺀다) 빨개진다. 뒤쪽을
 //!   실패로 두는 것은 명단이 낡지 않게 하려는 것이다.
@@ -201,9 +213,12 @@ pub mod env;
 pub mod file_holders;
 pub mod fs;
 pub mod group;
+pub mod input;
 pub mod process;
 pub mod shell;
 pub mod spawn;
+#[cfg(all(test, windows))]
+mod test_window;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 pub mod window;

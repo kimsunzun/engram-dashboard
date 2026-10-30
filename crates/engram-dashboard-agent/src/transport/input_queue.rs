@@ -29,6 +29,7 @@ use std::collections::VecDeque;
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use engram_dashboard_base::panic::{contain, payload_text, uncontained};
 use engram_dashboard_base::sync;
 
 use crate::types::{AgentId, PtyError};
@@ -41,9 +42,9 @@ use crate::types::{AgentId, PtyError};
 /// - ★꺼낸 뒤에 큐가 닫혀도 그 쓰기가 성공하면 불린다★ — 그래서 이 부름은 큐를 닫는 쪽(통로의 끝내기
 ///   `shutdown()` · 스트림 끝)과 겹칠 수 있다. 물러난 뒤에 하면 안 되는 일이면 이 안에서 물러남 표시
 ///   (`crate::transport::process_group::RetiringSignal`)를 직접 본다 — 큐의 닫힘이 막아 주지 않는다.
-/// - ★panic 하지 않게 짠다★ — 워크스페이스 루트 `Cargo.toml` 의 `[profile.release]` 가 `panic = "abort"` 라,
-///   릴리스에서는 이 안의 panic 이 프로세스를 죽인다. 라이터가 두른 `catch_unwind`(잡아 `error` 로 남기고 다음 덩이를
-///   계속 쓴다 — 큐를 닫지 않는다)는 unwind 빌드(개발·시험)에서만 서는 안전망이다.
+/// - ★panic 하지 않게 짠다★ — 라이터는 이 부름을 가둠 표시 밖에서 돌리므로(ADR-0292 결정 3) 운영 프로세스에서는
+///   이 안의 panic 을 base 패닉 훅이 받아 프로세스를 끝낸다. 라이터가 두른 안쪽 catch(잡아 `error` 로 남기고 다음
+///   덩이를 계속 쓴다 — 큐를 닫지 않는다)는 그 훅이 없는 시험 빌드에서만 서는 안전망이다.
 /// - 라이터 스레드 하나가 뒤 덩이도 쓰므로, 이 안에서 오래 막히면 그만큼 뒤 입력이 늦는다. 이 안에서 큐가 비기를
 ///   기다리면([`InputQueue::wait_drained`]) 자기를 기다린다.
 pub type OnWritten = Box<dyn FnOnce() + Send>;
@@ -270,13 +271,13 @@ impl InputQueue {
 /// ★쓰기 실패는 큐를 닫고 **끝낸다**★ — 파이프가 깨진 뒤의 재시도는 전부 실패하고, 계속 돌면 큐에
 ///   쌓이는 입력이 영영 안 나가면서 상한까지 메모리만 문다. 닫으면 다음 `send_input` 이 사유를 들고
 ///   `Err` 로 돌아가 부른 쪽이 재시도할지 포기할지 정할 수 있다.
-/// ★★panic 도 같은 처분을 받는다 — `catch_unwind` 가 그것을 위해 있다★★: 쓰기 중 panic 하면 큐 락은
+/// ★★panic 도 같은 처분을 받는다 — `contain` 이 그것을 위해 있다★★: 쓰기 중 panic 하면 큐 락은
 ///   **poison 되지 않는다**(쓰기는 락을 놓고 한다). 그래서 이 갈래를 안 잡으면 라이터만 죽고 큐는
 ///   **열린 채** 남아, 이후 `send_input` 이 계속 `Ok` 를 돌려주다가 상한에 닿는 순간부터 **틀린
 ///   사유**(「상한 초과」)로 거절한다 — 진짜 원인은 그 로그 어디에도 없다. 그 사이 바이트는 하나도
 ///   안 나간다. `spawn` 실패 갈래(`pty.rs`·`stdio.rs`)가 이미 고른 규율과 같은 자리다: **라이터가
-///   없으면 큐를 닫아 그 순간부터 정직하게 거절한다.** ★단 unwind 빌드에서만 선다★ — 릴리스는
-///   `panic = "abort"`(워크스페이스 루트 `Cargo.toml` 의 `[profile.release]`)라 panic 이 곧 프로세스의 끝이다.
+///   없으면 큐를 닫아 그 순간부터 정직하게 거절한다.** 덩이 뒤 부를 것([`OnWritten`])의 panic 은 이 가둠
+///   밖이다(그 타입 doc · ADR-0292 결정 3).
 /// ★`agent` 는 로그 귀속용★ — 이 경고들은 「받아 둔 뒤 실패한 쓰기」의 **유일한 흔적**이라, 에이전트가
 ///   여럿이면 누구 것인지가 없으면 흔적이 아니다(`docs/reference/logging-conventions.md` 의 형식 규약).
 pub(crate) fn drain(
@@ -285,27 +286,32 @@ pub(crate) fn drain(
     agent: AgentId,
     mut write: impl FnMut(&[u8]) -> std::io::Result<()>,
 ) {
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    // ADR-0292
+    let outcome = contain(std::panic::AssertUnwindSafe(|| {
         while let Some((chunk, on_written)) = queue.pop() {
             match write(&chunk) {
                 Ok(()) => {
                     // ★성공을 세는 이 한 줄이 [`InputQueue::wait_drained`] 의 유일한 진행 신호다★.
                     //   같은 줄이 [`Inner::bytes`] 회계도 푼다 — 「나갔다」가 두 뜻을 함께 갖는다.
                     queue.mark_written(chunk.len());
-                    // 부를 것의 panic 은 여기서 멈춘다 — 바깥 가드까지 가면 큐가 닫혀 멀쩡한 입력 경로가 죽는다.
-                    // ★unwind 빌드에서만 선다★ — 릴리스는 `panic = "abort"` 라 이 자리에서 프로세스가 죽는다
-                    //   ([`OnWritten`] 의 계약이 panic 없는 부를 것을 요구하는 이유).
+                    // ADR-0292 결정 3: 부를 것은 공유 상태(claude 잔여물 정리의 문)를 고치고 그 막은 abort 에 기댄다
+                    //   (ADR-0262 K7) — 표시를 끄고, 그 안의 panic 은 가두지 않는다. 안쪽 catch 는 바깥 가드까지 가서
+                    //   큐가 닫히는 것을 막는 자리인데, base 패닉 훅(`install_hook`)이 걸린 프로세스에서는 훅이 먼저
+                    //   끝내 닿지 않는다(그 훅이 없는 unwind 빌드에서만 잡는다). ★안쪽 catch 를 `contain` 으로 바꾸지
+                    //   말 것★ — 끈 표시를 다시 세운다.
                     if let Some(on_written) = on_written {
-                        if let Err(payload) =
-                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(on_written))
-                        {
-                            // 레벨 = error — 격리돼도 panic 은 error 다(`docs/reference/logging-conventions.md` 의 레벨 표).
-                            tracing::error!(
-                                agent = %agent,
-                                "{label} 입력 덩이가 나간 뒤 부를 것이 panic 했다 — 다음 덩이는 계속 쓴다: {}",
-                                panic_message(&*payload)
-                            );
-                        }
+                        uncontained(|| {
+                            if let Err(payload) =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(on_written))
+                            {
+                                // 레벨 = error — 격리돼도 panic 은 error 다(`docs/reference/logging-conventions.md` 의 레벨 표).
+                                tracing::error!(
+                                    agent = %agent,
+                                    "{label} 입력 덩이가 나간 뒤 부를 것이 panic 했다 — 다음 덩이는 계속 쓴다: {}",
+                                    payload_text(&*payload)
+                                );
+                            }
+                        });
                     }
                 }
                 Err(e) => {
@@ -321,22 +327,13 @@ pub(crate) fn drain(
         }
     }));
 
-    if let Err(payload) = outcome {
-        let msg = panic_message(&*payload);
-        let reason = format!("{label} 입력 라이터가 panic 했다: {msg}");
+    if let Err(caught) = outcome {
+        let reason = format!("{label} 입력 라이터가 panic 했다: {caught}");
         // 레벨 = error. 이 에이전트의 입력 경로가 **복구 불가**로 죽었고 사람이 봐야 한다
         //   (`docs/reference/logging-conventions.md` 의 레벨 표 — panic 은 error).
         tracing::error!(agent = %agent, "{reason}");
         queue.close(&reason);
     }
-}
-
-fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
-    payload
-        .downcast_ref::<&str>()
-        .map(|s| s.to_string())
-        .or_else(|| payload.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "<non-string panic payload>".to_string())
 }
 
 #[cfg(test)]
@@ -482,7 +479,7 @@ mod tests {
     /// 상한에 닿는 순간부터 **틀린 사유**(「상한 초과」)로 거절한다. 진짜 원인은 어디에도 안 남는다.
     ///
     /// ★락 poison 이 대신해 주지 않는다★: 쓰기는 큐 락을 **놓고** 하므로(`pop` 반환 뒤) panic 해도
-    ///   `Mutex` 는 멀쩡하다 — 그래서 `catch_unwind` 없이는 이 전이가 일어날 자리가 없다.
+    ///   `Mutex` 는 멀쩡하다 — 그래서 `contain` 없이는 이 전이가 일어날 자리가 없다.
     #[test]
     fn a_panicking_writer_closes_the_queue_with_the_panic_as_the_reason() {
         let queue = Arc::new(InputQueue::new());
@@ -782,8 +779,8 @@ mod tests {
         );
     }
 
-    /// 부를 것의 panic 은 그 자리에서 멈춘다 — 큐는 열린 채이고 뒤 덩이도, 그 뒤에 넣은 것도 나간다. ★unwind 빌드에서만
-    /// 도는 항목이다★ — 릴리스는 `panic = "abort"` 라 이 갈래 자체가 없다.
+    /// 부를 것의 panic 은 그 자리에서 멈춘다 — 큐는 열린 채이고 뒤 덩이도, 그 뒤에 넣은 것도 나간다. ★훅 없는 빌드의
+    /// 갈래다★ — 운영 프로세스에서는 이 panic 이 표시 밖이라 훅이 끝내 이 갈래 자체가 없다(ADR-0292).
     #[cfg(panic = "unwind")]
     #[test]
     fn a_panicking_on_written_does_not_stop_later_chunks() {
@@ -809,5 +806,39 @@ mod tests {
             *written.lock().unwrap(),
             vec![b"first".to_vec(), b"second".to_vec(), b"third".to_vec()]
         );
+    }
+
+    /// 쓰기는 가둠 표시 안에서, 부를 것은 표시 밖에서 돈다 — 부를 것은 공유 상태를 고친다.
+    // ADR-0292
+    #[test]
+    fn on_written_runs_outside_the_contain_mark_and_the_write_inside_it() {
+        use engram_dashboard_base::panic::is_contained;
+
+        let marks = Arc::new(Mutex::new(Vec::new()));
+        let at_callback = marks.clone();
+        let queue = InputQueue::new();
+        queue
+            .push_with(
+                b"marked".to_vec(),
+                Some(Box::new(move || {
+                    at_callback
+                        .lock()
+                        .unwrap()
+                        .push(("부를 것", is_contained()));
+                })),
+            )
+            .expect("push_with");
+
+        drain(&queue, "시험", test_agent(), |_| {
+            marks.lock().unwrap().push(("쓰기", is_contained()));
+            queue.close("한 덩이만");
+            Ok(())
+        });
+
+        assert_eq!(
+            *marks.lock().unwrap(),
+            vec![("쓰기", true), ("부를 것", false)]
+        );
+        assert!(!is_contained(), "drain 이 끝난 뒤 표시가 남았다");
     }
 }

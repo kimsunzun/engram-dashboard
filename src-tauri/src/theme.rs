@@ -6,14 +6,15 @@
 //! - ★유효 값은 [`EffectiveThemes`] 한 자리에서만 계산한다★ — 부팅 당기기(`get_ui_settings`) · 밀기
 //!   (`ui:settings-updated`) · `window.getTheme` 이 같은 출처를 본다. 한쪽만 다른 출처를 보면 그 창은 부팅과 밀기에서
 //!   다른 테마를 받는다.
-//! - ★락 순서 = 테마 관문 › {설정 상태 락 · `ViewManager` 락}★ — 관문만 바깥이고 나머지 둘은 하나씩 짧게 잡고
-//!   놓는다(겹쳐 잡지 않는다 — TRD §6-3). 테마를 바꾸는 쪽은 저장을 끝내고 모든 락을 놓은 뒤 밀기를 부른다.
+//! - ★락 순서 = 테마 관문 › {설정 상태 락 · `ViewManager` 락 · 모델 밖 창 테마 표}★ — 관문만 바깥이고 나머지
+//!   셋은 하나씩 짧게 잡고 놓는다(겹쳐 잡지 않는다 — TRD §6-3). 테마를 바꾸는 쪽은 저장을 끝내고 모든 락을 놓은 뒤
+//!   밀기를 부른다.
 //! - 보내는 자리는 호출자가 넣는다([`ThemeWindows`]) — Tauri 를 이 모듈에 들이지 않는다.
 // ADR-0265
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use engram_dashboard_base::sync;
 
@@ -36,6 +37,8 @@ pub enum UiTheme {
 }
 
 impl UiTheme {
+    pub const ALL: [UiTheme; 3] = [UiTheme::Dark, UiTheme::Light, UiTheme::EInk];
+
     /// 프론트가 `document.documentElement` 의 `data-theme` 에 그대로 박는 문자열.
     ///
     /// ★`src/styles/theme.css` 의 `:root[data-theme='…']` 셀렉터와 **같은 철자**여야 한다★ — 어긋나면
@@ -55,6 +58,18 @@ impl UiTheme {
             "light" => Some(UiTheme::Light),
             "e-ink" => Some(UiTheme::EInk),
             _ => None,
+        }
+    }
+
+    /// 셸이 창 · 웹뷰 바탕에 칠하는 색(RGB) — 페이지가 처음 칠해지기 전에 보이는 색이다(`webview_env::Backdrop`).
+    ///
+    /// ★`src/styles/theme.css` 의 그 테마 `--bg`(페이지 바탕 — `src/index.css` 의 `html, body, #root`)와 같은
+    /// 값이어야 한다★ — 어긋나면 창이 뜰 때 바탕이 한 번 바뀌어 보인다. 이 모듈 시험이 그 파일을 읽어 맞댄다.
+    pub const fn page_background(self) -> (u8, u8, u8) {
+        match self {
+            UiTheme::Dark => (0x0a, 0x0a, 0x0a),
+            UiTheme::Light => (0xf5, 0xf5, 0xf5),
+            UiTheme::EInk => (0xff, 0xff, 0xff),
         }
     }
 }
@@ -245,6 +260,8 @@ pub struct EffectiveThemes {
     layout: LayoutState,
     /// ★읽기부터 알림까지를 한 덩이로 묶는다★ — 사유는 [`Self::push_effective_themes`].
     gate: Mutex<()>,
+    /// 모델에 들기 전에 만드는 창의 자기 테마([`Self::stage`]) — 모델이 그 창을 모를 때만 읽는다.
+    staged: Mutex<HashMap<String, UiTheme>>,
 }
 
 impl EffectiveThemes {
@@ -253,7 +270,27 @@ impl EffectiveThemes {
             settings,
             layout,
             gate: Mutex::new(()),
+            staged: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// 아직 모델에 없는 창 `window` 의 자기 테마를 미리 정한다 — `own` = `None` 이면 정하지 않는다(전역을 따른다).
+    /// 모델이 그 창을 모르는 동안 부팅 당기기 · 밀기 · 창 바탕([`Self::effective_for`])이 이 값을 쓴다. 모델이 그 창을
+    /// 알게 되면 모델 값이 이긴다.
+    ///
+    /// 런타임 복원 수락이 쓴다 — 팝아웃 창을 모델에 들이기 전에 만들므로(TRD S21-storage §6-7 ②), 이것이 없으면 그
+    /// 창은 전역 테마로 칠해지고 첫 값을 당긴다. 다 쓰면 [`Self::unstage`] 로 거둔다.
+    pub fn stage(&self, window: &str, own: Option<UiTheme>) {
+        let mut staged = sync::lock(&self.staged);
+        match own {
+            Some(theme) => staged.insert(window.to_string(), theme),
+            None => staged.remove(window),
+        };
+    }
+
+    /// [`Self::stage`] 를 거둔다 — 정한 적 없는 창이면 아무 일도 없다.
+    pub fn unstage(&self, window: &str) {
+        sync::lock(&self.staged).remove(window);
     }
 
     /// 창 하나의 테마 — `window.getTheme` 의 답. 관문을 잡지 않는다(밀지 않으므로 창들 사이의 순서를 뒤집을 것이
@@ -263,13 +300,19 @@ impl EffectiveThemes {
         Ok(WindowTheme::resolve(own, global_theme(&self.settings)))
     }
 
-    /// 부팅 당기기 — 창 하나에 답하고 아무것도 밀지 않는다. ★모르는 창에도 답한다(전역 값)★ — 모델에 들기 전에
-    /// 스크립트를 올린 창(막 만들어지는 팝아웃)도 첫 값을 받아야 하고, 그런 창은 아직 자기 테마가 없다.
+    /// 부팅 당기기 — 창 하나에 답하고 아무것도 밀지 않는다. ★모르는 창에도 답한다★ — 모델에 들기 전에 스크립트를
+    /// 올린 창(막 만들어지는 팝아웃)도 첫 값을 받아야 한다. 그런 창은 [`Self::stage`] 로 정한 값, 없으면 전역 값이다.
     pub fn for_window(&self, window: &str) -> UiSettingsPayload {
-        let own = self.own_theme(window).ok().flatten();
-        WindowTheme::resolve(own, global_theme(&self.settings))
-            .effective
-            .into()
+        self.effective_for(window).into()
+    }
+
+    /// [`Self::for_window`] 와 같은 답을 테마 값으로 — 창을 만들 때 바탕색 · 첫 테마를 고르는 쪽이 쓴다.
+    pub fn effective_for(&self, window: &str) -> UiTheme {
+        let own = match self.own_theme(window) {
+            Ok(own) => own,
+            Err(_) => sync::lock(&self.staged).get(window).copied(),
+        };
+        WindowTheme::resolve(own, global_theme(&self.settings)).effective
     }
 
     /// 창 하나의 테마를 쓴다 — `None` = 그 창의 테마를 지운다(전역을 따른다). ★밀지 않는다★ — 미는 것은
@@ -296,8 +339,8 @@ impl EffectiveThemes {
     /// 락으로 직렬화한다 — 마지막 알림 = 마지막 읽기. 쓰는 쪽은 저장을 **끝낸 뒤** 이 함수를 부르므로, 마지막 밀기는
     /// 마지막 쓰기를 본다.
     ///
-    /// ★관문 아래에서 설정 상태 락 · 창 명단 · `ViewManager` 락을 하나씩 짧게 잡고 놓은 뒤 보낸다★ — 셋 중 어느
-    /// 것도 겹쳐 잡지 않고, 보낼 때는 관문만 쥔다. 부르는 쪽은 아무 락도 쥐지 않는다.
+    /// ★관문 아래에서 설정 상태 락 · 창 명단 · `ViewManager` 락 · 모델 밖 창 테마 표를 하나씩 짧게 잡고 놓은 뒤
+    /// 보낸다★ — 어느 둘도 겹쳐 잡지 않고, 보낼 때는 관문만 쥔다. 부르는 쪽은 아무 락도 쥐지 않는다.
     // ADR-0265
     pub fn push_effective_themes(&self, windows: &dyn ThemeWindows) -> Result<(), Undelivered> {
         // 락이 중독돼도(보유 중 패닉) 계속 돈다 — 이 락이 지키는 것은 순서뿐이라 뒤에 깨질 상태가 없다.
@@ -306,7 +349,7 @@ impl EffectiveThemes {
         let global = global_theme(&self.settings);
         let labels = windows.labels();
         let model: HashMap<&str, Option<UiTheme>> = {
-            let mgr = self.layout.0.lock().unwrap_or_else(PoisonError::into_inner);
+            let mgr = sync::lock(&self.layout.0);
             labels
                 .iter()
                 .filter_map(|label| {
@@ -315,10 +358,14 @@ impl EffectiveThemes {
                 })
                 .collect()
         };
+        let staged = sync::lock(&self.staged).clone();
         let targets: Vec<(String, UiTheme)> = labels
             .iter()
             .map(|label| {
-                let own = model.get(label.as_str()).copied().flatten();
+                let own = match model.get(label.as_str()) {
+                    Some(own) => *own,
+                    None => staged.get(label).copied(),
+                };
                 (label.clone(), WindowTheme::resolve(own, global).effective)
             })
             .collect();
@@ -335,7 +382,7 @@ impl EffectiveThemes {
     // 읽기는 독 든 모델에서도 한다 — 테마 값 하나라 반쯤 바뀐 모델에도 해롭지 않다(`state::boot_plugin` 의
     //   `LiveSource::revision` 과 같은 판단).
     fn own_theme(&self, window: &str) -> Result<Option<UiTheme>, ThemeError> {
-        let mgr = self.layout.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mgr = sync::lock(&self.layout.0);
         mgr.window_attrs(window)
             .map(|attrs| attrs.theme)
             .map_err(|_| ThemeError::UnknownWindow(window.to_string()))
@@ -381,6 +428,14 @@ impl ThemeControl {
             }
         }
         Ok(written)
+    }
+
+    pub fn stage(&self, window: &str, own: Option<UiTheme>) {
+        self.themes.stage(window, own);
+    }
+
+    pub fn unstage(&self, window: &str) {
+        self.themes.unstage(window);
     }
 
     /// 모든 창에 유효 테마를 민다. ★아무 락도 쥐지 않고 부른다★.
@@ -518,6 +573,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_page_background_is_the_themes_bg_token_in_theme_css() {
+        let css = include_str!("../../src/styles/theme.css");
+        for theme in [UiTheme::Dark, UiTheme::Light, UiTheme::EInk] {
+            let selector = format!(":root[data-theme='{}']", theme.as_wire());
+            let token = css
+                .lines()
+                .filter(|line| line.starts_with(&selector))
+                .find_map(|line| line.split("--bg:").nth(1))
+                .and_then(|rest| rest.split(';').next())
+                .unwrap_or_else(|| panic!("{selector} 블록에 --bg 가 없다"))
+                .trim();
+            let (r, g, b) = theme.page_background();
+            assert_eq!(
+                token.to_ascii_lowercase(),
+                format!("#{r:02x}{g:02x}{b:02x}"),
+                "{selector}"
+            );
+        }
+    }
+
     /// ★설정 표의 선택지와 이 enum 의 철자가 같다★ — 어긋나면 `theme.default` 의 그 값이 화면에서 조용히
     /// [`DEFAULT_THEME`] 로 접힌다(설정 답은 성공인데 화면은 안 바뀐다).
     #[test]
@@ -568,6 +644,23 @@ mod tests {
                 .effective,
             UiTheme::Light
         );
+    }
+
+    /// 셸은 설정을 빌더에서 적재하고 쓰기는 setup 에서야 연다(`lib.rs`) — 부팅이 창을 만들 때 고르는 바탕 · 첫 테마
+    /// ([`EffectiveThemes::effective_for`] — `webview_env::Backdrop::for_window`)는 그 사이에 이미 디스크의
+    /// `theme.default` 를 답해야 한다. 기본값으로 답하면 부팅이 연 창이 전역 테마가 아닌 색으로 칠해진다.
+    #[test]
+    fn a_persisted_theme_default_is_answered_right_after_load_before_writes_open() {
+        let config = Config::new("persisted");
+        config.service().set(THEME_DEFAULT, "light").unwrap();
+        let settings = Arc::new(SettingsService::load_from_dir(&config.0));
+        let layout = LayoutState::new();
+        layout.0.lock().unwrap().create_window(POPUP).unwrap();
+        let themes = EffectiveThemes::new(settings, layout);
+
+        for window in [MAIN_WINDOW_LABEL, POPUP, UNMODELED] {
+            assert_eq!(themes.effective_for(window), UiTheme::Light, "{window}");
+        }
     }
 
     #[test]
@@ -631,6 +724,59 @@ mod tests {
         );
         assert_eq!(rig.layout.0.lock().unwrap().attrs_rev(), attrs_rev);
         assert_eq!(rig.themes.for_window(ghost).theme, DEFAULT_THEME.as_wire());
+    }
+
+    /// 모델에 들기 전에 만드는 창(런타임 복원 수락의 팝아웃)은 미리 정한 자기 테마로 당기고 · 밀리고 · 칠해진다 —
+    /// 전역 값으로 한 번 그려지면 그 창의 테마가 아닌 색이 보인다.
+    #[test]
+    fn a_staged_window_answers_its_own_theme_until_the_model_knows_it() {
+        let rig = rig("staged");
+        rig.themes.stage(UNMODELED, Some(UiTheme::Light));
+
+        assert_eq!(rig.themes.effective_for(UNMODELED), UiTheme::Light);
+        assert_eq!(rig.themes.for_window(UNMODELED).theme, "light");
+        let windows = Recording::new(&[MAIN_WINDOW_LABEL, UNMODELED]);
+        rig.themes.push_effective_themes(&windows).expect("밀기");
+        assert_eq!(
+            windows.take(),
+            sent(&[(MAIN_WINDOW_LABEL, "dark"), (UNMODELED, "light")])
+        );
+        assert_eq!(
+            rig.themes.window_theme(UNMODELED),
+            Err(ThemeError::UnknownWindow(UNMODELED.to_string())),
+            "창 테마 읽기는 모델만 본다"
+        );
+
+        // 모델이 그 창을 알면 모델 값이 이긴다.
+        rig.layout
+            .0
+            .lock()
+            .unwrap()
+            .create_window(UNMODELED)
+            .unwrap();
+        assert_eq!(rig.themes.effective_for(UNMODELED), DEFAULT_THEME);
+
+        rig.themes.unstage(UNMODELED);
+        rig.layout
+            .0
+            .lock()
+            .unwrap()
+            .close_window(UNMODELED)
+            .unwrap();
+        assert_eq!(
+            rig.themes.effective_for(UNMODELED),
+            DEFAULT_THEME,
+            "거둔 뒤에는 전역 값"
+        );
+    }
+
+    #[test]
+    fn staging_no_theme_leaves_the_window_on_the_global() {
+        let rig = rig("staged-none");
+        rig.settings.set(THEME_DEFAULT, "e-ink").unwrap();
+        rig.themes.stage(UNMODELED, Some(UiTheme::Light));
+        rig.themes.stage(UNMODELED, None);
+        assert_eq!(rig.themes.effective_for(UNMODELED), UiTheme::EInk);
     }
 
     #[test]

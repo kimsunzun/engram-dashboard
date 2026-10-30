@@ -11,7 +11,7 @@
 resolver = "2"
 members = [
     "crates/engram-dashboard-protocol",
-    # ADR-0175 결정 1 · ADR-0269: 바닥 기반층 잎 crate(로깅 · 범용 도우미 text·time·path·sync·writable · 시험 대기 testing). 입주 조건 셋(지금 여러
+    # ADR-0175 결정 1 · ADR-0269: 바닥 기반층 잎 crate(데이터 파일 file · 로깅 · 범용 도우미 text·time·path·sync·writable · 시험 대기 testing). 입주 조건 셋(지금 여러
     #   곳에서 쓰이거나 복사돼 있을 것 · 도메인 지식 0 · 입주자끼리 무참조)의 정본은 그 crate lib.rs 헤더다.
     "crates/engram-dashboard-base",
     # ADR-0266 · ADR-0275: OS 층 잎 crate(OS 에 따라 달라지는 운영 코드 — 워크스페이스 crate 의존 0, base 도
@@ -38,7 +38,10 @@ members = [
 
 # profile 은 workspace 루트에만 둘 수 있다(멤버에 두면 무시+경고). src-tauri 에서 이동.
 [profile.release]
-panic = "abort"
+# panic 은 기본(unwind) — 가둔 자리(에이전트 펌프 셋 · 입력 라이터 — ADR-0293)가 되감기로 실패에 접히고,
+# 표시 밖 패닉은 데몬 · 셸의 패닉 훅이 즉시 끝낸다(ADR-0292). `panic = "abort"` 로 되돌리면 가둔 자리의 패닉도
+# 프로세스 종료가 된다 — 되돌림은 ADR-0292 결정 7 의 비상 경로이고, 그때 `rg "ADR-0292" crates src-tauri/src`
+# 의 가둔 자리 서술도 고친다(TRD S21-panic-policy §4-7).
 codegen-units = 1
 lto = true
 opt-level = "s"

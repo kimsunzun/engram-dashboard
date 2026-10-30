@@ -30,6 +30,7 @@ import { mergeTreeNodes, type AgentTreeNode } from './mergeTreeNodes'
 import { selectOpenTarget } from './selectOpenTarget'
 import { isFailureBlocked, rowGlyphColor, rowGlyphIcon, rowPhase } from './statusGlyph'
 import { failureLine } from './failureKinds'
+import { useBlurOnDragRegionPress } from '../layout/titleRow/dragRegion'
 import { t } from '../../i18n'
 // 「답을 기다리는 중」기호의 회전(클래스 `engram-glyph-spin`). 키프레임은 스타일시트가 소유한다.
 import './agentGlyph.css'
@@ -83,11 +84,18 @@ export default function AgentList() {
   useEffect(() => {
     if (editingId !== null) inputRef.current?.select()
   }, [editingId])
+  // 창 끌 자리(제목 줄) 누름에도 편집이 끝난다 — 확정은 onBlur 그대로.
+  useBlurOnDragRegionPress(editingId !== null, inputRef)
 
   const agents = useAgentStore(s => s.agents)
   const profiles = useAgentStore(s => s.profiles)
   const selectedAgentId = useAgentStore(s => s.selectedAgentId)
   const setSelectedAgent = useAgentStore(s => s.setSelectedAgent)
+  // ★둘 다 받기 전엔 트리 영역에 아무것도 그리지 않는다★: 빈 배열은 「아직 못 받음」과 「정말 비었음」을 못 가른다 —
+  //   새 창에서 목록이 오기 전 빈 목록 안내가 잠깐 보였다(사용자 실측 2026-10-19). 한쪽만으로 그려도 틀린 중간
+  //   화면이다 — 실행중 행의 표시명 · 부모 묶음은 프로필에서 오고, 명부 없이는 실행중이 예약으로 보인다.
+  //   데몬 연결 실패는 이 칸이 아니라 창 위 연결 실패 알림(`ConnectionNotice`)이 알린다(ADR-0148 의 두 플래그).
+  const listLoaded = useAgentStore(s => s.agentsLoaded && s.profilesLoaded)
 
   const forest: AgentTreeNode[] = mergeTreeNodes(profiles, agents)
   // 트리 존재/부재·메뉴 stale 판정용 평탄화(1단이라 루트 + 각 children). react-arborist 는 forest 를 직접 순회.
@@ -113,8 +121,9 @@ export default function AgentList() {
       const t = e.target as Node
       if (rowMenuRef.current && !rowMenuRef.current.contains(t)) setRowMenu(null)
     }
-    document.addEventListener('mousedown', h)
-    return () => document.removeEventListener('mousedown', h)
+    // 캡처 단계 — 창 끌 자리 누름은 거품 단계에 닿지 않는다(`layout/titleRow/dragRegion.ts`).
+    document.addEventListener('mousedown', h, true)
+    return () => document.removeEventListener('mousedown', h, true)
   }, [rowMenu])
 
   useEffect(() => {
@@ -565,76 +574,78 @@ export default function AgentList() {
       >
         {t('agent.treeLabel')}
       </div>
-      {/* ★빈 목록 = 트리 대신 flex-1 센터링 div★: 그릴 노드가 없으면 react-arborist 를 마운트하지 않고 안내
-          문구를 세로 중앙 정렬(옛 FIX-A 취지 유지 — 빈 상태엔 스크롤/가상화 표면 없음). */}
-      {flatRows.length === 0 ? (
-        <div
-          style={{
-            flex: 1,
-            minHeight: 0,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color: 'var(--text-muted)',
-            fontFamily: 'var(--font-ui)',
-            fontSize: '12px',
-          }}
-        >
-          {t('agent.emptyList')}
-        </div>
-      ) : (
-        <div ref={treeContainerRef} data-testid="agent-tree" style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
-          <Tree<AgentTreeNode>
-            data={forest}
-            idAccessor="id"
-            childrenAccessor="children"
-            width={dimensions.width}
-            height={dimensions.height}
-            rowHeight={ROW_HEIGHT}
-            indent={INDENT}
-            openByDefault
-            // ★rename 은 우클릭→인라인 input 자체 구현★: react-arborist 내장 edit(onRename) 대신 우리 draft
-            //   상태를 쓰므로 내장 편집은 끈다(중복 편집 UI 방지). 선택 다중선택도 불필요 → 단일선택 유지.
-            disableEdit
-            disableMultiSelection
-            // ★드래그 불가 = 프로필 없는 노드(ADR-0072 드롭 가드)★: ad-hoc(SpawnByCwd, 프로필 없는 running)은
-            //   reparent 대상 프로필이 없어 백엔드가 no-profile 을 Error 로 거부한다 → 애초에 드래그를 막아
-            //   불필요한 실패 커맨드·에러 토스트를 없앤다(reserved·프로필 있는 running 은 드래그 가능).
-            disableDrag={(data: AgentTreeNode) => !data.hasProfile}
-            // ★1단 상한 + 프로필 유무 + 부모-불변 UI 가드(ADR-0072 · review FIX)★: UI 에서 막는 3가지 —
-            //   ① 부모가 루트 아닌 곳(=자식 밑)으로의 드롭, 또는 이미 자식을 가진 노드를 남의 밑으로 드롭(둘 다
-            //      2단이 됨). leaf 도 children:[] 라 react-arborist 가 isInternal 로 봐 중앙 드롭이 걸리므로 필요.
-            //   ② 프로필 없는 노드(ad-hoc)를 부모로 하는 드롭 — 그 위엔 자식 못 붙임(reparent 대상 프로필 부재).
-            //   ③ 현재 부모와 동일한 부모로의 드롭(루트↔루트 reorder 포함) — 백엔드 정렬은 created_at 기반이라
-            //      reorder 미지원이다. react-arborist 는 same-parent reorder 를 유효 드롭(커서 표시)으로 주지만
-            //      드롭해도 아무 일 없어 혼란 → 유효 드롭처럼 보이지 않게 비활성(onMove 도 이미 no-op 억제).
-            //   ★루트 드롭 정규화★: canDrop 은 루트 드롭 때 parentNode 를 내부 루트 pseudo-node(isRoot,
-            //     level=-1, data={id:ROOT_ID})로 준다(null 이 아님). 그래서 ②·③ 은 실 부모(isRoot 아님)에만
-            //     적용하고, 루트-대상 비교는 dropParentId(루트=null)로 정규화해 판정한다.
-            disableDrop={({ parentNode, dragNodes }) => {
-              const isRootDrop = parentNode == null || parentNode.isRoot
-              const dropParentId = isRootDrop ? null : parentNode.id
-              const dragParent = dragNodes[0]?.parent
-              const currentParentId = dragParent && !dragParent.isRoot ? dragParent.id : null
-              return (
-                (!isRootDrop && parentNode.level > 0) ||
-                (!isRootDrop && !parentNode.data.hasProfile) ||
-                dragNodes.some(n => Array.isArray(n.data.children) && n.data.children.length > 0) ||
-                currentParentId === dropParentId
-              )
-            }}
-            // ★드래그 재부모화 = onMove(§5)★. dropParentId(null=루트)로 reparentProfile 발화(낙관 갱신 X).
-            onMove={({ dragIds, parentId }) => {
-              // disableMultiSelection 으로 단일 드래그 전제 — [0]만 처리(다중선택 재활성 시 이 라인 재검토).
-              if (dragIds.length !== 1) return
-              const childId = dragIds[0]
-              if (childId) reparent(childId, parentId)
+      {/* ★크기를 재는 칸은 늘 마운트한다★: 위 ResizeObserver effect 는 마운트 때 한 번만 붙는다 — 이 칸을 갈래 안에
+          두면 미수신 · 빈 상태로 뜬 창에서는 끝내 안 붙어 트리가 초기값 크기에 머문다. */}
+      <div ref={treeContainerRef} style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+        {!listLoaded ? null : flatRows.length === 0 ? (
+          // ★빈 목록 = 트리 대신 센터링 div★: react-arborist 를 마운트하지 않는다 — 빈 상태엔 스크롤/가상화 표면 없음.
+          <div
+            style={{
+              height: '100%',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: 'var(--text-muted)',
+              fontFamily: 'var(--font-ui)',
+              fontSize: '12px',
             }}
           >
-            {NodeRenderer}
-          </Tree>
-        </div>
-      )}
+            {t('agent.emptyList')}
+          </div>
+        ) : (
+          <div data-testid="agent-tree">
+            <Tree<AgentTreeNode>
+              data={forest}
+              idAccessor="id"
+              childrenAccessor="children"
+              width={dimensions.width}
+              height={dimensions.height}
+              rowHeight={ROW_HEIGHT}
+              indent={INDENT}
+              openByDefault
+              // ★rename 은 우클릭→인라인 input 자체 구현★: react-arborist 내장 edit(onRename) 대신 우리 draft
+              //   상태를 쓰므로 내장 편집은 끈다(중복 편집 UI 방지). 선택 다중선택도 불필요 → 단일선택 유지.
+              disableEdit
+              disableMultiSelection
+              // ★드래그 불가 = 프로필 없는 노드(ADR-0072 드롭 가드)★: ad-hoc(SpawnByCwd, 프로필 없는 running)은
+              //   reparent 대상 프로필이 없어 백엔드가 no-profile 을 Error 로 거부한다 → 애초에 드래그를 막아
+              //   불필요한 실패 커맨드·에러 토스트를 없앤다(reserved·프로필 있는 running 은 드래그 가능).
+              disableDrag={(data: AgentTreeNode) => !data.hasProfile}
+              // ★1단 상한 + 프로필 유무 + 부모-불변 UI 가드(ADR-0072 · review FIX)★: UI 에서 막는 3가지 —
+              //   ① 부모가 루트 아닌 곳(=자식 밑)으로의 드롭, 또는 이미 자식을 가진 노드를 남의 밑으로 드롭(둘 다
+              //      2단이 됨). leaf 도 children:[] 라 react-arborist 가 isInternal 로 봐 중앙 드롭이 걸리므로 필요.
+              //   ② 프로필 없는 노드(ad-hoc)를 부모로 하는 드롭 — 그 위엔 자식 못 붙임(reparent 대상 프로필 부재).
+              //   ③ 현재 부모와 동일한 부모로의 드롭(루트↔루트 reorder 포함) — 백엔드 정렬은 created_at 기반이라
+              //      reorder 미지원이다. react-arborist 는 same-parent reorder 를 유효 드롭(커서 표시)으로 주지만
+              //      드롭해도 아무 일 없어 혼란 → 유효 드롭처럼 보이지 않게 비활성(onMove 도 이미 no-op 억제).
+              //   ★루트 드롭 정규화★: canDrop 은 루트 드롭 때 parentNode 를 내부 루트 pseudo-node(isRoot,
+              //     level=-1, data={id:ROOT_ID})로 준다(null 이 아님). 그래서 ②·③ 은 실 부모(isRoot 아님)에만
+              //     적용하고, 루트-대상 비교는 dropParentId(루트=null)로 정규화해 판정한다.
+              disableDrop={({ parentNode, dragNodes }) => {
+                const isRootDrop = parentNode == null || parentNode.isRoot
+                const dropParentId = isRootDrop ? null : parentNode.id
+                const dragParent = dragNodes[0]?.parent
+                const currentParentId = dragParent && !dragParent.isRoot ? dragParent.id : null
+                return (
+                  (!isRootDrop && parentNode.level > 0) ||
+                  (!isRootDrop && !parentNode.data.hasProfile) ||
+                  dragNodes.some(n => Array.isArray(n.data.children) && n.data.children.length > 0) ||
+                  currentParentId === dropParentId
+                )
+              }}
+              // ★드래그 재부모화 = onMove(§5)★. dropParentId(null=루트)로 reparentProfile 발화(낙관 갱신 X).
+              onMove={({ dragIds, parentId }) => {
+                // disableMultiSelection 으로 단일 드래그 전제 — [0]만 처리(다중선택 재활성 시 이 라인 재검토).
+                if (dragIds.length !== 1) return
+                const childId = dragIds[0]
+                if (childId) reparent(childId, parentId)
+              }}
+            >
+              {NodeRenderer}
+            </Tree>
+          </div>
+        )}
+      </div>
 
       {/* ── 행 우클릭 메뉴 ─────────────────────────────────────────────── */}
       {rowMenu && (

@@ -9,7 +9,7 @@ const vs = vi.hoisted(() => ({
   closeSlot: vi.fn(async () => undefined),
   assignAgent: vi.fn(async () => undefined),
   setSlotContent: vi.fn(async () => undefined),
-  moveSlotToWindow: vi.fn(async () => ({ window: 'w', tab: 't' })),
+  moveSlotToWindow: vi.fn(async () => ({ window: 'w', tab: 't', window_id: 'id', number: 2 })),
 }))
 vi.mock('../store/viewStore', () => ({
   useViewStore: { getState: () => vs },

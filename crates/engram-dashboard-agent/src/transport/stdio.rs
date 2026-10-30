@@ -17,20 +17,20 @@
 //!
 //! tauri import 0. unsafe 0.
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use std::io::{Read, Write};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use engram_dashboard_base::logging::mask_secrets;
+use engram_dashboard_base::panic::{contain, Caught};
 use engram_dashboard_base::sync;
 use engram_dashboard_platform::group::GroupOwner;
-use engram_dashboard_platform::spawn::hide_console_window;
 
 use crate::output_core::OutputCore;
 use crate::transport::input_queue::{self, InputQueue, OnWritten};
 use crate::transport::process_group::{ProcessGroup, RetiringSignal};
+use crate::transport::spawn::{drain_stderr, spawn_piped, PipedChild};
 use crate::transport::{AgentTransport, OutputDecoder};
 use crate::types::{
     CommandSpec, ControlCaps, InputCaps, InputEvent, OutputCaps, OutputEvent, PtyError,
@@ -101,36 +101,14 @@ impl StdioTransport {
         structured: bool,
         decoder: Option<Box<dyn OutputDecoder>>,
     ) -> Result<(StdioTransport, Option<u32>), PtyError> {
-        // Windows shim(claude.cmd) 처리는 backend 가 이미 platform `console_command` 로 감싼 spec
-        //   (`cmd.exe /c claude …`)을 준다(PtyTransport와 동일 경로) — 여기선 그 program/args를 그대로 실행한다.
-        let mut cmd = Command::new(&spec.program);
-        cmd.args(&spec.args);
-        cmd.current_dir(&spec.cwd);
-        for (k, v) in &spec.env {
-            cmd.env(k, v);
-        }
-        // 세 파이프 모두 확보 — stdout/stderr를 우리가 읽어야 자식이 파이프 버퍼 full로 블록되지 않는다.
-        cmd.stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        // 헤드리스 백그라운드 프로세스다 — 데몬은 창 없는 프로세스일 수 있어 cmd.exe shim 이 콘솔을 새로 띄운다.
-        hide_console_window(&mut cmd);
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| PtyError::SpawnFailed(format!("stdio spawn: {e}")))?;
-
+        let PipedChild {
+            child,
+            stdin,
+            stdout,
+            stderr,
+            group,
+        } = spawn_piped(spec, "stdio")?;
         let child_pid = Some(child.id());
-
-        let stdin = child.stdin.take();
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-
-        let group = GroupOwner::new()?;
-        if let Some(pid) = child_pid {
-            group.adopt(pid)?;
-        }
 
         let transport = StdioTransport {
             child: Arc::new(Mutex::new(child)),
@@ -190,17 +168,10 @@ impl Drop for WriterStop {
 }
 
 /// pump 스레드가 어디서든 panic하면 그 agent가 영구 silent 정지하므로 Failed로 가시화한다(§5).
-fn resolve_pump_reason(result: std::thread::Result<TerminalReason>) -> TerminalReason {
+fn resolve_pump_reason(result: Result<TerminalReason, Caught>) -> TerminalReason {
     match result {
         Ok(reason) => reason,
-        Err(payload) => {
-            let msg = payload
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| payload.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "<non-string panic payload>".to_string());
-            TerminalReason::Error(format!("pump panicked: {msg}"))
-        }
+        Err(caught) => TerminalReason::Error(format!("pump panicked: {caught}")),
     }
 }
 
@@ -215,49 +186,8 @@ impl AgentTransport for StdioTransport {
         };
 
         // ── stderr drain 스레드 ──
-        // ★왜 drain 하나(파이프 fill 방지)★: stderr 파이프를 안 비우면 자식이 stderr 버퍼 full 로
-        //   블록해 진행이 멈춘다. 그래서 반드시 한 줄씩 읽어 흘린다(bounded — 무한 버퍼링 없음).
-        // ★왜 출력 스트림에 안 섞나(ADR-0044)★: json 모드 stdout은 NDJSON이라 프론트 RichSlot이
-        //   라인 단위로 파싱한다. stderr(경고·진단 텍스트)를 같은 스트림에 병합하면 NDJSON 중간에
-        //   비-JSON 라인이 껴 파서가 깨진다. 그래서 stderr는 출력과 분리해 라인별 로그로만 흘린다.
-        // ★레벨=debug(FIX 4/logging-conventions)★: claude 는 진행·진단 텍스트를 stderr 로 흘리는 게
-        //   정상 noise다 — warn 으로 찍으면 레벨 규약(warn=비정상)을 위반하고 로그를 범람시킨다.
-        // ★drain 하면서 core 의 **진단 버퍼**에도 쌓는다(출력 링이 아니다 — ADR-0172)★: 위 ADR-0044
-        //   근거대로 이 텍스트를 출력 스트림에 섞을 수는 없지만, 구조화 세션에서는 이것이 활성화 실패의
-        //   **유일한 증거**다(claude 의 "No conversation found with session ID: …" 가 여기로만 온다).
-        //   그래서 링과 분리된 작은 bounded 버퍼로 따로 붙든다 — 계약은 `OutputCore::push_diagnostic`.
-        // ★두 번째 캡처를 만들지 않았다★: 이 drain 이 이미 stderr 를 라인 단위로 읽는 유일한 지점이라,
-        //   여기 한 줄을 얹는 것으로 끝난다(파이프를 두 번 읽을 수는 없다).
-        // ADR-0172
         if let Some(stderr) = self.stderr.lock().expect("stderr poisoned").take() {
-            let diag_core = core.clone();
-            let spawn_result = std::thread::Builder::new()
-                .name("engram-stdio-stderr".into())
-                .spawn(move || {
-                    let reader = BufReader::new(stderr);
-                    for line in reader.lines() {
-                        match line {
-                            // ★mask_secrets(FIX 4)★: 외부 프로세스(claude) 출력이라 자격증명이 섞일 수
-                            //   있다 — 신선한 external-output 로그 경로는 호출자가 명시 마스킹(logging §보안).
-                            //   ★마스킹은 버퍼에도 그대로 적용된다★: 이 텍스트는 실패 사유로 다시 로그에
-                            //   실릴 수 있으므로, 원문을 붙들면 마스킹을 한 번 우회하는 경로가 생긴다.
-                            Ok(l) if !l.is_empty() => {
-                                let masked = mask_secrets(&l);
-                                // ★쌓기가 로그보다 **먼저**다★: 기본 로그 필터는 warn 이라 아래 debug 줄은
-                                //   평소 버려진다 — 분류를 그 줄에 매달면 로그 레벨이 기능을 켜고 끈다.
-                                diag_core.push_diagnostic(&masked);
-                                tracing::debug!(target: "agent_stderr", agent = %agent_id, "{}", masked)
-                            }
-                            Ok(_) => {}
-                            Err(_) => break,
-                        }
-                    }
-                });
-            // ★spawn 실패를 삼키지 않는다(FIX 4/logging 계측 의무)★: 조용히 버리지 말고 agent
-            //   맥락과 함께 warn.
-            if let Err(e) = spawn_result {
-                tracing::warn!(agent = %agent_id, "stdio stderr drain 스레드 기동 실패: {e}");
-            }
+            drain_stderr(stderr, &core, "engram-stdio-stderr", "stdio");
         }
 
         // ── 입력 라이터 스레드 ──
@@ -298,11 +228,12 @@ impl AgentTransport for StdioTransport {
         let writer_stop = WriterStop(self.input.clone());
 
         let handle = std::thread::spawn(move || {
-            // ★pump 가 끝나면 라이터도 끝난다★ — `catch_unwind` 바깥이라 정상·panic 두 갈래 모두 지난다.
+            // ★pump 가 끝나면 라이터도 끝난다★ — `contain` 바깥이라 정상·panic 두 갈래 모두 지난다.
             let _writer_stop = writer_stop;
             // ★UnwindSafe★: 잡은 stdout/buf/child/shutdown은 panic 후 버려지므로(스레드 종료)
             //   논리 불변 깨짐 없음 → AssertUnwindSafe.
-            let normal_reason = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // ADR-0292
+            let normal_reason = contain(std::panic::AssertUnwindSafe(|| {
                 let mut reader = stdout;
                 let mut buf = [0u8; 4096];
 
@@ -369,6 +300,7 @@ impl AgentTransport for StdioTransport {
 
             let reason = resolve_pump_reason(normal_reason);
 
+            // ADR-0292: finish 는 표시 밖이다 — 클로저 안으로 옮기지 말 것(사유 = `pty.rs` 의 같은 자리).
             pump_core.finish(reason);
 
             // G-1: 완료 신호(core.join_pump의 recv_timeout가 받는다). 수신측이 사라졌어도 무시.
@@ -502,10 +434,9 @@ mod tests {
     // ── resolve_pump_reason: panic → Error 매핑(pty.rs와 동일 규칙) ──
     #[test]
     fn resolve_pump_reason_panic_becomes_error() {
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> TerminalReason {
-                panic!("boom in stdio pump");
-            }));
+        let result = contain(std::panic::AssertUnwindSafe(|| -> TerminalReason {
+            panic!("boom in stdio pump");
+        }));
         match resolve_pump_reason(result) {
             TerminalReason::Error(msg) => {
                 assert!(msg.starts_with("pump panicked:"), "Error prefix: {msg}");
@@ -517,7 +448,7 @@ mod tests {
 
     #[test]
     fn resolve_pump_reason_normal_passthrough() {
-        let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> TerminalReason {
+        let ok = contain(std::panic::AssertUnwindSafe(|| -> TerminalReason {
             TerminalReason::Exited { code: Some(0) }
         }));
         assert!(matches!(
@@ -559,6 +490,28 @@ mod tests {
         assert!(matches!(json.interrupt(), Err(PtyError::Unsupported(_))));
         assert!(matches!(json.resize(80, 24), Err(PtyError::Unsupported(_))));
         json.shutdown();
+    }
+
+    // ── 가둔 pump panic: 운영 pump 클로저에서 본체는 표시 안 · `finish` 는 표시 밖(ADR-0292) ──
+    #[cfg(windows)]
+    #[test]
+    fn a_contained_pump_panic_fails_the_agent_and_finish_runs_unmarked() {
+        use crate::transport::pump_marks::{self, Marks};
+
+        let spec = CommandSpec {
+            program: "cmd.exe".into(),
+            args: vec!["/c".into(), "echo pump-probe".into()],
+            env: vec![],
+            cwd: std::path::PathBuf::from("."),
+        };
+        let (transport, _pid) = StdioTransport::open(&spec, false, None).expect("open");
+        let marks = Arc::new(Marks::default());
+        let core = pump_marks::core(&marks);
+        transport.start(core.clone());
+        core.join_pump(std::time::Duration::from_secs(10));
+
+        pump_marks::assert_contained_body_and_unmarked_finish(&marks);
+        transport.shutdown();
     }
 
     // ── 끊기 줄 주입(ADR-0238): 함수가 `Some` 이면 그 줄 한 벌이 부를 것과 함께 큐에 · `None` 이면 `Unsupported` 에 큐 무변경 ──

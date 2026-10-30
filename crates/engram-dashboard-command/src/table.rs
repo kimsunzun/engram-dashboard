@@ -213,6 +213,12 @@ impl CommandTable {
             .map(|e| CommandDecl {
                 name: e.spec.name.to_string(),
                 help: crate::spec_item_json(e.spec),
+                agent_args: e
+                    .spec
+                    .agent_args
+                    .iter()
+                    .map(|arg| arg.to_string())
+                    .collect(),
             })
             .collect()
     }
@@ -392,6 +398,7 @@ mod tests {
         errors: &[ErrorCode::Internal],
         args_type: "PingArgs",
         ok_type: "PingOk",
+        agent_args: &[],
     };
 
     /// 정수·실수 칸을 함께 든 선언 — 표가 스키마를 보고 인자를 맞추는지 여기서 본다.
@@ -411,6 +418,7 @@ mod tests {
         errors: &[],
         args_type: "NumbersArgs",
         ok_type: "NumbersOk",
+        agent_args: &[],
     };
     /// 필수 칸과 생략 가능한 칸을 함께 든 선언 — 입구 검문이 그 둘을 가르는지 여기서 본다.
     static ENTRANCE: CommandSpec = CommandSpec {
@@ -427,6 +435,7 @@ mod tests {
         errors: &[],
         args_type: "EntranceArgs",
         ok_type: "EntranceOk",
+        agent_args: &[],
     };
     static DECLARED: &[&CommandSpec] = &[&PING, &NUMBERS, &ENTRANCE];
 
@@ -471,6 +480,7 @@ mod tests {
             errors: &[],
             args_type: "OtherPingArgs",
             ok_type: "OtherPingOk",
+            agent_args: &[],
         };
         static COLLIDING: &[&CommandSpec] = &[&PING, &OTHER_PING];
 
@@ -508,6 +518,7 @@ mod tests {
             errors: &[],
             args_type: "BrokenArgs",
             ok_type: "BrokenOk",
+            agent_args: &[],
         };
         static WITH_BROKEN: &[&CommandSpec] = &[&BROKEN];
 
@@ -534,6 +545,7 @@ mod tests {
             errors: &[],
             args_type: "BrokenOkArgs",
             ok_type: "BrokenOkOk",
+            agent_args: &[],
         };
         static WITH_BROKEN_OK: &[&CommandSpec] = &[&BROKEN_OK];
 
@@ -591,6 +603,50 @@ mod tests {
             crate::catalog_json(1, DECLARED).contains(EXPECTED),
             "파생 파일의 원소"
         );
+    }
+
+    /// ★표시는 `help` 가 아니라 따로 난 칸으로 나간다★(ADR-0308) — 데몬은 `help` 를 열지 않는다.
+    #[test]
+    fn decls_carry_the_agent_reference_marks_beside_the_help() {
+        static MARKED: CommandSpec = CommandSpec {
+            name: "fixture.marked",
+            effect: Effect::Write,
+            since: 1,
+            summary: "표시 픽스처",
+            args_schema: concat!(
+                r#"{"type":"object","properties":{"target":{"type":"string"},"#,
+                r#""after":{"anyOf":[{"type":"string"},{"type":"null"}]}},"#,
+                r#""required":["target"]}"#
+            ),
+            ok_schema: "{\"type\":\"object\",\"properties\":{}}",
+            errors: &[],
+            args_type: "MarkedArgs",
+            ok_type: "MarkedOk",
+            agent_args: &["target", "after"],
+        };
+        static MARKED_DECLARED: &[&CommandSpec] = &[&MARKED, &PING];
+
+        let mut table = CommandTable::new(MARKED_DECLARED);
+        table.insert("fixture.marked", handler()).expect("삽입");
+        table.insert("fixture.ping", handler()).expect("삽입");
+
+        let decls = table.decls();
+        let marked = decls
+            .iter()
+            .find(|d| d.name == "fixture.marked")
+            .expect("표시한 명령");
+        assert_eq!(marked.agent_args, ["target", "after"], "선언 순서 그대로");
+        assert_eq!(
+            marked.help,
+            crate::spec_item_json(&MARKED),
+            "help 는 표시와 무관하다"
+        );
+        assert!(!marked.help.contains("agent_args"));
+        let plain = decls
+            .iter()
+            .find(|d| d.name == "fixture.ping")
+            .expect("표시 없는 명령");
+        assert!(plain.agent_args.is_empty());
     }
 
     #[test]

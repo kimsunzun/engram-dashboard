@@ -2,8 +2,8 @@
 
 use engram_dashboard_agent::commands::{
     AgentCancelQueuedInputArgs, AgentInterruptArgs, AgentListArgs, AgentListQueuedInputsArgs,
-    AgentMoveArgs, AgentNewArgs, AgentRenameArgs, AgentSpawnArgs, UsageGetArgs, UsageRefreshArgs,
-    COMMAND_SPECS, INPUT_AFFECTING,
+    AgentMoveArgs, AgentNewArgs, AgentRenameArgs, AgentResolveArgs, AgentSpawnArgs, UsageGetArgs,
+    UsageRefreshArgs, COMMAND_SPECS, INPUT_AFFECTING,
 };
 use engram_dashboard_command::{
     command_specs, duplicate_command_names, lint_spec, spec_item_json, spec_of, Effect, ErrorCode,
@@ -25,6 +25,7 @@ fn declared_names_are_the_cli_verbs() {
             "agent.move",
             "agent.new",
             "agent.rename",
+            "agent.resolve",
             "agent.spawn",
             "usage.get",
             "usage.refresh"
@@ -72,7 +73,17 @@ fn the_usage_verbs_are_declared_with_their_effect_and_generation() {
     let refresh = spec_of("usage.refresh").expect("선언");
     assert_eq!(refresh.effect, Effect::Write);
     assert_eq!(refresh.since, 6);
-    assert_eq!(engram_dashboard_agent::commands::CATALOG_VERSION, 6);
+}
+
+/// 여러 말을 한 번에 푸는 조회(TRD S28 §6) — `Read` 이고 카탈로그 8 에 들어왔다.
+// ADR-0307
+#[test]
+fn the_resolve_verb_is_a_read_declared_in_generation_8() {
+    let resolve = spec_of("agent.resolve").expect("선언");
+    assert_eq!(resolve.effect, Effect::Read);
+    assert_eq!(resolve.since, 8);
+    // 지금 세대는 8 이다 — `agent.resolve` 가 늘었다.
+    assert_eq!(engram_dashboard_agent::commands::CATALOG_VERSION, 8);
 }
 
 /// ★입력을 움직이는 명령 목록은 이 crate 의 `Write` 선언만 담는다★ — 없는 이름이나 조회가 끼면 공통 입구의
@@ -101,6 +112,11 @@ fn error_sets_are_golden() {
             .to_vec()
     };
     assert_eq!(declared("agent.list"), vec![]);
+    // 말 하나라도 빗나가면 그 말의 코드 — 없음 = NOT_FOUND · 동명 = CONFLICT(`resolve_in`).
+    assert_eq!(
+        declared("agent.resolve"),
+        vec![ErrorCode::NotFound, ErrorCode::Conflict]
+    );
     assert_eq!(
         declared("agent.spawn"),
         vec![ErrorCode::NotFound, ErrorCode::Conflict]
@@ -181,6 +197,11 @@ fn required_matches_what_deserialization_actually_demands() {
 
     let cases: &[(&str, fn(serde_json::Value) -> bool, serde_json::Value)] = &[
         ("agent.list", parses::<AgentListArgs>, json!({})),
+        (
+            "agent.resolve",
+            parses::<AgentResolveArgs>,
+            json!({ "targets": ["alpha"] }),
+        ),
         (
             "agent.spawn",
             parses::<AgentSpawnArgs>,

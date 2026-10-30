@@ -151,6 +151,13 @@ pub fn boundary(lo: f64, hi: f64, ratio: f64) -> f64 {
     lo + (hi - lo) * t
 }
 
+/// 두 축 모두 엄격히 `x0 < x1` · `y0 < y1`. 면적 0 칸은 f64 경계가 무너질 만큼 깊은
+/// 트리에서만 생긴다.
+// ADR-0227
+pub(crate) fn has_area(r: &SlotRect) -> bool {
+    r.x0 < r.x1 && r.y0 < r.y1
+}
+
 /// 정규화 경계 `e` 를 캔버스 축 길이 `canvas` 위의 정수 px 경계로 = `round(canvas · e)`.
 ///
 /// 동률은 0 에서 먼 쪽이다 — 입력이 음수가 아니므로 CSS `round(nearest)`(+∞ 쪽)와 같다. 칸 폭은 이 값

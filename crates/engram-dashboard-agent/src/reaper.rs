@@ -22,6 +22,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, RwLock};
 use std::thread::JoinHandle;
 
+use engram_dashboard_base::panic::payload_text;
 use engram_dashboard_base::sync;
 
 use crate::profile::ProfileRegistry;
@@ -47,9 +48,11 @@ impl ReaperDeps {
     /// reap 1건 처리(ADR-0019 §reap_one). 이 함수는 reaper 스레드(또는 테스트)에서만 호출된다.
     pub fn reap_one(&self, msg: ReapMsg) {
         // 1. write lock 구간 = epoch 검증 + remove 만(ADR-0006). Arc clone 후 즉시 해제.
-        //    ★poison-tolerant★: 다른 스레드(pump 등)가 sessions lock 보유 중 panic 해 lock 이
+        //    ★poison-tolerant★: 다른 스레드가 sessions lock 보유 중 panic 해 lock 이
         //    poison 돼도 reaper 는 계속 reap 해야 한다(좀비 방지). 데이터는 HashMap 일 뿐 불변식이
-        //    깨진 게 아니므로 가드를 되찾아 진행한다(catch_unwind 와 이중 안전).
+        //    깨진 게 아니므로 가드를 되찾아 진행한다(catch_unwind 와 이중 안전). 쓰기 락을 쥐는 자리는
+        //    가둠 표시 밖이라 운영 프로세스에서는 그 panic 을 훅이 먼저 끝낸다 — 훅 없는 시험 빌드의 그물이다.
+        // ADR-0292
         let removed = {
             let mut sessions = sync::write(&self.sessions);
             match sessions.get(&msg.id) {
@@ -66,7 +69,10 @@ impl ReaperDeps {
         //   (`AgentManager::early_activation_verdict`)은 조기종료 창 동안 같은 Arc 를 들고 있으므로, 그
         //   경로에선 실제 해제가 **그 관측자의 다음 폴링까지**(현 100ms 간격) 밀린다. 무해하다 —
         //   terminal 전이는 pump 단독이고(ADR-0005) 통로가 쥔 무리 주인(`GroupOwner`)의 drop 은 마지막
-        //   참조가 사라질 때 그대로 돈다. 즉 자식 프로세스는 이미 죽어 있고 미뤄지는 것은 핸들 회수뿐이다.
+        //   참조가 사라질 때 그대로 돈다. 대개 자식 프로세스는 이미 죽어 있어 미뤄지는 것은 핸들 회수뿐이다.
+        // ★가둔 pump panic 의 끝은 다르다(ADR-0292 결정 6)★: CLI 가 산 채 여기 닿고, 이 drop(마지막 참조면)이
+        //   무리 주인을 놓아 `KILL_ON_JOB_CLOSE` 가 CLI 트리를 끝낸다 — 위 관측자가 쥐고 있으면 그만큼 늦다.
+        //   비-Windows 는 무리 주인이 무동작이라 CLI 가 남을 수 있다(미측정).
         drop(removed);
 
         // 2.5. ★여기가 모든 terminal 의 단일 수렴점★ — 크래시·EOF·정상 exit·유저 kill 어떤 경로든
@@ -124,6 +130,9 @@ pub fn decide(msg: &ReapMsg) -> Disposition {
 /// ★lock 순서(ADR-0006)★: 비교를 **update_with 클로저 안**(프로필 락 보유 중)에서 한다 —
 ///   sessions 락은 여기서 절대 잡지 않는다(disposition 은 sessions lock-free 유지). epoch 판정을
 ///   프로필의 in-memory 필드로만 하므로 sessions 맵을 볼 필요가 없다.
+/// ★레지스트리 내부 입구다(`try_` 로 바꾸지 말 것)★ — 저장이 실패 · 거절돼도 메모리에 내리고 dirty 를 세운다.
+///   내리기를 버리면 메모리의 `true` 가 다음 저장에 실려 죽은 에이전트가 다음 부팅 복원에 되살아난다(크래시 루프).
+// ADR-0291 (E1)
 fn apply_disposition(
     profiles: &ProfileRegistry,
     id: AgentId,
@@ -194,23 +203,19 @@ pub fn spawn_reaper(deps: ReaperDeps) -> (Sender<ReaperCmd>, JoinHandle<()>) {
         .spawn(move || {
             while let Ok(cmd) = rx.recv() {
                 match cmd {
-                    // ★단일 장애점 격리(reviewer-deep blocker)★: reaper 는 전역 단일 스레드라
-                    //   reap_one 한 건의 panic(예: lock poison→expect, decide/apply 내부 패닉)이
-                    //   스레드 전체를 죽이면 **이후 모든 세션이 맵에서 영영 안 빠져 좀비화**한다.
-                    //   pump 는 agent 별 catch_unwind 로 이미 격리돼 있으니 reaper 도 메시지 1건
-                    //   처리 실패가 루프를 못 죽이게 catch_unwind 로 감싼다. &deps 는 unwind 후에도
-                    //   재사용하므로 AssertUnwindSafe 로 감싼다(여기서 deps 를 옮기지 않음).
+                    // ★reaper 는 가두지 않는다(ADR-0292)★ — 운영 프로세스에서 reap_one 의 panic 은
+                    //   훅이 프로세스를 끝내므로 아래 catch_unwind 는 훅 없는 시험 빌드에서만 닿는다.
+                    //   그 빌드에서 막는 것: reaper 는 전역 단일 스레드라 reap_one 한 건의 panic(예: lock
+                    //   poison→expect, decide/apply 내부 패닉)이 스레드 전체를 죽이면 **이후 모든 세션이
+                    //   맵에서 영영 안 빠져 좀비화**한다. &deps 는 unwind 후에도 재사용하므로
+                    //   AssertUnwindSafe 로 감싼다(여기서 deps 를 옮기지 않음).
                     ReaperCmd::Reap(msg) => {
                         let deps = &deps;
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                             move || deps.reap_one(msg),
                         ));
                         if let Err(e) = result {
-                            let detail = e
-                                .downcast_ref::<&str>()
-                                .map(|s| s.to_string())
-                                .or_else(|| e.downcast_ref::<String>().cloned())
-                                .unwrap_or_else(|| "<non-string panic>".to_string());
+                            let detail = payload_text(&*e);
                             tracing::error!(panic = %detail, "reap_one panicked — reaper 루프 생존, 다음 메시지 계속");
                         }
                     }

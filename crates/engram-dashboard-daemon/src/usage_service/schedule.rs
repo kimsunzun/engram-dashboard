@@ -88,7 +88,7 @@ fn tick(service: &UsageService) -> Tick {
 }
 
 fn bounded(sleep: Duration) -> Duration {
-    // `clamp` 를 쓰지 않는다 — 하한 > 상한이면 패닉한다(릴리즈 = abort).
+    // `clamp` 를 쓰지 않는다 — 하한 > 상한이면 패닉한다(가둠 표시 밖이라 데몬 종료 · ADR-0292).
     sleep.max(SCHEDULE_MIN_SLEEP).min(SCHEDULE_MAX_SLEEP)
 }
 

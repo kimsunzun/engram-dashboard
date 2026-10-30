@@ -23,13 +23,8 @@
 
 use uuid::Uuid;
 
-use super::geometry::{self, SlotRect};
+use super::geometry::{self, has_area, SlotRect};
 use super::types::LayoutNode;
-
-// ADR-0227
-fn has_area(r: &SlotRect) -> bool {
-    r.x0 < r.x1 && r.y0 < r.y1
-}
 
 fn center_x(r: &SlotRect) -> f64 {
     (r.x0 + r.x1) / 2.0
@@ -185,6 +180,20 @@ impl SpatialToken {
             "up" | "top" => Some(Self::Up),
             "down" | "bottom" => Some(Self::Down),
             _ => None,
+        }
+    }
+
+    /// wire 철자(kebab) — [`Self::parse`] 가 받는 대표 철자다.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TopLeft => "top-left",
+            Self::TopRight => "top-right",
+            Self::BottomLeft => "bottom-left",
+            Self::BottomRight => "bottom-right",
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Up => "up",
+            Self::Down => "down",
         }
     }
 }

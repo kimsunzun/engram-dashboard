@@ -48,7 +48,7 @@ use super::lifecycle::{Lifecycle, ReconnectVerdict};
 use super::protocol_state::{self, CommandFailure, PendingMap, SubState};
 use super::refusal::{RefusalAlerts, RefusalSite};
 use super::replay_flight::{self, RefusalOutcome, ReplayFlightSet, Resolution};
-use super::{ConnectionState, DaemonDiscovery, SharedUsageInterest};
+use super::{AgentNamesSink, ConnectionState, DaemonDiscovery, SharedUsageInterest};
 use crate::output_channel::{self, WindowChannelRegistry};
 use crate::output_router::{OutputRouter, WindowLabel};
 
@@ -137,7 +137,8 @@ pub enum HandshakeError {
     // Error/Close 중 무엇도 안 보내면 wait_for_hello 가 무한 대기하므로(깨울 외부 경로 없음),
     // 상한을 둬 확정적으로 실패로 빠진다. ★Fix A★ — 영구 hang 방지.
     Timeout,
-    // 연결 task 가 ready 신호 전에 사라짐(panic 등).
+    // 연결 task 가 ready 신호 전에 사라짐(stale self-close 등 — panic 은 운영 셸에선 훅이 셸째 끝내 훅 없는
+    //   시험 빌드에서만 여기로 온다 · ADR-0292).
     TaskGone,
 }
 
@@ -277,6 +278,8 @@ pub(crate) async fn run_connection(
     //   Text arm 의 broadcast(request_id 없는 AgentListUpdated/StatusChanged/…)를 전 webview 에 push 한다.
     //   실물은 `events::TauriEmitter`, 창 없는 조립은 `events::NoDaemonEvents`(버림).
     events: Arc<dyn DaemonEvents>,
+    // 데몬 목록의 이름 몫(TRD S26-window-chrome §4-3) — `AgentListUpdated` 팔이 프론트 알림 뒤에 부른다.
+    names: Arc<dyn AgentNamesSink>,
     // 등록 거절 박스의 거르개 — `DaemonClient` 가 쥔 것을 그대로 받는다(사유 = 그 칸 doc).
     refusals: Arc<RefusalAlerts>,
     // ADR-0155 결정 4: 데몬이 배달한 명령의 입구. 늦게 채워지므로 슬롯으로 받는다(`inbound::InboundSlot` doc).
@@ -374,6 +377,7 @@ pub(crate) async fn run_connection(
         router,
         registry,
         events,
+        names,
         refusals,
         inbound,
         usage,
@@ -629,6 +633,7 @@ async fn connected_lifetime(
     router: Arc<OutputRouter>,
     registry: WindowChannelRegistry,
     events: Arc<dyn DaemonEvents>,
+    names: Arc<dyn AgentNamesSink>,
     refusals: Arc<RefusalAlerts>,
     inbound: Arc<InboundSlot>,
     usage: SharedUsageInterest,
@@ -663,6 +668,7 @@ async fn connected_lifetime(
             &router,
             &registry,
             events.as_ref(),
+            names.as_ref(),
             &refusals,
             &inbound,
             &usage,
@@ -944,6 +950,7 @@ async fn main_loop(
     router: &Arc<OutputRouter>,
     registry: &WindowChannelRegistry,
     events: &dyn DaemonEvents,
+    names: &dyn AgentNamesSink,
     refusals: &Arc<RefusalAlerts>,
     inbound: &Arc<InboundSlot>,
     usage: &SharedUsageInterest,
@@ -1078,7 +1085,7 @@ async fn main_loop(
                                                 // ★T7c: request_id 없는 broadcast 를 알림 포트로 전
                                                 //   webview push. 실패는 포트 구현이 삼킨다(webview
                                                 //   없음/채널 오류 등은 치명적이지 않다).
-                                                ev => emit_broadcast(events, &ev),
+                                                ev => emit_broadcast(events, names, &ev),
                                             },
                                         }
                                     }
@@ -1163,6 +1170,20 @@ async fn main_loop(
                         }
                     }
                     ConnectionCommand::RequestReplay { agent_id, reply, .. } => {
+                        // ★어느 창에도 안 보이는 에이전트는 구독하지 않는다★ — 그 출력을 받을 창이 없고(배달도 같은
+                        //   `targets` 를 본다), 그 구독을 풀 해제도 다시 오지 않는다(해제는 레이아웃의 1→0 전이에서만
+                        //   나간다). 닫히는 팝아웃의 웹뷰는 닫기 요청이 해제를 낸 뒤에도 잠깐 살아 replay 를 청할 수 있다
+                        //   (TRD S21-slot-docking 5.8판 §1-2 「닫히는 창」). 요청 쪽(invoke)이 아니라 꺼내는 이 자리에서 보는
+                        //   것은 그 해제와 순서를 맞추기 위해서다 — 라우팅 표는 해제를 넣기 전에 같은 레이아웃 락 안에서
+                        //   바뀌므로, 이 채널에서 해제 뒤에 꺼낸 요청은 그 해제를 낸 표나 그보다 새 표를 본다. reply 는 drop(요청 쪽 =
+                        //   「미전송 · 재요청 안전」) · `flight` 는 건드리지 않는다.
+                        if router.targets(agent_id).is_empty() {
+                            tracing::debug!(
+                                %agent_id,
+                                "request_replay: 그 에이전트를 보이는 창이 없다 — Subscribe 를 보내지 않는다"
+                            );
+                            continue;
+                        }
                         let epoch = known_epoch(subs, agent_id);
                         let outcome = flight.request_replay(agent_id, Instant::now());
                         // send_now=false 가 **반복**되면 슬롯이 좀비라는 뜻이다(정상 병합은 뷰 동시
@@ -1263,10 +1284,13 @@ async fn main_loop(
 // 전송 어댑터의 판정이 아니다. 아래 `Error` 팔은 emit 이 아니라 로깅뿐인데, 이걸 어댑터로 옮기면
 // no-op 조립에서 그 흔적까지 함께 사라진다. 포트가 아는 것은 **무슨 일이 일어났나**뿐이고, 그것이
 // 어떤 Tauri 이벤트 이름으로 나가는지는 어댑터가 안다(`events.rs`).
-fn emit_broadcast(events: &dyn DaemonEvents, ev: &AgentEvent) {
+fn emit_broadcast(events: &dyn DaemonEvents, names: &dyn AgentNamesSink, ev: &AgentEvent) {
     match ev {
+        // 이름 장부는 프론트 알림 뒤다(TRD S26-window-chrome §4-3). 이 자리는 아무 락도 쥐지 않는다 — 장부의 실물이
+        //   레이아웃 락을 잡는다(`AgentNamesSink` doc).
         AgentEvent::AgentListUpdated { agents } => {
             events.agent_list_updated(agents);
+            names.agents(agents);
         }
         AgentEvent::StatusChanged {
             agent_id,
@@ -1465,7 +1489,7 @@ async fn write_usage_on_open(
 /// 데몬 방송 `UsageLimitsUpdated` 한 장 — 대조 → 받을 창에 알림 → 어긋났으면 같은 소켓에 바라는 집합 한 장.
 ///
 /// ★이 팔은 [`emit_broadcast`] 안이 아니라 그 호출 자리에 선다★: 대조에는 관심 상태 · 이 소켓의 표식 · 소켓
-/// 출구가 필요한데 [`emit_broadcast`] 는 `(events, ev)` 만 받는다. 그리로 떨어지면 `_ => {}` 가 조용히
+/// 출구가 필요한데 [`emit_broadcast`] 는 알림 포트 둘과 `ev` 만 받는다. 그리로 떨어지면 `_ => {}` 가 조용히
 /// 삼키고 컴파일러는 못 잡는다 — `tests.rs` 의 「방송 한 줄 → 알림 한 번」 시험이 유일한 벽이다.
 /// ★받을 창이 없으면 알리지 않는다★ — 옛 소켓의 한 장이거나 사용량 슬롯이 있는 창이 없다. 웹뷰는 자기 label 이
 /// 든 것만 받으므로 빈 `labels` 는 아무도 안 받는다.
@@ -1783,8 +1807,9 @@ pub const PENDING_SUPERSEDED: &str = "중복 request_id — 옛 요청 취소";
 /// **봉투를 지은 바깥 호출자**의 것이고(`engram_dashboard_protocol::command_request_id` 가
 /// `envelope.request_id` 를 그대로 이 맵의 키로 넘긴다), 웹뷰가 그 봉투를 `forward_daemon_command`
 /// (`src-tauri/src/commands/agent.rs`)로 실어 보낸다. 즉 유일성은 **통제 못 하는 입력의 성질**이지 우리
-/// 코드의 불변식이 아니다. 겹친 번호로 이 연결 태스크를 죽이면 그 뒤 모든 명령이 「연결 task 가 명령을 받지
-/// 못함」으로 끊기고 재연결도 없다(디버그 빌드 GUI 실측 2026-08-18 — 명부 0, 창은 살아 있는 채 단절).
+/// 코드의 불변식이 아니다. 겹친 번호로 패닉하면 운영 셸은 훅이 셸째 끝내고(ADR-0292), 훅 없는 빌드에선 이 연결
+/// 태스크만 죽어 그 뒤 모든 명령이 「연결 task 가 명령을 받지 못함」으로 끊기고 재연결도 없다(디버그 빌드 GUI
+/// 실측 2026-08-18 — 명부 0, 창은 살아 있는 채 단절).
 ///
 /// ## ★겹침의 답은 데몬이 짓는다★
 /// 배달 쪽은 이 겹침을 견디도록 이미 지어져 있다 — `engram_dashboard_daemon::command_delivery` 가 같은 번호의

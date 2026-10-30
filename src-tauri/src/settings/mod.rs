@@ -25,8 +25,9 @@ mod registry;
 mod store;
 
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, MutexGuard};
 
+use engram_dashboard_base::sync;
 use ts_rs::TS;
 
 use registry::SettingDef;
@@ -44,6 +45,16 @@ pub enum SettingsError {
     /// 형식 · 범위 위반(문구에 기대 형식), 또는 정확한 키 자리에 온 접두.
     #[error("{0}")]
     InvalidArgument(String),
+    /// 이 셸보다 새 판이 쓴 설정 파일이라 덮지 않았다(메모리 · `rev` 불변 · 알림 없음 · 파일 그대로). 그 파일이
+    /// 바뀌기 전에는 다시 해도 같다.
+    // ADR-0291 R2
+    #[error("{0}")]
+    Conflict(String),
+    /// 쓰기 직전에 지금 파일을 못 읽어 덮지 않았다(메모리 · `rev` 불변 · 알림 없음 · 파일 그대로). 쓸 때마다 다시
+    /// 읽으므로 대개 잠깐 쥔 잠김이고 조금 뒤 다시 하면 된다.
+    // ADR-0291 R17 — 사용자 결정 2026-10-11: 실행 중 재판정의 못 읽음은 일시 거절이다.
+    #[error("{0}")]
+    Unreadable(String),
     /// 디스크 쓰기 실패(메모리 · `rev` 불변 · 알림 없음), 또는 [`SettingsService::enable_writes`] 전의 쓰기.
     #[error("{0}")]
     Internal(String),
@@ -198,17 +209,14 @@ fn select(selector: Option<&str>) -> Result<Vec<&'static SettingDef>, SettingsEr
     Ok(defs)
 }
 
-/// 파일을 쓸지 — 파일을 읽었으면 파일이 목표와 다른가로, 못 읽었으면(IO 실패 · 통째로 못 쓰는 파일) 유효
-/// 값이 바뀌나로 가른다.
+/// 파일을 쓸지 — 파일을 읽었으면 파일이 목표와 다른가로, 못 읽었으면(IO 실패 · 통째로 못 쓰는 파일 · 새 판이
+/// 쓴 파일) 유효 값이 바뀌나로 가른다.
 fn needs_write(
-    document: &std::io::Result<store::Document>,
+    document: &store::Document,
     disk_differs: impl FnOnce(&store::Document) -> Option<bool>,
     memory_changed: bool,
 ) -> bool {
-    match document {
-        Ok(document) => disk_differs(document).unwrap_or(memory_changed),
-        Err(_) => memory_changed,
-    }
+    disk_differs(document).unwrap_or(memory_changed)
 }
 
 impl SettingsService {
@@ -262,8 +270,8 @@ impl SettingsService {
     ///
     /// ★쓸지는 파일로, `changed` 는 유효 값으로 가른다★ — 파일이 이미 목표대로면(기본값 = 키 없음 · 아니면
     /// 정규 철자) 안 쓴다. 다르면 유효 값이 같아도 쓴다 — 밖에서 고친 값이나 접힌 못 쓸 값을 바로잡는다. 그때
-    /// 답은 `changed: false` 이고 `rev` · 알림은 그대로다. 파일을 못 읽으면(IO 실패 · 통째로 못 쓰는 파일)
-    /// 유효 값이 바뀔 때만 쓴다(IO 실패면 그 쓰기는 `Internal`).
+    /// 답은 `changed: false` 이고 `rev` · 알림은 그대로다. 파일을 못 읽으면(IO 실패 · 통째로 못 쓰는 파일 · 새 판이
+    /// 쓴 파일) 유효 값이 바뀔 때만 쓴다 — IO 실패면 그 쓰기는 `Internal`, 새 판이 쓴 파일이면 덮지 않고 `Conflict`.
     ///
     /// 알림은 내지 않는다 — 셸의 쓰기는 [`set_and_notify`] 로 부른다.
     ///
@@ -440,38 +448,63 @@ impl SettingsService {
         Some(self.lock_state().effective(def).to_string())
     }
 
-    /// `io` 를 쥔 채 부른다 — 실패하면 메모리 · `rev` 그대로 `Internal`.
+    /// `io` 를 쥔 채 부른다 — 실패하면 메모리 · `rev` 그대로다. 새 판이 쓴 파일 = `Conflict` · 지금 파일을 못 읽음 =
+    /// `Unreadable` · 쓰기 실패 = `Internal`.
     fn persist(
         &self,
         files: &dyn SettingsFiles,
-        document: std::io::Result<store::Document>,
+        document: store::Document,
         changes: &[(&'static str, Option<String>)],
     ) -> Result<(), SettingsError> {
         let memory = self.lock_state().overrides.clone();
-        let written = document.and_then(|document| store::write(files, document, &memory, changes));
-        written.map_err(|e| {
-            tracing::warn!(
-                module = "settings",
-                source = %self.origin,
-                keys = changes.len(),
-                "설정을 디스크에 못 써 바꾸지 않았다: {e}"
-            );
-            SettingsError::Internal(format!("설정 파일을 못 썼다: {e}"))
+        store::write(files, document, &memory, changes).map_err(|e| match e {
+            store::WriteError::Newer { found } => {
+                tracing::warn!(
+                    module = "settings",
+                    source = %self.origin,
+                    keys = changes.len(),
+                    found,
+                    "설정 파일이 이 셸보다 새 판이 쓴 것이라 덮지 않고 바꾸지 않았다"
+                );
+                SettingsError::Conflict(format!(
+                    "설정 파일이 이 앱보다 새 버전(판 {found})이 쓴 것이라 덮지 않았다 — 값은 그대로다"
+                ))
+            }
+            store::WriteError::Unreadable(e) => {
+                tracing::warn!(
+                    module = "settings",
+                    source = %self.origin,
+                    keys = changes.len(),
+                    "설정 파일을 못 읽어 덮지 않고 바꾸지 않았다: {e}"
+                );
+                SettingsError::Unreadable(format!(
+                    "설정 파일을 지금 못 읽어 쓰지 않았다 — 값은 그대로다. 대개 잠깐 쥔 잠김이라 조금 뒤 다시 하면 된다: {e}"
+                ))
+            }
+            store::WriteError::Io(e) => {
+                tracing::warn!(
+                    module = "settings",
+                    source = %self.origin,
+                    keys = changes.len(),
+                    "설정을 디스크에 못 써 바꾸지 않았다: {e}"
+                );
+                SettingsError::Internal(format!("설정 파일을 못 썼다: {e}"))
+            }
         })
     }
 
     // 셋 다 중독돼도 계속 돈다 — 메모리는 파일 쓰기가 성공한 뒤에만 바뀌므로 패닉한 쓰기가 반쯤 바꾼 상태를
     //   남기지 않고, `io` · `announce` 는 순서만 지킨다.
     fn lock_io(&self) -> MutexGuard<'_, Box<dyn SettingsFiles>> {
-        self.io.lock().unwrap_or_else(PoisonError::into_inner)
+        sync::lock(&self.io)
     }
 
     fn lock_announce(&self) -> MutexGuard<'_, ()> {
-        self.announce.lock().unwrap_or_else(PoisonError::into_inner)
+        sync::lock(&self.announce)
     }
 
     fn lock_state(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+        sync::lock(&self.state)
     }
 }
 

@@ -16,9 +16,10 @@ use super::schema::{
     Bounds, PersistedContent, PersistedNode, TabEntry, TabStrip, WindowEntry, WindowKind,
 };
 use crate::layout::manager::{RestoredWindow, ViewId, WindowLabel, WindowTabs};
+use crate::layout::tab_name::{self, effective_tab_name};
 use crate::layout::{
-    tree, LabelSource, LayoutNode, SlotContent, View, ViewManager, WindowAttrs, WindowBounds,
-    MAIN_WINDOW_LABEL,
+    tree, LabelSource, LayoutNode, SlotContent, TabName, View, ViewManager, WindowAttrs,
+    WindowBounds, MAIN_WINDOW_LABEL,
 };
 use crate::theme::UiTheme;
 
@@ -78,6 +79,7 @@ fn tabbed_entry(
         canvas: _,
         metrics: _,
         window_id,
+        number,
         attrs,
         placement_memo: _,
     } = window;
@@ -88,6 +90,7 @@ fn tabbed_entry(
         .collect();
     window_entry(
         window_id.clone(),
+        *number,
         kind(TabStrip {
             active_tab: *active,
             tabs,
@@ -96,7 +99,7 @@ fn tabbed_entry(
     )
 }
 
-fn window_entry(id: String, kind: WindowKind, attrs: WindowAttrs) -> WindowEntry {
+fn window_entry(id: String, number: u32, kind: WindowKind, attrs: WindowAttrs) -> WindowEntry {
     let WindowAttrs {
         theme,
         bounds,
@@ -104,6 +107,7 @@ fn window_entry(id: String, kind: WindowKind, attrs: WindowAttrs) -> WindowEntry
     } = attrs;
     WindowEntry {
         id,
+        number: Some(number),
         kind,
         theme,
         bounds: bounds.map(|bounds| Bounds {
@@ -116,6 +120,7 @@ fn window_entry(id: String, kind: WindowKind, attrs: WindowAttrs) -> WindowEntry
     }
 }
 
+// 이름 = 그 순간의 보이는 이름 + 정했나(TRD S26-window-chrome §3-3). 자동 탭의 글자는 다음 부팅이 이름으로 쓰지 않는다.
 fn tab_entry(layout: &ViewManager, view: &View) -> TabEntry {
     let View {
         id,
@@ -125,7 +130,8 @@ fn tab_entry(layout: &ViewManager, view: &View) -> TabEntry {
     } = view;
     TabEntry {
         id: *id,
-        name: name.clone(),
+        name: effective_tab_name(layout, view),
+        named: Some(name.is_named()),
         focused_slot_id: *focused_slot_id,
         layout: persisted_node(layout, *id, node),
     }
@@ -180,6 +186,14 @@ fn persisted_content(
 }
 
 // ── 영속 → 메모리 ───────────────────────────────────────────────────────────
+
+// 정한 이름만 되살린다 — 칸이 없거나(옛 파일) 거짓이면 자동이다(D16). 정한 이름이 빈 글자면 자동으로 접는다(AC36).
+fn restored_name(name: String, named: Option<bool>) -> TabName {
+    match named {
+        Some(true) => TabName::named(name).unwrap_or(TabName::Auto),
+        Some(false) | None => TabName::Auto,
+    }
+}
 
 /// [`ViewManager::from_persisted`] 의 결과.
 pub struct Restored {
@@ -243,6 +257,13 @@ pub enum RestoreWarning {
         slot: Uuid,
         kind: Option<String>,
     },
+    /// 팝아웃이 저장 번호를 못 받았다 — 없거나 못 쓰는 값(`saved` = `None`) · main 의 1 · 앞 창과 겹침. 빈 가장 작은
+    /// 번호 `given` 을 준다(TRD S26-window-chrome §3-4 · D3).
+    NumberReassigned {
+        window_id: String,
+        saved: Option<u32>,
+        given: u32,
+    },
     /// 고친 입력으로도 모델을 못 세웠다 — 이 모듈의 결함이다. 기본 화면으로 시작한다.
     Internal(String),
 }
@@ -305,6 +326,17 @@ impl fmt::Display for RestoreWarning {
                 "창 {window_id} 의 탭 {view} 슬롯 {slot} — 이 판이 모르는 내용({}) 을 그대로 쥔다",
                 kind.as_deref().unwrap_or("종류 없음")
             ),
+            RestoreWarning::NumberReassigned {
+                window_id,
+                saved,
+                given,
+            } => match saved {
+                Some(saved) => write!(
+                    f,
+                    "팝아웃 {window_id} 의 번호 {saved} 를 쓸 수 없다 — {given} 을 준다"
+                ),
+                None => write!(f, "팝아웃 {window_id} 에 번호가 없다 — {given} 을 준다"),
+            },
             RestoreWarning::Internal(reason) => {
                 write!(
                     f,
@@ -328,6 +360,8 @@ impl ViewManager {
     /// - 곁표(모르는 내용)를 View 와 함께 옮긴다 — View 만 옮기면 그 슬롯이 빈 칸으로 저장돼 원문이 사라진다. 옛
     ///   View 는 `remove_view` 로 지운다(그 곁표 항목을 함께 거둔다).
     /// - main 항목은 탭 · 속성만 바꾼다 — 통째로 바꾸면 측정값(`canvas` · `metrics`)을 웹뷰가 다시 보고할 때까지 잃는다.
+    /// - 결과의 에이전트 이름 장부는 저장 파일에서 뜬 시드뿐이다(`agent_name_seed`) — 수락은 지금 장부의 빈 칸에만
+    ///   더한다(`adopt_restored`).
     pub(crate) fn from_persisted(windows: Vec<WindowEntry>, labels: &dyn LabelSource) -> Restored {
         let mut restorer = Restorer::default();
         for entry in windows {
@@ -345,6 +379,8 @@ struct Restorer {
     popout_ids: HashSet<Uuid>,
     views: HashSet<Uuid>,
     nodes: HashSet<Uuid>,
+    // 남긴 탭에서 뜬 에이전트 이름 시드(에이전트 id, 이름 — `agent_name_seed`) · 저장 순서.
+    names: Vec<(String, String)>,
 }
 
 struct Pending {
@@ -360,6 +396,7 @@ struct Staged {
     active: Option<ViewId>,
     nodes: HashSet<Uuid>,
     unknown: Vec<(ViewId, Uuid, Map<String, Value>)>,
+    names: Vec<(String, String)>,
     warnings: Vec<RestoreWarning>,
 }
 
@@ -367,6 +404,7 @@ impl Restorer {
     fn window(&mut self, entry: WindowEntry, labels: &dyn LabelSource) {
         let WindowEntry {
             id,
+            number,
             kind,
             theme,
             bounds,
@@ -382,7 +420,7 @@ impl Restorer {
                 }
                 let staged = self.stage(&id, strip);
                 let attrs = self.attrs(&id, theme, bounds, maximized);
-                self.main = Some(self.commit(attrs, staged));
+                self.main = Some(self.commit(attrs, number, staged));
             }
             WindowKind::Popout(strip) => {
                 let Ok(uuid) = Uuid::parse_str(&id) else {
@@ -409,7 +447,7 @@ impl Restorer {
                 }
                 self.popout_ids.insert(uuid);
                 let attrs = self.attrs(&id, theme, bounds, maximized);
-                let pending = self.commit(attrs, staged);
+                let pending = self.commit(attrs, number, staged);
                 self.popouts.push((label, id, pending));
             }
         }
@@ -471,6 +509,7 @@ impl Restorer {
         let TabEntry {
             id,
             name,
+            named,
             focused_slot_id,
             layout,
         } = tab;
@@ -512,30 +551,36 @@ impl Restorer {
             });
             staged.unknown.push((id, slot, raw));
         }
+        staged
+            .names
+            .extend(agent_name_seed(&name, named, &layout, focused_slot_id));
         staged.tabs.push(View {
             id,
-            name,
+            name: restored_name(name, named),
             layout,
             focused_slot_id,
         });
     }
 
-    fn commit(&mut self, attrs: WindowAttrs, staged: Staged) -> Pending {
+    fn commit(&mut self, attrs: WindowAttrs, number: Option<u32>, staged: Staged) -> Pending {
         let Staged {
             tabs,
             active,
             nodes,
             unknown,
+            names,
             warnings,
         } = staged;
         self.views.extend(tabs.iter().map(|v| v.id));
         self.nodes.extend(nodes);
+        self.names.extend(names);
         self.warnings.extend(warnings);
         Pending {
             window: RestoredWindow {
                 attrs,
                 tabs,
                 active,
+                number,
             },
             unknown,
         }
@@ -549,12 +594,14 @@ impl Restorer {
             popout_ids: _,
             views: _,
             nodes: _,
+            names,
         } = self;
         let main = main.unwrap_or(Pending {
             window: RestoredWindow {
                 attrs: WindowAttrs::default(),
                 tabs: Vec::new(),
                 active: None,
+                number: None,
             },
             unknown: Vec::new(),
         });
@@ -562,6 +609,10 @@ impl Restorer {
             warnings.push(RestoreWarning::MainWithoutTabs);
         }
         let mut unknown = main.unknown;
+        let saved: Vec<(WindowLabel, String, Option<u32>)> = popouts
+            .iter()
+            .map(|(label, id, pending)| (label.clone(), id.clone(), pending.window.number))
+            .collect();
         let popouts = popouts
             .into_iter()
             .map(|(label, id, pending)| {
@@ -579,13 +630,50 @@ impl Restorer {
                 };
             }
         };
+        for (label, window_id, saved) in saved {
+            let Some(given) = layout.windows.get(&label).map(|w| w.number) else {
+                continue;
+            };
+            if saved != Some(given) {
+                warnings.push(RestoreWarning::NumberReassigned {
+                    window_id,
+                    saved,
+                    given,
+                });
+            }
+        }
         for (view, slot, raw) in unknown {
             if let Err(e) = layout.set_unknown_content(view, slot, raw) {
                 warnings.push(RestoreWarning::Internal(e.to_string()));
             }
         }
+        layout.seed_agent_names(names);
         Restored { layout, warnings }
     }
+}
+
+/// 자동 이름 탭이 저장한 이름에서 에이전트 이름 장부의 시드를 뜬다(TRD S26-window-chrome §4-3 · 메인 결정 M16) — 그
+/// 이름은 저장 순간 포커스 슬롯의 [`slot_label`](crate::layout::tab_name::slot_label) 이라, 그 슬롯이 에이전트면 그
+/// 에이전트의 표시 이름이다. 데몬 목록이 오기 전에도 탭 이름 · OS 제목이 「에이전트」로 한 번 깜빡이지 않게 한다.
+///
+/// 시드가 아닌 것 — `named` 가 `Some(false)` 가 아님(정한 이름 · 칸이 없는 옛 파일: 그 글자는 「View 3」 같은 옛
+/// 기본값일 수 있다) · 빈 글자 · 낱말 표의 글자(장부에 없던 에이전트의 「에이전트」 — 이름이 아니다) · 포커스 슬롯이
+/// 에이전트가 아님(이 판이 모르는 내용 슬롯은 메모리 내용이 `Empty` 라 여기 든다). 포커스가 없거나 트리 밖이면 트리 첫
+/// 슬롯을 본다 — 복원 모델이 포커스를 고치는 규칙과 같다.
+fn agent_name_seed(
+    name: &str,
+    named: Option<bool>,
+    layout: &LayoutNode,
+    focused: Option<Uuid>,
+) -> Option<(String, String)> {
+    if named != Some(false) || name.trim().is_empty() || tab_name::is_word(name) {
+        return None;
+    }
+    let slot = focused
+        .filter(|&id| tree::contains_slot(layout, id))
+        .unwrap_or_else(|| tree::first_slot_id(layout));
+    let agent_id = tree::find_slot(layout, slot)?.agent_id()?;
+    Some((agent_id.to_string(), name.to_string()))
 }
 
 /// 한 탭의 트리를 내려가며 모은 것 — 노드 id(전위 순) · 모르는 내용 · 고친 비율(분할 id, 받은 값).
@@ -657,15 +745,15 @@ fn known_content(content: SlotContent) -> SlotContent {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
     use serde_json::{json, Map, Value};
     use uuid::Uuid;
 
-    use super::{to_persisted, RestoreWarning, Restored, StateRevision};
+    use super::{agent_name_seed, to_persisted, RestoreWarning, Restored, StateRevision};
     use crate::layout::{
-        tree, LabelSource, SlotContent, SplitDir, ViewManager, WindowAttrs, WindowBounds,
-        WindowPlacement, MAIN_WINDOW_LABEL,
+        tree, LabelSource, LayoutNode, SlotContent, SplitDir, TabName, ViewManager, WindowAttrs,
+        WindowBounds, WindowPlacement, MAIN_WINDOW_LABEL,
     };
     use crate::state::codec;
     use crate::state::schema::{
@@ -681,10 +769,6 @@ mod tests {
         fn next_label(&self) -> String {
             format!("slot-popup-{}", self.0.fetch_add(1, Ordering::SeqCst) + 1)
         }
-
-        fn tab_name(&self, label: &str) -> String {
-            label.to_string()
-        }
     }
 
     /// 늘 같은 label 을 준다.
@@ -693,10 +777,6 @@ mod tests {
     impl LabelSource for Fixed {
         fn next_label(&self) -> String {
             self.0.to_string()
-        }
-
-        fn tab_name(&self, label: &str) -> String {
-            label.to_string()
         }
     }
 
@@ -900,6 +980,205 @@ mod tests {
         assert_eq!(names, ["작업", "둘"]);
     }
 
+    // TRD S26-window-chrome §3-3 — 이름 칸은 그 순간의 보이는 이름 + 정했나다(자동 탭도 글자로 적는다).
+    #[test]
+    fn a_tab_is_written_with_its_visible_name_and_whether_it_was_named() {
+        let mut mgr = ViewManager::new();
+        let auto = main_active(&mgr);
+        let slot = first_slot(&mgr, auto);
+        mgr.set_slot_content(auto, slot, SlotContent::AgentList)
+            .unwrap();
+        let named = mgr
+            .create_tab(MAIN_WINDOW_LABEL, Some("작업".into()))
+            .unwrap();
+        let foreign = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+        let slot = first_slot(&mgr, foreign);
+        mgr.set_unknown_content(foreign, slot, raw("from_the_future"))
+            .unwrap();
+
+        let written = to_persisted(&mgr);
+        let tabs: Vec<(Uuid, &str, Option<bool>)> = main_strip(&written)
+            .tabs
+            .iter()
+            .map(|t| (t.id, t.name.as_str(), t.named))
+            .collect();
+        assert_eq!(
+            tabs,
+            [
+                (auto, "에이전트 트리", Some(false)),
+                (named, "작업", Some(true)),
+                (foreign, "알 수 없는 내용", Some(false)),
+            ]
+        );
+    }
+
+    // D16 · AC36 — `named` 가 참인 탭만 이름을 되살린다. 옛 파일(칸 없음)의 글자는 「View 3」 같은 옛 기본값일 수 있다.
+    #[test]
+    fn only_a_tab_marked_named_restores_its_name() {
+        let tab = |name: &str, named: Option<bool>| {
+            let mut tab = empty_tab();
+            tab.name = name.into();
+            tab.named = named;
+            tab
+        };
+        let back = restore(vec![main_entry(vec![
+            tab("작업", Some(true)),
+            tab("myproj", Some(false)),
+            tab("View 3", None),
+            tab("  ", Some(true)),
+        ])]);
+        assert_eq!(back.warnings, vec![]);
+        let names: Vec<TabName> = main_tab_ids(&back.layout)
+            .iter()
+            .map(|id| back.layout.views[id].name.clone())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                TabName::Named("작업".into()),
+                TabName::Auto,
+                TabName::Auto,
+                TabName::Auto,
+            ]
+        );
+    }
+
+    // ── 에이전트 이름 시드(TRD S26-window-chrome §4-3) ──
+
+    fn agent_tab(agent: &str, name: &str, named: Option<bool>) -> TabEntry {
+        let (mut tab, _) = slot_tab(PersistedContent::Known(SlotContent::Agent {
+            agent_id: agent.into(),
+        }));
+        tab.name = name.into();
+        tab.named = named;
+        tab
+    }
+
+    fn listed_names(layout: &ViewManager) -> Vec<String> {
+        layout
+            .list_tabs(MAIN_WINDOW_LABEL)
+            .unwrap()
+            .tabs
+            .into_iter()
+            .map(|t| t.name)
+            .collect()
+    }
+
+    // 자동 이름 탭(`named: false`)의 저장 이름만 시드다 — 정한 이름 · 칸이 없는 옛 파일의 글자 · 낱말 표의 글자는 심지
+    //   않는다. 심었으면 같은 에이전트를 보는 자동 탭이 그 글자를 보인다.
+    #[test]
+    fn only_an_auto_tabs_saved_agent_name_seeds_the_name_book() {
+        let back = restore(vec![main_entry(vec![
+            agent_tab("a1", "myproj", Some(false)),
+            agent_tab("a2", "정함", Some(true)),
+            agent_tab("a2", "에이전트", Some(false)),
+            agent_tab("a3", "View 3", None),
+        ])]);
+        assert_eq!(back.warnings, vec![]);
+        assert_eq!(
+            listed_names(&back.layout),
+            ["myproj", "정함", "에이전트", "에이전트"]
+        );
+    }
+
+    #[test]
+    fn a_seed_comes_from_the_focused_slot_or_else_the_first_slot() {
+        let slot = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let agent = LayoutNode::Slot {
+            id: slot,
+            content: SlotContent::Agent {
+                agent_id: "a1".into(),
+            },
+        };
+        let seed = Some(("a1".to_string(), "myproj".to_string()));
+        for focus in [Some(slot), None, Some(Uuid::new_v4())] {
+            assert_eq!(
+                agent_name_seed("myproj", Some(false), &agent, focus),
+                seed,
+                "{focus:?}"
+            );
+        }
+        let split = LayoutNode::Split {
+            id: Uuid::new_v4(),
+            dir: SplitDir::LeftRight,
+            ratio: 0.5,
+            a: Box::new(agent),
+            b: Box::new(LayoutNode::Slot {
+                id: other,
+                content: SlotContent::AgentList,
+            }),
+        };
+        assert_eq!(
+            agent_name_seed("myproj", Some(false), &split, Some(other)),
+            None,
+            "포커스 칸이 에이전트가 아니다"
+        );
+        assert_eq!(agent_name_seed("myproj", Some(false), &split, None), seed);
+    }
+
+    // 낱말 표의 글자는 이름이 아니다 — 장부에 없던 에이전트의 탭은 「에이전트」로 저장된다(메인 결정 · U3a 리뷰).
+    #[test]
+    fn no_word_of_the_table_and_no_blank_is_a_seed() {
+        let slot = Uuid::new_v4();
+        let agent = LayoutNode::Slot {
+            id: slot,
+            content: SlotContent::Agent {
+                agent_id: "a1".into(),
+            },
+        };
+        for text in [
+            "빈 칸",
+            "에이전트",
+            "에이전트 트리",
+            "프리셋",
+            "사용량",
+            "알 수 없는 내용",
+            "",
+            "  ",
+        ] {
+            assert_eq!(
+                agent_name_seed(text, Some(false), &agent, Some(slot)),
+                None,
+                "{text:?}"
+            );
+        }
+    }
+
+    // 자리채움 글자를 심었다면 그 칸이 차서, 뒤에 받아들인 사본의 진짜 이름이 빈 칸에만 드는 시드로 들어가지 못한다.
+    #[test]
+    fn a_placeholder_saved_at_boot_does_not_keep_a_restored_copys_name_out() {
+        let mut live = restore(vec![main_entry(vec![agent_tab(
+            "a1",
+            "에이전트",
+            Some(false),
+        )])])
+        .layout;
+        let copy = restore(vec![main_entry(vec![agent_tab(
+            "a1",
+            "myproj",
+            Some(false),
+        )])])
+        .layout;
+
+        live.adopt_restored(copy).unwrap();
+
+        assert_eq!(listed_names(&live), ["myproj"]);
+    }
+
+    #[test]
+    fn a_skipped_tab_seeds_nothing() {
+        let kept = agent_tab("a1", "에이전트", Some(false));
+        let mut twin = agent_tab("a1", "myproj", Some(false));
+        twin.id = kept.id;
+        let back = restore(vec![main_entry(vec![kept, twin])]);
+        assert!(matches!(
+            back.warnings.as_slice(),
+            [RestoreWarning::DuplicateTab { .. }]
+        ));
+        assert_eq!(listed_names(&back.layout), ["에이전트"]);
+    }
+
     #[test]
     fn unknown_content_is_written_back_only_while_the_slot_is_untouched() {
         let mut mgr = ViewManager::new();
@@ -997,6 +1276,7 @@ mod tests {
         let tab = TabEntry {
             id: Uuid::new_v4(),
             name: "t".into(),
+            named: Some(false),
             focused_slot_id: Some(slot),
             layout: PersistedNode::Slot { id: slot, content },
         };
@@ -1014,9 +1294,20 @@ mod tests {
         }
     }
 
+    // 부를 때마다 겹치지 않는 저장 번호 — 번호 고치기 경고가 번호를 재지 않는 시험의 경고 목록에 끼지 않게.
+    fn fresh_number() -> u32 {
+        static NEXT: AtomicU32 = AtomicU32::new(2);
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    }
+
     fn entry(id: &str, kind: WindowKind) -> WindowEntry {
+        let number = match kind {
+            WindowKind::Main(_) => 1,
+            WindowKind::Popout(_) => fresh_number(),
+        };
         WindowEntry {
             id: id.into(),
+            number: Some(number),
             kind,
             theme: None,
             bounds: Some(dto_bounds()),
@@ -1198,7 +1489,7 @@ mod tests {
             })
         );
         let only = main_active(&back.layout);
-        assert_eq!(back.layout.views[&only].name, "View 1");
+        assert_eq!(back.layout.views[&only].name, TabName::Auto);
     }
 
     #[test]
@@ -1490,6 +1781,96 @@ mod tests {
         let back = restore(vec![main_entry(vec![tab.clone()])]);
         assert_eq!(back.warnings, vec![]);
         assert_eq!(ratio_after(&back, &tab, id), Some(0.3));
+    }
+
+    // ── 창 번호(TRD S26-window-chrome §3-3 · §3-4) ──
+
+    fn numbers_by_id(layout: &ViewManager) -> Vec<(String, u32)> {
+        let mut numbers: Vec<(String, u32)> = layout
+            .windows
+            .values()
+            .map(|w| (w.window_id.clone(), w.number))
+            .collect();
+        numbers.sort();
+        numbers
+    }
+
+    #[test]
+    fn window_numbers_round_trip_and_closing_numbers_are_not_written() {
+        let mut mgr = ViewManager::new();
+        mgr.create_window("slot-popup-1").unwrap();
+        mgr.create_window("slot-popup-2").unwrap();
+        mgr.create_window("slot-popup-3").unwrap();
+        mgr.close_window("slot-popup-2").unwrap();
+        assert_eq!(mgr.closing_numbers(), [3]);
+
+        let written = to_persisted(&mgr);
+        assert_eq!(written[0].number, Some(1), "main 도 1 을 적는다");
+        let text = codec::encode(&StateFile {
+            version: STATE_VERSION,
+            saved_at_ms: 1,
+            clean_exit: false,
+            resolved_crash_copy: None,
+            windows: written.clone(),
+        })
+        .unwrap();
+        let (decoded, decode_warnings) = codec::decode(&text).unwrap();
+        assert_eq!(decode_warnings, vec![]);
+        let back = ViewManager::from_persisted(decoded.windows, &Labels::default());
+        assert_eq!(back.warnings, vec![]);
+        assert_eq!(numbers_by_id(&back.layout), numbers_by_id(&mgr));
+        assert!(back.layout.closing_numbers().is_empty());
+        back.layout.assert_number_invariants();
+        assert_eq!(to_persisted(&back.layout), written);
+    }
+
+    #[test]
+    fn a_popout_whose_number_cannot_stand_gets_the_smallest_free_one_and_is_kept() {
+        let ids: Vec<String> = (0..4).map(|_| Uuid::new_v4().to_string()).collect();
+        let popout = |id: &String, number: Option<u32>| {
+            let mut entry = popout_entry(id, vec![empty_tab()]);
+            entry.number = number;
+            entry
+        };
+        let mut main = main_entry(vec![empty_tab()]);
+        main.number = None;
+        let back = ViewManager::from_persisted(
+            vec![
+                main,
+                popout(&ids[0], Some(3)),
+                popout(&ids[1], Some(3)),
+                popout(&ids[2], None),
+                popout(&ids[3], Some(1)),
+            ],
+            &Labels::default(),
+        );
+        let given: Vec<u32> = (1..=4)
+            .map(|i| back.layout.windows[&format!("slot-popup-{i}")].number)
+            .collect();
+        assert_eq!(given, [3, 2, 4, 5]);
+        assert_eq!(back.layout.windows[MAIN_WINDOW_LABEL].number, 1);
+        assert_eq!(
+            back.warnings,
+            vec![
+                RestoreWarning::NumberReassigned {
+                    window_id: ids[1].clone(),
+                    saved: Some(3),
+                    given: 2,
+                },
+                RestoreWarning::NumberReassigned {
+                    window_id: ids[2].clone(),
+                    saved: None,
+                    given: 4,
+                },
+                RestoreWarning::NumberReassigned {
+                    window_id: ids[3].clone(),
+                    saved: Some(1),
+                    given: 5,
+                },
+            ],
+            "main 의 번호 없음은 알리지 않는다"
+        );
+        back.layout.assert_number_invariants();
     }
 
     // ── 변경 번호 ──

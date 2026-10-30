@@ -16,6 +16,7 @@ pub mod api;
 pub mod input_queue;
 pub(crate) mod process_group;
 pub mod pty;
+pub(crate) mod spawn;
 pub mod stdio;
 
 /// 출력 바이트 → OutputEvent 정제 seam (backend-agnostic — ADR-0004/0045).
@@ -259,5 +260,86 @@ mod tests {
     fn the_default_transport_holds_no_unconfirmed_input() {
         let t = RawOnly(Mutex::new(Vec::new()));
         assert!(t.unconfirmed_inputs().is_empty());
+    }
+}
+
+/// 세 펌프(PTY · stdio · codex 리더)의 가둠 시험이 함께 쓰는 가짜 — 첫 프레임에서 panic 하는 구독자로 펌프 본체 안에
+/// 가둔 panic 을 내고, 그때와 `finish` 가 상태를 알릴 때의 표시를 적는다.
+// ADR-0292
+#[cfg(test)]
+pub(crate) mod pump_marks {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use engram_dashboard_base::panic::is_contained;
+
+    use crate::output_core::{OutputCore, TurnWiring};
+    use crate::types::{
+        AgentId, AgentInfo, AgentStatus, OutputFrame, OutputSink, SinkError, SinkId, StatusSink,
+    };
+
+    #[derive(Default)]
+    pub(crate) struct Marks {
+        fired: AtomicBool,
+        at_send: Mutex<Vec<bool>>,
+        at_status: Mutex<Vec<(AgentStatus, bool)>>,
+    }
+
+    impl StatusSink for Marks {
+        fn status_changed(&self, _id: AgentId, status: AgentStatus, _epoch: u32) {
+            self.at_status
+                .lock()
+                .unwrap()
+                .push((status, is_contained()));
+        }
+        fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
+    }
+
+    /// 첫 프레임에서만 표시를 적고 panic 한다 — 그 뒤 프레임은 받기만 한다.
+    struct PanicAtFirstSend(Arc<Marks>, SinkId);
+
+    impl OutputSink for PanicAtFirstSend {
+        fn send(&self, _frame: OutputFrame<'_>) -> Result<(), SinkError> {
+            if self.0.fired.swap(true, Ordering::SeqCst) {
+                return Ok(());
+            }
+            self.0.at_send.lock().unwrap().push(is_contained());
+            panic!("구독자가 emit 안에서 panic");
+        }
+        fn sink_id(&self) -> SinkId {
+            self.1
+        }
+    }
+
+    /// 상태를 `marks` 로 알리고 그 구독자를 단 core.
+    pub(crate) fn core(marks: &Arc<Marks>) -> Arc<OutputCore> {
+        let core = Arc::new(OutputCore::new(
+            AgentId::new_v4(),
+            1,
+            marks.clone(),
+            TurnWiring::detached(),
+        ));
+        core.subscribe(Arc::new(PanicAtFirstSend(marks.clone(), SinkId::new_v4())));
+        core
+    }
+
+    /// 펌프 본체는 표시 안에서 panic 했고, 그 panic 은 `Failed` 한 번으로 접혔으며, `finish` 는 표시 밖에서 알렸다.
+    pub(crate) fn assert_contained_body_and_unmarked_finish(marks: &Marks) {
+        assert_eq!(
+            *marks.at_send.lock().unwrap(),
+            vec![true],
+            "펌프 본체가 표시 안에서 돌지 않았다"
+        );
+        match marks.at_status.lock().unwrap().as_slice() {
+            [(AgentStatus::Failed { message }, marked)] => {
+                assert!(message.starts_with("pump panicked: "), "{message}");
+                assert!(message.contains("구독자가 emit 안에서 panic"), "{message}");
+                assert!(
+                    !marked,
+                    "finish 가 표시 안에서 돌았다 — 그 안의 panic 이 가둬지면 `Running` 이 남는다"
+                );
+            }
+            other => panic!("가둔 panic 은 Failed 한 번이어야: {other:?}"),
+        }
     }
 }

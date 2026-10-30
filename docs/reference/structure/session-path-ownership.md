@@ -809,6 +809,8 @@ section (:401-408). Predicate `false` → skips normalize, snapshot and save, re
   justified at :568-571 ("`#[serde(skip)]` 이라 저장해도 파일 내용이 한 바이트도 달라지지 않는다").
   Note the inconsistency: `epoch_for_spawn` triggers a full save on **every spawn** although the
   serialized bytes are unchanged (epoch always writes `0`).
+  > ★2026-10-11 개정(경계 리팩터링 A · ADR-0291 결정 10 · U5b-1a): `epoch_for_spawn` 은 더는 저장하지 않는다 —
+  > `set_last_failure` 처럼 락만 잡아 표식을 간다(이 어긋남은 닫혔다)★
 - Path `<data_dir>/agents.json`, temp `agents.json.tmp` (persistence/mod.rs:22-24, :50-54);
   `data_dir` = `default_data_dir()` (daemon/src/lib.rs:252, :62; discovery/src/lib.rs:84).
 - Format `serde_json::to_vec_pretty(ProfilesFile { schema_version: 1, profiles })`
@@ -822,6 +824,15 @@ section (:401-408). Predicate `false` → skips normalize, snapshot and save, re
   **schema_version mismatch → empty, file left in place with NO backup rename** (:121-126), so the
   next mutation's save overwrites the preserved file. That is an unprotected data-loss path, unlike
   the parse-error path.
+  > ★2026-10-11 개정(경계 리팩터링 A · ADR-0291 · TRD `docs/process/S21-crate-boundaries/trd-A-data-file-unification.md`)
+  > — 위 세 줄과 바로 위 「Atomic write」 줄은 그 뒤 낡았다. 읽기 · 쓰기는 base `file` 규칙이다(presets 도 같은 구현):
+  > 없음 → 빈 목록 · 읽기 IO 실패(잠김이면 약 1 초 다시 읽은 뒤) → 빈 목록 + **그 실행 내내 읽기 전용** · 손상(JSON 아님 ·
+  > 모양 실패 · 16 MiB 초과 · 리더 없는 앞 판) → 적재 때 error + 빈 목록 · 첫 저장 직전에 고정 이름 `agents.json.corrupt` 로
+  > **복사**(덮어쓰기 · 이동 아님 · 이미 있는 `.corrupt-<ms>` 는 건드리지 않는다) · **새 판 `schema_version` → 읽지도 ·
+  > 덮지도 · 떠 두지도 않고 그 실행 내내 읽기 전용**(이 「무보호 손실 경로」가 닫혔다) · `schema_version` 키가 없으면 1 판.
+  > 저장마다 그 직전에 파일을 다시 판정한다 · 임시 = `agents.json.tmp<pid>.<번호>`(옛 고정 `.tmp` 는 저장소가 지운다) ·
+  > 저장 실패는 이제 호출자에게 간다 — 부르는 쪽 있는 변경(`try_*`)은 오류 · 메모리 그대로, 내부 변경은 메모리 적용 +
+  > dirty(다음 성공 저장이 싣는다) · 저장소 상태는 버스 `agent.list` 의 `store` 칸에 실린다★
 - Crash loses: any sid change not yet observed. Exposure window = poll interval (1 s) plus pid
   resolution latency (up to 15 polls). `epoch` and `last_failure` never reach disk by design.
 
@@ -885,6 +896,8 @@ Registry lifetime = daemon process lifetime; entry lifetime = disk-file lifetime
 ### Every disk file the agent crate touches
 
 Writes (ours): `<data_dir>/agents.json` + `.tmp` + `.corrupt-<ms>`, owner `FileProfileStore`
+★(2026-10-11 개정 — 경계 리팩터링 A: 임시 `.tmp<pid>.<번호>` · 손상 사본 고정 `.corrupt`(첫 저장 직전 복사) · presets 는
+복제가 아니라 같은 내부 구현을 부른다 — 위 PART A 「Load failure matrix」 아래 개정 표시)★
 (persistence/mod.rs:22-24, :39, :57-93). `<data_dir>/presets.json` + `.tmp` + `.corrupt-<ms>`, owner
 `FilePresetStore`, a deliberate clone of the same strategy (persistence/presets.rs:1-6, :18-20, :36,
 :53-86); `Preset {id, cwd, name}` (preset.rs:24-33).
@@ -1991,13 +2004,19 @@ would want to do, and why it cannot today.
     `#[serde(skip)]` (:207) so it dies with the daemon.
 54. **Surface a save failure to a caller, the UI, or the LLM** — swallowed with `tracing::error!`
     only (persistence/mod.rs:99-106); the contract explicitly says so (profile.rs:310-311).
+    ★2026-10-11 개정(경계 리팩터링 A · ADR-0291 결정 6): 이제 한다 — 저장이 `Result` 이고 부르는 쪽 있는 변경은
+    `CONFLICT`(저장 거절) · `INTERNAL`(쓰기 IO 실패)로 돌아오며 저장소 상태가 `agent.list` 에 실린다(화면 안내는 없다)★
 55. **Batch, debounce, or flush-on-shutdown the profile store** — every mutation rewrites the whole
     file synchronously inside the profiles mutex (profile.rs:395, :406); there is no dirty flag and
     no hook to attach one. `epoch_for_spawn` pays a full file write on **every spawn** for bytes that
     never change.
+    ★2026-10-11 개정(A): dirty 표시는 생겼다(내부 변경의 저장 실패 때만 — 다음 성공 저장이 싣는다) · `epoch_for_spawn` 은
+    저장하지 않는다. 묶기 · 디바운스 · 종료 때 비우기는 여전히 없다(종료 때 남은 dirty 는 잃는다)★
 56. **Migrate `agents.json` across schema versions** — a version mismatch yields an empty in-memory
     list with the file left **un-backed-up** (persistence/mod.rs:121-126), and the next save
     overwrites it (profile.rs:395). Unlike the parse-error path, which does rename to `.corrupt-<ms>`.
+    ★2026-10-11 개정(A · ADR-0291 R2 · R3): 새 판은 덮지 않는다(그 실행 내내 읽기 전용) · 리더 없는 앞 판은 손상으로
+    첫 저장 직전 `.corrupt` 에 복사된다. 판 사이 이주 자체는 여전히 없다(지금 판 = 1)★
 57. **Read back what was persisted** — `ProfileStore::load` has exactly one caller,
     `ProfileRegistry::new` (profile.rs:380); nothing re-reads after boot.
 58. **Roll back a partially-applied `mutate_if` closure** — the closure gets `&mut` to the map with

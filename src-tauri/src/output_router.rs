@@ -41,7 +41,7 @@ static EMPTY_TARGETS: LazyLock<Arc<[WindowLabel]>> = LazyLock::new(|| Arc::from(
 
 pub type AgentKey = uuid::Uuid;
 
-// Tauri window label(예: "main", "slot-popup-3"). `ViewManager.windows` 키와 동일 타입 → 별도
+// Tauri window label(예: "main", "slot-popup-0a1b2c3d-3"). `ViewManager.windows` 키와 동일 타입 → 별도
 // numeric 레지스트리 불필요(spike §8 D1).
 pub type WindowLabel = String;
 
@@ -181,29 +181,43 @@ impl OutputRouter {
 // `to_unsubscribe`(어느 창에도 안 남은 agent)는 **호출자가 락 안에서** 데몬에 발화한다(F1).
 //
 // ★이 함수는 Tauri·DaemonClient·registry 를 모른다★ — `ViewManager`(모델) + `OutputRouter`(라우팅)만
-//   받아 순수하게 모델·라우팅 표만 갱신한다(headless 단독 테스트 가능). command 핸들러
-//   `cleanup_popup_window` 가 이 코어를 ViewManager 락 안에서 호출하고, 델타 발화·registry.remove(Tauri
-//   부분)는 핸들러가 맡는다.
+//   받아 순수하게 모델·라우팅 표만 갱신한다(headless 단독 테스트 가능). `commands::popout::drop_window_in_model`
+//   (닫기 요청 · `Destroyed` 정리가 부른다)이 이 코어를 ViewManager 락 안에서 호출하고 델타 발화 · 닫히는 창 번호
+//   풀기를 같은 락 안에서 맡는다. registry 떼기(Tauri 부분)는 `cleanup_popup_window` 몫이다.
 //
 // - `label == MAIN_WINDOW_LABEL`: 정리 대상 아님(불변식 4) — no-op, 빈 델타(방어적, 호출자도 선차단).
-// - `windows` 에 `label` 없음(close_tab/close_window command 가 먼저 모델을 지운 정상 경로): close 스킵,
-//   `rebuild` 만 1회(계약상 표 재계산). Destroyed 는 그 뒤 OS 이벤트라 모델엔 이미 없다.
-// - `windows` 에 `label` 있음(titlebar/강제 Destroyed — 멀티탭 잔류 위험, G1): `close_window` 로 tabs
-//   전부 순회 드롭 후 `rebuild`.
+// - `windows` 에 `label` 없음(close_tab · 창 닫기(`apply::close_window`)나 팝아웃 닫기 요청이 먼저 모델을 지운 정상 경로):
+//   close 스킵, `rebuild` 만 1회(계약상 표 재계산). Destroyed 는 그 뒤 OS 이벤트라 모델엔 이미 없다.
+// - `windows` 에 `label` 있음(팝아웃 닫기 요청 · 닫기 요청 없이 온 `Destroyed` — 멀티탭 잔류 위험, G1):
+//   tabs 전부 순회 드롭 후 `rebuild`. 창 번호는 `cause` 가 가른다 — 닫기 요청이면 OS 창이 아직 있어 그 `Destroyed`
+//   까지 쥐고(`close_window`), `Destroyed` 면 곧바로 푼다(`drop_window_gone` — TRD S26-window-chrome §4-1).
 pub fn cleanup_window_core(
     mgr: &mut ViewManager,
     router: &OutputRouter,
     label: &str,
+    cause: DropCause,
 ) -> SubscriptionDelta {
     use crate::layout::manager::MAIN_WINDOW_LABEL;
     if label == MAIN_WINDOW_LABEL {
         return SubscriptionDelta::default();
     }
     if mgr.windows.contains_key(label) {
-        // close_window 는 main 거부 Err 를 낼 수 있으나 위에서 main 을 이미 걸렀으니 여기선 성공만.
-        let _ = mgr.close_window(label);
+        // main 거부 Err 를 낼 수 있으나 위에서 main 을 이미 걸렀으니 여기선 성공만.
+        let _ = match cause {
+            DropCause::CloseRequested => mgr.close_window(label),
+            DropCause::Destroyed => mgr.drop_window_gone(label),
+        };
     }
     router.rebuild(mgr)
+}
+
+/// 팝아웃 창 정리를 부른 OS 사건 — 그 OS 창이 아직 있나를 가른다(TRD S26-window-chrome §4-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropCause {
+    /// 닫기 요청 — OS 창은 곧 `Destroyed` 를 낸다.
+    CloseRequested,
+    /// 소멸 — OS 창은 이미 없다.
+    Destroyed,
 }
 
 // ★load-bearing 라우팅 불변식(ADR-0041/0042/0046 · ADR-0060)★: **배정 슬롯(SlotContent::Agent)만**
@@ -695,13 +709,18 @@ mod tests {
         assert_eq!(subs, HashSet::from([a_id, b_id]));
 
         // 강제 Destroyed 정리 코어(창은 아직 모델에 있음 — titlebar/강제 종료 경로).
-        let delta = cleanup_window_core(&mut mgr, &router, "slot-popup-1");
+        let delta = cleanup_window_core(&mut mgr, &router, "slot-popup-1", DropCause::Destroyed);
 
         for v in [p0, p1] {
             assert!(!mgr.views.contains_key(&v), "View 잔류 0");
             assert!(!mgr.view_owner.contains_key(&v), "view_owner 잔류 0");
         }
         assert!(!mgr.windows.contains_key("slot-popup-1"), "창 엔트리 제거");
+        assert!(
+            mgr.closing_numbers().is_empty(),
+            "Destroyed 는 번호를 곧바로 푼다"
+        );
+        mgr.assert_number_invariants();
         let unsub: HashSet<_> = delta.to_unsubscribe.iter().copied().collect();
         assert_eq!(
             unsub,
@@ -710,6 +729,20 @@ mod tests {
         );
         assert!(router.targets(a_id).is_empty());
         assert!(router.targets(b_id).is_empty());
+    }
+
+    #[test]
+    fn cleanup_core_on_a_close_request_holds_the_number_until_destroyed() {
+        let mut mgr = ViewManager::new();
+        mgr.create_window("slot-popup-1").unwrap();
+        let router = OutputRouter::new();
+        router.rebuild(&mgr);
+
+        cleanup_window_core(&mut mgr, &router, "slot-popup-1", DropCause::CloseRequested);
+
+        assert!(!mgr.windows.contains_key("slot-popup-1"));
+        assert_eq!(mgr.closing_numbers(), [2], "OS 창이 남아 번호를 쥔다");
+        mgr.assert_number_invariants();
     }
 
     #[test]
@@ -723,7 +756,7 @@ mod tests {
         let router = OutputRouter::new();
         router.rebuild(&mgr);
 
-        let delta = cleanup_window_core(&mut mgr, &router, "slot-popup-1");
+        let delta = cleanup_window_core(&mut mgr, &router, "slot-popup-1", DropCause::Destroyed);
         assert!(
             delta.to_unsubscribe.is_empty(),
             "main 에 남은 shared agent 는 Unsubscribe 금지"
@@ -740,7 +773,7 @@ mod tests {
         router.rebuild(&mgr);
 
         let before_views = mgr.views.len();
-        let delta = cleanup_window_core(&mut mgr, &router, MAIN_WINDOW_LABEL);
+        let delta = cleanup_window_core(&mut mgr, &router, MAIN_WINDOW_LABEL, DropCause::Destroyed);
         assert!(delta.is_empty(), "main 정리 요청은 빈 델타(no-op)");
         assert_eq!(mgr.views.len(), before_views, "main View 불변");
         assert!(mgr.windows.contains_key(MAIN_WINDOW_LABEL), "main 창 유지");
@@ -749,7 +782,7 @@ mod tests {
 
     #[test]
     fn cleanup_core_already_removed_window_only_rebuilds() {
-        // 정상 경로: close_window command 가 먼저 모델을 지운 뒤 OS Destroyed 가 뒤늦게 도착 →
+        // 정상 경로: 창 닫기(`apply::close_window`)가 먼저 모델을 지운 뒤 OS Destroyed 가 뒤늦게 도착 →
         //   windows 에 label 없음 → close 스킵, rebuild 만(빈 델타 — 이미 라우팅에서 빠졌으니).
         let mut mgr = ViewManager::new();
         let (aid, astr) = agent();
@@ -762,7 +795,7 @@ mod tests {
         let d_cmd = router.rebuild(&mgr);
         assert_eq!(d_cmd.to_unsubscribe, vec![aid]);
 
-        let d_late = cleanup_window_core(&mut mgr, &router, "slot-popup-1");
+        let d_late = cleanup_window_core(&mut mgr, &router, "slot-popup-1", DropCause::Destroyed);
         assert!(d_late.is_empty(), "이미 정리된 창 재정리는 빈 델타");
     }
 
@@ -779,7 +812,7 @@ mod tests {
         mgr.assign_agent(src, slot, astr).unwrap();
 
         // phase A: 임시 View 예약.
-        let (tmp, _src_content) = mgr.prepare_detached_view(src, slot, "Tab".into()).unwrap();
+        let (tmp, _src_content) = mgr.prepare_detached_view(src, slot).unwrap();
         // phase C: 타깃 창이 없음(소멸 모델) → Err.
         let err = mgr.insert_tab_into("gone-window", tmp).unwrap_err();
         assert!(matches!(
@@ -809,7 +842,7 @@ mod tests {
         mgr.assign_agent(src, slot, moved_str.clone()).unwrap();
 
         // phase A: 옮길 콘텐츠를 임시 View 로(src_content = 반출한 SlotContent — still_ours 대조 기준).
-        let (tmp, src_content) = mgr.prepare_detached_view(src, slot, "Tab".into()).unwrap();
+        let (tmp, src_content) = mgr.prepare_detached_view(src, slot).unwrap();
         mgr.create_window("slot-popup-1").unwrap();
 
         // ★phase B 동안 소스 슬롯이 다른 agent 로 재배정됨(gap race 시뮬)★.
@@ -843,7 +876,7 @@ mod tests {
         let (moved, moved_str) = agent();
         mgr.assign_agent(src, slot, moved_str.clone()).unwrap();
 
-        let (tmp, src_content) = mgr.prepare_detached_view(src, slot, "Tab".into()).unwrap();
+        let (tmp, src_content) = mgr.prepare_detached_view(src, slot).unwrap();
         mgr.create_window("slot-popup-1").unwrap();
         mgr.insert_tab_into("slot-popup-1", tmp).unwrap();
 
@@ -882,7 +915,7 @@ mod tests {
         );
 
         // phase A: agent_list 콘텐츠를 임시 View 로 반출.
-        let (tmp, src_content) = mgr.prepare_detached_view(src, slot, "Tab".into()).unwrap();
+        let (tmp, src_content) = mgr.prepare_detached_view(src, slot).unwrap();
         assert_eq!(src_content, SlotContent::AgentList);
         assert!(
             router.rebuild(&mgr).is_empty(),

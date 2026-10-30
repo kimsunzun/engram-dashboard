@@ -31,18 +31,25 @@ export default function AppLayout({ restore = restoreClient }: Props) {
 
   return (
     <>
-      {/* 알림도 잠기는 층 안이다 — 묻는 동안 알림의 ✕ 도 막힌다. */}
+      {/* 알림도 잠기는 층 안이다 — 묻는 동안 알림의 ✕ 도 막힌다. 제목 줄(창 단추 · 끌 자리)도 이 층 안이라 함께 막힌다 —
+            묻는 동안 제목 줄을 살리는 것은 작은 변경이 아니어서 하지 않았다(TRD S26-window-chrome §12-2 「모달 · 제목 줄」). */}
       <div inert={awaiting} style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+        {/* 감싼 칸 = `WindowLayout` 의 자리. 알림 층은 이 칸이 아니라 `WindowLayout` 안 제목 줄 아래 칸에 붙는다(화면마다 같은 자리). */}
         <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
-          <NoticeOverlay
-            // ADR-0276: 상태 파일 알림은 레이아웃을 밀지 않고 덮는다(거부한 대안 = 미는 흐름 블록).
-            // ADR-0277: 연결 띠도 이 층에서 덮는다(ADR-0180 개정).
-          >
-            {/* 연결 띠가 맨 위다 — 데몬에 못 붙으면 다른 아무것도 동작하지 않아 가장 먼저 읽혀야 한다(세션 판단). */}
-            <ConnectionNotice />
-            <StateFileNotice stateFile={status?.state_file} saves={status?.saves} />
-          </NoticeOverlay>
-          <WindowLayout label={MAIN_WINDOW_LABEL} />
+          <WindowLayout
+            label={MAIN_WINDOW_LABEL}
+            notices={
+              <NoticeOverlay
+              // ADR-0276: 상태 파일 알림은 레이아웃을 밀지 않고 덮는다(거부한 대안 = 미는 흐름 블록).
+              // ADR-0277: 연결 띠도 이 층에서 덮는다(ADR-0180 개정).
+              // 덮는 자리는 제목 줄 아래다 — 제목 줄은 덮지 않는다(사용자 결정 2026-10-26 · T-66).
+              >
+                {/* 연결 띠가 맨 위다 — 데몬에 못 붙으면 다른 아무것도 동작하지 않아 가장 먼저 읽혀야 한다(세션 판단). */}
+                <ConnectionNotice />
+                <StateFileNotice stateFile={status?.state_file} saves={status?.saves} />
+              </NoticeOverlay>
+            }
+          />
         </div>
       </div>
       {/* 덮는 층은 묻는 동안에만 그린다 — 늘 깔아 두면 투명해도 그 아래 클릭을 먹는다. */}

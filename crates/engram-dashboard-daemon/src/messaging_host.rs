@@ -65,7 +65,8 @@ use engram_dashboard_agent::types::{
 use engram_dashboard_messaging::busy::{BusyGate, BusyPolicy, IdleNotifier, TurnFact, TurnFacts};
 use engram_dashboard_messaging::envelope::{DeliveryObservation, EnvelopeFormat};
 use engram_dashboard_messaging::service::{
-    AddressingSources, ControlPlanePort, DeliveryPort, InjectReceipt, LiveAgent, MessagingService,
+    AddressingSources, ControlPlanePort, DeliveryPort, DormantAgent, InjectReceipt, LiveAgent,
+    MessagingService,
 };
 use engram_dashboard_messaging::PeerId;
 
@@ -176,11 +177,13 @@ impl DeliveryPort for ManagerDeliveryPort {
     /// ★차집합 계산은 여기 없다(ADR-0119 결정 2)★: 옛날엔 이 함수가 산 목록과 프로필 목록을 각자 떠서
     ///   id 차집합으로 잠든 이름을 만들었다 — 그 합성이 프론트에도 사본으로 있어 한쪽만 고쳐지는 drift 가
     ///   확정적이었다. 이제 합성은 매니저 한 곳이고 여기는 포워딩이다. **여기서 다시 합치지 말 것.**
-    /// ★정렬★: 잠든 이름도 `@all` 결정성 때문에 정렬해 둔다(위 `live_agents` doc).
+    /// ★정렬★: 잠든 쪽도 `@all` 결정성 때문에 (이름, id) 로 정렬해 둔다(위 `live_agents` doc · `sort_key` 와
+    ///   같은 2차 키).
     // ADR-0119 (명부 단일 입구 — 이 함수는 포워더)
+    // ADR-0309 (결정 3 — 잠든 쪽은 (id, 이름) 쌍)
     fn addressing_sources(&self) -> AddressingSources {
         let mut roster: Vec<LiveAgent> = Vec::new();
-        let mut dormant_names: Vec<String> = Vec::new();
+        let mut dormant: Vec<DormantAgent> = Vec::new();
         for entry in self.manager.roster() {
             match entry.live {
                 // 산 명단은 `live_agents` 와 **같은 술어**여야 한다(위 doc) — 여기만 걸고 한쪽을 빠뜨리면
@@ -191,15 +194,15 @@ impl DeliveryPort for ManagerDeliveryPort {
                 //   만료). 여기까지 거르면 셸 프로필을 산 에이전트 대역으로 쓰는 기존 통합 테스트의 전제가
                 //   무너진다 — 그 fixture 전략은 별도 결정 사항이라 이 수정에서 건드리지 않는다.
                 Some(_) => {}
-                None => dormant_names.push(entry.canonical_name),
+                None => dormant.push(DormantAgent {
+                    id: entry.id,
+                    name: entry.canonical_name,
+                }),
             }
         }
         roster.sort_by(sort_key);
-        dormant_names.sort();
-        AddressingSources {
-            roster,
-            dormant_names,
-        }
+        dormant.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+        AddressingSources { roster, dormant }
     }
 
     fn is_agent_live(&self, id: PeerId) -> bool {
@@ -207,20 +210,6 @@ impl DeliveryPort for ManagerDeliveryPort {
             .list_agents()
             .into_iter()
             .any(|a| a.id == id && is_live(&a))
-    }
-
-    /// ★우편 자격을 걸지 않는다(그 이유는 trait doc)★ — 술어는 `is_agent_live` 와 같은 **생존 한 축**이고
-    /// 축만 id 에서 이름으로 바뀐다. 이름 파생은 `live_agents` 와 같은 `list_agents()` 출처를 쓴다.
-    fn live_id_for_name(&self, name: &str) -> Option<PeerId> {
-        self.manager
-            .list_agents()
-            .into_iter()
-            .find(|a| is_live(a) && a.name == name)
-            .map(|a| a.id)
-    }
-
-    fn canonical_name(&self, id: PeerId) -> Option<String> {
-        self.manager.canonical_name(id)
     }
 }
 
@@ -353,8 +342,8 @@ pub fn busy_gate_for_manager(
 ///   배선 추론이 어려워진다.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FlushMsg {
-    /// 로스터 등장/화신 교체(그 이름의 도달 후보가 **유일**할 때만) — 그 **이름** 앞 파킹을 일괄 flush.
-    Appear { name: String, id: AgentId },
+    /// 로스터 등장/화신 교체 — 그 에이전트(id) 앞 파킹을 일괄 flush(큐 키 = id · ADR-0309).
+    Appear { id: AgentId },
     /// 턴 종료(idle 전이) 관측 — 그 id 의 파킹을 오래된 순 일괄 주입(C2 idle 게이트, ADR-0104 결정 3).
     Idle { id: AgentId },
 }
@@ -434,7 +423,7 @@ impl engram_dashboard_messaging::service::FlushTrigger for ChannelIdleNotifier {
 }
 
 /// ★파킹 flush 트리거(ADR-0104 · S18 메시징 v1 C1)★: 상태 sink 를 **감싸** 로스터 변화를
-///   데몬측에서 관측하고, 새로 살아났거나 화신이 갈린 이름 앞으로 파킹된 메시지를 flush 시킨다.
+///   데몬측에서 관측하고, 새로 살아났거나 화신이 갈린 에이전트(id) 앞으로 파킹된 메시지를 flush 시킨다.
 ///
 /// ★왜 sink 를 감싸나(agent seam 무변경 — ADR-0104)★: 코어는 메시징을 몰라야 한다(격리 ADR-0028/0104).
 ///   AgentManager 의 상태 sink 가 이미 `agent_list_updated(Vec<AgentInfo>)` 로 로스터 스냅샷을 push 하므로
@@ -450,13 +439,11 @@ impl engram_dashboard_messaging::service::FlushTrigger for ChannelIdleNotifier {
 /// ★락 규율(ADR-0006) — **의도된 이탈**★: prev 스냅샷 Mutex 는 diff 뿐 아니라 **채널 enqueue 까지 든 채로**
 ///   끝난다(`RosterDiff::dispatch` — 근거는 그 헤더가 정본). ★"락 놓고 send" 로 되돌리지 말 것★: 그게 이
 ///   이탈이 막는 회귀다.
-/// ★그 락을 든 채 **밖으로 나가는 호출은 둘**이다(전수 — 나머지는 전부 이 crate 안의 순수 자료 조작:
-///   `is_live` 술어 · HashMap 조작 · clone)★: ① flush 채널 unbounded send ② 동명 다수 skip 경로의
-///   `tracing::debug!`. ★안전 근거 = 재진입 불가★ — 둘 중 어느 것도 `RosterDiff::inner` 로 되돌아올 수
-///   없다(채널 수신자는 flush worker 고, tracing subscriber 는 이 타입을 모른다). 그래서 데드락은 구조적으로
-///   없다. ★다만 "논블록" 은 **채널 쪽에만** 성립한다★: tracing 은 사용자가 꽂은 subscriber 로 나가는
-///   호출이라 그쪽이 느린 writer 면(동기 파일/네트워크 appender) 이 락 구간이 그만큼 늘어난다 — 그 경로는
-///   흔치 않은 skip 분기이고 데몬 기본 subscriber 는 논블록이지만, **"락 구간은 무조건 논블록" 으로 읽지 말 것**.
+/// ★그 락을 든 채 **밖으로 나가는 호출은 하나**다 — flush 채널 unbounded send(전수 — 나머지는 전부 이
+///   crate 안의 순수 자료 조작: `is_live` 술어 · HashMap 조작)★. ★안전 근거 = 재진입 불가 · 논블록★ — 채널
+///   수신자는 flush worker 라 `RosterDiff::inner` 로 되돌아올 수 없고, unbounded send 는 막히지 않는다. 이 락
+///   구간에 로그 · 다른 락 · port 호출을 더하면 이 전수가 깨진다(옛 동명 다수 건너뜀 갈래의 `tracing::debug!`
+///   가 그런 둘째 호출이었다 — ADR-0309 로 그 갈래가 사라졌다).
 ///   실제 flush(messaging 락 + port 호출 + blocking write)는 worker 스레드로 옮겨져 이 락 **밖**에 있다.
 pub struct MessagingFlushSink {
     /// ★Box<dyn>★: 운영은 `UsageObserveSink(DaemonStatusSink)`(사용량 관측 + 프론트 broadcast), 통합 테스트는
@@ -487,7 +474,8 @@ pub struct RosterDiff {
 
 #[derive(Debug, Default)]
 struct RosterSnapshots {
-    prev: HashMap<String, (u32, AgentId)>,
+    /// 직전 스냅샷의 산 에이전트 — id → 화신 표식. 키가 id 라 개명은 diff 에 보이지 않는다(ADR-0309).
+    prev: HashMap<AgentId, u32>,
 }
 
 impl RosterDiff {
@@ -499,61 +487,27 @@ impl RosterDiff {
     fn dispatch(&self, agents: &[CoreAgentInfo], flush_tx: &mpsc::UnboundedSender<FlushMsg>) {
         let mut st = self.inner.lock().expect("flush roster diff poisoned");
 
-        // 1) ★산(Running|Exiting) 후보 전원★을 **이름별로 그룹핑**한다. ★4차 개정(ADR-0116 결정 7)★:
+        // ★산(Running|Exiting) 에이전트 전원★을 id → 화신 표식으로 모은다. ★4차 개정(ADR-0116 결정 7)★:
         //   여기엔 **structured 조건을 걸지 않는다** — 로스터 자격에서 capability 가 빠졌으므로 턴 신호 없는
         //   세션도 파킹을 들고 있을 수 있다(그 부류의 유일한 파킹 경로 = **주입 실패**, spec §5 분기 3).
         //   그 조건을 되살리면 그 파킹분에 재등장 flush 계기가 **영원히 없어** 24h TTL 로 조용히 만료된다.
-        // ★finding 2(BLOCK): 동명 다수 skip(last-write-wins 금지)★: 예전엔 같은 이름을 마지막 것으로
-        //   덮어(last-write-wins) 임의 incarnation 으로 flush 했다 — 이름-키 파킹이 엉뚱한 동명 에이전트로
-        //   갈 수 있어 send-side RECIPIENT_AMBIGUOUS 정책과 어긋난다. 이제 그 이름을 지닌 도달 가능
-        //   후보가 **정확히 1개**일 때만 flush 대상으로 삼고, 동명 다수는 건너뛴다(tracing::debug) — 파킹
-        //   메일은 그 이름이 다시 유일해지거나 TTL 로 만료될 때까지 대기한다.
-        let mut by_name: HashMap<String, Vec<(u32, AgentId)>> = HashMap::new();
-        for a in agents {
-            if !crate::messaging_host::is_live(a) {
-                continue;
-            }
-            by_name
-                .entry(a.name.clone())
-                .or_default()
-                .push((a.epoch, a.id));
-        }
-        // 2) 동명 다수는 prev 에도 안 남긴다 — 다시 유일해지면 "새로 등장" 으로 잡혀 flush 되게.
-        let mut next: HashMap<String, (u32, AgentId)> = HashMap::new();
-        for (name, candidates) in by_name {
-            if candidates.len() != 1 {
-                tracing::debug!(
-                    // 에이전트 이름은 클라이언트가 정한 문자열이다 — 로그 필드에 실을 땐 모양·길이를
-                    //   묶는다(`connection_core::sanitize_for_log` · 그 함수 doc 의 그 규율).
-                    name = %crate::connection_core::sanitize_for_log(&name),
-                    count = candidates.len(),
-                    "flush skip: 동명 도달 후보 다수 — 유일해질 때까지 파킹 대기(finding 2)"
-                );
-                continue;
-            }
-            next.insert(name, candidates[0]);
-        }
-        for (name, (epoch, id)) in &next {
-            // ★flush 트리거 조건(finding 3 — id 반영)★: ① 새로 등장(이전에 없던 이름/동명 해소로 재-유일)
-            //   OR ② **id 변경**(같은 이름의 **다른** 에이전트 = 새 AgentId — 예: 같은 이름의 새 프로필)
-            //   OR ③ 같은 id + **다른 화신**(재스폰/재활성화). ②가 load-bearing: 옛 diff 는 이름별 화신
-            //   표식만 비교해, id 가 다른데 표식이 겹치면 "새로 살아남" 을 놓쳐 그 이름 앞 파킹이 영영
-            //   stranded 됐다. id 가 바뀌면 그건 별개 에이전트의 등장이니 표식과 무관하게 flush 후보다.
-            //   ★③ 은 대소가 아니라 불일치다★: 표식은 화신마다 뽑은 난수라 순서에 뜻이 없다
-            //   (`AgentProfile::epoch`). 대소로 걸면 새 화신의 표식이 우연히 작을 때 등장을 놓쳐, 그 이름
+        // ★키 = id — 이름을 보지 않는다(ADR-0309 결정 1 · TRD S29 X4)★: 큐가 id 키라 flush 대상이 그 id
+        //   하나로 정해진다. 그래서 동명이 여럿이어도 각자 자기 큐를 flush 하고, 개명(같은 id · 같은 화신)은
+        //   등장이 아니다. 옛 「이름이 유일할 때만 flush」 건너뜀은 이름 키 큐가 엉뚱한 동명에게 갈 수 있어서
+        //   두었던 장치다 — 되살리면 동명 쌍둥이의 파킹이 둘 다 다음 계기까지 묶인다.
+        // ADR-0309
+        let next: HashMap<AgentId, u32> = agents
+            .iter()
+            .filter(|a| crate::messaging_host::is_live(a))
+            .map(|a| (a.id, a.epoch))
+            .collect();
+        for (id, epoch) in &next {
+            // ★flush 트리거 = 직전에 없던 id(새 에이전트 · 잠듦에서 깨어남) OR 같은 id 의 **다른 화신**
+            //   (재스폰/재활성화)★. ★화신은 대소가 아니라 불일치다★: 표식은 화신마다 뽑은 난수라 순서에 뜻이
+            //   없다(`AgentProfile::epoch`). 대소로 걸면 새 화신의 표식이 우연히 작을 때 등장을 놓쳐, 그 에이전트
             //   앞 파킹이 다음 재스폰까지 묶인다.
-            let trigger = match st.prev.get(name) {
-                None => true, // ① 새로 등장(또는 동명 해소로 다시 유일).
-                Some((prev_epoch, prev_id)) => {
-                    id != prev_id // ② 동명 다른 에이전트(새 AgentId) — 화신 표식과 무관.
-                        || epoch != prev_epoch // ③ 같은 id + 다른 화신(재스폰/재활성화).
-                }
-            };
-            if trigger {
-                let _ = flush_tx.send(FlushMsg::Appear {
-                    name: name.clone(),
-                    id: *id,
-                });
+            if st.prev.get(id) != Some(epoch) {
+                let _ = flush_tx.send(FlushMsg::Appear { id: *id });
             }
         }
         st.prev = next;
@@ -621,7 +575,8 @@ pub async fn run_flush_worker(
                 //   `let _ =` 는 **모든 배달이 영구 정지**한 사실을 감춘다(파킹만 쌓이다 TTL 로 만료 —
                 //   메시징 최악 실패 모드인데 로그 한 줄도 없다). 그래서 warn 으로 표면화한다. 여기서
                 //   복구(레인 재기동)는 하지 않는다 — 레인은 개별 flush 의 패닉을 격리하므로(run_flush_lane,
-                //   단 **debug 한정** — release 는 panic=abort 라 패닉 = 프로세스 종료다) 이 실패는
+                //   단 **훅 없는 시험 빌드 한정** — 운영 프로세스에서는 표시 밖 패닉이라 훅이 데몬을 끝낸다 ·
+                //   ADR-0292) 이 실패는
                 //   "종료 중" 이거나 진짜 버그이고, 후자면 로그가 유일한 단서다.
                 if let Err(e) = lane_tx.send(other) {
                     tracing::warn!("flush 레인 forward 실패(레인 종료/패닉 — 이후 배달 정지): {e}");
@@ -723,7 +678,7 @@ type DeliveryLanes = HashMap<AgentId, VecDeque<FlushMsg>>;
 /// 이 작업이 향하는 수신자 — 배달 직렬화의 분할 키.
 fn flush_recipient(msg: &FlushMsg) -> AgentId {
     match msg {
-        FlushMsg::Appear { id, .. } | FlushMsg::Idle { id } => *id,
+        FlushMsg::Appear { id } | FlushMsg::Idle { id } => *id,
     }
 }
 
@@ -733,9 +688,9 @@ fn flush_recipient(msg: &FlushMsg) -> AgentId {
 ///   묶여 head-of-line blocking 이 그대로 되살아난다(그게 이 디스패처가 없애는 것이다). 그래서 완료 신호가
 ///   클로저 안에 있고, Drop 이라 패닉 언와인딩에서도 발화한다. ★이 신호가 빠지면 증상★: 그 AgentId 의
 ///   대기열이 영원히 안 열려 그 수신자 앞 우편이 **조용히** 멈춘다(로그도 없다).
-/// ★패닉 격리는 **debug 한정**이다★: 워크스페이스 `[profile.release] panic = "abort"` 라 release 에선
-///   패닉 = 프로세스 즉사다(언와인딩이 없어 이 Drop 도 안 돈다). "패닉해도 운영에서 레인이 살아남는다" 로
-///   읽지 말 것.
+/// ★패닉 격리는 **훅 없는 시험 빌드 한정**이다★: 배달 클로저는 가둠 표시 밖이라 운영 프로세스에서는
+///   패닉 = 프로세스 즉사다(훅이 되감기 전에 끝내 이 Drop 도 안 돈다 · ADR-0292). "패닉해도 운영에서 레인이
+///   살아남는다" 로 읽지 말 것.
 struct DeliveryDone {
     id: AgentId,
     tx: mpsc::UnboundedSender<AgentId>,
@@ -744,14 +699,14 @@ struct DeliveryDone {
 
 /// 배달 클로저가 어디까지 갔나 — `DeliveryDone` 의 Drop 이 남길 말을 가른다.
 ///
-/// ★두 미완 갈래를 반드시 갈라야 한다★: 하나로 뭉치면 **release 에서 항상 거짓말**이 된다 — 그 빌드에는
-///   패닉 언와인딩 자체가 없으므로(`panic = "abort"`) Drop 이 미완으로 도는 유일한 경우가 아래
-///   `NotStarted` 다. "패닉했다" 로 찍으면 종료 때마다 없는 버그를 보고한다.
+/// ★두 미완 갈래를 반드시 갈라야 한다★: 하나로 뭉치면 **운영 프로세스에서 항상 거짓말**이 된다 — 거기서는
+///   배달 클로저의 패닉이 되감기 전에 프로세스를 끝내므로(훅 · ADR-0292) Drop 이 미완으로 도는 유일한 경우가
+///   아래 `NotStarted` 다. "패닉했다" 로 찍으면 종료 때마다 없는 버그를 보고한다.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DeliveryStage {
     /// blocking pool 이 클로저를 **한 번도 실행하지 않았다** — 런타임 종료 중 큐에서 취소된 경우.
     NotStarted,
-    /// 실행에는 들어갔으나 끝내지 못했다 = 언와인딩(debug/테스트 빌드에서만 가능).
+    /// 실행에는 들어갔으나 끝내지 못했다 = 언와인딩(훅 없는 시험 빌드에서만 가능).
     Started,
     Finished,
 }
@@ -766,7 +721,7 @@ impl Drop for DeliveryDone {
             ),
             DeliveryStage::Started => tracing::warn!(
                 agent = %self.id,
-                "flush 배달이 완료 전에 언와인딩됐다(그 수신자 레인은 계속 — 이 갈래는 debug 한정, release=abort)"
+                "flush 배달이 완료 전에 언와인딩됐다(그 수신자 레인은 계속 — 이 갈래는 패닉 훅이 없는 실행에서만 닿는다)"
             ),
         }
         // 채널이 닫혔으면(디스패처 종료) 버린다 — 그 시점엔 데몬이 내려가는 중이다.
@@ -805,7 +760,7 @@ fn spawn_delivery(
         let mut report = report;
         report.stage = DeliveryStage::Started;
         match msg {
-            FlushMsg::Appear { name, id } => svc.flush_for(&name, id),
+            FlushMsg::Appear { id } => svc.flush_for(id),
             FlushMsg::Idle { id } => svc.flush_for_agent(id),
         }
         report.stage = DeliveryStage::Finished;
@@ -841,18 +796,17 @@ fn advance_lane(
 ///   (구조화 입력 수신자는 제출 시퀀스가 아예 없다) 전원을 한 줄로 세우면 그 0.5초를 **모두가** 낸다.
 ///   같은 도어벨 id 안에서 순서를 지키는 것도 여기 얹혀 있다(배치 "오래된 순" — ADR-0104).
 ///
-/// ★같은 세션에 두 배달이 겹치지 않는 보장은 **여기 없다**(호스트가 못 하는 일)★: 실제 주입 타깃은 도어벨
-///   id 가 아니라 커널이 항목마다 해석한 세션이라(힌트 우선 → 이름 유일 도달), 도어벨 id 가 다른 두 레인이
-///   같은 세션으로 수렴할 수 있다. 그 배제는 커널의 **타깃 축 in-flight 가드**가 진다 — 트리거·실패 모드·
-///   되울림은 `MessagingService::drain_queue` 헤더의 "배제는 두 축" 절이 정본이다. 이 분할을 그 보장으로
-///   읽고 커널 가드를 걷어내면 봉투 둘이 한 턴으로 합쳐 제출된다.
+/// ★주입 타깃 = 도어벨 id★: 커널 `MessagingService::drain_queue` 는 명부에서 id 가 그 큐 id 와 같은 항목에만
+///   주입한다(ADR-0309) — 큐 id = 도어벨 id 라 도어벨 id 가 다른 두 레인이 한 세션으로 수렴하지 않는다.
+///   커널의 **타깃 축 in-flight 가드**(ADR-0142)는 남아 있지만 그 축을 세운 계기(다른 두 큐가 한 세션으로
+///   수렴)는 이제 생기지 않는다 — 걷을지는 `docs/tracking.md` T-30 이 맡는다.
 ///
 /// ★디스패처 자신은 막지 않는다★: 띄운 blocking task 를 **인라인 await 하지 않는다**. 완료는 별도 채널로
 ///   돌아오고(`DeliveryDone`), 그 사이에도 `lane_rx` 를 계속 비운다 — 이 성질이 깨지면 수신자별 직렬화만
 ///   남고 head-of-line blocking 이 그대로 되살아난다.
 ///
 /// ★Appear 는 접지 않는다★: 대기열에 세우는 것은 무손실이지만(flush 는 그 수신자 앞 파킹을 통째로 drain
-///   하므로 늦게 돌아도 효과가 남는다) 버리면 그 이름 앞 파킹이 TTL 까지 stranded 된다. coalescing 은
+///   하므로 늦게 돌아도 효과가 남는다) 버리면 그 id 앞 파킹이 TTL 까지 stranded 된다. coalescing 은
 ///   통지 측 Idle 전용이다(`IdleCoalescer`).
 ///
 /// ★spawn_blocking 격리(round-4 finding 1 — executor starvation)★: `flush_for` 안의 `inject` 는
@@ -1192,7 +1146,7 @@ mod tests {
 
             // ★실제로 뚫렸던 구멍★: `DeleteProfile` 은 산 세션을 죽이지 않는다. 판정을 프로필에서 뽑으면
             //   여기서 "모름" 이 되어 셸이 명단으로 되돌아온다 — 판정 근거가 세션에 있어야 이 단언이 산다.
-            manager.delete_agent(info.id);
+            manager.try_delete_agent(info.id).expect("저장 성공");
             assert!(
                 !port.live_agents().iter().any(|a| a.id == info.id),
                 "프로필이 사라져도 산 셸은 여전히 배달 명단 밖이어야"
@@ -1219,11 +1173,24 @@ mod tests {
         fn two_dormant_profiles_sharing_a_name_are_both_reported() {
             let manager = manager("dormant-dup");
             let port = ManagerDeliveryPort::new(manager.clone());
-            // ★하네스 seam 으로 심는다(ADR-0120)★: 정상 경로(`create_agent`)는 명부 전역 이름 유일성을
+            // ★하네스 seam 으로 심는다(ADR-0120)★: 정상 경로(`try_create_agent`)는 명부 전역 이름 유일성을
             //   강제해 동명 2건을 **만들 수 없다**. 유일성이 데이터 전체에 적용되기 전(기존 agents.json)엔
             //   이 상태가 실재할 수 있다.
-            manager.seed_agent_bypassing_uniqueness(profile("raw-twin-a", "twin"));
-            manager.seed_agent_bypassing_uniqueness(profile("raw-twin-b", "twin"));
+            let twin_a = profile("raw-twin-a", "twin");
+            let twin_b = profile("raw-twin-b", "twin");
+            let mut expected = vec![
+                DormantAgent {
+                    id: twin_a.id,
+                    name: "twin".to_string(),
+                },
+                DormantAgent {
+                    id: twin_b.id,
+                    name: "twin".to_string(),
+                },
+            ];
+            expected.sort_by_key(|d| d.id);
+            manager.seed_agent_bypassing_uniqueness(twin_a);
+            manager.seed_agent_bypassing_uniqueness(twin_b);
 
             let sources = port.addressing_sources();
             assert!(
@@ -1231,18 +1198,52 @@ mod tests {
                 "스폰이 없으므로 로스터는 비어야: {sources:?}"
             );
             assert_eq!(
-                sources.dormant_names,
-                vec!["twin".to_string(), "twin".to_string()],
-                "동명 잠듦 2건은 canonical 이름 그대로 2건 올라와야: {sources:?}"
+                sources.dormant, expected,
+                "동명 잠듦 2건은 각자의 id 와 canonical 이름 그대로 2건 올라와야(이름 · id 순): {sources:?}"
+            );
+        }
+
+        /// ★잠든 에이전트를 개명해도 id 는 그대로다(ADR-0309 결정 1)★ — 대기 우편 · 계약이 그 id 에 묶이므로,
+        ///   어댑터가 넘기는 쌍의 id 가 개명으로 바뀌면 그 에이전트가 자기 우편 · 의무를 잃는다.
+        #[test]
+        fn a_renamed_dormant_profile_is_reported_with_the_same_id_and_the_new_name() {
+            let manager = manager("dormant-rename");
+            let port = ManagerDeliveryPort::new(manager.clone());
+            let sleeper = profile("raw-sleeper", "before");
+            let id = sleeper.id;
+            manager.seed_agent_bypassing_uniqueness(sleeper);
+            assert_eq!(
+                port.addressing_sources().dormant,
+                vec![DormantAgent {
+                    id,
+                    name: "before".to_string()
+                }],
+                "전제: 잠든 쌍"
+            );
+
+            let outcome = manager
+                .try_rename_agent(id, Some("after".to_string()))
+                .expect("저장 성공");
+            assert!(
+                matches!(&outcome, engram_dashboard_agent::manager::RenameOutcome::Renamed(n) if n == "after"),
+                "전제: 개명이 확정됐다: {outcome:?}"
+            );
+            assert_eq!(
+                port.addressing_sources().dormant,
+                vec![DormantAgent {
+                    id,
+                    name: "after".to_string()
+                }],
+                "같은 id · 새 이름이어야"
             );
         }
 
         #[cfg(windows)]
         #[test]
         fn a_live_namesake_does_not_hide_a_dormant_profile_with_the_same_name() {
-            // ★정직 명시 — 이 fixture 의 발송 결말은 뮤테이션과 무관하게 같다★: 산 동명이 있으면 잠듦 축은
-            //   조회조차 되지 않는다(산 쪽이 이긴다 — `service.rs::a_live_agent_wins_over_a_dormant_namesake`).
-            //   즉 이건 어댑터 산출물의 white-box 봉인이지 발송 결말 회귀가 아니다.
+            // ★발송 결말과의 관계★: 이름으로 부르면 산 동명이 이겨 잠듦 축이 결말에 닿지 않는다. `@all` 은 id 로
+            //   펼치므로 잠든 동명도 자기 몫을 받는다(`service.rs::a_live_agent_wins_over_a_dormant_namesake` ·
+            //   ADR-0309) — 이름 축으로 빼는 회귀는 그 몫을 조용히 잃게 한다.
             let manager = manager("live-namesake");
             let port = ManagerDeliveryPort::new(manager.clone());
             let info = manager
@@ -1256,15 +1257,20 @@ mod tests {
                 .any(|a| a.id == info.id)));
             // ★하네스 seam★: 산 `twin` 이 이미 명부에 있으므로 정상 경로면 `twin(1)` 로 개명된다
             //   (ADR-0120). 이 테스트가 보는 건 **차집합 축이 id 라는 사실**이라 이름이 같아야 성립한다.
-            manager.seed_agent_bypassing_uniqueness(profile("raw-dormant-twin", "twin"));
+            let dormant_twin = profile("raw-dormant-twin", "twin");
+            let dormant_id = dormant_twin.id;
+            manager.seed_agent_bypassing_uniqueness(dormant_twin);
 
             let sources = port.addressing_sources();
             // ★전제가 바뀌었다★: 산 쪽은 셸이라 배달 명단엔 안 오른다(`reads_messages`). 그래도 이 테스트가
             //   보는 축은 그대로다 — 차집합은 **agent `roster()`** 가 id 로 끝내고 어댑터는 그 뒤에서 거를
             //   뿐이라, 이름 축으로 빼는 회귀가 생기면 산 `twin` 이 잠든 `twin` 을 삼켜 아래가 비어 버린다.
             assert_eq!(
-                sources.dormant_names,
-                vec!["twin".to_string()],
+                sources.dormant,
+                vec![DormantAgent {
+                    id: dormant_id,
+                    name: "twin".to_string()
+                }],
                 "산 쪽은 id 로 빠지고 잠든 동명은 남아야(이름 축으로 빼면 비어 버린다): {sources:?}"
             );
 
@@ -1359,32 +1365,31 @@ mod tests {
         out
     }
 
-    /// 이름 축 flush 대상(Appear)만 추린다 — C1 diff 단언을 그대로 유지하기 위한 필터.
-    fn drain_targets(rx: &mut mpsc::UnboundedReceiver<FlushMsg>) -> Vec<(String, AgentId)> {
-        drain_msgs(rx)
+    /// 등장 flush 대상(Appear)의 id 만 추린다 — 한 스냅샷 안 순서는 HashMap 순회라 정렬해 돌려준다.
+    fn drain_targets(rx: &mut mpsc::UnboundedReceiver<FlushMsg>) -> Vec<AgentId> {
+        let mut ids: Vec<AgentId> = drain_msgs(rx)
             .into_iter()
             .filter_map(|m| match m {
-                FlushMsg::Appear { name, id } => Some((name, id)),
+                FlushMsg::Appear { id } => Some(id),
                 _ => None,
             })
-            .collect()
+            .collect();
+        ids.sort();
+        ids
     }
 
     #[test]
-    fn flush_sink_enqueues_newly_live_unique_name() {
+    fn flush_sink_enqueues_a_newly_live_agent() {
         let (sink, mut rx) = flush_sink();
         let id = AgentId::new_v4();
         sink.agent_list_updated(vec![flush_info(id, "alice", 0, true, CoreStatus::Running)]);
-        let targets = drain_targets(&mut rx);
-        assert_eq!(
-            targets,
-            vec![("alice".to_string(), id)],
-            "유일 등장 이름 flush"
-        );
+        assert_eq!(drain_targets(&mut rx), vec![id], "새로 산 에이전트 flush");
     }
 
+    /// ★동명 쌍둥이는 각자 자기 큐를 flush 한다(ADR-0309 · TRD S29 X4)★ — 큐가 id 키라 이름이 겹쳐도 flush
+    ///   대상이 갈린다. 옛 「이름이 유일할 때만」 건너뜀을 되살리면 둘 다 여기서 빠진다.
     #[test]
-    fn flush_sink_skips_ambiguous_name() {
+    fn flush_sink_flushes_each_same_named_twin() {
         let (sink, mut rx) = flush_sink();
         let a = AgentId::new_v4();
         let b = AgentId::new_v4();
@@ -1392,39 +1397,59 @@ mod tests {
             flush_info(a, "dup", 0, true, CoreStatus::Running),
             flush_info(b, "dup", 0, true, CoreStatus::Running),
         ]);
+        let mut both = vec![a, b];
+        both.sort();
+        assert_eq!(drain_targets(&mut rx), both, "쌍둥이 둘 다 등장");
+        sink.agent_list_updated(vec![flush_info(a, "dup", 0, true, CoreStatus::Running)]);
         assert!(
             drain_targets(&mut rx).is_empty(),
-            "동명 다수는 flush 대상에서 제외(임의 incarnation 배달 금지)"
+            "한쪽이 빠져 이름이 유일해져도 남은 쪽은 같은 화신이라 등장이 아니다"
         );
     }
 
+    /// ★개명은 등장이 아니다 — 등장은 새 id 또는 같은 id 의 다른 화신뿐이다(ADR-0309 · TRD S29 §6-3 U4)★.
+    ///   diff 가 이름으로 돌면 개명 한 번에 등장이 나고(헛 flush), 옛 이름을 새로 가진 다른 에이전트를 같은
+    ///   에이전트로 본다.
     #[test]
-    fn flush_sink_reflushes_when_name_becomes_unique_again() {
+    fn flush_sink_appears_by_id_and_tag_and_ignores_a_rename() {
         let (sink, mut rx) = flush_sink();
-        let a = AgentId::new_v4();
-        let b = AgentId::new_v4();
+        let x = AgentId::new_v4();
+        sink.agent_list_updated(vec![flush_info(x, "a", 4, true, CoreStatus::Running)]);
+        assert_eq!(drain_targets(&mut rx), vec![x]);
+
+        sink.agent_list_updated(vec![flush_info(x, "b", 4, true, CoreStatus::Running)]);
+        assert!(
+            drain_targets(&mut rx).is_empty(),
+            "같은 id · 같은 화신의 개명은 등장이 아니다"
+        );
+
+        let y = AgentId::new_v4();
         sink.agent_list_updated(vec![
-            flush_info(a, "dup", 0, true, CoreStatus::Running),
-            flush_info(b, "dup", 0, true, CoreStatus::Running),
+            flush_info(x, "b", 4, true, CoreStatus::Running),
+            flush_info(y, "a", 4, true, CoreStatus::Running),
         ]);
-        assert!(drain_targets(&mut rx).is_empty());
-        sink.agent_list_updated(vec![flush_info(a, "dup", 0, true, CoreStatus::Running)]);
         assert_eq!(
             drain_targets(&mut rx),
-            vec![("dup".to_string(), a)],
-            "동명 해소로 유일해지면 다시 flush 대상"
+            vec![y],
+            "옛 이름을 새로 가진 다른 에이전트는 그 자신(새 id)으로만 등장한다"
         );
+
+        sink.agent_list_updated(vec![
+            flush_info(x, "b", 7, true, CoreStatus::Running),
+            flush_info(y, "a", 4, true, CoreStatus::Running),
+        ]);
+        assert_eq!(drain_targets(&mut rx), vec![x], "같은 id 의 새 화신은 등장");
     }
 
     /// ★대소가 아니라 **불일치**로 판정한다★: 화신 표식은 화신마다 뽑은 난수라 새 화신의 값이 옛 값보다
-    /// 작을 수 있다(`AgentProfile::epoch`). 대소로 걸면 그 절반의 재스폰에서 등장을 놓쳐, 그 이름 앞에
+    /// 작을 수 있다(`AgentProfile::epoch`). 대소로 걸면 그 절반의 재스폰에서 등장을 놓쳐, 그 에이전트 앞에
     /// 파킹된 우편이 다음 재스폰까지 묶인다.
     #[test]
     fn flush_sink_enqueues_on_any_different_tag_but_not_the_same_one() {
         let (sink, mut rx) = flush_sink();
         let id = AgentId::new_v4();
         sink.agent_list_updated(vec![flush_info(id, "a", 5, true, CoreStatus::Running)]);
-        assert_eq!(drain_targets(&mut rx), vec![("a".to_string(), id)]);
+        assert_eq!(drain_targets(&mut rx), vec![id]);
         sink.agent_list_updated(vec![flush_info(id, "a", 5, true, CoreStatus::Running)]);
         assert!(
             drain_targets(&mut rx).is_empty(),
@@ -1433,13 +1458,13 @@ mod tests {
         sink.agent_list_updated(vec![flush_info(id, "a", 9, true, CoreStatus::Running)]);
         assert_eq!(
             drain_targets(&mut rx),
-            vec![("a".to_string(), id)],
+            vec![id],
             "표식이 갈리면 flush(재스폰/재활성화)"
         );
         sink.agent_list_updated(vec![flush_info(id, "a", 2, true, CoreStatus::Running)]);
         assert_eq!(
             drain_targets(&mut rx),
-            vec![("a".to_string(), id)],
+            vec![id],
             "같은 id 라도 표식이 **작아지는** 재스폰이 있다 — 그것도 등장이다"
         );
     }
@@ -1450,11 +1475,11 @@ mod tests {
         let old = AgentId::new_v4();
         let new = AgentId::new_v4();
         sink.agent_list_updated(vec![flush_info(old, "svc", 3, true, CoreStatus::Running)]);
-        assert_eq!(drain_targets(&mut rx), vec![("svc".to_string(), old)]);
+        assert_eq!(drain_targets(&mut rx), vec![old]);
         sink.agent_list_updated(vec![flush_info(new, "svc", 0, true, CoreStatus::Running)]);
         assert_eq!(
             drain_targets(&mut rx),
-            vec![("svc".to_string(), new)],
+            vec![new],
             "동명 다른 에이전트(새 id)는 epoch 이 낮아도 flush(finding 3)"
         );
         sink.agent_list_updated(vec![flush_info(new, "svc", 0, true, CoreStatus::Running)]);
@@ -1475,10 +1500,7 @@ mod tests {
         ]);
         assert_eq!(
             drain_msgs(&mut rx),
-            vec![FlushMsg::Appear {
-                name: "tui".to_string(),
-                id: tui,
-            }],
+            vec![FlushMsg::Appear { id: tui }],
             "턴 신호 없는 산 세션 = Appear · terminal 은 아무것도 아님"
         );
     }
@@ -1657,25 +1679,34 @@ mod tests {
 
     // ── 9c. 배달 레인: 수신자별 직렬 · 수신자 간 병렬 ─────────────────────────────────────────
 
-    /// 배달 클로저의 진입/이탈 표식. Appear/Idle 이 서로 **다른 포트 조회**로 시작하므로 같은 수신자
-    /// 앞에서도 두 배달을 구분할 수 있다.
+    use engram_dashboard_messaging::envelope::Entrance;
+    use engram_dashboard_messaging::service::{SendMeta, SendStatus};
+    use engram_dashboard_messaging::SenderIdentity;
+
+    /// 배달 클로저의 진입/이탈 표식. 로스터 조회 표식엔 수신자가 없고 주입 표식엔 있다(`LaneProbe` 헤더).
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Probe {
-        EnterAppear,
-        ExitAppear,
-        EnterIdle(AgentId),
-        ExitIdle(AgentId),
+        EnterDrain,
+        ExitDrain,
+        EnterInject(AgentId),
+        ExitInject(AgentId),
     }
 
     /// 배달 클로저의 진입/이탈을 관측하고 **시점을 테스트가 통제**하게 하는 fake DeliveryPort.
     ///
-    /// ★관측점이 하필 로스터 조회인 이유(커널 코드가 정하는 외부 사실)★: 파킹이 비어 있는 수신자의 비동기
-    ///   flush 는 이 포트를 **정확히 한 번** 부른 뒤 조기 반환한다 — `flush_for_agent` 는 `canonical_name`
-    ///   (그 뒤 빈 큐 조기 반환), `flush_for` 는 `drain_queue` 의 `live_agents`(그 뒤 빈 배치). 그래서 그 두
-    ///   조회가 "이 배달 클로저가 지금 blocking pool 에서 돌고 있다" 의 표식이 된다 — 파킹·게이트·실
-    ///   에이전트 조립 없이 배달의 시작과 끝을 잡을 수 있다.
+    /// ★관측점 둘(커널 코드가 정하는 외부 사실)★
+    ///   - **로스터 조회(`live_agents`)** — 그 수신자 큐에 편지가 있으면 Appear(`flush_for`)든 Idle
+    ///     (`flush_for_agent`)든 드레인 머리에서 이 포트를 정확히 한 번 부른다. ★큐가 빈 수신자의 Idle 은 포트를
+    ///     한 번도 부르지 않는다★(`flush_for_agent` 의 빈 큐 조기 반환) — Appear 는 큐와 무관하게 부른다. 같은
+    ///     수신자 앞 두 배달의 순서는 이 차이로 가린다.
+    ///   - **주입(`inject`)** — 받는 이가 깨어 있으면 드레인이 그 id 로 부른다. 수신자가 실리는 표식은 이것뿐이다.
+    ///
+    /// ★편지는 잠든 동안 맡긴다(`park_while_asleep`)★: 깨어 있는 수신자 앞 발송은 테스트 스레드에서 곧장
+    ///   드레인해 표식이 레인 밖에서 찍힌다. 잠든 수신자 앞 발송은 파킹만 하고 flush 를 부르지 않는다.
     struct LaneProbe {
-        roster: Vec<(AgentId, String)>,
+        agents: Vec<(AgentId, String)>,
+        /// 거짓 = 전원 잠듦(로스터가 비고 잠든 쪽에만 보인다) · 참 = 전원 깨어 있음.
+        awake: std::sync::atomic::AtomicBool,
         events: mpsc::UnboundedSender<Probe>,
         /// 이 표식으로 진입한 클로저는 허가를 받을 때까지 막힌다.
         blocked: Vec<Probe>,
@@ -1689,7 +1720,10 @@ mod tests {
 
     impl LaneProbe {
         fn agents(&self) -> Vec<LiveAgent> {
-            self.roster
+            if !self.awake.load(std::sync::atomic::Ordering::SeqCst) {
+                return Vec::new();
+            }
+            self.agents
                 .iter()
                 .map(|(id, name)| LiveAgent {
                     id: *id,
@@ -1698,6 +1732,10 @@ mod tests {
                     turn_signal: false,
                 })
                 .collect()
+        }
+
+        fn wake(&self) {
+            self.awake.store(true, std::sync::atomic::Ordering::SeqCst);
         }
 
         fn checkpoint(&self, enter: Probe, exit: Probe) {
@@ -1722,34 +1760,36 @@ mod tests {
     }
 
     impl DeliveryPort for LaneProbe {
-        fn inject(&self, _to_id: PeerId, _bytes: &[u8]) -> Result<InjectReceipt, String> {
-            unreachable!("파킹이 비어 있으므로 주입까지 가지 않는다")
+        fn inject(&self, to_id: PeerId, bytes: &[u8]) -> Result<InjectReceipt, String> {
+            self.checkpoint(Probe::EnterInject(to_id), Probe::ExitInject(to_id));
+            Ok(InjectReceipt {
+                bytes_requested: bytes.len(),
+                bytes_written: bytes.len(),
+                msg_uuid: PeerId::new_v4(),
+                epoch: 0,
+            })
         }
         fn live_agents(&self) -> Vec<LiveAgent> {
-            self.checkpoint(Probe::EnterAppear, Probe::ExitAppear);
+            self.checkpoint(Probe::EnterDrain, Probe::ExitDrain);
             self.agents()
         }
         fn addressing_sources(&self) -> AddressingSources {
-            AddressingSources {
-                roster: self.agents(),
-                dormant_names: vec![],
-            }
+            let roster = self.agents();
+            let dormant = if roster.is_empty() {
+                self.agents
+                    .iter()
+                    .map(|(id, name)| DormantAgent {
+                        id: *id,
+                        name: name.clone(),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            AddressingSources { roster, dormant }
         }
         fn is_agent_live(&self, id: PeerId) -> bool {
-            self.roster.iter().any(|(rid, _)| *rid == id)
-        }
-        fn live_id_for_name(&self, name: &str) -> Option<PeerId> {
-            self.roster
-                .iter()
-                .find(|(_, n)| n == name)
-                .map(|(id, _)| *id)
-        }
-        fn canonical_name(&self, id: PeerId) -> Option<String> {
-            self.checkpoint(Probe::EnterIdle(id), Probe::ExitIdle(id));
-            self.roster
-                .iter()
-                .find(|(rid, _)| *rid == id)
-                .map(|(_, n)| n.clone())
+            self.agents().iter().any(|a| a.id == id)
         }
     }
 
@@ -1759,25 +1799,55 @@ mod tests {
         events: mpsc::UnboundedReceiver<Probe>,
         release: std::sync::mpsc::Sender<()>,
         probe: Arc<LaneProbe>,
+        svc: Arc<MessagingService>,
+    }
+
+    impl LaneHarness {
+        /// 잠든 수신자 앞에 편지 한 통을 맡긴다 — 파킹만 하고 flush 를 부르지 않는다(`LaneProbe` 헤더).
+        fn park_while_asleep(&self, name: &str) {
+            let rows = self
+                .svc
+                .handle_send(
+                    &format!("m-{name}"),
+                    SenderIdentity {
+                        peer_id: PeerId::new_v4(),
+                        epoch: 0,
+                    },
+                    "sender",
+                    &[name.to_string()],
+                    "hi",
+                    Entrance::Mcp,
+                    &SendMeta::default(),
+                )
+                .expect("발송 수락");
+            assert_eq!(
+                rows[0].status,
+                SendStatus::Pending,
+                "잠든 수신자 → 파킹: {rows:?}"
+            );
+        }
     }
 
     /// 실 `MessagingService`(fake 포트) + 실 2-레인 worker 조립 — 레인 스케줄링만 관측 대상으로 남긴다.
-    fn lane_harness(roster: Vec<(AgentId, String)>, blocked: Vec<Probe>) -> LaneHarness {
+    ///   수신자는 전원 잠든 채 시작한다(`LaneProbe::wake` 로 깨운다).
+    fn lane_harness(agents: Vec<(AgentId, String)>, blocked: Vec<Probe>) -> LaneHarness {
         let (ev_tx, events) = mpsc::unbounded_channel::<Probe>();
         let (release, release_rx) = std::sync::mpsc::channel::<()>();
         let probe = Arc::new(LaneProbe {
-            roster,
+            agents,
+            awake: std::sync::atomic::AtomicBool::new(false),
             events: ev_tx,
             blocked,
             release: Mutex::new(release_rx),
             inflight: std::sync::atomic::AtomicUsize::new(0),
             peak_inflight: std::sync::atomic::AtomicUsize::new(0),
         });
-        let slot = Arc::new(crate::control::mcp_server::MessagingSlot::new());
-        slot.set(Arc::new(MessagingService::new(
+        let svc = Arc::new(MessagingService::new(
             probe.clone(),
             Arc::new(ControlRegistry::new()),
-        )));
+        ));
+        let slot = Arc::new(crate::control::mcp_server::MessagingSlot::new());
+        slot.set(svc.clone());
         let (tx, rx) = mpsc::unbounded_channel::<FlushMsg>();
         let handles = spawn_flush_worker(
             rx,
@@ -1792,6 +1862,7 @@ mod tests {
             events,
             release,
             probe,
+            svc,
         }
     }
 
@@ -1805,28 +1876,36 @@ mod tests {
     }
 
     /// ★막힌 수신자가 다른 수신자의 배달을 막지 않는다★ — 배달 1건은 제출 페이싱으로 0.5초 넘게 잡혀 있고,
-    /// 그 뒤에 전원이 줄을 서면 페이싱이 필요 없는 수신자까지 그 시간을 낸다.
+    /// 그 뒤에 전원이 줄을 서면 페이싱이 필요 없는 수신자까지 그 시간을 낸다. a 의 주입을 막아 두고 b 가
+    /// 주입까지 완주하는지 본다.
     #[tokio::test]
     async fn a_stalled_recipient_does_not_hold_up_another_recipients_delivery() {
         let a = AgentId::new_v4();
         let b = AgentId::new_v4();
         let mut h = lane_harness(
             vec![(a, "alpha".to_string()), (b, "bravo".to_string())],
-            vec![Probe::EnterIdle(a)],
+            vec![Probe::EnterInject(a)],
         );
+        h.park_while_asleep("alpha");
+        h.park_while_asleep("bravo");
+        h.probe.wake();
 
         h.tx.send(FlushMsg::Idle { id: a }).expect("수신 레인 수신");
-        assert_eq!(next_probe(&mut h.events).await, Probe::EnterIdle(a));
+        assert_eq!(next_probe(&mut h.events).await, Probe::EnterDrain);
+        assert_eq!(next_probe(&mut h.events).await, Probe::ExitDrain);
+        assert_eq!(next_probe(&mut h.events).await, Probe::EnterInject(a));
         h.tx.send(FlushMsg::Idle { id: b }).expect("수신 레인 수신");
 
         assert_eq!(
             next_probe(&mut h.events).await,
-            Probe::EnterIdle(b),
+            Probe::EnterDrain,
             "a 가 막혀 있어도 b 의 배달은 시작해야"
         );
+        assert_eq!(next_probe(&mut h.events).await, Probe::ExitDrain);
+        assert_eq!(next_probe(&mut h.events).await, Probe::EnterInject(b));
         assert_eq!(
             next_probe(&mut h.events).await,
-            Probe::ExitIdle(b),
+            Probe::ExitInject(b),
             "a 가 아직 막혀 있는 동안 b 는 완주해야"
         );
         assert!(
@@ -1835,43 +1914,43 @@ mod tests {
         );
 
         h.release.send(()).expect("허가");
-        assert_eq!(next_probe(&mut h.events).await, Probe::ExitIdle(a));
+        assert_eq!(next_probe(&mut h.events).await, Probe::ExitInject(a));
         h.handles.shutdown().await;
     }
 
     /// ★같은 도어벨 id 의 배달은 겹치지 않고 디스패치 순서로 돈다★ — 이 축이 배치의 "오래된 순" 을 떠받친다.
     /// (같은 **세션**에 두 배달이 겹치지 않는 보장은 여기 축이 아니다 — `run_flush_lane` 헤더가 가리키는
     /// 커널의 타깃 축 가드 몫이고, 그쪽 회귀는 커널 테스트가 진다.)
+    ///
+    /// ★순서를 가리는 법★: 큐가 빈 채 Appear · Idle 을 차례로 넣는다. Appear 는 빈 큐에도 로스터를 뜨고(첫
+    ///   표식), 그 Appear 가 막혀 있는 동안 편지를 맡긴다. 그래서 둘째 표식은 **큐가 찬 뒤에 시작한 Idle** 만 낼
+    ///   수 있다 — Idle 이 먼저 돌았다면 빈 큐라 표식 없이 끝나 둘째 표식이 오지 않고, 겹쳐 돌았다면 첫 표식이
+    ///   풀리기 전에 둘째가 온다.
     #[tokio::test]
     async fn same_recipient_deliveries_are_serialized_in_dispatch_order() {
         let a = AgentId::new_v4();
-        let mut h = lane_harness(
-            vec![(a, "alpha".to_string())],
-            vec![Probe::EnterAppear, Probe::EnterIdle(a)],
-        );
+        let mut h = lane_harness(vec![(a, "alpha".to_string())], vec![Probe::EnterDrain]);
 
-        // 둘을 **먼저 다 넣는다** — 직렬화가 없으면 두 배달이 함께 in-flight 가 되어 아래 peak 단언이 잡는다.
-        h.tx.send(FlushMsg::Appear {
-            name: "alpha".to_string(),
-            id: a,
-        })
-        .expect("수신 레인 수신");
+        // 둘을 **먼저 다 넣는다** — 직렬화가 없으면 두 배달이 함께 in-flight 가 되어 아래 단언이 잡는다.
+        h.tx.send(FlushMsg::Appear { id: a })
+            .expect("수신 레인 수신");
         h.tx.send(FlushMsg::Idle { id: a }).expect("수신 레인 수신");
 
         assert_eq!(
             next_probe(&mut h.events).await,
-            Probe::EnterAppear,
-            "먼저 디스패치한 Appear 가 먼저 시작"
+            Probe::EnterDrain,
+            "먼저 디스패치한 Appear 가 먼저 시작(빈 큐의 Idle 은 표식을 내지 않는다)"
         );
+        h.park_while_asleep("alpha");
         h.release.send(()).expect("허가");
-        assert_eq!(next_probe(&mut h.events).await, Probe::ExitAppear);
+        assert_eq!(next_probe(&mut h.events).await, Probe::ExitDrain);
         assert_eq!(
             next_probe(&mut h.events).await,
-            Probe::EnterIdle(a),
-            "앞 배달이 끝난 뒤에야 다음 배달이 시작"
+            Probe::EnterDrain,
+            "앞 배달이 끝난 뒤에야 다음 배달(Idle — 큐가 찼다)이 시작"
         );
         h.release.send(()).expect("허가");
-        assert_eq!(next_probe(&mut h.events).await, Probe::ExitIdle(a));
+        assert_eq!(next_probe(&mut h.events).await, Probe::ExitDrain);
 
         assert_eq!(
             h.probe.peak(),
