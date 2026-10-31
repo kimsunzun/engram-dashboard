@@ -5,10 +5,10 @@
 //! **상대끼리 상태를 공유하지 않는다**: 데몬 A 가 포기해도 B 는 운영 중이다.
 //!
 //! ★위로 올라가는 줄도 이름표끼리 공유하지 않는다★ — 줄이 하나면 시끄러운 상대가 그것을 채우는 순간
-//! 조용한 상대의 사건·패킷이 버려지고, 「A 하나 죽어도 B·C 는 잘 동작해야 한다」가 무너진다(ADR-0180
-//! 결정 8). 그래서 줄은 이름표마다 따로 서고(길이 = [`Policy::inbound_queue`]), 넘쳐 잃는 것은 그 이름표의
-//! 것뿐이다. 같은 이름표를 다시 올리면 그 줄을 이어 쓴다([`Registry::add_with_policy`]). 줄이 찼다고
-//! 연결을 끊지는 않는다(`peer.rs` 의 `note_inbound_drop`).
+//! 조용한 상대의 사건·패킷이 그 뒤에 붙들리고, 「A 하나 죽어도 B·C 는 잘 동작해야 한다」가 무너진다
+//! (ADR-0180 결정 8). 그래서 줄은 이름표마다 따로 서고(길이 = [`Policy::inbound_queue`]), 줄이 차면 그
+//! 이름표의 감독이 자기 순서 칸에 붙든다 — 버리지 않고 연결을 끊지도 않는다(`peer.rs` 헤더). 같은 이름표를
+//! 다시 올리면 그 줄을 이어 쓴다([`Registry::add_with_policy`]).
 //! 줄의 넣는 끝과 받는 끝은 명부와 [`Inbound`] 가 함께 쥐는 표(`Roster`) 한 곳에 산다 — 줄의 수명 주인이
 //! 하나라야 받는 쪽이 안 읽는 동안 어떤 올리기 · 내리기 순서도 줄을 버려 두지 못한다.
 //! TODO(TRD 3 §6-0 U1d): 받는 끝을 손잡이마다 `add` 가 소비자에게 직접 돌려준다(ADR-0310 결정 17 —
@@ -257,10 +257,11 @@ impl<W: Wire> Shared<W> {
 ///
 /// ★순서는 이름표 하나 안에서만 계약이다★ — 한 이름표의 줄에서는 넣은 순서대로 오고, 이름표 사이의
 /// 순서는 낸 시각이 아니라 돌아가는 차례가 정한다. 같은 이름표를 다시 올리면 옛 감독과 새 감독이 **같은
-/// 줄**에 넣는다 — 옛 감독은 닫히는 동안 잠시 더 돌 수 있어([`Peer::close`] 에 완료 신호가 없다) 둘의
-/// 것이 넣은 순서대로 섞인다. 어느 감독의 것인지는 줄이 가르지 못하고, 연결 세대도 `Connected` ·
-/// `Disconnected` · `DecodeFailed` · 메시지([`crate::Arrival::generation`])에만 실린다 — `ConnectFailed`
-/// · `Rejected` · `GaveUp` · `Dropped` 등에는 없다.
+/// 줄**에 넣는다 — 옛 감독은 닫히는 동안(통로를 닫고 순서 칸에 붙든 것을 다 실을 때까지) 더 돌 수 있어
+/// 둘의 것이 넣은 순서대로 섞인다. 옛 감독의 끝은 그 감독의 [`TransportEvent::Closed`] 다. 어느 감독의
+/// 것인지는 줄이 가르지 못하고, 연결 세대도 `Connected` · `Disconnected` · `Closed` · `DecodeFailed` ·
+/// 메시지([`crate::Arrival::generation`])에만 실린다 — `ConnectFailed` · `Rejected` · `GaveUp` · `Dropped`
+/// 등에는 없다.
 /// TODO(TRD 3 §6-0 U1d): 받는 끝을 손잡이마다 따로 주고, 소비자가 TRD 3 §3-3 의 세 규칙으로 거른다 —
 /// 모든 사건에 손잡이 거름 · 세대를 실은 사건만 세대 비교 · 지금 손잡이의 세대 없는 생애 사건은 통과.
 pub struct Inbound<W: Wire> {
@@ -280,7 +281,9 @@ impl<W: Wire> Inbound<W> {
             .with(|roster| roster.rotate(|lane| lane.try_next()))
     }
 
-    /// 더 받지 않는다. 이미 큐에 있는 것은 [`Inbound::recv`] 로 계속 꺼낼 수 있다.
+    /// 더 받지 않는다. 이미 큐에 있는 것은 [`Inbound::recv`] 로 계속 꺼낼 수 있다. ★감독들이 순서 칸에
+    /// 붙들어 아직 줄에 못 든 것은 말없이 버려진다★ — 닫힌 줄에는 실을 수 없고, 세지도 신고하지도 않는다.
+    /// [`Inbound`] 를 떨어뜨려도 같다.
     ///
     /// 감독은 다음에 넣으려다 닫힌 것을 보고 다시 붙지 않고 접는다. 이 뒤에 올린 상대는 걸지 않고 곧바로
     /// 접힌다([`Registry::add_with_policy`]).
@@ -426,7 +429,10 @@ impl<W: Wire> Registry<W> {
     ///
     /// ★그래도 겹침이 0 이 되지는 않는다★ — [`Peer::close`] 에 완료 신호가 없어 옛 감독은 잠시 더
     /// 통로를 닫는 중일 수 있고, 그 사이 운영 단계에 들어서 세대를 하나 더 발행할 수도 있다.
-    /// **공용 계수기**가 그 겹침을 해롭지 않게 만드는 장치다(같은 번호가 두 번 나오지 않는다).
+    /// **공용 계수기**가 그 겹침을 해롭지 않게 만드는 장치다 — 붙을 때 뽑는 연결 세대(`Connected` ·
+    /// `Disconnected` · 메시지에 실리는 번호)는 두 번 나오지 않는다. ★한 번도 안 붙은 감독의 세대는 예외다★
+    /// — 바닥값(옛 감독의 마지막 세대)을 그대로 실어, 그 감독의 [`TransportEvent::Closed`] 와
+    /// [`Peer::generation`] 은 옛 감독의 것과 같은 번호를 보인다.
     ///
     /// ★같은 이름표면 위로 올라가는 줄을 새로 세우지 않고 이어 쓴다★ — 올라 있던 것을 갈아치울 때도, 내린
     /// 뒤 그 줄이 아직 안 걷혔을 때도 같다. 그래서 받는 쪽이 안 읽는 동안 다시 올려도 줄이 늘지 않고, 옛
@@ -542,7 +548,8 @@ impl<W: Wire> Registry<W> {
     ///
     /// 부분 실패는 그 상대의 [`TransportEvent::Dropped`] 로 **그 상대의 줄에** 올라온다 — ★조용히
     /// 사라지는 것을 안 만드는 것이 이 함수의 유일한 까다로운 부분이다★(오늘 `net` 의 팬아웃이 정확히 그
-    /// 자리에서 조용하다). 그 신고도 그 상대의 줄이 차 있으면 사라진다(세지 않는다).
+    /// 자리에서 조용하다). 그 신고도 그 상대의 줄이 차 있으면 사라진다(세지 않는다). ★감독의 순서 칸을
+    /// 거치지 않는다★ — 그 상대의 감독이 붙들고 있는 것보다 앞서 줄에 들 수 있다.
     ///
     /// ★앱이 [`Peer::close`] 로 닫은 상대에게는 신고하지 않는다★ — 명부에 남아 있어도 같다. 앱이 닫겠다고
     /// 한 뒤의 유실 개수는 읽을 쪽이 없고 깔끔한 종료가 우선이다(사용자 결정 2026-09-26 — `lib.rs`
@@ -627,6 +634,20 @@ mod tests {
                 out.push(item);
             }
             out
+        }
+
+        /// 감독들을 돌리며 비운다 — 감독이 순서 칸에 붙든 것을 줄로 옮길 틈을 주면서, 한 바퀴에 아무것도 안
+        /// 올라올 때까지.
+        async fn drain_until_quiet(&mut self) -> Vec<Incoming<TestWire>> {
+            let mut out = Vec::new();
+            loop {
+                settle().await;
+                let batch = self.drain();
+                if batch.is_empty() {
+                    return out;
+                }
+                out.extend(batch);
+            }
         }
     }
 
@@ -864,9 +885,9 @@ mod tests {
         assert_eq!(f.net.dials(), 2);
     }
 
-    // ── N1: 위로 올라가는 줄이 찼다고 연결을 끊지 않는다 ──
+    // ── N1: 위로 올라가는 줄이 찼다고 연결을 끊지도 버리지도 않는다 ──
     #[tokio::test]
-    async fn a_saturated_line_does_not_cut_the_link() {
+    async fn a_saturated_line_neither_cuts_the_link_nor_loses_anything() {
         let mut f = Fixture::new(Policy {
             inbound_queue: 2,
             ..Policy::default()
@@ -876,7 +897,7 @@ mod tests {
             .add(PeerId::new("a"), Address::new("mem://a"), immediate());
         settle().await;
         let endpoint = f.net.accept().unwrap();
-        // 아무도 안 읽는 채로 밀어 넣는다.
+        // 아무도 안 읽는 채로 밀어 넣고, 상대가 곧바로 닫는다.
         for seq in 1..=200 {
             endpoint.push(TestWire::chunk(1, 1, seq));
         }
@@ -886,21 +907,63 @@ mod tests {
             PeerState::Live,
             "위로 올라갈 자리가 없는 것은 이 연결의 잘못이 아니다"
         );
-
-        // 자리가 나면 유실을 신고한다.
-        f.drain();
-        endpoint.push(TestWire::chunk(1, 1, 201));
+        endpoint.close();
         settle().await;
-        let dropped = f.drain().into_iter().find_map(|i| match i.as_event() {
-            Some(TransportEvent::Dropped {
-                direction, count, ..
-            }) => Some((*direction, *count)),
-            _ => None,
-        });
-        assert!(
-            matches!(dropped, Some((Direction::Inbound, n)) if n > 0),
-            "세는 것을 그만두면 끊는 것보다 나쁘다"
+
+        let items = f.drain_until_quiet().await;
+        let seqs: Vec<u64> = items
+            .iter()
+            .filter_map(|i| match i.as_message().map(|a| &a.msg) {
+                Some(TestIn::Chunk { seq, .. }) => Some(*seq),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            seqs,
+            (1..=200).collect::<Vec<_>>(),
+            "★줄이 찬 동안 온 것도 하나도 안 버려지고 온 순서대로 나온다★"
         );
+        let kinds: Vec<&'static str> = items
+            .iter()
+            .filter_map(|i| i.as_event().map(|e| e.kind()))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["Connected", "Disconnected"],
+            "★끊김은 그 앞에 온 것들 뒤에 오고, 유실 신고는 없다★"
+        );
+        assert!(
+            matches!(
+                items.last().and_then(|i| i.as_event()),
+                Some(TransportEvent::Disconnected { .. })
+            ),
+            "끊김이 마지막이다"
+        );
+    }
+
+    // 데몬 되감기 링 한 벌(4096)이 한꺼번에 오는 모양 — 줄 길이(기본 512)의 여덟 배다.
+    #[tokio::test]
+    async fn a_replay_sized_burst_arrives_whole_while_the_consumer_lags() {
+        let mut f = Fixture::new(Policy::default());
+        f.registry
+            .add(PeerId::new("a"), Address::new("mem://a"), immediate());
+        settle().await;
+        let endpoint = f.net.accept().unwrap();
+        for seq in 1..=4096 {
+            endpoint.push(TestWire::chunk(1, 1, seq));
+        }
+        settle().await;
+
+        let seqs: Vec<u64> = f
+            .drain_until_quiet()
+            .await
+            .iter()
+            .filter_map(|i| match i.as_message().map(|a| &a.msg) {
+                Some(TestIn::Chunk { seq, .. }) => Some(*seq),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(seqs, (1..=4096).collect::<Vec<_>>());
     }
 
     #[tokio::test]
@@ -993,22 +1056,17 @@ mod tests {
         assert_eq!(noisy.peer_state(), PeerState::Live);
         assert_eq!(quiet.peer_state(), PeerState::Live);
 
-        // 넘친 것은 시끄러운 쪽의 것만이고, 자리가 나면 그 상대 이름으로 신고된다.
-        noisy_link.push(TestWire::chunk(1, 1, 501));
-        settle().await;
-        let dropped: Vec<PeerId> = f
-            .drain()
+        // 넘친 시끄러운 쪽의 것도 그 감독이 붙들고 있다가 순서대로 낸다.
+        let noisy_seqs: Vec<u64> = items
             .into_iter()
-            .filter_map(|i| match i.as_event() {
-                Some(TransportEvent::Dropped {
-                    peer,
-                    direction: Direction::Inbound,
-                    count,
-                }) if *count > 0 => Some(peer.clone()),
+            .chain(f.drain_until_quiet().await)
+            .filter(|item| item.peer() == &PeerId::new("noisy"))
+            .filter_map(|item| match item.as_message().map(|a| &a.msg) {
+                Some(TestIn::Chunk { seq, .. }) => Some(*seq),
                 _ => None,
             })
             .collect();
-        assert_eq!(dropped, vec![PeerId::new("noisy")]);
+        assert_eq!(noisy_seqs, (1..=500).collect::<Vec<_>>());
     }
 
     #[tokio::test]
@@ -1193,7 +1251,7 @@ mod tests {
 
     // ── 3-0 U1a: 같은 이름표는 줄 하나 ──
     #[tokio::test]
-    async fn re_adding_a_name_reuses_its_line_so_nothing_grows_while_nobody_reads() {
+    async fn re_adding_a_name_reuses_its_line_so_no_line_grows_while_nobody_reads() {
         let mut f = Fixture::new(Policy {
             inbound_queue: 4,
             ..Policy::default()
@@ -1217,7 +1275,7 @@ mod tests {
         let buffered = f.drain().len();
         assert!(
             buffered <= 4,
-            "줄 하나의 길이를 넘게 쥐지 않는다: {buffered}"
+            "줄에는 그 길이를 넘게 쌓이지 않는다 — 정리 중인 옛 감독이 붙든 꼬리는 줄 밖 순서 칸에 있다: {buffered}"
         );
     }
 
@@ -1226,7 +1284,7 @@ mod tests {
         let mut f = Fixture::new(Policy::default());
         let name = PeerId::new("a");
         for _ in 0..30 {
-            // 감독이 돌기 전에 내린다 — 감독은 걸기 전에 닫기를 보고 아무것도 안 낸 채 끝난다.
+            // 감독이 돌기 전에 내린다 — 감독은 걸기 전에 닫기를 보고 `Closed` 하나만 낸 채 끝난다.
             f.registry
                 .add(name.clone(), Address::new("mem://a"), immediate());
             f.registry.remove(&name);
@@ -1266,7 +1324,8 @@ mod tests {
             .filter_map(|i| i.as_event())
             .map(|e| match e {
                 TransportEvent::Connected { generation, .. }
-                | TransportEvent::Disconnected { generation, .. } => (e.kind(), Some(*generation)),
+                | TransportEvent::Disconnected { generation, .. }
+                | TransportEvent::Closed { generation, .. } => (e.kind(), Some(*generation)),
                 other => (other.kind(), None),
             })
             .collect();
@@ -1275,8 +1334,8 @@ mod tests {
             vec![
                 ("Connected", Some(Generation(1))),
                 ("Disconnected", Some(Generation(1))),
+                ("Closed", Some(Generation(1))),
                 ("Connected", Some(Generation(2))),
-                ("Disconnected", Some(Generation(2))),
             ],
             "★감독이 끝났어도 다 안 꺼낸 줄은 걷지 않는다★ — 걷으면 그 안의 것을 잃는다"
         );
@@ -1444,12 +1503,30 @@ mod tests {
             1,
             "★빈 줄이라도 옛 감독이 돌고 있으면 걷지 않는다★ — 걷으면 꼬리와 새 감독의 것이 두 줄로 갈라진다"
         );
-        let kinds: Vec<&'static str> = f
+        // ★옛 감독의 `Closed` 는 새 감독의 `Connected` 뒤에 올 수 있다★ — 옛 감독은 통로를 다 닫은 뒤에야
+        //   그것을 내고, 그 사이 새 감독이 붙는다. 그래서 한 감독 안의 순서와 빠짐없음만 단언한다.
+        let seen: Vec<(&'static str, Generation)> = f
             .drain()
             .iter()
-            .filter_map(|i| i.as_event().map(|e| e.kind()))
+            .filter_map(|i| match i.as_event() {
+                Some(e @ TransportEvent::Disconnected { generation, .. })
+                | Some(e @ TransportEvent::Closed { generation, .. })
+                | Some(e @ TransportEvent::Connected { generation, .. }) => {
+                    Some((e.kind(), *generation))
+                }
+                _ => None,
+            })
             .collect();
-        assert_eq!(kinds, vec!["Disconnected", "Connected"]);
+        let at = |what: (&'static str, Generation)| seen.iter().position(|s| *s == what);
+        assert_eq!(seen.len(), 3, "{seen:?}");
+        assert!(at(("Connected", Generation(2))).is_some(), "{seen:?}");
+        assert!(
+            matches!(
+                (at(("Disconnected", Generation(1))), at(("Closed", Generation(1)))),
+                (Some(gone), Some(end)) if gone < end
+            ),
+            "옛 감독 안에서는 끊김 → 끝 순서다: {seen:?}"
+        );
     }
 
     #[tokio::test]
@@ -1469,7 +1546,7 @@ mod tests {
             .iter()
             .filter_map(|i| i.as_event().map(|e| e.kind()))
             .collect();
-        assert_eq!(kinds, vec!["Rejected", "GaveUp", "Connected"]);
+        assert_eq!(kinds, vec!["Rejected", "GaveUp", "Closed", "Connected"]);
     }
 
     // ── 3-0 U1a: 기다리는 recv 는 모든 줄에서 깬다 ──

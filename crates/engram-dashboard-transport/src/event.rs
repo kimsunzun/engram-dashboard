@@ -55,10 +55,11 @@ impl fmt::Display for PeerId {
 }
 
 /// 어느 방향에서 버려졌나.
+///
+/// ★받는 쪽 갈래는 없다★ — 위로 올라가는 줄이 차도 감독이 자기 순서 칸에 붙들어 버리지 않는다
+/// (`peer.rs` 헤더 「순서 칸」 · TRD 3 §3-0 ②).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
-    /// 이 상대의 위로 올라가는 줄이 찼다 — 줄은 이름표마다 따로라 다른 이름표의 넘침은 여기 안 든다.
-    Inbound,
     /// 상대에게 나갈 것을 못 내보냈다. 큐 포화만이 아니라 끊겨서 버린 것도 들고, 그중에는 **쓰는 도중
     /// 끊긴** 알림·팬아웃도 있다(같은 처지의 요청은 여기 안 들고 오류로 깨어난다).
     ///
@@ -175,6 +176,28 @@ pub enum TransportEvent<W: Wire> {
     },
     /// 셸이 팝업 자격을 판정하는 입력(ADR-0180 결정 2).
     GaveUp { peer: PeerId, reason: GaveUpReason },
+    /// ★이 감독의 마지막 사건★ — 이 뒤로 이 감독에게서 올라오는 것은 없다. 정리가 통로를 다 닫고 순서
+    /// 칸에 붙든 것을 다 실은 뒤 맨 끝에 낸다(TRD 3 §3-0 ②).
+    ///
+    /// `generation` = 이 감독의 마지막 연결 세대(한 번도 안 붙었으면 명부가 준 바닥값) · `cause` = 끝낸
+    /// 까닭 — 지금은 늘 [`DisconnectCause::Explicit`] 다(감독이 끝나는 길이 닫기 하나뿐이다: 앱이
+    /// 닫았거나 받는 쪽이 사라졌다).
+    ///
+    /// ★`generation` 으로 감독을 가르지 못한다★ — 바닥값은 같은 이름표의 앞 감독이 마지막으로 뽑은 세대라,
+    /// 한 번도 안 붙고 끝난 감독의 이것은 앞 감독의 이것과 똑같을 수 있다(`Closed{g}` 둘).
+    ///
+    /// ★안 올 수 있다★ — 받는 쪽이 닫혔거나 사라졌으면 실을 데가 없고, 산 채 안 비우는 받는 쪽에는 정리가
+    /// 상한(`peer.rs` 의 `CLOSE_DRAIN_LIMIT`)을 넘기면 남은 것과 함께 이것도 버린다.
+    /// ★줄의 끝이 아니다★ — 같은 이름표를 다시 올리면 다음 감독이 같은 줄에 이어 넣고, 옛 감독의 이것이
+    /// 새 감독의 사건 뒤에 올 수도 있다([`crate::Inbound`] 의 순서 계약).
+    /// TODO(TRD 3 §6-0 U1d): 손잡이마다 수신단을 주면 이것이 그 수신단의 끝이 되고(어느 감독의 것인지는
+    /// 수신단이 가른다 — 위의 같은 `Closed{g}` 둘도 그것으로 풀린다), 상한을 넘기면 송신단을 놓아 수신단
+    /// 끝(`None`)이 대신 알린다. `cause` 의 읽기 끝 · 쓰기 끝 가름도 그 단위다.
+    Closed {
+        peer: PeerId,
+        generation: Generation,
+        cause: DisconnectCause,
+    },
     /// 어디서 몇 개를 잃었고 무엇을 다시 청했나. ★오늘은 순번 구멍 검사가 아예 없다★.
     StreamGap {
         peer: PeerId,
@@ -247,6 +270,7 @@ impl<W: Wire> TransportEvent<W> {
             | Self::ConnectFailed { peer, .. }
             | Self::Rejected { peer, .. }
             | Self::GaveUp { peer, .. }
+            | Self::Closed { peer, .. }
             | Self::StreamGap { peer, .. }
             | Self::StreamTruncated { peer, .. }
             | Self::StreamGenerationChanged { peer, .. }
@@ -267,6 +291,7 @@ impl<W: Wire> TransportEvent<W> {
             Self::ConnectFailed { .. } => "ConnectFailed",
             Self::Rejected { .. } => "Rejected",
             Self::GaveUp { .. } => "GaveUp",
+            Self::Closed { .. } => "Closed",
             Self::StreamGap { .. } => "StreamGap",
             Self::StreamTruncated { .. } => "StreamTruncated",
             Self::StreamGenerationChanged { .. } => "StreamGenerationChanged",
@@ -326,6 +351,16 @@ where
                 .debug_struct("GaveUp")
                 .field("peer", peer)
                 .field("reason", reason)
+                .finish(),
+            Self::Closed {
+                peer,
+                generation,
+                cause,
+            } => f
+                .debug_struct("Closed")
+                .field("peer", peer)
+                .field("generation", generation)
+                .field("cause", cause)
                 .finish(),
             Self::StreamGap {
                 peer,
@@ -454,6 +489,11 @@ mod tests {
                 generation: Generation(1),
             },
             TransportEvent::AmbiguousRole { peer: peer.clone() },
+            TransportEvent::Closed {
+                peer: peer.clone(),
+                generation: Generation(1),
+                cause: DisconnectCause::Explicit,
+            },
             TransportEvent::Dropped {
                 peer: peer.clone(),
                 direction: Direction::Outbound,
