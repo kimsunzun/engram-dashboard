@@ -63,12 +63,13 @@ use engram_dashboard_protocol::{
     AgentSpawnCommand as WireSpawnCommand, Capabilities as WireCaps,
     ControlCaps as WireControlCaps, DeliveredCopy as WireDeliveredCopy, DropCause as WireDropCause,
     EnvelopeFormat as WireEnvelopeFormat, InputCaps as WireInputCaps, ModelCaps as WireModelCaps,
-    OutputCaps as WireOutputCaps, Preset as WirePreset, QueuedInputCancel as WireQueuedInputCancel,
-    QueuedInputEvent as WireQueuedInputEvent, QueuedInputRow as WireQueuedInputRow,
-    RestartPolicy as WireRestartPolicy, RestoreOutcome as WireRestoreOutcome, RestoreReport,
-    SessionCaps as WireSessionCaps, SnapshotChunk as WireSnapshotChunk,
-    StructuredEvent as WireStructuredEvent, SubscribeAction, ToolCategory as WireToolCategory,
-    ToolOutcome as WireToolOutcome, TurnOutcome as WireTurnOutcome, PROTOCOL_VERSION,
+    OutputCaps as WireOutputCaps, OwnerToken as WireOwnerToken, Preset as WirePreset,
+    QueuedInputCancel as WireQueuedInputCancel, QueuedInputEvent as WireQueuedInputEvent,
+    QueuedInputRow as WireQueuedInputRow, RestartPolicy as WireRestartPolicy,
+    RestoreOutcome as WireRestoreOutcome, RestoreReport, SessionCaps as WireSessionCaps,
+    SnapshotChunk as WireSnapshotChunk, StructuredEvent as WireStructuredEvent, SubscribeAction,
+    ToolCategory as WireToolCategory, ToolOutcome as WireToolOutcome,
+    TurnOutcome as WireTurnOutcome, PROTOCOL_VERSION,
 };
 
 use tokio::sync::watch;
@@ -1096,6 +1097,11 @@ pub(crate) fn core_status_to_wire(status: CoreStatus) -> engram_dashboard_protoc
     status_to_wire(&status)
 }
 
+// ADR-0310: 등록 패킷의 주인 표지는 protocol 사본이다 — 명부 · 판정이 쓰는 도구 crate 타입으로 여기서 옮긴다.
+fn owner_from_wire(owner: WireOwnerToken) -> OwnerToken {
+    OwnerToken(owner.0)
+}
+
 /// wire 벤더 → 사용량 칸의 벤더 키. `None` = 그 벤더의 조회기가 없다.
 ///
 /// ★키는 들어온 낱말이 아니라 조회기의 키다★ — 버스 입구(대문자 낱말)와 같은 칸을 치려면 두 입구가 같은 조회기
@@ -2018,7 +2024,7 @@ impl ConnectionCore {
                 // ADR-0154
                 note_claimed_owner(
                     session,
-                    &claimed,
+                    &owner_from_wire(claimed),
                     self.commands.attached_owner(conn_id).as_ref(),
                 );
                 // ★`catalog_version` 으로 거절하지 않는다★: 세대 번호는 crate 마다라 받는 쪽이 자기
@@ -2053,7 +2059,7 @@ impl ConnectionCore {
                 // ADR-0154
                 note_claimed_owner(
                     session,
-                    &claimed,
+                    &owner_from_wire(claimed),
                     self.commands.attached_owner(conn_id).as_ref(),
                 );
                 tracing::debug!(
@@ -2657,8 +2663,6 @@ mod tests {
     /// variant 가 빠뜨려지는 것은 이 테스트가 아니라 `dispatch_order` 의 exhaustive match 가 잡는다.
     #[test]
     fn only_the_activations_and_the_usage_refresh_leave_the_arrival_queue() {
-        use engram_dashboard_command::OwnerToken;
-
         let detached = vec![
             AgentCommand::Spawn {
                 profile_id: uuid::Uuid::new_v4(),
@@ -2727,13 +2731,13 @@ mod tests {
             AgentCommand::Unsubscribe { agent_id },
             // ④ 명령 명부
             AgentCommand::RegisterCommands {
-                owner: OwnerToken::new("shell"),
+                owner: WireOwnerToken::new("shell"),
                 decls: vec![],
                 catalog_version: 1,
                 request_id: rid(),
             },
             AgentCommand::UpdateCommands {
-                owner: OwnerToken::new("shell"),
+                owner: WireOwnerToken::new("shell"),
                 added: vec![],
                 removed: vec![],
                 request_id: rid(),
@@ -4213,11 +4217,34 @@ mod tests {
         assert_eq!(logged[0].0, tracing::Level::WARN, "{logged:?}");
     }
 
+    /// 끝자락 옮겨 담기가 안쪽 문자열을 그대로 나르고, 두 타입의 wire 바이트가 같아 되돌려 풀어도 원래 값이다.
+    #[test]
+    fn the_wire_owner_crosses_into_the_bus_type_unchanged() {
+        for raw in [
+            "",
+            "engram-dashboard-shell",
+            "conn-7",
+            "주인 \"따옴표\"\n\u{7f}",
+        ] {
+            let wire = WireOwnerToken::new(raw);
+            let owner = owner_from_wire(wire.clone());
+            assert_eq!(owner.as_str(), raw);
+
+            let bytes = serde_json::to_string(&wire).unwrap();
+            assert_eq!(bytes, serde_json::to_string(&owner).unwrap(), "{raw:?}");
+            assert_eq!(serde_json::from_str::<OwnerToken>(&bytes).unwrap(), owner);
+            assert_eq!(
+                serde_json::from_str::<WireOwnerToken>(&bytes).unwrap(),
+                wire
+            );
+        }
+    }
+
     /// ★주인 칸에 파생값이 **아닌** 토큰을 일부러 싣는다★ — 명부의 주인이 패킷이 아니라 연결에서
     /// 난다는 것이 이 wire 의 계약이다(`ConnectionSession::owner_token`).
     fn register(decls: Vec<CommandDecl>, request_id: RequestId) -> AgentCommand {
         AgentCommand::RegisterCommands {
-            owner: OwnerToken::new("whatever-the-client-thinks"),
+            owner: WireOwnerToken::new("whatever-the-client-thinks"),
             decls,
             catalog_version: 7,
             request_id,
@@ -4226,7 +4253,7 @@ mod tests {
 
     fn update(added: Vec<CommandDecl>, removed: Vec<&str>, request_id: RequestId) -> AgentCommand {
         AgentCommand::UpdateCommands {
-            owner: OwnerToken::new("whatever-the-client-thinks"),
+            owner: WireOwnerToken::new("whatever-the-client-thinks"),
             added,
             removed: removed.into_iter().map(str::to_string).collect(),
             request_id,

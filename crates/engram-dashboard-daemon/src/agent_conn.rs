@@ -1148,8 +1148,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_disconnect_removes_that_connections_commands_from_the_roster() {
-        use engram_dashboard_command::{CommandDecl, OwnerToken};
-        use engram_dashboard_protocol::RequestId;
+        use engram_dashboard_command::CommandDecl;
+        use engram_dashboard_protocol::{OwnerToken, RequestId};
 
         let factory = test_factory();
         let owner = factory.handler_for(1);
@@ -1234,6 +1234,7 @@ mod tests {
     #[tokio::test]
     async fn a_disconnect_also_reclaims_that_connections_command_round_trips() {
         use engram_dashboard_command::{CommandDecl, CommandEnvelope, OwnerToken, RequestId};
+        use engram_dashboard_protocol::OwnerToken as WireOwnerToken;
 
         let commands = CommandRoster::new();
         let deliveries = CommandDeliveries::new();
@@ -1256,7 +1257,7 @@ mod tests {
             let _ = next_event(&mut caller_rx).await;
         }
         let registration = command_json(&AgentCommand::RegisterCommands {
-            owner: OwnerToken::new("shell"),
+            owner: WireOwnerToken::new("shell"),
             decls: vec![CommandDecl {
                 name: "tab.create".to_string(),
                 help: "{}".to_string(),

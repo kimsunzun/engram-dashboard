@@ -45,7 +45,7 @@ pub use domain::{
     SnapshotChunk, UsageLimitSnapshot, UsageScopedWindow, UsageStateDetail, UsageVendorState,
     UsageWindow,
 };
-pub use ids::{AgentId, PresetId, ProfileId, RequestId};
+pub use ids::{AgentId, OwnerToken, PresetId, ProfileId, RequestId};
 pub use messages::{
     command_request_id, event_reply_request_id, AgentCommand, AgentEvent, CommandListEntry,
     DeliveredCopy, DropCause, OutputChunk, QueuedInputCancel, QueuedInputEvent, QueuedInputRow,

@@ -1,14 +1,14 @@
 //! wire 메시지 — 클→데몬 [`AgentCommand`], 데몬→클 [`AgentEvent`].
 //! 둘 다 externally-tagged JSON(serde 기본).
 
-use engram_dashboard_command::{CommandDecl, CommandEnvelope, CommandReply, OwnerToken};
+use engram_dashboard_command::{CommandDecl, CommandEnvelope, CommandReply};
 use ts_rs::TS;
 
 use crate::domain::{
     AgentBackendKind, AgentInfo, AgentOutputFormat, AgentProfile, AgentStatus, Capabilities,
     EnvelopeFormat, Preset, RestoreReport, SnapshotChunk, UsageLimitSnapshot,
 };
-use crate::ids::{AgentId, PresetId, ProfileId, RequestId};
+use crate::ids::{AgentId, OwnerToken, PresetId, ProfileId, RequestId};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
@@ -250,9 +250,9 @@ pub enum AgentCommand {
     },
 
     // ── 명령 버스 등록 wire(ADR-0155/0156 · TRD §3-7) ───────────────────────────────
-    // ★받는 쪽만 서 있다★ — 데몬 dispatch 가 이 셋을 주인 명부에 반영하고 [`AgentEvent::CommandList`]
-    //   로 답한다(`connection_core.rs`). **보내는 쪽은 아직 없다** — 셸·화면이 자기 선언을 얹는 것은
-    //   TRD §6 Step 3·4 다.
+    // 데몬 dispatch 가 이 셋을 주인 명부에 반영하고 [`AgentEvent::CommandList`] 로 답한다
+    //   (`connection_core.rs`). 등록 둘을 보내는 쪽은 셸이다 — 연결마다 `RegisterCommands` 전량
+    //   (`daemon_client/connection.rs`), 웹뷰 화면 명단이 바뀔 때 `UpdateCommands`(`commands/view_bus.rs`).
     //
     // ★`request_id` 에 `#[serde(default)]` 를 달지 말 것★ — 이 crate 의 [`RequestId::default`] 는
     //   **새 v4 를 찍는다**(`ids.rs`). 기본값을 허용하면 그 칸이 빠진 패킷이 거절 대신 **아무와도 짝이
@@ -2509,7 +2509,7 @@ mod tests {
         engram_dashboard_command::CommandEnvelope {
             name: "tab.create".to_string(),
             request_id: engram_dashboard_command::RequestId(Uuid::nil()),
-            owner: OwnerToken::new("shell"),
+            owner: engram_dashboard_command::OwnerToken::new("shell"),
             proto_ver: 1,
             args: serde_json::json!({ "window": "main" }),
         }
