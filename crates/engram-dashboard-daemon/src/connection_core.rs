@@ -40,8 +40,7 @@ use engram_dashboard_agent::backend::usage_probe_for;
 use engram_dashboard_agent::commands::llm_creation_refusal;
 use engram_dashboard_agent::commands::{store_command_error, store_error_reason};
 use engram_dashboard_agent::failure::AgentFailureKind as CoreFailureKind;
-use engram_dashboard_agent::persistence::{AGENTS_FILE, PRESETS_FILE};
-use engram_dashboard_agent::preset::Preset as CorePreset;
+use engram_dashboard_agent::persistence::AGENTS_FILE;
 use engram_dashboard_agent::profile::StoreError;
 use engram_dashboard_agent::profile::{
     AgentCommand as CoreSpawnCommand, AgentOutputFormat as CoreAgentOutputFormat,
@@ -63,7 +62,7 @@ use engram_dashboard_protocol::{
     AgentSpawnCommand as WireSpawnCommand, Capabilities as WireCaps,
     ControlCaps as WireControlCaps, DeliveredCopy as WireDeliveredCopy, DropCause as WireDropCause,
     EnvelopeFormat as WireEnvelopeFormat, InputCaps as WireInputCaps, ModelCaps as WireModelCaps,
-    OutputCaps as WireOutputCaps, Preset as WirePreset, QueuedInputCancel as WireQueuedInputCancel,
+    OutputCaps as WireOutputCaps, QueuedInputCancel as WireQueuedInputCancel,
     QueuedInputEvent as WireQueuedInputEvent, QueuedInputRow as WireQueuedInputRow,
     RestartPolicy as WireRestartPolicy, RestoreOutcome as WireRestoreOutcome, RestoreReport,
     SessionCaps as WireSessionCaps, SnapshotChunk as WireSnapshotChunk,
@@ -286,10 +285,6 @@ pub(crate) fn dispatch_order(cmd: &AgentCommand) -> DispatchOrder {
         | AgentCommand::RenameProfile { .. }
         | AgentCommand::ReparentProfile { .. }
         | AgentCommand::GetSnapshot { .. }
-        | AgentCommand::ListPresets { .. }
-        | AgentCommand::CreatePreset { .. }
-        | AgentCommand::DeletePreset { .. }
-        | AgentCommand::RenamePreset { .. }
         | AgentCommand::SetEnvelopeFormat { .. }
         | AgentCommand::RegisterCommands { .. }
         | AgentCommand::UpdateCommands { .. }
@@ -787,18 +782,6 @@ fn profile_to_wire(p: &CoreProfile) -> WireProfile {
 
 fn core_profiles_to_wire(profiles: Vec<CoreProfile>) -> Vec<WireProfile> {
     profiles.iter().map(profile_to_wire).collect()
-}
-
-fn preset_to_wire(p: &CorePreset) -> WirePreset {
-    WirePreset {
-        id: p.id,
-        cwd: p.cwd.to_string_lossy().into_owned(),
-        name: p.name.clone(),
-    }
-}
-
-fn core_presets_to_wire(presets: Vec<CorePreset>) -> Vec<WirePreset> {
-    presets.iter().map(preset_to_wire).collect()
 }
 
 fn snapshot_chunk_to_wire(c: &CoreOutputChunk) -> WireSnapshotChunk {
@@ -1803,8 +1786,8 @@ impl ConnectionCore {
                 }
             }
 
-            // ★아래 셋 · 프리셋 셋은 부르는 쪽 있는 판이다★ — 저장소가 받지 않으면 바꾸지 않고 오류로 답하며 브로드캐스트를
-            //   내지 않는다(바뀐 것이 없다).
+            // ★아래 셋은 부르는 쪽 있는 판이다★ — 저장소가 받지 않으면 바꾸지 않고 오류로 답하며 브로드캐스트를 내지
+            //   않는다(바뀐 것이 없다).
             // ADR-0291 R17 (D3)
             AgentCommand::SetProfileAutoRestore {
                 profile_id,
@@ -1916,78 +1899,6 @@ impl ConnectionCore {
                     Err(e) => reply(sink, request_id, Err(e.to_string())),
                 }
             }
-
-            // ── 프리셋 CRUD(ADR-0061) ──────────────────────────────────────────────
-            AgentCommand::ListPresets { request_id } => {
-                let _ = sink.enqueue(Outbound::event(AgentEvent::PresetList {
-                    request_id,
-                    presets: core_presets_to_wire(manager.presets().list()),
-                }));
-            }
-
-            AgentCommand::CreatePreset { cwd, request_id } => {
-                match manager.presets().try_create(std::path::PathBuf::from(cwd)) {
-                    Ok(_) => {
-                        reply(sink, request_id, Ok(()));
-                        broadcast_preset_list(fanout, manager);
-                    }
-                    Err(error) => reply(
-                        sink,
-                        request_id,
-                        Err(store_error_text(
-                            conn_id,
-                            "CreatePreset",
-                            PRESETS_FILE,
-                            "the preset was not created",
-                            &error,
-                        )),
-                    ),
-                }
-            }
-
-            AgentCommand::DeletePreset {
-                preset_id,
-                request_id,
-            } => match manager.presets().try_remove(preset_id) {
-                Ok(()) => {
-                    reply(sink, request_id, Ok(()));
-                    broadcast_preset_list(fanout, manager);
-                }
-                Err(error) => reply(
-                    sink,
-                    request_id,
-                    Err(store_error_text(
-                        conn_id,
-                        "DeletePreset",
-                        PRESETS_FILE,
-                        &format!("preset {preset_id} was not deleted"),
-                        &error,
-                    )),
-                ),
-            },
-
-            // 없는 id 는 오류가 아니라 `Ack` 다(`Ok(false)` — 바꾼 것이 없을 뿐이다).
-            AgentCommand::RenamePreset {
-                preset_id,
-                name,
-                request_id,
-            } => match manager.presets().try_rename(preset_id, name) {
-                Ok(_) => {
-                    reply(sink, request_id, Ok(()));
-                    broadcast_preset_list(fanout, manager);
-                }
-                Err(error) => reply(
-                    sink,
-                    request_id,
-                    Err(store_error_text(
-                        conn_id,
-                        "RenamePreset",
-                        PRESETS_FILE,
-                        &format!("preset {preset_id} was not renamed"),
-                        &error,
-                    )),
-                ),
-            },
 
             AgentCommand::SetEnvelopeFormat { format, request_id } => {
                 // broadcast 하지 않는다 — 전역 상태는 다음 메시지에서 관측되지 목록 push 대상이 아니다.
@@ -2512,16 +2423,6 @@ fn broadcast_agent_list(fanout: &dyn FrameFanout, manager: &Arc<AgentManager>) {
     }
 }
 
-/// ★create/delete 는 반드시 이 broadcast 로 이어진다★(안 그러면 다른 창이 stale — ADR-0061 불변식).
-fn broadcast_preset_list(fanout: &dyn FrameFanout, manager: &Arc<AgentManager>) {
-    let ev = AgentEvent::PresetListUpdated {
-        presets: core_presets_to_wire(manager.presets().list()),
-    };
-    if let Some(text) = event_json(&ev) {
-        fanout.broadcast_text(text);
-    }
-}
-
 /// `Subscribe` 거절 통보([`AgentEvent::SubscribeFailed`])를 낸다 — 부르는 자리는 [`ConnectionCore::handle_subscribe`]
 /// 의 거절 지점 하나, `subscribe_from` 의 `Err` 갈래뿐이다(없는 에이전트도 거기로 온다).
 /// ★그 앞에 에이전트 존재를 따로 묻는 선조회 거절을 되살리지 말 것★ — 선조회는 화신 표식을 replay 와
@@ -2953,8 +2854,8 @@ mod tests {
     const STORE_REFUSES: u8 = 1;
     const STORE_FAILS_IO: u8 = 2;
 
-    /// 저장소 결말을 바꾸는 조립 — 스위치([`STORE_SAVES`] · [`STORE_REFUSES`] · [`STORE_FAILS_IO`])가 두
-    /// 저장소(프로필 · 프리셋)에 함께 걸린다. 팬아웃 기록과 그 스위치를 함께 돌려준다.
+    /// 저장소 결말을 바꾸는 조립 — 스위치([`STORE_SAVES`] · [`STORE_REFUSES`] · [`STORE_FAILS_IO`])가 프로필
+    /// 저장소에 걸린다. 팬아웃 기록과 그 스위치를 함께 돌려준다.
     // ADR-0291 R17
     fn test_core_refusable() -> (
         ConnectionCore,
@@ -2970,7 +2871,7 @@ mod tests {
         (core, fanout, refusing)
     }
 
-    /// [`test_core_built`] 의 본체 — `refusing` 이 [`STORE_SAVES`] 가 아닌 동안 두 저장소가 저장에 실패한다.
+    /// [`test_core_built`] 의 본체 — `refusing` 이 [`STORE_SAVES`] 가 아닌 동안 프로필 저장소가 저장에 실패한다.
     fn test_core_on_stores(
         deliveries: CommandDeliveries,
         locals: &dyn Fn(&Arc<AgentManager>, &MultiViewState) -> Arc<dyn LocalCommands>,
@@ -2980,7 +2881,6 @@ mod tests {
         watch::Receiver<bool>,
         Arc<crate::test_doubles::RecordingFanout>,
     ) {
-        use engram_dashboard_agent::preset::{PresetRegistry, PresetStore};
         use engram_dashboard_agent::profile::{ProfileRegistry, ProfileStore, Refusal};
         use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 
@@ -3011,40 +2911,19 @@ mod tests {
             }
         }
 
-        #[derive(Default)]
-        struct MemPresetStore {
-            saved: StdMutex<Vec<engram_dashboard_agent::preset::Preset>>,
-            refusing: Arc<AtomicU8>,
-        }
-        impl PresetStore for MemPresetStore {
-            fn save(&self, p: &[engram_dashboard_agent::preset::Preset]) -> Result<(), StoreError> {
-                refused(&self.refusing)?;
-                *self.saved.lock().unwrap() = p.to_vec();
-                Ok(())
-            }
-            fn load(&self) -> Vec<engram_dashboard_agent::preset::Preset> {
-                self.saved.lock().unwrap().clone()
-            }
-        }
-
         let recording = Arc::new(crate::test_doubles::RecordingFanout::new());
         let fanout: Arc<dyn FrameFanout> = recording.clone();
         let store: Arc<dyn ProfileStore> = Arc::new(MemStore {
-            refusing: refusing.clone(),
-            ..MemStore::default()
-        });
-        let preset_store: Arc<dyn PresetStore> = Arc::new(MemPresetStore {
             refusing,
-            ..MemPresetStore::default()
+            ..MemStore::default()
         });
         let status_sink = Arc::new(crate::status_fanout::DaemonStatusSink::new(fanout.clone()));
         let profiles = Arc::new(ProfileRegistry::new(store));
-        let presets = Arc::new(PresetRegistry::new(preset_store));
         let tracker = Arc::new(SessionTracker::new(
             TrackerConfig::default(),
             Arc::new(|_aid, _sid| {}),
         ));
-        let manager = Arc::new(AgentManager::new(status_sink, profiles, presets, tracker));
+        let manager = Arc::new(AgentManager::new(status_sink, profiles, tracker));
         let manager_for_locals = manager.clone();
         let multiview = MultiViewState::new();
         let locals = locals(&manager_for_locals, &multiview);
@@ -6366,13 +6245,11 @@ mod tests {
         assert!(fanout.texts().len() > before, "저장되면 명부를 민다");
     }
 
-    /// ★저장소가 받지 않은 명부 · 프리셋 변경은 전부 오류로 답하고 브로드캐스트를 내지 않는다(D3)★ — 바뀐 것이
-    ///   없다. 문구는 코드(`CONFLICT` — 버스와 같은 나눔)와 받지 않은 파일(`agents.json` · `presets.json`)을 댄다.
-    ///   프리셋 셋도 저장소가 받아야만 `Ack` 다.
+    /// ★저장소가 받지 않은 명부 변경은 전부 오류로 답하고 브로드캐스트를 내지 않는다(D3)★ — 바뀐 것이 없다. 문구는
+    ///   코드(`CONFLICT` — 버스와 같은 나눔)와 받지 않은 파일(`agents.json`)을 댄다.
     // ADR-0291 R17 (D3)
     #[tokio::test]
-    async fn every_ws_roster_or_preset_change_the_store_refuses_answers_an_error_and_broadcasts_nothing(
-    ) {
+    async fn every_ws_roster_change_the_store_refuses_answers_an_error_and_broadcasts_nothing() {
         let (core, fanout, refusing) = test_core_refusable();
         let session = ConnectionSession::new(1);
         let alpha = unlaunchable_profile("alpha");
@@ -6383,11 +6260,6 @@ mod tests {
         core.manager
             .try_create_agent(lead.clone())
             .expect("저장되면 등록");
-        let preset = core
-            .manager
-            .presets()
-            .try_create(std::env::temp_dir())
-            .expect("저장되면 프리셋");
         let profiles = || {
             let mut rows: Vec<_> = core
                 .manager
@@ -6398,18 +6270,7 @@ mod tests {
             rows.sort();
             rows
         };
-        let presets = || {
-            let mut rows: Vec<_> = core
-                .manager
-                .presets()
-                .list()
-                .into_iter()
-                .map(|p| (p.id, p.name))
-                .collect();
-            rows.sort();
-            rows
-        };
-        let (profiles_before, presets_before) = (profiles(), presets());
+        let profiles_before = profiles();
         refusing.store(STORE_REFUSES, Ordering::SeqCst);
         let before = fanout.texts().len();
         let temp = std::env::temp_dir().to_string_lossy().into_owned();
@@ -6420,7 +6281,7 @@ mod tests {
                 "agents.json",
                 AgentCommand::CreateProfile {
                     name: "new".into(),
-                    cwd: temp.clone(),
+                    cwd: temp,
                     extra_args: vec![],
                     env: vec![],
                     auto_restore: false,
@@ -6456,31 +6317,6 @@ mod tests {
                     request_id: rid(),
                 },
             ),
-            (
-                "CreatePreset",
-                "presets.json",
-                AgentCommand::CreatePreset {
-                    cwd: temp.clone(),
-                    request_id: rid(),
-                },
-            ),
-            (
-                "DeletePreset",
-                "presets.json",
-                AgentCommand::DeletePreset {
-                    preset_id: preset.id,
-                    request_id: rid(),
-                },
-            ),
-            (
-                "RenamePreset",
-                "presets.json",
-                AgentCommand::RenamePreset {
-                    preset_id: preset.id,
-                    name: Some("renamed".into()),
-                    request_id: rid(),
-                },
-            ),
         ];
         for (label, file, cmd) in cases {
             let (tx, _rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
@@ -6500,7 +6336,6 @@ mod tests {
 
         assert_eq!(fanout.texts().len(), before, "브로드캐스트 0");
         assert_eq!(profiles(), profiles_before, "명부 그대로");
-        assert_eq!(presets(), presets_before, "프리셋 그대로");
     }
 
     /// ★WS 활성화는 저장 거절이어도 프로필 목록을 민다(E2)★ — 활성화 실패가 그 항목의 「마지막 실패」를 적고, 그

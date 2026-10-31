@@ -24,7 +24,6 @@ use crate::backend;
 use crate::failure::AgentFailureKind;
 use crate::inputs_pending::InputsPendingTable;
 use crate::output_core::{OutputCore, QueuedWiring, TurnWiring};
-use crate::preset::PresetRegistry;
 use crate::profile::{
     AgentCommand, AgentProfile, ProfileRegistry, RestoreOutcome, RestoreReport, SpawnMode,
     StoreError, StoreStatus,
@@ -648,9 +647,6 @@ pub struct AgentManager {
     status_sink: Arc<dyn StatusSink>,
     // 프로필 단일 소유자.
     profiles: Arc<ProfileRegistry>,
-    // ADR-0061: 프리셋(cwd 북마크) 단일 소유자. 프로필과 동일하게 데몬이 보유(유저 데이터 단일 소유,
-    // ADR-0029)한다. reaper 는 프리셋을 안 보므로(에이전트 수명과 무관) manager 필드로만 둔다.
-    presets: Arc<PresetRegistry>,
     tracker: Arc<SessionTracker>,
 
     // ── ADR-0019 reaper ──────────────────────────────────────
@@ -792,16 +788,9 @@ impl AgentManager {
     pub fn new(
         status_sink: Arc<dyn StatusSink>,
         profiles: Arc<ProfileRegistry>,
-        presets: Arc<PresetRegistry>,
         tracker: Arc<SessionTracker>,
     ) -> Self {
-        Self::new_with_control(
-            status_sink,
-            profiles,
-            presets,
-            tracker,
-            Arc::new(NoopControlChannel),
-        )
+        Self::new_with_control(status_sink, profiles, tracker, Arc::new(NoopControlChannel))
     }
 
     /// 제어 채널 주입형(ADR-0086) — 데몬이 `DaemonControlChannel` 을 끼운다. reaper 도 같은 Arc 를
@@ -809,7 +798,6 @@ impl AgentManager {
     pub fn new_with_control(
         status_sink: Arc<dyn StatusSink>,
         profiles: Arc<ProfileRegistry>,
-        presets: Arc<PresetRegistry>,
         tracker: Arc<SessionTracker>,
         control: Arc<dyn ControlChannel>,
     ) -> Self {
@@ -829,7 +817,6 @@ impl AgentManager {
             sessions,
             status_sink,
             profiles,
-            presets,
             tracker,
             shutting_down: Arc::new(AtomicBool::new(false)),
             reaper_tx,
@@ -850,11 +837,7 @@ impl AgentManager {
         self.inputs_pending.clone()
     }
 
-    pub fn presets(&self) -> &Arc<PresetRegistry> {
-        &self.presets
-    }
-
-    /// 에이전트 명부 저장소(agents.json)의 지금 상태. 프리셋 쪽은 [`AgentManager::presets`] 로 본다.
+    /// 에이전트 명부 저장소(agents.json)의 지금 상태.
     // ADR-0291 R17 (D6)
     pub fn agents_store_status(&self) -> StoreStatus {
         self.profiles.store_status()
@@ -3614,7 +3597,7 @@ mod tests {
     //   in-crate 테스트라 private `sessions` 에 직접 접근한다 — `insert_test_session`(feature gate) 불요.
 
     use crate::backend::InputEncoder;
-    use crate::persistence::{FilePresetStore, FileProfileStore};
+    use crate::persistence::FileProfileStore;
     use crate::transport::AgentTransport;
     use crate::types::{
         BackendCaps, ControlCaps, InputCaps, InputEvent, ModelCaps, OutputCaps, SessionCaps,
@@ -3723,9 +3706,6 @@ mod tests {
         let profiles = Arc::new(crate::profile::ProfileRegistry::new(Arc::new(
             FileProfileStore::new(std::env::temp_dir().join(format!("engram-epoch-w-{tag}"))),
         )));
-        let presets = Arc::new(PresetRegistry::new(Arc::new(FilePresetStore::new(
-            std::env::temp_dir().join(format!("engram-epoch-w-preset-{tag}")),
-        ))));
         let tracker = Arc::new(SessionTracker::new(
             crate::session_tracker::TrackerConfig {
                 enabled: false,
@@ -3733,7 +3713,7 @@ mod tests {
             },
             Arc::new(|_, _| {}),
         ));
-        AgentManager::new_with_control(Arc::new(NoopStatus), profiles, presets, tracker, control)
+        AgentManager::new_with_control(Arc::new(NoopStatus), profiles, tracker, control)
     }
 
     /// 같은 id 재삽입 = 재시작(incarnation 교체) 모사.
@@ -5268,13 +5248,9 @@ mod tests {
                 self.0.lock().expect("mem store poisoned").clone()
             }
         }
-        let tag = uuid::Uuid::new_v4();
         let profiles = Arc::new(crate::profile::ProfileRegistry::new(Arc::new(
             MemStore::default(),
         )));
-        let presets = Arc::new(PresetRegistry::new(Arc::new(FilePresetStore::new(
-            std::env::temp_dir().join(format!("engram-cap-preset-{tag}")),
-        ))));
         let tracker = Arc::new(SessionTracker::new(
             crate::session_tracker::TrackerConfig {
                 enabled: false,
@@ -5282,7 +5258,7 @@ mod tests {
             },
             Arc::new(|_, _| {}),
         ));
-        AgentManager::new(Arc::new(NoopStatus), profiles, presets, tracker)
+        AgentManager::new(Arc::new(NoopStatus), profiles, tracker)
     }
 
     /// 상한 직전까지 채운다. 유일성 배정을 거치지 않는 seam 을 쓰는 이유는 속도뿐이다(정상 경로로 채우면
@@ -6905,9 +6881,6 @@ mod tests {
     fn scripted_manager() -> (AgentManager, Arc<ScriptedStore>) {
         let store = ScriptedStore::new();
         let profiles = Arc::new(crate::profile::ProfileRegistry::new(store.clone()));
-        let presets = Arc::new(PresetRegistry::new(Arc::new(FilePresetStore::new(
-            std::env::temp_dir().join(format!("engram-store-refusal-preset-{}", Uuid::new_v4())),
-        ))));
         let tracker = Arc::new(SessionTracker::new(
             crate::session_tracker::TrackerConfig {
                 enabled: false,
@@ -6915,7 +6888,7 @@ mod tests {
             },
             Arc::new(|_, _| {}),
         ));
-        let manager = AgentManager::new(Arc::new(NoopStatus), profiles, presets, tracker);
+        let manager = AgentManager::new(Arc::new(NoopStatus), profiles, tracker);
         (manager, store)
     }
 

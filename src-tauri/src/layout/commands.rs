@@ -91,6 +91,9 @@ use crate::theme::{ThemeControl, ThemeError, UiTheme, WindowTheme};
 //   `window.setTheme`·`window.getTheme`(화면에는 테마를 바꾸는 UI 가 없다 — TRD S21-storage §10 F7) ·
 //   `split.setRatio`·`split.list`(화면의 구분선 드래그는 Tauri `set_split_ratio` 를 직접 부르고 레지스트리에
 //   이름을 싣지 않는다 — ADR-0227).
+// ★세대 22 = 슬롯 종류 `PresetPalette` 가 빠진 세대★(TRD S25-preset-library §5-2 1 · ADR-0314 결정 5) —
+//   `layout.setSlotContent` 의 `content` 가 그 낱말을 받지 않고 `layout.get` 줄의 `content` 가 그 낱말을 내지 않는다.
+//   이름 · 인자 칸은 그대로다.
 // ★세대 21 = LLM 레이아웃 명령의 세대★(TRD S28 §4 · §7 · ADR-0307) — 에이전트 이름 · 공간 낱말로 탭 · 칸을 고르고 바꾼
 //   뒤의 배치를 답에 싣는다. 이름이 넷 늘었고(`tab.move` · `tab.dock` · `tab.detach` · `layout.get`), 칸 동사(`slot.focus` ·
 //   `slot.close` · `slot.split` · `slot.popout` · `slot.assignAgent` · `layout.setSlotContent`)가 `slot_of` · `at` · `window`
@@ -147,7 +150,7 @@ use crate::theme::{ThemeControl, ThemeError, UiTheme, WindowTheme};
 //   ★wire 프로토콜 판(`engram_dashboard_protocol::PROTOCOL_VERSION`)과 다른 번호다★ — 그쪽은 프레임 계약이고
 //   이쪽은 이 crate 의 어휘 세대다. 하나를 올린다고 다른 하나가 따라 올라가지 않는다.
 declare_commands! {
-    catalog_version: 21;
+    catalog_version: 22;
 
     /// 탭 바 한 칸 — `name` = 보이는 이름 · `named` = 이름을 정했나(거짓이면 `name` 은 포커스 칸 내용을 따라 바뀐다).
     struct TabRow {
@@ -171,7 +174,6 @@ declare_commands! {
         Empty,
         Agent,
         AgentList,
-        PresetPalette,
         Usage,
     }
 
@@ -246,7 +248,6 @@ declare_commands! {
         Empty,
         Agent,
         AgentList,
-        PresetPalette,
         Usage,
         Unknown,
     }
@@ -944,8 +945,8 @@ declare_commands! {
     /// 배치를 칸마다 한 줄로 읽는다 — 창 번호 순 → 탭 줄 순 → 탭 안 칸 순. window(window_id 또는 같은 실행 안 label ·
     /// 번호는 받지 않는다)를 주면 그 창만, agent(이름 또는 id)를 주면 그 에이전트가 든 칸만(어느 칸에도 없으면 빈 목록).
     /// 줄 = window · window_number · tab_index(그 창 탭 줄 자리 · 0 부터 — (window, tab_index) 가 같은 탭의 줄을 묶는
-    /// 열쇠) · tab_name · tab_active(그 창에 보이는 탭) · content(Empty · Agent · AgentList · PresetPalette · Usage ·
-    /// Unknown) · agent(표시 이름 — 모르면 빠진다) · focused(그 탭 안의 포커스 칸 — 창 · OS 포커스가 아니다) · x · y · w ·
+    /// 열쇠) · tab_name · tab_active(그 창에 보이는 탭) · content(Empty · Agent · AgentList · Usage · Unknown) ·
+    /// agent(표시 이름 — 모르면 빠진다) · focused(그 탭 안의 포커스 칸 — 창 · OS 포커스가 아니다) · x · y · w ·
     /// h(탭 안 정규 좌표 0~1 — 왼쪽 위가 0,0).
     /// ids = true 면 window_id · tab(다른 명령이 view_id 라 부르는 그 탭 id) · slot_id · agent_id 도 싣는다(기본은 빠진다 —
     /// 칸은 에이전트 이름 · 공간 낱말로 부른다). 그런 에이전트 이름이 없으면 NOT_FOUND · 이름이 둘 이상이면 CONFLICT(문구 끝
@@ -2886,7 +2887,6 @@ fn row_of(row: rows::LayoutRow, ids: bool) -> LayoutRow {
             rows::SlotKind::Empty => SlotKind::Empty,
             rows::SlotKind::Agent => SlotKind::Agent,
             rows::SlotKind::AgentList => SlotKind::AgentList,
-            rows::SlotKind::PresetPalette => SlotKind::PresetPalette,
             rows::SlotKind::Usage => SlotKind::Usage,
             rows::SlotKind::Unknown => SlotKind::Unknown,
         },
@@ -3040,9 +3040,6 @@ fn slot_content(
         }
         (SlotContentKind::Empty, None) => SlotContentWrite::Replace(SlotContent::Empty),
         (SlotContentKind::AgentList, None) => SlotContentWrite::Replace(SlotContent::AgentList),
-        (SlotContentKind::PresetPalette, None) => {
-            SlotContentWrite::Replace(SlotContent::PresetPalette)
-        }
     };
     if shows {
         return Err(CommandError::invalid_argument(

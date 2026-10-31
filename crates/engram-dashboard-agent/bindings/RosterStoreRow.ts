@@ -2,6 +2,6 @@
 import type { StoreStatusRow } from "./StoreStatusRow";
 
 /**
- * 명부 저장소 둘 — `agents`(agents.json · 에이전트 명부) · `presets`(presets.json · 경로 북마크).
+ * 명부 저장소 — `agents`(agents.json · 에이전트 명부).
  */
-export type RosterStoreRow = { agents: StoreStatusRow, presets: StoreStatusRow, };
+export type RosterStoreRow = { agents: StoreStatusRow, };

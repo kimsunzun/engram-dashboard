@@ -8,10 +8,10 @@
 //! statusGlyphIcon 으로 모양을 고른다. ◐(입력대기)는 어휘로만 정의(백엔드 신호 없어 절대 점등 안 함).
 //!
 //! ★표시명 = display_name override ?? cwd basename(프론트 파생, ADR-0061 리치화)★: 프로필 표시명 override
-//! (display_name)가 있으면 그대로, 없으면 cwd 의 마지막 세그먼트를 쓴다(공용 basename 유틸 — PresetPalette
-//! 표시명과 단일 출처). cwd 미노출(요구: name 만, cwd 표시 안 함).
+//! (display_name)가 있으면 그대로, 없으면 cwd 의 마지막 세그먼트를 쓴다(공용 basename 유틸). cwd 미노출(요구: name 만,
+//! cwd 표시 안 함).
 //!
-//! ★행(ROW) 우클릭 메뉴만 소유(ADR-0064)★: 옛 pane 배경 메뉴("에이전트 생성" 프리셋 픽커) + pane
+//! ★행(ROW) 우클릭 메뉴만 소유(ADR-0064)★: 옛 pane 배경 메뉴 + pane
 //! stopPropagation 은 제거됐다 — pane 배경 우클릭은 상위 통합 슬롯 메뉴로 버블(agent_list 전용
 //! "에이전트 생성" = agentlist.createAgent command + 공통 슬롯 ops). 행 우클릭만 stopPropagation 으로
 //! 가로채 item-targeted 메뉴(활성화/열기/종료/이름변경/삭제)를 띄운다(VS Code view/item/context 결).
@@ -59,7 +59,7 @@ export default function AgentList() {
   //   둬 트리가 첫 렌더부터 행을 그린다(옛 AgentTree 동형 — 테스트가 data-agent-row 를 관측).
   const treeContainerRef = useRef<HTMLDivElement>(null)
   const [dimensions, setDimensions] = useState({ width: 240, height: 400 })
-  // ★ref = 권위적 double-fire 가드, state(busyIds) = 시각(disabled/opacity)★ (PresetPalette 패턴 동형):
+  // ★ref = 권위적 double-fire 가드, state(busyIds) = 시각(disabled/opacity)★:
   //   useState 가드만으로는 re-render commit 전 두 번째 호출이 stale closure 로 busyIds 를 아직 비어있게 읽어
   //   둘 다 통과하는 창이 있다(빠른 더블클릭). ref 는 동기 mutable 이라 같은 tick 두 번째 호출도 즉시 차단한다.
   //   그래서 busyRef 가 실제 중복 발화를 막고, busyIds(state)는 순수 시각 표시(disabled/opacity)로만 병행한다.
@@ -196,7 +196,7 @@ export default function AgentList() {
   }
 
   // "열기" = 이 에이전트를 이 창 활성 뷰의 대상 슬롯에 배정(기존 assign 경로 재사용 — AgentTree 와 동일).
-  //   ★대상 슬롯 = selectOpenTarget(순수 함수)★: 기본은 포커스 슬롯이지만, 포커스가 제어 슬롯(트리/팔레트)·모르는
+  //   ★대상 슬롯 = selectOpenTarget(순수 함수)★: 기본은 포커스 슬롯이지만, 포커스가 제어 슬롯(트리 등)·모르는
   //   내용 슬롯이거나 focus=null 인 엣지 상태에선 그것을 덮어쓰지 않고 첫 빈 슬롯으로 폴백한다(제어 슬롯 포커스 제외 —
   //   LayoutLeaf click-to-focus 게이트의 안전망). 빈 슬롯도 없으면 배정 안 함(실패 토스트 — 클로버 금지).
   const openInFocusedSlot = (agentId: string) => {
@@ -272,8 +272,8 @@ export default function AgentList() {
       .finally(() => endInFlight(childId))
   }
 
-  // 표시명 = display_name override ?? cwd basename(ADR-0061 리치화 — 트리 rename). PresetPalette 와 동일
-  //   precedence(override 우선, 없으면 basename 파생). rename 시작·확정 시 이 값을 draft 시드/미변경 판정에 쓴다.
+  // 표시명 = display_name override ?? cwd basename(ADR-0061 리치화 — 트리 rename). rename 시작·확정 시 이 값을
+  //   draft 시드/미변경 판정에 쓴다.
   const displayNameOf = (node: AgentTreeNode): string => node.displayName ?? basename(node.cwd)
 
   // 행 메뉴는 호출부에서 닫는다.
@@ -541,7 +541,7 @@ export default function AgentList() {
   }
 
   return (
-    // ★구조 = 라벨(고정) 바깥 + 트리만 아래 영역★(PresetPalette/AgentMonitoringPicker 동형, ADR-0053):
+    // ★구조 = 라벨(고정) 바깥 + 트리만 아래 영역★(AgentMonitoringPicker 동형, ADR-0053):
     //   라벨은 스크롤 밖 flex 형제로 올려 상단 고정. react-arborist(react-window)는 자기 가상화 스크롤을
     //   소유하므로 ScrollArea 로 감싸지 않는다(스크롤 소유 충돌 회피 — 옛 flat 목록과 다른 점).
     //   ★pane 배경 마커 = 이 바깥 flex 컨테이너(data-agent-list)★: pane 배경 우클릭은 상위 통합 슬롯 메뉴로

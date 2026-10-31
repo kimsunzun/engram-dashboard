@@ -13,8 +13,7 @@ use uuid::Uuid;
 use engram_dashboard_agent::backend::{AgentBackend, ShellBackend};
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::output_core::{OutputCore, TurnWiring};
-use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
-use engram_dashboard_agent::preset::PresetRegistry;
+use engram_dashboard_agent::persistence::FileProfileStore;
 use engram_dashboard_agent::profile::{AgentCommand, AgentProfile, ProfileRegistry, SpawnMode};
 use engram_dashboard_agent::reaper::ReaperDeps;
 use engram_dashboard_agent::session::AgentSession;
@@ -59,11 +58,6 @@ fn make_manager(tag: &str) -> (AgentManager, CountingSink, Arc<ProfileRegistry>)
         std::env::temp_dir().join(format!("engram-test-reaper-{tag}-{}", Uuid::new_v4())),
     ));
     let profiles = Arc::new(ProfileRegistry::new(store));
-    let preset_store = Arc::new(FilePresetStore::new(std::env::temp_dir().join(format!(
-        "engram-test-reaper-preset-{tag}-{}",
-        Uuid::new_v4()
-    ))));
-    let presets = Arc::new(PresetRegistry::new(preset_store));
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig {
             enabled: false,
@@ -71,7 +65,7 @@ fn make_manager(tag: &str) -> (AgentManager, CountingSink, Arc<ProfileRegistry>)
         },
         Arc::new(|_, _| {}),
     ));
-    let manager = AgentManager::new(sink_dyn, profiles.clone(), presets, tracker);
+    let manager = AgentManager::new(sink_dyn, profiles.clone(), tracker);
     (manager, sink, profiles)
 }
 

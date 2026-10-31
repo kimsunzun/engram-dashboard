@@ -118,12 +118,12 @@ beforeEach(() => {
   currentViewIdMock.mockReturnValue('main-view')
   // 기본은 「명부 · 프로필 둘 다 받음」 — 미수신 구간은 그 시험이 플래그를 직접 내린다.
   useAgentStore.setState({
-    agents: [], agentsLoaded: true, profiles: [], profilesLoaded: true, presets: [], selectedAgentId: null,
+    agents: [], agentsLoaded: true, profiles: [], profilesLoaded: true, selectedAgentId: null,
   })
 })
 afterEach(() => {
   cleanup()
-  useAgentStore.setState({ agents: [], profiles: [], presets: [], selectedAgentId: null })
+  useAgentStore.setState({ agents: [], profiles: [], selectedAgentId: null })
 })
 
 // ── statusGlyphIcon: 전 분기(pure, ADR-0062) ─────────────────────────────────
@@ -762,7 +762,7 @@ describe('활성화 진행/거절이 행 기호를 몬다(초록 거짓말 회�
 
 // ── ★"열기" 안전망: 제어 슬롯 포커스 제외(selectOpenTarget 통합, ADR-0066 정제)★ ──────────────
 //   click-to-focus 게이트가 앞으로는 포커스를 제어 슬롯에 안 앉히지만, 기존/엣지 백엔드 상태(이미 트리
-//   슬롯이 포커스됐거나 focus=null)에서도 "열기"가 트리/팔레트를 덮지 않고 빈 슬롯으로 폴백해야 한다.
+//   슬롯이 포커스됐거나 focus=null)에서도 "열기"가 제어 슬롯을 덮지 않고 빈 슬롯으로 폴백해야 한다.
 //   빈 슬롯도 없으면 배정 안 함(실패 인라인, 클로버 금지).
 describe('열기 안전망 — 제어 슬롯 포커스 제외(selectOpenTarget)', () => {
   function openRow(agentId: string): void {
@@ -803,14 +803,14 @@ describe('열기 안전망 — 제어 슬롯 포커스 제외(selectOpenTarget)'
     expect(assignAgentMock).toHaveBeenCalledWith('main-view', 'empty', 'a1')
   })
 
-  it('포커스가 팔레트(preset_palette) + 빈 슬롯 없음 → assignAgent 미호출 + 실패 인라인 배지', () => {
+  it('포커스가 사용량 슬롯(usage) + 빈 슬롯 없음 → assignAgent 미호출 + 실패 인라인 배지', () => {
     selectViewMock.mockReturnValue({
       layout: {
         type: 'split', id: 'root', dir: 'left_right', ratio: 0.5,
-        a: { type: 'slot', id: 'palette', content: { type: 'preset_palette' } },
+        a: { type: 'slot', id: 'usage', content: { type: 'usage', show_claude: true, show_codex: true } },
         b: { type: 'slot', id: 'busy', content: { type: 'agent', agent_id: 'other' } },
       },
-      focusedSlotId: 'palette',
+      focusedSlotId: 'usage',
       foreignSlots: [],
     })
     useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
@@ -833,7 +833,7 @@ describe('열기 안전망 — 제어 슬롯 포커스 제외(selectOpenTarget)'
 })
 
 // ── FIX#3: 예약 행 "삭제" → deleteProfile(리그레션 복원) ────────────────────────
-//   메뉴 라벨은 '삭제'(rowCancelReserved — preset.deleteBtn 과 어휘 통일). 동작은 deleteProfile 그대로.
+//   메뉴 라벨은 '삭제'(rowCancelReserved). 동작은 deleteProfile 그대로.
 describe('삭제(deleteProfile, FIX#3)', () => {
   it('예약 행 우클릭 → "삭제" → deleteProfile(id) 호출', () => {
     useAgentStore.setState({ profiles: [profile('p1', 'C:/r')] })

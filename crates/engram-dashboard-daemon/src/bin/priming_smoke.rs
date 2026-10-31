@@ -12,8 +12,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use engram_dashboard_agent::manager::AgentManager;
-use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
-use engram_dashboard_agent::preset::PresetRegistry;
+use engram_dashboard_agent::persistence::FileProfileStore;
 use engram_dashboard_agent::profile::{
     AgentCommand, AgentOutputFormat, AgentProfile, ProfileRegistry, SpawnMode,
 };
@@ -130,13 +129,8 @@ async fn run() -> i32 {
     let sink: Arc<dyn StatusSink> = Arc::new(NoopStatus);
     let profile_dir =
         std::env::temp_dir().join(format!("engram-priming-smoke-prof-{}", AgentId::new_v4()));
-    let preset_dir =
-        std::env::temp_dir().join(format!("engram-priming-smoke-preset-{}", AgentId::new_v4()));
     let profiles = Arc::new(ProfileRegistry::new(Arc::new(FileProfileStore::new(
         profile_dir.clone(),
-    ))));
-    let presets = Arc::new(PresetRegistry::new(Arc::new(FilePresetStore::new(
-        preset_dir.clone(),
     ))));
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig {
@@ -146,7 +140,7 @@ async fn run() -> i32 {
         Arc::new(|_, _| {}),
     ));
     let manager = Arc::new(AgentManager::new_with_control(
-        sink, profiles, presets, tracker, control,
+        sink, profiles, tracker, control,
     ));
     slot.set(manager.clone());
     command_slot.set(Arc::new(
@@ -193,30 +187,14 @@ async fn run() -> i32 {
                 std::thread::sleep(Duration::from_millis(30));
             }
             if !appeared {
-                cleanup(
-                    &manager,
-                    None,
-                    &data_dir,
-                    &workspace,
-                    &profile_dir,
-                    &preset_dir,
-                )
-                .await;
+                cleanup(&manager, None, &data_dir, &workspace, &profile_dir).await;
                 handle.shutdown().await;
                 return skip_no_claude("스폰 후 에이전트가 목록에 안 나타남");
             }
             info
         }
         Err(e) => {
-            cleanup(
-                &manager,
-                None,
-                &data_dir,
-                &workspace,
-                &profile_dir,
-                &preset_dir,
-            )
-            .await;
+            cleanup(&manager, None, &data_dir, &workspace, &profile_dir).await;
             handle.shutdown().await;
             return skip_no_claude(&format!("spawn_agent 실패: {e}"));
         }
@@ -274,7 +252,6 @@ async fn run() -> i32 {
         &data_dir,
         &workspace,
         &profile_dir,
-        &preset_dir,
     )
     .await;
     handle.shutdown().await;
@@ -312,7 +289,6 @@ async fn cleanup(
     data_dir: &std::path::Path,
     workspace: &std::path::Path,
     profile_dir: &std::path::Path,
-    preset_dir: &std::path::Path,
 ) {
     if let Some(id) = agent_id {
         let _ = manager.kill_agent(id);
@@ -324,7 +300,6 @@ async fn cleanup(
     let _ = std::fs::remove_dir_all(data_dir);
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(profile_dir);
-    let _ = std::fs::remove_dir_all(preset_dir);
 }
 
 struct NoopStatus;

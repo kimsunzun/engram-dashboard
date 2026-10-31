@@ -1057,7 +1057,7 @@ pub struct SlotMove {
 // 원본 슬롯을 원본 View 에서 제거한다. agent 프로세스는 안 건드린다 — 표시 표면만 이동한다.
 // `to_window` 미지정 → 새 창(label = 창 포트가 맡긴 예열 창의 것 · 없으면 발급기의 새 것) · 지정 → 그 기존 창의 새 탭.
 //
-// ★ADR-0064 — 모든 슬롯 콘텐츠★: agent 슬롯뿐 아니라 agent_list/preset_palette 와 빈 슬롯(ADR-0228)도
+// ★ADR-0064 — 모든 슬롯 콘텐츠★: agent 슬롯뿐 아니라 agent_list·usage 와 빈 슬롯(ADR-0228)도
 // 옮긴다. 비-에이전트 콘텐츠는 백엔드 출력 구독이 없어 재동기가 자연히 no-op 이다(라우팅은 Agent 슬롯만
 // 훑는다). 거절은 없는 view/slot 뿐이고 그 사유(`LayoutError`)를 그대로 돌려준다.
 //

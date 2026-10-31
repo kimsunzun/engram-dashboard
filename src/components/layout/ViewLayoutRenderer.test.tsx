@@ -47,7 +47,6 @@ const agentStoreState = vi.hoisted(() => ({
   agentsLoaded: false,
   profiles: [] as unknown[],
   profilesLoaded: false,
-  presets: [] as unknown[],
 }))
 vi.mock('../../store/agentStore', () => ({
   useAgentStore: Object.assign(
@@ -56,7 +55,7 @@ vi.mock('../../store/agentStore', () => ({
   ),
 }))
 
-// ── 네이티브 폴더 다이얼로그 stub(ADR-0064) — slot.createAgentHere / preset.add / agentlist.createAgent 가
+// ── 네이티브 폴더 다이얼로그 stub(ADR-0064) — slot.createAgentHere / agentlist.createAgent 가
 //    @tauri-apps/plugin-dialog open 을 부른다. 테스트마다 반환(경로/null)을 갈아끼운다. ──
 const dialogMock = vi.hoisted(() => ({ open: vi.fn(async () => null as string | null) }))
 vi.mock('@tauri-apps/plugin-dialog', () => ({
@@ -85,10 +84,6 @@ vi.mock('../slot/DomSlot', () => ({
   ),
 }))
 
-// ── PresetPalette stub(ADR-0060/0061) — 프리셋 CRUD 배선 없이 preset_palette variant 마운트 여부만 확인 ──
-vi.mock('../slot/PresetPalette', () => ({
-  default: () => <div data-testid="preset-palette" />,
-}))
 // ── UsageSlot stub — usage variant 마운트 여부와 내려보낸 켜고 끔·슬롯 좌표만 확인(화면은 UsageSlot.test 담당) ──
 vi.mock('../slot/UsageSlot', () => ({
   default: ({
@@ -298,20 +293,12 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     expect(overlay).toBeUndefined()
   })
 
-  // ── ADR-0060/0061/0062: preset_palette·agent_list variant → 각 실 렌더러 마운트(hasContent=true) ──
-  it('content.type=preset_palette slot → PresetPalette 가 마운트된다', () => {
-    render(<ViewLayoutRenderer node={contentSlotNode('s1', { type: 'preset_palette' })} focusedSlotId={null} />)
-    expect(screen.getByTestId('preset-palette')).toBeTruthy()
-    // 프리셋 팔레트는 실 콘텐츠(hasContent=true) — 중앙정렬 flex 가 없어야 팔레트 레이아웃이 안 깨진다.
-    //   정렬은 테두리 요소가 진다(ADR-0227) — 겨냥이 맞는지는 아래 빈 슬롯 양성 짝이 지킨다.
-    expect(borderOf('s1').style.justifyContent).not.toBe('center')
-    expect(borderOf('s1').style.overflow).toBe('hidden')
-  })
-
+  // ── ADR-0060/0062: agent_list variant → 실 렌더러 마운트(hasContent=true) ──
   it('content.type=agent_list slot(Slice C) → AgentList 가 마운트된다(hasContent=true)', () => {
     render(<ViewLayoutRenderer node={contentSlotNode('s1', { type: 'agent_list' })} focusedSlotId={null} />)
     expect(screen.getByTestId('agent-list')).toBeTruthy()
     // empty 플레이스홀더가 아니라 실 렌더러 — 중앙정렬 flex 없어야 목록 레이아웃이 안 깨진다.
+    //   정렬은 테두리 요소가 진다(ADR-0227) — 겨냥이 맞는지는 아래 빈 슬롯 양성 짝이 지킨다.
     expect(emptyIcons()).toHaveLength(0)
     expect(borderOf('s1').style.justifyContent).not.toBe('center')
     expect(borderOf('s1').style.overflow).toBe('hidden')
@@ -817,7 +804,7 @@ describe('ViewLayoutRenderer — split 분기(셸 사각형)', () => {
 })
 
 // ── ★click-to-focus 게이트(제어 슬롯 포커스 제외 — ADR-0066 정제)★ ─────────────────────────────
-// ★이 스위트가 막는 것★: 트리(agent_list)·팔레트(preset_palette) 슬롯 pane 클릭이 focusSlot 을 부르면
+// ★이 스위트가 막는 것★: 트리(agent_list) 등 제어 슬롯 pane 클릭이 focusSlot 을 부르면
 // 안 된다(작업 슬롯이 아니라 포커스 대상 아님). 이어지는 우클릭 "열기"가 그 제어 슬롯을 대상으로 잡아
 // 트리를 에이전트 터미널로 덮어쓰던 선존 UX 버그의 뿌리. 콘텐츠 슬롯(empty/agent)은 기존대로 focusSlot 호출.
 //
@@ -880,11 +867,6 @@ describe('ViewLayoutRenderer — click-to-focus 게이트(제어 슬롯 포커�
     expect(focusSlotSpy).not.toHaveBeenCalled()
   })
 
-  it('preset_palette(팔레트) 슬롯 클릭 → focusSlot 미호출(제어 슬롯 = 포커스 제외)', () => {
-    clickSlot({ type: 'preset_palette' })
-    expect(focusSlotSpy).not.toHaveBeenCalled()
-  })
-
   // 포커스 게이트는 allowlist(isContentSlot)라 새 variant 는 따로 빼지 않아도 제외된다.
   it('usage(사용량) 슬롯 클릭 → focusSlot 미호출', () => {
     clickSlot({ type: 'usage', show_claude: true, show_codex: true })
@@ -895,7 +877,7 @@ describe('ViewLayoutRenderer — click-to-focus 게이트(제어 슬롯 포커�
 // ── ★우클릭 통합 컨텍스트 메뉴(§5, ADR-0064)★ ─────────────────────────────────────────────────
 // ★이 스위트가 실제로 막는 것★: 캔버스 슬롯 우클릭 → 통합 SlotContextMenu 마운트(buildSlotMenu(content.type)
 // 산출) + 각 항목 클릭이 그 command.run(ctx) 를 통해 viewStore/agentClient 로 (viewId, slotId, agentId)를
-// 흘리는지. 메뉴 항목 = command id 참조(ADR-0064) — 콘텐츠 전용(에이전트 종료·트리/팔레트 열기·생성) +
+// 흘리는지. 메뉴 항목 = command id 참조(ADR-0064) — 콘텐츠 전용(에이전트 종료·트리 열기·생성) +
 // 공통 '*'(가로/세로 분할·팝업 분리·비우기·닫기)가 한 메뉴에 공존한다.
 //
 // 전략: split/closeSlot/assignAgent/setSlotContent/moveSlotToWindow 를 real viewStore 에 spy 로 주입한다
@@ -982,7 +964,7 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(screen.queryByText('에이전트 트리 열기')).toBeNull()
     openNewContentFlyout()
     expect(screen.getByText('에이전트 트리 열기')).toBeTruthy()
-    expect(screen.getByText('프리셋 팔레트 열기')).toBeTruthy()
+    expect(screen.getByText('사용량 한도 열기')).toBeTruthy()
     // ADR-0067: "에이전트 생성"은 서브메뉴에서 제거됐다(스폰 = 트리 소관).
     expect(screen.queryByText('에이전트 생성')).toBeNull()
   })
@@ -1090,9 +1072,9 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(splitSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-lc2', 'top_bottom')
   })
 
-  // ★좌클릭은 어느 슬롯 타입도 메뉴를 열지 않는다(ADR-0144)★: 터미널 입력·트리 노드 선택·팔레트 항목
+  // ★좌클릭은 어느 슬롯 타입도 메뉴를 열지 않는다(ADR-0144)★: 터미널 입력·트리 노드 선택
   //   클릭 위에 메뉴가 뜨면 그 슬롯들이 가진 자기 클릭 의미를 덮는다. 빈 슬롯도 이제 같은 규칙이고(그
-  //   케이스는 focusSlot 과 함께 위 click-to-focus 게이트 스위트가 검증한다) 아래 세 케이스는 제어
+  //   케이스는 focusSlot 과 함께 위 click-to-focus 게이트 스위트가 검증한다) 아래 두 케이스는 제어
   //   슬롯 몫이다('가로 분할'은 콘텐츠 종류와 무관한 공통 항목이라 "메뉴가 떴는지"의 판별자로 쓴다).
   it('agent(터미널) 슬롯 좌클릭은 메뉴를 열지 않는다', () => {
     seedAgents(agentInfo('a-lc', false))
@@ -1104,14 +1086,6 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
   it('agent_list(트리) 슬롯 좌클릭은 메뉴를 열지 않는다', () => {
     render(<ViewLayoutRenderer node={contentSlotNode('slot-tree-lc', { type: 'agent_list' })} focusedSlotId={null} />)
     leftClickSlot('slot-tree-lc', 20, 30)
-    expect(screen.queryByText('가로 분할')).toBeNull()
-  })
-
-  it('preset_palette(팔레트) 슬롯 좌클릭은 메뉴를 열지 않는다', () => {
-    render(
-      <ViewLayoutRenderer node={contentSlotNode('slot-pal-lc', { type: 'preset_palette' })} focusedSlotId={null} />,
-    )
-    leftClickSlot('slot-pal-lc', 20, 30)
     expect(screen.queryByText('가로 분할')).toBeNull()
   })
 
@@ -1141,13 +1115,6 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     openNewContentFlyout()
     fireEvent.click(screen.getByText('에이전트 트리 열기'))
     expect(setSlotContentSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-T', { type: 'agent_list' })
-  })
-
-  it('"프리셋 팔레트 열기"(flyout) → setSlotContent(viewId, slotId, {type:preset_palette})', () => {
-    openMenu('slot-U', null)
-    openNewContentFlyout()
-    fireEvent.click(screen.getByText('프리셋 팔레트 열기'))
-    expect(setSlotContentSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-U', { type: 'preset_palette' })
   })
 
   it('"사용량 한도 열기"(flyout) → setSlotContent(viewId, slotId, {type:usage, 두 회사 켬})', () => {
@@ -1245,8 +1212,8 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     fireEvent.contextMenu(frameOf('slot-F'))
     expect(screen.getByText('에이전트 모니터링')).toBeTruthy()
     openNewContentFlyout()
-    fireEvent.click(screen.getByText('프리셋 팔레트 열기'))
-    expect(setSlotContentSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-F', { type: 'preset_palette' })
+    fireEvent.click(screen.getByText('에이전트 트리 열기'))
+    expect(setSlotContentSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-F', { type: 'agent_list' })
   })
 
   // ── ★"팝업으로 분리" = 공통(ADR-0064)★: 빈 슬롯 포함 콘텐츠 종류와 무관하게 뜨고(ADR-0228) (viewId, slotId)로 move. ──

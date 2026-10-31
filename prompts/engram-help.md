@@ -49,7 +49,7 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
   {tool} agent.list
       살아 있는 것과 잠든 것 전부. id, name, state(live|sleeping), cwd, parent.
       그 name 이 곧 팀원을 지목하는 이름이고, eg_send 의 to 에 그대로 적는다.
-      store 는 명부 파일 둘(agents = agents.json · presets = presets.json)의 상태다. 각각 state 가 Writable(쓸 수 있다) · ReadOnly(데몬이 뜰 때 그 파일을 받지 않았다 — 명부가 비어 있고 이 실행 내내 못 바꾼다) · Refusing(마지막 저장이 거절됐다 — 다음 변경이 다시 보고, 받아들이면 풀린다)이고, 받지 않는 까닭 reason 은 Newer(이 데몬보다 새 판이 쓴 파일 — file_version 이 그 판) · Unreadable(파일을 못 읽음)이다.
+      store 는 명부 파일(agents = agents.json)의 상태다. state 가 Writable(쓸 수 있다) · ReadOnly(데몬이 뜰 때 그 파일을 받지 않았다 — 명부가 비어 있고 이 실행 내내 못 바꾼다) · Refusing(마지막 저장이 거절됐다 — 다음 변경이 다시 보고, 받아들이면 풀린다)이고, 받지 않는 까닭 reason 은 Newer(이 데몬보다 새 판이 쓴 파일 — file_version 이 그 판) · Unreadable(파일을 못 읽음)이다.
 
   {tool} agent.resolve --targets <JSON 배열 — 이름|id 1~8 개>
       이름 · id 를 한 번에 푼다(잠든 것 포함). 요청한 차례로 target, id, name, live(true|false). 하나라도 못 풀면 그 자리(targets[i])를 대며 멈춘다.
@@ -134,7 +134,7 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
 
   {tool} layout.get [--window <창>] [--agent <에이전트>] [--ids true]
       칸마다 한 줄, 창 번호 → 탭 줄 → 탭 안 칸 순. --window 면 그 창만, --agent 면 그 에이전트가 든 칸만(어느 칸에도 없으면 빈 목록)
-      window · window_number · tab_index(탭 줄 자리, 0 부터 — (window, tab_index) 가 같은 탭의 줄을 묶는 열쇠) · tab_name · tab_active(그 창에 보이는 탭) · content(Empty|Agent|AgentList|PresetPalette|Usage|Unknown) · agent(표시 이름) · focused(그 탭의 포커스 칸) · x · y · w · h(탭 안 0~1 좌표, 왼쪽 위가 0,0)
+      window · window_number · tab_index(탭 줄 자리, 0 부터 — (window, tab_index) 가 같은 탭의 줄을 묶는 열쇠) · tab_name · tab_active(그 창에 보이는 탭) · content(Empty|Agent|AgentList|Usage|Unknown) · agent(표시 이름) · focused(그 탭의 포커스 칸) · x · y · w · h(탭 안 0~1 좌표, 왼쪽 위가 0,0)
       --ids true 면 window_id · tab(= view_id) · slot_id · agent_id 도 싣는다 — 에이전트 없는 칸을 id 로 짚을 때만 쓴다
 
   {tool} tab.move <탭> (--to_window <창> [--index <n>] | --after_tab <id> | --after_tab_of <에이전트> | --index <n>)
@@ -166,7 +166,7 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
       칸 하나를 다른 창의 새 탭으로 옮긴다(원래 칸은 닫힌다). to_window 를 빼면 새 창을 연다. 답에 옮겨 간 창의 window · window_id · number 와 새 탭 new_view_id. 탭째는 tab.detach
   {tool} slot.assignAgent <칸> --assign <에이전트>
       이미 살아 있는 에이전트를 그 칸에 붙인다. 새로 띄우지는 않는다
-  {tool} layout.setSlotContent <칸> --content <Empty|Agent|AgentList|PresetPalette|Usage> [--assign <에이전트>] [--show_claude <true|false>] [--show_codex <true|false>]
+  {tool} layout.setSlotContent <칸> --content <Empty|Agent|AgentList|Usage> [--assign <에이전트>] [--show_claude <true|false>] [--show_codex <true|false>]
       칸이 무엇을 보여줄지 바꾼다. assign 은 Agent 일 때만, show 둘(그 백엔드의 사용량 한도를 보일지)은 Usage 일 때만 준다. 뺀 show 칸은 그 칸이 이미 Usage 면 지금 값을 두고, 아니면 true 다
   {tool} agent.spawnInto --cwd <폴더> --backend <claude|codex> [--window <창>] [--at <낱말> | --view_id <id> [--slot_id <id>]]
       에이전트를 새로 띄워 그 자리에 놓는다. at 이면 window(빼면 main)의 보이는 탭에서 그 낱말이 집는 빈 칸이다(비어 있지 않으면 CONFLICT). 자리를 다 빼면 window(빼면 main)에 새 탭을 만든다. 답 = agent_id

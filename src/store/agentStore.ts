@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-import type { AgentInfo, AgentProfile, AgentStatus, Preset } from '../api/types'
+import type { AgentInfo, AgentProfile, AgentStatus } from '../api/types'
 
 export const dummyAgents = [
   { id: '1', name: '비서', status: 'running', cost: '$0.12' },
@@ -34,17 +34,6 @@ interface AgentState {
    * 그래서 "프로필 없음" 판정은 이 플래그가 선 뒤에만 내린다(안 서면 보수적으로 「연결 중」에 머문다).
    */
   profilesLoaded: boolean
-  /**
-   * 저장된 프리셋 전체(ADR-0061 — cwd 북마크). 부팅 1회 로드 + create/delete 후 PresetListUpdated
-   * broadcast 로 교체한다(프로필 미러). PresetPalette 가 이 목록을 그리고 각 행 표시명은 cwd basename
-   * 으로 파생한다(이름 미저장 — ADR-0061).
-   */
-  presets: Preset[]
-  /**
-   * 프리셋 목록을 한 번이라도 받았나(agentsLoaded 의 대칭). `presets: []` 만으로는 「아직 못 받음」과
-   * 「정말 없음」이 갈리지 않는다 — PresetPalette 는 이것이 선 뒤에만 빈 목록 안내를 그린다.
-   */
-  presetsLoaded: boolean
   groups: typeof dummyGroups
   selectedAgentId: string | null
   setSelectedAgent: (id: string | null) => void
@@ -52,8 +41,6 @@ interface AgentState {
   setAgents: (agents: AgentInfo[]) => void
   /** listProfiles refetch 결과로 프로필 전체 교체. */
   setProfiles: (profiles: AgentProfile[]) => void
-  /** listPresets / PresetListUpdated broadcast 결과로 프리셋 전체 교체(ADR-0061). */
-  setPresets: (presets: Preset[]) => void
   /**
    * agent-status-changed 수신 시 해당 agent의 status만 갱신(뱃지 표시용).
    * T-4: Killed/Exited를 받아도 목록에서 제거하지 않는다.
@@ -67,14 +54,11 @@ export const useAgentStore = create<AgentState>(set => ({
   agentsLoaded: false,
   profiles: [],
   profilesLoaded: false,
-  presets: [],
-  presetsLoaded: false,
   groups: dummyGroups,
   selectedAgentId: null,
   setSelectedAgent: id => set({ selectedAgentId: id }),
   setAgents: agents => set({ agents, agentsLoaded: true }),
   setProfiles: profiles => set({ profiles, profilesLoaded: true }),
-  setPresets: presets => set({ presets, presetsLoaded: true }),
   onStatusChanged: (id, status) =>
     set(state => ({
       agents: state.agents.map(a => (a.id === id ? { ...a, status } : a)),

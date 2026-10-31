@@ -48,7 +48,6 @@ import type {
   AgentProfile,
   AgentStatus,
   AgentOutputFormat,
-  Preset,
   RestoreReport,
 } from './types'
 
@@ -179,7 +178,6 @@ export class ProtocolClient implements AgentClient {
   private statusCbs = new Set<(id: string, status: AgentStatus, epoch: number) => void>()
   private restoreCbs = new Set<(report: RestoreReport) => void>()
   private profileListCbs = new Set<(profiles: AgentProfile[]) => void>()
-  private presetListCbs = new Set<(presets: Preset[]) => void>()
   private usageCbs = new Set<(snapshot: UsageLimitSnapshot, socketEpoch: number) => void>()
 
   private offMessage: (() => void) | null = null
@@ -784,16 +782,6 @@ export class ProtocolClient implements AgentClient {
       for (const cb of this.profileListCbs) cb(profiles)
       return
     }
-    if ('PresetList' in msg) {
-      const p = msg.PresetList as { request_id: string; presets: Preset[] }
-      this.resolvePending(p.request_id, p.presets)
-      return
-    }
-    if ('PresetListUpdated' in msg) {
-      const presets = (msg.PresetListUpdated as { presets: Preset[] }).presets
-      for (const cb of this.presetListCbs) cb(presets)
-      return
-    }
     if ('UsageLimitsUpdated' in msg) {
       // `socketEpoch` 는 셸 carrier 가 곁들인다 — 직결 carrier 가 올린 데몬 프레임엔 없어 0(= 표식 모름)으로 넘긴다.
       const u = msg.UsageLimitsUpdated as { snapshot: UsageLimitSnapshot; socketEpoch?: unknown }
@@ -1113,23 +1101,6 @@ export class ProtocolClient implements AgentClient {
     }))
   }
 
-  // ── 프리셋 CRUD(ADR-0061) ──────────────────────────────────────────────────────
-  listPresets(): Promise<Preset[]> {
-    return this.sendCommand<Preset[]>((request_id) => ({ ListPresets: { request_id } }))
-  }
-  createPreset(cwd: string): Promise<void> {
-    // 백엔드 reply=Ack(void). 생성된 프리셋은 뒤이은 PresetListUpdated broadcast 로 store 에 들어온다
-    //   (createClaudeProfile 이 Created{profile} 를 돌려주는 것과 다름 — 프리셋은 이름을 안 실어 reply 가 Ack).
-    return this.sendCommand<void>((request_id) => ({ CreatePreset: { cwd, request_id } }))
-  }
-  deletePreset(id: string): Promise<void> {
-    return this.sendCommand<void>((request_id) => ({ DeletePreset: { preset_id: id, request_id } }))
-  }
-  renamePreset(id: string, name: string | null): Promise<void> {
-    // 백엔드 reply=Ack(void). 표시명 반영은 뒤이은 PresetListUpdated broadcast(낙관 갱신 X, ADR-0061).
-    return this.sendCommand<void>((request_id) => ({ RenamePreset: { preset_id: id, name, request_id } }))
-  }
-
   // ── 사용량(TRD S21 usage-limit-slot §1-8) ──────────────────────────────────────
   refreshUsageLimits(vendor: AgentBackendKind): Promise<void> {
     return this.sendCommand<void>((request_id) => ({ RefreshUsageLimits: { vendor, request_id } }))
@@ -1161,12 +1132,6 @@ export class ProtocolClient implements AgentClient {
     this.profileListCbs.add(cb)
     return () => {
       this.profileListCbs.delete(cb)
-    }
-  }
-  onPresetListUpdated(cb: (presets: Preset[]) => void): () => void {
-    this.presetListCbs.add(cb)
-    return () => {
-      this.presetListCbs.delete(cb)
     }
   }
   onUsageLimitsUpdated(cb: (snapshot: UsageLimitSnapshot, socketEpoch: number) => void): () => void {

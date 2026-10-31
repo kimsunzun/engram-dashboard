@@ -3690,15 +3690,15 @@ async fn duplicate_request_id_insert_errs_prev_slot() {
 // 알림 포트(`events::DaemonEvents`) — 주입점이 사는 검증.
 //
 // ★왜 이 절이 있나★: emit 을 포트로 끊어 놓고 하네스가 `NoDaemonEvents`(버림)만 꽂으면, 포트는 섰지만
-//   **11개 emit 은 영원히 무검증**이다 — 모듈이 서는 것과 그 seam 이 검증을 사는 것은 다른 일이다
+//   **그 emit 들은 영원히 무검증**이다 — 모듈이 서는 것과 그 seam 이 검증을 사는 것은 다른 일이다
 //   (ADR-0012 가 요구하는 쪽은 뒤엣것이다). 그래서 `DaemonClient::new_with_events` 로 기록형 가짜를 꽂아,
 //   연결 태스크가 **무엇을 어떤 순서로** 알리는지를 실 소켓 왕복 위에서 잰다.
 // ★전수는 아니다(정직성)★: 여기서 실제로 발화되는 것은 넷(`connected` · `down` · 목록 갱신 · 상태 전이)
-//   이고 나머지(restore·profile·preset·reconnecting)는 여전히 무검증이다. 늘리는 자리는 여기다.
+//   이고 나머지(restore·profile·reconnecting)는 여전히 무검증이다. 늘리는 자리는 여기다.
 // ══════════════════════════════════════════════════════════════════════════════════
 
 use engram_dashboard_protocol::{
-    AgentId, AgentInfo, AgentProfile, AgentStatus, Preset, RestoreReport, UsageLimitSnapshot,
+    AgentId, AgentInfo, AgentProfile, AgentStatus, RestoreReport, UsageLimitSnapshot,
 };
 
 use super::events::{ConnectionStateEvent, DaemonEvents};
@@ -3765,10 +3765,6 @@ impl DaemonEvents for RecordingEvents {
 
     fn profile_list_updated(&self, profiles: &[AgentProfile]) {
         self.record(format!("profile_list:{}", profiles.len()));
-    }
-
-    fn preset_list_updated(&self, presets: &[Preset]) {
-        self.record(format!("preset_list:{}", presets.len()));
     }
 
     fn usage_limits_updated(

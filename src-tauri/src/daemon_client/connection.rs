@@ -1305,12 +1305,6 @@ fn emit_broadcast(events: &dyn DaemonEvents, names: &dyn AgentNamesSink, ev: &Ag
         AgentEvent::ProfileListUpdated { profiles } => {
             events.profile_list_updated(profiles);
         }
-        // ADR-0061: 프리셋 CRUD(생성/삭제) 후 데몬 broadcast → 전 webview push(profile 미러).
-        //   프론트 소비(preset-list-updated 리스너)는 후속 슬라이스지만, broadcast 가 창까지
-        //   닿아야 멀티창 동기화 불변식이 성립하므로 emit 배선은 여기서 함께 깐다.
-        AgentEvent::PresetListUpdated { presets } => {
-            events.preset_list_updated(presets);
-        }
         // ★어느 왕복에도 속하지 않는 실패는 여기 말고 닿는 곳이 없다★. `request_id` 가 있는 실패는 이
         //   함수에 **오지 않는다** — 호출부가 그보다 먼저 reply 매칭 분기로 걷어낸다(`event_reply_request_id`
         //   가 Some 이면 그 가지에서 끝난다). 그래서 이 팔이 보는 것은 항상 `None` 뿐이고, 패턴에 그렇게

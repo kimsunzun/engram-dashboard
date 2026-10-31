@@ -1189,8 +1189,8 @@ impl ViewManager {
     }
 
     // view 안 slot_id 슬롯의 콘텐츠를 `content`(SlotContent 제네릭)로 교체한다(ADR-0063 배치 제어 표면).
-    // assign_agent 의 미러이나 에이전트 전용이 아니라 유니온 전체(Empty/Agent/AgentList/PresetPalette/Usage)를
-    // 받는다 — 트리(에이전트)·팔레트를 슬롯에 배치하는 §5 LLM/사람 공용 경로. ★덮어쓰기 시맨틱(assign 과
+    // assign_agent 의 미러이나 에이전트 전용이 아니라 유니온 전체를 받는다 — 트리(에이전트)·사용량을 슬롯에 배치하는
+    // §5 LLM/사람 공용 경로. ★덮어쓰기 시맨틱(assign 과
     // 동형)★: 점유 슬롯도 무조건 교체(점유 방어는 없음 — 배치 command 는 명시적 교체 의도).
     pub fn set_slot_content(
         &mut self,
@@ -2903,7 +2903,7 @@ mod tests {
         let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         let ver = mgr.version;
         assert!(matches!(
-            mgr.set_slot_content(v, Uuid::new_v4(), SlotContent::PresetPalette)
+            mgr.set_slot_content(v, Uuid::new_v4(), SlotContent::AgentList)
                 .unwrap_err(),
             LayoutError::SlotNotFound(_)
         ));
@@ -3421,7 +3421,7 @@ mod tests {
     #[test]
     fn every_content_write_clears_the_unknown_entry() {
         type Write = fn(&mut ViewManager, ViewId, Uuid);
-        let writes: [(&str, Write); 6] = [
+        let writes: [(&str, Write); 5] = [
             ("assign_agent", |m, v, s| {
                 m.assign_agent(v, s, "a".into()).unwrap()
             }),
@@ -3440,10 +3440,6 @@ mod tests {
             }),
             ("set_slot_content(agent_list)", |m, v, s| {
                 m.set_slot_content(v, s, SlotContent::AgentList).unwrap()
-            }),
-            ("set_slot_content(preset_palette)", |m, v, s| {
-                m.set_slot_content(v, s, SlotContent::PresetPalette)
-                    .unwrap()
             }),
             ("set_slot_content(usage)", |m, v, s| {
                 m.set_slot_content(

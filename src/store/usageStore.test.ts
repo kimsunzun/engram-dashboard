@@ -304,7 +304,6 @@ describe('eventBus — 방송 잇기 먼저, pull 나중', () => {
       onStatusChanged: off,
       onRestoreResult: off,
       onProfileListUpdated: off,
-      onPresetListUpdated: off,
       onConnectionStateChange: (cb: (s: ConnectionState) => void) => {
         cb('connected')
         return () => {}
@@ -394,7 +393,6 @@ describe('eventBus — 방송 잇기 먼저, pull 나중', () => {
       ...rec.client,
       getAgents: vi.fn(async () => []),
       listProfiles: vi.fn(async () => []),
-      listPresets: vi.fn(async () => []),
       onConnectionStateChange: (cb: (s: ConnectionState) => void) => {
         stateCb = cb
         cb('connected')

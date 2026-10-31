@@ -14,7 +14,6 @@ import type {
   AgentProfile,
   AgentStatus,
   AgentOutputFormat,
-  Preset,
   RestoreReport,
 } from './types'
 
@@ -228,11 +227,6 @@ export interface AgentClient {
    */
   onProfileListUpdated(cb: (profiles: AgentProfile[]) => void): () => void
   /**
-   * 프리셋 목록 라이브 갱신(ADR-0061 — 프로필판과 동형, §5). 백엔드가 프리셋 CRUD(create/delete)를
-   * broadcast 하면 store 미러를 갱신한다(AgentEvent::PresetListUpdated 라우팅).
-   */
-  onPresetListUpdated(cb: (presets: Preset[]) => void): () => void
-  /**
    * 사용량 스냅숏 방송(TRD S21 usage-limit-slot §1-8). 셸이 이 창을 대상으로 고른 것만 온다. `socketEpoch` =
    * [`UsageSnapshotPull`] 의 그것 — 셸을 거치지 않는 직결 carrier 의 데몬 프레임에는 표식이 없어 `0` 으로 온다.
    * 같은 회사의 옛 사본이 늦게 올 수 있다(pull 과 서로 순서를 보장하지 않는다) — 가르는 것은 받는 쪽이다.
@@ -328,23 +322,4 @@ export interface AgentClient {
    * (낙관 갱신 X). 사람 드래그와 LLM 호출이 같은 진입점(§5 손발/두뇌 분리 — 트리 구성은 두뇌가 쥐는 핸들).
    */
   reparentProfile(childId: string, parentId: string | null): Promise<void>
-
-  // ── 프리셋 CRUD(ADR-0061 — cwd 북마크, 스폰 안 함) ─────────────────────────────
-  /** 저장된 프리셋 전체 조회. PresetList 전용 reply(request_id echo)로 회수. */
-  listPresets(): Promise<Preset[]>
-  /**
-   * 프리셋 생성(cwd 북마크). ★이름은 넘기지 않는다★ — 백엔드는 {id,cwd}만 저장하고 표시명은 프론트가
-   * cwd basename 으로 파생한다(ADR-0061). 백엔드 reply=Ack(void) — 생성된 Preset 은 뒤이은
-   * PresetListUpdated broadcast 로 store 에 반영된다(프로필 CreateProfile 이 Created{profile} 를 돌려주는
-   * 것과 다름 — 프리셋은 broadcast 로만 목록에 들어온다).
-   */
-  createPreset(cwd: string): Promise<void>
-  /** 프리셋 삭제(에이전트는 무관하게 산다 — ADR-0061). 없는 id 면 no-op(Ack). */
-  deletePreset(id: string): Promise<void>
-  /**
-   * 프리셋 표시명 override 설정/해제(ADR-0061 리치화, §5). name=문자열 → override 저장, null → 해제
-   * (cwd basename 파생 복귀). trim·빈문자열 거부·미변경 스킵은 호출부(UI)가 확정 직전 처리. 백엔드
-   * reply=Ack(void), 표시명 반영은 뒤이은 PresetListUpdated broadcast(낙관 갱신 X). 없는 id 면 no-op(Ack).
-   */
-  renamePreset(id: string, name: string | null): Promise<void>
 }

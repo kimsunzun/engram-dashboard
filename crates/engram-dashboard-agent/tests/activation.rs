@@ -15,8 +15,7 @@ use uuid::Uuid;
 use engram_dashboard_agent::backend;
 use engram_dashboard_agent::failure::AgentFailureKind;
 use engram_dashboard_agent::manager::AgentManager;
-use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
-use engram_dashboard_agent::preset::PresetRegistry;
+use engram_dashboard_agent::persistence::FileProfileStore;
 use engram_dashboard_agent::profile::{
     AgentCommand, AgentOutputFormat, AgentProfile, ProfileRegistry, ProfileStore, SpawnMode,
 };
@@ -79,11 +78,6 @@ fn make_manager_with_store(
         std::env::temp_dir().join(format!("engram-test-activate-{tag}-{}", Uuid::new_v4())),
     ));
     let profiles = Arc::new(ProfileRegistry::new(store.clone()));
-    let preset_store = Arc::new(FilePresetStore::new(std::env::temp_dir().join(format!(
-        "engram-test-activate-preset-{tag}-{}",
-        Uuid::new_v4()
-    ))));
-    let presets = Arc::new(PresetRegistry::new(preset_store));
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig {
             enabled: false,
@@ -91,8 +85,7 @@ fn make_manager_with_store(
         },
         Arc::new(|_, _| {}),
     ));
-    let manager =
-        AgentManager::new_with_control(sink_dyn, profiles.clone(), presets, tracker, control);
+    let manager = AgentManager::new_with_control(sink_dyn, profiles.clone(), tracker, control);
     (manager, sink, profiles, store)
 }
 

@@ -170,23 +170,6 @@ export interface AgentProfile {
   last_start_at: number | null
 }
 
-// ── 프리셋(ADR-0061) ────────────────────────────────────────────────────────────
-
-/**
- * 영속 프리셋 — presets.json 단위(데몬 소유, ADR-0061). wire `Preset` 미러(protocol/bindings/Preset.ts).
- * 프로필과 별개 축: 프리셋 = 자주 쓰는 cwd 북마크(스폰 안 함), 프로필 = 실제 에이전트 저장 단위.
- */
-export interface Preset {
-  id: string
-  /** 정규화된 cwd(PathBuf 의 JSON 표현 = 문자열). name override 가 없으면 이 값의 basename 으로 파생. */
-  cwd: string
-  /**
-   * 사용자 지정 표시명 override(ADR-0061 리치화). Some → 그대로 표시, null → cwd basename 파생(기존
-   * 동작 불변). wire `Preset.name` 미러(#[serde(default)] — 옛 presets.json 은 null). rename command 가 set/clear.
-   */
-  name: string | null
-}
-
 /** 복원 결말 — restore-result event, #[serde(tag="type")] */
 export type RestoreOutcome =
   | { type: 'Resumed' }

@@ -1,7 +1,7 @@
 //! ScrollArea — 앱 전역 오버레이 스크롤 영역 seam (ADR-0053).
 //!
 //! ★역할★: Radix ScrollArea(@radix-ui/react-scroll-area) primitive 를 얇게 감싼 **교체점**. 프론트의
-//!   모든 스크롤 표면(채팅·트리·프리셋·팝업 목록·DOM 관측기 등)은 raw `overflow:auto` 대신 이 seam 을
+//!   모든 스크롤 표면(채팅·트리·팝업 목록·DOM 관측기 등)은 raw `overflow:auto` 대신 이 seam 을
 //!   지난다 — 스크롤바 룩/거동을 한 곳(이 컴포넌트 + theme.css --scrollbar-* 토큰)에서 바꾸면 전 화면에
 //!   전파된다(단일 출처). 컴포넌트·스토어는 이 seam 에만 의존하고 Radix Root/Viewport 를 직접 다루지
 //!   않는다(§5 손발/두뇌 분리 — 스크롤바 구현을 나중에 통째로 갈아끼워도 소비자 코드는 불변). 직접

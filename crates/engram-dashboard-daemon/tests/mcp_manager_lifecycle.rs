@@ -8,8 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use engram_dashboard_agent::manager::AgentManager;
-use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
-use engram_dashboard_agent::preset::PresetRegistry;
+use engram_dashboard_agent::persistence::FileProfileStore;
 use engram_dashboard_agent::profile::{AgentCommand, AgentProfile, ProfileRegistry, SpawnMode};
 use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_agent::types::{
@@ -147,10 +146,6 @@ fn make_manager_with_injected(
         std::env::temp_dir().join(format!("engram-mcp-mgr-prof-{tag}-{}", AgentId::new_v4())),
     ));
     let profiles = Arc::new(ProfileRegistry::new(profile_store));
-    let preset_store = Arc::new(FilePresetStore::new(
-        std::env::temp_dir().join(format!("engram-mcp-mgr-preset-{tag}-{}", AgentId::new_v4())),
-    ));
-    let presets = Arc::new(PresetRegistry::new(preset_store));
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig {
             enabled: false,
@@ -158,7 +153,7 @@ fn make_manager_with_injected(
         },
         Arc::new(|_, _| {}),
     ));
-    let manager = AgentManager::new_with_control(sink, profiles, presets, tracker, control);
+    let manager = AgentManager::new_with_control(sink, profiles, tracker, control);
 
     (manager, registry, data_dir, handle)
 }

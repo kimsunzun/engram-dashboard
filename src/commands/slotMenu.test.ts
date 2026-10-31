@@ -61,7 +61,7 @@ describe('buildSlotMenu — 병합 + 결정적 정렬', () => {
       { commandId: 's1', group: 'slot-ops', order: 10 },
       { commandId: 's2', group: 'slot-ops', order: 20 },
     ])
-    const items = buildSlotMenu('preset_palette')
+    const items = buildSlotMenu('agent_list')
     expect(items.map(i => i.id)).toEqual(['s1', 's2'])
     expect(items[0].separatorBefore).toBe(false)
   })

@@ -168,7 +168,7 @@ interface ViewState {
   assignAgent: (viewId: string, slotId: string, agentId: string) => Promise<void>
   /**
    * slot 의 콘텐츠를 SlotContent 유니온 어느 것으로도 교체(ADR-0063 배치 제어 표면). 트리(agent_list)·
-   * 팔레트(preset_palette)·비우기(empty)를 슬롯에 배치한다. 백엔드 set_slot_content 를 invoke 하고 실제
+   * 사용량(usage)·비우기(empty)를 슬롯에 배치한다. 백엔드 set_slot_content 를 invoke 하고 실제
    * 반영은 layout:updated emit 으로만(낙관 갱신 X — 레이아웃 권위 = src-tauri, ADR-0035).
    * §5: `layout.setSlotContent` command 로 LLM 도 호출.
    */

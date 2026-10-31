@@ -426,7 +426,7 @@ mod tests {
             },
         };
         let second = tab("탭 둘", known(SlotContent::AgentList));
-        let popout = tab("View 3", known(SlotContent::PresetPalette));
+        let popout = tab("View 3", known(SlotContent::AgentList));
         StateFile {
             version: STATE_VERSION,
             saved_at_ms: 1_759_400_000_000,
@@ -628,6 +628,60 @@ mod tests {
             malformed_known
         );
         assert_eq!(back["windows"][0]["tabs"], doc["windows"][0]["tabs"]);
+    }
+
+    // ADR-0314
+    #[test]
+    fn a_retired_preset_palette_slot_reads_as_empty_and_keeps_the_rest() {
+        let palette = Uuid::new_v4();
+        let sibling = Uuid::new_v4();
+        let split_tab = json!({
+            "id": Uuid::new_v4(), "name": "t", "named": false, "focused_slot_id": palette,
+            "layout": {
+                "type": "split", "id": Uuid::new_v4(), "dir": "left_right", "ratio": 0.5,
+                "a": { "type": "slot", "id": palette, "content": { "type": "preset_palette" } },
+                "b": { "type": "slot", "id": sibling, "content": { "type": "agent", "agent_id": "a-1" } },
+            },
+        });
+        let doc = file(vec![tabbed(
+            "main",
+            "main",
+            vec![split_tab, tab_json(json!({ "type": "agent_list" }))],
+        )]);
+        let (mut state, warnings) = decode_value(&doc);
+        assert_eq!(warnings, vec![]);
+        let strip = main_strip(&mut state);
+        assert_eq!(strip.tabs.len(), 2);
+        assert_eq!(strip.tabs[0].focused_slot_id, Some(palette));
+        let PersistedNode::Split { a, b, .. } = &strip.tabs[0].layout else {
+            panic!("분할이어야 한다")
+        };
+        assert_eq!(
+            **a,
+            PersistedNode::Slot {
+                id: palette,
+                content: PersistedContent::Known(SlotContent::Empty),
+            }
+        );
+        assert_eq!(
+            **b,
+            PersistedNode::Slot {
+                id: sibling,
+                content: PersistedContent::Known(SlotContent::Agent {
+                    agent_id: "a-1".to_string(),
+                }),
+            }
+        );
+        let PersistedNode::Slot { content, .. } = &strip.tabs[1].layout else {
+            panic!("슬롯이어야 한다")
+        };
+        assert_eq!(content, &PersistedContent::Known(SlotContent::AgentList));
+
+        let back = json_of(&state);
+        assert_eq!(
+            back["windows"][0]["tabs"][0]["layout"]["a"]["content"],
+            json!({ "type": "empty" })
+        );
     }
 
     // ── 창 · 탭 건너뛰기 ──

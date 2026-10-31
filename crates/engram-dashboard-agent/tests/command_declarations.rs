@@ -82,8 +82,13 @@ fn the_resolve_verb_is_a_read_declared_in_generation_8() {
     let resolve = spec_of("agent.resolve").expect("선언");
     assert_eq!(resolve.effect, Effect::Read);
     assert_eq!(resolve.since, 8);
-    // 지금 세대는 8 이다 — `agent.resolve` 가 늘었다.
-    assert_eq!(engram_dashboard_agent::commands::CATALOG_VERSION, 8);
+}
+
+/// 지금 세대는 9 다 — `agent.new` 의 `preset` 칸과 `agent.list` 답의 `store.presets` 가 빠졌다(TRD S25-preset-library
+/// §5-2 1). 선언이 바뀌면 손으로 올리는 번호라 그 값을 여기 박는다.
+#[test]
+fn the_catalog_generation_is_9() {
+    assert_eq!(engram_dashboard_agent::commands::CATALOG_VERSION, 9);
 }
 
 /// ★입력을 움직이는 명령 목록은 이 crate 의 `Write` 선언만 담는다★ — 없는 이름이나 조회가 끼면 공통 입구의
@@ -121,11 +126,8 @@ fn error_sets_are_golden() {
         declared("agent.spawn"),
         vec![ErrorCode::NotFound, ErrorCode::Conflict]
     );
-    // `preset` 지목이 빗나가면 대상 부재다 — 그래서 만들기 동사도 NOT_FOUND 를 광고한다.
-    assert_eq!(
-        declared("agent.new"),
-        vec![ErrorCode::NotFound, ErrorCode::Conflict]
-    );
+    // 지목하는 칸이 없어 대상 부재가 없다 — 만들기 동사는 NOT_FOUND 를 광고하지 않는다.
+    assert_eq!(declared("agent.new"), vec![ErrorCode::Conflict]);
     assert_eq!(
         declared("agent.rename"),
         vec![ErrorCode::NotFound, ErrorCode::Conflict]
@@ -210,11 +212,8 @@ fn required_matches_what_deserialization_actually_demands() {
         (
             "agent.new",
             parses::<AgentNewArgs>,
-            // 상호배타인 두 칸을 함께 싣는다 — 이 대조가 재는 것은 **역직렬화**이고, 조합 제약은 핸들러가
-            //   본다(`agent.spawn` 의 target/cwd 와 같은 자리).
             json!({
                 "cwd": "C:/work/x",
-                "preset": "bookmark-1",
                 "name": "beta",
                 "output_format": "StreamJson",
                 "backend": "Claude",
@@ -290,22 +289,23 @@ fn required_matches_what_deserialization_actually_demands() {
 
 /// ★대화상자 없이 등록하는 길을 **광고가** 나른다★(ADR-0156 — 광고가 곧 사용법이다).
 ///
-/// 이 명령을 부르는 주체는 LLM 이고, 그가 보는 것은 이 스키마뿐이다: 폴더를 두 길로 정할 수 있다는 것
-/// (`cwd`·`preset`)과 나머지 두 칸이 **닫힌 어휘**라는 것이 거기 실려야 자기 인자를 스스로 고른다.
-/// ★폴더를 정하는 두 칸은 어느 쪽도 혼자서는 필수가 아니다★ — 「정확히 하나」는 칸이 아니라 **조합**이라
-/// 스키마가 표현하지 못한다(그 판정은 핸들러가 지고, 반려 문구가 두 칸을 함께 짚는다).
-/// ★반면 `backend` 는 혼자서 필수다(2026-09-08)★ — 조용한 claude 기본값을 걷은 결과이고, 그 사실이
-/// `required` 에 실려야 호출자가 부르기 전에 안다. 옛 계약(`required` 가 비어 있음)은 그 기본값 위에
-/// 서 있었다.
+/// 이 명령을 부르는 주체는 LLM 이고, 그가 보는 것은 이 스키마뿐이다: 작업 폴더(`cwd`)와 백엔드가 필수라는 것과
+/// 두 칸이 **닫힌 어휘**라는 것이 거기 실려야 자기 인자를 스스로 고른다.
+/// ★`backend` 는 필수다(2026-09-08)★ — 조용한 claude 기본값을 걷은 결과이고, 그 사실이 `required` 에 실려야
+/// 호출자가 부르기 전에 안다.
 #[test]
-fn the_create_verb_advertises_both_ways_to_pick_a_folder_and_its_closed_vocabularies() {
+fn the_create_verb_advertises_its_required_fields_and_closed_vocabularies() {
     let schema: serde_json::Value =
         serde_json::from_str(spec_of("agent.new").expect("선언").args_schema).expect("args 스키마");
     let properties = schema["properties"].as_object().expect("properties 객체");
 
-    for field in ["cwd", "preset", "name", "output_format", "backend"] {
-        assert!(properties.contains_key(field), "{field} 칸이 광고에 없다");
-    }
+    let mut fields: Vec<&str> = properties.keys().map(String::as_str).collect();
+    fields.sort_unstable();
+    assert_eq!(
+        fields,
+        vec!["backend", "cwd", "name", "output_format"],
+        "광고하는 칸: {schema}"
+    );
     let required: Vec<&str> = schema["required"]
         .as_array()
         .expect("required 배열")
@@ -314,8 +314,8 @@ fn the_create_verb_advertises_both_ways_to_pick_a_folder_and_its_closed_vocabula
         .collect();
     assert_eq!(
         required,
-        vec!["backend"],
-        "혼자서 필수인 칸은 `backend` 하나다: {schema}"
+        vec!["cwd", "backend"],
+        "필수인 칸은 `cwd` · `backend` 다: {schema}"
     );
 
     // 닫힌 어휘는 **값 목록**으로 실린다 — 이름만 실리면 호출자가 무엇을 넣을지 스스로 못 고른다.

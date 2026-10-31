@@ -21,7 +21,6 @@ pub enum SlotKind {
     Empty,
     Agent,
     AgentList,
-    PresetPalette,
     Usage,
     Unknown,
 }
@@ -130,7 +129,6 @@ fn kind(content: &SlotContent) -> SlotKind {
         SlotContent::Empty => SlotKind::Empty,
         SlotContent::Agent { .. } => SlotKind::Agent,
         SlotContent::AgentList => SlotKind::AgentList,
-        SlotContent::PresetPalette => SlotKind::PresetPalette,
         SlotContent::Usage { .. } => SlotKind::Usage,
     }
 }
@@ -157,17 +155,14 @@ mod tests {
         let mut raw = Map::new();
         raw.insert("type".into(), Value::String("from-the-future".into()));
         mgr.set_unknown_content(view, first, raw).unwrap();
-        mgr.set_slot_content(view, second, SlotContent::PresetPalette)
+        mgr.set_slot_content(view, second, SlotContent::AgentList)
             .unwrap();
 
         let rows = layout_rows(&mgr, &RowFilter::default());
 
         assert_eq!(
             rows.iter().map(|r| (r.slot, r.content)).collect::<Vec<_>>(),
-            [
-                (first, SlotKind::Unknown),
-                (second, SlotKind::PresetPalette)
-            ]
+            [(first, SlotKind::Unknown), (second, SlotKind::AgentList)]
         );
         assert_eq!(rows[0].agent_id, None);
     }

@@ -832,8 +832,9 @@ fn the_catalog_generation_is_pinned_to_the_declaration_set() {
     //   바뀐 세대다(TRD S26-window-chrome §6-1 · §6-6). 세대 21 은 이름이 넷 늘고(대상을 받는 `tab.move` · `tab.dock` ·
     //   `tab.detach` · `layout.get` — TRD S28 §4) 칸 · 탭 동사의 **인자**(`slot_of` · `at` · `tab_of` · `assign` — id 인자는
     //   선택) · **답 모양**(`layout`) · **오류 선언**(`NOT_FOUND`)이 바뀌고 에이전트 칸에 표시(`agent_args` — ADR-0308)가 든
-    //   세대다(TRD S28 §7 — 한 커밋이라 한 세대).
-    assert_eq!(CATALOG_VERSION, 21);
+    //   세대다(TRD S28 §7 — 한 커밋이라 한 세대). 세대 22 는 `layout.setSlotContent` 의 `content` 와 `layout.get` 줄의
+    //   `content` 가 받고 내는 **어휘**에서 `PresetPalette` 가 빠진 세대다(TRD S25-preset-library §5-2 1).
+    assert_eq!(CATALOG_VERSION, 22);
     assert_eq!(COMMAND_SPECS.len(), 36);
     for since in [
         TabMoveArgs::SPEC.since,
@@ -1907,6 +1908,27 @@ async fn slot_content_refuses_a_contradictory_pair() {
         .await,
     );
     assert_eq!(extra.code(), ErrorCode::InvalidArgument);
+}
+
+/// 걷은 종류는 받지 않는다 — 칸은 그대로다.
+// ADR-0314
+#[tokio::test]
+async fn slot_content_refuses_the_retired_preset_palette() {
+    let (world, queue, receiver) = queued();
+    let view = world.main_tabs().active;
+    let slot = world.empty_slot(view);
+    let refused = error_of(
+        call(
+            &receiver,
+            &queue,
+            &world.mail,
+            "layout.setSlotContent",
+            json!({ "view_id": view.to_string(), "slot_id": slot.to_string(), "content": "PresetPalette" }),
+        )
+        .await,
+    );
+    assert_eq!(refused.code(), ErrorCode::InvalidArgument);
+    assert_eq!(world.content(view, slot), Some(SlotContent::Empty));
 }
 
 /// `show_*` 는 `content=Usage` 에만 — 다른 종류에 붙으면 호출자는 그 회사를 켠 줄 안다.
@@ -6773,11 +6795,11 @@ async fn slot_verbs_by_agent_or_spatial_word_change_that_slot_and_answer_its_tab
         &receiver,
         &queue,
         "layout.setSlotContent",
-        json!({ "slot_id": below.to_string(), "content": "PresetPalette" }),
+        json!({ "slot_id": below.to_string(), "content": "AgentList" }),
     )
     .await;
-    assert_eq!(world.content(a, below), Some(SlotContent::PresetPalette));
-    assert_eq!(rows(&answer, "layout")[2]["content"], "PresetPalette");
+    assert_eq!(world.content(a, below), Some(SlotContent::AgentList));
+    assert_eq!(rows(&answer, "layout")[2]["content"], "AgentList");
 
     let answer = ok_of(
         &receiver,

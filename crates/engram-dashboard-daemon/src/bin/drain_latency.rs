@@ -21,8 +21,7 @@ use std::time::{Duration, Instant};
 use engram_dashboard_agent::backend::InputEncoder;
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::output_core::{OutputCore, TurnWiring};
-use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
-use engram_dashboard_agent::preset::PresetRegistry;
+use engram_dashboard_agent::persistence::FileProfileStore;
 use engram_dashboard_agent::profile::ProfileRegistry;
 use engram_dashboard_agent::session::AgentSession;
 use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
@@ -238,9 +237,6 @@ fn stage() -> Stage {
     let profiles = Arc::new(ProfileRegistry::new(Arc::new(FileProfileStore::new(
         store_root.join("profiles"),
     ))));
-    let presets = Arc::new(PresetRegistry::new(Arc::new(FilePresetStore::new(
-        store_root.join("presets"),
-    ))));
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig {
             enabled: false,
@@ -248,12 +244,7 @@ fn stage() -> Stage {
         },
         Arc::new(|_, _| {}),
     ));
-    let manager = Arc::new(AgentManager::new(
-        Arc::new(NoopStatus),
-        profiles,
-        presets,
-        tracker,
-    ));
+    let manager = Arc::new(AgentManager::new(Arc::new(NoopStatus), profiles, tracker));
     let bell = RecordingBell::new();
     let facts = ScriptedTurnFacts::new();
     let busy = Arc::new(BusyPolicy::new(facts.clone(), bell.clone()));

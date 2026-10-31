@@ -1,7 +1,7 @@
 // ★역할★: 사람 클릭·팔레트·키바인딩·LLM 이 같은 command·같은 id 를 지난다(§5 단일 제어 표면, ADR-0055).
 //   메뉴 자신은 store 를 직접 부르지 않는다(ADR-0064 불변식 — 옛 하드코딩 9항목의 viewStore 직접 호출).
 //
-// ★한 메뉴 컴포넌트★(ADR-0064 §5): 콘텐츠(PresetPalette/AgentList)가 자기 pane 메뉴를 소유하던 옛 구조를
+// ★한 메뉴 컴포넌트★(ADR-0064 §5): 콘텐츠(AgentList 등)가 자기 pane 메뉴를 소유하던 옛 구조를
 //   제거하고 이 하나로 통합했다.
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'

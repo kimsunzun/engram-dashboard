@@ -1039,8 +1039,7 @@ mod tests {
     /// 모듈째 `#[cfg(windows)]` 로 덮으면 non-Windows 에서 그 회귀가 초록으로 샌다.
     mod roster_predicate {
         use super::*;
-        use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
-        use engram_dashboard_agent::preset::PresetRegistry;
+        use engram_dashboard_agent::persistence::FileProfileStore;
         #[cfg(windows)]
         use engram_dashboard_agent::profile::SpawnMode;
         use engram_dashboard_agent::profile::{AgentCommand, AgentProfile, ProfileRegistry};
@@ -1067,9 +1066,6 @@ mod tests {
                 sink,
                 Arc::new(ProfileRegistry::new(Arc::new(FileProfileStore::new(dir(
                     "prof",
-                ))))),
-                Arc::new(PresetRegistry::new(Arc::new(FilePresetStore::new(dir(
-                    "preset",
                 ))))),
                 Arc::new(SessionTracker::new(
                     TrackerConfig {

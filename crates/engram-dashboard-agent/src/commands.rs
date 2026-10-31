@@ -23,7 +23,6 @@ use engram_dashboard_command::{
 
 use crate::manager::{AgentManager, RenameOutcome};
 use crate::persistence::AGENTS_FILE;
-use crate::preset::PresetId;
 use crate::queued_input::{ListedState, QueuedListing};
 // 코어 enum과 아래 동명 선언 어휘를 구분하는 별칭.
 use crate::profile::AgentOutputFormat as CoreAgentOutputFormat;
@@ -37,6 +36,9 @@ use crate::usage::UsageVendorKey;
 // ★성공 응답은 평평하다(사용자 결정 2026-08-13)★: 명령마다 반환을 선언하므로 `{"agent":{…}}` 한 겹을
 //   더 감쌀 이유가 없다.
 declare_commands! {
+    // v9(2026-11-01): 옛 프리셋(작업 폴더 북마크)을 걷었다 — `agent.new` 의 칸 `preset` 이 빠지고 `cwd` 가 필수가
+    //   됐다(광고 오류에서 `NOT_FOUND` 도 빠졌다) · `agent.list` 답의 `store.presets` 가 빠졌다(TRD S25-preset-library
+    //   §5-2 1).
     // v8(2026-10-26): 이름 하나가 늘었다 — `agent.resolve`(ADR-0307 · TRD S28 §6).
     // v7(2026-10-10): `agent.list` 의 답에 칸 `store` 가 늘었다 — 명부 저장소 둘(agents · presets)의 상태(ADR-0291
     //   R17 · D6). 이름은 그대로이고 답의 모양이 바뀌었다.
@@ -51,7 +53,7 @@ declare_commands! {
     // v3(2026-09-08): `agent.new` 의 `backend` 가 **선택 → 필수**가 됐다. 조용한 claude 기본값을 걷은
     //   깨는 변경이라 세대를 올린다(사유 = 그 칸의 doc). 이 번호는 진단용이고 받는 쪽이 거절에 쓰지
     //   않는다(`connection_core` 의 RegisterCommands 갈래).
-    catalog_version: 8;
+    catalog_version: 9;
 
     /// 명부의 한 행.
     struct AgentRow {
@@ -104,10 +106,9 @@ declare_commands! {
         file_version: Option<u64>,
     }
 
-    /// 명부 저장소 둘 — `agents`(agents.json · 에이전트 명부) · `presets`(presets.json · 경로 북마크).
+    /// 명부 저장소 — `agents`(agents.json · 에이전트 명부).
     struct RosterStoreRow {
         agents: StoreStatusRow,
-        presets: StoreStatusRow,
     }
 
     /// 새 에이전트를 돌릴 백엔드 — ★오늘 받는 값은 `Claude` 와 `Codex` 둘이다★(2026-09-22 에 codex 가
@@ -220,7 +221,7 @@ declare_commands! {
     // errors 에는 **이 명령 고유의** 코드만 적는다 — 인자 반려(INVALID_ARGUMENT)와 내부 실패(INTERNAL)는
     //   표가 내는 것이라 `CommandSpec::advertised_errors` 가 자동으로 얹는다.
 
-    /// 명부 전량 — 이름·생사·작업 폴더·부모 — 와 명부 저장소 둘의 상태(`store`).
+    /// 명부 전량 — 이름·생사·작업 폴더·부모 — 와 명부 저장소의 상태(`store`).
     #[effect(Read)]
     #[since(1)]
     "agent.list" => args AgentListArgs {}
@@ -267,10 +268,7 @@ declare_commands! {
     #[effect(Write)]
     #[since(1)]
     "agent.new" => args AgentNewArgs {
-        /// 작업 폴더. ★`preset` 과 상호배타이고 **둘 중 정확히 하나**가 있어야 한다★.
-        cwd: Option<String>,
-        /// 등록된 경로 북마크(프리셋)의 id. cwd 와 상호배타.
-        preset: Option<String>,
+        cwd: String,
         name: Option<String>,
         /// 미지정 = StreamJson.
         output_format: Option<AgentOutputFormat>,
@@ -285,7 +283,7 @@ declare_commands! {
         agent_id: String,
         name: String,
         state: String,
-    } errors [NOT_FOUND, CONFLICT];
+    } errors [CONFLICT];
 
     /// 표시 이름을 바꾼다.
     #[effect(Write)]
@@ -457,14 +455,6 @@ pub struct AgentRosterRow {
     pub live: Option<AgentStatus>,
 }
 
-/// 명부 저장소 둘의 지금 상태 — `agent.list` 가 [`RosterStoreRow`] 로 편다.
-// ADR-0291 R17 (D6)
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct RosterStoreStatus {
-    pub agents: StoreStatus,
-    pub presets: StoreStatus,
-}
-
 /// 띄우기 결과 — 이 표가 보는 세 칸.
 pub struct StartedAgent {
     pub id: AgentId,
@@ -483,9 +473,9 @@ pub struct StartedAgent {
 // ADR-0012
 pub trait AgentCommandHost: Send + Sync {
     fn roster(&self) -> Vec<AgentRosterRow>;
-    /// 명부 저장소 둘(agents · presets)의 지금 상태.
+    /// 명부 저장소(agents.json)의 지금 상태 — `agent.list` 가 [`RosterStoreRow`] 로 편다.
     // ADR-0291 R17 (D6)
-    fn store_status(&self) -> RosterStoreStatus;
+    fn store_status(&self) -> StoreStatus;
     fn agent_snapshot(&self, id: AgentId) -> Option<AgentProfile>;
     /// ★명부를 바꾸는 셋(`create_agent` · `rename_agent` · `reparent_agent`)은 부르는 쪽 있는 변경이다★ — 저장소가
     ///   그 변경을 받지 않으면 명부를 그대로 두고 [`PtyError::Store`] 다(매니저의 `try_` 판 · ADR-0291 R17).
@@ -503,11 +493,6 @@ pub trait AgentCommandHost: Send + Sync {
     /// ★`Ok(false)` 는 사유를 말해 주지 않는다★ — 매니저가 bool 하나만 준다(`ProfileRegistry::try_reparent`).
     /// 부재와 구조 충돌은 핸들러가 **명부 재조회로** 가른다(`verb_move`).
     fn reparent_agent(&self, child: AgentId, parent: Option<AgentId>) -> Result<bool, PtyError>;
-    /// 등록된 경로 북마크(프리셋, ADR-0061) 하나의 작업 폴더.
-    ///
-    /// ★지목은 **id 정확 일치**뿐이다★ — 이름으로는 못 찾는다(프리셋 이름은 유일하지 않다). 없는 id 와
-    /// id 형식이 아닌 문자열은 둘 다 `None` 이다: 호출자가 할 일이 같아서다(목록에서 id 를 다시 고른다).
-    fn preset_cwd(&self, id: &str) -> Option<String>;
     /// 산 화신의 대기 목록. `None` = 산 세션이 없다.
     // ADR-0231
     fn list_queued_inputs(&self, id: AgentId) -> Option<QueuedListing>;
@@ -614,11 +599,8 @@ impl AgentCommandHost for AgentManager {
             .collect()
     }
 
-    fn store_status(&self) -> RosterStoreStatus {
-        RosterStoreStatus {
-            agents: self.agents_store_status(),
-            presets: self.presets().store_status(),
-        }
+    fn store_status(&self) -> StoreStatus {
+        self.agents_store_status()
     }
 
     fn agent_snapshot(&self, id: AgentId) -> Option<AgentProfile> {
@@ -652,15 +634,6 @@ impl AgentCommandHost for AgentManager {
 
     fn reparent_agent(&self, child: AgentId, parent: Option<AgentId>) -> Result<bool, PtyError> {
         AgentManager::try_reparent_agent(self, child, parent)
-    }
-
-    fn preset_cwd(&self, id: &str) -> Option<String> {
-        let id: PresetId = id.parse().ok()?;
-        AgentManager::presets(self)
-            .list()
-            .into_iter()
-            .find(|preset| preset.id == id)
-            .map(|preset| preset.cwd.to_string_lossy().into_owned())
     }
 
     fn list_queued_inputs(&self, id: AgentId) -> Option<QueuedListing> {
@@ -837,14 +810,6 @@ fn output_format(given: Option<AgentOutputFormat>) -> CoreAgentOutputFormat {
     }
 }
 
-/// ★문구가 **무엇을 실어야 하는지**를 말한다★ — 없는 id 와 id 아닌 문자열이 같은 답을 받으므로
-/// (`AgentCommandHost::preset_cwd`) 그 둘을 한 번에 고칠 수 있는 안내여야 한다.
-fn preset_not_found(id: &str) -> CommandError {
-    CommandError::not_found(format!(
-        "no registered path with id '{id}' — preset takes the id of a path bookmark, not its name or the folder path itself"
-    ))
-}
-
 /// `agent.*` 표를 조립한다 — ★핸들러 실물이 들어오는 유일한 자리★(규칙 T-1).
 ///
 /// ★blocking 계약★: 핸들러 본문은 프로필 락을 쥔 채 디스크를 쓰고 resume 조기 종료를 폴링한다
@@ -1014,8 +979,7 @@ fn verb_list(host: &dyn AgentCommandHost) -> Result<AgentListOk, CommandError> {
     Ok(AgentListOk {
         agents,
         store: RosterStoreRow {
-            agents: store_status_row(store.agents),
-            presets: store_status_row(store.presets),
+            agents: store_status_row(store),
         },
     })
 }
@@ -1259,53 +1223,11 @@ fn verb_new(
     notify: &dyn RosterChanged,
     args: AgentNewArgs,
 ) -> Result<AgentNewOk, CommandError> {
-    let (cwd, preset, name) = (
-        args.cwd.as_deref(),
-        args.preset.as_deref(),
-        args.name.as_deref(),
-    );
-    // ★두 칸 다 「빼도 된다」가 아니다★ — 하나는 반드시 있어야 하므로 빈 값 안내가 **형제 칸**을 함께
-    //   가리킨다. 안 그러면 시킨 대로 뺀 재시도가 「둘 중 하나는 줘야 한다」로 다시 반려된다.
+    let (cwd, name) = (args.cwd.as_str(), args.name.as_deref());
     reject_blanks(&[
-        (
-            "cwd",
-            cwd,
-            Blank::OrElse("a folder path, or give preset instead"),
-        ),
-        (
-            "preset",
-            preset,
-            Blank::OrElse("the id of a registered path, or give cwd instead"),
-        ),
+        ("cwd", Some(cwd), Blank::NeedsValue),
         ("name", name, Blank::OrOmit),
     ])?;
-    // ★어느 폴더인가를 두 칸이 말할 수 있다 — 조용히 한쪽을 고르지 않는다★(`agent.spawn` 의 target/cwd 와
-    //   같은 규율): 둘 다 주면 고를 근거가 없고, 없으면 만들 자리가 없다.
-    let cwd = match (cwd, preset) {
-        (Some(_), Some(_)) => {
-            return Err(CommandError::invalid_argument(
-                "new takes either a folder (cwd) or a registered path (preset), not both",
-            ))
-        }
-        (None, None) => return Err(CommandError::invalid_argument(
-            "new needs either cwd (a folder to work in) or preset (the id of a registered path)",
-        )),
-        (Some(cwd), None) => cwd.to_string(),
-        (None, Some(id)) => {
-            let stored = host.preset_cwd(id).ok_or_else(|| preset_not_found(id))?;
-            // ★프리셋에 담겨 온 값도 **직접 준 값과 같은 검사**를 받는다★: 위 `reject_blanks` 는 호출자가
-            //   친 칸만 보므로 이 갈래는 그 그물을 통째로 지나친다. 프리셋 등록에는 값 검증이 없고
-            //   (`CreatePreset` 은 받은 문자열을 그대로 저장한다) 아래 `register` 도 빈 폴더를 거르지 않아
-            //   (`PtyError::CwdDenied` 를 만드는 코드가 코어에 없다) 여기서 안 보면 **작업 폴더가 빈
-            //   에이전트**가 명부에 앉고, 그것을 지우는 동사가 없다(ADR-0122).
-            if is_blank(Some(&stored)) {
-                return Err(CommandError::invalid_argument(format!(
-                    "the registered path '{id}' has a blank folder, so there is nothing to work in — register that path again with a real folder, or pass cwd directly"
-                )));
-            }
-            stored
-        }
-    };
     // ★기본값이 없다★ — 미지정은 역직렬화가 반려한다(`AgentNewArgs::backend` 의 doc). 여기서
     //   `unwrap_or(Claude)` 를 되살리지 말 것: 백엔드가 둘인 지금 그것은 「고르지 않았다」를 조용히
     //   claude 로 접는 경로이고, 스폰 패킷에서 이미 같은 이유로 걷어냈다.
@@ -1331,7 +1253,7 @@ fn verb_new(
     }
     let stored = register(
         host,
-        &cwd,
+        cwd,
         name.map(str::to_string),
         backend_command(backend, output_format(args.output_format)),
     )?;
@@ -1641,7 +1563,7 @@ fn verb_interrupt(
     }
 }
 
-/// 저장소(프로필 · 프리셋)가 받지 않은 부르는 쪽 변경 → 호출자 오류(코드 + 재시도 지시). 버스와 WS(daemon
+/// 저장소(프로필)가 받지 않은 부르는 쪽 변경 → 호출자 오류(코드 + 재시도 지시). 버스와 WS(daemon
 /// `connection_core`)가 이 하나를 쓰고, 셸 설정(`settings.set` · `settings.reset`)도 같은 나눔을 따른다(사용자 결정
 /// 2026-10-11):
 /// - 적재 때 거절된 저장소(이 실행 내내 읽기 전용 — 까닭 무관) = `CONFLICT` · `never` — 파일을 고치거나 바꾸고 데몬을
@@ -1960,9 +1882,9 @@ mod tests {
         /// 켜져 있으면 명부를 바꾸는 셋과 활성화가 저장 거절(새 판이 쓴 파일)로 돌아온다 — 명부는 그대로다.
         // ADR-0291 R17
         store_refuses: Mutex<bool>,
-        /// `agent.list` 가 싣는 저장소 상태 — 기본은 둘 다 쓸 수 있음.
+        /// `agent.list` 가 싣는 저장소 상태 — 기본은 쓸 수 있음.
         // ADR-0291 R17 (D6)
-        store_status: Mutex<RosterStoreStatus>,
+        store_status: Mutex<StoreStatus>,
         /// reparent 호출 **안에서** 명부에서 지울 대상 — 「그 사이 사라졌다」를 재현한다(자식이든 부모든).
         /// ★적용 성패와 무관하게 지운다★: 실패 뒤 사라짐은 사유 분기를, 성공 뒤 사라짐은 응답 이름의
         /// fallback 을 태운다 — 한쪽에만 걸면 다른 쪽 코드에 어떤 테스트도 못 닿는다.
@@ -1973,8 +1895,6 @@ mod tests {
         started_status: Mutex<Option<AgentStatus>>,
         /// reparent 성공 직후 자식이 얻는 새 이름 — 「적용 뒤 개명이 끼어들었다」를 재현한다.
         rename_on_reparent: Mutex<Option<String>>,
-        /// 등록된 경로 북마크(id → cwd) — 프리셋 지목이 **실제로 폴더를 물어 온다**를 재는 재료.
-        presets: Mutex<HashMap<String, String>>,
         /// 대기 목록 조회의 답. `None` = 산 세션이 없다.
         queued_listing: Mutex<Option<QueuedListing>>,
         /// 대기 입력 취소의 답(한 번 쓰고 비운다). 비었으면 `NotFound`.
@@ -2053,13 +1973,6 @@ mod tests {
             self.with_status(name, live.then_some(AgentStatus::Running), resumable)
         }
 
-        fn with_preset(self: &Arc<Self>, id: &str, cwd: &str) {
-            self.presets
-                .lock()
-                .unwrap()
-                .insert(id.to_string(), cwd.to_string());
-        }
-
         /// 명부 행의 상태를 **그대로** 심는다 — terminal 상태의 행이 `list` 에서 어떤 낱말로 나오는지를
         /// 재려면 `Running` 말고도 넣을 수 있어야 한다.
         fn with_status(
@@ -2129,7 +2042,7 @@ mod tests {
                 .collect()
         }
 
-        fn store_status(&self) -> RosterStoreStatus {
+        fn store_status(&self) -> StoreStatus {
             *self.store_status.lock().unwrap()
         }
 
@@ -2214,10 +2127,6 @@ mod tests {
                 }
             }
             Ok(ok)
-        }
-
-        fn preset_cwd(&self, id: &str) -> Option<String> {
-            self.presets.lock().unwrap().get(id).cloned()
         }
 
         fn list_queued_inputs(&self, id: AgentId) -> Option<QueuedListing> {
@@ -2317,48 +2226,45 @@ mod tests {
     ///   보이는데 바꾸는 요청은 `CONFLICT` 로 돌아와, 호출자가 그 오류를 설명할 상태를 못 본다.
     // ADR-0291 R17 (D6)
     #[test]
-    fn list_reports_each_store_status_with_its_reason() {
+    fn list_reports_the_store_status_with_its_reason() {
         let host = FakeHost::new();
         let (table, _notify) = wiring(&host);
-        let writable = json!({ "state": "Writable", "reason": null, "file_version": null });
 
         let out = call(&table, "agent.list", json!({})).expect("조회 성공");
         assert_eq!(
             out["store"],
-            json!({ "agents": writable, "presets": writable })
+            json!({ "agents": { "state": "Writable", "reason": null, "file_version": null } })
         );
 
-        for (status, expected_agents, expected_presets) in [
+        for (status, expected) in [
             (
-                RosterStoreStatus {
-                    agents: StoreStatus::ReadOnly(Refusal::Newer { found: 3 }),
-                    presets: StoreStatus::Refusing(Refusal::Unreadable),
-                },
+                StoreStatus::ReadOnly(Refusal::Newer { found: 3 }),
                 json!({ "state": "ReadOnly", "reason": "Newer", "file_version": 3 }),
+            ),
+            (
+                StoreStatus::Refusing(Refusal::Unreadable),
                 json!({ "state": "Refusing", "reason": "Unreadable", "file_version": null }),
             ),
             (
-                RosterStoreStatus {
-                    agents: StoreStatus::Refusing(Refusal::Newer { found: 4 }),
-                    presets: StoreStatus::ReadOnly(Refusal::Unreadable),
-                },
+                StoreStatus::Refusing(Refusal::Newer { found: 4 }),
                 json!({ "state": "Refusing", "reason": "Newer", "file_version": 4 }),
+            ),
+            (
+                StoreStatus::ReadOnly(Refusal::Unreadable),
                 json!({ "state": "ReadOnly", "reason": "Unreadable", "file_version": null }),
             ),
         ] {
             *host.store_status.lock().unwrap() = status;
             let out = call(&table, "agent.list", json!({})).expect("조회 성공");
-            assert_eq!(out["store"]["agents"], expected_agents, "{status:?}");
-            assert_eq!(out["store"]["presets"], expected_presets, "{status:?}");
+            assert_eq!(out["store"], json!({ "agents": expected }), "{status:?}");
         }
     }
 
-    /// ★실 매니저가 두 저장소의 상태를 각자 자리에 싣는다(D6)★ — 가짜 매니저는 심은 칸을 돌려줄 뿐이라, 매니저 쪽
-    ///   구현이 둘을 뒤바꾸거나 한쪽을 늘 `Writable` 로 두는 것은 실물로만 잡힌다.
+    /// ★실 매니저가 명부 저장소의 상태를 싣는다(D6)★ — 가짜 매니저는 심은 칸을 돌려줄 뿐이라, 매니저 쪽 구현이 그
+    ///   상태를 늘 `Writable` 로 두는 것은 실물로만 잡힌다.
     // ADR-0291 R17 (D6)
     #[test]
-    fn a_real_manager_reports_each_store_in_its_own_slot() {
-        use crate::preset::{Preset, PresetRegistry, PresetStore};
+    fn a_real_manager_reports_its_store_status() {
         use crate::profile::{ProfileRegistry, ProfileStore};
         use crate::session_tracker::{SessionTracker, TrackerConfig};
         use crate::types::{AgentInfo, StatusSink};
@@ -2380,23 +2286,10 @@ mod tests {
                 StoreStatus::ReadOnly(Refusal::Newer { found: 9 })
             }
         }
-        struct RefusingPresets;
-        impl PresetStore for RefusingPresets {
-            fn save(&self, _presets: &[Preset]) -> Result<(), StoreError> {
-                Err(StoreError::Refused(Refusal::Unreadable))
-            }
-            fn load(&self) -> Vec<Preset> {
-                vec![]
-            }
-            fn status(&self) -> StoreStatus {
-                StoreStatus::Refusing(Refusal::Unreadable)
-            }
-        }
 
         let manager = Arc::new(AgentManager::new(
             Arc::new(NoStatus),
             Arc::new(ProfileRegistry::new(Arc::new(NewerAgents))),
-            Arc::new(PresetRegistry::new(Arc::new(RefusingPresets))),
             Arc::new(SessionTracker::new(
                 TrackerConfig {
                     enabled: false,
@@ -2416,7 +2309,6 @@ mod tests {
             out["store"],
             json!({
                 "agents": { "state": "ReadOnly", "reason": "Newer", "file_version": 9 },
-                "presets": { "state": "Refusing", "reason": "Unreadable", "file_version": null },
             })
         );
     }
@@ -2773,11 +2665,11 @@ mod tests {
             "{at_load}"
         );
         let newer = store_error_reason(
-            "presets.json",
+            "agents.json",
             &StoreError::Refused(Refusal::Newer { found: 3 }),
         );
         assert!(
-            newer.starts_with("presets.json was written by a newer build (version 3)")
+            newer.starts_with("agents.json was written by a newer build (version 3)")
                 && newer.contains("retrying will not help"),
             "{newer}"
         );
@@ -2793,77 +2685,17 @@ mod tests {
         );
     }
 
-    /// ★대화상자 없이 등록되는 길★ — 프리셋 id 하나로 작업 폴더가 정해진다(ADR-0061 의 경로 북마크).
+    /// ★작업 폴더 없이는 만들지 않는다★ — 만들 자리가 없는 에이전트가 명부에 앉으면 그것을 지우는 동사가 없다
+    /// (ADR-0122).
     #[test]
-    fn new_resolves_a_preset_id_to_its_folder() {
+    fn new_without_a_cwd_is_refused_and_registers_nothing() {
         let host = FakeHost::new();
-        host.with_preset("bookmark-1", "C:/work/from-preset");
         let (table, notify) = wiring(&host);
 
-        let out = call(
-            &table,
-            "agent.new",
-            json!({ "preset": "bookmark-1", "backend": "Claude" }),
-        )
-        .expect("등록");
-
-        assert_eq!(out["state"], "sleeping");
-        assert_eq!(
-            host.rows.lock().unwrap()[0].cwd,
-            "C:/work/from-preset",
-            "프리셋이 가리킨 폴더로 등록돼야 한다"
-        );
-        assert_eq!(*notify.calls.lock().unwrap(), 1);
-    }
-
-    /// ★둘 다 주거나 아무것도 안 주면 **조용히 한쪽을 고르지 않는다**★ — 고르면 호출자가 의도한 곳이
-    /// 아닌 폴더에 에이전트가 생긴다(그리고 지울 경로가 없다 — ADR-0122).
-    #[test]
-    fn new_refuses_both_a_folder_and_a_preset_and_refuses_neither() {
-        let host = FakeHost::new();
-        host.with_preset("bookmark-1", "C:/work/from-preset");
-        let (table, notify) = wiring(&host);
-
-        for args in [
-            json!({ "cwd": "C:/work/x", "preset": "bookmark-1", "backend": "Claude" }),
-            json!({ "backend": "Claude" }),
-        ] {
-            let err = call(&table, "agent.new", args.clone()).expect_err("고를 근거가 없다");
-            assert_eq!(err.code(), ErrorCode::InvalidArgument, "{args}");
-            assert!(
-                err.message().contains("cwd") && err.message().contains("preset"),
-                "무엇을 주면 통하는지 말해야: {}",
-                err.message()
-            );
-        }
-        assert!(
-            host.rows.lock().unwrap().is_empty(),
-            "반려는 등록하지 않는다"
-        );
-        assert_eq!(*notify.calls.lock().unwrap(), 0, "반려는 통지하지 않는다");
-    }
-
-    /// ★프리셋 갈래가 빈 폴더 검사를 **비껴가지 않는다**★ — 그 등록에는 값 검증이 없어서 공백만 담긴
-    /// 북마크가 실제로 존재할 수 있고, 통과시키면 작업 폴더가 빈 에이전트가 지울 수단 없이 남는다.
-    #[test]
-    fn a_preset_holding_a_blank_folder_is_refused_like_a_blank_cwd() {
-        let host = FakeHost::new();
-        host.with_preset("blank-bookmark", "   ");
-        let (table, notify) = wiring(&host);
-
-        let err = call(
-            &table,
-            "agent.new",
-            json!({ "preset": "blank-bookmark", "backend": "Claude" }),
-        )
-        .expect_err("빈 폴더는 등록 대상이 아니다");
-
+        let err = call(&table, "agent.new", json!({ "backend": "Claude" }))
+            .expect_err("만들 자리가 없다");
         assert_eq!(err.code(), ErrorCode::InvalidArgument);
-        assert!(
-            err.message().contains("blank-bookmark"),
-            "어느 북마크인지 짚어야: {}",
-            err.message()
-        );
+        assert!(err.message().contains("cwd"), "{}", err.message());
         assert!(
             host.rows.lock().unwrap().is_empty(),
             "반려는 등록하지 않는다"
@@ -2871,22 +2703,21 @@ mod tests {
         assert_eq!(*notify.calls.lock().unwrap(), 0, "반려는 통지하지 않는다");
     }
 
+    /// ★`preset` 은 `agent.new` 의 칸이 아니다★ — 입구 검문(`CommandTable::check_args`)이 모르는 칸으로 반려한다.
+    ///   역직렬화는 모르는 칸을 버리므로(additive 규칙) 이 검문이 빠지면 경로 북마크 id 를 실은 옛 호출이 그 칸을
+    ///   잃은 채 `cwd` 로 만들어진다.
     #[test]
-    fn an_unknown_preset_is_not_found() {
-        let host = FakeHost::new();
-        let (table, _notify) = wiring(&host);
+    fn preset_is_not_an_argument_of_new() {
+        let (table, _notify) = wiring(&FakeHost::new());
 
-        let err = call(
-            &table,
-            "agent.new",
-            json!({ "preset": "no-such-bookmark", "backend": "Claude" }),
-        )
-        .expect_err("없는 북마크");
-        assert_eq!(err.code(), ErrorCode::NotFound);
-        assert!(
-            host.rows.lock().unwrap().is_empty(),
-            "반려는 등록하지 않는다"
-        );
+        let err = table
+            .check_args(
+                "agent.new",
+                &json!({ "cwd": "C:/work/x", "preset": "bookmark-1", "backend": "Claude" }),
+            )
+            .expect_err("선언에 없는 칸");
+        assert_eq!(err.code(), ErrorCode::InvalidArgument);
+        assert!(err.message().contains(r#""preset""#), "{}", err.message());
     }
 
     /// ★미지정은 StreamJson, 어휘 밖 값은 반려★ — 조용한 fallback 이 있으면 "만들었는데 화면이 다르다"가
@@ -2963,7 +2794,6 @@ mod tests {
         let host = FakeHost::new();
         host.with_agent("alpha", false, false);
         host.with_agent("lead", false, false);
-        host.with_preset("blank-bookmark", "   ");
         let (table, notify) = wiring(&host);
         let snapshot = || -> Vec<(AgentId, String, Option<AgentId>)> {
             host.roster()
@@ -2976,18 +2806,7 @@ mod tests {
         // 반려가 나는 갈래를 동사별로 훑는다 — 코드는 다르지만 전부 「손대기 전」이어야 한다.
         let rejections = [
             ("agent.new", json!({ "cwd": "   ", "backend": "Claude" })),
-            (
-                "agent.new",
-                json!({ "preset": "no-such-bookmark", "backend": "Claude" }),
-            ),
-            (
-                "agent.new",
-                json!({ "preset": "blank-bookmark", "backend": "Claude" }),
-            ),
-            (
-                "agent.new",
-                json!({ "cwd": "C:/x", "preset": "b", "backend": "Claude" }),
-            ),
+            ("agent.new", json!({ "backend": "Claude" })),
             ("agent.rename", json!({ "target": "ghost", "name": "beta" })),
             ("agent.rename", json!({ "target": "alpha", "name": "  " })),
             ("agent.move", json!({ "target": "ghost", "parent": null })),
@@ -3126,7 +2945,7 @@ mod tests {
             fn roster(&self) -> Vec<AgentRosterRow> {
                 self.0.roster()
             }
-            fn store_status(&self) -> RosterStoreStatus {
+            fn store_status(&self) -> StoreStatus {
                 self.0.store_status()
             }
             fn agent_snapshot(&self, id: AgentId) -> Option<AgentProfile> {
@@ -3160,9 +2979,6 @@ mod tests {
                 parent: Option<AgentId>,
             ) -> Result<bool, PtyError> {
                 self.0.reparent_agent(child, parent)
-            }
-            fn preset_cwd(&self, id: &str) -> Option<String> {
-                self.0.preset_cwd(id)
             }
             fn list_queued_inputs(&self, id: AgentId) -> Option<QueuedListing> {
                 self.0.list_queued_inputs(id)
@@ -3245,7 +3061,6 @@ mod tests {
     // ADR-0291 R17 (D3 · E2)
     #[test]
     fn a_real_manager_behind_the_bus_changes_nothing_while_its_store_does_not_save() {
-        use crate::preset::{Preset, PresetRegistry, PresetStore};
         use crate::profile::scripted_store::{Outcome, ScriptedStore, FAILURES};
         use crate::profile::ProfileRegistry;
         use crate::session_tracker::{SessionTracker, TrackerConfig};
@@ -3256,16 +3071,6 @@ mod tests {
             fn status_changed(&self, _id: AgentId, _s: AgentStatus, _e: u32) {}
             fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
         }
-        struct NoPresets;
-        impl PresetStore for NoPresets {
-            fn save(&self, _presets: &[Preset]) -> Result<(), StoreError> {
-                Ok(())
-            }
-            fn load(&self) -> Vec<Preset> {
-                vec![]
-            }
-        }
-
         for failure in FAILURES {
             let expected = match failure {
                 Outcome::FailsIo => ErrorCode::Internal,
@@ -3275,7 +3080,6 @@ mod tests {
             let manager = Arc::new(AgentManager::new(
                 Arc::new(NoStatus),
                 Arc::new(ProfileRegistry::new(store.clone())),
-                Arc::new(PresetRegistry::new(Arc::new(NoPresets))),
                 Arc::new(SessionTracker::new(
                     TrackerConfig {
                         enabled: false,
@@ -3900,12 +3704,12 @@ mod tests {
         .message()
         .to_string();
         assert!(
-            required.contains("cwd needs a folder path") && required.contains("preset"),
-            "값을 채우거나 형제 칸을 쓰라고 말해야: {required}"
+            required.contains("cwd needs a real value"),
+            "값을 채우라고 말해야: {required}"
         );
         assert!(
             !required.contains("left out"),
-            "빼라고만 하면 그 재시도가 「둘 중 하나는 줘야 한다」로 다시 반려된다: {required}"
+            "빼라고 하면 그 재시도가 「빠졌다」로 다시 반려된다: {required}"
         );
         // ★반려는 아무것도 만들지 않는다★ — 검사가 등록 뒤로 밀리면 빈 인자 호출이 에이전트를 만들어 놓고
         //   반려를 답한다(호출자는 실패로 읽고 다시 부른다 — 이름만 하나씩 늘어난다).

@@ -11,7 +11,6 @@ import { useAgentStore } from '../../store/agentStore'
 import TerminalSlot from '../slot/TerminalSlot'
 import RichSlot from '../slot/RichSlot'
 import DomSlot from '../slot/DomSlot'
-import PresetPalette from '../slot/PresetPalette'
 import UsageSlot from '../slot/UsageSlot'
 import AgentList from '../agent/AgentList'
 import { isContentSlot } from '../agent/selectOpenTarget'
@@ -83,7 +82,7 @@ function LayoutLeaf({
       //   ★버블 허용(stopPropagation/preventDefault 안 함)★: 내부 상호작용(터미널 포커스·AgentList 버튼 등)을
       //   가로채지 않는다 — pane 어디를 눌러도 내부 핸들러가 그대로 발화한다.
       //   ★제어 슬롯 포커스 제외 — allowlist(콘텐츠 슬롯만 포커스), ADR-0066 정제★: 콘텐츠 슬롯
-      //   (empty/agent)일 때만 focusSlot 호출한다. 트리(agent_list)·팔레트(preset_palette) 등 제어 슬롯,
+      //   (empty/agent)일 때만 focusSlot 호출한다. 트리(agent_list) 등 제어 슬롯,
       //   그리고 앞으로 추가될 제어 variant(ADR-0060 FileTree/ControlPanel 등)는 자동으로 비포커스된다
       //   — 게이트 기준을 denylist(제어 나열)가 아니라 selectOpenTarget 와 공유하는 단일 분류기
       //   isContentSlot(allowlist)로 잡아 "열기" 대상 선택과 기준 이원화를 막는다.
@@ -233,12 +232,11 @@ const SlotBody = memo(function SlotBody({
           : presence === 'reserved'
             ? 'stopped'
             : 'noTarget'
-  // preset_palette·agent_list·usage variant 도 슬롯을 100% 채우는 실 렌더러라 hasContent=true(중앙정렬
-  //   플레이스홀더 스타일이 이들 레이아웃을 깨지 않게, ADR-0060/0061/0062).
-  const isPresetPalette = node.content.type === 'preset_palette'
+  // agent_list·usage variant 도 슬롯을 100% 채우는 실 렌더러라 hasContent=true(중앙정렬
+  //   플레이스홀더 스타일이 이들 레이아웃을 깨지 않게, ADR-0060/0062).
   const isAgentList = node.content.type === 'agent_list'
   const isUsage = node.content.type === 'usage'
-  const hasContent = agentSlot === 'view' || isPresetPalette || isAgentList || isUsage
+  const hasContent = agentSlot === 'view' || isAgentList || isUsage
   return (
     <div
       ref={borderRef}
@@ -307,9 +305,6 @@ const SlotBody = memo(function SlotBody({
               }
             })()
           )
-        ) : node.content.type === 'preset_palette' ? (
-          // 목록/추가/삭제는 PresetPalette 내부에서 agentClient(단일 제어 표면)로 흐른다.
-          <PresetPalette />
         ) : node.content.type === 'agent_list' ? (
           // 조작은 AgentList 내부에서 agentClient/viewStore(단일 제어 표면)로 흐른다(§5).
           <AgentList />
@@ -358,8 +353,8 @@ const SlotBody = memo(function SlotBody({
         // ★강도 40%★: 옛 65%는 프레임이 시끄럽다고 판단해 하향(사용자 결정 2026-08-23 — 65→50→40을
         //   실제 화면에서 눈으로 비교해 고른 값). ADR-0066이 "너무 약해 안 보인다"며 거부했던 값과 같은
         //   40%지만, 그 거부는 실물 대조 없이 내린 것이라 이번 실측 결정이 우선한다. 되돌리려면 이 줄만
-        //   올리면 된다. 세 테마 모두 color-mix 자동 적응. 제어 슬롯(트리/프리셋)은
-        //   애초 focusSlot 제외(isContentSlot 게이트)라 isFocused=false → 링 없음(요구: 트리/프리셋 제외).
+        //   올리면 된다. 세 테마 모두 color-mix 자동 적응. 제어 슬롯(트리 등)은
+        //   애초 focusSlot 제외(isContentSlot 게이트)라 isFocused=false → 링 없음(요구: 제어 슬롯 제외).
         // ADR-0280
         // ★링 색은 슬롯 상태에 따라 달라지면 안 된다(사용자 결정 2026-10-06)★ — 그래서 링은 부재 막(z-20, 잎이
         //   그리든 슬롯 컴포넌트가 그리든) 위에 서서 막이 링을 흐리게 덮지 않는다. 전제 둘: 이 요소 아래 막의 조상

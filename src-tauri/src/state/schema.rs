@@ -131,6 +131,8 @@ pub enum PersistedNode {
 /// - ★아는 종류에 붙은 모르는 칸은 `Known` 으로 읽히고 다시 쓸 때 사라진다★ — `SlotContent` 의 serde 가 모르는
 ///   칸을 무시한다.
 /// - 객체가 아닌 값은 어느 쪽도 아니다 — 읽기 실패이고, 그 슬롯을 품은 탭을 못 읽는다.
+/// - 걷은 종류([`RETIRED_KINDS`])는 원문을 쥐지 않고 `Known(Empty)` 로 읽는다 — 새 판이 쓴 내용이 아니라 이 판이 버린
+///   내용이라, 다시 쓰면 빈 슬롯으로 나간다.
 // ADR-0060
 #[derive(Debug, Clone, PartialEq)]
 pub enum PersistedContent {
@@ -150,6 +152,9 @@ impl Serialize for PersistedContent {
 impl<'de> Deserialize<'de> for PersistedContent {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = Value::deserialize(deserializer)?;
+        if is_retired(&raw) {
+            return Ok(PersistedContent::Known(SlotContent::Empty));
+        }
         match SlotContent::deserialize(&raw) {
             Ok(known) if raw.is_object() => Ok(PersistedContent::Known(known)),
             _ => match raw {
@@ -158,6 +163,17 @@ impl<'de> Deserialize<'de> for PersistedContent {
             },
         }
     }
+}
+
+/// 걷은 슬롯 종류의 `type` 글자.
+// ADR-0314: 옛 데이터는 묻지 않고 버린다 — 모르는 내용으로 쥐면 원문이 저장마다 살아남고 그 칸이 「알 수 없는 내용」 ·
+//   복원 경고로 남는다.
+const RETIRED_KINDS: [&str; 1] = ["preset_palette"];
+
+fn is_retired(raw: &Value) -> bool {
+    raw.get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| RETIRED_KINDS.contains(&kind))
 }
 
 fn lenient_bool<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<bool>, D::Error> {
@@ -220,7 +236,6 @@ mod tests {
                     SlotContent::Empty => "empty",
                     SlotContent::Agent { agent_id: _ } => "agent",
                     SlotContent::AgentList => "agent_list",
-                    SlotContent::PresetPalette => "preset_palette",
                     SlotContent::Usage {
                         show_claude: _,
                         show_codex: _,
@@ -262,14 +277,10 @@ mod tests {
                     split(
                         SplitDir::TopBottom,
                         slot(SlotContent::AgentList),
-                        split(
-                            SplitDir::LeftRight,
-                            slot(SlotContent::PresetPalette),
-                            slot(SlotContent::Usage {
-                                show_claude: false,
-                                show_codex: true,
-                            }),
-                        ),
+                        slot(SlotContent::Usage {
+                            show_claude: false,
+                            show_codex: true,
+                        }),
                     ),
                 ),
                 focused_slot_id: Some(Uuid::new_v4()),
@@ -307,7 +318,6 @@ mod tests {
                 "empty",
                 "agent",
                 "agent_list",
-                "preset_palette",
                 "usage",
                 "left_right",
                 "top_bottom",

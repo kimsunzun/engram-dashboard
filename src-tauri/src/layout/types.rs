@@ -23,8 +23,8 @@ pub enum SplitDir {
 
 /// 슬롯 점유자 = 타입드 유니온(ADR-0060).
 ///
-/// 후속 콘텐츠 종류(FileTree/ControlPanel)는 variant 추가로 확장하고, 사용자 커스텀(프리셋 버튼셋)은 새
-/// variant 가 아니라 variant 내부 config 데이터로 표현한다(enum 폭발 방지 — ADR-0060 핵심 통찰).
+/// 후속 콘텐츠 종류(FileTree/ControlPanel)는 variant 추가로 확장하고, 사용자 커스텀은 새 variant 가 아니라
+/// variant 내부 config 데이터로 표현한다(enum 폭발 방지 — ADR-0060 핵심 통찰).
 ///
 /// ★불변식(ADR-0060)★: `Agent` variant 는 데몬 에이전트의 **바인딩(agent_id 참조 문자열)만** 담는다 —
 /// 라이브 출력 스트림은 여기 담지 않고 `OutputRouter` 가 agent_id 로 별도 라우팅한다(ADR-0041/0042/0046).
@@ -40,9 +40,6 @@ pub enum SlotContent {
     Agent { agent_id: String },
     /// MVP=필드 없는 unit — 렌더 대상만 지정하고 데이터는 agentStore 가 쥔다(콘텐츠 종류만 표현, ADR-0060).
     AgentList,
-    /// 프리셋 팔레트(등록된 cwd 프리셋 버튼셋) 뷰. MVP=필드 없는 unit — 프리셋 목록 데이터는
-    /// 데몬 소유(presets.json, ADR-0061)라 여기 담지 않고 PresetRegistry wire 로 별도 흐른다.
-    PresetPalette,
     /// 사용량 한도 뷰. 두 칸 = 이 슬롯이 켠 회사 — 셸은 이것으로 데몬 사용량 구독(관심)을 계산한다
     /// (`daemon_client::usage_interest`). 값 자체는 여기 담지 않는다.
     /// 칸이 빠진 입력은 `true` 로 읽는다 — `{"type":"usage"}` 한 장이 두 회사를 다 켠 슬롯이다.
@@ -66,10 +63,7 @@ impl SlotContent {
     pub fn agent_id(&self) -> Option<&str> {
         match self {
             SlotContent::Agent { agent_id } => Some(agent_id),
-            SlotContent::Empty
-            | SlotContent::AgentList
-            | SlotContent::PresetPalette
-            | SlotContent::Usage { .. } => None,
+            SlotContent::Empty | SlotContent::AgentList | SlotContent::Usage { .. } => None,
         }
     }
 }

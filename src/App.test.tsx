@@ -12,7 +12,6 @@ const wiring = vi.hoisted(() => ({
   initEventBus: vi.fn(async () => {}),
   getAgents: vi.fn(async () => []),
   listProfiles: vi.fn(async () => []),
-  listPresets: vi.fn(async () => []),
 }))
 
 vi.mock('./theme/uiSettings', () => ({ installUiSettings: wiring.installUiSettings }))
@@ -23,7 +22,7 @@ vi.mock('./components/ui/nativeScrollActivity', () => ({
 }))
 vi.mock('./api/clientFactory', () => ({
   bootstrapDaemonIfNeeded: wiring.bootstrapDaemonIfNeeded,
-  agentClient: { getAgents: wiring.getAgents, listProfiles: wiring.listProfiles, listPresets: wiring.listPresets },
+  agentClient: { getAgents: wiring.getAgents, listProfiles: wiring.listProfiles },
 }))
 vi.mock('./store/eventBus', () => ({ initEventBus: wiring.initEventBus }))
 vi.mock('./commands/contributions', () => ({}))

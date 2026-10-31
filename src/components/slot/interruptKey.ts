@@ -12,8 +12,8 @@ export type InterruptEscScope = 'slot' | 'input'
 export const ESC_SCOPE: InterruptEscScope = 'slot'
 
 /**
- * 열려 있는 동안 Esc 가 턴을 끊지 않는 오버레이의 표지. 문서 전역 Esc 로 닫히는 셋(에이전트 고르기 ·
- * 트리 행 메뉴 · 프리셋 행 메뉴)과 우클릭 메뉴가 뿌리에 단다 — 그 Esc 는 오버레이를 닫는 키다.
+ * 열려 있는 동안 Esc 가 턴을 끊지 않는 오버레이의 표지. 문서 전역 Esc 로 닫히는 둘(에이전트 고르기 ·
+ * 트리 행 메뉴)과 우클릭 메뉴가 뿌리에 단다 — 그 Esc 는 오버레이를 닫는 키다.
  */
 export const OVERLAY_SELECTOR = '[data-engram-overlay]'
 

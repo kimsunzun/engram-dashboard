@@ -56,7 +56,6 @@ const agentStoreState = vi.hoisted(() => ({
   agentsLoaded: false,
   profiles: [] as unknown[],
   profilesLoaded: false,
-  presets: [] as unknown[],
 }))
 vi.mock('../../store/agentStore', () => ({
   useAgentStore: Object.assign(
@@ -99,9 +98,6 @@ vi.mock('../slot/RichSlot', async () => {
 })
 vi.mock('../slot/DomSlot', () => ({
   default: ({ agentId }: { agentId: string }) => <div data-testid="dom-slot" data-agent-id={agentId} />,
-}))
-vi.mock('../slot/PresetPalette', () => ({
-  default: () => <div data-testid="preset-palette" />,
 }))
 vi.mock('../agent/AgentList', () => ({
   default: () => <div data-testid="agent-list" />,

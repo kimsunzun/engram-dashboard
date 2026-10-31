@@ -7,7 +7,7 @@
 // ★시드 전용(이 커밋)★: 인프라 형태를 증명하는 대표 엔트리만 담는다. 기존 ~100개 인라인 문자열의
 //   실제 마이그레이션은 후속 커밋(command → 컴포넌트 점진). 여기 나열된 것이 전부가 아니다.
 //
-// ★네임스페이스 = UI 도메인★: 도메인별 1단 그룹(tab/slot/agent/preset/common …).
+// ★네임스페이스 = UI 도메인★: 도메인별 1단 그룹(tab/slot/agent/common …).
 
 /**
  * `as const` 로 값을 리터럴 타입으로 고정한다 — index.ts 가 placeholder 유무를 값 리터럴에서 추론해
@@ -34,7 +34,6 @@ export const ko = {
     close: '닫기',
     resolveSpatial: '공간 타깃 해소',
     fillAgentList: '에이전트 트리 열기',
-    fillPresetPalette: '프리셋 팔레트 열기',
     fillUsage: '사용량 한도 열기',
     newContent: '새 콘텐츠', // ADR-0065 "새 콘텐츠 ▶" 서브메뉴 컨테이너 라벨.
     renderModeSet: '렌더 모드 지정',
@@ -94,7 +93,7 @@ export const ko = {
     treeLabel: '에이전트 트리',
     emptyList: '에이전트 없음 — 우클릭으로 생성',
     rowActivate: '활성화(spawn)', // reserved 행.
-    rowCancelReserved: '삭제', // reserved 행 — preset.deleteBtn 과 어휘 통일.
+    rowCancelReserved: '삭제', // reserved 행.
     rowOpen: '열기', // running 행.
     rowKill: '종료', // running 행.
     rowRename: '이름 변경', // running/reserved 행(ADR-0061 리치화).
@@ -129,16 +128,6 @@ export const ko = {
     rename: '에이전트 이름 변경', // §5 LLM 제어 — RenameProfile.
     cancelQueuedInput: '대기 입력을 목록에서 빼기', // ADR-0231 — 목록 ✕ 와 같은 command.
     interrupt: '응답 중단',
-  },
-  preset: {
-    create: '프리셋 생성',
-    list: '프리셋 목록 조회',
-    delete: '프리셋 삭제', // PresetPalette 행 삭제 aria-label 과 값 재사용.
-    add: '추가',
-    rename: '이름 변경', // PresetPalette 행 우클릭 메뉴와 값 재사용.
-    label: '프리셋',
-    empty: '프리셋 없음 — 우클릭 "추가"로 폴더를 선택하세요.',
-    deleteBtn: '삭제',
   },
   /**
    * 사용량 한도 슬롯(TRD S21 usage-limit-slot §1-8). 데몬·wire 는 상태 코드와 수만 나르고 문구는 여기서 만든다
@@ -295,7 +284,6 @@ export const ko = {
   /** 네이티브 OS 다이얼로그 제목 — webview 밖 사용자 노출 텍스트. */
   dialog: {
     pickAgentCwd: '에이전트 작업 디렉토리 선택',
-    pickPresetPath: '프리셋 경로 선택',
   },
   common: {
     emptySlot: '- 비어있음 -',

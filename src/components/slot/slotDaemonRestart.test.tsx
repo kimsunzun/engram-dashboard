@@ -57,7 +57,6 @@ const agentStoreState = vi.hoisted(() => ({
   agentsLoaded: false,
   profiles: [] as unknown[],
   profilesLoaded: false,
-  presets: [] as unknown[],
 }))
 vi.mock('../../store/agentStore', () => ({
   useAgentStore: Object.assign(
@@ -66,9 +65,8 @@ vi.mock('../../store/agentStore', () => ({
   ),
 }))
 
-// 슬롯 분기와 무관한 무거운 형제들(트리·팔레트)은 세우지 않는다 — 이 테스트의 노드는 agent 슬롯 하나다.
+// 슬롯 분기와 무관한 무거운 형제(트리)는 세우지 않는다 — 이 테스트의 노드는 agent 슬롯 하나다.
 vi.mock('../agent/AgentList', () => ({ default: () => <div /> }))
-vi.mock('./PresetPalette', () => ({ default: () => <div /> }))
 
 import ViewLayoutRenderer from '../layout/ViewLayoutRenderer'
 import { useViewStore } from '../../store/viewStore'

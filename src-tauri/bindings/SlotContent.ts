@@ -3,12 +3,12 @@
 /**
  * 슬롯 점유자 = 타입드 유니온(ADR-0060).
  *
- * 후속 콘텐츠 종류(FileTree/ControlPanel)는 variant 추가로 확장하고, 사용자 커스텀(프리셋 버튼셋)은 새
- * variant 가 아니라 variant 내부 config 데이터로 표현한다(enum 폭발 방지 — ADR-0060 핵심 통찰).
+ * 후속 콘텐츠 종류(FileTree/ControlPanel)는 variant 추가로 확장하고, 사용자 커스텀은 새 variant 가 아니라
+ * variant 내부 config 데이터로 표현한다(enum 폭발 방지 — ADR-0060 핵심 통찰).
  *
  * ★불변식(ADR-0060)★: `Agent` variant 는 데몬 에이전트의 **바인딩(agent_id 참조 문자열)만** 담는다 —
  * 라이브 출력 스트림은 여기 담지 않고 `OutputRouter` 가 agent_id 로 별도 라우팅한다(ADR-0041/0042/0046).
  * epoch(화신 표식, ADR-0163)도 레이아웃 트리 밖(agentStore 소유) — 재구독 계기는 이 필드가 아니라
  * 권위 명부 관측이다(ADR-0164 결정 8).
  */
-export type SlotContent = { "type": "empty" } | { "type": "agent", agent_id: string, } | { "type": "agent_list" } | { "type": "preset_palette" } | { "type": "usage", show_claude: boolean, show_codex: boolean, };
+export type SlotContent = { "type": "empty" } | { "type": "agent", agent_id: string, } | { "type": "agent_list" } | { "type": "usage", show_claude: boolean, show_codex: boolean, };

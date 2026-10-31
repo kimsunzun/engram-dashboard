@@ -92,10 +92,6 @@ describe('코어 콘텐츠(slotContentCommands) 라우팅', () => {
     run('slot.fill.agentList', CTX)
     expect(vs.setSlotContent).toHaveBeenCalledWith('v1', 's1', { type: 'agent_list' })
   })
-  it('slot.fill.presetPalette → setSlotContent(…,{type:preset_palette})', () => {
-    run('slot.fill.presetPalette', CTX)
-    expect(vs.setSlotContent).toHaveBeenCalledWith('v1', 's1', { type: 'preset_palette' })
-  })
   it('slot.fill.usage → setSlotContent(…,{type:usage, 두 회사 켬})', () => {
     run('slot.fill.usage', CTX)
     expect(vs.setSlotContent).toHaveBeenCalledWith('v1', 's1', { type: 'usage', show_claude: true, show_codex: true })
@@ -138,7 +134,6 @@ describe('코어 콘텐츠(slotContentCommands) 라우팅', () => {
     // ADR-0067: "생성" 은 뺀다 — 스폰은 트리 소관.
     expect(items[1].children?.map(c => c.id)).toEqual([
       'slot.fill.agentList',
-      'slot.fill.presetPalette',
       'slot.fill.usage',
     ])
     expect(items[1].children?.map(c => c.id)).not.toContain('slot.createAgentHere')
@@ -147,9 +142,9 @@ describe('코어 콘텐츠(slotContentCommands) 라우팅', () => {
 
   it('§5 불변: 접힌 slot.fill.* 도 registry 로 여전히 직접 실행 가능', () => {
     run('slot.fill.agentList', CTX)
-    run('slot.fill.presetPalette', CTX)
+    run('slot.fill.usage', CTX)
     expect(vs.setSlotContent).toHaveBeenCalledWith('v1', 's1', { type: 'agent_list' })
-    expect(vs.setSlotContent).toHaveBeenCalledWith('v1', 's1', { type: 'preset_palette' })
+    expect(vs.setSlotContent).toHaveBeenCalledWith('v1', 's1', { type: 'usage', show_claude: true, show_codex: true })
   })
   it('agent 콘텐츠 메뉴 = 에이전트 모니터링(order 5) → 종료(order 10) 순 (ADR-0067)', () => {
     const items = buildSlotMenu('agent')

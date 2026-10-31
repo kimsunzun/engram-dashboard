@@ -81,8 +81,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use engram_dashboard_agent::manager::AgentManager;
-use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
-use engram_dashboard_agent::preset::PresetRegistry;
+use engram_dashboard_agent::persistence::FileProfileStore;
 use engram_dashboard_agent::profile::{
     AgentCommand, AgentOutputFormat, AgentProfile, ProfileRegistry, SpawnMode,
 };
@@ -438,13 +437,8 @@ async fn run() -> i32 {
     let sink: Arc<dyn StatusSink> = Arc::new(NoopStatus);
     let profile_dir =
         std::env::temp_dir().join(format!("engram-roundtrip-prof-{}", AgentId::new_v4()));
-    let preset_dir =
-        std::env::temp_dir().join(format!("engram-roundtrip-preset-{}", AgentId::new_v4()));
     let profiles = Arc::new(ProfileRegistry::new(Arc::new(FileProfileStore::new(
         profile_dir.clone(),
-    ))));
-    let presets = Arc::new(PresetRegistry::new(Arc::new(FilePresetStore::new(
-        preset_dir.clone(),
     ))));
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig {
@@ -454,7 +448,7 @@ async fn run() -> i32 {
         Arc::new(|_, _| {}),
     ));
     let manager = Arc::new(AgentManager::new_with_control(
-        sink, profiles, presets, tracker, control,
+        sink, profiles, tracker, control,
     ));
     slot.set(manager.clone());
     command_slot.set(Arc::new(
@@ -475,7 +469,7 @@ async fn run() -> i32 {
     let agent_a = match spawn_named(&manager, NAME_A, &args.model, &ws_a) {
         Some(a) => a,
         None => {
-            let dirs = [&data_dir, &ws_a, &ws_b, &profile_dir, &preset_dir];
+            let dirs = [&data_dir, &ws_a, &ws_b, &profile_dir];
             cleanup(&manager, &[], &dirs).await;
             handle.shutdown().await;
             return skip_no_claude("A 스폰/등장 실패");
@@ -484,7 +478,7 @@ async fn run() -> i32 {
     let agent_b = match spawn_named(&manager, NAME_B, &args.model, &ws_b) {
         Some(b) => b,
         None => {
-            let dirs = [&data_dir, &ws_a, &ws_b, &profile_dir, &preset_dir];
+            let dirs = [&data_dir, &ws_a, &ws_b, &profile_dir];
             cleanup(&manager, &[agent_a.id], &dirs).await;
             handle.shutdown().await;
             return skip_no_claude("B 스폰/등장 실패");
@@ -509,7 +503,7 @@ async fn run() -> i32 {
             if let Some(id) = sink_b {
                 let _ = manager.unsubscribe(agent_b.id, id);
             }
-            let dirs = [&data_dir, &ws_a, &ws_b, &profile_dir, &preset_dir];
+            let dirs = [&data_dir, &ws_a, &ws_b, &profile_dir];
             cleanup(&manager, &[agent_a.id, agent_b.id], &dirs).await;
             handle.shutdown().await;
             return setup_fail($reason);
@@ -733,7 +727,7 @@ async fn run() -> i32 {
     if let Some(id) = sink_b {
         let _ = manager.unsubscribe(agent_b.id, id);
     }
-    let dirs = [&data_dir, &ws_a, &ws_b, &profile_dir, &preset_dir];
+    let dirs = [&data_dir, &ws_a, &ws_b, &profile_dir];
     cleanup(&manager, &[agent_a.id, agent_b.id], &dirs).await;
     handle.shutdown().await;
     0

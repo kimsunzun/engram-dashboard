@@ -174,7 +174,6 @@ fn persisted_content(
             agent_id: agent_id.clone(),
         },
         SlotContent::AgentList => SlotContent::AgentList,
-        SlotContent::PresetPalette => SlotContent::PresetPalette,
         SlotContent::Usage {
             show_claude,
             show_codex,
@@ -732,7 +731,6 @@ fn known_content(content: SlotContent) -> SlotContent {
         SlotContent::Empty => SlotContent::Empty,
         SlotContent::Agent { agent_id } => SlotContent::Agent { agent_id },
         SlotContent::AgentList => SlotContent::AgentList,
-        SlotContent::PresetPalette => SlotContent::PresetPalette,
         SlotContent::Usage {
             show_claude,
             show_codex,
@@ -852,8 +850,15 @@ mod tests {
 
         let p1 = mgr.create_window("slot-popup-7").unwrap();
         let s = first_slot(&mgr, p1);
-        mgr.set_slot_content(p1, s, SlotContent::PresetPalette)
-            .unwrap();
+        mgr.set_slot_content(
+            p1,
+            s,
+            SlotContent::Usage {
+                show_claude: false,
+                show_codex: true,
+            },
+        )
+        .unwrap();
         mgr.set_window_theme("slot-popup-7", Some(UiTheme::EInk))
             .unwrap();
         place(&mut mgr, "slot-popup-7", 100.0, false);
@@ -1131,7 +1136,6 @@ mod tests {
             "빈 칸",
             "에이전트",
             "에이전트 트리",
-            "프리셋",
             "사용량",
             "알 수 없는 내용",
             "",
@@ -1553,8 +1557,10 @@ mod tests {
     fn a_dropped_popout_holds_no_ids_against_the_windows_after_it() {
         // main 보다 먼저 적힌 팝아웃이 main 과 탭 id · 슬롯 id 를 나눠 쓰다가 label 때문에 버려진다.
         let (shared_view, view_slot) = slot_tab(PersistedContent::Known(SlotContent::AgentList));
-        let (shared_node, node_slot) =
-            slot_tab(PersistedContent::Known(SlotContent::PresetPalette));
+        let (shared_node, node_slot) = slot_tab(PersistedContent::Known(SlotContent::Usage {
+            show_claude: true,
+            show_codex: false,
+        }));
         let mut same_view = empty_tab();
         same_view.id = shared_view.id;
         let mut same_node = empty_tab();
@@ -1585,7 +1591,10 @@ mod tests {
         );
         assert_eq!(
             layout.slot_content(shared_node.id, node_slot),
-            Ok(SlotContent::PresetPalette)
+            Ok(SlotContent::Usage {
+                show_claude: true,
+                show_codex: false,
+            })
         );
         assert_eq!(layout.windows.len(), 1);
 

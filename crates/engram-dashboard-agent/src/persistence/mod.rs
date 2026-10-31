@@ -1,5 +1,4 @@
-//! 프로필 · 프리셋 영속화 — `agents.json` · `presets.json` 의 저장소. 두 파일이 이 모듈의 내부 저장소 하나를
-//! 부른다(같은 규칙 · 같은 구현).
+//! 프로필 영속화 — `agents.json` 의 저장소.
 //!
 //! 규칙은 base `file` 의 데이터 파일 규칙이다(ADR-0291):
 //! - 쓰기는 원자적이다(같은 폴더 임시 → rename) — 크래시가 나도 반쪽 파일이 남지 않는다.
@@ -12,7 +11,7 @@
 //!
 //! ★저장을 직렬화하는 것은 부르는 쪽이다★ — 레지스트리가 자기 맵 락을 쥔 채 저장하고(ADR-0071) 운영에서
 //! 저장소를 부르는 것은 레지스트리 하나뿐이다. 이 모듈이 쥐는 락은 잎 하나(저장소 상태 칸)이고 쥔 채 IO · 로그 ·
-//! 밖 호출을 하지 않는다 — 락 순서 = `래치 → expected 칸 → profiles|presets → 저장소 상태 칸`.
+//! 밖 호출을 하지 않는다 — 락 순서 = `래치 → expected 칸 → profiles → 저장소 상태 칸`.
 // ADR-0291
 
 use std::fs;
@@ -32,9 +31,6 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::profile::{AgentProfile, ProfileStore, Refusal, StoreError, StoreStatus};
-
-pub mod presets;
-pub use presets::{FilePresetStore, PRESETS_FILE};
 
 /// 프로필 저장소의 파일 이름 — 저장 거절 · 실패를 호출자에게 알리는 문구가 이 이름을 댄다.
 pub const AGENTS_FILE: &str = "agents.json";
@@ -168,7 +164,7 @@ struct FileKind {
     spec: file::Spec,
 }
 
-/// `agents.json` · `presets.json` 공통 저장소 — 상태 셋은 [`StoreStatus`] 다.
+/// `agents.json` 저장소 — 상태 셋은 [`StoreStatus`] 다.
 struct FileStore {
     dir: PathBuf,
     kind: FileKind,

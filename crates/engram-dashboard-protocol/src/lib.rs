@@ -39,11 +39,11 @@ pub use discovery::DaemonInfo;
 pub use domain::{
     AgentBackendKind, AgentFailureKind, AgentInfo, AgentOutputFormat, AgentProfile,
     AgentSpawnCommand, AgentStatus, Capabilities, ControlCaps, EnvelopeFormat, InputCaps,
-    ModelCaps, OutputCaps, Preset, RestartPolicy, RestoreOutcome, RestoreReport, SessionCaps,
+    ModelCaps, OutputCaps, RestartPolicy, RestoreOutcome, RestoreReport, SessionCaps,
     SnapshotChunk, UsageLimitSnapshot, UsageScopedWindow, UsageStateDetail, UsageVendorState,
     UsageWindow,
 };
-pub use ids::{AgentId, PresetId, ProfileId, RequestId};
+pub use ids::{AgentId, ProfileId, RequestId};
 pub use messages::{
     command_request_id, event_reply_request_id, AgentCommand, AgentEvent, CommandListEntry,
     DeliveredCopy, DropCause, OutputChunk, QueuedInputCancel, QueuedInputEvent, QueuedInputRow,
@@ -127,7 +127,14 @@ pub use placeholder::{placeholder_error_frame, PLACEHOLDER_ERROR_MESSAGE};
 /// 비정상 상태의 `detail`)과 이벤트의 `subscribed` 칸. 이 브랜치 전에는 사용량 wire 를 나르는 변형이 없어
 /// 그 모양을 읽는 옛 피어가 없다. bump 를 강제하는 것은 명령 축 하나다.
 ///
+/// v8: 옛 프리셋(작업 폴더 북마크) wire 를 걷었다 — 명령 `ListPresets` · `CreatePreset` · `DeletePreset` ·
+/// `RenamePreset` 과 이벤트 `PresetList` · `PresetListUpdated`(TRD S25-preset-library §5-2 1). 명령 변형을 뺀
+/// 것이라 v3 · v6 과 같은 **비관용** 축이다 — 구셸 + 신데몬이면 신데몬이 구셸의 프리셋 명령을 디코드하지 못해 파싱
+/// 실패 `Error{request_id: None}` 로 답하고, 상관 키가 없어 구셸의 대기 요청은 답장 상한까지 매달린다(v4 의 기준 —
+/// 조용한 오작동). 그래서 auth 의 version check + discovery 의 version-mismatch 거부가 짝이 안 맞는 데몬을
+/// **재사용하지 않고 거부/재기동**하게 강제한다(재는 자리 = v4 항목과 같다).
+///
 /// ★이 기준을 대고 **안 올리기로** 한 변경도 있다★ — 턴 경계 + 결말을 나르는
 /// [`StructuredEvent::TurnEnd`] 추가가 그것이다. 두 방향 분석과 그 결론은 그 변형 자신의 doc 에 산다 —
 /// 여기 되풀어 적지 않는다. **기준의 집은 이 자리, 그 판단의 집은 저쪽이다.**
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;

@@ -27,9 +27,12 @@ describe('selectOpenTarget (pure)', () => {
     expect(selectOpenTarget(layout, 'tree', [])).toBe('empty')
   })
 
-  it('포커스 슬롯 content=preset_palette(제어) + 빈 슬롯 없음 → null(클로버 금지)', () => {
-    const layout = split(slot('palette', { type: 'preset_palette' }), slot('busy', { type: 'agent', agent_id: 'y' }))
-    expect(selectOpenTarget(layout, 'palette', [])).toBeNull()
+  it('포커스 슬롯 content=usage(제어) + 빈 슬롯 없음 → null(클로버 금지)', () => {
+    const layout = split(
+      slot('usage', { type: 'usage', show_claude: true, show_codex: true }),
+      slot('busy', { type: 'agent', agent_id: 'y' }),
+    )
+    expect(selectOpenTarget(layout, 'usage', [])).toBeNull()
   })
 
   it('focus=null + 빈 슬롯 존재 → 첫 빈 슬롯(a→b 순서)', () => {

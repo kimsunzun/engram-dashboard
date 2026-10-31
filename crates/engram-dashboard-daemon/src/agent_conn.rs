@@ -895,7 +895,6 @@ mod tests {
         deliveries: CommandDeliveries,
         usage: Arc<UsageService>,
     ) -> AgentConnections {
-        use engram_dashboard_agent::preset::{Preset, PresetRegistry, PresetStore};
         use engram_dashboard_agent::profile::{
             AgentProfile, ProfileRegistry, ProfileStore, StoreError,
         };
@@ -910,19 +909,10 @@ mod tests {
                 Vec::new()
             }
         }
-        impl PresetStore for NoStore {
-            fn save(&self, _: &[Preset]) -> Result<(), StoreError> {
-                Ok(())
-            }
-            fn load(&self) -> Vec<Preset> {
-                Vec::new()
-            }
-        }
 
         let manager = Arc::new(AgentManager::new(
             Arc::new(crate::status_fanout::DaemonStatusSink::new(fanout.clone())),
             Arc::new(ProfileRegistry::new(Arc::new(NoStore))),
-            Arc::new(PresetRegistry::new(Arc::new(NoStore))),
             Arc::new(SessionTracker::new(
                 TrackerConfig::default(),
                 Arc::new(|_agent_id, _sid| {}),

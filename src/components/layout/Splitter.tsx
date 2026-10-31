@@ -217,7 +217,7 @@ function createDrag(latest: { current: SplitterProps }, setDragging: (v: boolean
     const size = dir === 'left_right' ? rect.width : rect.height
     if (!(size > 0)) return
     // preventDefault 하지 않는다 — 막으면 호환 mousedown 이 사라져, 문서 mousedown 으로 닫히는 열린 메뉴·팝업
-    //   (SlotContextMenu·AgentList·PresetPalette)이 구분선을 눌러도 안 닫힌다. 텍스트 선택은 구분선의
+    //   (SlotContextMenu·AgentList)이 구분선을 눌러도 안 닫힌다. 텍스트 선택은 구분선의
     //   `user-select: none` 과 드래그 중 body 잠금·pointermove 의 preventDefault 로 막는다.
     const start = axisOf(dir, e)
     const el = e.currentTarget

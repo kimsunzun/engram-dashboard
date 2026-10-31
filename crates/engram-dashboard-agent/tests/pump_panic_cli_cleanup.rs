@@ -31,8 +31,7 @@ mod on_windows {
     use uuid::Uuid;
 
     use engram_dashboard_agent::manager::AgentManager;
-    use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
-    use engram_dashboard_agent::preset::PresetRegistry;
+    use engram_dashboard_agent::persistence::FileProfileStore;
     use engram_dashboard_agent::profile::{
         AgentCommand, AgentOutputFormat, AgentProfile, ProfileRegistry, SpawnMode,
     };
@@ -503,9 +502,6 @@ while ($true) {
         let profiles = Arc::new(ProfileRegistry::new(Arc::new(FileProfileStore::new(
             store.join("profiles"),
         ))));
-        let presets = Arc::new(PresetRegistry::new(Arc::new(FilePresetStore::new(
-            store.join("presets"),
-        ))));
         let tracker = Arc::new(SessionTracker::new(
             TrackerConfig {
                 enabled: false,
@@ -513,7 +509,7 @@ while ($true) {
             },
             Arc::new(|_, _| {}),
         ));
-        AgentManager::new(seen, profiles, presets, tracker)
+        AgentManager::new(seen, profiles, tracker)
     }
 
     fn a_contained_pump_panic_ends_the_whole_cli_tree(pump: Pump) {

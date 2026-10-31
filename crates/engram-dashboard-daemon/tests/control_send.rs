@@ -14,8 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use engram_dashboard_agent::manager::AgentManager;
-use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
-use engram_dashboard_agent::preset::PresetRegistry;
+use engram_dashboard_agent::persistence::FileProfileStore;
 use engram_dashboard_agent::profile::{
     AgentCommand, AgentOutputFormat, AgentProfile, ProfileRegistry, SpawnMode,
 };
@@ -139,9 +138,6 @@ async fn wire(
     let profiles = Arc::new(ProfileRegistry::new(Arc::new(FileProfileStore::new(
         std::env::temp_dir().join(format!("engram-cli-prof-{tag}-{}", AgentId::new_v4())),
     ))));
-    let presets = Arc::new(PresetRegistry::new(Arc::new(FilePresetStore::new(
-        std::env::temp_dir().join(format!("engram-cli-preset-{tag}-{}", AgentId::new_v4())),
-    ))));
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig {
             enabled: false,
@@ -150,7 +146,7 @@ async fn wire(
         Arc::new(|_, _| {}),
     ));
     let manager = Arc::new(AgentManager::new_with_control(
-        sink, profiles, presets, tracker, control,
+        sink, profiles, tracker, control,
     ));
     slot.set(manager.clone());
     let idle_notifier = Arc::new(

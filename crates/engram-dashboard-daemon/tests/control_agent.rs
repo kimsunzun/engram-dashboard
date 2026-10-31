@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::manager::MAX_ROSTER_SIZE;
-use engram_dashboard_agent::preset::{Preset, PresetRegistry, PresetStore};
 use engram_dashboard_agent::profile::{
     AgentCommand, AgentProfile, ProfileRegistry, ProfileStore, StoreError,
 };
@@ -135,17 +134,6 @@ impl ProfileStore for MemProfileStore {
     }
     fn load(&self) -> Vec<AgentProfile> {
         self.saved.lock().expect("poisoned").clone()
-    }
-}
-
-#[derive(Default)]
-struct MemPresetStore;
-impl PresetStore for MemPresetStore {
-    fn save(&self, _presets: &[Preset]) -> Result<(), StoreError> {
-        Ok(())
-    }
-    fn load(&self) -> Vec<Preset> {
-        vec![]
     }
 }
 
@@ -360,7 +348,6 @@ async fn fixture_with_table(tag: &str, with_table: bool) -> Fixture {
     let manager = Arc::new(AgentManager::new_with_control(
         Arc::new(NoopSink),
         Arc::new(ProfileRegistry::new(Arc::new(MemProfileStore::default()))),
-        Arc::new(PresetRegistry::new(Arc::new(MemPresetStore))),
         Arc::new(SessionTracker::new(
             TrackerConfig {
                 enabled: false,

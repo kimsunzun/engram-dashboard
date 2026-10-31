@@ -11,7 +11,6 @@ use std::sync::{Arc, Mutex};
 
 use engram_dashboard_agent::backend::{accepts_mcp_config, uses_mail, writes_mcp_config_file};
 use engram_dashboard_agent::manager::AgentManager;
-use engram_dashboard_agent::preset::{Preset, PresetRegistry, PresetStore};
 use engram_dashboard_agent::profile::{
     AgentCommand, AgentOutputFormat, AgentProfile, ProfileRegistry, ProfileStore, StoreError,
 };
@@ -53,16 +52,6 @@ impl ProfileStore for MemProfileStore {
     }
     fn load(&self) -> Vec<AgentProfile> {
         self.saved.lock().expect("poisoned").clone()
-    }
-}
-
-struct MemPresetStore;
-impl PresetStore for MemPresetStore {
-    fn save(&self, _presets: &[Preset]) -> Result<(), StoreError> {
-        Ok(())
-    }
-    fn load(&self) -> Vec<Preset> {
-        vec![]
     }
 }
 
@@ -230,7 +219,6 @@ async fn fixture(tag: &str) -> Fixture {
     let manager = Arc::new(AgentManager::new_with_control(
         Arc::new(NoopSink),
         Arc::new(ProfileRegistry::new(Arc::new(MemProfileStore::default()))),
-        Arc::new(PresetRegistry::new(Arc::new(MemPresetStore))),
         Arc::new(SessionTracker::new(
             TrackerConfig {
                 enabled: false,

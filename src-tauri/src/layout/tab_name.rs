@@ -22,7 +22,6 @@ enum Word {
     EmptySlot,
     AgentUnknown,
     AgentTree,
-    Presets,
     Usage,
     /// 이 판이 모르는 내용의 슬롯 — `SlotContent` 의 갈래가 아니다(메모리 내용은 `Empty` · 원문은 곁표).
     Foreign,
@@ -36,7 +35,6 @@ const fn word(w: Word) -> &'static str {
         Word::EmptySlot => "빈 칸",
         Word::AgentUnknown => "에이전트",
         Word::AgentTree => "에이전트 트리",
-        Word::Presets => "프리셋",
         Word::Usage => "사용량",
         Word::Foreign => "알 수 없는 내용",
     }
@@ -44,11 +42,10 @@ const fn word(w: Word) -> &'static str {
 
 impl Word {
     // 변형을 더하면 여기에도 더한다 — 빠진 낱말은 [`is_word`] 를 지나 에이전트 이름 시드로 심긴다.
-    const ALL: [Word; 6] = [
+    const ALL: [Word; 5] = [
         Word::EmptySlot,
         Word::AgentUnknown,
         Word::AgentTree,
-        Word::Presets,
         Word::Usage,
         Word::Foreign,
     ];
@@ -101,7 +98,6 @@ pub fn slot_label<'n>(
             .unwrap_or(word(Word::AgentUnknown))
             .to_owned(),
         SlotContent::AgentList => word(Word::AgentTree).to_owned(),
-        SlotContent::PresetPalette => word(Word::Presets).to_owned(),
         SlotContent::Usage {
             show_claude: _,
             show_codex: _,
@@ -144,7 +140,6 @@ mod tests {
         assert_eq!(word(Word::EmptySlot), "빈 칸");
         assert_eq!(word(Word::AgentUnknown), "에이전트");
         assert_eq!(word(Word::AgentTree), "에이전트 트리");
-        assert_eq!(word(Word::Presets), "프리셋");
         assert_eq!(word(Word::Usage), "사용량");
         assert_eq!(word(Word::Foreign), "알 수 없는 내용");
     }
@@ -164,7 +159,6 @@ mod tests {
             "빈 칸",
             "에이전트",
             "에이전트 트리",
-            "프리셋",
             "사용량",
             "알 수 없는 내용",
         ] {
@@ -191,7 +185,6 @@ mod tests {
             slot_label(&SlotContent::AgentList, no_names),
             "에이전트 트리"
         );
-        assert_eq!(slot_label(&SlotContent::PresetPalette, no_names), "프리셋");
     }
 
     #[test]
@@ -259,7 +252,6 @@ mod tests {
         for content in [
             SlotContent::Empty,
             SlotContent::AgentList,
-            SlotContent::PresetPalette,
             SlotContent::Usage {
                 show_claude: true,
                 show_codex: true,
@@ -352,9 +344,9 @@ mod tests {
         let view = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         assert_eq!(name_of(&mgr, view), "빈 칸");
         let slot = tree::first_slot_id(&mgr.views[&view].layout);
-        mgr.set_slot_content(view, slot, SlotContent::PresetPalette)
+        mgr.set_slot_content(view, slot, SlotContent::AgentList)
             .unwrap();
-        assert_eq!(name_of(&mgr, view), "프리셋");
+        assert_eq!(name_of(&mgr, view), "에이전트 트리");
     }
 
     // 기본 이름(「View N」 · 「Popup N」 · 「Tab」)을 짓지 않는다 — 새로 서는 탭은 모두 자동 이름이다.

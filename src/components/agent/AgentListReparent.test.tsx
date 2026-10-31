@@ -115,12 +115,12 @@ beforeEach(() => {
   captured.disableDrag = undefined
   captured.disableDrop = undefined
   useAgentStore.setState({
-    agents: [], agentsLoaded: true, profiles: [], profilesLoaded: true, presets: [], selectedAgentId: null,
+    agents: [], agentsLoaded: true, profiles: [], profilesLoaded: true, selectedAgentId: null,
   })
 })
 afterEach(() => {
   cleanup()
-  useAgentStore.setState({ agents: [], profiles: [], presets: [], selectedAgentId: null })
+  useAgentStore.setState({ agents: [], profiles: [], selectedAgentId: null })
 })
 
 describe('드래그 재부모화 배선(onMove → reparentProfile, ADR-0072 §5)', () => {

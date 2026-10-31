@@ -506,13 +506,6 @@ mod tests {
     }
 
     #[test]
-    fn set_in_tree_replaces_with_preset_palette() {
-        let (mut node, id) = single_slot();
-        assert!(set_in_tree(&mut node, id, SlotContent::PresetPalette));
-        assert_eq!(find_slot(&node, id).unwrap(), &SlotContent::PresetPalette);
-    }
-
-    #[test]
     fn set_in_tree_can_clear_to_empty() {
         let id = Uuid::new_v4();
         let mut node = agent_slot(id, "occupant");
@@ -532,11 +525,8 @@ mod tests {
     fn set_in_tree_targets_correct_slot_in_split() {
         let (mut node, id) = single_slot();
         let new_id = split_in_tree(&mut node, id, SplitDir::LeftRight).unwrap();
-        assert!(set_in_tree(&mut node, new_id, SlotContent::PresetPalette));
-        assert_eq!(
-            find_slot(&node, new_id).unwrap(),
-            &SlotContent::PresetPalette
-        );
+        assert!(set_in_tree(&mut node, new_id, SlotContent::AgentList));
+        assert_eq!(find_slot(&node, new_id).unwrap(), &SlotContent::AgentList);
         assert!(find_slot(&node, id).unwrap().is_empty());
     }
 
@@ -688,7 +678,14 @@ mod tests {
         let (mut node, id) = single_slot();
         let new_id = split_in_tree(&mut node, id, SplitDir::LeftRight).unwrap();
         assert!(set_in_tree(&mut node, id, SlotContent::AgentList));
-        assert!(set_in_tree(&mut node, new_id, SlotContent::PresetPalette));
+        assert!(set_in_tree(
+            &mut node,
+            new_id,
+            SlotContent::Usage {
+                show_claude: true,
+                show_codex: true,
+            }
+        ));
         assert_eq!(first_empty_slot_id(&node), None, "전부 점유 → None");
     }
 }

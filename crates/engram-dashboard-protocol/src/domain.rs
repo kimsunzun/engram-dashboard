@@ -6,7 +6,7 @@
 
 use ts_rs::TS;
 
-use crate::ids::{AgentId, PresetId, ProfileId};
+use crate::ids::{AgentId, ProfileId};
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(tag = "type")]
@@ -402,22 +402,6 @@ pub struct AgentProfile {
     /// 마지막 프로세스 기동 시각(기록·디버깅용, 리셋 판정엔 미사용).
     #[ts(type = "number | null")]
     pub last_start_at: Option<i64>,
-}
-
-// ── 프리셋 wire 미러(ADR-0061) ──────────────────────────────────────────────────
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
-#[ts(export)]
-pub struct Preset {
-    #[ts(type = "string")]
-    pub id: PresetId,
-    /// 정규화된 cwd.
-    pub cwd: String,
-    /// 사용자 지정 표시명 override(ADR-0061 리치화). `Some` → 그대로 표시, `None` → cwd basename 파생
-    /// (기존 동작 불변).
-    #[serde(default)]
-    #[ts(type = "string | null")]
-    pub name: Option<String>,
 }
 
 /// agent `types::OutputChunk` 와 일치.

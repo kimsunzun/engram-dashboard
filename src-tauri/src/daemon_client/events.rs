@@ -25,7 +25,7 @@
 // ADR-0012
 
 use engram_dashboard_protocol::{
-    AgentId, AgentInfo, AgentProfile, AgentStatus, Preset, RestoreReport, UsageLimitSnapshot,
+    AgentId, AgentInfo, AgentProfile, AgentStatus, RestoreReport, UsageLimitSnapshot,
 };
 use tauri::Emitter;
 
@@ -92,9 +92,6 @@ pub(crate) trait DaemonEvents: Send + Sync {
     /// 프로필 목록 갱신(CRUD 후 전 창 동기화).
     fn profile_list_updated(&self, profiles: &[AgentProfile]);
 
-    /// 프리셋 목록 갱신(ADR-0061 — CRUD 후 전 창 동기화).
-    fn preset_list_updated(&self, presets: &[Preset]);
-
     /// 사용량 한 장 — 데몬 방송 하나당 한 번. `labels` = 그 한 장을 받을 창(사용량 슬롯이 있는 창 — 비지
     /// 않는다), `socket_epoch` = 그 한 장이 온 소켓의 표식(ADR-0195 · 받는 쪽은 이 값이 커질 때만 revision 을
     /// 잊는다). 창을 고르는 것은 받는 웹뷰다 — 전 webview 로 내보낸다.
@@ -160,10 +157,6 @@ impl DaemonEvents for TauriEmitter {
         let _ = self.0.emit("profile-list-updated", profiles);
     }
 
-    fn preset_list_updated(&self, presets: &[Preset]) {
-        let _ = self.0.emit("preset-list-updated", presets);
-    }
-
     fn usage_limits_updated(
         &self,
         snapshot: &UsageLimitSnapshot,
@@ -201,7 +194,6 @@ impl DaemonEvents for NoDaemonEvents {
     fn status_changed(&self, _agent_id: &AgentId, _status: &AgentStatus, _epoch: u32) {}
     fn restore_result(&self, _report: &RestoreReport) {}
     fn profile_list_updated(&self, _profiles: &[AgentProfile]) {}
-    fn preset_list_updated(&self, _presets: &[Preset]) {}
     fn usage_limits_updated(
         &self,
         _snapshot: &UsageLimitSnapshot,

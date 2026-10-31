@@ -1,7 +1,6 @@
 // ADR-0061: 이름을 저장하지 않고 cwd basename 을 쓴다.
 //
-// ★단일 출처★: 프리셋 표시명(PresetPalette)과 에이전트 행 표시명(AgentList)이 같은 규칙으로 이름을
-//   파생해야 한다. 각자 복제하면 win/posix·root 엣지 처리가 갈려 표시가 어긋나므로 여기 한 곳에 둔다.
+// ★단일 출처★: 경로에서 이름을 파생하는 자리마다 같은 규칙을 써야 한다. 각자 복제하면 win/posix·root 엣지 처리가 갈려 표시가 어긋나므로 여기 한 곳에 둔다.
 
 /** blank 라벨 방지용 안정적 placeholder. */
 export const PATH_NAME_PLACEHOLDER = '(경로 없음)'

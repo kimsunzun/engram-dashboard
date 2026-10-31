@@ -18,8 +18,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use engram_dashboard_agent::manager::AgentManager;
-use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
-use engram_dashboard_agent::preset::PresetRegistry;
+use engram_dashboard_agent::persistence::FileProfileStore;
 use engram_dashboard_agent::profile::{
     AgentCommand, AgentOutputFormat, AgentProfile, ProfileRegistry, SpawnMode,
 };
@@ -185,7 +184,6 @@ async fn run_one(
         _relay_sweeper,
         data_dir,
         profile_dir,
-        preset_dir,
     } = match wire(&run_id).await {
         Ok(w) => w,
         Err(e) => {
@@ -242,7 +240,6 @@ async fn run_one(
                     data_dir: &data_dir,
                     workspace: &workspace,
                     profile_dir: &profile_dir,
-                    preset_dir: &preset_dir,
                 },
                 cfg,
             )
@@ -343,7 +340,6 @@ async fn run_one(
             data_dir: &data_dir,
             workspace: &workspace,
             profile_dir: &profile_dir,
-            preset_dir: &preset_dir,
         },
         cfg,
     )
@@ -687,9 +683,8 @@ struct Wiring {
     /// 다음 사람에게 남는 함정이다(같은 형태를 세 픽스처에서 이미 밟았다).
     _relay_sweeper: engram_dashboard_daemon::command_delivery::BusSweeper,
     data_dir: PathBuf,
-    /// ★finding 9★: per-run profile/preset 임시 dir — cleanup 이 이것도 지워야 temp 가 안 샌다.
+    /// ★finding 9★: per-run profile 임시 dir — cleanup 이 이것도 지워야 temp 가 안 샌다.
     profile_dir: PathBuf,
-    preset_dir: PathBuf,
 }
 
 /// control_send.rs 의 wire() 순서를 미러한다.
@@ -739,12 +734,8 @@ async fn wire(tag: &str) -> Result<Wiring, String> {
 
     let sink: Arc<dyn StatusSink> = Arc::new(NoopStatus);
     let profile_dir = std::env::temp_dir().join(format!("engram-pilot-prof-{tag}"));
-    let preset_dir = std::env::temp_dir().join(format!("engram-pilot-preset-{tag}"));
     let profiles = Arc::new(ProfileRegistry::new(Arc::new(FileProfileStore::new(
         profile_dir.clone(),
-    ))));
-    let presets = Arc::new(PresetRegistry::new(Arc::new(FilePresetStore::new(
-        preset_dir.clone(),
     ))));
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig {
@@ -754,7 +745,7 @@ async fn wire(tag: &str) -> Result<Wiring, String> {
         Arc::new(|_, _| {}),
     ));
     let manager = Arc::new(AgentManager::new_with_control(
-        sink, profiles, presets, tracker, control,
+        sink, profiles, tracker, control,
     ));
     slot.set(manager.clone());
     command_slot.set(Arc::new(
@@ -781,7 +772,6 @@ async fn wire(tag: &str) -> Result<Wiring, String> {
         _relay_sweeper: relay_sweeper,
         data_dir,
         profile_dir,
-        preset_dir,
     })
 }
 
@@ -1564,7 +1554,6 @@ struct CleanupPaths<'a> {
     data_dir: &'a std::path::Path,
     workspace: &'a std::path::Path,
     profile_dir: &'a std::path::Path,
-    preset_dir: &'a std::path::Path,
 }
 
 async fn cleanup(
@@ -1588,7 +1577,6 @@ async fn cleanup(
     mcp_handle.shutdown().await;
     let _ = std::fs::remove_dir_all(paths.data_dir);
     let _ = std::fs::remove_dir_all(paths.profile_dir);
-    let _ = std::fs::remove_dir_all(paths.preset_dir);
     if cfg.keep_workspace {
         eprintln!("[pilot] workspace 보존: {}", paths.workspace.display());
     } else {

@@ -350,13 +350,18 @@ describe('layout.setSlotContent variant 형태 검증', () => {
     expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's1', { type: 'agent', agent_id: 'a-1' })
   })
 
-  it('unit variant(empty/agent_list/preset_palette)는 추가 필드 없이 통과', () => {
+  it('unit variant(empty/agent_list)는 추가 필드 없이 통과', () => {
     run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'empty' } })
     run('layout.setSlotContent', { viewId: 'v1', slotId: 's2', content: { type: 'agent_list' } })
-    run('layout.setSlotContent', { viewId: 'v1', slotId: 's3', content: { type: 'preset_palette' } })
     expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's1', { type: 'empty' })
     expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's2', { type: 'agent_list' })
-    expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's3', { type: 'preset_palette' })
+  })
+
+  it('걷은 종류 preset_palette 는 화이트리스트에서 거절한다', () => {
+    expect(() =>
+      run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'preset_palette' } }),
+    ).toThrow(/SlotContent variant/)
+    expect(setSlotContentSpy).not.toHaveBeenCalled()
   })
 
   // ★대소문자 무관 수용 + 선언 철자 정규화(사용자 결정 2026-09-23)★: store·백엔드로 흘러가는 태그는
@@ -364,10 +369,8 @@ describe('layout.setSlotContent variant 형태 검증', () => {
   it('type 대소문자 무관 수용 → 선언 철자로 정규화해 라우팅', () => {
     run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'EMPTY' } })
     run('layout.setSlotContent', { viewId: 'v1', slotId: 's2', content: { type: 'Agent_List' } })
-    run('layout.setSlotContent', { viewId: 'v1', slotId: 's3', content: { type: 'PRESET_PALETTE' } })
     expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's1', { type: 'empty' })
     expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's2', { type: 'agent_list' })
-    expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's3', { type: 'preset_palette' })
   })
 
   it('agent variant 는 태그만 접고 agent_id 는 그대로 나른다', () => {

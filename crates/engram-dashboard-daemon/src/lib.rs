@@ -33,8 +33,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use engram_dashboard_agent::manager::AgentManager;
-use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
-use engram_dashboard_agent::preset::{PresetRegistry, PresetStore};
+use engram_dashboard_agent::persistence::FileProfileStore;
 use engram_dashboard_agent::profile::{ProfileRegistry, ProfileStore};
 use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_agent::types::CLI_EXE_NAME;
@@ -154,7 +153,7 @@ fn init_logging_and_panic_hook(layout: &DataLayout) -> Option<PathBuf> {
 ///   `build_daemon_wiring(A)` 로 만든 manager 를 `run_accept_loop(.., 레지스트리 B)` 에 짝지어 넣는 것이
 ///   **컴파일된다**. 그러면 연결은 B 에 등록되고 상태·목록·복원 통지는 A 로 나가 아무 클라에도 닿지
 ///   않는다 — 빈 맵은 루프 0회라 **실패 로그조차 없고**, 프론트는 목록 이벤트로 terminal 을 판정하므로
-///   (ADR-0005) 모든 에이전트가 영원히 살아 있는 것으로 보인다. lease/프로필/프리셋 브로드캐스트도
+///   (ADR-0005) 모든 에이전트가 영원히 살아 있는 것으로 보인다. lease/프로필 브로드캐스트도
 ///   같은 방식으로 사라진다.
 /// ★어긋난 짝이 표현 가능한 자리 — **규칙으로 적는다**★. 경로를 열거하면 매번 한 자리씩 모자란다
 ///   (실제로 두 번 그랬다: 처음엔 `manager` 가, 그다음엔 `handlers` 가 열거를 빠져나갔다). 규칙은:
@@ -208,8 +207,7 @@ fn build_daemon_wiring(
     idle_coalescer: Arc<messaging_host::IdleCoalescer>,
 ) -> DaemonWiring {
     let state_dir = layout.daemon_state_dir();
-    let profile_store = Arc::new(FileProfileStore::new(state_dir.clone()));
-    let preset_store = Arc::new(FilePresetStore::new(state_dir));
+    let profile_store = Arc::new(FileProfileStore::new(state_dir));
     let scratch_root = layout.usage_probe_dir();
     // ★이 쓸기의 안전은 시점에 기댄다★ — 인스턴스 잠금을 쥔 **뒤**(다른 데몬이 같은 폴더에서 조회 중일 수
     //   없다)이고 스케줄러·조회가 하나도 뜨기 **전**(제 조회의 폴더를 지우지 않는다)이다. 잠금 앞이나
@@ -217,7 +215,6 @@ fn build_daemon_wiring(
     engram_dashboard_agent::usage::sweep_stale_scratch(&scratch_root);
     build_daemon_wiring_with_store(
         profile_store,
-        preset_store,
         UsageInputs {
             probes: engram_dashboard_agent::backend::usage_probes().to_vec(),
             spawner: Arc::new(OsProbeSpawner),
@@ -242,7 +239,6 @@ struct UsageInputs {
 /// build_daemon_wiring 의 store 주입형 — 테스트가 in-memory store 를 끼워 디스크/Embedded 와 격리한다.
 fn build_daemon_wiring_with_store(
     store: Arc<dyn ProfileStore>,
-    preset_store: Arc<dyn PresetStore>,
     usage_inputs: UsageInputs,
     control: Arc<dyn engram_dashboard_agent::types::ControlChannel>,
     flush_tx: tokio::sync::mpsc::UnboundedSender<messaging_host::FlushMsg>,
@@ -261,7 +257,6 @@ fn build_daemon_wiring_with_store(
         idle_coalescer,
     ));
     let profiles = Arc::new(ProfileRegistry::new(store));
-    let presets = Arc::new(PresetRegistry::new(preset_store));
 
     let profiles_cb = profiles.clone();
     let tracker = Arc::new(SessionTracker::new(
@@ -276,7 +271,6 @@ fn build_daemon_wiring_with_store(
     let manager = Arc::new(AgentManager::new_with_control(
         status_sink,
         profiles,
-        presets,
         tracker,
         control,
     ));
@@ -892,9 +886,6 @@ async fn start_test_server_inner(
     //   제어 채널을 배선하지 않으므로(아래 Noop) accept loop 전용 standalone registry 를 새로 만든다 —
     //   같은 Arc 라 dispatch 가 쓴 값을 그 서버 수명 동안 관측할 수 있다(운영은 control_registry 공유).
     let control_registry = Arc::new(control::registry::ControlRegistry::new());
-    // 프리셋 persist 를 검증하는 테스트는 없다 — 필요해지면 store 주입형을 추가한다(현재 프리셋 unit 은
-    //   agent 에서 격리 검증).
-    let preset_store: Arc<dyn PresetStore> = Arc::new(MemPresetStore::default());
     // WS 테스트는 제어 채널 미사용 → Noop(제어 채널 통합 테스트는 control::mcp_server 쪽이 담당).
     let control: Arc<dyn engram_dashboard_agent::types::ControlChannel> =
         Arc::new(engram_dashboard_agent::types::NoopControlChannel);
@@ -907,7 +898,6 @@ async fn start_test_server_inner(
     //   사용량 wire 의 연결 계층 시험은 가짜 조회기를 단 서비스로 `agent_conn` 에서 잰다.
     let wiring = build_daemon_wiring_with_store(
         store,
-        preset_store,
         UsageInputs {
             probes: Vec::new(),
             spawner: Arc::new(OsProbeSpawner),
@@ -1016,30 +1006,6 @@ impl ProfileStore for MemProfileStore {
     }
     fn load(&self) -> Vec<engram_dashboard_agent::profile::AgentProfile> {
         self.saved.lock().expect("mem store poisoned").clone()
-    }
-}
-
-/// `MemProfileStore` 의 프리셋판 — 운영의 `FilePresetStore` 를 대신한다.
-#[cfg(feature = "test-support")]
-#[derive(Default)]
-struct MemPresetStore {
-    saved: std::sync::Mutex<Vec<engram_dashboard_agent::preset::Preset>>,
-}
-
-#[cfg(feature = "test-support")]
-impl PresetStore for MemPresetStore {
-    fn save(
-        &self,
-        presets: &[engram_dashboard_agent::preset::Preset],
-    ) -> Result<(), engram_dashboard_agent::profile::StoreError> {
-        *self.saved.lock().expect("mem preset store poisoned") = presets.to_vec();
-        Ok(())
-    }
-    fn load(&self) -> Vec<engram_dashboard_agent::preset::Preset> {
-        self.saved
-            .lock()
-            .expect("mem preset store poisoned")
-            .clone()
     }
 }
 

@@ -1,5 +1,5 @@
 // ADR-0064 / ADR-0060 / ADR-0011: empty·agent 는 별도 feature 모듈이 없는 코어 콘텐츠 타입이라
-//   (preset_palette=presetCommands, agent_list=agentCommands 처럼 각자 모듈이 있는 것과 달리) 여기 한 곳에
+//   (agent_list=agentCommands 처럼 자기 모듈이 있는 것과 달리) 여기 한 곳에
 //   그 전용 command + 기여를 모은다. 모든 항목은 command id 참조로만 메뉴에 붙는다(ADR-0064 불변식 —
 //   메뉴 직접 store 호출 금지).
 
@@ -38,16 +38,6 @@ register({
 })
 
 register({
-  id: 'slot.fill.presetPalette',
-  title: t('slot.fillPresetPalette'),
-  category: 'slot',
-  run: args => {
-    const { viewId, slotId } = requireCoords(args, 'slot.fill.presetPalette')
-    return useViewStore.getState().setSlotContent(viewId, slotId, { type: 'preset_palette' })
-  },
-})
-
-register({
   id: 'slot.fill.usage',
   title: t('slot.fillUsage'),
   category: 'slot',
@@ -65,8 +55,7 @@ register({
   title: t('agent.create'),
   category: 'slot',
   // ★spawn + 이 슬롯에 배정★(ADR-0011 + ADR-0035): spawnAgent 는 데몬 권위, assignAgent 는 레이아웃 권위
-  //   invoke — 두 권위가 분리돼 있다. 폴더 다이얼로그는 preset.add·PresetPalette 와 동일
-  //   open({directory:true}) 패턴. async — 호출부(cdp/메뉴)가 await 가능하게 Promise 를 흘려보낸다.
+  //   invoke — 두 권위가 분리돼 있다. async — 호출부(cdp/메뉴)가 await 가능하게 Promise 를 흘려보낸다.
   run: async args => {
     const { viewId, slotId } = requireCoords(args, 'slot.createAgentHere')
     // 네이티브 OS 폴더 선택 창(webview 밖). directory+multiple:false → 반환은 string | null.
@@ -98,8 +87,8 @@ register({
 })
 
 // group='content' — 공통 slot-ops 위에 렌더.
-// ★"새 콘텐츠 ▶" 1단 서브메뉴(ADR-0065)★: 콘텐츠-채움 항목(트리·팔레트·사용량)을 컨테이너 하나로 접어
-//   빈 슬롯 메뉴를 정돈한다("이 칸에 뭘 넣나" = 콘텐츠 평면 분리). 자식 순서 = 트리 → 팔레트 → 사용량.
+// ★"새 콘텐츠 ▶" 1단 서브메뉴(ADR-0065)★: 콘텐츠-채움 항목(트리·사용량)을 컨테이너 하나로 접어
+//   빈 슬롯 메뉴를 정돈한다("이 칸에 뭘 넣나" = 콘텐츠 평면 분리). 자식 순서 = 트리 → 사용량.
 //   command 는 registry 단일소스로 그대로 직접 호출 가능(§5 불변) — 서브메뉴는 presentation 일 뿐이다.
 //   향후 백엔드 타입(codex/gemini) 추가 시 자식으로 붙는 확장 자리.
 // ★ADR-0067: "생성"(slot.createAgentHere) 제거★ — 스폰은 트리 소관으로 이관(reserved 프로필 더블클릭 +
@@ -111,14 +100,13 @@ registerSlotMenu('empty', [
     order: 10,
     children: [
       { commandId: 'slot.fill.agentList', group: 'content', order: 10 },
-      { commandId: 'slot.fill.presetPalette', group: 'content', order: 20 },
       { commandId: 'slot.fill.usage', group: 'content', order: 30 },
     ],
   },
 ])
 
 // ADR-0067: "에이전트 모니터링" 기여 — empty·agent 슬롯에 노출(우클릭한 slot 에 실행중 에이전트 배정).
-//   ★hideOn = ['agent_list','preset_palette','usage']★: 소스 슬롯(트리·팔레트)과 사용량 슬롯에서 "여기에 에이전트를
+//   ★hideOn = ['agent_list','usage']★: 소스 슬롯(트리)과 사용량 슬롯에서 "여기에 에이전트를
 //   모니터링"은 무의미하다(그 슬롯은 콘텐츠 자체가 UI). '*' 보편 등록으로 empty·agent 를 함께 덮되 이 타입들만
 //   subtraction 으로 뺀다(ADR-0065 hideOn — allowlist 아님, 공통 단일소스 유지).
 registerSlotMenu('*', [
@@ -126,7 +114,7 @@ registerSlotMenu('*', [
     commandId: 'slot.assignRunningAgent',
     group: 'content',
     order: 5,
-    hideOn: ['agent_list', 'preset_palette', 'usage'],
+    hideOn: ['agent_list', 'usage'],
   },
 ])
 

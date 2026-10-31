@@ -50,20 +50,14 @@ beforeEach(() => {
   clientMock.interruptAgent.mockReset()
   clientMock.interruptAgent.mockImplementation(async () => undefined)
   dialogMock.open.mockReset()
-  useAgentStore.setState({ presets: [], profiles: [] })
+  useAgentStore.setState({ profiles: [] })
   useInterruptStore.setState({ pending: {}, views: {} })
 })
 afterEach(() => {
-  useAgentStore.setState({ presets: [], profiles: [] })
+  useAgentStore.setState({ profiles: [] })
 })
 
 describe('agent.spawn 라우팅', () => {
-  it('preset(id) → store.presets 에서 cwd 해소 → spawnAgent(cwd)', () => {
-    useAgentStore.setState({ presets: [{ id: 'pr1', cwd: 'C:/work/engram', name: null }] })
-    run('agent.spawn', { preset: 'pr1' })
-    expect(clientMock.spawnAgent).toHaveBeenCalledWith('C:/work/engram', 'claude')
-  })
-
   it('raw cwd → spawnAgent(trim 된 cwd)', () => {
     run('agent.spawn', { cwd: '  C:/new/path  ' })
     expect(clientMock.spawnAgent).toHaveBeenCalledWith('C:/new/path', 'claude')
@@ -78,18 +72,6 @@ describe('agent.spawn 라우팅', () => {
     expect(() => run('agent.spawn', { cwd: '   ' })).toThrow()
     expect(() => run('agent.spawn', {})).toThrow()
     expect(clientMock.spawnAgent).not.toHaveBeenCalled()
-  })
-
-  it('없는 preset id → throw(조용한 no-op 금지)', () => {
-    useAgentStore.setState({ presets: [{ id: 'pr1', cwd: 'C:/work', name: null }] })
-    expect(() => run('agent.spawn', { preset: 'nope' })).toThrow(/알 수 없는 preset/)
-    expect(clientMock.spawnAgent).not.toHaveBeenCalled()
-  })
-
-  it('preset 이 cwd 보다 우선(둘 다 주면 preset 해소값 사용)', () => {
-    useAgentStore.setState({ presets: [{ id: 'pr1', cwd: 'C:/from/preset', name: null }] })
-    run('agent.spawn', { preset: 'pr1', cwd: 'C:/ignored' })
-    expect(clientMock.spawnAgent).toHaveBeenCalledWith('C:/from/preset', 'claude')
   })
 })
 

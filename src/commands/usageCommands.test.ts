@@ -80,7 +80,7 @@ describe('등록점', () => {
   })
 
   it('슬롯 우클릭 메뉴에 기여하지 않는다 — 사용량 슬롯을 비롯해 어느 콘텐츠의 메뉴에도 usageSlot.* 가 없다(사용자 결정 2026-09-29)', () => {
-    for (const type of ['usage', 'empty', 'agent', 'agent_list', 'preset_palette'] as const) {
+    for (const type of ['usage', 'empty', 'agent', 'agent_list'] as const) {
       expect(buildSlotMenu(type).some(i => i.id.startsWith('usageSlot.'))).toBe(false)
     }
   })

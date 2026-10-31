@@ -246,7 +246,7 @@ function optionalUuidArg(v: unknown, name: string): string | null {
 // SlotContent 유니온 태그 화이트리스트(set_slot_content 인자 검증 — ADR-0060/0063).
 // ★순서가 곧 선언 철자다★ — 호출자가 어떤 대소문자로 쓰든 백엔드로 나가는 태그는 이 배열의 원소로
 //   접힌다(사용자 결정 2026-09-23 — 같은 낱말이 CLI 로는 되고 이 표면으로는 안 되던 어긋남 제거).
-const SLOT_CONTENT_TYPES = ['empty', 'agent', 'agent_list', 'preset_palette', 'usage'] as const
+const SLOT_CONTENT_TYPES = ['empty', 'agent', 'agent_list', 'usage'] as const
 
 const USAGE_SHOW_FIELDS = ['show_claude', 'show_codex'] as const
 
@@ -293,7 +293,6 @@ function validateSlotContent(content: { type: string } & Record<string, unknown>
       break
     case 'empty':
     case 'agent_list':
-    case 'preset_palette':
       // 추가 필드 없는 unit variant — tag 만 맞으면 통과(여분 필드는 백엔드가 무시).
       break
     case 'usage':

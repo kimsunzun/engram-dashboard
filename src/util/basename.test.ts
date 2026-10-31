@@ -1,4 +1,4 @@
-// ADR-0061: cwd basename 파생 규칙. PresetPalette·AgentList 표시명 단일 출처.
+// ADR-0061: cwd basename 파생 규칙. 경로 표시명 단일 출처.
 
 import { describe, expect, it } from 'vitest'
 

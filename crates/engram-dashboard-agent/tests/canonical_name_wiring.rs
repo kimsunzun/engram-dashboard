@@ -28,8 +28,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use engram_dashboard_agent::manager::AgentManager;
-use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
-use engram_dashboard_agent::preset::PresetRegistry;
+use engram_dashboard_agent::persistence::FileProfileStore;
 use engram_dashboard_agent::profile::{AgentCommand, AgentProfile, ProfileRegistry, SpawnMode};
 use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_agent::types::{AgentId, AgentInfo, AgentStatus, StatusSink};
@@ -45,9 +44,6 @@ fn make_manager(tag: &str) -> AgentManager {
     let profiles = Arc::new(ProfileRegistry::new(Arc::new(FileProfileStore::new(
         std::env::temp_dir().join(format!("engram-canon-{tag}-{}", Uuid::new_v4())),
     ))));
-    let presets = Arc::new(PresetRegistry::new(Arc::new(FilePresetStore::new(
-        std::env::temp_dir().join(format!("engram-canon-preset-{tag}-{}", Uuid::new_v4())),
-    ))));
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig {
             enabled: false,
@@ -55,7 +51,7 @@ fn make_manager(tag: &str) -> AgentManager {
         },
         Arc::new(|_, _| {}),
     ));
-    AgentManager::new(sink, profiles, presets, tracker)
+    AgentManager::new(sink, profiles, tracker)
 }
 
 /// 스폰해도 즉시 죽지 않는 무해한 자식(대화형 cmd.exe — PTY 아래서 프롬프트를 띄우고 대기).

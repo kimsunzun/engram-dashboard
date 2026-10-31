@@ -1,7 +1,7 @@
-// ★배경(제어 슬롯 포커스 제외)★: 트리(agent_list)·팔레트(preset_palette)는 "작업 슬롯"이 아니라
+// ★배경(제어 슬롯 포커스 제외)★: 트리(agent_list)·사용량(usage)은 "작업 슬롯"이 아니라
 //   포커스 대상이 아니다(LayoutLeaf 의 click-to-focus 게이트가 앞으로는 이들을 포커스하지
 //   않는다). 그러나 기존/엣지 백엔드 상태(이미 제어 슬롯이 포커스됐거나 focus=null)에서도 "열기"가
-//   트리/팔레트를 에이전트 터미널로 덮어쓰지 않도록 이 함수가 방어한다.
+//   제어 슬롯을 에이전트 터미널로 덮어쓰지 않도록 이 함수가 방어한다.
 
 import type { LayoutNode, SlotContent } from '../../api/layoutTypes'
 

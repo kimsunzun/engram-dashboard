@@ -53,13 +53,10 @@ function App() {
       void initEventBus()
       // ADR-0102: 부팅 pull 을 재시도로 감싼다 — bootstrapDaemonIfNeeded 와 동일 패턴.
       // 데몬 연결 직후 IPC 가 일시적으로 미준비 상태일 수 있어 one-shot 실패가 그대로 공란이 된다.
-      // ★프로필 · 프리셋도 재시도한다★: 트리 · 프리셋 칸은 첫 목록을 받기 전엔 비워 두므로(AgentList · PresetPalette)
-      //   단발 실패가 곧 빈 칸 고착이다.
+      // ★프로필도 재시도한다★: 트리는 첫 목록을 받기 전엔 비워 두므로(AgentList) 단발 실패가 곧 빈 칸 고착이다.
       bootPull('getAgents', () => agentClient.getAgents(), agents => useAgentStore.getState().setAgents(agents))
       // ADR-0018: 트리가 예약(깡통) 노드를 그리려면 필요.
       bootPull('listProfiles', () => agentClient.listProfiles(), p => useAgentStore.getState().setProfiles(p))
-      // ADR-0061: PresetPalette 가 목록을 그리려면 필요.
-      bootPull('listPresets', () => agentClient.listPresets(), p => useAgentStore.getState().setPresets(p))
     })()
   }, [])
 

@@ -14,7 +14,7 @@
 // ★창별 단일 마운트★: WindowLayout 이 창마다 하나 마운트하고, target 이 null 이면 아무것도 렌더하지 않는다
 //   (닫힘). SlotContextMenu 의 fixed 오버레이 패턴과 동형 — 변수-only 스타일(테마 준수, 색 리터럴 0).
 //
-// ★스타일 = 변수-only★: 색·폰트는 전부 CSS 변수(PresetPalette/AgentList 와 동일 규율 — e-ink 대비).
+// ★스타일 = 변수-only★: 색·폰트는 전부 CSS 변수(AgentList 와 동일 규율 — e-ink 대비).
 
 import { useEffect, useRef, useState } from 'react'
 

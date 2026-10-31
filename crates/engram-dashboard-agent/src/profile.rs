@@ -300,7 +300,7 @@ impl AgentProfile {
 
 // ── 영속화 추상화 ──────────────────────────────────────────────────────────────
 
-/// 저장소가 판정으로 저장을 거절한 까닭. [`crate::preset::PresetStore`] 도 같은 타입을 쓴다.
+/// 저장소가 판정으로 저장을 거절한 까닭.
 // ADR-0291 R2 · R8
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
@@ -319,7 +319,7 @@ impl std::fmt::Display for Refusal {
     }
 }
 
-/// [`ProfileStore::save`] · [`crate::preset::PresetStore::save`] 의 실패.
+/// [`ProfileStore::save`] 의 실패.
 ///
 /// ★거절은 어디서 났나로 두 변형이다★ — 호출자에게 할 일이 갈린다: 적재 거절은 데몬을 다시 띄워야 풀리고, 재판정
 /// 거절은 다음 저장이 다시 판정한다(못 읽음은 대개 잠깐 쥔 잠김이라 조금 뒤 다시 하면 된다).

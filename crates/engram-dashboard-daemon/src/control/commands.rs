@@ -356,7 +356,6 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    use engram_dashboard_agent::preset::{Preset, PresetRegistry, PresetStore};
     use engram_dashboard_agent::profile::{
         AgentProfile, ProfileRegistry, ProfileStore, StoreError,
     };
@@ -386,16 +385,6 @@ mod tests {
         }
     }
 
-    struct NoPresets;
-    impl PresetStore for NoPresets {
-        fn save(&self, _presets: &[Preset]) -> Result<(), StoreError> {
-            Ok(())
-        }
-        fn load(&self) -> Vec<Preset> {
-            Vec::new()
-        }
-    }
-
     struct NoopSink;
     impl StatusSink for NoopSink {
         fn status_changed(&self, _id: AgentId, _status: AgentStatus, _epoch: u32) {}
@@ -422,7 +411,6 @@ mod tests {
         Arc::new(AgentManager::new(
             Arc::new(NoopSink),
             Arc::new(ProfileRegistry::new(Arc::new(MemProfileStore::default()))),
-            Arc::new(PresetRegistry::new(Arc::new(NoPresets))),
             Arc::new(SessionTracker::new(
                 TrackerConfig {
                     enabled: false,

@@ -24,7 +24,7 @@ import {
   type UsageSnapshotPull,
 } from './agentClient'
 import type { InboundMessage, Transport } from './transport'
-import type { AgentInfo, AgentProfile, Preset, RestoreReport } from './types'
+import type { AgentInfo, AgentProfile, RestoreReport } from './types'
 import type { UsageLimitSnapshot } from '../../crates/engram-dashboard-protocol/bindings/UsageLimitSnapshot'
 
 class MockTransport implements Transport {
@@ -282,64 +282,7 @@ describe('대기 입력 명령(ADR-0231) — ListQueuedInputs · CancelQueuedInp
   })
 })
 
-// ── 프리셋 CRUD(ADR-0061 — wire 명령/reply 매칭) ─────────────────────────────────────
-describe('프리셋 CRUD(ADR-0061)', () => {
-  it('listPresets → ListPresets{request_id} 전송 + PresetList{request_id,presets} resolve', async () => {
-    const t = new MockTransport()
-    const c = new ProtocolClient(t)
-    const p = c.listPresets()
-    await Promise.resolve()
-    const rid = t.lastSent<{ request_id: string }>('ListPresets')!.request_id
-    const presets = [{ id: 'pr1', cwd: 'C:/proj' }] as Preset[]
-    t.control({ PresetList: { request_id: rid, presets } })
-    expect(await p).toEqual(presets)
-  })
-
-  it('createPreset(cwd) → CreatePreset{cwd,request_id} 전송 + Ack 로 void resolve', async () => {
-    const t = new MockTransport()
-    const c = new ProtocolClient(t)
-    const p = c.createPreset('C:/work')
-    await Promise.resolve()
-    const sent = t.lastSent<{ request_id: string; cwd: string }>('CreatePreset')!
-    expect(sent.cwd).toBe('C:/work')
-    t.control({ Ack: { request_id: sent.request_id } })
-    await expect(p).resolves.toBeUndefined()
-  })
-
-  it('deletePreset(id) → DeletePreset{preset_id,request_id} 전송 + Ack 로 void resolve', async () => {
-    const t = new MockTransport()
-    const c = new ProtocolClient(t)
-    const p = c.deletePreset('pr1')
-    await Promise.resolve()
-    const sent = t.lastSent<{ request_id: string; preset_id: string }>('DeletePreset')!
-    expect(sent.preset_id).toBe('pr1')
-    t.control({ Ack: { request_id: sent.request_id } })
-    await expect(p).resolves.toBeUndefined()
-  })
-
-  it('renamePreset(id, name) → RenamePreset{preset_id,name,request_id} 전송 + Ack 로 void resolve', async () => {
-    const t = new MockTransport()
-    const c = new ProtocolClient(t)
-    const p = c.renamePreset('pr1', '내 프리셋')
-    await Promise.resolve()
-    const sent = t.lastSent<{ request_id: string; preset_id: string; name: string | null }>('RenamePreset')!
-    expect(sent.preset_id).toBe('pr1')
-    expect(sent.name).toBe('내 프리셋')
-    t.control({ Ack: { request_id: sent.request_id } })
-    await expect(p).resolves.toBeUndefined()
-  })
-
-  it('renamePreset(id, null) → name=null 로 전송(override 해제)', async () => {
-    const t = new MockTransport()
-    const c = new ProtocolClient(t)
-    const p = c.renamePreset('pr1', null)
-    await Promise.resolve()
-    const sent = t.lastSent<{ request_id: string; preset_id: string; name: string | null }>('RenamePreset')!
-    expect(sent.name).toBeNull()
-    t.control({ Ack: { request_id: sent.request_id } })
-    await expect(p).resolves.toBeUndefined()
-  })
-
+describe('프로필 이름 바꾸기(wire 명령/reply 매칭)', () => {
   it('renameProfile(id, name) → RenameProfile{profile_id,name,request_id} 전송 + Ack 로 void resolve', async () => {
     const t = new MockTransport()
     const c = new ProtocolClient(t)
@@ -1651,19 +1594,6 @@ describe('이벤트 라우팅(eventBus 공통 표면)', () => {
     off()
     t.control({ ProfileListUpdated: { profiles: [{ id: 'p2' }] } })
     expect(seen).toEqual([profiles])
-  })
-
-  it('PresetListUpdated → onPresetListUpdated cb 가 presets 수신(ADR-0061)', () => {
-    const t = new MockTransport()
-    const c = new ProtocolClient(t)
-    const seen: Preset[][] = []
-    const off = c.onPresetListUpdated((p) => seen.push(p))
-    const presets = [{ id: 'pr1', cwd: 'C:/proj' }] as Preset[]
-    t.control({ PresetListUpdated: { presets } })
-    expect(seen).toEqual([presets])
-    off()
-    t.control({ PresetListUpdated: { presets: [{ id: 'pr2', cwd: 'C:/x' }] } })
-    expect(seen).toEqual([presets])
   })
 
   it('getAgents 진행 중 broadcast AgentListUpdated 편승 안 함', async () => {

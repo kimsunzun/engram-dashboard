@@ -2,15 +2,7 @@
 import type { AgentBackend } from "./AgentBackend";
 import type { AgentOutputFormat } from "./AgentOutputFormat";
 
-export type AgentNewArgs = { 
-/**
- * 작업 폴더. ★`preset` 과 상호배타이고 **둘 중 정확히 하나**가 있어야 한다★.
- */
-cwd?: string | null, 
-/**
- * 등록된 경로 북마크(프리셋)의 id. cwd 와 상호배타.
- */
-preset?: string | null, name?: string | null, 
+export type AgentNewArgs = { cwd: string, name?: string | null, 
 /**
  * 미지정 = StreamJson.
  */
