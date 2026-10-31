@@ -478,15 +478,16 @@
       </svg>
       <div>
         <div class="eyebrow"><span class="num">L2 · a</span><span>3-0 · transport 수리</span></div>
-        <h2>붙이면 깨질 다섯 — 지금 → 고친 뒤</h2>
+        <h2>붙이면 깨질 다섯 — 그대로 붙이면 → 고친 뒤</h2>
+        <p class="cap">「그대로」 = 지금 transport 코드를 고치지 않고 붙였을 때. 지금 앱(net)에는 이 문제가 없다.</p>
       </div>
     </div>
 
     <div class="grid3">
       <figure class="fbox">
         <div class="fh"><span class="n">①</span>받는 줄이 차면 버린다</div>
-        <svg viewBox="0 0 320 206" role="img" aria-label="지금: 모든 상대가 같이 쓰는 받는 줄이 가득 차면 새 메시지를 버리고 개수만 센다. 고친 뒤: 상대마다 버리지 않는 줄, 차면 그 상대의 소켓 읽기를 멈춘다">
-          <rect class="s-warn" x="6" y="4" width="40" height="18" rx="9"/><text class="t-x t-w t-b t-c" x="26" y="17">지금</text>
+        <svg viewBox="0 0 320 206" role="img" aria-label="그대로 붙이면: 모든 상대가 같이 쓰는 받는 줄이 가득 차면 새 메시지를 버리고 개수만 센다. 고친 뒤: 상대마다 버리지 않는 줄, 차면 그 상대의 소켓 읽기를 멈춘다">
+          <rect class="s-warn" x="6" y="4" width="40" height="18" rx="9"/><text class="t-x t-w t-b t-c" x="26" y="17">그대로</text>
           <rect class="s-b" x="10" y="40" width="48" height="28" rx="5"/><text class="t-x t-c" x="34" y="58">상대</text>
           <line class="l" x1="58" y1="54" x2="90" y2="54" marker-end="url(#ah)"/>
           <text class="t-x t-c" x="160" y="32">같이 쓰는 줄 · 가득</text>
@@ -513,8 +514,8 @@
 
       <figure class="fbox">
         <div class="fh"><span class="n">②</span>연결 소식도 같은 줄에서 사라진다</div>
-        <svg viewBox="0 0 320 206" role="img" aria-label="지금: 끊김 같은 연결 소식도 같은 줄을 타서 줄이 차면 사라진다. 고친 뒤: 소식은 순서 칸에 머물렀다가 자리가 나면 넘어간다">
-          <rect class="s-warn" x="6" y="4" width="40" height="18" rx="9"/><text class="t-x t-w t-b t-c" x="26" y="17">지금</text>
+        <svg viewBox="0 0 320 206" role="img" aria-label="그대로 붙이면: 끊김 같은 연결 소식도 같은 줄을 타서 줄이 차면 사라진다. 고친 뒤: 소식은 순서 칸에 머물렀다가 자리가 나면 넘어간다">
+          <rect class="s-warn" x="6" y="4" width="40" height="18" rx="9"/><text class="t-x t-w t-b t-c" x="26" y="17">그대로</text>
           <rect class="s-acc" x="10" y="42" width="56" height="24" rx="12"/><text class="t-x t-a t-b t-c" x="38" y="58">끊김</text>
           <line class="l-warn dash" x1="66" y1="54" x2="102" y2="54" marker-end="url(#ah-warn)"/>
           <text class="t-w t-b t-c t-x16" x="116" y="60">✕</text>
@@ -535,8 +536,8 @@
 
       <figure class="fbox">
         <div class="fh"><span class="n">③</span>다시 붙는 사이 명령이 새 연결로</div>
-        <svg viewBox="0 0 320 206" role="img" aria-label="지금: 연결 세대 1 이 끊긴 사이에 낸 명령이 다시 붙은 세대 2 연결로 나간다. 고친 뒤: 명령에 낸 때의 세대를 찍고, 쓰기 직전 지금 세대와 다르면 안 보낸다">
-          <rect class="s-warn" x="6" y="4" width="40" height="18" rx="9"/><text class="t-x t-w t-b t-c" x="26" y="17">지금</text>
+        <svg viewBox="0 0 320 206" role="img" aria-label="그대로 붙이면: 연결 세대 1 이 끊긴 사이에 낸 명령이 다시 붙은 세대 2 연결로 나간다. 고친 뒤: 명령에 낸 때의 세대를 찍고, 쓰기 직전 지금 세대와 다르면 안 보낸다">
+          <rect class="s-warn" x="6" y="4" width="40" height="18" rx="9"/><text class="t-x t-w t-b t-c" x="26" y="17">그대로</text>
           <text class="t-x t-c" x="66" y="36">세대 1</text>
           <line class="l-acc l-thick" x1="16" y1="46" x2="112" y2="46"/>
           <text class="t-w t-b t-c t-x16" x="128" y="52">✕</text>
@@ -560,8 +561,8 @@
 
       <figure class="fbox">
         <div class="fh"><span class="n">④</span>닫을 때 마지막 답이 사라진다</div>
-        <svg viewBox="0 0 320 206" role="img" aria-label="지금: 닫기가 앞질러 소켓을 닫아 줄에 남은 정지 응답과 오류가 사라진다. 고친 뒤: 닫기 표지를 줄 끝에 넣어 앞의 것을 다 보낸 뒤 닫는다">
-          <rect class="s-warn" x="6" y="4" width="40" height="18" rx="9"/><text class="t-x t-w t-b t-c" x="26" y="17">지금</text>
+        <svg viewBox="0 0 320 206" role="img" aria-label="그대로 붙이면: 닫기가 앞질러 소켓을 닫아 줄에 남은 정지 응답과 오류가 사라진다. 고친 뒤: 닫기 표지를 줄 끝에 넣어 앞의 것을 다 보낸 뒤 닫는다">
+          <rect class="s-warn" x="6" y="4" width="40" height="18" rx="9"/><text class="t-x t-w t-b t-c" x="26" y="17">그대로</text>
           <rect class="s-b" x="10" y="40" width="48" height="32" rx="5"/><text class="t-x t-c" x="34" y="60">데몬</text>
           <line class="l" x1="58" y1="56" x2="80" y2="56" marker-end="url(#ah)"/>
           <rect class="s-b" x="82" y="38" width="160" height="36" rx="6"/>
@@ -588,8 +589,8 @@
 
       <figure class="fbox">
         <div class="fh"><span class="n">⑤</span>모든 인증 거절을 「포기」로</div>
-        <svg viewBox="0 0 320 206" role="img" aria-label="지금: 토큰이 낡은 거절도 버전이 다른 거절도 전부 포기. 고친 뒤: 닫기 코드로 갈라 토큰 거절은 daemon.json 을 다시 읽고 다시 시도, 버전 거절은 고정 문구 팝업으로 끝">
-          <rect class="s-warn" x="6" y="4" width="40" height="18" rx="9"/><text class="t-x t-w t-b t-c" x="26" y="17">지금</text>
+        <svg viewBox="0 0 320 206" role="img" aria-label="그대로 붙이면: 토큰이 낡은 거절도 버전이 다른 거절도 전부 포기. 고친 뒤: 닫기 코드로 갈라 토큰 거절은 daemon.json 을 다시 읽고 다시 시도, 버전 거절은 고정 문구 팝업으로 끝">
+          <rect class="s-warn" x="6" y="4" width="40" height="18" rx="9"/><text class="t-x t-w t-b t-c" x="26" y="17">그대로</text>
           <rect class="s-b2" x="10" y="28" width="84" height="24" rx="12"/><text class="t-x t-c" x="52" y="44">토큰 낡음</text>
           <rect class="s-b2" x="10" y="58" width="84" height="24" rx="12"/><text class="t-x t-c" x="52" y="74">버전 다름</text>
           <path class="l" d="M94,40 C140,40 150,52 196,53" marker-end="url(#ah)"/>
@@ -610,8 +611,8 @@
 
       <figure class="fbox">
         <div class="fh"><span class="n">+</span>없던 것 — 받는 창구 · 수락 검사</div>
-        <svg viewBox="0 0 320 206" role="img" aria-label="지금: transport 는 거는 쪽만 있고 받은 연결을 명부에 붙일 창구가 없으며 수락은 검사 없이 한다. 고친 뒤: 접속이 Origin, Host, 시한, 상한, 크기 검사를 거쳐 받는 창구로 들어와 명부에 붙는다">
-          <rect class="s-warn" x="6" y="4" width="40" height="18" rx="9"/><text class="t-x t-w t-b t-c" x="26" y="17">지금</text>
+        <svg viewBox="0 0 320 206" role="img" aria-label="그대로 붙이면: transport 는 거는 쪽만 있고 받은 연결을 명부에 붙일 창구가 없으며 수락은 검사 없이 한다. 고친 뒤: 접속이 Origin, Host, 시한, 상한, 크기 검사를 거쳐 받는 창구로 들어와 명부에 붙는다">
+          <rect class="s-warn" x="6" y="4" width="40" height="18" rx="9"/><text class="t-x t-w t-b t-c" x="26" y="17">그대로</text>
           <rect class="s-b" x="10" y="34" width="106" height="44" rx="6"/>
           <text class="t-x t-b t-c" x="63" y="52">transport</text>
           <text class="t-x t-c" x="63" y="69">거는 쪽만</text>
