@@ -1,38 +1,32 @@
-# 핸드오프: 3단계 transport 구현 중 — 3-1 U1~U3 · 3-0 U1a 착지 · 다음 = 3-0 U1b ∥ 3-1 U4
+# 핸드오프: 3단계 transport — 3-0 U1b · U1c · 3-1 U4a~c 착지 · 다음 = 3-0 U1d
 
 ## 한 줄 상태 · 다음 첫 액션
-브랜치 `v0.4.1/refactor/transport-attach` · HEAD `5bc3e633` · 작업트리 깨끗. 결정 26개 확정(ADR-0310) · TRD 6판 확정 · 단위 23 중 커밋 4(3-1 U1 · U2 · U3 · 3-0 U1a — U1a 는 3-0 U1 을 넷으로 쪼갠 첫 조각).
-★다음 첫 액션 = 두 갈래 병렬로 재개★: ① 3-0 U1b(순서 칸 — 메인 체크아웃) ② 3-1 U4(명령 칸 넷 `Box<RawValue>` — 워크트리 `.claude/worktrees/stage3-protocol`, 분리 HEAD = `84615909`). 착수 전에 워크트리를 브랜치 HEAD 로 맞춘다(`git -C .claude/worktrees/stage3-protocol checkout --detach v0.4.1/refactor/transport-attach`). 게이트 사본 줄(ci.yml · qa 바인딩 · CLAUDE.md) 직렬 = 3-1 U2(끝) → **3-0 U7** → 3-1 U5 — 3-1 U5 는 3-0 U7 뒤에만.
+브랜치 `v0.4.1/refactor/transport-attach` HEAD = 이 핸드오프 커밋(코드 마지막 = `92096d19` U1c). ★push 안 함 — 원격은 `dd0499a7` 까지★. 작업트리 깨끗(메인).
+이번 세션 커밋: 6c391a37 3-0 U1b(순서 칸) · b100b97c 3-1 U4a(봉투) · a3097400 U4b(답장) · cd992361 U4c(등록 둘) · 92096d19 3-0 U1c(배압 · 바이트 셈 · 멈춤 · 건지기).
+진척: 3단계 23단위 중 ≈5.75 — 3-1 U1~U4 완료(U5 는 3-0 U7 뒤) · 3-0 U1 의 a·b·c 완료(U1d 남음) · 3-2 · 3-3 미착수. S21 전체 = 1단계 · 2단계 · A 완료, 3단계 진행 중 → 그다음 다중 데몬(문답 학습 자료 → PRD).
+★다음 첫 액션 = 3-0 U1d★ — 손잡이별 수신단 표면(D24 ②: `attach` · `add` 가 상대별 수신단을 돌려준다 · 훅 없음) · 수신단 놓임(`Sender::closed()`) 감지 → 닫기 · 끝 원인 가름(`ReadFailed` · `WriteFailed` 가안) · lib.rs 「받는 쪽 불변식」 5 의 뒤 절반 · U1a 의 임시 구조(registry ≈1100줄) 갈아엎기 · 60 s 비우기 상한 버림을 수신단 끝(None)으로 알림. 코드의 `TODO(TRD 3 §6-0 U1d)` 표시가 할 일 목록이다(`rg "U1d" crates/engram-dashboard-transport`). 그 뒤 U2 → … → U7(전부 transport 같은 파일 → 순차) → 3-1 U5(게이트 사본 순서 3-0 U7 → 3-1 U5) · 3-2 는 3-0 U1~U5 뒤.
 
-## 사용자 방침 (이 세션)
-- 3단계는 1:1 동작 + 데몬 N 바닥(D4 ①)까지. **다중 데몬은 3단계 바로 다음, 이 흐름에서 이어서**. 그 전에 **질의응답식 학습 자료**로 개념을 익히게 한 뒤 PRD(사용자가 구조 제안을 하려면 개념이 필요). 브리핑 문서보다 문답이 잘 맞는다.
-- 「그만하라 할 때까지 에이전트 여러 개 합리적으로」 — 파일이 안 겹치는 갈래는 병렬.
-- ★핸드오프는 단위 경계에서★ — 진행 중 단위를 커밋까지 끝내고 끊는다(사용자 지적 2026-10-31).
-- 네트워크 세부는 메인 판단에 위임(「너가 판단해서 분배」). 사용자 체감 정책만 묻는다.
+## 문서 후속(load-bearing → /review doc 묶어서 한 커밋)
+- TRD §3-0 ①: 읽기 문턱 = 스트림 없으면 B · 첫 스트림 조각부터 B/2 + 붙든 몫 B/2(총 B+M 유지) · 배압 문턱 = 순서 칸 비지 않음 · 앞잡이 건지기 · 재요청 창 시계 멈춤. TRD ≈195 「셈이 예산 B 이상이면」 문장 갱신.
+- TRD §6-1 U4 행: 깨진 등록 칸 = `Error{Some(request_id)}` + INVALID_ARGUMENT(가안 None 에서 바꿈 — 번호가 칸 밖 · 셸 등록 대기 상한 없음). U5 행: CommandDecl golden · 드리프트 지킴이는 U4c 에서 셸로 먼저(남은 일 = Cargo 간선 삭제 + protocol 상한 게이트).
+- step-log 에 이번 세션 단위들.
 
-## 읽을 것
-- 명세: `docs/process/S21-crate-boundaries/trd-3-transport.md`(6판 · §6 단위표 · §3-0 · §3-3 거름 세 규칙) · 결정: `docs/decisions/0310-*.md`.
-- master 재확인(단위에 더해진 일 A1~A4 · 낡은 포인터): `.claude/handoff/attachments/trd3-master-recheck-2026-10-31.md` — 6판에 반영됨.
-- 사용자용 그림: `trd-3-transport-zoom.html`(확대도) · `trd-3-transport-brief.html`.
+## 사용자에게 보고할 것(아직)
+- U1b: lib.rs 2026-09-26 사용자 결정 기록 문구를 좁힘(결정 자체는 그대로).
+- U4c: 깨진 등록 칸 Some(번호).
+- 선재 결함 기록: 스트림 재생 vs 타이머(배압 무관 · `TODO(stream-replay-vs-timer)` — 운영 wire 는 스트림 미사용) · 깨진 페이로드 warn 래치 없음(U4a~c 공통 — 나중 래치 정책 하나로).
 
 ## 검증 상태
-- 기준선(구현 전 `66fcc5c9`): 결과 줄 60 · 5067 · 0 · 35 · `lib_unit` 1328.
-- 3-1 U3 커밋 시점(워크트리, 3-0 미포함): 60 · 5076 · 0 · 35 · 격리 4~4k PASS.
-- 3-0 U1a 커밋 시점(메인, 3-1 미포함): 60 · 5087 · 0 · 35 · transport 네 기능 조합 강제 재빌드 후 209/219/209/219 · 격리 PASS.
-- ★미검: 두 갈래가 합쳐진 지금 HEAD 의 워크스페이스 회귀는 안 돌렸다★(파일 안 겹침 · transport 소비자 0 이라 위험 낮음 — 예상 ≈ 5096). 다음 단위 QA 가 겸한다. 재실행 = `scripts/run-detached.ps1 -Command "cargo test --workspace -- --test-threads=4"`.
-- push: ADR 커밋(`dd0499a7`)까지만 원격. 그 뒤는 로컬.
+- U1c 커밋 시점 /qa standard PASS: 결과 줄 60 · 5186 통과 · 0 실패 · 35 무시 · lib_unit 1351 · transport 272/272/282/282(기본/test-support/ws/all-features) · 격리 4~4k · 생성물 내용 무변경 · 프론트 2802. 주석 한 줄 수정은 그 뒤(fmt · check 만 확인).
+- 재실행 = `scripts/run-detached.ps1 -Command "cargo test --workspace -- --test-threads=4" -WorkDir "I:/Engram/apps/engram-dashboard" -LogFile "<경로>.log"`.
 
-## do-not / 주의
-- ★변이 시험 · QA 가 같은 target 을 공유하면 낡은 바이너리가 돈다★ — 원본 복원은 수정 시각을 갱신(`touch`)하고, QA 전 대상 crate `touch`. 이번 U1a 거짓 FAIL 이 그것이었다.
-- ★codex 리뷰 슬롯에도 Claude 와 같은 맥락을 준다★(사용자 결정 2026-10-19 · review feedback.md — 스킬 본문 미반영). 이 세션 앞쪽은 blind 로 돌렸다.
-- 리뷰어 지시서엔 「새 target 폴더 만들지 마라」. 이번에 지우지 못한 것(사용자 몫): `I:\Engram\apps\rv-u1a-target` · `%TEMP%\engram-review\31u2\tgt` · `%TEMP%\engram-review\31u2\blocks`.
-- `rg` 는 Git Bash · PowerShell PATH 에 없다 — `C:\Users\kimsunzun\AppData\Local\OpenAI\Codex\bin\0354bc6c584f210c\rg.exe` 를 PATH 에. `python` 은 Store 스텁(`py`). run-detached 로그 경로는 슬래시로 변수에 먼저 담는다(`\$2` 가 그대로 넘어간 실수 2회).
-- 시험이 `**/bindings/*` 줄끝만 바꾸면 `git checkout --`.
-- U1a 는 U1d 에서 갈아엎을 임시 구조(≈1100줄)다 — U1b · U1c 는 그 위에 얹되 바이트 예산은 「연결마다 · 항목별 RAII」(줄 단위 아님 — 줄을 연속 연결이 같이 쓴다).
+## 단위 진행 방식(이 세션에서 굳힌 것)
+코더 = worker-senior → /review code deep(Claude worker-reviewer + codex 렌즈 둘(1 = diff 만 · 2 = diff + 파일 + 호출부), 같은 맥락 · 병렬) → 수정(상한 3 · 넘으면 사용자) → /qa standard(worker-scout · run-detached) → 커밋. 수정 확인 라운드도 같은 셋. 3-1 은 워크트리에서 짓고 cherry-pick.
+- ★맡기기 전 크기 재기★: U1c 는 단위 하나에 코더 + 수정 3회 + 리뷰 4회 ≈ 250만 토큰. U1d 도 넓다(수신단 표면이 바뀌면 testing.rs · registry 가 같이 바뀐다) — 둘로 쪼갤지 착수 때 판단.
 
-## 단위 진행 방식 (이 세션에서 굳힌 것)
-코더 = worker-senior(단순 = worker-scout) → `/review code`(Claude worker-reviewer + codex:codex-rescue, 병렬) → 재수정(상한 3 · 넘으면 사용자) → `/qa`(worker-scout 위임 · run-detached) → 커밋. 3-1 은 워크트리에서 짓고 브랜치로 cherry-pick 후 워크트리를 브랜치 HEAD 로 다시 맞춘다. 강도: transport 동시성 · 수명 = critical(deep) · protocol 바이트 변경 = critical · 그 밖 standard.
-
-## 정지 조건
-- 리뷰 BLOCK · 정면 대립 · 재수정 상한 초과 · master 머지 · 태그 → 사용자에게.
-- TRD 단위 범위를 바꾸는 판단(예: U1d 를 앞당기기)은 보고 후 진행.
+## 주의
+- codex 리뷰가 Bash 600 s 에 걸리면 detach — `tasks/<id>.output` 을 직접 읽어 회수(세션 안에서만).
+- 변이 시험 뒤 원본 복원은 cmp + touch · QA 전 transport touch(낡은 바이너리 거짓 결과 전례).
+- 작업트리 CRLF/LF 섞임 — 스크립트 편집은 `\r?\n` · `python` 은 Store 스텁(py 사용) · `rg` 는 `C:\Users\kimsunzun\AppData\Local\OpenAI\Codex\bin\0354bc6c584f210c\rg.exe`.
+- 워크트리 `.claude/worktrees/stage3-protocol` 은 쉬는 중(바인딩 122 줄끝 변경 — 내용 무변경). 쓸 때 `git -C … checkout --detach v0.4.1/refactor/transport-attach`.
+- 지우지 못한 임시 폴더(사용자 몫): `I:\Engram\apps\rv-u1a-target` · `%TEMP%\engram-review\31u2\tgt` · `%TEMP%\engram-review\31u2\blocks`.
