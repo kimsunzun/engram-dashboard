@@ -59,13 +59,33 @@ pub fn reply_to_wire(
     serde_json::value::to_raw_value(reply)
 }
 
-/// 웹뷰가 보낸 패킷의 명령 칸(봉투 · 답장 — `Command` · `CommandOutcome`)을 한 번 풀어 보고 구조체 순서 바이트로
-/// 다시 싼다 — 그 밖 variant 는 그대로 돌려준다.
+/// 이 셸이 얹을 등록 항목 목록을 등록 패킷(`RegisterCommands.decls` · `UpdateCommands.added`)의 원문 칸으로
+/// 싼다(ADR-0272 결정 3) — 목록 통째가 칸 하나다. 손으로 적은 TS 칸과 이 바이트를 대조하는 지킴이가 이 모듈
+/// 시험에 있다(`command_decl_hand_written_ts_matches_rust_shape`).
+// ADR-0272
+pub fn decls_to_wire(
+    decls: &[engram_dashboard_command::CommandDecl],
+) -> Result<Box<RawValue>, serde_json::Error> {
+    serde_json::value::to_raw_value(decls)
+}
+
+/// 등록 패킷의 항목 목록 칸(원문 JSON)을 명령 버스 등록 항목으로 푼다. `Err` = 패킷은 풀렸는데 목록 모양이
+/// 틀렸다(ADR-0272 결정 6) — 셸이 받는 길은 없고, 웹뷰가 보낸 등록을 [`reseal_webview_command_slots`] 가 막는다.
+// ADR-0272
+pub fn decls_from_wire(
+    raw: &RawValue,
+) -> Result<Vec<engram_dashboard_command::CommandDecl>, serde_json::Error> {
+    serde_json::from_str(raw.get())
+}
+
+/// 웹뷰가 보낸 패킷의 명령 칸(봉투 · 답장 · 등록 항목 목록 — `Command` · `CommandOutcome` · `RegisterCommands` ·
+/// `UpdateCommands`)을 한 번 풀어 보고 구조체 순서 바이트로 다시 싼다 — 그 밖 variant 는 그대로 돌려준다.
 ///
 /// 웹뷰 길은 패킷을 `serde_json::Value` 에서 풀어 원문 칸이 키 정렬된 바이트로 담긴다(`preserve_order` 없음) —
 /// 다시 싸야 셸이 직접 보내는 칸과 같은 바이트가 나간다. `Err` = 칸이 깨졌다: 봉투는 일방 발사로 흘러가 웹뷰의 대기가
 /// 답장 상한까지 매달리고, 답장은 데몬이 번호 없는 거절로 받아 웹뷰가 실패를 모른다 — 그래서 부르는 쪽이 invoke 를
-/// 바로 실패시킨다.
+/// 바로 실패시킨다. 등록 목록은 번호가 칸 밖이라 흘려보내도 데몬 거절이 대기를 깨우지만, 같은 자리에서 빠르게
+/// 실패시킨다(칸마다 갈래를 두지 않는다).
 // ADR-0272
 pub fn reseal_webview_command_slots(cmd: AgentCommand) -> Result<AgentCommand, serde_json::Error> {
     match cmd {
@@ -77,6 +97,28 @@ pub fn reseal_webview_command_slots(cmd: AgentCommand) -> Result<AgentCommand, s
             let reply = reply_to_wire(&reply_from_wire(&reply)?)?;
             Ok(AgentCommand::CommandOutcome { reply })
         }
+        AgentCommand::RegisterCommands {
+            owner,
+            decls,
+            catalog_version,
+            request_id,
+        } => Ok(AgentCommand::RegisterCommands {
+            owner,
+            decls: decls_to_wire(&decls_from_wire(&decls)?)?,
+            catalog_version,
+            request_id,
+        }),
+        AgentCommand::UpdateCommands {
+            owner,
+            added,
+            removed,
+            request_id,
+        } => Ok(AgentCommand::UpdateCommands {
+            owner,
+            added: decls_to_wire(&decls_from_wire(&added)?)?,
+            removed,
+            request_id,
+        }),
         other => Ok(other),
     }
 }
@@ -357,8 +399,8 @@ mod tests {
     //! 섞으면 결정 부분만 이식한다.
     //!
     //! ★검증 범위★: seq dedup/high-water 테스트는 없다 — 그 진도 상태 자체가 src-tauri 에 없다(ADR-0046).
-    //!   여기 박는 것은 순수 결정 함수뿐이다(봉투 · 답장 칸 풀기 · request_id 추출·reply 분류 · pending 매칭 · epoch 가드 ·
-    //!   apply_subscribe_ack 반환값).
+    //!   여기 박는 것은 순수 결정 함수뿐이다(봉투 · 답장 · 등록 목록 칸 풀기 · request_id 추출·reply 분류 · pending
+    //!   매칭 · epoch 가드 · apply_subscribe_ack 반환값).
     //!
     //! ★event-routing(M=5)은 여기서 검증하지 않는다★: InboundMessage variant 라우팅 + 콜백 호출/
     //!   unsubscribe 는 순수 결정이 아니라 protocol_state 단독으론 보호 대상이 없다 → 실제 배선이 도는
@@ -948,6 +990,249 @@ mod tests {
         }))
         .expect("원문 칸은 패킷 파싱을 통과한다");
         assert!(reseal_webview_command_slots(sent).is_err());
+    }
+
+    // ── 등록 항목 목록 칸(ADR-0272 결정 3) ─────────────────────────────────────────
+    //
+    // ★항목 → 바이트 golden 과 손으로 적은 TS 칸의 지킴이가 여기 사는 것은 이 끝자락이 칸을 싸서다★(TRD trd-3 §6-1
+    //   U4 · U5) — protocol 은 칸 안을 모르고, 데몬은 TS 를 내지 않는다(`ts-rs` 를 안 든다). 리터럴은 protocol
+    //   등록 golden(`messages.rs` 의 `MIXED_DECLS`) · 데몬 `connection_core` 시험과 같은 바이트다.
+
+    const MIXED_DECLS: &str = r#"[{"name":"slot.focus","help":"{}","agent_args":["agent","after_tab"]},{"name":"tab.focus","help":"{}"}]"#;
+
+    fn mixed_decls() -> Vec<engram_dashboard_command::CommandDecl> {
+        vec![
+            engram_dashboard_command::CommandDecl {
+                name: "slot.focus".into(),
+                help: "{}".into(),
+                agent_args: vec!["agent".into(), "after_tab".into()],
+            },
+            engram_dashboard_command::CommandDecl {
+                name: "tab.focus".into(),
+                help: "{}".into(),
+                agent_args: Vec::new(),
+            },
+        ]
+    }
+
+    /// `#[ts(type = "…")]` 로 손으로 적은 TypeScript 텍스트(protocol `RegisterCommands.decls` ·
+    /// `UpdateCommands.added`)를 도구 crate `CommandDecl` 의 Rust 모양에 묶는다.
+    ///
+    /// ★이 경로의 유일한 drift 위험이 이 문자열이다★ — `CommandDecl` 은 도구 crate 소유라 `TS` 를
+    /// 구현하지 않고(그 crate 의 외부 의존을 최소로 두려는 의도), 그래서 바인딩 텍스트를 ts-rs 가
+    /// 파생하지 않고 **사람이 적는다.** 필드가 늘거나 개명되면 Rust 는 컴파일되고 생성 TS 만 거짓말을
+    /// 하게 되므로, 여기서 둘을 대조한다.
+    #[test]
+    fn command_decl_hand_written_ts_matches_rust_shape() {
+        use engram_dashboard_command::CommandDecl;
+        use std::collections::{BTreeMap, BTreeSet};
+        use ts_rs::TS;
+
+        // 두 attribute(`RegisterCommands.decls` · `UpdateCommands.added`)에 적은 것과 같은 문자열.
+        const DECLS_TS: &str = "Array<{ name: string, help: string, agent_args?: Array<string> }>";
+
+        let inlined = <AgentCommand as TS>::inline();
+        assert!(
+            inlined.matches(DECLS_TS).count() == 2,
+            "생성 TS 가 손으로 적은 텍스트와 불일치(등록 2자리) — attribute 를 고쳤으면 여기도 고친다:\n{inlined}"
+        );
+
+        // 칸마다 값을 채운다 — 비면 직렬화에서 빠지는 칸(`agent_args`)도 타입을 대조할 수 있게.
+        let decl = CommandDecl {
+            name: "agent.spawn".into(),
+            help: r#"{"name":"agent.spawn"}"#.into(),
+            agent_args: vec!["target".into()],
+        };
+        let ts_type_of = |key: &str, value: &serde_json::Value| -> &'static str {
+            match value {
+                serde_json::Value::String(_) => "string",
+                serde_json::Value::Array(items) if items.iter().all(|item| item.is_string()) => {
+                    "Array<string>"
+                }
+                other => panic!("{key} = {other} — 위 TS 텍스트가 이 모양을 적지 않는다"),
+            }
+        };
+        let object_of = |decl: &CommandDecl| {
+            serde_json::to_value(decl)
+                .expect("CommandDecl 직렬화")
+                .as_object()
+                .expect("CommandDecl 은 JSON object 로 나간다")
+                .clone()
+        };
+        let rust_fields: BTreeMap<String, &'static str> = object_of(&decl)
+            .iter()
+            .map(|(k, v)| (k.clone(), ts_type_of(k, v)))
+            .collect();
+        // 비었을 때 직렬화에서 빠지는 칸 — TS 쪽에서는 `?` 로 적혀야 한다.
+        let sparse = object_of(&CommandDecl {
+            agent_args: Vec::new(),
+            ..decl.clone()
+        });
+        let skipped_when_empty: BTreeSet<String> = rust_fields
+            .keys()
+            .filter(|k| !sparse.contains_key(*k))
+            .cloned()
+            .collect();
+
+        // ★위 rust_fields 만으론 안 잡히는 구멍★: `#[serde(skip_serializing_if = "Option::is_none")]`
+        //   필드는 값이 None 이면 직렬화 결과 자체에서 키가 사라진다 — 새 옵셔널 필드가 이 fixture 에서
+        //   None 이면 rust_fields 에 안 뜨고, ts_fields 도 그 필드를 안 적었으면(TS 갱신을 잊음) 둘 다
+        //   "없음"으로 일치해 아래 첫 assert_eq 가 조용히 통과한다. Debug 는 serde 속성과 무관하게 모든
+        //   필드를 항상 찍으므로(derive 는 필드를 가리지 않는다) 이걸로 실제 필드 집합을 다시 뽑아
+        //   ts_fields 와 대조한다. pretty-print(`{:#?}`) 최상위 필드 줄만 거른다(4칸 들여쓰기, 더 깊은
+        //   들여쓰기는 중첩 값이라 제외) — 필드 값 안의 `,`·`:` 에 흔들리지 않는다.
+        let debug_fields: BTreeSet<String> = format!("{decl:#?}")
+            .lines()
+            .filter_map(|line| {
+                let rest = line.strip_prefix("    ")?;
+                if rest.starts_with(' ') {
+                    return None;
+                }
+                let (name, _) = rest.split_once(':')?;
+                Some(name.trim().to_string())
+            })
+            .collect();
+
+        // 손으로 적은 텍스트에서 `<이름>[?]: <타입>` 을 뽑는다.
+        let mut ts_optional: BTreeSet<String> = BTreeSet::new();
+        let ts_fields: BTreeMap<String, &'static str> = DECLS_TS
+            .trim_start_matches("Array<{")
+            .trim_end_matches("}>")
+            .split(',')
+            .filter(|s| !s.trim().is_empty())
+            .map(|pair| {
+                let (name, ty) = pair.split_once(':').expect("`이름: 타입` 형태");
+                let name = name.trim();
+                let name = match name.strip_suffix('?') {
+                    Some(optional) => {
+                        ts_optional.insert(optional.to_string());
+                        optional
+                    }
+                    None => name,
+                };
+                (name.to_string(), ty.trim())
+            })
+            .collect();
+
+        assert_eq!(
+            rust_fields, ts_fields,
+            "CommandDecl 의 Rust 필드 · 타입과 손으로 적은 TS 필드 · 타입이 갈렸다"
+        );
+        assert_eq!(
+            skipped_when_empty, ts_optional,
+            "비면 직렬화에서 빠지는 칸과 TS 의 `?` 칸이 갈렸다 — 빠지는 칸을 필수로 적으면 TS 가 거짓말을 한다"
+        );
+        let ts_names: BTreeSet<String> = ts_fields.keys().cloned().collect();
+        assert_eq!(
+            debug_fields, ts_names,
+            "CommandDecl 의 실제 필드(Debug 기준, skip_serializing_if 로도 안 가려짐)와 손으로 적은 \
+             TS 필드가 갈렸다 — 위 rust_fields 비교는 값이 None 이라 직렬화에서 빠진 필드를 못 잡는다"
+        );
+    }
+
+    /// 등록 항목 하나의 바이트(`agent_args` 있음 · 없음 — ADR-0308 의 선택 칸)와, 그 항목들을 싼 목록 칸의 바이트를
+    /// 고정한다 — 목록 칸 바이트는 protocol 등록 패킷 golden 의 칸과 같다.
+    #[test]
+    fn command_decl_json_golden_with_and_without_agent_args() {
+        let decls = mixed_decls();
+        for (decl, golden) in decls.iter().zip([
+            r#"{"name":"slot.focus","help":"{}","agent_args":["agent","after_tab"]}"#,
+            r#"{"name":"tab.focus","help":"{}"}"#,
+        ]) {
+            assert_eq!(
+                serde_json::to_string(decl).unwrap(),
+                golden,
+                "CommandDecl wire 형태가 golden 과 불일치 — 손으로 적은 TS 칸도 함께 고칠 것"
+            );
+            let back: engram_dashboard_command::CommandDecl = serde_json::from_str(golden).unwrap();
+            assert_eq!(&back, decl);
+        }
+        assert_eq!(decls_to_wire(&decls).unwrap().get(), MIXED_DECLS);
+        assert_eq!(decls_from_wire(&raw(MIXED_DECLS)).unwrap(), decls);
+    }
+
+    /// ★웹뷰 길에서 다시 싼 등록 목록 칸 = 구조체 순서 golden 바이트★ — 봉투 · 답장과 같은 이유다(`Value` 를 지나며
+    /// 키 정렬). 칸 밖(`owner` · `removed` · 번호)은 그대로 건넌다.
+    #[test]
+    fn webview_registrations_are_resealed_into_the_golden_bytes() {
+        let shuffled = serde_json::json!([
+            { "help": "{}", "agent_args": ["agent", "after_tab"], "name": "slot.focus" },
+            { "name": "tab.focus", "help": "{}" },
+        ]);
+        let registered: AgentCommand = serde_json::from_value(serde_json::json!({
+            "RegisterCommands": {
+                "owner": "shell",
+                "decls": shuffled,
+                "catalog_version": 3,
+                "request_id": "00000000-0000-0000-0000-000000000000",
+            }
+        }))
+        .unwrap();
+        match reseal_webview_command_slots(registered).expect("성한 목록은 다시 싸진다") {
+            AgentCommand::RegisterCommands {
+                owner,
+                decls,
+                catalog_version,
+                request_id,
+            } => {
+                assert_eq!(decls.get(), MIXED_DECLS);
+                assert_eq!(owner.as_str(), "shell");
+                assert_eq!(catalog_version, 3);
+                assert_eq!(request_id, RequestId(uuid::Uuid::nil()));
+            }
+            other => panic!("RegisterCommands 그대로여야: {other:?}"),
+        }
+
+        let updated: AgentCommand = serde_json::from_value(serde_json::json!({
+            "UpdateCommands": {
+                "owner": "shell",
+                "added": shuffled,
+                "removed": ["chat.reset"],
+                "request_id": "00000000-0000-0000-0000-000000000000",
+            }
+        }))
+        .unwrap();
+        match reseal_webview_command_slots(updated).expect("성한 목록은 다시 싸진다") {
+            AgentCommand::UpdateCommands { added, removed, .. } => {
+                assert_eq!(added.get(), MIXED_DECLS);
+                assert_eq!(removed, vec!["chat.reset".to_string()]);
+            }
+            other => panic!("UpdateCommands 그대로여야: {other:?}"),
+        }
+    }
+
+    /// ★웹뷰 길의 깨진 등록 목록 = 다시 싸기 실패★ — 부르는 쪽(`forward_to_daemon`)이 invoke 실패로 돌린다.
+    #[test]
+    fn a_broken_webview_registration_fails_to_reseal() {
+        for broken in [
+            serde_json::json!([{ "name": 1 }]),
+            serde_json::json!({ "name": "tab.focus", "help": "{}" }),
+        ] {
+            let registered: AgentCommand = serde_json::from_value(serde_json::json!({
+                "RegisterCommands": {
+                    "owner": "shell",
+                    "decls": broken.clone(),
+                    "catalog_version": 1,
+                    "request_id": "00000000-0000-0000-0000-000000000000",
+                }
+            }))
+            .expect("원문 칸은 패킷 파싱을 통과한다");
+            assert!(
+                reseal_webview_command_slots(registered).is_err(),
+                "{broken}"
+            );
+
+            let updated: AgentCommand = serde_json::from_value(serde_json::json!({
+                "UpdateCommands": {
+                    "owner": "shell",
+                    "added": broken.clone(),
+                    "removed": [],
+                    "request_id": "00000000-0000-0000-0000-000000000000",
+                }
+            }))
+            .expect("원문 칸은 패킷 파싱을 통과한다");
+            assert!(reseal_webview_command_slots(updated).is_err(), "{broken}");
+        }
     }
 
     /// ★중계 다리의 두 variant 는 pending 매칭 밖이다★ — 하나는 들어오는 **요청**이고 하나는 나가는

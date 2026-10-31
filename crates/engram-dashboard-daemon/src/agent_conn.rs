@@ -1166,11 +1166,12 @@ mod tests {
 
         let registration = command_json(&AgentCommand::RegisterCommands {
             owner: OwnerToken::new("shell"),
-            decls: vec![CommandDecl {
+            decls: serde_json::value::to_raw_value(&[CommandDecl {
                 name: "tab.create".to_string(),
                 help: "{}".to_string(),
                 agent_args: Vec::new(),
-            }],
+            }])
+            .unwrap(),
             catalog_version: 1,
             request_id: RequestId(uuid::Uuid::new_v4()),
         });
@@ -1256,11 +1257,12 @@ mod tests {
         }
         let registration = command_json(&AgentCommand::RegisterCommands {
             owner: WireOwnerToken::new("shell"),
-            decls: vec![CommandDecl {
+            decls: serde_json::value::to_raw_value(&[CommandDecl {
                 name: "tab.create".to_string(),
                 help: "{}".to_string(),
                 agent_args: Vec::new(),
-            }],
+            }])
+            .unwrap(),
             catalog_version: 1,
             request_id: engram_dashboard_protocol::RequestId(uuid::Uuid::new_v4()),
         });

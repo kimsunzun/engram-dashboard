@@ -1977,7 +1977,8 @@ pub fn accept_inbound(
     }
 }
 
-/// 이 클라이언트가 얹을 등록 패킷 — 얹을 것이 없으면 `None`.
+/// 이 클라이언트가 얹을 등록 패킷 — 얹을 것이 없거나 항목 목록을 원문 칸으로 싸지 못하면(error 로그 · ADR-0272)
+/// `None`.
 ///
 /// ★`pub` 이고 [`register_own_commands`] 와 갈라져 있는 이유★: 보내는 쪽은 실 소켓을 요구하지만
 /// **무엇을 보내나**(광고 이름 · 세대 · 주인 문자열)는 소켓과 무관하다. 갈라 두면 하네스가 실제로 나가는 그
@@ -1987,6 +1988,16 @@ pub fn registration_command(receiver: &InboundReceiver) -> Option<AgentCommand> 
     if decls.is_empty() {
         return None;
     }
+    let decls = match protocol_state::decls_to_wire(&decls) {
+        Ok(decls) => decls,
+        Err(e) => {
+            tracing::error!(
+                names = decls.len(),
+                "등록 항목 목록을 원문 칸으로 싸지 못했다 — 이 연결에서는 등록하지 않는다: {e}"
+            );
+            return None;
+        }
+    };
     Some(AgentCommand::RegisterCommands {
         owner: shell_owner_advert(),
         decls,
@@ -2026,7 +2037,14 @@ async fn register_own_commands(
         tracing::error!("등록 패킷 생성자가 RegisterCommands 가 아닌 것을 냈다");
         return;
     };
-    let count = decls.len();
+    // ADR-0272: 방금 싼 칸이라 늘 풀린다 — 못 풀리면 위 생성자가 바뀐 것이다.
+    let count = match protocol_state::decls_from_wire(decls) {
+        Ok(decls) => decls.len(),
+        Err(e) => {
+            tracing::error!("등록 패킷 생성자가 풀리지 않는 항목 목록 칸을 냈다: {e}");
+            return;
+        }
+    };
 
     let (outcome_tx, outcome_rx) = oneshot::channel();
     // 송신 **전에** 슬롯을 건다 — loopback 에서 답장이 먼저 도착해도 담을 자리가 있어야 한다(형제 경로와 동형).

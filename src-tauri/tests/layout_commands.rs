@@ -46,7 +46,7 @@ use engram_dashboard_lib::daemon_client::inbound::{
     BoxedTask, InboundReceiver, InboundSlot, RuntimeSpawner, TaskSpawner, ViewCommandPort,
 };
 use engram_dashboard_lib::daemon_client::protocol_state::{
-    command_request_id, envelope_from_wire, event_reply_request_id, reply_to_wire,
+    command_request_id, decls_from_wire, envelope_from_wire, event_reply_request_id, reply_to_wire,
 };
 use engram_dashboard_lib::layout::apply;
 use engram_dashboard_lib::layout::commands::{
@@ -4417,6 +4417,7 @@ fn the_registration_packet_is_the_one_the_connection_sends() {
     else {
         panic!("얹을 이름이 있으면 등록 패킷이 나온다");
     };
+    let decls = decls_from_wire(&decls).expect("셸이 싼 등록 칸은 풀린다");
     assert_eq!(
         decls.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
         plugged
@@ -4663,6 +4664,7 @@ async fn the_registration_packet_carries_shell_names_once_and_leaves_daemon_name
     let Some(AgentCommand::RegisterCommands { decls, .. }) = registration_command(&receiver) else {
         panic!("얹을 이름이 있으면 등록 패킷이 나온다");
     };
+    let decls = decls_from_wire(&decls).expect("셸이 싼 등록 칸은 풀린다");
     for name in &shell_names {
         let carried: Vec<_> = decls.iter().filter(|d| d.name == *name).collect();
         assert_eq!(carried.len(), 1, "{name}: 셸 표 이름은 한 번만 실린다");
@@ -5059,6 +5061,7 @@ async fn a_report_that_arrives_after_the_table_still_rides_the_next_registration
     let AgentCommand::RegisterCommands { decls, .. } = before else {
         panic!("RegisterCommands");
     };
+    let decls = decls_from_wire(&decls).expect("셸이 싼 등록 칸은 풀린다");
     assert!(
         !decls.iter().any(|d| d.name == "tab.next"),
         "아직 아무 창도 보고하지 않았다"
@@ -5070,6 +5073,7 @@ async fn a_report_that_arrives_after_the_table_still_rides_the_next_registration
     let AgentCommand::RegisterCommands { decls, .. } = after else {
         panic!("RegisterCommands");
     };
+    let decls = decls_from_wire(&decls).expect("셸이 싼 등록 칸은 풀린다");
     assert!(
         decls.iter().any(|d| d.name == "tab.next"),
         "다음 (재)핸드셰이크의 패킷에는 웹뷰 몫이 합쳐져 있다"

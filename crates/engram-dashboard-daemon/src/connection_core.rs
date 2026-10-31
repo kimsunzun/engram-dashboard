@@ -1194,6 +1194,28 @@ pub(crate) fn reply_to_wire(reply: &CommandReply) -> Result<Box<RawValue>, serde
     serde_json::value::to_raw_value(reply)
 }
 
+/// 등록 패킷(`RegisterCommands.decls` · `UpdateCommands.added`)의 항목 목록 칸(원문 JSON)을 명부가 쓰는 도구 crate
+/// 등록 항목으로 푼다(ADR-0272 결정 3). 에이전트 참조 칸(`agent_args`)은 이 풀기로 명부에 얹혀 중계 전 다시 쓰기
+/// (`command_delivery::resolve_agent_args`)가 읽는다 — 칸이 없는 옛 항목은 빈 목록이다(ADR-0308).
+///
+/// `Err` = 패킷은 풀렸는데 목록 모양이 틀렸다(ADR-0272 결정 6) — 받는 쪽은 그 패킷을 명부에 손대지 않고 칸 밖의
+/// `request_id` 로 거절한다(`INVALID_ARGUMENT`).
+// ADR-0272
+// ADR-0308
+pub(crate) fn decls_from_wire(raw: &RawValue) -> Result<Vec<CommandDecl>, serde_json::Error> {
+    serde_json::from_str(raw.get())
+}
+
+/// 항목 목록 칸이 깨진 등록 패킷의 거절(ADR-0272 결정 6). ★번호는 칸 밖이라 그 패킷의 `request_id` 로 답한다★ —
+/// 보낸 쪽 대기가 곧바로 깬다(셸의 등록 · 차분 대기는 상한이 없어 `None` 으로 답하면 연결이 끊길 때까지 매달린다).
+/// 봉투 · 답장 칸이 깨지면 `Error{request_id: None}` 인 것은 번호가 그 칸 안이라서다. 코드는 명부가 틀린 패킷에
+/// 쓰는 `INVALID_ARGUMENT` 이고, 패킷 통째로 반려라 명부는 그대로다.
+fn broken_decls_refusal(e: &serde_json::Error) -> CommandError {
+    CommandError::invalid_argument(format!(
+        "invalid command declarations: {e} — this packet was not applied"
+    ))
+}
+
 /// wire 벤더 → 사용량 칸의 벤더 키. `None` = 그 벤더의 조회기가 없다.
 ///
 /// ★키는 들어온 낱말이 아니라 조회기의 키다★ — 버스 입구(대문자 낱말)와 같은 칸을 치려면 두 입구가 같은 조회기
@@ -2119,6 +2141,19 @@ impl ConnectionCore {
                     &owner_from_wire(claimed),
                     self.commands.attached_owner(conn_id).as_ref(),
                 );
+                let decls = match decls_from_wire(&decls) {
+                    Ok(decls) => decls,
+                    Err(e) => {
+                        reply_roster(
+                            sink,
+                            conn_id,
+                            "register",
+                            request_id,
+                            Err(broken_decls_refusal(&e)),
+                        );
+                        return DispatchFlow::Continue;
+                    }
+                };
                 // ★`catalog_version` 으로 거절하지 않는다★: 세대 번호는 crate 마다라 받는 쪽이 자기
                 //   번호와 비교해 뜻을 부여하면 틀린다 — 진단용이다(TRD §4-①).
                 tracing::debug!(
@@ -2154,6 +2189,19 @@ impl ConnectionCore {
                     &owner_from_wire(claimed),
                     self.commands.attached_owner(conn_id).as_ref(),
                 );
+                let added = match decls_from_wire(&added) {
+                    Ok(added) => added,
+                    Err(e) => {
+                        reply_roster(
+                            sink,
+                            conn_id,
+                            "update",
+                            request_id,
+                            Err(broken_decls_refusal(&e)),
+                        );
+                        return DispatchFlow::Continue;
+                    }
+                };
                 tracing::debug!(
                     conn = conn_id,
                     added = added.len(),
@@ -2852,13 +2900,13 @@ mod tests {
             // ④ 명령 명부
             AgentCommand::RegisterCommands {
                 owner: WireOwnerToken::new("shell"),
-                decls: vec![],
+                decls: RawValue::from_string("[]".to_string()).unwrap(),
                 catalog_version: 1,
                 request_id: rid(),
             },
             AgentCommand::UpdateCommands {
                 owner: WireOwnerToken::new("shell"),
-                added: vec![],
+                added: RawValue::from_string("[]".to_string()).unwrap(),
                 removed: vec![],
                 request_id: rid(),
             },
@@ -4365,7 +4413,7 @@ mod tests {
     fn register(decls: Vec<CommandDecl>, request_id: RequestId) -> AgentCommand {
         AgentCommand::RegisterCommands {
             owner: WireOwnerToken::new("whatever-the-client-thinks"),
-            decls,
+            decls: decls_slot(&decls),
             catalog_version: 7,
             request_id,
         }
@@ -4374,11 +4422,19 @@ mod tests {
     fn update(added: Vec<CommandDecl>, removed: Vec<&str>, request_id: RequestId) -> AgentCommand {
         AgentCommand::UpdateCommands {
             owner: WireOwnerToken::new("whatever-the-client-thinks"),
-            added,
+            added: decls_slot(&added),
             removed: removed.into_iter().map(str::to_string).collect(),
             request_id,
         }
     }
+
+    /// 등록 항목 목록을 패킷의 원문 칸으로 싼다 — 운영에서 싸는 쪽은 셸이라(데몬은 풀기만 한다) 시험 몫이다.
+    fn decls_slot(decls: &[CommandDecl]) -> Box<RawValue> {
+        serde_json::value::to_raw_value(decls).expect("등록 항목 직렬화")
+    }
+
+    /// protocol 등록 golden(`messages.rs` 의 `MIXED_DECLS`) · 셸 `protocol_state` 시험과 같은 칸 바이트.
+    const MIXED_DECLS: &str = r#"[{"name":"slot.focus","help":"{}","agent_args":["agent","after_tab"]},{"name":"tab.focus","help":"{}"}]"#;
 
     /// 연결이 선 상태의 세션 — 명부는 **붙어 있는 연결**의 등록만 받으므로, 명단에 올리는 이 한 줄이
     /// 운영의 `on_connect` 자리다(`CommandRoster::attach`).
@@ -4454,6 +4510,165 @@ mod tests {
             names,
             vec!["tab.create".to_string(), "tab.split".to_string()],
             "내린 이름은 자리째 사라지고(ADR-0150) 차분에 안 실린 이름은 그대로다"
+        );
+    }
+
+    /// ★에이전트 참조 칸은 원문 등록 칸을 푼 데서 명부로 간다★(ADR-0308 · TRD trd-3 §6-1 U4 의 A4) — 중계 전 다시
+    /// 쓰기(`command_delivery::resolve_agent_args`)가 읽는 표가 이 풀기로 채워진다. 등록 · 차분 둘 다 같은 칸이다.
+    #[tokio::test]
+    async fn the_register_slot_hands_agent_args_to_the_roster() {
+        let (core, _rx) = test_core();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = attached(&core, 1);
+
+        let registered = rid();
+        core.dispatch(
+            AgentCommand::RegisterCommands {
+                owner: WireOwnerToken::new("shell"),
+                decls: RawValue::from_string(MIXED_DECLS.to_string()).unwrap(),
+                catalog_version: 1,
+                request_id: registered,
+            },
+            &session,
+            &mock,
+        )
+        .await;
+        let updated = rid();
+        core.dispatch(
+            AgentCommand::UpdateCommands {
+                owner: WireOwnerToken::new("shell"),
+                added: RawValue::from_string(
+                    r#"[{"name":"tab.dock","help":"{}","agent_args":["agent"]}]"#.to_string(),
+                )
+                .unwrap(),
+                removed: vec![],
+                request_id: updated,
+            },
+            &session,
+            &mock,
+        )
+        .await;
+
+        match mock.events().as_slice() {
+            [AgentEvent::Ack { request_id: a }, AgentEvent::Ack { request_id: b }] => {
+                assert_eq!((*a, *b), (registered, updated));
+            }
+            other => panic!("등록 · 차분 둘 다 Ack: {other:?}"),
+        }
+        let commands = core.commands();
+        assert_eq!(
+            commands.agent_args_of("slot.focus"),
+            vec!["agent".to_string(), "after_tab".to_string()],
+            "선언 순서 그대로"
+        );
+        assert!(commands.agent_args_of("tab.focus").is_empty());
+        assert_eq!(
+            commands.agent_args_of("tab.dock"),
+            vec!["agent".to_string()]
+        );
+    }
+
+    /// ★칸이 빠진 옛 항목은 빈 `agent_args` 로 풀린다★(ADR-0308 — 「바꿀 칸 없음」) · 칸이 든 목록은 선언 그대로
+    /// 풀린다. protocol `decl_agent_args_are_optional_on_the_wire` 가 패킷 쪽(칸 바이트가 그대로 건넌다)을 잰다.
+    #[test]
+    fn an_old_register_slot_unpacks_to_no_agent_args() {
+        let old =
+            RawValue::from_string(r#"[{"name":"tab.focus","help":"{}"}]"#.to_string()).unwrap();
+        match decls_from_wire(&old).expect("옛 항목도 풀린다").as_slice() {
+            [decl] => {
+                assert_eq!(decl.name, "tab.focus");
+                assert!(decl.agent_args.is_empty(), "칸이 없으면 빈 목록");
+            }
+            other => panic!("항목 하나여야: {other:?}"),
+        }
+
+        let mixed = RawValue::from_string(MIXED_DECLS.to_string()).unwrap();
+        let decls = decls_from_wire(&mixed).expect("칸이 든 목록");
+        assert_eq!(
+            decls
+                .iter()
+                .map(|decl| (decl.name.as_str(), decl.agent_args.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "slot.focus",
+                    vec!["agent".to_string(), "after_tab".to_string()]
+                ),
+                ("tab.focus", Vec::new()),
+            ]
+        );
+    }
+
+    /// ★패킷은 풀렸는데 항목 목록이 깨지면 그 패킷의 번호로 거절한다★(ADR-0272 결정 6 · `broken_decls_refusal`) —
+    /// 번호가 칸 밖이라 읽히므로 보낸 쪽 대기를 곧바로 깨운다. 패킷 통째로 반려라 명부는 그대로고(차분의 `removed`
+    /// 도 적용되지 않는다) 연결은 산다.
+    #[tokio::test]
+    async fn a_broken_register_slot_is_refused_with_its_request_id_and_applies_nothing() {
+        let (core, _rx) = test_core();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = attached(&core, 1);
+        core.dispatch(register(vec![decl("tab.create")], rid()), &session, &mock)
+            .await;
+
+        let registered = rid();
+        let flow = core
+            .dispatch(
+                AgentCommand::RegisterCommands {
+                    owner: WireOwnerToken::new("shell"),
+                    decls: RawValue::from_string(r#"[{"name":1}]"#.to_string()).unwrap(),
+                    catalog_version: 1,
+                    request_id: registered,
+                },
+                &session,
+                &mock,
+            )
+            .await;
+        assert_eq!(flow, DispatchFlow::Continue, "연결은 산다");
+        let updated = rid();
+        let flow = core
+            .dispatch(
+                AgentCommand::UpdateCommands {
+                    owner: WireOwnerToken::new("shell"),
+                    added: RawValue::from_string(r#"{"name":"tab.split"}"#.to_string()).unwrap(),
+                    removed: vec!["tab.create".to_string()],
+                    request_id: updated,
+                },
+                &session,
+                &mock,
+            )
+            .await;
+        assert_eq!(flow, DispatchFlow::Continue, "연결은 산다");
+
+        match mock.events().as_slice() {
+            [AgentEvent::Ack { .. }, AgentEvent::Error {
+                request_id: Some(a),
+                message: first,
+            }, AgentEvent::Error {
+                request_id: Some(b),
+                message: second,
+            }] => {
+                assert_eq!((*a, *b), (registered, updated), "그 패킷의 번호로 답한다");
+                for message in [first, second] {
+                    assert!(
+                        message.starts_with("INVALID_ARGUMENT: invalid command declarations"),
+                        "{message}"
+                    );
+                }
+            }
+            other => panic!("깨진 등록 · 차분은 번호 실은 Error: {other:?}"),
+        }
+        let names: Vec<String> = core
+            .commands()
+            .entries()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec!["tab.create".to_string()],
+            "깨진 패킷은 명부를 건드리지 않는다"
         );
     }
 
