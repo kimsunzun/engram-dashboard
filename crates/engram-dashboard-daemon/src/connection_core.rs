@@ -79,7 +79,9 @@ use crate::command_roster::CommandRoster;
 use crate::control::registry::ControlRegistry;
 use crate::usage_service::book::RequestKind;
 use crate::usage_service::UsageService;
-use engram_dashboard_command::{CommandDecl, CommandEnvelope, CommandError, ErrorCode, OwnerToken};
+use engram_dashboard_command::{
+    CommandDecl, CommandEnvelope, CommandError, CommandReply, ErrorCode, OwnerToken,
+};
 use engram_dashboard_messaging::envelope::EnvelopeFormat as CoreEnvelopeFormat;
 use engram_dashboard_net::frame_port::{ConnId, FrameFanout};
 use serde_json::value::RawValue;
@@ -1175,6 +1177,23 @@ pub(crate) fn envelope_to_wire(
     serde_json::value::to_raw_value(envelope)
 }
 
+/// 주인이 돌려준 결말 패킷(`CommandOutcome`)의 답장 칸(원문 JSON)을 배달 표가 쓰는 도구 crate 답장으로
+/// 푼다(ADR-0272 결정 4).
+///
+/// `Err` = 패킷은 풀렸는데 답장 모양이 틀렸다(ADR-0272 결정 6) — 받는 쪽은 번호를 못 읽어 왕복에 붙이지 못하고
+/// 그 결말을 `Error{request_id: None}` 으로 거절한다.
+// ADR-0272
+pub(crate) fn reply_from_wire(raw: &RawValue) -> Result<CommandReply, serde_json::Error> {
+    serde_json::from_str(raw.get())
+}
+
+/// 호출자에게 낼 답장을 답장 패킷(`AgentEvent::CommandReply`)의 원문 칸으로 싼다. 중계가 내린 재시도 지시
+/// (`command_delivery::send_reply`)는 이 바이트에 실린다 — 주인이 보낸 원문을 그대로 넘기면 그 지시가 사라진다.
+// ADR-0272
+pub(crate) fn reply_to_wire(reply: &CommandReply) -> Result<Box<RawValue>, serde_json::Error> {
+    serde_json::value::to_raw_value(reply)
+}
+
 /// wire 벤더 → 사용량 칸의 벤더 키. `None` = 그 벤더의 조회기가 없다.
 ///
 /// ★키는 들어온 낱말이 아니라 조회기의 키다★ — 버스 입구(대문자 낱말)와 같은 칸을 치려면 두 입구가 같은 조회기
@@ -2227,6 +2246,20 @@ impl ConnectionCore {
             //   (자취를 두면 그 목록이 무한히 자란다 — ADR-0150 가 명부에서 자취를 버린 것과 같은 이유).
             // ADR-0154
             AgentCommand::CommandOutcome { reply } => {
+                // ADR-0272 결정 6: 패킷은 풀렸는데 답장이 깨졌으면 번호를 못 읽어 어느 왕복에도 못 붙인다 —
+                //   깨진 봉투 갈래와 같은 처분(`Error{request_id: None}` · 연결은 산다). 그 왕복은 자기 마감시각에
+                //   호출자에게 답한다.
+                let reply = match reply_from_wire(&reply) {
+                    Ok(reply) => reply,
+                    Err(e) => {
+                        tracing::warn!(conn = conn_id, "명령 결말의 답장을 풀 수 없다: {e}");
+                        let _ = sink.enqueue(Outbound::event(AgentEvent::Error {
+                            request_id: None,
+                            message: format!("invalid command reply: {e}"),
+                        }));
+                        return DispatchFlow::Continue;
+                    }
+                };
                 let request_id = reply.request_id;
                 // ★거절 사유가 둘이고 **무게가 다르다**★: 「붙일 자리가 없다」는 흔한 정상 경합(마감이
                 //   먼저 지났다)이고, 「위임한 적 없다」는 **있을 수 없는 프레임**이다 — 그 번호의 왕복은
@@ -4671,7 +4704,9 @@ mod tests {
     }
 
     fn bus_outcome(reply: engram_dashboard_command::CommandReply) -> AgentCommand {
-        AgentCommand::CommandOutcome { reply }
+        AgentCommand::CommandOutcome {
+            reply: reply_to_wire(&reply).expect("답장 직렬화"),
+        }
     }
 
     fn on_current_thread<T>(body: impl std::future::Future<Output = T>) -> T {
@@ -4786,6 +4821,7 @@ mod tests {
 
         match next_frame_event(&mut caller_inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = reply_from_wire(&reply).expect("데몬이 싼 답장은 풀린다");
                 assert_eq!(reply.request_id, req);
                 assert_eq!(
                     reply.outcome,
@@ -4907,6 +4943,136 @@ mod tests {
         assert_eq!(envelope_from_wire(&raw).unwrap(), envelope);
     }
 
+    /// ★패킷은 풀렸는데 답장이 깨지면 번호 없는 거절이다★(ADR-0272 결정 6 · 데몬 쪽 — 깨진 봉투와 같은 처분) —
+    /// 번호를 못 읽으니 어느 왕복에도 붙지 않고 `Error{request_id: None}` 이 결말을 보낸 연결로 간다. 원문에 맞는
+    /// 번호가 적혀 있어도 번호만 골라 읽지 않는다(ADR-0272 「거부한 대안」 — 부분 파싱). 그 왕복은 열린 채 남아 성한
+    /// 결말이 오면 그대로 닫힌다.
+    #[tokio::test]
+    async fn a_broken_outcome_is_refused_without_a_request_id_and_settles_nothing() {
+        let (core, _rx) = test_core();
+        let (owner, mut owner_inbox) = attached_with_inbox(&core, 1);
+        let (caller, mut caller_inbox) = attached_with_inbox(&core, 2);
+        let (tx, _spill) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let owner_mock = MockOutboundSink::new(tx.clone());
+        let caller_mock = MockOutboundSink::new(tx);
+        core.dispatch(
+            register(vec![decl("tab.create")], rid()),
+            &owner,
+            &owner_mock,
+        )
+        .await;
+        let req = engram_dashboard_command::RequestId::new();
+        core.dispatch(bus_command("tab.create", req), &caller, &caller_mock)
+            .await;
+        assert!(matches!(
+            next_frame_event(&mut owner_inbox).await,
+            AgentEvent::CommandRequest { .. }
+        ));
+
+        let broken = AgentCommand::CommandOutcome {
+            reply: RawValue::from_string(format!(r#"{{"request_id":"{req}"}}"#)).unwrap(),
+        };
+        let flow = core.dispatch(broken, &owner, &owner_mock).await;
+
+        assert_eq!(flow, DispatchFlow::Continue, "연결은 산다");
+        match owner_mock.events().as_slice() {
+            [.., AgentEvent::Error {
+                request_id: None,
+                message,
+            }] => assert!(message.starts_with("invalid command reply"), "{message}"),
+            other => panic!("결말을 보낸 쪽에 번호 없는 Error 가 마지막이어야: {other:?}"),
+        }
+        assert_eq!(
+            core.deliveries().in_flight(),
+            1,
+            "깨진 답장은 왕복을 닫지 않는다"
+        );
+        assert!(
+            caller_inbox.try_recv().is_err(),
+            "물어본 쪽에는 아무것도 안 간다"
+        );
+
+        core.dispatch(
+            bus_outcome(engram_dashboard_command::CommandReply::ok(
+                req,
+                serde_json::json!({ "tab": 4 }),
+            )),
+            &owner,
+            &owner_mock,
+        )
+        .await;
+        match next_frame_event(&mut caller_inbox).await {
+            AgentEvent::CommandReply { reply } => assert_eq!(
+                reply_from_wire(&reply)
+                    .expect("데몬이 싼 답장은 풀린다")
+                    .request_id,
+                req
+            ),
+            other => panic!("성한 결말은 그 왕복을 닫는다: {other:?}"),
+        }
+    }
+
+    /// ★중계가 싼 답장 패킷은 protocol golden 과 같은 바이트다★(ADR-0272 — protocol
+    /// `command_reply_json_golden_and_roundtrip` 의 리터럴) — 답장 → 원문 칸이 모양 · 칸 순서를 바꾸면 호출자가
+    /// 받는 바이트가 달라진다. 거꾸로 그 바이트는 같은 답장으로 풀린다.
+    #[test]
+    fn the_relay_repacks_the_reply_into_the_golden_bytes() {
+        let nil = engram_dashboard_command::RequestId(uuid::Uuid::nil());
+        for (reply, golden) in [
+            (
+                CommandReply::err(nil, CommandError::of(ErrorCode::NotFound, "no view 'x'")),
+                r#"{"CommandReply":{"reply":{"request_id":"00000000-0000-0000-0000-000000000000","outcome":{"Err":{"code":"NOT_FOUND","message":"no view 'x'","retry":"never"}}}}}"#,
+            ),
+            (
+                CommandReply::ok(nil, serde_json::json!({ "view_id": "v1" })),
+                r#"{"CommandReply":{"reply":{"request_id":"00000000-0000-0000-0000-000000000000","outcome":{"Ok":{"view_id":"v1"}}}}}"#,
+            ),
+        ] {
+            let packet = event_json(&AgentEvent::CommandReply {
+                reply: reply_to_wire(&reply).unwrap(),
+            })
+            .unwrap();
+            assert_eq!(packet, golden);
+            let AgentEvent::CommandReply { reply: raw } = serde_json::from_str(&packet).unwrap()
+            else {
+                panic!("CommandReply 여야");
+            };
+            assert_eq!(reply_from_wire(&raw).unwrap(), reply);
+        }
+    }
+
+    /// ★손으로 적은 TS 답장 칸(protocol `AgentCommand::CommandOutcome` · `AgentEvent::CommandReply` 의
+    /// `#[ts(type = …)]`)이 광고하는 **관용**을 답장을 푸는 이 끝자락에 못박는다★ — 원문 칸이라 protocol 은 답장
+    /// 모양을 못 본다(ADR-0272).
+    ///
+    /// 그 칸은 컴파일러가 안 보므로, 답장 타입이 나중에 조여지면(세 칸을 필수로 만들거나 계약 밖 필드를 거부) 광고가
+    /// 조용히 거짓이 된다 — 그때 TS 호출자는 데몬이 받는 값을 타입으로 표현할 수 없게 된다. 위 golden 은 이 클래스를
+    /// 못 잡는다(답장 → 바이트 한 방향만 본다). 그래서 방향을 뒤집어 잰다.
+    #[test]
+    fn the_outcome_slot_accepts_everything_its_ts_type_advertises() {
+        let nil = "00000000-0000-0000-0000-000000000000";
+        // 세 칸 전부 **부재** + 계약 밖 필드.
+        let sparse = RawValue::from_string(format!(
+            r#"{{"request_id":"{nil}","outcome":{{"Err":{{"detail":{{"n":1}}}}}}}}"#
+        ))
+        .unwrap();
+        let reply =
+            reply_from_wire(&sparse).expect("세 칸이 없어도 받는다(TS 칸이 그렇게 광고한다)");
+        assert!(reply.outcome.is_err());
+        // ★계약 밖 필드는 되보낼 때 살아 있어야 한다★ — additive 확장이 중계 홉에서 증발하지 않는다는 계약.
+        assert!(
+            reply_to_wire(&reply).unwrap().get().contains("\"detail\""),
+            "계약 밖 필드가 중계에서 사라졌다"
+        );
+
+        // 세 칸 전부 **`null`**.
+        let nulls = RawValue::from_string(format!(
+            r#"{{"request_id":"{nil}","outcome":{{"Err":{{"code":null,"message":null,"retry":null}}}}}}"#
+        ))
+        .unwrap();
+        reply_from_wire(&nulls).expect("null 세 칸도 받는다");
+    }
+
     /// ★마감이 지나면 답장이 **정확히 한 번** 나가고, 늦게 온 결말은 두 번째 답장을 만들지 못한다★
     ///
     /// 시계를 손으로 밀어 재므로 실시간 대기가 없다. 늦은 결말은 붙을 자리를 못 찾아 형제 arm 의 거절로
@@ -4961,6 +5127,7 @@ mod tests {
         let (timed_out, events, caller_quiet, in_flight) = seen.expect("본문이 돌았다");
         match timed_out {
             AgentEvent::CommandReply { reply } => {
+                let reply = reply_from_wire(&reply).expect("데몬이 싼 답장은 풀린다");
                 let err = reply.outcome.expect_err("마감 초과");
                 assert_eq!(err.code(), ErrorCode::Timeout);
                 assert_eq!(
@@ -7138,6 +7305,7 @@ mod tests {
 
         let agent_id = match next_frame_event(&mut inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = reply_from_wire(&reply).expect("데몬이 싼 답장은 풀린다");
                 assert_eq!(reply.request_id, made);
                 let ok = reply.outcome.expect("등록 성공");
                 assert_eq!(ok["state"], "sleeping", "만들기는 띄우지 않는다: {ok}");
@@ -7157,6 +7325,7 @@ mod tests {
 
         match next_frame_event(&mut inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = reply_from_wire(&reply).expect("데몬이 싼 답장은 풀린다");
                 assert_eq!(reply.request_id, listed);
                 let ok = reply.outcome.expect("조회 성공");
                 let agents = ok["agents"].as_array().expect("배열");
@@ -7191,6 +7360,7 @@ mod tests {
 
         match next_frame_event(&mut inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = reply_from_wire(&reply).expect("데몬이 싼 답장은 풀린다");
                 let err = reply.outcome.expect_err("모르는 칸은 반려");
                 assert_eq!(
                     err.code(),
@@ -7247,6 +7417,7 @@ mod tests {
         .await;
         match next_frame_event(&mut stranger_inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = reply_from_wire(&reply).expect("데몬이 싼 답장은 풀린다");
                 let err = reply.outcome.expect_err("비보유자는 거절");
                 assert_eq!(err.code(), engram_dashboard_command::ErrorCode::Conflict);
                 assert_eq!(err.message(), INPUT_LOCKED_REFUSAL, "WS 와 같은 글자");
@@ -7266,6 +7437,7 @@ mod tests {
         .await;
         match next_frame_event(&mut holder_inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = reply_from_wire(&reply).expect("데몬이 싼 답장은 풀린다");
                 let err = reply.outcome.expect_err("오늘은 동사가 NOT_FOUND");
                 assert_eq!(
                     err.code(),

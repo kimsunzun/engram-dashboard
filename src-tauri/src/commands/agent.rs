@@ -187,7 +187,7 @@ pub async fn request_replay(
 // JSON 으로 보내면 Rust DaemonClient 를 통해 데몬으로 전달한다.
 //
 // ★계약★: `cmd` 는 AgentCommand 의 externally-tagged JSON(e.g. `{"Kill":{…}}`). 파싱 실패는
-// 에러 반환(JSON 구조 불일치). `Command` 의 봉투 칸이 깨진 것도 같은 에러 반환이다.
+// 에러 반환(JSON 구조 불일치). `Command` 의 봉투 칸 · `CommandOutcome` 의 답장 칸이 깨진 것도 같은 에러 반환이다.
 //
 // ## ★reply 평면 (Fix-B / 안 ②)★
 // 프론트 ProtocolClient 는 reply 를 oneshot(pending 맵)으로 기다리고, 그 reply 를 `onMessage`(control
@@ -220,10 +220,11 @@ pub(crate) async fn forward_to_daemon(
 ) -> Result<Option<serde_json::Value>, String> {
     let agent_cmd: engram_dashboard_protocol::AgentCommand =
         serde_json::from_value(cmd).map_err(|e| format!("AgentCommand 파싱 실패: {e}"))?;
-    // 봉투 칸은 원문이라 위 파싱이 그 모양을 안 본다 — 깨진 봉투를 여기서 막지 않으면 번호 없는 일방 발사로
-    //   나가 프론트 pending 이 끝내 reject 되지 않는다(ADR-0272).
-    let agent_cmd = crate::daemon_client::protocol_state::reseal_webview_envelope(agent_cmd)
-        .map_err(|e| format!("AgentCommand 봉투 파싱 실패: {e}"))?;
+    // 봉투 · 답장 칸은 원문이라 위 파싱이 그 모양을 안 본다 — 깨진 칸을 여기서 막지 않으면 봉투는 번호 없는
+    //   일방 발사로 나가 프론트 pending 이 끝내 reject 되지 않고, 답장은 데몬이 번호 없는 거절로 받아 프론트가
+    //   실패를 모른다(ADR-0272).
+    let agent_cmd = crate::daemon_client::protocol_state::reseal_webview_command_slots(agent_cmd)
+        .map_err(|e| format!("AgentCommand 명령 칸 파싱 실패: {e}"))?;
 
     // ★데몬 구독 소유 = src-tauri 단독(ADR-0035/0037 — BLOCK-1)★: 프론트가 보낸 Subscribe/Unsubscribe
     //   는 데몬으로 흘리지 않고 여기서 차단(drop)한다. 데몬 구독·재구독은 layout 구독 델타(ViewManager

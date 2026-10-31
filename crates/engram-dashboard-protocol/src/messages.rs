@@ -1,7 +1,7 @@
 //! wire 메시지 — 클→데몬 [`AgentCommand`], 데몬→클 [`AgentEvent`].
 //! 둘 다 externally-tagged JSON(serde 기본).
 
-use engram_dashboard_command::{CommandDecl, CommandReply};
+use engram_dashboard_command::CommandDecl;
 use serde_json::value::RawValue;
 use ts_rs::TS;
 
@@ -333,16 +333,23 @@ pub enum AgentCommand {
     /// ★방향 필드가 없는 것과 짝이다★ — 같은 봉투 어휘가 두 방향으로 흐르고, 어느 연결에 썼는가가 방향이다
     /// (TRD §3-2 · 도구 crate `CommandEnvelope::owner` 주석).
     ///
-    /// ★TS 칸은 **Rust 가 받아들이는 것**을 적는다 — 내보내는 것만 적으면 거짓이 된다★: 오류 세 칸은 전부
-    /// 생략·`null` 이 허용되고(`CommandError` 의 `RawError` 가 `Option<String>` 셋) 계약 밖 필드도 그대로
-    /// 통과한다(`#[serde(flatten)] extra` — `deny_unknown_fields` 는 additive 진화를 깨므로 안 단다). 필수
+    /// ★`reply` 는 원문 JSON 칸이다(ADR-0272 결정 3)★ — 바이트는 명령 버스 도구 crate 의 답장(`CommandReply` —
+    /// 모양은 아래 TS 칸)을 직렬화한 그대로이고, 이 crate 는 그 구조를 모른다. 답장으로 푸는 것은 셸 · 데몬
+    /// 끝자락이다. [`AgentCommand::Command`] 의 봉투 칸처럼 **모양이 틀린 답장도 패킷으로는 풀린다** — 그 갈래의
+    /// 처리는 끝자락 몫이다(ADR-0272 결정 6).
+    ///
+    /// ★TS 칸은 **끝자락이 답장을 풀 때 받아들이는 것**을 적는다 — 내보내는 것만 적으면 거짓이 된다★: 오류 세
+    /// 칸은 전부 생략·`null` 이 허용되고(`CommandError` 의 `RawError` 가 `Option<String>` 셋) 계약 밖 필드도
+    /// 그대로 통과한다(`#[serde(flatten)] extra` — `deny_unknown_fields` 는 additive 진화를 깨므로 안 단다). 필수
     /// 문자열로 적으면 **유효한 입력을 TS 로는 표현할 수 없다.** 되보내는 방향에도 그 관용이 실재한다 —
-    /// 릴레이 홉이 받은 원문을 재직렬화하면 세 칸 중 일부가 빠진 채 나간다(그 `Serialize` 구현).
+    /// 릴레이 홉이 받은 원문을 재직렬화하면 세 칸 중 일부가 빠진 채 나간다(그 `Serialize` 구현). 그 관용을 재는
+    /// 시험은 답장을 푸는 데몬 끝자락에 있다(`connection_core` 의
+    /// `the_outcome_slot_accepts_everything_its_ts_type_advertises`).
     CommandOutcome {
         #[ts(
             type = "{ request_id: string, outcome: { Ok: unknown } | { Err: { code?: string | null, message?: string | null, retry?: string | null, [key: string]: unknown } } }"
         )]
-        reply: CommandReply,
+        reply: Box<RawValue>,
     },
 
     // ── 대기 입력 목록(ADR-0231) ─────────────────────────────────────────────────────
@@ -623,16 +630,17 @@ pub enum AgentEvent {
         envelope: Box<RawValue>,
     },
 
-    /// [`AgentCommand::Command`] 의 **답장**(전용 reply, ADR-0155 결정 3) — 상관 키는 `reply.request_id` 다.
+    /// [`AgentCommand::Command`] 의 **답장**(전용 reply, ADR-0155 결정 3) — 상관 키는 `reply` 칸 안의
+    /// `request_id` 다.
     ///
-    /// ★[`AgentCommand::CommandOutcome`] 과 타입이 같고 방향만 다르다★ — 이쪽은 내가 낸 요청의 답이라
+    /// ★[`AgentCommand::CommandOutcome`] 과 칸이 같고 방향만 다르다★ — 이쪽은 내가 낸 요청의 답이라
     /// 셸의 `event_reply_request_id` 가 `Some` 을 주고, 저쪽은 내가 보내는 답이라 `None` 이다. 동형이라
     /// 헷갈리기 쉬운 자리이고, 갈림의 근거는 **어느 왕복의 주인이 나인가** 하나다.
     /// ★broadcast 로 바꾸지 말 것★ — [`AgentEvent::CommandList`] 와 같은 이유로 「전용 reply」라는
     /// 사실 위에 구형 셸 안전이 서 있다.
     ///
-    /// TS 칸이 광고하는 관용(오류 세 칸 생략·`null` 허용, 계약 밖 필드 통과)의 근거는
-    /// [`AgentCommand::CommandOutcome`] 에 적었다 — 같은 타입이라 같은 관용이다.
+    /// `reply` 는 [`AgentCommand::CommandOutcome`] 과 같은 원문 JSON 칸이고, TS 칸이 광고하는 관용(오류 세 칸
+    /// 생략·`null` 허용, 계약 밖 필드 통과)의 근거도 거기 적었다 — 같은 칸이라 같은 관용이다(ADR-0272).
     ///
     /// ★생산자는 이제 있다★ — 데몬이 자기 명부에서 주인을 찾아 배달하고 그 결말을 이 답장으로 되돌린다
     /// (`engram_dashboard_daemon::command_delivery` · ADR-0154). ★그래도 **프론트까지는 안 닿는다**★ —
@@ -663,7 +671,7 @@ pub enum AgentEvent {
         #[ts(
             type = "{ request_id: string, outcome: { Ok: unknown } | { Err: { code?: string | null, message?: string | null, retry?: string | null, [key: string]: unknown } } }"
         )]
-        reply: CommandReply,
+        reply: Box<RawValue>,
     },
 
     /// [`AgentCommand::ListQueuedInputs`] 응답(전용 reply) — 버스 `agent.listQueuedInputs` 의 답과 같은 값이다.
@@ -2326,18 +2334,24 @@ mod tests {
     //   모양이 바뀌어도 그 문자열은 조용히 그대로 남으므로, 실제 JSON 을 여기서 못박아 갈림을 드러낸다
     //   (`CommandDecl` 이 같은 이유로 같은 짝을 갖는다).
     //
-    // ★봉투 칸은 원문 JSON 이다(ADR-0272 결정 3)★ — 그래서 봉투가 든 패킷의 golden 은 바이트 리터럴로 짓고,
-    //   원문 칸 안은 「바이트 그대로 건넌다」만 잰다. 봉투 구조체 → 바이트(손으로 적은 TS 칸과 맞서는 쪽)의
-    //   golden 은 봉투를 푸는 끝자락이 같은 리터럴로 진다(셸 `daemon_client::protocol_state` · 데몬
+    // ★봉투 · 답장 칸은 원문 JSON 이다(ADR-0272 결정 3)★ — 그래서 그 칸이 든 패킷의 golden 은 바이트 리터럴로
+    //   짓고, 원문 칸 안은 「바이트 그대로 건넌다」만 잰다. 봉투 · 답장 구조체 → 바이트(손으로 적은 TS 칸과 맞서는
+    //   쪽)의 golden 은 그 칸을 푸는 끝자락이 같은 리터럴로 진다(셸 `daemon_client::protocol_state` · 데몬
     //   `connection_core` 시험).
     //
-    // ★한 리터럴이 중계 다리와 발신자 다리에 **함께** 쓰이는 것은 의도다★ — 두 다리의 봉투가 같은 칸·같은
+    // ★한 리터럴이 중계 다리와 발신자 다리에 **함께** 쓰이는 것은 의도다★ — 두 다리의 봉투 · 답장이 같은 칸·같은
     //   모양이라는 것이 계약이고(TRD §3-2 대칭), 다리마다 다른 리터럴을 두면 그 갈림이 안 보인다.
 
     const NIL_ENVELOPE: &str = r#"{"name":"tab.create","request_id":"00000000-0000-0000-0000-000000000000","owner":"shell","proto_ver":1,"args":{"window":"main"}}"#;
+    const NIL_FAILED_REPLY: &str = r#"{"request_id":"00000000-0000-0000-0000-000000000000","outcome":{"Err":{"code":"NOT_FOUND","message":"no view 'x'","retry":"never"}}}"#;
+    const NIL_OK_REPLY: &str = r#"{"request_id":"00000000-0000-0000-0000-000000000000","outcome":{"Ok":{"view_id":"v1"}}}"#;
+
+    fn raw_slot(json: &str) -> Box<RawValue> {
+        RawValue::from_string(json.to_string()).expect("칸 리터럴은 유효한 JSON")
+    }
 
     fn nil_envelope() -> Box<RawValue> {
-        RawValue::from_string(NIL_ENVELOPE.to_string()).expect("봉투 리터럴은 유효한 JSON")
+        raw_slot(NIL_ENVELOPE)
     }
 
     #[test]
@@ -2396,70 +2410,67 @@ mod tests {
 
     #[test]
     fn command_outcome_json_golden_and_roundtrip() {
-        let request_id = engram_dashboard_command::RequestId(Uuid::nil());
-        let failed = AgentCommand::CommandOutcome {
-            reply: engram_dashboard_command::CommandReply::err(
-                request_id,
-                engram_dashboard_command::CommandError::of(
-                    engram_dashboard_command::ErrorCode::NotFound,
-                    "no view 'x'",
-                ),
+        for (reply, golden) in [
+            (
+                NIL_FAILED_REPLY,
+                r#"{"CommandOutcome":{"reply":{"request_id":"00000000-0000-0000-0000-000000000000","outcome":{"Err":{"code":"NOT_FOUND","message":"no view 'x'","retry":"never"}}}}}"#,
             ),
-        };
-        let json = serde_json::to_string(&failed).unwrap();
-        assert_eq!(
-            json,
-            r#"{"CommandOutcome":{"reply":{"request_id":"00000000-0000-0000-0000-000000000000","outcome":{"Err":{"code":"NOT_FOUND","message":"no view 'x'","retry":"never"}}}}}"#,
-            "실패 결말의 wire 형태가 golden 과 불일치 — 손으로 적은 TS 칸도 함께 고칠 것"
-        );
-        let back: AgentCommand = serde_json::from_str(&json).unwrap();
-        let AgentCommand::CommandOutcome { reply } = &back else {
-            panic!("CommandOutcome 으로 복호돼야 한다");
-        };
-        assert_eq!(reply.request_id, request_id, "상관 키가 왕복을 건넌다");
-
-        let ok = AgentCommand::CommandOutcome {
-            reply: engram_dashboard_command::CommandReply::ok(
-                request_id,
-                serde_json::json!({ "view_id": "v1" }),
+            (
+                NIL_OK_REPLY,
+                r#"{"CommandOutcome":{"reply":{"request_id":"00000000-0000-0000-0000-000000000000","outcome":{"Ok":{"view_id":"v1"}}}}}"#,
             ),
-        };
-        assert_eq!(
-            serde_json::to_string(&ok).unwrap(),
-            r#"{"CommandOutcome":{"reply":{"request_id":"00000000-0000-0000-0000-000000000000","outcome":{"Ok":{"view_id":"v1"}}}}}"#,
-            "성공 결말도 같은 봉투 모양이어야"
-        );
+        ] {
+            let json = serde_json::to_string(&AgentCommand::CommandOutcome {
+                reply: raw_slot(reply),
+            })
+            .unwrap();
+            assert_eq!(
+                json, golden,
+                "CommandOutcome 패킷 바깥 모양이 golden 과 불일치 — 답장 모양은 셸 \
+                 `the_reply_slot_unpacks_to_the_bus_reply_byte_for_byte` · 데몬 \
+                 `the_relay_repacks_the_reply_into_the_golden_bytes` 가 지킨다"
+            );
+            let back: AgentCommand = serde_json::from_str(&json).unwrap();
+            let AgentCommand::CommandOutcome { reply: carried } = &back else {
+                panic!("CommandOutcome 으로 복호돼야 한다");
+            };
+            assert_eq!(carried.get(), reply, "원문 칸은 바이트 그대로 건넌다");
+        }
     }
 
-    /// ★손으로 적은 TS 칸이 광고하는 **관용**을 Rust 쪽에 못박는다★.
-    ///
-    /// 그 칸은 컴파일러가 안 보므로, Rust 가 나중에 조여지면(세 칸을 필수로 만들거나 계약 밖 필드를 거부)
-    /// 광고가 조용히 거짓이 된다 — 그때 TS 호출자는 Rust 가 받는 값을 타입으로 표현할 수 없게 된다.
-    /// ★위 두 골든은 이 클래스를 못 잡는다★(그것들은 Rust→JSON 한 방향만 본다). 그래서 방향을 뒤집어 잰다.
+    /// ★답장 칸도 「유효한 JSON 인가」만 본다★(ADR-0272 결정 3 · 6) — 모양이 틀린 답장도 패킷으로는 풀려야 끝자락이
+    /// 그 갈래를 처리할 수 있다(셸 = 요청 번호 없음 · 데몬 = `Error{request_id: None}`). TS 칸이 광고하는 관용(세 칸
+    /// 부재 · `null` · 계약 밖 필드)은 이 칸이 아니라 답장을 푸는 끝자락이 잰다(데몬
+    /// `the_outcome_slot_accepts_everything_its_ts_type_advertises`).
     #[test]
-    fn the_outcome_accepts_everything_its_ts_type_advertises() {
-        let nil = "00000000-0000-0000-0000-000000000000";
-        // 세 칸 전부 **부재** + 계약 밖 필드.
-        let sparse = format!(
-            r#"{{"CommandOutcome":{{"reply":{{"request_id":"{nil}","outcome":{{"Err":{{"detail":{{"n":1}}}}}}}}}}}}"#
-        );
-        let cmd: AgentCommand =
-            serde_json::from_str(&sparse).expect("세 칸이 없어도 받는다(TS 칸이 그렇게 광고한다)");
-        let AgentCommand::CommandOutcome { reply } = &cmd else {
-            panic!("CommandOutcome");
-        };
-        assert!(reply.outcome.is_err());
-        // ★계약 밖 필드는 되보낼 때 살아 있어야 한다★ — additive 확장이 중계 홉에서 증발하지 않는다는 계약.
-        assert!(
-            serde_json::to_string(&cmd).unwrap().contains("\"detail\""),
-            "계약 밖 필드가 중계에서 사라졌다"
-        );
+    fn the_reply_slot_takes_any_json_but_rejects_non_json() {
+        for reply in [
+            r#"{"request_id":"00000000-0000-0000-0000-000000000000","outcome":{"Err":{"detail":{"n":1}}}}"#,
+            r#"{"request_id":"not-a-uuid"}"#,
+            "[]",
+            "null",
+        ] {
+            let sent: AgentCommand =
+                serde_json::from_str(&format!(r#"{{"CommandOutcome":{{"reply":{reply}}}}}"#))
+                    .expect("모양이 틀린 답장도 CommandOutcome 패킷으로는 풀려야");
+            let AgentCommand::CommandOutcome { reply: carried } = sent else {
+                panic!("CommandOutcome 여야");
+            };
+            assert_eq!(carried.get(), reply);
 
-        // 세 칸 전부 **`null`**.
-        let nulls = format!(
-            r#"{{"CommandOutcome":{{"reply":{{"request_id":"{nil}","outcome":{{"Err":{{"code":null,"message":null,"retry":null}}}}}}}}}}"#
+            let answered: AgentEvent =
+                serde_json::from_str(&format!(r#"{{"CommandReply":{{"reply":{reply}}}}}"#))
+                    .expect("모양이 틀린 답장도 CommandReply 패킷으로는 풀려야");
+            let AgentEvent::CommandReply { reply: carried } = answered else {
+                panic!("CommandReply 여야");
+            };
+            assert_eq!(carried.get(), reply);
+        }
+        assert!(serde_json::from_str::<AgentEvent>(r#"{"CommandReply":{"reply":}}"#).is_err());
+        assert!(
+            serde_json::from_str::<AgentCommand>(r#"{"CommandOutcome":{}}"#).is_err(),
+            "답장 칸이 없는 패킷은 거절"
         );
-        serde_json::from_str::<AgentCommand>(&nulls).expect("null 세 칸도 받는다");
     }
 
     #[test]
@@ -2488,39 +2499,32 @@ mod tests {
 
     #[test]
     fn command_reply_json_golden_and_roundtrip() {
-        let request_id = engram_dashboard_command::RequestId(Uuid::nil());
-        let failed = AgentEvent::CommandReply {
-            reply: engram_dashboard_command::CommandReply::err(
-                request_id,
-                engram_dashboard_command::CommandError::of(
-                    engram_dashboard_command::ErrorCode::NotFound,
-                    "no view 'x'",
-                ),
+        for (reply, golden) in [
+            (
+                NIL_FAILED_REPLY,
+                r#"{"CommandReply":{"reply":{"request_id":"00000000-0000-0000-0000-000000000000","outcome":{"Err":{"code":"NOT_FOUND","message":"no view 'x'","retry":"never"}}}}}"#,
             ),
-        };
-        let json = serde_json::to_string(&failed).unwrap();
-        assert_eq!(
-            json,
-            r#"{"CommandReply":{"reply":{"request_id":"00000000-0000-0000-0000-000000000000","outcome":{"Err":{"code":"NOT_FOUND","message":"no view 'x'","retry":"never"}}}}}"#,
-            "실패 답장의 wire 형태가 golden 과 불일치 — 손으로 적은 TS 칸도 함께 고칠 것"
-        );
-        let back: AgentEvent = serde_json::from_str(&json).unwrap();
-        let AgentEvent::CommandReply { reply } = &back else {
-            panic!("CommandReply 로 복호돼야 한다");
-        };
-        assert_eq!(reply.request_id, request_id, "상관 키가 왕복을 건넌다");
-
-        let ok = AgentEvent::CommandReply {
-            reply: engram_dashboard_command::CommandReply::ok(
-                request_id,
-                serde_json::json!({ "view_id": "v1" }),
+            (
+                NIL_OK_REPLY,
+                r#"{"CommandReply":{"reply":{"request_id":"00000000-0000-0000-0000-000000000000","outcome":{"Ok":{"view_id":"v1"}}}}}"#,
             ),
-        };
-        assert_eq!(
-            serde_json::to_string(&ok).unwrap(),
-            r#"{"CommandReply":{"reply":{"request_id":"00000000-0000-0000-0000-000000000000","outcome":{"Ok":{"view_id":"v1"}}}}}"#,
-            "성공 답장도 같은 봉투 모양이어야"
-        );
+        ] {
+            let json = serde_json::to_string(&AgentEvent::CommandReply {
+                reply: raw_slot(reply),
+            })
+            .unwrap();
+            assert_eq!(
+                json, golden,
+                "CommandReply 패킷 바깥 모양이 golden 과 불일치 — 답장 모양은 셸 \
+                 `the_reply_slot_unpacks_to_the_bus_reply_byte_for_byte` · 데몬 \
+                 `the_relay_repacks_the_reply_into_the_golden_bytes` 가 지킨다"
+            );
+            let back: AgentEvent = serde_json::from_str(&json).unwrap();
+            let AgentEvent::CommandReply { reply: carried } = &back else {
+                panic!("CommandReply 로 복호돼야 한다");
+            };
+            assert_eq!(carried.get(), reply, "원문 칸은 바이트 그대로 건넌다");
+        }
     }
 
     // ── 사용량 한도 ──

@@ -1073,6 +1073,20 @@ async fn main_loop(
                                                         ),
                                                     }
                                                 }
+                                                // ADR-0272 결정 6: 답장이 여기 오는 것은 깨져서 번호를 못 읽었을
+                                                //   때뿐이다(성한 답장은 위 pending 갈래가 먼저 가져간다) — 깨울
+                                                //   대기를 못 찾으니 로그만 남기고 버린다(그 대기는 부르는 쪽의
+                                                //   답장 상한으로 끝난다 — 오늘은 `forward_daemon_command` 의
+                                                //   30s. 상한 없이 부르는 쪽은 연결이 끊길 때까지 기다린다 —
+                                                //   `mod.rs` 의 `send_command_with_origin` 주석 「알려진 잔여」).
+                                                AgentEvent::CommandReply { reply } => {
+                                                    if let Err(e) = protocol_state::reply_from_wire(&reply) {
+                                                        tracing::warn!(
+                                                            error = %e,
+                                                            "데몬이 보낸 답장을 풀 수 없다 — 깨울 요청 번호가 없어 버린다"
+                                                        );
+                                                    }
+                                                }
                                                 // ★사용량 팔은 `emit_broadcast` 안이 아니라 여기다★ — 사유는
                                                 //   `relay_usage_snapshot` doc.
                                                 AgentEvent::UsageLimitsUpdated {
@@ -1167,8 +1181,19 @@ async fn main_loop(
                             );
                             continue;
                         }
-                        let cmd = AgentCommand::CommandOutcome { reply };
-                        send_fire(&mut sink, &cmd, my_gen, "CommandOutcome").await;
+                        // ADR-0272: 결말을 원문 칸으로 싼다. 직렬화 실패는 `send_fire` 의 직렬화 실패 갈래와
+                        //   같은 처분이다(로그만 — 보낸 쪽 데몬은 자기 마감으로 회수한다).
+                        match protocol_state::reply_to_wire(&reply) {
+                            Ok(reply) => {
+                                let cmd = AgentCommand::CommandOutcome { reply };
+                                send_fire(&mut sink, &cmd, my_gen, "CommandOutcome").await;
+                            }
+                            Err(e) => tracing::warn!(
+                                request_id = %reply.request_id,
+                                error = %e,
+                                "명령 결말을 원문 칸으로 싸지 못했다 — 폐기"
+                            ),
+                        }
                     }
                     // 집합은 지금 읽는다 — 넛지를 넣던 때가 아니라 꺼내는 때의 관심이다(variant doc).
                     ConnectionCommand::UsageInterest { .. } => {

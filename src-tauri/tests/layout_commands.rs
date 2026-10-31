@@ -46,7 +46,7 @@ use engram_dashboard_lib::daemon_client::inbound::{
     BoxedTask, InboundReceiver, InboundSlot, RuntimeSpawner, TaskSpawner, ViewCommandPort,
 };
 use engram_dashboard_lib::daemon_client::protocol_state::{
-    command_request_id, envelope_from_wire, event_reply_request_id,
+    command_request_id, envelope_from_wire, event_reply_request_id, reply_to_wire,
 };
 use engram_dashboard_lib::layout::apply;
 use engram_dashboard_lib::layout::commands::{
@@ -4344,8 +4344,10 @@ async fn wire_round_trip(name: &str, args: serde_json::Value) -> WireTrip {
         "결말에 소켓 세대가 실려야 옛 소켓 몫을 폐기할 수 있다"
     );
 
-    // 연결 태스크가 그 소켓으로 내보내는 프레임.
-    let outcome = AgentCommand::CommandOutcome { reply };
+    // 연결 태스크가 그 소켓으로 내보내는 프레임 — 같은 끝자락 함수로 답장 칸을 싼다(ADR-0272 결정 4).
+    let outcome = AgentCommand::CommandOutcome {
+        reply: reply_to_wire(&reply).expect("결말 직렬화"),
+    };
     assert_eq!(
         command_request_id(&outcome),
         None,

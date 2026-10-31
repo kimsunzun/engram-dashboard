@@ -4539,10 +4539,13 @@ fn frame_label(cmd: &AgentCommand) -> String {
         AgentCommand::Unsubscribe { agent_id } => format!("marker:{agent_id}"),
         AgentCommand::RefreshUsageLimits { vendor, .. } => format!("refresh:{vendor:?}"),
         AgentCommand::RegisterCommands { .. } => "register".to_string(),
-        AgentCommand::CommandOutcome { reply } => match &reply.outcome {
-            Ok(_) => "outcome:ok".to_string(),
-            Err(e) => format!("outcome:err:{e:?}"),
-        },
+        AgentCommand::CommandOutcome { reply } => {
+            match super::protocol_state::reply_from_wire(reply).map(|reply| reply.outcome) {
+                Ok(Ok(_)) => "outcome:ok".to_string(),
+                Ok(Err(e)) => format!("outcome:err:{e:?}"),
+                Err(e) => format!("outcome:broken:{e}"),
+            }
+        }
         other => format!("{other:?}"),
     }
 }
@@ -5323,9 +5326,10 @@ async fn forward_drops_a_webview_usage_subscribe() {
     client.close();
 }
 
-// ── 웹뷰가 보낸 깨진 봉투 = invoke 실패 · 소켓에 안 나간다 ─────────────────────────────────
-// 봉투 칸은 원문이라 패킷 파싱은 통과한다 — 막지 않으면 번호 없는 일방 발사로 나가 프론트 pending 이 끝내 reject
-// 되지 않는다. 표지가 곧바로 다음 frame 이면 안 나갔다.
+// ── 웹뷰가 보낸 깨진 명령 칸(봉투 · 답장) = invoke 실패 · 소켓에 안 나간다 ─────────────────────────
+// 명령 칸은 원문이라 패킷 파싱은 통과한다 — 막지 않으면 봉투는 번호 없는 일방 발사로 나가 프론트 pending 이 끝내
+// reject 되지 않고, 답장은 데몬이 번호 없는 거절로 받아 프론트가 실패를 모른다. 표지가 곧바로 다음 frame 이면 안
+// 나갔다.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forward_rejects_a_webview_command_with_a_broken_envelope() {
     let mut server = spawn_usage_server().await;
@@ -5336,7 +5340,7 @@ async fn forward_rejects_a_webview_command_with_a_broken_envelope() {
     let cmd = serde_json::json!({ "Command": { "envelope": { "name": "tab.create" } } });
     let refused = forward_to_daemon(&client, cmd).await;
     assert!(
-        matches!(&refused, Err(m) if m.starts_with("AgentCommand 봉투 파싱 실패")),
+        matches!(&refused, Err(m) if m.starts_with("AgentCommand 명령 칸 파싱 실패")),
         "{refused:?}"
     );
     let m = marker(&client);
@@ -5344,6 +5348,30 @@ async fn forward_rejects_a_webview_command_with_a_broken_envelope() {
         server.next_frame().await,
         format!("1:{m}"),
         "깨진 봉투는 소켓에 안 나간다"
+    );
+    client.close();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forward_rejects_a_webview_outcome_with_a_broken_reply() {
+    let mut server = spawn_usage_server().await;
+    let events = Arc::new(RecordingEvents::default());
+    let (client, _disco) = usage_client(&server, events.clone());
+    client.connect().await.expect("connect → connected");
+
+    let cmd = serde_json::json!({
+        "CommandOutcome": { "reply": { "request_id": "00000000-0000-0000-0000-000000000000" } }
+    });
+    let refused = forward_to_daemon(&client, cmd).await;
+    assert!(
+        matches!(&refused, Err(m) if m.starts_with("AgentCommand 명령 칸 파싱 실패")),
+        "{refused:?}"
+    );
+    let m = marker(&client);
+    assert_eq!(
+        server.next_frame().await,
+        format!("1:{m}"),
+        "깨진 답장은 소켓에 안 나간다"
     );
     client.close();
 }

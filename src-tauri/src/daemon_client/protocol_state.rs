@@ -25,7 +25,7 @@ use serde_json::value::RawValue;
 
 // ── 명령 칸 끝자락 · request_id 추출(request/reply 상관) ──────────────────────────────
 // ADR-0272 결정 4: 패킷의 명령 버스 칸은 원문 JSON 이라 protocol 은 그 안의 번호를 못 읽는다 — 짝 맞추기는
-//   봉투를 푸는 끝자락(여기)이 진다. 데몬은 받는 쪽 거절에 실을 번호를 자기 끝자락에서 따로 읽는다.
+//   봉투 · 답장을 푸는 끝자락(여기)이 진다. 데몬은 받는 쪽 거절에 실을 번호를 자기 끝자락에서 따로 읽는다.
 
 /// 패킷의 봉투 칸(원문 JSON — `AgentCommand::Command` · `AgentEvent::CommandRequest`)을 명령 버스 봉투로
 /// 푼다(ADR-0272 결정 4).
@@ -38,17 +38,44 @@ pub fn envelope_from_wire(raw: &RawValue) -> Result<CommandEnvelope, serde_json:
     serde_json::from_str(raw.get())
 }
 
-/// 웹뷰가 보낸 패킷의 봉투 칸을 한 번 풀어 보고 구조체 순서 바이트로 다시 싼다 — `Command` 밖은 그대로 돌려준다.
+/// 패킷의 답장 칸(원문 JSON — `AgentEvent::CommandReply` · `AgentCommand::CommandOutcome`)을 명령 버스 답장으로
+/// 푼다(ADR-0272 결정 4).
+///
+/// `Err` = 패킷은 풀렸는데 답장 모양이 틀렸다(ADR-0272 결정 6). 셸은 그것도 「요청 번호 없음」으로 다룬다 —
+/// 받은 답장이면 깨울 대기 슬롯을 못 찾아([`event_reply_request_id`] 가 `None`) 로그만 남기고 버린다(연결 루프의
+/// `CommandReply` 갈래).
+// ADR-0272
+pub fn reply_from_wire(
+    raw: &RawValue,
+) -> Result<engram_dashboard_command::CommandReply, serde_json::Error> {
+    serde_json::from_str(raw.get())
+}
+
+/// 인바운드 명령의 결말을 결말 패킷(`AgentCommand::CommandOutcome`)의 원문 칸으로 싼다(ADR-0272 결정 4).
+// ADR-0272
+pub fn reply_to_wire(
+    reply: &engram_dashboard_command::CommandReply,
+) -> Result<Box<RawValue>, serde_json::Error> {
+    serde_json::value::to_raw_value(reply)
+}
+
+/// 웹뷰가 보낸 패킷의 명령 칸(봉투 · 답장 — `Command` · `CommandOutcome`)을 한 번 풀어 보고 구조체 순서 바이트로
+/// 다시 싼다 — 그 밖 variant 는 그대로 돌려준다.
 ///
 /// 웹뷰 길은 패킷을 `serde_json::Value` 에서 풀어 원문 칸이 키 정렬된 바이트로 담긴다(`preserve_order` 없음) —
-/// 다시 싸야 셸이 직접 보내는 봉투와 같은 바이트가 나간다. `Err` = 봉투가 깨졌다: 일방 발사로 흘려보내면 웹뷰의
-/// 대기가 답장 상한까지 매달리므로 부르는 쪽이 invoke 를 바로 실패시킨다.
+/// 다시 싸야 셸이 직접 보내는 칸과 같은 바이트가 나간다. `Err` = 칸이 깨졌다: 봉투는 일방 발사로 흘러가 웹뷰의 대기가
+/// 답장 상한까지 매달리고, 답장은 데몬이 번호 없는 거절로 받아 웹뷰가 실패를 모른다 — 그래서 부르는 쪽이 invoke 를
+/// 바로 실패시킨다.
 // ADR-0272
-pub fn reseal_webview_envelope(cmd: AgentCommand) -> Result<AgentCommand, serde_json::Error> {
+pub fn reseal_webview_command_slots(cmd: AgentCommand) -> Result<AgentCommand, serde_json::Error> {
     match cmd {
         AgentCommand::Command { envelope } => {
             let envelope = serde_json::value::to_raw_value(&envelope_from_wire(&envelope)?)?;
             Ok(AgentCommand::Command { envelope })
+        }
+        AgentCommand::CommandOutcome { reply } => {
+            let reply = reply_to_wire(&reply_from_wire(&reply)?)?;
+            Ok(AgentCommand::CommandOutcome { reply })
         }
         other => Ok(other),
     }
@@ -68,7 +95,7 @@ fn request_id_from_bus(id: engram_dashboard_command::RequestId) -> RequestId {
 /// ★계약★: 데몬 클라이언트의 pending 매칭(`send_command`)은 reply 를 기대하므로 request_id 가 있는
 /// 명령에만 쓴다. None 인 명령을 넣으면 매칭할 키가 없어 영구 pending(hang)이 되므로 호출자가 None 을 거른다.
 /// ★봉투가 깨진 `Command` 도 `None` 이다★(ADR-0272 결정 6) — 번호를 못 읽으니 대기 슬롯을 만들지 않는다.
-/// 웹뷰가 보낸 그런 패킷은 여기 오기 전에 [`reseal_webview_envelope`] 가 막아 invoke 가 실패한다.
+/// 웹뷰가 보낸 그런 패킷은 여기 오기 전에 [`reseal_webview_command_slots`] 가 막아 invoke 가 실패한다.
 pub fn command_request_id(cmd: &AgentCommand) -> Option<RequestId> {
     match cmd {
         AgentCommand::Spawn { request_id, .. }
@@ -136,6 +163,9 @@ pub fn command_request_id(cmd: &AgentCommand) -> Option<RequestId> {
 /// ★Error 분기★: `Error{request_id: Some(_)}` = 특정 명령 실패(매칭해 reject), `Error{request_id: None}`
 /// = 명령 무관 오류(broadcast 성격, 매칭 안 함). SubscribeAck 는 request_id 가 없어(agent_id 기반) 여기
 /// None — 데몬 클라이언트의 pending 매칭 대상이 아니다(Subscribe 는 request_id 없는 명령).
+/// ★답장이 깨진 `CommandReply` 도 `None` 이다★(ADR-0272 결정 6) — 깨울 슬롯을 못 찾으니 그 대기는 부르는
+/// 쪽의 답장 상한으로 끝난다(오늘은 `forward_daemon_command` 의 30s). 상한 없이 부르는 쪽은 연결이 끊길
+/// 때까지 기다린다 — 그 잔여는 `daemon_client/mod.rs` 의 `send_command_with_origin` 주석 「알려진 잔여」.
 pub fn event_reply_request_id(ev: &AgentEvent) -> Option<RequestId> {
     match ev {
         AgentEvent::Ack { request_id }
@@ -157,8 +187,11 @@ pub fn event_reply_request_id(ev: &AgentEvent) -> Option<RequestId> {
         | AgentEvent::Spawned { request_id, .. } => Some(*request_id),
         // ★명령 답장도 상관 대상이다 — 위 `AgentCommand::Command` 갈래의 짝★(ADR-0155). 요청이 Some 을
         //   주는데 여기서 None 을 고르면 그 슬롯을 깨울 짝이 없어져 연결이 끊길 때까지 안 풀린다.
-        // TODO(U4b): 답장 칸이 원문 JSON 이 되면 여기서 답장을 풀어 번호를 읽는다(ADR-0272 결정 4).
-        AgentEvent::CommandReply { reply } => Some(request_id_from_bus(reply.request_id)),
+        // ADR-0272 결정 4 · 6: 답장을 풀어 번호를 읽는다 — 깨진 답장은 번호 없음(`reply_from_wire` doc). 번호만
+        //   골라 읽지 않는다(같은 ADR 「거부한 대안」 — 부분 파싱).
+        AgentEvent::CommandReply { reply } => reply_from_wire(reply)
+            .ok()
+            .map(|reply| request_id_from_bus(reply.request_id)),
         AgentEvent::Error { request_id, .. } => *request_id,
         // request_id 없는 이벤트(broadcast 또는 agent_id 기반) — pending 매칭 대상 아님.
         AgentEvent::Hello { .. }
@@ -324,7 +357,7 @@ mod tests {
     //! 섞으면 결정 부분만 이식한다.
     //!
     //! ★검증 범위★: seq dedup/high-water 테스트는 없다 — 그 진도 상태 자체가 src-tauri 에 없다(ADR-0046).
-    //!   여기 박는 것은 순수 결정 함수뿐이다(봉투 칸 풀기 · request_id 추출·reply 분류 · pending 매칭 · epoch 가드 ·
+    //!   여기 박는 것은 순수 결정 함수뿐이다(봉투 · 답장 칸 풀기 · request_id 추출·reply 분류 · pending 매칭 · epoch 가드 ·
     //!   apply_subscribe_ack 반환값).
     //!
     //! ★event-routing(M=5)은 여기서 검증하지 않는다★: InboundMessage variant 라우팅 + 콜백 호출/
@@ -669,6 +702,34 @@ mod tests {
         }
     }
 
+    /// protocol 답장 golden 과 같은 바이트(`messages.rs` 의 `NIL_FAILED_REPLY` · `NIL_OK_REPLY`) — 봉투와 같은 법으로
+    /// 답장 구조체 ↔ 바이트는 답장을 푸는 이 끝자락이 잰다.
+    const NIL_FAILED_REPLY: &str = r#"{"request_id":"00000000-0000-0000-0000-000000000000","outcome":{"Err":{"code":"NOT_FOUND","message":"no view 'x'","retry":"never"}}}"#;
+    const NIL_OK_REPLY: &str = r#"{"request_id":"00000000-0000-0000-0000-000000000000","outcome":{"Ok":{"view_id":"v1"}}}"#;
+
+    fn nil_bus_replies() -> [(engram_dashboard_command::CommandReply, &'static str); 2] {
+        let nil = engram_dashboard_command::RequestId(uuid::Uuid::nil());
+        [
+            (
+                engram_dashboard_command::CommandReply::err(
+                    nil,
+                    engram_dashboard_command::CommandError::of(
+                        engram_dashboard_command::ErrorCode::NotFound,
+                        "no view 'x'",
+                    ),
+                ),
+                NIL_FAILED_REPLY,
+            ),
+            (
+                engram_dashboard_command::CommandReply::ok(
+                    nil,
+                    serde_json::json!({ "view_id": "v1" }),
+                ),
+                NIL_OK_REPLY,
+            ),
+        ]
+    }
+
     fn raw(json: &str) -> Box<RawValue> {
         RawValue::from_string(json.to_string()).expect("유효한 JSON")
     }
@@ -739,21 +800,21 @@ mod tests {
             } }
         });
         let sent: AgentCommand = serde_json::from_value(shuffled).unwrap();
-        match reseal_webview_envelope(sent).expect("성한 봉투는 다시 싸진다") {
+        match reseal_webview_command_slots(sent).expect("성한 봉투는 다시 싸진다") {
             AgentCommand::Command { envelope } => assert_eq!(envelope.get(), NIL_ENVELOPE),
             other => panic!("Command 그대로여야: {other:?}"),
         }
     }
 
     /// ★웹뷰 길의 깨진 봉투 = 다시 싸기 실패★ — 부르는 쪽(`forward_to_daemon`)이 그것을 invoke 실패로 돌려
-    /// 프론트 pending 을 곧바로 reject 한다. `Command` 밖 명령은 손대지 않는다.
+    /// 프론트 pending 을 곧바로 reject 한다. 명령 칸이 없는 명령은 손대지 않는다.
     #[test]
     fn a_broken_webview_envelope_fails_to_reseal() {
         let sent: AgentCommand = serde_json::from_value(serde_json::json!({
             "Command": { "envelope": { "name": "tab.create" } }
         }))
         .expect("원문 칸은 패킷 파싱을 통과한다");
-        assert!(reseal_webview_envelope(sent).is_err());
+        assert!(reseal_webview_command_slots(sent).is_err());
 
         let resize = AgentCommand::Resize {
             agent_id: uuid::Uuid::nil(),
@@ -762,9 +823,131 @@ mod tests {
             viewport_id: None,
         };
         assert!(matches!(
-            reseal_webview_envelope(resize),
+            reseal_webview_command_slots(resize),
             Ok(AgentCommand::Resize { cols: 80, .. })
         ));
+    }
+
+    /// ★손으로 적은 TS 답장 칸(protocol `AgentCommand::CommandOutcome` · `AgentEvent::CommandReply` 의
+    /// `#[ts(type = …)]`)과 맞서는 golden★ — 원문 칸이라 protocol 은 답장 모양을 못 보므로, 답장 구조체가 그
+    /// 바이트로 나가고(결말을 보내는 길 = [`reply_to_wire`]) 그 바이트가 같은 구조체로 풀리는지를 여기서 못박는다.
+    #[test]
+    fn the_reply_slot_unpacks_to_the_bus_reply_byte_for_byte() {
+        for (reply, golden) in nil_bus_replies() {
+            assert_eq!(
+                reply_to_wire(&reply).unwrap().get(),
+                golden,
+                "답장 구조체 → 원문 칸 바이트가 golden 과 불일치 — 손으로 적은 TS 칸도 함께 고칠 것"
+            );
+            assert_eq!(reply_from_wire(&raw(golden)).unwrap(), reply);
+        }
+    }
+
+    /// ★패킷은 풀렸는데 답장이 깨진 갈래 = 요청 번호 없음★(ADR-0272 결정 6 · 셸 쪽) — 깨울 슬롯을 못 찾으니 연결
+    /// 루프가 버린다. 원문에 맞는 번호가 적혀 있어도 번호만 골라 읽지 않는다(같은 ADR 「거부한 대안」 — 부분 파싱).
+    #[test]
+    fn a_broken_reply_has_no_request_id() {
+        for broken in [
+            r#"{"request_id":"00000000-0000-0000-0000-000000000000"}"#,
+            r#"{"request_id":"not-a-uuid","outcome":{"Ok":null}}"#,
+            "[]",
+            "null",
+        ] {
+            assert!(reply_from_wire(&raw(broken)).is_err(), "{broken}");
+            assert_eq!(
+                event_reply_request_id(&AgentEvent::CommandReply { reply: raw(broken) }),
+                None,
+                "{broken}"
+            );
+        }
+    }
+
+    /// ★TS 칸이 광고하는 관용(오류 세 칸 부재 · `null` · 계약 밖 필드)을 받은 답장도 짝을 찾는다★ — 이 끝자락이
+    /// 그런 답장을 깨진 것으로 읽으면 상대가 이미 답했는데도 대기가 답장 상한까지 매달린다(관용 자체는 데몬
+    /// `the_outcome_slot_accepts_everything_its_ts_type_advertises` 가 잰다).
+    #[test]
+    fn a_sparse_reply_still_pairs() {
+        let nil = "00000000-0000-0000-0000-000000000000";
+        for sparse in [
+            format!(r#"{{"request_id":"{nil}","outcome":{{"Err":{{"detail":{{"n":1}}}}}}}}"#),
+            format!(
+                r#"{{"request_id":"{nil}","outcome":{{"Err":{{"code":null,"message":null,"retry":null}}}}}}"#
+            ),
+        ] {
+            assert_eq!(
+                event_reply_request_id(&AgentEvent::CommandReply {
+                    reply: raw(&sparse)
+                }),
+                Some(RequestId(uuid::Uuid::nil())),
+                "{sparse}"
+            );
+        }
+    }
+
+    /// ★깨운 답장은 웹뷰로 JSON 값이 되어 올라간다★(`forward_to_daemon` 의 `serde_json::to_value`) — 원문 칸도 그
+    /// 길로 값이 되어야 프론트가 받는 모양이 그대로다(serde_json 의 `Value` 직렬화가 원문 칸을 풀어 담는다).
+    #[test]
+    fn a_reply_event_becomes_the_same_json_value_for_the_webview() {
+        let answered = AgentEvent::CommandReply {
+            reply: raw(NIL_OK_REPLY),
+        };
+        assert_eq!(
+            serde_json::to_value(&answered).unwrap(),
+            serde_json::json!({ "CommandReply": { "reply": {
+                "request_id": "00000000-0000-0000-0000-000000000000",
+                "outcome": { "Ok": { "view_id": "v1" } },
+            } } })
+        );
+    }
+
+    /// ★웹뷰 길에서 다시 싼 답장 칸 = 구조체 순서 golden 바이트★ — 봉투와 같은 이유다(`Value` 를 지나며 키 정렬).
+    #[test]
+    fn a_webview_outcome_is_resealed_into_the_golden_bytes() {
+        let shuffled = serde_json::json!({
+            "CommandOutcome": { "reply": {
+                "outcome": { "Ok": { "view_id": "v1" } },
+                "request_id": "00000000-0000-0000-0000-000000000000",
+            } }
+        });
+        let sent: AgentCommand = serde_json::from_value(shuffled).unwrap();
+        match reseal_webview_command_slots(sent).expect("성한 답장은 다시 싸진다") {
+            AgentCommand::CommandOutcome { reply } => assert_eq!(reply.get(), NIL_OK_REPLY),
+            other => panic!("CommandOutcome 그대로여야: {other:?}"),
+        }
+    }
+
+    /// ★웹뷰 답장의 계약 밖 필드는 다시 싸도 살아 남는다★ — TS 칸이 광고하는 모양(세 칸 부재 + 계약 밖
+    /// `detail`)을 웹뷰가 보내면 다시 싸기가 받아들이고 `detail` 을 그대로 데몬에 넘긴다. 데몬 쪽 짝 =
+    /// `connection_core` 의 `the_outcome_slot_accepts_everything_its_ts_type_advertises`.
+    #[test]
+    fn a_webview_outcome_keeps_its_out_of_contract_fields_when_resealed() {
+        let sent: AgentCommand = serde_json::from_value(serde_json::json!({
+            "CommandOutcome": { "reply": {
+                "request_id": "00000000-0000-0000-0000-000000000000",
+                "outcome": { "Err": { "detail": { "n": 1 } } },
+            } }
+        }))
+        .unwrap();
+        match reseal_webview_command_slots(sent).expect("세 칸이 없는 실패 답장도 다시 싸진다")
+        {
+            AgentCommand::CommandOutcome { reply } => assert!(
+                reply.get().contains(r#""detail":{"n":1}"#),
+                "계약 밖 필드가 다시 싸기에서 사라졌다: {}",
+                reply.get()
+            ),
+            other => panic!("CommandOutcome 그대로여야: {other:?}"),
+        }
+    }
+
+    /// ★웹뷰 길의 깨진 답장 = 다시 싸기 실패★ — 흘려보내면 데몬이 번호 없는 거절로 받아 웹뷰는 실패를 모른다.
+    /// 부르는 쪽(`forward_to_daemon`)이 그것을 invoke 실패로 돌린다.
+    #[test]
+    fn a_broken_webview_reply_fails_to_reseal() {
+        let sent: AgentCommand = serde_json::from_value(serde_json::json!({
+            "CommandOutcome": { "reply": { "request_id": "00000000-0000-0000-0000-000000000000" } }
+        }))
+        .expect("원문 칸은 패킷 파싱을 통과한다");
+        assert!(reseal_webview_command_slots(sent).is_err());
     }
 
     /// ★중계 다리의 두 variant 는 pending 매칭 밖이다★ — 하나는 들어오는 **요청**이고 하나는 나가는
@@ -780,10 +963,7 @@ mod tests {
         );
         assert_eq!(
             command_request_id(&AgentCommand::CommandOutcome {
-                reply: engram_dashboard_command::CommandReply::ok(
-                    engram_dashboard_command::RequestId(uuid::Uuid::nil()),
-                    serde_json::Value::Null,
-                ),
+                reply: raw(NIL_OK_REPLY),
             }),
             None,
             "답장을 보내면서 pending 슬롯을 만들면 깨울 짝이 없다"
@@ -805,10 +985,11 @@ mod tests {
             envelope: serde_json::value::to_raw_value(&envelope).unwrap(),
         };
         let answered = AgentEvent::CommandReply {
-            reply: engram_dashboard_command::CommandReply::ok(
+            reply: reply_to_wire(&engram_dashboard_command::CommandReply::ok(
                 envelope.request_id,
                 serde_json::json!({ "view_id": "v1" }),
-            ),
+            ))
+            .unwrap(),
         };
 
         let asked =
