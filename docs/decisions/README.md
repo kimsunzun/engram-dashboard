@@ -382,3 +382,4 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0334](0334-실행-재료는-포트로-넘긴다-해석은-asset-library-플래그-번역-백엔드-설정-지식은-backend.md) | 실행 재료는 포트로 넘긴다 — 해석은 asset-library, 플래그 번역 · 백엔드 설정 지식은 backend | 제안 |
 | [0335](0335-파일-조작-계획-실행-참조-고침-진행-기록-없이-순서만-obsidian-꼴-남은-임시-파일도-저절로-치우지-않는다.md) | 파일 조작 = 계획 → 실행 → 참조 고침, 진행 기록 없이 순서만 (Obsidian 꼴) — 남은 임시 파일도 저절로 치우지 않는다 | 제안 |
 | [0336](0336-서버-부품-선택-serde-saphyr-jsonschema-ureq-walkdir-junction-pulldown-cmark-sha2.md) | 서버 부품 선택 — serde-saphyr · jsonschema · ureq · walkdir · junction · pulldown-cmark · sha2 | 제안 |
+| [0337](0337-codex-실행-재료-json-은-developerinstructions-extraroots-터미널은-기본-프라이밍과-설정-c-만.md) | codex 실행 재료 — JSON 은 developerInstructions · extraRoots, 터미널은 「기본」 프라이밍과 설정 `-c` 만 | 제안 |

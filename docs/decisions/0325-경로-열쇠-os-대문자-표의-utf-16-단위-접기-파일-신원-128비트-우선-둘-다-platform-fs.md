@@ -16,7 +16,7 @@ Windows 는 대소문자를 가리지 않는다. `Catalog` 의 `items` · `used_
 ## 거부한 대안
 - **Rust `char::to_uppercase`**(수집자 안 — 한 글자 매핑일 때만) — 보충 평면 이름을 합친다(U+10428 → U+10400 · NTFS 의 `$UpCase` 표는 BMP 만이라 둘을 가른다)(M60 · codex 리뷰 BLOCK 유지).
 - **짝 비교 `same_path` 만** — 표의 열쇠를 만들 수 없다(M38).
-- **`unicase`** — 완전 접기(`ß` → `ss`)라 NTFS 와 다르다 · **`icu_casemap`** — 무겁다 (기각 근거: 약함) · **git `strcasecmp` 꼴** — ASCII 만 · **`CompareStringOrdinal`** — 비교 함수지 열쇠가 아니다(조사).
+- **`unicase`** — 완전 접기(`ß` → `ss`)라 NTFS 와 다르다 · **`icu_casemap`** — 무겁다 (기각 근거: 약함) 근거(메인 2026-11-01 — 보고 · M98): 유니코드 표준 대소문자 매핑이라 `char::to_uppercase` 와 같은 까닭(보충 평면 이름을 합친다 — NTFS 는 BMP 만 접는다)으로 결정 2 의 OS 대문자 표와 어긋난다(미검 — 2 단계 파일럿에서 대조) · 무게는 재지 않았다. · **git `strcasecmp` 꼴** — ASCII 만 · **`CompareStringOrdinal`** — 비교 함수지 열쇠가 아니다(조사).
 - **std Windows `MetadataExt` 의 `volume_serial_number` · `file_index`** — 불안정(rust-lang/rust#63010 · 1.95 에서도 nightly) · **`same-file`** — 저장할 신원 값이 없다(비교만)(조사).
 
 ## 근거
