@@ -2830,6 +2830,14 @@
   - **큰 변화** — 붙이기 전에 transport 를 고치는 단계 3-0 신설(공유 손실형 받는 줄 → 상대별 무손실 줄 + 바이트 예산 하나) · 데몬 받는 구조는 net 의 연결별 처리를 그대로 옮기는 ②′ 로 수렴(1판 공유 손실형 · 2판 합친 줄 + 훅 · 3판 공용 전달 task 는 각 회차 리뷰가 기각) · 옛 주소 재접속은 공유 위반일 때만(D25) · 다른 OS 사용자 위협 범위는 결정 항목(D26).
   - **결정 전 실측** — `docs/research/transport-stage3-measurements-2026-10-13.md`(Origin · 데이터 폴더 권한 · 띄우기 소요 · RawValue — `.engram-dev` 의 `daemon.json` 이 다른 로그인 사용자에게 읽기 · 수정 가능함을 실측).
   - **다음** — 사용자가 개념 브리핑을 보고 결정 D1~D26(답 순서 = D19 → D10/D11 → D2/D3 → D26 → D20 → 나머지) · 그 뒤 ADR 박제 → 구현(3-0 ∥ 3-1).
+- **[결정 + 구현 착수 2026-10-31 · 브랜치 `v0.4.1/refactor/transport-attach`] S21 — 3단계 transport: 결정 D1~D26 확정(ADR-0310) · TRD 6판 · 3-1 U1~U3 · 3-0 U1a**
+  - **master 흡수** — `66fcc5c9`(249 커밋 · 충돌 = step-log · tracking 문서뿐). 재확인 결과 결정 영향 없음 · 단위에 일 넷 추가(`.claude/handoff/attachments/trd3-master-recheck-2026-10-31.md`).
+  - **결정** — ADR-0310(`dd0499a7` · 확인 반영 `b33ae4b7`). 사용자 = D19 ① · D11 ②′ · D24 ② · D26 ② · D22 ② · D5 ③(10-12 방향과의 충돌을 확인받음). 사용자 위임 → 메인 판단 = D4 ① · D5 ③. 나머지 = 권고안(위임). 근거 약한 기각 열 건은 목록 보고 뒤 위임 확정. 다중 데몬 = 3단계 바로 다음(사용자 2026-10-31).
+  - **TRD 6판** — `2b83e353` → 리뷰 반영 `fb35d867` · `ff54be83`(`/review trd light` FIX 11 + 재확인 FIX 2 → 반영). 그림 확대도 `trd-3-transport-zoom.html`(`118288b1`) · 5판 그림엔 미반영 배너.
+  - **기준선(구현 전 · `66fcc5c9`)** — 결과 줄 60 · 5067 통과 · 0 실패 · 35 무시 · `lib_unit` 1328.
+  - **3-1 U1** `0592e872`(golden 둘) · **U2** `06dc71ae`(AuthFrame → protocol · Secret · 셸 → net 삭제 · shell gate 3 / qa 4k) · **U3** `84615909`(OwnerToken 사본 · 셸 변환 함수는 두지 않음 — 커밋 본문). 3-1 은 워크트리 `.claude/worktrees/stage3-protocol`(분리 HEAD)에서 짓고 브랜치로 cherry-pick.
+  - **3-0 U1a** `fb7a1c58` — 이름마다 무손실 줄 · 표 하나가 줄 수명. `/review code deep` 4 라운드(재수정 3회) + 재수정 4회차(사용자 허용 — QA 거짓 FAIL 원인 = 리뷰어 변이 시험이 수정 시각을 보존해 복원 → cargo 가 낡은 변이 바이너리를 돌림 · 코드 무변경).
+  - **다음** — 3-0 U1b(순서 칸) · 3-1 U4(명령 칸 RawValue). 게이트 사본 줄 = 3-1 U2(끝) → 3-0 U7 → 3-1 U5.
 - **[✅ 구현 2026-10-15 · 브랜치 `v0.4.1/chore/third-party-licenses` · 번호 선점 `3d94259a` · 게이트 = `/review code full` 6 라운드(doc-aware + codex blind · 마지막 PASS/PASS) · `/qa` standard + full(실 릴리즈 빌드 · 배포판 GUI 스모크) PASS · CI = push 뒤] S21 — 서드파티 라이선스 고지를 배포 zip 에 싣는다(T-62)** — 결정 = **ADR-0294**(릴리즈 빌드 때 생성 · 커밋 안 함 · 평소 CI 에서도 같은 생성) · ADR-0100 결정 2 부분 개정 — 여기 베끼지 않는다.
   - **경위** — 오전 결정 「손으로 뽑아 커밋」(T-62)을 사용자가 같은 날 「릴리즈 뽑을 때 생성」으로 바꿨다. 「잘못 뽑힐 위험 · 다른 곳은 어떻게 하나」 질문에 조사 = `docs/research/third-party-license-notice-generation-practice-2026-10-15.md`(medium · codex 적대 리뷰 BLOCK → 반영).
   - **한 것** — `scripts/gen-third-party-licenses.mjs` + `scripts/licenses/**`(cargo-about 0.9.2 · generate-license-file 4.2.5 devDependency) · `scripts/build-release.ps1` 단계 (0) · `ci.yml` `gates` 생성 검사 + `release-build` cargo-about 고정 설치 · 문서(CLAUDE.md 한 구 · README · scripts/README · qa 바인딩).
