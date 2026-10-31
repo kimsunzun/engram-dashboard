@@ -10,8 +10,8 @@
 
 use std::time::Duration;
 
-/// 큐가 찼을 때. ★나가는 큐에만 적용된다★ — 들어오는 한 줄은 상대들이 **함께 쓰는** 자원이라 그쪽의
-/// 포화로 연결을 끊으면 시끄러운 상대가 조용한 상대를 죽인다(ADR-0180 결정 8).
+/// 큐가 찼을 때. ★나가는 큐에만 적용된다★ — 위로 올라가는 줄이 차는 것은 소비자가 그 상대를 못
+/// 따라간다는 뜻이지 연결의 잘못이 아니고, 그 처분은 끊기가 아니라 배압으로 정해졌다(ADR-0310 결정 17).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueFullPolicy {
     /// 그 연결을 끊는다(현행 유지 — ADR-0177 결정 6). 다시 붙어 처음부터 맞추는 쪽이 낫다.
@@ -160,12 +160,17 @@ pub struct Policy {
     pub reconnect: ReconnectPolicy,
     /// 나가는 큐 길이(현행 셸값 보존).
     pub outbound_queue: usize,
-    /// ★상대 전부가 함께 쓰는★ 위로 올라가는 한 줄의 길이. ★미검 — 오늘 대응물이 없다★(셸은 Tauri
-    /// Channel 로 직행해 이 큐 자체가 없다). 즉 이 crate 는 **새 실패 모드를 하나 만든다**(TRD §12-12).
+    /// ★이름표 하나의★ 위로 올라가는 줄의 길이(개수). 명부가 이름표마다 줄을 하나 세우고, 그 길이는 줄이
+    /// 설 때(그 이름표를 처음 올릴 때 · 내린 뒤 그 줄이 걷힌 다음 다시 올릴 때) 이 값으로 정해진다 — 줄을
+    /// 이어 쓰는 동안 같은 이름표를 다른 값으로 다시 올려도 안 바뀐다. 쥐는 총량은 그 줄 길이들의 합이고
+    /// (내렸지만 아직 걷히지 않은 줄 포함) ★개수만 잰다 — 바이트 상한은 아직 없다★(TRD 3 §6-0 U1c).
+    /// 차면 그 이름표의 것만 버려지고 세어 신고된다 — 작게 덮어쓴 상대는 소비자가 밀릴 때 그만큼 일찍 잃는다.
+    /// ★미검 — 오늘 대응물이 없다★(셸은 Tauri Channel 로 직행해 이 큐 자체가 없다). 즉 이 crate 는
+    /// **새 실패 모드를 하나 만든다**(TRD §12-12).
     pub inbound_queue: usize,
     /// 연결 하나의 읽기 앞잡이 버퍼. ★[`Policy::inbound_queue`] 와 **다른 자원**이다★ — 이쪽이 차면
-    /// 읽기 태스크가 멈춰 전송 계층 배압이 걸릴 뿐이고, 저쪽이 차면 다른 상대까지 영향을 받는다.
-    /// 하나로 합치면 「상대 하나를 위해 고른 값」이 「전체를 위해 고른 값」을 덮어쓴다. ★미검★.
+    /// 읽기 태스크가 멈춰 전송 계층 배압이 걸릴 뿐이고, 저쪽이 차면 그 상대의 사건·패킷이 버려진다.
+    /// ★미검★.
     pub frame_buffer: usize,
     pub full_queue: QueueFullPolicy,
     pub decode_failure: DecodeFailurePolicy,
@@ -469,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn the_shared_line_and_the_per_link_buffer_are_two_values() {
+    fn the_upward_line_and_the_read_ahead_are_two_values() {
         let p = Policy {
             inbound_queue: 8,
             frame_buffer: 4096,

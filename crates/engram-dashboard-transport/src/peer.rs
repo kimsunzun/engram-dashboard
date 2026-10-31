@@ -178,6 +178,8 @@ struct PeerInner<W: Wire> {
     refused: Arc<AtomicU64>,
     /// 마지막 끊김 사유. 한 번도 안 붙었으면 [`DisconnectCause::LinkError`] 다.
     last_cause: Arc<AtomicU8>,
+    /// 앱이 [`Peer::close`] 를 불렀다. 감독이 그것을 처리했는지와 무관하게 부른 순간 선다.
+    close_requested: AtomicBool,
 }
 
 /// 값싼 clone 핸들 = 감독 태스크로 가는 명령 채널.
@@ -280,7 +282,12 @@ impl<W: Wire> Peer<W> {
     /// **이름표별 공용 세대 계수기**로 흡수한다(`Registry::add_with_policy`) — 겹침을 없애는 것이
     /// 아니라 겹쳐도 번호가 부딪히지 않게 하는 장치다.
     pub fn close(&self) {
+        self.inner.close_requested.store(true, Ordering::Release);
         let _ = self.inner.ctl_tx.send(Ctl::Close);
+    }
+
+    pub(crate) fn close_requested(&self) -> bool {
+        self.inner.close_requested.load(Ordering::Acquire)
     }
 
     pub(crate) fn send_frame(&self, frame: Frame) -> Result<(), SendError> {
@@ -318,6 +325,9 @@ pub(crate) struct PeerConfig<W: Wire> {
     pub clock: Arc<dyn Clock>,
     pub handshake: Arc<dyn Handshake>,
     pub policy: Policy,
+    /// ★이 이름표의 위로 올라가는 줄★ — 다른 이름표의 감독과 나눠 쓰지 않는다(`registry.rs` 헤더 —
+    /// 같은 이름표를 다시 올리면 옛 감독과 새 감독은 함께 쓴다). 다른 이름표와 나눠 쓰면 넘침
+    /// 처리(`note_inbound_drop`)가 시끄러운 상대의 몫을 조용한 상대에게 지운다.
     pub inbound: mpsc::Sender<Incoming<W>>,
     /// ★이 이름표의 세대 계수기★ — 같은 이름표를 다시 올려도 **같은 Arc 를 물려준다**.
     ///
@@ -326,6 +336,8 @@ pub(crate) struct PeerConfig<W: Wire> {
     /// 핸드셰이크가 이겨 세대를 하나 더 발행할 수 있는데, 명부는 그 직전 값을 이미 읽어 간 뒤다.
     /// 계수기를 공유하면 누가 이기든 같은 번호가 두 번 나오지 않는다.
     pub generations: Arc<AtomicU64>,
+    /// 닫힌 채 띄운다 — 태스크가 돌기 전에 닫기를 넣어 두므로 어느 런타임에서도 걸기 전에 접힌다.
+    pub start_closed: bool,
 }
 
 /// 감독 태스크를 띄우고 핸들을 돌려준다.
@@ -349,6 +361,7 @@ pub(crate) fn spawn_peer<W: Wire>(cfg: PeerConfig<W>) -> Peer<W> {
             overflow: overflow.clone(),
             refused: refused.clone(),
             last_cause: last_cause.clone(),
+            close_requested: AtomicBool::new(false),
         }),
     };
 
@@ -393,6 +406,9 @@ pub(crate) fn spawn_peer<W: Wire>(cfg: PeerConfig<W>) -> Peer<W> {
         dropped_in: 0,
         dropped_out: 0,
     };
+    if cfg.start_closed {
+        handle.close();
+    }
     tokio::spawn(supervisor.run());
     handle
 }
@@ -1248,9 +1264,12 @@ impl<W: Wire> Supervisor<W> {
 
     /// ★위로 올라가는 줄이 찼다고 **이 연결을 끊지 않는다**★.
     ///
-    /// 그 줄은 상대 전부가 함께 쓰는 자원이라, 시끄러운 상대 하나가 채운 것을 조용한 상대가 자기
-    /// 잘못으로 갚게 된다 — 그러면 「A 하나 죽어도 B·C 는 잘 동작해야 한다」가 깨진다(ADR-0180 결정 8).
+    /// 그 줄은 이 이름표의 것이라(`PeerConfig::inbound`) 찼다는 것은 소비자가 이 상대를 못 따라간다는
+    /// 뜻이지 연결의 잘못이 아니고, 그 처분은 끊기가 아니라 배압으로 정해졌다(ADR-0310 결정 17).
     /// 세어 두었다가 자리가 나면 신고한다.
+    /// TODO(TRD 3 §6-0 U1b·U1c): 버리지 말고 순서 칸에 붙들고, 문턱을 넘으면 프레임 갈래를 빼 그 상대의
+    /// 읽기를 세운다 — 그 단위가 이 함수와 [`Direction::Inbound`] 계수도 정리한다(TRD 3 §6-0 U1 의
+    /// 「`Dropped{Inbound}` 갈래 정리」).
     fn note_inbound_drop(&mut self) {
         self.dropped_in += 1;
     }
@@ -1291,8 +1310,9 @@ impl<W: Wire> Supervisor<W> {
 
     /// 핸들이 못 넣은 것을 걷어 처리한다.
     ///
-    /// ★나가는 큐 포화만 연결을 끊는다★ — 「내 큐가 찼다」는 이 연결의 문제이고, 「공유 줄이 찼다」는
-    /// 아니다. 둘을 한 세 칸으로 합치면 남의 홍수가 내 연결을 끊는다.
+    /// ★나가는 큐 포화만 연결을 끊는다★ — 「내 큐가 찼다」는 이 연결의 문제이고, 「위로 올라가는 줄이
+    /// 찼다」는 소비자의 속도다(`note_inbound_drop`). 둘을 한 셈 칸으로 합치면 소비자가 느린 것만으로
+    /// 연결이 끊긴다.
     #[must_use = "운영 중에는 이 판정이 연결을 끊는다"]
     fn drain_overflow(&mut self) -> Option<Input> {
         let refused = self.refused.swap(0, Ordering::AcqRel);
@@ -1540,6 +1560,7 @@ mod tests {
             policy: no_jitter(policy),
             inbound: inbound_tx,
             generations: Arc::new(AtomicU64::new(0)),
+            start_closed: false,
         });
         Harness {
             peer,
@@ -1768,6 +1789,7 @@ mod tests {
             policy: Policy::default(),
             inbound: inbound_tx,
             generations: counter.clone(),
+            start_closed: false,
         });
         settle_until("연결", || peer.peer_state() == PeerState::Live).await;
         assert_eq!(peer.generation(), Generation(42));
@@ -1776,6 +1798,32 @@ mod tests {
             42,
             "계수기가 함께 올라간다"
         );
+    }
+
+    #[tokio::test]
+    async fn a_supervisor_started_closed_never_dials() {
+        let net = MemoryNetwork::new();
+        let clock = ManualClock::new();
+        let (inbound_tx, _inbound) = mpsc::channel(8);
+        let peer = spawn_peer(PeerConfig {
+            id: PeerId::new("d1"),
+            addr: Address::new("mem://d1"),
+            wire: Arc::new(TestWire),
+            dialer: net.dialer(),
+            clock: clock.handle(),
+            handshake: Arc::new(ImmediateHandshake),
+            policy: Policy::default(),
+            inbound: inbound_tx,
+            generations: Arc::new(AtomicU64::new(0)),
+            start_closed: true,
+        });
+        settle_until("접힘", || peer.peer_state() == PeerState::Closed).await;
+        assert_eq!(
+            net.dials(),
+            0,
+            "닫기가 태스크보다 먼저 들어가 있으므로 걸지 않는다"
+        );
+        assert!(peer.close_requested());
     }
 
     #[tokio::test]
@@ -1795,6 +1843,7 @@ mod tests {
                 policy: Policy::default(),
                 inbound: inbound_tx.clone(),
                 generations: counter.clone(),
+                start_closed: false,
             })
         };
         // 옛 감독이 아직 살아 있는 채로 새 감독이 붙는 상황(같은 이름표의 승계 경합).
