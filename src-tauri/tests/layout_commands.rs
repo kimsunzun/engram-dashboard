@@ -36,9 +36,7 @@ use engram_dashboard_command::{
     CommandFuture, CommandHandler, CommandReply, CommandTable, ErrorCode, InboundCommands,
     OwnerToken, ReplySink, RequestId, Roster, TableError,
 };
-use engram_dashboard_protocol::{
-    command_request_id, event_reply_request_id, AgentCommand, AgentEvent,
-};
+use engram_dashboard_protocol::{AgentCommand, AgentEvent};
 
 use engram_dashboard_lib::commands::popout::{popup_label, PopupCounter};
 use engram_dashboard_lib::daemon_client::connection::{
@@ -46,6 +44,9 @@ use engram_dashboard_lib::daemon_client::connection::{
 };
 use engram_dashboard_lib::daemon_client::inbound::{
     BoxedTask, InboundReceiver, InboundSlot, RuntimeSpawner, TaskSpawner, ViewCommandPort,
+};
+use engram_dashboard_lib::daemon_client::protocol_state::{
+    command_request_id, envelope_from_wire, event_reply_request_id,
 };
 use engram_dashboard_lib::layout::apply;
 use engram_dashboard_lib::layout::commands::{
@@ -4314,7 +4315,8 @@ async fn wire_round_trip(name: &str, args: serde_json::Value) -> WireTrip {
 
     let request_id = RequestId::new();
     let sent = serde_json::to_string(&AgentEvent::CommandRequest {
-        envelope: envelope(name, args, request_id),
+        envelope: serde_json::value::to_raw_value(&envelope(name, args, request_id))
+            .expect("봉투 직렬화"),
     })
     .expect("데몬이 보낼 Text 프레임");
 
@@ -4328,6 +4330,8 @@ async fn wire_round_trip(name: &str, args: serde_json::Value) -> WireTrip {
     let AgentEvent::CommandRequest { envelope } = ev else {
         panic!("CommandRequest arm 으로 갈라져야 한다");
     };
+    // 연결 arm 이 넘기기 전에 하는 봉투 풀기(ADR-0272 결정 4) — 같은 끝자락 함수를 태운다.
+    let envelope = envelope_from_wire(&envelope).expect("데몬이 지은 봉투는 풀린다");
 
     accept_inbound(&slot, &cmd_tx.downgrade(), SOCKET, envelope);
     run(&queue).await;

@@ -1056,13 +1056,22 @@ async fn main_loop(
                                             //   — 인라인으로 되돌리면 합성 명령이 자기 답을 자기가 못 꺼내
                                             //   교착한다).
                                             ReplayFollowUp::NotHandled => match ev {
+                                                // ADR-0272 결정 6: 패킷은 풀렸는데 봉투가 깨졌으면 답장에
+                                                //   실을 요청 번호가 없다 — 실행도 답장도 못 하고 로그만
+                                                //   남긴다(그 왕복은 데몬이 자기 마감시각으로 접는다).
                                                 AgentEvent::CommandRequest { envelope } => {
-                                                    accept_inbound(
-                                                        inbound,
-                                                        cmd_tx,
-                                                        socket_epoch,
-                                                        envelope,
-                                                    );
+                                                    match protocol_state::envelope_from_wire(&envelope) {
+                                                        Ok(envelope) => accept_inbound(
+                                                            inbound,
+                                                            cmd_tx,
+                                                            socket_epoch,
+                                                            envelope,
+                                                        ),
+                                                        Err(e) => tracing::warn!(
+                                                            error = %e,
+                                                            "데몬이 배달한 봉투를 풀 수 없다 — 답장에 실을 요청 번호가 없어 버린다"
+                                                        ),
+                                                    }
                                                 }
                                                 // ★사용량 팔은 `emit_broadcast` 안이 아니라 여기다★ — 사유는
                                                 //   `relay_usage_snapshot` doc.
@@ -1803,8 +1812,8 @@ pub const PENDING_SUPERSEDED: &str = "중복 request_id — 옛 요청 취소";
 /// ## ★전제가 바뀌었다 — 이 번호는 더 이상 우리 것이 아니다★
 /// 옛 코드는 이 자리의 충돌을 「UUIDv4 라 사실상 불가」로 적고 `debug_assert!(false)` 로 터뜨렸다. 그 전제는
 /// 이 키를 *우리 코드가* 만들 때만 참이었다. 지금은 아니다 — `AgentCommand::Command { envelope }` 의 키는
-/// **봉투를 지은 바깥 호출자**의 것이고(`engram_dashboard_protocol::command_request_id` 가
-/// `envelope.request_id` 를 그대로 이 맵의 키로 넘긴다), 웹뷰가 그 봉투를 `forward_daemon_command`
+/// **봉투를 지은 바깥 호출자**의 것이고([`protocol_state::command_request_id`] 가 봉투를 풀어
+/// 그 `request_id` 를 그대로 이 맵의 키로 넘긴다), 웹뷰가 그 봉투를 `forward_daemon_command`
 /// (`src-tauri/src/commands/agent.rs`)로 실어 보낸다. 즉 유일성은 **통제 못 하는 입력의 성질**이지 우리
 /// 코드의 불변식이 아니다. 겹친 번호로 패닉하면 운영 셸은 훅이 셸째 끝내고(ADR-0292), 훅 없는 빌드에선 이 연결
 /// 태스크만 죽어 그 뒤 모든 명령이 「연결 task 가 명령을 받지 못함」으로 끊기고 재연결도 없다(디버그 빌드 GUI

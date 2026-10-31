@@ -31,10 +31,10 @@ use tokio::sync::watch;
 use crate::command_delivery::{CommandDeliveries, LocalCommands};
 use crate::command_roster::CommandRoster;
 use crate::connection_core::{
-    agent_list_event, broadcast_lease_changed, dispatch_order, event_json, hello_event,
-    inbound_lane, output_event_to_wire, ConnectionCore, ConnectionSession, DispatchFlow,
-    DispatchOrder, InboundLane, MultiViewState, Outbound, OutboundSink as CoreOutboundSink,
-    SinkError as CoreSinkError, SATURATED_REFUSAL,
+    agent_list_event, broadcast_lease_changed, command_request_id, dispatch_order, event_json,
+    hello_event, inbound_lane, output_event_to_wire, ConnectionCore, ConnectionSession,
+    DispatchFlow, DispatchOrder, InboundLane, MultiViewState, Outbound,
+    OutboundSink as CoreOutboundSink, SinkError as CoreSinkError, SATURATED_REFUSAL,
 };
 use crate::usage_service::book::wire_vendor;
 use crate::usage_service::watch::{UsageEncoder, UsageFrame, UsageOutlet};
@@ -428,9 +428,7 @@ impl ConnectionHandler for AgentConnection {
         }
         let sink = FrameOutboundSink::new(frames.clone());
         let refusal = sink.enqueue(Outbound::event(AgentEvent::Error {
-            request_id: cmd
-                .as_ref()
-                .and_then(engram_dashboard_protocol::command_request_id),
+            request_id: cmd.as_ref().and_then(command_request_id),
             message: SATURATED_REFUSAL.to_string(),
         }));
         match refusal {
@@ -1272,14 +1270,15 @@ mod tests {
             AgentEvent::Ack { .. }
         ));
 
+        let envelope = CommandEnvelope {
+            name: "tab.create".to_string(),
+            request_id: RequestId::new(),
+            owner: OwnerToken::new("whatever-the-caller-thinks"),
+            proto_ver: 1,
+            args: serde_json::json!({}),
+        };
         let request = command_json(&AgentCommand::Command {
-            envelope: CommandEnvelope {
-                name: "tab.create".to_string(),
-                request_id: RequestId::new(),
-                owner: OwnerToken::new("whatever-the-caller-thinks"),
-                proto_ver: 1,
-                args: serde_json::json!({}),
-            },
+            envelope: serde_json::value::to_raw_value(&envelope).expect("봉투 직렬화"),
         });
         caller.on_text(2, &request, &caller_frames).await;
         // 봉투가 주인에게 나간 것을 본 시점부터 그 왕복은 답을 기다리는 중이다.

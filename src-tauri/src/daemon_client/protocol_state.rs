@@ -19,13 +19,170 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use engram_dashboard_protocol::{AgentEvent, RequestId};
+use engram_dashboard_command::CommandEnvelope;
+use engram_dashboard_protocol::{AgentCommand, AgentEvent, RequestId};
+use serde_json::value::RawValue;
 
-// ── request_id 추출(request/reply 상관) ───────────────────────────────────────────────
-// wire 계약이라 protocol crate 가 소유한다 — 명령↔답장 쌍의 정합(ADR-0155 등)은 그 crate 의 테스트가
-// CI 가 항상 실행하는 target(`cargo test -p engram-dashboard-protocol`)에서 박는다. 여기서는 재수출해
-// 이 모듈 호출부(`protocol_state::command_request_id` 등)와 아래 tests 를 그대로 둔다.
-pub use engram_dashboard_protocol::{command_request_id, event_reply_request_id};
+// ── 명령 칸 끝자락 · request_id 추출(request/reply 상관) ──────────────────────────────
+// ADR-0272 결정 4: 패킷의 명령 버스 칸은 원문 JSON 이라 protocol 은 그 안의 번호를 못 읽는다 — 짝 맞추기는
+//   봉투를 푸는 끝자락(여기)이 진다. 데몬은 받는 쪽 거절에 실을 번호를 자기 끝자락에서 따로 읽는다.
+
+/// 패킷의 봉투 칸(원문 JSON — `AgentCommand::Command` · `AgentEvent::CommandRequest`)을 명령 버스 봉투로
+/// 푼다(ADR-0272 결정 4).
+///
+/// `Err` = 패킷은 풀렸는데 봉투 모양이 틀렸다(ADR-0272 결정 6). 셸은 그것을 「요청 번호 없음」으로 다룬다 —
+/// 보낼 때는 대기 슬롯을 만들지 않고([`command_request_id`] 가 `None`), 받을 때는 답할 번호가 없어 실행도
+/// 답장도 하지 않는다(연결 루프의 `CommandRequest` 갈래).
+// ADR-0272
+pub fn envelope_from_wire(raw: &RawValue) -> Result<CommandEnvelope, serde_json::Error> {
+    serde_json::from_str(raw.get())
+}
+
+/// 웹뷰가 보낸 패킷의 봉투 칸을 한 번 풀어 보고 구조체 순서 바이트로 다시 싼다 — `Command` 밖은 그대로 돌려준다.
+///
+/// 웹뷰 길은 패킷을 `serde_json::Value` 에서 풀어 원문 칸이 키 정렬된 바이트로 담긴다(`preserve_order` 없음) —
+/// 다시 싸야 셸이 직접 보내는 봉투와 같은 바이트가 나간다. `Err` = 봉투가 깨졌다: 일방 발사로 흘려보내면 웹뷰의
+/// 대기가 답장 상한까지 매달리므로 부르는 쪽이 invoke 를 바로 실패시킨다.
+// ADR-0272
+pub fn reseal_webview_envelope(cmd: AgentCommand) -> Result<AgentCommand, serde_json::Error> {
+    match cmd {
+        AgentCommand::Command { envelope } => {
+            let envelope = serde_json::value::to_raw_value(&envelope_from_wire(&envelope)?)?;
+            Ok(AgentCommand::Command { envelope })
+        }
+        other => Ok(other),
+    }
+}
+
+/// 봉투 · 답장이 품은 상관 키를 protocol 의 상관 키로 옮긴다 — ★uuid 를 그대로 나른다★(새 값을 만들지 않는 것이
+/// 계약이다 — 상관 키는 왕복 전 구간 동일해야 한다, ADR-0081 결정 4).
+fn request_id_from_bus(id: engram_dashboard_command::RequestId) -> RequestId {
+    RequestId(id.0)
+}
+
+/// 명령에 실린 request_id 를 꺼낸다. side-effect 명령(Spawn/Kill/…)은 모두 request_id 를 갖지만,
+/// 일부(Subscribe/Unsubscribe/Resize)는 request_id 가 없다(데몬이 reply 를 안 보냄) → `None`.
+/// (핸드셰이크는 이 표에 없다 — 명령이 아니라 따로 된 프레임(`handshake::AuthFrame`)이라 이 함수에 오지
+///  않는다. ADR-0129 0-4.)
+///
+/// ★계약★: 데몬 클라이언트의 pending 매칭(`send_command`)은 reply 를 기대하므로 request_id 가 있는
+/// 명령에만 쓴다. None 인 명령을 넣으면 매칭할 키가 없어 영구 pending(hang)이 되므로 호출자가 None 을 거른다.
+/// ★봉투가 깨진 `Command` 도 `None` 이다★(ADR-0272 결정 6) — 번호를 못 읽으니 대기 슬롯을 만들지 않는다.
+/// 웹뷰가 보낸 그런 패킷은 여기 오기 전에 [`reseal_webview_envelope`] 가 막아 invoke 가 실패한다.
+pub fn command_request_id(cmd: &AgentCommand) -> Option<RequestId> {
+    match cmd {
+        AgentCommand::Spawn { request_id, .. }
+        | AgentCommand::Kill { request_id, .. }
+        | AgentCommand::Interrupt { request_id, .. }
+        | AgentCommand::WriteStdin { request_id, .. }
+        | AgentCommand::AcquireInput { request_id, .. }
+        | AgentCommand::ReleaseInput { request_id, .. }
+        | AgentCommand::ListAgents { request_id }
+        | AgentCommand::StopDaemon { request_id, .. }
+        | AgentCommand::SpawnByCwd { request_id, .. }
+        | AgentCommand::ListProfiles { request_id }
+        | AgentCommand::CreateProfile { request_id, .. }
+        | AgentCommand::DeleteProfile { request_id, .. }
+        | AgentCommand::SpawnProfile { request_id, .. }
+        | AgentCommand::SetProfileAutoRestore { request_id, .. }
+        // 트리 rename(ADR-0061 리치화) — Ack 매칭 대상(SetProfileAutoRestore 와 동형).
+        | AgentCommand::RenameProfile { request_id, .. }
+        // 트리 reparent(ADR-0072 계층) — Ack 매칭 대상(RenameProfile 와 동형).
+        | AgentCommand::ReparentProfile { request_id, .. }
+        | AgentCommand::GetSnapshot { request_id, .. }
+        // 프리셋 CRUD(ADR-0061) — 넷 다 request_id 동봉(reply 매칭 대상).
+        | AgentCommand::ListPresets { request_id }
+        | AgentCommand::CreatePreset { request_id, .. }
+        | AgentCommand::DeletePreset { request_id, .. }
+        // 프리셋 rename(ADR-0061 리치화) — Ack 매칭 대상.
+        | AgentCommand::RenamePreset { request_id, .. }
+        // 봉투 포맷 전역 스위치(ADR-0096) — Ack 매칭 대상(데몬이 상태 변경 후 Ack echo).
+        | AgentCommand::SetEnvelopeFormat { request_id, .. }
+        // 명령 버스 등록 wire(ADR-0155/0156) — 셋 다 답장을 기다린다. 등록·차분은 Ack, 조회는
+        //   전용 reply CommandList 로 온다(아래 event_reply_request_id 가 그 짝).
+        | AgentCommand::RegisterCommands { request_id, .. }
+        | AgentCommand::UpdateCommands { request_id, .. }
+        | AgentCommand::ListCommands { request_id }
+        // 대기 입력 목록(ADR-0231) — 둘 다 전용 reply(QueuedInputs/QueuedInputCancelReply)를 기다린다.
+        | AgentCommand::ListQueuedInputs { request_id, .. }
+        | AgentCommand::CancelQueuedInput { request_id, .. }
+        // ⟳ — 답은 기존 `Ack` 라 아래 event_reply_request_id 에 새 갈래가 없다.
+        | AgentCommand::RefreshUsageLimits { request_id, .. } => Some(*request_id),
+        // ★명령 요청은 상관 대상이다 — 키만 봉투 안에 있다★(ADR-0155). 형제들처럼 제 칸이 없다고 여기서
+        //   None 을 고르면 셸이 답장을 받고도 깨울 슬롯을 못 만들어 마감시각까지 매달린다. 아래
+        //   event_reply_request_id 의 `CommandReply` 갈래와 **한 쌍으로만** 성립한다.
+        // ★uuid 는 그대로 옮긴다★ — 홉에서 새 키가 나면 답장이 이 요청에 못 붙는다(`request_id_from_bus`).
+        // ADR-0272 결정 4 · 6: 봉투를 풀어 번호를 읽는다 — 깨진 봉투는 번호 없음(위 doc).
+        AgentCommand::Command { envelope } => envelope_from_wire(envelope)
+            .ok()
+            .map(|envelope| request_id_from_bus(envelope.request_id)),
+        // request_id 없는 명령 — reply 매칭 대상 아님(데몬이 전용 reply 를 안 echo).
+        AgentCommand::Resize { .. }
+        | AgentCommand::Subscribe { .. }
+        | AgentCommand::Unsubscribe { .. }
+        | AgentCommand::UsageSubscribe { .. }
+        // ★CommandOutcome 은 **내가 보내는 답장**이라 여기 None 이다★ — 상관 키가 `reply` 안에 있지만 그것은
+        //   데몬이 나에게 준 요청의 키이고, 내 pending 표의 키가 아니다. Some 을 돌려주면 답장을 보내는 그
+        //   순간 그 키로 빈 pending 슬롯이 생겨 연결이 끊길 때까지 남는다.
+        | AgentCommand::CommandOutcome { .. } => None,
+    }
+}
+
+/// reply 이벤트에 실린 request_id 를 꺼낸다(매칭용). **전용 reply**(요청 하나에 붙는 답)만 request_id 를
+/// echo 하고, broadcast(AgentListUpdated/StatusChanged/…)는 `None` 이라 pending 매칭을 우회한다(편승 매칭
+/// 제거). ★어느 variant 가 어느 쪽인지의 목록은 아래 match 하나다★ — 여기 베껴 두면 variant 가 늘 때
+/// 한쪽만 고쳐진다.
+///
+/// ★Error 분기★: `Error{request_id: Some(_)}` = 특정 명령 실패(매칭해 reject), `Error{request_id: None}`
+/// = 명령 무관 오류(broadcast 성격, 매칭 안 함). SubscribeAck 는 request_id 가 없어(agent_id 기반) 여기
+/// None — 데몬 클라이언트의 pending 매칭 대상이 아니다(Subscribe 는 request_id 없는 명령).
+pub fn event_reply_request_id(ev: &AgentEvent) -> Option<RequestId> {
+    match ev {
+        AgentEvent::Ack { request_id }
+        | AgentEvent::AgentList { request_id, .. }
+        | AgentEvent::ProfileList { request_id, .. }
+        // PresetList = 전용 reply(request_id echo, ADR-0061). PresetListUpdated 는 broadcast(아래 None).
+        | AgentEvent::PresetList { request_id, .. }
+        | AgentEvent::Snapshot { request_id, .. }
+        | AgentEvent::Created { request_id, .. }
+        // ★CommandList 는 상관 대상이다★(ADR-0155) — ListCommands 조회의 전용 reply라 AgentList/
+        //   ProfileList/PresetList 와 같은 자리다. 여기서 None 을 고르면 셸이 확실히 매달린다: 위
+        //   command_request_id 가 ListCommands 에 Some 을 돌려주므로 pending 매칭이 슬롯을 만드는데,
+        //   그걸 깨울 짝이 없어져 연결이 끊길 때까지 안 풀린다. 두 함수는 명령↔답장 쌍마다 같이
+        //   움직여야 하는 한 쌍이다 — 이 쌍의 고정은 아래 tests 가 박는다.
+        | AgentEvent::CommandList { request_id, .. }
+        // 대기 입력 목록(ADR-0231) — 위 command_request_id 의 두 갈래와 한 쌍이다.
+        | AgentEvent::QueuedInputs { request_id, .. }
+        | AgentEvent::QueuedInputCancelReply { request_id, .. }
+        | AgentEvent::Spawned { request_id, .. } => Some(*request_id),
+        // ★명령 답장도 상관 대상이다 — 위 `AgentCommand::Command` 갈래의 짝★(ADR-0155). 요청이 Some 을
+        //   주는데 여기서 None 을 고르면 그 슬롯을 깨울 짝이 없어져 연결이 끊길 때까지 안 풀린다.
+        // TODO(U4b): 답장 칸이 원문 JSON 이 되면 여기서 답장을 풀어 번호를 읽는다(ADR-0272 결정 4).
+        AgentEvent::CommandReply { reply } => Some(request_id_from_bus(reply.request_id)),
+        AgentEvent::Error { request_id, .. } => *request_id,
+        // request_id 없는 이벤트(broadcast 또는 agent_id 기반) — pending 매칭 대상 아님.
+        AgentEvent::Hello { .. }
+        | AgentEvent::SubscribeAck { .. }
+        // SubscribeFailed 도 agent_id 기반이다(Subscribe 는 request_id 없는 명령) — 매칭 대상 아님.
+        | AgentEvent::SubscribeFailed { .. }
+        | AgentEvent::Output { .. }
+        | AgentEvent::ReplayComplete { .. }
+        | AgentEvent::StatusChanged { .. }
+        | AgentEvent::AgentListUpdated { .. }
+        | AgentEvent::RestoreResult { .. }
+        | AgentEvent::InputLeaseChanged { .. }
+        | AgentEvent::ProfileListUpdated { .. }
+        // PresetListUpdated = broadcast(request_id 없음, ADR-0061) — pending 매칭 대상 아님.
+        | AgentEvent::PresetListUpdated { .. }
+        // 구독한 연결로 가는 사용량 한 장 — ⟳ 의 답(`Ack`)이 아니다.
+        | AgentEvent::UsageLimitsUpdated { .. }
+        // ★CommandRequest 는 **들어오는 요청**이라 여기 None 이다(load-bearing)★ — 봉투에 request_id 가
+        //   있으니 Some 이 자연스러워 보이지만, 그 키는 **데몬이 만든 요청의 키**이고 내 pending 표의 키가
+        //   아니다. Some 을 돌려주면 받는 쪽이 이것을 「내가 기다린 답장」으로 읽어 봉투를 삼킨다 — 명령은
+        //   실행되지 않고 보낸 쪽은 마감시각까지 매달린다.
+        | AgentEvent::CommandRequest { .. } => None,
+    }
+}
 
 /// 셸이 보낸 명령이 성공 답으로 끝나지 못했을 때 **누가 실패를 말했나** — 데몬의 답인가, 셸 쪽 사정인가.
 ///
@@ -167,7 +324,7 @@ mod tests {
     //! 섞으면 결정 부분만 이식한다.
     //!
     //! ★검증 범위★: seq dedup/high-water 테스트는 없다 — 그 진도 상태 자체가 src-tauri 에 없다(ADR-0046).
-    //!   여기 박는 것은 순수 결정 함수뿐이다(request_id 추출·reply 분류 · pending 매칭 · epoch 가드 ·
+    //!   여기 박는 것은 순수 결정 함수뿐이다(봉투 칸 풀기 · request_id 추출·reply 분류 · pending 매칭 · epoch 가드 ·
     //!   apply_subscribe_ack 반환값).
     //!
     //! ★event-routing(M=5)은 여기서 검증하지 않는다★: InboundMessage variant 라우팅 + 콜백 호출/
@@ -442,8 +599,7 @@ mod tests {
             None,
             "AgentListUpdated 는 broadcast — 매칭 우회"
         );
-        // ADR-0155 명령↔답장 쌍(ListCommands↔CommandList) 박제는 이 파일이 아니라 protocol crate
-        // 쪽 테스트(`list_commands_reply_request_id_pairing`)가 진다.
+        // ADR-0155 명령↔답장 쌍(ListCommands↔CommandList) 박제는 아래 `list_commands_reply_request_id_pairing`.
         // SubscribeAck 는 agent_id 기반(request_id 없음) — T6a reply 매칭 대상 아님.
         assert_eq!(
             event_reply_request_id(&AgentEvent::SubscribeAck {
@@ -495,5 +651,275 @@ mod tests {
             Ok(AgentEvent::Ack { request_id }) => assert_eq!(request_id, r),
             other => panic!("Ack 은 Ok 그대로여야: {other:?}"),
         }
+    }
+
+    // ── 명령 칸 끝자락 · 명령↔답장 쌍(ADR-0272 결정 4) ──────────────────────────────────
+
+    /// protocol 봉투 golden 과 같은 바이트(`messages.rs` 의 `NIL_ENVELOPE`) — 패킷 쪽 golden 은 이 바이트가 원문
+    /// 칸을 그대로 건넌다는 것만 재고, 봉투 구조체 ↔ 바이트는 봉투를 푸는 이 끝자락이 잰다.
+    const NIL_ENVELOPE: &str = r#"{"name":"tab.create","request_id":"00000000-0000-0000-0000-000000000000","owner":"shell","proto_ver":1,"args":{"window":"main"}}"#;
+
+    fn nil_bus_envelope() -> CommandEnvelope {
+        CommandEnvelope {
+            name: "tab.create".to_string(),
+            request_id: engram_dashboard_command::RequestId(uuid::Uuid::nil()),
+            owner: engram_dashboard_command::OwnerToken::new("shell"),
+            proto_ver: 1,
+            args: serde_json::json!({ "window": "main" }),
+        }
+    }
+
+    fn raw(json: &str) -> Box<RawValue> {
+        RawValue::from_string(json.to_string()).expect("유효한 JSON")
+    }
+
+    /// ★손으로 적은 TS 봉투 칸(protocol `AgentCommand::Command` · `AgentEvent::CommandRequest` 의
+    /// `#[ts(type = …)]`)과 맞서는 golden★ — 원문 칸이라 protocol 은 봉투 모양을 못 보므로, 봉투 구조체가 그
+    /// 바이트로 나가고 그 바이트가 같은 구조체로 풀리는지를 여기서 못박는다.
+    #[test]
+    fn the_envelope_slot_unpacks_to_the_bus_envelope_byte_for_byte() {
+        let sealed = serde_json::value::to_raw_value(&nil_bus_envelope()).unwrap();
+        assert_eq!(
+            sealed.get(),
+            NIL_ENVELOPE,
+            "봉투 구조체 → 원문 칸 바이트가 golden 과 불일치 — 손으로 적은 TS 칸도 함께 고칠 것"
+        );
+        assert_eq!(
+            envelope_from_wire(&raw(NIL_ENVELOPE)).unwrap(),
+            nil_bus_envelope()
+        );
+    }
+
+    /// ★패킷은 풀렸는데 봉투가 깨진 갈래 = 요청 번호 없음★(ADR-0272 결정 6 · 셸 쪽) — 대기 슬롯을 만들면 그
+    /// 번호로 오는 답이 없어 답장 상한까지 매달린다.
+    #[test]
+    fn a_broken_envelope_has_no_request_id() {
+        for broken in [
+            r#"{"name":"tab.create"}"#,
+            r#"{"name":"x","request_id":"not-a-uuid","owner":"o","proto_ver":1,"args":null}"#,
+            "[]",
+            "null",
+        ] {
+            assert!(envelope_from_wire(&raw(broken)).is_err(), "{broken}");
+            assert_eq!(
+                command_request_id(&AgentCommand::Command {
+                    envelope: raw(broken)
+                }),
+                None,
+                "{broken}"
+            );
+        }
+    }
+
+    /// ★웹뷰 길(`forward_daemon_command`)은 패킷을 `serde_json::Value` 에서 푼다★ — 원문 칸도 그 길로 풀려
+    /// 번호를 읽어야 답장 대기 갈래를 탄다(serde_json 의 `Value` 역직렬화가 원문 칸을 다시 직렬화해 담는다).
+    #[test]
+    fn a_command_parsed_from_a_json_value_still_pairs() {
+        let sent: AgentCommand = serde_json::from_value(serde_json::json!({
+            "Command": { "envelope": serde_json::from_str::<serde_json::Value>(NIL_ENVELOPE).unwrap() }
+        }))
+        .expect("Value 에서도 원문 칸이 풀린다");
+        assert_eq!(
+            command_request_id(&sent),
+            Some(RequestId(uuid::Uuid::nil()))
+        );
+    }
+
+    /// ★웹뷰 길에서 다시 싼 봉투 칸 = 구조체 순서 golden 바이트★ — 키 순서를 섞어 보낸 봉투도 `Value` 를 지나며
+    /// 키 정렬되므로, 다시 싸지 않으면 셸이 직접 보내는 봉투와 다른 바이트가 나간다.
+    #[test]
+    fn a_webview_envelope_is_resealed_into_the_golden_bytes() {
+        let shuffled = serde_json::json!({
+            "Command": { "envelope": {
+                "args": { "window": "main" },
+                "proto_ver": 1,
+                "owner": "shell",
+                "request_id": "00000000-0000-0000-0000-000000000000",
+                "name": "tab.create",
+            } }
+        });
+        let sent: AgentCommand = serde_json::from_value(shuffled).unwrap();
+        match reseal_webview_envelope(sent).expect("성한 봉투는 다시 싸진다") {
+            AgentCommand::Command { envelope } => assert_eq!(envelope.get(), NIL_ENVELOPE),
+            other => panic!("Command 그대로여야: {other:?}"),
+        }
+    }
+
+    /// ★웹뷰 길의 깨진 봉투 = 다시 싸기 실패★ — 부르는 쪽(`forward_to_daemon`)이 그것을 invoke 실패로 돌려
+    /// 프론트 pending 을 곧바로 reject 한다. `Command` 밖 명령은 손대지 않는다.
+    #[test]
+    fn a_broken_webview_envelope_fails_to_reseal() {
+        let sent: AgentCommand = serde_json::from_value(serde_json::json!({
+            "Command": { "envelope": { "name": "tab.create" } }
+        }))
+        .expect("원문 칸은 패킷 파싱을 통과한다");
+        assert!(reseal_webview_envelope(sent).is_err());
+
+        let resize = AgentCommand::Resize {
+            agent_id: uuid::Uuid::nil(),
+            cols: 80,
+            rows: 24,
+            viewport_id: None,
+        };
+        assert!(matches!(
+            reseal_webview_envelope(resize),
+            Ok(AgentCommand::Resize { cols: 80, .. })
+        ));
+    }
+
+    /// ★중계 다리의 두 variant 는 pending 매칭 밖이다★ — 하나는 들어오는 **요청**이고 하나는 나가는
+    /// **답장**이라, 둘 중 어느 쪽이든 `Some` 을 주면 봉투가 삼켜지거나 빈 슬롯이 영구히 남는다.
+    #[test]
+    fn the_relay_leg_is_outside_pending_correlation() {
+        assert_eq!(
+            event_reply_request_id(&AgentEvent::CommandRequest {
+                envelope: raw(NIL_ENVELOPE),
+            }),
+            None,
+            "들어온 요청을 「내가 기다린 답장」으로 읽으면 그 명령은 실행되지 않고 사라진다"
+        );
+        assert_eq!(
+            command_request_id(&AgentCommand::CommandOutcome {
+                reply: engram_dashboard_command::CommandReply::ok(
+                    engram_dashboard_command::RequestId(uuid::Uuid::nil()),
+                    serde_json::Value::Null,
+                ),
+            }),
+            None,
+            "답장을 보내면서 pending 슬롯을 만들면 깨울 짝이 없다"
+        );
+    }
+
+    /// ★발신자 다리의 두 variant 는 **한 쌍으로** pending 매칭 안이다★ — 중계 다리(위)의 정반대다.
+    ///
+    /// 한쪽만 `Some` 이면 왕복이 안 닫힌다: 요청만 `Some` 이면 슬롯을 깨울 짝이 없고, 답장만 `Some` 이면
+    /// 깰 슬롯이 없다. 둘 다 셸이 마감시각을 다 쓰거나 연결이 끊길 때까지 매달리는 것으로 끝난다.
+    /// 이 테스트가 그 한쪽만 고친 편집을 떨어뜨린다.
+    #[test]
+    fn the_sender_leg_is_inside_pending_correlation_as_a_pair() {
+        let envelope = CommandEnvelope {
+            request_id: engram_dashboard_command::RequestId::new(),
+            ..nil_bus_envelope()
+        };
+        let sent = AgentCommand::Command {
+            envelope: serde_json::value::to_raw_value(&envelope).unwrap(),
+        };
+        let answered = AgentEvent::CommandReply {
+            reply: engram_dashboard_command::CommandReply::ok(
+                envelope.request_id,
+                serde_json::json!({ "view_id": "v1" }),
+            ),
+        };
+
+        let asked =
+            command_request_id(&sent).expect("요청이 pending 슬롯을 못 만들면 답장이 와도 못 깬다");
+        let woke =
+            event_reply_request_id(&answered).expect("답장이 상관 밖이면 그 슬롯을 깨울 짝이 없다");
+        assert_eq!(asked, woke, "두 다리가 같은 키를 봐야 왕복이 닫힌다");
+        // 홉에서 키를 새로 만들면(`RequestId::new`·`default`) 답장이 이 요청에 못 붙는다.
+        assert_eq!(
+            asked.0, envelope.request_id.0,
+            "봉투가 품은 uuid 그대로여야"
+        );
+    }
+
+    /// ★명령↔답장 쌍 박제(ADR-0155)★: `AgentCommand::ListCommands` 가 pending 슬롯을 만드는 쪽이고
+    /// `AgentEvent::CommandList` 가 그걸 깨우는 쪽이다. 한쪽만 고치면(예: 새 reply variant 를
+    /// broadcast 로 잘못 분류) 그 왕복은 연결이 끊길 때까지 안 풀린다.
+    #[test]
+    fn list_commands_reply_request_id_pairing() {
+        let r = RequestId::new();
+        let cmd = AgentCommand::ListCommands { request_id: r };
+        assert_eq!(
+            command_request_id(&cmd),
+            Some(r),
+            "ListCommands 는 request_id 동봉 — pending 슬롯을 만드는 쪽"
+        );
+        let reply = AgentEvent::CommandList {
+            request_id: r,
+            entries: vec![],
+        };
+        assert_eq!(
+            event_reply_request_id(&reply),
+            Some(r),
+            "CommandList 는 ListCommands 의 전용 reply — 같은 request_id 로 매칭돼야 슬롯이 깨어난다"
+        );
+    }
+
+    /// ★명령↔답장 두 쌍 박제★ — 한쪽만 `Some` 이면 셸이 그 왕복을 연결이 끊기거나 답장 상한이 찰 때까지 붙든다.
+    #[test]
+    fn queued_input_commands_and_replies_pair_by_request_id() {
+        let r = RequestId::new();
+        let agent_id = uuid::Uuid::new_v4();
+        let pairs = [
+            (
+                AgentCommand::ListQueuedInputs {
+                    agent_id,
+                    request_id: r,
+                },
+                AgentEvent::QueuedInputs {
+                    request_id: r,
+                    agent_id,
+                    inputs: vec![],
+                    as_of_seq: None,
+                    epoch: 0,
+                    stopped_after_error: false,
+                },
+            ),
+            (
+                AgentCommand::CancelQueuedInput {
+                    agent_id,
+                    input_id: "q1".into(),
+                    request_id: r,
+                },
+                AgentEvent::QueuedInputCancelReply {
+                    request_id: r,
+                    agent_id,
+                    input_id: "q1".into(),
+                    outcome: "cancelled".into(),
+                },
+            ),
+        ];
+        for (cmd, reply) in pairs {
+            assert_eq!(command_request_id(&cmd), Some(r), "{cmd:?}");
+            assert_eq!(event_reply_request_id(&reply), Some(r), "{reply:?}");
+        }
+    }
+
+    /// 구독은 답이 없고(대기표를 걸면 영구 pending) ⟳ 는 기존 `Ack` 와 한 쌍이며, 방송은 상관 밖이다.
+    #[test]
+    fn usage_wire_request_id_arms() {
+        use engram_dashboard_protocol::AgentBackendKind;
+
+        let r = RequestId::new();
+        assert_eq!(
+            command_request_id(&AgentCommand::UsageSubscribe {
+                vendors: vec![AgentBackendKind::Claude],
+            }),
+            None
+        );
+        assert_eq!(
+            command_request_id(&AgentCommand::RefreshUsageLimits {
+                vendor: AgentBackendKind::Claude,
+                request_id: r,
+            }),
+            Some(r)
+        );
+        assert_eq!(
+            event_reply_request_id(&AgentEvent::Ack { request_id: r }),
+            Some(r)
+        );
+        let updated: AgentEvent = serde_json::from_value(serde_json::json!({
+            "UsageLimitsUpdated": {
+                "snapshot": {
+                    "vendor": "codex", "account_key": "default", "five_hour": null, "weekly": null,
+                    "model_scoped": [], "plan": null, "in_flight": true,
+                    "state": { "kind": "Ready" }, "revision": 1
+                },
+                "subscribed": []
+            }
+        }))
+        .unwrap();
+        assert_eq!(event_reply_request_id(&updated), None);
     }
 }

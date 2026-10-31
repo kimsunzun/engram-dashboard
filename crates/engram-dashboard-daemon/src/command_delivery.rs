@@ -111,7 +111,7 @@ use engram_dashboard_protocol::AgentEvent;
 use tokio::sync::{oneshot, watch};
 
 use crate::command_roster::CommandRoster;
-use crate::connection_core::{event_json, sanitize_for_log, sanitize_within};
+use crate::connection_core::{envelope_to_wire, event_json, sanitize_for_log, sanitize_within};
 
 /// 물어본 연결이 이미 떠났을 때의 문구 — 이 답장도 갈 곳이 없다(그 연결이 사라졌다).
 const CALLER_ALREADY_GONE: &str = "the calling connection went away before the envelope was sent";
@@ -1152,7 +1152,11 @@ impl CommandLink for OwnerLink<'_> {
                 format!("the owner of '{name}' went away while the envelope was being handed over"),
             )),
             Some(sink) => {
-                let written = match event_json(&AgentEvent::CommandRequest { envelope: env }) {
+                // ADR-0272: 원문 칸으로 다시 싼다 — 중계가 고친 인자(ADR-0308)가 이 바이트에 실린다.
+                let packet = envelope_to_wire(&env)
+                    .ok()
+                    .and_then(|envelope| event_json(&AgentEvent::CommandRequest { envelope }));
+                let written = match packet {
                     // 큐 포화·닫힘 — 봉투는 나가지 못했지만 큐는 비워질 수 있어 같은 id 재질의가 쓸모 있다.
                     Some(text) => sink.try_send(Frame::Text(text)).map_err(|_| {
                         no_retry(
@@ -3919,6 +3923,7 @@ pub(crate) mod tests {
 
         match next_event(&mut owner_inbox).await {
             AgentEvent::CommandRequest { envelope } => {
+                let envelope = opened(&envelope);
                 assert_eq!(envelope.request_id, request_id, "id 는 전 구간 동일");
                 assert_eq!(
                     envelope.owner,
@@ -4258,6 +4263,7 @@ pub(crate) mod tests {
 
         match next_event(&mut owner_inbox).await {
             AgentEvent::CommandRequest { envelope } => {
+                let envelope = opened(&envelope);
                 assert_eq!(envelope.request_id, request_id);
                 assert_eq!(
                     envelope.args,
@@ -4422,6 +4428,7 @@ pub(crate) mod tests {
 
         match next_event(&mut owner_inbox).await {
             AgentEvent::CommandRequest { envelope } => {
+                let envelope = opened(&envelope);
                 assert_eq!(envelope.args, args, "그대로 통과");
             }
             other => panic!("주인은 CommandRequest 를 받는다: {other:?}"),
@@ -4710,7 +4717,7 @@ pub(crate) mod tests {
         resolving_settles_at(&deliveries, 0).await;
         let after = round_trip(marked());
         let envelope = match next_event(&mut owner_inbox).await {
-            AgentEvent::CommandRequest { envelope } => envelope,
+            AgentEvent::CommandRequest { envelope } => opened(&envelope),
             other => panic!("주인은 CommandRequest 를 받는다: {other:?}"),
         };
         assert_eq!(envelope.args["agent"], json!(lead.to_string()));
@@ -5734,9 +5741,14 @@ pub(crate) mod tests {
             .expect("호출 태스크")
     }
 
+    /// 주인에게 나간 패킷의 원문 봉투 칸을 푼다 — 데몬이 다시 싼 봉투는 늘 풀린다(ADR-0272).
+    fn opened(raw: &serde_json::value::RawValue) -> CommandEnvelope {
+        crate::connection_core::envelope_from_wire(raw).expect("데몬이 다시 싼 봉투는 풀린다")
+    }
+
     async fn envelope_from(inbox: &mut mpsc::Receiver<Frame>) -> CommandEnvelope {
         match next_event(inbox).await {
-            AgentEvent::CommandRequest { envelope } => envelope,
+            AgentEvent::CommandRequest { envelope } => opened(&envelope),
             other => panic!("봉투가 와야: {other:?}"),
         }
     }

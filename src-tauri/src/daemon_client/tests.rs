@@ -5323,6 +5323,31 @@ async fn forward_drops_a_webview_usage_subscribe() {
     client.close();
 }
 
+// ── 웹뷰가 보낸 깨진 봉투 = invoke 실패 · 소켓에 안 나간다 ─────────────────────────────────
+// 봉투 칸은 원문이라 패킷 파싱은 통과한다 — 막지 않으면 번호 없는 일방 발사로 나가 프론트 pending 이 끝내 reject
+// 되지 않는다. 표지가 곧바로 다음 frame 이면 안 나갔다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forward_rejects_a_webview_command_with_a_broken_envelope() {
+    let mut server = spawn_usage_server().await;
+    let events = Arc::new(RecordingEvents::default());
+    let (client, _disco) = usage_client(&server, events.clone());
+    client.connect().await.expect("connect → connected");
+
+    let cmd = serde_json::json!({ "Command": { "envelope": { "name": "tab.create" } } });
+    let refused = forward_to_daemon(&client, cmd).await;
+    assert!(
+        matches!(&refused, Err(m) if m.starts_with("AgentCommand 봉투 파싱 실패")),
+        "{refused:?}"
+    );
+    let m = marker(&client);
+    assert_eq!(
+        server.next_frame().await,
+        format!("1:{m}"),
+        "깨진 봉투는 소켓에 안 나간다"
+    );
+    client.close();
+}
+
 // ── `get_usage_snapshot` = 캐시 전부(받은 뒤 흐른 초만큼 보정) + 지금 소켓 표식 · 소켓 없음 → 빈 목록 + 0 ─────────
 // 보정 폭은 두 시각의 차로 잰다 — 받은 시각을 몰라도 두 시각의 차가 정수 초면 흐른 초의 차도 정확히 그만큼이다.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5575,14 +5600,15 @@ fn bus_table(state: &LayoutState, client: &Arc<DaemonClient>) -> CommandTable {
 
 // 데몬이 배달하는 셸 명령 한 장(LLM 의 `engram layout.setSlotContent …` 가 셸에 닿는 모양).
 fn bus_request(name: &str, args: serde_json::Value) -> AgentEvent {
+    let envelope = CommandEnvelope {
+        name: name.to_string(),
+        request_id: engram_dashboard_command::RequestId::new(),
+        owner: OwnerToken::new("shell"),
+        proto_ver: CATALOG_VERSION,
+        args,
+    };
     AgentEvent::CommandRequest {
-        envelope: CommandEnvelope {
-            name: name.to_string(),
-            request_id: engram_dashboard_command::RequestId::new(),
-            owner: OwnerToken::new("shell"),
-            proto_ver: CATALOG_VERSION,
-            args,
-        },
+        envelope: serde_json::value::to_raw_value(&envelope).expect("봉투 직렬화"),
     }
 }
 

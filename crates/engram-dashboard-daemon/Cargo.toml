@@ -123,7 +123,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync",
 #   `rg "futures_util|SinkExt|StreamExt" src/ tests/` 로 볼 것(여기 열거하지 않는다).
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `raw_value` = 명령 칸 원문을 풀고 다시 싸는 끝자락(ADR-0272 결정 4) — protocol 이 같은 판에 이미 켠다.
+serde_json = { version = "1", features = ["raw_value"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1"
