@@ -24,6 +24,9 @@
 //! [`Registry::new`] 가 명부를 세운다 · [`Registry::add`] 가 상대를 올리고 그 [`Peer`] 와 수신단 [`Inbox`] 를
 //! 준다 · [`Peer::request`]/[`Peer::notify`]/[`Peer::resume_stream`]/[`Peer::reconnect_now`]/[`Peer::close`] 가
 //! 조작 표면 · [`Inbox::recv`] 가 유일한 수신 표면이다 — 손잡이마다 하나이고 그 감독 하나가 낸 것만 온다.
+//! ★보내는 것은 연결 하나에 묶인다★ — `request` · `notify` 는 부른 순간의 지금 세대에, [`Peer::request_in`] ·
+//! [`Peer::notify_in`] 은 부르는 쪽이 준 세대(받은 메시지의 [`Arrival::generation`])에 묶이고, 그 연결이 아니면
+//! 나가지 않는다(TRD 3 §3-0 ③ — `peer.rs` 헤더).
 //!
 //! ★[`machine`]·[`pending`]·[`stream`] 이 공개인 것은 의도★ — 순수 층이라 소비자가 자기 하네스에서
 //! 그대로 돌려 볼 수 있다(ADR-0012). **지지되는 표면**은 위 진입점이고, 순수 층은 관측용이다.
@@ -71,8 +74,11 @@
 //! ★매니페스트 텍스트를 grep 으로 바꾸지 말 것★ — rename · `[dependencies.<이름>]` 테이블 형 ·
 //! `[build-dependencies]` · 비활성 target · `optional` 이 전부 정상 Cargo 문법으로 빠져나간다. 플래그도
 //! 줄이지 않는다(`command`·`base`·`messaging` 상한 게이트와 같은 근거).
-//! ★공통으로 남는 구멍★ — 멤버를 `engram-dashboard` **이름 접두**로 식별하므로 다른 이름을 단 멤버는
-//! 그냥 통과한다. 그래서 이 crate 의 패키지 이름에서 그 접두를 떼면 게이트가 조용히 눈을 감는다.
+//! ★남는 구멍 둘★ — 멤버를 `engram-dashboard` **이름 접두**로 식별하기 때문이다(ADR-0151 「개명 함정」).
+//! (a) 그 접두가 없는 워크스페이스 멤버를 의존하면 이 게이트를 그냥 통과한다. (b) 이 crate 가 그 접두를
+//! 떼면 이 게이트는 빨개지지만(`-p` 가 죽거나 자기 줄이 접두를 잃는다), **다른** crate 의 상한 게이트와
+//! 메시징 이름 정규식은 이 crate 로 가는 간선을 못 보게 된다(명단은 CLAUDE.md 「빌드·검증 명령」 — 여기 베끼지
+//! 않는다).
 //!
 //! **② Tauri import 0**(ADR-0003):
 //! `rg "^\s*use tauri" crates/engram-dashboard-transport/src/` → **0줄**.

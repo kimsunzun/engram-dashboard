@@ -14,6 +14,12 @@
 //!   굶기지 못한다. 오늘 `net` 의 실물 결함이 정확히 그 굶김이다.
 //! - ★핸들은 재연결에 불사★ — 세대 경계는 핸들을 죽이지 않고 [`crate::Arrival::generation`] 에 표식으로
 //!   나온다.
+//! - ★명령은 묶인 세대 밖으로 나가지 않는다(TRD 3 §3-0 ③)★ — 핸들이 큐에 넣는 명령마다 세대를 찍고(`*_in` 은
+//!   부르는 쪽이 준 값, 나머지는 부른 순간의 지금 세대) 감독이 쓰기 직전 지금 세대와 대조해 다르면 쓰지 않는다
+//!   (`Supervisor::on_cmd`). 큐는 재연결을 넘어 살아남는데 기계가 끊길 때 비우는 것은 그 순간의 큐뿐이라, 그 뒤 든
+//!   것이 연결 수립 구간을 지나 다음 연결에 쓰이던 틈을 이 대조가 닫는다. 쓰지 않은 요청은 안 보냄 끊김으로 깨우고
+//!   알림 · 팬아웃 · 이어받기는 센다 — 운영 단계가 아닐 때 든 명령과 같은 처분이다(`reject_command`). 핸들 입구도 같은
+//!   대조를 먼저 하지만 그것은 빠른 길이고 권위는 감독 쪽이다.
 //! - ★위로 올리는 것은 전부 순서 칸(감독 지역 큐)을 지나고, 버려지지 않는다★(TRD 3 §3-0 ②) — 넣는 자리
 //!   (사건 · 패킷 · 시한 사건 · 유실 신고)는 동기로 넣기만 하고 줄에 자리가 있으면 그 자리에서 싣는다. 줄이
 //!   차 있으면 붙들어 두고, **모든 대기 루프**(연결 수립 · 운영 · 백오프 · 포기)의 「줄에 자리 → 순서 칸
@@ -172,7 +178,7 @@ fn next_turn(
 pub enum SendError {
     /// 나가는 큐가 찼다.
     QueueFull,
-    /// 지금 운영 단계가 아니다(연결 중·백오프 중·포기함).
+    /// 지금 운영 단계가 아니다(연결 중·백오프 중·포기함) — 또는 묶은 연결이 지금 연결이 아니다([`Peer::notify_in`]).
     Disconnected,
     /// 감독 태스크가 사라졌다 — 이 상대는 끝났다.
     Closed,
@@ -182,7 +188,7 @@ impl std::fmt::Display for SendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::QueueFull => f.write_str("outbound queue full"),
-            Self::Disconnected => f.write_str("peer is not live"),
+            Self::Disconnected => f.write_str("peer is not live on the bound generation"),
             Self::Closed => f.write_str("peer supervisor is gone"),
         }
     }
@@ -190,7 +196,20 @@ impl std::fmt::Display for SendError {
 
 impl std::error::Error for SendError {}
 
-enum PeerCmd<W: Wire> {
+/// 감독에게 가는 데이터 명령 하나 — ★부르는 쪽이 잡은 세대를 단다★(TRD 3 §3-0 ③).
+///
+/// 나가는 큐는 연결보다 오래 산다(핸들이 재연결에 불사). 기계가 연결을 버릴 때 큐를 비우지만(`fail_pending`)
+/// 비운 뒤에 든 것은 못 보고, 연결 수립 구간(걸기 · 핸드셰이크)은 큐를 안 읽어 그것이 다음 운영 단계까지 남는다 —
+/// 세대 G 에 든 명령이 G+1 의 통로에 쓰인다(셸이 ADR-0195 로 막은 결함의 transport 판). 감독은 쓰기 직전 이
+/// 세대를 지금 세대와 대조해 다르면 쓰지 않는다(`Supervisor::on_cmd`) — 그 틈을 잡는 자리가 그 대조 하나다.
+struct PeerCmd<W: Wire> {
+    /// 이 명령이 나가도 되는 유일한 연결. 핸들의 입구가 찍는다 — `*_in` 은 부르는 쪽이 준 값, 나머지는 부른
+    /// 순간의 지금 세대([`Peer::generation`]).
+    generation: Generation,
+    op: PeerOp<W>,
+}
+
+enum PeerOp<W: Wire> {
     Request {
         out: W::Out,
         reply: oneshot::Sender<Result<W::In, RequestError>>,
@@ -255,7 +274,12 @@ struct PeerInner<W: Wire> {
     generation: Arc<AtomicU64>,
     /// 핸들이 **큐가 차서** 못 넣은 횟수. 감독이 걷어 가 [`QueueFullPolicy`] 대로 처리한다.
     overflow: Arc<AtomicU64>,
-    /// 핸들이 **운영 단계가 아니라서** 버린 횟수. ★연결을 끊지 않는다★ — 이미 안 붙어 있다.
+    /// 못 넣은 명령에 찍힌 세대 중 가장 새 것(`fetch_max` — 셈보다 먼저 적는다). ★감독은 이것이 지금 세대일 때만
+    /// [`QueueFullPolicy`] 를 집행한다★ — 끝난 세대의 넘침을 다음 세대가 걷어 그 새 연결을 끊지 않게(셈은 세대와
+    /// 무관하게 신고한다 — `Supervisor::drain_overflow`).
+    overflow_generation: Arc<AtomicU64>,
+    /// 핸들이 **묶은 세대가 운영 중이 아니라서**(운영 단계가 아니거나 더 새 세대로 다시 붙었다) 버린 횟수.
+    /// ★연결을 끊지 않는다★ — 묶은 연결은 이미 안 붙어 있다.
     refused: Arc<AtomicU64>,
     /// `overflow` · `refused` 를 올렸다고 감독을 깨운다 — 포기 · 백오프 대기는 그 셈만으로는 안 깨어, 안 깨우면 그
     /// 신고가 다음 「다시 연결」(포기면) · 백오프 끝(백오프면)까지 안 나온다. 남는 표는 많아야 하나라 쌓이지 않고,
@@ -307,56 +331,120 @@ impl<W: Wire> Peer<W> {
         Generation(self.inner.generation.load(Ordering::Acquire))
     }
 
-    /// 답장을 기다린다.
+    /// 답장을 기다린다 — 부른 순간의 지금 세대에 묶는다([`Peer::request_in`] 에 [`Peer::generation`] 을 넘긴 것과
+    /// 같다).
     ///
     /// 오류 조건: 시한 만료 · 끊김 · 큐 포화 · 번호 겹침 · 만료 번호 재사용 ·
     /// [`Wire::request_tag`] 가 `None`([`RequestError::NotARequest`] — `notify` 를 쓰라는 뜻).
     ///
     /// ★시한이 실제로 도달하는 경우는 「연결은 멀쩡한데 그 요청만 침묵」 하나뿐이다★ — 연결을 버리는
     /// 어느 갈래든 대기자를 즉시 깨우기 때문이다.
-    pub async fn request(&self, out: W::Out) -> Result<W::In, RequestError> {
-        if !self.peer_state().is_live() {
-            return Err(self.disconnected());
+    ///
+    /// ★재연결과 겹친 부름은 새 연결로 넘어가지 않는다★ — 세대를 먼저 읽고 운영 중인지를 그 뒤에 보므로, 그
+    /// 사이 다시 붙었으면 입구에서 끝나고 그 뒤에 다시 붙었으면 감독의 쓰기 직전 대조에서 끝난다(둘 다 안 보냄
+    /// 오류). 부른 순간의 연결보다 새 연결에는 쓰이지 않는다.
+    ///
+    /// ★`async fn` 이 아니다 — 되살리지 마라★: 세대를 부른 자리에서 읽어 돌려주는 future 에 싣는다. `async fn` 이면
+    /// 본문이 첫 폴링에 돌아, future 를 만든 뒤 다시 붙고 나서 기다리면 새 세대를 읽어 새 연결에 쓰인다.
+    pub fn request(&self, out: W::Out) -> impl Future<Output = Result<W::In, RequestError>> + '_ {
+        let generation = self.generation();
+        self.request_in(generation, out)
+    }
+
+    /// 답장을 기다린다 — ★`generation` 연결에서만 나간다★(TRD 3 §3-0 ③).
+    ///
+    /// 그 연결이 지금 운영 중이 아니면(끊겼다 · 다른 세대로 다시 붙었다) 보내지 않고 안 보냄 끊김
+    /// ([`RequestError::Disconnected`] 의 `sent` 가 거짓)으로 끝난다. ★입구 검사는 빠른 길이고 권위는 감독의 쓰기
+    /// 직전 대조다★ — 입구를 지난 뒤 쓰기 전에 세대가 바뀌면 감독이 쓰지 않고 같은 오류로 깨운다.
+    ///
+    /// 쓰임 = 받은 메시지에 걸린 요청을 그 메시지를 실어 온 연결로만 낼 때 그 [`crate::Arrival::generation`] 을
+    /// 넘긴다. 셸이 await 하는 보내기 전에 소켓을 잡던 자리다(TRD 3 §3-0 ③). 나머지 오류 조건은
+    /// [`Peer::request`] 와 같다.
+    pub async fn request_in(
+        &self,
+        generation: Generation,
+        out: W::Out,
+    ) -> Result<W::In, RequestError> {
+        if !self.bound_to(generation) {
+            return Err(self.disconnected(generation, false));
         }
         let (tx, rx) = oneshot::channel();
-        match self
-            .inner
-            .data_tx
-            .try_send(PeerCmd::Request { out, reply: tx })
-        {
+        let cmd = PeerCmd {
+            generation,
+            op: PeerOp::Request { out, reply: tx },
+        };
+        match self.inner.data_tx.try_send(cmd) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_)) => {
-                self.count_overflow();
+                self.count_overflow(generation);
                 return Err(RequestError::QueueFull);
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => return Err(self.disconnected()),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                return Err(self.disconnected(generation, false))
+            }
         }
-        // 감독이 사라져 슬롯이 함께 떨어져도 여기서 오류로 깨어난다.
-        rx.await.unwrap_or_else(|_| Err(self.disconnected()))
+        // 감독이 사라져 슬롯이 함께 떨어져도 여기서 오류로 깨어난다. ★보냄 칸은 참★ — 큐에 있었는지 대기 표에
+        //   있었는지 알 길이 없어 「갔을 수 있다」 쪽으로 적는다(`sent` 칸의 「부풀 수 있다」).
+        rx.await
+            .unwrap_or_else(|_| Err(self.disconnected(generation, true)))
     }
 
-    /// 답장을 안 기다린다. ★await 이 없다★ — 큐에 못 넣으면 즉시 `Err`.
+    /// 답장을 안 기다린다 — 부른 순간의 지금 세대에 묶는다([`Peer::notify_in`] 에 [`Peer::generation`] 을 넘긴 것과
+    /// 같다). ★await 이 없다★ — 큐에 못 넣으면 즉시 `Err`.
+    ///
+    /// 재연결과 겹친 부름은 [`Peer::request`] 와 같이 새 연결로 넘어가지 않는다 — 입구에서 끝나면 `Err`, 쓰기
+    /// 직전 대조에서 끝나면 [`TransportEvent::Dropped`] 로 센다([`Peer::notify_in`]).
     pub fn notify(&self, out: W::Out) -> Result<(), SendError> {
-        if !self.peer_state().is_live() {
+        self.notify_in(self.generation(), out)
+    }
+
+    /// 답장을 안 기다린다 — ★`generation` 연결에서만 나간다★(TRD 3 §3-0 ③). ★await 이 없다★.
+    ///
+    /// 입구에서 그 연결이 지금 운영 중이 아니면 `Err`([`SendError::Disconnected`] — 세지 않는다, 부르는 쪽이 오류를
+    /// 받았다). ★입구를 지난 뒤 쓰기 전에 세대가 바뀌면 감독이 쓰지 않고 [`TransportEvent::Dropped`]
+    /// ([`crate::Direction::Outbound`])로 센다★ — 부르는 쪽은 이미 `Ok` 를 받아 갔으므로 안 세면 조용한 유실이다(큐에
+    /// 든 채 끊긴 알림과 같은 규칙).
+    ///
+    /// 쓰임 = 받은 요청의 답을 그 요청이 온 연결로만 낼 때 그 [`crate::Arrival::generation`] 을 넘긴다 — 다른
+    /// 연결로 나가면 그 상대는 자기가 안 보낸 요청의 답을 받는다(셸 `CommandOutcome` — TRD 3 §3-0 ③).
+    pub fn notify_in(&self, generation: Generation, out: W::Out) -> Result<(), SendError> {
+        if !self.bound_to(generation) {
             return Err(SendError::Disconnected);
         }
-        self.push(PeerCmd::Notify { out })
+        self.push(PeerCmd {
+            generation,
+            op: PeerOp::Notify { out },
+        })
     }
 
-    /// 스트림을 이어받는다. 반환값은 이 요청이 실린 연결 세대다.
+    /// 스트림을 이어받는다. 반환값은 이 요청이 묶인 연결 세대다 — 부른 순간의 지금 세대이고, 이 요청은 그
+    /// 연결에서만 나간다([`Peer::notify`] 와 같은 대조).
     ///
-    /// ★받아들여졌다는 뜻이 아니다★ — 운영 단계가 아니거나 큐가 찼으면 요청은 버려지고
-    /// [`TransportEvent::Dropped`] 로만 보인다. 반환값은 "지금 세대가 이것이다" 일 뿐이다.
+    /// ★받아들여졌다는 뜻이 아니다★ — 운영 단계가 아니거나 큐가 찼거나 쓰기 전에 세대가 바뀌었으면 요청은
+    /// 버려지고 [`TransportEvent::Dropped`] 로만 보인다. 반환값은 "이 세대에 묶었다" 일 뿐이다.
     /// ★쓰는 도중 끊긴 이 요청은 그것으로도 안 보인다★ — 세지도, 다음 연결에서 다시 내지도 않는다(다시
     /// 내는 것은 이 crate 가 구멍을 보고 스스로 낸 재요청뿐이다).
     pub fn resume_stream(&self, key: W::StreamKey, after: Option<u64>) -> Generation {
-        if self.peer_state().is_live() {
-            let _ = self.push(PeerCmd::Resume { key, after });
+        let generation = self.generation();
+        if self.bound_to(generation) {
+            let _ = self.push(PeerCmd {
+                generation,
+                op: PeerOp::Resume { key, after },
+            });
         } else {
             // 부르는 쪽이 오류를 못 받는 입구다(팬아웃 `send_frame` 과 둘) — 세지 않으면 조용한 유실이 된다.
             self.refuse();
         }
-        self.generation()
+        generation
+    }
+
+    /// 지금 `generation` 연결이 운영 중인가 — 데이터 입구의 빠른 길이다. ★권위가 아니다★ — 이것이 참이어도 쓰기
+    /// 전에 세대가 바뀔 수 있고, 그것은 감독의 쓰기 직전 대조가 잡는다(`Supervisor::on_cmd`).
+    /// ★상태를 먼저 본다★ — 감독은 세대를 상태보다 먼저 내놓으므로(`Supervisor::publish`) 운영 중을 본 뒤 읽은
+    /// 세대는 그 운영 단계의 것이거나 더 새 것이다. 세대를 먼저 읽으면 그 뒤 다시 붙은 운영 중을 옛 세대의 것으로
+    /// 읽어, 여기서 `Err` 로 끝낼 수 있던 것을 큐에 넣는다(감독이 버리고 센다).
+    fn bound_to(&self, generation: Generation) -> bool {
+        self.peer_state().is_live() && self.generation() == generation
     }
 
     /// ★「지금 다시 해라」 입구★ — 예산을 초기화하고 즉시 시도한다(ADR-0180 결정 7). 포기 상태에서도 듣는다.
@@ -400,47 +488,63 @@ impl<W: Wire> Peer<W> {
     /// ★앱이 [`Peer::close`] 를 부른 뒤 운영 단계가 아니라서 못 넣은 것은 세지 않는다★ — 앱이 닫겠다고 한 뒤의
     /// 유실 개수는 읽을 쪽이 없고 깔끔한 종료가 우선이다(사용자 결정 2026-09-26 — `lib.rs` 「알려진 한계」). 그 전에
     /// 큐에 든 것은 감독이 센다.
+    ///
+    /// 지금 세대에 묶는다 — 쓰기 전에 세대가 바뀌면 감독이 쓰지 않고 센다([`Peer::notify_in`] 과 같은 대조).
     pub(crate) fn send_frame(&self, frame: Frame) -> Result<(), SendError> {
-        if !self.peer_state().is_live() {
+        let generation = self.generation();
+        if !self.bound_to(generation) {
             if !self.close_requested() {
                 self.refuse();
             }
             return Err(SendError::Disconnected);
         }
-        self.push(PeerCmd::Raw(frame))
+        self.push(PeerCmd {
+            generation,
+            op: PeerOp::Raw(frame),
+        })
     }
 
-    /// 운영 단계가 아니라서 버린 것 하나를 센다 — 감독이 걷어 [`TransportEvent::Dropped`] 로 신고한다.
+    /// 묶은 세대가 운영 중이 아니라서(운영 단계가 아니거나 더 새 세대로 다시 붙었다) 버린 것 하나를 센다 — 감독이
+    /// 걷어 [`TransportEvent::Dropped`] 로 신고한다.
     fn refuse(&self) {
         self.inner.refused.fetch_add(1, Ordering::AcqRel);
         self.inner.loss_wake.notify_one();
     }
 
-    /// 큐가 차서 못 넣은 것 하나를 센다 — 감독이 걷어 [`QueueFullPolicy`] 대로 처리한다. ★깨운다★ — 낡은
-    /// `Live` 를 보고 넣다 찬 셈이 감독이 큐를 다 비우고 잠든 뒤에 닿을 수 있다.
-    fn count_overflow(&self) {
+    /// `generation` 에 묶인 것이 큐가 차서 못 들어간 것 하나를 센다 — 감독이 걷어 신고하고, 그 세대가 지금 세대면
+    /// [`QueueFullPolicy`] 대로 처리한다(`PeerInner::overflow_generation`). ★세대를 셈보다 먼저 적는다★ — 셈을 걷은
+    /// 감독이 그 뒤에 읽는 세대가 이 넘침의 세대 이상이게. ★깨운다★ — 낡은 `Live` 를 보고 넣다 찬 셈이 감독이
+    /// 큐를 다 비우고 잠든 뒤에 닿을 수 있다.
+    fn count_overflow(&self, generation: Generation) {
+        self.inner
+            .overflow_generation
+            .fetch_max(generation.0, Ordering::AcqRel);
         self.inner.overflow.fetch_add(1, Ordering::AcqRel);
         self.inner.loss_wake.notify_one();
     }
 
-    /// 시험 손잡이 — 핸들이 운영 단계가 아니라서 버리고 감독이 아직 안 걷은 수.
+    /// 시험 손잡이 — 핸들이 묶은 세대가 운영 중이 아니라서 버리고 감독이 아직 안 걷은 수.
     #[cfg(test)]
     pub(crate) fn refused_count(&self) -> u64 {
         self.inner.refused.load(Ordering::Acquire)
     }
 
-    fn disconnected(&self) -> RequestError {
+    /// `generation` 에 묶인 요청이 끊김으로 끝났다 — 끊김 사유는 핸들이 아는 마지막 것이다. `sent` 의 뜻은
+    /// [`RequestError::Disconnected`] 그 칸.
+    fn disconnected(&self, generation: Generation, sent: bool) -> RequestError {
         RequestError::Disconnected {
-            generation: self.generation(),
+            generation,
             cause: cause_from_code(self.inner.last_cause.load(Ordering::Acquire)),
+            sent,
         }
     }
 
     fn push(&self, cmd: PeerCmd<W>) -> Result<(), SendError> {
+        let generation = cmd.generation;
         match self.inner.data_tx.try_send(cmd) {
             Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(_)) => {
-                self.count_overflow();
+                self.count_overflow(generation);
                 Err(SendError::QueueFull)
             }
             Err(mpsc::error::TrySendError::Closed(_)) => Err(SendError::Closed),
@@ -487,6 +591,7 @@ fn new_peer<W: Wire>(cfg: PeerConfig<W>) -> (Peer<W>, Supervisor<W>) {
     let generation_floor = cfg.generations.load(Ordering::Acquire);
     let generation = Arc::new(AtomicU64::new(generation_floor));
     let overflow = Arc::new(AtomicU64::new(0));
+    let overflow_generation = Arc::new(AtomicU64::new(0));
     let refused = Arc::new(AtomicU64::new(0));
     let loss_wake = Arc::new(Notify::new());
     let last_cause = Arc::new(AtomicU8::new(cause_code(DisconnectCause::WriteFailed)));
@@ -500,6 +605,7 @@ fn new_peer<W: Wire>(cfg: PeerConfig<W>) -> (Peer<W>, Supervisor<W>) {
             state_rx,
             generation: generation.clone(),
             overflow: overflow.clone(),
+            overflow_generation: overflow_generation.clone(),
             refused: refused.clone(),
             loss_wake: loss_wake.clone(),
             last_cause: last_cause.clone(),
@@ -537,6 +643,7 @@ fn new_peer<W: Wire>(cfg: PeerConfig<W>) -> (Peer<W>, Supervisor<W>) {
         generations: cfg.generations,
         generation,
         overflow,
+        overflow_generation,
         refused,
         loss_wake,
         last_cause,
@@ -629,6 +736,8 @@ struct Supervisor<W: Wire> {
     generations: Arc<AtomicU64>,
     generation: Arc<AtomicU64>,
     overflow: Arc<AtomicU64>,
+    /// 못 넣은 명령에 찍힌 세대 중 가장 새 것(`PeerInner` 의 같은 칸).
+    overflow_generation: Arc<AtomicU64>,
     refused: Arc<AtomicU64>,
     /// 핸들이 `overflow` · `refused` 를 올렸다 — 포기 · 백오프 대기를 깨워 신고하게 한다(`PeerInner` 의 같은 칸).
     loss_wake: Arc<Notify>,
@@ -1243,19 +1352,29 @@ impl<W: Wire> Supervisor<W> {
         None
     }
 
+    /// 운영 중에 꺼낸 명령 하나를 처리한다.
+    ///
+    /// ★쓰기 직전 세대 대조(TRD 3 §3-0 ③)★ — 찍힌 세대가 지금 세대가 아니면 아무것도 하지 않고 운영 단계가 아닐 때
+    /// 도착한 명령처럼 끝낸다(`reject_command` — 요청은 안 보냄으로 깨우고 나머지는 센다). 대조와 쓰기 사이에는 세대가
+    /// 바뀔 틈이 없다 — 세대를 바꾸는 것은 이 감독 하나이고 둘 다 이 함수 안이다. 대조는 다른 어떤 부수효과(대기 표
+    /// 등록 · 인코딩)보다 앞이다 — 낡은 요청을 표에 올리면 지금 연결의 같은 번호와 겹친다.
     async fn on_cmd(&mut self, cmd: PeerCmd<W>) -> Option<Input> {
-        match cmd {
-            PeerCmd::Raw(frame) => self.write_or_count(frame).await,
-            PeerCmd::Notify { out } => {
+        if cmd.generation != self.machine.generation() {
+            self.reject_command(cmd);
+            return None;
+        }
+        match cmd.op {
+            PeerOp::Raw(frame) => self.write_or_count(frame).await,
+            PeerOp::Notify { out } => {
                 let frame = self.wire.encode(&out);
                 self.write_or_count(frame).await
             }
-            PeerCmd::Resume { key, after } => {
+            PeerOp::Resume { key, after } => {
                 let out = self.wire.resume_request(&key, after);
                 let frame = self.wire.encode(&out);
                 self.write(frame).await.err()
             }
-            PeerCmd::Request { out, reply } => {
+            PeerOp::Request { out, reply } => {
                 let Some(tag) = self.wire.request_tag(&out) else {
                     let _ = reply.send(Err(RequestError::NotARequest));
                     return None;
@@ -1625,25 +1744,37 @@ impl<W: Wire> Supervisor<W> {
     fn fail_pending(&mut self, cause: DisconnectCause) {
         self.last_cause.store(cause_code(cause), Ordering::Release);
         let generation = self.machine.generation();
+        // ★대기 표에 있는 것은 보냄이다★ — 표에 오르는 것은 쓰기 직전이라(`on_cmd`) 상대에게 갔을 수 있다. 찍힌
+        //   세대 대조를 지나야 오르므로 그 세대가 곧 지금 세대다.
         for (_, slot) in self.pending.drain() {
-            let _ = slot.send(Err(RequestError::Disconnected { generation, cause }));
+            let _ = slot.send(Err(RequestError::Disconnected {
+                generation,
+                cause,
+                sent: true,
+            }));
         }
-        // ★큐에서 잠든 것까지 걷는다★ — 요청은 깨우고, 답장 없는 것은 **센다**(핸들은 이미 `Ok` 를
+        // ★큐에서 잠든 것까지 걷는다★ — 요청은 안 보냄으로 깨우고, 답장 없는 것은 **센다**(핸들은 이미 `Ok` 를
         //   받아 갔으므로 여기서 안 세면 그대로 조용한 유실이다).
         while let Ok(cmd) = self.data_rx.try_recv() {
             self.reject_command(cmd);
         }
     }
 
-    /// 운영 단계가 아닐 때 도착한 명령 하나를 처리한다.
+    /// 쓰지 않을 명령 하나를 끝낸다 — 운영 단계가 아닐 때 도착했거나 찍힌 세대가 지금 세대가 아니다(`on_cmd`).
+    /// 요청은 그것이 묶인 세대(찍힌 값)와 감독이 아는 마지막 끊김 사유로 깨운다 — 그 사유는 찍힌 세대가 끝난
+    /// 까닭이 아니라 그 뒤의 끊김 것일 수 있다(그 사이 여러 번 다시 붙었으면). 답장 없는 것은 센다.
     fn reject_command(&mut self, cmd: PeerCmd<W>) {
-        match cmd {
-            PeerCmd::Request { reply, .. } => {
-                let generation = self.machine.generation();
-                let cause = cause_from_code(self.last_cause.load(Ordering::Acquire));
-                let _ = reply.send(Err(RequestError::Disconnected { generation, cause }));
+        match cmd.op {
+            PeerOp::Request { reply, .. } => {
+                let _ = reply.send(Err(RequestError::Disconnected {
+                    generation: cmd.generation,
+                    cause: cause_from_code(self.last_cause.load(Ordering::Acquire)),
+                    sent: false,
+                }));
             }
-            _ => self.dropped_out += 1,
+            // ★`_` 로 접지 마라★ — 새 갈래(예: 닫기 전 비우기의 표지)가 버려질 때 세나 · 깨우나 · 따로 끝내나를
+            //   그 자리에서 정하게 한다.
+            PeerOp::Notify { .. } | PeerOp::Raw(_) | PeerOp::Resume { .. } => self.dropped_out += 1,
         }
     }
 
@@ -1799,6 +1930,10 @@ impl<W: Wire> Supervisor<W> {
     ///
     /// ★나가는 큐 포화만 연결을 끊는다★ — 「내 큐가 찼다」는 이 연결의 문제이고, 「위로 올라가는 줄이
     /// 찼다」는 소비자의 속도다(`put`). 둘을 한 셈 칸으로 합치면 소비자가 느린 것만으로 연결이 끊긴다.
+    ///
+    /// ★그 넘침이 지금 세대의 것일 때만 끊는다★ — 셈은 세대를 넘어 남는다: 세대 G 에서 센 넘침은 그 세대가 끝난
+    /// 뒤 연결 수립 구간을 지나(그 구간은 이것을 안 부른다) G+1 의 첫 바퀴가 걷는다. 거기서 정책을 집행하면 방금
+    /// 붙은 새 연결을 옛 연결의 넘침으로 끊는다. 셈은 세대와 무관하게 신고한다.
     #[must_use = "운영 중에는 이 판정이 연결을 끊는다"]
     fn drain_overflow(&mut self) -> Option<Input> {
         let refused = self.refused.swap(0, Ordering::AcqRel);
@@ -1811,6 +1946,11 @@ impl<W: Wire> Supervisor<W> {
         }
         self.dropped_out += full;
         self.report_drops();
+        // 셈을 걷은 뒤 읽는다 — 걷은 넘침의 세대 이상이 보인다(`Peer::count_overflow`).
+        let latest = Generation(self.overflow_generation.load(Ordering::Acquire));
+        if latest != self.machine.generation() {
+            return None;
+        }
         match self.policy.full_queue {
             QueueFullPolicy::Disconnect => Some(Input::LinkLost(DisconnectCause::QueueFull)),
             QueueFullPolicy::DropAndReport => None,
@@ -2592,6 +2732,342 @@ mod tests {
         assert!(h.kinds().contains(&"Disconnected"));
     }
 
+    // ── 세대 도장 · 보냄 칸(TRD 3 §3-0 ③ · D12 — 셸 ADR-0195 시험 둘의 transport 판) ──
+
+    /// 상대가 받은 데이터 프레임을 글로 — 하네스 어휘는 전부 `Frame::Text` 다.
+    fn texts(frames: Vec<Frame>) -> Vec<String> {
+        frames
+            .into_iter()
+            .filter_map(|frame| match frame {
+                Frame::Text(text) => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn spawn_request_in(
+        peer: &Peer<TestWire>,
+        generation: Generation,
+        tag: u64,
+    ) -> tokio::task::JoinHandle<Result<TestIn, RequestError>> {
+        let peer = peer.clone();
+        tokio::spawn(async move {
+            peer.request_in(
+                generation,
+                TestOut::Request {
+                    tag,
+                    body: format!("body{tag}"),
+                },
+            )
+            .await
+        })
+    }
+
+    // 셸 `buffered_command_on_disconnect_is_drained_not_executed_post_reconnect` 의 transport 판 — 답을 기다리던
+    //   요청과 큐에 든 채였던 요청이 끊김에 둘 다 깨어나고, 다음 연결에서 실행되지 않는다. ★갈래를 결정론으로
+    //   못 박는다★: 앞선 알림의 쓰기를 막아 감독을 그 위에 세우면 둘째 요청은 큐에 남는다(쓰기는 데이터 큐를 안
+    //   읽는다). 그래서 둘이 보냄 칸의 두 갈래(D12)를 하나씩 맡는다.
+    #[tokio::test]
+    async fn a_waiting_request_ends_as_sent_a_queued_one_as_not_sent_and_neither_runs_on_the_next_link(
+    ) {
+        let (h, first) = live().await;
+        let g1 = h.peer.generation();
+        let waiting = spawn_request(&h.peer, 1);
+        settle().await;
+        assert_eq!(
+            texts(first.frames()),
+            vec!["req|1|body1"],
+            "첫 요청이 나가 답을 기다린다"
+        );
+
+        first.stall_writes(true);
+        h.peer
+            .notify(TestOut::Notice("stuck".into()))
+            .expect("운영 중이다");
+        settle().await;
+        let queued = spawn_request(&h.peer, 2);
+        settle().await;
+        assert!(
+            !h.queue_drained(),
+            "감독이 막힌 쓰기 위에 서 있어 둘째 요청은 큐에 있다"
+        );
+
+        // 통로가 끊긴다 — 막힌 쓰기가 실패로 끝난다.
+        first.fail_writes();
+        first.stall_writes(false);
+        settle().await;
+        let waiting = joined(waiting).await;
+        assert!(
+            matches!(
+                waiting,
+                Err(RequestError::Disconnected {
+                    generation,
+                    sent: true,
+                    ..
+                }) if generation == g1
+            ),
+            "★답을 기다리던 요청은 보냄이다★ — 상대가 처리했을 수 있다: {waiting:?}"
+        );
+        let queued = joined(queued).await;
+        assert!(
+            matches!(
+                queued,
+                Err(RequestError::Disconnected {
+                    generation,
+                    sent: false,
+                    ..
+                }) if generation == g1
+            ),
+            "★큐에 든 채였던 요청은 안 보냄이다★ — 다시 보내도 두 번 적용되지 않는다: {queued:?}"
+        );
+
+        h.clock.advance(Duration::from_millis(500));
+        settle_until("재연결", || {
+            h.peer.peer_state() == PeerState::Live && h.peer.generation() != g1
+        })
+        .await;
+        let next = h.net.accept().expect("둘째 통로");
+        settle().await;
+        assert_eq!(
+            texts(next.frames()),
+            Vec::<String>::new(),
+            "끊긴 명령이 다음 연결에서 실행되면 안 된다(ADR-0195)"
+        );
+    }
+
+    // 셸 `held_clone_enqueued_after_disconnect_is_rejected_and_never_runs` 의 transport 판 — ★감독의 쓰기 직전
+    //   대조를 잰다★. 기계는 끊길 때 큐를 비우지만 그 뒤에 든 것은 못 보고, 연결 수립 구간은 큐를 안 읽어 그것이
+    //   다음 운영 단계까지 남는다. 그 틈을 만들려고 큐에 직접 넣는다 — 핸들 입구는 지금 운영 중이 아니라
+    //   거절하므로, 입구를 지난 직후 다시 걸린 경합(셸에선 창구 clone 을 쥐고 있다 넣는 길)을 흉내 낸다.
+    #[tokio::test]
+    async fn a_command_stamped_before_a_reconnect_is_not_written_on_the_next_link() {
+        let mut h = build(Policy::default(), Arc::new(ListeningHandshake));
+        settle_until("핸드셰이크 대기", || {
+            h.peer.peer_state() == PeerState::Handshaking
+        })
+        .await;
+        // ★상대편을 쥐고 있는다★ — 떨어뜨리면 말 없이 사라진 통로라 읽기 오류로 끊긴다(`MemoryEndpoint::close`).
+        let first = h.net.accept().expect("첫 통로");
+        first.push(Frame::Text("go".into()));
+        settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
+        let g1 = h.peer.generation();
+
+        h.peer.reconnect_now();
+        settle_until("다음 핸드셰이크 대기", || {
+            h.net.dials() == 2 && h.peer.peer_state() == PeerState::Handshaking
+        })
+        .await;
+        h.drain();
+        let (reply, mut woken) = oneshot::channel();
+        let stale = |op| PeerCmd { generation: g1, op };
+        let data = &h.peer.inner.data_tx;
+        assert!(data
+            .try_send(stale(PeerOp::Request {
+                out: TestOut::Request {
+                    tag: 5,
+                    body: "stale".into(),
+                },
+                reply,
+            }))
+            .is_ok());
+        assert!(data
+            .try_send(stale(PeerOp::Notify {
+                out: TestOut::Notice("stale".into()),
+            }))
+            .is_ok());
+        // 팬아웃 · 이어받기도 같은 대조를 지난다 — 갈래마다 따로 빠지지 않게 함께 넣는다.
+        assert!(data
+            .try_send(stale(PeerOp::Raw(Frame::Text("raw|stale".into()))))
+            .is_ok());
+        assert!(data
+            .try_send(stale(PeerOp::Resume {
+                key: 7,
+                after: Some(1),
+            }))
+            .is_ok());
+        settle().await;
+        assert!(
+            matches!(woken.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "★틈이 실재한다★ — 연결 수립 구간은 큐를 안 읽어 낡은 명령이 다음 운영 단계까지 남는다"
+        );
+
+        let next = h.net.accept().expect("둘째 통로");
+        next.push(Frame::Text("go".into()));
+        settle_until("재연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle().await;
+        assert_ne!(h.peer.generation(), g1);
+        let woken = woken.try_recv();
+        assert!(
+            matches!(
+                woken,
+                Ok(Err(RequestError::Disconnected {
+                    generation,
+                    sent: false,
+                    ..
+                })) if generation == g1
+            ),
+            "낡은 요청은 안 보냄으로 깨어난다: {woken:?}"
+        );
+        assert_eq!(
+            texts(next.frames()),
+            Vec::<String>::new(),
+            "★옛 세대에 묶인 명령은 다음 연결에 안 쓰인다★"
+        );
+        // 신고가 몇 건으로 갈리는지는 감독이 한 바퀴에 몇 개를 꺼내는지에 달려 있어 합만 본다.
+        assert_eq!(
+            outbound_dropped(&h.events()),
+            3,
+            "★부르는 쪽이 `Ok` 를 받아 간 알림 · 팬아웃 · 이어받기는 버린 만큼 센다★ — 안 세면 조용한 유실이다"
+        );
+    }
+
+    // `request` 는 세대를 부른 자리에서 잡는다 — future 를 만든 뒤 다시 붙고 나서 처음 폴링해도 새 연결로 안 간다.
+    #[tokio::test]
+    async fn a_request_future_made_before_a_reconnect_stays_bound_to_the_old_generation() {
+        let (h, first) = live().await;
+        let g1 = h.peer.generation();
+        let peer = h.peer.clone();
+        let mut asked = Box::pin(peer.request(TestOut::Request {
+            tag: 1,
+            body: "early".into(),
+        }));
+        first.close();
+        settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+        h.clock.advance(Duration::from_millis(500));
+        settle_until("재연결", || h.peer.peer_state() == PeerState::Live).await;
+        let next = h.net.accept().expect("둘째 통로");
+        assert_ne!(h.peer.generation(), g1);
+
+        let first_poll = poll_immediate(&mut asked).await;
+        assert!(
+            matches!(
+                first_poll,
+                Some(Err(RequestError::Disconnected {
+                    generation,
+                    sent: false,
+                    ..
+                })) if generation == g1
+            ),
+            "★처음 폴링이 다시 붙은 뒤여도 만든 때의 세대에 묶인다★: {first_poll:?}"
+        );
+        settle().await;
+        assert_eq!(
+            texts(next.frames()),
+            Vec::<String>::new(),
+            "만든 때의 연결이 끝났으니 다음 연결에 안 쓰인다"
+        );
+    }
+
+    // 끝난 세대에서 찬 큐는 신고만 하고 다음 연결을 끊지 않는다(`Supervisor::drain_overflow`). 「지금 다시 붙어라」는
+    //   백오프 대기를 거치지 않고 곧장 걸어, 그 넘침 셈을 처음 걷는 것이 새 연결의 첫 바퀴다.
+    #[tokio::test]
+    async fn a_queue_that_overflowed_on_the_old_generation_does_not_cut_the_next_link() {
+        let mut h = build(
+            Policy {
+                outbound_queue: 2,
+                ..Policy::default()
+            },
+            Arc::new(ImmediateHandshake),
+        );
+        settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
+        let first = h.net.accept().expect("첫 통로");
+        let g1 = h.peer.generation();
+
+        // 감독을 막힌 쓰기 위에 세우고 큐를 채운다.
+        first.stall_writes(true);
+        let notice = |body: &str| TestOut::Notice(body.into());
+        assert_eq!(h.peer.notify(notice("n1")), Ok(()));
+        settle().await;
+        assert_eq!(h.peer.notify(notice("n2")), Ok(()));
+        assert_eq!(h.peer.notify(notice("n3")), Ok(()));
+        assert_eq!(h.peer.notify(notice("n4")), Err(SendError::QueueFull));
+
+        h.peer.reconnect_now();
+        settle().await;
+        // 통로를 버리는 닫기가 막힌 쓰기에 서 있다 — 풀어 준다.
+        first.stall_writes(false);
+        settle_until("재연결", || {
+            h.peer.peer_state() == PeerState::Live && h.peer.generation() != g1
+        })
+        .await;
+        let _next = h.net.accept().expect("둘째 통로");
+        settle().await;
+
+        let g2 = h.peer.generation();
+        assert_eq!(
+            h.peer.peer_state(),
+            PeerState::Live,
+            "★옛 세대의 넘침이 새 연결을 끊으면 안 된다★"
+        );
+        let events = h.events();
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                TransportEvent::Disconnected { generation, .. } if *generation == g2
+            )),
+            "새 연결은 끊기지 않았다: {:?}",
+            events.iter().map(|e| e.kind()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            outbound_dropped(&events),
+            4,
+            "쓰다 버린 n1 · 큐에 든 채 버린 n2 · n3 · 넘친 n4 — 신고는 한다"
+        );
+    }
+
+    // 셸 `CommandOutcome` 소켓 대조의 transport 판 — 받은 연결의 세대를 잡아 답을 내면 그 연결에서만 나간다.
+    #[tokio::test]
+    async fn notify_in_and_request_in_go_out_only_on_the_generation_they_name() {
+        let (mut h, first) = live().await;
+        let g1 = h.peer.generation();
+        first.close();
+        settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+        h.clock.advance(Duration::from_millis(500));
+        settle_until("재연결", || h.peer.peer_state() == PeerState::Live).await;
+        let next = h.net.accept().expect("둘째 통로");
+        let g2 = h.peer.generation();
+        assert_ne!(g1, g2);
+        h.drain();
+
+        assert_eq!(
+            h.peer.notify_in(g1, TestOut::Notice("old".into())),
+            Err(SendError::Disconnected),
+            "옛 연결의 답은 입구에서 거절된다"
+        );
+        let old = joined(spawn_request_in(&h.peer, g1, 1)).await;
+        assert!(
+            matches!(
+                old,
+                Err(RequestError::Disconnected {
+                    generation,
+                    sent: false,
+                    ..
+                }) if generation == g1
+            ),
+            "{old:?}"
+        );
+        settle().await;
+        assert_eq!(texts(next.frames()), Vec::<String>::new());
+        assert!(
+            !h.kinds().contains(&"Dropped"),
+            "입구의 거절은 부르는 쪽이 오류로 받았으니 세지 않는다"
+        );
+        assert_eq!(h.peer.refused_count(), 0);
+
+        assert_eq!(h.peer.notify_in(g2, TestOut::Notice("new".into())), Ok(()));
+        let asked = spawn_request_in(&h.peer, g2, 2);
+        settle().await;
+        assert_eq!(texts(next.frames()), vec!["not|new", "req|2|body2"]);
+        next.push(TestWire::reply(2));
+        assert_eq!(
+            joined(asked).await,
+            Ok(TestIn::Reply {
+                tag: 2,
+                body: "ok".into()
+            })
+        );
+    }
+
     // ── keepalive · 시한 ──
     #[tokio::test]
     async fn silence_past_the_idle_timeout_cuts_the_link() {
@@ -3343,7 +3819,7 @@ mod tests {
         .await;
         h.drain();
 
-        h.peer.count_overflow();
+        h.peer.count_overflow(h.peer.generation());
         settle().await;
         assert_eq!(
             outbound_dropped(&h.events()),
@@ -3885,8 +4361,8 @@ mod tests {
 
     // ★정리 안의 순서(대기자 깨움 · 큐 닫기 → 순서 칸 비우기)를 잰다★. 접힘은 통로를 버리기 전에 핸들에
     //   보이고(`run` 이 `apply` 앞에서 낸다) 기계의 `FailPending` 이 그보다 먼저 대기 슬롯과 큐를 비우므로,
-    //   정리의 `fail_pending` 에 걸리는 요청은 핸들의 `is_live` 검사를 지난 직후 접힌 경합에서만 생긴다. 그
-    //   요청을 큐에 직접 넣어 만들고, 쓰기를 막아 감독을 기계의 `DropLink` 위에 세운 채 끼운다.
+    //   정리의 `fail_pending` 에 걸리는 요청은 핸들의 입구 검사(묶은 세대가 운영 중인가)를 지난 직후 접힌 경합에서만
+    //   생긴다. 그 요청을 큐에 직접 넣어 만들고, 쓰기를 막아 감독을 기계의 `DropLink` 위에 세운 채 끼운다.
     #[tokio::test]
     async fn requests_end_at_once_while_the_teardown_waits_on_the_held_items() {
         let (mut h, endpoint) = live_on_a_full_line().await;
@@ -3909,12 +4385,15 @@ mod tests {
         h.peer
             .inner
             .data_tx
-            .try_send(PeerCmd::Request {
-                out: TestOut::Request {
-                    tag: 9,
-                    body: "raced".into(),
+            .try_send(PeerCmd {
+                generation: h.peer.generation(),
+                op: PeerOp::Request {
+                    out: TestOut::Request {
+                        tag: 9,
+                        body: "raced".into(),
+                    },
+                    reply,
                 },
-                reply,
             })
             .unwrap_or_else(|_| panic!("나가는 큐에 자리가 있어야 한다"));
         settle().await;
