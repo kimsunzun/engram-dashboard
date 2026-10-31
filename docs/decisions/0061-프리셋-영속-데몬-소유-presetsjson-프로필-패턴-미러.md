@@ -1,6 +1,6 @@
 # ADR-0061: 프리셋 영속 = 데몬 소유 (presets.json, 프로필 패턴 미러)
 
-- 상태: **폐기 (Superseded by ADR-0314)** — TODO 사유. ~~확정 (2026-07-10, 근거: pre-PRD 설계-결정 리서치 + 사용자 결정, step-log 2026-07-10) · 부분 폐기 by ADR-0291 (presets 저장소가 profiles 를 복제하던 조항)~~
+- 상태: **폐기 (Superseded by ADR-0314)** — 프리셋이 작업 폴더 책갈피(`presets.json`)에서 라이브러리 폴더 안 YAML 에셋으로 바뀌어 데몬 프리셋 저장소 · wire · 방송이 걷힌다(ADR-0314). ~~확정 (2026-07-10, 근거: pre-PRD 설계-결정 리서치 + 사용자 결정, step-log 2026-07-10) · 부분 폐기 by ADR-0291 (presets 저장소가 profiles 를 복제하던 조항)~~
 - 관련: CLAUDE.md §5(LLM-우선 제어)·CLAUDE.md 「백엔드 모듈 맵」(AgentManager 소유=데몬) · ADR-0024(`.engram-data/` 위치) · ADR-0029(embedded 제거, 데몬 데이터 단일소유) · ADR-0028(백엔드 이벤트버스 소유) · `crates/engram-dashboard-core/src/persistence/mod.rs`(FileProfileStore 미러 대상) · step-log "에이전트 트리·프리셋" · Amended by ADR-0291 (presets 저장소가 profiles 를 복제하던 조항)
 
 ## 맥락
