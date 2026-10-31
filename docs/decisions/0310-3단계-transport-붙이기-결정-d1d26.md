@@ -1,7 +1,7 @@
 # ADR-0310: 3단계 transport 붙이기 — 결정 D1~D26
 
 - 상태: 확정 (2026-10-31, 근거: 사용자 결정 2026-10-31 (D19 · D11 · D24 · D26 · D22) + 사용자 위임 메인 판단 2026-10-31 (D4 · D5 — 「네가 판단해서 현재 어디까지 할지 분배」) + 권고안 채택 사용자 위임 2026-10-31 (나머지 열아홉) + TRD 5판 (리뷰 네 차례 반영 · 정적 판독) + master 흡수 재확인 2026-10-31) — ★거부한 대안 중 「기각 근거 약함」 표시(열 건)는 목록으로 사용자에게 보고했고 위임 범위로 확정했다(사용자 2026-10-31 「쭉 진행」)★
-- 관련: Amends ADR-0129 (결정 1 네트워크 lib 의 자리와 인증 프레임 소유) · Amends ADR-0177 (결정 3 스트림 살림과 받는 줄 및 결정 9 유실 신호와 근거의 큐 상한 문단) · Amends ADR-0180 (결정 4 재연결 횟수 기본값과 결정 5 거절 즉시 팝업 범위) · Amends ADR-0181 (결정 1 공용 시한 기본값) · Amends ADR-0272 (영향의 열린 OwnerToken 처분과 TS 바인딩 JSON 화) · TRD `docs/process/S21-crate-boundaries/trd-3-transport.md`(5판 — 선택지 · 세부 명세 · 작업 단위 · 시험의 정본. 이 ADR 은 고른 것과 그 까닭만 박는다) · 그림 `docs/process/S21-crate-boundaries/trd-3-transport.html` · master 흡수 재확인 `.claude/handoff/attachments/trd3-master-recheck-2026-10-31.md` · 보안 조사 `docs/research/transport-security-build-vs-adopt-2026-10-12.md` · transport TRD `docs/process/S21-transport-crate/trd.md` · 결정 후보 7 · 8 `docs/refactoring/architecture-discussion-2026-09-26.md` · 고치지 않고 확인만 하는 옛 결정(「영향」 끝 항목) — ADR-0179 결정 3 · ADR-0206 · ADR-0157 · ADR-0135 · ADR-0195 · ADR-0271 결정 5 · ADR-0177 결정 6 · ADR-0036 · ADR-0130 · ADR-0021 · ADR-0178 · ADR-0291 결정 15 · step-log S21
+- 관련: Amends ADR-0129 (결정 1 네트워크 lib 의 자리와 인증 프레임 소유) · Amends ADR-0177 (결정 3 스트림 살림과 받는 줄 및 결정 9 유실 신호와 근거의 큐 상한 문단) · Amends ADR-0180 (결정 4 재연결 횟수 기본값과 결정 5 거절 즉시 팝업 범위) · Amends ADR-0181 (결정 1 공용 시한 기본값) · Amends ADR-0272 (영향의 열린 OwnerToken 처분과 TS 바인딩 JSON 화) · TRD `docs/process/S21-crate-boundaries/trd-3-transport.md`(최신판 — 6판 이후 · 선택지 · 세부 명세 · 작업 단위 · 시험의 정본. 이 ADR 은 고른 것과 그 까닭만 박는다) · 그림 `docs/process/S21-crate-boundaries/trd-3-transport.html` · master 흡수 재확인 `.claude/handoff/attachments/trd3-master-recheck-2026-10-31.md` · 보안 조사 `docs/research/transport-security-build-vs-adopt-2026-10-12.md` · transport TRD `docs/process/S21-transport-crate/trd.md` · 결정 후보 7 · 8 `docs/refactoring/architecture-discussion-2026-09-26.md` · 고치지 않고 확인만 하는 옛 결정(「영향」 끝 항목) — ADR-0179 결정 3 · ADR-0206 · ADR-0157 · ADR-0135 · ADR-0195 · ADR-0271 결정 5 · ADR-0177 결정 6 · ADR-0036 · ADR-0130 · ADR-0021 · ADR-0178 · ADR-0291 결정 15 · step-log S21
 
 ## 맥락
 
@@ -17,7 +17,7 @@
 
 ## 결정
 
-표기: 각 결정 끝 괄호 = 정한 주체(**사용자** · **사용자 위임 — 메인 판단** · **권고안 채택 — 사용자 위임**). 세부 명세(가안 이름 · 상수 · 시험)의 정본은 TRD 5판이다. 아래 「가안」 값은 착지 때 메인이 정해 보고하는 내부 상수다.
+표기: 각 결정 끝 괄호 = 정한 주체(**사용자** · **사용자 위임 — 메인 판단** · **권고안 채택 — 사용자 위임**). 세부 명세(가안 이름 · 상수 · 시험)의 정본은 TRD 최신판(6판 이후)이다. 아래 「가안」 값은 착지 때 메인이 정해 보고하는 내부 상수다.
 
 ### 단계
 
