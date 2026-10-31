@@ -81,19 +81,10 @@ engram-dashboard-base = { path = "../crates/engram-dashboard-base" }
 #   ★새 서드파티가 아니다★ — 이 crate 는 워크스페이스 의존 0 이고, 여기 적기 전에도 agent 를 타고 이미
 #   이 셸의 의존 그래프에 링크돼 있었다(직접 간선만 는다).
 engram-dashboard-command = { path = "../crates/engram-dashboard-command" }
-# discovery: daemon.json 공유 계약(DaemonInfo) + PROTOCOL_VERSION.
+# discovery: daemon.json 공유 계약(DaemonInfo) + PROTOCOL_VERSION · 데몬 WS 첫 프레임(`handshake::AuthFrame`).
+#   ★데몬의 네트워크 행 crate(`engram-dashboard-net`)를 되살리지 말 것★ — 그 간선이 나르던 것은 첫 프레임
+#   하나였고 그 모양은 protocol 로 왔다(ADR-0310 결정 9). 벽 = CI `shell gate 3`(셸 운영 그래프에 net 0줄).
 engram-dashboard-protocol = { path = "../crates/engram-dashboard-protocol" }
-# ADR-0129 0-4: 데몬 WS 핸드셰이크 프레임(`auth::AuthFrame`) — 이 셸이 첫 프레임으로 보낸다(daemon_client
-#   재연결 경로). ★에이전트 호스팅이 아니다★(ADR-0029 불변) — 네트워크 lib 은 WS 살림만 담고
-#   `AgentManager` 를 모른다. 이 셸이 쓰는 조합(기본 feature)으로는 워크스페이스 의존이 0 이다(`server` 를
-#   켜면 {platform, protocol} — net `Cargo.toml` `[features]`).
-#   ★feature 를 켜지 않는다 — 쓰는 건 `auth::AuthFrame` 뿐이다★(`rg engram_dashboard_net src/` →
-#   daemon_client/connection.rs · daemon_client/stop.rs · daemon_client/tests.rs, 셋 다 그 타입 하나). net 의 기본 feature
-#   는 비어 있어 그 타입만 나오고, WS **서버** 행은 여기서 안 쓰므로 `server` 를 적지 않는다.
-#   ★이쪽은 의존 트리가 줄지 않는다★ — 이 셸은 자기 몫으로 tokio·tokio-tungstenite·futures-util 을 이미
-#   직접 지고 있다(아래 T1 블록). 그래도 안 켜는 이유는 **의도 표시**다: 나중에 이 셸이 async 를 걷어내도
-#   net 간선이 그것을 되돌려 놓지 않는다. 기본을 비워 둔 근거는 net `Cargo.toml` 의 `[features]` 주석.
-engram-dashboard-net = { path = "../crates/engram-dashboard-net" }
 # ADR-0266: OS 층 — 이 셸의 OS 일은 전부 여기서 온다.
 #   데몬 찾기 · 띄우기 · 끄기(`crate::discovery`) — PID 생존 판정(`process::pid_alive_with_start_time`) · 데몬 exe 의
 #   경로 · 파일 이름(`env::sibling_exe` · `env::exe_file_name` — `locate_daemon_exe`) · Job 밖에서 띄우기

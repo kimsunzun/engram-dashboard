@@ -52,7 +52,7 @@ impl From<engram_dashboard_protocol::DaemonInfo> for DaemonInfoDto {
             pid: i.pid,
             host: i.host,
             port: i.port,
-            token: i.token,
+            token: i.token.expose().to_owned(),
             protocol_version: i.protocol_version,
         }
     }
@@ -214,7 +214,7 @@ mod tests {
             pid: 4321,
             host: "127.0.0.1".into(),
             port: 51000,
-            token: "c".repeat(64),
+            token: engram_dashboard_protocol::Secret::new("c".repeat(64)),
             protocol_version: 7,
             start_time: 999,
         };

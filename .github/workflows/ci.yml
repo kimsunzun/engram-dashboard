@@ -1055,6 +1055,34 @@ jobs:
           } # end slot_label_gate
           slot_label_gate
 
+      # ADR-0310 결정 9 · TRD 3단계 3-1 U2 — 셸(`src-tauri`)은 데몬의 네트워크 행 crate(`engram-dashboard-net`)를 운영
+      #   의존하지 않는다. 셸이 그 crate 에서 쓰던 것은 첫 프레임(`AuthFrame`) 하나였고 그 모양이 protocol 로 와서 간선이
+      #   걷혔다 — 3단계 셸 작업(3-2)이 net 을 모른 채 시작하게 하는 벽이다. net crate 를 지우는 3-3 U6 에서 이 스텝도 걷는다.
+      #   셸(`engram-dashboard`)의 정상 · build 그래프에 `engram-dashboard-net` 이 0 줄이어야 PASS(짝: 데몬의 같은 그래프에
+      #   1 줄 이상). ★판정 함수(`shell_net_gate`)는 여기 하나에만 둔다★ — `/qa` 바인딩 4k 블록이 이것을 읽어 그대로 부른다.
+      # 꼴과 주의 넷(`-i` 금지 · `-e` 에 `dev` 금지 · 짝 · `^…␣` 앵커)은 `shell gate 1` 과 같다 — 근거의 정본은 그 스텝 주석이다.
+      #   ★dev 를 빼는 까닭도 같다★: 셸 → (dev) 데몬 → net 은 남는다(셸 통합 시험이 데몬을 쓴다).
+      # ★함수 본문에 `}` 한 글자뿐인 줄을 두지 말 것★ — 4k 블록은 함수 머리부터 첫 그런 줄까지를 함수로 읽는다.
+      - name: 'shell gate 3: no net crate in the shell release graph (shell = 0, daemon >= 1)'
+        shell: bash
+        run: |
+          shell_net_gate() {
+            local tree hits n rc
+            tree=$(cargo tree --locked -p engram-dashboard -e normal,build --target all --all-features --prefix none) || { echo "FAIL — cargo tree -p engram-dashboard errored"; return 1; }
+            rc=0; hits=$(printf '%s\n' "$tree" | rg '^engram-dashboard-net ') || rc=$?
+            [ "$rc" -le 1 ] || { echo "FAIL — rg errored (exit $rc)"; return 1; }
+            if [ -n "$hits" ]; then echo "FAIL — 셸 운영 그래프(normal · build)에 net 이 있다(ADR-0310 결정 9 — 셸은 첫 프레임을 protocol 에서 가져간다):"; printf '%s\n' "$hits"; return 1; fi
+            echo "shell normal/build graph: 0 net line(s)"
+            tree=$(cargo tree --locked -p engram-dashboard-daemon -e normal,build --target all --all-features --prefix none) || { echo "FAIL — cargo tree -p engram-dashboard-daemon errored"; return 1; }
+            rc=0; hits=$(printf '%s\n' "$tree" | rg '^engram-dashboard-net ') || rc=$?
+            [ "$rc" -le 1 ] || { echo "FAIL — rg errored (exit $rc)"; return 1; }
+            if [ -z "$hits" ]; then echo "FAIL — 짝: 데몬 운영 그래프에서도 net 0 줄 — crate 이름이 바뀌었나 · 패턴이 망가졌나(그러면 위 0 기대가 눈먼 채 통과한다)"; return 1; fi
+            n=$(printf '%s\n' "$hits" | wc -l | tr -d '[:space:]')
+            echo "daemon normal/build graph: $n net line(s)"
+            echo "PASS — 셸 운영 그래프에 net 없음(짝: 데몬 $n 줄)"
+          }
+          shell_net_gate
+
       # ADR-0273: CLI 패키지(`engram-dashboard-cli`)의 직접 워크스페이스 의존이 정확히 agent · cli(자기) · command
       #   여야 PASS. 해석된 그래프를 읽는다 — 꼴 · 플래그는 messaging · command · base · platform 상한 게이트와
       #   같다(줄이면 rename · 비활성 target · optional 이 샌다).

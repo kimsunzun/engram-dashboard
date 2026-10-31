@@ -19,8 +19,8 @@
 use std::path::Path;
 use std::time::Duration;
 
-use engram_dashboard_net::auth::AuthFrame;
-use engram_dashboard_protocol::{AgentCommand, DaemonInfo, RequestId, PROTOCOL_VERSION};
+use engram_dashboard_protocol::handshake::AuthFrame;
+use engram_dashboard_protocol::{AgentCommand, DaemonInfo, RequestId, Secret, PROTOCOL_VERSION};
 
 use crate::discovery::{
     check_acceptable, AcceptCheck, DaemonReader, DataLayout, DiscoveryError, FileReader,
@@ -105,12 +105,12 @@ fn build_stop_command() -> AgentCommand {
 
 /// 데몬은 연결 1초 내 첫 프레임으로 이걸 기대한다(네트워크 lib 의 AUTH_TIMEOUT).
 ///
-/// ★타입 출처(ADR-0129 0-4)★: 이건 **명령이 아니라 네트워크 lib 소유 프레임**이다(`AuthFrame`).
-/// 데몬의 인증 판정을 하는 그 crate 가 모양의 정본을 쥐므로, 발신자가 제 손으로 JSON 을 짜는 대신
+/// ★타입 출처(ADR-0129 0-4)★: 이건 **명령이 아니라 따로 된 핸드셰이크 프레임**이다(protocol
+/// `handshake::AuthFrame`). 데몬이 같은 타입으로 풀므로, 발신자가 제 손으로 JSON 을 짜는 대신
 /// 같은 타입을 쓴다 — 그래야 한쪽만 바뀌는 표류가 컴파일 에러가 된다.
-fn build_auth_command(token: &str) -> AuthFrame {
+fn build_auth_command(token: &Secret) -> AuthFrame {
     AuthFrame::Auth {
-        token: token.to_string(),
+        token: token.clone(),
         protocol_version: PROTOCOL_VERSION,
     }
 }
@@ -353,14 +353,14 @@ mod tests {
         let AuthFrame::Auth {
             token: t,
             protocol_version,
-        } = build_auth_command(&token);
-        assert_eq!(t, token);
+        } = build_auth_command(&Secret::new(token.clone()));
+        assert_eq!(t.expose(), token);
         assert_eq!(protocol_version, PROTOCOL_VERSION);
 
-        // wire 형태 — 태그 존재만이 아니라 **바이트 전체**를 못 박는다. 이 프레임을 받는 쪽(네트워크 lib)이
-        // 같은 문자열을 golden 으로 들고 있고, 데몬은 이 crate 의 타입을 쓰지 않으므로 둘을 잇는 것은
-        // 이 형태뿐이다(트레이 stop 이 조용히 인증에 실패하면 데몬이 안 꺼진다).
-        let json = serde_json::to_string(&build_auth_command(&token)).unwrap();
+        // wire 형태 — 태그 존재만이 아니라 **바이트 전체**를 못 박는다. 같은 문자열을 protocol `handshake` 가
+        // golden 으로 들고 있고, 이 경로가 실제로 그 바이트를 내는지는 여기서만 잰다(트레이 stop 이 조용히
+        // 인증에 실패하면 데몬이 안 꺼진다).
+        let json = serde_json::to_string(&build_auth_command(&Secret::new(token.clone()))).unwrap();
         assert_eq!(
             json,
             format!(r#"{{"Auth":{{"token":"{token}","protocol_version":{PROTOCOL_VERSION}}}}}"#),

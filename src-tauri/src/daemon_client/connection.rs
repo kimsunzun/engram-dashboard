@@ -20,8 +20,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-// ADR-0129 0-4: 핸드셰이크 프레임의 모양은 네트워크 lib 소유다(명령 enum 이 아니다).
-use engram_dashboard_net::auth::AuthFrame;
+use engram_dashboard_protocol::handshake::AuthFrame;
 use engram_dashboard_protocol::{
     AgentBackendKind, AgentCommand, AgentEvent, AgentId, DaemonInfo, RequestId, UsageLimitSnapshot,
     PROTOCOL_VERSION,
@@ -416,7 +415,7 @@ impl Handshaked {
 // ★Fix C — protocol_version 은 **우리가 컴파일된 PROTOCOL_VERSION**(protocol crate)이다★:
 // `DaemonInfo` 가 준 값을 되쏘면(echo) 서버의 버전 비교가 항상 통과해 버전 게이트가 무력화된다.
 // 불일치 시 서버가 거부하는 게 의도된 게이트다(`daemon_client::stop` 의 `build_auth_command` 와 동형).
-// ★타입 출처(ADR-0129 0-4)★: 프레임 모양은 네트워크 lib 소유(`AuthFrame`) — 명령 enum 이 아니다.
+// ★타입 출처(ADR-0129 0-4)★: 프레임은 protocol `handshake::AuthFrame` 이다 — 명령 enum 이 아니다.
 // ★token 은 wire 로만★(로그·에러에 미노출).
 fn auth_frame_text(info: &DaemonInfo) -> Result<String, serde_json::Error> {
     serde_json::to_string(&AuthFrame::Auth {

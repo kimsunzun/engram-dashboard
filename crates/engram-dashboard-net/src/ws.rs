@@ -336,7 +336,7 @@ pub async fn handle_connection(
                     protocol_version,
                 }) => {
                     // 보안: 토큰 값은 로그 금지.
-                    if !constant_time_eq(&token, expected_token.as_str()) {
+                    if !constant_time_eq(token.expose(), expected_token.as_str()) {
                         tracing::warn!(%peer, "auth 실패: 토큰 불일치 — close");
                         let _ = send_error_and_close(
                             &mut ws,
@@ -1949,7 +1949,7 @@ mod tests {
             .await
             .unwrap();
         let auth = serde_json::to_string(&AuthFrame::Auth {
-            token: "tok".to_string(),
+            token: engram_dashboard_protocol::Secret::new("tok"),
             protocol_version: client_sends,
         })
         .unwrap();

@@ -258,8 +258,8 @@ pub struct AgentConnection {
 /// `on_text` 이 명령 디코드에 실패한 뒤에만 부른다(ADR-0129 0-4).
 ///
 /// ★왜 필요한가★: 인증은 이미 네트워크 행이 첫 프레임에서 끝냈으므로 그 뒤에 오는 핸드셰이크는
-/// **프로토콜 위반**이다. 0-4 로 그 모양이 네트워크 lib 소유가 되면서 명령으로 디코드되지 않으니
-/// 여기서 되잡는다.
+/// **프로토콜 위반**이다. 그 프레임은 명령 enum 의 변형이 아니라(protocol `handshake::AuthFrame` — 0-4)
+/// 명령으로 디코드되지 않으니 여기서 되잡는다.
 ///
 /// ★온전함이 아니라 **태그**로 판정한다★: 필드가 빠졌거나 본문 모양이 어긋난 Auth 프레임도 핸드셰이크로
 /// 센다. 온전한 것만 세면 낡은 클라가 ``unknown variant `Auth` `` 를 받는데, 이 서버가 첫 프레임으로
@@ -268,7 +268,7 @@ pub struct AgentConnection {
 /// `IgnoredAny` 로 건너뛰어 값 트리를 만들지 않는다 — 피어가 프레임마다 도달시킬 수 있는 경로라
 /// 할당을 얹지 않는다.
 fn is_handshake_frame(text: &str) -> bool {
-    /// ★태그 문자열의 정본은 `engram_dashboard_net::auth::AuthFrame`★ — 아래
+    /// ★태그 문자열의 정본은 `engram_dashboard_protocol::handshake::AuthFrame`★ — 아래
     /// `handshake_frame_is_recognized_after_auth` 가 그 타입을 직렬화한 바이트로 이 판정을 걸어,
     /// 두 쪽이 갈라지면 깨지게 한다.
     #[derive(serde::Deserialize)]
@@ -805,8 +805,8 @@ mod tests {
     // ── 2b. 2차 핸드셰이크 판별(ADR-0129 0-4) ────────────────────────────────────
     #[test]
     fn handshake_frame_is_recognized_after_auth() {
-        let frame = engram_dashboard_net::auth::AuthFrame::Auth {
-            token: "deadbeef".into(),
+        let frame = engram_dashboard_protocol::handshake::AuthFrame::Auth {
+            token: engram_dashboard_protocol::Secret::new("deadbeef"),
             protocol_version: 3,
         };
         assert!(is_handshake_frame(&serde_json::to_string(&frame).unwrap()));

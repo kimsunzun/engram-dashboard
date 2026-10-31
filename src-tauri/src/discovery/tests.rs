@@ -242,7 +242,7 @@ pub(crate) fn info(pid: u32, version: u32) -> DaemonInfo {
         pid,
         host: "127.0.0.1".into(),
         port: 12345,
-        token: "t".repeat(64),
+        token: engram_dashboard_protocol::Secret::new("t".repeat(64)),
         protocol_version: version,
         start_time: 0,
     }
@@ -928,7 +928,7 @@ fn read_live_returns_full_info_with_token() {
     assert_eq!(got.host, "127.0.0.1");
     assert_eq!(got.port, 12345);
     assert_eq!(
-        got.token,
+        got.token.expose(),
         "t".repeat(64),
         "재연결 attach 에 token 이 실려야 함"
     );

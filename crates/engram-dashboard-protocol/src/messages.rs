@@ -12,11 +12,10 @@ use crate::ids::{AgentId, PresetId, ProfileId, RequestId};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
-// ★`Auth` variant 는 여기 없다(ADR-0129 0-4, 2026-08-05)★: 연결 후 첫 frame 전용 인증 프레임의 모양은
-//   네트워크 lib(`engram-dashboard-net` 의 `auth::AuthFrame`)이 소유한다 — 토큰 인증은 "이 소켓을 살릴지"
-//   판정이라 네트워크 살림이고, 그 판정을 하는 crate 가 에이전트 어휘(이 enum)를 타입으로 알면 안 되기
-//   때문이다(ADR-0129 결정 1). **wire 는 그대로다** — 저쪽도 externally-tagged 라 프레임은 여전히
-//   `{"Auth":{"token":"…","protocol_version":N}}` 이고, 그 형태의 정본 테스트는 저 crate 의 golden JSON 이다.
+// ★`Auth` variant 는 여기 없다(ADR-0129 0-4)★: 연결 후 첫 frame 전용 인증 프레임은 따로 된 타입
+//   `handshake::AuthFrame` 이다 — 토큰 인증은 "이 소켓을 살릴지" 판정이라, 그 판정을 하는 네트워크 행이
+//   에이전트 어휘(이 enum)를 타입으로 몰라도 그 프레임은 풀 수 있어야 한다(ADR-0129 결정 1). 프레임은
+//   `{"Auth":{"token":"…","protocol_version":N}}` 이고, 그 형태의 정본 테스트는 그 모듈의 golden JSON 이다.
 //   ★여기에 다시 넣지 말 것★: 두 정의가 공존하면 조용히 갈라진다. 프론트 바인딩(`bindings/AgentCommand.ts`)
 //   에도 그래서 `Auth` 가 없다(프론트 `wsTransport` 는 원래 타입 없이 객체 리터럴로 만든다).
 //
@@ -1001,8 +1000,8 @@ pub enum OutputChunk {
 // ── request_id 추출(request/reply 상관, wire 계약) ────────────────────────────────────
 /// 명령에 실린 request_id 를 꺼낸다. side-effect 명령(Spawn/Kill/…)은 모두 request_id 를 갖지만,
 /// 일부(Subscribe/Unsubscribe/Resize)는 request_id 가 없다(데몬이 reply 를 안 보냄) → `None`.
-/// (핸드셰이크는 이 표에 없다 — 명령이 아니라 네트워크 lib 소유 프레임이라 이 함수에 오지 않는다.
-///  ADR-0129 0-4.)
+/// (핸드셰이크는 이 표에 없다 — 명령이 아니라 따로 된 프레임(`handshake::AuthFrame`)이라 이 함수에 오지
+///  않는다. ADR-0129 0-4.)
 ///
 /// ★계약★: 데몬 클라이언트의 pending 매칭(`send_command`, src-tauri)은 reply 를 기대하므로
 /// request_id 가 있는 명령에만 쓴다. None 인 명령을 넣으면 매칭할 키가 없어 영구 pending(hang)이

@@ -15,6 +15,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::Secret;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DaemonInfo {
     pub pid: u32,
@@ -22,8 +24,8 @@ pub struct DaemonInfo {
     pub host: String,
     /// 데몬이 실제로 바인드한 포트(랜덤).
     pub port: u16,
-    /// 접속 토큰(256-bit hex 64자). 로그 금지.
-    pub token: String,
+    /// 접속 토큰(256-bit hex 64자). 로그 금지 — `Debug` 는 가리지만 [`Secret::expose`] 로 꺼낸 값은 못 가린다.
+    pub token: Secret,
     pub protocol_version: u32,
     /// 데몬 프로세스의 시작시각(Windows GetProcessTimes 의 creation FILETIME 을 u64 로:
     /// 1601-01-01 UTC 부터 100나노초 간격 수). PID 재사용을 구분해 liveness 를 정확히 판정한다
@@ -57,7 +59,7 @@ mod tests {
             pid: 4242,
             host: "127.0.0.1".into(),
             port: 51234,
-            token: "b".repeat(64),
+            token: Secret::new("b".repeat(64)),
             protocol_version: 1,
             start_time: 133_000_000_000_000_000,
         }
@@ -78,7 +80,29 @@ mod tests {
         let info = DaemonInfo::parse(json).expect("valid json should parse");
         assert_eq!(info.pid, 7);
         assert_eq!(info.port, 9);
-        assert_eq!(info.token, "deadbeef");
+        assert_eq!(info.token.expose(), "deadbeef");
+    }
+
+    #[test]
+    fn token_is_written_as_a_bare_string() {
+        let json = serde_json::to_string(&sample()).unwrap();
+        let want = format!(
+            r#"{{"pid":4242,"host":"127.0.0.1","port":51234,"token":"{}","protocol_version":1,"start_time":133000000000000000}}"#,
+            "b".repeat(64)
+        );
+        assert_eq!(json, want);
+    }
+
+    #[test]
+    fn debug_does_not_carry_the_token() {
+        let info = sample();
+        for shown in [format!("{info:?}"), format!("{info:#?}")] {
+            assert!(
+                !shown.contains(info.token.expose()),
+                "Debug 가 토큰을 찍었다: {shown}"
+            );
+            assert!(shown.contains("51234"), "가린 것은 토큰뿐: {shown}");
+        }
     }
 
     #[test]

@@ -103,7 +103,7 @@ mod tests {
             pid: 1234,
             host: "127.0.0.1".into(),
             port: 54321,
-            token: "a".repeat(64),
+            token: engram_dashboard_protocol::Secret::new("a".repeat(64)),
             protocol_version: 1,
             start_time: 0,
         }
@@ -137,7 +137,7 @@ mod tests {
         let dir = temp_dir("no-tail");
         let path = dir.join(DAEMON_FILE);
         let mut long = sample();
-        long.token = "b".repeat(4096);
+        long.token = engram_dashboard_protocol::Secret::new("b".repeat(4096));
         let mut f = open_held(&path);
         write_in_place(&mut f, &long).unwrap();
 
