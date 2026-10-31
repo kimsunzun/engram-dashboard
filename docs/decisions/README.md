@@ -383,3 +383,4 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0335](0335-파일-조작-계획-실행-참조-고침-진행-기록-없이-순서만-obsidian-꼴-남은-임시-파일도-저절로-치우지-않는다.md) | 파일 조작 = 계획 → 실행 → 참조 고침, 진행 기록 없이 순서만 (Obsidian 꼴) — 남은 임시 파일도 저절로 치우지 않는다 | 제안 |
 | [0336](0336-서버-부품-선택-serde-saphyr-jsonschema-ureq-walkdir-junction-pulldown-cmark-sha2.md) | 서버 부품 선택 — serde-saphyr · jsonschema · ureq · walkdir · junction · pulldown-cmark · sha2 | 제안 |
 | [0337](0337-codex-실행-재료-json-은-developerinstructions-extraroots-터미널은-기본-프라이밍과-설정-c-만.md) | codex 실행 재료 — JSON 은 developerInstructions · extraRoots, 터미널은 「기본」 프라이밍과 설정 `-c` 만 | 제안 |
+| [0338](0338-프리셋-편집-칸-초안-저장-저장은-목록을-통째로-덮고-마지막-저장이-이긴다-llm-버스-연산은-바로-적용.md) | 프리셋 편집 칸 = 초안 + [저장] — 저장은 목록을 통째로 덮고 마지막 저장이 이긴다 · LLM 버스 연산은 바로 적용 | 제안 |
