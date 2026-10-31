@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use engram_dashboard_transport::testing::TestWire;
 use engram_dashboard_transport::{
-    Dialer, Inbound, Incoming, Peer, PeerState, Policy, Registry, SystemClock,
+    Dialer, Inbox, Incoming, Peer, PeerState, Policy, Registry, SystemClock,
 };
 
 /// 실소켓·실시간 기다림의 상한. 로컬 loopback 왕복에는 과분한 값이고, 넘겼다면 무언가 매달린 것이다.
@@ -32,10 +32,7 @@ pub const PATIENCE: Duration = Duration::from_secs(10);
 
 /// 명부 하나. ★통로를 여는 쪽을 부르는 자리에서 고른다★ — 소켓 옵션을 걸어야 하는 테스트가 자기
 /// [`Dialer`] 를 가져온다(`ws_write_deadline.rs`).
-pub fn registry(
-    dialer: Arc<dyn Dialer>,
-    policy: Policy,
-) -> (Registry<TestWire>, Inbound<TestWire>) {
+pub fn registry(dialer: Arc<dyn Dialer>, policy: Policy) -> Registry<TestWire> {
     Registry::new(Arc::new(TestWire), dialer, Arc::new(SystemClock), policy)
 }
 
@@ -73,16 +70,16 @@ pub async fn wait_state(
     }
 }
 
-/// 위로 올라오는 한 줄에서 `pick` 이 값을 주는 첫 항목까지 읽는다.
+/// 손잡이 하나의 수신단에서 `pick` 이 값을 주는 첫 항목까지 읽는다.
 ///
-/// 패닉 조건: [`PATIENCE`] 초과 · 그 전에 명부가 닫힘.
+/// 패닉 조건: [`PATIENCE`] 초과 · 그 전에 수신단이 끝남.
 pub async fn wait_incoming<T>(
-    inbound: &mut Inbound<TestWire>,
+    inbox: &mut Inbox<TestWire>,
     what: &str,
     mut pick: impl FnMut(&Incoming<TestWire>) -> Option<T>,
 ) -> T {
     let seen = tokio::time::timeout(PATIENCE, async {
-        while let Some(msg) = inbound.recv().await {
+        while let Some(msg) = inbox.recv().await {
             if let Some(value) = pick(&msg) {
                 return Some(value);
             }
@@ -92,7 +89,7 @@ pub async fn wait_incoming<T>(
     .await;
     match seen {
         Ok(Some(value)) => value,
-        Ok(None) => panic!("{what} 을 보기 전에 인바운드가 닫혔다"),
+        Ok(None) => panic!("{what} 을 보기 전에 수신단이 끝났다"),
         Err(_) => panic!("{PATIENCE:?} 안에 {what} 이 올라오지 않았다"),
     }
 }

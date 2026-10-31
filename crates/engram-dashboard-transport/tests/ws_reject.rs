@@ -88,16 +88,15 @@ async fn a_close_code_from_the_peer_is_a_rejection_that_spends_no_reconnect_budg
 
     // ★이 파일에서 여기만 기본 정책이다★ — 「거절은 예산을 안 쓴다」는 쓸 예산이 실제로 있을 때만
     //   재진다. 태우는 구현이면 500ms 뒤 둘째 통로가 붙어 아래 계수가 1을 넘는다.
-    let (registry, mut inbound) = common::registry(Arc::new(WsDialer), Policy::default());
-    let peer = registry.add(PeerId::new("d1"), addr, Arc::new(ListeningHandshake));
+    let registry = common::registry(Arc::new(WsDialer), Policy::default());
+    let (peer, mut inbox) = registry.add(PeerId::new("d1"), addr, Arc::new(ListeningHandshake));
 
-    let (code, reason) = common::wait_incoming(&mut inbound, "Rejected 사건", |msg| {
-        match msg.as_event() {
+    let (code, reason) =
+        common::wait_incoming(&mut inbox, "Rejected 사건", |msg| match msg.as_event() {
             Some(TransportEvent::Rejected { code, reason, .. }) => Some((*code, reason.clone())),
             _ => None,
-        }
-    })
-    .await;
+        })
+        .await;
     assert_eq!(
         code,
         Some(CloseCode::HANDSHAKE_REJECTED),
@@ -147,24 +146,24 @@ async fn a_peer_that_vanishes_without_speaking_is_unreachable_and_does_spend_bud
         }
     });
 
-    let (registry, mut inbound) =
-        common::registry(Arc::new(WsDialer), spends_budget_without_waiting());
-    let peer = registry.add(PeerId::new("d1"), addr, Arc::new(ListeningHandshake));
+    let registry = common::registry(Arc::new(WsDialer), spends_budget_without_waiting());
+    let (peer, mut inbox) = registry.add(PeerId::new("d1"), addr, Arc::new(ListeningHandshake));
 
     // ★거절 사건도 함께 집는다★ — 안 집으면 「이 자극을 거절로 읽는」 회귀가 상한 초과(10초)로
     //   신고돼 원인이 「사건이 안 온다」로 둔갑한다.
-    let picked = common::wait_incoming(
-        &mut inbound,
-        "ConnectFailed 또는 Rejected 사건",
-        |msg| match msg.as_event() {
-            Some(TransportEvent::ConnectFailed { cause, .. }) => Some(Ok(cause.clone())),
-            Some(TransportEvent::Rejected { code, reason, .. }) => {
-                Some(Err((*code, reason.clone())))
-            }
-            _ => None,
-        },
-    )
-    .await;
+    let picked =
+        common::wait_incoming(
+            &mut inbox,
+            "ConnectFailed 또는 Rejected 사건",
+            |msg| match msg.as_event() {
+                Some(TransportEvent::ConnectFailed { cause, .. }) => Some(Ok(cause.clone())),
+                Some(TransportEvent::Rejected { code, reason, .. }) => {
+                    Some(Err((*code, reason.clone())))
+                }
+                _ => None,
+            },
+        )
+        .await;
     let cause = picked.unwrap_or_else(|(code, reason)| {
         panic!("못 붙은 것이 아니라 거절로 올라왔다: code={code:?} reason={reason}")
     });
@@ -177,7 +176,7 @@ async fn a_peer_that_vanishes_without_speaking_is_unreachable_and_does_spend_bud
          신고하기 시작했다」이고, 그러면 이 테스트의 실측 주석도 함께 낡은 것이다: {err}"
     );
 
-    let reason = common::wait_incoming(&mut inbound, "GaveUp 사건", |msg| match msg.as_event() {
+    let reason = common::wait_incoming(&mut inbox, "GaveUp 사건", |msg| match msg.as_event() {
         Some(TransportEvent::GaveUp { reason, .. }) => Some(*reason),
         _ => None,
     })
@@ -250,24 +249,24 @@ async fn a_graceful_going_away_is_not_a_rejection_and_does_spend_budget() {
     let probe = accepted.load(Ordering::Acquire);
 
     // ② 그 닫기가 거절이 아니고 예산을 쓴다.
-    let (registry, mut inbound) =
-        common::registry(Arc::new(WsDialer), spends_budget_without_waiting());
-    let peer = registry.add(PeerId::new("d1"), addr, Arc::new(ListeningHandshake));
+    let registry = common::registry(Arc::new(WsDialer), spends_budget_without_waiting());
+    let (peer, mut inbox) = registry.add(PeerId::new("d1"), addr, Arc::new(ListeningHandshake));
 
     // ★거절 사건도 함께 집는다★ — 안 집으면 「이 자극을 거절로 읽는」 회귀가 상한 초과(10초)로
     //   신고돼 원인이 「사건이 안 온다」로 둔갑한다.
-    let picked = common::wait_incoming(
-        &mut inbound,
-        "ConnectFailed 또는 Rejected 사건",
-        |msg| match msg.as_event() {
-            Some(TransportEvent::ConnectFailed { cause, .. }) => Some(Ok(cause.clone())),
-            Some(TransportEvent::Rejected { code, reason, .. }) => {
-                Some(Err((*code, reason.clone())))
-            }
-            _ => None,
-        },
-    )
-    .await;
+    let picked =
+        common::wait_incoming(
+            &mut inbox,
+            "ConnectFailed 또는 Rejected 사건",
+            |msg| match msg.as_event() {
+                Some(TransportEvent::ConnectFailed { cause, .. }) => Some(Ok(cause.clone())),
+                Some(TransportEvent::Rejected { code, reason, .. }) => {
+                    Some(Err((*code, reason.clone())))
+                }
+                _ => None,
+            },
+        )
+        .await;
     let cause = picked.unwrap_or_else(|(code, reason)| {
         panic!("못 붙은 것이 아니라 거절로 올라왔다: code={code:?} reason={reason}")
     });
@@ -282,7 +281,7 @@ async fn a_graceful_going_away_is_not_a_rejection_and_does_spend_budget() {
          통로에서는 유실됐다는 뜻이다: {err}"
     );
 
-    let reason = common::wait_incoming(&mut inbound, "GaveUp 사건", |msg| match msg.as_event() {
+    let reason = common::wait_incoming(&mut inbox, "GaveUp 사건", |msg| match msg.as_event() {
         Some(TransportEvent::GaveUp { reason, .. }) => Some(*reason),
         _ => None,
     })

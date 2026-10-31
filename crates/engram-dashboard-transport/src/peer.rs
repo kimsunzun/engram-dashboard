@@ -30,9 +30,8 @@
 //!   쥐는 것은 줄이 찬 뒤 처리한 프레임 한 장(또는 타이머 한 바퀴)이 낳은 것과 생애 사건 몇 개, 그리고 통로를
 //!   버릴 때 앞잡이 줄에서 건진 것(아래 항목)까지다 — 정리가 비울 옛 감독의 밀린 것도 그만큼이라, 비우는 받는
 //!   쪽이면 `CLOSE_DRAIN_LIMIT` 안에 끝난다(그 바이트는 셈 안이다).
-//!   ★상한을 넘겨 버린 것은 세지도 신고하지도 않는다★ — TRD 3 §3-0 ② 의 신호는 수신단 끝이다.
-//!   TODO(TRD 3 §6-0 U1d): 손잡이마다 수신단을 주면 상한을 넘긴 정리가 송신단을 놓아 수신단 끝(`None`)이 그
-//!   버림을 알린다.
+//!   ★상한을 넘겨 버린 것은 세지도 신고하지도 않는다★ — 정리가 넣는 끝을 놓아 수신단 끝(`None`)이 그 버림을
+//!   알린다(TRD 3 §3-0 ②).
 //! - ★이어받기 창이 붙든 스트림 조각은 읽기를 세우지 않는다★ — 같은 셈 안에서 창 몫으로 따로 세어 읽기
 //!   문에서 빼고, 창 몫은 감독마다 창 상한(스트림을 쓰는 예산의 반)으로 잰다 — 붙들면 넘는 조각은 붙들지 않고 그 창을
 //!   잘림으로 닫는다(`Supervisor::route`). 읽기를 세우면 구멍을 메울 재생분을 못 읽어, 메울 수 있던 구멍이
@@ -56,8 +55,9 @@
 //! - ★붙든 스트림 조각은 처음 실어 온 연결의 세대로 올라간다★ — 이어받기 창은 다시 붙어도 살아남아 다음
 //!   연결에서 닫힐 수 있지만, [`crate::Arrival::generation`] 은 그 조각을 실어 온 연결을 가리킨다.
 //! - ★정리 순서 = 통로 버림 → 대기자 깨움 · 나가는 큐 닫고 남은 명령 거절 → 열린 이어받기 창 접기(붙든 것을
-//!   잘림 신고와 함께 올린다) → 순서 칸 비우기 → [`TransportEvent::Closed`] 마지막★ — 받는 쪽을 기다리는 것은
-//!   순서 칸 비우기뿐이다(`teardown`).
+//!   잘림 신고와 함께 올린다) → 순서 칸 비우기 → [`TransportEvent::Closed`] 마지막 → 넣는 끝 놓기★ — 받는 쪽을
+//!   기다리는 것은 순서 칸 비우기뿐이다(`teardown`). 넣는 끝은 감독 하나만 쥐므로(`PeerConfig::inbound`) 감독이
+//!   끝나면 그 손잡이 수신단의 다음 `recv` 가 `None` 이다.
 //!
 //! ## 운영 루프의 우선순위 (되살리지 마라)
 //!
@@ -79,7 +79,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch, Notify};
 
 use crate::budget::{Charge, Charged, Ledger};
 use crate::clock::{with_deadline, Clock};
@@ -98,10 +98,11 @@ use crate::wire::Wire;
 const FRAME_BURST: usize = 32;
 
 /// 정리가 순서 칸을 다 싣기를 기다리는 상한. 넘기면 남은 것을 — 마지막 [`TransportEvent::Closed`] 까지 —
-/// 버리고 끝낸다. 산 채 안 비우는 받는 쪽에 감독이 매달리지 않게 하는 값이다.
+/// 버리고 끝낸다(넣는 끝을 놓아 수신단 끝 `None` 이 그 버림을 알린다). 산 채 안 비우는 받는 쪽에 감독이
+/// 매달리지 않게 하는 값이다.
 ///
 /// 60 s 인 까닭 = 데몬 읽기 task 가 우선 줄에서 기다리는 최악(8칸 × kill-join 5 s)을 덮는다(TRD 3 §3-0 ②).
-const CLOSE_DRAIN_LIMIT: Duration = Duration::from_secs(60);
+pub(crate) const CLOSE_DRAIN_LIMIT: Duration = Duration::from_secs(60);
 
 /// 감독 하나가 받아 쥘 페이로드 바이트의 예산(`budget.rs` 의 B). 셈 하나가 읽기 몫과 창 상한으로 나눠 쓴다 —
 /// 읽기 문은 읽기 몫으로 잰다(받아 쥔 바이트에서 이어받기 창 몫을 뺀 것이 그 이상이면 읽기 태스크가 통로를 더 안
@@ -244,6 +245,11 @@ struct PeerInner<W: Wire> {
     overflow: Arc<AtomicU64>,
     /// 핸들이 **운영 단계가 아니라서** 버린 횟수. ★연결을 끊지 않는다★ — 이미 안 붙어 있다.
     refused: Arc<AtomicU64>,
+    /// `overflow` · `refused` 를 올렸다고 감독을 깨운다 — 포기 · 백오프 대기는 그 셈만으로는 안 깨어, 안 깨우면 그
+    /// 신고가 다음 「다시 연결」(포기면) · 백오프 끝(백오프면)까지 안 나온다. 남는 표는 많아야 하나라 쌓이지 않고,
+    /// 남는 깨움은 해가 없다(바퀴 첫머리가 다시 걷는다). 연결 수립 구간(걸기 · 핸드셰이크)은 이것을 안 듣는다 —
+    /// 그 구간에 센 것은 구간이 끝난 뒤 첫 바퀴가 신고한다.
+    loss_wake: Arc<Notify>,
     /// 마지막 끊김 사유. 한 번도 안 붙었으면 [`DisconnectCause::LinkError`] 다.
     last_cause: Arc<AtomicU8>,
     /// 앱이 [`Peer::close`] 를 불렀다. 감독이 그것을 처리했는지와 무관하게 부른 순간 선다.
@@ -307,7 +313,7 @@ impl<W: Wire> Peer<W> {
         {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_)) => {
-                self.inner.overflow.fetch_add(1, Ordering::AcqRel);
+                self.count_overflow();
                 return Err(RequestError::QueueFull);
             }
             Err(mpsc::error::TrySendError::Closed(_)) => return Err(self.disconnected()),
@@ -334,8 +340,8 @@ impl<W: Wire> Peer<W> {
         if self.peer_state().is_live() {
             let _ = self.push(PeerCmd::Resume { key, after });
         } else {
-            // 부르는 쪽이 오류를 못 받는 유일한 입구다 — 세지 않으면 조용한 유실이 된다.
-            self.inner.refused.fetch_add(1, Ordering::AcqRel);
+            // 부르는 쪽이 오류를 못 받는 입구다(팬아웃 `send_frame` 과 둘) — 세지 않으면 조용한 유실이 된다.
+            self.refuse();
         }
         self.generation()
     }
@@ -373,11 +379,41 @@ impl<W: Wire> Peer<W> {
         self.inner.ledger.held()
     }
 
+    /// 팬아웃 한 장(`Registry::broadcast`). ★못 넣은 것은 이 상대의 감독이 세어 이 손잡이 수신단에
+    /// [`TransportEvent::Dropped`] 로 신고한다★ — 명부는 수신단의 넣는 끝을 쥐지 않는다(쥐면 「`Closed` 가 마지막
+    /// → 넣는 끝을 놓음 → `None`」이 깨진다 — TRD 3 §3-0 ②). 큐 포화는 넣기가 이미 센다(`push`). 감독이 사라진
+    /// 상대(`SendError::Closed`)는 신고할 수신단이 이미 끝났다.
+    ///
+    /// ★앱이 [`Peer::close`] 를 부른 뒤 운영 단계가 아니라서 못 넣은 것은 세지 않는다★ — 앱이 닫겠다고 한 뒤의
+    /// 유실 개수는 읽을 쪽이 없고 깔끔한 종료가 우선이다(사용자 결정 2026-09-26 — `lib.rs` 「알려진 한계」). 그 전에
+    /// 큐에 든 것은 감독이 센다.
     pub(crate) fn send_frame(&self, frame: Frame) -> Result<(), SendError> {
         if !self.peer_state().is_live() {
+            if !self.close_requested() {
+                self.refuse();
+            }
             return Err(SendError::Disconnected);
         }
         self.push(PeerCmd::Raw(frame))
+    }
+
+    /// 운영 단계가 아니라서 버린 것 하나를 센다 — 감독이 걷어 [`TransportEvent::Dropped`] 로 신고한다.
+    fn refuse(&self) {
+        self.inner.refused.fetch_add(1, Ordering::AcqRel);
+        self.inner.loss_wake.notify_one();
+    }
+
+    /// 큐가 차서 못 넣은 것 하나를 센다 — 감독이 걷어 [`QueueFullPolicy`] 대로 처리한다. ★깨운다★ — 낡은
+    /// `Live` 를 보고 넣다 찬 셈이 감독이 큐를 다 비우고 잠든 뒤에 닿을 수 있다.
+    fn count_overflow(&self) {
+        self.inner.overflow.fetch_add(1, Ordering::AcqRel);
+        self.inner.loss_wake.notify_one();
+    }
+
+    /// 시험 손잡이 — 핸들이 운영 단계가 아니라서 버리고 감독이 아직 안 걷은 수.
+    #[cfg(test)]
+    pub(crate) fn refused_count(&self) -> u64 {
+        self.inner.refused.load(Ordering::Acquire)
     }
 
     fn disconnected(&self) -> RequestError {
@@ -391,7 +427,7 @@ impl<W: Wire> Peer<W> {
         match self.inner.data_tx.try_send(cmd) {
             Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(_)) => {
-                self.inner.overflow.fetch_add(1, Ordering::AcqRel);
+                self.count_overflow();
                 Err(SendError::QueueFull)
             }
             Err(mpsc::error::TrySendError::Closed(_)) => Err(SendError::Closed),
@@ -408,10 +444,10 @@ pub(crate) struct PeerConfig<W: Wire> {
     pub clock: Arc<dyn Clock>,
     pub handshake: Arc<dyn Handshake>,
     pub policy: Policy,
-    /// ★이 이름표의 위로 올라가는 줄★ — 다른 이름표의 감독과 나눠 쓰지 않는다(`registry.rs` 헤더 —
-    /// 같은 이름표를 다시 올리면 옛 감독과 새 감독은 함께 쓴다). 다른 이름표와 나눠 쓰면 시끄러운 상대가
-    /// 채운 줄 뒤에서 조용한 상대의 것이 순서 칸에 붙들린다. 항목마다 그것을 넣은 감독의 바이트 몫이 실리고
-    /// 받는 쪽이 꺼낼 때 떨어진다(`budget.rs`).
+    /// ★이 손잡이 수신단의 넣는 끝 — 이 감독 하나만 쥔다★(`registry.rs` 헤더). 다른 감독과 나눠 쓰면 시끄러운
+    /// 상대가 채운 줄 뒤에서 조용한 상대의 것이 순서 칸에 붙들리고, 감독이 끝나며 이것을 놓아도 수신단이 끝나지
+    /// 않는다(「`Closed` 가 마지막 → 넣는 끝을 놓음 → `None`」 — TRD 3 §3-0 ②). 항목마다 그것을 넣은 감독의
+    /// 바이트 몫이 실리고 받는 쪽이 꺼낼 때 떨어진다(`budget.rs`).
     pub inbound: mpsc::Sender<Charged<Incoming<W>>>,
     /// 받아 쥘 바이트 예산 — 명부는 [`BYTE_BUDGET`] 을 넣는다. 칸으로 둔 것은 시험이 작은 값을 넣으려고다.
     pub byte_budget: usize,
@@ -422,8 +458,6 @@ pub(crate) struct PeerConfig<W: Wire> {
     /// 핸드셰이크가 이겨 세대를 하나 더 발행할 수 있는데, 명부는 그 직전 값을 이미 읽어 간 뒤다.
     /// 계수기를 공유하면 누가 이기든 같은 번호를 두 번 뽑지 않는다.
     pub generations: Arc<AtomicU64>,
-    /// 닫힌 채 띄운다 — 태스크가 돌기 전에 닫기를 넣어 두므로 어느 런타임에서도 걸기 전에 접힌다.
-    pub start_closed: bool,
 }
 
 /// 감독 태스크를 띄우고 핸들을 돌려준다.
@@ -441,6 +475,7 @@ fn new_peer<W: Wire>(cfg: PeerConfig<W>) -> (Peer<W>, Supervisor<W>) {
     let generation = Arc::new(AtomicU64::new(generation_floor));
     let overflow = Arc::new(AtomicU64::new(0));
     let refused = Arc::new(AtomicU64::new(0));
+    let loss_wake = Arc::new(Notify::new());
     let last_cause = Arc::new(AtomicU8::new(cause_code(DisconnectCause::LinkError)));
     let ledger = Ledger::new(cfg.byte_budget, cfg.clock.clone());
 
@@ -453,6 +488,7 @@ fn new_peer<W: Wire>(cfg: PeerConfig<W>) -> (Peer<W>, Supervisor<W>) {
             generation: generation.clone(),
             overflow: overflow.clone(),
             refused: refused.clone(),
+            loss_wake: loss_wake.clone(),
             last_cause: last_cause.clone(),
             close_requested: AtomicBool::new(false),
             #[cfg(test)]
@@ -489,6 +525,7 @@ fn new_peer<W: Wire>(cfg: PeerConfig<W>) -> (Peer<W>, Supervisor<W>) {
         generation,
         overflow,
         refused,
+        loss_wake,
         last_cause,
         tx: None,
         rx_raw: None,
@@ -505,9 +542,6 @@ fn new_peer<W: Wire>(cfg: PeerConfig<W>) -> (Peer<W>, Supervisor<W>) {
         last_ping: now,
         dropped_out: 0,
     };
-    if cfg.start_closed {
-        handle.close();
-    }
     (handle, supervisor)
 }
 
@@ -541,6 +575,8 @@ enum Down<W: Wire> {
     Ctl(Option<Ctl>),
     Cmd(Option<PeerCmd<W>>),
     Room(bool),
+    /// 핸들이 못 넣은 것을 셌다 — 다음 바퀴 첫머리의 신고가 걷는다.
+    Lost,
     Elapsed,
 }
 
@@ -580,6 +616,8 @@ struct Supervisor<W: Wire> {
     generation: Arc<AtomicU64>,
     overflow: Arc<AtomicU64>,
     refused: Arc<AtomicU64>,
+    /// 핸들이 `overflow` · `refused` 를 올렸다 — 포기 · 백오프 대기를 깨워 신고하게 한다(`PeerInner` 의 같은 칸).
+    loss_wake: Arc<Notify>,
     last_cause: Arc<AtomicU8>,
     tx: Option<Box<dyn LinkTx>>,
     /// 핸드셰이크 동안만 쥐는 읽는 쪽. 운영 단계로 들어서면 [`read_link`] 태스크로 넘어간다.
@@ -643,6 +681,7 @@ impl<W: Wire> Supervisor<W> {
             acts = self.machine.on(now, input);
         }
         self.teardown().await;
+        // 여기서 감독이 떨어지며 넣는 끝을 놓는다 — 그 손잡이 수신단의 다음 `recv` 는 `None` 이다.
     }
 
     fn publish(&mut self) {
@@ -811,10 +850,12 @@ impl<W: Wire> Supervisor<W> {
                 let ctl = &mut self.ctl_rx;
                 let data = &mut self.data_rx;
                 let (lane, order) = (&self.inbound, &mut self.order);
+                let lost = &self.loss_wake;
                 tokio::select! {
                     signal = ctl.recv() => Down::Ctl(signal),
                     cmd = data.recv() => Down::Cmd(cmd),
                     open = drain_order(lane, order), if backlog => Down::Room(open),
+                    () = lost.notified() => Down::Lost,
                     _ = sleep => Down::Elapsed,
                 }
             };
@@ -824,6 +865,7 @@ impl<W: Wire> Supervisor<W> {
                 Down::Cmd(None) => return Input::Close,
                 Down::Cmd(Some(cmd)) => self.reject_command(cmd),
                 Down::Room(open) => self.note_room(open),
+                Down::Lost => {}
                 Down::Elapsed => return Input::BackoffElapsed,
             }
         }
@@ -849,10 +891,12 @@ impl<W: Wire> Supervisor<W> {
                 let ctl = &mut self.ctl_rx;
                 let data = &mut self.data_rx;
                 let (lane, order) = (&self.inbound, &mut self.order);
+                let lost = &self.loss_wake;
                 tokio::select! {
                     signal = ctl.recv() => Down::Ctl(signal),
                     cmd = data.recv() => Down::Cmd(cmd),
                     open = drain_order(lane, order), if backlog => Down::Room(open),
+                    () = lost.notified() => Down::Lost,
                 }
             };
             match woken {
@@ -861,6 +905,7 @@ impl<W: Wire> Supervisor<W> {
                 Down::Cmd(None) => return Input::Close,
                 Down::Cmd(Some(cmd)) => self.reject_command(cmd),
                 Down::Room(open) => self.note_room(open),
+                Down::Lost => {}
                 Down::Elapsed => return Input::Close,
             }
         }
@@ -1661,7 +1706,7 @@ impl<W: Wire> Supervisor<W> {
     /// 순서 칸 끝에 넣고 줄에 실을 수 있는 만큼 싣는다. ★기다리지 않는다★ — 넣는 자리(사건 · 패킷 · 시한
     /// 사건 · 신고)가 전부 동기라서다. 거기서 기다리면 제어와 `fail_pending` 이 서고 정리가 매달린다.
     ///
-    /// ★줄이 찼다고 이 연결을 끊지도 버리지도 않는다★ — 그 줄은 이 이름표의 것이라(`PeerConfig::inbound`)
+    /// ★줄이 찼다고 이 연결을 끊지도 버리지도 않는다★ — 그 줄은 이 손잡이의 것이라(`PeerConfig::inbound`)
     /// 찼다는 것은 소비자가 이 상대를 못 따라간다는 뜻이지 연결의 잘못이 아니다(ADR-0310 결정 17). 대신 순서
     /// 칸이 붙든 동안 운영 루프가 그 상대의 읽기를 세운다(이 파일 헤더 「배압」).
     fn put(&mut self, item: Charged<Incoming<W>>) {
@@ -2018,7 +2063,6 @@ mod tests {
             inbound: inbound_tx,
             byte_budget,
             generations: Arc::new(AtomicU64::new(0)),
-            start_closed: false,
         });
         Harness {
             peer,
@@ -2249,7 +2293,6 @@ mod tests {
             inbound: inbound_tx,
             byte_budget: BYTE_BUDGET,
             generations: counter.clone(),
-            start_closed: false,
         });
         settle_until("연결", || peer.peer_state() == PeerState::Live).await;
         assert_eq!(peer.generation(), Generation(42));
@@ -2258,33 +2301,6 @@ mod tests {
             42,
             "계수기가 함께 올라간다"
         );
-    }
-
-    #[tokio::test]
-    async fn a_supervisor_started_closed_never_dials() {
-        let net = MemoryNetwork::new();
-        let clock = ManualClock::new();
-        let (inbound_tx, _inbound) = mpsc::channel(8);
-        let peer = spawn_peer(PeerConfig {
-            id: PeerId::new("d1"),
-            addr: Address::new("mem://d1"),
-            wire: Arc::new(TestWire),
-            dialer: net.dialer(),
-            clock: clock.handle(),
-            handshake: Arc::new(ImmediateHandshake),
-            policy: Policy::default(),
-            inbound: inbound_tx,
-            byte_budget: BYTE_BUDGET,
-            generations: Arc::new(AtomicU64::new(0)),
-            start_closed: true,
-        });
-        settle_until("접힘", || peer.peer_state() == PeerState::Closed).await;
-        assert_eq!(
-            net.dials(),
-            0,
-            "닫기가 태스크보다 먼저 들어가 있으므로 걸지 않는다"
-        );
-        assert!(peer.close_requested());
     }
 
     #[tokio::test]
@@ -2305,7 +2321,6 @@ mod tests {
                 inbound: inbound_tx.clone(),
                 byte_budget: BYTE_BUDGET,
                 generations: counter.clone(),
-                start_closed: false,
             })
         };
         // 옛 감독이 아직 살아 있는 채로 새 감독이 붙는 상황(같은 이름표의 승계 경합).
@@ -3235,6 +3250,28 @@ mod tests {
         assert!(
             matches!(dropped, Some((Direction::Outbound, 4))),
             "★다시 붙을 때까지 기다리면 사용자가 「다시 연결」을 누를 때까지 아무 데도 안 나온다★: {dropped:?}"
+        );
+    }
+
+    // ── 3-0 U1d: 큐 포화 셈도 잠든 감독을 깨운다 ──
+    //
+    // 핸들이 낡은 `Live` 를 보고 넣다 찼는데, 그 셈이 감독이 큐를 다 비우고 포기 대기에 잠든 뒤에 닿은 경합의 끝
+    //   모양이다 — 큐는 비었고 셈만 남았다. 안 깨우면 다음 제어까지 신고가 안 나온다.
+    #[tokio::test]
+    async fn a_queue_full_count_wakes_a_parked_supervisor() {
+        let mut h = build(Policy::default(), RejectingHandshake::new("nope"));
+        settle_until("포기", || {
+            matches!(h.peer.peer_state(), PeerState::GaveUp(_))
+        })
+        .await;
+        h.drain();
+
+        h.peer.count_overflow();
+        settle().await;
+        assert_eq!(
+            outbound_dropped(&h.events()),
+            1,
+            "★잠든 감독이 스스로 깨어 큐 포화 셈을 신고한다★"
         );
     }
 
@@ -4927,7 +4964,6 @@ mod tests {
             inbound,
             byte_budget: 100,
             generations: Arc::new(AtomicU64::new(0)),
-            start_closed: false,
         });
         (supervisor, clock)
     }

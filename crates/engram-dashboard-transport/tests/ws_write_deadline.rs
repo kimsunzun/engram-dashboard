@@ -226,8 +226,8 @@ async fn the_supervisor_names_the_write_deadline_when_it_drops_a_parked_link() {
         outbound_queue: PARKED_BLOBS,
         ..Policy::default()
     };
-    let (registry, mut inbound) = common::registry(Arc::new(WsDialer), policy);
-    let peer = registry.add(PeerId::new("d1"), addr, Arc::new(ImmediateHandshake));
+    let registry = common::registry(Arc::new(WsDialer), policy);
+    let (peer, mut inbox) = registry.add(PeerId::new("d1"), addr, Arc::new(ImmediateHandshake));
 
     // ★받고 나서 한 번도 폴링하지 않는다★ — 위 테스트와 같은 이유다.
     let _never_read = tokio::time::timeout(common::PATIENCE, listener.accept())
@@ -243,7 +243,7 @@ async fn the_supervisor_names_the_write_deadline_when_it_drops_a_parked_link() {
     }
 
     let cause = common::wait_incoming(
-        &mut inbound,
+        &mut inbox,
         &format!(
             "Disconnected 사건(첫 가설 = {PARKED_BLOBS}개 × {FRAME} 바이트에서는 커널이 더는 멈추지 \
              않는다)"
@@ -289,15 +289,15 @@ async fn an_oversized_frame_is_reported_as_a_link_error_instead_of_killing_the_s
         }
     });
 
-    let (registry, mut inbound) = common::registry(Arc::new(WsDialer), Policy::default());
-    let peer = registry.add(PeerId::new("d1"), addr, Arc::new(ImmediateHandshake));
+    let registry = common::registry(Arc::new(WsDialer), Policy::default());
+    let (peer, mut inbox) = registry.add(PeerId::new("d1"), addr, Arc::new(ImmediateHandshake));
     common::wait_state(&peer, "운영 단계", |state| state.is_live()).await;
 
     peer.notify(TestOut::Blob(vec![0u8; OVER_LIMIT]))
         .expect("나가는 큐");
 
     let cause = common::wait_incoming(
-        &mut inbound,
+        &mut inbox,
         "Disconnected 사건(첫 가설 = 그 쓰기가 값 대신 패닉으로 실패해 감독이 죽었다)",
         |msg| match msg.as_event() {
             Some(TransportEvent::Disconnected { cause, .. }) => Some(*cause),
@@ -313,7 +313,7 @@ async fn an_oversized_frame_is_reported_as_a_link_error_instead_of_killing_the_s
 
     // ★감독이 살아 있다는 증거는 다음 통로다★ — 죽은 감독은 재연결하지 않는다.
     let generation = common::wait_incoming(
-        &mut inbound,
+        &mut inbox,
         "재연결의 Connected 사건(첫 가설 = 감독이 그 쓰기에서 죽었다)",
         |msg| match msg.as_event() {
             Some(TransportEvent::Connected { generation, .. }) => Some(*generation),

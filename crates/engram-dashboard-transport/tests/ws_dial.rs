@@ -41,17 +41,16 @@ async fn a_real_socket_peer_shakes_hands_in_two_steps_and_round_trips_a_request(
         (hello, request)
     });
 
-    let (registry, mut inbound) = common::registry(Arc::new(WsDialer), Policy::default());
-    let peer = registry.add(PeerId::new("d1"), addr, Arc::new(HelloHandshake));
+    let registry = common::registry(Arc::new(WsDialer), Policy::default());
+    let (peer, mut inbox) = registry.add(PeerId::new("d1"), addr, Arc::new(HelloHandshake));
 
     common::wait_state(&peer, "운영 단계", |state| state.is_live()).await;
-    let generation = common::wait_incoming(&mut inbound, "Connected 사건", |msg| {
-        match msg.as_event() {
+    let generation =
+        common::wait_incoming(&mut inbox, "Connected 사건", |msg| match msg.as_event() {
             Some(TransportEvent::Connected { generation, .. }) => Some(*generation),
             _ => None,
-        }
-    })
-    .await;
+        })
+        .await;
     assert_eq!(generation, Generation(1), "첫 연결의 세대");
 
     let reply = tokio::time::timeout(
@@ -136,8 +135,9 @@ async fn dialing_a_port_that_nobody_listens_on_is_unreachable_not_rejected() {
     let (_held, closed_at) = unlistened_port();
     let closed = Address::new(format!("ws://{closed_at}/"));
 
-    let (registry, mut inbound) = common::registry(Arc::new(WsDialer), Policy::default());
-    let peer = registry.add(PeerId::new("d1"), closed.clone(), Arc::new(HelloHandshake));
+    let registry = common::registry(Arc::new(WsDialer), Policy::default());
+    let (peer, mut inbox) =
+        registry.add(PeerId::new("d1"), closed.clone(), Arc::new(HelloHandshake));
 
     // ★기대값을 그 포트에서 직접 뽑는다★ — 갈래 이름만으로는 「통로가 수락된 뒤 끊겼다」·「주소 문법이
     //   틀렸다」·「핸드셰이크가 시한에 걸렸다」가 전부 같은 `Unreachable` 이다. 이 테스트가 만들려는
@@ -147,7 +147,7 @@ async fn dialing_a_port_that_nobody_listens_on_is_unreachable_not_rejected() {
     let (refusal, cause) = tokio::join!(
         refusal_of(closed_at),
         common::wait_incoming(
-            &mut inbound,
+            &mut inbox,
             "ConnectFailed 사건(첫 가설 = 온 거절을 감독이 사건으로 올리지 않는다)",
             |msg| match msg.as_event() {
                 Some(TransportEvent::ConnectFailed { cause, .. }) => Some(cause.clone()),
