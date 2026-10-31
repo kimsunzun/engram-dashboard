@@ -45,13 +45,22 @@
 //!   우리 ping 은 그동안에도 나간다 — 상대가 우리를 침묵으로 끊지 않는다.
 //!   대가로 그 상대의 답장도 못 들어온다 — 받는 쪽을 비우는 task 위에서 [`Peer::request`] 를 기다리면 그
 //!   요청은 시한까지 매달린다(crate 헤더 「받는 쪽 불변식」 1).
-//!   TODO(TRD 3 §6-0 U1d): 받는 쪽이 사라진 것을 넣기 · 싣기가 실패해야 안다 — 조용한 상대면 링크가 `Live`
-//!   로 남는다. 대기 루프마다 「수신단 놓임(`Sender::closed()`) → 닫기」 갈래를 둔다.
+//! - ★받는 쪽이 수신단을 놓거나 닫으면 곧바로 접는다★(crate 헤더 「받는 쪽 불변식」 5) — 모든 대기 루프(연결
+//!   수립 · 운영 · 백오프 · 포기)와 쓰기(`write` · `ping`)가 수신단 닫힘(`Sender::closed`)을 지켜봐, 넣을 것이
+//!   없어도(상대가 조용해도) 그 자리에서 닫기로 간다 — 다시 걸지 않는다. 걸던 통로 · 핸드셰이크는 닫힘 팔이
+//!   이기는 대로 버린다 — 핸드셰이크가 막 끝나 끝남 팔이 이기면(`select!` 는 치우치지 않는다) `shake_hands` 가
+//!   세대를 뽑고 운영 단계의 첫 바퀴가 닫기를 보내며 접는다(해는 없다 · 뽑기 앞에 다시 보는 검사를 두지 않는다).
+//!   걸기 구간을 폴링하기 전에도 보므로 감독이 걸기를 시작하기 전에 놓인 수신단이면 통로를 안 건다. 쓰다 버린
+//!   답장 없는 프레임은 다른 까닭으로 버릴 때처럼 센다(`write_or_count`). 안 지켜보는 것은 `drop_link` 의 닫기
+//!   한 번뿐이다 — 닫기 코드를 끝까지 밀어 넣는 자리라 일부러 아무것도 안 듣고, 길어야 `write_deadline` 이다.
+//!   정리는 실을 데가 없으니 순서 칸을 기다리지 않는다(`Closed` 도 안 실린다).
 //! - ★통로를 버리기 전에 이미 읽은 것을 넘긴다★ — 운영 단계를 떠날 때(앱이 닫음 · 다시 걸기 · 쓰기 실패 ·
 //!   침묵 …) 읽기 태스크를 접고 앞잡이 줄을 기다림 없이 비워 운영 중과 같은 길로 보낸다
 //!   (`Supervisor::salvage_read_ahead`). 기계가 대기자를 깨우고 끊김 사건을 내기 전이라 답장은 기다리던
 //!   호출자에게 가고 그 밖은 끊김 사건 앞에 선다. 디코드 실패로 끊는 정책이어도 그 뒤에 이미 읽은 것은 넘긴다.
-//!   통로에 남은 것(아직 안 읽었다)은 함께 버린다.
+//!   통로에 남은 것(아직 안 읽었다)은 함께 버린다. 그 줄에 읽는 쪽의 끝(상대의 닫힘 · 통로 오류 · 디코드 실패로
+//!   끊음 — 맨 앞의 것)이 이미 와 있었으면 우리 쪽 끊김 까닭(쓰기 실패 · 침묵 · 넘침 …)만 그것으로 고쳐 적는다 —
+//!   통로를 버리기 전에 이미 읽힌 끝이다. 앱이 닫았거나 다시 걸라고 했으면 `Explicit` 그대로다(`earlier_end`).
 //! - ★붙든 스트림 조각은 처음 실어 온 연결의 세대로 올라간다★ — 이어받기 창은 다시 붙어도 살아남아 다음
 //!   연결에서 닫힐 수 있지만, [`crate::Arrival::generation`] 은 그 조각을 실어 온 연결을 가리킨다.
 //! - ★정리 순서 = 통로 버림 → 대기자 깨움 · 나가는 큐 닫고 남은 명령 거절 → 열린 이어받기 창 접기(붙든 것을
@@ -216,22 +225,25 @@ fn is_rejection(code: CloseCode) -> bool {
 fn cause_code(cause: DisconnectCause) -> u8 {
     match cause {
         DisconnectCause::PeerClosed => 0,
-        DisconnectCause::LinkError => 1,
+        DisconnectCause::ReadFailed => 1,
         DisconnectCause::Idle => 2,
         DisconnectCause::WriteDeadline => 3,
         DisconnectCause::QueueFull => 4,
         DisconnectCause::Explicit => 5,
+        DisconnectCause::WriteFailed => 6,
     }
 }
 
 fn cause_from_code(code: u8) -> DisconnectCause {
     match code {
         0 => DisconnectCause::PeerClosed,
+        1 => DisconnectCause::ReadFailed,
         2 => DisconnectCause::Idle,
         3 => DisconnectCause::WriteDeadline,
         4 => DisconnectCause::QueueFull,
         5 => DisconnectCause::Explicit,
-        _ => DisconnectCause::LinkError,
+        // 이 칸은 `cause_code` 만 적는다 — 남은 값은 6 하나다.
+        _ => DisconnectCause::WriteFailed,
     }
 }
 
@@ -250,7 +262,8 @@ struct PeerInner<W: Wire> {
     /// 남는 깨움은 해가 없다(바퀴 첫머리가 다시 걷는다). 연결 수립 구간(걸기 · 핸드셰이크)은 이것을 안 듣는다 —
     /// 그 구간에 센 것은 구간이 끝난 뒤 첫 바퀴가 신고한다.
     loss_wake: Arc<Notify>,
-    /// 마지막 끊김 사유. 한 번도 안 붙었으면 [`DisconnectCause::LinkError`] 다.
+    /// 마지막 끊김 사유. 한 번도 안 붙었으면 [`DisconnectCause::WriteFailed`] 다 — 읽기 · 쓰기 어느 끝도 정확하지
+    /// 않아, 이 값을 받는 쪽(실을 통로가 없어 못 내보낸 요청)에 가까운 나가는 쪽 끝을 골랐다.
     last_cause: Arc<AtomicU8>,
     /// 앱이 [`Peer::close`] 를 불렀다. 감독이 그것을 처리했는지와 무관하게 부른 순간 선다.
     close_requested: AtomicBool,
@@ -476,7 +489,7 @@ fn new_peer<W: Wire>(cfg: PeerConfig<W>) -> (Peer<W>, Supervisor<W>) {
     let overflow = Arc::new(AtomicU64::new(0));
     let refused = Arc::new(AtomicU64::new(0));
     let loss_wake = Arc::new(Notify::new());
-    let last_cause = Arc::new(AtomicU8::new(cause_code(DisconnectCause::LinkError)));
+    let last_cause = Arc::new(AtomicU8::new(cause_code(DisconnectCause::WriteFailed)));
     let ledger = Ledger::new(cfg.byte_budget, cfg.clock.clone());
 
     let handle = Peer {
@@ -560,7 +573,8 @@ enum LinkMsg {
     Failed,
 }
 
-/// `Room` 은 [`drain_order`] 의 답이다(`Down` · `Connecting` 의 같은 칸도) — `false` = 받는 쪽이 닫혔다.
+/// `Room` 은 [`drain_order`] 의 답이다(`Down` · `Connecting` 의 같은 칸도) — `false` = 받는 쪽이 닫혔다. 수신단
+/// 닫힘을 지켜보는 팔(`Sender::closed`)도 `Room(false)` 를 낸다.
 enum Wake<W: Wire> {
     Ctl(Option<Ctl>),
     Link(Option<LinkMsg>),
@@ -659,13 +673,13 @@ impl<W: Wire> Supervisor<W> {
             }
             let input = match follow {
                 Some(input) => input,
-                None if self.consumer_gone.load(Ordering::Acquire) => Input::Close,
+                None if self.receiver_gone() => Input::Close,
                 None => match self.machine.state() {
                     PeerState::Live => {
                         let input = self.run_live().await;
                         // 기계가 대기자를 깨우고 끊김 사건을 내기 전에 이미 읽은 것을 넘긴다.
-                        self.salvage_read_ahead().await;
-                        input
+                        let read_end = self.salvage_read_ahead().await;
+                        earlier_end(input, read_end)
                     }
                     PeerState::GaveUp(_) | PeerState::Idle => self.park().await,
                     other => {
@@ -776,15 +790,16 @@ impl<W: Wire> Supervisor<W> {
         }
     }
 
-    /// 연결 수립의 한 구간을 끝까지 돌리면서 제어를 듣고 순서 칸을 싣는다. 돌려주는 `Room` 은 늘
-    /// `false`(받는 쪽이 닫혔다) — 실은 바퀴는 구간을 이어 간다.
+    /// 연결 수립의 한 구간을 끝까지 돌리면서 제어를 듣고 순서 칸을 싣고 수신단 닫힘을 지켜본다. 돌려주는
+    /// `Room` 은 늘 `false`(받는 쪽이 닫혔다) — 실은 바퀴는 구간을 이어 간다.
     ///
     /// ★구간 future 를 바퀴 밖에 고정해 둔다★ — 순서 칸 갈래가 이길 때마다 그것을 떨어뜨리면 걸던 통로와
     /// 핸드셰이크가 처음부터 다시 시작한다.
     async fn connecting<T>(&mut self, step: impl Future<Output = T>) -> Connecting<T> {
-        // ★구간을 폴링하기 전에 본다★ — 안 보면 받는 쪽이 이미 사라졌는데도(앞 단계의 사건 · 유실 신고가
-        //   그것을 처음 알아챈 경우) 아무도 안 들을 데몬에 통로를 걸고 핸드셰이크를 끝내 세대까지 뽑은 뒤에야 접는다.
-        if self.consumer_gone.load(Ordering::Acquire) {
+        // ★구간을 폴링하기 전에 본다★ — 안 보면 받는 쪽이 이미 사라졌는데도 통로를 거는 future 를 한 번은
+        //   폴링한다(아래 `select!` 는 준비된 팔 중 무엇을 먼저 볼지 모른다). 첫 사건을 넣기도 전에 놓인 수신단이면
+        //   통로를 아예 안 건다.
+        if self.receiver_gone() {
             return Connecting::Room(false);
         }
         tokio::pin!(step);
@@ -793,10 +808,13 @@ impl<W: Wire> Supervisor<W> {
             let woken = {
                 let ctl = &mut self.ctl_rx;
                 let (lane, order) = (&self.inbound, &mut self.order);
+                // ★수신단이 닫히면 깨운다(`closed`)★ — 넣을 것이 없어도 곧바로 접는다(crate 헤더 「받는 쪽 불변식」
+                //   5). 취소 안전이다 — 다시 걸면 닫혔나부터 본다(외부 사실 — tokio `Sender::closed`).
                 tokio::select! {
                     signal = ctl.recv() => Connecting::Ctl(signal),
                     out = &mut step => Connecting::Done(out),
                     open = drain_order(lane, order), if backlog => Connecting::Room(open),
+                    () = lane.closed() => Connecting::Room(false),
                 }
             };
             match woken {
@@ -829,9 +847,8 @@ impl<W: Wire> Supervisor<W> {
             //   누를 때까지 아무 데도 안 나온다.
             let _ = self.drain_overflow();
             self.report_drops();
-            // ★신고 뒤에 본다★ — 받는 쪽이 사라진 것을 이 바퀴의 신고가 처음 알아챌 수 있다. 앞에서 보면 그대로
-            //   잠들어, 백오프를 다 잔 뒤 아무도 안 들을 데몬에 다시 붙는다(포기 상태면 다음 제어까지 잔다).
-            if self.consumer_gone.load(Ordering::Acquire) {
+            // 받는 쪽이 사라졌으면 다시 붙지 않고 접는다.
+            if self.receiver_gone() {
                 return Input::Close;
             }
             if let Some(signal) = self.drain_ctl() {
@@ -851,10 +868,12 @@ impl<W: Wire> Supervisor<W> {
                 let data = &mut self.data_rx;
                 let (lane, order) = (&self.inbound, &mut self.order);
                 let lost = &self.loss_wake;
+                // 수신단이 닫히면 깨운다 — `connecting` 의 같은 팔.
                 tokio::select! {
                     signal = ctl.recv() => Down::Ctl(signal),
                     cmd = data.recv() => Down::Cmd(cmd),
                     open = drain_order(lane, order), if backlog => Down::Room(open),
+                    () = lane.closed() => Down::Room(false),
                     () = lost.notified() => Down::Lost,
                     _ = sleep => Down::Elapsed,
                 }
@@ -876,8 +895,8 @@ impl<W: Wire> Supervisor<W> {
         loop {
             let _ = self.drain_overflow();
             self.report_drops();
-            // `wait` 의 같은 줄 — 신고 뒤에 본다.
-            if self.consumer_gone.load(Ordering::Acquire) {
+            // `wait` 의 같은 줄.
+            if self.receiver_gone() {
                 return Input::Close;
             }
             if let Some(signal) = self.drain_ctl() {
@@ -892,10 +911,12 @@ impl<W: Wire> Supervisor<W> {
                 let data = &mut self.data_rx;
                 let (lane, order) = (&self.inbound, &mut self.order);
                 let lost = &self.loss_wake;
+                // 수신단이 닫히면 깨운다 — `connecting` 의 같은 팔.
                 tokio::select! {
                     signal = ctl.recv() => Down::Ctl(signal),
                     cmd = data.recv() => Down::Cmd(cmd),
                     open = drain_order(lane, order), if backlog => Down::Room(open),
+                    () = lane.closed() => Down::Room(false),
                     () = lost.notified() => Down::Lost,
                 }
             };
@@ -917,6 +938,15 @@ impl<W: Wire> Supervisor<W> {
         }
     }
 
+    /// 받는 쪽이 사라졌나 — 넣다가 닫힌 것을 이미 봤거나 지금 수신단이 닫혀 있다(놓였거나
+    /// [`crate::Inbox::close`]). 닫힌 것을 보면 적어 둔다 — 그 뒤로는 넣지 않는다(`put`).
+    fn receiver_gone(&self) -> bool {
+        if self.inbound.is_closed() {
+            self.consumer_gone.store(true, Ordering::Release);
+        }
+        self.consumer_gone.load(Ordering::Acquire)
+    }
+
     // ── 운영 단계 ────────────────────────────────────────────────────────────
 
     async fn run_live(&mut self) -> Input {
@@ -934,15 +964,19 @@ impl<W: Wire> Supervisor<W> {
             self.track_pause(now);
             let overflow = self.drain_overflow();
             self.report_drops();
-            // `wait` 의 같은 줄 — 신고 뒤에 본다. 넘침 판정보다 앞이다: 접을 상대를 백오프로 돌리지 않는다.
-            if self.consumer_gone.load(Ordering::Acquire) {
+            // `wait` 의 같은 줄. 넘침 판정보다 앞이다 — 접을 상대를 백오프로 돌리지 않는다.
+            if self.receiver_gone() {
                 return Input::Close;
             }
             if let Some(input) = overflow {
                 return input;
             }
-            if self.frames_rx.is_none() || self.tx.is_none() {
-                return Input::LinkLost(DisconnectCause::LinkError);
+            // 핸드셰이크가 운영 단계를 열 때 두 절반이 함께 선다 — 빠졌으면 빠진 절반 쪽의 끝으로 적는다.
+            if self.tx.is_none() {
+                return Input::LinkLost(DisconnectCause::WriteFailed);
+            }
+            if self.frames_rx.is_none() {
+                return Input::LinkLost(DisconnectCause::ReadFailed);
             }
             // ① 제어는 매 바퀴 먼저 — 프레임이 끊이지 않아도 즉시 듣는다.
             if let Some(signal) = self.drain_ctl() {
@@ -1013,11 +1047,13 @@ impl<W: Wire> Supervisor<W> {
                 // ★순서 칸이 붙들고 있으면 프레임 팔을 뺀다(배압)★ — 그 프레임이 낳을 것도 줄에 못 실리니
                 //   통로에 두는 편이 낫다. 문턱을 하나로 둔 것은 순서 칸이 동기로 넣는 자리(사건 · 시한 사건)를
                 //   위한 것이지 프레임의 둘째 버퍼가 아니라서다. 그 대신 비우기 팔이 늘 함께 서 있다.
+                // ★수신단이 닫히면 깨운다★ — 조용한 상대 앞에서 넣을 것이 없어도 곧바로 접는다(`connecting` 의 같은 팔).
                 tokio::select! {
                     signal = ctl.recv() => Wake::Ctl(signal),
                     msg = frames.recv(), if !backlog => Wake::Link(msg),
                     cmd = data.recv() => Wake::Cmd(cmd),
                     open = drain_order(lane, order), if backlog => Wake::Room(open),
+                    () = lane.closed() => Wake::Room(false),
                     () = ledger.holder_room(), if over => Wake::Budget,
                     _ = sleep => Wake::Timer,
                 }
@@ -1027,7 +1063,7 @@ impl<W: Wire> Supervisor<W> {
                 Wake::Ctl(Some(Ctl::ReconnectNow)) => Some(Input::ReconnectNow),
                 Wake::Ctl(Some(Ctl::Close)) | Wake::Ctl(None) => Some(Input::Close),
                 Wake::Link(None) | Wake::Link(Some(LinkMsg::Failed)) => {
-                    Some(Input::LinkLost(DisconnectCause::LinkError))
+                    Some(Input::LinkLost(DisconnectCause::ReadFailed))
                 }
                 Wake::Link(Some(LinkMsg::Closed)) => {
                     Some(Input::LinkLost(DisconnectCause::PeerClosed))
@@ -1270,10 +1306,11 @@ impl<W: Wire> Supervisor<W> {
                     generation,
                     reason,
                 });
+                // 통로는 멀쩡해도 읽은 것을 못 읽어 끊는다 — 읽는 쪽의 끝으로 적는다(통로 오류와 같은 값이다).
                 return match self.policy.decode_failure {
                     DecodeFailurePolicy::DropFrame => Ok(None),
                     DecodeFailurePolicy::Disconnect => {
-                        Err(Input::LinkLost(DisconnectCause::LinkError))
+                        Err(Input::LinkLost(DisconnectCause::ReadFailed))
                     }
                 };
             }
@@ -1438,25 +1475,28 @@ impl<W: Wire> Supervisor<W> {
 
     // ── 쓰기 ────────────────────────────────────────────────────────────────
 
-    /// ★쓰는 동안에도 제어를 듣는다★ — 안 들으면 `close()` 가 `write_deadline` 만큼 늦게 들린다.
-    /// 제어가 이기면 쓰던 future 를 떨어뜨리고 통로를 버린다(machine 이 `DropLink` 를 낸다).
+    /// ★쓰는 동안에도 제어와 수신단 닫힘을 듣는다★ — 안 들으면 `close()` · 받는 쪽의 사라짐이 `write_deadline`
+    /// 만큼(큐를 잇달아 비우는 자리면 그 쓰기 수만큼 곱절로) 늦게 들린다. 그쪽이 이기면 쓰던 future 를 떨어뜨리고
+    /// 통로를 버린다(machine 이 `DropLink` 를 낸다).
     /// ★그 프레임이 어디까지 갔는지는 모른다★ — 한 번도 폴링되지 않았을 수도, 어댑터 버퍼에 들어가
     /// `drop_link` 의 닫기 앞에 실려 나갈 수도 있다. 알림·팬아웃이면 [`Self::write_or_count`] 가 센다.
     async fn write(&mut self, frame: Frame) -> Result<(), Input> {
         let clock = self.clock.clone();
         let deadline = self.policy.write_deadline;
         let ctl = &mut self.ctl_rx;
+        let lane = &self.inbound;
         let Some(tx) = self.tx.as_mut() else {
-            return Err(Input::LinkLost(DisconnectCause::LinkError));
+            return Err(Input::LinkLost(DisconnectCause::WriteFailed));
         };
         tokio::select! {
             signal = ctl.recv() => Err(match signal {
                 Some(Ctl::ReconnectNow) => Input::ReconnectNow,
                 Some(Ctl::Close) | None => Input::Close,
             }),
+            () = lane.closed() => Err(Input::Close),
             result = with_deadline(&*clock, deadline, tx.send(frame)) => match result {
                 Ok(Ok(())) => Ok(()),
-                Ok(Err(_)) => Err(Input::LinkLost(DisconnectCause::LinkError)),
+                Ok(Err(_)) => Err(Input::LinkLost(DisconnectCause::WriteFailed)),
                 Err(_) => Err(Input::LinkLost(DisconnectCause::WriteDeadline)),
             },
         }
@@ -1477,17 +1517,20 @@ impl<W: Wire> Supervisor<W> {
         let clock = self.clock.clone();
         let deadline = self.policy.write_deadline;
         let ctl = &mut self.ctl_rx;
+        let lane = &self.inbound;
         let Some(tx) = self.tx.as_mut() else {
-            return Err(Input::LinkLost(DisconnectCause::LinkError));
+            return Err(Input::LinkLost(DisconnectCause::WriteFailed));
         };
+        // `write` 의 같은 팔들.
         tokio::select! {
             signal = ctl.recv() => Err(match signal {
                 Some(Ctl::ReconnectNow) => Input::ReconnectNow,
                 Some(Ctl::Close) | None => Input::Close,
             }),
+            () = lane.closed() => Err(Input::Close),
             result = with_deadline(&*clock, deadline, tx.ping()) => match result {
                 Ok(Ok(())) => Ok(()),
-                Ok(Err(_)) => Err(Input::LinkLost(DisconnectCause::LinkError)),
+                Ok(Err(_)) => Err(Input::LinkLost(DisconnectCause::WriteFailed)),
                 Err(_) => Err(Input::LinkLost(DisconnectCause::WriteDeadline)),
             },
         }
@@ -1548,29 +1591,35 @@ impl<W: Wire> Supervisor<W> {
     /// ★그 취소를 한 바퀴 기다리는 것 말고는 기다리지 않는다★(`drop_link` 의 같은 대기를 앞당긴 것 — TRD 3
     /// §3-0 ② 「여기까지 기다림 없이」). 재요청도 안 쓴다 — 그 창은 열린 채 남아 다음 통로에서 다시 나간다
     /// (`reissue_resumes`).
-    async fn salvage_read_ahead(&mut self) {
-        let Some(mut frames) = self.frames_rx.take() else {
-            return;
-        };
+    ///
+    /// 돌려주는 것 = 앞잡이 줄에 이미 와 있던 맨 앞의 읽는 쪽 끝(디코드 실패로 끊는 한 장 · 상대의 닫힘 · 통로
+    /// 오류) — 끊김 원인을 그것으로 고쳐 적을지는 [`earlier_end`] 가 정한다.
+    async fn salvage_read_ahead(&mut self) -> Option<DisconnectCause> {
+        let mut frames = self.frames_rx.take()?;
         if let Some(reader) = self.reader.take() {
             reader.abort();
             let _ = reader.await;
         }
+        // 맨 앞의 읽기 끝 — 디코드 실패로 끊는 한 장이 그 뒤 닫힘보다 앞이다(운영 중에 그 한 장에서 끊었을 때와
+        //   같은 원인).
+        let mut cut = None;
         while let Ok(msg) = frames.try_recv() {
             match msg {
                 // ★디코드 실패로 끊는 정책이어도 멈추지 않고 그 뒤까지 넘긴다★ — 운영 중에 그 정책으로 끊으면
                 //   `run_live` 가 그 한 장에서 돌아오고 그 뒤에 이미 읽은 것은 이 비우기가 넘긴다. 여기서만 멈추면
                 //   같은 앞잡이 줄이 끊은 자리가 운영 중이었나 비우는 중이었나에 따라 넘어가기도 버려지기도 한다.
-                //   돌려받는 재요청은 안 쓴다(위 rustdoc).
+                //   끊김 원인만 그 한 장의 것으로 적어 둔다. 돌려받는 재요청은 안 쓴다(위 rustdoc).
                 LinkMsg::Frame(frame, charge) => {
-                    let _ = self.on_frame(frame, charge);
+                    if let Err(Input::LinkLost(cause)) = self.on_frame(frame, charge) {
+                        cut.get_or_insert(cause);
+                    }
                 }
                 // 그 뒤에는 아무것도 없다(읽기 태스크가 거기서 끝났다).
-                // TODO(TRD 3 §6-0 U1d): 끝 원인 가름 — 상대의 닫힘 · 통로 오류가 이미 와 있었어도 지금은 우리가
-                //   통로를 버린 원인(다시 걸기 · 쓰기 실패 …)이 끊김 원인으로 남는다.
-                LinkMsg::Closed | LinkMsg::Failed => break,
+                LinkMsg::Closed => return cut.or(Some(DisconnectCause::PeerClosed)),
+                LinkMsg::Failed => return cut.or(Some(DisconnectCause::ReadFailed)),
             }
         }
+        cut
     }
 
     fn fail_pending(&mut self, cause: DisconnectCause) {
@@ -1767,6 +1816,30 @@ impl<W: Wire> Supervisor<W> {
             QueueFullPolicy::DropAndReport => None,
         }
     }
+}
+
+/// 운영 단계를 떠날 때 기계에 먹일 입력 — 통로를 버리며 건진 앞잡이 줄([`Supervisor::salvage_read_ahead`])에
+/// 읽는 쪽의 끝이 이미 와 있었으면(맨 앞의 것 — 줄 가운데의 디코드 실패로 끊는 한 장일 수 있다) 우리가 떠난
+/// 까닭(쓰기 실패 · 침묵 · 넘침 …) 대신 그 끝을 끊김 원인으로 적는다 — 통로를 버리기 전에 이미 읽힌 끝이다. 배압으로 프레임 팔을 뺀 동안 상대가 닫으면 감독은 그 닫힘을
+/// 그 탓에 실패한 쓰기로 먼저 알아챌 수 있다(crate 헤더 「알려진 한계」의 줄 항목).
+///
+/// ★고쳐 적지 않는 것★ — 앱이 닫았거나(`Input::Close`) 다시 걸라고 했으면(`Input::ReconnectNow`) 그대로다: 둘 다
+/// 끊김 원인이 [`DisconnectCause::Explicit`] 이고 부른 쪽이 그 까닭을 안다. 다시 걸기를 끊김으로 바꾸면 예산을
+/// 되채우고 곧바로 거는 그 입구의 약속(ADR-0180 결정 7)이 사라진다. 우리 까닭이 이미 읽는 쪽의 끝(디코드 실패로
+/// 끊음)이면 그것도 그대로다 — 줄 안에서 그 한 장이 끝보다 앞이다.
+fn earlier_end(input: Input, read_end: Option<DisconnectCause>) -> Input {
+    match (input, read_end) {
+        (Input::LinkLost(ours), Some(theirs)) if !is_read_end(ours) => Input::LinkLost(theirs),
+        (input, _) => input,
+    }
+}
+
+/// 읽는 쪽의 끝인가 — 상대의 닫힘 · 통로 읽기 오류(디코드 실패로 끊음 포함).
+fn is_read_end(cause: DisconnectCause) -> bool {
+    matches!(
+        cause,
+        DisconnectCause::PeerClosed | DisconnectCause::ReadFailed
+    )
 }
 
 /// 순서 칸을 앞에서부터 줄에 실을 수 있는 만큼 싣는다 — 기다리지 않는다. `false` = 받는 쪽이 닫혔다(순서
@@ -2859,7 +2932,11 @@ mod tests {
         h.drain();
         endpoint.push(Frame::Text("garbage".into()));
         settle().await;
-        assert!(h.kinds().contains(&"Disconnected"));
+        assert_eq!(
+            h.disconnect_cause(),
+            Some(DisconnectCause::ReadFailed),
+            "읽은 것을 못 읽어 끊었다 — 읽는 쪽의 끝이다"
+        );
     }
 
     // ── 재연결 예산 ──
@@ -3368,10 +3445,12 @@ mod tests {
         for (what, push) in reply_less_pushes() {
             let (mut h, endpoint) = live().await;
             park_in_flight(&mut h, &endpoint, push).await;
-            // ★엔드포인트를 떨어뜨리면 걸린 쓰기가 통로 오류로 끝난다★ — 멈춤 신호가 함께 사라져 깨어나고
-            //   받을 쪽이 없어 실패한다(`testing::MemTx`). `fail` 로는 이 갈래가 안 선다: 그것은 읽는 쪽에만
-            //   닿고, 쓰는 동안 감독은 읽는 쪽을 안 본다.
-            drop(endpoint);
+            // ★쓰는 쪽만 끊고 멈춤을 풀면 걸린 쓰기가 통로 오류로 끝난다★ — 받을 쪽이 닫혀 실패한다
+            //   (`testing::MemTx`). `fail` 로는 이 갈래가 안 선다: 그것은 읽는 쪽에만 닿고, 쓰는 동안 감독은 읽는
+            //   쪽을 안 본다. 엔드포인트를 떨어뜨리는 것도 아니다 — 읽는 쪽이 함께 끊겨, 그 끝이 앞잡이 줄에 먼저
+            //   들면 끊김 원인이 읽기 끝으로 나온다(`salvage_read_ahead`).
+            endpoint.fail_writes();
+            endpoint.stall_writes(false);
             settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
             settle().await;
             let events = h.events();
@@ -3379,7 +3458,7 @@ mod tests {
                 events.iter().any(|e| matches!(
                     e,
                     TransportEvent::Disconnected {
-                        cause: DisconnectCause::LinkError,
+                        cause: DisconnectCause::WriteFailed,
                         ..
                     }
                 )),
@@ -4016,11 +4095,14 @@ mod tests {
         assert!(h.exited_cleanly().await);
     }
 
-    // 순서 칸이 비어 있으면 받는 쪽이 사라진 것을 지켜보는 갈래가 없다 — 대기 루프 안에서 낸 유실 신고가
-    // 그것을 처음 알아채는 경우다. 백오프 · 포기 중 큐에 든 알림은 핸들의 `is_live` 검사를 지난 직후 접힌
-    // 경합에서만 생기므로 큐에 직접 넣어 만든다.
+    // ── 3-0 U1d: 붙든 것이 없어도 받는 쪽이 사라지면 그 자리에서 접는다 ──
+    //
+    // 위 묶음은 순서 칸이 붙들고 있어 비우기 팔이 그 사라짐을 본다. 여기는 붙든 것이 없어 대기 루프마다 둔 수신단
+    // 닫힘 팔(`Sender::closed`)만이 본다 — 그 팔이 없으면 백오프 · 포기 · 핸드셰이크 · 조용한 운영이 시계나 다음
+    // 사건까지 그대로 머문다. 시계는 여기서도 밀지 않는다.
+
     #[tokio::test]
-    async fn a_waiting_peer_folds_when_its_loss_report_finds_the_consumer_gone() {
+    async fn a_waiting_peer_with_nothing_held_folds_when_the_consumer_goes() {
         for gave_up in [false, true] {
             let (mut h, endpoint) = live().await;
             if gave_up {
@@ -4035,22 +4117,12 @@ mod tests {
                 }
                 assert!(matches!(h.peer.peer_state(), PeerState::GaveUp(_)));
             }
+            assert!(
+                h.inbound.capacity() > 0,
+                "gave_up={gave_up}: 줄에 자리가 있다 — 순서 칸은 붙든 것이 없다"
+            );
             let dials = h.net.dials();
             drop_the_consumer(&mut h);
-            settle().await;
-            assert_ne!(
-                h.peer.peer_state(),
-                PeerState::Closed,
-                "gave_up={gave_up}: 순서 칸이 비어 아직 아무도 모른다"
-            );
-
-            h.peer
-                .inner
-                .data_tx
-                .try_send(PeerCmd::Notify {
-                    out: TestOut::Notice("raced".into()),
-                })
-                .unwrap_or_else(|_| panic!("나가는 큐에 자리가 있어야 한다"));
             settle_until("접힘", || h.peer.peer_state() == PeerState::Closed).await;
             assert_eq!(h.net.dials(), dials, "gave_up={gave_up}: 다시 걸지 않았다");
             settle_until("감독이 끝났다", || h.task.is_finished()).await;
@@ -4058,20 +4130,350 @@ mod tests {
         }
     }
 
-    // 운영 중 받는 쪽이 사라진 것을 「지금 다시 붙어라」의 끊김 사건이 처음 알아채는 경우 — 그 뒤 걸기를
-    // 시작하지 않는다.
     #[tokio::test]
-    async fn a_reconnect_that_finds_the_consumer_gone_does_not_dial() {
+    async fn a_mid_handshake_peer_with_nothing_held_folds_when_the_consumer_goes() {
+        let mut h = build(Policy::default(), Arc::new(ListeningHandshake));
+        settle_until("핸드셰이크 대기", || {
+            h.peer.peer_state() == PeerState::Handshaking
+        })
+        .await;
+        drop_the_consumer(&mut h);
+        settle_until("접힘", || h.peer.peer_state() == PeerState::Closed).await;
+        assert_eq!(h.net.dials(), 1, "다시 걸지 않았다");
+        assert_eq!(h.peer.generation(), Generation(0), "세대를 뽑지 않았다");
+        settle_until("감독이 끝났다", || h.task.is_finished()).await;
+        assert!(h.exited_cleanly().await);
+    }
+
+    #[tokio::test]
+    async fn a_silent_live_peer_folds_without_another_frame_when_the_consumer_goes() {
+        let (mut h, endpoint) = live().await;
+        drop_the_consumer(&mut h);
+        settle_until("접힘", || h.peer.peer_state() == PeerState::Closed).await;
+        settle_until(
+            "감독이 끝났다 — 상한을 기다리지 않았다",
+            || h.task.is_finished(),
+        )
+        .await;
+        assert_eq!(
+            endpoint.drain(),
+            vec![ClientMsg::Close(Close::new(
+                CloseCode::GOING_AWAY,
+                "closing"
+            ))],
+            "★상대는 조용했고 우리가 보낸 것은 닫기뿐이다★"
+        );
+        assert_eq!(h.net.dials(), 1, "다시 걸지 않았다");
+        assert!(h.exited_cleanly().await);
+    }
+
+    // 받는 쪽이 사라진 것과 「지금 다시 붙어라」가 함께 준비돼도 — 어느 팔이 먼저 깨든 — 다시 걸지 않는다.
+    #[tokio::test]
+    async fn a_reconnect_racing_the_consumers_exit_does_not_dial() {
         let (mut h, _endpoint) = live().await;
         drop_the_consumer(&mut h);
-        settle().await;
-        assert_eq!(h.peer.peer_state(), PeerState::Live, "아직 아무도 모른다");
-
         h.peer.reconnect_now();
         settle_until("접힘", || h.peer.peer_state() == PeerState::Closed).await;
         assert_eq!(h.net.dials(), 1, "아무도 안 들을 데몬에 다시 걸지 않았다");
         assert_eq!(h.peer.generation(), Generation(1));
         settle_until("감독이 끝났다", || h.task.is_finished()).await;
+        assert!(h.exited_cleanly().await);
+    }
+
+    // ── 3-0 U1d: 끝 원인 — 읽기 끝과 쓰기 끝을 가른다 ──
+    //
+    // 데몬 어댑터가 이 값으로 읽기 끝(남은 명령을 마저 돌린다)과 쓰기 끝(곧바로 끊는다)을 가른다(TRD 3 §3-0 ①).
+    // 엔드포인트를 떨어뜨리지 않는다 — 두 쪽이 함께 끊겨 어느 쪽이 먼저 알려지는지가 스케줄에 달린다.
+
+    type Cut = fn(&Harness, &MemoryEndpoint);
+    type ReadEnd = fn(&MemoryEndpoint);
+    type AppAct = fn(&Harness);
+
+    #[tokio::test]
+    async fn a_read_failure_and_a_write_failure_arrive_as_different_causes() {
+        let cases: [(&str, Cut, DisconnectCause); 3] = [
+            (
+                "읽기 오류",
+                |_, e| e.fail("boom"),
+                DisconnectCause::ReadFailed,
+            ),
+            (
+                "알림 쓰기 실패",
+                |h, e| {
+                    e.fail_writes();
+                    h.peer.notify(TestOut::Notice("x".into())).unwrap();
+                },
+                DisconnectCause::WriteFailed,
+            ),
+            (
+                "keepalive 쓰기 실패",
+                |h, e| {
+                    e.fail_writes();
+                    h.clock.advance(Policy::default().ping_interval);
+                },
+                DisconnectCause::WriteFailed,
+            ),
+        ];
+        for (what, cut, expected) in cases {
+            let (mut h, endpoint) = live().await;
+            cut(&h, &endpoint);
+            settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+            assert_eq!(h.disconnect_cause(), Some(expected), "{what}");
+        }
+    }
+
+    // ── 3-0 U1d: 통로를 버릴 때 앞잡이 줄에 이미 와 있던 읽기 끝이 끊김 원인이 된다 ──
+    //
+    // 줄 길이 1 — 첫 알림이 순서 칸에 붙들려 운영 루프가 프레임 팔을 뺀다(배압). 그 뒤 온 상대의 닫힘 · 읽기
+    // 오류는 앞잡이 줄에 든 채 안 읽히고, 감독은 자기 까닭(쓰기 실패 · 쓰기 시한 · 넘침 …)으로 먼저 떠난다.
+
+    /// 읽기 끝 하나를 앞잡이 줄에 넣어 둔 채 감독을 운영 단계에 세운다.
+    async fn a_read_end_behind_a_held_line(
+        policy: Policy,
+        end: ReadEnd,
+    ) -> (Harness, Arc<MemoryEndpoint>) {
+        let h = build_with(policy, Arc::new(ImmediateHandshake), 1);
+        settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
+        let endpoint = h.net.accept().expect("통로가 열렸어야 한다");
+        endpoint.push(TestWire::encode_in(&TestIn::Notice("held".into())));
+        settle().await;
+        end(&endpoint);
+        settle().await;
+        assert_eq!(endpoint.unread(), 0, "그 끝은 앞잡이 줄에 들었다");
+        assert_eq!(
+            h.peer.peer_state(),
+            PeerState::Live,
+            "프레임 팔을 뺀 감독은 그 끝을 아직 못 읽었다"
+        );
+        (h, endpoint)
+    }
+
+    fn disconnects(items: &[Incoming<TestWire>]) -> Vec<String> {
+        labels(items)
+            .into_iter()
+            .filter(|label| label.starts_with("Disconnected"))
+            .collect()
+    }
+
+    /// 감독이 운영 단계를 떠나는 우리 쪽 까닭 하나 — 정책과, 사이사이 감독을 돌리며 밟는 걸음들.
+    type Leave = (&'static str, fn() -> Policy, &'static [Cut]);
+
+    const LEAVES: [Leave; 4] = [
+        (
+            "알림 쓰기 실패",
+            Policy::default,
+            &[|h, e| {
+                e.fail_writes();
+                h.peer.notify(TestOut::Notice("x".into())).unwrap();
+            }],
+        ),
+        (
+            "keepalive 쓰기 실패",
+            Policy::default,
+            &[|h, e| {
+                e.fail_writes();
+                h.clock.advance(Policy::default().ping_interval);
+            }],
+        ),
+        // 걸린 쓰기를 시한이 자른 뒤 멈춤을 푼다 — 통로를 버리는 닫기가 나가야 백오프에 든다.
+        (
+            "쓰기 시한",
+            Policy::default,
+            &[
+                |h, e| {
+                    e.stall_writes(true);
+                    h.peer.notify(TestOut::Notice("x".into())).unwrap();
+                },
+                |h, _| h.clock.advance(Policy::default().write_deadline),
+                |_, e| e.stall_writes(false),
+            ],
+        ),
+        // 나가는 큐 한 칸 — 둘째 알림이 못 들어 세어지고, 감독이 첫째를 쓴 뒤 바퀴 첫머리에서 끊는다(기본 정책).
+        (
+            "나가는 큐 넘침",
+            || Policy {
+                outbound_queue: 1,
+                ..Policy::default()
+            },
+            &[|h, _| {
+                h.peer.notify(TestOut::Notice("x".into())).unwrap();
+                let _ = h.peer.notify(TestOut::Notice("y".into()));
+            }],
+        ),
+    ];
+
+    #[tokio::test]
+    async fn a_read_end_already_read_ahead_outranks_our_own_reason_for_leaving() {
+        let ends: [(&str, ReadEnd, &str); 2] = [
+            ("상대의 닫힘", |e| e.close(), "Disconnected:1:PeerClosed"),
+            ("읽기 오류", |e| e.fail("boom"), "Disconnected:1:ReadFailed"),
+        ];
+        for (end_what, end, expected) in ends {
+            for (leave_what, policy, steps) in LEAVES {
+                let (mut h, endpoint) = a_read_end_behind_a_held_line(policy(), end).await;
+                for step in steps {
+                    step(&h, &endpoint);
+                    settle().await;
+                }
+                settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+                let items = drain_until_quiet(&mut h).await;
+                assert_eq!(
+                    disconnects(&items),
+                    vec![expected.to_string()],
+                    "{end_what} 뒤 {leave_what}: ★먼저 난 읽기 끝이 원인이다★"
+                );
+            }
+        }
+    }
+
+    // 앱이 닫았거나 다시 걸라고 했으면 그 까닭(`Explicit`)이 남는다 — 부른 쪽이 안다.
+    #[tokio::test]
+    async fn an_app_close_or_reconnect_stays_explicit_with_a_read_end_read_ahead() {
+        let acts: [(&str, AppAct); 2] = [
+            ("닫기", |h| h.peer.close()),
+            ("다시 걸기", |h| h.peer.reconnect_now()),
+        ];
+        for (what, act) in acts {
+            let (mut h, _endpoint) =
+                a_read_end_behind_a_held_line(Policy::default(), |e| e.close()).await;
+            act(&h);
+            settle_until("접었거나 다시 걸었다", || {
+                h.peer.peer_state() == PeerState::Closed || h.net.dials() == 2
+            })
+            .await;
+            let items = drain_until_quiet(&mut h).await;
+            assert_eq!(
+                disconnects(&items),
+                vec!["Disconnected:1:Explicit"],
+                "{what}"
+            );
+        }
+    }
+
+    // 우리 까닭이 이미 읽는 쪽의 끝이면(디코드 실패로 끊음) 그대로다 — 줄 안에서 그 한 장이 뒤따른 닫힘보다 앞이다.
+    #[tokio::test]
+    async fn a_decode_failure_cut_keeps_its_cause_over_a_close_read_behind_it() {
+        let mut h = build(
+            Policy {
+                decode_failure: DecodeFailurePolicy::Disconnect,
+                ..Policy::default()
+            },
+            Arc::new(ImmediateHandshake),
+        );
+        settle_until("연결", || h.peer.peer_state() == PeerState::Live).await;
+        let endpoint = h.net.accept().unwrap();
+        h.drain();
+        endpoint.push(Frame::Text("garbage".into()));
+        endpoint.close();
+        settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+        assert_eq!(endpoint.unread(), 0, "닫힘도 읽혀 앞잡이 줄에 들었다");
+        assert_eq!(h.disconnect_cause(), Some(DisconnectCause::ReadFailed));
+    }
+
+    // 통로를 버리며 건진 줄 안에서도 같다 — 디코드 실패로 끊는 한 장이 뒤따른 닫힘보다 앞이라 그 원인이 남는다.
+    //   그 뒤에 이미 읽은 것은 그래도 넘긴다(`salvaging_carries_on_past_a_frame_it_cannot_decode`).
+    #[tokio::test]
+    async fn a_decode_cut_salvaged_from_the_read_ahead_outranks_a_close_behind_it() {
+        let (mut h, endpoint) = a_read_end_behind_a_held_line(
+            Policy {
+                decode_failure: DecodeFailurePolicy::Disconnect,
+                ..Policy::default()
+            },
+            |e| {
+                e.push(Frame::Text("garbage".into()));
+                e.push(TestWire::encode_in(&TestIn::Notice("after".into())));
+                e.close();
+            },
+        )
+        .await;
+        endpoint.fail_writes();
+        h.peer.notify(TestOut::Notice("x".into())).unwrap();
+        settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+        let items = drain_until_quiet(&mut h).await;
+        let seen = labels(&items);
+        assert!(
+            seen.contains(&"msg:after".to_string()),
+            "끊는 한 장 뒤에 이미 읽은 것도 넘겼다: {seen:?}"
+        );
+        assert_eq!(disconnects(&items), vec!["Disconnected:1:ReadFailed"]);
+    }
+
+    // ── 3-0 U1d: 쓰는 도중에 받는 쪽이 사라져도 그 쓰기를 기다리지 않는다 ──
+    //
+    // 큐를 잇달아 비우는 자리(`Turn::Outbound`)에서 걸린 쓰기 하나 · 걸린 keepalive 하나 — 둘 다 시계를 밀지 않고
+    // 접혀야 한다. 쓰기 팔이 없으면 걸린 쓰기마다 `write_deadline` 까지 선다.
+
+    #[tokio::test]
+    async fn a_consumer_leaving_mid_batch_folds_without_waiting_out_the_stalled_write() {
+        let mut h = build(
+            Policy {
+                outbound_queue: 4,
+                ..Policy::default()
+            },
+            Arc::new(ImmediateHandshake),
+        );
+        settle_until("연결", || h.peer.peer_state() == PeerState::Live).await;
+        let endpoint = h.net.accept().unwrap();
+        // keepalive 위에 세워 두고 큐를 반 넘게 채운 뒤, 쓰기를 막고 keepalive 를 푼다 — 다음 바퀴가 큐를 잇달아
+        //   비우다 첫 쓰기에서 선다.
+        endpoint.stall_pings(true);
+        h.clock.advance(Policy::default().ping_interval);
+        settle().await;
+        for n in 0..3 {
+            h.peer
+                .notify(TestOut::Notice(format!("n{n}")))
+                .expect("나가는 큐");
+        }
+        endpoint.stall_writes(true);
+        endpoint.stall_pings(false);
+        settle().await;
+        assert_eq!(endpoint.drain(), vec![ClientMsg::Ping]);
+        assert_eq!(
+            h.peer.inner.data_tx.capacity(),
+            2,
+            "감독이 하나를 꺼내 쓰다 섰고 둘이 큐에 남았다"
+        );
+
+        drop_the_consumer(&mut h);
+        settle_until("접힘 — 시계를 밀지 않았다", || {
+            h.peer.peer_state() == PeerState::Closed
+        })
+        .await;
+        // 통로를 버리는 닫기는 쓰기 막힘에 걸린다 — 그 하나는 일부러 안 듣는 자리라 풀어 준다(`drop_link`).
+        endpoint.stall_writes(false);
+        settle_until("감독이 끝났다", || h.task.is_finished()).await;
+        assert_eq!(
+            endpoint.drain(),
+            vec![ClientMsg::Close(Close::new(
+                CloseCode::GOING_AWAY,
+                "closing"
+            ))],
+            "★걸린 쓰기도 남은 둘도 안 나갔다★"
+        );
+        assert!(h.exited_cleanly().await);
+    }
+
+    #[tokio::test]
+    async fn a_consumer_leaving_mid_keepalive_folds_without_waiting_out_the_stalled_ping() {
+        let (mut h, endpoint) = live().await;
+        endpoint.stall_pings(true);
+        h.clock.advance(Policy::default().ping_interval);
+        settle().await;
+        assert!(endpoint.drain().is_empty(), "keepalive 위에 서 있다");
+
+        drop_the_consumer(&mut h);
+        settle_until("접힘 — 시계를 밀지 않았다", || {
+            h.peer.peer_state() == PeerState::Closed
+        })
+        .await;
+        settle_until("감독이 끝났다", || h.task.is_finished()).await;
+        assert_eq!(
+            endpoint.drain(),
+            vec![ClientMsg::Close(Close::new(
+                CloseCode::GOING_AWAY,
+                "closing"
+            ))]
+        );
         assert!(h.exited_cleanly().await);
     }
 

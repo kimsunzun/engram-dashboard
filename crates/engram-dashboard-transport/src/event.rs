@@ -198,8 +198,9 @@ pub enum TransportEvent<W: Wire> {
     /// 안 온다 — 산 채 안 비우는 받는 쪽에 정리가 상한(`peer.rs` 의 `CLOSE_DRAIN_LIMIT`)을 넘겨 남은 것과 함께
     /// 이것도 버렸거나(세지도 신고하지도 않는다), 태스크가 비정상으로 끝났다(패닉 · 런타임 종료). 어느 쪽이든 넣는
     /// 끝이 떨어져 `Closed` 없는 `None` 이 끝을 알린다 — 그것을 상한 초과로만 읽지 말 것.
-    /// TODO(TRD 3 §6-0 U1d): `cause` 에 읽기 끝 · 쓰기 끝 가름을 싣는다(`DisconnectCause::LinkError` →
-    /// `ReadFailed` · `WriteFailed`).
+    ///
+    /// 운영 중 끊김의 읽기 끝 · 쓰기 끝 가름([`DisconnectCause::ReadFailed`] · [`DisconnectCause::WriteFailed`])은
+    /// 그 앞의 [`TransportEvent::Disconnected`] 가 싣는다.
     Closed {
         peer: PeerId,
         generation: Generation,

@@ -250,9 +250,16 @@ impl MemoryEndpoint {
         self.send(ServerMsg::Closed(Some(close)));
     }
 
-    /// 오류로 끊는다.
+    /// 오류로 끊는다. ★읽는 쪽에만 닿는다★ — 클라의 다음 읽기가 오류다(쓰기는 그대로 나간다).
     pub fn fail(&self, why: &str) {
         self.send(ServerMsg::Fail(LinkError::new(why)));
+    }
+
+    /// ★쓰는 쪽만 끊는다★ — 클라의 다음 `send` · `ping` 이 오류로 끝나고(멈춤이 걸려 있으면 풀린 뒤) 읽기는
+    /// 그대로 산다. [`MemoryEndpoint::fail`] 의 짝이다 — 엔드포인트를 떨어뜨리면 두 쪽이 함께 끊겨 어느 쪽이
+    /// 먼저 알려지는지가 스케줄에 달린다. 이미 보낸 것은 [`MemoryEndpoint::take`] 로 계속 꺼낼 수 있다.
+    pub fn fail_writes(&self) {
+        self.from_client.lock().unwrap().close();
     }
 
     /// 켜면 클라의 쓰기가 멈춘다 — `send`·`ping`·`close` **셋 다**다(실소켓에서 그 셋이 한 통로를
@@ -357,7 +364,7 @@ impl LinkRx for MemRx {
                 //   읽기 오류이므로 여기서도 오류다. `Ok(Closed(None))` 으로 올리던 판은
                 //   [`crate::LinkRead::Closed`] 계약(「상대가 **말했다**」)을 하네스에서만 거짓으로 만들어,
                 //   엔드포인트를 떨어뜨려 죽음을 흉내내는 테스트가 `PeerClosed` 로 초록이고 실소켓에서는
-                //   `LinkError` 로 갈리게 했다.
+                //   통로 읽기 오류(지금 `ReadFailed`)로 갈리게 했다.
                 None => {
                     self.failed = true;
                     Err(LinkError::new("peer endpoint gone"))

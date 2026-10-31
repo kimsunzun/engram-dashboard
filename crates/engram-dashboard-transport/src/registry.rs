@@ -66,9 +66,10 @@ impl<W: Wire> Inbox<W> {
     /// 말없이 버려진다★ — 닫힌 줄에는 실을 수 없고, 세지도 신고하지도 않는다. [`Inbox`] 를 떨어뜨려도 같다(든
     /// 것까지 함께 버린다).
     ///
-    /// 감독은 다음에 넣으려다 닫힌 것을 보고 다시 붙지 않고 접는다.
-    /// TODO(TRD 3 §6-0 U1d): 넣을 것이 없어도 곧바로 접는다(대기 루프마다 `Sender::closed()` 갈래 — crate 헤더
-    /// 「받는 쪽 불변식」 5).
+    /// ★감독은 곧바로 접는다★ — 넣을 것이 없어도(상대가 조용해도) 그 자리에서 닫기로 가고 다시 붙지 않는다
+    /// (crate 헤더 「받는 쪽 불변식」 5). 떨어뜨려도 같다. ★받아 둔 나가는 일도 함께 버려진다★ — 큐에 든 명령은
+    /// 거절되고 쓰던 프레임은 버려진다(세지만 신고할 데가 없다). 보내고 떠나려면 `Closed` · `None` 까지 비운 뒤에
+    /// 놓는다.
     pub fn close(&mut self) {
         self.rx.close();
     }
@@ -300,7 +301,7 @@ mod tests {
             }
         }
 
-        /// ★돌려받은 수신단을 쥐고 있어야 한다★ — 떨어뜨리면 감독이 다음에 넣으려다 접는다.
+        /// ★돌려받은 수신단을 쥐고 있어야 한다★ — 떨어뜨리면 감독이 곧바로 접는다.
         fn add(
             &self,
             name: &str,
@@ -960,6 +961,54 @@ mod tests {
             "★옛 수신단을 놓은 것이 같은 이름표의 새 손잡이에 번지지 않는다★"
         );
         assert_eq!(labels(&drain(&mut fresh)), vec!["Connected:2"]);
+    }
+
+    // ── 3-0 U1d: 조용한 상대여도 수신단을 닫거나 놓으면 다음 프레임 없이 접는다 ──
+    #[tokio::test]
+    async fn closing_an_inbox_on_a_silent_peer_folds_it_and_still_drains_what_was_queued() {
+        let f = Fixture::new(Policy::default());
+        let (peer, mut inbox) = f.add("a", immediate());
+        settle_until("연결", || peer.peer_state() == PeerState::Live).await;
+        let link = f.net.accept().unwrap();
+        link.push(notice("before"));
+        settle().await;
+
+        inbox.close();
+        settle().await;
+        assert!(
+            peer.state().has_changed().is_err(),
+            "★넣을 것이 없어도 감독이 접고 정리를 마쳤다★ — 다음 프레임도 상한도 기다리지 않았다"
+        );
+        assert_eq!(peer.peer_state(), PeerState::Closed);
+        assert_eq!(f.net.dials(), 1, "다시 걸지 않았다");
+        assert_eq!(
+            labels(&drain(&mut inbox)),
+            vec!["Connected:1", "msg:before"],
+            "닫기 전에 든 것은 다 꺼낼 수 있다"
+        );
+        assert!(
+            ended(&mut inbox).await,
+            "그 뒤는 끝이다 — `Closed` 는 실을 데가 없었다"
+        );
+    }
+
+    // 30 번인 까닭 = 걸기 구간을 폴링하기 전의 검사가 없으면 걸기 future 와 닫힘 팔이 함께 준비돼 어느 쪽이 먼저
+    //   폴링될지가 난수다(`select!`) — 한 번으로는 그 검사가 빠진 것을 놓칠 수 있다.
+    #[tokio::test]
+    async fn an_inbox_dropped_before_its_supervisor_runs_never_dials() {
+        let f = Fixture::new(Policy::default());
+        for n in 0..30 {
+            let (peer, inbox) = f.add(&format!("a{n}"), immediate());
+            drop(inbox);
+            settle().await;
+            assert_eq!(peer.peer_state(), PeerState::Closed, "{n}");
+            assert!(peer.state().has_changed().is_err(), "{n}: 감독이 끝났다");
+        }
+        assert_eq!(
+            f.net.dials(),
+            0,
+            "★첫 사건을 넣기도 전에 놓인 수신단이면 통로를 아예 안 건다★"
+        );
     }
 
     // ── 3-0 U1d: 같은 이름표를 다시 올리면 옛 수신단은 옛 감독의 끝에서 끝나고 새 수신단은 새 감독의 것만 받는다 ──

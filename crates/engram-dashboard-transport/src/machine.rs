@@ -67,8 +67,12 @@ pub enum GaveUpReason {
 pub enum DisconnectCause {
     /// 상대가 정상 종료했다.
     PeerClosed,
-    /// 통로가 오류를 냈다.
-    LinkError,
+    /// 읽는 쪽이 끝났다 — 통로 읽기가 오류를 냈거나, 읽은 것을 못 읽어 끊었다(디코드 실패로 끊는 정책).
+    /// ★[`DisconnectCause::WriteFailed`] 와 가르는 것이 요점이다★ — 데몬 어댑터가 읽기 끝(남은 명령을 마저
+    /// 돌린다)과 쓰기 끝(곧바로 끊는다)을 이 값으로 가른다(TRD 3 §3-0 ①).
+    ReadFailed,
+    /// 쓰는 쪽이 끝났다 — 프레임 · keepalive 쓰기가 오류를 냈다(시한 초과는 [`DisconnectCause::WriteDeadline`]).
+    WriteFailed,
     /// 상대가 `idle_timeout` 동안 조용했다.
     Idle,
     /// 한 프레임을 미는 데 `write_deadline` 을 넘겼다.

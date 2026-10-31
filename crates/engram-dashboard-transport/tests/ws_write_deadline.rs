@@ -272,7 +272,7 @@ async fn the_supervisor_names_the_write_deadline_when_it_drops_a_parked_link() {
 }
 
 #[tokio::test]
-async fn an_oversized_frame_is_reported_as_a_link_error_instead_of_killing_the_supervisor() {
+async fn an_oversized_frame_is_reported_as_a_write_failure_instead_of_killing_the_supervisor() {
     // ★재는 것은 「값으로 실패하나」다★ — 이 자리가 패닉이면 감독 태스크가 그 안에서 죽고, 그
     //   `JoinHandle` 을 아무도 안 쥐고 있어 패닉을 **관측하는 자리가 없다**: 발행된 상태가 `Live` 에
     //   영구히 얼고 끊김 사건도 재연결도 안 난다. 그래서 이 테스트가 재는 것은 사건이 **오는지**다.
@@ -307,7 +307,7 @@ async fn an_oversized_frame_is_reported_as_a_link_error_instead_of_killing_the_s
     .await;
     assert_eq!(
         cause,
-        DisconnectCause::LinkError,
+        DisconnectCause::WriteFailed,
         "상한을 넘은 프레임을 다른 사유로 끊었다"
     );
 
