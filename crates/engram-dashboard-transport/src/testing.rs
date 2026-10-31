@@ -10,6 +10,7 @@
 //! ★운영 코드가 이 모듈을 참조하면 안 된다★ — 기본 빌드에 없으므로 컴파일이 먼저 깨진다.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -179,8 +180,11 @@ enum ServerMsg {
 /// 통로의 상대편. 테스트가 이것으로 프레임을 밀어 넣고 클라가 무엇을 보냈는지 본다.
 pub struct MemoryEndpoint {
     to_client: mpsc::UnboundedSender<ServerMsg>,
+    /// 밀어 넣었지만 클라가 아직 안 읽은 수 — `MemRx` 와 함께 쥔다.
+    unread: Arc<AtomicUsize>,
     from_client: Mutex<mpsc::UnboundedReceiver<ClientMsg>>,
     stall_tx: watch::Sender<bool>,
+    ping_stall_tx: watch::Sender<bool>,
 }
 
 impl MemoryEndpoint {
@@ -212,7 +216,22 @@ impl MemoryEndpoint {
 
     /// 클라에게 한 덩어리 보낸다.
     pub fn push(&self, frame: Frame) {
-        let _ = self.to_client.send(ServerMsg::Frame(frame));
+        self.send(ServerMsg::Frame(frame));
+    }
+
+    /// 밀어 넣었지만 클라가 아직 안 읽은 것(프레임 · 닫기 · 실패)의 수. ★배압이 통로까지 닿았나를 이것으로
+    /// 본다★ — 감독이 앞잡이 줄을 안 비우거나 받아 쥔 바이트가 읽기 몫 이상이면 읽기 태스크가 통로를 안 읽어
+    /// 여기 남는다.
+    pub fn unread(&self) -> usize {
+        self.unread.load(Ordering::Acquire)
+    }
+
+    /// ★보내기 전에 센다★ — 뒤에 세면 그 사이 읽은 쪽이 먼저 빼 셈이 0 밑으로 감긴다.
+    fn send(&self, msg: ServerMsg) {
+        self.unread.fetch_add(1, Ordering::AcqRel);
+        if self.to_client.send(msg).is_err() {
+            self.unread.fetch_sub(1, Ordering::AcqRel);
+        }
     }
 
     /// ★코드 **없이** 닫는다고 말한다★ — `LinkRead::Closed(None)` 이고, 계약상 이것도 「상대가 닫았다고
@@ -223,17 +242,17 @@ impl MemoryEndpoint {
     /// 것이라 `MemRx` 가 읽기 오류로 낸다(실소켓과 같은 모양). 「닫았다고 말했다」를 만들려면 이것이나
     /// [`MemoryEndpoint::reject`] 를 불러야 한다.
     pub fn close(&self) {
-        let _ = self.to_client.send(ServerMsg::Closed(None));
+        self.send(ServerMsg::Closed(None));
     }
 
     /// ★코드와 문구를 실어 닫는다★ — 「붙었는데 거절당했다」를 클라가 알아볼 수 있는 유일한 경로다.
     pub fn reject(&self, close: Close) {
-        let _ = self.to_client.send(ServerMsg::Closed(Some(close)));
+        self.send(ServerMsg::Closed(Some(close)));
     }
 
     /// 오류로 끊는다.
     pub fn fail(&self, why: &str) {
-        let _ = self.to_client.send(ServerMsg::Fail(LinkError::new(why)));
+        self.send(ServerMsg::Fail(LinkError::new(why)));
     }
 
     /// 켜면 클라의 쓰기가 멈춘다 — `send`·`ping`·`close` **셋 다**다(실소켓에서 그 셋이 한 통로를
@@ -254,11 +273,20 @@ impl MemoryEndpoint {
     pub fn writes_stalled(&self) -> bool {
         *self.stall_tx.borrow()
     }
+
+    /// 켜면 클라의 `ping` **만** 멈춘다 — [`MemoryEndpoint::stall_writes`] 와 겹쳐 걸리고, 끄면 실제로 깨어난다.
+    /// ★실소켓에는 없는 모양이다★(ping 도 같은 통로로 나간다) — 「앞선 쓰기는 끝났고 그 직후 타이머 바퀴의
+    /// ping 에서 선다」를 만들려고만 둔다. 둘을 한 손잡이로는 못 가른다: 멈춤을 푸는 순간 감독이 양보 없이
+    /// 다음 쓰기까지 밀고 간다.
+    pub fn stall_pings(&self, on: bool) {
+        let _ = self.ping_stall_tx.send(on);
+    }
 }
 
 struct MemTx {
     to_server: mpsc::UnboundedSender<ClientMsg>,
     stall_rx: watch::Receiver<bool>,
+    ping_stall_rx: watch::Receiver<bool>,
 }
 
 impl MemTx {
@@ -284,6 +312,7 @@ impl LinkTx for MemTx {
     fn ping(&mut self) -> BoxFuture<'_, Result<(), LinkError>> {
         Box::pin(async move {
             self.wait_writable().await;
+            let _ = self.ping_stall_rx.wait_for(|stalled| !*stalled).await;
             self.put(ClientMsg::Ping)
         })
     }
@@ -303,6 +332,7 @@ impl LinkTx for MemTx {
 
 struct MemRx {
     from_server: mpsc::UnboundedReceiver<ServerMsg>,
+    unread: Arc<AtomicUsize>,
     /// 이미 읽기가 실패했다 — [`LinkRx::recv`] 계약(실패 뒤에는 닫기를 내지 않는다)의 실물.
     failed: bool,
 }
@@ -316,7 +346,11 @@ impl LinkRx for MemRx {
             if self.failed {
                 return Err(LinkError::new("link already failed"));
             }
-            match self.from_server.recv().await {
+            let next = self.from_server.recv().await;
+            if next.is_some() {
+                self.unread.fetch_sub(1, Ordering::AcqRel);
+            }
+            match next {
                 Some(ServerMsg::Frame(f)) => Ok(LinkRead::Frame(f)),
                 Some(ServerMsg::Closed(close)) => Ok(LinkRead::Closed(close)),
                 // ★채널 소진 = 말 없이 사라졌다★ — 실소켓에서 같은 일(닫기 핸드셰이크 없이 버려진 소켓)은
@@ -431,17 +465,23 @@ impl Dialer for MemoryNetwork {
             let (to_server, from_client) = mpsc::unbounded_channel();
             let (to_client, from_server) = mpsc::unbounded_channel();
             let (stall_tx, stall_rx) = watch::channel(false);
+            let (ping_stall_tx, ping_stall_rx) = watch::channel(false);
+            let unread = Arc::new(AtomicUsize::new(0));
             st.opened.push_back(Arc::new(MemoryEndpoint {
                 to_client,
+                unread: unread.clone(),
                 from_client: Mutex::new(from_client),
                 stall_tx,
+                ping_stall_tx,
             }));
             let tx: Box<dyn LinkTx> = Box::new(MemTx {
                 to_server,
                 stall_rx,
+                ping_stall_rx,
             });
             let rx: Box<dyn LinkRx> = Box::new(MemRx {
                 from_server,
+                unread,
                 failed: false,
             });
             Ok((tx, rx))

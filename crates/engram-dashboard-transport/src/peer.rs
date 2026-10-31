@@ -22,14 +22,42 @@
 //!   자리(`Turn::Outbound` 의 큐 비우기 · `reissue_resumes`)에서는 그 쓰기 수 × `write_deadline` 까지.
 //!   그래서 한 감독이 올리는 것은 낸 순서대로 실린다. 버리는 것은 받는 쪽이 닫혔을 때와 정리의
 //!   상한(`CLOSE_DRAIN_LIMIT`)을 넘겼을 때뿐이다.
-//!   TODO(TRD 3 §6-0 U1c): 순서 칸에 상한이 없다 — 줄이 찬 동안에도 운영 루프는 계속 읽어 순서 칸이 자란다.
-//!   문턱을 넘으면 프레임 팔을 빼 그 상대의 읽기를 세우고(배압) 붙든 동안 침묵 판정을 멈춘다. 문턱은 비우는
-//!   받는 쪽이 옛 감독의 밀린 것을 `CLOSE_DRAIN_LIMIT` 안에 다 꺼낼 수 있는 크기로 잡는다 — 넘기면 정리가
-//!   남은 것을 버리고, 지금 그 버림은 세지도 신고하지도 않는다.
+//! - ★줄이 차면 그 상대의 읽기를 세운다(배압 — TRD 3 §3-0 ①)★ — 순서 칸이 무엇이든 붙들고 있는 동안 운영
+//!   루프는 프레임 팔을 뺀다. 그러면 앞잡이 줄([`Policy::frame_buffer`])이 차고 읽기 태스크가 통로 읽기를
+//!   멈춘다. 따로, 받아 쥔 바이트(이어받기 창 몫을 뺀 것)가 읽기 몫(스트림을 안 쓰면 `BYTE_BUDGET` 전부 ·
+//!   쓰면 그 반) 이상이면 읽기 태스크가 다음 읽기를 안 한다(`budget.rs` — 앞잡이 줄 · 순서 칸 · 위로 올라가는
+//!   줄 · 창을 셈 하나가 덮는다). 그래서 순서 칸이
+//!   쥐는 것은 줄이 찬 뒤 처리한 프레임 한 장(또는 타이머 한 바퀴)이 낳은 것과 생애 사건 몇 개, 그리고 통로를
+//!   버릴 때 앞잡이 줄에서 건진 것(아래 항목)까지다 — 정리가 비울 옛 감독의 밀린 것도 그만큼이라, 비우는 받는
+//!   쪽이면 `CLOSE_DRAIN_LIMIT` 안에 끝난다(그 바이트는 셈 안이다).
+//!   ★상한을 넘겨 버린 것은 세지도 신고하지도 않는다★ — TRD 3 §3-0 ② 의 신호는 수신단 끝이다.
+//!   TODO(TRD 3 §6-0 U1d): 손잡이마다 수신단을 주면 상한을 넘긴 정리가 송신단을 놓아 수신단 끝(`None`)이 그
+//!   버림을 알린다.
+//! - ★이어받기 창이 붙든 스트림 조각은 읽기를 세우지 않는다★ — 같은 셈 안에서 창 몫으로 따로 세어 읽기
+//!   문에서 빼고, 창 몫은 감독마다 창 상한(스트림을 쓰는 예산의 반)으로 잰다 — 붙들면 넘는 조각은 붙들지 않고 그 창을
+//!   잘림으로 닫는다(`Supervisor::route`). 읽기를 세우면 구멍을 메울 재생분을 못 읽어, 메울 수 있던 구멍이
+//!   영구 손실이 된다. 감독 하나의 바이트 천장은 `BYTE_BUDGET`(= 읽기 몫 + 창 상한) + 한 메시지다
+//!   (`budget.rs` 헤더).
+//! - ★붙든 동안은 침묵 판정과 이어받기 창의 시계를 멈춘다★ — 막힌 것은 우리 쪽이라 상대의 살아있음도
+//!   재요청의 답도 못 읽는다. 풀리는 순간 `last_rx` 를 그때로 두고 열린 창의 청한 시각을 붙든 시간만큼
+//!   민다(`Supervisor::track_pause`). 붙든 시간은 알아챈 때가 아니라 붙듦이 실제로 시작된 때부터 센다 —
+//!   쓰기를 기다리던 사이 시작됐어도 그렇고, 그 사이 읽기 문이 닫혔다 다시 열려 감독이 끝내 못 본 붙듦도 센다.
+//!   창은 붙든 시간보다 늦게 닫힐 수는 있어도 일찍 닫히지는 않는다(안전한 쪽 — 그 자리는 `track_pause`).
+//!   우리 ping 은 그동안에도 나간다 — 상대가 우리를 침묵으로 끊지 않는다.
+//!   대가로 그 상대의 답장도 못 들어온다 — 받는 쪽을 비우는 task 위에서 [`Peer::request`] 를 기다리면 그
+//!   요청은 시한까지 매달린다(crate 헤더 「받는 쪽 불변식」 1).
 //!   TODO(TRD 3 §6-0 U1d): 받는 쪽이 사라진 것을 넣기 · 싣기가 실패해야 안다 — 조용한 상대면 링크가 `Live`
 //!   로 남는다. 대기 루프마다 「수신단 놓임(`Sender::closed()`) → 닫기」 갈래를 둔다.
-//! - ★정리 순서 = 통로 버림 → 대기자 깨움 · 나가는 큐 닫고 남은 명령 거절 → 순서 칸 비우기 →
-//!   [`TransportEvent::Closed`] 마지막★ — 받는 쪽을 기다리는 것은 순서 칸 비우기뿐이다(`teardown`).
+//! - ★통로를 버리기 전에 이미 읽은 것을 넘긴다★ — 운영 단계를 떠날 때(앱이 닫음 · 다시 걸기 · 쓰기 실패 ·
+//!   침묵 …) 읽기 태스크를 접고 앞잡이 줄을 기다림 없이 비워 운영 중과 같은 길로 보낸다
+//!   (`Supervisor::salvage_read_ahead`). 기계가 대기자를 깨우고 끊김 사건을 내기 전이라 답장은 기다리던
+//!   호출자에게 가고 그 밖은 끊김 사건 앞에 선다. 디코드 실패로 끊는 정책이어도 그 뒤에 이미 읽은 것은 넘긴다.
+//!   통로에 남은 것(아직 안 읽었다)은 함께 버린다.
+//! - ★붙든 스트림 조각은 처음 실어 온 연결의 세대로 올라간다★ — 이어받기 창은 다시 붙어도 살아남아 다음
+//!   연결에서 닫힐 수 있지만, [`crate::Arrival::generation`] 은 그 조각을 실어 온 연결을 가리킨다.
+//! - ★정리 순서 = 통로 버림 → 대기자 깨움 · 나가는 큐 닫고 남은 명령 거절 → 열린 이어받기 창 접기(붙든 것을
+//!   잘림 신고와 함께 올린다) → 순서 칸 비우기 → [`TransportEvent::Closed`] 마지막★ — 받는 쪽을 기다리는 것은
+//!   순서 칸 비우기뿐이다(`teardown`).
 //!
 //! ## 운영 루프의 우선순위 (되살리지 마라)
 //!
@@ -53,6 +81,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot, watch};
 
+use crate::budget::{Charge, Charged, Ledger};
 use crate::clock::{with_deadline, Clock};
 use crate::event::{Arrival, Direction, Incoming, PeerId, TransportEvent};
 use crate::frame::{Close, CloseCode, Frame};
@@ -62,7 +91,7 @@ use crate::machine::{
 };
 use crate::pending::{Insert, Pending, RequestError};
 use crate::policy::{DecodeFailurePolicy, Policy, QueueFullPolicy};
-use crate::stream::{Streams, Verdict};
+use crate::stream::{Streams, Truncation, Verdict};
 use crate::wire::Wire;
 
 /// 프레임을 이만큼 연달아 처리하면 나가는 큐에 한 바퀴를 양보한다.
@@ -73,6 +102,18 @@ const FRAME_BURST: usize = 32;
 ///
 /// 60 s 인 까닭 = 데몬 읽기 task 가 우선 줄에서 기다리는 최악(8칸 × kill-join 5 s)을 덮는다(TRD 3 §3-0 ②).
 const CLOSE_DRAIN_LIMIT: Duration = Duration::from_secs(60);
+
+/// 감독 하나가 받아 쥘 페이로드 바이트의 예산(`budget.rs` 의 B). 셈 하나가 읽기 몫과 창 상한으로 나눠 쓴다 —
+/// 읽기 문은 읽기 몫으로 잰다(받아 쥔 바이트에서 이어받기 창 몫을 뺀 것이 그 이상이면 읽기 태스크가 통로를 더 안
+/// 읽는다). ★스트림을 안 쓰면 읽기 몫 = 이것 전부(창 상한 0)이고, 스트림 조각을 처음 본 뒤로는 반씩이다★
+/// (`budget::split` · 그 까닭은 `budget.rs` 헤더). 읽기는 「더하기 전 물높이」로 판정하므로 어느 쪽이든 감독
+/// 하나의 천장은 이것 + 한 메시지다(TRD 3 §3-0 ① 「B + M」).
+///
+/// 16 MiB 인 까닭 = net 의 연결별 받는 줄 예산(`CONN_RX_MAX_BYTES`)과 같은 값 — 셸 · 데몬이 같은 값을 쓴다
+/// (TRD 3 §3-0 ① 가안 · 메인이 정해 보고하는 내부 상수). 스트림을 안 쓰는 두 소비자(ADR-0310 결정 16)의 읽기
+/// 문이 net 과 같은 16 MiB 가 되는 것이 나누기를 미루는 까닭이다. 작은 프레임 홍수는 개수 상한
+/// ([`Policy::frame_buffer`] · [`Policy::inbound_queue`])이 맡는다.
+pub(crate) const BYTE_BUDGET: usize = 16 << 20;
 
 /// 운영 루프의 이번 바퀴가 무엇을 먼저 하나.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +139,9 @@ fn next_turn(
     outbound_len: usize,
     outbound_cap: usize,
 ) -> Turn {
+    // TODO(stream-replay-vs-timer): 시한이 프레임보다 앞이라, 창 시한이 쓰기 도중 지나고 그 사이 재생분이 앞잡이
+    //   줄에 들어왔으면 그 재생분을 처리하기 전에 이어받기 창이 닫힌다 — 배압이 없어도 그렇다(crate 헤더 「알려진
+    //   한계」).
     if wake <= now {
         return Turn::Timer;
     }
@@ -204,6 +248,8 @@ struct PeerInner<W: Wire> {
     last_cause: Arc<AtomicU8>,
     /// 앱이 [`Peer::close`] 를 불렀다. 감독이 그것을 처리했는지와 무관하게 부른 순간 선다.
     close_requested: AtomicBool,
+    #[cfg(test)]
+    ledger: Arc<Ledger>,
 }
 
 /// 값싼 clone 핸들 = 감독 태스크로 가는 명령 채널.
@@ -314,6 +360,19 @@ impl<W: Wire> Peer<W> {
         self.inner.close_requested.load(Ordering::Acquire)
     }
 
+    /// 시험 손잡이 — 이 감독이 지금 받아 쥔 페이로드 바이트 전부(셈의 물높이) — 앞잡이 줄 · 순서 칸 · 줄에 든
+    /// 것과 이어받기 창이 붙든 조각. 그중 창 몫만은 [`Peer::window_bytes`].
+    #[cfg(test)]
+    pub(crate) fn held_bytes(&self) -> usize {
+        self.inner.ledger.level()
+    }
+
+    /// 시험 손잡이 — 그중 이어받기 창이 붙든 조각의 바이트(읽기 문에서 빠지는 몫).
+    #[cfg(test)]
+    pub(crate) fn window_bytes(&self) -> usize {
+        self.inner.ledger.held()
+    }
+
     pub(crate) fn send_frame(&self, frame: Frame) -> Result<(), SendError> {
         if !self.peer_state().is_live() {
             return Err(SendError::Disconnected);
@@ -351,8 +410,11 @@ pub(crate) struct PeerConfig<W: Wire> {
     pub policy: Policy,
     /// ★이 이름표의 위로 올라가는 줄★ — 다른 이름표의 감독과 나눠 쓰지 않는다(`registry.rs` 헤더 —
     /// 같은 이름표를 다시 올리면 옛 감독과 새 감독은 함께 쓴다). 다른 이름표와 나눠 쓰면 시끄러운 상대가
-    /// 채운 줄 뒤에서 조용한 상대의 것이 순서 칸에 붙들린다.
-    pub inbound: mpsc::Sender<Incoming<W>>,
+    /// 채운 줄 뒤에서 조용한 상대의 것이 순서 칸에 붙들린다. 항목마다 그것을 넣은 감독의 바이트 몫이 실리고
+    /// 받는 쪽이 꺼낼 때 떨어진다(`budget.rs`).
+    pub inbound: mpsc::Sender<Charged<Incoming<W>>>,
+    /// 받아 쥘 바이트 예산 — 명부는 [`BYTE_BUDGET`] 을 넣는다. 칸으로 둔 것은 시험이 작은 값을 넣으려고다.
+    pub byte_budget: usize,
     /// ★이 이름표의 세대 계수기★ — 같은 이름표를 다시 올려도 **같은 Arc 를 물려준다**.
     ///
     /// 옛 감독의 마지막 세대를 읽어 바닥값으로 넘기는 방식은 경합이 있었다(D1): 옛 감독이
@@ -380,6 +442,7 @@ fn new_peer<W: Wire>(cfg: PeerConfig<W>) -> (Peer<W>, Supervisor<W>) {
     let overflow = Arc::new(AtomicU64::new(0));
     let refused = Arc::new(AtomicU64::new(0));
     let last_cause = Arc::new(AtomicU8::new(cause_code(DisconnectCause::LinkError)));
+    let ledger = Ledger::new(cfg.byte_budget, cfg.clock.clone());
 
     let handle = Peer {
         inner: Arc::new(PeerInner {
@@ -392,6 +455,8 @@ fn new_peer<W: Wire>(cfg: PeerConfig<W>) -> (Peer<W>, Supervisor<W>) {
             refused: refused.clone(),
             last_cause: last_cause.clone(),
             close_requested: AtomicBool::new(false),
+            #[cfg(test)]
+            ledger: ledger.clone(),
         }),
     };
 
@@ -432,6 +497,10 @@ fn new_peer<W: Wire>(cfg: PeerConfig<W>) -> (Peer<W>, Supervisor<W>) {
         fresh_link: false,
         consumer_gone: AtomicBool::new(false),
         order: VecDeque::new(),
+        order_since: now,
+        ledger,
+        paused: false,
+        paused_since: now,
         last_rx: now,
         last_ping: now,
         dropped_out: 0,
@@ -443,7 +512,8 @@ fn new_peer<W: Wire>(cfg: PeerConfig<W>) -> (Peer<W>, Supervisor<W>) {
 }
 
 enum LinkMsg {
-    Frame(Frame),
+    /// 받은 한 장과 그 바이트 몫 — 몫은 이 프레임이 낳는 항목을 따라 받는 쪽까지 간다.
+    Frame(Frame, Charge),
     /// 상대가 닫았다.
     ///
     /// ★여기에는 닫기 코드를 싣지 않는다★ — 이 태스크는 **핸드셰이크가 끝난 뒤에만** 돌고, 운영 중
@@ -462,6 +532,8 @@ enum Wake<W: Wire> {
     Link(Option<LinkMsg>),
     Cmd(Option<PeerCmd<W>>),
     Room(bool),
+    /// 읽기 문이 열렸다(`budget.rs`).
+    Budget,
     Timer,
 }
 
@@ -478,6 +550,15 @@ enum Connecting<T> {
     Room(bool),
 }
 
+/// 받아 디코드한 메시지 하나 — 바이트 몫과 그것을 실어 온 연결의 세대를 쥐고 위로 간다. ★세대는 받은 그때
+/// 찍는다★ — 이어받기 창에 붙든 채 다시 붙으면 창이 다음 연결에서 닫히는데, 그때의 세대를 찍으면
+/// [`Arrival::generation`] 이 실어 온 연결을 가리키지 않는다.
+struct Received<M> {
+    msg: M,
+    charge: Charge,
+    generation: Generation,
+}
+
 struct Supervisor<W: Wire> {
     id: PeerId,
     addr: Address,
@@ -488,8 +569,9 @@ struct Supervisor<W: Wire> {
     policy: Policy,
     machine: Machine,
     pending: Pending<W::Tag, oneshot::Sender<Result<W::In, RequestError>>>,
-    streams: Streams<W::StreamKey, W::In>,
-    inbound: mpsc::Sender<Incoming<W>>,
+    /// 붙든 조각도 자기 바이트 몫(창 몫으로 센다)과 실어 온 연결의 세대를 쥔 채 붙들린다.
+    streams: Streams<W::StreamKey, Received<W::In>>,
+    inbound: mpsc::Sender<Charged<Incoming<W>>>,
     data_rx: mpsc::Receiver<PeerCmd<W>>,
     ctl_rx: mpsc::UnboundedReceiver<Ctl>,
     state_tx: watch::Sender<PeerState>,
@@ -509,7 +591,19 @@ struct Supervisor<W: Wire> {
     /// 위로 올릴 데가 아예 닫혔다. ★다시 붙을 일이 아니라 접을 일이다★.
     consumer_gone: AtomicBool,
     /// 순서 칸 — 줄에 아직 못 실은 것을 낸 순서대로 붙든다(이 파일 헤더). 받는 쪽이 닫히면 비운다.
-    order: VecDeque<Incoming<W>>,
+    order: VecDeque<Charged<Incoming<W>>>,
+    /// 순서 칸이 마지막으로 붙들기 시작한 시각 — 순서 칸이 비어 있지 않을 때만 뜻이 있다(`put` 이 적는다).
+    order_since: Instant,
+    /// 이 감독이 받아 쥔 바이트의 셈(창 몫 포함) — 연결을 갈아도 같은 셈이다. 다시 붙은 통로는 옛 통로가 남긴
+    /// 몫이 읽기 문을 열 때까지 안 읽힌다(감독 하나 = 순서 칸 하나라 그 몫도 같은 받는 쪽을 기다린다).
+    ledger: Arc<Ledger>,
+    /// 바퀴 첫머리에 배압으로 붙들고 있었나 — 풀리는 순간을 알아보려고 둔다(`track_pause`). ★시한 판정 ·
+    /// 깨어날 시각 · 창 시계가 다 이 칸을 읽는다★ — 하나라도 그 자리의 배압을 다시 보면 서로 다른 상태로
+    /// 재 진도 확인이 깨진다(`run_live` 의 `Turn::Timer`).
+    paused: bool,
+    /// 이번 붙듦이 시작된 시각 — 알아챈 때가 아니라 실제로 시작된 때다(`track_pause`). 붙든 동안 창 시계는 여기
+    /// 멈춰 있다(`resume_clock`).
+    paused_since: Instant,
     last_rx: Instant,
     last_ping: Instant,
     dropped_out: u64,
@@ -529,7 +623,12 @@ impl<W: Wire> Supervisor<W> {
                 Some(input) => input,
                 None if self.consumer_gone.load(Ordering::Acquire) => Input::Close,
                 None => match self.machine.state() {
-                    PeerState::Live => self.run_live().await,
+                    PeerState::Live => {
+                        let input = self.run_live().await;
+                        // 기계가 대기자를 깨우고 끊김 사건을 내기 전에 이미 읽은 것을 넘긴다.
+                        self.salvage_read_ahead().await;
+                        input
+                    }
                     PeerState::GaveUp(_) | PeerState::Idle => self.park().await,
                     other => {
                         // Dialing/Backoff/Handshaking 는 `apply` 가 항상 후속 입력을 낸다.
@@ -675,7 +774,7 @@ impl<W: Wire> Supervisor<W> {
     /// 읽기를 따로 태스크로 뗀다 — 그 사유는 [`read_link`] 헤더에 있다.
     fn attach_reader(&mut self, rx: Box<dyn LinkRx>) {
         let (frames_tx, frames_rx) = mpsc::channel(self.policy.frame_buffer.max(1));
-        self.reader = Some(tokio::spawn(read_link(rx, frames_tx)));
+        self.reader = Some(tokio::spawn(read_link(rx, frames_tx, self.ledger.clone())));
         self.frames_rx = Some(frames_rx);
         self.fresh_link = true;
         let now = self.clock.now();
@@ -783,6 +882,11 @@ impl<W: Wire> Supervisor<W> {
         }
         let mut frames_in_row = 0usize;
         loop {
+            // ★붙듦은 유실 신고보다 먼저 본다★ — 신고는 순서 칸에 넣으며 줄에 실을 수 있는 만큼 싣는다(`put`).
+            //   쓰기를 기다리던 사이 받는 쪽이 줄을 비웠으면 그 신고가 순서 칸을 다 비워, 쓰기 도중 시작된 붙듦을
+            //   끝내 못 본다 — 시한을 넘긴 창이 앞잡이 줄의 재생분보다 먼저 닫혀 재생분이 지나간 번호로 버려진다.
+            let now = self.clock.now();
+            self.track_pause(now);
             let overflow = self.drain_overflow();
             self.report_drops();
             // `wait` 의 같은 줄 — 신고 뒤에 본다. 넘침 판정보다 앞이다: 접을 상대를 백오프로 돌리지 않는다.
@@ -803,7 +907,6 @@ impl<W: Wire> Supervisor<W> {
                 };
             }
 
-            let now = self.clock.now();
             let wake = self.wake_at();
             // ②③ 굶주림 방지 규칙. 판정은 `next_turn` 이 하고 여기서는 집행만 한다.
             match next_turn(
@@ -848,19 +951,29 @@ impl<W: Wire> Supervisor<W> {
 
             let sleep = self.clock.sleep(wake.saturating_duration_since(now));
             let backlog = !self.order.is_empty();
+            // 읽기 문이 열리면 깨운다. ★바퀴 첫머리에 읽기 문 때문에 붙든 것으로 봤으면(`paused` · 순서 칸 빔)
+            //   지금 이미 풀렸어도 이 팔을 세운다★ — 곧바로 깨어 다음 바퀴가 풀림을 적는다. 안 세우면 깨어날
+            //   시각이 `paused` 를 따라 침묵 · 창 시한을 뺀 채라, 상대가 조용하면 ping 때까지 풀림이 안 적힌다.
+            //   첫머리 뒤 신고(`report_drops`)가 순서 칸을 비웠으면 읽기 문이 열려 있어도 이 팔이 서지만, 곧바로
+            //   깨어 다음 바퀴가 풀림을 적는다 — 한 번 더 깰 뿐 헛돌지 않는다.
+            let over = self.ledger.over() || (self.paused && !backlog);
             let woken = {
                 let ctl = &mut self.ctl_rx;
                 let data = &mut self.data_rx;
                 let frames = self.frames_rx.as_mut().expect("checked above");
                 let (lane, order) = (&self.inbound, &mut self.order);
+                let ledger = &self.ledger;
                 // ★`biased` 를 다시 붙이지 말 것★ — 선언 순서 폴링이 프레임 홍수 아래에서 뒤 팔을
                 //   통째로 굶긴다(이 파일 헤더의 「운영 루프의 우선순위」).
-                // TODO(TRD 3 §6-0 U1c): 순서 칸이 문턱을 넘으면 프레임 팔을 빼 그 상대의 읽기를 세운다.
+                // ★순서 칸이 붙들고 있으면 프레임 팔을 뺀다(배압)★ — 그 프레임이 낳을 것도 줄에 못 실리니
+                //   통로에 두는 편이 낫다. 문턱을 하나로 둔 것은 순서 칸이 동기로 넣는 자리(사건 · 시한 사건)를
+                //   위한 것이지 프레임의 둘째 버퍼가 아니라서다. 그 대신 비우기 팔이 늘 함께 서 있다.
                 tokio::select! {
                     signal = ctl.recv() => Wake::Ctl(signal),
-                    msg = frames.recv() => Wake::Link(msg),
+                    msg = frames.recv(), if !backlog => Wake::Link(msg),
                     cmd = data.recv() => Wake::Cmd(cmd),
                     open = drain_order(lane, order), if backlog => Wake::Room(open),
+                    () = ledger.holder_room(), if over => Wake::Budget,
                     _ = sleep => Wake::Timer,
                 }
             };
@@ -874,9 +987,13 @@ impl<W: Wire> Supervisor<W> {
                 Wake::Link(Some(LinkMsg::Closed)) => {
                     Some(Input::LinkLost(DisconnectCause::PeerClosed))
                 }
-                Wake::Link(Some(LinkMsg::Frame(frame))) => {
+                Wake::Link(Some(LinkMsg::Frame(frame, charge))) => {
                     frames_in_row += 1;
-                    self.on_frame(frame).await
+                    match self.on_frame(frame, charge) {
+                        Ok(Some(resume)) => self.write(resume).await.err(),
+                        Ok(None) => None,
+                        Err(input) => Some(input),
+                    }
                 }
                 Wake::Cmd(None) => Some(Input::Close),
                 Wake::Cmd(Some(cmd)) => {
@@ -887,6 +1004,8 @@ impl<W: Wire> Supervisor<W> {
                     self.note_room(open);
                     None
                 }
+                // 다음 바퀴의 `track_pause` 가 풀림을 본다.
+                Wake::Budget => None,
                 Wake::Timer => {
                     frames_in_row = 0;
                     self.on_timer().await
@@ -914,30 +1033,110 @@ impl<W: Wire> Supervisor<W> {
                 return Some(input);
             }
         }
+        // 창 시계로 감는다 — 앞 통로에서 붙든 채 끊겼으면 그 시계가 아직 멈춰 있고, 풀릴 때 붙든 시간만큼
+        //   밀린다(`track_pause`). 지금 시각으로 감으면 그 밀기가 끊겨 있던 시간까지 한 번 더 민다.
         let now = self.clock.now();
-        self.streams.rearm_resumes(now);
+        self.streams.rearm_resumes(self.resume_clock(now));
         None
     }
 
     /// 다음에 깨어날 시각. ★모든 타이머 원천이 여기 한 곳에 모인다★ — 새 원천을 더하면서 이 함수를
     /// 안 고치면 그 시한은 아무도 깨우지 않고, `Turn::Timer` 의 진도 확인도 그것을 못 본다.
+    ///
+    /// ★붙든 동안 멈추는 시한(침묵 · 이어받기 창)은 `paused` 로 가린다★ — `on_timer` 가 그 칸으로 판정하므로,
+    /// 그 자리의 배압을 다시 보면 둘이 어긋나 진도 확인이 깨진다(풀림이 첫머리 뒤에 끼면 낡은 `last_rx` 로 깰
+    /// 시각을 잡고, `on_timer` 는 아직 붙든 것으로 보고 안 끊는다).
     fn wake_at(&self) -> Instant {
-        let mut wake = (self.last_ping + self.policy.ping_interval)
-            .min(self.last_rx + self.policy.idle_timeout);
+        let mut wake = self.last_ping + self.policy.ping_interval;
+        if !self.paused {
+            wake = wake.min(self.last_rx + self.policy.idle_timeout);
+        }
         if let Some(deadline) = self.pending.next_deadline() {
             wake = wake.min(deadline);
         }
         // ★없으면 아무도 재요청 창을 못 닫는다★ — 잘림 판정이 조각 도착에만 매달려 있으면,
         //   구멍 뒤에 스트림이 조용해진 평범한 경우(턴이 끝났다)에 그 창이 영원히 열려 있다.
-        if let Some(deadline) = self.streams.next_resume_deadline() {
-            wake = wake.min(deadline);
+        if !self.paused {
+            if let Some(deadline) = self.streams.next_resume_deadline() {
+                wake = wake.min(deadline);
+            }
         }
         wake
     }
 
+    /// 배압이 풀린 순간 `last_rx` 를 그때로 두고 열린 이어받기 창의 청한 시각을 붙든 시간만큼 민다(TRD 3 §3-0
+    /// ① 불변식 2). 붙든 동안은 상대의 살아있음도 재요청의 답도 못 읽으니, 그 시간을 침묵 · 창 시한으로 세면
+    /// 우리가 막아 놓고 상대를 끊거나 메울 수 있던 구멍을 잘림으로 접는다 — 늦게 온 재생분은 지나간 번호로
+    /// 버려진다. 붙듦 = 순서 칸이 붙들고 있다(프레임 팔을 뺐다) 또는 읽기 문이 닫혔다(읽기 태스크가 통로를 안
+    /// 읽는다).
+    ///
+    /// ★붙든 시간은 알아챈 때가 아니라 붙듦이 시작된 때부터 센다★ — 감독은 쓰기를 기다리는 동안 바퀴 첫머리에
+    /// 못 온다. 그 사이 붙듦이 시작됐는데 알아챈 때부터 세면, 쓰기를 기다린 시간이 창 시한으로 세져 풀리자마자
+    /// 창이 닫힌다. ★그 사이 읽기 문이 닫혔다 다시 열렸으면 감독은 그 붙듦을 끝내 못 본다★ — 셈이 그 구간을
+    /// 모아 두었다가 넘기고([`Ledger::take_shut`]) 여기서 그만큼 민다. 안 밀면 시한을 넘긴 창이 앞잡이 줄의
+    /// 재생분보다 먼저 닫혀 낮은 번호가 지나간 번호로 버려진다.
+    ///
+    /// ★한 시간을 두 번 밀지 않는다★ — 붙든 줄 알고 있던 동안(`paused`) 닫혔다 열린 구간은 다 그 붙듦이 시작된
+    /// 뒤라 풀릴 때 미는 시간 안에 들고, 못 본 구간이 지금 새로 알아챈 붙듦에 걸쳐 있으면(순서 칸이 먼저
+    /// 붙들었다) 따로 밀지 않고 그 첫 구간이 닫힌 때부터 이 붙듦이 시작된 것으로 본다.
+    ///
+    /// 창이 붙든 시간보다 늦게 닫히는 쪽(잃는 것이 없다)으로만 어긋난다 — 풀린 때는 알아챈 때로 두고, 걸친
+    /// 구간 사이의 안 붙든 틈도 붙든 것으로 세고, 창을 열기 전의 구간도 그 창을 민다([`Self::resume_clock`]).
+    /// 침묵 판정은 풀림을 알아챈 때를 마지막 수신으로 삼으므로 시작 시각과 무관하다.
+    ///
+    /// `on_timer` 첫머리에서도 부른다 — 잠든 사이 풀렸으면(풀림 팔과 시한 팔이 함께 준비돼 시한 팔이 이겼다)
+    /// 그 판정이 바퀴 첫머리에 본 낡은 「붙듦」 대신 지금 상태를 쓰게 한다. ★침묵 판정은 이 칸(`paused`)으로
+    /// 한다 — 붙듦을 그 자리에서 다시 보면 풀린 순간 옛 `last_rx` 로 재서 50 s 넘게 붙든 상대를 곧바로 `Idle`
+    /// 로 끊는다★.
+    fn track_pause(&mut self, now: Instant) {
+        let shut = self.ledger.take_shut();
+        let order = (!self.order.is_empty()).then_some(self.order_since);
+        let began = match (order, shut.since) {
+            (Some(order), Some(gate)) => Some(order.min(gate)),
+            (order, gate) => order.or(gate),
+        };
+        let closed = shut.closed;
+        match (self.paused, began) {
+            // 그 사이 닫혔다 열린 구간은 붙든 줄 알고 있던 시간 안이다 — 풀릴 때 함께 민다.
+            (true, None) => {
+                self.last_rx = now;
+                self.streams
+                    .shift_resumes(now.saturating_duration_since(self.paused_since));
+            }
+            (true, Some(_)) => {}
+            (false, Some(began)) if closed.until.is_some_and(|until| until > began) => {
+                self.paused_since = closed.from.map_or(began, |from| from.min(began)).min(now);
+            }
+            (false, began) => {
+                // 못 본 붙듦이 풀린 것도 풀림이다 — 알아챈 지금을 마지막 수신으로 삼는다.
+                if closed.until.is_some() {
+                    self.last_rx = now;
+                    self.streams.shift_resumes(closed.total);
+                }
+                if let Some(began) = began {
+                    self.paused_since = began.min(now);
+                }
+            }
+        }
+        self.paused = began.is_some();
+    }
+
+    /// 이어받기 창이 읽는 시계 — 붙든 동안은 붙들기 시작한 시각에 멈춰 있다. 그 사이 연 창도 그 시각에 연
+    /// 것으로 적혀, 풀릴 때 민 만큼(`track_pause`) 풀린 시각부터 센다.
+    /// ★민 시간이 창을 넘치게 늦출 수는 있다(안전한 쪽)★ — 창을 열기 전에 이미 닫혔다 열렸거나 닫혀 있던 읽기
+    /// 문의 시간도 열린 창 전부를 민다.
+    fn resume_clock(&self, now: Instant) -> Instant {
+        if self.paused {
+            self.paused_since
+        } else {
+            now
+        }
+    }
+
     async fn on_timer(&mut self) -> Option<Input> {
         let now = self.clock.now();
-        if now.saturating_duration_since(self.last_rx) >= self.policy.idle_timeout {
+        self.track_pause(now);
+        if !self.paused && now.saturating_duration_since(self.last_rx) >= self.policy.idle_timeout {
             return Some(Input::LinkLost(DisconnectCause::Idle));
         }
         let after = self.policy.request_timeout;
@@ -949,16 +1148,10 @@ impl<W: Wire> Supervisor<W> {
                 after,
             });
         }
-        for collapsed in self.streams.expire_resumes(now) {
-            self.emit(TransportEvent::StreamTruncated {
-                peer: self.id.clone(),
-                stream: collapsed.key,
-                generation: collapsed.generation,
-                oldest_valid: collapsed.oldest_valid,
-            });
-            for msg in collapsed.flushed {
-                self.deliver(msg);
-            }
+        // 붙든 동안은 창을 안 닫는다 — 그 시계는 멈춰 있다(`resume_clock`).
+        if !self.paused {
+            let expired = self.streams.expire_resumes(now);
+            self.hand_over_truncations(expired);
         }
         if now.saturating_duration_since(self.last_ping) >= self.policy.ping_interval {
             self.last_ping = now;
@@ -1008,11 +1201,14 @@ impl<W: Wire> Supervisor<W> {
         }
     }
 
-    async fn on_frame(&mut self, frame: Frame) -> Option<Input> {
+    /// 받은 한 장을 처리한다. ★기다리지 않는다★ — 통로를 버리기 전에 앞잡이 줄을 비우는 자리
+    /// ([`Self::salvage_read_ahead`])도 이것을 부른다. 써야 할 재요청이 생기면 그 프레임을 돌려주고 쓰기는
+    /// 부르는 쪽 몫이다. `Err` = 이 통로를 끊는다(디코드 실패 정책).
+    fn on_frame(&mut self, frame: Frame, charge: Charge) -> Result<Option<Frame>, Input> {
         let now = self.clock.now();
         if matches!(frame, Frame::Keepalive) {
             self.last_rx = now;
-            return None;
+            return Ok(None);
         }
         // ★쓰레기는 살아있음의 증거가 아니다★ — 디코드 전에 되감으면 못 읽을 것만 보내는 상대가
         //   침묵 판정에 영원히 안 걸리고, 기본 정책이 프레임만 버리므로 끊는 밸브가 어디에도 없다.
@@ -1030,17 +1226,19 @@ impl<W: Wire> Supervisor<W> {
                     reason,
                 });
                 return match self.policy.decode_failure {
-                    DecodeFailurePolicy::DropFrame => None,
+                    DecodeFailurePolicy::DropFrame => Ok(None),
                     DecodeFailurePolicy::Disconnect => {
-                        Some(Input::LinkLost(DisconnectCause::LinkError))
+                        Err(Input::LinkLost(DisconnectCause::LinkError))
                     }
                 };
             }
         };
-        self.route(msg).await
+        Ok(self.route(msg, charge))
     }
 
-    async fn route(&mut self, msg: W::In) -> Option<Input> {
+    /// 답장이면 몫을 여기서 놓는다 — 답장은 줄이 아니라 기다리던 호출자에게 간다. 돌려주는 것 = 써야 할
+    /// 재요청([`Self::on_frame`]).
+    fn route(&mut self, msg: W::In, charge: Charge) -> Option<Frame> {
         let reply = self.wire.reply_tag(&msg);
         let mark = self.wire.stream_mark(&msg);
         if reply.is_some() && mark.is_some() {
@@ -1064,13 +1262,32 @@ impl<W: Wire> Supervisor<W> {
             }
             return None;
         }
+        let msg = Received {
+            msg,
+            charge,
+            generation: self.machine.generation(),
+        };
         let Some(mark) = mark else {
             self.deliver(msg);
             return None;
         };
+        // 이 감독이 스트림을 쓴다 — 예산을 읽기 몫과 창 상한으로 나눈다(`budget.rs` 헤더). 처음 보는 스트림의 첫
+        //   조각은 늘 배달이라(`Streams::observe_capped`) 나눔은 어느 붙듦보다도 앞선다 — 아래 창 상한 재기와의
+        //   앞뒤는 상관없다.
+        self.ledger.use_streams();
 
-        let now = self.clock.now();
-        let verdict = self.streams.observe(&mark, msg, now);
+        // ★창 상한은 붙들기 전에 잰다★ — 이 조각까지 붙들면 넘는다면 붙들 자리가 없는 것으로 보고 개수 상한이 찬
+        //   것과 같은 잘림으로 보낸다(`Streams::observe_capped`). 붙든 뒤에 자르면 그 사이 상한을 넘는다.
+        let over_cap = !self.ledger.window_fits(msg.charge.bytes());
+        let now = self.resume_clock(self.clock.now());
+        let verdict = self.streams.observe_capped(&mark, msg, now, over_cap);
+        if matches!(verdict, Verdict::Gap { .. } | Verdict::Held { .. }) {
+            // 방금 붙든 조각의 몫을 창 몫으로 센다 — 읽기 문에서 빠진다(`budget.rs` 헤더). 창에서 나갈 때는
+            //   `deliver` 가 되돌리고, 창 안에서 버려지면(답이 왔다 · 화신이 갈렸다) 몫이 떨어지며 둘 다에서 뺀다.
+            if let Some(held) = self.streams.held_mut(&mark.key, mark.seq) {
+                held.charge.hold();
+            }
+        }
         let (event, resume_after, delivered) = match verdict {
             Verdict::Deliver(msg) => (None, None, vec![msg]),
             Verdict::Duplicate | Verdict::Held { .. } => (None, None, Vec::new()),
@@ -1126,22 +1343,18 @@ impl<W: Wire> Supervisor<W> {
         for msg in delivered {
             self.deliver(msg);
         }
-        if let Some(input) = self.flush_evictions().await {
-            return Some(input);
-        }
-        if let Some(after) = resume_after {
+        self.flush_evictions();
+        resume_after.map(|after| {
             let out = self.wire.resume_request(&mark.key, Some(after));
-            let frame = self.wire.encode(&out);
-            return self.write(frame).await.err();
-        }
-        None
+            self.wire.encode(&out)
+        })
     }
 
     /// 자리를 만들려고 잊은 스트림을 신고하고, 그것이 붙들고 있던 조각을 내보낸다.
     ///
     /// ★축출이 미결 재요청을 통째로 삼키면 그 구멍은 영영 안 메워진다★ — `pending_resumes` 에서
     /// 사라지므로 재연결이 다시 청하지도 못하고, 잘림 사건도 안 난다.
-    async fn flush_evictions(&mut self) -> Option<Input> {
+    fn flush_evictions(&mut self) {
         for evicted in self.streams.drain_evicted() {
             self.emit(TransportEvent::StreamForgotten {
                 peer: self.id.clone(),
@@ -1161,7 +1374,21 @@ impl<W: Wire> Supervisor<W> {
                 self.deliver(msg);
             }
         }
-        None
+    }
+
+    /// 닫힌 이어받기 창을 신고하고 붙들었던 것을 순서대로 올린다.
+    fn hand_over_truncations(&mut self, collapsed: Vec<Truncation<W::StreamKey, Received<W::In>>>) {
+        for collapsed in collapsed {
+            self.emit(TransportEvent::StreamTruncated {
+                peer: self.id.clone(),
+                stream: collapsed.key,
+                generation: collapsed.generation,
+                oldest_valid: collapsed.oldest_valid,
+            });
+            for msg in collapsed.flushed {
+                self.deliver(msg);
+            }
+        }
     }
 
     // ── 쓰기 ────────────────────────────────────────────────────────────────
@@ -1251,6 +1478,8 @@ impl<W: Wire> Supervisor<W> {
             let _ = with_deadline(&*clock, deadline, tx.close(Close::new(code, "closing"))).await;
         }
         self.rx_raw = None;
+        // 운영 단계를 떠난 갈래면 `salvage_read_ahead` 가 이미 비우고 접었다 — 여기 남은 것은 받는 쪽이
+        //   사라져 넘길 데가 없는 경우뿐이다.
         self.frames_rx = None;
         self.fresh_link = false;
         if let Some(reader) = self.reader.take() {
@@ -1260,6 +1489,42 @@ impl<W: Wire> Supervisor<W> {
             //   시점이 되고, 상대가 붙은 통로를 세면 한동안 둘로 보인다. `read_link` 는 항상 `await`
             //   자리에서 멈춰 있어 이 대기가 한 바퀴를 넘지 않는다.
             let _ = reader.await;
+        }
+    }
+
+    /// ★통로를 버리기 전에 이미 읽은 것을 넘긴다★ — 운영 단계를 떠나는 모든 갈래(앱이 닫음 · 다시 걸기 · 쓰기
+    /// 실패 · 침묵 · 넘침 …)에서 기계에 입력을 먹이기 전에 부른다(`run`). 그 자리라 기계가 낼 대기자 깨움 ·
+    /// 끊김 사건보다 앞이다: 답장은 기다리던 호출자에게 가고, 그 밖은 끊김 사건 앞에 순서 칸에 선다. 세대
+    /// 표식도 운영 중과 같은 지금 세대다(새 세대는 다음 핸드셰이크가 뽑는다). 배압 아래에서는 앞잡이 줄이 차
+    /// 있을 수 있어, 이것이 없으면 그 줄([`Policy::frame_buffer`] 장)을 말없이 버린다.
+    ///
+    /// ★읽기 태스크를 먼저 접는다★ — 그 태스크는 앞잡이 줄 자리를 잡은 뒤에만 읽으므로(`read_link`) 접힌 뒤
+    /// 줄에 든 것이 읽은 것 전부다. 안 접고 비우면 비운 자리로 통로를 더 읽는다.
+    /// ★그 취소를 한 바퀴 기다리는 것 말고는 기다리지 않는다★(`drop_link` 의 같은 대기를 앞당긴 것 — TRD 3
+    /// §3-0 ② 「여기까지 기다림 없이」). 재요청도 안 쓴다 — 그 창은 열린 채 남아 다음 통로에서 다시 나간다
+    /// (`reissue_resumes`).
+    async fn salvage_read_ahead(&mut self) {
+        let Some(mut frames) = self.frames_rx.take() else {
+            return;
+        };
+        if let Some(reader) = self.reader.take() {
+            reader.abort();
+            let _ = reader.await;
+        }
+        while let Ok(msg) = frames.try_recv() {
+            match msg {
+                // ★디코드 실패로 끊는 정책이어도 멈추지 않고 그 뒤까지 넘긴다★ — 운영 중에 그 정책으로 끊으면
+                //   `run_live` 가 그 한 장에서 돌아오고 그 뒤에 이미 읽은 것은 이 비우기가 넘긴다. 여기서만 멈추면
+                //   같은 앞잡이 줄이 끊은 자리가 운영 중이었나 비우는 중이었나에 따라 넘어가기도 버려지기도 한다.
+                //   돌려받는 재요청은 안 쓴다(위 rustdoc).
+                LinkMsg::Frame(frame, charge) => {
+                    let _ = self.on_frame(frame, charge);
+                }
+                // 그 뒤에는 아무것도 없다(읽기 태스크가 거기서 끝났다).
+                // TODO(TRD 3 §6-0 U1d): 끝 원인 가름 — 상대의 닫힘 · 통로 오류가 이미 와 있었어도 지금은 우리가
+                //   통로를 버린 원인(다시 걸기 · 쓰기 실패 …)이 끊김 원인으로 남는다.
+                LinkMsg::Closed | LinkMsg::Failed => break,
+            }
         }
     }
 
@@ -1300,12 +1565,16 @@ impl<W: Wire> Supervisor<W> {
         while let Ok(cmd) = self.data_rx.try_recv() {
             self.reject_command(cmd);
         }
+        // ★열린 이어받기 창을 접는다★ — 장부는 이 감독과 함께 사라지므로, 안 접으면 붙든 조각이 배달도 잘림
+        //   신고도 없이 없어진다. 창이 시한에 닫힐 때와 같은 신고로 내보낸다.
+        let open = self.streams.close_resumes();
+        self.hand_over_truncations(open);
         self.report_drops();
-        self.put(Incoming::Event(TransportEvent::Closed {
+        self.emit(TransportEvent::Closed {
             peer: self.id.clone(),
             generation: self.machine.generation(),
             cause,
-        }));
+        });
         self.hand_over_held().await;
     }
 
@@ -1366,29 +1635,46 @@ impl<W: Wire> Supervisor<W> {
     }
 
     fn emit(&mut self, event: TransportEvent<W>) {
-        self.put(Incoming::Event(event));
+        self.put(Charged::bare(Incoming::Event(event)));
     }
 
-    fn deliver(&mut self, msg: W::In) {
+    fn deliver(&mut self, msg: Received<W::In>) {
+        let Received {
+            msg,
+            mut charge,
+            generation,
+        } = msg;
+        // ★올라가는 것은 전부 읽기 문에 선다★ — 창에서 나온 조각이면 창 몫에서 뺀다(`budget.rs` 헤더). 창 몫에
+        //   남겨 두면 받는 쪽이 느린 것만으로 창 몫이 차 다음 구멍을 못 붙든다.
+        charge.unhold();
         let arrival = Arrival {
             peer: self.id.clone(),
-            generation: self.machine.generation(),
+            generation,
             msg,
         };
-        self.put(Incoming::Message(arrival));
+        self.put(Charged {
+            item: Incoming::Message(arrival),
+            charge,
+        });
     }
 
     /// 순서 칸 끝에 넣고 줄에 실을 수 있는 만큼 싣는다. ★기다리지 않는다★ — 넣는 자리(사건 · 패킷 · 시한
     /// 사건 · 신고)가 전부 동기라서다. 거기서 기다리면 제어와 `fail_pending` 이 서고 정리가 매달린다.
     ///
     /// ★줄이 찼다고 이 연결을 끊지도 버리지도 않는다★ — 그 줄은 이 이름표의 것이라(`PeerConfig::inbound`)
-    /// 찼다는 것은 소비자가 이 상대를 못 따라간다는 뜻이지 연결의 잘못이 아니다(ADR-0310 결정 17).
-    fn put(&mut self, item: Incoming<W>) {
+    /// 찼다는 것은 소비자가 이 상대를 못 따라간다는 뜻이지 연결의 잘못이 아니다(ADR-0310 결정 17). 대신 순서
+    /// 칸이 붙든 동안 운영 루프가 그 상대의 읽기를 세운다(이 파일 헤더 「배압」).
+    fn put(&mut self, item: Charged<Incoming<W>>) {
         if self.consumer_gone.load(Ordering::Acquire) {
             return;
         }
+        let was_empty = self.order.is_empty();
         self.order.push_back(item);
         let open = flush(&self.inbound, &mut self.order);
+        // 순서 칸이 지금 붙들기 시작했다 — 이 상대의 배압이 시작된 시각이다(`track_pause`).
+        if was_empty && !self.order.is_empty() {
+            self.order_since = self.clock.now();
+        }
         self.note_room(open);
     }
 
@@ -1400,8 +1686,10 @@ impl<W: Wire> Supervisor<W> {
             return;
         }
         // 아직 못 실은 신고가 순서 칸 끝에 있으면 거기 더한다 — 줄이 밀린 동안 바퀴마다 한 건씩 쌓이지 않게.
-        if let Some(Incoming::Event(TransportEvent::Dropped { count: held, .. })) =
-            self.order.back_mut()
+        if let Some(Charged {
+            item: Incoming::Event(TransportEvent::Dropped { count: held, .. }),
+            ..
+        }) = self.order.back_mut()
         {
             *held += count;
             return;
@@ -1565,20 +1853,29 @@ async fn handshake_once(
 ///
 /// ★따로 태스크인 이유★ — `select!` 팔에 `recv()` 를 직접 걸면 다른 팔이 이길 때마다 그 future 가
 /// 취소되고, 취소 안전하지 않은 전송에서는 그 순간 프레임이 사라진다.
-async fn read_link(mut rx: Box<dyn LinkRx>, out: mpsc::Sender<LinkMsg>) {
+///
+/// ★읽기 문이 닫혀 있으면 다음 읽기를 안 한다★(「더하기 전 물높이」 — `budget.rs`) — 앞잡이 줄의 칸 수만으로는
+/// 그 줄이 칸 수 × 한 메시지 상한까지 쥔다. 몫은 읽은 그 자리에서 더한다.
+///
+/// ★앞잡이 줄 자리를 읽기 전에 잡는다★ — 읽은 한 장을 손에 든 채 자리를 기다리지 않는다. 그래서 감독이 이
+/// 태스크를 접으면 이미 읽은 것은 전부 앞잡이 줄에 있다(`Supervisor::salvage_read_ahead`). 손에 든 채
+/// 접히면 그 한 장은 통로에서 이미 꺼냈는데 아무 데도 안 간다.
+async fn read_link(mut rx: Box<dyn LinkRx>, out: mpsc::Sender<LinkMsg>, ledger: Arc<Ledger>) {
     loop {
-        let msg = match rx.recv().await {
-            Ok(LinkRead::Frame(frame)) => LinkMsg::Frame(frame),
-            Ok(LinkRead::Closed(_)) => {
-                let _ = out.send(LinkMsg::Closed).await;
-                return;
-            }
-            Err(_) => {
-                let _ = out.send(LinkMsg::Failed).await;
-                return;
-            }
+        let Ok(slot) = out.reserve().await else {
+            return;
         };
-        if out.send(msg).await.is_err() {
+        ledger.reader_room().await;
+        let (msg, last) = match rx.recv().await {
+            Ok(LinkRead::Frame(frame)) => {
+                let charge = ledger.charge(frame.payload_len());
+                (LinkMsg::Frame(frame, charge), false)
+            }
+            Ok(LinkRead::Closed(_)) => (LinkMsg::Closed, true),
+            Err(_) => (LinkMsg::Failed, true),
+        };
+        slot.send(msg);
+        if last {
             return;
         }
     }
@@ -1587,6 +1884,7 @@ async fn read_link(mut rx: Box<dyn LinkRx>, out: mpsc::Sender<LinkMsg>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::budget::split;
     use crate::policy::ReconnectPolicy;
     use crate::testing::{
         settle, settle_until, ClientMsg, HelloHandshake, ImmediateHandshake, ListeningHandshake,
@@ -1599,7 +1897,7 @@ mod tests {
         peer: Peer<TestWire>,
         net: MemoryNetwork,
         clock: ManualClock,
-        inbound: mpsc::Receiver<Incoming<TestWire>>,
+        inbound: mpsc::Receiver<Charged<Incoming<TestWire>>>,
         /// 울타리를 보려고 미리 꺼내 온 것들. 뒤이은 단언이 이것부터 읽는다.
         buffered: Vec<Incoming<TestWire>>,
         /// 감독 태스크. ★채널 · 시계로는 「끝났다」와 「패닉했다」를 못 가른다★ — 패닉도 감독을 떨어뜨려
@@ -1635,7 +1933,7 @@ mod tests {
         fn drain(&mut self) -> Vec<Incoming<TestWire>> {
             let mut out = std::mem::take(&mut self.buffered);
             while let Ok(item) = self.inbound.try_recv() {
-                out.push(item);
+                out.push(item.into_item());
             }
             out
         }
@@ -1645,6 +1943,7 @@ mod tests {
             let mut hit = false;
             let mut kept = Vec::new();
             while let Ok(item) = self.inbound.try_recv() {
+                let item = item.into_item();
                 if let Some(TestIn::Notice(text)) = item.as_message().map(|a| &a.msg) {
                     if text == body {
                         hit = true;
@@ -1696,6 +1995,15 @@ mod tests {
     }
 
     fn build_with(policy: Policy, handshake: Arc<dyn Handshake>, inbound_cap: usize) -> Harness {
+        build_budgeted(policy, handshake, inbound_cap, BYTE_BUDGET)
+    }
+
+    fn build_budgeted(
+        policy: Policy,
+        handshake: Arc<dyn Handshake>,
+        inbound_cap: usize,
+        byte_budget: usize,
+    ) -> Harness {
         let net = MemoryNetwork::new();
         let clock = ManualClock::new();
         let (inbound_tx, inbound) = mpsc::channel(inbound_cap);
@@ -1708,6 +2016,7 @@ mod tests {
             handshake,
             policy: no_jitter(policy),
             inbound: inbound_tx,
+            byte_budget,
             generations: Arc::new(AtomicU64::new(0)),
             start_closed: false,
         });
@@ -1938,6 +2247,7 @@ mod tests {
             handshake: Arc::new(ImmediateHandshake),
             policy: Policy::default(),
             inbound: inbound_tx,
+            byte_budget: BYTE_BUDGET,
             generations: counter.clone(),
             start_closed: false,
         });
@@ -1964,6 +2274,7 @@ mod tests {
             handshake: Arc::new(ImmediateHandshake),
             policy: Policy::default(),
             inbound: inbound_tx,
+            byte_budget: BYTE_BUDGET,
             generations: Arc::new(AtomicU64::new(0)),
             start_closed: true,
         });
@@ -1992,6 +2303,7 @@ mod tests {
                 handshake: Arc::new(ImmediateHandshake),
                 policy: Policy::default(),
                 inbound: inbound_tx.clone(),
+                byte_budget: BYTE_BUDGET,
                 generations: counter.clone(),
                 start_closed: false,
             })
@@ -3366,7 +3678,12 @@ mod tests {
         let (mut h, endpoint) = live_on_a_full_line().await;
         endpoint.push(TestWire::encode_in(&TestIn::Notice("last words".into())));
         endpoint.close();
-        settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+        settle().await;
+        assert_eq!(
+            h.peer.peer_state(),
+            PeerState::Live,
+            "★닫힘은 붙든 말 뒤에 줄 서 있다★ — 받는 쪽이 그 말을 꺼내기 전에는 감독이 닫힘을 읽지 않는다"
+        );
 
         let items = drain_until_quiet(&mut h).await;
         assert_eq!(
@@ -3374,6 +3691,7 @@ mod tests {
             vec!["Connected:1", "msg:last words", "Disconnected:1:PeerClosed"],
             "★상대가 보내고 곧바로 닫아도 그 말은 안 버려지고 끊김보다 먼저 온다★"
         );
+        assert_eq!(h.peer.peer_state(), PeerState::Backoff);
     }
 
     #[tokio::test]
@@ -3387,9 +3705,9 @@ mod tests {
         first.push(Frame::Text("welcome".into()));
         settle_until("연결", || h.peer.peer_state() == PeerState::Live).await;
         first.push(TestWire::encode_in(&TestIn::Notice("n0".into())));
-        first.close();
-        settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
-        h.clock.advance(Duration::from_millis(500));
+        settle().await;
+        // 상대의 닫힘은 붙든 n0 뒤에 줄 서 안 읽히므로(배압) 제어로 다시 걸게 한다.
+        h.peer.reconnect_now();
         settle_until("둘째 핸드셰이크 대기", || {
             h.peer.peer_state() == PeerState::Handshaking
         })
@@ -3399,7 +3717,7 @@ mod tests {
         let items = drain_until_quiet(&mut h).await;
         assert_eq!(
             labels(&items),
-            vec!["Connected:1", "msg:n0", "Disconnected:1:PeerClosed"],
+            vec!["Connected:1", "msg:n0", "Disconnected:1:Explicit"],
             "★핸드셰이크가 상대를 기다리는 동안에도 받는 쪽이 비우는 대로 붙든 것이 실린다★"
         );
         assert_eq!(h.peer.peer_state(), PeerState::Handshaking);
@@ -3417,6 +3735,11 @@ mod tests {
             endpoint.push(TestWire::encode_in(&TestIn::Notice(format!("n{n}"))));
         }
         settle().await;
+        assert_eq!(
+            h.peer.held_bytes(),
+            3 * "not|n0".len(),
+            "n0 은 순서 칸에, n1 · n2 는 앞잡이 줄에 있다 — 순서 칸이 붙든 동안 프레임 팔을 뺐다"
+        );
         h.peer.close();
         settle_until("접힘", || h.peer.peer_state() == PeerState::Closed).await;
 
@@ -3431,8 +3754,10 @@ mod tests {
                 "Disconnected:1:Explicit",
                 "Closed:1:Explicit",
             ],
-            "★붙든 것을 다 실은 뒤 Closed 가 맨 끝이다★"
+            "★붙든 것을 다 실은 뒤 Closed 가 맨 끝이다★ — 앞잡이 줄의 n1 · n2 도 통로를 버리기 전에 건져 \
+             끊김 앞에 실린다"
         );
+        assert_eq!(h.peer.held_bytes(), 0, "꺼낸 몫은 셈에서 빠졌다");
         assert!(
             matches!(
                 h.inbound.try_recv(),
@@ -3580,7 +3905,7 @@ mod tests {
     #[tokio::test]
     async fn a_backing_off_peer_holding_items_folds_when_the_consumer_goes() {
         let (mut h, endpoint) = live_on_a_full_line().await;
-        endpoint.push(TestWire::encode_in(&TestIn::Notice("held".into())));
+        // 붙드는 것은 끊김 사건이다 — 그 앞에 알림을 두면 닫힘이 그 뒤에 줄 서 안 읽힌다(배압).
         endpoint.close();
         settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
         assert_eq!(
@@ -3630,9 +3955,9 @@ mod tests {
         first.push(Frame::Text("welcome".into()));
         settle_until("연결", || h.peer.peer_state() == PeerState::Live).await;
         first.push(TestWire::encode_in(&TestIn::Notice("n0".into())));
-        first.close();
-        settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
-        h.clock.advance(Duration::from_millis(500));
+        settle().await;
+        // `held_items_keep_flowing_while_the_supervisor_is_mid_handshake` 의 같은 줄 — 제어로 다시 걸게 한다.
+        h.peer.reconnect_now();
         settle_until("둘째 핸드셰이크 대기", || {
             h.peer.peer_state() == PeerState::Handshaking
         })
@@ -3711,5 +4036,1124 @@ mod tests {
         assert_eq!(h.peer.generation(), Generation(1));
         settle_until("감독이 끝났다", || h.task.is_finished()).await;
         assert!(h.exited_cleanly().await);
+    }
+
+    // ── 3-0 U1c: 배압 · 바이트 셈 · 침묵 판정 멈춤 ──
+
+    /// 페이로드가 정확히 `len` 바이트인 한 장.
+    fn blob(tag: u8, len: usize) -> Frame {
+        Frame::Binary(vec![tag; len])
+    }
+
+    fn blob_tags(items: &[Incoming<TestWire>]) -> Vec<u8> {
+        items
+            .iter()
+            .filter_map(|item| match item.as_message().map(|a| &a.msg) {
+                Some(TestIn::Blob(bytes)) => Some(bytes[0]),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn notices(items: &[Incoming<TestWire>]) -> Vec<String> {
+        items
+            .iter()
+            .filter_map(|item| match item.as_message().map(|a| &a.msg) {
+                Some(TestIn::Notice(body)) => Some(body.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_held_line_stops_reading_the_link_instead_of_growing_the_order_slot() {
+        let frame_buffer = 4;
+        let mut h = build_with(
+            Policy {
+                frame_buffer,
+                ..Policy::default()
+            },
+            Arc::new(ImmediateHandshake),
+            1,
+        );
+        settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
+        let endpoint = h.net.accept().unwrap();
+        for n in 0..20 {
+            endpoint.push(TestWire::encode_in(&TestIn::Notice(format!("n{n:02}"))));
+        }
+        settle().await;
+
+        // n00 = 순서 칸 · n01~n04 = 앞잡이 줄. 읽기 태스크는 자리를 잡은 뒤에만 읽어 손에 든 한 장이 없다.
+        let read = 1 + frame_buffer;
+        assert_eq!(
+            endpoint.unread(),
+            20 - read,
+            "★순서 칸이 붙든 동안 프레임을 더 안 꺼내 통로가 밀린다★ — 순서 칸이 자라지 않는다"
+        );
+        assert_eq!(h.peer.held_bytes(), read * "not|n00".len());
+        assert_eq!(
+            h.peer.peer_state(),
+            PeerState::Live,
+            "밀린 것은 끊을 일이 아니다"
+        );
+
+        let items = drain_until_quiet(&mut h).await;
+        assert_eq!(
+            notices(&items),
+            (0..20).map(|n| format!("n{n:02}")).collect::<Vec<_>>(),
+            "★배압 아래에서도 하나도 안 버려지고 온 순서대로 나온다★"
+        );
+        assert_eq!(endpoint.unread(), 0);
+        assert_eq!(h.peer.held_bytes(), 0, "꺼낸 몫은 셈에서 빠진다");
+    }
+
+    #[tokio::test]
+    async fn a_frame_past_the_byte_budget_stops_the_reads_and_loses_nothing() {
+        let budget = 100;
+        let mut h = build_budgeted(
+            Policy::default(),
+            Arc::new(ImmediateHandshake),
+            4096,
+            budget,
+        );
+        settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
+        let endpoint = h.net.accept().unwrap();
+        h.drain();
+        for tag in 0..5u8 {
+            endpoint.push(blob(tag, 150));
+        }
+        settle().await;
+        assert_eq!(
+            endpoint.unread(),
+            4,
+            "★빈 셈에는 예산보다 큰 한 장도 들어가고, 그 뒤로는 통로를 안 읽는다★(더하기 전 물높이)"
+        );
+        assert_eq!(h.peer.held_bytes(), 150);
+
+        let mut tags = Vec::new();
+        for _ in 0..5 {
+            let taken = h.drain();
+            assert_eq!(blob_tags(&taken).len(), 1, "한 번에 한 장씩만 읽힌다");
+            tags.extend(blob_tags(&taken));
+            settle().await;
+        }
+        assert_eq!(tags, vec![0, 1, 2, 3, 4], "★손실 0 · 순서 그대로★");
+        assert_eq!(endpoint.unread(), 0);
+        assert_eq!(h.peer.held_bytes(), 0);
+    }
+
+    // ★줄 길이 1 로 세 층을 다 쓴다★ — 첫 장은 순서 칸에, 둘째 장은 앞잡이 줄에 선다. 읽기 몫(스트림을 안 쓰니
+    //   예산 전부) 바로 밑에서 한 장을 더 읽는 것이 최악이라 한 장을 읽기 몫보다 1 작게 둔다. 스트림을 쓰며 창
+    //   몫까지 채운 천장은 아래 `holding_a_window_full_and_a_read_share_full_still_fits_the_budget_plus_one_message`.
+    #[tokio::test]
+    async fn what_a_peer_holds_never_exceeds_the_budget_plus_one_message() {
+        let budget = 1000;
+        let message = budget - 1;
+        let mut h = build_budgeted(Policy::default(), Arc::new(ImmediateHandshake), 1, budget);
+        settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
+        let endpoint = h.net.accept().unwrap();
+        let sent = 10u8;
+        for tag in 0..sent {
+            endpoint.push(blob(tag, message));
+            settle().await;
+            assert!(
+                h.peer.held_bytes() <= budget + message,
+                "{tag}번째를 보낸 뒤 {} 바이트를 쥐었다 — 앞잡이 줄 · 순서 칸 · 줄의 합이 B + M 을 넘었다",
+                h.peer.held_bytes()
+            );
+        }
+        assert_eq!(
+            h.peer.held_bytes(),
+            2 * message,
+            "★스트림을 안 쓰는 감독은 예산 전부를 읽기 몫으로 쓴다★ — 그 밑에서 한 장 더 읽고 거기서 멈췄다"
+        );
+        assert_eq!(endpoint.unread(), usize::from(sent) - 2);
+
+        let mut tags = Vec::new();
+        loop {
+            settle().await;
+            assert!(h.peer.held_bytes() <= budget + message);
+            let taken = h.drain();
+            if taken.is_empty() {
+                break;
+            }
+            tags.extend(blob_tags(&taken));
+        }
+        assert_eq!(
+            tags,
+            (0..sent).collect::<Vec<_>>(),
+            "★손실 0 · 순서 그대로★"
+        );
+        assert_eq!(h.peer.held_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn keepalive_goes_out_and_close_is_heard_while_the_line_is_held() {
+        let (mut h, endpoint) = live_on_a_full_line().await;
+        for n in 0..8 {
+            endpoint.push(TestWire::encode_in(&TestIn::Notice(format!("n{n}"))));
+        }
+        endpoint.push(Frame::Keepalive);
+        settle().await;
+        assert!(h.peer.held_bytes() > 0, "순서 칸이 붙들고 있다");
+
+        for _ in 0..3 {
+            h.clock.advance(Duration::from_secs(20));
+            settle().await;
+            assert!(
+                endpoint.drain().contains(&ClientMsg::Ping),
+                "★붙든 동안에도 우리 ping 은 나간다★ — 안 나가면 상대가 우리를 침묵으로 끊는다"
+            );
+        }
+        assert_eq!(h.peer.peer_state(), PeerState::Live);
+
+        h.peer.close();
+        settle_until("붙든 채로도 닫기가 들린다", || {
+            h.peer.peer_state() == PeerState::Closed
+        })
+        .await;
+        let items = drain_until_quiet(&mut h).await;
+        assert_eq!(
+            labels(&items).last().map(String::as_str),
+            Some("Closed:1:Explicit")
+        );
+    }
+
+    /// 50 s 넘게 붙든 뒤 풀어도 `Idle` 이 아니고, 침묵 판정은 풀린 그 순간부터 다시 센다.
+    async fn idle_restarts_from_the_release(mut h: Harness, what: &str) {
+        h.clock.advance(Duration::from_secs(60));
+        settle().await;
+        assert_eq!(
+            h.peer.peer_state(),
+            PeerState::Live,
+            "{what}: ★막은 것은 우리 쪽이다★ — 붙든 시간을 상대의 침묵으로 세면 안 된다"
+        );
+
+        drain_until_quiet(&mut h).await;
+        h.clock.advance(Duration::from_secs(49));
+        settle().await;
+        assert_eq!(
+            h.peer.peer_state(),
+            PeerState::Live,
+            "{what}: ★풀린 순간이 `last_rx` 다★ — 그 앞의 마지막 수신부터 세면 곧바로 끊긴다"
+        );
+        h.clock.advance(Duration::from_secs(1));
+        settle().await;
+        assert_eq!(
+            h.disconnect_cause(),
+            Some(DisconnectCause::Idle),
+            "{what}: 풀린 뒤에는 침묵 판정이 다시 돈다"
+        );
+    }
+
+    #[tokio::test]
+    async fn holding_past_the_idle_timeout_on_a_full_line_is_not_silence() {
+        let (h, endpoint) = live_on_a_full_line().await;
+        endpoint.push(TestWire::encode_in(&TestIn::Notice("held".into())));
+        settle().await;
+        idle_restarts_from_the_release(h, "순서 칸").await;
+    }
+
+    #[tokio::test]
+    async fn holding_past_the_idle_timeout_over_the_byte_budget_is_not_silence() {
+        let budget = 100;
+        let mut h = build_budgeted(
+            Policy::default(),
+            Arc::new(ImmediateHandshake),
+            4096,
+            budget,
+        );
+        settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
+        let endpoint = h.net.accept().unwrap();
+        h.drain();
+        // ★뒤에 살아있음 확인을 두지 않는다★ — 풀리자마자 그것이 읽혀 `last_rx` 를 되감으면 풀림의 되감기를
+        //   재지 못한다.
+        endpoint.push(blob(0, 2 * budget));
+        settle().await;
+        assert!(
+            h.peer.held_bytes() >= budget,
+            "줄에 든 한 장이 예산을 넘겼다"
+        );
+        idle_restarts_from_the_release(h, "바이트 예산").await;
+    }
+
+    // ★풀림이 진도 확인이 따르는 타이머 바퀴(`Turn::Timer`) 안에 끼게 한다★ — `on_timer` 는 첫머리의 「붙듦」으로
+    //   침묵 판정을 건너뛰었는데, 깨어날 시각을 그 자리의 배압으로 다시 재면 낡은 `last_rx` 의 침묵 시한(이미
+    //   지났다)으로 잡혀 진도 확인(`debug_assert`)이 감독을 패닉시킨다.
+    //   그 바퀴로 가려면 감독이 `select` 밖에 있는 동안 ping 시각이 지나야 한다 — 막힌 알림 쓰기로 세운다. 그 쓰기를
+    //   풀면 감독은 양보 없이 그 바퀴의 ping 까지 가므로, ping 만 따로 막아 그 안에서 받는 쪽이 비우게 한다.
+    #[tokio::test]
+    async fn a_release_inside_a_timer_round_does_not_trip_the_progress_check() {
+        let budget = 100;
+        let mut h = build_budgeted(
+            Policy::default(),
+            Arc::new(ImmediateHandshake),
+            4096,
+            budget,
+        );
+        settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
+        let endpoint = h.net.accept().unwrap();
+        endpoint.push(blob(0, 2 * budget));
+        settle().await;
+        assert!(h.peer.held_bytes() >= budget, "예산만으로 붙든다");
+        // 침묵 시한(50 s)을 넘긴다 — 붙든 동안이라 끊지 않고, ping 은 20 s 마다 나간다.
+        for _ in 0..2 {
+            h.clock.advance(Duration::from_secs(20));
+            settle().await;
+        }
+        h.clock.advance(Duration::from_secs(16));
+        settle().await;
+        assert_eq!(h.peer.peer_state(), PeerState::Live);
+
+        endpoint.stall_writes(true);
+        h.peer.notify(TestOut::Notice("slow".into())).unwrap();
+        settle().await;
+        // 쓰기에 선 채 다음 ping 시각(60 s)을 넘긴다 — 쓰기 시한(5 s) 안이다.
+        h.clock.advance(Duration::from_millis(4500));
+        settle().await;
+        endpoint.stall_pings(true);
+        endpoint.stall_writes(false);
+        settle().await;
+        assert!(!h.task.is_finished(), "타이머 바퀴의 ping 에서 기다린다");
+        h.drain();
+        endpoint.stall_pings(false);
+        settle().await;
+        assert!(
+            !h.task.is_finished(),
+            "★붙든 채 들어간 타이머 바퀴 안에서 풀려도 진도 확인이 안 터진다★"
+        );
+        assert_eq!(h.peer.peer_state(), PeerState::Live);
+        assert!(endpoint.drain().contains(&ClientMsg::Ping));
+    }
+
+    // ── 3-0 U1c: 이어받기 창 · 배압 ──
+
+    /// 페이로드가 정확히 `len` 바이트인 스트림 조각(키 1 · 화신 1).
+    fn sized_chunk(seq: u64, len: usize) -> Frame {
+        let head = format!("chk|1|1|{seq}|");
+        assert!(len >= head.len(), "{len} 바이트로는 머리도 못 싣는다");
+        Frame::Text(format!("{head}{}", "x".repeat(len - head.len())))
+    }
+
+    fn chunk_seqs(items: &[Incoming<TestWire>]) -> Vec<u64> {
+        items
+            .iter()
+            .filter_map(|item| match item.as_message().map(|a| &a.msg) {
+                Some(TestIn::Chunk { seq, .. }) => Some(*seq),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn truncations(items: &[Incoming<TestWire>]) -> Vec<u64> {
+        items
+            .iter()
+            .filter_map(|item| match item.as_event() {
+                Some(TransportEvent::StreamTruncated { oldest_valid, .. }) => Some(*oldest_valid),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 1번 조각을 받아 꺼내 둔 감독 — 다음 조각부터 구멍 판정이 선다.
+    async fn streaming(budget: usize, inbound_cap: usize) -> (Harness, Arc<MemoryEndpoint>) {
+        let mut h = build_budgeted(
+            Policy::default(),
+            Arc::new(ImmediateHandshake),
+            inbound_cap,
+            budget,
+        );
+        settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
+        let endpoint = h.net.accept().unwrap();
+        endpoint.push(TestWire::chunk(1, 1, 1));
+        assert_eq!(chunk_seqs(&drain_until_quiet(&mut h).await), vec![1]);
+        (h, endpoint)
+    }
+
+    // ★붙든 조각을 창 상한만큼 키운다★ — 창 상한이 읽기 몫 이상이라, 그 몫이 읽기 문에 들어가면 문이 닫혀
+    //   재생분이 통로에 남아 구멍을 못 메우고, 창이 시한에 닫힌 뒤 늦게 온 재생분은 지나간 번호로 버려진다.
+    #[tokio::test]
+    async fn a_held_chunk_never_stops_the_reads_that_fill_its_gap() {
+        let budget = 100;
+        let (read_share, window_cap) = split(budget);
+        assert!(window_cap >= read_share);
+        let (mut h, endpoint) = streaming(budget, 4096).await;
+        endpoint.push(sized_chunk(3, window_cap));
+        settle().await;
+        assert_eq!(
+            endpoint.frames(),
+            vec![Frame::Text("res|1|1".into())],
+            "구멍을 보고 재요청을 냈다"
+        );
+        assert_eq!(
+            h.peer.window_bytes(),
+            window_cap,
+            "붙든 조각은 창 몫에 선다"
+        );
+
+        endpoint.push(TestWire::chunk(1, 1, 2));
+        endpoint.push(TestWire::chunk(1, 1, 3));
+        settle().await;
+        assert_eq!(
+            endpoint.unread(),
+            0,
+            "★붙든 조각이 창 상한만큼이어도 재생분은 읽힌다★"
+        );
+        let items = h.drain();
+        assert_eq!(
+            chunk_seqs(&items),
+            vec![2, 3],
+            "★구멍이 메워져 순서대로 온다★"
+        );
+        assert_eq!(truncations(&items), Vec::<u64>::new(), "잘림이 아니다");
+        assert_eq!(h.peer.window_bytes(), 0, "답이 와 붙든 것을 버렸다");
+    }
+
+    // ★창을 연 뒤 받는 쪽이 멈춘다★ — 줄 길이 1 을 알림 하나로 채워 구멍 사건이 순서 칸에 서고, 그동안 프레임
+    //   팔이 빠져 재생분이 앞잡이 줄에 머문다. 창 시한을 그대로 세면 그 사이 창이 닫혀 재생분이 버려진다.
+    #[tokio::test]
+    async fn a_stalled_consumer_does_not_run_the_resume_window_out() {
+        let (mut h, endpoint) = streaming(BYTE_BUDGET, 1).await;
+        endpoint.push(TestWire::encode_in(&TestIn::Notice("fill".into())));
+        endpoint.push(TestWire::chunk(1, 1, 3));
+        settle().await;
+        assert_eq!(endpoint.frames(), vec![Frame::Text("res|1|1".into())]);
+        endpoint.push(TestWire::chunk(1, 1, 2));
+        endpoint.push(TestWire::chunk(1, 1, 3));
+        settle().await;
+        assert!(
+            h.peer.held_bytes() > h.peer.window_bytes(),
+            "재생분이 앞잡이 줄에 있다"
+        );
+
+        // 창 시한(2 s)을 넘기고, ping 시각(20 s)도 넘겨 붙든 채 타이머가 한 번 돌게 한다.
+        h.clock.advance(Duration::from_secs(3));
+        settle().await;
+        h.clock.advance(Duration::from_secs(20));
+        settle().await;
+        assert!(
+            endpoint.drain().contains(&ClientMsg::Ping),
+            "붙든 채 타이머가 돌았다"
+        );
+        assert_eq!(h.peer.peer_state(), PeerState::Live);
+
+        let items = drain_until_quiet(&mut h).await;
+        assert_eq!(
+            truncations(&items),
+            Vec::<u64>::new(),
+            "★막아 둔 것은 우리 쪽이다★ — 붙든 시간을 창 시한으로 세면 메울 수 있던 구멍을 잘림으로 접는다"
+        );
+        assert_eq!(
+            chunk_seqs(&items),
+            vec![2, 3],
+            "★풀린 뒤 재생분이 구멍을 메운다★"
+        );
+    }
+
+    // 예산 100 = 창 상한 50 — 30 두 장이면 둘째에서 넘는다.
+    #[tokio::test]
+    async fn holding_past_the_window_cap_takes_the_truncation_path() {
+        let budget = 100;
+        let (mut h, endpoint) = streaming(budget, 4096).await;
+        endpoint.push(sized_chunk(3, 30));
+        settle().await;
+        assert_eq!(h.peer.window_bytes(), 30);
+
+        endpoint.push(sized_chunk(4, 30));
+        settle().await;
+        assert_eq!(
+            (h.peer.held_bytes(), h.peer.window_bytes()),
+            (60, 0),
+            "★창에서 나온 조각의 몫은 읽기 문으로 돌아간다★ — 창 몫에 남으면 받는 쪽이 느린 것만으로 다음 구멍을 \
+             못 붙든다"
+        );
+        let items = h.drain();
+        assert_eq!(
+            truncations(&items),
+            vec![3],
+            "★창 상한을 넘기면 말없이 버리지 않고 잘림으로 신고한다★ — 붙든 첫 번호가 하한이다"
+        );
+        assert_eq!(
+            chunk_seqs(&items),
+            vec![3, 4],
+            "붙든 것을 순서대로 내보낸다"
+        );
+        assert_eq!(h.peer.held_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn held_bytes_counts_a_held_chunk_until_its_window_resolves() {
+        let (mut h, endpoint) = streaming(BYTE_BUDGET, 4096).await;
+        let held = TestWire::chunk(1, 1, 3).payload_len();
+        endpoint.push(TestWire::chunk(1, 1, 3));
+        settle().await;
+        h.drain();
+        assert_eq!(
+            (h.peer.held_bytes(), h.peer.window_bytes()),
+            (held, held),
+            "★창이 붙든 조각도 감독이 쥔 바이트다★"
+        );
+
+        let answer = TestWire::chunk(1, 1, 2).payload_len();
+        endpoint.push(TestWire::chunk(1, 1, 2));
+        settle().await;
+        assert_eq!(
+            (h.peer.held_bytes(), h.peer.window_bytes()),
+            (answer, 0),
+            "답이 와 창이 닫히면 붙든 몫이 빠지고 올라간 답만 남는다"
+        );
+        h.drain();
+        assert_eq!(h.peer.held_bytes(), 0);
+    }
+
+    // ── 3-0 U1c: 통로를 버릴 때 앞잡이 줄을 건진다 ──
+    //
+    // ★줄 길이 1 로 세운다★ — n0 은 순서 칸에 서고 n1 · n2 는 프레임 팔이 빠져 앞잡이 줄에 남는다.
+
+    async fn three_notices_held(h: &Harness, endpoint: &MemoryEndpoint) {
+        for n in 0..3 {
+            endpoint.push(TestWire::encode_in(&TestIn::Notice(format!("n{n}"))));
+        }
+        settle().await;
+        assert_eq!(
+            h.peer.held_bytes(),
+            3 * "not|n0".len(),
+            "n0 은 순서 칸에, n1 · n2 는 앞잡이 줄에 있다"
+        );
+        assert_eq!(endpoint.unread(), 0);
+    }
+
+    // ★앞잡이 줄을 꽉 채운다(2칸)★ — 읽기 태스크가 다음 자리를 기다리는 동안 손에 든 한 장이 없어야, 건진 것과
+    //   통로에 남은 것을 합쳐 보낸 것 전부가 된다.
+    #[tokio::test]
+    async fn reconnecting_hands_over_what_was_already_read_before_the_new_link() {
+        let mut h = build_with(
+            Policy {
+                frame_buffer: 2,
+                ..Policy::default()
+            },
+            Arc::new(ImmediateHandshake),
+            1,
+        );
+        settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
+        let endpoint = h.net.accept().unwrap();
+        for n in 0..5 {
+            endpoint.push(TestWire::encode_in(&TestIn::Notice(format!("n{n}"))));
+        }
+        settle().await;
+        assert_eq!(
+            endpoint.unread(),
+            2,
+            "n0 은 순서 칸에, n1 · n2 는 앞잡이 줄에"
+        );
+        h.peer.reconnect_now();
+        settle_until("새 통로", || h.net.dials() == 2).await;
+
+        let items = drain_until_quiet(&mut h).await;
+        assert_eq!(
+            labels(&items),
+            vec![
+                "Connected:1",
+                "msg:n0",
+                "msg:n1",
+                "msg:n2",
+                "Disconnected:1:Explicit",
+                "Connected:2",
+            ],
+            "★다시 걸어도 이미 읽은 것은 버리지 않고 옛 세대로 끊김 앞에 싣는다★"
+        );
+        assert_eq!(
+            endpoint.unread(),
+            2,
+            "n3 · n4 는 옛 통로에 남았다 — 읽고서 버린 것은 없다"
+        );
+        assert_eq!(h.peer.held_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_write_failure_hands_over_what_was_already_read_before_the_disconnect() {
+        let (mut h, endpoint) = live_on_a_full_line().await;
+        three_notices_held(&h, &endpoint).await;
+        endpoint.stall_writes(true);
+        h.peer.notify(TestOut::Notice("stuck".into())).unwrap();
+        settle().await;
+        h.clock.advance(Policy::default().write_deadline);
+        settle().await;
+        // 버리는 통로의 닫기도 같은 멈춤에 걸린다 — 풀어 정리를 끝낸다(`stall_writes` rustdoc).
+        endpoint.stall_writes(false);
+
+        let items = drain_until_quiet(&mut h).await;
+        assert_eq!(
+            labels(&items),
+            vec![
+                "Connected:1",
+                "msg:n0",
+                "msg:n1",
+                "msg:n2",
+                "Disconnected:1:WriteDeadline",
+                "Dropped",
+            ],
+            "★쓰기가 실패해도 이미 읽은 것은 끊김 앞에 온다★ — 못 나간 알림의 신고는 백오프가 낸다"
+        );
+    }
+
+    // ★다시 붙은 통로도 같은 셈을 쓴다★ — 옛 통로가 남긴 몫이 읽기 몫 밑으로 내려오기 전에는 새 통로를 안 읽는다.
+    #[tokio::test]
+    async fn a_new_link_waits_for_what_the_old_link_left_to_drop_below_the_budget() {
+        let budget = 100;
+        let mut h = build_budgeted(
+            Policy::default(),
+            Arc::new(ImmediateHandshake),
+            4096,
+            budget,
+        );
+        settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
+        let first = h.net.accept().unwrap();
+        first.push(blob(0, 2 * budget));
+        settle().await;
+        assert_eq!(h.peer.held_bytes(), 2 * budget, "줄에 남겨 둔다");
+
+        h.peer.reconnect_now();
+        settle_until("다시 붙음", || h.net.dials() == 2).await;
+        settle_until("운영", || h.peer.peer_state() == PeerState::Live).await;
+        let second = h.net.accept().unwrap();
+        second.push(blob(1, 10));
+        settle().await;
+        assert_eq!(
+            second.unread(),
+            1,
+            "★옛 통로의 몫이 읽기 몫 이상이면 새 통로를 안 읽는다★"
+        );
+
+        let items = drain_until_quiet(&mut h).await;
+        assert_eq!(blob_tags(&items), vec![0, 1]);
+        assert_eq!(second.unread(), 0, "옛 몫이 빠지자 새 통로를 읽었다");
+        assert_eq!(h.peer.held_bytes(), 0);
+    }
+
+    // ★답장이 앞잡이 줄에 있는 채 다시 걸어도 기다리던 호출자가 받는다★ — 건지기가 기계의 대기자 깨움보다 앞이다.
+    #[tokio::test]
+    async fn a_reply_already_read_reaches_its_caller_when_reconnecting() {
+        let (mut h, endpoint) = live_on_a_full_line().await;
+        let asked = spawn_request(&h.peer, 7);
+        settle().await;
+        endpoint.push(TestWire::encode_in(&TestIn::Notice("held".into())));
+        endpoint.push(TestWire::reply(7));
+        settle().await;
+        assert_eq!(endpoint.unread(), 0);
+        assert!(!asked.is_finished(), "답장은 앞잡이 줄에 있다");
+
+        h.peer.reconnect_now();
+        assert_eq!(
+            joined(asked).await,
+            Ok(TestIn::Reply {
+                tag: 7,
+                body: "ok".into(),
+            }),
+            "★이미 읽은 답장은 끊김으로 실패하지 않는다★"
+        );
+        drain_until_quiet(&mut h).await;
+    }
+
+    // ── 3-0 U1c: 예산 하나가 읽기 몫과 창 상한을 함께 덮는다(B + M) ──
+
+    // ★창을 채운 채 읽기 몫까지 채운다★ — 창 상한이 예산이면(셈이 둘이면) 창에 넷(96)을 붙들고 읽기로 둘(98)을
+    //   더 쥐어 B + M(149)을 넘는다. 창 상한이 반이면 셋째 조각에서 창이 잘림으로 닫히고 그 몫이 읽기 문을 닫는다.
+    #[tokio::test]
+    async fn holding_a_window_full_and_a_read_share_full_still_fits_the_budget_plus_one_message() {
+        let budget = 100;
+        let message = 49;
+        let (mut h, endpoint) = streaming(budget, 1).await;
+        let pushes: Vec<Frame> = (3..=6)
+            .map(|seq| sized_chunk(seq, 24))
+            .chain((0..3).map(|tag| blob(tag, message)))
+            .collect();
+        for frame in pushes {
+            endpoint.push(frame);
+            settle().await;
+            assert!(
+                h.peer.held_bytes() <= budget + message,
+                "{} 바이트를 쥐었다 — 셈 전체가 B + M 을 넘었다",
+                h.peer.held_bytes()
+            );
+            assert!(h.peer.window_bytes() <= split(budget).1);
+        }
+
+        let items = drain_until_quiet(&mut h).await;
+        assert_eq!(chunk_seqs(&items), vec![3, 4, 5, 6]);
+        assert_eq!(truncations(&items), vec![3]);
+        assert_eq!(blob_tags(&items), vec![0, 1, 2], "★손실 0 · 순서 그대로★");
+        assert_eq!(h.peer.held_bytes(), 0);
+    }
+
+    // ★스트림 조각을 본 감독만 읽기 문을 반으로 줄인다★ — 같은 세 장(30 · 30 · 30)을 예산 100 에 보낸다. 스트림을
+    //   안 쓴 감독은 셋째도 읽고(60 < 100), 조각을 하나 본 감독은 둘째에서 읽기 몫(50)에 닿아 셋째를 통로에 둔다.
+    #[tokio::test]
+    async fn only_a_peer_that_has_seen_a_stream_chunk_splits_its_read_gate() {
+        let budget = 100;
+        for streams in [false, true] {
+            let mut h = build_budgeted(
+                Policy::default(),
+                Arc::new(ImmediateHandshake),
+                4096,
+                budget,
+            );
+            settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
+            let endpoint = h.net.accept().unwrap();
+            if streams {
+                endpoint.push(TestWire::chunk(1, 1, 1));
+            }
+            drain_until_quiet(&mut h).await;
+            for tag in 0..3u8 {
+                endpoint.push(blob(tag, 30));
+            }
+            settle().await;
+            assert_eq!(
+                endpoint.unread(),
+                usize::from(streams),
+                "스트림 조각을 봤나 = {streams}"
+            );
+            assert_eq!(
+                blob_tags(&drain_until_quiet(&mut h).await),
+                vec![0, 1, 2],
+                "★손실 0 · 순서 그대로★"
+            );
+        }
+    }
+
+    // ── 3-0 U1c: 붙든 조각의 진도 · 시계 · 세대 · 정리 ──
+
+    // ★바이트 상한에 닿게 한 조각이 붙든 것 중 가장 큰 번호가 아니다★ — 진도를 그 조각 번호로 두면 재생분 4 · 5 가
+    //   5 뒤에 다시 올라간다(순서 역행 · 겹침).
+    #[tokio::test]
+    async fn a_descending_arrival_past_the_window_cap_never_rewinds_the_stream() {
+        let budget = 100;
+        let (mut h, endpoint) = streaming(budget, 4096).await;
+        endpoint.push(sized_chunk(5, 30));
+        endpoint.push(sized_chunk(3, 30));
+        settle().await;
+        for seq in 4..=6 {
+            endpoint.push(TestWire::chunk(1, 1, seq));
+        }
+        let items = drain_until_quiet(&mut h).await;
+        assert_eq!(truncations(&items), vec![3]);
+        assert_eq!(
+            chunk_seqs(&items),
+            vec![3, 5, 6],
+            "★늘 오름차순 · 겹침 없음★"
+        );
+    }
+
+    // ★붙듦이 쓰기를 기다리던 사이 시작된다★ — 감독은 그 쓰기가 끝나야 바퀴 첫머리에 와서 붙듦을 알아챈다. 알아챈
+    //   때부터 세면 쓰기에 선 3 s 가 창 시한(2 s)으로 세져, 풀리자마자 창이 닫히고 재생분은 지나간 번호로 버려진다.
+    #[tokio::test]
+    async fn backpressure_that_begins_during_a_stalled_write_still_stops_the_resume_clock() {
+        let budget = 100;
+        let (mut h, endpoint) = streaming(budget, 4096).await;
+        endpoint.push(TestWire::chunk(1, 1, 3));
+        settle().await;
+        assert_eq!(endpoint.frames(), vec![Frame::Text("res|1|1".into())]);
+
+        endpoint.stall_writes(true);
+        h.peer.notify(TestOut::Notice("slow".into())).unwrap();
+        settle().await;
+        endpoint.push(blob(0, 2 * budget));
+        endpoint.push(TestWire::chunk(1, 1, 2));
+        endpoint.push(TestWire::chunk(1, 1, 3));
+        settle().await;
+        assert_eq!(
+            endpoint.unread(),
+            2,
+            "쓰기에 선 사이 읽기 문이 닫혀 재생분이 통로에 남았다"
+        );
+        let resume_timeout = Policy::default().resume_timeout;
+        let stalled = resume_timeout + Duration::from_secs(1);
+        assert!(stalled < Policy::default().write_deadline);
+        h.clock.advance(stalled);
+        settle().await;
+        endpoint.stall_writes(false);
+
+        let items = drain_until_quiet(&mut h).await;
+        assert_eq!(
+            truncations(&items),
+            Vec::<u64>::new(),
+            "★붙듦은 시작된 때부터 센다★ — 알아챈 때부터 세면 쓰기를 기다린 시간이 창 시한을 다 먹는다"
+        );
+        assert_eq!(
+            chunk_seqs(&items),
+            vec![2, 3],
+            "★풀린 뒤 재생분이 구멍을 메운다★"
+        );
+        assert_eq!(blob_tags(&items), vec![0]);
+        assert_eq!(h.peer.peer_state(), PeerState::Live);
+    }
+
+    // 위 시험의 순서 칸 판 — 구멍 사건이 찬 줄 때문에 순서 칸에 선 그 자리에서 재요청 쓰기가 막힌다. 순서 칸이
+    //   붙들기 시작한 때부터 세야 쓰기에 선 시간이 창 시한으로 안 세진다.
+    #[tokio::test]
+    async fn a_held_line_that_begins_before_a_stalled_resume_write_still_stops_the_resume_clock() {
+        let (mut h, endpoint) = streaming(BYTE_BUDGET, 1).await;
+        endpoint.push(TestWire::encode_in(&TestIn::Notice("fill".into())));
+        settle().await;
+        endpoint.stall_writes(true);
+        endpoint.push(TestWire::chunk(1, 1, 3));
+        settle().await;
+        endpoint.push(TestWire::chunk(1, 1, 2));
+        endpoint.push(TestWire::chunk(1, 1, 3));
+        let stalled = Policy::default().resume_timeout + Duration::from_secs(1);
+        h.clock.advance(stalled);
+        settle().await;
+        endpoint.stall_writes(false);
+        settle().await;
+        assert_eq!(endpoint.frames(), vec![Frame::Text("res|1|1".into())]);
+
+        let items = drain_until_quiet(&mut h).await;
+        assert_eq!(truncations(&items), Vec::<u64>::new());
+        assert_eq!(chunk_seqs(&items), vec![2, 3]);
+    }
+
+    // 위 시험의 유실 신고 판 — 쓰기에 선 사이 받는 쪽이 줄을 비우고 나가는 큐가 넘친다. 쓰기가 끝난 바퀴 첫머리의
+    //   신고가 구멍 사건까지 줄에 실어 순서 칸을 비운다 — 붙듦을 그 신고보다 먼저 보지 않으면 쓰기 도중 시작된
+    //   붙듦을 잃어, 시한이 앞잡이 줄의 재생분보다 먼저 와 창을 닫는다.
+    #[tokio::test]
+    async fn a_drop_report_that_empties_the_held_line_does_not_hide_the_pause() {
+        let mut h = build_budgeted(
+            Policy {
+                outbound_queue: 1,
+                full_queue: QueueFullPolicy::DropAndReport,
+                ..Policy::default()
+            },
+            Arc::new(ImmediateHandshake),
+            2,
+            BYTE_BUDGET,
+        );
+        settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
+        let endpoint = h.net.accept().unwrap();
+        endpoint.push(TestWire::chunk(1, 1, 1));
+        assert_eq!(chunk_seqs(&drain_until_quiet(&mut h).await), vec![1]);
+        for body in ["fill0", "fill1"] {
+            endpoint.push(TestWire::encode_in(&TestIn::Notice(body.into())));
+        }
+        settle().await;
+        endpoint.stall_writes(true);
+        endpoint.push(TestWire::chunk(1, 1, 3));
+        settle().await;
+        endpoint.push(TestWire::chunk(1, 1, 2));
+        endpoint.push(TestWire::chunk(1, 1, 3));
+        h.peer.notify(TestOut::Notice("queued".into())).unwrap();
+        assert_eq!(
+            h.peer.notify(TestOut::Notice("lost".into())),
+            Err(SendError::QueueFull)
+        );
+        assert_eq!(
+            labels(&h.drain()),
+            vec!["msg:fill0", "msg:fill1"],
+            "쓰기에 선 사이 받는 쪽이 줄을 비웠다 — 구멍 사건은 아직 순서 칸에 있다"
+        );
+        let stalled = Policy::default().resume_timeout + Duration::from_secs(1);
+        assert!(stalled < Policy::default().write_deadline);
+        h.clock.advance(stalled);
+        settle().await;
+        endpoint.stall_writes(false);
+
+        let items = drain_until_quiet(&mut h).await;
+        assert_eq!(truncations(&items), Vec::<u64>::new());
+        assert_eq!(chunk_seqs(&items), vec![2, 3]);
+        assert!(labels(&items).contains(&"Dropped".to_string()));
+    }
+
+    // ★읽기 문이 쓰기를 기다리던 사이 닫혔다가 그 쓰기가 끝나기 전에 다시 열린다★ — 감독은 바퀴 첫머리에서 열린
+    //   문만 보고 붙듦을 끝내 못 본다. 그 시간을 안 밀면 쓰기에 선 3 s 가 창 시한(2 s)을 넘겨, 시한이 앞잡이 줄의
+    //   재생분보다 먼저 와 창을 닫고 재생분 2 는 지나간 번호로 버려진다.
+    #[tokio::test]
+    async fn a_gate_that_shuts_and_reopens_inside_a_stalled_write_still_stops_the_resume_clock() {
+        let budget = 100;
+        let (mut h, endpoint) = streaming(budget, 4096).await;
+        endpoint.push(TestWire::chunk(1, 1, 3));
+        endpoint.push(blob(0, 40));
+        settle().await;
+        assert_eq!(endpoint.frames(), vec![Frame::Text("res|1|1".into())]);
+
+        endpoint.stall_writes(true);
+        h.peer.notify(TestOut::Notice("slow".into())).unwrap();
+        settle().await;
+        endpoint.push(blob(1, 20));
+        endpoint.push(TestWire::chunk(1, 1, 2));
+        endpoint.push(TestWire::chunk(1, 1, 3));
+        settle().await;
+        assert_eq!(
+            endpoint.unread(),
+            2,
+            "쓰기에 선 사이 읽기 문이 닫혀 재생분이 통로에 남았다"
+        );
+        let stalled = Policy::default().resume_timeout + Duration::from_secs(1);
+        assert!(stalled < Policy::default().write_deadline);
+        h.clock.advance(stalled);
+        settle().await;
+        assert_eq!(blob_tags(&h.drain()), vec![0]);
+        settle().await;
+        assert_eq!(
+            endpoint.unread(),
+            0,
+            "받는 쪽이 비워 읽기 문이 다시 열렸다 — 쓰기는 아직 서 있다"
+        );
+        endpoint.stall_writes(false);
+
+        let items = drain_until_quiet(&mut h).await;
+        assert_eq!(
+            truncations(&items),
+            Vec::<u64>::new(),
+            "★끝내 못 본 붙듦도 창 시한에서 뺀다★"
+        );
+        assert_eq!(chunk_seqs(&items), vec![2, 3], "★재생분이 구멍을 메운다★");
+        assert_eq!(blob_tags(&items), vec![1]);
+        assert_eq!(h.peer.peer_state(), PeerState::Live);
+    }
+
+    // ── 3-0 U1c: 붙든 시간 세기(`track_pause`) — 돌리지 않은 감독에 칸을 손으로 놓는다 ──
+
+    fn idle_supervisor() -> (Supervisor<TestWire>, ManualClock) {
+        let net = MemoryNetwork::new();
+        let clock = ManualClock::new();
+        let (inbound, _) = mpsc::channel(1);
+        let (_, supervisor) = new_peer(PeerConfig {
+            id: PeerId::new("d1"),
+            addr: Address::new("mem://d1"),
+            wire: Arc::new(TestWire),
+            dialer: net.dialer(),
+            clock: clock.handle(),
+            handshake: Arc::new(ImmediateHandshake),
+            policy: Policy::default(),
+            inbound,
+            byte_budget: 100,
+            generations: Arc::new(AtomicU64::new(0)),
+            start_closed: false,
+        });
+        (supervisor, clock)
+    }
+
+    /// 1번을 받고 3번에서 구멍을 연 창 — 지금 청한 것으로 적힌다. 돌려주는 것 = 그 창의 시한.
+    fn open_window(sup: &mut Supervisor<TestWire>) -> Instant {
+        let now = sup.clock.now();
+        for seq in [1, 3] {
+            let msg = sup.wire.decode(TestWire::chunk(1, 1, seq)).unwrap();
+            let mark = sup.wire.stream_mark(&msg).unwrap();
+            let held = Received {
+                msg,
+                charge: Charge::none(),
+                generation: Generation(1),
+            };
+            let _ = sup.streams.observe_capped(&mark, held, now, false);
+        }
+        sup.streams.next_resume_deadline().expect("창이 열렸다")
+    }
+
+    /// 읽기 문을 `secs` 초 닫았다가 연다 — 예산 100 · 스트림을 안 쓰니 100 바이트면 닫힌다.
+    fn shut_for(sup: &Supervisor<TestWire>, clock: &ManualClock, secs: u64) {
+        let gate = sup.ledger.charge(100);
+        clock.advance(Duration::from_secs(secs));
+        drop(gate);
+    }
+
+    #[test]
+    fn unseen_shut_intervals_shift_the_window_by_exactly_their_length() {
+        let (mut sup, clock) = idle_supervisor();
+        let deadline = open_window(&mut sup);
+        clock.advance(Duration::from_secs(1));
+        shut_for(&sup, &clock, 2);
+        clock.advance(Duration::from_secs(1));
+        shut_for(&sup, &clock, 3);
+        sup.track_pause(clock.now());
+        assert!(!sup.paused);
+        assert_eq!(
+            sup.streams.next_resume_deadline(),
+            Some(deadline + Duration::from_secs(5)),
+            "★두 구간을 다 민다★ — 그 사이 열려 있던 1 s 는 안 민다"
+        );
+        assert_eq!(sup.last_rx, clock.now(), "못 본 붙듦이 풀린 것도 풀림이다");
+    }
+
+    // ★못 본 구간이 순서 칸의 붙듦에 걸쳐 있으면 그 첫 구간부터 붙든 것으로 본다★ — 순서 칸이 붙들기 시작한 때만
+    //   보면 그 앞에 닫혀 있던 1 s 를 잃고, 둘을 따로 밀면 겹친 1 s 를 두 번 민다.
+    #[test]
+    fn an_unseen_interval_reaching_into_a_held_line_starts_the_pause_at_its_own_start() {
+        let (mut sup, clock) = idle_supervisor();
+        let deadline = open_window(&mut sup);
+        clock.advance(Duration::from_secs(1));
+        let gate = sup.ledger.charge(100);
+        clock.advance(Duration::from_secs(1));
+        sup.order.push_back(Charged::bare(Incoming::Event(
+            TransportEvent::AmbiguousRole {
+                peer: PeerId::new("d1"),
+            },
+        )));
+        sup.order_since = clock.now();
+        clock.advance(Duration::from_secs(1));
+        drop(gate);
+        clock.advance(Duration::from_secs(1));
+        sup.track_pause(clock.now());
+        assert!(sup.paused);
+
+        sup.order.clear();
+        clock.advance(Duration::from_secs(1));
+        sup.track_pause(clock.now());
+        assert_eq!(
+            sup.streams.next_resume_deadline(),
+            Some(deadline + Duration::from_secs(4)),
+            "읽기 문이 닫힌 때(1 s)부터 풀림을 알아챈 때(5 s)까지다"
+        );
+    }
+
+    // ★못 본 구간이 지금 붙듦보다 앞에서 끝났으면 따로 민다★ — 지금 붙듦의 시작을 그 구간의 시작으로 당기면
+    //   그 사이 열려 있던 시간까지 민다.
+    #[test]
+    fn an_unseen_interval_that_ended_before_the_current_pause_is_shifted_on_its_own() {
+        let (mut sup, clock) = idle_supervisor();
+        let deadline = open_window(&mut sup);
+        clock.advance(Duration::from_secs(1));
+        shut_for(&sup, &clock, 2);
+        clock.advance(Duration::from_secs(1));
+        let gate = sup.ledger.charge(100);
+        clock.advance(Duration::from_secs(1));
+        sup.track_pause(clock.now());
+        assert!(sup.paused);
+
+        drop(gate);
+        clock.advance(Duration::from_secs(1));
+        sup.track_pause(clock.now());
+        assert_eq!(
+            sup.streams.next_resume_deadline(),
+            Some(deadline + Duration::from_secs(4)),
+            "못 본 2 s + 지금 붙듦(4 s 에 닫혀 6 s 에 알아챘다) 2 s — 그 사이 열린 1 s 는 안 민다"
+        );
+    }
+
+    // ★붙든 줄 알고 있던 동안 닫혔다 열린 구간을 셈이 따로 넘겨도 다시 밀지 않는다★ — 그 구간은 다 붙듦이
+    //   시작된 뒤라 풀릴 때 미는 시간 안에 이미 든다.
+    #[test]
+    fn intervals_inside_a_known_pause_are_not_shifted_twice() {
+        let (mut sup, clock) = idle_supervisor();
+        let deadline = open_window(&mut sup);
+        clock.advance(Duration::from_secs(1));
+        let gate = sup.ledger.charge(100);
+        sup.track_pause(clock.now());
+        assert!(sup.paused);
+        clock.advance(Duration::from_secs(1));
+        drop(gate);
+        clock.advance(Duration::from_secs(1));
+        shut_for(&sup, &clock, 1);
+        clock.advance(Duration::from_secs(1));
+        sup.track_pause(clock.now());
+        assert!(!sup.paused);
+        assert_eq!(
+            sup.streams.next_resume_deadline(),
+            Some(deadline + Duration::from_secs(4)),
+            "붙듦이 시작된 1 s 부터 풀림을 알아챈 5 s 까지 한 번만"
+        );
+    }
+
+    // ★디코드 실패로 끊는 정책이어도 건지기는 그 뒤까지 넘긴다★ — 운영 중에 그 한 장에서 끊어도 그 뒤는 건지기가
+    //   넘기므로, 건지는 중에 멈추면 같은 앞잡이 줄이 끊은 자리에 따라 넘어가기도 버려지기도 한다.
+    #[tokio::test]
+    async fn salvaging_carries_on_past_a_frame_it_cannot_decode() {
+        let mut h = build_with(
+            Policy {
+                decode_failure: DecodeFailurePolicy::Disconnect,
+                ..Policy::default()
+            },
+            Arc::new(ImmediateHandshake),
+            1,
+        );
+        settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
+        let endpoint = h.net.accept().unwrap();
+        endpoint.push(TestWire::encode_in(&TestIn::Notice("n0".into())));
+        endpoint.push(Frame::Text("garbage".into()));
+        endpoint.push(TestWire::encode_in(&TestIn::Notice("n1".into())));
+        settle().await;
+        assert_eq!(
+            endpoint.unread(),
+            0,
+            "n0 은 순서 칸에, 나머지는 앞잡이 줄에"
+        );
+        h.peer.reconnect_now();
+        settle_until("새 통로", || h.net.dials() == 2).await;
+
+        let items = drain_until_quiet(&mut h).await;
+        assert_eq!(
+            labels(&items),
+            vec![
+                "Connected:1",
+                "msg:n0",
+                "DecodeFailed",
+                "msg:n1",
+                "Disconnected:1:Explicit",
+                "Connected:2",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_chunk_held_across_a_reconnect_keeps_the_generation_that_carried_it() {
+        let (mut h, endpoint) = streaming(BYTE_BUDGET, 4096).await;
+        endpoint.push(TestWire::chunk(1, 1, 3));
+        settle().await;
+        h.peer.reconnect_now();
+        settle_until("다시 붙음", || h.net.dials() == 2).await;
+        settle_until("운영", || h.peer.peer_state() == PeerState::Live).await;
+        let second = h.net.accept().unwrap();
+        settle().await;
+        assert_eq!(
+            second.frames(),
+            vec![Frame::Text("res|1|1".into())],
+            "창이 살아남아 새 통로에서 다시 청했다"
+        );
+
+        h.clock.advance(Policy::default().resume_timeout);
+        let items = drain_until_quiet(&mut h).await;
+        let held: Vec<(u64, u64)> = items
+            .iter()
+            .filter_map(Incoming::as_message)
+            .filter_map(|arrival| match &arrival.msg {
+                TestIn::Chunk { seq, .. } => Some((*seq, arrival.generation.0)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(truncations(&items), vec![3], "둘째 통로에서 창이 닫혔다");
+        assert_eq!(
+            held,
+            vec![(3, 1)],
+            "★실어 온 연결의 세대다★ — 창이 닫힌 연결(2)의 세대를 찍으면 `Arrival::generation` 계약이 깨진다"
+        );
+    }
+
+    // ★정리가 장부를 버리기 전에 열린 창을 접는다★ — 안 접으면 붙든 조각이 배달도 잘림 신고도 없이 사라진다.
+    #[tokio::test]
+    async fn closing_hands_over_a_held_chunk_as_a_truncation_before_closed() {
+        let (mut h, endpoint) = streaming(BYTE_BUDGET, 4096).await;
+        endpoint.push(TestWire::chunk(1, 1, 3));
+        settle().await;
+        h.peer.close();
+        settle_until("접힘", || h.peer.peer_state() == PeerState::Closed).await;
+
+        let items = drain_until_quiet(&mut h).await;
+        let seen: Vec<String> = items
+            .iter()
+            .map(|item| match item.as_message().map(|a| &a.msg) {
+                Some(TestIn::Chunk { seq, .. }) => format!("chunk:{seq}"),
+                _ => label(item),
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                "StreamGap",
+                "Disconnected:1:Explicit",
+                "StreamTruncated",
+                "chunk:3",
+                "Closed:1:Explicit",
+            ]
+        );
+        assert_eq!(truncations(&items), vec![3], "붙든 첫 번호가 하한이다");
+        assert_eq!(h.peer.held_bytes(), 0);
     }
 }

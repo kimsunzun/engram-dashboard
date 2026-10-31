@@ -18,7 +18,7 @@
 //! 틀리게 신고」였다.
 //!
 //! **지금**은 붙들어 둔다. 재요청의 답을 기다리는 동안 도착한 순서 밖 조각은 **유계 버퍼**에 담기고,
-//! 창이 닫히면(시한 초과 · 버퍼 포화 · 스트림 축출) **순서대로 내보내면서** 그 첫 번호를
+//! 창이 닫히면(시한 초과 · 버퍼 포화 · 스트림 축출 · 부르는 쪽의 정리) **순서대로 내보내면서** 그 첫 번호를
 //! `oldest_valid` 로 올린다. 그래서 그 값이 참이 된다 — 우리가 실제로 그 번호부터 배달하기 때문이다.
 //! 답이 제대로 오면(=`after+1` 이 도착) 붙든 것은 버린다: 상대의 재생분이 그 구간을 다시 실어 온다.
 
@@ -120,14 +120,20 @@ struct Track<M> {
 }
 
 impl<M> Track<M> {
-    fn drain_held(&mut self) -> (Vec<M>, Option<u64>) {
+    /// 붙든 것을 꺼낸다 — `(번호 순서대로, 첫 번호, 끝 번호)`.
+    ///
+    /// ★진도는 끝 번호로 민다★ — 붙든 번호는 띄엄띄엄일 수 있고(구멍 뒤 조각이 거꾸로 왔다 · 재생분 일부만
+    /// 왔다) 창을 닫게 한 조각이 그중 가장 큰 번호라는 보장도 없다. 그보다 작게 밀면 이미 내보낸 번호가 재생분으로
+    /// 다시 와 순서를 거슬러 한 번 더 배달된다.
+    fn drain_held(&mut self) -> (Vec<M>, Option<u64>, Option<u64>) {
         match self.resume.take() {
             Some(resume) => {
                 let oldest = resume.held.keys().next().copied();
+                let newest = resume.held.keys().next_back().copied();
                 let flushed: Vec<M> = resume.held.into_values().collect();
-                (flushed, oldest)
+                (flushed, oldest, newest)
             }
-            None => (Vec::new(), None),
+            None => (Vec::new(), None, None),
         }
     }
 }
@@ -139,7 +145,8 @@ impl<M> Track<M> {
 /// [`Streams::pending_resumes`] 로 다시 나간다.
 ///
 /// ★크기를 상대가 정하는 유일한 컬렉션이다★ — 그래서 상한이 둘이다: 스트림 수(`max_streams`)와
-/// 스트림당 붙드는 조각 수(`resume_buffer`).
+/// 스트림당 붙드는 조각 수(`resume_buffer`). 부르는 쪽이 자기 단위(구동 층은 바이트)의 상한을 더 걸 수 있다
+/// ([`Streams::observe_capped`]).
 #[derive(Debug)]
 pub struct Streams<K, M> {
     seen: HashMap<K, Track<M>>,
@@ -167,6 +174,20 @@ impl<K: Eq + Hash + Clone, M> Streams<K, M> {
 
     /// 조각 하나를 본다. 판정은 [`Verdict`] 이고 부르는 쪽이 사건 발행·재요청·배달을 집행한다.
     pub fn observe(&mut self, mark: &StreamMark<K>, msg: M, now: Instant) -> Verdict<M> {
+        self.observe_capped(mark, msg, now, false)
+    }
+
+    /// [`Streams::observe`] 에 부르는 쪽의 붙듦 상한을 더한 판. `over_cap` = 「이 조각까지 붙들면 부르는 쪽이
+    /// 재는 상한(구동 층에서는 바이트)을 넘는다」 — 참이면 붙들 자리가 없는 것으로 본다. 창이 열려 있으면
+    /// [`Self::new`] 의 `resume_buffer` 가 찬 것과 같은 잘림으로 닫고, 창을 새로 열 구멍이면 창을 열지 않고 이
+    /// 조각부터 이어 가며 그 앞을 잘림으로 신고한다([`Verdict::Truncated`] — 재요청은 안 낸다).
+    pub fn observe_capped(
+        &mut self,
+        mark: &StreamMark<K>,
+        msg: M,
+        now: Instant,
+        over_cap: bool,
+    ) -> Verdict<M> {
         if !self.seen.contains_key(&mark.key) {
             self.admit(mark);
             return Verdict::Deliver(msg);
@@ -178,7 +199,7 @@ impl<K: Eq + Hash + Clone, M> Streams<K, M> {
 
         if track.generation != mark.generation {
             let from = track.generation;
-            let (stale, _) = track.drain_held();
+            let (stale, ..) = track.drain_held();
             track.generation = mark.generation;
             track.last_seq = mark.seq;
             return Verdict::GenerationChanged {
@@ -202,6 +223,15 @@ impl<K: Eq + Hash + Clone, M> Streams<K, M> {
         }
 
         let Some(resume) = track.resume.as_mut() else {
+            // ★붙들 자리가 처음부터 없으면 창을 열지 않는다★ — 열면 이 한 장이 부르는 쪽 상한을 넘긴 채
+            //   창이 닫힐 때까지 남는다.
+            if over_cap {
+                track.last_seq = mark.seq;
+                return Verdict::Truncated {
+                    oldest_valid: mark.seq,
+                    flushed: vec![msg],
+                };
+            }
             let resume_from = track.last_seq;
             let mut held = BTreeMap::new();
             held.insert(mark.seq, msg);
@@ -222,14 +252,14 @@ impl<K: Eq + Hash + Clone, M> Streams<K, M> {
         }
         resume.held.insert(mark.seq, msg);
         let expired = now.saturating_duration_since(resume.asked_at) >= resume_timeout;
-        let full = resume.held.len() >= resume_buffer;
+        let full = resume.held.len() >= resume_buffer || over_cap;
         if !expired && !full {
             let awaiting_after = resume.after;
             return Verdict::Held { awaiting_after };
         }
-        let (flushed, oldest) = track.drain_held();
+        let (flushed, oldest, newest) = track.drain_held();
         let oldest_valid = oldest.expect("붙든 것이 하나는 있다");
-        track.last_seq = mark.seq;
+        track.last_seq = newest.expect("붙든 것이 하나는 있다");
         Verdict::Truncated {
             oldest_valid,
             flushed,
@@ -254,25 +284,36 @@ impl<K: Eq + Hash + Clone, M> Streams<K, M> {
             .map(|(key, _)| key.clone())
             .collect();
         due.into_iter()
-            .filter_map(|key| {
-                let track = self.seen.get_mut(&key)?;
-                let generation = track.generation;
-                let (flushed, oldest) = track.drain_held();
-                let oldest_valid = oldest?;
-                if let Some(last) = flushed.len().checked_sub(1) {
-                    let _ = last;
-                }
-                track.last_seq = track.last_seq.max(oldest_valid);
-                // 붙든 것의 마지막 번호까지 진도를 민다.
-                track.last_seq = track.last_seq.max(oldest_valid + flushed.len() as u64 - 1);
-                Some(Truncation {
-                    key,
-                    generation,
-                    oldest_valid,
-                    flushed,
-                })
-            })
+            .filter_map(|key| self.collapse(key))
             .collect()
+    }
+
+    /// 열린 창을 시한과 무관하게 전부 접는다 — 부르는 쪽이 이 장부를 버리기 직전(구동 층의 정리)에 부른다.
+    /// 안 부르면 붙든 조각이 배달도 잘림 신고도 없이 장부와 함께 사라진다.
+    pub fn close_resumes(&mut self) -> Vec<Truncation<K, M>> {
+        let open: Vec<K> = self
+            .order
+            .iter()
+            .filter(|key| self.seen.get(*key).is_some_and(|t| t.resume.is_some()))
+            .cloned()
+            .collect();
+        open.into_iter()
+            .filter_map(|key| self.collapse(key))
+            .collect()
+    }
+
+    fn collapse(&mut self, key: K) -> Option<Truncation<K, M>> {
+        let track = self.seen.get_mut(&key)?;
+        let generation = track.generation;
+        let (flushed, oldest, newest) = track.drain_held();
+        let oldest_valid = oldest?;
+        track.last_seq = track.last_seq.max(newest?);
+        Some(Truncation {
+            key,
+            generation,
+            oldest_valid,
+            flushed,
+        })
     }
 
     /// 가장 이른 재요청 시한. `None` 이면 미결 재요청이 없다.
@@ -308,7 +349,7 @@ impl<K: Eq + Hash + Clone, M> Streams<K, M> {
             if let Some(mut track) = self.seen.remove(&victim) {
                 let generation = track.generation;
                 let last_seq = track.last_seq;
-                let (flushed, oldest_valid) = track.drain_held();
+                let (flushed, oldest_valid, _) = track.drain_held();
                 self.evicted.push(Evicted {
                     key: victim,
                     generation,
@@ -349,6 +390,23 @@ impl<K: Eq + Hash + Clone, M> Streams<K, M> {
                 resume.asked_at = now;
             }
         }
+    }
+
+    /// 미결 재요청의 청한 시각을 `by` 만큼 뒤로 민다 — 부르는 쪽이 그동안 답을 읽을 수 없었을 때(구동 층의
+    /// 배압) 그 시간을 시한에서 빼려고 부른다. 안 밀면 우리가 막아 둔 사이 시한이 차서, 메울 수 있던 구멍을
+    /// 잘림으로 접는다.
+    pub fn shift_resumes(&mut self, by: Duration) {
+        for track in self.seen.values_mut() {
+            if let Some(resume) = track.resume.as_mut() {
+                resume.asked_at += by;
+            }
+        }
+    }
+
+    /// 붙들고 있는 조각 하나. 부르는 쪽이 방금 붙든 조각에 자기 표식을 바꿔 달 때 쓴다(구동 층은 그 조각의
+    /// 바이트 몫을 창 몫으로 센다 — `budget.rs`).
+    pub fn held_mut(&mut self, key: &K, seq: u64) -> Option<&mut M> {
+        self.seen.get_mut(key)?.resume.as_mut()?.held.get_mut(&seq)
     }
 
     /// 지금까지 이어받은 마지막 순번.
@@ -616,6 +674,190 @@ mod tests {
             Some(t0 + Duration::from_secs(60) + RESUME_TIMEOUT)
         );
         assert!(s.expire_resumes(t0 + Duration::from_secs(60)).is_empty());
+    }
+
+    // ── 3-0 U1c: 부르는 쪽 상한 · 멈춘 시계 · 붙든 조각 고치기 ──
+
+    #[test]
+    fn a_chunk_past_the_callers_cap_closes_the_open_window_like_a_full_buffer() {
+        let mut s = streams();
+        let t0 = Instant::now();
+        see(&mut s, 1, 7, 1, t0);
+        see(&mut s, 1, 7, 5, t0);
+        assert_eq!(
+            s.observe_capped(&mark(1, 7, 6), 6, t0, true),
+            Verdict::Truncated {
+                oldest_valid: 5,
+                flushed: vec![5, 6],
+            },
+            "★개수 상한이 찬 것과 같은 길이다★ — 붙든 것을 순서대로 내보내고 그 첫 번호를 하한으로 올린다"
+        );
+        assert!(s.pending_resumes().is_empty());
+        assert_eq!(s.last_seq(&1), Some(6));
+    }
+
+    #[test]
+    fn a_gap_past_the_callers_cap_opens_no_window() {
+        let mut s = streams();
+        let t0 = Instant::now();
+        see(&mut s, 1, 7, 1, t0);
+        assert_eq!(
+            s.observe_capped(&mark(1, 7, 5), 5, t0, true),
+            Verdict::Truncated {
+                oldest_valid: 5,
+                flushed: vec![5],
+            },
+            "★붙들 자리가 없으면 재요청 없이 이 조각부터 이어 간다★ — 그 앞은 잘림으로 신고된다"
+        );
+        assert!(s.pending_resumes().is_empty(), "창을 열지 않았다");
+        assert_eq!(see(&mut s, 1, 7, 6, t0), Verdict::Deliver(6));
+    }
+
+    #[test]
+    fn shifting_the_resume_clock_pushes_the_deadline_back() {
+        let mut s = streams();
+        let t0 = Instant::now();
+        see(&mut s, 1, 7, 1, t0);
+        see(&mut s, 1, 7, 5, t0);
+        let paused = Duration::from_secs(30);
+        s.shift_resumes(paused);
+        assert_eq!(s.next_resume_deadline(), Some(t0 + paused + RESUME_TIMEOUT));
+        assert!(
+            s.expire_resumes(t0 + RESUME_TIMEOUT).is_empty(),
+            "★민 만큼 늦게 닫힌다★ — 그동안 답을 못 읽은 것은 상대 탓이 아니다"
+        );
+        assert_eq!(s.expire_resumes(t0 + paused + RESUME_TIMEOUT).len(), 1);
+    }
+
+    #[test]
+    fn a_held_chunk_can_be_reached_until_its_window_closes() {
+        let mut s = streams();
+        let t0 = Instant::now();
+        see(&mut s, 1, 7, 1, t0);
+        see(&mut s, 1, 7, 5, t0);
+        *s.held_mut(&1, 5).expect("붙들고 있다") = 50;
+        assert_eq!(s.held_mut(&1, 6), None, "안 붙든 번호");
+        assert_eq!(s.held_mut(&2, 5), None, "모르는 스트림");
+        let collapsed = s.expire_resumes(t0 + RESUME_TIMEOUT);
+        assert_eq!(collapsed[0].flushed, vec![50], "고친 것이 그대로 나간다");
+        assert_eq!(s.held_mut(&1, 5), None, "창이 닫히면 없다");
+    }
+
+    // ── 창이 닫히면 진도는 붙든 것의 끝 번호까지 ──
+    //
+    // ★창을 닫게 한 조각이 붙든 것 중 가장 큰 번호라는 보장이 없다★ — 그 조각의 번호로 진도를 두면 이미 내보낸
+    //   번호가 재생분으로 다시 와 순서를 거슬러 한 번 더 배달된다. 닫는 길마다(바이트 상한 · 개수 상한 · 시한 ·
+    //   정리) 같은 규칙이다.
+
+    /// 창을 닫은 뒤 상대가 재생분(`replay`)을 마저 보낸다 — 실제로 올라가는 번호 전부(닫을 때 내보낸 것 포함).
+    fn delivered_after(
+        s: &mut Streams<u8, u64>,
+        flushed: Vec<u64>,
+        replay: impl IntoIterator<Item = u64>,
+        now: Instant,
+    ) -> Vec<u64> {
+        let mut out = flushed;
+        for seq in replay {
+            out.extend(see(s, 1, 7, seq, now).into_delivered());
+        }
+        out
+    }
+
+    #[test]
+    fn a_descending_arrival_past_the_byte_cap_moves_the_cursor_to_the_highest_held() {
+        let mut s = streams();
+        let t0 = Instant::now();
+        see(&mut s, 1, 7, 1, t0);
+        assert!(matches!(see(&mut s, 1, 7, 5, t0), Verdict::Gap { .. }));
+        let Verdict::Truncated {
+            oldest_valid,
+            flushed,
+        } = s.observe_capped(&mark(1, 7, 3), 3, t0, true)
+        else {
+            panic!("상한을 넘겨 창이 닫혀야 한다");
+        };
+        assert_eq!((oldest_valid, flushed.clone()), (3, vec![3, 5]));
+        assert_eq!(
+            delivered_after(&mut s, flushed, [2, 3, 4, 5, 6], t0),
+            vec![3, 5, 6],
+            "★늘 오름차순 · 겹침 없음★ — 진도를 3 에 두면 재생분 4 · 5 가 5 뒤에 다시 올라간다"
+        );
+    }
+
+    #[test]
+    fn a_partial_replay_past_the_byte_cap_moves_the_cursor_to_the_highest_held() {
+        let mut s = streams();
+        let t0 = Instant::now();
+        see(&mut s, 1, 7, 1, t0);
+        assert!(matches!(see(&mut s, 1, 7, 4, t0), Verdict::Gap { .. }));
+        assert!(matches!(see(&mut s, 1, 7, 5, t0), Verdict::Held { .. }));
+        let Verdict::Truncated {
+            oldest_valid,
+            flushed,
+        } = s.observe_capped(&mark(1, 7, 3), 3, t0, true)
+        else {
+            panic!("상한을 넘겨 창이 닫혀야 한다");
+        };
+        assert_eq!((oldest_valid, flushed.clone()), (3, vec![3, 4, 5]));
+        assert_eq!(
+            delivered_after(&mut s, flushed, [4, 5, 6], t0),
+            vec![3, 4, 5, 6]
+        );
+    }
+
+    #[test]
+    fn a_descending_arrival_filling_the_hold_count_moves_the_cursor_to_the_highest_held() {
+        let mut s: Streams<u8, u64> = Streams::new(1024, 2, RESUME_TIMEOUT);
+        let t0 = Instant::now();
+        see(&mut s, 1, 7, 1, t0);
+        see(&mut s, 1, 7, 5, t0);
+        let Verdict::Truncated { flushed, .. } = see(&mut s, 1, 7, 3, t0) else {
+            panic!("개수 상한이 차 창이 닫혀야 한다");
+        };
+        assert_eq!(
+            delivered_after(&mut s, flushed, [4, 5, 6], t0),
+            vec![3, 5, 6]
+        );
+    }
+
+    #[test]
+    fn an_expired_window_with_scattered_numbers_moves_the_cursor_to_the_highest_held() {
+        let mut s = streams();
+        let t0 = Instant::now();
+        see(&mut s, 1, 7, 1, t0);
+        see(&mut s, 1, 7, 5, t0);
+        assert!(matches!(see(&mut s, 1, 7, 3, t0), Verdict::Held { .. }));
+        let mut collapsed = s.expire_resumes(t0 + RESUME_TIMEOUT);
+        let flushed = collapsed.remove(0).flushed;
+        assert_eq!(
+            delivered_after(&mut s, flushed, [4, 5, 6], t0 + RESUME_TIMEOUT),
+            vec![3, 5, 6],
+            "★첫 번호 + 붙든 수 − 1 은 끝 번호가 아니다★ — {{3, 5}} 면 4 가 되어 5 를 한 번 더 올린다"
+        );
+    }
+
+    #[test]
+    fn closing_every_window_hands_back_what_each_held() {
+        let mut s = streams();
+        let t0 = Instant::now();
+        see(&mut s, 1, 7, 1, t0);
+        see(&mut s, 2, 7, 1, t0);
+        see(&mut s, 3, 7, 1, t0);
+        see(&mut s, 1, 7, 4, t0);
+        see(&mut s, 1, 7, 6, t0);
+        see(&mut s, 3, 7, 9, t0);
+        let closed: Vec<(u8, u64, Vec<u64>)> = s
+            .close_resumes()
+            .into_iter()
+            .map(|t| (t.key, t.oldest_valid, t.flushed))
+            .collect();
+        assert_eq!(
+            closed,
+            vec![(1, 4, vec![4, 6]), (3, 9, vec![9])],
+            "★시한 전이어도 열린 창은 다 접힌다★ — 창이 없는 스트림은 건너뛴다"
+        );
+        assert!(s.pending_resumes().is_empty());
+        assert_eq!(s.last_seq(&1), Some(6));
     }
 
     #[test]

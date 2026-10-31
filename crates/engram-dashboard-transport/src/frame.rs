@@ -16,6 +16,17 @@ pub enum Frame {
     Keepalive,
 }
 
+impl Frame {
+    /// 받은 것의 바이트 셈 단위(`budget.rs`) — 페이로드 길이다. 살아있음 확인은 0 이다.
+    pub(crate) fn payload_len(&self) -> usize {
+        match self {
+            Frame::Text(text) => text.len(),
+            Frame::Binary(bytes) => bytes.len(),
+            Frame::Keepalive => 0,
+        }
+    }
+}
+
 /// 닫기 코드. 4000~4999 = RFC 6455 §7.4.2 의 애플리케이션 구간이다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CloseCode(pub u16);

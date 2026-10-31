@@ -7,8 +7,9 @@
 //! ★위로 올라가는 줄도 이름표끼리 공유하지 않는다★ — 줄이 하나면 시끄러운 상대가 그것을 채우는 순간
 //! 조용한 상대의 사건·패킷이 그 뒤에 붙들리고, 「A 하나 죽어도 B·C 는 잘 동작해야 한다」가 무너진다
 //! (ADR-0180 결정 8). 그래서 줄은 이름표마다 따로 서고(길이 = [`Policy::inbound_queue`]), 줄이 차면 그
-//! 이름표의 감독이 자기 순서 칸에 붙든다 — 버리지 않고 연결을 끊지도 않는다(`peer.rs` 헤더). 같은 이름표를
-//! 다시 올리면 그 줄을 이어 쓴다([`Registry::add_with_policy`]).
+//! 이름표의 감독이 자기 순서 칸에 붙들고 그 상대의 읽기를 세운다 — 버리지 않고 연결을 끊지도 않는다(`peer.rs`
+//! 헤더). 그래서 받는 쪽이 밀리면 그 상대만 밀린다. 같은 이름표를 다시 올리면 그 줄을 이어 쓴다
+//! ([`Registry::add_with_policy`]).
 //! 줄의 넣는 끝과 받는 끝은 명부와 [`Inbound`] 가 함께 쥐는 표(`Roster`) 한 곳에 산다 — 줄의 수명 주인이
 //! 하나라야 받는 쪽이 안 읽는 동안 어떤 올리기 · 내리기 순서도 줄을 버려 두지 못한다.
 //! TODO(TRD 3 §6-0 U1d): 받는 끝을 손잡이마다 `add` 가 소비자에게 직접 돌려준다(ADR-0310 결정 17 —
@@ -28,11 +29,12 @@ use std::task::{Context, Poll, Waker};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
 
+use crate::budget::Charged;
 use crate::clock::Clock;
 use crate::event::{Direction, Incoming, PeerId, TransportEvent};
 use crate::link::{Address, Dialer, Handshake};
 use crate::machine::PeerState;
-use crate::peer::{spawn_peer, Peer, PeerConfig};
+use crate::peer::{spawn_peer, Peer, PeerConfig, BYTE_BUDGET};
 use crate::policy::Policy;
 use crate::wire::Wire;
 
@@ -44,15 +46,15 @@ enum Probe<T> {
 
 /// 이름표 하나의 위로 올라가는 줄의 받는 끝.
 ///
-/// TODO(TRD 3 §6-0 U1c): 바이트 셈을 이 줄 단위로 두지 않는다 — 한 줄을 같은 이름표의 연이은 감독(연결)이
-/// 함께 쓰므로 줄 단위 셈은 옛 연결의 꼬리를 새 연결의 예산에 섞는다(연결당 B + M — TRD 3 §3-0 ①). 넣은
-/// 연결에 묶인 RAII 가드를 항목마다 싣고, 꺼낼 때 그 가드가 뺀다(TRD 3 §3-0 ② 「셈은 RAII 가드」).
+/// 항목마다 그것을 넣은 감독의 바이트 몫이 실려 있고 꺼낼 때 떨어진다(`budget.rs`). ★셈을 줄 단위로 두지
+/// 않는다★ — 한 줄을 같은 이름표의 연이은 감독이 함께 쓰므로 줄 단위로 재면 옛 감독의 꼬리가 새 감독의
+/// 예산을 먹는다(TRD 3 §3-0 ①). ★몫은 자물쇠 밖에서 떨어뜨린다★(`Inbound::try_recv`).
 struct Lane<W: Wire> {
-    rx: mpsc::Receiver<Incoming<W>>,
+    rx: mpsc::Receiver<Charged<Incoming<W>>>,
 }
 
 impl<W: Wire> Lane<W> {
-    fn poll_next(&mut self, cx: &mut Context<'_>) -> Probe<Incoming<W>> {
+    fn poll_next(&mut self, cx: &mut Context<'_>) -> Probe<Charged<Incoming<W>>> {
         match self.rx.poll_recv(cx) {
             Poll::Ready(Some(item)) => Probe::Item(item),
             Poll::Ready(None) => Probe::Ended,
@@ -60,7 +62,7 @@ impl<W: Wire> Lane<W> {
         }
     }
 
-    fn try_next(&mut self) -> Probe<Incoming<W>> {
+    fn try_next(&mut self) -> Probe<Charged<Incoming<W>>> {
         match self.rx.try_recv() {
             Ok(item) => Probe::Item(item),
             Err(TryRecvError::Empty) => Probe::Empty,
@@ -84,7 +86,7 @@ struct Slot<W: Wire> {
     /// TODO(TRD 3 §6-0 U1d): 받는 끝이 소비자에게 가면 이 강한 손잡이는 「`Closed` 가 마지막 → 송신단 놓기
     /// → `None`」(TRD 3 §3-0 ② · 불변식 5)을 깬다 — 받는 끝을 손잡이마다 따로 주고, 신고는 감독 쪽 셈으로
     /// 돌린다.
-    tx: Option<mpsc::Sender<Incoming<W>>>,
+    tx: Option<mpsc::Sender<Charged<Incoming<W>>>>,
     lane: Lane<W>,
 }
 
@@ -169,8 +171,8 @@ impl<W: Wire> Roster<W> {
     /// 거는 일이라, 하나라도 건너뛰면 그 줄에 든 것이 다음 깨움까지 안 보인다.
     fn rotate(
         &mut self,
-        mut probe: impl FnMut(&mut Lane<W>) -> Probe<Incoming<W>>,
-    ) -> Option<Incoming<W>> {
+        mut probe: impl FnMut(&mut Lane<W>) -> Probe<Charged<Incoming<W>>>,
+    ) -> Option<Charged<Incoming<W>>> {
         let mut at = self.next;
         let mut empty = 0;
         while empty < self.order.len() {
@@ -198,7 +200,7 @@ impl<W: Wire> Roster<W> {
     }
 
     /// 이 이름표의 줄에 넣는 끝 — 줄이 서 있으면 이어 쓰고, 없으면 `capacity` 길이로 새로 세운다.
-    fn lane_for(&mut self, id: &PeerId, capacity: usize) -> mpsc::Sender<Incoming<W>> {
+    fn lane_for(&mut self, id: &PeerId, capacity: usize) -> mpsc::Sender<Charged<Incoming<W>>> {
         if let Some(tx) = self.lanes.get(id).and_then(|slot| slot.tx.clone()) {
             return tx;
         }
@@ -277,8 +279,10 @@ impl<W: Wire> Inbound<W> {
 
     /// 기다리지 않고 한 개. 하네스가 지금까지 올라온 것을 걷을 때 쓴다.
     pub fn try_recv(&mut self) -> Option<Incoming<W>> {
+        // 바이트 몫은 자물쇠를 놓은 뒤에 떨어뜨린다 — 그 해제가 감독 · 읽기 태스크를 깨울 수 있다(`Shared::with`).
         self.shared
             .with(|roster| roster.rotate(|lane| lane.try_next()))
+            .map(Charged::into_item)
     }
 
     /// 더 받지 않는다. 이미 큐에 있는 것은 [`Inbound::recv`] 로 계속 꺼낼 수 있다. ★감독들이 순서 칸에
@@ -297,19 +301,22 @@ impl<W: Wire> Inbound<W> {
     }
 
     fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<Incoming<W>>> {
-        self.shared.with(|roster| {
-            if let Some(item) = roster.rotate(|lane| lane.poll_next(cx)) {
-                return Poll::Ready(Some(item));
-            }
-            let nothing_more = roster.registry_gone || roster.consumer != Consumer::Open;
-            if nothing_more && roster.lanes.is_empty() {
-                return Poll::Ready(None);
-            }
-            if !matches!(&roster.waker, Some(w) if w.will_wake(cx.waker())) {
-                roster.waker = Some(cx.waker().clone());
-            }
-            Poll::Pending
-        })
+        self.shared
+            .with(|roster| {
+                if let Some(item) = roster.rotate(|lane| lane.poll_next(cx)) {
+                    return Poll::Ready(Some(item));
+                }
+                let nothing_more = roster.registry_gone || roster.consumer != Consumer::Open;
+                if nothing_more && roster.lanes.is_empty() {
+                    return Poll::Ready(None);
+                }
+                if !matches!(&roster.waker, Some(w) if w.will_wake(cx.waker())) {
+                    roster.waker = Some(cx.waker().clone());
+                }
+                Poll::Pending
+            })
+            // `try_recv` 의 같은 줄 — 몫은 자물쇠 밖에서 떨어진다.
+            .map(|item| item.map(Charged::into_item))
     }
 
     /// 표에 선 줄 수.
@@ -483,6 +490,7 @@ impl<W: Wire> Registry<W> {
             handshake,
             policy,
             inbound,
+            byte_budget: BYTE_BUDGET,
             generations,
             start_closed,
         });
@@ -556,7 +564,7 @@ impl<W: Wire> Registry<W> {
     /// 「알려진 한계」).
     pub fn broadcast(&self, out: W::Out) {
         let frame = self.inner.wire.encode(&out);
-        let targets: Vec<(Peer<W>, Option<mpsc::Sender<Incoming<W>>>)> =
+        let targets: Vec<(Peer<W>, Option<mpsc::Sender<Charged<Incoming<W>>>>)> =
             self.inner.shared.with(|roster| {
                 roster
                     .peers
@@ -570,11 +578,12 @@ impl<W: Wire> Registry<W> {
         for (peer, lane) in targets {
             if peer.send_frame(frame.clone()).is_err() && !peer.close_requested() {
                 if let Some(lane) = lane {
-                    let _ = lane.try_send(Incoming::Event(TransportEvent::Dropped {
-                        peer: peer.id().clone(),
-                        direction: Direction::Outbound,
-                        count: 1,
-                    }));
+                    let _ =
+                        lane.try_send(Charged::bare(Incoming::Event(TransportEvent::Dropped {
+                            peer: peer.id().clone(),
+                            direction: Direction::Outbound,
+                            count: 1,
+                        })));
                 }
             }
         }
@@ -588,7 +597,7 @@ impl<W: Wire> Registry<W> {
 
     /// 그 이름표 줄에 넣는 끝 — 감독이 받는 것과 같은 표의 끝을 복제한다.
     #[cfg(test)]
-    fn lane_sender(&self, id: &PeerId) -> Option<mpsc::Sender<Incoming<W>>> {
+    fn lane_sender(&self, id: &PeerId) -> Option<mpsc::Sender<Charged<Incoming<W>>>> {
         self.inner
             .shared
             .with(|roster| roster.lanes.get(id).and_then(|slot| slot.tx.clone()))
@@ -953,6 +962,10 @@ mod tests {
             endpoint.push(TestWire::chunk(1, 1, seq));
         }
         settle().await;
+        assert!(
+            endpoint.unread() > 0,
+            "★받는 쪽이 밀린 동안 감독은 줄 · 앞잡이 줄 분량까지만 읽고 나머지는 통로에 둔다★(배압)"
+        );
 
         let seqs: Vec<u64> = f
             .drain_until_quiet()
@@ -1012,6 +1025,7 @@ mod tests {
     async fn a_noisy_peer_costs_a_quiet_peer_nothing_and_cannot_hold_it_back() {
         let mut f = Fixture::new(Policy {
             inbound_queue: 64,
+            frame_buffer: 8,
             ..Policy::default()
         });
         let noisy = f
@@ -1034,6 +1048,17 @@ mod tests {
             quiet_link.push(notice(&format!("q{n}")));
         }
         settle().await;
+        // TODO(TRD 3 §6-0 U1d): 손잡이마다 수신단이 서면 「안 비운 수신단은 그 상대만 세운다」를 수신단 단위로
+        //   다시 잰다 — 지금은 받는 쪽이 하나라 「시끄러운 쪽 줄만 차 있다」로 그 모양을 만든다.
+        assert!(
+            noisy_link.unread() > 0,
+            "★시끄러운 쪽은 자기 통로에서 배압을 받는다★ — 줄이 찬 뒤로는 그 통로를 안 읽는다"
+        );
+        assert_eq!(
+            quiet_link.unread(),
+            0,
+            "★조용한 쪽의 통로는 남의 배압과 무관하게 다 읽힌다★"
+        );
 
         let items = f.drain();
         let quiet_at: Vec<usize> = items
@@ -1067,6 +1092,45 @@ mod tests {
             })
             .collect();
         assert_eq!(noisy_seqs, (1..=500).collect::<Vec<_>>());
+    }
+
+    // ── 3-0 U1c: 명부가 바이트 예산을 감독에게 넘긴다 ──
+    //
+    // ★실제 예산 값으로 잰다★ — 감독 시험은 작은 예산을 직접 넣으므로, 명부가 엉뚱한 값(0 · 상한 없음)을 넘겨도
+    //   거기서는 안 보인다. 스트림을 안 쓰는 상대는 예산 전부(16 MiB)가 읽기 몫이라 그 절반보다 큰 두 장이면 둘째에서
+    //   읽기 문이 닫힌다(net `CONN_RX_MAX_BYTES` 시험과 같은 모양 — 같은 값이다).
+    #[tokio::test]
+    async fn the_registry_stops_reading_a_peer_once_it_holds_the_byte_budget() {
+        let mut f = Fixture::new(Policy::default());
+        let peer = f
+            .registry
+            .add(PeerId::new("a"), Address::new("mem://a"), immediate());
+        settle().await;
+        let endpoint = f.net.accept().unwrap();
+        f.drain();
+        let big = BYTE_BUDGET / 2 + 1;
+        for tag in 0..3u8 {
+            endpoint.push(Frame::Binary(vec![tag; big]));
+        }
+        settle().await;
+        assert_eq!(
+            endpoint.unread(),
+            1,
+            "★둘째 장에서 읽기 몫을 넘기고 셋째는 통로에 남는다★"
+        );
+        assert_eq!(peer.held_bytes(), 2 * big);
+
+        let tags: Vec<u8> = f
+            .drain_until_quiet()
+            .await
+            .iter()
+            .filter_map(|i| match i.as_message().map(|a| &a.msg) {
+                Some(TestIn::Blob(bytes)) => Some(bytes[0]),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tags, vec![0, 1, 2], "★손실 0 · 순서 그대로★");
+        assert_eq!(peer.held_bytes(), 0);
     }
 
     #[tokio::test]
@@ -1398,11 +1462,11 @@ mod tests {
         f.inbound.close();
         f.registry.remove(&PeerId::new("nobody"));
         assert!(f.inbound.try_recv().is_none(), "아직 실린 것이 없다");
-        permit.send(Incoming::Message(Arrival {
+        permit.send(Charged::bare(Incoming::Message(Arrival {
             peer: PeerId::new("a"),
             generation: Generation(1),
             msg: TestIn::Notice("held".into()),
-        }));
+        })));
         drop(lane);
 
         let first = tokio::time::timeout(Duration::from_secs(5), f.inbound.recv())
