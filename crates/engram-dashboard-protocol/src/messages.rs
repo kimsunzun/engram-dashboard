@@ -1987,6 +1987,80 @@ mod tests {
         assert_eq!(json, serde_json::to_string(&back).unwrap());
     }
 
+    /// 등록 항목 하나의 바이트를 패킷과 떼어 고정한다 — 패킷 칸의 타입이 바뀌어도 항목 바이트는 이 골든이 붙든다.
+    #[test]
+    fn command_decl_json_golden_with_and_without_agent_args() {
+        let cases = [
+            (
+                CommandDecl {
+                    name: "slot.focus".into(),
+                    help: "{}".into(),
+                    agent_args: vec!["agent".into(), "after_tab".into()],
+                },
+                r#"{"name":"slot.focus","help":"{}","agent_args":["agent","after_tab"]}"#,
+            ),
+            (
+                CommandDecl {
+                    name: "tab.focus".into(),
+                    help: "{}".into(),
+                    agent_args: Vec::new(),
+                },
+                r#"{"name":"tab.focus","help":"{}"}"#,
+            ),
+        ];
+        for (decl, golden) in cases {
+            assert_eq!(
+                serde_json::to_string(&decl).unwrap(),
+                golden,
+                "CommandDecl wire 형태가 golden 과 불일치 — 손으로 적은 TS 칸도 함께 고칠 것"
+            );
+            let back: CommandDecl = serde_json::from_str(golden).unwrap();
+            assert_eq!(back, decl);
+        }
+    }
+
+    #[test]
+    fn register_commands_json_golden_carries_agent_args() {
+        let decls = vec![
+            CommandDecl {
+                name: "slot.focus".into(),
+                help: "{}".into(),
+                agent_args: vec!["agent".into(), "after_tab".into()],
+            },
+            CommandDecl {
+                name: "tab.focus".into(),
+                help: "{}".into(),
+                agent_args: Vec::new(),
+            },
+        ];
+        let cmd = AgentCommand::RegisterCommands {
+            owner: OwnerToken::new("shell"),
+            decls: decls.clone(),
+            catalog_version: 1,
+            request_id: RequestId(Uuid::nil()),
+        };
+        let golden = r#"{"RegisterCommands":{"owner":"shell","decls":[{"name":"slot.focus","help":"{}","agent_args":["agent","after_tab"]},{"name":"tab.focus","help":"{}"}],"catalog_version":1,"request_id":"00000000-0000-0000-0000-000000000000"}}"#;
+        assert_eq!(
+            serde_json::to_string(&cmd).unwrap(),
+            golden,
+            "RegisterCommands wire 형태가 golden 과 불일치 — 손으로 적은 TS 칸도 함께 고칠 것"
+        );
+        match serde_json::from_str::<AgentCommand>(golden).unwrap() {
+            AgentCommand::RegisterCommands {
+                owner,
+                decls: back,
+                catalog_version,
+                request_id,
+            } => {
+                assert_eq!(owner.as_str(), "shell");
+                assert_eq!(back, decls);
+                assert_eq!(catalog_version, 1);
+                assert_eq!(request_id, RequestId(Uuid::nil()));
+            }
+            other => panic!("variant 불일치: {other:?}"),
+        }
+    }
+
     /// 조회 왕복. `available=false` 를 함께 굽는 것은 지금 의도다 — 데몬은 그 값을 내지 않지만
     /// (ADR-0150 결정 3) 계약은 두 값을 다 나르고, 이 골든이 그 칸이 조용히 사라지지 않게 붙든다.
     #[test]
