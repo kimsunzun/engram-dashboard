@@ -1,7 +1,7 @@
 # ADR-0070: 디스플레이 이름 = 백엔드 저장 override (Preset.name / AgentProfile.display_name, serde default·무마이그레이션)
 
-- 상태: 확정 (2026-07-12, 근거: 구현+리뷰 deep 3인 PASS·qa full PASS)
-- 관련: CLAUDE.md §5(LLM-우선 제어) · ADR-0061(프리셋 영속·cwd basename 이름 파생) 확장 · ADR-0057(탭 rename) 미러 · `crates/engram-dashboard-core/src/agent/preset.rs`(`Preset.name`·`rename`) · `.../agent/profile.rs`(`display_name`·`rename`) · `crates/engram-dashboard-protocol/src/messages.rs`(`RenamePreset`/`RenameProfile`) · `crates/engram-dashboard-daemon/src/connection_core.rs`(dispatch) · step-log
+- 상태: 확정 (2026-07-12, 근거: 구현+리뷰 deep 3인 PASS·qa full PASS) · 부분 폐기 by ADR-0314 (Preset.name 프리셋 이름 조항)
+- 관련: CLAUDE.md §5(LLM-우선 제어) · ADR-0061(프리셋 영속·cwd basename 이름 파생) 확장 · ADR-0057(탭 rename) 미러 · `crates/engram-dashboard-core/src/agent/preset.rs`(`Preset.name`·`rename`) · `.../agent/profile.rs`(`display_name`·`rename`) · `crates/engram-dashboard-protocol/src/messages.rs`(`RenamePreset`/`RenameProfile`) · `crates/engram-dashboard-daemon/src/connection_core.rs`(dispatch) · step-log · Amended by ADR-0314 (Preset.name 프리셋 이름 조항)
 
 ## 맥락
 
