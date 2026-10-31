@@ -1,7 +1,7 @@
 # ADR-0325: 경로 열쇠 = OS 대문자 표의 UTF-16 단위 접기 · 파일 신원 = 128비트 우선 — 둘 다 platform `fs`
 
 - 상태: 제안 (2026-10-31, 근거: 메인 M38(재리뷰 B5 · F11) · M60(0a codex 리뷰 BLOCK 유지 · 보고) · 조사 `docs/research/library-scan-file-identity-path-key-crates-2026-10-31.md`)
-- 관련: ADR-0315 · ADR-0324 · S25 초안 AH(미채번 — walkdir) · CLAUDE.md 「플랫폼 중립」 · ADR-0266(운영 OS 분기는 platform 안) · TRD `docs/process/S25-preset-library/trd.md` §1-6 · §1-4 `catalog.rs` · 흐름 ① 훑기 꼬리표 · 흐름 ② 「찾을 수 없음」 · §5-2 2 단계 · T-74
+- 관련: ADR-0315 · ADR-0324 · ADR-0336(walkdir) · CLAUDE.md 「플랫폼 중립」 · ADR-0266(운영 OS 분기는 platform 안) · TRD `docs/process/S25-preset-library/trd.md` §1-6 · §1-4 `catalog.rs` · 흐름 ① 훑기 꼬리표 · 흐름 ② 「찾을 수 없음」 · §5-2 2 단계 · T-74
 
 ## 맥락
 Windows 는 대소문자를 가리지 않는다. `Catalog` 의 `items` · `used_by` 는 경로로 찾는 표인데, 짝 비교 `same_path(a,b)` 로는 표의 열쇠를 만들 수 없어 대소문자만 다른 참조가 Windows 에서 「찾을 수 없음」 으로 보였다(M38). 훑기는 바뀐 파일만 다시 파싱하려고 경로 · 수정 시각 · 크기 · 파일 신원을 꼬리표로 견준다(TRD 흐름 ①).

@@ -1,7 +1,7 @@
 # ADR-0315: 참조 = 라이브러리 루트부터의 `/` 경로 한 꼴 + 기본 제공 `engram:/`
 
 - 상태: 제안 (2026-10-31, 근거: 사용자 결정 메모 101–103(2026-10-15 「ㅇㅇ 지정한 폴더로 확정」) · PRD R3 · Δ1)
-- 관련: ADR-0312 · S25 초안 M(미채번 — 자리 = 정체) · ADR-0325 · TRD `docs/process/S25-preset-library/trd.md` §1-2 `LibPath` · §7 2 · 조사 `docs/research/preset-asset-reference-base-survey-2026-10-14.md`(+ 2026-10-15 덧붙임)
+- 관련: ADR-0312 · ADR-0335(자리 = 정체) · ADR-0325 · TRD `docs/process/S25-preset-library/trd.md` §1-2 `LibPath` · §7 2 · 조사 `docs/research/preset-asset-reference-base-survey-2026-10-14.md`(+ 2026-10-15 덧붙임)
 
 ## 맥락
 프리셋 안의 참조(스킬 · 지침 · 설정 · 다른 프리셋)를 어떤 꼴로 적나.

@@ -1,7 +1,7 @@
 # ADR-0323: `daemon\cache\` = 다시 만들 수 있는 데이터만 — 언제 지워도 된다
 
 - 상태: 제안 (2026-10-31, 근거: 사용자 결정 B14(2026-10-19 「cache로 하자. 그래야 유저가 인지하고 삭제하지」) · P10)
-- 관련: Amends ADR-0264 (세 번째 분류 추가) · S25 초안 Z(미채번 — 설정 검사) · TRD `docs/process/S25-preset-library/trd.md` §1-1 · §1-4 `validate.rs` · §7 29
+- 관련: Amends ADR-0264 (세 번째 분류 추가) · ADR-0332(설정 검사) · TRD `docs/process/S25-preset-library/trd.md` §1-1 · §1-4 `validate.rs` · §7 29
 
 ## 맥락
 데몬이 내려받은 설정 스키마를 어디 두나. 지금 데이터 루트는 지키는 `state\` 와 실행 중 휘발 `run\` 으로 갈린다(ADR-0264).

@@ -8,7 +8,7 @@
 
 ## 결정
 1. 숨은 settings 조각이 없다. `allowedMcpServers:[{serverName:"engram"}]` 와 `DISABLE_AUTOUPDATER` 는 기본 제공 「기본」 의 claude 원문(`engram:/settings/default`)에 보이게 든다.
-2. 붙은 프리셋(「기본」 포함)의 claude 원문을 붙인 순서로 휘발 폴더 `settings.json` 하나에 합쳐 `--settings` 하나로 싣는다. 합침 = 값은 나중 것 · 객체는 재귀 · 목록은 이어 붙이고 같은 값은 하나 · 키마다 다른 규칙 없음 · Engram 우선 규칙 없음. 합치는 쪽은 backend 설정 검사 포트(S25-I(초안)).
+2. 붙은 프리셋(「기본」 포함)의 claude 원문을 붙인 순서로 휘발 폴더 `settings.json` 하나에 합쳐 `--settings` 하나로 싣는다. 합침 = 값은 나중 것 · 객체는 재귀 · 목록은 이어 붙이고 같은 값은 하나 · 키마다 다른 규칙 없음 · Engram 우선 규칙 없음. 합치는 쪽은 backend 설정 검사 포트(ADR-0334).
 3. 실 재료면 제어 채널 조각(`ControlEndpoint.settings_file`)을 싣지 않는다. `NoopLaunchKits` 는 지금 그대로 싣는다(argv 바이트 같음).
 4. `--mcp-config` 는 범위 밖이다(실행 인자 그대로 · 프리셋 아님).
 

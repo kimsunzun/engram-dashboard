@@ -1,7 +1,7 @@
 # ADR-0333: 프리셋 YAML 편집은 손 주석 · 모양을 보존한다 — `yaml-edit =0.3.5` + 조건 셋
 
 - 상태: 제안 (2026-10-31, 근거: TRD 결정 T2(2026-10-18 관행) · 사용자 「없으면 관행대로 처리해」 · G48(2026-10-31 「보통 메모 지킴은 맞는데 그걸 위해 별도로 노력할 필요는 없음 … 어쨋든 그 라이브러리에 맞게 하면 될것같음」) + 메인 M61(0b 스파이크) · M68(2차 측정) · M73(보고) · 스파이크 `docs/research/yaml-comment-preserving-edit-spike-2026-10-31.md`)
-- 관련: S25-L(초안) · ADR-0318 · S25-AH(초안 · 읽기 = serde-saphyr) · TRD §1-4 `format.rs` · §1-12 · §5 0b · §7 27 · 앞선 관행 조사 `docs/research/yaml-comment-preserving-edit-2026-10-18.md`
+- 관련: S25 초안 L(미채번) · ADR-0318 · ADR-0336(읽기 = serde-saphyr) · TRD §1-4 `format.rs` · §1-12 · §5 0b · §7 27 · 앞선 관행 조사 `docs/research/yaml-comment-preserving-edit-2026-10-18.md`
 
 ## 맥락
 데몬이 프리셋 파일을 고칠 때(붙이기 · 빼기 · 순서 · 꼬리표) 사람이 쓴 주석 · 모양이 남느냐. 0b 스파이크가 손 주석 14개 · 목록 넷인 실제 꼴 프리셋으로 두 편집기를 재었다(연산마다 새 사본 · `diff` · serde-saphyr 로 다시 읽어 값 대조 · CRLF/LF 셈).
