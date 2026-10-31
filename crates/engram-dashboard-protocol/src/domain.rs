@@ -203,7 +203,7 @@ pub enum AgentSpawnCommand {
 /// 같은 낱말이어야 하고 그 자리는 이미 `"claude"` 로 적혀 있었다(형제 `EnvelopeFormat` 과 같은 사유).
 /// ★받는 철자는 대소문자를 가리지 않는다 · **내보내는 철자는 lowercase 하나뿐이다**★: 이 칸을 채우는
 /// 것은 사람·LLM 이 손으로 친 낱말이고(`agent.spawnInto` 의 `backend`, 프론트의 `SpawnByCwd`) 거기서
-/// `Claude` 는 오타가 아니라 같은 뜻이다. 반대로 내보내는 쪽을 넓히면 `agents.json` 과 ts-rs 유니온이
+/// `Claude` 는 오타가 아니라 같은 뜻이다. 반대로 내보내는 쪽을 넓히면 프로필 파일과 ts-rs 유니온이
 /// 갈리므로 [`Serialize`](serde::Serialize) 는 derive 그대로 둔다.
 // `Ord` = 선언 순서 — 뜻이 없고 정렬된 집합(셸의 사용량 관심 `BTreeSet`)의 열쇠로만 쓴다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, TS)]
@@ -390,7 +390,7 @@ pub struct AgentProfile {
     pub failed_reason: Option<String>,
     /// 이 항목이 마지막으로 활성화에 실패한 종류(ADR-0172). `null` = 실패 기록 없음.
     ///
-    /// ★데몬 메모리에만 산다★ — agent 쪽 원본이 `#[serde(skip)]` 이라 `agents.json` 에 없고, 데몬을
+    /// ★데몬 메모리에만 산다★ — agent 쪽 원본이 `#[serde(skip)]` 이라 프로필 파일에 없고, 데몬을
     ///   재기동하면 사라진다(앱 창 재시작은 견딘다).
     /// `#[serde(default)]` 라 이 필드 없는 옛 wire → None(PROTOCOL_VERSION 유지 — display_name·
     /// parent_id 와 동형 additive). 모르는 **값**은 `Other` 로 흡수된다(`AgentFailureKind` 의
@@ -616,7 +616,7 @@ mod tests {
         assert!(text.contains("claude") && text.contains("codex"), "{text}");
     }
 
-    /// 내보내는 철자는 안 바뀐다 — `agents.json` 과 ts-rs 유니온이 이 값을 읽는다.
+    /// 내보내는 철자는 안 바뀐다 — 프로필 파일과 ts-rs 유니온이 이 값을 읽는다.
     #[test]
     fn backend_kind_serializes_exactly_the_declared_words() {
         for (kind, word) in AgentBackendKind::ALL {

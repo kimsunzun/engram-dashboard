@@ -22,7 +22,7 @@ use engram_dashboard_command::{
 };
 
 use crate::manager::{AgentManager, RenameOutcome};
-use crate::persistence::AGENTS_FILE;
+use crate::persistence::PROFILES_FILE;
 use crate::queued_input::{ListedState, QueuedListing};
 // 코어 enum과 아래 동명 선언 어휘를 구분하는 별칭.
 use crate::profile::AgentOutputFormat as CoreAgentOutputFormat;
@@ -106,7 +106,7 @@ declare_commands! {
         file_version: Option<u64>,
     }
 
-    /// 명부 저장소 — `agents`(agents.json · 에이전트 명부).
+    /// 명부 저장소 — `agents`(프로필 파일 `agent-profiles.json` · 에이전트 명부).
     struct RosterStoreRow {
         agents: StoreStatusRow,
     }
@@ -118,7 +118,7 @@ declare_commands! {
     /// 도는지 확인된 바 없다** — 그래서 칸은 열어 두되 값은 확인된 둘로 좁혀 둔다(나중에 계약 **모양**이
     /// 바뀌지 않게).
     /// ★변형을 더하는 값어치는 **짝이 이미 있나**가 가른다★: 실행 명령(`AgentCommand`)은
-    /// `#[serde(tag = "kind")]` 로 **`agents.json` 에 그대로 적히고**, 모르는 kind 를 만난 옛 빌드는 그
+    /// `#[serde(tag = "kind")]` 로 **프로필 파일에 그대로 적히고**, 모르는 kind 를 만난 옛 빌드는 그
     /// 파일을 **한 덩이로** 손상으로 보고 **빈 명부로 뜬다** — 첫 저장이 그 파일을 `.corrupt` 로 떠 두고 덮는다
     /// (persistence `FileProfileStore::load` · 그보다 옛 빌드는 적재 때 `.corrupt-<ms>` 로 옮긴다). 그러니
     /// `AgentCommand` 에 **아직 없는** 백엔드를 여기 더하는 것은 디스크 호환을 깨는 이주이고, 짝이 **이미
@@ -473,7 +473,7 @@ pub struct StartedAgent {
 // ADR-0012
 pub trait AgentCommandHost: Send + Sync {
     fn roster(&self) -> Vec<AgentRosterRow>;
-    /// 명부 저장소(agents.json)의 지금 상태 — `agent.list` 가 [`RosterStoreRow`] 로 편다.
+    /// 명부 저장소(프로필 파일)의 지금 상태 — `agent.list` 가 [`RosterStoreRow`] 로 편다.
     // ADR-0291 R17 (D6)
     fn store_status(&self) -> StoreStatus;
     fn agent_snapshot(&self, id: AgentId) -> Option<AgentProfile>;
@@ -1148,7 +1148,7 @@ fn wake_existing(
                 &error,
                 format!(
                     "could not start agent '{token}': {}",
-                    store_error_reason(AGENTS_FILE, &error)
+                    store_error_reason(PROFILES_FILE, &error)
                 ),
             ),
         ),
@@ -1210,7 +1210,7 @@ fn create_and_start(
                 PtyError::Store(error) => store_error(
                     "start",
                     &error,
-                    CommandError::internal(created_but(store_error_cause(AGENTS_FILE, &error))),
+                    CommandError::internal(created_but(store_error_cause(PROFILES_FILE, &error))),
                 ),
                 other => CommandError::internal(created_but(other.to_string())),
             }
@@ -1309,7 +1309,7 @@ fn register(
                 &error,
                 format!(
                     "could not register a new agent: {} — nothing was registered",
-                    store_error_reason(AGENTS_FILE, &error)
+                    store_error_reason(PROFILES_FILE, &error)
                 ),
             ),
         ),
@@ -1339,7 +1339,7 @@ fn verb_rename(
                     &error,
                     format!(
                         "could not rename '{token}': {} — the name was left as it is",
-                        store_error_reason(AGENTS_FILE, &error)
+                        store_error_reason(PROFILES_FILE, &error)
                     ),
                 ),
             ),
@@ -1414,7 +1414,7 @@ fn verb_move(
                 &error,
                 format!(
                     "could not move '{token}': {} — it was left where it was",
-                    store_error_reason(AGENTS_FILE, &error)
+                    store_error_reason(PROFILES_FILE, &error)
                 ),
             ),
         ),
@@ -1641,7 +1641,7 @@ fn store_error_cause(file: &str, error: &StoreError) -> String {
 fn store_error(action: &'static str, error: &StoreError, failure: CommandError) -> CommandError {
     tracing::warn!(
         action,
-        file = AGENTS_FILE,
+        file = PROFILES_FILE,
         %error,
         "저장소가 받지 않아 이 요청을 오류로 돌려준다(명령 버스)"
     );
@@ -2380,7 +2380,7 @@ mod tests {
     }
 
     /// ★저장된 sid 만으로 Resume 을 유도하지 않는다(ADR-0185)★ — 이어받을 수 없는 명령에 sid 가 남아
-    /// 있는 상태는 오늘도 만들어진다(손으로 고친 `agents.json` · 백엔드를 갈아탄 프로필). 그때 Resume 으로
+    /// 있는 상태는 오늘도 만들어진다(손으로 고친 프로필 파일 · 백엔드를 갈아탄 프로필). 그때 Resume 으로
     /// 띄우면 **새 대화가 열리는데 결과는 「이어받음」으로 보고된다** — wire 에 그것이 새 대화라는 표식이
     /// 없어 화면도 LLM 도 구별하지 못한다.
     /// ★WS 입구에도 같은 짝이 있다★ — 두 핸들이 같은 것을 흔들어야 한다(CLAUDE.md 「LLM-우선 제어」).
@@ -2643,7 +2643,7 @@ mod tests {
             if from_store {
                 // 어느 파일이 왜 받지 않았나를 문구가 댄다 — 호출자가 고칠 자리를 찾게.
                 assert!(
-                    err.message().contains("agents.json")
+                    err.message().contains(PROFILES_FILE)
                         && err.message().contains("nothing was registered"),
                     "{}",
                     err.message()
@@ -2658,30 +2658,26 @@ mod tests {
     #[test]
     fn store_refusal_reasons_are_english_and_name_the_way_out() {
         use crate::profile::Refusal;
-        let at_load = store_error_reason("agents.json", &StoreError::ReadOnly(Refusal::Unreadable));
+        let at_load = store_error_reason("x.json", &StoreError::ReadOnly(Refusal::Unreadable));
         assert!(
-            at_load.starts_with("agents.json could not be read")
+            at_load.starts_with("x.json could not be read")
                 && at_load.contains("restart the daemon"),
             "{at_load}"
         );
-        let newer = store_error_reason(
-            "agents.json",
-            &StoreError::Refused(Refusal::Newer { found: 3 }),
-        );
+        let newer = store_error_reason("x.json", &StoreError::Refused(Refusal::Newer { found: 3 }));
         assert!(
-            newer.starts_with("agents.json was written by a newer build (version 3)")
+            newer.starts_with("x.json was written by a newer build (version 3)")
                 && newer.contains("retrying will not help"),
             "{newer}"
         );
-        let transient =
-            store_error_reason("agents.json", &StoreError::Refused(Refusal::Unreadable));
+        let transient = store_error_reason("x.json", &StoreError::Refused(Refusal::Unreadable));
         assert!(transient.contains("retry in a moment"), "{transient}");
         assert_eq!(
             store_error_reason(
-                "agents.json",
+                "x.json",
                 &StoreError::Io(std::io::Error::other("disk full"))
             ),
-            "writing agents.json failed: disk full"
+            "writing x.json failed: disk full"
         );
     }
 
@@ -2863,7 +2859,7 @@ mod tests {
         .expect_err("개명은 저장 거절로 돌아온다 — Renamed 가 아니다");
         assert_eq!(err.code(), ErrorCode::Conflict);
         assert!(
-            err.message().contains("agents.json")
+            err.message().contains(PROFILES_FILE)
                 && err.message().contains("the name was left as it is"),
             "{}",
             err.message()
@@ -2876,7 +2872,7 @@ mod tests {
         )
         .expect_err("이동은 저장 거절로 돌아온다");
         assert_eq!(err.code(), ErrorCode::Conflict);
-        assert!(err.message().contains("agents.json"), "{}", err.message());
+        assert!(err.message().contains(PROFILES_FILE), "{}", err.message());
 
         assert_eq!(*notify.calls.lock().unwrap(), 0, "바뀐 것이 없다");
     }
@@ -2897,7 +2893,7 @@ mod tests {
         assert_eq!(err.code(), ErrorCode::Conflict);
         assert!(
             err.message().contains("could not start agent 'alpha'")
-                && err.message().contains("agents.json"),
+                && err.message().contains(PROFILES_FILE),
             "{}",
             err.message()
         );
@@ -2995,18 +2991,18 @@ mod tests {
             }
         }
         use crate::profile::Refusal;
-        let causes: [(fn() -> StoreError, &str); 3] = [
+        let causes: [(fn() -> StoreError, String); 3] = [
             (
                 || StoreError::Refused(Refusal::Unreadable),
-                "agents.json could not be read just now",
+                format!("{PROFILES_FILE} could not be read just now"),
             ),
             (
                 || StoreError::Refused(Refusal::Newer { found: 2 }),
-                "agents.json was written by a newer build (version 2)",
+                format!("{PROFILES_FILE} was written by a newer build (version 2)"),
             ),
             (
                 || StoreError::Io(std::io::Error::other("disk full")),
-                "writing agents.json failed: disk full",
+                format!("writing {PROFILES_FILE} failed: disk full"),
             ),
         ];
 
@@ -3030,7 +3026,7 @@ mod tests {
             assert_eq!(err.code(), ErrorCode::Internal, "{message}");
             assert!(
                 message.contains("was created but did not start")
-                    && message.contains(cause)
+                    && message.contains(&cause)
                     && message.contains(
                         "start it again by that name (in a moment) instead of creating another"
                     ),
@@ -3142,7 +3138,7 @@ mod tests {
                     .expect_err("저장소가 받지 않으면 오류다: {name} {args}");
                 assert_eq!(err.code(), expected, "{failure:?} · {name} {args}");
                 assert!(
-                    err.message().contains("agents.json"),
+                    err.message().contains(PROFILES_FILE),
                     "{failure:?} · {name}: {}",
                     err.message()
                 );
@@ -3269,7 +3265,7 @@ mod tests {
                 "{word}: 선언 어휘가 짓는 실행 명령이 그 어휘로 되읽히지 않는다"
             );
             // ★코어 쪽 wire 철자까지 묶는다★: `AgentCommand` 는 `#[serde(tag = "kind")]` 로 디스크에 그대로
-            //   적히므로(`agents.json`), 그 태그 값을 바꾸면 여기서 걸려야 한다 — 안 걸리면 선언 어휘와
+            //   적히므로(프로필 파일), 그 태그 값을 바꾸면 여기서 걸려야 한다 — 안 걸리면 선언 어휘와
             //   저장 어휘가 조용히 갈리고, 그 갈림은 옛 빌드가 파일을 못 읽는 형태로 나타난다.
             assert_eq!(
                 serde_json::to_value(&built).expect("코어 직렬화")["kind"],

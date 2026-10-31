@@ -16,18 +16,21 @@ launch/release/
 
 # 릴리즈 배포판의 런타임 데이터(실행파일 옆 `data/` — ADR-0134). 같은 이유로 절대 커밋 금지:
 #   daemon\run\ 에 256-bit WS 토큰(daemon.json)과 스폰 부착 파일의 토큰(mcp-config\),
-#   daemon\state\agents.json 에 프로필(평문 env 포함 가능)이 담긴다.
+#   daemon\state\agent-profiles.json 에 프로필(평문 env 포함 가능)이 담긴다(옛 판 = daemon\state\agents.json).
 #
 # ★폴더 이름 한 줄(`data/`)로 막지 마라(되살리지 마라)★: ADR-0134 개명으로 이름이 흔해져 무관한
 #   data 폴더까지 조용히 삼킨다 — 무시는 눈에 안 보여서, 넓은 규칙은 없느니만 못하다.
 # ★그렇다고 지우지도 마라★: 조립 산출 경로(위 release/ · launch/release/ · target/)는 이미 덮이지만,
 #   배포판 zip 을 추적 폴더 안 **임의 위치**에 풀거나 build-release.ps1 을 -OutDir 로 딴 데 돌리면
 #   그 경로들 밖이다. 그 몫만 비밀 자리를 정확히 겨눈다.
-# ★`agents.json*` 의 꼬리 `*` 를 빼지 마라★: `.corrupt-*` 사본도 같은 평문 env 를 싣는다.
+# ★`agent-profiles.json*` · `agents.json*` 의 꼬리 `*` 를 빼지 마라★: `.corrupt` · `.corrupt-*` 사본과 원자 쓰기의
+#   임시 파일(`.tmp<pid>.<번호>`)도 같은 평문 env 를 싣는다.
+# ★옛 판 `agents.json*` 줄도 지우지 마라★: 새 판은 그 파일을 읽지도 지우지도 않아(ADR-0314 결정 5) 폴더에 남는다.
 # ★`daemon/run/` 은 폴더 규칙이다★(ADR-0264 결정 7 — ADR-0136 결정 3 의 파일 이름 원칙에 대한 유일한 예외)
 #   — 토큰을 담는 것(daemon.json · mcp-config\)이 전부 그 아래이고, 경로가 구체적이라 무관한 폴더를
 #   삼키지 않는다.
 **/data/daemon/run/
+**/data/daemon/state/agent-profiles.json*
 **/data/daemon/state/agents.json*
 # 옛 평면 배치의 비밀 파일 — 코드는 더 읽지도 지우지도 않지만(ADR-0264 결정 5), 남은 토큰·평문 env 가
 #   미추적으로 떠 실수로 커밋되지 않게 둔다.

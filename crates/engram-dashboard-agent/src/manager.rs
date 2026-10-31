@@ -248,7 +248,7 @@ fn classify_name(base: &str, name: &str) -> Option<NameKind> {
 /// ★명부 총량 상한 = **폭주 백스톱**이지 제품 한도가 아니다★ (사용자 결정 2026-08-11).
 ///
 /// 제어 평면은 모든 에이전트에게 열려 있고(ADR-0132 결정 5) 그 결정은 유지된다 — 그러나 무언가가
-/// "에이전트 만들기" 를 반복 호출하면 명부와 `agents.json` 이 **상한 없이** 자란다. 그 루프만 끊는다.
+/// "에이전트 만들기" 를 반복 호출하면 명부와 프로필 파일이 **상한 없이** 자란다. 그 루프만 끊는다.
 ///
 /// ★왜 코어인가(입구가 아니라)★: 상한을 입구에 두면 입구마다 사본이 생기고, 사본이 없는 입구는 그냥
 ///   통과한다 — 실제로 제어 라우트에만 두었더니 데스크톱(WS `CreateProfile`)과 ad-hoc spawn 이 그대로
@@ -681,7 +681,7 @@ pub struct AgentManager {
     /// 역순(profiles 보유 중 이 락 취득)은 존재하지 않아 ADR-0006 순서에 순환이 없다.
     ///
     /// ★임계구역은 값싸지 않다★: ① `roster()` 관측이 **override 없는 잠든 에이전트 1건당
-    /// `dunce::canonicalize` syscall 1회**를 치르고 ② 커밋이 `agents.json` 전체를 디스크에 쓴다(ADR-0071).
+    /// `dunce::canonicalize` syscall 1회**를 치르고 ② 커밋이 프로필 파일 전체를 디스크에 쓴다(ADR-0071).
     /// 그래서 생성·개명·신규 등록 spawn 은 전역 직렬화되고, cwd 가 죽은 네트워크 공유에 있는 에이전트가
     /// 하나라도 있으면 그 syscall 이 멈춘 동안 세 경로가 함께 막힌다.
     /// ★그래도 메일 배달은 막히지 않는다 — 이 성질을 깨뜨리지 말 것★: `DeliveryPort`(주입·로스터·이름)는
@@ -837,7 +837,7 @@ impl AgentManager {
         self.inputs_pending.clone()
     }
 
-    /// 에이전트 명부 저장소(agents.json)의 지금 상태.
+    /// 에이전트 명부 저장소(프로필 파일)의 지금 상태.
     // ADR-0291 R17 (D6)
     pub fn agents_store_status(&self) -> StoreStatus {
         self.profiles.store_status()
@@ -961,9 +961,9 @@ impl AgentManager {
     ///   돌리므로 원리적으로는 `parent_id` 가 갈릴 수 있다. 이 경로는 항상 `parent_id == None` 인 새
     ///   프로필이라 실제로 갈리지 않지만, 되읽기가 필요해지면 명시적으로 다시 조회할 것.
     ///
-    /// ★접미사는 `display_name` 으로 박는다★: canonical 이름은 override 가 없으면 cwd basename 파생이라,
-    ///   같은 폴더를 가리키는 둘은 개명 없이도 자동 동명이 된다(ADR-0120 §영향). 그 충돌을 해소할 수 있는
-    ///   유일한 저장 자리가 override 다.
+    /// ★배정한 이름은 접미사가 없어도 `display_name` 으로 박는다★: canonical 이름은 override 가 없으면 cwd
+    ///   basename 파생이라, 같은 폴더를 가리키는 둘은 개명 없이도 자동 동명이 되고(ADR-0120 §영향) 작업 폴더가
+    ///   바뀌면 이름도 말없이 바뀐다. 둘 다 막는 저장 자리가 override 다.
     /// ★부르는 쪽 있는 변경이다★ — Err = 명부 상한 · 접미사 공간 소진 · 저장 거절 · 실패([`PtyError::Store`])이고,
     ///   어느 쪽이든 등록은 일어나지 않는다(메모리 명부 그대로).
     // ADR-0291 R17 (E4)
@@ -977,18 +977,32 @@ impl AgentManager {
         let roster = self.roster();
         check_roster_capacity(&roster)?;
         let desired = profile.canonical_name_when_live();
-        match self.decide_name_with_roster(&roster, profile.id, &desired, None) {
-            NameDecision::Free => {}
-            NameDecision::Suffixed(assigned) => profile.display_name = Some(assigned),
-            NameDecision::Exhausted => return Err(name_space_exhausted(&desired)),
-            NameDecision::KeepCurrent => {
-                unreachable!("decide_name(current=None) 은 KeepCurrent 를 낼 수 없다")
-            }
-        }
+        profile.display_name = Some(self.assign_new_name(&roster, profile.id, desired)?);
         self.profiles
             .try_upsert(profile.clone())
             .map_err(PtyError::Store)?;
         Ok(profile)
+    }
+
+    /// 신규 등록의 이름 — 비었으면 `desired`, 남이 쥐었으면 계열의 빈 번호. ★돌려준 이름을 `display_name` 으로
+    /// 박는다(접미사가 없어도)★ — 작업 폴더에서 파생된 채 두면 작업 폴더를 바꾸는 길이 우편 주소 · 트리 이름을
+    /// 말없이 바꾼다. 배정 게이트를 쥔 채 부른다.
+    // ADR-0120
+    // TRD S25 §1-5 「display_name 고정」
+    fn assign_new_name(
+        &self,
+        roster: &[RosterEntry],
+        id: AgentId,
+        desired: String,
+    ) -> Result<String, PtyError> {
+        match self.decide_name_with_roster(roster, id, &desired, None) {
+            NameDecision::Free => Ok(desired),
+            NameDecision::Suffixed(assigned) => Ok(assigned),
+            NameDecision::Exhausted => Err(name_space_exhausted(&desired)),
+            NameDecision::KeepCurrent => {
+                unreachable!("decide_name(current=None) 은 KeepCurrent 를 낼 수 없다")
+            }
+        }
     }
 
     /// 에이전트 삭제(트리 "지우기") — 부르는 쪽 있는 변경: 저장이 `Err` 면 지우지 않고 [`PtyError::Store`] 다. 없는
@@ -1252,14 +1266,7 @@ impl AgentManager {
         let roster = self.roster();
         check_roster_capacity(&roster)?;
         let desired = fresh.canonical_name_when_live();
-        match self.decide_name_with_roster(&roster, fresh.id, &desired, None) {
-            NameDecision::Free => {}
-            NameDecision::Suffixed(assigned) => fresh.display_name = Some(assigned),
-            NameDecision::Exhausted => return Err(name_space_exhausted(&desired)),
-            NameDecision::KeepCurrent => {
-                unreachable!("decide_name(current=None) 은 KeepCurrent 를 낼 수 없다")
-            }
-        }
+        fresh.display_name = Some(self.assign_new_name(&roster, fresh.id, desired)?);
         entry
             .upsert_preserving_hierarchy(&self.profiles, fresh)
             .map_err(PtyError::Store)
@@ -1387,6 +1394,10 @@ impl AgentManager {
             .ok_or_else(|| profile_vanished_mid_spawn(profile.id, "화신 표식 확정"))?;
 
         // cwd 정규화 — claude 세션 디렉토리 표기 고정(UNC 회피). 실패 시 원본 사용(best-effort).
+        // TODO(TRD S25 §1-5 (가) 실행 전처리): 이 cwd 와 실행 재료를 예약 뒤 명부에서 다시 읽은 값으로 뽑는다.
+        //   지금은 호출자 사본의 `profile.cwd` 인데 위 등록 병합은 명부의 cwd 를 지킨다(`merge_preserving_live`).
+        //   작업 폴더 바꾸기(`agent.setWorkspace`)가 사본을 뜬 뒤에 끼면 명부 cwd 와 이 화신의 프로세스 cwd 가 갈리고,
+        //   다음 이어받기(Resume)는 명부 cwd 로 떠 그 대화를 못 찾는다.
         let cwd = dunce::canonicalize(&profile.cwd).unwrap_or_else(|_| profile.cwd.clone());
 
         // ★세션 id 규칙(ADR-0226 — 「저장된 id 가 있다 ⟺ 이어받을 대화가 있다」)★: 여기서는 **아무것도
@@ -5858,7 +5869,13 @@ mod tests {
         let manager = bare_manager();
         create(&manager, "C:/x", Some("bob"));
         let x = create(&manager, "C:/somewhere/zeta", None);
-        assert_eq!(x.canonical_name_when_live(), "zeta", "프로필 파생 축");
+        // 만들기는 이름을 박는다 — 두 축이 갈리는 override 없는 상태는 이름 지우기가 만든다.
+        assert!(renamed_ok(
+            manager.try_rename_agent(x.id, None).expect("저장 성공")
+        ));
+        let stored = manager.agent_snapshot(x.id).unwrap();
+        assert_eq!(stored.display_name, None);
+        assert_eq!(stored.canonical_name_when_live(), "zeta", "프로필 파생 축");
         put_live_session_at(&manager, x.id, "C:/live/bob(1)");
         assert_eq!(name_of_in_roster(&manager, x.id), "bob(1)", "명부 축");
 
@@ -5924,14 +5941,11 @@ mod tests {
 
         let blank = create(&manager, "C:/blankdir", Some("   "));
         assert_eq!(
-            blank.display_name, None,
-            "공백만 남는 요청은 override 없음으로 저장된다"
+            blank.display_name,
+            Some("blankdir".to_string()),
+            "공백만 남는 요청은 이름 요청이 아니다 — cwd 파생 이름을 박는다(이름 고정)"
         );
-        assert_eq!(
-            name_of(&manager, blank.id),
-            "blankdir",
-            "override 가 없으니 cwd 파생 이름"
-        );
+        assert_eq!(name_of(&manager, blank.id), "blankdir");
 
         let named = create(&manager, "C:/otherdir", Some("zoe"));
         assert!(renamed_ok(
@@ -6511,7 +6525,7 @@ mod tests {
     ///   1. `register_for_spawn` **바로 뒤**가 `epoch_for_spawn` 이다. 앞엣것은 live 표식을 **보존**하므로
     ///      (ADR-0084) 그 사이 구간에는 여전히 **앞 화신의 표식**이 서 있고, 그 구간에 도착한 앞 화신의
     ///      지각 기록은 표식이 일치해 **거절되지 않는다**. 사이에 cwd 정규화(syscall)나 Fresh 비우기
-    ///      (`agents.json` 통째 쓰기)가 끼면 그 구간이 실제로 벌어진다.
+    ///      (프로필 파일 통째 쓰기)가 끼면 그 구간이 실제로 벌어진다.
     ///   2. 이어받기 손잡이를 읽는 자리가 `epoch_for_spawn` **뒤**다. 표식이 바뀐 뒤부터 이 spawn 이
     ///      기록 포트를 건네기 전까지는 어떤 화신의 기록도 통과하지 못해 명부 값이 얼어 있고, 그래서
     ///      「읽은 값 = 이 화신이 이어받는 값」이 성립한다.
@@ -7060,10 +7074,10 @@ mod tests {
         }
     }
 
-    /// ★거절 동안 디스크 바이트는 그대로다★ — 실 파일 저장소로 본다: 실행 중에 `agents.json` 이 새 판이 되면
+    /// ★거절 동안 디스크 바이트는 그대로다★ — 실 파일 저장소로 본다: 실행 중에 프로필 파일이 새 판이 되면
     ///   래치의 기록은 메모리에만 서고(dirty) 그 파일은 한 바이트도 안 바뀐다.
     #[test]
-    fn a_refused_latch_commit_leaves_the_agents_file_bytes_alone() {
+    fn a_refused_latch_commit_leaves_the_profile_file_bytes_alone() {
         let dir =
             std::env::temp_dir().join(format!("engram-manager-latch-refused-{}", Uuid::new_v4()));
         let profiles = Arc::new(crate::profile::ProfileRegistry::new(Arc::new(
@@ -7080,7 +7094,8 @@ mod tests {
         profiles.upsert(p);
         let epoch = profiles.epoch_for_spawn(id).expect("갓 넣은 프로필");
         let newer = r#"{"schema_version":2,"profiles":[]}"#;
-        std::fs::write(dir.join("agents.json"), newer).expect("새 판 파일 쓰기");
+        std::fs::write(dir.join(crate::persistence::PROFILES_FILE), newer)
+            .expect("새 판 파일 쓰기");
         let sid = Uuid::new_v4();
 
         session_id_sink(profiles.clone(), id, epoch, None)(&sid.to_string());
@@ -7091,7 +7106,7 @@ mod tests {
         );
         assert!(profiles.is_dirty());
         assert_eq!(
-            std::fs::read_to_string(dir.join("agents.json")).expect("읽기"),
+            std::fs::read_to_string(dir.join(crate::persistence::PROFILES_FILE)).expect("읽기"),
             newer,
             "거절 동안 dirty 명부는 새 판 파일에 닿지 않는다"
         );

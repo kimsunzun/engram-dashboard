@@ -1,4 +1,9 @@
-//! 프로필 영속화 — `agents.json` 의 저장소.
+//! 프로필 영속화 — 프로필 파일([`PROFILES_FILE`])의 저장소.
+//!
+//! ★옛 판의 `agents.json` 은 이 저장소의 파일이 아니다★(ADR-0314 결정 5 — 옛 데이터는 묻지 않고 버린다) —
+//! 읽지도 고치지도 지우지도 않고 그 임시 파일 이름도 쓸지 않는다. 그래서 옛 판 파일만 있는 폴더에서는 빈
+//! 명부로 시작하고, 옛 빌드로 내렸다 다시 올려도 두 판이 서로의 파일을 건드리지 않는다 — 판 표식 · 이전 ·
+//! 백업이 없는 이유다. 옛 이름을 다시 읽게 하지 말 것 — 옛 판 프로필(옛 에이전트)이 새 명부로 섞여 든다.
 //!
 //! 규칙은 base `file` 의 데이터 파일 규칙이다(ADR-0291):
 //! - 쓰기는 원자적이다(같은 폴더 임시 → rename) — 크래시가 나도 반쪽 파일이 남지 않는다.
@@ -13,8 +18,8 @@
 //! 저장소를 부르는 것은 레지스트리 하나뿐이다. 이 모듈이 쥐는 락은 잎 하나(저장소 상태 칸)이고 쥔 채 IO · 로그 ·
 //! 밖 호출을 하지 않는다 — 락 순서 = `래치 → expected 칸 → profiles → 저장소 상태 칸`.
 // ADR-0291
+// ADR-0314
 
-use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -33,11 +38,11 @@ use serde_json::{Map, Value};
 use crate::profile::{AgentProfile, ProfileStore, Refusal, StoreError, StoreStatus};
 
 /// 프로필 저장소의 파일 이름 — 저장 거절 · 실패를 호출자에게 알리는 문구가 이 이름을 댄다.
-pub const AGENTS_FILE: &str = "agents.json";
+/// ★바꾸면 `.gitignore` 의 같은 이름 줄도 함께 바꾼다★ — 프로필은 평문 `env` 를 싣는다(ADR-0264 결정 7).
+pub const PROFILES_FILE: &str = "agent-profiles.json";
 
 const PROFILES: FileKind = FileKind {
-    name: AGENTS_FILE,
-    legacy_tmp: "agents.json.tmp",
+    name: PROFILES_FILE,
     list_key: "profiles",
     spec: file::Spec {
         version_key: "schema_version",
@@ -103,7 +108,8 @@ fn warn_if_secret(profiles: &[AgentProfile]) {
                 tracing::warn!(
                     agent = %p.id,
                     env_key = %k,
-                    "프로필 env에 자격증명으로 보이는 키 — agents.json에 평문 저장됨. 자격증명은 env에 넣지 말 것."
+                    file = PROFILES_FILE,
+                    "프로필 env에 자격증명으로 보이는 키 — 프로필 파일에 평문 저장됨. 자격증명은 env에 넣지 말 것."
                 );
             }
         }
@@ -156,15 +162,12 @@ fn retry_load(attempt: &mut dyn FnMut() -> io::Result<()>) -> io::Result<()> {
 struct FileKind {
     /// 파일 이름 — 로그의 `file` 칸이기도 하다.
     name: &'static str,
-    /// 옛 빌드가 쓰던 고정 임시 이름. `file::sweep_temps` 는 번호 없는 이름을 남의 것일 수 있다고 보고 두므로
-    /// 이 이름은 저장소가 직접 지운다(ADR-0291 R12).
-    legacy_tmp: &'static str,
     /// 목록을 싣는 최상위 칸.
     list_key: &'static str,
     spec: file::Spec,
 }
 
-/// `agents.json` 저장소 — 상태 셋은 [`StoreStatus`] 다.
+/// 파일 하나의 저장소 — 상태 셋은 [`StoreStatus`] 다.
 struct FileStore {
     dir: PathBuf,
     kind: FileKind,
@@ -437,21 +440,6 @@ impl FileStore {
                 "남은 임시 파일을 찾지 못했다 — 치우지 않고 진행한다"
             ),
         }
-        let legacy = self.dir.join(self.kind.legacy_tmp);
-        match fs::remove_file(&legacy) {
-            Ok(()) => tracing::debug!(
-                file = name,
-                path = %legacy.display(),
-                "옛 고정 임시 파일을 지웠다"
-            ),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => tracing::warn!(
-                file = name,
-                path = %legacy.display(),
-                %error,
-                "옛 고정 임시 파일을 못 지웠다"
-            ),
-        }
     }
 }
 
@@ -499,8 +487,10 @@ fn read_list<T: DeserializeOwned>(doc: &Map<String, Value>, key: &str) -> Result
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
-    use crate::profile::AgentCommand;
+    use crate::profile::{AgentCommand, AttachedPreset};
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("engram-persist-test-{name}"));
@@ -535,25 +525,22 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// ★앞 릴리스로 되돌아간 바이너리가 이 파일을 읽을 수 있어야 한다★: 그 구조체는 `epoch` 를 **필수**
-    /// 필드로 선언했으므로 키가 없으면 `missing field` 로 파싱이 깨지고, 그 릴리스의 persistence 는 파일을
-    /// `.corrupt-<ts>` 로 치우고 빈 목록으로 시작한 뒤 다음 save 가 그 빈 목록을 덮어써 프로필·세션 id·트리
-    /// 부모가 통째로 사라진다.
-    /// 실리는 값은 산 표식이 아니라 고정 `0`(옛 카운터의 "재spawn 없음" 상태 — `AgentProfile::epoch` 주석).
+    /// `epoch` 키는 읽는 리더가 없는 남은 자리채움이다 — 걷을 때 이 테스트도 함께 고친다(근거 = `AgentProfile::epoch`
+    /// 주석).
     #[test]
-    fn agents_json_carries_a_zero_epoch_key_for_older_readers() {
+    fn the_profile_file_carries_a_zero_epoch_placeholder_not_the_live_tag() {
         let dir = temp_dir("epoch-key");
         let store = FileProfileStore::new(dir.clone());
         let mut p = sample();
         p.epoch = 0xDEAD_BEEF;
         store.save(&[p]).unwrap();
 
-        let raw = fs::read(dir.join(PROFILES.name)).expect("agents.json 읽기");
+        let raw = fs::read(dir.join(PROFILES.name)).expect("프로필 파일 읽기");
         let v: serde_json::Value = serde_json::from_slice(&raw).expect("JSON 파싱");
         assert_eq!(
             v["profiles"][0].get("epoch"),
             Some(&serde_json::json!(0)),
-            "옛 리더가 필수로 읽는 키가 0 으로 실려 있어야 한다: {v}"
+            "자리채움 키는 산 표식이 아니라 0 으로 실린다: {v}"
         );
 
         assert_eq!(
@@ -570,6 +557,129 @@ mod tests {
         let store = FileProfileStore::new(dir.clone());
         assert!(store.load().is_empty());
         assert_eq!(store.status(), StoreStatus::Writable);
+    }
+
+    // ADR-0264
+    #[test]
+    fn the_repo_gitignore_covers_the_profile_file_and_its_side_copies() {
+        const GITIGNORE: &str = include_str!("../../../../.gitignore");
+        let rule = format!("**/data/daemon/state/{PROFILES_FILE}*");
+        assert!(
+            GITIGNORE.lines().any(|line| line.trim() == rule),
+            "`.gitignore` 에 `{rule}` 줄이 없다"
+        );
+    }
+
+    // ── 옛 판 파일 · 새 칸 ──
+
+    /// 옛 판 `agents.json` 의 모양 — 그 판의 리더가 읽던 그대로(새 칸 없음).
+    const OLD_AGENTS_JSON: &str = r#"{
+  "schema_version": 1,
+  "profiles": [
+    {
+      "id": "00000000-0000-0000-0000-0000000000a1",
+      "name": "C:\\work\\old",
+      "display_name": "old",
+      "parent_id": null,
+      "command": { "kind": "Claude", "extra_args": [], "output_format": "Terminal" },
+      "cwd": "C:\\work\\old",
+      "env": [],
+      "backend_session_id": "00000000-0000-0000-0000-0000000000b1",
+      "old_session_ids": [],
+      "epoch": 0,
+      "auto_restore": true,
+      "restart_policy": "Always",
+      "restart_count": 0,
+      "failed_reason": null,
+      "created_at": 1,
+      "last_active": 1,
+      "last_start_at": null
+    }
+  ]
+}"#;
+
+    #[test]
+    fn only_the_old_agents_json_present_starts_an_empty_roster_and_leaves_it_byte_for_byte() {
+        let dir = temp_dir("old-only");
+        put(&dir, "agents.json", OLD_AGENTS_JSON);
+        let before = fs::read(dir.join("agents.json")).unwrap();
+
+        let store = FileProfileStore::new(dir.clone());
+        assert!(store.load().is_empty(), "옛 판 에이전트가 새 명부에 섞였다");
+        assert_eq!(store.status(), StoreStatus::Writable);
+        let p = sample();
+        store.save(std::slice::from_ref(&p)).unwrap();
+
+        assert_eq!(
+            fs::read(dir.join("agents.json")).unwrap(),
+            before,
+            "옛 판 파일은 읽지도 고치지도 않는다"
+        );
+        assert!(!dir.join("agents.json.corrupt").exists());
+        let ours = FileProfileStore::new(dir.clone()).load();
+        assert_eq!(ours.len(), 1);
+        assert_eq!(ours[0].id, p.id);
+
+        // 옛 빌드로 내렸다 올린 길 — 그 사이 옛 판 파일이 바뀌어도 새 명부는 섞이지도 비워지지도 않는다.
+        put(
+            &dir,
+            "agents.json",
+            &OLD_AGENTS_JSON.replace(r#""auto_restore": true"#, r#""auto_restore": false"#),
+        );
+        let reloaded = FileProfileStore::new(dir.clone()).load();
+        assert_eq!(reloaded.len(), 1);
+        assert_eq!(reloaded[0].id, p.id);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_new_fields_survive_a_save_and_reload_and_the_cwd_key_keeps_its_spelling() {
+        let dir = temp_dir("new-fields");
+        let mut p = sample();
+        p.default_preset = false;
+        p.presets = vec![
+            AttachedPreset {
+                path: "프리셋/리뷰.yaml".into(),
+            },
+            AttachedPreset {
+                path: "공용/코딩 습관.yaml".into(),
+            },
+        ];
+        p.last_applied_instructions_hash = Some("ab12".into());
+        FileProfileStore::new(dir.clone())
+            .save(std::slice::from_ref(&p))
+            .unwrap();
+
+        let raw: Value =
+            serde_json::from_slice(&fs::read(dir.join(PROFILES.name)).unwrap()).unwrap();
+        assert!(raw["profiles"][0].get("cwd").is_some(), "{raw}");
+
+        let back = &FileProfileStore::new(dir.clone()).load()[0];
+        assert!(!back.default_preset);
+        assert_eq!(back.presets, p.presets, "붙인 순서도 그대로");
+        assert_eq!(back.last_applied_instructions_hash.as_deref(), Some("ab12"));
+        assert_eq!(back.cwd, p.cwd);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 새 칸이 없는 항목도 손상이 아니다 — 만든 직후와 같은 값으로 읽힌다.
+    #[test]
+    fn an_item_without_the_new_fields_reads_as_freshly_created() {
+        let dir = temp_dir("new-fields-missing");
+        put(&dir, PROFILES.name, OLD_AGENTS_JSON);
+
+        let store = FileProfileStore::new(dir.clone());
+        let loaded = store.load();
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].default_preset);
+        assert!(loaded[0].presets.is_empty());
+        assert_eq!(loaded[0].last_applied_instructions_hash, None);
+        store.save(&loaded).unwrap();
+        assert!(
+            !dir.join(aside_name()).exists(),
+            "적재한 파일은 우리 것이라 떠 두지 않는다"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     // ── 손상 · 새 판 · 읽기 실패 ──
@@ -849,23 +959,27 @@ mod tests {
 
     // ── 기동 쓸기 ──
 
+    /// ★옛 판 파일의 임시 이름은 쓸지 않는다★ — 옛 판 `agents.json` 쪽은 바이트 하나 건드리지 않는다(모듈 머리).
     #[test]
-    fn the_first_load_sweeps_the_old_fixed_temp_and_our_own_numbered_temps() {
+    fn the_first_load_sweeps_our_own_numbered_temps_but_not_the_old_files() {
         let dir = temp_dir("sweep");
         let me = std::process::id();
         let own = format!("{}.tmp{me}.7", PROFILES.name);
-        put(&dir, PROFILES.legacy_tmp, "old");
+        let old_numbered = format!("agents.json.tmp{me}.7");
         put(&dir, &own, "half");
-        put(&dir, "agents.json.tmpx", "not ours");
+        put(&dir, &format!("{}.tmpx", PROFILES.name), "not ours");
+        put(&dir, "agents.json.tmp", "old fixed temp");
+        put(&dir, &old_numbered, "old numbered temp");
 
         let store = FileProfileStore::new(dir.clone());
         store.load();
-        assert!(!dir.join(PROFILES.legacy_tmp).exists());
         assert!(!dir.join(&own).exists());
         assert!(
-            dir.join("agents.json.tmpx").exists(),
+            dir.join(format!("{}.tmpx", PROFILES.name)).exists(),
             "우리 꼴이 아닌 이름은 둔다"
         );
+        assert_eq!(read(&dir, "agents.json.tmp"), "old fixed temp");
+        assert_eq!(read(&dir, &old_numbered), "old numbered temp");
 
         // 뒤 적재는 쓸지 않는다 — 그 사이 진행 중인 저장의 임시 파일을 지우면 그 rename 이 실패한다.
         put(&dir, &own, "in flight");

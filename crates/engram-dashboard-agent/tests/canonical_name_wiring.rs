@@ -11,6 +11,11 @@
 //!   (`spawn_agent` 반환 `AgentInfo.name` · `list_agents()` · `canonical_name(id)`)만 본다. 세 뮤테이션이
 //!   각각 다른 케이스에서 붙잡히도록 케이스를 갈랐다.
 //!
+//! ★①·② 케이스는 프로필을 명부에 먼저 심고 띄운다 — 심기를 빼지 말 것★: 명부에 없는 id 의 spawn 은 등록하며
+//!   `display_name` 을 박는다(TRD S25 §1-5 「display_name 고정」). 박힌 이름이 있으면 산 축 파생이 그 이름을 먼저
+//!   돌려줘 cwd 축도 가드 축도 닿지 않으므로 ①·② 가 초록으로 샌다. 있는 id 의 spawn 은 이름을 배정하지 않아
+//!   `display_name` 이 심은 그대로(`None` · 공백) 남는다 — 두 케이스는 띄운 뒤 그것을 먼저 단언한다.
+//!
 //! ★잠듦 파킹 키와의 관계(ADR-0116 결정 1)★: 잠든 프로필의 이름은
 //!   `AgentProfile::canonical_name_when_live()` 가 파생하고, 그 값은 **여기서 단언하는 산 이름과 같아야**
 //!   한다(다르면 파킹 키와 복원 후 이름이 어긋나 편지가 24h TTL 로 조용히 만료된다). 그래서 각 케이스는
@@ -39,7 +44,7 @@ impl StatusSink for NoopSink {
     fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
 }
 
-fn make_manager(tag: &str) -> AgentManager {
+fn make_manager(tag: &str) -> (AgentManager, Arc<ProfileRegistry>) {
     let sink: Arc<dyn StatusSink> = Arc::new(NoopSink);
     let profiles = Arc::new(ProfileRegistry::new(Arc::new(FileProfileStore::new(
         std::env::temp_dir().join(format!("engram-canon-{tag}-{}", Uuid::new_v4())),
@@ -51,7 +56,29 @@ fn make_manager(tag: &str) -> AgentManager {
         },
         Arc::new(|_, _| {}),
     ));
-    AgentManager::new(sink, profiles, tracker)
+    (AgentManager::new(sink, profiles.clone(), tracker), profiles)
+}
+
+/// 있는 id 로 띄운다 — 등록이 이름을 배정하지 않아 심은 `display_name` 이 그대로 남는다(파일 머리 ①·② 항목).
+fn spawn_seeded(
+    manager: &AgentManager,
+    profiles: &ProfileRegistry,
+    profile: &AgentProfile,
+) -> AgentInfo {
+    profiles
+        .try_upsert(profile.clone())
+        .expect("명부 심기 저장");
+    let info = manager
+        .spawn_agent(profile, SpawnMode::Fresh)
+        .expect("spawn")
+        .into_started()
+        .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+    assert_eq!(
+        profiles.get(profile.id).expect("명부에 있다").display_name,
+        profile.display_name,
+        "있는 id 의 spawn 이 이름을 박았다 — 산 축 파생이 박힌 이름에 가려 이 케이스가 아무것도 못 잡는다"
+    );
+    info
 }
 
 /// 스폰해도 즉시 죽지 않는 무해한 자식(대화형 cmd.exe — PTY 아래서 프롬프트를 띄우고 대기).
@@ -92,7 +119,7 @@ fn projected_name(manager: &AgentManager, spawned: &AgentInfo) -> String {
 fn the_stored_profile_name_field_is_never_used_as_the_routing_address() {
     // ★ADR-0101 이 고친 버그의 회귀 그물(뮤테이션 ③)★: `AgentProfile.name` 은 CreateProfile 때 받은 원본
     //   문자열이라 **종종 경로**다. 그걸 이름으로 쓰면 트리 표시명(basename)과 라우팅 주소가 갈린다.
-    let manager = make_manager("namefield");
+    let (manager, _) = make_manager("namefield");
     let cwd = std::env::temp_dir();
     let raw_name = "C:\\some\\raw\\name-field-must-not-be-the-address";
     let profile = idle_shell(raw_name, cwd.clone());
@@ -124,14 +151,10 @@ fn a_relative_cwd_derives_the_name_from_the_canonicalized_session_cwd() {
     //   심링크·대소문자 다른 Windows 경로) spawn 은 그걸 canonicalize 해 session.cwd 로 쓴다. 프론트 트리는
     //   `basename(AgentInfo.cwd)` = basename(session.cwd) 를 그리므로, 파생을 profile.cwd 로 하면 트리
     //   표시(`engram-dashboard-agent`)와 라우팅 주소(`"."`)가 갈린다.
-    let manager = make_manager("relcwd");
+    let (manager, profiles) = make_manager("relcwd");
     let profile = idle_shell("rel", PathBuf::from("."));
 
-    let info = manager
-        .spawn_agent(&profile, SpawnMode::Fresh)
-        .expect("spawn")
-        .into_started()
-        .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+    let info = spawn_seeded(&manager, &profiles, &profile);
     let name = projected_name(&manager, &info);
     manager.kill_agent(info.id).ok();
 
@@ -155,16 +178,12 @@ fn a_blank_display_name_override_is_ignored_by_the_production_path() {
     // ★뮤테이션 ②(canonical_name_or_id_fallback → resolve_display_name) 적출★: 후자는 빈/공백-only
     //   override 를 **그대로 이름으로 쓴다** — 주소가 공백 문자열이 되면 지목이 불가능하고 트리엔 빈 칸이
     //   그려진다. 생산 경로는 그 가드가 있는 헬퍼를 써야 한다.
-    let manager = make_manager("blankoverride");
+    let (manager, profiles) = make_manager("blankoverride");
     let cwd = std::env::temp_dir();
     let mut profile = idle_shell("blank", cwd.clone());
     profile.display_name = Some("   ".into());
 
-    let info = manager
-        .spawn_agent(&profile, SpawnMode::Fresh)
-        .expect("spawn")
-        .into_started()
-        .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+    let info = spawn_seeded(&manager, &profiles, &profile);
     let name = projected_name(&manager, &info);
     manager.kill_agent(info.id).ok();
 
@@ -189,7 +208,7 @@ fn a_blank_display_name_override_is_ignored_by_the_production_path() {
 #[test]
 fn a_real_display_name_override_wins_over_the_cwd_basename() {
     // ★삭제 정리(ADR-0116 결정 3)의 전제★: 이 등식이 깨지면 정리가 엉뚱한 큐를 지목한다.
-    let manager = make_manager("override");
+    let (manager, _) = make_manager("override");
     let mut profile = idle_shell("ovr", std::env::temp_dir());
     profile.display_name = Some("Renamed-Boss".into());
 

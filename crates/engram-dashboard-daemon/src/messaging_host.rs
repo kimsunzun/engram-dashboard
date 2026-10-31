@@ -1170,7 +1170,7 @@ mod tests {
             let manager = manager("dormant-dup");
             let port = ManagerDeliveryPort::new(manager.clone());
             // ★하네스 seam 으로 심는다(ADR-0120)★: 정상 경로(`try_create_agent`)는 명부 전역 이름 유일성을
-            //   강제해 동명 2건을 **만들 수 없다**. 유일성이 데이터 전체에 적용되기 전(기존 agents.json)엔
+            //   강제해 동명 2건을 **만들 수 없다**. 손으로 고친 프로필 파일엔(적재는 유일성을 보지 않는다)
             //   이 상태가 실재할 수 있다.
             let twin_a = profile("raw-twin-a", "twin");
             let twin_b = profile("raw-twin-b", "twin");

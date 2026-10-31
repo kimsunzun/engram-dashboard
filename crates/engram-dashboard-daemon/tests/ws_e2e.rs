@@ -2322,6 +2322,7 @@ mod real_process {
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command};
 
+    use engram_dashboard_agent::persistence::PROFILES_FILE;
     use engram_dashboard_base::testing::wait_until;
     use engram_dashboard_daemon::data_dir::DataLayout;
     use engram_dashboard_protocol::DaemonInfo;
@@ -2410,7 +2411,7 @@ mod real_process {
     /// 데몬이 부팅 시 restore_all 로 이 프로필을 복원 → 살아있는 PTY child(cmd.exe)를 만든다.
     /// ShellBackend 는 program/args 를 그대로 PTY 에 싣는다(shim 래핑 없음) → cmd.exe 가 데몬의
     /// 직계 자식이 되어 child_pids(daemon_pid) 로 식별 가능하다.
-    fn write_restorable_shell_agents_json(data_dir: &Path) {
+    fn write_restorable_shell_profile_file(data_dir: &Path) {
         // schema_version == 1 (persistence/mod.rs 의 `PROFILES`). 형태 고정(회귀 시 감지).
         let profile = AgentProfile::new(
             "step7-restore-shell".into(),
@@ -2427,7 +2428,7 @@ mod real_process {
         let file = format!("{{\"schema_version\":1,\"profiles\":{profiles_json}}}");
         let state = DataLayout::new(data_dir).daemon_state_dir();
         std::fs::create_dir_all(&state).expect("state 폴더");
-        std::fs::write(state.join("agents.json"), file).expect("agents.json 작성");
+        std::fs::write(state.join(PROFILES_FILE), file).expect("프로필 파일 작성");
     }
 
     // ── case1: 데몬 .exe kill → PTY child(cmd.exe) Job(KILL_ON_JOB_CLOSE) 동반 정리 ──────
@@ -2440,7 +2441,7 @@ mod real_process {
 
         let ctx = fresh_iso("kill");
         let data_dir = ctx.data_dir.clone();
-        write_restorable_shell_agents_json(&data_dir);
+        write_restorable_shell_profile_file(&data_dir);
         let mut daemon = spawn_daemon_iso(&ctx);
 
         let info = match poll_daemon_json(&data_dir, std::time::Duration::from_secs(15)) {

@@ -129,20 +129,20 @@ export type AgentFailureKind =
   | 'EarlyExitAfterResume'
   | 'Other'
 
-/** 영속 프로필 — agents.json 단위. env에 자격증명 금지(평문 저장) */
+/** 영속 프로필 — 데몬 프로필 파일 단위. env에 자격증명 금지(평문 저장) */
 export interface AgentProfile {
   id: string
   name: string
   /**
    * 사용자 지정 표시명 override(ADR-0061 리치화 — 트리 rename). Some → 그대로 표시, null → cwd basename
    * 파생(기존 동작 불변). 트리는 `name`(CreateProfile 이름/ad-hoc cwd 문자열, 표시명 부적합) 대신 이 값을
-   * 우선한다. wire `AgentProfile.display_name` 미러(#[serde(default)] — 옛 agents.json 은 null).
+   * 우선한다. wire `AgentProfile.display_name` 미러(#[serde(default)] — 키가 없는 항목은 null).
    */
   display_name: string | null
   /**
    * 트리 계층의 부모 프로필 id(ADR-0072). Some(pid) → pid 의 자식(들여쓰기), null → 최상위(루트).
    * 1단 중첩만 허용(부모는 반드시 루트) — 검증은 백엔드 ProfileRegistry::try_reparent + 쓰기 경계 정규화.
-   * wire `AgentProfile.parent_id` 미러(#[serde(default)] — 옛 agents.json 은 null).
+   * wire `AgentProfile.parent_id` 미러(#[serde(default)] — 키가 없는 항목은 null).
    */
   parent_id: string | null
   command: AgentCommand
@@ -159,7 +159,7 @@ export interface AgentProfile {
   failed_reason: string | null
   /**
    * 이 항목이 마지막으로 활성화에 실패한 종류(ADR-0172). null = 실패 기록 없음.
-   * 데몬 메모리에만 사는 값이라 agents.json 엔 없고 데몬 재기동 시 사라진다(앱 창 재시작은 견딘다).
+   * 데몬 메모리에만 사는 값이라 프로필 파일엔 없고 데몬 재기동 시 사라진다(앱 창 재시작은 견딘다).
    * wire `AgentProfile.last_failure` 미러(#[serde(default)] — 옛 wire 는 null).
    * 종류→{다시 해볼 가치·문구·권하는 행동} 표 = `src/components/agent/failureKinds.ts`.
    */

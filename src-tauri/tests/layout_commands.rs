@@ -4042,14 +4042,14 @@ async fn a_composite_command_does_not_wait_on_its_caller() {
 async fn spawn_into_keeps_the_code_the_daemon_answered_with() {
     for (answered, code, message) in [
         (
-            "CONFLICT: the agent was not created or started: agents.json could not be read just now",
+            "CONFLICT: the agent was not created or started: agent-profiles.json could not be read just now",
             ErrorCode::Conflict,
-            "the agent was not created or started: agents.json could not be read just now",
+            "the agent was not created or started: agent-profiles.json could not be read just now",
         ),
         (
-            "INTERNAL: the agent was not created or started: writing agents.json failed: disk full",
+            "INTERNAL: the agent was not created or started: writing agent-profiles.json failed: disk full",
             ErrorCode::Internal,
-            "the agent was not created or started: writing agents.json failed: disk full",
+            "the agent was not created or started: writing agent-profiles.json failed: disk full",
         ),
         (
             "backend 칸이 비었다",

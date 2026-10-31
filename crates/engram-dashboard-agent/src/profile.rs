@@ -52,7 +52,7 @@ pub enum AgentCommand {
     /// 사용자 추가 인자. `output_format` 이 없는 저장 JSON 은 `Terminal` 로 역직렬화한다.
     ///
     /// ★칸을 함부로 늘리지 않는다★: 이 enum 은 `#[serde(tag = "kind")]` 라 여기 적은 모양이 그대로
-    /// `agents.json` 에 앉는다 — 디스크에 박히는 계약이라 **덜 얼릴수록 싸다**. 샌드박스·승인 모드
+    /// 프로필 파일에 앉는다 — 디스크에 박히는 계약이라 **덜 얼릴수록 싸다**. 샌드박스·승인 모드
     /// 같은 값은 아직 `--help` 텍스트 등급이라(TRD §2) 지금 타입으로 굳히면 그 등급인 채로 굳는다.
     /// 칸이 `extra_args` 하나뿐이던 것도 그 사유의 결정이었고(사용자 결정 2026-09-07), 모드 축을
     /// 더하며 ADR-0194 가 그 자리만 갱신했다 — 사유는 그대로 산다.
@@ -117,7 +117,15 @@ pub enum RestoreOutcome {
 
 // ── 영속 프로필 ────────────────────────────────────────────────────────────────
 
-/// 에이전트 1개의 영속 프로필 — `agents.json`에 저장되는 단위.
+/// 에이전트에 붙은 프리셋 하나 — 라이브러리 참조(루트부터의 `/` 경로 또는 기본 제공 `engram:/…`).
+/// 「기본」 프리셋은 여기 들지 않는다 — [`AgentProfile::default_preset`] 칸이 따로 나른다.
+// ADR-0315
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachedPreset {
+    pub path: String,
+}
+
+/// 에이전트 1개의 영속 프로필 — 프로필 파일(`persistence::PROFILES_FILE`)에 저장되는 단위.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentProfile {
     /// 불변 키. 프로세스·세션이 바뀌어도 이 id는 평생 유지된다(프론트 구독 키).
@@ -127,14 +135,17 @@ pub struct AgentProfile {
     /// 사용자 지정 표시명 override(ADR-0061 리치화 — 트리 rename). **기존 `name` 과 별개 축**: `name` 은
     /// CreateProfile 시 넘어온 이름(claude 프로필) 또는 ad-hoc spawn 의 cwd 문자열이라 "깔끔한 표시명"이
     /// 아니다. `Some` → 그대로 표시, `None` → cwd basename 파생.
-    /// `#[serde(default)]` 라 이 필드 없는 옛 agents.json 은 `None` 으로 흡수(마이그레이션 불필요).
+    /// ★만들 때 비어 있으면 그때의 이름으로 채운다★(`AgentManager` 의 신규 등록 두 곳) — 이름이 작업 폴더에서
+    ///   파생된 채 남으면 작업 폴더를 바꾸는 길이 우편 주소 · 트리 이름을 말없이 바꾼다. 운영에서 `None` 이 되는
+    ///   길은 이름 지우기(`try_rename(id, None)`)뿐이다.
+    // ADR-0321
+    // TRD S25 §1-5 「display_name 고정」
     #[serde(default)]
     pub display_name: Option<String>,
 
     /// 트리 계층의 부모 프로필 id. `Some(pid)` → 이 프로필은
     /// pid 의 자식(트리에서 pid 밑에 들여쓰기), `None` → 최상위(루트). **1단 중첩만 허용**: 자식은 다시
     /// 부모가 될 수 없고(cycle 방지 단순화), 부모는 반드시 루트여야 한다 — 검증은 `ProfileRegistry::try_reparent`.
-    /// `#[serde(default)]` 라 이 필드 없는 옛 agents.json 은 `None`(루트)으로 흡수(마이그레이션 불필요).
     // ADR-0072
     #[serde(default)]
     pub parent_id: Option<AgentId>,
@@ -148,6 +159,24 @@ pub struct AgentProfile {
 
     /// ※자격증명 금지. persist 시 `*_KEY`/`*_TOKEN` 패턴은 경고한다(persistence).
     pub env: Vec<(String, String)>,
+
+    /// 「기본」 프리셋이 붙었나 — 만들 때 `true`. 키가 없는 항목도 `true` 로 읽는다(만든 직후와 같은 값).
+    #[serde(default = "default_preset_attached")]
+    pub default_preset: bool,
+
+    /// 붙은 프리셋 — 붙인 순서 그대로(실행이 이 순서로 펼친다). 만들 때 빔.
+    #[serde(default)]
+    pub presets: Vec<AttachedPreset>,
+
+    /// 지난 실행이 상대에 실은 지침의 해시 — codex JSON 이어받기가 지침이 바뀌었나 가를 때 본다(다를 때만 첫 턴에
+    /// 싣는다). `None` = 실린 적 없음.
+    /// ★저자 = 실행 하나★ — 그 지침이 실린 첫 턴이 상대에 닿은 때 화신 표식 가드를 건 명부 변경으로 적는다(세션 id
+    ///   비교-교체에 얹지 않는다 — 이어받기의 비교-교체는 같은 값이라 쓰지 않는다). 스폰 때 적으면 첫 턴이 안 나간
+    ///   화신 뒤의 이어받기가 바뀐 지침을 건너뛴다. 복제는 옮기지 않는다.
+    // ADR-0337
+    // TRD S25 §1-5 프로필 표 · T6 · M16
+    #[serde(default)]
+    pub last_applied_instructions_hash: Option<String>,
 
     /// 현재 백엔드 세션 id. **가변** — 화신의 첫 사용자 턴이 나가기 직전에 적히고(ADR-0226), `/clear`
     /// 등으로 바뀌면 session_tracker watcher가 갱신한다. None이면 이어받을 대화가 없다는 뜻.
@@ -171,14 +200,10 @@ pub struct AgentProfile {
     ///   디스크에서 되살리지 않는다. 되살리면 재기동한 데몬이 복원한 에이전트에 **옛 표식**을 다시 입혀,
     ///   붙어 있던 클라이언트가 "같은 스트림" 으로 오인하고 옛 진도 커서를 유지한다 — 새 세션의 프레임은
     ///   0 부터 다시 매겨지므로 통째로 dedup 탈락하고 그 슬롯은 앱을 다시 띄울 때까지 빈 채로 남는다.
-    ///   값이 안 실린 옛 `agents.json` 도, 옛 카운터가 실려 있는 `agents.json` 도 그대로 읽힌다
-    ///   (읽기를 건너뛰므로 그 값은 무시된다 — 마이그레이션 불요).
-    /// ★그런데 쓰기는 건너뛰지 않는다 — 키는 `0` 으로 실어 보낸다★: 앞 릴리스의 구조체는 이 필드를
-    ///   **필수**로 선언했으므로 키가 없는 파일을 읽으면 `missing field` 로 파싱이 깨진다. 그러면 그
-    ///   릴리스의 persistence 가 파일을 `.corrupt-<ts>` 로 치우고 빈 목록으로 시작하고, 다음 save 가 그 빈
-    ///   목록을 덮어써 프로필·세션 id·트리 부모가 통째로 사라진다(이 빌드를 한 번 돌린 뒤 되돌리기·재설치하는
-    ///   경로에서 실제로 성립한다). `0` 인 이유 = 옛 카운터의 "한 번도 재spawn 안 함" 상태라 옛
-    ///   바이너리가 그대로 믿어도 무해하다 — 산 난수를 실어 보내면 그게 카운터 자리에 앉는다.
+    ///   값이 안 실린 파일도, 0 아닌 값이 실린 파일도 그대로 읽힌다(읽기를 건너뛰므로 그 값은 무시된다).
+    /// ★쓰기는 키를 늘 `0` 으로 싣는다 — 무해한 남은 자리채움이다★: 이 키를 필수로 읽던 옛 빌드가 읽는 파일은
+    ///   옛 판 `agents.json` 하나이고, 이 빌드는 그 파일을 쓰지 않는다(ADR-0314 결정 5) — 프로필 파일에서 이 키를
+    ///   읽는 리더는 없다. 값이 고정 `0` 이라 산 표식은 디스크에 실리지 않는다. 키를 걷는 것은 별건이다.
     /// 프론트 구독 deps 에는 이 값을 넣지 않는다 — 재부착 계기는 화신 표식이 아니라 권위 명부
     /// 관측이다(ADR-0164 결정 8).
     // ADR-0007, ADR-0163, ADR-0164
@@ -243,6 +268,9 @@ impl AgentProfile {
             command,
             cwd,
             env,
+            default_preset: true,
+            presets: Vec::new(),
+            last_applied_instructions_hash: None,
             backend_session_id: None,
             old_session_ids: Vec::new(),
             epoch: 0,
@@ -597,7 +625,7 @@ impl ProfileRegistry {
     ///
     /// ★보존 목록의 정본은 아래 본문이다 — 이 문단에서 개수를 세지 말 것★(세던 「그 두 필드」가 실제로
     /// 두 번 뒤처졌다). 가름 규칙은 하나다: **그 칸을 누가 쓰나.** 호출자가 뜬 사본이 저자가 아닌 칸은
-    /// 전부 live 가 이기고, spawn 이 실제로 확정하는 칸(cwd·command·env 등)만 스냅샷을 반영한다.
+    /// 전부 live 가 이기고, 그 밖의 칸(command·env 등)만 스냅샷을 반영한다.
     ///
     /// ★왜 spawn 스냅샷을 그대로 안 쓰나(lost-update 봉인)★: 넘어오는 프로필은 호출 시점에 뜬
     /// **스냅샷**이라, 그 사이 다른 연결이 reparent/rename 을 커밋했다면 옛 `parent_id`/`display_name` 이
@@ -689,6 +717,15 @@ fn merge_preserving_live(m: &mut HashMap<AgentId, AgentProfile>, mut profile: Ag
         //   발급 축 backend 에만 붙는다). 방향은 개선이지만 **무변화가 아니다**.
         profile.backend_session_id = live.backend_session_id;
         profile.old_session_ids = live.old_session_ids.clone();
+        // ★붙은 프리셋 · 「기본」 칸 · 지난 적용 지침 해시 · 작업 폴더도 live 가 이긴다★ — 만든 뒤 이 칸들을 쓰는
+        //   것은 프리셋 명령 · 실행 · 작업 폴더 바꾸기(`agent.setWorkspace`)이지 spawn 이 뜬 옛 사본이 아니다.
+        //   사본이 이기면 그 사이 붙인 프리셋 · 바꾼 작업 폴더가 말없이 되돌아가 그대로 영속된다.
+        // ADR-0321
+        // TRD S25 §1-5 「merge_preserving_live 보존 칸」
+        profile.default_preset = live.default_preset;
+        profile.presets = live.presets.clone();
+        profile.last_applied_instructions_hash = live.last_applied_instructions_hash.clone();
+        profile.cwd = live.cwd.clone();
     }
     m.insert(profile.id, profile);
 }
@@ -781,7 +818,7 @@ impl ProfileRegistry {
     ///   두 번째 쓰기 경로가 생기는 것을 **컴파일러가** 막는다(crate 안에서는 규약과 리뷰가 지킨다 —
     ///   그 이상을 주장하지 않는다).
     /// ★디스크에 쓰지 않는다 — `mutate` 를 타지 않는 쓰기다(같은 꼴 = `epoch_for_spawn`)★: 이 필드는 `#[serde(skip)]` 이라
-    ///   저장해도 파일 내용이 한 바이트도 달라지지 않는다. `mutate` 를 타면 활성화마다 `agents.json`
+    ///   저장해도 파일 내용이 한 바이트도 달라지지 않는다. `mutate` 를 타면 활성화마다 프로필 파일
     ///   전체를 다시 쓰는 순수 비용만 붙는다.
     // ADR-0172
     pub(crate) fn set_last_failure(
@@ -1044,7 +1081,11 @@ fn retire_session_id(p: &mut AgentProfile) -> bool {
     }
 }
 
-/// 앞 릴리스 리더용 자리채움 — 산 표식과 무관하게 항상 `0` 을 쓴다(근거 = `AgentProfile::epoch` 주석).
+fn default_preset_attached() -> bool {
+    true
+}
+
+/// 남은 자리채움 — 산 표식과 무관하게 항상 `0` 을 쓴다(근거 = `AgentProfile::epoch` 주석).
 fn serialize_zero_placeholder<S: serde::Serializer>(_tag: &u32, s: S) -> Result<S::Ok, S::Error> {
     s.serialize_u32(0)
 }
@@ -1657,7 +1698,7 @@ mod tests {
         let json = serde_json::to_string(&p).expect("직렬화");
         assert!(
             !json.contains("last_failure"),
-            "agents.json 에 이 필드가 나가면 데몬 수명 제약이 깨진다 — got {json}"
+            "프로필 파일에 이 필드가 나가면 데몬 수명 제약이 깨진다 — got {json}"
         );
         let back: AgentProfile = serde_json::from_str(&json).expect("역직렬화");
         assert_eq!(
@@ -1942,7 +1983,7 @@ mod tests {
 
     // ── 쓰기 경계 정규화(ADR-0072) ────────────────────────────────────────────────
 
-    /// ★재현 경로★: store 에 이미 cyclic 쌍이 있는 상태(손상된/손편집 agents.json, 또는 reparent 검증을
+    /// ★재현 경로★: store 에 이미 cyclic 쌍이 있는 상태(손상된/손편집 프로필 파일, 또는 reparent 검증을
     /// 우회하는 legacy write)를 load 로 그대로 들여온 뒤(load 는 정규화 안 함), 아무 write 나 한 번 트리거하면
     /// 경계 정규화가 cycle 을 healing 한다. **normalize_hierarchy 없이는 실패한다** — 두 parent_id 가 그대로
     /// 남아 인메모리·디스크에 cycle 이 persist 된다.
@@ -2164,6 +2205,63 @@ mod tests {
         );
     }
 
+    /// ★spawn 이 뜬 옛 사본이 그 사이 붙인 프리셋 · 바꾼 작업 폴더 · 적은 지침 해시를 되돌리지 않는다★ — 되돌리면
+    ///   그 값이 그대로 영속된다. 사본이 저자인 칸(`env` 등)은 여전히 사본을 따른다.
+    // TRD S25 §1-5 「merge_preserving_live 보존 칸」
+    #[test]
+    fn spawn_preserving_upsert_keeps_presets_workspace_and_instructions_hash_from_live() {
+        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
+        let p = sample();
+        let id = p.id;
+        reg.upsert(p);
+        let mut stale_snapshot = reg.get(id).unwrap();
+
+        assert!(reg
+            .try_update_with(id, |p| {
+                p.default_preset = false;
+                p.presets = vec![AttachedPreset {
+                    path: "프리셋/리뷰.yaml".into(),
+                }];
+                p.last_applied_instructions_hash = Some("ab12".into());
+                p.cwd = PathBuf::from("C:/moved");
+            })
+            .expect("저장 성공"));
+        stale_snapshot.env = vec![("FROM_SPAWN".into(), "1".into())];
+
+        for via_update in [false, true] {
+            if via_update {
+                assert!(reg.update_preserving_hierarchy(stale_snapshot.clone()));
+            } else {
+                reg.upsert_preserving_hierarchy(stale_snapshot.clone());
+            }
+            let after = reg.get(id).unwrap();
+            assert!(!after.default_preset);
+            assert_eq!(
+                after.presets,
+                vec![AttachedPreset {
+                    path: "프리셋/리뷰.yaml".into()
+                }]
+            );
+            assert_eq!(
+                after.last_applied_instructions_hash.as_deref(),
+                Some("ab12")
+            );
+            assert_eq!(after.cwd, PathBuf::from("C:/moved"));
+            assert_eq!(
+                after.env, stale_snapshot.env,
+                "사본이 저자인 칸은 사본을 따른다"
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_profile_has_only_the_default_preset_and_no_instructions_hash() {
+        let p = sample();
+        assert!(p.default_preset);
+        assert!(p.presets.is_empty());
+        assert_eq!(p.last_applied_instructions_hash, None);
+    }
+
     #[test]
     fn preserving_upsert_inserts_snapshot_when_no_live_entry() {
         let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
@@ -2330,7 +2428,7 @@ mod tests {
     /// ★디스크에 **산** 화신 표식이 실리면 안 된다★: 실리면 재기동한 데몬이 복원한 에이전트에 옛 표식을
     /// 다시 입혀, 살아남은 클라이언트가 "같은 스트림" 으로 오인하고 옛 진도 커서를 유지한다 — 새 화신의
     /// 프레임은 0 부터 다시 매겨지므로 통째로 dedup 탈락하고 그 슬롯이 빈 채로 남는다.
-    /// (키 자체는 실린다 — 앞 릴리스 리더용 자리채움 `0`. 그 근거는 아래 forward-compat 테스트.)
+    /// (키 자체는 실린다 — 남은 자리채움 `0`. 근거 = `AgentProfile::epoch` 주석.)
     #[test]
     fn the_live_incarnation_tag_never_reaches_disk() {
         let mut p = sample();
@@ -2347,9 +2445,8 @@ mod tests {
         );
     }
 
-    /// ★옛 카운터가 실려 있어도 인메모리 값은 파일에서 오지 않는다★ — 앞 릴리스가 남긴
-    /// `agents.json`(이 빌드로 올렸다 되돌렸다 다시 올린 경로)은 0 아닌 카운터를 들고 있다. 그 값이
-    /// 복원되면 위 테스트가 막는 것과 같은 결말(옛 커서 유지 → 새 프레임 통째 dedup 탈락)이 난다.
+    /// ★파일에 0 아닌 값이 실려 있어도 인메모리 값은 파일에서 오지 않는다★ — 복원되면 위 테스트가 막는 것과
+    /// 같은 결말(옛 커서 유지 → 새 프레임 통째 dedup 탈락)이 난다.
     #[test]
     fn a_persisted_non_zero_tag_is_never_restored_into_memory() {
         let mut v: serde_json::Value =
@@ -2359,18 +2456,13 @@ mod tests {
         let back: AgentProfile = serde_json::from_value(v).expect("역직렬화");
         assert_eq!(
             back.epoch, 0,
-            "파일의 옛 카운터가 인메모리 표식으로 복원되면 안 된다"
+            "파일의 값이 인메모리 표식으로 복원되면 안 된다"
         );
     }
 
-    /// ★키는 남기고 값만 0 으로 박는다★ — 앞 릴리스로 되돌아간 바이너리의 구조체는 `epoch` 를
-    /// **필수** 필드로 선언했으므로, 키가 아예 없는 `agents.json` 은 `missing field` 로 파싱이 깨진다.
-    /// 그러면 그 릴리스의 persistence 가 파일을 `.corrupt-<ts>` 로 치우고 빈 목록으로 시작하고, 다음 save 가
-    /// 그 빈 목록을 덮어써 프로필·세션 id·트리 부모가 통째로 사라진다.
-    /// 실어 보내는 값이 **산 표식이 아니라 0** 인 이유: 0 은 옛 카운터의 "한 번도 재spawn 안 함" 상태라
-    /// 옛 바이너리가 그대로 믿어도 무해하다 — 난수를 실어 보내면 그게 카운터 자리에 앉는다.
+    /// 이 키는 읽는 리더가 없는 남은 자리채움이다 — 걷을 때 이 테스트도 함께 고친다(근거 = `AgentProfile::epoch` 주석).
     #[test]
-    fn the_persisted_incarnation_tag_is_a_fixed_zero_so_older_readers_still_parse() {
+    fn the_persisted_incarnation_tag_is_a_fixed_zero_placeholder() {
         let mut p = sample();
         p.epoch = 0xDEAD_BEEF;
         let v: serde_json::Value =
@@ -2379,7 +2471,7 @@ mod tests {
         assert_eq!(
             v.get("epoch"),
             Some(&serde_json::json!(0)),
-            "옛 리더가 필수로 읽는 키가 0 으로 실려 있어야 한다: {v}"
+            "자리채움 키는 산 표식이 아니라 0 으로 실린다: {v}"
         );
     }
 
@@ -2493,7 +2585,7 @@ mod tests {
             "engram-profile-test-dirty-refused-{}",
             Uuid::new_v4()
         ));
-        let path = dir.join("agents.json");
+        let path = dir.join(crate::persistence::PROFILES_FILE);
         let reg = ProfileRegistry::new(Arc::new(FileProfileStore::new(dir.clone())));
         let p = sample();
         let id = p.id;
@@ -2566,7 +2658,7 @@ mod tests {
             reg.commit_session_id(id, live, None, sid);
             let before = reg.get(id).unwrap();
             let mut moved = before.clone();
-            moved.cwd = PathBuf::from("C:/elsewhere");
+            moved.env = vec![("MOVED".into(), "1".into())];
             store.set(failure);
 
             let err = reg.try_rename(id, Some("새 이름".into())).unwrap_err();
@@ -2590,7 +2682,7 @@ mod tests {
             assert_eq!(after.display_name, None, "{failure:?}");
             assert_eq!(after.parent_id, None);
             assert!(after.auto_restore);
-            assert_eq!(after.cwd, before.cwd);
+            assert_eq!(after.env, before.env);
             assert_eq!(after.backend_session_id, Some(sid));
             assert_eq!(reg.list().len(), 2, "만들기 · 지우기도 커밋되지 않았다");
             assert!(
@@ -2656,7 +2748,7 @@ mod tests {
         assert!(!reg.try_rename(Uuid::new_v4(), None).unwrap());
         assert!(reg.try_update_with(id, |p| p.auto_restore = false).unwrap());
         let mut moved = reg.get(id).unwrap();
-        moved.cwd = PathBuf::from("C:/elsewhere");
+        moved.env = vec![("MOVED".into(), "1".into())];
         assert!(reg.try_update_preserving_hierarchy(moved).unwrap());
         assert!(!reg.try_update_preserving_hierarchy(sample()).unwrap());
 
@@ -2671,7 +2763,7 @@ mod tests {
         assert_eq!(disk.parent_id, Some(parent_id));
         assert_eq!(disk.display_name.as_deref(), Some("이름"));
         assert!(!disk.auto_restore);
-        assert_eq!(disk.cwd, PathBuf::from("C:/elsewhere"));
+        assert_eq!(disk.env, vec![("MOVED".to_string(), "1".to_string())]);
         assert_eq!(disk.backend_session_id, None);
         assert_eq!(disk.old_session_ids, vec![sid]);
 

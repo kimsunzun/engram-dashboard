@@ -40,7 +40,7 @@ use engram_dashboard_agent::backend::usage_probe_for;
 use engram_dashboard_agent::commands::llm_creation_refusal;
 use engram_dashboard_agent::commands::{store_command_error, store_error_reason};
 use engram_dashboard_agent::failure::AgentFailureKind as CoreFailureKind;
-use engram_dashboard_agent::persistence::AGENTS_FILE;
+use engram_dashboard_agent::persistence::PROFILES_FILE;
 use engram_dashboard_agent::profile::StoreError;
 use engram_dashboard_agent::profile::{
     AgentCommand as CoreSpawnCommand, AgentOutputFormat as CoreAgentOutputFormat,
@@ -1015,12 +1015,12 @@ fn store_error_text(
     .to_string()
 }
 
-/// 프로필 쪽 요청(매니저의 `try_` 판 · 활성화)의 실패 → `Error` 문구. `agents.json` 의 저장 `Err` 만
+/// 프로필 쪽 요청(매니저의 `try_` 판 · 활성화)의 실패 → `Error` 문구. 프로필 파일의 저장 `Err` 만
 /// [`store_error_text`] 로 — 나머지는 `PtyError` 의 Display 그대로다.
 // ADR-0291 R17
 fn profile_error_text(conn_id: ConnId, verb: &'static str, what: &str, e: PtyError) -> String {
     match e {
-        PtyError::Store(error) => store_error_text(conn_id, verb, AGENTS_FILE, what, &error),
+        PtyError::Store(error) => store_error_text(conn_id, verb, PROFILES_FILE, what, &error),
         other => other.to_string(),
     }
 }
@@ -3015,7 +3015,7 @@ mod tests {
             vec![],
             false,
         );
-        // 이어받을 수 없는 명령에 sid 가 남아 있는 상태 — 손으로 고친 `agents.json` 이 오늘 만든다.
+        // 이어받을 수 없는 명령에 sid 가 남아 있는 상태 — 손으로 고친 프로필 파일이 오늘 만든다.
         profile.backend_session_id = Some(uuid::Uuid::new_v4());
         let created = core.manager.try_create_agent(profile).expect("등록");
         assert!(
@@ -6212,7 +6212,7 @@ mod tests {
             }] => {
                 assert_eq!(*r, req);
                 assert!(
-                    message.starts_with("CONFLICT:") && message.contains("agents.json"),
+                    message.starts_with("CONFLICT:") && message.contains(PROFILES_FILE),
                     "{message}"
                 );
             }
@@ -6246,7 +6246,7 @@ mod tests {
     }
 
     /// ★저장소가 받지 않은 명부 변경은 전부 오류로 답하고 브로드캐스트를 내지 않는다(D3)★ — 바뀐 것이 없다. 문구는
-    ///   코드(`CONFLICT` — 버스와 같은 나눔)와 받지 않은 파일(`agents.json`)을 댄다.
+    ///   코드(`CONFLICT` — 버스와 같은 나눔)와 받지 않은 파일(프로필 파일)을 댄다.
     // ADR-0291 R17 (D3)
     #[tokio::test]
     async fn every_ws_roster_change_the_store_refuses_answers_an_error_and_broadcasts_nothing() {
@@ -6278,7 +6278,7 @@ mod tests {
         let cases = [
             (
                 "CreateProfile",
-                "agents.json",
+                PROFILES_FILE,
                 AgentCommand::CreateProfile {
                     name: "new".into(),
                     cwd: temp,
@@ -6292,7 +6292,7 @@ mod tests {
             ),
             (
                 "RenameProfile",
-                "agents.json",
+                PROFILES_FILE,
                 AgentCommand::RenameProfile {
                     profile_id: alpha.id,
                     name: Some("beta".into()),
@@ -6301,7 +6301,7 @@ mod tests {
             ),
             (
                 "ReparentProfile",
-                "agents.json",
+                PROFILES_FILE,
                 AgentCommand::ReparentProfile {
                     child_id: alpha.id,
                     parent_id: Some(lead.id),
@@ -6310,7 +6310,7 @@ mod tests {
             ),
             (
                 "SetProfileAutoRestore",
-                "agents.json",
+                PROFILES_FILE,
                 AgentCommand::SetProfileAutoRestore {
                     profile_id: alpha.id,
                     auto_restore: true,
@@ -6367,7 +6367,7 @@ mod tests {
 
         match mock.events().as_slice() {
             [AgentEvent::Error { message, .. }] => assert!(
-                message.starts_with("CONFLICT:") && message.contains("agents.json"),
+                message.starts_with("CONFLICT:") && message.contains(PROFILES_FILE),
                 "{message}"
             ),
             other => panic!("Error 1건이어야: {other:?}"),
@@ -6416,7 +6416,7 @@ mod tests {
         match mock.events().as_slice() {
             [AgentEvent::Error { message, .. }] => assert!(
                 message.starts_with("CONFLICT:")
-                    && message.contains("agents.json")
+                    && message.contains(PROFILES_FILE)
                     && message.contains("restart the daemon"),
                 "{message}"
             ),
@@ -6456,7 +6456,9 @@ mod tests {
 
         match mock.events().as_slice() {
             [AgentEvent::Error { message, .. }] => assert!(
-                message.starts_with("CONFLICT: the agent was not created or started: agents.json"),
+                message.starts_with(&format!(
+                    "CONFLICT: the agent was not created or started: {PROFILES_FILE}"
+                )),
                 "{message}"
             ),
             other => panic!("Error 1건이어야: {other:?}"),
@@ -6497,7 +6499,7 @@ mod tests {
         match mock.events().as_slice() {
             [AgentEvent::Error { message, .. }] => assert!(
                 message.starts_with("INTERNAL:")
-                    && message.contains("writing agents.json failed: disk full"),
+                    && message.contains(&format!("writing {PROFILES_FILE} failed: disk full")),
                 "{message}"
             ),
             other => panic!("Error 1건이어야: {other:?}"),
