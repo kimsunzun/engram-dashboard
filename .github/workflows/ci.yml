@@ -390,8 +390,8 @@ jobs:
         run: cargo test --locked -p engram-dashboard-transport --all-features
 
       # ★위 4a/4b 는 「명령이 성공했나」만 본다 — 스위트가 통째로 비어도 그대로 초록이다★. `tests/` 의
-      #   실소켓 파일 셋은 각각 파일 수준 `#![cfg(all(feature = "ws", feature = "test-support"))]` 뒤에
-      #   살아서, 그 조건이 거짓이 되면(feature 이름 오타·개명·다른 feature 로 접기) 세 바이너리가
+      #   실소켓 파일 넷은 각각 파일 수준 `#![cfg(all(feature = "ws", feature = "test-support"))]` 뒤에
+      #   살아서, 그 조건이 거짓이 되면(feature 이름 오타·개명·다른 feature 로 접기) 네 바이너리가
       #   **테스트 0개로 컴파일되고 통과한다.** 그래서 이 스텝은 종료코드를 믿지 않고 **기대하는 것의
       #   이름과 최소 개수를 CI 가 직접 말한다**(선례 = ts-rs 바인딩 게이트가 vacuous 였던 사건,
       #   ADR-0131 「적대 리뷰가 적출한 것」 1). 기대값의 정본 = 그 crate lib.rs 헤더의 게이트 ⑤.
@@ -406,7 +406,7 @@ jobs:
       - name: 'transport gate 4c: socket suites are not hollowed out (named targets + non-empty)'
         shell: bash
         run: |
-          for t in ws_dial ws_reject ws_write_deadline; do
+          for t in ws_dial ws_reject ws_write_deadline ws_accept; do
             set +e
             out=$(cargo test --locked -p engram-dashboard-transport --all-features --test "$t" -- --list)
             rc=$?
@@ -429,7 +429,7 @@ jobs:
               exit 1
             fi
           done
-          echo "PASS — 세 실소켓 스위트가 각각 1개 이상 등재됐다"
+          echo "PASS — 네 실소켓 스위트가 각각 1개 이상 등재됐다"
 
       # 기대값·근거의 정본 = 그 crate lib.rs 헤더 「격리 게이트」의 게이트 ④ 셋째 줄.
       - name: 'transport gate 4d: cargo check -p engram-dashboard-transport --features ws (consumer combo)'

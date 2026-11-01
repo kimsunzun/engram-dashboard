@@ -861,6 +861,14 @@ impl Listener for MemoryListener {
     }
 }
 
+/// 받은 통로의 양 끝을 꺼낸다 — 실소켓 시험이 받는 쪽을 감독 없이 손으로 몰 때 쓴다(`tests/ws_*.rs`).
+///
+/// ★운영 표면이 아니다★ — 양 끝을 crate 밖으로 꺼내지 않는 것이 [`Accepted`] 의 계약이고 이 길은 `test-support` 뒤에만
+/// 있다. 꺼낸 끝은 이미 청취기의 수락 검사를 지난 것이라 그 검사를 건너뛰는 길이 아니다. 업그레이드 칸은 여기서 놓인다.
+pub fn accepted_ends(accepted: Accepted) -> (Box<dyn LinkTx>, Box<dyn LinkRx>) {
+    (accepted.tx, accepted.rx)
+}
+
 /// [`MemoryListener`] 로 거는 [`Dialer`]. clone 은 같은 청취기로 건다. 주소는 보지 않는다.
 #[derive(Clone)]
 pub struct MemoryConnector {

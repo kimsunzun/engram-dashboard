@@ -17,21 +17,20 @@ use tokio::net::{TcpSocket, TcpStream};
 
 use engram_dashboard_transport::link::LinkRead;
 use engram_dashboard_transport::testing::{HelloHandshake, TestIn, TestOut, TestWire};
-use engram_dashboard_transport::ws::{WsDialer, WsListener};
 use engram_dashboard_transport::{
     Address, ConnectFailure, Frame, Generation, PeerId, Policy, TransportEvent,
 };
 
 #[tokio::test]
 async fn a_real_socket_peer_shakes_hands_in_two_steps_and_round_trips_a_request() {
-    let listener = WsListener::bind("127.0.0.1:0").await.expect("bind");
+    let mut listener = common::listen();
     // ★포트를 박지 않는다★ — 0번을 요청하고 커널이 고른 번호를 되읽는다.
-    assert_ne!(listener.local_addr().expect("local_addr").port(), 0);
-    let addr = listener.dial_address().expect("dial_address");
+    assert_ne!(listener.local_addr().port(), 0);
+    let addr = listener.dial_address();
 
     // 받는 쪽: hello 를 받고 welcome 을 돌려준 뒤, 요청 하나에 답장한다.
     let server = tokio::spawn(async move {
-        let (mut tx, mut rx) = listener.accept().await.expect("accept");
+        let (mut tx, mut rx) = common::accept_link(&mut listener).await.expect("accept");
         let hello = rx.recv().await.expect("hello 수신");
         tx.send(Frame::Text(HelloHandshake::WELCOME.into()))
             .await
@@ -41,7 +40,7 @@ async fn a_real_socket_peer_shakes_hands_in_two_steps_and_round_trips_a_request(
         (hello, request)
     });
 
-    let registry = common::registry(Arc::new(WsDialer), Policy::default());
+    let registry = common::registry(Arc::new(common::dialer()), Policy::default());
     let (peer, mut inbox) = registry.add(PeerId::new("d1"), addr, Arc::new(HelloHandshake));
 
     common::wait_state(&peer, "운영 단계", |state| state.is_live()).await;
@@ -135,7 +134,7 @@ async fn dialing_a_port_that_nobody_listens_on_is_unreachable_not_rejected() {
     let (_held, closed_at) = unlistened_port();
     let closed = Address::new(format!("ws://{closed_at}/"));
 
-    let registry = common::registry(Arc::new(WsDialer), Policy::default());
+    let registry = common::registry(Arc::new(common::dialer()), Policy::default());
     let (peer, mut inbox) =
         registry.add(PeerId::new("d1"), closed.clone(), Arc::new(HelloHandshake));
 

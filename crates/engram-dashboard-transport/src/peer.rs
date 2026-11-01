@@ -1057,7 +1057,7 @@ struct Supervisor<W: Wire> {
     /// 자리(`run` — 정리 앞)에서 놓는다: 정리가 받는 쪽을 무엇을 기다리든 칸이 그 몫에 묶이지 않게. 건 상대는 `None`
     /// 이다.
     ///
-    /// ★인증 대기 칸 · 운영 칸이 아직 없다★(3-0 U7 · 3-3 U4) — 그 몫까지 이 칸이 진다. 들어오면 `Registry::attach`
+    /// ★인증 대기 칸 · 운영 칸이 아직 없다★(3-3 U4) — 그 몫까지 이 칸이 진다. 들어오면 `Registry::attach`
     /// 가 인증 대기 칸을 쥐며 이 칸을 놓고, 감독은 여기 그 칸을 쥐었다가 운영 단계에 들 때 운영 칸과 바꾼다.
     admission: Option<ConnPermit>,
     exit: RosterExit<W>,

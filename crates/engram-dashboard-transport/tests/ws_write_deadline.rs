@@ -35,10 +35,10 @@ use tokio::sync::{Mutex, MutexGuard};
 
 use engram_dashboard_transport::link::LinkRead;
 use engram_dashboard_transport::testing::{ImmediateHandshake, TestOut};
-use engram_dashboard_transport::ws::{WsDialer, WsListener};
+use engram_dashboard_transport::ws::WsListener;
 use engram_dashboard_transport::{
-    with_deadline, Dialer, DisconnectCause, Elapsed, Frame, Generation, LinkRx, LinkTx, PeerId,
-    Policy, SystemClock, TransportEvent,
+    with_deadline, Dialer, DisconnectCause, Elapsed, Frame, Generation, LinkRx, LinkTx, Listener,
+    PeerId, Policy, SystemClock, TransportEvent,
 };
 
 /// 한 번에 미는 프레임 크기.
@@ -75,10 +75,8 @@ const PARKED_BLOBS: usize = 16;
 
 /// 받는 쪽 상한을 **한 바이트** 넘는 payload. 상한 자체는 legal 이다(어댑터가 `>` 로 본다).
 ///
-/// ★임계값의 정본은 `ws.rs` 의 `MAX_OUTGOING_PAYLOAD` 이고 그것은 비공개라 여기서 부를 수 없다★ — 두
-/// 값이 어긋나면 이 프레임이 상한 아래로 내려앉아 아무 오류도 안 나고, 그때 아래 테스트는 조용히
-/// 통과하는 대신 상한에서 「끊김 사건이 안 왔다」로 빨개진다. 맞출 자리가 여기다.
-const OVER_LIMIT: usize = (16 << 20) + 1;
+/// 임계값은 이 스위트가 거는 쪽에 준 상한([`common::MAX_MESSAGE`])이다.
+const OVER_LIMIT: usize = common::MAX_MESSAGE + 1;
 
 /// 이 바이너리의 테스트를 한 번에 하나만 돌린다 — 사유는 파일 헤더 「직렬로 돈다」.
 static SOCKET_LOCK: Mutex<()> = Mutex::const_new(());
@@ -145,14 +143,15 @@ async fn flood_until_cut(tx: &mut Box<dyn LinkTx>) -> Option<usize> {
 /// `Pending` 으로 만든다. 그 자리는 시한도 [`common::PATIENCE`] 도 아직 시작되지 않은 지점이라, 상한이
 /// 없으면 뒤따르는 flood 가 유계인 것과 무관하게 테스트가 매달린다.
 async fn connected_pair(
-    listener: &WsListener,
+    listener: &mut WsListener,
 ) -> (
     (Box<dyn LinkTx>, Box<dyn LinkRx>),
     (Box<dyn LinkTx>, Box<dyn LinkRx>),
 ) {
-    let addr = listener.dial_address().expect("dial_address");
+    let addr = listener.dial_address();
+    let dialer = common::dialer();
     let (accepted, dialed) = tokio::time::timeout(common::PATIENCE, async {
-        tokio::join!(listener.accept(), WsDialer.dial(&addr))
+        tokio::join!(common::accept_link(listener), dialer.dial(&addr))
     })
     .await
     .expect("핸드셰이크 상한 — TCP 는 붙었는데 WS 업그레이드가 안 끝난 것이 첫 가설이다");
@@ -162,11 +161,11 @@ async fn connected_pair(
 #[tokio::test]
 async fn writes_into_a_peer_that_never_reads_are_cut_by_the_deadline() {
     let _one_at_a_time = one_at_a_time().await;
-    let listener = WsListener::bind("127.0.0.1:0").await.expect("bind");
+    let mut listener = common::listen();
 
     // ★받은 통로를 붙들고 **한 번도 폴링하지 않는다**★ — 그래서 받는 쪽 커널 버퍼가 차고, 이어서
     //   보내는 쪽이 멈춘다. 떨어뜨리면 소켓이 닫혀 시한이 아니라 통로 오류가 난다.
-    let (_never_read, (mut tx, _rx)) = connected_pair(&listener).await;
+    let (_never_read, (mut tx, _rx)) = connected_pair(&mut listener).await;
 
     let cut = flood_until_cut(&mut tx).await;
     assert!(
@@ -180,9 +179,9 @@ async fn the_same_writes_into_a_peer_that_reads_are_never_cut() {
     // ★위 테스트의 반대쪽이다★ — 이것이 없으면 「이만한 쓰기는 무조건 시한에 걸린다」는 구현도 통과한다.
     //   프레임 수·크기·시한이 전부 같고 다른 것은 상대가 읽는지 하나뿐이다.
     let _one_at_a_time = one_at_a_time().await;
-    let listener = WsListener::bind("127.0.0.1:0").await.expect("bind");
+    let mut listener = common::listen();
 
-    let ((_server_tx, mut server_rx), (mut tx, _rx)) = connected_pair(&listener).await;
+    let ((_server_tx, mut server_rx), (mut tx, _rx)) = connected_pair(&mut listener).await;
 
     let drain = tokio::spawn(async move {
         let mut seen = 0usize;
@@ -213,8 +212,8 @@ async fn the_same_writes_into_a_peer_that_reads_are_never_cut() {
 #[tokio::test]
 async fn the_supervisor_names_the_write_deadline_when_it_drops_a_parked_link() {
     let _one_at_a_time = one_at_a_time().await;
-    let listener = WsListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.dial_address().expect("dial_address");
+    let mut listener = common::listen();
+    let addr = listener.dial_address();
 
     let policy = Policy {
         write_deadline: Duration::from_millis(500),
@@ -226,7 +225,7 @@ async fn the_supervisor_names_the_write_deadline_when_it_drops_a_parked_link() {
         outbound_queue: PARKED_BLOBS,
         ..Policy::default()
     };
-    let registry = common::registry(Arc::new(WsDialer), policy);
+    let registry = common::registry(Arc::new(common::dialer()), policy);
     let (peer, mut inbox) = registry.add(PeerId::new("d1"), addr, Arc::new(ImmediateHandshake));
 
     // ★받고 나서 한 번도 폴링하지 않는다★ — 위 테스트와 같은 이유다.
@@ -277,8 +276,8 @@ async fn an_oversized_frame_is_reported_as_a_write_failure_instead_of_killing_th
     //   `JoinHandle` 을 아무도 안 쥐고 있어 패닉을 **관측하는 자리가 없다**: 발행된 상태가 `Live` 에
     //   영구히 얼고 끊김 사건도 재연결도 안 난다. 그래서 이 테스트가 재는 것은 사건이 **오는지**다.
     let _one_at_a_time = one_at_a_time().await;
-    let listener = WsListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.dial_address().expect("dial_address");
+    let mut listener = common::listen();
+    let addr = listener.dial_address();
 
     // ★받은 통로를 붙들고만 있는다★ — 재연결이 실제로 붙어야 아래 둘째 세대 단언이 선다. 폴링하지
     //   않는 것은 이 파일의 다른 테스트와 같은 이유이고, 여기 프레임은 애초에 소켓에 닿지 않는다.
@@ -289,7 +288,7 @@ async fn an_oversized_frame_is_reported_as_a_write_failure_instead_of_killing_th
         }
     });
 
-    let registry = common::registry(Arc::new(WsDialer), Policy::default());
+    let registry = common::registry(Arc::new(common::dialer()), Policy::default());
     let (peer, mut inbox) = registry.add(PeerId::new("d1"), addr, Arc::new(ImmediateHandshake));
     common::wait_state(&peer, "운영 단계", |state| state.is_live()).await;
 

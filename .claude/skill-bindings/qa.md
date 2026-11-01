@@ -342,11 +342,12 @@ npm test                                    # 6) 프론트 테스트 (vitest run
   cargo test -p engram-dashboard-transport                    # ④ feature 0개 → 성공해야 PASS (CI transport gate 4a)
   cargo test -p engram-dashboard-transport --all-features     # ④ test-support · ws → 성공해야 PASS (CI transport gate 4b)
   cargo check -p engram-dashboard-transport --features ws     # ④ 소비자의 운영 조합(테스트 하네스 없이 어댑터가 컴파일되나) → 성공해야 PASS (CI transport gate 4d)
-  cargo test -p engram-dashboard-transport --all-features --test ws_dial -- --list             # ⑤ 실소켓 스위트가 비지 않았다 — 셋 다 (CI transport gate 4c)
+  cargo test -p engram-dashboard-transport --all-features --test ws_dial -- --list             # ⑤ 실소켓 스위트가 비지 않았다 — 넷 다 (CI transport gate 4c)
   cargo test -p engram-dashboard-transport --all-features --test ws_reject -- --list
   cargo test -p engram-dashboard-transport --all-features --test ws_write_deadline -- --list
+  cargo test -p engram-dashboard-transport --all-features --test ws_accept -- --list
   ```
-  판정: ①은 줄 수 · ②③은 매치 유무(0줄) · ④는 성공 여부 · ⑤는 줄마다 `: test` 로 끝나는 줄이 1개 이상(종료코드가 0 이 아니면 타깃이 사라진 것이라 그것도 FAIL). `cargo test`·`cargo check` 줄은 「분리 실행」을 거치고 `rg`·`cargo tree … | rg` 줄은 감싸지 않는다(그 절). `-- --test-threads=4` 는 붙이지 않는다 — 이 crate 는 자식 프로세스를 하나도 안 띄운다(헤더). ★**④를 한 줄로 줄이지 말 것 · ⑤를 ④로 갈음하지 말 것**★ — ④는 세 조합이 각자 상대가 못 보는 코드를 컴파일하고, ⑤의 세 파일은 파일 수준 `cfg` 가 거짓이 되면 테스트 0개로 **성공**해 ④를 그대로 통과한다(근거 정본 = 그 헤더 ④⑤).
+  판정: ①은 줄 수 · ②③은 매치 유무(0줄) · ④는 성공 여부 · ⑤는 줄마다 `: test` 로 끝나는 줄이 1개 이상(종료코드가 0 이 아니면 타깃이 사라진 것이라 그것도 FAIL). `cargo test`·`cargo check` 줄은 「분리 실행」을 거치고 `rg`·`cargo tree … | rg` 줄은 감싸지 않는다(그 절). `-- --test-threads=4` 는 붙이지 않는다 — 이 crate 는 자식 프로세스를 하나도 안 띄운다(헤더). ★**④를 한 줄로 줄이지 말 것 · ⑤를 ④로 갈음하지 말 것**★ — ④는 세 조합이 각자 상대가 못 보는 코드를 컴파일하고, ⑤의 네 파일은 파일 수준 `cfg` 가 거짓이 되면 테스트 0개로 **성공**해 ④를 그대로 통과한다(근거 정본 = 그 헤더 ④⑤).
 - **ADR-0130 재론 트리거는 걷었다(ADR-0236)** — `control/` 의 잎 성질을 내려놓아(S20 부터 다른 데몬 모듈을 쓴다) 매 QA 가 같은 매치로 울렸다. 되살리지 말 것. 제어 평면 분리를 다시 다룰 때 간선을 재는 법 = ADR-0130 §근거 ③ 의 재확인 명령(주의점은 ADR-0236 「영향」).
 - **공유 데몬 바이너리 락(실발동 2026-07-08):** 실행 중인 `engram-dashboard-daemon.exe`(공유 인프라 — 타 에이전트 호스팅 가능)가 있으면 daemon bin을 빌드하는 루트 `cargo build`·`cargo test`가 os error 5로 FAIL한다 — 코드 결함 아님. **데몬 강제 종료 금지.** 우회 = daemon bin을 안 빌드하는 패키지 스코프(`cargo build/test -p <영향 crate들>`)로 좁혀 회귀 확인, 워크스페이스 전체 게이트는 **PARTIAL로 정직 보고**(못 돌린 범위 명시).
 

@@ -14,13 +14,58 @@
 //! ★인메모리 하네스의 `settle`/`settle_until` 은 여기 못 쓴다★ — 그쪽은 협조적 양보만으로 정착을
 //! 만드는데, 실소켓·실시간에서는 양보가 커널을 기다려 주지 않는다.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use engram_dashboard_transport::testing::TestWire;
+use engram_dashboard_transport::testing::{accepted_ends, TestWire};
+use engram_dashboard_transport::ws::{AcceptPolicy, WsDialer, WsListener};
 use engram_dashboard_transport::{
-    Dialer, Inbox, Incoming, Peer, PeerState, Policy, Registry, SystemClock,
+    Dialer, Inbox, Incoming, LinkError, LinkRx, LinkTx, Listener, Peer, PeerState, Policy,
+    Registry, SystemClock,
 };
+
+/// 한 메시지 · 한 프레임의 바이트 상한 — 운영 값(TRD 3 §5 15)과 같다. 거는 쪽([`dialer`]) · 받는 쪽([`accept_policy`])에
+/// 같은 값을 준다.
+pub const MAX_MESSAGE: usize = 16 << 20;
+
+/// 수락을 재지 않는 스위트가 쓰는 수락 정책 — 운영과 같은 모양의 값이다(Origin 단 업그레이드 거절 · loopback Host ·
+/// 16 MiB). ★허용 전부를 뜻하는 값이 crate 에 없어서★ 시험도 실제 값으로 돈다.
+///
+/// ★업그레이드 시한은 [`PATIENCE`] 와 따로 둔다★ — 그 상수를 정책 창으로 쓰지 않는다(그 rustdoc).
+pub fn accept_policy() -> AcceptPolicy {
+    AcceptPolicy {
+        allowed_origins: Vec::new(),
+        allowed_host_names: vec!["127.0.0.1".into(), "localhost".into()],
+        upgrade_timeout: Duration::from_secs(5),
+        max_pending_upgrades: 8,
+        max_message_bytes: MAX_MESSAGE,
+        refusal_queue: 16,
+    }
+}
+
+/// 포트 0 의 loopback — 커널이 고른 번호는 청취기에서 되읽는다.
+pub fn loopback() -> SocketAddr {
+    "127.0.0.1:0".parse().expect("주소 문법")
+}
+
+/// [`accept_policy`] 로 연 청취기. 거절 보고는 버린다 — 그것을 재는 것은 `ws_accept.rs` 다.
+pub fn listen() -> WsListener {
+    WsListener::bind(loopback(), accept_policy(), Arc::new(SystemClock))
+        .expect("bind")
+        .0
+}
+
+pub fn dialer() -> WsDialer {
+    WsDialer::new(MAX_MESSAGE)
+}
+
+/// 받은 통로의 양 끝 — 받는 쪽을 감독 없이 손으로 모는 테스트가 쓴다.
+pub async fn accept_link(
+    listener: &mut WsListener,
+) -> Result<(Box<dyn LinkTx>, Box<dyn LinkRx>), LinkError> {
+    listener.accept().await.map(accepted_ends)
+}
 
 /// 실소켓·실시간 기다림의 상한. 로컬 loopback 왕복에는 과분한 값이고, 넘겼다면 무언가 매달린 것이다.
 ///

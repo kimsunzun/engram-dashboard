@@ -215,8 +215,8 @@ pub trait Listener: Send + 'static {
     /// ([`LinkRx::recv`] 와 같은 계약). ★상대 하나의 실패(업그레이드 실패 · 칸 넘침 · 시한)는 `Err` 가 아니다★ — 그
     /// 통로는 청취기가 스스로 닫고 다음 것을 기다린다. 그것을 `Err` 로 내면 상대 하나가 수락 루프를 끝낸다.
     ///
-    /// ★그런 거절은 이 trait 밖에서 구현마다 알린다★(TRD 3 §5 18) — `ws` 는 `bind` 가 청취기와 함께 거절 수신기를
-    /// 돌려준다(3-0 U7). `accept` 의 `Ok` 는 받은 통로([`Accepted`]) 하나뿐이고 거절 갈래를 싣지 않는다.
+    /// ★그런 거절은 이 trait 밖에서 구현마다 알린다★(TRD 3 §5 18) — `ws` 는 `WsListener::bind` 가 청취기와 함께 거절
+    /// 수신단(`AcceptRefusals`)을 돌려준다. `accept` 의 `Ok` 는 받은 통로([`Accepted`]) 하나뿐이고 거절 갈래를 싣지 않는다.
     fn accept(&mut self) -> BoxFuture<'_, Result<Accepted, LinkError>>;
 }
 
@@ -234,8 +234,8 @@ pub struct LinkInfo {
     /// 그쪽으로 걸 수 있는 주소가 아니다.
     /// ★전송이 지은 값이다 — 상대 글을 넣지 말 것★.
     pub remote: Option<String>,
-    /// WS 업그레이드 요청의 `Origin` 머리 값. ★상대가 지어 보낸 글이다★ — 판정은 수락 정책 몫이고(3-0 U7) 그대로
-    /// 찍지 않는다.
+    /// WS 업그레이드 요청의 `Origin` 머리 값. ★상대가 지어 보낸 글이다★ — 판정은 수락 정책 몫이고(`ws` 면
+    /// `AcceptPolicy::allowed_origins` 를 지난 값이다) 그대로 찍지 않는다.
     pub origin: Option<String>,
     /// 전송이 확인한 상대 공개 키(TLS 키 고정 · iroh 노드 id — TRD 3 §3-5 · §4). ★3단계 전송은 늘 `None` 이다★ — 칸만
     /// 미리 박는다.
@@ -257,8 +257,9 @@ impl fmt::Debug for LinkInfo {
 
 /// [`Listener::accept`] 가 내놓는 받은 통로 하나 — 양 끝 · [`LinkInfo`] · 업그레이드 칸 · 업그레이드 끝 시각.
 ///
-/// ★양 끝은 crate 밖으로 꺼내지 않는다★ — 받은 상대로 얹는 자리([`crate::Registry::attach`])만 쓴다. 떨어뜨리면 두
-/// 끝이 함께 떨어진다([`LinkTx`] 의 「양 끝이 둘 다」 의무가 여기서 저절로 선다).
+/// ★양 끝은 crate 밖으로 꺼내지 않는다★ — 받은 상대로 얹는 자리([`crate::Registry::attach`])만 쓴다. 예외는 시험
+/// 발판 하나다 — feature `test-support` 뒤의 `testing::accepted_ends` 가 실소켓 시험에 양 끝을 꺼내 주고, 운영 빌드에는
+/// 그 길이 없다. 떨어뜨리면 두 끝이 함께 떨어진다([`LinkTx`] 의 「양 끝이 둘 다」 의무가 여기서 저절로 선다).
 ///
 /// ★칸은 업그레이드 대기 칸이다★ — 전송이 통로를 받은 순간(TCP 수락)에 쥐고, 받는 쪽이 다음 칸(인증 대기)을 쥔
 /// 뒤에야 놓는다(TRD 3 §3-1 · §5 14). 그래서 소비자가 `accept` 를 안 부르는 동안 준비 큐에 앉은 통로도 센다. 인증 대기
