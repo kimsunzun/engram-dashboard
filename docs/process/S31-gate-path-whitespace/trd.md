@@ -17,7 +17,7 @@ PRD R1–R3 · AC1–AC3 을 `.github/workflows/ci.yml` 의 검사 여섯에 적
 | shell gate 2 — rustfmt 건너뛰기 부재 | 1031 | `rustfmt::skip\|rustfmt_skip` | `#[rustfmt :: skip]` 통과 — rustfmt 미적용 구역을 막는 가드 자체가 샌다 |
 
 - 범위 밖 — `net gate 2a`. 첫 마디 공백(`engram_dashboard_platform :: fs`)은 숨은 꼴 검사(`:1389`)가, 깊은 마디 공백(`engram_dashboard_platform::fs :: f`)은 추출(`:1368`) 집합 불일치가 FAIL 시킨다. 시험에 표본 하나를 넣어 이 주장을 실측으로 남긴다.
-- 범위 밖 — `:966` · `:989` · `:1028` 의 존재 검사(공백형이 들면 실패하는 안전한 쪽) · 줄을 넘는 경로.
+- 범위 밖 — `:964` · `:987` · `:1026` 의 존재 검사(공백형이 들면 실패하는 안전한 쪽) · 줄을 넘는 경로.
 - 범위 밖 · 새 할 일 — 공백이 아닌 다른 이름 꼴(`use tokio as rt;` · `extern crate tokio as rt;` · `use std::net;` · `use std::{net::TcpStream};`)도 replay_flight · transport gate 3 을 통과한다(옛 · 새 패턴 모두). 이번에 넓히지 않고 `docs/todo/doc-drift.md` 에 새 항목으로 올리고, 두 게이트의 해설 주석과 대상 헤더의 「알려진 한계」에 한 줄씩 적는다.
 
 ## 바꾸는 것
@@ -47,6 +47,8 @@ PRD R1–R3 · AC1–AC3 을 `.github/workflows/ci.yml` 의 검사 여섯에 적
 ## 시험 계획
 
 qa 가 각 검사를 `ci.yml` 원문 스텝 그대로 돌린다(qa-verify 「gates 잡」 추출). 표본은 대상 파일에 직접 넣지 않는다 — scratch worktree(`$QA_TMP/wt`)의 실파일에 한 줄을 넣고 그 worktree 에서 스텝을 그대로 돈다.
+- scratch worktree 는 커밋 전 작업 트리의 변경(특히 새 `ci.yml`)을 실어야 한다 — `git diff` 를 그 worktree 에 적용한 뒤 돈다. HEAD 만 떠 오면 옛 패턴을 돌려 AC2 · AC3 이 아무것도 증명하지 못한 채 PASS 한다.
+- 검사가 여럿 든 스텝(shell gate 2 · platform gate 6 · net gate 2a)은 표본을 다른 검사를 건드리지 않는 자리(예: 다른 0열 item 앞)에 넣고, FAIL 메시지가 대상 검사의 것인지 확인한다 — shell gate 2 「lint 를 끄는 attribute」 · 「rustfmt 건너뛰기」, platform gate 6 「명단 밖인데 걸린 파일」, net gate 2a 「심볼 꼴이 아닌 모양」.
 
 - AC2 — 이 브랜치 트리에서 여섯 검사 모두 수정 전과 같은 판정.
 - AC1(넣으면 FAIL) — 수정 전 패턴으로는 통과하던 것만 고른다:
@@ -78,4 +80,4 @@ qa 가 각 검사를 `ci.yml` 원문 스텝 그대로 돌린다(qa-verify 「gat
 
 ## 리뷰 기록
 
-(PRD+TRD 리뷰 통과 시 한 줄)
+- 2026-11-02 · PRD+TRD 리뷰 full(Claude worker-reviewer + codex xhigh) · 2라운드 PASS · 판 2 커밋 뒤 권장 3(줄 번호 · scratch worktree 에 변경 싣기 · FAIL 메시지 귀속) 반영.
