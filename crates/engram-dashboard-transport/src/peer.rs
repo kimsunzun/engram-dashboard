@@ -111,14 +111,17 @@ use crate::budget::{Charge, Charged, Ledger};
 use crate::clock::{with_deadline, Clock};
 use crate::event::{Arrival, Direction, Incoming, PeerId, TransportEvent};
 use crate::frame::{Close, CloseCode, Frame};
-use crate::link::{Address, Dialer, Handshake, HandshakeStep, LinkError, LinkRead, LinkRx, LinkTx};
+use crate::link::{
+    Address, DialFailure, Dialer, Handshake, HandshakeStep, LinkError, LinkRead, LinkRx, LinkTx,
+    RejectKind,
+};
 use crate::machine::{
     Action, ConnectFailure, DisconnectCause, Generation, Input, Machine, MachineEvent, PeerState,
 };
 use crate::pending::{Insert, Pending, RequestError};
 use crate::policy::{DecodeFailurePolicy, Policy, QueueFullPolicy};
 use crate::stream::{Streams, Truncation, Verdict};
-use crate::wire::Wire;
+use crate::wire::{DecodeClass, Wire};
 
 /// 프레임을 이만큼 연달아 처리하면 나가는 큐에 한 바퀴를 양보한다.
 const FRAME_BURST: usize = 32;
@@ -252,16 +255,6 @@ enum PeerOp<W: Wire> {
 enum Ctl {
     ReconnectNow,
     Close,
-}
-
-/// 상대가 「너를 안 받는다」고 **말한** 것인가.
-///
-/// ★정상 종료 계열은 거절이 아니다★ — RFC 6455 의 `1000`(Normal)·`1001`(Going Away)과 우리
-/// [`CloseCode::GOING_AWAY`] 는 「나 이제 간다」이지 거절이 아니다. 그것을 거절로 읽으면 데몬이 곱게
-/// 종료할 때마다 클라가 **재시도 한 번 없이** 포기한다. 나머지 코드는 상대가 굳이 골라 실은 것이므로
-/// 그 말을 그대로 받는다.
-fn is_rejection(code: CloseCode) -> bool {
-    !matches!(code.0, 1000 | 1001) && code != CloseCode::GOING_AWAY
 }
 
 /// 마지막으로 알려진 끊김 사유를 핸들 쪽에서도 읽게 하는 최소 표현.
@@ -1676,7 +1669,7 @@ impl<W: Wire> Supervisor<W> {
                 msg
             }
             Err(err) => {
-                let reason = err.to_string();
+                let reason = err.class();
                 let generation = self.machine.generation();
                 self.emit(TransportEvent::DecodeFailed {
                     peer: self.id.clone(),
@@ -2362,7 +2355,20 @@ async fn dial_once(
     let left = deadline.saturating_duration_since(clock.now());
     match with_deadline(&*clock, left, dialer.dial(&addr)).await {
         Ok(Ok(pair)) => Ok(pair),
-        Ok(Err(err)) => Err(ConnectFailure::Unreachable(err)),
+        Ok(Err(DialFailure::Unreachable(err))) => Err(ConnectFailure::Unreachable(err)),
+        // 거는 쪽이 이미 안다 — 붙었는데 거절과 같은 길(예산 없이 포기 · TRD 3 §3-0 ⑤).
+        Ok(Err(DialFailure::Refused { code, reason })) => {
+            debug_assert_eq!(
+                RejectKind::of(code),
+                Some(RejectKind::Terminal),
+                "DialFailure::Refused 는 종결 거절 코드만 싣는다: {code:?}"
+            );
+            Err(ConnectFailure::Rejected {
+                kind: RejectKind::Terminal,
+                code,
+                reason,
+            })
+        }
         Err(_) => Err(ConnectFailure::Unreachable(LinkError::new(
             "connect timed out",
         ))),
@@ -2382,7 +2388,8 @@ async fn handshake_once(
     loop {
         match step {
             HandshakeStep::Done => return Ok((tx, rx)),
-            HandshakeStep::Reject { last, reason } => {
+            HandshakeStep::Reject { kind, last, reason } => {
+                let code = kind.close_code();
                 let mut link_usable = true;
                 if let Some(frame) = last {
                     // 절반 나간 프레임 뒤에 더 쓰지 않는다 — 통로를 그냥 버린다.
@@ -2392,13 +2399,10 @@ async fn handshake_once(
                     );
                 }
                 if link_usable {
-                    let close = Close::new(CloseCode::HANDSHAKE_REJECTED, reason.clone());
+                    let close = Close::new(code, reason.clone());
                     let _ = with_deadline(&*clock, left(&*clock), tx.close(close)).await;
                 }
-                return Err(ConnectFailure::Rejected {
-                    code: Some(CloseCode::HANDSHAKE_REJECTED),
-                    reason,
-                });
+                return Err(ConnectFailure::Rejected { kind, code, reason });
             }
             HandshakeStep::Send(frame) => {
                 match with_deadline(&*clock, left(&*clock), tx.send(frame)).await {
@@ -2415,20 +2419,22 @@ async fn handshake_once(
             HandshakeStep::Await => match with_deadline(&*clock, left(&*clock), rx.recv()).await {
                 Ok(Ok(LinkRead::Frame(Frame::Keepalive))) => step = HandshakeStep::Await,
                 Ok(Ok(LinkRead::Frame(frame))) => step = handshake.on_frame(&frame),
-                // ★상대가 코드를 실어 닫았다 = 거절이다★. 그 판정이 재연결 예산을 가르므로
-                //   (ADR-0180 결정 5) 이 코드가 없으면 「거절은 예산을 안 쓴다」가 코드로는 성립하지 않는다.
-                Ok(Ok(LinkRead::Closed(Some(close)))) if is_rejection(close.code) => {
-                    return Err(ConnectFailure::Rejected {
-                        code: Some(close.code),
-                        reason: close.reason,
+                // ★상대가 코드를 실어 닫았다 = 거절이고, 종류는 그 코드가 정한다★(TRD 3 §3-0 ⑤ — 글로는 안
+                //   가른다). 이 코드가 없으면 「종결 거절은 예산을 안 쓴다」(ADR-0180 결정 5)가 코드로 성립하지 않는다.
+                //   ★맨 종료 · 정상 종료 코드는 「거절」이 아니다★ — 말 없이 끊긴 것은 「못 붙었다」라 예산을 쓴다(데몬
+                //   재시작 중이면 다음 시도에 붙는다).
+                Ok(Ok(LinkRead::Closed(close))) => {
+                    return Err(match close {
+                        Some(close) => match RejectKind::of(close.code) {
+                            Some(kind) => ConnectFailure::Rejected {
+                                kind,
+                                code: close.code,
+                                reason: close.reason,
+                            },
+                            None => peer_closed_during_handshake(),
+                        },
+                        None => peer_closed_during_handshake(),
                     })
-                }
-                // ★맨 종료는 「거절」이 아니다★ — 상대가 그렇게 **말했을** 때만 거절이고, 말 없이
-                //   끊긴 것은 「못 붙었다」라 예산을 쓴다(데몬 재시작 중이면 다음 시도에 붙는다).
-                Ok(Ok(LinkRead::Closed(_))) => {
-                    return Err(ConnectFailure::Unreachable(LinkError::new(
-                        "peer closed during handshake",
-                    )))
                 }
                 Ok(Err(err)) => return Err(ConnectFailure::Unreachable(err)),
                 Err(_) => {
@@ -2439,6 +2445,10 @@ async fn handshake_once(
             },
         }
     }
+}
+
+fn peer_closed_during_handshake() -> ConnectFailure {
+    ConnectFailure::Unreachable(LinkError::new("peer closed during handshake"))
 }
 
 /// 통로에서 읽어 감독에게 넘긴다.
@@ -3720,6 +3730,19 @@ mod tests {
 
     // ── 디코드 ──
     #[tokio::test]
+    async fn a_decode_failure_reports_only_the_wire_class_never_the_value_it_quotes() {
+        // ★해독기 오류는 받은 값을 인용한다★ — 그 글이 사건에 실리면 상대가 화면 · LLM 표면에 글을 심는다(TRD 3 §5 19).
+        let (mut h, endpoint) = live().await;
+        endpoint.push(Frame::Text("rep|PEER-SAYS-\u{1b}[31mHI|x".into()));
+        settle().await;
+        let reason = h.events().into_iter().find_map(|e| match e {
+            TransportEvent::DecodeFailed { reason, .. } => Some(reason),
+            _ => None,
+        });
+        assert_eq!(reason, Some("bad number"), "분류 낱말만 실린다");
+    }
+
+    #[tokio::test]
     async fn a_frame_the_wire_cannot_read_is_reported_without_cutting_the_link() {
         let (mut h, endpoint) = live().await;
         endpoint.push(Frame::Text("garbage".into()));
@@ -3816,10 +3839,7 @@ mod tests {
         });
         assert_eq!(
             reported,
-            Some((
-                Some(CloseCode::HANDSHAKE_REJECTED),
-                "protocol 3 != 4".into()
-            ))
+            Some((CloseCode::HANDSHAKE_REJECTED, "protocol 3 != 4".into()))
         );
     }
 
@@ -3833,6 +3853,262 @@ mod tests {
         h.net.accept().unwrap().close();
         settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
         assert!(h.kinds().contains(&"ConnectFailed"), "예산을 쓰는 쪽이다");
+    }
+
+    // ── 거절 종류(TRD 3 §3-0 ⑤ · D20 ①) — 예산은 종류가 가르고, 종류는 닫기 코드가 나른다 ──
+    fn connect_failure(h: &mut Harness) -> Option<ConnectFailure> {
+        h.events().into_iter().find_map(|e| match e {
+            TransportEvent::ConnectFailed { cause, .. } => Some(cause),
+            _ => None,
+        })
+    }
+
+    fn sent_close(endpoint: &MemoryEndpoint) -> Option<CloseCode> {
+        endpoint.drain().into_iter().find_map(|msg| match msg {
+            ClientMsg::Close(close) => Some(close.code),
+            _ => None,
+        })
+    }
+
+    #[tokio::test]
+    async fn each_reject_kind_of_our_handshake_closes_with_its_own_code() {
+        for (handshake, expected) in [
+            (
+                RejectingHandshake::new("version 3 != 4"),
+                CloseCode::HANDSHAKE_REJECTED,
+            ),
+            (
+                RejectingHandshake::retryable("stale token"),
+                CloseCode::HANDSHAKE_RETRYABLE,
+            ),
+        ] {
+            let h = build(Policy::default(), handshake);
+            settle_until("첫 시도의 끝", || {
+                matches!(
+                    h.peer.peer_state(),
+                    PeerState::Backoff | PeerState::GaveUp(_)
+                )
+            })
+            .await;
+            let endpoint = h.net.accept().expect("통로가 열렸어야 한다");
+            assert_eq!(sent_close(&endpoint), Some(expected), "{expected:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_retryable_rejection_by_our_handshake_spends_budget_and_dials_again() {
+        let mut h = build(
+            Policy::default(),
+            RejectingHandshake::retryable("stale token"),
+        );
+        settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+        let events = h.events();
+        assert!(
+            !events.iter().any(|e| e.kind() == "Rejected"),
+            "다시 거는 거절은 종결 거절 사건을 안 낸다"
+        );
+        let cause = events.into_iter().find_map(|e| match e {
+            TransportEvent::ConnectFailed { cause, .. } => Some(cause),
+            _ => None,
+        });
+        assert_eq!(
+            cause,
+            Some(ConnectFailure::Rejected {
+                kind: RejectKind::Retryable,
+                code: CloseCode::HANDSHAKE_RETRYABLE,
+                reason: "stale token".into(),
+            })
+        );
+        for (delay, dials) in [(500u64, 2usize), (1000, 3), (2000, 4)] {
+            settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+            h.clock.advance(Duration::from_millis(delay));
+            settle_until("다시 걸기", || h.net.dials() == dials).await;
+        }
+        settle_until("포기", || h.peer.peer_state().is_terminal()).await;
+        assert_eq!(
+            h.peer.peer_state(),
+            PeerState::GaveUp(crate::machine::GaveUpReason::BudgetExhausted),
+            "다시 거는 거절은 예산이 바닥나야 포기한다"
+        );
+        assert_eq!(h.net.dials(), 4, "첫 시도 + 재시도 3회");
+    }
+
+    #[tokio::test]
+    async fn a_close_code_other_than_the_terminal_one_is_a_retryable_rejection() {
+        // ★코드만 온 거절★ — 4001 만 종결이고, 다시 걸기 코드 · 모르는 코드는 예산을 쓰고 다시 건다.
+        for code in [
+            CloseCode::HANDSHAKE_RETRYABLE,
+            CloseCode(1008),
+            CloseCode(CloseCode::CONSUMER_BASE + 7),
+        ] {
+            let mut h = build(Policy::default(), Arc::new(ListeningHandshake));
+            settle_until("핸드셰이크 대기", || {
+                h.peer.peer_state() == PeerState::Handshaking
+            })
+            .await;
+            h.net
+                .accept()
+                .unwrap()
+                .reject(Close::new(code, "try again"));
+            settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+            assert_eq!(
+                connect_failure(&mut h),
+                Some(ConnectFailure::Rejected {
+                    kind: RejectKind::Retryable,
+                    code,
+                    reason: "try again".into(),
+                }),
+                "{code:?}"
+            );
+            h.clock.advance(Duration::from_millis(500));
+            settle_until("다시 걸기", || h.net.dials() == 2).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_graceful_close_during_the_handshake_is_could_not_connect() {
+        let mut h = build(Policy::default(), Arc::new(ListeningHandshake));
+        settle_until("핸드셰이크 대기", || {
+            h.peer.peer_state() == PeerState::Handshaking
+        })
+        .await;
+        h.net
+            .accept()
+            .unwrap()
+            .reject(Close::new(CloseCode(1000), "bye"));
+        settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+        assert_eq!(
+            connect_failure(&mut h),
+            Some(ConnectFailure::Unreachable(LinkError::new(
+                "peer closed during handshake"
+            )))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_handshake_that_waits_out_an_error_frame_lets_the_close_code_decide() {
+        /// 상대의 오류 프레임을 받으면 거절하지 않고 닫기를 기다린다(TRD 3 §3-0 ⑤).
+        struct WaitsOutErrors;
+        impl Handshake for WaitsOutErrors {
+            fn start(&self) -> HandshakeStep {
+                HandshakeStep::Send(Frame::Text(HelloHandshake::HELLO.into()))
+            }
+            fn on_frame(&self, frame: &Frame) -> HandshakeStep {
+                match frame {
+                    Frame::Text(t) if t == HelloHandshake::WELCOME => HandshakeStep::Done,
+                    _ => HandshakeStep::Await,
+                }
+            }
+        }
+        for (code, kind) in [
+            (CloseCode::HANDSHAKE_RETRYABLE, RejectKind::Retryable),
+            (CloseCode::HANDSHAKE_REJECTED, RejectKind::Terminal),
+        ] {
+            let mut h = build(Policy::default(), Arc::new(WaitsOutErrors));
+            settle_until("핸드셰이크 대기", || {
+                h.peer.peer_state() == PeerState::Handshaking
+            })
+            .await;
+            let endpoint = h.net.accept().unwrap();
+            endpoint.push(Frame::Text("error: auth failed".into()));
+            settle().await;
+            assert_eq!(
+                h.peer.peer_state(),
+                PeerState::Handshaking,
+                "오류 프레임 하나로 판정하지 않는다"
+            );
+            endpoint.reject(Close::new(code, "auth failed"));
+            settle_until("판정", || {
+                matches!(
+                    h.peer.peer_state(),
+                    PeerState::Backoff | PeerState::GaveUp(_)
+                )
+            })
+            .await;
+            let expected = match kind {
+                RejectKind::Terminal => PeerState::GaveUp(crate::machine::GaveUpReason::Rejected),
+                RejectKind::Retryable => PeerState::Backoff,
+            };
+            assert_eq!(h.peer.peer_state(), expected, "{code:?}");
+            h.drain();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_dialer_refusal_gives_up_as_rejected_without_budget_or_a_second_dial() {
+        let mut h = build(Policy::default(), Arc::new(ImmediateHandshake));
+        h.net.refuse(Close::new(
+            CloseCode::HANDSHAKE_REJECTED,
+            "daemon 0.4.0 != 0.4.1",
+        ));
+        settle_until("포기", || h.peer.peer_state().is_terminal()).await;
+        assert_eq!(
+            h.peer.peer_state(),
+            PeerState::GaveUp(crate::machine::GaveUpReason::Rejected)
+        );
+        let events = h.events();
+        let rejected = events.iter().find_map(|e| match e {
+            TransportEvent::Rejected { code, reason, .. } => Some((*code, reason.clone())),
+            _ => None,
+        });
+        assert_eq!(
+            rejected,
+            Some((
+                CloseCode::HANDSHAKE_REJECTED,
+                "daemon 0.4.0 != 0.4.1".into()
+            ))
+        );
+        assert!(
+            !events.iter().any(|e| e.kind() == "ConnectFailed"),
+            "예산을 쓴 적이 없으므로 시도 실패 사건도 없다"
+        );
+        h.clock.advance(Duration::from_secs(60));
+        settle().await;
+        assert_eq!(h.net.dials(), 1, "다시 걸지 않는다");
+    }
+
+    #[tokio::test]
+    async fn a_rejection_reason_from_the_peer_is_masked_before_it_surfaces() {
+        let noisy = format!(
+            "evil\u{1b}[31m\nline\u{202e}{}",
+            "가".repeat(crate::mask::REASON_MAX_BYTES)
+        );
+        for code in [
+            CloseCode::HANDSHAKE_REJECTED,
+            CloseCode::HANDSHAKE_RETRYABLE,
+        ] {
+            let mut h = build(Policy::default(), Arc::new(ListeningHandshake));
+            settle_until("핸드셰이크 대기", || {
+                h.peer.peer_state() == PeerState::Handshaking
+            })
+            .await;
+            h.net
+                .accept()
+                .unwrap()
+                .reject(Close::new(code, noisy.clone()));
+            settle_until("판정", || {
+                matches!(
+                    h.peer.peer_state(),
+                    PeerState::Backoff | PeerState::GaveUp(_)
+                )
+            })
+            .await;
+            let reason = h
+                .events()
+                .into_iter()
+                .find_map(|e| match e {
+                    TransportEvent::Rejected { reason, .. } => Some(reason),
+                    TransportEvent::ConnectFailed {
+                        cause: ConnectFailure::Rejected { reason, .. },
+                        ..
+                    } => Some(reason),
+                    _ => None,
+                })
+                .expect("거절 사건");
+            assert_eq!(reason, crate::mask_reason(&noisy), "{code:?}");
+            assert!(reason.starts_with("evil[31mline"), "{code:?}: {reason}");
+            assert!(reason.len() <= crate::mask::REASON_MAX_BYTES);
+        }
     }
 
     #[tokio::test]

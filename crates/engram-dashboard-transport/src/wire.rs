@@ -3,7 +3,6 @@
 //! ★이 trait 이 이 crate 의 존재 이유다★ — 지우면 `Out`/`In`/`Tag` 가 사라져 crate 가 바이트 파이프가
 //! 된다(ADR-0177 이 기각한 후보 C). 그래서 여기만 dyn 이 아니라 **제네릭**이다.
 
-use std::fmt::Display;
 use std::hash::Hash;
 
 use crate::frame::Frame;
@@ -26,8 +25,9 @@ pub trait Wire: Send + Sync + 'static {
     type Tag: Eq + Hash + Clone + Send + Sync + 'static;
     /// 스트림 하나를 가리키는 키.
     type StreamKey: Eq + Hash + Clone + Send + Sync + 'static;
-    /// 디코드 실패 사유. crate 는 사건에 문구로 실을 뿐 **분기하지 않는다**.
-    type DecodeError: Display + Send + 'static;
+    /// 디코드 실패 사유. ★crate 는 그 분류([`DecodeClass::class`])만 사건에 싣고 **분기하지 않는다**★ — 값 자체는
+    /// 사건에 안 올라간다(그 사유는 [`DecodeClass`]).
+    type DecodeError: DecodeClass + Send + 'static;
 
     fn encode(&self, out: &Self::Out) -> Frame;
 
@@ -48,6 +48,16 @@ pub trait Wire: Send + Sync + 'static {
     ///
     /// `after` 는 **그 번호 뒤부터** 달라는 뜻이고, `None` 이면 상대가 가진 처음부터다.
     fn resume_request(&self, key: &Self::StreamKey, after: Option<u64>) -> Self::Out;
+}
+
+/// 디코드 실패의 분류 — [`crate::TransportEvent::DecodeFailed`] 에 실리는 유일한 것(TRD 3 §3-0 ⑤ · §5 19).
+///
+/// ★`&'static str` 인 것이 요점이다★ — 해독기 오류의 글은 받은 값을 인용하기 쉬워(「invalid type: string "…"」)
+/// 그것을 사건에 실으면 상대가 화면 · LLM 표면에 글을 심는 길이 된다. 고정 낱말은 그 길을 타입으로 막는다. 자세한
+/// 오류는 소비자가 [`Wire::decode`] 안에서 자기 로그로 남긴다(이 crate 에는 로그가 없다).
+pub trait DecodeClass {
+    /// 이 실패가 어느 갈래인가 — 예: `"json syntax"` · `"unknown tag"` · `"frame too short"`.
+    fn class(&self) -> &'static str;
 }
 
 #[cfg(test)]
@@ -128,10 +138,13 @@ mod tests {
     }
 
     #[test]
-    fn decode_failure_is_a_display_only_value() {
+    fn decode_failure_surfaces_only_its_fixed_class() {
         let w = TestWire;
-        let err = w.decode(Frame::Text("nonsense".into())).unwrap_err();
-        assert!(!err.to_string().is_empty());
+        let err = w
+            .decode(Frame::Text("nonsense-from-the-peer".into()))
+            .unwrap_err();
+        assert!(!err.class().is_empty());
+        assert!(!err.class().contains("nonsense-from-the-peer"));
     }
 
     #[test]

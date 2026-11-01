@@ -19,9 +19,12 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::clock::Clock;
 use crate::frame::{Close, Frame};
-use crate::link::{Address, Dialer, Handshake, HandshakeStep, LinkError, LinkRead, LinkRx, LinkTx};
+use crate::link::{
+    Address, DialFailure, Dialer, Handshake, HandshakeStep, LinkError, LinkRead, LinkRx, LinkTx,
+    RejectKind,
+};
 use crate::stream::StreamMark;
-use crate::wire::Wire;
+use crate::wire::{DecodeClass, Wire};
 
 // ── 시간 ──────────────────────────────────────────────────────────────────────
 
@@ -382,6 +385,7 @@ struct NetState {
     dials: usize,
     fail_next: usize,
     fail_forever: bool,
+    refuse: Option<Close>,
     opened: VecDeque<Arc<MemoryEndpoint>>,
 }
 
@@ -404,6 +408,7 @@ impl MemoryNetwork {
                 dials: 0,
                 fail_next: 0,
                 fail_forever: false,
+                refuse: None,
                 opened: VecDeque::new(),
             })),
         }
@@ -423,11 +428,19 @@ impl MemoryNetwork {
         self.inner.lock().unwrap().fail_forever = true;
     }
 
+    /// 지금부터 모든 dial 이 통로 없이 [`DialFailure::Refused`] 로 끝난다 — 거는 쪽이 이미 아는 종결 거절(로컬 버전
+    /// 대조)을 흉내낸다. [`MemoryNetwork::fail_forever`] · [`MemoryNetwork::fail_next`] 보다 앞선다. `close.code` 는
+    /// 종결 거절 코드여야 한다(그 갈래의 계약).
+    pub fn refuse(&self, close: Close) {
+        self.inner.lock().unwrap().refuse = Some(close);
+    }
+
     /// 다시 붙을 수 있게 한다.
     pub fn allow(&self) {
         let mut st = self.inner.lock().unwrap();
         st.fail_forever = false;
         st.fail_next = 0;
+        st.refuse = None;
     }
 
     /// 지금까지 **실제로 폴링된** dial 수. 취소돼 시작조차 못 한 dial 은 세지 않는다.
@@ -458,16 +471,22 @@ impl Dialer for MemoryNetwork {
     fn dial(
         &self,
         _addr: &Address,
-    ) -> BoxFuture<'_, Result<(Box<dyn LinkTx>, Box<dyn LinkRx>), LinkError>> {
+    ) -> BoxFuture<'_, Result<(Box<dyn LinkTx>, Box<dyn LinkRx>), DialFailure>> {
         // ★통로를 future **안에서** 만든다★ — 밖에서 만들면 취소된 dial 이 아무도 안 쓰는 통로를
         //   명부에 남기고, 테스트가 `accept()` 로 그것을 집어 감독이 채택한 적 없는 채널에 단언한다.
         let inner = self.inner.clone();
         Box::pin(async move {
             let mut st = inner.lock().unwrap();
             st.dials += 1;
+            if let Some(close) = &st.refuse {
+                return Err(DialFailure::Refused {
+                    code: close.code,
+                    reason: close.reason.clone(),
+                });
+            }
             if st.fail_forever || st.fail_next > 0 {
                 st.fail_next = st.fail_next.saturating_sub(1);
-                return Err(LinkError::new("connection refused"));
+                return Err(LinkError::new("connection refused").into());
             }
             let (to_server, from_client) = mpsc::unbounded_channel();
             let (to_client, from_server) = mpsc::unbounded_channel();
@@ -528,6 +547,7 @@ impl Handshake for HelloHandshake {
         match frame {
             Frame::Text(t) if t == Self::WELCOME => HandshakeStep::Done,
             other => HandshakeStep::Reject {
+                kind: RejectKind::Terminal,
                 last: None,
                 reason: format!("unexpected handshake frame: {other:?}"),
             },
@@ -535,32 +555,44 @@ impl Handshake for HelloHandshake {
     }
 }
 
-/// 붙자마자 거절 — ★예산을 안 쓰는 경로★를 재는 데 쓴다.
+/// 붙자마자 거절 — [`RejectingHandshake::new`] 는 종결(★예산을 안 쓰는 경로★), [`RejectingHandshake::retryable`] 은
+/// 다시 거는 거절(예산을 쓰는 경로)을 재는 데 쓴다.
 pub struct RejectingHandshake {
+    pub kind: RejectKind,
     pub reason: String,
 }
 
 impl RejectingHandshake {
     pub fn new(reason: impl Into<String>) -> Arc<Self> {
         Arc::new(Self {
+            kind: RejectKind::Terminal,
             reason: reason.into(),
         })
+    }
+
+    pub fn retryable(reason: impl Into<String>) -> Arc<Self> {
+        Arc::new(Self {
+            kind: RejectKind::Retryable,
+            reason: reason.into(),
+        })
+    }
+
+    fn reject(&self) -> HandshakeStep {
+        HandshakeStep::Reject {
+            kind: self.kind,
+            last: None,
+            reason: self.reason.clone(),
+        }
     }
 }
 
 impl Handshake for RejectingHandshake {
     fn start(&self) -> HandshakeStep {
-        HandshakeStep::Reject {
-            last: None,
-            reason: self.reason.clone(),
-        }
+        self.reject()
     }
 
     fn on_frame(&self, _frame: &Frame) -> HandshakeStep {
-        HandshakeStep::Reject {
-            last: None,
-            reason: self.reason.clone(),
-        }
+        self.reject()
     }
 }
 
@@ -656,12 +688,34 @@ impl TestWire {
     }
 }
 
+/// [`TestWire`] 의 해독 실패. ★값을 실은 갈래는 받은 글을 그대로 인용한다★ — 사건에 그 글이 안 새는지를 재는
+/// 재료다([`DecodeClass`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TestDecodeError {
+    /// [`Frame::Keepalive`] 가 해독기에 왔다 — crate 계약 위반.
+    Keepalive,
+    /// 숫자 칸을 못 읽었다.
+    BadNumber(String),
+    /// 모르는 모양.
+    Unknown(String),
+}
+
+impl DecodeClass for TestDecodeError {
+    fn class(&self) -> &'static str {
+        match self {
+            TestDecodeError::Keepalive => "keepalive",
+            TestDecodeError::BadNumber(_) => "bad number",
+            TestDecodeError::Unknown(_) => "unknown frame",
+        }
+    }
+}
+
 impl Wire for TestWire {
     type Out = TestOut;
     type In = TestIn;
     type Tag = u64;
     type StreamKey = u32;
-    type DecodeError = String;
+    type DecodeError = TestDecodeError;
 
     fn encode(&self, out: &Self::Out) -> Frame {
         match out {
@@ -678,13 +732,13 @@ impl Wire for TestWire {
     fn decode(&self, frame: Frame) -> Result<Self::In, Self::DecodeError> {
         let text = match frame {
             Frame::Binary(bytes) => return Ok(TestIn::Blob(bytes)),
-            Frame::Keepalive => return Err("keepalive must not reach decode".into()),
+            Frame::Keepalive => return Err(TestDecodeError::Keepalive),
             Frame::Text(t) => t,
         };
         let parts: Vec<&str> = text.splitn(5, '|').collect();
-        let num = |s: &str| -> Result<u64, String> {
+        let num = |s: &str| -> Result<u64, TestDecodeError> {
             s.parse::<u64>()
-                .map_err(|e| format!("bad number {s:?}: {e}"))
+                .map_err(|e| TestDecodeError::BadNumber(format!("{s:?}: {e}")))
         };
         match parts.as_slice() {
             ["rep", tag, body] => Ok(TestIn::Reply {
@@ -704,7 +758,7 @@ impl Wire for TestWire {
                 generation: num(generation)? as u32,
                 seq: num(seq)?,
             }),
-            _ => Err(format!("unknown frame: {text:?}")),
+            _ => Err(TestDecodeError::Unknown(text)),
         }
     }
 

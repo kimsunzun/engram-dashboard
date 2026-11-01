@@ -124,7 +124,7 @@ use tokio_tungstenite::tungstenite::{Bytes, Message};
 use tokio_tungstenite::WebSocketStream;
 
 use crate::frame::{Close, CloseCode, Frame};
-use crate::link::{Address, Dialer, LinkError, LinkRead, LinkRx, LinkTx};
+use crate::link::{Address, DialFailure, Dialer, LinkError, LinkRead, LinkRx, LinkTx};
 
 /// 닫기 문구가 실릴 수 있는 최대 바이트 — **문자 수가 아니다**.
 ///
@@ -164,13 +164,18 @@ impl<S> WsStream for S where S: AsyncRead + AsyncWrite + Unpin + Send + 'static 
 ///
 /// [`Address`] 는 `tokio-tungstenite` 에 그대로 넘어간다 — 즉 `ws://host:port/path` 문법이고, 그 문법
 /// 위반도 [`LinkError`] 로 온다(주소를 crate 가 해석하지 않는다는 계약 그대로다).
+///
+/// ★실패는 전부 [`DialFailure::Unreachable`] 이다 — [`DialFailure::Refused`] 를 내지 않는다★. 업그레이드 단계의 HTTP
+/// 거절(101 이 아닌 상태 — 예: Origin 검사의 403)도 그렇다: 그 응답에는 닫기 코드가 없고, 상태 번호를 종결 · 다시
+/// 걸기로 옮기는 것은 이 어댑터가 모르는 정책이다(지어내면 일시 장애가 예산 없는 포기가 된다). 걸기 전에 종결을 아는
+/// 소비자는 이것을 감싼 자기 [`Dialer`] 에서 `Refused` 를 돌려준다(TRD 3 §3-0 ⑤).
 pub struct WsDialer;
 
 impl Dialer for WsDialer {
     fn dial(
         &self,
         addr: &Address,
-    ) -> BoxFuture<'_, Result<(Box<dyn LinkTx>, Box<dyn LinkRx>), LinkError>> {
+    ) -> BoxFuture<'_, Result<(Box<dyn LinkTx>, Box<dyn LinkRx>), DialFailure>> {
         // ★통로를 future 안에서 만든다★ — [`Dialer`] 계약이 그것을 요구한다(취소되면 아무것도 남지
         //   않아야 한다).
         // ★주소를 소유한 String 으로 옮겨 담는 것은 **시그니처가 강제한다**★ — 반환 타입의 `'_` 는

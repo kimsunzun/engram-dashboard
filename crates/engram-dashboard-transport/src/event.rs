@@ -184,10 +184,16 @@ pub enum TransportEvent<W: Wire> {
         cause: ConnectFailure,
         retry_in: Option<Duration>,
     },
-    /// 왜 거절당했나. ★이 문구가 팝업 문안이 된다★(ADR-0178 의 버전 거절이 여기로 올라온다).
+    /// ★종결 거절([`crate::RejectKind::Terminal`])★ — 바로 뒤에 [`TransportEvent::GaveUp`] 이 온다(ADR-0178 의 버전
+    /// 거절 · 거는 쪽의 [`crate::DialFailure::Refused`] 가 여기로 올라온다). 다시 거는 거절은 여기 오지 않고
+    /// [`TransportEvent::ConnectFailed`] 의 `cause` 로 간다.
+    ///
+    /// ★팝업 문안은 `code` 로 고르는 고정 로컬 문구다 — `reason` 이 아니다★(TRD 3 §3-0 ⑤). `reason` 은 상대가 준 글일
+    /// 수 있어 가르지도 화면 문안으로 쓰지도 않고 세부 · 로그로만 보낸다 — 가린 글이다
+    /// ([`crate::mask_reason`] · [`crate::ConnectFailure::Rejected`]).
     Rejected {
         peer: PeerId,
-        code: Option<CloseCode>,
+        code: CloseCode,
         reason: String,
     },
     /// 셸이 팝업 자격을 판정하는 입력(ADR-0180 결정 2).
@@ -272,10 +278,12 @@ pub enum TransportEvent<W: Wire> {
         count: u64,
     },
     /// [`Wire::decode`] 가 실패했다. 연결을 끊을지는 [`crate::DecodeFailurePolicy`] 가 정한다.
+    ///
+    /// `reason` = 소비자 해독 오류의 분류([`crate::wire::DecodeClass::class`]) — ★고정 낱말이고 받은 값을 안 담는다★.
     DecodeFailed {
         peer: PeerId,
         generation: Generation,
-        reason: String,
+        reason: &'static str,
     },
     /// 한 `In` 이 답장이면서 스트림 조각이라고 신고됐다 — [`Wire`] 계약 위반 신호다.
     AmbiguousRole { peer: PeerId },

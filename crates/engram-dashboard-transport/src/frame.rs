@@ -34,7 +34,8 @@ pub struct CloseCode(pub u16);
 impl CloseCode {
     /// 내 쪽이 정상 종료한다.
     pub const GOING_AWAY: Self = Self(4000);
-    /// 핸드셰이크에서 거절했다. 사유 판정은 소비자의 [`crate::Handshake`] 안에 있다.
+    /// 핸드셰이크에서 거절했다 — ★다시 걸어도 결과가 같다★([`crate::RejectKind::Terminal`]). 거는 쪽은 이 코드를 받으면
+    /// 예산 없이 포기한다. 사유 판정은 소비자의 [`crate::Handshake`] 안에 있다.
     pub const HANDSHAKE_REJECTED: Self = Self(4001);
     /// 상대가 조용해졌다(`idle_timeout`).
     pub const KEEPALIVE_TIMEOUT: Self = Self(4002);
@@ -44,6 +45,9 @@ impl CloseCode {
     pub const QUEUE_FULL: Self = Self(4004);
     /// 디코드가 깨졌다.
     pub const PROTOCOL_ERROR: Self = Self(4005);
+    /// 핸드셰이크에서 거절했지만 ★다시 걸면 붙을 수 있다★([`crate::RejectKind::Retryable`] — 예: 낡은 자격). 거는 쪽은
+    /// 이 코드를 받으면 재연결 예산을 쓰고 다시 건다(TRD 3 §3-0 ⑤ · D20 ①).
+    pub const HANDSHAKE_RETRYABLE: Self = Self(4006);
     /// 소비자 전용 구간의 시작. ★crate 는 4000~4099 만 쓴다★ — 그 아래를 소비자가 쓰면 충돌한다.
     pub const CONSUMER_BASE: u16 = 4100;
 
@@ -105,6 +109,7 @@ mod tests {
             CloseCode::WRITE_DEADLINE,
             CloseCode::QUEUE_FULL,
             CloseCode::PROTOCOL_ERROR,
+            CloseCode::HANDSHAKE_RETRYABLE,
         ] {
             assert!(code.0 < CloseCode::CONSUMER_BASE, "{code:?}");
         }

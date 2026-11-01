@@ -270,6 +270,7 @@ pub mod event;
 pub mod frame;
 pub mod link;
 pub mod machine;
+mod mask;
 pub mod peer;
 pub mod pending;
 pub mod policy;
@@ -286,14 +287,18 @@ pub mod ws;
 pub use clock::{with_deadline, Clock, Elapsed, SystemClock};
 pub use event::{Arrival, Direction, Incoming, PeerId, TransportEvent};
 pub use frame::{Close, CloseCode, Frame};
-pub use link::{Address, Dialer, Handshake, HandshakeStep, LinkError, LinkRead, LinkRx, LinkTx};
+pub use link::{
+    Address, DialFailure, Dialer, Handshake, HandshakeStep, LinkError, LinkRead, LinkRx, LinkTx,
+    RejectKind,
+};
 pub use machine::{
     Action, ConnectFailure, DisconnectCause, GaveUpReason, Generation, Input, Machine,
     MachineEvent, PeerState,
 };
+pub use mask::mask_reason;
 pub use peer::{Peer, SendError};
 pub use pending::{Insert, Pending, RequestError};
 pub use policy::{DecodeFailurePolicy, Policy, QueueFullPolicy, ReconnectPolicy};
 pub use registry::{Inbox, Registry};
 pub use stream::{StreamMark, Streams, Verdict};
-pub use wire::Wire;
+pub use wire::{DecodeClass, Wire};
