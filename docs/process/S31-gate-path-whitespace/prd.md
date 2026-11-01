@@ -3,19 +3,19 @@
 ## 1. 무엇 · 왜
 
 - CI 의 소스 정규식 게이트 몇 개가 crate 경로를 `\b(<이름>)::` 로 찾는다. Rust 는 경로 마디 사이에 공백을 허용하므로 `use   tokio :: time;` · `tokio :: spawn(…)` 은 컴파일되면서 이 정규식에 안 걸린다.
-- 보통은 `cargo fmt --check`(ci.yml backend 잡)가 먼저 막는다 — rustfmt 가 공백형을 `tokio::time` 으로 고쳐 쓰므로 공백형 그대로는 그 스텝에서 FAIL 한다.
+- 보통은 `cargo fmt --check`(ci.yml `gates` 잡)가 먼저 막는다 — rustfmt 가 공백형을 `tokio::time` 으로 고쳐 쓰므로 공백형 그대로는 그 스텝에서 FAIL 한다.
 - 남는 구멍 = rustfmt 가 손대지 않는 자리 — 매크로 본문(`macro_rules!` · 비표준 매크로 호출의 토큰)과 `#[rustfmt::skip]` 구간. 그 자리의 공백형은 fmt 게이트도, 정규식 게이트도 통과한다. 대상 게이트 중 일부는 컴파일러 backstop 이 없어 정규식이 유일한 벽이다(ci.yml 주석).
 - 출처 = `docs/todo/doc-drift.md` 「게이트 정규식이 못 닫은 구멍」.
 
 ## 2. 범위 / 비목표
 
-- 범위 = `.github/workflows/ci.yml` 의 소스 정규식 게이트 중 crate 경로를 `::` 로 찾는 것. 목록은 TRD 가 확정한다(후보: base 내부 경로 · `replay_flight` 순수성 · transport 순수 층 · net 의 platform 참조 둘).
-- 비목표 — 블록 주석(`/* */`) 안 오탐 · 다른 알려진 한계 · rustfmt 설정 변경 · 게이트를 컴파일러 검사로 바꾸는 것.
+- 범위 = `.github/workflows/ci.yml` 의 소스 정규식 검사 중 경로(crate 경로 · `std::os` · 도구 attribute `rustfmt::skip` · `clippy::restriction`)를 `::` 로 찾는 것. 목록은 TRD 가 확정한다.
+- 비목표 — 블록 주석(`/* */`) 안 오탐 · 줄을 넘는 경로 · 공백이 아닌 다른 이름 꼴(`use tokio as rt;` · `use std::{net::…}` · `use std::net;` — 새 할 일로 돌린다) · rustfmt 설정 변경 · 게이트를 컴파일러 검사로 바꾸는 것.
 
 ## 3. 요구사항
 
-- R1 — 대상 게이트가 경로 마디 사이 공백형(`tokio :: time` · `tokio  ::time` · `tokio:: time`)을 붙은 형태와 똑같이 잡는다.
-- R2 — 지금 트리(master)에서 대상 게이트의 판정이 바뀌지 않는다(오탐 0).
+- R1 — 대상 검사가 `::` 앞 · 뒤 · 여러 마디 사이의 공백형(`tokio :: time` · `tokio ::time` · `std :: net :: X` · `super:: sync` · 탭 포함)을 붙은 형태와 똑같이 잡는다.
+- R2 — 지금 트리에서 대상 게이트의 판정이 바뀌지 않는다(오탐 0).
 - R3 — 각 게이트의 기존 성질(주석 밖만 · `\b` 경계 · 정당한 이웃 `std::time` 통과 · 파일 존재 검사)을 유지한다.
 
 ## 4. 수용 기준
