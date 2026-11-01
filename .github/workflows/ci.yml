@@ -1176,7 +1176,7 @@ jobs:
       - name: 'platform gate 5: OS crates as direct normal/build deps — platform only'
         shell: bash
         run: |
-          os_dep_re='^(windows|windows-sys|winapi|libc|nix|rustix|objc2.*|objc|cocoa|core-foundation|core-graphics|security-framework|mach2)$'
+          os_dep_re='^(windows|windows-sys|winapi|libc|nix|rustix|objc2.*|objc|cocoa|core-foundation|core-graphics|security-framework|mach2|junction)$'
           os_dep_gate() {
             local tree hits own bad
             tree=$(cargo tree --locked --workspace --no-dedupe --depth 1 --prefix depth -e normal,build --target all --all-features) || { echo "FAIL — cargo tree errored"; return 1; }

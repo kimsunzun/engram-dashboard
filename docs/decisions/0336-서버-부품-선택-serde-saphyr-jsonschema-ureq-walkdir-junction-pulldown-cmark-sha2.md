@@ -14,7 +14,7 @@
 | JSON 스키마 검사 | `jsonschema` **0.60.2** (`default-features = false`, `["resolve-file","idna"]`) — TRD 의 0.59.0 에서 올림 | asset-library `validate` · 포맷 검증 정책은 코드에 밝힌다(두 대상 스키마가 draft-07) |
 | 스키마 받기(HTTPS) | `ureq` 3.5.0 블로킹 (`default-features = false`, `["rustls","platform-verifier","gzip","win-system-proxy"]`) | 데몬의 fetch 포트 구현(agent · asset-library 는 네트워크를 모른다 — ADR-0311) · `RootCerts::PlatformVerifier` 를 코드로 밝힌다(feature 만으로는 Mozilla 루트가 기본) · 읽기 API 를 이름으로 정하고 크기 상한을 둔다 · 프록시 = 환경변수 + `win-system-proxy`(HKCU 수동 프록시 하나만 — PAC · WPAD 안 됨 · 간접 `winreg` 를 끈다 — 새 패키지 · T-62 대상 — 메인 2026-10-31 M66) |
 | 폴더 훑기 | `walkdir` 2.5.0 (잠금에 이미 있음 — 직접 의존으로 올려도 새 패키지 0) | asset-library `store` · 루트가 링크일 때의 정책을 코드로 밝힌다(`follow_root_links` 기본 true) |
-| 디렉터리 정션 | `junction` 2.1.0 `create` · 끄기 = 링크임을 비추종 메타데이터로 먼저 확인한 뒤 `std::fs::remove_dir` | platform `fs` · reparse 설정이 실패하면 남은 빈 폴더를 호출자가 치운다 |
+| 디렉터리 정션 | `junction` 2.1.0 `create` · 끄기 = 재해석 지점 자체를 연 핸들 하나로 링크임을 확인하고 그 핸들로 지운다(구현 2026-11-01 — 확인한 그 핸들로 지운다 · 경로로 다시 찾아 지우면 확인과 지움 사이에 다른 것으로 바뀐 자리를 지울 수 있다 — S25 2 단계 코드 리뷰) | platform `fs` · 실패해도 남은 빈 폴더를 지우지 않는다(구현 2026-11-01 — 남이 만든 폴더를 지울 수 있어서 · 쓰는 곳은 휘발 폴더 안이라 그 폴더째 치워진다 — S25 2 단계 코드 리뷰) |
 | 지침 `.md` 발췌 | `pulldown-cmark` 0.13.6 (MIT · 신규) | `MetadataBlock` 하위 트리를 건너뛴다 · 표는 `ENABLE_TABLES` |
 | `SKILL.md` 앞머리 | 손으로 짠 분리(codex `extract_frontmatter` 규칙 그대로) + serde-saphyr · codex 의 **수선(repair) 규칙 전부를 옮긴다** | 엄격 검사만 하면 codex 가 싣는 스킬을 잘못 막는다 |
 | 판 해시(`rev`) | `sha2` 0.10(SHA-256 · 잠금에 있음 — 데몬 바이너리엔 새로) | 원시 바이트만 해시 · 붙임 목록은 길이 접두 정규 인코딩(없으면 `["ab","c"]` · `["a","bc"]` 가 부딪는다) · `std::hash::Hash` 를 거치지 않는다 |

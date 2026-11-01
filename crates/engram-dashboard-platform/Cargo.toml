@@ -60,9 +60,21 @@ raw-window-handle = "0.6"
 # `Win32_Graphics_Dwm` = `window::top_level_at` 의 가려진 창 판정(`DWMWA_CLOAKED`).
 # `Win32_Graphics_Gdi` = `window::restore_placement` 의 모니터 작업 영역(`MonitorFromRect` · `GetMonitorInfoW` —
 #   화면 좌표를 작업 공간 좌표로 옮긴다)과 `window::top_level_at` 의 창 모양(`GetWindowRgn` · `PtInRegion`).
+# `Win32_Storage_FileSystem` = `fs` 의 파일 신원(`GetFileInformationByHandleEx` 의 `FileIdInfo` · 물러난 길의
+#   `GetFileInformationByHandle`)과 정션 걷기(`FileAttributeTagInfo` — 비추종 reparse tag · 같은 핸들의 지우기 표시
+#   `SetFileInformationByHandle`). ADR-0325
+# `Win32_Globalization` = `fs::path_key` 의 OS 대문자 매핑(`LCMapStringEx` invariant `LCMAP_UPPERCASE`).
+#   ★`RtlUpcaseUnicodeChar` 로 바꾸지 말 것★ — 커널 모드 문서뿐이고 그 바인딩 feature(`Wdk_System_SystemServices`)가
+#   이 모듈의 두 배다(둘의 답이 같다는 실측은 `src/fs/path_key.rs`).
 # ★기능별 cargo feature 로 쪼개지 않는다★ — 이 의존 하나에 쓰는 바인딩 feature 의 합집합을 켠다(ADR-0275
 #   결정 13). 모듈을 옮겨 올 때 그 모듈이 쓰는 feature 를 여기 더한다.
 [target.'cfg(windows)'.dependencies]
+# `fs::link_dir` 의 정션 만들기(ADR-0336). 걷기는 이 crate 가 아니다(`fs::unlink_dir` — 확인한 핸들로 지운다).
+#   ★기본 feature 를 켜지 말 것★ — 기본의 `unstable_admin` 은 폴더 열기가 접근 거부면 프로세스 토큰에 복원
+#   특권(`SE_RESTORE_NAME`)을 켜고 다시 연다. 켜진 특권은 프로세스 전체에 남아, 토큰이 그 특권을 가진(권한 상승된)
+#   데몬이면 그 뒤 `FILE_FLAG_BACKUP_SEMANTICS` 로 쓰기 · 삭제 접근을 청하는 열기가 ACL 검사를 건너뛴다(MS
+#   `CreateFileW` 문서). 끄면 같은 자리에서 심볼릭 링크 특권만 시도한다(junction 2.1.0 `helpers.rs` 소스).
+junction = { version = "2.1.0", default-features = false }
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
@@ -79,6 +91,8 @@ windows = { version = "0.58", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
+    "Win32_Globalization",
 ] }
 
 # `file_holders` · `fs` 시험이 임시 파일 이름을 겹치지 않게 뽑는다 — 운영 그래프에는 안 든다.

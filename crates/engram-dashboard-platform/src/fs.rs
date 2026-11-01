@@ -1,6 +1,7 @@
 //! 파일 다루기의 OS 규칙 — 남의 쓰기를 막은 채 여는 열기와 그 실패의 분류 · 남이 잠깐 쥐어 난 실패의 판정과
-//! 다시 하기 · 폴더 동기화. std 만 쓴다 — `OpenOptionsExt::share_mode` 가 그대로 `CreateFileW` 의 공유 모드로
-//! 내려가 같은 커널 동작을 unsafe 없이 얻으므로 `windows` 바인딩이 필요 없다.
+//! 다시 하기 · 폴더 동기화 · 디렉터리 링크 만들기 · 걷기(`link`) · 경로 열쇠와 경로 비교(`path_key`) · 파일
+//! 신원(`identity`). 이 파일의 열기는 std 만 쓴다 — `OpenOptionsExt::share_mode` 가 그대로 `CreateFileW` 의 공유
+//! 모드로 내려가 같은 커널 동작을 unsafe 없이 얻는다.
 
 // ADR-0266
 // ADR-0291
@@ -9,6 +10,14 @@ use std::fs::File;
 use std::io;
 use std::path::Path;
 use std::time::Duration;
+
+mod identity;
+mod link;
+mod path_key;
+
+pub use identity::{file_identity, FileIdentity};
+pub use link::{link_dir, unlink_dir};
+pub use path_key::{path_key, same_path, PathKey};
 
 const ERROR_ACCESS_DENIED: i32 = 5;
 const ERROR_SHARING_VIOLATION: i32 = 32;
@@ -130,6 +139,18 @@ pub fn sync_dir(_dir: &Path) -> io::Result<()> {
 #[cfg(not(windows))]
 pub fn sync_dir(dir: &Path) -> io::Result<()> {
     File::open(dir)?.sync_all()
+}
+
+// FACILITY_WIN32 HRESULT(`0x8007xxxx`)는 아래 16비트를 원 Win32 코드로 되돌린다 — HRESULT 를 그대로 OS 코드로
+//   실으면 `kind()` 가 `Uncategorized` 가 되고 위 분류 함수들이 못 읽는다.
+#[cfg(windows)]
+fn win32_io_error(e: windows::core::Error) -> io::Error {
+    let hresult = e.code().0 as u32;
+    if hresult & 0xFFFF_0000 == 0x8007_0000 {
+        io::Error::from_raw_os_error((hresult & 0xFFFF) as i32)
+    } else {
+        io::Error::other(e)
+    }
 }
 
 #[cfg(test)]
@@ -368,5 +389,25 @@ mod tests {
         } else {
             assert_eq!(missing.unwrap_err().kind(), io::ErrorKind::NotFound);
         }
+    }
+
+    // ── windows 실패 옮기기 ──
+
+    #[cfg(windows)]
+    #[test]
+    fn a_wrapped_win32_failure_keeps_its_code_and_kind() {
+        use windows::core::{Error, HRESULT};
+        let not_found = win32_io_error(Error::from(HRESULT(0x8007_0002_u32 as i32)));
+        assert_eq!(not_found.raw_os_error(), Some(2));
+        assert_eq!(not_found.kind(), io::ErrorKind::NotFound);
+        let sharing = win32_io_error(Error::from(HRESULT(0x8007_0020_u32 as i32)));
+        assert!(is_sharing_violation(&sharing));
+
+        let foreign = win32_io_error(Error::from(HRESULT(0x8000_4005_u32 as i32))); // E_FAIL
+        assert_eq!(
+            foreign.raw_os_error(),
+            None,
+            "Win32 가 아닌 HRESULT 는 OS 코드로 싣지 않는다"
+        );
     }
 }
