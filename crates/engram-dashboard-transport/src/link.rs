@@ -1,5 +1,5 @@
-//! 전송 seam — 통로를 여는 것(`Dialer`)과 열린 통로의 양 끝(`LinkTx`/`LinkRx`), 그리고 그 위에서
-//! 도는 불투명 핸드셰이크.
+//! 전송 seam — 통로를 여는 것(`Dialer`) · 받는 것(`Listener`)과 열린 통로의 양 끝(`LinkTx`/`LinkRx`), 그리고 그
+//! 위에서 도는 불투명 핸드셰이크.
 //!
 //! ★왜 제네릭이 아니라 dyn 인가★ — 한 명부 안에 **서로 다른 전송이 섞일 수 있어야** 한다(로컬 WS 상대와
 //! 나중의 TLS 상대를 같은 [`crate::Registry`] 에 담는다). 제네릭 파라미터로는 그 컬렉션이 표현되지 않는다.
@@ -9,6 +9,9 @@
 //! (같은 저장소의 `net::frame_port` 가 같은 이유로 같은 형태다).
 
 use std::fmt;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
 
 use futures_util::future::BoxFuture;
 
@@ -189,6 +192,203 @@ pub trait LinkRx: Send + 'static {
     /// 계층이 자기 종료 표식으로 소진을 알리는 것이 보통이다 — WS 어댑터 rustdoc 이 그 실물을 든다).
     /// 그래서 이 계약 위에서 [`LinkRead::Closed`] 는 **조건 없이** 「상대가 말했다」를 뜻한다.
     fn recv(&mut self) -> BoxFuture<'_, Result<LinkRead, LinkError>>;
+}
+
+// ── 받는 쪽 ──────────────────────────────────────────────────────────────────
+
+/// 들어오는 통로를 받는다 — [`Dialer`] 의 짝(TRD 3 §3-1 ① · D1).
+///
+/// ★수락 루프는 소비자가 돈다★ — `accept` 를 언제 부르고 받은 것을 붙일지(연결 수 상한 · 속도)는 소비자 정책이다
+/// (ADR-0177 결정 4). 명부는 청취기를 쥐지 않는다.
+///
+/// ★받는 쪽은 하나다(`&mut self`)★ — 한 청취기를 두 task 가 나눠 받는 모양을 두지 않는다.
+///
+/// ★청취기를 떨어뜨리면 아직 안 받아 간 통로는 닫힌다★ — 거는 쪽은 그것을 통로 손실로 본다. 붙들어 두면 아무도
+/// 안 받을 소켓이 업그레이드 칸을 쥔 채 남는다.
+pub trait Listener: Send + 'static {
+    /// 다음 받은 통로를 기다린다.
+    ///
+    /// ★취소 안전★ — 반환 future 를 끝나기 전에 떨어뜨려도 받은 통로를 잃지 않고 다음 `accept` 가 그것을 준다
+    /// (`select!` 팔에 걸어 종료 신호와 겨뤄도 된다).
+    ///
+    /// ★`Err` 는 종결이다★ — 청취기가 더는 받을 수 없다. 한 번 `Err` 를 낸 청취기는 계속 `Err` 를 낸다
+    /// ([`LinkRx::recv`] 와 같은 계약). ★상대 하나의 실패(업그레이드 실패 · 칸 넘침 · 시한)는 `Err` 가 아니다★ — 그
+    /// 통로는 청취기가 스스로 닫고 다음 것을 기다린다. 그것을 `Err` 로 내면 상대 하나가 수락 루프를 끝낸다.
+    ///
+    /// ★그런 거절은 이 trait 밖에서 구현마다 알린다★(TRD 3 §5 18) — `ws` 는 `bind` 가 청취기와 함께 거절 수신기를
+    /// 돌려준다(3-0 U7). `accept` 의 `Ok` 는 받은 통로([`Accepted`]) 하나뿐이고 거절 갈래를 싣지 않는다.
+    fn accept(&mut self) -> BoxFuture<'_, Result<Accepted, LinkError>>;
+}
+
+/// 받은 통로에 붙은 사실 — 소비자가 그 통로의 핸드셰이크 값을 지을 때 읽는다(TRD 3 §3-1 ①).
+///
+/// ★`None` = 이 전송이 그것을 모른다★ — 인메모리 통로에는 원격 주소가 없고 Origin 은 WS 업그레이드에만 있다.
+/// ★`#[non_exhaustive]`★ — 나중 전송이 칸을 더해도 소비자가 안 깨진다. crate 밖에서는 [`LinkInfo::default`] 에서
+/// 칸을 채워 짓는다.
+///
+/// `Debug` 는 `remote` · `origin` 을 [`crate::mask_reason`] 으로 가리고 `peer_key` 는 길이만 찍는다.
+#[derive(Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LinkInfo {
+    /// 받은 쪽에서 본 상대 끝 — 진단 · 로그 재료다. ★[`Address`] 가 아니다★ — 연결마다 바뀌는 임시 포트 같은 것이라
+    /// 그쪽으로 걸 수 있는 주소가 아니다.
+    /// ★전송이 지은 값이다 — 상대 글을 넣지 말 것★.
+    pub remote: Option<String>,
+    /// WS 업그레이드 요청의 `Origin` 머리 값. ★상대가 지어 보낸 글이다★ — 판정은 수락 정책 몫이고(3-0 U7) 그대로
+    /// 찍지 않는다.
+    pub origin: Option<String>,
+    /// 전송이 확인한 상대 공개 키(TLS 키 고정 · iroh 노드 id — TRD 3 §3-5 · §4). ★3단계 전송은 늘 `None` 이다★ — 칸만
+    /// 미리 박는다.
+    pub peer_key: Option<Vec<u8>>,
+}
+
+impl fmt::Debug for LinkInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LinkInfo")
+            .field("remote", &self.remote.as_deref().map(mask_reason))
+            .field("origin", &self.origin.as_deref().map(mask_reason))
+            .field(
+                "peer_key",
+                &self.peer_key.as_ref().map(|k| format!("{} bytes", k.len())),
+            )
+            .finish()
+    }
+}
+
+/// [`Listener::accept`] 가 내놓는 받은 통로 하나 — 양 끝 · [`LinkInfo`] · 업그레이드 칸 · 업그레이드 끝 시각.
+///
+/// ★양 끝은 crate 밖으로 꺼내지 않는다★ — 받은 상대로 얹는 자리만 쓴다(3-0 U6b). 떨어뜨리면 두 끝이 함께 떨어진다
+/// ([`LinkTx`] 의 「양 끝이 둘 다」 의무가 여기서 저절로 선다).
+///
+/// ★칸은 업그레이드 대기 칸이다★ — 전송이 통로를 받은 순간(TCP 수락)에 쥐고, 받는 쪽이 다음 칸(인증 대기)을 쥔
+/// 뒤에야 놓는다(TRD 3 §3-1 · §5 14). 그래서 소비자가 `accept` 를 안 부르는 동안 준비 큐에 앉은 통로도 센다.
+///
+/// ★인증 시한은 `upgraded_at` 부터 잰다★(TRD 3 §5 3) — 준비 큐에 앉은 시간도 시한에 든다. 그 시각을 찍은 시계와
+/// 시한을 재는 시계가 같아야 하므로 전송 구현에 명부와 같은 [`crate::Clock`] 을 준다.
+pub struct Accepted {
+    // 읽는 자리 = 받은 상대로 얹는 자리(3-0 U6b) — 그 전에는 시험만 읽는다.
+    #[allow(dead_code)]
+    pub(crate) tx: Box<dyn LinkTx>,
+    #[allow(dead_code)]
+    pub(crate) rx: Box<dyn LinkRx>,
+    pub(crate) info: LinkInfo,
+    pub(crate) upgraded_at: Instant,
+    pub(crate) permit: ConnPermit,
+}
+
+impl Accepted {
+    /// 전송 구현이 짓는다. `tx` · `rx` 는 같은 통로의 한 쌍이다. `upgraded_at` = 통로가 프레임을 나를 수 있게 된 순간
+    /// (WS 면 업그레이드 응답을 보낸 뒤).
+    pub fn new(
+        tx: Box<dyn LinkTx>,
+        rx: Box<dyn LinkRx>,
+        info: LinkInfo,
+        upgraded_at: Instant,
+        permit: ConnPermit,
+    ) -> Self {
+        Self {
+            tx,
+            rx,
+            info,
+            upgraded_at,
+            permit,
+        }
+    }
+
+    pub fn info(&self) -> &LinkInfo {
+        &self.info
+    }
+
+    pub fn upgraded_at(&self) -> Instant {
+        self.upgraded_at
+    }
+}
+
+impl fmt::Debug for Accepted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Accepted")
+            .field("info", &self.info)
+            .field("upgraded_at", &self.upgraded_at)
+            .field("permit", &self.permit)
+            .finish_non_exhaustive()
+    }
+}
+
+/// 동시에 쥘 수 있는 [`ConnPermit`] 수의 상한 — 연결 수 상한의 셈(TRD 3 §5 14). clone 은 같은 묶음이다.
+///
+/// ★사건으로 세지 않고 쥔 손잡이로 센다★(TRD 3 §3-0 ②) — 세는 대상의 수명에 [`ConnPermit`] 을 묶으면 그것이 어느 길로
+/// 끝나든(오류 · 패닉 · 취소 포함) 떨어질 때 칸이 돌아간다. 사건으로 세면 사건 하나를 놓친 길마다 셈이 샌다.
+#[derive(Clone)]
+pub struct PermitPool {
+    count: Arc<PermitCount>,
+}
+
+struct PermitCount {
+    limit: usize,
+    in_use: AtomicUsize,
+}
+
+impl PermitPool {
+    /// `limit` = 0 이면 칸을 하나도 안 준다.
+    pub fn new(limit: usize) -> Self {
+        Self {
+            count: Arc::new(PermitCount {
+                limit,
+                in_use: AtomicUsize::new(0),
+            }),
+        }
+    }
+
+    /// 칸 하나. `None` = 다 찼다 — 기다리지 않는다(넘친 것은 새것을 닫는다 — TRD 3 §5 14).
+    pub fn try_take(&self) -> Option<ConnPermit> {
+        let limit = self.count.limit;
+        self.count
+            .in_use
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < limit).then_some(n + 1)
+            })
+            .ok()
+            .map(|_| ConnPermit {
+                count: self.count.clone(),
+            })
+    }
+
+    pub fn in_use(&self) -> usize {
+        self.count.in_use.load(Ordering::Acquire)
+    }
+
+    pub fn limit(&self) -> usize {
+        self.count.limit
+    }
+}
+
+impl fmt::Debug for PermitPool {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PermitPool")
+            .field("in_use", &self.in_use())
+            .field("limit", &self.limit())
+            .finish()
+    }
+}
+
+/// [`PermitPool`] 의 칸 하나 — 떨어뜨리면 돌아간다.
+#[must_use = "떨어뜨리는 순간 칸이 돌아간다 — 세는 대상의 수명에 묶어 둔다"]
+pub struct ConnPermit {
+    count: Arc<PermitCount>,
+}
+
+impl Drop for ConnPermit {
+    fn drop(&mut self) {
+        self.count.in_use.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl fmt::Debug for ConnPermit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConnPermit")
+            .field("limit", &self.count.limit)
+            .finish_non_exhaustive()
+    }
 }
 
 /// 불투명 핸드셰이크. ★왕복 횟수를 crate 가 세지 않는다★ — [`HandshakeStep::Send`]/[`HandshakeStep::Await`]
@@ -437,6 +637,61 @@ mod tests {
             }
             .to_string(),
             "refused (4001): abcd"
+        );
+    }
+
+    // ── 받는 쪽 타입 ──
+    #[test]
+    fn a_permit_pool_never_hands_out_more_than_its_limit_and_takes_back_on_drop() {
+        let pool = PermitPool::new(2);
+        let a = pool.try_take().expect("첫 칸");
+        let b = pool.try_take().expect("둘째 칸");
+        assert!(pool.try_take().is_none(), "상한을 넘겼다");
+        assert_eq!(pool.in_use(), 2);
+        drop(a);
+        assert_eq!(pool.in_use(), 1);
+        let c = pool
+            .clone()
+            .try_take()
+            .expect("돌아온 칸 — clone 은 같은 묶음이다");
+        assert!(pool.try_take().is_none());
+        drop((b, c));
+        assert_eq!(pool.in_use(), 0);
+        assert!(PermitPool::new(0).try_take().is_none());
+    }
+
+    #[test]
+    fn link_info_debug_masks_the_texts_and_shows_only_the_key_length() {
+        let info = LinkInfo {
+            remote: Some("127.0.0.1:5\u{1b}[2J".into()),
+            origin: Some("http://evil\r\n\u{202e}x".into()),
+            peer_key: Some(vec![7; 32]),
+        };
+        assert_eq!(
+            format!("{info:?}"),
+            r#"LinkInfo { remote: Some("127.0.0.1:5[2J"), origin: Some("http://evilx"), peer_key: Some("32 bytes") }"#
+        );
+        assert_eq!(
+            format!("{:?}", LinkInfo::default()),
+            "LinkInfo { remote: None, origin: None, peer_key: None }"
+        );
+    }
+
+    #[test]
+    fn accepted_debug_carries_the_facts_but_no_link() {
+        let end = crate::testing::memory_link().0;
+        let permit = PermitPool::new(1).try_take().unwrap();
+        let info = LinkInfo {
+            origin: Some("o".into()),
+            ..LinkInfo::default()
+        };
+        let accepted = Accepted::new(end.tx, end.rx, info.clone(), Instant::now(), permit);
+        assert_eq!(accepted.info(), &info);
+        let shown = format!("{accepted:?}");
+        assert!(shown.starts_with("Accepted { info: LinkInfo {"), "{shown}");
+        assert!(
+            shown.ends_with("permit: ConnPermit { limit: 1, .. }, .. }"),
+            "{shown}"
         );
     }
 

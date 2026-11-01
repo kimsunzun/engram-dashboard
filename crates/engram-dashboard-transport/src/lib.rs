@@ -13,7 +13,7 @@
 //! ```text
 //! ① 타입은 제네릭, 자원은 dyn.
 //!      제네릭 = Wire(소비자의 패킷 어휘)
-//!      dyn    = Dialer/Link(전송) · Clock(시간)
+//!      dyn    = Dialer/Listener/Link(전송) · Clock(시간)
 //! ② 순수 층과 구동 층을 파일로 가른다(아래 게이트 3 이 그 벽이다).
 //! ③ 상대는 처음부터 N 개다.
 //! ④ 위로 올라가는 것은 Incoming 하나뿐이다 — 패킷과 사건이 같은 흐름을 타고 옆 채널을 두지 않는다.
@@ -229,10 +229,10 @@
 //!   결정 2026-09-26).
 //! - ★**하네스는 current_thread 런타임 전용이다**★ — [`testing::settle`] 이 협조적 양보로만 동기화하고,
 //!   그 위반을 스스로 패닉으로 잡는다.
-//! - ★**받는 쪽 seam 이 아직 없다**★ — [`Handshake`] 는 이미 방향 대칭이고 `ws::WsListener` 가 실소켓
-//!   통로를 받아 오지만, `link.rs` 에 `Listener` trait 이 없고 [`Registry`] 는 **들어오는 연결을 모른다**
-//!   (받은 통로를 감독 태스크에 얹는 일을 아무도 안 한다). 그 seam 이 들어오면 [`Registry::new`]
-//!   시그니처가 바뀐다(TRD §12-7 의 열린 질문).
+//! - ★**받은 통로를 상대로 얹는 자리가 아직 없다**★ — 받는 쪽 seam([`Listener`] → [`Accepted`])과 그 인메모리
+//!   구현(`testing::MemoryListener`)은 있지만 [`Registry`] 는 **들어오는 연결을 모른다**(받은 통로를 감독 태스크에
+//!   얹는 일을 아무도 안 한다 — 3-0 U6b). 실소켓 `ws::WsListener` 는 아직 [`Listener`] 를 구현하지 않는다(3-0 U7 ·
+//!   그 파일 헤더). [`Registry::new`] 시그니처는 그대로 간다 — 수락 루프는 소비자가 돈다(TRD 3 §3-1 ①).
 //! - ★**어댑터가 하나뿐이고 그 한계는 그 파일 헤더가 정본이다**★ — [`ws`](feature `ws`) 가 유일한
 //!   실전송 구현체이고, 정본은 `src/ws.rs` 헤더의 「알려진 한계」·「통로 성질」 두 절이다(**미검** 항목도
 //!   그 안에 있다). ★그 목록을 여기 일부라도 베끼지 않는다★ — 손으로 옮긴 목록은 낡고, 넷만 적혀 있으면
@@ -288,8 +288,8 @@ pub use clock::{with_deadline, Clock, Elapsed, SystemClock};
 pub use event::{Arrival, Direction, Incoming, PeerId, TransportEvent};
 pub use frame::{Close, CloseCode, Frame};
 pub use link::{
-    Address, DialFailure, Dialer, Handshake, HandshakeStep, LinkError, LinkRead, LinkRx, LinkTx,
-    RejectKind,
+    Accepted, Address, ConnPermit, DialFailure, Dialer, Handshake, HandshakeStep, LinkError,
+    LinkInfo, LinkRead, LinkRx, LinkTx, Listener, PermitPool, RejectKind,
 };
 pub use machine::{
     Action, ConnectFailure, DisconnectCause, GaveUpReason, Generation, Input, Machine,
