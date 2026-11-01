@@ -5,9 +5,12 @@
 //! ★둘은 먼 끝이 다르다★ — [`MemoryNetwork`] 의 먼 끝은 시험이 손으로 모는 대본([`MemoryEndpoint`])이고,
 //! [`MemoryListener`] 의 먼 끝은 진짜 [`LinkTx`]/[`LinkRx`] 한 쌍([`Accepted`])이라 두 감독을 서로 잇는다.
 //!
-//! ★**이 모듈은 current_thread 런타임 전용이다**★ — [`settle`] 이 협조적 양보로만 동기화하므로
+//! ★**[`settle`] · [`settle_until`] 만 current_thread 런타임 전용이다**★ — 협조적 양보로만 동기화하므로
 //! `#[tokio::test(flavor = "multi_thread")]` 아래에서는 아무것도 보장하지 않는다. 그 위반은 조용히
-//! 흔들리는 테스트가 되므로 [`settle`] 이 **런타임 종류를 직접 보고 패닉한다.**
+//! 흔들리는 테스트가 되므로 둘이 **런타임 종류를 직접 보고 패닉한다.** 그 위에 선 시험 도우미(`registry.rs` 시험의
+//! `Near::arrived` 처럼 기다리지 않고 한 번만 폴링하는 것)도 같은 전제다. 인메모리 부품([`MemoryNetwork`] ·
+//! [`memory_link`] · [`ManualClock`] …)과 [`PermitPool`] 은 multi_thread 에서도 쓴다 — 끝은 실시간 시한을 건 대기로
+//! 본다(`registry.rs` 의 3-0 U6b 시험).
 //!
 //! ★운영 코드가 이 모듈을 참조하면 안 된다★ — 기본 빌드에 없으므로 컴파일이 먼저 깨진다.
 
@@ -1583,7 +1586,8 @@ mod tests {
         Address::new("mem://listener")
     }
 
-    // 받은 끝을 감독 없이 손으로 몬다(명부에 얹는 자리는 3-0 U6b) — 거는 쪽 감독과 진짜 통로로 이어지는지가 요점이다.
+    // 받은 끝을 감독 없이 손으로 몬다(명부에 얹는 길은 `Registry::attach` — 그 시험은 `registry.rs`) — 거는 쪽 감독과
+    //   진짜 통로로 이어지는지가 요점이다.
     #[tokio::test]
     async fn a_dialer_peer_handshakes_and_round_trips_a_request_with_a_raw_accepted_end() {
         let (clock, mut listener, connector) = listener(4);

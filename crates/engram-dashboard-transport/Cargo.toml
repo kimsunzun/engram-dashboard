@@ -28,8 +28,8 @@ ws = ["dep:tokio-tungstenite", "tokio/net"]
 [dependencies]
 # rt = 상대마다 감독 태스크 + 연결마다 reader 태스크 spawn · sync = mpsc(나가는 큐·손잡이별 수신단)·
 #   watch(PeerState)·oneshot(대기 슬롯) · time = `SystemClock::sleep` · macros = `select!` 와 `#[tokio::test]`.
-# ★`rt-multi-thread` 를 넣지 않는다★ — 이 crate 에 런타임 빌더도 `flavor = "multi_thread"` 도 없고,
-#   감독 태스크는 `rt` 만으로 뜬다. 소비자가 멀티스레드 런타임을 쓰는 것은 그쪽 feature 선택이다.
+# ★운영 의존에는 `rt-multi-thread` 를 넣지 않는다★ — 이 crate 에 런타임 빌더가 없고 감독 태스크는 `rt` 만으로
+#   뜬다. 소비자가 멀티스레드 런타임을 쓰는 것은 그쪽 feature 선택이다(시험만 켠다 — 아래 `[dev-dependencies]`).
 # ★바닥 1.37 = mpsc `Receiver::{len, is_empty, is_closed}` 가 들어온 판★ — 운영 루프의 굶주림 방지 규칙이 나가는
 #   큐 깊이를 `len` 으로 읽는다(`peer.rs` 의 `next_turn` 호출).
 tokio = { version = "1.37", features = ["rt", "sync", "time", "macros"] }
@@ -50,3 +50,8 @@ tokio-tungstenite = { version = "0.26", optional = true }
 #   thiserror — 오류 타입이 적어 `Display` 를 손으로 쓴다(net 도 같다).
 #   rand — 지터 난수원은 `Clock::now()` 하위 나노초 + `PeerId` 해시다(선례 = agent 의 profile.rs).
 #   uuid — `Tag`·`StreamKey` 가 제네릭이라 이 crate 는 uuid 를 보지 않는다.
+
+[dev-dependencies]
+# rt-multi-thread = 명부의 올리기 경합을 일꾼 스레드 여럿 위에서 재는 시험(`registry.rs` 의 `flavor = "multi_thread"`).
+#   운영 빌드에는 안 든다 — dev 의존의 feature 는 운영 그래프로 합쳐지지 않는다(resolver 2).
+tokio = { version = "1.37", features = ["rt-multi-thread"] }

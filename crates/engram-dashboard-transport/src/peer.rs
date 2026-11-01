@@ -74,6 +74,13 @@
 //!   잘림 신고와 함께 올린다) → 순서 칸 비우기 → [`TransportEvent::Closed`] 마지막 → 넣는 끝 놓기★ — 받는 쪽을
 //!   기다리는 것은 순서 칸 비우기뿐이다(`teardown`). 넣는 끝은 감독 하나만 쥐므로(`PeerConfig::inbound`) 감독이
 //!   끝나면 그 손잡이 수신단의 다음 `recv` 가 `None` 이다.
+//! - ★받은 상대(`Registry::attach`)는 다시 걸지 않는다(TRD 3 §3-1 ①)★ — 통로를 이미 쥔 채 핸드셰이크부터 시작하고
+//!   (기계의 걸기를 그 자리에서 「열렸다」로 갚는다 — `Supervisor::run`), 기계가 다시 걸기 · 포기로 가는 모든 끝
+//!   (핸드셰이크 실패 · 운영 중 끊김)을 닫기 전 비우기와 같은 접기로 곧바로 닫는다(`Supervisor::fold_into_close`).
+//!   ★기계(순수 층)는 거는 쪽 모양 그대로 둔다★ — 받은 상대 갈래를 기계에 넣으면 그 모든 끝(거절 · 시한 · 끊김 ·
+//!   다시 걸기)이 갈래를 하나씩 더 지는데, 감독 쪽에는 「다시 걸지 않고 닫는다」 접기가 이미 있다. 핸드셰이크 시한은
+//!   업그레이드 끝부터다(`Supervisor::shake_hands`). 끝 까닭은 [`TransportEvent::Closed`] 에 실리고
+//!   (`Supervisor::end_cause`) 끝나면 명부에서 스스로 내린다(`RosterExit`).
 //! - ★닫기 전 비우기는 데이터 큐의 표지 하나로 한다(TRD 3 §3-0 ④)★ — [`Peer::close_after_flush`] 가 실을 닫기를
 //!   먼저 적고(그것이 「비우는 중」 표시다 — 그 뒤 핸들의 보내기는 거절된다) 표지를 데이터 큐 끝에 넣는다. 운영
 //!   중이면 감독이 표지 앞 명령을 차례로 쓰고 표지에서 닫는다(`Supervisor::on_cmd` — 표지는 세대에 안 묶인다). 운영
@@ -101,7 +108,7 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use futures_util::future::OptionFuture;
@@ -112,8 +119,8 @@ use crate::clock::{with_deadline, Clock};
 use crate::event::{Arrival, Direction, Incoming, PeerId, TransportEvent};
 use crate::frame::{Close, CloseCode, Frame};
 use crate::link::{
-    Address, DialFailure, Dialer, Handshake, HandshakeStep, LinkError, LinkRead, LinkRx, LinkTx,
-    RejectKind,
+    Address, ConnPermit, DialFailure, Dialer, Handshake, HandshakeStep, LinkError, LinkRead,
+    LinkRx, LinkTx, RejectKind,
 };
 use crate::machine::{
     Action, ConnectFailure, DisconnectCause, Generation, Input, Machine, MachineEvent, PeerState,
@@ -316,6 +323,10 @@ struct PeerInner<W: Wire> {
     /// `goodbye` 를 적었다고 감독을 깨운다 — 데이터 큐를 안 읽는 자리(연결 수립 구간 · 쓰기 도중)를 위해서다.
     /// 남는 표는 그 뒤로 늘 참인 사실을 가리켜 해가 없다.
     flush_wake: Arc<Notify>,
+    /// 받은 상대다(`Origin::Accepted`) — 다시 걸지 않는다.
+    accepted: bool,
+    /// 이 감독이 세대를 뽑는 계수기(`PeerConfig::generations`) — 같은 이름표를 갈아치우는 쪽이 물려받는다.
+    generations: Arc<AtomicU64>,
     #[cfg(test)]
     ledger: Arc<Ledger>,
 }
@@ -496,8 +507,11 @@ impl<W: Wire> Peer<W> {
     /// ★[`Peer::close_after_flush`] 뒤에는 듣지 않는다★ — 비우고 닫기로 한 상대다. 그 앞에 불렀어도 감독이 아직
     /// 안 읽었으면 버려진다(감독은 비우기를 본 뒤 읽은 다시 걸기를 버린다 — 들으면 통로를 버려 비울 것도 거절되고
     /// 준 닫기 없이 끝난다). 감독이 이미 읽어 통로를 버리러 간 뒤면 그 비우기는 쓸 연결 없이 곧바로 닫는다.
+    ///
+    /// ★받은 상대([`crate::Registry::attach`])는 듣지 않는다★ — 걸 주소가 없다. 운영 중인 통로를 버리게 두면 그
+    /// 상대는 다시 붙을 길 없이 끝난다.
     pub fn reconnect_now(&self) {
-        if self.flushing() {
+        if self.flushing() || self.inner.accepted {
             return;
         }
         let _ = self.inner.ctl_tx.send(Ctl::ReconnectNow);
@@ -590,6 +604,15 @@ impl<W: Wire> Peer<W> {
         self.inner.close_requested.load(Ordering::Acquire)
     }
 
+    /// 이 감독이 세대를 뽑는 계수기 — 같은 이름표로 갈아치우는 쪽이 물려받아 세대를 되감지 않는다(`registry.rs`).
+    pub(crate) fn generations(&self) -> Arc<AtomicU64> {
+        self.inner.generations.clone()
+    }
+
+    pub(crate) fn same(&self, other: &Peer<W>) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     /// 시험 손잡이 — 이 감독이 지금 받아 쥔 페이로드 바이트 전부(셈의 물높이) — 앞잡이 줄 · 순서 칸 · 줄에 든
     /// 것과 이어받기 창이 붙든 조각. 그중 창 몫만은 [`Peer::window_bytes`].
     #[cfg(test)]
@@ -679,12 +702,37 @@ impl<W: Wire> Peer<W> {
     }
 }
 
+/// 감독이 통로를 얻는 길 — 그 길이 감독의 끝을 가른다.
+pub(crate) enum Origin<W: Wire> {
+    /// 명부의 [`Dialer`] 로 건다(`Registry::add`) — 끊기면 백오프를 지나 다시 걸고, 끝은 닫기 하나뿐이다.
+    Dial {
+        addr: Address,
+        dialer: Arc<dyn Dialer>,
+    },
+    /// 이미 받은 통로 하나(`Registry::attach`) — 핸드셰이크부터 시작하고 다시 걸지 않는다(`Supervisor::run`).
+    Accepted(AcceptedLink<W>),
+}
+
+/// 받은 상대가 감독에 들고 가는 것.
+pub(crate) struct AcceptedLink<W: Wire> {
+    pub tx: Box<dyn LinkTx>,
+    pub rx: Box<dyn LinkRx>,
+    /// 인증 시한의 기준 — 시한 = 이것 + [`Policy::connect_timeout`](TRD 3 §5 3). 명부의 시계로 찍은 값이다.
+    pub upgraded_at: Instant,
+    /// 업그레이드 칸 — 운영 단계에 들 때 놓고, 못 들면 감독이 통로를 버린 뒤 놓는다(`Supervisor::admission`).
+    pub permit: ConnPermit,
+    /// 감독이 끝날 때 명부에서 스스로 내리는 손(`RosterExit`).
+    pub leave: LeaveRoster<W>,
+}
+
+/// 명부에서 이 손잡이를 내린다 — 그 이름표가 아직 이 손잡이를 가리킬 때만이다(갈아치운 새것은 그대로 둔다).
+pub(crate) type LeaveRoster<W> = Box<dyn FnOnce(&Peer<W>) + Send>;
+
 /// 감독 태스크를 세우는 데 필요한 것 전부.
 pub(crate) struct PeerConfig<W: Wire> {
     pub id: PeerId,
-    pub addr: Address,
+    pub origin: Origin<W>,
     pub wire: Arc<W>,
-    pub dialer: Arc<dyn Dialer>,
     pub clock: Arc<dyn Clock>,
     pub handshake: Arc<dyn Handshake>,
     pub policy: Policy,
@@ -704,7 +752,26 @@ pub(crate) struct PeerConfig<W: Wire> {
     pub generations: Arc<AtomicU64>,
 }
 
-/// 감독 태스크를 띄우고 핸들을 돌려준다.
+/// 아직 안 띄운 감독 — 명부가 그 손잡이를 올린 뒤에 띄운다(`Registry::launch`).
+pub(crate) struct Unstarted<W: Wire>(Supervisor<W>);
+
+impl<W: Wire> Unstarted<W> {
+    /// ★`JoinHandle` 을 버린다★ — 감독의 끝은 상태 watch 가 알린다(`Peer::finished`). 런타임이 접히는 중이면 감독은
+    /// 이 자리에서 돌지 않고 떨어지고, 받은 상대면 그 Drop 이 명부 자물쇠를 잡는다(`RosterExit`) — 그 자물쇠를 쥔 채
+    /// 부르지 않는다.
+    pub(crate) fn start(self, runtime: &tokio::runtime::Handle) {
+        runtime.spawn(self.0.run());
+    }
+}
+
+/// 감독과 그 손잡이를 짓고 띄우지는 않는다 — 띄우기는 [`Unstarted::start`].
+pub(crate) fn prepare_peer<W: Wire>(cfg: PeerConfig<W>) -> (Peer<W>, Unstarted<W>) {
+    let (handle, supervisor) = new_peer(cfg);
+    (handle, Unstarted(supervisor))
+}
+
+/// 시험 손잡이 — 감독 태스크를 곧바로 띄우고 핸들을 돌려준다(명부 없이).
+#[cfg(test)]
 pub(crate) fn spawn_peer<W: Wire>(cfg: PeerConfig<W>) -> Peer<W> {
     let (handle, supervisor) = new_peer(cfg);
     tokio::spawn(supervisor.run());
@@ -712,6 +779,10 @@ pub(crate) fn spawn_peer<W: Wire>(cfg: PeerConfig<W>) -> Peer<W> {
 }
 
 fn new_peer<W: Wire>(cfg: PeerConfig<W>) -> (Peer<W>, Supervisor<W>) {
+    // ★패닉할 수 있는 것은 전부 `exit` 를 짓기 전이다★ — 명부는 자물쇠를 쥔 채 이것을 부르고(`Registry::launch`),
+    //   `exit` 를 지은 뒤 패닉하면 풀리며 떨어지는 그것이 같은 스레드에서 명부 자물쇠를 다시 잡는다(교착). 주입한
+    //   시계 · 시한 덧셈 · 채널 용량 단언이 그 자리다. `exit` 뒤에는 옮기기만 둔다.
+    let now = cfg.clock.now();
     let (data_tx, data_rx) = mpsc::channel(cfg.policy.outbound_queue.max(1));
     let (ctl_tx, ctl_rx) = mpsc::unbounded_channel();
     let (state_tx, state_rx) = watch::channel(PeerState::Idle);
@@ -725,6 +796,37 @@ fn new_peer<W: Wire>(cfg: PeerConfig<W>) -> (Peer<W>, Supervisor<W>) {
     let goodbye = Arc::new(OnceLock::new());
     let flush_wake = Arc::new(Notify::new());
     let ledger = Ledger::new(cfg.byte_budget, cfg.clock.clone());
+    let (mode, link, admission, leave) = match cfg.origin {
+        Origin::Dial { addr, dialer } => (Mode::Dial { addr, dialer }, None, None, None),
+        Origin::Accepted(AcceptedLink {
+            tx,
+            rx,
+            upgraded_at,
+            permit,
+            leave,
+        }) => (
+            Mode::Accepted {
+                auth_deadline: upgraded_at + cfg.policy.connect_timeout,
+            },
+            Some((tx, rx)),
+            Some(permit),
+            Some(leave),
+        ),
+    };
+    let accepted = matches!(mode, Mode::Accepted { .. });
+    let (tx, rx_raw) = link.unzip();
+    let machine = Machine::new(
+        cfg.policy.clone(),
+        cfg.id.jitter_seed(),
+        now,
+        generation_floor,
+    );
+    let pending = Pending::new(cfg.policy.retired_tags);
+    let streams = Streams::new(
+        cfg.policy.max_streams,
+        cfg.policy.resume_buffer,
+        cfg.policy.resume_timeout,
+    );
 
     let handle = Peer {
         inner: Arc::new(PeerInner {
@@ -741,29 +843,23 @@ fn new_peer<W: Wire>(cfg: PeerConfig<W>) -> (Peer<W>, Supervisor<W>) {
             close_requested: AtomicBool::new(false),
             goodbye: goodbye.clone(),
             flush_wake: flush_wake.clone(),
+            accepted,
+            generations: cfg.generations.clone(),
             #[cfg(test)]
             ledger: ledger.clone(),
         }),
     };
-
-    let now = cfg.clock.now();
+    let exit = RosterExit {
+        leave,
+        me: Arc::downgrade(&handle.inner),
+    };
     let supervisor = Supervisor {
-        machine: Machine::new(
-            cfg.policy.clone(),
-            cfg.id.jitter_seed(),
-            now,
-            generation_floor,
-        ),
-        pending: Pending::new(cfg.policy.retired_tags),
-        streams: Streams::new(
-            cfg.policy.max_streams,
-            cfg.policy.resume_buffer,
-            cfg.policy.resume_timeout,
-        ),
+        machine,
+        pending,
+        streams,
         id: cfg.id,
-        addr: cfg.addr,
+        mode,
         wire: cfg.wire,
-        dialer: cfg.dialer,
         clock: cfg.clock,
         handshake: cfg.handshake,
         policy: cfg.policy,
@@ -781,8 +877,8 @@ fn new_peer<W: Wire>(cfg: PeerConfig<W>) -> (Peer<W>, Supervisor<W>) {
         goodbye,
         flush_wake,
         flush_deadline: None,
-        tx: None,
-        rx_raw: None,
+        tx,
+        rx_raw,
         frames_rx: None,
         reader: None,
         fresh_link: false,
@@ -795,6 +891,9 @@ fn new_peer<W: Wire>(cfg: PeerConfig<W>) -> (Peer<W>, Supervisor<W>) {
         last_rx: now,
         last_ping: now,
         dropped_out: 0,
+        admission,
+        exit,
+        end_cause: DisconnectCause::Explicit,
     };
     (handle, supervisor)
 }
@@ -860,11 +959,48 @@ struct Received<M> {
     generation: Generation,
 }
 
+/// 감독이 통로를 얻는 길에서 통로 · 칸을 뗀 나머지(`Origin`).
+enum Mode {
+    Dial {
+        addr: Address,
+        dialer: Arc<dyn Dialer>,
+    },
+    /// `auth_deadline` = 업그레이드 끝 + [`Policy::connect_timeout`] — 핸드셰이크의 시한이다.
+    Accepted { auth_deadline: Instant },
+}
+
+/// 받은 상대가 끝날 때 명부에서 스스로 내리는 손(`Registry::attach`). 건 상대는 비어 있다 — 명부에 남아 `remove` ·
+/// 갈아치우기를 기다린다.
+///
+/// ★떨어질 때도 내린다★ — 감독이 패닉하거나 런타임이 접혀 정리를 못 마쳐도 명부에 끝난 손잡이가 남지 않게.
+struct RosterExit<W: Wire> {
+    leave: Option<LeaveRoster<W>>,
+    /// ★약한 손잡이다★ — 강하면 소비자가 손잡이를 다 놓아도 제어 채널이 안 닫혀, 감독이 그것을 「닫아라」로 못 듣는다.
+    me: Weak<PeerInner<W>>,
+}
+
+impl<W: Wire> RosterExit<W> {
+    fn leave(&mut self) {
+        let Some(leave) = self.leave.take() else {
+            return;
+        };
+        // 못 올리면 명부도 이 손잡이를 쥐고 있지 않다 — 내릴 것이 없다.
+        if let Some(inner) = self.me.upgrade() {
+            leave(&Peer { inner });
+        }
+    }
+}
+
+impl<W: Wire> Drop for RosterExit<W> {
+    fn drop(&mut self) {
+        self.leave();
+    }
+}
+
 struct Supervisor<W: Wire> {
     id: PeerId,
-    addr: Address,
+    mode: Mode,
     wire: Arc<W>,
-    dialer: Arc<dyn Dialer>,
     clock: Arc<dyn Clock>,
     handshake: Arc<dyn Handshake>,
     policy: Policy,
@@ -917,11 +1053,30 @@ struct Supervisor<W: Wire> {
     last_rx: Instant,
     last_ping: Instant,
     dropped_out: u64,
+    /// 받은 상대의 업그레이드 칸(TRD 3 §5 14) — 운영 단계에 들 때(`shake_hands`) 놓고, 못 들고 끝나면 통로를 버린 그
+    /// 자리(`run` — 정리 앞)에서 놓는다: 정리가 받는 쪽을 무엇을 기다리든 칸이 그 몫에 묶이지 않게. 건 상대는 `None`
+    /// 이다.
+    ///
+    /// ★인증 대기 칸 · 운영 칸이 아직 없다★(3-0 U7 · 3-3 U4) — 그 몫까지 이 칸이 진다. 들어오면 `Registry::attach`
+    /// 가 인증 대기 칸을 쥐며 이 칸을 놓고, 감독은 여기 그 칸을 쥐었다가 운영 단계에 들 때 운영 칸과 바꾼다.
+    admission: Option<ConnPermit>,
+    exit: RosterExit<W>,
+    /// [`TransportEvent::Closed`] 의 `cause`. 건 상대는 늘 `Explicit` 다(끊김 까닭은 앞의 `Disconnected` 가 싣는다).
+    /// 받은 상대는 진짜 까닭이다 — 운영 중 끊김이면 그 까닭(`run`), 핸드셰이크 실패면 그 실패 자리(`shake_hands`),
+    /// 앱 · 받는 쪽이 닫았으면 `Explicit` 그대로.
+    end_cause: DisconnectCause,
 }
 
 impl<W: Wire> Supervisor<W> {
     async fn run(mut self) {
-        let mut acts = self.machine.on(self.clock.now(), Input::Start);
+        let now = self.clock.now();
+        let mut acts = self.machine.on(now, Input::Start);
+        if self.accepted() {
+            // ★받은 상대는 통로를 이미 쥐고 있다★(`new_peer`) — 기계의 걸기를 그 자리에서 「열렸다」로 갚아 핸드셰이크부터
+            //   간다. 기계는 거는 쪽 모양 그대로 두고(순수 층), 「걸기 중」은 발행되기 전에 지나간다.
+            debug_assert!(matches!(acts.as_slice(), [Action::Dial { .. }]), "{acts:?}");
+            acts = self.machine.on(now, Input::Dialed);
+        }
         loop {
             self.publish();
             let follow = self.apply(acts).await;
@@ -950,9 +1105,14 @@ impl<W: Wire> Supervisor<W> {
                 },
             };
             let now = self.clock.now();
+            if let (true, Input::LinkLost(cause)) = (self.accepted(), &input) {
+                self.end_cause = *cause;
+            }
             acts = self.machine.on(now, input);
             // ★발행보다 앞이다★ — 접기 전에 바퀴 첫머리의 `publish` 가 돌면 `Backoff` · `GaveUp` 이 한 번 보인다.
-            if self.flushing()
+            // ★받은 상대는 늘 접는다★ — 다시 걸 주소가 없다. 기계가 다시 걸기 · 포기로 가는 모든 끝(핸드셰이크 실패 ·
+            //   운영 중 끊김)이 여기서 닫기가 된다.
+            if (self.flushing() || self.accepted())
                 && matches!(
                     self.machine.state(),
                     PeerState::Backoff | PeerState::GaveUp(_)
@@ -961,8 +1121,16 @@ impl<W: Wire> Supervisor<W> {
                 acts = self.fold_into_close(now, acts);
             }
         }
+        // 통로는 이미 버렸다(기계의 마지막 묶음이 `DropLink` 를 낸다) — 칸은 받는 쪽을 기다리는 정리 앞에 놓고, 명부에서도
+        //   그 앞에 내린다.
+        self.admission = None;
+        self.exit.leave();
         self.teardown().await;
         // 여기서 감독이 떨어지며 넣는 끝을 놓는다 — 그 손잡이 수신단의 다음 `recv` 는 `None` 이다.
+    }
+
+    fn accepted(&self) -> bool {
+        matches!(self.mode, Mode::Accepted { .. })
     }
 
     /// 닫기 전 비우기 도중 연결을 잃었다(운영 중 끊김 · 걸던 시도의 실패 — 기계가 `Backoff` · `GaveUp` 으로 갔다) —
@@ -975,19 +1143,23 @@ impl<W: Wire> Supervisor<W> {
     /// 상대에 그 팝업이 뜨면 안 되고, 다시 걸지 않을 상대에 「n 초 뒤 다시」를 알리는 것도 거짓이다. 기계는 이미
     /// `Closed` 라 그 사이 상태(`Backoff` · `GaveUp`)는 발행되지 않는다(`run` 이 발행보다 앞에서 부른다). 포기를
     /// 정한 뒤 그 묶음의 통로 버림 도중에 시작된 비우기는 여기 안 걸린다 — 그 신고는 `apply` 가 걷는다.
+    ///
+    /// ★받은 상대는 연결을 잃으면 늘 여기로 온다★(`run`) — 걸 주소가 없다. 그 상대에는 종결 거절
+    /// ([`MachineEvent::Rejected`])도 거른다: 그 사건은 바로 뒤의 `GaveUp` 을 약속하고(`TransportEvent::Rejected`),
+    /// 받은 상대의 핸드셰이크 실패는 `Closed` 의 까닭 하나로 끝난다(`Supervisor::end_cause`).
     fn fold_into_close(&mut self, now: Instant, acts: Vec<Action>) -> Vec<Action> {
-        let mut folded: Vec<Action> = acts
-            .into_iter()
-            .filter(|act| {
-                !matches!(
-                    act,
+        let accepted = self.accepted();
+        let mut folded: Vec<Action> =
+            acts.into_iter()
+                .filter(|act| match act {
                     Action::Wait { .. }
-                        | Action::Emit(
-                            MachineEvent::GaveUp { .. } | MachineEvent::ConnectFailed { .. }
-                        )
-                )
-            })
-            .collect();
+                    | Action::Emit(
+                        MachineEvent::GaveUp { .. } | MachineEvent::ConnectFailed { .. },
+                    ) => false,
+                    Action::Emit(MachineEvent::Rejected { .. }) => !accepted,
+                    _ => true,
+                })
+                .collect();
         folded.extend(self.machine.on(now, Input::Close));
         folded
     }
@@ -1055,16 +1227,18 @@ impl<W: Wire> Supervisor<W> {
     /// ★두 구간(dial · 핸드셰이크) 내내 제어 신호를 듣는다★ — 안 그러면 `close()` 가 `connect_timeout`
     /// 만큼 늦게 들린다. 제어가 이기면 통로는 취소된 future 와 함께 닫힌다.
     async fn dial(&mut self, deadline: Instant) -> Input {
+        let Mode::Dial { addr, dialer } = &self.mode else {
+            // 받은 상대에 걸기를 시키는 길(다시 걸기 · 백오프 끝)은 감독이 다 막는다 — `run` 의 접기 ·
+            //   `Peer::reconnect_now`. 닿았으면 우리 실수이고, 걸 주소가 없으니 접는다.
+            debug_assert!(false, "받은 상대에 걸기가 왔다");
+            return Input::Close;
+        };
+        let (addr, dialer) = (addr.clone(), dialer.clone());
         // 이미 쌓여 있던 「지금 다시 붙어라」는 지금 하려는 일 그 자체이므로 삼킨다.
         if let Some(Ctl::Close) = self.drain_ctl() {
             return Input::Close;
         }
-        let dialing = dial_once(
-            self.dialer.clone(),
-            self.addr.clone(),
-            self.clock.clone(),
-            deadline,
-        );
+        let dialing = dial_once(dialer, addr, self.clock.clone(), deadline);
         match self.connecting(dialing).await {
             Connecting::Done(Ok((tx, rx))) => {
                 self.tx = Some(tx);
@@ -1090,16 +1264,38 @@ impl<W: Wire> Supervisor<W> {
                 "no link to hand shake on",
             )));
         };
+        let deadline = match self.mode {
+            // ★받은 상대의 시한은 업그레이드 끝부터다★(TRD 3 §5 3) — 준비 큐에 앉은 시간도 든다. 기계의 시한(감독이
+            //   시작한 때부터)보다 늘 이르거나 같아야 하는데, 청취기가 다른 시계로 찍었어도 그것을 넘지 않게 이른 쪽을 쓴다.
+            Mode::Accepted { auth_deadline } => auth_deadline.min(deadline),
+            Mode::Dial { .. } => deadline,
+        };
+        // ★받은 상대는 시한이 이미 지났으면 핸드셰이크를 돌리지 않는다★ — `with_deadline` 은 지난 시한에도 한 번은
+        //   폴링해(그 rustdoc), 준비 큐에 앉은 동안 이미 와 있던 프레임으로 통과시킬 수 있다. 통로는 시한으로 끝난
+        //   핸드셰이크처럼 닫기 없이 버린다.
+        if self.accepted() && deadline <= self.clock.now() {
+            self.end_cause = DisconnectCause::Idle;
+            return Input::ConnectFailed(ConnectFailure::Unreachable(LinkError::new(
+                "handshake timed out",
+            )));
+        }
         let shaking = handshake_once(tx, rx, self.handshake.clone(), self.clock.clone(), deadline);
         match self.connecting(shaking).await {
             Connecting::Done(Ok((tx, rx))) => {
                 self.tx = Some(tx);
                 self.attach_reader(rx);
+                // 받은 상대의 업그레이드 칸은 운영 단계에 든 지금 놓는다(`Supervisor::admission`).
+                self.admission = None;
                 // 번호를 여기서 뽑는다 — 이 자리가 「이 통로가 운영 단계에 들어섰다」의 유일한 지점이다.
                 let minted = Generation(self.generations.fetch_add(1, Ordering::AcqRel) + 1);
                 Input::Connected(minted)
             }
-            Connecting::Done(Err(failure)) => Input::ConnectFailed(failure),
+            Connecting::Done(Err(failed)) => {
+                if self.accepted() {
+                    self.end_cause = failed.end;
+                }
+                Input::ConnectFailed(failed.failure)
+            }
             Connecting::Ctl(Some(Ctl::ReconnectNow)) => Input::ReconnectNow,
             Connecting::Ctl(Some(Ctl::Close))
             | Connecting::Ctl(None)
@@ -2109,7 +2305,7 @@ impl<W: Wire> Supervisor<W> {
     /// 큐 닫기 · 남은 명령 거절)을 받는 쪽 속도에 묶지 않는다. 앞에 두면 그 사이 큐에 든 요청 · 알림이 받는
     /// 쪽이 비울 때까지(최대 [`CLOSE_DRAIN_LIMIT`]) 매달린다.
     async fn teardown(&mut self) {
-        let cause = DisconnectCause::Explicit;
+        let cause = self.end_cause;
         self.drop_link(CloseCode::GOING_AWAY).await;
         self.fail_pending(cause);
         self.data_rx.close();
@@ -2375,14 +2571,35 @@ async fn dial_once(
     }
 }
 
+/// 핸드셰이크가 못 끝났다 — 거는 쪽은 `failure` 를 기계에 먹이고, 받은 상대는 `end` 를 끝 까닭으로 적는다
+/// (`Supervisor::end_cause`). 실패 자리마다 둘을 함께 정한다 — 거는 쪽 갈래(`ConnectFailure`)는 못 붙음의 글만 싣고
+/// 읽기 끝 · 쓰기 끝을 안 가른다.
+struct HandshakeFailed {
+    failure: ConnectFailure,
+    end: DisconnectCause,
+}
+
+impl HandshakeFailed {
+    fn unreachable(err: LinkError, end: DisconnectCause) -> Self {
+        Self {
+            failure: ConnectFailure::Unreachable(err),
+            end,
+        }
+    }
+}
+
 /// 열린 통로 위에서 핸드셰이크를 끝까지 돌린다.
+///
+/// 받은 상대의 끝 까닭: 우리 핸드셰이크의 거절 = `Explicit` · 상대가 닫음(거절 코드 포함) = `PeerClosed` · 읽기 오류 =
+/// `ReadFailed` · 쓰기 오류 = `WriteFailed` · 쓰기가 시한을 넘김 = `WriteDeadline` · 시한까지 상대 프레임이 안 옴 =
+/// `Idle`.
 async fn handshake_once(
     mut tx: Box<dyn LinkTx>,
     mut rx: Box<dyn LinkRx>,
     handshake: Arc<dyn Handshake>,
     clock: Arc<dyn Clock>,
     deadline: Instant,
-) -> Result<(Box<dyn LinkTx>, Box<dyn LinkRx>), ConnectFailure> {
+) -> Result<(Box<dyn LinkTx>, Box<dyn LinkRx>), HandshakeFailed> {
     let left = |clock: &dyn Clock| deadline.saturating_duration_since(clock.now());
     let mut step = handshake.start();
     loop {
@@ -2402,16 +2619,25 @@ async fn handshake_once(
                     let close = Close::new(code, reason.clone());
                     let _ = with_deadline(&*clock, left(&*clock), tx.close(close)).await;
                 }
-                return Err(ConnectFailure::Rejected { kind, code, reason });
+                return Err(HandshakeFailed {
+                    failure: ConnectFailure::Rejected { kind, code, reason },
+                    end: DisconnectCause::Explicit,
+                });
             }
             HandshakeStep::Send(frame) => {
                 match with_deadline(&*clock, left(&*clock), tx.send(frame)).await {
                     Ok(Ok(())) => {}
-                    Ok(Err(err)) => return Err(ConnectFailure::Unreachable(err)),
+                    Ok(Err(err)) => {
+                        return Err(HandshakeFailed::unreachable(
+                            err,
+                            DisconnectCause::WriteFailed,
+                        ))
+                    }
                     Err(_) => {
-                        return Err(ConnectFailure::Unreachable(LinkError::new(
-                            "handshake write timed out",
-                        )))
+                        return Err(HandshakeFailed::unreachable(
+                            LinkError::new("handshake write timed out"),
+                            DisconnectCause::WriteDeadline,
+                        ))
                     }
                 }
                 step = HandshakeStep::Await;
@@ -2424,7 +2650,7 @@ async fn handshake_once(
                 //   ★맨 종료 · 정상 종료 코드는 「거절」이 아니다★ — 말 없이 끊긴 것은 「못 붙었다」라 예산을 쓴다(데몬
                 //   재시작 중이면 다음 시도에 붙는다).
                 Ok(Ok(LinkRead::Closed(close))) => {
-                    return Err(match close {
+                    let failure = match close {
                         Some(close) => match RejectKind::of(close.code) {
                             Some(kind) => ConnectFailure::Rejected {
                                 kind,
@@ -2434,13 +2660,23 @@ async fn handshake_once(
                             None => peer_closed_during_handshake(),
                         },
                         None => peer_closed_during_handshake(),
-                    })
+                    };
+                    return Err(HandshakeFailed {
+                        failure,
+                        end: DisconnectCause::PeerClosed,
+                    });
                 }
-                Ok(Err(err)) => return Err(ConnectFailure::Unreachable(err)),
+                Ok(Err(err)) => {
+                    return Err(HandshakeFailed::unreachable(
+                        err,
+                        DisconnectCause::ReadFailed,
+                    ))
+                }
                 Err(_) => {
-                    return Err(ConnectFailure::Unreachable(LinkError::new(
-                        "handshake timed out",
-                    )))
+                    return Err(HandshakeFailed::unreachable(
+                        LinkError::new("handshake timed out"),
+                        DisconnectCause::Idle,
+                    ))
                 }
             },
         }
@@ -2611,9 +2847,11 @@ mod tests {
         let (inbound_tx, inbound) = mpsc::channel(inbound_cap);
         let (peer, supervisor) = new_peer(PeerConfig {
             id: PeerId::new("d1"),
-            addr: Address::new("mem://d1"),
+            origin: Origin::Dial {
+                addr: Address::new("mem://d1"),
+                dialer: net.dialer(),
+            },
             wire: Arc::new(TestWire),
-            dialer: net.dialer(),
             clock: clock.handle(),
             handshake,
             policy: no_jitter(policy),
@@ -2841,9 +3079,11 @@ mod tests {
         let counter = Arc::new(AtomicU64::new(41));
         let peer = spawn_peer(PeerConfig {
             id: PeerId::new("d1"),
-            addr: Address::new("mem://d1"),
+            origin: Origin::Dial {
+                addr: Address::new("mem://d1"),
+                dialer: net.dialer(),
+            },
             wire: Arc::new(TestWire),
-            dialer: net.dialer(),
             clock: clock.handle(),
             handshake: Arc::new(ImmediateHandshake),
             policy: Policy::default(),
@@ -2869,9 +3109,11 @@ mod tests {
         let spawn = |tag: &str| {
             spawn_peer(PeerConfig {
                 id: PeerId::new(tag),
-                addr: Address::new("mem://d1"),
+                origin: Origin::Dial {
+                    addr: Address::new("mem://d1"),
+                    dialer: net.dialer(),
+                },
                 wire: Arc::new(TestWire),
-                dialer: net.dialer(),
                 clock: clock.handle(),
                 handshake: Arc::new(ImmediateHandshake),
                 policy: Policy::default(),
@@ -6446,9 +6688,11 @@ mod tests {
         let (inbound, _) = mpsc::channel(1);
         let (_, supervisor) = new_peer(PeerConfig {
             id: PeerId::new("d1"),
-            addr: Address::new("mem://d1"),
+            origin: Origin::Dial {
+                addr: Address::new("mem://d1"),
+                dialer: net.dialer(),
+            },
             wire: Arc::new(TestWire),
-            dialer: net.dialer(),
             clock: clock.handle(),
             handshake: Arc::new(ImmediateHandshake),
             policy: Policy::default(),

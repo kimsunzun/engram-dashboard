@@ -75,13 +75,14 @@ pub enum DisconnectCause {
     ReadFailed,
     /// 쓰는 쪽이 끝났다 — 프레임 · keepalive 쓰기가 오류를 냈다(시한 초과는 [`DisconnectCause::WriteDeadline`]).
     WriteFailed,
-    /// 상대가 `idle_timeout` 동안 조용했다.
+    /// 상대가 `idle_timeout` 동안 조용했다. 받은 상대([`crate::Registry::attach`])가 인증 시한 안에 핸드셰이크를 못
+    /// 마친 것도 이것이다(`TransportEvent::Closed` 의 `cause`).
     Idle,
-    /// 한 프레임을 미는 데 `write_deadline` 을 넘겼다.
+    /// 한 프레임을 미는 데 `write_deadline` 을 넘겼다 — 받은 상대의 핸드셰이크 쓰기면 인증 시한을 넘겼다.
     WriteDeadline,
     /// 큐가 찼고 정책이 [`crate::QueueFullPolicy::Disconnect`] 였다.
     QueueFull,
-    /// 우리가 명시로 닫았다.
+    /// 우리가 명시로 닫았다 — 받은 상대에선 우리 핸드셰이크가 거절한 것도 이것이다.
     Explicit,
 }
 

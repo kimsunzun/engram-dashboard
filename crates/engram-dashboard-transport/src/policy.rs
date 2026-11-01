@@ -140,7 +140,9 @@ pub struct Policy {
     ///
     /// ★미검 — 에이전트 spawn 실소요를 잰 적이 없다★. 그 ADR 이 8초의 유일한 실질 위험으로 적은 자리다.
     pub request_timeout: Duration,
-    /// dial 과 핸드셰이크를 **함께** 감싸는 상한(현행 `HANDSHAKE_TIMEOUT` 보존).
+    /// dial 과 핸드셰이크를 **함께** 감싸는 상한(현행 `HANDSHAKE_TIMEOUT` 보존). ★받은 상대
+    /// ([`crate::Registry::attach`])에선 인증 시한이다★ — 붙인 때가 아니라 업그레이드 끝([`crate::Accepted::upgraded_at`])
+    /// 부터 잰다(TRD 3 §5 3). 받은 상대는 다시 걸지 않아 [`Policy::reconnect`] · [`Policy::live_dwell`] 을 안 쓴다.
     pub connect_timeout: Duration,
     /// 한 프레임을 미는 데 허용하는 상한. ★미검 — 업계 참고값뿐★(NATS 10s · nginx 60s · gRPC keepalive
     /// timeout 20s). 불변식: `write_deadline < ping_interval` — 안 그러면 쓰기 하나가 keepalive 를
@@ -160,9 +162,9 @@ pub struct Policy {
     pub reconnect: ReconnectPolicy,
     /// 나가는 큐 길이(현행 셸값 보존).
     pub outbound_queue: usize,
-    /// ★손잡이 하나의★ 수신단([`crate::Inbox`]) 길이(개수). [`crate::Registry::add`] 가 올릴 때마다 줄을
-    /// 하나 이 길이로 세운다(같은 이름표를 다시 올려도 새 줄이다). 쥐는 총량은 살아 있는 수신단 길이들의 합이고
-    /// (옛 감독이 정리를 마치지 않은 옛 수신단 포함) ★이 값은 개수만 잰다★ — 바이트는 감독마다 crate 내부
+    /// ★손잡이 하나의★ 수신단([`crate::Inbox`]) 길이(개수). [`crate::Registry::add`] · [`crate::Registry::attach`]
+    /// 가 올릴 때마다 줄을 하나 이 길이로 세운다(같은 이름표를 다시 올려도 새 줄이다). 쥐는 총량은 살아 있는 수신단
+    /// 길이들의 합이고(옛 감독이 정리를 마치지 않은 옛 수신단 포함) ★이 값은 개수만 잰다★ — 바이트는 감독마다 crate 내부
     /// 예산(16 MiB — 앞잡이 줄 · 순서 칸 · 이 줄 · 이어받기 창을 셈 하나가 덮는다. 스트림 조각을 한 번이라도 받은
     /// 감독만 읽기 몫 · 창 상한으로 반씩 나누고, 안 받은 감독은 읽기 몫이 예산 전부다)이 잰다(`lib.rs` 「알려진
     /// 한계」). 차면 그 손잡이의 감독이 자기 순서 칸에 붙들고 그 상대의 읽기를 세운다 — 버리지 않는다(배압).

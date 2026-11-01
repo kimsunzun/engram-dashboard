@@ -15,6 +15,10 @@
 //! 수신단에 넣는다. 그래서 수신단 하나에는 감독 하나의 것만 오고 그 수신단의 끝이 그 감독의 끝이다. 수신단
 //! 사이의 순서는 없다 — 합친 보기가 필요하면 소비자 어댑터가 수신단들을 합친다(거르는 규칙은 TRD 3 §3-3).
 //!
+//! ★상대를 올리는 길은 둘이다★ — [`Registry::add`] 는 주소로 걸고 끊기면 다시 건다. [`Registry::attach`] 는 받은
+//! 통로([`Accepted`]) 하나를 얹고 다시 걸지 않으며, 끝나면 명부에서 스스로 내린다(TRD 3 §3-1 ①). 수락 루프는 소비자가
+//! 돈다 — 명부는 청취기를 쥐지 않는다.
+//!
 //! ★「앱 전체가 끊겼나」는 여기서 판정하지 않는다★ — 그건 화면의 개념이고 이 crate 는 상대를 셀 뿐
 //! 앱을 모른다. 재료 둘([`Registry::peers`] 와 [`crate::Peer::reconnect_now`])을 주고 셸이 접는다
 //! (ADR-0180 의 열린 질문이 그렇게 닫힌다).
@@ -31,13 +35,13 @@ use crate::budget::Charged;
 use crate::clock::{with_deadline, Clock, Elapsed};
 use crate::event::{Incoming, PeerId};
 use crate::frame::CloseCode;
-use crate::link::{Address, Dialer, Handshake};
+use crate::link::{Accepted, Address, Dialer, Handshake};
 use crate::machine::PeerState;
-use crate::peer::{spawn_peer, Peer, PeerConfig, BYTE_BUDGET};
+use crate::peer::{prepare_peer, AcceptedLink, LeaveRoster, Origin, Peer, PeerConfig, BYTE_BUDGET};
 use crate::policy::Policy;
 use crate::wire::Wire;
 
-/// 손잡이 하나의 수신단 — 그것을 돌려준 [`Registry::add`] 가 띄운 감독 하나가 낸 것만 온다.
+/// 손잡이 하나의 수신단 — 그것을 돌려준 [`Registry::add`] · [`Registry::attach`] 가 띄운 감독 하나가 낸 것만 온다.
 ///
 /// ★끝 = [`TransportEvent::Closed`](crate::TransportEvent::Closed) 다음의 `None`★ — 감독은 정리를 마치며 `Closed`
 /// 를 마지막으로 싣고 넣는 끝을 놓는다. ★`Closed` 없이 `None` 이 오면 — 받는 쪽이 스스로 [`Inbox::close`] 를
@@ -83,20 +87,52 @@ struct RegistryInner<W: Wire> {
     dialer: Arc<dyn Dialer>,
     clock: Arc<dyn Clock>,
     policy: Policy,
-    /// 올라 있는 이름표의 손잡이. ★자물쇠 안에서는 기다리지 않는다★ — 감독 띄우기 · 닫기는 자물쇠 밖이다.
-    peers: Mutex<HashMap<PeerId, Peer<W>>>,
+    /// ★자물쇠 안에서는 기다리지 않는다★ — 감독 띄우기 · 닫기 · 손잡이 떨어뜨리기는 자물쇠 밖이다.
+    roster: Mutex<Roster<W>>,
+}
+
+/// 명부 자물쇠 하나가 지키는 것 전부. ★세대 표도 이 자물쇠 안이다★ — 갈아치울 손잡이 빼기 · 계수기 고르기 · 새
+/// 손잡이 올리기가 한 임계 구역이어야 해서다(`Registry::launch`).
+struct Roster<W: Wire> {
+    /// 올라 있는 이름표의 손잡이.
+    peers: HashMap<PeerId, Peer<W>>,
     /// 이름표별 세대 계수기. ★`remove` 로 지우지 않는다★ — 지우면 같은 이름표를 다시 올릴 때 세대가
     /// 0 으로 되감기고, 소비자의 평범한 방어(「최대 세대 미만은 무시」)가 새 연결을 통째로 버린다.
     ///
-    /// 이 map 은 **소비자가 쓴 이름표 수**만큼 자란다(상대가 정하는 값이 아니다).
-    generations: Mutex<HashMap<PeerId, Arc<AtomicU64>>>,
+    /// 이 map 은 **소비자가 [`Registry::add`] 로 쓴 이름표 수**만큼 자란다(상대가 정하는 값이 아니다).
+    /// ★받은 상대는 넣지 않는다★ — 연결마다 이름표가 새것이라 넣으면 연결 수만큼 영원히 자란다
+    /// ([`Registry::attach_with_policy`]).
+    generations: HashMap<PeerId, Arc<AtomicU64>>,
+    /// [`Registry::close_all`] 을 불렀다 — 그 뒤 올리는 상대는 명부에 오르지 않고 곧바로 닫힌다. 세우는 쪽(`close_all`
+    /// 의 비우기)과 읽는 쪽(`launch`)이 같은 자물쇠 안이라 접기와 엇갈린 올리기가 비운 명부에 남지 않는다.
+    folded: bool,
 }
 
 impl<W: Wire> RegistryInner<W> {
-    /// 독 걸린 자물쇠를 그대로 다시 쓴다 — 자물쇠 안의 갱신은 패닉할 자리 없이 한 칸씩이라 반쯤 바뀐 표가
-    /// 남지 않고, 독을 그대로 두면 한 번의 패닉이 명부를 영영 못 쓰게 만든다.
-    fn peers(&self) -> MutexGuard<'_, HashMap<PeerId, Peer<W>>> {
-        self.peers.lock().unwrap_or_else(PoisonError::into_inner)
+    /// 독 걸린 자물쇠를 그대로 다시 쓴다 — 독을 그대로 두면 한 번의 패닉이 명부를 영영 못 쓰게 만든다.
+    ///
+    /// 그래도 반쯤 바뀐 표는 남지 않는다: 자물쇠 안에서 패닉할 수 있는 것은 감독 짓기(`Registry::launch` 의
+    /// `prepare_peer` — 주입한 시계 같은 것) 하나이고 표를 바꾸기 전에 끝나며, 표 바꾸기는 패닉할 자리 없이 한
+    /// 칸씩이다. ★짓다 패닉해도 풀리며 떨어지는 것이 이 자물쇠를 다시 잡지 않는다★(`peer.rs` 의 `new_peer`) — 잡으면
+    /// 같은 스레드에서 교착이다.
+    fn roster(&self) -> MutexGuard<'_, Roster<W>> {
+        self.roster.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl<W: Wire> Roster<W> {
+    /// 이 이름표가 쓸 세대 계수기 — 표에 있으면 그것, 없으면 올라 있는(갈아치울) 손잡이의 것, 둘 다 없으면 새것이다.
+    /// 표를 바꾸지 않는다 — 표에 올리기는 `Registry::launch` 가 짓기를 마친 뒤에 한다.
+    fn counter(&self, id: &PeerId) -> Arc<AtomicU64> {
+        if let Some(counter) = self.generations.get(id) {
+            return counter.clone();
+        }
+        // ★옛 감독의 마지막 세대를 읽지 않고 계수기째 잇는다★(그 경합 = `PeerConfig::generations`). 표에 없는 받은
+        //   상대를 `add` 로 갈아치울 때 새 계수기면 받은 상대가 이미 뽑은 번호를 되풀이한다.
+        self.peers
+            .get(id)
+            .map(Peer::generations)
+            .unwrap_or_default()
     }
 }
 
@@ -118,7 +154,8 @@ impl<W: Wire> Clone for Registry<W> {
 }
 
 impl<W: Wire> Registry<W> {
-    /// 명부 하나를 세운다. ★받는 것은 [`Registry::add`] 가 손잡이마다 돌려주는 [`Inbox`] 로만 나온다★.
+    /// 명부 하나를 세운다. ★받는 것은 [`Registry::add`] · [`Registry::attach`] 가 손잡이마다 돌려주는 [`Inbox`] 로만
+    /// 나온다★. `dialer` 는 `add` 만 쓴다.
     pub fn new(
         wire: Arc<W>,
         dialer: Arc<dyn Dialer>,
@@ -132,8 +169,11 @@ impl<W: Wire> Registry<W> {
                 dialer,
                 clock,
                 policy,
-                peers: Mutex::new(HashMap::new()),
-                generations: Mutex::new(HashMap::new()),
+                roster: Mutex::new(Roster {
+                    peers: HashMap::new(),
+                    generations: HashMap::new(),
+                    folded: false,
+                }),
             }),
         }
     }
@@ -141,8 +181,11 @@ impl<W: Wire> Registry<W> {
     /// 상대를 올리고 즉시 붙기 시작한다 — 그 손잡이와 수신단을 돌려준다. 같은 이름표가 이미 있으면 **옛 것을
     /// 닫고 갈아치운다**.
     ///
-    /// ★tokio 런타임 안에서 불러야 한다★ — 감독 태스크를 띄우므로 밖에서 부르면 패닉한다(명부는 그 뒤에도
-    /// 쓸 수 있다). 그렇게 패닉해도 같은 이름표로 올라 있던 상대는 이미 명부에서 내려가 닫힌 뒤다.
+    /// ★tokio 런타임 안에서 불러야 한다★ — 감독 태스크를 띄우므로 밖에서 부르면 패닉한다. 그 패닉은 명부를 건드리기
+    /// 전이다 — 명부는 그 뒤에도 쓸 수 있고, 같은 이름표로 올라 있던 상대도 그대로 올라 있다.
+    ///
+    /// [`Registry::close_all`] 을 부른 뒤면 명부에 올리지 않고 걸기 전에 닫는다 — 수신단은 `Closed` → `None` 으로
+    /// 끝나고 [`Dialer`] 는 불리지 않는다.
     pub fn add(
         &self,
         id: PeerId,
@@ -153,7 +196,7 @@ impl<W: Wire> Registry<W> {
         self.add_with_policy(id, addr, handshake, policy)
     }
 
-    /// 이 상대에게만 다른 정책을 건다. 런타임 조건은 [`Registry::add`] 와 같다.
+    /// 이 상대에게만 다른 정책을 건다. 런타임 조건 · 접은 명부는 [`Registry::add`] 와 같다.
     ///
     /// ★옛 감독을 먼저 닫고, 그 마지막 세대를 새 감독의 바닥값으로 넘긴다★ — 순서를 뒤집으면 두 소켓이
     /// 같은 상대에게 동시에 붙고, 바닥값을 안 넘기면 세대가 0 으로 되감겨 소비자의 평범한 방어
@@ -167,6 +210,11 @@ impl<W: Wire> Registry<W> {
     /// [`TransportEvent::Closed`](crate::TransportEvent::Closed) 와 [`Peer::generation`] 은 옛 감독의 것과 같은
     /// 번호를 보인다. 어느 감독의 것인지는 수신단이 가른다.
     ///
+    /// ★세대가 1 부터 다시 가는 것은 `add` 로 올린 적이 없고 지금 명부에도 없는 이름표뿐이다★ — 받아 얹었다가 스스로
+    /// 내렸거나 [`Registry::remove`] 로 내린 이름표를 `add` 하는 것도 여기 든다. 그 밖에는 이 이름표의 계수기(세대
+    /// 표에 있는 것 · 없으면 갈아치우는 손잡이의 것)를 잇고 표에 올린다. 같은 이름표를 동시에 올리는 호출끼리도
+    /// 그렇다 — 어느 호출도 다른 호출이 뺀 손잡이를 못 본 채 새 계수기를 만들지 않는다.
+    ///
     /// ★같은 이름표라도 수신단은 새것이다★ — 옛 감독은 정리를 마칠 때까지 옛 수신단에 넣고, 그 끝은 `Closed`
     /// 다음의 `None` 이다. 옛 수신단을 놓으면 옛 감독의 정리가 기다리지 않고 끝나고, 쥔 채 안 비우면
     /// `peer.rs` 의 `CLOSE_DRAIN_LIMIT` 까지 남는다.
@@ -178,28 +226,15 @@ impl<W: Wire> Registry<W> {
         policy: Policy,
     ) -> (Peer<W>, Inbox<W>) {
         debug_assert_eq!(policy.check(), Ok(()), "정책 값이 자기 불변식을 어긴다");
-        // ★옛 감독의 마지막 세대를 **읽지** 않는다★ — 읽는 순간과 그 감독이 마지막 세대를 발행하는
-        //   순간 사이에 경합이 있다(그 감독은 `shake_hands` 의 `select` 안에서 핸드셰이크와 `Close` 를
-        //   동시에 준비된 채로 만날 수 있고, 핸드셰이크가 이기면 번호를 하나 더 발행한다). 계수기를
-        //   물려주면 누가 이기든 같은 번호가 두 번 나오지 않는다.
-        let generations = self
-            .inner
-            .generations
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .entry(id.clone())
-            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
-            .clone();
-        let displaced = self.inner.peers().remove(&id);
-        if let Some(old) = displaced {
-            old.close();
-        }
         let (inbound, rx) = mpsc::channel(policy.inbound_queue.max(1));
-        let peer = spawn_peer(PeerConfig {
-            id: id.clone(),
+        let origin = Origin::Dial {
             addr,
-            wire: self.inner.wire.clone(),
             dialer: self.inner.dialer.clone(),
+        };
+        let peer = self.launch(id.clone(), true, |generations| PeerConfig {
+            id,
+            origin,
+            wire: self.inner.wire.clone(),
             clock: self.inner.clock.clone(),
             handshake,
             policy,
@@ -207,18 +242,163 @@ impl<W: Wire> Registry<W> {
             byte_budget: BYTE_BUDGET,
             generations,
         });
-        let displaced = self.inner.peers().insert(id, peer.clone());
-        // 같은 이름표를 동시에 올린 다른 호출이 그 사이에 끼었으면 먼저 들어간 쪽을 닫는다.
-        if let Some(other) = displaced {
-            other.close();
-        }
         (peer, Inbox { rx })
+    }
+
+    /// 받은 통로를 상대로 얹는다 — 그 손잡이와 수신단을 돌려준다. 정책은 명부의 것이다
+    /// ([`Registry::attach_with_policy`] 가 덮는다). 계약은 그쪽에 있다.
+    pub fn attach(
+        &self,
+        id: PeerId,
+        accepted: Accepted,
+        handshake: Arc<dyn Handshake>,
+    ) -> (Peer<W>, Inbox<W>) {
+        let policy = self.inner.policy.clone();
+        self.attach_with_policy(id, accepted, handshake, policy)
+    }
+
+    /// 받은 통로([`Accepted`])를 이 정책으로 상대로 얹는다(TRD 3 §3-1 ①). 런타임 조건 · 같은 이름표 갈아치우기(옛 것을
+    /// 닫는다 · 옛 수신단은 `Closed` → `None` 으로 끝난다 · 수신단은 새것이다)는 [`Registry::add_with_policy`] 와 같다.
+    ///
+    /// ★핸드셰이크부터 시작하고 다시 걸지 않는다★ — 운영 단계에 못 들고 끝나거나(거절 · 시한 · 통로 손실) 운영 중
+    /// 끊기면 곧바로 접는다: 수신단은 [`TransportEvent::Closed`](crate::TransportEvent::Closed) 다음 `None` 으로 끝나고
+    /// 그 `cause` 가 진짜 까닭을 싣는다(운영 중 끊김이면 앞의 `Disconnected` 와 같은 까닭 — 읽기 끝 · 쓰기 끝 가름
+    /// 포함). 거는 쪽 사건(`ConnectFailed` · `Rejected` · `GaveUp`)은 오지 않고 [`Peer::state`] 도 `Dialing` ·
+    /// `Backoff` · `GaveUp` 을 거치지 않는다. [`Peer::reconnect_now`] 는 듣지 않는다. 그 밖의 손잡이 계약(보내기 ·
+    /// 닫기 · 비우고 닫기)은 건 상대와 같다.
+    ///
+    /// ★인증 시한 = [`Accepted::upgraded_at`] + [`Policy::connect_timeout`]★(TRD 3 §5 3) — 청취기의 준비 큐에 앉은
+    /// 시간도 든다. 얹는 순간 이미 지났으면 핸드셰이크를 돌리지 않고 닫는다(`cause` = `Idle`). 그래서 청취기는 이 명부와
+    /// 같은 [`Clock`] 으로 `upgraded_at` 을 찍어야 한다(debug 빌드는 미래 시각을 단언으로 잡는다).
+    ///
+    /// ★끝나면 명부에서 스스로 내린다★ — 통로를 버린 뒤 정리(받는 쪽이 수신단을 비우기를 기다린다) 앞에서다. 그 사이
+    /// 같은 이름표로 갈아치웠으면 새것은 그대로 둔다. 감독이 비정상으로 끝나도 내린다. 첫 폴링에 곧바로 끝나는
+    /// 상대(시한이 이미 지났다 · 상대가 이미 끊었다)도 명부에 남지 않는다 — 올린 뒤에 감독을 띄운다.
+    ///
+    /// ★세대 표에 안 든다★ — 받는 쪽 이름표는 연결마다 새것이라(TRD 3 §3-1 ① `conn-<ConnId>`) 넣으면 연결 수만큼 표가
+    /// 자란다. 세대 계수기는 표에 그 이름표가 있으면(`add` 로 올린 적이 있다) 그것을, 없으면 갈아치우는 손잡이의 것을,
+    /// 둘 다 없으면 새 것을 쓴다 — 명부에 있는 이름표를 다시 얹으면 동시에 얹어도 세대가 되감기지 않는다. ★세대가 1
+    /// 부터 다시 가는 것은 `add` 로 올린 적이 없고 지금 명부에도 없는 이름표뿐이다★ — 처음 얹는 이름표, 그리고 스스로
+    /// 내렸거나 [`Registry::remove`] 로 내린 뒤 다시 얹는 이름표다(받는 쪽 이름표를 되쓰지 않는다는 전제).
+    ///
+    /// ★업그레이드 칸([`Accepted`] 의 [`crate::ConnPermit`])은 운영 단계에 들 때 놓는다★ — 못 들고 끝나면 통로를
+    /// 버린 그 자리에서 놓는다(받는 쪽이 수신단을 비우기 전에 — TRD 3 §5 14 「인증에 실패한 상대는 닫히는 즉시 칸을
+    /// 놓는다」). 인증 대기 칸이 아직 없어(3-0 U7 · 3-3 U4) 그 몫까지 이 칸이 진다 — 그 칸이 들어오면 여기서 그것을
+    /// 쥐고 업그레이드 칸을 놓는다.
+    ///
+    /// [`Registry::close_all`] 을 부른 뒤면 명부에 올리지 않고 핸드셰이크 전에 닫는다 — 통로에서 아무것도 읽지도
+    /// 쓰지도 않은 채 닫기([`CloseCode::GOING_AWAY`])를 싣고 버린다.
+    pub fn attach_with_policy(
+        &self,
+        id: PeerId,
+        accepted: Accepted,
+        handshake: Arc<dyn Handshake>,
+        policy: Policy,
+    ) -> (Peer<W>, Inbox<W>) {
+        debug_assert_eq!(policy.check(), Ok(()), "정책 값이 자기 불변식을 어긴다");
+        let Accepted {
+            tx,
+            rx,
+            info: _,
+            upgraded_at,
+            permit,
+        } = accepted;
+        debug_assert!(
+            upgraded_at <= self.inner.clock.now(),
+            "listener/registry clock mismatch — 청취기가 명부와 다른 시계로 upgraded_at 을 찍었다"
+        );
+        let (inbound, inbox) = mpsc::channel(policy.inbound_queue.max(1));
+        let origin = Origin::Accepted(AcceptedLink {
+            tx,
+            rx,
+            upgraded_at,
+            permit,
+            leave: self.leave_roster(id.clone()),
+        });
+        let peer = self.launch(id.clone(), false, |generations| PeerConfig {
+            id,
+            origin,
+            wire: self.inner.wire.clone(),
+            clock: self.inner.clock.clone(),
+            handshake,
+            policy,
+            inbound,
+            byte_budget: BYTE_BUDGET,
+            generations,
+        });
+        (peer, Inbox { rx: inbox })
+    }
+
+    /// `add` · `attach` 의 공통 꼬리 — 감독과 손잡이를 짓고, 명부에 올린 **뒤에** 감독을 띄운다. `record` = 표에 없던
+    /// 이름표면 고른 세대 계수기를 표에 올린다(`add`).
+    ///
+    /// ★올리기가 띄우기보다 앞이다★ — 뒤집으면 첫 폴링에 곧바로 끝나는 받은 상대(시한이 이미 지났다 · 상대가 이미
+    /// 끊었다)가 다른 일꾼 스레드에서 명부 내리기까지 마친 뒤에 올라, 끝난 손잡이가 영영 남는다(받는 쪽 이름표는
+    /// 연결마다 새것이라 아무도 다시 내리지 않는다 — 빨리 끊기는 연결 수만큼 명부가 자란다). 접은 명부도 띄우기 전에
+    /// 가르고 닫기를 먼저 넣는다 — 감독은 첫 폴링에서 그것을 보고 걸지도 핸드셰이크하지도 않는다(`peer.rs` 의 `dial` ·
+    /// `shake_hands` 첫 줄). 뒤집으면 다른 일꾼에서 먼저 돈 감독이 한 번 걸거나 핸드셰이크를 시작한다.
+    ///
+    /// ★계수기 고르기 · 갈아치울 손잡이 빼기 · 올리기가 한 임계 구역이다★ — 쪼개면 같은 이름표를 동시에 올리는 두
+    /// 호출 중 하나가 다른 쪽이 뺀 손잡이도 표의 칸도 못 본 채 새 계수기를 만들어, 이미 나간 세대를 다시 뽑는다.
+    ///
+    /// ★표는 짓기(`prepare_peer`)를 마친 뒤에야 바꾼다★ — 짓다가 패닉하면(주입한 시계 같은 것) 명부는 손대지 않은
+    /// 그대로라, 갈아치우려던 손잡이가 올라 있고 계속 돈다. 그 뒤의 표 바꾸기에는 패닉할 자리가 없다(`roster`).
+    fn launch(
+        &self,
+        id: PeerId,
+        record: bool,
+        config: impl FnOnce(Arc<AtomicU64>) -> PeerConfig<W>,
+    ) -> Peer<W> {
+        // 런타임 밖이면 여기서 패닉한다 — 명부를 건드리기 전이다(`Registry::add`).
+        let runtime = tokio::runtime::Handle::current();
+        let (peer, supervisor, displaced, folded) = {
+            let mut roster = self.inner.roster();
+            let generations = roster.counter(&id);
+            let (peer, supervisor) = prepare_peer(config(generations.clone()));
+            // `add` 만 고른 계수기를 표에 올린다 — 받은 상대는 표를 읽기만 한다(`Roster::generations`).
+            if record {
+                roster.generations.entry(id.clone()).or_insert(generations);
+            }
+            let displaced = roster.peers.remove(&id);
+            let folded = roster.folded;
+            if !folded {
+                roster.peers.insert(id, peer.clone());
+            }
+            (peer, supervisor, displaced, folded)
+        };
+        if let Some(old) = displaced {
+            old.close();
+        }
+        if folded {
+            peer.close();
+        }
+        supervisor.start(&runtime);
+        peer
+    }
+
+    /// 받은 상대가 끝날 때 명부에서 스스로 내리는 손 — 그 이름표가 아직 그 손잡이를 가리킬 때만 내린다. ★약한
+    /// 손잡이다★ — 명부를 붙들지 않는다(명부가 먼저 사라지면 내릴 것도 없다).
+    fn leave_roster(&self, id: PeerId) -> LeaveRoster<W> {
+        let registry = Arc::downgrade(&self.inner);
+        Box::new(move |me: &Peer<W>| {
+            let Some(registry) = registry.upgrade() else {
+                return;
+            };
+            // 내린 손잡이는 자물쇠 밖에서 떨어뜨린다.
+            let _left = {
+                let mut roster = registry.roster();
+                match roster.peers.get(&id) {
+                    Some(listed) if listed.same(me) => roster.peers.remove(&id),
+                    _ => None,
+                }
+            };
+        })
     }
 
     /// 명부에서 내리고 그 상대를 닫는다. 그 손잡이의 수신단은 감독이 정리를 마치면 `Closed` → `None` 으로
     /// 끝난다.
     pub fn remove(&self, id: &PeerId) {
-        let removed = self.inner.peers().remove(id);
+        let removed = self.inner.roster().peers.remove(id);
         if let Some(peer) = removed {
             peer.close();
         }
@@ -235,9 +415,11 @@ impl<W: Wire> Registry<W> {
     /// ★부른 순간 명부에 있던 상대만 기다린다★ — 그 전에 `add` 가 갈아치웠거나 `remove` 로 내려 아직 접는 중인
     /// 감독은 모른다.
     ///
-    /// ★부르기 전에 명부에 올리기를 멈춘다★ — 이 함수는 그 뒤의 [`Registry::add`] 를 막지 않아, 부른 뒤 올린 상대는
-    /// 닫지도 기다리지도 않은 채 명부에 남는다. 그래서 상대를 올리는 쪽(데몬의 수락 루프 등)을 먼저 세우고 부른다.
-    /// 그 뒤의 `add` · 들어오는 상대 붙이기를 거절할지는 받는 쪽 seam 단위(TRD 3 §6-0 U6)가 정한다.
+    /// ★명부를 접는다 — 다시 열리지 않는다★ — 부른 뒤의 [`Registry::add`] · [`Registry::attach`] 는 명부에 오르지
+    /// 않고 걸거나 핸드셰이크하기 전에 닫힌다(그 수신단은 `Closed` → `None` 으로 끝나고, 받은 통로는 아무것도 읽고
+    /// 쓰지 않은 채 닫기를 싣고 버린다). 이 함수는 그것을
+    /// 기다리지 않는다. 수락 루프가 접기와 엇갈려 얹은 상대가 비운 명부에 닫히지 않은 채 남지 않게 하려는 것이다 —
+    /// 그래도 수락 루프는 먼저 세운다(접은 뒤 받은 통로는 얹어 봐야 곧바로 닫힌다).
     ///
     /// ★닫기는 부른 그 자리에서 시작된다★ — 돌려주는 future 는 기다리기만 한다. 떨어뜨려도 닫기는 이어진다
     /// ([`Peer::close_after_flush`] 와 같다). 시한은 그 future 를 처음 폴링한 때부터 잰다.
@@ -250,7 +432,11 @@ impl<W: Wire> Registry<W> {
         &self,
         deadline: Duration,
     ) -> impl Future<Output = Result<(), Elapsed>> + Send + 'static {
-        let peers: Vec<Peer<W>> = self.inner.peers().drain().map(|(_, peer)| peer).collect();
+        let peers: Vec<Peer<W>> = {
+            let mut roster = self.inner.roster();
+            roster.folded = true;
+            roster.peers.drain().map(|(_, peer)| peer).collect()
+        };
         // 손잡이는 여기서 놓아도 된다 — 표지가 제어 채널을 붙들어 비우기가 이어진다(`Peer::close_after_flush`).
         let ends: Vec<_> = peers
             .iter()
@@ -265,14 +451,15 @@ impl<W: Wire> Registry<W> {
     }
 
     pub fn get(&self, id: &PeerId) -> Option<Peer<W>> {
-        self.inner.peers().get(id).cloned()
+        self.inner.roster().peers.get(id).cloned()
     }
 
     /// 이름표 순으로 정렬한 지금 한 장. ★셸이 「앱 전체」를 접는 재료가 이것이다★.
     pub fn peers(&self) -> Vec<(PeerId, PeerState)> {
         let mut out: Vec<(PeerId, PeerState)> = self
             .inner
-            .peers()
+            .roster()
+            .peers
             .iter()
             .map(|(id, peer)| (id.clone(), peer.peer_state()))
             .collect();
@@ -281,7 +468,7 @@ impl<W: Wire> Registry<W> {
     }
 
     pub fn len(&self) -> usize {
-        self.inner.peers().len()
+        self.inner.roster().peers.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -303,7 +490,7 @@ impl<W: Wire> Registry<W> {
     /// 2026-09-26 — `lib.rs` 「알려진 한계」). 그 전에 큐에 든 것은 감독이 센다.
     pub fn broadcast(&self, out: W::Out) {
         let frame = self.inner.wire.encode(&out);
-        let targets: Vec<Peer<W>> = self.inner.peers().values().cloned().collect();
+        let targets: Vec<Peer<W>> = self.inner.roster().peers.values().cloned().collect();
         for peer in targets {
             // 실패는 그 상대의 감독이 센다(`Peer::send_frame`).
             let _ = peer.send_frame(frame.clone());
@@ -314,17 +501,21 @@ impl<W: Wire> Registry<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{Direction, TransportEvent};
+    use crate::event::{Arrival, Direction, TransportEvent};
     use crate::frame::{Close, Frame};
-    use crate::link::HandshakeStep;
+    use crate::link::{
+        HandshakeStep, LinkInfo, LinkRead, LinkRx, LinkTx, Listener, PermitPool, RejectKind,
+    };
     use crate::machine::{GaveUpReason, Generation};
     use crate::peer::CLOSE_DRAIN_LIMIT;
+    use crate::stream::StreamMark;
     use crate::testing::{
-        settle, settle_until, ClientMsg, ImmediateHandshake, ManualClock, MemoryNetwork,
-        RejectingHandshake, TestIn, TestOut, TestWire,
+        memory_link, settle, settle_until, ClientMsg, HelloHandshake, ImmediateHandshake,
+        ManualClock, MemoryConnector, MemoryLinkControl, MemoryListener, MemoryNetwork,
+        RejectingHandshake, TestDecodeError, TestIn, TestOut, TestWire,
     };
     use futures_util::future::poll_immediate;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     struct Fixture {
         registry: Registry<TestWire>,
@@ -1464,5 +1655,1213 @@ mod tests {
             assert_eq!(kinds(&items).last(), Some(&"Closed"), "{deadline:?}");
             assert!(ended(&mut inbox).await, "{deadline:?}");
         }
+    }
+
+    // ── 3-0 U6b: 받은 상대(`attach`) ──
+
+    /// TRD 3 §5 3 의 인증 시한.
+    const AUTH: Duration = Duration::from_secs(1);
+    const GOOD: &str = "auth|good";
+
+    fn auth_policy() -> Policy {
+        Policy {
+            connect_timeout: AUTH,
+            ..Policy::default()
+        }
+    }
+
+    /// 받는 쪽 인증 — 첫 프레임이 [`GOOD`] 이어야 운영 단계다. 아니면 다시 거는 거절이다(낡은 자격 — TRD 3 §3-0 ⑤).
+    struct TokenGate;
+
+    impl Handshake for TokenGate {
+        fn start(&self) -> HandshakeStep {
+            HandshakeStep::Await
+        }
+
+        fn on_frame(&self, frame: &Frame) -> HandshakeStep {
+            match frame {
+                Frame::Text(text) if text == GOOD => HandshakeStep::Done,
+                _ => HandshakeStep::Reject {
+                    kind: RejectKind::Retryable,
+                    last: None,
+                    reason: "bad token".into(),
+                },
+            }
+        }
+    }
+
+    /// 받는 쪽 명부와 그 청취기. ★명부의 Dialer 는 세기만 하는 그물이다★ — 받은 상대가 다시 거는지 본다.
+    struct Accepting {
+        registry: Registry<TestWire>,
+        redials: MemoryNetwork,
+        clock: ManualClock,
+        listener: MemoryListener,
+        connector: MemoryConnector,
+    }
+
+    /// 거는 쪽 끝 — 감독 없이 손으로 몬다.
+    struct Near {
+        tx: Box<dyn LinkTx>,
+        rx: Box<dyn LinkRx>,
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum Seen {
+        Frame(Frame),
+        Closed(Option<Close>),
+        Failed,
+    }
+
+    impl Accepting {
+        fn new(policy: Policy) -> Self {
+            let clock = ManualClock::new();
+            let redials = MemoryNetwork::new();
+            let registry =
+                Registry::new(Arc::new(TestWire), redials.dialer(), clock.handle(), policy);
+            let (listener, connector) = MemoryListener::new(clock.handle(), 8);
+            Self {
+                registry,
+                redials,
+                clock,
+                listener,
+                connector,
+            }
+        }
+
+        /// 거는 쪽 끝을 하나 열고 청취기에서 그 통로를 받아 온다 — `upgraded_at` = 지금.
+        async fn connect(&mut self) -> (Near, Accepted) {
+            let (tx, rx) = self
+                .connector
+                .dial(&Address::new("mem://acceptor"))
+                .await
+                .expect("걸기");
+            let accepted = self.listener.accept().await.expect("받기");
+            (Near { tx, rx }, accepted)
+        }
+
+        /// 마지막 통로의 받는 쪽 끝.
+        fn far(&self) -> MemoryLinkControl {
+            self.connector.latest().expect("통로").acceptor
+        }
+
+        fn attach(
+            &self,
+            name: &str,
+            accepted: Accepted,
+            handshake: Arc<dyn Handshake>,
+        ) -> (Peer<TestWire>, Inbox<TestWire>) {
+            self.registry.attach(PeerId::new(name), accepted, handshake)
+        }
+
+        fn generation_names(&self) -> usize {
+            self.registry.inner.roster().generations.len()
+        }
+    }
+
+    impl Near {
+        async fn say(&mut self, text: &str) {
+            self.tx
+                .send(Frame::Text(text.into()))
+                .await
+                .expect("거는 쪽 쓰기");
+        }
+
+        /// 지금 와 있는 것을 다 읽는다 — 기다리지 않고, 끝(닫힘 · 오류) 뒤로는 안 읽는다.
+        async fn arrived(&mut self) -> Vec<Seen> {
+            let mut out = Vec::new();
+            while let Some(read) = poll_immediate(self.rx.recv()).await {
+                let seen = match read {
+                    Ok(LinkRead::Frame(frame)) => Seen::Frame(frame),
+                    Ok(LinkRead::Closed(close)) => Seen::Closed(close),
+                    Err(_) => Seen::Failed,
+                };
+                let end = !matches!(seen, Seen::Frame(_));
+                out.push(seen);
+                if end {
+                    break;
+                }
+            }
+            out
+        }
+    }
+
+    fn closing() -> Seen {
+        Seen::Closed(Some(Close::new(CloseCode::GOING_AWAY, "closing")))
+    }
+
+    // ★시계를 밀지 않고 끝을 본다★ — 다시 걸기로 가면 백오프 대기에 서서 `Closed` 가 안 온다.
+    #[tokio::test]
+    async fn an_accepted_peer_that_loses_its_link_ends_with_that_cause_and_never_redials() {
+        let mut a = Accepting::new(auth_policy());
+        let (near, accepted) = a.connect().await;
+        let (peer, mut inbox) = a.attach("conn-1", accepted, immediate());
+        settle_until("운영", || peer.peer_state().is_live()).await;
+        drop(near);
+        let items = drain_until_quiet(&mut inbox).await;
+        assert_eq!(
+            labels(&items),
+            vec![
+                "Connected:1",
+                "Disconnected:1:ReadFailed",
+                "Closed:1:ReadFailed"
+            ],
+            "거는 쪽 사건(ConnectFailed · GaveUp) 없이 끝난다"
+        );
+        assert!(ended(&mut inbox).await);
+        assert_eq!(peer.peer_state(), PeerState::Closed);
+        assert!(a.registry.is_empty(), "끝나면 명부에서 스스로 내린다");
+        a.clock.advance(Duration::from_secs(60));
+        settle().await;
+        assert_eq!(a.redials.dials(), 0, "받은 상대는 다시 걸지 않는다");
+    }
+
+    // 데몬 어댑터가 읽기 끝(남은 명령을 마저 돌린다)과 쓰기 끝(곧바로 끊는다)을 이 까닭으로 가른다(TRD 3 §3-0 ①).
+    #[tokio::test]
+    async fn read_end_and_write_end_causes_reach_closed_on_the_accepted_side() {
+        let write_deadline = Policy::default().write_deadline;
+        for case in [
+            "상대가 닫음",
+            "읽기 오류",
+            "말 없이 사라짐",
+            "쓰기 오류",
+            "쓰기 시한",
+            "침묵",
+        ] {
+            let mut a = Accepting::new(auth_policy());
+            let (mut near, accepted) = a.connect().await;
+            let far = a.far();
+            let (peer, mut inbox) = a.attach("conn-1", accepted, immediate());
+            settle_until("운영", || peer.peer_state().is_live()).await;
+            let expected = match case {
+                "상대가 닫음" => {
+                    near.tx.close(Close::going_away()).await;
+                    "PeerClosed"
+                }
+                "읽기 오류" => {
+                    far.fail_reads("boom");
+                    "ReadFailed"
+                }
+                "말 없이 사라짐" => {
+                    drop(near);
+                    "ReadFailed"
+                }
+                "쓰기 오류" => {
+                    far.fail_writes();
+                    peer.notify(TestOut::Notice("x".into())).unwrap();
+                    "WriteFailed"
+                }
+                "쓰기 시한" => {
+                    far.stall_writes(true);
+                    peer.notify(TestOut::Notice("x".into())).unwrap();
+                    settle().await;
+                    a.clock.advance(write_deadline);
+                    settle().await;
+                    // 통로를 버리는 닫기도 막혀 있다 — 그 대기도 쓰기 시한이 자른다.
+                    a.clock.advance(write_deadline);
+                    "WriteDeadline"
+                }
+                // 거는 쪽이 안 읽으니 우리 ping 의 대답도 없다.
+                _ => {
+                    for _ in 0..5 {
+                        settle().await;
+                        a.clock.advance(Duration::from_secs(10));
+                    }
+                    "Idle"
+                }
+            };
+            // 쓰기 쪽 끝은 그 쓰다 만 알림을 `Dropped` 로 함께 센다 — 여기서 재는 것은 끝 까닭이다.
+            let ends: Vec<String> = labels(&drain_until_quiet(&mut inbox).await)
+                .into_iter()
+                .filter(|label| label != "Dropped")
+                .collect();
+            assert_eq!(
+                ends,
+                vec![
+                    "Connected:1".to_string(),
+                    format!("Disconnected:1:{expected}"),
+                    format!("Closed:1:{expected}"),
+                ],
+                "{case}"
+            );
+            assert!(ended(&mut inbox).await, "{case}");
+            assert!(a.registry.is_empty(), "{case}");
+        }
+    }
+
+    // 운영 단계에 못 든 끝도 읽기 끝 · 쓰기 끝을 가른다(`handshake_once` 의 실패 자리마다).
+    #[tokio::test]
+    async fn a_handshake_that_ends_on_the_link_reports_which_end_failed() {
+        for case in ["상대가 닫음", "말 없이 사라짐", "쓰기 오류", "쓰기 시한"] {
+            let mut a = Accepting::new(auth_policy());
+            let (mut near, accepted) = a.connect().await;
+            let far = a.far();
+            // 쓰기 쪽 갈래는 먼저 말하는 핸드셰이크로 잰다.
+            let handshake: Arc<dyn Handshake> = match case {
+                "쓰기 오류" | "쓰기 시한" => Arc::new(HelloHandshake),
+                _ => Arc::new(TokenGate),
+            };
+            let expected = match case {
+                "상대가 닫음" => "PeerClosed",
+                "말 없이 사라짐" => "ReadFailed",
+                "쓰기 오류" => {
+                    far.fail_writes();
+                    "WriteFailed"
+                }
+                _ => {
+                    far.stall_writes(true);
+                    "WriteDeadline"
+                }
+            };
+            let (_peer, mut inbox) = a.attach("conn-1", accepted, handshake);
+            settle().await;
+            match case {
+                "상대가 닫음" => near.tx.close(Close::going_away()).await,
+                "말 없이 사라짐" => drop(near),
+                "쓰기 시한" => a.clock.advance(AUTH),
+                _ => {}
+            }
+            assert_eq!(
+                labels(&drain_until_quiet(&mut inbox).await),
+                vec![format!("Closed:0:{expected}")],
+                "{case}"
+            );
+            assert!(ended(&mut inbox).await, "{case}");
+            assert!(a.registry.is_empty(), "{case}");
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_failures_and_silent_links_do_not_stop_a_later_real_connection() {
+        let mut a = Accepting::new(auth_policy());
+        let permits = a.listener.permits();
+        for n in 1..=5 {
+            let (mut near, accepted) = a.connect().await;
+            let (_peer, mut inbox) = a.attach(&format!("conn-{n}"), accepted, Arc::new(TokenGate));
+            near.say("auth|stale").await;
+            let items = drain_until_quiet(&mut inbox).await;
+            assert_eq!(
+                labels(&items),
+                vec!["Closed:0:Explicit"],
+                "{n}: 거는 쪽 사건(Rejected · ConnectFailed · GaveUp) 없이 끝만 — 거절은 우리가 했다"
+            );
+            assert!(ended(&mut inbox).await, "{n}");
+            assert_eq!(
+                near.arrived().await,
+                vec![Seen::Closed(Some(Close::new(
+                    RejectKind::Retryable.close_code(),
+                    "bad token"
+                )))],
+                "{n}: 거절 코드는 상대에게 간다"
+            );
+        }
+        // 종결 거절도 끝만 온다 — `Rejected` 는 바로 뒤의 `GaveUp` 을 약속하는 거는 쪽 사건이다.
+        let (mut near, accepted) = a.connect().await;
+        let (_peer, mut inbox) = a.attach(
+            "conn-terminal",
+            accepted,
+            RejectingHandshake::new("version mismatch"),
+        );
+        assert_eq!(
+            labels(&drain_until_quiet(&mut inbox).await),
+            vec!["Closed:0:Explicit"]
+        );
+        assert_eq!(
+            near.arrived().await,
+            vec![Seen::Closed(Some(Close::new(
+                RejectKind::Terminal.close_code(),
+                "version mismatch"
+            )))]
+        );
+        // 아무 말도 안 하는 통로 — 인증 시한에 닫기 없이 버린다.
+        let (mut silent, accepted) = a.connect().await;
+        let (_peer, mut inbox) = a.attach("conn-6", accepted, Arc::new(TokenGate));
+        settle().await;
+        a.clock.advance(AUTH);
+        assert_eq!(
+            labels(&drain_until_quiet(&mut inbox).await),
+            vec!["Closed:0:Idle"]
+        );
+        assert_eq!(silent.arrived().await, vec![Seen::Failed]);
+
+        let (mut near, accepted) = a.connect().await;
+        let (peer, mut inbox) = a.attach("conn-7", accepted, Arc::new(TokenGate));
+        near.say(GOOD).await;
+        settle_until("운영", || peer.peer_state().is_live()).await;
+        assert_eq!(
+            labels(&drain_until_quiet(&mut inbox).await),
+            vec!["Connected:1"]
+        );
+        assert_eq!(a.registry.len(), 1, "실패한 상대는 명부에 남지 않는다");
+        assert_eq!(a.generation_names(), 0);
+        assert_eq!(permits.in_use(), 0);
+        assert_eq!(a.redials.dials(), 0);
+    }
+
+    // ★인증 프레임은 이미 와 있다★ — 지난 시한에도 한 번 읽어 보는 길(`with_deadline` 의 0)이면 통과한다.
+    #[tokio::test]
+    async fn a_link_that_sat_in_the_ready_queue_past_the_auth_deadline_closes_as_soon_as_it_is_attached(
+    ) {
+        for (sat, live) in [
+            (AUTH - Duration::from_millis(1), true),
+            (AUTH, false),
+            (AUTH * 3, false),
+        ] {
+            let mut a = Accepting::new(auth_policy());
+            let (mut near, accepted) = a.connect().await;
+            near.say(GOOD).await;
+            a.clock.advance(sat);
+            let (_peer, mut inbox) = a.attach("conn-1", accepted, Arc::new(TokenGate));
+            let items = drain_until_quiet(&mut inbox).await;
+            if live {
+                assert_eq!(labels(&items), vec!["Connected:1"], "{sat:?}");
+            } else {
+                assert_eq!(labels(&items), vec!["Closed:0:Idle"], "{sat:?}");
+                assert!(ended(&mut inbox).await, "{sat:?}");
+                assert!(a.registry.is_empty(), "{sat:?}");
+                assert_eq!(near.arrived().await, vec![Seen::Failed], "{sat:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_auth_deadline_counts_from_the_upgrade_not_from_attach() {
+        let mut a = Accepting::new(auth_policy());
+        let (_near, accepted) = a.connect().await;
+        a.clock.advance(Duration::from_millis(600));
+        let (_peer, mut inbox) = a.attach("conn-1", accepted, Arc::new(TokenGate));
+        settle().await;
+        a.clock.advance(Duration::from_millis(399));
+        assert!(
+            drain_until_quiet(&mut inbox).await.is_empty(),
+            "업그레이드 뒤 999 ms — 아직 시한 전"
+        );
+        a.clock.advance(Duration::from_millis(1));
+        assert_eq!(
+            labels(&drain_until_quiet(&mut inbox).await),
+            vec!["Closed:0:Idle"],
+            "붙인 뒤로는 400 ms 뿐이다"
+        );
+    }
+
+    #[tokio::test]
+    async fn roster_generation_table_and_permits_stay_flat_across_many_accept_close_cycles() {
+        let mut a = Accepting::new(auth_policy());
+        let permits = a.listener.permits();
+        for n in 0..30 {
+            let (mut near, accepted) = a.connect().await;
+            let (peer, mut inbox) = a.attach(&format!("conn-{n}"), accepted, Arc::new(TokenGate));
+            match n % 3 {
+                0 => {
+                    near.say(GOOD).await;
+                    settle_until("운영", || peer.peer_state().is_live()).await;
+                    drop(near);
+                }
+                1 => near.say("auth|stale").await,
+                _ => {
+                    near.say(GOOD).await;
+                    settle_until("운영", || peer.peer_state().is_live()).await;
+                    peer.close();
+                }
+            }
+            let items = drain_until_quiet(&mut inbox).await;
+            assert_eq!(kinds(&items).last(), Some(&"Closed"), "{n}");
+            assert!(ended(&mut inbox).await, "{n}");
+            assert!(a.registry.is_empty(), "{n}");
+            assert_eq!(
+                a.generation_names(),
+                0,
+                "{n}: 받은 상대는 세대 표에 안 든다"
+            );
+            assert_eq!(permits.in_use(), 0, "{n}");
+        }
+        assert_eq!(a.listener.queued(), 0);
+        assert_eq!(a.redials.dials(), 0);
+    }
+
+    /// 양쪽이 같은 어휘를 쓰는 최소 패킷 — 묻기와 답하기뿐이다. `TestWire` 는 한쪽(클라) 어휘라 두 명부를 마주 잇지
+    /// 못한다.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum Talk {
+        Ask { tag: u64, body: String },
+        Answer { tag: u64, body: String },
+    }
+
+    struct TalkWire;
+
+    impl Wire for TalkWire {
+        type Out = Talk;
+        type In = Talk;
+        type Tag = u64;
+        type StreamKey = u32;
+        type DecodeError = TestDecodeError;
+
+        fn encode(&self, out: &Talk) -> Frame {
+            Frame::Text(match out {
+                Talk::Ask { tag, body } => format!("ask|{tag}|{body}"),
+                Talk::Answer { tag, body } => format!("ans|{tag}|{body}"),
+            })
+        }
+
+        fn decode(&self, frame: Frame) -> Result<Talk, TestDecodeError> {
+            let Frame::Text(text) = frame else {
+                return Err(TestDecodeError::Unknown("not text".into()));
+            };
+            let tag = |s: &str| {
+                s.parse::<u64>()
+                    .map_err(|e| TestDecodeError::BadNumber(e.to_string()))
+            };
+            match text.splitn(3, '|').collect::<Vec<_>>().as_slice() {
+                ["ask", t, body] => Ok(Talk::Ask {
+                    tag: tag(t)?,
+                    body: (*body).to_string(),
+                }),
+                ["ans", t, body] => Ok(Talk::Answer {
+                    tag: tag(t)?,
+                    body: (*body).to_string(),
+                }),
+                _ => Err(TestDecodeError::Unknown(text)),
+            }
+        }
+
+        fn request_tag(&self, out: &Talk) -> Option<u64> {
+            match out {
+                Talk::Ask { tag, .. } => Some(*tag),
+                Talk::Answer { .. } => None,
+            }
+        }
+
+        fn reply_tag(&self, inn: &Talk) -> Option<u64> {
+            match inn {
+                Talk::Answer { tag, .. } => Some(*tag),
+                Talk::Ask { .. } => None,
+            }
+        }
+
+        fn stream_mark(&self, _inn: &Talk) -> Option<StreamMark<u32>> {
+            None
+        }
+
+        fn resume_request(&self, _key: &u32, _after: Option<u64>) -> Talk {
+            unreachable!("스트림을 안 쓴다")
+        }
+    }
+
+    /// 수신단에 온 물음마다 그 물음이 온 연결로 답한다. 답한 수를 돌려준다.
+    async fn answer_asks(peer: &Peer<TalkWire>, inbox: &mut Inbox<TalkWire>) -> usize {
+        settle().await;
+        let mut answered = 0;
+        while let Some(item) = inbox.try_recv() {
+            if let Some(Arrival {
+                generation,
+                msg: Talk::Ask { tag, body },
+                ..
+            }) = item.as_message()
+            {
+                let answer = Talk::Answer {
+                    tag: *tag,
+                    body: format!("re:{body}"),
+                };
+                peer.notify_in(*generation, answer).unwrap();
+                answered += 1;
+            }
+        }
+        answered
+    }
+
+    // transport 수준의 왕복이다 — 데몬끼리 어휘가 아니라 받는 쪽 자리가 양방향 요청을 나르는지를 잰다(TRD 3 §6-0 U6).
+    #[tokio::test]
+    async fn two_registries_ask_each_other_over_a_dialed_peer_and_an_attached_one() {
+        let clock = ManualClock::new();
+        let (mut listener, connector) = MemoryListener::new(clock.handle(), 4);
+        let client = Registry::new(
+            Arc::new(TalkWire),
+            connector.dialer(),
+            clock.handle(),
+            Policy::default(),
+        );
+        let server = Registry::new(
+            Arc::new(TalkWire),
+            MemoryNetwork::new().dialer(),
+            clock.handle(),
+            Policy::default(),
+        );
+        let (to_server, mut client_inbox) = client.add(
+            PeerId::new("server"),
+            Address::new("mem://server"),
+            immediate(),
+        );
+        let accepted = listener.accept().await.expect("받기");
+        let (to_client, mut server_inbox) =
+            server.attach(PeerId::new("conn-1"), accepted, immediate());
+        settle_until("양쪽 운영", || {
+            to_server.peer_state().is_live() && to_client.peer_state().is_live()
+        })
+        .await;
+
+        // 요청은 수신단을 비우는 task 밖에서 기다린다(crate 헤더 「받는 쪽 불변식」 1).
+        let ask = |peer: &Peer<TalkWire>, tag: u64, body: &str| {
+            let peer = peer.clone();
+            let out = Talk::Ask {
+                tag,
+                body: body.into(),
+            };
+            tokio::spawn(async move { peer.request(out).await })
+        };
+        let client_asked = ask(&to_server, 1, "ping");
+        let server_asked = ask(&to_client, 2, "who");
+        assert_eq!(answer_asks(&to_client, &mut server_inbox).await, 1);
+        assert_eq!(answer_asks(&to_server, &mut client_inbox).await, 1);
+        for (asked, expected) in [
+            (
+                client_asked,
+                Talk::Answer {
+                    tag: 1,
+                    body: "re:ping".into(),
+                },
+            ),
+            (
+                server_asked,
+                Talk::Answer {
+                    tag: 2,
+                    body: "re:who".into(),
+                },
+            ),
+        ] {
+            let got = tokio::time::timeout(Duration::from_secs(5), asked)
+                .await
+                .expect("답이 안 왔다")
+                .expect("요청 태스크가 패닉했다")
+                .expect("요청이 실패했다");
+            assert_eq!(got, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_accepted_peer_flushes_what_it_holds_before_closing() {
+        let mut a = Accepting::new(auth_policy());
+        let (mut near, accepted) = a.connect().await;
+        let far = a.far();
+        let (peer, mut inbox) = a.attach("conn-1", accepted, immediate());
+        settle_until("운영", || peer.peer_state().is_live()).await;
+        far.stall_writes(true);
+        peer.notify(TestOut::Notice("ack".into())).unwrap();
+        peer.notify(TestOut::Notice("last".into())).unwrap();
+        let closing = tokio::spawn(peer.close_after_flush(CloseCode::GOING_AWAY, "bye"));
+        settle().await;
+        assert!(!closing.is_finished(), "막힌 쓰기를 비우는 중이다");
+        far.stall_writes(false);
+        settle_until("비우고 닫았다", || closing.is_finished()).await;
+        assert_eq!(
+            near.arrived().await,
+            vec![
+                Seen::Frame(Frame::Text("not|ack".into())),
+                Seen::Frame(Frame::Text("not|last".into())),
+                Seen::Closed(Some(Close::new(CloseCode::GOING_AWAY, "bye"))),
+            ]
+        );
+        assert_eq!(
+            labels(&drain_until_quiet(&mut inbox).await),
+            vec![
+                "Connected:1",
+                "Disconnected:1:Explicit",
+                "Closed:1:Explicit"
+            ]
+        );
+        assert!(ended(&mut inbox).await);
+        assert!(a.registry.is_empty());
+    }
+
+    // ★옛 감독은 새것이 오른 뒤에 끝난다★ — 그 끝의 명부 내리기가 새것을 내리면 안 된다.
+    #[tokio::test]
+    async fn re_attaching_a_name_closes_the_old_peer_and_its_end_leaves_the_new_one_listed() {
+        let mut a = Accepting::new(auth_policy());
+        let (mut first, accepted) = a.connect().await;
+        let (old, mut old_inbox) = a.attach("conn", accepted, immediate());
+        settle_until("옛것 운영", || old.peer_state().is_live()).await;
+        let (second, accepted) = a.connect().await;
+        let (new, mut new_inbox) = a.attach("conn", accepted, immediate());
+        settle_until("새것 운영", || new.peer_state().is_live()).await;
+        assert_eq!(
+            labels(&drain_until_quiet(&mut old_inbox).await),
+            vec![
+                "Connected:1",
+                "Disconnected:1:Explicit",
+                "Closed:1:Explicit"
+            ]
+        );
+        assert!(ended(&mut old_inbox).await);
+        assert_eq!(first.arrived().await, vec![closing()]);
+        assert_eq!(
+            labels(&drain_until_quiet(&mut new_inbox).await),
+            vec!["Connected:2"],
+            "갈아치운 손잡이의 계수기를 물려받는다 — 세대가 되감기지 않는다"
+        );
+        assert!(
+            a.registry
+                .get(&PeerId::new("conn"))
+                .is_some_and(|listed| listed.same(&new)),
+            "옛 감독의 끝이 새것을 내리지 않는다"
+        );
+        assert_eq!(a.generation_names(), 0);
+        drop(second);
+        drain_until_quiet(&mut new_inbox).await;
+        assert!(a.registry.is_empty());
+    }
+
+    // 표에 있는 이름표(`add`)를 받은 통로로 갈아치우면 표의 계수기를 잇고(표는 안 자란다), 받은 상대를 `add` 로
+    //   갈아치우면 그 계수기를 표에 올린다 — 어느 쪽이든 같은 번호를 두 번 뽑지 않는다.
+    #[tokio::test]
+    async fn a_name_passed_between_add_and_attach_never_mints_the_same_generation_twice() {
+        let mut a = Accepting::new(auth_policy());
+        let x = PeerId::new("x");
+        let (dialed, _dialed_inbox) =
+            a.registry
+                .add(x.clone(), Address::new("mem://x"), immediate());
+        settle_until("add 운영", || dialed.peer_state().is_live()).await;
+        assert_eq!(dialed.generation(), Generation(1));
+        let (_near, accepted) = a.connect().await;
+        let (attached, _attached_inbox) = a.attach("x", accepted, immediate());
+        settle_until("attach 운영", || attached.peer_state().is_live()).await;
+        assert_eq!(attached.generation(), Generation(2));
+        assert_eq!(a.generation_names(), 1, "읽기만 했다");
+
+        let (_near, accepted) = a.connect().await;
+        let (attached, _attached_inbox) = a.attach("y", accepted, immediate());
+        settle_until("attach 운영", || attached.peer_state().is_live()).await;
+        assert_eq!(attached.generation(), Generation(1));
+        let (dialed, _dialed_inbox) =
+            a.registry
+                .add(PeerId::new("y"), Address::new("mem://y"), immediate());
+        settle_until("add 운영", || dialed.peer_state().is_live()).await;
+        assert_eq!(dialed.generation(), Generation(2));
+        assert_eq!(a.generation_names(), 2);
+    }
+
+    #[tokio::test]
+    async fn after_close_all_an_attach_or_an_add_is_closed_at_once_and_never_listed() {
+        let mut a = Accepting::new(auth_policy());
+        let (_listed_near, accepted) = a.connect().await;
+        let (listed, mut listed_inbox) = a.attach("conn-0", accepted, immediate());
+        settle_until("운영", || listed.peer_state().is_live()).await;
+        let folding = tokio::spawn(a.registry.close_all(Duration::from_secs(3)));
+
+        let (mut near, accepted) = a.connect().await;
+        let (_late, mut inbox) = a.attach("conn-1", accepted, immediate());
+        assert!(a.registry.get(&PeerId::new("conn-1")).is_none());
+        assert_eq!(
+            labels(&drain_until_quiet(&mut inbox).await),
+            vec!["Closed:0:Explicit"]
+        );
+        assert!(ended(&mut inbox).await);
+        assert_eq!(near.arrived().await, vec![closing()]);
+
+        let (_dialed, mut dialed_inbox) =
+            a.registry
+                .add(PeerId::new("d"), Address::new("mem://d"), immediate());
+        assert_eq!(
+            labels(&drain_until_quiet(&mut dialed_inbox).await),
+            vec!["Closed:0:Explicit"]
+        );
+        assert!(ended(&mut dialed_inbox).await);
+        assert_eq!(
+            a.redials.dials(),
+            0,
+            "접은 명부에 올린 상대는 걸지도 않는다"
+        );
+
+        assert_eq!(
+            labels(&drain_until_quiet(&mut listed_inbox).await),
+            vec![
+                "Connected:1",
+                "Disconnected:1:Explicit",
+                "Closed:1:Explicit"
+            ]
+        );
+        settle_until("접기 끝", || folding.is_finished()).await;
+        assert_eq!(folding.await.expect("close_all 태스크"), Ok(()));
+        assert!(a.registry.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_upgrade_permit_is_held_through_the_handshake_and_given_back_at_live_or_at_failure()
+    {
+        let mut a = Accepting::new(auth_policy());
+        let permits = a.listener.permits();
+        let (mut near, accepted) = a.connect().await;
+        assert_eq!(permits.in_use(), 1, "준비 큐");
+        let (peer, _inbox) = a.attach("conn-1", accepted, Arc::new(TokenGate));
+        settle().await;
+        assert_eq!(
+            permits.in_use(),
+            1,
+            "인증 대기 칸이 생기기 전까지 핸드셰이크 동안 쥔다"
+        );
+        near.say(GOOD).await;
+        settle_until("운영", || peer.peer_state().is_live()).await;
+        assert_eq!(permits.in_use(), 0, "운영 단계에 들면 놓는다");
+
+        let (mut stale, accepted) = a.connect().await;
+        assert_eq!(permits.in_use(), 1);
+        let (_failed, _failed_inbox) = a.attach("conn-2", accepted, Arc::new(TokenGate));
+        stale.say("auth|stale").await;
+        settle().await;
+        assert_eq!(
+            permits.in_use(),
+            0,
+            "인증에 실패한 상대는 수신단을 안 비워도 칸을 놓는다"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_accepted_peer_ignores_reconnect_now_and_folds_once_its_inbox_is_dropped() {
+        let mut a = Accepting::new(auth_policy());
+        let (mut near, accepted) = a.connect().await;
+        let (peer, mut inbox) = a.attach("conn-1", accepted, immediate());
+        settle_until("운영", || peer.peer_state().is_live()).await;
+        peer.reconnect_now();
+        settle().await;
+        assert!(
+            peer.peer_state().is_live(),
+            "걸 주소가 없다 — 운영 중인 통로를 안 버린다"
+        );
+        assert_eq!(
+            labels(&drain_until_quiet(&mut inbox).await),
+            vec!["Connected:1"]
+        );
+        assert!(near.arrived().await.is_empty());
+
+        drop(inbox);
+        settle().await;
+        assert_eq!(near.arrived().await, vec![closing()]);
+        assert_eq!(peer.peer_state(), PeerState::Closed);
+        assert!(a.registry.is_empty());
+    }
+
+    // 정리는 받는 쪽이 수신단을 비우기를 기다린다 — 그 사이 명부에 끝난 손잡이가 보이면 안 된다.
+    #[tokio::test]
+    async fn an_accepted_peer_leaves_the_roster_before_its_teardown_waits_on_the_inbox() {
+        let mut a = Accepting::new(Policy {
+            inbound_queue: 1,
+            ..auth_policy()
+        });
+        let (_near, accepted) = a.connect().await;
+        let (peer, mut inbox) = a.attach("conn-1", accepted, immediate());
+        settle_until("운영", || peer.peer_state().is_live()).await;
+        peer.close();
+        settle().await;
+        assert!(
+            a.registry.is_empty(),
+            "수신단이 차 정리가 서 있어도 명부에는 없다"
+        );
+        assert_eq!(
+            labels(&drain_until_quiet(&mut inbox).await),
+            vec![
+                "Connected:1",
+                "Disconnected:1:Explicit",
+                "Closed:1:Explicit"
+            ]
+        );
+        assert!(ended(&mut inbox).await);
+    }
+
+    #[tokio::test]
+    async fn an_accepted_peer_whose_supervisor_panics_still_leaves_the_roster() {
+        let mut a = Accepting::new(auth_policy());
+        let (_near, accepted) = a.connect().await;
+        let (_peer, mut inbox) = a.attach("conn-1", accepted, Arc::new(PanickingHandshake));
+        settle_until("감독이 끝났다", || a.registry.is_empty()).await;
+        assert!(drain_until_quiet(&mut inbox).await.is_empty());
+        assert!(ended(&mut inbox).await, "`Closed` 없는 `None`");
+    }
+
+    // ── 3-0 U6b: 일꾼 스레드가 여럿인 런타임에서 올리기 ──
+    //
+    // ★`settle` 을 못 쓴다★(current_thread 전용 — `testing.rs`) — 끝은 실시간 시한을 건 대기로 본다. OS 스레드
+    //   `RACE_THREADS` 개가 장벽에서 함께 출발해 같은 명부를 두드린다 — 감독은 그 사이 일꾼 스레드에서 돈다.
+
+    const RACE_THREADS: usize = 4;
+    const REAL_WAIT: Duration = Duration::from_secs(10);
+
+    /// 수신단을 끝(`None`)까지 비운다 — 실시간 [`REAL_WAIT`] 안에 안 끝나면 패닉한다.
+    async fn drain_to_end(inbox: &mut Inbox<TestWire>) -> Vec<Incoming<TestWire>> {
+        tokio::time::timeout(REAL_WAIT, async {
+            let mut out = Vec::new();
+            while let Some(item) = inbox.recv().await {
+                out.push(item);
+            }
+            out
+        })
+        .await
+        .expect("수신단이 실시간 시한 안에 안 끝났다")
+    }
+
+    /// 조건이 서기를 실시간 [`REAL_WAIT`] 까지 기다린다.
+    async fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+        tokio::time::timeout(REAL_WAIT, async {
+            while !done() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("실시간 시한 안에 안 섰다: {what}"));
+    }
+
+    /// 받은 통로 하나와 그 거는 쪽 끝 — 업그레이드 끝 = `upgraded_at`.
+    fn accepted_link(pool: &PermitPool, upgraded_at: Instant) -> (Near, Accepted) {
+        let (near, far) = memory_link();
+        let permit = pool.try_take().expect("업그레이드 칸");
+        let accepted = Accepted::new(far.tx, far.rx, LinkInfo::default(), upgraded_at, permit);
+        (
+            Near {
+                tx: near.tx,
+                rx: near.rx,
+            },
+            accepted,
+        )
+    }
+
+    /// OS 스레드 [`RACE_THREADS`] 개가 런타임 문맥 안에서 장벽을 함께 넘어 `call(스레드 번호)` 를 돌린다. ★이 대기는
+    /// 시험 본문 스레드를 막는다★ — multi_thread 시험의 본문은 일꾼이 아니라 `block_on` 스레드라 감독은 계속 돈다.
+    fn race<T: Send>(call: impl Fn(usize) -> T + Sync) -> Vec<T> {
+        let runtime = tokio::runtime::Handle::current();
+        let start = std::sync::Barrier::new(RACE_THREADS);
+        std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..RACE_THREADS)
+                .map(|t| {
+                    let (runtime, start, call) = (&runtime, &start, &call);
+                    scope.spawn(move || {
+                        let _entered = runtime.enter();
+                        start.wait();
+                        call(t)
+                    })
+                })
+                .collect();
+            threads
+                .into_iter()
+                .map(|thread| thread.join().expect("경합 스레드가 패닉했다"))
+                .collect()
+        })
+    }
+
+    /// 거는 쪽 끝을 끝(닫힘 · 오류)까지 읽는다 — 실시간 [`REAL_WAIT`] 까지. ★[`Near::arrived`] 를 쓰지 않는다★ — 기다리지
+    /// 않고 한 번만 폴링해, tokio 의 협조 예산이 바닥난 task 에서는 와 있는 것도 못 읽는다.
+    async fn read_to_end(near: &mut Near) -> Vec<Seen> {
+        tokio::time::timeout(REAL_WAIT, async {
+            let mut out = Vec::new();
+            loop {
+                let seen = match near.rx.recv().await {
+                    Ok(LinkRead::Frame(frame)) => Seen::Frame(frame),
+                    Ok(LinkRead::Closed(close)) => Seen::Closed(close),
+                    Err(_) => Seen::Failed,
+                };
+                let end = !matches!(seen, Seen::Frame(_));
+                out.push(seen);
+                if end {
+                    return out;
+                }
+            }
+        })
+        .await
+        .expect("거는 쪽 끝이 실시간 시한 안에 안 끝났다")
+    }
+
+    fn connected_generations(items: &[Incoming<TestWire>]) -> Vec<u64> {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                Incoming::Event(TransportEvent::Connected { generation, .. }) => Some(generation.0),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // 첫 폴링에 곧바로 끝나는 받은 상대 — 시한이 이미 지났거나(`Idle`) 거는 쪽이 이미 끊었다. 올리기가 띄우기보다
+    //   뒤면 다른 일꾼에서 명부 내리기까지 마친 감독의 손잡이가 그 뒤에 올라 영영 남는다(`Registry::launch`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn accepted_peers_that_end_on_their_first_poll_never_stay_listed() {
+        const PER_THREAD: usize = 50;
+        let clock = ManualClock::new();
+        let registry = Registry::new(
+            Arc::new(TestWire),
+            MemoryNetwork::new().dialer(),
+            clock.handle(),
+            auth_policy(),
+        );
+        let upgraded_at = clock.handle().now();
+        clock.advance(AUTH * 2);
+        let pool = PermitPool::new(RACE_THREADS * PER_THREAD);
+        let attached = race(|t| {
+            (0..PER_THREAD)
+                .map(|n| {
+                    let past_deadline = n % 2 == 0;
+                    let at = if past_deadline {
+                        upgraded_at
+                    } else {
+                        clock.handle().now()
+                    };
+                    let (near, accepted) = accepted_link(&pool, at);
+                    if !past_deadline {
+                        drop(near);
+                    }
+                    let (_peer, inbox) = registry.attach(
+                        PeerId::new(format!("conn-{t}-{n}")),
+                        accepted,
+                        Arc::new(TokenGate),
+                    );
+                    inbox
+                })
+                .collect::<Vec<_>>()
+        });
+        for mut inbox in attached.into_iter().flatten() {
+            assert_eq!(kinds(&drain_to_end(&mut inbox).await), vec!["Closed"]);
+        }
+        assert_eq!(registry.len(), 0, "끝난 받은 상대는 명부에 남지 않는다");
+        assert_eq!(pool.in_use(), 0);
+    }
+
+    // 접은 명부에 올린 상대는 띄우기 전에 닫기가 들어 있어, 어느 일꾼에서 먼저 돌든 걸지도 핸드셰이크하지도 않는다.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn after_close_all_no_attach_shakes_hands_and_no_add_dials_on_a_multi_thread_runtime() {
+        const PER_THREAD: usize = 25;
+        let clock = ManualClock::new();
+        let net = MemoryNetwork::new();
+        let registry = Registry::new(
+            Arc::new(TestWire),
+            net.dialer(),
+            clock.handle(),
+            auth_policy(),
+        );
+        assert_eq!(registry.close_all(Duration::from_secs(1)).await, Ok(()));
+        let pool = PermitPool::new(RACE_THREADS * PER_THREAD);
+        let late = race(|t| {
+            (0..PER_THREAD)
+                .map(|n| {
+                    let (near, accepted) = accepted_link(&pool, clock.handle().now());
+                    let (_attached, attached_inbox) = registry.attach(
+                        PeerId::new(format!("conn-{t}-{n}")),
+                        accepted,
+                        Arc::new(HelloHandshake),
+                    );
+                    let (_dialed, dialed_inbox) = registry.add(
+                        PeerId::new(format!("d-{t}-{n}")),
+                        Address::new("mem://d"),
+                        immediate(),
+                    );
+                    (near, attached_inbox, dialed_inbox)
+                })
+                .collect::<Vec<_>>()
+        });
+        for (mut near, mut attached_inbox, mut dialed_inbox) in late.into_iter().flatten() {
+            for inbox in [&mut attached_inbox, &mut dialed_inbox] {
+                assert_eq!(
+                    labels(&drain_to_end(inbox).await),
+                    vec!["Closed:0:Explicit"]
+                );
+            }
+            assert_eq!(
+                read_to_end(&mut near).await,
+                vec![closing()],
+                "핸드셰이크 프레임(hello) 없이 닫기만 온다"
+            );
+        }
+        assert_eq!(net.dials(), 0, "접은 명부에 올린 상대는 걸지 않는다");
+        assert!(registry.is_empty());
+        assert_eq!(pool.in_use(), 0);
+    }
+
+    // 같은 이름표를 여러 호출이 동시에 `add` · `attach` 로 갈아치운다. ★표에 칸이 없는 받은 상대가 올라 있을 때가
+    //   경합 자리다★ — 그 손잡이를 빼는 자리와 계수기를 고르는 자리가 갈리면 다른 호출이 손잡이도 표의 칸도 못 보고 새
+    //   계수기를 만들어 이미 나간 세대를 다시 뽑는다(`Registry::launch`). 그래서 이름표마다 그 상태로 시작한다.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn racing_replacements_of_one_name_never_mint_the_same_generation_twice() {
+        const NAMES: usize = 60;
+        const PER_THREAD: usize = 4;
+        let clock = ManualClock::new();
+        let net = MemoryNetwork::new();
+        let registry = Registry::new(
+            Arc::new(TestWire),
+            net.dialer(),
+            clock.handle(),
+            Policy::default(),
+        );
+        let pool = PermitPool::new(NAMES * (1 + RACE_THREADS * PER_THREAD));
+        for round in 0..NAMES {
+            let name = PeerId::new(format!("x{round}"));
+            let (first_near, accepted) = accepted_link(&pool, clock.handle().now());
+            let (first, first_inbox) = registry.attach(name.clone(), accepted, immediate());
+            wait_until("받은 상대 운영", || first.peer_state().is_live()).await;
+            let raced = race(|t| {
+                (0..PER_THREAD)
+                    .map(|n| {
+                        if (t + n) % 2 == 0 {
+                            let (_peer, inbox) =
+                                registry.add(name.clone(), Address::new("mem://x"), immediate());
+                            (None, inbox)
+                        } else {
+                            let (near, accepted) = accepted_link(&pool, clock.handle().now());
+                            let (_peer, inbox) =
+                                registry.attach(name.clone(), accepted, immediate());
+                            (Some(near), inbox)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            });
+            // 경합 뒤 표에 남은 계수기로 한 번 더 붙는다 — 경합이 새 계수기를 표에 올렸으면 여기서 1 을 다시 뽑는다.
+            let (last, last_inbox) =
+                registry.add(name.clone(), Address::new("mem://x"), immediate());
+            wait_until("마지막 상대 운영", || last.peer_state().is_live()).await;
+            registry.remove(&name);
+
+            let mut nears = vec![first_near];
+            let mut inboxes = vec![first_inbox, last_inbox];
+            for (near, inbox) in raced.into_iter().flatten() {
+                nears.extend(near);
+                inboxes.push(inbox);
+            }
+            let mut minted = Vec::new();
+            for inbox in &mut inboxes {
+                minted.extend(connected_generations(&drain_to_end(inbox).await));
+            }
+            let mut unique = minted.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            assert_eq!(
+                unique.len(),
+                minted.len(),
+                "{name:?}: 같은 세대를 두 번 뽑았다 — {minted:?}"
+            );
+            drop(nears);
+        }
+    }
+
+    /// [`TrippingClock`] 이 터뜨리는 패닉의 값.
+    struct Tripped;
+
+    /// 정해 둔 스레드의 n 번째 `now()` 에서 한 번 패닉하는 시계 — 그 밖은 [`ManualClock`] 그대로다. ★스레드로
+    /// 거른다★ — 다른 감독이 일꾼 스레드에서 읽는 것이 세는 수에 섞이지 않게.
+    #[derive(Default)]
+    struct TrippingClock {
+        clock: ManualClock,
+        trip: Mutex<Option<(std::thread::ThreadId, usize)>>,
+    }
+
+    impl TrippingClock {
+        /// 부른 스레드의 `nth` 번째 읽기에서 패닉하게 한다.
+        fn arm(&self, nth: usize) {
+            *self.trip.lock().unwrap() = Some((std::thread::current().id(), nth));
+        }
+    }
+
+    impl Clock for TrippingClock {
+        fn now(&self) -> Instant {
+            let fire = {
+                let mut trip = self.trip.lock().unwrap();
+                match trip.as_mut() {
+                    Some((thread, left)) if *thread == std::thread::current().id() => {
+                        *left -= 1;
+                        let fire = *left == 0;
+                        if fire {
+                            *trip = None;
+                        }
+                        fire
+                    }
+                    _ => false,
+                }
+            };
+            // 자물쇠를 놓은 뒤에 터뜨린다 — 쥔 채 터지면 그 독이 다른 감독의 읽기까지 터뜨린다.
+            if fire {
+                std::panic::panic_any(Tripped);
+            }
+            self.clock.now()
+        }
+
+        fn sleep(&self, d: Duration) -> futures_util::future::BoxFuture<'static, ()> {
+            self.clock.sleep(d)
+        }
+    }
+
+    /// `call` 을 런타임 문맥에 든 OS 스레드에서 패닉을 잡으며 돌린다 — 실시간 [`REAL_WAIT`] 안에 안 끝나면 교착으로
+    /// 보고 패닉한다. ★그 스레드를 떼어 둔다★ — 교착한 스레드를 기다리면 시험이 실패하지 않고 매달린다.
+    fn off_thread<T: Send + 'static>(
+        call: impl FnOnce() -> T + Send + 'static,
+    ) -> std::thread::Result<T> {
+        let runtime = tokio::runtime::Handle::current();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _entered = runtime.enter();
+            let _ = done_tx.send(std::panic::catch_unwind(std::panic::AssertUnwindSafe(call)));
+        });
+        done_rx
+            .recv_timeout(REAL_WAIT)
+            .expect("실시간 시한 안에 안 끝났다 — 명부 자물쇠 교착")
+    }
+
+    // 갈아치우는 `attach` · `add` 가 명부 자물쇠 안에서 감독을 짓다 패닉한다(주입한 시계). ★받은 상대는 짓기 뒤에
+    //   패닉하면 풀리며 떨어지는 명부 내리기가 같은 스레드에서 자물쇠를 다시 잡는다★(`peer.rs` 의 `new_peer`) — 그
+    //   교착이 시험을 매달지 않게 실시간 시한을 건 스레드에서 부른다. 짓기 전에 표를 바꾸면 갈아치우려던 손잡이가
+    //   명부에서 사라진다(`Registry::launch`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_replacement_that_panics_while_preparing_leaves_the_roster_untouched_and_usable() {
+        let clock = Arc::new(TrippingClock::default());
+        let registry = Registry::new(
+            Arc::new(TestWire),
+            MemoryNetwork::new().dialer(),
+            clock.clone(),
+            Policy::default(),
+        );
+        let pool = PermitPool::new(2);
+        let name = PeerId::new("a");
+        let (first, mut first_inbox) =
+            registry.add(name.clone(), Address::new("mem://a"), immediate());
+        let still_first = |registry: &Registry<TestWire>| {
+            registry.len() == 1 && registry.get(&name).is_some_and(|peer| peer.same(&first))
+        };
+
+        // debug 빌드는 `attach_with_policy` 의 시계 단언이 짓기의 읽기 하나 앞에 선다.
+        let nth = if cfg!(debug_assertions) { 2 } else { 1 };
+        let (_near, accepted) = accepted_link(&pool, clock.now());
+        let attached = off_thread({
+            let (registry, clock, name) = (registry.clone(), clock.clone(), name.clone());
+            move || {
+                clock.arm(nth);
+                registry.attach(name, accepted, immediate())
+            }
+        });
+        assert!(attached.is_err_and(|panic| panic.is::<Tripped>()));
+        assert!(
+            still_first(&registry),
+            "받은 상대 짓기가 패닉해도 표는 그대로다"
+        );
+        assert_eq!(pool.in_use(), 0, "업그레이드 칸은 패닉과 함께 돌아간다");
+
+        let added = off_thread({
+            let (registry, clock, name) = (registry.clone(), clock.clone(), name.clone());
+            move || {
+                clock.arm(1);
+                registry.add(name, Address::new("mem://a"), immediate())
+            }
+        });
+        assert!(added.is_err_and(|panic| panic.is::<Tripped>()));
+        assert!(
+            still_first(&registry),
+            "건 상대 짓기가 패닉해도 표는 그대로다"
+        );
+        wait_until("갈아치우려던 상대 운영", || {
+            first.peer_state().is_live()
+        })
+        .await;
+
+        let (_near, accepted) = accepted_link(&pool, clock.now());
+        let (replaced, _replaced_inbox) = off_thread({
+            let (registry, name) = (registry.clone(), name.clone());
+            move || registry.attach(name, accepted, immediate())
+        })
+        .expect("패닉 뒤에도 명부를 쓴다");
+        assert!(registry.get(&name).is_some_and(|peer| peer.same(&replaced)));
+        assert_eq!(
+            kinds(&drain_to_end(&mut first_inbox).await).last(),
+            Some(&"Closed"),
+            "갈아치운 손잡이는 닫힌다"
+        );
     }
 }

@@ -257,19 +257,17 @@ impl fmt::Debug for LinkInfo {
 
 /// [`Listener::accept`] 가 내놓는 받은 통로 하나 — 양 끝 · [`LinkInfo`] · 업그레이드 칸 · 업그레이드 끝 시각.
 ///
-/// ★양 끝은 crate 밖으로 꺼내지 않는다★ — 받은 상대로 얹는 자리만 쓴다(3-0 U6b). 떨어뜨리면 두 끝이 함께 떨어진다
-/// ([`LinkTx`] 의 「양 끝이 둘 다」 의무가 여기서 저절로 선다).
+/// ★양 끝은 crate 밖으로 꺼내지 않는다★ — 받은 상대로 얹는 자리([`crate::Registry::attach`])만 쓴다. 떨어뜨리면 두
+/// 끝이 함께 떨어진다([`LinkTx`] 의 「양 끝이 둘 다」 의무가 여기서 저절로 선다).
 ///
 /// ★칸은 업그레이드 대기 칸이다★ — 전송이 통로를 받은 순간(TCP 수락)에 쥐고, 받는 쪽이 다음 칸(인증 대기)을 쥔
-/// 뒤에야 놓는다(TRD 3 §3-1 · §5 14). 그래서 소비자가 `accept` 를 안 부르는 동안 준비 큐에 앉은 통로도 센다.
+/// 뒤에야 놓는다(TRD 3 §3-1 · §5 14). 그래서 소비자가 `accept` 를 안 부르는 동안 준비 큐에 앉은 통로도 센다. 인증 대기
+/// 칸이 아직 없어 얹은 상대는 운영 단계에 들 때까지 이 칸을 쥔다([`crate::Registry::attach_with_policy`]).
 ///
 /// ★인증 시한은 `upgraded_at` 부터 잰다★(TRD 3 §5 3) — 준비 큐에 앉은 시간도 시한에 든다. 그 시각을 찍은 시계와
 /// 시한을 재는 시계가 같아야 하므로 전송 구현에 명부와 같은 [`crate::Clock`] 을 준다.
 pub struct Accepted {
-    // 읽는 자리 = 받은 상대로 얹는 자리(3-0 U6b) — 그 전에는 시험만 읽는다.
-    #[allow(dead_code)]
     pub(crate) tx: Box<dyn LinkTx>,
-    #[allow(dead_code)]
     pub(crate) rx: Box<dyn LinkRx>,
     pub(crate) info: LinkInfo,
     pub(crate) upgraded_at: Instant,

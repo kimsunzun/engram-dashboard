@@ -202,9 +202,13 @@ pub enum TransportEvent<W: Wire> {
     /// 순서 칸에 붙든 것을 다 실은 뒤 맨 끝에 내고, 감독이 넣는 끝을 놓아 그 수신단의 다음 `recv` 는 `None`
     /// 이다(TRD 3 §3-0 ②).
     ///
-    /// `generation` = 이 감독의 마지막 연결 세대(한 번도 안 붙었으면 명부가 준 바닥값) · `cause` = 끝낸
-    /// 까닭 — 지금은 늘 [`DisconnectCause::Explicit`] 다(감독이 끝나는 길이 닫기 하나뿐이다: 앱이 닫았거나,
-    /// 그 손잡이가 다 사라졌거나, 받는 쪽이 수신단을 닫았다).
+    /// `generation` = 이 감독의 마지막 연결 세대(한 번도 안 붙었으면 명부가 준 바닥값) · `cause` = 끝낸 까닭.
+    /// ★건 상대([`crate::Registry::add`])는 늘 [`DisconnectCause::Explicit`] 다★ — 감독이 끝나는 길이 닫기 하나뿐이다
+    /// (앱이 닫았거나, 그 손잡이가 다 사라졌거나, 받는 쪽이 수신단을 닫았다). ★받은 상대([`crate::Registry::attach`])는
+    /// 진짜 까닭이다★ — 다시 걸지 않아 연결을 잃는 것이 곧 끝이다: 운영 중 끊김이면 앞의 `Disconnected` 와 같은 까닭,
+    /// 운영 단계에 못 들었으면 핸드셰이크가 멈춘 자리(우리 핸드셰이크의 거절 = `Explicit` · 상대가 닫음 = `PeerClosed` ·
+    /// 읽기 · 쓰기 오류 = `ReadFailed` · `WriteFailed` · 쓰기가 시한을 넘김 = `WriteDeadline` · 인증 시한까지 상대가 못
+    /// 마침 = `Idle`), 앱 · 받는 쪽이 닫았으면 `Explicit`.
     ///
     /// ★`generation` 으로 감독을 가르지 않는다 — 수신단이 가른다★ — 바닥값은 같은 이름표의 앞 감독이
     /// 마지막으로 뽑은 세대라, 한 번도 안 붙고 끝난 감독의 이것은 앞 감독의 이것과 똑같을 수 있다. 감독마다
@@ -217,7 +221,8 @@ pub enum TransportEvent<W: Wire> {
     /// 끝이 떨어져 `Closed` 없는 `None` 이 끝을 알린다 — 그것을 상한 초과로만 읽지 말 것.
     ///
     /// 운영 중 끊김의 읽기 끝 · 쓰기 끝 가름([`DisconnectCause::ReadFailed`] · [`DisconnectCause::WriteFailed`])은
-    /// 그 앞의 [`TransportEvent::Disconnected`] 가 싣는다.
+    /// 그 앞의 [`TransportEvent::Disconnected`] 가 싣는다 — 받은 상대는 이것도 싣는다(데몬 어댑터가 이 까닭 하나로 읽기
+    /// 끝 · 쓰기 끝을 가른다 — TRD 3 §3-0 ①).
     Closed {
         peer: PeerId,
         generation: Generation,
