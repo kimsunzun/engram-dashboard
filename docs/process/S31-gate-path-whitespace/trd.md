@@ -18,7 +18,7 @@ PRD R1–R3 · AC1–AC3 을 `.github/workflows/ci.yml` 의 검사 여섯에 적
 
 - 범위 밖 — `net gate 2a`. 첫 마디 공백(`engram_dashboard_platform :: fs`)은 숨은 꼴 검사(`:1389`)가, 깊은 마디 공백(`engram_dashboard_platform::fs :: f`)은 추출(`:1368`) 집합 불일치가 FAIL 시킨다. 시험에 표본 하나를 넣어 이 주장을 실측으로 남긴다.
 - 범위 밖 — `:964` · `:987` · `:1026` 의 존재 검사(공백형이 들면 실패하는 안전한 쪽) · 줄을 넘는 경로.
-- 범위 밖 · 새 할 일 — 공백이 아닌 다른 이름 꼴(`use tokio as rt;` · `extern crate tokio as rt;` · `use std::net;` · `use std::{net::TcpStream};`)도 replay_flight · transport gate 3 을 통과한다(옛 · 새 패턴 모두). 이번에 넓히지 않고 `docs/todo/doc-drift.md` 에 새 항목으로 올리고, 두 게이트의 해설 주석과 대상 헤더의 「알려진 한계」에 한 줄씩 적는다.
+- 범위 밖 · 새 할 일 — 공백이 아닌 다른 이름 꼴(`use tokio as rt;` · `extern crate tokio as rt;` · `use std::net;` · 여러 항목 묶음 `use std::{net::TcpStream, time::Instant};`)도 replay_flight · transport gate 3 을 통과한다(옛 · 새 패턴 모두). 한 항목 묶음은 rustfmt 가 풀어 써 게이트에 걸린다. 이번에 넓히지 않고 `docs/todo/observed-only.md` 에 새 항목으로 올리고, 「알려진 한계」 한 줄을 각 게이트의 정본 자리에만 적는다(replay_flight = `ci.yml` 스텝 주석 · transport gate 3 = transport `lib.rs` 헤더).
 
 ## 바꾸는 것
 
@@ -63,7 +63,7 @@ qa 가 각 검사를 `ci.yml` 원문 스텝 그대로 돌린다(qa-verify 「gat
 
 ## 구현 단위
 
-- 코더 1 · 단위 1(파일이 겹친다). 변경 = `ci.yml` 패턴 6곳 + 해설 사본 + 「알려진 한계」 한 줄씩 + `docs/todo/doc-drift.md`(이 항목 닫기 · 새 항목 올리기).
+- 코더 1 · 단위 1(파일이 겹친다). 변경 = `ci.yml` 패턴 6곳 + 해설 사본 + 「알려진 한계」 한 줄(게이트 정본 자리) + `docs/todo/doc-drift.md`(이 항목 닫기) · `docs/todo/observed-only.md`(새 항목).
 - 단위 끝 = `ci.yml` YAML 파싱 OK + 코더가 AC1 · AC3 표본 몇 개를 rg 로 한 번 돌려 본다(최종 판정은 qa).
 
 ## 결정
@@ -81,3 +81,4 @@ qa 가 각 검사를 `ci.yml` 원문 스텝 그대로 돌린다(qa-verify 「gat
 ## 리뷰 기록
 
 - 2026-11-02 · PRD+TRD 리뷰 full(Claude worker-reviewer + codex xhigh) · 2라운드 PASS · 판 2 커밋 뒤 권장 3(줄 번호 · scratch worktree 에 변경 싣기 · FAIL 메시지 귀속) 반영.
+- 2026-11-02 · 코드 리뷰 full(Claude worker-reviewer + codex) · PASS(must 0) · 권장 라운드 재리뷰 PASS. 그 반영으로 새 할 일 자리(`observed-only.md`) · 한계 기록 자리(게이트 정본 한 곳) · 묶음 예시(여러 항목)를 이 TRD 에도 맞췄다 — 설계는 그대로다.

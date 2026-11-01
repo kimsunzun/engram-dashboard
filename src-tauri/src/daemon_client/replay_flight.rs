@@ -50,9 +50,10 @@
 //! ## ★위 둘을 지키는 것 — 산문이 아니라 게이트★
 //! `.github/workflows/ci.yml` 의 `Gate: replay_flight purity — no transport/wire ingress` 가 이 파일 한 장을
 //! 훑어 `tauri`·`tokio`·`std::net`·`engram_dashboard_*` 경로가 **주석 밖에** 나오면 FAIL 시킨다. `use` 줄만이
-//! 아니라 인라인 완전경로도 잡는다 — 형제 crate 격리 게이트와 달리 **컴파일러 backstop 이 없어서**다(셸
-//! 패키지는 그 셋을 전부 의존하므로 `tokio::spawn(..)` 한 줄이 그냥 컴파일된다). 게이트 정본 =
-//! `.github/workflows/ci.yml` (ADR-0175 §영향).
+//! 아니라 인라인 완전경로도, `::` 앞뒤에 공백을 둔 꼴(`tokio :: spawn`)도 잡는다 — 형제 crate 격리 게이트와
+//! 달리 **컴파일러 backstop 이 없어서**다(셸 패키지는 그 셋을 전부 의존하므로 `tokio::spawn(..)` 한 줄이 그냥
+//! 컴파일된다). 게이트 정본(기대값 · 알려진 한계) = `.github/workflows/ci.yml` 의 그 스텝 주석
+//! (ADR-0175 §영향).
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};

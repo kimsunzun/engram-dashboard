@@ -52,7 +52,7 @@
 //! 쏘면 편한" 대표 자리다. 패턴이 import 라인 앵커인 것은 이 헤더가 자기 자신에 걸리지 않게 하기 위해서다.
 //!
 //! **③ 입주자끼리 서로 참조하지 않는다**(입주 조건 ③의 벽):
-//! `rg "(crate|super)::(logging|text|time|path|sync|testing|writable|file|panic)" crates/engram-dashboard-base/src/` → **0줄**.
+//! `rg "(crate|super)\s*::\s*(logging|text|time|path|sync|testing|writable|file|panic)" crates/engram-dashboard-base/src/` → **0줄**.
 //! ★`crate::` 단독으로 넓히지 말 것★ — 그건 평범한 Rust 라 게이트가 아니라 잡음이 된다. 대가로 모듈
 //! **이름**을 손으로 박으므로 **입주자가 늘면 여기 이름을 더해야 보인다**(messaging 정규식과 같은 종류의
 //! 구멍이고, ①이 그 구멍을 덮지 않는다 — ①은 crate 밖만 본다).

@@ -45,7 +45,7 @@
 //! 통과한다. 두 게이트는 겹치지 않는다.
 //!
 //! **③ 순수 층 격리**(`pending.rs`·`stream.rs`·`machine.rs` 범위):
-//! `rg "^(?:[^/]|/[^/])*?\b(tokio|futures_util|futures|engram_dashboard_[a-z_]+|std::net)::"`
+//! `rg "^(?:[^/]|/[^/])*?\b(tokio|futures_util|futures|engram_dashboard_[a-z_]+|std\s*::\s*net)\s*::"`
 //! `crates/engram-dashboard-transport/src/pending.rs crates/engram-dashboard-transport/src/stream.rs`
 //! `crates/engram-dashboard-transport/src/machine.rs` → **0줄**.
 //! ★`use` 라인만 앵커하면 인라인 완전경로 한 줄에 뚫린다★ — `tokio::spawn(…)` 처럼 본문에 완전경로로
@@ -54,6 +54,11 @@
 //! ★이 게이트에는 컴파일러 backstop 이 없다★ — 같은 crate 안이라 `tokio` 한 줄이 그냥 컴파일된다.
 //! 이 정규식이 **유일한 벽**이다. ★파일이 사라져도 매치는 0이라 통과로 읽힌다★ — 이름을 바꾸거나
 //! 옮긴 뒤엔 `test -f` 로 세 파일의 존재를 먼저 본다.
+//! ★`::` 앞뒤 `\s*` 를 걷지 말 것★ — 공백형(`tokio :: spawn`)을 잡는다 — 근거는 `.github/workflows/ci.yml` 의
+//! `replay_flight` 순수성 게이트 주석.
+//! ★알려진 한계 = `<이름>::` 꼴이 아닌 이름★ — 별칭(`use tokio as rt;` · `extern crate tokio as rt;`) · 끝 마디
+//! import(`use std::net;`) · 여러 항목 묶음(`use std::{net::TcpStream, time::Instant};`)은 못 본다
+//! (`docs/todo/observed-only.md`).
 //! ★TRD §9-2 의 초안은 `machine.rs` 만 겨눴다★ — 파일표는 셋 다 ★순수★로 표시하므로 셋으로 넓혔다.
 //!
 //! **④ 세 feature 조합이 각각 컴파일된다**(`-p` 범위):
