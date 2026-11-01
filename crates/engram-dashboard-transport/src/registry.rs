@@ -20,14 +20,17 @@
 //! (ADR-0180 의 열린 질문이 그렇게 닫힌다).
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 
 use crate::budget::Charged;
-use crate::clock::Clock;
+use crate::clock::{with_deadline, Clock, Elapsed};
 use crate::event::{Incoming, PeerId};
+use crate::frame::CloseCode;
 use crate::link::{Address, Dialer, Handshake};
 use crate::machine::PeerState;
 use crate::peer::{spawn_peer, Peer, PeerConfig, BYTE_BUDGET};
@@ -221,6 +224,46 @@ impl<W: Wire> Registry<W> {
         }
     }
 
+    /// 명부의 상대를 전부 내리고 각자 받아 둔 나가는 일을 비운 뒤 닫는다([`Peer::close_after_flush`] ·
+    /// [`CloseCode::GOING_AWAY`]) — 그 감독들이 다 끝나기를 `deadline`(명부의 시계)까지 기다린다(TRD 3 §3-0 ④ — 데몬
+    /// 종료가 이것을 기다린다). `Err` = 시한까지 다 안 끝났다 — 남은 감독은 계속 접고 각자의 시한
+    /// ([`Policy::flush_timeout`] · 정리 상한)에 끝난다.
+    ///
+    /// ★곧바로 닫지 않고 비운다★ — 닫기 직전에 넣은 마지막 답(정지 Ack 같은 것)이 나가게 하려는 것이 이 함수의
+    /// 까닭이다. 곧바로 닫으려면 [`Registry::remove`].
+    ///
+    /// ★부른 순간 명부에 있던 상대만 기다린다★ — 그 전에 `add` 가 갈아치웠거나 `remove` 로 내려 아직 접는 중인
+    /// 감독은 모른다.
+    ///
+    /// ★부르기 전에 명부에 올리기를 멈춘다★ — 이 함수는 그 뒤의 [`Registry::add`] 를 막지 않아, 부른 뒤 올린 상대는
+    /// 닫지도 기다리지도 않은 채 명부에 남는다. 그래서 상대를 올리는 쪽(데몬의 수락 루프 등)을 먼저 세우고 부른다.
+    /// 그 뒤의 `add` · 들어오는 상대 붙이기를 거절할지는 받는 쪽 seam 단위(TRD 3 §6-0 U6)가 정한다.
+    ///
+    /// ★닫기는 부른 그 자리에서 시작된다★ — 돌려주는 future 는 기다리기만 한다. 떨어뜨려도 닫기는 이어진다
+    /// ([`Peer::close_after_flush`] 와 같다). 시한은 그 future 를 처음 폴링한 때부터 잰다.
+    ///
+    /// ★그 상대들의 수신단을 비우는 task 위에서 기다리지 않는다★ — 감독의 끝은 그 받는 쪽이 비우는 데 달려 있어
+    /// (crate 헤더 「알려진 한계」), 거기서 기다리면 그 감독이 정리 상한까지 남아 이 대기가 `deadline` 까지 간다.
+    /// 수신단은 끝(`None`)까지 계속 비운다 — 놓으면 그 상대의 남은 나가는 일이 버려진다(crate 헤더 「받는 쪽
+    /// 불변식」 5).
+    pub fn close_all(
+        &self,
+        deadline: Duration,
+    ) -> impl Future<Output = Result<(), Elapsed>> + Send + 'static {
+        let peers: Vec<Peer<W>> = self.inner.peers().drain().map(|(_, peer)| peer).collect();
+        // 손잡이는 여기서 놓아도 된다 — 표지가 제어 채널을 붙들어 비우기가 이어진다(`Peer::close_after_flush`).
+        let ends: Vec<_> = peers
+            .iter()
+            .map(|peer| peer.close_after_flush(CloseCode::GOING_AWAY, "going away"))
+            .collect();
+        let clock = self.inner.clock.clone();
+        async move {
+            with_deadline(&*clock, deadline, futures_util::future::join_all(ends))
+                .await
+                .map(|_| ())
+        }
+    }
+
     pub fn get(&self, id: &PeerId) -> Option<Peer<W>> {
         self.inner.peers().get(id).cloned()
     }
@@ -272,13 +315,13 @@ impl<W: Wire> Registry<W> {
 mod tests {
     use super::*;
     use crate::event::{Direction, TransportEvent};
-    use crate::frame::Frame;
+    use crate::frame::{Close, Frame};
     use crate::link::HandshakeStep;
     use crate::machine::{GaveUpReason, Generation};
     use crate::peer::CLOSE_DRAIN_LIMIT;
     use crate::testing::{
-        settle, settle_until, ImmediateHandshake, ManualClock, MemoryNetwork, RejectingHandshake,
-        TestIn, TestOut, TestWire,
+        settle, settle_until, ClientMsg, ImmediateHandshake, ManualClock, MemoryNetwork,
+        RejectingHandshake, TestIn, TestOut, TestWire,
     };
     use futures_util::future::poll_immediate;
     use std::time::Duration;
@@ -1309,5 +1352,117 @@ mod tests {
             ended(&mut inbox).await,
             "손잡이가 다 사라지면 수신단이 끝난다"
         );
+    }
+
+    // ── 3-0 U3: close_all ──
+
+    #[tokio::test]
+    async fn close_all_flushes_every_peer_then_closes_it_and_empties_the_roster() {
+        let fx = Fixture::new(Policy::default());
+        let (a, mut inbox_a) = fx.add("a", immediate());
+        let (b, mut inbox_b) = fx.add("b", immediate());
+        settle_until("둘 다 운영", || {
+            a.peer_state().is_live() && b.peer_state().is_live()
+        })
+        .await;
+        let endpoints = [fx.net.accept().unwrap(), fx.net.accept().unwrap()];
+        // ★쓰기를 막아 둔다★ — 「last」가 쓰이는 도중 닫기가 들어와야 곧바로 닫는 회귀와 갈린다.
+        for endpoint in &endpoints {
+            endpoint.stall_writes(true);
+        }
+        a.notify(TestOut::Notice("last".into())).unwrap();
+        b.notify(TestOut::Notice("last".into())).unwrap();
+
+        let closing = tokio::spawn(fx.registry.close_all(Duration::from_secs(3)));
+        settle().await;
+        assert!(!closing.is_finished(), "막힌 쓰기를 비우는 중이다");
+        for endpoint in &endpoints {
+            endpoint.stall_writes(false);
+        }
+        settle_until("시계를 밀지 않고 끝났다", || {
+            closing.is_finished()
+        })
+        .await;
+        assert_eq!(closing.await.expect("close_all 태스크"), Ok(()));
+        assert!(fx.registry.is_empty(), "명부에서 내렸다");
+        for endpoint in &endpoints {
+            assert_eq!(
+                endpoint.drain(),
+                vec![
+                    ClientMsg::Frame(notice("last")),
+                    ClientMsg::Close(Close::new(CloseCode::GOING_AWAY, "going away")),
+                ],
+                "★곧바로 닫지 않고 앞서 받아 둔 것을 먼저 쓴다★"
+            );
+        }
+        for inbox in [&mut inbox_a, &mut inbox_b] {
+            assert_eq!(
+                labels(&drain(inbox)),
+                vec![
+                    "Connected:1",
+                    "Disconnected:1:Explicit",
+                    "Closed:1:Explicit"
+                ]
+            );
+            assert!(ended(inbox).await);
+        }
+    }
+
+    // ★future 를 기다리지 않아도 닫는다★ — 닫기는 부른 자리에서 시작되고 future 는 기다리기만 한다.
+    #[tokio::test]
+    async fn close_all_closes_even_when_nobody_waits_for_it() {
+        let fx = Fixture::new(Policy::default());
+        let (peer, mut inbox) = fx.add("a", immediate());
+        settle_until("운영", || peer.peer_state().is_live()).await;
+        drop(fx.registry.close_all(Duration::ZERO));
+        let items = drain_until_quiet(&mut inbox).await;
+        assert_eq!(
+            labels(&items),
+            vec![
+                "Connected:1",
+                "Disconnected:1:Explicit",
+                "Closed:1:Explicit"
+            ]
+        );
+        assert!(ended(&mut inbox).await);
+    }
+
+    // ★close_all 의 시한(1 s · 3 s)을 비우기의 시한(2 s) 양쪽에 둔다★ — 그 안에 못 끝나면 `Err` 이고, 감독은 기다림과
+    //   무관하게 제 시한에 끝난다.
+    #[tokio::test]
+    async fn close_all_waits_only_up_to_its_deadline() {
+        assert_eq!(Policy::default().flush_timeout, Duration::from_secs(2));
+        for (deadline, in_time) in [
+            (Duration::from_secs(1), false),
+            (Duration::from_secs(3), true),
+        ] {
+            let fx = Fixture::new(Policy::default());
+            let (peer, mut inbox) = fx.add("a", immediate());
+            settle_until("운영", || peer.peer_state().is_live()).await;
+            let endpoint = fx.net.accept().unwrap();
+            endpoint.stall_writes(true);
+            peer.notify(TestOut::Notice("stuck".into())).unwrap();
+            settle().await;
+
+            let closing = tokio::spawn(fx.registry.close_all(deadline));
+            settle().await;
+            fx.clock.advance(Duration::from_secs(1));
+            settle().await;
+            assert_eq!(closing.is_finished(), !in_time, "{deadline:?}: 1 s 뒤");
+            fx.clock.advance(Duration::from_secs(1));
+            settle_until("비우기의 시한에 감독이 끝났다", || {
+                closing.is_finished()
+            })
+            .await;
+            let expected = if in_time { Ok(()) } else { Err(Elapsed) };
+            assert_eq!(
+                closing.await.expect("close_all 태스크"),
+                expected,
+                "{deadline:?}"
+            );
+            let items = drain_until_quiet(&mut inbox).await;
+            assert_eq!(kinds(&items).last(), Some(&"Closed"), "{deadline:?}");
+            assert!(ended(&mut inbox).await, "{deadline:?}");
+        }
     }
 }

@@ -5,8 +5,8 @@
 //!
 //! ★근거 없이 고른 값에는 그 자리에 「미검」을 적어 둔다★ — 적어 두지 않으면 다음 세션이 추측을 실측으로
 //! 읽는다. 미검인 것: `request_timeout` · `write_deadline` · `reconnect.jitter` · `inbound_queue` ·
-//! `frame_buffer` · `retired_tags` · `max_streams` · `resume_timeout` · `live_dwell`. 나머지는 현행
-//! 코드값 보존이다.
+//! `frame_buffer` · `retired_tags` · `max_streams` · `resume_timeout` · `live_dwell` · `flush_timeout`.
+//! 나머지는 현행 코드값 보존이다.
 
 use std::time::Duration;
 
@@ -197,6 +197,12 @@ pub struct Policy {
     /// (8 MiB — 바이트 예산의 반 · 모든 스트림의 붙든 조각 합)이 함께 재고, 넘으면 같은 길로 닫는다 — 새 구멍이면
     /// 창을 열지 않고 곧바로 잘림이다(`lib.rs` 「알려진 한계」). ★미검★.
     pub resume_buffer: usize,
+    /// [`crate::Peer::close_after_flush`] 하나가 쓰는 시한 — 감독이 그 닫기를 알아챈 때부터 표지 앞의 쓰기 ·
+    /// keepalive · 닫기 프레임까지 **전부를 함께** 덮는다. 넘기면 남은 것을 안 쓰고 닫는다.
+    ///
+    /// ★[`Policy::write_deadline`] 으로 대신하지 않는다★ — 그것은 쓰기 한 번 단위라, 느리게 읽는 상대가 큐 길이 ×
+    /// 쓰기 시한 동안 닫기를 붙들 수 있다(TRD 3 §3-0 ④). ★미검★ — TRD 3 §3-0 ④ 의 가안 값 그대로다.
+    pub flush_timeout: Duration,
 }
 
 impl Default for Policy {
@@ -218,6 +224,7 @@ impl Default for Policy {
             max_streams: 1024,
             resume_timeout: Duration::from_secs(2),
             resume_buffer: 256,
+            flush_timeout: Duration::from_secs(2),
         }
     }
 }
@@ -240,6 +247,9 @@ impl Policy {
         }
         if self.max_streams == 0 || self.resume_buffer == 0 {
             return Err("max_streams / resume_buffer must be non-zero");
+        }
+        if self.flush_timeout.is_zero() {
+            return Err("flush_timeout must be non-zero");
         }
         if self.reconnect.base < MIN_BACKOFF {
             return Err("reconnect.base >= MIN_BACKOFF");
@@ -279,6 +289,7 @@ mod tests {
         assert_eq!(p.retired_tags, 256);
         assert_eq!(p.full_queue, QueueFullPolicy::Disconnect);
         assert_eq!(p.reconnect.max_attempts, 3);
+        assert_eq!(p.flush_timeout, Duration::from_secs(2));
     }
 
     #[test]
@@ -286,6 +297,15 @@ mod tests {
         let mut p = Policy::default();
         p.write_deadline = p.ping_interval;
         assert!(p.check().is_err());
+    }
+
+    #[test]
+    fn a_zero_flush_timeout_is_rejected() {
+        let p = Policy {
+            flush_timeout: Duration::ZERO,
+            ..Policy::default()
+        };
+        assert_eq!(p.check(), Err("flush_timeout must be non-zero"));
     }
 
     #[test]
