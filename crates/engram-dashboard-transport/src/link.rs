@@ -279,6 +279,8 @@ pub enum HandshakeStep {
     },
 }
 
+/// 실은 프레임은 [`Frame`] 의 `Debug`(갈래 + 바이트 길이)로만 찍는다 — `Send` 가 인증 토큰을 싣는다(TRD 3 §5 5).
+/// `reason` 은 상대에게 닫기 문구로 나가는 한 줄이라 값 그대로 찍는다 — 길이는 줄을 탈 때만 묶인다(ws 어댑터 `clamp_close_reason`).
 impl fmt::Debug for HandshakeStep {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -326,6 +328,46 @@ mod tests {
                 assert!(c.reason.contains("version"));
             }
             other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn handshake_step_and_link_read_debug_carry_no_frame_body() {
+        let secret = r#"{"auth":"tok-SECRET"}"#;
+        let n = secret.len();
+        let shown = [
+            (
+                format!("{:?}", HandshakeStep::Send(Frame::Text(secret.into()))),
+                format!("Send(Text {{ bytes: {n} }})"),
+            ),
+            (
+                format!(
+                    "{:?}",
+                    HandshakeStep::Send(Frame::Binary(secret.as_bytes().to_vec()))
+                ),
+                format!("Send(Binary {{ bytes: {n} }})"),
+            ),
+            (
+                format!(
+                    "{:?}",
+                    HandshakeStep::Reject {
+                        kind: RejectKind::Retryable,
+                        last: Some(Frame::Text(secret.into())),
+                        reason: "stale credential".into(),
+                    }
+                ),
+                format!(
+                    "Reject {{ kind: Retryable, last: Some(Text {{ bytes: {n} }}), reason: \"stale credential\" }}"
+                ),
+            ),
+            (
+                format!("{:?}", LinkRead::Frame(Frame::Text(secret.into()))),
+                format!("Frame(Text {{ bytes: {n} }})"),
+            ),
+        ];
+        for (got, expected) in shown {
+            assert!(!got.contains("SECRET"), "{got}");
+            assert_eq!(got, expected);
         }
     }
 

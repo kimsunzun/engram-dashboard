@@ -3,11 +3,17 @@
 //! ★이 crate 는 `Text`/`Binary` 의 **안을 해석하지 않는다**★. 해석은 소비자의 [`crate::Wire`] 뿐이고,
 //! 여기 있는 것은 "한 덩어리가 어디서 끝나나" 와 "어떤 코드로 닫았나" 뿐이다.
 
+use std::fmt;
+
 /// 통로가 나르는 한 덩어리.
 ///
 /// 코덱이 둘인 소비자를 한 [`crate::Wire`] 가 흡수할 수 있는 것이 이 두 갈래 덕이다(우리 wire 는
 /// control = JSON text · 출력 hot path = 고정헤더 binary 다).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// ★`Debug` 는 갈래와 바이트 길이만 찍는다 — 본문은 안 찍는다★(TRD 3 §5 5). 핸드셰이크 첫 프레임이 인증 토큰을
+/// 싣고, 소비자의 로그 · 패닉 문구가 프레임을 `{:?}` 로 찍을 수 있다. `derive(Debug)` 로 되돌리지 말 것 — 본문이 필요한
+/// 자리는 갈래를 풀어 직접 꺼낸다.
+#[derive(Clone, PartialEq, Eq)]
 pub enum Frame {
     Text(String),
     Binary(Vec<u8>),
@@ -23,6 +29,19 @@ impl Frame {
             Frame::Text(text) => text.len(),
             Frame::Binary(bytes) => bytes.len(),
             Frame::Keepalive => 0,
+        }
+    }
+}
+
+impl fmt::Debug for Frame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Frame::Text(text) => f.debug_struct("Text").field("bytes", &text.len()).finish(),
+            Frame::Binary(bytes) => f
+                .debug_struct("Binary")
+                .field("bytes", &bytes.len())
+                .finish(),
+            Frame::Keepalive => f.write_str("Keepalive"),
         }
     }
 }
@@ -112,6 +131,30 @@ mod tests {
             CloseCode::HANDSHAKE_RETRYABLE,
         ] {
             assert!(code.0 < CloseCode::CONSUMER_BASE, "{code:?}");
+        }
+    }
+
+    #[test]
+    fn debug_shows_the_arm_and_byte_length_but_never_the_body() {
+        let secret = r#"{"auth":"tok-SECRET-토큰"}"#;
+        let cases = [
+            (
+                Frame::Text(secret.into()),
+                format!("Text {{ bytes: {} }}", secret.len()),
+            ),
+            (
+                Frame::Binary(secret.as_bytes().to_vec()),
+                format!("Binary {{ bytes: {} }}", secret.len()),
+            ),
+            (Frame::Keepalive, "Keepalive".to_string()),
+        ];
+        for (frame, expected) in cases {
+            for shown in [format!("{frame:?}"), format!("{frame:#?}")] {
+                assert!(!shown.contains("SECRET"), "{shown}");
+                // 바이트 본문의 첫 바이트 `{` = 123 — 숫자 목록으로 찍혀도 새지 않아야 한다.
+                assert!(!shown.contains("123"), "{shown}");
+            }
+            assert_eq!(format!("{frame:?}"), expected);
         }
     }
 
