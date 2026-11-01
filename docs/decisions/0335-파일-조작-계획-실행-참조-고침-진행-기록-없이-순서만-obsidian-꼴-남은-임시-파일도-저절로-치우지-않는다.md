@@ -1,7 +1,7 @@
 # ADR-0335: 파일 조작 = 계획 → 실행 → 참조 고침, 진행 기록 없이 순서만 (Obsidian 꼴) — 남은 임시 파일도 저절로 치우지 않는다
 
-- 상태: 제안 (2026-10-31, 근거: 사용자 결정 G38(2026-10-31 「일단 이건 이대로 두고 나중에 생각하자」) · G40(2026-10-31 「남기고 알아서 치우라그래」) · P3 · P5 · G36 + 메인 M4 · M26 · M36 · M56(보고 — 사용자에게 알림 2026-10-31) · M65(재리뷰 r7 — 보고) · 조사 `docs/research/multi-file-rename-crash-safety-practice-2026-10-31.md` · `docs/research/atomic-write-temp-cleanup-practice-2026-10-31.md` · `docs/research/junction-recycle-bin-atomic-write-2026-10-31.md`)
-- 관련: ADR-0312 · ADR-0315 · ADR-0330 · ADR-0320 · ADR-0324(편집의 차례) · ADR-0336 · ADR-0265 결정 4 · ADR-0291(원자적 쓰기) · PRD R17 · R19 · TRD §1-4 흐름 ④ · `store.rs` · §1-11a 발견 15 · §7 7 · T-74
+- 상태: 제안 (2026-10-31, 근거: 사용자 결정 G38(2026-10-31 「일단 이건 이대로 두고 나중에 생각하자」) · G40(2026-10-31 「남기고 알아서 치우라그래」) · P3 · P5 · G36 + 메인 M4 · M26 · M36 · M56(보고 — 사용자에게 알림 2026-10-31) · M65(재리뷰 r7 — 보고) · 조사 `docs/research/multi-file-rename-crash-safety-practice-2026-10-31.md` · `docs/research/atomic-write-temp-cleanup-practice-2026-10-31.md` · `docs/research/junction-recycle-bin-atomic-write-2026-10-31.md`) · 부분 폐기 by ADR-0339 (결정 5 대체)
+- 관련: ADR-0312 · ADR-0315 · ADR-0330 · ADR-0320 · ADR-0324(편집의 차례) · ADR-0336 · ADR-0265 결정 4 · ADR-0291(원자적 쓰기) · PRD R17 · R19 · TRD §1-4 흐름 ④ · `store.rs` · §1-11a 발견 15 · §7 7 · T-74 · Amended by ADR-0339 (결정 5 대체)
 
 ## 맥락
 앱 안 이동 · 이름 바꾸기는 파일 하나와 그것을 가리키는 여러 프리셋 · 에이전트를 함께 고친다. 중간에 끊기면 어떻게 되나.
