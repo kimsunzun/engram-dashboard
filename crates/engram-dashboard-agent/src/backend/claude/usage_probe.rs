@@ -518,6 +518,7 @@ mod tests {
 
     use crate::backend::claude::ClaudeBackend;
     use crate::backend::AgentBackend;
+    use crate::launch::LaunchArtifacts;
     use crate::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
     use crate::usage::testing::{ChildScript, ScriptedSpawner, TempRoot};
     use crate::usage::{ExitInfo, ProbeSpawner};
@@ -1635,6 +1636,7 @@ mod tests {
             PathBuf::from("."),
             vec![],
             None,
+            &LaunchArtifacts::default(),
         );
         assert!(
             spawn

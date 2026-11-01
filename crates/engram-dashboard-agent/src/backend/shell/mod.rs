@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::backend::AgentBackend;
+use crate::launch::LaunchArtifacts;
 use crate::profile::{AgentCommand, SpawnMode};
 use crate::types::{BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, SessionCaps};
 
@@ -53,6 +54,7 @@ impl AgentBackend for ShellBackend {
         cwd: PathBuf,
         env: Vec<(String, String)>,
         _control: Option<ControlEndpoint>,
+        _artifacts: &LaunchArtifacts,
     ) -> CommandSpec {
         match command {
             AgentCommand::Shell { program, args } => CommandSpec {
@@ -98,6 +100,7 @@ mod tests {
             PathBuf::from("."),
             vec![],
             None,
+            &LaunchArtifacts::default(),
         )
     }
 
@@ -135,6 +138,7 @@ mod tests {
             cwd.clone(),
             env.clone(),
             None,
+            &LaunchArtifacts::default(),
         );
         assert_eq!(s.cwd, cwd);
         assert_eq!(s.env, env);

@@ -816,6 +816,7 @@ mod tests {
                     PathBuf::from("."),
                     vec![],
                     Some(ep),
+                    &engram_dashboard_agent::launch::LaunchArtifacts::default(),
                 )
                 .args
                 .iter()
@@ -866,6 +867,7 @@ mod tests {
         profile_env: Vec<(String, String)>,
     ) -> engram_dashboard_agent::types::CommandSpec {
         use engram_dashboard_agent::backend::{AgentBackend, ClaudeBackend};
+        use engram_dashboard_agent::launch::LaunchArtifacts;
         use engram_dashboard_agent::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
         ClaudeBackend.build_spec(
             &AgentCommand::Claude {
@@ -878,6 +880,7 @@ mod tests {
             PathBuf::from("."),
             profile_env,
             Some(ep),
+            &LaunchArtifacts::default(),
         )
     }
 

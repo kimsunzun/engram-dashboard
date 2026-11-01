@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use engram_dashboard_agent::backend;
 use engram_dashboard_agent::failure::AgentFailureKind;
+use engram_dashboard_agent::launch::LaunchArtifacts;
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::persistence::FileProfileStore;
 use engram_dashboard_agent::profile::{
@@ -829,6 +830,7 @@ fn fresh_claude_spec_carries_the_minted_session_id() {
             std::env::temp_dir(),
             vec![],
             None,
+            &LaunchArtifacts::default(),
         );
         let at = spec
             .args

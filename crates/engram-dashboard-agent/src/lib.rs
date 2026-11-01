@@ -14,11 +14,15 @@ pub mod commands;
 pub mod failure;
 // ADR-0231
 pub mod inputs_pending;
+// ADR-0334
+pub mod launch;
 pub mod manager;
 // ADR-0101
 pub mod name;
 pub mod output_core;
 pub mod profile;
+// ADR-0311
+pub mod profile_edit;
 // ADR-0231
 pub mod queued_input;
 pub mod reaper;

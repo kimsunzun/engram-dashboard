@@ -20,12 +20,13 @@ pub use codex::CodexBackend;
 pub use gemini::GeminiBackend;
 pub use shell::ShellBackend;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use uuid::Uuid;
 
 use crate::failure::AgentFailureKind;
+use crate::launch::{LaunchArtifacts, LaunchFs, LaunchKit};
 use crate::profile::{AgentCommand, AgentProfile, SpawnMode};
 use crate::session_tracker::SessionIdSource;
 use crate::transport::pty::PtyTransport;
@@ -295,6 +296,28 @@ pub trait AgentBackend: Send + Sync {
         false
     }
 
+    /// 이 화신의 재료 `kit` 를 이 backend 가 실을 꼴로 배치한다 — 디스크 쓰기는 `fs` 로만, 휘발 폴더 안에서만
+    /// 한다(작업 폴더에는 쓰지 않는다). 돌려준 값이 같은 화신의 [`AgentBackend::build_spec`] ·
+    /// [`AgentBackend::open_spawn`] 에 `artifacts` 로 간다.
+    ///
+    /// `cwd` = [`AgentBackend::build_spec`] 이 받는 것과 같은 정규화한 작업 폴더.
+    /// `Err(사유)` = 스폰 중단 — 그 사이 쓴 것은 [`crate::launch::LaunchKitSource::release`] 가 휘발 폴더째 거둔다.
+    /// ★기본값 = 실을 것 없음 · 쓰기 없음★ — `real` 만 `kit.plan.real` 그대로이고 나머지는
+    ///   `LaunchArtifacts::default()` 다. 재료를 번역하지 않는 backend 는 실 재료를 받아도 아무것도 싣지 않는다.
+    // ADR-0334
+    fn materialize(
+        &self,
+        _command: &AgentCommand,
+        kit: &LaunchKit,
+        _cwd: &Path,
+        _fs: &dyn LaunchFs,
+    ) -> Result<LaunchArtifacts, String> {
+        Ok(LaunchArtifacts {
+            real: kit.plan.real,
+            ..LaunchArtifacts::default()
+        })
+    }
+
     /// cwd·env는 manager가 정규화한 값을 전달한다.
     ///
     /// `control`(ADR-0086): 데몬이 발급한 제어 채널 엔드포인트(추상 descriptor). 있으면 backend 가
@@ -315,8 +338,12 @@ pub trait AgentBackend: Send + Sync {
     ///   「Fresh 인데 이어받을 값이 있다」가 표현 불가능하지만, 이 자리는 `mode` 를 이미 받고 있고
     ///   **Fresh 와 Resume 의 argv 가 애초에 갈린다**(claude 의 `--session-id` ↔ `--resume`). 조립점은
     ///   그쪽과 같은 규율로 Fresh 면 이 칸을 비워서 넘긴다.
+    ///
+    /// `artifacts` = 이 화신의 [`AgentBackend::materialize`] 결과. 실을 것이 없으면(기본값) argv 는 골든
+    ///   `tests/launch_argv_golden.rs` 와 바이트 같다.
     // ADR-0185
     // ADR-0208
+    // ADR-0334
     fn build_spec(
         &self,
         command: &AgentCommand,
@@ -326,6 +353,7 @@ pub trait AgentBackend: Send + Sync {
         cwd: PathBuf,
         env: Vec<(String, String)>,
         control: Option<ControlEndpoint>,
+        artifacts: &LaunchArtifacts,
     ) -> CommandSpec;
 
     /// 데몬이 발급한 제어 endpoint 로 이 spawn 을 **세울 수 있나**. `Err(사유)` = fail-closed(스폰 중단).
@@ -378,6 +406,13 @@ pub trait AgentBackend: Send + Sync {
         TransportShape::Pty
     }
 
+    /// 이 backend 의 통로가 연결을 세워야 하나(공개 래퍼 [`declares_link`] 의 doc 이 정본).
+    /// ★기본값 = `false`★ — 선언하지 않은 backend 는 배달 포트를 받지 않고 옛 판정 경로를 그대로 탄다.
+    // ADR-0004
+    fn declares_link(&self, _command: &AgentCommand) -> bool {
+        false
+    }
+
     /// 이 backend 가 `command` 를 띄울 **물리 통로를 직접 만들어**, 세션 조립에 필요한 나머지 값과 함께
     /// 한 번에 내준다.
     ///
@@ -428,16 +463,13 @@ pub trait AgentBackend: Send + Sync {
     ///   (`resume_session_id` 가 argv 와 핸드셰이크로 갈리는 것과 같은 규율).
     /// ★대부분의 backend 는 이 칸을 무시한다★ — 명령줄로 번역해 끝나는 backend 는 `build_spec` 에서
     ///   이미 다 했다.
+    ///
+    /// `artifacts` = [`AgentBackend::build_spec`] 이 받은 것과 **같은** [`AgentBackend::materialize`] 결과 —
+    ///   통로로 실을 재료가 있는 backend 를 위해 온다. 명령줄로 다 싣는 backend 는 무시한다.
     // ADR-0004
     // ADR-0191
     // ADR-0215
-    /// 이 backend 의 통로가 연결을 세워야 하나(공개 래퍼 [`declares_link`] 의 doc 이 정본).
-    /// ★기본값 = `false`★ — 선언하지 않은 backend 는 배달 포트를 받지 않고 옛 판정 경로를 그대로 탄다.
-    // ADR-0004
-    fn declares_link(&self, _command: &AgentCommand) -> bool {
-        false
-    }
-
+    // ADR-0334
     fn open_spawn(
         &self,
         command: &AgentCommand,
@@ -450,11 +482,18 @@ pub trait AgentBackend: Send + Sync {
         // 연결의 결말을 배달할 곳 — `declares_link()` 가 true 인 backend 에만 온다.
         _link_sink: Option<LinkSink>,
         control: Option<&ControlEndpoint>,
+        artifacts: &LaunchArtifacts,
     ) -> Result<SpawnParts, PtyError> {
-        // 이 기본값은 세션 id 를 받아 오지도, 턴을 통로가 지지도, 통로로 이어받지도, 제어 평면 데이터를
-        //   핸드셰이크에 싣지도 않는다 — 밑줄 이름 대신 여기서 명시적으로 버린다(이름은 위 doc 이 부르는
-        //   것과 같아야 한다: rustdoc 이 시그니처를 그대로 렌더한다).
-        let _ = (sid_sink, first_turn_sink, resume_session_id, control);
+        // 이 기본값은 세션 id 를 받아 오지도, 턴을 통로가 지지도, 통로로 이어받지도, 제어 평면 데이터나
+        //   재료를 핸드셰이크에 싣지도 않는다 — 밑줄 이름 대신 여기서 명시적으로 버린다(이름은 위 doc 이
+        //   부르는 것과 같아야 한다: rustdoc 이 시그니처를 그대로 렌더한다).
+        let _ = (
+            sid_sink,
+            first_turn_sink,
+            resume_session_id,
+            control,
+            artifacts,
+        );
         let (transport, child_pid) = PtyTransport::open(spec, cols, rows)?;
         Ok(SpawnParts {
             transport: Box::new(transport),
@@ -747,6 +786,23 @@ pub fn uses_mail(c: &AgentCommand) -> bool {
     backend_for(c).uses_mail()
 }
 
+/// 정본 doc = [`AgentBackend::materialize`]. ★이 호출은 디스크에 쓸 수 있다★(`fs` 로, 휘발 폴더 안에서만).
+///
+/// ★backend 에 `fs` 를 그대로 건네지 않는다★ — `kit.volatile_dir` 안에 가둔 포트로 감싸 건넨다. 그 밖에 쓰려 하면(작업
+///   폴더 포함) 배치가 실패한다(`place_in_volatile`).
+// ADR-0334
+// TRD S25 §1-5 (나) 6
+pub fn materialize(
+    c: &AgentCommand,
+    kit: &LaunchKit,
+    cwd: &Path,
+    fs: &dyn LaunchFs,
+) -> Result<LaunchArtifacts, String> {
+    crate::launch::place_in_volatile(kit, fs, |confined| {
+        backend_for(c).materialize(c, kit, cwd, confined)
+    })
+}
+
 pub fn build_command_spec(
     c: &AgentCommand,
     mode: SpawnMode,
@@ -755,8 +811,18 @@ pub fn build_command_spec(
     cwd: PathBuf,
     env: Vec<(String, String)>,
     control: Option<ControlEndpoint>,
+    artifacts: &LaunchArtifacts,
 ) -> CommandSpec {
-    backend_for(c).build_spec(c, mode, session_id, resume_session_id, cwd, env, control)
+    backend_for(c).build_spec(
+        c,
+        mode,
+        session_id,
+        resume_session_id,
+        cwd,
+        env,
+        control,
+        artifacts,
+    )
 }
 
 /// 조립 **직전**의 fail-closed 게이트(정본 doc = [`AgentBackend::precheck_control_endpoint`]).
@@ -789,6 +855,7 @@ pub fn open_spawn(
     resume_session_id: Option<Uuid>,
     link_sink: Option<LinkSink>,
     control: Option<&ControlEndpoint>,
+    artifacts: &LaunchArtifacts,
 ) -> Result<SpawnParts, PtyError> {
     backend_for(c).open_spawn(
         c,
@@ -800,6 +867,7 @@ pub fn open_spawn(
         resume_session_id,
         link_sink,
         control,
+        artifacts,
     )
 }
 
@@ -1585,8 +1653,19 @@ mod tests {
                 //   파이프다.
                 TransportShape::StdioBidiJson => (false, false),
             };
-            let parts =
-                open_spawn(c, &probe, 80, 24, None, None, None, None, None).expect("open_spawn");
+            let parts = open_spawn(
+                c,
+                &probe,
+                80,
+                24,
+                None,
+                None,
+                None,
+                None,
+                None,
+                &LaunchArtifacts::default(),
+            )
+            .expect("open_spawn");
             let caps = parts.transport.capabilities();
             let actual = (caps.output.terminal_bytes, caps.control.resize);
             parts.transport.shutdown();
@@ -1881,5 +1960,114 @@ mod tests {
                 "{word}"
             );
         }
+    }
+
+    // ── 실행 재료 배치(ADR-0334) ──
+
+    /// 배치 포트로 쓰려 한 자리를 전부 적는 가짜 — 「쓰기 없음」 을 잰다.
+    #[derive(Default)]
+    struct RecordingFs {
+        writes: std::sync::Mutex<Vec<PathBuf>>,
+    }
+
+    impl LaunchFs for RecordingFs {
+        fn write_file(&self, path: &Path, _bytes: &[u8]) -> std::io::Result<()> {
+            self.writes.lock().unwrap().push(path.to_path_buf());
+            Ok(())
+        }
+
+        fn link_dir(&self, link: &Path, _target: &Path) -> std::io::Result<()> {
+            self.writes.lock().unwrap().push(link.to_path_buf());
+            Ok(())
+        }
+
+        fn exists(&self, _path: &Path) -> bool {
+            false
+        }
+
+        fn is_link(&self, _path: &Path) -> std::io::Result<bool> {
+            Err(std::io::ErrorKind::NotFound.into())
+        }
+    }
+
+    fn noop_kit_for(command: &AgentCommand, cwd: &Path) -> LaunchKit {
+        use crate::launch::{LaunchKitSource, NoopLaunchKits};
+
+        let profile = AgentProfile::new(
+            "materialize".to_string(),
+            command.clone(),
+            cwd.to_path_buf(),
+            Vec::new(),
+            false,
+        );
+        let plan = NoopLaunchKits.check(&profile).expect("Noop 은 막지 않는다");
+        NoopLaunchKits
+            .prepare(plan, profile.id, 1)
+            .expect("Noop 준비")
+    }
+
+    /// Noop 재료는 어느 backend 에서도 실을 것 없음 · 쓰기 없음으로 배치된다 — 골든(`tests/launch_argv_golden.rs`)이
+    /// 기본값 `artifacts` 로 잰 argv 가 운영 Noop 스폰의 argv 라는 전제가 이것이다.
+    #[test]
+    fn a_noop_kit_materializes_to_nothing_on_every_backend() {
+        let cwd = std::env::temp_dir();
+        for command in mail_eligibility_samples() {
+            let fs = RecordingFs::default();
+            assert_eq!(
+                materialize(&command, &noop_kit_for(&command, &cwd), &cwd, &fs),
+                Ok(LaunchArtifacts::default()),
+                "{command:?}"
+            );
+            assert_eq!(
+                *fs.writes.lock().unwrap(),
+                Vec::<PathBuf>::new(),
+                "{command:?}"
+            );
+        }
+
+        // gemini 는 dispatch 에 배선되지 않아(그 파일 헤더) 구현을 직접 부른다 — 기본 구현은 명령을 읽지 않는다.
+        let stand_in = mail_eligibility_samples().remove(0);
+        let fs = RecordingFs::default();
+        assert_eq!(
+            GeminiBackend.materialize(&stand_in, &noop_kit_for(&stand_in, &cwd), &cwd, &fs),
+            Ok(LaunchArtifacts::default())
+        );
+        assert_eq!(*fs.writes.lock().unwrap(), Vec::<PathBuf>::new());
+    }
+
+    /// 기본 배치는 실 재료라도 아무것도 싣거나 쓰지 않지만 `real` 은 계획 그대로 넘긴다.
+    #[test]
+    fn the_default_materialize_carries_real_and_nothing_else() {
+        let cwd = std::env::temp_dir();
+        let real_kit = |command: &AgentCommand| {
+            let mut kit = noop_kit_for(command, &cwd);
+            kit.plan.real = true;
+            kit
+        };
+        let carried = LaunchArtifacts {
+            real: true,
+            ..LaunchArtifacts::default()
+        };
+        for command in mail_eligibility_samples() {
+            let fs = RecordingFs::default();
+            assert_eq!(
+                materialize(&command, &real_kit(&command), &cwd, &fs),
+                Ok(carried.clone()),
+                "{command:?}"
+            );
+            assert_eq!(
+                *fs.writes.lock().unwrap(),
+                Vec::<PathBuf>::new(),
+                "{command:?}"
+            );
+        }
+
+        let stand_in = mail_eligibility_samples().remove(0);
+        let fs = RecordingFs::default();
+        assert_eq!(
+            GeminiBackend.materialize(&stand_in, &real_kit(&stand_in), &cwd, &fs),
+            Ok(carried)
+        );
+        assert_eq!(*fs.writes.lock().unwrap(), Vec::<PathBuf>::new());
     }
 }

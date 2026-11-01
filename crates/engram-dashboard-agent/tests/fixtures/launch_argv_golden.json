@@ -1,0 +1,1003 @@
+[
+  {
+    "case": "claude-terminal/fresh/no-endpoint",
+    "console": true,
+    "program": "claude",
+    "args": [
+      "--permission-mode",
+      "bypassPermissions",
+      "--session-id",
+      "11111111-1111-4111-8111-111111111111",
+      "--model",
+      "golden-model"
+    ],
+    "env": [
+      [
+        "PATH",
+        "/golden/sys;/golden/tools"
+      ],
+      [
+        "GOLDEN_FLAG",
+        "1"
+      ],
+      [
+        "DISABLE_AUTOUPDATER",
+        "1"
+      ]
+    ],
+    "cwd": "/golden/work"
+  },
+  {
+    "case": "claude-terminal/fresh/endpoint",
+    "console": true,
+    "program": "claude",
+    "args": [
+      "--permission-mode",
+      "bypassPermissions",
+      "--session-id",
+      "11111111-1111-4111-8111-111111111111",
+      "--mcp-config",
+      "/golden/mcp/agent.mcp.json",
+      "--append-system-prompt-file",
+      "/golden/priming.md",
+      "--settings",
+      "/golden/mcp/agent.settings.json",
+      "--model",
+      "golden-model",
+      "--disallowedTools",
+      "SendMessage",
+      "--allowedTools",
+      "mcp__engram__eg_send",
+      "Bash(engram:*)",
+      "PowerShell(engram:*)"
+    ],
+    "env": [
+      [
+        "PATH",
+        "/golden/bin;/golden/sys;/golden/tools"
+      ],
+      [
+        "GOLDEN_FLAG",
+        "1"
+      ],
+      [
+        "DISABLE_AUTOUPDATER",
+        "1"
+      ],
+      [
+        "ENGRAM_TOKEN",
+        "golden-token"
+      ],
+      [
+        "ENGRAM_CONTROL_URL",
+        "http://127.0.0.1:47000"
+      ],
+      [
+        "ENGRAM_CLI_EXE",
+        "/golden/bin/engram.exe"
+      ]
+    ],
+    "cwd": "/golden/work"
+  },
+  {
+    "case": "claude-terminal/fresh/endpoint-no-priming-no-settings",
+    "console": true,
+    "program": "claude",
+    "args": [
+      "--permission-mode",
+      "bypassPermissions",
+      "--session-id",
+      "11111111-1111-4111-8111-111111111111",
+      "--mcp-config",
+      "/golden/mcp/agent.mcp.json",
+      "--model",
+      "golden-model",
+      "--disallowedTools",
+      "SendMessage",
+      "--allowedTools",
+      "mcp__engram__eg_send"
+    ],
+    "env": [
+      [
+        "PATH",
+        "/golden/bin;/golden/sys;/golden/tools"
+      ],
+      [
+        "GOLDEN_FLAG",
+        "1"
+      ],
+      [
+        "DISABLE_AUTOUPDATER",
+        "1"
+      ],
+      [
+        "ENGRAM_TOKEN",
+        "golden-token"
+      ],
+      [
+        "ENGRAM_CONTROL_URL",
+        "http://127.0.0.1:47000"
+      ],
+      [
+        "ENGRAM_CLI_EXE",
+        "/golden/bin/engram.exe"
+      ]
+    ],
+    "cwd": "/golden/work"
+  },
+  {
+    "case": "claude-terminal/resume/no-endpoint",
+    "console": true,
+    "program": "claude",
+    "args": [
+      "--permission-mode",
+      "bypassPermissions",
+      "--resume",
+      "22222222-2222-4222-8222-222222222222",
+      "--model",
+      "golden-model"
+    ],
+    "env": [
+      [
+        "PATH",
+        "/golden/sys;/golden/tools"
+      ],
+      [
+        "GOLDEN_FLAG",
+        "1"
+      ],
+      [
+        "DISABLE_AUTOUPDATER",
+        "1"
+      ]
+    ],
+    "cwd": "/golden/work"
+  },
+  {
+    "case": "claude-terminal/resume/endpoint",
+    "console": true,
+    "program": "claude",
+    "args": [
+      "--permission-mode",
+      "bypassPermissions",
+      "--resume",
+      "22222222-2222-4222-8222-222222222222",
+      "--mcp-config",
+      "/golden/mcp/agent.mcp.json",
+      "--append-system-prompt-file",
+      "/golden/priming.md",
+      "--settings",
+      "/golden/mcp/agent.settings.json",
+      "--model",
+      "golden-model",
+      "--disallowedTools",
+      "SendMessage",
+      "--allowedTools",
+      "mcp__engram__eg_send",
+      "Bash(engram:*)",
+      "PowerShell(engram:*)"
+    ],
+    "env": [
+      [
+        "PATH",
+        "/golden/bin;/golden/sys;/golden/tools"
+      ],
+      [
+        "GOLDEN_FLAG",
+        "1"
+      ],
+      [
+        "DISABLE_AUTOUPDATER",
+        "1"
+      ],
+      [
+        "ENGRAM_TOKEN",
+        "golden-token"
+      ],
+      [
+        "ENGRAM_CONTROL_URL",
+        "http://127.0.0.1:47000"
+      ],
+      [
+        "ENGRAM_CLI_EXE",
+        "/golden/bin/engram.exe"
+      ]
+    ],
+    "cwd": "/golden/work"
+  },
+  {
+    "case": "claude-terminal/resume/endpoint-no-priming-no-settings",
+    "console": true,
+    "program": "claude",
+    "args": [
+      "--permission-mode",
+      "bypassPermissions",
+      "--resume",
+      "22222222-2222-4222-8222-222222222222",
+      "--mcp-config",
+      "/golden/mcp/agent.mcp.json",
+      "--model",
+      "golden-model",
+      "--disallowedTools",
+      "SendMessage",
+      "--allowedTools",
+      "mcp__engram__eg_send"
+    ],
+    "env": [
+      [
+        "PATH",
+        "/golden/bin;/golden/sys;/golden/tools"
+      ],
+      [
+        "GOLDEN_FLAG",
+        "1"
+      ],
+      [
+        "DISABLE_AUTOUPDATER",
+        "1"
+      ],
+      [
+        "ENGRAM_TOKEN",
+        "golden-token"
+      ],
+      [
+        "ENGRAM_CONTROL_URL",
+        "http://127.0.0.1:47000"
+      ],
+      [
+        "ENGRAM_CLI_EXE",
+        "/golden/bin/engram.exe"
+      ]
+    ],
+    "cwd": "/golden/work"
+  },
+  {
+    "case": "claude-json/fresh/no-endpoint",
+    "console": true,
+    "program": "claude",
+    "args": [
+      "--permission-mode",
+      "bypassPermissions",
+      "-p",
+      "--input-format",
+      "stream-json",
+      "--output-format",
+      "stream-json",
+      "--replay-user-messages",
+      "--verbose",
+      "--include-partial-messages",
+      "--session-id",
+      "11111111-1111-4111-8111-111111111111",
+      "--model",
+      "golden-model"
+    ],
+    "env": [
+      [
+        "PATH",
+        "/golden/sys;/golden/tools"
+      ],
+      [
+        "GOLDEN_FLAG",
+        "1"
+      ],
+      [
+        "DISABLE_AUTOUPDATER",
+        "1"
+      ],
+      [
+        "MAX_THINKING_TOKENS",
+        "8000"
+      ]
+    ],
+    "cwd": "/golden/work"
+  },
+  {
+    "case": "claude-json/fresh/endpoint",
+    "console": true,
+    "program": "claude",
+    "args": [
+      "--permission-mode",
+      "bypassPermissions",
+      "-p",
+      "--input-format",
+      "stream-json",
+      "--output-format",
+      "stream-json",
+      "--replay-user-messages",
+      "--verbose",
+      "--include-partial-messages",
+      "--session-id",
+      "11111111-1111-4111-8111-111111111111",
+      "--mcp-config",
+      "/golden/mcp/agent.mcp.json",
+      "--append-system-prompt-file",
+      "/golden/priming.md",
+      "--settings",
+      "/golden/mcp/agent.settings.json",
+      "--model",
+      "golden-model",
+      "--disallowedTools",
+      "SendMessage",
+      "--allowedTools",
+      "mcp__engram__eg_send",
+      "Bash(engram:*)",
+      "PowerShell(engram:*)"
+    ],
+    "env": [
+      [
+        "PATH",
+        "/golden/bin;/golden/sys;/golden/tools"
+      ],
+      [
+        "GOLDEN_FLAG",
+        "1"
+      ],
+      [
+        "DISABLE_AUTOUPDATER",
+        "1"
+      ],
+      [
+        "MAX_THINKING_TOKENS",
+        "8000"
+      ],
+      [
+        "ENGRAM_TOKEN",
+        "golden-token"
+      ],
+      [
+        "ENGRAM_CONTROL_URL",
+        "http://127.0.0.1:47000"
+      ],
+      [
+        "ENGRAM_CLI_EXE",
+        "/golden/bin/engram.exe"
+      ]
+    ],
+    "cwd": "/golden/work"
+  },
+  {
+    "case": "claude-json/fresh/endpoint-no-priming-no-settings",
+    "console": true,
+    "program": "claude",
+    "args": [
+      "--permission-mode",
+      "bypassPermissions",
+      "-p",
+      "--input-format",
+      "stream-json",
+      "--output-format",
+      "stream-json",
+      "--replay-user-messages",
+      "--verbose",
+      "--include-partial-messages",
+      "--session-id",
+      "11111111-1111-4111-8111-111111111111",
+      "--mcp-config",
+      "/golden/mcp/agent.mcp.json",
+      "--model",
+      "golden-model",
+      "--disallowedTools",
+      "SendMessage",
+      "--allowedTools",
+      "mcp__engram__eg_send"
+    ],
+    "env": [
+      [
+        "PATH",
+        "/golden/bin;/golden/sys;/golden/tools"
+      ],
+      [
+        "GOLDEN_FLAG",
+        "1"
+      ],
+      [
+        "DISABLE_AUTOUPDATER",
+        "1"
+      ],
+      [
+        "MAX_THINKING_TOKENS",
+        "8000"
+      ],
+      [
+        "ENGRAM_TOKEN",
+        "golden-token"
+      ],
+      [
+        "ENGRAM_CONTROL_URL",
+        "http://127.0.0.1:47000"
+      ],
+      [
+        "ENGRAM_CLI_EXE",
+        "/golden/bin/engram.exe"
+      ]
+    ],
+    "cwd": "/golden/work"
+  },
+  {
+    "case": "claude-json/resume/no-endpoint",
+    "console": true,
+    "program": "claude",
+    "args": [
+      "--permission-mode",
+      "bypassPermissions",
+      "-p",
+      "--input-format",
+      "stream-json",
+      "--output-format",
+      "stream-json",
+      "--replay-user-messages",
+      "--verbose",
+      "--include-partial-messages",
+      "--resume",
+      "22222222-2222-4222-8222-222222222222",
+      "--model",
+      "golden-model"
+    ],
+    "env": [
+      [
+        "PATH",
+        "/golden/sys;/golden/tools"
+      ],
+      [
+        "GOLDEN_FLAG",
+        "1"
+      ],
+      [
+        "DISABLE_AUTOUPDATER",
+        "1"
+      ],
+      [
+        "MAX_THINKING_TOKENS",
+        "8000"
+      ]
+    ],
+    "cwd": "/golden/work"
+  },
+  {
+    "case": "claude-json/resume/endpoint",
+    "console": true,
+    "program": "claude",
+    "args": [
+      "--permission-mode",
+      "bypassPermissions",
+      "-p",
+      "--input-format",
+      "stream-json",
+      "--output-format",
+      "stream-json",
+      "--replay-user-messages",
+      "--verbose",
+      "--include-partial-messages",
+      "--resume",
+      "22222222-2222-4222-8222-222222222222",
+      "--mcp-config",
+      "/golden/mcp/agent.mcp.json",
+      "--append-system-prompt-file",
+      "/golden/priming.md",
+      "--settings",
+      "/golden/mcp/agent.settings.json",
+      "--model",
+      "golden-model",
+      "--disallowedTools",
+      "SendMessage",
+      "--allowedTools",
+      "mcp__engram__eg_send",
+      "Bash(engram:*)",
+      "PowerShell(engram:*)"
+    ],
+    "env": [
+      [
+        "PATH",
+        "/golden/bin;/golden/sys;/golden/tools"
+      ],
+      [
+        "GOLDEN_FLAG",
+        "1"
+      ],
+      [
+        "DISABLE_AUTOUPDATER",
+        "1"
+      ],
+      [
+        "MAX_THINKING_TOKENS",
+        "8000"
+      ],
+      [
+        "ENGRAM_TOKEN",
+        "golden-token"
+      ],
+      [
+        "ENGRAM_CONTROL_URL",
+        "http://127.0.0.1:47000"
+      ],
+      [
+        "ENGRAM_CLI_EXE",
+        "/golden/bin/engram.exe"
+      ]
+    ],
+    "cwd": "/golden/work"
+  },
+  {
+    "case": "claude-json/resume/endpoint-no-priming-no-settings",
+    "console": true,
+    "program": "claude",
+    "args": [
+      "--permission-mode",
+      "bypassPermissions",
+      "-p",
+      "--input-format",
+      "stream-json",
+      "--output-format",
+      "stream-json",
+      "--replay-user-messages",
+      "--verbose",
+      "--include-partial-messages",
+      "--resume",
+      "22222222-2222-4222-8222-222222222222",
+      "--mcp-config",
+      "/golden/mcp/agent.mcp.json",
+      "--model",
+      "golden-model",
+      "--disallowedTools",
+      "SendMessage",
+      "--allowedTools",
+      "mcp__engram__eg_send"
+    ],
+    "env": [
+      [
+        "PATH",
+        "/golden/bin;/golden/sys;/golden/tools"
+      ],
+      [
+        "GOLDEN_FLAG",
+        "1"
+      ],
+      [
+        "DISABLE_AUTOUPDATER",
+        "1"
+      ],
+      [
+        "MAX_THINKING_TOKENS",
+        "8000"
+      ],
+      [
+        "ENGRAM_TOKEN",
+        "golden-token"
+      ],
+      [
+        "ENGRAM_CONTROL_URL",
+        "http://127.0.0.1:47000"
+      ],
+      [
+        "ENGRAM_CLI_EXE",
+        "/golden/bin/engram.exe"
+      ]
+    ],
+    "cwd": "/golden/work"
+  },
+  {
+    "case": "codex-terminal/fresh/no-endpoint",
+    "console": true,
+    "program": "codex",
+    "args": [
+      "--cd",
+      "/golden/work",
+      "-s",
+      "workspace-write",
+      "-a",
+      "on-request",
+      "-c",
+      "model=golden-model"
+    ],
+    "env": [
+      [
+        "PATH",
+        "/golden/sys;/golden/tools"
+      ],
+      [
+        "GOLDEN_FLAG",
+        "1"
+      ]
+    ],
+    "cwd": "/golden/work"
+  },
+  {
+    "case": "codex-terminal/fresh/endpoint",
+    "console": true,
+    "program": "codex",
+    "args": [
+      "--cd",
+      "/golden/work",
+      "-s",
+      "workspace-write",
+      "-a",
+      "on-request",
+      "-c",
+      "model=golden-model",
+      "-c",
+      "mcp_servers.engram={url='http://127.0.0.1:47000/mcp',bearer_token_env_var='ENGRAM_TOKEN',default_tools_approval_mode='approve'}",
+      "-c",
+      "developer_instructions='Launch argv golden priming.\\nSecond line for the newline replacement.\\n'"
+    ],
+    "env": [
+      [
+        "PATH",
+        "/golden/bin;/golden/sys;/golden/tools"
+      ],
+      [
+        "GOLDEN_FLAG",
+        "1"
+      ],
+      [
+        "ENGRAM_TOKEN",
+        "golden-token"
+      ],
+      [
+        "ENGRAM_CONTROL_URL",
+        "http://127.0.0.1:47000"
+      ],
+      [
+        "ENGRAM_CLI_EXE",
+        "/golden/bin/engram.exe"
+      ],
+      [
+        "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+        "engram-33333333-3333-4333-8333-333333333333-7"
+      ]
+    ],
+    "cwd": "/golden/work"
+  },
+  {
+    "case": "codex-terminal/resume/no-endpoint",
+    "console": true,
+    "program": "codex",
+    "args": [
+      "resume",
+      "22222222-2222-4222-8222-222222222222",
+      "--cd",
+      "/golden/work",
+      "-s",
+      "workspace-write",
+      "-a",
+      "on-request",
+      "-c",
+      "model=golden-model"
+    ],
+    "env": [
+      [
+        "PATH",
+        "/golden/sys;/golden/tools"
+      ],
+      [
+        "GOLDEN_FLAG",
+        "1"
+      ]
+    ],
+    "cwd": "/golden/work"
+  },
+  {
+    "case": "codex-terminal/resume/endpoint",
+    "console": true,
+    "program": "codex",
+    "args": [
+      "resume",
+      "22222222-2222-4222-8222-222222222222",
+      "--cd",
+      "/golden/work",
+      "-s",
+      "workspace-write",
+      "-a",
+      "on-request",
+      "-c",
+      "model=golden-model",
+      "-c",
+      "mcp_servers.engram={url='http://127.0.0.1:47000/mcp',bearer_token_env_var='ENGRAM_TOKEN',default_tools_approval_mode='approve'}",
+      "-c",
+      "developer_instructions='Launch argv golden priming.\\nSecond line for the newline replacement.\\n'"
+    ],
+    "env": [
+      [
+        "PATH",
+        "/golden/bin;/golden/sys;/golden/tools"
+      ],
+      [
+        "GOLDEN_FLAG",
+        "1"
+      ],
+      [
+        "ENGRAM_TOKEN",
+        "golden-token"
+      ],
+      [
+        "ENGRAM_CONTROL_URL",
+        "http://127.0.0.1:47000"
+      ],
+      [
+        "ENGRAM_CLI_EXE",
+        "/golden/bin/engram.exe"
+      ],
+      [
+        "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+        "engram-33333333-3333-4333-8333-333333333333-7"
+      ]
+    ],
+    "cwd": "/golden/work"
+  },
+  {
+    "case": "codex-json/fresh/no-endpoint",
+    "console": true,
+    "program": "codex",
+    "args": [
+      "app-server",
+      "--stdio",
+      "-c",
+      "model=golden-model"
+    ],
+    "env": [
+      [
+        "PATH",
+        "/golden/sys;/golden/tools"
+      ],
+      [
+        "GOLDEN_FLAG",
+        "1"
+      ]
+    ],
+    "cwd": "/golden/work"
+  },
+  {
+    "case": "codex-json/fresh/endpoint",
+    "console": true,
+    "program": "codex",
+    "args": [
+      "app-server",
+      "--stdio",
+      "-c",
+      "model=golden-model",
+      "-c",
+      "mcp_servers.engram={url='http://127.0.0.1:47000/mcp',bearer_token_env_var='ENGRAM_TOKEN',default_tools_approval_mode='approve'}"
+    ],
+    "env": [
+      [
+        "PATH",
+        "/golden/bin;/golden/sys;/golden/tools"
+      ],
+      [
+        "GOLDEN_FLAG",
+        "1"
+      ],
+      [
+        "ENGRAM_TOKEN",
+        "golden-token"
+      ],
+      [
+        "ENGRAM_CONTROL_URL",
+        "http://127.0.0.1:47000"
+      ],
+      [
+        "ENGRAM_CLI_EXE",
+        "/golden/bin/engram.exe"
+      ],
+      [
+        "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+        "engram-33333333-3333-4333-8333-333333333333-7"
+      ]
+    ],
+    "cwd": "/golden/work"
+  },
+  {
+    "case": "codex-json/resume/no-endpoint",
+    "console": true,
+    "program": "codex",
+    "args": [
+      "app-server",
+      "--stdio",
+      "-c",
+      "model=golden-model"
+    ],
+    "env": [
+      [
+        "PATH",
+        "/golden/sys;/golden/tools"
+      ],
+      [
+        "GOLDEN_FLAG",
+        "1"
+      ]
+    ],
+    "cwd": "/golden/work"
+  },
+  {
+    "case": "codex-json/resume/endpoint",
+    "console": true,
+    "program": "codex",
+    "args": [
+      "app-server",
+      "--stdio",
+      "-c",
+      "model=golden-model",
+      "-c",
+      "mcp_servers.engram={url='http://127.0.0.1:47000/mcp',bearer_token_env_var='ENGRAM_TOKEN',default_tools_approval_mode='approve'}"
+    ],
+    "env": [
+      [
+        "PATH",
+        "/golden/bin;/golden/sys;/golden/tools"
+      ],
+      [
+        "GOLDEN_FLAG",
+        "1"
+      ],
+      [
+        "ENGRAM_TOKEN",
+        "golden-token"
+      ],
+      [
+        "ENGRAM_CONTROL_URL",
+        "http://127.0.0.1:47000"
+      ],
+      [
+        "ENGRAM_CLI_EXE",
+        "/golden/bin/engram.exe"
+      ],
+      [
+        "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+        "engram-33333333-3333-4333-8333-333333333333-7"
+      ]
+    ],
+    "cwd": "/golden/work"
+  },
+  {
+    "case": "shell/fresh/no-endpoint",
+    "console": false,
+    "program": "golden-shell",
+    "args": [
+      "--login",
+      "-i"
+    ],
+    "env": [
+      [
+        "PATH",
+        "/golden/sys;/golden/tools"
+      ],
+      [
+        "GOLDEN_FLAG",
+        "1"
+      ]
+    ],
+    "cwd": "/golden/work"
+  },
+  {
+    "case": "shell/fresh/endpoint",
+    "console": false,
+    "program": "golden-shell",
+    "args": [
+      "--login",
+      "-i"
+    ],
+    "env": [
+      [
+        "PATH",
+        "/golden/sys;/golden/tools"
+      ],
+      [
+        "GOLDEN_FLAG",
+        "1"
+      ]
+    ],
+    "cwd": "/golden/work"
+  },
+  {
+    "case": "shell/resume/no-endpoint",
+    "console": false,
+    "program": "golden-shell",
+    "args": [
+      "--login",
+      "-i"
+    ],
+    "env": [
+      [
+        "PATH",
+        "/golden/sys;/golden/tools"
+      ],
+      [
+        "GOLDEN_FLAG",
+        "1"
+      ]
+    ],
+    "cwd": "/golden/work"
+  },
+  {
+    "case": "shell/resume/endpoint",
+    "console": false,
+    "program": "golden-shell",
+    "args": [
+      "--login",
+      "-i"
+    ],
+    "env": [
+      [
+        "PATH",
+        "/golden/sys;/golden/tools"
+      ],
+      [
+        "GOLDEN_FLAG",
+        "1"
+      ]
+    ],
+    "cwd": "/golden/work"
+  },
+  {
+    "case": "spawn-by-cwd/claude/fresh/no-endpoint",
+    "console": true,
+    "program": "claude",
+    "args": [
+      "--permission-mode",
+      "bypassPermissions",
+      "-p",
+      "--input-format",
+      "stream-json",
+      "--output-format",
+      "stream-json",
+      "--replay-user-messages",
+      "--verbose",
+      "--include-partial-messages",
+      "--session-id",
+      "11111111-1111-4111-8111-111111111111"
+    ],
+    "env": [
+      [
+        "DISABLE_AUTOUPDATER",
+        "1"
+      ],
+      [
+        "MAX_THINKING_TOKENS",
+        "8000"
+      ]
+    ],
+    "cwd": "/golden/work"
+  },
+  {
+    "case": "spawn-by-cwd/codex/fresh/no-endpoint",
+    "console": true,
+    "program": "codex",
+    "args": [
+      "app-server",
+      "--stdio"
+    ],
+    "env": [],
+    "cwd": "/golden/work"
+  },
+  {
+    "case": "smoke-bin/claude-json/fresh/no-endpoint",
+    "console": true,
+    "program": "claude",
+    "args": [
+      "--permission-mode",
+      "bypassPermissions",
+      "-p",
+      "--input-format",
+      "stream-json",
+      "--output-format",
+      "stream-json",
+      "--replay-user-messages",
+      "--verbose",
+      "--include-partial-messages",
+      "--session-id",
+      "11111111-1111-4111-8111-111111111111",
+      "--model",
+      "golden-model"
+    ],
+    "env": [
+      [
+        "DISABLE_AUTOUPDATER",
+        "1"
+      ],
+      [
+        "MAX_THINKING_TOKENS",
+        "8000"
+      ]
+    ],
+    "cwd": "/golden/work"
+  }
+]

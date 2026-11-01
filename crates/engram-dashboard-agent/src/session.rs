@@ -17,6 +17,7 @@ use std::time::Duration;
 use engram_dashboard_base::sync;
 
 use crate::backend::InputEncoder;
+use crate::launch::LaunchLease;
 use crate::output_core::{CancelRequest, OutputCore};
 use crate::queued_input::{overlay_unconfirmed, ListedRow, QueuedInputs, RowPhase};
 use crate::session_id_latch::SessionIdLatch;
@@ -62,6 +63,10 @@ pub struct AgentSession {
     continues_conversation: bool,
     /// 이 화신의 세션 id 첫 제출 래치. `None` = 입력 두 동사의 제출 세기가 무동작이다.
     session_id_latch: Option<Arc<SessionIdLatch>>,
+    /// 이 화신의 실행 재료 회수 열쇠 — 세션은 들기만 하고 꺼내 쓰는 것은 reaper 다. `None` = 거둘 재료가 없다(하네스
+    /// 세션) · 이미 꺼냈다. 잎 락이다(쥔 채 밖을 부르지 않는다).
+    // TRD S25 §5-2 4 (c2) ②
+    launch_lease: Mutex<Option<LaunchLease>>,
     /// 턴 도중 입력 정책 — backend 신고값. 기본값(`with_mid_turn` 을 안 부름) = `None`(오늘 경로).
     // ADR-0231
     mid_turn: MidTurnPolicy,
@@ -127,6 +132,7 @@ impl AgentSession {
             sleeper: blocking_sleep,
             continues_conversation: false,
             session_id_latch: None,
+            launch_lease: Mutex::new(None),
             mid_turn: MidTurnPolicy::None,
             delivery_ack: Arc::new(DeliveryAck::new()),
             input_order: Mutex::new(()),
@@ -152,6 +158,21 @@ impl AgentSession {
     pub(crate) fn with_session_id_latch(mut self, latch: Arc<SessionIdLatch>) -> Self {
         self.session_id_latch = Some(latch);
         self
+    }
+
+    /// 실행 재료 회수 열쇠를 싣는다 — 기본값(부르지 않음) = 열쇠 없음.
+    ///
+    /// ★운영 조립점에서 빠뜨리면 뜬 화신의 휘발 폴더가 조용히 남는다★(부팅 쓸기가 받칠 때까지 — 오류는 없다).
+    // TRD S25 §5-2 4 (c2) ②
+    pub(crate) fn with_launch_lease(mut self, lease: LaunchLease) -> Self {
+        self.launch_lease = Mutex::new(Some(lease));
+        self
+    }
+
+    /// 이 화신의 실행 재료 회수 열쇠를 꺼낸다 — 두 번째부터는 `None`. 부르는 자리는 이 세션을 명부에서 뺀 reaper 하나다.
+    // TRD S25 §5-2 4 (c2) ②
+    pub(crate) fn take_launch_lease(&self) -> Option<LaunchLease> {
+        sync::lock(&self.launch_lease).take()
     }
 
     /// 턴 도중 입력 정책과 받음 알림 가능 여부를 싣는다 — 기본값(부르지 않음) = `None` · `Unknown`.

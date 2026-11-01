@@ -51,6 +51,7 @@ use crate::backend::{
     TransportShape, TurnClassifier,
 };
 use crate::failure::AgentFailureKind;
+use crate::launch::LaunchArtifacts;
 use crate::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
 use crate::session_tracker::SessionIdSource;
 use crate::transport::pty::PtyTransport;
@@ -162,6 +163,11 @@ impl AgentBackend for ClaudeBackend {
         true
     }
 
+    // TODO(TRD S25 §5-2 5): `materialize` 를 여기서 덮는다(휘발 폴더의 플러그인 정션 · 합친 settings) — 그때까지 트레이트
+    //   기본값(실을 것 없음 · 쓰기 없음)이다. 파일 · 링크 경로는 `kit.volatile_dir` 에 낱말을 이어 붙여서만 짓고, 실을
+    //   링크 경로는 `link_dir` 에 넘긴 바로 그 값이다 — 대소문자 · 접두를 바꾼 철자를 쓰지 않고 링크 아래에는 쓰지
+    //   않는다(가둠 포트가 막아 배치가 실패한다).
+
     fn build_spec(
         &self,
         command: &AgentCommand,
@@ -171,6 +177,7 @@ impl AgentBackend for ClaudeBackend {
         cwd: PathBuf,
         mut env: Vec<(String, String)>,
         control: Option<ControlEndpoint>,
+        _artifacts: &LaunchArtifacts,
     ) -> CommandSpec {
         match command {
             AgentCommand::Claude {
@@ -454,6 +461,7 @@ impl AgentBackend for ClaudeBackend {
         //   로그의 귀속으로만 읽고 통로로 보내지 않으니 그 경우가 아니다.
         // ADR-0262
         control: Option<&ControlEndpoint>,
+        _artifacts: &LaunchArtifacts,
     ) -> Result<SpawnParts, PtyError> {
         // 위 doc 이 말한 대로 쓰지 않는다 — 밑줄 이름을 쓰면 rustdoc 이 렌더하는 시그니처가 doc 과 어긋난다.
         let _ = (sid_sink, first_turn_sink, resume_session_id);
@@ -2105,7 +2113,16 @@ mod tests {
     }
 
     fn spec(command: &AgentCommand, mode: SpawnMode, sid: Option<Uuid>) -> CommandSpec {
-        ClaudeBackend.build_spec(command, mode, sid, None, PathBuf::from("."), vec![], None)
+        ClaudeBackend.build_spec(
+            command,
+            mode,
+            sid,
+            None,
+            PathBuf::from("."),
+            vec![],
+            None,
+            &LaunchArtifacts::default(),
+        )
     }
 
     fn spec_with_control(
@@ -2122,6 +2139,7 @@ mod tests {
             PathBuf::from("."),
             vec![],
             control,
+            &LaunchArtifacts::default(),
         )
     }
 
@@ -2453,6 +2471,7 @@ mod tests {
             PathBuf::from("."),
             profile_env,
             control,
+            &LaunchArtifacts::default(),
         )
     }
 
@@ -3217,6 +3236,7 @@ mod tests {
             cwd.clone(),
             env.clone(),
             None,
+            &LaunchArtifacts::default(),
         );
         assert_eq!(s.cwd, cwd);
         assert_eq!(s.env, [env[0].clone(), owned(NO_AUTOUPDATE_ENV)]);
@@ -3374,6 +3394,7 @@ mod tests {
             PathBuf::from("."),
             env,
             None,
+            &LaunchArtifacts::default(),
         );
         let vals: Vec<&str> = s
             .env
@@ -3399,6 +3420,7 @@ mod tests {
             PathBuf::from("."),
             env,
             None,
+            &LaunchArtifacts::default(),
         );
         let vals: Vec<&str> = s
             .env
@@ -4569,6 +4591,7 @@ mod tests {
             PathBuf::from("."),
             vec![],
             None,
+            &LaunchArtifacts::default(),
         );
 
         let pos = spec
@@ -6378,9 +6401,19 @@ mod tests {
             env: vec![],
             cwd: PathBuf::from("."),
         };
-        let parts =
-            crate::backend::open_spawn(&json(vec![]), &probe, 80, 24, None, None, None, None, None)
-                .expect("open_spawn");
+        let parts = crate::backend::open_spawn(
+            &json(vec![]),
+            &probe,
+            80,
+            24,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &LaunchArtifacts::default(),
+        )
+        .expect("open_spawn");
         assert!(parts.transport.capabilities().control.interrupt);
         assert!(
             matches!(parts.transport.interrupt(), Err(PtyError::Unsupported(_))),

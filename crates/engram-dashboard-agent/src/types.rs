@@ -1045,6 +1045,19 @@ pub enum PtyError {
     // ADR-0291 R17
     #[error("agent store: {0}")]
     Store(crate::profile::StoreError),
+    /// 실행 재료 점검이 이 실행을 막았다 — 걸린 사유 전부. 프로세스도 제어 채널도 만들지 않았다.
+    // ADR-0334
+    #[error("{0}")]
+    LaunchBlocked(crate::launch::LaunchBlocked),
+    /// 점검한 실행 입력이 띄울 값과 맞지 않는다 — 실행 준비 중 붙임 · 명령 · env 가 두 번 다 바뀌었거나, 스폰에 넘긴
+    /// 사본의 명령 · env 가 점검한 명부 값과 다르거나, 점검한 계획의 원본(라이브러리 파일)이 재료 준비 전에 사라졌거나
+    /// 바뀌었다([`crate::launch::PrepareError::Stale`]). 프로세스도 제어 채널도 만들지 않았고, 새로 읽은 사본으로 다시
+    /// 시도하면 선다. 원본 경합은 화신 표식을 뽑은 뒤라 표식이 하나 탄다(저장된 세션 id 는 그대로다).
+    // ADR-0319
+    #[error(
+        "launch raced: the agent's launch inputs (presets or their library files, command or env) changed while it was being prepared — try again"
+    )]
+    LaunchRaced,
     // ★중복 spawn 요청을 여기 오류로 되돌리지 마라★: "이미 떠 있다 / 이미 뜨는 중이다" 는 실패가 아니라
     //   **할 일이 없는 요청**이라 `Ok(manager::SpawnOutcome::Moot)` 로 답한다. 오류로 두던 시절엔 소비자
     //   마다 "이 오류는 진짜 실패가 아니다" 목록을 들어야 했고, 그 목록을 세 번 손보는 동안 세 번 다 하나씩

@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::backend::AgentBackend;
+use crate::launch::LaunchArtifacts;
 use crate::profile::{AgentCommand, SpawnMode};
 use crate::types::{BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, SessionCaps};
 
@@ -75,6 +76,7 @@ impl AgentBackend for GeminiBackend {
         // TODO(ADR-0094): translate ControlEndpoint.grants to gemini permission flags
         //   (claude 는 --allowedTools mcp__{s}__{t} / Bash({e}:*)+PowerShell({e}:*); gemini 방언은 CLI spike 후 확정).
         _control: Option<ControlEndpoint>,
+        _artifacts: &LaunchArtifacts,
     ) -> CommandSpec {
         let mut args: Vec<String> = Vec::new();
 
@@ -163,6 +165,7 @@ mod tests {
             PathBuf::from("."),
             vec![],
             None,
+            &LaunchArtifacts::default(),
         )
     }
 
@@ -205,6 +208,7 @@ mod tests {
             cwd.clone(),
             env.clone(),
             None,
+            &LaunchArtifacts::default(),
         );
         assert_eq!(s.cwd, cwd);
         assert_eq!(s.env, env);

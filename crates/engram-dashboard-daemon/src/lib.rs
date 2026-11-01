@@ -268,6 +268,8 @@ fn build_daemon_wiring_with_store(
     ));
     tracker.start();
 
+    // TODO(TRD S25 §5-2 8): 실행 재료 포트를 여기서 꽂는다(`with_launch_ports`) — 꽂기 전에 남은 `launch\` 를 쓸어 낸다
+    //   (그 쓸기는 `restore_all` 보다도 먼저 끝난다 · §5-2 4 (c2) ⑥).
     let manager = Arc::new(AgentManager::new_with_control(
         status_sink,
         profiles,

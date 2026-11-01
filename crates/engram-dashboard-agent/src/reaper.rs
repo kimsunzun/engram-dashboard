@@ -1,8 +1,8 @@
 //! 세션 reaper — 종료 분류(ADR-0019)의 단일 소비자.
 //!
 //! pump 가 finish 승자일 때 발행한 `ReapMsg` 를 **단일 supervisor 스레드**가 소비해 다음을 수행한다:
-//! sessions 맵에서 제거(epoch 일치 검증 후) → 프로필 disposition(auto_restore=false 다운그레이드 /
-//! 손 안 댐 — ADR-0083 으로 자동 삭제 폐지) → 목록 통지.
+//! sessions 맵에서 제거(epoch 일치 검증 후) → 제어 채널 폐기 → 프로필 disposition
+//! (auto_restore=false 다운그레이드 / 손 안 댐 — ADR-0083 으로 자동 삭제 폐지) → 목록 통지 → 실행 재료 회수.
 //!
 //! 불변식:
 //! - kill 2동사(ADR-0001)·finalize 1회(ADR-0005)는 reaper 가 건드리지 않는다 — done 신호를
@@ -37,6 +37,9 @@ pub enum ReaperCmd {
 
 /// AgentManager 의 필드 Arc 들을 **그대로** 공유한다 — manager 와 reaper 가 같은
 /// sessions/profiles/status_sink/control 을 본다(사본 금지).
+/// ★실행 재료 출처는 여기 두지 않는다★ — 이 묶음은 매니저 생성자에서 만들어져 그 뒤 `with_launch_ports` 가 바꿔 끼운
+///   포트를 못 본다. 재료는 세션이 든 열쇠(`AgentSession::take_launch_lease`)로 거둔다.
+// TRD S25 §5-2 4 (c2) ③
 pub struct ReaperDeps {
     pub sessions: Arc<RwLock<HashMap<AgentId, Arc<AgentSession>>>>,
     pub profiles: Arc<ProfileRegistry>,
@@ -62,9 +65,11 @@ impl ReaperDeps {
         };
 
         // 2. remove Some 승자 1명만 아래로 진행(idempotency).
-        if removed.is_none() {
+        let Some(removed) = removed else {
             return;
-        }
+        };
+        // 재료 열쇠는 세션을 놓기 전에 꺼낸다 — 쓰는 것은 아래 5 다.
+        let lease = removed.take_launch_lease();
         // Arc<AgentSession> 폐기. ★"마지막" 참조라고 단정하지 않는다★: 이어받기 실패 관측
         //   (`AgentManager::early_activation_verdict`)은 조기종료 창 동안 같은 Arc 를 들고 있으므로, 그
         //   경로에선 실제 해제가 **그 관측자의 다음 폴링까지**(현 100ms 간격) 밀린다. 무해하다 —
@@ -90,6 +95,20 @@ impl ReaperDeps {
         // 4. 목록 변경 통지(lock 밖, 외부 콜백). list_agents 와 동치인 스냅샷을 만든다.
         let agents = list_agents(&self.sessions, &self.profiles);
         self.status_sink.agent_list_updated(agents);
+
+        // 5. ★세션 등록 뒤 실행 재료를 거두는 유일한 자리★ — 같은 표식 승자 · 락 밖. disposition · 목록 통지 **뒤**인
+        //   것은 느리거나 멈춘 회수가 auto_restore 내리기(ADR-0019 「내리기가 마지막」)와 목록 통지를 붙들지 않게다.
+        //   kill · 실패 정리 길은 거두지 않는다(그 시점엔 자식이 아직 살아 휘발 폴더를 쓴다). 열쇠는 그 화신을 준비한
+        //   출처를 쥐므로 매니저 생성 뒤 바꿔 끼운 포트도 여기 닿는다.
+        // ★최선 노력이다★ — 여기 닿아도 CLI 트리가 살아 있을 수 있다(조기 판정 관측자가 세션 `Arc` 를 쥠 · 가둔 pump
+        //   panic · `KILL_ON_JOB_CLOSE` 는 비동기). 끝내 돌지 않는 회수(데몬 종료 · 강제 종료 · `Stop` 뒤에 온
+        //   `ReapMsg`)는 부팅 쓸기가 받친다.
+        // ADR-0334
+        // TRD S25 §5-2 4 (c2) ② · ④ · ⑥
+        if let Some(lease) = lease {
+            debug_assert_eq!(lease.epoch(), msg.epoch);
+            lease.release();
+        }
 
         tracing::info!(
             agent = %msg.id,

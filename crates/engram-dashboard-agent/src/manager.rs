@@ -23,6 +23,9 @@ use engram_dashboard_base::sync;
 use crate::backend;
 use crate::failure::AgentFailureKind;
 use crate::inputs_pending::InputsPendingTable;
+#[cfg(test)]
+use crate::launch::LaunchArtifacts;
+use crate::launch::{LaunchKitGuard, LaunchLease, LaunchPorts};
 use crate::output_core::{OutputCore, QueuedWiring, TurnWiring};
 use crate::profile::{
     AgentCommand, AgentProfile, ProfileRegistry, RestoreOutcome, RestoreReport, SpawnMode,
@@ -40,6 +43,9 @@ use crate::types::{
     InputOrigin, NoopControlChannel, OutputChunk, OutputEvent, OutputSink, PtyError, ReapMsg,
     SinkId, StatusSink, SubscribeReply, TerminalReason, TerminationIntent,
 };
+
+mod prelaunch;
+mod profile_edit;
 
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
@@ -186,7 +192,7 @@ pub struct RosterEntry {
 
 /// **지금 실제로 override 를 싣는 경로는 개명 하나뿐**이다 — 표시명 override 를 나르는 wire 명령은
 /// `RenameProfile` 뿐이고, 생성·spawn 쪽에는 그 필드가 아예 없다. 그래서 `try_create_agent`·
-/// `register_for_spawn` 쪽 호출은 공개 API 방어선이다.
+/// `ensure_registered` 쪽 호출은 공개 API 방어선이다.
 ///
 /// ★저장된 이름 · 화면에 그려지는 이름 · 편지 주소가 **같은 문자열**이어야 한다★: 유일성(ADR-0120) 판정은
 ///   문자열 비교라 `bob` 과 `" bob "` 은 서로 다른 이름으로 **둘 다** 통과하는데 트리에는 똑같이 그려진다 —
@@ -261,7 +267,7 @@ fn classify_name(base: &str, name: &str) -> Option<NameKind> {
 ///   프로세스를 띄우는 등록에만 통하고, 프로세스를 하나도 띄우지 않는 **잠든 에이전트 등록**엔 통하지
 ///   않는다(그쪽은 아무것도 밀어내지 않으므로 물리적 제동이 아예 없다). 상한이 필요한 이유가 바로 그것이다.
 /// ★기존 명부는 인질이 아니다★: 상한은 **신규 등록**만 본다 — 이미 상한을 넘은 명부의 복원·재spawn 은
-///   그대로 돌아간다(`register_for_spawn` 의 기존-id 분기는 이 검사를 지나지 않는다).
+///   그대로 돌아간다(`ensure_registered` 는 있는 id 에 이 검사를 하지 않는다).
 // ADR-0132
 pub const MAX_ROSTER_SIZE: usize = 512;
 
@@ -409,14 +415,28 @@ fn profile_vanished_mid_spawn(id: AgentId, at: &str) -> PtyError {
 
 /// 띄우기가 프로세스를 내기 전에 `Err` 로 끝났을 때 「마지막 실패」에 적을 종류.
 ///
-/// ★저장 `Err` 는 `SpawnFailed` 가 아니라 「그 밖」이다★ — 띄우기 전 명부 변경을 저장소가 받지 않아 프로세스를
-///   열려고 한 적이 없다. `SpawnFailed`(실행파일 부재 · 권한 등)로 적으면 화면 · LLM 이 실행 환경을 의심한다.
+/// ★저장 `Err` · 실행 재료 막힘 · 준비 경합은 `SpawnFailed` 가 아니라 「그 밖」이다★ — 셋 다 프로세스를 열려고
+///   한 적이 없다. `SpawnFailed`(실행파일 부재 · 권한 등)로 적으면 화면 · LLM 이 실행 환경을 의심한다.
 // ADR-0291 R17
+// ADR-0319
 fn spawn_error_kind(e: &PtyError) -> AgentFailureKind {
     match e {
-        PtyError::Store(_) => AgentFailureKind::Other,
+        PtyError::Store(_) | PtyError::LaunchBlocked(_) | PtyError::LaunchRaced => {
+            AgentFailureKind::Other
+        }
         _ => AgentFailureKind::SpawnFailed,
     }
+}
+
+/// 프로세스를 열기 전에 끊긴 실패 중 호출자가 **종류로** 받아야 하는 것 — 버스가 저장 거절 · 실행 막힘을 다른
+/// 실패와 가른다. 이어받기 동사는 이것만 `Err` 로 올리고 나머지는 활성화 결말 문구로 접는다.
+// ADR-0291 R17
+// ADR-0334
+fn refused_before_spawn(e: &PtyError) -> bool {
+    matches!(
+        e,
+        PtyError::Store(_) | PtyError::LaunchBlocked(_) | PtyError::LaunchRaced
+    )
 }
 
 /// 레지스트리의 어느 변경 입구로 바꾸나 — 그 변경을 부른 쪽이 정한다. 아래 동사들은 그 입구의 레지스트리
@@ -636,10 +656,12 @@ fn session_id_sink(
 ///   오류는 없다). 기본값이 운영에 닿는 길을 컴파일러로 막는 모양이다. 받은 래치를 세션에 싣는 것까지는
 ///   컴파일러가 강제하지 못해 배선 구조 시험이 잰다.
 /// `continues_conversation` = 이 spawn 이 이어받을 손잡이를 실었다(이어받기의 성공 여부가 아니다).
+/// `launch_lease` = 이 화신의 실행 재료 회수 열쇠 — 세션에 실려 reaper 가 거둔다(TRD S25 §5-2 4 (c2) ②).
 // ADR-0226
 struct SpawnIncarnation {
     continues_conversation: bool,
     latch: Arc<SessionIdLatch>,
+    launch_lease: LaunchLease,
 }
 
 pub struct AgentManager {
@@ -677,7 +699,7 @@ pub struct AgentManager {
     /// 보고 둘 다 가져간다). 결정표 전체 — 파생·관측·커밋 — 가 이 락 안에서 일어난다.
     ///
     /// ★락 순서 = name_allocation → sessions/profiles 단방향★. 이 락을 잡는 곳은 셋
-    /// (`try_create_agent`·`try_rename_agent`·`register_for_spawn`)이고 셋 다 잡은 **뒤에야** 명부를 만진다.
+    /// (`try_create_agent`·`try_rename_agent`·`ensure_registered`)이고 셋 다 잡은 **뒤에야** 명부를 만진다.
     /// 역순(profiles 보유 중 이 락 취득)은 존재하지 않아 ADR-0006 순서에 순환이 없다.
     ///
     /// ★임계구역은 값싸지 않다★: ① `roster()` 관측이 **override 없는 잠든 에이전트 1건당
@@ -704,6 +726,16 @@ pub struct AgentManager {
     /// 읽기 = 우편 바쁨 어댑터. ★sessions 락과 무관★(위 `turns` 와 같은 규율).
     // ADR-0231
     inputs_pending: Arc<InputsPendingTable>,
+
+    /// 실행 재료 포트 — 기본 = [`LaunchPorts::noop`](오늘과 같은 실행). 점검 · 준비는 명부 · 예약 · 세션 락을 하나도
+    /// 쥐지 않고 부른다(asset-library 락 → manager 락 한 방향 — ADR-0324).
+    // ADR-0334
+    launch: LaunchPorts,
+
+    /// 시험 전용 — 채워져 있으면 스폰이 조립한 명령과 거기 실은 재료를 여기로 보내고 프로세스를 띄우기 전에 멈춘다(실
+    /// CLI 없이 argv 를 잰다).
+    #[cfg(test)]
+    spec_probe: Mutex<Option<Sender<(CommandSpec, LaunchArtifacts)>>>,
 }
 
 /// spawn 진행 중 AgentId 예약을 잡고, drop 시 자동 해제하는 RAII 가드(ADR-0086 FIX 6). spawn_agent
@@ -826,7 +858,17 @@ impl AgentManager {
             name_allocation: Arc::new(Mutex::new(())),
             turns,
             inputs_pending,
+            launch: LaunchPorts::noop(),
+            #[cfg(test)]
+            spec_probe: Mutex::new(None),
         }
+    }
+
+    /// 실행 재료 포트를 바꿔 끼운다 — 공유(`Arc`)하기 전에 부른다.
+    // ADR-0334
+    pub fn with_launch_ports(mut self, launch: LaunchPorts) -> Self {
+        self.launch = launch;
+        self
     }
 
     pub fn turns(&self) -> Arc<TurnObservations> {
@@ -1214,14 +1256,19 @@ impl AgentManager {
         }
     }
 
-    /// spawn 이 프로필을 명부에 등록하는 지점(`spawn_agent_watching_link` 단독 호출). 레지스트리 입구는
-    /// `entry` 가 고른다.
+    /// spawn 이 **명부에 없는** 프로필을 넣는 지점 — 실행 전처리 앞(`spawn_agent_watching_link` 단독 호출)이라
+    /// 전처리는 늘 명부에 있는 항목을 읽는다. 있으면 아무것도 하지 않는다(갱신은 [`Self::register_for_spawn`]).
+    /// 레지스트리 입구는 `entry` 가 고른다. 돌려주는 값 = 넣었나.
     ///
-    /// ★★유일성은 **신규 등록에만** 건다 — epoch 교체는 개명 대상이 아니다(ADR-0115 §영향 · ADR-0007)★★.
+    /// ★넣기 **전에** 호출자 사본으로 실행 재료를 점검한다 — 막히면 아무것도 넣지 않는다★(만드는 길은 만들기 전에
+    ///   점검한다): 넣은 뒤에 막히면 띄우지도 못할 항목이 명부에 남고, 그 답(wire `SpawnByCwd`)은 만든 id 를 싣지
+    ///   않아 아무도 그 항목을 겨누지 못한다. 넣은 뒤 다시 점검에서 막히는 경합은 남는다(부분 성공).
+    ///
+    /// ★★유일성 · 상한은 **신규 등록에만** 건다 — epoch 교체는 개명 대상이 아니다(ADR-0115 §영향 · ADR-0007)★★.
     ///   restart / restore(`restore_all`·`restore_one`) / 재활성화(`activate_profile`) /
     ///   `resume_no_fallback` 는 전부 **같은 AgentId 의 맵 교체**지 새 에이전트가 아니다. id 가 이미 명부에
-    ///   있는지로 그 둘을 가른다. ad-hoc spawn(연결이 그 자리에서 만든 프로필)은 명부에 없는 id 라 신규
-    ///   등록으로 잡힌다.
+    ///   있는지로 그 둘을 가른다. ad-hoc spawn(연결이 그 자리에서 만든 프로필 — wire `SpawnByCwd` · 스모크 bin)은
+    ///   명부에 없는 id 라 신규 등록으로 잡힌다.
     /// ★`upsert_preserving_hierarchy` 는 live 엔트리의 `display_name` 을 보존한다★ — 그래서 신규 등록
     ///   갈래에서만 override 를 심어도 안전하다(기존 id 갈래는 어차피 live 값이 이긴다). 이름이 실제로
     ///   새려면 이 분기 제거와 그 보존 규칙 상실이 **함께** 일어나야 한다(그 복합 회귀를
@@ -1229,35 +1276,24 @@ impl AgentManager {
     /// ★분기를 두는 또 하나의 이유 = 복원 경로 비용★: 부팅 복원은 에이전트마다 이걸 부르는데, 검사가 돌면
     ///   매번 명부 전체 스캔 + override 없는 잠든 에이전트 수만큼 canonicalize syscall 을 배정 게이트
     ///   안에서 치른다(게이트 필드 주석).
-    /// ★Err = 명부 상한 · 접미사 공간 소진 · 그 사이 지워짐 · (`Entry::Caller` 면) 저장 거절 · 실패★ — spawn 이
-    ///   그 Err 로 중단된다(중복 이름으로 뜨지 않는다 · 저장 `Err` 면 명부는 그대로다).
+    /// ★**부활 경로를 전부 닫지는 않는다**★ — 등록이 시작되기 **전에** 삭제가 끝났으면 「없다」로 보여 신규
+    ///   등록으로 간다. 그 둘을 가르려면 호출자가 「원래 있던 항목이다」를 들고 와야 하는데 그 신호가
+    ///   `spawn_agent` 시그니처에 없다(미해결).
+    /// ★Err = 실행 막힘 · 명부 상한 · 접미사 공간 소진 · (`Entry::Caller` 면) 저장 거절 · 실패★ — spawn 이 그
+    ///   Err 로 중단된다(중복 이름으로 뜨지 않는다 · 저장 `Err` 면 명부는 그대로다).
     // ADR-0115
     // ADR-0291 R17 (E3)
-    fn register_for_spawn(&self, profile: &AgentProfile, entry: Entry) -> Result<(), PtyError> {
-        // 기존 id 면 이름 배정 자체가 없으므로 게이트를 잡지 않는다.
-        //
-        // ★★「있나」와 「쓴다」를 **한 임계구역**에서 한다 — 두 호출로 되돌리지 말 것★★:
-        //   조회와 쓰기가 갈리면 그 사이에 낀 `DeleteProfile` 이 무시되고, **삭제가 성공으로 보고된 뒤
-        //   그 프로필이 되살아나며 자식 프로세스까지 따라 뜬다.** 그래서 갱신은
-        //   [`ProfileRegistry::update_preserving_hierarchy`] 가 락 안에서 존재까지 함께 판정하고,
-        //   여기서는 그 결과로만 갈린다.
-        // ★`false` = 그 사이 지워졌다 → **spawn 을 끊는다**★: 아래 신규 등록 갈래로 떨어뜨리면 그게 바로
-        //   부활이고, 그냥 진행하면 프로필 없는 세션이 명부에 오른다.
-        //   ★뒤에 선 `profile_vanished_mid_spawn` 검사 셋과 **같은 처분, 다른 시점**이다★ — 그쪽은 표식
-        //   확정 **뒤**의 삭제를 잡고 이쪽은 그 앞을 잡는다. 어느 하나로 대체되지 않는다.
-        // ★**이 줄이 부활 경로를 전부 닫지는 않는다**★ — 등록이 시작되기 **전에** 삭제가 끝났으면 이
-        //   조회가 애초에 없어서 아래 신규 등록(ad-hoc spawn) 갈래로 간다. 그 둘을 가르려면 호출자가
-        //   「원래 있던 항목이다」를 들고 와야 하는데 그 신호가 `spawn_agent` 시그니처에 없다(미해결).
+    // ADR-0319
+    // TRD S25 §1-5 (가) 1 ②
+    fn ensure_registered(&self, profile: &AgentProfile, entry: Entry) -> Result<bool, PtyError> {
+        // 있는 id 면 이름 배정 자체가 없으므로 게이트를 잡지 않는다. 「있나」와 「넣나」 사이는 이 id 의 스폰
+        //   예약이 덮는다 — 같은 id 의 두 스폰이 함께 여기 오지 않는다.
         if self.profiles.get(profile.id).is_some() {
-            return if entry
-                .update_preserving_hierarchy(&self.profiles, profile.clone())
-                .map_err(PtyError::Store)?
-            {
-                Ok(())
-            } else {
-                Err(profile_vanished_mid_spawn(profile.id, "spawn 등록"))
-            };
+            return Ok(false);
         }
+        // 이름 배정 게이트를 잡기 **전**이다 — 점검은 manager 락을 하나도 쥐지 않고 부른다(asset-library 락 →
+        //   manager 락 한 방향).
+        self.check_before_create(profile)?;
         let mut fresh = profile.clone();
         fresh.display_name = normalize_display_name(fresh.display_name.take());
         let _gate = self.lock_name_allocation();
@@ -1269,7 +1305,38 @@ impl AgentManager {
         fresh.display_name = Some(self.assign_new_name(&roster, fresh.id, desired)?);
         entry
             .upsert_preserving_hierarchy(&self.profiles, fresh)
-            .map_err(PtyError::Store)
+            .map_err(PtyError::Store)?;
+        Ok(true)
+    }
+
+    /// spawn 이 호출자 사본을 명부에 병합하는 지점(`spawn_agent_watching_link` 단독 호출 · 실행 전처리 뒤) — 런타임이
+    /// 저자인 칸은 명부 값이 이긴다(`merge_preserving_live`). 레지스트리 입구는 `entry` 가 고른다.
+    ///
+    /// ★없는 id 를 넣지 않는다★ — 신규 등록은 [`Self::ensure_registered`] 가 전처리 앞에서 끝냈으므로, 여기서
+    ///   없다는 것은 그 사이 지워졌다는 뜻이다. 방금 넣은 id 에는 부르지 않는다 — 넣은 값이 곧 그 사본이라 병합할
+    ///   것이 없고, 부르면 즉석 생성의 저장이 둘이 되어 둘째 실패가 「만들지 않았다」로 잘못 보고된다.
+    /// 명령 · env 는 이 병합이 사본에서 명부로 옮기는 칸이다 — 실행 전처리가 그 둘이 점검한 값과 같을 때만 여기 온다.
+    /// ★Err = 그 사이 지워짐 · (`Entry::Caller` 면) 저장 거절 · 실패★ — spawn 이 그 Err 로 중단된다.
+    // ADR-0115
+    // ADR-0291 R17 (E3)
+    fn register_for_spawn(&self, profile: &AgentProfile, entry: Entry) -> Result<(), PtyError> {
+        // ★★「있나」와 「쓴다」를 **한 임계구역**에서 한다 — 두 호출로 되돌리지 말 것★★:
+        //   조회와 쓰기가 갈리면 그 사이에 낀 `DeleteProfile` 이 무시되고, **삭제가 성공으로 보고된 뒤
+        //   그 프로필이 되살아나며 자식 프로세스까지 따라 뜬다.** 그래서 갱신은
+        //   [`ProfileRegistry::update_preserving_hierarchy`] 가 락 안에서 존재까지 함께 판정하고,
+        //   여기서는 그 결과로만 갈린다.
+        // ★`false` = 그 사이 지워졌다 → **spawn 을 끊는다**★: 신규 등록으로 떨어뜨리면 그게 바로 부활이고,
+        //   그냥 진행하면 프로필 없는 세션이 명부에 오른다.
+        //   ★뒤에 선 `profile_vanished_mid_spawn` 검사들과 **같은 처분, 다른 시점**이다★ — 그쪽은 표식
+        //   확정 **뒤**의 삭제를 잡고 이쪽은 그 앞을 잡는다. 어느 하나로 대체되지 않는다.
+        if entry
+            .update_preserving_hierarchy(&self.profiles, profile.clone())
+            .map_err(PtyError::Store)?
+        {
+            Ok(())
+        } else {
+            Err(profile_vanished_mid_spawn(profile.id, "spawn 등록"))
+        }
     }
 
     // ── spawn ──────────────────────────────────────────────────────────────
@@ -1291,6 +1358,10 @@ impl AgentManager {
     ///   (근거의 정본 = `backend/codex/transport.rs` 의 같은 구멍 주석).
     /// ★부르는 쪽 있는 입구다★ — 명부 등록 · 세션 id 비우기의 저장이 `Err` 면 띄우지 않고
     ///   [`PtyError::Store`] 다(부분 성공 = [`AgentManager::spawn_agent_watching_link`]).
+    /// 실행 재료 점검이 막으면 [`PtyError::LaunchBlocked`] · 점검하는 사이 실행 입력이 두 번 다 바뀌거나 넘긴 사본의
+    ///   명령 · env 가 명부와 다르거나 점검한 원본이 재료 준비 전에 바뀌면 [`PtyError::LaunchRaced`] — 둘 다 띄우지
+    ///   않았다. 명부에 없던 id 는 넣기 전에 점검해 막히면 넣지 않는다 · 넣은 뒤 다시 점검에서 막히거나 경합하면 넣은
+    ///   것은 남는다. 재료 준비가 그 밖의 까닭으로 실패하면 `SpawnFailed` 다.
     pub fn spawn_agent(
         &self,
         profile: &AgentProfile,
@@ -1303,14 +1374,17 @@ impl AgentManager {
     /// 띄우기의 공유 본체 — 입구 셋(`spawn_agent` · `activate_profile` · `restore_one`)이 두 동사를 거쳐
     /// 여기 닿는다.
     ///
-    /// `entry` = 이 띄우기를 부른 쪽. 프로세스를 열기 전의 명부 변경 셋 중 ① 등록 · ③ Fresh 의 세션 id
-    ///   비우기가 그 입구로 레지스트리를 바꾼다. ② 화신 표식은 메모리만이라 입구와 무관하고, 띄운 뒤의
-    ///   `auto_restore` 올리기(`spawn_session`)는 입구와 무관하게 늘 내부다.
+    /// `entry` = 이 띄우기를 부른 쪽. 프로세스를 열기 전의 명부 변경 셋 중 ① 등록(없으면 점검 뒤 넣기 → 실행
+    ///   전처리 → 있던 id 면 병합) · ③ Fresh 의 세션 id 비우기가 그 입구로 레지스트리를 바꾼다. ② 화신 표식은
+    ///   메모리만이라 입구와 무관하고, 띄운 뒤의 `auto_restore` 올리기(`spawn_session`)는 입구와 무관하게 늘
+    ///   내부다. 실행 전처리는 명부에 쓰지 않는다.
     /// ★부분 성공은 되돌리지 않는다(`Entry::Caller`)★ — 각 변경이 자기 저장을 가진 독립 변경이다. ① 이
     ///   저장된 뒤 ③ 의 저장이 `Err` 면 ① 은 남고(명부에 오른 · 갱신된 채 안 뜬 에이전트 — 프로세스 열기
     ///   실패 뒤와 같은 끝 모양) ② 의 새 표식도 메모리에 남으며(쥔 화신이 없어 무해) 칸에는 옛 손잡이가
-    ///   남는다. 띄우기가 멈췄으므로 어긋날 화신이 없다. ① 이 실패하면 ② · ③ 에 닿지 않는다.
+    ///   남는다. 띄우기가 멈췄으므로 어긋날 화신이 없다. ① 이 실패하면 ② · ③ 에 닿지 않는다. 넣은 뒤 실행
+    ///   전처리가 막히거나 경합해도 넣은 것은 남는다(같은 끝 모양).
     // ADR-0291 R17 (E3 · D8)
+    // ADR-0319
     fn spawn_agent_watching_link(
         &self,
         profile: &AgentProfile,
@@ -1355,7 +1429,19 @@ impl AgentManager {
             return Ok((SpawnOutcome::Moot(Some(self.agent_info(&session))), None));
         }
 
-        self.register_for_spawn(profile, entry)?;
+        // 전처리가 명부의 항목을 읽으므로 없는 id(즉석 생성)를 먼저 넣는다(넣기 전 점검은 그 안에서).
+        // TRD S25 §1-5 (가) 0
+        let inserted = self.ensure_registered(profile, entry)?;
+        // ★실행 전처리는 이 자리다 — 예약 · 떠 있음 확인 **뒤**, 화신 표식 · 세션 파생 **앞**(ADR-0319)★: 예약 앞이면
+        //   같은 에이전트의 두 실행이 함께 점검하고, 표식 · 세션 파생 뒤면 래치 · 표식이 맞추기 전 사본을 본다. 막히면
+        //   제어 채널을 발급하기 전에 끊는다.
+        let plan = self.prelaunch(profile)?;
+
+        // 방금 넣은 id 는 병합하지 않는다 — 넣은 값이 곧 사본이고, 앞 화신이 없어 아래 표식까지 사이에 낄 지각
+        //   기록도 없다.
+        if !inserted {
+            self.register_for_spawn(profile, entry)?;
+        }
 
         // ★화신 표식 확정 — 화신마다 새 값(ADR-0007)★
         //
@@ -1382,22 +1468,45 @@ impl AgentManager {
         //   보다 뒤로 가면, 비운 칸에 앞 화신의 지각 기록이 표식 가드를 통과해 앉는다. 그러면 이 화신의
         //   첫 제출 commit 은 칸이 시작 때 본 값(`None`)과 달라 거절되고, 이 화신의 id 는 영속되지 않아
         //   다음 활성화가 죽은 화신의 대화를 연다(ADR-0226).
-        //   ★**그 대가로 「프로필이 사라졌다」를 보는 자리가 늘었다 — 아래 둘도 `?` 로 끊는다**★:
-        //   이 줄이 맨 앞으로 오면서, 여기서 통과한 뒤 비우기·명부 읽기 **사이**에 프로필이 지워지는
-        //   창이 생겼다. 그 창을 안 막으면 비우기와 읽기가 조용히 `None` 을 돌려주고 spawn 은 계속 가서,
-        //   이어받기가 말없이 새 대화가 되고 프로필 없는 세션이 명부에 오른다. 옛 배치에서는 이 줄이
-        //   맨 뒤라 그 인터리빙이 여기서 걸렸다 — 지금은 세 자리가 각자 건다.
+        //   ★**그 대가로 「프로필이 사라졌다」를 보는 자리가 늘었다 — 아래 셋(명부 다시 읽기 · 세션 id
+        //   비우기 · 이어받기 손잡이 읽기)도 `?` 로 끊는다**★: 여기서 통과한 뒤 그 셋 **사이**에 프로필이
+        //   지워지는 창이 있다. 그 창을 안 막으면 읽기와 비우기가 조용히 `None` 을 돌려주고 spawn 은 계속
+        //   가서, 이어받기가 말없이 새 대화가 되고 프로필 없는 세션이 명부에 오른다 — 이 줄까지 네 자리가
+        //   각자 건다.
         // ADR-0007
         let epoch = self
             .profiles
             .epoch_for_spawn(profile.id)
             .ok_or_else(|| profile_vanished_mid_spawn(profile.id, "화신 표식 확정"))?;
 
+        // ★실행 재료 가드는 준비 **앞**에서 무장한다★ — 준비 도중 실패 · 그 뒤 세션이 넘겨받기 전의 어느 실패에서도
+        //   Err 경로는 이 화신의 재료를 정확히 한 번 거둔다(`release` 는 준비한 적 없는 화신에도 안전하다). 패닉은
+        //   운영에서 프로세스를 끝내므로(ADR-0292) 부팅 쓸기가 받친다 — 시험 · contain 안에서만 풀린다. 준비 뒤로
+        //   옮기면 준비가 반쯤 만든 휘발 폴더가 남는다.
+        // ★준비는 다시 읽은 명부가 아니라 점검한 계획으로 한다★ — 대조와 다시 읽기 사이에 바뀐 붙임이 점검 없이 실린다.
+        // ★준비는 세션 id 비우기 · 제어 채널 발급 **앞**이다★ — 원본이 점검 뒤 바뀌어 끊겨도(`LaunchRaced`) 점검 경합과
+        //   같은 끝 모양이다(저장된 세션 id 를 밀지 않고 토큰을 내지 않는다 — 표식만 하나 탄다).
+        // ADR-0334
+        // TRD S25 §1-5 (나) 4 · §5-2 4 (a) (c)
+        let mut kit_guard = LaunchKitGuard::arm(self.launch.kits.clone(), profile.id, epoch);
+        let kit = self
+            .launch
+            .kits
+            .prepare(plan, profile.id, epoch)
+            .map_err(|e| prelaunch::prepare_failed(profile.id, e))?;
+
+        // ★여기부터는 호출자 사본이 아니라 **명부의 지금 값**에서 파생한다★ — 위 등록 병합은 명부의 작업 폴더 ·
+        //   붙임을 지키므로(`merge_preserving_live`) 사본을 뜬 뒤 작업 폴더를 바꿨으면(`agent.setWorkspace`) 사본의
+        //   cwd 는 낡았다. 사본으로 띄우면 이 화신의 프로세스 cwd 와 명부 cwd 가 갈리고, 다음 이어받기는 명부 cwd 로
+        //   떠 그 대화를 못 찾는다. 읽는 자리가 표식 확정 **뒤**인 것은 위 「등록 바로 뒤 표식」 규율을 지키려는 것이다.
+        // TRD S25 §1-5 (가) 3
+        let reread = self
+            .profiles
+            .get(profile.id)
+            .ok_or_else(|| profile_vanished_mid_spawn(profile.id, "명부 다시 읽기"))?;
+        let profile = &reread;
+
         // cwd 정규화 — claude 세션 디렉토리 표기 고정(UNC 회피). 실패 시 원본 사용(best-effort).
-        // TODO(TRD S25 §1-5 (가) 실행 전처리): 이 cwd 와 실행 재료를 예약 뒤 명부에서 다시 읽은 값으로 뽑는다.
-        //   지금은 호출자 사본의 `profile.cwd` 인데 위 등록 병합은 명부의 cwd 를 지킨다(`merge_preserving_live`).
-        //   작업 폴더 바꾸기(`agent.setWorkspace`)가 사본을 뜬 뒤에 끼면 명부 cwd 와 이 화신의 프로세스 cwd 가 갈리고,
-        //   다음 이어받기(Resume)는 명부 cwd 로 떠 그 대화를 못 찾는다.
         let cwd = dunce::canonicalize(&profile.cwd).unwrap_or_else(|_| profile.cwd.clone());
 
         // ★세션 id 규칙(ADR-0226 — 「저장된 id 가 있다 ⟺ 이어받을 대화가 있다」)★: 여기서는 **아무것도
@@ -1545,6 +1654,18 @@ impl AgentManager {
         // ★Fresh 면 비워서 넘긴다★ — 값을 실어 보내고 backend 가 모드를 다시 보게 하면 판정이 두 곳이
         //   된다. 그 죽은 화신의 thread id 로 새 대화를 열라는 요청이 Fresh 인데, 여기서 안 비우면 그
         //   요청이 backend 마다 다르게 해석된다(그 문 = 위 `resume_handle_for`).
+        // ★재료는 여기서 한 번만 배치해 아래 조립 · 띄우기에 같은 값으로 넘긴다★ — 두 자리에서 따로 만들면 명령줄과 통로가
+        //   다른 재료를 싣는다. 위 준비가 낸 재료에서만 만든다(다시 읽은 명부에서 풀지 않는다). 배치는 그 화신의 휘발 폴더
+        //   안에만 쓴다(dispatch 가 가둔다). 실패하면 두 가드가 토큰 · 재료를 거둔다. Noop 재료는 아무것도 쓰지 않고
+        //   기본값을 내 argv 골든과 바이트 같다.
+        // ADR-0334
+        // TRD S25 §1-5 (나) 6
+        // TODO(TRD S25 §5-2 4 (a)): `build_command_spec` · `materialize` 의 `command` · `env` 는 아직 다시 읽은 명부에서
+        //   온다 — `command` · `env` 를 쓰는 길이 생기면 계획에서 받거나 대조를 다시 한다.
+        let artifacts = backend::materialize(&profile.command, &kit, &cwd, &*self.launch.fs)
+            .map_err(|e| {
+                PtyError::SpawnFailed(format!("실행 재료 배치 실패: {e} (agent {})", profile.id))
+            })?;
         let spec = backend::build_command_spec(
             &profile.command,
             mode,
@@ -1553,7 +1674,10 @@ impl AgentManager {
             cwd.clone(),
             profile.env.clone(),
             control_endpoint.clone(),
+            &artifacts,
         );
+        #[cfg(test)]
+        self.probe_spec(&spec, &artifacts)?;
 
         // ADR-0079: json 모드 claude 만 실제로 transcript 를 읽는다 — 터미널은 TUI PTY repaint 로
         //   복원되고 shell 은 대화가 없어, 그 외 backend 는 빈 Vec 을 돌려준다.
@@ -1599,6 +1723,8 @@ impl AgentManager {
         // ★commit 이 비교할 값 = 이 화신이 시작할 때 본 칸의 값(`stored_handle` — Fresh 는 위에서 비운 뒤라
         //   `None`)★: 그 사이 다른 기록자(claude 파일 감시자)가 칸을 바꿨으면 commit 은 되감지 않고 거절한다.
         // ADR-0226
+        // TODO(TRD S25 §5-2 4 (b)): `kit.instructions_hash` 를 아직 `last_applied_instructions_hash` 에 적지 않는다 —
+        //   적을 때 다시 읽은 명부가 아니라 재료에서 받는다.
         let latch = SessionIdLatch::new(
             profile.id,
             epoch,
@@ -1624,12 +1750,16 @@ impl AgentManager {
             //   건넨다(codex app-server 가 `thread/start` 에 프라이밍을 싣는다). 무엇을 어디에 싣는지는
             //   backend 가 정한다 — 이 자리는 두 수단 중 어느 쪽인지 모른다(ADR-0004).
             control_endpoint.as_ref(),
+            &artifacts,
         )?;
 
         // ADR-0226: 이 화신 사실은 세션만 든다(wire 에 싣는 것은 구독 응답이다).
+        // ★재료 회수 열쇠는 가드에서 받는다★ — 준비를 부른 그 출처로 거두게(매니저 생성 때 잡은 포트가 아니다).
+        // TRD S25 §5-2 4 (c2) ③
         let incarnation = SpawnIncarnation {
             continues_conversation: resume_session_id.is_some(),
             latch,
+            launch_lease: kit_guard.lease(),
         };
         let (session, child_pid) =
             self.spawn_session(profile.id, spec, parts, epoch, seed_events, incarnation)?;
@@ -1637,6 +1767,10 @@ impl AgentManager {
         if let Some(g) = provision_guard.as_mut() {
             g.disarm();
         }
+        // ★세션이 명부에 올랐다 — 이 화신의 재료는 이제 reaper 만 거둔다★(세션이 든 열쇠로). 등록과 이 해제 사이에 실패할
+        //   수 있는 단계를 두지 말 것 — 거기서 끊기면 가드와 reaper 가 함께 거두는 주인 둘이 된다.
+        // TRD S25 §5-2 4 (c2) ① · ②
+        kit_guard.disarm();
 
         // sid drift 관측 부착(best-effort). 관측기를 만드는 것도 "만들 게 없다"고 답하는 것도 backend
         //   몫이라(ADR-0004) 여기서는 그 프로그램이 무엇을 읽는지 모른다.
@@ -1704,6 +1838,9 @@ impl AgentManager {
     /// ★부르는 쪽 있는 입구다(`Entry::Caller`)★ — 띄우기 전 명부 변경의 저장이 `Err` 면 띄우지 않고
     ///   [`PtyError::Store`] 다(부분 성공 = [`AgentManager::spawn_agent_watching_link`]). 같은 동사를 부팅
     ///   복원은 `Entry::Internal` 로 부른다.
+    /// 실행 재료 점검이 막으면 [`PtyError::LaunchBlocked`] · 실행 입력(붙임 · 명령 · env)이 두 번 다 바뀌거나 넘긴
+    ///   사본의 명령 · env 가 명부와 다르거나 점검한 원본이 재료 준비 전에 바뀌면 [`PtyError::LaunchRaced`] — 새 대화든
+    ///   이어받기든 같은 변형으로 돌아오고, 「마지막 실패」 는 「그 밖」 이다.
     // ADR-0082
     // ADR-0076
     // ADR-0201
@@ -1766,10 +1903,9 @@ impl AgentManager {
             };
         }
 
-        // 저장 `Err` 는 원형 그대로 돌려준다 — Fresh 갈래의 `?` 와 같은 답이 되게(ADR-0291 R17).
-        let (outcome, spawned) = self
-            .resume_no_fallback(profile, Entry::Caller)
-            .map_err(PtyError::Store)?;
+        // 띄우기 전 거절(저장 · 실행 막힘 · 준비 경합)은 원형 그대로 돌려준다 — Fresh 갈래의 `?` 와 같은 답이 되게
+        //   (ADR-0291 R17 · ADR-0334).
+        let (outcome, spawned) = self.resume_no_fallback(profile, Entry::Caller)?;
         match outcome {
             // 성립·실패 양쪽 다 `resume_no_fallback` 안에서 이미 기록됐다(그 자리가 무엇이 일어났는지
             //   아는 유일한 곳). 여기서 또 쓰면 지움 지점이 둘이 된다.
@@ -2028,6 +2164,7 @@ impl AgentManager {
         let SpawnIncarnation {
             continues_conversation,
             latch,
+            launch_lease,
         } = incarnation;
         let backend::SpawnParts {
             transport,
@@ -2115,6 +2252,8 @@ impl AgentManager {
             )
             .with_incarnation(continues_conversation)
             .with_session_id_latch(latch)
+            // TRD S25 §5-2 4 (c2) ②: 빠뜨려도 컴파일되고 오류도 없다 — 뜬 화신의 휘발 폴더를 아무도 안 거둔다.
+            .with_launch_lease(launch_lease)
             // ADR-0231: 빠뜨려도 컴파일되고 오류도 없다 — 이 화신의 모든 입력이 오늘 경로로 간다.
             .with_mid_turn(mid_turn, delivery_ack),
         );
@@ -2137,10 +2276,15 @@ impl AgentManager {
         //    pump 가 즉시 EOF→finish 하면 그 시점에 세션이 맵에 있어야 reaper 가 reap 한다. insert 전에
         //    start 하면 빠른 종료 시 hook send 가 맵에 없는 id 를 가리켜 reap 가 no-op→세션 좀비화.
         //    attach_pump 는 start 내부 동기 완료라 join_pump 영향 없음(insert 순서 무관).
-        self.sessions
+        let replaced = self
+            .sessions
             .write()
             .expect("sessions poisoned")
             .insert(id, session.clone());
+        // 갈아치운 화신은 reaper 의 표식 대조에 걸리지 않아 재료 회수 · 권한 회수를 잃는다 — 예약 · 떠 있음 확인이 이
+        //   자리를 비워 둔다.
+        // TRD S25 §5-2 4 (c2) ②
+        debug_assert!(replaced.is_none(), "명부의 화신을 갈아치웠다 — agent={id}");
 
         // 5.5. ★ADR-0019 활성화 — 반드시 start_pump 전★: spawn(=지금 떠 있어야 함)이면 프로필을
         //      auto_restore=true 로 확정·persist 한다(강제종료 후 부팅 복원 대상이 되게). 이 플립을
@@ -2219,9 +2363,9 @@ impl AgentManager {
 
         match self.resume_no_fallback(profile, Entry::Internal) {
             Ok((outcome, _)) => outcome,
-            // 내부 입구는 저장 `Err` 를 내지 않는다 — 오면 복원 보고 문구로 접는다(방어).
-            Err(store) => RestoreOutcome::Failed {
-                reason: format!("resume spawn 실패: {}", PtyError::Store(store)),
+            // 띄우기 전 거절(내부 입구라 저장 `Err` 는 오지 않고 실행 막힘 · 준비 경합만 온다)은 복원 보고 문구로 접는다.
+            Err(refused) => RestoreOutcome::Failed {
+                reason: format!("resume spawn 실패: {refused}"),
             },
         }
     }
@@ -2250,17 +2394,19 @@ impl AgentManager {
     /// 반환의 둘째 칸 = 이 시도가 **만들어 낸** 화신(있으면). `activate_profile` 이 성공 판정 뒤 조회가
     /// 실패했을 때 성공을 뒤집지 않으려고 쓴다(그쪽 주석이 그 인과의 정본).
     /// `entry` 는 받은 그대로 공유 본체에 넘긴다 — 이 동사는 입구를 가르지 않는다.
-    /// ★`Err` = 띄우기 전 명부 변경의 저장이 `Err` 라 띄우지 않았다(부르는 쪽 입구에서만 난다)★ — 다른 띄우기
-    ///   실패처럼 `RestoreOutcome::Failed` 문구로 접지 말 것: 접으면 `activate_profile` 이 `PtyError::Store` 를
-    ///   돌려주지 못해 버스가 저장 거절을 다른 실패와 못 가른다. 실패 기록 · 로그는 접을 때와 같이 남긴다.
+    /// ★`Err` = 띄우기 전에 거절돼 띄우지 않았다 — 저장 `Err`(부르는 쪽 입구에서만) · 실행 막힘 · 준비 경합(그 셋 =
+    ///   [`refused_before_spawn`])★ — 다른 띄우기 실패처럼 `RestoreOutcome::Failed` 문구로 접지 말 것: 접으면
+    ///   `activate_profile` 이 그 변형을 돌려주지 못해 버스가 저장 거절 · 막힘을 다른 실패와 못 가른다. 실패 기록 ·
+    ///   로그는 접을 때와 같이 남긴다.
     // ADR-0082
     // ADR-0172
     // ADR-0291 R17
+    // ADR-0334
     fn resume_no_fallback(
         &self,
         profile: &AgentProfile,
         entry: Entry,
-    ) -> Result<(RestoreOutcome, Option<AgentInfo>), StoreError> {
+    ) -> Result<(RestoreOutcome, Option<AgentInfo>), PtyError> {
         // ★이어받을 손잡이가 없는 이어받기 요청은 **새 대화로 연다** — 고름이 아니라 사용자 결정 D1 의
         //   귀결이다(「저장된 id 가 있다 ⟺ 이어받을 대화가 있다 · id 없음 → Fresh」)★.
         //   ★그 조합에 실제로 들어오는 것은 WS `SpawnProfile` 의 `resume: true` 명시 요청이다★ — 그
@@ -2289,7 +2435,7 @@ impl AgentManager {
             // 기록은 새 대화 경로 안에서 한다 — 여기서 또 쓰면 지움 지점이 둘이 된다.
             return match self.spawn_fresh_settled(profile, entry) {
                 Ok(outcome) => Ok((RestoreOutcome::Started, outcome.into_info())),
-                Err(PtyError::Store(store)) => Err(store),
+                Err(e) if refused_before_spawn(&e) => Err(e),
                 Err(e) => Ok((
                     RestoreOutcome::Failed {
                         reason: format!("새 대화 spawn 실패: {e}"),
@@ -2305,11 +2451,11 @@ impl AgentManager {
                 // ADR-0172: 실패는 시도한 자리에서 기록한다 — 이 기록이 ADR-0082 가 요구한 "원인을 남겨
                 //   제어 LLM 이 읽는다" 의 화면·API 쪽 실물이다(로그는 사람만 읽는다).
                 self.note_activation_result(profile.id, None, Some(spawn_error_kind(&e)));
-                // ★저장 `Err` 는 아래 경고를 내지 않는다★ — 프로세스를 열기 전에 멈춰 종점(시체)이 없고, 그 오류를
+                // ★띄우기 전 거절은 아래 경고를 내지 않는다★ — 프로세스를 열기 전에 멈춰 종점(시체)이 없고, 그 오류를
                 //   호출자 오류로 바꾸는 표면(버스 · WS)이 한 줄 남긴다. 여기서도 내면 한 요청에 두 줄이다.
                 // ADR-0291 R17
-                if let PtyError::Store(store) = e {
-                    return Err(store);
+                if refused_before_spawn(&e) {
+                    return Err(e);
                 }
                 let reason = format!("resume spawn 실패: {e}");
                 tracing::warn!(
@@ -2516,6 +2662,8 @@ impl AgentManager {
         // 물러남 예고가 첫 걸음이다(사유 = `kill_agent` 의 같은 줄). ★표식 대조 **뒤**여야 한다★ — 앞이면 산 후임의
         //   통로가 되돌릴 수 없는 물러남 표시를 받는다.
         session.begin_retire();
+        // 실행 재료는 여기서 거두지 않는다 — 자식이 끝난 뒤 reaper 가 거둔다(`kill_agent` 의 같은 줄).
+        // TRD S25 §5-2 4 (c2) ④
         self.control.revoke(id, session.epoch);
         let _ = session.enter_exiting();
         session.kill(Duration::from_secs(5));
@@ -3056,7 +3204,10 @@ impl AgentManager {
         //    5s join) **뒤**에 있으면 죽어가는 에이전트의 토큰이 그 5s 창 동안 유효해, 그 사이 에이전트가
         //    제어 채널로 명령을 낼 수 있다(TOCTOU). 여기선 락 미보유라 안전하고(§10 — registry 는 leaf
         //    lock, ADR-0006), revoke 는 idempotent 라 reaper 의 terminal revoke 와 겹쳐도 무해(그게 backstop).
+        // ★실행 재료는 이 옆에서 거두지 않는다★ — 아직 산 자식이 휘발 폴더(지침 · 정션)를 쓰고 있다. 세션을 명부에서 뺀
+        //   reaper 하나가 거둔다(주인은 늘 하나).
         // ADR-0086
+        // TRD S25 §5-2 4 (c2) ④
         self.control.revoke(agent_id, epoch);
 
         session.set_intent(TerminationIntent::UserKill);
@@ -3565,6 +3716,7 @@ mod tests {
             None,
             None,
             None,
+            &LaunchArtifacts::default(),
         )
         .expect("open_spawn");
         let caps = parts.transport.capabilities();
@@ -3590,6 +3742,7 @@ mod tests {
             None,
             None,
             None,
+            &LaunchArtifacts::default(),
         )
         .expect("open_spawn");
         let caps = parts.transport.capabilities();
@@ -3777,14 +3930,28 @@ mod tests {
     ///   는 아무것도 띄우지 않으므로 이 세션은 **스스로 절대 죽지 않는다** — 그게 "죽음을 기다리지 않는다"
     ///   를 재는 데 필요한 성질이다(실 claude 로는 그 상태를 결정적으로 붙들 수 없다).
     // ADR-0172
-    fn put_live_session(manager: &AgentManager, id: AgentId, epoch: u32) -> Arc<OutputCore> {
+    pub(super) fn put_live_session(
+        manager: &AgentManager,
+        id: AgentId,
+        epoch: u32,
+    ) -> Arc<OutputCore> {
+        put_live_session_leased(manager, id, epoch, None)
+    }
+
+    /// [`put_live_session`] 에 실행 재료 회수 열쇠를 실을 수 있는 꼴.
+    pub(super) fn put_live_session_leased(
+        manager: &AgentManager,
+        id: AgentId,
+        epoch: u32,
+        lease: Option<LaunchLease>,
+    ) -> Arc<OutputCore> {
         let core = Arc::new(OutputCore::new(
             id,
             epoch,
             Arc::new(NoopStatus),
             TurnWiring::detached(),
         ));
-        let session = Arc::new(AgentSession::new(
+        let mut session = AgentSession::new(
             id,
             std::path::PathBuf::from("."),
             epoch,
@@ -3809,12 +3976,15 @@ mod tests {
             Box::new(RecordingTransport {
                 written: Arc::new(Mutex::new(Vec::new())),
             }),
-        ));
+        );
+        if let Some(lease) = lease {
+            session = session.with_launch_lease(lease);
+        }
         manager
             .sessions
             .write()
             .expect("sessions poisoned")
-            .insert(id, session);
+            .insert(id, Arc::new(session));
         core
     }
 
@@ -5170,7 +5340,7 @@ mod tests {
             .insert(id, session);
     }
 
-    fn agent_profile(cwd: &str, display_name: Option<&str>) -> AgentProfile {
+    pub(super) fn agent_profile(cwd: &str, display_name: Option<&str>) -> AgentProfile {
         let mut p = AgentProfile::new(
             "raw".into(),
             crate::profile::AgentCommand::Shell {
@@ -5189,6 +5359,16 @@ mod tests {
         manager
             .try_create_agent(agent_profile(cwd, display_name))
             .expect("이 픽스처는 접미사 공간을 소진시키지 않는다")
+    }
+
+    impl AgentManager {
+        /// 스폰의 등록 두 걸음(없으면 넣기 · 있던 id 면 사본 병합) — 실행 전처리는 운영에서 그 사이에 돈다.
+        fn register_like_spawn(&self, profile: &AgentProfile) -> Result<(), PtyError> {
+            if self.ensure_registered(profile, Entry::Caller)? {
+                return Ok(());
+            }
+            self.register_for_spawn(profile, Entry::Caller)
+        }
     }
 
     /// ★산 항목의 이름과 계층은 **같은 프로필 스냅샷**에서 나온다★.
@@ -5312,7 +5492,7 @@ mod tests {
 
         // ad-hoc spawn 의 신규 등록 경로도 같은 답 — 이쪽이 뚫려 있으면 "총량" 이 거짓이 된다.
         let err = manager
-            .register_for_spawn(&agent_profile("C:/adhoc", Some("adhoc")), Entry::Caller)
+            .ensure_registered(&agent_profile("C:/adhoc", Some("adhoc")), Entry::Caller)
             .expect_err("ad-hoc 신규 등록도 거부");
         assert!(matches!(err, PtyError::RosterFull { .. }), "{err}");
         assert_eq!(
@@ -5322,6 +5502,12 @@ mod tests {
         );
 
         // ★기존 에이전트는 인질이 아니다★: 같은 id 재등록(복원·재spawn)과 개명은 상한에서도 계속 된다.
+        assert!(
+            !manager
+                .ensure_registered(&last, Entry::Caller)
+                .expect("기존 id 는 넣지 않고 지난다 — 상한과 무관"),
+            "기존 id 를 넣었다고 답한다"
+        );
         manager
             .register_for_spawn(&last, Entry::Caller)
             .expect("기존 id 재등록은 상한과 무관");
@@ -5734,7 +5920,7 @@ mod tests {
 
         let newcomer = agent_profile("C:/x", Some("bob"));
         manager
-            .register_for_spawn(&newcomer, Entry::Caller)
+            .register_like_spawn(&newcomer)
             .expect("신규 등록 성공");
         assert_eq!(
             name_of(&manager, newcomer.id),
@@ -5742,17 +5928,13 @@ mod tests {
             "명부에 없던 id = 신규 등록 → 접미사"
         );
 
-        manager
-            .register_for_spawn(&bob, Entry::Caller)
-            .expect("재등록 성공");
+        manager.register_like_spawn(&bob).expect("재등록 성공");
         assert_eq!(
             name_of(&manager, bob.id),
             "bob",
             "재시작이 이름을 바꾸면 안 된다"
         );
-        manager
-            .register_for_spawn(&newcomer, Entry::Caller)
-            .expect("재등록 성공");
+        manager.register_like_spawn(&newcomer).expect("재등록 성공");
         assert_eq!(
             name_of(&manager, newcomer.id),
             "bob(1)",
@@ -5776,7 +5958,7 @@ mod tests {
         let squatter = create(&manager, "C:/squat", Some("was-here"));
         assert_eq!(squatter.canonical_name_when_live(), "was-here");
         manager
-            .register_for_spawn(&stale_snapshot, Entry::Caller)
+            .register_like_spawn(&stale_snapshot)
             .expect("재등록 성공");
         assert_eq!(
             name_of(&manager, agent.id),
@@ -5924,7 +6106,7 @@ mod tests {
 
         let spawned = agent_profile("C:/z", Some(" erin "));
         manager
-            .register_for_spawn(&spawned, Entry::Caller)
+            .register_like_spawn(&spawned)
             .expect("신규 등록 성공");
         assert_eq!(
             manager.agent_snapshot(spawned.id).unwrap().display_name,
@@ -6621,13 +6803,18 @@ mod tests {
              구간의 명부 값이 앞 화신의 지각 기록에 열려 있다"
         );
 
-        // 등록 **바로 다음 실행 줄**이 표식 바인딩의 시작이어야 한다(주석·빈 줄만 사이에 허용).
+        // 등록 **바로 다음 실행 줄**이 표식 바인딩의 시작이어야 한다(주석·빈 줄과 방금 넣은 id 면 병합을 건너뛰는
+        //   가드의 닫는 괄호만 사이에 허용).
+        let after_registration = match code[registered + 1] {
+            "}" => registered + 2,
+            _ => registered + 1,
+        };
         assert!(
-            code[registered + 1].starts_with("let epoch"),
+            code[after_registration].starts_with("let epoch"),
             "`register_for_spawn` 다음 실행 줄이 표식 바인딩이 아니다 — 그만큼 앞 화신의 표식이 명부에 \
              서 있는 구간이 벌어지고, 그 구간에 도착한 지각 기록이 비운 칸에 앉아 이 화신의 첫 제출 \
              commit 을 거절되게 만든다: {:?}",
-            code[registered + 1]
+            code[after_registration]
         );
 
         // ★Fresh 를 비우는 문이 읽기와 spec 조립 **사이**여야 한다★ — 그 문이 사라지면 Fresh 스폰이
@@ -6770,9 +6957,9 @@ mod tests {
         );
         assert!(
             spawning.contains(
-                "SpawnIncarnation{continues_conversation:resume_session_id.is_some(),latch}"
+                "SpawnIncarnation{continues_conversation:resume_session_id.is_some(),latch,launch_lease:kit_guard.lease()}"
             ),
-            "spawn 이 만든 그 래치가 `SpawnIncarnation` 에 실리지 않는다"
+            "spawn 이 만든 그 래치 · 준비한 출처의 재료 열쇠가 `SpawnIncarnation` 에 실리지 않는다"
         );
         assert!(
             spawning.contains(
@@ -6783,7 +6970,7 @@ mod tests {
 
         let session = squashed_production_body("fn spawn_session(", "pub fn restore_all(");
         let head = session
-            .find("letSpawnIncarnation{continues_conversation,latch}=incarnation;")
+            .find("letSpawnIncarnation{continues_conversation,latch,launch_lease}=incarnation;")
             .expect("`spawn_session` 이 `SpawnIncarnation` 을 이름째 해체하지 않는다");
         let parts = session
             .find("letbackend::SpawnParts{")
@@ -6799,6 +6986,11 @@ mod tests {
         assert!(
             session.contains(".with_session_id_latch(latch)"),
             "세션에 래치가 실리지 않는다 — 제출이 한 번도 안 세어져 모든 이어받기가 조용히 사라진다"
+        );
+        // TRD S25 §5-2 4 (c2) ②: 빠지면 뜬 화신의 재료를 reaper 가 못 거둔다(오류 없음).
+        assert!(
+            session.contains(".with_launch_lease(launch_lease)"),
+            "세션에 재료 회수 열쇠가 실리지 않는다 — 뜬 화신의 휘발 폴더를 아무도 안 거둔다"
         );
 
         let src = include_str!("manager.rs");
@@ -6855,7 +7047,7 @@ mod tests {
         manager.kill_agent(second.id).ok();
     }
 
-    /// 실 spawn 경로가 정말 `register_for_spawn` 을 탄다는 것(= 위 단위 테스트가 죽은 코드를 보고 있지
+    /// 실 spawn 경로가 정말 `ensure_registered` 를 탄다는 것(= 위 단위 테스트가 죽은 코드를 보고 있지
     /// 않다는 것)을 실 프로세스로 확인한다. cmd.exe 두 개를 잠깐 띄웠다 죽인다.
     #[cfg(windows)]
     #[test]
@@ -6892,7 +7084,7 @@ mod tests {
 
     use crate::profile::scripted_store::{Outcome, ScriptedStore, FAILURES};
 
-    fn scripted_manager() -> (AgentManager, Arc<ScriptedStore>) {
+    pub(super) fn scripted_manager() -> (AgentManager, Arc<ScriptedStore>) {
         let store = ScriptedStore::new();
         let profiles = Arc::new(crate::profile::ProfileRegistry::new(store.clone()));
         let tracker = Arc::new(SessionTracker::new(
@@ -7305,7 +7497,7 @@ mod tests {
 
     /// ★부르는 쪽 입구의 부분 성공은 되돌리지 않는다(D8)★ — 등록(①)이 저장된 뒤 세션 id 비우기(③)의 저장이
     ///   `Err` 면 등록은 남고 칸에는 옛 손잡이가 남으며 띄우지 않는다. 띄우기는 ③ 에서 멈추므로 프로세스를
-    ///   띄우지 않는다.
+    ///   띄우지 않는다. 즉석 생성의 등록은 넣기 하나다 — 방금 넣은 id 는 병합하지 않는다.
     #[test]
     fn a_caller_spawn_whose_release_save_fails_keeps_the_registration_and_the_old_handle() {
         for failure in FAILURES {

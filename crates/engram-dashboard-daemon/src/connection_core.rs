@@ -244,10 +244,8 @@ pub(crate) fn dispatch_order(cmd: &AgentCommand) -> DispatchOrder {
         // ── 줄 밖: 활성화가 결말까지 기다리는 셋 ──────────────────────────────────
         AgentCommand::Spawn { .. }
         | AgentCommand::SpawnProfile { .. }
-        // ★`SpawnByCwd` 도 여기 든다★: 이쪽은 `spawn_blocking` 조차 없이 `manager.spawn_agent` 를
-        //   그대로 부르지만(실 프로세스 생성), 그 blocking 자체는 이 변경의 범위가 아니다 — 여기서
-        //   재는 것은 「순서가 뜻을 갖는가」뿐이고, 매번 새 uuid 를 만드는 즉석 생성이라 겹칠 짝이
-        //   애초에 없다.
+        // ★`SpawnByCwd` 도 여기 든다★: 실 프로세스 생성(`spawn_blocking` 뒤)이 끝날 때까지 기다린다. 순서가 뜻을
+        //   갖지 않는다 — 매번 새 uuid 를 만드는 즉석 생성이라 겹칠 짝이 애초에 없다.
         | AgentCommand::SpawnByCwd { .. }
         // ★⟳ 도 줄 밖이다★ — 조회를 띄우면 그 끝을 상한(`usage_service::REPLY_WAIT_MAX`)까지 기다린다. 줄에 두면
         //   그동안 이 연결의 `WriteStdin` 까지 밀린다. 순서가 뜻을 갖지 않는다: 같은 벤더의 ⟳ 둘은 서비스가 한
@@ -1576,7 +1574,16 @@ impl ConnectionCore {
                 //   띄우다 실패하면 기록한다. 이 동사를 그 모양으로 맞추려면 `activate_profile` 이 아직
                 //   등록되지 않은 프로필을 받아야 하는데 그건 그 함수의 전제(저장된 항목)를 바꾸는 일이라
                 //   별건이다 — 맞출 때 두 곳을 함께 본다.
-                match manager.spawn_agent(&profile, SpawnMode::Fresh) {
+                // ★blocking 풀로 넘긴다★ — 이 동사도 실행 재료 점검(라이브러리 락을 기다릴 수 있다)과 실 프로세스
+                //   생성을 yield 없이 동기로 한다. 사유의 정본은 위 `Spawn` 갈래의 같은 주석이다.
+                // TRD S25 §5-2 4
+                let mgr = manager.clone();
+                let spawned = tokio::task::spawn_blocking(move || {
+                    mgr.spawn_agent(&profile, SpawnMode::Fresh)
+                })
+                .await
+                .unwrap_or_else(|e| Err(PtyError::SpawnFailed(format!("spawn task failed: {e}"))));
+                match spawned {
                     // 방금 만든 uuid 라 moot(이미 떠 있음)이 나올 수 없다 — 그래도 결말을 가려 받는다.
                     Ok(outcome) => match outcome.into_info() {
                         Some(info) => {
@@ -2696,6 +2703,39 @@ mod tests {
             assert!(
                 line.contains("mgr.activate_profile("),
                 "활성화를 async 워커에서 직접 부른다 — 최대 20 초 동안 그 워커가 묶이고, 막힌 활성화                  N 건이 워커 N 개를 가져가 다른 연결의 명령까지 멈춘다: {line}"
+            );
+            let window = lines[i.saturating_sub(4)..=i].join("\n");
+            assert!(
+                window.contains("spawn_blocking"),
+                "수신자만 풀 사본 이름이고 인계가 없다 — 이름은 맞는데 여전히 async 워커에서 돈다:\n{window}"
+            );
+        }
+    }
+
+    /// ★즉석 생성(`SpawnByCwd`)의 띄우기도 async 워커에서 직접 부르지 않는다★ — 실행 재료 점검이 라이브러리 락을
+    /// 기다릴 수 있고 실 프로세스 생성이 yield 없이 돈다(TRD S25 §5-2 4). 소스에서 재는 사유 · 두 축 · 못 보는 것은
+    /// 위 활성화 형제와 같다.
+    #[test]
+    fn the_by_cwd_spawn_hands_the_blocking_call_to_the_pool() {
+        let src = include_str!("connection_core.rs");
+        let production = src.split("mod tests {").next().expect("운영 구획");
+
+        let lines: Vec<&str> = production.lines().collect();
+        let call_sites: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.contains(".spawn_agent(") && !l.trim_start().starts_with("//"))
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            !call_sites.is_empty(),
+            "즉석 생성 호출 자리가 사라졌다 — 이 항목의 전제가 낡았다"
+        );
+        for i in call_sites {
+            let line = lines[i];
+            assert!(
+                line.contains("mgr.spawn_agent("),
+                "즉석 생성을 async 워커에서 직접 부른다 — 점검 · 프로세스 생성 동안 그 워커가 묶인다: {line}"
             );
             let window = lines[i.saturating_sub(4)..=i].join("\n");
             assert!(

@@ -72,6 +72,7 @@ use crate::backend::{
     TransportShape, TurnClassifier,
 };
 use crate::failure::AgentFailureKind;
+use crate::launch::LaunchArtifacts;
 use crate::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
 use crate::transport::pty::PtyTransport;
 use crate::transport::{AgentTransport, LinkSink, OutputDecoder};
@@ -152,6 +153,15 @@ fn thread_open(
             developer_instructions,
         }),
     }
+}
+
+// app-server 스폰이 핸드셰이크에 싣는 값 — 시험이 이 함수로 그 값을 못 박는다(Noop 실행 재료 회귀 · TRD S25 §5-2 4).
+fn app_server_thread_open(
+    spec: &CommandSpec,
+    resume_session_id: Option<Uuid>,
+    control: Option<&ControlEndpoint>,
+) -> ThreadOpen {
+    thread_open(spec, resume_session_id, priming_text(control))
 }
 
 /// PATH 로 해석되는 이름 그대로 띄운다(사용자 결정 2026-09-07 · TRD §6-H).
@@ -645,6 +655,11 @@ impl AgentBackend for CodexBackend {
         false
     }
 
+    // TODO(TRD S25 §5-2 6): `materialize` 를 여기서 덮는다(JSON = `extraRoots` 정션 폴더 · 터미널 = 배치 없음) — 그때까지
+    //   트레이트 기본값(실을 것 없음 · 쓰기 없음)이다. 파일 · 링크 경로는 `kit.volatile_dir` 에 낱말을 이어 붙여서만 짓고,
+    //   실을 링크 경로는 `link_dir` 에 넘긴 바로 그 값이다 — 대소문자 · 접두를 바꾼 철자를 쓰지 않고 링크 아래에는 쓰지
+    //   않는다(가둠 포트가 막아 배치가 실패한다).
+
     /// ★한때 false 였다 — 그 사유와 그것을 버린 이유를 **함께** 남긴다(지우지 말 것)★: 옛 값의 근거는
     /// 「이 메서드가 `command` 를 안 받아 두 모드를 가를 수 없다」였다. app-server 모드는 턴 신호를
     /// 낸다 — 통로가 `turn/completed` 를 읽고(`turn/started` 는 **일부러** 읽지 않는다. 사유 정본은 그
@@ -782,6 +797,7 @@ impl AgentBackend for CodexBackend {
         cwd: PathBuf,
         mut env: Vec<(String, String)>,
         control: Option<ControlEndpoint>,
+        _artifacts: &LaunchArtifacts,
     ) -> CommandSpec {
         match command {
             AgentCommand::Codex {
@@ -1068,6 +1084,7 @@ impl AgentBackend for CodexBackend {
         resume_session_id: Option<Uuid>,
         link_sink: Option<LinkSink>,
         control: Option<&ControlEndpoint>,
+        _artifacts: &LaunchArtifacts,
     ) -> Result<SpawnParts, PtyError> {
         let (transport, child_pid, mid_turn, delivery_ack): (
             Box<dyn AgentTransport>,
@@ -1084,7 +1101,7 @@ impl AgentBackend for CodexBackend {
                 spec,
                 true,
                 decoder,
-                thread_open(spec, resume_session_id, priming_text(control)),
+                app_server_thread_open(spec, resume_session_id, control),
                 sid_sink,
                 link_sink,
             )?;
@@ -1297,6 +1314,7 @@ mod tests {
             PathBuf::from(cwd),
             vec![],
             None,
+            &LaunchArtifacts::default(),
         )
     }
 
@@ -1405,6 +1423,7 @@ mod tests {
             PathBuf::from("."),
             vec![],
             None,
+            &LaunchArtifacts::default(),
         );
         assert!(
             !s.args.iter().any(|a| a.contains(&sid.to_string())),
@@ -1441,6 +1460,7 @@ mod tests {
             PathBuf::from(cwd),
             vec![],
             None,
+            &LaunchArtifacts::default(),
         )
     }
 
@@ -1628,6 +1648,7 @@ mod tests {
             PathBuf::from("C:/workspace"),
             vec![],
             control,
+            &LaunchArtifacts::default(),
         )
     }
 
@@ -1734,6 +1755,7 @@ mod tests {
             PathBuf::from("C:/workspace"),
             vec![],
             None,
+            &LaunchArtifacts::default(),
         );
         let argv = codex_argv(&s);
         assert!(
@@ -1762,6 +1784,7 @@ mod tests {
             PathBuf::from("C:/workspace"),
             vec![],
             None,
+            &LaunchArtifacts::default(),
         );
         let argv = codex_argv(&s);
         assert!(
@@ -1815,6 +1838,7 @@ mod tests {
                     PathBuf::from("C:/workspace"),
                     vec![],
                     None,
+                    &LaunchArtifacts::default(),
                 );
                 let argv_resumes = codex_argv(&s)
                     .first()
@@ -1973,6 +1997,7 @@ mod tests {
             PathBuf::from("C:/workspace"),
             vec![],
             Some(endpoint()),
+            &LaunchArtifacts::default(),
         );
         let argv = codex_argv(&s);
         assert_eq!(&argv[..1], &[RESUME_SUBCOMMAND.to_string()]);
@@ -2057,8 +2082,19 @@ mod tests {
             cwd: PathBuf::from("."),
         };
         let open = |command: &AgentCommand| {
-            crate::backend::open_spawn(command, &probe, 80, 24, None, None, None, None, None)
-                .expect("open_spawn")
+            crate::backend::open_spawn(
+                command,
+                &probe,
+                80,
+                24,
+                None,
+                None,
+                None,
+                None,
+                None,
+                &LaunchArtifacts::default(),
+            )
+            .expect("open_spawn")
         };
 
         let json = open(&codex_app_server(vec![]));
@@ -2615,6 +2651,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             None,
             Some(link_sink),
             None,
+            &LaunchArtifacts::default(),
         )
         .expect("open_spawn");
 
@@ -2691,6 +2728,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             Some(resume_target),
             Some(link_sink),
             None,
+            &LaunchArtifacts::default(),
         )
         .expect("open_spawn");
 
@@ -2811,6 +2849,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             Some(resume_target),
             Some(link_sink),
             None,
+            &LaunchArtifacts::default(),
         )
         .expect("open_spawn");
 
@@ -2985,6 +3024,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             None,
             Some(link_sink),
             None,
+            &LaunchArtifacts::default(),
         )
         .expect("open_spawn");
 
@@ -3134,6 +3174,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             None,
             Some(link_sink),
             None,
+            &LaunchArtifacts::default(),
         )
         .expect("open_spawn");
         assert!(
@@ -3661,6 +3702,78 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         std::fs::remove_file(&path).expect("임시 지시서 삭제");
     }
 
+    /// Noop 실행 재료의 app-server 핸드셰이크 — 새 대화 · 이어받기 × 프라이밍 있음 · 없음 · 제어 채널 없음마다 값을
+    /// 못 박는다. 실행 재료 포트가 들어와도 재료 없는 스폰은 이것과 같아야 한다(TRD S25 §5-2 4).
+    #[test]
+    fn the_app_server_handshake_is_pinned_for_a_spawn_without_launch_kit() {
+        let text = "pinned priming\nsecond line\n";
+        let (with_priming, path) = bake_priming(text);
+        let without_priming = endpoint_without_priming();
+        let spec = CommandSpec {
+            program: CODEX_PROGRAM.to_string(),
+            args: Vec::new(),
+            env: Vec::new(),
+            cwd: PathBuf::from("C:/workspace"),
+        };
+        let thread = Uuid::from_u128(0x2222_2222_2222_4222_8222_2222_2222_2222);
+        let handshake =
+            |resume: Option<Uuid>, control: Option<&ControlEndpoint>| match app_server_thread_open(
+                &spec, resume, control,
+            ) {
+                ThreadOpen::Start(p) => serde_json::json!({ "start": p }),
+                ThreadOpen::Resume(p) => serde_json::json!({ "resume": p }),
+            };
+        let actual = [
+            handshake(None, Some(&with_priming)),
+            handshake(None, Some(&without_priming)),
+            handshake(None, None),
+            handshake(Some(thread), Some(&with_priming)),
+            handshake(Some(thread), Some(&without_priming)),
+            handshake(Some(thread), None),
+        ];
+        std::fs::remove_file(&path).expect("임시 지시서 삭제");
+
+        let resume = serde_json::json!({ "resume": {
+            "threadId": "22222222-2222-4222-8222-222222222222",
+            "cwd": "C:/workspace",
+            "approvalPolicy": "on-request",
+            "sandbox": "workspace-write",
+            "excludeTurns": true,
+        }});
+        let expected = [
+            serde_json::json!({ "start": {
+                "cwd": "C:/workspace",
+                "approvalPolicy": "on-request",
+                "sandbox": "workspace-write",
+                "developerInstructions": "pinned priming\nsecond line\n",
+            }}),
+            serde_json::json!({ "start": {
+                "cwd": "C:/workspace",
+                "approvalPolicy": "on-request",
+                "sandbox": "workspace-write",
+            }}),
+            serde_json::json!({ "start": {
+                "cwd": "C:/workspace",
+                "approvalPolicy": "on-request",
+                "sandbox": "workspace-write",
+            }}),
+            resume.clone(),
+            resume.clone(),
+            resume,
+        ];
+        let labels = [
+            "fresh/priming",
+            "fresh/no-priming",
+            "fresh/no-endpoint",
+            "resume/priming",
+            "resume/no-priming",
+            "resume/no-endpoint",
+        ];
+        for ((label, actual), expected) in labels.iter().zip(&actual).zip(&expected) {
+            assert_eq!(actual, expected, "{label}");
+        }
+    }
+
     /// 데몬이 프라이밍을 안 실어 준 스폰(`wants_priming` 이 false 인 갈래)은 argv 가 한 칸도 늘지 않는다.
     #[test]
     fn without_a_priming_file_nothing_is_injected() {
@@ -3735,6 +3848,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             cwd.clone(),
             env.clone(),
             None,
+            &LaunchArtifacts::default(),
         );
         assert_eq!(s.cwd, cwd);
         assert_eq!(s.env, env);
@@ -3868,6 +3982,7 @@ mod terminal_capture_wiring {
                 None,
                 None,
                 None,
+                &LaunchArtifacts::default(),
             )
             .expect("터미널 통로 기동");
 
@@ -3916,6 +4031,7 @@ mod terminal_capture_wiring {
             std::env::temp_dir(),
             vec![],
             None,
+            &LaunchArtifacts::default(),
         );
         let argv = codex_argv(&resumed);
         assert_eq!(
@@ -3965,6 +4081,7 @@ mod terminal_capture_wiring {
                 Some(thread_id),
                 None,
                 None,
+                &LaunchArtifacts::default(),
             )
             .expect("터미널 통로 기동");
 

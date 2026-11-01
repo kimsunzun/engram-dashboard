@@ -6,15 +6,17 @@
 //!
 //! tauri import 0 — 격리 규칙 준수.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use engram_dashboard_base::time::now_epoch_ms;
+use engram_dashboard_platform::fs::{path_key, PathKey};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::failure::AgentFailureKind;
+use crate::profile_edit::{Attachments, PresetPathRename};
 use crate::types::AgentId;
 
 // ── 중립 실행 명령 ─────────────────────────────────────────────────────────────
@@ -992,6 +994,177 @@ impl ProfileRegistry {
     }
 }
 
+/// 붙임(「기본」 칸 + 붙인 프리셋) 읽기 · 쓰기.
+///
+/// ★쓰기와 대조가 `pub(crate)` 인 것은 의도다★ — crate 밖(asset-library)은 프로필 편집 포트
+/// ([`crate::profile_edit::ProfileEditPort`] — `AgentManager` 가 구현)로 고친다. ★컴파일러가 막지는 않는다★ —
+/// 범용 쓰기(`try_update_with` · `update_with` · `try_upsert`)가 `pub` 이라 이 길은 리뷰가 지키는 약속이다. 읽기는
+/// 명부를 바로 읽는다(M5).
+// ADR-0311
+// TRD S25 §1-5 「프로필 편집 포트」
+impl ProfileRegistry {
+    pub fn attachments_of(&self, id: AgentId) -> Option<Attachments> {
+        self.lock().map.get(&id).map(attachments_of_profile)
+    }
+
+    /// 명부 전체 — 순서 없음.
+    pub fn attachments(&self) -> Vec<(AgentId, Attachments)> {
+        self.lock()
+            .map
+            .values()
+            .map(|p| (p.id, attachments_of_profile(p)))
+            .collect()
+    }
+
+    /// 지금 실행 입력이 `seen` 과 같은가 — 칸 셋을 명부 락 한 번 아래 함께 견주고 저장하지 않는다. `None` = 프로필이
+    /// 없다(그 사이 지워졌다).
+    // TRD S25 §1-5 (가) 2 「비교-교체」
+    pub(crate) fn launch_inputs_unchanged(&self, id: AgentId, seen: &LaunchInputs) -> Option<bool> {
+        self.lock().map.get(&id).map(|p| seen.matches(p))
+    }
+
+    /// 붙임을 `next` 로 통째 바꾼다 — 부르는 쪽 있는 입구(저장이 성공해야 커밋한다).
+    ///
+    /// `Ok(false)` = 명부에 없다 · `Ok(true)` = 이제 붙임이 `next` 다. 같은 값이면 저장하지 않는다(밀린 dirty 변경만
+    /// 싣는다 — 그 저장의 실패는 이 요청의 실패가 아니다).
+    pub(crate) fn try_set_attachments(
+        &self,
+        id: AgentId,
+        next: Attachments,
+    ) -> Result<bool, StoreError> {
+        let mut present = false;
+        self.try_mutate_if(|m| {
+            let Some(p) = m.get_mut(&id) else {
+                return false;
+            };
+            present = true;
+            if same_attachments(p, &next) {
+                return false;
+            }
+            p.default_preset = next.default_preset;
+            p.presets = next.presets;
+            true
+        })?;
+        Ok(present)
+    }
+
+    /// 명부 전체에서 붙은 경로를 `renames` 대로 바꾼다 — 락 한 번 · 저장 한 번(부르는 쪽 있는 입구). 돌려주는 것 =
+    /// 실제로 값이 바뀐 에이전트(id 순). 바뀐 것이 없으면 저장하지 않는다.
+    ///
+    /// 대응은 한꺼번에 걸린다 — 각 경로는 **원래** 값으로 한 번만 찾는다(이어 걸리지 않는다). 맞춤은 경로 전체를
+    /// platform `same_path` 로 견준다(접두 맞춤 없음). 열쇠가 같은 `from` 이 여러 줄이면 앞 줄이 이긴다. 「바뀌었다」
+    /// 는 글자 그대로 — 대소문자만 고친 `a.md → A.md` 도 바꾼 것이다. 바뀐 에이전트의 목록은 `same_path` 로 같은
+    /// 경로를 첫 자리 하나만 남긴다(안 바뀐 에이전트의 목록은 건드리지 않는다).
+    // ADR-0335
+    pub(crate) fn try_rewrite_preset_paths(
+        &self,
+        renames: &[PresetPathRename],
+    ) -> Result<Vec<AgentId>, StoreError> {
+        // ADR-0325: `same_path` 와 같은 답인 열쇠로 찾는다.
+        let mut mapping: HashMap<PathKey, &str> = HashMap::with_capacity(renames.len());
+        for r in renames {
+            mapping
+                .entry(path_key(Path::new(&r.from)))
+                .or_insert(r.to.as_str());
+        }
+        let mut changed = Vec::new();
+        self.try_mutate_if(|m| {
+            for p in m.values_mut() {
+                let mut touched = false;
+                for preset in &mut p.presets {
+                    match mapping.get(&path_key(Path::new(&preset.path))) {
+                        Some(&to) if to != preset.path => {
+                            preset.path = to.to_owned();
+                            touched = true;
+                        }
+                        _ => {}
+                    }
+                }
+                if touched {
+                    // ADR-0339
+                    // 덮어 옮기기 = 지우기 + 이름 바꾸기라 `[a, b]` 에 `a → b` 면 `[b, b]` — 뒤는 남은 찌꺼기다.
+                    let mut seen = HashSet::with_capacity(p.presets.len());
+                    p.presets
+                        .retain(|preset| seen.insert(path_key(Path::new(&preset.path))));
+                    changed.push(p.id);
+                }
+            }
+            !changed.is_empty()
+        })?;
+        changed.sort_unstable();
+        Ok(changed)
+    }
+
+    /// 명부 전체에서 붙은 경로를 `paths` 대로 걷는다 — 락 한 번 · 저장 한 번(부르는 쪽 있는 입구 · 규칙 =
+    /// [`crate::profile_edit::ProfileEditPort::remove_preset_paths`]). 걷은 것이 없으면 저장하지 않는다(밀린 dirty
+    /// 변경만 싣는다 — 그 저장의 실패는 이 요청의 실패가 아니다).
+    // ADR-0339
+    pub(crate) fn try_remove_preset_paths(
+        &self,
+        paths: &[String],
+    ) -> Result<Vec<AgentId>, StoreError> {
+        // ADR-0325: `same_path` 와 같은 답인 열쇠로 찾는다.
+        let gone: HashSet<PathKey> = paths.iter().map(|p| path_key(Path::new(p))).collect();
+        let mut changed = Vec::new();
+        self.try_mutate_if(|m| {
+            for p in m.values_mut() {
+                let before = p.presets.len();
+                p.presets
+                    .retain(|preset| !gone.contains(&path_key(Path::new(&preset.path))));
+                if p.presets.len() < before {
+                    changed.push(p.id);
+                }
+            }
+            !changed.is_empty()
+        })?;
+        changed.sort_unstable();
+        Ok(changed)
+    }
+}
+
+fn attachments_of_profile(p: &AgentProfile) -> Attachments {
+    Attachments {
+        default_preset: p.default_preset,
+        presets: p.presets.clone(),
+    }
+}
+
+fn same_attachments(p: &AgentProfile, a: &Attachments) -> bool {
+    p.default_preset == a.default_preset && p.presets == a.presets
+}
+
+/// 실행 전처리가 점검한 칸 중 띄우기가 쓰는 것 — 붙임 · 명령 · env. 점검 뒤 이 셋이 그대로일 때만 그 점검의 답으로
+/// 띄운다.
+///
+/// ★작업 폴더는 넣지 않는다★ — 바꾸기(`agent.setWorkspace`)가 그 에이전트의 실행 예약을 잡아 실행과 엇갈리지 않고,
+///   호출자 사본의 작업 폴더는 낡아도 병합이 명부 값을 지킨다(그래서 사본 대조에 넣으면 정당한 실행이 끊긴다).
+// TRD S25 §1-5 (가) 2
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LaunchInputs {
+    pub(crate) attachments: Attachments,
+    pub(crate) command: AgentCommand,
+    pub(crate) env: Vec<(String, String)>,
+}
+
+impl LaunchInputs {
+    pub(crate) fn of(p: &AgentProfile) -> Self {
+        Self {
+            attachments: attachments_of_profile(p),
+            command: p.command.clone(),
+            env: p.env.clone(),
+        }
+    }
+
+    fn matches(&self, p: &AgentProfile) -> bool {
+        same_attachments(p, &self.attachments) && self.same_command_and_env(p)
+    }
+
+    /// `p` 의 명령 · env 가 이 값과 같은가 — 스폰 병합이 호출자 사본에서 명부로 옮기는 두 칸이다.
+    pub(crate) fn same_command_and_env(&self, p: &AgentProfile) -> bool {
+        p.command == self.command && p.env == self.env
+    }
+}
+
 fn remove_promoting_children(m: &mut ProfileMap, id: AgentId) {
     m.remove(&id);
     // 1단 중첩이라 자식은 부모가 아니므로 재귀 승격은 불필요 — 한 번의 훑기로 충분하다.
@@ -1095,6 +1268,14 @@ fn serialize_zero_placeholder<S: serde::Serializer>(_tag: &u32, s: S) -> Result<
 fn random_incarnation_tag() -> u32 {
     let b = Uuid::new_v4().into_bytes();
     u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+}
+
+#[cfg(test)]
+impl ProfileRegistry {
+    /// 지금 명부 락을 아무도 쥐고 있지 않나 — 쥔 쪽이 이 스레드여도 `false` 다(기다리지 않는다).
+    pub(crate) fn lock_is_free(&self) -> bool {
+        self.profiles.try_lock().is_ok()
+    }
 }
 
 /// 저장 결과를 시험이 정하는 프로필 저장소 — 레지스트리 · 매니저 시험이 함께 쓴다.
@@ -2908,5 +3089,503 @@ mod tests {
             as_json(reg.list()),
             "dirty 가 아니면 마지막 저장 = 메모리"
         );
+    }
+
+    // ── 붙임 읽기 · 쓰기(TRD S25 §1-5 프로필 편집 포트 · ADR-0311 · ADR-0335) ──────────────
+
+    fn attached(paths: &[&str]) -> Vec<AttachedPreset> {
+        paths
+            .iter()
+            .map(|p| AttachedPreset {
+                path: (*p).to_string(),
+            })
+            .collect()
+    }
+
+    fn rename(from: &str, to: &str) -> PresetPathRename {
+        PresetPathRename {
+            from: from.into(),
+            to: to.into(),
+        }
+    }
+
+    /// 붙인 경로를 둔 프로필 하나를 더 심는다.
+    fn seed_with(reg: &ProfileRegistry, paths: &[&str]) -> AgentId {
+        let mut p = sample();
+        p.presets = attached(paths);
+        let id = p.id;
+        reg.upsert(p);
+        id
+    }
+
+    fn paths_of(reg: &ProfileRegistry, id: AgentId) -> Vec<String> {
+        reg.attachments_of(id)
+            .unwrap()
+            .presets
+            .into_iter()
+            .map(|p| p.path)
+            .collect()
+    }
+
+    #[test]
+    fn attachment_reads_mirror_the_profile_fields() {
+        let (reg, _store, id) = scripted();
+        let other = seed_with(&reg, &["/a.md", "engram:/기본"]);
+
+        assert_eq!(
+            reg.attachments_of(id),
+            Some(Attachments {
+                default_preset: true,
+                presets: vec![],
+            }),
+            "만든 직후 = 「기본」 만"
+        );
+        assert_eq!(paths_of(&reg, other), ["/a.md", "engram:/기본"]);
+        assert_eq!(reg.attachments_of(Uuid::new_v4()), None);
+
+        let mut all = reg.attachments();
+        all.sort_by_key(|(id, _)| *id);
+        let mut expected = vec![
+            (id, reg.attachments_of(id).unwrap()),
+            (other, reg.attachments_of(other).unwrap()),
+        ];
+        expected.sort_by_key(|(id, _)| *id);
+        assert_eq!(all, expected);
+    }
+
+    #[test]
+    fn launch_inputs_unchanged_tells_same_changed_and_gone() {
+        let (reg, store, id) = scripted();
+        let seen = LaunchInputs::of(&reg.get(id).unwrap());
+        let before = store.attempts();
+
+        assert_eq!(reg.launch_inputs_unchanged(id, &seen), Some(true));
+        assert_eq!(store.attempts(), before, "대조는 저장하지 않는다");
+
+        let next = Attachments {
+            default_preset: false,
+            presets: attached(&["/a.md"]),
+        };
+        assert!(reg.try_set_attachments(id, next).unwrap());
+        assert_eq!(reg.launch_inputs_unchanged(id, &seen), Some(false));
+        let seen = LaunchInputs::of(&reg.get(id).unwrap());
+        assert_eq!(reg.launch_inputs_unchanged(id, &seen), Some(true));
+
+        // 명령 · env 도 같은 대조에 든다 — 스폰 병합이 그 둘을 호출자 사본에서 옮기므로.
+        assert!(reg.update_with(id, |p| p.env.push(("ADDED".into(), "1".into()))));
+        assert_eq!(reg.launch_inputs_unchanged(id, &seen), Some(false));
+        let seen = LaunchInputs::of(&reg.get(id).unwrap());
+        assert!(reg.update_with(id, |p| p.command = AgentCommand::Shell {
+            program: "other".into(),
+            args: vec![],
+        }));
+        assert_eq!(reg.launch_inputs_unchanged(id, &seen), Some(false));
+        let seen = LaunchInputs::of(&reg.get(id).unwrap());
+
+        // 작업 폴더는 대조 밖이다(실행 예약이 지킨다).
+        assert!(reg.update_with(id, |p| p.cwd = PathBuf::from("/elsewhere")));
+        assert_eq!(reg.launch_inputs_unchanged(id, &seen), Some(true));
+
+        reg.try_remove(id).unwrap();
+        assert_eq!(
+            reg.launch_inputs_unchanged(id, &seen),
+            None,
+            "사라진 프로필은 「바뀌었다」와 가른다"
+        );
+    }
+
+    #[test]
+    fn try_set_attachments_saves_a_change_and_reports_whether_the_agent_exists() {
+        let (reg, store, id) = scripted();
+        let next = Attachments {
+            default_preset: false,
+            presets: attached(&["/b.md", "/a.md"]),
+        };
+
+        assert!(reg.try_set_attachments(id, next.clone()).unwrap());
+        let disk = store.disk(id).unwrap();
+        assert!(!disk.default_preset);
+        assert_eq!(disk.presets, next.presets, "붙인 순서 그대로");
+
+        let before = store.attempts();
+        assert!(
+            reg.try_set_attachments(id, next.clone()).unwrap(),
+            "같은 값도 「있다」 다"
+        );
+        assert_eq!(store.attempts(), before, "같은 값이면 저장하지 않는다");
+
+        assert!(
+            !reg.try_set_attachments(Uuid::new_v4(), next).unwrap(),
+            "`false` = 명부에 없다"
+        );
+    }
+
+    #[test]
+    fn attachment_writes_that_fail_to_save_leave_memory_as_it_was() {
+        for failure in FAILURES {
+            let (reg, store, id) = scripted();
+            let other = seed_with(&reg, &["/a.md"]);
+            let before = (reg.attachments_of(id), reg.attachments_of(other));
+            store.set(failure);
+
+            let err = reg
+                .try_set_attachments(
+                    id,
+                    Attachments {
+                        default_preset: false,
+                        presets: attached(&["/x.md"]),
+                    },
+                )
+                .unwrap_err();
+            assert!(
+                matches!(
+                    (failure, &err),
+                    (Outcome::FailsIo, StoreError::Io(_))
+                        | (Outcome::Refuses(_), StoreError::Refused(_))
+                ),
+                "저장소의 `Err` 를 그대로 돌려준다 — {failure:?} → {err}"
+            );
+            assert!(reg
+                .try_rewrite_preset_paths(&[rename("/a.md", "/b.md")])
+                .is_err());
+
+            assert_eq!(
+                (reg.attachments_of(id), reg.attachments_of(other)),
+                before,
+                "{failure:?}"
+            );
+            assert!(!reg.is_dirty(), "{failure:?}");
+        }
+    }
+
+    /// 대응은 한꺼번에 — 각 줄은 원래 값에만 맞춘다(ADR-0335).
+    #[test]
+    fn rewrite_maps_every_matching_agent_once_against_the_original_values() {
+        let (reg, store, untouched) = scripted();
+        let a = seed_with(&reg, &["/a.md", "/x.md", "/a.md"]);
+        let b = seed_with(&reg, &["/b.md"]);
+        let c = seed_with(&reg, &["/c.md"]);
+        let x = seed_with(&reg, &["/x.md"]);
+        let before = store.attempts();
+
+        let changed = reg
+            .try_rewrite_preset_paths(&[
+                rename("/a.md", "/b.md"),
+                rename("/b.md", "/c.md"),
+                rename("/x.md", "/x.md"),
+            ])
+            .unwrap();
+
+        let mut expected = vec![a, b];
+        expected.sort_unstable();
+        assert_eq!(
+            changed, expected,
+            "바뀐 에이전트만 — 제자리 대응(`/x.md` → `/x.md`)은 바꾼 것이 아니다"
+        );
+        assert_eq!(
+            paths_of(&reg, a),
+            ["/b.md", "/x.md"],
+            "`/a.md` 는 `/b.md` 가 된다 — `/c.md` 까지 이어 걸리지 않는다 · 겹친 뒤 자리는 걷힌다"
+        );
+        assert_eq!(paths_of(&reg, b), ["/c.md"]);
+        assert_eq!(paths_of(&reg, c), ["/c.md"]);
+        assert_eq!(paths_of(&reg, x), ["/x.md"]);
+        assert!(paths_of(&reg, untouched).is_empty());
+        assert_eq!(store.attempts(), before + 1, "명부 전체를 저장 한 번에");
+        assert_eq!(
+            store
+                .disk(a)
+                .unwrap()
+                .presets
+                .into_iter()
+                .map(|p| p.path)
+                .collect::<Vec<_>>(),
+            ["/b.md", "/x.md"]
+        );
+    }
+
+    #[test]
+    fn rewrite_with_a_repeated_source_uses_its_first_line() {
+        let (reg, _store, _id) = scripted();
+        let a = seed_with(&reg, &["/a.md"]);
+
+        let changed = reg
+            .try_rewrite_preset_paths(&[
+                rename("/a.md", "/first.md"),
+                rename("/a.md", "/second.md"),
+            ])
+            .unwrap();
+
+        assert_eq!(changed, vec![a]);
+        assert_eq!(paths_of(&reg, a), ["/first.md"]);
+    }
+
+    #[test]
+    fn rewrite_with_nothing_to_change_saves_nothing() {
+        let (reg, store, _id) = scripted();
+        let a = seed_with(&reg, &["/a.md"]);
+        let before = store.attempts();
+
+        assert!(reg
+            .try_rewrite_preset_paths(&[rename("/nowhere.md", "/b.md")])
+            .unwrap()
+            .is_empty());
+        assert!(reg.try_rewrite_preset_paths(&[]).unwrap().is_empty());
+        assert_eq!(store.attempts(), before);
+        assert_eq!(paths_of(&reg, a), ["/a.md"]);
+    }
+
+    /// 경로 전체를 platform `same_path` 로 맞춘다 — 접두 맞춤은 없다(폴더 이동은 부르는 쪽이 항목마다 펼친다).
+    /// 대소문자는 OS 규칙을 따른다(Windows = 접는다 · 그 밖 = 가린다 — ADR-0325 · ADR-0335).
+    #[test]
+    fn rewrite_matches_the_whole_path_by_same_path() {
+        let (reg, _store, _id) = scripted();
+        let a = seed_with(&reg, &["/dir/a.md", "/A.md"]);
+        let folds =
+            engram_dashboard_platform::fs::same_path(Path::new("/A.md"), Path::new("/a.md"));
+
+        let changed = reg
+            .try_rewrite_preset_paths(&[rename("/dir", "/moved"), rename("/a.md", "/b.md")])
+            .unwrap();
+
+        if folds {
+            assert_eq!(changed, vec![a]);
+            assert_eq!(paths_of(&reg, a), ["/dir/a.md", "/b.md"]);
+        } else {
+            assert!(changed.is_empty());
+            assert_eq!(paths_of(&reg, a), ["/dir/a.md", "/A.md"]);
+        }
+    }
+
+    /// 「바뀌었다」 는 글자 그대로 — 대소문자만 고친 이름도 바꾼 것이다. 열쇠가 같은 `from` 은 앞 줄이 이긴다.
+    #[test]
+    fn rewrite_counts_a_case_only_rename_as_a_change() {
+        let (reg, _store, _id) = scripted();
+        let a = seed_with(&reg, &["/a.md"]);
+
+        let changed = reg
+            .try_rewrite_preset_paths(&[rename("/a.md", "/A.md"), rename("/A.md", "/second.md")])
+            .unwrap();
+
+        assert_eq!(changed, vec![a]);
+        assert_eq!(paths_of(&reg, a), ["/A.md"]);
+    }
+
+    /// 돌려주는 순서 = id 순 — 명부(`HashMap`)를 도는 순서가 아니다. 여덟이면 우연히 맞을 확률은 1/8! 이다.
+    #[test]
+    fn rewrite_returns_the_changed_agents_in_id_order() {
+        let (reg, _store, _id) = scripted();
+        let mut ids: Vec<AgentId> = (0..8).map(|_| seed_with(&reg, &["/a.md"])).collect();
+
+        let changed = reg
+            .try_rewrite_preset_paths(&[rename("/a.md", "/b.md")])
+            .unwrap();
+
+        ids.sort_unstable();
+        assert_eq!(changed, ids);
+    }
+
+    /// 바꿔 쓴 뒤 같은 경로가 겹치면 첫 자리만 남는다 — 덮어 옮기기의 뒤 자리는 찌꺼기다.
+    #[test]
+    fn rewrite_keeps_only_the_first_of_paths_that_now_coincide() {
+        let (reg, store, _id) = scripted();
+        let ab = seed_with(&reg, &["/a.md", "/b.md"]);
+        let ba = seed_with(&reg, &["/b.md", "/a.md"]);
+        let axb = seed_with(&reg, &["/a.md", "/x.md", "/b.md"]);
+
+        let changed = reg
+            .try_rewrite_preset_paths(&[rename("/a.md", "/b.md")])
+            .unwrap();
+
+        let mut expected = vec![ab, ba, axb];
+        expected.sort_unstable();
+        assert_eq!(changed, expected);
+        assert_eq!(paths_of(&reg, ab), ["/b.md"]);
+        assert_eq!(paths_of(&reg, ba), ["/b.md"], "첫 자리를 지킨다");
+        assert_eq!(paths_of(&reg, axb), ["/b.md", "/x.md"]);
+        assert_eq!(
+            store
+                .disk(ab)
+                .unwrap()
+                .presets
+                .into_iter()
+                .map(|p| p.path)
+                .collect::<Vec<_>>(),
+            ["/b.md"]
+        );
+    }
+
+    /// 겹침도 `same_path` 로 본다 — Windows 에서는 대소문자만 다른 `/B.md` 도 `/b.md` 와 같아 첫 자리만 남는다.
+    #[test]
+    fn rewrite_dedupes_by_same_path() {
+        let (reg, _store, _id) = scripted();
+        let a = seed_with(&reg, &["/a.md", "/B.md"]);
+        let folds =
+            engram_dashboard_platform::fs::same_path(Path::new("/B.md"), Path::new("/b.md"));
+
+        let changed = reg
+            .try_rewrite_preset_paths(&[rename("/a.md", "/b.md")])
+            .unwrap();
+
+        assert_eq!(changed, vec![a]);
+        if folds {
+            assert_eq!(paths_of(&reg, a), ["/b.md"]);
+        } else {
+            assert_eq!(paths_of(&reg, a), ["/b.md", "/B.md"]);
+        }
+    }
+
+    /// 이번에 안 바뀐 에이전트의 목록은 원래 겹쳐 있어도 그대로 둔다.
+    #[test]
+    fn rewrite_leaves_an_untouched_agents_duplicates_alone() {
+        let (reg, _store, _id) = scripted();
+        let dup = seed_with(&reg, &["/d.md", "/d.md"]);
+        let a = seed_with(&reg, &["/a.md"]);
+
+        let changed = reg
+            .try_rewrite_preset_paths(&[rename("/a.md", "/b.md"), rename("/d.md", "/d.md")])
+            .unwrap();
+
+        assert_eq!(changed, vec![a]);
+        assert_eq!(paths_of(&reg, dup), ["/d.md", "/d.md"]);
+    }
+
+    fn strings(paths: &[&str]) -> Vec<String> {
+        paths.iter().map(|p| (*p).to_string()).collect()
+    }
+
+    /// 걷기는 명부 전체에 걸리고 남는 항목의 순서 · 「기본」 칸은 그대로다(ADR-0339).
+    #[test]
+    fn remove_drops_matching_entries_across_agents_and_keeps_the_rest_in_order() {
+        let (reg, store, untouched) = scripted();
+        let a = seed_with(&reg, &["/x.md", "/a.md", "/y.md", "/a.md", "/z.md"]);
+        let b = seed_with(&reg, &["/b.md", "/x.md"]);
+        let c = seed_with(&reg, &["/c.md"]);
+        let emptied = seed_with(&reg, &["/a.md"]);
+        // 기본값(true)으로는 칸을 건드려도 못 본다 — 바뀌는 둘을 false 로 두고 지켜본다.
+        assert!(reg.update_with(a, |p| p.default_preset = false));
+        assert!(reg.update_with(emptied, |p| p.default_preset = false));
+        let before = store.attempts();
+
+        let changed = reg
+            .try_remove_preset_paths(&strings(&["/a.md", "/b.md"]))
+            .unwrap();
+
+        let mut expected = vec![a, b, emptied];
+        expected.sort_unstable();
+        assert_eq!(changed, expected);
+        assert_eq!(paths_of(&reg, a), ["/x.md", "/y.md", "/z.md"]);
+        assert_eq!(paths_of(&reg, b), ["/x.md"]);
+        assert_eq!(paths_of(&reg, c), ["/c.md"]);
+        assert!(paths_of(&reg, untouched).is_empty());
+        assert!(paths_of(&reg, emptied).is_empty());
+        assert!(
+            !reg.attachments_of(a).unwrap().default_preset,
+            "「기본」 칸은 그대로"
+        );
+        assert!(
+            !reg.attachments_of(emptied).unwrap().default_preset,
+            "목록이 비어도 「기본」 칸은 그대로"
+        );
+        assert_eq!(store.attempts(), before + 1, "명부 전체를 저장 한 번에");
+        assert_eq!(
+            store
+                .disk(a)
+                .unwrap()
+                .presets
+                .into_iter()
+                .map(|p| p.path)
+                .collect::<Vec<_>>(),
+            ["/x.md", "/y.md", "/z.md"]
+        );
+    }
+
+    /// 걷기는 남는 항목을 겹침 정리하지 않는다 — 바꿔 쓰기와 달리 걷기는 겹침을 만들지 않는다(ADR-0339).
+    #[test]
+    fn remove_keeps_surviving_duplicates() {
+        let (reg, _store, _id) = scripted();
+        let a = seed_with(&reg, &["/x.md", "/a.md", "/x.md"]);
+
+        let changed = reg.try_remove_preset_paths(&strings(&["/a.md"])).unwrap();
+
+        assert_eq!(changed, vec![a]);
+        assert_eq!(paths_of(&reg, a), ["/x.md", "/x.md"]);
+    }
+
+    /// 맞춤은 경로 전체를 platform `same_path` 로 — 접두 맞춤은 없고 대소문자는 OS 규칙을 따른다(ADR-0325).
+    #[test]
+    fn remove_matches_the_whole_path_by_same_path() {
+        let (reg, _store, _id) = scripted();
+        let a = seed_with(&reg, &["/dir/a.md", "/A.md"]);
+        let folds =
+            engram_dashboard_platform::fs::same_path(Path::new("/A.md"), Path::new("/a.md"));
+
+        let changed = reg
+            .try_remove_preset_paths(&strings(&["/dir", "/a.md"]))
+            .unwrap();
+
+        if folds {
+            assert_eq!(changed, vec![a]);
+            assert_eq!(paths_of(&reg, a), ["/dir/a.md"]);
+        } else {
+            assert!(changed.is_empty());
+            assert_eq!(paths_of(&reg, a), ["/dir/a.md", "/A.md"]);
+        }
+    }
+
+    /// 돌려주는 순서 = id 순 — 명부(`HashMap`)를 도는 순서가 아니다. 여덟이면 우연히 맞을 확률은 1/8! 이다.
+    #[test]
+    fn remove_returns_the_changed_agents_in_id_order() {
+        let (reg, _store, _id) = scripted();
+        let mut ids: Vec<AgentId> = (0..8).map(|_| seed_with(&reg, &["/a.md"])).collect();
+
+        let changed = reg.try_remove_preset_paths(&strings(&["/a.md"])).unwrap();
+
+        ids.sort_unstable();
+        assert_eq!(changed, ids);
+    }
+
+    #[test]
+    fn remove_with_nothing_to_remove_saves_nothing() {
+        let (reg, store, _id) = scripted();
+        let a = seed_with(&reg, &["/a.md"]);
+        let before = store.attempts();
+
+        assert!(reg
+            .try_remove_preset_paths(&strings(&["/nowhere.md"]))
+            .unwrap()
+            .is_empty());
+        assert!(reg.try_remove_preset_paths(&[]).unwrap().is_empty());
+        assert_eq!(store.attempts(), before);
+        assert_eq!(paths_of(&reg, a), ["/a.md"]);
+    }
+
+    #[test]
+    fn remove_that_fails_to_save_leaves_memory_as_it_was() {
+        for failure in FAILURES {
+            let (reg, store, _id) = scripted();
+            let a = seed_with(&reg, &["/a.md", "/b.md"]);
+            let b = seed_with(&reg, &["/a.md"]);
+            let before = (reg.attachments_of(a), reg.attachments_of(b));
+            store.set(failure);
+
+            let err = reg
+                .try_remove_preset_paths(&strings(&["/a.md"]))
+                .unwrap_err();
+            assert!(
+                matches!(
+                    (failure, &err),
+                    (Outcome::FailsIo, StoreError::Io(_))
+                        | (Outcome::Refuses(_), StoreError::Refused(_))
+                ),
+                "저장소의 `Err` 를 그대로 돌려준다 — {failure:?} → {err}"
+            );
+            assert_eq!(
+                (reg.attachments_of(a), reg.attachments_of(b)),
+                before,
+                "{failure:?}"
+            );
+            assert!(!reg.is_dirty(), "{failure:?}");
+        }
     }
 }

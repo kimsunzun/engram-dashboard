@@ -88,6 +88,7 @@ use uuid::Uuid;
 use engram_dashboard_agent::backend::{
     AgentBackend, ClaudeBackend, CodexBackend, InputEncoder, TransportShape, SUBMIT_PACING,
 };
+use engram_dashboard_agent::launch::LaunchArtifacts;
 use engram_dashboard_agent::output_core::{OutputCore, TurnWiring};
 use engram_dashboard_agent::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
 use engram_dashboard_agent::transport::pty::PtyTransport;
@@ -741,6 +742,7 @@ fn production_spec(
         cwd.to_path_buf(),
         env.to_vec(),
         None,
+        &LaunchArtifacts::default(),
     )
 }
 
