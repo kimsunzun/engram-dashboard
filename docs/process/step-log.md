@@ -2187,6 +2187,14 @@
   - QA = full regression run locally (workspace 5067 passed · 0 failed · gates 30/30 · frontend 2802 · tsc · ts-rs no drift) · claude and codex lanes off (no path hit · same versions). An earlier standalone qa (2026-11-02) failed only on two pre-existing failures.
 - 2026-11-01 — Opened. Number = S30 (not claimed by push — user 「push 금지」 until the skill real-use test ends).
 
+## S31 — 소스 정규식 게이트의 공백형 경로 (2026-11-02, `v0.5.0/fix/gate-path-whitespace`, 자율 세션 — 스킬 실사용 시험 「쭉 진행해」) · 설계 폴더 `docs/process/S31-gate-path-whitespace/` · 정본 ADR 없음 · 구현 · 리뷰 · QA · **master 머지 전**(기준 = `v0.5.0/chore/skill-apply` — 통합은 그 뒤)
+
+- 2026-11-02 — 구현 착지. `ci.yml` 의 소스 정규식 검사 여섯(base tenants · replay_flight 순수성 · transport gate 3 · platform gate 6 · shell gate 2 의 lint 끄기 · rustfmt 건너뛰기 부재)이 `::` 앞뒤 공백(`\s*::\s*`)을 받는다. 구멍 = rustfmt 가 손대지 않는 중괄호 매크로 호출 본문 · `#[rustfmt::skip]` 구간의 `tokio :: spawn` 꼴이 fmt 게이트와 정규식 게이트를 모두 지났다. 해설 사본 · 대상 헤더를 맞췄고, 공백이 아닌 다른 이름 꼴(별칭 · 끝 마디 import · 여러 항목 묶음)은 각 게이트 정본 자리의 「알려진 한계」 + `docs/todo/observed-only.md` 로 돌렸다.
+  - 리뷰 = PRD+TRD full 2라운드 PASS · 코드 full PASS(must 0) · 권장 라운드 재리뷰(문서 정확성) PASS — 남은 문구는 메인이 고치고 셀프리뷰로 닫았다.
+  - QA = 로컬 CI 대체(`jobs:` 가 바뀌어 CI 결론을 못 씀 · push 안 함) — 빌드 · backend 잡 전 줄 · ts-rs 동기 · gates 30 · frontend · claude 레인 PASS. 게이트 표본(TRD 시험 계획 AC1–AC3 · net gate 2a · 여러 항목 묶음 한계 · rustfmt 의 한 항목 묶음 재작성)은 실제 `ci.yml` 스텝으로 전부 기대대로 — 수정 전 패턴은 공백형 표본을 통과시켰다(구멍 실재).
+  - ★QA FAIL 1 — S31 무관(선재)★: codex 레인 `backend_contract --ignored` 6/11 실패(`q4` `q5` `q6` `q8` `q11` `q12` · `path must be shorter than SUN_LEN`). codex 0.163.0 이 시험 HOME(`target\tmp\backend-contract-home-…`) 아래에 app-server 소켓을 만들어 경로 한도를 넘는다. 기준 브랜치(skill-apply `e12116fa`)에서 같은 이름 · 메시지로 재현됐다. 실 앱에서 띄운 codex 에이전트(StreamJson)는 정상 연결됐다(SUN_LEN 0건) — 시험 하네스만의 문제로 보인다(TUI 모드 미측). 고치는 일은 S31 밖이다.
+- 2026-11-02 — 주제 열기. 번호 = S31(선점 push 안 함 — 사용자 지시 「push 금지」). 출처 = `docs/todo/doc-drift.md` 「게이트 정규식이 못 닫은 구멍」.
+
 ## 다음 (미진행)
 
 - **[✅ 결정 완료 2026-08-14 — ADR-0158] 버전 불일치는 끊지 않고 알린다.** 아래 방향 항목은 이 ADR로 닫혔다. 결정 = 프로토콜 버전 안 올림(상향 기준을 「봉투 문법이 깨질 때」로 좁힘) · 보내기 전 상대 능력 확인(데몬이 연결 직후 먼저 광고하므로 옛 데몬에게 모르는 것을 보낼 일이 없다 — 실측 확인) · 데몬 자동 종료 없음 · **고지 = 앱 시작 시 1회, 알리기만, 닫으면 작은 흔적**(행동 버튼 없음, 모달은 아예 못 붙을 때만) · 버전과 무관하게 마감 시한 + 오류의 상관관계 표시를 함께 깐다. 근거 조사 = `docs/research/daemon-version-mismatch-2026-08-14.md`(적대 리뷰 BLOCK → 추천 수정됨, 그 경위도 그 문서에).
