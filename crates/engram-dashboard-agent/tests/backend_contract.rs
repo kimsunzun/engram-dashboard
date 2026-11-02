@@ -3,10 +3,11 @@
 //! 이 파일이 소유하는 것은 질문표 하나다. 백엔드가 셋째로 늘면 [`backend_table`] 에 **행이 하나 늘고**
 //! 질문 함수들은 그대로다 — 파일이 느는 구조가 아니다.
 //!
-//! **레인이 둘이다.**
-//! - 비-ignore 다섯([`declaration_table_is_filled_for_every_backend`]과 통로 선언 대조 넷) — 프로세스를
-//!   하나도 안 띄우고 선언만 대조한다. 기본 회귀·CI 에서 그대로 돈다.
-//! - 나머지 전부 `#[ignore]` — 실 CLI 를 띄운다. `-- --ignored` 로 부를 때만 돈다.
+//! **There are two lanes.**
+//! - Not ignored: the declaration checks ([`declaration_table_is_filled_for_every_backend`] and the
+//!   four per-channel checks) and the trust-record checks (`trust_record_*` · `no_trust_record_*`,
+//!   over fixture text). They spawn no process and run as-is in the default regression run and CI.
+//! - Everything else is `#[ignore]` — it spawns the real CLI and runs only under `-- --ignored`.
 //!
 //! ★비-ignore 항목이 있는 이유 = `#[ignore]` 의 대가★: `#[ignore]` 스위트는 통째로 증발해도 초록이다.
 //!   컴파일과 표의 존재를 지키는 항목이 하나는 남아 있어야 그 침묵이 안 생긴다.
@@ -32,52 +33,65 @@
 //!   띄우느니 멈춘다. 운영이 `-s` 를 `--sandbox` 로 바꾸는 날 이 레인은 빨개지고, 사람이 새 argv 의 봉투를
 //!   다시 세운 뒤에야 돈다.
 //!
-//! ★**그래서 무엇이 아직 안 재지나 — 정직하게 적는다**★: `-s workspace-write` · `-a on-request` 아래에서
-//!   **실제 모델 턴을 돌린 관측은 없다.** 그건 이 시험대에 쓰기 권한을 쥔 에이전트를 돌리는 일이고,
-//!   무해함(읽기 전용·승인 없음·짧은 프롬프트·망 작업 없음·저장소를 cwd 로 쓰지 않음)이 이 파일의 전제라
-//!   맞바꾸지 않는다. [`q11_production_argv_is_accepted_and_reaches_a_composer`] 가 재는 것은 「그 두 값을
-//!   단 운영 argv 를 실 CLI 가 받아들이고 **컴포저까지 선다**」까지다 — 키는 시작 모달의 CR 하나뿐이고
-//!   프롬프트는 하나도 안 넣는다(모델 턴이 없으면 그 권한은 행사될 기회가 없다). 「그 정책 아래 모델이
-//!   무엇을 할 수 있나」는 이 파일 밖이고, 그 칸은 비어 있다.
+//! ★**So what is still unmeasured — stated honestly**★: there is **no observation of a real
+//!   model turn** under `-s workspace-write` · `-a on-request`. That would mean this harness
+//!   running an agent that holds write access, and harmlessness (read-only · no approvals ·
+//!   short prompts · no network work · never this repo as cwd) is this file's premise, so we
+//!   do not trade it away. [`q11_production_argv_is_accepted_and_reaches_a_composer`] measures
+//!   only "the real CLI accepts the production argv carrying those two values and **reaches a
+//!   composer**" — the only keys it sends are the ones that pass the startup screen (the probe
+//!   characters of [`PtySession::pass_startup_modal`], their erasure, and one CR); it submits
+//!   no prompt (without a model turn that permission never gets a chance to be used). "What
+//!   the model can do under that policy" is outside this file, and that cell is empty.
 //!
-//! ★**어느 버전을 쟀나는 로그에 남는다**★: 이 CLI 는 스스로 업데이트하므로 관측은 버전과 묶여야 뜻이
-//!   있다. [`record_version_once`] 가 **운영 argv 로** `--version` 을 물어 찍는다(최근 실측 = codex-cli
-//!   0.153.4, 2026-09-08). ★값을 단언하지 않는 것은 의도★ — 박아 두면 업데이트마다 빨개지고 그건 회귀가
-//!   아니라 달력이다.
+//! ★**Which version was measured is left in the log**★: this CLI updates itself, so an
+//!   observation means something only when tied to a version. [`record_version_once`]
+//!   asks `--version` **through the production argv** and prints it (latest measurement
+//!   = codex-cli 0.163.0, 2026-11-02). ★Not asserting the value is deliberate★ — pinning
+//!   it would turn red on every update, and that is a calendar, not a regression.
 //!
-//! ★**표식은 공백 배치를 무시하고 댄다**([`mentions`])★ — 이 TUI 는 부하가 걸리면 문장을 단어마다 커서를
-//!   옮겨 그려서 제어 시퀀스를 걷어낸 텍스트에 공백이 사라진다. 그 판에서 `flatten` + `contains` 는 표식을
-//!   못 찾고, 그러면 모달을 안 지나 **다음 질문이 「컴포저가 안 섰다」로** 죽는다 — 질문의 답이 아니라
-//!   하네스의 오작동인데 둘이 똑같이 빨갛다. 근거·실측은 그 함수 주석이 갖는다.
+//! ★**Markers are matched ignoring whitespace layout**([`mentions`])★ — under load this TUI draws a
+//!   sentence word by word with cursor moves, so the text left after stripping control sequences
+//!   loses its spaces. There `flatten` + `contains` misses the marker, and **the next question then
+//!   dies with "the composer never came up"** — a harness malfunction, not the question's answer,
+//!   yet both are the same red. The evidence and measurements live in that function's comment.
 //!
 //! **§3-5 게이트** — 아래가 빨개지면 Phase 1 배선을 시작하지 않는다: **Q1 · Q4 · Q5 · Q8 · Q10**.
 //! Q3 · Q6 · Q9 는 게이트가 아니라 관측이다(어느 쪽으로 나오든 배선의 *모양* 이 아니라 인자 하나·기록이
 //! 갈린다). Q7(사람 눈 — 우리 xterm 에서 보기에 나은가)은 **이 시험대가 덮지 않는다**: 바이트에
 //! alt-screen 시퀀스가 있나(Q6)는 잴 수 있어도 "그래서 화면이 나은가" 는 여기서 못 잰다.
 //!
-//! ★TRD 가 몰랐던 사실 — 첫 방문 폴더에는 **모달**이 먼저 뜬다★(실측 codex-cli 0.153.4): 폴더 신뢰
-//!   확인이 컴포저 위에 겹쳐 뜨고, 그 동안 키 입력은 컴포저가 아니라 모달로 간다. 그래서 컴포저·cwd 를
-//!   묻는 질문(Q4·Q5·Q6·**Q8**)은 전부 [`PtySession::pass_startup_modal`] 로 그것을 먼저 지나간다.
-//!   ★Q8 이 그 명단에 든 것이 이 파일의 가장 비싼 교훈이다★ — 모달이 프로세스를 붙들고 있는 동안은
-//!   "5초 뒤에도 Running" 이 **거짓일 수가 없어서**, 모달을 안 지나던 옛 Q8 은 cwd 정책을 물은 적이 없다.
-//!   초록이던 그 칸이 사실은 빈 칸이었다. **우리 스폰 입구는 임의 폴더를 받으므로 이건 시험대만의 사정이
-//!   아니다** — 처음 보는 cwd 로 뜬 codex 탭은 사람이 모달을 지나기 전까지 입력을 안 받는다.
+//! ★A fact the TRD did not know — a first-visit folder shows a **modal**
+//!   first★: a folder-trust prompt is drawn over the composer, and while
+//!   it is up keystrokes go to the modal, not the composer.
+//!   ★When it appears and what it says are per-version★ — measured on 0.163.0: a git-repo cwd
+//!   gets the trust modal, a non-git cwd gets no modal at all, and the wording changed.
+//!   (History: 0.153.4 also showed it for a non-git cwd — the old Q8 record.) So every question
+//!   about the composer or the cwd first goes through [`PtySession::pass_startup_modal`] until
+//!   the composer accepts keys, **modal or not** — that verb never reads the modal's wording.
+//!   ★Q8 being on that list is this file's most expensive lesson★ — while a modal holds the
+//!   process, "still Running after 5 s" **cannot be false**, so the old Q8, which never
+//!   passed the modal, never asked about the cwd policy. That green cell was in fact empty.
+//!   **Our spawn entry accepts any folder, so this is not just the harness's problem** — a
+//!   codex tab started in an unseen cwd takes no input until a person passes the modal.
 //!
-//! ★**실 사용자 홈을 건드리지 않는다**★: 모달을 지나면 그 CLI 는 폴더 신뢰를 **자기 설정 파일에 적는다**.
-//!   그대로 두면 시험대가 돌 때마다 개발자의 실 `~/.codex/config.toml` 에 지워진 경로의 죽은 항목이
-//!   쌓인다(실제로 쌓였다 — 그것이 [`LiveProbe::home_redirect`] 가 생긴 계기다). 그래서 이 시험대의 모든
-//!   실 스폰은 그 CLI 의 상태 디렉터리를 **항목마다 새로 파는 임시 홈**으로 돌리고, 인증에 필요한 파일만
-//!   실 홈에서 복사해 온다. 임시 홈은 `CARGO_TARGET_TMPDIR` 아래 둔다 — ★시스템 temp 아래는 안 된다★:
-//!   codex 0.153.4 는 temp 아래를 홈으로 받으면 sandbox 헬퍼 생성을 거부하고 경고를 찍는다(실측).
-//!   ★그 보증도 이제 재진다★ —
-//!   [`q12_working_root_comes_from_the_spawn_argument_and_env_reaches_the_process`] 가 그 항목의 임시
-//!   경로가 **임시 홈에는 적혔고 실 홈에는 안 적혔음**을 양쪽에서 단언한다. 예전엔 이 문단이 약속이기만
-//!   했고 그것을 지키는 것이 사람 눈뿐이었다.
+//! ★**The real user home is never touched**★: passing the modal makes the CLI **write the folder
+//!   trust into its own config file**. Left alone, every harness run would pile dead entries for
+//!   deleted paths into the developer's real `~/.codex/config.toml` (it really did — that is why
+//!   [`LiveProbe::home_redirect`] exists). So every real spawn in this harness redirects the
+//!   CLI's state directory to **a temp home dug fresh per item**, and copies only the files
+//!   needed for auth from the real home. The temp home lives ★outside the system temp dir, on a
+//!   short path★ — codex requires both (evidence = [`Scratch::new_home`]).
+//!   ★That guarantee is measured too★ —
+//!   [`q12_working_root_comes_from_the_spawn_argument_and_env_reaches_the_process`] asserts
+//!   from both sides that the item's temp path **was written to the temp home and not to the
+//!   real home**. This paragraph used to be only a promise, kept by nobody but a human eye.
 //!
 //! 실 자식 프로세스를 띄우므로 `-- --test-threads=4` 로 돈다(TRD §7 0-2 · `.claude/skill-bindings/qa.md` 「모듈별 명령」).
 //!   ★보안 소프트웨어 DLL 이 프로세스 생성을 후킹하는 PC 에서는 1 로 낮춘다★ — 같은 문서의 「그래도
 //!   죽으면 2로 낮춘다」 조항과 같은 사유이고, 이 스위트는 한 항목이 실 CLI 를 여러 번 띄운다.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -125,10 +139,11 @@ struct Declared {
     /// 그 백엔드 폴더에 적혀 있어야 한다★.
     uses_mail: bool,
     session_snapshot: bool,
-    /// ★이 칸에는 실 근거가 붙는다 — 선언끼리 맞대는 것으로 끝나지 않는다★: 「cwd·env 를 준 대로
-    /// 쓴다」는 주장이라 [`q12_working_root_comes_from_the_cd_flag_and_env_reaches_the_process`] 가
-    /// 실 프로세스로 양쪽을 각각 잰다(작업 루트 = `--cd` 가 정한다 · env = 넘긴 상태 디렉터리로
-    /// 실제로 쓴다).
+    /// ★This cell has real evidence — it does not stop at matching
+    /// declarations★: it claims "cwd and env are used as given", so
+    /// [`q12_working_root_comes_from_the_spawn_argument_and_env_reaches_the_process`]
+    /// measures each half with a real process (the working root is set
+    /// by `--cd` · env = the state directory passed in is really used).
     ///
     /// ★단 그 근거는 **실 프로브가 있는 행에만** 붙는다★ — `probe: None` 인 행(claude)의 이 칸은
     ///   여전히 선언 대조뿐이고, 이 파일은 그 행의 cwd·env 를 잰 적이 없다. 그 행의 근거는 이 시험대
@@ -188,26 +203,31 @@ struct LiveProbe {
     submit_body: &'static str,
     /// Q5 — LF 로 이어 붙일 조각들. 조각이 전부 에코되면 여러 줄이 통째로 들어간 것이다.
     multiline_parts: &'static [&'static str],
-    /// 첫 방문 폴더에서 이 CLI 가 띄우는 **모달**의 화면 표식. 모달이 떠 있는 동안 키 입력은 컴포저가
-    /// 아니라 모달로 가므로, 컴포저를 묻는 질문(Q4·Q5·Q6)은 그것을 지나야 자기 질문을 물을 수 있다.
-    /// `None` = 그런 모달이 없는 백엔드.
-    startup_modal_marker: Option<&'static str>,
     /// 컴포저가 **비어 있을 때** 그 자리에 그려지는 안내 문구.
     ///
     /// ★왜 필요한가★: 제출은 컴포저를 비운다 — 그러니 본문을 넣은 뒤 이 문구가 **다시 그려지면** 그
     ///   입력은 제출된 것이다. 이 신호가 없으면 Q5 는 "본문 아닌 글자가 왔나" 로 판정할 수밖에 없는데,
     ///   TUI 는 아무 입력 없이도 배너·모델명·사용량 안내를 다시 그려서 그 글자가 **응답인지 제 화면인지
     ///   구분되지 않는다**(실측 — 그 잡음이 게이트를 헛발동시켰다).
-    /// `None` = 그 신호가 없는 백엔드 → Q5 는 화면 정적 여부만 본다.
+    /// `None` = a backend without that signal → Q5 only checks whether the screen
+    /// stays static. ★The startup probe ([`PtySession::pass_startup_modal`]) also
+    /// stands on this signal★ — with `None` that verb sends no key at all.
     composer_idle_marker: Option<&'static str>,
-    /// Q12 — 이 CLI 가 **자기 작업 루트를 화면에 적는** 자리의 표식(codex 0.153.4 = 머리 상자의
-    /// `directory:` 줄). `None` = 그런 표식이 없는 백엔드 → Q12 의 화면 쪽 판정을 건너뛰고 파일 쪽
-    /// 증거만 본다.
+    /// The **byte sequence** the CLI emits once startup (loading ·
+    /// first-visit modal) is over and the session is up. It is a control
+    /// sequence, not screen text, so rewording does not affect it.
+    /// `None` = a backend without such a signal → [`PtySession::pass_startup_modal`]
+    /// decides from the probe alone and can miss a modal that appears late, after loading.
+    ready_signal: Option<&'static [u8]>,
+    /// Q12 — does this CLI **print its own working-root path on screen**. `false` = it does
+    /// not → Q12 skips the screen-side check and looks only at the file-side evidence.
     ///
-    /// ★이 표식 자체는 판정이 아니다★ — 이게 있는지만 보면 "무슨 폴더든 하나 적혀 있다" 로 통과한다.
-    ///   판정은 **거기 적힌 것이 `--cd` 로 준 폴더인가**이고, 그래서 Q12 는 프로세스 cwd 를 일부러 다른
-    ///   폴더로 두고 잰다.
-    workspace_line_marker: Option<&'static str>,
+    /// ★Why yes/no instead of a marker string★: the label next to that path is
+    ///   per-version (0.153.4 = a `directory:` line in the header box, 0.163.0 = the
+    ///   bare path with no label — measured). The check was never about the label but
+    ///   about **whether the folder on screen is the one given via `--cd`**, so Q12
+    ///   deliberately runs the process in another folder and compares both leaf names.
+    shows_workspace_root: bool,
     /// Q6 — `--no-alt-screen` 이 **PTY 바이트를 바꾸는가**. Phase 0 이 실측으로 채우는 칸이고, 테스트는
     /// 관측이 이 선언과 같은지를 잰다.
     ///
@@ -224,23 +244,47 @@ struct HomeRedirect {
     env: &'static str,
     /// 그 변수가 안 걸렸을 때의 기본 위치(사용자 홈 기준 상대 경로). 씨앗 파일을 여기서 퍼 온다.
     default_subdir: &'static str,
-    /// 임시 홈에 **복사해 넣어야 그 CLI 가 여전히 로그인 상태인** 파일들. 없으면 TUI 가 컴포저 대신
-    /// 로그인 화면을 띄워 Q1 부터 무너진다(실측: 빈 홈 = `Not logged in`).
+    /// Files that must be **copied into the temp home for the CLI to stay logged in**.
+    /// Without them the TUI shows a login screen instead of the composer and everything
+    /// from Q1 on collapses (measured: empty home = `Not logged in`). ★If even one cannot
+    /// be copied, the harness stops before spawning★ ([`sandbox_home`]) — the login
+    /// screen is a cursor-hidden list, i.e. a screen the startup verb could press CR on.
     ///
-    /// ★복사본은 자격증명이다★ — 임시 홈은 [`Scratch`] 가 `Drop` 에서 지운다. 그 보증이 이 필드의 전제다.
+    /// ★The copies are credentials★ — [`Scratch`]'s `Drop` deletes **these copies
+    ///   first**, then the folder. If a child still holds a file it retries up to a
+    ///   limit, and if anything is still left it prints the path to stderr. ★Best
+    ///   effort, not a guarantee★ — if the test process is killed, `Drop` never runs and
+    ///   the copy stays under `%LOCALAPPDATA%\ebc\` (not a place `cargo clean` clears).
     seed_files: &'static [&'static str],
-    /// 임시 홈에 **새로 적어 넣을** 파일 — `(파일명, 내용)`. 복사보다 나중에 적용된다.
+    /// Files **written fresh** into the temp home —
+    /// `(file name, content)`. Applied after the copies.
     ///
-    /// ★왜 필요한가 — 실측 2026-09-07★: 빈 홈으로 codex 0.153.4 를 띄우면 폴더 신뢰 모달 **뒤에 모달이 하나
-    ///   더** 온다(`Set up the Codex agent sandbox …`). 그 둘째 모달의 기본 선택은 `1. Set up default sandbox
-    ///   (requires Administrator permissions)` 라 ★자동 테스트가 CR 로 지나가서는 안 되는 화면★이다 —
-    ///   지나가면 관리자 권한 상승을 부른다. 그리고 그 모달이 떠 있는 동안 컴포저는 키를 안 받으므로,
-    ///   Q4·Q5 는 아무 에코도 못 받고 죽는다(실제로 그렇게 죽었고, 그 시체가 이 필드의 근거다).
-    /// ★그래서 「실 홈이 이미 갖고 있는 답」을 그대로 적어 준다★: 개발자의 실 `config.toml` 에는
-    ///   `[windows] sandbox = "unelevated"` 가 이미 들어 있어 그 모달이 안 뜬다. 운영 스폰이 만나는 것도
-    ///   그 홈이므로, 이걸 적는 것은 관측을 꾸미는 것이 아니라 **운영과 같은 조건으로 맞추는 것**이다.
-    ///   ★단 폴더 신뢰 항목(`[projects.*]`)은 적지 않는다★ — 그 모달은 지나가는 것이 Q4·Q5·Q8 의 관측 대상이다.
+    /// ★Why it is needed — measured 2026-09-07★: starting codex 0.153.4 with an empty home shows
+    ///   **one more modal after** the folder-trust modal (`Set up the Codex agent sandbox …`).
+    ///   Its default choice is `1. Set up default sandbox (requires Administrator permissions)`,
+    ///   ★a screen an automated test must never pass with CR★ — passing it requests an
+    ///   elevation. And while it is up the composer takes no keys, so Q4·Q5 get no echo and die
+    ///   (they really did; that failure is this field's evidence).
+    /// ★So we write "the answer the real home already has"★: the developer's real
+    ///   `config.toml` already holds `[windows] sandbox = "unelevated"`, so that
+    ///   modal does not appear. Production spawns meet that same home, so writing it
+    ///   does not dress up the observation — it **matches production conditions**.
+    ///   ★But no folder-trust entry (`[projects.*]`) is written★ — that modal is a
+    ///   screen production's first-visit tab really meets, so passing it is part of
+    ///   what is observed, and the entry's key is chosen by the CLI itself (measured
+    ///   0.163.0: not the `C:\Users\<user>~1\…` we pass but **the lower-case long path
+    ///   of the repo root**, `c:\users\<user>\…`). Pre-writing it would make this file
+    ///   mimic that normalization and need fixing every time the CLI changes it.
     seed_writes: &'static [(&'static str, &'static str)],
+    /// Whether the temp home holds the **folder-trust decision** for
+    /// `workspace` — if so, that entry as one human-readable line.
+    ///
+    /// ★Why it is needed★: the startup verb ([`PtySession::pass_startup_modal`]) presses
+    ///   CR without reading the modal's wording. So whether the screen passed with CR
+    ///   **really was the folder-trust modal** can only be checked by its result — did a
+    ///   trust entry appear. Searching the files for the path text (`find_text_under`)
+    ///   does not do — it also matches when a warning screen logs that path.
+    trusted_entry: fn(home: &Path, workspace: &Path) -> Option<String>,
 }
 
 struct BackendRow {
@@ -396,27 +440,44 @@ fn backend_table() -> Vec<BackendRow> {
                 home_redirect: Some(HomeRedirect {
                     env: "CODEX_HOME",
                     default_subdir: ".codex",
-                    // 인증 하나면 로그인 상태가 따라온다(실측: 이 파일만 복사한 빈 홈에서
-                    // `codex login status` = `Logged in using ChatGPT`). `version.json` 은 자동 업데이트
-                    // 확인 기록이라, 같이 옮겨 두면 항목마다 새 홈을 파도 업데이트 검사가 다시 안 돈다.
-                    seed_files: &["auth.json", "version.json"],
-                    // 실 홈의 `[windows] sandbox` 값 그대로. 이게 없으면 신뢰 모달 뒤에 관리자 권한을 묻는
-                    // sandbox 설치 모달이 따라온다(실측 — 위 필드 주석).
-                    seed_writes: &[("config.toml", "[windows]\nsandbox = \"unelevated\"\n")],
+                    // Auth alone brings the logged-in state with it
+                    // (measured: in an empty home with only this file copied,
+                    // `codex login status` = `Logged in using ChatGPT`).
+                    // ★`version.json` is not copied★ — if it names a newer release than the
+                    // installed one, 0.163.0 shows an update modal right at start (measured: a
+                    // home with `latest_version` set to 99.0.0 =
+                    // `1. Update now (runs npm install -g @openai/codex)` as the default choice
+                    // · cursor hidden). A CR on that screen runs a global `npm install`.
+                    seed_files: &["auth.json"],
+                    // `check_for_update_on_startup = false` turns off the update check and
+                    // its modal (measured 0.163.0: even with a `version.json` naming 99.0.0
+                    // no modal appears and the composer comes straight up · without that
+                    // file none is created). `[windows] sandbox` is the real home's value
+                    // as-is — without it a sandbox-setup modal asking for administrator
+                    // rights follows the trust modal (measured — see the field doc).
+                    seed_writes: &[(
+                        "config.toml",
+                        "check_for_update_on_startup = false\n\n[windows]\nsandbox = \"unelevated\"\n",
+                    )],
+                    trusted_entry: codex_trusted_entry,
                 }),
                 session_id_flag: None,
                 submit_body: "say OK",
                 multiline_parts: &["hi", "there"],
-                // 폴더 신뢰 확인 모달(실측 codex-cli 0.153.4). 줄바꿈에 걸리지 않게 짧게 집는다.
-                startup_modal_marker: Some("Do you trust"),
                 composer_idle_marker: Some("Ask Codex to do anything"),
-                // 머리 상자의 작업 루트 줄(실측 0.153.4: `directory: ~\…\<leaf>`). ★TUI 는 폭에 맞춰
-                // 경로를 줄이므로 Q12 는 **짧은 leaf 이름 + 넓은 PTY** 로 잰다★ — 80 열에서는 이 줄이
-                // 앞을 `…` 로 잘라 낸다(실측 Q8 화면 덤프).
-                workspace_line_marker: Some("directory:"),
-                // 실측 0.153.4 — 두 모드의 DEC private mode 집합이 **완전히 같고** 어느 쪽도 alt-screen
-                // 진입 시퀀스를 안 낸다. 즉 이 버전의 TUI 는 플래그 없이도 inline 이다.
-                no_alt_screen_changes_bytes: false,
+                // Measured 0.163.0 — once the session is up it announces `state=idle`
+                // via OSC 7501 (both alt-screen and `--no-alt-screen`). Not while the
+                // trust modal is up; it comes after the modal is accepted.
+                ready_signal: Some(b"\x1b]7501;state=idle"),
+                // The working-root path is printed in the header box and the bottom
+                // line (measured 0.163.0). ★The TUI shortens paths to fit the width, so
+                // Q12 measures with **a short leaf name + a wide PTY**★ — at 80 columns
+                // the front is cut to `…` (measured on a 0.153.4 Q8 screen dump).
+                shows_workspace_root: true,
+                // Measured 0.163.0 — the default mode emits alt-screen entry
+                // (`?1049h`) and mouse tracking (`?1003;1006h`), and `--no-alt-screen`
+                // emits neither. So without the flag this version's TUI is alt-screen.
+                no_alt_screen_changes_bytes: true,
             }),
         },
     ]
@@ -610,6 +671,86 @@ fn every_pipe_channel_declares_an_output_decoder_and_a_non_raw_encoder() {
     }
 }
 
+// ── Trust-record check (no process — runs in CI) ─────────────────────────────
+
+/// The workspace the trust-record fixtures below point at, in the long form the caller passes.
+const TRUST_WORKSPACE: &str = r"C:\Work\Root-1234";
+
+/// A `config.toml` with an unrelated key and table ahead of `projects`, as a real temp home has.
+fn trust_config(projects: &str) -> String {
+    format!(
+        "check_for_update_on_startup = false\n\n[windows]\nsandbox = \"unelevated\"\n\n{projects}"
+    )
+}
+
+/// The shape codex 0.163.0 writes (measured): literal-string key, lower-case long path.
+#[test]
+fn trust_record_is_read_from_the_table_codex_writes() {
+    let literal = trust_config("[projects.'c:\\work\\root-1234']\ntrust_level = \"trusted\"\n");
+    assert_eq!(
+        codex_trust_record(&literal, TRUST_WORKSPACE).as_deref(),
+        Some("[projects.'c:\\work\\root-1234']")
+    );
+}
+
+/// The double-quoted key form TOML also allows for the same table. Never seen codex write it —
+/// the check accepts it because it names the same key.
+#[test]
+fn trust_record_is_also_read_from_a_double_quoted_key() {
+    let basic = trust_config("[projects.\"c:\\\\work\\\\root-1234\"]\ntrust_level = \"trusted\"\n");
+    assert_eq!(
+        codex_trust_record(&basic, TRUST_WORKSPACE).as_deref(),
+        Some("[projects.\"c:\\\\work\\\\root-1234\"]")
+    );
+}
+
+/// (a) the CR was accepted but no trust record appeared.
+#[test]
+fn no_trust_record_is_none() {
+    assert_eq!(codex_trust_record(&trust_config(""), TRUST_WORKSPACE), None);
+    assert_eq!(codex_trust_record("", TRUST_WORKSPACE), None);
+}
+
+/// (b) a record exists, but for another folder — a sibling, the parent or a child.
+#[test]
+fn trust_record_for_another_folder_is_none() {
+    for other in [r"c:\work\away-1234", r"c:\work", r"c:\work\root-1234\sub"] {
+        let config = trust_config(&format!(
+            "[projects.'{other}']\ntrust_level = \"trusted\"\n"
+        ));
+        assert_eq!(
+            codex_trust_record(&config, TRUST_WORKSPACE),
+            None,
+            "a record for `{other}` was taken as the workspace's"
+        );
+    }
+}
+
+/// (c) a record for the workspace exists, but with another value or in a shape this check
+/// does not read.
+#[test]
+fn trust_record_with_another_value_or_shape_is_none() {
+    // A root-level dotted key must come before any table header, so it cannot go through
+    // `trust_config` (whose `[windows]` table would own it).
+    let dotted = "projects.'c:\\work\\root-1234'.trust_level = \"trusted\"\n\n[windows]\nsandbox = \"unelevated\"\n";
+    assert_eq!(
+        codex_trust_record(dotted, TRUST_WORKSPACE),
+        None,
+        "taken as a trust record: {dotted:?}"
+    );
+    for projects in [
+        "[projects.'c:\\work\\root-1234']\ntrust_level = \"untrusted\"\n",
+        "[projects]\n'c:\\work\\root-1234' = { trust_level = \"trusted\" }\n",
+        "[projects.'c:\\work\\root-1234']\n[other]\ntrust_level = \"trusted\"\n",
+    ] {
+        assert_eq!(
+            codex_trust_record(&trust_config(projects), TRUST_WORKSPACE),
+            None,
+            "taken as a trust record: {projects:?}"
+        );
+    }
+}
+
 // ── 공용 하네스 ──────────────────────────────────────────────────────────────
 
 const FIRST_BYTES_TIMEOUT: Duration = Duration::from_secs(30);
@@ -624,8 +765,26 @@ const PRE_SUBMIT_WINDOW: Duration = Duration::from_secs(6);
 /// Q6 — 두 모드의 초기 출력을 모으는 창.
 const CAPTURE_WINDOW: Duration = Duration::from_secs(8);
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(60);
-/// 시작 모달이 화면에 나타나기를 기다리는 상한.
-const MODAL_TIMEOUT: Duration = Duration::from_secs(20);
+/// Budget for getting past the startup screen (loading · modal) until the composer takes
+/// keys; probes repeat within it. ★Not a hard cap★ — it is checked only at the head of
+/// each round, and a round already started (probe windows · waiting for quiet · the
+/// post-CR trust-record wait) runs to its end, so a run can overrun it (~54 s observed).
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(45);
+/// Window in which one probe waits for its echo, and then for the idle
+/// hint to reappear. Missing it is not a failure, just the next probe.
+const PROBE_WINDOW: Duration = Duration::from_secs(2);
+/// Probe characters asking whether the composer takes keys. ★Not hex characters★ — they cannot
+/// collide with a temp path (uuid) on screen. ★No digits★ — in a list modal a digit selects that
+/// numbered choice (trust modal `1. … 2. …`).
+const COMPOSER_PROBE: &str = "xz";
+/// After the startup verb sends its CR, the limit for its result (the folder-trust entry) to be
+/// written into the temp home.
+const TRUST_RECORD_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long [`Scratch`]'s `Drop` keeps retrying the removal —
+/// the same value as Q10's limit for "the tree empties".
+const SCRATCH_REMOVE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Byte limit of a Unix socket path — `sockaddr_un.sun_path`'s 108 bytes minus the trailing NUL.
+const SOCKET_PATH_MAX: usize = 107;
 /// 모달을 지난 뒤 컴포저가 그려지기를 기다리는 상한.
 const COMPOSER_TIMEOUT: Duration = Duration::from_secs(25);
 /// Q4 · Q5 — 넣은 본문이 컴포저에 에코되기를 기다리는 상한. ★고정 sleep 이 아니라 재시도인 이유★:
@@ -979,7 +1138,7 @@ fn record_version_once(row: &BackendRow) {
         .expect("실 프로브가 없는 행에 버전을 물었다");
     // **임시 홈으로 돌려서** 묻는다 — 업데이트 확인 기록을 실 홈에 남기지 않기 위해서다.
     let cwd = Scratch::new("version");
-    let (_home, env) = sandbox_home(probe, "version");
+    let (_home, env) = sandbox_home(probe, "version", HomeUse::PrintAndExit);
     let spec = harnessed_spec(row, cwd.path(), &env, &["--version"]);
     let ver = run_capture(
         &spec.program,
@@ -998,6 +1157,21 @@ fn record_version_once(row: &BackendRow) {
     println!("[version] {} = {version} (운영 argv 로 물음)", row.name);
 }
 
+/// What the CLI will do with a temp home — decides whether [`Scratch::new_home`]
+/// enforces the socket-path limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HomeUse {
+    /// May start the TUI/app-server, which opens a Unix socket under the home. Every spawn not
+    /// known to be print-only uses this.
+    Session,
+    /// `--version` only — assumed to print and exit without starting the app-server.
+    /// ★Unmeasured★. If it does open the socket, an over-limit home path skips the clear
+    /// socket-limit panic; if codex then fails, that shows up only as [`record_version_once`]'s
+    /// generic "did not report a version" panic (exit code not 0 or empty output), in the first
+    /// item of the run to reach it — later items skip the version probe.
+    PrintAndExit,
+}
+
 /// 임시 폴더 한 칸. ★`Drop` 이 지운다★ — 단언이 패닉으로 끊겨도 남지 않는다.
 ///
 /// ★왜 함수 끝에서 지우는 한 줄로는 안 되나★: 이 파일의 단언은 **실패할 목적**으로 있고, 실패는
@@ -1005,6 +1179,8 @@ fn record_version_once(row: &BackendRow) {
 ///   실 홈에서 복사한 인증 파일이 들어가므로 그 누수는 자격증명 누수이기도 하다.
 struct Scratch {
     path: PathBuf,
+    /// Credentials copied into this folder — `Drop` deletes them before the folder.
+    secrets: Vec<PathBuf>,
 }
 
 impl Scratch {
@@ -1015,17 +1191,48 @@ impl Scratch {
         let path =
             std::env::temp_dir().join(format!("engram-backend-contract-{tag}-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&path).expect("임시 폴더 생성 실패");
-        Scratch { path }
+        Scratch {
+            path,
+            secrets: Vec::new(),
+        }
     }
 
-    /// 테스트 홈은 시스템 temp 아래에 두지 않는다 — codex 0.153.4 는 그 자리를 홈으로 받으면 sandbox
-    /// 헬퍼 생성을 거부하고 경고를 찍는다(실측). `CARGO_TARGET_TMPDIR` = cargo 가 통합 테스트에 주는
-    /// `target/tmp` 라 gitignore 안이고 temp 밖이다.
-    fn new_home(tag: &str) -> Scratch {
-        let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-            .join(format!("backend-contract-home-{tag}-{}", Uuid::new_v4()));
+    /// The test home is never placed under the system temp dir — codex 0.153.4 refuses to
+    /// create its sandbox helper when its home is there and prints a warning (measured).
+    /// ★The path is kept short★ — codex 0.163.0 opens a Unix socket at
+    /// `app-server-control\app-server-control.sock` under its home; if that path exceeds 108 bytes
+    /// (SUN_LEN) the app-server cannot start and neither does codex (measured — the old
+    /// `target/tmp/backend-contract-home-<tag>-<uuid>` gave a 152-char socket path).
+    /// So the home goes to `%LOCALAPPDATA%\ebc\<tag>-<8 chars>` — the parent of temp
+    /// (`%LOCALAPPDATA%\Temp`), hence outside it. On an OS without that variable it is
+    /// `CARGO_TARGET_TMPDIR` (= `target/tmp`).
+    ///
+    /// Panics when `use_` is [`HomeUse::Session`] and the socket path would exceed
+    /// [`SOCKET_PATH_MAX`] — such a home would make codex fail to start.
+    fn new_home(tag: &str, use_: HomeUse) -> Scratch {
+        let root = std::env::var_os("LOCALAPPDATA")
+            .map(|dir| PathBuf::from(dir).join("ebc"))
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_TARGET_TMPDIR")));
+        let id = Uuid::new_v4().simple().to_string();
+        let path = root.join(format!("{tag}-{}", &id[..8]));
+        if use_ == HomeUse::Session {
+            let socket = path
+                .join("app-server-control")
+                .join("app-server-control.sock");
+            let socket_len = socket.as_os_str().len();
+            assert!(
+                socket_len <= SOCKET_PATH_MAX,
+                "temp home is too long — codex's app-server socket path `{}` is {socket_len} bytes, over \
+                 the {SOCKET_PATH_MAX}-byte limit (SUN_LEN 108 minus the trailing NUL). codex would not \
+                 start from this home",
+                socket.display()
+            );
+        }
         std::fs::create_dir_all(&path).expect("임시 홈 생성 실패");
-        Scratch { path }
+        Scratch {
+            path,
+            secrets: Vec::new(),
+        }
     }
 
     fn path(&self) -> &Path {
@@ -1035,25 +1242,51 @@ impl Scratch {
     /// Q8 이 재는 축(cwd 가 git repo 인가)을 다른 질문에 섞지 않으려고, Q8 을 뺀 나머지는 **git repo 인**
     /// 임시 폴더에서 돈다.
     fn git_init(self) -> Scratch {
-        let init = run_capture(
-            "git",
-            &["init".to_string(), "-q".to_string()],
-            &[],
-            &self.path,
-            PROCESS_TIMEOUT,
-        );
-        assert_eq!(
-            init.exit_code,
-            Some(0),
-            "임시 git repo 초기화 실패: {init:?}"
-        );
+        git_init_at(&self.path);
         self
     }
 }
 
+fn git_init_at(dir: &Path) {
+    let init = run_capture(
+        "git",
+        &["init".to_string(), "-q".to_string()],
+        &[],
+        dir,
+        PROCESS_TIMEOUT,
+    );
+    assert_eq!(
+        init.exit_code,
+        Some(0),
+        "임시 git repo 초기화 실패: {init:?}"
+    );
+}
+
 impl Drop for Scratch {
+    /// ★Credential copies go first, and removal is retried up to a limit★: right after
+    /// teardown a grandchild process still holds files in the home, so
+    /// `remove_dir_all` stops midway and leaves the folder half there (measured
+    /// 0.163.0: Q6's temp home stayed behind with its `auth.json`). Whatever is still
+    /// left is not passed over silently — its path is printed, for a person to delete.
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
+        let cleared = wait_until(SCRATCH_REMOVE_TIMEOUT, || {
+            for f in &self.secrets {
+                let _ = std::fs::remove_file(f);
+            }
+            let _ = std::fs::remove_dir_all(&self.path);
+            !self.path.exists()
+        });
+        if !cleared {
+            let left: Vec<&PathBuf> = self.secrets.iter().filter(|f| f.exists()).collect();
+            // Not `eprintln!` — libtest captures that and discards it when the test passes,
+            // which is exactly when a leftover credential copy would go unreported.
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "[scratch] could not remove the temp folder within {SCRATCH_REMOVE_TIMEOUT:?}: {} · \
+                 credential copies left: {left:?} — delete them by hand",
+                self.path.display()
+            );
+        }
     }
 }
 
@@ -1075,20 +1308,32 @@ fn real_home(redirect: &HomeRedirect) -> Option<PathBuf> {
         .filter(|p| p.is_dir())
 }
 
-fn sandbox_home(probe: &LiveProbe, tag: &str) -> (Option<Scratch>, Vec<(String, String)>) {
+fn sandbox_home(
+    probe: &LiveProbe,
+    tag: &str,
+    use_: HomeUse,
+) -> (Option<Scratch>, Vec<(String, String)>) {
     let Some(redirect) = probe.home_redirect.as_ref() else {
         return (None, Vec::new());
     };
 
-    let home = Scratch::new_home(tag);
+    let mut home = Scratch::new_home(tag, use_);
 
-    if let Some(real) = real_home(redirect) {
-        for f in redirect.seed_files {
-            let from = real.join(f);
-            if from.is_file() {
-                let _ = std::fs::copy(&from, home.path().join(f));
-            }
-        }
+    // ★If even one seed file cannot be copied, stop before spawning★ — started without it, the CLI
+    //   shows a login screen first, a screen the startup verb could press CR on
+    //   ([`HomeRedirect::seed_files`]).
+    let real = real_home(redirect).unwrap_or_else(|| {
+        panic!(
+            "실 사용자 상태 디렉터리(`{}` 또는 ~/{})가 없다 — 임시 홈에 옮길 인증이 없다",
+            redirect.env, redirect.default_subdir
+        )
+    });
+    for f in redirect.seed_files {
+        let to = home.path().join(f);
+        // Registered **before** the attempt, so a half-failed copy's remains are deleted too.
+        home.secrets.push(to.clone());
+        std::fs::copy(real.join(f), &to)
+            .unwrap_or_else(|e| panic!("임시 홈에 `{f}` 를 못 옮겼다({e}) — 띄우지 않는다"));
     }
     // 복사보다 나중이라 같은 이름이면 이쪽이 이긴다.
     for (name, body) in redirect.seed_writes {
@@ -1102,16 +1347,113 @@ fn sandbox_home(probe: &LiveProbe, tag: &str) -> (Option<Scratch>, Vec<(String, 
     (Some(home), env)
 }
 
-/// 시작 모달을 지나려 한 결과. ★`bool` 이 아닌 이유★: 「안 떴다」와 「이 백엔드엔 그런 모달이 없다」는
-/// 같은 값이 아니다 — 앞쪽은 그 질문의 전제가 흔들린 것이고 뒤쪽은 애초에 물을 것이 없는 것이다.
+/// codex's folder-trust record for `workspace` in the temp home's `config.toml`
+/// ([`HomeRedirect::trusted_entry`]). Reads the file and resolves `workspace`
+/// to its long canonical form, then defers to [`codex_trust_record`]. `None`
+/// also when the file or the folder cannot be read.
+fn codex_trusted_entry(home: &Path, workspace: &Path) -> Option<String> {
+    let config = std::fs::read_to_string(home.join("config.toml")).ok()?;
+    let workspace = dunce::canonicalize(workspace).ok()?;
+    codex_trust_record(&config, &workspace.to_string_lossy())
+}
+
+/// The header line of the `[projects.'<path>']` table in `config` whose path equals `workspace` and
+/// that holds `trust_level = "trusted"`; `None` when there is no such table.
+///
+/// ★Paths are compared case-insensitively★ — 0.163.0 writes the lower-case long path
+///   (`c:\users\<user>\…`), not the 8.3 short form we pass (`C:\Users\<user>~1\…`) (measured). The
+///   caller passes the long form.
+/// ★Only this one shape is read★ (the shape 0.163.0 writes — measured). A version that writes
+///   another shape yields `None`, so the startup verb stops loudly instead of passing silently.
+fn codex_trust_record(config: &str, workspace: &str) -> Option<String> {
+    let want = workspace.to_lowercase();
+    let project_key = |head: &str| -> Option<String> {
+        let inner = head.strip_prefix("[projects.")?.strip_suffix(']')?;
+        if let Some(literal) = inner.strip_prefix('\'').and_then(|k| k.strip_suffix('\'')) {
+            return Some(literal.to_string());
+        }
+        let basic = inner.strip_prefix('"').and_then(|k| k.strip_suffix('"'))?;
+        Some(basic.replace("\\\\", "\\"))
+    };
+    let mut table: Option<&str> = None;
+    for line in config.lines().map(str::trim) {
+        if line.starts_with('[') {
+            table = project_key(line)
+                .filter(|k| k.to_lowercase() == want)
+                .map(|_| line);
+            continue;
+        }
+        if let Some(head) = table {
+            if line.replace(' ', "") == "trust_level=\"trusted\"" {
+                return Some(head.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Result of trying to get past the startup screen. ★Why not a `bool`★: "there
+/// was no modal" and "this backend has no way to ask" are not the same value —
+/// the first is an observation, the second means there was nothing to ask.
+/// ★Whether the composer came up is not here★ — [`Startup::composer`] holds that.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModalOutcome {
-    /// 표에 모달 표식이 없는 백엔드.
+    /// The table has no idle composer hint for this backend —
+    /// no signal to build a probe on, so no key was sent.
     NotDeclared,
-    /// 표식은 있는데 상한 안에 화면에 안 나타났다.
+    /// No CR was sent — no screen covering the composer was seen.
     NotShown,
-    /// 떠 있었고, 기본 선택으로 지나갔다.
+    /// A screen covered the composer, one CR picked its default choice, and
+    /// as a result a folder-trust entry was written into the temp home.
     Passed,
+}
+
+/// The signal **still missing last** when the startup verb did not reach the composer in
+/// time — lets the failure text say where it stopped instead of lumping it into "no composer".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupStall {
+    /// The startup-done signal ([`LiveProbe::ready_signal`]) never came — loading did not finish,
+    /// an unknown screen is covering, or the CLI may have stopped emitting the ready signal.
+    NoReadySignal,
+    /// The probe characters were not echoed — keys do not reach the composer.
+    NoProbeEcho,
+    /// Echoed, but after erasing them the idle composer hint was not drawn again.
+    NoRedraw,
+}
+
+impl StartupStall {
+    fn describe(self, idle_marker: &str) -> String {
+        match self {
+            StartupStall::NoReadySignal => "the startup-done signal never came (loading did not \
+                 finish, an unknown screen is covering, or the CLI may have stopped emitting the \
+                 ready signal)"
+                .to_string(),
+            StartupStall::NoProbeEcho => {
+                "the probe characters were not echoed (keys do not reach the composer)".to_string()
+            }
+            StartupStall::NoRedraw => format!(
+                "the probe characters were echoed, but after erasing them the idle composer hint \
+                 (`{idle_marker}`) was not drawn again"
+            ),
+        }
+    }
+}
+
+/// The result of [`PtySession::pass_startup_modal`].
+struct Startup {
+    outcome: ModalOutcome,
+    /// Where the output **without** the consumed modal starts — the accumulated length right before
+    /// the CR if one was sent, else 0. The modal's text also contains the workspace path (measured
+    /// 0.163.0), so matching the workspace folder on screen looks only past this point (Q12).
+    settled_from: usize,
+    /// `Ok` = the composer took keys; the value is the accumulated length right
+    /// before the passing probe wrote its erasure (after it the idle composer
+    /// hint was drawn again). `Err` = not reached in time. When the table has
+    /// no composer hint (`NotDeclared`) it is the end position at that moment.
+    composer: Result<usize, StartupStall>,
+    /// The folder-trust entry that appeared in the temp home after the CR
+    /// ([`HomeRedirect::trusted_entry`]).
+    trust_entry: Option<String>,
 }
 
 /// 실 PTY 위의 한 화신. `Drop` 이 teardown 을 진다 — 단언이 패닉으로 끊겨도 자식이 남지 않는다.
@@ -1197,30 +1539,138 @@ impl PtySession {
         wait_until(timeout, || mentions(&self.tail_text(from), needle))
     }
 
-    /// 시작 모달이 떠 있으면 **기본 선택으로 한 번 지나간다**.
+    /// Goes past the startup screen (loading · first-visit modal) **until the composer
+    /// takes keys**. If a modal is up, it is passed once with its default choice.
     ///
-    /// ★추측이 아니다★: codex 0.153.4 의 폴더 신뢰 모달은 화면에 `1. Yes, continue` 를 선택해 두고
-    ///   `Press enter to continue` 라고 직접 적는다(실측). 그래서 CR 하나가 그 모달의 문서화된 조작이다.
-    /// ★대가★: 그 선택은 그 CLI 의 설정 파일에 폴더 신뢰 항목을 남긴다 — 그래서 이 동사를 쓰는 항목은
-    ///   전부 [`sandbox_home`] 이 판 임시 홈으로 돌려 놓고 부른다. 실 사용자 설정은 안 바뀐다.
+    /// ★The modal's wording is never read★: it changed across versions (0.153.4 `Do you trust …`
+    ///   → 0.163.0 `Trust this folder?`) — relying on it would turn this harness red on every
+    ///   update and make a person fix the marker. So only three wording-free signals are used.
+    ///   ① **Is startup over** = [`LiveProbe::ready_signal`]. ★The probe alone
+    ///      cannot tell this★ — the composer takes keys even while loading, and
+    ///      the trust modal appears **after** loading ends (measured 0.163.0: the
+    ///      modal came up after the probe had passed, and Q4's body went into it).
+    ///   ② **Does the composer take keys** = type the probe characters
+    ///      ([`COMPOSER_PROBE`]), see the echo, and check that the idle composer hint is
+    ///      drawn again **after** erasing them. A modal does not draw those characters
+    ///      into the composer, so this holds only when the composer is in front.
+    ///   ③ **Is something covering the composer** = the screen went quiet
+    ///      with the cursor hidden. Measured 0.163.0: loading · composer =
+    ///      cursor shown (`?25h`), folder-trust modal = hidden (`?25l`).
+    /// When ③ holds a CR is sent — the folder-trust modal's default choice is to accept
+    ///   (measured 0.153.4 `1. Yes, continue` · 0.163.0 `1. Trust and continue`). After
+    ///   it, ① is looked for again **in the output after the CR**.
     ///
-    /// 반환의 둘째 칸 = **CR 을 쓴 직후의 누적 길이**. ★그 위치가 필요한 이유★: 이 TUI 는 모달을 컴포저
-    /// **위에 겹쳐** 그리므로 빈 컴포저 안내가 모달보다 **먼저** 화면에 있다(실측 — Q8 화면 덤프). 그 앞
-    /// 구간을 포함해 안내 문구를 찾으면 "모달을 지나서 컴포저가 섰다" 가 아니라 "모달 뒤에 가려진 컴포저를
-    /// 봤다" 가 되고, 그건 아무것도 안 묻는 판정이다.
-    fn pass_startup_modal(&self, marker: Option<&str>) -> (ModalOutcome, usize) {
-        let Some(marker) = marker else {
-            return (ModalOutcome::NotDeclared, self.sink.len());
+    /// ★What is guarded and what is not★ — the CR is pressed
+    /// **before the screen is recognised**. So:
+    /// - **Guarded (environment)**: the other cursor-hiding first screens we know of are kept
+    ///   from appearing in the temp home at all — the update modal
+    ///   (`check_for_update_on_startup = false` · `version.json` not copied), the administrator
+    ///   sandbox-setup modal (`[windows] sandbox`), the login screen (if the auth copy fails,
+    ///   nothing is spawned). Evidence = the two seed fields of [`HomeRedirect`].
+    /// - **Guarded (post-check)**: within [`TRUST_RECORD_TIMEOUT`] after the CR
+    ///   a folder-trust entry for `workspace` must appear in the temp home
+    ///   ([`HomeRedirect::trusted_entry`]). If not, the run stops right there
+    ///   and says so — every item that calls this verb goes through this check.
+    /// - **Only one CR** — a second covering screen gets no key. The composer does not come up and
+    ///   [`Startup::composer`] comes back `Err`.
+    /// - **Not guarded**: a first screen the environment does not block — the CLI
+    ///   showing a login screen because the copied auth expired, an update check
+    ///   re-enabled under another key, or any **new** screen — gets the CR, and whatever
+    ///   its default choice runs has already happened with that CR. The post-check
+    ///   reports it (stops the run and prints the screen) but cannot undo it.
+    /// ★Cost★: that choice leaves a folder-trust entry in the CLI's config file — so the CR is
+    ///   sent only when there is a temp home (`home`). The real user config is never changed.
+    ///
+    /// `workspace` = the folder the CLI will use as its working root (= the folder
+    /// the trust entry must point at). It can differ from the process cwd (Q12).
+    ///
+    /// Why the position in [`Startup::composer`] is needed: this TUI draws the modal
+    /// **over** the composer, so the idle composer hint is on screen **before** the
+    /// modal (measured on a 0.153.4 Q8 screen dump). Searching for the hint including
+    /// that earlier stretch would mean "saw the composer hidden behind the modal",
+    /// not "passed the modal and the composer came up" — a check that asks nothing.
+    fn pass_startup_modal(
+        &self,
+        probe: &LiveProbe,
+        home: Option<&Scratch>,
+        workspace: &Path,
+    ) -> Startup {
+        let mut startup = Startup {
+            outcome: ModalOutcome::NotDeclared,
+            settled_from: 0,
+            composer: Ok(self.sink.len()),
+            trust_entry: None,
         };
-        // ★한 번 보고 마는 대신 기다린다★: 모달은 첫 프레임에 안 나오는 경우가 있고, 그것을 "안 떴다" 로
-        //   읽으면 그 뒤 질문 전체가 모달 뒤에서 물어보는 꼴이 된다.
-        if !wait_until(MODAL_TIMEOUT, || mentions(&self.screen(), marker)) {
-            return (ModalOutcome::NotShown, self.sink.len());
+        let Some(marker) = probe.composer_idle_marker else {
+            return startup;
+        };
+        startup.outcome = ModalOutcome::NotShown;
+        let deadline = Instant::now() + STARTUP_TIMEOUT;
+        let mut stall = StartupStall::NoReadySignal;
+        while Instant::now() < deadline {
+            let ready = probe
+                .ready_signal
+                .is_none_or(|sig| contains_seq(&self.sink.tail_from(startup.settled_from), sig));
+            if ready {
+                match self.probe_composer(marker) {
+                    Ok(erase_at) => {
+                        startup.composer = Ok(erase_at);
+                        return startup;
+                    }
+                    Err(missing) => stall = missing,
+                }
+            } else {
+                stall = StartupStall::NoReadySignal;
+            }
+            self.wait_quiet();
+            if startup.outcome == ModalOutcome::NotShown && cursor_hidden(&self.sink.snapshot()) {
+                let (redirect, home) = probe.home_redirect.as_ref().zip(home).expect(
+                    "임시 홈 없이 시작 화면에 CR 을 보낼 수 없다 — 수락한 화면을 확인할 길이 없다",
+                );
+                startup.settled_from = self.sink.len();
+                self.write(b"\r");
+                startup.outcome = ModalOutcome::Passed;
+                wait_until(TRUST_RECORD_TIMEOUT, || {
+                    startup.trust_entry = (redirect.trusted_entry)(home.path(), workspace);
+                    startup.trust_entry.is_some()
+                });
+                assert!(
+                    startup.trust_entry.is_some(),
+                    "sent a CR to a screen that hid the cursor, but within {TRUST_RECORD_TIMEOUT:?} the temp \
+                     home (`{}`) got no trust record for the workspace `{}`. One of three things happened: \
+                     (1) the screen was not the folder-trust modal — a person must check what its default \
+                     choice ran; (2) the CLI trusted a different folder; (3) the CLI wrote the record in a \
+                     shape `HomeRedirect::trusted_entry` does not read. Screen: {}",
+                    home.path().display(),
+                    workspace.display(),
+                    excerpt(&self.tail_text(0), 1200)
+                );
+                self.wait_quiet();
+            }
         }
-        self.write(b"\r");
-        let after_cr = self.sink.len();
-        self.wait_quiet();
-        (ModalOutcome::Passed, after_cr)
+        startup.composer = Err(stall);
+        startup
+    }
+
+    /// One probe — the accumulated length right before the erasure if the composer
+    /// took the keys, else the missing signal. ★The erasure is always sent, echo or
+    /// not★: if the echo arrives after the window, the characters stay in the
+    /// composer, the next probe's erasure falls short, and the hint never comes back.
+    fn probe_composer(&self, marker: &str) -> Result<usize, StartupStall> {
+        let typed_at = self.sink.len();
+        self.write(COMPOSER_PROBE.as_bytes());
+        let echoed = wait_until(PROBE_WINDOW, || {
+            mentions(&self.tail_text(typed_at), COMPOSER_PROBE)
+        });
+        let erase_at = self.sink.len();
+        self.write(&b"\x7f".repeat(COMPOSER_PROBE.len()));
+        if !echoed {
+            return Err(StartupStall::NoProbeEcho);
+        }
+        if !self.wait_for_text(erase_at, marker, PROBE_WINDOW) {
+            return Err(StartupStall::NoRedraw);
+        }
+        Ok(erase_at)
     }
 
     /// 실 TUI 는 뜬 뒤에도 한동안 다시 그린다. 첫 바이트만 보고 입력을 넣으면 컴포저가 아직 없을 수
@@ -1249,24 +1699,31 @@ impl Drop for PtySession {
     }
 }
 
-/// 모달을 지난 뒤 **컴포저가 실제로 설 때까지** 기다리고, 안 서면 그 자리에서 멈춘다. 반환 = 그 신호를
-/// 가진 백엔드면 `Some(true)`, 표에 신호가 없으면 `None`.
+/// Did the startup verb **reach the composer** — if not, stop right here, printing which signal was
+/// missing and the screen. No further waiting (the startup verb's budget already spent it). Returns
+/// `Some(true)` for a backend whose table has a composer hint, else `None`.
 ///
 /// ★컴포저를 묻기 전에 컴포저가 있는지부터 묻는다★: 안 그러면 키 입력은 컴포저가 아닌 무엇(다음 모달·
 ///   로딩 화면)으로 가고, 그때 나오는 "에코가 없다" 는 **이 질문의 답이 아니라 하네스의 오작동**인데 둘이
 ///   똑같이 빨갛다. 실제로 codex 는 빈 홈에서 모달을 하나 더 띄웠고, 그때 Q5 는 「조각이 컴포저에 안
 ///   보인다」고 — 즉 답을 아는 것처럼 — 죽었다. 이 게이트가 그 둘을 갈라 준다.
-fn wait_for_composer(s: &PtySession, probe: &LiveProbe, from: usize, name: &str) -> Option<bool> {
+fn assert_composer(
+    s: &PtySession,
+    probe: &LiveProbe,
+    startup: &Startup,
+    name: &str,
+) -> Option<bool> {
     let marker = probe.composer_idle_marker?;
-    let ready = s.wait_for_text(from, marker, COMPOSER_TIMEOUT);
-    assert!(
-        ready,
-        "{name}: 시작 모달을 지난 뒤 {COMPOSER_TIMEOUT:?} 안에 컴포저(`{marker}`)가 서지 않았다 — \
-         지금 화면에 있는 것은 컴포저가 아니다. 여기서 재는 것은 컴포저 계약이므로 그 위에 다른 화면이 \
-         떠 있으면 아래 판정은 전부 무의미하다: {}",
-        excerpt(&s.screen(), 1200)
-    );
-    Some(ready)
+    if let Err(missing) = startup.composer {
+        panic!(
+            "{name}: 시작 화면을 {STARTUP_TIMEOUT:?} 안에 못 지났다(모달={:?}) — {}. 여기서 재는 것은 컴포저 \
+             계약이므로 컴포저가 키를 안 받으면 아래 판정은 전부 무의미하다: {}",
+            startup.outcome,
+            missing.describe(marker),
+            excerpt(&s.screen(), 1200)
+        );
+    }
+    Some(true)
 }
 
 /// TUI 출력은 대부분 제어 시퀀스다. "무엇이 새로 왔나" 를 사람이 읽는 글자로만 재려면 먼저 뗀다.
@@ -1335,14 +1792,16 @@ fn flatten(text: &str) -> String {
 ///   에뮬레이터가 있어야 한다. 그래서 이 술어는 「같은 행」이 아니라 **「사이에 다른 것이 없다」**를 잰다.
 /// `haystack` 이 `needle` 을 말하나 — ★공백 배치를 무시하고 본다★. 표식 대조는 전부 이것을 쓴다.
 ///
-/// ★왜 [`flatten`] + `contains` 로는 부족한가 — 실측 2026-09-08★: 이 TUI 는 같은 문장을 **두 가지로**
-///   그린다. 한가할 땐 글자 사이에 진짜 공백을 넣어 쓰고, 부하가 걸리면 **단어마다 커서를 옮겨** 찍는다.
-///   뒤쪽에서는 제어 시퀀스를 걷어낸 텍스트에 공백이 아예 없어서(`Doyoutrustthecontents…`) 표식
-///   (`Do you trust`)이 어긋난다. 그러면 [`PtySession::pass_startup_modal`] 이 「모달이 안 떴다」로 읽고
-///   CR 을 안 보내며, 모달이 남은 화면에서 다음 질문이 「컴포저가 안 섰다」로 죽는다 —
-///   ★질문의 답이 아니라 하네스의 오작동인데 둘이 똑같이 빨갛다★. [`wait_for_composer`] 주석이 경고하던
-///   바로 그 함정이고, 실제로 빠졌다: 같은 레인이 어떤 판에서는 이 이유로 3 건이 죽고 어떤 판에서는 전부
-///   초록이었다(판마다 갈리는 축 = 그 판의 기계 부하).
+/// ★Why [`flatten`] + `contains` is not enough — measured 2026-09-08★: this TUI draws the
+///   same sentence **two ways**. When idle it writes real spaces between words; under load
+///   it **moves the cursor for each word**. In the latter the text left after stripping
+///   control sequences has no spaces at all (`Doyoutrustthecontents…`), so the marker
+///   (`Do you trust`) misses. Back when [`PtySession::pass_startup_modal`] found the modal
+///   by its wording, it then read "no modal", sent no CR, and the next question died on the
+///   screen the modal still held with "the composer never came up" — ★a harness malfunction,
+///   not the question's answer, yet both are the same red★. That is exactly the trap the
+///   [`assert_composer`] comment warned about, and we fell in: the same lane lost 3 items to
+///   it in one run and was all green in another (what varied between runs = machine load).
 /// ★공백을 빼도 표식이 무뎌지지 않는다★: 남는 것은 글자 순서 그대로라, 우연히 걸리려면 공백만 다른 같은
 ///   문장이어야 한다. [`contiguous_echo`] 가 이미 같은 이유로 `" "` 와 `""` 두 이음을 다 본다.
 fn mentions(haystack: &str, needle: &str) -> bool {
@@ -1382,6 +1841,15 @@ fn excerpt(text: &str, max: usize) -> String {
 
 fn contains_seq(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Did the output end with the cursor **hidden** — is the last DECTCEM (`ESC [ ? 25 h|l`) an `l`.
+fn cursor_hidden(raw: &[u8]) -> bool {
+    let last = |seq: &[u8]| raw.windows(seq.len()).rposition(|w| w == seq);
+    match (last(b"\x1b[?25l"), last(b"\x1b[?25h")) {
+        (Some(hide), Some(show)) => hide > show,
+        (hidden, _) => hidden.is_some(),
+    }
 }
 
 /// 출력에 든 DEC private mode set/reset(`ESC [ ? <params> <h|l>`) 전부, 중복 없이 나온 순서대로.
@@ -1469,7 +1937,7 @@ fn q1_comes_up_under_real_pty() {
         assert_program_present(&row);
 
         let cwd = Scratch::new("q1").git_init();
-        let (_home, env) = sandbox_home(probe, "q1");
+        let (_home, env) = sandbox_home(probe, "q1", HomeUse::Session);
         let mut s = PtySession::open(&harnessed_spec(&row, cwd.path(), &env, &[]), 80, 24);
         let started = Instant::now();
         let got = s.wait_first_bytes();
@@ -1503,7 +1971,7 @@ fn q2_stays_alive_after_first_output() {
         assert_program_present(&row);
 
         let cwd = Scratch::new("q2").git_init();
-        let (_home, env) = sandbox_home(probe, "q2");
+        let (_home, env) = sandbox_home(probe, "q2", HomeUse::Session);
         let mut s = PtySession::open(&harnessed_spec(&row, cwd.path(), &env, &[]), 80, 24);
         let got_first = s.wait_first_bytes();
         std::thread::sleep(ALIVE_WINDOW);
@@ -1538,7 +2006,7 @@ fn q3_non_tty_stdin_is_refused() {
         assert_program_present(&row);
 
         let cwd = Scratch::new("q3").git_init();
-        let (_home, env) = sandbox_home(probe, "q3");
+        let (_home, env) = sandbox_home(probe, "q3", HomeUse::Session);
         // ★운영 argv 그대로(정책 값만 무해하게) 묻는다★ — 이 질문의 축은 stdin 이지만, 그 답은 우리가
         //   실제로 띄우는 argv 아래서의 답이어야 한다.
         let spec = harnessed_spec(&row, cwd.path(), &env, &[]);
@@ -1602,12 +2070,13 @@ fn q4_body_pause_cr_reads_as_submit() {
         assert_program_present(&row);
 
         let cwd = Scratch::new("q4").git_init();
-        let (_home, env) = sandbox_home(probe, "q4");
+        let (home, env) = sandbox_home(probe, "q4", HomeUse::Session);
         let mut s = PtySession::open(&harnessed_spec(&row, cwd.path(), &env, &[]), 80, 24);
         assert!(s.wait_first_bytes(), "{}: 첫 바이트 없음", row.name);
         s.wait_quiet();
-        let (modal, after_modal) = s.pass_startup_modal(probe.startup_modal_marker);
-        let composer = wait_for_composer(&s, probe, after_modal, row.name);
+        let startup = s.pass_startup_modal(probe, home.as_ref(), cwd.path());
+        let modal = startup.outcome;
+        let composer = assert_composer(&s, probe, &startup, row.name);
 
         // TUI 는 입력이 없어도 다시 그린다. 그 바닥 소음을 먼저 재 둔다 — **단언 기준이 아니다**(아래 판정은
         // 「컴포저가 비었나」로 선다). 보고서가 "이 관측이 얼마나 흔들리는 값인가" 를 말하게 하는 숫자다.
@@ -1689,12 +2158,13 @@ fn q5_multiline_body_enters_whole() {
         let body = probe.multiline_parts.join("\n");
 
         let cwd = Scratch::new("q5").git_init();
-        let (_home, env) = sandbox_home(probe, "q5");
+        let (home, env) = sandbox_home(probe, "q5", HomeUse::Session);
         let mut s = PtySession::open(&harnessed_spec(&row, cwd.path(), &env, &[]), 80, 24);
         assert!(s.wait_first_bytes(), "{}: 첫 바이트 없음", row.name);
         s.wait_quiet();
-        let (modal, after_modal) = s.pass_startup_modal(probe.startup_modal_marker);
-        let composer = wait_for_composer(&s, probe, after_modal, row.name);
+        let startup = s.pass_startup_modal(probe, home.as_ref(), cwd.path());
+        let modal = startup.outcome;
+        let composer = assert_composer(&s, probe, &startup, row.name);
 
         // ★CR 을 보내지 않는다★: 본문에 든 LF 만으로 제출이 일어나는지가 이 질문이다.
         let mark = s.sink.len();
@@ -1807,11 +2277,16 @@ fn q6_no_alt_screen_changes_the_bytes() {
         let mut seen: Vec<(bool, Vec<String>, usize, ModalOutcome)> = Vec::new();
         for extra in [Vec::new(), vec![flag]] {
             let cwd = Scratch::new("q6").git_init();
-            let (_home, env) = sandbox_home(probe, "q6");
+            let (home, env) = sandbox_home(probe, "q6", HomeUse::Session);
             let mut s = PtySession::open(&harnessed_spec(&row, cwd.path(), &env, &extra), 80, 24);
             let got = s.wait_first_bytes();
             s.wait_quiet();
-            let (modal, _) = s.pass_startup_modal(probe.startup_modal_marker);
+            let startup = s.pass_startup_modal(probe, home.as_ref(), cwd.path());
+            let modal = startup.outcome;
+            // ★Both captures must have finished startup for the comparison
+            //   to hold★ — if one is captured still in loading or a modal,
+            //   that difference gets recorded as the effect of `{flag}`.
+            assert_composer(&s, probe, &startup, &format!("{} {extra:?}", row.name));
             std::thread::sleep(CAPTURE_WINDOW);
             let raw = s.sink.snapshot();
             s.teardown();
@@ -1880,22 +2355,23 @@ fn q8_non_git_cwd_is_accepted() {
             "임시 폴더가 git work tree 안이다 — Q8 의 전제가 성립하지 않는다: {inside:?}"
         );
 
-        let (_home, env) = sandbox_home(probe, "q8");
+        let (home, env) = sandbox_home(probe, "q8", HomeUse::Session);
         let mut s = PtySession::open(&harnessed_spec(&row, cwd.path(), &env, &[]), 80, 24);
         let got_first = s.wait_first_bytes();
         s.wait_quiet();
 
-        // ★여기가 이 항목의 전부다★: 처음 보는 폴더에는 신뢰 모달이 먼저 뜨고, 모달이 프로세스를 붙들고
-        //   있는 동안 "5초 뒤에도 Running" 은 **거짓일 수가 없다**. 그 상태로 재면 「codex 가 git repo 아닌
-        //   cwd 를 거부하지 않는다」는 반증 불가능한 주장이 되고, 이 게이트 행은 초록인 채로 아무것도 안
-        //   묻는다. 모달을 지나고 **컴포저가 실제로 섰는지**까지 봐야 cwd 정책을 물은 것이다.
-        let (modal, after_modal) = s.pass_startup_modal(probe.startup_modal_marker);
-        // ★`after_modal` 부터 센다★ — 모달은 컴포저 **위에** 겹쳐 뜨므로 그 앞 구간에 이미 빈 컴포저
-        //   안내가 그려져 있다(실측 화면 덤프). 거기서부터 찾으면 모달을 지나기 전에 그려진 것을 보고
-        //   "섰다" 고 말하게 된다.
-        let composer_ready = probe
-            .composer_idle_marker
-            .map(|m| s.wait_for_text(after_modal, m, COMPOSER_TIMEOUT));
+        // ★This is the whole item★: while a modal holds the process, "still Running after 5 s"
+        //   **cannot be false**. Measured in that state, "codex does not refuse a non-git cwd"
+        //   becomes an unfalsifiable claim and this gate row stays green while asking nothing.
+        //   Only checking **that the composer really takes keys** asks about the cwd policy.
+        // ★Acceptance has two shapes★ — the composer directly with no modal, or the composer
+        //   after the folder-trust modal (which version shows which: file header). A refusal or
+        //   warning screen must be neither: if the screen passed with CR was not the folder-trust
+        //   modal (no trust entry for this cwd appears in the temp home), the startup verb stops
+        //   right there, and if the composer is not reached the gate below stops.
+        let startup = s.pass_startup_modal(probe, home.as_ref(), cwd.path());
+        let modal = startup.outcome;
+        let composer_ready = probe.composer_idle_marker.map(|_| startup.composer);
 
         std::thread::sleep(ALIVE_WINDOW);
         let status = s.core.status();
@@ -1903,13 +2379,10 @@ fn q8_non_git_cwd_is_accepted() {
         s.teardown();
 
         println!(
-            "[Q8 {}] 첫 바이트={got_first} · 모달={modal:?} · 컴포저 기립={} · {ALIVE_WINDOW:?} 뒤 \
-             status={status:?}\n  화면: {}",
+            "[Q8 {}] 첫 바이트={got_first} · 모달={modal:?} · 컴포저={composer_ready:?} · 신뢰 항목={:?} · \
+             {ALIVE_WINDOW:?} 뒤 status={status:?}\n  화면: {}",
             row.name,
-            match composer_ready {
-                Some(v) => v.to_string(),
-                None => "표에 컴포저 표식 없음(★약한 판정★)".to_string(),
-            },
+            startup.trust_entry,
             excerpt(&screen, 1200)
         );
         assert!(
@@ -1917,24 +2390,13 @@ fn q8_non_git_cwd_is_accepted() {
             "{}: git repo 아닌 cwd 에서 아무 출력도 없다 — ★§3-5 게이트★",
             row.name
         );
-        if probe.startup_modal_marker.is_some() {
-            assert_ne!(
-                modal,
-                ModalOutcome::NotShown,
-                "{}: git repo 아닌 cwd 에서 {MODAL_TIMEOUT:?} 안에 아는 시작 모달이 안 떴다 — 이 폴더에서는 \
-                 **다른 화면**(거부·경고·다른 모달)이 떴다는 뜻이라 아래 판정을 그대로 쓸 수 없다. \
-                 사람이 화면을 읽고 표식을 갱신하거나 Q8 의 결론을 다시 써야 한다: {}",
+        if let (Some(Err(missing)), Some(marker)) = (composer_ready, probe.composer_idle_marker) {
+            panic!(
+                "{}: 시작 화면을 지나 컴포저가 키를 받지 않았다(모달={modal:?} · {}) — ★§3-5 게이트★ git repo \
+                 아닌 cwd 를 받아들이지 않았다는 뜻이다(거부·경고·모르는 모달). 우리 스폰 입구는 임의 \
+                 폴더를 받으므로 cwd 정책이 배선보다 먼저 결정돼야 한다: {}",
                 row.name,
-                excerpt(&screen, 800)
-            );
-        }
-        if let Some(ready) = composer_ready {
-            assert!(
-                ready,
-                "{}: 모달을 지났는데 {COMPOSER_TIMEOUT:?} 안에 컴포저가 서지 않았다 — ★§3-5 게이트★ \
-                 git repo 아닌 cwd 를 받아들이지 않았다는 뜻이다. 우리 스폰 입구는 임의 폴더를 받으므로 \
-                 cwd 정책이 배선보다 먼저 결정돼야 한다: {}",
-                row.name,
+                missing.describe(marker),
                 excerpt(&screen, 800)
             );
         }
@@ -1957,7 +2419,7 @@ fn q9_caller_cannot_choose_the_session_id() {
         assert_program_present(&row);
 
         let cwd = Scratch::new("q9");
-        let (_home, env) = sandbox_home(probe, "q9");
+        let (_home, env) = sandbox_home(probe, "q9", HomeUse::Session);
         // 운영 argv 에 `--help` 를 얹어 묻는다 — 도움말은 파싱 단계에서 단락하므로 앞 인자들이 그대로
         // 있어도 같은 텍스트가 나온다(실측 0.153.4). 이 파일이 그 CLI 를 부르는 길을 하나로 두는 값이다.
         let spec = harnessed_spec(&row, cwd.path(), &env, &["--help"]);
@@ -2018,7 +2480,7 @@ fn q10_shutdown_empties_the_process_tree() {
         assert_program_present(&row);
 
         let cwd = Scratch::new("q10").git_init();
-        let (_home, env) = sandbox_home(probe, "q10");
+        let (_home, env) = sandbox_home(probe, "q10", HomeUse::Session);
         let mut s = PtySession::open(&harnessed_spec(&row, cwd.path(), &env, &[]), 80, 24);
         assert!(s.wait_first_bytes(), "{}: 첫 바이트 없음", row.name);
         s.wait_quiet();
@@ -2107,7 +2569,7 @@ fn q11_production_argv_is_accepted_and_reaches_a_composer() {
         assert_program_present(&row);
 
         let cwd = Scratch::new("q11").git_init();
-        let (_home, env) = sandbox_home(probe, "q11");
+        let (home, env) = sandbox_home(probe, "q11", HomeUse::Session);
 
         // ★이 항목만 안전 스왑을 안 건다★ — 나머지 질문은 정책 칸을 무해한 것으로 덮어쓰고 뜨므로,
         //   「운영이 쓰는 그 값들을 실 CLI 가 받아들이나」를 묻는 자리는 여기뿐이다.
@@ -2130,28 +2592,31 @@ fn q11_production_argv_is_accepted_and_reaches_a_composer() {
             row.name, spec.program, spec.args
         );
 
-        // ★키를 하나도 안 넣는다 — 시작 모달의 CR 하나를 뺀다★. 모델 턴이 없으면 그 정책이 주는 쓰기
-        //   권한은 행사될 기회가 없고, 그것이 이 항목이 운영 정책 그대로 뜨면서도 무해한 유일한 이유다.
+        // ★No prompt is ever submitted★ — the only keys sent are the probe characters,
+        //   their erasure and one CR that pass the startup screen
+        //   ([`PtySession::pass_startup_modal`]). Without a model turn the write access
+        //   that policy grants never gets a chance to be used, and that is the only
+        //   reason this item is harmless while running the production policy as-is.
+        // ★That verb also carries the startup-path guarantee★ — if another first
+        //   screen appears under the production policy values, its post-CR check
+        //   (did a folder-trust entry for this cwd appear in the temp home) stops
+        //   the run. That is why this item has no modal assertion of its own.
         let mut s = PtySession::open(&spec, 100, 24);
         let got_first = s.wait_first_bytes();
         s.wait_quiet();
-        let (modal, after_modal) = s.pass_startup_modal(probe.startup_modal_marker);
-        let composer = probe
-            .composer_idle_marker
-            .map(|m| s.wait_for_text(after_modal, m, COMPOSER_TIMEOUT));
+        let startup = s.pass_startup_modal(probe, home.as_ref(), cwd.path());
+        let modal = startup.outcome;
+        let composer = probe.composer_idle_marker.map(|_| startup.composer);
         std::thread::sleep(ALIVE_WINDOW);
         let status = s.core.status();
         let screen = s.screen();
         s.teardown();
 
         println!(
-            "[Q11 {}] 첫 바이트={got_first} · 모달={modal:?} · 컴포저 기립={} · {ALIVE_WINDOW:?} 뒤 \
-             status={status:?}\n  화면: {}",
+            "[Q11 {}] 첫 바이트={got_first} · 모달={modal:?} · 컴포저={composer:?} · 신뢰 항목={:?} · \
+             {ALIVE_WINDOW:?} 뒤 status={status:?}\n  화면: {}",
             row.name,
-            match composer {
-                Some(v) => v.to_string(),
-                None => "표에 컴포저 표식 없음(★약한 판정★)".to_string(),
-            },
+            startup.trust_entry,
             excerpt(&screen, 900)
         );
 
@@ -2161,24 +2626,13 @@ fn q11_production_argv_is_accepted_and_reaches_a_composer() {
              는 안 뜬다는 뜻이다. 여기가 빨개지면 배선이 아니라 운영 인자가 틀린 것이다",
             row.name
         );
-        if probe.startup_modal_marker.is_some() {
-            assert_ne!(
-                modal,
-                ModalOutcome::NotShown,
-                "{}: 운영 argv 에서는 {MODAL_TIMEOUT:?} 안에 아는 시작 모달이 안 떴다 — 정책 값이 달라지면 \
-                 다른 화면이 먼저 뜬다는 뜻이라, 시험대가 지나는 모달 경로가 운영과 같다는 전제가 \
-                 깨진다: {}",
-                row.name,
-                excerpt(&screen, 800)
-            );
-        }
-        if let Some(ready) = composer {
-            assert!(
-                ready,
-                "{}: 운영 argv 가 {COMPOSER_TIMEOUT:?} 안에 컴포저까지 오지 못했다 — 사람이 쓸 수 있는 \
+        if let (Some(Err(missing)), Some(marker)) = (composer, probe.composer_idle_marker) {
+            panic!(
+                "{}: 운영 argv 가 컴포저까지 오지 못했다(모달={modal:?} · {}) — 사람이 쓸 수 있는 \
                  화면에 도달하지 않는 정책 값이라는 뜻이다(승인 대기·샌드박스 설치 모달 등). 운영 인자를 \
                  다시 봐야 한다: {}",
                 row.name,
+                missing.describe(marker),
                 excerpt(&screen, 900)
             );
         }
@@ -2260,8 +2714,20 @@ fn q12_working_root_comes_from_the_spawn_argument_and_env_reaches_the_process() 
         let away = away_box.path().join(&away_leaf);
         std::fs::create_dir_all(&root).expect("작업 루트 폴더 생성 실패");
         std::fs::create_dir_all(&away).expect("프로세스 cwd 폴더 생성 실패");
+        // ★Both folders are made git repos★ — the trust record that is the evidence for
+        //   (나) below is written only by passing the trust modal, and a non-git folder
+        //   gets no modal (file header; measured 0.163.0: such a folder goes straight to
+        //   the composer and its path is written nowhere in the home). The process-cwd
+        //   side must be a repo too, so that "a record appeared for it" is something that
+        //   **can happen** — only then does that absence assertion measure anything.
+        // ★A run where that side wins is usually caught first by the startup
+        //   verb★ — it requires a trust entry for the **working root** after
+        //   the CR, so it stops if the modal offered to trust the process cwd.
+        //   The absence assertion below catches a run where both got written.
+        git_init_at(&root);
+        git_init_at(&away);
 
-        let (home, env) = sandbox_home(probe, "q12");
+        let (home, env) = sandbox_home(probe, "q12", HomeUse::Session);
         let mut spec = harnessed_spec(&row, &root, &env, &[]);
         // ★그 다음 프로세스 cwd 만 딴 데로 돌린다★: 두 칸이 같은 값이면 「작업 루트가 인자에서 왔나」를
         //   물을 수가 없다 — 그 인자가 통째로 무시돼도 프로세스 cwd 가 **같은 답**을 만들어 주기 때문이다.
@@ -2291,16 +2757,18 @@ fn q12_working_root_comes_from_the_spawn_argument_and_env_reaches_the_process() 
         let mut s = PtySession::open(&spec, 140, 24);
         let got_first = s.wait_first_bytes();
         s.wait_quiet();
-        let (modal, after_modal) = s.pass_startup_modal(probe.startup_modal_marker);
-        let composer = wait_for_composer(&s, probe, after_modal, row.name);
+        let startup = s.pass_startup_modal(probe, home.as_ref(), &root);
+        let modal = startup.outcome;
+        let composer = assert_composer(&s, probe, &startup, row.name);
 
-        let screen_flat = flatten(&s.screen());
-        let says_root = mentions(&screen_flat, &root_leaf);
-        let says_away = mentions(&screen_flat, &away_leaf);
-        let has_dir_line = probe
-            .workspace_line_marker
-            .map(|m| mentions(&screen_flat, m))
-            .unwrap_or(false);
+        // ★Only the output after the startup screen is looked at★ — the consumed
+        //   trust modal's text also contains the working-root path (measured
+        //   0.163.0 `Trusting will apply to the repository root: …\root-…`).
+        //   Matching the whole accumulated screen would stay green thanks to
+        //   that sentence even if the working-root display disappeared.
+        let settled = s.tail_text(startup.settled_from);
+        let says_root = mentions(&settled, &root_leaf);
+        let says_away = mentions(&settled, &away_leaf);
 
         // 파일 쪽 증거 — 모달을 지나면 그 결정이 상태 디렉터리에 적힌다. 비동기라 기다린다.
         let home_path = home.as_ref().map(|h| h.path().to_path_buf());
@@ -2325,40 +2793,36 @@ fn q12_working_root_comes_from_the_spawn_argument_and_env_reaches_the_process() 
             .and_then(|rh| find_text_under(&rh, &root_leaf));
 
         println!(
-            "[Q12 {}] 첫 바이트={got_first} · 모달={modal:?} · 컴포저={composer:?} · 작업루트 표시줄={has_dir_line}\n  \
-             화면이 말하는 폴더: 인자쪽(`{root_leaf}`)={says_root} · 프로세스cwd쪽(`{away_leaf}`)={says_away}\n  \
-             임시 홈 기록: 인자쪽={:?} · 프로세스cwd쪽={:?}\n  실 홈 오염: {:?}\n  화면: {}",
+            "[Q12 {}] 첫 바이트={got_first} · 모달={modal:?} · 컴포저={composer:?} · 신뢰 항목={:?}\n  \
+             시작 뒤 화면이 말하는 폴더: 인자쪽(`{root_leaf}`)={says_root} · 프로세스cwd쪽(`{away_leaf}`)={says_away}\n  \
+             임시 홈 기록: 인자쪽={:?} · 프로세스cwd쪽={:?}\n  실 홈 오염: {:?}\n  시작 뒤 화면: {}\n  전체 화면: {}",
             row.name,
+            startup.trust_entry,
             root_in_home.as_ref().map(|p| p.display().to_string()),
             away_in_home.as_ref().map(|p| p.display().to_string()),
             root_in_real_home.as_ref().map(|p| p.display().to_string()),
+            excerpt(&settled, 1000),
             excerpt(&screen, 1000)
         );
 
         assert!(got_first, "{}: 첫 바이트 없음", row.name);
 
         // ── (가) cwd 반 — 작업 루트는 **인자**가 정한다 ────────────────────────────────────────
-        if probe.workspace_line_marker.is_some() {
-            assert!(
-                has_dir_line,
-                "{}: 작업 루트를 적는 줄이 화면에 없다 — 아래 판정은 그 줄을 읽는 것이므로 어느 쪽으로 \
-                 나오든 무의미해진다. 표식이 바뀌었거나 화면이 좌폭으로 잘렸다: {}",
-                row.name,
-                excerpt(&screen, 900)
-            );
+        if probe.shows_workspace_root {
             assert!(
                 says_root,
                 "{}: 화면에 인자로 준 작업 루트(`{root_leaf}`)가 없다 — 그 인자가 작업 루트를 정한다는 \
-                 주장이 서지 않는다: {}",
+                 주장이 서지 않는다(작업 루트를 화면에 안 적게 바뀌었거나 화면이 좌폭으로 잘렸다면 표의 \
+                 `shows_workspace_root` 칸부터 다시 잰다): {}",
                 row.name,
-                excerpt(&screen, 900)
+                excerpt(&settled, 900)
             );
             assert!(
                 !says_away,
                 "{}: 화면이 **프로세스 cwd**(`{away_leaf}`)를 작업 폴더로 말한다 — 인자가 무시되고 \
                  프로세스 cwd 가 이긴다는 뜻이라, 운영이 그 인자로 작업 폴더를 정한다는 전제가 깨진다: {}",
                 row.name,
-                excerpt(&screen, 900)
+                excerpt(&settled, 900)
             );
         }
 
