@@ -179,6 +179,7 @@ git worktree add --detach "$QA_TMP/base" <기준점>
 
 - 레인이 환경 탓(CLI 없음 · 미로그인)으로 못 돌았으면 가르지 않는다 — 수단 없음 PARTIAL 로 적고(골격 §4) 여기서 다시 돌지 않는다.
 - 사본 = 기준점 그대로다 — 작업 트리 변경을 얹지 않는다. 변이 확인 사본(`$QA_TMP/wt`)과 따로 두고 빌드 폴더도 따로 쓴다(`$QA_TMP/target-base`).
+- 사본은 한 번만 만든다 — 다음 가르기에서 `$QA_TMP/base` 가 이미 있으면 HEAD 가 기준점인지 보고 다시 쓴다.
 - Rust: 분리 실행을 `-WorkDir "$QA_TMP/base"` 로, 깨진 줄(「모듈별 명령」 · 레인 줄)에 `--target-dir "$QA_TMP/target-base"` 를 붙이고 `--` 뒤에 `--exact <깨진 이름>…` 을 더한다. 데몬 빌드가 앞에 붙은 레인은 그 빌드도 같은 `--target-dir` 로 짓는다.
 - 프론트: 사본에서 분리 실행으로 `npm ci` 뒤 `npx vitest run <깨진 시험 파일>`.
 - 라벨 규칙 = qa 골격 `references/flow.md` §2 「깨진 테스트 가르기」. `FAIL(선재)` 는 「추적 기록 위치」로 찾는다.
