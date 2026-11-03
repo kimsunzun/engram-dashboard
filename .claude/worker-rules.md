@@ -8,4 +8,4 @@
 - 앱을 셸에서 직접 띄우지 않는다 — `.claude/skill-bindings/qa.md` 「GUI 실측」 절차(빌드 · 점검 · `scripts/launch-detached.ps1`)로 띄운다.
 - 에이전트 프로필 env에 자격증명을 넣지 않는다 — `agents.json`에 평문으로 저장된다.
 - Windows에서 `python`은 Store 스텁(exit 49)이다 — `py`를 쓴다.
-- 주석·문서를 쓸 때 언어는 `CLAUDE.md` 「언어」를 따른다.
+- 작업 산출물은 영어로 쓴다 — 코드 주석 · 문서 · 메인에게 돌려주는 보고. 지시서가 한국어여도 같다. 지시서가 출력 언어를 정하면 그것을 따른다. 한국어로 쓰는 것과 고치는 문단의 범위 = `CLAUDE.md` 「언어」.

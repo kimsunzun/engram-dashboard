@@ -2175,7 +2175,7 @@
 - 2026-10-29 — 구현 착지(사용자 외출 중 자율 진행 「쭉 진행해」 · 진행 강도 중간 = TRD 리뷰 생략 · 끝에 코드 리뷰 full). ADR-0309(ADR-0111 결정 6 · 0114 · 0115 · 0116 결정 3 · 0120 · 0142 결정 2 부분 개정 · `/review doc light` FIX 반영) · TRD 1판(메인 검토 — 동명 쌍둥이 결말 X0~X4 수용 · ADR-0142 대상 축은 후속 T-29). 단위 = U1 계약 키 id · 잠든 (id, 이름) 쌍 → U2a-1 우편함 · 장부 배달 기록 키 id · 힌트 장치 걷기 → U2a-2 시험 다시 쓰기 · 개명 회귀 → U2b · U4 삭제 정리 id 하나 · 보낸 대기분 조회 id · 데몬 등장 판정 id → U3 입구 `Resolution` · 무리 id 펼침 · 잠든 에이전트 id 지목 · UUID 철자를 제어 입구와 같게 · loser 키 걷기 → 리뷰 반영(낡은 주석 · 미해석 토큰 접기 시험 · 삭제 안내 문구). 문서 = 메시징 spec · 아키텍처 개요(`/review doc light` FIX 반영). (`/review code full` — codex PASS · Claude FIX → 반영 → PASS · `/qa standard` PASS — 워크스페이스 결과 줄 60 · 5065 통과 · 0 실패 · 35 무시 · 격리 · CI 전용 게이트 전부 · tsc · vitest 2802) ★GUI 실측 없음 — 화면 · IPC 응답 모양이 바뀌지 않는다★. 코더 단위가 TRD 추정(도구 80~150 회)의 1.5~2 배였다(U1 212 회 · U2a-1 189 회) — U2a 를 둘로 갈라 막았다.
 - 2026-10-29 — 주제 열기(번호 선점). 범위 = 메시징 대기 우편함 · 기록의 수신자 키를 정규 이름 → 에이전트 id(가장자리 주소는 이름 그대로 — ADR-0101). 계기 = 잠든 에이전트 앞 대기 우편이 이름만으로 묶여 있어 그 프로필 이름을 바꾸면 우편이 조용히 사라지거나 같은 이름을 새로 가진 에이전트로 갈 수 있다(정적 조사 · 재현 안 함). ADR-0114 · 0115 · 0120 부분 개정 예정.
 
-## S30 — skill bindings and project docs for the new skill skeletons (2026-11-01~03, `v0.5.0/chore/skill-apply`, autonomous sessions — skill real-use test) · folder `docs/process/S30-skill-apply/` · ADR-0340 · reviewed · QA PASS · **not merged**
+## S30 — skill bindings and project docs for the new skill skeletons (2026-11-01~03, `v0.5.0/chore/skill-apply`, autonomous sessions — skill real-use test) · folder `docs/process/S30-skill-apply/` · ADR-0340 · reviewed · QA PASS · merged 2026-11-03 (`e1d7f64e`)
 
 - 2026-11-03 — Landed. Contents:
   - Skill bindings rewritten for the new `engram-*` skeletons · architecture doc regenerated · project worker rules (`.claude/worker-rules.md`) created.
@@ -2187,7 +2187,7 @@
   - QA = full regression run locally (workspace 5067 passed · 0 failed · gates 30/30 · frontend 2802 · tsc · ts-rs no drift) · claude and codex lanes off (no path hit · same versions). An earlier standalone qa (2026-11-02) failed only on two pre-existing failures.
 - 2026-11-01 — Opened. Number = S30 (not claimed by push — user 「push 금지」 until the skill real-use test ends).
 
-## S31 — 소스 정규식 게이트의 공백형 경로 (2026-11-02, `v0.5.0/fix/gate-path-whitespace`, 자율 세션 — 스킬 실사용 시험 「쭉 진행해」) · 설계 폴더 `docs/process/S31-gate-path-whitespace/` · 정본 ADR 없음 · 구현 · 리뷰 · QA · **master 머지 전**(기준 = `v0.5.0/chore/skill-apply` — 통합은 그 뒤)
+## S31 — source-regex gates and whitespace-around-:: paths (2026-11-02, `v0.5.0/fix/gate-path-whitespace`, autonomous session — skill real-use test 「쭉 진행해」) · folder `docs/process/S31-gate-path-whitespace/` · no ADR · implemented · reviewed · QA · merged 2026-11-03 (`3d0fe6cb`)
 
 - 2026-11-02 — 구현 착지. `ci.yml` 의 소스 정규식 검사 여섯(base tenants · replay_flight 순수성 · transport gate 3 · platform gate 6 · shell gate 2 의 lint 끄기 · rustfmt 건너뛰기 부재)이 `::` 앞뒤 공백(`\s*::\s*`)을 받는다. 구멍 = rustfmt 가 손대지 않는 중괄호 매크로 호출 본문 · `#[rustfmt::skip]` 구간의 `tokio :: spawn` 꼴이 fmt 게이트와 정규식 게이트를 모두 지났다. 해설 사본 · 대상 헤더를 맞췄고, 공백이 아닌 다른 이름 꼴(별칭 · 끝 마디 import · 여러 항목 묶음)은 각 게이트 정본 자리의 「알려진 한계」 + `docs/todo/observed-only.md` 로 돌렸다.
   - 리뷰 = PRD+TRD full 2라운드 PASS · 코드 full PASS(must 0) · 권장 라운드 재리뷰(문서 정확성) PASS — 남은 문구는 메인이 고치고 셀프리뷰로 닫았다.
@@ -2195,7 +2195,7 @@
   - ★QA FAIL 1 — S31 무관(선재)★: codex 레인 `backend_contract --ignored` 6/11 실패(`q4` `q5` `q6` `q8` `q11` `q12` · `path must be shorter than SUN_LEN`). codex 0.163.0 이 시험 HOME(`target\tmp\backend-contract-home-…`) 아래에 app-server 소켓을 만들어 경로 한도를 넘는다. 기준 브랜치(skill-apply `e12116fa`)에서 같은 이름 · 메시지로 재현됐다. 실 앱에서 띄운 codex 에이전트(StreamJson)는 정상 연결됐다(SUN_LEN 0건) — 시험 하네스만의 문제로 보인다(TUI 모드 미측). 고치는 일은 S31 밖이다.
 - 2026-11-02 — 주제 열기. 번호 = S31(선점 push 안 함 — 사용자 지시 「push 금지」). 출처 = `docs/todo/doc-drift.md` 「게이트 정규식이 못 닫은 구멍」.
 
-## S32 — codex contract harness on codex 0.163.0 (2026-11-02~03, `v0.5.0/fix/codex-contract-home`, autonomous session — user 「경로가 문제아냐. 그냥 수정해」) · folder `docs/process/S32-codex-contract-home/` · no ADR · implemented · reviewed · QA PASS · **not merged** (based on `v0.5.0/chore/skill-apply`)
+## S32 — codex contract harness on codex 0.163.0 (2026-11-02~03, `v0.5.0/fix/codex-contract-home`, autonomous session — user 「경로가 문제아냐. 그냥 수정해」) · folder `docs/process/S32-codex-contract-home/` · no ADR · implemented · reviewed · QA PASS · merged 2026-11-03 (`036ea87d`)
 
 - 2026-11-03 — Landed. The `#[ignore]` codex lane of `crates/engram-dashboard-agent/tests/backend_contract.rs` failed 6/11 on codex 0.163.0 (pre-existing, found by the S31 qa). Two causes: the temp CODEX_HOME under `target/tmp` pushed codex's app-server socket past SUN_LEN, and 0.163.0 reworded its folder-trust prompt (and shows none for a non-git cwd). Fix = temp home at `%LOCALAPPDATA%\ebc\<tag>-<8hex>` with the socket path budget asserted · a wording-free start-up pass (ready OSC + hidden cursor + composer probe) · update/login screens suppressed by the temp home's config · after any CR, a trust record for the cwd must appear (pure check `codex_trust_record`, unit-tested) · S32 comments rewritten in English. The user chose to keep the wording-free CR when the reviewers split on it (「지금대로 자동 수락」). Production code unchanged.
   - Review = code full (Claude + codex) 3 rounds → PASS. Unfixed 권장: no shorter-path fallback when the profile path is long (the assertion names the limit instead).
