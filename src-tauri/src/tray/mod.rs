@@ -1,6 +1,6 @@
 //! tray — Tauri 통합 트레이 모듈(ADR-0026: 트레이를 앱에 통합, 2프로세스).
 //!
-//! ## 구조 (3층 — CLAUDE.md 「코어 격리」/§5)
+//! ## 구조 (3층 — CLAUDE.md 「코어 격리」 · 「LLM-우선 제어」)
 //! - [`core`] — **순수**(OS/Tauri/discovery 무의존): MenuAction 의도 enum, menu_id↔action 매핑,
 //!   IconState, to_grayscale_rgba. 단위테스트 대상.
 //! - [`actions`] — **불순 공유 부수효과**: 트레이 핸들러와 command 가 같은 함수를 부르게(중복 금지).
@@ -106,7 +106,7 @@ pub fn build_tray(app: &App) -> tauri::Result<()> {
         .on_menu_event(|app, event| dispatch_menu(app, event.id.as_ref()))
         // 트레이 좌클릭(단발) = 모든 UI 창 되살리기(사용자 요청, ADR-0229). Left + Up(뗄 때)만 처리 —
         // Click 은 Down·Up 둘 다 발화하므로 Up 으로 한정해 1회만(중복 표시 방지). 우클릭/Enter/Move/
-        // Leave 무시. show_main_ui 는 command·단일 인스턴스 재실행과 같은 actions 함수 공유(CLAUDE.md §5). 사람의
+        // Leave 무시. show_main_ui 는 command·단일 인스턴스 재실행과 같은 actions 함수 공유(CLAUDE.md 「LLM-우선 제어」). 사람의
         // 누름이라 「누름」 갈래다(TRD S26-window-chrome §6-2 「누가 어느 갈래인가」).
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {

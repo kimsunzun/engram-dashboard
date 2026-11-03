@@ -753,7 +753,7 @@ pub struct LlmBackendPolicy {
 /// 그것이고, [`verb_new`] 는 그 값을 **백엔드와 무관하게** 그대로 [`backend_command`] 로 넘긴다. 그래서
 /// 낱말을 열면 두 모드가 함께 열린다. ★한때 이 자리에 「출력 모드 축은 어디에도 LLM 표현이 없다」고
 /// 적혀 있었는데 그 칸은 그 문장보다 먼저 있었다 — 쓰일 때부터 거짓이었다.★ 그 문장을 근거로 모드 축에
-/// 두 번째 입구를 짓지 말 것(CLAUDE.md 「LLM-우선 제어」의 「두 번째 표면을 짓지 말 것」).
+/// 두 번째 입구를 짓지 말 것(CLAUDE.md 「LLM-우선 제어」의 「두 번째 표면을 만들지 않는다」).
 pub const LLM_BACKEND_POLICY: &[LlmBackendPolicy] = &[
     LlmBackendPolicy {
         word: "claude",

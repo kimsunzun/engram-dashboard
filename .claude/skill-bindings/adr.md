@@ -1,78 +1,48 @@
-# ADR 바인딩 — engram
+# adr 바인딩 — engram-dashboard
 
-이 파일은 ADR-0004 규약으로 **소비처 프로젝트 트리**(`.claude/skill-bindings/adr.md`)에 산다 — adr 골격 flow.md가 cwd-상대로 Read하는 파일이다. 골격이 "스크립트"·"ADR 폴더"·"파일명 규약"·"템플릿"·"인덱스"·"상태 범례"·"앵커 명령"이라 부르는 자리에 끼우는 **engram 전용 실명령·실체·연동**이다. 골격은 어느 프로젝트나 동일한 범용 ADR 엔진이고, 이 파일이 engram으로 바인딩한다.
+## 서기 스크립트 실명령
 
-> **정본 = `<skill>/scripts/adr.mjs`(서기 작업 실체) + `docs/decisions/README.md`(템플릿·인덱스·상태 범례·supersede 규칙) + CLAUDE.md 「설계 결정 기록 (ADR)」 절.** 이 파일은 그 **현재 바인딩 스냅샷**일 뿐이다 — 충돌하면 스크립트/README.md/CLAUDE.md를 따르고 이 파일을 고친다(rot 방지). 템플릿·인덱스 표를 통째 복붙해 제2의 출처로 만들지 않는다 — *가리키기만* 한다.
-
-## 스크립트 실명령 (골격 §2 "스크립트 호출"에 주입)
-
-서기 작업은 **스킬 폴더 안** `scripts/adr.mjs`(node 내장만, JSON 출력 — cdp.mjs 결)가 결정적으로 한다. 스크립트가 스킬과 함께 이동한다(자족 스킬). **워크스페이스 루트(= dashboard repo 루트)에서** 실행한다. `<skill>` = 이 스킬이 로드된 base dir(호출 시 하네스가 제공).
-
-engram(dashboard)의 실값은 **전부 스크립트 기본값과 동일**하다 — 그래서 dashboard에선 파라미터 플래그 없이(폴더만 기본) 호출한다:
-
-- ADR 폴더 = `docs/decisions/`(스크립트 기본) · 인덱스 파일 = `README.md`(기본) · 상태 어휘 = `확정/제안/폐기/거부`(기본) · 기본 상태 = `확정`(기본) · 템플릿 = dashboard 내장 템플릿(기본, `<skill>/references/formats/adr.template.md`와 동일 구조) · 코드 앵커 루트 = `crates,src,src-tauri,scripts`(기본).
+저장소 루트에서 실행한다. 모든 호출에 `--anchor-roots crates,src,src-tauri,scripts`를 붙인다 — 빠진 `lint`는 코드 앵커 검사를 건너뛴다. 폴더·인덱스 파일·상태 어휘·템플릿은 스크립트 기본값이 dashboard 실값이라 플래그를 주지 않는다.
 
 ```bash
-# new — 채번(max+1, 쓰기 직전 재스캔) + 스캐폴드 파일 생성. 본문 prose 슬롯은 TODO(스킬이 채움).
-node <skill>/scripts/adr.mjs new --title "<한 줄 제목>" [--status 확정|제안]
-
-# supersede 전체 — 새 ADR 스캐폴드 + 옛 status→폐기(기존 status 취소선 보존) + 양방향 Supersedes/Superseded by.
-node <skill>/scripts/adr.mjs supersede --old <N> --mode full    --title "<새 제목>" [--status ...]
-
-# supersede 부분 — 새 ADR 스캐폴드 + 옛 status 유지 + 양방향 Amends/Amended by (바뀐 조항 단서).
-node <skill>/scripts/adr.mjs supersede --old <N> --mode partial --clause "<바뀐 조항>" --title "<새 제목>"
-
-# supersede 다중 대상 — 한 결정이 여러 ADR을 함께 개정할 때. --clause 는 직전 --old 에 붙는다(순서 유의).
-# 새 ADR 은 대상 수와 무관하게 하나만 생긴다. 대상 중 하나라도 없으면 아무것도 안 쓰고 중단한다.
-node <skill>/scripts/adr.mjs supersede --old <N> --clause "<조항>" --old <M> --clause "<조항>" --mode partial --title "<새 제목>"
-
-# link — 이미 있는 두 ADR 사이에 링크·도장만 박는다. 채번도 새 파일도 없다.
-# 한쪽만 박혀 있으면 빠진 쪽만 채운다(lint 「단방향」 수리 도구). 양쪽 다 있으면 no-op.
-node <skill>/scripts/adr.mjs link --old <N> --new <M> --mode partial --clause "<바뀐 조항>"
-node <skill>/scripts/adr.mjs link --old <N> --new <M> --mode full
-
-# index — 본문 H1·상태 스캔해 README 인덱스 표 재생성. 기본 --check(diff만, 안 고침), --write만 실제 갱신.
-node <skill>/scripts/adr.mjs index --check     # 점검(read-only diff·경고)
-node <skill>/scripts/adr.mjs index --write     # 실제 재생성(본문서 파생 가능한 것만, 큐레이션 셀 보존)
-
-# lint — 정합성 점검(보고 전용, read-only). JSON에 error/advisory 구분.
-node <skill>/scripts/adr.mjs lint
+node <skill>/scripts/adr.mjs new --title "<한 줄 제목>" [--status 확정|제안] --anchor-roots crates,src,src-tauri,scripts
+node <skill>/scripts/adr.mjs supersede --old <N> --mode full --title "<새 제목>" --anchor-roots crates,src,src-tauri,scripts
+node <skill>/scripts/adr.mjs supersede --old <N> --mode partial --clause "<바뀐 조항>" --title "<새 제목>" --anchor-roots crates,src,src-tauri,scripts
+node <skill>/scripts/adr.mjs supersede --old <N> --clause "<조항>" --old <M> --clause "<조항>" --mode partial --title "<새 제목>" --anchor-roots crates,src,src-tauri,scripts
+node <skill>/scripts/adr.mjs link --old <N> --new <M> --mode full --anchor-roots crates,src,src-tauri,scripts
+node <skill>/scripts/adr.mjs link --old <N> --new <M> --mode partial --clause "<바뀐 조항>" --anchor-roots crates,src,src-tauri,scripts
+node <skill>/scripts/adr.mjs link --old <N> --new <M> --mode partial --clause "<새 조항 전문>" --rewrite-clause --anchor-roots crates,src,src-tauri,scripts
+node <skill>/scripts/adr.mjs lint --anchor-roots crates,src,src-tauri,scripts
+node <skill>/scripts/adr.mjs index --check --anchor-roots crates,src,src-tauri,scripts   # 읽기 전용 — 쓰지 않고 diff만
+node <skill>/scripts/adr.mjs index --write --anchor-roots crates,src,src-tauri,scripts   # 인덱스를 본문에서 다시 만들어 쓴다(커밋 안 함)
 ```
 
-- **격리 테스트** — `--dir <폴더>` 또는 `ADR_DIR` 환경변수로 대상 폴더를 바꿔 실데이터 밖에서 dry-run. 기본 = `docs/decisions/`(cwd 기준). 스캔/상대경로 기준 루트는 `--root`(기본 = cwd).
-- **파라미터 플래그(멀티 소비처)** — 스크립트는 여러 소비처를 하나로 섬긴다. dashboard는 위 기본값이 실값이라 플래그 불필요. 다른 소비처는 `--dir · --index-name · --template · --status-vocab a,b,c · --default-status · --anchor-roots a,b`로 실값을 주입한다(각 프로젝트 바인딩 소관).
-- **호출 순서** — `new`/`supersede`로 파일을 만든 뒤 **본문 prose를 채우고**, 그 다음 `index --write`로 인덱스를 재생성한다. `link`는 파일을 안 만드니 곧바로 `index --write`다(스캐폴드만으론 prose가 TODO라 인덱스 제목이 임시값일 수 있음 — prose 먼저, 인덱스 나중).
-- ★**채번했으면 스캐폴드를 바로 커밋·푸시해 번호를 선점한다**★ — 골격 §2 「채번은 미루지 않는다」의 engram 사정이다. **이 저장소는 워크트리를 넷 동시에 돌린다**(`git worktree list`), 그래서 다른 워크트리가 쓴 번호가 이쪽 `docs/decisions/`에 없는 구간이 상시 존재한다. 밀어 두는 비용은 **없다** — 스캐폴드만 담은 push 는 `docs/` 만 바꾸므로 CI 가 뜨지 않는다(목록 정본 = `.github/workflows/ci.yml` 의 `on.push.paths` · ADR-0232). 코드 커밋과 함께 밀어 CI 가 돌더라도 public repo 라 러너 비용이 0 이다(근거 = 같은 파일의 트리거 주석). 실발생 = ADR-0168 이 두 워크트리에서 같은 번호로 만들어져 한쪽을 0169 로 내렸다(2026-08-24).
+- 실데이터 밖 시험은 `--dir <임시 폴더> --no-git`으로 돌린다.
 
-## ADR 폴더 + 파일명 규약 (골격 §2에 주입)
+## ADR 폴더 · 파일명
 
-- **폴더** — `docs/decisions/`.
-- **파일명** — `NNNN-제목-슬러그.md`(4자리 zero-pad 번호 + 슬러그). 슬러그는 스크립트가 결정적으로 생성(한국어 유지 · 영문 소문자화 · 공백→`-` · 특수문자 제거). 기존 예시 `docs/decisions/0001-kill-2동사.md`.
-- **채번** — 스크립트가 `docs/decisions/`의 현재 `NNNN-*.md` 중 최대 번호 + 1로 결정(쓰기 직전 재스캔). 번호를 LLM이 지정하지 않는다.
+- 폴더 = `docs/decisions/` · 파일명 = `NNNN-<슬러그>.md`(4자리 번호, 슬러그는 스크립트가 만든다). 예: `docs/decisions/0012-테스트-격리-하네스-tdd.md`.
 
-## 템플릿 실체 (골격 §2 prose 채우기에 주입)
+## 스캐폴드 템플릿
 
-`docs/decisions/README.md`의 "템플릿" 절이 정본이다 — 섹션 구조(제목 / 상태 / 관련 / 맥락 / 결정 / 거부한 대안 / 근거 / 영향·불변식). 스크립트 스캐폴드가 이 구조로 빈 슬롯(`TODO`)을 만들고, 스킬이 §1에서 받은 내용으로 TODO를 메운다. **섹션 구조는 건드리지 않는다**(스크립트·README 정본 그대로). 여기 복붙하지 않는다(rot).
+- 스킬 표준 템플릿(`adr.template.md`)을 쓴다 — `--template`을 주지 않는다. 섹션 구조(맥락 · 결정 · 거부한 대안 · 근거 · 영향 / 불변식)가 `docs/decisions/README.md` 「템플릿」과 같다.
 
-engram은 스크립트 **내장 기본 템플릿**을 그대로 쓴다(별도 `--template` 불필요) — 그 구조를 파일로 뽑은 사본이 `<skill>/references/formats/adr.template.md`(다른 소비처가 `--template`으로 가리킬 수 있는 형태). 내장 기본과 이 파일이 어긋나면 README.md·스크립트 내장을 정본으로 보고 이 사본을 고친다.
+## 인덱스 위치 · 형식
 
-## 인덱스 위치·형식 + 재생성 (골격 §2 "인덱스 재생성"에 주입)
+- `docs/decisions/README.md`의 `## 인덱스` 표(`| # | 제목 | 상태 |`). 스크립트가 본문 H1·상태줄에서 다시 만든다 — 손으로 고치지 않는다.
 
-- **위치·형식 정본** — `docs/decisions/README.md`의 "## 인덱스" 표(`| # | 제목 | 상태 |`). `# ` 칸은 `[NNNN](NNNN-제목-슬러그.md)` 링크.
-- **재생성** — `node <skill>/scripts/adr.mjs index --write`가 본문 H1·상태줄을 스캔해 표를 다시 만든다(본문=단일 출처 → 제목/상태 drift 차단). **손으로 인덱스 표를 편집하지 않는다.**
-- **보존 규칙(중요)** — 인덱스 셀이 본문보다 정보가 많으면(수작업 큐레이션 제목·레거시 부분폐기 status 단서) 스크립트가 **기존 셀을 보존하고 경고만** 낸다(자동 손실 금지). 신규 ADR은 본문 H1 = 인덱스 제목이 일치하게 만들어 drift를 애초에 안 만든다.
-- **부분 폐기 인덱스 표기** — 본문에 양방향 `Amends`/`Amended by` 링크가 있으면 스크립트가 `<어휘> (부분 폐기 by ADR-N: <조항>)` 식으로 인덱스 단서를 합성한다. 링크 없는 레거시(0016/0024)는 기존 인덱스 단서를 보존.
+## 상태 어휘
 
-## 상태 범례 (골격 §2 lint·§3에 주입)
+- `확정` · `제안` · `폐기` · `거부` — 범례 = `docs/decisions/README.md` 「상태 범례」.
 
-`docs/decisions/README.md` "상태 범례"가 정본: **확정(Accepted) / 제안(Proposed) / 폐기(Superseded) / 거부(Rejected)**. 스크립트 lint은 이 **어휘만** 검사한다 — 상태줄의 단서절(em-dash 뒤 자유서술·부분폐기 설명)은 무시하므로 복합 상태 문자열에서 거짓양성이 안 난다. 어휘를 늘리면 스크립트 `STATUS_VOCAB`과 README를 같이 고친다.
+## 앵커 명령
 
-## 코드 앵커 규약 + 고아 검출 (골격 §2 lint에 주입)
+- 코드 앵커 루트 = `crates,src,src-tauri,scripts`(위 실명령의 `--anchor-roots`). 앵커 형식의 정본 = `.claude/skill-bindings/code-conventions.md` §주석.
 
-- **앵커 형식** — load-bearing 코드에 `// ADR-NNNN` 한 줄 주석. CLAUDE.md 「설계 결정 기록 (ADR)」 절이 정본(앵커는 코드와 한 몸이라 리스트처럼 rot하지 않는다).
-- **고아 검출** — `lint`이 코드 경로(`crates/ src/ src-tauri/ scripts/`)에서만 `// ADR-NNNN`을 긁어 `docs/`는 제외한다(문서 본문의 "ADR-" 언급이 거짓양성 안 나게). 존재하지 않는 ADR을 가리키면 error, *폐기된* ADR을 가리키면 advisory(폐기된 결정을 코드가 아직 따를 수 있음 → 확인 권고).
+## 채번 push
 
-## 흐름 기록 연동 (골격 §3 "결과 보고"에 주입)
+- push하지 않는다(`--push` 없음). 이 저장소의 워크트리들은 `.git` 하나를 같이 써서, 스크립트의 커밋은 다른 워크트리의 채번 스캔(`git log --all`)에 바로 보인다.
 
-- ADR 추가·번복의 **흐름(언제/무엇)** → `docs/process/step-log.md`. ADR은 *왜*(결정), step-log는 *언제/무엇*(흐름) — 섞지 않는다(CLAUDE.md "기록 분리").
-- **스킬·스크립트는 step-log를 직접 쓰지 않는다 — 메인(오케스트레이터)이 처리**한다. **세션 종료 체크리스트(정본 = 이 파일)** — 새 ADR 썼나 / 폐기 도장을 *폐기당한* ADR에 박았나 / 인덱스 갱신했나 / step-log 추가했나. 메인이 세션 끝에 확인한다.
+## 연동
+
+- 흐름(언제·무엇)은 메인이 `docs/process/step-log.md`에 적는다. 스킬·스크립트는 step-log를 쓰지 않는다.

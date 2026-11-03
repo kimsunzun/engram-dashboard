@@ -50,12 +50,12 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 |---|---|---|
 | [0001](0001-kill-2동사.md) | kill = 2동사 (shutdown + join_pump) | 확정 |
 | [0002](0002-output-event-seam.md) | 출력 seam = OutputEvent (터미널 가정 금지) | 확정 |
-| [0003](0003-output-status-sink-격리.md) | OutputSink/StatusSink — 코어 Tauri 격리 | 확정 |
+| [0003](0003-output-status-sink-격리.md) | OutputSink / StatusSink — 코어 Tauri 격리 | 확정 |
 | [0004](0004-agent-transport-backend-격리.md) | AgentTransport seam + backend 지식 격리 | 확정 |
 | [0005](0005-finalize-1회.md) | finalize 정확히 1회 (pump 단독) | 확정 |
 | [0006](0006-락-순서.md) | 락 순서 규율 (sessions → 내부) | 확정 (부분 폐기 by ADR-0231: 입력 자물쇠 락 순서 줄과 그 안 팬아웃 예외 · replay → 대기 목록 표(잎) / ADR-0234: codex 방출 줄 order 를 쥔 채 하는 팬아웃 예외) |
 | [0007](0007-epoch-재구독.md) | epoch 맵교체 재구독 | 확정 (부분 폐기 by ADR-0046: 프론트 epoch 권위 조항: SubscribeAck 단독 → src-tauri decide_epoch 1차 필터 + 필터된 frame/마커 epoch 채택 — 그때는 [agentId, epoch] 재구독 원칙을 그대로 뒀으나 그 deps 조항은 뒤이어 ADR-0163 이 폐기했다 / ADR-0163: 맵 교체마다 epoch +1 증분과 재구독 deps 두 조항) |
-| [0008](0008-세션복원-sid-통제.md) | 세션 복원 — 우리가 sid 통제, 추적 파일 best-effort | 확정 (부분 폐기 by ADR-0082: resume 조기종료 → fresh-fallback 조항 폐지: 실패는 종점으로 직행(대개 `Exited{code≠0}` — `Failed` 가 아니다), 자동 fresh 재spawn 없음 / ADR-0185: sid 발급 주체 / ADR-0226: 결정 첫 항 중 영속 시점만 발급은 spawn 그대로) |
+| [0008](0008-세션복원-sid-통제.md) | 세션 복원 — 우리가 sid 통제, 추적 파일은 best-effort | 확정 (부분 폐기 by ADR-0082: resume 조기종료 → fresh-fallback 조항 폐지: 실패는 종점으로 직행(대개 `Exited{code≠0}` — `Failed` 가 아니다), 자동 fresh 재spawn 없음 / ADR-0185: sid 발급 주체 / ADR-0226: 결정 첫 항 중 영속 시점만 발급은 spawn 그대로) |
 | [0009](0009-tauri-2x-핀.md) | tauri 최신 2.x 핀 (Channel 무손실 실측) | 확정 |
 | [0010](0010-cargo-workspace-분리.md) | Cargo workspace 3-crate 분리 | 확정 |
 | [0011](0011-agentclient-제어표면.md) | agentClient 제어 표면 facade (데몬 대비) | 확정 |
@@ -63,23 +63,23 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0013](0013-데몬-참조-3대장.md) | 데몬 참조 3대장 — tmux / Zellij / Mosh | 확정 |
 | [0014](0014-오케스트레이션-참조-후보.md) | 오케스트레이션 참조 후보 (설계 시 고려) | 제안 |
 | [0015](0015-데몬-수명-콘솔-뷰어.md) | 데몬 수명 = persist-until-kill, 콘솔 = detachable 뷰어 | 확정 |
-| [0016](0016-에이전트-수명-모델.md) | 에이전트 수명 모델 — sid 인스턴스, 저장=살림·삭제=끔, 단순 가드 | 확정 (restart=Always 런타임 해석은 0019가 일부 폐기) |
-| [0017](0017-세션-슬롯-구조-죽음정의.md) | 세션/슬롯 구조 — 슬롯=한 모드의 한 세션(끝나면 슬롯도 끝), 터미널 비저장, 죽음=Run 종료+이유 | 확정 (부분 폐기 by ADR-0245: 결정 5 interrupt(Ctrl-C) 부분 PTY 는 끊기를 지원하지 않는다) |
-| [0018](0018-깡통-예약-에이전트-프론트-머지.md) | 깡통(예약) 에이전트 — Reserved=프론트 합성, 백엔드 무변경 | 확정 |
-| [0019](0019-세션-종료-분류-프로필-disposition.md) | 세션 종료 분류 — disposition(유저kill·정상=삭제 / 크래시=예약 / 셧다운=유지), 런타임 자동재시작 폐기 | 확정 (부분 폐기 by ADR-0083: 유저 kill·정상 exit(code0) → 프로필 삭제 조항 폐지: 모든 종료는 프로필 시체 보존(KeepDisableAutoRestore), 자동 삭제 없음 — 삭제는 명시적 사용자 명령으로만 / ADR-0084: apply_disposition epoch-guard 추가 — stale reap 이 재활성화된 산 세션을 auto_restore=false 로 강등 못 하게(reaped msg.epoch 가 현재 세션 epoch 와 일치할 때만 적용). 재활성화(resume)는 맵 교체이므로 epoch bump(ADR-0007 재확인).) |
-| [0020](0020-클라이언트-경로-통합-단일-프로토콜.md) | 클라이언트/백엔드 경로 통합 — 단일 프로토콜 + transport-중립 dispatch core(embedded/daemon carrier만 교체) | 확정 (부분 폐기 by ADR-0037: 결정3: 프로토콜 의미론 위치 — JS ProtocolClient → Rust(DaemonClient/protocol_state)) |
-| [0021](0021-데몬-수명-on-demand-무재시작.md) | 데몬 수명 — on-demand spawn + 자동재시작 없음(tmux/wezterm 모델), ensure(명시)/reconnect(attach-only) 분리 | 확정 |
-| [0022](0022-통합-command-registry-palette-키바인딩.md) | 통합 command registry — palette+키바인딩+LLM+메뉴/트레이 단일 출처(VS Code 모델, 추가 여파 0 지향) | 제안 (부분 폐기 by ADR-0155: 미해결 forks 3건 소진) |
-| [0023](0023-트레이-프로세스-토폴로지.md) | 트레이/프로세스 토폴로지 — 순수-Rust tray-host + detached 데몬 + UI(X=hide), 3프로세스 | 폐기 (Superseded by ADR-0026) |
-| [0024](0024-데몬-소유-생사-종료-데이터위치.md) | 데몬 소유·생사·종료·데이터 위치 — self-owned detached + WS/lockfile liveness + 재입양 + `.engram-data/` | 확정 (부분 폐기 by ADR-0271: 데이터 위치 구현 줄의 discovery 단일 출처 / ADR-0025: C3 UI ensure 금지 / ADR-0027: 데이터 위치와 공유) |
+| [0016](0016-에이전트-수명-모델.md) | 에이전트 수명 모델 — sid 인스턴스, 저장=살림·삭제=끔, restart 기본 Always, 단순 가드 | 확정 (부분 폐기 by ADR-0019: restart=Always 런타임 해석) |
+| [0017](0017-세션-슬롯-구조-죽음정의.md) | 세션/슬롯 구조 — 슬롯=한 모드의 한 세션(끝나면 슬롯도 끝), "죽음"=백엔드별 Run 종료+이유 | 확정 (부분 폐기 by ADR-0245: 결정 5 interrupt(Ctrl-C) 부분 PTY 는 끊기를 지원하지 않는다) |
+| [0018](0018-깡통-예약-에이전트-프론트-머지.md) | 깡통(예약) 에이전트 = 저장 프로필의 트리 표현 + 더블클릭 활성화 (프론트 머지, 백엔드 무변경) | 확정 |
+| [0019](0019-세션-종료-분류-프로필-disposition.md) | 세션 종료 분류 — 의도는 "행동 지점"에서, 프로필 disposition으로 죽음/예약/복원 가름 | 확정 (부분 폐기 by ADR-0083: 유저 kill·정상 exit(code0) → 프로필 삭제 조항 폐지: 모든 종료는 프로필 시체 보존(KeepDisableAutoRestore), 자동 삭제 없음 — 삭제는 명시적 사용자 명령으로만 / ADR-0084: apply_disposition epoch-guard 추가 — stale reap 이 재활성화된 산 세션을 auto_restore=false 로 강등 못 하게(reaped msg.epoch 가 현재 세션 epoch 와 일치할 때만 적용). 재활성화(resume)는 맵 교체이므로 epoch bump(ADR-0007 재확인).) |
+| [0020](0020-클라이언트-경로-통합-단일-프로토콜.md) | 클라이언트/백엔드 경로 통합 — 단일 프로토콜 + transport-중립 dispatch core | 확정 (부분 폐기 by ADR-0037: 결정3: 프로토콜 의미론 위치 — JS ProtocolClient → Rust(DaemonClient/protocol_state)) |
+| [0021](0021-데몬-수명-on-demand-무재시작.md) | 데몬 수명 — on-demand spawn + 자동재시작 없음 (tmux/wezterm 모델) | 확정 |
+| [0022](0022-통합-command-registry-palette-키바인딩.md) | 통합 command registry — palette + 키바인딩 + LLM + 메뉴/트레이 단일 출처 | 제안 (부분 폐기 by ADR-0155: 미해결 forks 3건 소진) |
+| [0023](0023-트레이-프로세스-토폴로지.md) | 트레이/프로세스 토폴로지 — 순수-Rust tray-host + detached 데몬 + UI(창 hide), 3프로세스 | 폐기 (Superseded by ADR-0026) |
+| [0024](0024-데몬-소유-생사-종료-데이터위치.md) | 데몬 소유·생사감지·종료·데이터 위치 — self-owned detached + WS/lockfile liveness + 재입양 | 확정 (부분 폐기 by ADR-0271: 데이터 위치 구현 줄의 discovery 단일 출처 / ADR-0025: C3 UI ensure 금지 / ADR-0027: 데이터 위치와 공유) |
 | [0025](0025-UI-부팅-데몬-ensure-유지.md) | UI 부팅 1회 데몬 ensure 유지 — ADR-0024 C3("UI ensure 금지") 폐기 | 확정 |
 | [0026](0026-트레이-앱-통합-2프로세스.md) | 트레이/프로세스 토폴로지 재결정 — 트레이를 Tauri 앱에 통합(2프로세스), 데몬 별도 (ADR-0023 폐기) | 확정 (부분 폐기 by ADR-0229: X 와 보이기 숨기기가 다루는 대상 창 범위만) |
-| [0027](0027-모드별-인스턴스-스코프-데이터위치.md) | 모드별 인스턴스 스코프 + 데이터 위치 — embedded=폴더별/폴더-로컬, daemon=전역/유저-global | 폐기 (Superseded by ADR-0029) |
-| [0028](0028-백엔드-이벤트버스-소유-단일push채널.md) | 백엔드가 이벤트버스 소유 — 단일 push 채널(백엔드→트레이/WebView/LLM), 상태는 항상 아래로 (ADR-0003 일반화) | 확정 |
-| [0029](0029-embedded-제거-daemon-only-통일.md) | embedded(싱글) 모드 제거 — daemon-only 통일, 모드 축→데몬 위치(로컬/원격) 흡수 (ADR-0027 폐기, 0020/0026 일부 정리) | 확정 (부분 폐기 by ADR-0134: 단일 인스턴스 스코프와 릴리스 데이터 폴더 위치 대체) |
-| [0030](0030-capability-합성-transport-backend.md) | capability 산출 = transport(물리) ⊕ backend(프로그램) 합성 — 타입으로 소유권 강제, shell resume=false 정확화 (ADR-0002 구체화) | 확정 (부분 폐기 by ADR-0245: PTY 능력 목록의 interrupt 가 거짓이 된다) |
-| [0031](0031-검수체계-opus-codex-2자-적대리뷰.md) | 검수 체계 = opus + Codex 2자 적대 리뷰(단계별 특화 Advocate/Adversary) — 웹 consult 폐기, 불일치→사용자, effort 메인 xhigh | 확정 |
-| [0032](0032-주석컨벤션-2계층-overview헤더.md) | 주석 컨벤션 = 2계층(인라인 좁히기 + load-bearing overview 헤더) + ADR 앵커 점진 확대 (캐논 docs/reference/commenting-conventions.md) | 확정 |
+| [0027](0027-모드별-인스턴스-스코프-데이터위치.md) | 모드별 인스턴스 스코프 + 데이터 위치 — embedded=폴더별/폴더-로컬, daemon=전역/유저-global (ADR-0024 데이터-공유 폐기) | 폐기 (Superseded by ADR-0029) |
+| [0028](0028-백엔드-이벤트버스-소유-단일push채널.md) | 백엔드가 이벤트버스를 소유 — 단일 push 채널(백엔드→트레이/WebView/LLM) | 확정 |
+| [0029](0029-embedded-제거-daemon-only-통일.md) | embedded(싱글) 모드 제거 — daemon-only 통일 (ADR-0027 폐기, 0020/0026 일부 정리) | 확정 (부분 폐기 by ADR-0134: 단일 인스턴스 스코프와 릴리스 데이터 폴더 위치 대체) |
+| [0030](0030-capability-합성-transport-backend.md) | capability 산출 = transport(물리) ⊕ backend(프로그램) 합성 | 확정 (부분 폐기 by ADR-0245: PTY 능력 목록의 interrupt 가 거짓이 된다) |
+| [0031](0031-검수체계-opus-codex-2자-적대리뷰.md) | 검수 체계 — opus + Codex 2자 적대 리뷰 (웹 consult 폐기, 단계별 특화 역할) | 확정 |
+| [0032](0032-주석컨벤션-2계층-overview헤더.md) | 주석 컨벤션 — 2계층(인라인 좁히기 + load-bearing overview 헤더) + ADR 앵커 점진 확대 | 확정 |
 | [0033](0033-검증기록-스킬-인프라-2층-골격바인딩-adr-하이브리드.md) | 검증·기록 스킬 인프라 — 2층 골격+바인딩 + adr 하이브리드 | 확정 |
 | [0034](0034-문서-아키텍처-개발-플로우-중심-frame-claudemd-라우터화.md) | 문서 아키텍처 — 개발 플로우 중심 frame + CLAUDE.md 라우터화 | 확정 |
 | [0035](0035-레이아웃-권위-src-tauri-클라-데몬-ui-불가지론-에디터-모델.md) | 레이아웃 권위 = src-tauri 클라 (데몬 UI 불가지론, 에디터 모델) | 확정 (부분 폐기 by ADR-0057: ViewManager 내부 모델: 전역 active_view_id(main-전용)+window_bindings → 창별 active + view_owner/windows 탭 소유 / ADR-0169: §5 제어 표면이 __engramLayout 이라는 조항) |
@@ -122,7 +122,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0072](0072-에이전트-트리-계층-구조백엔드-parent-id-reparentprofile-react-arborist-부활-1단-중첩부모삭제루트승격상태-글리프.md) | 에이전트 트리 = 계층 구조(백엔드 parent_id + ReparentProfile) + react-arborist 부활 — 1단 중첩·부모삭제=루트승격·상태 글리프 | 확정 |
 | [0073](0073-제어-슬롯트리팔레트-포커스-제외-click-to-focus를-콘텐츠-슬롯으로-한정.md) | 제어 슬롯(트리·팔레트) 포커스 제외 — click-to-focus를 콘텐츠 슬롯으로 한정 | 확정 (부분 폐기 by ADR-0224: 백엔드 포커스 강제 보류 조항) |
 | [0074](0074-json-stream-json-모드-resume-활성화-adr0044-후속-완료-통제-sid-adr0008-재사용.md) | json(stream-json) 모드 resume 활성화 — ADR-0044 후속 완료 (통제-sid/ADR-0008 재사용) | 확정 |
-| [0075](0075-상태-글리프-색-허용-활성-녹색-테마-변수-adr0062-색-아님-개정-eink-별도-모드.md) | 상태 글리프 색 허용(활성=녹색, 테마 변수) — ADR-0062 "색 아님" 개정 (e-ink 별도 모드) | 확정 (부분 폐기 by ADR-0168: 글리프 매핑 심볼 교체) |
+| [0075](0075-상태-글리프-색-허용-활성-녹색-테마-변수-adr0062-색-아님-개정-eink-별도-모드.md) | 상태 글리프 색 허용(활성=녹색, 테마 변수) — ADR-0062 "색 아님" 개정 (e-ink 별도 모드 분리 전제) | 확정 (부분 폐기 by ADR-0168: 글리프 매핑 심볼 교체) |
 | [0076](0076-활성화기존-세션-resume-fresh는-새-sid-발급재사용-금지-adr-0008-정련.md) | 활성화=기존 세션 resume, Fresh는 새 sid 발급(재사용 금지) — ADR-0008 정련 | 확정 (부분 폐기 by ADR-0077: 수동 활성화(activate_profile)도 resume 조기종료 시 restore_one 과 동일한 fresh-fallback 을 공유한다 / ADR-0082: fallback_fresh 관련 불변식·"fresh-fallback 유효" 문구 폐지: 활성화=resume·Fresh=새 sid·sid 발급 단일점은 유효 / ADR-0185: 우리 쪽 sid 발급 전제 / ADR-0226: 결정 첫 항의 명시적 resume=true 존중과 둘째 항의 new_session_id 발급 영속 수단 및 영향의 ensure_session_id 불변식) |
 | [0077](0077-수동-활성화도-resume-조기종료-시-fresh-fallback-공유-adr-0076-정련.md) | 수동 활성화도 resume 조기종료 시 fresh-fallback 공유 — ADR-0076 정련 | 폐기 (Superseded by ADR-0082) |
 | [0078](0078-렌더-모드는-에이전트-생성-시-결정고정-per-activation-활성화-오버라이드-폐기.md) | 렌더 모드는 에이전트 생성 시 결정·고정 (per-activation 활성화 오버라이드 폐기) | 확정 |
@@ -178,7 +178,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0128](0128-우편-채널-하드-단일화-capability로만-갈리고-물리-배선도-교육과-등호.md) | 우편 채널 하드 단일화 — capability로만 갈리고 물리 배선도 교육과 등호 | 확정 (부분 폐기 by ADR-0132: 제어 CLI 우편 동사 금지 제약) |
 | [0129](0129-데몬-lib-3층-분리-네트워크-lib-에이전트-시스템-lib-얇은-조립-바이너리.md) | 데몬 lib 3층 분리 — 네트워크 lib · 에이전트 시스템 lib · 얇은 조립 바이너리 | 확정 (부분 폐기 by ADR-0130: 결정 2와 3 보류) |
 | [0130](0130-데몬-lib-추가-분리-보류-목적은-net-분리로-달성-응용-층은-소비자-없음.md) | 데몬 lib 추가 분리 보류 — 목적은 net 분리로 달성, 응용 층은 소비자 없음 | 확정 (부분 폐기 by ADR-0151: 분리 판정 기준 / ADR-0236: 재개 조건 2와 재론 트리거) |
-| [0131](0131-CI-도입-windows-단일-러너-검증-전용-릴리즈는-태그-트리거.md) | CI 도입 — windows 단일 러너 · 검증 전용 · 릴리즈는 태그 트리거 | 확정 (부분 폐기 by ADR-0232: 결정 2 매 push 범위에서 문서 경로만 바뀐 push와 PR 제외) |
+| [0131](0131-CI-도입-windows-단일-러너-검증-전용-릴리즈는-태그-트리거.md) | CI 도입 — windows 단일 러너 · 검증 전용 · 릴리즈는 태그 트리거 | 확정 (부분 폐기 by ADR-0232: 결정 2 매 push 범위에서 문서 경로만 바뀐 push와 PR 제외 / ADR-0340: 영향 로컬/CI 분담의 전체 회귀는 CI) |
 | [0132](0132-제어-평면-cli-단일-실행파일에-우편과-제어를-담고-우편-격리를-데몬-거절로-옮긴다.md) | 제어 평면 CLI — 단일 실행파일에 우편과 제어를 담고 우편 격리를 데몬 거절로 옮긴다 | 확정 (부분 폐기 by ADR-0220: 그룹 help 발견 경로) |
 | [0133](0133-우편-노출은-스폰-시-주입한-표식으로-가리고-거절-응답은-대안-채널을-알리지-않는다.md) | 우편 노출은 스폰 시 주입한 표식으로 가리고 거절 응답은 대안 채널을 알리지 않는다 | 확정 (부분 폐기 by ADR-0220: 우편 가시성 필터 / ADR-0285: 결정 2 의 help 무자격증명 성질과 거부한 대안 첫 항목의 데몬 조회 기각 사유) |
 | [0134](0134-릴리스-데이터-폴더를-실행-폴더-하위-engram-data-로-단일-인스턴스-스코프를-데이터-폴더-기준으로.md) | 릴리스 데이터 폴더를 실행 폴더 하위 engram-data 로 + 단일 인스턴스 스코프를 데이터 폴더 기준으로 | 확정 (부분 폐기 by ADR-0135: 연결키 파일을 잠금 파일에 통합 / ADR-0136: 릴리스 데이터 폴더 이름) |
@@ -194,7 +194,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0144](0144-빈-슬롯-좌클릭은-포커스만-메뉴는-우클릭-전용.md) | 빈 슬롯 좌클릭은 포커스만, 메뉴는 우클릭 전용 | 확정 |
 | [0145](0145-json-모드-빈-상태-화면-복원-완료-신호-기준-마스코트와-가운데-입력창.md) | JSON 모드 빈 상태 화면 = 복원 완료 신호 기준, 마스코트와 가운데 입력창 | 확정 (부분 폐기 by ADR-0146: 마스코트 임계 높이 접힘 / ADR-0226: 결정 1 빈 상태 판정 및 근거의 프로토콜 무변경 전제) |
 | [0146](0146-빈-상태-마스코트-접힘-폐지-자연-잘림과-svg-렌더.md) | 빈 상태 마스코트 접힘 폐지, 자연 잘림과 SVG 렌더 | 확정 |
-| [0147](0147-전역-리셋-블록-삭제-tailwind-preflight-중복.md) | 전역 리셋은 Tailwind base 계층 안에 둔다 | 확정 |
+| [0147](0147-전역-리셋-블록-삭제-tailwind-preflight-중복.md) | 전역 `*` 리셋 블록 삭제 — Tailwind preflight가 이미 덮는다 | 확정 |
 | [0148](0148-에이전트가-없는-슬롯은-내용을-고정하고-흐리게-심볼.md) | 에이전트가 없는 슬롯은 내용을 고정하고 흐리게 + 심볼 | 확정 (부분 폐기 by ADR-0149: 에이전트 부재의 단일 판정 / ADR-0165: 문구 없음 조항의 범위를 세 슬롯 공용 막으로 넓힘) |
 | [0149](0149-슬롯의-에이전트-부재를-세-상태로-가른다.md) | 슬롯의 에이전트 부재를 세 상태로 가른다 | 확정 (부분 폐기 by ADR-0280: ① 결정 (A) 의 스폰 대기 흡수 ② 결정 (C) 의 문구, 프로필이 지워진 슬롯 ③ 근거 마지막 항목 중 예약 노드를 활성화한 직후 죽은 표시가 스침을 피해야 한다는 판단을 기억 없는 예약 슬롯에 한해 ④ 영향의 알려진 한계 중 기억 없는 렌더러의 표시 ⑤ 거부한 대안 「삭제도 흐림으로 통일」의 사유를 기억 없는 예약 슬롯에 한해) |
 | [0150](0150-명부-주인은-클라이언트가-만든-식별자-끊기면-자취-없이-제거한다.md) | 명부 주인은 클라이언트가 만든 식별자 — 끊기면 자취 없이 제거한다 | 확정 |
@@ -219,7 +219,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0169](0169-챗-스타일은-명령이-아니라-설정-데이터이고-버스-이전-곁문-둘을-걷는다.md) | 챗 스타일은 명령이 아니라 설정 데이터이고 버스 이전 곁문 둘을 걷는다 | 확정 (부분 폐기 by ADR-0265: 결정 1의 ui.refresh 경로와 받아들인 대가와 chatStyleStore 불변식) |
 | [0171](0171-상태의-거처는-누가-보나와-언제까지-사나로-정한다.md) | 상태의 거처는 누가 보나와 언제까지 사나로 정한다 | 확정 |
 | [0172](0172-에이전트-실패는-미리-감지하지-않고-실패한-자리에서-기록한다.md) | 에이전트 실패는 미리 감지하지 않고 실패한 자리에서 기록한다 | 확정 |
-| [0173](0173-실패-표시는-트리에서-기호를-갈아끼우고-슬롯은-기존-종료-화면에-얹는다.md) | 실패 표시는 트리에서 기호를 갈아끼우고 슬롯은 기존 종료 화면에 얹는다 | 확정 (슬롯 조항은 ADR-0165 로 대체 — 화면은 아이콘만, 사유는 트리 hover 만) |
+| [0173](0173-실패-표시는-트리에서-기호를-갈아끼우고-슬롯은-기존-종료-화면에-얹는다.md) | 실패 표시는 트리에서 기호를 갈아끼우고 슬롯은 기존 종료 화면에 얹는다 | 확정 (부분 폐기 by ADR-0165: 슬롯 조항(화면은 아이콘만, 사유는 트리 hover 만)) |
 | [0174](0174-셸-유닛테스트는-lib-내장-타깃을-끄고-명시-test-타깃으로-옮겨-세운다.md) | 셸 유닛테스트는 lib 내장 타깃을 끄고 명시 [[test]] 타깃으로 옮겨 세운다 | 확정 |
 | [0175](0175-코어를-agent-와-base-로-가른다.md) | 코어를 agent 와 base 로 가른다 | 확정 (부분 폐기 by ADR-0176: 결정 4와 5 보류 / ADR-0266: 결정 1의 PID 헬퍼 거처와 결정 2의 Job Object 래퍼 거처와 거부한 대안 첫 항목 중 platform 쪽 / ADR-0269: 영향의 입주 조건 1번과 세 번째 입주자 되열 조항과 거부한 대안의 util 잡동사니 이름 사유 / ADR-0270: 영향의 의존 그래프 중 셸이 agent 를 쥐는 줄과 근거의 COMMAND_SPECS 필터 필요 이유 / ADR-0271: 영향의 의존 그래프 중 discovery 가 든 줄 / ADR-0272: 영향의 의존 그래프 중 protocol 이 command 를 쥐는 줄) |
 | [0176](0176-명령-이름-접두를-넣지-않고-셸-필터를-남긴다.md) | 명령 이름 접두를 넣지 않고 셸 필터를 남긴다 | 확정 (부분 폐기 by ADR-0270: 결정 2의 COMMAND_SPECS 간선과 데몬 이름 쪽 예약 필터 유지와 거부한 대안 중 필터만 없앤다의 근거와 영향의 reserved_names 삭제 금지 경고와 셸 agent 의존 잔존) |
@@ -356,3 +356,4 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0307](0307-llm-명령-규칙-명령은-한-호출-조회는-영역별로-바로-출력.md) | LLM 명령 규칙 — 명령은 한 호출, 조회는 영역별로 바로 출력 | 확정 |
 | [0308](0308-데몬은-화면-내용을-모른다-셸이-에이전트-참조로-표시한-인자는-데몬이-중계-전에-id-로-바꾼다.md) | 데몬은 화면 내용을 모른다 — 셸이 에이전트 참조로 표시한 인자는 데몬이 중계 전에 id 로 바꾼다 | 확정 |
 | [0309](0309-우편-내부-키는-에이전트-id-가장자리-주소는-이름-그대로.md) | 우편 내부 키는 에이전트 id — 가장자리 주소는 이름 그대로 | 확정 |
+| [0340](0340-full-regression-runs-locally-before-commit-ci-is-a-post-push-check.md) | Full regression runs locally before commit, CI is a post-push check | 확정 |

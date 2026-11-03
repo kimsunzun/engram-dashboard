@@ -38,6 +38,7 @@
 | 표시 정책이 표면마다 흩어져 있다 | 트리거 대기 | 큼 | [`todo/display-policy.md`](todo/display-policy.md) |
 | 터미널 치수 전파 | 트리거 대기 | 중간 | [`todo/terminal-sizing.md`](todo/terminal-sizing.md) |
 | 재생·구독 | 트리거 대기 | 중간 | [`todo/replay-subscription.md`](todo/replay-subscription.md) |
+| LLM 제어 — 남은 갭 | 트리거 대기 | 불명 | [`todo/llm-control-gaps.md`](todo/llm-control-gaps.md) |
 | 이름·기록 | 트리거 대기 | 큼 | [`todo/naming-and-records.md`](todo/naming-and-records.md) |
 | QA 절차 문서가 CI 테스트 입력이다 — 결합 풀기 | 트리거 대기 | 중간 | [`todo/qa-doc-test-coupling.md`](todo/qa-doc-test-coupling.md) |
 | 프론트엔드 모듈 분리 | 소유됨 | 불명 | [`todo/frontend-module-split.md`](todo/frontend-module-split.md) |
@@ -58,6 +59,6 @@
 
 ## 공통 — 어느 항목이든
 
-- 커밋 제목 스텝 번호 = 새 주제마다 새 번호 — 받는 때 · 고르는 법의 정본은 `CLAUDE.md` 「브랜치·커밋」(사용자 결정 2026-10-19 · 옛 「마지막 스텝을 잇고 임의로 올리지 않는다」 폐기).
-- 소스가 한 줄이라도 바뀌면 커밋 전 `/qa`. 비자명 변경이면 코더 스폰 + `/review`.
-- 브랜치는 master 에서 판다. **master 를 상시 체크아웃하지 않는다** — 통합 절차의 정본은 `CLAUDE.md` 「브랜치·커밋」.
+- 커밋 제목 스텝 번호 = 새 주제마다 새 번호 — 받는 때 · 고르는 법의 정본은 `handbook/branch-commit.md`.
+- 코드 변경은 `/engram-implement` 로 한다(리뷰 · QA 포함).
+- 브랜치는 master 에서 판다. **master 를 상시 체크아웃하지 않는다** — 통합 절차의 정본은 `handbook/branch-commit.md`.
