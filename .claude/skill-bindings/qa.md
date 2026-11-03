@@ -33,7 +33,7 @@
 - 범위 정의:
   - **전체 회귀** = CI 세 잡(`backend` · `gates` · `frontend`)을 로컬에서 도는 것. 절차 = qa-verify 「전체 회귀 — CI 세 잡 로컬 실행」.
   - **영향 모듈** = 아래 「모듈별 명령」의 그 모듈 줄. 변이 확인 · 재현 명령 · 작은 수정 확인에 쓴다.
-- 로컬 순서 = 전체 회귀 → 로컬 레인 → 변이 확인 → GUI 실측. 로컬 단계끼리 병렬로 돌리지 않는다.
+- 로컬 순서 = 전체 회귀 → 로컬 레인 → (깨지면) 깨진 테스트 가르기 → 변이 확인 → GUI 실측. 로컬 단계끼리 병렬로 돌리지 않는다.
 
 ## 전체 회귀 = 로컬
 
@@ -70,6 +70,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Co
 - 완료 = 로그 마지막 줄 `__EXIT=<종료코드>`. 마커가 없으면 아직 안 끝났거나 실행 실패다 — 빈 로그 · 마커 없음은 PASS 가 아니다.
 - `-WorkDir` · `-LogFile` 은 슬래시 경로로 준다 — bash 에서 `\` 뒤의 `$` 는 이스케이프되어 경로가 깨진다.
 - 감싸지 않는 것: `rg` · `cargo tree … | rg` 게이트(래퍼의 cmd 에는 `rg` 가 없다) · `%` 가 든 명령(배치가 `%` 를 먹는다).
+- 한글 인자는 래퍼를 거치면 `?` 로 깨진다(배치를 ASCII 로 쓴다) — vitest `-t <한글 이름>` 대신 파일 단위로 돌리고 출력에서 이름을 찾는다.
 - `call` 을 손으로 붙이지 않는다 — 래퍼가 배치 대상에만 붙인다.
 - Git Bash 에서 `/` 로 시작하는 인자(`taskkill /PID` 등) · `/` 가 든 `gh -q` 식 · `<ref>:<경로>` 인자는 앞에 `MSYS_NO_PATHCONV=1` 을 붙인다.
 
@@ -100,6 +101,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Co
 - `-- --test-threads=4` 는 실 자식 프로세스를 띄우는 시험이 있는 crate(platform · agent · daemon · cli)와 워크스페이스 전체에만 붙인다.
 - `npx tsc --noEmit` 은 통과하면 아무것도 안 찍는다 — 판정은 `__EXIT=0` 으로만 한다.
 - `cargo build` · `cargo test` 가 `os error 5` 로 죽으면 떠 있는 앱 · 데몬이 `target` 의 exe 를 잡은 것이다 — 그 프로세스를 끄지 않는다. `--target-dir "$QA_TMP/target"` 를 붙여 다시 돈다(분리 실행은 환경변수를 넘기지 못한다). 그 빌드의 exe 는 `$QA_TMP/target/<debug|release>/` 에 생긴다.
+- 따뜻한 빌드를 다시 쓰는 자리는 이 워크트리의 `target/`(기본 — `--target-dir` 없음)뿐이다. 다른 워크트리의 `target/` 을 `--target-dir` 로 주지 않는다 — 그 트리의 `target/debug/*.exe` 를 덮는다.
+- 게이트는 초록인데 앱 빌드 · 기동만 죽으면(예: `failed to read plugin permissions … (os error 3)`) diff 를 의심하기 전에 `target/` 에 다른 루트의 산출물이 섞였나 본다. 아래가 찍는 폴더가 그것이다 — 지우지 않고 그 패키지 이름과 처방 `cargo clean -p <패키지>` 를 보고한다:
+  ```bash
+  grep -LF "$(cygpath -w "$PWD")\\target\\" target/*/build/*/root-output
+  ```
 
 ## 로컬 레인 — CI 가 못 도는 시험
 
@@ -137,23 +143,52 @@ cargo test -p engram-dashboard-agent --test backend_contract -- --ignored --test
 | 셸 실 데몬 | 표의 `discovery` · `stop.rs` 행 | `cargo build -p engram-dashboard-daemon` 뒤 `cargo test -p engram-dashboard --test stop_smoke -- --ignored --test-threads=1` |
 | 실 프로세스 Job | `crates/engram-dashboard-platform/src/group/**` · `crates/engram-dashboard-agent/src/reaper.rs` | `cargo test -p engram-dashboard-daemon --test ws_e2e -- --ignored --test-threads=4` · `cargo test -p engram-dashboard-platform -- --ignored msys --test-threads=4`(Git Bash 필요) |
 
-- `stop_smoke` 의 `send_stop_makes_real_daemon_self_exit` 는 알려진 실패다 — FAIL 로 보고하고 `docs/tracking.md` T-52 를 단다.
-- `ws_e2e` 의 `real_process::ignored_daemon_kill_cleans_pty_child` 는 알려진 실패다 — FAIL 로 보고하고 `docs/process/step-log.md` 「부팅 자동 resume OFF」를 단다(데몬 부팅 자동 복원을 끈 뒤로 실패한다).
+- 이 두 레인에 알려진 실패가 있다 — 「알려진 실패 목록」.
 - `lib_unit` 의 실 WMI 시험(`--ignored real_wmi`)은 표가 켜지 않는다 — 운영 데이터 폴더 `.engram-dev` 를 건드린다. 메인이 사용자에게 돌릴지 묻고, 돌리면 앱을 띄우기 전에 `cargo test -p engram-dashboard --test lib_unit -- --ignored real_wmi --test-threads=1`.
 - `lib_unit` 에 맨 `--ignored` 를 쓰지 않는다 — 실 WMI 와 골든 다시 뜨기(`regenerate_bands_golden`)가 함께 돈다.
+
+## 알려진 실패 목록
+
+깨진 테스트를 가를 때 이름과 메시지가 둘 다 맞으면 `FAIL(알려진 실패)` 다 — 기준점에서 재현하지 않는다. 메시지가 다르면 목록 밖이다.
+
+- `stop_smoke` `send_stop_makes_real_daemon_self_exit` — `assert_eq` 실패 `left: Timeout` · `right: DaemonClosed`. 기록 = `docs/tracking.md` T-52.
+- `ws_e2e` `real_process::ignored_daemon_kill_cleans_pty_child` — panic `… PTY child(cmd.exe)를 OS 트리 열거로 식별하지 못함`(데몬 부팅 자동 복원을 꺼 자식이 안 뜬다). 기록 = `docs/process/step-log.md` 「부팅 자동 resume OFF」.
+
+## 추적 기록 위치
+
+`FAIL(선재)` 는 `docs/tracking.md`(T-번호 항목)와 `docs/process/step-log.md` 에서 시험 이름으로 찾는다:
+
+```bash
+grep -nF '<시험 이름>' docs/tracking.md docs/process/step-log.md
+```
+
+- 찾으면 파일과 T-번호 · 헤딩을 적는다. 안 나오면 「기록 없음」.
+
+## 기준점 사본 (비용 있음)
+
+「알려진 실패 목록」에 없는 깨진 테스트만 리뷰 기준점에서 다시 돈다:
+
+```bash
+git worktree add --detach "$QA_TMP/base" <기준점>
+```
+
+- 사본 = 기준점 그대로다 — 작업 트리 변경을 얹지 않는다. 변이 확인 사본(`$QA_TMP/wt`)과 따로 둔다.
+- Rust: 분리 실행을 `-WorkDir "$QA_TMP/base"` 로, 깨진 줄(「모듈별 명령」 · 레인 줄)에 `--target-dir "$QA_TMP/target"` 를 붙이고 `--` 뒤에 `--exact <깨진 이름>…` 을 더한다. 데몬 빌드가 앞에 붙은 레인은 그 빌드도 같은 `--target-dir` 로 짓는다.
+- 프론트: 사본에서 분리 실행으로 `npm ci` 뒤 `npx vitest run <깨진 시험 파일>`.
+- 같은 이름 · 같은 메시지로 깨지면 `FAIL(선재)` → 「추적 기록 위치」. 기준점에서 통과하면 라벨을 붙이지 않는다.
 
 ## 변이 확인 — 격리 사본
 
 ```bash
 git worktree add --detach "$QA_TMP/wt" HEAD
-git diff HEAD --binary | git -C "$QA_TMP/wt" apply --allow-empty
+git -c core.safecrlf=false diff HEAD --binary | git -C "$QA_TMP/wt" apply --allow-empty
 git ls-files -o --exclude-standard -z | xargs -0 -r cp --parents -t "$QA_TMP/wt"
 ```
 
 - 사본 = HEAD 에 작업 트리의 변경(추적 파일 diff · 무시 안 된 미추적 파일)을 얹은 것이다 — qa 는 커밋 전에 돈다.
 - `--allow-empty` 는 추적 파일 변경이 없을 때(미추적 추가뿐 · 커밋 뒤 재실행) 빈 diff 를 통과시킨다 — 빼면 종료코드 128 로 죽는다.
 - 그 밖에 `apply` 가 실패하면 변이 확인을 멈추고 보고한다 — 변경이 빠진 사본으로 재지 않는다.
-- 줄끝만 다른 ` M` 파일은 `git diff` 에 안 나와 사본에 건너가지 않는다 — 내용은 같다.
+- 줄끝만 다른 ` M` 파일은 `git diff` 에 안 나와 사본에 건너가지 않는다 — 내용은 같다. `-c core.safecrlf=false` 는 그 파일마다 찍히는 LF→CRLF 경고만 끈다(오류는 그대로 찍힌다).
 - Rust: 사본 줄을 깬 뒤 분리 실행을 `-WorkDir "$QA_TMP/wt"` 로 `cargo test --target-dir "$QA_TMP/target" -p <crate> <시험 이름>` — 실패해야 한다.
 - 프론트: 사본에서 `npm ci` 뒤 `npx vitest run <시험 파일>`.
 - 사본은 뒷정리 때 통째로 지운다. 작업 트리는 `git status --porcelain` 이 시작 때와 같아야 한다.
@@ -250,25 +285,28 @@ MSYS_NO_PATHCONV=1 taskkill /PID <이번에 띄운 1420 주인 PID> /F
   ```
 - 찍힌 것만 `MSYS_NO_PATHCONV=1 taskkill /PID <PID> /F` 로 하나씩 끈다. 이 조회를 돌린 셸(`bash.exe` · `powershell.exe`)은 명령줄에 경로가 있을 뿐이라 끄지 않는다. 이름만 보고 끄지 않는다.
 - 남은 것이 없어진 뒤 「뒷정리」에서 `$QA_TMP` 를 지운다.
-- `rm -rf "$QA_TMP"` 가 사용 중으로 실패하면 조회에 안 걸린 손자가 남았을 수 있다(codex JSON 모드는 명령줄에 경로가 없다) — 끄지 말고 사용자에게 보고한다.
+- 휴지통 명령이 `$QA_TMP` 에 `FAIL` 을 찍으면(사용 중) 조회에 안 걸린 손자가 남았을 수 있다(codex JSON 모드는 명령줄에 경로가 없다) — 끄지 말고 사용자에게 보고한다.
 
 ## 비용 있는 검사 (알리고 진행)
 
 - claude · codex 레인 — 토큰 · 사용 한도.
 - GUI 실측 — 클라이언트 · 데몬 빌드 수 분, 릴리스 빌드는 더 길다.
 - `--target-dir "$QA_TMP/target"` 우회 · 변이 사본 — 찬 빌드 수 분.
+- 기준점 사본 — 찬 빌드 수 분(프론트면 `npm ci` 를 더한다).
 
 ## 뒷정리
 
 ```bash
-git worktree remove --force "$QA_TMP/wt"
-rm -f <분리 실행이 찍은 BAT= 경로들>
-rm -rf "$QA_TMP"
+for w in wt base npm; do [ -d "$QA_TMP/$w" ] && git worktree remove --force "$QA_TMP/$w"; done
+bash ~/.claude/references/recycle.sh <분리 실행이 찍은 BAT= 경로들> "$QA_TMP"
+git worktree prune
 ```
 
-- `git worktree remove` 가 긴 경로로 실패하면 빈 폴더로 미러해 비운 뒤 지운다:
+- 삭제는 휴지통 명령으로만 한다(`rm -rf` 는 권한이 막는다). 줄마다 `recycled` · `skip (missing)` 이면 된 것이다. 명령이 없거나 막히면 다른 명령으로 돌아가지 않고 남은 경로를 보고한다.
+- `git worktree prune` 이 휴지통으로 간 사본을 git 에서 뗀다 — `git worktree list` 에 `$QA_TMP` 아래가 남지 않아야 한다.
+- `git worktree remove` 가 긴 경로로 실패하면 그 사본을 빈 폴더로 미러해 비운 뒤 지운다:
   ```bash
-  mkdir -p "$QA_TMP/empty"; MSYS_NO_PATHCONV=1 robocopy "$QA_TMP/empty" "$QA_TMP/wt" /MIR /NFL /NDL /NJH /NJS /NP > "$QA_TMP/robocopy.log"; rc=$?; echo "robocopy rc=$rc"; [ "$rc" -lt 8 ] && git worktree prune && rm -rf "$QA_TMP"
+  mkdir -p "$QA_TMP/empty"; MSYS_NO_PATHCONV=1 robocopy "$QA_TMP/empty" "$QA_TMP/<사본>" /MIR /NFL /NDL /NJH /NJS /NP > "$QA_TMP/robocopy.log"; rc=$?; echo "robocopy rc=$rc"; [ "$rc" -lt 8 ] && bash ~/.claude/references/recycle.sh "$QA_TMP" && git worktree prune
   ```
 - robocopy 종료코드 0~7 은 성공이다. 8 이상이면 `$QA_TMP` 가 남는다 — `robocopy.log` 를 읽고 보고한다.
 - robocopy 출력은 로그로 돌린다 — `/NFL` 을 줘도 지운 파일마다 한 줄씩 찍는다.

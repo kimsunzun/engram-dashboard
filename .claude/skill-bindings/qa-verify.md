@@ -20,7 +20,7 @@ cargo check -p engram-dashboard --features snap-overlay
 cargo test -p engram-dashboard-platform --features snap-overlay -- window::snap --test-threads=4
 ```
 
-- 그 밖에 `qa.md` 「모듈별 명령」의 crate 줄을 전부 돈다(셸 타깃 다섯 · net 두 줄 · transport 세 줄 포함).
+- 그 밖에 `qa.md` 「모듈별 명령」의 crate 줄을 전부 돈다(셸 타깃 다섯 · net 두 줄 · transport 세 줄 포함). daemon 줄은 뺀다 — backend 잡에 따로 없고 워크스페이스 줄이 이미 돈다.
 - `--list` 세 줄은 줄마다 `: test` 로 끝나는 줄이 1개 이상이어야 PASS 다.
 - `window::snap` 줄은 `test window::snap::` … `ok` 줄이 1개 이상이어야 PASS 다.
 - 로컬 워크스페이스 회귀는 실 claude 시험을 빼지 않는다 — claude 가 없거나 미로그인이면 FAIL 이다.
@@ -109,23 +109,39 @@ for f in "$QA_TMP"/gate-*.sh; do ( set -eo pipefail; RUNNER_TEMP="$QA_TMP"; sour
 - `createClaudeProfile(name, cwd, extraArgs, env, autoRestore, outputFormat?)` · `createCodexProfile(…같은 인자)` → 프로필. `spawnProfile(id, resume)` · `deleteProfile(id)` · `setProfileAutoRestore(id, bool)`.
 - `outputFormat` 을 빼면 `'Terminal'` 이다 — 레지스트리 경로의 기본(`'StreamJson'`)과 다르다.
 - `window.__engram`(store 스냅샷)은 DEV 빌드에만 있다.
+- view 캐시(`useViewStore`)는 `__engram` 에 없다 — `performance.getEntriesByType('resource')` 에서 페이지가 받은 `/src/store/viewStore.ts…` URL 을 찾아 그 URL 그대로 `import()` 한다(DEV). 쿼리를 뗀 URL 은 빈 새 스토어를 연다.
 
 ### 셸 invoke — `window.__TAURI__.core.invoke`
 
 - 셸 command 를 바로 부른다 — `list_tabs` · `get_view` · `set_split_ratio`(칸 폭 · 비율 하한 0.1) · `assign_agent` · `move_slot_to_window` · `settings_set` · `restore_status`.
+- `list_tabs` 는 창 label 을 받는다 — `invoke('list_tabs', { window: 'main' })`. `{}` 면 던진다.
 - 데몬 버스 명령(토큰 없이 · main 창) = `invoke('forward_daemon_command', { cmd: { Command: { envelope: { name: '<명령>', request_id: crypto.randomUUID(), owner: '', proto_ver: 1, args: { … } } } } })`.
 - IPC 호출을 엿볼 때 `window.__TAURI_INTERNALS__.invoke` 를 바꿔 끼우지 않는다 — 대입이 조용히 무시된다. `window.fetch` 를 감싸 `http://ipc.localhost/<command>` 요청을 본다.
+- 어느 호출부가 쐈나 = 감싼 자리에서 `new Error().stack`. 줄번호는 vite 변환본 기준이다 — `fetch('/src/<경로>.tsx')` 로 변환본을 받아 맞춘다(DEV).
 - 챗 스타일 값은 인라인 값으로 잰다 — `document.documentElement.style.getPropertyValue('--chat-font-size')`. `getComputedStyle` 은 테마 fallback 때문에 적용 경로가 죽어도 통과한다.
 
 ### 짧은 상태 · 실 에이전트
 
 - 1초 미만으로 사는 화면 상태는 폴링으로 못 잡는다 — 페이지에 `MutationObserver` 기록기를 먼저 걸고 동작을 일으킨다.
+- 그 상태를 세워 두고 재려면 칸에 올리기 전에 `window.__ENGRAM_AGENT__.subscribeOutput` 을 감싸 이력 청크를 붙잡았다가 순서대로 푼다.
+- 이 PC 의 WebView 는 `prefers-reduced-motion: reduce` 를 보고한다 — 움직임은 CDP `Emulation.setEmulatedMedia`(`prefers-reduced-motion` = `no-preference`)를 건 뒤 잰다.
+- 구독이 나갔나는 셸 · 데몬 로그에 안 남는다 — 그 이벤트(예: `usage-limits-updated`)를 `window.__TAURI__.event.listen` 으로 듣고 첫 스냅숏 도착으로 본다.
+- 새 패키지를 더한 뒤 첫 기동은 vite 가 의존성을 다시 최적화해 main 창이 `Invalid hook call` 로 빌 수 있다 — `location.reload()` 한 번.
 - codex 승인 거절 시험의 쓰기 대상은 `%TEMP%` 밖에 둔다 — `$QA_TMP` 도 `%TEMP%` 안이라 승인 요청이 서지 않는다. 그 폴더는 뒷정리 목록에 더한다.
+
+### 에이전트 입출력
+
+- claude · codex 는 입력 전 출력 0건 · 뷰 `buffering` 이 정상이다 — 실측 단위는 스폰이 아니라 입력 → 응답이다.
+- 터미널 에이전트 입력 = `window.__ENGRAM_AGENT__.writeStdin(id, new TextEncoder().encode('<글>'))`. codex TUI 는 `'\r'` 을 따로 한 번 더 쓴다 — 함께 쓰면 입력창에 남는다.
+- 챗 칸 입력 = 그 칸 `textarea` 에 native setter(`Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set`)로 값을 넣고 `input` 이벤트 뒤 Enter `keydown`(둘 다 `bubbles: true`). 빈 칸 표식 = `[data-rich-empty]`.
+- 에이전트가 실제로 친 명령은 칸 글자가 아니라 세션 기록에서 읽는다 — claude = `~/.claude/projects/<cwd 슬러그>/<세션>.jsonl` 의 tool_use · 결과, codex = `~/.codex/sessions/` rollout(읽기만).
+- 한글이 든 프로세스 명령줄은 콘솔로 읽지 않는다 — `Get-CimInstance Win32_Process … | Out-File -Encoding utf8 "$QA_TMP/<이름>.txt"` 로 떨궈 파일을 읽는다(콘솔 코드페이지가 깨뜨린다).
 
 ## 창 조작 · 세션
 
 - 창 · 포커스 · 화면 캡처 · 네이티브 입력을 재기 전에 세션이 잠기지 않았는지 본다 — `powershell -NoProfile -Command "Get-Process LogonUI -ErrorAction SilentlyContinue"` 가 무엇이든 찍으면 잠김이다(미검 판별). 잠겼으면 그 실측은 수단 없음 PARTIAL 로 일찍 멈춘다.
 - 창 옮기기 · 최대화 · 최소화 · 닫기 · 전경 판정은 웹뷰 JS 로 안 된다(capability 가 막는다).
+- 숨은 창 판정 = 그 창(`CDP_MATCH`)에서 `window.__TAURI__.window.getCurrentWindow().isVisible()`. `document.visibilityState` 는 숨긴 창에서도 `visible` 이다.
 - PowerShell `Add-Type` P/Invoke 는 훅이 막는다 — C# 헬퍼(user32 `SetWindowPos` · `ShowWindow` · `GetForegroundWindow` · `EnumWindows`)를 `$QA_TMP` 에 짓는다:
   ```bash
   MSYS_NO_PATHCONV=1 /c/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe /nologo /out:"$(cygpath -w "$QA_TMP/win.exe")" "$(cygpath -w "$QA_TMP/win.cs")"
