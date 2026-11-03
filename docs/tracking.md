@@ -10,6 +10,7 @@
 
 | ID | 제목(짧게) | 구역 | 상태 |
 |---|---|---|---|
+| T-77 | LLM control — remaining gaps (moved from todo) | 메인 | Waiting for trigger — close each gap when its feature is touched |
 | T-66 | 창 크롬 · 이름(크롬식 제목 표시줄 · 창 번호 재사용 · 창 제목) | 메인 | 진행 — `v0.5.0/feat/window-chrome`(S26) · U1–U9 구현 · U10 문서 착지(2026-10-26) · 사람 손 GUI 확인 2026-10-26(S13 · S14 통과) · 남은 것 = push · CI · master 머지 |
 | T-65 | 슬롯 도킹 LLM 명령(`tab.dock` · `layout.get`) | 메인 | 진행 — S28 `v0.5.0/feat/llm-layout-commands` · U1–U3 구현 · push(`2710e14f` CI 진행 중) · `/qa standard` PASS · 남은 것 = U4 문서 커밋 · GUI 실측 · master 머지 · TRD §11 결정 일곱 사용자 확인 |
 | T-49 | 꺼진 에이전트의 슬롯 쪽 활성화 · 완전한 이어받기 | 메인 | 보류 — 저장 작업 뒤 |
@@ -24,6 +25,7 @@
 | T-11 | child별 권한 스코프(R7) | 메인 | 보류 — 원격 단계 |
 | T-9 | claude 프로세스 풀링 | 메인 | 보류 |
 | T-6 | cwd 워크스페이스 검증 | 메인 | 보류 — 운영 단계 |
+| T-78 | In-app codex terminal on codex 0.163.0 — alt-screen · mouse tracking (S21 TRD §6-F) | 버그 | Open — user decision on the default |
 | T-52 | graceful 데몬 끄기 결과가 `Timeout` | 버그 | 미착수 · 원인 미규명(커밋 가름만) · 3단계 자리 추정 |
 | T-45 | 스폰 이름 중복 · codex 가 claude 로 보임 | 버그 | 보류 — id 전환과 묶음 |
 | T-39 | 실패·거절된 사용량 값 흐리게 | 버그 | 보류 — 사용량 작업과 묶음 |
@@ -61,6 +63,15 @@
 | T-16 | 프론트 종료 판정 · 세대 필터 | 사소한 기능·정리 | 잔존 · T-32 선결 |
 
 ## 메인
+
+### T-77. LLM control — operations the formal surfaces do not reach yet
+- **Status:** waiting for trigger — close each gap when work touches that feature. Moved from `docs/todo/llm-control-gaps.md` on 2026-11-03 (`docs/README.md`: new items go here, not to `todo.md`). Principle = CLAUDE.md 「LLM-우선 제어」. Formal surfaces = daemon bus · front `__engramCmd`.
+- **Tree selection state** — no command changes the agent-tree selection. The only read is the row's `data-selected` attribute (`src/components/agent/AgentList.tsx`).
+- **Interrupting a terminal-mode agent** — `agent.interrupt` answers `CONFLICT` on channels that cannot interrupt (`crates/engram-dashboard-agent/src/commands.rs` `verb_interrupt`), and the bus has no raw-input command. ADR-0245 · accepted by the user.
+- **The shell command table is reachable only while the shell is attached to the daemon** — every command in `src-tauri/src/layout/commands.rs` (windows · tabs · slots · splits · `settings.*` etc. — not daemon-owned ones like `usage.*`). `docs/process/S21-storage/trd.md` §12 R9.
+- **No window position · size · snap commands** — window state (`window.minimize` · `maximize` · `unmaximize` · `raise` etc.) and tab moves (`tab.move` · `tab.dock` · `tab.detach`) are bus commands, but window position and size are human OS gestures only. ADR-0302 · ADR-0303 decision 4 · ADR-0304.
+- **Global handles outside the bus** — handles other than `__engramCmd` remain. Do not list them here; find them with `rg ").__ENGRAM_|).__engram" src/ -g '!*.test.*'` (`__engramCmd` in the output is the formal surface, the rest are gaps). A handle's own comment is not evidence of whether it is a gap.
+- Keybinding remapping = T-42.
 
 ### T-66. 창 크롬 · 이름 — 크롬식 제목 표시줄 · 보이는 창 번호 재사용 · 창 제목
 - **상태:** 진행 — `v0.5.0/feat/window-chrome`(S26 · 2026-10-23~) · PRD 0.5판 · TRD 0.3판(`docs/process/S26-window-chrome/trd.md`) · 구현 U1–U9 커밋(`4cefce48` … `c7295bdb`) · U10 문서 = ADR-0300~0306 · CLAUDE.md · step-log · 도움말 본문(2026-10-26) · 단위마다 `/review code full` 과 QA 를 거쳤다 — 단 U8a 1부 · U8b · U9 는 리뷰 전에 로컬 커밋하고 리뷰 수정을 뒤 커밋으로 더했다 · U2 · U3b 의 QA standard = CI · U8a 2부부터는 2026-10-26 로컬 `/qa standard`(U8a 2부 `bca0686e` · U8a + U8b `49b64836` · U9 `c7295bdb` · U10 `cf26db3d` — 모두 PASS)(CI 초록은 U7b `24782701` 까지 — U8a 부터는 아직 push 전이다 · 로컬 ref 기준 2026-10-26) · ★GUI(`/qa full`)는 PARTIAL — 세션이 잠겨 끝까지 재지 못했다★ · 사람 손 GUI 확인 2026-10-26(사용자 · 주로 다크) = S13 · S14 · AC13 · AC22 · 커서 자리 새 창 통과 → U8b 측정 문 통과(`TOP_GAP` · 놓기 구역 그대로) · AC23 Alt+Space 는 이 PC 의 PowerToys Run 이 가로채 못 봤다(앱 결함 아님) · 상세 = step-log S26. 2026-10-23 줄: PRD 0.4판(사용자 결정 반영 · 리뷰 전) · 슬롯 도킹은 T-66 없이 먼저 머지됨(`c60797a6`). 옛 줄: 예정 — 슬롯 도킹(TRD 7판 U7) 직후 바로(사용자 결정 2026-10-17) · 최종 머지에 포함. 제목 표시줄 없애기와 창 구분은 슬롯 도킹 구현 뒤 바로 이어서 한다(사용자 2026-10-20 — 「그거하고 탭바 제거하는거하고 현재 구현 끝나고 이어서 진행할거.」).
@@ -157,6 +168,11 @@
 - **재도입:** 운영 단계에서 허용 cwd 정책(예: Engram 워크스페이스 하위만) 결정 후 manager.spawn_agent 또는 command 층에서 검증.
 
 ## 버그
+
+### T-78. In-app codex terminal on codex 0.163.0 — alt-screen and mouse tracking
+- **Status:** open — the S21 TRD §6-F default (`--no-alt-screen` or not) is a user decision; reopen it with the evidence below.
+- **Problem:** `docs/process/S21-codex-backend/trd.md` §6-F assumed codex already runs inline without a flag. On codex 0.163.0 the operating codex terminal tab runs in alt-screen with mouse tracking (S31 qa, 2026-11-02).
+- **Observed in the app (S32 qa, 2026-11-03 — observation only):** the folder-trust prompt appears · the xterm has no scrollback · the mouse wheel goes to codex, not to the xterm buffer.
 
 ### T-52. graceful 데몬 끄기(`send_stop`)의 결과가 `DaemonClosed` 대신 `Timeout` 이다 — 데몬은 실제로 내려간다
 - **상태:** 미착수(2026-10-07 발견 — 경계 리팩터링 2-2 U3 의 실 레인 · GUI 실측). 원인은 찾지 않았다. 2-2 에서 고치지 않았다 — 「데몬 수신 루프를 건드려야 해 3단계(transport) 자리」는 추정이다(가름이 수신 루프 커밋을 가리킬 뿐이고, 고칠 자리가 클라이언트 `stop.rs` 일 수도 있다).

@@ -24,7 +24,6 @@
 ## 산출 저장 (flow §6)
 
 - 조사 결과는 묻지 않고 전부 파일로 남긴다 — light 요약도 같다.
-- 보고서 파일은 영어로 쓴다.
 - 기본 경로 = `docs/research/<주제-슬러그>-<YYYY-MM-DD>.md`.
 - 리팩토링 경계 실측 · 구조 부채 계측 = `docs/refactoring/`에 두고 그 폴더 `README.md` 목록에 한 줄 추가한다.
 - 새 보고서는 ADR · `docs/process/<작업>/`의 PRD·TRD · `docs/tracking.md` · `docs/process/step-log.md` 중 한 곳에서 링크한다.
