@@ -55,9 +55,11 @@
 
 ```bash
 QA_TMP="$(cygpath -m "$TEMP")/engram-qa-$(date +%Y%m%d-%H%M%S)"; mkdir -p "$QA_TMP"; echo "$QA_TMP"
+git status --porcelain > "$QA_TMP/status.start"
 ```
 
 - qa 가 만드는 로그 · 스크린샷 · 사본 · 데이터 폴더는 전부 `$QA_TMP` 아래 둔다. Bash 호출이 바뀌면 처음 찍힌 경로를 그대로 다시 쓴다.
+- `status.start` = 시작 때 작업 트리 상태다. 「뒷정리」가 지우기 전에 대조한다.
 
 ### 분리 실행
 
@@ -116,7 +118,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Co
 - 버전 = `claude --version` · `codex --version`(토큰 안 씀).
 - 기록 파일 = `$LOCALAPPDATA/engram-qa/lanes.tsv`(PC 마다 · 저장소 밖). 줄 = `<레인>` · `<CLI 버전>` · `<SHA>` 탭 구분. `<SHA>` = 그 실행이 잰 기준 HEAD — 작업 트리에 커밋 안 된 변경이 있었으면 뒤에 ` +uncommitted` 를 붙인다. 레인이 PASS 면 그 레인 줄을 갈아 쓰고, FAIL 이면 그대로 둔다.
 - 안 켠 레인은 「해당 없음 — 경로 무관 · 버전 같음(<버전>)」으로 적는다.
-- CLI 없음 · 미로그인은 FAIL 이다.
+- CLI 없음 · 미로그인은 수단 없음 PARTIAL 이다(골격 §4) — FAIL 로 적지 않고 라벨도 붙이지 않는다.
 
 | 레인 | 경로 |
 |---|---|
@@ -150,20 +152,22 @@ cargo test -p engram-dashboard-agent --test backend_contract -- --ignored --test
 
 ## 알려진 실패 목록
 
-깨진 테스트를 가를 때 이름과 메시지가 둘 다 맞으면 `FAIL(알려진 실패)` 다 — 기준점에서 재현하지 않는다. 메시지가 다르면 목록 밖이다.
+깨진 테스트를 가를 때 이름과 메시지가 둘 다 맞으면 `FAIL(알려진 실패)` 다 — 기준점에서 재현하지 않는다. 메시지는 실행마다 바뀌는 값(pid · 시각 · 임시 경로)을 빼고 비교한다. 그래도 다르면 목록 밖이다.
 
 - `stop_smoke` `send_stop_makes_real_daemon_self_exit` — `assert_eq` 실패 `left: Timeout` · `right: DaemonClosed`. 기록 = `docs/tracking.md` T-52.
 - `ws_e2e` `real_process::ignored_daemon_kill_cleans_pty_child` — panic `… PTY child(cmd.exe)를 OS 트리 열거로 식별하지 못함`(데몬 부팅 자동 복원을 꺼 자식이 안 뜬다). 기록 = `docs/process/step-log.md` 「부팅 자동 resume OFF」.
 
 ## 추적 기록 위치
 
-`FAIL(선재)` 는 `docs/tracking.md`(T-번호 항목)와 `docs/process/step-log.md` 에서 시험 이름으로 찾는다 — 전체 경로와 마지막 `::` 조각 둘 다(기록은 짧은 이름을 쓴다):
+`FAIL(선재)` 는 재는 트리(워크트리 루트 — 사본 `base` · `wt` 가 아니다)의 `docs/tracking.md`(T-번호 항목)와 `docs/process/step-log.md` 에서 시험 이름으로 찾는다 — 전체 경로와 마지막 `::` 조각 둘 다(기록은 짧은 이름을 쓴다):
 
 ```bash
 N='<시험 이름>'; grep -nF -e "$N" -e "${N##*::}" docs/tracking.md docs/process/step-log.md
+awk -v n=<찾은 줄> 'NR<=n && /^##/ {h=NR": "$0} END {print h}' <그 파일>
 ```
 
-- 찾으면 파일과 T-번호 · 헤딩을 적는다. 안 나오면 「기록 없음」.
+- 찾은 줄이 그 시험 · 증상을 가리키는지 읽어 확인한다 — 짧은 조각은 딴 줄에도 걸린다. 여러 줄이 걸리면 그 시험 · 증상을 말하는 줄이 기록이다.
+- 기록 = tracking.md 면 T-번호, step-log 면 `파일:줄` + 위 둘째 줄이 찍는 그 위 가장 가까운 헤딩. 안 나오면 「기록 없음」.
 
 ## 기준점 사본 (비용 있음)
 
@@ -173,7 +177,7 @@ N='<시험 이름>'; grep -nF -e "$N" -e "${N##*::}" docs/tracking.md docs/proce
 git worktree add --detach "$QA_TMP/base" <기준점>
 ```
 
-- 레인이 환경 탓(CLI 없음 · 미로그인)으로 깨졌으면 가르기 전에 환경 실패로 적는다 — 기준점에서도 깨지므로 `FAIL(선재)` 로 적지 않고 여기서 다시 돌지 않는다.
+- 레인이 환경 탓(CLI 없음 · 미로그인)으로 못 돌았으면 가르지 않는다 — 수단 없음 PARTIAL 로 적고(골격 §4) 여기서 다시 돌지 않는다.
 - 사본 = 기준점 그대로다 — 작업 트리 변경을 얹지 않는다. 변이 확인 사본(`$QA_TMP/wt`)과 따로 두고 빌드 폴더도 따로 쓴다(`$QA_TMP/target-base`).
 - Rust: 분리 실행을 `-WorkDir "$QA_TMP/base"` 로, 깨진 줄(「모듈별 명령」 · 레인 줄)에 `--target-dir "$QA_TMP/target-base"` 를 붙이고 `--` 뒤에 `--exact <깨진 이름>…` 을 더한다. 데몬 빌드가 앞에 붙은 레인은 그 빌드도 같은 `--target-dir` 로 짓는다.
 - 프론트: 사본에서 분리 실행으로 `npm ci` 뒤 `npx vitest run <깨진 시험 파일>`.
@@ -193,8 +197,9 @@ git ls-files -o --exclude-standard -z | xargs -0 -r cp --parents -t "$QA_TMP/wt"
 - 줄끝만 다른 ` M` 파일은 `git diff` 에 안 나와 사본에 건너가지 않는다 — 내용은 같다. `-c core.safecrlf=false` 는 그 파일마다 찍히는 LF→CRLF 경고만 끈다(오류는 그대로 찍힌다).
 - Rust: 사본 줄을 깬 뒤 분리 실행을 `-WorkDir "$QA_TMP/wt"` 로 `cargo test --target-dir "$QA_TMP/target" -p <crate> <시험 이름>` — 실패해야 한다.
 - 셸 패키지 시험 중 데몬 exe 를 띄우는 것(`stop_smoke` · `lib_unit` 의 `real_wmi`)은 `<target-dir>/<profile>/` 의 데몬을 쓴다 — 그 앞에 같은 사본 · 같은 `--target-dir` 로 `cargo build -p engram-dashboard-daemon` 을 돈다. daemon crate 시험은 cargo 가 데몬을 같이 짓는다.
+- `#[ignore]` 시험(위 둘 포함)은 `--` 뒤에 `--ignored` 를 붙인다 — 안 붙이면 0개가 돈다. `real_wmi` 는 사용자 확인 뒤에만 돈다(「비용 없는 `#[ignore]` 레인」).
 - 프론트: 사본에서 `npm ci` 뒤 `npx vitest run <시험 파일>`.
-- 사본은 뒷정리 때 통째로 지운다. 작업 트리는 `git status --porcelain` 이 시작 때와 같아야 한다.
+- 사본은 뒷정리 때 통째로 지운다. 작업 트리 대조는 「뒷정리」 첫 줄이다.
 
 ## GUI 실측
 
@@ -299,6 +304,21 @@ MSYS_NO_PATHCONV=1 taskkill /PID <이번에 띄운 1420 주인 PID> /F
 
 ## 뒷정리
 
+지우기 전에 작업 트리를 시작 때와 대조한다 — 시작 상태(`status.start`)가 `$QA_TMP` 안에 있다.
+
+- 시험이 다시 구운 생성물은 내용이 같아도 줄끝만 달라 ` M` 으로 남는다 — 대상 = `crates/engram-dashboard-protocol/bindings` · `crates/engram-dashboard-agent/bindings` · `src-tauri/bindings` · `src-tauri/Cargo.toml`. `git update-index --refresh` 로는 안 지워진다.
+- 먼저 아래가 찍는 파일(` M` 인데 `git diff --numstat` 이 빈 것) 중 `status.start` 에 없던 것만 `git checkout -- <파일>` 로 되돌린다:
+  ```bash
+  P="crates/engram-dashboard-protocol/bindings crates/engram-dashboard-agent/bindings src-tauri/bindings src-tauri/Cargo.toml"
+  comm -23 <(git ls-files -m -- $P 2>/dev/null | sort) <(git diff --numstat -- $P 2>/dev/null | cut -f3 | sort)
+  ```
+- 그 뒤 대조한다. `STATUS_SAME` 이 안 찍히면 diff 를 보고에 싣는다:
+  ```bash
+  git status --porcelain | diff "$QA_TMP/status.start" - && echo STATUS_SAME
+  ```
+
+그 뒤 지운다:
+
 ```bash
 for w in wt base npm; do [ -d "$QA_TMP/$w" ] && git worktree remove --force "$QA_TMP/$w"; done
 bash ~/.claude/references/recycle.sh '<분리 실행이 찍은 BAT= 경로>'… "$QA_TMP"
@@ -314,9 +334,3 @@ git worktree prune
   ```
 - robocopy 종료코드 0~7 은 성공이다. 8 이상이면 `$QA_TMP` 가 남는다 — `robocopy.log` 를 읽고 보고한다.
 - robocopy 출력은 로그로 돌린다 — `/NFL` 을 줘도 지운 파일마다 한 줄씩 찍는다.
-- 시험이 다시 구운 생성물은 내용이 같아도 줄끝만 달라 ` M` 으로 남는다 — 대상 = `crates/engram-dashboard-protocol/bindings` · `crates/engram-dashboard-agent/bindings` · `src-tauri/bindings` · `src-tauri/Cargo.toml`. `git update-index --refresh` 로는 안 지워진다.
-- 아래가 찍는 파일(` M` 인데 `git diff --numstat` 이 빈 것) 중 시작 때 `git status --porcelain` 에 없던 것만 `git checkout -- <파일>` 로 되돌린다:
-  ```bash
-  P="crates/engram-dashboard-protocol/bindings crates/engram-dashboard-agent/bindings src-tauri/bindings src-tauri/Cargo.toml"
-  comm -23 <(git ls-files -m -- $P 2>/dev/null | sort) <(git diff --numstat -- $P 2>/dev/null | cut -f3 | sort)
-  ```
