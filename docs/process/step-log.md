@@ -2175,6 +2175,18 @@
 - 2026-10-29 — 구현 착지(사용자 외출 중 자율 진행 「쭉 진행해」 · 진행 강도 중간 = TRD 리뷰 생략 · 끝에 코드 리뷰 full). ADR-0309(ADR-0111 결정 6 · 0114 · 0115 · 0116 결정 3 · 0120 · 0142 결정 2 부분 개정 · `/review doc light` FIX 반영) · TRD 1판(메인 검토 — 동명 쌍둥이 결말 X0~X4 수용 · ADR-0142 대상 축은 후속 T-29). 단위 = U1 계약 키 id · 잠든 (id, 이름) 쌍 → U2a-1 우편함 · 장부 배달 기록 키 id · 힌트 장치 걷기 → U2a-2 시험 다시 쓰기 · 개명 회귀 → U2b · U4 삭제 정리 id 하나 · 보낸 대기분 조회 id · 데몬 등장 판정 id → U3 입구 `Resolution` · 무리 id 펼침 · 잠든 에이전트 id 지목 · UUID 철자를 제어 입구와 같게 · loser 키 걷기 → 리뷰 반영(낡은 주석 · 미해석 토큰 접기 시험 · 삭제 안내 문구). 문서 = 메시징 spec · 아키텍처 개요(`/review doc light` FIX 반영). (`/review code full` — codex PASS · Claude FIX → 반영 → PASS · `/qa standard` PASS — 워크스페이스 결과 줄 60 · 5065 통과 · 0 실패 · 35 무시 · 격리 · CI 전용 게이트 전부 · tsc · vitest 2802) ★GUI 실측 없음 — 화면 · IPC 응답 모양이 바뀌지 않는다★. 코더 단위가 TRD 추정(도구 80~150 회)의 1.5~2 배였다(U1 212 회 · U2a-1 189 회) — U2a 를 둘로 갈라 막았다.
 - 2026-10-29 — 주제 열기(번호 선점). 범위 = 메시징 대기 우편함 · 기록의 수신자 키를 정규 이름 → 에이전트 id(가장자리 주소는 이름 그대로 — ADR-0101). 계기 = 잠든 에이전트 앞 대기 우편이 이름만으로 묶여 있어 그 프로필 이름을 바꾸면 우편이 조용히 사라지거나 같은 이름을 새로 가진 에이전트로 갈 수 있다(정적 조사 · 재현 안 함). ADR-0114 · 0115 · 0120 부분 개정 예정.
 
+## S30 — skill bindings and project docs for the new skill skeletons (2026-11-01~03, `v0.5.0/chore/skill-apply`, autonomous sessions — skill real-use test) · folder `docs/process/S30-skill-apply/` · ADR-0340 · reviewed · QA PASS · **not merged**
+
+- 2026-11-03 — Landed. Contents:
+  - Skill bindings rewritten for the new `engram-*` skeletons · architecture doc regenerated · project worker rules (`.claude/worker-rules.md`) created.
+  - CLAUDE.md 130 KB → 4.9 KB (decisions D1–D19) · branch/commit procedure split out to `docs/handbook/branch-commit.md`.
+  - qa binding batch: full regression runs locally inside qa and CI is a post-push check (user decision 2026-11-02 → ADR-0340, partial supersede of ADR-0131) · 7 qa binding drifts · work-tree fingerprint before commit.
+  - Language rule (user decision 2026-09-29, missing until now) + its scope (worker-rules.md is Korean · pointer-only edits keep their language).
+  - Third-party wrapping criterion into the code-conventions binding (T-61 step 1) · two todo items closed.
+  - Review = doc full (Claude + codex): skill-apply rounds 1–3 → PASS; qa binding batch rounds 0–3 → PASS. Two holds closed by the user (ADR-0131 → ADR-0340 · language rule scope).
+  - QA = full regression run locally (workspace 5067 passed · 0 failed · gates 30/30 · frontend 2802 · tsc · ts-rs no drift) · claude and codex lanes off (no path hit · same versions). An earlier standalone qa (2026-11-02) failed only on two pre-existing failures.
+- 2026-11-01 — Opened. Number = S30 (not claimed by push — user 「push 금지」 until the skill real-use test ends).
+
 ## 다음 (미진행)
 
 - **[✅ 결정 완료 2026-08-14 — ADR-0158] 버전 불일치는 끊지 않고 알린다.** 아래 방향 항목은 이 ADR로 닫혔다. 결정 = 프로토콜 버전 안 올림(상향 기준을 「봉투 문법이 깨질 때」로 좁힘) · 보내기 전 상대 능력 확인(데몬이 연결 직후 먼저 광고하므로 옛 데몬에게 모르는 것을 보낼 일이 없다 — 실측 확인) · 데몬 자동 종료 없음 · **고지 = 앱 시작 시 1회, 알리기만, 닫으면 작은 흔적**(행동 버튼 없음, 모달은 아예 못 붙을 때만) · 버전과 무관하게 마감 시한 + 오류의 상관관계 표시를 함께 깐다. 근거 조사 = `docs/research/daemon-version-mismatch-2026-08-14.md`(적대 리뷰 BLOCK → 추천 수정됨, 그 경위도 그 문서에).
