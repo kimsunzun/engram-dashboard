@@ -798,7 +798,7 @@ impl OutputCore {
     /// 알림 역전 창은 "프로세스 자연 종료가 kill과 동시에 겹치는 순간"뿐이며, 이는 S9 원본
     /// (manager.kill_agent의 Exiting 발행 vs drain.transition의 terminal 발행)에도 동일하게 존재하는
     /// 기존 동작이다. 프론트는 terminal 판정을 status_changed가 아니라 agent-list-updated(목록)로
-    /// 하므로(CLAUDE.md 핵심 불변식) 늦은 Exiting을 받아도 고착되지 않는다 — 설계상 완화됨.
+    /// 하므로(`docs/reference/architecture.md` 「런타임 불변식」 I4) 늦은 Exiting을 받아도 고착되지 않는다 — 설계상 완화됨.
     pub fn enter_exiting(&self) -> bool {
         // 이미 종료 처리됐으면 Exiting을 쓰지 않는다(빠른 경로 — 실제 status 필드 보호는 아래 lock 구간).
         if self.finalized.load(Ordering::Acquire) {

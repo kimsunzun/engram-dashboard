@@ -34,7 +34,7 @@ launch/release/
 **/data/daemon.json
 **/data/agents.json*
 
-# 핸드오프 히스토리(/handoff용) — 기록 보존 위해 git 추적(2026-07-09, 사용자 결정). history/ append-only.
+# 핸드오프 히스토리(/engram-handoff용) — 기록 보존 위해 git 추적(2026-07-09, 사용자 결정). history/ append-only.
 .ccb/
 
 # 작업용 스크린샷 보관함(cdp shot 등) — 로컬 전용, 커밋 안 함.

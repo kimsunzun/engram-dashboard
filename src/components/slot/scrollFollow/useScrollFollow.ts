@@ -4,7 +4,7 @@
 //
 // ★`viewportRef` · `pin` · `unpin` 은 마운트 수명 동안 같은 함수다★ — 상태·노드를 렌더 밖에 둔다. 그래서
 //   슬롯의 구독 효과가 안에서 불러도 옛 함수를 쥘 걱정이 없고, ★그 deps(`[viewId, agentId]`)에 넣지 않는다★
-//   (넣으면 손잡이 정체성이 흔들릴 때 재구독 → replay 가 돈다 — CLAUDE.md 「통합 micro-rules」).
+//   (넣으면 손잡이 정체성이 흔들릴 때 재구독 → replay 가 돈다 — `docs/reference/architecture.md` 「프론트 규칙」).
 // ★청취자는 뷰포트에만 건다 — 전역 청취자를 걸지 않는다★(ADR-0242 — `use-stick-to-bottom` 기각 사유).
 // 관측 표면 = 뷰포트의 `data-scroll-follow="pinned" | "free"`(훅이 직접 적는다 — React 상태를 거치지 않는다).
 

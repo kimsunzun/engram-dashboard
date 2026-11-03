@@ -6,21 +6,21 @@
 
 ## 1. 개발 플로우가 척추다
 
-전체 개발 흐름의 **정의는 `../../CLAUDE.md`** — 「개발 스텝」(PRD→TRD→모듈 경계→구현+TDD) + 「구현 실행 규약」(코더→리뷰어→QA)에 있다. **여기 다시 적지 않는다(SSoT).** 이 문서는 그 흐름 *위에 문서를 얹는 레이어*다.
+전체 개발 흐름의 **정의는 `../../CLAUDE.md`** 「개발 순서」와 `/engram-implement` 스킬(PRD→TRD→리뷰→코딩→코드 리뷰→QA→커밋)에 있다. **여기 다시 적지 않는다(SSoT).** 이 문서는 그 흐름 *위에 문서를 얹는 레이어*다.
 
 ## 2. 단계별 — 산출 문서 · 게이트 · 기록
 
 | 단계 | 산출 문서 | 검증 게이트 | 기록 |
 |---|---|---|---|
 | **리서치** | `research/` 보고서(+`status:`) | research 내부 교차검증 | step-log |
-| **결정(PRD)** | **ADR**(왜 + 거부한 대안) | `/review prd` → 사용자 확인 | step-log + `/adr` |
-| **설계(TRD)** | TRD/design(`process/SN/spec/`) + 설계 ADR | `/review trd` → 사용자 확인 | step-log + `/adr` |
-| **구현** | 코드 + 테스트 + `// ADR-` 앵커 | `/review code` → `/qa` | step-log |
+| **결정(PRD)** | PRD(`process/S<n>-<슬러그>/prd.md`) + **ADR**(왜 + 거부한 대안) | 사용자 승인 | step-log + `/engram-adr` |
+| **설계(TRD)** | TRD(`process/S<n>-<슬러그>/trd.md`) + 설계 ADR | `/engram-review`(PRD+TRD) → 사용자 확인 | step-log + `/engram-adr` |
+| **구현** | 코드 + 테스트 + `// ADR-` 앵커 | `/engram-review code` → `/engram-qa` | step-log |
 
 - **ADR은 한 단계 전용이 아니다** — 굵은 결정이 날 때마다(PRD·TRD 양쪽) 쓴다.
 - **step-log**(`process/step-log.md`)는 전 단계에서 *언제/무엇*을 남긴다(타임라인 단일 출처).
 - **reference**(`reference/`)는 흐름 옆에서 코드 동기 캐논으로 갱신된다(컨벤션 등).
-- **핸드오프**(`.ccb/`)는 일회성 세션 인계 도구다 — **문서 아키텍처 밖, 기록 안 남김.**
+- **핸드오프**(`/engram-handoff`)는 일회성 세션 인계 도구다 — **문서 아키텍처 밖, 기록 안 남김.**
 
 ## 3. 불변식 (이것만 지키면 나머진 유연)
 
@@ -33,14 +33,13 @@
 
 | 노드 | 도구 | 상태 |
 |---|---|---|
-| 리서치 | `/research` | ✅ |
-| ADR(채번·양방향·인덱스·lint) | `/adr`(전역 스킬 — 스크립트 내장, 바인딩 = `.claude/skill-bindings/adr.md`) | ✅ |
-| 단계 게이트 | `/review`(단계 인자) · `/qa` | ✅ |
+| 리서치 | `/engram-research` | ✅ |
+| ADR(채번·양방향·인덱스·lint) | `/engram-adr`(전역 스킬 — 스크립트 내장, 바인딩 = `.claude/skill-bindings/adr.md`) | ✅ |
+| 단계 게이트 | `/engram-review`(단계 인자) · `/engram-qa` | ✅ |
 | step-log 기록 | (수동) | 수동 |
 | 문서 lint/CI(고아·링크·freshness) | — | 나중 (hard 보강) |
-| CLAUDE.md 슬리밍(always-load 비용) | — | 나중 (큰 변경, 방향만) |
 
-스킬 4종(research/review/qa/adr)이 이미 흐름의 **산출·게이트 자리에 박혀** 있다. 빈 칸은 step-log(수동)뿐.
+스킬(research/implement/review/qa/adr)이 이미 흐름의 **산출·게이트 자리에 박혀** 있다. 빈 칸은 step-log(수동)뿐.
 
 ## 5. 어디에 넣나 / 무슨 문서가 있나
 

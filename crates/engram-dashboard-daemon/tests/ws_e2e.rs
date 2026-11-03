@@ -2,7 +2,7 @@
 //!
 //! 프론트(UI) 없이 데몬의 WS 서버를 **in-process 로 실제 기동**하고(`start_test_server`),
 //! 이 테스트 코드가 **WS 클라이언트**가 되어 auth → subscribe → binary frame 디코드 →
-//! command 송신 전 경로를 검증한다. CLAUDE.md: "데몬 모듈은 격리 하네스로 한 번에 돌도록 모은다."
+//! command 송신 전 경로를 검증한다. (ADR-0012 — 모듈은 격리 하네스로 단독으로 돈다.)
 //!
 //! ★격리★: bind 는 127.0.0.1:0(OS 자동 포트 — 테스트 병렬 충돌 없음), store 는 in-memory,
 //! 각 테스트가 독립 서버 인스턴스를 띄우고 끝에서 shutdown(전 에이전트 kill — 좀비 PTY 방지).

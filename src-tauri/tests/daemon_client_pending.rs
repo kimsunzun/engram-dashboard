@@ -6,9 +6,9 @@
 //! ★"요구한다"이지 "못 세운다"가 아니다★ — `src/daemon_client/tests.rs` 가 루프백 WS 로 그 배선을 실제로
 //! 돌린다. 여기서 사는 것은 소켓 없이 얻는 결정론과 속도이지 유일한 가능성이 아니다.
 //! 순수 단위 단언은 모듈 옆 `#[cfg(test)]` 로 가고 그쪽은 `--test lib_unit` 으로 돈다
-//! (그 타깃을 세운 결정 = ADR-0174 · 현황 = CLAUDE.md 「빌드·검증 명령」).
+//! (그 타깃을 세운 결정 = ADR-0174 · 현황 = `.claude/skill-bindings/qa.md` 「모듈별 명령」).
 //! 실행: `cargo test -p engram-dashboard --test daemon_client_pending`(자식 프로세스를 하나도 안
-//! 띄우므로 `-- --test-threads=4` 를 붙이지 않는다 — 판정 규칙 정본 = CLAUDE.md 「빌드·검증 명령」).
+//! 띄우므로 `-- --test-threads=4` 를 붙이지 않는다 — 판정 규칙 정본 = `.claude/skill-bindings/qa.md` 「모듈별 명령」).
 //! CI 는 이 타깃만 따로 부르는 전용 스텝도 갖는다(`.github/workflows/ci.yml`).
 //!
 //! ## ★무엇을 지키나 — 겹친 번호로 연결이 죽지 않는다★

@@ -3054,7 +3054,7 @@ fn slot_content(
 
 // ★단언은 대부분 `tests/layout_commands.rs` 에 있다★ — 봉투가 표를 지나는 길로 잰다. 여기 단위 테스트는 그 길로
 //   만들 수 없는 결말(적용 서비스 계약이 깨진 그물)만 잰다. 이 패키지의 `#[cfg(test)]` 단언은
-//   `cargo test -p engram-dashboard --test lib_unit` 으로 돈다(현황 = CLAUDE.md 「빌드·검증 명령」의 그 줄 · 그 타깃을 세운
+//   `cargo test -p engram-dashboard --test lib_unit` 으로 돈다(현황 = `.claude/skill-bindings/qa.md` 「모듈별 명령」의 셸 줄 · 그 타깃을 세운
 //   결정 = ADR-0174).
 #[cfg(test)]
 mod tests {

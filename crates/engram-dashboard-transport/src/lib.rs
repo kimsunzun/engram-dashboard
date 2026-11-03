@@ -166,7 +166,7 @@
 //! ★그 셋을 「인메모리 하네스로 옮기면 빨라진다」로 읽지 말 것★ — 옮기는 순간 재던 것이 사라진다.
 //!
 //! ★`-- --test-threads=4` 를 붙이지 않는다★ — 이 crate 는 자식 프로세스를 하나도 안 띄운다.
-//! CLAUDE.md 「빌드·검증 명령」의 판정 규칙 그대로이고 `command`·`protocol`·`messaging`·`net` 과 같은 처지다.
+//! `.claude/skill-bindings/qa.md` 「모듈별 명령」의 판정 규칙 그대로이고 `command`·`protocol`·`messaging`·`net` 과 같은 처지다.
 
 // ADR-0177
 // ADR-0180

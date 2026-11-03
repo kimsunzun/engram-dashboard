@@ -1,40 +1,22 @@
-# Review 바인딩 — engram
+# review 바인딩 — engram-dashboard
 
-> **ADR-0004 규약:** 이 파일은 소비처 프로젝트 트리(`.claude/skill-bindings/review.md`)에 위치하며, 골격 `flow.md`가 cwd-상대로 Read하는 파일이다. 구 경로(`references/bindings/engram.md`)는 폐기됐다.
+## code 단계 코드 불변식
 
-골격(`flow.md`)이 "프로젝트 코드 불변식 체크리스트"·"프로젝트 QA 명령"·"프로젝트 결정 기록"이라 부르는 자리에 끼우는 **engram 전용 체크리스트·연동**이다. 골격은 어느 프로젝트나 동일한 범용 리뷰 엔진이고, 이 파일이 engram으로 바인딩한다.
+모든 리뷰어에게 같은 묶음으로 준다.
 
-> **정본 = 코드의 `// ADR-NNNN` 앵커 주석 + 각 ADR(`docs/decisions/`).** 이 파일은 리뷰 때 꺼내 쓰는 점검용 목록일 뿐 — 코드·ADR이 바뀌면 rot한다. 통째 복붙해 정본으로 착각하지 말고, 의심되면 `rg "ADR-"`로 코드 앵커를 확인한다.
+- **설계 원칙** = `CLAUDE.md` 「설계 원칙」 · **런타임 불변식** = `docs/reference/architecture.md`. 닿은 코드에 해당하는 항목을 추려 준다.
+- **닿은 코드의 결정** = `rg -n "ADR-\d{4}" <바뀐 파일>`로 앵커를 뽑고, 가리키는 ADR(`docs/decisions/`)을 함께 준다.
+- **명령 핸들러는 패닉하지 않고 `CommandError` 값으로 실패한다** — 가둔 자리(에이전트 펌프·입력 라이터) 밖의 패닉은 프로세스를 끝낸다. (ADR-0292 · ADR-0293)
+- **새 전역 핸들을 늘리지 않는다** — LLM 제어는 데몬 버스와 `__engramCmd`에 얹는다. 확인 = `rg "\)\.__ENGRAM_|\)\.__engram" src/ -g '!*.test.*'` — 결과 중 `__engramCmd`는 정식 표면이고 나머지는 갭이다. 변경 전보다 줄이 늘면 지적한다.
+- **로깅이 걸린 변경이면 `docs/reference/logging-conventions.md`를 준다** — 레벨·계측 의무·토큰 비노출 판정의 정본.
 
-## code 단계 게이트 — 우리 불변식 (골격 §2 code 행 "체크리스트")
+## 화면 확인 조건
 
-code 단계 Adversary(doc-aware breaker)는 다음 불변식 위반을 공격 표면으로 삼는다. **doc-aware 렌즈에만 준다**(blind 렌즈엔 주지 않는다 — 앵커링 차단).
+- **테마** — `dark` · `light` · `e-ink` 셋(`src/themes.ts`, 창마다 다를 수 있다). 한 테마에서만 본 구분(선택·포커스·경계)이 나머지 테마에서 같은 색이 돼 사라지지 않나 본다.
+- **입력 수단** — 마우스 · 키보드(탭 순서·포커스 — 안 보이는 요소가 포커스를 받나) · LLM 경로(같은 조작이 `__engramCmd`나 데몬 버스로 되나).
+- **화면 밖 관측 채널** — 접근성 트리(`role`·`aria-label`) · LLM 조회 출력.
 
-- **kill 인과(2동사)** — `transport.shutdown()`(child.kill+wait → TerminateJobObject → master drop) → `core.join_pump(5s)`. master drop → reader EOF → pump break → `core.finish` → done_tx. (ADR-0001)
-- **finalize 1회** — `OutputCore.finalized.swap(AcqRel)` — terminal 전이/알림 정확히 1회(pump 단독). (ADR-0005)
-- **락 순서** — sessions RwLock은 Arc clone 후 즉시 해제 → 그 뒤 내부 접근. status lock 보유 중 외부 호출 금지. emit은 subscribers clone 후 lock 미보유 send. (ADR-0006)
-- **상태 알림 분담** — 과도기 `Exiting`=manager, terminal(`Killed`/`Exited`/`Failed`)=pump 단독. 프론트는 `agent-list-updated`로 terminal 판정(status_changed로 판정 금지). (ADR-0005)
-- **화신 표식(필드명은 아직 `epoch`)** — 화신마다 새로 뽑는 난수, **비교는 일치/불일치만**(대소로 "더 새 것" 유도 금지). 읽기는 건너뛰고 쓰기는 `0` 자리채움 — 이 비대칭은 의도이고 **범위는 `agents.json` 디스크 serde 뿐이다**(wire 의 `0` 은 실제로 뽑히는 정당한 표식이라 거기서 특별취급하면 회귀). (ADR-0163) 재부착 계기는 소켓이 아니라 **권위 명부 관측 단독**이고 구독 deps는 `[viewId, agentId]` — **표식을 넣지 않는다.** (ADR-0164 · 최초 도입 = ADR-0007)
-- **replay→live** — subscribers lock 보유 중 replay 전송(순서 역전 방지) + 프론트 seq dedup.
-- **코어 tauri import 0** — 코어 crate는 Tauri import 금지(ADR-0003). 격리 위반이면 코어가 전송 방식에 묶인 것 = 회귀.
-- **명령 핸들러는 값으로 실패한다** — 패닉으로 죽지 말고 오류를 `CommandError`로 돌려줄 것. 근거·귀결(릴리즈 프로필) 정본 = `docs/process/S20-command-bus/trd.md` §4-⑨.
-- **관찰성/로깅** — load-bearing 경로가 로그 규약(`docs/reference/logging-conventions.md`) 준수 계측됐나. 위반(무계측·레벨오용·토큰 로깅) FIX. **판정 기준·계측 의무는 그 문서가 정본**(여기선 가리키기만).
+## 결정 기록
 
-근거·거부 대안 상세는 CLAUDE.md "핵심 불변식" 섹션과 각 ADR. **이 목록이 정본이 아니다 — 코드의 `// ADR-` 앵커가 단일 출처다.**
-
-## QA 실측 게이트 (골격 §5)
-
-리뷰 판정과 무관하게 항상 돈다. **build/test·GUI 실측 실명령은 qa 스킬 바인딩(`.claude/skill-bindings/qa.md`)이 정본** — 여기 베끼지 않는다. 이 절은 정책만 남긴다:
-
-- build/test·GUI 실측을 강도별로 돌린다(실명령 = qa 바인딩 §강도별 실명령).
-- **코드(test/tsc) PASS ≠ 동작 보장** — 화면·동작이 걸린 변경은 GUI 실측까지 가야 동작 확인이다.
-
-## doc-aware 컨텍스트 준비 (골격 §1·§3)
-
-doc-aware 렌즈(trd·code·doc 단계)에 줄 ADR·불변식 묶음을 미리 추린다. 위 "code 단계 게이트" 목록 + 닿은 코드의 `// ADR-` 앵커(`rg "ADR-"`)가 출발점이다. 로깅이 걸린 변경이면 `docs/reference/logging-conventions.md`도 넣는다(레벨·계측 의무·보안 준수 판정용). **blind 렌즈에는 주지 않는다.**
-
-## 결정 기록 (골격 §6)
-
-- 굵은 설계 결정 → ADR(`docs/decisions/`, 인덱스 `README.md`). 번복은 *폐기당한* ADR에 `폐기 (Superseded by ADR-NNNN)` 박기.
-- 흐름(언제/무엇) → `docs/process/step-log.md`.
-- **스킬·리뷰어는 기록하지 않는다 — 메인(오케스트레이터)이 처리한다.**
+- 굵은 설계 결정 → ADR(`docs/decisions/`) — `/engram-adr`로 쓴다.
+- 흐름(언제·무엇) → `docs/process/step-log.md`.

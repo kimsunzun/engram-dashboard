@@ -64,7 +64,7 @@ scripts\rebuild-run-debug.bat            # 데몬·클라이언트 빌드 + dev 
 
 ## 문서
 
-- [아키텍처 개요](docs/reference/architecture-overview.md) — 전체 구조·crate 구성
+- [아키텍처](docs/reference/architecture.md) — 모듈·연결·런타임 불변식
 - [문서 인덱스](docs/README.md) — 설계 결정·개발 기록을 포함한 전체 문서
 
 ## 라이선스
