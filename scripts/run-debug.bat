@@ -21,7 +21,7 @@ REM   confirm the dev identifier actually landed. A bare cargo build skips the T
 REM   overlay never applies and the exe is stamped with the RELEASE identifier (measured). The symptom
 REM   never shows at build time: with the release app up, the dev app then exits instantly with no
 REM   window and a 0-byte log, and this launcher dies at LAUNCH_FAILED (mechanism = the overlay file's
-REM   own comment). The same script is what the /qa gate calls, so there is ONE implementation to fix.
+REM   own comment). The same script is what /engram-qa calls, so there is ONE implementation to fix.
 REM ★Launch the path the script PRINTS, never a hardcoded target\debug (do not remove)★: CARGO_TARGET_DIR
 REM   or .cargo\config.toml build.target-dir moves cargo's output, and a hardcoded path would then point
 REM   at a STALE exe that still exists and still passes the identifier check. The script resolves the

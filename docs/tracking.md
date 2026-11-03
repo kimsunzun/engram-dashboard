@@ -10,6 +10,7 @@
 
 | ID | 제목(짧게) | 구역 | 상태 |
 |---|---|---|---|
+| T-77 | LLM control — remaining gaps (moved from todo) | 메인 | Waiting for trigger — close each gap when its feature is touched |
 | T-66 | 창 크롬 · 이름(크롬식 제목 표시줄 · 창 번호 재사용 · 창 제목) | 메인 | 진행 — `v0.5.0/feat/window-chrome`(S26) · U1–U9 구현 · U10 문서 착지(2026-10-26) · 사람 손 GUI 확인 2026-10-26(S13 · S14 통과) · 남은 것 = push · CI · master 머지 |
 | T-65 | 슬롯 도킹 LLM 명령(`tab.dock` · `layout.get`) | 메인 | 진행 — S28 `v0.5.0/feat/llm-layout-commands` · U1–U3 구현 · push(`2710e14f` CI 진행 중) · `/qa standard` PASS · 남은 것 = U4 문서 커밋 · GUI 실측 · master 머지 · TRD §11 결정 일곱 사용자 확인 |
 | T-49 | 꺼진 에이전트의 슬롯 쪽 활성화 · 완전한 이어받기 | 메인 | 보류 — 저장 작업 뒤 |
@@ -24,6 +25,7 @@
 | T-11 | child별 권한 스코프(R7) | 메인 | 보류 — 원격 단계 |
 | T-9 | claude 프로세스 풀링 | 메인 | 보류 |
 | T-6 | cwd 워크스페이스 검증 | 메인 | 보류 — 운영 단계 |
+| T-78 | In-app codex terminal on codex 0.163.0 — alt-screen · mouse tracking (S21 TRD §6-F) | 버그 | Open — user decision on the default |
 | T-52 | graceful 데몬 끄기 결과가 `Timeout` | 버그 | 미착수 · 원인 미규명(커밋 가름만) · 3단계 자리 추정 |
 | T-45 | 스폰 이름 중복 · codex 가 claude 로 보임 | 버그 | 보류 — id 전환과 묶음 |
 | T-39 | 실패·거절된 사용량 값 흐리게 | 버그 | 보류 — 사용량 작업과 묶음 |
@@ -50,7 +52,7 @@
 | T-70 | 브랜치 앞 버전 짐작 기준 — 기능이면 0.5.0 쪽 | 사소한 기능·정리 | 할 일 — 나중에 이슈로 |
 | T-69 | 스텝 번호 규약 — 새 주제마다 S번호 | 사소한 기능·정리 | 일부 됨 · 남은 것 = 자잘한 커밋 접두 |
 | T-68 | 로컬라이제이션 — 앱 전체를 다른 언어로 | 사소한 기능·정리 | 할 일 — 할 게 없을 때 뽑아서(사용자 2026-10-16) |
-| T-61 | 서드파티 라이브러리 감싸기 기준 — CLAUDE.md 반영 · 기존 코드 점검 | 사소한 기능·정리 | 트리거 대기 — CLAUDE.md 개편 · 리팩토링 때 |
+| T-61 | Third-party wrapping criterion — in the code-conventions binding (done) · check existing code | 사소한 기능·정리 | Waiting for trigger — next refactoring round |
 | T-60 | 브랜치 이름에서 버전 접두 떼기(버전 묶음 = 태그 기준) | 사소한 기능·정리 | 사용자 결정 대기 — 나중에 고친다(2026-10-12) |
 | T-51 | 슬롯 보기 모드 덮어쓰기 영속(옛 P3e) | 사소한 기능·정리 | 보류 — 필요해질 때 |
 | T-43 | claude 도구 결과 중립 사건화 | 사소한 기능·정리 | 보류 |
@@ -62,6 +64,15 @@
 | T-16 | 프론트 종료 판정 · 세대 필터 | 사소한 기능·정리 | 잔존 · T-32 선결 |
 
 ## 메인
+
+### T-77. LLM control — operations the formal surfaces do not reach yet
+- **Status:** waiting for trigger — close each gap when work touches that feature. Moved from `docs/todo/llm-control-gaps.md` on 2026-11-03 (`docs/README.md`: new items go here, not to `todo.md`). Principle = CLAUDE.md 「LLM-우선 제어」. Formal surfaces = daemon bus · front `__engramCmd`.
+- **Tree selection state** — no command changes the agent-tree selection. The only read is the row's `data-selected` attribute (`src/components/agent/AgentList.tsx`).
+- **Interrupting a terminal-mode agent** — `agent.interrupt` answers `CONFLICT` on channels that cannot interrupt (`crates/engram-dashboard-agent/src/commands.rs` `verb_interrupt`), and the bus has no raw-input command. ADR-0245 · accepted by the user.
+- **The shell command table is reachable only while the shell is attached to the daemon** — every command in `src-tauri/src/layout/commands.rs` (windows · tabs · slots · splits · `settings.*` etc. — not daemon-owned ones like `usage.*`). `docs/process/S21-storage/trd.md` §12 R9.
+- **No window position · size · snap commands** — window state (`window.minimize` · `maximize` · `unmaximize` · `raise` etc.) and tab moves (`tab.move` · `tab.dock` · `tab.detach`) are bus commands, but window position and size are human OS gestures only. ADR-0302 · ADR-0303 decision 4 · ADR-0304.
+- **Global handles outside the bus** — handles other than `__engramCmd` remain. Do not list them here; find them with `rg ").__ENGRAM_|).__engram" src/ -g '!*.test.*'` (`__engramCmd` in the output is the formal surface, the rest are gaps). A handle's own comment is not evidence of whether it is a gap.
+- Keybinding remapping = T-42.
 
 ### T-66. 창 크롬 · 이름 — 크롬식 제목 표시줄 · 보이는 창 번호 재사용 · 창 제목
 - **상태:** 진행 — `v0.5.0/feat/window-chrome`(S26 · 2026-10-23~) · PRD 0.5판 · TRD 0.3판(`docs/process/S26-window-chrome/trd.md`) · 구현 U1–U9 커밋(`4cefce48` … `c7295bdb`) · U10 문서 = ADR-0300~0306 · CLAUDE.md · step-log · 도움말 본문(2026-10-26) · 단위마다 `/review code full` 과 QA 를 거쳤다 — 단 U8a 1부 · U8b · U9 는 리뷰 전에 로컬 커밋하고 리뷰 수정을 뒤 커밋으로 더했다 · U2 · U3b 의 QA standard = CI · U8a 2부부터는 2026-10-26 로컬 `/qa standard`(U8a 2부 `bca0686e` · U8a + U8b `49b64836` · U9 `c7295bdb` · U10 `cf26db3d` — 모두 PASS)(CI 초록은 U7b `24782701` 까지 — U8a 부터는 아직 push 전이다 · 로컬 ref 기준 2026-10-26) · ★GUI(`/qa full`)는 PARTIAL — 세션이 잠겨 끝까지 재지 못했다★ · 사람 손 GUI 확인 2026-10-26(사용자 · 주로 다크) = S13 · S14 · AC13 · AC22 · 커서 자리 새 창 통과 → U8b 측정 문 통과(`TOP_GAP` · 놓기 구역 그대로) · AC23 Alt+Space 는 이 PC 의 PowerToys Run 이 가로채 못 봤다(앱 결함 아님) · 상세 = step-log S26. 2026-10-23 줄: PRD 0.4판(사용자 결정 반영 · 리뷰 전) · 슬롯 도킹은 T-66 없이 먼저 머지됨(`c60797a6`). 옛 줄: 예정 — 슬롯 도킹(TRD 7판 U7) 직후 바로(사용자 결정 2026-10-17) · 최종 머지에 포함. 제목 표시줄 없애기와 창 구분은 슬롯 도킹 구현 뒤 바로 이어서 한다(사용자 2026-10-20 — 「그거하고 탭바 제거하는거하고 현재 구현 끝나고 이어서 진행할거.」).
@@ -98,7 +109,7 @@
 ### T-44. 채팅에서 승인 받기 — codex 승인 질문을 지금은 자동 거절한다
 - **상태:** 보류(사용자 결정 2026-09-27 — 다음 과제로). 챗 화면 라운드는 거절된 호출을 「거부됨」으로 보이기만 한다. 옛 번호 = T-38(`v0.3.3/feat/chat-ux` 브랜치의 커밋·인계 첨부에서 이 주제를 가리키는 「T-38」).
 - **문제:** JSON(채팅) 모드에서 codex 의 서버 요청은 전부 곧바로 「처리하지 않음」으로 거절된다(답하지 않으면 에이전트가 영원히 멈춘다). 채팅 스폰 정책이 `OnRequest` + `WorkspaceWrite` 라 작업 폴더 밖 쓰기 같은 승인 질문이 전부 거절된다. 터미널 모드는 codex 가 자기 승인 프롬프트를 그려 사람이 답할 수 있고, claude 는 두 모드 모두 `bypassPermissions` 라 묻지 않는다(ADR-0097).
-- **다음:** 피어가 채팅 안에서 승인 요청을 어떻게 그리고 답받는지 조사(CLAUDE.md 「참조 구현」) → 설계. 오면 TRD §4-7 ②-2 의 거부 귀속과 그 알려진 한계 넷을 다시 본다(필요 없어질 가능성 높음). 「거절」 답에 벤더가 `declined` 를 내는지는 미검.
+- **다음:** 피어가 채팅 안에서 승인 요청을 어떻게 그리고 답받는지 조사(`docs/research/reference-implementations.md`) → 설계. 오면 TRD §4-7 ②-2 의 거부 귀속과 그 알려진 한계 넷을 다시 본다(필요 없어질 가능성 높음). 「거절」 답에 벤더가 `declined` 를 내는지는 미검.
 - **근거:** ADR-0241(거부한 대안 「채팅 승인을 이번에 짓는다」) · `docs/process/S21-chat-ux/trd.md` §1 U7 · §4-7 ②-2 · §12 · `crates/engram-dashboard-agent/src/backend/codex/transport.rs` 의 `refuse`(서버 Request 분기가 부른다)
 
 ### T-42. 단축키 시스템 — 명령 표는 있는데 「키 → 명령」 연결은 칸마다 흩어져 있다
@@ -158,6 +169,11 @@
 - **재도입:** 운영 단계에서 허용 cwd 정책(예: Engram 워크스페이스 하위만) 결정 후 manager.spawn_agent 또는 command 층에서 검증.
 
 ## 버그
+
+### T-78. In-app codex terminal on codex 0.163.0 — alt-screen and mouse tracking
+- **Status:** open — the S21 TRD §6-F default (`--no-alt-screen` or not) is a user decision; reopen it with the evidence below.
+- **Problem:** `docs/process/S21-codex-backend/trd.md` §6-F assumed codex already runs inline without a flag. On codex 0.163.0 the operating codex terminal tab runs in alt-screen with mouse tracking (S31 qa, 2026-11-02).
+- **Observed in the app (S32 qa, 2026-11-03 — observation only):** the folder-trust prompt appears · the xterm has no scrollback · the mouse wheel goes to codex, not to the xterm buffer.
 
 ### T-52. graceful 데몬 끄기(`send_stop`)의 결과가 `DaemonClosed` 대신 `Timeout` 이다 — 데몬은 실제로 내려간다
 - **상태:** 미착수(2026-10-07 발견 — 경계 리팩터링 2-2 U3 의 실 레인 · GUI 실측). 원인은 찾지 않았다. 2-2 에서 고치지 않았다 — 「데몬 수신 루프를 건드려야 해 3단계(transport) 자리」는 추정이다(가름이 수신 루프 커밋을 가리킬 뿐이고, 고칠 자리가 클라이언트 `stop.rs` 일 수도 있다).
@@ -261,7 +277,7 @@
 - **상태:** 미착수 · 선재 위험(이론상 경로 — 일어난 것을 본 적은 없다). 크레이트 경계 A U7 리뷰가 띄우기 실패 가드에서 같은 위험을 짚어 가드는 바꿨고(ADR-0291 결정 13 의 U7 개정 — 가드는 이제 번호로 후손을 끄지 않는다), 아래 호출자들은 범위 밖이라 그대로 두었다(메인 결정(위임) 2026-10-10).
 - **문제:** `taskkill /T` 는 부모 번호(WMI `ParentProcessId`)만으로 나무를 엮고 시작시각을 보지 않는다. 죽은 부모의 번호를 그대로 단 프로세스가 흔하다(이 PC 실측 2026-10-10 · U7 리뷰어 — 읽기 전용 조사). 끄는 뿌리가 그런 죽은 부모의 번호를 다시 받았으면 그 고아들(예: `explorer.exe` 와 그 나무)까지 끈다. 뿌리 번호 자신을 먼저 대조해도 `/T` 가 엮는 후손은 대조하지 않는다. 상시로 `/T` 를 쓰는 자리(2026-10-10 셈 · 일회성 스크립트와 `/T` 없는 `scripts/rebuild-run-*.bat` 은 뺐다):
   - 운영: 셸의 데몬 끄기 fallback — `src-tauri/src/discovery/mod.rs:498` 의 `TaskKiller` 가 platform `process::kill_tree`(`taskkill /PID <pid> /F /T`)를 부른다(설명 = `src-tauri/src/commands/discovery.rs:161`). 데몬 번호 자신은 daemon.json 의 시작시각으로 먼저 가른다(`stop_with`).
-  - QA: GUI 실측 teardown — `.claude/skill-bindings/qa.md:373` 의 `taskkill /PID <기록한PID> /T /F`(띄운 앱 + 그 WebView2 렌더러).
+  - QA: GUI 실측 teardown — `.claude/skill-bindings/qa.md` 「GUI 뒷정리」의 `taskkill /PID <앱 PID> /T /F`(띄운 앱 + 그 WebView2 렌더러).
   - 시험: `src-tauri/tests/stop_smoke.rs:75-76`(`force_kill` — 실 데몬 시험의 RAII 정리) · `crates/engram-dashboard-agent/tests/backend_contract.rs:895-898`(`kill_tree` — 실 CLI 계약 시험의 shim 사슬 정리 · 부르는 자리 `:857`).
 - **다음:** 처방 후보 = `/T` 없이 뿌리만 끄고 후손은 Job 에 맡기기(데몬은 에이전트를 `KILL_ON_JOB_CLOSE` Job 으로 담는다 — `discovery/mod.rs:497` 그 자리 주석 「데몬 Job 안전망과 겹치나 무해하다」 · 이 항목이 그 「무해」를 의심한다 · 시험은 띄운 것을 자기 Job 에 담는다). ★번호 스냅숏을 찍고 후손마다 시작시각을 다시 대조해 끄는 길은 처방이 아니다★ — 찍은 뒤 다시 읽기 전에 번호가 넘어가면 같은 위험이다(ADR-0291 「거부한 대안」 (g)). 어느 쪽이든 동작 변경이라 별 슬라이스.
 - **근거:** ADR-0291 결정 13 · 「거부한 대안」 (g) · `crates/engram-dashboard-platform/src/process.rs`(`kill_tree`) · `src-tauri/src/commands/discovery.rs:161`
@@ -332,15 +348,15 @@
 - **근거:** `docs/process/S25-preset-library/prd.md` R49.
 
 ### T-61. 서드파티 라이브러리 감싸기 기준 — CLAUDE.md 에 올리고 기존 코드를 그 기준으로 점검
-- **상태:** 트리거 대기 — 바깥(스킬 쪽)에서 진행 중인 리팩토링 뒤 CLAUDE.md 를 고칠 때 · 다음 리팩토링 라운드 때(사용자 2026-10-14 「나중에 리팩토링할 때 언급」). 그때까지 새 설계는 이 기준을 따른다.
+- **Status:** step ① done in S30 (2026-11-03) — the criterion now lives in `.claude/skill-bindings/code-conventions.md` 「설계」, which coders and reviewers read, instead of CLAUDE.md. Step ② (check existing code against it) waits for the next refactoring round (user 2026-10-14 「나중에 리팩토링할 때 언급」).
 - **기준(세션 정리 · 사용자 동의 2026-10-14):** 셋 중 **하나라도 「예」면 목적 인터페이스 뒤에, 셋 다 「아니오」면 그냥 쓴다** — ① 바깥(디스크 · 네트워크 · 프로세스 · OS · 외부 서비스)과 닿나 ② 바뀔 가능성이 큰가(RC · 관리자 적음 · 선택에 자신 없음) ③ 그 타입이 여러 곳 · 여러 crate 로 퍼지나. 감싸는 단위는 **라이브러리가 아니라 목적**(Cockburn 포트) — 1:1 얇은 래퍼는 세부가 새어 비용만 든다. 언어 표준 · 기반(serde · tokio · React · Zustand) · 한 곳에서만 쓰는 순수 도우미는 감싸지 않는다(사용자 「stl 랩핑은 쓸데없는 짓」).
 - **첫 적용:** 프리셋 라이브러리 — walkdir · serde-saphyr · `std::fs` 는 데몬 「라이브러리 저장소」(목록 · 읽기 · 쓰기) 하나로 묶고, 화면 부품 라이브러리(react-arborist · TanStack Table · react-selecto)는 따로 감싸지 않고 라이브러리 트리 · 목록 부품 안에서 쓴다(`.claude/handoff/attachments/20261012-preset-decisions.md` 2026-10-14 절).
-- **할 것:** ① CLAUDE.md 「아키텍처 원칙」에 이 기준을 짧게(또는 ADR 로 박고 그 번호를 가리키게 — 거부한 대안 = 「모든 라이브러리 감싸기」 · 「전혀 안 감싸기」) ② 기존 코드 점검 — 예: react-arborist 는 지금 `src/components/agent/AgentList.tsx` 한 곳뿐이라 ③ 이 「아니오」 → 지금은 그대로, 라이브러리 트리가 두 번째로 쓰는 순간 공용 부품으로.
+- **할 것:** ① CLAUDE.md 「설계 원칙」에 이 기준을 짧게(또는 ADR 로 박고 그 번호를 가리키게 — 거부한 대안 = 「모든 라이브러리 감싸기」 · 「전혀 안 감싸기」) ② 기존 코드 점검 — 예: react-arborist 는 지금 `src/components/agent/AgentList.tsx` 한 곳뿐이라 ③ 이 「아니오」 → 지금은 그대로, 라이브러리 트리가 두 번째로 쓰는 순간 공용 부품으로.
 - **근거:** `docs/research/third-party-wrapping-criteria-survey-2026-10-14.md`
 ### T-60. 브랜치 이름에서 버전 접두를 떼고, 버전 묶음은 태그로 본다
 - **상태:** 나중에 고친다(사용자 2026-10-12 — 「피드백에 올려 나중에 수정」). 그때까지 현행 규약(`v<다음 릴리스>/<타입>/<슬러그>`)을 따른다.
 - **문제:** 현행 규약은 다음 릴리스 번호를 브랜치를 팔 때 미리 짐작하게 한다. 짐작이 두 번 틀렸다 — 2026-08-17(매니페스트 현재 버전을 넣음) · 2026-10-12(transport 브랜치를 `v0.3.3/…` 로 팠다가 0.4.0 이 따로 진행 중이라 `v0.4.1/…` 로 바꿈). 일반 관행은 작업 브랜치를 주제로만 짓고 버전은 내보낼 때 정한다.
-- **다음:** CLAUDE.md 「브랜치·커밋」 절을 「브랜치 = `<타입>/<슬러그>` · 잡동사니 = `chore/misc` · 버전 묶음 = 태그 기준」으로 고친다(`/review doc` 거쳐 커밋). 묶음 보기 명령: `git log --first-parent --merges --oneline <옛 태그>..<새 태그>` · `git branch --merged <새 태그> --no-merged <옛 태그>` · 아직 안 실린 것 = `git branch --merged master --no-merged <최신 태그>`. 잃는 것 = git GUI 의 릴리스별 폴더 접힘. 이미 있는 `v0.x/…` 브랜치는 지우지 않는다(현행 규약).
+- **다음:** `docs/handbook/branch-commit.md` 를 「브랜치 = `<타입>/<슬러그>` · 잡동사니 = `chore/misc` · 버전 묶음 = 태그 기준」으로 고친다(`/review doc` 거쳐 커밋). 묶음 보기 명령: `git log --first-parent --merges --oneline <옛 태그>..<새 태그>` · `git branch --merged <새 태그> --no-merged <옛 태그>` · 아직 안 실린 것 = `git branch --merged master --no-merged <최신 태그>`. 잃는 것 = git GUI 의 릴리스별 폴더 접힘. 이미 있는 `v0.x/…` 브랜치는 지우지 않는다(현행 규약).
 - **근거:** CLAUDE.md 「브랜치·커밋」(사용자 결정 2026-08-16/17) · 이 세션 대화(2026-10-12)
 
 ### T-51. 슬롯 보기 모드 덮어쓰기 영속(옛 P3e) — 지금은 프론트 메모리뿐이다
@@ -362,7 +378,7 @@
 - **할 것:** ① `todo` 항목마다 옮길 곳을 확인하고 옮긴 뒤 지운다(`docs/todo.md` 규칙 3 — 편입 없이 지우면 증발) ② `docs/README.md` · `docs/handbook/documentation-system.md` 링크 갱신(`rg "todo\.md|docs/todo/"`) ③ `todo` 의 상태 넷을 이 파일의 **상태** 줄로 흡수 ④ 이름 — 업계 통칭은 backlog · 바꾸면 CLAUDE.md · `docs/README.md` · ADR 링크를 함께 ⑤ `/review doc`(문서 체계 변경 = load-bearing).
 
 ### T-27. 셸(`src-tauri`) 로직의 회귀망 — 검증 공백은 닫혔다, 남은 것은 분리 모양 결정과 옛 테스트의 처분
-- **상태:** 보류 — 사용자 결정 대기(구조 결정뿐). 검증 공백은 2026-08-24 에 닫혔다 — 셸 단위 스위트가 `--test lib_unit` 으로 로컬·워크스페이스 회귀·CI(통째로) 모두에서 돈다(수치·명령 정본 = CLAUDE.md 「빌드·검증 명령」의 `lib_unit` 줄).
+- **상태:** 보류 — 사용자 결정 대기(구조 결정뿐). 검증 공백은 2026-08-24 에 닫혔다 — 셸 단위 스위트가 `--test lib_unit` 으로 로컬·워크스페이스 회귀·CI(통째로) 모두에서 돈다(명령 정본 = `.github/workflows/ci.yml` 의 `cargo test -p engram-dashboard --test lib_unit` 스텝).
 - **문제:** 레이아웃 권위가 `src-tauri` 에 있어(ADR-0035) 셸 로직을 테스트 가능한 crate 로 분리할지가 남았다. 경계 실측 = 셸 실코드 10,637줄 중 8,286줄(78%)이 `use tauri` 0 · 순환 없음(`layout/` 은 셸 내부 참조조차 0). 워크스페이스 회귀 편입은 분리 없이 이미 되므로 분리 동기는 사실상 의존 방향의 컴파일러 강제 하나다.
 - **미결(여기서 정하지 않는다):** ① 분리 여부·모양(ADR-0012 — 사용자 결정 · ADR-0151 기준을 셸에 적용한 결정 기록 없음) ② 기존 셸 테스트(당시 209개)의 처분 — 결정된 적 없다(2026-08-23 사용자 발언은 우선순위 진술이지 폐기 지시가 아니다 — 사용자 확인 2026-08-24 · 원문 = 아래 조사 문서 :19) ③ `cargo check --all-targets` CI 게이트 — 실행 스위트가 생겨 값어치가 옅으나 세울지는 다시 판단 ④ `app: None` 단락 수정 모양을 ADR 로 박을지(ADR-0174 는 테스트 타깃을 세운 결정이지 이 수정의 결정이 아니다).
 - **함정:** `--lib` · `--all-targets` 는 여전히 `0xc0000139` 로 즉사한다 — 부르는 법은 `--test lib_unit` 하나(설명 정본 = `src-tauri/Cargo.toml` 주석).

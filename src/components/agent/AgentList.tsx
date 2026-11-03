@@ -374,8 +374,8 @@ export default function AgentList() {
       <div
         ref={dragHandle}
         data-agent-row={data.id}
-        // ★선택 상태의 기계 판독 채널★: 배경색만으로는 CDP·LLM 셀렉터가 선택을 못 읽고(CLAUDE.md
-        //   「LLM-우선 제어」의 "트리 선택 상태 미커버" 갭), 색만 바뀌는 회귀를 테스트가 못 잡는다.
+        // ★선택 상태의 기계 판독 채널★: 배경색만으로는 CDP·LLM 셀렉터가 선택을 못 읽고(`docs/tracking.md` T-77
+        //   의 「트리 선택 상태」 갭), 색만 바뀌는 회귀를 테스트가 못 잡는다.
         //   ★`aria-selected` 를 여기 달지 말 것★: 이 div 에는 role 이 없어 ARIA 상 무효이고, react-arborist 가
         //   *부모* 행에 이미 `role="treeitem" + aria-selected` 를 건다 — 둘이 갈리면 AT 는 바깥 값을 읽어
         //   오히려 틀린 상태를 읽는다(리뷰 지적 2026-08-23). 기계 판독은 아래 data 속성이 진다.

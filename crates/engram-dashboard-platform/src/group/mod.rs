@@ -461,7 +461,7 @@ mod tests {
         );
     }
 
-    // ── 실프로세스(Windows) — 시험마다 몇 개만 차례로 띄운다: 몰아 띄우면 개발 PC 터미널이 죽는다(CLAUDE.md) ──
+    // ── 실프로세스(Windows) — 시험마다 몇 개만 차례로 띄운다: 몰아 띄우지 않는다(로컬 병렬 상한 `--test-threads=4` — `.claude/skill-bindings/qa.md` 「모듈별 명령」) ──
 
     #[cfg(windows)]
     use std::io::Write;

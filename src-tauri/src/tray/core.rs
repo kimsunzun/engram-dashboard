@@ -5,14 +5,14 @@
 //! discovery command 를 직접 부르므로 불필요하다(ADR-0026, TRD §2).
 //! 메뉴에 QuitTray 가 없는 건 트레이=앱 통합이라 무의미해서다(ADR-0026).
 //! ★주의: show_main_ui/hide_main_ui actions·command 는 유지★ — ShowUi/HideUi 는 메뉴 *항목*만
-//! 뺀 것이고(트레이 좌클릭이 대체), LLM/cdp 제어(CLAUDE.md §5)가 같은 actions 함수를 계속 쓴다.
+//! 뺀 것이고(트레이 좌클릭이 대체), LLM/cdp 제어(CLAUDE.md 「LLM-우선 제어」)가 같은 actions 함수를 계속 쓴다.
 
 use crate::layout::MAIN_WINDOW_LABEL;
 
 // ── 메뉴 의도 ──────────────────────────────────────────────────────────────────
 
 // 트레이 메뉴 클릭이 표현하는 **의도**. 사람 클릭·LLM 호출·단축키가 모두 이 의도로
-// 수렴한다(CLAUDE.md §5 손발/두뇌).
+// 수렴한다(CLAUDE.md 「LLM-우선 제어」).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuAction {
     StartDaemon,

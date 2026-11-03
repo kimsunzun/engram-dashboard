@@ -385,7 +385,7 @@ pub fn run() {
                         //   않는다★: 닫기 취소는 위 main 갈래뿐이고, 프론트에 닫기 요청 리스너가 없으며, 런타임은 이
                         //   콜백이 돌아오자마자 창을 닫는다(tauri-runtime-wry 2.11.3 `on_close_requested` →
                         //   `on_window_close`). 리스너나 닫기 취소가 하나라도 생기면 지운 창이 살아남는다 — 그때는
-                        //   「닫는 중 표시 + 막히면 해제」로 바꾼다. 점검(매 `/qa` · 저장소 루트에서): `rg -i "close.?requested" src/`
+                        //   「닫는 중 표시 + 막히면 해제」로 바꾼다. 점검(매 `/engram-qa` · 저장소 루트에서): `rg -i "close.?requested" src/`
                         //   → 0줄 · `rg "prevent[_]close" src-tauri/src/` → 1줄(위 main 갈래).
                         let app = window.app_handle();
                         // 하나라도 없으면(초기화 실패 극단 케이스) 건너뛴다 — 아래 `Destroyed` 갈래와 같다.

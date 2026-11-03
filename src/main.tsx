@@ -22,7 +22,7 @@ settingsClient.install();
 // ★이 줄을 App 안 effect 로 되돌리지 말 것★(createRoot 뒤면 이미 늦다).
 applyBootTheme();
 
-// LLM 제어 표면(CLAUDE.md §5) — 개발 빌드에서만 store 핸들을 window에 노출한다.
+// LLM 제어 표면(CLAUDE.md 「LLM-우선 제어」) — 개발 빌드에서만 store 핸들을 window에 노출한다.
 // 외부(cdp.mjs eval / CDP)에서 window.__engram.<store>.getState()로 상태를 JSON으로 읽고
 // getState().<액션>()으로 UI를 조작할 수 있다. 프로덕션 빌드(import.meta.env.DEV=false)에선 미노출.
 // ★레이아웃(슬롯/뷰)은 여기 없다★ — 백엔드 권위(ADR-0035)라 그 제어 표면은 command 레지스트리다

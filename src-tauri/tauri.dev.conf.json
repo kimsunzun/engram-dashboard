@@ -12,7 +12,7 @@
   //   ★이 파일을 실제로 먹이는 주입 지점은 둘이다(하나만 고치지 마라)★: (1) `scripts/tauri-cli.mjs`
   //   가 `tauri dev` 서브커맨드에 `--config` 로 끼운다(Tauri CLI 경로 전용) · (2)
   //   `scripts/build-client-shell.mjs` 가 `TAURI_CONFIG` 로 실어 `cargo build -p engram-dashboard`
-  //   에 넘긴다(CLI 를 지나지 않는 경로 — debug 런처 `.bat` 둘과 `/qa` 게이트가 그 스크립트를 부른다).
+  //   에 넘긴다(CLI 를 지나지 않는 경로 — debug 런처 `.bat` 둘과 `/engram-qa` 가 그 스크립트를 부른다).
   //   (2)가 없던 동안 debug exe 가 release identifier 로 빌드됐다(실측).
   //   WebView2 데이터 폴더는 identifier 가 아니라 데이터 폴더(`.engram-dev`) 아래 `webview` 다(TRD
   //   S21-storage §4) — 그 폴더에 못 쓸 때만 identifier 의 Tauri 기본 폴더로 물러난다(`webview_env.rs`).

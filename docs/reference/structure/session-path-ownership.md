@@ -887,7 +887,7 @@ Registry lifetime = daemon process lifetime; entry lifetime = disk-file lifetime
   because the reader skips the field; nothing grants `0` that meaning anywhere else. No production
   site reads it back as a sentinel today — no `== 0` on this field exists in `crates/`, `src/` or
   `src-tauri/` (the one `socket_epoch == 0` in daemon_client/lifecycle.rs is an unrelated axis).
-  Rule of record: CLAUDE.md 「핵심 불변식」 — the asymmetry is `agents.json` disk serde only, do not
+  Rule of record: `docs/reference/architecture.md` 「런타임 불변식」 I6 — the asymmetry is `agents.json` disk serde only, do not
   widen it to the wire.
 - Honest limit stated in-source (:646-652): the only real guarantee is *adjacency within one
   process*; a cross-process collision remains 2^-32 and is never detected because the value is
@@ -1686,7 +1686,7 @@ then `session.start_pump()` (:1285). Quoted invariant (manager.rs:1265-1269):
 "★ADR-0019 — sessions 등록은 pump 기동(start)보다 **먼저**★: finish hook 이 ReapMsg 를 보내는데,
 pump 가 즉시 EOF→finish 하면 그 시점에 세션이 맵에 있어야 reaper 가 reap 한다. insert 전에 start 하면
 빠른 종료 시 hook send 가 맵에 없는 id 를 가리켜 reap 가 no-op→세션 좀비화." Restated at
-session.rs:117-120 and in the project CLAUDE.md's invariant list ("등록 순서") — and the failure mode
+session.rs:117-120 and in `docs/reference/architecture.md` 「런타임 불변식」 I10 ("등록 순서") — and the failure mode
 is **silent at runtime**; only the reaper test catches a regression.
 
 Three more orderings ride on the same line and are each separately named:
