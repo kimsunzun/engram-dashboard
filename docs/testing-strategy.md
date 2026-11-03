@@ -47,7 +47,7 @@
 - 격리 게이트 3종(실명령·기대값 정본 = `ci.yml` 의 그 게이트 스텝):
   - ① 의존 상한 `cargo tree -p engram-dashboard-base --depth 1 --prefix none -e normal,dev,build --target all --all-features | rg "^engram-dashboard" | sort -u` → 정확히 1줄(자기 자신). 입주 조건 ②(도메인 지식 0)의 벽.
   - ② `rg "^\s*use tauri" crates/engram-dashboard-base/src/` → 0줄. ADR-0003 의 짝 — ①이 못 덮는 축이다. ①은 `rg "^engram-dashboard"` 로 **워크스페이스 멤버만** 세므로 서드파티 `tauri` 가 그대로 통과하고, 이 crate 는 headless 데몬에 링크되므로 여기서 Tauri 를 부르면 창도 webview 도 없는 그 바이너리가 전송 방식에 묶인다. **`logging`·`platform` 이 `agent` 에서 이리로 오면서 agent 게이트의 스캔 범위를 벗어났다 — 이 줄이 그 자리를 받는다**(`platform` 은 그 뒤 OS 층 crate 로 나가 그 crate 의 같은 게이트가 본다).
-  - ③ `rg "(crate|super)::(logging|text|time|path|sync|testing|writable|file|panic)" crates/engram-dashboard-base/src/` → 0줄. 입주 조건 ③(입주자끼리 서로 참조하지 않을 것)의 벽 — 엮이면 한 덩어리이고, 한 덩어리를 바닥에 두면 그 전체가 모든 소비자에게 딸려 간다(`bevy_core` 실패의 시작점). ★`crate::` 단독으로 넓히지 말 것★ — 평범한 Rust 라 게이트가 아니라 잡음이 된다.
+  - ③ `rg "(crate|super)\s*::\s*(logging|text|time|path|sync|testing|writable|file|panic)" crates/engram-dashboard-base/src/` → 0줄. 입주 조건 ③(입주자끼리 서로 참조하지 않을 것)의 벽 — 엮이면 한 덩어리이고, 한 덩어리를 바닥에 두면 그 전체가 모든 소비자에게 딸려 간다(`bevy_core` 실패의 시작점). ★`crate::` 단독으로 넓히지 말 것★ — 평범한 Rust 라 게이트가 아니라 잡음이 된다.
   - **워크스페이스 crate 이름을 훑는 소스 정규식 짝은 없다** — 이 crate 는 남을 안 부르는 것이 불변식이라 부르는 이름의 알파벳을 관리할 대상이 없다(메시징과 갈리는 지점).
   - base 시험 기능(`test-support`)이 운영 그래프에 안 실리는지 보는 게이트(ADR-0269 결정 5 · ADR-0275 결정 5) — 실명령 · 기대값 정본 = `ci.yml` 의 그 게이트 스텝.
 
@@ -176,7 +176,7 @@ npm test                                    # 로직 단위 게이트 (vitest ru
 rg "^\s*use tauri" crates/engram-dashboard-agent/src/      # → 0줄 (import 라인 앵커 — 자기 인용 주석 오탐 방지)
 rg "engram_dashboard_protocol" crates/engram-dashboard-agent/src/   # → 0줄
 rg "^\s*use tauri" crates/engram-dashboard-base/src/       # → 0줄 (같은 ADR-0003 불변식의 짝 — 위 §1 base 절)
-rg "(crate|super)::(logging|text|time|path|sync|testing|writable|file|panic)" crates/engram-dashboard-base/src/   # → 0줄 (입주 조건 ③)
+rg "(crate|super)\s*::\s*(logging|text|time|path|sync|testing|writable|file|panic)" crates/engram-dashboard-base/src/   # → 0줄 (입주 조건 ③)
 
 # ③ 실앱/시각 (CDP — 보안 소프트웨어 탐지 대상, 최소 사용)
 # 실명령 정본 = qa 바인딩 「GUI 실측」 (여기 베끼지 않는다).

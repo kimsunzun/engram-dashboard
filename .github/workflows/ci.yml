@@ -691,13 +691,15 @@ jobs:
       #   다시 잰다)가 실패한 시작점이 정확히 여기다.
       # ★`crate::` 단독으로 넓히지 말 것★: 그건 평범한 Rust 라 게이트가 아니라 잡음이 된다. 모듈 **이름**을
       #   박아 두는 대가로 입주자가 늘면 여기 이름을 더해야 한다(메시징 정규식과 같은 종류의 구멍).
+      # ★`::` 앞뒤 `\s*` 를 걷지 말 것★: 공백형(`super:: sync` · `crate :: time`)을 잡는다 — 근거는 아래
+      #   `replay_flight` 순수성 게이트 주석.
       # ★알려진 한계★: `logging` 이 나중에 하위 모듈을 가지면 그 안의 `crate::logging::…` 자기 참조가
       #   오탐된다. 그때는 상대 경로(`super::`)로 부르거나 이 게이트를 다시 판정한다.
       - name: 'Gate: base leaf crate — tenants must not reference each other'
         shell: bash
         run: |
           set +e
-          hits=$(rg "(crate|super)::(logging|text|time|path|sync|testing|writable|file|panic)" crates/engram-dashboard-base/src/)
+          hits=$(rg "(crate|super)\s*::\s*(logging|text|time|path|sync|testing|writable|file|panic)" crates/engram-dashboard-base/src/)
           rc=$?
           set -e
           case "$rc" in
@@ -932,8 +934,9 @@ jobs:
       #     그 밖 자리의 `=>`(중첩 `match` · `=>` 만 내린 줄 · rustfmt 가 다음 줄로 내린 가드)도 FAIL 이다.
       # ★짝 둘을 지우지 말 것★ — ① 0 열 `pub fn slot_label` 이 정확히 하나 · 그 앞에 `#[deny(…)]`(사이 `#[…]` · `//`
       #   줄 허용) · 그 파일에 이 lint 를 끄는 `allow` · `expect` · `warn` 이 없음 · 그 파일 어디에도 rustfmt 건너뛰기
-      #   (`rustfmt::skip` · `rustfmt_skip`)가 없음(② 가 기대는 rustfmt 꼴을 끄므로) · 본문 끝을 찾음 · 주석 밖 `match` 가
-      #   있음. ② 도우미 자기 시험 — 갈래 모양 위반 표본 19 개는 전부 걸리고 위반 아닌 표본 10 개는 하나도 안 걸리며,
+      #   (`rustfmt::skip` · `rustfmt_skip` — `::` 앞뒤 공백형 포함)가 없음(② 가 기대는 rustfmt 꼴을 끄므로) ·
+      #   본문 끝을 찾음 · 주석 밖 `match` 가 있음.
+      #   ② 도우미 자기 시험 — 갈래 모양 위반 표본 19 개는 전부 걸리고 위반 아닌 표본 10 개는 하나도 안 걸리며,
       #   가짜 enum(변형 3 · 문서 줄 · attribute 줄)과 한 변형(`Ag` — `AgList` 와 앞이 같다 · 주석에만 있다)이 빠진
       #   가짜 본문에서 정확히 그 하나를 빠졌다고 한다. 수를 고정한다(배열이 비면 0 = 0 이다).
       # 기대는 것 = rustfmt(`cargo fmt --check`)가 갈래를 줄마다 · 4 칸 들여쓰기로 놓는다는 것.
@@ -1027,10 +1030,10 @@ jobs:
             [ "$n" = 1 ] || { echo "FAIL — 짝 ①: $f 에 0 열 'pub fn slot_label' 이 $n 개(기대 1) — 개명 · 이사했나"; return 1; }
             n=$(rg -U --count-matches '#\[deny\(clippy::wildcard_enum_match_arm\)\]\s*(?:(?:#\[.*\]|//.*)\s*)*pub fn slot_label[<(]' "$f") || n=0
             [ "$n" = 1 ] || { echo "FAIL — 짝 ①: 'pub fn slot_label' 앞에 '#[deny(clippy::wildcard_enum_match_arm)]' 가 없다(attribute 를 걷었나)"; return 1; }
-            rc=0; hits=$(rg -n '\b(?:allow|expect|warn)\s*\([^)]*(?:wildcard_enum_match_arm|clippy::restriction)' "$f") || rc=$?
+            rc=0; hits=$(rg -n '\b(?:allow|expect|warn)\s*\([^)]*(?:wildcard_enum_match_arm|clippy\s*::\s*restriction)' "$f") || rc=$?
             [ "$rc" -le 1 ] || { echo "FAIL — rg errored (exit $rc)"; return 1; }
             [ -z "$hits" ] || { echo "FAIL — 짝 ①: $f 에 그 lint 를 끄는 attribute 가 있다:"; printf '%s\n' "$hits"; return 1; }
-            rc=0; hits=$(rg -n 'rustfmt::skip|rustfmt_skip' "$f") || rc=$?
+            rc=0; hits=$(rg -n 'rustfmt\s*::\s*skip|rustfmt_skip' "$f") || rc=$?
             [ "$rc" -le 1 ] || { echo "FAIL — rg errored (exit $rc)"; return 1; }
             [ -z "$hits" ] || { echo "FAIL — 짝 ①: $f 에 rustfmt 건너뛰기가 있다(② 가 기대는 rustfmt 꼴을 끈다):"; printf '%s\n' "$hits"; return 1; }
             s=$(awk '/^pub fn slot_label[<(]/ { print NR; exit }' "$f")
@@ -1196,7 +1199,7 @@ jobs:
       - name: 'platform gate 6: std::os::windows/unix outside platform — exactly the fixed file list'
         shell: bash
         run: |
-          std_os_re='^(?:[^/]|/[^/])*?\bstd::os::(?:windows|unix)\b'
+          std_os_re='^(?:[^/]|/[^/])*?\bstd\s*::\s*os\s*::\s*(?:windows|unix)\b'
           # 인자 = 명단 원문(`#` 주석 · 빈 줄 · 들여쓰기를 받는다 — 4h 블록은 ci.yml 원문 그대로 넘긴다).
           #   `\134` 는 게이트 ④ 의 `os_cfg_files` 와 같은 이유다.
           std_os_gate() {
@@ -1252,7 +1255,13 @@ jobs:
       # ★`\b` + `::` 요구가 정당한 이웃을 가른다★ — 이 모듈은 `std::time::Instant` 를 쓴다(결정론 하네스의
       #   주입점). `tokio::time::Instant` 만 잡고 std 쪽은 안 잡아야 해서 crate 뿌리 이름을 물었고, `\b` 가
       #   `my_tauri::` 같은 부분일치를 막는다.
+      # ★`::` 앞뒤 `\s*` 를 걷지 말 것★ — Rust 는 경로 마디 사이 공백을 받는다(`tokio :: spawn`). 보통은 rustfmt
+      #   (`cargo fmt --check`)가 먼저 막지만, rustfmt 가 손대지 않는 매크로 본문 · `#[rustfmt::skip]` 구간의
+      #   공백형은 fmt 게이트를 지나 그대로 남는다. 줄을 넘는 경로는 여전히 못 본다.
       # ★알려진 한계 = 블록 주석(`/* */`)★ — 그 안쪽은 접두 가드가 못 막는다. 대상 파일은 `//` 만 쓴다.
+      # ★알려진 한계 = `<이름>::` 꼴이 아닌 이름★ — 별칭(`use tokio as rt;` · `extern crate tokio as rt;`) · 끝 마디
+      #   import(`use std::net;`) · 여러 항목 묶음(`use std::{net::TcpStream, time::Instant};`)은 못 본다
+      #   (`docs/todo/observed-only.md`).
       # ★`test -f` 를 지우지 말 것★ — 파일이 또 이사하면 rg 는 매치 0 을 뱉고 0 = PASS 라 벽이 조용히
       #   사라진다(rc=2 갈래도 같은 것을 잡지만 사유를 못 찍는다). `-d` 가 아니라 `-f` 다 — 대상이 파일이다.
       - name: 'Gate: replay_flight purity — no transport/wire ingress'
@@ -1261,7 +1270,7 @@ jobs:
           set +e
           f=src-tauri/src/daemon_client/replay_flight.rs
           if [ ! -f "$f" ]; then echo "FAIL — 게이트 대상 파일이 없다: $f (또 이사했나)"; exit 1; fi
-          hits=$(rg "^(?:[^/]|/[^/])*?\b(tauri|tokio|engram_dashboard_[a-z_]+|std::net)::" "$f")
+          hits=$(rg "^(?:[^/]|/[^/])*?\b(tauri|tokio|engram_dashboard_[a-z_]+|std\s*::\s*net)\s*::" "$f")
           rc=$?
           set -e
           case "$rc" in
@@ -1327,7 +1336,7 @@ jobs:
       #   유일한 벽이다. 형태의 근거는 위 `replay_flight` 순수성 게이트 주석과 같다(접두
       #   `^(?:[^/]|/[^/])*?` = 「아직 `//` 를 안 만났다」 → 주석 밖만 잡아 헤더 자기인용이 오탐되지 않고 ·
       #   `use` 줄만 앵커하면 인라인 완전경로 `tokio::spawn(…)` 한 줄에 뚫리며 · `\b`+`::` 가 정당한 이웃
-      #   `std::time::Instant` 를 가른다).
+      #   `std::time::Instant` 를 가르고 · `::` 앞뒤 `\s*` 가 공백형 `tokio :: spawn` 을 잡는다).
       # ★파일이 사라져도 매치는 0 = PASS 라 세 파일의 존재를 먼저 본다★(`-d` 가 아니라 `-f` — 대상이 파일이다).
       # ★`$files` 를 따옴표로 감싸지 말 것★ — 세 경로로 갈라져 rg 인자가 돼야 한다(경로에 공백이 없다).
       - name: 'transport gate 3: pure layer isolation (pending/stream/machine)'
@@ -1338,7 +1347,7 @@ jobs:
           for f in $files; do
             if [ ! -f "$f" ]; then echo "FAIL — 게이트 대상 파일이 없다: $f (개명했나·이사했나)"; exit 1; fi
           done
-          hits=$(rg "^(?:[^/]|/[^/])*?\b(tokio|futures_util|futures|engram_dashboard_[a-z_]+|std::net)::" $files)
+          hits=$(rg "^(?:[^/]|/[^/])*?\b(tokio|futures_util|futures|engram_dashboard_[a-z_]+|std\s*::\s*net)\s*::" $files)
           rc=$?
           set -e
           case "$rc" in
