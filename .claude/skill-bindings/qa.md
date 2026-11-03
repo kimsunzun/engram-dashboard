@@ -33,7 +33,8 @@
 - 범위 정의:
   - **전체 회귀** = CI 세 잡(`backend` · `gates` · `frontend`)을 로컬에서 도는 것. 절차 = qa-verify 「전체 회귀 — CI 세 잡 로컬 실행」.
   - **영향 모듈** = 아래 「모듈별 명령」의 그 모듈 줄. 변이 확인 · 재현 명령 · 작은 수정 확인에 쓴다.
-- 로컬 순서 = 전체 회귀 → 로컬 레인 → (깨지면) 깨진 테스트 가르기 → 변이 확인 → GUI 실측. 로컬 단계끼리 병렬로 돌리지 않는다.
+- 로컬 순서 = 전체 회귀 → (깨지면) 깨진 테스트 가르기 → 로컬 레인 → (레인이 깨지면) 그 실패 가르기 → 변이 확인 → GUI 실측. 로컬 단계끼리 병렬로 돌리지 않는다.
+- 가르기 뒤 라벨 없는 실패가 남으면 거기서 멈춘다 — 토큰 레인(claude · codex)을 돌지 않는다.
 
 ## 전체 회귀 = 로컬
 
@@ -156,10 +157,10 @@ cargo test -p engram-dashboard-agent --test backend_contract -- --ignored --test
 
 ## 추적 기록 위치
 
-`FAIL(선재)` 는 `docs/tracking.md`(T-번호 항목)와 `docs/process/step-log.md` 에서 시험 이름으로 찾는다:
+`FAIL(선재)` 는 `docs/tracking.md`(T-번호 항목)와 `docs/process/step-log.md` 에서 시험 이름으로 찾는다 — 전체 경로와 마지막 `::` 조각 둘 다(기록은 짧은 이름을 쓴다):
 
 ```bash
-grep -nF '<시험 이름>' docs/tracking.md docs/process/step-log.md
+N='<시험 이름>'; grep -nF -e "$N" -e "${N##*::}" docs/tracking.md docs/process/step-log.md
 ```
 
 - 찾으면 파일과 T-번호 · 헤딩을 적는다. 안 나오면 「기록 없음」.
@@ -172,10 +173,11 @@ grep -nF '<시험 이름>' docs/tracking.md docs/process/step-log.md
 git worktree add --detach "$QA_TMP/base" <기준점>
 ```
 
-- 사본 = 기준점 그대로다 — 작업 트리 변경을 얹지 않는다. 변이 확인 사본(`$QA_TMP/wt`)과 따로 둔다.
-- Rust: 분리 실행을 `-WorkDir "$QA_TMP/base"` 로, 깨진 줄(「모듈별 명령」 · 레인 줄)에 `--target-dir "$QA_TMP/target"` 를 붙이고 `--` 뒤에 `--exact <깨진 이름>…` 을 더한다. 데몬 빌드가 앞에 붙은 레인은 그 빌드도 같은 `--target-dir` 로 짓는다.
+- 레인이 환경 탓(CLI 없음 · 미로그인)으로 깨졌으면 가르기 전에 환경 실패로 적는다 — 기준점에서도 깨지므로 `FAIL(선재)` 로 적지 않고 여기서 다시 돌지 않는다.
+- 사본 = 기준점 그대로다 — 작업 트리 변경을 얹지 않는다. 변이 확인 사본(`$QA_TMP/wt`)과 따로 두고 빌드 폴더도 따로 쓴다(`$QA_TMP/target-base`).
+- Rust: 분리 실행을 `-WorkDir "$QA_TMP/base"` 로, 깨진 줄(「모듈별 명령」 · 레인 줄)에 `--target-dir "$QA_TMP/target-base"` 를 붙이고 `--` 뒤에 `--exact <깨진 이름>…` 을 더한다. 데몬 빌드가 앞에 붙은 레인은 그 빌드도 같은 `--target-dir` 로 짓는다.
 - 프론트: 사본에서 분리 실행으로 `npm ci` 뒤 `npx vitest run <깨진 시험 파일>`.
-- 같은 이름 · 같은 메시지로 깨지면 `FAIL(선재)` → 「추적 기록 위치」. 기준점에서 통과하면 라벨을 붙이지 않는다.
+- 라벨 규칙 = qa 골격 `references/flow.md` §2 「깨진 테스트 가르기」. `FAIL(선재)` 는 「추적 기록 위치」로 찾는다.
 
 ## 변이 확인 — 격리 사본
 
@@ -190,6 +192,7 @@ git ls-files -o --exclude-standard -z | xargs -0 -r cp --parents -t "$QA_TMP/wt"
 - 그 밖에 `apply` 가 실패하면 변이 확인을 멈추고 보고한다 — 변경이 빠진 사본으로 재지 않는다.
 - 줄끝만 다른 ` M` 파일은 `git diff` 에 안 나와 사본에 건너가지 않는다 — 내용은 같다. `-c core.safecrlf=false` 는 그 파일마다 찍히는 LF→CRLF 경고만 끈다(오류는 그대로 찍힌다).
 - Rust: 사본 줄을 깬 뒤 분리 실행을 `-WorkDir "$QA_TMP/wt"` 로 `cargo test --target-dir "$QA_TMP/target" -p <crate> <시험 이름>` — 실패해야 한다.
+- 셸 패키지 시험 중 데몬 exe 를 띄우는 것(`stop_smoke` · `lib_unit` 의 `real_wmi`)은 `<target-dir>/<profile>/` 의 데몬을 쓴다 — 그 앞에 같은 사본 · 같은 `--target-dir` 로 `cargo build -p engram-dashboard-daemon` 을 돈다. daemon crate 시험은 cargo 가 데몬을 같이 짓는다.
 - 프론트: 사본에서 `npm ci` 뒤 `npx vitest run <시험 파일>`.
 - 사본은 뒷정리 때 통째로 지운다. 작업 트리는 `git status --porcelain` 이 시작 때와 같아야 한다.
 
@@ -292,17 +295,18 @@ MSYS_NO_PATHCONV=1 taskkill /PID <이번에 띄운 1420 주인 PID> /F
 - claude · codex 레인 — 토큰 · 사용 한도.
 - GUI 실측 — 클라이언트 · 데몬 빌드 수 분, 릴리스 빌드는 더 길다.
 - `--target-dir "$QA_TMP/target"` 우회 · 변이 사본 — 찬 빌드 수 분.
-- 기준점 사본 — 찬 빌드 수 분(프론트면 `npm ci` 를 더한다).
+- 기준점 사본 — 찬 빌드 수 분(프론트면 `npm ci` 를 더한다). claude · codex 레인 시험을 다시 돌면 토큰도 든다.
 
 ## 뒷정리
 
 ```bash
 for w in wt base npm; do [ -d "$QA_TMP/$w" ] && git worktree remove --force "$QA_TMP/$w"; done
-bash ~/.claude/references/recycle.sh <분리 실행이 찍은 BAT= 경로들> "$QA_TMP"
+bash ~/.claude/references/recycle.sh '<분리 실행이 찍은 BAT= 경로>'… "$QA_TMP"
 git worktree prune
 ```
 
-- 삭제는 휴지통 명령으로만 한다(`rm -rf` 는 권한이 막는다). 줄마다 `recycled` · `skip (missing)` 이면 된 것이다. 명령이 없거나 막히면 다른 명령으로 돌아가지 않고 남은 경로를 보고한다.
+- `rm -rf` 자리는 휴지통 명령으로 한다(`rm -rf` 는 권한이 막는다). 예외는 둘 — 사본을 git 에서 떼는 `git worktree remove --force` 와 아래 `robocopy /MIR` 비우기. 줄마다 `recycled` · `skip (missing)` 이면 된 것이다. 명령이 없거나 막히면 다른 명령으로 돌아가지 않고 남은 경로를 보고한다.
+- `BAT=` 경로는 역슬래시 Windows 경로다 — 작은따옴표로 감싼다. 안 감싸면 bash 가 `\` 를 먹어 없는 경로가 되고 `skip (missing)` 이 된 것처럼 보인다.
 - `git worktree prune` 이 휴지통으로 간 사본을 git 에서 뗀다 — `git worktree list` 에 `$QA_TMP` 아래가 남지 않아야 한다.
 - `git worktree remove` 가 긴 경로로 실패하면 그 사본을 빈 폴더로 미러해 비운 뒤 지운다:
   ```bash
