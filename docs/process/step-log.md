@@ -2195,6 +2195,13 @@
   - ★QA FAIL 1 — S31 무관(선재)★: codex 레인 `backend_contract --ignored` 6/11 실패(`q4` `q5` `q6` `q8` `q11` `q12` · `path must be shorter than SUN_LEN`). codex 0.163.0 이 시험 HOME(`target\tmp\backend-contract-home-…`) 아래에 app-server 소켓을 만들어 경로 한도를 넘는다. 기준 브랜치(skill-apply `e12116fa`)에서 같은 이름 · 메시지로 재현됐다. 실 앱에서 띄운 codex 에이전트(StreamJson)는 정상 연결됐다(SUN_LEN 0건) — 시험 하네스만의 문제로 보인다(TUI 모드 미측). 고치는 일은 S31 밖이다.
 - 2026-11-02 — 주제 열기. 번호 = S31(선점 push 안 함 — 사용자 지시 「push 금지」). 출처 = `docs/todo/doc-drift.md` 「게이트 정규식이 못 닫은 구멍」.
 
+## S32 — codex contract harness on codex 0.163.0 (2026-11-02~03, `v0.5.0/fix/codex-contract-home`, autonomous session — user 「경로가 문제아냐. 그냥 수정해」) · folder `docs/process/S32-codex-contract-home/` · no ADR · implemented · reviewed · QA PASS · **not merged** (based on `v0.5.0/chore/skill-apply`)
+
+- 2026-11-03 — Landed. The `#[ignore]` codex lane of `crates/engram-dashboard-agent/tests/backend_contract.rs` failed 6/11 on codex 0.163.0 (pre-existing, found by the S31 qa). Two causes: the temp CODEX_HOME under `target/tmp` pushed codex's app-server socket past SUN_LEN, and 0.163.0 reworded its folder-trust prompt (and shows none for a non-git cwd). Fix = temp home at `%LOCALAPPDATA%\ebc\<tag>-<8hex>` with the socket path budget asserted · a wording-free start-up pass (ready OSC + hidden cursor + composer probe) · update/login screens suppressed by the temp home's config · after any CR, a trust record for the cwd must appear (pure check `codex_trust_record`, unit-tested) · S32 comments rewritten in English. The user chose to keep the wording-free CR when the reviewers split on it (「지금대로 자동 수락」). Production code unchanged.
+  - Review = code full (Claude + codex) 3 rounds → PASS. Unfixed 권장: no shorter-path fallback when the profile path is long (the assertion names the limit instead).
+  - QA = full regression run locally (workspace 5072 passed · gates 30 · frontend 2802 · tsc) · codex lane `backend_contract --ignored` 11/11 ×2 · mutation 2/2 caught · real app: a JSON-mode codex agent answered one turn (`PONG-5968`). Observed only: a TUI-mode codex agent in the app has no xterm scrollback and the mouse wheel goes to codex (alt-screen) — S21 TRD §6-F follow-up, user decision pending.
+- 2026-11-02 — Opened. Number = S32 (not claimed by push — user 「push 금지」). Source = S31 qa codex-lane failure.
+
 ## 다음 (미진행)
 
 - **[✅ 결정 완료 2026-08-14 — ADR-0158] 버전 불일치는 끊지 않고 알린다.** 아래 방향 항목은 이 ADR로 닫혔다. 결정 = 프로토콜 버전 안 올림(상향 기준을 「봉투 문법이 깨질 때」로 좁힘) · 보내기 전 상대 능력 확인(데몬이 연결 직후 먼저 광고하므로 옛 데몬에게 모르는 것을 보낼 일이 없다 — 실측 확인) · 데몬 자동 종료 없음 · **고지 = 앱 시작 시 1회, 알리기만, 닫으면 작은 흔적**(행동 버튼 없음, 모달은 아예 못 붙을 때만) · 버전과 무관하게 마감 시한 + 오류의 상관관계 표시를 함께 깐다. 근거 조사 = `docs/research/daemon-version-mismatch-2026-08-14.md`(적대 리뷰 BLOCK → 추천 수정됨, 그 경위도 그 문서에).
