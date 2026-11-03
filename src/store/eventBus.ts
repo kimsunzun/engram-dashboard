@@ -64,16 +64,16 @@ export function initEventBus(): Promise<void> {
       //   tab.*·window.*·slot.*·layout.setSlotContent 로 부른다. 핸들을 나란히 두면 같은 액션에 표면이
       //   둘이 되고, 한쪽만 고친 변경이 조용히 갈라진다.
       //   ★단 표면이 이미 하나인 것은 아니다★ — 버스 밖 전역 핸들이 아직 남아 있다. 여기를 읽고 "이제
-      //   단일 표면"이라고 결론내지 말 것. 정책 정본 = CLAUDE.md 「LLM-우선 제어」, 살아 있는 대입만 뽑는
+      //   단일 표면"이라고 결론내지 말 것. 정책 정본 = CLAUDE.md 「LLM-우선 제어」 · 갭 = `docs/tracking.md` T-77, 살아 있는 대입만 뽑는
       //   법 = `rg "\)\.__ENGRAM_|\)\.__engram" src/ -g '!*.test.*'`(4줄 — 그중 `__engramCmd` 가 여기다.
       //   `).__NAME` 앵커를 빼면 타입 표기·주석까지 걸려 38줄이 된다). ★이 자리에 명단을 적지 말 것 —
       //   낡는다★. ★그 출력을 정의부 주석으로 판정하지 말 것★ — 남은 것 중 일부는 자기를 「정식 §5 표면」
-      //   으로 소개해서, 주석만 보면 곁문인지 알 수 없다(판정은 CLAUDE.md 그 절이 한다).
+      //   으로 소개해서, 주석만 보면 곁문인지 알 수 없다(판정은 `docs/tracking.md` T-77 이 한다).
       //   ★레지스트리는 상태 권위가 아니다★ — handler 가 기존 store 액션/invoke 로 라우팅한다(ADR-0035
       //   유지). run 은 handler 반환(일부 Promise)을 그대로 흘려보내 cdp eval 에서 await 가능.
       //   window.__engramCmd.run('slot.empty', { viewId, slotId })  // 실행(모르는 id 는 throw)
-      // ★전체 command 를 window 에 노출하는 것은 의도적이다(WONTFIX)★: CLAUDE.md §5(모든 기능은 LLM 제어
-      //   가능해야 한다) / ADR-0055 의 설계 요구다. "allowlist 로 일부만 노출" 대안은 §5(LLM 이 메인 조작
+      // ★전체 command 를 window 에 노출하는 것은 의도적이다(WONTFIX)★: CLAUDE.md 「LLM-우선 제어」(모든 기능은 LLM 제어
+      //   가능해야 한다) / ADR-0055 의 설계 요구다. "allowlist 로 일부만 노출" 대안은 그 원칙(LLM 이 메인 조작
       //   주체)와 정면 충돌해 기각됐다. 이 표면은 보안 취약점이 아니라 제어 계약이다(리뷰어 재제기 방지 앵커).
       ;(globalThis as Record<string, unknown>).__engramCmd = {
         list: cmdList,

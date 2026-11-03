@@ -7,7 +7,7 @@ description = "Engram Dashboard 바닥 기반층 — 데이터 파일 읽기 판
 # ★test-support (ADR-0275 결정 5)★: 시험 도우미 모듈(`testing`)과 손으로 미는 시계(`time` 안
 #   `ManualClock`)를 연다. 기본 OFF — 소비 crate 는 dev-dependency 에서만 켠다(선례 =
 #   `engram-dashboard-command` · `engram-dashboard-transport` 의 같은 이름).
-#   데몬 · 셸 운영 그래프에 이 기능이 없다는 것은 CI 게이트가 잰다(CLAUDE.md 「빌드·검증 명령」).
+#   데몬 · 셸 운영 그래프에 이 기능이 없다는 것은 CI 게이트가 잰다(`.github/workflows/ci.yml`).
 [features]
 test-support = []
 

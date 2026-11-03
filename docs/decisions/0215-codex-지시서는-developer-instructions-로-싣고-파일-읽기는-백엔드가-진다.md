@@ -1,7 +1,7 @@
 # ADR-0215: codex 지시서는 developer_instructions 로 싣고 파일 읽기는 백엔드가 진다
 
 - 상태: 확정 (2026-09-20, 근거: `docs/research/codex-instruction-injection-2026-09-20.md` — 방법·수치 정본, 여기 베끼지 않는다) · 부분 폐기 by ADR-0219 (LLM 생성 표면의 codex 차단 조항)
-- 관련: ADR-0004(백엔드 확장) · ADR-0210(스폰을 실패시키지 않는다) · ADR-0209 · ADR-0211(같은 8,191 벽을 먼저 실측했고 지시서를 이 크기로 줄인 결정) · ADR-0092(프라이밍 seam 의 최초 결정 — 이 ADR 이 어기지 않는다) · `crates/engram-dashboard-agent/src/backend/claude/mod.rs:238` · Amends ADR-0099 (codex 는 경로 대신 내용을 싣는다) · Amended by ADR-0219 (LLM 생성 표면의 codex 차단 조항)
+- 관련: ADR-0004(백엔드 확장) · ADR-0210(스폰을 실패시키지 않는다) · ADR-0209 · ADR-0211(같은 8,191 벽을 먼저 실측했고 지시서를 이 크기로 줄인 결정) · ADR-0092(프라이밍 seam 의 최초 결정 — 이 ADR 이 어기지 않는다) · `crates/engram-dashboard-agent/src/backend/claude/mod.rs:238` · Amends ADR-0099 (codex 는 경로 대신 내용을 싣는다) · Amended by ADR-0219 (LLM 생성 표면의 codex 차단 조항) · Amends ADR-0092 (백엔드가 프라이밍 내용을 읽는다)
 
 ## 맥락
 

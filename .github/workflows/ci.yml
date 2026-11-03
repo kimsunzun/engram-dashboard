@@ -1,11 +1,13 @@
+# 이 워크플로를 고치기 전에 ADR-0131(`docs/decisions/0131-*`)을 읽는다.
 name: CI
 
 on:
   push:
-    # ★모든 브랜치★ — 좁히면 그 브랜치 작업에는 게이트가 아예 없어진다. 로컬을 quick 으로 낮춘
-    # 분담(`/qa` 바인딩)과 맞물리면 무게이트 구간이 생긴다. public repo 라 러너 비용이 0 이다.
-    # ★이 말은 브랜치 축의 것이다★ — 경로 축은 아래 `paths` 가 문서 경로만 뺀다. 어느 브랜치든
-    # 문서 밖 파일을 하나라도 바꾼 push 는 그대로 전부 돈다.
+    # ★All branches★ — narrowing this leaves those branches with no gate at all, and CI green is the
+    # integration check before every merge (`docs/handbook/branch-commit.md`; qa's full regression runs
+    # locally — `.claude/skill-bindings/qa.md` 「전체 회귀 = 로컬」). Public repo, so runner cost is 0.
+    # ★This is about the branch axis only★ — on the path axis, `paths` below drops doc paths only. On any
+    # branch, a push that changes even one non-doc file runs everything.
     branches:
       - '**'
     # 버전 태그 push = 릴리즈 트리거(맨 아래 release-build → release-publish 2단). 태그 push 에서는
@@ -185,7 +187,7 @@ jobs:
       # 아래 다섯 스텝 = 셸 패키지(`engram-dashboard`)의 테스트 타깃을 **하나씩** 집는다 —
       #   통합 4종(`src-tauri/tests/`) + 단위 스위트 1종(`lib_unit` = `[[test]] path = "src/lib.rs"`).
       #   ★`src-tauri/tests/stop_smoke.rs` 에는 스텝을 세우지 않는다★ — 시험 셋이 전부 `#[ignore]` 라 여기서 돌
-      #   것이 없고, 컴파일은 위 워크스페이스 회귀가 덮는다(실행은 로컬 실 데몬 레인 — `/qa` 바인딩).
+      #   것이 없고, 컴파일은 위 워크스페이스 회귀가 덮는다(실행은 로컬 실 데몬 레인 — qa 바인딩 「로컬 레인」).
       # ★2026-08-24: 이제 이 스위트들의 유일한 실행 경로가 아니다★ — 위 워크스페이스 회귀가 이 패키지를
       #   함께 돈다(제외 해제 · 겹침을 남긴 사유의 정본 = 그 스텝 주석). 이 다섯 줄이 남아 있는 값어치는
       #   둘이다: ① 실패가 **어느 스위트**에서 났는지를 스텝 이름이 짚는다(「실패 보고 시 게이트 명칭」).
@@ -202,8 +204,9 @@ jobs:
       #   타깃을 안 고른다). 넓히면 안 되는 이유는 위 ① 하나다: 다섯 타깃이 한 스텝에 뭉치면 어느 타깃이
       #   깨졌는지가 판정에서 섞인다. (옛 사유 "`lib_unit` 의 알려진 실패를 통째로 끌어온다" 는 그 실패가
       #   전부 고쳐지며 죽었다 — 결론만 남기고 사유를 갈아 끼웠다.)
-      # `-- --test-threads=4` 는 붙이지 않는다 — CI 는 그 플래그를 쓰지 않고(CLAUDE.md 「빌드·검증 명령」),
-      #   애초에 이 스위트는 인메모리 fake 포트뿐이라 자식 프로세스를 하나도 띄우지 않는다.
+      # No `-- --test-threads=4` — CI never uses that flag (the local/CI command-line split is intentional:
+      #   qa binding 「전체 회귀 = 로컬」), and this suite only uses in-memory fake ports, so it spawns no
+      #   child process anyway.
       # 검증 레인(ADR-0131 결정 2)에 둔다 — 릴리즈 잡이 아니다. release-build 는 태그에서만 돌고
       #   `needs: [backend, …]` 로 이 잡에 매달리므로, 여기 두면 배포 앞 게이트로도 함께 선다.
       - name: cargo test -p engram-dashboard --test layout_apply
@@ -286,9 +289,9 @@ jobs:
 
       # ADR-0266: OS 층 crate(`platform`). 워크스페이스 crate 의존 0(base 도 아니다)이 불변식이라 이 crate 도
       #   위와 같은 단독 기립 축으로 확인한다 — 불변식 · 게이트의 정본은 그 crate lib.rs 헤더다.
-      # `-- --test-threads=4` 는 붙이지 않는다 — `process` 의 시험(`child_pids_finds_spawned_child` 등)이 실
-      #   `cmd.exe` 를 띄우긴 하지만 CI 는 그 플래그를 아예 쓰지 않는다(CLAUDE.md 「빌드·검증 명령」 — 그
-      #   플래그가 겨냥하는 조건이 러너에 없다). 로컬 명령에는 붙는다.
+      # No `-- --test-threads=4` — the `process` tests (`child_pids_finds_spawned_child` etc.) do spawn a real
+      #   `cmd.exe`, but CI never uses that flag (qa binding 「전체 회귀 = 로컬」 — the condition the flag
+      #   targets does not exist on the runner). The local command does add it.
       - name: cargo test -p engram-dashboard-platform
         shell: bash
         run: cargo test --locked -p engram-dashboard-platform
@@ -302,8 +305,8 @@ jobs:
       #   ② 배송 파일명 가드(`the_built_binary_file_name_matches_the_shared_constant` · ADR-0094)가 든 `engram_cli`
       #      타깃이 사라지면 `--test engram_cli` 가 「no test target」으로 죽는다. 위 워크스페이스 회귀에서는 사라진
       #      타깃이 실패가 아니라 침묵이다(셸 `--test lib_unit` 스텝과 같은 값어치).
-      # `-- --test-threads=4` 는 붙이지 않는다 — CI 는 그 플래그를 쓰지 않는다(CLAUDE.md 「빌드·검증 명령」). 로컬
-      #   명령에는 붙는다(`engram_cli` 가 실 engram.exe 를 띄운다).
+      # No `-- --test-threads=4` — CI never uses that flag (qa binding 「전체 회귀 = 로컬」). The local
+      #   command does add it (`engram_cli` spawns the real engram.exe).
       # ADR-0285
       - name: cargo test -p engram-dashboard-cli --bins --test engram_cli
         shell: bash
@@ -378,9 +381,9 @@ jobs:
       #   게이트 ⑤(실소켓 스위트가 비지 않았나)를 부른다.
       # ★feature 목록을 손으로 박아 `--all-features` 를 대체하지 말 것★ — `--all-features` 쪽이 `ws`
       #   어댑터의 optional 서드파티와 실소켓 테스트까지 컴파일한다. 그게 의도다.
-      # `-- --test-threads=4` 는 붙이지 않는다 — CI 는 그 플래그를 아예 쓰지 않는다(CLAUDE.md
-      #   「빌드·검증 명령」 — 그 플래그가 겨냥하는 보안 소프트웨어 조건이 러너에 없고, 낮추면 CI 만
-      #   느려진다). 로컬 명령에도 이 crate 에는 안 붙는다 — 자식 프로세스를 하나도 안 띄운다.
+      # No `-- --test-threads=4` — CI never uses that flag (qa binding 「전체 회귀 = 로컬」 — the
+      #   security-software condition it targets does not exist on the runner, and lowering it only slows
+      #   CI). The local command does not add it for this crate either — it spawns no child process.
       - name: 'transport gate 4a: cargo test -p engram-dashboard-transport (features off)'
         shell: bash
         run: cargo test --locked -p engram-dashboard-transport
@@ -688,13 +691,15 @@ jobs:
       #   다시 잰다)가 실패한 시작점이 정확히 여기다.
       # ★`crate::` 단독으로 넓히지 말 것★: 그건 평범한 Rust 라 게이트가 아니라 잡음이 된다. 모듈 **이름**을
       #   박아 두는 대가로 입주자가 늘면 여기 이름을 더해야 한다(메시징 정규식과 같은 종류의 구멍).
+      # ★`::` 앞뒤 `\s*` 를 걷지 말 것★: 공백형(`super:: sync` · `crate :: time`)을 잡는다 — 근거는 아래
+      #   `replay_flight` 순수성 게이트 주석.
       # ★알려진 한계★: `logging` 이 나중에 하위 모듈을 가지면 그 안의 `crate::logging::…` 자기 참조가
       #   오탐된다. 그때는 상대 경로(`super::`)로 부르거나 이 게이트를 다시 판정한다.
       - name: 'Gate: base leaf crate — tenants must not reference each other'
         shell: bash
         run: |
           set +e
-          hits=$(rg "(crate|super)::(logging|text|time|path|sync|testing|writable|file|panic)" crates/engram-dashboard-base/src/)
+          hits=$(rg "(crate|super)\s*::\s*(logging|text|time|path|sync|testing|writable|file|panic)" crates/engram-dashboard-base/src/)
           rc=$?
           set -e
           case "$rc" in
@@ -882,8 +887,7 @@ jobs:
       # ADR-0270 「영향」 불변식 「셸(`src-tauri`)은 agent crate 를 운영 의존하지 않는다」의 기계 벽(TRD 2-1 D6).
       #   셸(`engram-dashboard`)의 정상 · build 그래프에 `engram-dashboard-agent` 가 0 줄이어야 PASS(짝: 데몬의 같은
       #   그래프에 1 줄 이상). 해석된 그래프를 읽는다 — 매니페스트 grep 이 아니라서 다른 의존이 agent 를 끌어오는
-      #   전이 경로까지 잡는다. ★판정 함수(`shell_agent_gate`)는 여기 하나에만 둔다★ — `/qa` 바인딩 4i 블록이 이것을
-      #   읽어 그대로 부른다.
+      #   전이 경로까지 잡는다. ★판정 함수(`shell_agent_gate`)는 여기 하나에만 둔다★ — 로컬 대체(`.claude/skill-bindings/qa-verify.md` 「gates 잡」)는 이 스텝을 그대로 돈다.
       # ★`cargo tree -i engram-dashboard-agent` 로 바꾸지 말 것★ — 대상이 그래프에 없으면 rc=101 로 죽어 「없다」가
       #   FAIL 로 읽힌다(실측 — TRD 2-1 §1-4). 그래서 그래프 전체를 찍고 줄을 찾는다.
       # ★`-e` 에 `dev` 를 넣지 말 것★ — 셸 → (dev) 데몬 → agent 는 일부러 남아 있다(셸 통합 시험이 데몬을 쓴다 ·
@@ -891,7 +895,6 @@ jobs:
       # ★짝(데몬 → 1 줄 이상)을 지우지 말 것★ — agent 를 개명하거나 접두를 바꾸거나 패턴에 오타가 나면 0 기대 줄이
       #   매치할 이름을 잃고 눈먼 채 통과한다. 셸 패키지를 개명하면 `cargo tree -p` 가 죽어 FAIL 이다.
       # ★`^…␣` 앵커(뒤 공백)를 빼지 말 것★ — 빼면 같은 접두의 다른 이름이 걸린다(platform 게이트 ⑦ 과 같다).
-      # ★함수 본문에 `}` 한 글자뿐인 줄을 두지 말 것★ — 4i 블록은 함수 머리부터 첫 그런 줄까지를 함수로 읽는다.
       - name: 'shell gate 1: no agent crate in the shell release graph (shell = 0, daemon >= 1)'
         shell: bash
         run: |
@@ -916,7 +919,7 @@ jobs:
       #   모든 변형을 이름으로 다루고 와일드카드 · 묶음 이름 갈래를 두지 않아야 PASS — 슬롯 종류를 더하면 이름을 짓기
       #   전에는 통과하지 못하게 하려는 것이다. 함수에 `#[deny(clippy::wildcard_enum_match_arm)]` 가 붙어 있지만 CI 가
       #   clippy 를 돌리지 않아 그 attribute 만으로는 지켜지지 않는다 — 이 스텝이 벽이다.
-      #   ★판정 함수(`slot_label_gate`)는 여기 하나에만 둔다★ — `/qa` 바인딩 4j 블록이 이것을 읽어 그대로 부른다.
+      #   ★판정 함수(`slot_label_gate`)는 여기 하나에만 둔다★ — 로컬 대체(`.claude/skill-bindings/qa-verify.md` 「gates 잡」)는 이 스텝을 그대로 돈다.
       # ★양성 검사다 — 위반 꼴을 정규식으로 열거하지 않는다★(U1 리뷰 2): 열거하던 음성 정규식은 `Other =>` ·
       #   `other | other =>` · `other @ &_ =>` · 범위를 자르는 0 열 `}` · 주석 글자에 차례로 샜다. 대신 둘을 잰다.
       #   범위 = `slot_label` 본문(0 열 `pub fn slot_label` 줄부터 첫 0 열 `}` 줄까지)에서 `/* … */`(한 줄) · `//` 주석을
@@ -931,8 +934,9 @@ jobs:
       #     그 밖 자리의 `=>`(중첩 `match` · `=>` 만 내린 줄 · rustfmt 가 다음 줄로 내린 가드)도 FAIL 이다.
       # ★짝 둘을 지우지 말 것★ — ① 0 열 `pub fn slot_label` 이 정확히 하나 · 그 앞에 `#[deny(…)]`(사이 `#[…]` · `//`
       #   줄 허용) · 그 파일에 이 lint 를 끄는 `allow` · `expect` · `warn` 이 없음 · 그 파일 어디에도 rustfmt 건너뛰기
-      #   (`rustfmt::skip` · `rustfmt_skip`)가 없음(② 가 기대는 rustfmt 꼴을 끄므로) · 본문 끝을 찾음 · 주석 밖 `match` 가
-      #   있음. ② 도우미 자기 시험 — 갈래 모양 위반 표본 19 개는 전부 걸리고 위반 아닌 표본 10 개는 하나도 안 걸리며,
+      #   (`rustfmt::skip` · `rustfmt_skip` — `::` 앞뒤 공백형 포함)가 없음(② 가 기대는 rustfmt 꼴을 끄므로) ·
+      #   본문 끝을 찾음 · 주석 밖 `match` 가 있음.
+      #   ② 도우미 자기 시험 — 갈래 모양 위반 표본 19 개는 전부 걸리고 위반 아닌 표본 10 개는 하나도 안 걸리며,
       #   가짜 enum(변형 3 · 문서 줄 · attribute 줄)과 한 변형(`Ag` — `AgList` 와 앞이 같다 · 주석에만 있다)이 빠진
       #   가짜 본문에서 정확히 그 하나를 빠졌다고 한다. 수를 고정한다(배열이 비면 0 = 0 이다).
       # 기대는 것 = rustfmt(`cargo fmt --check`)가 갈래를 줄마다 · 4 칸 들여쓰기로 놓는다는 것.
@@ -942,7 +946,6 @@ jobs:
       # ★일부러 속이는 꼴 셋은 받아들였다 — 사용자 수락(U1 리뷰 3 다툼 · 커밋 `4cefce48`)★: 가짜 `match` 를 담은 원시 문자열 ·
       #   ① 을 채우는 문자열 속 `SlotContent::<새 변형>` · 망라한 `match` 를 닿지 않게 두고 그 앞에서 묶음 갈래를 가진
       #   도우미로 일찍 돌아가기. 셋 다 코드 리뷰가 볼 몫으로 남긴다.
-      # ★함수 끝은 `} # end slot_label_gate` 줄이다★ — 4j 블록이 함수 머리부터 그 줄까지를 함수로 읽는다. 바꾸지 말 것.
       - name: 'shell gate 2: slot_label names every SlotContent variant with path-pattern arms only (D17)'
         shell: bash
         run: |
@@ -1027,10 +1030,10 @@ jobs:
             [ "$n" = 1 ] || { echo "FAIL — 짝 ①: $f 에 0 열 'pub fn slot_label' 이 $n 개(기대 1) — 개명 · 이사했나"; return 1; }
             n=$(rg -U --count-matches '#\[deny\(clippy::wildcard_enum_match_arm\)\]\s*(?:(?:#\[.*\]|//.*)\s*)*pub fn slot_label[<(]' "$f") || n=0
             [ "$n" = 1 ] || { echo "FAIL — 짝 ①: 'pub fn slot_label' 앞에 '#[deny(clippy::wildcard_enum_match_arm)]' 가 없다(attribute 를 걷었나)"; return 1; }
-            rc=0; hits=$(rg -n '\b(?:allow|expect|warn)\s*\([^)]*(?:wildcard_enum_match_arm|clippy::restriction)' "$f") || rc=$?
+            rc=0; hits=$(rg -n '\b(?:allow|expect|warn)\s*\([^)]*(?:wildcard_enum_match_arm|clippy\s*::\s*restriction)' "$f") || rc=$?
             [ "$rc" -le 1 ] || { echo "FAIL — rg errored (exit $rc)"; return 1; }
             [ -z "$hits" ] || { echo "FAIL — 짝 ①: $f 에 그 lint 를 끄는 attribute 가 있다:"; printf '%s\n' "$hits"; return 1; }
-            rc=0; hits=$(rg -n 'rustfmt::skip|rustfmt_skip' "$f") || rc=$?
+            rc=0; hits=$(rg -n 'rustfmt\s*::\s*skip|rustfmt_skip' "$f") || rc=$?
             [ "$rc" -le 1 ] || { echo "FAIL — rg errored (exit $rc)"; return 1; }
             [ -z "$hits" ] || { echo "FAIL — 짝 ①: $f 에 rustfmt 건너뛰기가 있다(② 가 기대는 rustfmt 꼴을 끈다):"; printf '%s\n' "$hits"; return 1; }
             s=$(awk '/^pub fn slot_label[<(]/ { print NR; exit }' "$f")
@@ -1093,8 +1096,7 @@ jobs:
 
       # ADR-0266 불변식 「운영 OS 분기는 platform crate 안에만」 — platform 밖에서 OS cfg 술어를 쓰는 `.rs` 파일 목록이
       #   아래 명단과 정확히 같아야 PASS(짝: 같은 matcher 가 platform 안에서는 1 파일 이상). ★명단(heredoc) · 정규식
-      #   (`os_cfg_re`) · 파일 찾기 함수(`os_cfg_files`)는 여기 하나에만 둔다★ — `/qa` 바인딩 4f 블록이 이 셋을 읽는다.
-      #   ★대상 범위 · 짝 · 대조는 4f 블록이 따로 되풀어 적는다★ — 이 스텝의 그쪽을 고치면 4f 블록도 맞춘다.
+      #   (`os_cfg_re`) · 파일 찾기 함수(`os_cfg_files`)는 여기 하나에만 둔다★ — 로컬 대체(`.claude/skill-bindings/qa-verify.md` 「gates 잡」)는 이 스텝을 그대로 돈다.
       #   matcher · 짝 · 범위 · 한계 · 명단을 고치는 법의 정본 = `crates/engram-dashboard-platform/src/lib.rs` 헤더 게이트 ④.
       - name: 'platform gate 4: OS cfg outside platform — exactly the fixed file list'
         shell: bash
@@ -1169,10 +1171,9 @@ jobs:
 
       # ADR-0266 불변식의 의존 축 — 워크스페이스 멤버 중 아래 OS crate 를 **운영 의존**(normal · build · 대상 OS 무관)으로
       #   **직접** 가진 것이 platform 하나여야 PASS(짝: platform 이 1 개 이상 가진다). dev 의존은 세지 않는다.
-      #   ★목록(`os_dep_re` — 손으로 적은 명시 목록) · 판정 함수(`os_dep_gate`)는 여기 하나에만 둔다★ — `/qa` 바인딩
-      #   4g 블록이 이 둘을 읽어 그 함수를 그대로 부른다. 짝 · 범위 · 한계의 정본 = `crates/engram-dashboard-platform/src/lib.rs`
+      #   ★목록(`os_dep_re` — 손으로 적은 명시 목록) · 판정 함수(`os_dep_gate`)는 여기 하나에만 둔다★ —
+      #   로컬 대체(`.claude/skill-bindings/qa-verify.md` 「gates 잡」)는 이 스텝을 그대로 돈다. 짝 · 범위 · 한계의 정본 = `crates/engram-dashboard-platform/src/lib.rs`
       #   헤더 게이트 ⑤.
-      # ★함수 본문에 `}` 한 글자뿐인 줄을 두지 말 것★ — 4g 블록은 함수 머리부터 첫 그런 줄까지를 함수로 읽는다.
       - name: 'platform gate 5: OS crates as direct normal/build deps — platform only'
         shell: bash
         run: |
@@ -1193,13 +1194,12 @@ jobs:
       # ADR-0266 불변식의 표준 라이브러리 축 — platform 밖에서 `std::os::windows` · `std::os::unix` 를 `//` 주석 밖에 쓰는
       #   `.rs` 파일 목록이 아래 명단과 정확히 같아야 PASS(짝: 같은 matcher 가 platform 안에서는 1 파일 이상).
       #   ★정규식(`std_os_re`) · 판정 함수(`std_os_gate` — 대상 범위 · 짝 · 대조 · 메시지 전부) · 명단(heredoc)은 여기
-      #   하나에만 둔다★ — `/qa` 바인딩 4h 블록이 이 셋을 읽어 그 함수를 그대로 부른다. 짝 · 범위 · 한계 · 명단을 고치는
+      #   하나에만 둔다★ — 로컬 대체(`.claude/skill-bindings/qa-verify.md` 「gates 잡」)는 이 스텝을 그대로 돈다. 짝 · 범위 · 한계 · 명단을 고치는
       #   법의 정본 = `crates/engram-dashboard-platform/src/lib.rs` 헤더 게이트 ⑥.
-      # ★함수 본문에 `}` 한 글자뿐인 줄을 두지 말 것★ — 4h 블록은 함수 머리부터 첫 그런 줄까지를 함수로 읽는다.
       - name: 'platform gate 6: std::os::windows/unix outside platform — exactly the fixed file list'
         shell: bash
         run: |
-          std_os_re='^(?:[^/]|/[^/])*?\bstd::os::(?:windows|unix)\b'
+          std_os_re='^(?:[^/]|/[^/])*?\bstd\s*::\s*os\s*::\s*(?:windows|unix)\b'
           # 인자 = 명단 원문(`#` 주석 · 빈 줄 · 들여쓰기를 받는다 — 4h 블록은 ci.yml 원문 그대로 넘긴다).
           #   `\134` 는 게이트 ④ 의 `os_cfg_files` 와 같은 이유다.
           std_os_gate() {
@@ -1255,7 +1255,13 @@ jobs:
       # ★`\b` + `::` 요구가 정당한 이웃을 가른다★ — 이 모듈은 `std::time::Instant` 를 쓴다(결정론 하네스의
       #   주입점). `tokio::time::Instant` 만 잡고 std 쪽은 안 잡아야 해서 crate 뿌리 이름을 물었고, `\b` 가
       #   `my_tauri::` 같은 부분일치를 막는다.
+      # ★`::` 앞뒤 `\s*` 를 걷지 말 것★ — Rust 는 경로 마디 사이 공백을 받는다(`tokio :: spawn`). 보통은 rustfmt
+      #   (`cargo fmt --check`)가 먼저 막지만, rustfmt 가 손대지 않는 매크로 본문 · `#[rustfmt::skip]` 구간의
+      #   공백형은 fmt 게이트를 지나 그대로 남는다. 줄을 넘는 경로는 여전히 못 본다.
       # ★알려진 한계 = 블록 주석(`/* */`)★ — 그 안쪽은 접두 가드가 못 막는다. 대상 파일은 `//` 만 쓴다.
+      # ★알려진 한계 = `<이름>::` 꼴이 아닌 이름★ — 별칭(`use tokio as rt;` · `extern crate tokio as rt;`) · 끝 마디
+      #   import(`use std::net;`) · 여러 항목 묶음(`use std::{net::TcpStream, time::Instant};`)은 못 본다
+      #   (`docs/todo/observed-only.md`).
       # ★`test -f` 를 지우지 말 것★ — 파일이 또 이사하면 rg 는 매치 0 을 뱉고 0 = PASS 라 벽이 조용히
       #   사라진다(rc=2 갈래도 같은 것을 잡지만 사유를 못 찍는다). `-d` 가 아니라 `-f` 다 — 대상이 파일이다.
       - name: 'Gate: replay_flight purity — no transport/wire ingress'
@@ -1264,7 +1270,7 @@ jobs:
           set +e
           f=src-tauri/src/daemon_client/replay_flight.rs
           if [ ! -f "$f" ]; then echo "FAIL — 게이트 대상 파일이 없다: $f (또 이사했나)"; exit 1; fi
-          hits=$(rg "^(?:[^/]|/[^/])*?\b(tauri|tokio|engram_dashboard_[a-z_]+|std::net)::" "$f")
+          hits=$(rg "^(?:[^/]|/[^/])*?\b(tauri|tokio|engram_dashboard_[a-z_]+|std\s*::\s*net)\s*::" "$f")
           rc=$?
           set -e
           case "$rc" in
@@ -1330,7 +1336,7 @@ jobs:
       #   유일한 벽이다. 형태의 근거는 위 `replay_flight` 순수성 게이트 주석과 같다(접두
       #   `^(?:[^/]|/[^/])*?` = 「아직 `//` 를 안 만났다」 → 주석 밖만 잡아 헤더 자기인용이 오탐되지 않고 ·
       #   `use` 줄만 앵커하면 인라인 완전경로 `tokio::spawn(…)` 한 줄에 뚫리며 · `\b`+`::` 가 정당한 이웃
-      #   `std::time::Instant` 를 가른다).
+      #   `std::time::Instant` 를 가르고 · `::` 앞뒤 `\s*` 가 공백형 `tokio :: spawn` 을 잡는다).
       # ★파일이 사라져도 매치는 0 = PASS 라 세 파일의 존재를 먼저 본다★(`-d` 가 아니라 `-f` — 대상이 파일이다).
       # ★`$files` 를 따옴표로 감싸지 말 것★ — 세 경로로 갈라져 rg 인자가 돼야 한다(경로에 공백이 없다).
       - name: 'transport gate 3: pure layer isolation (pending/stream/machine)'
@@ -1341,7 +1347,7 @@ jobs:
           for f in $files; do
             if [ ! -f "$f" ]; then echo "FAIL — 게이트 대상 파일이 없다: $f (개명했나·이사했나)"; exit 1; fi
           done
-          hits=$(rg "^(?:[^/]|/[^/])*?\b(tokio|futures_util|futures|engram_dashboard_[a-z_]+|std::net)::" $files)
+          hits=$(rg "^(?:[^/]|/[^/])*?\b(tokio|futures_util|futures|engram_dashboard_[a-z_]+|std\s*::\s*net)\s*::" $files)
           rc=$?
           set -e
           case "$rc" in

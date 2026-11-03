@@ -8,7 +8,7 @@ use crate::{CommandEnvelope, CommandError, CommandReply, ErrorCode, RequestId};
 /// 봉투를 상대 프로세스로 보내고 **같은 `request_id`** 의 답을 기다린다.
 ///
 /// 구현체는 프로세스마다 하나다(데몬 = WS 연결 · 셸 = daemon_client · 화면 = invoke).
-/// ★이것이 교체점이라 전송 방식이 코드에 안 묶인다★(CLAUDE.md 「아키텍처 원칙」).
+/// ★이것이 교체점이라 전송 방식이 코드에 안 묶인다★(CLAUDE.md 「설계 원칙」).
 pub trait CommandLink: Send + Sync {
     fn send(&self, env: CommandEnvelope) -> Pin<Box<dyn Future<Output = CommandReply> + Send>>;
 }

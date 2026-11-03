@@ -4,7 +4,7 @@
 //
 // ADR-0137 — dev 서브커맨드에만 오버레이를 끼우는 이 한 겹은 identifier 분리의 주입 지점 **둘 중
 //   하나**다. ★다른 하나 = `scripts/build-client-shell.mjs`★ — 그쪽은 Tauri CLI 를 지나지 않는 생
-//   `cargo build -p engram-dashboard` 를 `TAURI_CONFIG` 로 덮는다(debug 런처 둘과 `/qa` 게이트가 그
+//   `cargo build -p engram-dashboard` 를 `TAURI_CONFIG` 로 덮는다(debug 런처 둘과 `/engram-qa` 가 그
 //   스크립트를 부른다). 한쪽만 고치면 다른 경로가 조용히 release identifier 로 돌아간다 — 실제로
 //   그렇게 났다.
 // ★왜 래퍼가 필요한가(`"tauri": "tauri"` 로 되돌리지 마라)★: dev 빌드는 릴리즈와 **다른 번들

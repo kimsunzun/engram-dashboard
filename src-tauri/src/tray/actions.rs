@@ -1,6 +1,6 @@
 //! tray actions — 트레이 핸들러와 Tauri command 가 **공유하는** 부수효과 함수(불순: Tauri/discovery 의존).
 //!
-//! ## 왜 이 모듈이 따로 있나 (CLAUDE.md §5 — load-bearing)
+//! ## 왜 이 모듈이 따로 있나 (CLAUDE.md 「LLM-우선 제어」 — load-bearing)
 //! 네이티브 트레이 팝업은 WebView DOM 이 아니라 cdp 가 직접 클릭 못 한다. 그래서 트레이 메뉴 클릭과
 //! LLM/cdp 의 invoke 가 **같은 내부 함수**(여기)를 부르게 해 두 조작 주체가 같은 동작을 공유한다.
 //! 트레이 핸들러(mod.rs on_menu_event)도, command(commands/tray.rs)도 전부 이 함수들만 호출 —

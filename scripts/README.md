@@ -16,7 +16,7 @@
 
 ## 빌드·테스트
 
-빌드·테스트도 같은 방식으로 [`run-detached.ps1`](run-detached.ps1)을 거쳐 프로세스 트리 밖에서 돌리고, 출력은 파일로만 받습니다 — 빌드 로그 전체를 읽지 않고 필요한 줄만 보기 위해서입니다. 사용법은 그 스크립트 헤더에 있고, 어떤 명령을 어느 강도로 돌리는지는 `/qa` 바인딩([`.claude/skill-bindings/qa.md`](../.claude/skill-bindings/qa.md))이 정합니다.
+빌드·테스트도 같은 방식으로 [`run-detached.ps1`](run-detached.ps1)을 거쳐 프로세스 트리 밖에서 돌리고, 출력은 파일로만 받습니다 — 빌드 로그 전체를 읽지 않고 필요한 줄만 보기 위해서입니다. 사용법은 그 스크립트 헤더에 있고, 어떤 명령을 어느 강도로 돌리는지는 qa 바인딩([`.claude/skill-bindings/qa.md`](../.claude/skill-bindings/qa.md))이 정합니다.
 
 ## 서드파티 라이선스 고지
 

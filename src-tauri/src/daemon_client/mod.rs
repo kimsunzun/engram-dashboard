@@ -625,7 +625,7 @@ impl DaemonClient {
         //   emit 을 포트로 끊었다(`events.rs`) — 이제 `None` 상태 자체가 타입에 없다.
         //   ★기록 위치★: docs/process/step-log.md "모듈① T7c Fix-C" 섹션 ② 항목. ADR-0174 는 이 스위트를
         //   **세운 방법**이고, 이 seam 은 거기서 후속으로 남겨 둔 몫이다.
-        //   ★수치·CI 등재 상태는 여기 적지 않는다★ — 정본 = CLAUDE.md 「빌드·검증 명령」의 lib_unit 줄.
+        //   ★수치·CI 등재 상태는 여기 적지 않는다★ — 등재 정본 = `ci.yml` 의 `--test lib_unit` 스텝 · 수치는 실행 결과에서 센다.
         self.rt.spawn(run_connection(
             info,
             my_gen,

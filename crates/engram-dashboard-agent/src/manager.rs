@@ -2711,7 +2711,7 @@ impl AgentManager {
             //   화면·프론트에는 안 나가고, 아래 `format!("resume 조기 종료({status:?})")` 의 사유 문자열과
             //   `matches!(status, AgentStatus::Killed)` 판정에만 쓰인다. 그래서 "공표되는 `Failed` 는
             //   pump 패닉 전용"이 그대로 성립한다 — 다만 *코드에 두 곳뿐*이라고 적으면 여기서 거짓이 된다
-            //   (문서가 그렇게 적었다가 2026-08-25 에 정정됐다. 정본 = architecture-overview 「세션 복원 / 활성화」).
+            //   (문서가 그렇게 적었다가 2026-08-25 에 정정됐다. 정본 = docs/reference/architecture.md 「세션 복원 · 활성화」).
             Err(_) => {
                 return EarlyVerdict::Terminal {
                     status: AgentStatus::Failed {

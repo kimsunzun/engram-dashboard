@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>S31 공백 낀 경로 게이트</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: one reading column (~70ch); each section = claim heading → figure/table → a few lines of why. Dark by default (user preference); light only on explicit data-theme="light". */
+:root{
+  --bg:#0f1114; --paper:#171a1f; --ink:#e3e6ea; --muted:#99a1ad; --line:#2a2f37;
+  --code-bg:#1d2128;
+  --fix:#3fc1a5; --fix-soft:#11302a;      /* 새 패턴이 잡는 쪽 */
+  --hole:#e0a43a; --hole-soft:#33270f;    /* 새던 길 */
+  --fail:#f0716a; --fail-soft:#351818;    /* 막힘 · 잘못된 길 */
+  --hl:#7aa7ff; --hl-soft:#18233a;        /* 변경 이력 하이라이트 */
+  --f-body:"IBM Plex Sans KR","Malgun Gothic","Apple SD Gothic Neo",system-ui,sans-serif;
+  --f-mono:"JetBrains Mono",ui-monospace,Consolas,monospace;
+  color-scheme:dark;
+}
+:root[data-theme="light"]{
+  --bg:#f4f5f7; --paper:#ffffff; --ink:#171a1f; --muted:#5a626e; --line:#d8dce2;
+  --code-bg:#eceff3;
+  --fix:#0d7a64; --fix-soft:#dff3ee;
+  --hole:#94600a; --hole-soft:#fbefd6;
+  --fail:#c0322b; --fail-soft:#fbe4e2;
+  --hl:#2457c5; --hl-soft:#e3ebfb;
+  color-scheme:light;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--f-body);font-size:15.5px;line-height:1.7}
+.wrap{max-width:860px;margin:0 auto;padding-inline:16px;padding-block:40px 80px;display:flex;flex-direction:column;gap:52px}
+h1,h2,h3{text-wrap:balance;line-height:1.35;margin:0;font-weight:700}
+h1{font-size:28px;letter-spacing:-.01em}
+h2{font-size:21px}
+h3{font-size:16px}
+p{margin:0;max-width:70ch}
+section{display:flex;flex-direction:column;gap:16px}
+.eyebrow{font-family:var(--f-mono);font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+code,.mono{font-family:var(--f-mono);font-size:.88em}
+code{background:var(--code-bg);padding:.08em .35em;border-radius:4px;white-space:nowrap}
+pre{margin:0;background:var(--code-bg);border:1px solid var(--line);border-radius:8px;padding:12px 14px;overflow-x:auto;font-family:var(--f-mono);font-size:13px;line-height:1.6}
+pre code{background:none;padding:0;white-space:pre}
+ins{text-decoration:none;color:var(--fix);background:var(--fix-soft);border-radius:3px;padding:0 1px;font-weight:600}
+.muted{color:var(--muted)}
+.small{font-size:13.5px}
+ul.tight{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;max-width:70ch}
+
+/* hero */
+.hero{display:flex;flex-direction:column;gap:14px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+.lede{font-size:17px;max-width:66ch}
+.decide{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr));gap:10px;margin-top:6px}
+.decide>div{background:var(--paper);border:1px solid var(--line);border-radius:8px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.decide b{font-size:13px;color:var(--muted);font-weight:600}
+.decide a{color:var(--hl);font-size:13px;text-decoration:none}
+.decide a:hover,.decide a:focus-visible{text-decoration:underline}
+
+/* figures */
+figure{margin:0;display:flex;flex-direction:column;gap:8px}
+.fig-box{background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:14px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto;min-width:640px;color:var(--ink)}
+figcaption{font-size:13.5px;color:var(--muted);max-width:70ch}
+svg text{font-family:var(--f-body);font-size:12.5px;fill:currentColor}
+svg .m{font-family:var(--f-mono);font-size:12.5px}
+svg .sub{fill:var(--muted);font-size:11.5px}
+svg .box{fill:var(--paper);stroke:currentColor;stroke-width:1.2}
+svg .box-src{fill:var(--code-bg);stroke:currentColor;stroke-width:1.2}
+svg .box-fail{fill:var(--fail-soft);stroke:var(--fail);stroke-width:1.4}
+svg .box-hole{fill:var(--hole-soft);stroke:var(--hole);stroke-width:1.4}
+svg .box-fix{fill:var(--fix-soft);stroke:var(--fix);stroke-width:1.4}
+svg .box-bad{fill:var(--fail-soft);stroke:var(--fail);stroke-width:1.2;stroke-dasharray:5 4}
+svg .edge{fill:none;stroke:currentColor;stroke-width:1.3}
+svg .edge-bad{fill:none;stroke:var(--fail);stroke-width:1.3;stroke-dasharray:5 4}
+svg .t-fail{fill:var(--fail);font-weight:600}
+svg .t-hole{fill:var(--hole);font-weight:600}
+svg .t-fix{fill:var(--fix);font-weight:600}
+svg .ah{fill:currentColor}
+svg .ah-bad{fill:var(--fail)}
+
+/* tables */
+.tbl{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--paper)}
+table{border-collapse:collapse;width:100%;font-size:14px}
+th,td{text-align:left;vertical-align:top;padding:9px 12px;border-bottom:1px solid var(--line)}
+tr:last-child td{border-bottom:0}
+th{font-size:12px;letter-spacing:.06em;color:var(--muted);font-weight:600;background:var(--code-bg)}
+td code{white-space:nowrap}
+.verdict{font-family:var(--f-mono);font-size:12.5px;font-weight:600;white-space:nowrap}
+.v-pass{color:var(--muted)}
+.v-hole{color:var(--hole)}
+.v-fail{color:var(--fix)}
+.v-bad{color:var(--fail)}
+.tbl-match td:first-child code{white-space:pre}
+
+/* callout for the one trap */
+.note{border:1px solid var(--hole);background:var(--hole-soft);border-radius:8px;padding:12px 14px;max-width:72ch}
+.note b{color:var(--hole)}
+
+/* glossary row */
+.gloss{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr));gap:10px}
+.gloss>div{border-top:2px solid var(--line);padding-top:8px;font-size:14px;min-width:0}
+.gloss code{white-space:normal;word-break:break-all}
+
+/* reference (collapsed) */
+details{border:1px solid var(--line);border-radius:10px;background:var(--paper)}
+summary{cursor:pointer;padding:12px 14px;font-weight:600}
+summary:focus-visible,button:focus-visible,a:focus-visible{outline:2px solid var(--hl);outline-offset:2px}
+details[open] summary{border-bottom:1px solid var(--line)}
+details .inner{padding:14px;display:flex;flex-direction:column;gap:12px}
+details .tbl{border-radius:8px}
+
+/* change history */
+.hist{display:flex;flex-direction:column;gap:6px}
+.hist-row{all:unset;cursor:pointer;display:grid;grid-template-columns:auto auto 1fr;gap:14px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--paper);font-size:14px}
+.hist-row[aria-pressed="true"]{border-color:var(--hl);background:var(--hl-soft)}
+.hist-row .mono{color:var(--muted)}
+.hist-off{all:unset;cursor:pointer;font-size:13px;color:var(--hl);align-self:flex-start}
+.hl{outline:2px solid var(--hl);outline-offset:3px;border-radius:4px;background:var(--hl-soft)}
+
+@media (max-width:520px){
+  h1{font-size:24px}
+  .lede{font-size:16px}
+  th,td{padding:8px 10px}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<!-- ───────── 결론 ───────── -->
+<header class="hero">
+  <div class="eyebrow">S31 · PRD + TRD 판 2 · 2026-11-02</div>
+  <h1>CI 정규식 게이트가 <code>tokio :: time</code> 을 못 본다 — <code>::</code> 양옆에 공백을 허용해 막는다</h1>
+  <p class="lede">CI 의 소스 검사 몇 개는 <code>rg</code> 정규식으로 <code>tokio::</code> 같은 경로를 찾는다. Rust 는 <code>tokio :: time</code> 처럼 <code>::</code> 앞뒤에 공백을 넣어도 컴파일되는데, 지금 정규식은 붙은 형태만 찾는다. 이번 작업은 검사 여섯 개의 패턴에 <code>\s*</code> 를 넣어 공백형도 똑같이 잡게 한다.</p>
+  <div class="decide" aria-label="판단할 결정 세 가지">
+    <div><b>대상</b><span>검사 여섯. <code>net gate 2a</code> 는 이미 잡으므로 뺐다.</span><a href="#change">§3 바꾸는 것</a></div>
+    <div><b>공백 허용 범위</b><span><code>\s*</code> = 같은 줄 안의 공백·탭. 줄 넘김은 뺐다.</span><a href="#change">§3 바꾸는 것</a></div>
+    <div><b>미룬 것</b><span><code>use tokio as rt;</code> 같은 다른 이름 꼴은 이번에 안 고치고 새 할 일로 올린다.</span><a href="#out">§4 안 하는 것</a></div>
+  </div>
+</header>
+
+<!-- ───────── 1. 왜 새나 ───────── -->
+<section id="why">
+  <div class="eyebrow">1 · 구멍</div>
+  <h2>공백이 끼면 컴파일은 되고 정규식은 못 찾는다</h2>
+  <p>C++ 에서 <code>std :: vector&lt;int&gt; v;</code> 가 컴파일되는 것과 같다. 경로 마디 사이 공백은 문법상 아무 의미가 없어서, 붙여 쓰든 띄어 쓰든 같은 코드다. 그런데 게이트는 텍스트를 본다. <code>tokio::</code> 를 찾는 grep 은 <code>tokio :: </code> 를 지나친다.</p>
+  <p>이 게이트들은 「이 파일·crate 는 저 경로를 쓰지 않는다」 같은 구조 규칙을 지킨다. 예를 들어 <code>replay_flight.rs</code> 는 <code>tokio</code>·<code>tauri</code>·<code>std::net</code> 을 쓰면 안 된다. crate 의존성에는 <code>tokio</code> 가 들어 있으니 컴파일러는 막지 않는다. 일부 게이트는 이처럼 정규식이 유일한 벽이다(ci.yml 주석).</p>
+
+  <figure>
+    <div class="tbl">
+      <table class="tbl-match">
+        <thead><tr><th>소스 한 줄</th><th>옛 패턴</th><th>새 패턴</th><th>뜻</th></tr></thead>
+        <tbody>
+          <tr><td><code>tokio::spawn(f);</code></td><td class="verdict v-fail">FAIL</td><td class="verdict v-fail">FAIL</td><td>붙은 형태는 지금도 잡힌다</td></tr>
+          <tr><td><code>tokio :: spawn(f);</code></td><td class="verdict v-hole">PASS</td><td class="verdict v-fail">FAIL</td><td>구멍. 이번에 막는다</td></tr>
+          <tr><td><code>tokio	::	x</code> <span class="muted small">(탭)</span></td><td class="verdict v-hole">PASS</td><td class="verdict v-fail">FAIL</td><td><code>\s</code> 는 탭도 먹는다</td></tr>
+          <tr><td><code>std :: time :: Instant</code></td><td class="verdict v-pass">PASS</td><td class="verdict v-pass">PASS</td><td>정당한 이웃. 넓혀도 안 걸린다</td></tr>
+          <tr><td><code>// tokio :: spawn</code></td><td class="verdict v-pass">PASS</td><td class="verdict v-pass">PASS</td><td>주석 안은 여전히 안 본다</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <figcaption>replay_flight 게이트 기준. FAIL = 게이트가 위반으로 잡음. 공백형만 판정이 바뀌고, 정당한 코드의 판정은 그대로다.</figcaption>
+  </figure>
+</section>
+
+<!-- ───────── 2. 어디서 실제로 문제인가 ───────── -->
+<section id="where">
+  <div class="eyebrow">2 · 실제로 새는 자리</div>
+  <h2>보통은 rustfmt 가 먼저 막는다. 새는 곳은 rustfmt 가 손대지 않는 구간뿐이다</h2>
+  <p>CI <code>gates</code> 잡에는 <code>cargo fmt --check</code> 가 있다. rustfmt 는 Rust 판 clang-format 이다. 공백형을 보면 <code>tokio::spawn</code> 으로 고쳐 쓰려 하므로, 일반 코드의 공백형은 fmt 스텝에서 먼저 FAIL 한다.</p>
+  <p>rustfmt 가 손대지 않는 자리는 두 가지다. 중괄호 매크로 호출의 본문(<code>m! { tokio :: spawn(f) }</code> — 단순한 <code>macro_rules!</code> 본문은 rustfmt 가 고쳐 쓴다)과 <code>#[rustfmt::skip]</code> 구간이다. <code>#[rustfmt::skip]</code> 은 clang-format 의 <code>// clang-format off</code> 와 같은 역할이다. 이 두 자리의 공백형은 fmt 게이트와 정규식 게이트를 모두 통과한다.</p>
+
+  <figure>
+    <div class="fig-box">
+      <svg viewBox="0 0 760 250" role="img" aria-label="공백형 경로가 CI 를 지나는 두 길. 일반 코드에서는 cargo fmt --check 가 FAIL 시킨다. 매크로 본문이나 rustfmt::skip 구간에서는 fmt 가 손대지 않아 PASS 하고, 옛 정규식도 PASS 해서 구멍이 된다. 새 정규식은 여기서 FAIL 시킨다.">
+        <defs>
+          <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+        </defs>
+        <!-- source -->
+        <rect class="box-src" x="10" y="98" width="150" height="58" rx="6"/>
+        <text class="m" x="85" y="122" text-anchor="middle">tokio :: spawn(f)</text>
+        <text class="sub" x="85" y="142" text-anchor="middle">컴파일 OK</text>
+        <!-- split -->
+        <path class="edge" d="M160,115 C195,115 195,62 228,62" marker-end="url(#a2)"/>
+        <path class="edge" d="M160,140 C195,140 195,184 228,184" marker-end="url(#a2)"/>
+        <text x="236" y="28">일반 코드</text>
+        <text x="236" y="226">매크로 본문 · #[rustfmt::skip] 구간</text>
+        <!-- lane A -->
+        <rect class="box" x="230" y="42" width="150" height="40" rx="6"/>
+        <text class="m" x="305" y="67" text-anchor="middle">cargo fmt --check</text>
+        <path class="edge" d="M380,62 L446,62" marker-end="url(#a2)"/>
+        <text class="sub" x="413" y="54" text-anchor="middle">고칠 게 있음</text>
+        <rect class="box-fail" x="450" y="42" width="300" height="40" rx="6"/>
+        <text class="t-fail" x="600" y="67" text-anchor="middle">FAIL — 여기서 멈춘다</text>
+        <!-- lane B -->
+        <rect class="box" x="230" y="164" width="150" height="40" rx="6"/>
+        <text class="m" x="305" y="189" text-anchor="middle">cargo fmt --check</text>
+        <path class="edge" d="M380,184 L446,184" marker-end="url(#a2)"/>
+        <text class="sub" x="413" y="176" text-anchor="middle">PASS</text>
+        <rect class="box" x="450" y="164" width="120" height="40" rx="6"/>
+        <text x="510" y="189" text-anchor="middle">정규식 게이트</text>
+        <path class="edge" d="M570,176 C590,176 592,140 616,140" marker-end="url(#a2)"/>
+        <path class="edge" d="M570,192 C590,192 592,226 616,226" marker-end="url(#a2)"/>
+        <rect class="box-hole" x="620" y="122" width="130" height="36" rx="6"/>
+        <text class="t-hole" x="685" y="145" text-anchor="middle">옛 패턴: PASS</text>
+        <rect class="box-fix" x="620" y="208" width="130" height="36" rx="6"/>
+        <text class="t-fix" x="685" y="231" text-anchor="middle">새 패턴: FAIL</text>
+        <text class="sub" x="685" y="114" text-anchor="middle">= 구멍</text>
+      </svg>
+    </div>
+    <figcaption>공백형이 CI 를 끝까지 빠져나가는 길은 아래 줄 하나다. 이번 수정은 그 길 끝의 정규식만 바꾼다. fmt 설정은 건드리지 않는다.</figcaption>
+  </figure>
+</section>
+
+<!-- ───────── 3. 바꾸는 것 ───────── -->
+<section id="change">
+  <div class="eyebrow">3 · 바꾸는 것</div>
+  <h2>검사 여섯 개의 패턴에서 <code>::</code> 양옆에 <code>\s*</code> 를 넣는다</h2>
+  <p>규칙은 하나다. 이름 뒤 <code>::</code> 는 <code>\s*::</code>, 여러 마디 이름(<code>std::net</code> 등)은 마디 사이마다 <code>\s*::\s*</code>. 다른 부분(주석 가드, <code>\b</code>, 파일 존재 검사, 판정 <code>case</code>)은 그대로다. 예시 하나:</p>
+  <pre><code><span class="muted">옛</span>  ^(?:[^/]|/[^/])*?\b(tauri|tokio|engram_dashboard_[a-z_]+|std::net)::
+<span class="muted">새</span>  ^(?:[^/]|/[^/])*?\b(tauri|tokio|engram_dashboard_[a-z_]+|std<ins>\s*</ins>::<ins>\s*</ins>net)<ins>\s*</ins>::</code></pre>
+
+  <div class="gloss">
+    <div><code>\s*</code><br>공백·탭 0개 이상. <code>rg</code> 는 한 줄씩 읽으므로 줄 넘김은 먹지 않는다.</div>
+    <div><code>\b</code><br>단어 경계. <code>my_tokio::x</code> 의 <code>tokio</code> 에는 걸리지 않는다. 그대로 둔다.</div>
+    <div><code>^(?:[^/]|/[^/])*?</code><br>줄 앞쪽에 <code>//</code> 가 없을 때만 매치 = 주석 밖만 본다. 그대로 둔다.</div>
+  </div>
+
+  <figure>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>검사(스텝)</th><th>지키는 규칙</th><th>지금 새는 예</th></tr></thead>
+        <tbody>
+          <tr><td><code>base leaf crate</code></td><td>base crate 안 모듈(logging · time · sync …)끼리 서로 참조하지 않는다</td><td><code>super:: sync::X</code></td></tr>
+          <tr><td><code>replay_flight purity</code></td><td><code>replay_flight.rs</code> 가 transport·wire 쪽(tauri · tokio · 다른 engram crate · std::net)을 쓰지 않는다</td><td><code>std :: net :: X</code></td></tr>
+          <tr><td><code>transport gate 3</code></td><td>transport 의 순수 층(pending · stream · machine)이 tokio · futures · 다른 engram crate · std::net 을 쓰지 않는다</td><td><code>tokio :: spawn</code></td></tr>
+          <tr><td><code>platform gate 6</code></td><td><code>std::os::windows|unix</code> 는 명단에 있는 파일만 쓴다</td><td>명단 밖 파일의 <code>std :: os :: windows</code></td></tr>
+          <tr><td><code>shell gate 2</code> · lint</td><td>대상 파일에 lint 를 끄는 attribute 가 없다</td><td><code>#[allow(clippy :: restriction)]</code></td></tr>
+          <tr><td><code>shell gate 2</code> · rustfmt</td><td>대상 파일에 rustfmt 건너뛰기가 없다</td><td><code>#[rustfmt :: skip]</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <figcaption>여섯 검사 모두 「금지된 경로가 소스에 나오면 FAIL」 꼴이다. 마지막 줄은 §2 의 구멍을 만드는 <code>rustfmt::skip</code> 을 막는 가드인데, 그 가드도 공백형에 샌다. 첫 판 TRD 는 앞의 셋만 다뤘고, 리뷰가 platform gate 6 와 shell gate 2 를 더했다. 패턴 원문은 맨 아래 「찾아보기」에 있다.</figcaption>
+  </figure>
+
+  <h3>같은 패턴이 적힌 해설도 함께 고친다</h3>
+  <p>옛 패턴 문자열은 ci.yml 밖에도 해설로 복사돼 있다. 이걸 그대로 두면 문서와 게이트가 어긋나므로 같이 고친다.</p>
+  <ul class="tight small">
+    <li><code>ci.yml</code> 각 스텝의 해설 주석</li>
+    <li>대상 헤더: <code>engram-dashboard-base/src/lib.rs:55</code> · <code>engram-dashboard-transport/src/lib.rs:48</code> · <code>engram-dashboard-platform/src/lib.rs:169-171</code>(+ <code>:174</code> 알려진 한계) · <code>src-tauri/src/daemon_client/replay_flight.rs:51-54</code></li>
+    <li><code>docs/testing-strategy.md:50</code> · <code>:179</code></li>
+    <li><code>docs/todo/doc-drift.md</code>: 이 항목을 닫는다 · <code>docs/todo/observed-only.md</code>: §4 의 새 항목을 올린다</li>
+  </ul>
+  <p class="small muted">다른 S 의 process 문서, ADR, handoff, research 같은 역사 기록은 손대지 않는다. 코더는 이 목록을 출발점으로 옛 문자열을 다시 세고, 목록과 다르면 구현 전에 보고한다.</p>
+  <p class="note small"><b>함정 하나.</b> base 게이트에는 주석 가드가 없다. base <code>lib.rs</code> 헤더에 <code>crate :: time</code> 같은 예시 경로를 쓰면 게이트가 자기 헤더에 걸린다(헤더 <code>:66</code> 경고). 그래서 헤더에는 패턴을 괄호째 인용하는 지금 방식을 유지한다.</p>
+</section>
+
+<!-- ───────── 4. 안 하는 것 ───────── -->
+<section id="out">
+  <div class="eyebrow">4 · 안 하는 것과 이유</div>
+  <h2>이미 잡히는 곳과 구멍이 더 넓은 곳은 이번 범위에서 뺐다</h2>
+  <figure>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>뺀 것</th><th>왜</th><th>대신 하는 것</th></tr></thead>
+        <tbody>
+          <tr><td><code>net gate 2a</code></td><td>공백형을 이미 잡는다. 첫 마디 공백(<code>engram_dashboard_platform :: fs</code>)은 숨은 꼴 검사(<code>:1389</code>)가, 깊은 마디 공백(<code>…platform::fs :: f</code>)은 추출 결과(<code>:1368</code>)와 기대 집합이 어긋나서 FAIL 한다.</td><td>시험에 표본 하나를 넣어 이 주장을 실측으로 남긴다</td></tr>
+          <tr><td>다른 이름 꼴</td><td>아래 코드처럼 이름을 바꿔 부르면 옛 패턴도 새 패턴도 통과한다. 공백형보다 구멍이 넓고, rustfmt 를 통과한 정상 코드에서도 나온다. 그래서 따로 판단할 일이다.</td><td><code>observed-only.md</code> 에 새 항목. 두 게이트(replay_flight · transport gate 3)의 정본 자리에 「알려진 한계」 한 줄(replay_flight = <code>ci.yml</code> 스텝 주석 · transport gate 3 = transport <code>lib.rs</code> 헤더)</td></tr>
+          <tr><td>존재 검사 <code>:964</code> · <code>:987</code> · <code>:1026</code></td><td>「이 줄이 있어야 한다」를 보는 검사다. 공백형이 들어가면 없다고 판정해 FAIL 하므로 안전한 쪽으로 틀린다.</td><td>없음</td></tr>
+          <tr><td>줄을 넘는 경로 · 블록 주석 <code>/* */</code> 안 오탐</td><td>줄 단위 정규식의 한계. 이번 구멍과 별개다.</td><td>없음</td></tr>
+          <tr><td>rustfmt 설정 변경 · 게이트를 컴파일러 검사로 전환</td><td>PRD 비목표. 방향은 todo 가 「정규식을 넓힌다」로 이미 정했다.</td><td>없음</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <figcaption>뺀 항목은 「이미 FAIL 한다」, 「틀려도 안전한 쪽이다」, 「따로 판단할 더 큰 구멍이다」 중 하나다.</figcaption>
+  </figure>
+  <pre><code>use tokio as rt;
+rt::spawn(f);                              <span class="muted">// 정규식이 보는 이름은 rt — tokio 가 안 나온다</span>
+use std::{net::TcpStream, time::Instant};  <span class="muted">// std 다음이 {  — std::net:: 꼴이 아니다(한 항목 묶음은 rustfmt 가 풀어 쓴다)</span>
+use std::net;                              <span class="muted">// net 뒤가 ;  — 그 뒤 net::TcpStream 으로 쓴다</span></code></pre>
+</section>
+
+<!-- ───────── 5. 확인 방법 ───────── -->
+<section id="verify">
+  <div class="eyebrow">5 · 확인 방법</div>
+  <h2>qa 가 새 ci.yml 을 실은 scratch worktree 에서 원문 스텝을 그대로 돌린다</h2>
+  <p>표본 줄을 진짜 대상 파일에 넣지 않는다. 별도 worktree(<code>$QA_TMP/wt</code>)의 실파일에 한 줄을 넣고, ci.yml 의 스텝 스크립트를 고치지 않고 그대로 돈다. 정규식만 따로 돌리는 것보다 CI 에서 실제로 도는 것과 같다.</p>
+
+  <figure>
+    <div class="fig-box">
+      <svg viewBox="0 0 800 200" role="img" aria-label="시험 흐름. 커밋 전 작업 트리의 변경을 git diff 로 scratch worktree 에 적용하고, 대상 실파일에 표본 한 줄을 넣은 뒤 ci.yml 원문 스텝을 돌려 판정과 FAIL 문구를 확인한다. diff 를 싣지 않고 HEAD 만 떠 오면 옛 패턴이 돌아 AC2·AC3 이 아무것도 증명하지 못한 채 PASS 한다.">
+        <defs>
+          <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+          <marker id="a3b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah-bad" d="M0,0 L10,5 L0,10 z"/></marker>
+        </defs>
+        <rect class="box" x="10" y="40" width="150" height="56" rx="6"/>
+        <text x="85" y="63" text-anchor="middle">작업 트리</text>
+        <text class="sub" x="85" y="82" text-anchor="middle">새 ci.yml · 커밋 전</text>
+        <rect class="box" x="220" y="40" width="150" height="56" rx="6"/>
+        <text x="295" y="63" text-anchor="middle">scratch worktree</text>
+        <text class="sub m" x="295" y="82" text-anchor="middle">$QA_TMP/wt</text>
+        <rect class="box" x="430" y="40" width="150" height="56" rx="6"/>
+        <text x="505" y="63" text-anchor="middle">대상 실파일</text>
+        <text class="sub" x="505" y="82" text-anchor="middle">표본 한 줄 삽입</text>
+        <rect class="box-fix" x="640" y="40" width="150" height="56" rx="6"/>
+        <text x="715" y="63" text-anchor="middle">ci.yml 스텝 실행</text>
+        <text class="sub" x="715" y="82" text-anchor="middle">판정 · FAIL 문구 확인</text>
+        <path class="edge" d="M160,68 L216,68" marker-end="url(#a3)"/>
+        <path class="edge" d="M370,68 L426,68" marker-end="url(#a3)"/>
+        <path class="edge" d="M580,68 L636,68" marker-end="url(#a3)"/>
+        <text class="sub" x="190" y="28" text-anchor="middle">git diff 적용</text>
+        <text class="sub" x="400" y="28" text-anchor="middle">표본 한 줄</text>
+        <text class="sub" x="610" y="28" text-anchor="middle">원문 그대로</text>
+        <path class="edge-bad" d="M295,96 L295,140" marker-end="url(#a3b)"/>
+        <text class="t-fail" x="305" y="124" style="font-size:11.5px">diff 를 안 실으면</text>
+        <rect class="box-bad" x="220" y="144" width="570" height="40" rx="6"/>
+        <text x="505" y="169" text-anchor="middle">HEAD 만 떠 옴 → 옛 패턴이 돈다 → AC2 · AC3 이 아무것도 증명 못 한 채 PASS</text>
+      </svg>
+    </div>
+    <figcaption>새 패턴을 시험하려면 worktree 에 새 ci.yml 이 실려 있어야 한다. 그래서 <code>git diff</code> 를 먼저 적용한다. 리뷰에서 지적돼 TRD 판 2 에 들어갔다.</figcaption>
+  </figure>
+
+  <p>검사가 여럿 든 스텝(shell gate 2 · platform gate 6 · net gate 2a)은 표본이 다른 검사를 건드리지 않는 자리에 넣고, FAIL 메시지가 대상 검사의 것인지 확인한다. 엉뚱한 검사가 FAIL 해도 FAIL 은 FAIL 이라, 메시지를 안 보면 틀린 증명이 된다.</p>
+
+  <figure>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>기준</th><th>무엇을 돌리나</th><th>기대</th></tr></thead>
+        <tbody>
+          <tr><td><b>AC1</b><br><span class="small muted">공백형을 잡나</span></td>
+            <td class="small">replay_flight · transport: <code>use   tokio :: time;</code> · <code>let _ = tokio ::spawn(f);</code> · <code>tokio	::	x</code>(탭) · <code>std :: net :: TcpStream::connect(a)</code> · <code>std::net :: TcpStream::connect(a)</code> · <code>engram_dashboard_protocol :: X</code><br>
+              base: <code>crate :: time::now()</code> · <code>super:: sync::X</code><br>
+              platform gate 6: 명단 밖 <code>.rs</code> 에 <code>use std :: os :: windows::io::AsRawHandle;</code><br>
+              shell gate 2: <code>#[rustfmt :: skip]</code> · <code>#[allow(clippy :: restriction)]</code><br>
+              붙은 형태 <code>tokio::spawn</code> 도 함께</td>
+            <td class="verdict v-fail">FAIL</td></tr>
+          <tr><td><b>AC2</b><br><span class="small muted">지금 트리는 그대로인가</span></td><td class="small">표본 없이 이 브랜치 트리에서 여섯 검사</td><td class="verdict v-pass">PASS<br><span class="small muted">(수정 전과 같음)</span></td></tr>
+          <tr><td><b>AC3</b><br><span class="small muted">정당한 코드를 안 잡나</span></td><td class="small"><code>std::time::Instant</code> · <code>std :: time :: Instant</code> · 꼬리 주석 <code>// tokio :: spawn</code> · <code>my_tokio :: x</code> · base 는 <code>crate::other_mod</code></td><td class="verdict v-pass">PASS</td></tr>
+          <tr><td><b>범위 밖 실측</b></td><td class="small">net gate 2a 에 <code>use engram_dashboard_platform :: fs::open_deny_write;</code></td><td class="verdict v-fail">FAIL<br><span class="small muted">(§4 주장 확인)</span></td></tr>
+          <tr><td><b>구멍 실재</b></td><td class="small">AC1 표본을 <em>옛</em> 패턴으로</td><td class="verdict v-hole">PASS<br><span class="small muted">(그래서 고친다)</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <figcaption>AC1 표본은 옛 패턴으로는 통과하던 것만 골랐다. 그래서 「새 패턴에서 FAIL」이 곧 「구멍이 닫혔다」는 뜻이 된다. FAIL 은 여기서 기대한 결과다.</figcaption>
+  </figure>
+</section>
+
+<!-- ───────── 6. 위험과 진행 ───────── -->
+<section id="risk">
+  <div class="eyebrow">6 · 위험과 진행</div>
+  <h2>위험은 오탐과 CI 기준선 차이 둘이다</h2>
+  <ul class="tight">
+    <li><b>오탐</b>: 넓힌 정규식이 정당한 코드를 잡을 수 있다. AC2 · AC3 이 막는다. 리뷰어가 미리 넓힌 패턴을 지금 트리에 돌려 봤고, 옛 패턴과 결과가 같았다.</li>
+    <li><b>CI 기준선</b>: <code>jobs:</code> 가 바뀌므로 이 커밋의 CI 결론이 master 기준선과 다르다. qa 바인딩 「전체 회귀 = CI」 규칙대로 판단한다.</li>
+    <li><b>문자열 리터럴</b>: <code>"tokio :: x"</code> 는 지금도 붙은 형태와 같은 취급을 받는다. 새 위험은 아니다.</li>
+  </ul>
+  <p class="small muted">브랜치 기준 = <code>v0.5.0/chore/skill-apply</code>. 통합은 skill-apply 다음이다. 구현은 코더 1명이 한 단위로 맡는다(파일이 겹친다). 단위가 끝나면 ci.yml YAML 파싱을 확인하고, 코더가 AC1 · AC3 표본 몇 개를 <code>rg</code> 로 한 번 돌려 본다. 최종 판정은 qa 가 한다. PRD+TRD 리뷰는 full(Claude + codex)로 2라운드 PASS 했고, 권고 3건(줄 번호 · worktree 에 변경 싣기 · FAIL 메시지 귀속)을 판 2 에 반영했다.</p>
+</section>
+
+<!-- ───────── 찾아보기 ───────── -->
+<details id="ref">
+  <summary>찾아보기 — 패턴 원문과 ci.yml 줄 번호</summary>
+  <div class="inner">
+    <p class="small muted">줄 번호는 skill-apply 브랜치 기준이다. <ins>초록</ins> = 새로 들어가는 <code>\s*</code>.</p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>스텝 · 줄</th><th>옛 → 새</th></tr></thead>
+        <tbody>
+          <tr><td class="small"><code>Gate: base leaf crate — tenants must not reference each other</code><br><span class="mono muted">:698</span></td>
+            <td><pre><code>(crate|super)::(logging|text|time|path|sync|testing|writable|file|panic)
+(crate|super)<ins>\s*</ins>::<ins>\s*</ins>(logging|text|time|path|sync|testing|writable|file|panic)</code></pre></td></tr>
+          <tr><td class="small"><code>Gate: replay_flight purity — no transport/wire ingress</code><br><span class="mono muted">:1262</span></td>
+            <td><pre><code>^(?:[^/]|/[^/])*?\b(tauri|tokio|engram_dashboard_[a-z_]+|std::net)::
+^(?:[^/]|/[^/])*?\b(tauri|tokio|engram_dashboard_[a-z_]+|std<ins>\s*</ins>::<ins>\s*</ins>net)<ins>\s*</ins>::</code></pre></td></tr>
+          <tr><td class="small"><code>transport gate 3: pure layer isolation (pending/stream/machine)</code><br><span class="mono muted">:1339</span></td>
+            <td><pre><code>^(?:[^/]|/[^/])*?\b(tokio|futures_util|futures|engram_dashboard_[a-z_]+|std::net)::
+^(?:[^/]|/[^/])*?\b(tokio|futures_util|futures|engram_dashboard_[a-z_]+|std<ins>\s*</ins>::<ins>\s*</ins>net)<ins>\s*</ins>::</code></pre></td></tr>
+          <tr><td class="small"><code>platform gate 6</code> (<code>std_os_re</code>)<br><span class="mono muted">:1197</span></td>
+            <td><pre><code>^(?:[^/]|/[^/])*?\bstd::os::(?:windows|unix)\b
+^(?:[^/]|/[^/])*?\bstd<ins>\s*</ins>::<ins>\s*</ins>os<ins>\s*</ins>::<ins>\s*</ins>(?:windows|unix)\b</code></pre></td></tr>
+          <tr><td class="small"><code>shell gate 2</code> — lint 끄기 부재<br><span class="mono muted">:1028</span></td>
+            <td><pre><code>\b(?:allow|expect|warn)\s*\([^)]*(?:wildcard_enum_match_arm|clippy::restriction)
+\b(?:allow|expect|warn)\s*\([^)]*(?:wildcard_enum_match_arm|clippy<ins>\s*</ins>::<ins>\s*</ins>restriction)</code></pre></td></tr>
+          <tr><td class="small"><code>shell gate 2</code> — rustfmt 건너뛰기 부재<br><span class="mono muted">:1031</span></td>
+            <td><pre><code>rustfmt::skip|rustfmt_skip
+rustfmt<ins>\s*</ins>::<ins>\s*</ins>skip|rustfmt_skip</code></pre></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="small muted">패턴은 bash 큰따옴표·작은따옴표 안에 있으므로 <code>\s</code> 는 그대로 <code>rg</code> 에 전달된다. 원본 문서: 같은 폴더의 <code>prd.md</code> · <code>trd.md</code>(판 2).</p>
+  </div>
+</details>
+
+<!-- ───────── 변경 이력 ───────── -->
+<section id="history" aria-label="변경 이력">
+  <div class="eyebrow">변경 이력</div>
+  <div class="hist">
+    <button type="button" class="hist-row" data-hist="1" id="hist-1"><span class="mono">1</span><span class="mono">2026-11-02</span><span>처음 작성 — PRD + TRD 판 2 기준</span></button>
+  </div>
+  <button type="button" class="hist-off" id="hist-off">하이라이트 끄기</button>
+</section>
+
+</div>
+<script>
+(function(){
+  var rows=[].slice.call(document.querySelectorAll('[data-hist]'));
+  function select(rev){
+    rows.forEach(function(r){r.setAttribute('aria-pressed', r.dataset.hist===rev ? 'true' : 'false');});
+    [].forEach.call(document.querySelectorAll('[data-rev]'),function(el){
+      el.classList.toggle('hl', !!rev && el.dataset.rev.split(' ').indexOf(rev)>=0);
+    });
+  }
+  rows.forEach(function(r){r.addEventListener('click',function(){select(r.dataset.hist);});});
+  document.getElementById('hist-off').addEventListener('click',function(){select(null);});
+  if(rows.length){select(rows[rows.length-1].dataset.hist);}
+})();
+</script>
+</body>
+</html>

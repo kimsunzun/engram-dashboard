@@ -706,7 +706,7 @@ fn win_err(e: windows::core::Error) -> io::Error {
     io::Error::other(e)
 }
 
-// 실프로세스 시험 — 시험마다 넷 이하(콘솔 호스트 포함): 몰아 띄우면 개발 PC 터미널이 죽는다(CLAUDE.md).
+// 실프로세스 시험 — 시험마다 넷 이하(콘솔 호스트 포함): 몰아 띄우지 않는다(로컬 병렬 상한 `--test-threads=4` — `.claude/skill-bindings/qa.md` 「모듈별 명령」).
 #[cfg(test)]
 mod tests {
     use std::io::Write;

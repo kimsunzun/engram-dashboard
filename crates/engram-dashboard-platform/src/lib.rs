@@ -31,7 +31,7 @@
 //! `spawn::wmi_create_raw`(WMI 띄우기의 원시 호출 — 진단 시험 몫)는 cargo 기능 `test-support` 뒤다★
 //! (TRD 1-3 §3-8 · 이름은 base 의 ADR-0275 결정 5 와 같다) — 선언이 `#[cfg(any(test, feature = "test-support"))]` 라 이 crate 자기 시험과 그 기능을 dev 의존으로 켠 소비자 시험만
 //! 본다. 그 기능이 데몬 · 셸 · CLI 의 운영 의존 그래프에 없다는 것은 CI 게이트 ③ 이 잰다(0줄 기대와 짝인 1줄
-//! 이상 기대) — 아래 격리 게이트 ①② 와 별개인 시험 기능 누수 게이트이고, 명령 · 기대값의 정본은 `/qa` 바인딩이다.
+//! 이상 기대) — 아래 격리 게이트 ①② 와 별개인 시험 기능 누수 게이트이고, 명령 · 기대값의 정본은 `.github/workflows/ci.yml` 이다.
 //!
 //! ★`window::snap`(스냅 레이아웃 오버레이)은 cargo 기능 `snap-overlay` 뒤다 · 기본 꺼짐★(TRD S26-window-chrome §8-4 · 사용자
 //! 결정 Q1 2026-10-24) — 켜는 것은 셸 기능 `snap-overlay` 하나뿐이고, 그 기능이 셸 운영 그래프에 없다는 것(0줄 기대와 짝인
@@ -102,9 +102,8 @@
 //! 남겼고, ④~⑥ 의 꼴과 거부한 대안은 ADR-0278 이 기록한다): 이 crate 밖에서 OS `cfg` 술어를 쓰는 `.rs`
 //! 파일 목록이 고정 명단과 **정확히** 같아야 한다.
 //! - **어디에 있나** — 정규식(`os_cfg_re`) · 파일 찾기 함수(`os_cfg_files`) · 명단(heredoc)은
-//!   `.github/workflows/ci.yml` 의 `platform gate 4` 스텝 하나에만 있다. `/qa` 바인딩 4f 블록은 그 셋을 읽되 대상
-//!   범위 · 짝 · 대조는 자기 안에 따로 되풀어 적고(스텝의 그쪽을 고치면 함께 맞춘다), 같은 항목의 「저장소 전체」
-//!   한 줄은 이 crate 를 빼지 않고 돌린다 — 그 셋은 여기도 다른 문서도 베끼지 않는다. 대상 = `crates` ·
+//!   `.github/workflows/ci.yml` 의 `platform gate 4` 스텝 하나에만 있고 로컬 대체(`.claude/skill-bindings/qa-verify.md`
+//!   「gates 잡」)는 그 스텝을 그대로 돈다 — 그 셋은 여기도 다른 문서도 베끼지 않는다. 대상 = `crates` ·
 //!   `src-tauri` 의 `.rs` 에서 이 crate 를 뺀 것(`src-tauri/tests/` · `build.rs` 까지 — TRD §4-4 의 `src-tauri/src`
 //!   보다 넓고, 재 보면 명단은 같았다). 돌리기 전에 세 경로(`crates` · `src-tauri` · 이 crate `src`)가 있는지
 //!   본다 — 없으면 rg 가 사유 없이 죽는다.
@@ -149,7 +148,7 @@
 //! 워크스페이스 멤버 중 OS crate 를 **운영 의존**(normal · build — 대상 OS 무관)으로 **직접** 가진 것이 이 crate
 //! 하나여야 한다.
 //! - **어디에 있나** — OS crate 목록(`os_dep_re`) · 판정 함수(`os_dep_gate`)는 `.github/workflows/ci.yml` 의
-//!   `platform gate 5` 스텝 하나에만 있고, `/qa` 바인딩 4g 블록이 그 둘을 읽어 돌린다. 목록은 손으로 적은 명시
+//!   `platform gate 5` 스텝 하나에만 있고, 로컬 대체(qa-verify 「gates 잡」)는 그 스텝을 그대로 돈다. 목록은 손으로 적은 명시
 //!   목록이다(cargo-deny 식) — 여기 베끼지 않는다.
 //! - **읽는 것** = `cargo tree --workspace --no-dedupe --depth 1 --prefix depth -e normal,build --target all
 //!   --all-features` 의 뿌리(멤버)와 그 바로 아래 의존. 멤버를 손으로 적지 않아 새 멤버도 보이고, 해석된
@@ -168,16 +167,18 @@
 //! 밖에서 `std::os::windows` · `std::os::unix` 를 쓰는 `.rs` 파일 목록이 고정 명단과 **정확히** 같아야 한다.
 //! `std` 의 일반 API(`std::fs` · `std::process` 따위)는 OS 에 맞게 알아서 바뀌므로 대상이 아니다.
 //! - **어디에 있나** — 정규식(`std_os_re`) · 판정 함수(`std_os_gate` — 대상 범위 · 짝 · 대조 전부) ·
-//!   명단(heredoc)은 `ci.yml` 의 `platform gate 6` 스텝 하나에만 있고, `/qa` 바인딩 4h 블록이 그 셋을 읽어 그
-//!   함수를 그대로 부른다(④ 와 달리 4h 블록이 되풀어 적는 판정이 없다). 대상 경로 · 경로 확인 ·
+//!   명단(heredoc)은 `ci.yml` 의 `platform gate 6` 스텝 하나에만 있고, 로컬 대체(qa-verify 「gates 잡」)는 그
+//!   스텝을 그대로 돈다. 대상 경로 · 경로 확인 ·
 //!   경로 구분자 맞춤 · 명단에 드는 부류(시험 분기뿐인 파일 · `tests/` · 시험 하네스 bin · `examples/`) ·
 //!   양방향 판정 · 짝(이 crate 안에서 1 파일 이상)은 ④ 와 같다.
 //! - **matcher** = 줄 머리부터 「아직 `//` 를 안 만났다」(`^(?:[^/]|/[^/])*?`) 뒤의 `std::os::windows` ·
-//!   `std::os::unix`(rg 기본 엔진 — PCRE2 가 필요 없다). `//` · `///` · `//!` 주석은 안 걸리고, `use` 줄과
-//!   완전 경로 호출(`::std::os::unix::…::f(…)` 포함)은 걸린다.
+//!   `std::os::unix`(마디 사이 `::` 앞뒤 공백 허용 · rg 기본 엔진 — PCRE2 가 필요 없다). `//` · `///` · `//!`
+//!   주석은 안 걸리고, `use` 줄과 완전 경로 호출(`::std::os::unix::…::f(…)` 포함) · 공백형(rustfmt 가 손대지
+//!   않는 매크로 본문 등에 남는다)은 걸린다.
 //! - ★**한계**★:
 //!   - 명단에 이미 든 파일 안의 새 운영 쓰임은 못 잡는다(④ 와 같다 — 리뷰 몫).
-//!   - 별칭 · 묶음(`use std::os as o;` · `use std::os::{windows::…};` · `use std::{os::windows::…};`)과 다른 OS
+//!   - 별칭 · 여러 항목 묶음(`use std::os as o;` · `use std::os::{unix::…, windows::…};` ·
+//!     `use std::{io, os::windows::…};` — 한 항목 묶음은 rustfmt 가 풀어 써 걸린다)과 다른 OS
 //!     모듈(`std::os::linux` · `std::os::macos` · `std::os::fd` 따위)은 못 본다.
 //!   - 블록 주석 · 문자열 안의 그 경로는 걸린다(오탐 — 안전한 쪽). 같은 줄에서 그 경로 앞 문자열에 `//` 가
 //!     있으면 놓친다.
@@ -185,9 +186,8 @@
 //! **⑦ 동기 crate 로의 async 런타임 반입 0**(위 「의존」 셋째 항의 벽 · ADR-0282): 정상 그래프(`cargo tree
 //! --locked -e normal --prefix none --target all`)에서 `^(tokio|mio|tokio-tungstenite|futures-util) ` 에 맞는 줄을
 //! 센다.
-//! - **어디에 있나** — 명령 · 판정의 정본은 `.github/workflows/ci.yml` 의 `platform gate 7` 스텝이다. `/qa`
-//!   바인딩 「CI와의 분담」 블록이 네 명령과 패턴을 로컬용으로 싣고 이 헤더도 패턴을 적으므로, 패턴을 고치면
-//!   셋을 함께 고친다.
+//! - **어디에 있나** — 명령 · 판정의 정본은 `.github/workflows/ci.yml` 의 `platform gate 7` 스텝이다. 이 헤더도
+//!   패턴을 적으므로, 패턴을 고치면 둘을 함께 고친다.
 //! - **대상 넷** — ① agent → 0줄: tokio 없는 동기 crate 이면서 이 crate · base · command 를 운영 의존으로 진다.
 //!   이 crate 에 든 런타임이 실제로 번질 자리가 여기라 이 crate 단독이 아니라 agent 를 잰다(agent 가 다른 경로로
 //!   들이는 런타임도 함께 잡힌다). ② net 기본 feature → 0줄: feature 0개 소비자에게 async 런타임이 딸려오는 것
