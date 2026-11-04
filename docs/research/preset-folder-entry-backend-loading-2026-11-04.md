@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Research done · cross-family review FIX applied · decision pending (S25 — new preset entry "folder") |
+| **Status** | Research done · cross-family review FIX applied · **decided 2026-11-04 → ADR-0341** (claude native `--add-dir` + env var · codex fills only what it lacks · terminal codex omits and notifies once per agent · missing folder blocks) |
 | **Method** | `/engram-research` medium · 3 collectors (claude measurement · codex measurement + source · peer docs survey) · main grounding (raw docs re-read for the load-bearing claude claims, `codex --help` re-run) · cross-family review (see "Review") |
 | **Versions** | Claude Code **2.1.284** · codex-cli **0.163.0** (source tag `rust-v0.163.0` = `83086188`) · Windows 11 |
 | **Prior reports** | [`external-skill-dir-loading-claude-codex-2026-10-10.md`](external-skill-dir-loading-claude-codex-2026-10-10.md) · [`skill-md-recognition-claude-codex-2026-10-20.md`](skill-md-recognition-claude-codex-2026-10-20.md) · [`codex-instruction-channels-2026-10-20.md`](codex-instruction-channels-2026-10-20.md) — their conclusions still hold; this report adds the non-skill items, codex 0.163.0, and peers |
