@@ -3800,7 +3800,7 @@ impl super::AgentNamesSink for RecordingEvents {
     }
 }
 
-fn wire_agent(id: AgentId, name: &str) -> AgentInfo {
+pub(super) fn wire_agent(id: AgentId, name: &str) -> AgentInfo {
     use engram_dashboard_protocol::{
         Capabilities, ControlCaps, InputCaps, ModelCaps, OutputCaps, SessionCaps,
     };

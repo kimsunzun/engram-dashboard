@@ -188,6 +188,11 @@ pub(crate) const CHANNEL_GONE: &str = "연결 task 가 명령을 받지 못함(�
 /// [`connection::UNSENT_ON_DISCONNECT`] 의 「재전송 안전」을 여기에 붙이면 거짓이 된다.
 pub(crate) const REPLY_LOST: &str = "명령 응답 수신 실패(연결 task 종료)";
 
+/// A round trip asked for a command that takes no reply (no `request_id`) — shared by the old driver's entry check
+/// and the link's error texts (`link::errors`), so the two cannot drift.
+pub(crate) const NO_REQUEST_ID: &str =
+    "send_command: request_id 없는 명령은 reply 를 기대할 수 없다";
+
 // 데몬 연결의 단일 핸들. invoke 핸들러·트레이·상태 구독자가 공유한다(`Arc<DaemonClient>`).
 //
 // 연결 task 본체는 spawn 된 tokio task(`run_connection`)가 소유하고, 이 구조체는 그 task 와
@@ -897,9 +902,7 @@ impl DaemonClient {
         use protocol_state::CommandFailure::Local;
 
         if protocol_state::command_request_id(&cmd).is_none() {
-            return Err(Local(
-                "send_command: request_id 없는 명령은 reply 를 기대할 수 없다".to_string(),
-            ));
+            return Err(Local(NO_REQUEST_ID.to_string()));
         }
         // 지금 명령을 받을 소켓이 있으면 그 채널과 표식을 함께 얻는다(없으면 연결 안 됨/끊김).
         let Some((cmd_tx, socket)) = self.lifecycle.current_cmd_tx() else {

@@ -44,6 +44,7 @@ use super::events::{ConnectionStateEvent, DaemonEvents};
 use super::frame_relay::{self, FrameRelay};
 use super::inbound::{InboundReceiver, InboundSlot};
 use super::lifecycle::{Lifecycle, ReconnectVerdict};
+use super::link::route::emit_broadcast;
 use super::protocol_state::{self, CommandFailure, PendingMap, SubState};
 use super::refusal::{RefusalAlerts, RefusalSite};
 use super::replay_flight::{self, RefusalOutcome, ReplayFlightSet, Resolution};
@@ -1305,59 +1306,6 @@ async fn main_loop(
     let _ = sink.close().await;
     // 상태 전이(Down/Reconnecting)는 호출자(connected_lifetime)가 가드와 함께 결정한다 — 여기선 사유만.
     exit
-}
-
-// ★T7c: broadcast 이벤트(request_id 없음) → 알림 포트로 전 webview push.★
-//
-// AgentListUpdated / StatusChanged / RestoreResult / ProfileListUpdated 에 대응하는 알림을 낸다. 그 외
-// variant(Ack·SubscribeAck·Output·ReplayComplete·AgentList/ProfileList/Snapshot 등)는 request_id 있거나
-// Binary 평면이거나 내부 소비라 emit 대상이 아니다 → 조용히 no-op.
-//
-// ★이 함수가 포트 뒤로 안 들어간 이유★: **어느 variant 가 알림 대상인가**는 연결 태스크의 판정이지
-// 전송 어댑터의 판정이 아니다. 아래 `Error` 팔은 emit 이 아니라 로깅뿐인데, 이걸 어댑터로 옮기면
-// no-op 조립에서 그 흔적까지 함께 사라진다. 포트가 아는 것은 **무슨 일이 일어났나**뿐이고, 그것이
-// 어떤 Tauri 이벤트 이름으로 나가는지는 어댑터가 안다(`events.rs`).
-fn emit_broadcast(events: &dyn DaemonEvents, names: &dyn AgentNamesSink, ev: &AgentEvent) {
-    match ev {
-        // 이름 장부는 프론트 알림 뒤다(TRD S26-window-chrome §4-3). 이 자리는 아무 락도 쥐지 않는다 — 장부의 실물이
-        //   레이아웃 락을 잡는다(`AgentNamesSink` doc).
-        AgentEvent::AgentListUpdated { agents } => {
-            events.agent_list_updated(agents);
-            names.agents(agents);
-        }
-        AgentEvent::StatusChanged {
-            agent_id,
-            status,
-            epoch,
-        } => {
-            events.status_changed(agent_id, status, *epoch);
-        }
-        AgentEvent::RestoreResult { report } => {
-            events.restore_result(report);
-        }
-        AgentEvent::ProfileListUpdated { profiles } => {
-            events.profile_list_updated(profiles);
-        }
-        // ADR-0061: 프리셋 CRUD(생성/삭제) 후 데몬 broadcast → 전 webview push(profile 미러).
-        //   프론트 소비(preset-list-updated 리스너)는 후속 슬라이스지만, broadcast 가 창까지
-        //   닿아야 멀티창 동기화 불변식이 성립하므로 emit 배선은 여기서 함께 깐다.
-        AgentEvent::PresetListUpdated { presets } => {
-            events.preset_list_updated(presets);
-        }
-        // ★어느 왕복에도 속하지 않는 실패는 여기 말고 닿는 곳이 없다★. `request_id` 가 있는 실패는 이
-        //   함수에 **오지 않는다** — 호출부가 그보다 먼저 reply 매칭 분기로 걷어낸다(`event_reply_request_id`
-        //   가 Some 이면 그 가지에서 끝난다). 그래서 이 팔이 보는 것은 항상 `None` 뿐이고, 패턴에 그렇게
-        //   적어 둔다(옛 `?request_id` 는 언제나 None 을 찍는 죽은 필드였다).
-        //   ★emit 하지 않는 이유★: 이 자리에서 웹뷰로 올리면 어느 뷰가 자기 것으로 오인할지 정할 수
-        //   없다(주인을 식별할 필드가 없다). 판정 없이 기록만 한다.
-        AgentEvent::Error {
-            request_id: None,
-            message,
-        } => {
-            tracing::warn!(%message, "데몬 error 이벤트(명령 왕복 밖)");
-        }
-        _ => {}
-    }
 }
 
 // ★fire-and-forget 송신(T6b)★: reply 없는 명령(Subscribe/Unsubscribe/Resize)을 JSON 으로 wire 송신.

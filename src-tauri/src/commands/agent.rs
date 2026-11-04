@@ -288,10 +288,9 @@ pub(crate) async fn forward_to_daemon(
             Ok(Some(value))
         }
         Ok(Err(e)) => Err(e),
-        Err(_elapsed) => Err(
-            "daemon reply timeout — 연결은 살아있으나 데몬이 응답을 보내지 않음(30s 초과)"
-                .to_string(),
-        ),
+        Err(_elapsed) => Err(crate::daemon_client::link::errors::reply_timeout_text(
+            REPLY_TIMEOUT,
+        )),
     }
 }
 

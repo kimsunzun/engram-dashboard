@@ -1,12 +1,16 @@
 //! The shell's daemon link on the transport crate (ADR-0177 · ADR-0310 · TRD S21 trd-3 §6-2 U2).
 //!
 //! This module is the shell's edge of the transport: the packet vocabulary ([`wire::ShellWire`]), the handshake
-//! ([`handshake::ShellHandshake`]), the dialer ([`dialer::LocalDaemonDialer`]) and the endpoint source
-//! ([`endpoint::EndpointSource`]); event routing comes later in 3-2 U2. The connection machine itself (dial · backoff ·
-//! keepalive · pending replies · per-peer lossless inbox) is the transport crate's; this module only adapts it.
+//! ([`handshake::ShellHandshake`]), the dialer ([`dialer::LocalDaemonDialer`]), the endpoint source
+//! ([`endpoint::EndpointSource`]), the inbox consumer ([`pump`]), the routing of what it delivers ([`route`]) and the
+//! failure texts callers see ([`errors`]). The connection machine itself (dial · backoff · keepalive · pending replies
+//! · per-peer lossless inbox) is the transport crate's; this module only adapts it.
 //!
-//! ★Nothing in production calls this yet★ — 3-2 U3 builds a new driver on it behind a constructor choice and 3-2 U4
-//! switches production over. Items are `pub` so the unused stretch needs no lint allowances.
+//! ★Production does not run on this yet★ — 3-2 U3 builds a new driver on it behind a constructor choice and 3-2 U4
+//! switches production over. Until then the old driver only shares two pieces: `route::emit_broadcast` and the
+//! reply-timeout text (`errors::reply_timeout_text` — `commands::agent`). Items are `pub` so the unused stretch needs no
+//! lint allowances; the one item whose signature names a crate-private port (`route::emit_broadcast` —
+//! `events::DaemonEvents`) is `pub(crate)`.
 //!
 //! ★Vocabulary wall★ — no `tauri` path and no agent crate in this directory (CI `shell gate 4`). Frontend emits reach
 //! this module only through the ports in the parent module (`events::DaemonEvents` · `AgentNamesSink`), never as
@@ -15,8 +19,13 @@
 
 pub mod dialer;
 pub mod endpoint;
+pub mod errors;
 pub mod handshake;
+pub mod pump;
+pub mod route;
 pub mod wire;
+
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use engram_dashboard_transport::PeerId;
 
@@ -39,13 +48,19 @@ impl DaemonKey {
     }
 }
 
-/// Names one `Registry::add` of a key. ★Intended contract — not enforced yet★: the event routing (3-2 U2 commit C)
-/// mints one per add and then makes the field private behind a constructor; until then nothing mints tokens and the
-/// field is open.
+/// Names one `Registry::add` of a key: mint one per add ([`HandleToken::mint`]) — no two mints in a process are equal,
+/// and the field is private, so a token cannot be made up.
 ///
-/// ★Why the shell will mint it★: transport has no handle identity on `Peer`, and re-adding the same key starts a new
-/// supervisor while the old one may still drain its own inbox (`registry.rs` — overlap is not zero). Events are to be
-/// filtered by "is this the key's current token" (TRD §3-3 rule ①), so the token must differ for every add of one key.
-/// Order carries no meaning — only equality does.
+/// ★Why the shell mints it★: transport has no handle identity on `Peer`, and re-adding the same key starts a new
+/// supervisor while the old one may still drain its own inbox (`registry.rs` — overlap is not zero). Items are filtered
+/// by "is this the key's current token" (TRD §3-3 rule ① — [`route`]), so the token must differ for every add of one
+/// key. Order carries no meaning — only equality does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct HandleToken(pub u64);
+pub struct HandleToken(u64);
+
+impl HandleToken {
+    pub fn mint() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
