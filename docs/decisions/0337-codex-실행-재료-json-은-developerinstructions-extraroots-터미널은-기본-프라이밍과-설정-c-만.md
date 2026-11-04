@@ -1,7 +1,7 @@
 # ADR-0337: codex 실행 재료 — JSON 은 developerInstructions · extraRoots, 터미널은 「기본」 프라이밍과 설정 `-c` 만
 
-- 상태: 제안 (2026-10-31, 근거: 사용자 결정 P4-FINAL(2026-10-20 「프리셋은 베이스때문에 무조건 들어가야겠네. 그럼 안에 스킬이나 그런 지시서가 있을때 경고 띄우면 될듯」) · P7AC · G28 + 메인 M8 · M13 · M19 · M20 · M29 · M97(보고))
-- 관련: ADR-0215(codex 지시서 = developer_instructions) · ADR-0216(덮어쓰기 순서) · ADR-0329 · ADR-0334 · ADR-0331 · PRD R37 · TRD §1-3 6 · §1-5 표 · §7 5 · 조사 `docs/research/codex-instruction-channels-2026-10-20.md`
+- 상태: 제안 (2026-10-31, 근거: 사용자 결정 P4-FINAL(2026-10-20 「프리셋은 베이스때문에 무조건 들어가야겠네. 그럼 안에 스킬이나 그런 지시서가 있을때 경고 띄우면 될듯」) · P7AC · G28 + 메인 M8 · M13 · M19 · M20 · M29 · M97(보고)) · 부분 폐기 by ADR-0341 (결정 3 알림 횟수)
+- 관련: ADR-0215(codex 지시서 = developer_instructions) · ADR-0216(덮어쓰기 순서) · ADR-0329 · ADR-0334 · ADR-0331 · PRD R37 · TRD §1-3 6 · §1-5 표 · §7 5 · 조사 `docs/research/codex-instruction-channels-2026-10-20.md` · Amended by ADR-0341 (결정 3 알림 횟수)
 
 ## 맥락
 codex 는 JSON(app-server)과 터미널 모드의 지침 · 스킬 채널이 다르다. 터미널은 프로세스마다 스킬 폴더를 줄 길이 없다(PRD R37 · 조사).

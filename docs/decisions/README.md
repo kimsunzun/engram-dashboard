@@ -139,7 +139,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0089](0089-mid-flight-epoch-race-결정론-재현-test-harness-yield-seam-배달-관측-epoch-자족화-adr-0088-후속.md) | mid-flight epoch race 결정론 재현 — test-harness yield seam + 배달 관측 epoch 자족화 (ADR-0088 후속) | 확정 |
 | [0090](0090-stage-2-컨텍스트-포화-실측-실행-설계-파일럿-선행전용-실험-binsonnet-핀안전-범위-해석.md) | Stage 2 컨텍스트 포화 실측 실행 설계 — 파일럿 선행·전용 실험 bin·sonnet 핀·안전 범위 해석 | 확정 |
 | [0091](0091-stage-2포화를-포맷-수용부-뒤로-재배치-단계4-분리-adr-0088-사다리-재개정.md) | Stage 2(포화)를 포맷-수용부 뒤로 재배치 + 단계4 분리 — ADR-0088 사다리 재개정 | 확정 |
-| [0092](0092-s17-수신-계약-프라이밍외부-md-seam스폰-시-시스템프롬프트-주입-11-선행다중수신-추상-happy-path-first-adr-00900091-원인-정정.md) | S17 수신 계약 — 프라이밍(외부 MD seam·스폰 시 시스템프롬프트 주입) + 1:1 선행(다중수신 추상) + happy-path-first — ADR-0090/0091 원인 정정 | 확정 (부분 폐기 by ADR-0327: 결정 1 프라이밍 원천 경로) |
+| [0092](0092-s17-수신-계약-프라이밍외부-md-seam스폰-시-시스템프롬프트-주입-11-선행다중수신-추상-happy-path-first-adr-00900091-원인-정정.md) | S17 수신 계약 — 프라이밍(외부 MD seam·스폰 시 시스템프롬프트 주입) + 1:1 선행(다중수신 추상) + happy-path-first — ADR-0090/0091 원인 정정 | 확정 (부분 폐기 by ADR-0215: 백엔드가 프라이밍 내용을 읽는다 / ADR-0327: 결정 1 프라이밍 원천 경로) |
 | [0093](0093-s17-답장-왕복-실험-하네스-발신-안내-케이스-매트릭스-c0c3.md) | S17 답장 왕복 실험 하네스 — 발신-안내 케이스 매트릭스 (C0~C3) | 확정 |
 | [0094](0094-s17-에이전트-간-발신-권한-런타임-최소권한-pre-authorization-grant-seam.md) | S17 에이전트 간 발신 권한 — 런타임 최소권한 pre-authorization (grant seam) | 확정 (부분 폐기 by ADR-0097: 발신만 pre-authorize·bypassPermissions 거부 → 스폰 기본을 auto mode(bypassPermissions)로 채택(2026-07-22 사용자 결정). grant seam은 미래 공용 제약 레이어용 정책 표면으로 유지 / ADR-0098: CLI 발신 grant 번역을 절대경로 Bash({exe} *)에서 bare-name Bash/PowerShell({exe}:*) + PATH 주입으로 정렬(claude 권한 매처 미매칭 0/38 해소·배포 이식성)) |
 | [0095](0095-봉투-포맷-스위칭-구조-기본-colon대체-xml-bracket-기각.md) | 봉투 포맷 스위칭 구조 — 기본 colon·대체 xml (bracket 기각) | 확정 (부분 폐기 by ADR-0096: 봉투 포맷 스위치 저장 위치·노출 방식 (결정 5)) |
@@ -357,7 +357,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0308](0308-데몬은-화면-내용을-모른다-셸이-에이전트-참조로-표시한-인자는-데몬이-중계-전에-id-로-바꾼다.md) | 데몬은 화면 내용을 모른다 — 셸이 에이전트 참조로 표시한 인자는 데몬이 중계 전에 id 로 바꾼다 | 확정 |
 | [0309](0309-우편-내부-키는-에이전트-id-가장자리-주소는-이름-그대로.md) | 우편 내부 키는 에이전트 id — 가장자리 주소는 이름 그대로 | 확정 |
 | [0311](0311-라이브러리는-따로-된-얇은-crate-engram-dashboard-asset-library-다-데몬은-배선만.md) | 라이브러리는 따로 된 얇은 crate `engram-dashboard-asset-library` 다 — 데몬은 배선만 | 제안 |
-| [0312](0312-라이브러리-루트는-하나다-바깥-내용은-루트-안으로-들인다.md) | 라이브러리 루트는 하나다 — 바깥 내용은 루트 안으로 들인다 | 제안 |
+| [0312](0312-라이브러리-루트는-하나다-바깥-내용은-루트-안으로-들인다.md) | 라이브러리 루트는 하나다 — 바깥 내용은 루트 안으로 들인다 | 제안 (부분 폐기 by ADR-0341: 결정 3 범위) |
 | [0313](0313-구현은-서버-먼저-데몬-라이브러리-기능은-늘-켜져-있고-화면만-끄고-켠다.md) | 구현은 서버 먼저 — 데몬 라이브러리 기능은 늘 켜져 있고 화면만 끄고 켠다 | 제안 |
 | [0314](0314-프리셋-라이브러리는-데몬이-소유하는-에셋이고-클라이언트가-요청해-읽는다.md) | 프리셋 · 라이브러리는 데몬이 소유하는 에셋이고 클라이언트가 요청해 읽는다 | 제안 |
 | [0315](0315-참조-라이브러리-루트부터의-경로-한-꼴-기본-제공-engram.md) | 참조 = 라이브러리 루트부터의 `/` 경로 한 꼴 + 기본 제공 `engram:/` | 제안 |
@@ -382,7 +382,8 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0334](0334-실행-재료는-포트로-넘긴다-해석은-asset-library-플래그-번역-백엔드-설정-지식은-backend.md) | 실행 재료는 포트로 넘긴다 — 해석은 asset-library, 플래그 번역 · 백엔드 설정 지식은 backend | 제안 |
 | [0335](0335-파일-조작-계획-실행-참조-고침-진행-기록-없이-순서만-obsidian-꼴-남은-임시-파일도-저절로-치우지-않는다.md) | 파일 조작 = 계획 → 실행 → 참조 고침, 진행 기록 없이 순서만 (Obsidian 꼴) — 남은 임시 파일도 저절로 치우지 않는다 | 제안 (부분 폐기 by ADR-0339: 결정 5 대체와 결정 1 및 6 확장) |
 | [0336](0336-서버-부품-선택-serde-saphyr-jsonschema-ureq-walkdir-junction-pulldown-cmark-sha2.md) | 서버 부품 선택 — serde-saphyr · jsonschema · ureq · walkdir · junction · pulldown-cmark · sha2 | 제안 |
-| [0337](0337-codex-실행-재료-json-은-developerinstructions-extraroots-터미널은-기본-프라이밍과-설정-c-만.md) | codex 실행 재료 — JSON 은 developerInstructions · extraRoots, 터미널은 「기본」 프라이밍과 설정 `-c` 만 | 제안 |
+| [0337](0337-codex-실행-재료-json-은-developerinstructions-extraroots-터미널은-기본-프라이밍과-설정-c-만.md) | codex 실행 재료 — JSON 은 developerInstructions · extraRoots, 터미널은 「기본」 프라이밍과 설정 `-c` 만 | 제안 (부분 폐기 by ADR-0341: 결정 3 알림 횟수) |
 | [0338](0338-프리셋-편집-칸-초안-저장-저장은-목록을-통째로-덮고-마지막-저장이-이긴다-llm-버스-연산은-바로-적용.md) | 프리셋 편집 칸 = 초안 + [저장] — 저장은 목록을 통째로 덮고 마지막 저장이 이긴다 · LLM 버스 연산은 바로 적용 | 제안 (부분 폐기 by ADR-0339: 결정 8 확장) |
 | [0339](0339-덮어쓰기-삭제-이름-바꾸기-참조는-자리를-따름-한-목록-안-같은-경로는-처음-자리만-삭제는-참조-처리를-고른다-사람-모달-llm-인자-기본-남기기.md) | 덮어쓰기 = 삭제 + 이름 바꾸기 (참조는 자리를 따름 · 한 목록 안 같은 경로는 처음 자리만) · 삭제는 참조 처리를 고른다 (사람 = 모달 · LLM = 인자, 기본 남기기) | 제안 |
 | [0340](0340-full-regression-runs-locally-before-commit-ci-is-a-post-push-check.md) | Full regression runs locally before commit, CI is a post-push check | 확정 |
+| [0341](0341-preset-folder-entry-claude-reads-it-natively-through-add-dir-codex-gets-only-what-it-lacks-a-missing-folder-blocks-launch.md) | Preset folder entry — claude reads it natively through --add-dir, codex gets only what it lacks, a missing folder blocks launch | 확정 |
