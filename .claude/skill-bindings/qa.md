@@ -308,11 +308,13 @@ MSYS_NO_PATHCONV=1 taskkill /PID <이번에 띄운 1420 주인 PID> /F
 지우기 전에 작업 트리를 시작 때와 대조한다 — 시작 상태(`status.start`)가 `$QA_TMP` 안에 있다.
 
 - 시험이 다시 구운 생성물은 내용이 같아도 줄끝만 달라 ` M` 으로 남는다 — 대상 = `crates/engram-dashboard-protocol/bindings` · `crates/engram-dashboard-agent/bindings` · `src-tauri/bindings` · `src-tauri/Cargo.toml`. `git update-index --refresh` 로는 안 지워진다.
-- 먼저 아래가 찍는 파일(` M` 인데 `git diff --numstat` 이 빈 것) 중 `status.start` 에 없던 것만 `git checkout -- <파일>` 로 되돌린다:
+- 먼저 아래가 찍는 파일을 `git checkout -- <파일>` 로 되돌린다 — 작업 트리 쪽이 바뀌었는데 `git diff --numstat` 이 비고, 지금 상태 줄이 `status.start` 의 줄과 다른 것이다:
   ```bash
   P="crates/engram-dashboard-protocol/bindings crates/engram-dashboard-agent/bindings src-tauri/bindings src-tauri/Cargo.toml"
-  comm -23 <(git ls-files -m -- $P 2>/dev/null | sort) <(git diff --numstat -- $P 2>/dev/null | cut -f3 | sort)
+  comm -23 <(git ls-files -m -- $P 2>/dev/null | sort) <(git diff --numstat -- $P 2>/dev/null | cut -f3 | sort) \
+    | while IFS= read -r f; do grep -qxF -- "$(git status --porcelain -- "$f" 2>/dev/null)" "$QA_TMP/status.start" || echo "$f"; done
   ```
+- 시작 때 스테이징돼 있던 파일(`M ` → `MM`)도 찍힌다 — `git checkout --` 은 인덱스로 되돌리므로 스테이징한 내용은 남는다.
 - 그 뒤 대조한다. `STATUS_SAME` 이 안 찍히면 diff 를 보고에 싣는다:
   ```bash
   git status --porcelain | diff "$QA_TMP/status.start" - && echo STATUS_SAME
