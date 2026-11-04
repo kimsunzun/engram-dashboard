@@ -1,7 +1,7 @@
 # ADR-0342: Daemon version mismatch shows on the existing connection-failure surface, no new popup
 
-- 상태: 확정 (2026-11-04, 근거: 사용자 결정 2026-11-04 + 3-2 U2 landing survey (no popup surface exists, no TRD unit builds one))
-- 관련: Amends ADR-0310 (결정 12 버전 불일치 즉시 팝업) · Amends ADR-0180 (결정 2 버전 거절 팝업 자격과 결정 5 즉시 팝업과 결정 6 버전 불일치 팝업 모양) · Amends ADR-0178 (결정 5 클라 팝업) · TRD `docs/process/S21-crate-boundaries/trd-3-transport.md` §6-2 U2 (B landing note ①) · `src/components/layout/ConnectionNotice.tsx` (the existing surface) · ADR-0287 (notice bands on the overlay layer) · `src-tauri/src/daemon_client/link/dialer.rs` (local mismatch = Dialer `Refused` 4001, no dial) · `src-tauri/src/discovery/mod.rs` `DiscoveryError::VersionMismatch` · step-log S21
+- 상태: 확정 (2026-11-04, 근거: 사용자 결정 2026-11-04 + 3-2 U2 landing survey (no popup surface exists, no TRD unit builds one)) · 부분 폐기 by ADR-0343 (결정 1 표시에 재시작 버튼 추가)
+- 관련: Amends ADR-0310 (결정 12 버전 불일치 즉시 팝업) · Amends ADR-0180 (결정 2 버전 거절 팝업 자격과 결정 5 즉시 팝업과 결정 6 버전 불일치 팝업 모양) · Amends ADR-0178 (결정 5 클라 팝업) · TRD `docs/process/S21-crate-boundaries/trd-3-transport.md` §6-2 U2 (B landing note ①) · `src/components/layout/ConnectionNotice.tsx` (the existing surface) · ADR-0287 (notice bands on the overlay layer) · `src-tauri/src/daemon_client/link/dialer.rs` (local mismatch = Dialer `Refused` 4001, no dial) · `src-tauri/src/discovery/mod.rs` `DiscoveryError::VersionMismatch` · step-log S21 · Amended by ADR-0343 (결정 1 표시에 재시작 버튼 추가)
 
 ## 맥락
 
