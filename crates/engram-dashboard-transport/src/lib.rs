@@ -132,6 +132,11 @@
 //! ★기대값은 최소 1이고 실수를 올리지 않는다★ — 올리면 개수의 정본이 둘이 된다. 그래서 이 게이트는
 //! 스위트가 **완전히** 빈 것과 타깃이 사라진 것만 잡고, 3개가 1개로 줄어드는 것은 못 잡는다.
 //!
+//! **Consumer side — `test-support` stays out of release graphs.** The harness ([`testing`]) is for consumers' tests
+//! only: a consumer turns the feature on in its `[dev-dependencies]`, never in `[dependencies]`. Unlike ①–⑤ (which
+//! watch this crate) this is checked on the consumer: `.github/workflows/ci.yml` `shell gate 5` holds the shell's release
+//! graph at 0 lines of the feature, paired with ≥ 1 in its dev graph (the daemon line comes with TRD 3 §6-3 U4).
+//!
 //! ## 알려진 한계 (보증으로 읽지 말 것)
 //!
 //! - ★**늦은 답장의 오배달을 불가능하게 만들지 못한다 — 그리고 만들려 하지 않는다**★. 소비자가

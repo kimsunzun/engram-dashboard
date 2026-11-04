@@ -8,10 +8,16 @@ description = "Engram Dashboard 재사용 전송 lib — 프레임 경계·요�
 name = "engram_dashboard_transport"
 path = "src/lib.rs"
 
-# ★`default = []` — 사유는 `net` 과 같다: 조용한 회귀보다 시끄러운 실패★. 하네스가 필요한 소비자가
-#   `features = ["test-support"]` 를 명시로 켠다(선례 = `engram-dashboard-command`).
-#   ★이 저장소에서 빈 default 의 실이득을 넘겨 읽지 말 것★ — feature 합집합은 cargo 호출 1회 단위라
-#   루트 빌드에서는 어차피 켜진다. 얻는 것은 **소비자 쪽 실수가 컴파일 오류로 말하는 것**이다.
+# ★`default = []` — same reason as `net`: a loud failure beats a silent regression★. A consumer that needs the harness
+#   turns on `features = ["test-support"]` explicitly, ★in its `[dev-dependencies]` only★ (precedent =
+#   `engram-dashboard-command` · base · platform). The release graph is checked by CI: `ci.yml` `shell gate 5` for the
+#   shell (the daemon line comes with 3-3 U4).
+#   ★What the empty default buys in this repo★ — features are unified per cargo invocation under resolver 2: a plain
+#   `cargo build` (root or `--workspace`) leaves `test-support` off (measured 2026-11-04: lib features `default` · `ws`),
+#   and it turns on only when the call builds a consumer's dev graph that requests it (a root or `--workspace` test run —
+#   the shell) or selects this crate with `--all-features`; `cargo test -p engram-dashboard-transport` alone keeps it
+#   off (transport gate ④ line 1 relies on that).
+#   The gain is that a consumer's mistake speaks as a compile error.
 [features]
 default = []
 test-support = []

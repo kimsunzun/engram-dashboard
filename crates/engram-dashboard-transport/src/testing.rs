@@ -13,6 +13,10 @@
 //! 본다(`registry.rs` 의 3-0 U6b 시험).
 //!
 //! ★운영 코드가 이 모듈을 참조하면 안 된다★ — 기본 빌드에 없으므로 컴파일이 먼저 깨진다.
+//!
+//! ★Consumers turn `test-support` on in `[dev-dependencies]` only★ — in `[dependencies]` this module would land in their
+//! release binary. CI checks it on the consumer: `.github/workflows/ci.yml` `shell gate 5` (shell; the daemon line comes
+//! with TRD 3 §6-3 U4).
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

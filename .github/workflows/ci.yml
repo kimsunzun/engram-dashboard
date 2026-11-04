@@ -913,8 +913,10 @@ jobs:
       #   셸(`engram-dashboard`)의 정상 · build 그래프에 `engram-dashboard-agent` 가 0 줄이어야 PASS(짝: 데몬의 같은
       #   그래프에 1 줄 이상). 해석된 그래프를 읽는다 — 매니페스트 grep 이 아니라서 다른 의존이 agent 를 끌어오는
       #   전이 경로까지 잡는다. ★판정 함수(`shell_agent_gate`)는 여기 하나에만 둔다★ — 로컬 대체(`.claude/skill-bindings/qa-verify.md` 「gates 잡」)는 이 스텝을 그대로 돈다.
-      # ★`cargo tree -i engram-dashboard-agent` 로 바꾸지 말 것★ — 대상이 그래프에 없으면 rc=101 로 죽어 「없다」가
-      #   FAIL 로 읽힌다(실측 — TRD 2-1 §1-4). 그래서 그래프 전체를 찍고 줄을 찾는다.
+      # ★Do not switch to `cargo tree -i engram-dashboard-agent`★ — `-i` exits 101 when the target is absent from the
+      #   package's whole resolve (dev included) and prints "nothing to print" with rc=0 when it is reachable only
+      #   through dev edges (measured 2026-11-04 — see `shell gate 5`), so its outcome depends on edges this step does
+      #   not judge. Print the whole graph and look for the line instead.
       # ★`-e` 에 `dev` 를 넣지 말 것★ — 셸 → (dev) 데몬 → agent 는 일부러 남아 있다(셸 통합 시험이 데몬을 쓴다 ·
       #   ADR-0286). 넣으면 그 간선으로 늘 빨갛다.
       # ★짝(데몬 → 1 줄 이상)을 지우지 말 것★ — agent 를 개명하거나 접두를 바꾸거나 패턴에 오타가 나면 0 기대 줄이
@@ -1110,6 +1112,90 @@ jobs:
             echo "PASS — 셸 운영 그래프에 net 없음(짝: 데몬 $n 줄)"
           }
           shell_net_gate
+
+      # TRD S21 trd-3 §2-4 (edge vocabulary gate ①, shell half — 3-2 U2 · ADR-0310): the shell's daemon link
+      #   (`src-tauri/src/daemon_client/link/`) names no `tauri` crate path and no agent crate. It adapts the transport and
+      #   reaches the frontend only through the parent module's ports. PASS = 0 matches outside `//` comments.
+      # Name (`$n`) = `tauri` · `tauri_<plugin>` · `engram_dashboard_agent`, optionally raw (`r#tauri`). Any of four forms is a
+      #   hit: ① the name followed by `::` (also `::tauri::` · `tauri :: Emitter`) ② `use` · `extern crate` of the name, with
+      #   an optional leading `::` (`use tauri;` · `use ::tauri;`) ③ the name followed by `as` (`use {tauri as t};` ·
+      #   `use ::tauri as t;`) ④ the name inside a top-level `use {…}` group on one line (`use {std::fmt, tauri};`).
+      #   A plain `tauri::` search would miss `tauri_plugin_dialog::` · `use tauri;` · every alias form.
+      #   The `(?:[^/]|/[^/])*?` prefix means "no `//` yet on this line", so comments that name the wall do not count (same
+      #   guard as the replay_flight purity step). Keep the `\s*` before `::` (same reason as that step).
+      # ★Do not drop the two existence checks★ — if the directory moves, rg matches 0 and 0 reads as PASS; a module root at
+      #   `daemon_client/link.rs` (instead of `link/mod.rs`) would sit outside the scanned directory.
+      # ★Known limits★ — block comments (the directory uses `//` only) · names reached through another module
+      #   (`super::events::…` — the wall is on names, not on the graph) · a file pulled in from elsewhere with
+      #   `#[path = …]` · a macro defined outside the directory that expands to such a path · a `//` inside a string
+      #   before the path on the same line · a `/` right before the name (`x/tauri::`) · paths or `use` groups split
+      #   across lines · a nested group earlier in a one-line `use {…}` group (`use {std::{fmt}, tauri};` — `[^}]*`
+      #   stops at the inner `}`).
+      # The daemon half (`crates/engram-dashboard-daemon/src/link/`) lands with 3-3 U4.
+      - name: 'shell gate 4: daemon link vocabulary — no tauri or agent crate paths in daemon_client/link'
+        shell: bash
+        run: |
+          set +e
+          d=src-tauri/src/daemon_client/link
+          if [ ! -d "$d" ]; then echo "FAIL — gate target directory is missing: $d (renamed or moved?)"; exit 1; fi
+          if [ ! -f "$d/mod.rs" ]; then echo "FAIL — module root is not $d/mod.rs (a root outside the directory escapes the scan)"; exit 1; fi
+          n='(?:r#)?(?:tauri(?:_[a-z0-9_]+)?|engram_dashboard_agent)'
+          hits=$(rg -n "^(?:[^/]|/[^/])*?(?:\b$n\s*::|\b(?:use|extern\s+crate)\s+(?:::)?$n\b|\b$n\s+as\b|\buse\s+(?:::)?\{[^}]*\b$n\b)" "$d/")
+          rc=$?
+          set -e
+          case "$rc" in
+            1) echo "PASS — 0 matches" ;;
+            0) echo "FAIL — expected 0 matches, found:"; printf '%s\n' "$hits"; exit 1 ;;
+            *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
+          esac
+
+      # TRD S21 trd-3 §2-4 (transport `test-support` release-graph gate, shell half — 3-2 U2 · ADR-0310): the transport's
+      #   test harness (`testing` — `MemoryNetwork` · `ManualClock` …) is turned on only in the shell's `[dev-dependencies]`.
+      #   The workspace uses `resolver = "2"`, so a dev-graph feature does not reach the release build — this step catches
+      #   someone turning it on in `[dependencies]`. Form = the base · platform test-support steps (resolved graph, `-e` with
+      #   `build`, crate-qualified pair).
+      # ★Shell only for now★ — `-i engram-dashboard-transport` exits 101 when transport is absent from the package's whole
+      #   resolve, dev included (measured: daemon · cli today); when it is reachable only through dev edges the normal-graph
+      #   query exits 0 with "nothing to print". The daemon does not depend on transport until 3-3 U4 (that unit adds the
+      #   daemon line). No cli line ever: the cli graph never holds transport (TRD §2-4).
+      # `--all-features` on the 0 check = the shell's own features are on too (as in `shell gate 1` · `shell gate 3`), so a
+      #   shell feature that turned the harness on is caught.
+      # ★Do not drop the pair (shell dev graph → at least 1)★ — if the feature is renamed, the 0 check loses its word and
+      #   passes blind.
+      # ★Limit★ — same as the base · platform steps: one cargo call that compiles lib and test targets (`--all-targets`) or
+      #   selects the transport crate with all its features (`cargo build --workspace --all-features`) merges the feature
+      #   into the shell binary; the resolved per-package graph does not show that.
+      - name: 'shell gate 5: transport test-support stays out of the shell release graph (shell = 0, shell dev >= 1)'
+        shell: bash
+        run: |
+          set +e
+          tree=$(cargo tree --locked -p engram-dashboard -e normal,build,features -i engram-dashboard-transport --target all --all-features)
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then echo "FAIL — cargo tree -p engram-dashboard exited $rc"; printf '%s\n' "$tree"; exit 1; fi
+          set +e
+          hits=$(printf '%s\n' "$tree" | rg 'feature "test-support"')
+          rgrc=$?
+          set -e
+          case "$rgrc" in
+            1) echo "PASS — shell normal graph: 0 matches" ;;
+            0) echo "FAIL — transport test-support is on in the shell release graph:"; printf '%s\n' "$tree"; exit 1 ;;
+            *) echo "FAIL — rg errored (exit $rgrc)"; exit 1 ;;
+          esac
+          set +e
+          tree=$(cargo tree --locked -p engram-dashboard -e normal,dev,features -i engram-dashboard-transport --target all)
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then echo "FAIL — cargo tree -p engram-dashboard (dev) exited $rc"; printf '%s\n' "$tree"; exit 1; fi
+          set +e
+          hits=$(printf '%s\n' "$tree" | rg 'engram-dashboard-transport feature "test-support"')
+          rgrc=$?
+          set -e
+          if [ "$rgrc" -gt 1 ]; then echo "FAIL — rg errored (exit $rgrc)"; exit 1; fi
+          if [ -z "$hits" ]; then n=0; else n=$(printf '%s\n' "$hits" | wc -l | tr -d '[:space:]'); fi
+          echo "shell dev graph: $n match(es)"
+          if [ "$n" -lt 1 ]; then echo "FAIL — expected >= 1 — was the feature renamed? (then the 0 check above passes blind)"; printf '%s\n' "$tree"; exit 1; fi
+          echo "PASS"
 
       # ADR-0273: CLI 패키지(`engram-dashboard-cli`)의 직접 워크스페이스 의존이 정확히 agent · cli(자기) · command
       #   여야 PASS. 해석된 그래프를 읽는다 — 꼴 · 플래그는 messaging · command · base · platform 상한 게이트와

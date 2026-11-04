@@ -27,6 +27,8 @@ mod frame_relay;
 // ADR-0155 결정 4: 데몬이 보낸 명령을 받는 입구. 적용은 연결 태스크 밖에서 돈다.
 pub mod inbound;
 mod lifecycle;
+// ADR-0310: the daemon link on the transport crate (TRD S21 trd-3 §6-2 U2).
+pub mod link;
 pub mod protocol_state;
 pub(crate) mod refusal;
 // ADR-0046 M1: single-flight replay 채번/펜스 상태기계 + replay 경계 마커 인코딩(순수 — 소켓/Tauri 의존 0).

@@ -96,6 +96,12 @@ engram-dashboard-protocol = { path = "../crates/engram-dashboard-protocol" }
 #   ★`windows` 를 이 셸에 직접 되살리지 말 것★ — OS crate 운영 의존은 platform 하나에만 둔다(CI `platform gate 5`).
 #   ★운영 의존에서 `test-support` 를 켜지 않는다★(CI `platform gate 3` — 시험 기능은 아래 dev 재선언에서만).
 engram-dashboard-platform = { path = "../crates/engram-dashboard-platform" }
+# Reusable transport lib (ADR-0177) — the shell's daemon link (`daemon_client::link`) is built on it (TRD S21 trd-3 §6-2
+#   U2 · ADR-0310). `ws` = the real-socket dialer. Not a new third-party package set: tokio · futures-util ·
+#   tokio-tungstenite 0.26 are already in this graph.
+#   ★Never turn on `test-support` here★ — the harness is for tests only (dev re-declaration below). Wall = CI
+#   `shell gate 5` (0 lines of that feature in this package's normal · build graph).
+engram-dashboard-transport = { path = "../crates/engram-dashboard-transport", features = ["ws"] }
 # 동기 WS 클라이언트 — graceful 데몬 끄기(`daemon_client::stop` 의 일방 발사)만 쓴다. 3-2(transport 셸 부착)가 그
 #   클라이언트를 다시 쓰며 걷는다(ADR-0271 결정 5). 새 패키지가 아니다 — 아래 `tokio-tungstenite` 가 같은 판을 이미 문다.
 tungstenite = "0.26"
@@ -134,6 +140,10 @@ tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread", "
 #   합쳐진다★ — 데몬 `Cargo.toml` 「운영 빌드 주의」의 self-dev-dependency 와 같은 위험군이고, 위 게이트는 그 꼴을
 #   못 본다(해석된 그래프만 읽는다 — `ci.yml` 같은 스텝 주석의 「한계」). 배포용 빌드는 그렇게 짓지 않는다.
 engram-dashboard-platform = { path = "../crates/engram-dashboard-platform", features = ["test-support"] }
+# Feature re-declaration — the link tests drive `daemon_client::link` over the transport's in-memory harness
+#   (`MemoryNetwork` · `ManualClock`). The request stays in the dev graph, so release binaries do not get it
+#   (CI `shell gate 5` checks the resolved normal graph; the `--all-targets` caveat above applies the same way).
+engram-dashboard-transport = { path = "../crates/engram-dashboard-transport", features = ["test-support", "ws"] }
 # 실 데몬 graceful 끄기 왕복 시험(`tests/stop_smoke.rs` · `#[ignore]`)의 임시 데이터 폴더 격리.
 tempfile = "3"
 # feature-only 재선언 — 도킹 골든(`src/layout/bands_golden.json`)을 비트 단위로 읽는다. 이 기능이 없으면 serde_json 이
