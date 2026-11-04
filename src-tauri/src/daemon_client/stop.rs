@@ -2,9 +2,9 @@
 //!
 //! ★임시 거처★ — 3-2(transport 셸 부착)가 정지 명령 클라이언트를 다시 쓴다(ADR-0271 결정 5).
 //!
-//! ★이 파일이 [`crate::discovery`] 에서 쓰는 내부는 이 파일을 위해 `pub(crate)` 로 연 것뿐이다★ — `check_acceptable` ·
-//! `AcceptCheck` · `FileReader`(와 그 필드 `path`) · `RealLiveness`. 셸의 다른 모듈이 그것을 쓰기 시작하면 3-2 의
-//! 다시 쓰기가 넓어진다.
+//! The [`crate::discovery`] internals this file uses are `pub(crate)`: `FileReader` (and its field `path`) for this
+//! file only · `check_acceptable` · `AcceptCheck` · `RealLiveness` also for `daemon_client::link::endpoint`, which
+//! reads `daemon.json` itself.
 //!
 //! ★분담(daemon_stop 와의 차이)★: send_stop 은 그 위 계층의 **graceful** 경로 — 데몬에 WS 로
 //! StopDaemon{force} 를 보내 데몬이 스스로 shutdown_all(자식 PTY 정리) + self-exit 하게

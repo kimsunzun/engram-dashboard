@@ -108,7 +108,8 @@ impl Wire for ShellWire {
     }
 }
 
-fn json_class(err: &serde_json::Error) -> &'static str {
+/// A fixed class word for a JSON error — the parser's message can quote the input.
+pub(super) fn json_class(err: &serde_json::Error) -> &'static str {
     match err.classify() {
         serde_json::error::Category::Syntax => "json syntax",
         serde_json::error::Category::Data => "json data",

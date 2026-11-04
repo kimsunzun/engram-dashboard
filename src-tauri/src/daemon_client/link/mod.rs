@@ -1,7 +1,8 @@
 //! The shell's daemon link on the transport crate (ADR-0177 · ADR-0310 · TRD S21 trd-3 §6-2 U2).
 //!
-//! This module is the shell's edge of the transport: the packet vocabulary ([`wire::ShellWire`]) and, in later
-//! units, the handshake · dialer · endpoint source · event routing. The connection machine itself (dial · backoff ·
+//! This module is the shell's edge of the transport: the packet vocabulary ([`wire::ShellWire`]), the handshake
+//! ([`handshake::ShellHandshake`]), the dialer ([`dialer::LocalDaemonDialer`]) and the endpoint source
+//! ([`endpoint::EndpointSource`]); event routing comes later in 3-2 U2. The connection machine itself (dial · backoff ·
 //! keepalive · pending replies · per-peer lossless inbox) is the transport crate's; this module only adapts it.
 //!
 //! ★Nothing in production calls this yet★ — 3-2 U3 builds a new driver on it behind a constructor choice and 3-2 U4
@@ -12,6 +13,9 @@
 //! Tauri types.
 // ADR-0310
 
+pub mod dialer;
+pub mod endpoint;
+pub mod handshake;
 pub mod wire;
 
 use engram_dashboard_transport::PeerId;

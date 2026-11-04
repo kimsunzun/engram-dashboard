@@ -201,7 +201,7 @@ pub trait Clock: engram_dashboard_base::time::Clock {
 // ── 순수 오케스트레이션 ────────────────────────────────────────────────────────────
 
 /// info 소유권을 호출자가 유지하도록 참조 기반 판정 — Accept 는 데이터 없이 신호만 준다.
-// pub(crate) = daemon_client::stop 전용(3-2 까지) · ADR-0271
+// pub(crate) for daemon_client::stop and daemon_client::link::endpoint · ADR-0271
 pub(crate) enum AcceptCheck {
     Accept,
     DeadPid,
@@ -211,7 +211,7 @@ pub(crate) enum AcceptCheck {
 // ADR-0196: 생존 확인이 버전 대조보다 **먼저**다 — 뒤집지 마라. 그리고 이 판정은 **버전 방향을 일부러
 // 보지 않는다**: 죽은 기록은 우리보다 낮든 높든 stale 이라, 방향 판정을 더해 「더 새 기록이면 물러난다」로
 // 고치지 말 것.
-// pub(crate) = daemon_client::stop 전용(3-2 까지) · ADR-0271
+// pub(crate) for daemon_client::stop and daemon_client::link::endpoint · ADR-0271
 pub(crate) fn check_acceptable(info: &DaemonInfo, liveness: &dyn PidLiveness) -> AcceptCheck {
     if liveness.is_dead(info.pid, info.start_time) {
         return AcceptCheck::DeadPid;
@@ -607,7 +607,7 @@ impl DaemonReader for FileReader {
     }
 }
 
-// pub(crate) = daemon_client::stop 전용(3-2 까지) · ADR-0271
+// pub(crate) for daemon_client::stop and daemon_client::link::endpoint · ADR-0271
 pub(crate) struct RealLiveness;
 
 impl PidLiveness for RealLiveness {

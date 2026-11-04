@@ -33,4 +33,6 @@ Only the popup parts of the amended clauses die: the "popup" in ADR-0310 decisio
 
 - 3-2 U2 C / U4: map the 4001 / `GaveUp(Rejected)` path to the existing connection-failure surface with the fixed local message; never put the peer's text in the UI.
 - 3-2 U4 GUI check ③ checks the existing surface, not a popup.
-- TRD passages that still say "popup" for version mismatch (§3-0 ⑤, §3-3, §3-6 D25 bullet, §5 6 and 19, §6-2 U2 body, §6-4 ③) are superseded by this ADR and the B landing note.
+- The fixed local message keeps ADR-0178 decision 5's guidance and ADR-0134 decision 4's actionable-text rule: it suggests restarting the daemon (the running daemon is the old version; the new files are already installed), not "get a new version".
+- 4001 is not unique to a version mismatch: 3-3 U7's identity refusal (TRD §3-2, `Reject{Terminal}`) also closes with 4001. Before 3-3 U7 lands, give that refusal its own close code or make the 4001 message not say "version"; this ADR covers the version-mismatch case only.
+- TRD passages that still say "popup" for version mismatch (§3-0 ⑤, §3-3, §3-6 D25 bullet, §5 6 and 19, §6-2 U2 body, §6-4 ③, §8-3 D20 and D25) are superseded by this ADR and the B landing note.
