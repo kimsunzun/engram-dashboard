@@ -2120,6 +2120,7 @@
 ## S25 — 프리셋 · 라이브러리 (2026-10-12~, `v0.5.0/feat/preset-library` — 2026-10-20 에 `v0.4.1/…` 에서 이름 바꿈(사용자 · 다음 릴리스 = 0.5.0), 대화 세션) · 설계 폴더 `docs/process/S25-preset-library/` · **구현 미착수**
 
 - 2026-10-19 에 `v0.3.3/chore/misc` 에서 떼어 낸 주제 브랜치(그 전 커밋은 `S21:` 접두 — 잡동사니 브랜치에서 자란 주제). 이 브랜치의 커밋부터 `S25:`. 타임라인 상세는 「## 다음 (미진행)」 아래 프리셋 항목(2026-10-12~ 줄들)에 있다 — 옮기지 않는다.
+- 2026-11-04~05 — new preset entry "folder" (user request 2026-11-01; the handoff's unconfirmed reading "outside folder via `--add-dir`" was clarified with the user before research). `/engram-research` medium → `docs/research/preset-folder-entry-backend-loading-2026-11-04.md` (codex review FIX applied) → user decisions → ADR-0341 (amends ADR-0312 decision 3 scope · ADR-0337 decision 3 notice count) → PRD/TRD reflected (`73317d2a` · `fe45669b`) → `/engram-review` prd+trd full (Claude + codex), 3 fix rounds (`5194a942` + this commit) → both PASS. Last user decision 2026-11-05: a folder holding nothing a backend loads gets no notice. Implementation not started; next = step 16 (stop step — confirm first).
 
 ## S26 — 창 크롬 · 이름 (T-66) (2026-10-23~, `v0.5.0/feat/window-chrome`, 대화 세션) · 설계 폴더 `docs/process/S26-window-chrome/` · ADR-0300~0306 · 구현 U1–U9 커밋 · U10 문서 · **사람 손 GUI 확인 · master 머지 전**
 
