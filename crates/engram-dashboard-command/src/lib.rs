@@ -64,3 +64,8 @@ pub use table::{blocking_handler, CommandFuture, CommandHandler, CommandTable, T
 /// 선언 매크로가 링커 수집 항목을 만들 때 쓴다 — 소비 crate 가 `inventory` 를 직접 의존하지 않게 한다.
 #[doc(hidden)]
 pub use inventory;
+
+/// The declaration macro's `Json` field type expands to `serde_json::Value` through this path, so a declaring
+/// crate need not depend on `serde_json` itself.
+#[doc(hidden)]
+pub use serde_json;

@@ -807,7 +807,7 @@ mod tests {
             super::super::ingress::ControlQueryResult::Ok(payload) => {
                 ("OK".to_string(), payload.to_string())
             }
-            super::super::ingress::ControlQueryResult::Error { code, hint } => {
+            super::super::ingress::ControlQueryResult::Error { code, hint, .. } => {
                 (code.to_string(), hint)
             }
         }

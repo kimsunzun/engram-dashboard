@@ -291,6 +291,7 @@ impl HelpSource {
                 ControlQueryResult::Error {
                     code: ErrorCode::Internal.as_str(),
                     hint: format!("help text unavailable — {e}; report this to the owner"),
+                    args: None,
                 }
             }
         }
@@ -417,6 +418,7 @@ fn parse_request(body: &[u8]) -> Result<HelpTopic, ControlQueryResult> {
             "unknown help topic: {} — run `{CLI_EXE_NAME} help` to list groups, or `{CLI_EXE_NAME} help {CLI_GROUP_MAIL}`",
             preview(&word)
         ),
+        args: None,
     })
 }
 
@@ -428,6 +430,7 @@ fn malformed_request(what: &str, body: &[u8]) -> ControlQueryResult {
             "the help request body {what} — it must be a JSON object like {{\"{CLI_HELP_TOPIC_KEY}\":null}} for the list of groups or {{\"{CLI_HELP_TOPIC_KEY}\":\"{CLI_GROUP_MAIL}\"}} for one group; got: {}",
             preview(&String::from_utf8_lossy(body))
         ),
+        args: None,
     }
 }
 
@@ -543,7 +546,7 @@ mod tests {
                 .as_str()
                 .unwrap_or_else(|| panic!("성공 봉투에 화면 문자열이 있어야({word:?}): {v}"))
                 .to_string(),
-            ControlQueryResult::Error { code, hint } => {
+            ControlQueryResult::Error { code, hint, .. } => {
                 panic!("화면이어야({word:?}): {code} {hint}")
             }
         }
@@ -551,7 +554,7 @@ mod tests {
 
     fn rejection_of(source: &HelpSource, body: &[u8]) -> (&'static str, String) {
         match source.answer(body) {
-            ControlQueryResult::Error { code, hint } => (code, hint),
+            ControlQueryResult::Error { code, hint, .. } => (code, hint),
             ControlQueryResult::Ok(v) => panic!("반려여야: {v}"),
         }
     }
@@ -988,7 +991,7 @@ mod tests {
             String::new(),
         ] {
             match parse_request(body.as_bytes()) {
-                Err(ControlQueryResult::Error { code, hint }) => {
+                Err(ControlQueryResult::Error { code, hint, .. }) => {
                     assert_eq!(code, invalid, "{body:?}: {hint}");
                     assert!(
                         hint.contains(CLI_HELP_TOPIC_KEY),
@@ -1026,7 +1029,7 @@ mod tests {
             r#"{"topic":"mail","topic":"mail"}"#,
         ] {
             match parse_request(body.as_bytes()) {
-                Err(ControlQueryResult::Error { code, hint }) => {
+                Err(ControlQueryResult::Error { code, hint, .. }) => {
                     assert_eq!(code, ErrorCode::InvalidArgument.as_str(), "{body}: {hint}");
                     assert!(
                         hint.contains("duplicate field") && hint.contains(CLI_HELP_TOPIC_KEY),

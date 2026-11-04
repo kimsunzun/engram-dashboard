@@ -453,6 +453,31 @@ fn engram_agent_rejections_from_the_daemon_exit_one_with_the_body_intact() {
     assert_eq!(v["code"], "AGENT_NOT_FOUND", "{stdout}");
 }
 
+/// A refusal that carries the code's `args` is still a refusal (exit 1), and the CLI prints the arguments
+/// as received — on the group verb and on the full-name surface alike.
+#[test]
+fn rejections_carrying_args_exit_one_and_print_the_args() {
+    const BODY: &str = r#"{"status":"error","code":"CONFLICT","hint":"launch blocked","args":{"reasons":[{"code":"missing","item":"a/b"}]}}"#;
+    let want: serde_json::Value = serde_json::from_str(BODY).expect("body json");
+
+    let (host, port, stub) = spawn_capturing_stub(ok_response(BODY));
+    let url = format!("http://{host}:{port}");
+    let (stdout, code) = run_cli(&url, &["agent", "spawn", "w"], None);
+    let _ = stub.join().expect("stub join");
+    assert_eq!(code, 1, "refusal → exit 1: {stdout}");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout json");
+    assert_eq!(v, want, "{stdout}");
+
+    let (host, port, stub) = spawn_scripted_stub(vec![sample_catalog(), ok_response(BODY)]);
+    let url = format!("http://{host}:{port}");
+    let (stdout, code) = run_cli(&url, &["tab.create", "--title", "x"], None);
+    let requests = stub.join().expect("stub join");
+    assert_eq!(code, 1, "refusal → exit 1: {stdout}");
+    assert_eq!(requests.len(), 2, "the call went out: {requests:?}");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout json");
+    assert_eq!(v, want, "{stdout}");
+}
+
 /// ★변경의 증거가 없는 2xx 는 성공이 아니다★: 우편 조회 판정기를 그대로 썼을 땐 `{}` 도 exit 0 이라,
 ///   아무것도 만들지 않은 응답을 받고도 호출자가 만들어졌다고 믿었다. 재시도 대상(1)이 아니라 보고
 ///   대상(2)이라는 것까지 프로세스 레벨로 못박는다.

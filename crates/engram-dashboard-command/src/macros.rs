@@ -43,6 +43,13 @@
 /// | `Option<T>`·`Option<Vec<T>>` | 값 또는 `null` | 가능(optional) |
 /// | `Option<Option<T>>` | 값 또는 `null` — ★**부재·`null`·값 셋을 가른다**★ | **불가**(required) |
 /// | 이 블록에서 선언한 struct/enum | 인라인으로 펼쳐진 객체 / 문자열 열거 | **불가**(required) |
+/// | `Json` | any JSON value (`serde_json::Value` · schema `{}` · TS `unknown`) | **no**(required) |
+///
+/// `Json` is a free-form slot for a payload whose keys the declaration does not fix (e.g. a notice row's
+/// `args`, whose keys depend on its `code`). Write it bare only — `Option<Json>` / `Vec<Json>` are outside the
+/// alphabet and fail to compile (`cannot find type Json`). `Json` is a reserved word of the alphabet: a block
+/// that declares a struct/enum by that name fails with `compile_error!` (checked by hand — this crate has no
+/// compile-fail harness).
 ///
 /// ## 에이전트 참조 칸 — `#[agent_ref]` (ADR-0308)
 ///
@@ -109,6 +116,14 @@ macro_rules! declare_commands {
 #[macro_export]
 macro_rules! __engram_declare {
     // ── 1단계: 블록 안 타입 선언을 먼저 모은다(사전을 찍으려면 전량이 있어야 한다) ──────────────
+    // `Json` is the alphabet's word: a block type by that name would win the schema dictionary while the
+    //   struct arms still emit `serde_json::Value`, so the schema and the Rust/TS type would disagree (ADR-0156).
+    (@types [$($seen:tt)*] $(#[doc = $doc:literal])* struct Json $($rest:tt)*) => {
+        compile_error!("declare_commands!: `Json` is the alphabet's free-form JSON type — declare the struct under another name.");
+    };
+    (@types [$($seen:tt)*] $(#[doc = $doc:literal])* enum Json $($rest:tt)*) => {
+        compile_error!("declare_commands!: `Json` is the alphabet's free-form JSON type — declare the enum under another name.");
+    };
     (@types [$($seen:tt)*] $(#[doc = $doc:literal])* struct $name:ident { $($fields:tt)* } $($rest:tt)*) => {
         $crate::__engram_declare!(@types [$($seen)* (struct $name [$($fields)*] [$($doc)*])] $($rest)*);
     };
@@ -163,11 +178,12 @@ macro_rules! __engram_declare {
             };
             ($d:tt f32) => { "{\"type\":\"number\"}" };
             ($d:tt f64) => { "{\"type\":\"number\"}" };
+            ($d:tt Json) => { "{}" };
             ($d:tt $other:ident) => {
                 compile_error!(concat!(
-                    "declare_commands!: 허용 타입 밖의 필드 타입 `", stringify!($other),
-                    "` — String·bool·정수·실수·Option<T>·Vec<T>·Option<Option<T>>·",
-                    "이 블록에서 선언한 struct/enum 만 쓴다."
+                    "declare_commands!: field type `", stringify!($other),
+                    "` is outside the alphabet — use String, bool, integers, floats, Json, Option<T>, Vec<T>, ",
+                    "Option<Option<T>>, or a struct/enum declared in this block."
                 ))
             };
         }
@@ -231,6 +247,14 @@ macro_rules! __engram_declare {
         $(#[doc = $fdoc:literal])* $field:ident : Vec < $ty:ident > , $($rest:tt)*) => {
         $crate::__engram_declare!(@struct_def $name [$($doc)*]
             [$($out)* $(#[doc = $fdoc])* pub $field : Vec<$ty>,] $($rest)*);
+    };
+    // ts-rs has no impl for `serde_json::Value` without a feature the declaring crates do not enable, so the TS
+    //   type is spelled out. No `serde(default)`: the field is required, as its schema advertises.
+    (@struct_def $name:ident [$($doc:literal)*] [$($out:tt)*]
+        $(#[doc = $fdoc:literal])* $field:ident : Json , $($rest:tt)*) => {
+        $crate::__engram_declare!(@struct_def $name [$($doc)*]
+            [$($out)* $(#[doc = $fdoc])* #[ts(type = "unknown")]
+             pub $field : $crate::serde_json::Value,] $($rest)*);
     };
     (@struct_def $name:ident [$($doc:literal)*] [$($out:tt)*]
         $(#[doc = $fdoc:literal])* $field:ident : $ty:ident , $($rest:tt)*) => {

@@ -23,6 +23,12 @@ declare_commands! {
         Slow,
     }
 
+    /// An answer row with a free-form payload — the shape a notice row (`code` + its `args`) takes.
+    struct Note {
+        code: String,
+        args: Json,
+    }
+
     /// 알파벳 전량.
     #[effect(Write)]
     #[since(3)]
@@ -41,6 +47,7 @@ declare_commands! {
         mode: Mode,
     } -> ok AlphabetOk {
         echoed: String,
+        notes: Vec<Note>,
     } errors [INVALID_ARGUMENT, UNSUPPORTED];
 
     /// 에이전트 참조 표시(ADR-0308) — 표시한 칸 이름만 `agent_args` 로 나가고 스키마 · 타입은 그대로다.
@@ -165,6 +172,47 @@ fn absent_option_fields_are_none() {
     let parsed: AlphabetArgs = serde_json::from_value(value).expect("역직렬화");
     assert!(parsed.maybe.is_none());
     assert!(parsed.maybe_many.is_none());
+}
+
+// ── Free-form JSON field (`Json`) ───────────────────────────────────────────────────────
+
+/// `Json` advertises "any value" and stays required — the schema must not promise an omission that
+/// deserialization then refuses.
+#[test]
+fn a_json_field_advertises_any_value_and_stays_required() {
+    let schema: serde_json::Value =
+        serde_json::from_str(AlphabetArgs::SPEC.ok_schema).expect("ok schema is JSON");
+    let row = &schema["properties"]["notes"]["items"];
+    assert_eq!(row["properties"]["args"], serde_json::json!({}));
+    assert_eq!(row["required"], serde_json::json!(["code", "args"]));
+    engram_dashboard_command::lint_spec(&AlphabetArgs::SPEC).expect("lint");
+
+    let missing = serde_json::json!({"echoed": "x", "notes": [{"code": "c"}]});
+    assert!(serde_json::from_value::<AlphabetOk>(missing).is_err());
+}
+
+/// The payload goes out and comes back as given — nested objects and arrays included.
+#[test]
+fn a_json_field_round_trips_its_payload_verbatim() {
+    let value = serde_json::json!({
+        "echoed": "x",
+        "notes": [
+            {"code": "unsupported-line", "args": {"item": "a/b", "line": 3, "names": ["k", "v"]}},
+            {"code": "empty", "args": {}}
+        ]
+    });
+    let parsed: AlphabetOk = serde_json::from_value(value.clone()).expect("deserialize");
+    assert_eq!(parsed.notes[0].args["names"][1], "v");
+    assert_eq!(serde_json::to_value(&parsed).expect("serialize"), value);
+}
+
+/// The TS binding names the payload `unknown` — the reader narrows it by `code`.
+#[test]
+fn a_json_field_is_unknown_in_typescript() {
+    use ts_rs::TS as _;
+
+    let decl = Note::decl();
+    assert!(decl.contains("args: unknown"), "{decl}");
 }
 
 #[test]

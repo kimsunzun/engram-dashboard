@@ -189,6 +189,7 @@ fn refused(e: CommandError) -> ControlQueryResult {
     ControlQueryResult::Error {
         code: e.code().as_str(),
         hint,
+        args: e.args().cloned(),
     }
 }
 
@@ -225,6 +226,7 @@ fn unknown_verb(verb: &str) -> ControlQueryResult {
             "unknown verb '{verb}' — {}.",
             recovery_for(ErrorCode::UnknownCommand)
         ),
+        args: None,
     }
 }
 
@@ -294,6 +296,7 @@ pub fn malformed_body(reason: &str, raw: &str) -> ControlQueryResult {
             preview(raw),
             recovery_for(ErrorCode::InvalidArgument)
         ),
+        args: None,
     }
 }
 
@@ -309,7 +312,7 @@ mod tests {
 
     fn error_of(result: ControlQueryResult) -> (&'static str, String) {
         match result {
-            ControlQueryResult::Error { code, hint } => (code, hint),
+            ControlQueryResult::Error { code, hint, .. } => (code, hint),
             other => panic!("반려여야: {other:?}"),
         }
     }
@@ -408,6 +411,26 @@ mod tests {
                 "칠 수 있는 명령이 없다: {hint}"
             );
         }
+    }
+
+    /// The code's arguments ride to the `engram agent …` body untouched; the hint keeps its recovery line.
+    #[test]
+    fn a_rejection_carries_the_codes_args_next_to_the_hint() {
+        let args = serde_json::json!({"reasons": [{"code": "missing", "item": "a/b"}]});
+        let body = refused(
+            CommandError::of(ErrorCode::Conflict, "launch blocked")
+                .with_args(args.as_object().expect("object").clone()),
+        )
+        .into_json();
+
+        assert_eq!(body["code"], "CONFLICT");
+        assert_eq!(body["args"], args);
+        assert!(
+            body["hint"]
+                .as_str()
+                .is_some_and(|hint| hint.contains(&format!("`{CLI_EXE_NAME} "))),
+            "{body}"
+        );
     }
 
     /// ★입력 임대 거절은 명부 안내를 안 단다★ — `CONFLICT` 지만 대상을 잘못 고른 것이 아니라서, 명부를

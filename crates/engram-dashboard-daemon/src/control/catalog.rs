@@ -286,6 +286,7 @@ fn caller_request_id(raw: &str) -> Result<RequestId, ControlQueryResult> {
                 "'{CALLER_REQUEST_ID_FIELD}' must be a UUID — hyphenated (8-4-4-4-12), 32 hex digits with no dashes, braced, or urn:uuid: form — so a retry can reuse it; got: {}",
                 preview(raw)
             ),
+            args: None,
         }
     })
 }
@@ -400,6 +401,7 @@ fn refused(e: CommandError) -> ControlQueryResult {
     ControlQueryResult::Error {
         code: e.code().as_str(),
         hint,
+        args: e.args().cloned(),
     }
 }
 
@@ -442,6 +444,7 @@ fn unknown_name(name: &str) -> ControlQueryResult {
             "unknown command '{}' — neither this daemon nor any connected client declares that name; {CATALOG_RECOVERY}.",
             preview(name)
         ),
+        args: None,
     }
 }
 
@@ -460,6 +463,7 @@ pub fn malformed_body(reason: &str, raw: &str) -> ControlQueryResult {
             "the request body is not a valid command call: {reason} — it must be a JSON object like {{\"name\":\"agent.list\",\"args\":{{}}}}; got: {}",
             preview(raw)
         ),
+        args: None,
     }
 }
 
@@ -653,7 +657,7 @@ mod tests {
                 ..CallRequest::default()
             };
             match handle_call(&table, &registered, req) {
-                CallOutcome::Answered(ControlQueryResult::Error { code, hint }) => {
+                CallOutcome::Answered(ControlQueryResult::Error { code, hint, .. }) => {
                     assert_eq!(code, "INVALID_ARGUMENT", "{hint}");
                     assert!(
                         hint.contains(CALLER_REQUEST_ID_FIELD),
@@ -724,7 +728,7 @@ mod tests {
             &Registered("tab.create"),
             call_of("tab.create"),
         ) {
-            CallOutcome::Answered(ControlQueryResult::Error { code, hint }) => {
+            CallOutcome::Answered(ControlQueryResult::Error { code, hint, .. }) => {
                 assert_eq!(code, "INTERNAL", "{hint}");
                 assert!(hint.contains("tab.create"), "어느 이름인지 말해야: {hint}");
             }
@@ -835,7 +839,7 @@ mod tests {
         }
 
         match handle_call(&table, &registered, call_of("nope.nope")) {
-            CallOutcome::Answered(ControlQueryResult::Error { code, hint }) => {
+            CallOutcome::Answered(ControlQueryResult::Error { code, hint, .. }) => {
                 assert_eq!(code, "UNKNOWN_COMMAND");
                 assert!(hint.contains("nope.nope"), "{hint}");
                 assert!(hint.contains(CATALOG_RECOVERY), "{hint}");
@@ -861,7 +865,7 @@ mod tests {
             CommandError::invalid_argument("no such window 'ghost'"),
         ));
         match failed {
-            ControlQueryResult::Error { code, hint } => {
+            ControlQueryResult::Error { code, hint, .. } => {
                 assert_eq!(code, "INVALID_ARGUMENT");
                 assert!(hint.contains("ghost"), "{hint}");
                 assert!(
@@ -870,6 +874,89 @@ mod tests {
                 );
             }
             other => panic!("반려여야: {other:?}"),
+        }
+    }
+
+    /// The code's arguments reach the caller's body — from this daemon's own table and from an owner whose
+    /// reply crossed the wire (decoded, not handed over in memory).
+    #[test]
+    fn a_refusal_carries_the_codes_args_from_the_table_and_across_a_relay() {
+        let args = serde_json::json!({"reasons": [{"code": "missing", "item": "a/b"}]});
+        let error = CommandError::of(ErrorCode::Conflict, "launch blocked")
+            .with_args(args.as_object().expect("object").clone());
+        let want = serde_json::json!({
+            "status": "error",
+            "code": "CONFLICT",
+            "hint": "launch blocked",
+            "args": args,
+        });
+
+        match handle_call(
+            &Refuses("agent.spawn", error.clone()),
+            &Registered("tab.create"),
+            call_of("agent.spawn"),
+        ) {
+            CallOutcome::Answered(result) => assert_eq!(result.into_json(), want),
+            other => panic!("the table's own name is answered here: {other:?}"),
+        }
+
+        let id = RequestId::new();
+        let wire = serde_json::to_string(&CommandReply::err(id, error)).expect("serialize");
+        let decoded: CommandReply = serde_json::from_str(&wire).expect("decode");
+        assert_eq!(relayed(decoded).into_json(), want);
+    }
+
+    /// No `args` key in the body when there is nothing to carry: an empty map written by the table, or the
+    /// arguments of an owner code this daemon downgrades to `INTERNAL` (they stay with the relay copy).
+    #[test]
+    fn a_refusal_body_has_no_args_for_empty_or_foreign_arguments() {
+        let empty = CommandError::not_found("no agent").with_args(serde_json::Map::new());
+        match handle_call(
+            &Refuses("agent.spawn", empty),
+            &Registered("tab.create"),
+            call_of("agent.spawn"),
+        ) {
+            CallOutcome::Answered(result) => assert_eq!(
+                result.into_json(),
+                serde_json::json!({"status": "error", "code": "NOT_FOUND", "hint": "no agent"})
+            ),
+            other => panic!("the table's own name is answered here: {other:?}"),
+        }
+
+        let id = RequestId::new();
+        let foreign: CommandReply = serde_json::from_str(&format!(
+            r#"{{"request_id":"{id}","outcome":{{"Err":{{"code":"FROM_THE_FUTURE","message":"x","retry":"never","args":{{"k":1}}}}}}}}"#
+        ))
+        .expect("decode");
+        let body = relayed(foreign).into_json();
+        assert_eq!(body["code"], "INTERNAL", "{body}");
+        assert!(body.get("args").is_none(), "{body}");
+    }
+
+    /// A table that owns one name and refuses every call to it with the given error.
+    struct Refuses(&'static str, CommandError);
+
+    impl LocalCommands for Refuses {
+        fn claim(&self, name: &str) -> Option<Effect> {
+            (name == self.0).then_some(Effect::Write)
+        }
+
+        fn run(
+            &self,
+            name: &str,
+            _args: &mut serde_json::Value,
+            _entrance: &'static str,
+            _caller: Option<ConnId>,
+        ) -> Option<Result<serde_json::Value, CommandError>> {
+            (name == self.0).then(|| Err(self.1.clone()))
+        }
+
+        fn decls(&self) -> Vec<CommandDecl> {
+            vec![decl(self.0, "{}")]
+        }
+
+        fn agent_roster(&self) -> Vec<engram_dashboard_agent::commands::AgentRosterRow> {
+            Vec::new()
         }
     }
 
@@ -885,6 +972,7 @@ mod tests {
                 ControlQueryResult::Error {
                     code,
                     hint: unfixable,
+                    ..
                 },
             ) => {
                 assert!(fixable.contains(CATALOG_RECOVERY), "{fixable}");
@@ -924,7 +1012,7 @@ mod tests {
         ];
         for branch in branches {
             match branch {
-                ControlQueryResult::Error { code, hint } => {
+                ControlQueryResult::Error { code, hint, .. } => {
                     assert!(
                         hint.contains("truncated"),
                         "잘랐다고 말한다({code}): {hint}"

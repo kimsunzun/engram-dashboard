@@ -127,31 +127,46 @@ impl fmt::Display for RetryMode {
 
 /// 실패 하나 — 코드(기계) + 문구(사람) + 재시도 지시.
 ///
-/// ★`message` 로 기계 분기하지 말 것★: 분기 재료는 `code` 하나다. 지금 CLI 가 하는 문자열 패턴매칭이
-/// 이 계약이 없어서 생긴 것이고, 그 취약함을 여기서 끝낸다(TRD §4-⑦).
-/// wire 형태 = `{"code":"NOT_FOUND","message":"…","retry":"never"}`.
+/// ★Never branch on `message`★: the material to branch on is `code` (with its `args`). The string pattern
+/// matching the CLI does today grew out of the absence of this contract, and this type ends that fragility
+/// (TRD §4-⑦).
+/// Wire shape = `{"code":"NOT_FOUND","message":"…","retry":"never"}`, plus `"args":{…}` when the error carries
+/// arguments. Without arguments the key is absent, so such an error is byte-identical to the three-field shape.
 ///
-/// ★동등성은 **뜻**이 정한다 — 세 칸뿐이다★: 아래 `received` 는 중계용 사본이라 비교에 끼지 않는다.
-/// 끼면 「미지 코드를 낮춰 읽은 값」과 「같은 뜻으로 직접 만든 값」이 다르다고 나와, 계약(TRD §4-⑦ 의
-/// 평평한 세 칸)이 말하는 같음과 코드가 말하는 같음이 갈린다.
+/// ★Equality is **meaning** — the typed fields `code`, `message`, `retry` and `args`★: the `received` copy
+/// below is relay residue and takes no part. If it did, a value read by downgrading an unknown code and a value
+/// built with the same meaning would compare unequal, and the sameness the contract states (TRD §4-⑦) would
+/// split from the sameness the code states. `args` takes part because it is meaning: the human wording is
+/// rebuilt from code + args (TRD S25 §1-8).
 ///
-/// ★세 칸은 비공개다 — 쓰기는 setter 로만 한다★: 원문 사본을 쥔 값에 칸을 직접 갈아 끼우면 재직렬화가
-/// 그 원문을 내보내 **쓴 값이 조용히 무시된다**(중계 홉이 위험한 재시도를 끊으려고 `retry` 를 내려도
-/// 다음 홉은 원문 지시를 그대로 읽는다 — TRD §4-④·§4-⑦). setter 는 그 경로를 없앤다:
-/// **쓴 값은 언제나 그대로 나간다.**
+/// ★The typed fields are private — write them only through the setters and `with_args`★: swapping a
+/// field directly on a value that holds a received copy would let re-serialization send that original, so
+/// **the written value would be silently ignored** (a relay hop lowering `retry` to stop a dangerous retry
+/// would still have the next hop read the original instruction — TRD §4-④ · §4-⑦). The setters close that
+/// path: **a written value always goes out as written.**
 #[derive(Debug, Clone)]
 pub struct CommandError {
     code: ErrorCode,
     message: String,
     retry: RetryMode,
-    /// 받은 원문 중 **타입드 세 칸이 못 나르는 것**만. 직접 만든 오류는 `None` 이다.
+    /// The code's arguments — structured material a reader rebuilds the wording from (`{code, args}`,
+    /// TRD S25 §1-8). `None` = the error carries none, and the key is then absent on the wire.
+    /// Only a non-empty JSON object sits here. A received `null` or `{}` folds into absence, the same way the
+    /// typed fields fold `null` — both say "no arguments".
+    /// What is not ours to read stays an out-of-contract field in `received` and goes out verbatim: an `args`
+    /// of any other shape, and **any** `args` next to a code this side does not know (absent, `null` or
+    /// unknown). Those arguments belong to a code we downgrade to `INTERNAL`; typing them would pair foreign
+    /// keys with our `INTERNAL`.
+    args: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Only what the **typed fields cannot carry** out of the received original. `None` for an error built here.
     ///
     /// ★수용이 파괴여선 안 된다★: 미지 코드를 `INTERNAL` 로 낮춰 읽는 것(§4-⑦)과 그것을 **다시 내보낼 때
     ///   원문을 지우는 것**은 다른 일이다. 중계 홉이 낮춘 값으로 재직렬화하면 최종 호출자는 주인이 보낸
     ///   코드를 영영 못 본다. 같은 이유로 계약 밖 필드도 그대로 들고 간다.
-    ///   ★단 `null` 과 부재는 **함께** 정규화된다★ — 세 칸 중 하나가 `null` 로 실려 오면 부재로 읽고
-    ///   나갈 때도 싣지 않는다(둘 다 「값 없음」이라 다시 디코드하면 같은 값이 나온다). 계약 밖 필드는
-    ///   그 정규화를 받지 않고 `null` 인 채로 실려 나간다 — 뜻을 모르는 칸이라 접을 근거가 없다.
+    ///   ★But `null` and absence are normalized **together**★ — when a typed field (`code`, `message`,
+    ///   `retry`, or `args` next to a known code) arrives as `null`, it is read as absent and not sent on
+    ///   (both mean "no value", so decoding again gives the same value). Out-of-contract fields do not get
+    ///   that normalization and go out as `null` — we do not know their meaning, so there is no ground to fold.
     /// 이 칸이 비공개라 구조체 리터럴로는 못 만든다 — 생성자를 쓴다.
     received: Option<Box<ReceivedError>>,
 }
@@ -165,7 +180,8 @@ enum ReceivedCode {
     Unknown(String),
 }
 
-/// 디코드가 붙잡아 두는 원문 조각 — [`CommandError`] 의 세 칸으로 복원할 수 없는 것만 담는다.
+/// The piece of the original a decode holds on to — only what the typed fields of [`CommandError`] cannot
+/// restore.
 #[derive(Debug, Clone)]
 struct ReceivedError {
     /// 아는 코드였으면 `None`(타입드 칸이 그대로 나른다). 두 예외는 [`ReceivedCode`].
@@ -180,7 +196,10 @@ struct ReceivedError {
 
 impl PartialEq for CommandError {
     fn eq(&self, other: &Self) -> bool {
-        self.code == other.code && self.message == other.message && self.retry == other.retry
+        self.code == other.code
+            && self.message == other.message
+            && self.retry == other.retry
+            && self.args == other.args
     }
 }
 
@@ -193,6 +212,7 @@ impl CommandError {
             code,
             message: message.into(),
             retry: code.default_retry(),
+            args: None,
             received: None,
         }
     }
@@ -203,6 +223,7 @@ impl CommandError {
             code,
             message: message.into(),
             retry,
+            args: None,
             received: None,
         }
     }
@@ -219,14 +240,39 @@ impl CommandError {
         self.retry
     }
 
-    /// 코드를 갈아 끼운다 — **원문 사본을 버린다.**
+    /// The code's arguments, if any. Their keys are defined per code, so read them together with
+    /// [`CommandError::code`].
+    pub fn args(&self) -> Option<&serde_json::Map<String, serde_json::Value>> {
+        self.args.as_ref()
+    }
+
+    /// Attaches the code's arguments, replacing any already carried. An empty map means "no arguments" and
+    /// leaves the key off the wire. Meant for errors whose code this side knows: on a received error whose
+    /// code was downgraded to `INTERNAL`, it would pair the written keys with `INTERNAL` and drop the owner's
+    /// `args` that were travelling verbatim.
     ///
-    /// ★버리는 것이 요점이다★: 사본을 든 채로 코드만 바꾸면 미지 코드를 받은 값에서 재직렬화가 원문을
-    /// 내보내 쓴 값이 무시된다. 함께 버려지는 것은 계약 밖 필드와 받은 `retry` 원문인데, 둘 다 **바뀌기
-    /// 전 코드의 부속**이라 새 코드 옆에 두면 서로 어긋난다.
-    /// 중계만 할 값이면 부르지 말 것 — 그대로 두어야 원문이 최종 호출자까지 간다.
+    /// Keeps the received copy, like [`CommandError::set_message`]: `args` always serializes from the typed
+    /// field, so no original can shadow the written value. An `args` held as an out-of-contract field in the
+    /// copy is dropped — otherwise the key would go out twice, or the written "none" would be overridden.
+    pub fn with_args(mut self, args: serde_json::Map<String, serde_json::Value>) -> Self {
+        if let Some(received) = self.received.as_deref_mut() {
+            received.extra.remove(ARGS_FIELD);
+        }
+        self.args = (!args.is_empty()).then_some(args);
+        self
+    }
+
+    /// Replaces the code — **drops the received copy and the arguments.**
+    ///
+    /// ★Dropping is the point★: keeping the copy while changing only the code would let re-serialization of a
+    /// value received with an unknown code send the original, silently ignoring the written code. What goes with
+    /// it — out-of-contract fields, the received `retry` text and `args` — all **belong to the old code**, and
+    /// next to a new code they contradict it (`args` keys are defined per code). Attach arguments for the new
+    /// code with [`CommandError::with_args`] afterwards.
+    /// Do not call this on a value you only relay — leave it as is so the original reaches the final caller.
     pub fn set_code(&mut self, code: ErrorCode) {
         self.code = code;
+        self.args = None;
         self.received = None;
     }
 
@@ -312,11 +358,16 @@ impl fmt::Display for CommandError {
 
 impl std::error::Error for CommandError {}
 
+/// Wire name of [`CommandError::args`] — the decoder pulls it out of the out-of-contract fields by this name.
+const ARGS_FIELD: &str = "args";
+
 #[derive(serde::Serialize)]
 struct WireError<'a> {
     code: &'a str,
     message: &'a str,
     retry: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    args: Option<&'a serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -341,6 +392,7 @@ impl serde::Serialize for CommandError {
                 code: self.code.as_str(),
                 message: &self.message,
                 retry: self.retry.as_str(),
+                args: self.args.as_ref(),
             }
             .serialize(s);
         };
@@ -355,6 +407,9 @@ impl serde::Serialize for CommandError {
         if let Some(retry) = &received.retry {
             map.serialize_entry("retry", retry)?;
         }
+        if let Some(args) = &self.args {
+            map.serialize_entry(ARGS_FIELD, args)?;
+        }
         for (key, value) in &received.extra {
             map.serialize_entry(key, value)?;
         }
@@ -364,8 +419,17 @@ impl serde::Serialize for CommandError {
 
 impl<'de> serde::Deserialize<'de> for CommandError {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let raw = RawError::deserialize(d)?;
+        let mut raw = RawError::deserialize(d)?;
         let known_code = raw.code.as_deref().and_then(ErrorCode::from_wire);
+        // Which `args` is typed, folded or kept verbatim: see the `args` field.
+        let args = match known_code.and_then(|_| raw.extra.remove(ARGS_FIELD)) {
+            Some(serde_json::Value::Object(args)) if !args.is_empty() => Some(args),
+            Some(serde_json::Value::Object(_)) | Some(serde_json::Value::Null) | None => None,
+            Some(other) => {
+                raw.extra.insert(ARGS_FIELD.to_string(), other);
+                None
+            }
+        };
         let known_retry = raw.retry.as_deref().and_then(RetryMode::from_wire);
         // 낮춘 해석: 모르는 코드는 INTERNAL + never(§4-⑦), 모르는 지시는 코드의 파생값.
         //   코드가 **없는** 것도 같은 자리로 접는다 — 아는 코드가 아니면 뜻을 모르는 것은 매한가지다.
@@ -374,8 +438,8 @@ impl<'de> serde::Deserialize<'de> for CommandError {
             Some(_) => known_retry.unwrap_or_else(|| code.default_retry()),
             None => RetryMode::Never,
         };
-        // 세 칸이 받은 것을 그대로 복원할 수 있으면 사본을 안 든다 — 들 이유가 없을 때 들면 위 doc 의
-        //   「손으로 갈아 끼우지 말 것」이 흔한 값에까지 번진다.
+        // If the typed fields restore what was received exactly, hold no copy — holding one without a reason
+        //   would spread the doc's "do not swap fields by hand" warning to the common value.
         let expressible = known_code.is_some()
             && known_retry.is_some()
             && raw.message.is_some()
@@ -396,6 +460,7 @@ impl<'de> serde::Deserialize<'de> for CommandError {
             code,
             message: raw.message.unwrap_or_default(),
             retry,
+            args,
             received,
         })
     }
@@ -646,10 +711,11 @@ mod tests {
         assert_eq!(serde_json::to_string(&decoded).expect("재직렬화"), wire);
     }
 
-    /// ★같음은 세 칸이 정한다★ — 낮춰 읽은 값과 같은 뜻으로 만든 값이 다르다고 나오면 계약(§4-⑦)과
-    /// 코드가 서로 다른 같음을 말하게 된다.
+    /// ★Sameness is the typed fields★ — if a downgraded value and a value built with the same meaning
+    /// compared unequal, the contract (§4-⑦) and the code would state different sameness. `args` is meaning,
+    /// so two errors that differ only there are different errors.
     #[test]
-    fn equality_is_the_three_contract_fields_not_the_relay_copy() {
+    fn equality_is_the_typed_fields_not_the_relay_copy() {
         let downgraded: CommandError =
             serde_json::from_str(r#"{"code":"FROM_THE_FUTURE","message":"x","retry":"whenever"}"#)
                 .expect("디코드");
@@ -666,5 +732,179 @@ mod tests {
             serde_json::from_str(r#"{"code":"NOT_FOUND","message":"y","retry":"never"}"#)
                 .expect("디코드");
         assert_ne!(other_message, CommandError::not_found("x"));
+
+        let with = |v| CommandError::not_found("x").with_args(object(v));
+        assert_eq!(
+            with(serde_json::json!({"k": 1})),
+            with(serde_json::json!({"k": 1}))
+        );
+        assert_ne!(
+            with(serde_json::json!({"k": 1})),
+            with(serde_json::json!({"k": 2}))
+        );
+        assert_ne!(
+            with(serde_json::json!({"k": 1})),
+            CommandError::not_found("x")
+        );
+    }
+
+    fn object(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        match value {
+            serde_json::Value::Object(map) => map,
+            other => panic!("an object literal: {other}"),
+        }
+    }
+
+    /// `args` rides after the three fields and decodes back into the typed slot — no relay copy for it.
+    #[test]
+    fn args_round_trip_through_wire_as_a_typed_field() {
+        let e = CommandError::of(ErrorCode::Conflict, "blocked").with_args(object(
+            serde_json::json!({"reasons": [{"code": "missing", "item": "a/b"}]}),
+        ));
+        let text = serde_json::to_string(&e).expect("serialize");
+        assert_eq!(
+            text,
+            r#"{"code":"CONFLICT","message":"blocked","retry":"never","args":{"reasons":[{"code":"missing","item":"a/b"}]}}"#
+        );
+
+        let decoded: CommandError = serde_json::from_str(&text).expect("decode");
+        assert_eq!(decoded, e);
+        assert_eq!(decoded.args(), e.args());
+        assert!(
+            decoded.received.is_none(),
+            "an object `args` is expressible by the typed fields"
+        );
+    }
+
+    /// ★Accepting must not destroy★ — `args` next to an unknown code and an extra field reaches the next hop
+    /// as received, also after a relay hop lowers the retry instruction. It is not typed: those keys belong
+    /// to a code this side downgrades to `INTERNAL`.
+    #[test]
+    fn args_survive_a_relay_hop_next_to_an_unknown_code_and_extras() {
+        let wire = r#"{"code":"FROM_THE_FUTURE","message":"x","retry":"whenever","args":{"k":1},"details":true}"#;
+        let mut decoded: CommandError = serde_json::from_str(wire).expect("decode");
+
+        assert_eq!(decoded.args(), None);
+        assert_eq!(serde_json::to_string(&decoded).expect("re-serialize"), wire);
+
+        decoded.set_retry_for_relay(RetryMode::Never);
+        assert_eq!(
+            serde_json::to_string(&decoded).expect("re-serialize"),
+            r#"{"code":"FROM_THE_FUTURE","message":"x","retry":"never","args":{"k":1},"details":true}"#
+        );
+    }
+
+    /// A downgraded code — unknown, absent or `null` — never pairs `INTERNAL` with the foreign code's
+    /// arguments, and the arguments still travel verbatim.
+    #[test]
+    fn a_downgraded_code_leaves_its_args_untyped() {
+        for wire in [
+            r#"{"code":"FROM_THE_FUTURE","message":"x","retry":"never","args":{"k":1}}"#,
+            r#"{"message":"x","retry":"never","args":{"k":1}}"#,
+            r#"{"code":null,"message":"x","retry":"never","args":{"k":1}}"#,
+        ] {
+            let decoded: CommandError = serde_json::from_str(wire).expect("decode");
+            assert_eq!(decoded.code(), ErrorCode::Internal, "{wire}");
+            assert_eq!(decoded.args(), None, "{wire}");
+            assert!(
+                serde_json::to_string(&decoded)
+                    .expect("re-serialize")
+                    .ends_with(r#""args":{"k":1}}"#),
+                "{wire}"
+            );
+        }
+    }
+
+    /// Typed `args` of a known code ride next to a relay copy (here: an unknown retry text) and its extras.
+    #[test]
+    fn typed_args_ride_with_a_relay_copy_and_its_extras() {
+        let wire =
+            r#"{"code":"TIMEOUT","message":"x","retry":"tomorrow","args":{"k":1},"details":true}"#;
+        let mut decoded: CommandError = serde_json::from_str(wire).expect("decode");
+
+        assert_eq!(decoded.args(), Some(&object(serde_json::json!({"k": 1}))));
+        assert_eq!(serde_json::to_string(&decoded).expect("re-serialize"), wire);
+
+        decoded.set_retry_for_relay(RetryMode::Never);
+        assert_eq!(
+            serde_json::to_string(&decoded).expect("re-serialize"),
+            r#"{"code":"TIMEOUT","message":"x","retry":"never","args":{"k":1},"details":true}"#
+        );
+    }
+
+    /// `{}` says "no arguments" like `null` does — on decode and when written — so the key stays off the wire.
+    #[test]
+    fn an_empty_args_object_folds_to_absence() {
+        let decoded: CommandError =
+            serde_json::from_str(r#"{"code":"NOT_FOUND","message":"x","retry":"never","args":{}}"#)
+                .expect("decode");
+        assert_eq!(decoded.args(), None);
+        assert!(decoded.received.is_none());
+        assert_eq!(decoded, CommandError::not_found("x"));
+
+        let written = CommandError::not_found("x").with_args(serde_json::Map::new());
+        assert_eq!(written.args(), None);
+        assert_eq!(
+            serde_json::to_string(&written).expect("serialize"),
+            r#"{"code":"NOT_FOUND","message":"x","retry":"never"}"#
+        );
+    }
+
+    /// An `args` that is not an object is not ours to read: it travels verbatim as an out-of-contract field,
+    /// and a hop that writes its own arguments replaces it instead of sending the key twice.
+    #[test]
+    fn a_non_object_args_travels_verbatim_and_a_written_one_replaces_it() {
+        let wire = r#"{"code":"NOT_FOUND","message":"x","retry":"never","args":[1,2]}"#;
+        let decoded: CommandError = serde_json::from_str(wire).expect("decode");
+
+        assert_eq!(decoded.args(), None);
+        assert_eq!(serde_json::to_string(&decoded).expect("re-serialize"), wire);
+
+        let rewritten = decoded.with_args(object(serde_json::json!({"k": 1})));
+        assert_eq!(
+            serde_json::to_string(&rewritten).expect("re-serialize"),
+            r#"{"code":"NOT_FOUND","message":"x","retry":"never","args":{"k":1}}"#
+        );
+    }
+
+    /// `null` folds into absence like the typed fields — decoding the folded form gives the same value back.
+    #[test]
+    fn an_explicit_null_args_is_canonicalized_to_absence() {
+        let decoded: CommandError = serde_json::from_str(
+            r#"{"code":"NOT_FOUND","message":"x","retry":"never","args":null}"#,
+        )
+        .expect("decode");
+
+        assert_eq!(decoded.args(), None);
+        assert!(decoded.received.is_none());
+        assert_eq!(
+            serde_json::to_string(&decoded).expect("re-serialize"),
+            r#"{"code":"NOT_FOUND","message":"x","retry":"never"}"#
+        );
+    }
+
+    /// `args` keys are defined per code, so a new code does not inherit the old code's arguments.
+    #[test]
+    fn changing_the_code_drops_its_args() {
+        let mut e = CommandError::of(ErrorCode::Conflict, "blocked")
+            .with_args(object(serde_json::json!({"k": 1})));
+        e.set_code(ErrorCode::Internal);
+
+        assert_eq!(e.args(), None);
+        assert_eq!(
+            serde_json::to_string(&e).expect("serialize"),
+            r#"{"code":"INTERNAL","message":"blocked","retry":"never"}"#
+        );
+    }
+
+    /// The other writers leave `args` alone — they do not change what the arguments belong to.
+    #[test]
+    fn writing_the_message_or_the_retry_keeps_the_args() {
+        let args = object(serde_json::json!({"k": 1}));
+        let mut e = CommandError::of(ErrorCode::Conflict, "blocked").with_args(args.clone());
+        e.set_message("blocked twice");
+        e.set_retry(RetryMode::AfterCondition);
+
+        assert_eq!(e.args(), Some(&args));
     }
 }

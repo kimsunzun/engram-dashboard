@@ -145,8 +145,10 @@ pub const ENTRANCE_CONTROL: &str = "control";
 /// ★재개 조건★ — dedup 저장소(완료분 재생 + TTL)가 서면 그때 이 함수를 걷고 코드에서 파생된 지시를
 /// 되살린다. 그전에 되살리면 「안전하다」는 거짓말이 된다.
 ///
-/// ★이 파일에서 오류를 짓는 길은 여기 하나뿐이다★ — 기계로 지키는 자리는
-/// `tests::this_module_can_only_build_do_not_retry_failures`.
+/// ★This is the only place in this file that builds an error★ — machine-checked by
+/// `tests::this_module_can_only_build_do_not_retry_failures`. `agent_ref_refusal` does not build one: it
+/// reshapes the resolver's own error and forces `Never` with `set_retry`, which the gate cannot see — its
+/// test pins the `Never`.
 // ADR-0159
 fn no_retry(code: ErrorCode, detail: impl Into<String>) -> CommandError {
     CommandError::with_retry(code, detail, RetryMode::Never)
@@ -1958,6 +1960,16 @@ pub async fn deliver(
     deliveries.release(request_id, token);
 }
 
+/// The resolver's refusal for one marked argument, as this round trip's answer: the message gains the
+/// `<arg>: ` head and the retry is `never` (like [`no_retry`]); the code and its `args` stay as resolved.
+// ADR-0308
+fn agent_ref_refusal(arg: &str, mut refused: CommandError) -> CommandError {
+    let message = format!("{arg}: {}", refused.message());
+    refused.set_message(message);
+    refused.set_retry(RetryMode::Never);
+    refused
+}
+
 /// 중계 전 에이전트 참조 변환(ADR-0308) — 주인이 등록 때 표시한 칸의 **문자열 값**을 이 데몬의 해석기
 /// ([`resolve_in`] — ADR-0132)로 에이전트 id 로 바꿔 봉투에 다시 적는다.
 ///
@@ -2016,10 +2028,7 @@ async fn resolve_agent_args(
         refs.into_iter()
             .map(|(arg, token)| match resolve_in(&agents, &token) {
                 Ok(agent) => Ok((arg, agent.id.to_string())),
-                Err(refused) => Err(no_retry(
-                    refused.code(),
-                    format!("{arg}: {}", refused.message()),
-                )),
+                Err(refused) => Err(agent_ref_refusal(&arg, refused)),
             })
             .collect::<Result<Vec<_>, CommandError>>()
     });
@@ -4363,6 +4372,27 @@ pub(crate) mod tests {
             "{}",
             err.message()
         );
+    }
+
+    /// A resolver refusal keeps its code and `args` (e.g. the candidates of an ambiguous name); only the
+    /// message head and the retry are this hop's.
+    #[test]
+    fn an_agent_ref_refusal_keeps_the_resolvers_code_and_args() {
+        let args = json!({"candidates": ["a-1", "a-2"]})
+            .as_object()
+            .expect("object")
+            .clone();
+        // Built via `no_retry` — this module's source gate allows one direct retry constructor.
+        let mut refused =
+            no_retry(ErrorCode::Conflict, "more than one agent").with_args(args.clone());
+        refused.set_retry(RetryMode::AfterCondition);
+
+        let answer = agent_ref_refusal("agent", refused);
+
+        assert_eq!(answer.code(), ErrorCode::Conflict);
+        assert_eq!(answer.message(), "agent: more than one agent");
+        assert_eq!(answer.retry(), RetryMode::Never);
+        assert_eq!(answer.args(), Some(&args));
     }
 
     /// ★칸은 표시 순서대로 푼다★ — 둘 다 안 풀리면 먼저 표시된 칸이 답이 된다(같은 요청에 같은 답).

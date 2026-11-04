@@ -429,28 +429,42 @@ pub fn handle_send(
 //   messaging state 하나이고 그 임계구역은 순수 자료구조 조작뿐이라(port 호출은 락 밖) 짧다 — async 워커를
 //   붙들지 않는다. `handle_send` 가 blocking 풀로 가는 이유(막힌 파이프)가 여기엔 성립하지 않는다.
 
-/// 조회 커맨드의 결과 — 발송(`ControlResult`)과 **에러 shape 이 동일**하다(`{status:"error", code, hint}`):
-/// 발신 LLM·CLI 가 성공/실패를 한 규칙으로 읽는다.
+/// The result of a query command — its **error shape matches the send entrance** (`ControlResult`):
+/// `{status:"error", code, hint}`, so the sending LLM / CLI reads success and failure by one rule. The one
+/// addition is an optional `args` (the code's arguments), which only refusals folded from a `CommandError`
+/// carry; a reader that ignores it still reads the shared shape.
 ///
 /// ★왜 발송과 다른 타입인가★: 발송 성공은 `{id, results[]}` 로 **shape 이 고정**돼 있지만(계약), 조회 성공은
 ///   동사마다 모양이 다르다. 억지로 한 enum 에 넣으면 variant 가 동사마다 늘어 계약이 흐려지므로, 성공
 ///   payload 는 만든 쪽이 통째로 싣고 **에러 축만** 공유한다.
-// Eq 가 아니라 PartialEq 인 것은 `serde_json::Value` 가 f64 를 담아 Eq 를 못 주기 때문이다.
+// PartialEq only: tests compare results; nothing needs `Eq` here.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ControlQueryResult {
     Ok(serde_json::Value),
-    Error { code: &'static str, hint: String },
+    Error {
+        code: &'static str,
+        hint: String,
+        /// The code's arguments (`CommandError::args`), carried as `"args"`. `None` leaves the key out, so a
+        /// refusal without arguments keeps the `{status, code, hint}` shape byte for byte.
+        args: Option<serde_json::Map<String, serde_json::Value>>,
+    },
 }
 
 impl ControlQueryResult {
     pub fn to_json(&self) -> serde_json::Value {
         match self {
             ControlQueryResult::Ok(v) => v.clone(),
-            ControlQueryResult::Error { code, hint } => serde_json::json!({
-                "status": "error",
-                "code": code,
-                "hint": hint,
-            }),
+            ControlQueryResult::Error { code, hint, args } => {
+                let mut body = serde_json::json!({
+                    "status": "error",
+                    "code": code,
+                    "hint": hint,
+                });
+                if let Some(args) = args {
+                    body["args"] = serde_json::Value::Object(args.clone());
+                }
+                body
+            }
         }
     }
 
@@ -521,6 +535,7 @@ pub fn handle_messages(
                 return ControlQueryResult::Error {
                     code: "MESSAGE_NOT_FOUND",
                     hint: "Pass the message id you want to inspect (e.g. m-7f3k9q2d), or call this tool with no arguments to list your own open items.".to_string(),
+                    args: None,
                 };
             }
             let Some(view) = messaging.message_state(msg_id, now) else {
@@ -529,6 +544,7 @@ pub fn handle_messages(
                     hint: format!(
                         "No message '{msg_id}' in the ledger. Ids look like m-7f3k9q2d; very old messages fall out of the in-memory history, and the ledger is cleared when the daemon restarts."
                     ),
+                    args: None,
                 };
             };
             let rows: Vec<serde_json::Value> = view
@@ -1012,6 +1028,7 @@ mod tests {
         let e = ControlQueryResult::Error {
             code: "GROUP_NOT_FOUND",
             hint: "h".to_string(),
+            args: None,
         };
         assert_eq!(
             e.to_json(),
@@ -1021,5 +1038,25 @@ mod tests {
         let ok = ControlQueryResult::Ok(serde_json::json!({"groups":["@all"]}));
         assert_eq!(ok.to_json(), serde_json::json!({"groups":["@all"]}));
         assert!(ok.is_ok());
+    }
+
+    /// Arguments ride as one more key; the shared three keys stay as they are.
+    #[test]
+    fn query_result_error_carries_args_only_when_present() {
+        let mut args = serde_json::Map::new();
+        args.insert(
+            "reasons".to_string(),
+            serde_json::json!([{"code": "missing"}]),
+        );
+        let e = ControlQueryResult::Error {
+            code: "CONFLICT",
+            hint: "h".to_string(),
+            args: Some(args),
+        };
+        assert_eq!(
+            e.clone().into_json(),
+            serde_json::json!({"status":"error","code":"CONFLICT","hint":"h","args":{"reasons":[{"code":"missing"}]}})
+        );
+        assert_eq!(e.to_json(), e.into_json());
     }
 }
