@@ -25,7 +25,7 @@ use crate::failure::AgentFailureKind;
 use crate::inputs_pending::InputsPendingTable;
 #[cfg(test)]
 use crate::launch::LaunchArtifacts;
-use crate::launch::{LaunchKitGuard, LaunchLease, LaunchPorts};
+use crate::launch::{LaunchKitGuard, LaunchLease, LaunchPorts, Notice};
 use crate::output_core::{OutputCore, QueuedWiring, TurnWiring};
 use crate::profile::{
     AgentCommand, AgentProfile, ProfileRegistry, RestoreOutcome, RestoreReport, SpawnMode,
@@ -125,6 +125,42 @@ impl SpawnOutcome {
             SpawnOutcome::Moot(_) => None,
         }
     }
+}
+
+/// Whether the caller of an activation shows the returned notices to a reader (a person, an LLM, the CLI).
+///
+/// Notices are shown once per agent: only a caller that delivers them may mark them as seen, so only `Delivered`
+/// records the notice fingerprint ([`AgentProfile::notice_fingerprint`]). Either way the notices are returned and
+/// every launch logs them.
+// ADR-0341
+// TRD S25 §1-5 「Notices once per agent」
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoticeDelivery {
+    /// The caller puts the notices on its success reply — a launch that started a process records their fingerprint.
+    Delivered,
+    /// The caller does not show them — nothing is recorded, so the next delivering caller still gets the set.
+    Withheld,
+}
+
+/// A successful activation and the launch notices for its reply.
+#[derive(Debug, Clone)]
+pub struct Activated {
+    pub info: AgentInfo,
+    /// Empty when this call launched nothing (the agent was already running), when the plan had no notices, or when
+    /// the agent was already shown this set ([`AgentProfile::notice_fingerprint`]). Otherwise the plan's full list.
+    pub notices: Vec<Notice>,
+}
+
+/// The notices of a launch that started a process — only that call carries them out of the spawn; a moot spawn and
+/// every failure carry none.
+struct LaunchNotices {
+    /// The incarnation this launch started — the record lands only while it is current.
+    epoch: u32,
+    fingerprint: String,
+    /// For the reply — empty when the stored fingerprint already equals `fingerprint`.
+    notices: Vec<Notice>,
+    /// The stored fingerprint `prelaunch` compared against — the record's compare-and-set baseline.
+    baseline: Option<String>,
 }
 
 /// 실패 분류가 들여다보는 출력 꼬리의 하드 상한(`OutputCore::terminal_tail` 이 정확히 지킨다). 우리가
@@ -1368,11 +1404,11 @@ impl AgentManager {
         mode: SpawnMode,
     ) -> Result<SpawnOutcome, PtyError> {
         self.spawn_agent_watching_link(profile, mode, Entry::Caller)
-            .map(|(o, _)| o)
+            .map(|(o, _, _)| o)
     }
 
-    /// 띄우기의 공유 본체 — 입구 셋(`spawn_agent` · `activate_profile` · `restore_one`)이 두 동사를 거쳐
-    /// 여기 닿는다.
+    /// The shared spawn body — the entries (`spawn_agent` · `spawn_agent_reporting` · `activate_profile_reporting` ·
+    /// `restore_one`) reach it directly or through the two verbs.
     ///
     /// `entry` = 이 띄우기를 부른 쪽. 프로세스를 열기 전의 명부 변경 셋 중 ① 등록(없으면 점검 뒤 넣기 → 실행
     ///   전처리 → 있던 id 면 병합) · ③ Fresh 의 세션 id 비우기가 그 입구로 레지스트리를 바꾼다. ② 화신 표식은
@@ -1383,14 +1419,17 @@ impl AgentManager {
     ///   실패 뒤와 같은 끝 모양) ② 의 새 표식도 메모리에 남으며(쥔 화신이 없어 무해) 칸에는 옛 손잡이가
     ///   남는다. 띄우기가 멈췄으므로 어긋날 화신이 없다. ① 이 실패하면 ② · ③ 에 닿지 않는다. 넣은 뒤 실행
     ///   전처리가 막히거나 경합해도 넣은 것은 남는다(같은 끝 모양).
+    /// The third slot = this launch's notices — `Some` exactly when this call started a process (`Started`), `None` on
+    ///   a moot request. It records nothing; a caller-facing entry decides that ([`NoticeDelivery`]).
     // ADR-0291 R17 (E3 · D8)
     // ADR-0319
+    // ADR-0341
     fn spawn_agent_watching_link(
         &self,
         profile: &AgentProfile,
         mode: SpawnMode,
         entry: Entry,
-    ) -> Result<(SpawnOutcome, Option<LinkWatch>), PtyError> {
+    ) -> Result<(SpawnOutcome, Option<LinkWatch>, Option<LaunchNotices>), PtyError> {
         // ★★예약을 **명부 조회보다 먼저** 잡는다 — 순서를 되돌리지 마라★★: 연결을 선언하는 통로에서는
         //   예약이 spawn 이 끝날 때까지가 아니라 **연결의 결말이 날 때까지** 살아 있다([`LinkWatch`]).
         //   그 구간의 세션은 명부에 올라 있지만 아직 **입력을 받을 수 있는지 모르는** 화신이다. 조회를
@@ -1407,7 +1446,7 @@ impl AgentManager {
                 agent = %profile.id,
                 "spawn_agent: 이미 뜨는 중 — 이 요청은 할 일이 없다(moot)"
             );
-            return Ok((SpawnOutcome::Moot(None), None));
+            return Ok((SpawnOutcome::Moot(None), None, None));
         };
 
         // ★잔여 레이스(ADR-0082 미해결·후속)★: 이 이중-spawn 가드는 여기서 read lock 을 잡아 contains_key 를 본 뒤
@@ -1426,7 +1465,11 @@ impl AgentManager {
                 agent = %profile.id,
                 "spawn_agent: 이미 실행 중 — 이 요청은 할 일이 없다(moot)"
             );
-            return Ok((SpawnOutcome::Moot(Some(self.agent_info(&session))), None));
+            return Ok((
+                SpawnOutcome::Moot(Some(self.agent_info(&session))),
+                None,
+                None,
+            ));
         }
 
         // 전처리가 명부의 항목을 읽으므로 없는 id(즉석 생성)를 먼저 넣는다(넣기 전 점검은 그 안에서).
@@ -1435,7 +1478,7 @@ impl AgentManager {
         // ★실행 전처리는 이 자리다 — 예약 · 떠 있음 확인 **뒤**, 화신 표식 · 세션 파생 **앞**(ADR-0319)★: 예약 앞이면
         //   같은 에이전트의 두 실행이 함께 점검하고, 표식 · 세션 파생 뒤면 래치 · 표식이 맞추기 전 사본을 본다. 막히면
         //   제어 채널을 발급하기 전에 끊는다.
-        let plan = self.prelaunch(profile)?;
+        let (plan, plan_notices) = self.prelaunch(profile)?;
 
         // 방금 넣은 id 는 병합하지 않는다 — 넣은 값이 곧 사본이고, 앞 화신이 없어 아래 표식까지 사이에 낄 지각
         //   기록도 없다.
@@ -1801,7 +1844,13 @@ impl AgentManager {
             }),
             None => None,
         };
-        Ok((SpawnOutcome::Started(info), watch))
+        let notices = LaunchNotices {
+            epoch,
+            fingerprint: plan_notices.fingerprint,
+            notices: plan_notices.shown,
+            baseline: plan_notices.baseline,
+        };
+        Ok((SpawnOutcome::Started(info), watch, Some(notices)))
     }
 
     /// ★수동 활성화 진입점 — 이어받기(resume) 전용, fresh-fallback 폐지(ADR-0082)★.
@@ -1841,6 +1890,8 @@ impl AgentManager {
     /// 실행 재료 점검이 막으면 [`PtyError::LaunchBlocked`] · 실행 입력(붙임 · 명령 · env)이 두 번 다 바뀌거나 넘긴
     ///   사본의 명령 · env 가 명부와 다르거나 점검한 원본이 재료 준비 전에 바뀌면 [`PtyError::LaunchRaced`] — 새 대화든
     ///   이어받기든 같은 변형으로 돌아오고, 「마지막 실패」 는 「그 밖」 이다.
+    /// Records no notice fingerprint and drops the notices — [`AgentManager::activate_profile_reporting`] with
+    ///   [`NoticeDelivery::Withheld`].
     // ADR-0082
     // ADR-0076
     // ADR-0201
@@ -1850,6 +1901,24 @@ impl AgentManager {
         profile: &AgentProfile,
         mode: SpawnMode,
     ) -> Result<AgentInfo, PtyError> {
+        self.activate_profile_reporting(profile, mode, NoticeDelivery::Withheld)
+            .map(|a| a.info)
+    }
+
+    /// [`AgentManager::activate_profile`] plus the launch notices for the caller's reply ([`Activated::notices`]).
+    ///
+    /// `delivery` = whether the caller shows them. With [`NoticeDelivery::Delivered`] a success that started a process
+    ///   (a fresh start, or a resume — incl. a resume request that opened a new conversation) records the notice
+    ///   fingerprint; an activation that launched nothing (already running) or failed anywhere — before the process,
+    ///   or after it (`EarlyVerdict::LinkFailed`, an early exit, a diagnosed resume failure) — records nothing.
+    // ADR-0341
+    // TRD S25 §1-5 「Notices once per agent」
+    pub fn activate_profile_reporting(
+        &self,
+        profile: &AgentProfile,
+        mode: SpawnMode,
+        delivery: NoticeDelivery,
+    ) -> Result<Activated, PtyError> {
         // ★★「떠 있다」고 답하기 **전에** 「아직 결말이 안 난 활성화」를 본다 — 순서를 되돌리지 마라★★:
         //   연결을 선언하는 통로에서는 세션이 명부에 오른 뒤에도 그 화신이 입력을 받을 수 있는지가
         //   아직 안 정해져 있고([`LinkWatch`]), 그 구간을 여는 요청이 예약을 들고 있다. 아래 조회를
@@ -1880,7 +1949,11 @@ impl AgentManager {
             );
             // ★이 갈래는 「마지막 실패」에 아무것도 쓰지 않는다★: 활성화를 시도하지 않았으므로 기록할
             //   실패도, 지울 근거도 없다 — 아래 `spawn_agent` 의 moot 갈래와 같은 규율이다(ADR-0172).
-            return Ok(self.agent_info(&session));
+            // No launch, so no notices and no fingerprint record either.
+            return Ok(Activated {
+                info: self.agent_info(&session),
+                notices: Vec::new(),
+            });
         }
 
         if mode == SpawnMode::Fresh {
@@ -1892,20 +1965,31 @@ impl AgentManager {
             //   띄우는 중**이라 우리가 돌려줄 세션이 없을 뿐이다. `NotFound` 를 그대로 흘리면 원인을
             //   잘못 지목한 문구("agent not found")가 호출자·LLM 에게 간다.
             // ADR-0172
-            return match outcome?.into_info() {
-                Some(info) => Ok(info),
-                None => self.agent_info_by_id(profile.id).map_err(|e| match e {
-                    PtyError::NotFound(id) => PtyError::SpawnFailed(format!(
-                        "another request is already starting agent {id}; this one did nothing"
-                    )),
-                    other => other,
+            let (outcome, launched) = outcome?;
+            return match outcome.into_info() {
+                Some(info) => Ok(Activated {
+                    info,
+                    notices: self.deliver_notices(profile.id, launched, delivery),
                 }),
+                // A moot spawn launched nothing — no notices.
+                None => self
+                    .agent_info_by_id(profile.id)
+                    .map(|info| Activated {
+                        info,
+                        notices: Vec::new(),
+                    })
+                    .map_err(|e| match e {
+                        PtyError::NotFound(id) => PtyError::SpawnFailed(format!(
+                            "another request is already starting agent {id}; this one did nothing"
+                        )),
+                        other => other,
+                    }),
             };
         }
 
         // 띄우기 전 거절(저장 · 실행 막힘 · 준비 경합)은 원형 그대로 돌려준다 — Fresh 갈래의 `?` 와 같은 답이 되게
         //   (ADR-0291 R17 · ADR-0334).
-        let (outcome, spawned) = self.resume_no_fallback(profile, Entry::Caller)?;
+        let (outcome, spawned, launched) = self.resume_no_fallback(profile, Entry::Caller)?;
         match outcome {
             // 성립·실패 양쪽 다 `resume_no_fallback` 안에서 이미 기록됐다(그 자리가 무엇이 일어났는지
             //   아는 유일한 곳). 여기서 또 쓰면 지움 지점이 둘이 된다.
@@ -1921,17 +2005,23 @@ impl AgentManager {
             // ★`Started` 를 `Resumed` 와 **같이** 처리한다 — 둘 다 「떴다」이고 갈리는 것은 보고 어휘다★:
             //   앞엣것은 이어받을 손잡이가 없어 새 대화를 연 경우다(`resume_no_fallback` 의 그 판정).
             //   여기서 `Err` 로 내리면 정상적으로 뜬 에이전트가 실패로 보고된다.
+            // The success is what the caller is told, so a delivering caller records here even when the lookup
+            //   downgraded the status (ADR-0341). `launched` is `None` when the resume was moot.
             RestoreOutcome::Resumed | RestoreOutcome::Started => {
-                match self.agent_info_by_id(profile.id) {
-                    Ok(info) => Ok(info),
+                let info = match self.agent_info_by_id(profile.id) {
+                    Ok(info) => info,
                     Err(e) => match spawned {
                         Some(mut info) => {
                             info.status = AgentStatus::Exited { code: None };
-                            Ok(info)
+                            info
                         }
-                        None => Err(e),
+                        None => return Err(e),
                     },
-                }
+                };
+                Ok(Activated {
+                    info,
+                    notices: self.deliver_notices(profile.id, launched, delivery),
+                })
             }
             RestoreOutcome::Failed { reason } => Err(PtyError::SpawnFailed(reason)),
             // resumable 프로필로만 진입하므로 나머지 결말은 도달 불가(방어적 Err).
@@ -1941,6 +2031,47 @@ impl AgentManager {
                 "activate_profile: 예상 밖 결말 {other:?}"
             ))),
         }
+    }
+
+    /// [`AgentManager::spawn_agent`] plus the launch notices — empty when the request was moot or the agent was
+    /// already shown this set.
+    ///
+    /// ★It never records the notice fingerprint★ — like `spawn_agent` it does not wait for a link verdict, so a link
+    ///   that fails after the start would leave the set marked as seen. Only
+    ///   [`AgentManager::activate_profile_reporting`] records.
+    // ADR-0341
+    pub fn spawn_agent_reporting(
+        &self,
+        profile: &AgentProfile,
+        mode: SpawnMode,
+    ) -> Result<(SpawnOutcome, Vec<Notice>), PtyError> {
+        let (outcome, _, launched) =
+            self.spawn_agent_watching_link(profile, mode, Entry::Caller)?;
+        Ok((outcome, launched.map(|l| l.notices).unwrap_or_default()))
+    }
+
+    /// The reply's notices of a successful caller activation — and, when the caller delivers them, the record that
+    /// this agent has been shown this set. `launched` is `None` when the activation launched nothing.
+    /// ★Call only on a success the caller is answered with★ — a failure must not mark the set as seen.
+    // ADR-0341
+    fn deliver_notices(
+        &self,
+        id: AgentId,
+        launched: Option<LaunchNotices>,
+        delivery: NoticeDelivery,
+    ) -> Vec<Notice> {
+        let Some(launched) = launched else {
+            return Vec::new();
+        };
+        if delivery == NoticeDelivery::Delivered {
+            self.profiles.record_notice_fingerprint(
+                id,
+                launched.epoch,
+                launched.baseline.as_deref(),
+                launched.fingerprint,
+            );
+        }
+        launched.notices
     }
 
     /// ★「마지막 실패」를 쓰는 **유일한 지점**(ADR-0172 결정 4 — 개정판)★. `None` = 활성화가 성립했다
@@ -2038,24 +2169,27 @@ impl AgentManager {
     ///   거짓이다(이어받으려 한 적이 없다). 없는 어휘를 지어내는 대신 「그 밖」으로 둔다 — 그쪽은
     ///   재시도 가능이라 화면이 항목을 막지도 않는다(`failureKinds.ts`).
     /// `entry` 는 받은 그대로 공유 본체에 넘긴다 — 이 동사는 입구를 가르지 않는다.
+    /// The second slot = the launch's notices, carried only by a success that started a process — a link that failed
+    ///   after the start drops them with its `Err`.
     // ADR-0201
     // ADR-0202
+    // ADR-0341
     fn spawn_fresh_settled(
         &self,
         profile: &AgentProfile,
         entry: Entry,
-    ) -> Result<SpawnOutcome, PtyError> {
+    ) -> Result<(SpawnOutcome, Option<LaunchNotices>), PtyError> {
         let attempt = self.spawn_agent_watching_link(profile, SpawnMode::Fresh, entry);
-        let (result, watch) = match attempt {
-            Ok((outcome, watch)) => (Ok(outcome), watch),
-            Err(e) => (Err(e), None),
+        let (result, watch, launched) = match attempt {
+            Ok((outcome, watch, launched)) => (Ok(outcome), watch, launched),
+            Err(e) => (Err(e), None, None),
         };
 
         // 기다릴 결말이 없는 셋이 여기서 빠진다 — 연결 축이 없는 통로 · 아무것도 안 만든 요청(moot) ·
         // 프로세스조차 못 띄운 실패. 셋 다 옛 기록 규율 그대로다(`note_spawn_result`).
         let (Some(watch), Ok(SpawnOutcome::Started(info))) = (watch.as_ref(), &result) else {
             self.note_spawn_result(profile.id, &result);
-            return result;
+            return result.map(|outcome| (outcome, launched));
         };
         // ★표식을 결말 **밖으로** 들고 나간다★ — 아래 정리·기록은 판정만큼 늦게 일어나고, 그 사이 이
         //   화신이 수거되고 다음 화신이 떴을 수 있다. 값으로 들고 가야 둘 다 이 화신에만 닿는다
@@ -2080,11 +2214,11 @@ impl AgentManager {
             //   코드는 모른다(`None`). `resume_no_fallback` 의 형제 갈래를 `activate_profile` 이
             //   처리하는 모양과 **같은 규율**이고, 그쪽 주석이 이 인과의 정본이다.
             EarlyVerdict::Ready => match self.agent_info_by_id(profile.id) {
-                Ok(fresh) => Ok(SpawnOutcome::Started(fresh)),
+                Ok(fresh) => Ok((SpawnOutcome::Started(fresh), launched)),
                 Err(_) => {
                     let mut gone = info.clone();
                     gone.status = AgentStatus::Exited { code: None };
-                    Ok(SpawnOutcome::Started(gone))
+                    Ok((SpawnOutcome::Started(gone), launched))
                 }
             },
             // ★정리를 **먼저**, 기록을 나중에★ — `resume_no_fallback` 의 같은 갈래와 같은 순서이고 같은
@@ -2361,8 +2495,9 @@ impl AgentManager {
             };
         }
 
+        // Boot restore answers no caller, so its launch notices are only logged — never recorded (ADR-0341).
         match self.resume_no_fallback(profile, Entry::Internal) {
-            Ok((outcome, _)) => outcome,
+            Ok((outcome, _, _)) => outcome,
             // 띄우기 전 거절(내부 입구라 저장 `Err` 는 오지 않고 실행 막힘 · 준비 경합만 온다)은 복원 보고 문구로 접는다.
             Err(refused) => RestoreOutcome::Failed {
                 reason: format!("resume spawn 실패: {refused}"),
@@ -2393,6 +2528,9 @@ impl AgentManager {
     ///
     /// 반환의 둘째 칸 = 이 시도가 **만들어 낸** 화신(있으면). `activate_profile` 이 성공 판정 뒤 조회가
     /// 실패했을 때 성공을 뒤집지 않으려고 쓴다(그쪽 주석이 그 인과의 정본).
+    /// The third slot = the launch's notices — `Some` only with `Resumed` / `Started` from a call that started a
+    /// process; a moot request (reported as `Resumed` or `Started`) and every `Failed` carry `None`. Do not key the
+    /// notice record on the `RestoreOutcome` variant.
     /// `entry` 는 받은 그대로 공유 본체에 넘긴다 — 이 동사는 입구를 가르지 않는다.
     /// ★`Err` = 띄우기 전에 거절돼 띄우지 않았다 — 저장 `Err`(부르는 쪽 입구에서만) · 실행 막힘 · 준비 경합(그 셋 =
     ///   [`refused_before_spawn`])★ — 다른 띄우기 실패처럼 `RestoreOutcome::Failed` 문구로 접지 말 것: 접으면
@@ -2402,11 +2540,12 @@ impl AgentManager {
     // ADR-0172
     // ADR-0291 R17
     // ADR-0334
+    // ADR-0341
     fn resume_no_fallback(
         &self,
         profile: &AgentProfile,
         entry: Entry,
-    ) -> Result<(RestoreOutcome, Option<AgentInfo>), PtyError> {
+    ) -> Result<(RestoreOutcome, Option<AgentInfo>, Option<LaunchNotices>), PtyError> {
         // ★이어받을 손잡이가 없는 이어받기 요청은 **새 대화로 연다** — 고름이 아니라 사용자 결정 D1 의
         //   귀결이다(「저장된 id 가 있다 ⟺ 이어받을 대화가 있다 · id 없음 → Fresh」)★.
         //   ★그 조합에 실제로 들어오는 것은 WS `SpawnProfile` 의 `resume: true` 명시 요청이다★ — 그
@@ -2434,19 +2573,22 @@ impl AgentManager {
             );
             // 기록은 새 대화 경로 안에서 한다 — 여기서 또 쓰면 지움 지점이 둘이 된다.
             return match self.spawn_fresh_settled(profile, entry) {
-                Ok(outcome) => Ok((RestoreOutcome::Started, outcome.into_info())),
+                Ok((outcome, launched)) => {
+                    Ok((RestoreOutcome::Started, outcome.into_info(), launched))
+                }
                 Err(e) if refused_before_spawn(&e) => Err(e),
                 Err(e) => Ok((
                     RestoreOutcome::Failed {
                         reason: format!("새 대화 spawn 실패: {e}"),
                     },
                     None,
+                    None,
                 )),
             };
         }
 
         let attempt = self.spawn_agent_watching_link(profile, SpawnMode::Resume, entry);
-        let (outcome, watch) = match attempt {
+        let (outcome, watch, launched) = match attempt {
             Err(e) => {
                 // ADR-0172: 실패는 시도한 자리에서 기록한다 — 이 기록이 ADR-0082 가 요구한 "원인을 남겨
                 //   제어 LLM 이 읽는다" 의 화면·API 쪽 실물이다(로그는 사람만 읽는다).
@@ -2463,7 +2605,7 @@ impl AgentManager {
                     %reason,
                     "ADR-0082: resume 실패 → 종점(시체), fresh-fallback 없음"
                 );
-                return Ok((RestoreOutcome::Failed { reason }, None));
+                return Ok((RestoreOutcome::Failed { reason }, None, None));
             }
             Ok(pair) => pair,
         };
@@ -2477,7 +2619,7 @@ impl AgentManager {
                     agent = %profile.id,
                     "resume: 이미 떠 있거나 뜨는 중 — 이 요청은 할 일이 없다(moot)"
                 );
-                return Ok((RestoreOutcome::Resumed, info));
+                return Ok((RestoreOutcome::Resumed, info, None));
             }
             SpawnOutcome::Started(info) => info,
         };
@@ -2537,7 +2679,7 @@ impl AgentManager {
                         "ADR-0082: resume 조기종료 → 종점(시체), fresh-fallback 없음 — LLM 에스컬레이션 대상"
                     );
                 }
-                (RestoreOutcome::Failed { reason }, Some(spawned))
+                (RestoreOutcome::Failed { reason }, Some(spawned), None)
             }
             // ★아직 살아 있는데 실패로 접는다 — 그리고 **아무것도 죽이지 않는다**★: claude 는 진단을
             //   내고도 종료 훅이 도는 동안 몇 초 더 산다(실측 +2.2s 진단 / +6.4s 종료). 그 시체를
@@ -2555,7 +2697,7 @@ impl AgentManager {
                     ?kind,
                     "ADR-0172: 진단 스트림이 이어받기 실패를 확정 — 종료를 기다리지 않는다"
                 );
-                (RestoreOutcome::Failed { reason }, Some(spawned))
+                (RestoreOutcome::Failed { reason }, Some(spawned), None)
             }
             // ★프로세스는 살아 있는데 **쓸 수 없다** — 살아 있음을 성공으로 세지 않는 자리★.
             //
@@ -2592,7 +2734,7 @@ impl AgentManager {
                     ?kind,
                     "ADR-0082: 통로가 연결을 못 세웠다 → 활성화 실패, fresh-fallback 없음 — LLM 에스컬레이션 대상"
                 );
-                (RestoreOutcome::Failed { reason }, Some(spawned))
+                (RestoreOutcome::Failed { reason }, Some(spawned), None)
             }
             // ★상대가 **준비됐다고 신호했다** = 성립(사용자 결정)★ — 창을 지켜본 것이 아니라 긍정 증거를
             //   받은 것이다. 그래서 이 갈래는 `Alive` 보다 **빨리**, 그리고 **강한 근거로** 도착한다.
@@ -2612,7 +2754,7 @@ impl AgentManager {
             //   지움 규칙을 그쪽으로 넓히지 말 것(별건이고, 그 경로는 이 결정의 범위 밖이다).
             EarlyVerdict::Ready => {
                 // 손잡이 없는 요청은 위 머리에서 새 대화로 빠졌으므로 여기 오는 것은 이어받기뿐이다.
-                (RestoreOutcome::Resumed, Some(spawned))
+                (RestoreOutcome::Resumed, Some(spawned), launched)
             }
             EarlyVerdict::Alive => {
                 // ★조기종료 창을 넘겼고 진단도 침묵했다 = 이어받을 대화가 실재했다★ — 여기가 「지움」의
@@ -2621,7 +2763,7 @@ impl AgentManager {
                 //   선언하는 통로는 위 `Ready`/`LinkFailed` 에서 이미 갈린다. 그래서 지움 규칙이 여기
                 //   남아 있는 것이 claude 경로를 그대로 두는 것과 같은 말이다.
                 self.note_activation_result(profile.id, Some(spawned.epoch), None);
-                (RestoreOutcome::Resumed, Some(spawned))
+                (RestoreOutcome::Resumed, Some(spawned), launched)
             }
         })
     }
@@ -4818,6 +4960,73 @@ mod tests {
         assert!(
             arm.contains("tear_down_failed_activation(profile.id, incarnation)"),
             "정리가 화신 표식 없이 불린다 — 그 사이 다른 화신이 섰으면 산 후임을 죽인다: {arm}"
+        );
+    }
+
+    /// ★A launch that fails after its process started carries no notices out, so no caller records them★ — the
+    /// fingerprint is recorded at one door, fed only by success returns.
+    ///
+    /// Why in source: the link verdicts (`LinkFailed` · `Ready`) need a real codex app-server, which the harness lacks.
+    /// The non-link post-start failure (an early exit in the resume window) is run in `tests/activation.rs`.
+    // ADR-0341
+    // TRD S25 §1-5 「Notices once per agent」
+    #[test]
+    fn a_post_start_failure_drops_the_launch_notices_in_source() {
+        assert!(
+            fresh_arm("EarlyVerdict::Ready =>", "EarlyVerdict::LinkFailed").contains("launched"),
+            "the fresh success no longer carries the notices — the premise of the checks below is stale"
+        );
+        for (start, end) in [
+            (
+                "EarlyVerdict::LinkFailed { reason } => {",
+                "EarlyVerdict::Terminal {",
+            ),
+            (
+                "EarlyVerdict::Terminal { status, evidence } => {",
+                "other =>",
+            ),
+        ] {
+            let arm = fresh_arm(start, end);
+            assert!(
+                !arm.contains("launched"),
+                "a failed fresh arm hands the notices on: {arm}"
+            );
+        }
+        for (start, end) in [
+            (
+                "EarlyVerdict::Terminal { status, evidence } => {",
+                "EarlyVerdict::Diagnosed(kind) => {",
+            ),
+            (
+                "EarlyVerdict::Diagnosed(kind) => {",
+                "EarlyVerdict::LinkFailed { reason } => {",
+            ),
+            (
+                "EarlyVerdict::LinkFailed { reason } => {",
+                "EarlyVerdict::Ready => {",
+            ),
+        ] {
+            let arm = resume_arm(start, end);
+            assert!(
+                !arm.contains("launched"),
+                "a failed resume arm hands the notices on: {arm}"
+            );
+        }
+        assert!(
+            resume_arm("EarlyVerdict::Ready => {", "EarlyVerdict::Alive => {").contains("launched")
+        );
+
+        let src = include_str!("manager.rs");
+        let production = src.split("mod tests {").next().expect("운영 구획");
+        assert_eq!(
+            production.matches(".record_notice_fingerprint(").count(),
+            1,
+            "a second door records the fingerprint"
+        );
+        assert_eq!(
+            production.matches("self.deliver_notices(").count(),
+            2,
+            "the record is reached from other than the two `activate_profile_reporting` successes"
         );
     }
 

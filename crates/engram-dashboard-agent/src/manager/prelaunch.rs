@@ -13,7 +13,7 @@
 // TRD S25 §1-5 (가)
 
 use super::{profile_vanished_mid_spawn, AgentManager};
-use crate::launch::{LaunchBlocked, LaunchPlan, PrepareError};
+use crate::launch::{notice_fingerprint, LaunchBlocked, LaunchPlan, Notice, PrepareError};
 use crate::profile::{AgentProfile, LaunchInputs};
 use crate::types::{AgentId, PtyError};
 
@@ -39,7 +39,13 @@ impl AgentManager {
     /// `Err` = 막힘([`PtyError::LaunchBlocked`]) · 실행 입력이 두 번 다 바뀜 또는 사본의 명령 · env 가 점검한 값과
     /// 다름([`PtyError::LaunchRaced`]) · 그 사이 지워짐(`SpawnFailed`). 어느 쪽이든 명부 · 세션 · 제어 채널은
     /// 그대로다.
-    pub(super) fn prelaunch(&self, caller: &AgentProfile) -> Result<LaunchPlan, PtyError> {
+    /// With the plan comes its notice comparison against the fingerprint on the same roster read ([`PlanNotices`]) —
+    ///   compared here, recorded by nobody here.
+    // ADR-0341
+    pub(super) fn prelaunch(
+        &self,
+        caller: &AgentProfile,
+    ) -> Result<(LaunchPlan, PlanNotices), PtyError> {
         let id = caller.id;
         for attempt in 1..=PRELAUNCH_ATTEMPTS {
             // 호출자 사본이 아니라 명부 값 — 사본을 뜬 뒤 붙인 프리셋까지 본다. `get` 은 사본을 뜨고 락을 놓는다.
@@ -52,7 +58,12 @@ impl AgentManager {
             //   막힘은 이미 낡았다(고친 붙임이 낡은 막힘에 걸려 끊긴다).
             let checked = self.launch.kits.check(&profile);
             match self.profiles.launch_inputs_unchanged(id, &seen) {
-                Some(true) => return settle(caller, &seen, checked),
+                Some(true) => {
+                    return settle(caller, &seen, checked).map(|plan| {
+                        let notices = PlanNotices::against(&plan, &profile);
+                        (plan, notices)
+                    })
+                }
                 Some(false) => tracing::debug!(
                     agent = %id,
                     attempt,
@@ -86,7 +97,7 @@ fn settle(
         return Err(PtyError::LaunchRaced);
     }
     let plan = checked.map_err(|blocked| launch_blocked(id, blocked))?;
-    // TODO(TRD S25 §5-2 16): 알림은 실행 성공 답에 싣는다 — 그 단계 전까지는 로그로만 남는다.
+    // Every launch logs its notices, whether or not a reply shows them (ADR-0341).
     for notice in &plan.notices {
         tracing::info!(
             agent = %id,
@@ -97,6 +108,36 @@ fn settle(
         );
     }
     Ok(plan)
+}
+
+/// A plan's notices against what the agent was last shown — notices once per agent.
+// ADR-0341
+// TRD S25 §1-5 「Notices once per agent」
+pub(super) struct PlanNotices {
+    /// The plan's omission identity ([`notice_fingerprint`]) — what a delivering caller records.
+    pub(super) fingerprint: String,
+    /// For the success reply: the plan's full list, or empty when the stored fingerprint equals `fingerprint`.
+    pub(super) shown: Vec<Notice>,
+    /// The stored fingerprint `shown` was decided against — the record is a compare-and-set on it.
+    pub(super) baseline: Option<String>,
+}
+
+impl PlanNotices {
+    /// `roster` = the roster copy this plan was checked from — its fingerprint is the one compared.
+    fn against(plan: &LaunchPlan, roster: &AgentProfile) -> Self {
+        let fingerprint = notice_fingerprint(&plan.notices);
+        let baseline = roster.notice_fingerprint.clone();
+        let shown = if baseline.as_deref() == Some(fingerprint.as_str()) {
+            Vec::new()
+        } else {
+            plan.notices.clone()
+        };
+        Self {
+            fingerprint,
+            shown,
+            baseline,
+        }
+    }
 }
 
 fn launch_blocked(id: AgentId, blocked: LaunchBlocked) -> PtyError {
@@ -157,7 +198,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::super::tests::{put_live_session, put_live_session_leased};
-    use super::super::{AgentManager, SpawnOutcome, SpawnReservation};
+    use super::super::{AgentManager, NoticeDelivery, SpawnOutcome, SpawnReservation};
+    use super::PlanNotices;
     use crate::backend;
     use crate::failure::AgentFailureKind;
     use crate::launch::{
@@ -1252,6 +1294,140 @@ mod tests {
         assert!(rig.assembled_nothing());
     }
 
+    // ── Notices once per agent (ADR-0341) ──
+
+    fn notice(code: &str) -> Reason {
+        Reason {
+            code: code.to_string(),
+            args: json!({ "names": [code] }),
+            line: Some(1),
+        }
+    }
+
+    /// The plan `profile` checks to, carrying `notices`.
+    fn plan_with(profile: &AgentProfile, notices: Vec<Reason>) -> LaunchPlan {
+        LaunchPlan {
+            notices,
+            ..NoopLaunchKits.check(profile).unwrap()
+        }
+    }
+
+    #[test]
+    fn plan_notices_are_empty_only_when_the_stored_fingerprint_matches() {
+        let mut roster = Way::Fresh.profile();
+        let x = plan_with(&roster, vec![notice("a"), notice("b")]);
+        let fingerprint = crate::launch::notice_fingerprint(&x.notices);
+
+        let never = PlanNotices::against(&x, &roster);
+        assert_eq!(never.fingerprint, fingerprint);
+        assert_eq!(never.shown, x.notices, "nothing recorded → the full list");
+        assert_eq!(
+            never.baseline, None,
+            "the record's baseline = the value compared"
+        );
+
+        roster.notice_fingerprint = Some(fingerprint.clone());
+        let same = PlanNotices::against(&x, &roster);
+        assert!(same.shown.is_empty(), "same set");
+        assert_eq!(same.baseline, Some(fingerprint.clone()));
+
+        roster.notice_fingerprint = Some(crate::launch::notice_fingerprint(&[notice("a")]));
+        assert_eq!(
+            PlanNotices::against(&x, &roster).shown,
+            x.notices,
+            "a changed set → the full list, not the difference"
+        );
+
+        roster.notice_fingerprint = Some(String::new());
+        let none = PlanNotices::against(&plan_with(&roster, Vec::new()), &roster);
+        assert_eq!(none.fingerprint, "");
+        assert!(none.shown.is_empty());
+    }
+
+    /// The compare reads the roster, not the caller's copy — a copy taken before the last record would re-show the set
+    /// (and a copy carrying a record the roster lacks would hide it).
+    #[test]
+    fn prelaunch_compares_with_the_roster_fingerprint_not_the_callers_copy() {
+        let p = Way::Fresh.profile();
+        let x = vec![notice("a")];
+        let shown_before = crate::launch::notice_fingerprint(&x);
+
+        let kits = ScriptedKits::new(vec![
+            Turn::Plan(plan_with(&p, x.clone())),
+            Turn::Plan(plan_with(&p, x.clone())),
+        ]);
+        let rig = kits.rig();
+        let mut roster = p.clone();
+        roster.notice_fingerprint = Some(shown_before.clone());
+        rig.manager.profiles.upsert(roster);
+
+        let (_, notices) = rig.manager.prelaunch(&p).expect("passes");
+        assert!(
+            notices.shown.is_empty(),
+            "the roster was already shown this set"
+        );
+        assert_eq!(notices.fingerprint, shown_before);
+
+        rig.manager
+            .profiles
+            .update_with(p.id, |q| q.notice_fingerprint = None);
+        let mut stale_copy = p.clone();
+        stale_copy.notice_fingerprint = Some(shown_before);
+        let (_, notices) = rig.manager.prelaunch(&stale_copy).expect("passes");
+        assert_eq!(notices.shown, x, "nothing recorded on the roster");
+    }
+
+    /// ★No failure marks a set as seen★ — a block, a race, a prepare failure and a spawn error after the assembly all
+    /// answer with an error, so a delivering caller records nothing and the next success shows the set.
+    // TRD S25 §1-5 「Notices once per agent」
+    #[test]
+    fn a_failed_delivered_activation_records_no_fingerprint() {
+        type Expect = fn(&PtyError) -> bool;
+        let cases: [(&str, Option<PrepareError>, Expect); 4] = [
+            ("block", None, |e| matches!(e, PtyError::LaunchBlocked(_))),
+            (
+                "stale prepare",
+                Some(PrepareError::Stale("gone".to_string())),
+                |e| matches!(e, PtyError::LaunchRaced),
+            ),
+            (
+                "failed prepare",
+                Some(PrepareError::Failed("disk".to_string())),
+                |e| matches!(e, PtyError::SpawnFailed(m) if !m.contains("시험")),
+            ),
+            (
+                "spawn error after the assembly",
+                None,
+                |e| matches!(e, PtyError::SpawnFailed(m) if m.contains("시험")),
+            ),
+        ];
+        for (what, prep, expected) in cases {
+            for way in Way::ALL {
+                let p = way.profile();
+                let turn = if what == "block" {
+                    Turn::Block(blocked())
+                } else {
+                    Turn::Plan(plan_with(&p, vec![notice("a")]))
+                };
+                let preps = prep.clone().map(Prep::Fail).into_iter().collect();
+                let kits = ScriptedKits::preparing(vec![turn], preps);
+                let rig = kits.rig();
+                rig.manager.profiles.upsert(p.clone());
+
+                let err = rig
+                    .manager
+                    .activate_profile_reporting(&p, way.mode(), NoticeDelivery::Delivered)
+                    .expect_err(what);
+                assert!(expected(&err), "{what} ({way:?}): {err}");
+                assert_eq!(
+                    rig.manager.profiles.get(p.id).unwrap().notice_fingerprint,
+                    None,
+                    "{what} ({way:?}) recorded the set as seen"
+                );
+            }
+        }
+    }
+
     // ── 재료 준비 ──
 
     /// 점검이 낸 계획임을 알아볼 표시를 단 Noop 계획.
@@ -1665,7 +1841,7 @@ mod tests {
                 "self.profiles.get(id)",
                 // 답(막힘 포함)을 쥔 채 곧바로 대조한다 — 사이에서 풀면 바뀐 입력의 막힘이 그대로 나간다.
                 "letchecked=self.launch.kits.check(&profile);matchself.profiles.launch_inputs_unchanged(id,&seen)",
-                "Some(true)=>returnsettle(caller,&seen,checked)",
+                "Some(true)=>{returnsettle(caller,&seen,checked)",
             ],
         );
 
@@ -1709,7 +1885,7 @@ mod tests {
         assert_in_order(
             &spawn,
             &[
-                "letplan=self.prelaunch(profile)?;",
+                "let(plan,plan_notices)=self.prelaunch(profile)?;",
                 ".epoch_for_spawn(profile.id)",
                 "letmutkit_guard=LaunchKitGuard::arm(self.launch.kits.clone(),profile.id,epoch);",
                 ".kits.prepare(plan,profile.id,epoch)",

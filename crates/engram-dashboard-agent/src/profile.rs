@@ -180,6 +180,18 @@ pub struct AgentProfile {
     #[serde(default)]
     pub last_applied_instructions_hash: Option<String>,
 
+    /// The omission identity ([`crate::launch::notice_fingerprint`]) of the launch notices last delivered to a caller.
+    /// `None` = nothing recorded · `Some("")` = an empty set was delivered (X → none → X shows X again).
+    /// ★Author = the launch alone★ — written by `ProfileRegistry::record_notice_fingerprint` once a caller that delivers
+    ///   notices got a success reply from a launch that started a process; never on boot restore, a moot activation or
+    ///   any failure. `merge_preserving_live` keeps the live value. A duplicated agent must start without it (`None`) —
+    ///   `agent.duplicate` does not exist yet, and `AgentProfile::new` starts at `None`. The creation paths store the
+    ///   caller copy's value as is, so this holds only while every builder starts from `AgentProfile::new`.
+    // ADR-0341
+    // TRD S25 §1-5 「Notices once per agent」
+    #[serde(default)]
+    pub notice_fingerprint: Option<String>,
+
     /// 현재 백엔드 세션 id. **가변** — 화신의 첫 사용자 턴이 나가기 직전에 적히고(ADR-0226), `/clear`
     /// 등으로 바뀌면 session_tracker watcher가 갱신한다. None이면 이어받을 대화가 없다는 뜻.
     ///
@@ -273,6 +285,7 @@ impl AgentProfile {
             default_preset: true,
             presets: Vec::new(),
             last_applied_instructions_hash: None,
+            notice_fingerprint: None,
             backend_session_id: None,
             old_session_ids: Vec::new(),
             epoch: 0,
@@ -727,6 +740,8 @@ fn merge_preserving_live(m: &mut HashMap<AgentId, AgentProfile>, mut profile: Ag
         profile.default_preset = live.default_preset;
         profile.presets = live.presets.clone();
         profile.last_applied_instructions_hash = live.last_applied_instructions_hash.clone();
+        // ADR-0341: the launch writes it (`record_notice_fingerprint`) — a stale spawn copy would re-show notices.
+        profile.notice_fingerprint = live.notice_fingerprint.clone();
         profile.cwd = live.cwd.clone();
     }
     m.insert(profile.id, profile);
@@ -838,6 +853,60 @@ impl ProfileRegistry {
             }
             _ => false,
         }
+    }
+
+    /// Records the notice fingerprint a caller was just shown — a compare-and-set. `true` = the in-memory map changed.
+    ///
+    /// Written only when, under the roster lock, both hold:
+    /// - `incarnation` (the incarnation whose launch produced the notices) is still the profile's current one;
+    /// - the stored value still equals `baseline` (the value that launch compared against in `prelaunch`).
+    ///
+    /// Otherwise it is skipped (logged at debug): a late record of an earlier launch must not overwrite what a later
+    /// launch compared against. Skipping never marks a set that no caller was shown; in the common orders it only
+    /// makes a set show once more. One improbable interleaving (a dying earlier incarnation recording between a later
+    /// launch's compare and its epoch bump) can still leave the earlier set stored — accepted (S25 step 16 review).
+    /// The fingerprint already stored → no write. An internal roster write, like the post-launch `auto_restore` raise
+    /// (ADR-0291): a save failure keeps the change in memory, dirty (no `Err`) — the activation has already succeeded,
+    /// and its reply is about to leave.
+    // ADR-0341
+    // ADR-0291
+    // TRD S25 §1-5 「Notices once per agent」
+    pub(crate) fn record_notice_fingerprint(
+        &self,
+        id: AgentId,
+        incarnation: u32,
+        baseline: Option<&str>,
+        fingerprint: String,
+    ) -> bool {
+        let mut skipped = None;
+        let written = self.mutate_if(|m| {
+            let Some(p) = m.get_mut(&id) else {
+                skipped = Some("the profile is gone");
+                return false;
+            };
+            if p.epoch != incarnation {
+                skipped = Some("a later incarnation is current");
+                return false;
+            }
+            if p.notice_fingerprint.as_deref() == Some(fingerprint.as_str()) {
+                return false;
+            }
+            if p.notice_fingerprint.as_deref() != baseline {
+                skipped = Some("the stored fingerprint moved since the launch compared it");
+                return false;
+            }
+            p.notice_fingerprint = Some(fingerprint);
+            true
+        });
+        if let Some(why) = skipped {
+            tracing::debug!(
+                agent = %id,
+                epoch = incarnation,
+                why,
+                "notice fingerprint not recorded — a later delivered launch may show this set again"
+            );
+        }
+        written
     }
 
     /// 세션 id 를 관측한 자리에서 호출 — 옛 sid 를 이력으로 넘기고 새 값으로 교체,
@@ -2441,6 +2510,117 @@ mod tests {
         assert!(p.default_preset);
         assert!(p.presets.is_empty());
         assert_eq!(p.last_applied_instructions_hash, None);
+    }
+
+    // ── Notice fingerprint (ADR-0341) ──
+
+    /// A new (or duplicated) agent starts with nothing recorded — its first delivered launch shows every notice.
+    #[test]
+    fn a_new_profile_has_no_notice_fingerprint() {
+        assert_eq!(sample().notice_fingerprint, None);
+    }
+
+    /// The launch writes the fingerprint, not the spawn copy — a stale copy must not undo a record.
+    #[test]
+    fn spawn_preserving_upsert_keeps_the_notice_fingerprint_from_live() {
+        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
+        let p = sample();
+        let id = p.id;
+        reg.upsert(p);
+        let stale_snapshot = reg.get(id).unwrap();
+        let live = reg.epoch_for_spawn(id).unwrap();
+        assert!(reg.record_notice_fingerprint(id, live, None, "x".into()));
+
+        reg.upsert_preserving_hierarchy(stale_snapshot.clone());
+        assert_eq!(
+            reg.get(id).unwrap().notice_fingerprint.as_deref(),
+            Some("x")
+        );
+        assert!(reg.update_preserving_hierarchy(stale_snapshot));
+        assert_eq!(
+            reg.get(id).unwrap().notice_fingerprint.as_deref(),
+            Some("x")
+        );
+    }
+
+    /// Written for the current incarnation only, saved when it changes, and the empty set is a value of its own.
+    #[test]
+    fn record_notice_fingerprint_is_guarded_by_the_incarnation_and_saves_a_change() {
+        let (reg, store, id, live) = registry_with_live_incarnation();
+        let before = saves(&store);
+
+        assert!(!reg.record_notice_fingerprint(id, live.wrapping_add(1), None, "x".into()));
+        assert_eq!(
+            reg.get(id).unwrap().notice_fingerprint,
+            None,
+            "another incarnation"
+        );
+        assert!(!reg.record_notice_fingerprint(Uuid::new_v4(), live, None, "x".into()));
+
+        assert!(reg.record_notice_fingerprint(id, live, None, "x".into()));
+        assert_eq!(saves(&store), before + 1, "a change is saved");
+        assert_eq!(
+            store
+                .load()
+                .into_iter()
+                .find(|p| p.id == id)
+                .unwrap()
+                .notice_fingerprint
+                .as_deref(),
+            Some("x")
+        );
+        assert!(
+            !reg.record_notice_fingerprint(id, live, Some("x"), "x".into()),
+            "same value"
+        );
+        assert_eq!(saves(&store), before + 1, "the same value writes nothing");
+
+        assert!(reg.record_notice_fingerprint(id, live, Some("x"), String::new()));
+        assert_eq!(
+            reg.get(id).unwrap().notice_fingerprint.as_deref(),
+            Some(""),
+            "an empty set is recorded, not cleared to `None`"
+        );
+    }
+
+    /// ★Compare-and-set on the baseline★ — X → Y → X: launch A (plan Y, compared against X) records late, after launch B
+    /// (plan X) compared against the still-stored X and showed nothing. B's record over A's Y is skipped (B's baseline X
+    /// moved), so the next X launch shows X again instead of X staying hidden for good.
+    #[test]
+    fn record_notice_fingerprint_writes_only_over_the_baseline_it_compared_against() {
+        let (reg, store, id, live) = registry_with_live_incarnation();
+        assert!(reg.record_notice_fingerprint(id, live, None, "x".into()));
+        let before = saves(&store);
+
+        assert!(
+            !reg.record_notice_fingerprint(id, live, None, "y".into()),
+            "the stored value moved from the baseline (None → x)"
+        );
+        assert!(
+            !reg.record_notice_fingerprint(id, live, Some("z"), "y".into()),
+            "another baseline"
+        );
+        assert_eq!(
+            reg.get(id).unwrap().notice_fingerprint.as_deref(),
+            Some("x"),
+            "a skipped record leaves the stored value"
+        );
+        assert_eq!(saves(&store), before, "a skipped record writes nothing");
+
+        assert!(reg.record_notice_fingerprint(id, live, Some("x"), "y".into()));
+        assert_eq!(
+            reg.get(id).unwrap().notice_fingerprint.as_deref(),
+            Some("y")
+        );
+    }
+
+    /// Not a launch input — a record between the check and the compare must not race the launch.
+    #[test]
+    fn the_notice_fingerprint_is_not_a_launch_input() {
+        let (reg, _store, id, live) = registry_with_live_incarnation();
+        let seen = LaunchInputs::of(&reg.get(id).unwrap());
+        assert!(reg.record_notice_fingerprint(id, live, None, "x".into()));
+        assert_eq!(reg.launch_inputs_unchanged(id, &seen), Some(true));
     }
 
     #[test]

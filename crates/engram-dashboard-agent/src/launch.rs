@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use engram_dashboard_base::sync;
 use engram_dashboard_platform::fs::same_path;
-use serde_json::{Number, Value};
+use serde_json::{Map, Number, Value};
 
 use crate::profile::{AgentCommand, AgentProfile};
 use crate::types::AgentId;
@@ -125,7 +125,11 @@ fn cmp_number(a: &Number, b: &Number) -> Ordering {
 /// 지침 원천 하나.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceRef {
-    /// 라이브러리 참조(루트부터의 `/` 경로 또는 기본 제공 `engram:/…`).
+    /// Where the source comes from, in one of three forms: a library path from the root (`/`-separated), a built-in
+    /// `engram:/…` reference, or for a folder entry `folder:` + the normalized absolute folder path (e.g.
+    /// `folder:D:\rules\company`) — then [`SourceRef::file`] is the instruction file chosen inside that folder.
+    /// A `folder:` string must not be matched against a library path (a folder inside the library is still a folder).
+    // ADR-0341
     pub path: String,
     /// 그 파일의 절대 경로.
     pub file: PathBuf,
@@ -164,6 +168,17 @@ pub struct LaunchPlan {
     pub notices: Vec<Notice>,
     /// 실 재료인가. `false` 면 backend 번역이 재료를 하나도 싣지 않아 오늘과 바이트 같은 argv 를 낸다.
     pub real: bool,
+    /// Folder entries — absolute normalized paths in expansion order, deduplicated. Only `backend/claude` reads them
+    /// (the backend loads each folder itself). Empty in a Noop plan.
+    // ADR-0341
+    // TODO(TRD S25 §5-2 5): no backend translates this list yet — every plan today carries it empty.
+    pub folders: Vec<PathBuf>,
+    /// Extra skill roots that codex JSON appends to its skill roots as they are (the folder entries' `.agents/skills`
+    /// and `.codex/skills` that exist). Roots, not named skills — they join neither [`LaunchPlan::skills`] nor the
+    /// conflict check. Only `backend/codex` reads them. Empty in a Noop plan.
+    // ADR-0341
+    // TODO(TRD S25 §5-2 6): no backend translates this list yet — every plan today carries it empty.
+    pub extra_skill_roots: Vec<PathBuf>,
 }
 
 /// [`LaunchKitSource::prepare`] 가 낸 이 화신의 재료.
@@ -185,7 +200,9 @@ pub struct LaunchKit {
 
 /// 실행을 막는 사유 하나. 변형 순서가 보이는 순서다 — `Ord` 가 이 순서로 가른다(TRD S25 §1-3 8).
 ///
-/// `item` = 걸린 항목의 라이브러리 경로 · `via` = 그 항목을 참조하는 프리셋(온 길).
+/// `item` = the blocked item: its library path, or for a folder entry `folder:` + the normalized absolute folder path
+/// (the same third form as [`SourceRef::path`]). `via` = the presets that reference it (the chain it came through).
+// ADR-0341
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BlockReason {
     /// 붙은 파일이 없다.
@@ -247,6 +264,176 @@ impl fmt::Display for LaunchBlocked {
 }
 
 impl std::error::Error for LaunchBlocked {}
+
+// ── Reply rows ────────────────────────────────────────────────────────────────
+
+impl LaunchBlocked {
+    /// The reasons as `CommandError` args: `{"reasons": [row, …]}`, rows in the stored order. A row by kind:
+    /// - `{"kind": "missing" | "broken", "item", "via": [..], "code", "args", "line"?}`
+    /// - `{"kind": "conflict", "items": [{"item", "via": [..]}, ..], "code", "args", "line"?}`
+    /// - `{"kind": "library_unavailable", "code", "args", "line"?}`
+    ///
+    /// `line` is present only when the reason names one. A `Map`, not a `Value`, so a caller can put keys beside
+    /// `reasons` (an after-create block adds the created agent's id).
+    pub fn to_args(&self) -> Map<String, Value> {
+        let reasons = self
+            .reasons
+            .iter()
+            .map(|r| {
+                let mut row = Map::new();
+                let reason = match r {
+                    BlockReason::Missing { item, via, reason }
+                    | BlockReason::Broken { item, via, reason } => {
+                        let kind = if matches!(r, BlockReason::Missing { .. }) {
+                            "missing"
+                        } else {
+                            "broken"
+                        };
+                        row.insert("kind".into(), kind.into());
+                        row.insert("item".into(), item.as_str().into());
+                        row.insert("via".into(), via.clone().into());
+                        reason
+                    }
+                    BlockReason::Conflict { reason, items } => {
+                        row.insert("kind".into(), "conflict".into());
+                        let items = items
+                            .iter()
+                            .map(|(item, via)| {
+                                let mut entry = Map::new();
+                                entry.insert("item".into(), item.as_str().into());
+                                entry.insert("via".into(), via.clone().into());
+                                Value::Object(entry)
+                            })
+                            .collect::<Vec<_>>();
+                        row.insert("items".into(), items.into());
+                        reason
+                    }
+                    BlockReason::LibraryUnavailable { reason } => {
+                        row.insert("kind".into(), "library_unavailable".into());
+                        reason
+                    }
+                };
+                put_reason(&mut row, reason);
+                Value::Object(row)
+            })
+            .collect::<Vec<_>>();
+        let mut args = Map::new();
+        args.insert("reasons".into(), reasons.into());
+        args
+    }
+}
+
+/// One notice as a reply row: `{"code", "args", "line"?, "text"}` — `line` only when the notice names one, `text` =
+/// [`notice_text`]. The bus answer and the wire mirror are to use this one shape (no consumer yet — step 16 P3 · P4).
+pub fn notice_row(notice: &Notice) -> Value {
+    let mut row = Map::new();
+    put_reason(&mut row, notice);
+    row.insert("text".into(), notice_text(notice).into());
+    Value::Object(row)
+}
+
+fn put_reason(row: &mut Map<String, Value>, reason: &Reason) {
+    row.insert("code".into(), reason.code.as_str().into());
+    row.insert("args".into(), reason.args.clone());
+    if let Some(line) = reason.line {
+        row.insert("line".into(), line.into());
+    }
+}
+
+/// The wording of a notice for a person or an LLM reading the reply — Korean, factual, says the omission is intended
+/// and recommends no fix (TRD S25 G28 · §2-4 8).
+///
+/// Every code takes the generic wording today — the code and the values listed in `args` (object keys in name order).
+/// No production code emits a notice yet (the producers arrive with the asset library and the codex translation); a
+/// code that needs its own sentence gets an arm here when it is defined.
+/// Control characters in the code and the listed values (file names from the library — outside input) are escaped
+/// (`\n`, `\u{1b}`), so the line stays one line and carries no terminal escape when the CLI prints it.
+pub fn notice_text(notice: &Notice) -> String {
+    let mut listed = Vec::new();
+    collect_listed(&notice.args, &mut listed);
+    let code = escape_controls(&notice.code);
+    if listed.is_empty() {
+        format!("알림({code}): 의도된 동작입니다.")
+    } else {
+        format!(
+            "알림({code}): 의도된 동작입니다. 대상 — {}",
+            listed.join(" · ")
+        )
+    }
+}
+
+fn escape_controls(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
+fn collect_listed(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::Null => {}
+        Value::String(s) => out.push(escape_controls(s)),
+        Value::Bool(_) | Value::Number(_) => out.push(value.to_string()),
+        Value::Array(items) => items.iter().for_each(|v| collect_listed(v, out)),
+        Value::Object(map) => {
+            let mut entries: Vec<_> = map.iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(b.0));
+            entries.iter().for_each(|(_, v)| collect_listed(v, out));
+        }
+    }
+}
+
+/// The omission identity of a notice set — what "the same notices" means for notices once per agent.
+///
+/// Per notice: `code` and `args` in a canonical form (object keys sorted · array elements sorted, so a reordered name
+/// or path list is the same notice), `line` left out — a moved line or a reordered key does not make a new notice. The
+/// set: those identities sorted, deduplicated and joined by `\n` (compact JSON escapes every newline in a string, so
+/// the join cannot be forged by an argument). The empty set is the empty string.
+/// The value is persisted as is (no hash — a hash of std is not stable across Rust releases) and only compared for
+/// equality: the manager does not interpret it.
+// ADR-0341
+pub fn notice_fingerprint(notices: &[Notice]) -> String {
+    let mut identities: Vec<String> = notices
+        .iter()
+        .map(|n| {
+            format!(
+                "[{},{}]",
+                Value::String(n.code.clone()),
+                canonical_json(&n.args)
+            )
+        })
+        .collect();
+    identities.sort();
+    identities.dedup();
+    identities.join("\n")
+}
+
+// Not `Value::to_string` — key order follows the map, and if `preserve_order` is ever enabled elsewhere in the build
+//   that becomes insertion order.
+fn canonical_json(value: &Value) -> String {
+    match value {
+        Value::Object(map) => {
+            let mut entries: Vec<_> = map.iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(b.0));
+            let body: Vec<String> = entries
+                .iter()
+                .map(|(k, v)| format!("{}:{}", Value::String((*k).clone()), canonical_json(v)))
+                .collect();
+            format!("{{{}}}", body.join(","))
+        }
+        Value::Array(items) => {
+            let mut body: Vec<String> = items.iter().map(canonical_json).collect();
+            body.sort();
+            format!("[{}]", body.join(","))
+        }
+        scalar => scalar.to_string(),
+    }
+}
 
 /// [`LaunchKitSource::prepare`] 의 실패 — manager 가 갈래마다 다른 실패로 옮긴다.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -329,6 +516,8 @@ impl LaunchKitSource for NoopLaunchKits {
             include_priming: true,
             notices: Vec::new(),
             real: false,
+            folders: Vec::new(),
+            extra_skill_roots: Vec::new(),
         })
     }
 
@@ -635,6 +824,11 @@ pub struct LaunchArtifacts {
     pub instructions_file: Option<PathBuf>,
     /// 스킬을 싣는 뿌리 폴더(휘발 폴더 안).
     pub skill_roots: Vec<PathBuf>,
+    /// Environment pairs the backend adds to the process (claude's `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD`),
+    /// meant to be applied after the profile env so they override a profile value for the same key.
+    // ADR-0341
+    // TODO(TRD S25 §5-2 5): nothing fills or applies this yet — every artifact today carries it empty.
+    pub env: Vec<(String, String)>,
 }
 
 // ── 가드 · 묶음 ───────────────────────────────────────────────────────────────
@@ -929,6 +1123,8 @@ mod tests {
                     include_priming: true,
                     notices: Vec::new(),
                     real: false,
+                    folders: Vec::new(),
+                    extra_skill_roots: Vec::new(),
                 }
             );
         }
@@ -1529,5 +1725,171 @@ mod tests {
             "링크 밖 쓰기까지 막았다"
         );
         assert_eq!(std::fs::read(&settings).unwrap(), b"{}");
+    }
+
+    // ── Reply rows · notice fingerprint ──
+
+    // ADR-0341
+    #[test]
+    fn the_fingerprint_is_the_omission_identity_only() {
+        let x = || {
+            vec![
+                reason(
+                    "omitted",
+                    json!({ "names": ["b", "a"], "kind": "skill" }),
+                    Some(3),
+                ),
+                reason("other", json!({}), None),
+            ]
+        };
+        let base = notice_fingerprint(&x());
+
+        let mut moved = x();
+        moved[0].line = Some(40);
+        moved[1].line = Some(1);
+        assert_eq!(
+            notice_fingerprint(&moved),
+            base,
+            "a `line` shift is the same set"
+        );
+
+        let mut reordered = x();
+        reordered[0].args = json!({ "kind": "skill", "names": ["a", "b"] });
+        assert_eq!(
+            notice_fingerprint(&reordered),
+            base,
+            "a reordered key or name list is the same set"
+        );
+
+        let mut swapped = x();
+        swapped.reverse();
+        swapped.push(x()[0].clone());
+        assert_eq!(
+            notice_fingerprint(&swapped),
+            base,
+            "the set is sorted and deduplicated"
+        );
+
+        let mut renamed = x();
+        renamed[0].args = json!({ "names": ["a", "c"], "kind": "skill" });
+        assert_ne!(notice_fingerprint(&renamed), base, "another omitted name");
+        let mut recoded = x();
+        recoded[1].code = "another".to_string();
+        assert_ne!(notice_fingerprint(&recoded), base, "another code");
+        assert_ne!(notice_fingerprint(&x()[..1]), base, "a notice fewer");
+
+        assert_eq!(
+            notice_fingerprint(&[]),
+            "",
+            "the empty set is the empty string"
+        );
+        assert_ne!(notice_fingerprint(&[reason("", json!(null), None)]), "");
+    }
+
+    /// An argument cannot spell the separator of two notices — the join stays unambiguous.
+    #[test]
+    fn an_argument_holding_a_newline_does_not_forge_two_notices() {
+        let two = [reason("a", json!(1), None), reason("b", json!(2), None)];
+        let joined = notice_fingerprint(&two);
+        let forged = [reason("a", json!(format!("1]\n{}", "[\"b\",2")), None)];
+        assert_ne!(notice_fingerprint(&forged), joined);
+        assert!(!notice_fingerprint(&forged).contains('\n'));
+    }
+
+    #[test]
+    fn a_notice_row_carries_code_args_line_and_text() {
+        let with_line = reason("omitted", json!({ "names": ["지시서.md"] }), Some(7));
+        assert_eq!(
+            notice_row(&with_line),
+            json!({
+                "code": "omitted",
+                "args": { "names": ["지시서.md"] },
+                "line": 7,
+                "text": "알림(omitted): 의도된 동작입니다. 대상 — 지시서.md",
+            })
+        );
+        let without = reason("bare", json!({}), None);
+        assert_eq!(
+            notice_row(&without),
+            json!({ "code": "bare", "args": {}, "text": "알림(bare): 의도된 동작입니다." }),
+            "no `line` key when the notice names none"
+        );
+    }
+
+    #[test]
+    fn the_notice_text_lists_the_argument_values_in_key_order() {
+        let n = reason(
+            "omitted",
+            json!({ "skills": ["s1", "s2"], "instructions": ["i.md"], "count": 2, "none": null }),
+            None,
+        );
+        assert_eq!(
+            notice_text(&n),
+            "알림(omitted): 의도된 동작입니다. 대상 — 2 · i.md · s1 · s2"
+        );
+    }
+
+    /// Outside names reach a line the CLI prints as is — a newline or a terminal escape in them must not.
+    #[test]
+    fn the_notice_text_escapes_control_characters() {
+        let n = reason(
+            "omit\nted",
+            json!({ "names": ["a\nb.md", "\u{1b}[31mred", "탭\t이름"] }),
+            None,
+        );
+        let text = notice_text(&n);
+        assert_eq!(
+            text,
+            "알림(omit\\nted): 의도된 동작입니다. 대상 — a\\nb.md · \\u{1b}[31mred · 탭\\t이름"
+        );
+        assert!(!text.chars().any(char::is_control), "{text:?}");
+        assert_eq!(
+            notice_row(&n)["args"],
+            json!({ "names": ["a\nb.md", "\u{1b}[31mred", "탭\t이름"] }),
+            "the args stay raw — only the display line is escaped"
+        );
+    }
+
+    #[test]
+    fn blocked_args_carry_every_reason_as_a_kind_row_in_order() {
+        let blocked = LaunchBlocked {
+            reasons: vec![
+                BlockReason::Missing {
+                    item: "folder:D:\\rules".to_string(),
+                    via: vec!["team/base.yaml".to_string()],
+                    reason: reason("missing-folder", json!({ "path": "D:\\rules" }), None),
+                },
+                BlockReason::Broken {
+                    item: "team/a.yaml".to_string(),
+                    via: Vec::new(),
+                    reason: reason("yaml", json!({}), Some(2)),
+                },
+                BlockReason::Conflict {
+                    reason: reason("same-skill", json!({ "name": "s" }), None),
+                    items: vec![
+                        ("x/s".to_string(), vec!["p1.yaml".to_string()]),
+                        ("y/s".to_string(), vec!["p2.yaml".to_string()]),
+                    ],
+                },
+                BlockReason::LibraryUnavailable {
+                    reason: reason("no-library", json!({}), None),
+                },
+            ],
+        };
+        let args = blocked.to_args();
+        assert_eq!(args.len(), 1, "only `reasons` — callers add their own keys");
+        assert_eq!(
+            Value::Object(args),
+            json!({ "reasons": [
+                { "kind": "missing", "item": "folder:D:\\rules", "via": ["team/base.yaml"],
+                  "code": "missing-folder", "args": { "path": "D:\\rules" } },
+                { "kind": "broken", "item": "team/a.yaml", "via": [],
+                  "code": "yaml", "args": {}, "line": 2 },
+                { "kind": "conflict",
+                  "items": [ { "item": "x/s", "via": ["p1.yaml"] }, { "item": "y/s", "via": ["p2.yaml"] } ],
+                  "code": "same-skill", "args": { "name": "s" } },
+                { "kind": "library_unavailable", "code": "no-library", "args": {} },
+            ] })
+        );
     }
 }

@@ -14,11 +14,15 @@ use uuid::Uuid;
 
 use engram_dashboard_agent::backend;
 use engram_dashboard_agent::failure::AgentFailureKind;
-use engram_dashboard_agent::launch::LaunchArtifacts;
-use engram_dashboard_agent::manager::AgentManager;
+use engram_dashboard_agent::launch::{
+    notice_fingerprint, LaunchArtifacts, LaunchBlocked, LaunchKit, LaunchKitSource, LaunchPlan,
+    LaunchPorts, NoopLaunchKits, Notice, PrepareError,
+};
+use engram_dashboard_agent::manager::{Activated, AgentManager, NoticeDelivery};
 use engram_dashboard_agent::persistence::FileProfileStore;
 use engram_dashboard_agent::profile::{
-    AgentCommand, AgentOutputFormat, AgentProfile, ProfileRegistry, ProfileStore, SpawnMode,
+    AgentCommand, AgentOutputFormat, AgentProfile, ProfileRegistry, ProfileStore, RestoreOutcome,
+    SpawnMode,
 };
 use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_agent::types::{
@@ -26,6 +30,7 @@ use engram_dashboard_agent::types::{
     NoopControlChannel, ProvisionError, StatusSink,
 };
 use engram_dashboard_base::testing::wait_until;
+use serde_json::json;
 
 #[derive(Clone)]
 struct CountingSink {
@@ -1174,6 +1179,327 @@ fn a_handleless_claude_resume_opens_a_new_conversation_without_persisting() {
     assert_eq!(profiles.get(id).and_then(|p| p.backend_session_id), None);
     assert_eq!(stored_on_disk(&store, id), None, "대화 없는 id 가 영속됐다");
     assert_eq!(profiles.get(id).and_then(|p| p.last_failure), None);
+
+    let _ = manager.kill_agent(id);
+    let _ = wait_until(Duration::from_secs(10), || manager.list_agents().is_empty());
+    let _ = std::fs::remove_dir_all(&fake_dir);
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
+// ── Notices once per agent (ADR-0341) ──
+
+/// Plans with the notices the test sets — otherwise the Noop plan and kit (today's argv).
+#[derive(Default)]
+struct NoticeKits {
+    notices: Mutex<Vec<Notice>>,
+}
+
+impl NoticeKits {
+    fn set(&self, notices: Vec<Notice>) {
+        *self.notices.lock().unwrap() = notices;
+    }
+}
+
+impl LaunchKitSource for NoticeKits {
+    fn check(&self, profile: &AgentProfile) -> Result<LaunchPlan, LaunchBlocked> {
+        let mut plan = NoopLaunchKits.check(profile)?;
+        plan.notices = self.notices.lock().unwrap().clone();
+        Ok(plan)
+    }
+    fn prepare(
+        &self,
+        plan: LaunchPlan,
+        id: AgentId,
+        epoch: u32,
+    ) -> Result<LaunchKit, PrepareError> {
+        NoopLaunchKits.prepare(plan, id, epoch)
+    }
+    fn release(&self, _id: AgentId, _epoch: u32) {}
+}
+
+fn noticing_manager(tag: &str) -> (AgentManager, Arc<NoticeKits>, Arc<ProfileRegistry>) {
+    let (manager, _sink, profiles) = make_manager(tag);
+    let kits = Arc::new(NoticeKits::default());
+    let manager = manager.with_launch_ports(LaunchPorts {
+        kits: kits.clone(),
+        ..LaunchPorts::noop()
+    });
+    (manager, kits, profiles)
+}
+
+fn notice(code: &str, args: serde_json::Value, line: Option<u32>) -> Notice {
+    Notice {
+        code: code.to_string(),
+        args,
+        line,
+    }
+}
+
+fn delivered(manager: &AgentManager, profile: &AgentProfile, mode: SpawnMode) -> Activated {
+    manager
+        .activate_profile_reporting(profile, mode, NoticeDelivery::Delivered)
+        .expect("the activation succeeds")
+}
+
+fn recorded(profiles: &ProfileRegistry, id: AgentId) -> Option<String> {
+    profiles.get(id).and_then(|p| p.notice_fingerprint)
+}
+
+fn kill_and_reap(manager: &AgentManager, id: AgentId) {
+    manager.kill_agent(id).expect("kill_agent failed");
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            !manager.list_agents().iter().any(|a| a.id == id)
+        }),
+        "the killed session was not reaped"
+    );
+}
+
+/// A delivering caller is shown a set once: the same set (even with a moved line) comes back empty, a changed set
+/// comes back in full, and the empty set is recorded too (X → none → X shows X again).
+#[test]
+fn a_delivered_fresh_start_shows_each_notice_set_once_per_agent() {
+    let (manager, kits, profiles) = noticing_manager("notices-fresh");
+    let (profile, batch, count) = long_lived_profile("notices-fresh");
+    let id = profile.id;
+    profiles.try_upsert(profile.clone()).expect("저장 성공");
+    let x = vec![notice("omitted", json!({ "names": ["a.md"] }), Some(1))];
+
+    kits.set(x.clone());
+    assert_eq!(
+        delivered(&manager, &profile, SpawnMode::Fresh).notices,
+        x,
+        "first delivery"
+    );
+    assert_eq!(recorded(&profiles, id), Some(notice_fingerprint(&x)));
+    kill_and_reap(&manager, id);
+
+    let mut moved = x.clone();
+    moved[0].line = Some(9);
+    kits.set(moved);
+    assert!(
+        delivered(&manager, &profile, SpawnMode::Fresh)
+            .notices
+            .is_empty(),
+        "the same set (a moved line) is not shown again"
+    );
+    kill_and_reap(&manager, id);
+
+    let y = vec![x[0].clone(), notice("other", json!({}), None)];
+    kits.set(y.clone());
+    assert_eq!(
+        delivered(&manager, &profile, SpawnMode::Fresh).notices,
+        y,
+        "a changed set is shown in full"
+    );
+    kill_and_reap(&manager, id);
+
+    kits.set(Vec::new());
+    assert!(delivered(&manager, &profile, SpawnMode::Fresh)
+        .notices
+        .is_empty());
+    assert_eq!(
+        recorded(&profiles, id),
+        Some(String::new()),
+        "the empty set is recorded"
+    );
+    kill_and_reap(&manager, id);
+
+    kits.set(y.clone());
+    assert_eq!(
+        delivered(&manager, &profile, SpawnMode::Fresh).notices,
+        y,
+        "after an empty set the old set is new again"
+    );
+    kill_and_reap(&manager, id);
+    let _ = std::fs::remove_file(&count);
+    let _ = std::fs::remove_file(&batch);
+}
+
+/// Only a caller that shows the notices marks them as seen — a withheld reply and a moot activation (already running,
+/// no launch) record nothing, so the next delivering caller still gets the set.
+#[test]
+fn a_withheld_or_moot_activation_records_nothing() {
+    let (manager, kits, profiles) = noticing_manager("notices-withheld");
+    let (profile, batch, count) = long_lived_profile("notices-withheld");
+    let id = profile.id;
+    profiles.try_upsert(profile.clone()).expect("저장 성공");
+    let x = vec![notice("omitted", json!({ "names": ["a.md"] }), None)];
+    kits.set(x.clone());
+
+    let withheld = manager
+        .activate_profile_reporting(&profile, SpawnMode::Fresh, NoticeDelivery::Withheld)
+        .expect("starts");
+    assert_eq!(withheld.notices, x, "the notices are returned either way");
+    assert_eq!(
+        recorded(&profiles, id),
+        None,
+        "a withheld reply records nothing"
+    );
+
+    let moot = delivered(&manager, &profile, SpawnMode::Fresh);
+    assert_eq!(
+        moot.info.epoch, withheld.info.epoch,
+        "premise: nothing was launched"
+    );
+    assert!(
+        moot.notices.is_empty(),
+        "a moot activation carries no notices"
+    );
+    assert_eq!(
+        recorded(&profiles, id),
+        None,
+        "a moot activation records nothing"
+    );
+    kill_and_reap(&manager, id);
+
+    assert_eq!(delivered(&manager, &profile, SpawnMode::Fresh).notices, x);
+    assert_eq!(recorded(&profiles, id), Some(notice_fingerprint(&x)));
+    kill_and_reap(&manager, id);
+    let _ = std::fs::remove_file(&count);
+    let _ = std::fs::remove_file(&batch);
+}
+
+/// A caller resume that started a process records (past the early-exit window), and the next resume with the same set
+/// gets an empty list.
+#[test]
+fn a_caller_resume_records_and_the_next_resume_with_the_same_set_is_empty() {
+    let (manager, kits, profiles) = noticing_manager("notices-resume");
+    let (profile, batch, count) = long_lived_profile("notices-resume");
+    let id = profile.id;
+    profiles.try_upsert(profile.clone()).expect("저장 성공");
+    let x = vec![notice("omitted", json!({ "names": ["s"] }), None)];
+    kits.set(x.clone());
+
+    assert_eq!(delivered(&manager, &profile, SpawnMode::Resume).notices, x);
+    assert_eq!(recorded(&profiles, id), Some(notice_fingerprint(&x)));
+    kill_and_reap(&manager, id);
+
+    assert!(delivered(&manager, &profile, SpawnMode::Resume)
+        .notices
+        .is_empty());
+    kill_and_reap(&manager, id);
+    let _ = std::fs::remove_file(&count);
+    let _ = std::fs::remove_file(&batch);
+}
+
+/// Boot restore answers no caller — it records nothing, so the first caller launch after it still shows the set.
+#[test]
+fn boot_restore_records_no_notice_fingerprint() {
+    let (manager, kits, profiles) = noticing_manager("notices-restore");
+    let (mut profile, batch, count) = long_lived_profile("notices-restore");
+    profile.auto_restore = true;
+    let id = profile.id;
+    profiles.try_upsert(profile.clone()).expect("저장 성공");
+    let x = vec![notice("omitted", json!({ "names": ["s"] }), None)];
+    kits.set(x.clone());
+
+    let reports = manager.restore_all();
+    assert!(
+        reports
+            .iter()
+            .any(|r| r.agent_id == id && matches!(r.outcome, RestoreOutcome::Started)),
+        "premise: the restore started the agent — got {reports:?}"
+    );
+    assert_eq!(
+        recorded(&profiles, id),
+        None,
+        "boot restore recorded the set"
+    );
+    kill_and_reap(&manager, id);
+
+    assert_eq!(delivered(&manager, &profile, SpawnMode::Fresh).notices, x);
+    kill_and_reap(&manager, id);
+    let _ = std::fs::remove_file(&count);
+    let _ = std::fs::remove_file(&batch);
+}
+
+/// A launch that fails after its process started (an early exit in the resume window) answers with an error — it
+/// records nothing.
+#[test]
+fn a_post_start_failure_records_no_notice_fingerprint() {
+    let (manager, kits, profiles) = noticing_manager("notices-early-exit");
+    let (profile, batch, count) = always_early_exit_profile("notices-early-exit");
+    let id = profile.id;
+    profiles.try_upsert(profile.clone()).expect("저장 성공");
+    kits.set(vec![notice("omitted", json!({ "names": ["s"] }), None)]);
+
+    let result =
+        manager.activate_profile_reporting(&profile, SpawnMode::Resume, NoticeDelivery::Delivered);
+    assert!(
+        result.is_err(),
+        "premise: the resume exits early — got {result:?}"
+    );
+    assert!(
+        wait_until(Duration::from_secs(5), || run_count(&count) == 1),
+        "premise: the process started"
+    );
+    assert_eq!(
+        recorded(&profiles, id),
+        None,
+        "a failed launch recorded the set"
+    );
+
+    let _ = wait_until(Duration::from_secs(5), || {
+        !manager.list_agents().iter().any(|a| a.id == id)
+    });
+    let _ = std::fs::remove_file(&count);
+    let _ = std::fs::remove_file(&batch);
+}
+
+/// `spawn_agent_reporting` carries the notices of a start and none of a moot request — and never records: it does
+/// not wait for a link verdict, so a link failing after the start would leave the set marked as seen.
+#[test]
+fn spawn_agent_reporting_carries_the_notices_of_a_start_and_never_records() {
+    let (manager, kits, profiles) = noticing_manager("notices-spawn");
+    let (profile, batch, count) = long_lived_profile("notices-spawn");
+    let id = profile.id;
+    profiles.try_upsert(profile.clone()).expect("저장 성공");
+    let x = vec![notice("omitted", json!({ "names": ["s"] }), None)];
+    kits.set(x.clone());
+
+    let (started, notices) = manager
+        .spawn_agent_reporting(&profile, SpawnMode::Fresh)
+        .expect("starts");
+    assert!(started.started());
+    assert_eq!(notices, x);
+    assert_eq!(recorded(&profiles, id), None, "this verb never records");
+
+    let (moot, notices) = manager
+        .spawn_agent_reporting(&profile, SpawnMode::Fresh)
+        .expect("moot");
+    assert!(!moot.started());
+    assert!(notices.is_empty());
+    kill_and_reap(&manager, id);
+    let _ = std::fs::remove_file(&count);
+    let _ = std::fs::remove_file(&batch);
+}
+
+/// A caller resume with no stored handle opens a new conversation (the `resume_no_fallback` head) — that start is a
+/// delivered success too: the notices come back and the fingerprint is recorded.
+#[test]
+fn a_handleless_caller_resume_that_opens_a_new_conversation_records_the_notices() {
+    let (manager, kits, profiles) = noticing_manager("notices-handleless");
+    let (fake_dir, args_log) = fake_claude_dir("notices-handleless");
+    let (profile, cwd) = claude_on_fake_path("notices-handleless-claude", &fake_dir);
+    let id = profile.id;
+    profiles.try_upsert(profile.clone()).expect("저장 성공");
+    let x = vec![notice("omitted", json!({ "names": ["s"] }), None)];
+    kits.set(x.clone());
+
+    let activated = delivered(&manager, &profile, SpawnMode::Resume);
+    assert!(
+        wait_until(Duration::from_secs(10), || !fake_spawns(&args_log)
+            .is_empty()),
+        "premise: the fake claude started"
+    );
+    let spawns = fake_spawns(&args_log);
+    assert!(
+        spawns.len() == 1 && !spawns[0].contains("--resume"),
+        "premise: one new-conversation spawn — got {spawns:?}"
+    );
+    assert_eq!(activated.notices, x);
+    assert_eq!(recorded(&profiles, id), Some(notice_fingerprint(&x)));
 
     let _ = manager.kill_agent(id);
     let _ = wait_until(Duration::from_secs(10), || manager.list_agents().is_empty());

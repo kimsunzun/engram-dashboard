@@ -662,6 +662,44 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// The notice fingerprint survives a daemon restart — a recorded empty set stays distinct from "nothing recorded",
+    /// and an item without the key reads as nothing recorded.
+    // ADR-0341
+    #[test]
+    fn the_notice_fingerprint_survives_a_save_and_reload() {
+        let dir = temp_dir("notice-fingerprint");
+        let mut shown = sample();
+        shown.notice_fingerprint = Some("[\"omitted\",{}]".into());
+        let mut empty = sample();
+        empty.notice_fingerprint = Some(String::new());
+        let never = sample();
+        FileProfileStore::new(dir.clone())
+            .save(&[shown.clone(), empty.clone(), never.clone()])
+            .unwrap();
+
+        let back = FileProfileStore::new(dir.clone()).load();
+        let of = |id| {
+            back.iter()
+                .find(|p| p.id == id)
+                .unwrap()
+                .notice_fingerprint
+                .clone()
+        };
+        assert_eq!(of(shown.id), shown.notice_fingerprint);
+        assert_eq!(of(empty.id), Some(String::new()));
+        assert_eq!(of(never.id), None);
+
+        let _ = fs::remove_dir_all(&dir);
+
+        let without_key = temp_dir("notice-fingerprint-missing");
+        put(&without_key, PROFILES.name, OLD_AGENTS_JSON);
+        assert_eq!(
+            FileProfileStore::new(without_key.clone()).load()[0].notice_fingerprint,
+            None
+        );
+        let _ = fs::remove_dir_all(&without_key);
+    }
+
     /// 새 칸이 없는 항목도 손상이 아니다 — 만든 직후와 같은 값으로 읽힌다.
     #[test]
     fn an_item_without_the_new_fields_reads_as_freshly_created() {
