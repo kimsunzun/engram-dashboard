@@ -42,7 +42,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 - **daemon** — `AgentManager` 소유. WS 로 셸을 받고 명령 버스 배달 · 우편 호스트 · 제어 평면(HTTP 하나에 MCP `/mcp` + CLI `/control/*`, 신원 = Bearer 토큰)을 돈다.
 - **agent** — 에이전트 런타임(Tauri 0). 세션 · 펌프 · transport(PTY · stdio) · backend(claude · codex · 셸).
 - **cli** — `engram.exe`. 스폰된 에이전트가 HTTP 로 데몬 제어 라우트에 붙는다(인증 + 배송만).
-- **protocol** — 셸 ↔ 데몬 wire 계약 + codec + ts-rs 바인딩.
+- **protocol** — 셸 ↔ 데몬 wire 계약 + codec + ts-rs 바인딩(워크스페이스 의존 0).
 - **command** — 명령 버스 도구(명령 0개 — 명령은 생산자 옆에서 선언).
 - **net** — 데몬 네트워크 행(WS · 핸드셰이크 · 단일 인스턴스 · `daemon.json`).
 - **messaging** — 에이전트 간 우편 커널(워크스페이스 의존 0, 포트 trait 로만 접합).

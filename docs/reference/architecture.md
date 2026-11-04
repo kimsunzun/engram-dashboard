@@ -29,9 +29,8 @@ src-tauri ─▶ protocol · command · base · platform      (agent 는 의존�
 daemon    ─▶ agent · protocol · net(server) · messaging · command · base · platform
 cli       ─▶ agent · command
 agent     ─▶ command · base · platform
-protocol  ─▶ command
 net       ─▶ protocol · platform   (platform only behind the server feature)
-base · platform · command · messaging · transport ─▶ 워크스페이스 의존 0
+base · platform · command · messaging · transport · protocol ─▶ 워크스페이스 의존 0
 ```
 
 ## 모듈

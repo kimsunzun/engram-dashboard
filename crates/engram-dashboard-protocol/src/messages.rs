@@ -257,7 +257,7 @@ pub enum AgentCommand {
     // ★`request_id` 에 `#[serde(default)]` 를 달지 말 것★ — 이 crate 의 [`RequestId::default`] 는
     //   **새 v4 를 찍는다**(`ids.rs`). 기본값을 허용하면 그 칸이 빠진 패킷이 거절 대신 **아무와도 짝이
     //   안 맞는 새 상관 키**를 얻어 답장이 영영 안 붙는다(도구 crate 쪽 동명 타입은 정반대로 `Default`
-    //   자체가 없다 — `engram-dashboard-command` 의 `envelope.rs` 가 그 이유를 적고 있다).
+    //   자체가 없다 — 도구 crate 의 `envelope.rs` 가 그 이유를 적고 있다).
     /// 주인이 **붙는 순간** 자기 선언 전량을 한 방에 얹는다(TRD §3-7 조항 1). 이름마다 왕복하지 않고,
     /// 재연결마다 전량 재전송한다.
     ///

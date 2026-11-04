@@ -12,6 +12,9 @@
 //!
 //! ## Tauri import 금지. 도메인 로직 금지(순수 타입·serde·codec 만).
 //!
+//! ## No workspace crate dependencies (ADR-0272 「영향」)
+//! Gate = the `ci.yml` step `protocol gate 1` (direct workspace deps = exactly self).
+//!
 //! ## ★ 이름 충돌 메모:
 //! 이 crate 의 [`AgentCommand`] = **클→데몬 요청 envelope**(설계 §3 명칭).
 //! 기존 `agent(profile.rs)::AgentCommand` = **spawn 종류**(Claude/Shell) — 그쪽의 wire 미러는 이 enum 이

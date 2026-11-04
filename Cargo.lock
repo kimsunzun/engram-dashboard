@@ -1130,7 +1130,6 @@ dependencies = [
 name = "engram-dashboard-protocol"
 version = "0.1.0"
 dependencies = [
- "engram-dashboard-command",
  "serde",
  "serde_bytes",
  "serde_json",

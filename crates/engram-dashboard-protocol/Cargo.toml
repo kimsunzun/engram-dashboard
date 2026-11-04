@@ -5,10 +5,7 @@ edition = "2021"
 description = "Engram Dashboard 경계 계약 — 클↔데몬 wire 프로토콜. Tauri import 금지(linchpin)."
 
 [dependencies]
-# ADR-0272 결정 3: 명령 칸 넷(봉투 · 답장 · 등록 · 등록 변경)이 전부 원문 JSON 이라 이 crate 는 도구 crate 타입을
-#   하나도 부르지 않는다 — 남은 간선은 쓰는 곳이 없고, protocol 의존 상한 게이트와 함께 3-1 U5 가 지운다
-#   (TRD S21-crate-boundaries trd-3 §6-1).
-engram-dashboard-command = { path = "../engram-dashboard-command" }
+# ★No workspace crate goes here★ — ADR-0272 「영향」 invariant; the wall is the `ci.yml` step `protocol gate 1`.
 serde = { version = "1", features = ["derive"] }
 # discovery::DaemonInfo parse/serialize(daemon.json 공유 계약) · `raw_value` = 명령 칸 원문(ADR-0272 결정 3)
 serde_json = { version = "1", features = ["raw_value"] }
