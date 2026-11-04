@@ -1,38 +1,57 @@
-# 핸드오프: 3단계 transport — 3-0 전부 착지(U1~U7) · 다음 = 3-1 U5 → 3-2
+# Handoff: stage 3 transport — master merged twice + qa binding fixed · next = 3-1 U5 → 3-2
 
-## 한 줄 상태 · 다음 첫 액션
-브랜치 `v0.4.1/refactor/transport-attach` HEAD = 이 핸드오프 커밋(코드 마지막 = `baf8e42a` U7 · 문서 = `7ee4a241`). 작업트리 깨끗. ★push 안 함 — 원격은 `dd0499a7` 까지(로컬 커밋 다수 앞섬)★.
-이번 세션 커밋: 098dad63 U1d-1 · 379d5cf8 U1d-2 · 25439d4f 문서 · fd7552a8 U2 · b35af1c7 U3 · 00fc52d4 U4 · de104f69 U5 · 9be94cd9 U6a · 5d981aaf U6b · 10fcae05 핸드오프 · baf8e42a U7 · 7ee4a241 문서(U2~U7 착지).
-★다음 첫 액션 = 3-1 U5★(TRD §6-1 U5 행 — 착지로 줄었다: protocol → command Cargo 간선 삭제 + protocol 의존 상한 게이트 + 문서. 지킴이 · golden 은 U4c 가 셸로 옮겼다). 게이트 사본 셋(ci.yml · qa 바인딩 · CLAUDE.md 「빌드·검증 명령」 줄 — 3-1 은 CLAUDE.md 도 고친다)을 같은 커밋 · `/review doc`.
-그 뒤 3-2(셸 부착 — §6-2 U1~U5 · GUI 실측 `/qa full` 포함) → 3-3(데몬 부착 · net 걷기 — §6-3 U1~U6). 3-2 착수 전 TRD §6-2 U2 의 「3-0 착지가 더한 주의 셋」(DecodeClass · 옛 세대 Dropped 는 UI 경고 아님 · 예산 소진 문안은 마지막 ConnectFailed 코드)을 읽을 것.
-진척: 3단계 23 단위 중 ≈12(3-0 U1~U7 · 3-1 U1~U4 완료). S21 전체 = 1단계 · 2단계 · A 완료, 3단계 진행 중.
+## Know first
+- Project rules changed under this branch today (master S30 merged in): CLAUDE.md is now the slim version; new `docs/` text and code comments are **English** (rewritten paragraphs too — CLAUDE.md 「언어」); branch/commit procedure lives in `docs/handbook/branch-commit.md`; full regression is local before commit (ADR-0340, procedure = `.claude/skill-bindings/qa-verify.md`); deletion = `bash ~/.claude/references/recycle.sh <path>` (`rm -rf` is blocked).
+- The qa binding is master's new skeleton (known failures · tracking records · baseline copy · triage · recycle cleanup) plus this branch's two edits (below).
 
-## 사용자 결정 · 지시(이번 세션)
-- 다중 데몬(3단계 뒤)은 바로 착수하지 않는다 — 먼저 사용자에게 네트워크 지식 · 구조 강의.
-- 토큰 절약 개선은 스킬 지시서에 쓰지 말고 핸드오프로만(스킬 시스템 개선 중 — 새 지시서 들어오면 사용자가 사인).
-- 「토큰 소모하라」 지시는 기록에 없었다(확인함).
-- 사용자가 「쭉쭉 진행 · 끝나면 핸드오프」로 위임 — 단위마다 리뷰 · QA · 커밋까지 자율로 돈다.
+## One-line state · next first action
+Branch `v0.4.1/refactor/transport-attach`, HEAD = this handoff commit (code/binding last = `c2ac9dd8`). Work tree clean. **Not pushed** — origin is at `dd0499a7`, local is 53+ commits ahead.
+This session (no stage-3 code work):
+- `31069634` merge master `671b7ece` (S30 skill bindings/docs · S31 gate regex · S32 codex contract). Conflicts were md only: qa.md + CLAUDE.md took master (4k block dropped; `shell gate 3` stays in ci.yml) · decisions/README + tracking kept both rows · testing-strategy took master's role lines and carries the branch's net facts + shell gate 3 (rewritten in English) · stale lines fixed: architecture.md crate graph (no shell → net; net → protocol unconditional; net bullet in English) · T-60 「다음」 → `docs/handbook/branch-commit.md`.
+- `a4ffa4e9` merge master `9152bcaa` (qa binding skeleton follow-up; no conflicts).
+- `c2ac9dd8` S21 chore(qa-binding): ① qa-verify backend job gets the `ws_accept --list` line (「네 줄」) ② qa.md 「Rust 테스트 판정」: net features-off line runs 0 tests on this branch (tests moved to protocol, ADR-0310 D9) → PASS = `__EXIT=0` + a `running 0 tests` line, reported as 「컴파일 PASS (시험 0개)」, not a test pass; remove with the net crate in 3-3 U6.
+**Next first action = 3-1 U5** (TRD §6-1 U5 row: delete protocol → command Cargo edge + protocol dependency-cap gate + docs). Gate copies now live in ci.yml (+ qa-verify extracts it) — the old 「three copies incl. CLAUDE.md 빌드·검증 명령」 no longer exists (slim CLAUDE.md has no gate lines); check where the gate text must go under the new binding before editing. `/engram-review doc` for doc changes.
+Then 3-2 (shell attach — §6-2 U1~U5 · GUI `/qa` real measurement) → 3-3 (daemon attach · remove net — §6-3 U1~U6). Before 3-2 read TRD §6-2 U2 「3-0 착지가 더한 주의 셋」.
+Progress: stage 3 ≈12 of 23 units (3-0 U1~U7 · 3-1 U1~U4).
 
-## 진행 방식(토큰 절약 — 이 주제에서 적용 중 · 실측 근거)
-- 실측: 코더 15만~50만/단위(작은 수정 15만~22만) · Claude 리뷰어 읽기 전용 16만~25만/회(예전 빌드 + 변이 27만~36만) · codex ~8만/회 · QA 12만~17만/회.
-- Claude 리뷰어 = 읽기 전용(빌드 · 변이 금지 — 코더 변이 결과를 검토). 첫 회차 = Claude + codex 렌즈 1(diff) + 렌즈 2(호출부 — 새 API 뿐이거나 transport 밖 소비자 0 이면 생략). 확인 회차 = 고친 델타만 Claude 하나 · 작은 기계적 수정은 메인 직접 확인으로 갈음.
-- 문맥 30만 넘은 코더는 이어 쓰지 않는다 → 새 코더 + 짧은 지시서. 코드 · 문서는 파일이 안 겹치면 병렬로.
-- QA = worker-scout · run-detached · 4f~4k 는 `source` 로(자식 bash 는 rg 함수가 없어 거짓 FAIL) · 헬퍼 = scratchpad `qa8/rd.sh` · `qa6/g4*.sh`(세션 스크래치 — 새 세션엔 없음, 바인딩 원문에서 다시 뽑는다). 시험 뒤 바인딩 57~66 개 `M` 은 줄끝뿐 — `git diff --quiet` 확인 후 `git checkout --` 로 되돌리고 커밋.
+## Verification state
+- Full regression on the final tree `4f585839` (= HEAD `c2ac9dd8` tree, verified by `git rev-parse HEAD^{tree}`): PASS — workspace 61 result lines · 5299 passed · 0 failed · 35 ignored · lib_unit 1351 · gates 31/31 · frontend 2802 + tsc · `ws_accept --list` 12 · net features-off = compile PASS (0 tests).
+- Earlier today on tree `c2a5f281` (= `31069634`): same numbers + codex lane 13/13 (lanes.tsv updated) + Job lane: only known failure `ws_e2e real_process::ignored_daemon_kill_cleans_pty_child` + GUI smoke PASS (claude terminal agent spawn/output/kill).
+- Not measured: the intermediate merge commit tree `a4ffa4e9` alone (differs from the measured final tree only by the two binding md edits).
+- Rerun = `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Command "cargo test --workspace -- --test-threads=4" -WorkDir "I:/Engram/apps/engram-dashboard" -LogFile "<path>.log"` (full CI-three-jobs procedure = qa-verify 「전체 회귀」).
 
-## 검증 상태
-- U7 커밋 시점 /qa standard PASS: 결과 줄 61(새 `ws_accept` — 기본 기능에선 0 건) · 5294 통과 · 0 실패 · 35 무시 · lib_unit 1351 · transport 380 / all-features 405 + ws_accept 12 · ws_dial 2 · ws_reject 5 · ws_write_deadline 4 · 격리 게이트 전부 · 프론트 2802.
-- 재실행 = `scripts/run-detached.ps1 -Command "cargo test --workspace -- --test-threads=4" -WorkDir "I:/Engram/apps/engram-dashboard" -LogFile "<경로>.log"`.
-- 안 돌린 것: GUI 실측(3-2 에서) · 실 데몬 · 실 WMI 레인(transport 만 바뀜).
+## Decisions
+- net features-off verdict: binding exception, not a revived test in net. Reason: restoring a test in net splits ownership of frame shape/golden again (branch moved it to protocol); the only test left to write would be a re-export identity check that always passes. Told the user the exception is framed as a compile check so it does not conflict with the qa skeleton's sealed 「0 tests is not a pass」; user did not object.
+- User conditions this session: 「qa 에서 바인딩의 알려진 실패(T-52 stop_smoke · ws_e2e ignored_daemon_kill_cleans_pty_child)만 남으면 코더에게 돌리지 말고 진행해」. Earlier standing: user delegates 「쭉쭉 진행 · 끝나면 핸드오프」 per unit with review · QA · commit; multi-daemon work waits for a network/structure lecture to the user first; token-saving notes go to handoff, not skill briefs.
+- Unresolved: none blocking.
 
-## 리뷰 기록에 남는 것
-- U2 확인 회차 = codex 한도로 Claude 대체 — 단독 family 리뷰(cross-family 교차검증 없음).
-- 첫 문서 리뷰: codex 「U5 행 취소선 묶음 삭제」 미반영(저장소 관례 취소선 보존) — 사용자에게 보고함.
-- U2 · U4 · U6a · U6b 의 lib 헤더 고침은 별도 `/review doc` 없이 `/review code deep` 안의 doc-aware 리뷰어가 봤다(step-log 에 기록).
+## Do-not / lessons
+- Do not answer subagent interim notifications (「stopped with background work still running · not reported yet」) with user-facing lines — user flagged 20+ 「QA 진행 중」 lines as noise; stay silent until the final hand-back.
+- Cause of those notifications: QA worker wrote its own polling driver + Monitor `tail -f` watcher because the binding gives no way to wait for `__EXIT` across 25 detached commands. In the next QA brief, tell the worker to wait inside a single tool call (no turn-ending polling) until a shared driver exists.
+- In `I:/Engram`, commit feedback files with an explicit pathspec only — a `git add <dir>` there once staged an unrelated untracked file (undone).
 
-## 남은 메모 · 보류
-- 3-3 U4: 인증 대기 칸 · 운영 칸 없음 — 지금 업그레이드 칸이 Live 까지 그 몫 · 운영 중 받은 상대 수 상한 없음(TRD 에 「TRD 와 다른 점」으로 기록).
-- 받은 `Close.reason` 가림 = TRD §9 후속.
-- 선재 하네스 결함 보류: `testing.rs` `MemTx::ping`(MemoryEndpoint) ping 멈춤 · 쓰기 멈춤 두 단계 대기 — 고치면 기존 peer 시험 타이밍이 바뀔 수 있음.
-- `mask.rs` 는 게이트 ③ 순수 층 목록에 안 넣었다(그 게이트는 파일 단위라 import 를 안 본다 — U7 코더 판단).
-- 의존성: transport `[dev-dependencies] tokio` features `rt-multi-thread`(U6b 시험) — 운영 그래프 무관 · Cargo.lock 무변경(사용자에게 보고함).
-- 주의(이전 그대로): codex 리뷰가 Bash 600 s 에 걸리면 `tasks/<id>.output` 회수 · `python3`/`python` 은 Store 스텁(`py` 사용) · `rg` = `C:\Users\kimsunzun\AppData\Local\OpenAI\Codex\bin\0354bc6c584f210c\rg.exe` · 워크트리 `.claude/worktrees/stage3-protocol` 쉬는 중 · 지우지 못한 임시 폴더(사용자 몫) `I:\Engram\apps\rv-u1a-target` · `%TEMP%\engram-review\31u2\{tgt,blocks}`.
+## Token-saving practice (still in force for this topic)
+- Coder 150k~500k/unit · Claude reviewer read-only 160k~250k/round · codex ~80k/round · QA 110k~230k/run (today: 134k and 111k new input).
+- Claude reviewer = read-only; first round = Claude + codex lens 1 (diff) + lens 2 (call sites, skip when only new API / no consumer outside transport); confirm rounds = delta only.
+- Coder past 300k context → new coder with a short brief. Code and docs in parallel when files don't overlap.
+- QA = worker-senior (『qa 실행자』 = 주도 상급); gate blocks needing the `rg` function must be `source`d.
+
+## Open notes (carried)
+- 3-3 U4: no auth-wait slot · no operating slot (upgrade slot covers up to Live) · no cap on accepted peers in operation (recorded in TRD 「TRD 와 다른 점」).
+- Masking received `Close.reason` = TRD §9 follow-up.
+- Pre-existing harness defect parked: `testing.rs` `MemTx::ping` (MemoryEndpoint) ping stall · two-stage write-stall wait.
+- `mask.rs` not in gate ③ pure-layer list (file-level gate).
+- transport `[dev-dependencies] tokio` `rt-multi-thread` (U6b test) — no production graph change.
+- Tools: `py` not `python` · `rg` = `C:\Users\kimsunzun\AppData\Local\OpenAI\Codex\bin\0354bc6c584f210c\rg.exe` · codex review hitting Bash 600 s → recover from `tasks/<id>.output` · worktree `.claude/worktrees/stage3-protocol` idle · leftover temp dirs for the user: `I:\Engram\apps\rv-u1a-target`, `%TEMP%\engram-review\31u2\{tgt,blocks}`.
+
+## Improvement feedback filed today (Engram repo, all 미반영)
+- `core/claude-global-shared/references/global-feedback.md` — interim-notification noise · QA worker polling cause (`9d5ca04`, `b0a1383`).
+- `core/claude-global-shared/skills/engram-qa/feedback.md` — qa-verify ws_accept drift (now fixed on this branch; master still has 3 lines) · net 0-test verdict · `$QA_TMP` cleanup blocked / own watcher holding files · shared wait driver · plain-shell-agent brief error (`4b92c1c`, `b0a1383`).
+- Note for master: master's ci.yml has no `ws_accept` (checked `9152bcaa`) and its qa-verify lists 3 `--list` lines — consistent there; both the gate line and the binding line land on master together when this branch merges.
+
+## Resume command
+`git -C I:/Engram/apps/engram-dashboard log --oneline -5 && git -C I:/Engram/apps/engram-dashboard status -sb`
+
+## References
+- TRD stage 3: `docs/process/S21-crate-boundaries/trd-3-transport.md` (§6-1 U5 row, §6-2 U2 cautions).
+- `.claude/skill-bindings/qa.md` · `.claude/skill-bindings/qa-verify.md` · `docs/handbook/branch-commit.md` · `docs/reference/architecture.md`.
