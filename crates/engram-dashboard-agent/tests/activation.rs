@@ -13,10 +13,13 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use engram_dashboard_agent::backend;
+use engram_dashboard_agent::commands::{
+    make_table, AgentBackend, AgentCommandHost, RosterChanged, UsageCommandHost, UsageVendorRow,
+};
 use engram_dashboard_agent::failure::AgentFailureKind;
 use engram_dashboard_agent::launch::{
-    notice_fingerprint, LaunchArtifacts, LaunchBlocked, LaunchKit, LaunchKitSource, LaunchPlan,
-    LaunchPorts, NoopLaunchKits, Notice, PrepareError,
+    notice_fingerprint, notice_row, BlockReason, LaunchArtifacts, LaunchBlocked, LaunchKit,
+    LaunchKitSource, LaunchPlan, LaunchPorts, NoopLaunchKits, Notice, PrepareError,
 };
 use engram_dashboard_agent::manager::{Activated, AgentManager, NoticeDelivery};
 use engram_dashboard_agent::persistence::FileProfileStore;
@@ -30,6 +33,8 @@ use engram_dashboard_agent::types::{
     NoopControlChannel, ProvisionError, StatusSink,
 };
 use engram_dashboard_base::testing::wait_until;
+use engram_dashboard_command::testing::block_on;
+use engram_dashboard_command::ErrorCode;
 use serde_json::json;
 
 #[derive(Clone)]
@@ -1188,10 +1193,11 @@ fn a_handleless_claude_resume_opens_a_new_conversation_without_persisting() {
 
 // ── Notices once per agent (ADR-0341) ──
 
-/// Plans with the notices the test sets — otherwise the Noop plan and kit (today's argv).
+/// Plans with the notices the test sets, or the block it sets — otherwise the Noop plan and kit (today's argv).
 #[derive(Default)]
 struct NoticeKits {
     notices: Mutex<Vec<Notice>>,
+    block: Mutex<Option<LaunchBlocked>>,
 }
 
 impl NoticeKits {
@@ -1202,6 +1208,9 @@ impl NoticeKits {
 
 impl LaunchKitSource for NoticeKits {
     fn check(&self, profile: &AgentProfile) -> Result<LaunchPlan, LaunchBlocked> {
+        if let Some(blocked) = self.block.lock().unwrap().clone() {
+            return Err(blocked);
+        }
         let mut plan = NoopLaunchKits.check(profile)?;
         plan.notices = self.notices.lock().unwrap().clone();
         Ok(plan)
@@ -1505,4 +1514,91 @@ fn a_handleless_caller_resume_that_opens_a_new_conversation_records_the_notices(
     let _ = wait_until(Duration::from_secs(10), || manager.list_agents().is_empty());
     let _ = std::fs::remove_dir_all(&fake_dir);
     let _ = std::fs::remove_dir_all(&cwd);
+}
+
+// ── The bus `agent.spawn` over the real manager (TRD S25 step 16) ──
+
+struct NoRoster;
+
+impl RosterChanged for NoRoster {
+    fn roster_changed(&self) {}
+}
+
+struct NoUsage;
+
+impl UsageCommandHost for NoUsage {
+    fn get(&self, _backend: &AgentBackend) -> Option<UsageVendorRow> {
+        None
+    }
+    fn refresh(&self, _backend: &AgentBackend) -> Option<UsageVendorRow> {
+        None
+    }
+}
+
+/// The bus `agent.spawn` is a delivering caller: its success answer carries the notices as rows and marks the set as
+/// shown (the next start with the same set answers an empty list). A blocked launch starts nothing and is a
+/// `CONFLICT` carrying every reason in `args`.
+#[test]
+fn the_bus_spawn_delivers_the_notices_and_answers_a_block_with_its_reasons() {
+    let (manager, kits, profiles) = noticing_manager("notices-bus");
+    let manager = Arc::new(manager);
+    let (profile, batch, count) = long_lived_profile("notices-bus");
+    let id = profile.id;
+    profiles.try_upsert(profile.clone()).expect("저장 성공");
+    let table = make_table(
+        Arc::clone(&manager) as Arc<dyn AgentCommandHost>,
+        Arc::new(NoRoster),
+        Arc::new(NoUsage),
+    );
+    let spawn = || {
+        let mut args = json!({ "target": id.to_string() });
+        block_on(table.call("agent.spawn", &mut args).expect("declared"))
+    };
+
+    let x = vec![notice("omitted", json!({ "names": ["a.md"] }), Some(2))];
+    kits.set(x.clone());
+    let first = spawn().expect("the first start");
+    assert_eq!(first["notices"], json!([notice_row(&x[0])]), "{first}");
+    assert_eq!(
+        recorded(&profiles, id),
+        Some(notice_fingerprint(&x)),
+        "the bus shows the set, so the start records it"
+    );
+    assert!(
+        wait_until(Duration::from_secs(10), || run_count(&count) == 1),
+        "premise: the first process started"
+    );
+    kill_and_reap(&manager, id);
+
+    let again = spawn().expect("the second start");
+    assert_eq!(
+        again["notices"],
+        json!([]),
+        "the same set is not shown twice: {again}"
+    );
+    assert!(
+        wait_until(Duration::from_secs(10), || run_count(&count) == 2),
+        "premise: the second process started"
+    );
+    kill_and_reap(&manager, id);
+
+    let blocked = LaunchBlocked {
+        reasons: vec![BlockReason::Broken {
+            item: "rules/a.md".into(),
+            via: vec!["team.yaml".into()],
+            reason: notice("yaml-syntax", json!({ "path": "rules/a.md" }), Some(7)),
+        }],
+    };
+    *kits.block.lock().unwrap() = Some(blocked.clone());
+    let err = spawn().expect_err("the launch is blocked");
+    assert_eq!(err.code(), ErrorCode::Conflict, "{}", err.message());
+    assert_eq!(err.args(), Some(&blocked.to_args()), "{}", err.message());
+    assert!(
+        manager.list_agents().is_empty(),
+        "a blocked launch starts nothing"
+    );
+    assert_eq!(run_count(&count), 2, "no third process");
+
+    let _ = std::fs::remove_file(&count);
+    let _ = std::fs::remove_file(&batch);
 }

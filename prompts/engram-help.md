@@ -58,7 +58,7 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
       만들기만 한다 — 잠든 채로 명부에 오르고 agent_id 를 돌려준다. 백엔드는 만들 때 고르며 바꾸는 명령은 없다.
 
   {tool} agent.spawn --target <이름|id>
-      띄운다 — 처음이면 새로 시작하고, 지난 세션이 있으면 이어받는다.
+      띄운다 — 처음이면 새로 시작하고, 지난 세션이 있으면 이어받는다. 실행이 막히면 아무것도 띄우지 않고 CONFLICT 로 돌아오며 args.reasons 에 사유가 실린다 — 적힌 항목을 고친 뒤 다시 띄운다. 성공 답의 notices 는 일부러 싣지 않은 것의 알림이다(같은 묶음은 에이전트마다 한 번만 온다).
 
   {tool} agent.rename --target <이름|id> --name <새 이름>
       같은 이름이 있으면 뒤에 숫자가 붙고, 받은 이름이 outcome 과 함께 온다.
@@ -66,7 +66,7 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
   {tool} agent.move --target <이름|id> --parent <이름|none>
       다른 에이전트 밑으로 넣는다. none 이면 최상위로 되돌린다.
 
-  명부를 바꾸는 명령(agent.new · agent.spawn · agent.rename · agent.move · agent.spawnInto)은 agents 저장소가 그 변경을 받지 않으면 CONFLICT 로 돌아오고 명부는 그대로다. 할 일은 까닭이 가르고 문구가 그것을 말한다 — 데몬이 뜰 때 받지 않은 파일(store 의 ReadOnly)은 다시 해도 소용없고 그 파일을 고치거나 바꾼 뒤 데몬을 다시 띄워야 풀린다. 실행 중에 파일을 못 읽어 받지 않은 것(Refusing · Unreadable)은 대개 잠깐 쥔 잠김이라 조금 뒤 다시 하면 된다. 실행 중에 새 판이 그 파일을 쓴 것(Refusing · Newer)은 그 파일이 그대로면 다시 해도 같다. 저장 쓰기 자체가 실패하면 INTERNAL 이고 역시 명부는 그대로다. 단 agent.spawn --target 의 깨우기가 막히면 명부는 그대로지만 그 에이전트의 마지막 실패가 적혀 대시보드에 보인다. agent.spawn --cwd 가 만든 뒤 띄우기에서 막히면 코드는 INTERNAL 이고 만든 에이전트는 잠든 채 남는다 — 새로 만들지 말고 문구가 댄 그 이름으로 띄운다. Refusing 은 파일이 다시 쓸 만해지면(고쳐지거나 잠김이 풀리면) 다음 변경이 받아들여 풀린다 — 다시 띄울 필요가 없다.
+  명부를 바꾸는 명령(agent.new · agent.spawn · agent.rename · agent.move · agent.spawnInto)은 agents 저장소가 그 변경을 받지 않으면 CONFLICT 로 돌아오고 명부는 그대로다. 할 일은 까닭이 가르고 문구가 그것을 말한다 — 데몬이 뜰 때 받지 않은 파일(store 의 ReadOnly)은 다시 해도 소용없고 그 파일을 고치거나 바꾼 뒤 데몬을 다시 띄워야 풀린다. 실행 중에 파일을 못 읽어 받지 않은 것(Refusing · Unreadable)은 대개 잠깐 쥔 잠김이라 조금 뒤 다시 하면 된다. 실행 중에 새 판이 그 파일을 쓴 것(Refusing · Newer)은 그 파일이 그대로면 다시 해도 같다. 저장 쓰기 자체가 실패하면 INTERNAL 이고 역시 명부는 그대로다. 단 agent.spawn --target 의 깨우기가 막히면 명부는 그대로지만 그 에이전트의 마지막 실패가 적혀 대시보드에 보인다. agent.spawn --cwd 가 만든 뒤 띄우기에서 막히면 코드는 INTERNAL 이고 만든 에이전트는 잠든 채 남는다(args.agent_id 가 그 id) — 새로 만들지 말고 문구가 댄 그 이름으로 띄운다. Refusing 은 파일이 다시 쓸 만해지면(고쳐지거나 잠김이 풀리면) 다음 변경이 받아들여 풀린다 — 다시 띄울 필요가 없다.
 
   {tool} agent.listQueuedInputs --target <이름|id>
       턴 도중 받아 아직 받혔다는 확인이 없는 입력 목록. 각 항목의 id, text, state(queued|unconfirmed|cancelling).

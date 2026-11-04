@@ -1427,6 +1427,8 @@ type LocalJoin = Result<
 ///   ★예외 하나 — 깨우기(`agent.spawn` 의 `target`)의 판정 거절★: 그 항목을 같은 값으로 다시 적는 등록이 저장된
 ///   뒤에 거절될 수 있다(ADR-0291 §3-9 부분 성공) — 재시도가 같은 결과라 놓아도 된다. 만들고 띄우기의 띄우기
 ///   거절은 만든 에이전트가 남으므로 `CONFLICT` 가 아니라 `INTERNAL` 로 나온다(agent `create_and_start`).
+///   A wake's launch refusal (blocked or raced, TRD S25 step 16) is a second such `CONFLICT` after a write: it
+///   records the last failure (and a race consumes an epoch) — releasing is still safe, a rerun gives the same answer.
 /// - **나머지는 전부 붙든다** — `INTERNAL`·`OUTCOME_UNKNOWN` 이 여기 든다. 특히 후자는 「일부가 이미
 ///   적용됐을 수 있다」를 **문구로 명시하는** 코드다(`control::commands::drive_to_completion`).
 /// - **빈손은 놓는다** — 표가 아무것도 안 돌렸다는 것이 확실하다([`fold_local`] 이 그것을 `INTERNAL` 답장으로

@@ -21,7 +21,8 @@ use engram_dashboard_command::{
     blocking_handler, declare_commands, CommandError, CommandTable, ErrorCode, RetryMode,
 };
 
-use crate::manager::{AgentManager, RenameOutcome};
+use crate::launch::{notice_text, LaunchBlocked, Notice};
+use crate::manager::{Activated, AgentManager, NoticeDelivery, RenameOutcome};
 use crate::persistence::PROFILES_FILE;
 use crate::queued_input::{ListedState, QueuedListing};
 // 코어 enum과 아래 동명 선언 어휘를 구분하는 별칭.
@@ -36,9 +37,10 @@ use crate::usage::UsageVendorKey;
 // ★성공 응답은 평평하다(사용자 결정 2026-08-13)★: 명령마다 반환을 선언하므로 `{"agent":{…}}` 한 겹을
 //   더 감쌀 이유가 없다.
 declare_commands! {
-    // v9(2026-11-01): 옛 프리셋(작업 폴더 북마크)을 걷었다 — `agent.new` 의 칸 `preset` 이 빠지고 `cwd` 가 필수가
-    //   됐다(광고 오류에서 `NOT_FOUND` 도 빠졌다) · `agent.list` 답의 `store.presets` 가 빠졌다(TRD S25-preset-library
-    //   §5-2 1).
+    // v9 (2026-11-01): the old presets (working-folder bookmarks) were removed — `agent.new` lost its `preset` field
+    //   and `cwd` became required (`NOT_FOUND` left its advertised errors), and the `agent.list` answer lost
+    //   `store.presets` (TRD S25-preset-library §5-2 1). The same unreleased generation: the `agent.spawn` answer
+    //   gains `notices` (TRD S25 step 16).
     // v8(2026-10-26): 이름 하나가 늘었다 — `agent.resolve`(ADR-0307 · TRD S28 §6).
     // v7(2026-10-10): `agent.list` 의 답에 칸 `store` 가 늘었다 — 명부 저장소 둘(agents · presets)의 상태(ADR-0291
     //   R17 · D6). 이름은 그대로이고 답의 모양이 바뀌었다.
@@ -218,6 +220,18 @@ declare_commands! {
         Rejected,
     }
 
+    /// A launch notice (`agent.spawn`) — something the launch leaves out on purpose; not an error, nothing to fix.
+    struct LaunchNoticeRow {
+        /// Fixed notice code.
+        code: String,
+        /// The code's arguments (keys depend on `code`).
+        args: Json,
+        /// Line in the file it names, or `null`.
+        line: Option<u32>,
+        /// The notice as one readable line.
+        text: String,
+    }
+
     // errors 에는 **이 명령 고유의** 코드만 적는다 — 인자 반려(INVALID_ARGUMENT)와 내부 실패(INTERNAL)는
     //   표가 내는 것이라 `CommandSpec::advertised_errors` 가 자동으로 얹는다.
 
@@ -247,7 +261,12 @@ declare_commands! {
         agents: Vec<ResolvedAgentRow>,
     } errors [NOT_FOUND, CONFLICT];
 
-    /// 에이전트를 띄운다(잠든 것 깨우기 포함).
+    /// Starts an agent: wakes an existing one (`target`) or creates one in `cwd` and starts it.
+    /// A blocked launch starts nothing and is `CONFLICT` with `args.reasons`, one row per reason by `kind`:
+    /// `missing`|`broken` {kind, item, via, code, args, line?} · `conflict` {kind, items: [{item, via}], code, args,
+    /// line?} · `library_unavailable` {kind, code, args, line?}. Fix the listed items, then start again.
+    /// With `cwd` the agent is registered before its launch is checked, so any start failure after that is `INTERNAL`
+    /// with `args.agent_id` (plus `args.reasons` when blocked): start that agent by target — do not create another.
     #[effect(Write)]
     #[since(1)]
     "agent.spawn" => args AgentSpawnArgs {
@@ -262,6 +281,9 @@ declare_commands! {
         name: String,
         state: String,
         created: bool,
+        /// Launch notices, each set shown once per agent — empty when nothing was launched or this agent was
+        /// already shown the same set.
+        notices: Vec<LaunchNoticeRow>,
     } errors [NOT_FOUND, CONFLICT];
 
     /// 새 에이전트를 명부에 등록한다(띄우지는 않는다 — 잠든 상태로 남는다).
@@ -455,11 +477,13 @@ pub struct AgentRosterRow {
     pub live: Option<AgentStatus>,
 }
 
-/// 띄우기 결과 — 이 표가 보는 세 칸.
+/// The result of a start — the fields this table reads.
 pub struct StartedAgent {
     pub id: AgentId,
     pub name: String,
     pub status: AgentStatus,
+    /// The launch notices for the reply — [`crate::manager::Activated::notices`].
+    pub notices: Vec<Notice>,
 }
 
 /// `agent.*` 핸들러가 매니저에게 시키는 일 **전부**.
@@ -480,6 +504,8 @@ pub trait AgentCommandHost: Send + Sync {
     /// ★명부를 바꾸는 셋(`create_agent` · `rename_agent` · `reparent_agent`)은 부르는 쪽 있는 변경이다★ — 저장소가
     ///   그 변경을 받지 않으면 명부를 그대로 두고 [`PtyError::Store`] 다(매니저의 `try_` 판 · ADR-0291 R17).
     fn create_agent(&self, profile: AgentProfile) -> Result<AgentProfile, PtyError>;
+    /// The handler puts the returned notices on its success reply, so the activation counts as delivering them
+    /// ([`crate::manager::NoticeDelivery::Delivered`] — a start marks the set as shown for this agent).
     fn activate_profile(
         &self,
         profile: &AgentProfile,
@@ -617,11 +643,13 @@ impl AgentCommandHost for AgentManager {
         profile: &AgentProfile,
         mode: SpawnMode,
     ) -> Result<StartedAgent, PtyError> {
-        AgentManager::activate_profile(self, profile, mode).map(|info| StartedAgent {
-            id: info.id,
-            name: info.name,
-            status: info.status,
-        })
+        AgentManager::activate_profile_reporting(self, profile, mode, NoticeDelivery::Delivered)
+            .map(|Activated { info, notices }| StartedAgent {
+                id: info.id,
+                name: info.name,
+                status: info.status,
+                notices,
+            })
     }
 
     fn rename_agent(
@@ -1152,11 +1180,34 @@ fn wake_existing(
                 ),
             ),
         ),
+        // A launch refused before any process is a `CONFLICT` so the daemon releases the request id
+        //   (`command_delivery::retains_the_id`) — `INTERNAL` would hold it and swallow the fixed retry as
+        //   `ALREADY_APPLIED` (TRD S25 §1-5 (가) 1 ①).
+        PtyError::LaunchBlocked(blocked) => CommandError::of(
+            ErrorCode::Conflict,
+            format!(
+                "{LAUNCH_REFUSAL} for agent '{token}': {}; nothing was started — fix the listed items, then start it again",
+                launch_blocked_reason(&blocked)
+            ),
+        )
+        .with_args(blocked.to_args()),
+        PtyError::LaunchRaced => CommandError::with_retry(
+            ErrorCode::Conflict,
+            format!(
+                "{LAUNCH_REFUSAL} for agent '{token}': {LAUNCH_RACED_CAUSE}; nothing was started — try again"
+            ),
+            RetryMode::AfterCondition,
+        ),
         other => CommandError::internal(format!("could not start agent '{token}': {other}")),
     })?;
     Ok(started_payload(started, false))
 }
 
+// Every failure after the create answers INTERNAL with `args.agent_id`: the agent stays registered, and a
+//   CONFLICT would release the request id so a same-id retry creates an undeletable duplicate.
+// ADR-0122
+// TODO(TRD S25 §5-2 10a): check the profile before creating it (TRD §1-5 (가) 1 ②) so a block answers CONFLICT
+//   with nothing created; then revisit the `agent.spawn` summary ("registered before its launch is checked").
 fn create_and_start(
     host: &dyn AgentCommandHost,
     notify: &dyn RosterChanged,
@@ -1191,14 +1242,19 @@ fn create_and_start(
             // ★회복 경로를 문구가 나른다★: 만들어진 에이전트는 명부에 남아 있으므로 호출자가 할 일은
             //   「다시 만들기」가 아니라 **그 이름으로 다시 띄우기**다. 안 적으면 같은 cwd 로 또 만들어
             //   이름이 하나씩 늘어난다.
-            let created_but = |reason: String| {
+            // A block does not clear by waiting — its tail says fix first; every other failure keeps "(in a moment)".
+            let created_but = |reason: &str, next: &str| {
                 format!(
-                    "agent '{}' ({}) was created but did not start: {reason} — it is registered and asleep, so start it again by that name (in a moment) instead of creating another",
+                    "agent '{}' ({}) was created but did not start: {reason} — it is registered and asleep, so {next} instead of creating another",
                     stored.canonical_name_when_live(),
                     stored.id
                 )
             };
-            match e {
+            const AGAIN: &str = "start it again by that name (in a moment)";
+            // Every answer here names the created agent in `args.agent_id`, so the recovery targets it (TRD S25
+            //   §1-5 (가) 1 ②).
+            let mut args = serde_json::Map::new();
+            let error = match e {
                 // ★사유는 까닭만 싣는다([`store_error_cause`]) — 할 일 지시를 붙이지 않는다★: 여기서 「조금 뒤
                 //   다시」는 같은 `--cwd` 로 또 만들라는 말로 읽혀 중복을 낳고, 「다시 해도 소용없다」는 뒤의 「그
                 //   이름으로 다시 띄우라」와 어긋난다. 할 일은 뒤 꼬리 하나가 댄다.
@@ -1210,10 +1266,27 @@ fn create_and_start(
                 PtyError::Store(error) => store_error(
                     "start",
                     &error,
-                    CommandError::internal(created_but(store_error_cause(PROFILES_FILE, &error))),
+                    CommandError::internal(created_but(
+                        &store_error_cause(PROFILES_FILE, &error),
+                        AGAIN,
+                    )),
                 ),
-                other => CommandError::internal(created_but(other.to_string())),
-            }
+                // A block or race after the create stays `INTERNAL` for the same reason. The race passes its cause
+                //   only — `PtyError::LaunchRaced`'s text ends in "try again", an instruction the rule above forbids.
+                PtyError::LaunchBlocked(blocked) => {
+                    args = blocked.to_args();
+                    CommandError::internal(created_but(
+                        &launch_blocked_reason(&blocked),
+                        "fix the listed items first, then start it by that name",
+                    ))
+                }
+                PtyError::LaunchRaced => {
+                    CommandError::internal(created_but(LAUNCH_RACED_CAUSE, AGAIN))
+                }
+                other => CommandError::internal(created_but(&other.to_string(), AGAIN)),
+            };
+            args.insert("agent_id".into(), stored.id.to_string().into());
+            error.with_args(args)
         })?;
     Ok(started_payload(started, true))
 }
@@ -1668,7 +1741,34 @@ fn started_payload(started: StartedAgent, created: bool) -> AgentSpawnOk {
         name: started.name,
         state: state_of(Some(&started.status)).to_string(),
         created,
+        notices: started
+            .notices
+            .into_iter()
+            .map(|notice| LaunchNoticeRow {
+                text: notice_text(&notice),
+                code: notice.code,
+                args: notice.args,
+                line: notice.line,
+            })
+            .collect(),
     }
+}
+
+/// The start of every `agent.spawn` refusal of a launch before any process (a block or a race — `CONFLICT`). Such a
+/// message ends with its own next step, so a surface adds no recovery tail of its own (daemon `control::agent`).
+pub const LAUNCH_REFUSAL: &str = "launch refused";
+
+/// Why a launch raced — the cause only; the next step belongs to the message that carries it.
+const LAUNCH_RACED_CAUSE: &str = "its launch inputs (presets or their library files, command or env) changed while it was being prepared";
+
+/// The cause of a launch block, without a next step — English, like the rest of this surface. The reasons
+/// themselves travel in the error's args ([`LaunchBlocked::to_args`]), so `LaunchBlocked`'s Korean `Display` is not
+/// used here.
+fn launch_blocked_reason(blocked: &LaunchBlocked) -> String {
+    format!(
+        "its launch is blocked — {} reason(s) in args.reasons (a missing or broken item, a conflict, or no library folder)",
+        blocked.reasons.len()
+    )
 }
 
 /// 상태 → wire 어휘의 **단일 매핑**. 술어는 [`AgentStatus::is_live`] 하나다(ADR-0116).
@@ -1868,6 +1968,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::launch::{notice_row, BlockReason, Reason};
 
     /// 가짜 매니저 — ★프로세스도 PTY 도 없다★. 이 하네스가 서지 않으면 T-1 이 깨진 것이다.
     #[derive(Default)]
@@ -1878,6 +1979,10 @@ mod tests {
         rename_result: Mutex<Option<RenameOutcome>>,
         reparent_ok: Mutex<bool>,
         start_fails: Mutex<bool>,
+        /// The next activation's error (taken once) — a launch block or race.
+        start_error: Mutex<Option<PtyError>>,
+        /// The notices every successful activation returns.
+        start_notices: Mutex<Vec<Notice>>,
         create_fails: Mutex<Option<PtyError>>,
         /// 켜져 있으면 명부를 바꾸는 셋과 활성화가 저장 거절(새 판이 쓴 파일)로 돌아온다 — 명부는 그대로다.
         // ADR-0291 R17
@@ -2076,6 +2181,9 @@ mod tests {
             if *self.start_fails.lock().unwrap() {
                 return Err(PtyError::SpawnFailed("fake".to_string()));
             }
+            if let Some(error) = self.start_error.lock().unwrap().take() {
+                return Err(error);
+            }
             self.refuse_if_set()?;
             let resumed = matches!(mode, SpawnMode::Resume);
             self.started.lock().unwrap().push((profile.id, resumed));
@@ -2089,6 +2197,7 @@ mod tests {
                 id: profile.id,
                 name: profile.canonical_name_when_live(),
                 status,
+                notices: self.start_notices.lock().unwrap().clone(),
             })
         }
 
@@ -2481,6 +2590,173 @@ mod tests {
             call(&table, "agent.spawn", json!({ "cwd": "C:/work/gamma" })).expect_err("기동 실패");
         assert_eq!(err.code(), ErrorCode::Internal);
         assert_eq!(host.rows.lock().unwrap().len(), 1, "명부에는 남는다");
+    }
+
+    // ── Launch answers (TRD S25 step 16) ──
+
+    fn blocked() -> LaunchBlocked {
+        LaunchBlocked {
+            reasons: vec![
+                BlockReason::Missing {
+                    item: "rules/a.md".into(),
+                    via: vec!["team.yaml".into()],
+                    reason: Reason {
+                        code: "not-found".into(),
+                        args: json!({ "path": "rules/a.md" }),
+                        line: Some(3),
+                    },
+                },
+                BlockReason::LibraryUnavailable {
+                    reason: Reason {
+                        code: "library-unset".into(),
+                        args: json!({}),
+                        line: None,
+                    },
+                },
+            ],
+        }
+    }
+
+    /// A wake refused before any process is a `CONFLICT` — the daemon then releases the request id
+    /// (`command_delivery::retains_the_id`), so the retry after the fix is not swallowed — and carries every reason in
+    /// `args`. The roster is still announced (the failure is recorded — ADR-0172).
+    #[test]
+    fn a_blocked_wake_is_a_conflict_carrying_the_reasons() {
+        let host = FakeHost::new();
+        host.with_agent("alpha", false, false);
+        *host.start_error.lock().unwrap() = Some(PtyError::LaunchBlocked(blocked()));
+        let (table, notify) = wiring(&host);
+
+        let err = call(&table, "agent.spawn", json!({ "target": "alpha" }))
+            .expect_err("the launch is blocked");
+
+        let message = err.message();
+        assert_eq!(err.code(), ErrorCode::Conflict, "{message}");
+        assert_eq!(err.retry(), RetryMode::Never, "{message}");
+        assert_eq!(err.args(), Some(&blocked().to_args()), "{message}");
+        assert!(
+            message.starts_with(&format!("{LAUNCH_REFUSAL} for agent 'alpha'"))
+                && message.contains("2 reason(s)")
+                && message.ends_with("fix the listed items, then start it again"),
+            "{message}"
+        );
+        assert!(host.started.lock().unwrap().is_empty(), "nothing started");
+        assert_eq!(*notify.calls.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_raced_wake_is_a_conflict_to_try_again() {
+        let host = FakeHost::new();
+        host.with_agent("alpha", false, false);
+        *host.start_error.lock().unwrap() = Some(PtyError::LaunchRaced);
+        let (table, _notify) = wiring(&host);
+
+        let err = call(&table, "agent.spawn", json!({ "target": "alpha" }))
+            .expect_err("the launch raced");
+
+        let message = err.message();
+        assert_eq!(err.code(), ErrorCode::Conflict, "{message}");
+        assert_eq!(err.retry(), RetryMode::AfterCondition, "{message}");
+        assert_eq!(err.args(), None, "{message}");
+        assert!(
+            message.starts_with(&format!("{LAUNCH_REFUSAL} for agent 'alpha'"))
+                && message.ends_with("try again"),
+            "{message}"
+        );
+    }
+
+    /// With `cwd` the agent exists before its start fails, so the answer stays `INTERNAL` — a `CONFLICT` would release
+    /// the request id and the same id's retry would create a second agent (ADR-0122). Every such answer names the
+    /// created agent in `args.agent_id` (a block adds its reasons) so the recovery starts that one. The text carries
+    /// no instruction but its tail: no "try again" (it reads as "create again"), and a block says fix first — waiting
+    /// does not clear it.
+    #[test]
+    fn a_start_failure_after_the_create_stays_internal_and_names_the_created_agent() {
+        const AGAIN: &str = "start it again by that name (in a moment) instead of creating another";
+        const FIX_FIRST: &str =
+            "fix the listed items first, then start it by that name instead of creating another";
+        let cases = [
+            (
+                PtyError::LaunchBlocked(blocked()),
+                blocked().to_args(),
+                FIX_FIRST,
+            ),
+            (PtyError::LaunchRaced, serde_json::Map::new(), AGAIN),
+            (
+                PtyError::SpawnFailed("fake".into()),
+                serde_json::Map::new(),
+                AGAIN,
+            ),
+            (
+                PtyError::Store(StoreError::Io(std::io::Error::other("disk full"))),
+                serde_json::Map::new(),
+                AGAIN,
+            ),
+        ];
+        for (error, mut want, tail) in cases {
+            let host = FakeHost::new();
+            *host.start_error.lock().unwrap() = Some(error);
+            let (table, notify) = wiring(&host);
+
+            let err = call(
+                &table,
+                "agent.spawn",
+                json!({ "cwd": "C:/work/gamma", "name": "gamma" }),
+            )
+            .expect_err("the launch is refused after the create");
+
+            let message = err.message();
+            assert_eq!(err.code(), ErrorCode::Internal, "{message}");
+            let rows = host.rows.lock().unwrap();
+            assert_eq!(rows.len(), 1, "the created agent stays");
+            want.insert("agent_id".into(), rows[0].id.to_string().into());
+            assert_eq!(err.args(), Some(&want), "{message}");
+            assert!(
+                message.contains("was created but did not start") && message.ends_with(tail),
+                "{message}"
+            );
+            assert!(!message.contains("try again"), "{message}");
+            assert_eq!(
+                message.matches("fix the listed items").count(),
+                usize::from(tail == FIX_FIRST),
+                "{message}"
+            );
+            assert_eq!(*notify.calls.lock().unwrap(), 2);
+        }
+    }
+
+    /// The success answer carries the activation's notices as rows of the [`notice_row`] shape (`line` is `null`
+    /// when the notice names none), and an empty list when there are none.
+    #[test]
+    fn the_spawn_answer_carries_the_launch_notices_as_rows() {
+        let host = FakeHost::new();
+        host.with_agent("alpha", false, false);
+        let (table, _notify) = wiring(&host);
+
+        let quiet = call(&table, "agent.spawn", json!({ "target": "alpha" })).expect("wake");
+        assert_eq!(quiet["notices"], json!([]), "{quiet}");
+
+        let lined = Reason {
+            code: "omitted".into(),
+            args: json!({ "names": ["a.md"], "backend": "codex" }),
+            line: Some(4),
+        };
+        let bare = Reason {
+            code: "other".into(),
+            args: json!({}),
+            line: None,
+        };
+        *host.start_notices.lock().unwrap() = vec![lined.clone(), bare.clone()];
+        let out =
+            call(&table, "agent.spawn", json!({ "cwd": "C:/work/gamma" })).expect("create + start");
+
+        let mut bare_row = notice_row(&bare);
+        bare_row["line"] = serde_json::Value::Null;
+        assert_eq!(
+            out["notices"],
+            json!([notice_row(&lined), bare_row]),
+            "{out}"
+        );
     }
 
     #[test]

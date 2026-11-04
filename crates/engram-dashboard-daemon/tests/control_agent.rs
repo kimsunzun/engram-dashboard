@@ -7,6 +7,10 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use engram_dashboard_agent::launch::{
+    BlockReason, LaunchBlocked, LaunchKit, LaunchKitSource, LaunchPlan, LaunchPorts,
+    NoopLaunchKits, PrepareError, Reason,
+};
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::manager::MAX_ROSTER_SIZE;
 use engram_dashboard_agent::profile::{
@@ -314,6 +318,14 @@ async fn fixture(tag: &str) -> Fixture {
 /// `with_table = false` 는 **표가 아직 안 꽂힌 조립**을 재현한다 — 그 상태의 계약(503)을 보는 테스트가
 /// 쓴다. 그 외엔 언제나 표를 꽂는다(그게 운영 조립이다).
 async fn fixture_with_table(tag: &str, with_table: bool) -> Fixture {
+    fixture_assembled(tag, with_table, None).await
+}
+
+/// Builds the launch-kit source of a fixture from its profile registry (a race needs to change it mid-check).
+type KitsOf = Box<dyn FnOnce(Arc<ProfileRegistry>) -> Arc<dyn LaunchKitSource>>;
+
+/// `kits` = the manager's launch-kit source (`None` = the Noop default, today's launch).
+async fn fixture_assembled(tag: &str, with_table: bool, kits: Option<KitsOf>) -> Fixture {
     let registry = Arc::new(ControlRegistry::new());
     let manager_slot = Arc::new(ManagerSlot::new());
     let broadcast = Arc::new(CountingBroadcast::default());
@@ -345,9 +357,10 @@ async fn fixture_with_table(tag: &str, with_table: bool) -> Fixture {
     .unwrap_or_else(|e| panic!("start mcp server({tag}): {e}"));
 
     let control: Arc<dyn ControlChannel> = Arc::new(NoopControlChannel);
-    let manager = Arc::new(AgentManager::new_with_control(
+    let profiles = Arc::new(ProfileRegistry::new(Arc::new(MemProfileStore::default())));
+    let mut manager = AgentManager::new_with_control(
         Arc::new(NoopSink),
-        Arc::new(ProfileRegistry::new(Arc::new(MemProfileStore::default()))),
+        profiles.clone(),
         Arc::new(SessionTracker::new(
             TrackerConfig {
                 enabled: false,
@@ -356,7 +369,14 @@ async fn fixture_with_table(tag: &str, with_table: bool) -> Fixture {
             Arc::new(|_, _| {}),
         )),
         control,
-    ));
+    );
+    if let Some(kits) = kits {
+        manager = manager.with_launch_ports(LaunchPorts {
+            kits: kits(profiles),
+            ..LaunchPorts::noop()
+        });
+    }
+    let manager = Arc::new(manager);
     manager_slot.set(manager.clone());
     if with_table {
         // 라우트가 실제로 태우는 것이 이 표다(ADR-0155) — 운영 조립(`lib.rs`)과 같은 조립 함수를 쓴다.
@@ -2011,5 +2031,104 @@ mod resolver_alignment {
         );
         assert_eq!(control_resolution(&fixture, "twin"), Resolution::Ambiguous);
         assert_eq!(control_resolution(&fixture, "nobody"), Resolution::NotFound);
+    }
+}
+
+// ── Launch refusals on this route (TRD S25 step 16) ──
+
+/// Blocks every launch with the reasons it holds.
+struct BlockingKits(LaunchBlocked);
+
+impl LaunchKitSource for BlockingKits {
+    fn check(&self, _profile: &AgentProfile) -> Result<LaunchPlan, LaunchBlocked> {
+        Err(self.0.clone())
+    }
+    fn prepare(
+        &self,
+        plan: LaunchPlan,
+        id: AgentId,
+        epoch: u32,
+    ) -> Result<LaunchKit, PrepareError> {
+        NoopLaunchKits.prepare(plan, id, epoch)
+    }
+    fn release(&self, _id: AgentId, _epoch: u32) {}
+}
+
+/// Changes the agent's env in the roster during every check, so the launch inputs never settle — a race.
+struct RacingKits(Arc<ProfileRegistry>);
+
+impl LaunchKitSource for RacingKits {
+    fn check(&self, profile: &AgentProfile) -> Result<LaunchPlan, LaunchBlocked> {
+        let mut changed = profile.clone();
+        changed
+            .env
+            .push(("ENGRAM_RACE".into(), uuid::Uuid::new_v4().to_string()));
+        self.0.try_upsert(changed).expect("roster write");
+        NoopLaunchKits.check(profile)
+    }
+    fn prepare(
+        &self,
+        plan: LaunchPlan,
+        id: AgentId,
+        epoch: u32,
+    ) -> Result<LaunchKit, PrepareError> {
+        NoopLaunchKits.prepare(plan, id, epoch)
+    }
+    fn release(&self, _id: AgentId, _epoch: u32) {}
+}
+
+/// A launch refused before any process is a `CONFLICT` whose message already says the next step (fix the listed
+/// items / try again), so this route adds no roster tail — "see the roster" would send the caller looking for a
+/// wrong target. A block carries its reasons in `args`; nothing starts either way.
+#[tokio::test]
+async fn a_refused_launch_is_a_conflict_without_a_roster_tail() {
+    let blocked = LaunchBlocked {
+        reasons: vec![BlockReason::Missing {
+            item: "rules/a.md".into(),
+            via: vec!["team.yaml".into()],
+            reason: Reason {
+                code: "not-found".into(),
+                args: serde_json::json!({ "path": "rules/a.md" }),
+                line: Some(3),
+            },
+        }],
+    };
+    let blocking = blocked.clone();
+    let cases: [(&str, KitsOf, Option<serde_json::Value>, &str); 2] = [
+        (
+            "launch-blocked",
+            Box::new(move |_| Arc::new(BlockingKits(blocking)) as Arc<dyn LaunchKitSource>),
+            Some(serde_json::Value::Object(blocked.to_args())),
+            "fix the listed items, then start it again.",
+        ),
+        (
+            "launch-raced",
+            Box::new(|profiles| Arc::new(RacingKits(profiles)) as Arc<dyn LaunchKitSource>),
+            None,
+            "try again.",
+        ),
+    ];
+    for (tag, kits, args, ending) in cases {
+        let f = fixture_assembled(tag, true, Some(kits)).await;
+        seed_shell_agent(&f.manager, "worker");
+
+        let (status, body) = f
+            .post(serde_json::json!({ "verb": "spawn", "target": "worker" }))
+            .await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "error", "{body}");
+        assert_eq!(body["code"], "CONFLICT", "{body}");
+        assert_eq!(body.get("args").cloned(), args, "{body}");
+        let hint = body["hint"].as_str().unwrap_or_default();
+        assert!(
+            hint.starts_with("launch refused for agent 'worker'") && hint.ends_with(ending),
+            "{body}"
+        );
+        assert!(!hint.contains("agent list"), "no roster tail: {body}");
+        assert!(
+            f.manager.list_agents().is_empty(),
+            "nothing started: {body}"
+        );
+        f.shutdown_agents();
     }
 }

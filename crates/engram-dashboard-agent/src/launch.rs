@@ -324,7 +324,8 @@ impl LaunchBlocked {
 }
 
 /// One notice as a reply row: `{"code", "args", "line"?, "text"}` — `line` only when the notice names one, `text` =
-/// [`notice_text`]. The bus answer and the wire mirror are to use this one shape (no consumer yet — step 16 P3 · P4).
+/// [`notice_text`]. The bus `agent.spawn` answer declares the same fields as a typed row and sends an absent `line` as
+/// `null` (the command macro's `Option` has no skip) — a commands test pins the equality otherwise.
 pub fn notice_row(notice: &Notice) -> Value {
     let mut row = Map::new();
     put_reason(&mut row, notice);

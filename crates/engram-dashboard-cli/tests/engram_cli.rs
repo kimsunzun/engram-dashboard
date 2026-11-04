@@ -478,6 +478,40 @@ fn rejections_carrying_args_exit_one_and_print_the_args() {
     assert_eq!(v, want, "{stdout}");
 }
 
+/// `engram agent spawn` on the launch answers (TRD S25 step 16): a blocked launch (`CONFLICT` + `args.reasons`) and
+/// a launch refused after `--cwd` created the agent (`INTERNAL` + `args.agent_id`) exit 1; a success carrying
+/// `notices` exits 0. Each body is printed as received — the notice `text` included.
+#[test]
+fn engram_agent_spawn_prints_launch_blocks_and_notices_as_received() {
+    let cases: [(&[&str], &str, i32); 3] = [
+        (
+            &["agent", "spawn", "worker"],
+            r#"{"status":"error","code":"CONFLICT","hint":"could not start agent 'worker': its launch is blocked — 1 reason(s) in args.reasons","args":{"reasons":[{"kind":"missing","item":"rules/a.md","via":["team.yaml"],"code":"not-found","args":{"path":"rules/a.md"},"line":3}]}}"#,
+            1,
+        ),
+        (
+            &["agent", "spawn", "--cwd", "C:/work", "--name", "w"],
+            r#"{"status":"error","code":"INTERNAL","hint":"agent 'w' (i) was created but did not start: launch raced","args":{"agent_id":"i"}}"#,
+            1,
+        ),
+        (
+            &["agent", "spawn", "worker"],
+            r#"{"agent_id":"i","name":"worker","state":"live","created":false,"notices":[{"code":"omitted","args":{"names":["a.md"]},"line":null,"text":"알림(omitted): 의도된 동작입니다. 대상 — a.md"}]}"#,
+            0,
+        ),
+    ];
+    for (args, body, want_code) in cases {
+        let (host, port, stub) = spawn_capturing_stub(ok_response(body));
+        let url = format!("http://{host}:{port}");
+        let (stdout, code) = run_cli(&url, args, None);
+        let _ = stub.join().expect("stub join");
+        assert_eq!(code, want_code, "{args:?} ← {body}: {stdout}");
+        let printed: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout json");
+        let sent: serde_json::Value = serde_json::from_str(body).expect("body json");
+        assert_eq!(printed, sent, "{args:?}: {stdout}");
+    }
+}
+
 /// ★변경의 증거가 없는 2xx 는 성공이 아니다★: 우편 조회 판정기를 그대로 썼을 땐 `{}` 도 exit 0 이라,
 ///   아무것도 만들지 않은 응답을 받고도 호출자가 만들어졌다고 믿었다. 재시도 대상(1)이 아니라 보고
 ///   대상(2)이라는 것까지 프로세스 레벨로 못박는다.

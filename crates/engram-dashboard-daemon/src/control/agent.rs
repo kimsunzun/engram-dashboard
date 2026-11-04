@@ -31,6 +31,7 @@
 // ADR-0155
 // ADR-0157
 
+use engram_dashboard_agent::commands::LAUNCH_REFUSAL;
 use engram_dashboard_agent::types::{CLI_EXE_NAME, CLI_GROUP_AGENT};
 use engram_dashboard_command::{CommandError, ErrorCode};
 
@@ -179,9 +180,15 @@ pub fn handle_agent(table: &super::commands::DaemonTable, req: AgentRequest) -> 
 /// ★예외 하나 — 입력 임대 거절★(`CONFLICT` 이지만 대상 문제가 아니다): 명부를 봐도 고칠 것이 없고, 다음
 ///   걸음(놓인 뒤 다시)은 거절 문구 자신이 싣는다(`commands::admit_input` 의 연결 없는 입구 꼬리). 명부 안내를
 ///   붙이면 호출자는 없는 동명이인을 찾는다.
+/// A launch refusal (`agent.spawn` blocked or raced — [`LAUNCH_REFUSAL`]) is the same kind of `CONFLICT`: the fix is
+///   in the listed library items, or a plain retry for a race, and the message already says which. Keyed on the
+///   message prefix on purpose — a deliberate exception to "never branch on the message" (command `error.rs`):
+///   a race carries no `args`, and the prefix is a constant our own table writes before any caller text.
 // ADR-0231
 fn refused(e: CommandError) -> ControlQueryResult {
-    let hint = if e.message().starts_with(INPUT_LOCKED_REFUSAL) {
+    let carries_its_next_step = e.message().starts_with(INPUT_LOCKED_REFUSAL)
+        || (e.code() == ErrorCode::Conflict && e.message().starts_with(LAUNCH_REFUSAL));
+    let hint = if carries_its_next_step {
         format!("{}.", e.message())
     } else {
         format!("{} — {}.", e.message(), recovery_for(e.code()))
