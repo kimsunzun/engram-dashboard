@@ -358,4 +358,4 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0309](0309-우편-내부-키는-에이전트-id-가장자리-주소는-이름-그대로.md) | 우편 내부 키는 에이전트 id — 가장자리 주소는 이름 그대로 | 확정 |
 | [0310](0310-3단계-transport-붙이기-결정-d1d26.md) | 3단계 transport 붙이기 — 결정 D1~D26 | 확정 (부분 폐기 by ADR-0342: 결정 12 버전 불일치 즉시 팝업) |
 | [0340](0340-full-regression-runs-locally-before-commit-ci-is-a-post-push-check.md) | Full regression runs locally before commit, CI is a post-push check | 확정 |
-| [0342](0342-데몬-버전-불일치는-새-팝업-없이-기존-연결-실패-표시로-알린다.md) | 데몬 버전 불일치는 새 팝업 없이 기존 연결 실패 표시로 알린다 | 확정 |
+| [0342](0342-daemon-version-mismatch-shows-on-the-existing-connection-failure-surface-no-new-popup.md) | Daemon version mismatch shows on the existing connection-failure surface, no new popup | 확정 |
