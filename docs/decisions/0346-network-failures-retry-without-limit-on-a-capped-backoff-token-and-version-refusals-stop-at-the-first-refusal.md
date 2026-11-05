@@ -35,7 +35,7 @@ That exposed the token case. ADR-0310 decision 12 made a token mismatch `Retryab
 ## 영향 / 불변식
 
 - **Nothing on the local path retries a refusal.** If a future refusal kind needs retrying, it needs its own ADR — do not route it through the network backoff.
-- **Unverified premise, check at 3-2 U3 start:** the new driver re-reads `daemon.json` on every attempt and uses port and token from the same read (`LocalEndpointSource` · `LocalDaemonDialer`). If it caches either, decision 2's argument fails.
+- **Premise verified (code read 2026-11-05):** every dial goes `LocalDaemonDialer::dial` → `resolve` → `EndpointSource::current()`, which reads `daemon.json` afresh (`endpoint.rs:150-153`) and sets the credential from that same read (`dialer.rs:153`); the `Busy` path reuses the last-known endpoint together with its own credential. If a later change caches the port or the token apart, decision 2's argument fails.
 - The transport `Retryable` kind (close code 4006) loses its local producer; the daemon side (stage 3-3) sends a token mismatch as terminal. Close code 4001 is already shared with 3-3 U7's identity refusal — the refusal text must tell token, version and identity apart.
 - Shell text (`link::route::refusal_message`) gains a token-refusal cause; the count constants (`connection.rs` `MAX_RECONNECT_ATTEMPTS`, the 「5회」 prose in `src/api/agentClient.ts` and `src/api/daemonControl.ts`) go away with the old driver (3-2 U4 / U5).
 - Landing: U3 (driver: unlimited policy, terminal token refusal) · U5 (band 「다시 연결」 with ADR-0344's button) — the TRD records the final units.
