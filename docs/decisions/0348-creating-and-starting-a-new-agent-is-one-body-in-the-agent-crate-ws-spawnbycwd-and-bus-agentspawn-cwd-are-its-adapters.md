@@ -1,20 +1,67 @@
 # ADR-0348: Creating and starting a new agent is one body in the agent crate — WS SpawnByCwd and bus agent.spawn --cwd are its adapters
 
-- 상태: 확정 (2026-11-06, 근거: TODO)
-- 관련: Amends ADR-0279 (결정 3) · TODO 나머지 관련
+- 상태: 확정 (2026-11-06, 근거: user delegation 2026-11-06 「이부분 너가 알아서 쭉 진행」 after main recommended "unify before step 5" and "screen-path failures get the failure mark" · code reading 2026-11-06 at `2dfd33e0` (main + two scouts))
+- 관련: Amends ADR-0279 (결정 3) · ADR-0172(last failure is recorded where the failure happens) · ADR-0173(failure glyph) · ADR-0004(backend knowledge lives in the agent crate) · ADR-0003(agent crate knows no Tauri/transport) · ADR-0270(shell does not depend on the agent crate) · ADR-0122(request-id retention on created-but-not-started) · ADR-0341(launch blocks and notices) · `crates/engram-dashboard-daemon/src/connection_core.rs`(`SpawnByCwd` arm · `spawn_command_by_cwd`) · `crates/engram-dashboard-agent/src/commands.rs`(`verb_spawn` · `create_and_start`) · `crates/engram-dashboard-agent/src/manager.rs`(`spawn_agent_reporting` · `activate_profile_reporting` · `spawn_fresh_settled`) · `src-tauri/src/commands/layout.rs`(`DaemonSpawner`) · `src-tauri/src/layout/apply.rs`(`spawn_into_placed`) · `docs/process/S25-preset-library/trd.md`(steps 10a · 11)
 
 ## 맥락
-TODO — 무슨 문제를 풀어야 했나.
+
+The daemon has two separate implementations of "create a new agent for a folder and start it":
+
+- **WS `SpawnByCwd` arm** (`connection_core.rs`). Callers: the shell `DaemonSpawner` (Tauri `spawn_into` and shell bus verb `agent.spawnInto`) and the webview `protocolClient.spawnAgent` (front `agent.spawn`, `slot.createAgentHere`). It builds an ad-hoc profile and calls `manager.spawn_agent_reporting`.
+- **Bus `agent.spawn {cwd}`** → `create_and_start` (`agent/src/commands.rs`). It registers, then calls `activate_profile` → `activate_profile_reporting` → `spawn_fresh_settled`.
+
+Both end in `AgentManager::spawn_agent_watching_link`, but they split one level above it, and the split has drifted:
+
+| | WS `SpawnByCwd` | bus `create_and_start` |
+|---|---|---|
+| Backend | caller's choice, required | fixed Claude (by design — `agent.new` is the backend-choosing door) |
+| LLM backend policy | checked | not checked |
+| Launch block | checked before the add; nothing left | add first, then INTERNAL + `agent_id` + reasons; asleep agent left (pre-create check deferred to TRD step 10a) |
+| Caller-given name · cwd spelling normalization | no | yes |
+| Roster notify | none | yes |
+| Last failure (ADR-0172) | never recorded | recorded |
+| Notices fingerprint | not recorded | recorded |
+| Codex link verdict | **dropped** — `spawn_agent_reporting` discards the `LinkWatch` | settled in `spawn_fresh_settled` |
+
+The last row is a defect: a codex app-server agent created through the screen or `agent.spawnInto` path is answered as started even when its handshake fails, and the failure is neither torn down nor recorded (code reading; not reproduced at runtime). The `connection_core.rs` arm already carries a comment admitting the asymmetry ("when aligning, look at both").
+
+Separately, the shell folds the daemon reply: `send_command` turns `AgentEvent::Error` into a plain string and `DaemonSpawner` takes only `agent.id` from `Spawned`, so `launch_blocked` reasons and `notices` (wired in step 16 P4) never reach `agent.spawnInto`'s answer.
+
+The user asked whether this structure is normal. The hop order (shell checks the target slot → daemon spawns → shell places) is sound; the duplicated, drifting creation body is not.
 
 ## 결정
-TODO — 무엇으로 정했나.
+
+1. **One creation body.** "Create a new agent for a folder and start it" is one function in the agent crate (the widened `create_and_start`), over one manager entry that runs the Fresh activation path (`activate_profile_reporting` → `spawn_fresh_settled`) for a not-yet-registered profile. Link verdict, last-failure record, notice delivery and launch-block reasons come from that one path. `spawn_command_by_cwd` (backend → launch command mapping in the daemon) moves into the agent crate with it.
+2. **Every create gets the same treatment.** Backend policy check before anything is registered · launch-block check before the add (absorbs TRD step 10a's pre-create check) · cwd spelling normalization · roster notify after activation · last failure recorded when a registered agent fails to start · codex link verdict settled before answering.
+3. **Entrances are adapters and keep only what is theirs.**
+   - WS `SpawnByCwd`: caller-chosen backend, `MISSING_BACKEND` refusal, reply = `Spawned { agent, notices }` / `Error` (with `launch_blocked`). Notices stay `Withheld` (not marked seen) until a WS consumer shows them (TRD step 11).
+   - Bus `agent.spawn {cwd}`: backend stays fixed to Claude (`agent.new` remains the only bus door that chooses a backend), notices `Delivered`, answer = `AgentSpawnOk` / `CommandError`.
+4. **Policy doors (replaces ADR-0279 decision 3).** The daemon checks the backend policy at two places: `agent.new` (`verb_new`) and the one creation body. The policy's home is still `LLM_BACKEND_POLICY`. ADR-0279 decisions 1, 2 and 4 stand (the wall is still before anything is registered; shell slot-spawn path, round trips and placement order unchanged; the door still does not tell callers apart).
+5. **Shell stops discarding the reply.** `agent.spawnInto` answers with the daemon's `notices` on success and `args.reasons` on a launch block. Hop order unchanged; no new verb; the shell still does not depend on the agent crate.
+6. **Screen-path failures get the failure mark** (user decision 2026-11-06, delegated). A screen or `agent.spawnInto` create that registers the agent but fails to start it now records last failure, so the agent list shows the ban glyph and the failure-kind tooltip, as the bus path already does.
+7. **Completion requires a real run.** Unit tests are not enough for this change: verification includes a live daemon with real claude/codex processes and the GUI (screen create, `agent.spawnInto` from the CLI, bus `agent.spawn --cwd`), checking the answers and the agent list (user: 「실테스트 필요할듯. 지금 귀찮아서 너무 대충 넘기는게 많아」).
 
 ## 거부한 대안
-- TODO 대안 A — 왜 버렸나.
-- TODO 대안 B — 왜 버렸나.
+
+- **(a) Keep both bodies; only fix the shell's reply folding.** Rejected — code: the WS body drops the codex link verdict (`spawn_agent_reporting` discards the `LinkWatch`), skips the last-failure record and roster notify, and the table above shows the two bodies already diverged on eight axes. Fixing one row at a time keeps the drift.
+- **(b) Shell spawns through `agent.new` + `agent.spawn {target}` over the bus.** Rejected — still holds from ADR-0279 alternative (a): two round trips, an asleep orphan if the second fails, args JSON built by hand in the shell, and the webview `SpawnByCwd` paths would remain a second body.
+- **(c) Add a `backend` argument to bus `agent.spawn` and have the shell call the bus.** Rejected — code: the shell has no bus-call producer today (no `AgentCommand::Command` sender in `src-tauri/src`) and would need a `CommandReply` fold helper and a fit under its 30 s reply cap; and it reverses the 2026-09-22 rule in `create_and_start` that `agent.new` is the one backend-choosing bus door. The webview `SpawnByCwd` paths would still need the body anyway.
+- **(d) Put the unified body in the daemon crate.** Rejected — code/ADR: backend → launch-command knowledge belongs in the agent crate (ADR-0004), the activation path it must reuse lives in the agent `AgentManager`, and the bus entrance already lives in the agent crate. The daemon keeps only the WS adapter.
 
 ## 근거
-TODO — 실측·리뷰 등 결정의 뒷받침.
+
+- **Decision source** — main recommended both points (unify before TRD step 5; screen failures get the mark); the user delegated: 「이부분 너가 알아서 쭉 진행」 (2026-11-06). The real-run requirement is the user's (decision 7).
+- **Code reading (at `2dfd33e0`)** — `spawn_agent_reporting` calls `spawn_agent_watching_link` and discards the watch (`let (outcome, _, launched)`); `spawn_fresh_settled` settles it via `link_activation_verdict`. `create_and_start` fixes Claude on purpose (comment dated 2026-09-22). `DaemonSpawner::spawn_by_cwd` maps `Spawned` to `agent.id` only; `send_command` folds `Error` to `Err(message)`.
+- **Design scout (2026-11-06)** — reported that the Fresh branch of `activate_profile_reporting` already accepts an unregistered profile (`ensure_registered` runs the pre-create check, capacity check, name assignment, then inserts) and that `set_last_failure` on an unknown id is a no-op. To be confirmed in the TRD before coding.
+- **Previously rejected new combined daemon verb (ADR-0279 alternative (b))** is not reopened: this decision adds no verb; it merges bodies behind the existing entrances.
 
 ## 영향 / 불변식
-TODO — 이 결정이 묶는 코드·게이트. 어기면 무엇이 깨지나.
+
+- ★**Invariant: one creation body.**★ A new entrance that creates-and-starts must call it; do not add a third body. The WS and bus adapters must not re-implement policy, launch-block, link-verdict or failure-record logic.
+- **Policy before registration** (ADR-0279 invariant) still holds — inside the one body.
+- **A refusal (policy · launch block before the add · missing folder) records no last failure and leaves nothing registered.** A failure after the add leaves an asleep agent with last failure set; the WS answer says so with an `INTERNAL:` prefix so the shell keeps the request id (ADR-0122).
+- **Notice delivery is per entrance** — WS `Withheld` until TRD step 11 flips it with a WS consumer; marking a set seen without showing it is forbidden.
+- **Visible changes** — screen-path failures now show the ban glyph; WS codex creates answer only after the handshake settles (bounded by the link backstop — fit under the shell's 30 s cap to be checked in the TRD); bus creates may appear in the tree slightly later (keep the early roster frame if cheap).
+- **TRD** — a new S25 step before step 5. It absorbs step 10a's pre-create check and step 11's "give `SpawnByCwd` a recording path" and shell `agent.spawnInto` items; the webview carrier stays with step 11.
+- **Tests that pin today's split break by design** — manager source-pin tests on `spawn_agent_reporting`, `create_and_start` INTERNAL/block tests, daemon `SpawnByCwd` policy tests (move to the agent crate with the body).
+- **Code anchors = `// ADR-0348`** on the unified body, the manager entry, both adapters, and the shell reply pass-through.
