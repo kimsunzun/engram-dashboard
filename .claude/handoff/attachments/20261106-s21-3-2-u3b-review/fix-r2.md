@@ -1,0 +1,13 @@
+# U3b — round 2 (권장 only; lead and risk-axis are PASS on must)
+
+Same brief and rules (the narrow transport permission from fix-r1 F1 still covers `peer.rs` tests/doc for `drop_link_in`). Reject with evidence if an item is wrong. Do not edit the comments listed under "main does".
+
+G1. **Stop relaying a connection once its drop is decided** (risk-axis 권장-A — a gap since round 0). After a short frame, `relay_output` calls `drop_connection(g, ReadFailed)`, but items of g already in the inbox and the read-ahead the supervisor salvages before `Disconnected` (`peer.rs:1092-1094`) keep routing: frames are relayed and a later `ReplayComplete` sends a success marker for a replay that is missing the unreadable frame. The old driver left its loop at the short frame and cleared flights at once (`connection.rs:1126-1137`). Fix: in `drop_connection` record that g is being dropped, set `open = None`, run `flight.on_disconnect()` at once, and skip `Output` and replay `ToDriver` items of g until g's `LinkDown` (which still clears normally). Same for the `WriteFailed` path. Test: short frame followed by more frames and a `ReplayComplete` on the same connection → none relayed, no success marker; after the redial a new replay goes out.
+G2. **Test the supervisor-side generation check for `DropLink`** (lead N1 + risk-axis): add a stale `PeerOp::DropLink{..}` to `a_command_stamped_before_a_reconnect_is_not_written_on_the_next_link` (`peer.rs` ~3454-3500); assert the newer generation stays Live with no `Disconnected`.
+G3. **Make the F7 test deterministic** (lead N2 + risk-axis 권장-B): replace the 20 ms real sleep with an inbox-order barrier — after `ReplayComplete`, push an `AgentListUpdated` on the same endpoint and wait for its frontend event (`names:` line) before the barrier `unsubscribe(other)`; fix the test comment.
+G4. **`DropAndReport` and `close_after_flush` in the `drop_link_in` doc** (lead N3, risk batched): state that under `DropAndReport` a drop that meets a full queue is lost (counted as a dropped outbound frame) — the shell uses `Disconnect`; and that a drop queued before `close_after_flush` ends the flush early with the drop's cause. (Doc only — do not move the drop to the control channel.)
+G5. Transport test name `repeated_drops_after_short_connects_keep_waiting_at_least_the_base_delay` holds only under `no_jitter` — rename or say so in the test.
+
+Main does at the end (do not edit): `lib.rs:26-27` operation list (add `drop_link_in`), `replay_flight.rs` "no rollback entry" comment (note the sanctioned `on_refused` use for a promoted request never sent).
+
+Report per item G1–G5, tests (full shell `lib_unit`, transport `cargo test -p engram-dashboard-transport` and `--all-features`), name diff vs base `beaf8f31`, self-check.
