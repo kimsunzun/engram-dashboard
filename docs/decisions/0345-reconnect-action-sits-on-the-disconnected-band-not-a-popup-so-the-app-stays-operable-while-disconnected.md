@@ -1,7 +1,7 @@
 # ADR-0345: Reconnect action sits on the disconnected band, not a popup, so the app stays operable while disconnected
 
-- 상태: 확정 (2026-11-05, 근거: 사용자 결정 2026-11-05 「재연결 버튼이 있어야지」 · 「일단 음.. 띠에두자. 연결안되도 클라는 조작되게.」 + 조사 `docs/research/reconnect-give-up-ui-2026-11-05.md` (light) · `docs/research/banner-action-buttons-2026-11-05.md` (light))
-- 관련: Amends ADR-0180 (결정 2 예산 소진 팝업 자격과 결정 7 다시 연결 팝업) · ADR-0344 (same shape — one action button on the band) · ADR-0180 결정 4 (count 3 rests on this button) · ADR-0180 결정 8 (per-connection reconnect on the band — kept) · ADR-0342 (version mismatch on the band) · `src/components/layout/ConnectionNotice.tsx` · `src-tauri/src/daemon_client/connection.rs` (`MAX_RECONNECT_ATTEMPTS`) · TRD `docs/process/S21-crate-boundaries/trd-3-transport.md` D14 · §6-2 U5 · step-log S21
+- 상태: 확정 (2026-11-05, 근거: 사용자 결정 2026-11-05 「재연결 버튼이 있어야지」 · 「일단 음.. 띠에두자. 연결안되도 클라는 조작되게.」 + 조사 `docs/research/reconnect-give-up-ui-2026-11-05.md` (light) · `docs/research/banner-action-buttons-2026-11-05.md` (light)) · 부분 폐기 by ADR-0346 (결정 4 재시도 3회로 내림)
+- 관련: Amends ADR-0180 (결정 2 예산 소진 팝업 자격과 결정 7 다시 연결 팝업) · ADR-0344 (same shape — one action button on the band) · ADR-0180 결정 4 (count 3 rests on this button) · ADR-0180 결정 8 (per-connection reconnect on the band — kept) · ADR-0342 (version mismatch on the band) · `src/components/layout/ConnectionNotice.tsx` · `src-tauri/src/daemon_client/connection.rs` (`MAX_RECONNECT_ATTEMPTS`) · TRD `docs/process/S21-crate-boundaries/trd-3-transport.md` D14 · §6-2 U5 · step-log S21 · Amended by ADR-0346 (결정 4 재시도 3회로 내림)
 
 ## 맥락
 
