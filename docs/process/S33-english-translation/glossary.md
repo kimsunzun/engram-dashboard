@@ -44,5 +44,12 @@ Every translation batch uses these renderings. A batch that needs a new term add
 | 회귀 | regression | |
 | UI 실행 | launching the UI | the app start, not "a UI action" (S33 batch 2 review) |
 | X 이하 | X and everything below it | includes X itself |
+| 단일 발행 (파일) | single writer | exclusive ownership, not "one publication" |
+| 상주 / 생사 | resident / liveness | |
+| 재입양 / 재발견 | re-adoption / rediscovery | |
+| 맹아 | seed | |
+| 보강 (절) | addendum | |
+| 구독 (X 구독) | subscribes to X | "eventBus.ts(agentClient 구독)" = eventBus subscribes through agentClient; check the direction |
+| 자동 재시작 (supervision) | auto-restart | check who restarts what: "데몬 사망 시 UI 자동 재시작" = the UI restarts the daemon |
 
 Kept in Korean: the ADR lint tokens (`- 상태:` + vocab, `- 관련:`, section headings), text in 「」, names of CLAUDE.md and `.claude/` sections.

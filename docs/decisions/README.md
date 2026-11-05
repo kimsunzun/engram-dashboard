@@ -68,16 +68,16 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0018](0018-깡통-예약-에이전트-프론트-머지.md) | Empty-shell (reserved) agent = the tree representation of a saved profile + double-click activation (frontend merge, no backend change) | 확정 |
 | [0019](0019-세션-종료-분류-프로필-disposition.md) | Session end classification — intent is decided at the "point of action", the profile disposition separates death/reserved/restore | 확정 (부분 폐기 by ADR-0083: the clause "user kill · normal exit (code0) → profile deletion" removed: every end preserves the profile corpse (KeepDisableAutoRestore), no automatic deletion — deletion only by an explicit user command / ADR-0084: apply_disposition epoch-guard added — so a stale reap cannot demote a re-activated live session to auto_restore=false (applied only when the reaped msg.epoch matches the current session epoch). Re-activation (resume) is a map replacement, so the epoch is bumped (ADR-0007 reconfirmed).) |
 | [0020](0020-클라이언트-경로-통합-단일-프로토콜.md) | Client/backend path unification — a single protocol + a transport-neutral dispatch core | 확정 (부분 폐기 by ADR-0037: decision 3: where the protocol semantics live — JS ProtocolClient → Rust (DaemonClient/protocol_state)) |
-| [0021](0021-데몬-수명-on-demand-무재시작.md) | 데몬 수명 — on-demand spawn + 자동재시작 없음 (tmux/wezterm 모델) | 확정 |
-| [0022](0022-통합-command-registry-palette-키바인딩.md) | 통합 command registry — palette + 키바인딩 + LLM + 메뉴/트레이 단일 출처 | 제안 (부분 폐기 by ADR-0155: 미해결 forks 3건 소진) |
-| [0023](0023-트레이-프로세스-토폴로지.md) | 트레이/프로세스 토폴로지 — 순수-Rust tray-host + detached 데몬 + UI(창 hide), 3프로세스 | 폐기 (Superseded by ADR-0026) |
-| [0024](0024-데몬-소유-생사-종료-데이터위치.md) | 데몬 소유·생사감지·종료·데이터 위치 — self-owned detached + WS/lockfile liveness + 재입양 | 확정 (부분 폐기 by ADR-0271: 데이터 위치 구현 줄의 discovery 단일 출처 / ADR-0025: C3 UI ensure 금지 / ADR-0027: 데이터 위치와 공유) |
-| [0025](0025-UI-부팅-데몬-ensure-유지.md) | UI 부팅 1회 데몬 ensure 유지 — ADR-0024 C3("UI ensure 금지") 폐기 | 확정 |
-| [0026](0026-트레이-앱-통합-2프로세스.md) | 트레이/프로세스 토폴로지 재결정 — 트레이를 Tauri 앱에 통합(2프로세스), 데몬 별도 (ADR-0023 폐기) | 확정 (부분 폐기 by ADR-0229: X 와 보이기 숨기기가 다루는 대상 창 범위만) |
-| [0027](0027-모드별-인스턴스-스코프-데이터위치.md) | 모드별 인스턴스 스코프 + 데이터 위치 — embedded=폴더별/폴더-로컬, daemon=전역/유저-global (ADR-0024 데이터-공유 폐기) | 폐기 (Superseded by ADR-0029) |
-| [0028](0028-백엔드-이벤트버스-소유-단일push채널.md) | 백엔드가 이벤트버스를 소유 — 단일 push 채널(백엔드→트레이/WebView/LLM) | 확정 |
-| [0029](0029-embedded-제거-daemon-only-통일.md) | embedded(싱글) 모드 제거 — daemon-only 통일 (ADR-0027 폐기, 0020/0026 일부 정리) | 확정 (부분 폐기 by ADR-0134: 단일 인스턴스 스코프와 릴리스 데이터 폴더 위치 대체) |
-| [0030](0030-capability-합성-transport-backend.md) | capability 산출 = transport(물리) ⊕ backend(프로그램) 합성 | 확정 (부분 폐기 by ADR-0245: PTY 능력 목록의 interrupt 가 거짓이 된다) |
+| [0021](0021-데몬-수명-on-demand-무재시작.md) | Daemon lifetime — on-demand spawn + no auto-restart (tmux/wezterm model) | 확정 |
+| [0022](0022-통합-command-registry-palette-키바인딩.md) | Unified command registry — a single source for palette + keybindings + LLM + menu/tray | 제안 (부분 폐기 by ADR-0155: three unresolved forks exhausted) |
+| [0023](0023-트레이-프로세스-토폴로지.md) | Tray/process topology — a pure-Rust tray-host + a detached daemon + the UI (window hide), 3 processes | 폐기 (Superseded by ADR-0026) |
+| [0024](0024-데몬-소유-생사-종료-데이터위치.md) | Daemon ownership, liveness detection, exit, and data location — self-owned detached + WS/lockfile liveness + re-adoption | 확정 (부분 폐기 by ADR-0271: single discovery source for the data-location implementation line / ADR-0025: C3 UI ensure ban / ADR-0027: data location and sharing) |
+| [0025](0025-UI-부팅-데몬-ensure-유지.md) | Keep the one UI-boot daemon ensure — discard ADR-0024 C3 ("no UI ensure") | 확정 |
+| [0026](0026-트레이-앱-통합-2프로세스.md) | Tray/process topology re-decided — merge the tray into the Tauri app (2 processes), daemon separate (discards ADR-0023) | 확정 (부분 폐기 by ADR-0229: only the target-window scope that X and show/hide cover) |
+| [0027](0027-모드별-인스턴스-스코프-데이터위치.md) | Per-mode instance scope + data location — embedded = per folder / folder-local, daemon = global / user-global (discards ADR-0024 data sharing) | 폐기 (Superseded by ADR-0029) |
+| [0028](0028-백엔드-이벤트버스-소유-단일push채널.md) | The backend owns the event bus — a single push channel (backend → tray/WebView/LLM) | 확정 |
+| [0029](0029-embedded-제거-daemon-only-통일.md) | Remove the embedded (single) mode — unify on daemon-only (discards ADR-0027, partly cleans up 0020/0026) | 확정 (부분 폐기 by ADR-0134: replaces the single-instance scope and the release data folder location) |
+| [0030](0030-capability-합성-transport-backend.md) | Capability derivation = transport (physical) ⊕ backend (program) composition | 확정 (부분 폐기 by ADR-0245: the interrupt in the PTY capability list becomes false) |
 | [0031](0031-검수체계-opus-codex-2자-적대리뷰.md) | 검수 체계 — opus + Codex 2자 적대 리뷰 (웹 consult 폐기, 단계별 특화 역할) | 확정 |
 | [0032](0032-주석컨벤션-2계층-overview헤더.md) | 주석 컨벤션 — 2계층(인라인 좁히기 + load-bearing overview 헤더) + ADR 앵커 점진 확대 | 확정 |
 | [0033](0033-검증기록-스킬-인프라-2층-골격바인딩-adr-하이브리드.md) | 검증·기록 스킬 인프라 — 2층 골격+바인딩 + adr 하이브리드 | 확정 |
