@@ -17,6 +17,9 @@
 //! - **generation 가드(openGen 씨앗, Fix B)** — `lifecycle.rs`.
 
 pub mod connection;
+// ADR-0310: the new driver on the transport crate (TRD S21 trd-3 §6-2 U3) — tests only until 3-2 U4 switches production.
+#[cfg(test)]
+mod connection_v2;
 // ADR-0012: 연결 태스크가 프론트로 내는 emit 의 seam(실물 AppHandle / 기록형 가짜 / no-op). 이 seam 이
 // 없으면 이 모듈의 단위 하네스는 아예 서지 못한다 — 사유·계약 정본은 그 파일 헤더.
 // ★`pub(crate)` 인 것이 요점이다★: 이 포트의 유일한 소비자는 `run_connection`(그 자체가 `pub(crate)`)이고,
@@ -163,6 +166,22 @@ impl DaemonDiscovery for RealDiscovery {
     }
 }
 
+/// The discovery of a client on the new driver ([`DaemonClient::new_on_link`]) — that driver finds the daemon through
+/// its endpoint source, so nothing may reach this one; it fails instead of finding a daemon.
+#[cfg(test)]
+struct OnTheLink;
+
+#[cfg(test)]
+impl DaemonDiscovery for OnTheLink {
+    fn ensure_spawn(&self, _timeout: Duration) -> Result<DaemonInfo, String> {
+        Err("this client connects through the link driver".to_owned())
+    }
+
+    fn read_live(&self) -> Option<DaemonInfo> {
+        None
+    }
+}
+
 // discover(spawn 가능) timeout 기본값(wsTransport discover_daemon 5s 와 정렬).
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -240,6 +259,11 @@ pub struct DaemonClient {
     /// 사용량 관심 — 재연결 task 수명을 넘어 산다(관심은 레이아웃에서 나오고 소켓과 무관하다). 연결 task 마다
     ///   clone 해 넘긴다.
     usage: SharedUsageInterest,
+    /// The new driver (`connection_v2`) when this client was built on it ([`Self::new_on_link`]) — connect, ensure,
+    /// close, the command round trips and fire-and-forget sends go there instead of the old connection task;
+    /// `state_rx` is its watch.
+    #[cfg(test)]
+    link: Option<connection_v2::LinkClient>,
 }
 
 impl DaemonClient {
@@ -307,6 +331,8 @@ impl DaemonClient {
             refusals: Arc::new(RefusalAlerts::new(Arc::new(NoRefusalNotice))),
             names: Arc::new(NoAgentNames),
             usage: SharedUsageInterest::default(),
+            #[cfg(test)]
+            link: None,
         }
     }
 
@@ -324,6 +350,46 @@ impl DaemonClient {
     pub(crate) fn with_agent_names(mut self, port: Arc<dyn AgentNamesSink>) -> Self {
         self.names = port;
         self
+    }
+
+    /// A client on the new driver (`connection_v2` — TRD S21 trd-3 §6-2 U3). `inner` dials the address the endpoint
+    /// `source` resolves (a memory network in tests); `clock` drives the transport. ★The ports go in here, not through
+    /// [`Self::with_agent_names`] · [`Self::with_refusal_notice`]★ — the driver starts with this call and keeps what it
+    /// got. Only connect · ensure · close · state, the command round trips and fire-and-forget sends run on it so far.
+    #[cfg(test)]
+    pub(crate) fn new_on_link(
+        rt: Handle,
+        inner: Arc<dyn engram_dashboard_transport::Dialer>,
+        source: Arc<dyn link::endpoint::EndpointSource>,
+        clock: Arc<dyn engram_dashboard_transport::Clock>,
+        events: Arc<dyn DaemonEvents>,
+        names: Arc<dyn AgentNamesSink>,
+    ) -> Self {
+        let link = connection_v2::LinkClient::start(
+            &rt,
+            inner,
+            source,
+            clock,
+            events.clone(),
+            names.clone(),
+        );
+        let (lifecycle, _) = Lifecycle::new();
+        Self {
+            rt,
+            _owned_rt: None,
+            discovery: Arc::new(OnTheLink),
+            state_rx: link.state_rx(),
+            lifecycle: Arc::new(lifecycle),
+            handshake_timeout: HANDSHAKE_TIMEOUT,
+            router: Arc::new(OutputRouter::new()),
+            registry: WindowChannelRegistry::default(),
+            inbound: Arc::new(InboundSlot::new()),
+            events,
+            refusals: Arc::new(RefusalAlerts::new(Arc::new(NoRefusalNotice))),
+            names,
+            usage: SharedUsageInterest::default(),
+            link: Some(link),
+        }
     }
 
     // 실 discovery + `NoDaemonEvents`. ★emit 없는 조립이라는 것이 `new` 와 같다★ — 운영 셸은 이걸 부르지
@@ -357,6 +423,8 @@ impl DaemonClient {
             refusals: Arc::new(RefusalAlerts::new(Arc::new(NoRefusalNotice))),
             names: Arc::new(NoAgentNames),
             usage: SharedUsageInterest::default(),
+            #[cfg(test)]
+            link: None,
         }
     }
 
@@ -385,6 +453,8 @@ impl DaemonClient {
             refusals: Arc::new(RefusalAlerts::new(Arc::new(NoRefusalNotice))),
             names: Arc::new(NoAgentNames),
             usage: SharedUsageInterest::default(),
+            #[cfg(test)]
+            link: None,
         }
     }
 
@@ -422,6 +492,8 @@ impl DaemonClient {
             events: Arc::new(TauriEmitter(app)),
             names,
             usage: SharedUsageInterest::default(),
+            #[cfg(test)]
+            link: None,
         })
     }
 
@@ -487,6 +559,10 @@ impl DaemonClient {
     // 안에서 bump 했어서 그 창이 무방비였다(Codex BLOCK). 캡처한 my_gen 을 그대로 start_connection 에
     // 넘겨 ★이중 bump 를 피한다★(start_connection 은 더 이상 bump 안 함).
     pub async fn connect(&self) -> Result<(), HandshakeError> {
+        #[cfg(test)]
+        if let Some(link) = &self.link {
+            return link.connect().await;
+        }
         if self.state() == ConnectionState::Connected {
             return Ok(());
         }
@@ -560,6 +636,10 @@ impl DaemonClient {
     // 세대를 취소·승계한다. ensure 는 attach-only(ADR-0021 — no-spawn)지만 *승계 취소* 는 동일 적용 —
     // read_live 창 동안 옛 재연결이 소켓을 열지 못하게. 캡처한 my_gen 을 start_connection 에 넘긴다.
     pub async fn ensure(&self) -> Result<(), HandshakeError> {
+        #[cfg(test)]
+        if let Some(link) = &self.link {
+            return link.ensure().await;
+        }
         if self.state() == ConnectionState::Connected {
             return Ok(());
         }
@@ -827,6 +907,11 @@ impl DaemonClient {
     // 넣고 단일 소비자가 빼는 발화 큐**를 두거나, 발화에 세대를 실어 프론트가 정렬하게 해야 한다 — 둘 다
     // 이 자리 하나로 끝나지 않으므로 별건이다.
     pub fn close(&self) {
+        #[cfg(test)]
+        if let Some(link) = &self.link {
+            link.close();
+            return;
+        }
         tracing::info!("데몬 연결 명시 종료(close)");
         let my_gen = self.lifecycle.close();
         if self.lifecycle.is_current(my_gen) {
@@ -901,6 +986,10 @@ impl DaemonClient {
     ) -> Result<AgentEvent, protocol_state::CommandFailure> {
         use protocol_state::CommandFailure::Local;
 
+        #[cfg(test)]
+        if let Some(link) = &self.link {
+            return link.send_command(cmd).await;
+        }
         if protocol_state::command_request_id(&cmd).is_none() {
             return Err(Local(NO_REQUEST_ID.to_string()));
         }
@@ -967,6 +1056,11 @@ impl DaemonClient {
     // 기본값 80×24 나 최소 치수가 그대로 PTY 로 간다 — 고치려는 그 값이다). 그런 슬롯은 다시 보이거나
     // 크기가 잡히는 순간 위 넷 중 하나가 발화해 고친다.
     pub fn send_fire_and_forget(&self, cmd: AgentCommand) {
+        #[cfg(test)]
+        if let Some(link) = &self.link {
+            link.send_fire_and_forget(cmd);
+            return;
+        }
         self.try_enqueue(|socket| ConnectionCommand::Fire { cmd, socket }, "fire");
     }
 

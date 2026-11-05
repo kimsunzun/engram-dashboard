@@ -457,9 +457,11 @@ pub enum HandshakeStep {
     Send(Frame),
     /// 아무것도 안 보내고 상대의 다음 프레임을 기다린다.
     ///
-    /// ★상대가 거절을 알리는 프레임(오류 문구)을 보냈으면 여기서 [`HandshakeStep::Reject`] 하지 말고 이것으로
-    /// 닫기를 기다린다★ — 거절의 종류는 그 뒤 상대가 실어 닫는 코드가 정한다([`RejectKind::of`] · TRD 3 §3-0 ⑤).
-    /// 코드 없이 닫히면 못 붙음이다. 그 프레임의 글은 소비자의 진단 · 로그 몫이다.
+    /// To let the peer's close code decide the kind of a refusal, answer the peer's refusal frame (its error text)
+    /// with this and wait for the close — the kind then comes from that code ([`RejectKind::of`] · TRD 3 §3-0 ⑤); a
+    /// close without a code reads as "could not connect". A consumer whose peer never sends a code may instead
+    /// answer that frame with [`HandshakeStep::Reject`] (the shell does — ADR-0346). The frame's text is for the
+    /// consumer's diagnostics and logs only.
     Await,
     /// 운영 단계로.
     Done,

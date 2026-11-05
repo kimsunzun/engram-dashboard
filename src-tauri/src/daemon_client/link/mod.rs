@@ -23,6 +23,8 @@ pub mod errors;
 pub mod handshake;
 pub mod pump;
 pub mod route;
+#[cfg(test)]
+pub(crate) mod test_log;
 pub mod wire;
 
 use std::sync::atomic::{AtomicU64, Ordering};

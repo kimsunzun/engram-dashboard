@@ -38,6 +38,15 @@ use super::endpoint::{Current, Endpoint, EndpointSource};
 use super::handshake::{CredentialSlot, ShellHandshake};
 use super::DaemonKey;
 
+/// The texts of the failed attempts this dialer makes — routing keys its throttled failure log on them
+/// (`route::UnreachableClass`); nothing decides on them.
+pub(super) const NOT_REGISTERED: &str = "no daemon registered at";
+pub(super) const READ_FAILED: &str = "reading the daemon endpoint failed";
+pub(super) const BUSY_UNKNOWN: &str =
+    "the daemon endpoint record is busy and no earlier address is known";
+pub(super) const NO_RECORD: &str = "no daemon endpoint record — no live daemon";
+pub(super) const UNUSABLE: &str = "the daemon endpoint record is unusable";
+
 struct Registration {
     source: Arc<dyn EndpointSource>,
     credential: Arc<CredentialSlot>,
@@ -91,6 +100,15 @@ impl LocalDaemonDialer {
             .remove(address);
     }
 
+    /// How many registrations are held — for tests of the callers' unregistering.
+    #[cfg(test)]
+    pub(crate) fn registered(&self) -> usize {
+        self.registrations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+
     async fn resolve(&self, addr: &Address) -> Result<Address, DialFailure> {
         let registration = self
             .registrations
@@ -98,12 +116,12 @@ impl LocalDaemonDialer {
             .unwrap_or_else(PoisonError::into_inner)
             .get(addr)
             .cloned()
-            .ok_or_else(|| LinkError::new(format!("no daemon registered at {addr}")))?;
+            .ok_or_else(|| LinkError::new(format!("{NOT_REGISTERED} {addr}")))?;
         let source = registration.source.clone();
         // Blocking file I/O. A dial dropped mid-read leaves the read to finish on its own — it has no side effect.
         let current = tokio::task::spawn_blocking(move || source.current())
             .await
-            .map_err(|e| LinkError::new(format!("reading the daemon endpoint failed: {e}")))?;
+            .map_err(|e| LinkError::new(format!("{READ_FAILED}: {e}")))?;
         let mut last_known = registration
             .last_known
             .lock()
@@ -120,20 +138,15 @@ impl LocalDaemonDialer {
                     );
                     endpoint.clone()
                 }
-                None => {
-                    return Err(LinkError::new(
-                        "the daemon endpoint record is busy and no earlier address is known",
-                    )
-                    .into())
-                }
+                None => return Err(LinkError::new(BUSY_UNKNOWN).into()),
             },
             Current::Absent => {
                 *last_known = None;
-                return Err(LinkError::new("no daemon endpoint record — no live daemon").into());
+                return Err(LinkError::new(NO_RECORD).into());
             }
             Current::Unusable(why) => {
                 *last_known = None;
-                return Err(LinkError::new(why).into());
+                return Err(LinkError::new(format!("{UNUSABLE}: {why}")).into());
             }
             Current::VersionMismatch { daemon } => {
                 *last_known = None;
@@ -182,7 +195,7 @@ mod tests {
     use engram_dashboard_transport::testing::{settle, ManualClock, MemoryEndpoint, MemoryNetwork};
     use engram_dashboard_transport::{
         Close, ConnectFailure, Frame, GaveUpReason, HandshakeStep, Inbox, Incoming, Peer,
-        PeerState, Policy, Registry, RejectKind, TransportEvent,
+        PeerState, Policy, Registry, TransportEvent,
     };
 
     use super::super::endpoint::LocalEndpointSource;
@@ -448,22 +461,10 @@ mod tests {
         assert_eq!(source.ensures(), 0);
     }
 
-    #[tokio::test]
-    async fn an_error_then_close_4001_gives_up_rejected_without_spending_budget() {
-        let source = ScriptedSource::new([live(5123, TOKEN_A)]);
-        let mut h = Harness::start(source.clone());
-        let (endpoint, _) = h.next_link().await;
-
-        endpoint.push(daemon_error());
-        settle().await;
-        assert_eq!(
-            h.state(),
-            PeerState::Handshaking,
-            "the error text alone decides nothing"
-        );
-        endpoint.reject(Close::new(CloseCode::HANDSHAKE_REJECTED, "version"));
+    /// The dial ends in a terminal refusal after one dial — an `Error` frame (the real daemon then closes without a
+    /// code — ADR-0346) or a bare 4001 close.
+    async fn assert_gave_up_rejected_after_one_dial(h: &mut Harness, source: &ScriptedSource) {
         wait_for("gave up", || h.state().is_terminal()).await;
-
         assert_eq!(h.state(), PeerState::GaveUp(GaveUpReason::Rejected));
         assert!(h.saw("Rejected"));
         assert!(
@@ -472,38 +473,40 @@ mod tests {
         );
         h.clock.advance(Duration::from_secs(60));
         settle().await;
-        assert_eq!(h.net.dials(), 1);
+        assert_eq!(h.net.dials(), 1, "a refusal is never re-dialed");
         assert_eq!(source.reads(), 1);
         assert_eq!(source.ensures(), 0);
     }
 
     #[tokio::test]
-    async fn close_4006_spends_budget_and_the_next_attempt_re_reads_the_credential() {
+    async fn an_error_frame_gives_up_rejected_without_spending_budget() {
+        let source = ScriptedSource::new([live(5123, TOKEN_A)]);
+        let mut h = Harness::start(source.clone());
+        let (endpoint, _) = h.next_link().await;
+
+        endpoint.push(daemon_error());
+        assert_gave_up_rejected_after_one_dial(&mut h, &source).await;
+    }
+
+    #[tokio::test]
+    async fn a_bare_close_4001_gives_up_rejected_without_spending_budget() {
+        let source = ScriptedSource::new([live(5123, TOKEN_A)]);
+        let mut h = Harness::start(source.clone());
+        let (endpoint, _) = h.next_link().await;
+
+        endpoint.reject(Close::new(CloseCode::HANDSHAKE_REJECTED, "version"));
+        assert_gave_up_rejected_after_one_dial(&mut h, &source).await;
+    }
+
+    #[tokio::test]
+    async fn an_error_frame_before_a_4006_close_gives_up_instead_of_retrying() {
         let source = ScriptedSource::new([live(5123, TOKEN_A), live(5123, TOKEN_B)]);
         let mut h = Harness::start(source.clone());
-        let (first, first_auth) = h.next_link().await;
-        assert_eq!(first_auth, auth(TOKEN_A));
+        let (endpoint, _) = h.next_link().await;
 
-        first.push(daemon_error());
-        first.reject(Close::new(CloseCode::HANDSHAKE_RETRYABLE, "stale token"));
-        wait_for("backoff", || h.state() == PeerState::Backoff).await;
-        assert_eq!(
-            h.connect_failures(),
-            vec![ConnectFailure::Rejected {
-                kind: RejectKind::Retryable,
-                code: CloseCode::HANDSHAKE_RETRYABLE,
-                reason: "stale token".into(),
-            }],
-            "one attempt of the budget"
-        );
-
-        settle().await;
-        h.clock.advance(Duration::from_secs(1));
-        let (second, second_auth) = h.next_link().await;
-        assert_eq!(source.reads(), 2);
-        assert_eq!(second_auth, auth(TOKEN_B), "the re-read credential");
-        h.go_live(&second).await;
-        assert_eq!(source.ensures(), 0);
+        endpoint.push(daemon_error());
+        endpoint.reject(Close::new(CloseCode::HANDSHAKE_RETRYABLE, "stale token"));
+        assert_gave_up_rejected_after_one_dial(&mut h, &source).await;
     }
 
     #[tokio::test]

@@ -25,21 +25,33 @@
 //!
 //! Dropped items are logged only.
 //!
+//! ## Connection failures
+//!
+//! A handle that has not connected yet shows its first failed attempt as `Down` at once — a first connect has no
+//! `Reconnecting` phase (TRD revision 9 ①); the transport keeps retrying in the background and a later `Connected` is
+//! an edge. Failed attempts are logged throttled (`FailureLog` — ADR-0346 decision 5): retries no longer run out, so
+//! a line per attempt would repeat for as long as the daemon is away.
+//!
 //! ## Replies skip this path (§3-3 B2)
 //!
 //! A reply wakes its `request` inside the transport and never reaches the inbox, so it can resolve before events the
 //! daemon sent ahead of it are routed (pinned by a test below; the caller survey is in the TRD §6-2 U2 C note).
 // ADR-0310
 // ADR-0342
+// ADR-0346
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use engram_dashboard_command::CommandReply as BusReply;
 use engram_dashboard_protocol::{AgentCommand, AgentEvent};
 use engram_dashboard_transport::{
-    Arrival, CloseCode, ConnectFailure, GaveUpReason, Generation, Incoming, Peer, TransportEvent,
+    Arrival, Clock, CloseCode, ConnectFailure, GaveUpReason, Generation, Incoming, Peer,
+    TransportEvent,
 };
 
+use super::dialer::{BUSY_UNKNOWN, NOT_REGISTERED, NO_RECORD, READ_FAILED, UNUSABLE};
 use super::wire::{ShellIn, ShellWire};
 use super::{DaemonKey, HandleToken};
 use crate::daemon_client::events::DaemonEvents;
@@ -79,12 +91,14 @@ pub enum Routed {
 /// What the connection-failure surface gets. A value only — what the UI does with it is wired in 3-2 U4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkNotice {
-    /// The daemon refused for good (`GaveUp(Rejected)` follows). The UI text is [`refusal_message`]`(code)` —
+    /// The daemon refused for good — `GaveUp(Rejected)` follows for a terminal refusal; for a refusal the transport
+    /// would retry, the driver removes the peer instead (`Closed` follows and the registry no longer holds the peer).
+    /// The UI text is [`refusal_message`]`(code)` —
     /// never the daemon's own text (ADR-0342).
     Refused { code: CloseCode },
     /// The reconnect budget ran out (`GaveUp(BudgetExhausted)`). `last` = the cause of the last failed attempt since
-    /// the handle's last `Connected` (`None` = none failed). ★What the UI shows here is still open with the user★ (TRD
-    /// §6-2 U2 — the ⓒ / "다시 연결" item); today's behaviour is the `Down` state and nothing more.
+    /// the handle's last `Connected` (`None` = none failed). ★The shell's driver never reaches it★ — it retries network
+    /// failures without limit (ADR-0346); only a registry built with a finite budget produces it.
     BudgetExhausted { last: Option<FailureCause> },
 }
 
@@ -104,11 +118,78 @@ impl FailureCause {
     }
 }
 
+/// What the failure log tells apart — [`FailureCause`] with the kind of an unreachable daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailureKind {
+    Unreachable(UnreachableClass),
+    Refused { code: CloseCode },
+}
+
+impl FailureKind {
+    fn of(failure: &ConnectFailure) -> Self {
+        match failure {
+            ConnectFailure::Unreachable(e) => {
+                FailureKind::Unreachable(UnreachableClass::of(&e.message))
+            }
+            ConnectFailure::Rejected { code, .. } => FailureKind::Refused { code: *code },
+        }
+    }
+}
+
+/// Why a daemon could not be reached, as far as a stable log key goes. ★Read from the failure text and used only to
+/// throttle the log★ — a class is never a decision, and a text no rule knows is `Other`. Not the raw text: it carries
+/// ports and OS detail that can change per attempt and would defeat the throttle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnreachableClass {
+    /// No `daemon.json` (`link::dialer`).
+    NoRecord,
+    /// A `daemon.json` that cannot be used — broken · dead pid · access denied (`link::dialer`).
+    RecordUnusable,
+    /// The record is held by another process and no address is known (`link::dialer`).
+    RecordBusy,
+    /// The registration or its endpoint read is gone (`link::dialer`).
+    Registration,
+    /// The dial or the handshake ran out of time (the transport's texts).
+    TimedOut,
+    /// The daemon closed the link during the handshake (the transport's text).
+    ClosedInHandshake,
+    /// The ws dial itself failed — refused, reset, … (the transport's ws dialer).
+    Dial,
+    Other,
+}
+
+impl UnreachableClass {
+    fn of(text: &str) -> Self {
+        let starts = |prefix: &str| text.starts_with(prefix);
+        if starts(NO_RECORD) {
+            UnreachableClass::NoRecord
+        } else if starts(UNUSABLE) {
+            UnreachableClass::RecordUnusable
+        } else if starts(BUSY_UNKNOWN) {
+            UnreachableClass::RecordBusy
+        } else if starts(NOT_REGISTERED) || starts(READ_FAILED) {
+            UnreachableClass::Registration
+        } else if matches!(
+            text,
+            "connect timed out" | "handshake timed out" | "handshake write timed out"
+        ) {
+            UnreachableClass::TimedOut
+        } else if text == "peer closed during handshake" {
+            UnreachableClass::ClosedInHandshake
+        } else if starts("ws connect ") {
+            UnreachableClass::Dial
+        } else {
+            UnreachableClass::Other
+        }
+    }
+}
+
 /// The fixed local text for a terminal refusal with `code` — ★the one place a close code becomes UI text★
-/// (ADR-0342). It states the cause only — ADR-0343: the restart action lands in 3-2 U5; until then add no instruction here (the tray
-/// stop does nothing on a version mismatch). ★4001 is not only a
-/// version mismatch★: 3-3 U7's identity refusal closes with it too, so that unit gives its refusal its own code or
-/// rewords this text before it lands.
+/// (ADR-0342). It states the cause only — ADR-0343: the restart action lands in 3-2 U5; until then add no instruction
+/// here (the tray stop does nothing on a version mismatch). ★4001 does not say why★: it is the daemon's refusal of the
+/// handshake, whatever the cause (the shell never reads the daemon's text — `ShellHandshake`: token, version or
+/// anything else), or a local version mismatch (`link::dialer`); 3-3 U7's identity refusal will close with it too. The
+/// text for it is a pending user decision.
 pub fn refusal_message(code: CloseCode) -> &'static str {
     match code {
         CloseCode::HANDSHAKE_REJECTED => "실행 중인 데몬이 이 앱과 버전이 다릅니다",
@@ -116,15 +197,18 @@ pub fn refusal_message(code: CloseCode) -> &'static str {
     }
 }
 
-/// The routing state of every key — see the module doc.
-#[derive(Default)]
+/// The routing state of every key — see the module doc. `clock` times the failure log only — pass the registry's.
 pub struct RouteState {
     keys: HashMap<DaemonKey, KeyRoute>,
+    clock: Arc<dyn Clock>,
 }
 
 impl RouteState {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(clock: Arc<dyn Clock>) -> Self {
+        Self {
+            keys: HashMap::new(),
+            clock,
+        }
     }
 
     /// `token` is now the key's current handle (one `Registry::add`): every later item of an earlier handle of the key
@@ -157,6 +241,7 @@ impl RouteState {
                 seen: None,
                 open: None,
                 last_failure: None,
+                failures: FailureLog::default(),
                 shown,
                 closed: false,
             },
@@ -172,9 +257,62 @@ struct KeyRoute {
     /// The connection given to the driver as `LinkUp` and not yet as `LinkDown`.
     open: Option<Generation>,
     last_failure: Option<FailureCause>,
+    failures: FailureLog,
     shown: Option<ConnectionState>,
     /// `Closed` was routed — the inbox ends cleanly after it.
     closed: bool,
+}
+
+/// Throttles the log of one handle's failed attempts (ADR-0346 decision 5): the first failure and every change of
+/// cause get a line; while the same cause repeats, one summary line at most every [`FailureLog::SUMMARY_EVERY`], with
+/// the count since the previous line. A `Connected` starts it over.
+#[derive(Default)]
+struct FailureLog {
+    cause: Option<FailureKind>,
+    /// Failures of `cause` since the last line.
+    unlogged: u32,
+    line_at: Option<Instant>,
+}
+
+/// What [`FailureLog::record`] says to log.
+#[derive(Debug, PartialEq, Eq)]
+enum FailureLine {
+    /// The first failure, or another cause than the previous one. `unlogged` = failures of the previous cause that no
+    /// line counted yet.
+    New { unlogged: u32 },
+    /// The same cause, [`FailureLog::SUMMARY_EVERY`] after the last line: `count` failures since that line.
+    Repeated { count: u32 },
+    /// The same cause, within [`FailureLog::SUMMARY_EVERY`] of the last line.
+    Quiet,
+}
+
+impl FailureLog {
+    const SUMMARY_EVERY: Duration = Duration::from_secs(60);
+
+    fn record(&mut self, cause: FailureKind, now: Instant) -> FailureLine {
+        if self.cause != Some(cause) {
+            let unlogged = std::mem::take(&mut self.unlogged);
+            self.cause = Some(cause);
+            self.line_at = Some(now);
+            return FailureLine::New { unlogged };
+        }
+        self.unlogged = self.unlogged.saturating_add(1);
+        let due = self
+            .line_at
+            .is_none_or(|at| now.saturating_duration_since(at) >= Self::SUMMARY_EVERY);
+        if !due {
+            return FailureLine::Quiet;
+        }
+        self.line_at = Some(now);
+        FailureLine::Repeated {
+            count: std::mem::take(&mut self.unlogged),
+        }
+    }
+
+    /// Starts over; returns the failures no line counted.
+    fn reset(&mut self) -> u32 {
+        std::mem::take(self).unlogged
+    }
 }
 
 /// Routes one item of `key`'s handle `token` (the pump's tag). Returns nothing for a dropped or log-only item.
@@ -184,7 +322,8 @@ pub fn route(
     token: HandleToken,
     item: Incoming<ShellWire>,
 ) -> Vec<Routed> {
-    let Some(route) = st.current(key, token) else {
+    let RouteState { keys, clock } = st;
+    let Some(route) = keys.get_mut(key).filter(|r| r.token == token) else {
         tracing::debug!(
             peer = %key.peer_id(),
             item = item_kind(&item),
@@ -194,7 +333,7 @@ pub fn route(
     };
     match item {
         Incoming::Message(arrival) => route.message(key, arrival),
-        Incoming::Event(event) => route.event(key, event),
+        Incoming::Event(event) => route.event(key, event, clock.as_ref()),
     }
 }
 
@@ -223,6 +362,13 @@ pub fn route_end(st: &mut RouteState, key: &DaemonKey, token: HandleToken) -> Ve
 }
 
 impl RouteState {
+    /// `token` is `key`'s current handle and its connection is open as routed (`LinkUp` given, `LinkDown` not yet).
+    pub fn is_open(&self, key: &DaemonKey, token: HandleToken) -> bool {
+        self.keys
+            .get(key)
+            .is_some_and(|r| r.token == token && r.open.is_some())
+    }
+
     fn current(&mut self, key: &DaemonKey, token: HandleToken) -> Option<&mut KeyRoute> {
         self.keys.get_mut(key).filter(|r| r.token == token)
     }
@@ -277,14 +423,25 @@ impl KeyRoute {
         }]
     }
 
-    fn event(&mut self, key: &DaemonKey, event: TransportEvent<ShellWire>) -> Vec<Routed> {
+    fn event(
+        &mut self,
+        key: &DaemonKey,
+        event: TransportEvent<ShellWire>,
+        clock: &dyn Clock,
+    ) -> Vec<Routed> {
         let peer = key.peer_id();
         match event {
             TransportEvent::Connected { generation, .. } => {
                 if self.is_stale(generation) {
                     return self.drop_stale(key, "Connected", generation);
                 }
-                tracing::info!(%peer, generation = generation.0, "daemon link connected");
+                let unlogged_failures = self.failures.reset();
+                tracing::info!(
+                    %peer,
+                    generation = generation.0,
+                    unlogged_failures,
+                    "daemon link connected"
+                );
                 self.seen = Some(generation);
                 self.open = Some(generation);
                 self.last_failure = None;
@@ -308,23 +465,50 @@ impl KeyRoute {
                 out.extend(self.show(ConnectionState::Reconnecting));
                 out
             }
-            // No state edge per attempt. What a failure before the first `Connected` shows is the cold-start decision
-            //   of 3-2 U3 — this mapping stays neutral (it only remembers the cause).
+            // No state edge per attempt — only a handle that never connected shows its first failure (module doc).
             TransportEvent::ConnectFailed {
                 attempt,
-                of,
                 cause,
                 retry_in,
                 ..
             } => {
                 let failure = FailureCause::of(&cause);
+                let kind = FailureKind::of(&cause);
                 // The failure's text can carry the daemon's words — kind and close code only.
-                tracing::warn!(%peer, attempt, of, ?failure, ?retry_in, "a daemon connection attempt failed");
+                match self.failures.record(kind, clock.now()) {
+                    FailureLine::New { unlogged } => tracing::warn!(
+                        %peer,
+                        attempt,
+                        ?kind,
+                        ?retry_in,
+                        unlogged_before = unlogged,
+                        "a daemon connection attempt failed"
+                    ),
+                    FailureLine::Repeated { count } => tracing::warn!(
+                        %peer,
+                        attempt,
+                        ?kind,
+                        ?retry_in,
+                        count,
+                        "daemon connection attempts keep failing with the same cause"
+                    ),
+                    FailureLine::Quiet => tracing::debug!(
+                        %peer,
+                        attempt,
+                        ?kind,
+                        ?retry_in,
+                        "the daemon connection failed again with the same cause"
+                    ),
+                }
                 self.last_failure = Some(failure);
-                Vec::new()
+                if self.seen.is_none() {
+                    self.show(ConnectionState::Down).into_iter().collect()
+                } else {
+                    Vec::new()
+                }
             }
             TransportEvent::Rejected { code, reason, .. } => {
-                // The daemon's text can echo what we sent (the Auth token) — its length only (as `ShellHandshake`).
+                // The daemon's text can echo what we sent (the Auth token) — its length only.
                 tracing::warn!(
                     %peer,
                     code = code.0,
@@ -500,6 +684,7 @@ mod tests {
     };
     use serde_json::value::RawValue;
 
+    use super::super::test_log::capture;
     use crate::daemon_client::events::ConnectionStateEvent;
     use crate::daemon_client::replay_flight::ReplayFlightSet;
     use crate::daemon_client::tests::wire_agent;
@@ -612,8 +797,12 @@ mod tests {
             .collect()
     }
 
+    fn route_state() -> RouteState {
+        RouteState::new(ManualClock::new().handle())
+    }
+
     fn adopted() -> (RouteState, HandleToken) {
-        let mut st = RouteState::new();
+        let mut st = route_state();
         let token = HandleToken::mint();
         assert!(
             st.adopt(key(), token).is_empty(),
@@ -728,10 +917,10 @@ mod tests {
             matches!(
                 out.as_slice(),
                 [
+                    Routed::State(ConnectionState::Down),
                     Routed::Notice(LinkNotice::Refused {
                         code: CloseCode::HANDSHAKE_REJECTED
                     }),
-                    Routed::State(ConnectionState::Down)
                 ]
             ),
             "{out:?}"
@@ -782,6 +971,247 @@ mod tests {
             })
             .collect();
         assert_eq!(links, ["up1", "down1", "up2", "down2"]);
+    }
+
+    #[test]
+    fn a_handle_that_never_connected_shows_its_first_failure_as_down_and_a_later_connect_as_connected(
+    ) {
+        use ConnectionState::*;
+        let (mut st, token) = adopted();
+        let out = run(
+            &mut st,
+            token,
+            [
+                connect_failed(unreachable()),
+                connect_failed(unreachable()),
+                connect_failed(retryable_refusal()),
+                connected(1),
+                disconnected(1, DisconnectCause::PeerClosed),
+                connect_failed(unreachable()),
+            ],
+        );
+        assert_eq!(
+            states(&out),
+            [Down, Connected, Reconnecting],
+            "no Reconnecting before the first Connected, no Down after it"
+        );
+    }
+
+    #[test]
+    fn repeated_failures_get_one_line_per_cause_change_and_a_summary_at_most_every_minute() {
+        let mut log = FailureLog::default();
+        let t0 = Instant::now();
+        let at = |secs| t0 + Duration::from_secs(secs);
+        let unreachable = FailureKind::Unreachable(UnreachableClass::NoRecord);
+        let refused = FailureKind::Refused {
+            code: CloseCode::HANDSHAKE_RETRYABLE,
+        };
+        assert_eq!(
+            log.record(unreachable, at(0)),
+            FailureLine::New { unlogged: 0 }
+        );
+        for secs in [10, 20, 59] {
+            assert_eq!(log.record(unreachable, at(secs)), FailureLine::Quiet);
+        }
+        assert_eq!(
+            log.record(unreachable, at(60)),
+            FailureLine::Repeated { count: 4 },
+            "a minute after the first line, counting every failure since it"
+        );
+        assert_eq!(log.record(unreachable, at(70)), FailureLine::Quiet);
+        assert_eq!(
+            log.record(unreachable, at(119)),
+            FailureLine::Quiet,
+            "the minute runs from the summary line"
+        );
+        assert_eq!(
+            log.record(refused, at(121)),
+            FailureLine::New { unlogged: 2 },
+            "a new cause logs at once and carries what no line counted"
+        );
+        assert_eq!(
+            log.record(unreachable, at(122)),
+            FailureLine::New { unlogged: 0 }
+        );
+        assert_eq!(log.record(unreachable, at(123)), FailureLine::Quiet);
+        assert_eq!(log.reset(), 1);
+        assert_eq!(
+            log.record(unreachable, at(124)),
+            FailureLine::New { unlogged: 0 },
+            "after a connect the next failure is a first one again"
+        );
+    }
+
+    fn unreachable_with(text: &str) -> Incoming<ShellWire> {
+        connect_failed(ConnectFailure::Unreachable(LinkError::new(text)))
+    }
+
+    #[test]
+    fn a_change_in_why_the_daemon_is_unreachable_is_logged_at_once() {
+        let (mut st, token) = adopted();
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        capture(lines.clone(), || {
+            run(
+                &mut st,
+                token,
+                [
+                    unreachable_with(NO_RECORD),
+                    unreachable_with(&format!(
+                        "{UNUSABLE}: daemon.json read failed: access denied"
+                    )),
+                    // The same class with other detail is the same cause.
+                    unreachable_with(&format!(
+                        "{UNUSABLE}: daemon.json names pid 7 which is not alive"
+                    )),
+                    unreachable_with("ws connect ws://127.0.0.1:5123: connection refused"),
+                    unreachable_with("ws connect ws://127.0.0.1:6000: connection refused"),
+                ],
+            )
+        });
+        let lines = lines.lock().unwrap();
+        let failures = failure_lines(&lines);
+        assert_eq!(
+            levels(&failures),
+            ["WARN", "WARN", "DEBUG", "WARN", "DEBUG"],
+            "{lines:?}"
+        );
+        assert!(
+            failures[0].contains(" kind=Unreachable(NoRecord) "),
+            "{failures:?}"
+        );
+        assert!(
+            failures[1].contains(" kind=Unreachable(RecordUnusable) "),
+            "{failures:?}"
+        );
+        assert!(
+            failures[3].contains(" kind=Unreachable(Dial) "),
+            "{failures:?}"
+        );
+    }
+
+    /// The failure log's lines — the events with a `kind` field.
+    fn failure_lines(lines: &[String]) -> Vec<&String> {
+        lines
+            .iter()
+            .filter(|line| line.contains(" kind="))
+            .collect()
+    }
+
+    fn levels<'a>(lines: &[&'a String]) -> Vec<&'a str> {
+        lines
+            .iter()
+            .map(|line| {
+                line.strip_prefix("level=")
+                    .and_then(|rest| rest.split(' ').next())
+                    .unwrap_or("")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_repeated_cause_is_debug_until_a_minute_passed_and_a_connect_reports_what_no_line_counted()
+    {
+        let clock = ManualClock::new();
+        let mut st = RouteState::new(clock.handle());
+        let token = HandleToken::mint();
+        let _ = st.adopt(key(), token);
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        capture(lines.clone(), || {
+            run(&mut st, token, [unreachable_with(NO_RECORD)]);
+            for _ in 0..3 {
+                clock.advance(Duration::from_secs(15));
+                run(&mut st, token, [unreachable_with(NO_RECORD)]);
+            }
+            clock.advance(Duration::from_secs(15));
+            run(&mut st, token, [unreachable_with(NO_RECORD)]);
+            clock.advance(Duration::from_secs(5));
+            run(&mut st, token, [unreachable_with(NO_RECORD)]);
+            run(&mut st, token, [connected(1)]);
+            run(&mut st, token, [unreachable_with(NO_RECORD)]);
+        });
+        let lines = lines.lock().unwrap();
+        let failures = failure_lines(&lines);
+        assert_eq!(
+            levels(&failures),
+            ["WARN", "DEBUG", "DEBUG", "DEBUG", "WARN", "DEBUG", "WARN"],
+            "within a minute the same cause is debug only: {lines:?}"
+        );
+        assert!(
+            failures[4].contains(" count=4 "),
+            "the summary a minute after the first line counts every failure since it: {failures:?}"
+        );
+        let connected_line = lines
+            .iter()
+            .find(|line| line.contains(" unlogged_failures="))
+            .expect("the connect line");
+        assert!(
+            connected_line.starts_with("level=INFO ")
+                && connected_line.contains(" unlogged_failures=1 "),
+            "{connected_line}"
+        );
+        assert!(
+            failures[6].contains(" unlogged_before=0 "),
+            "after a connect the next failure is a first one again: {failures:?}"
+        );
+    }
+
+    // `UnreachableClass` reads texts the transport writes — a rewording there must break this, not fall into `Other`.
+    #[tokio::test]
+    async fn the_transport_texts_the_failure_classes_read_are_the_ones_it_writes() {
+        use engram_dashboard_transport::testing::HelloHandshake;
+        use engram_dashboard_transport::ws::WsDialer;
+        use engram_dashboard_transport::{DialFailure, Dialer};
+
+        let net = MemoryNetwork::new();
+        let clock = ManualClock::new();
+        let registry = registry(&net, &clock);
+        let (peer, mut inbox) =
+            registry.add(peer_id(), Address::new("mem"), Arc::new(HelloHandshake));
+        settle_until("a link", || net.open_endpoints() > 0).await;
+        // A close without a code during the handshake.
+        net.accept().unwrap().close();
+        settle_until("backoff", || peer.peer_state() == PeerState::Backoff).await;
+        settle().await;
+        clock.advance(Duration::from_secs(1));
+        settle_until("a second link", || net.open_endpoints() > 0).await;
+        // Held and never answered — the attempt runs out of time.
+        let _silent = net.accept().unwrap();
+        settle().await;
+        clock.advance(Duration::from_secs(11));
+        settle_until("backoff again", || peer.peer_state() == PeerState::Backoff).await;
+
+        let mut classes = Vec::new();
+        while let Some(item) = inbox.try_recv() {
+            if let Incoming::Event(TransportEvent::ConnectFailed {
+                cause: ConnectFailure::Unreachable(e),
+                ..
+            }) = item
+            {
+                classes.push(UnreachableClass::of(&e.message));
+            }
+        }
+        assert_eq!(
+            classes,
+            [
+                UnreachableClass::ClosedInHandshake,
+                UnreachableClass::TimedOut
+            ]
+        );
+
+        let failure = WsDialer::new(1024)
+            .dial(&Address::new("not a url"))
+            .await
+            .err();
+        match failure {
+            Some(DialFailure::Unreachable(e)) => {
+                assert_eq!(
+                    UnreachableClass::of(&e.message),
+                    UnreachableClass::Dial,
+                    "{e}"
+                )
+            }
+            _ => panic!("the ws dialer refuses a bad address as unreachable"),
+        }
     }
 
     #[test]
@@ -876,8 +1306,8 @@ mod tests {
                 matches!(
                     out.as_slice(),
                     [
+                        Routed::State(ConnectionState::Down),
                         Routed::Notice(LinkNotice::BudgetExhausted { last: got }),
-                        Routed::State(ConnectionState::Down)
                     ] if *got == last
                 ),
                 "{out:?}"
@@ -1145,7 +1575,7 @@ mod tests {
 
     #[test]
     fn a_re_add_drops_the_old_tail_after_the_new_snapshot_and_keeps_the_new_flight() {
-        let mut st = RouteState::new();
+        let mut st = route_state();
         let mut flight = ReplayFlightSet::new(Duration::from_secs(10));
         let rec = Recorder::default();
         let agent = AgentId::new_v4();
@@ -1208,7 +1638,7 @@ mod tests {
 
     #[test]
     fn a_re_add_releases_the_replay_flight_of_the_old_connection() {
-        let mut st = RouteState::new();
+        let mut st = route_state();
         let mut flight = ReplayFlightSet::new(Duration::from_secs(10));
         let rec = Recorder::default();
         let agent = AgentId::new_v4();

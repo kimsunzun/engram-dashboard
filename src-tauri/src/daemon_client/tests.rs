@@ -3709,7 +3709,7 @@ use super::events::{ConnectionStateEvent, DaemonEvents};
 // 발화를 **온 순서대로** 한 줄씩 적는 가짜. ★Vec 이지 집합이 아니다★ — 이 하네스가 사는 것의 절반이
 // 순서다(연결 상태가 broadcast 보다 먼저 나가야 프론트가 출력 Channel 을 등록한 뒤 목록을 받는다).
 #[derive(Default)]
-struct RecordingEvents {
+pub(super) struct RecordingEvents {
     seen: std::sync::Mutex<Vec<String>>,
     // `Connected` 발화마다 앞에서 하나씩 꺼내 돌리는 훅(빈 줄이면 아무것도 안 한다). ★연결 task 안에서 동기로
     //   돈다★ — 그 자리는 창구를 연 뒤 · main_loop 가 명령 채널을 읽기 전 · (첫 연결이면) 호출자가 명령
@@ -3726,7 +3726,7 @@ impl RecordingEvents {
             .push(line);
     }
 
-    fn seen(&self) -> Vec<String> {
+    pub(super) fn seen(&self) -> Vec<String> {
         self.seen.lock().expect("recording events poisoned").clone()
     }
 
