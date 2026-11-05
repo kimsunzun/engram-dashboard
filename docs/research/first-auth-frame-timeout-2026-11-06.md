@@ -1,6 +1,6 @@
 # First auth frame timeout after connect — open-source defaults
 
-- Status: done (2026-11-06). Tier: light (one source-reading collector; main re-read graphql-ws `connectionInitWaitTimeout = 3_000` (`src/server.ts:613`)). Why: our daemon's `AUTH_TIMEOUT = 1s` (`crates/engram-dashboard-net/src/ws.rs:124`) came from the S12 design draft (`b6145f30`, 2026-06-14) with no recorded reason; it decides whether a slow shell's handshake reads as a terminal refusal (ADR-0346, U3a review hold). Decision: pending with the user.
+- Status: done (2026-11-06). Tier: light (one source-reading collector; main re-read graphql-ws `connectionInitWaitTimeout = 3_000` (`src/server.ts:613`)). Why: our daemon's `AUTH_TIMEOUT = 1s` (`crates/engram-dashboard-net/src/ws.rs:124`) came from the S12 design draft (`b6145f30`, 2026-06-14) with no recorded reason; it decides whether a slow shell's handshake reads as a terminal refusal (ADR-0346, U3a review hold). Decision (user, 2026-11-06): raise the daemon's `AUTH_TIMEOUT` to 15 s (ADR-0347).
 - Collector output follows verbatim.
 
 # First auth/init message timeout — OSS server defaults (collection)

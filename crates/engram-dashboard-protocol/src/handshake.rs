@@ -23,8 +23,8 @@
 
 use crate::Secret;
 
-/// 연결 후 **첫 프레임** 전용 인증 프레임. 데몬은 연결 1초 안에(net `ws::AUTH_TIMEOUT`) 이것 하나만 받아들이고,
-/// 그 뒤에 오는 같은 프레임은 위층이 거절한다.
+/// The auth frame, valid only as the **first frame** of a connection. The daemon accepts exactly this one within
+/// net `ws::AUTH_TIMEOUT`; the layer above rejects the same frame arriving later.
 ///
 /// `token` 은 daemon.json 의 256-bit hex · `protocol_version` 은 **보내는 쪽이 컴파일된 버전**이다 —
 /// daemon.json 이 준 값을 되쏘면 받는 쪽의 버전 비교가 늘 통과해 버전 게이트가 죽는다.

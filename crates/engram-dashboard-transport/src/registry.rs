@@ -1659,7 +1659,8 @@ mod tests {
 
     // ── 3-0 U6b: 받은 상대(`attach`) ──
 
-    /// TRD 3 §5 3 의 인증 시한.
+    /// An auth window for these tests (they run on `ManualClock`, so the value only sets the step size — the
+    /// daemon's real window is 15 s, TRD 3 revision 9 ⑧).
     const AUTH: Duration = Duration::from_secs(1);
     const GOOD: &str = "auth|good";
 

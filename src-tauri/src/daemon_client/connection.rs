@@ -2,8 +2,8 @@
 //!
 //! 데몬 WS 서버(`crates/engram-dashboard-net/src/ws.rs` — ADR-0129 로 데몬 crate 에서 이사)의
 //! **대칭 클라이언트**다. 서버측 기대:
-//!   1) WS 업그레이드 후 **1초 내 첫 frame 이 핸드셰이크 프레임(`AuthFrame`, Text JSON)** 이어야 한다
-//!      — 아니면 서버가 Error 후 close(`handle_connection` step 2 / AUTH_TIMEOUT).
+//!   1) After the WS upgrade the first frame must be the handshake frame (`AuthFrame`, Text JSON) within
+//!      `AUTH_TIMEOUT` — otherwise the server sends an Error and closes (`handle_connection` step 2).
 //!   2) 토큰·protocol_version 일치 시 서버가 `AgentEvent::Hello`(Text JSON) → `AgentListUpdated`
 //!      를 push 한다(ws.rs step 4 `hello_event`). 불일치면 Error 후 close.
 //! 그래서 이 task 는 소켓 open 직후 **가장 먼저 Auth 를 보내고**, 첫 Hello 를 internal 소비해
@@ -77,10 +77,13 @@ pub type CommandReply = oneshot::Sender<Result<AgentEvent, String>>;
 
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-// 핸드셰이크(소켓 open ~ Hello 수신) 상한. 서버측 AUTH_TIMEOUT(1s, ws.rs)보다 넉넉히 잡되
-// 정상 핸드셰이크는 loopback 에서 <1s 라 절대 안 닿는다. 이 상한이 없으면 서버가 소켓만 받고
-// 침묵할 때 wait_for_hello 가 영구 대기한다(Fix A). 운영 기본값이며, 테스트는 run_connection 의
-// `handshake_timeout` 파라미터로 짧은 값을 주입한다(const 가 테스트를 10초 기다리게 만들지 않도록).
+// Upper bound for the handshake (socket open → Hello). A normal handshake on loopback takes well under 1 s, so
+// it is never reached; without it `wait_for_hello` waits forever when the server accepts the socket and stays
+// silent (Fix A). It bounds the connect and the Hello wait separately (the Auth send itself has no bound), and it
+// is shorter than the server's `AUTH_TIMEOUT` (15 s, ws.rs) — so a stall while reading the upgrade response gives
+// up here first; a stall after the socket opens can still meet the daemon's "auth timeout". Production default;
+// tests inject a short value through `run_connection`'s `handshake_timeout` (so the const never makes a test
+// wait 10 s).
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 // ★재연결 백오프(T4 — wsTransport `scheduleReconnect` 500ms→10s MAX5 이식)★.
@@ -406,7 +409,7 @@ impl Handshaked {
     }
 }
 
-// 첫 frame(핸드셰이크) text 를 만든다 — 데몬은 연결 1초 안에 이걸 기대한다(네트워크 lib 의 AUTH_TIMEOUT).
+// Builds the first (handshake) frame text — the daemon expects it within the net lib's `AUTH_TIMEOUT`.
 //
 // ★단일 산출점(2026-08-05 통합)★: `handshake` 와 `handshake_cancellable` 이 **각자** 같은 프레임을
 // 조립하고 있었다. 그 중복이 위험한 이유는 아래 Fix C 불변식이 **두 벌**이었다는 것 — 한쪽만 고치면

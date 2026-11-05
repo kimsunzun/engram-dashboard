@@ -1,7 +1,7 @@
 //! WebSocket 서버 본체 — 소켓 살림만 하는 네트워크 행(ADR-0129).
 //!
-//! 책임: accept 된 TCP stream 을 WS 업그레이드(Origin allowlist) → 1초 내 첫 frame 토큰 auth →
-//! 연결 수명·단일 writer·keepalive·레지스트리. **프레임 내용의 어휘는 모른다** — 들어온 text/binary
+//! Duty: upgrade an accepted TCP stream to WS (Origin allowlist) → token auth on the first frame within
+//! [`AUTH_TIMEOUT`] → connection lifetime · single writer · keepalive · registry. **프레임 내용의 어휘는 모른다** — 들어온 text/binary
 //! 는 `ConnectionHandler`(frame_port)로 올리고, 나가는 것은 `FrameSink`(연결당)·`FrameFanout`
 //! (전-연결)으로 받는다.
 //!
@@ -121,7 +121,14 @@ const CONN_BYPASS_CAP: usize = 8;
 ///   다른 연결도 이 대기에 걸리지 않는다.
 const BYPASS_DRAIN_GRACE: Duration = Duration::from_secs(10);
 
-const AUTH_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long a new connection may stay open without its first (auth) frame before it is closed with an
+/// "auth timeout" error. 15 s — the open-source defaults read are 3–60 s, mostly 5–15 s (SignalR
+/// `HandshakeTimeout` 15 s, EMQX `idle_timeout` 15 s — `docs/research/first-auth-frame-timeout-2026-11-06.md`).
+/// A short window turns a briefly stalled shell into a terminal refusal: the shell reads any handshake `Error`
+/// as terminal (TRD trd-3 revision 9 ⑧). There is still no cap on pre-auth connections on this path (TRD §5 14
+/// · R11) — the transport daemon's caps land in 3-3 U4.
+// ADR-0347
+const AUTH_TIMEOUT: Duration = Duration::from_secs(15);
 
 const DEFAULT_PING_INTERVAL: Duration = Duration::from_secs(20);
 /// ping_interval 의 2.5배(여러 Ping 을 놓쳐야 끊김 — 일시 지연 위양성 방지).
@@ -424,7 +431,7 @@ pub async fn handle_connection(
             return;
         }
         Err(_) => {
-            tracing::warn!(%peer, "auth 타임아웃(1s) — close");
+            tracing::warn!(%peer, timeout_ms = AUTH_TIMEOUT.as_millis() as u64, "no auth frame in time — closing");
             let _ =
                 send_error_and_close(&mut ws, handlers.handshake_error_frame("auth timeout")).await;
             return;

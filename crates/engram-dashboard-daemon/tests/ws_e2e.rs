@@ -604,14 +604,19 @@ async fn case02_auth_wrong_token_closes() {
     server.shutdown().await;
 }
 
-// ── 케이스 3: auth 타임아웃(첫 frame 미전송) → 서버가 close ──────────────────────────
+// ── Case 3: auth timeout (no first frame) → the server closes after AUTH_TIMEOUT ──────────────────────
 #[tokio::test]
 async fn case03_auth_timeout_closes() {
     let server = start_test_server().await.unwrap();
     let mut c = Client::connect_raw(server.port).await;
+    // Still open well past the old 1 s window, then closed once the 15 s window passes.
     assert!(
-        c.expect_closed().await,
-        "auth frame 미전송이면 1s 후 닫혀야 함"
+        !c.expect_closed_within(Duration::from_secs(3)).await,
+        "a connection without an auth frame must stay open for AUTH_TIMEOUT, not close at once"
+    );
+    assert!(
+        c.expect_closed_within(Duration::from_secs(20)).await,
+        "a connection without an auth frame must close once AUTH_TIMEOUT passes"
     );
     server.shutdown().await;
 }

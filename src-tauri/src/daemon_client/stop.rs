@@ -103,7 +103,7 @@ fn build_stop_command() -> AgentCommand {
     }
 }
 
-/// 데몬은 연결 1초 내 첫 프레임으로 이걸 기대한다(네트워크 lib 의 AUTH_TIMEOUT).
+/// The daemon expects this as the first frame of a connection, within the net lib's `AUTH_TIMEOUT`.
 ///
 /// ★타입 출처(ADR-0129 0-4)★: 이건 **명령이 아니라 따로 된 핸드셰이크 프레임**이다(protocol
 /// `handshake::AuthFrame`). 데몬이 같은 타입으로 풀므로, 발신자가 제 손으로 JSON 을 짜는 대신
