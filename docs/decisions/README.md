@@ -183,50 +183,50 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0133](0133-우편-노출은-스폰-시-주입한-표식으로-가리고-거절-응답은-대안-채널을-알리지-않는다.md) | Mail exposure is hidden by a marker injected at spawn, and the rejection response does not announce the alternative channel | 확정 (부분 폐기 by ADR-0220: mail visibility filter / ADR-0285: the credential-free nature of help in decision 2, and the reason for rejecting the daemon lookup in the first rejected alternative) |
 | [0134](0134-릴리스-데이터-폴더를-실행-폴더-하위-engram-data-로-단일-인스턴스-스코프를-데이터-폴더-기준으로.md) | Put the release data folder in an engram-data subfolder of the run folder + base the single-instance scope on the data folder | 확정 (부분 폐기 by ADR-0135: merge the connection-key file into the lock file / ADR-0136: release data folder name) |
 | [0135](0135-단일-인스턴스-잠금-파일이-접속-정보를-함께-나른다.md) | The single-instance lock file also carries the connection info | 확정 (부분 폐기 by ADR-0264: the lock file location of decision 1 — moved to the single `daemon\run\daemon.json` · no exclusion lock at the old location) |
-| [0136](0136-릴리스-데이터-폴더-이름에서-앱-접두어를-뗀다.md) | 릴리스 데이터 폴더 이름에서 앱 접두어를 뗀다 | 확정 (부분 폐기 by ADR-0264: 결정 3에 run 폴더 규칙과 agents.json 사본 패턴 추가 · 결정 2 번복 — 개발 루트 이름 `.engram-dev`(옛 `.engram-data` 는 옮기지 않는다)) |
-| [0137](0137-dev-빌드에-별도-번들-identifier-릴리스-앱과-동시-실행.md) | dev 빌드에 별도 번들 identifier — 릴리스 앱과 동시 실행 | 확정 (부분 폐기 by ADR-0283: 영향의 WebView2 데이터 폴더 대가 서술) |
-| [0138](0138-릴리스-로그를-파일에-동기로-남긴다-stdout-이-아무-데도-없다.md) | 릴리스 로그를 파일에 동기로 남긴다 — stdout 이 아무 데도 없다 | 확정 |
-| [0139](0139-런처는-자기-배포판의-데몬만-죽인다-이미지-이름-kill-폐지.md) | 런처는 자기 배포판의 데몬만 죽인다 — 이미지 이름 kill 폐지 | 확정 |
-| [0140](0140-슬롯-분할-방향-어휘-재정의-가로-위아래-세로-좌우.md) | 슬롯 분할 방향 어휘 재정의 (가로 = 위아래, 세로 = 좌우) | 확정 (부분 폐기 by ADR-0222: 결정 5 부팅 기본 레이아웃 배치 / ADR-0227: 영향의 allotment 매핑 진실 경계) |
-| [0141](0141-빈-슬롯-어포던스-중앙-아이콘-단독-슬롯-id-텍스트-제거-클릭-우클릭과-동일-메뉴.md) | 빈 슬롯 어포던스 = 중앙 + 아이콘 단독 (슬롯 id 텍스트 제거, 클릭 = 우클릭과 동일 메뉴) | 확정 (부분 폐기 by ADR-0143: 클릭 대상과 아이콘 상호작용성 / ADR-0144: 빈 슬롯 좌클릭 메뉴 오픈) |
-| [0142](0142-우편-배달-병렬화-축과-같은-세션-배제-축.md) | 우편 배달 병렬화 축과 같은 세션 배제 축 | 확정 (부분 폐기 by ADR-0292: 수용한 잔여의 abort 전제 / ADR-0309: 결정 2 이름 축 유지) |
-| [0143](0143-빈-슬롯-좌클릭-슬롯-전체-아이콘은-순수-그림.md) | 빈 슬롯 좌클릭 = 슬롯 전체 (아이콘은 순수 그림) | 확정 (부분 폐기 by ADR-0144: 빈 슬롯 좌클릭 메뉴 오픈) |
-| [0144](0144-빈-슬롯-좌클릭은-포커스만-메뉴는-우클릭-전용.md) | 빈 슬롯 좌클릭은 포커스만, 메뉴는 우클릭 전용 | 확정 |
-| [0145](0145-json-모드-빈-상태-화면-복원-완료-신호-기준-마스코트와-가운데-입력창.md) | JSON 모드 빈 상태 화면 = 복원 완료 신호 기준, 마스코트와 가운데 입력창 | 확정 (부분 폐기 by ADR-0146: 마스코트 임계 높이 접힘 / ADR-0226: 결정 1 빈 상태 판정 및 근거의 프로토콜 무변경 전제) |
-| [0146](0146-빈-상태-마스코트-접힘-폐지-자연-잘림과-svg-렌더.md) | 빈 상태 마스코트 접힘 폐지, 자연 잘림과 SVG 렌더 | 확정 |
-| [0147](0147-전역-리셋-블록-삭제-tailwind-preflight-중복.md) | 전역 `*` 리셋 블록 삭제 — Tailwind preflight가 이미 덮는다 | 확정 |
-| [0148](0148-에이전트가-없는-슬롯은-내용을-고정하고-흐리게-심볼.md) | 에이전트가 없는 슬롯은 내용을 고정하고 흐리게 + 심볼 | 확정 (부분 폐기 by ADR-0149: 에이전트 부재의 단일 판정 / ADR-0165: 문구 없음 조항의 범위를 세 슬롯 공용 막으로 넓힘) |
-| [0149](0149-슬롯의-에이전트-부재를-세-상태로-가른다.md) | 슬롯의 에이전트 부재를 세 상태로 가른다 | 확정 (부분 폐기 by ADR-0280: ① 결정 (A) 의 스폰 대기 흡수 ② 결정 (C) 의 문구, 프로필이 지워진 슬롯 ③ 근거 마지막 항목 중 예약 노드를 활성화한 직후 죽은 표시가 스침을 피해야 한다는 판단을 기억 없는 예약 슬롯에 한해 ④ 영향의 알려진 한계 중 기억 없는 렌더러의 표시 ⑤ 거부한 대안 「삭제도 흐림으로 통일」의 사유를 기억 없는 예약 슬롯에 한해) |
-| [0150](0150-명부-주인은-클라이언트가-만든-식별자-끊기면-자취-없이-제거한다.md) | 명부 주인은 클라이언트가 만든 식별자 — 끊기면 자취 없이 제거한다 | 확정 |
-| [0151](0151-crate-분리-판정-기준은-독립적으로-쓸-수-있는가-소비자-수-기준을-대체한다.md) | crate 분리 판정 기준은 독립적으로 쓸 수 있는가 — 소비자 수 기준을 대체한다 | 확정 (부분 폐기 by ADR-0175: 바닥 crate 구성 / ADR-0236: control 잎 긍정 증거 / ADR-0269: 거부한 대안 E의 판정과 영향의 덩어리별 판정 기대) |
-| [0152](0152-거절-응답에-되돌려-보내는-호출자-문자열에-길이-상한을-두지-않는다.md) | 거절 응답에 되돌려 보내는 호출자 문자열에 길이 상한을 두지 않는다 | 확정 |
-| [0153](0153-명령-명부-식별자의-위협-모형-인증-경계-안에서는-문자열-지식만으로-신뢰한다.md) | 명령 명부 식별자의 위협 모형 — 인증 경계 안에서는 문자열 지식만으로 신뢰한다 | 확정 |
-| [0154](0154-명령-배달의-대상-지목은-데몬이-자기-표로-한다.md) | 명령 배달의 대상 지목은 데몬이 자기 표로 한다 | 확정 (부분 폐기 by ADR-0159: 확실성 분류 미결 항목) |
-| [0155](0155-통합-command-버스-선언은-생산자-옆-배달은-홉마다-같은-3단계-명부는-런타임-등록만.md) | 통합 command 버스 — 선언은 생산자 옆, 배달은 홉마다 같은 3단계, 명부는 런타임 등록만 | 확정 (부분 폐기 by ADR-0150: 주인 토큰 산출) |
-| [0156](0156-명령-발견-인자와-반환-모양을-등록-패킷에-불투명-문자열로-동봉하고-조회를-v1에-포함한다.md) | 명령 발견 — 인자와 반환 모양을 등록 패킷에 불투명 문자열로 동봉하고 조회를 v1에 포함한다 | 확정 (부분 폐기 by ADR-0150: 끊긴 이름의 자취 보존 / ADR-0169: 곁문 철거 근거로 든 챗 읽기 둘 / ADR-0308: 결정 1과 근거의 데몬 파싱 금지 하드 제약(에이전트 참조 칸 예외)) |
-| [0157](0157-명령-인자의-모르는-칸-입구는-거절-배선은-관용.md) | 명령 인자의 모르는 칸 — 입구는 거절, 배선은 관용 | 확정 |
-| [0158](0158-버전-불일치는-끊지-않고-알린다-능력-광고-시작-시-1회-고지.md) | 버전 불일치는 끊지 않고 알린다 — 능력 광고 + 시작 시 1회 고지 | 폐기 (Superseded by ADR-0178) |
-| [0159](0159-재시도-지시는-안전과-쓸모로-고른다-확실성-축은-기준이-아니다.md) | 재시도 지시는 안전과 쓸모로 고른다 — 확실성 축은 기준이 아니다 | 확정 |
-| [0160](0160-에이전트-명령-중계는-제어-라우트를-넓혀-붙인다.md) | 에이전트 명령 중계는 제어 라우트를 넓혀 붙인다 | 확정 (부분 폐기 by ADR-0161: 요청 번호 발급 주체) |
-| [0161](0161-제어-라우트-중계의-요청-번호는-호출자가-낸다.md) | 제어 라우트 중계의 요청 번호는 호출자가 낸다 | 확정 |
-| [0162](0162-중계-재시도는-결과-저장소-대신-상태-조회로-해소한다.md) | 중계 재시도는 결과 저장소 대신 상태 조회로 해소한다 | 확정 |
-| [0163](0163-화신-신원은-순서-없는-난수-표식-읽기는-건너뛰고-쓰기는-0-자리채움.md) | 화신 신원은 순서 없는 난수 표식 — 읽기는 건너뛰고 쓰기는 0 자리채움 | 확정 (부분 폐기 by ADR-0291: 결정 7 이 가리키는 mutate 클로저 자리) |
-| [0164](0164-재부착-계기는-소켓이-아니라-권위-명부-구독-deps-에-화신-표식을-넣지-않는다.md) | 재부착 계기는 소켓이 아니라 권위 명부 — 구독 deps 에 화신 표식을 넣지 않는다 | 확정 |
-| [0165](0165-슬롯-부재-표시는-종료-아이콘-하나로-통일하고-막을-세-슬롯이-공유한다.md) | 슬롯 부재 표시는 종료 아이콘 하나로 통일하고 막을 세 슬롯이 공유한다 | 확정 |
-| [0166](0166-ui-설정은-디스크-파일이-정본이고-uirefresh-가-다시-읽는다.md) | UI 설정은 디스크 파일이 정본이고 ui.refresh 가 다시 읽는다 | 확정 (부분 폐기 by ADR-0265: 결정 1과 3과 5와 7과 8과 9) |
-| [0167](0167-창별-테마는-설정-파일에-담고-죽은-창의-항목은-부팅-때-쓸어낸다.md) | 창별 테마는 설정 파일에 담고 죽은 창의 항목은 부팅 때 쓸어낸다 | 확정 (부분 폐기 by ADR-0265: 결정 1과 3과 6과 7과 8 / ADR-0302: 근거의 팝아웃 label 꼴 「앱을 띄울 때마다 1 부터 다시 세는」 카운터) |
-| [0168](0168-프레임-시각-정리-포커스-링-하향-상태-글리프-아이콘화-ui-폰트-sans-전환.md) | 프레임 시각 정리 — 포커스 링 하향, 상태 글리프 아이콘화, UI 폰트 sans 전환 | 확정 (부분 폐기 by ADR-0227: 결정 7 allotment sash 토큰 / ADR-0295: 결정 5 중 위 모서리 반지름과 구분선 규칙과 비활성 탭 토큰만 / ADR-0298: 결정 5 ① 활성 탭이 바보다 밝다와 그 불변식을 다크에서만 그리고 비활성 탭 글자색을 다크와 라이트에서) |
-| [0169](0169-챗-스타일은-명령이-아니라-설정-데이터이고-버스-이전-곁문-둘을-걷는다.md) | 챗 스타일은 명령이 아니라 설정 데이터이고 버스 이전 곁문 둘을 걷는다 | 확정 (부분 폐기 by ADR-0265: 결정 1의 ui.refresh 경로와 받아들인 대가와 chatStyleStore 불변식) |
-| [0171](0171-상태의-거처는-누가-보나와-언제까지-사나로-정한다.md) | 상태의 거처는 누가 보나와 언제까지 사나로 정한다 | 확정 |
-| [0172](0172-에이전트-실패는-미리-감지하지-않고-실패한-자리에서-기록한다.md) | 에이전트 실패는 미리 감지하지 않고 실패한 자리에서 기록한다 | 확정 |
-| [0173](0173-실패-표시는-트리에서-기호를-갈아끼우고-슬롯은-기존-종료-화면에-얹는다.md) | 실패 표시는 트리에서 기호를 갈아끼우고 슬롯은 기존 종료 화면에 얹는다 | 확정 (부분 폐기 by ADR-0165: 슬롯 조항(화면은 아이콘만, 사유는 트리 hover 만)) |
-| [0174](0174-셸-유닛테스트는-lib-내장-타깃을-끄고-명시-test-타깃으로-옮겨-세운다.md) | 셸 유닛테스트는 lib 내장 타깃을 끄고 명시 [[test]] 타깃으로 옮겨 세운다 | 확정 |
-| [0175](0175-코어를-agent-와-base-로-가른다.md) | 코어를 agent 와 base 로 가른다 | 확정 (부분 폐기 by ADR-0176: 결정 4와 5 보류 / ADR-0266: 결정 1의 PID 헬퍼 거처와 결정 2의 Job Object 래퍼 거처와 거부한 대안 첫 항목 중 platform 쪽 / ADR-0269: 영향의 입주 조건 1번과 세 번째 입주자 되열 조항과 거부한 대안의 util 잡동사니 이름 사유 / ADR-0270: 영향의 의존 그래프 중 셸이 agent 를 쥐는 줄과 근거의 COMMAND_SPECS 필터 필요 이유 / ADR-0271: 영향의 의존 그래프 중 discovery 가 든 줄 / ADR-0272: 영향의 의존 그래프 중 protocol 이 command 를 쥐는 줄) |
-| [0176](0176-명령-이름-접두를-넣지-않고-셸-필터를-남긴다.md) | 명령 이름 접두를 넣지 않고 셸 필터를 남긴다 | 확정 (부분 폐기 by ADR-0270: 결정 2의 COMMAND_SPECS 간선과 데몬 이름 쪽 예약 필터 유지와 거부한 대안 중 필터만 없앤다의 근거와 영향의 reserved_names 삭제 금지 경고와 셸 agent 의존 잔존) |
-| [0177](0177-전송을-transport-crate-로-새로-세우고-밖에는-패킷-정의만-남긴다.md) | 전송을 transport crate 로 새로 세우고 밖에는 패킷 정의만 남긴다 | 확정 (부분 폐기 by ADR-0272: 결정 4의 짝짓기 번호 함수 정본 위치) |
-| [0178](0178-버전-불일치는-데몬이-핸드셰이크에서-판정하고-끊는다.md) | 버전 불일치는 데몬이 핸드셰이크에서 판정하고 끊는다 | 확정 |
-| [0179](0179-데몬은-클라이언트-여럿을-받고-클라는-데몬-여럿에-붙는다.md) | 데몬은 클라이언트 여럿을 받고 클라는 데몬 여럿에 붙는다 | 확정 |
-| [0180](0180-연결-사건은-띠로-알리고-사용자가-눌러야-풀리는-것만-팝업으로-덮는다.md) | 연결 사건은 띠로 알리고 사용자가 눌러야 풀리는 것만 팝업으로 덮는다 | 확정 (부분 폐기 by ADR-0276: 알림이 덮는 것을 팝업 자격으로만 가르는 불변식 중 상태 파일 안내 / ADR-0277: 알림이 덮는 것을 팝업 자격으로만 가르는 불변식 중 연결 띠 / ADR-0287: 알림이 덮는 것을 팝업 자격으로만 가르는 불변식 중 나머지 띠 알림 전부) |
+| [0136](0136-릴리스-데이터-폴더-이름에서-앱-접두어를-뗀다.md) | Drop the app prefix from the release data folder name | 확정 (부분 폐기 by ADR-0264: decision 3 gains the run-folder rule and the agents.json copy pattern · decision 2 reversed — the development root name is `.engram-dev`(the old `.engram-data` is not moved)) |
+| [0137](0137-dev-빌드에-별도-번들-identifier-릴리스-앱과-동시-실행.md) | A separate bundle identifier for the dev build — running alongside the release app | 확정 (부분 폐기 by ADR-0283: the WebView2 data folder cost statement in 영향) |
+| [0138](0138-릴리스-로그를-파일에-동기로-남긴다-stdout-이-아무-데도-없다.md) | Write the release log to a file synchronously — stdout goes nowhere | 확정 |
+| [0139](0139-런처는-자기-배포판의-데몬만-죽인다-이미지-이름-kill-폐지.md) | The launcher kills only its own distribution's daemon — image-name kill is abolished | 확정 |
+| [0140](0140-슬롯-분할-방향-어휘-재정의-가로-위아래-세로-좌우.md) | Redefine the slot split direction vocabulary (가로 = top/bottom, 세로 = left/right) | 확정 (부분 폐기 by ADR-0222: decision 5 boot default layout arrangement / ADR-0227: the allotment mapping truth boundary in 영향) |
+| [0141](0141-빈-슬롯-어포던스-중앙-아이콘-단독-슬롯-id-텍스트-제거-클릭-우클릭과-동일-메뉴.md) | Empty slot affordance = a lone centered icon (slot id text removed, click = the same menu as right-click) | 확정 (부분 폐기 by ADR-0143: click target and icon interactivity / ADR-0144: empty slot left-click menu opening) |
+| [0142](0142-우편-배달-병렬화-축과-같은-세션-배제-축.md) | The mail delivery parallelization axis and the same-session exclusion axis | 확정 (부분 폐기 by ADR-0292: the abort premise of the accepted residual / ADR-0309: decision 2 keeps the name axis) |
+| [0143](0143-빈-슬롯-좌클릭-슬롯-전체-아이콘은-순수-그림.md) | Left-click on an empty slot = the whole slot (the icon is a pure picture) | 확정 (부분 폐기 by ADR-0144: empty slot left-click menu opening) |
+| [0144](0144-빈-슬롯-좌클릭은-포커스만-메뉴는-우클릭-전용.md) | Left-click on an empty slot only focuses; the menu is right-click only | 확정 |
+| [0145](0145-json-모드-빈-상태-화면-복원-완료-신호-기준-마스코트와-가운데-입력창.md) | JSON mode empty state screen = based on the restore-complete signal, mascot and a centered input box | 확정 (부분 폐기 by ADR-0146: mascot threshold-height collapse / ADR-0226: decision 1 empty state decision and the no-protocol-change premise in the grounds) |
+| [0146](0146-빈-상태-마스코트-접힘-폐지-자연-잘림과-svg-렌더.md) | Retire the empty-state mascot collapse; natural clipping and SVG rendering | 확정 |
+| [0147](0147-전역-리셋-블록-삭제-tailwind-preflight-중복.md) | Delete the global `*` reset block — Tailwind preflight already covers it | 확정 |
+| [0148](0148-에이전트가-없는-슬롯은-내용을-고정하고-흐리게-심볼.md) | A slot with no agent freezes its content, dims it, and shows a symbol | 확정 (부분 폐기 by ADR-0149: single decision of agent absence / ADR-0165: the scope of the no-text clause is widened to the veil shared by the three slots) |
+| [0149](0149-슬롯의-에이전트-부재를-세-상태로-가른다.md) | Split a slot's agent absence into three states | 확정 (부분 폐기 by ADR-0280: ① absorbing spawn-wait into decision (A) ② the wording of decision (C), a slot whose profile was erased ③ in the last item of the grounds, the judgment that a dead indicator must not flash right after a reserved node is activated, only for a reserved slot with no memory ④ in the known limits of 영향, the display of a renderer with no memory ⑤ the reason of the rejected alternative 「삭제도 흐림으로 통일」, only for a reserved slot with no memory) |
+| [0150](0150-명부-주인은-클라이언트가-만든-식별자-끊기면-자취-없이-제거한다.md) | The registry owner is a client-made identifier — on disconnect, remove it without a trace | 확정 |
+| [0151](0151-crate-분리-판정-기준은-독립적으로-쓸-수-있는가-소비자-수-기준을-대체한다.md) | The crate-split criterion is whether it can be used independently — it replaces the consumer-count criterion | 확정 (부분 폐기 by ADR-0175: bottom crate composition / ADR-0236: positive evidence that the control leaf / ADR-0269: the decision on rejected alternative E and the per-chunk decision expectation in the impact section) |
+| [0152](0152-거절-응답에-되돌려-보내는-호출자-문자열에-길이-상한을-두지-않는다.md) | Put no length cap on the caller string echoed back in a rejection response | 확정 |
+| [0153](0153-명령-명부-식별자의-위협-모형-인증-경계-안에서는-문자열-지식만으로-신뢰한다.md) | Threat model of the command-registry identifier — inside the authentication boundary, trust on string knowledge alone | 확정 |
+| [0154](0154-명령-배달의-대상-지목은-데몬이-자기-표로-한다.md) | The daemon picks the target of command delivery with its own table | 확정 (부분 폐기 by ADR-0159: open item on the certainty classification) |
+| [0155](0155-통합-command-버스-선언은-생산자-옆-배달은-홉마다-같은-3단계-명부는-런타임-등록만.md) | Unified command bus — declarations next to the producer, delivery in the same 3 steps at every hop, the registry filled by runtime registration only | 확정 (부분 폐기 by ADR-0150: owner token derivation) |
+| [0156](0156-명령-발견-인자와-반환-모양을-등록-패킷에-불투명-문자열로-동봉하고-조회를-v1에-포함한다.md) | Command discovery — bundle the argument and return shapes into the registration packet as an opaque string, and include lookup in v1 | 확정 (부분 폐기 by ADR-0150: keeping a trace of a disconnected name / ADR-0169: the two chat reads cited as the basis for tearing down the side doors / ADR-0308: decision 1 and the hard constraint in the basis forbidding the daemon from parsing (exception: the agent reference field)) |
+| [0157](0157-명령-인자의-모르는-칸-입구는-거절-배선은-관용.md) | Unknown fields in command arguments — reject at the entrance, be tolerant in the wiring | 확정 |
+| [0158](0158-버전-불일치는-끊지-않고-알린다-능력-광고-시작-시-1회-고지.md) | A version mismatch is announced, not cut off — capability advertisement + a one-time notice at startup | 폐기 (Superseded by ADR-0178) |
+| [0159](0159-재시도-지시는-안전과-쓸모로-고른다-확실성-축은-기준이-아니다.md) | The retry instruction is chosen by safety and usefulness — the certainty axis is not the criterion | 확정 |
+| [0160](0160-에이전트-명령-중계는-제어-라우트를-넓혀-붙인다.md) | Agent command relay is attached by widening the control route | 확정 (부분 폐기 by ADR-0161: who issues the request number) |
+| [0161](0161-제어-라우트-중계의-요청-번호는-호출자가-낸다.md) | The request number of a control-route relay is issued by the caller | 확정 |
+| [0162](0162-중계-재시도는-결과-저장소-대신-상태-조회로-해소한다.md) | Relay retry is resolved by a state query instead of a result store | 확정 |
+| [0163](0163-화신-신원은-순서-없는-난수-표식-읽기는-건너뛰고-쓰기는-0-자리채움.md) | Incarnation identity is an unordered random token — skip on read, write a zero placeholder | 확정 (부분 폐기 by ADR-0291: the mutate closure site that decision 7 points to) |
+| [0164](0164-재부착-계기는-소켓이-아니라-권위-명부-구독-deps-에-화신-표식을-넣지-않는다.md) | The re-attach trigger is the authoritative registry, not the socket — do not put the incarnation token in the subscription deps | 확정 |
+| [0165](0165-슬롯-부재-표시는-종료-아이콘-하나로-통일하고-막을-세-슬롯이-공유한다.md) | The slot-absence display is unified into one terminated icon and the veil is shared by the three slots | 확정 |
+| [0166](0166-ui-설정은-디스크-파일이-정본이고-uirefresh-가-다시-읽는다.md) | UI settings are owned by the disk file, and ui.refresh re-reads it | 확정 (부분 폐기 by ADR-0265: decisions 1, 3, 5, 7, 8 and 9) |
+| [0167](0167-창별-테마는-설정-파일에-담고-죽은-창의-항목은-부팅-때-쓸어낸다.md) | Per-window theme is kept in the settings file and entries of dead windows are swept at boot | 확정 (부분 폐기 by ADR-0265: decisions 1, 3, 6, 7 and 8 / ADR-0302: the popout label shape in the 근거 section, the counter 「앱을 띄울 때마다 1 부터 다시 세는」) |
+| [0168](0168-프레임-시각-정리-포커스-링-하향-상태-글리프-아이콘화-ui-폰트-sans-전환.md) | Frame visual cleanup — lowering the focus ring, turning status glyphs into icons, switching the UI font to sans | 확정 (부분 폐기 by ADR-0227: decision 7 allotment sash token / ADR-0295: of decision 5, only the top corner radius, the divider rule and the inactive tab token / ADR-0298: of decision 5 ① the active tab is brighter than the bar and its invariant, only: drawn in dark only, and the inactive tab text color in dark and light) |
+| [0169](0169-챗-스타일은-명령이-아니라-설정-데이터이고-버스-이전-곁문-둘을-걷는다.md) | Chat style is configuration data, not a command, and the two pre-bus side doors are removed | 확정 (부분 폐기 by ADR-0265: decision 1's ui.refresh path, the accepted cost, and the chatStyleStore invariant) |
+| [0171](0171-상태의-거처는-누가-보나와-언제까지-사나로-정한다.md) | State's home is decided by who needs to see it and how long it must live | 확정 |
+| [0172](0172-에이전트-실패는-미리-감지하지-않고-실패한-자리에서-기록한다.md) | Agent failures are not detected in advance but recorded where they fail | 확정 |
+| [0173](0173-실패-표시는-트리에서-기호를-갈아끼우고-슬롯은-기존-종료-화면에-얹는다.md) | The failure indicator swaps the symbol in the tree, and the slot layers onto the existing exit screen | 확정 (부분 폐기 by ADR-0165: slot clause (screen shows only an icon, the reason only on tree hover)) |
+| [0174](0174-셸-유닛테스트는-lib-내장-타깃을-끄고-명시-test-타깃으로-옮겨-세운다.md) | Shell unit tests turn off the lib built-in target and are re-established as an explicit [[test]] target | 확정 |
+| [0175](0175-코어를-agent-와-base-로-가른다.md) | Split the core into agent and base | 확정 (부분 폐기 by ADR-0176: decisions 4 and 5 put on hold / ADR-0266: decision 1's PID helper home, decision 2's Job Object wrapper home, and the platform side of the first item of the rejected alternatives / ADR-0269: condition 1 of the move-in conditions in the consequences, the clause on reopening when a third resident arrives, and the reason for rejecting the name util grab-bag in the rejected alternatives / ADR-0270: in the consequences' dependency graph, the line where the shell holds agent, and the reason in the rationale why the COMMAND_SPECS filter is needed / ADR-0271: in the consequences' dependency graph, the line containing discovery / ADR-0272: in the consequences' dependency graph, the line where protocol holds command) |
+| [0176](0176-명령-이름-접두를-넣지-않고-셸-필터를-남긴다.md) | Do not add the command name prefix, and keep the shell filter | 확정 (부분 폐기 by ADR-0270: decision 2's COMMAND_SPECS edge and keeping the reserved filter on the daemon-name side, the rationale of the rejected alternative that removes only the filter, and in the consequences the warning not to delete reserved_names and the remaining shell agent dependency) |
+| [0177](0177-전송을-transport-crate-로-새로-세우고-밖에는-패킷-정의만-남긴다.md) | Build transport fresh as a transport crate and leave only packet definitions outside it | 확정 (부분 폐기 by ADR-0272: decision 4's canonical location of the pairing-number function) |
+| [0178](0178-버전-불일치는-데몬이-핸드셰이크에서-판정하고-끊는다.md) | The daemon decides a version mismatch at the handshake and cuts the connection | 확정 |
+| [0179](0179-데몬은-클라이언트-여럿을-받고-클라는-데몬-여럿에-붙는다.md) | The daemon accepts several clients and a client attaches to several daemons | 확정 |
+| [0180](0180-연결-사건은-띠로-알리고-사용자가-눌러야-풀리는-것만-팝업으로-덮는다.md) | Announce connection events with a strip and cover the screen with a popup only for what is cleared only when the user presses | 확정 (부분 폐기 by ADR-0276: of the invariant that separates which notifications cover the screen by popup eligibility alone, the status-file guidance / ADR-0277: of the invariant that separates which notifications cover the screen by popup eligibility alone, the connection strip / ADR-0287: of the invariant that separates which notifications cover the screen by popup eligibility alone, all the remaining strip notifications) |
 | [0181](0181-요청-시한은-명령-무관-공용-하나로-두고-만료는-그-요청만-실패시킨다.md) | 요청 시한은 명령 무관 공용 하나로 두고 만료는 그 요청만 실패시킨다 | 확정 |
 | [0182](0182-transport-는-연결-사건을-구조화해-올리고-화면은-만들지-않는다.md) | transport 는 연결 사건을 구조화해 올리고 화면은 만들지 않는다 | 확정 |
 | [0183](0183-겹친-요청-번호는-승계시키지-않고-은퇴시켜-양쪽-다-실패시킨다.md) | 겹친 요청 번호는 승계시키지 않고 은퇴시켜 양쪽 다 실패시킨다 | 확정 |

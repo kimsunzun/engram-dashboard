@@ -1,34 +1,34 @@
-# ADR-0147: 전역 `*` 리셋 블록 삭제 — Tailwind preflight가 이미 덮는다
+# ADR-0147: Delete the global `*` reset block — Tailwind preflight already covers it
 
-- 상태: 확정 (2026-08-18, 근거: 실측 + 사용자 결정)
-- 관련: ADR-0047(Tailwind 채택) · `src/index.css`
+- 상태: 확정 (2026-08-18, grounds: measured + user decision)
+- 관련: ADR-0047(Tailwind adoption) · `src/index.css`
 
 ## 맥락
 
-`src/index.css`가 `*, *::before, *::after { box-sizing; margin: 0; padding: 0 }` 리셋을 **계층 밖(unlayered)**에 두고 있었다. CSS 캐스케이드에서 계층 밖 규칙은 `@layer` 안 규칙을 이긴다 — Tailwind 유틸리티는 `@layer utilities`에 들어가므로, **이 앱의 모든 padding·margin 유틸리티가 조용히 죽어 있었다.**
+`src/index.css` had a `*, *::before, *::after { box-sizing; margin: 0; padding: 0 }` reset **outside any layer (unlayered)**. In the CSS cascade, an unlayered rule beats a rule inside `@layer` — Tailwind utilities go into `@layer utilities`, so **every padding and margin utility in this app was silently dead.**
 
-발견 경위: 빈 상태 입력창의 안내 문구가 테두리에 붙는다는 사용자 제보로 좌우 여백을 16 → 24px로 올렸는데 **화면이 전혀 바뀌지 않았다.** 실행 중인 앱에서 `px-6 py-4`만 가진 요소를 새로 만들어 재보니 계산된 padding이 `0px`이고, 인라인으로 주면 24px가 정상 적용됐다. Tailwind 채택(ADR-0047) 이후 계속 이 상태였다.
+How it was found: after a user report that the guidance text of the empty state input box sticks to the border, the horizontal spacing was raised from 16 to 24px, but **the screen did not change at all.** When a new element carrying only `px-6 py-4` was created in the running app and measured, the computed padding was `0px`, and when given inline it applied normally as 24px. It had been in this state ever since Tailwind adoption (ADR-0047).
 
 ## 결정
 
-1. **리셋 블록을 삭제한다.** Tailwind preflight가 이미 같은 일을 하고 있고, 그것은 `@layer base` 안에 있어 유틸리티에 진다 — 우리 블록은 없어도 되는 중복이었다.
-2. 이로써 여백 유틸리티를 쓰던 자리(소스 7파일, 약 25개 토큰)가 처음으로 실제 적용된다 — 챗 행 좌우 들여쓰기·메뉴 여백 등이 함께 살아난다.
-3. **전역 `*` padding·margin 리셋을 계층 밖에 다시 두지 않는다.** 이 금지를 지키는 단위 테스트를 둔다(§영향).
+1. **Delete the reset block.** Tailwind preflight already does the same job, and it is inside `@layer base`, so it loses to utilities — our block was a duplicate that was not needed.
+2. With this, the places that used spacing utilities (7 source files, about 25 tokens) are actually applied for the first time — the left and right indentation of chat rows, menu margins and so on come alive together.
+3. **Do not put a global `*` padding·margin reset outside a layer again.** A unit test that keeps this prohibition is added (§영향).
 
 ## 거부한 대안
 
-- **리셋을 `@layer base` 안으로 옮기기(초판 결정)** — 이것으로 먼저 고쳤고 ADR도 그렇게 적었다. 근거는 "지우면 Tailwind preflight가 덮지 않는 요소의 기본 여백이 되살아난다"였는데, **리뷰에서 사실이 아님이 확인됐다**: `node_modules/tailwindcss/preflight.css:7-16`이 `*, ::after, ::before, ::backdrop, ::file-selector-button`에 `box-sizing: border-box; margin: 0; padding: 0; border: 0 solid`를 걸고, 그 preflight는 `@layer base` 안이다. 우리 블록은 그 **진부분집합**(가상요소 둘·border를 오히려 덜 덮는다)이라 되살아날 여백이 없다. 계층 이동도 동작은 옳지만, 없어도 되는 규칙을 남기면 같은 지뢰(계층 밖으로 되돌리기)의 씨앗이 남는다 — 그래서 삭제로 바꿨다.
-- **입력창 두 곳만 인라인 스타일로 강제** — 증상만 덮고 같은 지뢰를 남긴다. 다음에 여백 유틸리티를 쓰는 사람이 또 "값을 올렸는데 화면이 안 바뀐다"를 겪는다.
-- **여백 유틸리티 사용을 금지하고 전용 CSS로 통일** — Tailwind 채택 결정(ADR-0047)을 부분 무효화한다. 유틸리티가 도는 게 정상이고 리셋이 비정상이었다.
+- **Move the reset inside `@layer base` (the first-draft decision)** — it was fixed this way first and the ADR was written that way. The ground was "if deleted, the default margins of elements that Tailwind preflight does not cover come back," but **review confirmed this is not true**: `node_modules/tailwindcss/preflight.css:7-16` applies `box-sizing: border-box; margin: 0; padding: 0; border: 0 solid` to `*, ::after, ::before, ::backdrop, ::file-selector-button`, and that preflight is inside `@layer base`. Our block is a **proper subset** of it (it covers the two pseudo-elements and border less, if anything), so there is no margin to come back. Moving the layer also behaves correctly, but leaving a rule that is not needed leaves a seed of the same mine (moving it back outside the layer) — so it was changed to deletion.
+- **Force it with inline styles in just the two input boxes** — it covers only the symptom and leaves the same mine. The next person to use a spacing utility again experiences "I raised the value but the screen did not change."
+- **Forbid spacing utilities and unify with dedicated CSS** — it partially invalidates the Tailwind adoption decision (ADR-0047). Utilities working was normal, and the reset was the abnormal part.
 
 ## 근거
 
-- **실측(2026-08-18)** — 실행 중인 릴리스 빌드에서 `px-6` 요소의 계산값이 `0px`, 인라인 지정은 `24px`. 즉 클래스가 생성은 되지만 캐스케이드에서 진다.
-- **사용자 결정(2026-08-18)** — 전역 규칙의 존재 자체를 사용자가 몰랐고, 확인 후 "그냥 푸는" 쪽을 선택했다.
-- **preflight 대조(리뷰 실측 2026-08-18)** — 삭제해도 되는 근거는 추측이 아니라 설치된 Tailwind 파일을 열어 확인한 것이다(위 「거부한 대안」 1의 경로·범위).
+- **Measured (2026-08-18)** — in the running release build, the computed value of a `px-6` element was `0px` and the inline specification was `24px`. That is, the class is generated but loses in the cascade.
+- **User decision (2026-08-18)** — the user did not know the global rule existed, and after confirming chose the side of "그냥 푸는" (gloss: just releasing it).
+- **Preflight comparison (review measurement 2026-08-18)** — the ground for being allowed to delete is not a guess but was confirmed by opening the installed Tailwind file (the path and range in 「거부한 대안」 item 1 above).
 
 ## 영향 / 불변식
 
-- **전역 `*` padding·margin 리셋을 계층 밖에 두면 앱 전역의 여백 유틸리티가 전부 죽는다.** 증상이 조용하다 — 클래스는 그대로 보이고 화면만 안 바뀌며 **테스트는 초록으로 남는다**(실제로 그 상태로 695건이 통과하고 있었다). 그래서 이 금지는 문서가 아니라 단위 테스트가 지킨다.
-- **계층 밖 CSS는 유틸리티를 이긴다** — `structuredItems.css`·`chat.css`·`scroll-area.css`가 클래스에 직접 건 padding·margin은 여전히 유틸리티를 이긴다. 이 결정은 그 파일들을 바꾸지 않는다.
-- **여백 값 감각이 달라졌다** — 이전 값들은 "적용되지 않는 값"이라 크기가 검증된 적이 없다. 여백을 조정할 땐 화면으로 확인한다.
+- **If a global `*` padding·margin reset is placed outside a layer, all spacing utilities across the app die.** The symptom is quiet — the classes remain visible and only the screen does not change, and **the tests stay green** (in fact 695 passed in that state). So this prohibition is kept by a unit test, not by a document.
+- **Unlayered CSS beats utilities** — the padding·margin that `structuredItems.css` · `chat.css` · `scroll-area.css` put directly on classes still beat utilities. This decision does not change those files.
+- **The feel for margin values has changed** — the earlier values were "values that were not applied," so their sizes were never verified. When adjusting margins, confirm on screen.

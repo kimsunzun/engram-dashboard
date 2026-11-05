@@ -66,5 +66,10 @@ Every translation batch uses these renderings. A batch that needs a new term add
 | A와 B 제외 (수식어 공유) | excluding A and B that … | a shared qualifier covers both items |
 | 화신 / 화신 표식 | incarnation / incarnation marker | |
 | 자취 / 주인 | trace / owner | command registry |
+| N라운드 (리뷰) | round N | "3라운드" = round 3, not three rounds |
+| 0 자리채움 | zero placeholder | the whole value is zero, not zero-padded |
+| 규격대로 뚫다 | cross as the spec allows | not "against its spec" |
+| 살림 (데몬) | lifecycle management | not "liveness" |
+| 파서 (폴더를 파서) | create (a folder) | 파다, not "parse" |
 
 Kept in Korean: the ADR lint tokens (`- 상태:` + vocab, `- 관련:`, section headings), text in 「」, names of CLAUDE.md and `.claude/` sections.
