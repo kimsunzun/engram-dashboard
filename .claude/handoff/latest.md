@@ -1,57 +1,62 @@
-# Handoff: stage 3 transport — master merged twice + qa binding fixed · next = 3-1 U5 → 3-2
+# Handoff: stage 3 transport — 3-1 done · 3-2 U2 (A/B/C) done · next = 3-2 U3
 
 ## Know first
-- Project rules changed under this branch today (master S30 merged in): CLAUDE.md is now the slim version; new `docs/` text and code comments are **English** (rewritten paragraphs too — CLAUDE.md 「언어」); branch/commit procedure lives in `docs/handbook/branch-commit.md`; full regression is local before commit (ADR-0340, procedure = `.claude/skill-bindings/qa-verify.md`); deletion = `bash ~/.claude/references/recycle.sh <path>` (`rm -rf` is blocked).
-- The qa binding is master's new skeleton (known failures · tracking records · baseline copy · triage · recycle cleanup) plus this branch's two edits (below).
+- Two user decisions made at the end of this session are **not yet recorded in an ADR** (the ADR call was interrupted by the user — 「하던거 다 끝나고 핸드오프 하면 됨」). Record them before U3/U5 work relies on them; ask the user before writing if unsure:
+  1. **Cold-start connect failure (U3): show 「끊김」(Down) immediately**, like today — no 5-try "재연결 중" phase on the first connect. (Main recommended; user: 「쭉 진행해」.)
+  2. **Version-mismatch action (U5): a 「데몬 끄기」 button only, shown only when the daemon is OLDER than the app, no automatic restart.** Amends ADR-0343 decisions 1 and 4 (ADR-0343 currently says "restart action → graceful stop → start the new daemon"). Also for U5: after a stop, re-check the version (a running daemon exe may block the zip overwrite, leaving a stale daemon exe → tell the user to quit and re-extract); if the daemon is NEWER than the app, no button — tell them to use the newer app.
+- Graceful stop of any shipped old daemon is possible: authenticate with the token and the daemon's OWN version from `daemon.json`, send only `StopDaemon` (ADR-0343 decision 2 — single-purpose exception to the handshake rule). Fallback = identity-checked kill (pid + start time through one handle).
+- Project rules (unchanged from last handoff): new `docs/` text and code comments are English (also inside Korean docs — I got this wrong once in a coder brief); branch/commit procedure = `docs/handbook/branch-commit.md`; full regression local before commit (ADR-0340); delete = `bash ~/.claude/references/recycle.sh`.
 
 ## One-line state · next first action
-Branch `v0.4.1/refactor/transport-attach`, HEAD = this handoff commit (code/binding last = `c2ac9dd8`). Work tree clean. **Not pushed** — origin is at `dd0499a7`, local is 53+ commits ahead.
-This session (no stage-3 code work):
-- `31069634` merge master `671b7ece` (S30 skill bindings/docs · S31 gate regex · S32 codex contract). Conflicts were md only: qa.md + CLAUDE.md took master (4k block dropped; `shell gate 3` stays in ci.yml) · decisions/README + tracking kept both rows · testing-strategy took master's role lines and carries the branch's net facts + shell gate 3 (rewritten in English) · stale lines fixed: architecture.md crate graph (no shell → net; net → protocol unconditional; net bullet in English) · T-60 「다음」 → `docs/handbook/branch-commit.md`.
-- `a4ffa4e9` merge master `9152bcaa` (qa binding skeleton follow-up; no conflicts).
-- `c2ac9dd8` S21 chore(qa-binding): ① qa-verify backend job gets the `ws_accept --list` line (「네 줄」) ② qa.md 「Rust 테스트 판정」: net features-off line runs 0 tests on this branch (tests moved to protocol, ADR-0310 D9) → PASS = `__EXIT=0` + a `running 0 tests` line, reported as 「컴파일 PASS (시험 0개)」, not a test pass; remove with the net crate in 3-3 U6.
-**Next first action = 3-1 U5** (TRD §6-1 U5 row: delete protocol → command Cargo edge + protocol dependency-cap gate + docs). Gate copies now live in ci.yml (+ qa-verify extracts it) — the old 「three copies incl. CLAUDE.md 빌드·검증 명령」 no longer exists (slim CLAUDE.md has no gate lines); check where the gate text must go under the new binding before editing. `/engram-review doc` for doc changes.
-Then 3-2 (shell attach — §6-2 U1~U5 · GUI `/qa` real measurement) → 3-3 (daemon attach · remove net — §6-3 U1~U6). Before 3-2 read TRD §6-2 U2 「3-0 착지가 더한 주의 셋」.
-Progress: stage 3 ≈12 of 23 units (3-0 U1~U7 · 3-1 U1~U4).
+Branch `v0.4.1/refactor/transport-attach`, HEAD = this handoff commit (code last = `37994b9d`). Work tree clean. **Not pushed** — origin `dd0499a7`, local 63 commits ahead after this commit.
+This session: `8792a013` 3-1 U5 (protocol → command edge removed + `protocol gate 1`) → 3-1 complete · `85f72023` 3-2 U2 A (shell → transport dep, `ShellWire`, shell gates 4/5) · `8463b236` U2 B (`LocalEndpointSource`, `LocalDaemonDialer` per-registration credential slot, `ShellHandshake`) · `37994b9d` U2 C (`RouteState`/`route`/`adopt`/`route_end`, pump with `Ended`, error texts, `emit_broadcast` moved, flaky capture-test fix) · ADR-0342 (`b50ba383`, version mismatch on the existing connection-failure surface, no popup) · ADR-0343 + research (`a2821a31`).
+**Next first action = 3-2 U3** (TRD §6-2 U3 row: new driver `connection_v2` behind a `DaemonClient` constructor choice, test constructor first; one actor serializes Subscribe/Unsubscribe/RequestReplay; same-key re-add path; move A1 `tests.rs:6069` / A2 `:3954`; new driver tests on `ManualClock` + fake server; production stays on the old driver). Read first: `.claude/handoff/attachments/20261105-s21-3-2-u2-handover-for-u3.md` (pinned interfaces, contracts U3 must honour — esp. the three Addenda) and the TRD §6-2 U2 C note "Contracts for the driver (U3)". Record decision 1 above before U3 coding.
+Then U4 (production switch, GUI `/qa full`) → U5 (stop client on transport + version-mismatch button) → U6 (N daemons — **stop and give the user the network/structure lecture first**, standing condition) → 3-3.
+Progress: stage 3 ≈15 of 23 units (3-0 all · 3-1 all · 3-2 U2).
 
 ## Verification state
-- Full regression on the final tree `4f585839` (= HEAD `c2ac9dd8` tree, verified by `git rev-parse HEAD^{tree}`): PASS — workspace 61 result lines · 5299 passed · 0 failed · 35 ignored · lib_unit 1351 · gates 31/31 · frontend 2802 + tsc · `ws_accept --list` 12 · net features-off = compile PASS (0 tests).
-- Earlier today on tree `c2a5f281` (= `31069634`): same numbers + codex lane 13/13 (lanes.tsv updated) + Job lane: only known failure `ws_e2e real_process::ignored_daemon_kill_cleans_pty_child` + GUI smoke PASS (claude terminal agent spawn/output/kill).
-- Not measured: the intermediate merge commit tree `a4ffa4e9` alone (differs from the measured final tree only by the two binding md edits).
-- Rerun = `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Command "cargo test --workspace -- --test-threads=4" -WorkDir "I:/Engram/apps/engram-dashboard" -LogFile "<path>.log"` (full CI-three-jobs procedure = qa-verify 「전체 회귀」).
+- Each commit ran review + full local regression on its exact tree:
+  - `8792a013`: review full (Claude + codex) R2 PASS · QA PASS — 61 result lines · 5299 passed · 0 failed · gates 32/32 · frontend 2802 + tsc.
+  - `85f72023`: review deep R2 PASS · QA PASS — 5355 passed · gates 34/34 · mutations caught.
+  - `8463b236`: review deep R2 PASS · QA = FAIL(known failure only) — 5381 passed · `stop_smoke send_stop_makes_real_daemon_self_exit` T-52 (shell real-daemon lane was on) · mutations caught.
+  - `37994b9d`: review deep R2 PASS · QA PASS — 61 lines · 5404 passed · 0 failed · 35 ignored · lib_unit 1408 · gates 34/34 · 2802 + tsc · handshake test 20/20 · no hang.
+- Not verified: one unexplained hang of a full `lib_unit` run seen once in ~127 stress runs during C's coding (test unknown; not reproduced in 120 later runs nor in QA). Watch for it.
+- The new link code has no production caller yet → no GUI check so far (U4 does `/qa full`).
+- Rerun = `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Command "cargo test --workspace -- --test-threads=4" -WorkDir "I:/Engram/apps/engram-dashboard" -LogFile "<path>.log"`; link only = `cargo test -p engram-dashboard --test lib_unit daemon_client::link::`.
 
-## Decisions
-- net features-off verdict: binding exception, not a revived test in net. Reason: restoring a test in net splits ownership of frame shape/golden again (branch moved it to protocol); the only test left to write would be a re-export identity check that always passes. Told the user the exception is framed as a compile check so it does not conflict with the qa skeleton's sealed 「0 tests is not a pass」; user did not object.
-- User conditions this session: 「qa 에서 바인딩의 알려진 실패(T-52 stop_smoke · ws_e2e ignored_daemon_kill_cleans_pty_child)만 남으면 코더에게 돌리지 말고 진행해」. Earlier standing: user delegates 「쭉쭉 진행 · 끝나면 핸드오프」 per unit with review · QA · commit; multi-daemon work waits for a network/structure lecture to the user first; token-saving notes go to handoff, not skill briefs.
-- Unresolved: none blocking.
+## Decisions (this session)
+- 3-2 U2 split into A → B ∥ C (file overlap); B/C run serially.
+- ADR-0342 (user, 2026-11-04): version mismatch shown on the existing UI connection-failure surface, fixed local text by close code, never the peer's text, no popup. User: 「그냥 UI 화면에 띄우면 안됨?」.
+- ADR-0343 (user delegated 「리서치해서 결정해」, research medium single-family — cross-family review skipped by user agreement): user-pressed action, graceful stop first. **Partly overridden by the two unrecorded decisions in "Know first".**
+- Version-mismatch UI text until U5 = cause only: 「실행 중인 데몬이 이 앱과 버전이 다릅니다」 (`link::route::refusal_message`, the single mapping; 4001 is shared with 3-3 U7's identity refusal — U7 must separate it).
+- Credential slot per registration (`engram-local:<key>#<n>`), not per key (codex must — overlapping supervisors could pair tokens with the wrong address).
+- Every `Disconnected` (incl. Explicit) shows Reconnecting; route is the only state emitter.
+- Logs: new code writes English log messages (CLAUDE.md 「언어」). **Conflict unresolved:** `docs/reference/logging-conventions.md:32` says log messages are Korean — raise with the user.
+- Still open with the user: what to show after `GaveUp(BudgetExhausted)` (ADR-0180 decision 2/7 "다시 연결" popup).
+- Standing user conditions: 「qa 에서 알려진 실패(T-52 stop_smoke · ws_e2e ignored_daemon_kill_cleans_pty_child)만 남으면 코더에게 돌리지 말고 진행」; 「쭉 진행 · 이슈 있으면 말해줘」.
 
 ## Do-not / lessons
-- Do not answer subagent interim notifications (「stopped with background work still running · not reported yet」) with user-facing lines — user flagged 20+ 「QA 진행 중」 lines as noise; stay silent until the final hand-back.
-- Cause of those notifications: QA worker wrote its own polling driver + Monitor `tail -f` watcher because the binding gives no way to wait for `__EXIT` across 25 detached commands. In the next QA brief, tell the worker to wait inside a single tool call (no turn-ending polling) until a shared driver exists.
-- In `I:/Engram`, commit feedback files with an explicit pathspec only — a `git add <dir>` there once staged an unrelated untracked file (undone).
+- User-facing questions: start from what the user sees, explain why it's asked now, then the options — in plain text. The user interrupted AskUserQuestion three times and asked 「뭔소리야」 / 「뭐 혼자 얘기해?」 (filed to global-feedback).
+- Don't run medium research for a one-line UI decision without telling the user the scale first (「문구 하나 조사하는데 거창한거 아님?」 — filed to engram-research feedback).
+- Coder briefs: new text in `docs/` is English even inside Korean docs — say so in every brief.
+- Do not answer subagent interim notifications with user-facing lines (from last handoff).
+- `py` heredoc with Korean on stdin breaks (cp949) — write the script to a file or use the Edit tool.
 
-## Token-saving practice (still in force for this topic)
-- Coder 150k~500k/unit · Claude reviewer read-only 160k~250k/round · codex ~80k/round · QA 110k~230k/run (today: 134k and 111k new input).
-- Claude reviewer = read-only; first round = Claude + codex lens 1 (diff) + lens 2 (call sites, skip when only new API / no consumer outside transport); confirm rounds = delta only.
-- Coder past 300k context → new coder with a short brief. Code and docs in parallel when files don't overlap.
-- QA = worker-senior (『qa 실행자』 = 주도 상급); gate blocks needing the `rg` function must be `source`d.
+## Open notes (carried + new)
+- U3/U4 carry list is in the attachment's Addenda: unregister on every `Ended`; re-add = `register` + `adopt` + `spawn_pump` in one driver step; `close()` must not emit Down itself; optional defensive `link_down()` on `Closed`; U4 logs the masked `Unreachable` text in `ConnectFailed`; U4 rewords `wire.rs` `SERIALIZE_FAILED_PREFIX` reference and refreshes "production still runs the old code" statements (CLAUDE.md:50, architecture.md:51, link/mod.rs).
+- Follow-up flake: three other hand-rolled tracing capture subscribers (`usage_interest.rs:1225`, `settings/tests.rs:1220`, `tab_drop/mod.rs:885`) carry the `has_just_one` flake fixed in `link/handshake.rs` `capture()` — move `capture()` to a shared test helper.
+- Not done this session: `docs/process/step-log.md` S21 entries for 3-1 U5 and 3-2 U2 A/B/C; ADR-0272 landing notes (OwnerToken closed by 3-1 U3, invariant landed by 3-1 U5); TRD §9 「메모 §10 3. 착지 표시」.
+- Carried: 3-3 U4 slot notes; `Close.reason` masking = TRD §9; `MemTx::ping` stall; `mask.rs` not in gate ③; tools (`py`, rg path); worktree `.claude/worktrees/stage3-protocol` idle; leftover temp dirs `I:\Engram\apps\rv-u1a-target`, `%TEMP%\engram-review\31u2\{tgt,blocks}`.
 
-## Open notes (carried)
-- 3-3 U4: no auth-wait slot · no operating slot (upgrade slot covers up to Live) · no cap on accepted peers in operation (recorded in TRD 「TRD 와 다른 점」).
-- Masking received `Close.reason` = TRD §9 follow-up.
-- Pre-existing harness defect parked: `testing.rs` `MemTx::ping` (MemoryEndpoint) ping stall · two-stage write-stall wait.
-- `mask.rs` not in gate ③ pure-layer list (file-level gate).
-- transport `[dev-dependencies] tokio` `rt-multi-thread` (U6b test) — no production graph change.
-- Tools: `py` not `python` · `rg` = `C:\Users\kimsunzun\AppData\Local\OpenAI\Codex\bin\0354bc6c584f210c\rg.exe` · codex review hitting Bash 600 s → recover from `tasks/<id>.output` · worktree `.claude/worktrees/stage3-protocol` idle · leftover temp dirs for the user: `I:\Engram\apps\rv-u1a-target`, `%TEMP%\engram-review\31u2\{tgt,blocks}`.
-
-## Improvement feedback filed today (Engram repo, all 미반영)
-- `core/claude-global-shared/references/global-feedback.md` — interim-notification noise · QA worker polling cause (`9d5ca04`, `b0a1383`).
-- `core/claude-global-shared/skills/engram-qa/feedback.md` — qa-verify ws_accept drift (now fixed on this branch; master still has 3 lines) · net 0-test verdict · `$QA_TMP` cleanup blocked / own watcher holding files · shared wait driver · plain-shell-agent brief error (`4b92c1c`, `b0a1383`).
-- Note for master: master's ci.yml has no `ws_accept` (checked `9152bcaa`) and its qa-verify lists 3 `--list` lines — consistent there; both the gate line and the binding line land on master together when this branch merges.
+## Improvement feedback filed this session (Engram repo `d5755e7`, 미반영)
+- `core/claude-global-shared/references/global-feedback.md` — user-facing question framing / AskUserQuestion rejections.
+- `core/claude-global-shared/skills/engram-research/feedback.md` — research scale for small design decisions.
 
 ## Resume command
-`git -C I:/Engram/apps/engram-dashboard log --oneline -5 && git -C I:/Engram/apps/engram-dashboard status -sb`
+`git -C I:/Engram/apps/engram-dashboard log --oneline -8 && git -C I:/Engram/apps/engram-dashboard status -sb`
 
 ## References
-- TRD stage 3: `docs/process/S21-crate-boundaries/trd-3-transport.md` (§6-1 U5 row, §6-2 U2 cautions).
-- `.claude/skill-bindings/qa.md` · `.claude/skill-bindings/qa-verify.md` · `docs/handbook/branch-commit.md` · `docs/reference/architecture.md`.
+- TRD: `docs/process/S21-crate-boundaries/trd-3-transport.md` (§6-2 U2 A/B/C landing notes incl. "Contracts for the driver (U3)", §6-2 U3–U6 rows).
+- U3 handover: `.claude/handoff/attachments/20261105-s21-3-2-u2-handover-for-u3.md`.
+- ADRs: 0310 (stage 3 decisions), 0342, 0343; research `docs/research/daemon-version-mismatch-restart-2026-11-05.md`.
+- Code: `src-tauri/src/daemon_client/link/{wire,endpoint,dialer,handshake,route,pump,errors}.rs`; old driver `src-tauri/src/daemon_client/connection.rs`.
