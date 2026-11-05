@@ -5,6 +5,16 @@
 - The 26 ` M src-tauri/bindings/*.ts` files are pre-existing line-ending-only noise — never stage them.
 - The user wants autonomous progress (「쭉 진행해 … 핸드오프하면 되고 하던거 끝나면」): finish a unit, save a handoff, continue.
 
+## In progress with the user — review of decisions main made on the user's behalf (do this BEFORE step 5)
+The user asked to go through, one at a time, what main decided while the user said 「알아서/쭉 진행해」. Explain each from basics (the user said main assumed too much context) and concisely. List:
+1. Launch-block reasons not reaching two entrances (screen double-click via Tauri carrier; LLM via shell bus `agent.spawnInto`) — moved to step 11. **Open:** user agreed the human/screen path can wait; for `agent.spawnInto` (LLM path, shell-owned: creates a slot + asks the daemon `SpawnByCwd` + places the agent; folds the reply to text — per reviewer, main has not read the code) main proposed moving it to step 8 (when blocks first become real); the user asked whether it must be done now. Not decided — ask: now vs step 8 vs step 11.
+2. Generic notice wording 「알림(<code>): 의도된 동작입니다. 대상 — …」 (shipped; per-code wording in steps 6/7).
+3. `--cwd` create-then-blocked: agent stays registered, answer INTERNAL + agent_id "fix the listed items, then start it by that name"; pre-create check deferred to step 10a.
+4. Notice record point: only when a process actually started; never moot/boot restore/failure/screen paths (yet).
+5. CLI launch-block hint: no "engram agent list" tail; ends "fix the listed items, then start it again".
+6. Folder entry details: add refuses missing/unreadable/cmd-unsafe paths; spelling variants deduped; codex terminal still blocks on a missing folder.
+Also reported to the user: docs commit `05799d4c` had no separate doc review; CI for the push not checked yet.
+
 ## One-line state · next first action
 Step 16 「실행 답 넓히기」 is implemented, reviewed (deep per piece, Claude + codex), QA PASS, committed and pushed (`05799d4c`). CI result for that push NOT checked yet.
 **Next first action:** (1) check CI for `05799d4c` (`gh run list --branch v0.5.0/feat/preset-library -L 3`); (2) start TRD §5-2 step 5 via `/engram-implement` — `S25: feat(agent): claude 실행 재료 번역 + backend 설정 검사 포트` plus its ADR-0341 addendum (folder entries → `--add-dir` per entry + `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` via `LaunchArtifacts.env`, `path_is_cli_safe` guard → ②, the claude implementation of the folder load set). Begin with a code-map scout (worked well for step 16), then split into sequential coder pieces.
