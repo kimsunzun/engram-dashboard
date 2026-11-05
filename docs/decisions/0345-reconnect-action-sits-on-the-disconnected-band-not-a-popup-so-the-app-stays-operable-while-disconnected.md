@@ -12,7 +12,7 @@ The transport rewrite (stage 3-2) now produces `GaveUp(BudgetExhausted)` from th
 ## 결정
 
 1. **When the reconnect budget is exhausted, the disconnected band carries one action button 「다시 연결」.** No popup. The rest of the app (layout, tabs, panes) stays operable while disconnected. Budget exhaustion leaves ADR-0180 decision 2's popup-eligible list.
-2. **Pressing it starts a fresh attempt sequence with a reset budget** — not a single extra try. (Main's call from the survey: both surveyed libraries restart from scratch on a manual reconnect after give-up.) The mechanism (re-add vs `reconnect_now`) is the TRD's.
+2. **Pressing it starts a fresh attempt sequence with a reset budget** — not a single extra try. (Main proposed it from the survey — both surveyed libraries restart from scratch on a manual reconnect after give-up; user confirmed 2026-11-05: 「버튼을 누르면 횟수를 처음부터 다시셈」.) The mechanism (re-add vs `reconnect_now`) is the TRD's.
 3. **Per connection.** With several daemons (stage 3-3), each lost connection's band entry gets its own button — ADR-0180 decision 8 already put per-connection reconnect on the band.
 4. **The retry count drops to 3 in the same change that lands the button** (ADR-0180 decision 4 · TRD D14 ①). Until then the shell keeps injecting 5.
 5. **LLM path:** the same action is reachable through the existing command surface (`__engramCmd`), per CLAUDE.md 「LLM-우선 제어」.
