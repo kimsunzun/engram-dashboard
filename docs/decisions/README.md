@@ -325,7 +325,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0276](0276-상태-파일-안내는-레이아웃을-밀지-않고-덮는다.md) | 상태 파일 안내는 레이아웃을 밀지 않고 덮는다 | 확정 (부분 폐기 by ADR-0277: 결정 5 범위 중 연결 띠 / ADR-0287: 층 높이 불변식의 근거와 줄 바깥 빈 영역 / ADR-0306: 결정 2 「TabBar 를 가려도 된다」와 근거 GUI QA 의 「안내가 TabBar 를 덮는다」) |
 | [0277](0277-연결-끊김-안내도-레이아웃을-밀지-않고-덮는다-모든-창.md) | 연결 끊김 안내도 레이아웃을 밀지 않고 덮는다 — 모든 창 | 확정 (부분 폐기 by ADR-0287: 열린 것 중 나머지 연결 사건 / ADR-0306: 결정 2 의 「main 과 팝아웃에서는 TabBar 를 가린다」와 영향의 자리 기준과 근거 GUI QA 의 자리 사실) |
 | [0278](0278-os-경계-게이트는-러프한-텍스트-검사와-의존-그래프-검사로-한다-린트-도구는-들이지-않는다.md) | OS 경계 게이트는 러프한 텍스트 검사와 의존 그래프 검사로 한다 — 린트 도구는 들이지 않는다 | 확정 |
-| [0279](0279-백엔드-정책-벽은-데몬의-spawnbycwd-처리부다-셸-슬롯-스폰은-경로를-바꾸지-않는다.md) | 백엔드 정책 벽은 데몬의 SpawnByCwd 처리부다 — 셸 슬롯 스폰은 경로를 바꾸지 않는다 | 확정 |
+| [0279](0279-백엔드-정책-벽은-데몬의-spawnbycwd-처리부다-셸-슬롯-스폰은-경로를-바꾸지-않는다.md) | 백엔드 정책 벽은 데몬의 SpawnByCwd 처리부다 — 셸 슬롯 스폰은 경로를 바꾸지 않는다 | 확정 (부분 폐기 by ADR-0348: 결정 3) |
 | [0280](0280-복원된-슬롯이-꺼진-에이전트를-가리키면-부재-막으로-덮는다-슬롯-활성화-단추는-두지-않는다.md) | 복원된 슬롯이 꺼진 에이전트를 가리키면 부재 막으로 덮는다 — 슬롯 활성화 단추는 두지 않는다 | 확정 |
 | [0281](0281-데몬이-셸-명령-등록을-거절하면-셸이-os-오류-박스를-띄운다-가름은-답-경계의-출처-타입이다.md) | 데몬이 셸 명령 등록을 거절하면 셸이 OS 오류 박스를 띄운다 — 가름은 답 경계의 출처 타입이다 | 확정 (부분 폐기 by ADR-0292: dialog 패닉의 abort 서술) |
 | [0282](0282-2-2-discovery-나누기의-세부-실행-파일-위치는-platform-한-곳-쓰기-프로브는-base-셸-사본은-같은-경로-시험으로-묶는다.md) | 2-2 discovery 나누기의 세부 — 실행 파일 위치는 platform 한 곳, 쓰기 프로브는 base, 셸 사본은 같은 경로 시험으로 묶는다 | 확정 (부분 폐기 by ADR-0285: 영향의 CLI 임시 간선 항목) |
@@ -387,3 +387,4 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0339](0339-덮어쓰기-삭제-이름-바꾸기-참조는-자리를-따름-한-목록-안-같은-경로는-처음-자리만-삭제는-참조-처리를-고른다-사람-모달-llm-인자-기본-남기기.md) | 덮어쓰기 = 삭제 + 이름 바꾸기 (참조는 자리를 따름 · 한 목록 안 같은 경로는 처음 자리만) · 삭제는 참조 처리를 고른다 (사람 = 모달 · LLM = 인자, 기본 남기기) | 제안 |
 | [0340](0340-full-regression-runs-locally-before-commit-ci-is-a-post-push-check.md) | Full regression runs locally before commit, CI is a post-push check | 확정 |
 | [0341](0341-preset-folder-entry-claude-reads-it-natively-through-add-dir-codex-gets-only-what-it-lacks-a-missing-folder-blocks-launch.md) | Preset folder entry — claude reads it natively through --add-dir, codex gets only what it lacks, a missing folder blocks launch | 확정 |
+| [0348](0348-creating-and-starting-a-new-agent-is-one-body-in-the-agent-crate-ws-spawnbycwd-and-bus-agentspawn-cwd-are-its-adapters.md) | Creating and starting a new agent is one body in the agent crate — WS SpawnByCwd and bus agent.spawn --cwd are its adapters | 확정 |

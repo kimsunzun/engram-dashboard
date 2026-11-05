@@ -1,7 +1,7 @@
 # ADR-0279: 백엔드 정책 벽은 데몬의 SpawnByCwd 처리부다 — 셸 슬롯 스폰은 경로를 바꾸지 않는다
 
-- 상태: 확정 (2026-10-06, 근거: 사용자 위임 2026-10-06 「알아서 해 … 단계 착수」 아래의 메인 결정 + `/review trd full` 3라운드 PASS + 코드 대조 `cf693f4` + 착지 `8b48386`(2-1 U1 — `/review code full` 3라운드 PASS · `/qa standard` PASS · CI 초록))
-- 관련: Amends ADR-0270 (결정 3 의 정책 벽 경로) · Amends ADR-0219 (결정 5 의 claude 고정 문 축) · ADR-0029(셸 = 데몬 클라이언트) · ADR-0172(즉석 생성은 「마지막 실패」를 쓰지 않는다) · ADR-0012(seam · 단독 하네스) · `crates/engram-dashboard-daemon/src/connection_core.rs`(`SpawnByCwd` 처리부) · `crates/engram-dashboard-agent/src/commands.rs`(`llm_creation_refusal` · `LLM_BACKEND_POLICY` · `verb_new`) · `src-tauri/src/layout/apply.rs`(`spawn_into` · `gate_backend`) · `docs/process/S21-crate-boundaries/trd-2-1-shell-agent-cut.md` §2-1 · §7 · step-log S21
+- 상태: 확정 (2026-10-06, 근거: 사용자 위임 2026-10-06 「알아서 해 … 단계 착수」 아래의 메인 결정 + `/review trd full` 3라운드 PASS + 코드 대조 `cf693f4` + 착지 `8b48386`(2-1 U1 — `/review code full` 3라운드 PASS · `/qa standard` PASS · CI 초록)) · 부분 폐기 by ADR-0348 (결정 3)
+- 관련: Amends ADR-0270 (결정 3 의 정책 벽 경로) · Amends ADR-0219 (결정 5 의 claude 고정 문 축) · ADR-0029(셸 = 데몬 클라이언트) · ADR-0172(즉석 생성은 「마지막 실패」를 쓰지 않는다) · ADR-0012(seam · 단독 하네스) · `crates/engram-dashboard-daemon/src/connection_core.rs`(`SpawnByCwd` 처리부) · `crates/engram-dashboard-agent/src/commands.rs`(`llm_creation_refusal` · `LLM_BACKEND_POLICY` · `verb_new`) · `src-tauri/src/layout/apply.rs`(`spawn_into` · `gate_backend`) · `docs/process/S21-crate-boundaries/trd-2-1-shell-agent-cut.md` §2-1 · §7 · step-log S21 · Amended by ADR-0348 (결정 3)
 
 ## 맥락
 
