@@ -56,5 +56,10 @@ Every translation batch uses these renderings. A batch that needs a new term add
 | A + B N곳 | A and B, N places in total | the count covers the whole list |
 | 자리만 | placeholder only | |
 | 적대 리뷰 / 탈출구 | adversarial review / escape hatch | |
+| A→B→B 불량 시 C | A→B→(C if B is poor) | one step, not two |
+| X은 Y가 … 건너뛰어짐 | X is skipped because Y … | the topic (X) is what gets skipped |
+| 명부 / 로스터 | registry / roster | registry = all agents, roster = alive now |
+| 장부 / 보관함 / 봉투 | ledger / mailbox / envelope | |
+| 파킹 / 반려 | parking / bounced | |
 
 Kept in Korean: the ADR lint tokens (`- 상태:` + vocab, `- 관련:`, section headings), text in 「」, names of CLAUDE.md and `.claude/` sections.

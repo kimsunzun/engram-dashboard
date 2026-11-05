@@ -1,28 +1,28 @@
-# ADR-0074: json(stream-json) 모드 resume 활성화 — ADR-0044 후속 완료 (통제-sid/ADR-0008 재사용)
+# ADR-0074: Enabling resume in json (stream-json) mode — completing the ADR-0044 follow-up (reusing the controlled sid / ADR-0008)
 
 - 상태: 확정 (2026-07-13)
-- 관련: ADR-0044(json 모드 배선 — resume 을 후속으로 스코프아웃) · ADR-0008(세션 복원 통제-sid) · ADR-0030(capability) · `crates/engram-dashboard-core/src/agent/backend/claude.rs`(build_spec StreamJson·capabilities) · `session.rs`
+- 관련: ADR-0044 (json mode wiring — scoped resume out as a follow-up) · ADR-0008 (session restore controlled sid) · ADR-0030 (capability) · `crates/engram-dashboard-core/src/agent/backend/claude.rs` (build_spec StreamJson·capabilities) · `session.rs`
 
 ## 맥락
 
-ADR-0044 는 json(stream-json) resume 을 MVP 밖(후속)으로 두고, build_spec 이 SpawnMode 무관 항상 `--session-id`(fresh)로 고정하고 caps 를 resume=false 로 신고했다. 사용자가 "터미널과 동일하게 resume 되게 붙여"를 요청.
+ADR-0044 left json (stream-json) resume outside the MVP (as a follow-up), fixed build_spec to always use `--session-id` (fresh) regardless of SpawnMode, and reported caps as resume=false. The user asked: "attach it so it resumes the same as the terminal".
 
 ## 결정
 
-json 모드도 터미널 분기와 동일하게 build_spec 이 mode 로 세션 플래그를 가른다(Fresh→`--session-id`, Resume→`--resume <sid>`), caps 는 두 모드 모두 resume=true. 통제-sid(ADR-0008) 인프라를 그대로 재사용 — json 전용 신규 기계 없음. 트리 "에이전트 생성"의 기본 output_format 도 이와 함께 StreamJson 으로 전환(resume 이 보장되므로 안전).
+In json mode too, build_spec splits the session flag by mode, the same as the terminal branch (Fresh→`--session-id`, Resume→`--resume <sid>`), and caps are resume=true for both modes. It reuses the controlled-sid (ADR-0008) infrastructure as is — no new json-specific machinery. The default output_format of the tree's "에이전트 생성" (create agent) is also switched to StreamJson along with this (safe since resume is guaranteed).
 
 ## 거부한 대안
 
-- **보수적 resume=false 유지(현행)** — 사용자가 명시 요청했고, spike 로 안전이 확인됐으며, resume 없으면 정지 후 재개 시 대화가 조용히 소실되므로 유지할 이유가 없다.
-- **Mechanism B(매 턴 `claude -p --resume` 재기동)** — ADR-0044 가 이미 거부(매 턴 시동비용 + mid-turn 개입 불가). 현 Mechanism A(지속 프로세스)에 startup `--resume` 만 더한다.
+- **Keep the conservative resume=false (status quo)** — the user explicitly asked, safety was confirmed by a spike, and without resume the conversation is silently lost when resuming after a stop, so there is no reason to keep it.
+- **Mechanism B (restart `claude -p --resume` every turn)** — already rejected by ADR-0044 (per-turn startup cost + no mid-turn intervention). Only a startup `--resume` is added to the current Mechanism A (persistent process).
 
 ## 근거
 
-spike 실측(2026-07-13, claude 2.1.170) — `claude -p --input-format stream-json --output-format stream-json --replay-user-messages --resume <sid>` 가 `-p`/stream-json 과 공존하며 "session already in use" 없이 과거 대화를 무손실 재개함을 확인(비밀코드 회상 성공 + `cache_read_input_tokens` 로 이전 컨텍스트 로드 입증). 즉 능력 부재가 아니라 미배선이었다. restore 경로는 backend-agnostic(`needs_session` 무조건 true + `claude_session_id` 영속) 이라 json 도 터미널과 동일 레일을 탄다.
+Spike measurement (2026-07-13, claude 2.1.170) — `claude -p --input-format stream-json --output-format stream-json --replay-user-messages --resume <sid>` coexists with `-p`/stream-json and resumes the past conversation without loss and without "session already in use" (the secret-code recall succeeded + `cache_read_input_tokens` proved the earlier context was loaded). That is, it was not a missing capability but unwired. The restore path is backend-agnostic (`needs_session` unconditionally true + `claude_session_id` persisted), so json takes the same rail as the terminal.
 
 ## 영향 / 불변식
 
-- resume 실패 시 조용한 fresh 가 아니라 시각적 `FreshFallback`(loud).
-- `capabilities` 는 이제 두 모드 모두 resume=true(mode 무관).
-- ADR-0044 §6 의 "resume 복원 정합 후속" 항목은 이 ADR 로 완료.
-- **미검증 잔여:** 앱 레벨 왕복 실측(데몬 재빌드 필요)은 미완 — CLI spike + 코드 리뷰(deep)로 정합 확인, 앱 E2E 는 후속.
+- On resume failure, not a silent fresh but a visual `FreshFallback` (loud).
+- `capabilities` is now resume=true in both modes (regardless of mode).
+- The ADR-0044 §6 item "resume restore consistency follow-up" is completed by this ADR.
+- **Unverified remainder:** the app-level round-trip measurement (needs a daemon rebuild) is not done — consistency was confirmed by the CLI spike + code review (deep), and app E2E is a follow-up.
