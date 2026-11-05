@@ -1,33 +1,33 @@
-# ADR-0097: 스폰 에이전트 기본 auto mode(bypassPermissions) 채택 — 헤드리스 워커 권한 현실화
+# ADR-0097: Adopt auto mode (bypassPermissions) as the default for spawned agents — making headless worker permissions realistic
 
-- 상태: 확정 (2026-07-22, 근거: 사용자 결정 + CLI 발신 0/38 실측) · 부분 폐기 by ADR-0188 (권한 값을 백엔드 코드에 고정하던 부분)
-- 관련: Amends ADR-0094 (발신만 pre-authorize·bypassPermissions 거부 → 스폰 기본을 auto mode(bypassPermissions)로 채택(2026-07-22 사용자 결정). grant seam은 미래 공용 제약 레이어용 정책 표면으로 유지) · ADR-0004(백엔드 지식 격리) · Amended by ADR-0188 (권한 값을 백엔드 코드에 고정하던 부분)
+- 상태: 확정 (2026-07-22, basis: user decision + CLI send 0/38 measurement) · 부분 폐기 by ADR-0188 (the part that fixed the permission value in backend code)
+- 관련: Amends ADR-0094 (pre-authorize sending only · bypassPermissions rejected → adopt auto mode (bypassPermissions) as the spawn default (user decision 2026-07-22). The grant seam stays as a policy surface for a future shared constraint layer) · ADR-0004(backend knowledge isolation) · Amended by ADR-0188 (the part that fixed the permission value in backend code)
 
 ## 맥락
-ADR-0094는 "발신 입구만 pre-authorize, 전부-허용(bypassPermissions)은 거부"를 택했다 — 왕복(메시지 주고받기) MVP엔 발신 grant만으로 충분하고 인젝션 표면을 최소화한다는 근거였다. 그러나 두 가지가 드러났다:
+ADR-0094 chose "pre-authorize only the send entrances, and reject allow-everything (bypassPermissions)" — the basis being that the send grant alone is enough for the round-trip (message exchange) MVP and it minimizes the injection surface. But two things came to light:
 
-1. **헤드리스 워커엔 기본 거부가 구조적 벽.** stream-json(`-p`) 스폰엔 승인자(사람)가 없다. pre-approve 안 된 툴 호출(Read/Edit/Bash 등)은 전부 거부로 떨어진다. 에이전트가 "메시지 주고받기"를 넘어 실제 일을 하려면 능력마다 grant 배관을 늘려야 하는데, 이는 사실상 권한 시스템을 도구 단위로 재발명하는 코스다.
-2. **grant 배관 자체가 취약(실측).** CLI 발신(engram-send) grant는 절대경로 `Bash(<abs> *)` 패턴이 에이전트 실호출(`$ENGRAM_SEND_EXE ...`)과 문자열 미매칭 → claude 권한 게이트가 **38/38 전부 차단**(2026-07-22 roundtrip 실측). ADR-0098(bare-name+PATH 정렬)로 고쳐 0/38→10/10로 회복했지만, 이는 "grant 문자열 하나만 어긋나도 조용히 전멸"임을 보여줬다.
+1. **For headless workers, default-deny is a structural wall.** A stream-json (`-p`) spawn has no approver (human). Every tool call that is not pre-approved (Read/Edit/Bash, etc.) falls through to a denial. For an agent to do real work beyond "exchanging messages", the grant plumbing would have to grow per capability, which is effectively a course of reinventing the permission system per tool.
+2. **The grant plumbing itself is fragile (measured).** The CLI send (engram-send) grant's absolute-path `Bash(<abs> *)` pattern did not match the string of the agent's real call (`$ENGRAM_SEND_EXE ...`) → the claude permission gate **blocked all 38/38** (roundtrip measurement 2026-07-22). It was fixed by ADR-0098 (bare-name + PATH alignment) and recovered from 0/38 to 10/10, but this showed that "if even one grant string is off, everything silently dies".
 
-업계 방향도 "승인 완화 + 안전은 경계(containment)가 담당"(Codex `--sandbox`, Claude Code 샌드박스, 컨테이너 격리)이다. 경계 하나를 감사하는 게 grant N개를 관리하는 것보다 단순·결정적이다.
+The industry direction is also "relax approval + safety is the boundary's (containment) job" (Codex `--sandbox`, Claude Code sandbox, container isolation). Auditing one boundary is simpler and more deterministic than managing N grants.
 
 ## 결정
-**스폰되는 모든 claude 에이전트를 `--permission-mode bypassPermissions`(auto mode)로 띄운다.** Terminal PTY·StreamJson 두 모드 공통, control endpoint 유무와 무관하게 무조건. (`backend/claude.rs::build_spec` — args 맨 앞 base 플래그.)
+**Launch every spawned claude agent with `--permission-mode bypassPermissions` (auto mode).** Common to both the Terminal PTY and StreamJson modes, unconditionally, regardless of whether there is a control endpoint. (`backend/claude.rs::build_spec` — the base flag at the very front of args.)
 
-- **발신 입구 grant(ADR-0094/0096: MCP send_message + Bash/PowerShell engram-send)는 유지한다.** bypass 하에선 런타임 게이트가 아니지만, ① 미래 공용 제약 레이어가 되살릴 **정책 표면**이고 ② 어느 채널을 여는지의 **문서화**다. 제거하지 않는다.
-- **임시 체제.** 대체 = 전 LLM(claude·codex·gemini) 공용 제약 레이어(공용 셋팅 정본 → LLM별 설정 파일로 materialize, 셋+상속 조합 주입). step-log 백로그 "전 LLM 공용 제약 레이어" + 이 ADR가 착수 시 전제.
+- **The send entrance grants (ADR-0094/0096: MCP send_message + Bash/PowerShell engram-send) are kept.** Under bypass they are not a runtime gate, but they are ① a **policy surface** that a future shared constraint layer will revive and ② **documentation** of which channels are open. They are not removed.
+- **A transitional regime.** The replacement = a constraint layer shared by all LLMs (claude · codex · gemini) (a shared settings canon → materialized into per-LLM settings files, injected as a combination of sets + inheritance). The step-log backlog "constraint layer shared by all LLMs" + this ADR is the premise when that work starts.
 
 ## 거부한 대안
-- **기본 거부 유지 + 능력마다 grant 확대(ADR-0094 연장)** — 헤드리스 승인자 부재로 매 능력이 벽이고, grant 문자열 미매칭이 조용한 전멸을 낳는다(0/38 실측). 도구 단위 권한 재발명 = rot.
-- **`--dangerously-skip-permissions`** — bypassPermissions와 실질 동일 효과지만 이름이 "위험" 경고를 달고 세팅 의존(`allowDangerouslySkipPermissions`)이 얽힌다. `--permission-mode bypassPermissions`가 claude가 노출하는 정식 모드값이라 이걸 쓴다.
-- **`auto`(모델 분류기 승인) 모드** — claude가 노출하는 다른 모드로, 분류기가 확률적으로 승인/거부한다(이번 CLI 0/38의 "권한 분류기 차단"이 이 계열 동작). 워커가 자기 도구를 확률적으로 못 쓰는 건 헤드리스 신뢰성에 반한다. 결정적 bypass를 택한다.
-- **지금 Windows 경계부터 깔고 bypass** — 방향은 옳으나(경계 있어야 "auto + 제약") Windows OS 샌드박스 부재 → WSL2/컨테이너+PTY 스파이크 선행 필요. 그 사이를 막지 않으려 bypass를 먼저 채택하고 경계는 공용 제약 레이어에서 건다(사용자 결정: 지금 auto, 경계 나중).
+- **Keep default-deny + extend grants per capability (extending ADR-0094)** — with no headless approver every capability is a wall, and a grant string mismatch causes silent annihilation (0/38 measured). Reinventing per-tool permissions = rot.
+- **`--dangerously-skip-permissions`** — the effect is practically the same as bypassPermissions, but the name carries a "dangerous" warning and it is entangled with a settings dependency (`allowDangerouslySkipPermissions`). `--permission-mode bypassPermissions` is the formal mode value claude exposes, so use that.
+- **`auto` (model-classifier approval) mode** — another mode claude exposes, where a classifier approves/denies probabilistically (the "permission classifier block" in this CLI 0/38 is behavior of this family). A worker being probabilistically unable to use its own tools goes against headless reliability. Choose deterministic bypass.
+- **Lay down the Windows boundary first, then bypass** — the direction is right (a boundary must exist for "auto + constraints"), but with no Windows OS sandbox a WSL2/container+PTY spike has to come first. To avoid blocking in the meantime, bypass is adopted first and the boundary is applied in the shared constraint layer (user decision: auto now, boundary later).
 
 ## 근거
-- **실측:** CLI 발신 0/38(default-deny, grant 미매칭·권한 분류기 차단) → ADR-0096 정렬 후 10/10(cli). auto mode 하 라이브 roundtrip 발신 성공 실측. `bypassPermissions`가 claude CLI 정식 모드값이며 헤드리스에서 non-granted Bash를 실제 실행함을 로컬 실측(echo 통과).
-- **게이트:** `/review code full` — doc-aware(Claude) FIX 1건(types.rs stale doc) 반영 + blind(codex) PASS. `/qa standard` 전 게이트 green.
+- **Measured:** CLI send 0/38 (default-deny, grant mismatch · permission classifier block) → 10/10 (cli) after the ADR-0096 alignment. A successful send was measured in a live roundtrip under auto mode. Local measurement (echo passed) confirmed that `bypassPermissions` is claude CLI's formal mode value and that it actually runs non-granted Bash headlessly.
+- **Gate:** `/review code full` — 1 doc-aware (Claude) FIX (types.rs stale doc) applied + blind (codex) PASS. All `/qa standard` gates green.
 
 ## 영향 / 불변식
-- **`--permission-mode bypassPermissions` = args 첫 base 플래그**(변경 금지 위치 규칙): variadic `--allowedTools` 그룹은 여전히 **맨 끝**이어야 한다(ADR-0094 positional 흡수 방지). pair는 비-variadic이라 앞에 둔다. 회귀 가드 = `claude_auto_permission_mode_precedes_allowed_tools_*` + 기존 `claude_allowed_tools_group_is_last_*`.
-- **측정 seam 함의(중요):** `ENGRAM_DISALLOW_MCP_SEND`/`--disallow-mcp`는 MCP **grant**만 제거한다. bypass 하에선 권한 게이트가 없고 mcp-config 서버 연결은 남으므로 send_message가 여전히 호출 가능 — **auto mode에선 이 seam이 "MCP 부재"를 시뮬레이트하지 못한다.** 순수 CLI-only/채널 강제 측정은 default-deny(ADR-0094 체제)에서만 유효하다. auto mode에서 채널 선택 = 프라이밍 결정(강제 없음). (0/38→10/10 Phase-3 수치는 default-deny 세계 측정 = grant 배관 검증으로 유효.)
-- **인젝션 표면 상향:** 팀메이트 메시지가 입력으로 꽂히는 구조에서 bypass 에이전트는 설득당하면 경계 안에서 뭐든 한다. 봉투 검증(발신자 위조 차단)·프라이밍 "자기판단 유지"는 확률적 방어일 뿐 — **안전 상한 = 미래 경계(containment) 품질**. 그 전까지는 신뢰 환경 전용으로 운용.
+- **`--permission-mode bypassPermissions` = the first base flag in args** (a position rule, do not change): the variadic `--allowedTools` group must still be **at the very end** (preventing positional absorption, ADR-0094). The pair is non-variadic, so it goes in front. Regression guards = `claude_auto_permission_mode_precedes_allowed_tools_*` + the existing `claude_allowed_tools_group_is_last_*`.
+- **Implication for the measurement seam (important):** `ENGRAM_DISALLOW_MCP_SEND`/`--disallow-mcp` removes only the MCP **grant**. Under bypass there is no permission gate and the mcp-config server connection remains, so send_message is still callable — **under auto mode this seam cannot simulate "MCP absence".** Pure CLI-only/forced-channel measurement is valid only under default-deny (the ADR-0094 regime). Under auto mode, channel choice = a priming decision (no enforcement). (The 0/38→10/10 Phase-3 numbers were measured in the default-deny world = valid as grant plumbing verification.)
+- **Injection surface raised:** in a structure where teammate messages are driven in as input, a bypass agent will do anything inside the boundary if persuaded. Envelope verification (blocking sender forgery) and the priming "keep your own judgment" are only probabilistic defenses — **the safety ceiling = the quality of the future boundary (containment)**. Until then, operate it for trusted environments only.

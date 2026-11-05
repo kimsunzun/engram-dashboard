@@ -1,35 +1,35 @@
-# ADR-0092: S17 수신 계약 — 프라이밍(외부 MD seam·스폰 시 시스템프롬프트 주입) + 1:1 선행(다중수신 추상) + happy-path-first — ADR-0090/0091 원인 정정
+# ADR-0092: S17 receive contract — priming (external MD seam · injected into the system prompt at spawn) + 1:1 first (multi-recipient abstraction) + happy-path-first — correcting the cause in ADR-0090/0091
 
-- 상태: 확정 (2026-07-20, 근거: Stage 2 파일럿 confound 재해석 + 사용자 설계 결정) · 부분 폐기 by ADR-0215 (백엔드가 프라이밍 내용을 읽는다)
-- 관련: ADR-0086(듀얼 입구·즉시 push·메일박스 — 보내는 절반 정본) · ADR-0087(봉투/이름 규칙) · ADR-0090(파일럿 실행 — 이 ADR이 그 발견을 정정) · ADR-0091(acceptance-before-saturation 순서 — 결론 유효, 원인 정정) · Amended by ADR-0215 (백엔드가 프라이밍 내용을 읽는다)
+- 상태: 확정 (2026-07-20, basis: reinterpreting the Stage 2 pilot confound + the user's design decision) · 부분 폐기 by ADR-0215 (the backend reads the priming content)
+- 관련: ADR-0086(dual entrance · immediate push · mailbox — the canonical source for the sending half) · ADR-0087(envelope/name rules) · ADR-0090(pilot execution — this ADR corrects its finding) · ADR-0091(acceptance-before-saturation order — the conclusion stays valid, the cause is corrected) · Amended by ADR-0215 (the backend reads the priming content)
 
 ## 맥락
-Stage 2 파일럿(ADR-0090)은 "정책-준수 claude가 에이전트 간 메시지를 인젝션으로 격리 → 기능이 막힘"으로 읽혔다. 그러나 사용자 지적으로 이게 **confound**였음이 드러났다: (a) 파일럿의 프로브 본문이 "코드워드 기억했다가 나중에 발신자·id·코드워드를 보고하라"는 **교과서적 인젝션/유출 모양**이었고, (b) 받는 에이전트에게 **"너는 팀에 속하고 이런 메시지가 정당하다"는 안내(프라이밍)가 전혀 없었다.** 보통 orchestration은 정상 동작한다(스폰 프롬프트=신뢰 채널). 즉 **기능이 막힌 게 아니라 수신 절반(수신 계약)이 미설계**였다. 보내는 절반(dual entrance·즉시 push·`wrap_message`)은 이미 구현돼 있다.
+The Stage 2 pilot (ADR-0090) was read as "a policy-compliant claude isolates an agent-to-agent message as an injection → the feature is blocked". But the user's remark showed this was a **confound**: (a) the pilot's probe body was a **textbook injection/exfiltration shape** ("remember the codeword, and later report the sender, id and codeword"), and (b) the receiving agent had **no notice at all (priming) that "you belong to a team and messages like this are legitimate".** Orchestration normally works (the spawn prompt = a trusted channel). That is, **the feature was not blocked; the receiving half (the receive contract) was simply undesigned**. The sending half (dual entrance · immediate push · `wrap_message`) is already implemented.
 
-happy path를 세우려면 수신 계약이 필요하다 — 이게 지금 설계 대상이다. ADR-0091의 "수용(acceptance)이 포화 측정에 선행"이라는 순서는 유효하나, 그 원인은 "정책 하드블록"이 아니라 "프라이밍 부재"로 정정한다.
+Standing up the happy path needs a receive contract — that is what we design now. The order in ADR-0091, "acceptance precedes saturation measurement", stays valid, but its cause is corrected from "a hard policy block" to "no priming".
 
 ## 결정
-1. **프라이밍 = 외부 MD seam (하드코딩 금지).** 프라이밍 내용을 코드에 문자열로 박지 않는다. 고정 경로의 공용 마크다운(`prompts/agent-priming.md`, repo·버전관리)을 스폰 시 로더가 읽어 **시스템 프롬프트에 주입**한다(데몬이 읽어 넣음 — 에이전트가 스스로 파일을 읽는 방식 아님). 코드엔 **경로 + 로더 seam**만. 현재 구현체 = 공용 파일 로더, **미래 구현체 = 에이전트별 프롬프트 인젝션/스킬등록 시스템**(로더 교체로 흡수, "길은 뚫어둔다"). 임시판은 **전원 무조건 주입**.
-2. **1:1 선행, 다중수신 추상.** 최종 토폴로지 = 그룹챗 + 메일(1:1·다중타겟·단체). **1:1 먼저** 구현하되, 배달을 "수신자 목록"(현재 길이 1)으로 흐르게 해 그룹·단체가 seam 위에 얹히게 한다(ADR-0086의 group reserved 위에). 저위험·장기 seam이라 지금 깐다(CLAUDE.md §0).
-3. **형식 선택 = 비교 스파이크, 판정축 수용>토큰.** 후보 봉투 형식 몇 개를 실 송수신 테스트해 고른다. **1순위 = 수용·처리 품질, 2순위 = 토큰 효율.** 프라이밍이 깔린 뒤라 인젝션과 싸우는 게 아니라 happy-path에서 가독성 비교다.
-4. **happy-path-first (사다리 재편).** 정상 수용 baseline을 먼저 세우고, 포화·인젝션·exact-once 등 비정상은 그 뒤 — **크면 후순위, 작으면 구현 병행**. ADR-0088의 적대-우선 사다리를 이 관점으로 재편한다.
-   - **수용 판정 기준:** 받는 에이전트가 인젝션 취급 없이 자연스럽게 인지하고 맥락에 반영/반응(즉시 "받았음" ack 아님).
+1. **Priming = an external MD seam (no hardcoding).** The priming content is not embedded in code as a string. A shared markdown file at a fixed path (`prompts/agent-priming.md`, in the repo, version-controlled) is read by a loader at spawn and **injected into the system prompt** (the daemon reads it and puts it in — the agent does not read the file itself). The code holds only the **path + the loader seam**. The current implementation = a shared-file loader, the **future implementation = a per-agent prompt-injection/skill-registration system** (absorbed by swapping the loader, "keep the road open"). The interim version **injects it into everyone unconditionally**.
+2. **1:1 first, multi-recipient abstraction.** The final topology = group chat + mail (1:1 · multi-target · broadcast). Implement **1:1 first**, but let delivery flow as a "recipient list" (currently length 1) so groups and broadcast sit on top of the seam (on top of ADR-0086's reserved group). It is a low-risk, long-lived seam, so we lay it down now (CLAUDE.md §0).
+3. **Format choice = a comparison spike, decision axis acceptance > tokens.** Pick by testing real send/receive on a few candidate envelope formats. **Priority 1 = acceptance/processing quality, priority 2 = token efficiency.** With priming in place, this is not fighting injection; it is a readability comparison on the happy path.
+4. **happy-path-first (restructuring the ladder).** Stand up the normal-acceptance baseline first, and handle abnormal cases (saturation, injection, exact-once, etc.) after it — **if large, later; if small, implement in parallel**. ADR-0088's adversarial-first ladder is restructured from this viewpoint.
+   - **Acceptance criterion:** the receiving agent naturally recognizes the message without treating it as an injection and reflects/reacts to it in context (not an immediate "received" ack).
 
 ## 거부한 대안
-- **프라이밍 텍스트 코드 하드코딩** — 미래 인젝션 시스템으로 교체 불가, 내용 수정마다 재빌드. → 외부 MD seam.
-- **에이전트가 스스로 MD 파일 읽기** — 별도 행동 필요 + 미래 인젝션 시스템(시스템프롬프트 주입)과 다른 결이라 나중에 갈아엎어야 함. → 데몬이 읽어 시스템프롬프트 주입.
-- **1:1 전용 구현(다중 무시)** — 그룹·단체 도입 시 배달 경로 재작업. → 수신자-목록 추상.
-- **형식을 위조내성으로 판정** — happy-path 수용이 먼저. 위조 방어=이스케이프는 Stage 4 유보(ADR-0088/0091).
-- **파일럿 발견을 "기능 막힘"으로 확정** — confound(인젝션-모양 프로브 + 프라이밍 부재)를 반영 안 한 과잉 결론. 수신 계약이 실제 빈칸.
+- **Hardcoding the priming text in code** — cannot be swapped for the future injection system, and every content edit needs a rebuild. → external MD seam.
+- **The agent reads the MD file itself** — needs a separate action, and it is a different grain from the future injection system (system-prompt injection), so it would have to be torn out later. → the daemon reads it and injects it into the system prompt.
+- **A 1:1-only implementation (ignoring multi)** — introducing groups or broadcast would rework the delivery path. → recipient-list abstraction.
+- **Deciding the format by forgery resistance** — happy-path acceptance comes first. Forgery defense = escaping is deferred to Stage 4 (ADR-0088/0091).
+- **Fixing the pilot finding as "feature blocked"** — an over-conclusion that ignored the confound (an injection-shaped probe + no priming). The receive contract is the real gap.
 
 ## 근거
-- **파일럿 confound 재해석(사용자 지적 2026-07-20):** orchestration은 정상 동작하는데(스폰 과제=신뢰 채널), 파일럿은 mid-stream 제3자 인젝션-모양 프로브를 프라이밍 없는 에이전트에 던졌다 — 격리는 정상 반응. 자연 메시지 + 프라이밍은 미검증.
-- **사용자 설계 결정(2026-07-20):** 토폴로지(1:1 먼저·다중 가정) · 프라이밍(외부 MD·전원 주입·seam) · 형식선택(수용>토큰) · 코드 직전 조감도 승인 게이트.
+- **Reinterpreting the pilot confound (user remark 2026-07-20):** orchestration works normally (the spawn task = a trusted channel), yet the pilot threw a mid-stream third-party injection-shaped probe at an agent with no priming — the isolation was a normal reaction. A natural message + priming is unverified.
+- **User design decision (2026-07-20):** topology (1:1 first · multi assumed) · priming (external MD · injected into everyone · seam) · format choice (acceptance > tokens) · an approval gate on the bird's-eye view just before code.
 
 ## 영향 / 불변식
-- **프라이밍 내용 하드코딩 금지** — 항상 외부 MD. 로더는 seam(미래 인젝션 시스템으로 교체 가능).
-- **배달 경로 = 수신자-목록 추상 유지** — 1:1도 목록(길이 1)로 흐른다. 단일-수신자로 좁히면 그룹 회귀.
-- **happy-path baseline 통과 전 비정상(포화·인젝션) 본격 착수 금지** — 성공 모드 없이 실패 모드부터 파지 않는다.
-- **형식 판정축 = 수용>토큰** (위조내성 아님).
-- **프라이밍 수용 실측이 계정에 적용된 지침으로 막히면 지침이 없는 계정** — 계정 지침이 수용 판정 오염(ADR-0091 계정 의존 유지).
-- **코드 구현 착수 전 사용자에게 조감도 승인** — 이 세션 사용자 규칙.
+- **No hardcoding of the priming content** — always an external MD. The loader is a seam (swappable for a future injection system).
+- **The delivery path keeps the recipient-list abstraction** — even 1:1 flows as a list (length 1). Narrowing to a single recipient would be a group regression.
+- **No serious start on abnormal cases (saturation, injection) before the happy-path baseline passes** — do not dig into failure modes without a success mode.
+- **Format decision axis = acceptance > tokens** (not forgery resistance).
+- **If measuring priming acceptance is blocked by an instruction applied to the account, use an account without the instruction** — account instructions contaminate the acceptance decision (ADR-0091's account dependency stays).
+- **Get the user's approval of the bird's-eye view before starting the code implementation** — a user rule in this session.

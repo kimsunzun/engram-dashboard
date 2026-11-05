@@ -1,44 +1,44 @@
-# ADR-0109: 그룹 v1 관리 semantics·듀얼 입구 계약 — 전원 수정·암묵 생성·@ 예약·정규화 단일점·--settings 파일 주입
+# ADR-0109: Group v1 management semantics and dual-entry contract — everyone can edit, implicit creation, @ reserved, a single normalization point, --settings file injection
 
-- 상태: 확정 (2026-07-27, 근거: 사용자 결정 5건(2026-07-26~27) + D 적대 리뷰 실적출) · 부분 폐기 by ADR-0111 (결정 1~5 그룹 관리 semantics)
-- 관련: ADR-0086(듀얼 입구) · ADR-0094(grants 최소권한 — 미확장 유지) · ADR-0099(mcp-config 파일 수명주기 — settings 동승) · ADR-0101(WYSIWYA 이름 주소) · ADR-0103(§6 입구·조각의 원 결정 — 이 ADR이 D 단계 계약으로 구체화) · spec §4·§6 · Amended by ADR-0111 (결정 1~5 그룹 관리 semantics)
+- 상태: 확정 (2026-07-27, basis: 5 user decisions (2026-07-26~27) + real findings from the D adversarial review) · 부분 폐기 by ADR-0111 (decisions 1-5 group management semantics)
+- 관련: ADR-0086(dual entry) · ADR-0094(grants least privilege — kept unextended) · ADR-0099(mcp-config file lifecycle — settings rides along) · ADR-0101(WYSIWYA name addressing) · ADR-0103(the original decision for the §6 entries and fragment — this ADR makes it concrete as the D-stage contract) · spec §4·§6 · Amended by ADR-0111 (decisions 1-5 group management semantics)
 
 ## 맥락
 
-D(입구 완성)가 `group`(명단 관리)·`messages`(미결 조회) 툴과 CLI 미러, 스폰 `--settings` 주입을 구현하며 열려 있던 정책·계약 갈림길들을 확정해야 했다. 리뷰(2인 적대 + blind 7라운드)가 입구 이원화로 인한 계약 분기(정규화 비대칭·에러 어휘 분기)를 실적출했다.
+While implementing the `group` (roster management) and `messages` (open-items query) tools, their CLI mirrors, and the spawn `--settings` injection, D (entry completion) had to settle the policy and contract forks that were still open. The review (two adversarial reviewers + 7 blind rounds) found for real the contract divergence caused by having two entries (normalization asymmetry, split error vocabulary).
 
 ## 결정
 
-**그룹 v1 semantics (사용자 결정 2026-07-26~27):**
-1. **전원 수정 가능** — 누구나 아무 그룹을 만들고·고치고·지운다. ACL·조작 주체 기록 없음(기록·권한 시스템 고도화 때 한꺼번에 — step-log 백로그).
-2. **조용히** — 명단 변경·삭제에 통지 없음(v1 기본만 원칙).
-3. **명단 변경·삭제는 이미 파킹된 방송분에 무영향** — 발송 순간 스냅샷 원칙의 귀결(회수 기능 비채택).
-4. **`@` = 그룹 전용 네임스페이스** — 그룹명은 `@` 필수(아니면 `INVALID_GROUP_NAME`), 멤버 이름에 `@` 금지(`INVALID_MEMBER_NAME` — 중첩 그룹 미지원인데 리터럴 유령 멤버가 되는 것 차단), `@all` 내장 보호(`GROUP_BUILTIN`).
-5. **암묵 생성** — create 동사 없음: 없는 그룹에 add하면 생성, remove·조회는 생성하지 않음. 빈 add로의 다운그레이드 금지(`INVALID_GROUP_ARGS`).
+**Group v1 semantics (user decisions 2026-07-26~27):**
+1. **Everyone can edit** — anyone creates, edits, and deletes any group. No ACL and no record of the acting party (all at once when the record and permission system is upgraded — step-log backlog).
+2. **Quietly** — no notification for a roster change or deletion (only the v1 default principle).
+3. **A roster change or deletion has no effect on broadcast items that are already parked** — a consequence of the snapshot-at-send-time principle (a recall feature is not adopted).
+4. **`@` = a namespace for groups only** — a group name must have `@` (otherwise `INVALID_GROUP_NAME`), `@` is forbidden in a member name (`INVALID_MEMBER_NAME` — nested groups are unsupported, and this blocks a literal phantom member), and the built-in `@all` is protected (`GROUP_BUILTIN`).
+5. **Implicit creation** — there is no create verb: add to a group that does not exist creates it, remove and query do not create. No downgrade to an empty add (`INVALID_GROUP_ARGS`).
 
-**입구·계약 (구현 결정 — 리뷰 실적출 반영):**
-6. **의미 검증·정규화 = 데몬 단일점.** 멤버명 콤마 분해·트림·공백 제거는 공유 핸들러(ingress)에서만 — CLI는 원문 포워딩. 두 입구는 바이트 동일 JSON(파리티 통합 테스트로 고정). 배치 변경은 전검증 후 일괄 적용(부분 반영 금지).
-7. **`messages` 계약** — id 조회는 수신자별 행 + `expected_rows` 대비 부족 시 `may_be_truncated`(발송 시점 기대 행수 기록 — 위치 기반 "증명"은 그룹 2단계 기록으로 반증돼 폐기). 무인자는 호출자의 미결 3축(방향 태그), **회신 의무는 id 우선 매칭**(동명 오귀속 차단)이며 **의무는 실제 봉투를 받은 자를 따라간다**(배달 시점 재결박). 시각은 상대 초(장부가 단조 시계만 보유). 소유권 제한 없음·본문 미반환.
-8. **CLI 신원 = ENGRAM_TOKEN 유일** — `--as` 위장 불가(서버측 BoundIdentity 파생). exit code: `status=="error"`인 2xx 응답은 어떤 형태든 0이 될 수 없다(송·조회 공통).
-9. **`--settings` = 파일 경로 주입**(인라인 JSON 아님) — Windows `cmd /c` 래핑의 따옴표 붕괴가 조용한 실패 모드라 배제. 조각은 `{"allowedMcpServers":[{"serverName":"engram"}]}` 단일 키 유지(우선순위가 높아 잡동사니화 금지 — 회귀 테스트로 고정), mcp-config 디렉토리·스윕·revoke 수명주기에 동승(ADR-0099). 쓰기 실패는 warn+계속(mcp-config와 달리 조각 부재 = 열화지 차단 아님).
-10. **grants(ADR-0094) 미확장** — `messages`/`group`은 발신 입구가 아니므로 `--allowedTools` 목록에 추가하지 않음. 현재 스폰 권한 모드에선 무영향이며, 제약 레이어 도입 때 사용자 결정 필요(코드 주석 플래그).
+**Entry and contract (implementation decisions — reflecting real review findings):**
+6. **Semantic validation and normalization = a single daemon point.** Splitting member names on commas, trimming, and removing whitespace happen only in the shared handler (ingress) — the CLI forwards the raw text. The two entries produce byte-identical JSON (pinned by a parity integration test). A batch change is applied all at once after full validation (no partial application).
+7. **The `messages` contract** — an id query returns per-recipient rows, and when there are fewer than `expected_rows` it reports `may_be_truncated` (the expected row count is recorded at send time — position-based "proof" was disproved by the two-stage group record and discarded). The no-argument form returns the caller's three open axes (direction tag), **reply obligations match by id first** (blocks misattribution to a same name), and **an obligation follows whoever actually received the envelope** (re-bound at delivery time). Times are relative seconds (the ledger holds only a monotonic clock). No ownership restriction, body not returned.
+8. **CLI identity = ENGRAM_TOKEN only** — no spoofing with `--as` (derived server-side as BoundIdentity). Exit code: a 2xx response with `status=="error"` can never be 0, in any form (common to send and query).
+9. **`--settings` = file path injection** (not inline JSON) — quote collapse in the Windows `cmd /c` wrapping is a silent failure mode, so it is excluded. The fragment keeps the single key `{"allowedMcpServers":[{"serverName":"engram"}]}` (its priority is high, so no junk drawer — pinned by a regression test), and rides along on the mcp-config directory, sweep, and revoke lifecycle (ADR-0099). A write failure is warn + continue (unlike mcp-config, a missing fragment is a degradation, not a block).
+10. **grants (ADR-0094) not extended** — `messages`/`group` are not sender entries, so they are not added to the `--allowedTools` list. It has no effect under the current spawn permission mode, and a user decision is needed when a constraint layer is introduced (code comment flag).
 
 ## 거부한 대안
 
-- **ACL/조작 주체 기록 v1 포함** — 사용자 결정으로 연기(임시땜빵 금지 — 한꺼번에). 향후 방향: 수정 능력은 열어두되 커스텀 설정 + 프라이밍 비노출로 시스템적 차단.
-- **명시적 create 동사** — API 면적 증가 + "기존 이름 재생성" 갈림길만 낳음. 암묵 생성이면 질문 자체가 소멸.
-- **그룹 변경 통지** — 통지 남발 + 걷어내기 비용. 조회로 확인.
-- **멤버명 정규화를 입구별 구현** — CLI만 쪼개던 비대칭이 유령 멤버(`"alice,bob"` 1명)를 실제로 만듦(실적출). 단일점만이 파리티를 구조로 보장.
-- **`--settings` 인라인 JSON** — `cmd /c` 인용 붕괴가 조용히 설정을 버림(스파이크 실측 문서 근거). 파일 경로는 기검증 메커니즘 3종과 동일 패턴.
-- **콤마 포함 이름 반려 대신 분해** — 프라이밍이 콤마 표기를 가르치므로 반려는 문서와 구현의 싸움. 비용(콤마 포함 이름은 그룹 등록 불가)은 문서화로 수용.
+- **Include ACL / acting-party record in v1** — deferred by user decision (no stopgap patches — all at once). Future direction: keep the edit ability open, and block it systemically with custom settings + not exposing it in priming.
+- **An explicit create verb** — grows the API surface and only produces the fork "re-create an existing name". With implicit creation the question disappears.
+- **Group change notification** — notification spam + the cost of stripping it out. Confirm by query.
+- **Implementing member-name normalization per entry** — the asymmetry where only the CLI split names actually produced a phantom member (`"alice,bob"` as one person) (found for real). Only a single point guarantees parity by structure.
+- **`--settings` inline JSON** — `cmd /c` quote collapse silently drops the settings (spike measurement, documented). A file path is the same pattern as the three already-verified mechanisms.
+- **Splitting a name that contains a comma instead of rejecting it** — priming teaches comma notation, so a reject would be a fight between the docs and the implementation. The cost (a comma-containing name cannot be registered in a group) is accepted by documenting it.
 
 ## 근거
 
-- 리뷰 실적출: 정규화 비대칭(유령 멤버)·`@` 멤버 조용한 등록·`--delete` 파리티 분기·exit code 하이브리드 구멍·배치 부분 반영 — 전부 수정 후 재판정 통과(round 7 PASS).
-- 게이트: rust 1,079(core 290·daemon 691·proto/discovery 98) green · 파리티 통합 테스트(두 입구 바이트 동일) · mutation 검증.
+- Real findings of the review: normalization asymmetry (phantom member) · silent registration of an `@` member · `--delete` parity divergence · the exit code hybrid hole · partial batch application — all passed re-verdict after being fixed (round 7 PASS).
+- Gate: rust 1,079 (core 290 · daemon 691 · proto/discovery 98) green · parity integration test (two entries byte-identical) · mutation verification.
 
 ## 영향 / 불변식
 
-- 코드 앵커 `// ADR-0109` = `ingress.rs`(정규화·검증 단일점)·`groups.rs`(update_members 원자성·@ 가드)·`mcp_config.rs`(settings 조각)·`backend/claude.rs`(--settings 주입). 듀얼 입구에 세 번째 표면(UI 등)이 붙어도 의미 검증은 데몬 단일점 원칙 유지.
-- 수용 잔여: `outbound_pending` 축은 이름 기반(MessageRecord에 id 열 없음 — 의무 축만 id 인지, 관측 축은 후속) · `messages{id}` 무제한 조회(본문 미반환 전제) · 콤마 포함 이름 그룹 등록 불가.
-- spec 정합: §4(그룹 관리 semantics)·§6(에러 어휘·CLI 신원·--settings)이 이 ADR로 갱신됨.
+- Code anchors `// ADR-0109` = `ingress.rs` (the single point for normalization and validation) · `groups.rs` (update_members atomicity · @ guard) · `mcp_config.rs` (the settings fragment) · `backend/claude.rs` (--settings injection). Even if a third surface (UI etc.) is attached to the dual entry, the principle that semantic validation is a single daemon point stays.
+- Accepted residuals: the `outbound_pending` axis is name-based (MessageRecord has no id column — only the obligation axis is id-aware, the observation axis is follow-up) · unlimited `messages{id}` query (on the premise that the body is not returned) · a comma-containing name cannot be registered in a group.
+- Spec alignment: §4 (group management semantics) and §6 (error vocabulary · CLI identity · --settings) are updated by this ADR.
