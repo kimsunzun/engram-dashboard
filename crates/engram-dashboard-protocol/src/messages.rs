@@ -534,6 +534,16 @@ pub enum AgentEvent {
     Spawned {
         request_id: RequestId,
         agent: AgentInfo,
+        /// The launch notices of this activation, one row each: `{"code", "args", "line"?, "text"}` — `args` = the
+        /// code's free JSON, `line` = the 1-based line in the asset file (only when the notice names one), `text` =
+        /// the wording for a reader. Rows as agent `launch::notice_row` builds them.
+        ///
+        /// Absent = none: the activation launched nothing, its plan had none, or this agent was already shown the same
+        /// set. The daemon never sends an empty list.
+        // TRD S25 §1-8 · §5-2 16
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional, type = "Array<unknown>")]
+        notices: Option<Vec<serde_json::Value>>,
     },
 
     /// [`AgentCommand::ListCommands`] 응답(전용 reply, ADR-0155/0156) — request_id 에코.
@@ -657,6 +667,16 @@ pub enum AgentEvent {
     Error {
         request_id: Option<RequestId>,
         message: String,
+        /// Present only when an activation (`Spawn`, `SpawnByCwd`, `SpawnProfile`) was refused because its launch
+        /// material is blocked — nothing was started, and `message` says the same as text. The object is the `args`
+        /// of the bus `agent.spawn` refusal (agent `launch::LaunchBlocked::to_args`): `{"reasons": [row, …]}`, a row
+        /// per reason with its `kind` (`missing` · `broken` · `conflict` · `library_unavailable`), the blocked `item`
+        /// and its `via` chain (a conflict: `items: [{"item", "via"}, …]`), and the reason's `code`, `args` and
+        /// optional 1-based `line`.
+        // TRD S25 §1-8 · §5-2 16
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional, type = "Record<string, unknown>")]
+        launch_blocked: Option<serde_json::Map<String, serde_json::Value>>,
     },
 }
 
@@ -1509,6 +1529,99 @@ mod tests {
             }
             other => panic!("SubscribeAck 이어야: {other:?}"),
         }
+    }
+
+    // ── Activation replies: launch block reasons · launch notices (TRD S25 §5-2 16) ──
+
+    /// An agent row for the `Spawned` goldens, in the field order the wire writes.
+    const SPAWNED_AGENT_JSON: &str = r#"{"id":"11111111-1111-1111-1111-111111111111","name":"worker","cwd":"C:/proj","status":{"type":"Running"},"cols":80,"rows":24,"epoch":7,"capabilities":{"input":{"raw":true,"message":false,"attachment":false},"output":{"terminal_bytes":true,"structured":false,"markdown":false,"tool_events":false,"usage":false},"control":{"resize":true,"interrupt":true,"cancel":false,"graceful_shutdown":false},"session":{"resume":false,"snapshot":true,"cwd_env":true},"model":{"select":false,"temperature":false,"max_tokens":false}}}"#;
+
+    /// Without a block the failure keeps the old bytes, and an old daemon's failure reads as "not a block".
+    #[test]
+    fn an_error_without_a_launch_block_keeps_the_old_bytes() {
+        let nil = "00000000-0000-0000-0000-000000000000";
+        let old = format!(r#"{{"Error":{{"request_id":"{nil}","message":"boom"}}}}"#);
+        let event: AgentEvent = serde_json::from_str(&old).expect("an old failure decodes");
+        let AgentEvent::Error { launch_blocked, .. } = &event else {
+            panic!("Error expected: {event:?}");
+        };
+        assert_eq!(launch_blocked, &None);
+        assert_eq!(serde_json::to_string(&event).unwrap(), old);
+    }
+
+    #[test]
+    fn an_error_carries_the_launch_block_reasons_and_round_trips() {
+        let blocked = serde_json::json!({
+            "reasons": [
+                {
+                    "kind": "missing", "item": "rules/a.md", "via": ["team.yaml"],
+                    "code": "not-found", "args": { "path": "rules/a.md" }, "line": 3
+                },
+                {
+                    "kind": "conflict",
+                    "items": [{ "item": "a.md", "via": [] }, { "item": "b.md", "via": ["x.yaml"] }],
+                    "code": "same-name", "args": {}
+                }
+            ]
+        });
+        let event = AgentEvent::Error {
+            request_id: Some(RequestId(Uuid::nil())),
+            message: "launch blocked".into(),
+            launch_blocked: blocked.as_object().cloned(),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "Error": {
+                    "request_id": "00000000-0000-0000-0000-000000000000",
+                    "message": "launch blocked",
+                    "launch_blocked": blocked
+                }
+            })
+        );
+        let back: AgentEvent = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&back).unwrap(), json);
+    }
+
+    /// Without notices the success keeps the old bytes, and an old daemon's success reads as "no notices".
+    #[test]
+    fn a_spawned_reply_without_notices_keeps_the_old_bytes() {
+        let nil = "00000000-0000-0000-0000-000000000000";
+        let old = format!(r#"{{"Spawned":{{"request_id":"{nil}","agent":{SPAWNED_AGENT_JSON}}}}}"#);
+        let event: AgentEvent = serde_json::from_str(&old).expect("an old success decodes");
+        let AgentEvent::Spawned { notices, .. } = &event else {
+            panic!("Spawned expected: {event:?}");
+        };
+        assert_eq!(notices, &None);
+        assert_eq!(serde_json::to_string(&event).unwrap(), old);
+    }
+
+    #[test]
+    fn a_spawned_reply_carries_its_notices_and_round_trips() {
+        let nil = "00000000-0000-0000-0000-000000000000";
+        let notices = serde_json::json!([
+            {
+                "code": "skipped-field", "args": { "field": "model" }, "line": 4,
+                "text": "알림(skipped-field): 의도된 동작입니다. 대상 — model"
+            },
+            { "code": "plain", "args": {}, "text": "알림(plain): 의도된 동작입니다." }
+        ]);
+        let mut json: serde_json::Value = serde_json::from_str(&format!(
+            r#"{{"Spawned":{{"request_id":"{nil}","agent":{SPAWNED_AGENT_JSON}}}}}"#
+        ))
+        .unwrap();
+        json["Spawned"]["notices"] = notices.clone();
+        let event: AgentEvent = serde_json::from_value(json.clone()).unwrap();
+        let AgentEvent::Spawned {
+            notices: Some(rows),
+            ..
+        } = &event
+        else {
+            panic!("Spawned with notices expected: {event:?}");
+        };
+        assert_eq!(&serde_json::Value::Array(rows.clone()), &notices);
+        assert_eq!(serde_json::to_value(&event).unwrap(), json);
     }
 
     /// ★옛 프리셋 wire 는 디코드되지 않는다 — 그래서 판이 8 이다★(`PROTOCOL_VERSION` 의 v8 항목). 이 판의 데몬이

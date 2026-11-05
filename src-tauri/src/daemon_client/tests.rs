@@ -2470,6 +2470,7 @@ async fn spawn_reply_mock_server(behavior: ReplyBehavior) -> u16 {
             ReplyBehavior::ErrorEcho => AgentEvent::Error {
                 request_id: Some(rid),
                 message: "데몬측 거부(테스트)".into(),
+                launch_blocked: None,
             },
             ReplyBehavior::AckWrongId => AgentEvent::Ack {
                 // 명령과 다른 request_id — 클라가 매칭 못 해 무시해야 한다.
@@ -6222,6 +6223,7 @@ async fn spawn_register_reply_server(script: Vec<RegisterReply>) -> u16 {
                     let ev = AgentEvent::Error {
                         request_id: Some(request_id),
                         message: message.into(),
+                        launch_blocked: None,
                     };
                     Message::Text(serde_json::to_string(&ev).unwrap().into())
                 };

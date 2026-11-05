@@ -1314,6 +1314,7 @@ fn emit_broadcast(events: &dyn DaemonEvents, names: &dyn AgentNamesSink, ev: &Ag
         AgentEvent::Error {
             request_id: None,
             message,
+            ..
         } => {
             tracing::warn!(%message, "데몬 error 이벤트(명령 왕복 밖)");
         }

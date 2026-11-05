@@ -22,7 +22,9 @@ use std::sync::{Arc, Mutex};
 // ★만들기 기본 모드의 집은 코어 한 곳이다★ — 이 파일이 자기 상수를 두지 않는 이유는 그 상수의 doc 이
 //   진다(`spawn_command_by_cwd` 가 그것을 참조한다).
 use engram_dashboard_agent::commands::NEW_AGENT_OUTPUT_FORMAT;
+use engram_dashboard_agent::launch::{notice_row, Notice};
 use engram_dashboard_agent::manager::AgentManager;
+use engram_dashboard_agent::manager::NoticeDelivery;
 use engram_dashboard_agent::manager::RenameOutcome as CoreRenameOutcome;
 use engram_dashboard_agent::profile::RestoreReport as CoreRestoreReport;
 use engram_dashboard_agent::profile::SpawnMode;
@@ -594,6 +596,12 @@ pub(crate) fn agent_info_to_wire(a: &CoreAgentInfo) -> WireAgentInfo {
     }
 }
 
+/// Launch notices → the `Spawned.notices` rows — `None` for none (the wire never carries an empty list).
+// TRD S25 §5-2 16
+fn notices_to_wire(notices: &[Notice]) -> Option<Vec<serde_json::Value>> {
+    (!notices.is_empty()).then(|| notices.iter().map(notice_row).collect())
+}
+
 pub(crate) fn restore_outcome_to_wire(outcome: &CoreRestoreOutcome) -> WireRestoreOutcome {
     match outcome {
         CoreRestoreOutcome::Resumed => WireRestoreOutcome::Resumed,
@@ -1023,6 +1031,28 @@ fn profile_error_text(conn_id: ConnId, verb: &'static str, what: &str, e: PtyErr
     }
 }
 
+/// The failure reply of a wire activation (`Spawn` · `SpawnByCwd` · `SpawnProfile`) — [`profile_error_text`] as the
+/// message, plus a launch block's reasons as `launch_blocked` (the `LaunchBlocked::to_args` object — what the bus
+/// `agent.spawn` wake refusal carries as `args`; the bus after-create refusal adds `agent_id`).
+// TRD S25 §1-8 · §5-2 16
+fn activation_error(
+    conn_id: ConnId,
+    verb: &'static str,
+    what: &str,
+    request_id: engram_dashboard_protocol::RequestId,
+    e: PtyError,
+) -> AgentEvent {
+    let launch_blocked = match &e {
+        PtyError::LaunchBlocked(blocked) => Some(blocked.to_args()),
+        _ => None,
+    };
+    AgentEvent::Error {
+        request_id: Some(request_id),
+        message: profile_error_text(conn_id, verb, what, e),
+        launch_blocked,
+    }
+}
+
 /// 도구 종류 도메인 → wire. ★`_` 갈래를 쓰지 않는다★ — 종류가 늘면 여기가 컴파일 에러로 서야 새 종류가
 /// 조용히 다른 종류로 접히지 않는다. 데몬은 벤더 도구 이름을 모른다 — 판정은 각 backend 번역기가 끝냈다.
 // ADR-0239
@@ -1145,7 +1175,7 @@ pub struct ConnectionCore {
     locals: Arc<dyn LocalCommands>,
     usage: Arc<UsageService>,
     shutdown_tx: watch::Sender<bool>,
-    /// `SpawnByCwd` 처리부가 `spawn_agent` 전에 묻는 백엔드 생성 정책. 운영은 늘 agent
+    /// `SpawnByCwd` 처리부가 `spawn_agent_reporting` 전에 묻는 백엔드 생성 정책. 운영은 늘 agent
     /// `commands::llm_creation_refusal` 이고 [`ConnectionCore::new`] 가 채운다 — 시험만 닫는 가짜로 갈아
     /// 꽂는다(오늘 운영 표는 아무것도 안 닫아 실물 입력으로는 거절 갈래에 못 닿는다 · ADR-0012).
     /// ★공유 핸들이 아닌데도 여기 앉을 수 있다★ — 상태 없는 순수 함수 포인터라 연결마다 새로 채워도 갈릴
@@ -1284,6 +1314,7 @@ impl ConnectionCore {
                 Err(message) => AgentEvent::Error {
                     request_id: Some(request_id),
                     message,
+                    launch_blocked: None,
                 },
             };
             let _ = sink.enqueue(Outbound::event(ev));
@@ -1331,7 +1362,10 @@ impl ConnectionCore {
                 //   (tauri command + WS) 그 갈림은 「사람 클릭과 LLM 이 같은 핸들을 흔든다」를 깨뜨린다.
                 //   `SpawnProfile` 과 다른 점은 모드 유도가 없다는 것뿐이라(항상 Fresh) 그대로 유지한다.
                 // ADR-0172
-                let result = match manager.agent_snapshot(profile_id) {
+                // The success is an `Ack`, which has no place for launch notices — so `activate_profile` (drops them,
+                //   records nothing). A launch block still answers with its reasons.
+                // TRD S25 §5-2 16
+                match manager.agent_snapshot(profile_id) {
                     Some(profile) => {
                         // ★★blocking 풀로 넘긴다 — 이 자리에서 직접 부르지 마라★★: `activate_profile`
                         //   은 연결을 선언하는 통로에서 **결말이 날 때까지** 블록하고(최대 백스톱 15s),
@@ -1352,23 +1386,29 @@ impl ConnectionCore {
                             Err(PtyError::SpawnFailed(format!(
                                 "activation task failed: {e}"
                             )))
-                        })
-                        .map_err(|e| {
-                            profile_error_text(
-                                conn_id,
-                                "Spawn",
-                                &format!("agent {profile_id} was not started"),
-                                e,
-                            )
                         });
                         // ★결말과 무관하게 민다 — 저장 거절이어도★: 활성화 실패는 그 항목의 「마지막 실패」를
                         //   적는다(ADR-0172 · ADR-0291 E2).
                         broadcast_profile_list(fanout, manager);
-                        started
+                        match started {
+                            Ok(()) => reply(sink, request_id, Ok(())),
+                            Err(e) => {
+                                let _ = sink.enqueue(Outbound::event(activation_error(
+                                    conn_id,
+                                    "Spawn",
+                                    &format!("agent {profile_id} was not started"),
+                                    request_id,
+                                    e,
+                                )));
+                            }
+                        }
                     }
-                    None => Err(format!("profile not found: {profile_id}")),
-                };
-                reply(sink, request_id, result);
+                    None => reply(
+                        sink,
+                        request_id,
+                        Err(format!("profile not found: {profile_id}")),
+                    ),
+                }
             }
 
             AgentCommand::Kill {
@@ -1540,7 +1580,7 @@ impl ConnectionCore {
                 request_id,
             } => {
                 // ★이 한 줄이 [`spawn_command_by_cwd`] 를 부른다는 사실은 **아무 테스트도 안 잰다**★ —
-                //   이 갈래의 성공 경로는 실 프로세스 spawn 이라(`manager.spawn_agent` 바로 아래) 단위
+                //   이 갈래의 성공 경로는 실 프로세스 spawn 이라(`manager.spawn_agent_reporting` 바로 아래) 단위
                 //   테스트가 못 들어오고, 여기를 옛 상수 호출로 되돌려도 전 스위트가 초록이다. 그러면
                 //   codex by-cwd 가 조용히 app-server 로 갈아탄다. 그 함수의 **내용**은
                 //   `by_cwd_fills_one_shared_default_mode_for_every_backend` 가 지키므로, 무방비인 것은
@@ -1549,7 +1589,7 @@ impl ConnectionCore {
                     reply(sink, request_id, Err(MISSING_BACKEND.to_string()));
                     return DispatchFlow::Continue;
                 };
-                // ★정책은 `spawn_agent` 보다 먼저 본다★ — 이 갈래의 즉석 프로필은 `spawn_agent` 가 명부에 올리고
+                // ★정책은 `spawn_agent_reporting` 보다 먼저 본다★ — 이 갈래의 즉석 프로필은 `spawn_agent_reporting` 이 명부에 올리고
                 //   디스크에 쓰므로, 판정을 그 뒤로 미루면 거절된 프로필이 남는다. `CoreProfile::new` 앞에 둔 것은
                 //   배치일 뿐이다(메모리 값만 만든다). 이 문은 호출자를 가리지 않는다 —
                 //   사람 경로도 같은 표를 본다(ADR-0279 「감수한 대가」). 거절은 「마지막 실패」를 쓰지 않는다 —
@@ -1578,18 +1618,20 @@ impl ConnectionCore {
                 //   생성을 yield 없이 동기로 한다. 사유의 정본은 위 `Spawn` 갈래의 같은 주석이다.
                 // TRD S25 §5-2 4
                 let mgr = manager.clone();
+                // `spawn_agent_reporting` records no notice fingerprint — why the WS must not: the `SpawnProfile` arm.
                 let spawned = tokio::task::spawn_blocking(move || {
-                    mgr.spawn_agent(&profile, SpawnMode::Fresh)
+                    mgr.spawn_agent_reporting(&profile, SpawnMode::Fresh)
                 })
                 .await
                 .unwrap_or_else(|e| Err(PtyError::SpawnFailed(format!("spawn task failed: {e}"))));
                 match spawned {
                     // 방금 만든 uuid 라 moot(이미 떠 있음)이 나올 수 없다 — 그래도 결말을 가려 받는다.
-                    Ok(outcome) => match outcome.into_info() {
+                    Ok((outcome, notices)) => match outcome.into_info() {
                         Some(info) => {
                             let _ = sink.enqueue(Outbound::event(AgentEvent::Spawned {
                                 request_id,
                                 agent: agent_info_to_wire(&info),
+                                notices: notices_to_wire(&notices),
                             }));
                         }
                         None => reply(
@@ -1598,16 +1640,15 @@ impl ConnectionCore {
                             Err("ad-hoc spawn produced no session".to_string()),
                         ),
                     },
-                    Err(e) => reply(
-                        sink,
-                        request_id,
-                        Err(profile_error_text(
+                    Err(e) => {
+                        let _ = sink.enqueue(Outbound::event(activation_error(
                             conn_id,
                             "SpawnByCwd",
                             "the agent was not created or started",
+                            request_id,
                             e,
-                        )),
-                    ),
+                        )));
+                    }
                 }
             }
 
@@ -1746,10 +1787,20 @@ impl ConnectionCore {
                         // ★blocking 풀로 넘긴다★ — 사유의 정본은 위 `Spawn` 갈래의 같은 주석이다.
                         //   ★Fresh 도 이제 여기 든다★: 연결을 선언하는 통로에서는 모드와 무관하게
                         //   결말까지 기다린다(ADR-0201 — 예전엔 Fresh 가 즉시 반환이었다).
+                        // `Withheld`: the reply carries the notices, but the webview does not show them yet, so this
+                        //   path must not mark the set as seen for the agent (a later delivering caller still gets it).
+                        // ADR-0341
+                        // TRD S25 §5-2 16
+                        // TODO(TRD S25 §5-2 11): when the webview shows `Spawned.notices`, switch the WS activation
+                        //   paths to `Delivered` (and give by-cwd a recording path) — or "once per agent" breaks.
                         let mgr = manager.clone();
                         let profile_for_task = profile.clone();
                         let started = tokio::task::spawn_blocking(move || {
-                            mgr.activate_profile(&profile_for_task, mode)
+                            mgr.activate_profile_reporting(
+                                &profile_for_task,
+                                mode,
+                                NoticeDelivery::Withheld,
+                            )
                         })
                         .await
                         .unwrap_or_else(|e| {
@@ -1766,22 +1817,22 @@ impl ConnectionCore {
                         //   `core::agent::commands::{wake_existing, create_and_start}`.
                         //   ★저장 거절도 그 실패다★ — 그대로 민다(ADR-0291 E2).
                         match started {
-                            Ok(info) => {
+                            Ok(activated) => {
                                 let _ = sink.enqueue(Outbound::event(AgentEvent::Spawned {
                                     request_id,
-                                    agent: agent_info_to_wire(&info),
+                                    agent: agent_info_to_wire(&activated.info),
+                                    notices: notices_to_wire(&activated.notices),
                                 }));
                             }
-                            Err(e) => reply(
-                                sink,
-                                request_id,
-                                Err(profile_error_text(
+                            Err(e) => {
+                                let _ = sink.enqueue(Outbound::event(activation_error(
                                     conn_id,
                                     "SpawnProfile",
                                     &format!("agent {profile_id} was not started"),
+                                    request_id,
                                     e,
-                                )),
-                            ),
+                                )));
+                            }
                         }
                         broadcast_profile_list(fanout, manager);
                     }
@@ -2079,6 +2130,7 @@ impl ConnectionCore {
                 let _ = sink.enqueue(Outbound::event(AgentEvent::Error {
                     request_id: None,
                     message: refusal.into(),
+                    launch_blocked: None,
                 }));
             }
 
@@ -2460,6 +2512,7 @@ fn send_error(
     let _ = sink.enqueue(Outbound::event(AgentEvent::Error {
         request_id,
         message,
+        launch_blocked: None,
     }));
 }
 
@@ -2687,7 +2740,10 @@ mod tests {
         let call_sites: Vec<usize> = lines
             .iter()
             .enumerate()
-            .filter(|(_, l)| l.contains(".activate_profile(") && !l.trim_start().starts_with("//"))
+            .filter(|(_, l)| {
+                (l.contains(".activate_profile(") || l.contains(".activate_profile_reporting("))
+                    && !l.trim_start().starts_with("//")
+            })
             .map(|(i, _)| i)
             .collect();
         assert!(
@@ -2701,7 +2757,7 @@ mod tests {
         for i in call_sites {
             let line = lines[i];
             assert!(
-                line.contains("mgr.activate_profile("),
+                line.contains("mgr.activate_profile"),
                 "활성화를 async 워커에서 직접 부른다 — 최대 20 초 동안 그 워커가 묶이고, 막힌 활성화                  N 건이 워커 N 개를 가져가 다른 연결의 명령까지 멈춘다: {line}"
             );
             let window = lines[i.saturating_sub(4)..=i].join("\n");
@@ -2724,7 +2780,10 @@ mod tests {
         let call_sites: Vec<usize> = lines
             .iter()
             .enumerate()
-            .filter(|(_, l)| l.contains(".spawn_agent(") && !l.trim_start().starts_with("//"))
+            .filter(|(_, l)| {
+                (l.contains(".spawn_agent(") || l.contains(".spawn_agent_reporting("))
+                    && !l.trim_start().starts_with("//")
+            })
             .map(|(i, _)| i)
             .collect();
         assert!(
@@ -2734,7 +2793,7 @@ mod tests {
         for i in call_sites {
             let line = lines[i];
             assert!(
-                line.contains("mgr.spawn_agent("),
+                line.contains("mgr.spawn_agent"),
                 "즉석 생성을 async 워커에서 직접 부른다 — 점검 · 프로세스 생성 동안 그 워커가 묶인다: {line}"
             );
             let window = lines[i.saturating_sub(4)..=i].join("\n");
@@ -2885,7 +2944,7 @@ mod tests {
         watch::Receiver<bool>,
         Arc<crate::test_doubles::RecordingFanout>,
     ) {
-        test_core_on_stores(deliveries, locals, Arc::default())
+        test_core_on_stores(deliveries, locals, Arc::default(), None)
     }
 
     /// [`test_core_refusable`] 의 저장소 스위치 값 — 받음 · 적재 때 거절(새 판) · 쓰기 실패. 어느 쪽이든 실패면
@@ -2907,15 +2966,32 @@ mod tests {
             CommandDeliveries::new(),
             &|_, _| Arc::new(crate::command_delivery::NoLocalCommands),
             refusing.clone(),
+            None,
         );
         (core, fanout, refusing)
     }
 
+    /// A core whose manager checks launches with `kits` (the running daemon plugs none yet, and the Noop source
+    /// neither blocks nor carries notices), and its fanout record.
+    fn test_core_with_kits(
+        kits: Arc<dyn engram_dashboard_agent::launch::LaunchKitSource>,
+    ) -> (ConnectionCore, Arc<crate::test_doubles::RecordingFanout>) {
+        let (core, _rx, fanout) = test_core_on_stores(
+            CommandDeliveries::new(),
+            &|_, _| Arc::new(crate::command_delivery::NoLocalCommands),
+            Arc::default(),
+            Some(kits),
+        );
+        (core, fanout)
+    }
+
     /// [`test_core_built`] 의 본체 — `refusing` 이 [`STORE_SAVES`] 가 아닌 동안 프로필 저장소가 저장에 실패한다.
+    /// `kits` = the manager's launch-kit source (`None` = the Noop default).
     fn test_core_on_stores(
         deliveries: CommandDeliveries,
         locals: &dyn Fn(&Arc<AgentManager>, &MultiViewState) -> Arc<dyn LocalCommands>,
         refusing: Arc<AtomicU8>,
+        kits: Option<Arc<dyn engram_dashboard_agent::launch::LaunchKitSource>>,
     ) -> (
         ConnectionCore,
         watch::Receiver<bool>,
@@ -2963,7 +3039,14 @@ mod tests {
             TrackerConfig::default(),
             Arc::new(|_aid, _sid| {}),
         ));
-        let manager = Arc::new(AgentManager::new(status_sink, profiles, tracker));
+        let mut manager = AgentManager::new(status_sink, profiles, tracker);
+        if let Some(kits) = kits {
+            manager = manager.with_launch_ports(engram_dashboard_agent::launch::LaunchPorts {
+                kits,
+                ..engram_dashboard_agent::launch::LaunchPorts::noop()
+            });
+        }
+        let manager = Arc::new(manager);
         let manager_for_locals = manager.clone();
         let multiview = MultiViewState::new();
         let locals = locals(&manager_for_locals, &multiview);
@@ -3897,6 +3980,7 @@ mod tests {
             [AgentEvent::Error {
                 request_id: Some(r),
                 message,
+                ..
             }] => {
                 assert_eq!(*r, req);
                 assert!(
@@ -3941,10 +4025,12 @@ mod tests {
             [AgentEvent::Error {
                 request_id: Some(w),
                 message: write_message,
+                ..
             }],
             [AgentEvent::Error {
                 request_id: Some(c),
                 message: cancel_message,
+                ..
             }],
         ) = (write.as_slice(), cancel.as_slice())
         else {
@@ -3988,6 +4074,7 @@ mod tests {
                 [AgentEvent::Error {
                     request_id: Some(r),
                     message,
+                    ..
                 }] => {
                     assert_eq!(*r, req);
                     assert!(
@@ -4693,6 +4780,7 @@ mod tests {
             [AgentEvent::Ack { .. }, AgentEvent::Error {
                 request_id,
                 message,
+                ..
             }] => {
                 assert_eq!(*request_id, None, "이 프레임엔 상관 키가 없다");
                 assert!(message.contains("deadline"), "{message}");
@@ -4778,6 +4866,7 @@ mod tests {
             [AgentEvent::Error {
                 request_id,
                 message,
+                ..
             }] => {
                 assert_eq!(*request_id, Some(req));
                 assert!(
@@ -4821,6 +4910,7 @@ mod tests {
             [AgentEvent::Error {
                 request_id,
                 message,
+                ..
             }] => {
                 assert_eq!(*request_id, Some(req));
                 assert!(
@@ -4861,6 +4951,7 @@ mod tests {
             [AgentEvent::Error {
                 request_id,
                 message,
+                ..
             }] => {
                 assert_eq!(*request_id, Some(req));
                 assert!(
@@ -5027,6 +5118,7 @@ mod tests {
             [AgentEvent::Error {
                 request_id,
                 message,
+                ..
             }] => {
                 assert_eq!(*request_id, Some(req));
                 assert!(message.contains("backend"), "어느 칸인지 말해야: {message}");
@@ -5086,6 +5178,7 @@ mod tests {
             [AgentEvent::Error {
                 request_id,
                 message,
+                ..
             }] => {
                 assert_eq!(*request_id, Some(req));
                 assert_eq!(message.as_str(), MISSING_BACKEND);
@@ -5207,6 +5300,7 @@ mod tests {
                 [AgentEvent::Error {
                     request_id,
                     message,
+                    ..
                 }] => {
                     assert_eq!(*request_id, Some(req), "{word}");
                     assert!(
@@ -6249,6 +6343,7 @@ mod tests {
             [AgentEvent::Error {
                 request_id: Some(r),
                 message,
+                ..
             }] => {
                 assert_eq!(*r, req);
                 assert!(
@@ -6366,6 +6461,7 @@ mod tests {
                 [AgentEvent::Error {
                     request_id: Some(_),
                     message,
+                    ..
                 }] => assert!(
                     message.starts_with("CONFLICT:") && message.contains(file),
                     "{label}: {message}"
@@ -6955,5 +7051,280 @@ mod tests {
             1,
             "거절된 취소는 명부를 건드리지 않는다"
         );
+    }
+
+    // ── Wire activation replies: launch block reasons · launch notices (TRD S25 §5-2 16) ──
+
+    mod launch_replies {
+        use super::*;
+        use engram_dashboard_agent::launch::{
+            notice_text, BlockReason, LaunchBlocked, LaunchKit, LaunchKitSource, LaunchPlan,
+            NoopLaunchKits, PrepareError, Reason,
+        };
+
+        /// Blocks every launch with the reasons it holds.
+        struct BlockingKits(LaunchBlocked);
+
+        impl LaunchKitSource for BlockingKits {
+            fn check(&self, _profile: &CoreProfile) -> Result<LaunchPlan, LaunchBlocked> {
+                Err(self.0.clone())
+            }
+            fn prepare(
+                &self,
+                plan: LaunchPlan,
+                id: AgentId,
+                epoch: u32,
+            ) -> Result<LaunchKit, PrepareError> {
+                NoopLaunchKits.prepare(plan, id, epoch)
+            }
+            fn release(&self, _id: AgentId, _epoch: u32) {}
+        }
+
+        /// Passes every launch with the Noop plan plus these notices.
+        struct NoticingKits(Vec<Notice>);
+
+        impl LaunchKitSource for NoticingKits {
+            fn check(&self, profile: &CoreProfile) -> Result<LaunchPlan, LaunchBlocked> {
+                let mut plan = NoopLaunchKits.check(profile)?;
+                plan.notices = self.0.clone();
+                Ok(plan)
+            }
+            fn prepare(
+                &self,
+                plan: LaunchPlan,
+                id: AgentId,
+                epoch: u32,
+            ) -> Result<LaunchKit, PrepareError> {
+                NoopLaunchKits.prepare(plan, id, epoch)
+            }
+            fn release(&self, _id: AgentId, _epoch: u32) {}
+        }
+
+        fn blocked() -> LaunchBlocked {
+            LaunchBlocked {
+                reasons: vec![BlockReason::Missing {
+                    item: "rules/a.md".into(),
+                    via: vec!["team.yaml".into()],
+                    reason: Reason {
+                        code: "not-found".into(),
+                        args: serde_json::json!({ "path": "rules/a.md" }),
+                        line: Some(3),
+                    },
+                }],
+            }
+        }
+
+        async fn dispatch_events(core: &ConnectionCore, cmd: AgentCommand) -> Vec<AgentEvent> {
+            let (tx, _rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+            let mock = MockOutboundSink::new(tx);
+            core.dispatch(cmd, &ConnectionSession::new(1), &mock).await;
+            mock.events()
+        }
+
+        /// Every wire activation that the launch check blocks answers with the reasons as structured
+        /// `launch_blocked` — the `LaunchBlocked::to_args` object — and starts nothing.
+        #[tokio::test]
+        async fn a_blocked_ws_activation_answers_with_its_reasons_and_starts_nothing() {
+            let expected = serde_json::json!({
+                "reasons": [{
+                    "kind": "missing", "item": "rules/a.md", "via": ["team.yaml"],
+                    "code": "not-found", "args": { "path": "rules/a.md" }, "line": 3
+                }]
+            });
+            for verb in ["Spawn", "SpawnProfile", "SpawnByCwd"] {
+                let (core, _fanout) = test_core_with_kits(Arc::new(BlockingKits(blocked())));
+                // The policy is not under test — an open one lets `SpawnByCwd` reach the launch check.
+                let core = core.with_llm_policy(|_| None);
+                let stored = core
+                    .manager
+                    .try_create_agent(live_profile("blocked"))
+                    .expect("register");
+                let req = rid();
+                let cmd = match verb {
+                    "Spawn" => AgentCommand::Spawn {
+                        profile_id: stored.id,
+                        request_id: req,
+                    },
+                    "SpawnProfile" => AgentCommand::SpawnProfile {
+                        profile_id: stored.id,
+                        resume: false,
+                        request_id: req,
+                    },
+                    _ => AgentCommand::SpawnByCwd {
+                        cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+                        backend: Some(WireBackendKind::Claude),
+                        request_id: req,
+                    },
+                };
+                match dispatch_events(&core, cmd).await.as_slice() {
+                    [AgentEvent::Error {
+                        request_id,
+                        message,
+                        launch_blocked: Some(reasons),
+                    }] => {
+                        assert_eq!(*request_id, Some(req), "{verb}");
+                        assert_eq!(
+                            serde_json::Value::Object(reasons.clone()),
+                            expected,
+                            "{verb}"
+                        );
+                        assert!(!message.is_empty(), "{verb}: the text stays");
+                    }
+                    other => panic!("{verb}: one Error with the reasons expected: {other:?}"),
+                }
+                assert!(
+                    core.manager.list_agents().is_empty(),
+                    "{verb}: nothing started"
+                );
+                assert_eq!(
+                    core.manager.agent_snapshots().len(),
+                    1,
+                    "{verb}: nothing created"
+                );
+            }
+        }
+
+        /// A failure that is not a launch block carries no `launch_blocked` — the field is not "any failure".
+        #[tokio::test]
+        async fn a_ws_activation_failure_that_is_not_a_block_carries_no_reasons() {
+            for verb in ["Spawn", "SpawnProfile"] {
+                let (core, _rx) = test_core();
+                let stored = core
+                    .manager
+                    .try_create_agent(unlaunchable_profile("broken"))
+                    .expect("register");
+                let req = rid();
+                let cmd = if verb == "Spawn" {
+                    AgentCommand::Spawn {
+                        profile_id: stored.id,
+                        request_id: req,
+                    }
+                } else {
+                    AgentCommand::SpawnProfile {
+                        profile_id: stored.id,
+                        resume: false,
+                        request_id: req,
+                    }
+                };
+                match dispatch_events(&core, cmd).await.as_slice() {
+                    [AgentEvent::Error {
+                        request_id,
+                        launch_blocked,
+                        ..
+                    }] => {
+                        assert_eq!(*request_id, Some(req), "{verb}");
+                        assert_eq!(launch_blocked, &None, "{verb}");
+                    }
+                    other => panic!("{verb}: one Error expected: {other:?}"),
+                }
+            }
+        }
+
+        /// `SpawnProfile`'s success carries the launch notices as rows (absent when there are none) and leaves the
+        /// agent's notice fingerprint unrecorded — the webview shows no notices yet.
+        #[tokio::test]
+        async fn a_ws_spawn_profile_success_carries_the_launch_notices_and_records_nothing() {
+            let notices = vec![
+                Reason {
+                    code: "skipped-field".into(),
+                    args: serde_json::json!({ "field": "model" }),
+                    line: Some(4),
+                },
+                Reason {
+                    code: "plain".into(),
+                    args: serde_json::json!({}),
+                    line: None,
+                },
+            ];
+            let rows = serde_json::json!([
+                {
+                    "code": "skipped-field", "args": { "field": "model" }, "line": 4,
+                    "text": notice_text(&notices[0])
+                },
+                { "code": "plain", "args": {}, "text": notice_text(&notices[1]) }
+            ]);
+            for (kits, expected) in [(notices.clone(), Some(rows)), (Vec::new(), None)] {
+                let (core, _fanout) = test_core_with_kits(Arc::new(NoticingKits(kits)));
+                let stored = core
+                    .manager
+                    .try_create_agent(live_profile("noticed"))
+                    .expect("register");
+                let req = rid();
+                let events = dispatch_events(
+                    &core,
+                    AgentCommand::SpawnProfile {
+                        profile_id: stored.id,
+                        resume: false,
+                        request_id: req,
+                    },
+                )
+                .await;
+                let _ = core.manager.kill_agent(stored.id);
+                match events.as_slice() {
+                    [AgentEvent::Spawned {
+                        request_id,
+                        agent,
+                        notices,
+                    }] => {
+                        assert_eq!(*request_id, req);
+                        assert_eq!(agent.id, stored.id);
+                        assert_eq!(
+                            notices.clone().map(serde_json::Value::Array),
+                            expected,
+                            "the notice rows"
+                        );
+                    }
+                    other => panic!("one Spawned expected: {other:?}"),
+                }
+                assert_eq!(
+                    core.manager
+                        .agent_snapshot(stored.id)
+                        .expect("still registered")
+                        .notice_fingerprint,
+                    None,
+                    "the WS records no notice fingerprint"
+                );
+            }
+        }
+
+        /// `Spawn` answers `Ack`, which carries no notices — so a success with notices leaves the fingerprint
+        /// unrecorded.
+        #[tokio::test]
+        async fn a_ws_spawn_success_acks_and_records_no_notice_fingerprint() {
+            let notices = vec![Reason {
+                code: "plain".into(),
+                args: serde_json::json!({}),
+                line: None,
+            }];
+            let (core, _fanout) = test_core_with_kits(Arc::new(NoticingKits(notices)));
+            let stored = core
+                .manager
+                .try_create_agent(live_profile("noticed"))
+                .expect("register");
+            let req = rid();
+            let events = dispatch_events(
+                &core,
+                AgentCommand::Spawn {
+                    profile_id: stored.id,
+                    request_id: req,
+                },
+            )
+            .await;
+            let started = !core.manager.list_agents().is_empty();
+            let _ = core.manager.kill_agent(stored.id);
+            match events.as_slice() {
+                [AgentEvent::Ack { request_id }] => assert_eq!(*request_id, req),
+                other => panic!("one Ack expected: {other:?}"),
+            }
+            assert!(started, "the agent started");
+            assert_eq!(
+                core.manager
+                    .agent_snapshot(stored.id)
+                    .expect("still registered")
+                    .notice_fingerprint,
+                None,
+                "the WS records no notice fingerprint"
+            );
+        }
     }
 }

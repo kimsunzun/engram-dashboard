@@ -423,7 +423,8 @@ mod tests {
         assert_eq!(
             event_reply_request_id(&AgentEvent::Error {
                 request_id: Some(r),
-                message: "x".into()
+                message: "x".into(),
+                launch_blocked: None,
             }),
             Some(r),
             "Error{{Some}} 은 특정 명령 실패 — 매칭"
@@ -431,7 +432,8 @@ mod tests {
         assert_eq!(
             event_reply_request_id(&AgentEvent::Error {
                 request_id: None,
-                message: "x".into()
+                message: "x".into(),
+                launch_blocked: None,
             }),
             None,
             "Error{{None}} 은 명령 무관 — 매칭 안 함"
@@ -474,6 +476,7 @@ mod tests {
             let classified = classify_reply(Ok(AgentEvent::Error {
                 request_id: Some(r),
                 message: message.into(),
+                launch_blocked: None,
             }));
             match classified {
                 Err(failure @ CommandFailure::Daemon { .. }) => {

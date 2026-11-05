@@ -161,6 +161,7 @@ impl Client {
                 Some(Incoming::Event(AgentEvent::Error {
                     request_id: Some(rid),
                     message,
+                    ..
                 })) if rid == expect_id => {
                     panic!("Ack 기대했으나 Error(req={rid:?}): {message}");
                 }
@@ -178,6 +179,7 @@ impl Client {
                 Some(Incoming::Event(AgentEvent::Error {
                     request_id: Some(rid),
                     message,
+                    ..
                 })) if rid == expect_id => {
                     return message;
                 }
@@ -243,6 +245,7 @@ impl Client {
                 Some(Incoming::Event(AgentEvent::Error {
                     request_id: Some(rid),
                     message,
+                    ..
                 })) if rid == req => panic!("CRUD 실패 Error(req={rid:?}): {message}"),
                 Some(_) => continue,
                 None => break,
@@ -273,6 +276,7 @@ impl Client {
                 Some(Incoming::Event(AgentEvent::Error {
                     request_id: Some(rid),
                     message,
+                    ..
                 })) if rid == req => panic!("Created 기대했으나 Error(req={rid:?}): {message}"),
                 Some(_) => continue,
                 None => break,
@@ -285,7 +289,9 @@ impl Client {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         while std::time::Instant::now() < deadline {
             match self.next().await {
-                Some(Incoming::Event(AgentEvent::Spawned { request_id, agent })) => {
+                Some(Incoming::Event(AgentEvent::Spawned {
+                    request_id, agent, ..
+                })) => {
                     assert_eq!(request_id, req, "Spawned 의 request_id echo");
                     return agent;
                 }
@@ -295,6 +301,7 @@ impl Client {
                 Some(Incoming::Event(AgentEvent::Error {
                     request_id: Some(rid),
                     message,
+                    ..
                 })) if rid == req => panic!("Spawned 기대했으나 Error(req={rid:?}): {message}"),
                 Some(_) => continue,
                 None => break,
@@ -364,6 +371,7 @@ impl Client {
                 Some(Incoming::Event(AgentEvent::Error {
                     request_id: Some(rid),
                     message,
+                    ..
                 })) if rid == req => panic!("Spawn 실패 Error(req={rid:?}): {message}"),
                 Some(_) => continue,
                 None => break,
@@ -394,6 +402,7 @@ impl Client {
                 Some(Incoming::Event(AgentEvent::Error {
                     request_id: Some(rid),
                     message,
+                    ..
                 })) if rid == req => panic!("Kill 실패 Error(req={rid:?}): {message}"),
                 Some(_) => continue,
                 None => break,
@@ -2212,6 +2221,7 @@ async fn case45_ws_activation_does_not_block_the_next_command() {
             Some(Incoming::Event(AgentEvent::Error {
                 request_id: Some(rid),
                 message,
+                ..
             })) if rid == spawn_req => {
                 panic!("Spawn 이 실패했다 — 이 케이스가 재는 것이 아니다: {message}")
             }

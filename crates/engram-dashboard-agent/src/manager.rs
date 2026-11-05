@@ -1387,11 +1387,11 @@ impl AgentManager {
     /// ★그래서 **이 동사로 띄운 화신의 연결 실패는 주인이 없다**★ — 활성화 입구
     /// ([`AgentManager::activate_profile`]·[`AgentManager::restore_one`])는 Fresh 도 Resume 도
     /// [`LinkWatch`] 를 쥐는 갈래로 들어가므로 그 구멍에 닿지 않는다.
-    /// ★남는 소비자는 데몬의 **즉석 by-cwd 생성** 하나다 — ★한때 여기 「WS `Spawn`」으로 적혀 있었는데
-    ///   그건 거짓이다★: 그 명령은 `activate_profile` 로 들어간다(그 자리 주석이 「활성화 입구는 하나여야
-    ///   한다」로 그렇게 못박았다). 실제로 이 동사를 직접 부르는 운영 자리는 프로필을 등록하지 않고 즉석
-    ///   생성하는 그 갈래뿐이고, **오늘 거기 닿는 codex 는 출력 형식이 터미널이라 연결 축이 없다**
-    ///   (근거의 정본 = `backend/codex/transport.rs` 의 같은 구멍 주석).
+    /// ★Its production consumers today: none outside the smoke binaries★ — the daemon's ad-hoc by-cwd create now
+    ///   calls [`AgentManager::spawn_agent_reporting`] (same body, plus the launch notices). WS `Spawn` goes through
+    ///   `activate_profile` (its call site pins "one activation entrance"). Wherever this body is reached directly,
+    ///   **the codex that gets there today has a terminal output format and so no link axis** (the source of
+    ///   truth = the same hole comment in `backend/codex/transport.rs`).
     /// ★부르는 쪽 있는 입구다★ — 명부 등록 · 세션 id 비우기의 저장이 `Err` 면 띄우지 않고
     ///   [`PtyError::Store`] 다(부분 성공 = [`AgentManager::spawn_agent_watching_link`]).
     /// 실행 재료 점검이 막으면 [`PtyError::LaunchBlocked`] · 점검하는 사이 실행 입력이 두 번 다 바뀌거나 넘긴 사본의
@@ -1880,7 +1880,7 @@ impl AgentManager {
     ///   직접 부르면 그 워커가 통째로 묶이고, 막힌 활성화 N 건이 워커 N 개를 가져가 다른 연결의 명령까지
     ///   함께 멈춘다. 오늘 운영 호출자 넷이 전부 그 계약을 지킨다 — 명령 버스 둘은 `blocking_handler`
     ///   뒤(`crate::commands::make_table`), WS 둘은 `tokio::task::spawn_blocking` 뒤
-    ///   (`connection_core` 의 `Spawn`·`SpawnProfile`). ★한때 이 자리에 「그 연결의 응답만 지연되고
+    ///   (`connection_core` 의 `Spawn`·`SpawnProfile` — `SpawnProfile` 은 `activate_profile_reporting` 으로). ★한때 이 자리에 「그 연결의 응답만 지연되고
     ///   다른 세션에는 영향 없다」로 적혀 있었는데, 그것은 **호출자가 위 계약을 지킬 때만** 참이고
     ///   실제로 WS 둘이 안 지키고 있었다★ — 성질이 아니라 계약으로 적는다.
     ///   ★실패는 이 상한보다 빨리 돌아올 수 있다★ — 진단 스트림이 먼저 말하면 그 자리에서 끊는다.

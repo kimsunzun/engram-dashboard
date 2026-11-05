@@ -357,6 +357,7 @@ impl ConnectionHandler for AgentConnection {
                     let _ = sink.enqueue(Outbound::event(AgentEvent::Error {
                         request_id: None,
                         message: "already authenticated".into(),
+                        launch_blocked: None,
                     }));
                     ConnFlow::Continue
                 }
@@ -365,6 +366,7 @@ impl ConnectionHandler for AgentConnection {
                     let _ = sink.enqueue(Outbound::event(AgentEvent::Error {
                         request_id: None,
                         message: format!("invalid command: {e}"),
+                        launch_blocked: None,
                     }));
                     ConnFlow::Continue
                 }
@@ -385,6 +387,7 @@ impl ConnectionHandler for AgentConnection {
             let _ = sink.enqueue(Outbound::event(AgentEvent::Error {
                 request_id: None,
                 message: "unexpected binary frame".into(),
+                launch_blocked: None,
             }));
             let _ = frames.send(Frame::Close("protocol error".into())).await;
             ConnFlow::Close
@@ -432,6 +435,7 @@ impl ConnectionHandler for AgentConnection {
                 .as_ref()
                 .and_then(engram_dashboard_protocol::command_request_id),
             message: SATURATED_REFUSAL.to_string(),
+            launch_blocked: None,
         }));
         match refusal {
             Ok(()) => Saturated::Refused,
@@ -613,6 +617,7 @@ impl ConnectionHandlerFactory for AgentConnections {
         event_json(&AgentEvent::Error {
             request_id: None,
             message: message.to_string(),
+            launch_blocked: None,
         })
     }
 }
@@ -858,6 +863,7 @@ mod tests {
         sink.enqueue(Outbound::event(AgentEvent::Error {
             request_id: None,
             message: "boom".into(),
+            launch_blocked: None,
         }))
         .expect("event ok");
         sink.enqueue(Outbound::Binary(vec![1, 2, 3]))
@@ -1081,6 +1087,7 @@ mod tests {
             AgentEvent::Error {
                 request_id,
                 message,
+                ..
             } => {
                 assert_eq!(
                     request_id,
@@ -1642,6 +1649,7 @@ mod tests {
                 AgentEvent::Error {
                     request_id,
                     message,
+                    ..
                 } => {
                     assert_eq!(request_id, Some(r));
                     assert!(message.starts_with("NOT_FOUND: "), "{message}");
