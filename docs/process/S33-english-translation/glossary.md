@@ -51,5 +51,10 @@ Every translation batch uses these renderings. A batch that needs a new term add
 | 보강 (절) | addendum | |
 | 구독 (X 구독) | subscribes to X | "eventBus.ts(agentClient 구독)" = eventBus subscribes through agentClient; check the direction |
 | 자동 재시작 (supervision) | auto-restart | check who restarts what: "데몬 사망 시 UI 자동 재시작" = the UI restarts the daemon |
+| X 독립 (단위) | independent per X | not "X-independent" (that reads as "unrelated to X") |
+| 스택 흔적 0 | no stack-specific content | tech-stack neutrality, not stack traces |
+| A + B N곳 | A and B, N places in total | the count covers the whole list |
+| 자리만 | placeholder only | |
+| 적대 리뷰 / 탈출구 | adversarial review / escape hatch | |
 
 Kept in Korean: the ADR lint tokens (`- 상태:` + vocab, `- 관련:`, section headings), text in 「」, names of CLAUDE.md and `.claude/` sections.
