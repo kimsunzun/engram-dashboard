@@ -48,11 +48,11 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 
 | # | 제목 | 상태 |
 |---|---|---|
-| [0001](0001-kill-2동사.md) | kill = 2동사 (shutdown + join_pump) | 확정 |
-| [0002](0002-output-event-seam.md) | 출력 seam = OutputEvent (터미널 가정 금지) | 확정 |
-| [0003](0003-output-status-sink-격리.md) | OutputSink / StatusSink — 코어 Tauri 격리 | 확정 |
-| [0004](0004-agent-transport-backend-격리.md) | AgentTransport seam + backend 지식 격리 | 확정 |
-| [0005](0005-finalize-1회.md) | finalize 정확히 1회 (pump 단독) | 확정 |
+| [0001](0001-kill-2동사.md) | kill = 2 verbs (shutdown + join_pump) | 확정 |
+| [0002](0002-output-event-seam.md) | Output seam = OutputEvent (no terminal assumption) | 확정 |
+| [0003](0003-output-status-sink-격리.md) | OutputSink / StatusSink — isolating the core from Tauri | 확정 |
+| [0004](0004-agent-transport-backend-격리.md) | AgentTransport seam + isolating backend knowledge | 확정 |
+| [0005](0005-finalize-1회.md) | finalize exactly once (pump alone) | 확정 |
 | [0006](0006-락-순서.md) | 락 순서 규율 (sessions → 내부) | 확정 (부분 폐기 by ADR-0231: 입력 자물쇠 락 순서 줄과 그 안 팬아웃 예외 · replay → 대기 목록 표(잎) / ADR-0234: codex 방출 줄 order 를 쥔 채 하는 팬아웃 예외) |
 | [0007](0007-epoch-재구독.md) | epoch 맵교체 재구독 | 확정 (부분 폐기 by ADR-0046: 프론트 epoch 권위 조항: SubscribeAck 단독 → src-tauri decide_epoch 1차 필터 + 필터된 frame/마커 epoch 채택 — 그때는 [agentId, epoch] 재구독 원칙을 그대로 뒀으나 그 deps 조항은 뒤이어 ADR-0163 이 폐기했다 / ADR-0163: 맵 교체마다 epoch +1 증분과 재구독 deps 두 조항) |
 | [0008](0008-세션복원-sid-통제.md) | 세션 복원 — 우리가 sid 통제, 추적 파일은 best-effort | 확정 (부분 폐기 by ADR-0082: resume 조기종료 → fresh-fallback 조항 폐지: 실패는 종점으로 직행(대개 `Exited{code≠0}` — `Failed` 가 아니다), 자동 fresh 재spawn 없음 / ADR-0185: sid 발급 주체 / ADR-0226: 결정 첫 항 중 영속 시점만 발급은 spawn 그대로) |
