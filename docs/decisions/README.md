@@ -53,21 +53,21 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0003](0003-output-status-sink-격리.md) | OutputSink / StatusSink — isolating the core from Tauri | 확정 |
 | [0004](0004-agent-transport-backend-격리.md) | AgentTransport seam + isolating backend knowledge | 확정 |
 | [0005](0005-finalize-1회.md) | finalize exactly once (pump alone) | 확정 |
-| [0006](0006-락-순서.md) | 락 순서 규율 (sessions → 내부) | 확정 (부분 폐기 by ADR-0231: 입력 자물쇠 락 순서 줄과 그 안 팬아웃 예외 · replay → 대기 목록 표(잎) / ADR-0234: codex 방출 줄 order 를 쥔 채 하는 팬아웃 예외) |
-| [0007](0007-epoch-재구독.md) | epoch 맵교체 재구독 | 확정 (부분 폐기 by ADR-0046: 프론트 epoch 권위 조항: SubscribeAck 단독 → src-tauri decide_epoch 1차 필터 + 필터된 frame/마커 epoch 채택 — 그때는 [agentId, epoch] 재구독 원칙을 그대로 뒀으나 그 deps 조항은 뒤이어 ADR-0163 이 폐기했다 / ADR-0163: 맵 교체마다 epoch +1 증분과 재구독 deps 두 조항) |
-| [0008](0008-세션복원-sid-통제.md) | 세션 복원 — 우리가 sid 통제, 추적 파일은 best-effort | 확정 (부분 폐기 by ADR-0082: resume 조기종료 → fresh-fallback 조항 폐지: 실패는 종점으로 직행(대개 `Exited{code≠0}` — `Failed` 가 아니다), 자동 fresh 재spawn 없음 / ADR-0185: sid 발급 주체 / ADR-0226: 결정 첫 항 중 영속 시점만 발급은 spawn 그대로) |
-| [0009](0009-tauri-2x-핀.md) | tauri 최신 2.x 핀 (Channel 무손실 실측) | 확정 |
-| [0010](0010-cargo-workspace-분리.md) | Cargo workspace 3-crate 분리 | 확정 |
-| [0011](0011-agentclient-제어표면.md) | agentClient 제어 표면 facade (데몬 대비) | 확정 |
-| [0012](0012-테스트-격리-하네스-tdd.md) | 테스트 전략 — 모듈 격리 하네스 + TDD | 확정 |
-| [0013](0013-데몬-참조-3대장.md) | 데몬 참조 3대장 — tmux / Zellij / Mosh | 확정 |
-| [0014](0014-오케스트레이션-참조-후보.md) | 오케스트레이션 참조 후보 (설계 시 고려) | 제안 |
-| [0015](0015-데몬-수명-콘솔-뷰어.md) | 데몬 수명 = persist-until-kill, 콘솔 = detachable 뷰어 | 확정 |
-| [0016](0016-에이전트-수명-모델.md) | 에이전트 수명 모델 — sid 인스턴스, 저장=살림·삭제=끔, restart 기본 Always, 단순 가드 | 확정 (부분 폐기 by ADR-0019: restart=Always 런타임 해석) |
-| [0017](0017-세션-슬롯-구조-죽음정의.md) | 세션/슬롯 구조 — 슬롯=한 모드의 한 세션(끝나면 슬롯도 끝), "죽음"=백엔드별 Run 종료+이유 | 확정 (부분 폐기 by ADR-0245: 결정 5 interrupt(Ctrl-C) 부분 PTY 는 끊기를 지원하지 않는다) |
-| [0018](0018-깡통-예약-에이전트-프론트-머지.md) | 깡통(예약) 에이전트 = 저장 프로필의 트리 표현 + 더블클릭 활성화 (프론트 머지, 백엔드 무변경) | 확정 |
-| [0019](0019-세션-종료-분류-프로필-disposition.md) | 세션 종료 분류 — 의도는 "행동 지점"에서, 프로필 disposition으로 죽음/예약/복원 가름 | 확정 (부분 폐기 by ADR-0083: 유저 kill·정상 exit(code0) → 프로필 삭제 조항 폐지: 모든 종료는 프로필 시체 보존(KeepDisableAutoRestore), 자동 삭제 없음 — 삭제는 명시적 사용자 명령으로만 / ADR-0084: apply_disposition epoch-guard 추가 — stale reap 이 재활성화된 산 세션을 auto_restore=false 로 강등 못 하게(reaped msg.epoch 가 현재 세션 epoch 와 일치할 때만 적용). 재활성화(resume)는 맵 교체이므로 epoch bump(ADR-0007 재확인).) |
-| [0020](0020-클라이언트-경로-통합-단일-프로토콜.md) | 클라이언트/백엔드 경로 통합 — 단일 프로토콜 + transport-중립 dispatch core | 확정 (부분 폐기 by ADR-0037: 결정3: 프로토콜 의미론 위치 — JS ProtocolClient → Rust(DaemonClient/protocol_state)) |
+| [0006](0006-락-순서.md) | Lock ordering discipline (sessions → internals) | 확정 (부분 폐기 by ADR-0231: the input-lock lock-order line and the fan-out exception inside it · replay → pending-list table (leaf) / ADR-0234: the fan-out exception in the codex emit line that holds order) |
+| [0007](0007-epoch-재구독.md) | Resubscribe on epoch map replacement | 확정 (부분 폐기 by ADR-0046: frontend epoch authority clause: SubscribeAck alone → src-tauri decide_epoch as the first-stage filter + adopt the epoch of the filtered frame/marker — it left the [agentId, epoch] resubscribe principle as is at that time, but ADR-0163 later discarded that deps clause / ADR-0163: the two clauses: epoch +1 increment on every map replacement and the resubscribe deps) |
+| [0008](0008-세션복원-sid-통제.md) | Session restore — we control the sid, the tracking file is best-effort | 확정 (부분 폐기 by ADR-0082: resume early-exit → fresh-fallback clause removed: a failure goes straight to the end state (usually `Exited{code≠0}` — not `Failed`), no automatic fresh re-spawn / ADR-0185: who issues the sid / ADR-0226: of the first item of the decision, only the persist timing; issuing at spawn stays as is) |
+| [0009](0009-tauri-2x-핀.md) | Pin tauri to the latest 2.x (Channel losslessness measured) | 확정 |
+| [0010](0010-cargo-workspace-분리.md) | Split into a 3-crate Cargo workspace | 확정 |
+| [0011](0011-agentclient-제어표면.md) | agentClient control-surface facade (daemon preparation) | 확정 |
+| [0012](0012-테스트-격리-하네스-tdd.md) | Test strategy — module isolation harness + TDD | 확정 |
+| [0013](0013-데몬-참조-3대장.md) | The three daemon references — tmux / Zellij / Mosh | 확정 |
+| [0014](0014-오케스트레이션-참조-후보.md) | Orchestration reference candidates (to consider at design time) | 제안 |
+| [0015](0015-데몬-수명-콘솔-뷰어.md) | Daemon lifetime = persist-until-kill, console = detachable viewer | 확정 |
+| [0016](0016-에이전트-수명-모델.md) | Agent lifetime model — sid instances, saved = kept alive · deleted = turned off, restart defaults to Always, simple guard | 확정 (부분 폐기 by ADR-0019: the runtime interpretation of restart=Always) |
+| [0017](0017-세션-슬롯-구조-죽음정의.md) | Session/slot structure — slot = one session of one mode (when it ends, the slot ends), "death" = per-backend Run end + reason | 확정 (부분 폐기 by ADR-0245: decision 5, the interrupt(Ctrl-C) part: PTY does not support interruption) |
+| [0018](0018-깡통-예약-에이전트-프론트-머지.md) | Empty-shell (reserved) agent = the tree representation of a saved profile + double-click activation (frontend merge, no backend change) | 확정 |
+| [0019](0019-세션-종료-분류-프로필-disposition.md) | Session end classification — intent is decided at the "point of action", the profile disposition separates death/reserved/restore | 확정 (부분 폐기 by ADR-0083: the clause "user kill · normal exit (code0) → profile deletion" removed: every end preserves the profile corpse (KeepDisableAutoRestore), no automatic deletion — deletion only by an explicit user command / ADR-0084: apply_disposition epoch-guard added — so a stale reap cannot demote a re-activated live session to auto_restore=false (applied only when the reaped msg.epoch matches the current session epoch). Re-activation (resume) is a map replacement, so the epoch is bumped (ADR-0007 reconfirmed).) |
+| [0020](0020-클라이언트-경로-통합-단일-프로토콜.md) | Client/backend path unification — a single protocol + a transport-neutral dispatch core | 확정 (부분 폐기 by ADR-0037: decision 3: where the protocol semantics live — JS ProtocolClient → Rust (DaemonClient/protocol_state)) |
 | [0021](0021-데몬-수명-on-demand-무재시작.md) | 데몬 수명 — on-demand spawn + 자동재시작 없음 (tmux/wezterm 모델) | 확정 |
 | [0022](0022-통합-command-registry-palette-키바인딩.md) | 통합 command registry — palette + 키바인딩 + LLM + 메뉴/트레이 단일 출처 | 제안 (부분 폐기 by ADR-0155: 미해결 forks 3건 소진) |
 | [0023](0023-트레이-프로세스-토폴로지.md) | 트레이/프로세스 토폴로지 — 순수-Rust tray-host + detached 데몬 + UI(창 hide), 3프로세스 | 폐기 (Superseded by ADR-0026) |

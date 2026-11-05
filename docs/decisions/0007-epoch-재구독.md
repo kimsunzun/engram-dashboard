@@ -1,20 +1,20 @@
-# ADR-0007: epoch 맵교체 재구독
+# ADR-0007: Resubscribe on epoch map replacement
 
-- 상태: 확정 (S9 §18-d) · 부분 폐기 by ADR-0163 (맵 교체마다 epoch +1 증분과 재구독 deps 두 조항)
-- 관련: CLAUDE.md 핵심 불변식·프론트 통합 규칙 · `output_core.rs(epoch)` · `TerminalSlot.tsx` · Amended by ADR-0046 (프론트 epoch 권위 조항: SubscribeAck 단독 → src-tauri decide_epoch 1차 필터 + 필터된 frame/마커 epoch 채택 — 그때는 [agentId, epoch] 재구독 원칙을 그대로 뒀으나 그 deps 조항은 뒤이어 ADR-0163 이 폐기했다) · Amended by ADR-0163 (맵 교체마다 epoch +1 증분과 재구독 deps 두 조항)
+- 상태: 확정 (S9 §18-d) · 부분 폐기 by ADR-0163 (the two clauses: epoch +1 increment on every map replacement and the resubscribe deps)
+- 관련: CLAUDE.md 핵심 불변식·프론트 통합 규칙 · `output_core.rs(epoch)` · `TerminalSlot.tsx` · Amended by ADR-0046 (frontend epoch authority clause: SubscribeAck alone → src-tauri decide_epoch as the first-stage filter + adopt the epoch of the filtered frame/marker — it left the [agentId, epoch] resubscribe principle as is at that time, but ADR-0163 later discarded that deps clause) · Amended by ADR-0163 (the two clauses: epoch +1 increment on every map replacement and the resubscribe deps)
 
 ## 맥락
-restart/fresh fallback 시 **같은 AgentId로 세션 맵을 교체**한다. 프론트가 옛 구독을 유지하면 새 세션 출력을 못 받거나 옛 세션의 stale 알림을 받는다.
+On restart/fresh fallback, the session map is replaced **under the same AgentId**. If the frontend keeps the old subscription, it either never receives output from the new session or receives stale notifications from the old one.
 
 ## 결정
-같은 AgentId 맵 교체마다 **epoch +1**. 프론트는 구독 effect의 deps를 `[agentId, epoch]`로 두어, epoch가 바뀌면 reset → 재구독 → replay를 다시 탄다. status_changed에 epoch를 동봉해 프론트가 epoch 불일치 알림을 버린다.
+Every same-AgentId map replacement bumps the **epoch by +1**. The frontend sets the deps of the subscription effect to `[agentId, epoch]`, so when the epoch changes it goes through reset → resubscribe → replay again. status_changed carries the epoch, so the frontend drops notifications with a mismatched epoch.
 
 ## 거부한 대안
-- **id만으로 구독** — 재시작을 감지 못 해 옛 채널에 머무름. stale terminal 알림이 새 세션을 덮음.
+- **Subscribe by id only** — a restart goes undetected and the frontend stays on the old channel. A stale terminal notification overwrites the new session.
 
 ## 근거
-S9 fable 리뷰(Mn-1: status_changed epoch 동봉)에서 stale Killed가 갓 살아난 세션을 덮는 경합을 확인 → epoch로 분별.
+The S9 fable review (Mn-1: status_changed carries the epoch) confirmed a race in which a stale Killed overwrites a freshly revived session → the epoch tells them apart.
 
 ## 영향 / 불변식
-- TerminalSlot 구독 effect deps는 반드시 `[agentId, epoch]`.
-- 프론트 seq dedup과 함께 replay→live 순서 보존(→ ADR 없음, 프론트 통합 규칙).
+- The TerminalSlot subscription effect deps must be `[agentId, epoch]`.
+- Together with frontend seq dedup, the replay→live order is preserved (→ no ADR, frontend integration rule).

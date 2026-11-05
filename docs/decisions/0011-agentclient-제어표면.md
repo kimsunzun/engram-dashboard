@@ -1,20 +1,20 @@
-# ADR-0011: agentClient 제어 표면 facade (데몬 대비)
+# ADR-0011: agentClient control-surface facade (daemon preparation)
 
-- 상태: 확정 (프론트 통합, S12 대비)
+- 상태: 확정 (frontend integration, S12 preparation)
 - 관련: CLAUDE.md §5·프론트 파일 구조 · `api/{agentClient,embeddedClient,clientFactory}.ts`
 
 ## 맥락
-데몬화 시 프론트가 `invoke`/Channel을 직접 호출하면 전송 경로(in-process ↔ WebSocket)를 갈아끼울 수 없다. 또 §5(LLM-우선 제어)는 모든 동작이 LLM이 닿는 단일 제어 표면을 갖길 요구한다.
+When daemonizing, if the frontend calls `invoke`/Channel directly, the transport path (in-process ↔ WebSocket) cannot be swapped. Also, §5 (LLM-first control) requires every action to have a single control surface that the LLM can reach.
 
 ## 결정
-컴포넌트·스토어는 **`agentClient` 인터페이스만** 의존한다(ptyApi 직접 호출 금지). 현재 구현은 `embeddedClient`(in-process, invoke/Channel 캡슐화). `clientFactory`가 싱글톤을 만들고 `window.__ENGRAM_AGENT__`로 노출(§5 제어 표면). 데몬 단계의 `DaemonClient`(WS)는 **동일 인터페이스**로 추가.
+Components and stores depend **only on the `agentClient` interface** (no direct ptyApi calls). The current implementation is `embeddedClient` (in-process, encapsulating invoke/Channel). `clientFactory` creates the singleton and exposes it as `window.__ENGRAM_AGENT__` (the §5 control surface). The daemon-stage `DaemonClient` (WS) is added with the **same interface**.
 
 ## 거부한 대안
-- **ptyApi invoke 직접 호출 산재** — 데몬 전환 시 모든 호출처를 전면 수정. facade swap 불가.
+- **Scattered direct ptyApi invoke calls** — a daemon switch would force a full rewrite of every call site. The facade cannot be swapped.
 
 ## 근거
-facade 한 곳만 교체하면 in-process ↔ daemon 전환 흡수(데몬화=facade swap, 갈아엎기 X). window 노출로 사람 클릭과 LLM 호출이 같은 진입점.
+Replacing the facade in one place absorbs the in-process ↔ daemon switch (daemonization = facade swap, not a rewrite). Exposing it on window makes a human click and an LLM call share the same entry point.
 
 ## 영향 / 불변식
-- **컴포넌트·스토어에서 ptyApi 직접 호출 금지** — 반드시 agentClient 경유.
-- DaemonClient는 새 인터페이스를 만들지 말고 agentClient를 구현한다.
+- **No direct ptyApi calls from components or stores** — always go through agentClient.
+- DaemonClient must implement agentClient, not create a new interface.

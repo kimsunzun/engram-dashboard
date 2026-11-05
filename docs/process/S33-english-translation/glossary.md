@@ -1,0 +1,48 @@
+# S33 glossary — Korean → English
+
+Every translation batch uses these renderings. A batch that needs a new term adds a row here in the same commit.
+
+| Korean | English | Note |
+|---|---|---|
+| 동사 (2동사) | verb (2 verbs) | ADR-0001 metaphor for separate operations |
+| 격리 | isolation · isolating X from Y | |
+| 합류 (스레드) | join / joining | thread join |
+| 자원 폐쇄 | resource closing | |
+| 전이 | transition | terminal 전이 = terminal transition |
+| 발행 / 단독 발행 | emit / emitted by X alone | events and notifications |
+| 발행 주체 | emitter | |
+| 원자 게이트 | atomic gate | |
+| 정확히 1회 | exactly once | |
+| 과도기 | transitional | |
+| 자연 종료 | natural exit | |
+| 중복·경합 | duplicates and races | |
+| 확장 enum | extensible enum | |
+| 교체 가능 / 교체성 | swappable / swappability | |
+| 대원칙 | core principle | |
+| 결합 | coupling / coupled to | |
+| 주입 | inject | |
+| 명령 조립 / 인자 조립 | command assembly / argument assembly | |
+| 전송 경로 / 전송 방식 | transport path / transport method | |
+| 실측 | measured | |
+| 재편 | restructure | |
+| 판정 | decide / decision | 판정 금지 = must not decide |
+| 프론트 | frontend | |
+| 셸 | shell | the Tauri app process |
+| 데몬 | daemon | |
+| 우편 | mail | agent-to-agent messaging |
+| 슬롯 | slot | |
+| 게이트 | gate | |
+| 미리 깐다 | lay down early | |
+| 폐기 (in prose, not the status line) | discarded | the status word `폐기` stays Korean |
+| 깡통 (에이전트) | empty shell | reserved agent with no process |
+| 예약 / 대기 | reserved / waiting | |
+| 죽음 | death | |
+| 복원 / 부팅 복원 / 콜드 부팅 | restore / boot restore / cold boot | |
+| 되살리기 / 깨우기 | revive / wake-up | |
+| 폭주 (가드) | runaway (guard) | |
+| 강등 / 무손상 강등 | degrade / degrade without damage | not "damage is contained" |
+| 회귀 | regression | |
+| UI 실행 | launching the UI | the app start, not "a UI action" (S33 batch 2 review) |
+| X 이하 | X and everything below it | includes X itself |
+
+Kept in Korean: the ADR lint tokens (`- 상태:` + vocab, `- 관련:`, section headings), text in 「」, names of CLAUDE.md and `.claude/` sections.
