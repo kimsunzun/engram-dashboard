@@ -356,10 +356,11 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0307](0307-llm-명령-규칙-명령은-한-호출-조회는-영역별로-바로-출력.md) | LLM 명령 규칙 — 명령은 한 호출, 조회는 영역별로 바로 출력 | 확정 |
 | [0308](0308-데몬은-화면-내용을-모른다-셸이-에이전트-참조로-표시한-인자는-데몬이-중계-전에-id-로-바꾼다.md) | 데몬은 화면 내용을 모른다 — 셸이 에이전트 참조로 표시한 인자는 데몬이 중계 전에 id 로 바꾼다 | 확정 |
 | [0309](0309-우편-내부-키는-에이전트-id-가장자리-주소는-이름-그대로.md) | 우편 내부 키는 에이전트 id — 가장자리 주소는 이름 그대로 | 확정 |
-| [0310](0310-3단계-transport-붙이기-결정-d1d26.md) | 3단계 transport 붙이기 — 결정 D1~D26 | 확정 (부분 폐기 by ADR-0342: 결정 12 버전 불일치 즉시 팝업 / ADR-0346: 결정 12 토큰 불일치 재시도와 결정 20 재연결 횟수 주입) |
+| [0310](0310-3단계-transport-붙이기-결정-d1d26.md) | 3단계 transport 붙이기 — 결정 D1~D26 | 확정 (부분 폐기 by ADR-0342: 결정 12 버전 불일치 즉시 팝업 / ADR-0346: 결정 12 토큰 불일치 재시도와 결정 20 재연결 횟수 주입 / ADR-0347: 결정 11 인증 시한 1초) |
 | [0340](0340-full-regression-runs-locally-before-commit-ci-is-a-post-push-check.md) | Full regression runs locally before commit, CI is a post-push check | 확정 |
 | [0342](0342-daemon-version-mismatch-shows-on-the-existing-connection-failure-surface-no-new-popup.md) | Daemon version mismatch shows on the existing connection-failure surface, no new popup | 확정 (부분 폐기 by ADR-0343: 결정 1 표시에 재시작 버튼 추가) |
 | [0343](0343-version-mismatched-daemon-gets-a-user-pressed-restart-action-with-a-graceful-stop.md) | Version-mismatched daemon gets a user-pressed restart action with a graceful stop | 확정 (부분 폐기 by ADR-0344: 결정 1 재시작 행동과 결정 4 새 데몬 자동 시작) |
 | [0344](0344-version-mismatch-band-carries-one-confirmed-stop-action-no-automatic-restart.md) | Version-mismatch band carries one confirmed stop action, no automatic restart | 확정 |
 | [0345](0345-reconnect-action-sits-on-the-disconnected-band-not-a-popup-so-the-app-stays-operable-while-disconnected.md) | Reconnect action sits on the disconnected band, not a popup, so the app stays operable while disconnected | 확정 (부분 폐기 by ADR-0346: 결정 4 재시도 3회로 내림) |
 | [0346](0346-network-failures-retry-without-limit-on-a-capped-backoff-token-and-version-refusals-stop-at-the-first-refusal.md) | Network failures retry without limit on a capped backoff; token and version refusals stop at the first refusal | 확정 |
+| [0347](0347-the-daemon-waits-15-s-for-the-first-auth-frame-and-the-longer-pre-auth-window-is-accepted-as-a-known-local-limit-until-3-3-caps-land.md) | The daemon waits 15 s for the first auth frame, and the longer pre-auth window is accepted as a known local limit until 3-3 caps land | 확정 |
