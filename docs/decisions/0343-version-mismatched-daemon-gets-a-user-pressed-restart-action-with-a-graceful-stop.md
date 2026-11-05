@@ -1,7 +1,7 @@
 # ADR-0343: Version-mismatched daemon gets a user-pressed restart action with a graceful stop
 
-- 상태: 확정 (2026-11-05, 근거: 사용자 위임 2026-11-05 「리서치해서 결정해」 + 조사 `docs/research/daemon-version-mismatch-restart-2026-11-05.md` (medium, 단독 family — cross-family 리뷰 생략은 사용자 합의))
-- 관련: Amends ADR-0180 (거부한 대안 데몬 강제 종료 버튼) · Amends ADR-0178 (거부한 대안의 미결 재시작 버튼) · Amends ADR-0342 (결정 1 표시에 재시작 버튼 추가) · ADR-0158 결정 3 (no automatic kill — kept: the user presses it) · `crates/engram-dashboard-protocol/src/handshake.rs` (the "send your own compiled version" rule — exception below) · `crates/engram-dashboard-net/src/ws.rs` (token then version check) · `src-tauri/src/discovery/mod.rs` `daemon_stop` (identity-checked kill) · `src-tauri/src/daemon_client/stop.rs` (tray stop; `NoTarget` on mismatch) · TRD `docs/process/S21-crate-boundaries/trd-3-transport.md` §6-2 U5 · step-log S21
+- 상태: 확정 (2026-11-05, 근거: 사용자 위임 2026-11-05 「리서치해서 결정해」 + 조사 `docs/research/daemon-version-mismatch-restart-2026-11-05.md` (medium, 단독 family — cross-family 리뷰 생략은 사용자 합의)) · 부분 폐기 by ADR-0344 (결정 1 재시작 행동과 결정 4 새 데몬 자동 시작)
+- 관련: Amends ADR-0180 (거부한 대안 데몬 강제 종료 버튼) · Amends ADR-0178 (거부한 대안의 미결 재시작 버튼) · Amends ADR-0342 (결정 1 표시에 재시작 버튼 추가) · ADR-0158 결정 3 (no automatic kill — kept: the user presses it) · `crates/engram-dashboard-protocol/src/handshake.rs` (the "send your own compiled version" rule — exception below) · `crates/engram-dashboard-net/src/ws.rs` (token then version check) · `src-tauri/src/discovery/mod.rs` `daemon_stop` (identity-checked kill) · `src-tauri/src/daemon_client/stop.rs` (tray stop; `NoTarget` on mismatch) · TRD `docs/process/S21-crate-boundaries/trd-3-transport.md` §6-2 U5 · step-log S21 · Amended by ADR-0344 (결정 1 재시작 행동과 결정 4 새 데몬 자동 시작)
 
 ## 맥락
 

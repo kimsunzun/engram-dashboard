@@ -226,7 +226,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0177](0177-전송을-transport-crate-로-새로-세우고-밖에는-패킷-정의만-남긴다.md) | 전송을 transport crate 로 새로 세우고 밖에는 패킷 정의만 남긴다 | 확정 (부분 폐기 by ADR-0272: 결정 4의 짝짓기 번호 함수 정본 위치 / ADR-0310: 결정 3 스트림 살림과 받는 줄 및 결정 9 유실 신호와 근거의 큐 상한 문단) |
 | [0178](0178-버전-불일치는-데몬이-핸드셰이크에서-판정하고-끊는다.md) | 버전 불일치는 데몬이 핸드셰이크에서 판정하고 끊는다 | 확정 (부분 폐기 by ADR-0342: 결정 5 클라 팝업 / ADR-0343: 거부한 대안의 미결 재시작 버튼) |
 | [0179](0179-데몬은-클라이언트-여럿을-받고-클라는-데몬-여럿에-붙는다.md) | 데몬은 클라이언트 여럿을 받고 클라는 데몬 여럿에 붙는다 | 확정 |
-| [0180](0180-연결-사건은-띠로-알리고-사용자가-눌러야-풀리는-것만-팝업으로-덮는다.md) | 연결 사건은 띠로 알리고 사용자가 눌러야 풀리는 것만 팝업으로 덮는다 | 확정 (부분 폐기 by ADR-0276: 알림이 덮는 것을 팝업 자격으로만 가르는 불변식 중 상태 파일 안내 / ADR-0277: 알림이 덮는 것을 팝업 자격으로만 가르는 불변식 중 연결 띠 / ADR-0287: 알림이 덮는 것을 팝업 자격으로만 가르는 불변식 중 나머지 띠 알림 전부 / ADR-0310: 결정 4 재연결 횟수 기본값과 결정 5 거절 즉시 팝업 범위 / ADR-0342: 결정 2 버전 거절 팝업 자격과 결정 5 즉시 팝업과 결정 6 버전 불일치 팝업 모양 / ADR-0343: 거부한 대안 데몬 강제 종료 버튼) |
+| [0180](0180-연결-사건은-띠로-알리고-사용자가-눌러야-풀리는-것만-팝업으로-덮는다.md) | 연결 사건은 띠로 알리고 사용자가 눌러야 풀리는 것만 팝업으로 덮는다 | 확정 (부분 폐기 by ADR-0276: 알림이 덮는 것을 팝업 자격으로만 가르는 불변식 중 상태 파일 안내 / ADR-0277: 알림이 덮는 것을 팝업 자격으로만 가르는 불변식 중 연결 띠 / ADR-0287: 알림이 덮는 것을 팝업 자격으로만 가르는 불변식 중 나머지 띠 알림 전부 / ADR-0310: 결정 4 재연결 횟수 기본값과 결정 5 거절 즉시 팝업 범위 / ADR-0342: 결정 2 버전 거절 팝업 자격과 결정 5 즉시 팝업과 결정 6 버전 불일치 팝업 모양 / ADR-0343: 거부한 대안 데몬 강제 종료 버튼 / ADR-0344: 결정 1 띠는 알리기만 한다) |
 | [0181](0181-요청-시한은-명령-무관-공용-하나로-두고-만료는-그-요청만-실패시킨다.md) | 요청 시한은 명령 무관 공용 하나로 두고 만료는 그 요청만 실패시킨다 | 확정 (부분 폐기 by ADR-0310: 결정 1 공용 시한 기본값) |
 | [0182](0182-transport-는-연결-사건을-구조화해-올리고-화면은-만들지-않는다.md) | transport 는 연결 사건을 구조화해 올리고 화면은 만들지 않는다 | 확정 |
 | [0183](0183-겹친-요청-번호는-승계시키지-않고-은퇴시켜-양쪽-다-실패시킨다.md) | 겹친 요청 번호는 승계시키지 않고 은퇴시켜 양쪽 다 실패시킨다 | 확정 |
@@ -359,4 +359,5 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0310](0310-3단계-transport-붙이기-결정-d1d26.md) | 3단계 transport 붙이기 — 결정 D1~D26 | 확정 (부분 폐기 by ADR-0342: 결정 12 버전 불일치 즉시 팝업) |
 | [0340](0340-full-regression-runs-locally-before-commit-ci-is-a-post-push-check.md) | Full regression runs locally before commit, CI is a post-push check | 확정 |
 | [0342](0342-daemon-version-mismatch-shows-on-the-existing-connection-failure-surface-no-new-popup.md) | Daemon version mismatch shows on the existing connection-failure surface, no new popup | 확정 (부분 폐기 by ADR-0343: 결정 1 표시에 재시작 버튼 추가) |
-| [0343](0343-version-mismatched-daemon-gets-a-user-pressed-restart-action-with-a-graceful-stop.md) | Version-mismatched daemon gets a user-pressed restart action with a graceful stop | 확정 |
+| [0343](0343-version-mismatched-daemon-gets-a-user-pressed-restart-action-with-a-graceful-stop.md) | Version-mismatched daemon gets a user-pressed restart action with a graceful stop | 확정 (부분 폐기 by ADR-0344: 결정 1 재시작 행동과 결정 4 새 데몬 자동 시작) |
+| [0344](0344-version-mismatch-band-carries-one-confirmed-stop-action-no-automatic-restart.md) | Version-mismatch band carries one confirmed stop action, no automatic restart | 확정 |
