@@ -1,175 +1,175 @@
-# 명령 발견 구조 서베이 — `engram help` 와 `engram commands` 의 분담 (설계 조사)
+# Command discovery structure survey — dividing the work between `engram help` and `engram commands` (design survey)
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| **상태** | **적대 리뷰 1회 반영본**(초안이 BLOCK 판정을 받아 재작성). 메인 세션이 지적을 선별했고 **기각한 지적은 §7 에 사유와 함께 남긴다** |
-| **날짜** | 2026-09-20 |
-| ★**정정 2026-09-23**★ | **§1 의 현황 서술은 낡았다.** 그 뒤 `help` 본문이 **구획 5 개**(`root`·`mail`·`agent`·`window`·`theme`)로 재편됐고 루트가 이름을 대는 계열도 **넷**이 됐다. 고정 조립표는 사라져 구획 하나를 고르는 방식이 됐고, 파일명도 `prompts/engram-help.md` 다. ★§1 의 `파일:줄` 은 그 시점 값이라 지금 코드와 안 맞는다★ — 다만 조사의 **물음**(손으로 적은 목록과 런타임 명부를 어떻게 잇나)은 그대로 열려 있다 |
-| **방법** | 외부 선례 조사(공식 문서·이슈 원문 대조) + **이 저장소 코드 직접 읽기**(§1 의 모든 줄에 `파일:줄` 이 붙는다) |
-| **★새 측정은 하나도 없다★** | ★**에이전트를 실제로 몰아 「목록을 보고 옳은 명령을 골랐나」를 잰 적이 없다**★ — 이 문서의 어떤 수치도 우리 화면에 대한 측정이 아니다. 그 부재가 §5 의 가장 큰 한계이고 §7 에 기지(known) 공백으로 등재돼 있다 |
-| **확신도 범례** | ★**코드 실측**★ = 이 세션이 해당 `파일:줄` 을 열어 확인 · **원문 대조** = 그 URL 을 열어 문구를 맞춤 · **2차 출처** = 요약만 봄 · ★**미검**★ = 출처를 못 댐(초안이 「확인했다」고 적었으나 링크를 안 남긴 것 포함) |
-| **왜 이 조사를 했나** | 루트 도움말이 계열 이름 둘만 내는데 실제로 부를 수 있는 이름은 22 개다. 한 번 실제로 누락 사고가 났고, 「손으로 적은 목록과 런타임 명부를 어떻게 잇나」가 열려 있었다 |
+| **Status** | **Version with 1 adversarial review applied** (the draft got a BLOCK verdict and was rewritten). The main session selected the findings, and **the findings rejected are kept in §7 with the reasons** |
+| **Date** | 2026-09-20 |
+| ★**Correction 2026-09-23**★ | **The description of the current state in §1 is outdated.** Afterwards the `help` body was restructured into **5 sections** (`root` · `mail` · `agent` · `window` · `theme`), and the groups the root names also became **four**. The fixed assembly table is gone and it is now a scheme of picking one section, and the file name is `prompts/engram-help.md`. ★The `파일:줄` anchors in §1 are values from that time and no longer match the current code★ — but the survey's **question** (how to connect the hand-written list and the runtime registry) is still open |
+| **Method** | External precedent survey (official docs · issue originals cross-checked) + **reading this repository's code directly** (every line in §1 carries a `파일:줄`) |
+| **★No new measurement at all★** | ★**We have never actually driven an agent to measure 「목록을 보고 옳은 명령을 골랐나」**★ — none of the figures in this document is a measurement on our screen. That absence is the largest limit of §5 and is registered as a known gap in §7 |
+| **Confidence legend** | ★**Code-measured**★ = this session opened that `파일:줄` and confirmed · **Original cross-checked** = opened that URL and matched the wording · **Secondary source** = saw only a summary · ★**Unchecked**★ = no source could be given (including what the draft wrote as 「확인했다」 but left no link for) |
+| **Why this survey was done** | The root help gives only two group names, yet the names that can actually be called number 22. An omission accident really happened once, and 「손으로 적은 목록과 런타임 명부를 어떻게 잇나」 was left open |
 
-> ★**먼저 읽을 것 — 이 문서의 증거 등급은 두 층으로 갈린다**★
+> ★**Read first — the evidence grade of this document splits into two layers**★
 >
-> **§1(우리 현황)은 코드 실측이다** — 줄 번호로 재현된다. **§2~§3(외부 선례·수치)은 남의 측정이고, 그 어느 것도 우리 화면 크기에서 재지 않았다.** ★**§3 의 수치들은 배경이지 판정 근거가 아니다**★ — 초안은 그것들을 추천의 근거로 썼고 적대 리뷰가 그 자리에서 BLOCK 을 냈다. 같은 실수를 반복하지 말 것.
+> **§1 (our current state) is code-measured** — reproducible by line number. **§2~§3 (external precedent · figures) are other people's measurements, and none of them was measured at our screen size.** ★**The figures in §3 are background, not grounds for the verdict**★ — the draft used them as grounds for the recommendation and the adversarial review issued a BLOCK on the spot. Do not repeat the same mistake.
 
 ---
 
-## 0. 결론과 범위
+## 0. Conclusion and scope
 
-**질문:** 에이전트가 부를 수 있는 명령을 어떻게 발견하게 하나 — 손으로 쓴 `engram help` 와 런타임 카탈로그 `engram commands` 두 표면을 어떻게 분담시키나.
+**Question:** How do we let agents discover the commands they can call — how do we divide the work between the two surfaces, the hand-written `engram help` and the runtime catalog `engram commands`.
 
-**이번 라운드의 답 = 작게 간다.** 루트 화면의 **계열 목록**을 카탈로그에서 뽑고(선택지 A), 패리티 테스트를 **사후 탐지 장치로** 더한다(선택지 B). ★**두 표면을 한 모델에서 렌더하는 큰 개편(선택지 E)은 기각이 아니라 연기다**★ — 사유는 이번 라운드의 범위를 사용자가 작게 못 박았기 때문이지, E 가 나쁘다고 판정했기 때문이 아니다.
+**This round's answer = go small.** Pull the root screen's **group list** from the catalog (option A), and add a parity test **as an after-the-fact detection device** (option B). ★**The large overhaul that renders both surfaces from one model (option E) is deferred, not rejected**★ — the reason is that the user fixed this round's scope as small, not that we decided E is bad.
 
-★**이 추천이 서는 축은 비용과 범위지 §3 의 토큰 수치가 아니다**★ — 그 수치들은 A·B·D·E 를 **가르지 못한다**(§3).
+★**The axis this recommendation stands on is cost and scope, not the token figures of §3**★ — those figures **cannot separate** A · B · D · E (§3).
 
 ---
 
-## 1. 우리 현황 — 전부 코드 실측
+## 1. Our current state — all code-measured
 
-**두 표면이 병존하고, 둘은 재료도 전송도 언어도 다르다.**
+**The two surfaces coexist, and they differ in material, transport and language.**
 
 | | `engram help` | `engram commands` |
 |---|---|---|
-| 재료 | 손으로 쓴 `prompts/engram-cli-help.md` | 데몬 카탈로그 왕복 |
-| 전송 | 로컬 파일 읽기(데몬 불요) | 매 호출 `POST /control/commands` |
-| 언어 | 영어 | 요약이 한국어 |
-| 카탈로그를 읽나 | ★**안 읽는다**★ | 그것이 전부다 |
+| Material | The hand-written `prompts/engram-cli-help.md` | A daemon catalog round trip |
+| Transport | A local file read (no daemon needed) | `POST /control/commands` on every call |
+| Language | English | The summaries are in Korean |
+| Does it read the catalog | ★**No**★ | That is all it does |
 
-- **`help` 본문은 구획 17 개로 쪼개져 있고 고정 조립표가 이어 붙인다** — 구획 id 선언 `crates/engram-dashboard-daemon/src/bin/engram.rs:323‥331`, 조립 `:489‥517`, 파일 경로 상수 `:299`, 내장 폴백 `:319`(`include_str!` 라 파일과 바이트가 같다). 실제 표시 줄 17 개 = `prompts/engram-cli-help.md`(전체 122 줄).
-- **루트가 이름을 대는 계열은 둘뿐**(`mail`·`agent`) — `root.group.mail`·`root.group.agent` 두 구획이 전부다. 데몬 자신의 코드가 이 성질을 문서화해 두고 있다: 「그 화면은 **정적**이라 계열 이름 둘만 내고 칸은 하나도 안 낸다」(`crates/engram-dashboard-daemon/src/control/catalog.rs:420‥422`).
-- **실제로 부를 수 있는 이름은 22 개다** — 데몬 자기 표 5(`crates/engram-dashboard-agent/src/commands.rs:30` 의 `declare_commands!` = `agent.list`·`spawn`·`new`·`rename`·`move`) + 셸이 등록하는 17(`src-tauri/src/layout/commands.rs:68` = `tab.*` 5 · `window.*` 3 · `slot.*` 6 · `layout.setSlotContent` · `agent.spawnInto` · `ui.refresh`). ★초안의 「약 24 개」는 이 세션이 센 값과 다르다 — **22 가 실측이다.**★
-- **자동 목록의 재료는 이미 다 있다** — `CommandSpec` 에 `name`·`effect`·`since`·`summary`(한 줄)·`args_schema`·`ok_schema`·`errors`·`args_type`·`ok_type`(`crates/engram-dashboard-command/src/spec.rs:29‥47`). 선언된 모든 명령이 doc 주석 한 줄을 갖는다.
-- **`engram commands` 는 이미 두 층이다** — 목록은 「이름 + 한 줄」(`bin/engram.rs:2470`), `engram commands <이름>` 은 인자·반환·에러코드(`:2839`). 동사 자체는 `:156`, 라우트 상수는 `:165`. 렌더러 단위 테스트가 다수 붙어 있다(`:5735` 이하).
-- ★**도달성 칸이 이미 있다**★ — 발견 응답은 `{name, help, callable}` 이고(`control/catalog.rs:103‥129`) CLI 는 `callable=false` 를 별도 구역으로 갈라 찍는다(`bin/engram.rs:232`·`:2486`). 「지금 부를 수 있나」는 **이미 계약이다**(`catalog.rs:84‥92`).
-- ★**그런데 `owner` 는 wire 에 안 실린다**★ — `RosterEntry` 에는 있지만(`crates/engram-dashboard-command/src/roster.rs:14`) 목록 조립이 `name`·`help`·`callable` 세 칸만 만든다(`catalog.rs:119‥124`). 초안의 「`owner` 필드가 이미 있다」는 **명부 안쪽에서만 참이다.**
-- **제약 넷**
-  1. **우편은 카탈로그에 없다** — 별도 라우트(`/control/send`·`/control/messages` · `bin/engram.rs:975‥977`). 카탈로그만으로 목록을 만들면 우편이 사라진다.
-  2. `summary` 가 전부 한국어인데(`src-tauri/src/layout/commands.rs:108`·`:175` 등) 도움말 파일은 영어다(`prompts/engram-cli-help.md:21`).
-  3. 인자 **설명 문장**은 스키마에 없다 — 타입·필수 여부만.
-  4. `since` 는 선언 crate 별 세대 스탬프라 절대 릴리스 순서가 아니고 정렬·필터 재료가 못 된다.
-- **예산 문제는 없다** — 화면 하나 최대 25 줄, 루트 8 줄, 명령 22 개.
-- **MCP 툴은 둘뿐이다** — `eg_send`·`eg_messages`(`control/mcp_server.rs:330`·`:335`). ★**발견(`/control/commands`)에는 MCP 툴이 없다**★ — 기계 경로는 HTTP POST 와 CLI 동사뿐이다.
-
----
-
-## 2. 외부 선례
-
-### 2-1. 루트 화면 정책
-
-- **git = 추린 루트 + 전체 목록 탈출구.** 옵션 없는 `git help` 는 "a list of the most commonly used Git commands", `--all` 이 "all available commands". (원문 대조 — https://git-scm.com/docs/git-help) 단 **출력의 카테고리 분류는 그 문서가 설명하지 않는다**(출력엔 있으나 미문서화).
-- **gh** = 이름 붙은 구역으로 나누되 내장은 전부 루트에 보이고, 확장은 루트에서 빼 `gh extension list` 로 민다. (2차 출처 — https://cli.github.com/manual/gh)
-- **kubectl** = 작업 범주별 묶음 + 내장 대부분 포함, 플러그인은 `kubectl plugin list`. (2차 출처)
-- **cargo** = 내장은 범주별+설명, 외부 `cargo-*` 는 "installed commands" 로 **설명 없이** 나열 — 열린 이슈. (https://github.com/rust-lang/cargo/issues/10662)
-- **줄 수 상한 관례는 없다** — clig.dev 가 규정하는 것은 길이가 아니라 **깊이와 기본 간결함**이다. (원문 대조 — https://clig.dev/)
-
-### 2-2. 요약 문구의 출처
-
-- **Cobra**: `Short` 가 목록에, `Long` 이 `help <cmd>` 에 렌더된다 — ★**둘 다 코드의 구조체 필드이고, 그 동작은 Cobra 패키지 문서가 명시한다**★. (원문 대조 — https://pkg.go.dev/github.com/spf13/cobra#Command) ★초안의 「별도 문서 출처가 없다」는 틀렸다 — 렌더 주장만 참이고 부재 주장은 거짓이었다.★
-- **clap**: doc 주석이 `about` 이 된다(명시 속성이 이김). (원문 대조 — https://docs.rs/clap/latest/clap/_derive/index.html)
-- **click**: docstring 첫 문장이 short help 이고, docstring 이 없어도 강제되지 않아 **설명 없는 명령이 조용히 생긴다**. (2차 출처)
-- → **우리 `declare_commands!` 의 doc 주석 한 줄 = Cobra `Short` / clap doc 주석과 같은 물건.** 이미 주류 방식이다.
-
-### 2-3. 동적·플러그인 명령을 목록에 어떻게 넣나
-
-- **docker** — "Plugins are listed in the existing 'Commands' category and not separated out into 'plugins'". ★**이 인용은 2018 년의 *제안된 설계* 이슈에서 왔고 현행 제품 문서가 아니다**★. 현행 소스가 플러그인 스텁과 vendor 표기를 붙이는 것은 맞지만, **그 제시 방식이 안정된 제품 계약이라는 근거는 이 인용이 대지 못한다.** (https://github.com/docker/cli/issues/1534)
-- gh·kubectl = 루트에서 빼고 별도 list 명령. cargo = 넣되 설명 없이.
-- → 우리 셸 등록 17 개에 그대로 적용 가능하다. 단 **`owner` 를 화면에 쓰려면 wire 에 먼저 실어야 한다**(§1).
-
-### 2-4. 에이전트가 읽는 표면
-
-- **두 층이 수렴 형태다** — 짧은 목록 → 필요할 때 상세. 3 층 이상을 이름 붙여 쓰는 선례는 못 찾았다(**부재 증거**이지 천장 증명이 아니다).
-- **ACP 슬래시 명령** = 손으로 쓰고 에이전트가 밀어 준다. 평면 1 층이고, 가용성이 바뀌면 **목록 전체를 다시 민다**. (2차 출처 — https://agentclientprotocol.com/)
-- **herdr** = `api schema`(짧은 요약) ↔ `--json`(전체 스키마) 두 층. 기능이 꺼져도 **목록에서 숨기지 않고** 호출 시 거절한다. (2차 출처 — https://github.com/herdrdev/herdr) ★우리 `callable` 칸이 같은 모양이다★(§1).
-- **OpenAI 지연 로딩** = 고를 때 읽는 짧은 설명 / 쓸 때 읽는 완전한 설명으로 텍스트 예산을 둘로 나눈다. ★**미검 — 초안이 출처 URL 을 남기지 않았다.**★
-
-### 2-5. 어긋남(drift)을 막는 기법
-
-★**렌더 시점 생성은 어긋남의 *한 종류*를 없앤다 — 손으로 베낀 사본이 갈라지는 것.**★ ★**그리고 다른 종류를 들여온다**★: 생성기 자체의 버그 · 낡은 런타임 상태 · 주인이 없는 엔트리 누락 · **등록이 끝나기 전에 렌더** · 카탈로그 읽기 실패. ★초안의 「생성만이 구조적으로 drift 를 없앤다」는 과장이었다 — 그 문장을 인용해 A 를 정당화하지 말 것.★
-
-- **사고가 일어날 수 있다는 것은 확인됐다 — 얼마나 흔한지는 모른다.** 표본 둘: 손으로 유지하던 usage 문자열이 실제 플래그 13 개를 빠뜨림(kazi#1792) · 「전체 명령 목록」이라 자칭한 문서가 219 개 중 23 개 누락(Soup#822). ★**둘 다 URL 미기록**★ — 초안 수집자가 직접 열었다고 적었으나 링크를 안 남겼다. **분모도 표본 설계도 없으므로 「흔하다」로 읽지 말 것.**
-- 각 기법의 **못 잡는 것**:
-  - 빌드 생성 + `git diff --exit-code`: **생성기 자체가 틀린 것**을 못 잡는다 — 버그가 있으면 게이트는 영원히 초록.
-  - 골든/스냅샷: **이미 있던 누락**이 첫 스냅샷에 박제된다.
-  - 패리티 테스트: 이 실패 양식을 정면으로 겨냥하지만 **스스로 공허해질 수 있다** — 정규식이 문구 변경 후 0 건을 매치했는데 빈 목록에 대한 `all()` 이 참이라 **아무것도 검사하지 않으면서 초록**이었던 사례. (https://github.com/KCNyu/clawock/issues/1607 · 파이썬 `all()` 의 성질 = https://docs.python.org/3/library/functions.html#all)
-- **생성/수기 분할**(구조 목록은 생성, 서사는 수기): clig.dev 와 몇몇 프레임워크가 그 모양을 권한다. ★**「통설」이라 부를 근거는 없고, LLM 을 향한 명령 발견에 대해 이 분할을 직접 규정한 출처는 찾지 못했다.**★
+- **The `help` body is split into 17 sections and a fixed assembly table joins them** — the section id declarations `crates/engram-dashboard-daemon/src/bin/engram.rs:323‥331`, the assembly `:489‥517`, the file path constant `:299`, the built-in fallback `:319` (it is `include_str!`, so it is byte-identical to the file). The 17 lines actually displayed = `prompts/engram-cli-help.md` (122 lines in total).
+- **The groups the root names are only two** (`mail` · `agent`) — the two sections `root.group.mail` and `root.group.agent` are all of it. The daemon's own code documents this property: 「그 화면은 **정적**이라 계열 이름 둘만 내고 칸은 하나도 안 낸다」 (`crates/engram-dashboard-daemon/src/control/catalog.rs:420‥422`).
+- **The names that can actually be called number 22** — the daemon's own table 5 (`declare_commands!` at `crates/engram-dashboard-agent/src/commands.rs:30` = `agent.list` · `spawn` · `new` · `rename` · `move`) + the 17 the shell registers (`src-tauri/src/layout/commands.rs:68` = `tab.*` 5 · `window.*` 3 · `slot.*` 6 · `layout.setSlotContent` · `agent.spawnInto` · `ui.refresh`). ★The draft's 「약 24 개」 differs from the value this session counted — **22 is the measured value.**★
+- **All the material for an automatic list already exists** — `CommandSpec` has `name` · `effect` · `since` · `summary` (one line) · `args_schema` · `ok_schema` · `errors` · `args_type` · `ok_type` (`crates/engram-dashboard-command/src/spec.rs:29‥47`). Every declared command carries one doc-comment line.
+- **`engram commands` is already two layers** — the list is 「이름 + 한 줄」 (`bin/engram.rs:2470`), and `engram commands <이름>` gives args · return · error codes (`:2839`). The verb itself is at `:156`, the route constant at `:165`. Many renderer unit tests are attached (`:5735` and below).
+- ★**A reachability field already exists**★ — the discovery response is `{name, help, callable}` (`control/catalog.rs:103‥129`), and the CLI splits `callable=false` into a separate area when printing (`bin/engram.rs:232` · `:2486`). 「지금 부를 수 있나」 is **already a contract** (`catalog.rs:84‥92`).
+- ★**But `owner` is not carried on the wire**★ — `RosterEntry` has it (`crates/engram-dashboard-command/src/roster.rs:14`), but the list assembly builds only the three fields `name` · `help` · `callable` (`catalog.rs:119‥124`). The draft's 「`owner` 필드가 이미 있다」 is **true only inside the registry.**
+- **Four constraints**
+  1. **Mail is not in the catalog** — it has separate routes (`/control/send` · `/control/messages` · `bin/engram.rs:975‥977`). If the list is built from the catalog alone, mail disappears.
+  2. The `summary` is entirely Korean (`src-tauri/src/layout/commands.rs:108` · `:175` etc.) while the help file is English (`prompts/engram-cli-help.md:21`).
+  3. The **description sentences** of args are not in the schema — only the type and whether required.
+  4. `since` is a generation stamp per declaring crate, so it is not an absolute release order and cannot serve as material for sorting or filtering.
+- **There is no budget problem** — at most 25 lines per screen, 8 lines for the root, 22 commands.
+- **There are only two MCP tools** — `eg_send` · `eg_messages` (`control/mcp_server.rs:330` · `:335`). ★**There are no MCP tools in discovery (`/control/commands`)**★ — the machine path is only HTTP POST and the CLI verbs.
 
 ---
 
-## 3. ★배경 수치 — 판정에 쓰지 않는다★
+## 2. External precedent
 
-아래 수치는 **정확히 인용됐고 출처가 맞다.** 그러나 ★**우리 선택지를 가르지 못한다**★ — 전부 **스키마 전문을 실은 도구 수십~수천 개**를 잰 것이고, 우리 표면은 **명령 22 개 · 한 줄 요약 · 화면 최대 25 줄**이다. §1 이 「예산 문제는 없다」고 이미 실측했으므로, 이 수치들이 A·B·D·E 중 어느 쪽도 지지하지 않는다.
+### 2-1. Root screen policy
 
-- Anthropic Tool Search: Opus 4 49% → 74%, Opus 4.5 79.5% → 88.1%. 컨텍스트 약 77K → 약 8.7K. 사내 도구 정의가 134K 토큰까지 간 사례. (원문 대조 — https://www.anthropic.com/engineering/advanced-tool-use)
-- code execution with MCP: 실 워크플로 도구 정의 150,000 → 2,000 토큰. (원문 대조 — https://www.anthropic.com/engineering/code-execution-with-mcp)
-- RAG-MCP: 전체 카탈로그 선택 정확도 13.62% → 43.13%. ★**실험 조건은 웹검색 과업 20 개 · qwen-max-0125 · distractor 사이의 관련 MCP 1 개 · 자동 심판이다**★ — 24 개짜리 CLI 목록에 대한 근거가 아니다. (https://arxiv.org/abs/2505.03275)
-- ★기각한 수치★: "Haiku 4.5 91%→87%" 류 모델별 곡선 — 지목된 출처에 **그런 수치가 없다**(검색 요약의 날조 귀속). "무릎이 40 개 근처" 류 = 벤더 내부 트레이스 주장, 측정치로 취급하지 않는다.
+- **git = a trimmed root + an escape hatch to the full list.** `git help` with no option gives "a list of the most commonly used Git commands", and `--all` gives "all available commands". (original cross-checked — https://git-scm.com/docs/git-help) But **that document does not explain the category grouping of the output** (it is in the output but undocumented).
+- **gh** = divides into named areas but shows all built-ins at the root, and takes extensions out of the root and points them to `gh extension list`. (secondary source — https://cli.github.com/manual/gh)
+- **kubectl** = groups by task category + includes most built-ins, with plugins under `kubectl plugin list`. (secondary source)
+- **cargo** = built-ins by category + description, external `cargo-*` listed as "installed commands" **without a description** — an open issue. (https://github.com/rust-lang/cargo/issues/10662)
+- **There is no convention for a line-count cap** — what clig.dev prescribes is not length but **depth and concise-by-default**. (original cross-checked — https://clig.dev/)
+
+### 2-2. Where the summary wording comes from
+
+- **Cobra**: `Short` is rendered in the list and `Long` in `help <cmd>` — ★**both are struct fields in code, and that behavior is stated explicitly by the Cobra package docs**★. (original cross-checked — https://pkg.go.dev/github.com/spf13/cobra#Command) ★The draft's 「별도 문서 출처가 없다」 was wrong — only the rendering claim was true and the absence claim was false.★
+- **clap**: a doc comment becomes `about` (an explicit attribute wins). (original cross-checked — https://docs.rs/clap/latest/clap/_derive/index.html)
+- **click**: the first sentence of the docstring is the short help, and when there is no docstring nothing is enforced, so **a command without a description is silently created**. (secondary source)
+- → **Our `declare_commands!` doc-comment line = the same thing as Cobra `Short` / a clap doc comment.** It is already the mainstream method.
+
+### 2-3. How dynamic · plugin commands are put in the list
+
+- **docker** — "Plugins are listed in the existing 'Commands' category and not separated out into 'plugins'". ★**This quote comes from a 2018 *proposed design* issue and is not current product documentation**★. It is true that the current source attaches plugin stubs and vendor marks, but **this quote cannot supply grounds that this way of presenting is a stable product contract.** (https://github.com/docker/cli/issues/1534)
+- gh · kubectl = take out of the root and use a separate list command. cargo = include but without a description.
+- → Directly applicable to our 17 shell-registered commands. But **to use `owner` on the screen, it must first be carried on the wire** (§1).
+
+### 2-4. The surface agents read
+
+- **Two layers is the converged shape** — a short list → detail when needed. We found no precedent that uses 3 or more named layers (**evidence of absence**, not a proof of a ceiling).
+- **ACP slash commands** = written by hand and pushed by the agent. A flat single layer, and when availability changes it **pushes the whole list again**. (secondary source — https://agentclientprotocol.com/)
+- **herdr** = two layers, `api schema` (short summary) ↔ `--json` (full schema). Even when a feature is off it **does not hide it from the list** and rejects it at call time. (secondary source — https://github.com/herdrdev/herdr) ★Our `callable` field has the same shape★ (§1).
+- **OpenAI lazy loading** = splits the text budget in two: a short description read when choosing / a complete description read when using. ★**Unchecked — the draft left no source URL.**★
+
+### 2-5. Techniques to prevent drift
+
+★**Generating at render time removes one *kind* of drift — a hand-copied duplicate splitting apart.**★ ★**And it brings in other kinds**★: bugs in the generator itself · stale runtime state · omission of entries that have no owner · **rendering before registration finishes** · a catalog read failure. ★The draft's 「생성만이 구조적으로 drift 를 없앤다」 was an exaggeration — do not quote that sentence to justify A.★
+
+- **That an accident can happen has been confirmed — how common it is we do not know.** Two samples: a hand-maintained usage string omitted 13 real flags (kazi#1792) · a document calling itself a 「전체 명령 목록」 missed 23 of 219 (Soup#822). ★**Neither URL was recorded**★ — the draft's collector wrote that it opened them directly but left no link. **There is no denominator and no sample design, so do not read it as 「흔하다」.**
+- What each technique **cannot catch**:
+  - Build generation + `git diff --exit-code`: cannot catch **the generator itself being wrong** — if there is a bug the gate stays green forever.
+  - Golden/snapshot: **an omission that already existed** is enshrined in the first snapshot.
+  - Parity test: aims squarely at this failure pattern but **can itself become vacuous** — a case where a regex matched 0 items after a wording change and `all()` over an empty list is true, so it was **green while checking nothing**. (https://github.com/KCNyu/clawock/issues/1607 · the property of Python `all()` = https://docs.python.org/3/library/functions.html#all)
+- **A generated/hand-written split** (the structural list generated, the narrative by hand): clig.dev and a few frameworks recommend that shape. ★**There are no grounds to call it 「통설」, and we found no source that prescribes this split directly for command discovery aimed at an LLM.**★
 
 ---
 
-## 4. 선택지
+## 3. ★Background figures — not used for the verdict★
 
-| | 무엇 | 얻는 것 | 잃는 것/비용 |
+The figures below are **quoted accurately and the sources are right.** But ★**they cannot separate our options**★ — all of them measure **tens to thousands of tools carrying full schemas**, while our surface is **22 commands · one-line summaries · at most 25 lines per screen**. Since §1 already measured that 「예산 문제는 없다」, these figures support none of A · B · D · E.
+
+- Anthropic Tool Search: Opus 4 49% → 74%, Opus 4.5 79.5% → 88.1%. Context about 77K → about 8.7K. A case where in-house tool definitions reached 134K tokens. (original cross-checked — https://www.anthropic.com/engineering/advanced-tool-use)
+- code execution with MCP: tool definitions of a real workflow 150,000 → 2,000 tokens. (original cross-checked — https://www.anthropic.com/engineering/code-execution-with-mcp)
+- RAG-MCP: full-catalog selection accuracy 13.62% → 43.13%. ★**The experimental conditions are 20 web-search tasks · qwen-max-0125 · 1 relevant MCP among the distractors · an automatic judge**★ — not grounds for a 24-item CLI list. (https://arxiv.org/abs/2505.03275)
+- ★Rejected figures★: per-model curves like "Haiku 4.5 91%→87%" — **there is no such figure** in the cited source (a fabricated attribution in a search summary). Claims like "the knee is near 40 items" = vendor internal trace claims, not treated as measurements.
+
+---
+
+## 4. Options
+
+| | What | What it gains | What it loses / cost |
 |---|---|---|---|
-| **A. 루트를 카탈로그에서 생성** | 루트의 계열 목록을 카탈로그에서 뽑아 렌더. 계열 설명·우편은 수기 조각 유지 | 손으로 베낀 계열 목록이 갈라지는 경로가 사라진다 | 우편 특수 처리. 한/영 혼재(§1 제약 2). 렌더러 작업. ★**새 실패 모드가 들어온다**★ — §2-5 의 목록 |
-| **B. 추린 루트 유지 + 패리티 게이트** | 「카탈로그의 모든 계열이 루트에 이름이 있나」 테스트 추가 | 작다. git 과 같은 정통 모양 유지 | 사후 탐지. ★**독립 백스톱이 아니다**★ — §5 |
-| **C. 현행 유지** | 아무것도 안 함 | 0 | 같은 누락이 반복된다 — 이미 한 번 났다 |
-| **D. 전부 자동, 수기 도움말 폐지** | `help` 를 `commands` 로 흡수 | 표면 하나 | ★**초안이 적은 「우편이 사라진다·한글만 남는다·인자 설명이 없다」는 결정적 결격이 아니다**★ — 셋 다 **현재 스키마의 성질**이고 고칠 수 있다(우편을 카탈로그에 등록하거나 합집합으로 얹기 · summary 로케일 칸 · 인자 설명 칸 추가). 남는 실비용은 그 스키마 수선과 서사 손실이다 |
-| **E. 두 표면, 한 모델**(신규) | `engram commands` = **기계·에이전트용 정본**, `engram help` = **사람용 안내**. 둘 다 하나의 버전 있는 모델에서 렌더하고 수기 주석은 명시 칸으로 얹는다 | 두 표면이 갈릴 경로가 원리적으로 사라진다. 어느 쪽이 권위인지 라우팅 규칙이 선다 | 가장 큼 — 모델·버전·로케일·주석 칸을 새로 설계해야 한다. 이번 라운드 범위 밖(§9) |
+| **A. Generate the root from the catalog** | Pull the root's group list from the catalog and render it. Keep the hand-written fragments for group descriptions · mail | The path by which the hand-copied group list splits apart disappears | Special handling for mail. Mixed Korean/English (§1 constraint 2). Renderer work. ★**New failure modes come in**★ — the list in §2-5 |
+| **B. Keep the trimmed root + a parity gate** | Add a test 「카탈로그의 모든 계열이 루트에 이름이 있나」 | Small. Keeps the same orthodox shape as git | After-the-fact detection. ★**Not an independent backstop**★ — §5 |
+| **C. Keep as is** | Do nothing | 0 | The same omission repeats — it already happened once |
+| **D. Everything automatic, abolish the hand-written help** | Absorb `help` into `commands` | One surface | ★**What the draft wrote, 「우편이 사라진다·한글만 남는다·인자 설명이 없다」, is not a decisive disqualification**★ — all three are **properties of the current schema** and can be fixed (register mail in the catalog or lay it on as a union · a summary locale field · add an arg description field). The remaining real cost is that schema repair and the loss of narrative |
+| **E. Two surfaces, one model** (new) | `engram commands` = **the canon for machines · agents**, `engram help` = **the guide for humans**. Both render from one versioned model and the hand-written notes are laid on in explicit fields | The path by which the two surfaces could split disappears in principle. A routing rule for which one is authoritative stands | The largest — a model · version · locale · note fields must be newly designed. Outside this round's scope (§9) |
 
-★**초안에 E 가 없었던 것이 적대 리뷰의 최대 지적이었다**★ — 「가장 뻔한 후보가 표에 없다」. 여기 올려 둔다.
-
----
-
-## 5. 추천과 그 한계
-
-**이번 라운드 = A + B.** 루트의 **계열 목록**은 카탈로그에서 뽑고, **계열 한 줄 설명과 우편**은 수기 조각이 진다. **E 는 다음 라운드 후보다**(기각 아님).
-
-★**단 B 를 「생성기의 독립 백스톱」이라고 부르지 말 것 — 거짓이다**★. 패리티 테스트가 기대값을 **생성기가 쓰는 바로 그 카탈로그·`owner` 매핑에서 끌어오면 그것은 공통 원인(common-mode) 동어반복이다.** 잡는 것은 출력이 통째로 사라진 경우뿐이고, **둘이 공유하는 잘못된 매핑은 못 잡는다.** 진짜 백스톱이 되려면 ① 독립 오라클(손으로 고정한 기대 목록 등 — 그 자체가 §2-5 의 수기 drift 를 다시 들인다) 또는 ② 변이 테스트(생성기에 고의 결함을 넣어 게이트가 빨개지는지 확인)가 필요하다. **둘 중 무엇도 이번 라운드에 안 짓는다면, B 는 탐지 장치이지 백스톱이 아니다.**
-
-★**그리고 이 설계가 무엇을 개선하려는지 먼저 이름 붙인다**★ — 목표는 「drift 최소화」가 아니라 **「에이전트가 옳은 명령을 찾아 정확히 호출한다」**이다. ★**그 목표를 재는 평가셋이 없다**★ — 대표 프롬프트·헷갈리는 명령 쌍·부재 명령·다국어 질의에 대해 A·B·D·E 를 겨뤄 본 적이 한 번도 없다. **그래서 이 추천은 측정이 아니라 비용·범위 판단이다.**
+★**That E was missing from the draft was the adversarial review's biggest finding**★ — 「가장 뻔한 후보가 표에 없다」. It is put here.
 
 ---
 
-## 6. ★열린 위험 — 이번 설계가 안 다루는 것★
+## 5. The recommendation and its limits
 
-1. ★**등록자가 준 요약 문구가 LLM 이 읽는 화면에 그대로 렌더된다 — 신뢰 경계인데 방어가 0 이다.**★
-   셸이 등록하는 17 개의 `help` 블롭은 **불투명 문자열로 보존돼**(`crates/engram-dashboard-command/src/roster.rs:12` — 파싱·검증·분기 금지, ADR-0156) 목록에 실린다(`control/catalog.rs:121`). **길이 상한도, 이스케이프도, 출처 표시도, 신뢰 소유자 구분도 없다.** 오늘 소유자가 우리 셸 하나라 실해가 없을 뿐, **제3자 소유자가 붙는 순간 프롬프트 주입 표면이 된다.** (MCP 가 서버 메타데이터를 「신뢰할 수 없는 힌트」로 규정한다는 지적이 적대 리뷰에서 나왔다 — 그 출처는 ★미대조★: https://blog.modelcontextprotocol.io/posts/2026-03-16-tool-annotations/)
-2. ★**「존재한다」와 「지금 부를 수 있다」가 갈리지 않는다.**★
-   `callable` 칸은 있지만(§1) **헤드리스에서는 셸의 17 개가 목록에서 통째로 빠진다** — `merge` 가 명부에 없는 이름을 만들지 않기 때문이다(`control/catalog.rs:61‥82`). 그리고 데몬은 **그 둘을 구분할 재료를 갖고 있지 않다**: 끊긴 주인의 등록이 명부에서 사라지므로 「방금 끊긴 이름」과 「한 번도 없던 이름」이 **같은 답을 받는다**(`roster.rs:19‥21` — ADR-0150 이 감수한 손실). 즉 에이전트는 **부재와 일시 불가를 구별할 수 없고**, 「없으니 다른 길을 찾자」로 잘못 결론 낼 수 있다. ★**열린 질문: 그 구분을 줄 것인가, 준다면 어느 칸으로 주나.**★ (그 파일 자신이 답의 방향을 적어 둔다 — 자취를 되살리는 것이 아니라 **연결 목록을 응답에 싣는 쪽**.)
+**This round = A + B.** The root's **group list** is pulled from the catalog, and the **one-line group descriptions and mail** are carried by the hand-written fragments. **E is a candidate for the next round** (not rejected).
 
----
+★**But do not call B 「생성기의 독립 백스톱」 — it is false**★. If the parity test **draws its expected values from the very same catalog · `owner` mapping that the generator uses, it is a common-mode tautology.** What it catches is only the case where the output vanished entirely, and **it cannot catch a wrong mapping that the two share.** To be a real backstop it needs ① an independent oracle (a hand-fixed expected list, etc. — which itself brings back the hand-written drift of §2-5) or ② a mutation test (inject a deliberate fault into the generator and check that the gate turns red). **If neither is built this round, B is a detection device, not a backstop.**
 
-## 7. ★검토했으나 이번 라운드 밖 — 다시 발견하지 말 것★
-
-적대 리뷰가 올린 지적 중 **실재하고 값어치 있으나** 이번 라운드에 안 다루기로 한 것. **다음 세션이 처음부터 다시 찾지 않게 남긴다.**
-
-- **기계 표면 재설계 3종** — ① 안정된 JSON 계약 · 스키마 버전 · 로케일 · 결정적 정렬 · 구조화 오류 ② 스냅샷 버전·변경 통지·캐시 무효화(ACP 가 가용성 변화 때 전량 스냅샷을 다시 미는 것이 선례) ③ **질의·능력 필터** — `az find` 는 과업 언어로 검색하고 `kubectl api-resources` 는 group·category·scope·verb 로 거르며 JSON/YAML/name 출력을 낸다(https://learn.microsoft.com/en-us/cli/azure/reference-index#az-find · https://kubernetes.io/docs/reference/kubectl/generated/kubectl_api-resources/). ★**사유 = 이것들은 기계 표면의 재설계이고 선택지 E 와 한 덩어리다. 사용자가 이번 라운드를 작게 못 박았다.**★
-- **에이전트 평가셋 부재** — 어느 선택지도 대표 프롬프트로 겨뤄 본 적이 없다. ★**사유 = 평가셋 구축은 그 자체로 별개 프로젝트다.**★ 기지 공백으로 등재한다(§5 가 같은 것을 가리킨다).
+★**And first name what this design is trying to improve**★ — the goal is not 「drift 최소화」 but **「에이전트가 옳은 명령을 찾아 정확히 호출한다」**. ★**There is no evaluation set that measures that goal**★ — we have never once pitted A · B · D · E against each other on representative prompts · confusable command pairs · absent commands · multilingual queries. **So this recommendation is a cost and scope judgment, not a measurement.**
 
 ---
 
-## 8. 사용자 결정이 필요한 것
+## 6. ★Open risks — what this design does not address★
 
-1. ★**요약 언어**★ — 카탈로그 summary 는 한국어, 도움말 파일은 영어. 자동 생성하면 한 화면에 섞인다. (a) summary 를 영어로 (b) 도움말을 한국어로 (c) 섞인 채 둔다. ★초안은 이 혼재를 「막는 비용」으로 적었으나 그것은 과했다 — **모델이 혼재를 못 읽는지 재 본 적이 없고**, 로케일 칸을 두는 길도 있다. 이것은 **메타데이터 정책 결정**이지 자동 렌더를 막는 논거가 아니다.★
-2. **우편을 루트에 어떻게 얹나** — 수기 조각 유지(현행) vs 카탈로그에 우편을 넣는 리팩터.
-3. **셸 등록 17 개 표시** — docker 식 「출처」 표시를 넣나(먼저 `owner` 를 wire 에 실어야 한다), gh/kubectl 식으로 루트에서 빼고 별도 목록으로 미나.
-
----
-
-## 9. ★이번 세션에서 결정된 것 — 다시 열지 말 것★
-
-1. ★**MCP 툴 이름에 짧은 접두 `eg_` 를 붙인다**★ — `send_message` → `eg_send` · `messages` → `eg_messages`(착지 위치 = `crates/engram-dashboard-daemon/src/control/mcp_server.rs:330`·`:335`). **사유 = codex 에 `send_message`·`spawn_agent`·`list_agents` 라는 이름의 네이티브 툴이 실재한다**(codex 에게 자기 툴 목록을 직접 물어 확인). 우리 툴이 **같은 목록에 같은 이름으로** 앉는다. claude 에는 그런 네이티브 툴이 없어서 지금까지 안 물렸을 뿐이다.
-2. ★**CLI·카탈로그 이름에는 접두를 붙이지 않는다**★ — `engram` 실행 파일 자체가 이미 접두이고, 카탈로그 이름은 **프론트 레지스트리·골든 테스트·문서가 공유하는 계약**이다.
-3. ★**두 표면을 하나로 합치는 큰 개편(선택지 E)은 연기다 — 기각이 아니다.**★ 다시 열 때의 출발점 = §4 의 E 행과 §7 의 재설계 3종.
+1. ★**The summary wording given by the registrant is rendered as is on the screen the LLM reads — a trust boundary with zero defense.**★
+   The `help` blobs of the 17 the shell registers are **preserved as opaque strings** (`crates/engram-dashboard-command/src/roster.rs:12` — no parsing · validation · branching, ADR-0156) and carried into the list (`control/catalog.rs:121`). **There is no length cap, no escaping, no source marking, no trusted-owner distinction.** Today there is no real harm only because the owner is our one shell, and **the moment a third-party owner attaches it becomes a prompt-injection surface.** (The adversarial review raised that MCP defines server metadata as an 「신뢰할 수 없는 힌트」 — its source is ★uncross-checked★: https://blog.modelcontextprotocol.io/posts/2026-03-16-tool-annotations/)
+2. ★**「존재한다」 and 「지금 부를 수 있다」 are not separated.**★
+   There is a `callable` field (§1), but **in headless mode the shell's 17 drop out of the list entirely** — because `merge` does not create names that are not in the registry (`control/catalog.rs:61‥82`). And the daemon **has no material to tell the two apart**: the registration of a disconnected owner vanishes from the registry, so 「방금 끊긴 이름」 and 「한 번도 없던 이름」 **get the same answer** (`roster.rs:19‥21` — a loss ADR-0150 accepted). That is, the agent **cannot distinguish absence from temporary unavailability**, and may wrongly conclude 「없으니 다른 길을 찾자」. ★**Open question: do we give that distinction, and if so in which field.**★ (That file itself notes the direction of the answer — not reviving the trace but **carrying the connection list in the response**.)
 
 ---
 
-## 10. 공백·한계
+## 7. ★Reviewed but outside this round — do not rediscover★
 
-- ★**우리 화면에 대한 측정이 0 이다**★ — §3 의 수치는 전부 남의 조건에서 잰 것이고, 우리 22 개 목록에 대해 에이전트를 몰아 본 적이 없다.
-- 우리 피어(orca·paseo·t3code·superset·qm·sshx)가 **에이전트에게 명령 목록을 어떻게 보여 주는지** 문서를 못 찾았다 — 전부 기권.
-- MCP 코어 스펙 원문은 직접 안 읽었다(2차 요약 의존). §6-1 의 MCP 인용도 ★미대조★다.
-- 초안이 「직접 확인했다」고 적은 이슈 둘(kazi#1792 · Soup#822)과 OpenAI 지연 로딩 항목은 **URL 이 기록되지 않아 이 문서가 재현할 수 없다** — §2-5 · §2-4 의 ★미검★ 표시가 그 자리다.
-- 3 층 이상 선례 부재는 **부재 증거**이지 그런 설계가 나쁘다는 증명이 아니다.
+Findings raised by the adversarial review that are **real and valuable but that we decided not to address this round.** **Kept so the next session does not find them again from scratch.**
+
+- **Three redesigns of the machine surface** — ① a stable JSON contract · schema version · locale · deterministic sort · structured errors ② snapshot version · change notification · cache invalidation (precedent: ACP pushing a full snapshot again when availability changes) ③ **query · capability filters** — `az find` searches in task language and `kubectl api-resources` filters by group · category · scope · verb and emits JSON/YAML/name output (https://learn.microsoft.com/en-us/cli/azure/reference-index#az-find · https://kubernetes.io/docs/reference/kubectl/generated/kubectl_api-resources/). ★**Reason = these are a redesign of the machine surface and form one lump with option E. The user fixed this round as small.**★
+- **The absence of an agent evaluation set** — no option has ever been pitted on representative prompts. ★**Reason = building an evaluation set is a separate project in itself.**★ Registered as a known gap (§5 points to the same thing).
+
+---
+
+## 8. What needs a user decision
+
+1. ★**Summary language**★ — the catalog summary is Korean, the help file is English. Automatic generation mixes them on one screen. (a) make the summary English (b) make the help Korean (c) leave it mixed. ★The draft wrote this mixing as a 「막는 비용」 but that was too much — **we have never measured whether a model cannot read the mix**, and there is also the path of adding a locale field. This is a **metadata policy decision**, not an argument against automatic rendering.★
+2. **How to lay mail onto the root** — keep the hand-written fragment (current) vs. a refactor that puts mail into the catalog.
+3. **Showing the 17 shell-registered** — do we add a docker-style 「출처」 mark (`owner` must first be carried on the wire), or take them out of the root as gh/kubectl do and point to a separate list.
+
+---
+
+## 9. ★Decided in this session — do not reopen★
+
+1. ★**Attach the short prefix `eg_` to MCP tool names**★ — `send_message` → `eg_send` · `messages` → `eg_messages` (landing place = `crates/engram-dashboard-daemon/src/control/mcp_server.rs:330` · `:335`). **Reason = native tools named `send_message` · `spawn_agent` · `list_agents` really exist in codex** (confirmed by asking codex directly for its own tool list). Our tools would sit **in the same list under the same name**. Claude has no such native tools, so it simply has not collided so far.
+2. ★**Do not attach a prefix to CLI · catalog names**★ — the `engram` executable itself is already the prefix, and the catalog names are **a contract shared by the frontend registry · golden tests · docs**.
+3. ★**The large overhaul that merges the two surfaces into one (option E) is deferred — not rejected.**★ The starting point when reopening = the E row of §4 and the three redesigns of §7.
+
+---
+
+## 10. Gaps and limits
+
+- ★**Measurement on our screen is 0**★ — the figures of §3 were all measured under other people's conditions, and we have never driven an agent against our list of 22.
+- We could not find documentation of **how our peers (orca · paseo · t3code · superset · qm · sshx) show the command list to agents** — all abstained.
+- We did not read the MCP core spec original directly (relying on secondary summaries). The MCP quote in §6-1 is also ★uncross-checked★.
+- The two issues the draft wrote as 「직접 확인했다」 (kazi#1792 · Soup#822) and the OpenAI lazy-loading item **had no URL recorded, so this document cannot reproduce them** — the ★unchecked★ marks in §2-5 · §2-4 are that place.
+- The absence of precedent for 3 or more layers is **evidence of absence**, not a proof that such a design is bad.
