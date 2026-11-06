@@ -1,73 +1,73 @@
-# S28 TRD — LLM 레이아웃 명령 (T-65) — 4판 (2026-10-27)
+# S28 TRD — LLM layout commands (T-65) — edition 4 (2026-10-27)
 
-- **상태:** 4판 · 메인 작성(사용자 외출 중 자율 진행 「쭉 진행해」 · 명령 세부 = 사용자 위임 2026-10-26 「잘 지시되는쪽으로 알아서」). 1판(`76d29cd0`)을 `/review trd full`(codex Designer · Claude Architect-breaker — 둘 다 FIX) 지적으로, 2판(`61c66724`)을 Claude 재확인(FIX) 지적으로 고쳤고, 4판은 ADR-0308 을 구현대로 반영했다 — 고친 것 = §12. 사용자가 돌아오면 볼 결정 = §11.
-- **이름 풀기 = ADR-0308** — 셸은 에이전트를 고르는 인자를 등록 때 「에이전트 참조」로 표시하고, 데몬이 중계 전에 그 칸의 이름을 id 로 바꿔 넘긴다(§5-1 · §6 · 조사 = `docs/research/agent-name-resolution-relay-vs-callback-2026-10-27.md`). 셸은 데몬에 되묻지 않는다.
-- **규칙:** ADR-0307 · `docs/reference/llm-command-conventions.md`(이하 「규칙」).
-- **옛 설계:** `docs/process/S21-slot-docking/prd.md` R11b(LLM 명령은 창 활성 · 보이는 탭 · 포커스를 안 바꾼다) · R16 · Q10 · D9 · D22(탭 순서 바꾸기도 T-65) · `docs/process/S21-slot-docking/trd.md` §3-6(`FocusPolicy::Keep` · 기본 share · 새 창 크기를 마우스와 같은 함수로 · 예열 창 그대로) · §9-5 · ADR-0297(끄는 중에도 LLM 명령은 막지 않는다).
+- **Status:** edition 4 · written by main (autonomous work while the user was away 「쭉 진행해」 · command details = delegated by the user 2026-10-26 「잘 지시되는쪽으로 알아서」). Edition 1 (`76d29cd0`) was fixed from the `/review trd full` findings (codex Designer · Claude Architect-breaker — both FIX), edition 2 (`61c66724`) from the Claude re-check (FIX) findings, and edition 4 reflects ADR-0308 as implemented — what was fixed = §12. Decisions for the user to look at on return = §11.
+- **Name resolution = ADR-0308** — when registering, the shell marks the arguments that select an agent as 「에이전트 참조」 (agent reference), and the daemon turns the name in that field into an id before relaying (§5-1 · §6 · research = `docs/research/agent-name-resolution-relay-vs-callback-2026-10-27.md`). The shell does not ask the daemon back.
+- **Rules:** ADR-0307 · `docs/reference/llm-command-conventions.md` (hereafter 「규칙」, "rule" below).
+- **Old design:** `docs/process/S21-slot-docking/prd.md` R11b (LLM commands do not change the window activation · the visible tab · the focus) · R16 · Q10 · D9 · D22 (reordering tabs is also T-65) · `docs/process/S21-slot-docking/trd.md` §3-6 (`FocusPolicy::Keep` · default share · new-window size by the same function as the mouse · the prewarmed window as is) · §9-5 · ADR-0297 (LLM commands are not blocked even during a drag).
 
-## 1. 범위
+## 1. Scope
 
-| 묶음 | 내용 |
+| Group | Content |
 |---|---|
-| A | 데몬 — 중계 전 에이전트 참조 칸 변환(ADR-0308 · 해석기 `resolve_in` 그대로 · ADR-0132) · `resolve_in` 의 NOT_FOUND / CONFLICT 문구에 후보를 싣는다 · 명령 `agent.resolve`(이름/id **여럿을 한 번에** → `{id, name, live}` — CLI 편의 · 셸은 부르지 않는다) |
-| B | 셸 대상 풀기 — 에이전트 칸은 `#[agent_ref]` 로 표시(데몬이 id 로 바꿔 넘긴다) · **id · 공간 낱말 → 칸 · 탭 · 창은 적용과 같은 잠금 안에서** · 배치 줄 짓기 · `DockError` → 버스 오류 코드 |
-| C | 새 명령 — `tab.move` · `tab.dock` · `tab.detach`(셋 다 `apply::dock_tab` · `FocusPolicy::Keep`) · `layout.get` |
-| D | 기존 칸 · 탭 명령 넓히기 — 이름 · 공간 낱말로 지목 · 배치를 바꾸면 응답에 바뀐 배치 |
-| E | `prompts/engram-help.md` 「## window」 를 이름 기준으로 간결히 다시 쓰기 · CLAUDE.md 「LLM-우선 제어」 남은 갭 줄 고치기 |
+| A | Daemon — convert agent-reference fields before relaying (ADR-0308 · resolver `resolve_in` as is · ADR-0132) · put candidates in the NOT_FOUND / CONFLICT messages of `resolve_in` · command `agent.resolve` (**several names/ids at once** → `{id, name, live}` — a CLI convenience · the shell does not call it) |
+| B | Shell target resolution — agent fields are marked with `#[agent_ref]` (the daemon passes them on as ids) · **id · spatial word → pane · tab · window inside the same lock as the apply** · building layout rows · `DockError` → bus error code |
+| C | New commands — `tab.move` · `tab.dock` · `tab.detach` (all three go through `apply::dock_tab` · `FocusPolicy::Keep`) · `layout.get` |
+| D | Widen the existing pane · tab commands — address by name · spatial word · if the layout changes, the response carries the changed layout |
+| E | Rewrite `prompts/engram-help.md` 「## window」 concisely, name-based · fix the remaining-gap line of CLAUDE.md 「LLM-우선 제어」 |
 
-**범위 밖:** 프론트(웹 레지스트리 · 렌더) — 셸 표에 선언한 이름은 웹 등록에서 자동으로 빠지고(`view_commands.rs` `reserved_names()`), 배치 알림은 적용 서비스가 이미 낸다. 「크면 파일로」 안전장치(자리 미정 — ADR-0307 결정 6). 칸 번호 지목(ADR-0307 결정 8). 탭 이름으로 지목(이름이 유일하지 않고 자동 이름은 포커스로 바뀐다 — `layout/tab_name.rs`).
+**Out of scope:** the frontend (web registry · rendering) — names declared in the shell table automatically drop out of web registration (`view_commands.rs` `reserved_names()`), and the layout notification is already emitted by the apply service. The 「크면 파일로」 safeguard (place undecided — ADR-0307 decision 6). Addressing by pane number (ADR-0307 decision 8). Addressing by tab name (names are not unique and automatic names change with focus — `layout/tab_name.rs`).
 
-## 2. 옮기는 단위 = 탭(마우스와 같다)
+## 2. The unit that moves = the tab (same as the mouse)
 
-- `apply::dock_tab` 은 **탭(View) 하나를 통째로** 옮긴다(`layout/dock.rs` `docked_tree` · `ViewManager::dock`). 한 칸만 빼내 다른 칸 옆에 붙이는 길은 없다(`slot.popout` 은 칸 하나를 **새 창의 새 탭**으로만 뺀다).
-- 그래서 원본을 에이전트로 고르면 = **그 에이전트가 든 칸이 속한 탭**. 그 탭에 칸이 여럿이면 **탭째 옮긴다**(§11-1). 응답 배치에 함께 옮겨진 칸들이 드러난다.
-- **`tab.dock`(칸 옆에 붙이기)은 원본 탭을 지운다** — 원본 탭의 칸들이 목적 탭 안으로 들어간다(`manager.rs` 의 Seam 경로 `remove_view`). 응답의 `tab` 은 **살아남은 목적 탭**이다(§4-4).
+- `apply::dock_tab` moves **one whole tab (View)** (`layout/dock.rs` `docked_tree` · `ViewManager::dock`). There is no path that pulls out a single pane and attaches it beside another pane (`slot.popout` only pulls a single pane out as the **new tab of a new window**).
+- So when the source is selected by agent = **the tab that holds the pane containing that agent**. If that tab has several panes, **the whole tab moves** (§11-1). The panes that moved along show up in the response layout.
+- **`tab.dock` (attach beside a pane) deletes the source tab** — the source tab's panes go into the destination tab (the Seam path `remove_view` in `manager.rs`). The `tab` in the response is **the surviving destination tab** (§4-4).
 
-## 3. 인자 이름 — 종류마다 따로, 뜻이 겹치지 않게
+## 3. Argument names — separate per kind, with no overlapping meaning
 
-| 무엇을 고르나 | id 로 | 에이전트로(이름 또는 id — 데몬이 푼다) | 공간 낱말로 |
+| What is selected | by id (id 로) | by agent (에이전트로) (name or id — the daemon resolves) | by spatial word (공간 낱말로) |
 |---|---|---|---|
-| 탭 | `tab` | `tab_of` | — |
-| 칸 | `slot_id` | `slot_of` | `at` (+ `window`) |
-| 붙일 자리(칸) — `tab.dock` | `beside_slot` | `beside` | `beside_at` (+ `window`) |
-| 옮길 자리 — `tab.move` | `to_window`(ADR-0302 창 인자) · `after_tab`(그 탭 바로 뒤) | `after_tab_of`(그 에이전트 탭 바로 뒤) | — |
-| 칸에 넣을 에이전트 | `assign`(이름 또는 id) | | |
+| tab | `tab` | `tab_of` | — |
+| pane | `slot_id` | `slot_of` | `at` (+ `window`) |
+| place to attach (pane) — `tab.dock` | `beside_slot` | `beside` | `beside_at` (+ `window`) |
+| place to move to — `tab.move` | `to_window` (ADR-0302 window argument) · `after_tab` (right after that tab) | `after_tab_of` (right after that agent's tab) | — |
+| agent to put in a pane | `assign` (name or id) | | |
 
-- 한 줄(무엇을 고르나) 안에서 **정확히 하나**를 준다 — 둘 이상 / 하나도 없음 = `INVALID_ARGUMENT`(필수인 줄만).
-- `slot_of` · `beside` 의 에이전트가 **여러 칸에 떠 있으면** `CONFLICT` + 후보(그 칸들의 `slot_id` · 탭 · 창) — 다음 호출에 `slot_id` · `beside_slot` 으로 바로 고친다. `tab_of` · `after_tab_of` 는 **탭 단위**로 본다 — 한 탭 안 여러 칸이면 그 탭으로 풀리고(탭을 고르는 데는 모호함이 없다), 여러 탭에 떠 있을 때만 `CONFLICT` + 후보(`tab` 으로 고친다).
-- 어느 칸에도 없으면 `NOT_FOUND` + 후보(칸에 떠 있는 에이전트 이름 최대 5).
-- `at` · `beside_at` 은 `window` 의 **보이는 탭**에서 푼다(`apply::resolve_spatial` 그대로 · `window` 없으면 main). 낱말이 칸을 못 집으면 `NOT_FOUND`.
-- 창 인자는 ADR-0302 그대로(영속 id · 같은 실행 label · 번호 거부 — `layout/window_arg.rs`).
-- id 는 버스 매크로 규칙대로 `String`(처리기가 Uuid 로 푼다).
-- 「에이전트로」 열의 인자와 `assign` · 옛 `agent_id` · `layout.get` 의 `agent` 는 선언에 `#[agent_ref]` 로 표시한다(§5-1) — 처리기에는 데몬이 바꿔 넣은 id 로 온다. 「id 로」 · 「공간 낱말로」 열과 창 인자는 표시하지 않는다.
-- 옛 인자 `agent_id`(`slot.assignAgent` · `layout.setSlotContent` 의 넣을 에이전트)도 계속 받는다(옛 호출자) — 새 호출은 `assign`. 둘 다 = `INVALID_ARGUMENT`. 이것도 표시한 칸이라 데몬이 명부로 푼다(§7-1).
+- Give **exactly one** within one row (what is selected) — two or more / none = `INVALID_ARGUMENT` (only for rows that are required).
+- If the agent in `slot_of` · `beside` **appears in several panes**, `CONFLICT` + candidates (the `slot_id`, tab and window of those panes) — the next call fixes it directly with `slot_id` · `beside_slot`. `tab_of` · `after_tab_of` are looked at **per tab** — if the agent is in several panes within one tab it resolves to that tab (there is no ambiguity in selecting a tab), and only when it appears in several tabs is it `CONFLICT` + candidates (fix with `tab`).
+- If it is in no pane, `NOT_FOUND` + candidates (up to 5 names of agents that appear in panes).
+- `at` · `beside_at` are resolved in the **visible tab** of `window` (`apply::resolve_spatial` as is · main when there is no `window`). If the word does not pick a pane, `NOT_FOUND`.
+- The window argument is as in ADR-0302 (persistent id · same-run label · numbers rejected — `layout/window_arg.rs`).
+- The id is a `String` per the bus macro rule (the handler resolves it to a Uuid).
+- The arguments in the 「에이전트로」 column, `assign`, the old `agent_id` and the `agent` of `layout.get` are marked `#[agent_ref]` in the declaration (§5-1) — they reach the handler as the id the daemon swapped in. The 「id 로」 and 「공간 낱말로」 columns and the window argument are not marked.
+- The old argument `agent_id` (the agent to put in, for `slot.assignAgent` · `layout.setSlotContent`) is also still accepted (old callers) — new calls use `assign`. Both given = `INVALID_ARGUMENT`. This is also a marked field, so the daemon resolves it against the registry (§7-1).
 
-## 4. 새 명령
+## 4. New commands
 
-### 4-1. `tab.move` — 탭 줄로 옮기기 · 순서 바꾸기 (`DockDest::TabBar`)
+### 4-1. `tab.move` — move to a tab strip · reorder (`DockDest::TabBar`)
 
 - args: `tab?` · `tab_of?` · `to_window?` · `after_tab_of?` · `index?: u32`
-- 목적 = `to_window`(그 창 탭 줄 · `index` 자리 — 0 부터 · 없거나 끝을 넘으면 맨 끝) | `after_tab_of`(그 에이전트가 든 탭 **바로 뒤** · `index` 를 같이 주면 `INVALID_ARGUMENT`) | 둘 다 없으면 **원본의 창**(같은 창 안 순서 바꾸기 · `index` 필수).
-- `after_tab_of` 는 **목적도 `Target` 으로**(§5-2 — `AfterTabOf(AgentId)`) 넘겨 **잠금 안에서** 그 에이전트의 탭과 그 탭의 창을 찾고, 원본을 목록에서 뺀 뒤 그 탭 바로 뒤 자리를 계산한다(같은 창에서 원본이 앞에 있을 때 하나 어긋나는 것을 막는다). `DockTo::TabBar`(`check_dock` 이 읽는 쪽)와 `DockDest::TabBar` 에 같은 「뒤에」 칸을 더한다 — 마우스 경로는 비운다.
-- 가장자리: 그 에이전트가 **원본 탭 안**에 있으면(제 뒤에 넣기) `INVALID_ARGUMENT` · 여러 탭에 떠 있으면 `CONFLICT` + 후보.
+- Destination = `to_window` (the tab strip of that window · position `index` — from 0 · if absent or past the end, the very end) | `after_tab_of` (**right after** the tab holding that agent · giving `index` together is `INVALID_ARGUMENT`) | with neither, **the source's window** (reordering within the same window · `index` required).
+- `after_tab_of` is passed **as a `Target` for the destination too** (§5-2 — `AfterTabOf(AgentId)`), so that **inside the lock** it finds that agent's tab and that tab's window, removes the source from the list, and then computes the position right after that tab (this prevents an off-by-one when the source is in front in the same window). The same 「뒤에」 ("after") field is added to `DockTo::TabBar` (the side `check_dock` reads) and `DockDest::TabBar` — the mouse path leaves it empty.
+- Edge: if that agent is **inside the source tab** (inserting after itself) `INVALID_ARGUMENT` · if it appears in several tabs `CONFLICT` + candidates.
 
-### 4-2. `tab.dock` — 칸 옆에 붙이기(분할) (`DockDest::Seam`)
+### 4-2. `tab.dock` — attach beside a pane (split) (`DockDest::Seam`)
 
 - args: `tab?` · `tab_of?` · `beside_slot?` · `beside?` · `beside_at?` · `window?` · `side: DockSide` · `whole?: bool` · `share?: f64`
-- `side` = 새로 붙는 탭이 놓일 쪽(`Left` · `Right` · `Top` · `Bottom` — `layout/dock.rs` `DockSide` 와 같은 철자 · 버스 블록에 같은 이름 enum 을 하나 더 둔다 — 매크로는 블록 밖 enum 을 못 쓴다).
-- `whole: true` = 목적 칸이 속한 **탭 전체의 바깥 변**(`DockAnchor::Outer`). 기본 = 그 칸(`DockAnchor::Slot`).
-- `window` 는 `beside_at` 과만 쓴다(다른 것과 함께면 `INVALID_ARGUMENT`).
-- `share` = 붙는 쪽 몫(0.01~0.5 — `InvalidShare` 범위 그대로). 없으면 **마우스와 같은 공식** `bands::attach_share(original, side, 목적 px 틀)` — `original` = **원본 탭 창의 캔버스 크기**(셸 모델 `windows[label].canvas`) · 목적 px 틀 = 목적 칸 px(`slot_px`) | `whole` 이면 목적 창 캔버스. 입력이 없으면(웹뷰가 크기를 아직 안 알림) **0.5**. ★마우스와 다른 점★: 마우스는 `original` 을 웹이 잰 `drag_sizes().original`(원본 창이 최대화면 복원 크기)로 쓴다 — 셸 모델에는 그 입력(모니터 작업 영역 · 창 틀 · 뷰포트)이 없어 캔버스로 갈음한다(§11-6).
-- 원본 탭 = 목적 칸이 든 탭이면 `SelfTarget` → `INVALID_ARGUMENT`.
+- `side` = the side where the newly attached tab is placed (`Left` · `Right` · `Top` · `Bottom` — same spelling as `DockSide` in `layout/dock.rs` · one more enum with the same name is put in the bus block — the macro cannot use an enum outside the block).
+- `whole: true` = the **outer edge of the whole tab** that the destination pane belongs to (`DockAnchor::Outer`). Default = that pane (`DockAnchor::Slot`).
+- `window` is used only with `beside_at` (together with anything else is `INVALID_ARGUMENT`).
+- `share` = the share of the attaching side (0.01~0.5 — the `InvalidShare` range as is). If absent, the **same formula as the mouse** `bands::attach_share(original, side, 목적 px 틀)` — `original` = **the canvas size of the source tab's window** (shell model `windows[label].canvas`) · destination px frame = the destination pane px (`slot_px`) | the destination window canvas if `whole`. With no input (the webview has not reported sizes yet) **0.5**. ★Difference from the mouse★: the mouse uses as `original` the `drag_sizes().original` that the web measured (the restored size when the source window is maximized) — the shell model does not have that input (monitor work area · window frame · viewport), so the canvas stands in (§11-6).
+- If the source tab is the tab holding the destination pane, `SelfTarget` → `INVALID_ARGUMENT`.
 
-### 4-3. `tab.detach` — 새 창으로 떼기 (`DockDest::NewWindow`)
+### 4-3. `tab.detach` — detach to a new window (`DockDest::NewWindow`)
 
 - args: `tab?` · `tab_of?`
-- 크기 = `plan_new_window` 기본(원본이 팝아웃이면 그 보통 크기 · main 이면 팝아웃 기본 크기). 자리 = 커서가 없으므로 label 기본 자리. 예열 창을 그대로 쓴다(활성화 없이 z 만 — `Keep`). ★마우스와 다른 점★: 마우스는 `drag_size::drag_sizes` 로 main 복원 크기를 상한까지 쓰는데, 그 입력(모니터 작업 영역 · 창 틀 · 뷰포트)이 셸 모델에 없다 — 그 입력을 셸로 올리는 포트는 이번 범위 밖(§11-6).
-- **두 잠금 사이 지킴**: 새 창 적용은 잠금을 두 번 잡는다(계획 → 잠금 밖에서 창 열기 → 커밋 · `apply.rs` 의 `dock_into_window`). 커밋 잠금에서 대상을 **다시 `locate`** 해 첫 잠금 때와 다른 탭이면 연 창을 거두고 `CONFLICT`(아무것도 안 옮김).
-- 원본이 **탭 하나뿐인 팝아웃**이면 `plan_new_window` 가 창째 다시 쓰고(`reused`) 바뀌는 것이 없다 → `ok` + `changed: false`.
+- Size = the `plan_new_window` default (if the source is a popout, its normal size · if main, the popout default size). Position = there is no cursor, so the label's default position. The prewarmed window is used as is (z only, without activation — `Keep`). ★Difference from the mouse★: the mouse uses the main restore size up to the cap through `drag_size::drag_sizes`, but the shell model does not have that input (monitor work area · window frame · viewport) — a port that lifts that input into the shell is out of scope this time (§11-6).
+- **Guard between the two locks**: applying a new window takes the lock twice (plan → open the window outside the lock → commit · `dock_into_window` in `apply.rs`). In the commit lock the target is **`locate`d again**, and if it is a different tab from the first lock, the opened window is withdrawn and `CONFLICT` (nothing is moved).
+- If the source is a **popout with only one tab**, `plan_new_window` reuses the whole window (`reused`) and nothing changes → `ok` + `changed: false`.
 
-### 4-4. 응답(셋 공통 — 규칙 §1-4)
+### 4-4. Response (common to the three — rule §1-4)
 
 ```
 TabMoveOk / TabDockOk / TabDetachOk {
@@ -80,14 +80,14 @@ TabMoveOk / TabDockOk / TabDetachOk {
 }
 ```
 
-- `DockOutcome` 에 `changed: bool` 을 더한다(지금은 「바뀐 것 없음」이 알림만 빠지는 꼴이라 몸통이 모른다).
-- 다시 쓴 창(혼자인 팝아웃 재사용)이 그 사이 닫히면 그 탭도 모델에서 사라진다 — 결말을 읽는 잠금에서 대상을 다시 풀어 다르거나 없으면 `CONFLICT`(옮기려던 탭이 없어졌다 · 구현 = `TargetDockError::Moved`). 마우스 경로(`identity == None` → 성공)는 그대로.
-- `emptied` · `main_refilled` 은 `layout` 에 드러나므로 따로 싣지 않는다.
+- Add `changed: bool` to `DockOutcome` (today 「바뀐 것 없음」 is only a missing notification, so the body does not know).
+- If the reused window (the reuse of a lone popout) is closed in the meantime, that tab also disappears from the model — in the lock that reads the result, the target is resolved again, and if it differs or is gone, `CONFLICT` (the tab that was about to move is gone · implemented as `TargetDockError::Moved`). The mouse path (`identity == None` → success) is unchanged.
+- `emptied` · `main_refilled` show up in `layout`, so they are not carried separately.
 
-### 4-5. `layout.get` — 배치 조회 (#[effect(Read)])
+### 4-5. `layout.get` — layout query (#[effect(Read)])
 
-- args: `window?` · `agent?`(그 에이전트가 든 칸의 줄만 — 핀포인트 · 이름은 데몬이 푼다) · `ids?: bool`(기본 false)
-- ok: `{ rows: Vec<LayoutRow> }` — **칸마다 한 줄, 평평하게**(매크로가 재귀 타입을 못 싣는다):
+- args: `window?` · `agent?` (only the rows of the panes holding that agent — pinpoint · the daemon resolves the name) · `ids?: bool` (default false)
+- ok: `{ rows: Vec<LayoutRow> }` — **one row per pane, flat** (the macro cannot carry a recursive type):
 
 ```
 LayoutRow {
@@ -102,144 +102,144 @@ LayoutRow {
 }
 ```
 
-- 좌표 = `geometry::compute`(셸 안 기하의 단일 출처 — ADR-0227)의 칸 사각형. 픽셀 측정 없이도 나온다.
-- 기본은 id 를 싣지 않는다(규칙 §4 — 크기 · LLM 은 이름 · 낱말로 부른다). 에이전트 없는 칸을 id 로 짚어야 하면 `ids: true`.
-- 창 순서 = `window.list` 순 · 탭 순서 = 탭 줄 순 · 칸 순서 = 트리 전위 순.
-- **표시 이름은 셸 캐시(`agent_names`)** — 풀이가 아니라 보여 주기라 ADR-0132 의 「해석기 하나」에 걸리지 않는다. 캐시에 없으면 `agent: None`.
+- Coordinates = the pane rectangles of `geometry::compute` (the single source of geometry in the shell — ADR-0227). They come out without pixel measurement.
+- By default ids are not carried (rule §4 — size · the LLM calls things by name · word). Use `ids: true` when a pane without an agent has to be pointed at by id.
+- Window order = `window.list` order · tab order = tab strip order · pane order = tree pre-order.
+- **The display name is the shell cache (`agent_names`)** — it is for showing, not resolving, so it does not fall under 「해석기 하나」 of ADR-0132. If it is not in the cache, `agent: None`.
 
-## 5. 대상 풀기 (묶음 B)
+## 5. Target resolution (group B)
 
-### 5-1. 이름 → id: 데몬이 중계 전에 바꾼다(ADR-0308)
+### 5-1. Name → id: the daemon swaps it before relaying (ADR-0308)
 
-- 셸은 에이전트를 고르는 인자(`tab_of` · `slot_of` · `beside` · `after_tab_of` · `assign` · 옛 `agent_id` · `layout.get` 의 `agent`)를 선언에서 `#[agent_ref]` 로 표시한다 — 등록 패킷의 `CommandDecl.agent_args` 로 실리고 `help` 는 그대로 불투명하다. 데몬이 아는 것은 「이 칸은 내 에이전트를 가리킨다」뿐이다.
-- 데몬은 셸 명령을 중계하기 전에 표시한 칸의 **문자열 값만** 자기 해석기(`resolve_in` — ADR-0132)로 id(정규 철자)로 바꿔 봉투에 다시 적는다(§6). 풀리지 않으면 **중계하지 않고** 해석기의 코드 그대로(없음 = `NOT_FOUND` · 이름 겹침 = `CONFLICT`) `"<칸>: <문구 + 후보>"` 로 답한다 — 셸은 아무것도 받지 않았으므로 아무것도 바뀌지 않는다.
-- 셸 처리기는 표시한 칸에서 **id 만** 본다 — `Uuid` 로 풀고, UUID 가 아니면(데몬을 거치지 않은 호출) `INVALID_ARGUMENT`(「`<칸>` must be an agent id (a UUID) …」). 셸은 이름을 풀지 않는다(ADR-0132 · 규칙 §1-2 — 셸의 이름 캐시 `agent_names` 는 보여 주기 몫).
-- 이름 → id 는 셸의 적용 잠금 밖(데몬)이고 id → 칸은 안이다 — 그 사이의 움직임은 §5-2 가 지킨다.
+- The shell marks the arguments that select an agent (`tab_of` · `slot_of` · `beside` · `after_tab_of` · `assign` · the old `agent_id` · the `agent` of `layout.get`) with `#[agent_ref]` in the declaration — it is carried as `CommandDecl.agent_args` in the registration packet, and `help` stays opaque as before. All the daemon knows is 「이 칸은 내 에이전트를 가리킨다」.
+- Before relaying a shell command, the daemon swaps **only the string values** of the marked fields into the id (canonical spelling) with its own resolver (`resolve_in` — ADR-0132) and rewrites them into the envelope (§6). If one does not resolve, it **does not relay** and answers with the resolver's code as is (not found = `NOT_FOUND` · name overlap = `CONFLICT`) as `"<칸>: <문구 + 후보>"` — the shell received nothing, so nothing changed.
+- The shell handler looks at **only the id** in a marked field — it resolves it as a `Uuid`, and if it is not a UUID (a call that did not pass through the daemon) `INVALID_ARGUMENT` (「`<칸>` must be an agent id (a UUID) …」). The shell does not resolve names (ADR-0132 · rule §1-2 — the shell's name cache `agent_names` is for showing).
+- Name → id is outside the shell's apply lock (in the daemon) and id → pane is inside — §5-2 guards the movement in between.
 
-### 5-2. id · 공간 낱말 → 칸 · 탭 · 창: 적용과 같은 잠금 안에서
+### 5-2. id · spatial word → pane · tab · window: inside the same lock as the apply
 
-- 데몬이 이름을 id 로 바꾼 뒤 셸이 적용하기까지 다른 명령 · 마우스가 배치를 바꿀 수 있다(TOCTOU). 그래서 **에이전트 id · 공간 낱말 → (창, 탭, 칸) 고르기는 적용 함수 안, 바꾸는 잠금을 쥔 채** 한다.
-  - 적용 서비스에 **대상 꼴** 을 더한다 — `enum Target { Tab(ViewId), TabOf(AgentId), AfterTabOf(AgentId), Slot{view: Option<ViewId>, slot: SlotId}, SlotOf(AgentId), At{token, window} }`(이름 · 위치는 구현이 정한다). **`Target` 을 받는 새 적용 함수**를 두고 잠금 안에서 `locate` 로 푼다.
-  - ★옛 id 시그니처는 그대로 남긴다★ — 마우스 · 웹 · `tab_drop` · 팝아웃 등 기존 호출자(10 파일 남짓)는 손대지 않는다. 옛 함수는 새 함수를 `Target::Tab` · `Target::Slot` 으로 부르는 얇은 겉이거나 그 반대(구현이 고른다). 그래서 U2 가 혼자 빌드된다.
-  - 잠금을 두 번 잡는 적용(새 창 — `dock_into_window`)은 커밋 잠금에서 다시 `locate` 해 같은지 본다(§4-3).
-  - `agent.spawnInto` 는 데몬 스폰을 중간에 기다리는 `async` 적용이라(`apply.rs` 의 `spawn_into`) §8 의 `spawn_blocking` 에서 뺀다 — `at` 은 그 함수의 첫 잠금 안에서 푼다.
-- 풀린 뒤 사라진 것(`TabNotFound` · `SlotNotFound` · `SlotNotInTab` 이 **에이전트 · 낱말로 고른 대상**에서 난 경우)은 호출자 잘못이 아니라 경합이라 `CONFLICT`.
+- After the daemon swaps the name for an id and before the shell applies it, another command or the mouse can change the layout (TOCTOU). So **selecting the (window, tab, pane) from the agent id · spatial word is done inside the apply function, holding the mutating lock**.
+  - Add a **target form** to the apply service — `enum Target { Tab(ViewId), TabOf(AgentId), AfterTabOf(AgentId), Slot{view: Option<ViewId>, slot: SlotId}, SlotOf(AgentId), At{token, window} }` (names · locations are up to the implementation). Provide a **new apply function that takes a `Target`** and resolve it with `locate` inside the lock.
+  - ★The old id signatures are left as they are★ — existing callers such as the mouse · web · `tab_drop` · popout (about 10 files) are not touched. The old function is either a thin wrapper that calls the new function with `Target::Tab` · `Target::Slot`, or the reverse (the implementation chooses). That is why U2 builds on its own.
+  - An apply that takes the lock twice (new window — `dock_into_window`) `locate`s again in the commit lock and checks that it is the same (§4-3).
+  - `agent.spawnInto` is an `async` apply that waits for a daemon spawn midway (`spawn_into` in `apply.rs`), so it is excluded from the `spawn_blocking` of §8 — `at` is resolved inside the first lock of that function.
+- Things that disappeared after resolving (`TabNotFound` · `SlotNotFound` · `SlotNotInTab` that arise from a **target selected by agent · word**) are a race, not the caller's fault, so `CONFLICT`.
 
-### 5-3. 오류 코드 대응 · 선언
+### 5-3. Error code mapping · declaration
 
-- `DockError` → 버스: `SelfTarget` · `InvalidShare` → `INVALID_ARGUMENT` · 호출자가 **id 로 준** 탭 · 칸이 없음(`TabNotFound` · `SlotNotFound` · `SlotNotInTab`) → `NOT_FOUND` · **`WindowNotFound` → `CONFLICT`**(ADR-0302 결정 9 · `window_arg_error` 와 같게) · 나머지(`ZeroArea` · `WindowClosed` · `WindowExists` · `SlotIdOverlap` · `WindowOpen`) → `CONFLICT`. 문구는 `DockError` 의 것을 그대로.
-- **새 명령 · 넓힌 명령의 선언 `errors [...]` 에 실제로 내는 코드를 모두 적는다**(ADR-0156 발견 계약 · `spawn_not_applied` 가 선언으로 거른다) — 대개 `[NOT_FOUND, CONFLICT]`. 데몬이 에이전트 칸을 못 풀어 이 명령 대신 낸 답(없음 `NOT_FOUND` · 겹침 `CONFLICT` — §5-1)도 이 명령의 답이라 선언에 든다. `commands.rs` 머리의 「적용 실패는 코드 하나로 나간다(CONFLICT)」 문장을 이 대응으로 고친다.
-- **후보 싣기**: `CommandError` 는 코드 · 문구 · 재시도만 싣는다(구조 칸 없음). 후보는 **문구 끝에** `— candidates: a, b, c`(최대 5 · 영어 — 기존 오류 문구가 영어).
+- `DockError` → bus: `SelfTarget` · `InvalidShare` → `INVALID_ARGUMENT` · a tab · pane that the caller **gave by id** is missing (`TabNotFound` · `SlotNotFound` · `SlotNotInTab`) → `NOT_FOUND` · **`WindowNotFound` → `CONFLICT`** (ADR-0302 decision 9 · same as `window_arg_error`) · the rest (`ZeroArea` · `WindowClosed` · `WindowExists` · `SlotIdOverlap` · `WindowOpen`) → `CONFLICT`. The message is that of `DockError` as is.
+- **List every code actually emitted in the `errors [...]` of the declaration of the new and widened commands** (ADR-0156 discovery contract · `spawn_not_applied` filters by the declaration) — usually `[NOT_FOUND, CONFLICT]`. The answer the daemon gave in place of this command because it could not resolve an agent field (not found `NOT_FOUND` · overlap `CONFLICT` — §5-1) is also this command's answer, so it is in the declaration. Fix the sentence 「적용 실패는 코드 하나로 나간다(CONFLICT)」 at the head of `commands.rs` according to this mapping.
+- **Carrying candidates**: `CommandError` carries only the code · message · retry (no structured field). Candidates go **at the end of the message** as `— candidates: a, b, c` (up to 5 · in English — the existing error messages are English).
 
-## 6. 데몬 쪽 (묶음 A)
+## 6. Daemon side (group A)
 
-- **중계 전 변환(ADR-0308)** — 자리 = `crates/engram-dashboard-daemon/src/command_delivery.rs` 의 `deliver` 에서 남의 이름을 `route` 에 넘기기 직전(소켓 · 제어 라우트 두 입구가 다 지나는 한 곳 · `resolve_agent_args`).
-  - 표시는 명부에서 읽는다(`CommandRoster::agent_args_of` — 주인이 등록한 `agent_args`). 표시한 칸 중 문자열 값만 바꾸고, 부재 · `null` · 문자열 아닌 값은 손대지 않는다(주인이 반려한다).
-  - 해석기 명부(`LocalCommands::agent_roster` — `agent.*` 동사가 지목을 푸는 그 명부)는 **`spawn_blocking`** 에서 읽는다 — 잠든 프로필의 경로 정규화가 길 수 있다(`AgentManager::roster`). 읽기는 취소되지 않으므로 동시 상한(`MAX_RESOLVING_IN_FLIGHT` = 16)을 두고 셈은 읽기가 끝날 때 풀린다 · 넘치면 중계 없이 `CONFLICT` · 이미 떠난 호출자면 읽지 않는다.
-  - 실패 = `resolve_in` 의 코드 그대로 · 문구 앞에 `"<칸>: "` · 중계하지 않는다. 해석 도중 그 왕복의 자리가 먼저 정산되면(마감 · 종료 · 호출자 이탈) 그 판정의 코드가 답이고(문구는 「주인에게 보내지 않았다」) 중계하지 않는다 · 해석 작업이 죽으면 `INTERNAL`.
-  - 데몬은 그 칸이 칸 지목인지 탭 지목인지 모른다 — `help` 도 열지 않는다(ADR-0308 결정 2 · 3).
-- 표시 칸: 명령 도구 crate(`command`)의 선언 매크로가 `#[agent_ref]`(꼭대기 인자의 `String` · `Option<String>` 만 — 그 밖은 컴파일 에러)를 `CommandSpec.agent_args` → `CommandDecl.agent_args` 로 싣는다. 이 칸이 없는 옛 패킷은 빈 목록으로 읽힌다.
-- `agent.resolve` — `crates/engram-dashboard-agent/src/commands.rs` 에 선언(생산자 옆 · ADR-0155). args `{targets: Vec<String>}`(1~8 개) → ok `{agents: Vec<{target, id, name, live: bool}>}`(같은 순서). 몸통 = 말마다 `resolve_in(roster, target)` 그대로(id 먼저 · 정확한 이름 · 중복 = CONFLICT · 없음 = NOT_FOUND). 하나라도 실패하면 그 코드로 실패하고 문구에 **어느 말**이 실패했는지 적는다. `#[effect(Read)]`. ★CLI 편의 명령이다 — 셸은 부르지 않는다★(이름 풀기는 위 중계 전 변환).
-- `resolve_in` 의 오류 문구에 후보를 싣는다 — NOT_FOUND: 이름에 그 낱말을 (대소문자 무시) 품은 것 먼저, 없으면 앞에서부터 최대 5 · CONFLICT: 겹친 에이전트들의 id(최대 5). **모든 `target` 동사와 중계 전 변환이 함께 받는다**(규칙 §1-3). 교차 시험은 코드만 비교하고(`control_agent.rs`) CLI 는 문구를 해석하지 않는다(리뷰 확인) — 문구 단언 시험만 고친다.
-- agent crate 의 `catalog_version` 을 올린다.
-- `agent.resolve` 의 답 JSON 골든(`crates/engram-dashboard-agent/tests/fixtures/agent_resolve_ok.json`)은 agent crate 시험이 직렬화 결과와 대조한다 — 셸 시험은 읽지 않는다.
-- TS 바인딩: agent crate 는 명령 타입을 명시 내보낸다(`crates/engram-dashboard-agent/tests/ts_export.rs`) — 새 타입도 더하고 생성물을 커밋한다(CI 동기 게이트).
+- **Conversion before relaying (ADR-0308)** — location = in `deliver` of `crates/engram-dashboard-daemon/src/command_delivery.rs`, right before another party's name is passed to `route` (the one place both entrances, socket and control route, pass through · `resolve_agent_args`).
+  - The marks are read from the registry (`CommandRoster::agent_args_of` — the `agent_args` the owner registered). Only string values of the marked fields are swapped; absent · `null` · non-string values are not touched (the owner bounces them).
+  - The resolver registry (`LocalCommands::agent_roster` — the same registry the `agent.*` verbs use to resolve a target) is read in **`spawn_blocking`** — path normalization of a sleeping profile can take long (`AgentManager::roster`). A read cannot be cancelled, so a concurrency cap is set (`MAX_RESOLVING_IN_FLIGHT` = 16) and the count is released when the read ends · when it overflows, `CONFLICT` without relaying · if the caller has already left, no read is done.
+  - Failure = the code of `resolve_in` as is · `"<칸>: "` before the message · no relay. If the slot of that round trip is settled first during resolution (deadline · shutdown · caller leaving), the code of that decision is the answer (the message is 「주인에게 보내지 않았다」) and nothing is relayed · if the resolving task dies, `INTERNAL`.
+  - The daemon does not know whether the field is a pane target or a tab target — it does not even open `help` (ADR-0308 decisions 2 · 3).
+- Marked fields: the declaration macro of the command tool crate (`command`) carries `#[agent_ref]` (only on a top-level argument of `String` · `Option<String>` — anything else is a compile error) as `CommandSpec.agent_args` → `CommandDecl.agent_args`. An old packet without this field reads as an empty list.
+- `agent.resolve` — declared in `crates/engram-dashboard-agent/src/commands.rs` (next to the producer · ADR-0155). args `{targets: Vec<String>}` (1~8) → ok `{agents: Vec<{target, id, name, live: bool}>}` (same order). Body = `resolve_in(roster, target)` as is for each word (id first · exact name · duplicate = CONFLICT · none = NOT_FOUND). If even one fails, it fails with that code and the message says **which word** failed. `#[effect(Read)]`. ★This is a CLI convenience command — the shell does not call it★ (name resolution is the pre-relay conversion above).
+- Candidates go into the error messages of `resolve_in` — NOT_FOUND: names containing that word (case-insensitive) first, otherwise up to 5 from the front · CONFLICT: the ids of the overlapping agents (up to 5). **All `target` verbs and the pre-relay conversion receive it together** (rule §1-3). The cross test compares only codes (`control_agent.rs`) and the CLI does not interpret the message (review confirmed) — only the tests that assert the message are fixed.
+- Raise the `catalog_version` of the agent crate.
+- The answer JSON golden of `agent.resolve` (`crates/engram-dashboard-agent/tests/fixtures/agent_resolve_ok.json`) is compared with the serialized result by the agent crate test — the shell tests do not read it.
+- TS bindings: the agent crate exports command types explicitly (`crates/engram-dashboard-agent/tests/ts_export.rs`) — add the new types too and commit the generated output (CI sync gate).
 
-## 7. 기존 명령 넓히기 (묶음 D)
+## 7. Widening existing commands (group D)
 
-| 명령 | 더하는 인자 | 선택으로 바뀌는 인자 | 응답 |
+| Command | Added arguments | Arguments that become optional | Response |
 |---|---|---|---|
-| `slot.focus` · `slot.close` · `slot.split` · `slot.popout` | `slot_of` · `at` (+`window`) | `view_id` · `slot_id` | 배치를 바꾸면 `layout`(바뀐 탭 줄) 을 더한다 |
-| `slot.assignAgent` · `layout.setSlotContent` | `slot_of` · `at` (+`window`) · `assign` | `view_id` · `slot_id` · `agent_id` | `layout` 더함 |
-| `tab.switch` · `tab.close` · `tab.rename` | `tab_of` | `view_id` · **`window`**(탭에서 창을 알 수 있다) | `tab.close` 는 `layout` 더함 |
-| `agent.spawnInto` | `at` (+`window` 그대로) | — | 그대로(+`layout`) |
+| `slot.focus` · `slot.close` · `slot.split` · `slot.popout` | `slot_of` · `at` (+`window`) | `view_id` · `slot_id` | if the layout changes, add `layout` (changed tab rows) |
+| `slot.assignAgent` · `layout.setSlotContent` | `slot_of` · `at` (+`window`) · `assign` | `view_id` · `slot_id` · `agent_id` | add `layout` |
+| `tab.switch` · `tab.close` · `tab.rename` | `tab_of` | `view_id` · **`window`** (the window can be known from the tab) | `tab.close` adds `layout` |
+| `agent.spawnInto` | `at` (+`window` as is) | — | as is (+`layout`) |
 
-- `assign` · `agent_id` 가 **풀리지 않으면 거절**한다 — 지금은 없는 id 도 받아 칸이 빈 채 남는다(help 가 적어 둔 함정 · §11-3). 둘 다 에이전트 칸이라 데몬이 중계 전에 명부로 풀고, 없으면 데몬이 `NOT_FOUND` 로 답해 셸에 오지 않는다(§5-1).
-- 응답에 `layout` 을 더하는 것은 **덧붙이기**(필드 추가)라 옛 호출자는 그대로다. 규칙 §1-4 · ADR-0307 결정 4(사용자 결정)를 이 명령들에도 지킨다.
-- 인자를 선택으로 바꾸는 것은 id 를 주는 옛 호출자에 그대로 맞는다. 셸 `catalog_version` 을 올린다.
+- If `assign` · `agent_id` **does not resolve, it is rejected** — today an id that does not exist is also accepted and the pane is left empty (a trap that help documents · §11-3). Both are agent fields, so the daemon resolves them against the registry before relaying, and if absent the daemon answers `NOT_FOUND` and it does not reach the shell (§5-1).
+- Adding `layout` to the response is an **append** (adding a field), so old callers are unaffected. Rule §1-4 · ADR-0307 decision 4 (user decision) are kept for these commands too.
+- Making arguments optional still fits old callers that give an id. Raise the shell `catalog_version`.
 
-### 7-1. 기존 호출자에게 보이는 변화(구현 · 리뷰 실측 — 코드 · 결정 없이 기록만)
+### 7-1. Changes visible to existing callers (measured in implementation · review — recorded only, no code · no decision)
 
-- `agent_id`(`slot.assignAgent` · `layout.setSlotContent` 의 Agent)도 에이전트 칸이라 데몬이 중계 전에 명부로 푼다 — 명부에 있는 id · 이름이면 그 id(정규 철자)로 바꿔 넘기고, 없으면 `NOT_FOUND` · 이름이 겹치면 `CONFLICT` 로 데몬이 답한다(예전엔 받은 그대로 적었다 · §11-3). 해석기는 id 를 `Uuid` 가 읽는 철자 전부(대문자 · 중괄호 · 하이픈 없음 · `urn:uuid:`)로 이름보다 먼저 맞추므로 대문자 UUID 를 보내던 옛 호출자도 그대로 풀린다(우편 입구는 정규 철자만 — 알고 남긴 불일치 · 교차 대조 시험이 양쪽을 단언한다). 빈 값 · 엉뚱한 값도 셸의 검문(`INVALID_ARGUMENT` — 빈 값 · 내용이 Agent 가 아닌데 준 `agent_id`)에 닿기 전에 데몬의 `NOT_FOUND` 다. 데몬을 거치지 않은 호출은 UUID 가 아니면 셸이 `INVALID_ARGUMENT` 로 반려한다.
-- 예전엔 무시되던 엉뚱한 인자가 이제 효력을 낸다 — 칸 동사에 `window` 만 주면 `INVALID_ARGUMENT`(「window 는 at 과만」) · `at` · `slot_of` · `assign` · `tab_of` 도 같다(알 수 없는 인자는 무시한다는 버스 규칙 — ADR-0157 — 에서 그 이름이 이제 「아는 인자」가 되었기 때문).
-- 데몬의 에이전트 칸 풀기가 셸의 모든 검문보다 먼저 돈다 — 없는 칸 + 모르는 `agent_id` 는 칸의 `CONFLICT` 대신 에이전트의 `NOT_FOUND` · 셸이 반려할 인자 조합이어도 모르는 에이전트면 `NOT_FOUND` 가 먼저다.
-- 같은 코드 · 다른 문구: 필수 id 빠짐(serde 「missing field」 → 「the slot/tab is missing — give one of …」) · 빈 탭 · 칸 id 문자열 · 숫자 창 + 모양이 틀린 `view_id`(UUID 문구가 먼저).
-- 탭 동사의 `window` 가 선택이 됐다 — 주면 그 창의 탭이어야 한다(옛 오류 그대로).
+- `agent_id` (the Agent of `slot.assignAgent` · `layout.setSlotContent`) is also an agent field, so the daemon resolves it against the registry before relaying — if it is an id · name in the registry, it is passed on swapped to that id (canonical spelling), and if absent the daemon answers `NOT_FOUND` · if the name overlaps, `CONFLICT` (before, it was written as received · §11-3). The resolver matches an id against every spelling `Uuid` can read (uppercase · braces · no hyphens · `urn:uuid:`) before names, so an old caller that sent an uppercase UUID still resolves as before (the mail entrance accepts only the canonical spelling — a known leftover mismatch · the cross-comparison test asserts both sides). An empty or nonsense value is also the daemon's `NOT_FOUND` before it reaches the shell's checks (`INVALID_ARGUMENT` — an empty value · an `agent_id` given although the content is not an Agent). A call that did not pass through the daemon is bounced by the shell with `INVALID_ARGUMENT` if it is not a UUID.
+- Nonsense arguments that used to be ignored now take effect — giving only `window` to a pane verb is `INVALID_ARGUMENT` (「window 는 at 과만」) · the same for `at` · `slot_of` · `assign` · `tab_of` (because under the bus rule that unknown arguments are ignored — ADR-0157 — those names are now 「아는 인자」).
+- The daemon's agent-field resolution runs before all of the shell's checks — a non-existent pane + an unknown `agent_id` gets the agent's `NOT_FOUND` instead of the pane's `CONFLICT` · even for an argument combination the shell would bounce, an unknown agent gets `NOT_FOUND` first.
+- Same code · different message: required id missing (serde 「missing field」 → 「the slot/tab is missing — give one of …」) · an empty tab · pane id string · a numeric window + a malformed `view_id` (the UUID message comes first).
+- `window` of the tab verbs became optional — if given, the tab must be in that window (the old error as is).
 
-## 8. 처리기 · 스레드
+## 8. Handlers · threads
 
-- 대상을 받는 명령(새 넷 + 넓힌 칸 · 탭 동사)은 처리기 `targeted_handler`(`layout/commands.rs`)로 꽂는다 — 본문 전체(인자 검문 · 창 인자 풀기 · 적용 = 잠금 + 고르기 + 바꾸기)를 **`spawn_blocking`** 에서 돌리고 답은 `null` 칸을 뺀 JSON 이다. 셸 쪽에는 데몬 왕복이 없어 기다릴 것이 없다(이름은 데몬이 중계 전에 바꿨다 — §5-1).
-- 블로킹 풀인 이유 — `NewWindow` 는 main 스레드 · 동기 명령에서 부르면 창 짓기가 교착하고(`apply.rs` 의 `dock_tab` 문서), 예열 창 대기(~1 초) 동안 tokio 일꾼을 막지 않게.
-- `agent.spawnInto` 는 그대로 비동기 처리기(`SpawnInto`)다 — 적용 안에서 데몬 스폰을 기다린다(§5-2).
-- 끄는 중(마우스 탭 끌기)에도 막지 않는다(ADR-0297) — 놓기가 옮겨진 탭을 다시 찾는다.
+- Commands that take a target (the new four + the widened pane · tab verbs) are plugged in through the handler `targeted_handler` (`layout/commands.rs`) — the whole body (argument checks · window argument resolution · apply = lock + select + mutate) runs in **`spawn_blocking`**, and the answer is JSON with the `null` fields dropped. There is no daemon round trip on the shell side, so there is nothing to wait for (the daemon swapped the name before relaying — §5-1).
+- Why the blocking pool — `NewWindow` deadlocks window creation when called from the main thread · a synchronous command (the `dock_tab` doc in `apply.rs`), and so that tokio workers are not blocked during the prewarmed-window wait (~1 s).
+- `agent.spawnInto` stays an asynchronous handler (`SpawnInto`) — it waits for the daemon spawn inside the apply (§5-2).
+- Not blocked even during a drag (mouse tab drag) (ADR-0297) — the drop looks up the moved tab again.
 
-## 9. 시험
+## 9. Tests
 
-- 데몬(agent crate): `agent.resolve` 의 id · 이름 · 중복 · 없음 · 여럿 · 후보 문구 · 답 골든 JSON.
-- 데몬(daemon crate · `command_delivery.rs`): 중계 전 변환 — 표시한 칸의 이름 → id · id 는 그대로 · 표시 없는 칸 · 문자열 아닌 값은 손대지 않음 · 표시 순서 · 없음 `NOT_FOUND` · 겹침 `CONFLICT`(문구 머리 `<칸>: `)이면 중계 안 함 · 명부를 blocking 풀에서 읽음 · 풀던 중 마감이면 `TIMEOUT` 이고 중계 안 함.
-- 명령 도구(command crate): `#[agent_ref]` → `CommandSpec.agent_args`(선언 순서 · 스키마 불변 — agent crate `tests/command_alphabet.rs`) · 등록 패킷이 `help` 밖 칸으로 싣는다(`table.rs`).
-- 셸 `src-tauri/tests/layout_commands.rs`: 새 명령 넷 + 넓힌 인자 — 에이전트 칸에는 id 를 직접 준다(이름 → id 는 데몬 시험 몫) · 등록 패킷의 `agent_args` 가 명령마다 표시한 칸 그대로 · 표시한 칸의 UUID 아닌 값 = `INVALID_ARGUMENT` · 표 이름 골든 목록 갱신 · 인자 배타(둘 다 / 없음) · 후보 문구 · 오류 코드 대응(WindowNotFound = CONFLICT 포함) · 선언 `errors` 와 실제 코드 일치 · `Keep`(보이는 탭 · 포커스 불변 — 예외 셋 §11-4) · `tab.detach` 의 `reused` → `changed: false` · `tab.dock` 의 응답 `tab` = 목적 탭 · NewWindow 는 가짜 `WindowHost` 로 headless.
-- 셸 `src-tauri/tests/layout_apply.rs`: `Target` 풀기(잠금 안) · **끼어들기 시험**(데몬이 이름을 id 로 바꾼 뒤 · 셸이 적용하기 전에 그 에이전트가 옮겨지면 적용 잠금 안에서 **지금 자리**로 풀린다 — 옮겨 간 탭이 움직이고 떠난 탭은 안 건드린다 · 어느 칸에도 없으면 `NOT_FOUND` · 새 창 두 잠금 사이에 옮겨지면 연 창을 거두고 `CONFLICT`) · `after_tab_of` 자리(같은 창에서 원본이 앞 · 뒤) · `LayoutRow` 짓기(창 · 탭 · 칸 순서 · 좌표 · 다중 표시 · 빈 탭).
-- 명령: `cargo test -p engram-dashboard --test layout_commands` · `--test layout_apply` · `--test lib_unit` · `cargo test -p engram-dashboard-command` · `cargo test -p engram-dashboard-daemon -- --test-threads=4` · `cargo test -p engram-dashboard-agent -- --test-threads=4` · CI 생성물 동기.
+- Daemon (agent crate): `agent.resolve` id · name · duplicate · none · several · candidate messages · answer golden JSON.
+- Daemon (daemon crate · `command_delivery.rs`): pre-relay conversion — name → id in marked fields · an id stays as is · unmarked fields · non-string values not touched · marked order · none `NOT_FOUND` · overlap `CONFLICT` (message head `<칸>: `) means no relay · the registry is read in the blocking pool · a deadline during resolution is `TIMEOUT` and no relay.
+- Command tool (command crate): `#[agent_ref]` → `CommandSpec.agent_args` (declaration order · schema unchanged — agent crate `tests/command_alphabet.rs`) · the registration packet carries it in a field outside `help` (`table.rs`).
+- Shell `src-tauri/tests/layout_commands.rs`: the new four + the widened arguments — agent fields are given an id directly (name → id is for the daemon tests) · the `agent_args` of the registration packet is exactly the marked fields per command · a non-UUID value in a marked field = `INVALID_ARGUMENT` · update the table-name golden list · argument exclusivity (both / none) · candidate messages · error code mapping (including WindowNotFound = CONFLICT) · declared `errors` match the actual codes · `Keep` (visible tab · focus unchanged — three exceptions §11-4) · `reused` of `tab.detach` → `changed: false` · response `tab` of `tab.dock` = destination tab · NewWindow is headless with a fake `WindowHost`.
+- Shell `src-tauri/tests/layout_apply.rs`: `Target` resolution (inside the lock) · **interleaving test** (if that agent is moved after the daemon swaps the name for an id and before the shell applies it, it is resolved to its **current place** inside the apply lock — the tab it moved to moves and the tab it left is not touched · in no pane = `NOT_FOUND` · if moved between the two locks of a new window, the opened window is withdrawn and `CONFLICT`) · the `after_tab_of` position (source in front · behind in the same window) · `LayoutRow` building (window · tab · pane order · coordinates · multiple marks · empty tab).
+- Commands: `cargo test -p engram-dashboard --test layout_commands` · `--test layout_apply` · `--test lib_unit` · `cargo test -p engram-dashboard-command` · `cargo test -p engram-dashboard-daemon -- --test-threads=4` · `cargo test -p engram-dashboard-agent -- --test-threads=4` · CI generated-output sync.
 
-## 10. 구현 단위(파일 겹침으로 가른다 · 단위마다 빌드가 선다)
+## 10. Implementation units (split by file overlap · the build stands per unit)
 
-| 단위 | 파일 | 의존 |
+| Unit | Files | Depends on |
 |---|---|---|
-| U1 데몬 `agent.resolve` + 후보 문구 + 골든 | agent crate `commands.rs` · 그 시험 · `tests/ts_export.rs` · 바인딩 | 없음 |
-| U2 셸 적용 층 — `Target` · `locate` · `DockDest::TabBar.after` · `DockOutcome.changed` · `LayoutRow` 짓기 · 크기 계산 연결 | `src-tauri/src/layout/{apply.rs, manager.rs, dock.rs}` + 새 모듈 · `tests/layout_apply.rs` | 없음(U1 과 병렬) |
-| U3 데몬 몫 — 표시 칸(`#[agent_ref]` · `agent_args`) · 중계 전 변환(ADR-0308) | `crates/engram-dashboard-command/src/{macros.rs, spec.rs, table.rs, roster.rs}` · `crates/engram-dashboard-daemon/src/{command_delivery.rs, command_roster.rs, control/commands.rs}` · 프로토콜 등록 패킷 · 그 시험 | U1 |
-| U3 셸 몫 — 에이전트 칸 표시 · 새 명령 넷 · 오류 대응 · 넓힌 명령 | `src-tauri/src/layout/{commands.rs, apply.rs, manager.rs, rows.rs, target.rs, window_arg.rs}` · `src-tauri/src/view_commands.rs` · `src-tauri/tests/{layout_commands.rs, layout_apply.rs}` | U2 · U3 데몬 몫 |
+| U1 daemon `agent.resolve` + candidate messages + golden | agent crate `commands.rs` · its tests · `tests/ts_export.rs` · bindings | none |
+| U2 shell apply layer — `Target` · `locate` · `DockDest::TabBar.after` · `DockOutcome.changed` · `LayoutRow` building · size calculation hookup | `src-tauri/src/layout/{apply.rs, manager.rs, dock.rs}` + new module · `tests/layout_apply.rs` | none (parallel with U1) |
+| U3 daemon part — marked fields (`#[agent_ref]` · `agent_args`) · pre-relay conversion (ADR-0308) | `crates/engram-dashboard-command/src/{macros.rs, spec.rs, table.rs, roster.rs}` · `crates/engram-dashboard-daemon/src/{command_delivery.rs, command_roster.rs, control/commands.rs}` · protocol registration packet · its tests | U1 |
+| U3 shell part — agent field marks · the new four commands · error mapping · widened commands | `src-tauri/src/layout/{commands.rs, apply.rs, manager.rs, rows.rs, target.rs, window_arg.rs}` · `src-tauri/src/view_commands.rs` · `src-tauri/tests/{layout_commands.rs, layout_apply.rs}` | U2 · U3 daemon part |
 | U4 help · CLAUDE.md · step-log · tracking | `prompts/engram-help.md` · `CLAUDE.md` · `docs/` | U3 |
 
-## 11. 사용자가 돌아오면 볼 결정(메인이 기본값으로 진행)
+## 11. Decisions for the user to look at on return (main proceeds with the defaults)
 
-1. **원본 탭에 칸이 여럿이면 탭째 옮긴다**(§2 — 마우스와 같다). 대안 = 거절 · 칸 하나만 빼내는 새 길(지금 코드에 없음).
-2. **`tab.dock` 의 `share` 기본** = 마우스와 같은 값, 크기를 모르면 0.5(§4-2).
-3. **`slot.assignAgent` · `layout.setSlotContent` 가 풀리지 않는 에이전트를 거절**(§7 — 지금은 받아서 빈 칸).
-4. **`Keep` 이어도 보이는 탭이 바뀌는 세 경우**(슬롯 도킹 PRD R11b 의 예외 — 원본 탭이 떠나면 무언가를 보여야 한다): ⓐ 같은 창 안에서 보이던 탭을 옮기면 목적 탭이 보이게 된다 ⓑ 원본 창에서 보이던 탭이 떠나면 이웃 탭이 보인다 ⓒ main 의 마지막 탭이 떠나면 빈 탭이 새로 생겨 보인다(`manager.rs` 의 `dock` 승계).
-5. **끄는 중에 LLM 이 옮긴 탭을 우리 웹뷰 밖에 놓으면 새 창이 안 생긴다**(슬롯 도킹 PRD D9 · TRD §9-5 의 「T-65 가 다시 정한다」) — 이 TRD 는 그 동작을 **그대로 둔다**(드문 겹침 · ADR-0297 「막지 않는다」 유지).
-7. **칸 하나만 다른 칸 옆에 붙이기가 없다** — `tab.dock` 은 탭째 옮긴다. 두 에이전트가 이미 한 탭에 있으면 `slot.popout` 으로 빼낸 뒤 `tab.dock`(두 호출). 한 번에 하려면 칸 단위 도킹 경로가 새로 필요하다(지금 코드에 없음 · U3a 리뷰가 짚음).
-6. **LLM 의 새 창 크기 · 붙임 몫 기본이 마우스와 조금 다르다**(§4-2 · §4-3 — 원본 창이 최대화일 때 · main 에서 뗄 때). 같게 하려면 모니터 작업 영역 · 창 틀 입력을 셸로 올리는 포트가 필요하다(이번 범위 밖).
+1. **If the source tab has several panes, the whole tab moves** (§2 — same as the mouse). Alternatives = reject · a new path that pulls out a single pane (not in the code today).
+2. **The `share` default of `tab.dock`** = the same value as the mouse, 0.5 if the size is unknown (§4-2).
+3. **`slot.assignAgent` · `layout.setSlotContent` reject an agent that does not resolve** (§7 — today they accept it and leave an empty pane).
+4. **Three cases where the visible tab changes even with `Keep`** (exceptions to slot-docking PRD R11b — when the source tab leaves, something must be shown): ⓐ moving the visible tab within the same window makes the destination tab visible ⓑ when the visible tab of the source window leaves, a neighboring tab becomes visible ⓒ when the last tab of main leaves, an empty tab is newly created and shown (the `dock` succession in `manager.rs`).
+5. **If the tab an LLM moved during a drag is dropped outside our webview, no new window is created** (slot-docking PRD D9 · TRD §9-5 「T-65 가 다시 정한다」) — this TRD **leaves that behavior as is** (a rare overlap · ADR-0297 「막지 않는다」 kept).
+7. **There is no way to attach a single pane beside another pane** — `tab.dock` moves the whole tab. If two agents are already in one tab, pull one out with `slot.popout` and then `tab.dock` (two calls). Doing it in one call needs a new pane-level docking path (not in the code today · pointed out by the U3a review).
+6. **The LLM's default new-window size · attach share differ slightly from the mouse** (§4-2 · §4-3 — when the source window is maximized · when detaching from main). To make them the same, a port that lifts the monitor work area · window frame inputs into the shell is needed (out of scope this time).
 
-## 12. 1판 → 2판 (리뷰 반영)
+## 12. Edition 1 → edition 2 (review applied)
 
-- 응답 `tab` 이 dock 에서 지워진 원본 id 였다 → 살아남은 목적 탭(codex).
-- 이름 · 낱말 → 칸 고르기가 적용과 다른 잠금이었다(TOCTOU) → 적용 잠금 안 `Target` 풀기 + 끼어들기 시험(codex · Claude).
-- 목적 칸이 여러 칸에 뜬 에이전트면 고칠 인자가 없었다 → `beside_slot`(둘 다).
-- 평평한 줄이 좌우 · 위아래를 잃었다 → 정규 좌표 `x · y · w · h`(codex).
-- 이름 왕복이 말마다 3 초라 7 초 배달 시한을 넘을 수 있었다 → 한 번에 묶고 2 초 · 넘으면 적용 없음 + `INTERNAL`(Claude).
-- 「마우스와 같다」가 거짓이었다(새 창 크기 · share 원본 크기) → `drag_size::drag_sizes`(Claude).
-- `agent` 가 「어느 칸」과 「넣을 에이전트」로 겹쳤다 → `slot_of` · `tab_of` · `beside` · `assign`(Claude).
-- 탭 동사가 `window` 를 계속 요구했다 → 선택(Claude).
-- 선언 오류 목록 · `WindowNotFound` 코드 · 머리 문장 → §5-3(Claude).
-- `to_agent` 자리 계산이 잠금 밖 · 하나 어긋남 → `DockDest::TabBar.after`(Claude).
-- `changed` 출처 · identity 없음 → `DockOutcome.changed` · `CONFLICT`(Claude).
-- agent crate 판 · 답 모양 고정 → `catalog_version` · 골든 공유(Claude).
-- `TIMEOUT` 이 두 뜻 → `INTERNAL`(Claude).
-- 응답 크기 → 바뀐 탭만 · id 는 `ids: true` 일 때만(Claude).
-- 기존 명령 응답 미룸이 사용자 결정(ADR-0307 결정 4)을 어겼다 → 넓힌 명령에도 `layout`(Claude) · §11 에 R11b 예외 · D9 를 올림(Claude).
+- The response `tab` was the source id that dock deleted → the surviving destination tab (codex).
+- Selecting a pane from name · word was under a different lock than the apply (TOCTOU) → resolve `Target` inside the apply lock + interleaving test (codex · Claude).
+- When the destination pane was an agent that appears in several panes, there was no argument to fix it with → `beside_slot` (both).
+- The flat rows lost left/right · up/down → normalized coordinates `x · y · w · h` (codex).
+- The name round trip took 3 s per word and could exceed the 7 s delivery deadline → batched into one, 2 s · if exceeded, no apply + `INTERNAL` (Claude).
+- 「마우스와 같다」 was false (new-window size · share original size) → `drag_size::drag_sizes` (Claude).
+- `agent` overlapped as 「어느 칸」 and 「넣을 에이전트」 → `slot_of` · `tab_of` · `beside` · `assign` (Claude).
+- The tab verbs kept requiring `window` → optional (Claude).
+- Declared error list · the `WindowNotFound` code · head sentence → §5-3 (Claude).
+- The `to_agent` position calculation was outside the lock · off by one → `DockDest::TabBar.after` (Claude).
+- Source of `changed` · no identity → `DockOutcome.changed` · `CONFLICT` (Claude).
+- Agent crate edition · fixing the answer shape → `catalog_version` · shared golden (Claude).
+- `TIMEOUT` had two meanings → `INTERNAL` (Claude).
+- Response size → only changed tabs · ids only when `ids: true` (Claude).
+- Deferring the response of existing commands violated the user decision (ADR-0307 decision 4) → `layout` for the widened commands too (Claude) · the R11b exception and D9 raised in §11 (Claude).
 
-### 2판 → 3판 (Claude 재확인 반영)
+### Edition 2 → edition 3 (Claude re-check applied)
 
-- 새 창 크기 · share 원본을 `drag_sizes` 로 계산한다던 2판도 입력(작업 영역 · 창 틀 · 뷰포트)이 셸에 없어 사실상 거짓 → `plan_new_window` · 캔버스로 갈음하고 차이를 §11-6 에 밝힘.
-- 이름 풀기 시한 넘김 코드 `INTERNAL`(재시도 없음 · 패닉 뜻) → `CONFLICT` + `AfterCondition`.
-- 새 창 적용의 두 잠금 사이 → 커밋 잠금에서 다시 `locate` · 다르면 창을 거두고 `CONFLICT`.
-- `after_tab_of` 를 잠금 밖에서 `ViewId` 로 바꾸던 것 → `Target::AfterTabOf` · `DockTo::TabBar` 에도 칸 · 가장자리(원본 탭 안 · 여러 탭).
-- `layout.get` 줄에 탭 묶음 열쇠가 없었다 → `tab_index`.
-- 옛 데몬(`agent.resolve` 모름)과 붙은 새 셸이 id 만 주는 옛 호출까지 막던 것 → 이름만 `CONFLICT` · id 는 확인 건너뜀.
-- U2 가 혼자 빌드 안 되던 것(적용 시그니처 변경이 호출자 10 파일 남짓을 깸) → 옛 id 시그니처를 남김.
-- `agent.spawnInto` 를 `spawn_blocking` 에 넣을 수 없음 → 예외 · `at` 은 첫 잠금 안.
-- `identity == None` 을 `CONFLICT` 로 → 이미 옮겼으므로 `ok`.
+- Edition 2, which said it would compute the new-window size · share original with `drag_sizes`, was also effectively false because the inputs (work area · window frame · viewport) are not in the shell → the `plan_new_window` · canvas stand in, and the difference is stated in §11-6.
+- The code for exceeding the name-resolution deadline, `INTERNAL` (no retry · means panic) → `CONFLICT` + `AfterCondition`.
+- Between the two locks of a new-window apply → `locate` again in the commit lock · if different, withdraw the window and `CONFLICT`.
+- `after_tab_of` was converted to a `ViewId` outside the lock → `Target::AfterTabOf` · `DockTo::TabBar` also gets the field · edge (inside the source tab · several tabs).
+- The `layout.get` rows had no tab-grouping key → `tab_index`.
+- A new shell connected to an old daemon (which does not know `agent.resolve`) even blocked old calls that gave only an id → only names get `CONFLICT` · ids skip the check.
+- U2 did not build on its own (the apply signature change breaks about 10 caller files) → the old id signatures are kept.
+- `agent.spawnInto` cannot go into `spawn_blocking` → exception · `at` inside the first lock.
+- `identity == None` as `CONFLICT` → `ok`, since it was already moved.
 
-### 3판 → 4판 (ADR-0308 적용 · 구현대로)
+### Edition 3 → edition 4 (ADR-0308 applied · as implemented)
 
-- 셸이 처리 중 데몬에 `agent.resolve` 로 되묻던 이름 풀기(포트 · 2 초 시한 · 그 실패 코드 · 버려진 대기 슬롯 정리) → 셸은 에이전트 칸을 `#[agent_ref]` 로 표시하고 데몬이 중계 전에 id 로 바꾼다 · 못 풀면 데몬이 중계 없이 답한다(§5-1 · §6). 거부 사유 = ADR-0308.
-- 셸 처리기: 표시한 칸은 id 만 받는다 · UUID 가 아니면 `INVALID_ARGUMENT` · 비동기 처리기 → 본문 전체를 `spawn_blocking` 에서(`targeted_handler` · §8).
-- 선언 `errors` 의 근거를 데몬의 에이전트 칸 거절로 고침(§5-3) · `agent_id` 확인 · 기존 호출자 변화를 데몬 변환 기준으로 다시 씀(§7 · §7-1).
-- 셸 시험이 가짜 데몬 · `agent.resolve` 골든을 읽지 않는다 — 에이전트 칸에 id 를 준다 · 표시 목록과 UUID 아닌 값 반려를 잰다(§9) · 구현 단위에 데몬 몫을 더함(§10).
+- The name resolution where the shell asked the daemon back with `agent.resolve` while handling (port · 2 s deadline · its failure code · cleanup of abandoned wait slots) → the shell marks agent fields with `#[agent_ref]` and the daemon swaps them for ids before relaying · if it cannot resolve, the daemon answers without relaying (§5-1 · §6). Reason for rejection = ADR-0308.
+- Shell handler: marked fields accept only an id · `INVALID_ARGUMENT` if it is not a UUID · asynchronous handler → the whole body in `spawn_blocking` (`targeted_handler` · §8).
+- The basis of the declared `errors` fixed to the daemon's rejection of agent fields (§5-3) · the `agent_id` confirmation · the changes for existing callers rewritten on the daemon-conversion basis (§7 · §7-1).
+- The shell tests do not read a fake daemon · the `agent.resolve` golden — they give an id to agent fields · they measure the marked list and the bounce of non-UUID values (§9) · the daemon part added to the implementation units (§10).
 
-### 4판 코드 리뷰(FIX) 반영
+### Edition 4 code review (FIX) applied
 
-- 데몬: 명부 읽기 동시 상한(`MAX_RESOLVING_IN_FLIGHT` 16 — 표식이 읽기 안에서 풀린다 · 넘치면 중계 없이 `CONFLICT`) · 읽기 전 호출자 이탈 확인 · 푸는 동안 정산된 `TIMEOUT` · `OUTCOME_UNKNOWN` 은 코드를 두고 「주인에게 보내지 않았다」로 문구를 고침 + warn · `LocalCommands::agent_roster` 기본 몸통 제거 · `resolve_in` 이 UUID 철자 전부를 id 로(§7-1) · `lint_spec` 이 표시한 명령의 `NOT_FOUND` · `CONFLICT` 선언을 요구.
-- 셸: 에이전트 칸 오류 머리에 표시 이름(`slot_of 'beta' (<id>)` — 장부에 없으면 id) · `agent_arg` 반려에 「이름이나 id 를 주라」 · 등록 시험이 칸 수 · 칸 이름 길이 · 광고 코드 · 에이전트 이름꼴 인자의 표시 누락을 잰다.
+- Daemon: concurrency cap on registry reads (`MAX_RESOLVING_IN_FLIGHT` 16 — the mark is released inside the read · when it overflows, `CONFLICT` without relaying) · caller-left check before the read · `TIMEOUT` · `OUTCOME_UNKNOWN` settled during resolution keep the code and the message is changed to 「주인에게 보내지 않았다」 + warn · removed the `LocalCommands::agent_roster` default body · `resolve_in` takes every UUID spelling as an id (§7-1) · `lint_spec` requires the `NOT_FOUND` · `CONFLICT` declarations on marked commands.
+- Shell: the error head of an agent field carries the display name (`slot_of 'beta' (<id>)` — the id if not in the ledger) · the `agent_arg` bounce says 「이름이나 id 를 주라」 · the registration test measures the field count · field-name length · advertised codes · a missing mark on an agent-name-shaped argument.
