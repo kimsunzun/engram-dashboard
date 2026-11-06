@@ -1,60 +1,60 @@
-# ADR 자동화 — "스크립트 + 판단 한 스푼" 하이브리드 업계 관행 (리서치)
+# ADR automation: industry practice for the "script + a spoonful of judgment" hybrid (research)
 
-- 상태: 완료 (2026-06-26) · 강도: research 스킬 **medium**
-- 방법: Claude(Sonnet) 2갈래(supersede / 하이브리드 아키텍처) + Codex 1, **BLIND 독립 수집** → opus 교차 대조·적대 검증. (채번·인덱스 갈래는 6-25 라운드에서 회수.)
-- 목적: engram `adr` 스킬을 "결정적 스크립트 + LLM 판단" 하이브리드로 재설계. `/review trd full`이 잡은 부분 폐기·lint·채번 구멍의 해법 탐색.
-- 확신도 범례: 확실 / 가능성 높음 / 불확실
+- 상태: done (2026-06-26) · depth: research skill **medium**
+- Method: Claude (Sonnet) 2 branches (supersede / hybrid architecture) + Codex 1, **BLIND independent collection** → opus cross-check and adversarial verification. (The numbering and index branches were collected in the 6-25 round.)
+- Purpose: redesign the engram `adr` skill as a "deterministic script + LLM judgment" hybrid. Look for answers to the partial-discard, lint and numbering holes that `/review trd full` caught.
+- Confidence legend: certain / likely / uncertain
 
-## 핵심 결론
+## Core conclusions
 
-1. **기계 vs 판단 경계는 업계 전반에 일관**(확실). 스크립트 = 서기 작업(채번·파일생성·템플릿·인덱스 재생성·supersede 링크 박기·형식 lint). 사람/LLM = 사유 작업(본문 prose·전체/부분 폐기 판단·status 해석·"ADR감인가" 트리거). 2015 adr-tools ~ 2026 adr-kit까지 동일.
-2. **adr-tools(npryce)가 표준 thin 하이브리드 레퍼런스**(확실). bash 수백 줄. `adr new -s N` = supersede 양방향 자동, `-l "N:Amends:Amended by"` = 임의 양방향 관계.
-3. **부분 폐기(partial supersede)는 표준 도구 지원이 없다**(확실). 전체 폐기는 status를 `superseded`로 바꾸는 게 기본. 부분은 ① adr-tools `-l Amends/Amended by` 양방향 링크 관습 ② 본문 dated note(living-doc, joelparkerhenderson) — **둘 다 옛 ADR status는 유지**하고 링크/노트만 추가.
-   - → **우리 구멍의 정답:** 부분 폐기 = status 유지 + 양방향 `Amends`/`Amended by` 링크(+조항 단서). status를 통째 '폐기'로 덮지 않는다.
-4. **양방향 링크가 핵심이고 자동화가 가치**(확실). 손으로 하면 한쪽 빠뜨림 → 스크립트가 양쪽 박는 게 adr-tools의 존재 이유(우리 review 지적과 동일).
-5. **index/TOC는 별도 관심사, 재생성형**(확실). adr-log·pyadr `generate-toc`가 본문 스캔해 index 재생성. adr-tools 자체는 index 안 만듦.
-   - → 인덱스를 본문에서 **재생성**하면 "인덱스↔본문 drift"·"제목 drift"가 원천 차단(본문=단일 출처). 우리 "상태 정본=본문 헤더" 불변식과 정합.
-6. **status 어휘 표준** = proposed/accepted/deprecated/superseded(+rejected)(확실). superseded=더 나은 결정으로 대체 / deprecated=대체 없이 폐함.
-7. **LLM을 ADR에 끼운 패턴은 2024–2026 등장, 주류 내장은 아직 아님**(가능성 높음). 검증된 패턴 = Equal Experts "kernel of truth"(사람이 핵심 제공 → LLM 초안 → AI 비평 → 사람 fact-check·승인), Codex CLI 거버넌스, rvdbreemen/adr-kit(MCP). 공통 경고: **LLM이 Context/Consequences를 환각**(없는 API 생성) → 사람 검증 필수.
-8. **CI/훅 lint는 형성 중, 비주류**(확실). archgate·adr-kit·Codex CLI 패턴 전부 2025–2026 신생.
+1. **The machine-vs-judgment boundary is consistent across the industry** (certain). Script = clerical work (numbering, file creation, templates, index regeneration, laying down supersede links, format lint). Human/LLM = reasoning work (body prose, deciding full vs partial discard, interpreting status, the "is this ADR-worthy?" trigger). The same from 2015 adr-tools to 2026 adr-kit.
+2. **adr-tools (npryce) is the standard thin hybrid reference** (certain). A few hundred lines of bash. `adr new -s N` = supersede, automatic in both directions; `-l "N:Amends:Amended by"` = an arbitrary two-way relation.
+3. **Partial discard (partial supersede) has no standard tool support** (certain). For a full discard the default is to change the status to `superseded`. For a partial one: ① the adr-tools `-l Amends/Amended by` two-way link convention ② a dated note in the body (living-doc, joelparkerhenderson) — **both keep the old ADR's status** and only add a link/note.
+   - → **The answer to our hole:** partial discard = keep the status + two-way `Amends`/`Amended by` links (+ a clause qualifier). Do not overwrite the whole status with 'discarded'.
+4. **Two-way links are the core, and automating them is the value** (certain). Done by hand, one side gets forgotten → the script laying down both sides is the reason adr-tools exists (same as our review finding).
+5. **Index/TOC is a separate concern, of the regenerate kind** (certain). adr-log and pyadr `generate-toc` scan the bodies and regenerate the index. adr-tools itself does not build an index.
+   - → **Regenerating** the index from the bodies blocks "index↔body drift" and "title drift" at the source (body = single source). Consistent with our invariant "the status source of truth = the body header".
+6. **Status vocabulary standard** = proposed/accepted/deprecated/superseded (+rejected) (certain). superseded = replaced by a better decision / deprecated = dropped with no replacement.
+7. **The pattern of putting an LLM into ADRs appeared in 2024–2026, but it is not yet built into the mainstream** (likely). Verified patterns = Equal Experts "kernel of truth" (a human supplies the core → LLM draft → AI critique → human fact-check and approval), Codex CLI governance, rvdbreemen/adr-kit (MCP). Common warning: **the LLM hallucinates Context/Consequences** (invents APIs that do not exist) → human verification is required.
+8. **CI/hook lint is still forming and is not mainstream** (certain). The archgate, adr-kit and Codex CLI patterns are all new in 2025–2026.
 
-## 교차검증표 (Claude ↔ Codex)
+## Cross-check table (Claude ↔ Codex)
 
-| 클레임 | Claude | Codex | 판정 |
+| Claim | Claude | Codex | Decision |
 |---|---|---|---|
-| 기계/판단 경계 일관 | ✓ | ✓ | 수렴·확실 |
-| adr-tools = thin 레퍼런스 | ✓ | ✓ | 수렴·확실 |
-| 부분 폐기 표준 미지원, Amends 링크가 유일 실용 | ✓ | ✓ | 수렴·확실 |
-| 양방향 자동화는 adr-tools만 | ✓ | ✓ | 수렴·확실 |
-| index 재생성 = 별도 도구 | ✓ | ✓ | 수렴·확실 |
-| LLM 패턴 등장·비주류 | ✓ | ✓ | 수렴·가능성높음 |
-| EventCatalog 구조화 `amends` 필드 | ✓(미확정) | — | 한쪽만·가능성높음 |
-| dotnet-adr 실존 | 라운드1 확인 | 확인불가 | 약함·불확실 |
+| The machine/judgment boundary is consistent | ✓ | ✓ | converged · certain |
+| adr-tools = thin reference | ✓ | ✓ | converged · certain |
+| Partial discard is not supported by any standard, and Amends links are the only practical option | ✓ | ✓ | converged · certain |
+| Two-way automation exists only in adr-tools | ✓ | ✓ | converged · certain |
+| index regeneration = a separate tool | ✓ | ✓ | converged · certain |
+| LLM pattern emerging · not mainstream | ✓ | ✓ | converged · likely |
+| EventCatalog structured `amends` field | ✓ (unconfirmed) | — | one side only · likely |
+| dotnet-adr exists | confirmed in round 1 | could not confirm | weak · uncertain |
 
-## 설계 함의 (engram adr 하이브리드)
+## Design implications (engram adr hybrid)
 
-**`scripts/adr.mjs` (결정적):**
-- `new` — 채번(본문 파일 max+1, 쓰기 직전 재스캔) + 템플릿 파일 생성 + 인덱스 재생성
-- `supersede` — 전체: 옛 ADR status→`폐기 (Superseded by N)` + 새 ADR `Supersedes M`(양방향) / **부분: 옛 status 유지 + `Amended by N` ↔ 새 `Amends M` 양방향 링크**
-- `index` — 본문 H1·상태 스캔해 README 인덱스 **재생성**(drift 원천 차단)
-- `lint` — 상태 *어휘만* 비교 / 중복·빠진 번호 / supersede 양방향 일치 / 코드 앵커 `// ADR-`(코드 경로 한정, `docs/` 제외) 고아
+**`scripts/adr.mjs` (deterministic):**
+- `new` — numbering (max+1 over the body files, rescanned right before writing) + template file creation + index regeneration
+- `supersede` — full: old ADR status→`폐기 (Superseded by N)` + new ADR `Supersedes M` (two-way) / **partial: keep the old status + two-way link `Amended by N` ↔ new `Amends M`**
+- `index` — scan the body H1 and status and **regenerate** the README index (blocks drift at the source)
+- `lint` — compare the status *vocabulary only* / duplicate and missing numbers / supersede two-way consistency / orphan code anchors `// ADR-` (code paths only, `docs/` excluded)
 
-**`adr` 스킬 (얇게, 판단):** 사용자 결정 수령 → **전체 vs 부분 폐기 판단** → 본문 prose 정리(kernel→템플릿) → 스크립트 호출 → 결과 보고. 거부한 대안·근거는 사용자 제공(환각 금지·fact-check).
+**`adr` skill (thin, judgment):** take the user's decision → **decide full vs partial discard** → tidy the body prose (kernel→template) → call the script → report the result. Rejected alternatives and rationale come from the user (no hallucination · fact-check).
 
-→ 이 설계가 `/review`가 잡은 6개 구멍(부분폐기·lint거짓양성·채번·rg노이즈·제목drift·상태정본)을 **구조적으로** 해소한다.
+→ This design resolves the 6 holes `/review` caught (partial discard · lint false positives · numbering · rg noise · title drift · status source of truth) **structurally**.
 
-## 공백·한계
-- **만장일치 주의:** 두 family 모두 adr-tools에 강하게 앵커링 — 가장 오래·잘 문서화돼 과대표집 가능. 단 "부분 폐기 표준 없음"은 다수 독립 도구 확인이라 견고.
-- EventCatalog의 구조화 `amends` 필드는 스키마 미확인(추가 조사 여지).
-- LLM-ADR 연구의 효과 수치는 초록 미공개 다수(정량 불확실).
+## Gaps and limits
+- **Unanimity caution:** both families anchor strongly on adr-tools — it is the oldest and best documented, so it may be over-sampled. But "no standard for partial discard" is solid, since many independent tools confirm it.
+- The schema of EventCatalog's structured `amends` field was not checked (room for further investigation).
+- Many of the effect figures in the LLM-ADR studies are not disclosed in the abstracts (quantitatively uncertain).
 
-## 출처
-- adr-tools(npryce): https://github.com/npryce/adr-tools (`src/adr-new` 소스 직접 확인)
+## Sources
+- adr-tools(npryce): https://github.com/npryce/adr-tools (`src/adr-new` source checked directly)
 - adr-log: https://github.com/adr/adr-log · pyadr: https://github.com/opinionated-digital-center/pyadr
 - MADR: https://adr.github.io/madr/ · log4brains: https://github.com/thomvaill/log4brains
-- joelparkerhenderson ADR 모음: https://github.com/joelparkerhenderson/architecture-decision-record
+- joelparkerhenderson ADR collection: https://github.com/joelparkerhenderson/architecture-decision-record
 - Backstage ADR: https://backstage.io/docs/architecture-decisions/ · EventCatalog: https://www.eventcatalog.dev/blog/introducing-adrs
 - archgate/cli: https://github.com/archgate/cli · rvdbreemen/adr-kit: https://github.com/rvdbreemen/adr-kit · kschlt/adr-kit
-- Codex CLI ADR 거버넌스: https://codex.danielvaughan.com/2026/04/28/codex-cli-architecture-decision-records-adr-automated-governance/
-- Equal Experts(생성 AI + ADR): https://www.equalexperts.com/blog/our-thinking/accelerating-architectural-decision-records-adrs-with-generative-ai/
-- 논문: arXiv 2403.01709(Can LLMs Generate ADDs) · arXiv 2504.08207(DRAFT-ing ADDs) · AWS Prescriptive Guidance(ADR process)
+- Codex CLI ADR governance: https://codex.danielvaughan.com/2026/04/28/codex-cli-architecture-decision-records-adr-automated-governance/
+- Equal Experts (generative AI + ADR): https://www.equalexperts.com/blog/our-thinking/accelerating-architectural-decision-records-adrs-with-generative-ai/
+- Papers: arXiv 2403.01709 (Can LLMs Generate ADDs) · arXiv 2504.08207 (DRAFT-ing ADDs) · AWS Prescriptive Guidance (ADR process)
