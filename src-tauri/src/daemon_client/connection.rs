@@ -55,10 +55,10 @@ use crate::output_router::{OutputRouter, WindowLabel};
 // ★replay 진행 기반 deadline(ADR-0046)★. single-flight in-flight 가 이 시간 동안 진행(frame/Ack) 0 이면
 // 실패 마커로 종결한다(agent 소멸·subscribe 실패로 Ack/Complete 자체가 안 오는 경로). healthy-slow replay
 // (디버그 빌드·경합)는 frame/Ack 마다 리셋돼 절대 트립 안 된다(진행 기반). 운영 10s급.
-const REPLAY_DEADLINE: Duration = Duration::from_secs(10);
+pub(super) const REPLAY_DEADLINE: Duration = Duration::from_secs(10);
 
 // deadline sweep 주기 — main_loop select! 의 tick 간격. 이 granularity 로 만료된 in-flight 를 훑는다.
-const REPLAY_DEADLINE_TICK: Duration = Duration::from_secs(1);
+pub(super) const REPLAY_DEADLINE_TICK: Duration = Duration::from_secs(1);
 
 /// SendCommand 의 대기 슬롯(T6a) — request_id 로 짝지은 데몬 답, 또는 셸 로컬 실패를 호출자에게 나른다.
 ///
@@ -1704,7 +1704,8 @@ pub fn apply_replay_event(
         AgentEvent::SubscribeFailed { agent_id, reason } => {
             tracing::warn!(
                 %agent_id,
-                %reason,
+                // The daemon's free text — masked as the transport masks handshake text.
+                reason = %engram_dashboard_transport::mask_reason(reason),
                 "데몬이 Subscribe 를 거절 — single-flight 슬롯 해제"
             );
             let plan = plan_subscribe_refusal(flight, subs, *agent_id, now);
@@ -1724,7 +1725,7 @@ pub fn apply_replay_event(
 /// 자리다. 반면 읽는 자리(다음 세대 재구독 · 만료 마커 · 거절 마커)엔 그 증거가 없다 — 거기서
 /// `entry().or_default()` 를 쓰면 사라진 에이전트의 빈 항목이 연결 수명 내내 쌓인다. 읽는 자리를 전부 이
 /// 함수로 모아 그 규칙이 사이트마다 갈리지 않게 한다.
-fn known_epoch(subs: &HashMap<AgentId, SubState>, agent_id: AgentId) -> Option<u32> {
+pub(super) fn known_epoch(subs: &HashMap<AgentId, SubState>, agent_id: AgentId) -> Option<u32> {
     subs.get(&agent_id).and_then(|st| st.epoch)
 }
 

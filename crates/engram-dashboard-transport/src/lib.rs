@@ -24,7 +24,7 @@
 //! [`Registry::new`] 가 명부를 세운다 · [`Registry::add`] 가 상대를 올리고 그 [`Peer`] 와 수신단 [`Inbox`] 를
 //! 준다 · [`Registry::attach`] 는 받은 통로([`Listener`] 가 낸 [`Accepted`])를 같은 모양으로 얹는다(다시 걸지 않고
 //! 끝나면 명부에서 내린다 — 수락 루프는 소비자가 돈다) · [`Peer::request`]/[`Peer::notify`]/[`Peer::resume_stream`]/
-//! [`Peer::reconnect_now`]/[`Peer::close`]/[`Peer::close_after_flush`] 가 조작 표면 · [`Inbox::recv`] 가 유일한 수신
+//! [`Peer::reconnect_now`]/[`Peer::drop_link_in`]/[`Peer::close`]/[`Peer::close_after_flush`] 가 조작 표면 · [`Inbox::recv`] 가 유일한 수신
 //! 표면이다 — 손잡이마다 하나이고 그 감독 하나가 낸 것만 온다. 명부를 접을 때는 [`Registry::close_all`] 이 전부를
 //! 비우고 닫으며 끝을 기다린다.
 //! ★보내는 것은 연결 하나에 묶인다★ — `request` · `notify` 는 부른 순간의 지금 세대에, [`Peer::request_in`] ·

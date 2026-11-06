@@ -257,6 +257,10 @@ enum PeerOp<W: Wire> {
     Close {
         _keep_ctl: mpsc::UnboundedSender<Ctl>,
     },
+    /// [`Peer::drop_link_in`] — the bound connection ends as a lost link with `cause`.
+    DropLink {
+        cause: DisconnectCause,
+    },
 }
 
 enum Ctl {
@@ -515,6 +519,28 @@ impl<W: Wire> Peer<W> {
             return;
         }
         let _ = self.inner.ctl_tx.send(Ctl::ReconnectNow);
+    }
+
+    /// Ends connection `generation` as a lost link with `cause` — the same path as a read failure: `Disconnected`, flap
+    /// accounting, and the backoff before the next dial (an accepted peer ends, as on any link loss). ★Unlike
+    /// [`Peer::reconnect_now`] it keeps the budget and the backoff★ — a consumer that drops a connection over what the
+    /// remote sent must not turn a remote that keeps sending it into a reconnect loop.
+    ///
+    /// ★Only that connection★ — a no-op when `generation` is not the live one, at the entry and again when the
+    /// supervisor takes it (it never drops a newer connection). It goes through the outbound queue, behind what is
+    /// already queued; a full queue counts as an overflow of `generation` and [`crate::QueueFullPolicy`] decides — the
+    /// default `Disconnect` drops the link anyway, ★under `DropAndReport` the drop itself is lost★ (counted as one dropped
+    /// outbound frame). Ignored after [`Peer::close_after_flush`]; ★a drop queued before it ends that flush early★ —
+    /// the supervisor reaches the drop ahead of the flush marker, loses the link with the drop's `cause` and closes
+    /// without writing what was queued behind it.
+    pub fn drop_link_in(&self, generation: Generation, cause: DisconnectCause) {
+        if self.flushing() || !self.bound_to(generation) {
+            return;
+        }
+        let _ = self.push(PeerCmd {
+            generation,
+            op: PeerOp::DropLink { cause },
+        });
     }
 
     /// 명시 종료 — 다시 붙지 않는다. 큐에 든 것을 기다리지 않는다(제어 채널이 데이터 큐를 앞지른다) — 비우고
@@ -1821,6 +1847,7 @@ impl<W: Wire> Supervisor<W> {
                 self.write(frame).await.err()
             }
             PeerOp::Close { .. } => Some(Input::Close),
+            PeerOp::DropLink { cause } => Some(Input::LinkLost(cause)),
             PeerOp::Request { out, reply } => {
                 let Some(tag) = self.wire.request_tag(&out) else {
                     let _ = reply.send(Err(RequestError::NotARequest));
@@ -2298,6 +2325,8 @@ impl<W: Wire> Supervisor<W> {
             // 표지는 메시지가 아니라 세지 않는다. 버려져도 닫기는 안 잃는다 — 핸들이 표지보다 먼저 적은 `goodbye` 를
             //   운영 밖의 모든 대기 루프가 보고 접는다(이 자리를 부르는 곳은 운영 밖이거나 이미 닫는 중이다).
             PeerOp::Close { .. } => {}
+            // Not a message, and its connection is gone already — nothing to drop, nothing to count.
+            PeerOp::DropLink { .. } => {}
         }
     }
 
@@ -3471,6 +3500,12 @@ mod tests {
                 after: Some(1),
             }))
             .is_ok());
+        // A drop bound to the old connection must not cut the next one (`Peer::drop_link_in`).
+        assert!(data
+            .try_send(stale(PeerOp::DropLink {
+                cause: DisconnectCause::ReadFailed,
+            }))
+            .is_ok());
         settle().await;
         assert!(
             matches!(woken.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
@@ -3499,9 +3534,21 @@ mod tests {
             Vec::<String>::new(),
             "★옛 세대에 묶인 명령은 다음 연결에 안 쓰인다★"
         );
+        assert_eq!(
+            h.peer.peer_state(),
+            PeerState::Live,
+            "the stale drop left the next link up"
+        );
+        let events = h.events();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, TransportEvent::Disconnected { .. })),
+            "{events:?}"
+        );
         // 신고가 몇 건으로 갈리는지는 감독이 한 바퀴에 몇 개를 꺼내는지에 달려 있어 합만 본다.
         assert_eq!(
-            outbound_dropped(&h.events()),
+            outbound_dropped(&events),
             3,
             "★부르는 쪽이 `Ok` 를 받아 간 알림 · 팬아웃 · 이어받기는 버린 만큼 센다★ — 안 세면 조용한 유실이다"
         );
@@ -4393,6 +4440,78 @@ mod tests {
         h.clock.advance(Duration::from_millis(500));
         settle_until("재연결", || h.peer.peer_state() == PeerState::Live).await;
         assert_eq!(h.peer.generation(), Generation(2), "세대가 하나 올랐다");
+    }
+
+    // ── drop_link_in ──
+    #[tokio::test]
+    async fn drop_link_in_ignores_a_connection_that_is_not_the_live_one() {
+        let (mut h, first) = live().await;
+        let g1 = h.peer.generation();
+        first.close();
+        settle_until("backoff", || h.peer.peer_state() == PeerState::Backoff).await;
+        h.peer.drop_link_in(g1, DisconnectCause::ReadFailed);
+        settle().await;
+        assert_eq!(
+            h.peer.peer_state(),
+            PeerState::Backoff,
+            "not live — nothing to drop"
+        );
+        h.clock.advance(Duration::from_millis(500));
+        settle_until("reconnected", || h.peer.peer_state() == PeerState::Live).await;
+        let _next = h.net.accept().expect("the second link");
+        let g2 = h.peer.generation();
+        assert_ne!(g1, g2);
+        h.drain();
+
+        h.peer.drop_link_in(g1, DisconnectCause::ReadFailed);
+        settle().await;
+        assert_eq!(h.peer.peer_state(), PeerState::Live);
+        assert_eq!(h.peer.generation(), g2, "the newer connection stays");
+        assert_eq!(
+            h.kinds(),
+            Vec::<&str>::new(),
+            "no Disconnected, nothing counted"
+        );
+        assert_eq!(h.net.dials(), 2);
+    }
+
+    #[tokio::test]
+    async fn drop_link_in_loses_the_live_link_and_waits_the_backoff_before_the_next_dial() {
+        let (mut h, _endpoint) = live().await;
+        let g1 = h.peer.generation();
+        h.drain();
+        h.peer.drop_link_in(g1, DisconnectCause::ReadFailed);
+        settle_until("backoff", || h.peer.peer_state() == PeerState::Backoff).await;
+        assert_eq!(h.disconnect_cause(), Some(DisconnectCause::ReadFailed));
+        h.clock.advance(Duration::from_millis(499));
+        settle().await;
+        assert_eq!(h.net.dials(), 1, "no dial before the base delay");
+        h.clock.advance(Duration::from_millis(1));
+        settle_until("reconnected", || h.peer.peer_state() == PeerState::Live).await;
+        assert_eq!(h.net.dials(), 2);
+    }
+
+    #[tokio::test]
+    async fn repeated_drops_after_short_connects_keep_waiting_the_base_delay_without_jitter() {
+        // `build` turns jitter off (`no_jitter`) — with jitter the wait can fall below the base.
+        let mut policy = Policy::default();
+        policy.reconnect.max_attempts = u32::MAX;
+        let h = build(policy, Arc::new(ImmediateHandshake));
+        settle_until("first connect", || h.peer.peer_state() == PeerState::Live).await;
+        for round in 1..=5 {
+            h.peer
+                .drop_link_in(h.peer.generation(), DisconnectCause::ReadFailed);
+            settle_until("backoff", || h.peer.peer_state() == PeerState::Backoff).await;
+            h.clock.advance(Duration::from_millis(499));
+            settle().await;
+            assert_eq!(
+                h.net.dials(),
+                round,
+                "round {round}: no dial before the base delay"
+            );
+            h.clock.advance(Duration::from_millis(1));
+            settle_until("reconnected", || h.peer.peer_state() == PeerState::Live).await;
+        }
     }
 
     // ── N8: 붙자마자 끊기는 상대도 결국 포기에 닿는다(팝업 자격) ──

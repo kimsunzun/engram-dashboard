@@ -5510,9 +5510,9 @@ use crate::settings::{SettingsEvents, SettingsService, SettingsSnapshot};
 use crate::theme::{EffectiveThemes, ThemeControl, ThemeWindows, UiSettingsPayload};
 use crate::tray::actions::{for_each_ui_window, LayoutUsageVisibility, UsageVisibility};
 
-const POPUP: &str = "slot-popup-7";
+pub(super) const POPUP: &str = "slot-popup-7";
 
-struct NoLayoutEvents;
+pub(super) struct NoLayoutEvents;
 
 impl LayoutEvents for NoLayoutEvents {
     fn layout_updated(&self, _snapshot: &ViewSnapshot) {}
@@ -5641,7 +5641,7 @@ fn bus_request(name: &str, args: serde_json::Value) -> AgentEvent {
 }
 
 // `window` 활성 탭의 첫 슬롯.
-fn active_slot(state: &LayoutState, window: &str) -> (uuid::Uuid, uuid::Uuid) {
+pub(super) fn active_slot(state: &LayoutState, window: &str) -> (uuid::Uuid, uuid::Uuid) {
     let mgr = state.0.lock().unwrap();
     let view = mgr.windows[window].active;
     (view, tree::first_slot_id(&mgr.views[&view].layout))

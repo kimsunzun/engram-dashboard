@@ -217,6 +217,9 @@ impl ReplayFlightSet {
     //   참일 때만 안전한데, 그건 tungstenite/TCP 의 오류 의미론이지 우리가 강제하는 성질이 아니다. 대신
     //   호출자가 그 자리에서 **연결을 끊고**(`connection.rs` Subscribe(replay) 송신 실패 분기)
     //   [`Self::on_disconnect`] 가 일괄 청소한다 — 롤백보다 넓게 지우지만 전제를 코드로 만든다.
+    //   One sanctioned exception (new driver `connection_v2`, `write_follow_up`): a merged request promoted by
+    //   `on_complete` / `on_refused` whose agent no window shows any more is released with `on_refused` *before*
+    //   its Subscribe is attempted — it never reached the wire, so the single-outstanding premise holds.
 
     /// single-flight 라 도착하는 Ack 는 항상 유일 outstanding in-flight 의 것이다(좀비 포함 — 만료
     /// 세대의 late Ack 도 그 슬롯을 가리킨다). 그래서 gen 대조 없이 현 슬롯에 그대로 각인한다.

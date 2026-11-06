@@ -207,6 +207,11 @@ pub(crate) const CHANNEL_GONE: &str = "연결 task 가 명령을 받지 못함(�
 /// [`connection::UNSENT_ON_DISCONNECT`] 의 「재전송 안전」을 여기에 붙이면 거짓이 된다.
 pub(crate) const REPLY_LOST: &str = "명령 응답 수신 실패(연결 task 종료)";
 
+/// A replay request that wrote no `Subscribe` and got no generation — the link dropped, or no window shows the agent.
+/// Shared by the old connection task's dropped reply and the link driver's refusal, so the two cannot drift.
+pub(crate) const REPLAY_UNSENT: &str =
+    "replay 요청 미전송(연결 끊김 · 그 에이전트를 보이는 창 없음) — 프론트 재요청 안전";
+
 /// A round trip asked for a command that takes no reply (no `request_id`) — shared by the old driver's entry check
 /// and the link's error texts (`link::errors`), so the two cannot drift.
 pub(crate) const NO_REQUEST_ID: &str =
@@ -260,8 +265,8 @@ pub struct DaemonClient {
     ///   clone 해 넘긴다.
     usage: SharedUsageInterest,
     /// The new driver (`connection_v2`) when this client was built on it ([`Self::new_on_link`]) — connect, ensure,
-    /// close, the command round trips and fire-and-forget sends go there instead of the old connection task;
-    /// `state_rx` is its watch.
+    /// close, the command round trips, fire-and-forget sends, unsubscribe and replay requests go there instead of the
+    /// old connection task; `state_rx` is its watch.
     #[cfg(test)]
     link: Option<connection_v2::LinkClient>,
 }
@@ -355,7 +360,8 @@ impl DaemonClient {
     /// A client on the new driver (`connection_v2` — TRD S21 trd-3 §6-2 U3). `inner` dials the address the endpoint
     /// `source` resolves (a memory network in tests); `clock` drives the transport. ★The ports go in here, not through
     /// [`Self::with_agent_names`] · [`Self::with_refusal_notice`]★ — the driver starts with this call and keeps what it
-    /// got. Only connect · ensure · close · state, the command round trips and fire-and-forget sends run on it so far.
+    /// got. Connect · ensure · close · state, the command round trips, fire-and-forget sends, unsubscribe, replay
+    /// requests and the output relay (through this client's `router` and `registry`) run on it so far.
     #[cfg(test)]
     pub(crate) fn new_on_link(
         rt: Handle,
@@ -365,13 +371,19 @@ impl DaemonClient {
         events: Arc<dyn DaemonEvents>,
         names: Arc<dyn AgentNamesSink>,
     ) -> Self {
+        let router = Arc::new(OutputRouter::new());
+        let registry = WindowChannelRegistry::default();
         let link = connection_v2::LinkClient::start(
             &rt,
             inner,
             source,
             clock,
-            events.clone(),
-            names.clone(),
+            connection_v2::Ports {
+                events: events.clone(),
+                names: names.clone(),
+                router: router.clone(),
+                windows: registry.clone(),
+            },
         );
         let (lifecycle, _) = Lifecycle::new();
         Self {
@@ -381,8 +393,8 @@ impl DaemonClient {
             state_rx: link.state_rx(),
             lifecycle: Arc::new(lifecycle),
             handshake_timeout: HANDSHAKE_TIMEOUT,
-            router: Arc::new(OutputRouter::new()),
-            registry: WindowChannelRegistry::default(),
+            router,
+            registry,
             inbound: Arc::new(InboundSlot::new()),
             events,
             refusals: Arc::new(RefusalAlerts::new(Arc::new(NoRefusalNotice))),
@@ -1030,6 +1042,11 @@ impl DaemonClient {
     // 그래서 소켓이 없는 동안의 해제는 보낼 필요가 **없다** — 이미 끝난 일이다. ★이 문장을 형제
     // [`Self::send_fire_and_forget`] 로 넓히지 말 것★ — 그쪽은 사정이 다르고, 그 doc 이 그것을 적는다.
     pub fn unsubscribe(&self, agent_id: AgentId) {
+        #[cfg(test)]
+        if let Some(link) = &self.link {
+            link.unsubscribe(agent_id);
+            return;
+        }
         self.try_enqueue(
             |socket| ConnectionCommand::Unsubscribe { agent_id, socket },
             "unsubscribe",
@@ -1163,6 +1180,10 @@ impl DaemonClient {
     //   보내고 oneshot 으로 gen 을 회수한다(actor 가 single-flight 상태를 단독 소유 → 직렬). 그 에이전트를 보이는
     //   창이 없으면 Subscribe 없이 Err(연결 task 의 `RequestReplay` 팔 — 사유 정본 그 주석).
     pub async fn request_replay(&self, agent_id: AgentId) -> Result<u64, String> {
+        #[cfg(test)]
+        if let Some(link) = &self.link {
+            return link.request_replay(agent_id).await;
+        }
         let Some((cmd_tx, socket)) = self.lifecycle.current_cmd_tx() else {
             return Err(NOT_CONNECTED.to_string());
         };
@@ -1192,10 +1213,7 @@ impl DaemonClient {
         //   그냥 drop 한다 — 나를 통로는 `u64` 뿐이라 실어 보낼 오류값이 없다. 그래서 아래 문구가 그
         //   경로의 **유일한** 관측이고, 「미전송 · 재요청 안전」이라 그 경우에도 정직하다. 보이는 창이 없는 요청도
         //   같은 drop 으로 온다.
-        reply_rx.await.map_err(|_| {
-            "replay 요청 미전송(연결 끊김 · 그 에이전트를 보이는 창 없음) — 프론트 재요청 안전"
-                .to_string()
-        })
+        reply_rx.await.map_err(|_| REPLAY_UNSENT.to_string())
     }
 
     fn try_enqueue(&self, make: impl FnOnce(u64) -> ConnectionCommand, kind: &str) {

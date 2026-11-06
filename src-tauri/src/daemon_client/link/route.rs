@@ -323,7 +323,7 @@ pub fn route(
     item: Incoming<ShellWire>,
 ) -> Vec<Routed> {
     let RouteState { keys, clock } = st;
-    let Some(route) = keys.get_mut(key).filter(|r| r.token == token) else {
+    let Some(route) = of_current_handle(keys.get_mut(key), token) else {
         tracing::debug!(
             peer = %key.peer_id(),
             item = item_kind(&item),
@@ -343,7 +343,7 @@ pub fn route(
 /// The driver unregisters the handle's dial registration on every `Ended` — current or replaced handle — not only when
 /// this returns something (3-2 U3).
 pub fn route_end(st: &mut RouteState, key: &DaemonKey, token: HandleToken) -> Vec<Routed> {
-    let Some(route) = st.current(key, token) else {
+    let Some(route) = of_current_handle(st.keys.get_mut(key), token) else {
         tracing::debug!(peer = %key.peer_id(), "the inbox of a replaced handle ended");
         return Vec::new();
     };
@@ -364,14 +364,16 @@ pub fn route_end(st: &mut RouteState, key: &DaemonKey, token: HandleToken) -> Ve
 impl RouteState {
     /// `token` is `key`'s current handle and its connection is open as routed (`LinkUp` given, `LinkDown` not yet).
     pub fn is_open(&self, key: &DaemonKey, token: HandleToken) -> bool {
-        self.keys
-            .get(key)
-            .is_some_and(|r| r.token == token && r.open.is_some())
+        of_current_handle(self.keys.get(key), token).is_some_and(|r| r.open.is_some())
     }
+}
 
-    fn current(&mut self, key: &DaemonKey, token: HandleToken) -> Option<&mut KeyRoute> {
-        self.keys.get_mut(key).filter(|r| r.token == token)
-    }
+/// Rule ①: a key's route, kept only while `token` is that key's current handle.
+fn of_current_handle<R: std::borrow::Borrow<KeyRoute>>(
+    route: Option<R>,
+    token: HandleToken,
+) -> Option<R> {
+    route.filter(|r| r.borrow().token == token)
 }
 
 fn item_kind(item: &Incoming<ShellWire>) -> &'static str {
@@ -994,6 +996,30 @@ mod tests {
             states(&out),
             [Down, Connected, Reconnecting],
             "no Reconnecting before the first Connected, no Down after it"
+        );
+    }
+
+    #[test]
+    fn a_re_add_of_a_connected_key_shows_the_new_handles_first_failure_as_down() {
+        use ConnectionState::*;
+        let (mut st, old) = adopted();
+        assert_eq!(states(&run(&mut st, old, [connected(1)])), [Connected]);
+
+        let new = HandleToken::mint();
+        assert_eq!(states(&st.adopt(key(), new)), [Reconnecting]);
+        let out = run(
+            &mut st,
+            new,
+            [
+                connect_failed(unreachable()),
+                connect_failed(unreachable()),
+                connected(2),
+            ],
+        );
+        assert_eq!(
+            states(&out),
+            [Down, Connected],
+            "an explicit connect that fails shows Down, as a first connect does"
         );
     }
 
