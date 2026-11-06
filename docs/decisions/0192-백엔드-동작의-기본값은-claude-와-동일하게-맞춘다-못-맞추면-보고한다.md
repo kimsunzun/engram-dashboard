@@ -1,40 +1,40 @@
-# ADR-0192: 백엔드 동작의 기본값은 claude 와 동일하게 맞춘다 — 못 맞추면 보고한다
+# ADR-0192: The default of backend behavior is matched to claude — if it cannot be matched, report it
 
-- 상태: 확정 (2026-09-10, 근거: 사용자 결정)
-- 관련: ADR-0188(권한·승인 중립 축 — 값 설계는 후속) · ADR-0187(2a 면제 조건) · ADR-0004(백엔드 지식 격리) · ADR-0005(finalize 1 회) · ADR-0019(reaper 단일 소비자) · `.claude/handoff/attachments/codex-measurements-2026-09-09.md`(값·조합 실측) · CLAUDE.md 「아키텍처 원칙」 · step-log S21
+- 상태: 확정 (2026-09-10, basis: user decision)
+- 관련: ADR-0188 (permission/approval neutral axis — value design is follow-up) · ADR-0187 (the 2a exemption condition) · ADR-0004 (backend knowledge isolation) · ADR-0005 (finalize once) · ADR-0019 (reaper single consumer) · `.claude/handoff/attachments/codex-measurements-2026-09-09.md` (measured values · combinations) · CLAUDE.md 「아키텍처 원칙」 · step-log S21
 
 ## 맥락
 
-두 번째 백엔드를 붙이는 동안 「codex 는 어떻게 할까요」 형태의 질문이 축마다 반복됐다(권한 · 죽은 뒤 재연결).
+While attaching the second backend, questions of the form 「codex 는 어떻게 할까요」 (what should we do for codex) repeated axis after axis (permissions · reconnect after death).
 
-★**사용자 지적이 그 반복을 끊었다**★ — 그런 축은 백엔드마다 새로 정할 것이 아니라 **기존 동작에 맞추는 것이 기본**이고, 맞출 수 없다면 그것은 **추상화가 안 됐다는 신호**다.
+★**The user's point cut that repetition**★ — for such axes, it is not something to decide anew per backend: **matching existing behavior is the default**, and if it cannot be matched, that is **a sign it was not abstracted**.
 
-실제로 ADR-0188 이 같은 결함을 권한 축에서 이미 발견해 두었다 — 두 백엔드가 각자 자기 파일에서 정책을 문자열로 박고 있었고 **서로 달랐다**.
+In fact ADR-0188 had already found the same defect on the permission axis — the two backends each hard-coded their policy as strings in their own files and **they differed from each other**.
 
 ## 결정
 
-**백엔드 간에 갈릴 수 있는 동작 축의 기본값은 오늘 claude 가 하는 것과 동일하게 맞춘다.**
+**The default of a behavior axis that can differ between backends is matched to exactly what claude does today.**
 
-- **맞출 수 없거나 대응되는 값이 없으면 임의로 정하지 않고 그 사실을 보고한다** — 그것을 추상화 결함의 신호로 취급한다.
-- 이번에 이 규칙이 낳은 값 둘:
-  - **권한 = 쓰기 허용 + 승인 안 묻기.** claude 가 오늘 승인을 끄고 도는 것과 같은 자세다. ★단 글자 그대로 동일하게 맞추면 codex 쪽은 샌드박스까지 해제하는 값이 되어 과하므로 **한 칸 좁혀 작업폴더 쓰기로 맞췄다**★(도움말로 대응이 서는 유일한 쌍이 「전부 무시」 계열이라는 실측 = `.claude/handoff/attachments/codex-measurements-2026-09-09.md` §2-4).
-  - **프로세스가 죽은 뒤 재연결 = 하지 않는다.** claude 도 하지 않는다.
-- ★**권한 값은 잠정이다**★ — 공용 선언 형태(선언은 백엔드 중립, 내부 실행만 각 백엔드가 자기 인자로 옮김)로 가야 하고 **그 여지를 남긴다**. 값 설계 자체는 ADR-0188 의 후속 ADR 몫이다(사용자 결정).
+- **If it cannot be matched or has no corresponding value, do not decide arbitrarily but report that fact** — treat it as a sign of an abstraction defect.
+- The two values this rule produced this time:
+  - **Permission = allow writes + do not ask for approval.** The same posture as claude running today with approvals turned off. ★But matching literally the same would make it a value that even lifts the sandbox on the codex side, which is excessive, so **we matched it one notch narrower, to writing in the working folder**★ (the measurement that the only pair with a correspondence by help text is the 「전부 무시」 (ignore everything) family = `.claude/handoff/attachments/codex-measurements-2026-09-09.md` §2-4).
+  - **Reconnect after the process dies = do not.** claude does not either.
+- ★**The permission value is provisional**★ — it has to go to the shared declaration form (the declaration is backend-neutral and only the internal execution is moved into each backend's own arguments), and **we leave room for that**. The value design itself is the share of the follow-up ADR of ADR-0188 (user decision).
 
 ## 거부한 대안
 
-- **백엔드마다 그 도구에 자연스러운 값을 고른다** — 같은 제품 안에서 에이전트마다 정책이 갈리고 **사용자가 화면에서 그것을 알 방법이 없다**(ADR-0188 맥락의 실측 = 두 백엔드 정책이 이미 달랐다).
-- **축마다 사용자에게 묻는다** — 백엔드가 늘 때마다 질문이 배로 는다. **이 ADR 자체가 그 반복을 끝내려고 생겼다.**
-- **재연결을 codex 에만 붙인다** — 「끝났다는 신호는 정확히 한 번」(ADR-0005)과 「끝난 세션을 걷어가는 단일 소비자」(ADR-0019)를 건드려야 하고, 그러면 claude 와 동작이 갈린다. 2 인 리뷰가 각각 이 충돌을 BLOCK 급으로 짚었다.
+- **Each backend picks the value natural for its tool** — within one product the policy splits per agent and **the user has no way to know it from the screen** (the measurement in the ADR-0188 맥락 = the two backends' policies already differed).
+- **Ask the user per axis** — the questions double every time a backend is added. **This ADR itself came into being to end that repetition.**
+- **Attach reconnect only to codex** — it would have to touch 「끝났다는 신호는 정확히 한 번」 (ADR-0005) and 「끝난 세션을 걷어가는 단일 소비자」 (ADR-0019), and then the behavior would split from claude. Each of the two reviewers pointed at this conflict at BLOCK level.
 
 ## 근거
 
-- **선례 = ADR-0188.** 권한 축에서 이 규칙이 없어 생긴 결과가 그 ADR 의 맥락에 실측으로 남아 있다 — 두 백엔드가 정책을 각자 문자열로 박았고 서로 달랐으며, 프론트에는 권한 개념이 0 줄이었다.
-- **권한 잠정값의 실측 근거** = `.claude/handoff/attachments/codex-measurements-2026-09-09.md` §2-4. 값 이름끼리 짝지을 근거가 **도움말에 없고**, 대응이 서는 것은 「전부 무시」 계열 한 쌍뿐이다. 그래서 「글자 그대로 동일」이 아니라 **한 칸 좁힌 값**으로 맞췄다.
+- **Precedent = ADR-0188.** The result that came from not having this rule on the permission axis remains as a measurement in the 맥락 of that ADR — the two backends hard-coded their policies as strings on their own and they differed from each other, and the frontend had 0 lines of permission concept.
+- **The measured ground of the provisional permission value** = `.claude/handoff/attachments/codex-measurements-2026-09-09.md` §2-4. There is **no ground in the help text** for pairing value names, and the only thing a correspondence stands on is the one pair of the 「전부 무시」 family. So we matched not 「글자 그대로 동일」 (literally the same) but a **value one notch narrower**.
 
 ## 영향 / 불변식
 
-- **재연결 안 함** → 출력이 끊긴 순간의 종료·수거 경로가 그대로다. ADR-0005 · ADR-0019 를 건드리지 않는다.
-- **권한 잠정값이 ADR-0187 의 면제와 충돌하지 않는다 — 단 「요청이 아예 안 생긴다」로 읽지 말 것** — 승인 정책이 끄는 것은 선언된 서버→클라 요청 11 종 중 **승인 부분집합뿐**이다. 나머지 다섯(`currentTime/read` · `attestation/generate` · `account/chatgptAuthTokens/refresh` · `item/tool/call` · `mcpServer/elicitation/request`)은 승인이 아니라 그 정책의 사정권 밖이다(`.claude/handoff/attachments/codex-measurements-2026-09-09.md:61`). 실측 **0 건**도 「안 묻기」 하나가 만든 값이 아니라 **읽기 전용 + 안 묻기 + 도구 미실행**이 함께 만든 결과다(같은 문서 `:55` 가 앞 둘을 조건으로 적고, §3 `:128` 이 도구 미실행을 미측정 사유로 적어 둔다). ★**MCP 를 「없어서 안 왔다」로 적지 말 것**★ — 그 실행에 MCP 는 살아 있었다(`mcpServer/startupStatus/updated` 알림이 실제로 도착했다, 같은 문서 `:53`). `mcpServer/elicitation/request` 가 안 온 이유는 **미측정**이다. ★그러니 「안 온다」에 기대지 않는다 — 오면 method-not-found 로 응답한다는 처분(ADR-0189)이 그대로 유효하다.★ ★단 「쓰기 허용 + 안 묻기」 조합 자체는 **미측정**이다★ — 실측된 무승인 조합은 **읽기 전용** 쪽이다(같은 실측 문서 §1-3).
-- **claude 쪽 동작 변화 0.**
-- **이 결정을 다시 열 트리거** — ① ADR-0188 의 값 설계가 나오면 권한 잠정값이 그 축으로 흡수된다 ② 「claude 와 동일」이 **불가능한** 축이 나오면 그때 보고하고 별도 결정을 받는다 ③ 승인을 실제로 받기로 하면 ADR-0187 의 「서버 요청 0 건」 면제가 죽는다.
+- **No reconnect** → the exit and reaping path at the moment the output is cut stays as it is. It does not touch ADR-0005 · ADR-0019.
+- **The provisional permission value does not conflict with the exemption of ADR-0187 — but do not read it as 「요청이 아예 안 생긴다」 (requests are not generated at all)** — what the approval policy turns off is **only the approval subset** of the 11 declared server→client request kinds. The other five (`currentTime/read` · `attestation/generate` · `account/chatgptAuthTokens/refresh` · `item/tool/call` · `mcpServer/elicitation/request`) are not approvals but are outside that policy's reach (`.claude/handoff/attachments/codex-measurements-2026-09-09.md:61`). The measured **0** was also not a value produced by 「안 묻기」 (not asking) alone but a result produced together by **read-only + not asking + no tool executed** (the same document `:55` writes the first two as conditions, and §3 `:128` writes no tool execution as the reason for not measuring). ★**Do not write MCP as 「없어서 안 왔다」 (did not come because it was absent)**★ — MCP was alive in that run (the `mcpServer/startupStatus/updated` notification actually arrived, the same document `:53`). The reason `mcpServer/elicitation/request` did not come is **unmeasured**. ★So we do not lean on 「안 온다」 (it does not come) — the disposition that if one comes we answer with method-not-found (ADR-0189) remains valid as is.★ ★But the combination 「쓰기 허용 + 안 묻기」 (allow writes + do not ask) itself is **unmeasured**★ — the no-approval combination that was measured is on the **read-only** side (the same measurement document §1-3).
+- **Zero change in claude-side behavior.**
+- **Triggers to reopen this decision** — ① when the value design of ADR-0188 comes out, the provisional permission value is absorbed into that axis ② if an axis appears where 「claude 와 동일」 (the same as claude) is **impossible**, report it then and take a separate decision ③ if approvals are actually to be received, the 「서버 요청 0 건」 (0 server requests) exemption of ADR-0187 dies.

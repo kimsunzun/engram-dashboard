@@ -62,7 +62,7 @@ Every translation batch uses these renderings. A batch that needs a new term add
 | 장부 / 보관함 / 봉투 | ledger / mailbox / envelope | |
 | 파킹 / 반려 | parking / bounced | |
 | 유예 (flush) | deferral / deferred | not "grace" |
-| 창구 (데몬) | endpoint | not "window" |
+| 창구 | endpoint (or channel) | any receiving/sending entry: daemon route, write path, LLM surface; never "window" |
 | A와 B 제외 (수식어 공유) | excluding A and B that … | a shared qualifier covers both items |
 | 화신 / 화신 표식 | incarnation / incarnation marker | |
 | 자취 / 주인 | trace / owner | command registry |
@@ -71,5 +71,7 @@ Every translation batch uses these renderings. A batch that needs a new term add
 | 규격대로 뚫다 | cross as the spec allows | not "against its spec" |
 | 살림 (데몬) | lifecycle management | not "liveness" |
 | 파서 (폴더를 파서) | create (a folder) | 파다, not "parse" |
+| 「…」이 없다 (quote + negation) | there is no 「…」 | keep the negation in the sentence, not only in the gloss |
+| X를 들어 주다 | lift / waive X for us | not "make X apply" |
 
 Kept in Korean: the ADR lint tokens (`- 상태:` + vocab, `- 관련:`, section headings), text in 「」, names of CLAUDE.md and `.claude/` sections.

@@ -227,50 +227,50 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0178](0178-버전-불일치는-데몬이-핸드셰이크에서-판정하고-끊는다.md) | The daemon decides a version mismatch at the handshake and cuts the connection | 확정 |
 | [0179](0179-데몬은-클라이언트-여럿을-받고-클라는-데몬-여럿에-붙는다.md) | The daemon accepts several clients and a client attaches to several daemons | 확정 |
 | [0180](0180-연결-사건은-띠로-알리고-사용자가-눌러야-풀리는-것만-팝업으로-덮는다.md) | Announce connection events with a strip and cover the screen with a popup only for what is cleared only when the user presses | 확정 (부분 폐기 by ADR-0276: of the invariant that separates which notifications cover the screen by popup eligibility alone, the status-file guidance / ADR-0277: of the invariant that separates which notifications cover the screen by popup eligibility alone, the connection strip / ADR-0287: of the invariant that separates which notifications cover the screen by popup eligibility alone, all the remaining strip notifications) |
-| [0181](0181-요청-시한은-명령-무관-공용-하나로-두고-만료는-그-요청만-실패시킨다.md) | 요청 시한은 명령 무관 공용 하나로 두고 만료는 그 요청만 실패시킨다 | 확정 |
-| [0182](0182-transport-는-연결-사건을-구조화해-올리고-화면은-만들지-않는다.md) | transport 는 연결 사건을 구조화해 올리고 화면은 만들지 않는다 | 확정 |
-| [0183](0183-겹친-요청-번호는-승계시키지-않고-은퇴시켜-양쪽-다-실패시킨다.md) | 겹친 요청 번호는 승계시키지 않고 은퇴시켜 양쪽 다 실패시킨다 | 확정 |
-| [0184](0184-pty-transport-가-자식에게-터미널-정체성을-선언한다.md) | PTY transport 가 자식에게 터미널 정체성을 선언한다 | 확정 |
-| [0185](0185-세션-복원-불변식을-발급-주체-중립으로-codex는-발급받은-thread-id를-수령해-쓴다.md) | 세션 복원 불변식을 발급 주체 중립으로 — codex는 발급받은 thread id를 수령해 쓴다 | 확정 (부분 폐기 by ADR-0186: 원칙 문서 두 곳 조항 / ADR-0226: 결정 2 수령 지점 및 영향의 수령 단일점과 Phase 2 요구의 미강제 서술 / ADR-0233: 영향의 Phase 2 요구 첫 턴 전 persist 를 codex JSON 에서 거둠) |
-| [0186](0186-claudemd-는-매-세션-필요한-것만-담는다-에피소딕-지식은-adr코드-앵커핸드오프가-진다.md) | CLAUDE.md 는 매 세션 필요한 것만 담는다 — 에피소딕 지식은 ADR·코드 앵커·핸드오프가 진다 | 확정 |
-| [0187](0187-codex-phase-2-통로를-app-server-로-확정한다-exec-는-글자를-흘리지-않는다.md) | codex Phase 2 통로를 app-server 로 확정한다 — exec 는 글자를 흘리지 않는다 | 확정 |
-| [0188](0188-권한과-승인을-백엔드-중립-축으로-추상화한다-값-설계는-후속.md) | 권한과 승인을 백엔드 중립 축으로 추상화한다 — 값 설계는 후속 | 확정 |
-| [0189](0189-codex-app-server-통로는-backend-폴더-안의-agenttransport-구현체로-둔다.md) | codex app-server 통로는 backend 폴더 안의 AgentTransport 구현체로 둔다 | 확정 (부분 폐기 by ADR-0191: 통로의 거처는 정했으나 생성 경로를 안 정했다) |
-| [0190](0190-json-모드-입력은-큐에-담고-보낼-수-있을-때-흘린다-큐만-두고-조작은-나중.md) | json 모드 입력은 큐에 담고 보낼 수 있을 때 흘린다 — 큐만 두고 조작은 나중 | 확정 (부분 폐기 by ADR-0193: 결정 4 의 「턴이 도는가는 코어가 이미 안다」 조항 (큐 해제 판정을 코어 단독으로 좁힌 부분) / ADR-0231: 턴 도중 사용자 입력은 가장 이른 경계까지만 붙든다 · Idle 사용자 우선 · halted · 재론 트리거 ② 발동) |
-| [0191](0191-백엔드가-자기-통로를-만들어-넘긴다-가르는-switch-는-한-곳뿐이다.md) | 백엔드가 자기 통로를 만들어 넘긴다 — 가르는 switch 는 한 곳뿐이다 | 확정 |
-| [0192](0192-백엔드-동작의-기본값은-claude-와-동일하게-맞춘다-못-맞추면-보고한다.md) | 백엔드 동작의 기본값은 claude 와 동일하게 맞춘다 — 못 맞추면 보고한다 | 확정 |
-| [0193](0193-큐-해제의-지금-보낼-수-있나는-각-통로-구현체가-자기-상태로-판정한다.md) | 큐 해제의 「지금 보낼 수 있나」는 각 통로 구현체가 자기 상태로 판정한다 | 확정 (부분 폐기 by ADR-0231: codex 통로의 넘기기 정책 steer와 Idle 순서와 오류 뒤 멈춤) |
-| [0194](0194-터미널이냐-json이냐는-백엔드-중립-축-하나로-둔다-종류만-구분자다.md) | 터미널이냐 JSON이냐는 백엔드 중립 축 하나로 둔다 — 종류만 구분자다 | 확정 |
-| [0195](0195-연결이-끊긴-동안-들어온-명령은-담아-두지-않고-즉시-실패시킨다.md) | 연결이 끊긴 동안 들어온 명령은 담아 두지 않고 즉시 실패시킨다 | 확정 |
-| [0196](0196-죽은-데몬-기록은-버전-방향과-무관하게-stale-생존-확인을-버전-대조보다-먼저.md) | 죽은 데몬 기록은 버전 방향과 무관하게 stale — 생존 확인을 버전 대조보다 먼저 | 확정 |
-| [0197](0197-주제별-상세-구조-문서를-referencestructure-에-모은다-파일-하나-주제-하나.md) | 주제별 상세 구조 문서를 reference/structure/ 에 모은다 — 파일 하나 = 주제 하나 | 확정 |
-| [0198](0198-codex-입력도-화면에-즉시-띄운다-합성-에코를-clientusermessageid-로-합친다.md) | codex 입력도 화면에 즉시 띄운다 — 합성 에코를 clientUserMessageId 로 합친다 | 확정 (부분 폐기 by ADR-0231: 합성 에코는 한가할 때만 · 영향의 하이드레이션 순서 미결을 닫음(대기 → 이력 뒤 전달) · 보낸 자리 정식 말풍선 원안 거부) |
-| [0199](0199-기록-실패-갈래에서-통로가-자기-stdin-쓰기-끝을-닫는다.md) | 기록 실패 갈래에서 통로가 자기 stdin 쓰기 끝을 닫는다 | 확정 (부분 폐기 by ADR-0200: stdin 을 닫는 갈래 범위 / ADR-0292: 릴리스 도달 불가 근거의 abort 전제) |
-| [0200](0200-왕복-실패-갈래도-통로가-자기-stdin-쓰기-끝을-닫는다.md) | 왕복 실패 갈래도 통로가 자기 stdin 쓰기 끝을 닫는다 | 확정 |
-| [0201](0201-이어받기-성공은-준비됐다는-신호로-판정한다-시간-창이-아니다.md) | 이어받기 성공은 준비됐다는 신호로 판정한다 — 시간 창이 아니다 | 확정 |
-| [0202](0202-활성화-증거를-지우지-않는다-저장된-손잡이도-실패-기록도.md) | 활성화 증거를 지우지 않는다 — 저장된 손잡이도 실패 기록도 | 확정 |
-| [0203](0203-codex-화면-복원은-app-server-에-페이지로-요청한다-rollout-파일을-읽지-않는다.md) | codex 화면 복원은 app-server 에 페이지로 요청한다 — rollout 파일을 읽지 않는다 | 확정 (부분 폐기 by ADR-0204: 복원 이벤트가 붙는 자리) |
-| [0204](0204-복원-이벤트는-통로가-넣는다-매니저가-공개-전에-깔-수-있는-시점이-없다.md) | 복원 이벤트는 통로가 넣는다 — 매니저가 공개 전에 깔 수 있는 시점이 없다 | 확정 |
-| [0205](0205-이력-배달에-끼어드는-라이브-줄을-붙드는-리더-보류-큐를-만들지-않는다.md) | 이력 배달에 끼어드는 라이브 줄을 붙드는 리더 보류 큐를 만들지 않는다 | 확정 |
-| [0206](0206-연결-수신-루프는-명령을-붙들지-않고-넘긴다-입력-쓰기는-에이전트별-전담-라이터가-진다.md) | 연결 수신 루프는 명령을 붙들지 않고 넘긴다 — 입력 쓰기는 에이전트별 전담 라이터가 진다 | 확정 |
-| [0207](0207-프로필-저장은-락을-쥔-채-디스크를-쓴다-락-보유-시간을-줄이지-않는다.md) | 프로필 저장은 락을 쥔 채 디스크를 쓴다 — 락 보유 시간을 줄이지 않는다 | 확정 (부분 폐기 by ADR-0291: 락 안 작업 증가와 재론 방아쇠 ② 에 닿는 최악 시간 수락 및 근거 3(`mutate` 를 타지 않는 유일한 쓰기)) |
-| [0208](0208-codex-세션-id-는-훅이-되돌려-보내고-데몬은-빈-칸에만-받는다.md) | codex 세션 id 는 훅이 되돌려 보내고 데몬은 빈 칸에만 받는다 | 확정 (부분 폐기 by ADR-0210: 훅 등록 경계와 훅 진단 합류 / ADR-0216: 훅 회수 경로와 adopt 빈 칸 정책 대체) |
-| [0209](0209-우편-인가는-uses-mail-로-축을-쪼갠다-mcp-가-정식이고-cli-는-미러다.md) | 우편 인가는 uses_mail 로 축을 쪼갠다 — MCP 가 정식이고 CLI 는 미러다 | 확정 |
-| [0210](0210-codex-훅은-파일-설치-없이-실행-인자로-등록하고-신뢰는-tui-심사로-얻는다.md) | codex 훅은 파일 설치 없이 실행 인자로 등록하고 신뢰는 TUI 심사로 얻는다 | 폐기 (Superseded by ADR-0216) |
-| [0211](0211-지시서는-포인터로-줄이고-계약은-도구-설명문과-engram-help-가-진다.md) | 지시서는 포인터로 줄이고 계약은 도구 설명문과 engram help 가 진다 | 확정 (부분 폐기 by ADR-0220: 지시서 포인터와 mail 하위 쪼개기 / ADR-0285: 영향의 help 무자격증명 무데몬 성질) |
-| [0212](0212-engram-help-본문을-외부-파일로-빼되-내장-사본을-폴백으로-남긴다.md) | engram help 본문을 외부 파일로 빼되 내장 사본을 폴백으로 남긴다 | 확정 (부분 폐기 by ADR-0220: 파일명과 구획 표시 꼴 / ADR-0285: 결정 3과 4 및 거부한 대안 셋과 영향의 잃은 보증) |
-| [0213](0213-mcp-도구-이름에-eg-접두-에이전트-내장-도구와의-이름-충돌-차단.md) | MCP 도구 이름에 eg_ 접두 — 에이전트 내장 도구와의 이름 충돌 차단 | 확정 (부분 폐기 by ADR-0220: 지시서의 engram help mail 금지) |
-| [0214](0214-codex-우편을-mcp로-양방향-개방-승인은-서버별-스폰-인자로-끈다.md) | codex 우편을 MCP로 양방향 개방 — 승인은 서버별 스폰 인자로 끈다 | 확정 |
-| [0215](0215-codex-지시서는-developer-instructions-로-싣고-파일-읽기는-백엔드가-진다.md) | codex 지시서는 developer_instructions 로 싣고 파일 읽기는 백엔드가 진다 | 확정 (부분 폐기 by ADR-0219: LLM 생성 표면의 codex 차단 조항) |
-| [0216](0216-codex-세션-id-는-tui-상태줄에서-읽고-훅은-걷어낸다.md) | codex 세션 id 는 TUI 상태줄에서 읽고 훅은 걷어낸다 | 확정 (부분 폐기 by ADR-0217: 상태줄 회수 채널과 스캐너 대체 / ADR-0226: 결정 7 값 정책) |
-| [0217](0217-codex-세션-id-는-mcp-호출-메타로-받고-상태줄-스크래핑을-걷어낸다.md) | codex 세션 id 는 MCP 호출 메타로 받고 상태줄 스크래핑을 걷어낸다 | 확정 (부분 폐기 by ADR-0218: 회수 채널을 락 파일 홀더 PID 로 교체 / ADR-0226: 결정 7 값 정책) |
-| [0218](0218-codex-세션-id-는-락-파일을-쥔-프로세스가-우리-자식인지로-판정한다.md) | codex 세션 id 는 락 파일을 쥔 프로세스가 우리 자식인지로 판정한다 | 확정 (부분 폐기 by ADR-0226: 결정 6 값 정책 / ADR-0266: 결정 11의 플랫폼 질의 거처) |
-| [0219](0219-llm-생성-표면을-codex-에-연다-폴더-신뢰-모달은-tui-전용이다.md) | LLM 생성 표면을 codex 에 연다 — 폴더 신뢰 모달은 TUI 전용이다 | 확정 (부분 폐기 by ADR-0270: 결정 2의 셸 gate_backend 문과 영향의 셸 거절 팔 가드 / ADR-0279: 결정 5 의 claude 고정 문 축) |
-| [0220](0220-에이전트가-읽는-표면을-네-계열로-재편하고-우편-가시성-필터를-걷는다.md) | 에이전트가 읽는 표면을 네 계열로 재편하고 우편 가시성 필터를 걷는다 | 확정 (부분 폐기 by ADR-0285: 결정 2의 목차 화면 자리와 영향 첫 항목) |
-| [0221](0221-호출자-입력의-철자-관용은-코어가-흡수한다.md) | 호출자 입력의 철자 관용은 코어가 흡수한다 | 확정 |
-| [0222](0222-부팅-기본-레이아웃은-단일-빈-슬롯이다-에이전트-트리를-기본에서-뺀다.md) | 부팅 기본 레이아웃은 단일 빈 슬롯이다 (에이전트 트리를 기본에서 뺀다) | 확정 |
-| [0223](0223-레이아웃-분할-노드에-고정-id를-두고-화면은-그-id로-분할-인스턴스를-가른다.md) | 레이아웃 분할 노드에 고정 id를 두고 화면은 그 id로 분할 인스턴스를 가른다 | 확정 (부분 폐기 by ADR-0227: 결정 2 Allotment key와 영향의 승격 재마운트 조항) |
-| [0224](0224-닫은-뒤-포커스는-직전-콘텐츠-칸으로-돌아가고-제어-칸은-포커스를-받지-않는다.md) | 닫은 뒤 포커스는 직전 콘텐츠 칸으로 돌아가고 제어 칸은 포커스를 받지 않는다 | 확정 |
+| [0181](0181-요청-시한은-명령-무관-공용-하나로-두고-만료는-그-요청만-실패시킨다.md) | The request deadline is one shared value, independent of the command, and expiry fails only that request | 확정 |
+| [0182](0182-transport-는-연결-사건을-구조화해-올리고-화면은-만들지-않는다.md) | transport raises connection events as structure and does not build a screen | 확정 |
+| [0183](0183-겹친-요청-번호는-승계시키지-않고-은퇴시켜-양쪽-다-실패시킨다.md) | A colliding request number is not handed on but retired, and both sides fail | 확정 |
+| [0184](0184-pty-transport-가-자식에게-터미널-정체성을-선언한다.md) | The PTY transport declares a terminal identity to the child | 확정 |
+| [0185](0185-세션-복원-불변식을-발급-주체-중립으로-codex는-발급받은-thread-id를-수령해-쓴다.md) | The session-restore invariant is issuer-neutral — codex receives and uses the thread id it was issued | 확정 (부분 폐기 by ADR-0186: the clauses in two principle documents / ADR-0226: the receiving point in decision 2, the single receiving point in the impact section, and the unenforced description of the Phase 2 requirement / ADR-0233: withdraws, for codex JSON, the Phase 2 requirement in the impact section to persist before the first turn) |
+| [0186](0186-claudemd-는-매-세션-필요한-것만-담는다-에피소딕-지식은-adr코드-앵커핸드오프가-진다.md) | CLAUDE.md holds only what every session needs — episodic knowledge is carried by ADRs, code anchors and handoffs | 확정 |
+| [0187](0187-codex-phase-2-통로를-app-server-로-확정한다-exec-는-글자를-흘리지-않는다.md) | Settle the codex Phase 2 channel on app-server — exec does not stream characters | 확정 |
+| [0188](0188-권한과-승인을-백엔드-중립-축으로-추상화한다-값-설계는-후속.md) | Abstract permissions and approvals into a backend-neutral axis — value design comes later | 확정 |
+| [0189](0189-codex-app-server-통로는-backend-폴더-안의-agenttransport-구현체로-둔다.md) | The codex app-server channel is placed as an AgentTransport implementation inside the backend folder | 확정 (부분 폐기 by ADR-0191: it decided where the channel lives but did not decide the creation path) |
+| [0190](0190-json-모드-입력은-큐에-담고-보낼-수-있을-때-흘린다-큐만-두고-조작은-나중.md) | json-mode input goes into a queue and is released when it can be sent — only the queue now, controls later | 확정 (부분 폐기 by ADR-0193: the clause 「턴이 도는가는 코어가 이미 안다」 of decision 4 (the part that narrowed the queue-release decision to the core alone) / ADR-0231: user input mid-turn is held only until the earliest boundary · Idle user-first · halted · reopen trigger ② fired) |
+| [0191](0191-백엔드가-자기-통로를-만들어-넘긴다-가르는-switch-는-한-곳뿐이다.md) | The backend builds its own channel and hands it over — there is only one switch that splits them | 확정 |
+| [0192](0192-백엔드-동작의-기본값은-claude-와-동일하게-맞춘다-못-맞추면-보고한다.md) | The default of backend behavior is matched to claude — if it cannot be matched, report it | 확정 |
+| [0193](0193-큐-해제의-지금-보낼-수-있나는-각-통로-구현체가-자기-상태로-판정한다.md) | Each transport implementation decides 「지금 보낼 수 있나」 (“can we send now?”) for queue release from its own state | 확정 (부분 폐기 by ADR-0231: the codex transport's handoff policy steer, the Idle order, and the stop after an error) |
+| [0194](0194-터미널이냐-json이냐는-백엔드-중립-축-하나로-둔다-종류만-구분자다.md) | Terminal vs JSON is one backend-neutral axis — only the kind is the discriminator | 확정 |
+| [0195](0195-연결이-끊긴-동안-들어온-명령은-담아-두지-않고-즉시-실패시킨다.md) | Commands that arrive while the connection is down are failed at once, not held | 확정 |
+| [0196](0196-죽은-데몬-기록은-버전-방향과-무관하게-stale-생존-확인을-버전-대조보다-먼저.md) | A dead daemon's record is stale regardless of version direction — check liveness before comparing versions | 확정 |
+| [0197](0197-주제별-상세-구조-문서를-referencestructure-에-모은다-파일-하나-주제-하나.md) | Collect per-topic detailed structure documents in reference/structure/ — one file = one topic | 확정 |
+| [0198](0198-codex-입력도-화면에-즉시-띄운다-합성-에코를-clientusermessageid-로-합친다.md) | Show codex input on screen at once too — merge the synthetic echo by clientUserMessageId | 확정 (부분 폐기 by ADR-0231: the synthetic echo only when idle · closes the hydration-order open item under impact (waiting → deliver after history) · rejects the original plan of a formal bubble at the sent spot) |
+| [0199](0199-기록-실패-갈래에서-통로가-자기-stdin-쓰기-끝을-닫는다.md) | On the record-failure branch the transport closes its own stdin write end | 확정 (부분 폐기 by ADR-0200: the scope of branches that close stdin / ADR-0292: the abort premise of the ground that release is unreachable) |
+| [0200](0200-왕복-실패-갈래도-통로가-자기-stdin-쓰기-끝을-닫는다.md) | The round-trip-failure branch too — the transport closes its own stdin write end | 확정 |
+| [0201](0201-이어받기-성공은-준비됐다는-신호로-판정한다-시간-창이-아니다.md) | Resume success is decided by a "ready" signal — not a time window | 확정 |
+| [0202](0202-활성화-증거를-지우지-않는다-저장된-손잡이도-실패-기록도.md) | Do not erase activation evidence — neither the stored handle nor the failure record | 확정 |
+| [0203](0203-codex-화면-복원은-app-server-에-페이지로-요청한다-rollout-파일을-읽지-않는다.md) | Restore the codex screen by requesting pages from the app-server — do not read rollout files | 확정 (부분 폐기 by ADR-0204: the spot where the restore events attach) |
+| [0204](0204-복원-이벤트는-통로가-넣는다-매니저가-공개-전에-깔-수-있는-시점이-없다.md) | The transport inserts the restore events — there is no point at which the manager can lay them down before publication | 확정 |
+| [0205](0205-이력-배달에-끼어드는-라이브-줄을-붙드는-리더-보류-큐를-만들지-않는다.md) | Do not build a reader-side hold queue that holds the live lines interleaving into history delivery | 확정 |
+| [0206](0206-연결-수신-루프는-명령을-붙들지-않고-넘긴다-입력-쓰기는-에이전트별-전담-라이터가-진다.md) | The connection receive loop hands commands off instead of holding them — input writes are carried by a dedicated per-agent writer | 확정 |
+| [0207](0207-프로필-저장은-락을-쥔-채-디스크를-쓴다-락-보유-시간을-줄이지-않는다.md) | Profile saves write to disk while holding the lock — we do not shorten the lock hold time | 확정 (부분 폐기 by ADR-0291: accepting the growth of in-lock work and a worst-case time that reaches re-open trigger ②, and rationale 3 (the only write that does not go through `mutate`)) |
+| [0208](0208-codex-세션-id-는-훅이-되돌려-보내고-데몬은-빈-칸에만-받는다.md) | The codex session id is sent back by a hook, and the daemon accepts it only into an empty slot | 확정 (부분 폐기 by ADR-0210: hook registration boundary and merging of hook diagnostics / ADR-0216: replaces the hook retrieval path and the adopt empty-slot policy) |
+| [0209](0209-우편-인가는-uses-mail-로-축을-쪼갠다-mcp-가-정식이고-cli-는-미러다.md) | Mail authorization splits its axis with uses_mail — MCP is the official path and the CLI is a mirror | 확정 |
+| [0210](0210-codex-훅은-파일-설치-없이-실행-인자로-등록하고-신뢰는-tui-심사로-얻는다.md) | The codex hook is registered through an execution argument without installing any file, and trust is obtained through the TUI review | 폐기 (Superseded by ADR-0216) |
+| [0211](0211-지시서는-포인터로-줄이고-계약은-도구-설명문과-engram-help-가-진다.md) | The instruction document shrinks to a pointer, and the contract is carried by the tool description and engram help | 확정 (부분 폐기 by ADR-0220: instruction pointer and splitting mail into sub-pages / ADR-0285: the help-needs-no-credentials-or-daemon property in Impact) |
+| [0212](0212-engram-help-본문을-외부-파일로-빼되-내장-사본을-폴백으로-남긴다.md) | Move the engram help body into an external file, but keep a built-in copy as the fallback | 확정 (부분 폐기 by ADR-0220: file name and the shape of the section markers / ADR-0285: decisions 3 and 4, the three rejected alternatives, and the lost guarantee in Impact) |
+| [0213](0213-mcp-도구-이름에-eg-접두-에이전트-내장-도구와의-이름-충돌-차단.md) | The eg_ prefix on MCP tool names — blocking name collisions with the agent's built-in tools | 확정 (부분 폐기 by ADR-0220: the instruction document's ban on engram help mail) |
+| [0214](0214-codex-우편을-mcp로-양방향-개방-승인은-서버별-스폰-인자로-끈다.md) | Open codex mail in both directions over MCP — turn approval off with a per-server spawn argument | 확정 |
+| [0215](0215-codex-지시서는-developer-instructions-로-싣고-파일-읽기는-백엔드가-진다.md) | The codex instruction document is carried in developer_instructions, and the backend carries the file reading | 확정 (부분 폐기 by ADR-0219: the clause blocking codex on the LLM creation surface) |
+| [0216](0216-codex-세션-id-는-tui-상태줄에서-읽고-훅은-걷어낸다.md) | The codex session id is read from the TUI status line, and the hook is removed | 확정 (부분 폐기 by ADR-0217: status-line recovery channel and scanner replaced / ADR-0226: decision 7 value policy) |
+| [0217](0217-codex-세션-id-는-mcp-호출-메타로-받고-상태줄-스크래핑을-걷어낸다.md) | The codex session id is received through the MCP call meta, and the status-line scraping is removed | 확정 (부분 폐기 by ADR-0218: recovery channel replaced with the lock-file holder PID / ADR-0226: decision 7 value policy) |
+| [0218](0218-codex-세션-id-는-락-파일을-쥔-프로세스가-우리-자식인지로-판정한다.md) | The codex session id is decided by whether the process holding the lock file is our child | 확정 (부분 폐기 by ADR-0226: decision 6 value policy / ADR-0266: the home of the platform query in decision 11) |
+| [0219](0219-llm-생성-표면을-codex-에-연다-폴더-신뢰-모달은-tui-전용이다.md) | Open the LLM creation surface to codex — the folder-trust modal is TUI-only | 확정 (부분 폐기 by ADR-0270: the shell gate_backend door of decision 2 and the shell rejection-arm guard in the consequences / ADR-0279: the claude-pinned door axis of decision 5) |
+| [0220](0220-에이전트가-읽는-표면을-네-계열로-재편하고-우편-가시성-필터를-걷는다.md) | Restructure the surfaces agents read into four families and remove the mail visibility filter | 확정 (부분 폐기 by ADR-0285: the table-of-contents screen place in decision 2 and the first item of the consequences) |
+| [0221](0221-호출자-입력의-철자-관용은-코어가-흡수한다.md) | The core absorbs spelling tolerance for caller input | 확정 |
+| [0222](0222-부팅-기본-레이아웃은-단일-빈-슬롯이다-에이전트-트리를-기본에서-뺀다.md) | The boot default layout is a single empty slot (the agent tree is removed from the default) | 확정 |
+| [0223](0223-레이아웃-분할-노드에-고정-id를-두고-화면은-그-id로-분할-인스턴스를-가른다.md) | Give layout split nodes a fixed id, and let the screen tell split instances apart by that id | 확정 (부분 폐기 by ADR-0227: decision 2's Allotment key and the promotion-remount clause in the consequences) |
+| [0224](0224-닫은-뒤-포커스는-직전-콘텐츠-칸으로-돌아가고-제어-칸은-포커스를-받지-않는다.md) | After a close, focus returns to the previous content cell, and control cells do not receive focus | 확정 |
 | [0225](0225-숨은-에이전트-트리-전용-창을-걷어낸다.md) | 숨은 에이전트 트리 전용 창을 걷어낸다 | 확정 |
 | [0226](0226-세션-id-는-첫-대화-뒤에만-영속하고-이어받는-화신은-구독-응답으로-로딩을-띄운다.md) | 세션 id 는 첫 대화 뒤에만 영속하고 이어받는 화신은 구독 응답으로 로딩을 띄운다 | 확정 (부분 폐기 by ADR-0231: D5 로딩 종료 조건을 전달된 입력의 말풍선으로 · 연결 중 거둔 첫 입력의 id 영속을 쓰레기 부류에 더함 / ADR-0233: 결정 2 방아쇠와 결정 11 예외 및 영향의 불변식을 codex JSON 에서 첫 유저 메시지 되울림 기준으로 / ADR-0291: 세션 id 의 디스크 영속 시점 / ADR-0292: 래치 catch_unwind 근거의 abort 전제) |
 | [0227](0227-분할-렌더러를-평평한-칸-목록으로-직접-구현하고-구분선-드래그를-셸-비율-명령으로-되쓴다.md) | 분할 렌더러를 평평한 칸 목록으로 직접 구현하고 구분선 드래그를 셸 비율 명령으로 되쓴다 | 확정 (부분 폐기 by ADR-0260: 결정 2와 영향의 비율 한계 0.1~0.9) |
