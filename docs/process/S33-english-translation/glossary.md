@@ -77,5 +77,7 @@ Every translation batch uses these renderings. A batch that needs a new term add
 | 갈려 나가다 | be replaced | not "ground away" |
 | N판 (문서) / N회차 (리뷰) | Nth edition / round N | "deep 4회차 전원 PASS" = all reviewers passed in round 4 |
 | 명단 (목록) | list | 명단이 아니다 = not a complete list; roster only for 로스터 |
+| 가능성 높음 / 불확실 / 확실 | likely / uncertain / certain | confidence labels, not "confidence high" |
+| 쌍둥이 (같은 이름) | twins | "@all 쌍둥이는 둘 다 받는다" = both twins receive it |
 
 Kept in Korean: the ADR lint tokens (`- 상태:` + vocab, `- 관련:`, section headings), text in 「」, names of CLAUDE.md and `.claude/` sections.
