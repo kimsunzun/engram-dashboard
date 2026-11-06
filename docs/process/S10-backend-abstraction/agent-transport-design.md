@@ -1,23 +1,23 @@
-# S10 — 백엔드 추상화 설계 (AgentTransport / OutputEvent)
+# S10 — Backend abstraction design (AgentTransport / OutputEvent)
 
-> **✅ 구현 완료 (2026-06-12, 커밋 `60fe859`~`fb50917`).** 9단계 전부 + fable 게이트(2/3/6/최종) GO. 회귀 0(test 38 / headless·smoke PASS). 구체 시그니처는 `impl-spec.md`, 타임라인은 `../step-log.md` S10. 콘솔(PtyTransport) 구현·검증, ApiTransport·codex/gemini는 stub(후일 채움).
+> **✅ Implementation complete (2026-06-12, commits `60fe859`~`fb50917`).** All 9 steps + fable gates (2/3/6/final) GO. Zero regressions (test 38 / headless·smoke PASS). Concrete signatures are in `impl-spec.md`, the timeline in `../step-log.md` S10. Console (PtyTransport) implemented and verified; ApiTransport and codex/gemini are stubs (to be filled in later).
 
-근거: GPT+Gemini 구성 검토 수렴(`web 검토 2026-06-12`) + 사용자 결정.
-범위: 멀티 백엔드(claude/codex/gemini 콘솔 + API) 통합 인터페이스. **장기·저위험은 충분히 추상화(over-engineer 허용), API는 껍데기만, 콘솔 3종은 구현.**
+Basis: converged GPT+Gemini composition review (`web 검토 2026-06-12`) + user decisions.
+Scope: a unified interface for multiple backends (claude/codex/gemini console + API). **For long-term, low-risk items, abstract thoroughly (over-engineering allowed); API is a stub shell only; the three consoles are implemented.**
 
-## 결정 사항 (사용자)
-- 장기로 가니 위험 없는 추상화는 지금 충분히 깐다.
-- **API transport는 shell(껍데기)만** — 인터페이스만 만족, 내부는 나중(종량제 API ~한 달 뒤).
-- **콘솔 3종(claude / codex / gemini CLI)은 만들어둔다** — 전부 터미널 기반.
+## Decisions (user)
+- Since this is a long-term project, lay down the risk-free abstractions thoroughly now.
+- **The API transport is a shell (stub) only** — satisfy the interface only, internals later (pay-per-use API ~a month later).
+- **Build the three consoles (claude / codex / gemini CLI)** — all terminal-based.
 
-## 수렴 피드백 반영 (GPT+Gemini 일치)
-1. **seam을 `emit(bytes)` → `emit(OutputEvent)`로 상향.** xterm은 유일 진실이 아니라 projection 중 하나.
-2. replay raw-bytes 취약(ANSI 잘림/부분메시지) → **콘솔은 terminal-bytes ring 유지(알려진 한계)**, semantic event log/이중저장/projection은 **API 등장 때 채움**.
-3. capability **bool 폭증 금지** → 영역별 descriptor(input/output/control/session/model).
-4. 입력도 bytes면 leaky → **`InputEvent`** 개념(PTY=Raw, API=Message).
-5. 빠진 control 동사: **interrupt(≠kill)** 지금 추가, reconfigure/snapshot/graceful-shutdown은 단계화.
+## Converged feedback reflected (GPT+Gemini agree)
+1. **Raise the seam from `emit(bytes)` to `emit(OutputEvent)`.** xterm is not the single source of truth; it is one of the projections.
+2. Replay of raw bytes is fragile (truncated ANSI/partial messages) → **the console keeps a terminal-bytes ring (known limitation)**; the semantic event log / dual storage / projection are **filled in when the API arrives**.
+3. **No explosion of capability bools** — per-area descriptors (input/output/control/session/model).
+4. If input is bytes too, it leaks → the **`InputEvent`** concept (PTY=Raw, API=Message).
+5. Missing control verb: add **interrupt (≠kill)** now; phase in reconfigure/snapshot/graceful-shutdown.
 
-## 레이어 (목표 구조)
+## Layers (target structure)
 
 ```
 AgentManager
@@ -37,7 +37,7 @@ AgentManager
         └ ApiTransport  : 껍데기(unimplemented), HTTP 스트림은 나중
 ```
 
-## 핵심 타입 (개념 — 시그니처 확정은 구현 시)
+## Core types (conceptual — signatures are finalized at implementation)
 
 ```
 enum OutputEvent {
@@ -60,85 +60,85 @@ struct Capabilities {               // bool 나열이 아니라 영역별 묶음
 }
 ```
 
-### 콘솔 백엔드 (AgentBackend — PtyTransport가 파라미터로 보유)
-- `ClaudeBackend`  : `--session-id`/`--resume` + `sessions/<pid>.json` 추적. **구현·검증 완료(S9)**.
-- `CodexBackend`   : build_command/tracking — **CLI 구독일(며칠 뒤) spike로 플래그 확정**. 그 전엔 best-guess + 표식.
-- `GeminiBackend`  : 동일 — gemini CLI 플래그 spike 후 확정.
-- 셋 다 `PtyTransport` 공유, 차이는 args·세션 추적뿐.
+### Console backends (AgentBackend — held by PtyTransport as a parameter)
+- `ClaudeBackend`  : `--session-id`/`--resume` + `sessions/<pid>.json` tracking. **Implemented and verified (S9)**.
+- `CodexBackend`   : build_command/tracking — **flags finalized by a spike on the CLI subscription day (a few days later)**. Until then best-guess + marker.
+- `GeminiBackend`  : same — finalized after a spike on the gemini CLI flags.
+- All three share `PtyTransport`; the differences are only args and session tracking.
 
-### ApiTransport (껍데기)
-- `AgentTransport` 구현은 하되 메서드는 `Unsupported`/`unimplemented!` 반환. capability는 전부 false/미지원으로 보고. HTTP 스트림·이벤트 변환은 API 모델 붙는 날 채움.
+### ApiTransport (stub shell)
+- Implements `AgentTransport`, but its methods return `Unsupported`/`unimplemented!`. Capabilities are all reported as false/unsupported. The HTTP stream and event conversion are filled in on the day an API model is attached.
 
-## 단계 구분 (지금 vs 후일)
-| 항목 | 지금 | 후일 |
+## Phase split (now vs later)
+| Item | Now | Later |
 |---|---|---|
-| OutputEvent seam | ✅ enum + TerminalBytes | TextDelta/Usage/ToolCall variant |
+| OutputEvent seam | ✅ enum + TerminalBytes | TextDelta/Usage/ToolCall variants |
 | InputEvent | ✅ enum + Raw | Message/Cancel/Reconfigure |
-| Capabilities 영역별 | ✅ 구조 + 콘솔 값 | API 값 채움 |
-| control: interrupt | ✅ (Ctrl+C / 콘솔 즉시 유용) | — |
-| control: reconfigure/snapshot | 정의만 | API 때 구현 |
-| replay | 콘솔 terminal-bytes ring(현행) | semantic event log + display/event 분리 + projection |
-| 콘솔 백엔드 | claude✅ / codex·gemini 구조+stub | CLI 붙는 날 spike로 flag 확정·검증 |
-| ApiTransport | 껍데기 | 내부 구현 |
+| Capabilities per area | ✅ structure + console values | fill in API values |
+| control: interrupt | ✅ (Ctrl+C / immediately useful for consoles) | — |
+| control: reconfigure/snapshot | definition only | implement for the API |
+| replay | console terminal-bytes ring (current) | semantic event log + display/event separation + projection |
+| Console backends | claude✅ / codex·gemini structure+stub | on the day the CLI is attached, finalize and verify flags by spike |
+| ApiTransport | stub shell | internal implementation |
 
-## 현재 S9 코드 → 목표 마이그레이션
-- `PtySession` 분해 → `PtyTransport`(master/slave·pump·kill6·job) + `OutputCore`(seq/replay/fanout를 AgentSession으로 hoist).
-- `pump` 스레드(현 drain의 read 부분)는 `OutputEvent::TerminalBytes`를 emit, OutputCore가 후처리.
-- `PtyManager` → `AgentManager`(`Arc<dyn AgentSession>` 보유). restore/fallback은 `capabilities().session.resume` 기반 generic.
-- `claude.rs` → `ClaudeBackend`. `CodexBackend`/`GeminiBackend` 신설(stub). `ApiTransport` 껍데기 신설.
-- write_stdin → `send_input(InputEvent::Raw)`. kill에서 interrupt 분리.
+## Current S9 code → target migration
+- Decompose `PtySession` → `PtyTransport` (master/slave·pump·kill6·job) + `OutputCore` (hoist seq/replay/fanout into AgentSession).
+- The `pump` thread (the read part of the current drain) emits `OutputEvent::TerminalBytes`, and OutputCore post-processes.
+- `PtyManager` → `AgentManager` (holds `Arc<dyn AgentSession>`). restore/fallback is generic, based on `capabilities().session.resume`.
+- `claude.rs` → `ClaudeBackend`. Add `CodexBackend`/`GeminiBackend` (stubs). Add the `ApiTransport` stub shell.
+- write_stdin → `send_input(InputEvent::Raw)`. Separate interrupt from kill.
 
-## 미해결/검토 포인트 (③ 상세 웹 질문 후보)
-- pump→OutputCore 전달: 채널 vs 콜백(Arc OutputCore)? 성능·소유권.
-- OutputEvent enum을 지금 어디까지 정의할지(미사용 variant 미리 vs 나중 추가).
-- AgentBackend(콘솔 args) trait을 PtyTransport에 합칠지 별도 둘지.
-- interrupt의 PTY 구현(Ctrl+C=0x03 주입 vs 시그널).
-- capability를 trait 메서드 vs 데이터 descriptor vs Extension Trait(`as_interactive()`).
+## Open / review points (candidates for ③ detailed web questions)
+- pump→OutputCore handoff: channel vs callback (Arc OutputCore)? Performance and ownership.
+- How far to define the OutputEvent enum now (unused variants up front vs add later).
+- Whether to merge the AgentBackend (console args) trait into PtyTransport or keep it separate.
+- PTY implementation of interrupt (inject Ctrl+C=0x03 vs signal).
+- Capability as trait methods vs data descriptor vs Extension Trait (`as_interactive()`).
 
-## 3자 고수준 검토 취합 (GPT + Gemini + fable, 2026-06-12)
+## Consolidated three-way high-level review (GPT + Gemini + fable, 2026-06-12)
 
-**수렴(3자 일치):** seam을 event 관점으로 · capability bool 폭증 경계 · interrupt/reconfigure 동사 누락.
+**Converged (all three agree):** seam from the event viewpoint · guard against capability bool explosion · missing interrupt/reconfigure verbs.
 
-**★fable 단독 발견 (실제 코드 grounded — 핵심 보강)★:** leak은 입력(emit bytes)이 아니라 **종료 경계**다.
-- kill 6단계(manager.rs:442-503)는 transport-private 자원(child/job/master)과 공용 OutputCore의 pump 종료 동기화가 섞여 있어 통째로 `transport.kill()`에 못 넣는다.
-- `transition()`(drain.rs:110-140)의 exit-code 판정은 transport별로 다르다(PTY=exit code / API=stream closed·cancelled·error).
-- **→ 분해:** `transport.shutdown()`(자원 강제 종료, 멱등, child→job→master 순서만 transport-private) + `core.join_pump(timeout)`(pump 종료 동기 대기, 공용) + `TerminalReason`(Exited{code}/Killed/StreamClosed/Error — transport가 산출, status 전이 idempotent 규칙은 공용).
-- **kill = `shutdown()` + `join_pump()` 합성.** 이 분해가 `remove_session` vs `kill_agent` 중복(manager.rs:357-387 vs 442-503)도 자연 제거 → 분리선이 옳다는 방증.
-- shutdown flag 소유권 명시 필요(transport set / pump 종료부 read).
+**★Found by fable alone (grounded in real code — key reinforcement)★:** the leak is not the input (emit bytes) but the **shutdown boundary**.
+- The kill 6 steps (manager.rs:442-503) mix transport-private resources (child/job/master) with synchronizing the shared OutputCore's pump shutdown, so they cannot be put wholesale into `transport.kill()`.
+- The exit-code decision in `transition()` (drain.rs:110-140) differs per transport (PTY=exit code / API=stream closed·cancelled·error).
+- **→ Decomposition:** `transport.shutdown()` (force-terminate resources, idempotent, only the child→job→master order is transport-private) + `core.join_pump(timeout)` (synchronously wait for pump shutdown, shared) + `TerminalReason` (Exited{code}/Killed/StreamClosed/Error — produced by the transport; the idempotent status-transition rule is shared).
+- **kill = the composition of `shutdown()` + `join_pump()`.** This decomposition also naturally removes the duplication between `remove_session` and `kill_agent` (manager.rs:357-387 vs 442-503) → evidence that the dividing line is right.
+- Shutdown flag ownership must be stated (transport sets / pump shutdown part reads).
 
-**capability 결정 (fable, 현 규모):** bool 몇 개면 충분. session/resume만 작은 descriptor(메커니즘 다름). Extension Trait/full negotiation은 과설계(컴파일타임 capability 상실 → "추상 위에만 구현" 원칙과 충돌). capabilities를 `AgentInfo` 스냅샷에 실어 프론트 결합점 일원화.
+**Capability decision (fable, at the current scale):** a few bools are enough. Only session/resume gets a small descriptor (the mechanisms differ). Extension Trait / full negotiation is over-design (loses compile-time capability → conflicts with the principle "implement only on top of the abstraction"). Carry capabilities in the `AgentInfo` snapshot to unify the frontend coupling point.
 
-**control 동사 확정안:** `start` · `send_input(InputEvent)` · `resize` · **`interrupt`**(≠kill, PTY=`\x03` 주입 / API=HTTP cancel) · `shutdown`(자원) · **`reconfigure`**(PTY=respawn / API=param 변경) · `capabilities`. pump 종료는 `core.join_pump()`.
+**Control verbs settled:** `start` · `send_input(InputEvent)` · `resize` · **`interrupt`** (≠kill, PTY=inject `\x03` / API=HTTP cancel) · `shutdown` (resources) · **`reconfigure`** (PTY=respawn / API=parameter change) · `capabilities`. Pump shutdown is `core.join_pump()`.
 
-## 저수준 취합 (fable + GPT + Gemini, 2026-06-12)
+## Low-level consolidation (fable + GPT + Gemini, 2026-06-12)
 
-### 3자 수렴 — 확정
-1. **TerminalReason**: flat enum, transport 산출 → core가 `AgentStatus` 매핑(idempotent + **finalize 정확히 1회**: OnceCell/compare_exchange). variant: `Exited{code:Option<i32>}` · `Killed` · `Interrupted` · `StreamClosed` · `Cancelled` · `Error(String)`. ※ **raw lib error(reqwest/nix) 직접 노출 금지** → 도메인 문자열로 매핑(Gemini). `StreamClosed`≠성공(GPT — 보조 last_error 여지).
-2. **shutdown()/join_pump() 명시 2동사** (RAII 금지 — async Drop 없음[Gemini] + master drop 타이밍 못 잡음[fable]). 순서: `transport.shutdown()`(master drop/cancel token → pump read가 EOF/Err로 깨어 탈출) → `core.join_pump(timeout)` → status finalize 1회. Drop은 안전망만. **소유권**: transport=master/writer/child/shutdown flag/job, core=subscribers/replay/seq/status/drain_handle/drain_done_rx. Killed 판정은 transport가 reason으로 올려 **atomic flag 공유 제거**. 인과는 타이밍이 아니라 자원 폐쇄로 보장(Gemini).
-3. **InputEvent**: `Raw(bytes)` only 지금. **Cancel은 variant 아님** → control verb `interrupt()`(3자 일치).
-4. **args 격리**: PtyTransport는 claude/codex/gemini를 **모름**. 순수 `CommandSpec{program,args,env,cwd}` 주입. claude/codex/gemini 각자 CommandSpec 산출(얇은 backend layer). dyn/제네릭 과추상화 금지(Gemini). SpawnMode(Fresh/Resume) 중립 유지, 플래그명 매핑만 backend 안.
-5. **control 동사 최종**: start·send_input·resize·interrupt·shutdown·reconfigure·capabilities. kill = shutdown+join_pump 합성.
+### Three-way convergence — settled
+1. **TerminalReason**: flat enum, produced by the transport → the core maps it to `AgentStatus` (idempotent + **finalize exactly once**: OnceCell/compare_exchange). Variants: `Exited{code:Option<i32>}` · `Killed` · `Interrupted` · `StreamClosed` · `Cancelled` · `Error(String)`. Note: **do not expose raw lib errors (reqwest/nix) directly** → map to domain strings (Gemini). `StreamClosed`≠success (GPT — leave room for an auxiliary last_error).
+2. **Two explicit verbs shutdown()/join_pump()** (no RAII — there is no async Drop [Gemini] + the master drop timing cannot be pinned down [fable]). Order: `transport.shutdown()` (master drop/cancel token → the pump read wakes with EOF/Err and exits) → `core.join_pump(timeout)` → status finalize once. Drop is only a safety net. **Ownership**: transport = master/writer/child/shutdown flag/job, core = subscribers/replay/seq/status/drain_handle/drain_done_rx. The transport raises the Killed decision as a reason, so the **shared atomic flag is removed**. Causality is guaranteed by resource closing, not by timing (Gemini).
+3. **InputEvent**: `Raw(bytes)` only for now. **Cancel is not a variant** → control verb `interrupt()` (all three agree).
+4. **args isolation**: PtyTransport does **not know** claude/codex/gemini. A pure `CommandSpec{program,args,env,cwd}` is injected. claude/codex/gemini each produce a CommandSpec (a thin backend layer). No dyn/generic over-abstraction (Gemini). Keep SpawnMode (Fresh/Resume) neutral; only the flag-name mapping lives inside the backend.
+5. **Final control verbs**: start·send_input·resize·interrupt·shutdown·reconfigure·capabilities. kill = shutdown+join_pump composition.
 
-### ✅ 해결 — OutputEvent/InputEvent: 확장 enum으로 인터페이스화 후 넘어감 (사용자 결정)
-**결정:** `OutputEvent`(`TerminalBytes`만)·`InputEvent`(`Raw`만)를 **확장 가능한 enum**으로 정의하고, core를 variant-agnostic(`_ => ignore`)로 둔다. API variant는 붙을 때 한 줄 추가(교체 가능 = 인터페이스화 완료). "지금 dead variant 이름까지 쓸지"는 비용 0의 곁가지라 비결정 — 안 쓰고 진행. 원칙: "나중에 교체만 되면 인터페이스화하고 넘어간다."
+### ✅ Resolved — OutputEvent/InputEvent: turn them into an interface with an extensible enum and move on (user decision)
+**Decision:** define `OutputEvent` (`TerminalBytes` only) and `InputEvent` (`Raw` only) as **extensible enums**, and keep the core variant-agnostic (`_ => ignore`). When the API arrives, adding a variant is one line (swappable = interfacing done). "Whether to write even the dead variant names now" is a zero-cost side issue, so left undecided — proceed without them. Principle: "if it only needs to be swapped later, make it an interface and move on."
 
-## 구현 순서 (④ — 단계마다 build/test/commit, 끝에 fable 게이트)
+## Implementation order (④ — build/test/commit at each step, fable gate at the end)
 
-검증된 S9 코드 재편이라 **회귀 0**이 목표. 각 단계 후 `cargo test --lib` + `cargo run --example headless` 통과 유지.
+Since this restructures verified S9 code, the goal is **zero regressions**. After each step keep `cargo test --lib` + `cargo run --example headless` passing.
 
-1. **중립 타입/enum 정의** — `OutputEvent{TerminalBytes}` · `InputEvent{Raw}`(확장 enum) · `TerminalReason{Exited{code}/Killed/Interrupted/StreamClosed/Cancelled/Error(String)}` · `Capabilities`(영역별, 콘솔 값) · `CommandSpec{program,args,env,cwd}`. `PtyChunk`→`OutputChunk` 중립화.
-2. **OutputCore 추출** — PtySession에서 seq/replay/subscribers/status를 분리한 구조체. `emit(event)` · `finish(reason)`(idempotent + finalize once) · `join_pump(timeout)` · subscribe/unsubscribe. 단위 테스트.
-3. **AgentTransport trait + PtyTransport** — master/writer/child/shutdown/job + pump 스레드를 PtyTransport로 이동. `shutdown()`(반환 전 master drop 보장) · pump가 `OutputEvent` emit + 종료 시 `TerminalReason` 산출→`core.finish`. headless 통과.
-4. **AgentBackend(CommandSpec 산출)** — `ClaudeBackend`(현 claude.rs) + `CodexBackend`/`GeminiBackend` stub. SpawnMode 중립 유지, 플래그명 매핑만 각 backend.
-5. **AgentSession** — OutputCore + transport 보유. `write_input`/`resize`/`interrupt`/`kill`(=shutdown+join_pump)/`reconfigure`/`capabilities` 노출.
-6. **AgentManager**(PtyManager 개명) — `Arc<dyn AgentSession>` 보유. spawn/restore/fallback을 `capabilities().resume` 기반 generic으로. S9 복원 로직 이식. `remove_session` 중복 소멸.
-7. **ApiTransport 껍데기** — AgentTransport 구현하되 `Unsupported`/`unimplemented!`. capability 전부 false.
-8. **commands/lib/프론트 재배선** — `send_input`/`interrupt` 커맨드, `capabilities`를 `AgentInfo` 스냅샷에 포함, TS 미러.
-9. **fable 게이트** + headless + 전체 테스트.
+1. **Neutral types/enums** — `OutputEvent{TerminalBytes}` · `InputEvent{Raw}` (extensible enums) · `TerminalReason{Exited{code}/Killed/Interrupted/StreamClosed/Cancelled/Error(String)}` · `Capabilities` (per area, console values) · `CommandSpec{program,args,env,cwd}`. Neutralize `PtyChunk`→`OutputChunk`.
+2. **Extract OutputCore** — a struct that separates seq/replay/subscribers/status out of PtySession. `emit(event)` · `finish(reason)` (idempotent + finalize once) · `join_pump(timeout)` · subscribe/unsubscribe. Unit tests.
+3. **AgentTransport trait + PtyTransport** — move master/writer/child/shutdown/job + the pump thread into PtyTransport. `shutdown()` (guarantees master drop before returning) · the pump emits `OutputEvent` and on exit produces a `TerminalReason` → `core.finish`. headless passes.
+4. **AgentBackend (produces CommandSpec)** — `ClaudeBackend` (current claude.rs) + `CodexBackend`/`GeminiBackend` stubs. Keep SpawnMode neutral; only the flag-name mapping in each backend.
+5. **AgentSession** — holds OutputCore + transport. Exposes `write_input`/`resize`/`interrupt`/`kill` (=shutdown+join_pump)/`reconfigure`/`capabilities`.
+6. **AgentManager** (PtyManager renamed) — holds `Arc<dyn AgentSession>`. spawn/restore/fallback made generic based on `capabilities().resume`. Port the S9 restore logic. Eliminate the `remove_session` duplication.
+7. **ApiTransport stub shell** — implements AgentTransport but with `Unsupported`/`unimplemented!`. All capabilities false.
+8. **Rewire commands/lib/frontend** — `send_input`/`interrupt` commands, include `capabilities` in the `AgentInfo` snapshot, TS mirror.
+9. **fable gate** + headless + full tests.
 
-**불변식 유지(회귀 금지):** kill의 "master drop→reader EOF→join" 인과(이제 shutdown→join_pump 2동사로), §10 락 규칙, drain send 시 lock 미보유, epoch 재구독, best-effort tracker.
+**Keep the invariants (no regression):** kill's "master drop→reader EOF→join" causality (now as the two verbs shutdown→join_pump), the §10 lock rules, no lock held at drain send, epoch resubscribe, best-effort tracker.
 
-## (참고) 검토 당시 갈림: OutputEvent API variant를 지금 정의?
-- **fable + GPT (2): 미리 정의 X.** wire 포맷(Serialize, 프론트 공유)이라 dead variant가 TS로 샘 + API shape 불명 = 추측 over-engineer. 지금은 `TerminalBytes`만 + 이름 중립화. 대신 **core를 variant-agnostic**(consumer `_ => ignore`)으로 = 확장 안전 구조만 확보.
-- **Gemini (1): 미리 정의 O(강력).** LLM primitive(TextDelta/Usage/ToolCall)는 저위험·준표준. core fanout/replay match-arm 미리 안정화 → API는 transport만 끼움. `Extension(Value)` 탈출구.
-- **매니저 권고: 미리 정의 X.** "저위험 over-engineer"는 "확장이 안 깨지고 retrofit이 비싼 것"에만 적용 — OutputEvent는 나중에 variant 추가가 싸므로(consumer ignore) 그 바에 못 미침. 단 3자 진짜 공통점인 **"core를 variant-agnostic 확장안전으로"** 는 지금 확보.
+## (Reference) The split at review time: define the OutputEvent API variants now?
+- **fable + GPT (2): do not define up front.** It is a wire format (Serialize, shared with the frontend), so dead variants leak into TS + the API shape is unknown = speculative over-engineering. For now only `TerminalBytes` + neutralized names. Instead secure only the **core being variant-agnostic** (consumer `_ => ignore`) = an extension-safe structure.
+- **Gemini (1): define up front (strong).** LLM primitives (TextDelta/Usage/ToolCall) are low-risk and quasi-standard. Stabilize the core fanout/replay match arms early → the API only plugs in the transport. `Extension(Value)` escape hatch.
+- **Manager recommendation: do not define up front.** "Low-risk over-engineering" applies only to "things whose extension does not break and whose retrofit is expensive" — adding an OutputEvent variant later is cheap (consumer ignores it), so it does not clear that bar. But the genuine common ground of the three, **"make the core variant-agnostic and extension-safe"**, is secured now.
