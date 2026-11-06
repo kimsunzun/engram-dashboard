@@ -1,52 +1,52 @@
-# LLM 제어 표면 — 메시지/커맨드 시스템: 프로세스 & 리서치 스코프 (draft)
+# LLM control surface — message/command system: process & research scope (draft)
 
-**상태:** draft 계획 — 오너 승인 대기. 리서치 착수 전 스코프 문서(선행조사 prep).
-**작성:** dashboard1 (worktree `engram-dashboard-a1`, 브랜치 wip/a1). 오너 외출 중 "프로세스 짜봐" 요청 이행분.
-**다음 액션:** 오너 복귀 → 이 스코프 검토 → 리서치 강도 결정(`/research`) → 옵션셋 → PRD 결정.
+**Status:** draft plan — awaiting owner approval. A scope document before research starts (prep for the preliminary survey).
+**Written by:** dashboard1 (worktree `engram-dashboard-a1`, branch wip/a1). Written in answer to the owner's "프로세스 짜봐" (draw up a process) request while the owner was away.
+**Next action:** owner returns → reviews this scope → decides research intensity (`/research`) → option set → PRD decision.
 
-## 1. 목표 시나리오 (오너가 말한 1차 마일스톤)
+## 1. Target scenario (the first milestone the owner described)
 
-LLM이 아래를 **명령으로** 수행할 수 있어야 함(사람 UI는 보조):
-1. 최초 1화면(메인 윈도우) 기동.
-2. 왼쪽 = 에이전트 목록, 오른쪽 = 4사분면 분할.
-3. 팝업 1개 추가 생성 → 그 안은 2분할.
-4. 특정 폴더에서 에이전트 1·2·3·4 spawn.
-5. 에이전트 1·3을 각각 1사분면·4사분면에 배치.
-6. 에이전트 간 통신 확인.
+The LLM must be able to do the following **by command** (the human UI is secondary):
+1. Launch the first screen (main window).
+2. Left = agent list, right = 4-quadrant split.
+3. Create one more popup → inside it, a 2-way split.
+4. Spawn agents 1·2·3·4 in a specific folder.
+5. Place agents 1 and 3 in quadrants 1 and 4 respectively.
+6. Confirm communication between agents.
 
-## 2. 본질
+## 2. Essence
 
-이건 CLAUDE.md §5 **"LLM 제어 표면"**의 첫 구현이다 — 백엔드 + UI/레이아웃 전부를 LLM이 부르는 **단일 의도(intent) command 버스**로 모으고, 사람 클릭은 같은 핸들을 흔드는 보조 입력. 세 덩어리:
-- **커맨드 버스** — 레이아웃 분할·슬롯 배치·팝업·에이전트 spawn/배치를 LLM이 호출.
-- **메시지 시스템** — 에이전트 간 통신(시나리오 6번).
-- **레이아웃 제어** — 사분면/팝업/분할(시나리오 2·3·5번).
+This is the first implementation of CLAUDE.md §5 **"LLM 제어 표면"** — gather the backend + all of the UI/layout into a **single intent command bus** that the LLM calls, with human clicks as a secondary input that shakes the same handle. Three pieces:
+- **Command bus** — the LLM calls layout split · slot placement · popup · agent spawn/placement.
+- **Message system** — communication between agents (scenario step 6).
+- **Layout control** — quadrants/popup/split (scenario steps 2·3·5).
 
-## 3. S14 경계 (★ 조율 포인트 — 오너 결정 필요)
+## 3. S14 boundary (★ coordination point — owner decision needed)
 
-목표 시나리오의 **레이아웃(분할·팝업·슬롯 배치)은 dashboard2가 지금 하는 S14 ViewManager 영역과 겹친다**(ADR-0035/0036/0037). 원칙:
-- 커맨드 버스는 ViewManager를 **구동하는 층**이지 **재발명이 아니다.**
-- 리서치·설계 시 S14 TRD·ADR을 먼저 읽고, "ViewManager가 이미 노출하는 것 ↔ 커맨드 버스가 새로 얹을 것" 경계를 명확히 긋는다.
-- 이 경계는 두 작업(dashboard1·2)이 충돌하지 않게 **오너가 조율 결정**할 지점이다.
+The target scenario's **layout (split · popup · slot placement) overlaps the S14 ViewManager area that dashboard2 is working on now** (ADR-0035/0036/0037). Principle:
+- The command bus is a layer that **drives** the ViewManager, **not a reinvention.**
+- In research · design, read the S14 TRD · ADRs first, and draw a clear line between "what the ViewManager already exposes ↔ what the command bus newly layers on".
+- This boundary is a point the **owner decides by coordination** so that the two workstreams (dashboard1 · 2) do not collide.
 
-## 4. 개발 스텝 프로세스 (CLAUDE.md 매크로 흐름 적용)
+## 4. Development step process (applying the CLAUDE.md macro flow)
 
-1. **리서치(옵션)** — `/research` 설계-결정 모드. OSS 서베이 + 옵션셋. (이 문서가 그 스코프)
-2. **PRD — 오너 결정** — 옵션 중 오너가 선택(임의 채택 X). `/review prd` 적대검증.
-3. **TRD** — 인터페이스·커맨드 스키마 확정. 구현 갈림길은 다시 오너 결정. ADR 즉시 박제.
-4. **모듈 경계(DDD)** — 커맨드 버스 seam(LLM 호출 ↔ store 액션 ↔ ViewManager). 단독 검증 가능하게.
-5. **구현 + TDD** — 코더/리뷰어(`/review code`)/QA(`/qa`) 서브에이전트. 메인은 오케스트레이션.
+1. **Research (optional)** — `/research` design-decision mode. OSS survey + option set. (This document is that scope.)
+2. **PRD — owner decision** — the owner chooses among the options (no arbitrary adoption). Adversarial verification with `/review prd`.
+3. **TRD** — fix the interface · command schema. Implementation forks go to the owner for decision again. Record ADRs immediately.
+4. **Module boundary (DDD)** — the command bus seam (LLM call ↔ store action ↔ ViewManager). Make it verifiable in isolation.
+5. **Implementation + TDD** — coder/reviewer (`/review code`)/QA (`/qa`) subagents. Main does the orchestration.
 
-## 5. 리서치 스코프 (다음 스텝의 3축)
+## 5. Research scope (3 axes for the next step)
 
-1. **커맨드 버스 / 제어 표면 패턴** — 사람·LLM이 같은 핸들을 부르는 단일 intent 버스를 성숙 OSS가 어떻게 푸나(command pattern·intent registry·이벤트 소싱 등).
-2. **에이전트 간 통신 / 오케스트레이션** — ADR-0014 후보(Erlang OTP/Ractor·Temporal/Restate·LangGraph/MS Agent Framework·A2A) 재방문 → engram 제약(Rust·교체성·LLM 제어)으로 비교.
-3. **S14 ViewManager 인터페이스** — ViewManager 현 API를 읽고, 레이아웃 커맨드(분할·팝업·배치)를 어떻게 그 위에 얹을지.
-- 산출 가로축: **목표 시나리오 6단계를 각각 command primitive로 분해** → 어떤 핸들이 필요한지 도출.
+1. **Command bus / control-surface patterns** — how mature OSS solves a single intent bus that humans and LLMs call through the same handle (command pattern · intent registry · event sourcing etc.).
+2. **Inter-agent communication / orchestration** — revisit the ADR-0014 candidates (Erlang OTP/Ractor · Temporal/Restate · LangGraph/MS Agent Framework · A2A) → compare under engram's constraints (Rust · swappability · LLM control).
+3. **S14 ViewManager interface** — read the ViewManager's current API, and see how to layer layout commands (split · popup · placement) on top of it.
+- Horizontal axis of the output: **break each of the 6 target-scenario steps down into command primitives** → derive which handles are needed.
 
-## 6. 산출물·결정권
+## 6. Output · decision authority
 
-리서치 산출 = **옵션셋 + 트레이드오프 + 놓친 대안** 보고서(`docs/research/`). **채택은 오너 결정**(임의 확정 금지). 굵은 결정은 ADR.
+The research output = an **option set + trade-offs + missed alternatives** report (`docs/research/`). **Adoption is the owner's decision** (no arbitrary fixing). Major decisions go into ADRs.
 
-## 7. 멀티에이전트 조율 메모
+## 7. Multi-agent coordination memo
 
-공유 repo, 단일 worktree 분리 적용: dashboard2 = `engram-dashboard`(master, S14/ViewManager), dashboard1 = `engram-dashboard-a1`(wip/a1, 이 작업). 레이아웃 커맨드가 S14에 인터페이스하므로 **두 작업의 경계·머지 시점을 오너가 조율**해야 한다(§3).
+Shared repo, with one worktree split applied: dashboard2 = `engram-dashboard` (master, S14/ViewManager), dashboard1 = `engram-dashboard-a1` (wip/a1, this work). Since the layout commands interface with S14, **the owner must coordinate the boundary and merge timing of the two workstreams** (§3).

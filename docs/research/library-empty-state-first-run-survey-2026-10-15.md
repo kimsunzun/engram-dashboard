@@ -1,25 +1,25 @@
-# 라이브러리 폴더를 아직 안 골랐을 때 — 빈 화면 안내 (관행 요약)
+# When no library folder has been chosen yet — empty-screen guidance (practice summary)
 
-- **상태:** light · 결정 대기(프리셋 PRD 이전 구상 — 사용자 결정 2026-10-15: 라이브러리 슬롯은 처음에도 평소 모습으로 뜨고 트리만 비며, 사용자가 눌러서 알아챌 수 있게 안내한다)
-- **날짜:** 2026-10-15
-- **방법:** research light. 수집자 1(검색 4 · fetch 2) · 메인 grounding(Obsidian 원문) · 적대 리뷰 없음.
+- **Status:** light · awaiting decision (an earlier idea before the preset PRD — user decision 2026-10-15: the library slot appears in its usual form even at first, only the tree is empty, and guidance is given so the user can notice it by clicking)
+- **Date:** 2026-10-15
+- **Method:** research light. Collector 1 (4 searches · 2 fetches) · main grounding (Obsidian source text) · no adversarial review.
 
-## 결론
+## Conclusion
 
-1. **자리 = 그 칸의 빈 내용 영역 안(띠가 아니다).** VS Code 탐색기는 빈 탐색기 안에 「welcome view」 — 문장 하나 + 「Open Folder」 · 「Open Recent」. 원문 문자열(소스 · 요약기 경유): 「You have not yet opened a folder.」. **가능성 높음.** Obsidian · Lightroom 은 막아서는 고르기 창이다.
-2. **단추 = 「기존 폴더 열기」 + (앱이 저장소를 만들 수 있으면) 「새로 만들기」.** Obsidian 볼트 관리: 「Create new vault」(이름 · Browse · Create) · 「Open folder as vault」(Open) — **가능성 높음**(메인 원문 확인). Lightroom: 새 카탈로그 만들기 · 다른 카탈로그 고르기(커뮤니티 — 불확실).
-3. **기본 경로 추천은 저장소를 「소유하는」 앱만 한다.** Calibre 첫 실행 마법사가 홈 아래 「Calibre Library」를 제안(포럼 — 불확실). 폴더를 보여 주기만 하는 VS Code 는 추천하지 않는다.
-4. **지정해 둔 폴더가 없어졌을 때의 관행은 확인 못 했다.** Lightroom 은 마지막 카탈로그를 못 열면 카탈로그 고르기 창을 띄운다(커뮤니티 — 불확실). **공백.**
+1. **Placement = inside that pane's empty content area (not a strip).** The VS Code explorer shows a 「welcome view」 inside the empty explorer — one sentence + 「Open Folder」 · 「Open Recent」. Source string (source · via a summarizer): 「You have not yet opened a folder.」. **Likely.** Obsidian · Lightroom use a blocking chooser window.
+2. **Buttons = 「기존 폴더 열기」 (open an existing folder) + (if the app can create the repository) 「새로 만들기」 (create new).** Obsidian vault management: 「Create new vault」 (name · Browse · Create) · 「Open folder as vault」 (Open) — **likely** (main checked the source text). Lightroom: create a new catalog · choose another catalog (community — uncertain).
+3. **Only apps that 「소유하는」 (own) the repository suggest a default path.** The Calibre first-run wizard proposes 「Calibre Library」 under the home folder (forum — uncertain). VS Code, which only displays folders, does not suggest one.
+4. **The practice when the designated folder has disappeared was not confirmed.** Lightroom shows a catalog chooser window when it cannot open the last catalog (community — uncertain). **Gap.**
 
-## Engram 에 옮기면 (후보)
+## If moved to Engram (candidates)
 
-- 빈 트리 칸 안에 VS Code 식 안내 — 한 문장 + [폴더 열기](기존 폴더) + [새로 만들기](배포판 안 `library\` 를 미리 채워 둔 위치에 만들기 — Obsidian 「Create new vault」 · Calibre 기본 경로 꼴).
-- 폴더가 없어지면 같은 자리에 「…를 찾을 수 없습니다」 + 같은 단추 — 관행 확인 못 함(세션 제안).
+- VS Code-style guidance inside the empty tree pane — one sentence + [open folder] (existing folder) + [create new] (create it at a pre-filled location, `library\` inside the distribution — the Obsidian 「Create new vault」 · Calibre default-path form).
+- If the folder disappears, 「…를 찾을 수 없습니다」 in the same place + the same buttons — practice not confirmed (session proposal).
 
 ## grounding
 
-| 클레임 | 출처 | 판정 |
+| Claim | Source | Verdict |
 |---|---|---|
-| Obsidian Create new vault(Create · Vault name · Browse) · Open folder as vault(Open) | https://obsidian.md/help/manage-vaults (메인 · 요약기 경유 원문 인용) | 지지 |
-| VS Code 「You have not yet opened a folder.」 · Open Folder · Open Recent | https://raw.githubusercontent.com/microsoft/vscode/main/src/vs/workbench/contrib/files/browser/explorerViewlet.ts (수집자 · 요약기 경유) | 미확인(메인 대조 안 함) |
-| Calibre 기본 「Calibre Library」 · Lightroom 고르기 창 | 포럼 · 커뮤니티 | 불확실 |
+| Obsidian Create new vault (Create · Vault name · Browse) · Open folder as vault (Open) | https://obsidian.md/help/manage-vaults (main · source text quoted via a summarizer) | Supported |
+| VS Code 「You have not yet opened a folder.」 · Open Folder · Open Recent | https://raw.githubusercontent.com/microsoft/vscode/main/src/vs/workbench/contrib/files/browser/explorerViewlet.ts (collector · via a summarizer) | Unconfirmed (main did not cross-check) |
+| Calibre default 「Calibre Library」 · Lightroom chooser window | Forum · community | Uncertain |
