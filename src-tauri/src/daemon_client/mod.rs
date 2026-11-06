@@ -85,11 +85,14 @@ pub enum ConnectionState {
 /// 셸 하나의 사용량 관심 상태([`UsageInterest`])의 공유 손잡이 — 연결 태스크와 관심을 바꾸는 쪽(레이아웃
 /// 재계산 · 숨김 · 줄임 타이머)과 웹뷰 pull 이 같은 하나를 쥔다(TRD S21 usage-limit-slot §1-7).
 ///
-/// ★락 차례 = `ViewManager → 이 락 → lifecycle`★ — 잎이 아니다: 이 락 안에서 넛지
-/// ([`DaemonClient::nudge_usage_interest`])를 넣으면 그 안에서 lifecycle 락을 잡는다. lifecycle 은 어느 쪽으로도
-/// 되부르지 않고, 연결 태스크가 ViewManager 락을 잡는 자리([`AgentNamesSink`])는 이 락도 lifecycle 도 쥐지 않은
-/// 때라 역순이 없다. 이 락 안에서는 [`UsageInterest`] 의
-/// 메서드와 그 넛지만 부르고, ★소켓 쓰기·emit 은 락을 놓은 뒤에 한다★(ADR-0006).
+/// ★Lock order = `ViewManager → this lock → lifecycle`★ — not a leaf: a nudge
+/// ([`DaemonClient::nudge_usage_interest`]) issued inside this lock takes the lifecycle lock. lifecycle never calls
+/// back either way, and the connection task takes the ViewManager lock ([`AgentNamesSink`]) holding neither this lock
+/// nor lifecycle, so there is no reverse order. Inside this lock only [`UsageInterest`] methods and that nudge run;
+/// ★emits happen after the lock is released★ (ADR-0006). Socket writes too on the old driver; the new driver
+/// (`connection_v2`) instead queues its usage subscribe inside this lock on purpose, so the order sets are read is the
+/// order they are queued — that queueing (`Peer::notify_in`) is a non-blocking leaf, and the peer is looked up
+/// before the lock is taken.
 ///
 /// ★오염돼도 되찾는다★: 그 메서드 안에서 패닉이 나 상태가 반쯤 고쳐진 채 남아도 결과는 데몬과 어긋난 구독이나
 /// 빗나간 전달 대상이고, 다음 재계산 · 스냅숏 대조 · 새 소켓이 다시 맞춘다. 오염을 전파하면 연결 태스크가 그
@@ -265,8 +268,8 @@ pub struct DaemonClient {
     ///   clone 해 넘긴다.
     usage: SharedUsageInterest,
     /// The new driver (`connection_v2`) when this client was built on it ([`Self::new_on_link`]) — connect, ensure,
-    /// close, the command round trips, fire-and-forget sends, unsubscribe and replay requests go there instead of the
-    /// old connection task; `state_rx` is its watch.
+    /// close, the command round trips, fire-and-forget sends, unsubscribe, replay requests and usage nudges go there
+    /// instead of the old connection task; `state_rx` is its watch.
     #[cfg(test)]
     link: Option<connection_v2::LinkClient>,
 }
@@ -360,8 +363,8 @@ impl DaemonClient {
     /// A client on the new driver (`connection_v2` — TRD S21 trd-3 §6-2 U3). `inner` dials the address the endpoint
     /// `source` resolves (a memory network in tests); `clock` drives the transport. ★The ports go in here, not through
     /// [`Self::with_agent_names`] · [`Self::with_refusal_notice`]★ — the driver starts with this call and keeps what it
-    /// got. Connect · ensure · close · state, the command round trips, fire-and-forget sends, unsubscribe, replay
-    /// requests and the output relay (through this client's `router` and `registry`) run on it so far.
+    /// got. Every connection path of the client runs on it (this client's `router`, `registry`, command table slot,
+    /// refusal filter and usage interest are the driver's).
     #[cfg(test)]
     pub(crate) fn new_on_link(
         rt: Handle,
@@ -370,9 +373,13 @@ impl DaemonClient {
         clock: Arc<dyn engram_dashboard_transport::Clock>,
         events: Arc<dyn DaemonEvents>,
         names: Arc<dyn AgentNamesSink>,
+        refusal_notice: Arc<dyn RefusalNotice>,
     ) -> Self {
         let router = Arc::new(OutputRouter::new());
         let registry = WindowChannelRegistry::default();
+        let inbound = Arc::new(InboundSlot::new());
+        let refusals = Arc::new(RefusalAlerts::new(refusal_notice));
+        let usage = SharedUsageInterest::default();
         let link = connection_v2::LinkClient::start(
             &rt,
             inner,
@@ -383,6 +390,9 @@ impl DaemonClient {
                 names: names.clone(),
                 router: router.clone(),
                 windows: registry.clone(),
+                inbound: inbound.clone(),
+                refusals: refusals.clone(),
+                usage: usage.clone(),
             },
         );
         let (lifecycle, _) = Lifecycle::new();
@@ -395,11 +405,11 @@ impl DaemonClient {
             handshake_timeout: HANDSHAKE_TIMEOUT,
             router,
             registry,
-            inbound: Arc::new(InboundSlot::new()),
+            inbound,
             events,
-            refusals: Arc::new(RefusalAlerts::new(Arc::new(NoRefusalNotice))),
+            refusals,
             names,
-            usage: SharedUsageInterest::default(),
+            usage,
             link: Some(link),
         }
     }
@@ -1093,6 +1103,11 @@ impl DaemonClient {
     /// (`start_connection`). 명령 채널이 차서 버려진 넛지는 그 연결의 다음 스냅숏 대조가 고친다 — 구독이
     /// 하나도 없는 연결은 대조할 계기가 없어 ⟳ 가 고친다(TRD §6 #25).
     pub fn nudge_usage_interest(&self) {
+        #[cfg(test)]
+        if let Some(link) = &self.link {
+            link.nudge_usage();
+            return;
+        }
         nudge_usage_on(&self.lifecycle);
     }
 
@@ -1147,6 +1162,8 @@ impl DaemonClient {
                 //   창구가 닫혀 no-op 이다).
                 let usage = self.usage.clone();
                 let lifecycle = Arc::downgrade(&self.lifecycle);
+                #[cfg(test)]
+                let link_nudger = self.link.as_ref().map(|link| link.usage_nudger());
                 self.rt.spawn(async move {
                     sleep.await;
                     if !usage.lock().deferral_elapsed(gen) {
@@ -1154,6 +1171,12 @@ impl DaemonClient {
                             ?gen,
                             "사용량 관심: 줄임 기한 — 그 사이 무르거나 새 세대가 섰다, 넛지 없음"
                         );
+                        return;
+                    }
+                    #[cfg(test)]
+                    if let Some(nudger) = &link_nudger {
+                        tracing::debug!(?gen, "usage interest: shrink deadline — nudge");
+                        nudger.nudge();
                         return;
                     }
                     match lifecycle.upgrade() {

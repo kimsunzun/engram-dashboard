@@ -401,6 +401,10 @@ impl<W: Wire> Peer<W> {
     /// 넘긴다. 셸이 await 하는 보내기 전에 소켓을 잡던 자리다(TRD 3 §3-0 ③). 나머지 오류 조건은
     /// [`Peer::request`] 와 같다 — [`Peer::close_after_flush`] 뒤에 처음 폴링되면 보내지 않고 안 보냄 끊김(`cause` =
     /// [`DisconnectCause::Explicit`])이다.
+    ///
+    /// ★The first poll queues the request (or ends the call) before the first wait★ — a consumer may poll the future
+    /// once to place the request in the outbound queue at that point, ahead of what it queues next, and await the reply
+    /// elsewhere (the shell driver's registration). Keep every check and the queue push ahead of the reply wait.
     pub async fn request_in(
         &self,
         generation: Generation,
@@ -3376,6 +3380,37 @@ mod tests {
             )
             .await
         })
+    }
+
+    // The `request_in` contract a consumer relies on: one poll queues the request, so what it queues next goes out
+    //   after it, while the reply is awaited later.
+    #[tokio::test]
+    async fn the_first_poll_of_request_in_queues_the_request() {
+        let (h, endpoint) = live().await;
+        let g = h.peer.generation();
+        let mut asked = Box::pin(h.peer.request_in(
+            g,
+            TestOut::Request {
+                tag: 7,
+                body: "body7".into(),
+            },
+        ));
+        assert!(
+            poll_immediate(asked.as_mut()).await.is_none(),
+            "waits for the reply"
+        );
+        assert_eq!(h.peer.notify_in(g, TestOut::Notice("after".into())), Ok(()));
+        settle().await;
+        assert_eq!(texts(endpoint.frames()), vec!["req|7|body7", "not|after"]);
+        endpoint.push(TestWire::reply(7));
+        settle().await;
+        assert_eq!(
+            asked.await,
+            Ok(TestIn::Reply {
+                tag: 7,
+                body: "ok".into()
+            })
+        );
     }
 
     // 셸 `buffered_command_on_disconnect_is_drained_not_executed_post_reconnect` 의 transport 판 — 답을 기다리던

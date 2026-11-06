@@ -6,12 +6,13 @@
 //!
 //! One actor task per client owns the routing: the registry's dialer registrations, [`RouteState`] and the inbox pumps
 //! all meet on it, and it is the only place that applies what [`route`] returns (connection state · frontend
-//! broadcasts · replay events · output frames). Callers' round trips run on the callers' tasks through a registry
-//! clone, never on the actor.
+//! broadcasts · replay events · daemon command requests · usage snapshots · output frames). Callers' round trips run on
+//! the callers' tasks through a registry clone, never on the actor.
 //!
 //! - ★The actor never awaits anything that waits on an inbox★ (transport invariant 1, transitively — see `link::pump`):
 //!   no `Peer::request`, no `Peer::close_after_flush` future, no `Registry::close_all`. Its awaits are its two
-//!   channels and the replay deadline timer on the injected clock; it writes with `notify_in` only.
+//!   channels and the replay deadline timer on the injected clock; it writes with `notify_in`, and the one request it
+//!   makes (the registration) it only queues — the reply is awaited on another task.
 //! - ★Every add is one actor step★ — `register` (a fresh dial address) + `adopt` + `Registry::add` + `spawn_pump`,
 //!   with `adopt`'s output applied; a re-add of the key takes the same step. Every `Ended` gives its dial registration
 //!   back, current or replaced handle.
@@ -40,45 +41,76 @@
 //!   the actor clears its flights at once and handles none of its later output frames or driver events (its
 //!   broadcasts and lifecycle events still pass).
 //!
-//! ★Not wired yet★ (3-2 U3c and the rest of U3): daemon command requests and their outcomes, broken command replies,
-//! command registration on connect, the usage interest. Their routed items are dropped here (logged at debug); a
-//! client built on this driver is for driver tests only until then.
+//! - ★A connection is opened by the actor before any caller writes on it★ — on its `LinkUp` the actor queues the
+//!   usage subscribe and the command registration (`RegisterCommands`, every connect — TRD §3-7 clause 1), then
+//!   publishes the generation as opened, with the close epoch of its handle. Callers bind their writes to the
+//!   connection live when they were called and write only once it is published, never on "the peer is live" alone: a
+//!   round trip that comes while that connection is live but not yet opened waits for the publish (bounded by the
+//!   request timeout) and fails if the connection ends meanwhile — it never moves on to a later connection (ADR-0195);
+//!   a fire-and-forget then waits in the gate's pending list, which the actor writes out when that connection opens
+//!   (older ones dropped). That is the old driver's order, where a command queued on a new socket went out after its
+//!   on-open writes. A publish older than a close the caller saw counts as closed, so `close()` followed by a write
+//!   fails at once as the old driver did.
+//! - ★The gate★ (`Gate` — one leaf lock shared by the callers and the actor) holds the opened connection and the
+//!   pending fire-and-forgets. A caller writes a fire-and-forget on an opened connection while holding it; the actor
+//!   writes the pending ones and sets the opened connection while holding it; a round trip writes only after it saw
+//!   the opened connection there. So ★one caller's fire-and-forget then round trip keep their order, at all times★.
+//!   ★There is no order across callers★, and none between fire-and-forgets and Subscribe · Unsubscribe ·
+//!   RequestReplay (those go through the actor — A1 above; fire-and-forgets go to the peer directly, as in 3-2 U3b).
+//! - ★The registration's reply is never awaited on the actor★ — its request is queued in the `LinkUp` step and the
+//!   reply is read on a spawned task, which logs it and shows a daemon refusal in the refusal box.
+//! - ★A daemon command request is applied off the actor★ (`InboundReceiver::accept`) and its outcome goes back only on
+//!   the connection it came on (`send_command_outcome` with the request's generation).
+//! - ★Usage subscribes are read and queued under the usage lock★ — the actor's (open · nudge · snapshot resend) and a
+//!   caller's ⟳ pre-subscribe alike, so the order the interest is read in is the order the subscribes reach the peer
+//!   queue and the last one on the wire is the latest interest (TRD S21 usage-limit-slot §1-7). The usage socket
+//!   epoch is the routed generation; it does not rewind across re-adds (`Registry::add`).
 // ADR-0046
 // ADR-0310
 // ADR-0346
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::task::{Context, Poll, Waker};
 
-use engram_dashboard_protocol::{AgentCommand, AgentEvent, AgentId};
+use engram_dashboard_base::sync;
+use engram_dashboard_command::{CommandEnvelope, CommandError, CommandReply as BusReply};
+use engram_dashboard_protocol::{
+    AgentBackendKind, AgentCommand, AgentEvent, AgentId, UsageLimitSnapshot,
+};
 use engram_dashboard_transport::{
-    Address, Clock, ConnectFailure, Dialer, DisconnectCause, Generation, Incoming, Peer, Policy,
-    Registry, RejectKind, TransportEvent,
+    mask_reason, Address, Clock, ConnectFailure, Dialer, DisconnectCause, Generation, Incoming,
+    Peer, PeerState, Policy, Registry, RejectKind, RequestError, TransportEvent,
 };
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use super::connection::{
-    apply_replay_event, known_epoch, HandshakeError, ReplayFollowUp, REPLAY_DEADLINE,
-    REPLAY_DEADLINE_TICK, SEND_FAILED_PREFIX,
+    apply_replay_event, known_epoch, registration_command, HandshakeError, ReplayFollowUp,
+    REPLAY_DEADLINE, REPLAY_DEADLINE_TICK, SEND_FAILED_PREFIX, UNSENT_ON_DISCONNECT,
 };
 use super::events::{ConnectionStateEvent, DaemonEvents};
 use super::frame_relay::{relay_binary_frame, FrameRelay, UnknownTagLog};
+use super::inbound::InboundSlot;
 use super::link::dialer::LocalDaemonDialer;
 use super::link::endpoint::EndpointSource;
 use super::link::errors::{request_error_text, require_live, send_error_text};
 use super::link::pump::{spawn_pump, Routable};
 use super::link::route::{
-    emit_broadcast, refusal_message, route, route_end, LinkNotice, RouteState, Routed,
+    emit_broadcast, refusal_message, route, route_end, send_command_outcome, LinkNotice,
+    RouteState, Routed,
 };
 use super::link::wire::{ShellIn, ShellWire};
 use super::link::{DaemonKey, HandleToken};
 use super::protocol_state::{self, CommandFailure, SubState};
+use super::refusal::{RefusalAlerts, RefusalSite};
 use super::replay_flight::{encode_marker_frame, ReplayFlightSet};
 use super::{
-    AgentNamesSink, ConnectionState, DEFAULT_CONNECT_TIMEOUT, NOT_CONNECTED, NO_REQUEST_ID,
-    REPLAY_UNSENT,
+    AgentNamesSink, ConnectionState, SharedUsageInterest, CHANNEL_GONE, DEFAULT_CONNECT_TIMEOUT,
+    NOT_CONNECTED, NO_REQUEST_ID, REPLAY_UNSENT,
 };
 use crate::output_channel::{send_to_windows, WindowChannelRegistry};
 use crate::output_router::{OutputRouter, WindowLabel};
@@ -88,6 +120,37 @@ const DAEMON: &str = "local";
 
 /// Room in the pumps → actor channel. A full channel is backpressure, not loss (`link::pump`).
 const ROUTABLE_QUEUE: usize = 256;
+
+/// Fire-and-forget commands pending in the gate for a connection not opened yet — the old driver's command channel
+/// bound. Past it the caller drops the command (logged), as a full old channel dropped it.
+const QUEUED_FIRES_MAX: usize = 512;
+
+/// A connection the actor opened, and the close epoch its handle was added under — a caller that read a later epoch
+/// (a close came since) does not write on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Opened {
+    generation: Generation,
+    closes: u64,
+}
+
+/// The callers' and the actor's shared view of the opened connection (module doc). ★A leaf lock★ — no other lock is
+/// taken while it is held (the registry and the usage lock are read before it); under it there are only these fields
+/// and non-blocking `Peer::notify_in` writes. Logging happens after it is released.
+#[derive(Default)]
+struct Gate {
+    /// The connection the actor opened — its on-open writes and its pending fire-and-forgets are queued on the peer.
+    opened: Option<Opened>,
+    /// Fire-and-forget commands for a live connection the actor has not opened yet, in the order sent, each with that
+    /// connection's generation.
+    pending: VecDeque<(Generation, AgentCommand)>,
+    /// The close epoch the current handle was added under — set before that handle's peer exists. A caller that read a
+    /// newer epoch saw a close after it: its fire-and-forget is dropped, opened or not.
+    handle_closes: u64,
+}
+
+fn lock_gate(gate: &Mutex<Gate>) -> MutexGuard<'_, Gate> {
+    sync::lock(gate)
+}
 
 /// The transport policy of the shell's daemon link: the crate defaults, except that network-class failures retry
 /// without limit (ADR-0346 decision 1 — production never reaches `GaveUp(BudgetExhausted)`). The rest of the TRD §7
@@ -107,6 +170,13 @@ pub(crate) struct Ports {
     /// The windows' output channels. Output frames and replay markers go through the same channel so the frontend
     /// sees them in arrival order (ADR-0046).
     pub windows: WindowChannelRegistry,
+    /// The command table slot — the `DaemonClient`'s own, so a table installed after the start is seen (daemon command
+    /// requests · the registration on every connect).
+    pub inbound: Arc<InboundSlot>,
+    /// The refusal box filter — the `DaemonClient`'s own, so its repeat suppression spans connections.
+    pub refusals: Arc<RefusalAlerts>,
+    /// The usage interest — the `DaemonClient`'s own, which the layout recomputes and the webview pull reads.
+    pub usage: SharedUsageInterest,
 }
 
 /// The callers' side of the driver — `DaemonClient` holds one.
@@ -125,6 +195,26 @@ pub(crate) struct LinkClient {
     closes: Arc<AtomicU64>,
     cmd_tx: mpsc::UnboundedSender<DriverCmd>,
     state_rx: watch::Receiver<ConnectionState>,
+    /// Shared with the actor (module doc).
+    gate: Arc<Mutex<Gate>>,
+    /// Changes whenever the actor changes the gate's opened connection — wakes round trips waiting for it.
+    opened_rx: watch::Receiver<()>,
+    /// The ⟳ pre-subscribe reads the interest here.
+    usage: SharedUsageInterest,
+    /// Times the wait for an opened connection.
+    clock: Arc<dyn Clock>,
+}
+
+/// Nudges the actor's usage interest without keeping the actor alive — the usage shrink timer holds one
+/// (`DaemonClient::run_usage_action`). A nudge after the client is gone does nothing.
+pub(crate) struct UsageNudger(mpsc::WeakUnboundedSender<DriverCmd>);
+
+impl UsageNudger {
+    pub(crate) fn nudge(&self) {
+        if let Some(cmd_tx) = self.0.upgrade() {
+            let _ = cmd_tx.send(DriverCmd::UsageNudge);
+        }
+    }
 }
 
 enum DriverCmd {
@@ -152,6 +242,9 @@ enum DriverCmd {
         agent_id: AgentId,
         reply: oneshot::Sender<Result<u64, String>>,
     },
+    /// The usage interest may have changed — the set is read when the actor takes this (TRD S21 usage-limit-slot §1-7
+    /// "one serial path"), so it carries none.
+    UsageNudge,
     /// The key's current handle.
     #[cfg(test)]
     CurrentHandle {
@@ -199,11 +292,16 @@ impl LinkClient {
         let (state_tx, state_rx) = watch::channel(ConnectionState::Down);
         let (routable_tx, routable_rx) = mpsc::channel(ROUTABLE_QUEUE);
         let closes = Arc::new(AtomicU64::new(0));
+        let (opened_tx, opened_rx) = watch::channel(());
+        let gate = Arc::new(Mutex::new(Gate::default()));
         let Ports {
             events,
             names,
             router,
             windows,
+            inbound,
+            refusals,
+            usage,
         } = ports;
         let client = Self {
             key: key.clone(),
@@ -217,6 +315,10 @@ impl LinkClient {
             closes: closes.clone(),
             cmd_tx,
             state_rx,
+            gate: gate.clone(),
+            opened_rx,
+            usage: usage.clone(),
+            clock: clock.clone(),
         };
         let driver = Driver {
             key,
@@ -240,6 +342,11 @@ impl LinkClient {
             flight: ReplayFlightSet::new(REPLAY_DEADLINE),
             unknown_tags: UnknownTagLog::default(),
             dropping: None,
+            inbound,
+            refusals,
+            usage,
+            gate,
+            opened_tx,
         };
         (client, driver, cmd_rx, routable_rx)
     }
@@ -320,7 +427,12 @@ impl LinkClient {
         let _ = self.cmd_tx.send(DriverCmd::Close);
     }
 
-    /// One command round trip on the caller's task; failure texts are the old driver's (`link::errors`).
+    /// One command round trip on the caller's task, on the opened connection ([`Self::opened_generation`]); failure
+    /// texts are the old driver's (`link::errors`), except the new one for a connection that did not open in time.
+    ///
+    /// ★⟳ (`RefreshUsageLimits`) is one act with the usage subscribe★ (TRD S21 usage-limit-slot §1-7 "⟳"): the interest
+    /// goes out first on the same connection, even when it equals what was sent; when it cannot be queued the refresh
+    /// is not sent either.
     pub(crate) async fn send_command(
         &self,
         cmd: AgentCommand,
@@ -330,11 +442,18 @@ impl LinkClient {
         if protocol_state::command_request_id(&cmd).is_none() {
             return Err(Local(NO_REQUEST_ID.to_owned()));
         }
+        // Read first — a close called before this call must be seen by every check below.
+        let closes = self.closes.load(Ordering::SeqCst);
         let Some(peer) = self.registry.get(self.key.peer_id()) else {
             return Err(Local(NOT_CONNECTED.to_owned()));
         };
         require_live(peer.peer_state()).map_err(Local)?;
-        match peer.request(cmd).await {
+        let generation = self.opened_generation(&peer, closes).await.map_err(Local)?;
+        if matches!(cmd, AgentCommand::RefreshUsageLimits { .. }) {
+            self.write_refresh_subscribe(&peer, generation)
+                .map_err(Local)?;
+        }
+        match peer.request_in(generation, cmd).await {
             Ok(ShellIn::Event(event)) => protocol_state::classify_reply(Ok(event)),
             // `ShellWire::reply_tag` never tags an output frame, so none answers a request.
             Ok(ShellIn::Output(bytes)) => Err(Local(format!(
@@ -345,23 +464,151 @@ impl LinkClient {
         }
     }
 
-    /// A command without a reply. Not live → dropped, as the old driver's closed command window (ADR-0195).
+    /// A command without a reply, for the connection live now. Never blocks. Not live, or a close came → dropped, as
+    /// the old driver's closed command window (ADR-0195).
+    ///
+    /// On the opened connection it is written here, under the gate; on a live connection the actor has not opened yet
+    /// it waits in the gate's pending list (at most [`QUEUED_FIRES_MAX`], then dropped) and the actor writes it when
+    /// that connection opens — in either case ahead of any later round trip of this caller (module doc).
     pub(crate) fn send_fire_and_forget(&self, cmd: AgentCommand) {
+        let closes = self.closes.load(Ordering::SeqCst);
         let peer = self
             .registry
             .get(self.key.peer_id())
             .filter(|peer| require_live(peer.peer_state()).is_ok());
         let Some(peer) = peer else {
-            tracing::debug!(peer = %self.key.peer_id(), "fire-and-forget: the daemon link is not live — dropped");
-            return;
-        };
-        if let Err(e) = peer.notify(cmd) {
             tracing::debug!(
                 peer = %self.key.peer_id(),
+                why = "not live",
+                "fire-and-forget: dropped"
+            );
+            return;
+        };
+        let generation = peer.generation();
+        let outcome = {
+            let mut gate = lock_gate(&self.gate);
+            match gate.opened {
+                _ if gate.handle_closes < closes => FireOutcome::Closed,
+                Some(opened) if opened.generation == generation => {
+                    FireOutcome::Written(peer.notify_in(generation, cmd))
+                }
+                _ if gate.pending.len() < QUEUED_FIRES_MAX => {
+                    gate.pending.push_back((generation, cmd));
+                    FireOutcome::Pending
+                }
+                _ => FireOutcome::Full,
+            }
+        };
+        match outcome {
+            FireOutcome::Written(Ok(())) | FireOutcome::Pending => {}
+            FireOutcome::Written(Err(e)) => tracing::debug!(
+                peer = %self.key.peer_id(),
+                generation = generation.0,
                 error = %send_error_text(&e),
                 "fire-and-forget: not sent"
-            );
+            ),
+            FireOutcome::Closed => tracing::debug!(
+                peer = %self.key.peer_id(),
+                why = "closed",
+                "fire-and-forget: dropped"
+            ),
+            FireOutcome::Full => tracing::debug!(
+                peer = %self.key.peer_id(),
+                generation = generation.0,
+                why = "pending full",
+                "fire-and-forget: too many waiting for a connection that has not opened yet — dropped"
+            ),
         }
+    }
+
+    /// The usage interest may have changed — the actor writes the interest of the moment on the open connection, if it
+    /// differs from what that connection got. Never blocks; with no connection open it does nothing — the next one
+    /// gets the whole interest when it opens.
+    pub(crate) fn nudge_usage(&self) {
+        let _ = self.cmd_tx.send(DriverCmd::UsageNudge);
+    }
+
+    pub(crate) fn usage_nudger(&self) -> UsageNudger {
+        UsageNudger(self.cmd_tx.downgrade())
+    }
+
+    /// The generation of `peer`'s live connection once the actor opened it — the generation a caller writes on.
+    ///
+    /// ★Bound to the connection live at the call★ (ADR-0195): waits while the actor has not opened it yet (routing
+    /// trails the peer), bounded by the request timeout, and never moves on to a later connection — the next one may
+    /// be another daemon. `closes` = the close epoch the caller read on entry. `Err` = the text for a command that
+    /// never went out: a close came ([`NOT_CONNECTED`]), the connection ended while waiting
+    /// ([`UNSENT_ON_DISCONNECT`]), the actor is gone ([`CHANNEL_GONE`]) — the old driver's texts — or it did not open
+    /// in time (a new text with [`SEND_FAILED_PREFIX`]).
+    async fn opened_generation(
+        &self,
+        peer: &Peer<ShellWire>,
+        closes: u64,
+    ) -> Result<Generation, String> {
+        let bound = peer.generation();
+        // Both receivers before the first check, so a change after it wakes the wait.
+        let mut state = peer.state();
+        let mut opened = self.opened_rx.clone();
+        opened.borrow_and_update();
+        if opened_now(peer, bound, closes, &self.gate)? {
+            return Ok(bound);
+        }
+        let wait = async {
+            loop {
+                tokio::select! {
+                    changed = opened.changed() => if changed.is_err() {
+                        return Err(CHANNEL_GONE.to_owned());
+                    },
+                    changed = state.changed() => if changed.is_err() {
+                        return Err(UNSENT_ON_DISCONNECT.to_owned());
+                    },
+                }
+                if opened_now(peer, bound, closes, &self.gate)? {
+                    return Ok(bound);
+                }
+            }
+        };
+        let after = link_policy().request_timeout;
+        tokio::select! {
+            // An outcome of the connection itself wins over a timeout that is due at the same poll.
+            biased;
+            opened = wait => opened,
+            () = self.clock.sleep(after) => {
+                tracing::warn!(
+                    peer = %self.key.peer_id(),
+                    generation = bound.0,
+                    after_secs = after.as_secs(),
+                    "a command waited for its daemon connection to open and gave up — not sent"
+                );
+                Err(format!(
+                    "{SEND_FAILED_PREFIX}: the daemon connection did not finish opening within {}s",
+                    after.as_secs()
+                ))
+            }
+        }
+    }
+
+    /// Queues the ⟳ pre-subscribe on `generation`, read and queued under the usage lock (module doc). Nothing to queue
+    /// when the usage state does not see `generation` as its socket (it ended meanwhile).
+    fn write_refresh_subscribe(
+        &self,
+        peer: &Peer<ShellWire>,
+        generation: Generation,
+    ) -> Result<(), String> {
+        let mut usage = self.usage.lock();
+        let Some(vendors) = usage.sync(generation.0, true) else {
+            return Ok(());
+        };
+        peer.notify_in(generation, usage_subscribe(vendors))
+            .map_err(|e| {
+                tracing::debug!(
+                    peer = %self.key.peer_id(),
+                    generation = generation.0,
+                    error = %e,
+                    "the usage subscribe ahead of a refresh was not queued — the refresh is not sent"
+                );
+                send_error_text(&e)
+            })
     }
 
     /// Queues the unsubscribe on the actor, behind every earlier unsubscribe and replay request. Never blocks — the
@@ -427,6 +674,14 @@ struct Driver {
     /// A connection this actor decided to drop and whose `LinkDown` has not come yet — its later output frames and
     /// driver events are not handled (`drop_connection`); its broadcasts and lifecycle events still pass.
     dropping: Option<Generation>,
+    inbound: Arc<InboundSlot>,
+    refusals: Arc<RefusalAlerts>,
+    usage: SharedUsageInterest,
+    /// Shared with the callers (module doc): its opened connection is set at the end of a `LinkUp` step and cleared by
+    /// that connection's `LinkDown`, its drop and a close.
+    gate: Arc<Mutex<Gate>>,
+    /// Signalled after every change of the gate's opened connection.
+    opened_tx: watch::Sender<()>,
 }
 
 impl Driver {
@@ -448,6 +703,7 @@ impl Driver {
                     Some(DriverCmd::RequestReplay { agent_id, reply }) => {
                         let _ = reply.send(self.request_replay(agent_id));
                     }
+                    Some(DriverCmd::UsageNudge) => self.nudge_usage(),
                     #[cfg(test)]
                     Some(DriverCmd::CurrentHandle { reply }) => {
                         let _ = reply.send(self.current);
@@ -488,6 +744,12 @@ impl Driver {
     fn close(&mut self) {
         self.current = None;
         self.registry.remove(self.key.peer_id());
+        {
+            let mut gate = lock_gate(&self.gate);
+            gate.opened = None;
+            gate.pending.clear();
+        }
+        self.opened_tx.send_replace(());
         if let Some((_, waiting)) = self.first.take() {
             for caller in waiting {
                 let _ = caller.send(Err(HandshakeError::ClosedBeforeHello));
@@ -508,6 +770,8 @@ impl Driver {
             let _ = first.send(Ok(()));
             return;
         }
+        // Before the peer exists — a caller that sees it live must not read the previous handle's epoch.
+        lock_gate(&self.gate).handle_closes = closes;
         let token = HandleToken::mint();
         let (address, handshake) = self.dialer.register(&self.key, self.source.clone());
         let ended = self.route.adopt(self.key.clone(), token);
@@ -755,6 +1019,7 @@ impl Driver {
         if self.open == Some(generation) {
             self.open = None;
             self.flight.on_disconnect();
+            self.close_gate();
         }
     }
 
@@ -800,8 +1065,9 @@ impl Driver {
         }
     }
 
-    /// A replay event of connection `generation` (`SubscribeAck` · `ReplayComplete` · `SubscribeFailed`); the
-    /// follow-up `Subscribe` goes out on that connection.
+    /// An event of connection `generation` the driver handles itself: a replay event (`SubscribeAck` ·
+    /// `ReplayComplete` · `SubscribeFailed` — the follow-up `Subscribe` goes out on that connection), a daemon command
+    /// request, a command reply too broken to match a request, a usage snapshot.
     fn on_driver_event(&mut self, generation: Generation, event: AgentEvent) {
         let windows = &self.windows;
         let mut deliver =
@@ -824,11 +1090,264 @@ impl Driver {
                 ?other,
                 "a replay follow-up that is not a Subscribe — not written"
             ),
-            ReplayFollowUp::NotHandled => tracing::debug!(
-                peer = %self.key.peer_id(),
-                event = event_kind(&event),
-                "a daemon event this driver does not handle yet — dropped"
+            ReplayFollowUp::NotHandled => match event {
+                // ADR-0272 decision 6: an envelope that does not parse has no request id to answer with — it is
+                //   neither run nor answered; the daemon ends that round trip by its own deadline.
+                AgentEvent::CommandRequest { envelope } => {
+                    match protocol_state::envelope_from_wire(&envelope) {
+                        Ok(envelope) => self.accept_inbound(generation, envelope),
+                        Err(e) => tracing::warn!(
+                            peer = %self.key.peer_id(),
+                            generation = generation.0,
+                            event = "CommandRequest",
+                            class = ?e.classify(),
+                            line = e.line(),
+                            column = e.column(),
+                            "a daemon command envelope does not parse — no request id to answer with; dropped"
+                        ),
+                    }
+                }
+                // ADR-0272 decision 6: a reply reaches the driver only when its request id cannot be read (a readable
+                //   one is matched in the transport, or reported there as unmatched) — no waiter to wake, log only.
+                AgentEvent::CommandReply { reply } => match protocol_state::reply_from_wire(&reply)
+                {
+                    Err(e) => tracing::warn!(
+                        peer = %self.key.peer_id(),
+                        generation = generation.0,
+                        event = "CommandReply",
+                        class = ?e.classify(),
+                        line = e.line(),
+                        column = e.column(),
+                        "a daemon command reply does not parse — no request id to wake; dropped"
+                    ),
+                    Ok(reply) => tracing::debug!(
+                        peer = %self.key.peer_id(),
+                        generation = generation.0,
+                        request_id = %reply.request_id,
+                        "a daemon command reply reached the driver — dropped"
+                    ),
+                },
+                AgentEvent::UsageLimitsUpdated {
+                    snapshot,
+                    subscribed,
+                } => self.relay_usage_snapshot(generation, &snapshot, &subscribed),
+                other => tracing::debug!(
+                    peer = %self.key.peer_id(),
+                    event = event_kind(&other),
+                    "a daemon event this driver does not handle — dropped"
+                ),
+            },
+        }
+    }
+
+    /// Hands a daemon command request to the command table, off the actor (ADR-0155 decision 4); its outcome goes back
+    /// only on connection `generation`, the one it came on.
+    fn accept_inbound(&self, generation: Generation, envelope: CommandEnvelope) {
+        let request_id = envelope.request_id;
+        let deliver = self.outcome_sink(generation);
+        match self.inbound.get() {
+            Some(receiver) => receiver.accept(envelope, deliver),
+            // Not dropped silently — the daemon would hold the round trip until its deadline. A missing table is an
+            //   assembly miss (`install_command_table` not called), so a retry would not help.
+            None => {
+                tracing::error!(
+                    peer = %self.key.peer_id(),
+                    %request_id,
+                    "a daemon command request came before a command table was installed — assembly miss \
+                     (install_command_table)"
+                );
+                deliver(BusReply::err(
+                    request_id,
+                    CommandError::internal("this client has no command table installed"),
+                ));
+            }
+        }
+    }
+
+    /// Where a command outcome goes — connection `generation` of the key's peer at the time the outcome is ready, never
+    /// a later connection (`send_command_outcome`).
+    fn outcome_sink(&self, generation: Generation) -> impl FnOnce(BusReply) + Send + 'static {
+        let registry = self.registry.clone();
+        let peer_id = self.key.peer_id().clone();
+        move |reply: BusReply| match registry.get(&peer_id) {
+            Some(peer) => send_command_outcome(&peer, generation, &reply),
+            None => tracing::warn!(
+                peer = %peer_id,
+                request_id = %reply.request_id,
+                generation = generation.0,
+                "a command outcome has no peer to go to — the link was closed; dropped"
             ),
+        }
+    }
+
+    /// A usage snapshot of connection `generation`: matched against the interest, a resend queued on that connection
+    /// when the daemon's set differs, then handed to the windows with a usage slot (`UsageInterest::on_snapshot`).
+    /// ★The resend is queued under the usage lock★ (module doc) — so ahead of the frontend notice, which goes out with
+    /// no lock held (ADR-0006).
+    fn relay_usage_snapshot(
+        &self,
+        generation: Generation,
+        snapshot: &UsageLimitSnapshot,
+        subscribed: &[AgentBackendKind],
+    ) {
+        // Before the usage lock — the registry takes its own lock.
+        let peer = self.registry.get(self.key.peer_id());
+        let labels = {
+            let mut usage = self.usage.lock();
+            // The real clock, not the injected one — the webview pull ages the cache against `Instant::now()`.
+            let outcome = usage.on_snapshot(
+                generation.0,
+                snapshot,
+                subscribed,
+                std::time::Instant::now(),
+            );
+            if let Some(vendors) = outcome.resend {
+                match &peer {
+                    Some(peer) => write_usage_subscribe(peer, generation, vendors, "resend"),
+                    None => tracing::debug!(
+                        peer = %self.key.peer_id(),
+                        generation = generation.0,
+                        "a usage resend has no peer to go to — the link was closed"
+                    ),
+                }
+            }
+            outcome.labels
+        };
+        // No window to receive it: a snapshot of a socket that is no longer current, or no window has a usage slot.
+        if !labels.is_empty() {
+            self.events
+                .usage_limits_updated(snapshot, &labels, generation.0);
+        }
+    }
+
+    /// Writes the interest of the moment on the open connection when it differs from what that connection got.
+    fn nudge_usage(&self) {
+        let Some((peer, generation)) = self.open_peer() else {
+            tracing::debug!(
+                peer = %self.key.peer_id(),
+                "usage nudge: no open daemon connection — the next one gets the interest when it opens"
+            );
+            return;
+        };
+        let mut usage = self.usage.lock();
+        if let Some(vendors) = usage.sync(generation.0, false) {
+            write_usage_subscribe(&peer, generation, vendors, "nudge");
+        }
+    }
+
+    /// No connection is opened any more — callers wait or fail; pending fire-and-forgets stay for a later connection.
+    fn close_gate(&self) {
+        lock_gate(&self.gate).opened = None;
+        self.opened_tx.send_replace(());
+    }
+
+    /// Opens connection `generation` (module doc): the usage subscribe and the command registration are queued, then —
+    /// under the gate — the pending fire-and-forgets of this connection are written (older ones dropped, newer ones
+    /// kept) and the connection is set as opened. With no peer (the user closed, the connection's tail is still routed)
+    /// nothing is written or opened; the usage state still pairs this open with the `LinkDown` to come.
+    fn on_link_up(&mut self, generation: Generation) {
+        self.open = Some(generation);
+        let peer = self.registry.get(self.key.peer_id());
+        // The old driver's order: the interest first, then the registration.
+        {
+            let mut usage = self.usage.lock();
+            let opened = usage.on_socket_open(generation.0);
+            if let (Some(vendors), Some(peer)) = (opened, &peer) {
+                write_usage_subscribe(peer, generation, vendors, "open");
+            }
+        }
+        let Some(peer) = peer else {
+            return;
+        };
+        self.register_commands(&peer, generation);
+        let (mut failed, mut dropped) = (Vec::new(), 0usize);
+        // ★The drain and the publish stay one critical section, before the signal★ — a caller's round trip writes
+        // only after it saw `opened` under the gate, so its own pending fire-and-forgets are already on the peer
+        // queue. Draining after the publish (or after the signal) lets that round trip overtake them.
+        {
+            let mut gate = lock_gate(&self.gate);
+            for (pending, cmd) in std::mem::take(&mut gate.pending) {
+                if pending == generation {
+                    if let Err(e) = peer.notify_in(generation, cmd) {
+                        failed.push(e);
+                    }
+                } else if pending > generation {
+                    gate.pending.push_back((pending, cmd));
+                } else {
+                    dropped += 1;
+                }
+            }
+            gate.opened = Some(Opened {
+                generation,
+                closes: gate.handle_closes,
+            });
+        }
+        self.opened_tx.send_replace(());
+        if dropped > 0 {
+            tracing::debug!(
+                peer = %self.key.peer_id(),
+                generation = generation.0,
+                dropped,
+                "fire-and-forget: pending for a connection that never opened — dropped"
+            );
+        }
+        for e in failed {
+            tracing::debug!(
+                peer = %self.key.peer_id(),
+                generation = generation.0,
+                error = %send_error_text(&e),
+                "fire-and-forget: not sent"
+            );
+        }
+    }
+
+    /// Sends this shell's command names to the daemon roster on connection `generation` (TRD §3-7 clause 1 — every
+    /// connect; a resend replaces the names, as the daemon roster is last-wins per name — ADR-0150 decision 3). The
+    /// request is queued in this step; the reply is read on a spawned task (module doc).
+    ///
+    /// ★A refusal is not retried on this connection★ — the names stay off the roster until the next one. Known limit:
+    /// the reply has the transport's request timeout (TRD §7 values are 3-2 U4), where the old driver waited until the
+    /// connection ended — a daemon slower than that leaves a warn and no refusal box.
+    fn register_commands(&self, peer: &Peer<ShellWire>, generation: Generation) {
+        let Some(receiver) = self.inbound.get() else {
+            tracing::debug!(
+                peer = %self.key.peer_id(),
+                generation = generation.0,
+                "no command table installed — nothing to register"
+            );
+            return;
+        };
+        let Some(cmd) = registration_command(receiver) else {
+            return;
+        };
+        let names = match &cmd {
+            AgentCommand::RegisterCommands { decls, .. } => {
+                // Just encoded by `registration_command` — failing to decode means that function changed.
+                match protocol_state::decls_from_wire(decls) {
+                    Ok(decls) => decls.len(),
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "the registration packet carries a declaration list that does not decode"
+                        );
+                        return;
+                    }
+                }
+            }
+            other => {
+                tracing::error!(?other, "the registration packet is not RegisterCommands");
+                return;
+            }
+        };
+        let refusals = self.refusals.clone();
+        let peer = peer.clone();
+        match start_now(async move { peer.request_in(generation, cmd).await }) {
+            Ok(answer) => report_registration(answer, names, generation, &refusals),
+            Err(reply) => {
+                tokio::spawn(async move {
+                    report_registration(reply.await, names, generation, &refusals);
+                });
+            }
         }
     }
 
@@ -886,9 +1405,11 @@ impl Driver {
                 Routed::Notice(notice) => {
                     tracing::debug!(peer = %self.key.peer_id(), ?notice, "daemon link notice")
                 }
-                Routed::LinkUp { generation } => self.open = Some(generation),
+                Routed::LinkUp { generation } => self.on_link_up(generation),
                 // The old driver's per-socket reset: flights cleared without markers (the frontend re-requests on its
-                //   `connected` edge), unknown tags warned again on the next connection.
+                //   `connected` edge), unknown tags warned again on the next connection, the usage state forgets the
+                //   socket. Publishing `None` always wakes callers waiting for an opened connection, so they see the
+                //   loss now.
                 Routed::LinkDown { generation } => {
                     self.open = None;
                     self.flight.on_disconnect();
@@ -896,13 +1417,160 @@ impl Driver {
                     if self.dropping == Some(generation) {
                         self.dropping = None;
                     }
+                    self.usage.lock().on_socket_lost(generation.0);
+                    self.close_gate();
                 }
+                // ★A daemon command request on a connection being dropped is skipped too — not run, not answered★. The
+                //   old driver stopped reading the socket once it decided to disconnect, so it never saw such a
+                //   request either. The daemon does not fail it when the link closes: its delivery table reaps only
+                //   the round trips the closing connection started (`command_delivery.rs` `drop_origin` doc), so the
+                //   round trip ends at its delivery deadline as `TIMEOUT` (`CommandDeliveries::expire`). Running it
+                //   here would apply its side effects with an outcome that can never reach the daemon — the drop is
+                //   queued ahead of it and the connection is gone after.
                 Routed::ToDriver { generation, .. } if self.is_dropping(generation, "event") => {}
+                // ★Likewise a daemon command request in a closed link's tail★ (`close` leaves the old handle routed
+                //   until its `LinkDown`): its outcome can never reach the daemon — the peer is removed — so running it
+                //   would apply side effects for nothing; the daemon ends the round trip at its delivery deadline as
+                //   `TIMEOUT`, as above.
+                Routed::ToDriver {
+                    generation,
+                    event: AgentEvent::CommandRequest { .. },
+                } if self.current.is_none() => tracing::debug!(
+                    peer = %self.key.peer_id(),
+                    generation = generation.0,
+                    "a daemon command request of a closed link — not run"
+                ),
                 Routed::ToDriver { generation, event } => self.on_driver_event(generation, event),
                 Routed::Output { generation, .. } if self.is_dropping(generation, "output") => {}
                 Routed::Output { generation, bytes } => self.relay_output(generation, &bytes),
             }
         }
+    }
+}
+
+/// Whether connection `bound` of `peer` is opened for a caller that read close epoch `closes`; `false` while the actor
+/// has not opened it yet. `Err`: the peer was closed, or a close came after the connection was opened
+/// ([`NOT_CONNECTED`] — the old driver's closed window), or connection `bound` is no longer the live one
+/// ([`UNSENT_ON_DISCONNECT`]).
+fn opened_now(
+    peer: &Peer<ShellWire>,
+    bound: Generation,
+    closes: u64,
+    gate: &Mutex<Gate>,
+) -> Result<bool, String> {
+    match peer.peer_state() {
+        PeerState::Closed => return Err(NOT_CONNECTED.to_owned()),
+        state if !state.is_live() => return Err(UNSENT_ON_DISCONNECT.to_owned()),
+        _ if peer.generation() != bound => return Err(UNSENT_ON_DISCONNECT.to_owned()),
+        _ => {}
+    }
+    let opened = lock_gate(gate).opened;
+    match opened {
+        Some(opened) if opened.generation == bound && opened.closes < closes => {
+            Err(NOT_CONNECTED.to_owned())
+        }
+        Some(opened) => Ok(opened.generation == bound),
+        None => Ok(false),
+    }
+}
+
+/// What became of a fire-and-forget at the caller.
+enum FireOutcome {
+    Written(Result<(), engram_dashboard_transport::SendError>),
+    Pending,
+    Closed,
+    Full,
+}
+
+fn usage_subscribe(vendors: BTreeSet<AgentBackendKind>) -> AgentCommand {
+    AgentCommand::UsageSubscribe {
+        vendors: vendors.into_iter().collect(),
+    }
+}
+
+/// Queues the usage subscribe on connection `generation`. ★A failure does not drop the connection★ — unlike a replay
+/// `Subscribe` no slot waits on it, and a connection that ended sends the whole interest again on its successor.
+fn write_usage_subscribe(
+    peer: &Peer<ShellWire>,
+    generation: Generation,
+    vendors: BTreeSet<AgentBackendKind>,
+    why: &'static str,
+) {
+    if let Err(e) = peer.notify_in(generation, usage_subscribe(vendors)) {
+        tracing::debug!(
+            peer = %peer.id(),
+            generation = generation.0,
+            why,
+            error = %e,
+            "a usage subscribe was not queued"
+        );
+    }
+}
+
+/// Polls `future` once on this task, so what it does before its first wait happens in this step (a request is queued
+/// on the peer); the rest is handed back to run elsewhere. Polled with a no-op waker: the next poll, on the task that
+/// takes it, registers that task's waker.
+fn start_now<F: Future>(future: F) -> Result<F::Output, Pin<Box<F>>> {
+    let mut future = Box::pin(future);
+    match future
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+    {
+        Poll::Ready(output) => Ok(output),
+        Poll::Pending => Err(future),
+    }
+}
+
+/// Logs the registration's answer; a daemon refusal also goes to the refusal box (ADR-0281 — a local failure does not).
+fn report_registration(
+    answer: Result<ShellIn, RequestError>,
+    names: usize,
+    generation: Generation,
+    refusals: &RefusalAlerts,
+) {
+    let generation = generation.0;
+    match answer {
+        // A daemon `Error` reply is the daemon's refusal (ADR-0281 — `protocol_state::classify_reply`).
+        Ok(ShellIn::Event(AgentEvent::Error { message, .. })) => {
+            tracing::warn!(
+                names,
+                generation,
+                reason = %mask_reason(&message),
+                "the daemon refused the shell's command registration — its commands stay off the daemon roster \
+                 until the next connection"
+            );
+            refusals.surface(RefusalSite::Register, &message);
+        }
+        Ok(ShellIn::Event(_)) => {
+            tracing::info!(names, generation, "shell commands registered with the daemon")
+        }
+        // `ShellWire::reply_tag` never tags an output frame.
+        Ok(ShellIn::Output(bytes)) => tracing::warn!(
+            names,
+            generation,
+            bytes = bytes.len(),
+            "an output frame answered the shell's command registration"
+        ),
+        Err(RequestError::TimedOut { after }) => tracing::warn!(
+            names,
+            generation,
+            after_secs = after.as_secs(),
+            "the daemon did not answer the shell's command registration within the request timeout — its commands \
+             may be off the daemon roster until the next connection"
+        ),
+        Err(RequestError::Disconnected { sent: false, .. }) => tracing::debug!(
+            names,
+            generation,
+            "the shell's command registration was not sent — its connection already ended; a next connection, if \
+             any, registers again"
+        ),
+        Err(e) => tracing::warn!(
+            names,
+            generation,
+            error = %request_error_text(&e),
+            "the shell's command registration failed — its commands stay off the daemon roster until the next \
+             connection"
+        ),
     }
 }
 

@@ -3730,7 +3730,7 @@ impl RecordingEvents {
         self.seen.lock().expect("recording events poisoned").clone()
     }
 
-    fn then_on_connected(&self, hook: impl FnOnce() + Send + 'static) {
+    pub(super) fn then_on_connected(&self, hook: impl FnOnce() + Send + 'static) {
         self.on_connected
             .lock()
             .expect("recording events poisoned")
@@ -4626,7 +4626,11 @@ fn usage_client(
 
 // 관심을 「main 의 활성 탭 = 사용량 슬롯 하나」 레이아웃으로 다시 계산한다. 넛지는 부르는 쪽이 정한다 — 결과를 안 쓰는
 // 자리는 `let _ =` 로 버린다(연결 전이라 넛지가 할 일이 없거나, 시험이 넛지를 직접 넣는다).
-fn relayout(usage: &SharedUsageInterest, show_claude: bool, show_codex: bool) -> InterestAction {
+pub(super) fn relayout(
+    usage: &SharedUsageInterest,
+    show_claude: bool,
+    show_codex: bool,
+) -> InterestAction {
     let mut mgr = ViewManager::new();
     let view = mgr.windows[MAIN_WINDOW_LABEL].active;
     let slot = tree::first_slot_id(&mgr.views[&view].layout);
@@ -4642,7 +4646,7 @@ fn relayout(usage: &SharedUsageInterest, show_claude: bool, show_codex: bool) ->
     usage.lock().recompute(&mgr, Instant::now())
 }
 
-fn usage_update(
+pub(super) fn usage_update(
     vendor: AgentBackendKind,
     revision: u64,
     subscribed: &[AgentBackendKind],
@@ -5593,7 +5597,7 @@ impl SettingsEvents for NoSettingsEvents {
 }
 
 // 운영 버스 표와 같은 구독 재동기 어댑터(`OwnedSubs` — 사람 경로의 `RouterSubs` 에 넘긴다)를 끼운 레이아웃 명령 표.
-fn bus_table(state: &LayoutState, client: &Arc<DaemonClient>) -> CommandTable {
+pub(super) fn bus_table(state: &LayoutState, client: &Arc<DaemonClient>) -> CommandTable {
     // 쓰기를 안 연다 — 이 시험은 설정을 건드리지 않고, 적재는 없는 폴더를 만들지 않는다.
     let settings = Arc::new(SettingsService::load_from_dir(
         &std::env::temp_dir().join("engram-dashboard-no-settings"),
@@ -5627,7 +5631,7 @@ fn bus_table(state: &LayoutState, client: &Arc<DaemonClient>) -> CommandTable {
 }
 
 // 데몬이 배달하는 셸 명령 한 장(LLM 의 `engram layout.setSlotContent …` 가 셸에 닿는 모양).
-fn bus_request(name: &str, args: serde_json::Value) -> AgentEvent {
+pub(super) fn bus_request(name: &str, args: serde_json::Value) -> AgentEvent {
     let envelope = CommandEnvelope {
         name: name.to_string(),
         request_id: engram_dashboard_command::RequestId::new(),

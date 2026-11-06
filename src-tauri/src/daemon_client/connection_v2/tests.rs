@@ -20,14 +20,21 @@ use engram_dashboard_transport::{
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tokio::task::JoinHandle;
 
+use engram_dashboard_command::{CommandDecl, CommandTable, OwnerLookup, OwnerToken};
+
 use crate::commands::layout::RouterSubs;
 use crate::commands::popout::close_requested_popup_window;
+use crate::daemon_client::inbound::{BoxedTask, InboundReceiver, TaskSpawner, ViewCommandPort};
 use crate::daemon_client::link::endpoint::{Current, Endpoint};
+use crate::daemon_client::refusal::RecordingRefusals;
 use crate::daemon_client::replay_flight::MARKER_TAG;
 use crate::daemon_client::tests::{
-    active_slot, wire_agent, NoLayoutEvents, RecordingEvents, POPUP,
+    active_slot, bus_request, bus_table, relayout, usage_update, wire_agent, NoLayoutEvents,
+    RecordingEvents, POPUP,
 };
+use crate::daemon_client::usage_interest::{InterestAction, USAGE_INTEREST_SHRINK_DELAY};
 use crate::daemon_client::DaemonClient;
+use crate::layout::commands::CATALOG_VERSION;
 use crate::layout::{apply, LayoutState, MAIN_WINDOW_LABEL};
 use crate::output_channel::register_window;
 
@@ -143,6 +150,7 @@ struct Harness {
     clock: ManualClock,
     record: Arc<Record>,
     events: Arc<RecordingEvents>,
+    refusals: Arc<RecordingRefusals>,
     client: Arc<DaemonClient>,
 }
 
@@ -152,6 +160,7 @@ impl Harness {
         let clock = ManualClock::new();
         let record = Record::new(now);
         let events = Arc::new(RecordingEvents::default());
+        let refusals = Arc::new(RecordingRefusals::new());
         let client = Arc::new(DaemonClient::new_on_link(
             Handle::current(),
             net.dialer(),
@@ -159,12 +168,14 @@ impl Harness {
             clock.handle(),
             events.clone(),
             events.clone(),
+            refusals.clone(),
         ));
         Self {
             net,
             clock,
             record,
             events,
+            refusals,
             client,
         }
     }
@@ -632,6 +643,7 @@ async fn dropping_the_client_closes_the_link_and_gives_its_one_registration_back
 /// An actor the test drives by hand — never spawned; its pumps' items wait unread in `_routable_rx`.
 struct Bench {
     driver: Driver,
+    events: Arc<RecordingEvents>,
     _client: LinkClient,
     _cmd_rx: tokio::sync::mpsc::UnboundedReceiver<DriverCmd>,
     _routable_rx: tokio::sync::mpsc::Receiver<Routable>,
@@ -649,13 +661,17 @@ impl Bench {
             ManualClock::new().handle(),
             Ports {
                 events: events.clone(),
-                names: events,
+                names: events.clone(),
                 router: Arc::new(OutputRouter::new()),
                 windows: WindowChannelRegistry::default(),
+                inbound: Arc::new(InboundSlot::new()),
+                refusals: Arc::new(RefusalAlerts::new(Arc::new(RecordingRefusals::new()))),
+                usage: SharedUsageInterest::default(),
             },
         );
         Self {
             driver,
+            events,
             _client: client,
             _cmd_rx: cmd_rx,
             _routable_rx: routable_rx,
@@ -1507,4 +1523,1225 @@ async fn a_subscribe_that_cannot_be_written_ends_the_connection_for_the_actor_un
     });
     bench_route(&mut b, token, lost);
     assert_eq!(b.driver.dropping, None, "cleared by g's LinkDown");
+}
+
+// ── daemon commands · registration · usage interest (3-2 U3c) ───────────────────────────────────
+
+/// A command name the shell table does not hold — [`HeldView`] takes it.
+const HELD: &str = "view.held";
+
+/// A webview port that takes [`HELD`] and answers it only once the test releases it.
+#[derive(Default)]
+struct HeldView {
+    entered: AtomicUsize,
+    answered: Arc<AtomicUsize>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl ViewCommandPort for HeldView {
+    fn declarations(&self) -> Vec<CommandDecl> {
+        Vec::new()
+    }
+
+    fn lookup(&self, name: &str) -> OwnerLookup {
+        if name == HELD {
+            OwnerLookup::Available(OwnerToken::new("view"))
+        } else {
+            OwnerLookup::Unknown
+        }
+    }
+
+    fn dispatch(
+        &self,
+        env: CommandEnvelope,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = BusReply> + Send>> {
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        let (release, answered) = (self.release.clone(), self.answered.clone());
+        Box::pin(async move {
+            release.notified().await;
+            answered.fetch_add(1, Ordering::SeqCst);
+            BusReply::ok(env.request_id, serde_json::json!({}))
+        })
+    }
+}
+
+/// A daemon command request for `name` and its request id.
+fn command_request(name: &str) -> (engram_dashboard_command::RequestId, AgentEvent) {
+    let envelope = CommandEnvelope {
+        name: name.to_owned(),
+        request_id: engram_dashboard_command::RequestId::new(),
+        owner: OwnerToken::new("shell"),
+        proto_ver: CATALOG_VERSION,
+        args: serde_json::json!({}),
+    };
+    let event = AgentEvent::CommandRequest {
+        envelope: serde_json::value::to_raw_value(&envelope).unwrap(),
+    };
+    (envelope.request_id, event)
+}
+
+/// A short name for a command the shell wrote.
+fn label(cmd: &AgentCommand) -> String {
+    match cmd {
+        AgentCommand::UsageSubscribe { vendors } => {
+            let vendors: Vec<String> = vendors.iter().map(|v| format!("{v:?}")).collect();
+            format!("usage[{}]", vendors.join(","))
+        }
+        AgentCommand::RegisterCommands { .. } => "register".to_owned(),
+        AgentCommand::CommandOutcome { reply } => {
+            match protocol_state::reply_from_wire(reply).map(|reply| reply.outcome) {
+                Ok(Ok(_)) => "outcome:ok".to_owned(),
+                Ok(Err(e)) => format!("outcome:err:{e:?}"),
+                Err(e) => format!("outcome:broken:{e}"),
+            }
+        }
+        AgentCommand::RefreshUsageLimits { vendor, .. } => format!("refresh:{vendor:?}"),
+        AgentCommand::Unsubscribe { agent_id } => format!("unsubscribe:{agent_id}"),
+        AgentCommand::ListAgents { .. } => "list".to_owned(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// Queues an unsubscribe on the actor as an order marker and returns its label.
+fn marker(client: &DaemonClient) -> String {
+    let agent = AgentId::new_v4();
+    client.unsubscribe(agent);
+    format!("unsubscribe:{agent}")
+}
+
+/// The usage state's socket epoch — what the webview pull gets.
+fn usage_socket(client: &DaemonClient) -> u64 {
+    client
+        .usage_interest()
+        .lock()
+        .snapshot_for_webview(Instant::now())
+        .socket_epoch
+}
+
+impl Harness {
+    /// Drops the daemon link and lets the link redial; returns the daemon side of the new link once connected.
+    async fn reconnected(&self, old: &MemoryEndpoint) -> Arc<MemoryEndpoint> {
+        old.close();
+        wait_for("Reconnecting", || {
+            self.client.state() == ConnectionState::Reconnecting
+        })
+        .await;
+        self.advance_until("the redial", || self.net.open_endpoints() > 0)
+            .await;
+        let (endpoint, _) = self.next_link().await;
+        endpoint.push(hello());
+        wait_for("connected again", || {
+            self.client.state() == ConnectionState::Connected
+        })
+        .await;
+        endpoint
+    }
+
+    async fn labels(&self, endpoint: &MemoryEndpoint, n: usize) -> Vec<String> {
+        self.commands(endpoint, n).await.iter().map(label).collect()
+    }
+}
+
+#[tokio::test]
+async fn a_daemon_command_is_answered_on_the_connection_it_came_on_and_not_on_a_later_one() {
+    let h = Harness::new(live());
+    let view = Arc::new(HeldView::default());
+    let spawner = Arc::new(CountingSpawner::default());
+    h.client.inbound.set(Arc::new(InboundReceiver::with_view(
+        CommandTable::new(&[]),
+        spawner.clone(),
+        CATALOG_VERSION,
+        view.clone(),
+    )));
+    let old = h.connected().await;
+
+    let (asked, request) = command_request("no.such.command");
+    old.push(text(&request));
+    match h.command(&old).await {
+        AgentCommand::CommandOutcome { reply } => {
+            let reply = protocol_state::reply_from_wire(&reply).unwrap();
+            assert_eq!(reply.request_id, asked);
+            assert!(reply.outcome.is_err(), "{:?}", reply.outcome);
+        }
+        other => panic!("expected the outcome, got {other:?}"),
+    }
+
+    let (held, request) = command_request(HELD);
+    old.push(text(&request));
+    wait_for("the view took the held command", || {
+        view.entered.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    let endpoint = h.reconnected(&old).await;
+    view.release.notify_one();
+    // Its task ends after the outcome was handed to the transport (`ReplySink` → `send_command_outcome`).
+    wait_for("the held command's outcome handed over", || {
+        spawner.finished.load(Ordering::SeqCst) == 2
+    })
+    .await;
+    assert_eq!(view.answered.load(Ordering::SeqCst), 1);
+    let m = marker(&h.client);
+    let sent = h.commands(&endpoint, 1).await;
+    assert_eq!(
+        sent.iter().map(label).collect::<Vec<_>>(),
+        [m],
+        "the outcome of a request of the old connection is not written on the new one (held {held})"
+    );
+}
+
+#[tokio::test]
+async fn a_daemon_reply_or_request_too_broken_to_read_is_logged_and_dropped() {
+    let mut b = Bench::new();
+    let g = Generation(1);
+    let token = b.add();
+    let connected = bench_connected(&b, g);
+    bench_route(&mut b, token, connected);
+    // Each payload's parse error quotes a marker value — the log must not.
+    const MARKER: &str = "MARKER_7Q";
+    let (_, request) = command_request("x");
+    let AgentEvent::CommandRequest { envelope } = request else {
+        unreachable!()
+    };
+    let mut envelope: serde_json::Value = serde_json::from_str(envelope.get()).unwrap();
+    envelope["proto_ver"] = MARKER.into();
+    let mut reply = serde_json::to_value(BusReply::ok(
+        engram_dashboard_command::RequestId::new(),
+        serde_json::json!({}),
+    ))
+    .unwrap();
+    reply["outcome"] = serde_json::json!({ MARKER: 1 });
+    let raw = |value: &serde_json::Value| {
+        serde_json::value::RawValue::from_string(value.to_string()).unwrap()
+    };
+    let quoted = [
+        protocol_state::envelope_from_wire(&raw(&envelope)).map(|_| ()),
+        protocol_state::reply_from_wire(&raw(&reply)).map(|_| ()),
+    ];
+    for error in quoted {
+        let error = error.expect_err("a broken payload").to_string();
+        assert!(
+            error.contains(MARKER),
+            "the parse error must quote the marker: {error}"
+        );
+    }
+
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    crate::daemon_client::link::test_log::capture(lines.clone(), || {
+        for event in [
+            AgentEvent::CommandReply { reply: raw(&reply) },
+            AgentEvent::CommandRequest {
+                envelope: raw(&envelope),
+            },
+        ] {
+            let item = bench_message(&b, g, ShellIn::Event(event));
+            bench_route(&mut b, token, item);
+        }
+    });
+    let lines = lines.lock().unwrap();
+    for event in ["CommandReply", "CommandRequest"] {
+        let field = format!("event=\"{event}\" ");
+        let warns = lines
+            .iter()
+            .filter(|line| line.starts_with("level=WARN ") && line.contains(&field))
+            .count();
+        assert_eq!(warns, 1, "{event}: {lines:?}");
+    }
+    assert!(
+        !lines.iter().any(|line| line.starts_with("level=ERROR ")),
+        "a broken envelope is not run (no table lookup): {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains(MARKER)),
+        "no daemon text in the log: {lines:?}"
+    );
+}
+
+const REFUSAL: &str = "INVALID_ARGUMENT: a command name may be at most 128 bytes (got 129)";
+
+#[tokio::test]
+async fn every_connect_registers_once_and_a_refusal_shows_its_box_while_the_actor_stays_responsive()
+{
+    let h = Harness::new(live());
+    let state = LayoutState::new();
+    h.client.install_command_table(
+        bus_table(&state, &h.client),
+        CATALOG_VERSION,
+        Arc::new(HeldView::default()),
+    );
+    let old = h.connected().await;
+    let AgentCommand::RegisterCommands { request_id, .. } = h.command(&old).await else {
+        panic!("the registration comes first");
+    };
+
+    // The registration reply is pending — actor round trips still complete (bounded: a stuck actor fails here).
+    tokio::time::timeout(Duration::from_secs(10), h.current_handle())
+        .await
+        .expect("the actor answers while the registration reply is pending");
+    let replay = tokio::time::timeout(
+        Duration::from_secs(10),
+        h.client.request_replay(AgentId::new_v4()),
+    )
+    .await
+    .expect("the actor answers while the registration reply is pending");
+    assert_eq!(replay, Err(REPLAY_UNSENT.to_owned()));
+
+    old.push(text(&AgentEvent::Error {
+        request_id: Some(request_id),
+        message: REFUSAL.into(),
+    }));
+    wait_for("the refusal box", || !h.refusals.shown().is_empty()).await;
+    assert_eq!(
+        h.refusals.shown(),
+        [(RefusalSite::Register, REFUSAL.to_owned())]
+    );
+
+    let endpoint = h.reconnected(&old).await;
+    assert_eq!(label(&h.command(&endpoint).await), "register");
+    let m = marker(&h.client);
+    assert_eq!(
+        label(&h.command(&endpoint).await),
+        m,
+        "one registration per connect"
+    );
+}
+
+// The order rule of the opened connection (module doc): the actor is held inside its `LinkUp` step — the test holds
+// the usage lock that step takes — while the peer is already live; a round trip and a fire-and-forget sent then go out
+// after the connection's on-open writes, not before and not failed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // Holding the usage lock is the device: it stops the actor in its `LinkUp` step.
+async fn a_command_sent_as_soon_as_the_peer_is_live_goes_out_after_the_registration_and_the_usage_subscribe(
+) {
+    let h = Harness::new(live());
+    let state = LayoutState::new();
+    h.client.install_command_table(
+        bus_table(&state, &h.client),
+        CATALOG_VERSION,
+        Arc::new(HeldView::default()),
+    );
+    let _ = relayout(h.client.usage_interest(), true, false);
+    let connect = h.connect();
+    let (endpoint, _) = h.next_link().await;
+
+    let usage = h.client.usage_interest().lock();
+    endpoint.push(hello());
+    wait_for("the peer is live", || {
+        h.peer_state() == Some(PeerState::Live)
+    })
+    .await;
+    let rid = RequestId::new();
+    let request = {
+        let client = h.client.clone();
+        tokio::spawn(async move {
+            client
+                .send_command(AgentCommand::ListAgents { request_id: rid })
+                .await
+        })
+    };
+    let fired = AgentId::new_v4();
+    h.client
+        .send_fire_and_forget(AgentCommand::Unsubscribe { agent_id: fired });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        endpoint.frames().is_empty(),
+        "nothing goes out before the connection is opened"
+    );
+    assert!(
+        !request.is_finished(),
+        "the round trip waits, it does not fail"
+    );
+    drop(usage);
+
+    let sent = h.labels(&endpoint, 4).await;
+    assert_eq!(sent.len(), 4, "{sent:?}");
+    assert_eq!(sent[..2], ["usage[Claude]", "register"], "{sent:?}");
+    let mut callers = sent[2..].to_vec();
+    callers.sort();
+    assert_eq!(callers, ["list".to_owned(), format!("unsubscribe:{fired}")]);
+
+    endpoint.push(text(&AgentEvent::Ack { request_id: rid }));
+    assert!(matches!(
+        joined("the round trip", request).await,
+        Ok(AgentEvent::Ack { request_id }) if request_id == rid
+    ));
+    joined("connect", connect).await.expect("connected");
+}
+
+// Copied from the old suite, which keeps its own until U4 (TRD §6-2 — moved onto the new driver).
+#[tokio::test]
+async fn a_usage_broadcast_notifies_once_with_labels_and_socket_epoch() {
+    let h = Harness::new(live());
+    let _ = relayout(h.client.usage_interest(), true, false);
+    let endpoint = h.connected().await;
+    assert_eq!(label(&h.command(&endpoint).await), "usage[Claude]");
+    let socket = usage_socket(&h.client);
+    assert_ne!(socket, 0);
+
+    endpoint.push(text(&usage_update(
+        AgentBackendKind::Claude,
+        7,
+        &[AgentBackendKind::Claude],
+    )));
+    wait_for("the usage notice", || h.events.seen().len() >= 2).await;
+    let m = marker(&h.client);
+    assert_eq!(
+        label(&h.command(&endpoint).await),
+        m,
+        "the same set — no resend"
+    );
+    assert_eq!(
+        h.events.seen(),
+        [
+            "state:connected".to_owned(),
+            format!("usage:Claude:7:{MAIN_WINDOW_LABEL}:{socket}"),
+        ]
+    );
+}
+
+// Copied from the old suite (TRD §6-2).
+#[tokio::test]
+async fn a_mismatched_broadcast_writes_the_interest_back_on_its_socket() {
+    let h = Harness::new(live());
+    let _ = relayout(h.client.usage_interest(), true, true);
+    let endpoint = h.connected().await;
+    assert_eq!(label(&h.command(&endpoint).await), "usage[Claude,Codex]");
+    let socket = usage_socket(&h.client);
+
+    endpoint.push(text(&usage_update(
+        AgentBackendKind::Claude,
+        1,
+        &[AgentBackendKind::Claude],
+    )));
+    wait_for("the usage notice", || h.events.seen().len() >= 2).await;
+    let m = marker(&h.client);
+    assert_eq!(
+        h.labels(&endpoint, 2).await,
+        ["usage[Claude,Codex]".to_owned(), m],
+        "the daemon lacks Codex — the wanted set goes back"
+    );
+    assert_eq!(
+        h.events.seen(),
+        [
+            "state:connected".to_owned(),
+            format!("usage:Claude:1:{MAIN_WINDOW_LABEL}:{socket}"),
+        ]
+    );
+}
+
+// Copied from the old suite (TRD §6-2): nudges carry no set, so whatever order they are taken in, the last subscribe
+// is the last interest.
+#[tokio::test]
+async fn nudges_carry_no_set_so_the_last_subscribe_is_the_last_interest() {
+    let h = Harness::new(live());
+    let _ = relayout(h.client.usage_interest(), true, false);
+    let endpoint = h.connected().await;
+    assert_eq!(label(&h.command(&endpoint).await), "usage[Claude]");
+
+    assert_eq!(
+        relayout(h.client.usage_interest(), true, true),
+        InterestAction::Nudge
+    );
+    assert_eq!(
+        relayout(h.client.usage_interest(), false, true),
+        InterestAction::Nudge
+    );
+    h.client.nudge_usage_interest();
+    h.client.nudge_usage_interest();
+    let m = marker(&h.client);
+    assert_eq!(
+        h.labels(&endpoint, 2).await,
+        ["usage[Codex]".to_owned(), m],
+        "the second nudge sends nothing"
+    );
+}
+
+// Adapted from the old suite's `a_new_socket_sends_the_interest_before_queued_commands` (TRD §6-2) — the order against
+// queued commands is pinned by `a_command_sent_as_soon_as_the_peer_is_live_…`.
+#[tokio::test]
+async fn a_lost_connection_clears_the_usage_cache_and_the_next_one_gets_the_current_interest_first()
+{
+    let h = Harness::new(live());
+    let _ = relayout(h.client.usage_interest(), true, false);
+    let old = h.connected().await;
+    assert_eq!(label(&h.command(&old).await), "usage[Claude]");
+    old.push(text(&usage_update(
+        AgentBackendKind::Claude,
+        1,
+        &[AgentBackendKind::Claude],
+    )));
+    wait_for("the usage notice", || h.events.seen().len() >= 2).await;
+    let cached = || {
+        let pulled = h
+            .client
+            .usage_interest()
+            .lock()
+            .snapshot_for_webview(Instant::now());
+        (pulled.socket_epoch, pulled.snapshots.len())
+    };
+    assert_eq!(cached().1, 1, "cached before the loss");
+
+    old.close();
+    wait_for("Reconnecting", || {
+        h.client.state() == ConnectionState::Reconnecting
+    })
+    .await;
+    assert_eq!(
+        cached(),
+        (0, 0),
+        "the loss empties the cache and the socket"
+    );
+    assert_eq!(
+        relayout(h.client.usage_interest(), true, true),
+        InterestAction::Nudge
+    );
+    h.client.nudge_usage_interest(); // no connection open — nothing to write
+
+    h.advance_until("the redial", || h.net.open_endpoints() > 0)
+        .await;
+    let (endpoint, _) = h.next_link().await;
+    endpoint.push(hello());
+    assert_eq!(
+        label(&h.command(&endpoint).await),
+        "usage[Claude,Codex]",
+        "the new connection's first frame is the interest of now"
+    );
+    h.client.nudge_usage_interest();
+    let m = marker(&h.client);
+    assert_eq!(
+        label(&h.command(&endpoint).await),
+        m,
+        "what the new connection got is what it was sent — the nudge has nothing to add"
+    );
+}
+
+// Copied from the old suite (TRD §6-2).
+#[tokio::test]
+async fn a_refresh_writes_the_interest_before_the_refresh_frame() {
+    let h = Harness::new(live());
+    let _ = relayout(h.client.usage_interest(), true, false);
+    let endpoint = h.connected().await;
+    assert_eq!(label(&h.command(&endpoint).await), "usage[Claude]");
+
+    let request_id = RequestId::new();
+    let refresh = {
+        let client = h.client.clone();
+        tokio::spawn(async move {
+            client
+                .send_command(AgentCommand::RefreshUsageLimits {
+                    vendor: AgentBackendKind::Claude,
+                    request_id,
+                })
+                .await
+        })
+    };
+    assert_eq!(
+        h.labels(&endpoint, 2).await,
+        ["usage[Claude]", "refresh:Claude"],
+        "the interest ahead of the refresh — even when it is the same set"
+    );
+    endpoint.push(text(&AgentEvent::Ack { request_id }));
+    assert!(matches!(
+        joined("the refresh", refresh).await,
+        Ok(AgentEvent::Ack { request_id: got }) if got == request_id
+    ));
+}
+
+// Copied from the old suite (TRD §6-2): the usage state sees the new socket when `Connected` is announced — first
+// connect and reconnect.
+#[tokio::test]
+async fn connected_is_announced_after_the_usage_state_sees_the_new_socket() {
+    let h = Harness::new(live());
+    let _ = relayout(h.client.usage_interest(), true, false);
+    let at_connected = Arc::new(Mutex::new(Vec::new()));
+    for _ in 0..2 {
+        let usage = h.client.usage_interest().clone();
+        let at_connected = at_connected.clone();
+        h.events.then_on_connected(move || {
+            let epoch = usage
+                .lock()
+                .snapshot_for_webview(Instant::now())
+                .socket_epoch;
+            at_connected.lock().unwrap().push(epoch);
+        });
+    }
+    let old = h.connected().await;
+    assert_eq!(label(&h.command(&old).await), "usage[Claude]");
+    let first = usage_socket(&h.client);
+
+    let endpoint = h.reconnected(&old).await;
+    assert_eq!(label(&h.command(&endpoint).await), "usage[Claude]");
+    let second = usage_socket(&h.client);
+    assert_ne!(first, second);
+    assert_eq!(*at_connected.lock().unwrap(), [first, second]);
+}
+
+// Copied from the old suite (TRD §6-2): a command the daemon delivers runs through the table, its usage nudge writes
+// the subscribe, and a shrink goes out only after the shrink delay — the deferred nudge reaches this driver.
+#[tokio::test]
+async fn a_usage_slot_placed_over_the_bus_subscribes_and_a_bus_toggle_off_shrinks_later() {
+    let h = Harness::new(live());
+    let state = LayoutState::new();
+    h.client.install_command_table(
+        bus_table(&state, &h.client),
+        CATALOG_VERSION,
+        Arc::new(HeldView::default()),
+    );
+    let endpoint = h.connected().await;
+    assert_eq!(
+        label(&h.command(&endpoint).await),
+        "register",
+        "no usage slot — no subscribe"
+    );
+
+    let (view, slot) = active_slot(&state, MAIN_WINDOW_LABEL);
+    let slot_args = |extra: serde_json::Value| {
+        let mut args = serde_json::json!({
+            "view_id": view.to_string(),
+            "slot_id": slot.to_string(),
+            "content": "Usage",
+        });
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        args
+    };
+    endpoint.push(text(&bus_request(
+        "layout.setSlotContent",
+        slot_args(serde_json::json!({})),
+    )));
+    // The outcome and the nudge reach the wire on different paths — their order is no contract.
+    let mut placed = h.labels(&endpoint, 2).await;
+    placed.sort();
+    assert_eq!(placed, ["outcome:ok", "usage[Claude,Codex]"]);
+
+    let asked = Instant::now();
+    endpoint.push(text(&bus_request(
+        "layout.setSlotContent",
+        slot_args(serde_json::json!({ "show_codex": false })),
+    )));
+    assert_eq!(
+        label(&h.command(&endpoint).await),
+        "outcome:ok",
+        "a shrink does not go out at once"
+    );
+    assert_eq!(label(&h.command(&endpoint).await), "usage[Claude]");
+    // The timer does not wake before its deadline — the slack below is millisecond rounding only.
+    assert!(
+        asked.elapsed() >= USAGE_INTEREST_SHRINK_DELAY - Duration::from_millis(20),
+        "the shrink went out before the delay: {:?}",
+        asked.elapsed()
+    );
+}
+
+// The skip rule of a connection being dropped (`apply`'s `ToDriver` arm): a daemon command request and a usage snapshot
+// of it are not handled; the same items on the next connection are.
+#[tokio::test]
+async fn a_daemon_command_request_or_usage_snapshot_on_a_connection_being_dropped_is_not_handled() {
+    let mut b = Bench::new();
+    let agent = AgentId::new_v4();
+    let _ = relayout(&b.driver.usage, true, false);
+    let g = Generation(1);
+    let token = b.add();
+    let connected = bench_connected(&b, g);
+    bench_route(&mut b, token, connected);
+    // A drop the actor decides — the replay Subscribe cannot be written (the bench peer is not live).
+    b.driver.router.set_visible_agents_for_test(&[agent]);
+    assert_eq!(
+        b.driver.request_replay(agent),
+        Err(REPLAY_UNSENT.to_owned())
+    );
+    assert_eq!(b.driver.dropping, Some(g));
+
+    // With no command table installed, handling a request logs an error and answers it (`accept_inbound`).
+    let route_both = |b: &mut Bench, generation: Generation| {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        crate::daemon_client::link::test_log::capture(lines.clone(), || {
+            let (_, request) = command_request("no.such.command");
+            let snapshot = usage_update(AgentBackendKind::Claude, 1, &[AgentBackendKind::Claude]);
+            for event in [request, snapshot] {
+                let item = bench_message(b, generation, ShellIn::Event(event));
+                bench_route(b, token, item);
+            }
+        });
+        let lines = lines.lock().unwrap().clone();
+        lines
+    };
+    let lines = route_both(&mut b, g);
+    assert!(
+        !lines.iter().any(|line| line.starts_with("level=ERROR ")),
+        "the request was not run: {lines:?}"
+    );
+    let skipped = lines
+        .iter()
+        .filter(|line| line.starts_with("level=DEBUG ") && line.contains("what=\"event\" "))
+        .count();
+    assert_eq!(skipped, 2, "{lines:?}");
+    assert!(
+        !b.events
+            .seen()
+            .iter()
+            .any(|line| line.starts_with("usage:")),
+        "{:?}",
+        b.events.seen()
+    );
+
+    let lost = Incoming::Event(TransportEvent::Disconnected {
+        peer: b.key().peer_id().clone(),
+        generation: g,
+        cause: DisconnectCause::WriteFailed,
+    });
+    bench_route(&mut b, token, lost);
+    let next = Generation(2);
+    let connected = bench_connected(&b, next);
+    bench_route(&mut b, token, connected);
+    let lines = route_both(&mut b, next);
+    assert!(
+        lines.iter().any(|line| line.starts_with("level=ERROR ")),
+        "the next connection's request is run: {lines:?}"
+    );
+    assert!(
+        b.events
+            .seen()
+            .iter()
+            .any(|line| line.starts_with("usage:Claude:1:")),
+        "{:?}",
+        b.events.seen()
+    );
+}
+
+// ── review round 1 (3-2 U3c) ────────────────────────────────────────────────────────────────────
+
+/// Runs inbound command tasks and counts the ones that ran to their end — the outcome was handed over by then.
+#[derive(Default)]
+struct CountingSpawner {
+    finished: Arc<AtomicUsize>,
+}
+
+impl TaskSpawner for CountingSpawner {
+    fn spawn(&self, task: BoxedTask) {
+        let finished = self.finished.clone();
+        tokio::spawn(async move {
+            task.await;
+            finished.fetch_add(1, Ordering::SeqCst);
+        });
+    }
+}
+
+fn published(link: &LinkClient) -> Option<Opened> {
+    lock_gate(&link.gate).opened
+}
+
+/// The generations of the fire-and-forgets pending in the gate, in order.
+fn pending(gate: &Mutex<Gate>) -> Vec<Generation> {
+    lock_gate(gate)
+        .pending
+        .iter()
+        .map(|(generation, _)| *generation)
+        .collect()
+}
+
+fn unsubscribe(agent_id: AgentId) -> AgentCommand {
+    AgentCommand::Unsubscribe { agent_id }
+}
+
+fn list() -> AgentCommand {
+    AgentCommand::ListAgents {
+        request_id: RequestId::new(),
+    }
+}
+
+impl Harness {
+    /// Commands written on `endpoint` up to and including the one labelled `last`.
+    async fn labels_until(&self, endpoint: &MemoryEndpoint, last: &str) -> Vec<String> {
+        let mut got = Vec::new();
+        while !got.iter().any(|label| label == last) {
+            got.extend(self.labels(endpoint, 1).await);
+        }
+        got
+    }
+}
+
+// A round trip waiting for its connection to open fails as unsent when that connection is lost meanwhile, and nothing
+// of it goes out on the next connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // Holding the usage lock is the device: it stops the actor in its `LinkUp` step.
+async fn a_waiting_command_fails_as_unsent_when_its_connection_is_lost() {
+    let h = Harness::new(live());
+    let connect = h.connect();
+    let (old, _) = h.next_link().await;
+    let usage = h.client.usage_interest().lock();
+    old.push(hello());
+    wait_for("the peer is live", || {
+        h.peer_state() == Some(PeerState::Live)
+    })
+    .await;
+    let request = {
+        let client = h.client.clone();
+        tokio::spawn(async move { client.send_command(list()).await })
+    };
+    // Lets the call reach its wait — it is not opened while the actor is held.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!request.is_finished());
+    old.close();
+    let ended = joined("the waiting command", request).await;
+    assert!(
+        matches!(&ended, Err(text) if text == UNSENT_ON_DISCONNECT),
+        "{ended:?}"
+    );
+    drop(usage);
+    joined("connect", connect).await.expect("connected");
+
+    h.advance_until("the redial", || h.net.open_endpoints() > 0)
+        .await;
+    let (endpoint, _) = h.next_link().await;
+    endpoint.push(hello());
+    wait_for("the next connection opened", || {
+        published(h.link()).is_some_and(|opened| opened.generation > Generation(1))
+    })
+    .await;
+    let m = marker(&h.client);
+    assert_eq!(h.labels(&endpoint, 1).await, [m]);
+}
+
+// F1 (ADR-0195): a round trip waiting for its connection to open is bound to it. Polled again only once the next
+// connection is open and published, it fails as unsent — it does not take the next connection — and writes nothing
+// there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // Holding the usage lock is the device: it stops the actor in its `LinkUp` step.
+async fn a_waiting_command_woken_only_after_the_next_connection_opened_fails_and_writes_nothing_there(
+) {
+    let h = Harness::new(live());
+    let connect = h.connect();
+    let (old, _) = h.next_link().await;
+    let usage = h.client.usage_interest().lock();
+    old.push(hello());
+    wait_for("the peer is live", || {
+        h.peer_state() == Some(PeerState::Live)
+    })
+    .await;
+    let mut call = Box::pin(h.link().send_command(list()));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(
+        call.as_mut().poll(&mut cx).is_pending(),
+        "waits for its connection to open"
+    );
+
+    old.close();
+    drop(usage);
+    joined("connect", connect).await.expect("connected");
+    h.advance_until("the redial", || h.net.open_endpoints() > 0)
+        .await;
+    let (endpoint, _) = h.next_link().await;
+    endpoint.push(hello());
+    wait_for("the next connection opened", || {
+        published(h.link()).is_some_and(|opened| opened.generation > Generation(1))
+    })
+    .await;
+
+    match call.as_mut().poll(&mut cx) {
+        Poll::Ready(Err(CommandFailure::Local(text))) => assert_eq!(text, UNSENT_ON_DISCONNECT),
+        other => panic!("expected the unsent failure, got {other:?}"),
+    }
+    let m = marker(&h.client);
+    assert_eq!(h.labels(&endpoint, 1).await, [m]);
+}
+
+// The gate's pending list is bounded at the caller, as the old command channel was; on `LinkUp` the pending ones go
+// out in the order sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // Holding the usage lock is the device: it stops the actor in its `LinkUp` step.
+async fn fire_and_forgets_pending_for_a_connection_not_opened_yet_are_bounded_at_the_caller() {
+    let h = Harness::new(live());
+    let connect = h.connect();
+    let (endpoint, _) = h.next_link().await;
+    let usage = h.client.usage_interest().lock();
+    endpoint.push(hello());
+    wait_for("the peer is live", || {
+        h.peer_state() == Some(PeerState::Live)
+    })
+    .await;
+    let fired: Vec<AgentId> = (0..=QUEUED_FIRES_MAX).map(|_| AgentId::new_v4()).collect();
+    for agent_id in &fired {
+        h.client.send_fire_and_forget(unsubscribe(*agent_id));
+    }
+    assert_eq!(
+        pending(&h.link().gate).len(),
+        QUEUED_FIRES_MAX,
+        "the one past the bound is dropped at the caller"
+    );
+    drop(usage);
+    joined("connect", connect).await.expect("connected");
+
+    let m = marker(&h.client);
+    let sent = h.labels_until(&endpoint, &m).await;
+    let expected: Vec<String> = fired[..QUEUED_FIRES_MAX]
+        .iter()
+        .map(|agent| format!("unsubscribe:{agent}"))
+        .chain([m])
+        .collect();
+    assert_eq!(sent, expected, "in the order sent, the dropped one missing");
+    assert!(pending(&h.link().gate).is_empty());
+}
+
+// Finding 2: one caller's fire-and-forget sent while its connection is not opened yet, then a round trip once it is —
+// written in that order (the actor writes the pending list before it sets the connection opened, under the gate).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // Holding the usage lock is the device: it stops the actor in its `LinkUp` step.
+async fn a_fire_and_forget_sent_before_the_open_goes_out_ahead_of_the_same_callers_round_trip_after_it(
+) {
+    let h = Harness::new(live());
+    let connect = h.connect();
+    let (endpoint, _) = h.next_link().await;
+    let usage = h.client.usage_interest().lock();
+    endpoint.push(hello());
+    wait_for("the peer is live", || {
+        h.peer_state() == Some(PeerState::Live)
+    })
+    .await;
+    let fired = AgentId::new_v4();
+    h.client.send_fire_and_forget(unsubscribe(fired));
+    assert_eq!(pending(&h.link().gate).len(), 1);
+    drop(usage);
+    joined("connect", connect).await.expect("connected");
+    wait_for("opened", || published(h.link()).is_some()).await;
+
+    let rid = RequestId::new();
+    let request = {
+        let client = h.client.clone();
+        tokio::spawn(async move {
+            client
+                .send_command(AgentCommand::ListAgents { request_id: rid })
+                .await
+        })
+    };
+    assert_eq!(
+        h.labels(&endpoint, 2).await,
+        [format!("unsubscribe:{fired}"), "list".to_owned()]
+    );
+    endpoint.push(text(&AgentEvent::Ack { request_id: rid }));
+    assert!(joined("the round trip", request).await.is_ok());
+}
+
+// Finding 1: a fire-and-forget left pending for a connection that was lost (a caller saw it live just before) does not
+// hold anything back — the next connection opens and a round trip on it completes.
+#[tokio::test]
+async fn a_pending_fire_and_forget_of_a_lost_connection_does_not_hold_back_the_next_one() {
+    let h = Harness::new(live());
+    let old = h.connected().await;
+    wait_for("opened", || published(h.link()).is_some()).await;
+    let first = published(h.link()).unwrap().generation;
+    old.close();
+    wait_for("Reconnecting", || {
+        h.client.state() == ConnectionState::Reconnecting
+    })
+    .await;
+    assert_eq!(published(h.link()), None);
+    let stale = AgentId::new_v4();
+    lock_gate(&h.link().gate)
+        .pending
+        .push_back((first, unsubscribe(stale)));
+
+    h.advance_until("the redial", || h.net.open_endpoints() > 0)
+        .await;
+    let (endpoint, _) = h.next_link().await;
+    endpoint.push(hello());
+    let rid = RequestId::new();
+    let request = {
+        let client = h.client.clone();
+        tokio::spawn(async move {
+            client
+                .send_command(AgentCommand::ListAgents { request_id: rid })
+                .await
+        })
+    };
+    assert_eq!(
+        h.labels(&endpoint, 1).await,
+        ["list"],
+        "the stale one is not written"
+    );
+    endpoint.push(text(&AgentEvent::Ack { request_id: rid }));
+    assert!(joined("the round trip", request).await.is_ok());
+    assert!(pending(&h.link().gate).is_empty());
+}
+
+// F3: on an opened connection one caller's fire-and-forget and round trip go out in the order made.
+#[tokio::test]
+async fn a_fire_and_forget_then_a_round_trip_go_out_in_that_order_on_an_opened_connection() {
+    let h = Harness::new(live());
+    let endpoint = h.connected().await;
+    wait_for("opened", || published(h.link()).is_some()).await;
+    let rid = RequestId::new();
+    let fired = AgentId::new_v4();
+    let client = h.client.clone();
+    let caller = tokio::spawn(async move {
+        client.send_fire_and_forget(AgentCommand::Unsubscribe { agent_id: fired });
+        client
+            .send_command(AgentCommand::ListAgents { request_id: rid })
+            .await
+    });
+    assert_eq!(
+        h.labels(&endpoint, 2).await,
+        [format!("unsubscribe:{fired}"), "list".to_owned()]
+    );
+    endpoint.push(text(&AgentEvent::Ack { request_id: rid }));
+    assert!(joined("the round trip", caller).await.is_ok());
+}
+
+// F4: `close()` followed at once by a write fails it — as the old driver's closed command window did.
+#[tokio::test]
+async fn a_command_right_after_a_close_fails_at_once_and_nothing_goes_out() {
+    let h = Harness::new(live());
+    let endpoint = h.connected().await;
+    wait_for("opened", || published(h.link()).is_some()).await;
+
+    h.client.close();
+    // No await before both calls decide: on this single-thread runtime the actor has not taken the close yet, so the
+    //   peer is still live and published — only the close epoch tells them apart.
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    crate::daemon_client::link::test_log::capture(lines.clone(), || {
+        h.client
+            .send_fire_and_forget(unsubscribe(AgentId::new_v4()))
+    });
+    assert!(
+        lines
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.starts_with("level=DEBUG ") && line.contains("why=\"closed\" ")),
+        "dropped at the caller as closed: {:?}",
+        lines.lock().unwrap()
+    );
+    assert!(matches!(
+        h.client.send_command(list()).await,
+        Err(text) if text == NOT_CONNECTED
+    ));
+    wait_for("Down", || h.client.state() == ConnectionState::Down).await;
+    assert_eq!(endpoint.frames(), Vec::<Frame>::new());
+}
+
+// G1: a fire-and-forget sent after `close()` while the connection is live but not opened yet is dropped at the caller —
+// it does not wait in the pending list for the `LinkUp` step to write it on the closing link.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // Holding the usage lock is the device: it stops the actor in its `LinkUp` step.
+async fn a_fire_and_forget_after_a_close_while_the_connection_is_not_opened_yet_is_dropped() {
+    let h = Harness::new(live());
+    let connect = h.connect();
+    let (endpoint, _) = h.next_link().await;
+    let usage = h.client.usage_interest().lock();
+    endpoint.push(hello());
+    wait_for("the peer is live", || {
+        h.peer_state() == Some(PeerState::Live)
+    })
+    .await;
+    assert_eq!(published(h.link()), None, "not opened — the actor is held");
+
+    h.client.close();
+    let fired = AgentId::new_v4();
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    crate::daemon_client::link::test_log::capture(lines.clone(), || {
+        h.client.send_fire_and_forget(unsubscribe(fired))
+    });
+    assert!(
+        lines
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.starts_with("level=DEBUG ") && line.contains("why=\"closed\" ")),
+        "dropped at the caller as closed: {:?}",
+        lines.lock().unwrap()
+    );
+    assert!(pending(&h.link().gate).is_empty());
+    drop(usage);
+    // The connect may resolve either way — its handle was closed right after it connected.
+    let _ = joined("connect", connect).await;
+    wait_for("Down", || h.client.state() == ConnectionState::Down).await;
+    assert_eq!(
+        endpoint.frames(),
+        Vec::<Frame>::new(),
+        "nothing reached the closing link"
+    );
+}
+
+// F5: a daemon command request in the tail of a link the user closed is not run.
+#[tokio::test]
+async fn a_daemon_command_request_of_a_closed_links_tail_is_not_run() {
+    let mut b = Bench::new();
+    let g = Generation(1);
+    let token = b.add();
+    let connected = bench_connected(&b, g);
+    bench_route(&mut b, token, connected);
+    // With no command table installed, running a request logs an error and answers it (`accept_inbound`).
+    let route_request = |b: &mut Bench| {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        crate::daemon_client::link::test_log::capture(lines.clone(), || {
+            let (_, request) = command_request("no.such.command");
+            let item = bench_message(b, g, ShellIn::Event(request));
+            bench_route(b, token, item);
+        });
+        let errors = lines
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|line| line.starts_with("level=ERROR "))
+            .count();
+        errors
+    };
+    assert_eq!(route_request(&mut b), 1, "run while the link is the user's");
+    b.driver.close();
+    assert_eq!(route_request(&mut b), 0, "not run after the close");
+}
+
+// T1: a round trip whose connection does not open within the request timeout gives up with its text and a warn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // Holding the usage lock is the device: it stops the actor in its `LinkUp` step.
+async fn a_command_whose_connection_does_not_open_in_time_gives_up_with_a_warn() {
+    let h = Harness::new(live());
+    let connect = h.connect();
+    let (endpoint, _) = h.next_link().await;
+    let usage = h.client.usage_interest().lock();
+    endpoint.push(hello());
+    wait_for("the peer is live", || {
+        h.peer_state() == Some(PeerState::Live)
+    })
+    .await;
+    let after = link_policy().request_timeout;
+    // The link's own timers stay quiet over the advance.
+    assert!(
+        after + Duration::from_secs(1) < link_policy().ping_interval
+            && after + Duration::from_secs(1) < link_policy().idle_timeout
+    );
+
+    let mut call = Box::pin(h.link().send_command(list()));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(
+        call.as_mut().poll(&mut cx).is_pending(),
+        "waits for the open"
+    );
+    h.clock.advance(after + Duration::from_secs(1));
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let polled = crate::daemon_client::link::test_log::capture(lines.clone(), || {
+        call.as_mut().poll(&mut cx)
+    });
+    match polled {
+        Poll::Ready(Err(CommandFailure::Local(text))) => assert_eq!(
+            text,
+            format!(
+                "{SEND_FAILED_PREFIX}: the daemon connection did not finish opening within {}s",
+                after.as_secs()
+            )
+        ),
+        other => panic!("expected the timeout, got {other:?}"),
+    }
+    let lines = lines.lock().unwrap().clone();
+    let field = format!("after_secs={} ", after.as_secs());
+    assert!(
+        lines.iter().any(|line| line.starts_with("level=WARN ")
+            && line.contains(&field)
+            && line.contains("generation=")),
+        "{lines:?}"
+    );
+    drop(usage);
+    joined("connect", connect).await.expect("connected");
+}
+
+// The actor's rules for the gate's pending list on `LinkUp`: that connection's are written (before it is set opened —
+// same lock), older ones dropped, newer ones kept; a close clears the list.
+#[tokio::test]
+async fn pending_fire_and_forgets_follow_their_connection() {
+    let mut b = Bench::new();
+    let token = b.add();
+    let (g1, g2, g3) = (Generation(1), Generation(2), Generation(3));
+    for generation in [g1, g2, g3] {
+        lock_gate(&b.driver.gate)
+            .pending
+            .push_back((generation, unsubscribe(AgentId::new_v4())));
+    }
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let connected = bench_connected(&b, g2);
+    crate::daemon_client::link::test_log::capture(lines.clone(), || {
+        bench_route(&mut b, token, connected)
+    });
+    let lines = lines.lock().unwrap().clone();
+    // The bench peer is not live, so the write is refused — and logged with its generation.
+    let refused = format!("error={UNSENT_ON_DISCONNECT} ");
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.starts_with("level=DEBUG ")
+                && line.contains("generation=2 ")
+                && line.contains(&refused))
+            .count(),
+        1,
+        "g2's one was written: {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("level=DEBUG ") && line.contains("dropped=1 ")),
+        "g1's one was dropped: {lines:?}"
+    );
+    assert_eq!(pending(&b.driver.gate), [g3], "a newer one is kept");
+    assert_eq!(
+        lock_gate(&b.driver.gate).opened,
+        Some(Opened {
+            generation: g2,
+            closes: 0
+        })
+    );
+
+    b.driver.close();
+    assert!(pending(&b.driver.gate).is_empty());
+    assert_eq!(lock_gate(&b.driver.gate).opened, None);
+}
+
+// T3 — adapted from the old suite's `a_drop_before_the_reply_shows_no_box` (TRD §6-2): a registration whose link drops
+// before the reply is a local failure — a warn, no box (ADR-0281); the next connection's refusal shows one.
+#[tokio::test]
+async fn a_drop_before_the_registration_reply_shows_no_box() {
+    let h = Harness::new(live());
+    let state = LayoutState::new();
+    h.client.install_command_table(
+        bus_table(&state, &h.client),
+        CATALOG_VERSION,
+        Arc::new(HeldView::default()),
+    );
+    let old = h.connected().await;
+    assert_eq!(label(&h.command(&old).await), "register");
+
+    let endpoint = h.reconnected(&old).await;
+    let AgentCommand::RegisterCommands { request_id, .. } = h.command(&endpoint).await else {
+        panic!("the next connection registers");
+    };
+    endpoint.push(text(&AgentEvent::Error {
+        request_id: Some(request_id),
+        message: REFUSAL.into(),
+    }));
+    wait_for("the refusal box", || !h.refusals.shown().is_empty()).await;
+    assert_eq!(
+        h.refusals.shown(),
+        [(RefusalSite::Register, REFUSAL.to_owned())],
+        "the dropped registration showed a box"
+    );
+}
+
+// T4 — copied from the old suite (TRD §6-2): with no interest ⟳ still writes an empty subscribe ahead of the refresh.
+#[tokio::test]
+async fn a_refresh_with_no_interest_writes_an_empty_subscribe_first() {
+    let h = Harness::new(live());
+    let endpoint = h.connected().await;
+    let request_id = RequestId::new();
+    let refresh = {
+        let client = h.client.clone();
+        tokio::spawn(async move {
+            client
+                .send_command(AgentCommand::RefreshUsageLimits {
+                    vendor: AgentBackendKind::Claude,
+                    request_id,
+                })
+                .await
+        })
+    };
+    assert_eq!(h.labels(&endpoint, 2).await, ["usage[]", "refresh:Claude"]);
+    endpoint.push(text(&AgentEvent::Ack { request_id }));
+    assert!(joined("the refresh", refresh).await.is_ok());
 }
