@@ -73,5 +73,9 @@ Every translation batch uses these renderings. A batch that needs a new term add
 | 파서 (폴더를 파서) | create (a folder) | 파다, not "parse" |
 | 「…」이 없다 (quote + negation) | there is no 「…」 | keep the negation in the sentence, not only in the gloss |
 | X를 들어 주다 | lift / waive X for us | not "make X apply" |
+| 거두다 / 거둔 (입력, ✕) | withdraw (with ✕) | not "take in" or "collect" |
+| 갈려 나가다 | be replaced | not "ground away" |
+| N판 (문서) / N회차 (리뷰) | Nth edition / round N | "deep 4회차 전원 PASS" = all reviewers passed in round 4 |
+| 명단 (목록) | list | 명단이 아니다 = not a complete list; roster only for 로스터 |
 
 Kept in Korean: the ADR lint tokens (`- 상태:` + vocab, `- 관련:`, section headings), text in 「」, names of CLAUDE.md and `.claude/` sections.
