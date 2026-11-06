@@ -79,5 +79,9 @@ Every translation batch uses these renderings. A batch that needs a new term add
 | 명단 (목록) | list | 명단이 아니다 = not a complete list; roster only for 로스터 |
 | 가능성 높음 / 불확실 / 확실 | likely / uncertain / certain | confidence labels, not "confidence high" |
 | 쌍둥이 (같은 이름) | twins | "@all 쌍둥이는 둘 다 받는다" = both twins receive it |
+| 목적 함수 (platform) | purpose-specific function | not "objective function" (ADR-0266/0295) |
+| 크롬 보고 | chrome reporting | app window chrome, not Google Chrome |
+| 가리다 | tell apart / distinguish (or cover) | decide by context |
+| 끄는 | turning off (끄다) or dragging (끌다) | decide by context |
 
 Kept in Korean: the ADR lint tokens (`- 상태:` + vocab, `- 관련:`, section headings), text in 「」, names of CLAUDE.md and `.claude/` sections.
