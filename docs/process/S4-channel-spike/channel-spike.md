@@ -1,23 +1,23 @@
-# Channel Spike — Tauri 2.11 Channel 실측 (담당: dco23, Opus)
+# Channel Spike — measuring the Tauri 2.11 Channel (owner: dco23, Opus)
 
-발신: ed12 (매니저)
-목적: tauri 버전 핀 결정을 위한 실측. 현재 `tauri = "2.4"`가 caret이라 2.11.2로 resolve됨.
-LLD는 "2.5+ Channel silent failure" 우려로 2.4 고정을 명시했으나, 그 이슈가 **Windows WebView2**에 실제 존재하는지 직접 검증한다.
-**결과 양호 시 최신 2.x 유지 확정, 문제 시 `=2.4` 핀.** (사용자 결정: 3번 실측 → 1번 유지)
+From: ed12 (manager)
+Purpose: a measurement for deciding the tauri version pin. The current `tauri = "2.4"` is a caret, so it resolves to 2.11.2.
+The LLD states a 2.4 pin because of the concern "2.5+ Channel silent failure", but we verify directly whether that issue actually exists on **Windows WebView2**.
+**If the result is good, confirm keeping the latest 2.x; if there is a problem, pin `=2.4`.** (User decision: option 3, measure → option 1, keep)
 
-## 검증 대상 2가지
+## Two things to verify
 
-### 검증 1 (필수) — 연속 send 무결성
-이슈 #11421("새 Channel 인스턴스가 1회만 전송 가능")이 Windows에도 있는가?
-우리 drain은 매 chunk마다 send하므로 이게 깨지면 치명적.
+### Verification 1 (required) — integrity of consecutive sends
+Does issue #11421 ("a new Channel instance can send only once") also exist on Windows?
+Our drain sends on every chunk, so it is fatal if this is broken.
 
-### 검증 2 (가능하면) — webview 소멸 후 send 반환값
-이슈 #10901: webview가 안 듣고 있을 때 send가 Err를 반환하는가, 아니면 조용히 Ok인가?
-우리 drain의 dead subscriber 감지(send 실패 시 제거)에 영향. (단 우리는 명시적 unsubscribe도 있어 치명적이진 않음)
+### Verification 2 (if possible) — send return value after the webview is gone
+Issue #10901: when the webview is not listening, does send return Err, or silently Ok?
+It affects our drain's dead-subscriber detection (removal when send fails). (But we also have an explicit unsubscribe, so it is not fatal)
 
-## 구현 (임시 검증 코드 — spike처럼 나중 정리)
+## Implementation (temporary verification code — clean up later like the spike)
 
-### 백엔드: 임시 test command
+### Backend: temporary test command
 ```rust
 use tauri::ipc::Channel;
 
@@ -31,9 +31,9 @@ fn channel_spike(on_event: Channel<String>) -> Result<(), String> {
     Ok(())
 }
 ```
-lib.rs invoke_handler에 임시 등록.
+Register it temporarily in the lib.rs invoke_handler.
 
-### 프론트: 수신 카운트
+### Frontend: receive count
 ```ts
 import { Channel, invoke } from '@tauri-apps/api/core'
 
@@ -50,20 +50,20 @@ await invoke('channel_spike', { onEvent: ch })
 // 잠시 후 count, gap 출력 — count===1000 && !gap 이면 검증1 PASS
 console.log({ count, gap, lastSeq })
 ```
-App.tsx 등에 버튼 하나 달아 트리거하거나, 마운트 시 1회 실행. 화면이나 콘솔에 결과 표시.
+Attach a button to App.tsx or similar to trigger it, or run it once on mount. Show the result on screen or in the console.
 
-### 검증 2 (선택)
-두 번째 WebviewWindow를 만들어 그 창에서 channel 등록 → 창 close → 백엔드에서 그 channel로 send → 반환값(Ok/Err) 관찰. 구현 부담되면 검증1만 하고 검증2는 "미실시"로 보고.
+### Verification 2 (optional)
+Create a second WebviewWindow, register the channel in that window → close the window → send to that channel from the backend → observe the return value (Ok/Err). If the implementation is a burden, do only verification 1 and report verification 2 as "not done".
 
-## 실행 & 보고
+## Run and report
 
 ```
 npm run tauri dev   # 앱 띄우고 트리거 → 콘솔/화면에서 count, gap 확인
 ```
 
-보고:
-- 검증1 PASS(count=1000, gap=false): `orch 12 "⟁dco23 Channel spike — 검증1 PASS(1000/1000 무손실), 검증2 <결과>. 최신 2.x 유지 가능"`
-- 검증1 FAIL: `orch 12 "⟁dco23 Channel spike — 검증1 FAIL(N/1000 수신, gap=true). =2.4 핀 필요"` + 로그
+Report:
+- Verification 1 PASS (count=1000, gap=false): `orch 12 "⟁dco23 Channel spike — 검증1 PASS(1000/1000 무손실), 검증2 <결과>. 최신 2.x 유지 가능"`
+- Verification 1 FAIL: `orch 12 "⟁dco23 Channel spike — 검증1 FAIL(N/1000 수신, gap=true). =2.4 핀 필요"` + log
 
-임시 코드(channel_spike command, 프론트 트리거)는 검증 후 ed12가 정리 지시. 막히면 30분 내 중간보고.
-주의: 이건 Tauri 앱을 실제로 띄우는 첫 통합 테스트다 — 빌드/실행 환경 문제(WebView2 등)도 같이 관찰해서 보고.
+The temporary code (the channel_spike command, the frontend trigger) is cleaned up after verification on ed12's instruction. If stuck, send an interim report within 30 minutes.
+Note: this is the first integration test that actually launches the Tauri app — also observe and report build/run environment problems (WebView2 etc.).

@@ -1,20 +1,20 @@
-# 모듈 2 — pty/session.rs 브리핑 (담당: dco23, Opus)
+# Module 2 — pty/session.rs briefing (owner: dco23, Opus)
 
-발신: ed12 (매니저)
-근거: `docs/backend-lld-stage1.md` §4 (PtySession 구조체), §7 (subscribe/replay), §10 (동시성).
-**반드시 §4·§7·§10 원문을 읽고 따른다.** 이 모듈이 백엔드에서 가장 동시성 민감하다.
+From: ed12 (manager)
+Source: `docs/backend-lld-stage1.md` §4 (PtySession struct), §7 (subscribe/replay), §10 (concurrency).
+**Read the original §4, §7 and §10 and follow them.** This module is the most concurrency-sensitive part of the backend.
 
-## 목표
+## Goal
 
 `src-tauri/src/pty/session.rs`:
-1. `PtySession` 구조체 (§4)
-2. `ReplayBuffer` — **types.rs에서 이 파일로 이동** (dr26 리뷰 일탈 1건 해결: LLD §1/§4가 session.rs 소속으로 명시). types.rs에서는 제거하고, types.rs가 ReplayBuffer를 참조하던 부분이 있으면 정리.
-3. `impl PtySession` 의 `subscribe` / `unsubscribe` (§7)
-4. `PtySession::new(...)` 생성자 (manager의 spawn_agent가 호출할 형태)
+1. The `PtySession` struct (§4)
+2. `ReplayBuffer` — **move it from types.rs to this file** (resolves one deviation found in the dr26 review: LLD §1/§4 state that it belongs to session.rs). Remove it from types.rs, and clean up anything in types.rs that referenced ReplayBuffer.
+3. `subscribe` / `unsubscribe` of `impl PtySession` (§7)
+4. The `PtySession::new(...)` constructor (in the form manager's spawn_agent will call)
 
-drain thread 로직(drain_loop)과 spawn/kill은 **이 파일이 아니다** (drain.rs / manager.rs). 여기선 자료구조 + subscribe/unsubscribe만.
+The drain thread logic (drain_loop) and spawn/kill are **not this file** (drain.rs / manager.rs). Here: only the data structures + subscribe/unsubscribe.
 
-## PtySession 구조체 (§4 그대로)
+## PtySession struct (§4 as written)
 
 ```rust
 pub struct PtySession {
@@ -37,9 +37,9 @@ pub struct PtySession {
 }
 ```
 
-**필드별 별도 Mutex인 이유**(§4 line 245)를 구조체 위 doc comment로 설명: drain이 replay/subscribers만 잠그는 동안 write_stdin은 writer만 잠가 교착 없이 병행 가능.
+**Explain the reason for a separate Mutex per field** (§4 line 245) in a doc comment above the struct: while drain locks only replay/subscribers, write_stdin locks only writer, so they run in parallel without deadlock.
 
-## subscribe (§7 — C4 핵심, 절대 준수)
+## subscribe (§7 — the core of C4, follow strictly)
 
 ```
 subscribe(&self, sink: Arc<dyn OutputSink>) -> SinkId:
@@ -56,8 +56,8 @@ subscribe(&self, sink: Arc<dyn OutputSink>) -> SinkId:
     sink_id
 ```
 
-- **락 순서 예외 명시 주석**: "subscribe 함수만 subscribers→replay 두 lock 동시 취득. drain thread는 절대 두 lock 동시 보유 금지" (§10 규칙3 예외).
-- seq 연속성: replay snapshot의 seq와 이후 live chunk의 seq가 끊기지 않아야 함. 프론트가 seq로 dedup한다.
+- **A comment stating the lock-order exception**: "only the subscribe function acquires both locks, subscribers→replay, at the same time. The drain thread must never hold the two locks at the same time" (§10 rule 3 exception).
+- seq continuity: the seq of the replay snapshot and the seq of the live chunks after it must not have a gap. The frontend dedups by seq.
 
 ## unsubscribe (§7)
 
@@ -66,21 +66,21 @@ unsubscribe(&self, sink_id: SinkId):
     self.subscribers.lock().retain(|s| s.sink_id() != sink_id);
 ```
 
-## 불변 규칙 (리뷰 필수)
+## Invariants (mandatory for review)
 
-- tauri import 0개. (JobObjectHandle은 crate::pty::platform 경유)
-- `master` 는 반드시 `Mutex<Option<...>>` — kill path에서 take() 한다.
-- 락 보유 중 `sink.send()` 호출하는 곳은 **subscribe의 replay 전송뿐** (C4 의도된 예외). drain은 절대 금지 — 그건 drain.rs 몫.
-- Mutex는 std::sync::Mutex 사용 (LLD가 parking_lot 명시 안 하면 std). lock().unwrap() 또는 expect로 poison 처리.
-- 모든 unsafe 없음(이 파일엔 unsafe 불필요).
+- Zero tauri imports. (JobObjectHandle goes through crate::pty::platform)
+- `master` must be `Mutex<Option<...>>` — the kill path does take() on it.
+- The **only** place that calls `sink.send()` while holding a lock is subscribe's replay send (the intended C4 exception). Drain must never do this — that is drain.rs's job.
+- Use std::sync::Mutex (std unless the LLD names parking_lot). Handle poison with lock().unwrap() or expect.
+- No unsafe at all (this file needs no unsafe).
 
-## 코드 품질
+## Code quality
 
-- 동시성 결정마다 *왜* 한국어 주석 (특히 C4, 필드별 Mutex, 락 순서 예외).
-- **완료 보고 전 `cargo fmt` 필수** → `cargo fmt --check` 통과.
-- `cargo build` 통과 (types.rs에서 ReplayBuffer 빠지므로 types.rs도 같이 빌드되는지 확인).
+- A Korean comment on *why* for every concurrency decision (especially C4, the per-field Mutex, the lock-order exception).
+- **Run `cargo fmt` before the completion report** → `cargo fmt --check` passes.
+- `cargo build` passes (ReplayBuffer leaves types.rs, so check that types.rs builds together with it).
 
-## 보고
+## Report
 
 `orch 12 "⟁dco23 session.rs 완료 — PtySession+ReplayBuffer이동+subscribe(C4)/unsubscribe, fmt/build OK"`
-막히면 30분 내 중간보고. 동시성 판단 애매하면 ed12에 질문.
+If stuck, send an interim report within 30 minutes. If a concurrency call is ambiguous, ask ed12.

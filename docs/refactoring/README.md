@@ -1,30 +1,30 @@
-# 리팩토링 — 조사·경계·계획을 모으는 곳
+# Refactoring — where surveys, boundaries and plans are collected
 
-**목적 = 한 곳에서 훑어보기.** 리팩토링 재료가 `research/`에 섞여 들어가면 조사 20여 건 사이에 묻혀 다시 못 찾는다(사용자 지적 2026-08-23 — 이 폴더가 생긴 이유).
+**Purpose = browse in one place.** When refactoring material got mixed into `research/`, it was buried among 20-odd surveys and could not be found again (user's point, 2026-08-23 — the reason this folder exists).
 
-## 무엇이 여기 들어오나
+## What goes here
 
-- **분리·병합 경계 실측** — 어디까지 떼어낼 수 있나, 의존이 어느 방향으로 흐르나.
-- **구조 부채 계측** — 지금 구조가 치르는 대가를 숫자로 잰 것.
-- **리팩토링 계획·순서** — 무엇부터, 무엇과 묶어서.
+- **Measuring split/merge boundaries** — how far can we cut things out, and in which direction do dependencies flow.
+- **Measuring structural debt** — the cost the current structure pays, measured in numbers.
+- **Refactoring plans and order** — what first, and bundled with what.
 
-## 무엇이 여기 안 들어오나
+## What does not go here
 
-| 그건 이쪽 | 왜 |
+| It goes there | Why |
 |---|---|
-| 설계 **결정**(+거부한 대안) → `../decisions/` | 여기 문서는 결정 아니다. 결정을 내렸으면 ADR로 박고 여기서 링크한다. |
-| 일반 선행조사(OSS 비교·업계 관행) → `../research/` | 리팩토링 재료가 아니면 원래 자리로. |
-| **보류 항목 등록** → `../tracking.md` (T-) | 「나중에 다룬다」는 사실은 거기가 정본이다. |
+| Design **decisions** (+ rejected alternatives) → `../decisions/` | Documents here are not decisions. Once a decision is made, record it as an ADR and link it from here. |
+| General prior surveys (OSS comparisons · industry practice) → `../research/` | If it is not refactoring material, it goes to its original place. |
+| **Registering deferred items** → `../tracking.md` (T-) | The fact that 「나중에 다룬다」 has its source of truth there. |
 
-★**추적 항목과 짝지어 쓴다**★ — `tracking.md`의 T- 항목이 **"무엇이 밀려 있나"**를, 여기 문서가 **"재본 결과"**를 진다. 둘을 서로 링크하고, 같은 내용을 양쪽에 베끼지 않는다.
+★**Use together with tracking items**★ — the T- items in `tracking.md` carry **"what is pending"**, and the documents here carry **"the measured result"**. Link the two to each other, and do not copy the same content to both sides.
 
-## 목록
+## List
 
-이 표가 이 폴더의 열람면이다(다른 정본이 없으므로 여기서 관리한다 — **문서를 추가하면 한 줄 같이 넣는다**).
+This table is the browsing surface of this folder (there is no other source of truth, so it is maintained here — **when you add a document, add a line here too**).
 
-| 문서 | 무엇 | 상태 |
+| Document | What | Status |
 |---|---|---|
-| `shell-crate-boundary-survey-2026-08-23.md` | 셸(`src-tauri`) 10,637줄 중 어디까지 crate로 떼어낼 수 있나 — `use tauri` 실측 + 의존 방향 | 경계 실측 완료 · **모양 미결**(사용자 검토 중) · 연결 = T-27 |
-| `socket-head-of-line-blocking-2026-09-17.md` | 활성화 하나가 클라↔데몬 소켓 수신을 통째로 막는다 — 코드 3지점 + 「직렬은 가드가 아니다」 반증 | 구조 부채 계측 · **네트워크 리팩토링에 편입**(사용자 결정 2026-09-17) |
-| `slot-docking-drag-code-audit-2026-10-18.md` | 슬롯 도킹 끌기 코드(9c 트리) 구조 점검 — 중복 · 거대 클로저 · 잠든 스크롤 배관 · Chrome 식 재설계 기준으로 본 살릴 것/걷을 것(그 방향은 ADR-0296 이 OS 끌기로 대신했다) | 계측 완료 · 방향 = ADR-0296(OS 끌기) · 걷기 범위 정본 = TRD 7판 §5 · 짝 조사 = `../research/slot-docking-chrome-desktop-drag-2026-10-18.md` |
-| `architecture-discussion-2026-09-26.md` | transport 부착 전 전체 의존관계·모듈 쪼개기 논의 — 모듈 순서 Q&A 에서 나온 사실과 결정 후보 | **논의 완료**(2026-10-02) · ADR-0266~0273 작성(2026-10-02/03) · 후보 7(transport 부착 뒤 net 걷기)은 transport TRD 로 미룸 · 후보 3(로그는 base 경유만)은 번복 — 감싸지 않는다(ADR-0268) · 후보 2(`command`·`messaging` 의 base 의존)는 철회 — 필요해질 때만 연결한다(ADR-0267) · 큰 절 A(로깅 시스템 설계) 요구 수집 · 연결 = T-47 |
+| `shell-crate-boundary-survey-2026-08-23.md` | How much of the shell (`src-tauri`, 10,637 lines) can be cut out into crates — `use tauri` measurement + dependency direction | Boundary measurement done · **shape undecided** (user reviewing) · link = T-27 |
+| `socket-head-of-line-blocking-2026-09-17.md` | A single activation blocks the whole client↔daemon socket receive — 3 code points + a refutation of 「직렬은 가드가 아니다」 | Structural-debt measurement · **folded into the network refactoring** (user decision 2026-09-17) |
+| `slot-docking-drag-code-audit-2026-10-18.md` | Structural audit of the slot-docking drag code (9c tree) — duplication · giant closures · dormant scroll plumbing · what to keep / what to clear away, judged against a Chrome-style redesign (ADR-0296 replaced that direction with an OS drag) | Measurement done · direction = ADR-0296 (OS drag) · source of truth for the clearing scope = TRD edition 7 §5 · companion survey = `../research/slot-docking-chrome-desktop-drag-2026-10-18.md` |
+| `architecture-discussion-2026-09-26.md` | Discussion of the whole dependency graph and module splitting before transport attachment — facts and decision candidates from the module-order Q&A | **Discussion complete** (2026-10-02) · ADR-0266~0273 written (2026-10-02/03) · candidate 7 (clearing net after transport attachment) deferred to the transport TRD · candidate 3 (logs only via base) reversed — we do not wrap (ADR-0268) · candidate 2 (base dependency of `command`·`messaging`) withdrawn — connect only when needed (ADR-0267) · major section A (logging system design) requirements collected · link = T-47 |

@@ -1,17 +1,17 @@
-# 모듈 6b — Headless 백엔드 테스트 브리핑 (담당: dcs24, Sonnet)
+# Module 6b — Headless backend test briefing (owner: dcs24, Sonnet)
 
-발신: ed12 (매니저)
-근거: backend-lld-stage1.md §11(테스트), OutputSink/StatusSink trait(types.rs).
-목적: **프론트엔드(Tauri/React) 없이** 백엔드 PTY 전체 흐름을 로그로 실측한다. 사용자 핵심 요구사항.
+From: ed12 (manager)
+Source: backend-lld-stage1.md §11 (tests), the OutputSink/StatusSink traits (types.rs).
+Purpose: **without the frontend (Tauri/React)**, measure the whole backend PTY flow through logs. A core user requirement.
 
-## 왜 가능한가
+## Why it is possible
 
-백엔드는 `OutputSink`/`StatusSink` trait으로 추상화돼 Tauri 의존이 없다(pty/ import 0개).
-테스트용 sink(`LogSink`)를 만들어 PtyManager에 주입하면, 실제 Tauri Channel 없이 PTY 출력·상태를 로그로 관찰할 수 있다.
+The backend is abstracted behind the `OutputSink`/`StatusSink` traits and has no Tauri dependency (zero imports in pty/).
+If you make a test sink (`LogSink`) and inject it into PtyManager, you can observe PTY output and status through logs without a real Tauri Channel.
 
-## 1. LogSink (테스트용 sink)
+## 1. LogSink (test sink)
 
-`examples/headless.rs` 안에 정의 (또는 별도 모듈, 자유). OutputSink + StatusSink 둘 다 구현:
+Define it inside `examples/headless.rs` (or a separate module, your choice). Implement both OutputSink and StatusSink:
 
 ```rust
 struct LogSink { id: SinkId }
@@ -36,9 +36,9 @@ impl StatusSink for LogSink {
 }
 ```
 
-> ⚠️ 주석 필수: 이 LogSink는 PTY 출력을 그대로 로그에 찍는다. **실제 claude 에이전트 연결 시에는 API 키 마스킹(tracking T-1)이 필요** — 지금은 cmd.exe/pwsh 테스트라 안전하지만 주석으로 명시.
+> ⚠️ A comment is required: this LogSink writes PTY output to the log as is. **When connecting a real claude agent, API key masking (tracking T-1) is needed** — it is safe for now because the test uses cmd.exe/pwsh, but state it in a comment.
 
-## 2. examples/headless.rs 시나리오
+## 2. examples/headless.rs scenario
 
 ```rust
 fn main() {
@@ -74,23 +74,23 @@ fn main() {
 }
 ```
 
-## 검증 기준 (이게 Phase 1 결승선)
+## Pass criteria (this is the Phase 1 finish line)
 
-로그에서 다음이 순서대로 관찰돼야 PASS:
+PASS if the following are observed in the log, in order:
 1. `spawned` + agent list updated(count=1)
-2. PTY out 이벤트 여러 건 (cmd 프롬프트)
-3. write 후 `echo headless-test` 출력이 PTY out에 보임
-4. STATUS: **Running → Exiting → Killed** 순서로 전이
-5. kill 후 list 비고(count=0), recv_timeout 안 걸리고 즉시 종료(spike처럼 ms 단위)
-6. 프로세스 깔끔히 종료(좀비/행 없음)
+2. Several PTY out events (the cmd prompt)
+3. After the write, the `echo headless-test` output is visible in PTY out
+4. STATUS: transitions in the order **Running → Exiting → Killed**
+5. After kill, the list is empty (count=0), recv_timeout does not trigger, and it ends immediately (in ms, as in the spike)
+6. The process exits cleanly (no zombie/hang)
 
-## 실행 & 보고
+## Run and report
 
 ```
 cd src-tauri
 cargo run --example headless
 ```
 
-`orch 12 "⟁dcs24 headless PASS — spawn/out/write echo확인/resize/Running→Exiting→Killed/즉시종료, 로그발췌"` (FAIL이면 어느 단계/로그)
+`orch 12 "⟁dcs24 headless PASS — spawn/out/write echo확인/resize/Running→Exiting→Killed/즉시종료, 로그발췌"` (on FAIL, which step/log)
 
-Cargo.toml에 examples 의존(필요시 dev-dependencies) 추가는 자유. 막히면 30분 내 중간보고.
+Adding example dependencies to Cargo.toml (dev-dependencies if needed) is up to you. If stuck, send an interim report within 30 minutes.
