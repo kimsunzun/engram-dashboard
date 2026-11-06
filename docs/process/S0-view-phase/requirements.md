@@ -1,187 +1,187 @@
-# Engram Dashboard — 요구사항
+# Engram Dashboard — Requirements
 
-대화에서 나온 결정 사항을 순서대로 기록.
-
----
-
-## 기술 스택
-
-- 데스크톱: **Tauri v2** (Rust 백엔드 + OS 내장 웹뷰)
-- 프론트엔드: **React 19 + TypeScript**, 빌드: **Vite**
-- 스타일: **TailwindCSS v4 + shadcn/ui**
-- 상태 관리: **Zustand** (`@tauri-store/zustand` 공식 연동)
-- 터미널 렌더링: **@xterm/xterm + react-xtermjs**
-- 패널 분할: **allotment** (VS Code 파생, 동적 pane)
-- 에이전트 트리: **react-arborist** (expand/collapse API 내장)
-- 코드 diff 뷰: **@monaco-editor/react DiffEditor** (로컬 번들 필수)
-- PTY 관리: **portable-pty (Rust 직접)** — tauri-plugin-pty는 단일 인스턴스만 지원해서 탈락
-- Rust↔TS 타입: **tauri-specta** (처음부터 필수 — 나중에 추가하면 전부 재작업)
-- CCB(Claude Code Bridge) 포크 아닌 처음부터 제작
-
-## UI 구조
-
-- 왼쪽 사이드바: 에이전트 트리 + 상태 표시 (running / waiting / ...)
-- 오른쪽 메인: 오케스트레이터 에이전트 터미널 (xterm.js, 크게)
-- 서브에이전트 생성 시 오른쪽 하단에 패널 동적 추가 (n분할)
-- 하단 선택 영역: Monaco DiffEditor (코드 변경 전/후, Accept/Revert)
+Decisions that came out of the conversation, recorded in order.
 
 ---
 
-## 에이전트 트리 UI
+## Tech stack
 
-- 트리 접기/펼치기 가능
-- 컨트롤: "모두 펼치기", "하위만 펼치기" 옵션 제공
-- 비활성 에이전트: 아이콘 회색 / 활성 에이전트: 활성 색상
-- 같은 타입 에이전트가 여러 개면 폴더 구조로 그룹핑
-  - 상위: 에이전트 타입 노드 (예: 비서 에이전트)
-  - 하위: 인스턴스 1, 2, 3 ...
-- **상위 노드 집계 상태**: 하위 인스턴스 중 일부 활성이면 부모 아이콘에 뱃지/반채움 표시 → 트리 접혀있어도 상태 파악 가능
-- **인스턴스 수에 따른 표시 방식**
-  - 0개: 타입 노드만 (회색, flat) — 에이전트 타입이 시스템에 존재함을 표시
-  - 1개: 타입 노드 = 인스턴스 (flat, 활성 색상)
-  - 2개+: 타입 노드 하위에 인스턴스 1, 2, 3... 그룹핑
+- Desktop: **Tauri v2** (Rust backend + the OS's built-in webview)
+- Frontend: **React 19 + TypeScript**, build: **Vite**
+- Style: **TailwindCSS v4 + shadcn/ui**
+- State management: **Zustand** (official `@tauri-store/zustand` integration)
+- Terminal rendering: **@xterm/xterm + react-xtermjs**
+- Panel split: **allotment** (VS Code derived, dynamic panes)
+- Agent tree: **react-arborist** (expand/collapse API built in)
+- Code diff view: **@monaco-editor/react DiffEditor** (local bundle mandatory)
+- PTY management: **portable-pty (Rust directly)** — tauri-plugin-pty was dropped because it supports only a single instance
+- Rust↔TS types: **tauri-specta** (mandatory from the start — if added later, everything is reworked)
+- Built from scratch, not a fork of CCB (Claude Code Bridge)
 
----
+## UI structure
 
-## 터미널 대체
-
-- 대시보드가 `claude` 프로세스를 PTY로 직접 spawn
-- xterm.js 패널 1개 = PTY 1개 = `claude` 프로세스 1개
-- WezTerm 패널 역할을 대시보드 내 xterm.js가 완전 대체
-- 최종적으로 WezTerm 불필요 — 대시보드가 독립 실행 파일로 동작
-
-## 백그라운드 실행 + 포커스 스위칭 (tmux 방식)
-
-- PTY 프로세스는 Rust 백엔드에서 항상 백그라운드 실행 (50개든 상관없음)
-- Rust가 각 PTY 출력을 **스크롤백 버퍼**로 저장
-- 화면엔 사용자가 선택한 N개 패널만 표시
-- 에이전트 포커스 시: 버퍼 replay → 이후 실시간 스트리밍 연결
-- 포커스 해제 시: xterm.js 연결만 끊음, PTY는 계속 실행
-- 오케스트레이션은 완전 백그라운드, 사용자는 보고 싶은 것만 골라서 봄
-
-## 터미널 출력 — 버추얼 스크롤백
-
-- xterm.js 기본 가상 렌더링 활용 (보이는 행만 DOM 렌더)
-- PTY당 스크롤백 버퍼 상한선 설정 (예: 최근 10,000줄) — 50개 에이전트도 메모리 안전
-- 스위칭 시 버퍼 replay도 가상 렌더링이라 빠름
-
-## 터미널 출력 — 클릭 인터랙션 (LinkProvider)
-
-xterm.js LinkProvider API로 정규식 패턴 등록 → 클릭 시 Tauri invoke:
-- **파일 경로** → Explorer에서 해당 폴더/파일 열기
-- **diff 블록** → Monaco DiffEditor 풀 diff 팝업
-- **URL** → 브라우저 열기
-- **에러 라인** → 해당 파일 해당 줄로 점프
-- Claude 출력 패턴에 맞게 커스텀 정규식 추가 가능
-
-## 레이아웃 — 슬롯 구조
-
-- **슬롯** = 디스플레이 컨테이너 (PTY 프로세스와 분리된 개념)
-- 기본 슬롯 N개 (예: 3개) — 각 슬롯에 어떤 에이전트든 assign/switch 가능
-- 슬롯 헤더: 현재 에이전트명 + 전환 버튼 (다른 에이전트로 스위칭)
-- 각 슬롯 내부에서 추가 분할 가능 (중첩 split)
-- 전환 알고리즘은 추후 설계
-
-## 사이드바 — 에이전트 관리 뷰
-
-- 기본: **트리 뷰** (폴더 구조)
-- 추후 옵션: **그래프 뷰** (에이전트 간 연결도/오케스트레이션 흐름) — 사이드바 토글
-- 그래프 뷰 구현 시 react-flow 또는 d3-force 검토
-
-## 슬롯 전환 UI
-
-- **포커스 슬롯** 개념 — 마지막으로 클릭/상호작용한 슬롯이 활성 상태 (테두리 강조)
-- **기본 전환**: 슬롯 클릭(포커스) → 트리에서 에이전트 클릭 → 포커스 슬롯이 해당 에이전트로 전환
-- **보조 전환**: 슬롯 헤더 직접 클릭 → 에이전트 목록 팝업 → 선택 (포커스 없이 특정 슬롯 지정)
-- VS Code 에디터 그룹 + 파일 탐색기 조합과 동일한 감각
-
-## 레이아웃 — Visual Studio 스타일 도킹
-
-- **메인 윈도우**: 에이전트 트리(고정) + 상태바(고정) + 기본 슬롯 영역
-- **플로팅 윈도우**: 슬롯만 뜯어낸 것 (VS의 에디터 탭 분리와 동일)
-  - 탭 그룹 + 분할 뷰 둘 다 지원
-  - 플로팅끼리 합치기 가능 (드래그 도킹)
-  - 메인 윈도우에 다시 도킹 가능
-- 트리/상태바는 메인에 고정 — 슬롯(터미널)만 분리 대상
-
-## 패널 분리 가능 범위
-
-- **슬롯(터미널)**: 분리 가능 (기본)
-- **에이전트 트리**: 분리 가능 — 메인엔 접힌 상태로 남거나 완전 숨김 (멀티모니터 대응)
-- **상태바**: 메인 고정
-
-## 스타일 & 테마
-
-- **투박한 고대비** 스타일 — 화려함 없음, 선 명확, 경계 뚜렷
-- 애니메이션 최소화 (전자잉크 대응 + 효율)
-- 그라디언트/그림자 없음 — flat, sharp
-- **창 단위 테마** 지원 (처음부터 설계 필수)
-  - 전자잉크 모니터 창: 흰색(라이트) 테마
-  - 일반 모니터 창: 검은색(다크) 테마
-- CSS 변수 기반 테마 시스템 — 핫리로드 지원 (재시작 없이 즉시 반영)
-- 커스터마이징 범위: 색상 토큰 전체 (배경, 텍스트, 테두리, 상태색 등)
+- Left sidebar: agent tree + state display (running / waiting / ...)
+- Right main: the orchestrator agent terminal (xterm.js, large)
+- When a sub-agent is created, a panel is added dynamically at the bottom right (n-way split)
+- Bottom selection area: Monaco DiffEditor (code before/after change, Accept/Revert)
 
 ---
 
-## 미결 사항 (스택 검토 필요)
+## Agent tree UI
 
-- shadcn/ui: 기본 스타일이 둥글고 세련된 느낌 → 투박한 고대비 스타일과 충돌 가능. 요구사항 확정 후 Radix UI 직접 사용으로 교체 여부 판단.
+- The tree can be collapsed/expanded
+- Controls: provide the options "모두 펼치기" (expand all) and "하위만 펼치기" (expand only the children)
+- Inactive agent: icon gray / active agent: active color
+- If there are several agents of the same type, group them as a folder structure
+  - Upper: agent type node (e.g. secretary agent)
+  - Lower: instance 1, 2, 3 ...
+- **Aggregated state of the parent node**: if some of the child instances are active, show a badge/half-fill on the parent icon → the state can be grasped even while the tree is collapsed
+- **Display by number of instances**
+  - 0: type node only (gray, flat) — shows that the agent type exists in the system
+  - 1: type node = instance (flat, active color)
+  - 2 or more: group instances 1, 2, 3... under the type node
 
-## 스플래시 스크린 (낮은 우선순위)
+---
 
-- 앱 로딩 시 "Engram" 텍스트 + 오퍼레이션 느낌의 로고/서브텍스트
-- 로딩 없으면 생략
+## Terminal replacement
 
-## 드롭다운 표시 규칙
+- The dashboard spawns the `claude` process directly as a PTY
+- 1 xterm.js panel = 1 PTY = 1 `claude` process
+- The xterm.js inside the dashboard fully replaces the role of the WezTerm panel
+- In the end WezTerm is unnecessary — the dashboard runs as a standalone executable
 
-- 에이전트 트리: 인스턴스 1개면 확장 화살표 없이 이름만 flat 표시
-- 슬롯 헤더: 해당 에이전트 인스턴스가 1개뿐이면 ▼ 없이 이름만 표시
-- 인스턴스 2개+일 때만 드롭다운 표시
+## Background execution + focus switching (tmux style)
 
-## 에이전트별 토큰/비용 표시
+- PTY processes always run in the background in the Rust backend (50 of them is fine)
+- Rust stores each PTY's output as a **scrollback buffer**
+- The screen shows only the N panels the user selected
+- When an agent gets focus: replay the buffer → then connect live streaming
+- When focus is released: only the xterm.js connection is cut, the PTY keeps running
+- Orchestration is fully in the background; the user picks and views only what they want to see
 
-- 별도 API 요청 없음 — PTY 스트림에서 Claude Code 출력 파싱으로 추출
-- 파싱 대상: Claude Code가 출력하는 토큰/비용 라인 (정규식)
-- 슬롯 헤더에 개별 표시, 상태바에 전체 합산
-- 리스크: Claude Code 출력 포맷 변경 시 파싱 깨질 수 있음
+## Terminal output — virtual scrollback
 
-- 위치: 에이전트 트리 각 노드 옆 + 슬롯 헤더
-- 토글 가능 (표시/숨김)
+- Use xterm.js's default virtual rendering (only visible rows are rendered in the DOM)
+- Set an upper limit on the scrollback buffer per PTY (e.g. the most recent 10,000 lines) — memory-safe even with 50 agents
+- Buffer replay on switching is also fast because it is virtual rendering
 
-## 슬롯 컨트롤 방식
+## Terminal output — click interaction (LinkProvider)
 
-- 슬롯 헤더에 버튼 없음 — 헤더는 에이전트 이름(+인스턴스 2개+면 ▼)만 표시
-- **우클릭 컨텍스트 메뉴**: 분할(가로/세로), 팝업 분리, 에이전트 전환, 슬롯 닫기
-- **키보드 단축키**: 위 동작들 단축키로 접근 가능
-- **Claude 프로그래밍 제어**: 오케스트레이터가 orch 명령으로 레이아웃 직접 조작 가능
+Register regex patterns with the xterm.js LinkProvider API → Tauri invoke on click:
+- **File path** → open that folder/file in Explorer
+- **diff block** → Monaco DiffEditor full-diff popup
+- **URL** → open the browser
+- **Error line** → jump to that line of that file
+- Custom regexes can be added to match Claude output patterns
 
-## 슬롯 에이전트 이름 표시
+## Layout — slot structure
 
-- 별도 헤더 바 없음
-- 터미널(xterm.js) 우하단 구석에 이름 오버레이 (WezTerm 패널 타이틀과 동일한 감각)
-- xterm.js 위에 absolute position으로 얹는 방식
-- 터미널 공간 최대 활용
+- **Slot** = a display container (a concept separate from the PTY process)
+- Default N slots (e.g. 3) — any agent can be assigned/switched into each slot
+- Slot header: current agent name + switch button (switching to another agent)
+- Further splitting is possible inside each slot (nested split)
+- The switching algorithm will be designed later
 
-## 에이전트 스폰 (추후)
+## Sidebar — agent management view
 
-- 대시보드에서 직접 에이전트 스폰 가능
-- 특정 슬롯/패널 지정해서 원하는 claude 프로세스 띄우기
-- 오케스트레이터가 프로그래밍으로 스폰 요청도 가능
+- Default: **tree view** (folder structure)
+- Later option: **graph view** (connection map between agents/orchestration flow) — sidebar toggle
+- When implementing the graph view, consider react-flow or d3-force
 
-## 에이전트 관계 모델 (중요)
+## Slot switching UI
 
-- 에이전트 간 관계는 **폴더/파일 구조가 아닌 논리적 종속 관계**
-- 하나의 에이전트가 **여러 부모**를 가질 수 있음 (트리 불가 → DAG)
-- 관계 설정 방식:
-  - 스폰 시점에 "누가 스폰했는가"로 자동 연결
-  - 수동으로 종속 관계 지정 가능
-- **트리 뷰**: 주 부모 하나만 선택해서 계층 표시 (기본, 보기 편함)
-- **그래프 뷰**: 실제 DAG 관계 전부 표시 (정확하지만 복잡)
-- 사이드바 하단 [트리][그래프] 토글로 전환
+- A **focus slot** concept — the slot last clicked/interacted with is the active one (border highlight)
+- **Primary switch**: click a slot (focus) → click an agent in the tree → the focus slot switches to that agent
+- **Secondary switch**: click the slot header directly → agent list popup → select (designate a specific slot without focus)
+- The same feel as the VS Code editor group + file explorer combination
 
-## 에이전트 관계 모델 (확정)
+## Layout — Visual Studio style docking
 
-- **에이전트 리스트 + 그룹 섹션** 분리 방식
+- **Main window**: agent tree (fixed) + status bar (fixed) + default slot area
+- **Floating window**: a slot torn off alone (same as detaching an editor tab in VS)
+  - Supports both tab groups + split views
+  - Floating windows can be merged with each other (drag docking)
+  - Can be docked back into the main window
+- The tree/status bar are fixed in main — only slots (terminals) are detachable
+
+## Detachable scope of panels
+
+- **Slot (terminal)**: detachable (default)
+- **Agent tree**: detachable — stays in main as collapsed or fully hidden (multi-monitor support)
+- **Status bar**: fixed in main
+
+## Style & theme
+
+- **Blunt high-contrast** style — no flashiness, clear lines, distinct boundaries
+- Minimize animation (e-ink support + efficiency)
+- No gradients/shadows — flat, sharp
+- **Per-window theme** support (must be designed in from the start)
+  - E-ink monitor window: white (light) theme
+  - Regular monitor window: black (dark) theme
+- CSS-variable-based theme system — hot-reload support (applied immediately without restart)
+- Customization scope: the entire color token set (background, text, border, state colors, etc.)
+
+---
+
+## Open issues (stack review needed)
+
+- shadcn/ui: its default style feels round and refined → may conflict with the blunt high-contrast style. After the requirements are fixed, decide whether to switch to using Radix UI directly.
+
+## Splash screen (low priority)
+
+- On app loading, the text "Engram" + a logo/subtext with an operations feel
+- Omit it if there is no loading
+
+## Dropdown display rules
+
+- Agent tree: with 1 instance, show only the name flat with no expand arrow
+- Slot header: if the agent has only 1 instance, show only the name with no ▼
+- Show the dropdown only when there are 2 or more instances
+
+## Per-agent token/cost display
+
+- No separate API request — extract by parsing the Claude Code output from the PTY stream
+- Parse target: the token/cost lines that Claude Code outputs (regex)
+- Shown individually in the slot header, total summed in the status bar
+- Risk: parsing may break if the Claude Code output format changes
+
+- Location: next to each node of the agent tree + the slot header
+- Toggleable (show/hide)
+
+## Slot control method
+
+- No buttons in the slot header — the header shows only the agent name (+ ▼ if 2 or more instances)
+- **Right-click context menu**: split (horizontal/vertical), pop-out detach, agent switch, close slot
+- **Keyboard shortcuts**: the above actions are reachable by shortcuts
+- **Claude programmatic control**: the orchestrator can manipulate the layout directly with orch commands
+
+## Slot agent name display
+
+- No separate header bar
+- A name overlay in the bottom-right corner of the terminal (xterm.js) (same feel as a WezTerm panel title)
+- Laid over the xterm.js with absolute position
+- Maximizes terminal space
+
+## Agent spawn (later)
+
+- Agents can be spawned directly from the dashboard
+- Designate a specific slot/panel to bring up the desired claude process
+- The orchestrator can also request a spawn programmatically
+
+## Agent relationship model (important)
+
+- Relationships between agents are **logical dependency relationships, not a folder/file structure**
+- One agent can have **multiple parents** (a tree is impossible → DAG)
+- How relationships are set:
+  - Connected automatically by "who spawned it" at spawn time
+  - Dependency relationships can be designated manually
+- **Tree view**: show the hierarchy by choosing only one primary parent (default, easy to view)
+- **Graph view**: show all of the actual DAG relationships (accurate but complex)
+- Switch with the [Tree][Graph] toggle at the bottom of the sidebar
+
+## Agent relationship model (confirmed)
+
+- A method that separates an **agent list + group section**
   ```
   AGENTS
   ── 플래너 ●  $0.12
@@ -191,56 +191,56 @@ xterm.js LinkProvider API로 정규식 패턴 등록 → 클릭 시 Tauri invoke
   ▼ 코딩룰
     플래너 · 코더 · 리뷰어
   ```
-- 에이전트는 여러 그룹에 속할 수 있음 (다중 소속)
-- 데이터 모델: `agents[]` + `groups[]` 분리 → UI 변경해도 데이터 유지
-- 추후 트리/그래프 뷰로 전환 가능 (렌더링만 교체)
+- An agent can belong to several groups (multiple membership)
+- Data model: separate `agents[]` + `groups[]` → data survives UI changes
+- Can later switch to tree/graph view (only the rendering is swapped)
 
 ---
 
-## GPT 검수 반영 사항 (2026-06-07)
+## Items reflecting the GPT review (2026-06-07)
 
-### 슬롯 전환 — 더블클릭으로 변경 (확정)
-- 기존: 에이전트 트리 단일클릭 → 포커스 슬롯 전환
-- 변경: **더블클릭** → 슬롯 전환
-- 이유: 단일클릭은 실수 위험 + 우클릭 컨텍스트 메뉴와 조합 시 더블클릭이 자연스러움
+### Slot switching — changed to double-click (confirmed)
+- Before: single-click on an agent tree → switch the focus slot
+- Change: **double-click** → slot switch
+- Reason: single-click risks mistakes + double-click is natural in combination with the right-click context menu
 
-### 알림/이벤트 패널 (추가)
-- 에이전트에서 오는 이벤트를 한 곳에 모으는 패널
-- 포함 이벤트: 승인 요청, 작업 완료, 에러 발생, 사용자 지정 알림
-- 위치: View에 공간 예약 (레이아웃 미확정)
-- 승인은 보통 없어야 정상 — 알림 용도가 주목적
+### Notification/event panel (added)
+- A panel that gathers the events coming from agents in one place
+- Included events: approval request, task complete, error occurred, user-specified notification
+- Location: reserve space in the View (layout not fixed)
+- Approvals should normally be absent — the main purpose is notification
 
-### Agent Detail Panel (추후)
-- 에이전트 상세 정보 (작업 파일, 토큰 그래프, 명령 이력 등)
-- 현재 레이아웃 설계에 지장 없음
-- 구현 시: 슬롯에 assign하거나 별도 팝업으로 처리
+### Agent Detail Panel (later)
+- Detailed agent information (working files, token graph, command history, etc.)
+- No problem for the current layout design
+- On implementation: assign it to a slot or handle it as a separate popup
 
-### 기술 스택 변경
-- `react-xtermjs` → **직접 xterm.js wrapper 작성** (GPL 라이선스 리스크)
-- resize 이벤트에 **debounce** 추가 (allotment 리사이즈 → FitAddon 동기화)
+### Tech stack change
+- `react-xtermjs` → **write our own xterm.js wrapper** (GPL license risk)
+- Add a **debounce** to the resize event (allotment resize → FitAddon sync)
 
-### 폰트/테마 CSS 변수 추가
-- `--font-size-ui`, `--font-size-terminal`, `--font-size-code` 추가
-- `--line-height-ui`, `--line-height-terminal` 추가
-- ThemeManager 단일 진입점으로 관리
+### Font/theme CSS variables added
+- Added `--font-size-ui`, `--font-size-terminal`, `--font-size-code`
+- Added `--line-height-ui`, `--line-height-terminal`
+- Managed through the single ThemeManager entry point
 
-### 에이전트 컨트롤 (View 더미로 추가)
-- Start / Stop / Kill 버튼 — 더미 상태로 View에 포함
-- 위치: 에이전트 트리 노드 우클릭 컨텍스트 메뉴
+### Agent controls (added as View dummies)
+- Start / Stop / Kill buttons — included in the View in a dummy state
+- Location: right-click context menu of an agent tree node
 
-### 상태 분리 아키텍처 (확정)
-- `AgentSession`: 에이전트 실제 상태 (토큰, status, 작업 이력) → 앱 전체 공유 중앙 store
-- `SlotView`: 창별 레이아웃 (슬롯 구성) → window별 store
-- `TerminalView`: xterm DOM 인스턴스 → 창이 소유, 창 닫으면 dispose
-- 효과: 팝업 분리/재도킹 시 에이전트 상태 유지, xterm만 새로 생성 후 버퍼 replay
+### State separation architecture (confirmed)
+- `AgentSession`: actual agent state (tokens, status, work history) → a central store shared across the whole app
+- `SlotView`: per-window layout (slot composition) → a per-window store
+- `TerminalView`: xterm DOM instance → owned by the window, disposed when the window closes
+- Effect: agent state is kept across pop-out detach/re-docking, only xterm is newly created and the buffer replayed
 
-### 키보드 단축키 (View 더미로 추가)
-- `Ctrl+1~4`: 슬롯 포커스 전환
-- `Ctrl+Shift+S`: 슬롯 분할
-- `Ctrl+Shift+P`: 커맨드 팔레트 (더미)
-- `Esc`: 패널 닫기
-- View 단계에서 더미 핸들러로 구현, 실제 동작은 추후 연결
+### Keyboard shortcuts (added as View dummies)
+- `Ctrl+1~4`: switch slot focus
+- `Ctrl+Shift+S`: split slot
+- `Ctrl+Shift+P`: command palette (dummy)
+- `Esc`: close panel
+- Implemented with dummy handlers at the View stage, the real behavior connected later
 
-### 추후 검토
-- LinkProvider 보안 정책 (파일경로 whitelist, 외부 URL confirm) — 현재는 제한 없이 열기, 불편하면 추가
-- Broadcast Input: 오케스트레이터가 하위 에이전트에 전파하는 방식으로 대체
+### Review later
+- LinkProvider security policy (file path whitelist, external URL confirm) — currently open without restriction, add it if it becomes inconvenient
+- Broadcast Input: replaced by the orchestrator propagating to sub-agents
