@@ -1,23 +1,23 @@
-# 디버깅·결함수정 규약 (engram-dashboard)
+# Debugging and defect-fixing conventions (engram-dashboard)
 
-**상태:** 실천 규약(정설 — 제자리 수정 캐논, ADR 아님). *왜* + 거부한 대안 = ADR-0038. 근거 사례 = `docs/research/toctou-concurrency-test-verification-research-2026-06-28.md`. load-bearing 결함을 고칠 때 이 문서가 단일 출처다.
+**Status:** working convention (settled doctrine — an edit-in-place canon, not an ADR). The *why* + the rejected alternatives = ADR-0038. Evidence case = `docs/research/toctou-concurrency-test-verification-research-2026-06-28.md`. When you fix a load-bearing defect, this document is the single source.
 
-> 한 줄: **비자명한 기술결함은 혼자 매직넘버로 맞추지 말고, OSS가 이 부류를 어떻게 푸는지 먼저 조사해 근본 해법으로 고친다.** 새 *기능*은 OSS 먼저(`/engram-research` 설계 조사)의 *결함 수정* 형제 규칙.
+> In one line: **for a non-trivial technical defect, do not tune it alone with magic numbers; first research how OSS solves this class of problem, then fix it at the root.** The *defect-fixing* sibling of the rule for new *features*, OSS first (`/engram-research` design research).
 
-**비자명 기술결함** = 동시성/race · 타이밍/flaky · perf · memory · 아키텍처처럼 *성숙 OSS에 정석이 있고 순진한 수정이 흔히 틀리는* 영역.
+**Non-trivial technical defect** = an area such as concurrency/race · timing/flaky · perf · memory · architecture, where *mature OSS has a standard answer and the naive fix is often wrong*.
 
-## 발동 조건 (둘 중 하나라도)
+## Trigger (either one is enough)
 
-자기인식 가드다(훅 강제 불가) — *카테고리*가 아니라 *그 순간 알아챌 수 있는 행동*으로 잡는다:
+This is a self-awareness guard (it cannot be enforced by a hook) — it is caught by *an action you can notice in the moment*, not by *category*:
 
-1. **증상 억제** — 매직넘버·타이밍 상수·임계값·재시도 횟수를 조정해 실패/flaky/느림을 "통과시키려" 한다(근본원인 이해 없이 증상만 지움).
-2. **반복 추측** — 비자명 기술결함을 추측성 수정 1회 실패하고도 솔로로 더 돌리려 한다.
+1. **Suppressing the symptom** — you try to "get past" a failure/flaky test/slowness by adjusting a magic number, a timing constant, a threshold or a retry count (erasing only the symptom without understanding the root cause).
+2. **Repeated guessing** — a guess-based fix for a non-trivial technical defect has already failed once, and you still try to keep going solo.
 
-**제외:** 원인 명확한 사소 버그·오타·결정적 수정 / OSS 선례 없는 프로젝트 고유 비즈니스 로직.
+**Excluded:** trivial bugs with an obvious cause, typos, deterministic fixes / project-specific business logic with no OSS precedent.
 
-## 발동하면
+## When it triggers
 
-멈추고, OSS(성숙 라이브러리·1차 문서)가 이 부류를 어떻게 푸는지 조사해 **근본 해법을 선택지로** 만든다(굵으면 사용자 제시·ADR). 조사 실행은 **기존 조사-위임 규칙**(global-rules "위임 우선", 구 컨텍스트 위생 — 서브에이전트/`/engram-research`)을 따른다. 결과가 "현 접근이 맞다"여도 — *확인된* 것이라 솔로 추측과 다르다.
+Stop, research how OSS (mature libraries, primary documentation) solves this class of problem, and **turn the root-cause solutions into options** (if it is big, present it to the user · write an ADR). Carry out the research under the **existing research-delegation rule** (global-rules "위임 우선", formerly "컨텍스트 위생" — subagent / `/engram-research`). Even if the result is "the current approach is right" — it is *confirmed*, so it differs from a solo guess.
 
 ---
-발견 = code-conventions 바인딩(`.claude/skill-bindings/code-conventions.md`) 「설계」 한 줄(코더·리뷰어 지시서에 실린다) → 이 문서. **발화** = `/engram-qa`가 flaky·타이밍·perf 실패를 잡는 지점(qa 바인딩 「Rust 테스트 판정」). 정본 안티패턴 사례(S14 flaky `5ms→50ms` 솔로튜닝 ↔ `/research` 근본해법)는 ADR-0038 + 위 리서치 보고서.
+Discovery = one line under 「설계」 in the code-conventions binding (`.claude/skill-bindings/code-conventions.md`) (it is carried in coder and reviewer briefs) → this document. **Firing** = the point where `/engram-qa` catches a flaky, timing or perf failure (qa binding 「Rust 테스트 판정」). The canonical anti-pattern case (S14 flaky `5ms→50ms` solo tuning ↔ `/research` root-cause fix) is in ADR-0038 + the research report above.
