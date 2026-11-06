@@ -83,5 +83,8 @@ Every translation batch uses these renderings. A batch that needs a new term add
 | 크롬 보고 | chrome reporting | app window chrome, not Google Chrome |
 | 가리다 | tell apart / distinguish (or cover) | decide by context |
 | 끄는 | turning off (끄다) or dragging (끌다) | decide by context |
+| 녹 / 빨강 (측정) | green / red | "M9 · M10 녹" = M9 and M10 passed; not "folded in" |
+| \<id\> 앞 (파킹분·드레인) | addressed to \<id\> | not "in front of" (no queue position meant) |
+| N차 (개정) | Nth amendment | amendment generation, not a review round |
 
 Kept in Korean: the ADR lint tokens (`- 상태:` + vocab, `- 관련:`, section headings), text in 「」, names of CLAUDE.md and `.claude/` sections.
