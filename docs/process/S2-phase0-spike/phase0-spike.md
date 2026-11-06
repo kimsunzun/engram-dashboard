@@ -1,26 +1,26 @@
-# Phase 0 — Spike Test 브리핑 (담당: dco23, Opus)
+# Phase 0 — Spike Test Briefing (owner: dco23, Opus)
 
-발신: ed12 (매니저)
-목적: **본 구현 전에** Windows에서 PTY kill 시퀀스의 핵심 가정을 실측으로 검증한다.
-이게 실패하면 LLD의 kill 설계를 고쳐야 하므로, 코드 본 구현보다 먼저 한다.
+From: ed12 (manager)
+Purpose: **Before the main implementation**, verify the key assumptions of the PTY kill sequence on Windows by measurement.
+If this fails, the LLD's kill design has to be fixed, so do this before the main code.
 
-전체 설계 맥락은 `docs/backend-lld-stage1.md` (특히 §6 drain/kill, §13 Windows JobObject) 참조.
-
----
-
-## 검증하려는 가정 3가지
-
-1. **portable-pty 0.8.1** 로 Windows에서 자식 프로세스를 정상 spawn하고 stdout을 읽을 수 있다.
-2. kill 시퀀스 `child.kill() → child.wait() → TerminateJobObject → master.take()(drop)` 후
-   **drain(reader) 스레드가 5초 이내에 EOF로 깨어나 종료**된다.
-   (master를 drop하면 ConPTY가 ClosePseudoConsole를 호출 → reader가 EOF/Err로 풀린다는 가정)
-3. **Windows Job Object + KILL_ON_JOB_CLOSE** 로 손자 프로세스까지 정리된다.
+For the overall design context see `docs/backend-lld-stage1.md` (especially §6 drain/kill, §13 Windows JobObject).
 
 ---
 
-## 할 일
+## The 3 assumptions to verify
 
-### 1. Cargo.toml 의존성 추가 (LLD §2 — 버전 고정 절대 변경 금지)
+1. With **portable-pty 0.8.1**, a child process can be spawned normally on Windows and its stdout can be read.
+2. After the kill sequence `child.kill() → child.wait() → TerminateJobObject → master.take()(drop)`,
+   the **drain (reader) thread wakes up on EOF and exits within 5 seconds**.
+   (The assumption: dropping the master makes ConPTY call ClosePseudoConsole → the reader is released with EOF/Err.)
+3. **Windows Job Object + KILL_ON_JOB_CLOSE** also cleans up grandchild processes.
+
+---
+
+## What to do
+
+### 1. Add Cargo.toml dependencies (LLD §2 — the pinned versions must never change)
 
 ```toml
 [dependencies]
@@ -44,11 +44,11 @@ windows = { version = "0.58", features = [
 ] }
 ```
 
-### 2. spike 바이너리 작성
+### 2. Write the spike binary
 
-위치: `src-tauri/examples/spike.rs` (examples 디렉토리 — 본 코드 오염 없음, 검증 후 삭제)
+Location: `src-tauri/examples/spike.rs` (the examples directory — does not pollute the main code, delete after verification)
 
-흐름:
+Flow:
 ```
 1. portable-pty: native_pty_system() → openpty(PtySize { rows:24, cols:80, .. })
 2. CommandBuilder::new("cmd.exe"), cwd 지정 → pair.slave.spawn_command(cmd) → child
@@ -67,23 +67,23 @@ windows = { version = "0.58", features = [
      - Err(Timeout) → reader가 안 풀림 ❌ (가정 2 깨짐 — 즉시 보고)
 ```
 
-`Instant` 로 각 단계 소요시간을 eprintln 한다. 어떤 단계에서 reader가 풀리는지(kill인지 master drop인지) 관측이 핵심.
+Print the time each step takes with eprintln using `Instant`. The key is to observe at which step the reader is released (the kill or the master drop).
 
-### 3. 실행 & 보고
+### 3. Run and report
 
 ```
 cd src-tauri
 cargo run --example spike
 ```
 
-결과를 ed12(pane 12)에 orch로 보고:
+Report the result to ed12 (pane 12) via orch:
 - PASS: `orch 12 "⟁dco23 spike PASS — reader join Xms, 가정 1·2·3 확인"`
 - FAIL: `orch 12 "⟁dco23 spike FAIL — <어느 가정/어느 단계에서 막힘> <로그 발췌>"`
 
 ---
 
-## 주의
+## Cautions
 
-- spike는 throwaway 검증 코드다. 본 모듈(pty/session.rs 등) 작성은 spike 통과 확인 후 ed12가 별도 지시한다.
-- 막히면 30분 안에 중간 상태라도 보고. 혼자 오래 끌지 말 것.
-- 버전 변경이 필요하다고 판단되면 임의 변경 말고 ed12에 먼저 보고.
+- The spike is throwaway verification code. Writing the main modules (pty/session.rs etc.) is directed separately by ed12 after the spike is confirmed to pass.
+- If you get stuck, report even an intermediate state within 30 minutes. Do not drag on alone.
+- If you judge that a version change is needed, do not change it on your own — report to ed12 first.
