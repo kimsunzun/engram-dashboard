@@ -112,5 +112,7 @@ Every translation batch uses these renderings. A batch that needs a new term add
 | 연결별 줄 | per-connection lane | net `ws.rs` |
 | 제어 줄 | control channel | transport `peer.rs` |
 | 정리 유예 | cleanup grace period | bounded wait, see 유예 (bounded wait) |
+| 순서 칸 | ordering area | supervisor-local ordering queue (transport) |
+| 보냄 칸 | the sent field | write without backticks unless the source has them |
 
 Kept in Korean: the ADR lint tokens (`- 상태:` + vocab, `- 관련:`, section headings), text in 「」, names of CLAUDE.md and `.claude/` sections.
