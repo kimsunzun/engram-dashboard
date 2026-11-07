@@ -48,7 +48,7 @@ Two changes, both main's implementation choices: (A) the agent crate's PTY pump 
 
 ## 5. Units
 
-One unit, one coder. Order: A (with AC1/AC1b) → B (with AC2) → C.
+One unit, one coder. Order: A (with AC0/AC1) → B (with AC2) → C. AC0 scripted reader: an unexpected extra read fails at once, and cases (c)/(d) assert the read count.
 
 ## 6. Risks
 
@@ -66,3 +66,4 @@ One unit, one coder. Order: A (with AC1/AC1b) → B (with AC2) → C.
 
 - 2026-11-07 — PRD+TRD review round 1 (full: lead Claude Opus xhigh + codex gpt-6.1-sol xhigh): FIX. Must (both): AC1 could pass a partial fix (10 s bound vs 5 s join; no `Killed` assertion). Must (codex) / 권장 (lead): never-EOF lifetime (drain forever → no `finish`; non-Windows grandchildren). Applied in revision 2: bounded drain (§3A), AC1 rewritten (grandchild producer, < 2 s, `Killed`, separate watchdog), AC2 specified, ADR-0001 named instead of ADR-0206, research note fix, rejected bounded wait + residual risk recorded, comment scope widened, lane/arm naming corrected.
 - 2026-11-07 — PRD+TRD review round 2: lead PASS (권장: publish `master_closed` only after the master is destroyed; a deterministic loop test; an unbounded producer; join-order-proof AC2; test placement; stale PRD lines). codex FIX — must: on non-Windows the bounded drain adds one blocking read that a silent surviving grandchild never ends (regression vs today). Applied in revision 3: the drain is gated by a platform fact `CLOSE_NEEDS_DRAIN` (Windows only — non-Windows keeps today's rule exactly), `master_closed` published after the drop statement completes (and the watcher's drop-under-lock pinned), AC0 deterministic loop tests, AC1 unbounded grandchild producer + base failure over several runs, AC2 "entered" handshake, PRD synced.
+- 2026-11-07 — PRD+TRD review round 3: codex PASS (round-2 must fixed; 권장 AC0 read counts and batched PRD/TRD wording applied in revision 3 as committed). **PRD+TRD review passed** (full, 3 rounds).

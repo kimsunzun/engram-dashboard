@@ -31,7 +31,7 @@
 
 ## 5. Open decisions
 
-- None for the user: no user-visible behaviour changes except the bug going away. Implementation choices (drain-until-EOF, `spawn_blocking` mirroring `Spawn`) are main's, reported.
+- None for the user: no user-visible behaviour changes except the bug going away. Implementation choices (a Windows-only drain bounded by the master close, `spawn_blocking` mirroring activation) are main's, reported.
 
 ## 6. Risks
 
