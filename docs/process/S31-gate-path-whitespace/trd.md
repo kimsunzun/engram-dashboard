@@ -1,6 +1,6 @@
 # S31 TRD — spaced paths in source-regex checks
 
-- Status: edition 2 · 2026-11-02 · no source-of-truth ADR (the source of truth for a gate's expected values is each target crate / file header — see 「같은 주장」 below). Edition 2 = PRD+TRD review (Claude · codex) applied.
+- Status: edition 2 · 2026-11-02 · no source-of-truth ADR (the source of truth for a gate's expected values is each target crate / file header — see "Same claim" below). Edition 2 = PRD+TRD review (Claude · codex) applied.
 - Branch base = `v0.5.0/chore/skill-apply` (on top of the bindings · CLAUDE.md cleanup). Integration order = after skill-apply.
 
 ## Scope and relation to the PRD

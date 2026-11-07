@@ -1,6 +1,6 @@
 # When to wrap a third-party library — summary of criteria
 
-- **Status:** light · applied to the component decision for the preset-library slot (「Engram 에 옮기면」 (If we carry this to Engram) below) · a whole-codebase audit is a separate item
+- **Status:** light · applied to the component decision for the preset-library slot ("If we carry this to Engram" below) · a whole-codebase audit is a separate item
 - **Date:** 2026-10-14
 - **Method:** research light. 1 collector · main grounding (Cockburn original) · no adversarial review.
 - **Trigger:** the user's 「라이브러리는 항상 브릿지로 감싸야 한다 — 단 표준 라이브러리까지 감싸는 건 쓸데없다, 확인해 봐라」 (a library must always be wrapped in a bridge — but wrapping even the standard library is pointless, check it).

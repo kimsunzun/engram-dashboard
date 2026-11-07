@@ -43,7 +43,7 @@
 
 - claude interactive TUI · stream-json mode (only `-p` was run — the TUI may show a settings dialog).
 - Whether the doctor output wording stays the same when the version changes (not documented).
-- ~~Rust `jsonschema` and serde-saphyr were not actually compiled and run (ajv stood in) · schemars `uint*` format handling not checked.~~ → measured below in 「Rust 크레이트 실측 (2026-10-18)」 (Rust crate measurement (2026-10-18)).
+- ~~Rust `jsonschema` and serde-saphyr were not actually compiled and run (ajv stood in) · schemars `uint*` format handling not checked.~~ → measured below in "Rust crate measurement (2026-10-18)".
 - Whether `codex debug models` goes over the network.
 
 ## Rust crate measurement (2026-10-18)

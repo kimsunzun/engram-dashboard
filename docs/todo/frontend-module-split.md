@@ -1,5 +1,5 @@
-# 프론트엔드 모듈 분리
+# Frontend module split
 
-> **상태:** 소유됨 · **정본 색인:** [`../todo.md`](../todo.md)
+> **Status:** Owned · **Canonical index:** [`../todo.md`](../todo.md)
 
-★**다른 세션이 손대지 말 것**★. 단 **아직 착수 결정 전이다** — 사용자가 할지 검토 중이고(2026-08-26), 범위도 안 정해졌다.
+★**Other sessions must not touch it**★. But **the decision to start has not yet been made** — the user is reviewing whether to do it (2026-08-26), and the scope is not settled either.

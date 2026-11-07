@@ -265,8 +265,8 @@ impl CommandRoster {
     ///
     /// A place that only needs to know whether it is alive (checking the caller before producing side effects) and uses the sibling [`CommandRoster::sink_for_conn`]
     /// keeps one strong reference alive for the lifetime of that place. If that place is a blocking body of several seconds, the copy stays
-    /// alive meanwhile and **the dropped connection's writer cannot finish itself** (ADR-0154's 「do not hold a handed-out copy across a round
-    /// trip」 — the leak that sentence blocks, exactly). So a caller that needs only the decision uses this one.
+    /// alive meanwhile and **the dropped connection's writer cannot finish itself** (ADR-0154's 「내준 사본을 왕복 너머로 들지
+    /// 않는다」 (do not hold a handed-out copy across a round trip) — the leak that sentence blocks, exactly). So a caller that needs only the decision uses this one.
     /// ★`ConnId` is not reused★ — this is the basis on which the predicate also reads as 「같은 피어인가」 (is it the same peer), and the authoritative measurement is
     /// `Pending::origin` of `command_delivery`.
     // ADR-0154
@@ -306,8 +306,8 @@ impl CommandRoster {
     /// and real connections count up from 1 (that issuer's doc), and fake connections register no names so there is no registry
     /// entry to erase at all. That is, ② does nothing beyond removing its own slot from `live`.
     /// ★Log what was erased — this line is that event's **only diagnostic surface**★: the registry keeps no trace of a dropped owner
-    /// (ADR-0150 decision 3), so there is no way to trace the vanished names back through a query. If this line is removed, there is no material anywhere to answer 「which command
-    /// vanished and why」 (the bounce log tells only about **refused packets**). The level is `info!` because it is a connection-lifetime
+    /// (ADR-0150 decision 3), so there is no way to trace the vanished names back through a query. If this line is removed, there is no material anywhere to answer 「어느 명령이 왜
+    /// 없어졌나」 (which command vanished and why) (the bounce log tells only about **refused packets**). The level is `info!` because it is a connection-lifetime
     /// event (`docs/reference/logging-conventions.md` level table · the connection-lifetime item of the same document's 「계측 의무」).
     /// Only a drop with no names to remove drops to `debug!` — with nothing erased this line has no event to tell, and
     /// the connection's own end is already logged by the network layer, and **registering clients are still at zero, so that branch is

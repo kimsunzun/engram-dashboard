@@ -17,9 +17,9 @@ mod connection;
 // ★Being `pub(crate)` is the point★: its consumers are the connection drivers inside this crate; opening it would
 //   leak the `AppHandle` carrier onto the lib surface with nowhere outside the crate to plug it in.
 pub(crate) mod events;
-// ADR-0231: 출력 binary frame 한 장의 중계 판정(디코드 · 화신 표식 거름 · 보는 창) — seq 를 건너뛰지 않는다.
+// ADR-0231: relay decision for one output binary frame (decode · incarnation marker filter · viewing window) — seq is never skipped.
 mod frame_relay;
-// ADR-0155 결정 4: 데몬이 보낸 명령을 받는 입구. 적용은 연결 태스크 밖에서 돈다.
+// ADR-0155 decision 4: the entry point that receives commands the daemon sends. Applying them runs outside the connection task.
 pub mod inbound;
 // ADR-0310: the daemon link on the transport crate (TRD S21 trd-3 §6-2 U2).
 pub mod link;
@@ -27,11 +27,11 @@ pub mod protocol_state;
 pub(crate) mod refusal;
 // ADR-0046 M1: the daemon's replay events applied to the single-flight state — no socket, no Tauri.
 pub mod replay_events;
-// ADR-0046 M1: single-flight replay 채번/펜스 상태기계 + replay 경계 마커 인코딩(순수 — 소켓/Tauri 의존 0).
+// ADR-0046 M1: single-flight replay numbering/fence state machine + replay boundary marker encoding (pure — zero socket/Tauri dependencies).
 pub mod replay_flight;
-// ADR-0271: graceful 데몬 끄기(StopDaemon 일방 발사) — 3-2 가 다시 쓸 때까지의 임시 거처.
+// ADR-0271: graceful daemon stop (one-way fire of StopDaemon) — a temporary home until 3-2 rewrites it.
 pub mod stop;
-// 사용량 관심(레이아웃 → 데몬 구독 집합) + 구독 대조·캐시 상태기(순수 — TRD S21 usage-limit-slot §1-7).
+// Usage interest (layout → daemon subscription set) + subscription reconciliation · cache state machine (pure — TRD S21 usage-limit-slot §1-7).
 pub mod usage_interest;
 
 use std::path::PathBuf;
@@ -47,14 +47,14 @@ use tokio::sync::watch;
 
 pub use connection::HandshakeError;
 use events::{DaemonEvents, TauriEmitter};
-// 알림을 버리는 조립은 하네스 전용이다(`events::NoDaemonEvents` doc) — 운영 빌드엔 아예 없다.
+// The assembly that discards notifications is harness-only (`events::NoDaemonEvents` doc) — it does not exist in production builds at all.
 #[cfg(test)]
 use events::NoDaemonEvents;
 use inbound::InboundSlot;
 use link::endpoint::LocalEndpointSource;
 use link::DaemonKey;
 use refusal::{RefusalAlerts, TauriRefusalBox};
-// 박스를 버리는 조립도 하네스 전용이다(`refusal::NoRefusalNotice` doc).
+// The assembly that discards the box is also harness-only (`refusal::NoRefusalNotice` doc).
 #[cfg(test)]
 use refusal::{NoRefusalNotice, RefusalNotice};
 use usage_interest::{InterestAction, UsageInterest};
@@ -88,9 +88,9 @@ pub enum ConnectionState {
 /// queued — that queueing (`Peer::notify_in`) is a non-blocking leaf, and the peer is looked up before the lock is
 /// taken.
 ///
-/// ★오염돼도 되찾는다★: 그 메서드 안에서 패닉이 나 상태가 반쯤 고쳐진 채 남아도 결과는 데몬과 어긋난 구독이나
-/// 빗나간 전달 대상이고, 다음 재계산 · 스냅숏 대조 · 새 소켓이 다시 맞춘다. 오염을 전파하면 연결 태스크가 그
-/// 자리에서 죽어 출력·명령이 통째로 멎는다.
+/// ★Poison is recovered from★: if a panic inside that method leaves the state half-fixed, the outcome is a subscription out of
+/// step with the daemon or a missed delivery target, and the next recompute · snapshot reconciliation · new socket sets it right
+/// again. Propagating the poison would kill the connection task on the spot and stop output and commands altogether.
 #[derive(Clone, Default)]
 pub struct SharedUsageInterest(Arc<Mutex<UsageInterest>>);
 
@@ -100,24 +100,24 @@ impl SharedUsageInterest {
     }
 }
 
-/// 데몬 `AgentListUpdated` 의 이름 몫을 받는 포트 — 탭 자동 이름이 읽는 에이전트 이름 장부를 채운다(TRD
-/// S26-window-chrome §4-3). 실물 = 셸 조립(`lib.rs`)이 레이아웃 적용 서비스 `layout::apply::agent_names_updated` 를
-/// 부르는 것, 하네스 = 버림(`NoAgentNames`) · 기록형.
+/// Port that receives the name part of the daemon's `AgentListUpdated` — it fills the agent-name ledger that tab auto-names read (TRD
+/// S26-window-chrome §4-3). The real one = the shell assembly (`lib.rs`) calling the layout apply service `layout::apply::agent_names_updated`;
+/// harness = discard (`NoAgentNames`) · recording type.
 ///
-/// - 알림 포트 `events::DaemonEvents` 를 넓히지 않고 따로 끊은 형제다(그 doc 이 넓히기를 금한다) — 그 포트는 프론트에
-///   알리기만 하고, 이 포트의 실물은 셸 상태(레이아웃 락 안의 장부)를 고친다.
+/// - A sibling cut separately without widening the notification port `events::DaemonEvents` (its doc forbids widening) — that port only
+///   notifies the frontend, while the real one of this port edits shell state (the ledger inside the layout lock).
 /// - ★The connection driver calls it holding no lock★ — the real one takes the layout lock, and inside that lock the
 ///   usage interest lock is taken ([`SharedUsageInterest`] doc); calling it while holding that lock is the reverse
 ///   order.
-/// - 구현은 레이아웃 락의 짧은 임계구역 말고는 막지 않고 실패를 삼킨다 — 장부를 못 고친 것은 연결을 되돌릴 사유가
-///   아니고, 다음 목록이 다시 채운다.
+/// - The implementation never blocks except for the short critical section of the layout lock, and it swallows failures — failing to edit the ledger is not
+///   a reason to roll the connection back, and the next list refills it.
 pub trait AgentNamesSink: Send + Sync {
-    /// `AgentListUpdated` 마다 그 목록 그대로 — 프론트 알림(`agent_list_updated`)을 낸 뒤에 불린다.
+    /// Called with each `AgentListUpdated`, passing that list as is — after the frontend notification (`agent_list_updated`) has been emitted.
     fn agents(&self, agents: &[AgentInfo]);
 }
 
-/// 이름 장부 포트를 버리는 조립 — ★하네스 전용이다★. `#[cfg(test)]` 인 이유는 `events::NoDaemonEvents` 와 같다 —
-/// 운영 빌드에 두면 데몬 목록이 와도 탭 이름이 「에이전트」에 머무는 클라이언트를 조용히 조립할 길이 열린다.
+/// The assembly that discards the name-ledger port — ★harness-only★. The reason it is `#[cfg(test)]` is the same as `events::NoDaemonEvents` —
+/// in a production build it would open a way to quietly assemble a client whose tab names stay at 「에이전트」 (agent) even when the daemon list arrives.
 #[cfg(test)]
 pub(crate) struct NoAgentNames;
 
@@ -141,7 +141,7 @@ impl link::endpoint::EndpointSource for NoDaemonAnywhere {
     }
 }
 
-// discover(spawn 가능) timeout 기본값(wsTransport discover_daemon 5s 와 정렬).
+// Default discover (spawnable) timeout (aligned with wsTransport discover_daemon 5s).
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 // TRD S21 trd-3 §5 15 (C10): one ws message or frame on the daemon link is at most 16 MiB — the shell's side; the
@@ -179,13 +179,13 @@ pub(crate) const NO_REQUEST_ID: &str =
 // The link driver (`connection`) owns the connection: its actor owns the routing and the transport peer owns the
 // socket; this struct holds the driver's caller side (`link`) and the state watch (`state_rx`) — never the stream.
 pub struct DaemonClient {
-    // 연결 task 를 spawn 할 런타임 핸들. 운영=전용 multi-thread(`_owned_rt`), 테스트=현재 런타임.
+    // Runtime handle on which to spawn the connection task. Production = dedicated multi-thread (`_owned_rt`), tests = current runtime.
     rt: Handle,
-    // ★전용 런타임 소유(운영 — T6a)★. `setup` 콜백은 tokio 런타임 컨텍스트가 아닐 수 있어
-    // `Handle::current()` 가 패닉한다. 그래서 운영 생성자(`new_real_with_owned_runtime`)는 spike §2
-    // "tokio multi-thread(데몬처럼)" 대로 전용 멀티스레드 런타임을 *직접 만들어* 그 Handle 을 쓴다.
-    // 이 필드가 런타임을 살려둔다 — drop 되면 Handle 이 무효가 돼 연결 task 가 죽으므로 DaemonClient
-    // 수명과 묶는다(`Arc<DaemonClient>` 가 app 수명). `None` = 외부 핸들 주입(테스트=현재 런타임).
+    // ★Owns a dedicated runtime (production — T6a)★. The `setup` callback may not be in a tokio runtime context, so
+    // `Handle::current()` panics. So the production constructor (`new_real_with_owned_runtime`) follows spike §2
+    // "tokio multi-thread (like the daemon)" and *builds* a dedicated multi-thread runtime *itself*, using its Handle.
+    // This field keeps the runtime alive — if it is dropped the Handle becomes invalid and the connection task dies, so it is tied to the DaemonClient
+    // lifetime (`Arc<DaemonClient>` is the app lifetime). `None` = external handle injected (tests = current runtime).
     _owned_rt: Option<Arc<tokio::runtime::Runtime>>,
     /// The filter for the command-registration refusal box (ADR-0281). Production = `refusal::TauriRefusalBox`,
     /// harness = `refusal::NoRefusalNotice` or a recording fake ([`Self::new_on_link`]).
@@ -388,7 +388,7 @@ impl DaemonClient {
         )
     }
 
-    /// 이 클라이언트가 실행할 수 있는 명령 표를 꽂는다 — ★연결 전에 부른다★(ADR-0155 결정 4·5).
+    /// Plug in the command table this client can execute — ★call it before connecting★ (ADR-0155 decisions 4·5).
     ///
     /// ★Choosing the runtime here is the point★: the apply tasks must run on the **same runtime** as the connection
     /// driver — while `agent.spawnInto` waits on a daemon round trip, the driver's tasks must keep running for the
@@ -416,24 +416,24 @@ impl DaemonClient {
             )));
     }
 
-    // 현재 연결 상태 스냅샷(락 없이).
+    // Snapshot of the current connection state (lock-free).
     pub fn state(&self) -> ConnectionState {
         *self.state_rx.borrow()
     }
 
-    // 상태 변경 구독(watch). 호출자가 await 로 다음 전이를 기다리거나 현재값을 본다.
+    // Subscribe to state changes (watch). The caller awaits the next transition or looks at the current value.
     pub fn subscribe_state(&self) -> watch::Receiver<ConnectionState> {
         self.state_rx.clone()
     }
 
-    /// 사용량 관심 상태 — 웹뷰 pull 이 캐시를 읽는다. 관심을 바꾸는 쪽은 이 손잡이가 아니라 재계산 셋
-    /// ([`Self::usage_layout_changed`] · [`Self::usage_window_destroyed`] · [`Self::usage_window_visibility`])을
-    /// 부른다 — 결과 처리(넛지 · 줄임 타이머)가 거기 한 벌이다. 락 차례는 [`SharedUsageInterest`] doc.
+    /// Usage-interest state — the webview pull reads the cache. The side that changes the interest does not use this handle but calls the recompute set
+    /// ([`Self::usage_layout_changed`] · [`Self::usage_window_destroyed`] · [`Self::usage_window_visibility`]) —
+    /// result handling (nudge · shrink timer) lives there in one place. For lock order see the [`SharedUsageInterest`] doc.
     pub fn usage_interest(&self) -> &SharedUsageInterest {
         &self.usage
     }
 
-    /// 연결 task 의 등록 자리와 **같은** 거르개 — 차분 자리(`commands::view_bus`)가 쓴다.
+    /// The **same** filter as the registration spot of the connection task — used by the diff spot (`commands::view_bus`).
     pub(crate) fn refusal_alerts(&self) -> &RefusalAlerts {
         &self.refusals
     }
@@ -455,23 +455,23 @@ impl DaemonClient {
         self.link.close();
     }
 
-    // ── T6a: invoke 명령 request/reply 평면(spawn/kill/interrupt/write/resize/…) ─────────
+    // ── T6a: invoke command request/reply plane (spawn/kill/interrupt/write/resize/…) ─────────
     // Sends a side-effect command through the connection driver and awaits the daemon's reply (matched by request_id).
-    /// [`Self::send_command_with_origin`] 의 실패를 글로만 돌려주는 형제 — 계약·흐름·잔여는 그쪽에 적는다.
+    /// Sibling of [`Self::send_command_with_origin`] that returns a failure only as text — contract · flow · remainder are written there.
     pub async fn send_command(&self, cmd: AgentCommand) -> Result<AgentEvent, String> {
         self.send_command_with_origin(cmd)
             .await
             .map_err(|failure| failure.to_string())
     }
 
-    /// [`Self::send_command`] 와 같은 왕복이되 실패의 **출처**를 타입으로 남긴다 — 데몬이 `Error` 로 답했나
-    /// (`CommandFailure::Daemon`), 셸 쪽에서 끝났나(`CommandFailure::Local`)를 문구를 읽지 않고 가려야 하는
-    /// 호출자가 쓴다(ADR-0281). 글은 형제와 바이트 단위로 같다(`CommandFailure` 의 `Display`).
-    /// 이 함수 안의 실패(request_id 없음 · 미연결 · 채널 끊김 · 답 유실)는 전부 `Local` 이다.
+    /// Same round trip as [`Self::send_command`], but it keeps the **origin** of the failure as a type — used by callers that must tell whether the daemon replied with `Error`
+    /// (`CommandFailure::Daemon`) or the failure ended on the shell side (`CommandFailure::Local`) without reading the wording
+    /// (ADR-0281). The text is byte-for-byte the same as the sibling's (`Display` of `CommandFailure`).
+    /// Every failure inside this function (no request_id · not connected · channel closed · reply lost) is `Local`.
     ///
-    /// ★호출 전제 — `cmd` 에 request_id 를 호출자가 이미 박는다★(commands/agent.rs 의 빌더가
-    /// `RequestId::new()` 로 채운다). 그래야 reply 매칭 키가 호출자에게도 알려져 idempotency(재시도 시 같은
-    /// 키)와 정합한다 — 이 왕복이 임의로 채우면 호출자가 키를 모른다.
+    /// ★Call precondition — the caller already stamps a request_id into `cmd`★ (the builder in commands/agent.rs fills it with
+    /// `RequestId::new()`). That way the reply-matching key is known to the caller too and fits idempotency (same
+    /// key on retry) — if this round trip filled it arbitrarily the caller would not know the key.
     pub async fn send_command_with_origin(
         &self,
         cmd: AgentCommand,
@@ -479,7 +479,7 @@ impl DaemonClient {
         self.link.send_command(cmd).await
     }
 
-    // ── T6b: fire-and-forget 평면(Subscribe/Unsubscribe/Resize — reply 없음) ─────────────
+    // ── T6b: fire-and-forget plane (Subscribe/Unsubscribe/Resize — no reply) ─────────────
     /// Writes `Unsubscribe` on the open connection, behind earlier unsubscribes and replay requests; with none open it
     /// does nothing — the daemon drops a connection's subscriptions with it. Never blocks (the layout calls it under its
     /// lock). Contract: `LinkClient::unsubscribe`.
@@ -494,39 +494,39 @@ impl DaemonClient {
         self.link.send_fire_and_forget(cmd);
     }
 
-    /// 사용량 관심이 바뀌었을 수 있다 — 연결 task 에 **집합 없는** 넛지 한 장(TRD S21 usage-limit-slot §1-7
-    /// 「한 직렬 경로」). 보낼 집합은 연결 task 가 꺼낼 때 [`UsageInterest::sync`] 로 **그때의** 관심을 읽는다 —
-    /// 그래서 넛지가 몇 장이든 어떤 순서로 처리되든 소켓의 마지막 한 장이 최신 관심이다. 집합을 여기서 읽어
-    /// 실어 보내면 두 변경이 읽기와 전송 사이에서 엇갈릴 때 옛 집합이 마지막으로 닿는다 — 되살리지 말 것
+    /// Usage interest may have changed — one **set-less** nudge to the connection task (TRD S21 usage-limit-slot §1-7
+    /// 「한 직렬 경로」 (one serial path)). The set to send is read by the connection task as the **current** interest via [`UsageInterest::sync`] when it takes the nudge out —
+    /// so however many nudges there are and in whatever order they are handled, the last one on the socket carries the latest interest. If the set were read here
+    /// and carried along, when two changes interleave between the read and the send the old set would arrive last — do not revive that
     /// (TRD §3 #74).
     ///
-    /// 비블로킹이라 [`SharedUsageInterest`] 락 안에서 불러도 된다(락 차례는 그 doc).
+    /// It is non-blocking, so it may be called inside the [`SharedUsageInterest`] lock (lock order in that doc).
     /// With no connection open it does nothing — the next one gets the whole interest when it opens
     /// (`LinkClient::nudge_usage`).
     pub fn nudge_usage_interest(&self) {
         self.link.nudge_usage();
     }
 
-    /// 레이아웃이 바뀌었다 — 사용량 관심을 다시 계산하고 그 결과대로 넛지하거나 줄임 타이머를 띄운다(TRD S21
-    /// usage-limit-slot §1-7 「재계산 자리」). 레이아웃 쓰기의 구독 재동기(`layout::SubscriptionSync`)가 부른다.
+    /// The layout changed — recompute the usage interest and, per the result, nudge or start the shrink timer (TRD S21
+    /// usage-limit-slot §1-7 「재계산 자리」 (the recompute spot)). Called by the layout write's subscription resync (`layout::SubscriptionSync`).
     ///
-    /// ★ViewManager 락 안에서 부른다★ — 락 차례는 [`SharedUsageInterest`] doc 그대로이고, 하는 일은 메모리 안
-    /// 계산 · 비블로킹 넛지 · 타이머 태스크 기동뿐이라 그 포트의 「락 안 · 동기 · 비블로킹」 계약을 지킨다. 이 셋
-    /// 형제([`Self::usage_window_destroyed`] · [`Self::usage_window_visibility`])도 같다.
+    /// ★Called inside the ViewManager lock★ — lock order is as in the [`SharedUsageInterest`] doc, and all it does is in-memory
+    /// computation · a non-blocking nudge · starting a timer task, so it keeps that port's 「락 안 · 동기 · 비블로킹」 (inside the lock · synchronous · non-blocking) contract. The other two
+    /// siblings ([`Self::usage_window_destroyed`] · [`Self::usage_window_visibility`]) are the same.
     pub fn usage_layout_changed(&self, mgr: &ViewManager) {
         let action = self.usage.lock().recompute(mgr, Instant::now());
         self.run_usage_action(action);
     }
 
-    /// 팝업 창 `label` 이 소멸했다 — 모델에서 창을 지운 같은 ViewManager 락 안에서 부른다. 모델이 그 창을
-    /// 쥐고 있었는지와 무관하게 그 label 의 숨김 표시를 잊는다([`UsageInterest::forget_window`]).
+    /// Popup window `label` is gone — called inside the same ViewManager lock that removed the window from the model. Whether or not the model
+    /// held that window, it forgets that label's hidden flag ([`UsageInterest::forget_window`]).
     pub fn usage_window_destroyed(&self, label: &str, mgr: &ViewManager) {
         let action = self.usage.lock().forget_window(label, mgr, Instant::now());
         self.run_usage_action(action);
     }
 
-    /// 셸이 창 `label` 을 숨겼거나(`false`) 다시 보였다(`true`) — 트레이 보이기·숨기기가 창마다 ViewManager 락을
-    /// 짧게 잡고 부른다(OS 창 호출은 그 락 밖).
+    /// The shell hid (`false`) or re-showed (`true`) window `label` — tray show/hide takes the ViewManager lock briefly per window
+    /// and calls this (the OS window call is outside that lock).
     pub fn usage_window_visibility(&self, label: &str, visible: bool, mgr: &ViewManager) {
         let action = self
             .usage
@@ -535,15 +535,15 @@ impl DaemonClient {
         self.run_usage_action(action);
     }
 
-    // 재계산 결과를 처리하는 한 자리 — 사용량 관심 락은 이미 놓았다(넛지는 집합을 싣지 않아 락 밖이어도 순서가
-    // 안 엇갈린다 — [`Self::nudge_usage_interest`]).
+    // The single place that handles the recompute result — the usage-interest lock is already released (a nudge carries no set, so even outside the lock the order
+    // does not interleave — [`Self::nudge_usage_interest`]).
     fn run_usage_action(&self, action: InterestAction) {
         match action {
             InterestAction::Unchanged => {}
             InterestAction::Nudge => self.nudge_usage_interest(),
             InterestAction::Defer { gen, deadline } => {
-                // 기한까지의 잠을 **부른 자리에서** 이 런타임의 시계로 짓는다 — 태스크 안에서 지으면 그 첫 poll
-                //   만큼 기한이 밀리고, 가짜 시계 시험에서는 시계를 먼저 돌린 뒤 지어져 기한이 통째로 밀린다.
+                // Build the sleep until the deadline **at the call site**, with this runtime's clock — building it inside a task shifts the deadline by
+                //   its first poll, and in a fake-clock test it is built after the clock was advanced, so the deadline is shifted wholesale.
                 let delay = deadline.saturating_duration_since(Instant::now());
                 let sleep = {
                     let _rt = self.rt.enter();
@@ -585,18 +585,18 @@ impl DaemonClient {
 impl Drop for DaemonClient {
     fn drop(&mut self) {
         // The link driver ends with its `LinkClient` (dropped with the fields below).
-        // ★전용 런타임은 여기서 **비블로킹으로** 접는다★ — 이 함수 본문이 끝나면 필드들이 이어서 drop
-        //   되고, 그중 [`Self::_owned_rt`] 는 tokio `Runtime` 이다. `Runtime` 의 기본 drop 은 워커가 멈출
-        //   때까지 블로킹하는데, **async 컨텍스트 안에서 그 drop 이 일어나면 tokio 가 패닉한다**. `Drop`
-        //   안의 패닉은 unwinding 중이면 프로세스를 abort 시킨다 — 진단 없이 죽는 결말이다.
-        //   `shutdown_background` 는 워커를 detach 해 즉시 돌아오므로 어느 컨텍스트에서든 같은 값을 낸다.
-        //   소멸자가 원하는 것이 정확히 그것이다(기다리지 않음 + 패닉 없음).
-        // ★"오늘은 못 닿는다"에 이걸 걸지 않는다★: 지금 이 자리가 그 조합에 닿을 길은 없다 — 테스트
-        //   생성자는 전부 `_owned_rt: None` 이고, 운영 클라이언트는 `Arc` 순환(`lib.rs` 가 클라이언트 자신의 `Arc`
-        //   로 명령 표를 굽고 그 표를 `install_command_table` 로 이 클라이언트에 꽂는다) 때문에 애초에 drop 되지
-        //   않는다. 그러나 그 무해함은 **우연이지 구조가 아니다**(런타임을 소유하는
-        //   생성자가 하나만 늘거나, 순환이 끊기면 그날로 사라진다). 그래서 구조로 막아 둔다.
-        // ★마지막 참조일 때만 접는다★ — `Arc` 가 남아 있으면 다른 소유자가 그 런타임을 아직 쓰는 중이다.
+        // ★The dedicated runtime is shut down here **without blocking**★ — when this function body ends the fields are dropped
+        //   next, and among them [`Self::_owned_rt`] is a tokio `Runtime`. A `Runtime`'s default drop blocks until the workers
+        //   stop, and **if that drop happens inside an async context tokio panics**. A panic inside `Drop`
+        //   aborts the process if it happens during unwinding — an end that dies with no diagnostics.
+        //   `shutdown_background` detaches the workers and returns at once, so it gives the same result in any context.
+        //   That is exactly what a destructor wants (no waiting + no panic).
+        // ★Do not hang this on "it cannot be reached today"★: there is no path by which this spot reaches that combination today — every test
+        //   constructor has `_owned_rt: None`, and the production client is never dropped in the first place, because of an `Arc` cycle (`lib.rs` bakes the client's own `Arc`
+        //   into the command table and plugs that table into this client with `install_command_table`). But that
+        //   harmlessness is **an accident, not structure** (it disappears the day one more constructor that owns a runtime is
+        //   added, or the cycle is broken). So it is blocked by structure.
+        // ★Shut down only when this is the last reference★ — if an `Arc` remains, another owner is still using that runtime.
         if let Some(rt) = self._owned_rt.take() {
             if let Ok(rt) = Arc::try_unwrap(rt) {
                 rt.shutdown_background();

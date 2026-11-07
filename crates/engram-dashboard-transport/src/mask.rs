@@ -1,30 +1,30 @@
-//! 상대가 준 글을 사건 · 표시에 싣기 전에 가린다(TRD 3 §3-0 ⑤ · §5 19).
+//! Masks text the peer gave before carrying it in an event · a display (TRD 3 §3-0 ⑤ · §5 19).
 //!
-//! ★상태 기계와 거는 자리의 타입이 함께 쓴다★ — [`crate::machine`] 이 사건에 싣는 자리에서,
-//! [`crate::DialFailure`] 가 `Display` 에서 부른다. 한쪽 파일에 두면 seam 타입이 상태 기계를 부르게 돼 따로 둔다.
+//! ★The state machine and the dialing-place type use it together★ — it is called where [`crate::machine`] carries it in an event, and
+//! from `Display` by [`crate::DialFailure`]. If placed in either of those files, the seam type would end up calling the state machine, so it is kept separate.
 
-/// 가린 글의 바이트 상한 — ★글자가 아니라 바이트★다. 넘치면 문자 경계에서 자르고 말줄임표(`…`)를 붙여 이 안에
-/// 맞춘다. WS 닫기 문구 상한 123 바이트보다 넉넉히 잡았다 — 로컬 진단 문구와 못 붙음의 문구도 이 길을 탄다.
+/// Byte cap of the masked text — ★bytes, not characters★. If it overflows, it is cut at a character boundary and an ellipsis (`…`) is added to fit within this.
+/// It is set with more room than the WS close-text cap of 123 bytes — the local diagnostic text and the could-not-connect text take this path too.
 pub(crate) const REASON_MAX_BYTES: usize = 256;
 
-/// 상대가 준 글을 가린다 — 줄을 끊거나 보이지 않게 글을 바꾸거나 숨은 내용을 싣는 글자를 지우고 길이를 바이트
-/// 상한(256 바이트)으로 묶는다. ★여러 번 거쳐도 같다★ — 가린 글을 다시 가려도 바뀌지 않는다.
+/// Masks text the peer gave — erases characters that break lines, alter text invisibly, or carry hidden content, and bounds the length to the byte
+/// cap (256 bytes). ★The same after several passes★ — masking already masked text again changes nothing.
 ///
-/// 지우는 것 = 제어 문자(Cc) + U+2028/2029 + Default_Ignorable_Code_Point 전부 + U+FFF9–FFFB. 이것이 전부다.
-/// - 제어 문자 — `char::is_control`(U+0000–001F · U+007F–009F. 줄바꿈 · 탭 · ESC 포함).
-/// - 줄 · 문단 나눔 U+2028 · U+2029 — 제어 문자가 아닌데도 줄을 끊는다.
-/// - Default_Ignorable_Code_Point(유니코드 속성 — 「보통은 아무것도 그리지 않는 글자」) 전부. 양방향 서식(보이는
-///   순서를 뒤집어 다른 글로 읽힌다) · 폭 없는 글자 · 한글 채움 문자 · 태그 문자 U+E0000–E007F(화면에는 안 보이는데
-///   LLM 은 읽는다 — 프롬프트 밀반입 통로) · 변형 선택자(256 개라 하나가 한 바이트를 실어 보이는 글자 뒤에 임의
-///   데이터를 숨긴다 — 지워서 잃는 것은 이모지 · 한자 이체 모양뿐이라 진단 글에서는 값이 없다)가 여기 든다.
-///   표준 라이브러리에 속성 표가 없어 `hides` 가 범위를 손으로 적는다(미할당 예약 범위 포함 — 속성 정의가 그렇다).
-/// - 주석 서식 U+FFF9–FFFB — 위 속성에 들지 않지만 보이지 않는 구간을 연다.
+/// What it erases = control characters (Cc) + U+2028/2029 + all Default_Ignorable_Code_Point + U+FFF9–FFFB. That is all.
+/// - Control characters — `char::is_control` (U+0000–001F · U+007F–009F. Includes line breaks · tabs · ESC).
+/// - Line · paragraph separators U+2028 · U+2029 — they break lines even though they are not control characters.
+/// - All Default_Ignorable_Code_Point (a Unicode property — 「보통은 아무것도 그리지 않는 글자」 (characters that normally draw nothing)). It covers bidirectional formatting (flips the visible
+///   order so it reads as different text) · zero-width characters · Hangul filler characters · tag characters U+E0000–E007F (invisible on screen but
+///   an LLM reads them — a prompt-smuggling channel) · variation selectors (there are 256, so one carries a byte and hides arbitrary
+///   data behind a visible character — all that erasing loses is emoji · CJK variant glyph shapes, so they have no value in diagnostic text).
+///   The standard library has no property table, so `hides` writes the ranges by hand (including unassigned reserved ranges — the property definition is that way).
+/// - Annotation formatting U+FFF9–FFFB — not in the property above but they open an invisible stretch.
 ///
-/// ★남는 것★ — 위 밖의 서식 문자(Cf. 예: 보이는 아랍 숫자 앞머리 U+0600–0605)와 결합 문자 연속. 결합 문자 연속의
-/// 피해(글자 위아래로 넘치는 그림)는 길이 상한(256 바이트)이 묶는다.
+/// ★What remains★ — format characters outside the above (Cf. e.g. the visible Arabic-number prefix U+0600–0605) and runs of combining characters. The
+/// damage of runs of combining characters (glyphs overflowing above and below the line) is bounded by the length cap (256 bytes).
 ///
-/// ★글을 「안전하게」 만들지 않는다★ — 길이와 숨은 글자만 다룬다. 상대가 지어낸 그럴듯한 문장은 그대로 남으므로
-/// 분기 · 팝업 문안에 쓰지 않는 규칙([`crate::ConnectFailure::Rejected`])이 여전히 벽이다.
+/// ★It does not make text 「안전하게」 (safe)★ — it handles only length and hidden characters. A plausible sentence the peer made up
+/// remains as is, so the rule of not using it for branching · popup text ([`crate::ConnectFailure::Rejected`]) is still the wall.
 pub fn mask_reason(text: &str) -> String {
     const ELLIPSIS: char = '…';
     let mut out: String = text.chars().filter(|c| !hides(*c)).collect();
@@ -97,7 +97,7 @@ mod tests {
 
     #[test]
     fn masking_drops_tag_characters_that_smuggle_text_to_an_llm() {
-        // 「ignore」 를 태그 문자로 적은 것 — 화면에는 「ok」 만 보인다.
+        // 「ignore」 written with tag characters — only 「ok」 shows on screen.
         let smuggled: String = "ignore"
             .chars()
             .map(|c| char::from_u32(0xE0000 + c as u32).unwrap())

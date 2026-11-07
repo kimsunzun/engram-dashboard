@@ -1,9 +1,9 @@
-# QA 절차 문서가 CI 테스트 입력이다 — 결합 풀기
+# The QA procedure doc is a CI test input — decoupling
 
-> **상태:** 트리거 대기 · **정본 색인:** [`../todo.md`](../todo.md)
+> **Status:** Waiting for trigger · **Canonical index:** [`../todo.md`](../todo.md)
 
-- **문제:** `src/util/launcherWiring.test.ts` 가 `.claude/skill-bindings/qa.md` 를 텍스트로 열어 코드 블록 속 빌드 명령을 단언한다(`scripts/build-client-shell.mjs` 를 부르는가 · 맨 `cargo build -p engram-dashboard` 가 없는가 — ADR-0137). 제품 테스트(vitest, `src/`)가 에이전트 작업용 절차서(`.claude/`)에 기대는 층 교차다.
-- **번진 비용:** CI 경로 필터가 `.claude/**` 를 빼면서 이 파일 하나를 끝에서 되살려야 했다(ADR-0232 결정 1). 테스트 파일 자리도 콜로케이션 규약의 예외다(`src/util/devConfigOverlay.test.ts` 헤더).
-- **풀 방법(후보):** GUI 실측 준비 명령을 `scripts/` 아래 스크립트로 빼고 `qa.md` 는 그 스크립트를 부르라고만 적는다 → 테스트는 스크립트를 본다 → `qa.md` 는 순수 문서가 되고 CI 되살리기가 필요 없어진다.
-- ★**풀 때 잃지 말 것**★ — 이 단언은 실사고에서 나왔다(`473e82f`: 런처가 맨 `cargo build` 로 바뀌었는데 전 게이트가 초록이었다). 「문서화된 모든 빌드 경로가 그 스크립트를 부른다」는 검사 자체는 남긴다. 풀면 `ci.yml` 의 되살림 줄과 ADR-0232 결정 1 의 되살림 서술도 함께 걷는다(새 ADR 로).
-- **왜 지금 안 하나:** 사용자가 다른 세션에서 QA 스킬을 고치는 중이라 그 작업이 끝난 뒤 논의하기로 했다(사용자 결정 2026-09-26). **트리거 = 그 QA 스킬 작업의 종료.**
+- **Problem:** `src/util/launcherWiring.test.ts` opens `.claude/skill-bindings/qa.md` as text and asserts the build commands in its code blocks (does it call `scripts/build-client-shell.mjs` · is there no bare `cargo build -p engram-dashboard` — ADR-0137). It is a layer crossing where a product test (vitest, `src/`) depends on a procedure document for agent work (`.claude/`).
+- **Cost that spread:** the CI path filter excluded `.claude/**` and so had to revive this one file at the end (ADR-0232 decision 1). The test file's location is also an exception to the colocation convention (`src/util/devConfigOverlay.test.ts` header).
+- **How to untangle (candidate):** move the GUI measurement preparation commands into a script under `scripts/` and have `qa.md` only say to call that script → the test looks at the script → `qa.md` becomes a pure document and the CI revival is no longer needed.
+- ★**What not to lose when untangling**★ — this assertion came from a real incident (`473e82f`: the launcher changed to a bare `cargo build` while every gate was green). The check itself remains — 「문서화된 모든 빌드 경로가 그 스크립트를 부른다」 (every documented build path calls that script). When untangled, the revival line of `ci.yml` and the revival statement of ADR-0232 decision 1 are also removed (with a new ADR).
+- **Why not now:** the user is fixing the QA skill in another session, so we agreed to discuss it after that work ends (user decision 2026-09-26). **Trigger = the end of that QA skill work.**

@@ -34,7 +34,7 @@
 
 ★**The axis that picked that answer is not the technique's success rate but 「못 찾았을 때 무슨 일이 일어나나」**★ — §1 is that axis, and it is the **section to read first** in this report.
 
-★**But what we actually built is not the full form of that technique category — it prevents misattribution only halfway**★. The cause, the extent of the empty-slot window, and the one line of defense that exists today are canonical in §1 「축을 절반만 닫는다」 · the state as a remaining risk = §7.
+★**But what we actually built is not the full form of that technique category — it prevents misattribution only halfway**★. The cause, the extent of the empty-slot window, and the one line of defense that exists today are canonical in §1 "it closes the axis only halfway" · the state as a remaining risk = §7.
 
 ### What was measured and what was not
 
@@ -123,7 +123,7 @@
 
   ③ is **a variant that abbreviates** the two path fields to `C:/x/y.jsonl` and `C:/x` — the 「실측된 페이로드 그대로」 that constant speaks of means the **field composition**, not the length. The real payload carries the rollout absolute path and the session cwd, and JSON doubles the backslashes, so those two fields eat several hundred bytes. ★**② matches neither ① nor ③**★ (larger than ③ and smaller than ①) — **which sample that line was written from has not been established** (this pass did zero re-measurement · so it did not fix that comment either — fixing without measuring merely turns one unverified number into another).
   ★**Do not pick one of the three at the spot where you size the buffer**★ — the fact the decision needs is just that **all three are under 1% of the 64 KiB cap**, and the ground of that cap is not size but 「이 stdin 은 상대가 채운다」 (that constant's doc).
-- ★**codex injects none of its own env into the hook process — it is pure inheritance**★. **So the `ENGRAM_TOKEN` we planted arrives as is, and the bearer the hook presents to `/control/hook` is exactly that token** (ADR-0086 · planted at `backend/mod.rs:102`). ★**This one line is both the ground that makes §1 technique ② hold and the hole in that technique**★ — the same inheritance gives the same token **to a sub-agent's hook too** (§1 「축을 절반만 닫는다」).
+- ★**codex injects none of its own env into the hook process — it is pure inheritance**★. **So the `ENGRAM_TOKEN` we planted arrives as is, and the bearer the hook presents to `/control/hook` is exactly that token** (ADR-0086 · planted at `backend/mod.rs:102`). ★**This one line is both the ground that makes §1 technique ② hold and the hole in that technique**★ — the same inheritance gives the same token **to a sub-agent's hook too** (§1 "it closes the axis only halfway").
 - ★**`CODEX_THREAD_ID` does not exist in 0.155.0**★ (**zero hits in the binary's full strings**). **herdr's codex hook uses it to tell nesting apart, and if you copy that guard it always reads as unset.**
 - **codex hook event vocabulary** (from herdr's install code — precedent reading): `SessionStart` · `UserPromptSubmit` · `PreToolUse` · `Stop` · `PermissionRequest`. **herdr too now uses only `SessionStart`** (for the rest only code that deletes old entries remains).
 
@@ -201,9 +201,9 @@
 - ~~★**Hook firing on the TUI (terminal) path is unmeasured**★~~ → ★**§10 closed it**★ (review screen, approval, firing and `session_id` on a real PTY). **Do not reopen 「가장 큰 공백」 on the strength of this line in this section.** ★**But a remainder inherited that spot — the line 「우리 쪽 훅 배선」 below is it, and that is now the biggest gap.**★
 - **Unconfirmed whether a codex hook fires once per session** — we could not run a clean two-turn experiment.
 - **Whether `thread/fork`, compaction and sub-agent threads fire, and their `source` values, are unmeasured** — ★but the two values `startup`/`resume` were measured by §10-8★ (fork is still unmeasured).
-- ★**The rollout-creation-time contradiction in §4 is not established**★ — **kept as an open item.** The values and conditions of the two observations, and the fact that we could not decide which belongs to which path, are carried by §4 「내부 모순 하나」.
+- ★**The rollout-creation-time contradiction in §4 is not established**★ — **kept as an open item.** The values and conditions of the two observations, and the fact that we could not decide which belongs to which path, are carried by §4 "One internal contradiction".
 - **Our side's hook wiring has never been run against a real codex** (§0 · the reason for that boundary = §9).
-- ★★**A nested session can occupy the parent's slot — a hole left by design (unresolved)**★★ — the cause, the extent of the empty-slot window and the one line of defense that exists today are canonical in §1 「축을 절반만 닫는다」 and are not repeated here. **What this section carries is 「그래서 언제 닫히나」: not before a means to tell parent from child exists** — because the absence of that means today is exactly the cause. Canonical code-side description = the header of `crates/engram-dashboard-daemon/src/control/hook.rs`.
+- ★★**A nested session can occupy the parent's slot — a hole left by design (unresolved)**★★ — the cause, the extent of the empty-slot window and the one line of defense that exists today are canonical in §1 "it closes the axis only halfway" and are not repeated here. **What this section carries is 「그래서 언제 닫히나」: not before a means to tell parent from child exists** — because the absence of that means today is exactly the cause. Canonical code-side description = the header of `crates/engram-dashboard-daemon/src/control/hook.rs`.
 
 ### Do-nots that came out of this survey (only what was actually experienced)
 

@@ -1,18 +1,18 @@
-//! 하네스 전용 — 기능 플래그 `test-support` 뒤에 산다(ADR-0012, 선례 = `engram-dashboard-command`).
+//! Harness only — lives behind the feature flag `test-support` (ADR-0012, precedent = `engram-dashboard-command`).
 //!
-//! ★여기 있는 것이 「백오프·keepalive·쓰기 시한을 **실제로 기다리지 않는다**」의 실물이다★
-//! (ADR-0177 결정 8): [`ManualClock`] 이 시간을, [`MemoryNetwork`] · [`MemoryListener`] 가 전송을 대신한다.
-//! ★둘은 먼 끝이 다르다★ — [`MemoryNetwork`] 의 먼 끝은 시험이 손으로 모는 대본([`MemoryEndpoint`])이고,
-//! [`MemoryListener`] 의 먼 끝은 진짜 [`LinkTx`]/[`LinkRx`] 한 쌍([`Accepted`])이라 두 감독을 서로 잇는다.
+//! ★This is the real thing behind 「백오프·keepalive·쓰기 시한을 **실제로 기다리지 않는다**」 (never actually waiting for backoff, keepalive or write deadlines)★
+//! (ADR-0177 decision 8): [`ManualClock`] stands in for time, [`MemoryNetwork`] and [`MemoryListener`] for the transport.
+//! ★Their far ends differ★ — the far end of [`MemoryNetwork`] is a script the test drives by hand ([`MemoryEndpoint`]),
+//! and the far end of [`MemoryListener`] is a real [`LinkTx`]/[`LinkRx`] pair ([`Accepted`]), so it joins two supervisors to each other.
 //!
-//! ★**[`settle`] · [`settle_until`] 만 current_thread 런타임 전용이다**★ — 협조적 양보로만 동기화하므로
-//! `#[tokio::test(flavor = "multi_thread")]` 아래에서는 아무것도 보장하지 않는다. 그 위반은 조용히
-//! 흔들리는 테스트가 되므로 둘이 **런타임 종류를 직접 보고 패닉한다.** 그 위에 선 시험 도우미(`registry.rs` 시험의
-//! `Near::arrived` 처럼 기다리지 않고 한 번만 폴링하는 것)도 같은 전제다. 인메모리 부품([`MemoryNetwork`] ·
-//! [`memory_link`] · [`ManualClock`] …)과 [`PermitPool`] 은 multi_thread 에서도 쓴다 — 끝은 실시간 시한을 건 대기로
-//! 본다(`registry.rs` 의 3-0 U6b 시험).
+//! ★**Only [`settle`] and [`settle_until`] are for the current_thread runtime**★ — they synchronize by cooperative yielding alone,
+//! so under `#[tokio::test(flavor = "multi_thread")]` they guarantee nothing. Breaking that gives a silently
+//! flaky test, so both **look at the runtime kind themselves and panic.** Test helpers built on them (like `Near::arrived`
+//! in the `registry.rs` tests, which polls once without waiting) share the same premise. The in-memory parts ([`MemoryNetwork`],
+//! [`memory_link`], [`ManualClock`] ...) and [`PermitPool`] also work under multi_thread — the ends are
+//! observed through waits bounded by a real-time deadline (the 3-0 U6b test in `registry.rs`).
 //!
-//! ★운영 코드가 이 모듈을 참조하면 안 된다★ — 기본 빌드에 없으므로 컴파일이 먼저 깨진다.
+//! ★Production code must not reference this module★ — it is absent from the default build, so compilation breaks first.
 //!
 //! ★Consumers turn `test-support` on in `[dev-dependencies]` only★ — in `[dependencies]` this module would land in their
 //! release binary. CI checks it on the consumer: `.github/workflows/ci.yml` `shell gate 5` (shell; the daemon line comes
@@ -43,16 +43,16 @@ struct ManualState {
 }
 
 impl ManualState {
-    /// 받는 쪽이 사라진 잠꾸러기를 버린다.
+    /// Drops the sleeper whose receiving side is gone.
     ///
-    /// ★없으면 `waiters` 가 무한히 자란다★ — 감독의 운영 루프가 한 바퀴마다 새 `sleep` 을 만들고
-    /// 그중 이긴 것 말고는 전부 그대로 버려지기 때문이다(트래픽 한 번에 한 개씩 쌓인다).
+    /// ★Without this `waiters` grows without bound★ — each turn of the supervisor's production loop creates a new `sleep`
+    /// and all but the winner are simply dropped (one piles up per traffic event).
     fn prune(&mut self) {
         self.waiters.retain(|(_, tx)| !tx.is_closed());
     }
 }
 
-/// 손으로 미는 시계. ★스스로 흐르지 않는다★ — [`ManualClock::advance`] 만이 시각을 옮긴다.
+/// A clock pushed by hand. ★It does not flow on its own★ — only [`ManualClock::advance`] moves the time.
 #[derive(Clone)]
 pub struct ManualClock {
     inner: Arc<Mutex<ManualState>>,
@@ -74,15 +74,15 @@ impl ManualClock {
         }
     }
 
-    /// `Arc<dyn Clock>` 자리에 꽂을 손잡이. 원본과 같은 시각을 본다.
+    /// A handle to plug in where an `Arc<dyn Clock>` goes. It sees the same time as the original.
     pub fn handle(&self) -> Arc<dyn Clock> {
         Arc::new(self.clone())
     }
 
-    /// 시각을 옮기고 시한이 지난 잠꾸러기를 **시한이 이른 순서로** 깨운다.
+    /// Moves the time and wakes the sleepers whose deadline has passed **in deadline order**.
     ///
-    /// ★순서가 계약이다★ — 한 번의 `advance` 가 두 시한을 함께 넘길 때 등록 순서로 깨우면 실시간이
-    /// 만들 수 없는 순서가 나오고, 그 순서에서만 통과하는 테스트가 생긴다.
+    /// ★The order is the contract★ — if one `advance` crosses two deadlines and wakes them in registration order, the result is an order
+    /// real time can never produce, and some test passes only under that order.
     pub fn advance(&self, d: Duration) {
         let due = {
             let mut st = self.inner.lock().unwrap();
@@ -101,7 +101,7 @@ impl ManualClock {
         }
     }
 
-    /// 지금 **살아서** 잠들어 있는 수. 버려진 타이머는 세지 않는다.
+    /// The number currently asleep **and alive**. Dropped timers are not counted.
     pub fn sleepers(&self) -> usize {
         let mut st = self.inner.lock().unwrap();
         st.prune();
@@ -131,12 +131,12 @@ impl Clock for ManualClock {
     }
 }
 
-/// [`settle`] 이 한 번에 도는 양보 횟수.
+/// The number of yields [`settle`] runs in one call.
 const SETTLE_YIELDS: usize = 512;
 
 fn assert_single_threaded() {
-    // ★멀티스레드 런타임에서는 양보가 동기화가 아니다★ — 이 모듈의 모든 단언 패턴이 그 위에서
-    //   조용히 흔들린다. 조용한 흔들림보다 시끄러운 실패가 낫다.
+    // ★On a multithreaded runtime yielding is not synchronization★ — every assertion pattern in this module
+    //   silently turns flaky there. A loud failure beats a silent flake.
     let flavor = tokio::runtime::Handle::current().runtime_flavor();
     assert_eq!(
         flavor,
@@ -146,10 +146,10 @@ fn assert_single_threaded() {
     );
 }
 
-/// 수동 시계 아래에서 감독·reader 태스크가 갈 데까지 가게 한다.
+/// Lets the supervisor and reader tasks run as far as they can under the manual clock.
 ///
-/// ★실시간을 재우지 않는다★ — `yield_now` 만 반복한다. 조건을 알고 있다면 [`settle_until`] 이 낫다:
-/// 이 함수는 **안 끝났다는 것을 알아채지 못하고** 그 실패가 엉뚱한 단언 자리에서 튀어나온다.
+/// ★It does not sleep in real time★ — it only repeats `yield_now`. If you know the condition, [`settle_until`] is better:
+/// this function **does not notice that things are not finished**, and the failure surfaces at some unrelated assertion.
 pub async fn settle() {
     assert_single_threaded();
     for _ in 0..SETTLE_YIELDS {
@@ -157,8 +157,8 @@ pub async fn settle() {
     }
 }
 
-/// 조건이 설 때까지 양보한다. ★한도를 넘기면 그 자리에서 패닉한다★ — 「안 끝났다」를 「단언이 틀렸다」로
-/// 둔갑시키지 않으려는 것이 이 함수의 존재 이유다.
+/// Yields until the condition holds. ★Past the limit it panics on the spot★ — the reason this function exists is to avoid
+/// disguising 「안 끝났다」 (not finished yet) as 「단언이 틀렸다」 (the assertion is wrong).
 pub async fn settle_until(what: &str, mut done: impl FnMut() -> bool) {
     assert_single_threaded();
     for _ in 0..SETTLE_YIELDS {
@@ -174,7 +174,7 @@ pub async fn settle_until(what: &str, mut done: impl FnMut() -> bool) {
 
 // ── 전송 ──────────────────────────────────────────────────────────────────────
 
-/// 클라가 통로로 보낸 것. 프레임뿐 아니라 **살아있음 확인과 닫기**도 관측된다.
+/// What the client sent down the link. Besides frames, **keepalive and close** are also observed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientMsg {
     Frame(Frame),
@@ -189,10 +189,10 @@ enum ServerMsg {
     Fail(LinkError),
 }
 
-/// 통로의 상대편. 테스트가 이것으로 프레임을 밀어 넣고 클라가 무엇을 보냈는지 본다.
+/// The other side of the link. The test pushes frames in through it and sees what the client sent.
 pub struct MemoryEndpoint {
     to_client: mpsc::UnboundedSender<ServerMsg>,
-    /// 밀어 넣었지만 클라가 아직 안 읽은 수 — `MemRx` 와 함께 쥔다.
+    /// The number pushed in but not yet read by the client — held together with `MemRx`.
     unread: Arc<AtomicUsize>,
     from_client: Mutex<mpsc::UnboundedReceiver<ClientMsg>>,
     stall_tx: watch::Sender<bool>,
@@ -200,12 +200,12 @@ pub struct MemoryEndpoint {
 }
 
 impl MemoryEndpoint {
-    /// 클라가 보낸 것 하나. 없으면 `None`.
+    /// One item the client sent. `None` if there is none.
     pub fn take(&self) -> Option<ClientMsg> {
         self.from_client.lock().unwrap().try_recv().ok()
     }
 
-    /// 클라가 보낸 것 전부.
+    /// Everything the client sent.
     pub fn drain(&self) -> Vec<ClientMsg> {
         let mut rx = self.from_client.lock().unwrap();
         let mut out = Vec::new();
@@ -215,7 +215,7 @@ impl MemoryEndpoint {
         out
     }
 
-    /// 클라가 보낸 **프레임**만.
+    /// Only the **frames** the client sent.
     pub fn frames(&self) -> Vec<Frame> {
         self.drain()
             .into_iter()
@@ -226,19 +226,19 @@ impl MemoryEndpoint {
             .collect()
     }
 
-    /// 클라에게 한 덩어리 보낸다.
+    /// Sends the client one chunk.
     pub fn push(&self, frame: Frame) {
         self.send(ServerMsg::Frame(frame));
     }
 
-    /// 밀어 넣었지만 클라가 아직 안 읽은 것(프레임 · 닫기 · 실패)의 수. ★배압이 통로까지 닿았나를 이것으로
-    /// 본다★ — 감독이 앞잡이 줄을 안 비우거나 받아 쥔 바이트가 읽기 몫 이상이면 읽기 태스크가 통로를 안 읽어
-    /// 여기 남는다.
+    /// The number of items (frames, closes, failures) pushed in but not yet read by the client. ★This is how to see whether
+    /// backpressure reached the link★ — if the supervisor does not drain the read-ahead queue or the bytes it holds exceed the read share, the read task does not read the link and
+    /// the items stay here.
     pub fn unread(&self) -> usize {
         self.unread.load(Ordering::Acquire)
     }
 
-    /// ★보내기 전에 센다★ — 뒤에 세면 그 사이 읽은 쪽이 먼저 빼 셈이 0 밑으로 감긴다.
+    /// ★Count before sending★ — if counted after, the reader may take it out in between and the count wraps below 0.
     fn send(&self, msg: ServerMsg) {
         self.unread.fetch_add(1, Ordering::AcqRel);
         if self.to_client.send(msg).is_err() {
@@ -246,57 +246,57 @@ impl MemoryEndpoint {
         }
     }
 
-    /// ★코드 **없이** 닫는다고 말한다★ — `LinkRead::Closed(None)` 이고, 계약상 이것도 「상대가 닫았다고
-    /// 말했다」다(말 없이 사라진 것은 [`MemoryEndpoint::fail`] 쪽 = `Err`). 클라는 닫힘은 알고 사유는
-    /// 못 얻는다.
+    /// ★Says it closes **without** a code★ — this is `LinkRead::Closed(None)`, and by contract it too means 「상대가 닫았다고
+    /// 말했다」 (the peer said it closed). (Vanishing without a word is the [`MemoryEndpoint::fail`] side = `Err`.) The client learns of the close but
+    /// gets no reason.
     ///
-    /// ★이 통로를 **그냥 떨어뜨리는 것**(엔드포인트를 drop)은 이 갈래가 아니다★ — 그건 말 없이 사라진
-    /// 것이라 `MemRx` 가 읽기 오류로 낸다(실소켓과 같은 모양). 「닫았다고 말했다」를 만들려면 이것이나
-    /// [`MemoryEndpoint::reject`] 를 불러야 한다.
+    /// ★**Simply dropping this link** (dropping the endpoint) is not this branch★ — that is vanishing
+    /// without a word, so `MemRx` reports it as a read error (same shape as a real socket). To make 「닫았다고 말했다」 (said it closed), call this or
+    /// [`MemoryEndpoint::reject`].
     pub fn close(&self) {
         self.send(ServerMsg::Closed(None));
     }
 
-    /// ★코드와 문구를 실어 닫는다★ — 「붙었는데 거절당했다」를 클라가 알아볼 수 있는 유일한 경로다.
+    /// ★Closes with a code and a message★ — the only path where the client can recognize 「붙었는데 거절당했다」 (connected but rejected).
     pub fn reject(&self, close: Close) {
         self.send(ServerMsg::Closed(Some(close)));
     }
 
-    /// 오류로 끊는다. ★읽는 쪽에만 닿는다★ — 클라의 다음 읽기가 오류다(쓰기는 그대로 나간다).
+    /// Cuts with an error. ★It reaches the reading side only★ — the client's next read is an error (writes still go out).
     pub fn fail(&self, why: &str) {
         self.send(ServerMsg::Fail(LinkError::new(why)));
     }
 
-    /// ★쓰는 쪽만 끊는다★ — 클라의 다음 `send` · `ping` 이 오류로 끝나고(멈춤이 걸려 있으면 풀린 뒤) 읽기는
-    /// 그대로 산다. [`MemoryEndpoint::fail`] 의 짝이다 — 엔드포인트를 떨어뜨리면 두 쪽이 함께 끊겨 어느 쪽이
-    /// 먼저 알려지는지가 스케줄에 달린다. 이미 보낸 것은 [`MemoryEndpoint::take`] 로 계속 꺼낼 수 있다.
+    /// ★Cuts the writing side only★ — the client's next `send` or `ping` ends in an error (after release, if a stall is set) and reads
+    /// stay alive. The counterpart of [`MemoryEndpoint::fail`] — dropping the endpoint cuts both sides together, so which one
+    /// is reported first depends on scheduling. What was already sent can still be taken out with [`MemoryEndpoint::take`].
     pub fn fail_writes(&self) {
         self.from_client.lock().unwrap().close();
     }
 
-    /// 켜면 클라의 쓰기가 멈춘다 — `send`·`ping`·`close` **셋 다**다(실소켓에서 그 셋이 한 통로를
-    /// 쓰므로). ★끄면 **실제로 깨어난다**★ — 깨울 길 없는 `pending()` 으로 막으면 그 멈춤은 장식이고,
-    /// 그 위에서 통과한 테스트는 아무것도 재지 않은 것이다.
+    /// When on, the client's writes stall — **all three**: `send`, `ping` and `close` (on a real socket those three
+    /// use one link). ★When off, it **really wakes up**★ — if it blocked with an unwakeable `pending()`, the stall would be decoration,
+    /// and a test that passed on it measured nothing.
     ///
-    /// ★막힌 채로 통로가 버려지는 테스트는 걸린 닫기까지 계산해야 한다★ — `drop_link` 의 닫기가
-    /// 여기서 멈추면 그 뒤 단계(백오프 대기·유실 신고)가 시작되지 않는다. 푸는 길은 둘이다: 이것을
-    /// 끄거나, 시계를 `write_deadline` 만큼 더 밀어 그 닫기를 시한으로 자르거나.
+    /// ★A test where the link is dropped while blocked must account for the pending close★ — if the close in `drop_link`
+    /// stalls here, the later steps (backoff wait, loss report) never start. There are two ways to release it: turn this
+    /// off, or push the clock `write_deadline` further so the deadline cuts that close.
     ///
-    /// ★커널 버퍼가 있어야 재는 「상대가 안 읽을 때」 는 이것으로 못 잰다★ — 그건 실소켓 몫이고,
-    /// 여기서 재는 것은 **우리 쪽 시한·큐 로직**이다.
+    /// ★The 「상대가 안 읽을 때」 (when the peer does not read) case, which needs a kernel buffer to measure, cannot be measured with this★ — that belongs to a real socket,
+    /// and what is measured here is **our side's deadline and queue logic**.
     pub fn stall_writes(&self, on: bool) {
         let _ = self.stall_tx.send(on);
     }
 
-    /// 지금 쓰기가 막혀 있나.
+    /// Whether writes are blocked right now.
     pub fn writes_stalled(&self) -> bool {
         *self.stall_tx.borrow()
     }
 
-    /// 켜면 클라의 `ping` **만** 멈춘다 — [`MemoryEndpoint::stall_writes`] 와 겹쳐 걸리고, 끄면 실제로 깨어난다.
-    /// ★실소켓에는 없는 모양이다★(ping 도 같은 통로로 나간다) — 「앞선 쓰기는 끝났고 그 직후 타이머 바퀴의
-    /// ping 에서 선다」를 만들려고만 둔다. 둘을 한 손잡이로는 못 가른다: 멈춤을 푸는 순간 감독이 양보 없이
-    /// 다음 쓰기까지 밀고 간다.
+    /// When on, **only** the client's `ping` stalls — it stacks with [`MemoryEndpoint::stall_writes`] and really wakes up when off.
+    /// ★This shape does not exist on a real socket★ (ping goes out the same link) — it is here only to build 「앞선 쓰기는 끝났고 그 직후 타이머 바퀴의 ping 에서 선다」 (the earlier write
+    /// finished, then it stops at the ping of the timer turn right after). One handle cannot tell the two apart: the moment the stall is released the supervisor
+    /// pushes on to the next write without yielding.
     pub fn stall_pings(&self, on: bool) {
         let _ = self.ping_stall_tx.send(on);
     }
@@ -336,11 +336,11 @@ impl LinkTx for MemTx {
         })
     }
 
-    /// ★닫기도 `send`/`ping` 과 **같은 통로**로 나가므로 같이 막힌다★ — 실소켓에서는 닫기 프레임이
-    /// 잘린 프레임의 나머지 뒤에 줄을 서고, 그것이 감독의 `drop_link` 가 `write_deadline` 만큼 먹는
-    /// 자리다. ★이 `wait_writable` 을 지우지 말 것★ — 없던 동안 하네스는 「이미 막힌 쓰기 뒤에 닫기가
-    /// 걸린다」를 표현할 수 없었고, 그래서 `drop_link` 가 그 동안 제어를 못 듣는 결함이 무검으로
-    /// 남아 있었다(2026-09-07).
+    /// ★Close goes out over the **same link** as `send`/`ping`, so it is blocked together with them★ — on a real socket the close frame
+    /// queues behind the rest of the truncated frame, and that is where the supervisor's `drop_link` spends
+    /// `write_deadline`. ★Do not delete this `wait_writable`★ — while it was missing the harness could not express 「이미 막힌 쓰기 뒤에 닫기가 걸린다」
+    /// (a close queued behind an already blocked write), so the defect that `drop_link` cannot hear control meanwhile
+    /// stayed unexamined (2026-09-07).
     fn close(&mut self, close: Close) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             self.wait_writable().await;
@@ -352,16 +352,16 @@ impl LinkTx for MemTx {
 struct MemRx {
     from_server: mpsc::UnboundedReceiver<ServerMsg>,
     unread: Arc<AtomicUsize>,
-    /// 이미 읽기가 실패했다 — [`LinkRx::recv`] 계약(실패 뒤에는 닫기를 내지 않는다)의 실물.
+    /// Reading has already failed — the real thing behind the [`LinkRx::recv`] contract (no close is emitted after a failure).
     failed: bool,
 }
 
 impl LinkRx for MemRx {
     fn recv(&mut self) -> BoxFuture<'_, Result<LinkRead, LinkError>> {
         Box::pin(async move {
-            // ★실 어댑터와 같은 계약을 진다★ — 하네스가 실패 뒤에 `Closed(None)` 을 내면, 그 값으로
-            //   분기하는 코드가 여기서는 초록이고 실소켓에서는 안 탄다(그 함정의 정본 = `link.rs` 의
-            //   [`crate::LinkRead::Closed`] rustdoc).
+            // ★It carries the same contract as the real adapter★ — if the harness emitted `Closed(None)` after a failure, code
+            //   that branches on that value would be green here and never taken on a real socket (the canonical source of that trap = the
+            //   [`crate::LinkRead::Closed`] rustdoc in `link.rs`).
             if self.failed {
                 return Err(LinkError::new("link already failed"));
             }
@@ -372,11 +372,11 @@ impl LinkRx for MemRx {
             match next {
                 Some(ServerMsg::Frame(f)) => Ok(LinkRead::Frame(f)),
                 Some(ServerMsg::Closed(close)) => Ok(LinkRead::Closed(close)),
-                // ★채널 소진 = 말 없이 사라졌다★ — 실소켓에서 같은 일(닫기 핸드셰이크 없이 버려진 소켓)은
-                //   읽기 오류이므로 여기서도 오류다. `Ok(Closed(None))` 으로 올리던 판은
-                //   [`crate::LinkRead::Closed`] 계약(「상대가 **말했다**」)을 하네스에서만 거짓으로 만들어,
-                //   엔드포인트를 떨어뜨려 죽음을 흉내내는 테스트가 `PeerClosed` 로 초록이고 실소켓에서는
-                //   통로 읽기 오류(지금 `ReadFailed`)로 갈리게 했다.
+                // ★Channel exhausted = vanished without a word★ — on a real socket the same event (a socket dropped without a close handshake)
+                //   is a read error, so it is an error here too. The old version that raised it as `Ok(Closed(None))`
+                //   made the [`crate::LinkRead::Closed`] contract (「상대가 **말했다**」 (the peer said so)) false in the harness alone,
+                //   so a test that simulated death by dropping the endpoint was green as `PeerClosed` while on a real socket it
+                //   went to a link read error (now `ReadFailed`).
                 None => {
                     self.failed = true;
                     Err(LinkError::new("peer endpoint gone"))
@@ -398,7 +398,7 @@ struct NetState {
     opened: VecDeque<Arc<MemoryEndpoint>>,
 }
 
-/// 인메모리 전송. 한 [`Dialer`] 뒤에서 통로를 열고, 열린 통로의 상대편을 테스트에 넘긴다.
+/// In-memory transport. Opens links behind one [`Dialer`] and hands the far side of an opened link to the test.
 #[derive(Clone)]
 pub struct MemoryNetwork {
     inner: Arc<Mutex<NetState>>,
@@ -427,24 +427,24 @@ impl MemoryNetwork {
         Arc::new(self.clone())
     }
 
-    /// 다음 `n` 번의 dial 이 실패한다.
+    /// The next `n` dials fail.
     pub fn fail_next(&self, n: usize) {
         self.inner.lock().unwrap().fail_next = n;
     }
 
-    /// 지금부터 모든 dial 이 실패한다.
+    /// From now on every dial fails.
     pub fn fail_forever(&self) {
         self.inner.lock().unwrap().fail_forever = true;
     }
 
-    /// 지금부터 모든 dial 이 통로 없이 [`DialFailure::Refused`] 로 끝난다 — 거는 쪽이 이미 아는 종결 거절(로컬 버전
-    /// 대조)을 흉내낸다. [`MemoryNetwork::fail_forever`] · [`MemoryNetwork::fail_next`] 보다 앞선다. `close.code` 는
-    /// 종결 거절 코드여야 한다(그 갈래의 계약).
+    /// From now on every dial ends in [`DialFailure::Refused`] with no link — imitates a terminal refusal the caller already knows (local version
+    /// check). It takes precedence over [`MemoryNetwork::fail_forever`] and [`MemoryNetwork::fail_next`]. `close.code` must be
+    /// a terminal refusal code (the contract of that branch).
     pub fn refuse(&self, close: Close) {
         self.inner.lock().unwrap().refuse = Some(close);
     }
 
-    /// 다시 붙을 수 있게 한다.
+    /// Lets it connect again.
     pub fn allow(&self) {
         let mut st = self.inner.lock().unwrap();
         st.fail_forever = false;
@@ -452,17 +452,17 @@ impl MemoryNetwork {
         st.refuse = None;
     }
 
-    /// 지금까지 **실제로 폴링된** dial 수. 취소돼 시작조차 못 한 dial 은 세지 않는다.
+    /// The number of dials **actually polled** so far. A dial that was cancelled and never started is not counted.
     pub fn dials(&self) -> usize {
         self.inner.lock().unwrap().dials
     }
 
-    /// 가장 오래된 「아직 안 가져간」 통로의 상대편.
+    /// The far side of the oldest link that has 「아직 안 가져간」 (not yet been taken).
     pub fn accept(&self) -> Option<Arc<MemoryEndpoint>> {
         self.inner.lock().unwrap().opened.pop_front()
     }
 
-    /// 마지막으로 열린 통로의 상대편(앞의 것은 버린다).
+    /// The far side of the last link opened (earlier ones are discarded).
     pub fn latest(&self) -> Option<Arc<MemoryEndpoint>> {
         let mut st = self.inner.lock().unwrap();
         let last = st.opened.pop_back();
@@ -470,7 +470,7 @@ impl MemoryNetwork {
         last
     }
 
-    /// 아직 아무도 안 가져간 통로 수.
+    /// The number of links nobody has taken yet.
     pub fn open_endpoints(&self) -> usize {
         self.inner.lock().unwrap().opened.len()
     }
@@ -481,8 +481,8 @@ impl Dialer for MemoryNetwork {
         &self,
         _addr: &Address,
     ) -> BoxFuture<'_, Result<(Box<dyn LinkTx>, Box<dyn LinkRx>), DialFailure>> {
-        // ★통로를 future **안에서** 만든다★ — 밖에서 만들면 취소된 dial 이 아무도 안 쓰는 통로를
-        //   명부에 남기고, 테스트가 `accept()` 로 그것을 집어 감독이 채택한 적 없는 채널에 단언한다.
+        // ★The link is created **inside** the future★ — if created outside, a cancelled dial leaves a link nobody uses in
+        //   the registry, and the test picks it up with `accept()` and asserts on a channel the supervisor never adopted.
         let inner = self.inner.clone();
         Box::pin(async move {
             let mut st = inner.lock().unwrap();
@@ -524,31 +524,31 @@ impl Dialer for MemoryNetwork {
     }
 }
 
-// ── 양끝 통로 · 받는 쪽 ───────────────────────────────────────────────────────
+// ── Two-ended link · receiving side ───────────────────────────────────────────
 
-/// 양끝 통로 위로 건너가는 것.
+/// What crosses over a two-ended link.
 #[derive(Debug)]
 enum PipeMsg {
     Frame(Frame),
-    /// 받는 끝이 [`Frame::Keepalive`] 로 올리고 대답(`Pong`)을 돌려보낸다.
+    /// The receiving end raises it as [`Frame::Keepalive`] and sends the reply (`Pong`) back.
     Ping,
     Pong,
     Closed(Option<Close>),
-    /// [`MemoryLinkControl::fail_reads`] 가 넣는다.
+    /// Put in by [`MemoryLinkControl::fail_reads`].
     Fail(LinkError),
 }
 
-/// 양끝 통로 한 끝의 상태 — 그 끝의 두 반쪽과 그 끝의 손잡이가 함께 쥔다.
+/// The state of one end of a two-ended link — held together by that end's two halves and that end's handle.
 struct EndState {
     stall: watch::Sender<bool>,
     ping_stall: watch::Sender<bool>,
     writes_failed: AtomicBool,
-    /// 이 끝에 들어왔지만 아직 안 읽은 수.
+    /// The number that arrived at this end but has not been read yet.
     unread: AtomicUsize,
-    /// 살아 있는 반쪽 수(처음 2). 0 = 이 끝이 통째로 떨어졌다.
+    /// The number of live halves (2 at the start). 0 = this end has been dropped entirely.
     halves: AtomicUsize,
-    /// 이 끝의 들어오는 줄 — 손잡이가 실패를 넣는 자리. ★약한 손잡이다★ — 강하면 손잡이를 쥔 시험 때문에 상대가
-    /// 사라져도 줄이 안 말라, 이 끝이 「말 없이 사라졌다」(읽기 오류)를 못 본다.
+    /// This end's incoming queue — where the handle puts in a failure. ★A weak handle★ — if strong, a test holding the handle would keep the queue from draining even after the peer
+    /// vanishes, so this end could not see 「말 없이 사라졌다」 (vanished without a word) (a read error).
     inbound: mpsc::WeakUnboundedSender<PipeMsg>,
 }
 
@@ -565,7 +565,7 @@ impl EndState {
     }
 }
 
-/// `dest` 끝의 줄에 하나 넣는다. ★넣기 전에 센다★ — 사유는 `MemoryEndpoint::send`.
+/// Puts one item into the `dest` end's queue. ★Count before putting in★ — the reason is in `MemoryEndpoint::send`.
 fn deliver(dest: &EndState, line: &mpsc::UnboundedSender<PipeMsg>, msg: PipeMsg) -> bool {
     dest.unread.fetch_add(1, Ordering::AcqRel);
     if line.send(msg).is_err() {
@@ -588,9 +588,9 @@ impl MemLinkTx {
         let _ = self.stall.wait_for(|stalled| !*stalled).await;
     }
 
-    /// 두 멈춤이 **함께** 풀려 있을 때 돌아온다 — 깰 때마다 다른 쪽을 다시 본다. ★한 번씩 차례로 지나가게 되돌리지
-    /// 말 것★ — 쓰기 멈춤을 지나 ping 멈춤에서 선 동안 쓰기 멈춤이 걸리면, ping 멈춤만 풀어도 ping 이 나갔다(ping 도
-    /// 쓰기 통로로 나간다 — [`MemoryLinkControl::stall_writes`]).
+    /// Returns when the two stalls are **both** released — it re-checks the other each time it wakes. ★Do not turn this back into passing each one
+    /// in turn★ — while stopped at the ping stall after passing the write stall, if the write stall gets set, releasing only the ping stall let the ping out (ping also goes out
+    /// the write link — [`MemoryLinkControl::stall_writes`]).
     async fn wait_pingable(&mut self) {
         loop {
             self.wait_writable().await;
@@ -601,8 +601,8 @@ impl MemLinkTx {
         }
     }
 
-    /// ★상대 끝의 읽는 반쪽만 떨어졌으면 쓰기는 성공한다★ — 실소켓도 한 끝의 두 반쪽이 둘 다 떨어져야 닫힌다
-    /// ([`LinkTx`] rustdoc). 그때 넣은 것은 읽을 이가 없어 사라진다.
+    /// ★If only the peer end's reading half is dropped, writes succeed★ — a real socket also closes only when both halves of an end are dropped
+    /// ([`LinkTx`] rustdoc). What was put in then vanishes because no one can read it.
     fn put(&self, msg: PipeMsg) -> Result<(), LinkError> {
         if self.me.writes_failed.load(Ordering::Acquire) {
             return Err(LinkError::new("writes failed"));
@@ -616,7 +616,7 @@ impl MemLinkTx {
 }
 
 impl LinkTx for MemLinkTx {
-    /// [`Frame::Keepalive`] 는 `ping` 과 같이 나간다 — WS 어댑터가 그것을 Ping 으로 옮기는 것과 맞춘다.
+    /// [`Frame::Keepalive`] goes out like `ping` — matches the WS adapter translating it into a Ping.
     fn send(&mut self, frame: Frame) -> BoxFuture<'_, Result<(), LinkError>> {
         Box::pin(async move {
             self.wait_writable().await;
@@ -634,7 +634,7 @@ impl LinkTx for MemLinkTx {
         })
     }
 
-    /// 멈춤을 `send` · `ping` 과 같이 탄다 — 그 사유는 `MemTx::close`.
+    /// Takes the stall like `send` and `ping` — the reason is in `MemTx::close`.
     fn close(&mut self, close: Close) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             self.wait_writable().await;
@@ -653,10 +653,10 @@ struct MemLinkRx {
     me: Arc<EndState>,
     peer: Arc<EndState>,
     from_peer: mpsc::UnboundedReceiver<PipeMsg>,
-    /// 받은 Ping 의 대답을 돌려보내는 자리 — 실소켓에서도 대답은 읽는 쪽이 낸다(`ws.rs` 「들어온 Ping 에 대한 자동
-    /// Pong」). ★그래서 이 끝이 안 읽으면 상대의 Ping 은 대답을 못 받는다★.
+    /// Where the reply to a received Ping is sent back — on a real socket too the reply comes from the reading side (`ws.rs` 「들어온 Ping 에 대한 자동
+    /// Pong」 (automatic Pong for an incoming Ping)). ★So if this end does not read, the peer's Ping gets no reply★.
     to_peer: mpsc::UnboundedSender<PipeMsg>,
-    /// [`LinkRx::recv`] 계약(실패 뒤에는 닫기를 내지 않는다)의 실물 — `MemRx` 와 같다.
+    /// The real thing behind the [`LinkRx::recv`] contract (no close is emitted after a failure) — same as `MemRx`.
     failed: bool,
 }
 
@@ -673,7 +673,7 @@ impl LinkRx for MemLinkRx {
             match next {
                 Some(PipeMsg::Frame(f)) => Ok(LinkRead::Frame(f)),
                 Some(PipeMsg::Ping) => {
-                    // 대답은 멈춤을 안 탄다 — 실소켓에서는 혼잡한 송신 버퍼 뒤에 늦게 나간다(그 모양은 실소켓 몫).
+                    // The reply does not take the stall — on a real socket it goes out late behind a congested send buffer (that shape belongs to a real socket).
                     if !self.me.writes_failed.load(Ordering::Acquire) {
                         deliver(&self.peer, &self.to_peer, PipeMsg::Pong);
                     }
@@ -681,8 +681,8 @@ impl LinkRx for MemLinkRx {
                 }
                 Some(PipeMsg::Pong) => Ok(LinkRead::Frame(Frame::Keepalive)),
                 Some(PipeMsg::Closed(close)) => Ok(LinkRead::Closed(close)),
-                // ★줄 소진 = 상대 끝의 두 반쪽이 다 떨어졌다 = 말 없이 사라졌다★ — 닫기가 아니라 읽기 오류다
-                //   (`MemRx` 의 같은 팔 · [`crate::LinkRead::Closed`] 계약).
+                // ★Queue exhausted = both halves of the peer end are dropped = vanished without a word★ — a read error, not a close
+                //   (the same arm in `MemRx` · the [`crate::LinkRead::Closed`] contract).
                 None => {
                     self.failed = true;
                     Err(LinkError::new("peer end gone"))
@@ -702,25 +702,25 @@ impl Drop for MemLinkRx {
     }
 }
 
-/// 양끝 통로의 한 끝 — 두 반쪽과 그 끝의 손잡이.
+/// One end of a two-ended link — two halves and that end's handle.
 pub struct MemoryLinkEnd {
     pub tx: Box<dyn LinkTx>,
     pub rx: Box<dyn LinkRx>,
     pub control: MemoryLinkControl,
 }
 
-/// 양끝 통로의 한 끝을 조작하는 손잡이 — ★제 끝에만 작용한다★. [`MemoryEndpoint`] 의 손잡이는 먼 끝이 클라 끝에
-/// 거는 것이라 이름이 갈린다: 그쪽 `fail` = 여기 [`MemoryLinkControl::fail_reads`]. 나머지는 이름이 같다.
+/// A handle that operates one end of a two-ended link — ★it acts on its own end only★. The handle of [`MemoryEndpoint`] is what the far end applies to the client end,
+/// so the names differ: its `fail` = [`MemoryLinkControl::fail_reads`] here. The rest have the same names.
 ///
-/// 손잡이를 쥐고 있어도 그 끝이 살아 있게 되지는 않는다 — 두 반쪽이 다 떨어지면 상대는 읽기 오류를 본다.
+/// Holding the handle does not keep that end alive — once both halves are dropped the peer sees a read error.
 #[derive(Clone)]
 pub struct MemoryLinkControl {
     state: Arc<EndState>,
 }
 
 impl MemoryLinkControl {
-    /// 켜면 이 끝의 `send` · `ping` · `close` 가 멈추고 끄면 실제로 깨어난다([`MemoryEndpoint::stall_writes`] 와 같은
-    /// 계약 — 그쪽 rustdoc 의 주의도 같다).
+    /// When on, this end's `send`, `ping` and `close` stall, and when off it really wakes up (same contract as [`MemoryEndpoint::stall_writes`]
+    /// — the cautions in its rustdoc apply too).
     pub fn stall_writes(&self, on: bool) {
         self.state.stall.send_replace(on);
     }
@@ -729,38 +729,38 @@ impl MemoryLinkControl {
         *self.state.stall.borrow()
     }
 
-    /// 켜면 이 끝의 `ping` **만** 멈춘다([`MemoryEndpoint::stall_pings`] 와 같다 — 실소켓에는 없는 모양이다).
+    /// When on, **only** this end's `ping` stalls (same as [`MemoryEndpoint::stall_pings`] — a shape that does not exist on a real socket).
     pub fn stall_pings(&self, on: bool) {
         self.state.ping_stall.send_replace(on);
     }
 
-    /// 이 끝의 읽기를 오류로 끊는다 — 이미 들어와 있는 것 뒤에 줄 선다. 쓰기는 그대로 나간다.
+    /// Cuts this end's reading with an error — it queues behind what has already arrived. Writes still go out.
     pub fn fail_reads(&self, why: &str) {
         if let Some(line) = self.state.inbound.upgrade() {
             deliver(&self.state, &line, PipeMsg::Fail(LinkError::new(why)));
         }
     }
 
-    /// 이 끝의 다음 `send` · `ping` 이 오류로 끝난다(멈춤이 걸려 있으면 풀린 뒤). `close` 는 아무것도 안 보낸다.
-    /// 읽기는 그대로 산다.
+    /// This end's next `send` or `ping` ends in an error (after release, if a stall is set). `close` sends nothing.
+    /// Reads stay alive.
     pub fn fail_writes(&self) {
         self.state.writes_failed.store(true, Ordering::Release);
     }
 
-    /// 이 끝에 들어왔지만 아직 안 읽은 것(프레임 · 대답 · 닫기 · 실패)의 수.
+    /// The number of items (frames, replies, closes, failures) that arrived at this end but have not been read yet.
     pub fn unread(&self) -> usize {
         self.state.unread.load(Ordering::Acquire)
     }
 
-    /// 이 끝의 두 반쪽이 다 떨어졌나.
+    /// Whether both halves of this end have been dropped.
     pub fn dropped(&self) -> bool {
         self.state.halves.load(Ordering::Acquire) == 0
     }
 }
 
-/// 서로 이어진 두 끝을 짓는다 — 한 끝이 보낸 것을 다른 끝이 읽는다.
+/// Builds two ends joined to each other — what one end sends, the other reads.
 ///
-/// ★상한 없는 줄이다★ — 안 읽는 상대 앞에서 쓰기가 서는 모양(커널 버퍼)은 없다. 그건 실소켓 몫이다.
+/// ★The queue has no upper bound★ — the shape where a write stops in front of a peer that does not read (kernel buffer) does not exist. That belongs to a real socket.
 pub fn memory_link() -> (MemoryLinkEnd, MemoryLinkEnd) {
     let (into_a, a_from) = mpsc::unbounded_channel();
     let (into_b, b_from) = mpsc::unbounded_channel();
@@ -789,12 +789,12 @@ pub fn memory_link() -> (MemoryLinkEnd, MemoryLinkEnd) {
     (end(&a, &b, a_from, into_b), end(&b, &a, b_from, into_a))
 }
 
-/// [`MemoryConnector`] 가 연 통로 하나의 두 손잡이.
+/// The two handles of one link opened by [`MemoryConnector`].
 #[derive(Clone)]
 pub struct MemoryLinkControls {
-    /// 거는 쪽(감독이 쥔 끝).
+    /// The dialing side (the end the supervisor holds).
     pub dialer: MemoryLinkControl,
-    /// 받는 쪽([`Accepted`] 에 실린 끝).
+    /// The receiving side (the end carried in [`Accepted`]).
     pub acceptor: MemoryLinkControl,
 }
 
@@ -809,23 +809,23 @@ struct ListenShared {
     log: Mutex<ListenLog>,
 }
 
-/// 인메모리 청취기 — [`MemoryConnector`] 로 건 통로를 [`Accepted`] 로 내놓는다.
+/// In-memory listener — hands out links dialed through [`MemoryConnector`] as [`Accepted`].
 ///
-/// ★건 순간이 업그레이드 끝이다★ — 인메모리 통로에는 업그레이드가 없어서, 걸기가 끝난 순간 그 통로가 준비 큐에
-/// 앉고 [`Accepted::upgraded_at`] 이 그 시각이다. 칸([`MemoryListener::permits`])은 그 순간 쥐어 [`Accepted`] 와 함께
-/// 간다 — 칸이 다 찼으면 그 걸기는 실패한다(넘친 새것을 닫는다 — TRD 3 §5 14).
+/// ★The moment of dialing is the end of the upgrade★ — an in-memory link has no upgrade, so the moment dialing finishes the link
+/// sits in the ready queue and [`Accepted::upgraded_at`] is that time. The permit ([`MemoryListener::permits`]) is taken at that moment and goes
+/// along with [`Accepted`] — if the permits are all used, that dial fails (the overflowing new one is closed — TRD 3 §5 14).
 ///
-/// ★[`Listener::accept`] 의 종결 `Err` = 모든 [`MemoryConnector`] 가 사라지고 준비 큐가 비었다★ — 더 걸 길이 없다.
-/// 청취기를 떨어뜨리면 준비 큐에 앉은 통로가 닫히고(거는 쪽은 읽기 오류) 그 뒤의 걸기는 실패한다.
+/// ★The terminal `Err` of [`Listener::accept`] = every [`MemoryConnector`] is gone and the ready queue is empty★ — there is no way left to dial.
+/// Dropping the listener closes the links sitting in the ready queue (the dialing side gets a read error) and later dials fail.
 pub struct MemoryListener {
     ready: mpsc::UnboundedReceiver<Accepted>,
     permits: PermitPool,
 }
 
 impl MemoryListener {
-    /// `clock` = 받은 상대를 얹을 명부와 같은 시계. `max_pending_upgrades` = 업그레이드 칸 수(준비 큐 + 받아 갔지만
-    /// 아직 칸을 쥔 것) — TRD 3 §5 14 의 업그레이드 대기 상한이다. ★TCP listen backlog 가 아니다★ — 커널 수락 큐가
-    /// 아니라 이 crate 가 세는 칸이다.
+    /// `clock` = the same clock as the registry the accepted peers are put on. `max_pending_upgrades` = the number of upgrade permits (ready queue + those taken away but
+    /// still holding a permit) — the upgrade-wait cap of TRD 3 §5 14. ★It is not the TCP listen backlog★ — it is a permit
+    /// count this crate keeps, not the kernel accept queue.
     pub fn new(clock: Arc<dyn Clock>, max_pending_upgrades: usize) -> (Self, MemoryConnector) {
         let (ready_tx, ready) = mpsc::unbounded_channel();
         let permits = PermitPool::new(max_pending_upgrades);
@@ -843,12 +843,12 @@ impl MemoryListener {
         (Self { ready, permits }, connector)
     }
 
-    /// 업그레이드 칸 묶음 — 청취기를 떨어뜨린 뒤에도 셈을 읽을 수 있다.
+    /// The upgrade permit pool — the count can still be read after the listener is dropped.
     pub fn permits(&self) -> PermitPool {
         self.permits.clone()
     }
 
-    /// 준비 큐에 앉아 아직 안 받아 간 수.
+    /// The number sitting in the ready queue not yet taken.
     pub fn queued(&self) -> usize {
         self.ready.len()
     }
@@ -865,15 +865,15 @@ impl Listener for MemoryListener {
     }
 }
 
-/// 받은 통로의 양 끝을 꺼낸다 — 실소켓 시험이 받는 쪽을 감독 없이 손으로 몰 때 쓴다(`tests/ws_*.rs`).
+/// Takes out both ends of the accepted link — used when a real-socket test drives the receiving side by hand without a supervisor (`tests/ws_*.rs`).
 ///
-/// ★운영 표면이 아니다★ — 양 끝을 crate 밖으로 꺼내지 않는 것이 [`Accepted`] 의 계약이고 이 길은 `test-support` 뒤에만
-/// 있다. 꺼낸 끝은 이미 청취기의 수락 검사를 지난 것이라 그 검사를 건너뛰는 길이 아니다. 업그레이드 칸은 여기서 놓인다.
+/// ★Not a production surface★ — the contract of [`Accepted`] is that both ends never leave the crate, and this path exists only behind `test-support`.
+/// The ends taken out have already passed the listener's accept check, so this is not a way to skip that check. The upgrade permit is released here.
 pub fn accepted_ends(accepted: Accepted) -> (Box<dyn LinkTx>, Box<dyn LinkRx>) {
     (accepted.tx, accepted.rx)
 }
 
-/// [`MemoryListener`] 로 거는 [`Dialer`]. clone 은 같은 청취기로 건다. 주소는 보지 않는다.
+/// A [`Dialer`] that dials through a [`MemoryListener`]. A clone dials the same listener. It does not look at the address.
 #[derive(Clone)]
 pub struct MemoryConnector {
     ready: mpsc::UnboundedSender<Accepted>,
@@ -885,23 +885,23 @@ impl MemoryConnector {
         Arc::new(self.clone())
     }
 
-    /// 지금까지 **실제로 폴링된** 걸기 수(실패 포함).
+    /// The number of dials **actually polled** so far (failures included).
     pub fn dials(&self) -> usize {
         self.shared.log.lock().unwrap().dials
     }
 
-    /// 준비 큐에 닿은 통로 수.
+    /// The number of links that reached the ready queue.
     pub fn links(&self) -> usize {
         self.shared.log.lock().unwrap().links.len()
     }
 
-    /// `n` 번째(1 부터) 통로의 손잡이 — 그 [`Accepted`] 의 [`LinkInfo::remote`] 가 `mem:<n>` 이다.
+    /// The handle of the `n`th (from 1) link — the [`LinkInfo::remote`] of its [`Accepted`] is `mem:<n>`.
     pub fn link(&self, n: usize) -> Option<MemoryLinkControls> {
         let log = self.shared.log.lock().unwrap();
         n.checked_sub(1).and_then(|i| log.links.get(i).cloned())
     }
 
-    /// 마지막 통로의 손잡이.
+    /// The handle of the last link.
     pub fn latest(&self) -> Option<MemoryLinkControls> {
         self.shared.log.lock().unwrap().links.last().cloned()
     }
@@ -912,12 +912,12 @@ impl Dialer for MemoryConnector {
         &self,
         _addr: &Address,
     ) -> BoxFuture<'_, Result<(Box<dyn LinkTx>, Box<dyn LinkRx>), DialFailure>> {
-        // ★통로를 future **안에서** 만든다★ — [`Dialer`] 계약(취소된 걸기는 아무것도 남기지 않는다).
+        // ★The link is created **inside** the future★ — the [`Dialer`] contract (a cancelled dial leaves nothing behind).
         let ready = self.ready.clone();
         let shared = self.shared.clone();
         Box::pin(async move {
-            // ★주입된 시계는 장부 자물쇠 밖에서 읽는다★ — 시계의 `now` 가 이 연결기의 장부(`links` · `dials`)를 읽으면
-            //   쥔 자물쇠를 다시 잡아 교착한다. 자물쇠 안에서는 주입받은 것을 부르지 않는다.
+            // ★Read the injected clock outside the ledger lock★ — if the clock's `now` reads this connector's ledger (`links`, `dials`),
+            //   it takes the held lock again and deadlocks. Do not call anything injected while inside a lock.
             let now = shared.clock.now();
             let mut log = shared.log.lock().unwrap();
             log.dials += 1;
@@ -934,7 +934,7 @@ impl Dialer for MemoryConnector {
                 ..LinkInfo::default()
             };
             let accepted = Accepted::new(far.tx, far.rx, info, now, permit);
-            // 실패하면 돌려받은 `Accepted` 가 여기서 떨어져 칸 · 먼 끝이 함께 돌아간다.
+            // On failure the returned `Accepted` is dropped here, and the permit and the far end go back together.
             if ready.send(accepted).is_err() {
                 return Err(LinkError::new("listener gone").into());
             }
@@ -947,9 +947,9 @@ impl Dialer for MemoryConnector {
     }
 }
 
-// ── 핸드셰이크 ────────────────────────────────────────────────────────────────
+// ── Handshake ─────────────────────────────────────────────────────────────────
 
-/// 왕복 없이 곧장 운영 단계로.
+/// Straight to the operating phase with no round trip.
 pub struct ImmediateHandshake;
 
 impl Handshake for ImmediateHandshake {
@@ -962,7 +962,7 @@ impl Handshake for ImmediateHandshake {
     }
 }
 
-/// 두 걸음 — `hello` 를 보내고 `welcome` 을 받으면 운영 단계로, 아니면 거절.
+/// Two steps — send `hello` and on receiving `welcome` go to the operating phase, otherwise reject.
 pub struct HelloHandshake;
 
 impl HelloHandshake {
@@ -987,8 +987,8 @@ impl Handshake for HelloHandshake {
     }
 }
 
-/// 붙자마자 거절 — [`RejectingHandshake::new`] 는 종결(★예산을 안 쓰는 경로★), [`RejectingHandshake::retryable`] 은
-/// 다시 거는 거절(예산을 쓰는 경로)을 재는 데 쓴다.
+/// Rejects right after connecting — [`RejectingHandshake::new`] is for measuring a terminal one (★the path that does not spend the budget★), [`RejectingHandshake::retryable`] the
+/// redial one (the path that spends the budget).
 pub struct RejectingHandshake {
     pub kind: RejectKind,
     pub reason: String,
@@ -1028,7 +1028,7 @@ impl Handshake for RejectingHandshake {
     }
 }
 
-/// 아무것도 안 보내고 상대의 첫 프레임을 기다린다 — 상대가 **닫기로** 말하는 경로를 재는 데 쓴다.
+/// Sends nothing and waits for the peer's first frame — used to measure the path where the peer speaks by **closing**.
 pub struct ListeningHandshake;
 
 impl Handshake for ListeningHandshake {
@@ -1041,9 +1041,9 @@ impl Handshake for ListeningHandshake {
     }
 }
 
-// ── 가짜 패킷 어휘 ────────────────────────────────────────────────────────────
+// ── Fake packet vocabulary ────────────────────────────────────────────────────
 
-/// 하네스가 보내는 것.
+/// What the harness sends.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TestOut {
     Request { tag: u64, body: String },
@@ -1052,7 +1052,7 @@ pub enum TestOut {
     Blob(Vec<u8>),
 }
 
-/// 하네스가 받는 것.
+/// What the harness receives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TestIn {
     Reply {
@@ -1066,7 +1066,7 @@ pub enum TestIn {
         body: String,
     },
     Notice(String),
-    /// 답장이면서 스트림 조각이라고 신고한다 — [`Wire`] 계약 위반 관측용.
+    /// Reports itself as both a reply and a stream chunk — for observing a [`Wire`] contract violation.
     Ambiguous {
         tag: u64,
         key: u32,
@@ -1076,11 +1076,11 @@ pub enum TestIn {
     Blob(Vec<u8>),
 }
 
-/// 최소 패킷 어휘. `|` 로 칸을 나눈 텍스트라 serde 없이 왕복한다.
+/// A minimal packet vocabulary. Text split into fields by `|`, so it round-trips without serde.
 pub struct TestWire;
 
 impl TestWire {
-    /// 상대편이 클라에게 밀어 넣을 프레임을 짓는다.
+    /// Builds a frame for the other side to push to the client.
     pub fn encode_in(inn: &TestIn) -> Frame {
         match inn {
             TestIn::Reply { tag, body } => Frame::Text(format!("rep|{tag}|{body}")),
@@ -1101,7 +1101,7 @@ impl TestWire {
         }
     }
 
-    /// 스트림 조각 하나를 만드는 지름길.
+    /// A shortcut to build one stream chunk.
     pub fn chunk(key: u32, generation: u32, seq: u64) -> Frame {
         Self::encode_in(&TestIn::Chunk {
             key,
@@ -1111,7 +1111,7 @@ impl TestWire {
         })
     }
 
-    /// 답장 하나를 만드는 지름길.
+    /// A shortcut to build one reply.
     pub fn reply(tag: u64) -> Frame {
         Self::encode_in(&TestIn::Reply {
             tag,
@@ -1120,15 +1120,15 @@ impl TestWire {
     }
 }
 
-/// [`TestWire`] 의 해독 실패. ★값을 실은 갈래는 받은 글을 그대로 인용한다★ — 사건에 그 글이 안 새는지를 재는
-/// 재료다([`DecodeClass`]).
+/// A decode failure of [`TestWire`]. ★The branches that carry a value quote the received text verbatim★ — material for measuring whether that text leaks
+/// into the event ([`DecodeClass`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TestDecodeError {
-    /// [`Frame::Keepalive`] 가 해독기에 왔다 — crate 계약 위반.
+    /// A [`Frame::Keepalive`] reached the decoder — a crate contract violation.
     Keepalive,
-    /// 숫자 칸을 못 읽었다.
+    /// Could not read a numeric field.
     BadNumber(String),
-    /// 모르는 모양.
+    /// Unknown shape.
     Unknown(String),
 }
 
@@ -1245,12 +1245,12 @@ mod tests {
     use crate::registry::Registry;
     use futures_util::future::poll_immediate;
 
-    // ── H1: 멈춘 쓰기는 실제로 깨어나야 한다 ──
+    // ── H1: a stalled write must really wake up ──
     //
-    // ★멈춘 작업을 **다른 태스크**에 둔다★ — 같은 태스크에서 손으로 poll 하면 멈춤을 푼 뒤 우리가 직접
-    //   다시 poll 하게 되고, 그러면 **waker 를 등록하지 않는 구현도 통과한다**. 그 형태로 쓴 옛 판은
-    //   반례 변이(멈춤 중 `Pending` 을 내고 waker 는 등록하지 않는 `poll_fn`)를 하나도 못 잡았다
-    //   (실측 2026-09-07). 태스크에 두면 깨우는 것 말고는 완료로 가는 길이 없다.
+    // ★Put the stalled work on **another task**★ — if polled by hand on the same task, after releasing the stall we
+    //   poll it again ourselves, and then **an implementation that does not register a waker passes too**. The old version written that way
+    //   caught none of the counterexample mutants (a `poll_fn` that returns `Pending` during the stall and does not register a waker)
+    //   (measured 2026-09-07). With the work on a task, nothing but a wake-up leads to completion.
     #[tokio::test]
     async fn clearing_the_stall_actually_wakes_the_parked_write() {
         let net = MemoryNetwork::new();
@@ -1263,9 +1263,9 @@ mod tests {
         assert!(!parked.is_finished(), "막혀 있어야 한다");
         assert!(endpoint.frames().is_empty());
 
-        // ★멈춤을 푸는 것은 잠든 태스크가 아니라 이쪽이다★ — 저쪽을 깨우는 유일한 수단이 waker 다.
+        // ★It is this side, not the sleeping task, that releases the stall★ — the only means of waking the other side is the waker.
         endpoint.stall_writes(false);
-        // ★유계 대기★ — 깨울 길 없는 멈춤으로 되돌아가면 매달리는 대신 깨끗이 실패해야 한다.
+        // ★Bounded wait★ — if it falls back to an unwakeable stall it must fail cleanly instead of hanging.
         tokio::time::timeout(Duration::from_secs(5), parked)
             .await
             .expect("멈춤을 풀었는데도 쓰기가 안 깨어났다")
@@ -1274,7 +1274,7 @@ mod tests {
         assert_eq!(endpoint.frames(), vec![Frame::Text("payload".into())]);
     }
 
-    // ── H1b: 멈춘 **닫기**도 실제로 깨어나야 한다 ──
+    // ── H1b: a stalled **close** must really wake up too ──
     #[tokio::test]
     async fn clearing_the_stall_actually_wakes_the_parked_close() {
         let net = MemoryNetwork::new();
@@ -1291,7 +1291,7 @@ mod tests {
         assert!(endpoint.drain().is_empty());
 
         endpoint.stall_writes(false);
-        // ★유계 대기★ — 깨울 길 없는 멈춤으로 되돌아가면 매달리는 대신 깨끗이 실패해야 한다.
+        // ★Bounded wait★ — if it falls back to an unwakeable stall it must fail cleanly instead of hanging.
         tokio::time::timeout(Duration::from_secs(5), parked)
             .await
             .expect("멈춤을 풀었는데도 닫기가 안 깨어났다")
@@ -1302,7 +1302,7 @@ mod tests {
         ));
     }
 
-    // ── H2: 버려진 타이머가 쌓이지 않고, 깨우는 순서가 시한 순이다 ──
+    // ── H2: dropped timers do not pile up, and wake-up order is deadline order ──
     #[tokio::test]
     async fn abandoned_timers_do_not_pile_up() {
         let clock = ManualClock::new();
@@ -1321,7 +1321,7 @@ mod tests {
     async fn one_advance_wakes_in_deadline_order_not_registration_order() {
         let clock = ManualClock::new();
         let order = Arc::new(Mutex::new(Vec::new()));
-        // 늦은 시한을 먼저 등록한다 — 등록 순서로 깨우면 뒤집힌다.
+        // Register the later deadline first — waking in registration order would reverse them.
         for (label, secs) in [("late", 9u64), ("early", 1), ("middle", 5)] {
             let sleep = clock.sleep(Duration::from_secs(secs));
             let order = order.clone();
@@ -1336,7 +1336,7 @@ mod tests {
         assert_eq!(*order.lock().unwrap(), vec!["early", "middle", "late"]);
     }
 
-    // ── H3: 정착하지 않으면 시끄럽게 실패한다 ──
+    // ── H3: if it does not settle, it fails loudly ──
     #[tokio::test]
     #[should_panic(expected = "정착하지 않았다")]
     async fn settle_until_says_so_instead_of_failing_somewhere_else() {
@@ -1355,7 +1355,7 @@ mod tests {
         assert!(*flag.lock().unwrap());
     }
 
-    // ── H4: 취소된 dial 은 통로를 남기지 않는다 ──
+    // ── H4: a cancelled dial leaves no link ──
     #[tokio::test]
     async fn a_dial_that_is_never_polled_opens_nothing() {
         let net = MemoryNetwork::new();
@@ -1373,11 +1373,11 @@ mod tests {
         assert_eq!(net.dials(), 1);
     }
 
-    // ── H5: 하네스도 「실패 뒤에는 닫기를 내지 않는다」 걸쇠를 진다 ──
+    // ── H5: the harness also carries the 「실패 뒤에는 닫기를 내지 않는다」 (no close is emitted after a failure) latch ──
     //
-    // ★실패 **뒤에 닫기를 줄 세우는** 것이 요점이다★ — 걸쇠가 없으면 둘째 읽기가 큐에 남은 그것을
-    //   「상대가 말했다」로 올려, [`crate::LinkRead::Closed`] 계약이 하네스에서만 거짓이 된다.
-    //   실 어댑터 쪽 짝 = `tests/ws_reject.rs` 의
+    // ★The point is **queueing a close after a failure**★ — without the latch the second read raises the close left in the queue
+    //   as 「상대가 말했다」 (the peer said so), and the [`crate::LinkRead::Closed`] contract becomes false in the harness alone.
+    //   Counterpart on the real adapter side = `tests/ws_reject.rs`
     //   `a_read_after_a_failed_read_is_still_an_error_never_a_spoken_close`.
     #[tokio::test]
     async fn a_read_after_a_failed_read_is_still_an_error_in_the_harness_too() {
@@ -1393,16 +1393,16 @@ mod tests {
         }
     }
 
-    // ── H6: 엔드포인트를 떨어뜨린 것은 닫기가 아니라 읽기 오류다 ──
+    // ── H6: dropping the endpoint is a read error, not a close ──
     //
-    // ★`MemRx::recv` 의 채널 소진 팔을 지키는 것은 이 테스트뿐이다★ — H5 는 `fail` 로 `Fail` 팔만 타고,
-    //   채널 소진 팔을 `Ok(Closed(None))` 으로 되돌려도 나머지 스위트는 전부 초록이었다(실측 2026-09-25).
+    // ★This test alone guards the channel-exhausted arm of `MemRx::recv`★ — H5 takes only the `Fail` arm through `fail`, and
+    //   even with the channel-exhausted arm turned back into `Ok(Closed(None))` the rest of the suite was all green (measured 2026-09-25).
     #[tokio::test]
     async fn dropping_the_endpoint_is_a_read_error_not_a_close() {
         let net = MemoryNetwork::new();
         let (_tx, mut rx) = net.dial(&Address::new("mem://x")).await.unwrap();
         let endpoint = net.accept().unwrap();
-        // `accept` 가 명부에서 꺼내 주므로 이 `Arc` 가 송신단의 유일한 소유자다.
+        // `accept` takes it out of the registry, so this `Arc` is the sole owner of the sender.
         assert_eq!(Arc::strong_count(&endpoint), 1);
         drop(endpoint);
         match rx.recv().await {
@@ -1429,7 +1429,7 @@ mod tests {
         }
     }
 
-    // ── H7: 양끝 통로 — 두 끝이 다 진짜 통로다 ──
+    // ── H7: two-ended link — both ends are real links ──
     #[tokio::test]
     async fn a_two_ended_link_carries_frames_both_ways_and_a_spoken_close() {
         let (mut a, mut b) = memory_link();
@@ -1454,8 +1454,8 @@ mod tests {
         }
     }
 
-    // 실소켓과 같다 — 한 끝의 두 반쪽이 둘 다 떨어져야 닫힌다(`LinkTx` rustdoc). 다 떨어진 끝은 상대에게 닫기가 아니라
-    // 읽기 오류다(H6 의 양끝 판).
+    // Same as a real socket — an end closes only when both of its halves are dropped (`LinkTx` rustdoc). To the peer, a fully dropped end is a read error,
+    // not a close (the two-ended version of H6).
     #[tokio::test]
     async fn one_end_closes_only_once_both_of_its_halves_are_gone() {
         let (mut a, b) = memory_link();
@@ -1502,7 +1502,7 @@ mod tests {
         assert_eq!((a.control.unread(), b.control.unread()), (0, 0));
     }
 
-    // H1 의 양끝 판 — 멈춘 쓰기를 다른 태스크에 두는 사유도 H1 과 같다.
+    // The two-ended version of H1 — the reason for putting the stalled write on another task is the same as in H1.
     #[tokio::test]
     async fn clearing_a_two_ended_stall_actually_wakes_the_parked_write() {
         let (a, mut b) = memory_link();
@@ -1524,7 +1524,7 @@ mod tests {
         );
     }
 
-    // ping 멈춤에서 선 동안 쓰기 멈춤이 걸리면, ping 멈춤만 풀어서는 안 나가고 두 멈춤이 다 풀려야 나간다.
+    // If the write stall gets set while stopped at the ping stall, releasing only the ping stall does not send it out; both stalls must be released.
     #[tokio::test]
     async fn a_ping_parked_on_its_own_stall_still_waits_for_a_write_stall_set_meanwhile() {
         let (a, mut b) = memory_link();
@@ -1587,7 +1587,7 @@ mod tests {
         );
     }
 
-    // ── H8: MemoryListener — 받는 쪽 ──
+    // ── H8: MemoryListener — the receiving side ──
     fn listener(max_pending_upgrades: usize) -> (ManualClock, MemoryListener, MemoryConnector) {
         let clock = ManualClock::new();
         let (listener, connector) = MemoryListener::new(clock.handle(), max_pending_upgrades);
@@ -1598,8 +1598,8 @@ mod tests {
         Address::new("mem://listener")
     }
 
-    // 받은 끝을 감독 없이 손으로 몬다(명부에 얹는 길은 `Registry::attach` — 그 시험은 `registry.rs`) — 거는 쪽 감독과
-    //   진짜 통로로 이어지는지가 요점이다.
+    // Drives the accepted end by hand without a supervisor (the path that puts it on the registry is `Registry::attach` — that test is in `registry.rs`) — the point is whether it joins
+    //   the dialing supervisor through a real link.
     #[tokio::test]
     async fn a_dialer_peer_handshakes_and_round_trips_a_request_with_a_raw_accepted_end() {
         let (clock, mut listener, connector) = listener(4);
@@ -1661,7 +1661,7 @@ mod tests {
         assert_eq!((connector.dials(), connector.links()), (1, 1));
     }
 
-    // 깨운 뒤 버린 future 가 요점이다 — 기다리던 중에 통로가 닿아 깨어난 accept 를 폴링 없이 버려도 통로는 남는다.
+    // The point is a future dropped after waking — an accept that woke because a link arrived while waiting leaves the link in place even if dropped without polling.
     #[tokio::test]
     async fn accept_is_cancel_safe() {
         let (_clock, mut listener, connector) = listener(4);
@@ -1738,7 +1738,7 @@ mod tests {
         assert_eq!(connector.links(), 1, "닿은 통로는 처음 하나뿐이다");
     }
 
-    // 인증 시한은 업그레이드 끝부터 잰다(TRD 3 §5 3) — 받아 간 순간으로 찍으면 준비 큐에 앉은 시간이 시한에서 빠진다.
+    // The auth deadline is measured from the end of the upgrade (TRD 3 §5 3) — if stamped at the moment it was taken, the time sitting in the ready queue drops out of the deadline.
     #[tokio::test]
     async fn upgraded_at_is_when_the_link_landed_not_when_it_was_accepted() {
         let (clock, mut listener, connector) = listener(4);
@@ -1799,7 +1799,7 @@ mod tests {
         );
     }
 
-    /// `now` 안에서 연결기 장부를 읽는 시계. 시계 ↔ 연결기가 서로를 쥐어 새지만 시험 하나 동안뿐이다.
+    /// A clock that reads the connector's ledger inside `now`. Clock and connector hold each other and leak, but only for the length of one test.
     struct LogReadingClock {
         connector: std::sync::OnceLock<MemoryConnector>,
         reads: AtomicUsize,
@@ -1819,7 +1819,7 @@ mod tests {
         }
     }
 
-    // 걸기를 다른 스레드에서 돌린다 — 교착이 시험을 매달지 않고 시한 실패로 드러나게.
+    // Runs the dialing on another thread — so a deadlock shows up as a deadline failure instead of hanging the test.
     #[test]
     fn a_clock_that_reads_the_connector_log_does_not_deadlock_the_dial() {
         use futures_util::FutureExt;

@@ -209,7 +209,7 @@ LayoutRow {
 - When the destination pane was an agent that appears in several panes, there was no argument to fix it with → `beside_slot` (both).
 - The flat rows lost left/right · up/down → normalized coordinates `x · y · w · h` (codex).
 - The name round trip took 3 s per word and could exceed the 7 s delivery deadline → batched into one, 2 s · if exceeded, no apply + `INTERNAL` (Claude).
-- 「마우스와 같다」 was false (new-window size · share original size) → `drag_size::drag_sizes` (Claude).
+- "Same as the mouse" (§2) was false (new-window size · share original size) → `drag_size::drag_sizes` (Claude).
 - `agent` overlapped as 「어느 칸」 and 「넣을 에이전트」 → `slot_of` · `tab_of` · `beside` · `assign` (Claude).
 - The tab verbs kept requiring `window` → optional (Claude).
 - Declared error list · the `WindowNotFound` code · head sentence → §5-3 (Claude).

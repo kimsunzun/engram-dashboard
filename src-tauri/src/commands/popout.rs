@@ -548,10 +548,10 @@ pub(crate) fn close_requested_popup_window(
 //   ★ADR-0006 has no "delta queued under the lock" clause★). So the send is under the lock too, as in the apply
 //   service (`SubscriptionSync::resync`) and move_slot_to_window — unsubscribe only sends to the connection driver's
 //   actor (no await, no network, no other lock), so there is no deadlock.
-// 창 번호(TRD S26-window-chrome §4-1) — 닫기 요청이 지운 창은 번호를 그 `Destroyed` 까지 쥐고, `Destroyed` 는 그
-//   번호를 같은 락 안에서 푼다(아직 모델에 있던 창이면 곧바로). ★`Destroyed` 의 번호 풀기를 이 락 밖으로 떼지
-//   않는다★ — 먼저 다른 락에서 모델 창을 빼면 그 틈에 묘비 없이 빠진 창이 보이고 지운 탭 수가 늘 0 이 된다.
-//   이것을 못 부르는 극단(`lib.rs` — 상태가 없다)만 `layout::release_window_number` 가 번호를 푼다.
+// Window number (TRD S26-window-chrome §4-1) — a window the close request removed holds its number until its `Destroyed`, and `Destroyed` releases that
+//   number inside the same lock (immediately if it was still in the model). ★Do not move `Destroyed`'s number release out of this lock★
+//   — if the model window were removed first under another lock, a window that dropped out with no tombstone would be seen in that gap and the removed tab count would always be 0.
+//   Only the extreme case where this cannot be called (`lib.rs` — it has no state) has `layout::release_window_number` release the number.
 pub(crate) fn drop_window_in_model(
     label: &str,
     cause: DropCause,

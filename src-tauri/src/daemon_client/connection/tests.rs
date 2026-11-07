@@ -3425,9 +3425,9 @@ async fn settle() {
     }
 }
 
-// ── 레이아웃 쓰기 한 번 → 재계산 한 번(`RouterSubs::resync`) ─────────────────────────────
-// `sent` 가 빈 채로(연결 태스크가 꺼내지 않는다) 늘어난 관심은 재계산마다 넛지를 한 장씩 낸다 — 넛지 수가 곧
-// 재계산 수다.
+// ── One layout write → one recompute (`RouterSubs::resync`) ─────────────────────────────
+// Interest that grew while `sent` stays empty (the connection task does not take it out) issues one nudge per recompute — the nudge count is
+// the recompute count.
 #[tokio::test]
 async fn one_layout_write_recomputes_the_usage_interest_once() {
     let Idle {
@@ -3441,9 +3441,9 @@ async fn one_layout_write_recomputes_the_usage_interest_once() {
     assert_eq!(nudges(&mut rx), 1);
 }
 
-// ── 트레이 숨김 → 기한 뒤 줄인 관심 · 보임 → 곧바로 늘어난 관심 ─────────────────────────────
-// 트레이 두 함수가 창마다 하는 일(`for_each_ui_window` + 운영 구현 `LayoutUsageVisibility`)을 그대로 태운다 —
-// 빠진 것은 창 목록을 OS 에서 뜨는 것과 OS 창 호출뿐이다.
+// ── Tray hide → interest shrunk after the deadline · show → interest grown at once ─────────────────────────────
+// Drives what the two tray functions do per window (`for_each_ui_window` + the production implementation `LayoutUsageVisibility`) as is —
+// only fetching the window list from the OS and the OS window calls are missing.
 #[tokio::test(start_paused = true)]
 async fn tray_hide_shrinks_after_the_delay_and_show_grows_at_once() {
     let Idle {
@@ -3497,7 +3497,7 @@ async fn tray_hide_shrinks_after_the_delay_and_show_grows_at_once() {
     );
 }
 
-// ── 기한 안에 다시 보이면 줄임이 물러진다 — 뒤늦게 깬 타이머는 아무것도 안 낸다 ─────────────────
+// ── Shown again within the deadline, the shrink backs off — a timer that wakes late emits nothing ─────────────────
 #[tokio::test(start_paused = true)]
 async fn showing_again_within_the_delay_cancels_the_shrink() {
     let Idle {
@@ -3526,7 +3526,7 @@ async fn showing_again_within_the_delay_cancels_the_shrink() {
     assert_eq!(sync_as_the_actor(&client, socket), None);
 }
 
-// ── 팝업 소멸 → 그 창의 관심이 기한 뒤에 빠진다 ─────────────────────────────────────────
+// ── Popup destroyed → that window's interest drops out after the deadline ─────────────────────────────────────────
 #[tokio::test(start_paused = true)]
 async fn a_destroyed_popup_leaves_the_interest_after_the_delay() {
     let Idle {
@@ -3557,10 +3557,10 @@ async fn a_destroyed_popup_leaves_the_interest_after_the_delay() {
     assert_eq!(sync_as_the_actor(&client, socket), Some(BTreeSet::new()));
 }
 
-// ── 팝업 소멸은 모델이 그 창을 쥐지 않았어도 숨김 표시를 잊는다 ─────────────────────────────────
-// 새 창으로 슬롯 옮기기는 OS 창을 먼저 열고 모델 창을 나중에 더한다 — 그 틈에 트레이가 숨기고 창이 닫히면 모델엔
-// 그 창이 없다. 같은 label 의 창을 묘비 없는 새 모델에 세우면(시험만 — 운영 label 은 다시 안 쓰이고, 묘비가 선 label 은
-// 모델이 받지 않는다) 잊힌 표시는 보임으로 센다.
+// ── A popup destroyed forgets the hidden mark even if the model did not hold that window ─────────────────────────────────
+// Moving a slot to a new window opens the OS window first and adds the model window later — if the tray hides and the window closes in that gap, the model
+// does not have that window. If a window with the same label is stood up in a new model with no tombstone (tests only — production labels are not reused, and a label with a tombstone is
+// not accepted by the model), the forgotten mark counts as shown.
 #[tokio::test]
 async fn a_destroyed_popup_forgets_its_hidden_mark_even_when_the_model_never_held_it() {
     let Idle {
@@ -3591,9 +3591,9 @@ async fn a_destroyed_popup_forgets_its_hidden_mark_even_when_the_model_never_hel
     );
 }
 
-// ── 팝아웃 닫기 요청이 그 창에만 보이던 에이전트의 구독을 한 번 풀고, 뒤이은 소멸 정리는 아무것도 안 보낸다 ─────────
-// 닫기 요청이 모델을 먼저 지우므로(TRD S21-slot-docking 5.8판 §1-2 「닫히는 창」) 해제는 그때 나가고, 소멸 정리는 같은 몫을
-// 다시 해도 낼 것이 없다.
+// ── A popout close request releases once the subscription of an agent that was visible only in that window, and the destroy cleanup that follows sends nothing ─────────
+// The close request removes the model first (TRD S21-slot-docking 5.8th edition §1-2 「닫히는 창」), so the release goes out then, and the destroy cleanup has nothing to emit even if it
+// does the same share again.
 #[tokio::test]
 async fn a_popout_close_request_unsubscribes_once_and_the_later_destroyed_sends_nothing() {
     let Idle {
@@ -3638,8 +3638,8 @@ async fn a_popout_close_request_unsubscribes_once_and_the_later_destroyed_sends_
     assert!(rx.try_recv().is_err(), "소멸 정리가 명령을 냈다");
 }
 
-// ── 닫기 요청 없이 온 소멸(모델에 남은 팝아웃) — `lib.rs` 의 `Destroyed` 정리가 부르는 모델 몫 한 번이 구독 해제 ·
-//   묘비 · 사용량 관심 줄임 · 창 번호 풀기를 다 한다(TRD S26-window-chrome §4-1) ─────────────────────────
+// ── A destroy that came without a close request (a popout left in the model) — the one model share the `Destroyed` cleanup of `lib.rs` calls does all of: subscription release ·
+//   tombstone · usage interest shrink · window number release (TRD S26-window-chrome §4-1) ─────────────────────────
 #[tokio::test(start_paused = true)]
 async fn a_destroyed_popout_still_in_the_model_is_cleaned_up_in_one_pass_and_frees_its_number() {
     let Idle {
@@ -3708,7 +3708,7 @@ async fn a_destroyed_popout_still_in_the_model_is_cleaned_up_in_one_pass_and_fre
     mgr.assert_number_invariants();
 }
 
-// ── 트레이 숨기기가 실패한 창은 보이는 창으로 남는다 — 관심이 줄지 않는다 ─────────────────────────
+// ── A window whose tray hide failed stays a visible window — the interest does not shrink ─────────────────────────
 #[tokio::test(start_paused = true)]
 async fn a_failed_tray_hide_keeps_the_window_in_the_interest() {
     let Idle {
@@ -3739,10 +3739,10 @@ async fn a_failed_tray_hide_keeps_the_window_in_the_interest() {
     assert_eq!(sync_as_the_actor(&client, socket), None);
 }
 
-// ── 사용량 슬롯을 새 창으로 옮겨도 데몬에 아무것도 안 간다(TRD §1-9 #9) ─────────────────────────────
-// 옮기기의 모든 단계가 재계산한다 — phase A(임시 뷰로 떼기)는 원본 슬롯을 그대로 두고, phase C 가 새 창에 붙인 **같은
-// 락 안에서** 원본을 닫는다. 그래서 어느 재계산에서도 관심이 `sent` 를 떠나지 않아 줄임조차 서지 않는다. 옮긴 뒤의
-// 방송은 새 창으로 간다.
+// ── Moving a usage slot to a new window sends nothing to the daemon (TRD §1-9 #9) ─────────────────────────────
+// Every step of the move recomputes — phase A (detaching to a temporary view) leaves the original slot as is, and phase C closes the original **inside the same
+// lock** that attached it to the new window. So at no recompute does the interest leave `sent`, so not even a shrink stands. The broadcast after
+// the move goes to the new window.
 #[tokio::test(start_paused = true)]
 async fn moving_a_usage_slot_to_a_new_window_sends_nothing() {
     let Idle {

@@ -1,19 +1,19 @@
 #!/usr/bin/env node
-// scripts/gen-third-party-licenses.mjs — 릴리즈 zip 에 실리는 서드파티 고지(THIRD_PARTY_LICENSES.txt)를 만든다.
+// scripts/gen-third-party-licenses.mjs — builds the third-party notice (THIRD_PARTY_LICENSES.txt) shipped in the release zip.
 //
-// ADR-0294: 고지는 커밋하지 않고 릴리즈 빌드 때 만들며, 같은 생성을 push CI 에서도 돌린다 · 잘못되면 실패한다(fail-closed).
-// 부르는 쪽 둘: `scripts/build-release.ps1`(릴리즈 빌드마다 — 긴 빌드보다 먼저) · CI gates 잡(push 마다 — 결과는 버린다).
-//   push 에서도 도는 이유: 허용 밖 라이선스 · 본문 없는 패키지 같은 실패가 태그를 찍은 뒤 릴리즈 빌드에서 처음 터지지 않게.
-// 사용: `node scripts/gen-third-party-licenses.mjs <출력 파일 경로>` (cwd 무관)
-//   전제: 아래 CARGO_ABOUT_VERSION 의 cargo-about · `npm ci` 를 마친 node_modules(generate-license-file 도 devDependency 로
-//   거기 깔린다 — 버전과 그 전이 의존을 package-lock.json 이 묶는다).
+// ADR-0294: the notice is not committed but built at release build time, and the same generation also runs in push CI · it fails if wrong (fail-closed).
+// Two callers: `scripts/build-release.ps1` (every release build — before the long build) · the CI gates job (every push — the result is discarded).
+//   Why it runs on push too: so that failures such as a license outside the allowed set or a package with no license text do not first blow up in the release build after the tag is cut.
+// Usage: `node scripts/gen-third-party-licenses.mjs <출력 파일 경로>` (cwd-independent)
+//   Prerequisites: cargo-about at the CARGO_ABOUT_VERSION below · node_modules after `npm ci` (generate-license-file is also installed
+//   there as a devDependency — package-lock.json pins its version and its transitive dependencies).
 //
-// 세 부분을 한 파일로 잇는다.
-//   Part 1 Rust = cargo-about(설정 licenses/about.toml). JSON 으로 받아 본문을 보정한 뒤 여기서 글로 찍는다.
-//   Part 2 npm  = generate-license-file(설정 licenses/glf.jsonc). 운영 의존만 고르고 NOTICE 도 스스로 싣는다.
-//   Part 3      = 패키지 메타데이터로는 안 보이는 동봉물(licenses/extra/*.txt — 손으로 관리).
-// cargo-about 의 handlebars 템플릿을 쓰지 않는 이유: 기본이 HTML 이스케이프라 라이선스 본문의 따옴표가 `&quot;` 로
-//   깨지고, 아래 보정 · 판정에 어차피 JSON 이 필요하다.
+// Joins three parts into one file.
+//   Part 1 Rust = cargo-about (config licenses/about.toml). Receives JSON, corrects the texts, and prints them as text here.
+//   Part 2 npm  = generate-license-file (config licenses/glf.jsonc). Picks only production dependencies and includes NOTICE by itself.
+//   Part 3      = bundled items not visible from package metadata (licenses/extra/*.txt — managed by hand).
+// Why the handlebars template of cargo-about is not used: the default is HTML escaping, so quotes in the license text
+//   break into `&quot;`, and the corrections and decisions below need JSON anyway.
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
@@ -24,11 +24,11 @@ const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const CONFIG_DIR = join(ROOT, 'scripts', 'licenses')
 const GLF_DIR = join(ROOT, 'node_modules', 'generate-license-file')
 
-// 올리면 출력 형식부터 다시 본다 — npm 쪽은 도구가 찍은 글을 아래에서 쪼개 읽는다. CI 가 까는 버전(ci.yml 의
-//   PIN_CARGO_ABOUT_VERSION)과 어긋나면 여기서 요란하게 실패한다.
+// If raised, look at the output format again first — on the npm side the text the tool printed is split and read below. If it diverges from the version CI installs (PIN_CARGO_ABOUT_VERSION in ci.yml),
+//   it fails loudly here.
 const CARGO_ABOUT_VERSION = '0.9.2'
-// ★`--features cli` 를 빼지 말 것★: 0.9 부터 실행 파일이 그 기능 뒤에 있어, 빼면 설치는 성공한 채 실행 파일만 안 생긴다(실측).
-//   GitHub 릴리스의 미리 빌드된 x86_64-pc-windows-msvc 바이너리를 PATH 에 둬도 된다(CI 가 그렇게 한다).
+// ★Do not drop `--features cli`★: since 0.9 the executable is behind that feature, so if dropped the install succeeds while only the executable is not produced (measured).
+//   You may also put GitHub release's prebuilt x86_64-pc-windows-msvc binary on PATH (CI does that).
 const CARGO_ABOUT_INSTALL = `cargo install cargo-about --locked --features cli --version ${CARGO_ABOUT_VERSION}`
 
 function fail(message) {
@@ -46,7 +46,7 @@ const OUTPUT = resolve(process.argv[2])
 const work = mkdtempSync(join(tmpdir(), 'engram-licenses-'))
 process.on('exit', () => rmSync(work, { recursive: true, force: true }))
 
-// 라이선스 본문을 한 모양으로 — 줄바꿈은 LF(쓸 때 CRLF 로 바꾼다) · BOM 과 줄 끝 공백 제거.
+// Puts the license text in one shape — line breaks are LF (changed to CRLF when written) · BOM and trailing spaces removed.
 function normalize(text) {
   return text
     .replace(/^﻿/, '')
@@ -55,7 +55,7 @@ function normalize(text) {
     .trim()
 }
 
-// about.toml 의 accepted — Rust 의 OR 대안 고르기와 npm 허용 판정이 같은 목록을 쓴다(목록은 그 파일 한 곳에만 둔다).
+// The accepted of about.toml — the Rust OR-alternative selection and the npm allow decision use the same list (the list lives in that one file only).
 function readAccepted() {
   const toml = readFileSync(join(CONFIG_DIR, 'about.toml'), 'utf8')
   const block = toml.match(/^accepted\s*=\s*\[([^\]]*)\]/m)
@@ -64,8 +64,8 @@ function readAccepted() {
 }
 const ACCEPTED = readAccepted()
 
-// SPDX 식을 잎 판정 `leaf(id, exception)` 으로 계산한다 — OR 는 하나라도, AND 는 전부. 못 읽는 식은 null(부르는 쪽이
-//   실패로 다룬다).
+// Evaluates an SPDX expression with the leaf decision `leaf(id, exception)` — OR needs any one, AND needs all. An expression it cannot read is null (the caller
+//   treats it as a failure).
 function evalSpdx(expr, leaf) {
   const tokens = expr.replace(/[()]/g, (p) => ` ${p} `).trim().split(/\s+/)
   let i = 0
@@ -108,14 +108,14 @@ function evalSpdx(expr, leaf) {
     return null
   }
 }
-// 허용 목록으로 만족되는가 — `X WITH Y` 는 목록에 그 꼴 그대로 있어야 한다.
+// Whether it is satisfied by the allow list — `X WITH Y` must be in the list in exactly that form.
 const satisfies = (expr) => evalSpdx(expr, (id, exception) => ACCEPTED.includes(exception ? `${id} WITH ${exception}` : id))
-// 실을 본문(그 안에서 전문으로 판정된 라이선스 ids)이 선언한 식을 덮는가 — `X WITH Y` 는 바탕 라이선스 X 로 본다.
+// Whether the text to ship (the license ids decided as full text within it) covers the declared expression — `X WITH Y` is treated as the base license X.
 const coveredBy = (expr, ids) => evalSpdx(expr, (id) => ids.includes(id))
 
-// 표준 본문 자리표시(`<year>` · `[yyyy]` …)가 남은 글 — 표준 본문을 대신 실은 항목 밖에서 나오면 실패다.
-//   Apache-2.0 부록의 `Copyright [yyyy] [name of copyright owner]`(옛 판은 `{yyyy} {name of copyright owner}`)는
-//   라이선스 전문의 일부라 빼고 본다.
+// Text where a standard-text placeholder (`<year>` · `[yyyy]` ...) remains — if it appears outside an item that shipped the standard text instead, it fails.
+//   The Apache-2.0 appendix `Copyright [yyyy] [name of copyright owner]` (the old edition has `{yyyy} {name of copyright owner}`) is
+//   part of the license full text, so this check ignores it.
 const PLACEHOLDER =
   /<\s*(year|yyyy|copyright holders?|owner|organization|name of author)\s*>|\[\s*(year|yyyy|fullname|name of copyright owner|copyright holders?)\s*\]|\{\s*(year|yyyy|name of copyright owner)\s*\}/i
 function placeholderIn(text) {
@@ -145,23 +145,23 @@ const about = spawnSync(
     'about', 'generate', '--format', 'json', '--workspace', '--locked',
     '-c', join(CONFIG_DIR, 'about.toml'),
     '-m', join(ROOT, 'Cargo.toml'),
-    // -o 필수: 표준출력으로 받으면 cargo-about 이 부모가 PowerShell 인지 보고 거부한다(인코딩 문제 회피).
+    // -o is required: if output goes to stdout, cargo-about checks whether the parent is PowerShell and refuses (works around an encoding problem).
     '-o', rustJson,
   ],
   { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
 )
 if (about.error) fail(`cargo about 을 실행하지 못했습니다 - ${about.error.message}`)
 if (about.status !== 0) fail(`cargo about 실패(exit ${about.status})\n${about.stderr}`)
-// 우리 crate 는 license 필드가 없어 매번 경고가 난다 — 그것만 걸러 내고 나머지 경고는 보인다. 판정은 아래 JSON 으로 한다.
+// Our crates have no license field so a warning appears every time — only that one is filtered out and the other warnings stay visible. The decision is made from the JSON below.
 const aboutNoise = about.stderr.split('\n').filter((l) => l.trim() !== '' && !l.includes("'engram-dashboard"))
 if (aboutNoise.length > 0) process.stderr.write(aboutNoise.join('\n') + '\n')
 
 const rust = JSON.parse(readFileSync(rustJson, 'utf8'))
 
-// 우리 워크스페이스 crate 를 고지에서 빼는 것은 cargo-about 의 private 무시가 아니다(그건 `publish = false` 를 봐야
-//   서는데 우리 매니페스트엔 없다). license 필드가 없는 crate 는 결과에서 빠지고 경고만 남는다 — 우리 crate 는 그 덕에
-//   빠지지만, 외부 crate 가 같은 꼴이면 고지에서 **조용히** 빠진다. 그래서 그 둘을 여기서 가른다.
-// source 가 없음 = 경로 의존 = 이 저장소의 crate(Cargo.lock 의 외부 출처는 crates.io 하나뿐 — 실측 2026-10-15).
+// Dropping our workspace crates from the notice is not cargo-about's private ignore (that works only by looking at `publish = false`
+//   and our manifests do not have it). A crate with no license field drops out of the result and only a warning remains — our crates drop out thanks to that,
+//   but if an external crate had the same shape it would drop out of the notice **silently**. So we tell those two apart here.
+// No source = a path dependency = a crate of this repository (the only external origin in Cargo.lock is crates.io — measured 2026-10-15).
 const unknownExternal = rust.crates.filter((c) => c.license === 'Unknown' && c.package.source != null)
 if (unknownExternal.length > 0) {
   fail(
@@ -177,23 +177,23 @@ if (local.length > 0) {
   )
 }
 
-// ── 본문 보정 ──
-// cargo-about 은 라이선스 파일을 이름 글롭으로 찾는데 `LICENSE_MIT` · `license-mit` · `COPYING` · 내용으로만 가를 수 있는
-//   `LICENSE` 를 놓치면 그 crate 에 표준 본문(저작권 줄 없음)을 대신 싣고 디버그 로그만 남긴다(`--fail` 도 못 잡는다 —
-//   0.9.2 src/generate.rs). 그런 항목(source_path 없음)마다 crate 루트를 직접 읽어 진짜 본문을 찾는다.
-//   ① 고른 라이선스의 전문이 든 파일 — 한 라이선스만 든 파일을 먼저(여러 개가 든 파일은 그다음)
-//   ② 없으면 OR 식의 다른 허용 라이선스 중 전문 파일이 있는 것으로 바꾼다(about.toml 순서) — brotli-decompressor 처럼
-//      고른 쪽(MIT) 파일은 없고 다른 쪽(BSD-3-Clause) 파일만 있는 crate
-//   ③ 패키지에 없으면 licenses/rust/<crate>.txt 교체 파일(상류 저장소에서 옮긴 본문 · `// crate: <이름> <버전>` 으로 버전을
-//      박는다 — 버전이 어긋나면 실패. 새 버전의 본문이 바뀌었을 수 있다)
-//   ④ 그래도 없으면 표준 본문을 그대로 두고 "synthesized" 로 표시한다 — licenses/synthesized-crates.txt 에 없는 crate 면 실패.
+// ── Text correction ──
+// cargo-about finds license files by name glob, and if it misses `LICENSE_MIT` · `license-mit` · `COPYING` · a `LICENSE` that can be told apart only by content,
+//   it ships the standard text (with no copyright line) for that crate and leaves only a debug log (`--fail` does not catch it either —
+//   0.9.2 src/generate.rs). For each such item (no source_path) it reads the crate root directly to find the real text.
+//   ① a file that holds the full text of the chosen license — files holding a single license first (files holding several next)
+//   ② if none, switch to another allowed license in the OR expression that has a full-text file (about.toml order) — a crate like brotli-decompressor
+//      with no file for the chosen side (MIT) but only a file for the other side (BSD-3-Clause)
+//   ③ if the package has none, the licenses/rust/<crate>.txt replacement file (text moved from the upstream repository · the version is pinned with `// crate: <이름> <버전>` —
+//      it fails if the version diverges. The new version's text may have changed)
+//   ④ if still none, leave the standard text as is and mark it "synthesized" — it fails if the crate is not in licenses/synthesized-crates.txt.
 const LICENSE_FILE = /^(licen[cs]e|copying)([-_.].*)?$/i
-// 파일이 어느 라이선스의 **전문**인가 — 이름이 아니라 내용으로 가른다(`LICENSE` · `COPYING` 은 이름이 아무것도 말하지
-//   않는다). 전문에만 있는 문장을 본다 — "Apache License 2.0 을 따른다" 같은 선언문은 걸리지 않는다.
+// Which license's **full text** a file is — told apart by content, not by name (the name of `LICENSE` · `COPYING` says nothing).
+//   We look at sentences found only in the full text — a declaration like "follows Apache License 2.0" does not match.
 const MARKERS = {
   'MIT': { all: [/permission is hereby granted, free of charge/, /shall be included in all copies or substantial portions/] },
-  // 제목 줄("Apache License" · "Version 2.0" · "TERMS AND CONDITIONS …")만으로는 서지 않게 본문 조항(저작권 · 특허 허락 ·
-  //   재배포 조건)의 문장까지 요구한다 — 다른 라이선스 본문에 Apache 제목만 붙인 글이 통과하지 않게.
+  // So that title lines ("Apache License" · "Version 2.0" · "TERMS AND CONDITIONS ...") alone do not suffice, it also requires sentences of the body clauses (copyright · patent grant ·
+  //   redistribution conditions) — so that text of another license with just an Apache title stuck on does not pass.
   'Apache-2.0': { all: [/apache license,? version 2\.0/, /terms and conditions for use, reproduction,? and distribution/, /grant of copyright license\. subject to the terms and conditions of this license/, /grant of patent license\. subject to the terms and conditions of this license/, /you may reproduce and distribute copies of the work or derivative works thereof/] },
   'BSD-3-Clause': { all: [/redistribution and use in source and binary forms/, /neither the name/] },
   'BSD-2-Clause': { all: [/redistribution and use in source and binary forms/], none: [/neither the name/] },
@@ -203,7 +203,7 @@ const MARKERS = {
   'MPL-2.0': { all: [/mozilla public license,? version 2\.0/] },
   'Unicode-3.0': { all: [/unicode license v3/] },
   'BSL-1.0': { all: [/boost software license - version 1\.0/] },
-  // 아래 셋은 위 형제와 문장이 겹쳐 「없어야 하는 문장」으로 가른다(MIT-0 = 저작권 표시 조건 없는 MIT · 0BSD = 같은 조건 없는 ISC).
+  // The three below overlap in sentences with their siblings above, so they are told apart by 「없어야 하는 문장」 (sentences that must be absent) (MIT-0 = MIT without the copyright notice condition · 0BSD = ISC without the same condition).
   'MIT-0': { all: [/permission is hereby granted, free of charge/], none: [/shall be included in all copies or substantial portions/] },
   '0BSD': { all: [/permission to use, copy, modify, and\/or distribute this software for any purpose with or without fee is hereby granted/], none: [/provided that the above copyright notice and this permission notice appear in all copies/] },
   'Unlicense': { all: [/this is free and unencumbered software released into the public domain/] },
@@ -216,7 +216,7 @@ function classify(text) {
 }
 function readLicenseFiles(dir) {
   return readdirSync(dir, { withFileTypes: true })
-    // `.spdx` = SPDX 메타데이터 문서(tauri 계열) · THIRD-PARTY = 그 crate 가 품은 남의 코드 고지(아래 NOTICE 절이 싣는다).
+    // `.spdx` = SPDX metadata document (tauri family) · THIRD-PARTY = the notice of others' code that crate contains (the NOTICE section below ships it).
     .filter((e) => e.isFile() && LICENSE_FILE.test(e.name) && !/\.spdx$/i.test(e.name) && !/third.?party/i.test(e.name))
     .map((e) => {
       const text = normalize(readFileSync(join(dir, e.name), 'utf8'))
@@ -239,8 +239,8 @@ function readKnownList(file) {
       .filter((l) => l !== ''),
   )
 }
-// 손으로 둔 본문 파일(rust/ · extra/)의 꼴 — 맨 앞 `//` 줄은 관리용 주석이라 떼고, 그중 `// crate: <이름> <버전>` 은
-//   그 파일이 매인 crate 다.
+// The shape of hand-placed text files (rust/ · extra/) — the leading `//` lines are management comments and are stripped, and of them `// crate: <이름> <버전>` is
+//   the crate that file is bound to.
 function readHandFile(path) {
   const lines = readFileSync(path, 'utf8').replace(/\r\n?/g, '\n').split('\n')
   let i = 0
@@ -300,7 +300,7 @@ for (const lic of rust.licenses) {
         record.synthesized = true
         synthesizedSeen.add(u.crate.name)
         if (!knownSynthesized.has(u.crate.name)) unexpectedSynthesized.push(`  ${crate} (${lic.id})`)
-        // 전문은 없어도 선언문(저작권 줄이 든 COPYING 등)이 있으면 함께 싣는다. 경로 한 줄짜리(깨진 링크)는 뺀다.
+        // Even without a full text, if there is a declaration (such as a COPYING holding a copyright line) it is shipped together. A one-line path file (a broken link) is excluded.
         for (const f of files) {
           if (f.text.length >= 40 && !/^\.{1,2}[\\/]/.test(f.text)) record.text += `\n\n--- ${f.name} of the crate ---\n\n${f.text}`
         }
@@ -316,8 +316,8 @@ if (unexpectedSynthesized.length > 0) {
       `더합니다(표준 본문을 싣는다):\n${unexpectedSynthesized.join('\n')}`,
   )
 }
-// 쓰이지 않은 교체 파일 = 그 crate 가 그래프에서 빠졌거나 버전이 바뀌어(새 버전이 파일을 싣게 됐을 수도) 매인 버전과
-//   어긋난 것이다 — 둘 다 그 파일을 다시 볼 일이라 실패로 올린다.
+// An unused replacement file = that crate dropped out of the graph or the version changed (the new version may have started shipping the file) and diverged from the bound version
+//   — both mean the file needs another look, so it is raised as a failure.
 for (const [name, r] of rustReplacements) {
   if (!r.used) badReplacements.push(`  rust/${r.file}: 쓰이지 않았다 — ${name} 이 그래프에 없거나 이제 패키지가 본문을 싣는다(매인 버전 ${r.ties.join(', ')})`)
 }
@@ -331,7 +331,7 @@ const rustPlaceholders = records
   .filter((r) => !r.synthesized && placeholderIn(r.text))
   .map((r) => `  ${r.crate} (${r.id}): ${placeholderIn(r.text)}`)
 
-// 같은 라이선스 · 같은 본문끼리 묶는다(같은 MIT 라도 저작권 줄이 다르면 따로 — 저작권 줄이 고지 의무의 일부다).
+// Groups by same license · same text (even the same MIT is separate if the copyright line differs — the copyright line is part of the notice obligation).
 const rustGroups = new Map()
 for (const r of records) {
   if (!rustGroups.has(r.id)) rustGroups.set(r.id, { crates: new Set(), entries: new Map() })
@@ -348,7 +348,7 @@ for (const [id, group] of [...rustGroups].sort((a, b) => b[1].crates.size - a[1]
   rustOut.push(RULE, `${name && name !== id ? `${name} (${id})` : id} - ${group.crates.size} crate(s)`, RULE, '')
   const entries = [...group.entries.values()]
   for (const e of entries) e.crates.sort((a, b) => a.localeCompare(b))
-  // 읽는 사람이 crate 이름으로 찾게 첫 crate 이름 순으로. 표준 본문을 대신 실은 묶음은 맨 뒤.
+  // In order of the first crate name so the reader can look up by crate name. The group that shipped the standard text instead goes last.
   entries.sort((a, b) => a.synthesized - b.synthesized || a.crates[0].localeCompare(b.crates[0]))
   entries.forEach((e, i) => {
     if (i > 0) rustOut.push(THIN_RULE, '')
@@ -358,10 +358,10 @@ for (const [id, group] of [...rustGroups].sort((a, b) => b[1].crates.size - a[1]
   })
 }
 
-// 의존이 함께 배포하라고 둔 고지 파일 — Apache-2.0 §4(d) 의 NOTICE, 그리고 COPYRIGHT · LICENSE-THIRD-PARTY(그 crate 가
-//   품은 남의 코드의 저작권 · 라이선스). 어느 도구 문서에도 이 처리가 없다(npm 쪽 도구는 NOTICE 만 스스로 싣는다).
-//   고른 라이선스와 무관하게 crate 루트의 것을 다 싣는다 — 실어서 손해가 없다. 단 cargo-about 이 이미 라이선스 본문으로
-//   집은 파일(source_path — atomic-waker 의 LICENSE-THIRD-PARTY 가 그렇다)은 Part 1 에 있으니 다시 싣지 않는다.
+// Notice files a dependency asks to be distributed together — the NOTICE of Apache-2.0 §4(d), and COPYRIGHT · LICENSE-THIRD-PARTY (the copyright · license of
+//   others' code that crate contains). No tool's documentation covers this handling (the npm-side tool ships only NOTICE by itself).
+//   Everything at the crate root is shipped regardless of the chosen license — there is no harm in shipping. But a file cargo-about already
+//   picked up as license text (source_path — atomic-waker's LICENSE-THIRD-PARTY is one) is in Part 1, so it is not shipped again.
 const pathKey = (p) => resolve(p).toLowerCase()
 const aboutSources = new Set(
   rust.licenses
@@ -411,12 +411,12 @@ const glf = spawnSync(
 if (glf.error) fail(`generate-license-file 을 실행하지 못했습니다 - ${glf.error.message}`)
 if (glf.status !== 0) fail(`generate-license-file 실패(exit ${glf.status})\n${glf.stderr}`)
 if (glf.stderr.trim() !== '') process.stderr.write(glf.stderr)
-// 라이선스 본문을 못 찾은 패키지는 경고만 남기고 출력에서 빠진다(종료 코드 0) — 조용한 누락이라 실패로 올린다.
+// A package whose license text was not found leaves only a warning and drops out of the output (exit code 0) — a silent omission, so it is raised as a failure.
 if (glf.stderr.includes('Unable to determine license content')) {
   fail('generate-license-file 이 라이선스를 못 찾은 패키지가 있습니다(위 경고) — scripts/licenses/glf.jsonc 의 replace 로 대 주세요')
 }
 
-// 도구가 앞뒤에 붙이는 자기 홍보 두 줄은 뗀다 — 그 글의 "This file" 이 이 파일 전체를 가리키는 것처럼 읽힌다.
+// The two self-promotion lines the tool attaches before and after are stripped — the "This file" in that text would read as if it pointed at this whole file.
 const GLF_CREDIT = 'This file was generated with the generate-license-file npm package!\nhttps://www.npmjs.com/package/generate-license-file\n'
 let npmText = readFileSync(npmTxt, 'utf8')
 if (!npmText.startsWith(GLF_CREDIT + '\n') || !npmText.endsWith(GLF_CREDIT)) {
@@ -424,9 +424,9 @@ if (!npmText.startsWith(GLF_CREDIT + '\n') || !npmText.endsWith(GLF_CREDIT)) {
 }
 npmText = npmText.slice(GLF_CREDIT.length + 1, -GLF_CREDIT.length)
 
-// 도구가 라이선스 본문이 아닌 것을 본문으로 싣는 꼴을 막는다 — 라이선스 파일이 없으면 package.json 의 식별자 한 줄("MIT")
-//   이나 license 필드의 URL, `LICENSE.spdx` 가 있으면 그 SPDX 메타데이터 문서. 전부 허락 문구가 빠진다.
-//   묶음 형식 = 「패키지 목록 → "...the following license:" → 본문 → (선택) "With the following notices:" → 구분선」.
+// Prevents the tool from shipping something that is not license text as text — if there is no license file, the one-line identifier in package.json ("MIT")
+//   or the URL in the license field, or if `LICENSE.spdx` exists, that SPDX metadata document. All of them lack the permission wording.
+//   Group format = 「패키지 목록 → "...the following license:" → 본문 → (선택) "With the following notices:" → 구분선」 (package list → "...the following license:" → text → (optional) "With the following notices:" → separator line).
 const npmPackages = new Set()
 const badBodies = []
 const npmPlaceholders = []
@@ -435,22 +435,22 @@ function checkNpmBlock(packages, licenseAndNotices) {
   if (/^[\w.+\-() ]+$/.test(body) || /^(https?:\/\/|www\.)\S+$/.test(body) || body.startsWith('SPDXVersion:')) {
     badBodies.push(`  ${packages.join(', ')} => "${body.split('\n')[0]}"`)
   }
-  // 본문 · 고지 둘 다 본다. 한 묶음이 여러 패키지의 같은 글이라 패키지 목록째 보고한다.
+  // Looks at both text and notices. One group is the same text for several packages, so it reports the whole package list.
   const hit = placeholderIn(licenseAndNotices)
   if (hit) npmPlaceholders.push(`  ${packages.join(', ')}: ${hit}`)
 }
 const blocks = npmText.split('\n-----------\n').filter((b) => b.trim() !== '')
 for (const block of blocks) {
   const start = block.indexOf('the following license:\n\n')
-  // 패키지 목록은 본문 앞에서만 읽는다 — 라이선스 본문에도 ` - ` 로 시작하는 줄(조항 목록)이 있다.
+  // The package list is read only before the text — license text also has lines starting with ` - ` (clause lists).
   const packages = start < 0 ? [] : [...block.slice(0, start).matchAll(/^ - (.+)$/gm)].map((m) => m[1])
   if (packages.length === 0) fail(`generate-license-file 출력의 한 묶음을 읽지 못했습니다:\n${block.slice(0, 300)}`)
   packages.forEach((p) => npmPackages.add(p))
   checkNpmBlock(packages, block.slice(start + 'the following license:\n\n'.length))
 }
 
-// glf.jsonc 의 replace — 키 대조(아래)와 peer 뒷받침이 함께 읽는다. 줄 전체 `//` 주석만 걷어 내고 JSON 으로 읽는다
-//   (그 파일 머리말의 약속).
+// The replace of glf.jsonc — read by both the key check (below) and the peer backing. Only whole-line `//` comments are stripped and it is read as JSON
+//   (the promise in that file's preamble).
 let glfReplace
 try {
   const raw = readFileSync(join(CONFIG_DIR, 'glf.jsonc'), 'utf8').split(/\r?\n/).filter((l) => !/^\s*\/\//.test(l)).join('\n')
@@ -459,8 +459,8 @@ try {
   fail(`scripts/licenses/glf.jsonc 를 읽지 못했습니다(주석은 줄 전체 \`//\` 만 쓸 것) - ${err.message}`)
 }
 
-// 패키지마다 선언한 라이선스(package.json 의 license) — 교체 · peer 본문 대조와 아래 허용 판정이 함께 쓴다. node_modules 를
-//   직접 훑어 이름@버전 → license 를 모은다(같은 패키지가 여러 버전으로 중첩돼 깔려도 버전으로 가른다).
+// The license each package declared (license in package.json) — used by both the replacement · peer text check and the allow decision below. It scans node_modules
+//   directly to collect name@version → license (even if the same package is installed nested in several versions, they are told apart by version).
 const npmLicenses = new Map()
 const walk = (dir) => {
   if (!existsSync(dir)) return
@@ -486,11 +486,11 @@ const visit = (dir) => {
 }
 walk(join(ROOT, 'node_modules'))
 
-// 위 묶음은 도구가 실은 패키지뿐이다 — 도구가 빼먹은 것은 못 본다. generate-license-file 4.2.5 는 peer 로 표시된 패키지를
-//   기록 · 순회 전에 건너뛰고(설치본 dist 의 resolveNpmDependencies), 본문을 못 찾은 패키지도 경고만 하고 뺀다. 그래서
-//   운영 의존 집합을 package-lock.json 에서 따로 세어 대조한다 — `dev` 만 빼고(peer 는 넣는다), 이 플랫폼에 안 깔린
-//   선택 의존(다른 OS 의 바이너리 패키지)은 디스크에 없으니 뺀다. 이름 = 항목의 `name`(별칭으로 깔린 패키지는 진짜 이름을
-//   여기 적는다 — 도구도 진짜 이름으로 싣는다), 없으면 경로의 마지막 `node_modules/` 뒤(중첩 · scope 포함).
+// The groups above are only the packages the tool shipped — we cannot see what the tool left out. generate-license-file 4.2.5 skips packages marked peer
+//   before recording · traversing (resolveNpmDependencies in the installed dist), and also drops a package whose text it could not find with only a warning. So
+//   we count the production dependency set separately from package-lock.json and compare — dropping only `dev` (peer is included), and optional
+//   dependencies not installed on this platform (binary packages for other OSes) are dropped because they are not on disk. Name = the entry's `name` (for a package installed under an alias, write
+//   the real name here — the tool also ships under the real name), otherwise what follows the last `node_modules/` in the path (nested · scope included).
 const lock = JSON.parse(readFileSync(join(ROOT, 'package-lock.json'), 'utf8'))
 const lockPackages = new Map()
 for (const [path, entry] of Object.entries(lock.packages ?? {})) {
@@ -503,10 +503,10 @@ for (const [path, entry] of Object.entries(lock.packages ?? {})) {
   lockPackages.set(`${name}@${entry.version}`, { path, peer: !!entry.peer })
 }
 
-// replace 키는 정확한 이름@버전이다(glf.jsonc 머리말). 아래 「본문 아닌 것」 · 자리표시 검사보다 먼저 판정한다 — 키가
-//   어긋나면 도구가 그 패키지에 본문을 못 대 줘 그 검사들도 터지는데, 고칠 곳은 키다(도구 실행 직후의 「라이선스를 못 찾은
-//   패키지」 검사는 이보다도 앞, 위에서 이미 끝났다). 설치된 운영 의존에 그 이름@버전이 없으면 = 버전이 바뀌었거나
-//   패키지가 빠져 그 본문이 아무 데도 쓰이지 않는다 — 새 버전의 본문을 다시 확인하라는 신호라 실패로 올린다.
+// The replace key is the exact name@version (glf.jsonc preamble). It is decided before the 「본문 아닌 것」 (not text) · placeholder checks below — if the key
+//   diverges the tool cannot supply the text for that package and those checks blow up too, but the place to fix is the key (the 「라이선스를 못 찾은
+//   패키지」 (package with no license found) check right after the tool runs is even earlier than this, already done above). If the installed production dependencies have no such name@version = the version changed or
+//   the package dropped out so that text is used nowhere — a signal to re-check the new version's text, so it is raised as a failure.
 const badReplaceKeys = Object.keys(glfReplace)
   .filter((k) => !/^@?[^@]+@[^@]+$/.test(k) || !lockPackages.has(k))
   .map((k) => `  ${k}${/^@?[^@]+@[^@]+$/.test(k) ? ' — 설치된 운영 의존에 이 버전이 없다' : ' — 키에 버전이 없다'}`)
@@ -514,10 +514,10 @@ if (badReplaceKeys.length > 0) {
   fail(`scripts/licenses/glf.jsonc 의 replace 키가 설치본과 어긋납니다 — 그 버전의 본문을 다시 확인하고 키를 고치거나 지우세요:\n${badReplaceKeys.join('\n')}`)
 }
 
-// 손으로 댄 본문(replace 파일 · 아래 peer 뒷받침)이 그 패키지가 선언한 라이선스를 덮는가 — 엉뚱한 파일을 건 실수(Apache-2.0
-//   패키지에 MIT 본문만 등)를 막는다. 본문 안에서 전문으로 확인된 라이선스(Rust 쪽과 같은 내용 판정)로 선언 식을 계산한다.
-// `ids` 는 파일마다 따로 판정한 것의 합집합으로 받는다 — 여러 파일을 이어 붙여 한 번에 판정하면 「없어야 하는 문장」 조건
-//   때문에 MIT 파일이 MIT-0 을, BSD-3 이 BSD-2 를, ISC 가 0BSD 를 가려 `MIT-0 AND MIT` 같은 정당한 식이 떨어진다.
+// Whether the hand-attached text (replace file · peer backing below) covers the license that package declared — prevents the mistake of attaching the wrong file (only MIT text for an Apache-2.0
+//   package, etc.). It evaluates the declared expression with the licenses confirmed as full text within the text (the same content decision as the Rust side).
+// `ids` is taken as the union of what was decided per file — if several files were joined and decided at once, the 「없어야 하는 문장」 (sentences that must be absent) condition
+//   would let an MIT file hide MIT-0, BSD-3 hide BSD-2 and ISC hide 0BSD, so a legitimate expression like `MIT-0 AND MIT` would fail.
 const uncovered = []
 function checkCoverage(p, ids, source) {
   const declared = npmLicenses.get(p)
@@ -529,9 +529,9 @@ for (const [k, file] of Object.entries(glfReplace)) {
   checkCoverage(k, classify(normalize(readFileSync(join(CONFIG_DIR, file), 'utf8'))), `glf.jsonc → ${file}`)
 }
 
-// peer 로만 닿는 운영 의존은 도구가 아예 보지 않아 glf.jsonc 의 replace 도 소용없다 — 여기서 직접 싣는다. 본문 =
-//   glf.jsonc 에 그 이름@버전 replace 가 있으면 그 파일, 없으면 패키지 폴더의 라이선스 전문 파일 전부(파일 이름 · 내용
-//   판정은 Rust 쪽과 같다) · 고지 = 같은 폴더의 notice 파일. 도구가 실은 묶음과 같은 꼴 · 같은 검사를 거친다.
+// A production dependency reached only through peer is not seen by the tool at all, so the replace in glf.jsonc is useless too — it is shipped directly here. Text =
+//   that file if glf.jsonc has a replace for that name@version, otherwise all the license full-text files in the package folder (file name · content
+//   decision is the same as the Rust side) · notices = the notice files in the same folder. It goes through the same shape · the same checks as the groups the tool shipped.
 const missingFromNotice = []
 const peerFallback = []
 for (const [p, { path, peer }] of [...lockPackages].sort((a, b) => a[0].localeCompare(b[0]))) {
@@ -580,7 +580,7 @@ for (const p of [...npmPackages].filter((p) => !lockPackages.has(p)).sort()) {
   note(`고지에는 있는데 package-lock.json 의 운영 의존에는 없는 패키지: ${p}`)
 }
 
-// npm 쪽 도구에는 허용 목록이 없다 — 실린 패키지마다 선언 라이선스(위 npmLicenses)를 about.toml 의 accepted 로 판정한다.
+// The npm-side tool has no allow list — each shipped package's declared license (npmLicenses above) is decided with the accepted of about.toml.
 const npmRejected = []
 for (const p of [...npmPackages].sort()) {
   const lic = npmLicenses.get(p)
@@ -595,7 +595,7 @@ if (npmRejected.length > 0) {
   )
 }
 
-// ── Part 3. 손으로 관리하는 동봉물 고지(licenses/extra/*.txt) ───────────────────────────────────
+// ── Part 3. Hand-managed bundled-item notices (licenses/extra/*.txt) ───────────────────────────────────
 
 const EXTRA_DIR = join(CONFIG_DIR, 'extra')
 const extras = []
@@ -610,7 +610,7 @@ for (const file of existsSync(EXTRA_DIR) ? readdirSync(EXTRA_DIR).filter((f) => 
   extras.push(text)
 }
 
-// ── 합치기 ───────────────────────────────────────────────────────────────────────────────────
+// ── Merging ───────────────────────────────────────────────────────────────────────────────────
 
 const now = new Date()
 const date = [now.getFullYear(), now.getMonth() + 1, now.getDate()].map((n) => String(n).padStart(2, '0')).join('-')
@@ -646,7 +646,7 @@ const out = [
   '',
 ].join('\n')
 
-// CRLF 로 쓴다 — Windows 배포물이다(메모장 기준).
+// Written with CRLF — it is a Windows distribution (by Notepad's convention).
 mkdirSync(dirname(OUTPUT), { recursive: true })
 writeFileSync(OUTPUT, out.replace(/\n/g, '\r\n'))
 const synthesizedCount = records.filter((r) => r.synthesized).length

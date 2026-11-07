@@ -25,8 +25,8 @@ use crate::layout::{
 use crate::settings::{SettingsEvents, SettingsService, SettingsSnapshot};
 use crate::theme::{EffectiveThemes, ThemeControl, ThemeWindows, UiSettingsPayload};
 
-// 발화를 **온 순서대로** 한 줄씩 적는 가짜. ★Vec 이지 집합이 아니다★ — 이 하네스가 사는 것의 절반이
-// 순서다(연결 상태가 broadcast 보다 먼저 나가야 프론트가 출력 Channel 을 등록한 뒤 목록을 받는다).
+// A fake that writes each firing as one line **in the order it came**. ★A Vec, not a set★ — half of what this harness buys is
+// order (the connection state must go out before the broadcast so the frontend receives the list after it registers the output Channel).
 #[derive(Default)]
 pub(crate) struct RecordingEvents {
     seen: std::sync::Mutex<Vec<String>>,
@@ -59,7 +59,7 @@ impl RecordingEvents {
 
 impl DaemonEvents for RecordingEvents {
     fn connection_state(&self, state: ConnectionStateEvent) {
-        // ★`as_str()` 을 거쳐 적는다★ — 재려는 것은 프론트가 실제로 받는 **그 문자열**이지 enum 이름이 아니다.
+        // ★Written through `as_str()`★ — what we measure is **that string** the frontend actually receives, not the enum name.
         self.record(format!("state:{}", state.as_str()));
         if state == ConnectionStateEvent::Connected {
             let hook = self
@@ -108,7 +108,7 @@ impl DaemonEvents for RecordingEvents {
     }
 }
 
-// 이름 장부 포트도 같은 한 줄 기록에 적는다 — 프론트 알림과의 차례를 한 목록으로 잰다.
+// The name-ledger port is written into the same one-line record — the order against frontend notifications is measured in one list.
 impl super::AgentNamesSink for RecordingEvents {
     fn agents(&self, agents: &[AgentInfo]) {
         let names: Vec<String> = agents
@@ -164,8 +164,8 @@ pub(crate) fn wire_agent(id: AgentId, name: &str) -> AgentInfo {
     }
 }
 
-// 관심을 「main 의 활성 탭 = 사용량 슬롯 하나」 레이아웃으로 다시 계산한다. 넛지는 부르는 쪽이 정한다 — 결과를 안 쓰는
-// 자리는 `let _ =` 로 버린다(연결 전이라 넛지가 할 일이 없거나, 시험이 넛지를 직접 넣는다).
+// Recomputes the interest for the layout 「main 의 활성 탭 = 사용량 슬롯 하나」 (main's active tab = one usage slot). The nudge is decided by the caller — a spot that does not use the result
+// drops it with `let _ =` (the nudge has nothing to do before connecting, or the test injects the nudge directly).
 pub(crate) fn relayout(
     usage: &SharedUsageInterest,
     show_claude: bool,
@@ -289,9 +289,9 @@ impl SettingsEvents for NoSettingsEvents {
     fn theme_default_changed(&self) {}
 }
 
-// 운영 버스 표와 같은 구독 재동기 어댑터(`OwnedSubs` — 사람 경로의 `RouterSubs` 에 넘긴다)를 끼운 레이아웃 명령 표.
+// A command table for layout that includes the same subscription-resync adapter as the production bus table (`OwnedSubs` — passed to the human path's `RouterSubs`).
 pub(crate) fn bus_table(state: &LayoutState, client: &Arc<DaemonClient>) -> CommandTable {
-    // 쓰기를 안 연다 — 이 시험은 설정을 건드리지 않고, 적재는 없는 폴더를 만들지 않는다.
+    // Does not open writes — this test does not touch settings, and loading does not create a folder that does not exist.
     let settings = Arc::new(SettingsService::load_from_dir(
         &std::env::temp_dir().join("engram-dashboard-no-settings"),
     ));
@@ -313,7 +313,7 @@ pub(crate) fn bus_table(state: &LayoutState, client: &Arc<DaemonClient>) -> Comm
         themes,
         settings,
         settings_events: Arc::new(NoSettingsEvents),
-        // 포트를 꽂지 않은 조율자 — 이 시험은 복원에 답하지 않는다.
+        // A coordinator with no port plugged in — this test does not answer restores.
         restore: Arc::new(crate::state::restore::RestoreCoordinator::new(
             Arc::new(crate::state::restore::RestoreService::new()),
             state.clone(),
@@ -323,7 +323,7 @@ pub(crate) fn bus_table(state: &LayoutState, client: &Arc<DaemonClient>) -> Comm
     })
 }
 
-// 데몬이 배달하는 셸 명령 한 장(LLM 의 `engram layout.setSlotContent …` 가 셸에 닿는 모양).
+// One shell command the daemon delivers (the shape in which an LLM's `engram layout.setSlotContent …` reaches the shell).
 pub(crate) fn bus_request(name: &str, args: serde_json::Value) -> AgentEvent {
     let envelope = CommandEnvelope {
         name: name.to_string(),
@@ -337,14 +337,14 @@ pub(crate) fn bus_request(name: &str, args: serde_json::Value) -> AgentEvent {
     }
 }
 
-// `window` 활성 탭의 첫 슬롯.
+// The first slot of the `window` active tab.
 pub(crate) fn active_slot(state: &LayoutState, window: &str) -> (uuid::Uuid, uuid::Uuid) {
     let mgr = state.0.lock().unwrap();
     let view = mgr.windows[window].active;
     (view, tree::first_slot_id(&mgr.views[&view].layout))
 }
 
-// 창 빌드가 늘 성공하는 호스트 — 슬롯 옮기기가 phase B 를 지나 phase C 까지 간다.
+// A host where the window build always succeeds — a slot move passes phase B and reaches phase C.
 pub(crate) struct OpenWindows;
 
 impl WindowHost for OpenWindows {

@@ -1,58 +1,58 @@
-//! single-flight replay 채번/펜스 상태기계 + replay 경계 마커 인코딩 (ADR-0046 M1).
+//! Single-flight replay numbering/fence state machine + replay boundary marker encoding (ADR-0046 M1).
 //!
-//! ## 무엇 / 왜 (load-bearing)
-//! src-tauri 는 미러 버퍼를 버리고(ADR-0046) 무상태 통과 라우터가 됐다. remount/리로드/새 창은 데몬 ring
-//! 을 **전량 재replay** 받고, 그 replay 의 경계(끝)를 뷰가 알 수 있게 **에이전트당 single-flight** 로
-//! wire `Subscribe`↔`ReplayComplete` 를 1:1 대응시켜 `gen`(세대)을 각인한다. 뷰는 자기 `requestReplay` 가
-//! 돌려받은 gen **이상**의 성공 마커에만 sort+dedup flush 한다(gen 펜스 — 남의/구세대 replay 조기 flush 차단).
+//! ## What / why (load-bearing)
+//! src-tauri dropped the mirror buffer (ADR-0046) and became a stateless pass-through router. A remount/reload/new window gets the daemon ring
+//! **fully replayed again**, and so that the view can know the boundary (end) of that replay, a **single-flight per agent** maps the
+//! wire `Subscribe`↔`ReplayComplete` 1:1 and stamps a `gen` (generation). The view flushes with sort+dedup only on a success marker whose gen is **at least** what its own `requestReplay`
+//! got back (gen fence — blocks early flush by someone else's / an old generation's replay).
 //!
-//! ## ★셈 기반 결합 금지(재검증 실증)★
-//! gen↔Complete 를 카운팅/마지막값 각인으로 추론하면 desync 한다(마지막값=조기 flush 유실, FIFO=Complete
-//! 누락 실패 경로 영구 desync). 그래서 **동시 in-flight 는 정확히 1개**로 강제한다 — in-flight 중 도착한
-//! 요청은 전부 "다음 1회 Subscribe" 로 병합(coalesce)하고, 그 Subscribe 는 현 in-flight 가 해소될 때 보낸다.
+//! ## ★No count-based coupling (re-verified in practice)★
+//! Inferring gen↔Complete by counting/last-value stamping desyncs (last value = early flush loses data, FIFO = a failure path
+//! that misses Complete desyncs permanently). So **exactly 1 concurrent in-flight** is enforced — every request that arrives
+//! during an in-flight is merged (coalesced) into "one next Subscribe", and that Subscribe is sent when the current in-flight resolves.
 //!
-//! ## ★수명·불변식(TRD rev4 §2 + FIX round — zombie 의미론)★
-//! - in_flight 수명 = sent → (SubscribeAck) → acked → (ReplayComplete) → 성공 마커. **슬롯의 해제 경로는
-//!   셋뿐 — resolution(Ack 뒤 Complete) · 거절([`ReplayFlightSet::on_refused`]) · disconnect.** deadline
-//!   초과는 슬롯을 해제하지 않는다.
-//! - 같은 gen 에 실패 마커 뒤 성공 마커가 붙어도 안전하다: 재요청한 뷰는 더 높은 myGen 을 들고 이걸
-//!   무시하고, 아직 대기 중인 뷰는 완전한 버퍼를 flush 한다(뷰는 실패 마커에 버퍼를 유지한다). 진행 기반
-//!   deadline 아래 late-resolution 은 empty/near-empty replay 를 함의하고, 흘렀던 frame 은 뷰가 이미 버퍼했다.
-//! - **agent-gone 은 더 이상 좀비가 아니다:** 데몬이 그 거절을 `AgentEvent::SubscribeFailed` 로 내고
-//!   ([`ReplayFlightSet::on_refused`]) 슬롯이 그 자리에서 풀린다. 옛 배선은 주인을 식별할 필드가 없는
-//!   `Error` 뿐이라 클라가 어느 슬롯을 풀지 몰랐고, 그래서 여기 "수용된 한계" 로 적혀 있었다(되살리지 마라).
-//! - **그래도 좀비가 남는 형태 하나:** 데몬이 `Ack` 만 주고 그 뒤로 `ReplayComplete` 도 거절도 영영 안 보내는
-//!   경우(응답이 아직 올 수 있으므로 만료가 슬롯을 못 푼다). 그 슬롯은 disconnect 까지 남는다. 실패 마커는
-//!   최초 만료 때 이미 나갔고 UX 는 뷰의 bounded 재요청 사다리가 처리한다(수용). ★데몬이 `Complete` 를
-//!   **큐 포화로 흘리는** 갈래는 여기 들지 않는다★ — 그쪽은 데몬이 그 자리에서 연결을 닫아 disconnect 로
-//!   귀결시킨다(daemon `handle_subscribe` 의 ReplayComplete enqueue 실패 분기).
+//! ## ★Lifetime · invariants (TRD rev4 §2 + FIX round — zombie semantics)★
+//! - in_flight lifetime = sent → (SubscribeAck) → acked → (ReplayComplete) → success marker. **There are only three
+//!   release paths for the slot — resolution (Complete after Ack) · refusal ([`ReplayFlightSet::on_refused`]) · disconnect.** Exceeding the
+//!   deadline does not release the slot.
+//! - A success marker may follow a failure marker on the same gen safely: a view that re-requested holds a higher myGen and
+//!   ignores it, and a view still waiting flushes the complete buffer (the view keeps its buffer on a failure marker). Under the progress-based
+//!   deadline a late resolution implies an empty/near-empty replay, and the frames that flowed were already buffered by the view.
+//! - **agent-gone is no longer a zombie:** the daemon emits that refusal as `AgentEvent::SubscribeFailed`
+//!   ([`ReplayFlightSet::on_refused`]) and the slot is released on the spot. The old wiring had only an `Error` with no field
+//!   to identify the owner, so the client did not know which slot to release, and it was written here as an "accepted limitation" (do not revive it).
+//! - **One shape where a zombie still remains:** the daemon gives only `Ack` and afterwards never sends `ReplayComplete` or a refusal
+//!   (a response may still come, so expiry cannot release the slot). That slot stays until disconnect. The failure marker had
+//!   already gone out at the first expiry, and the UX is handled by the view's bounded re-request ladder (accepted). ★The branch where the daemon
+//!   **drops `Complete` because the queue is saturated** is not included here★ — there the daemon closes the connection on the spot and it
+//!   ends in a disconnect (the ReplayComplete enqueue failure branch of the daemon's `handle_subscribe`).
 //!
-//! ## ★단일 outstanding — 이 파일 밖에서 지켜지는 전제(load-bearing)★
-//! [`ReplayFlightSet::on_ack`]·[`ReplayFlightSet::on_complete`]·[`ReplayFlightSet::on_refused`] 는 도착한
-//! 응답의 세대를 **대조하지 않는다**(wire 에 세대 필드가 없다 — 데몬은 gen 을 모른다). 대신 "그 에이전트의
-//! Subscribe 는 wire 에 많아야 하나뿐이고 그것이 곧 현 `in_flight`" 라는 전제에 기댄다. 그래서 이 파일은
-//! **추적을 잃은 채 wire 로 나간 Subscribe 를 만드는 진입점을 두지 않는다** — 그런 함수가 하나라도 있으면
-//! 구세대의 Ack/Complete/거절이 신세대 슬롯에 오각인돼 replay 가 돌지 않은 gen 에 성공 마커가 붙는다
-//! (gen 펜스 붕괴). 호출자 쪽 대응 규율은 형제 모듈 `connection.rs` 의 replay Subscribe 송신 실패
-//! 처리(연결을 끊는다)다.
+//! ## ★Single outstanding — a premise kept outside this file (load-bearing)★
+//! [`ReplayFlightSet::on_ack`] · [`ReplayFlightSet::on_complete`] · [`ReplayFlightSet::on_refused`] do **not check** the generation of the
+//! arriving response (the wire has no generation field — the daemon does not know gen). Instead they rely on the premise that "at most one Subscribe of that agent
+//! is on the wire and it is exactly the current `in_flight`". So this file
+//! **has no entry point that produces a Subscribe that went out on the wire with its tracking lost** — if even one such function exists,
+//! an old generation's Ack/Complete/refusal gets misstamped onto the new generation's slot and a success marker is attached to a gen whose replay never ran
+//! (gen fence collapse). The matching discipline on the caller side is the replay Subscribe send-failure
+//! handling in the sibling module `connection.rs` (it drops the connection).
 //!
-//! ## ★순수성 ① 테스트 격리 — 소켓·tokio·Tauri 의존 0 (ADR-0012 · ADR-0175 결정 3)★
-//! 셸 패키지 안에 살지만 그 배선을 하나도 물지 않는다. 시간은 `Instant` 를 인자로 받아 결정론 단위테스트가
-//! 선다(부작용=마커 실제 송신·wire Subscribe 는 호출자=연결 task 가 수행).
+//! ## ★Purity ① test isolation — zero socket · tokio · Tauri dependencies (ADR-0012 · ADR-0175 decision 3)★
+//! It lives inside the shell package but touches none of its wiring. Time is taken as an `Instant` argument so deterministic unit
+//! tests stand (side effects = actually sending the marker · the wire Subscribe are done by the caller = the connection task).
 //!
-//! ## ★순수성 ② wire 계약 무지 — protocol 의존 0 (ADR-0046 결정 3·4)★
-//! 이 모듈이 각인하는 경계 마커 tag 255 는 데몬 codec 에 없는 **셸↔웹뷰 Channel 내부 계약**이고(아래
-//! `MARKER_TAG`), ADR-0046 결정 3 이 셸에 허용한 상태는 요청 부기(epoch·single-flight)뿐이다. protocol 을
-//! 한 번 들이면 다음 세션이 여기서 wire 타입을 쓰기 시작해, 이 모듈이 자기가 참여하지 않는 계약을 아는
-//! 상태가 된다. ★"그 crate 가 무거워서" 가 아니다★ — protocol 은 런타임 없는 순수 데이터 crate 라 ①의
-//! 결정론에는 값이 0 이다. 즉 이 항을 ①의 사유로 설명하면 틀린다.
+//! ## ★Purity ② ignorant of the wire contract — zero protocol dependencies (ADR-0046 decisions 3·4)★
+//! The boundary marker tag 255 that this module stamps is a **shell↔webview Channel-internal contract** absent from the daemon codec (see
+//! `MARKER_TAG` below), and the only state ADR-0046 decision 3 allows the shell is request bookkeeping (epoch · single-flight). Once protocol is
+//! brought in, a later session starts using wire types here and this module ends up knowing a contract it takes no part in.
+//! ★It is not "because that crate is heavy"★ — protocol is a pure data crate with no runtime, so its value for the determinism of ① is 0. That is,
+//! explaining this clause as a reason of ① is wrong.
 //!
-//! ## ★위 둘을 지키는 것 — 산문이 아니라 게이트★
-//! `.github/workflows/ci.yml` 의 `Gate: replay_flight purity — no transport/wire ingress` 가 이 파일 한 장을
-//! 훑어 `tauri`·`tokio`·`std::net`·`engram_dashboard_*` 경로가 **주석 밖에** 나오면 FAIL 시킨다. `use` 줄만이
-//! 아니라 인라인 완전경로도, `::` 앞뒤에 공백을 둔 꼴(`tokio :: spawn`)도 잡는다 — 형제 crate 격리 게이트와
-//! 달리 **컴파일러 backstop 이 없어서**다(셸 패키지는 그 셋을 전부 의존하므로 `tokio::spawn(..)` 한 줄이 그냥
-//! 컴파일된다). 게이트 정본(기대값 · 알려진 한계) = `.github/workflows/ci.yml` 의 그 스텝 주석
+//! ## ★Keeping the two above — a gate, not prose★
+//! `.github/workflows/ci.yml`'s `Gate: replay_flight purity — no transport/wire ingress` scans this one file
+//! and FAILs if a `tauri` · `tokio` · `std::net` · `engram_dashboard_*` path appears **outside comments**. It catches not only
+//! `use` lines but also inline full paths, and the shape with spaces around `::` (`tokio :: spawn`) — because, unlike the sibling-crate isolation gate, there is **no compiler backstop**
+//! (the shell package depends on all three, so a single `tokio::spawn(..)` line just compiles).
+//! The gate's authority (expected values · known limits) = that step's comment in `.github/workflows/ci.yml`
 //! (ADR-0175 §영향).
 
 use std::collections::HashMap;
@@ -60,59 +60,59 @@ use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
-/// 에이전트 식별자. `engram_dashboard_protocol::AgentId` 와 같은 `uuid::Uuid` 라 호출부에서 통과 전달된다
-/// — ★중복을 알고 두는 것★. 그쪽 alias 로 갈아타려면 protocol 을 import 해야 하고, 그 순간 이 파일이
-/// wire 계약을 아는 상태가 된다(위 「순수성 ②」). 비용 문제가 아니다 — 그 crate 엔 런타임이 없다.
+/// Agent identifier. It is the same `uuid::Uuid` as `engram_dashboard_protocol::AgentId`, so it passes straight through at call sites
+/// — ★a duplicate kept knowingly★. Switching to that alias would require importing protocol, and the moment that happens this file
+/// knows the wire contract (「순수성 ②」 (Purity ②) above). It is not a cost matter — that crate has no runtime.
 type AgentId = Uuid;
 
-/// replay 경계 마커의 wire tag. 데몬 codec(tag0/tag1)엔 없는 **src-tauri↔웹뷰 Channel 내부 계약** 값 —
-/// 프론트 decodeOutputFrame 이 미지 tag 로 조용히 skip(전방 호환, M0)하고 M2 가 정식 소비한다.
+/// Wire tag of the replay boundary marker. A **src-tauri↔webview Channel-internal contract** value absent from the daemon codec (tag0/tag1) —
+/// the frontend decodeOutputFrame quietly skips it as an unknown tag (forward compatible, M0) and M2 consumes it formally.
 pub const MARKER_TAG: u8 = 255;
 
-/// 마커 프레임 총 길이 = tag(1) + agentId(16) + epoch(4) + gen(8) + flags(1) + replay_from(8) = 38바이트.
-/// ★셸과 웹뷰가 한 빌드로 나가므로 웹뷰는 이보다 짧은 마커를 받지 않는다★(ADR-0231 — 옛 30바이트 포함).
+/// Total marker frame length = tag(1) + agentId(16) + epoch(4) + gen(8) + flags(1) + replay_from(8) = 38 bytes.
+/// ★The shell and webview ship in one build, so the webview does not accept a marker shorter than this★ (ADR-0231 — including the old 30 bytes).
 pub const MARKER_FRAME_LEN: usize = 1 + 16 + 4 + 8 + 1 + 8;
 
-/// replay 경계 마커의 논리 내용(gen 펜스 + 플래그). agentId·epoch 는 인코딩 시 붙인다.
+/// Logical content of the replay boundary marker (gen fence + flags). agentId · epoch are attached at encode time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Marker {
     pub generation: u64,
-    /// 데몬이 ring 하한 초과 과거를 잘랐음(SubscribeAck.truncated 전파) — 뷰가 경고 표면화.
+    /// The daemon cut the past beyond the ring lower bound (propagates SubscribeAck.truncated) — the view surfaces a warning.
     pub truncated: bool,
-    /// 실패 종결(진행 기반 deadline 초과) — 뷰는 flush 금지, 재요청 사다리(M2).
+    /// Failure termination (progress-based deadline exceeded) — the view must not flush, re-request ladder (M2).
     pub failed: bool,
-    /// 이 replay 의 화신은 저장된 대화를 이어받으려고 떴다(SubscribeAck.continues_conversation 전파 —
-    /// 이어받기의 성공 여부가 아니다). ★성공 마커에만 참일 수 있다★ — 실패 마커를 만드는 두 자리
-    /// ([`ReplayFlightSet::check_deadlines`]·[`ReplayFlightSet::on_refused`])가 `false` 로 짓고,
-    /// [`encode_marker_frame`] 도 실패 마커의 bit2 를 지운다. 실패엔 Ack 이 안 왔을 수 있어 값이 없는
-    /// 자리다. 뷰 쪽 계약(ADR-0226 A4): 이 비트는 성공 flush 에서만 읽는다.
+    /// The incarnation of this replay came up to resume a stored conversation (propagates SubscribeAck.continues_conversation —
+    /// not whether the resume succeeded). ★Can be true only on a success marker★ — the two places that build a failure marker
+    /// ([`ReplayFlightSet::check_deadlines`] · [`ReplayFlightSet::on_refused`]) set it to `false`,
+    /// and [`encode_marker_frame`] also clears bit2 of a failure marker. On a failure the Ack may not have come, so it is a spot with no value.
+    /// The view-side contract (ADR-0226 A4): this bit is read only on a success flush.
     pub continues_conversation: bool,
-    /// 이 replay 의 머리 — 그 세대 `SubscribeAck.replay_from`(데몬이 실제로 처음 보낸 seq · 빈 ring 이면
-    /// 다음에 발급할 seq). 뷰가 성공 flush 를 `max(마지막+1, replay_from)` 에서 시작한다(ADR-0231).
-    /// ★버퍼의 최소 seq 로 대신할 수 없어 받는다★ — replay 가 비면 틀린다. Ack 전이면 0 이고, 실패 마커에선
-    /// 뜻이 없다(뷰가 flush 하지 않는다).
+    /// The head of this replay — that generation's `SubscribeAck.replay_from` (the seq the daemon actually sent first · for an empty ring the
+    /// next seq to be issued). The view starts the success flush at `max(마지막+1, replay_from)` (ADR-0231).
+    /// ★Received because it cannot be replaced by the buffer's minimum seq★ — it is wrong when the replay is empty. Before the Ack it is 0, and on a failure marker
+    /// it is meaningless (the view does not flush).
     pub replay_from: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RequestOutcome {
-    /// 이 요청에 배정된 세대 — 호출자가 프론트로 반환한다.
+    /// The generation assigned to this request — the caller returns it to the frontend.
     pub generation: u64,
-    /// `true` = 지금 wire `Subscribe{after_seq:None}` 를 보낸다(idle 이라 즉시 발사).
-    /// `false` = in-flight 중이라 병합됨(Subscribe 는 현 in-flight 해소 시 [`Resolution::send_next`] 로 발사).
+    /// `true` = send the wire `Subscribe{after_seq:None}` now (idle, so fire immediately).
+    /// `false` = merged because an in-flight is running (the Subscribe fires through [`Resolution::send_next`] when the current in-flight resolves).
     pub send_now: bool,
 }
 
 /// [`ReplayFlightSet::on_refused`] 결정.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefusalOutcome {
-    /// 풀 슬롯이 없다 — disconnect 로 이미 청소됐거나, 우리가 낸 적 없는 구독의 거절(stray).
+    /// No pool slot — already cleaned up by a disconnect, or a refusal of a subscription we never issued (stray).
     Ignore,
-    /// 슬롯 해제 완료.
+    /// Slot release done.
     Released {
-        /// 실패 마커. 이미 좀비로 1회 발행됐으면 `None`(중복 발행 금지 — 뷰의 재요청 사다리를 두 번 민다).
+        /// Failure marker. `None` if it was already emitted once as a zombie (no duplicate emission — it would push the view's re-request ladder twice).
         marker: Option<Marker>,
-        /// `true` = 병합된 다음 요청의 Subscribe 를 지금 보낸다.
+        /// `true` = send the merged next request's Subscribe now.
         send_next: bool,
     },
 }
@@ -120,21 +120,21 @@ pub enum RefusalOutcome {
 /// [`ReplayFlightSet::on_complete`] 결정.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resolution {
-    /// Ack 전 도착 Complete(전대 고아) 또는 in_flight 없는 stray.
+    /// A Complete that arrived before Ack (orphan of the previous generation) or a stray with no in_flight.
     Ignore,
     Emit {
         marker: Marker,
-        /// `true` = 병합된 다음 요청의 Subscribe 를 지금 보낸다(현 in-flight 를 그 gen 으로 교체 완료).
+        /// `true` = send the merged next request's Subscribe now (the current in-flight has been replaced with that gen).
         send_next: bool,
     },
 }
 
-/// 한 에이전트의 single-flight 부기. `gen_counter` 는 절대 리셋 안 한다(단조 — 구세대 마커 오인 방지).
+/// Single-flight bookkeeping for one agent. `gen_counter` is never reset (monotonic — prevents mistaking an old-generation marker).
 #[derive(Default)]
 struct AgentFlight {
     gen_counter: u64,
     in_flight: Option<InFlight>,
-    /// in-flight 중 도착한 요청들이 공유하는 "다음 1회 Subscribe" 의 gen. `Some` ⟹ in_flight `Some`(불변식).
+    /// The gen of the "next one Subscribe" shared by the requests that arrived during an in-flight. `Some` ⟹ in_flight `Some` (invariant).
     next_gen: Option<u64>,
 }
 
@@ -144,10 +144,10 @@ struct InFlight {
     truncated: bool,
     continues_conversation: bool,
     replay_from: u64,
-    /// ★좀비 플래그(FIX-1)★: 실패 마커를 이미 1회 발행했음(재발행 금지 표시). 근거는
+    /// ★Zombie flag (FIX-1)★: the failure marker has already been emitted once (a mark against re-emission). The rationale is
     ///   [`ReplayFlightSet::check_deadlines`].
     failed: bool,
-    /// 진행 기반 deadline — frame/Ack 마다 갱신.
+    /// Progress-based deadline — updated by every frame/Ack.
     deadline: Instant,
 }
 
@@ -165,14 +165,14 @@ impl InFlight {
     }
 }
 
-/// 연결 task(actor)가 `&mut` 로 소유해 직렬 조작한다 — 내부 락 없음.
+/// The connection task (actor) owns it by `&mut` and operates it serially — no internal lock.
 pub struct ReplayFlightSet {
     agents: HashMap<AgentId, AgentFlight>,
     deadline: Duration,
 }
 
 impl ReplayFlightSet {
-    /// `deadline` = 진행 기반 무진행 상한(운영 10s급).
+    /// `deadline` = progress-based no-progress limit (around 10s in production).
     pub fn new(deadline: Duration) -> Self {
         Self {
             agents: HashMap::new(),
@@ -180,7 +180,7 @@ impl ReplayFlightSet {
         }
     }
 
-    /// 항상 정확히 1개의 마커로 종결되는 계약의 진입점.
+    /// Entry point of the contract that always terminates with exactly 1 marker.
     pub fn request_replay(&mut self, agent: AgentId, now: Instant) -> RequestOutcome {
         let deadline = self.deadline;
         let f = self.agents.entry(agent).or_default();
@@ -193,9 +193,9 @@ impl ReplayFlightSet {
                 send_now: true,
             }
         } else {
-            // ★coalesce 안전조건★: 요청은 항상 뷰 SubState 등록 *후* 도착하므로 그 뒤에 발사될 Subscribe 에
-            //   병합해도 안전하다(rev2 안전조건이 이 구조로 충족). N뷰 동시 remount ≤ 2회 replay.
-            //   ★좀비 슬롯도 여기로 병합★ — 좀비가 late Complete/disconnect 로 풀릴 때 이 next_gen 이 나간다.
+            // ★Coalesce safety condition★: a request always arrives *after* the view's SubState registration, so merging it into a Subscribe fired later
+            //   is safe (the rev2 safety condition is met by this structure). N views remounting at once ≤ 2 replays.
+            //   ★A zombie slot is merged here too★ — when the zombie is released by a late Complete/disconnect this next_gen goes out.
             let generation = match f.next_gen {
                 Some(g) => g,
                 None => {
@@ -211,19 +211,19 @@ impl ReplayFlightSet {
         }
     }
 
-    // ★송신 실패 롤백 진입점은 의도적으로 없다(되살리지 마라)★: 옛 `abort_in_flight` 는 send_now
-    //   Subscribe 의 wire 송신 실패 시 슬롯만 비우고 **연결은 계속 폴링**했다. 그 조합은 이 파일의 단일
-    //   outstanding 전제(모듈 헤더)를 호출자 쪽 가정 위에 올려놓는다 — "송신 실패 = 상대가 못 받았다"가
-    //   참일 때만 안전한데, 그건 tungstenite/TCP 의 오류 의미론이지 우리가 강제하는 성질이 아니다. 대신
-    //   호출자가 그 자리에서 **연결을 끊고**(`connection.rs` Subscribe(replay) 송신 실패 분기)
-    //   [`Self::on_disconnect`] 가 일괄 청소한다 — 롤백보다 넓게 지우지만 전제를 코드로 만든다.
+    // ★There is deliberately no send-failure rollback entry point (do not revive it)★: the old `abort_in_flight` only emptied the slot when the wire send of the send_now
+    //   Subscribe failed and **kept polling the connection**. That combination puts this file's single
+    //   outstanding premise (module header) on top of an assumption about the caller — it is safe only if "send failure = the peer did not receive it"
+    //   is true, and that is the error semantics of tungstenite/TCP, not a property we enforce. Instead the
+    //   caller **drops the connection** on the spot (the `connection.rs` Subscribe(replay) send-failure branch) and
+    //   [`Self::on_disconnect`] cleans everything up — it erases more broadly than a rollback, but it makes the premise into code.
     //   One sanctioned exception (the connection driver's `write_follow_up`): a merged request promoted by
     //   `on_complete` / `on_refused` whose agent no window shows any more is released with `on_refused` *before*
     //   its Subscribe is attempted — it never reached the wire, so the single-outstanding premise holds.
 
-    /// single-flight 라 도착하는 Ack 는 항상 유일 outstanding in-flight 의 것이다(좀비 포함 — 만료
-    /// 세대의 late Ack 도 그 슬롯을 가리킨다). 그래서 gen 대조 없이 현 슬롯에 그대로 각인한다.
-    /// `replay_from` = 그 Ack 의 replay 머리 — 이 세대의 성공 마커가 싣는다([`Marker::replay_from`]).
+    /// Being single-flight, an arriving Ack is always that of the one outstanding in-flight (zombie included — a late Ack
+    /// of an expired generation also points at that slot). So it stamps onto the current slot as is, with no gen comparison.
+    /// `replay_from` = the replay head of that Ack — carried by this generation's success marker ([`Marker::replay_from`]).
     pub fn on_ack(
         &mut self,
         agent: AgentId,
@@ -244,7 +244,7 @@ impl ReplayFlightSet {
         }
     }
 
-    /// binary frame 등 그 에이전트의 진행 신호 — deadline 리셋(healthy-slow replay 무오탐).
+    /// Progress signal of that agent such as a binary frame — resets the deadline (no false positive for a healthy-slow replay).
     pub fn note_progress(&mut self, agent: AgentId, now: Instant) {
         let deadline = self.deadline;
         if let Some(f) = self.agents.get_mut(&agent) {
@@ -254,12 +254,12 @@ impl ReplayFlightSet {
         }
     }
 
-    /// **acked 상태의 in_flight 에만** 성공 마커를 각인한다. wire 순서가 `[Ack_k]…[Complete_k][Ack_{k+1}]`
-    /// 이므로 Ack 전에 도착한 Complete 는 증명 가능하게 전대(前代)의 고아 → Ignore(오귀속 원천 차단).
-    /// `now` = 새 in-flight 의 deadline 기점.
+    /// Stamps a success marker **only on an in_flight in acked state**. The wire order is `[Ack_k]…[Complete_k][Ack_{k+1}]`,
+    /// so a Complete that arrives before Ack is provably an orphan of the previous generation → Ignore (misattribution blocked at the source).
+    /// `now` = deadline baseline of the new in_flight.
     ///
-    /// ★좀비도 여기서 해제된다(FIX-1)★: deadline 으로 좀비(`failed=true`)가 된 슬롯도 late Ack→late Complete
-    /// 면 acked 게이트를 통과해 **같은 gen 의 성공 마커**로 해제된다(replay 가 실제로 완료됐다는 증거).
+    /// ★A zombie is released here too (FIX-1)★: a slot that became a zombie (`failed=true`) through the deadline also passes the acked gate
+    /// on a late Ack→late Complete and is released with a **success marker of the same gen** (evidence that the replay actually completed).
     pub fn on_complete(&mut self, agent: AgentId, now: Instant) -> Resolution {
         let deadline = self.deadline;
         let Some(f) = self.agents.get_mut(&agent) else {
@@ -270,7 +270,7 @@ impl ReplayFlightSet {
             return Resolution::Ignore;
         }
         let inf = f.in_flight.take().expect("acked 이면 in_flight 는 Some");
-        // ★같은 gen 성공 마커★: 좀비였든(late Complete) 정상이든 replay 완료 = 성공(failed:false).
+        // ★Same-gen success marker★: whether it was a zombie (late Complete) or normal, replay completed = success (failed:false).
         let marker = Marker {
             generation: inf.generation,
             truncated: inf.truncated,
@@ -282,24 +282,24 @@ impl ReplayFlightSet {
         Resolution::Emit { marker, send_next }
     }
 
-    /// ★진행 기반 deadline sweep(FIX-1 — zombie 의미론)★. 무진행으로 만료된 in-flight 를 **실패 마커로 1회
-    /// 발행**하고 좀비(`failed=true`)로 표시하되 **슬롯은 유지하고 대기열은 전진시키지 않는다**. 반환:
-    /// `(agent, 실패 마커)` 목록(호출자가 마커만 송신 — 다음 Subscribe 는 여기서 절대 안 나간다).
+    /// ★Progress-based deadline sweep (FIX-1 — zombie semantics)★. An in-flight that expired with no progress is **emitted once as a failure
+    /// marker** and marked as a zombie (`failed=true`), but **the slot is kept and the queue is not advanced**. Returns:
+    /// a list of `(agent, 실패 마커)` (the caller sends only the markers — the next Subscribe never goes out from here).
     ///
-    /// ★왜 큐를 전진 안 시키나(cross-family 리뷰어 적출 — load-bearing)★: 타임아웃이 즉시 다음 Subscribe 로
-    /// 넘어가 슬롯을 교체하면, 만료 세대의 *늦은* Ack/Complete 가 도착했을 때 그게 새 in-flight 에 오각인돼
-    /// **replay 가 아직 안 돈 새 gen 에 성공 마커**가 붙는다(gen 펜스 붕괴). 좀비로 슬롯을 붙잡아 두면
-    /// Ack/Complete 는 구조적으로 유일 outstanding Subscribe(=이 좀비)만 가리킬 수 있어 오귀속이 불가능하다.
-    /// 슬롯 해제는 resolution(late Complete) · **거절**([`Self::on_refused`]) · disconnect 로만 일어난다.
+    /// ★Why the queue is not advanced (found by the cross-family reviewer — load-bearing)★: if a timeout moved straight to the next Subscribe and
+    /// replaced the slot, then when a *late* Ack/Complete of the expired generation arrives it would be misstamped onto the new in-flight and a
+    /// **success marker would be attached to a new gen whose replay has not run yet** (gen fence collapse). If the zombie holds the slot,
+    /// an Ack/Complete can structurally point only at the one outstanding Subscribe (= this zombie), so misattribution is impossible.
+    /// The slot is released only by resolution (late Complete) · **refusal** ([`Self::on_refused`]) · disconnect.
     ///
-    /// ★거절은 왜 해제해도 되나 — 타임아웃은 왜 안 되나(위 hazard 를 푸는 근거)★: 이 둘의 차이는
-    /// **응답이 아직 올 수 있는가** 하나다. 타임아웃은 "10초째 조용하다"는 관측일 뿐이라 늦은 Ack/Complete
-    /// 가 여전히 올 수 있고, 그래서 슬롯을 붙잡아 오귀속을 구조적으로 막아야 한다. 반면 거절
-    /// (`AgentEvent::SubscribeFailed`)은 데몬이 **그 Subscribe 를 처리하지 않기로 끝냈다는 통보**이고,
-    /// 그 뒤로 그 구독에 대한 Ack 도 Complete 도 발행되지 않는다(데몬 `handle_subscribe` 는 Ack 발행 전에
-    /// 조기 return 한다 — 그 실패는 `get_session` 조회 실패뿐이라 구조적으로 `on_ready` 앞이다).
-    /// 오귀속될 응답 자체가 존재하지 않으므로 즉시 해제가 안전하다.
-    /// 이 차이 때문에 "만료된 좀비를 해제한다"는 손쉬운 변형을 **택하지 않았다**(실측 2026-08-19).
+    /// ★Why a refusal may release and a timeout may not (the rationale that resolves the hazard above)★: the difference between the two is
+    /// **whether a response can still come**, and nothing else. A timeout is merely the observation "it has been quiet for 10 seconds", so a late Ack/Complete
+    /// can still come, which is why the slot must be held to block misattribution structurally. A refusal
+    /// (`AgentEvent::SubscribeFailed`), on the other hand, is **a notice that the daemon has finished by deciding not to process that Subscribe**,
+    /// and after it neither Ack nor Complete is emitted for that subscription (the daemon's `handle_subscribe` returns early before emitting Ack — its failure is only
+    /// the `get_session` lookup failure, so it is structurally before `on_ready`).
+    /// Since there is no response left that could be misattributed, releasing at once is safe.
+    /// Because of this difference we **did not choose** the easy variant "release the expired zombie" (measured 2026-08-19).
     pub fn check_deadlines(&mut self, now: Instant) -> Vec<(AgentId, Marker)> {
         let mut out = Vec::new();
         for (agent, f) in self.agents.iter_mut() {
@@ -330,29 +330,29 @@ impl ReplayFlightSet {
             .any(|f| f.in_flight.as_ref().is_some_and(|inf| !inf.failed))
     }
 
-    /// 데몬이 이 에이전트의 `Subscribe` 를 **거절**했다(`AgentEvent::SubscribeFailed`). 슬롯을 해제하고,
-    /// 아직 실패 마커를 안 냈으면 지금 내고(뷰가 10초 deadline 을 기다리지 않게), 병합된 대기열을 전진시킨다.
+    /// The daemon **refused** this agent's `Subscribe` (`AgentEvent::SubscribeFailed`). It releases the slot, and
+    /// if the failure marker has not been emitted yet it emits it now (so the view does not wait for the 10-second deadline), and advances the merged queue.
     ///
-    /// ★해제가 안전한 이유★ = [`Self::check_deadlines`] 의 "거절은 왜 해제해도 되나" 문단(그 hazard 를
-    /// 푸는 근거가 거기 있다). 요약: 거절된 구독엔 뒤따를 Ack/Complete 가 없어 오귀속될 응답이 없다.
+    /// ★Why the release is safe★ = the paragraph "why a refusal may release" of [`Self::check_deadlines`] (the rationale that resolves
+    /// that hazard is there). Summary: a refused subscription has no Ack/Complete to follow, so no response can be misattributed.
     ///
-    /// ★왜 세대를 대조하지 않나 — "푸는 슬롯이 곧 거절당한 그 슬롯"인 근거★: wire 거절
-    /// (`AgentEvent::SubscribeFailed`)엔 세대 필드가 없다(데몬은 gen 을 모른다). 그래도 현 `in_flight` 를
-    /// 풀어도 되는 건 **그 에이전트의 Subscribe 가 wire 에 많아야 하나뿐**이기 때문이다 — 모듈 헤더의 단일
-    /// outstanding 전제. 새 Subscribe 는 (a) idle 요청 · (b) [`Self::on_complete`]/이 함수의 `send_next`
-    /// 로만 나가고, 둘 다 **직전 세대가 해소된 뒤에** 나간다. 그래서 "거절이 도착했는데 그 대상은 이미
-    /// 해소된 구세대이고 현 슬롯은 다른 세대" 라는 상태가 성립하지 않는다. ★이 전제를 깨는 유일한 형태 =
-    /// 추적을 잃은 채 wire 에 남은 Subscribe★ 이고, 그런 진입점을 만들지 않는다(위 "송신 실패 롤백 진입점은
-    /// 의도적으로 없다" 주석).
+    /// ★Why the generation is not compared — the rationale that "the slot being released is the very slot that was refused"★: the wire refusal
+    /// (`AgentEvent::SubscribeFailed`) has no generation field (the daemon does not know gen). Even so, releasing the current `in_flight`
+    /// is fine because **that agent has at most one Subscribe on the wire** — the module header's single
+    /// outstanding premise. A new Subscribe goes out only via (a) an idle request · (b) the `send_next` of [`Self::on_complete`] / this function,
+    /// and both go out **after the previous generation has been resolved**. So the state "a refusal arrived but its target is an already
+    /// resolved old generation and the current slot is another generation" cannot hold. ★The only shape that breaks this premise =
+    /// a Subscribe left on the wire with its tracking lost★, and no such entry point is created (the comment "there is deliberately no
+    /// send-failure rollback entry point" above).
     ///
-    /// ★acked 슬롯은 해제하지 않는다(방어)★: Ack 를 받은 구독은 데몬이 **받아들인** 것이라 거절과 공존할
-    /// 수 없다. 그래도 막는 이유 = 해제해 버리면 뒤따라오는 `ReplayComplete` 가 빈 슬롯을 만나
-    /// [`Self::on_complete`] 의 acked 게이트에서 `Ignore` 로 떨어지고, 그 replay 를 기다리던 뷰는 성공
-    /// 마커를 영영 못 받는다. 잘못 발화한 거절 하나가 **정상 replay 를 죽이는** 경로라 값싸게 닫는다.
+    /// ★An acked slot is not released (defense)★: a subscription that received an Ack was **accepted** by the daemon, so it cannot
+    /// coexist with a refusal. The reason to block it anyway = if it were released, the `ReplayComplete` that follows would meet an empty slot and
+    /// fall to `Ignore` at the acked gate of [`Self::on_complete`], and the view waiting for that replay would never
+    /// receive the success marker. It is a path where one misfired refusal **kills a normal replay**, so it is closed cheaply.
     ///
-    /// ★거절 사유가 일시적이어도 해제가 맞다★: 이 함수는 "재시도해도 될까"를 판정하지 않는다 — 재요청
-    /// 구동자는 뷰의 bounded 사다리다. 해제는 그 재요청이 **wire 로 나갈 수 있게** 만들 뿐이고, 붙잡아
-    /// 두면 일시적 실패조차 영구 두절이 된다(이 결함의 실제 모습).
+    /// ★Releasing is right even when the refusal reason is transient★: this function does not decide "is a retry worthwhile" — the re-request
+    /// driver is the view's bounded ladder. Releasing only makes that re-request **able to go out on the wire**, and holding
+    /// the slot would turn even a transient failure into a permanent cutoff (the actual shape of this defect).
     pub fn on_refused(&mut self, agent: AgentId, now: Instant) -> RefusalOutcome {
         let deadline = self.deadline;
         let Some(f) = self.agents.get_mut(&agent) else {
@@ -379,8 +379,8 @@ impl ReplayFlightSet {
         RefusalOutcome::Released { marker, send_next }
     }
 
-    /// 연결 단절 — 내부 클리어만, **마커는 발행하지 않는다**(재요청 구동자는 프론트 connected 전이 단독).
-    /// agent-gone 으로 disconnect 까지 남은 좀비도 여기서 최종 청소된다.
+    /// Connection lost — internal clear only, **no marker is emitted** (the re-request driver is the frontend connected transition alone).
+    /// A zombie left until disconnect due to agent-gone is also finally cleaned here.
     pub fn on_disconnect(&mut self) {
         for f in self.agents.values_mut() {
             f.in_flight = None;
@@ -399,15 +399,15 @@ fn advance_next(f: &mut AgentFlight, now: Instant, deadline: Duration) -> bool {
     }
 }
 
-/// replay 경계 마커를 wire 프레임 bytes 로 인코딩(Channel 내부 계약, ADR-0046). 레이아웃(M2 파서 계약 ·
-/// 웹뷰 `decodeReplayMarker` 와 한 쌍):
-/// `[tag=255:1][agentId:16][epoch:4 BE][gen:8 BE][flags:1][replay_from:8 BE]` — 38바이트 고정.
+/// Encode a replay boundary marker into wire frame bytes (Channel-internal contract, ADR-0046). Layout (M2 parser contract ·
+/// a pair with the webview `decodeReplayMarker`):
+/// `[tag=255:1][agentId:16][epoch:4 BE][gen:8 BE][flags:1][replay_from:8 BE]` — fixed 38 bytes.
 ///
-/// ★엔디안(FIX-4 — 마커 프레임 전체 BE 통일)★: agentId 는 RFC4122 network order(frame 헤더 동형), epoch·gen·
-/// replay_from 은 모두 **big-endian**(binary frame 헤더가 uniformly BE 인 것과 동일 규약 — M2 파서가 한 규약으로
-/// 읽게). `replay_from` 은 flags 뒤 끝자리에 붙였다(ADR-0231) — 앞 칸 오프셋이 그대로라 옛 판독이 안 밀린다.
+/// ★Endianness (FIX-4 — the whole marker frame unified to BE)★: agentId is RFC4122 network order (same form as the frame header), epoch · gen ·
+/// replay_from are all **big-endian** (the same convention as the binary frame header being uniformly BE — so the M2 parser
+/// reads with one convention). `replay_from` is attached at the very end after flags (ADR-0231) — the earlier field offsets stay put, so old readers do not shift.
 /// flags bit0=truncated, bit1=failed, bit2=continues_conversation.
-/// ★bit2 는 실패 마커(bit1)에서 늘 0 이다 — 입력 `Marker` 가 참을 들고 와도 여기서 지운다(ADR-0226)★.
+/// ★bit2 is always 0 on a failure marker (bit1) — even if the input `Marker` carries true, it is cleared here (ADR-0226)★.
 pub fn encode_marker_frame(agent_id: AgentId, epoch: u32, marker: Marker) -> Vec<u8> {
     let mut buf = Vec::with_capacity(MARKER_FRAME_LEN);
     buf.push(MARKER_TAG);
@@ -446,7 +446,7 @@ mod tests {
         Duration::from_secs(10)
     }
 
-    // ── gen 단조 + idle 요청 = Subscribe 1회 ───────────────────────────────────────────
+    // ── gen monotonic + idle request = Subscribe once ───────────────────────────────────────────
     #[test]
     fn idle_request_allocates_gen_and_sends_subscribe() {
         let mut fs = ReplayFlightSet::new(dl());
@@ -516,7 +516,7 @@ mod tests {
         }
     }
 
-    // ── acked 게이트 ──────────────────────────────────────────────────────────────────
+    // ── acked gate ──────────────────────────────────────────────────────────────────
     #[test]
     fn complete_before_ack_is_orphan_ignored() {
         let mut fs = ReplayFlightSet::new(dl());
@@ -553,7 +553,7 @@ mod tests {
         );
     }
 
-    // ── FIX-1 (a): 좀비 late-resolution 시퀀스 ────────────────────────────────────────
+    // ── FIX-1 (a): zombie late-resolution sequence ────────────────────────────────────────
     #[test]
     fn zombie_late_ack_complete_emits_success_same_gen_then_advances() {
         let mut fs = ReplayFlightSet::new(Duration::from_millis(100));
@@ -592,15 +592,15 @@ mod tests {
         }
     }
 
-    // ── FIX-1 (b): 좀비 미해제 + disconnect ───────────────────────────────────────────
+    // ── FIX-1 (b): zombie not released + disconnect ───────────────────────────────────────────
     #[test]
     fn zombie_unresolved_then_disconnect_clears_no_markers_counter_monotonic() {
         let mut fs = ReplayFlightSet::new(Duration::from_millis(100));
         let a = aid(1);
         let start = t0();
         fs.request_replay(a, start); // gen1
-        fs.request_replay(a, start); // gen2 대기열
-                                     // agent-gone 시나리오: 이후 Ack/Complete 가 영영 안 온다.
+        fs.request_replay(a, start); // gen2 queue
+                                     // agent-gone scenario: afterwards neither Ack nor Complete ever comes.
         let expired = fs.check_deadlines(start + Duration::from_millis(200));
         assert_eq!(expired.len(), 1);
         assert_eq!(expired[0].1.generation, 1);
@@ -613,7 +613,7 @@ mod tests {
         assert!(after.send_now, "disconnect 로 슬롯 비어 즉시 발사");
     }
 
-    // ── 진행 기반 deadline ────────────────────────────────────────────────────────────
+    // ── progress-based deadline ────────────────────────────────────────────────────────────
     #[test]
     fn missing_complete_expires_to_failure_marker_then_zombie_resolves() {
         let mut fs = ReplayFlightSet::new(Duration::from_millis(100));
@@ -654,7 +654,7 @@ mod tests {
         fs.on_ack(a, false, false, 0, start);
         let mut now = start;
         for _ in 0..5 {
-            now += Duration::from_millis(80); // deadline(100ms) 전에 진행.
+            now += Duration::from_millis(80); // progress before the deadline (100ms).
             fs.note_progress(a, now);
             assert!(fs.check_deadlines(now).is_empty(), "진행 중이면 만료 0");
         }
@@ -667,11 +667,11 @@ mod tests {
         ));
     }
 
-    // ── 거절(SubscribeFailed) — 슬롯 해제 ──────────────────────────────────────────────
-    // ★회귀 대상(실측 2026-08-19)★: 데몬 재기동 직후엔 세션이 없어(부팅 자동 복원 OFF) 재연결 replay 의
-    //   Subscribe 가 "agent not found" 로 거절된다. 거절엔 Ack/Complete 가 없어 슬롯이 좀비로 남았고,
-    //   그 뒤 **그 에이전트의 Subscribe 가 두 번 다시 나가지 못해**(모든 요청이 병합) 재spawn 해도 출력이
-    //   모든 창에서 영구 두절됐다. 아래 첫 케이스가 정확히 그 "두 번 다시"를 깬다.
+    // ── refusal (SubscribeFailed) — slot release ──────────────────────────────────────────────
+    // ★Regression target (measured 2026-08-19)★: right after a daemon restart there are no sessions (boot auto-restore OFF), so the reconnect replay's
+    //   Subscribe is refused as "agent not found". A refusal has no Ack/Complete, so the slot stayed a zombie, and
+    //   after that **that agent's Subscribe could never go out again** (every request merged), so even after a re-spawn output was
+    //   permanently cut off in all windows. The first case below breaks exactly that "never again".
     #[test]
     fn refusal_releases_slot_so_next_request_sends_again() {
         let mut fs = ReplayFlightSet::new(dl());
@@ -690,7 +690,7 @@ mod tests {
             other => panic!("거절은 슬롯을 해제해야: {other:?}"),
         }
 
-        // ★이 단언이 결함의 핵심★ — 고치기 전엔 send_now=false 가 영원히 반복됐다.
+        // ★This assertion is the heart of the defect★ — before the fix send_now=false repeated forever.
         let next = fs.request_replay(a, now);
         assert_eq!(next.generation, 2, "gen 단조");
         assert!(next.send_now, "해제됐으니 새 Subscribe 가 즉시 나간다");
@@ -712,7 +712,7 @@ mod tests {
             }
             other => panic!("해제여야: {other:?}"),
         }
-        // gen2 가 in-flight 로 올라섰다 — 정상 Ack/Complete 로 성공 마커까지 간다.
+        // gen2 has risen to in-flight — it goes through the normal Ack/Complete up to the success marker.
         fs.on_ack(a, false, false, 0, now);
         assert!(matches!(
             fs.on_complete(a, now),
@@ -727,16 +727,16 @@ mod tests {
         ));
     }
 
-    // ★단일 outstanding 전제의 박제★: 거절엔 세대 필드가 없으므로 "지금 풀리는 게 방금 거절당한 그 세대"는
-    //   순서로만 성립한다 — 연속 거절이 각각 **그때 wire 에 나가 있던** 세대를 낸다. 이게 어긋나면 gen 펜스가
-    //   무너진다(모듈 헤더 · on_refused 문단).
+    // ★Pinning the single-outstanding premise★: a refusal has no generation field, so "what is released now is the very generation just refused" holds
+    //   only by order — consecutive refusals each yield the generation **that was on the wire at that time**. If this goes wrong the gen fence
+    //   collapses (module header · on_refused paragraph).
     #[test]
     fn consecutive_refusals_release_the_then_outstanding_generation() {
         let mut fs = ReplayFlightSet::new(dl());
         let a = aid(1);
         let now = t0();
-        fs.request_replay(a, now); // gen1 = wire 로 나감
-        let w = fs.request_replay(a, now); // gen2 병합(아직 안 나감)
+        fs.request_replay(a, now); // gen1 = went out on the wire
+        let w = fs.request_replay(a, now); // gen2 merged (not sent yet)
         assert_eq!((w.generation, w.send_now), (2, false));
 
         match fs.on_refused(a, now) {
@@ -746,7 +746,7 @@ mod tests {
             }
             other => panic!("해제여야: {other:?}"),
         }
-        // 두 번째 거절이 도착 — 그 시점 outstanding 은 gen2 하나뿐이다.
+        // The second refusal arrives — at that point gen2 is the only outstanding one.
         match fs.on_refused(a, now) {
             RefusalOutcome::Released { marker, send_next } => {
                 assert_eq!(marker.expect("실패 마커").generation, 2, "둘째 거절 = gen2");
@@ -760,7 +760,7 @@ mod tests {
         );
     }
 
-    // 좀비(만료로 실패 마커 1회 발행됨)가 뒤늦게 거절을 받으면: 해제는 하되 마커는 **다시 내지 않는다**.
+    // If a zombie (a failure marker was emitted once through expiry) receives a refusal late: it releases but **does not emit the marker again**.
     #[test]
     fn refusal_on_expired_zombie_releases_without_duplicate_marker() {
         let mut fs = ReplayFlightSet::new(Duration::from_millis(100));
@@ -787,8 +787,8 @@ mod tests {
         );
     }
 
-    // ★방어★: Ack 를 받은(=데몬이 받아들인) 슬롯은 거절로 해제하지 않는다. 해제하면 뒤따라올
-    //   ReplayComplete 가 빈 슬롯을 만나 Ignore 로 떨어져 그 replay 의 성공 마커가 영영 안 나간다.
+    // ★Defense★: a slot that received an Ack (= accepted by the daemon) is not released by a refusal. If released, the following
+    //   ReplayComplete would meet an empty slot and fall to Ignore, and that replay's success marker would never go out.
     #[test]
     fn refusal_never_releases_an_acked_healthy_slot() {
         let mut fs = ReplayFlightSet::new(dl());
@@ -802,7 +802,7 @@ mod tests {
             RefusalOutcome::Ignore,
             "acked 슬롯은 거절로 안 풀린다"
         );
-        // 정상 완료 경로가 그대로 살아 있어야 한다.
+        // The normal completion path must stay alive as is.
         assert!(matches!(
             fs.on_complete(a, now),
             Resolution::Emit {
@@ -831,10 +831,10 @@ mod tests {
         );
     }
 
-    // ── 송신 실패 = 단절로 청소(옛 abort_in_flight 롤백을 대체) ────────────────────────
-    // ★회귀 대상★: 옛 코드는 wire 송신 실패에 슬롯만 비우고 연결을 계속 폴링했다 — 추적을 잃은 Subscribe 가
-    //   wire 에 남을 수 있으면 뒤늦은 거절/Ack 가 신세대 슬롯에 오각인된다(gen 펜스 붕괴). 지금은 호출자가
-    //   그 자리에서 연결을 끊고 이 경로가 일괄 청소한다. 재요청이 다시 나갈 수 있어야 한다는 결과는 같다.
+    // ── send failure = cleaned by disconnect (replaces the old abort_in_flight rollback) ────────────────────────
+    // ★Regression target★: the old code only emptied the slot on a wire send failure and kept polling the connection — if a Subscribe that lost tracking
+    //   can remain on the wire, a late refusal/Ack is misstamped onto the new-generation slot (gen fence collapse). Now the caller
+    //   drops the connection on the spot and this path cleans everything up. The result that a re-request must be able to go out again is the same.
     #[test]
     fn send_failure_path_clears_via_disconnect_and_next_request_sends() {
         let mut fs = ReplayFlightSet::new(dl());
@@ -842,7 +842,7 @@ mod tests {
         let now = t0();
         let first = fs.request_replay(a, now);
         assert_eq!((first.generation, first.send_now), (1, true));
-        fs.on_disconnect(); // 송신 실패 → 호출자가 연결을 끊는다.
+        fs.on_disconnect(); // Send failure → the caller drops the connection.
         let next = fs.request_replay(a, now);
         assert_eq!(next.generation, 2, "gen 단조(1 소진 → 2)");
         assert!(next.send_now, "단절 청소로 슬롯 비어 즉시 재발사");
@@ -863,21 +863,21 @@ mod tests {
         let a = aid(1);
         let now = t0();
         fs.request_replay(a, now); // gen1 in-flight
-        fs.request_replay(a, now); // gen2 대기열
+        fs.request_replay(a, now); // gen2 queue
         fs.on_disconnect();
         let out = fs.request_replay(a, now);
         assert_eq!(out.generation, 3, "gen_counter 단조 유지(2까지 소진 → 3)");
         assert!(out.send_now, "단절로 in-flight 비어 즉시 발사");
     }
 
-    // ── truncated 플래그 전파 ──────────────────────────────────────────────────────────
+    // ── truncated flag propagation ──────────────────────────────────────────────────────────
     #[test]
     fn truncated_flag_propagates_to_success_marker() {
         let mut fs = ReplayFlightSet::new(dl());
         let a = aid(1);
         let now = t0();
         fs.request_replay(a, now);
-        fs.on_ack(a, true, false, 0, now); // 데몬이 하한 초과 과거를 잘랐음.
+        fs.on_ack(a, true, false, 0, now); // The daemon cut the past beyond the lower bound.
         match fs.on_complete(a, now) {
             Resolution::Emit { marker, .. } => {
                 assert!(marker.truncated, "SubscribeAck.truncated 가 마커로 전파");
@@ -887,7 +887,7 @@ mod tests {
         }
     }
 
-    // ── 마커 인코딩 규격 ──────────────────────────────────────────────────────────────
+    // ── marker encoding spec ──────────────────────────────────────────────────────────────
     #[test]
     fn marker_frame_layout_is_fixed() {
         let a = aid(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10);
@@ -937,7 +937,7 @@ mod tests {
         assert_eq!(buf[29], 0b0000_0010, "flags: failed=bit1");
     }
 
-    // ── 이어받기 표식(ADR-0226) — Ack 에서 성공 마커 bit2 까지 ─────────────────────────
+    // ── resume marker (ADR-0226) — from Ack to success marker bit2 ─────────────────────────
     #[test]
     fn continues_conversation_encodes_bit2_on_success_and_is_cleared_on_failure() {
         let a = aid(1);
@@ -992,8 +992,8 @@ mod tests {
         }
     }
 
-    // ★실패 마커는 Ack 이 참을 말했어도 표식을 싣지 않는다★ — 만료가 Ack 뒤에 와도 그렇다. 그 뒤 늦은
-    //   Complete 의 성공 마커는 같은 Ack 의 표식을 싣는다.
+    // ★A failure marker does not carry the resume marker even if the Ack said true★ — even when expiry comes after the Ack. The success marker of the later
+    //   Complete after that carries the same Ack's resume marker.
     #[test]
     fn a_deadline_failure_marker_never_carries_continues_conversation() {
         let mut fs = ReplayFlightSet::new(Duration::from_millis(100));
@@ -1017,7 +1017,7 @@ mod tests {
         }
     }
 
-    // 만료가 Ack **앞**이면(좀비) 표식은 늦은 Ack 에서 온다 — 실패 마커는 0, 늦은 성공 마커는 참.
+    // If expiry is **before** the Ack (zombie), the resume marker comes from the late Ack — failure marker 0, late success marker true.
     #[test]
     fn a_zombies_late_ack_still_lands_its_flag_on_the_success_marker() {
         let mut fs = ReplayFlightSet::new(Duration::from_millis(100));
@@ -1056,11 +1056,11 @@ mod tests {
         }
     }
 
-    // ★표식은 세대마다 자기 Ack 의 값이다★ — 앞 세대의 Ack 이 참이었어도, 병합돼 뒤이어 나간 세대의
-    //   성공 마커는 자기 Ack(거짓)의 값을 싣는다. 잡는 것은 앞 세대의 참이 **눌어붙어** 넘어오는 모양 —
-    //   거짓 Ack 이 칸을 안 덮어쓰고(OR 누적 · 참일 때만 쓰기) 그 칸이 세대를 넘어 살아남는(초기화 누락 ·
-    //   에이전트당 한 칸) 경우다. 둘 중 하나만으로는 새지 않는다 — 성공 마커마다 자기 Ack 이 먼저
-    //   오므로, 덮어쓰기만 제대로면 칸을 어디 두든 새지 않고, 세대마다 새로 서면 쌓을 것이 없다.
+    // ★The resume marker is each generation's own Ack value★ — even if the previous generation's Ack was true, the success marker of a generation that was merged and went out
+    //   afterwards carries its own Ack's (false) value. What this catches is the shape where the previous generation's true **sticks** and carries over —
+    //   a case where a false Ack does not overwrite the field (OR accumulation · write only when true) and that field survives across generations (missing
+    //   reset · one field per agent). Either one alone does not leak — every success marker is preceded by its own Ack,
+    //   so as long as overwriting is done right it does not leak wherever the field is placed, and if it is built fresh per generation there is nothing to accumulate.
     #[test]
     fn the_next_generation_does_not_inherit_the_previous_acks_flag() {
         let mut fs = ReplayFlightSet::new(dl());
@@ -1090,7 +1090,7 @@ mod tests {
         }
     }
 
-    // ── replay 머리(ADR-0231) — Ack 에서 성공 마커까지 ───────────────────────────────
+    // ── replay head (ADR-0231) — from Ack to success marker ───────────────────────────────
     #[test]
     fn replay_from_propagates_from_the_ack_to_the_success_marker() {
         let mut fs = ReplayFlightSet::new(dl());
@@ -1107,9 +1107,9 @@ mod tests {
         }
     }
 
-    // ★빈 replay 의 머리 0 이 그대로 간다★ — 새 화신(빈 ring)은 머리 0 을 받고, 뷰가 그 값으로 flush 를 시작해
-    //   마커 뒤로 늦게 온 seq 0 을 붙든다. 「0 = 모름」으로 특별취급하지 않는다(Ack 전 기본값과 같은 수라도
-    //   성공 마커는 늘 Ack 뒤에만 선다).
+    // ★The head 0 of an empty replay goes through as is★ — a new incarnation (empty ring) receives head 0, and the view starts its flush with that value
+    //   and catches the seq 0 that arrives late after the marker. 0 is not special-cased as 「0 = 모름」 (0 = unknown) (even if it is the same number as the default before Ack,
+    //   a success marker always stands only after an Ack).
     #[test]
     fn an_empty_replays_head_zero_reaches_the_marker_bytes() {
         let mut fs = ReplayFlightSet::new(dl());
@@ -1124,7 +1124,7 @@ mod tests {
         assert_eq!(&buf[30..38], &0u64.to_be_bytes());
     }
 
-    // ★머리는 세대마다 자기 Ack 의 값이다★ — 병합돼 뒤이어 나간 세대가 앞 세대의 머리를 물려받지 않는다.
+    // ★The head is each generation's own Ack value★ — a generation merged and sent afterward does not inherit the previous generation's head.
     #[test]
     fn the_next_generation_carries_its_own_acks_replay_from() {
         let mut fs = ReplayFlightSet::new(dl());

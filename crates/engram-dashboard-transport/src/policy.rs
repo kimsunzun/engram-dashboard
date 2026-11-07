@@ -1,65 +1,65 @@
-//! 정책 값 — ★전부 crate 기본값이 있고 소비자가 덮는다★(ADR-0177 결정 4).
+//! Policy values — ★every one has a crate default and the consumer overrides it★ (ADR-0177 decision 4).
 //!
-//! [`crate::Registry::new`] 가 명부 기본값을, [`crate::Registry::add_with_policy`] 가 상대별 덮어쓰기를
-//! 받는다.
+//! [`crate::Registry::new`] takes the registry defaults and [`crate::Registry::add_with_policy`] takes the per-peer
+//! overrides.
 //!
-//! ★근거 없이 고른 값에는 그 자리에 「미검」을 적어 둔다★ — 적어 두지 않으면 다음 세션이 추측을 실측으로
-//! 읽는다. 미검인 것: `request_timeout` · `write_deadline` · `reconnect.jitter` · `inbound_queue` ·
+//! ★Where a value was chosen without grounds, write 「미검」 (unverified) at that spot★ — if not written, the next session
+//! reads a guess as a measurement. The unverified ones: `request_timeout` · `write_deadline` · `reconnect.jitter` · `inbound_queue` ·
 //! `frame_buffer` · `retired_tags` · `max_streams` · `resume_timeout` · `live_dwell` · `flush_timeout`.
-//! 나머지는 현행 코드값 보존이다.
+//! The rest preserve current code values.
 
 use std::time::Duration;
 
-/// 큐가 찼을 때. ★나가는 큐에만 적용된다★ — 위로 올라가는 줄이 차는 것은 소비자가 그 상대를 못
-/// 따라간다는 뜻이지 연결의 잘못이 아니고, 그 처분은 끊기가 아니라 배압으로 정해졌다(ADR-0310 결정 17).
+/// When the queue is full. ★It applies only to the outbound queue★ — the upward line filling means the consumer cannot keep up with that
+/// peer, not that the connection is at fault, and the disposition was decided as backpressure, not cutting (ADR-0310 decision 17).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueFullPolicy {
-    /// 그 연결을 끊는다(현행 유지 — ADR-0177 결정 6). 다시 붙어 처음부터 맞추는 쪽이 낫다.
+    /// it cuts that connection (kept as is — ADR-0177 decision 6). It is better to re-attach and sync from the start.
     ///
-    /// ★메시지 단위로 떨구는 안(drop oldest/newest)은 터미널 바이트에 못 쓴다★ — 중간을 버리면 UTF-8 이
-    /// 깨지고 ANSI 파서 상태가 어긋나 화면이 망가진 채로 계속 그려진다.
+    /// ★The plan of dropping per message (drop oldest/newest) cannot be used on terminal bytes★ — dropping the middle breaks UTF-8
+    /// and desyncs the ANSI parser state, so the screen keeps being drawn broken.
     Disconnect,
-    /// 그 메시지만 버리고 [`crate::TransportEvent::Dropped`] 로 신고한다. ★조용한 유실을 안 만드는 것이
-    /// 이 갈래의 전부다★ — 세는 것을 그만두면 `Disconnect` 보다 나쁜 선택이 된다.
+    /// Drop only that message and report it as [`crate::TransportEvent::Dropped`]. ★Not creating a silent loss is the whole of
+    /// this branch★ — if it stopped counting, it would be a worse choice than `Disconnect`.
     DropAndReport,
 }
 
-/// [`crate::Wire::decode`] 가 실패했을 때.
+/// When [`crate::Wire::decode`] fails.
 ///
-/// ★기본이 [`DecodeFailurePolicy::DropFrame`] 인 것은 사용자 체감 판단이다★ — 프레임 하나가 깨졌다고
-/// 화면이 통째로 끊기지 않게 한다. **대가 = 프로토콜이 어긋난 채로 계속 도는 조합이 생긴다**(TRD §12-11
-/// 이 연 질문이고, 그 답이 정해지면 기본값이 바뀔 수 있다).
+/// ★The default being [`DecodeFailurePolicy::DropFrame`] is a judgment about how the user feels★ — one broken frame
+/// should not cut the whole screen. **Cost = a combination arises where it keeps running with the protocol out of sync** (TRD §12-11
+/// is the open question, and once its answer is settled the default may change).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeFailurePolicy {
     DropFrame,
     Disconnect,
 }
 
-/// 재연결 예산과 백오프 일정.
+/// Reconnect budget and backoff schedule.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ReconnectPolicy {
-    /// ★예산 회복 뒤 허용하는 **재시도 횟수**★. 이 수만큼의 백오프 대기가 있고, 그 뒤 다시 실패하면
-    /// [`crate::GaveUpReason::BudgetExhausted`] 다.
+    /// ★The **number of retries** allowed after the budget recovers★. There are this many backoff waits, and if it fails again after that
+    /// it is [`crate::GaveUpReason::BudgetExhausted`].
     pub max_attempts: u32,
     pub base: Duration,
     pub cap: Duration,
     pub multiplier: f64,
-    /// 대기 시간에 섞는 흔들림의 비율(0.2 = ±20%). ★미검★ — gRPC 가 스스로 *"Proposed Backoff
-    /// Algorithm"* 이라 제목을 단 문서의 예시값을 차용했다. **오늘 코드에는 지터가 아예 없다.**
+    /// The proportion of wobble mixed into the wait time (0.2 = ±20%). ★Unverified★ — borrowed from the example value of a document gRPC itself titled *"Proposed Backoff
+    /// Algorithm"*. **Today's code has no jitter at all.**
     pub jitter: f64,
 }
 
 impl Default for ReconnectPolicy {
     fn default() -> Self {
         Self {
-            // ADR-0180 결정 4(사용자 결정). 오늘 코드는 5다 — 두 층이 갈리는 것은 알려진 상태이고
-            //   맞추는 일은 이 crate 를 붙이는 단계 몫이다.
+            // ADR-0180 decision 4 (user decision). Today's code is 5 — the two layers diverging is a known state and
+            //   aligning them is the job of the stage that attaches this crate.
             max_attempts: 3,
-            // 현행값 보존 — `connection.rs` 의 BACKOFF_BASE.
+            // Current value preserved — BACKOFF_BASE in `connection.rs`.
             base: Duration::from_millis(500),
-            // 현행값 보존 — `connection.rs` 의 BACKOFF_CAP.
+            // Current value preserved — BACKOFF_CAP in `connection.rs`.
             cap: Duration::from_secs(10),
-            // 현행값 보존 — 3회 = 500ms→1s→2s = 합계 3.5초(ADR-0180 이 든 그 수치).
+            // Current value preserved — 3 times = 500ms→1s→2s = total 3.5 seconds (the figure ADR-0180 cited).
             multiplier: 2.0,
             jitter: 0.2,
         }
@@ -67,32 +67,32 @@ impl Default for ReconnectPolicy {
 }
 
 impl ReconnectPolicy {
-    /// `attempt` 번째(0-기반) 재시도 앞의 대기.
+    /// The wait before the `attempt`-th (0-based) retry.
     ///
-    /// `r` 은 [0,1) 의 흔들림 눈금이고 부르는 쪽이 만든다(이 crate 는 난수 crate 를 들이지 않는다 —
-    /// 난수원의 정본은 [`crate::machine`]).
+    /// `r` is a wobble scale in [0,1) and the caller makes it (this crate does not bring in a random-number crate —
+    /// the canonical source of randomness is [`crate::machine`]).
     ///
-    /// ★값이 망가져 있어도 여기서 죽지 않는다★ — 패닉 훅을 건 운영 프로세스는 가두지 않은 패닉에 곧바로
-    /// 끝나므로(ADR-0292) `Duration::from_secs_f64(NaN)` 한 번이 **프로세스 전체**를 내린다. 정책은
-    /// 소비자가 파일에서 읽어 넣는 값이므로 NaN·음수·1 이상 지터가 실제로 도달할 수 있다고 보고 전부 여기서
-    /// 접는다.
+    /// ★It does not die here even if the values are broken★ — an operating process with a panic hook ends at once on an uncontained panic
+    /// (ADR-0292), so one `Duration::from_secs_f64(NaN)` takes down the **whole process**. The policy is
+    /// a value the consumer reads in from a file, so we consider NaN · negative · jitter of 1 or more actually reachable and fold them all
+    /// here.
     ///
-    /// ★상한을 지터 **뒤에** 한 번 더 문다★ — 그래서 `cap` 부근에서는 위쪽 흔들림이 잘려 분포가
-    /// 한쪽으로 눌린다. 지터의 목적이 동시 재시도를 흩는 것이라 상한 초과를 허용하는 것보다 낫다고 봤다.
+    /// ★The cap is bitten once more **after** the jitter★ — so near `cap` the upward wobble is cut and the distribution
+    /// is pressed to one side. Since the purpose of jitter is to scatter simultaneous retries, we judged this better than allowing the cap to be exceeded.
     pub fn delay(&self, attempt: u32, r: f64) -> Duration {
-        // ★상한이 하한보다 작으면 **하한을 내린다**★ — 옛 판은 `cap.max(base)` 로 상한을 조용히
-        //   버려서 `base=10s, cap=1s` 가 10초를 돌려줬다(선언한 상한의 열 배). 이름이 「상한」이면
-        //   그것을 넘지 않는 쪽이 덜 놀랍다. `check()` 는 이 조합을 아예 거절한다.
+        // ★If the cap is smaller than the floor, **lower the floor**★ — the old edition quietly discarded the cap with `cap.max(base)`
+        //   so `base=10s, cap=1s` returned 10 seconds (ten times the declared cap). If the name is 「상한」 (cap),
+        //   not exceeding it is less surprising. `check()` rejects this combination outright.
         let floor = MIN_BACKOFF.as_secs_f64();
         let cap = sane_secs(self.cap.as_secs_f64(), 10.0).max(floor);
         let base = sane_secs(self.base.as_secs_f64(), 0.5).clamp(floor, cap);
-        // 1 미만 배율은 백오프를 **줄여** dial 열루프가 된다.
+        // A multiplier under 1 **shrinks** the backoff and becomes a dial busy loop.
         let multiplier = if self.multiplier.is_finite() && self.multiplier >= 1.0 {
             self.multiplier
         } else {
             1.0
         };
-        // 1 이상 지터는 대기를 0 으로 만들 수 있어 같은 열루프가 된다.
+        // A jitter of 1 or more can make the wait 0 and becomes the same busy loop.
         let jitter = if self.jitter.is_finite() {
             self.jitter.clamp(0.0, 0.99)
         } else {
@@ -104,8 +104,8 @@ impl ReconnectPolicy {
             0.5
         };
 
-        // ★`attempt as i32` 로 바로 넘기지 말 것★ — `u32::MAX` 가 `-1` 이 되어 지수가 뒤집히고
-        //   백오프가 base 보다 **짧아진다**(실측: 500ms → 250ms). 어차피 상한에서 포화하므로 자른다.
+        // ★Do not pass `attempt as i32` directly★ — `u32::MAX` becomes `-1`, the exponent flips and
+        //   the backoff becomes **shorter** than base (measured: 500ms → 250ms). It saturates at the cap anyway, so we truncate.
         let grown = base * multiplier.powi(attempt.min(1024) as i32);
         let capped = if grown.is_finite() {
             grown.min(cap)
@@ -114,7 +114,7 @@ impl ReconnectPolicy {
         };
         let jittered = capped * (1.0 + jitter * (2.0 * nudge - 1.0));
         if jittered.is_finite() {
-            // ★바닥이 있어야 한다★ — 「0이 아니다」로는 부족하다: 1ns 백오프는 dial 열루프다.
+            // ★There must be a floor★ — 「0이 아니다」 (not zero) is not enough: a 1ns backoff is a dial busy loop.
             Duration::from_secs_f64(jittered.clamp(floor, cap))
         } else {
             Duration::from_secs_f64(cap)
@@ -122,7 +122,7 @@ impl ReconnectPolicy {
     }
 }
 
-/// 어떤 정책 값이 와도 백오프가 이보다 짧아지지 않는다. 이보다 잦은 재시도는 대기가 아니라 열루프다.
+/// Whatever policy value comes, the backoff never gets shorter than this. Retrying more often than this is a busy loop, not a wait.
 pub const MIN_BACKOFF: Duration = Duration::from_millis(1);
 
 fn sane_secs(value: f64, fallback: f64) -> f64 {
@@ -133,77 +133,77 @@ fn sane_secs(value: f64, fallback: f64) -> f64 {
     }
 }
 
-/// 한 상대에게 걸리는 정책 전부.
+/// All the policy that applies to one peer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Policy {
-    /// 답장을 기다리는 상한. 명령 종류와 무관한 공용 값 하나다(ADR-0181 결정 1).
+    /// The upper limit on waiting for a reply. One shared value regardless of command kind (ADR-0181 decision 1).
     ///
-    /// ★미검 — 에이전트 spawn 실소요를 잰 적이 없다★. 그 ADR 이 8초의 유일한 실질 위험으로 적은 자리다.
+    /// ★Unverified — the real time agent spawn takes has never been measured★. It is the place that ADR wrote down as the only real risk of 8 seconds.
     pub request_timeout: Duration,
-    /// dial 과 핸드셰이크를 **함께** 감싸는 상한(현행 `HANDSHAKE_TIMEOUT` 보존). ★받은 상대
-    /// ([`crate::Registry::attach`])에선 인증 시한이다★ — 붙인 때가 아니라 업그레이드 끝([`crate::Accepted::upgraded_at`])
-    /// 부터 잰다(TRD 3 §5 3). 받은 상대는 다시 걸지 않아 [`Policy::reconnect`] · [`Policy::live_dwell`] 을 안 쓴다.
+    /// The limit that wraps the dial and the handshake **together** (preserving the current `HANDSHAKE_TIMEOUT`). ★For an accepted peer
+    /// ([`crate::Registry::attach`]) it is the auth deadline★ — measured not from when it was attached but from the end of the upgrade ([`crate::Accepted::upgraded_at`])
+    /// (TRD 3 §5 3). An accepted peer does not redial, so it does not use [`Policy::reconnect`] · [`Policy::live_dwell`].
     pub connect_timeout: Duration,
-    /// 한 프레임을 미는 데 허용하는 상한. ★미검 — 업계 참고값뿐★(NATS 10s · nginx 60s · gRPC keepalive
-    /// timeout 20s). 불변식: `write_deadline < ping_interval` — 안 그러면 쓰기 하나가 keepalive 를
-    /// 통째로 굶긴다(오늘 `net` 에 있는 실물 결함이 정확히 그 모양이다).
+    /// The limit allowed for pushing one frame. ★Unverified — only industry reference values★ (NATS 10s · nginx 60s · gRPC keepalive
+    /// timeout 20s). Invariant: `write_deadline < ping_interval` — otherwise one write starves
+    /// keepalive entirely (the real defect in `net` today has exactly that shape).
     pub write_deadline: Duration,
-    /// 능동 ping 주기(현행 데몬값 보존).
+    /// Active ping interval (current daemon value preserved).
     pub ping_interval: Duration,
-    /// 상대가 이만큼 조용하면 끊는다(현행 데몬값 보존 — ping 주기의 2.5배).
+    /// If the peer is this quiet, cut (current daemon value preserved — 2.5 times the ping interval).
     pub idle_timeout: Duration,
-    /// ★이만큼 운영 단계에 머문 연결만 재연결 예산을 되채운다★.
+    /// ★Only a connection that stayed in the operating phase this long refills the reconnect budget★.
     ///
-    /// 없으면 붙자마자 끊기는 상대가 **영원히** 500ms 마다 재연결을 되풀이해
-    /// [`crate::GaveUpReason::BudgetExhausted`] 에 절대 닿지 않고, 그러면 ADR-0180 결정 7 의 팝업이
-    /// 「사용자가 행동하지 않으면 영영 복구되지 않는」 바로 그 상태에서 **뜨지 않는다**.
-    /// ★미검 — 실제 재연결 소요를 잰 적이 없다★. 오늘 셸에는 이 개념 자체가 없다(성공 즉시 리셋).
+    /// Without it, a peer that is cut as soon as it attaches repeats reconnecting every 500ms **forever** and
+    /// never reaches [`crate::GaveUpReason::BudgetExhausted`], and then the popup of ADR-0180 decision 7
+    /// **does not appear** in exactly the state of 「사용자가 행동하지 않으면 영영 복구되지 않는」 (never recovers unless the user acts).
+    /// ★Unverified — the real reconnect time has never been measured★. Today's shell has no such concept at all (reset on success).
     pub live_dwell: Duration,
     pub reconnect: ReconnectPolicy,
-    /// 나가는 큐 길이(현행 셸값 보존).
+    /// Outbound queue length (current shell value preserved).
     pub outbound_queue: usize,
-    /// ★손잡이 하나의★ 수신단([`crate::Inbox`]) 길이(개수). [`crate::Registry::add`] · [`crate::Registry::attach`]
-    /// 가 올릴 때마다 줄을 하나 이 길이로 세운다(같은 이름표를 다시 올려도 새 줄이다). 쥐는 총량은 살아 있는 수신단
-    /// 길이들의 합이고(옛 감독이 정리를 마치지 않은 옛 수신단 포함) ★이 값은 개수만 잰다★ — 바이트는 감독마다 crate 내부
-    /// 예산(16 MiB — 앞잡이 줄 · 순서 칸 · 이 줄 · 이어받기 창을 셈 하나가 덮는다. 스트림 조각을 한 번이라도 받은
-    /// 감독만 읽기 몫 · 창 상한으로 반씩 나누고, 안 받은 감독은 읽기 몫이 예산 전부다)이 잰다(`lib.rs` 「알려진
-    /// 한계」). 차면 그 손잡이의 감독이 자기 순서 칸에 붙들고 그 상대의 읽기를 세운다 — 버리지 않는다(배압).
-    /// ★미검 — 오늘 대응물이 없다★(셸은 Tauri Channel 로 직행해 이 큐 자체가 없다). 즉 이 crate 는
-    /// **새 실패 모드를 하나 만든다**(TRD §12-12).
+    /// ★One handle's★ receiver end ([`crate::Inbox`]) length (count). Each time [`crate::Registry::add`] · [`crate::Registry::attach`]
+    /// raise one, a line of this length is set up (even raising the same name tag again is a new line). The total held is the sum of the live receiver-end
+    /// lengths (including old receiver ends whose old supervisor has not finished teardown) and ★this value measures only count★ — bytes are measured by each supervisor's crate-internal
+    /// budget (16 MiB — one count covers the read-ahead queue · the ordering area · this line · the resume window. Only a supervisor that has received a stream piece even once
+    /// splits it half and half into read share · window cap, and for one that has not, the read share is the whole budget) (`lib.rs` 「알려진
+    /// 한계」 (known limits)). When full, that handle's supervisor holds in its own ordering area and stops that peer's reading — it does not drop (backpressure).
+    /// ★Unverified — there is no counterpart today★ (the shell goes straight to a Tauri Channel so this queue itself does not exist). That is, this crate
+    /// **creates one new failure mode** (TRD §12-12).
     pub inbound_queue: usize,
-    /// 연결 하나의 읽기 앞잡이 버퍼(개수). ★[`Policy::inbound_queue`] 와 **다른 자원**이다★ — 이쪽이 차면
-    /// 읽기 태스크가 멈춰 전송 계층 배압이 걸리고, 저쪽이 차면 그 상대의 사건·패킷이 감독의 순서 칸에
-    /// 붙들리며 감독이 이쪽을 더 안 비운다 — 그래서 저쪽이 차면 이쪽도 곧 찬다. 바이트는 이 값과 따로 감독의
-    /// 예산이 잰다(위 `inbound_queue` 의 같은 문장).
-    /// ★미검★.
+    /// One connection's read-ahead buffer (count). ★A **different resource** from [`Policy::inbound_queue`]★ — if this one fills,
+    /// the read task stops and transport-layer backpressure applies, and if that one fills, that peer's events · packets are held in the supervisor's ordering area
+    /// and the supervisor drains this one no more — so if that one fills, this one soon fills too. Bytes are measured by the supervisor's budget separately from this value
+    /// (the same sentence in `inbound_queue` above).
+    /// ★Unverified★.
     pub frame_buffer: usize,
     pub full_queue: QueueFullPolicy,
     pub decode_failure: DecodeFailurePolicy,
-    /// 만료된 짝짓기 번호를 몇 개까지 기억하나. ★미검★ — [`crate::Pending`] 의 유계 링 길이다.
+    /// How many expired pairing numbers to remember. ★Unverified★ — it is the length of [`crate::Pending`]'s bounded ring.
     pub retired_tags: usize,
-    /// 순번을 추적하는 스트림 수 상한. ★이 crate 에서 **크기를 상대가 정하는 유일한 컬렉션**이라
-    /// 상한이 없으면 새 키를 계속 보내는 상대가 메모리를 무한히 밀어 올린다★. 넘치면 가장 오래
-    /// 등록된 것부터 잊고, 잊힌 스트림은 중복 제거 장부를 처음부터 다시 쌓는다. ★미검★.
+    /// The upper limit on the number of streams whose sequence numbers are tracked. ★This is **the only collection in this crate whose size the peer decides**, so
+    /// without a limit a peer that keeps sending new keys pushes memory up without bound★. When it overflows it forgets from the oldest
+    /// registered, and a forgotten stream rebuilds its dedup ledger from scratch. ★Unverified★.
     pub max_streams: usize,
-    /// 이어받기를 청한 뒤 그 답(=`after+1` 번 조각)을 기다리는 상한.
+    /// The upper limit on waiting for the answer (= piece number `after+1`) after asking for a resume.
     ///
-    /// ★이 값이 「상대가 못 준다」와 「아직 안 왔다」를 가른다★ — 그 사이에 도착하는 순서 밖 조각은
-    /// 상대가 재요청을 받기 전에 이미 띄운 것일 수 있으므로 버리고 답을 기다린다. 이 시한을 넘겨야
-    /// [`crate::TransportEvent::StreamTruncated`] 를 올린다. ★배압으로 그 상대의 읽기를 세운 동안은 이 시계가
-    /// 멈춘다★ — 그 사이 답이 와도 우리가 못 읽는다(`lib.rs` 「받는 쪽 불변식」 2). ★미검★.
+    /// ★This value separates 「상대가 못 준다」 (the peer cannot give it) from 「아직 안 왔다」 (it has not come yet)★ — an out-of-order piece arriving in between
+    /// may be one the peer had already sent before receiving the re-request, so we drop it and wait for the answer. Only after exceeding this deadline do we raise
+    /// [`crate::TransportEvent::StreamTruncated`]. ★While that peer's reading is stopped by backpressure, this clock
+    /// stops★ — even if the answer comes in that time we cannot read it (`lib.rs` 「받는 쪽 불변식」 (receiver invariants) 2). ★Unverified★.
     pub resume_timeout: Duration,
-    /// 재요청의 답을 기다리는 동안 스트림 하나가 **붙들어 두는** 조각 수 상한.
+    /// The upper limit on the number of pieces one stream **holds back** while waiting for a re-request's answer.
     ///
-    /// 순서를 지키려고 붙드는 것이라 버리면 안 되지만, 상한이 없으면 상대가 이 버퍼로 우리 메모리를
-    /// 민다. 차면 창을 그 자리에서 닫고 붙든 것을 순서대로 내보낸다. 바이트로는 감독마다 crate 내부 창 상한
-    /// (8 MiB — 바이트 예산의 반 · 모든 스트림의 붙든 조각 합)이 함께 재고, 넘으면 같은 길로 닫는다 — 새 구멍이면
-    /// 창을 열지 않고 곧바로 잘림이다(`lib.rs` 「알려진 한계」). ★미검★.
+    /// They are held to keep order so dropping is not allowed, but without a limit the peer pushes our memory
+    /// with this buffer. When full, the window is closed on the spot and what was held is sent out in order. In bytes, each supervisor's crate-internal window cap
+    /// (8 MiB — half of the byte budget · the sum of held pieces across all streams) also measures, and when exceeded it closes the same way — if it is a new hole,
+    /// it does not open the window and goes straight to a truncation (`lib.rs` 「알려진 한계」 (known limits)). ★Unverified★.
     pub resume_buffer: usize,
-    /// [`crate::Peer::close_after_flush`] 하나가 쓰는 시한 — 감독이 그 닫기를 알아챈 때부터 표지 앞의 쓰기 ·
-    /// keepalive · 닫기 프레임까지 **전부를 함께** 덮는다. 넘기면 남은 것을 안 쓰고 닫는다.
+    /// The deadline that one [`crate::Peer::close_after_flush`] uses — from when the supervisor notices that close it covers the writes before the marker ·
+    /// keepalive · close frame **all together**. If exceeded, it closes without writing the rest.
     ///
-    /// ★[`Policy::write_deadline`] 으로 대신하지 않는다★ — 그것은 쓰기 한 번 단위라, 느리게 읽는 상대가 큐 길이 ×
-    /// 쓰기 시한 동안 닫기를 붙들 수 있다(TRD 3 §3-0 ④). ★미검★ — TRD 3 §3-0 ④ 의 가안 값 그대로다.
+    /// ★It is not replaced by [`Policy::write_deadline`]★ — that is per write, so a peer that reads slowly can hold the close for queue length ×
+    /// write deadline (TRD 3 §3-0 ④). ★Unverified★ — it is the draft value of TRD 3 §3-0 ④ as is.
     pub flush_timeout: Duration,
 }
 
@@ -232,11 +232,11 @@ impl Default for Policy {
 }
 
 impl Policy {
-    /// 값들이 서로 모순되지 않나. 어긋난 항목의 사람이 읽는 이름을 돌려준다.
+    /// Do the values contradict each other. Returns the human-readable name of the item that is off.
     ///
-    /// ★이것이 통과하지 않아도 crate 는 죽지 않는다★ — [`ReconnectPolicy::delay`] 가 망가진 값을 스스로
-    /// 접는다. 이 함수는 **소비자가 설정을 읽을 때 시끄럽게 실패하라고** 있는 것이고, 명부는
-    /// `debug_assert` 로만 본다.
+    /// ★The crate does not die even if this does not pass★ — [`ReconnectPolicy::delay`] folds broken values by itself.
+    /// This function exists so that **the consumer fails loudly when reading its settings**, and the registry
+    /// looks only with `debug_assert`.
     pub fn check(&self) -> Result<(), &'static str> {
         if self.write_deadline >= self.ping_interval {
             return Err("write_deadline < ping_interval");
@@ -330,7 +330,7 @@ mod tests {
         assert_eq!(total, Duration::from_millis(3500));
     }
 
-    // ── F2: 상한이 하한보다 작은 조합 ──
+    // ── F2: a combination where the cap is smaller than the floor ──
     #[test]
     fn a_cap_below_the_base_is_rejected_and_never_exceeded() {
         let policy = ReconnectPolicy {
@@ -352,7 +352,7 @@ mod tests {
         }
     }
 
-    // ── F3: 열루프가 되는 바닥값 ──
+    // ── F3: a floor value that becomes a busy loop ──
     #[test]
     fn a_nanosecond_base_is_rejected_and_never_produces_a_hot_loop() {
         let policy = ReconnectPolicy {
@@ -427,7 +427,7 @@ mod tests {
         }
     }
 
-    // ── 망가진 정책 값이 프로세스를 내리지 않는다 ──
+    // ── A broken policy value does not take down the process ──
     #[test]
     fn a_poisoned_policy_never_panics_and_never_yields_a_zero_wait() {
         let poisons = [

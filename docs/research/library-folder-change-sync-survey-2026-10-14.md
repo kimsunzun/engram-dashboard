@@ -81,7 +81,7 @@ codex (effort high · web search on) — verdict **FIX**. Findings and handling:
 | The Unreal auto re-import setting is not a basis for the content-browser list | major | accepted · the registry-callback claim is marked unchecked |
 | Rebuttal of 「포커스 훑기 이유의 벤더 문서 없음」 (no vendor document for the focus-walk reason) — Godot · Total Commander | major | the Total Commander FAQ is confirmed (cost reason) · the Godot CPU reason was not found in the source text → partly accepted |
 | A daemon-client watcher-lifetime peer (Theia) is missing | major | added (marked unchecked) |
-| A logic gap in making client focus the freshness boundary — changes while looking | major | accepted · the gap and A′ added to 「Engram 에 옮기면」 (If carried over to Engram) |
+| A logic gap in making client focus the freshness boundary — changes while looking | major | accepted · the gap and A′ added to "If carried over to Engram" |
 | Blender: inferring no automatic detection from the button alone | minor | accepted · lowered to uncertain |
 
 ## Limits
