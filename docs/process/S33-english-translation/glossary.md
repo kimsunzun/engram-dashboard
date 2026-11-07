@@ -106,5 +106,6 @@ Every translation batch uses these renderings. A batch that needs a new term add
 | 회귀망 | regression net | |
 | 통로 | link | transport connection |
 | 감독 | supervisor | transport peer supervisor task |
+| 이어받기 표식 | resume marker | `continues_conversation` (ADR-0226); not "takeover"; keep 마커 = marker separate |
 
 Kept in Korean: the ADR lint tokens (`- 상태:` + vocab, `- 관련:`, section headings), text in 「」, names of CLAUDE.md and `.claude/` sections.
