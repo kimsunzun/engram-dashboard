@@ -1,11 +1,11 @@
-// Phase 0 Spike — Windows PTY kill 시퀀스 실측 검증 (throwaway)
+// Phase 0 Spike — measured verification of the Windows PTY kill sequence (throwaway)
 //
-// 검증 가정:
-//   1. portable-pty 0.8.1 로 Windows에서 child spawn + stdout read 가능
-//   2. kill 시퀀스 후 drain(reader) 스레드가 5초 이내 EOF로 종료
-//   3. Job Object + KILL_ON_JOB_CLOSE 로 손자 프로세스까지 정리
+// Assumptions to verify:
+//   1. With portable-pty 0.8.1, child spawn + stdout read works on Windows
+//   2. After the kill sequence, the drain (reader) thread exits at EOF within 5 seconds
+//   3. Job Object + KILL_ON_JOB_CLOSE cleans up even grandchild processes
 //
-// 실행: cargo run -p engram-dashboard-agent --example spike
+// Run: cargo run -p engram-dashboard-agent --example spike
 
 use std::io::Read;
 use std::sync::mpsc;
@@ -68,7 +68,7 @@ fn main() {
     let t0 = Instant::now();
     eprintln!("[spike] start");
 
-    // 1. PTY 생성
+    // 1. Create PTY
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -87,7 +87,7 @@ fn main() {
     let pid = child.process_id();
     eprintln!("[spike] spawned child pid={:?} @ {:?}", pid, t0.elapsed());
 
-    // 3. Job Object 생성 + assign (Windows)
+    // 3. Create Job Object + assign (Windows)
     #[cfg(windows)]
     let job = {
         let job = job::Job::create().expect("CreateJobObject failed");
@@ -101,10 +101,10 @@ fn main() {
         job
     };
 
-    // slave는 더 이상 필요 없음 → drop (FD 누수 방지)
+    // slave is no longer needed → drop (prevents FD leak)
     drop(pair.slave);
 
-    // 4. reader 스레드
+    // 4. reader thread
     let mut reader = pair.master.try_clone_reader().expect("try_clone_reader");
     let (done_tx, done_rx) = mpsc::channel::<(u64, &'static str)>();
     let reader_t0 = Instant::now();
@@ -131,14 +131,14 @@ fn main() {
         }
     });
 
-    // 5. 2초간 출력 수신
+    // 5. Receive output for 2 seconds
     std::thread::sleep(Duration::from_secs(2));
     eprintln!(
         "[spike] --- 2s elapsed, begin kill sequence @ {:?} ---",
         t0.elapsed()
     );
 
-    // 6. kill 시퀀스 (각 단계 타임스탬프)
+    // 6. kill sequence (timestamp for each step)
     let k0 = Instant::now();
     match child.kill() {
         Ok(()) => eprintln!("[kill] child.kill() ok @ +{:?}", k0.elapsed()),
@@ -158,7 +158,7 @@ fn main() {
     drop(pair.master);
     eprintln!("[kill] drop(master) @ +{:?}", k0.elapsed());
 
-    // 7. reader 종료 대기 (5초 타임아웃)
+    // 7. Wait for the reader to exit (5-second timeout)
     match done_rx.recv_timeout(Duration::from_secs(5)) {
         Ok((total, why)) => {
             eprintln!(
