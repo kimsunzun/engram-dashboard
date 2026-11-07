@@ -24,8 +24,8 @@
 
 ## 4. Acceptance criteria
 
-- AC1 — Agent-level test: spawn a PTY agent that prints a large burst, kill it ~300 ms later; the kill returns within the existing join bound (fails today — blocks).
-- AC2 — Daemon-level test (or targeted check): a `Kill` dispatched on a connection does not run on the dispatch task's worker thread (it goes through the blocking pool like `Spawn`/`Shutdown`), so a slow kill does not stop that connection's writer.
+- AC1 — Agent-level test: spawn a PTY agent whose burst comes from a grandchild, kill it ~300 ms into the burst; the kill returns well under the existing 5 s pump-join ceiling and the agent ends `Killed` (fails today — blocks). Exact bounds in the TRD §4.
+- AC2 — Daemon-level test: a `Kill` dispatched on a connection does not block the async worker running that connection (it goes through the blocking pool like activation and `StopDaemon`'s shutdown), so a slow kill does not stop that connection's writer.
 - AC3 — Live (QA): the U4a repro (spew agent, kill ~0.3 s after spawn) no longer freezes the connection — the kill reply arrives and later commands work.
 - AC4 — Full regression green; existing kill/shutdown tests unchanged in meaning.
 
