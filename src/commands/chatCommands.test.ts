@@ -1,7 +1,7 @@
-// chat.toolGroup.setExpanded — 창 안 command 시험(ADR-0239 · TRD S21-chat-ux §4-4).
+// chat.toolGroup.setExpanded — in-window command test (ADR-0239 · TRD S21-chat-ux §4-4).
 //
-// ★`./chatCommands` 를 직접 import 하지 않는다 — 매니페스트를 통해 들어온다★(사유 = renderModeCommands.test.ts
-//   머리): 그래야 contributions.ts 의 import 한 줄이 사라지면 여기가 깨진다. stub 집합도 그 파일과 같다.
+// ★Do not import `./chatCommands` directly — it comes in through the manifest★ (reason = the head of renderModeCommands.test.ts):
+//   that way this breaks if the one import line in contributions.ts disappears. The stub set is also the same as that file's.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -17,7 +17,7 @@ vi.mock('../api/clientFactory', () => ({
   bootstrapDaemonIfNeeded: vi.fn(async () => undefined),
 }))
 
-import './contributions' // side-effect register — ★직접 import 금지(위 헤더)★
+import './contributions' // side-effect register — ★no direct import (header above)★
 import { list, run } from './registry'
 import { effectiveOpen, useToolGroupStore } from '../store/toolGroupStore'
 
@@ -35,7 +35,7 @@ describe('chat.toolGroup.setExpanded', () => {
     expect(list().map(c => c.id)).toContain(ID)
   })
 
-  // ★버스 미승선(ADR-0167)★: 펼침 상태는 창마다 따로 있는 프론트 상태다 — 사유는 chatCommands.ts 머리.
+  // ★Not on the bus (ADR-0167)★: expanded state is frontend state that exists separately per window — the reason is at the head of chatCommands.ts.
   it('help 가 없다 — 버스에 오르지 않고 이 창 안에만 남는다', () => {
     expect(list().find(c => c.id === ID)!.help).toBeUndefined()
   })
@@ -45,7 +45,7 @@ describe('chat.toolGroup.setExpanded', () => {
     expect(effectiveOpen(useToolGroupStore.getState(), 's1', 'tool:call_1')).toBe(true)
     expect(run(ID, { slotId: 's1', groupKey: 'item:7', expanded: false })).toEqual({ expanded: false })
     expect(effectiveOpen(useToolGroupStore.getState(), 's1', 'item:7')).toBe(false)
-    expect(bySlot().s1.open).toEqual({ 'tool:call_1': true, 'item:7': false }) // 접힘도 고른 값으로 적힌다.
+    expect(bySlot().s1.open).toEqual({ 'tool:call_1': true, 'item:7': false }) // A collapse is also recorded as the chosen value.
   })
 
   it('여분 칸(viewId 등)이 섞인 가방도 그대로 통과한다', () => {
@@ -77,7 +77,7 @@ describe('chat.toolGroup.setExpanded', () => {
     expect(bySlot()).toBe(before)
   })
 
-  // 렌더 모드 교체 · 팝아웃 이동으로 뷰가 마운트 해제된 뒤 — 성공으로 답하면 화면은 그대로인데 호출자는 바뀐 것으로 읽는다.
+  // After the view is unmounted by a render mode swap · a popout move — answering success would leave the screen unchanged while the caller reads it as changed.
   it('뷰가 마운트 해제된 슬롯이면 throw 하고 아무것도 적지 않는다 — 다시 마운트되면 먹힌다', () => {
     const release = useToolGroupStore.getState().bind('s2', 'a1')
     release()

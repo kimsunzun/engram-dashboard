@@ -1,13 +1,13 @@
-// TauriTransport 단위테스트 — Tauri carrier 의 reply(③-a)·output(③-b)·리스너 재등록(MED-1)·
-// 연결 생명주기 가드(Fix-C ①)·출력 Channel 재등록(Fix-C ④) 평면(T7c Fix-B/Fix-C).
+// TauriTransport unit test — the plane of the Tauri carrier's reply (③-a) · output (③-b) · listener re-registration (MED-1) ·
+// connection lifecycle guard (Fix-C ①) · output Channel re-registration (Fix-C ④) (T7c Fix-B/Fix-C).
 //
-// 프로토콜 의미론(pending 매칭/dedup/epoch)은 protocolClient.test 가 본다.
+// Protocol semantics (pending matching/dedup/epoch) are covered by protocolClient.test.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-// ★vi.hoisted★: vi.mock factory 는 파일 최상단으로 호이스팅되므로 일반 top-level 변수를 참조할 수
-//   없다. mock 이 공유하는 상태(listeners/captured channel/forward reply)와 FakeChannel 을 hoisted
-//   블록에 두어 factory 와 테스트 본문이 같은 인스턴스를 본다.
+// ★vi.hoisted★: the vi.mock factory is hoisted to the top of the file, so it cannot reference ordinary top-level variables. State shared by
+//   the mock (listeners/captured channel/forward reply) and FakeChannel are put in the hoisted
+//   block so the factory and the test bodies see the same instance.
 const h = vi.hoisted(() => {
   type Listener = (e: { payload: unknown }) => void
   const listeners = new Map<string, Set<Listener>>()
@@ -17,27 +17,27 @@ const h = vi.hoisted(() => {
     subscribeOutputCalls: 0,
     forwardReply: null as unknown,
     forwardShouldReject: false,
-    // ★Rust emit 흉내★: daemon_connect/daemon_ensure invoke 가 resolve 되기 직전, Rust 가 connected
-    //   를 emit 하는 동작을 흉내낼지. 기본 true(정상 connect = Rust 가 connected emit). false 면 emit
-    //   없이 invoke 만 resolve(상태가 down 에 머무는지 = 단일 진실원 검증).
+    // ★Imitate a Rust emit★: whether to imitate Rust emitting connected right before the daemon_connect/daemon_ensure invoke
+    //   resolves. Default true (normal connect = Rust emits connected). If false, only the invoke resolves with no emit
+    //   (checks that the state stays at down = single source of truth).
     emitConnectedOnConnect: true,
-    // daemon_connect invoke 를 무한 대기시키는 게이트(close 세대 가드 테스트용). resolve 함수를 보관.
+    // A gate that makes the daemon_connect invoke wait forever (for the close generation guard test). Holds the resolve function.
     connectGate: null as null | (() => void),
-    // ★Fix-D self-heal★: daemon_connection_state invoke 가 돌려줄 상태 문자열(리로드 pull 조회 흉내).
+    // ★Fix-D self-heal★: the state string the daemon_connection_state invoke will return (imitates the reload pull query).
     connectionStateReply: 'down',
-    // ★FIX 5 게이트★: daemon_connection_state invoke 를 대기시켜, pull 응답 전에 이벤트를 끼워넣게 한다.
-    //   resolve 함수(= 게이트 해제)를 보관. null 이면 즉시 resolve(기존 동작).
+    // ★FIX 5 gate★: hold the daemon_connection_state invoke so an event can be slipped in before the pull response.
+    //   Holds the resolve function (= releases the gate). If null, resolves immediately (existing behavior).
     connectionStateGate: null as null | (() => void),
-    // ★FIX 6 게이트 큐★: subscribe_output invoke 각각을 대기시켜 완료 순서를 테스트가 통제한다. 각
-    //   invoke 는 배열에 resolve 함수를 push 하고 대기 — 테스트가 임의 순서로 호출해 풀어준다. 빈 배열이면
-    //   즉시 resolve(기존 동작).
+    // ★FIX 6 gate queue★: hold each subscribe_output invoke so the test controls the completion order. Each
+    //   invoke pushes its resolve function into the array and waits — the test calls them in any order to release them. If the array is empty,
+    //   resolves immediately (existing behavior).
     subscribeOutputGate: false,
     subscribeOutputResolvers: [] as Array<() => void>,
-    // request_replay invoke 횟수(gen 부여 카운터 겸 — ADR-0046 F2).
+    // request_replay invoke count (also the counter that assigns gen — ADR-0046 F2).
     requestReplayCalls: 0,
-    // ★FIX-5★: request_replay 가 돌려줄 gen 을 명시 지정(null 이면 카운터). 안전 정수 초과 케이스 재현용.
+    // ★FIX-5★: explicitly specify the gen request_replay will return (counter if null). For reproducing the beyond-safe-integer case.
     requestReplayReply: null as number | string | null,
-    // 이 창의 Tauri label(`getCurrentWindow().label`) — 사용량 방송의 `labels` 거름이 본다.
+    // This window's Tauri label (`getCurrentWindow().label`) — what the `labels` filter of the usage broadcast looks at.
     windowLabel: 'main',
     usageSnapshotReply: { socket_epoch: 0, snapshots: [] } as unknown,
   }
@@ -51,9 +51,9 @@ function emit(name: string, payload: unknown): void {
   for (const cb of h.listeners.get(name) ?? []) cb({ payload })
 }
 
-// ★microtask 다수 양보★: doConnect 는 registerListeners(6× await listen) → daemon_connect invoke →
-//   그 안의 connected emit → applyConnectionState → registerOutputChannel(비동기) 체인을 탄다. 게이트로
-//   중간을 막고 관측하려면 여러 microtask 틱을 흘려야 그 체인이 게이트 지점까지 진행한다.
+// ★Yield many microtasks★: doConnect runs the chain registerListeners (6× await listen) → daemon_connect invoke →
+//   the connected emit inside it → applyConnectionState → registerOutputChannel (async). To block
+//   the middle with a gate and observe, several microtask ticks must be flushed so the chain advances to the gate point.
 async function flush(ticks = 12): Promise<void> {
   for (let i = 0; i < ticks; i++) await Promise.resolve()
 }
@@ -78,8 +78,8 @@ const invokeMock = vi.fn(async (cmd: string, args?: Record<string, unknown>) => 
         h.state.connectGate = resolve
       })
     }
-    // ★Rust emit 흉내★: 리스너는 invoke 전에 등록됐으므로(doConnect 순서), 여기서 emit 하면
-    //   u5 가 받아 setState('connected') 한다 — Rust 가 connect Ok 직전 connected 를 emit 하는 동형.
+    // ★Imitate a Rust emit★: the listeners were registered before the invoke (doConnect order), so emitting here
+    //   makes u5 receive it and setState('connected') — isomorphic to Rust emitting connected right before connect Ok.
     if (h.state.emitConnectedOnConnect) emit('daemon-connection-state', 'connected')
     return undefined
   }
@@ -108,7 +108,7 @@ const invokeMock = vi.fn(async (cmd: string, args?: Record<string, unknown>) => 
   }
   if (cmd === 'get_usage_snapshot') return h.state.usageSnapshotReply
   if (cmd === 'request_replay') {
-    // ADR-0046: src-tauri single-flight 가 gen(u64)을 부여 반환. mock 은 단조 카운터로 흉내.
+    // ADR-0046: the src-tauri single-flight assigns and returns gen (u64). The mock imitates it with a monotonic counter.
     h.state.requestReplayCalls += 1
     return h.state.requestReplayReply ?? h.state.requestReplayCalls
   }
@@ -151,7 +151,7 @@ function buildFrame(opts: { agentId: string; epoch: number; seq: number; payload
   return buf
 }
 
-// ADR-0046 replay 경계 마커 frame: [tag=255][agentId:16][epoch:4 BE][gen:8 BE][flags:1][replay_from:8 BE].
+// ADR-0046 replay boundary marker frame: [tag=255][agentId:16][epoch:4 BE][gen:8 BE][flags:1][replay_from:8 BE].
 const MARKER_LEN = 38
 function buildMarker(opts: {
   agentId: string
@@ -222,7 +222,7 @@ describe('TauriTransport 연결', () => {
 describe('TauriTransport 상태 단일 진실원(Fix-C ①)', () => {
   it('Rust 가 connected 를 emit 하지 않으면 invoke resolve 만으로 connected 가 되지 않는다', async () => {
     const t = new TauriTransport()
-    h.state.emitConnectedOnConnect = false // Rust emit 없음(예: stale 폐기·재연결 중).
+    h.state.emitConnectedOnConnect = false // No Rust emit (e.g. stale discarded · mid-reconnect).
     await t.start()
     expect(t.connectionState).toBe('down')
     expect(h.state.capturedChannel).toBeNull()
@@ -249,13 +249,13 @@ describe('TauriTransport 상태 단일 진실원(Fix-C ①)', () => {
 describe('TauriTransport close 세대 가드(Fix-C ①)', () => {
   it('close 후 뒤늦게 완료된 doConnect 는 출력 Channel 을 (재)등록하지 않는다', async () => {
     const t = new TauriTransport()
-    // ★검증 핵심★: close() 가 u5 리스너를 제거하므로, 게이트 해제 후 Rust 가 connected 를 emit 해도
-    //   u5 가 없어 무시된다 → 출력 Channel 등록 안 됨. emit 흉내를 켠 채로 그 경로를 본다.
+    // ★Key check★: close() removes the u5 listener, so even if Rust emits connected after the gate is released,
+    //   there is no u5 and it is ignored → the output Channel is not registered. Look at that path with the emit imitation on.
     h.state.emitConnectedOnConnect = true
     h.state.connectGate = () => {}
     const p = t.start()
     expect(h.state.subscribeOutputCalls).toBe(0)
-    // close → 세대 bump + cleanupListeners(u5 제거).
+    // close → generation bump + cleanupListeners (u5 removed).
     t.close()
     expect(t.connectionState).toBe('down')
     const release = h.state.connectGate
@@ -292,7 +292,7 @@ describe('TauriTransport 재연결 출력 Channel 재등록(Fix-C ④)', () => {
     expect(h.state.subscribeOutputCalls).toBe(1)
     emit('daemon-connection-state', 'reconnecting')
     emit('daemon-connection-state', 'connected')
-    // registerOutputChannel 은 async(invoke await) — microtask 한 틱 양보 후 검사.
+    // registerOutputChannel is async (invoke await) — check after yielding one microtask tick.
     await Promise.resolve()
     await Promise.resolve()
     expect(h.state.subscribeOutputCalls).toBe(2)
@@ -302,7 +302,7 @@ describe('TauriTransport 재연결 출력 Channel 재등록(Fix-C ④)', () => {
 describe('TauriTransport 리로드 self-heal(Fix-D)', () => {
   it('init → 조회가 connected 면 출력 Channel 을 1회 등록한다(전이 이벤트 없이도 복구)', async () => {
     const t = new TauriTransport()
-    // 리로드 흉내: 데몬은 이미 Connected 라 전이 이벤트가 안 온다. pull 조회만 connected 를 알려준다.
+    // Reload imitation: the daemon is already Connected, so no transition event comes. Only the pull query reports connected.
     h.state.connectionStateReply = 'connected'
     await t.init()
     expect(invokeMock).toHaveBeenCalledWith('daemon_connection_state', undefined)
@@ -340,14 +340,14 @@ describe('TauriTransport 리로드 self-heal(Fix-D)', () => {
     expect(t.connectionState).toBe('down')
   })
 
-  // ── FIX 5: pull 응답 *전* 이벤트가 끼면 pull(stale)을 폐기(event→pull 순서 역전 방어) ──────
+  // ── FIX 5: if an event slips in *before* the pull response, discard the pull (stale) (guards against event→pull order reversal) ──────
   it('조회 대기 중 down 이벤트가 끼면, 뒤늦게 온 connected 조회 결과를 폐기한다(이벤트 승)', async () => {
     const t = new TauriTransport()
-    // pull 은 stale 'connected' 를 돌려주게 하되, 게이트로 응답을 미룬다(placeholder → 실 resolver 로 교체).
+    // Make the pull return a stale 'connected' but delay the response with the gate (placeholder → replaced by the real resolver).
     h.state.connectionStateReply = 'connected'
     h.state.connectionStateGate = () => {}
     const initP = t.init()
-    // init 은 registerListeners → selfHeal(invoke 게이트에 막힘) 순. 리스너 등록 + pull invoke 진입 대기.
+    // init goes registerListeners → selfHeal (blocked on the invoke gate) in that order. Wait for listener registration + the pull invoke to enter.
     await flush()
     emit('daemon-connection-state', 'down')
     expect(t.connectionState).toBe('down')
@@ -377,13 +377,13 @@ describe('TauriTransport 리로드 self-heal(Fix-D)', () => {
   })
 })
 
-// ── FIX 7: 미지 상태 어휘 방어(retrofit 함정) ───────────────────────────────────────────
+// ── FIX 7: guard against an unknown state vocabulary (retrofit trap) ───────────────────────────────────────────
 describe('TauriTransport 미지 연결 상태 어휘(FIX 7)', () => {
   it('알 수 없는 상태 문자열은 down 으로 처리 + console.warn 1회', async () => {
     const t = new TauriTransport()
     await t.start() // connected.
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    // Rust 가 나중에 새 어휘('connecting')를 emit 하면 조용히 오역하지 않고 안전측(down) 강등 + 경고.
+    // If Rust later emits a new vocabulary item ('connecting'), do not silently mistranslate — degrade to the safe side (down) + warn.
     emit('daemon-connection-state', 'connecting')
     expect(t.connectionState).toBe('down')
     const unknownWarns = warnSpy.mock.calls.filter(
@@ -394,7 +394,7 @@ describe('TauriTransport 미지 연결 상태 어휘(FIX 7)', () => {
   })
 })
 
-// ── FIX 6: 출력 Channel 등록 single-flight(겹치는 등록 시 Rust 도착 순서 역전 방어) ──────────
+// ── FIX 6: output Channel registration single-flight (guards against Rust arrival order reversal on overlapping registrations) ──────────
 describe('TauriTransport 출력 Channel 등록 single-flight(FIX 6)', () => {
   it('진행 중 등록에 겹쳐 온 재등록은 동시 invoke 를 만들지 않고 완료 후 1회만 재실행한다', async () => {
     const t = new TauriTransport()
@@ -440,7 +440,7 @@ describe('TauriTransport reply 평면(③-a, HIGH-2)', () => {
     const got: InboundMessage[] = []
     t.onMessage((m) => got.push(m))
     await t.start()
-    // 데몬 reply 흉내: Ack(request_id echo). externally-tagged 형태 그대로.
+    // Daemon reply imitation: Ack (request_id echo). Exactly the externally-tagged shape.
     h.state.forwardReply = { Ack: { request_id: 'req-1' } }
     await t.send({ Kill: { agent_id: AGENT, request_id: 'req-1' } })
     expect(got).toContainEqual({ kind: 'control', event: { Ack: { request_id: 'req-1' } } })
@@ -451,8 +451,8 @@ describe('TauriTransport reply 평면(③-a, HIGH-2)', () => {
     const got: InboundMessage[] = []
     t.onMessage((m) => got.push(m))
     await t.start()
-    got.length = 0 // 연결 시 올라온 메시지 제거
-    h.state.forwardReply = null // Resize 등 fire-and-forget 명령 → Rust 가 null 반환.
+    got.length = 0 // Remove the messages that came up at connect time
+    h.state.forwardReply = null // Fire-and-forget commands like Resize → Rust returns null.
     await t.send({ Resize: { agent_id: AGENT, cols: 80, rows: 24, viewport_id: null } })
     expect(got).toHaveLength(0)
   })
@@ -483,31 +483,31 @@ describe('TauriTransport output 평면(③-b, HIGH-1)', () => {
     const got: InboundMessage[] = []
     t.onMessage((m) => got.push(m))
     await t.start()
-    const bad = new ArrayBuffer(5) // 헤더 길이 미만 → decode null.
+    const bad = new ArrayBuffer(5) // Shorter than the header length → decode null.
     h.state.capturedChannel!.onmessage!(bad)
     expect(got.find((m) => m.kind === 'output')).toBeUndefined()
   })
 })
 
-// ── ADR-0046 F2: requestReplay(invoke) + replay 경계 마커 정규화 ──────────────────────────
+// ── ADR-0046 F2: requestReplay (invoke) + replay boundary marker normalization ──────────────────────────
 describe('TauriTransport requestReplay(ADR-0046 F2)', () => {
   it('requestReplay → invoke("request_replay",{agentId}) + gen(BigInt) 반환', async () => {
     const t = new TauriTransport()
     await t.start()
     const gen = await t.requestReplay(AGENT)
     expect(invokeMock).toHaveBeenCalledWith('request_replay', { agentId: AGENT })
-    // u64 gen 을 BigInt 로 반환(§F2 — 마커 frame getBigUint64 와 폭 일치).
+    // Return the u64 gen as a BigInt (§F2 — width matches the marker frame getBigUint64).
     expect(typeof gen).toBe('bigint')
     expect(gen).toBe(1n)
     expect(await t.requestReplay(AGENT)).toBe(2n)
   })
 
-  // ── FIX-5: u64 gen 이 안전 정수 초과(number 직렬화)면 console.warn(실무 도달 불가) ──────────
+  // ── FIX-5: if the u64 gen exceeds the safe integer (number serialization), console.warn (unreachable in practice) ──────────
   it('gen 이 안전 정수 초과 number 로 오면 console.warn 1회(BigInt 변환은 유지)', async () => {
     const t = new TauriTransport()
     await t.start()
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    // 2^53 초과 number(이미 정밀도 깨진 채 도착) — 실무 도달 불가하나 조용한 오각인 대신 경고.
+    // A number beyond 2^53 (arrived with precision already broken) — unreachable in practice, but warn instead of a silent mis-stamp.
     h.state.requestReplayReply = Number.MAX_SAFE_INTEGER + 2
     const gen = await t.requestReplay(AGENT)
     expect(typeof gen).toBe('bigint')
@@ -534,7 +534,7 @@ describe('TauriTransport requestReplay(ADR-0046 F2)', () => {
   })
 })
 
-// ── ADR-0231: replay 요청은 이 창의 출력 Channel 등록 뒤에만 — 셸은 등록 안 된 창 몫을 말없이 건너뛴다 ──
+// ── ADR-0231: a replay request only after this window's output Channel is registered — the shell silently skips the share of an unregistered window ──
 describe('TauriTransport replay 요청 ↔ 출력 Channel 등록 순서(ADR-0231)', () => {
   const callOrder = (): string[] =>
     invokeMock.mock.calls
@@ -544,7 +544,7 @@ describe('TauriTransport replay 요청 ↔ 출력 Channel 등록 순서(ADR-0231
   it('등록이 늦게 풀려도 request_replay 는 subscribe_output 이 풀린 뒤에야 나간다', async () => {
     const t = new TauriTransport()
     h.state.subscribeOutputGate = true
-    await t.start() // emit 경로 — 등록은 게이트에 막힌 채 진행 중
+    await t.start() // emit path — registration is in progress, blocked on the gate
     await flush()
     expect(h.state.subscribeOutputCalls).toBe(1)
     const replay = t.requestReplay(AGENT)
@@ -556,7 +556,7 @@ describe('TauriTransport replay 요청 ↔ 출력 Channel 등록 순서(ADR-0231
     t.close()
   })
 
-  // 리로드·팝아웃: 셸은 이미 Connected 라 ensure 가 전이 없이 Ok 로 단락하고, init 조회도 아직이다.
+  // Reload · popout: the shell is already Connected, so ensure short-circuits to Ok without a transition, and the init query has not happened yet either.
   it('ensure 가 전이 없이 Ok 면 doConnect 가 조회로 연결을 받고 등록을 마친 뒤에 풀린다 — replay 는 그 뒤', async () => {
     const t = new TauriTransport()
     h.state.emitConnectedOnConnect = false
@@ -582,7 +582,7 @@ describe('TauriTransport replay 요청 ↔ 출력 Channel 등록 순서(ADR-0231
 
   it('한 번도 등록되지 않았으면 request_replay 앞에서 먼저 등록한다', async () => {
     const t = new TauriTransport()
-    h.state.emitConnectedOnConnect = false // 조회도 down — 어느 경로도 등록을 안 시작했다
+    h.state.emitConnectedOnConnect = false // The query is also down — no path started a registration
     await t.start()
     expect(h.state.subscribeOutputCalls).toBe(0)
     await t.requestReplay(AGENT)
@@ -638,11 +638,11 @@ describe('TauriTransport replay 경계 마커(tag=255 → replayBoundary)', () =
       continuesConversation: false,
       replayFrom: 0,
     })
-    // 마커는 output 으로 올라오지 않는다(공개 표면 미노출 — Designer 요구).
+    // The marker does not come up as output (not exposed on the public surface — Designer requirement).
     expect(got.find((m) => m.kind === 'output')).toBeUndefined()
   })
 
-  // ADR-0226: 이어받기 화신 표식(bit2)이 정규화에서 떨어지면 슬롯은 늘 첫 화면으로 떨어진다(조용한 실패).
+  // ADR-0226: if the resume incarnation marker (bit2) drops out of normalization, the slot always falls back to the first screen (a silent failure).
   it('이어받기 화신 표식(bit2)이 경계에 실린다', async () => {
     const t = new TauriTransport()
     const got: InboundMessage[] = []
@@ -658,7 +658,7 @@ describe('TauriTransport replay 경계 마커(tag=255 → replayBoundary)', () =
     })
   })
 
-  // ADR-0231: 뷰의 flush 시작점이 이 머리다 — 정규화에서 떨어지면 빈 replay 에서 seq 0 을 건너뛴다.
+  // ADR-0231: the view's flush start point is this head — if it drops out of normalization, an empty replay skips seq 0.
   it('replay 머리(replay_from)가 경계에 실린다', async () => {
     const t = new TauriTransport()
     const got: InboundMessage[] = []
@@ -730,14 +730,14 @@ describe('TauriTransport 리스너 재등록(MED-1)', () => {
     t.onMessage(() => {})
     await t.start()
     const afterFirst = h.state.listenCalls
-    // 이미 connected 면 start 즉시 resolve(doConnect 미진입) — 리스너 변화 없음.
+    // If already connected, start resolves immediately (doConnect not entered) — no listener change.
     await t.start()
     expect(h.state.listenCalls).toBe(afterFirst)
     expect(h.listeners.get('agent-list-updated')!.size).toBe(1)
   })
 })
 
-// ── 사용량(TRD S21 usage-limit-slot §1-8) — 방송 수신(labels 거름) · 셸 캐시 pull ────────────────
+// ── Usage (TRD S21 usage-limit-slot §1-8) — broadcast receipt (labels filter) · shell cache pull ────────────────
 describe('TauriTransport 사용량', () => {
   const snap = (vendor: 'claude' | 'codex', revision: number) =>
     ({
@@ -792,7 +792,7 @@ describe('TauriTransport 사용량', () => {
     const t = new TauriTransport()
     const c = new ProtocolClient(t)
     await t.start()
-    await flush() // connected 전이가 시작한 출력 Channel 등록(subscribe_output)까지 끝낸다.
+    await flush() // Finish through the output Channel registration (subscribe_output) that the connected transition started.
     invokeMock.mockClear()
     h.state.forwardReply = { Ack: { request_id: 'req-u1-0000-0000-0000-000000000000' } }
     await expect(c.refreshUsageLimits('claude')).resolves.toBeUndefined()

@@ -1,4 +1,4 @@
-// restoreClient — 구독 먼저 · 나중에 낸 당기기가 이김 · 답 뒤 다시 당김(TRD S21-storage §6-7 · §8 「프론트 모달」).
+// restoreClient — subscribe first · the later-issued pull wins · pull again after the answer (TRD S21-storage §6-7 · §8 「프론트 모달」).
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -66,7 +66,7 @@ describe('restoreClient — 내린 설치의 답', () => {
     await flush()
     expect(f.heldStatus).toHaveLength(2)
 
-    // 앞 설치가 낸 요청이 늦게 풀린다 — 그사이 셸은 이미 답을 받았다.
+    // A request issued by the earlier install resolves late — meanwhile the shell has already received the answer.
     f.heldStatus[0](view('awaiting'))
     await flush()
     expect(client.status()).toBeNull()
@@ -101,7 +101,7 @@ describe('restoreClient — 알림', () => {
     f.setHoldStatus(true)
     client.install()
     await flush()
-    // 첫 당기기가 떠 있는 동안 답이 끝나 알림이 왔다 → 둘째 당기기.
+    // While the first pull was in flight the answer finished and a notification arrived → a second pull.
     f.push('answered')
     await flush()
     expect(f.heldStatus).toHaveLength(2)
@@ -153,7 +153,7 @@ describe('restoreClient — 알림', () => {
     expect(client.status()?.saves).toBe(false)
   })
 
-  // 셸과 프론트의 판이 어긋난 경우 — 짐을 버리면 묻는 모달까지 안 뜬다.
+  // When the shell and frontend editions are out of step — if the payload is dropped, even the asking modal does not show.
   it.each([
     ['없어도', undefined],
     ['null 이어도', null],
@@ -193,7 +193,7 @@ describe('restoreClient — 알림', () => {
     expect(warn).toHaveBeenCalledTimes(1)
   })
 
-  // ADR-0291: 셸의 `newer` 는 아는 값이다 — 모르는 값으로 낮추면 그 알림을 잃는다.
+  // ADR-0291: the shell's `newer` is a known value — lowering it to unknown would lose that notice.
   it('state_file 의 newer 를 그대로 싣고 경고하지 않는다', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const f = fakeRestoreIpc({ ...view('none'), saves: false, state_file: 'newer' })
@@ -247,7 +247,7 @@ describe('restoreClient — 답', () => {
   })
 })
 
-// 유계 재시도(150 + 300 + 600 ms 사이 4회)가 다 끝나는 데 충분한 시간.
+// Enough time for the bounded retry (4 attempts spaced 150 + 300 + 600 ms) to run out.
 const RETRIES_DONE_MS = 1100
 
 describe('restoreClient — 부팅 당기기는 받을 때까지 놓지 않는다', () => {
@@ -273,7 +273,7 @@ describe('restoreClient — 부팅 당기기는 받을 때까지 놓지 않는�
     await vi.advanceTimersByTimeAsync(BOOT_REPULL_INTERVAL_MS * 3)
     expect(f.statusCalls()).toBe(7)
     expect(client.status()).toBeNull()
-    // 유계 재시도의 3회 뒤로는 시도마다 남기지 않는다.
+    // After the 3rd attempt of the bounded retry, not every attempt leaves a log.
     expect(log.error).toHaveBeenCalledTimes(1)
     expect(log.warn).toHaveBeenCalledTimes(3)
 

@@ -10,7 +10,7 @@ describe('matchDeclaredSpelling', () => {
     expect(matchDeclaredSpelling('StreamJson', DECLARED)).toBe('StreamJson')
   })
 
-  // ★핵심★: 반환은 호출자가 준 문자열이 아니라 선언 철자다 — 이것이 wire 값의 바이트 동일성을 진다.
+  // ★Key★: the return is the declared spelling, not the string the caller gave — this is what bears the byte-identity of the wire value.
   it('대소문자가 달라도 선언 철자로 접어 돌려준다', () => {
     expect(matchDeclaredSpelling('terminal', DECLARED)).toBe('Terminal')
     expect(matchDeclaredSpelling('TERMINAL', DECLARED)).toBe('Terminal')
@@ -29,13 +29,13 @@ describe('matchDeclaredSpelling', () => {
     expect(matchDeclaredSpelling({ toString: () => 'Terminal' }, DECLARED)).toBeUndefined()
   })
 
-  // 공백·주변 문자는 안 다듬는다 — 접는 축은 대소문자 하나뿐이다.
+  // Whitespace and surrounding characters are not trimmed — the only axis folded is letter case.
   it('trim 은 하지 않는다', () => {
     expect(matchDeclaredSpelling(' Terminal', DECLARED)).toBeUndefined()
     expect(matchDeclaredSpelling('Terminal ', DECLARED)).toBeUndefined()
   })
 
-  // 대소문자만 다른 두 철자가 선언되는 날에도 정확히 쓴 호출자는 자기 철자를 받는다.
+  // Even on the day two spellings that differ only in case get declared, a caller who writes it exactly receives their own spelling.
   it('완전 일치가 접기보다 먼저다', () => {
     const ambiguous = ['id', 'ID'] as const
     expect(matchDeclaredSpelling('ID', ambiguous)).toBe('ID')

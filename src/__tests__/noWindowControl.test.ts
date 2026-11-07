@@ -1,23 +1,23 @@
 // @vitest-environment node
-// ADR-0302 — 창 상태 명령
-// AC10 게이트(TRD S26-window-chrome §10-4) — 웹은 Tauri 창 제어 API 를 부르지 않는다. 창 닫기 · 최소화 · 최대화 · 보이기 ·
-//   포커스는 전부 셸 invoke `window_control` 로 간다(레지스트리 `window.*` — §6-4 · 0탭 자가닫힘 — §5-5). 두 층이다 —
-//   ① 소스 타입 검사 ② 그 권한을 어느 capability 도 웹에 주지 않는다는 실행 시점 받침(§9 — 아래 「capability」 구획).
+// ADR-0302 — window state command
+// AC10 gate (TRD S26-window-chrome §10-4) — the web never calls the Tauri window control API. Closing, minimizing, maximizing, showing and
+//   focusing a window all go through the shell invoke `window_control` (registry `window.*` — §6-4 · 0-tab self-close — §5-5). Two layers —
+//   ① a source type check ② a runtime backstop that no capability grants that permission to the web (§9 — the 「capability」 section below).
 //
-// ★rg 한 줄로 바꾸지 말 것★: 문자열 매치는 줄바꿈 · 별칭(`const w = getCurrentWindow(); w.close()`) · 구조 분해에 뚫린다
-//   (리뷰 Claude ⑦). 그래서 프로젝트 tsconfig 로 `src` 를 타입 검사해 받는 쪽 타입이 `@tauri-apps/api` 의 `Window` ·
-//   `WebviewWindow`(그 자식 클래스 · 그것을 제약으로 둔 타입 매개변수 포함)인 접근을 찾는다 — 속성 접근 · 리터럴 키 접근 ·
-//   구조 분해(선언 · 매개변수 · 대입).
-// ★짝★ — 같은 프로그램에 위반 꼴을 담은 가상 파일을 하나 넣어 그것이 정확히 잡히는지, 실제 코드에서도 그 타입의 받는
-//   쪽(`getCurrentWindow().label`)이 보이는지 본다. 받는 쪽 판정이 눈멀면(패키지 경로 · 타입 이름이 바뀌거나 타입이 `any`
-//   로 풀리면) 0 건이 그대로 통과하므로 그것을 빨갛게 만든다.
-// 남는 구멍(① 이 못 본다) — 계산된 이름(`w[name]()`) · `Reflect.get` · `any` · `unknown` 으로 지운 타입 · 중첩 대입 구조
-//   분해 · 로컬 · 포트 타입으로의 구조적 업캐스트(`const p: { close(): Promise<void> } = getCurrentWindow()` — 받는 쪽이
-//   익명 타입이다) · `Pick` · `Omit` 같은 매핑 타입 · `Webview` 받는 쪽(`getCurrentWebview()` — 닫기 · 숨기기 · 보이기 ·
-//   포커스를 따로 가진다) · invoke 로 플러그인 명령(`plugin:window|close`)을 직접 부르는 것. 그 꼴들의 받침이 ② 다 —
-//   권한이 없으면 셸이 그 호출을 거절한다(실측 2026-10-25 — 구조적 업캐스트 · `Pick` · `Omit` · `Webview` 는 ① 에서 0 건).
-//   ② 의 구멍 — `src-tauri/capabilities` 밖의 capability(설정 파일 안 인라인 · 빌드 때 `TAURI_CONFIG` 로 덧대는 것)와
-//   `core:default` 같은 묶음이 뒤에 창 제어를 품게 되는 것.
+// ★Do not turn this into a one-line rg★: string matching is bypassed by line breaks, aliases (`const w = getCurrentWindow(); w.close()`) and destructuring
+//   (review Claude ⑦). So the project tsconfig type-checks `src` and finds accesses whose receiver type is `Window` or
+//   `WebviewWindow` of `@tauri-apps/api` (including their child classes and type parameters constrained by them) — property access, literal-key access,
+//   and destructuring (declarations · parameters · assignments).
+// ★Pair★ — put one virtual file containing a violating form into the same program and check that it is caught exactly, and that the real code also shows a receiver
+//   of that type (`getCurrentWindow().label`). If the receiver check goes blind (the package path or type name changes, or the type resolves to `any`),
+//   zero hits would pass unchanged, so make that fail red.
+// Remaining holes (① cannot see them) — computed names (`w[name]()`) · `Reflect.get` · types erased to `any` or `unknown` · nested assignment destructuring
+//   · structural upcasts to a local or port type (`const p: { close(): Promise<void> } = getCurrentWindow()` — the receiver is
+//   an anonymous type) · mapped types like `Pick` or `Omit` · a `Webview` receiver (`getCurrentWebview()` — it has its own close, hide, show and
+//   focus) · calling the plugin command (`plugin:window|close`) directly through invoke. The backstop for those forms is ② —
+//   without the permission the shell rejects the call (measured 2026-10-25 — structural upcasts, `Pick`, `Omit` and `Webview` give 0 hits in ①).
+//   Holes in ② — capabilities outside `src-tauri/capabilities` (inline in a config file · overlaid at build time through `TAURI_CONFIG`) and
+//   bundles like `core:default` that later come to include window control.
 
 import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
@@ -97,15 +97,15 @@ function isTauriWindowType(type: ts.Type, checker: ts.TypeChecker, seen = new Se
   if (seen.has(type)) return false
   seen.add(type)
   if (type.isUnionOrIntersection()) return type.types.some(t => isTauriWindowType(t, checker, seen))
-  // 제네릭 받는 쪽(`<T extends Window>(w: T)`)과 자식 클래스 안의 `this` 는 그 제약으로 본다 — 둘 다 타입 매개변수라
-  //   심볼 이름으로는 안 걸린다.
+  // Generic receivers (`<T extends Window>(w: T)`) and `this` inside a child class are judged by that constraint — both are type parameters, so
+  //   they are not caught by symbol name.
   if (type.flags & ts.TypeFlags.Instantiable) {
     const constraint = checker.getBaseConstraintOfType(type)
     return constraint !== undefined && isTauriWindowType(constraint, checker, seen)
   }
   const symbol = type.aliasSymbol ?? type.getSymbol()
-  // 클래스 선언으로 가른다 — `@tauri-apps/api/event` 가 DOM 의 전역 `Window` 에 칸을 덧대(`declare global`) 그 이름의
-  //   선언이 같은 패키지에도 생긴다. 파일만 보면 `window.close()`(DOM)가 잡힌다(실측).
+  // Tell them apart by class declaration — `@tauri-apps/api/event` adds a field to the DOM global `Window` (`declare global`), so a declaration
+  //   with that name also appears in the same package. By file alone, `window.close()` (DOM) gets caught (measured).
   if (
     symbol !== undefined &&
     RECEIVERS.has(symbol.getName()) &&
@@ -133,7 +133,7 @@ function keyName(key: ts.PropertyName | ts.BindingName, checker: ts.TypeChecker)
 interface Scan {
   /** `<파일>:<줄> .<이름>` */
   hits: string[]
-  /** 받는 쪽이 Tauri 창 타입인 `.label` 접근 수 — 실제 코드에서 그 타입이 풀리는지 보는 짝. */
+  /** Number of `.label` accesses whose receiver is a Tauri window type — the pair that checks whether that type resolves in the real code. */
   labelReads: number
 }
 
@@ -219,10 +219,10 @@ describe('AC10 — 웹은 Tauri 창 제어 API 를 부르지 않는다', () => {
   }, 120_000)
 })
 
-// ── 실행 시점 받침 — capability(셸 ACL) ──
-// 웹의 창 제어 호출(위 타입 검사가 못 보는 꼴 · invoke `plugin:window|…` 포함)은 그 권한이 없으면 셸이 거절한다. 그래서
-//   어느 capability 도 웹에 창 · 웹뷰 제어 권한을 주지 않는다는 것을 따로 잰다. `core:window:allow-start-dragging`(제목 줄
-//   끌기 — U8a)은 창 상태를 바꾸지 않아 허용한다.
+// ── runtime backstop — capability (shell ACL) ──
+// Window control calls from the web (forms the type check above cannot see · including invoke `plugin:window|…`) are rejected by the shell without that permission. So
+//   we separately measure that no capability gives the web window or webview control permission. `core:window:allow-start-dragging` (title bar
+//   drag — U8a) is allowed because it does not change window state.
 const CAPABILITY_DIR = `${ROOT}/src-tauri/capabilities`
 const BANNED_PERMISSIONS = new Set([
   ...['close', 'destroy', 'minimize', 'maximize', 'unmaximize', 'toggle-maximize', 'show', 'hide', 'set-focus', 'unminimize'].map(
@@ -239,7 +239,7 @@ const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'obj
 
 interface CapabilityRead {
   capabilities: { file: string; identifier: unknown; permissions: string[] }[]
-  /** 읽지 못한 것 — 이 게이트가 그 파일을 못 본 채 통과하지 않게 실패로 센다. */
+  /** Files that could not be read — counted as failures so this gate does not pass without having seen them. */
   unreadable: string[]
 }
 
@@ -258,7 +258,7 @@ function readCapabilities(): CapabilityRead {
       out.unreadable.push(`${file}: ${String(e)}`)
       continue
     }
-    // Tauri capability 파일의 세 꼴 — capability 하나 · 그 목록 · `{ capabilities: [...] }`.
+    // The three forms of a Tauri capability file — one capability · a list of them · `{ capabilities: [...] }`.
     const list = Array.isArray(doc) ? doc : isRecord(doc) && Array.isArray(doc.capabilities) ? doc.capabilities : [doc]
     for (const cap of list) {
       if (!isRecord(cap) || !Array.isArray(cap.permissions)) {
@@ -267,7 +267,7 @@ function readCapabilities(): CapabilityRead {
       }
       const permissions: string[] = []
       for (const p of cap.permissions) {
-        // 권한 항목 = 이름 문자열 또는 범위를 단 `{ identifier, allow, deny }`.
+        // A permission entry = a name string or `{ identifier, allow, deny }` with a scope attached.
         const id = typeof p === 'string' ? p : isRecord(p) && typeof p.identifier === 'string' ? p.identifier : undefined
         if (id === undefined) out.unreadable.push(`${file}: 읽지 못한 권한 ${JSON.stringify(p)}`)
         else permissions.push(id)

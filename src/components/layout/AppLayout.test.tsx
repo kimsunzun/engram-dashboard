@@ -1,12 +1,12 @@
-// 삭제된 고정 크롬 파일의 dangling import 도 이 스위트가 잡는다 — 셸이 그것들을 import 하면
-// 단언 이전에 이 테스트 파일이 로드 실패한다.
+// This suite also catches a dangling import of a deleted fixed chrome file — if the shell imports them,
+// this test file fails to load before any assertion.
 
 import type { ReactNode } from 'react'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-// 실제 탭/캔버스 배선 커버리지는 WindowLayout.test 담당이라 여기선 sentinel 로 stub. 알림 층은 `notices` 로 받아 그 안에
-//   그린다 — 제목 줄 아래 자리는 WindowLayout.test 「알림 층의 자리」 몫.
+// Real tab/canvas wiring coverage belongs to WindowLayout.test, so stub it here with a sentinel. The notice layer is received as `notices` and drawn inside it
+//   — the area below the title bar belongs to WindowLayout.test 「알림 층의 자리」.
 vi.mock('./WindowLayout', () => ({
   default: ({ label, notices }: { label: string; notices?: ReactNode }) => (
     <div data-testid="window-layout" data-label={label}>
@@ -15,7 +15,7 @@ vi.mock('./WindowLayout', () => ({
   ),
 }))
 
-// 연결 알림을 띄우려고 연결 상태 표면만 대역한다(ConnectionNotice.test 와 같은 모양).
+// Stand in only for the connection state surface to raise a connection notice (the same shape as ConnectionNotice.test).
 const { connection } = vi.hoisted(() => {
   const listeners = new Set<() => void>()
   const connection = {
@@ -42,7 +42,7 @@ import { fakeRestoreIpc, flush, view } from '../../api/testing/fakeRestoreIpc'
 import { t } from '../../i18n'
 import { MAIN_WINDOW_LABEL } from '../../store/viewStore'
 
-// 복원 상태는 묻지 않는 실행(`none` · `ok`) — 모달 배선은 RestoreModal.test 몫이다.
+// The restore state is a launch that does not ask (`none` · `ok`) — the modal wiring belongs to RestoreModal.test.
 const idleRestore = () => createRestoreClient(fakeRestoreIpc(view('none')).ipc)
 
 async function mount(initial: RestoreStatusView, connectionError: string | null = null) {
@@ -71,18 +71,18 @@ describe('AppLayout — 슬롯화된 셸(ADR-0063)', () => {
 
   it('옛 고정 크롬(Sidebar/DiffPanel/StatusBar) 잔재가 없다', () => {
     render(<AppLayout restore={idleRestore()} />)
-    expect(screen.queryByText('Agent Tree')).toBeNull() // 옛 Sidebar 헤더
-    expect(screen.queryByText('Ready')).toBeNull() // 옛 StatusBar
-    expect(screen.queryByText('Accept')).toBeNull() // 옛 DiffPanel
-    expect(screen.queryByText('▶')).toBeNull() // 옛 사이드바 재열기 토글
+    expect(screen.queryByText('Agent Tree')).toBeNull() // The old Sidebar header
+    expect(screen.queryByText('Ready')).toBeNull() // The old StatusBar
+    expect(screen.queryByText('Accept')).toBeNull() // The old DiffPanel
+    expect(screen.queryByText('▶')).toBeNull() // The old sidebar reopen toggle
   })
 })
 
-// jsdom 은 크기를 재지 못한다 — 「밀지 않는다」를 계산된 위치와 구조로 단언한다. 층 자체(줄만큼 · 스크롤 · 쌓임)는
-// NoticeOverlay.test 몫이다.
+// jsdom cannot measure size — assert 「밀지 않는다」 (does not push) by the computed position and structure. The layer itself (as many rows as there are · scroll · stacking) belongs to
+// NoticeOverlay.test.
 describe('AppLayout — 알림은 레이아웃을 덮는다(ADR-0276 · ADR-0277)', () => {
-  // 덮는 자리는 WindowLayout 이 정한다 — 제목 줄 아래 캔버스 칸(사용자 결정 2026-10-26 · T-66). 여기서는 층이 `notices` 로
-  //   넘어가고 덮는 층(absolute)이라는 것만 본다.
+  // Where it covers is decided by WindowLayout — the canvas area below the title bar (user decision 2026-10-26 · T-66). Here we only check that the layer is
+  //   passed as `notices` and that it is a covering layer (absolute).
   it('알림 층은 main WindowLayout 의 notices 로 넘어가고, 계산된 위치가 absolute 로 기준 칸의 맨 위에 붙는다', async () => {
     const { overlay } = await mount(view('none', { state_file: 'unreadable', saves: false }))
     const style = getComputedStyle(overlay)
@@ -93,7 +93,7 @@ describe('AppLayout — 알림은 레이아웃을 덮는다(ADR-0276 · ADR-0277
     const windowLayout = screen.getByTestId('window-layout')
     expect(windowLayout.getAttribute('data-label')).toBe(MAIN_WINDOW_LABEL)
     expect(windowLayout.contains(overlay)).toBe(true)
-    // 감싼 칸 = WindowLayout 의 자리(positioned 로 둔다 — 알림 층의 기준은 WindowLayout 안 칸이다).
+    // The wrapping area = WindowLayout's place (keep it positioned — the reference of the notice layer is the area inside WindowLayout).
     expect(getComputedStyle(windowLayout.parentElement as HTMLElement).position).toBe('relative')
   })
 

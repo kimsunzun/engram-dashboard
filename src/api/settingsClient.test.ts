@@ -1,4 +1,4 @@
-// settingsClient — 구독 먼저 · 키마다 `rev` 로 적용 · 쓰기 통과(ADR-0265 · TRD S21-storage §8 「프론트 설정」).
+// settingsClient — subscribe first · apply by `rev` per key · writes pass through (ADR-0265 · TRD S21-storage §8 「프론트 설정」).
 
 import { describe, expect, it, vi } from 'vitest'
 
@@ -14,7 +14,7 @@ function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
   return { promise, resolve }
 }
 
-/** 가짜 IPC — `listen` 등록과 `settings_get` 답을 시험이 붙잡았다 놓는다. */
+/** Fake IPC — the test holds and releases the `listen` registration and the `settings_get` answer. */
 function fakeIpc() {
   const calls: string[] = []
   const listenGate = deferred<void>()
@@ -56,7 +56,7 @@ function fakeIpc() {
   }
 }
 
-/** 마이크로태스크 사슬(등록 → 당기기 → 적용)을 흘려보낸다. */
+/** Flush the microtask chain (registration → pull → apply). */
 async function flush(): Promise<void> {
   for (let i = 0; i < 10; i++) await Promise.resolve()
 }
@@ -65,7 +65,7 @@ function item(key: string, value: string) {
   return { key, value, is_default: false }
 }
 
-/** 구독자가 받은 변경을 키 → 값으로 누적한다. */
+/** Accumulate the changes the subscriber received as key → value. */
 function recorder() {
   const seen: SettingChange[][] = []
   const listener = (changes: readonly SettingChange[]) => {
@@ -206,7 +206,7 @@ describe('settingsClient — 쓰기 통과', () => {
     await flush()
     f.push({ rev: 2, items: [item('a', 'old')] })
 
-    // rev 3–5 의 알림을 이 창이 놓쳤다 — 셸의 현재 값은 이미 'new' 라 쓰기는 무변경으로 답한다.
+    // This window missed the notices for rev 3–5 — the shell's current value is already 'new', so the write answers with no change.
     f.writeAnswers.set('settings_set', { rev: 5, key: 'a', value: 'new', changed: false })
     await client.set('a', 'new')
     expect(client.get('a')).toBe('new')
