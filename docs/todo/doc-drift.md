@@ -1,19 +1,19 @@
-# 문서 드리프트 묶음 — 작고 독립적
+# Doc drift bundle — small and independent
 
-> **상태:** 착수 가능 · **정본 색인:** [`../todo.md`](../todo.md)
+> **Status:** Ready to start · **Canonical index:** [`../todo.md`](../todo.md)
 
-순서 없음, 서로 무관.
+No order, mutually unrelated.
 
-★**`v0.3.0/chore/misc` 는 버려진 브랜치다 — 재사용도, master 로 들이려는 시도도 하지 말 것(2026-08-26 실측)**★. crate 경계 재편(ADR-0175) **이전**에 갈라져 나왔고, master 를 끌어오면 대규모 diff 에 더해 **modify/delete 충돌 셋**이 난다 — master 가 `.claude/skills/` 를 통째로 지웠기 때문이다(스킬 정본이 이 저장소 밖으로 옮겨 갔다).
+★**`v0.3.0/chore/misc` is an abandoned branch — do not reuse it or try to bring it into master (measured 2026-08-26)**★. It forked **before** the crate boundary restructure (ADR-0175), and pulling in master produces, on top of a huge diff, **three modify/delete conflicts** — because master deleted `.claude/skills/` wholesale (the canonical skill source moved outside this repository).
 
-**그 브랜치가 물고 있던 것은 회수됐다.** 머지 안 된 커밋 셋의 내용(스킬 피드백 적립 + ADR 채번 규율)은 2026-08-26 에 스킬 정본 쪽으로 **원문 그대로 옮겼다** — 옮기기 전에 내용 대조로 부재를 확인했고(대표 문구 다섯 전부 0건), 옮긴 뒤 원문 일치와 충돌 마커 0 을 검증했다. ★즉 이 브랜치에 남은 고유 내용은 없다★. 새 작업은 master 에서 새 브랜치를 판다. **브랜치 자체는 지우지 않는다**(이 저장소는 브랜치를 지우지 않는 규약이다).
+**What that branch was holding has been recovered.** The contents of the three unmerged commits (skill feedback accumulation + ADR numbering discipline) were **moved verbatim** to the canonical skill source on 2026-08-26 — before moving, absence was confirmed by content comparison (all five representative phrases returned 0 hits), and after moving, verbatim match and 0 conflict markers were verified. ★So no unique content remains on this branch★. For new work, create a new branch from master. **The branch itself is not deleted** (this repository has a convention of not deleting branches).
 
-**남은 것:**
+**What remains:**
 
-- ADR-0175 본문 사실 오류 5종. ★어느 다섯인지가 아직 어디에도 안 적혀 있다 — 착수 첫 걸음이 그 목록을 세우는 것이다.★
-- `daemon` 의 미사용 `tracing-subscriber` 선언(`crates/engram-dashboard-daemon/Cargo.toml`). 걷을지는 판단 필요 — 사용 0줄 실측됨. 걷으면 매니페스트가 바뀌므로 빌드 확인이 따라온다.
+- Five factual errors in the ADR-0175 body. ★Which five is not written down anywhere yet — the first step of starting is to build that list.★
+- The unused `tracing-subscriber` declaration in `daemon` (`crates/engram-dashboard-daemon/Cargo.toml`). Whether to remove it needs judgment — 0 lines of use were measured. Removing it changes the manifest, so a build check follows.
 
-**닫힌 것(2026-08-26):**
+**Closed (2026-08-26):**
 
-- ~~`0` 자리채움 범위 누락~~ → **닫혔다.** `CLAUDE.md` 「핵심 불변식」과 `.claude/skill-bindings/review.md` 양쪽에 「범위는 `agents.json` 디스크 serde 뿐 · wire 의 `0` 은 정당한 표식이라 특별취급이 회귀」를 박았다.
-- ~~`README.md` 의 `--exclude engram-dashboard` 드리프트~~ → **닫혔다.** 명령줄에서 그 플래그를 걷고, 위 주석도 「알려진 실패가 남아 있다」에서 「사유 둘이 차례로 죽어 더는 제외하지 않는다」로 갈았다.
+- ~~`0` placeholder range omission~~ → **closed.** We put 「범위는 `agents.json` 디스크 serde 뿐 · wire 의 `0` 은 정당한 표식이라 특별취급이 회귀」 into both `CLAUDE.md` 「핵심 불변식」 and `.claude/skill-bindings/review.md`.
+- ~~The `--exclude engram-dashboard` drift in `README.md`~~ → **closed.** The flag was removed from the command line, and the comment above it was also switched from 「알려진 실패가 남아 있다」 to 「사유 둘이 차례로 죽어 더는 제외하지 않는다」.

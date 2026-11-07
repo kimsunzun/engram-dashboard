@@ -1,12 +1,12 @@
-//! 위로 올라가는 것의 어휘 — 자료형뿐이고 로직이 없다.
+//! Vocabulary of what goes upward — data types only, no logic.
 //!
-//! ★손잡이마다 올라가는 줄은 하나다★([`Incoming`]) — 패킷과 사건이 같은 줄로 흐른다. 옆 채널을 두지 않는 것이
-//! 결정이다(ADR-0177 결정 9): 신호를 소비자가 **이미 읽는** 스트림에 넣지 않으면 안 들었을 때 없는 것과
-//! 같다. 대가 = 패킷만 원하는 소비자도 `match` 를 한 겹 쓴다.
+//! ★Each handle has exactly one upward line★ ([`Incoming`]) — packets and events flow through the same line. Having no side channel is the
+//! decision (ADR-0177 decision 9): a signal not put into the stream the consumer **already reads** is the same as nonexistent if not heard.
+//! The price = a consumer that wants only packets also uses one more layer of `match`.
 //!
-//! ★이 명단이 곧 crate 경계다★(ADR-0182 「영향」) — **에이전트 오류·명령 실패는 여기 없다.** 위층이
-//! 아는 일이고, 여러 출처를 합치는 것은 나중에 화면이 한다. 「이것도 같이 올리면 편하다」로 한 칸이라도
-//! 들어오면 그 경계가 그 자리에서 깨진다.
+//! ★This list is the crate boundary★ (ADR-0182 「영향」 (Consequences)) — **agent errors and command failures are not here.** The upper layer
+//! knows about them, and merging several sources is done later by the screen. If even one entry comes in on the grounds of 「이것도 같이 올리면 편하다」 (it would be convenient to raise this too),
+//! that boundary breaks on the spot.
 
 use std::fmt;
 use std::sync::Arc;
@@ -16,9 +16,9 @@ use crate::frame::CloseCode;
 use crate::machine::{ConnectFailure, DisconnectCause, GaveUpReason, Generation};
 use crate::wire::Wire;
 
-/// 상대에게 소비자가 붙이는 이름표. ★사건의 출처 표식이 이 값이고, 나중에 화면에 그대로 뜬다★.
+/// Label the consumer attaches to a peer. ★This value is the event's source marker, and it later shows on screen as is★.
 ///
-/// crate 는 이 문자열을 해석하지 않는다 — 같은지만 본다.
+/// The crate does not interpret this string — it only checks whether two are equal.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PeerId(pub Arc<str>);
 
@@ -31,7 +31,7 @@ impl PeerId {
         &self.0
     }
 
-    /// 지터를 상대마다 흩는 씨앗. ★난수가 아니라 이름의 함수라 재실행에도 같다★(FNV-1a 64).
+    /// Seed that scatters jitter per peer. ★Not random but a function of the name, so it is the same across re-runs★ (FNV-1a 64).
     pub fn jitter_seed(&self) -> u64 {
         let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
         for byte in self.0.as_bytes() {
@@ -54,49 +54,49 @@ impl fmt::Display for PeerId {
     }
 }
 
-/// 어느 방향에서 버려졌나.
+/// From which direction it was discarded.
 ///
-/// ★받는 쪽 갈래는 없다★ — 위로 올라가는 줄이 차도 감독이 자기 순서 칸에 붙들어 버리지 않는다
-/// (`peer.rs` 헤더 「순서 칸」 · TRD 3 §3-0 ②).
+/// ★There is no receiver-side branch★ — even when the upward line is full, the supervisor holds items in its own ordering area instead of discarding them
+/// (`peer.rs` header 「순서 칸」 (ordering area) · TRD 3 §3-0 ②).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
-    /// 상대에게 나갈 것을 못 내보냈다. 큐 포화만이 아니라 끊겨서 버린 것도 들고, 그중에는 **쓰는 도중
-    /// 끊긴** 알림·팬아웃도 있다(같은 처지의 요청은 여기 안 들고 오류로 깨어난다).
+    /// Could not send out what was meant to go to the peer. It includes not only queue saturation but also what was discarded because of a disconnect, and among those are
+    /// notifications and fan-outs **cut off mid-write** (a request in the same situation is not included here; it wakes with an error).
     ///
-    /// ★「확실히 잃었다」가 아니라 「쓰기가 `Ok` 로 끝나는 것을 못 봤다」다 — 부풀 수 있다★. 부푸는 자리는
-    /// 쓰는 도중 끊긴 프레임이다 — 이미 어댑터 버퍼에 들어가 있었을 수 있고, WS 어댑터에서는 통로를 버릴 때
-    /// 보내는 닫기가 그것을 먼저 밀어낼 수 있다(소스 판독 — `ws.rs` 「통로 성질」). 같은 혼잡이면 그 닫기도
-    /// 쓰기 시한에 잘릴 수 있다.
+    /// ★It is not 「확실히 잃었다」 (certainly lost) but 「쓰기가 `Ok` 로 끝나는 것을 못 봤다」 (did not see the write end in Ok) — the count can be inflated★. The place where it is inflated is
+    /// a frame cut off mid-write — it may already have been in the adapter buffer, and on the WS adapter, the close
+    /// sent when the link is discarded may push it out first (source reading — `ws.rs` 「통로 성질」 (link properties)). Under the same congestion that close
+    /// can also be cut by the write deadline.
     ///
-    /// [`crate::Registry::broadcast`] 가 못 넣은 프레임은 그 상대의 감독이 한 번 센다(큐 포화 · 운영 단계
-    /// 아님). 단 앱이 [`crate::Peer::close`] 를 부른 뒤 운영 단계가 아니라서 못 넣은 것은 세지 않는다(`lib.rs`
-    /// 「알려진 한계」) — 닫기를 부른 뒤라도 아직 운영 중인 상대에 넣다 큐가 찬 것은 센다.
+    /// A frame that [`crate::Registry::broadcast`] could not put in is counted once by that peer's supervisor (queue saturation · not in the operating phase).
+    /// But a frame that could not be put in because the peer was not in the operating phase after the app called [`crate::Peer::close`] is not counted (`lib.rs`
+    /// 「알려진 한계」 (known limits)) — a frame put into a peer still operating after close was called, where the queue then filled, is counted.
     ///
-    /// ★묶인 세대가 쓰기 직전에 지금 세대가 아니라서 안 쓴 것도 든다★(TRD 3 §3-0 ③ — [`crate::Peer::notify_in`])
-    /// — 큐에 넣을 때는 그 연결이 운영 중이었지만 쓰기 전에 다시 붙었다. 그 신고는 다음 연결의
-    /// [`TransportEvent::Connected`] 뒤에 올 수 있다 — 버린 것은 앞 연결 몫이다. `notify` · `notify_in` 이 입구에서
-    /// 묶은 세대가 운영 중이 아니라 `Err`([`crate::SendError::Disconnected`])를 받은 것은 세지 않는다 — 큐가 차 받은
-    /// `Err` 는 센다(큐 포화). 팬아웃 · 이어받기는 부르는 쪽이 오류를 못 받으므로 입구의 거절도 센다(위). 끝난
-    /// 세대에서 찬 큐는 신고만 하고 다음 연결을 끊지 않는다.
+    /// ★It also includes what was not written because the bound generation was not the current one just before the write★ (TRD 3 §3-0 ③ — [`crate::Peer::notify_in`])
+    /// — the connection was operating when it was queued, but it reconnected before the write. That report may come after the next connection's
+    /// [`TransportEvent::Connected`] — what was discarded belongs to the previous connection. A call where the generation bound by `notify` · `notify_in` at the entrance
+    /// was not operating and got `Err` ([`crate::SendError::Disconnected`]) is not counted — an `Err` received because the queue was full is
+    /// counted (queue saturation). Fan-outs and resume calls cannot get the error to the caller, so an entrance rejection is counted too (above). A queue
+    /// that filled in an ended generation only reports and does not cut the next connection.
     ///
-    /// 거꾸로 안 센 것도 도착을 보증하지 않는다 — 쓰기의 `Ok` 는 전송 버퍼까지다.
+    /// Conversely, what was not counted does not guarantee arrival either — the `Ok` of a write only reaches the transport buffer.
     Outbound,
 }
 
-/// 상대에게서 온 패킷 하나.
+/// One packet from the peer.
 pub struct Arrival<W: Wire> {
-    /// ★출처 표식★ — 어느 상대의 것인가.
+    /// ★Source marker★ — which peer it is from.
     pub peer: PeerId,
-    /// ★세대 경계★ — 이 조각이 어느 **연결** 세대의 것인가. 재연결을 가로질러도 핸들은 살아 있으므로,
-    /// 경계가 보이는 자리는 여기다.
+    /// ★Generation boundary★ — which **connection** generation this piece belongs to. The handle stays alive across reconnects,
+    /// so this is where the boundary shows.
     ///
-    /// ★스트림 조각은 더 새 세대의 [`TransportEvent::Connected`] 뒤에 옛 세대 번호를 달고 올 수 있다★ — 이어받기
-    /// 창이 붙든 조각은 다시 붙은 뒤 닫힐 때 올라가도 실어 온 연결의 세대를 단다. 그래서 스트림 층을 켜는 결정이
-    /// 서면(지금 두 소비자는 안 쓴다 — ADR-0310 결정 16) 그 받는 쪽은 스트림 조각을 세대로 거르지 않아야 한다 —
-    /// 거르면 창이 붙들었다 올린 조각을 버린다. 세대 거름은 스트림이 아닌 메시지에만 건다.
+    /// ★A stream fragment can arrive carrying an old generation number after a newer generation's [`TransportEvent::Connected`]★ — a fragment the resume
+    /// window held goes upward when the window closes after reconnecting, but it carries the generation of the connection it arrived on. So once the decision to turn the stream layer on
+    /// is made (today's two consumers do not use it — ADR-0310 decision 16), that receiver must not filter stream fragments by generation —
+    /// filtering would discard fragments the window held and then raised. Generation filtering applies only to non-stream messages.
     ///
-    /// ★이 메시지에 걸린 답 · 요청을 실어 온 그 연결로만 내려면 이 값을 [`crate::Peer::notify_in`] ·
-    /// [`crate::Peer::request_in`] 에 넘긴다★ — 그 사이 다시 붙었으면 다음 연결로 넘어가지 않고 안 나간다(TRD 3
+    /// ★To send an answer · request hanging on this message only over the connection it arrived on, pass this value to [`crate::Peer::notify_in`] ·
+    /// [`crate::Peer::request_in`]★ — if it reconnected in between, it does not go over to the next connection and is not sent (TRD 3
     /// §3-0 ③).
     pub generation: Generation,
     pub msg: W::In,
@@ -115,7 +115,7 @@ where
     }
 }
 
-/// 수신단([`crate::Inbox`])으로 올라오는 것 전부.
+/// Everything that comes up into the inbox ([`crate::Inbox`]).
 pub enum Incoming<W: Wire> {
     Message(Arrival<W>),
     Event(TransportEvent<W>),
@@ -158,25 +158,25 @@ where
     }
 }
 
-/// 연결에 무슨 일이 있었나. ★전부 `peer` 를 갖는다★.
+/// What happened to the connection. ★All of them carry `peer`★.
 ///
-/// 스트림 계열의 `generation` 은 **화신 표식**(u32)이라 [`Generation`](연결 세대)과 다른 것이다 —
-/// 이름이 같아 헷갈리기 쉬운 자리이므로 폭으로 갈린다고 기억하는 편이 빠르다.
-/// ★`#[non_exhaustive]`★ — TRD §7 이 「항목은 늘어난다」로 못박았고 이 crate 는 재사용을 겨냥한다.
-/// 지금 달아 두지 않으면 갈래 하나를 더하는 순간 소비자 전부의 `match` 가 깨진다.
+/// The `generation` of the stream family is an **incarnation marker** (u32), a different thing from [`Generation`] (connection generation) —
+/// the names are the same and easy to confuse, so it is quicker to remember that they are told apart by width.
+/// ★`#[non_exhaustive]`★ — TRD §7 pinned it down as 「항목은 늘어난다」 (items grow) and this crate aims at reuse.
+/// If it is not set now, the moment one more branch is added, every consumer's `match` breaks.
 #[non_exhaustive]
 pub enum TransportEvent<W: Wire> {
     Connected {
         peer: PeerId,
         generation: Generation,
     },
-    /// ★오늘 코드에는 이 `cause` 구분이 없다 — 전부 「끊김」 한 덩어리다★.
+    /// ★Today's code has no such `cause` distinction — everything is one lump of 「끊김」 (disconnected)★.
     Disconnected {
         peer: PeerId,
         generation: Generation,
         cause: DisconnectCause,
     },
-    /// ★오늘은 재연결 중 실패 사유가 `debug!` 로만 남고 버려진다★.
+    /// ★Today the failure reason during a reconnect is left only as `debug!` and discarded★.
     ConnectFailed {
         peer: PeerId,
         attempt: u32,
@@ -184,51 +184,51 @@ pub enum TransportEvent<W: Wire> {
         cause: ConnectFailure,
         retry_in: Option<Duration>,
     },
-    /// ★종결 거절([`crate::RejectKind::Terminal`])★ — 바로 뒤에 [`TransportEvent::GaveUp`] 이 온다(ADR-0178 의 버전
-    /// 거절 · 거는 쪽의 [`crate::DialFailure::Refused`] 가 여기로 올라온다). 다시 거는 거절은 여기 오지 않고
-    /// [`TransportEvent::ConnectFailed`] 의 `cause` 로 간다.
+    /// ★Terminal rejection ([`crate::RejectKind::Terminal`])★ — [`TransportEvent::GaveUp`] comes right after (the version
+    /// rejection of ADR-0178 · the dialer's [`crate::DialFailure::Refused`] comes up here). A rejection that is retried does not come here; it goes
+    /// as the `cause` of [`TransportEvent::ConnectFailed`].
     ///
-    /// ★팝업 문안은 `code` 로 고르는 고정 로컬 문구다 — `reason` 이 아니다★(TRD 3 §3-0 ⑤). `reason` 은 상대가 준 글일
-    /// 수 있어 가르지도 화면 문안으로 쓰지도 않고 세부 · 로그로만 보낸다 — 가린 글이다
+    /// ★The popup text is a fixed local string chosen by `code` — not `reason`★ (TRD 3 §3-0 ⑤). `reason` may be text the peer
+    /// gave, so it is neither used to decide nor used as screen text and goes only to details · the log — it is masked text
     /// ([`crate::mask_reason`] · [`crate::ConnectFailure::Rejected`]).
     Rejected {
         peer: PeerId,
         code: CloseCode,
         reason: String,
     },
-    /// 셸이 팝업 자격을 판정하는 입력(ADR-0180 결정 2).
+    /// Input from which the shell decides popup eligibility (ADR-0180 decision 2).
     GaveUp { peer: PeerId, reason: GaveUpReason },
-    /// ★이 감독의 마지막 사건이자 그 손잡이 수신단([`crate::Inbox`])의 마지막 항목★ — 정리가 통로를 다 닫고
-    /// 순서 칸에 붙든 것을 다 실은 뒤 맨 끝에 내고, 감독이 넣는 끝을 놓아 그 수신단의 다음 `recv` 는 `None`
-    /// 이다(TRD 3 §3-0 ②).
+    /// ★This supervisor's last event and the last item of that handle's inbox ([`crate::Inbox`])★ — cleanup closes all links and loads everything held in the
+    /// ordering area, then emits it at the very end and releases the supervisor's sending end, so the next `recv` on that inbox is `None`
+    /// (TRD 3 §3-0 ②).
     ///
-    /// `generation` = 이 감독의 마지막 연결 세대(한 번도 안 붙었으면 명부가 준 바닥값) · `cause` = 끝낸 까닭.
-    /// ★건 상대([`crate::Registry::add`])는 늘 [`DisconnectCause::Explicit`] 다★ — 감독이 끝나는 길이 닫기 하나뿐이다
-    /// (앱이 닫았거나, 그 손잡이가 다 사라졌거나, 받는 쪽이 수신단을 닫았다). ★받은 상대([`crate::Registry::attach`])는
-    /// 진짜 까닭이다★ — 다시 걸지 않아 연결을 잃는 것이 곧 끝이다: 운영 중 끊김이면 앞의 `Disconnected` 와 같은 까닭,
-    /// 운영 단계에 못 들었으면 핸드셰이크가 멈춘 자리(우리 핸드셰이크의 거절 = `Explicit` · 상대가 닫음 = `PeerClosed` ·
-    /// 읽기 · 쓰기 오류 = `ReadFailed` · `WriteFailed` · 쓰기가 시한을 넘김 = `WriteDeadline` · 인증 시한까지 상대가 못
-    /// 마침 = `Idle`), 앱 · 받는 쪽이 닫았으면 `Explicit`.
+    /// `generation` = this supervisor's last connection generation (the floor value the registry gave if it never connected) · `cause` = the reason it ended.
+    /// ★A peer that we dialed ([`crate::Registry::add`]) is always [`DisconnectCause::Explicit`]★ — the supervisor's only way to end is a close
+    /// (the app closed it, or all its handles are gone, or the receiver closed the inbox). ★A peer that was accepted ([`crate::Registry::attach`]) carries
+    /// the real reason★ — it does not redial, so losing the connection is the end: if it dropped while operating, the same reason as the preceding `Disconnected`;
+    /// if it never reached the operating phase, the place where the handshake stopped (our handshake's rejection = `Explicit` · peer closed = `PeerClosed` ·
+    /// read · write error = `ReadFailed` · `WriteFailed` · write passed its deadline = `WriteDeadline` · the peer could not
+    /// finish by the auth deadline = `Idle`), and `Explicit` if the app · the receiver closed it.
     ///
-    /// ★`generation` 으로 감독을 가르지 않는다 — 수신단이 가른다★ — 바닥값은 같은 이름표의 앞 감독이
-    /// 마지막으로 뽑은 세대라, 한 번도 안 붙고 끝난 감독의 이것은 앞 감독의 이것과 똑같을 수 있다. 감독마다
-    /// 수신단이 따로라 둘이 한 수신단에 섞이지 않는다.
+    /// ★Do not tell supervisors apart by `generation` — the inbox does★ — the floor value is the generation the previous supervisor of the same label
+    /// last drew, so for a supervisor that ended without ever connecting, this can be identical to the previous supervisor's. Each supervisor has
+    /// its own inbox, so the two never mix in one inbox.
     ///
-    /// ★안 올 수 있다★ — 받는 쪽이 수신단을 닫거나 놓은 뒤에는 실을 데가 없다(닫기 전에 이미 실린 이것은
-    /// 닫은 뒤에도 꺼낼 수 있다). 감독이 정상 정리 없이 끝나도
-    /// 안 온다 — 산 채 안 비우는 받는 쪽에 정리가 상한(`peer.rs` 의 `CLOSE_DRAIN_LIMIT`)을 넘겨 남은 것과 함께
-    /// 이것도 버렸거나(세지도 신고하지도 않는다), 태스크가 비정상으로 끝났다(패닉 · 런타임 종료). 어느 쪽이든 넣는
-    /// 끝이 떨어져 `Closed` 없는 `None` 이 끝을 알린다 — 그것을 상한 초과로만 읽지 말 것.
+    /// ★It may not come★ — after the receiver closes or drops the inbox there is nowhere to load it (one already loaded before closing can still be taken out
+    /// after closing). It also does not come when the supervisor ends without a normal cleanup —
+    /// either cleanup went past its cap (`CLOSE_DRAIN_LIMIT` in `peer.rs`) against a receiver that stays alive and does not drain, and discarded this along with the rest
+    /// (not counted and not reported), or the task ended abnormally (panic · runtime shutdown). Either way the sending
+    /// end drops and a `None` without `Closed` signals the end — do not read it only as a cap overrun.
     ///
-    /// 운영 중 끊김의 읽기 끝 · 쓰기 끝 가름([`DisconnectCause::ReadFailed`] · [`DisconnectCause::WriteFailed`])은
-    /// 그 앞의 [`TransportEvent::Disconnected`] 가 싣는다 — 받은 상대는 이것도 싣는다(데몬 어댑터가 이 까닭 하나로 읽기
-    /// 끝 · 쓰기 끝을 가른다 — TRD 3 §3-0 ①).
+    /// The read-end / write-end split of a disconnect while operating ([`DisconnectCause::ReadFailed`] · [`DisconnectCause::WriteFailed`])
+    /// is carried by the preceding [`TransportEvent::Disconnected`] — an accepted peer carries it here too (the daemon adapter tells the read
+    /// end from the write end by this one reason — TRD 3 §3-0 ①).
     Closed {
         peer: PeerId,
         generation: Generation,
         cause: DisconnectCause,
     },
-    /// 어디서 몇 개를 잃었고 무엇을 다시 청했나. ★오늘은 순번 구멍 검사가 아예 없다★.
+    /// Where and how many were lost and what was requested again. ★Today there is no sequence-hole check at all★.
     StreamGap {
         peer: PeerId,
         stream: W::StreamKey,
@@ -237,27 +237,27 @@ pub enum TransportEvent<W: Wire> {
         got: u64,
         resumed_from: Option<u64>,
     },
-    /// ★참/거짓이 아니라 **번호**★ — 지금 유효한 가장 오래된 순번(ADR-0177 결정 9).
+    /// ★Not true/false but a **number**★ — the oldest sequence number valid now (ADR-0177 decision 9).
     StreamTruncated {
         peer: PeerId,
         stream: W::StreamKey,
         generation: u32,
         oldest_valid: u64,
     },
-    /// 화신이 갈렸다 — 순번 대조가 초기화됐다.
+    /// The incarnation changed — the sequence cross-check was reset.
     StreamGenerationChanged {
         peer: PeerId,
         stream: W::StreamKey,
         from: u32,
         to: u32,
-        /// 옛 화신 몫으로 붙들고 있다가 버린 조각 수. 새 화신에서는 그 번호들이 뜻을 갖지 않는다.
+        /// Number of fragments held and then discarded for the old incarnation. Under the new incarnation those numbers have no meaning.
         discarded: u64,
     },
-    /// 스트림 수 상한 때문에 이 스트림의 장부를 잊었다.
+    /// Forgot this stream's ledger because of the stream-count cap.
     ///
-    /// ★상대가 새 키를 계속 지어내면 자리가 모자란다★ — 그때 무엇을 잊었는지 말하지 않으면, 이후
-    /// 그 스트림의 중복 제거·구멍 검출이 조용히 처음부터 다시 시작된다. 붙들고 있던 조각은 버리지
-    /// 않고 [`TransportEvent::StreamTruncated`] 와 함께 올라온다.
+    /// ★If the peer keeps inventing new keys, room runs out★ — if what was forgotten were not reported then, from that point
+    /// that stream's duplicate removal and hole detection would silently restart from scratch. Fragments being held are not
+    /// discarded and come up together with [`TransportEvent::StreamTruncated`].
     StreamForgotten {
         peer: PeerId,
         stream: W::StreamKey,
@@ -269,28 +269,28 @@ pub enum TransportEvent<W: Wire> {
         tag: W::Tag,
         after: Duration,
     },
-    /// 답장이 왔는데 **기다리던 자리가 없다**.
+    /// A reply came but **there is no waiting slot**.
     ///
-    /// 만료 뒤 늦게 온 답장은 여기 오지 않는다 — 그건 설계대로 조용히 버린다(ADR-0181 결정 4). 여기
-    /// 오는 것은 **애초에 우리가 청한 적 없는 짝짓기 번호**이고, 소비자 쪽 실수(답장을 받는 명령을
-    /// `notify`/`broadcast` 로 밀었다)이거나 상대가 지어낸 번호다.
+    /// A reply that arrives late after expiry does not come here — that is quietly discarded by design (ADR-0181 decision 4). What
+    /// comes here is **a pairing number we never asked for in the first place**, and it is either a consumer-side mistake (a command that expects a reply was pushed through
+    /// `notify`/`broadcast`) or a number the peer made up.
     UnmatchedReply { peer: PeerId, tag: W::Tag },
-    /// 버린 것의 수 — 무엇을 세나는 [`Direction`] 각 갈래가 정본이다. 큐 정책과 무관하게 올라온다.
-    /// ★조용한 유실을 안 만들기 위한 칸이다★.
+    /// Number of discarded items — what is counted is defined by each branch of [`Direction`]. It comes up regardless of queue policy.
+    /// ★This field exists so as not to create silent loss★.
     Dropped {
         peer: PeerId,
         direction: Direction,
         count: u64,
     },
-    /// [`Wire::decode`] 가 실패했다. 연결을 끊을지는 [`crate::DecodeFailurePolicy`] 가 정한다.
+    /// [`Wire::decode`] failed. Whether to disconnect is decided by [`crate::DecodeFailurePolicy`].
     ///
-    /// `reason` = 소비자 해독 오류의 분류([`crate::wire::DecodeClass::class`]) — ★고정 낱말이고 받은 값을 안 담는다★.
+    /// `reason` = classification of the consumer's decode error ([`crate::wire::DecodeClass::class`]) — ★a fixed word that does not hold the received value★.
     DecodeFailed {
         peer: PeerId,
         generation: Generation,
         reason: &'static str,
     },
-    /// 한 `In` 이 답장이면서 스트림 조각이라고 신고됐다 — [`Wire`] 계약 위반 신호다.
+    /// One `In` was reported as both a reply and a stream fragment — a signal of a [`Wire`] contract violation.
     AmbiguousRole { peer: PeerId },
 }
 
@@ -315,7 +315,7 @@ impl<W: Wire> TransportEvent<W> {
         }
     }
 
-    /// 로그·단언에서 갈래를 집기 위한 안정된 이름.
+    /// Stable name for picking out the branch in logs · assertions.
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Connected { .. } => "Connected",
@@ -545,8 +545,8 @@ mod tests {
 
     #[test]
     fn the_event_list_is_open_for_growth() {
-        // crate 밖에서 이 enum 을 남김없이 match 할 수 없다는 것이 `#[non_exhaustive]` 의 전부다.
-        // 여기서는 갈래 이름이 안정된 문자열로 나오는 것만 잰다 — 소비자가 그것으로 가른다.
+        // All `#[non_exhaustive]` means is that this enum cannot be matched exhaustively outside the crate.
+        // Here we only measure that the branch name comes out as a stable string — the consumer tells branches apart by it.
         let peer = PeerId::new("d1");
         let forgotten: TransportEvent<TestWire> = TransportEvent::StreamForgotten {
             peer: peer.clone(),

@@ -1,27 +1,27 @@
-//! 상대 N 개 명부 — ★구동 층★. 상대마다 감독 하나를 세우고, 그 손잡이의 수신단([`Inbox`])을 올린 쪽에
-//! 돌려준다.
+//! Peer-N registry — ★driving layer★. It sets up one supervisor per peer and returns that handle's receiver end ([`Inbox`]) to
+//! the side that raised it.
 //!
-//! ★상대는 처음부터 N 개다★(ADR-0177 결정 3 · ADR-0179) — 하나뿐인 세계를 전제한 상태가 어디에도 없다.
-//! **상대끼리 상태를 공유하지 않는다**: 데몬 A 가 포기해도 B 는 운영 중이다.
+//! ★There are N peers from the start★ (ADR-0177 decision 3 · ADR-0179) — there is no state anywhere that presumes a world of just one.
+//! **Peers do not share state with each other**: even if daemon A gives up, B is operating.
 //!
-//! ★위로 올라가는 줄도 공유하지 않는다 — 손잡이마다 따로다★(ADR-0310 결정 17 · TRD 3 §3-0 ① D24 ②) — 줄이
-//! 하나면 시끄러운 상대가 그것을 채우는 순간 조용한 상대의 사건·패킷이 그 뒤에 붙들리고, 「A 하나 죽어도
-//! B·C 는 잘 동작해야 한다」가 무너진다(ADR-0180 결정 8). 그래서 [`Registry::add`] 가 올릴 때마다 줄(길이 =
-//! [`Policy::inbound_queue`])을 하나 세워 그 받는 끝을 돌려주고, 넣는 끝은 그 감독 하나만 쥔다. 줄이 차면 그
-//! 감독이 자기 순서 칸에 붙들고 그 상대의 읽기를 세운다 — 버리지 않고 연결을 끊지도 않는다(`peer.rs` 헤더).
-//! 그래서 받는 쪽이 한 수신단을 안 비우면 그 상대만 선다.
+//! ★The upward line is not shared either — it is separate per handle★ (ADR-0310 decision 17 · TRD 3 §3-0 ① D24 ②) — with one line,
+//! the moment a noisy peer fills it, a quiet peer's events · packets are held behind it, and 「A 하나 죽어도
+//! B·C 는 잘 동작해야 한다」 (even if A dies, B and C must keep working) collapses (ADR-0180 decision 8). So each time [`Registry::add`] raises one it sets up a line (length =
+//! [`Policy::inbound_queue`]), returns its receiving end, and only that one supervisor holds the enqueue end. When the line is full, that
+//! supervisor holds in its own ordering area and stops that peer's reading — it neither drops nor cuts the connection (`peer.rs` header).
+//! So if the receiving side does not drain one receiver end, only that peer stalls.
 //!
-//! ★같은 이름표를 다시 올려도 줄을 잇지 않는다★ — 옛 감독은 정리를 마칠 때까지 옛 수신단에, 새 감독은 새
-//! 수신단에 넣는다. 그래서 수신단 하나에는 감독 하나의 것만 오고 그 수신단의 끝이 그 감독의 끝이다. 수신단
-//! 사이의 순서는 없다 — 합친 보기가 필요하면 소비자 어댑터가 수신단들을 합친다(거르는 규칙은 TRD 3 §3-3).
+//! ★Even raising the same name tag again does not continue the line★ — the old supervisor puts into the old receiver end until it finishes teardown, and the new supervisor into the new
+//! receiver end. So only one supervisor's output comes to one receiver end and that receiver end's end is that supervisor's end. There is no ordering between
+//! receiver ends — if a merged view is needed, the consumer adapter merges the receiver ends (the filtering rules are TRD 3 §3-3).
 //!
-//! ★상대를 올리는 길은 둘이다★ — [`Registry::add`] 는 주소로 걸고 끊기면 다시 건다. [`Registry::attach`] 는 받은
-//! 통로([`Accepted`]) 하나를 얹고 다시 걸지 않으며, 끝나면 명부에서 스스로 내린다(TRD 3 §3-1 ①). 수락 루프는 소비자가
-//! 돈다 — 명부는 청취기를 쥐지 않는다.
+//! ★There are two ways to raise a peer★ — [`Registry::add`] dials by address and redials when cut. [`Registry::attach`] puts on one received
+//! channel ([`Accepted`]) and does not redial, and when it ends it removes itself from the registry (TRD 3 §3-1 ①). The consumer runs the accept loop
+//! — the registry does not hold the listener.
 //!
-//! ★「앱 전체가 끊겼나」는 여기서 판정하지 않는다★ — 그건 화면의 개념이고 이 crate 는 상대를 셀 뿐
-//! 앱을 모른다. 재료 둘([`Registry::peers`] 와 [`crate::Peer::reconnect_now`])을 주고 셸이 접는다
-//! (ADR-0180 의 열린 질문이 그렇게 닫힌다).
+//! ★The registry does not decide 「앱 전체가 끊겼나」 (is the whole app disconnected)★ — that is a screen concept and this crate only counts peers and
+//! does not know the app. It gives two ingredients ([`Registry::peers`] and [`crate::Peer::reconnect_now`]) and the shell folds them
+//! (that is how ADR-0180's open question gets closed).
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -41,42 +41,42 @@ use crate::peer::{prepare_peer, AcceptedLink, LeaveRoster, Origin, Peer, PeerCon
 use crate::policy::Policy;
 use crate::wire::Wire;
 
-/// 손잡이 하나의 수신단 — 그것을 돌려준 [`Registry::add`] · [`Registry::attach`] 가 띄운 감독 하나가 낸 것만 온다.
+/// One handle's receiver end — only what was emitted by the one supervisor raised by the [`Registry::add`] · [`Registry::attach`] that returned it comes.
 ///
-/// ★끝 = [`TransportEvent::Closed`](crate::TransportEvent::Closed) 다음의 `None`★ — 감독은 정리를 마치며 `Closed`
-/// 를 마지막으로 싣고 넣는 끝을 놓는다. ★`Closed` 없이 `None` 이 오면 — 받는 쪽이 스스로 [`Inbox::close`] 를
-/// 부른 게 아니라면 — 감독이 정상 정리 없이 끝났다★: 정리가 상한(`peer.rs` 의 `CLOSE_DRAIN_LIMIT`)을 넘겨 남은
-/// 것을 `Closed` 까지 버렸거나(세지도 신고하지도 않는다), 태스크가 비정상으로 끝났다(패닉 · 런타임 종료 — 넣는
-/// 끝이 태스크와 함께 떨어진다). 상한 초과로만 읽지 말 것. [`Inbox::close`] 를 부른 뒤의 `None` 은 감독의 끝이
-/// 아니다 — 감독은 아직 돌고 있을 수 있다. ★끝까지 비운다★ — crate 헤더 「받는 쪽 불변식」 5.
+/// ★The end = `None` after [`TransportEvent::Closed`](crate::TransportEvent::Closed)★ — the supervisor loads `Closed` last
+/// as it finishes teardown and releases the enqueue end. ★If `None` comes without `Closed` — unless the receiving side called [`Inbox::close`]
+/// itself — the supervisor ended without a normal teardown★: either teardown exceeded the limit (`CLOSE_DRAIN_LIMIT` in `peer.rs`) and dropped the rest
+/// up to `Closed` (neither counted nor reported), or the task ended abnormally (panic · runtime shutdown — the enqueue
+/// end is dropped with the task). Do not read it only as exceeding the limit. A `None` after calling [`Inbox::close`] is not the
+/// supervisor's end — the supervisor may still be running. ★Drain to the end★ — crate header 「받는 쪽 불변식」 (receiver invariants) 5.
 ///
-/// 항목마다 감독의 바이트 몫이 실려 있고 꺼낼 때 떨어진다(`budget.rs`). 수신단을 떨어뜨리면 든 것의 몫도 함께
-/// 떨어진다.
+/// Each item carries the supervisor's byte share and it is released when taken out (`budget.rs`). If the receiver end is dropped, the share of what it held
+/// is released with it.
 pub struct Inbox<W: Wire> {
     rx: mpsc::Receiver<Charged<Incoming<W>>>,
 }
 
 impl<W: Wire> Inbox<W> {
-    /// `None` = 끝 — 감독이 넣는 끝을 놓았거나 [`Inbox::close`] 를 불렀고, 든 것을 다 꺼냈다.
-    /// ★취소 안전★ — `select!` 팔에 걸어 다른 팔이 이겨도 항목을 잃지 않는다.
+    /// `None` = the end — the supervisor released the enqueue end or [`Inbox::close`] was called, and everything it held has been taken out.
+    /// ★Cancel-safe★ — put on a `select!` arm, no item is lost even if another arm wins.
     pub async fn recv(&mut self) -> Option<Incoming<W>> {
         self.rx.recv().await.map(Charged::into_item)
     }
 
-    /// 기다리지 않고 한 개. `None` = 지금 든 것이 없거나 끝났다 — 둘을 가르려면 [`Inbox::recv`] 를 쓴다.
+    /// One without waiting. `None` = nothing held now or it ended — to tell the two apart use [`Inbox::recv`].
     pub fn try_recv(&mut self) -> Option<Incoming<W>> {
         self.rx.try_recv().ok().map(Charged::into_item)
     }
 
-    /// 새로 넣는 것만 막는다. 이미 든 것(이미 실린 `Closed` 포함)은 [`Inbox::recv`] · [`Inbox::try_recv`] 로 계속
-    /// 꺼낼 수 있고, 다 꺼내면 감독이 아직 돌고 있어도 `None` 이다. ★감독이 순서 칸에 붙들어 아직 못 실은 것은
-    /// 말없이 버려진다★ — 닫힌 줄에는 실을 수 없고, 세지도 신고하지도 않는다. [`Inbox`] 를 떨어뜨려도 같다(든
-    /// 것까지 함께 버린다).
+    /// It blocks only new items. What is already held (including an already loaded `Closed`) can still be taken out with [`Inbox::recv`] · [`Inbox::try_recv`],
+    /// and when all are taken out it is `None` even if the supervisor is still running. ★What the supervisor holds in the ordering area and has not yet loaded
+    /// is silently dropped★ — it cannot be loaded into a closed line, and it is neither counted nor reported. The same if the [`Inbox`] is dropped (what it held
+    /// is dropped along with it).
     ///
-    /// ★감독은 곧바로 접는다★ — 넣을 것이 없어도(상대가 조용해도) 그 자리에서 닫기로 가고 다시 붙지 않는다
-    /// (crate 헤더 「받는 쪽 불변식」 5). 떨어뜨려도 같다. ★받아 둔 나가는 일도 함께 버려진다★ — 큐에 든 명령은
-    /// 거절되고 쓰던 프레임은 버려진다(세지만 신고할 데가 없다). 보내고 떠나려면 `Closed` · `None` 까지 비운 뒤에
-    /// 놓는다.
+    /// ★The supervisor folds immediately★ — even with nothing to put in (even if the peer is quiet) it goes to closing on the spot and does not re-attach
+    /// (crate header 「받는 쪽 불변식」 (receiver invariants) 5). The same if dropped. ★The outbound work it had accepted is dropped too★ — commands in the queue are
+    /// rejected and the frame being written is dropped (counted but nowhere to report). To send and leave, drain until `Closed` · `None`
+    /// and then release.
     pub fn close(&mut self) {
         self.rx.close();
     }
@@ -87,48 +87,48 @@ struct RegistryInner<W: Wire> {
     dialer: Arc<dyn Dialer>,
     clock: Arc<dyn Clock>,
     policy: Policy,
-    /// ★자물쇠 안에서는 기다리지 않는다★ — 감독 띄우기 · 닫기 · 손잡이 떨어뜨리기는 자물쇠 밖이다.
+    /// ★Do not wait inside the lock★ — starting supervisors · closing · dropping handles are outside the lock.
     roster: Mutex<Roster<W>>,
 }
 
-/// 명부 자물쇠 하나가 지키는 것 전부. ★세대 표도 이 자물쇠 안이다★ — 갈아치울 손잡이 빼기 · 계수기 고르기 · 새
-/// 손잡이 올리기가 한 임계 구역이어야 해서다(`Registry::launch`).
+/// Everything one registry lock guards. ★The generation table is inside this lock too★ — because taking out the handle to replace · choosing the counter · raising the new
+/// handle must be one critical section (`Registry::launch`).
 struct Roster<W: Wire> {
-    /// 올라 있는 이름표의 손잡이.
+    /// The handle of a name tag that is raised.
     peers: HashMap<PeerId, Peer<W>>,
-    /// 이름표별 세대 계수기. ★`remove` 로 지우지 않는다★ — 지우면 같은 이름표를 다시 올릴 때 세대가
-    /// 0 으로 되감기고, 소비자의 평범한 방어(「최대 세대 미만은 무시」)가 새 연결을 통째로 버린다.
+    /// The per-name-tag generation counter. ★Do not erase with `remove`★ — if erased, the generation is rewound to
+    /// 0 when the same name tag is raised again, and the consumer's ordinary defense (「최대 세대 미만은 무시」 — ignore anything below the max generation) discards the new connection entirely.
     ///
-    /// 이 map 은 **소비자가 [`Registry::add`] 로 쓴 이름표 수**만큼 자란다(상대가 정하는 값이 아니다).
-    /// ★받은 상대는 넣지 않는다★ — 연결마다 이름표가 새것이라 넣으면 연결 수만큼 영원히 자란다
+    /// This map grows by as many as **the number of name tags the consumer wrote with [`Registry::add`]** (it is not a value the peer decides).
+    /// ★Accepted peers are not put in★ — the name tag is new for each connection so putting them in would grow it forever by the number of connections
     /// ([`Registry::attach_with_policy`]).
     generations: HashMap<PeerId, Arc<AtomicU64>>,
-    /// [`Registry::close_all`] 을 불렀다 — 그 뒤 올리는 상대는 명부에 오르지 않고 곧바로 닫힌다. 세우는 쪽(`close_all`
-    /// 의 비우기)과 읽는 쪽(`launch`)이 같은 자물쇠 안이라 접기와 엇갈린 올리기가 비운 명부에 남지 않는다.
+    /// [`Registry::close_all`] was called — a peer raised after that does not get onto the registry and is closed at once. The side that sets it (`close_all`'s
+    /// draining) and the side that reads it (`launch`) are inside the same lock, so a raise that crosses the fold does not remain in the emptied registry.
     folded: bool,
 }
 
 impl<W: Wire> RegistryInner<W> {
-    /// 독 걸린 자물쇠를 그대로 다시 쓴다 — 독을 그대로 두면 한 번의 패닉이 명부를 영영 못 쓰게 만든다.
+    /// Reuse a poisoned lock as is — if the poison were left, one panic would make the registry unusable forever.
     ///
-    /// 그래도 반쯤 바뀐 표는 남지 않는다: 자물쇠 안에서 패닉할 수 있는 것은 감독 짓기(`Registry::launch` 의
-    /// `prepare_peer` — 주입한 시계 같은 것) 하나이고 표를 바꾸기 전에 끝나며, 표 바꾸기는 패닉할 자리 없이 한
-    /// 칸씩이다. ★짓다 패닉해도 풀리며 떨어지는 것이 이 자물쇠를 다시 잡지 않는다★(`peer.rs` 의 `new_peer`) — 잡으면
-    /// 같은 스레드에서 교착이다.
+    /// Even so, no half-changed table remains: the only thing that can panic inside the lock is building the supervisor (`prepare_peer` of `Registry::launch`
+    /// — things like the injected clock), and it ends before the table is changed, and the table change is one field at a time with no place to panic. ★Even if it panics while building,
+    /// what is dropped as it unwinds does not retake this lock★ (`new_peer` in `peer.rs`) — if it did,
+    /// it would be a deadlock on the same thread.
     fn roster(&self) -> MutexGuard<'_, Roster<W>> {
         self.roster.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
 impl<W: Wire> Roster<W> {
-    /// 이 이름표가 쓸 세대 계수기 — 표에 있으면 그것, 없으면 올라 있는(갈아치울) 손잡이의 것, 둘 다 없으면 새것이다.
-    /// 표를 바꾸지 않는다 — 표에 올리기는 `Registry::launch` 가 짓기를 마친 뒤에 한다.
+    /// The generation counter this name tag will use — the one in the table if there, else that of the raised (to be replaced) handle, and if neither, a new one.
+    /// It does not change the table — putting it on the table is done after `Registry::launch` finishes building.
     fn counter(&self, id: &PeerId) -> Arc<AtomicU64> {
         if let Some(counter) = self.generations.get(id) {
             return counter.clone();
         }
-        // ★옛 감독의 마지막 세대를 읽지 않고 계수기째 잇는다★(그 경합 = `PeerConfig::generations`). 표에 없는 받은
-        //   상대를 `add` 로 갈아치울 때 새 계수기면 받은 상대가 이미 뽑은 번호를 되풀이한다.
+        // ★It continues the counter itself without reading the old supervisor's last generation★ (that race = `PeerConfig::generations`). When replacing an accepted
+        //   peer not in the table with `add`, a new counter would repeat numbers the accepted peer had already drawn.
         self.peers
             .get(id)
             .map(Peer::generations)
@@ -136,11 +136,11 @@ impl<W: Wire> Roster<W> {
     }
 }
 
-/// 상대 명부. clone 은 같은 명부를 가리킨다.
+/// Peer registry. A clone points to the same registry.
 ///
-/// ★마지막 clone 이 사라지면 명부가 쥔 손잡이를 놓을 뿐이다★ — 감독은 그 상대의 손잡이([`Peer`])가 다
-/// 사라질 때 닫기로 알아듣고 정리하며, 그 수신단은 `Closed` → `None` 으로 끝난다. 소비자가 손잡이를 쥐고
-/// 있으면 그 감독은 계속 돈다.
+/// ★When the last clone disappears the registry merely releases the handles it holds★ — the supervisor hears it as a close when all of that peer's handles ([`Peer`]) are
+/// gone and tears down, and that receiver end ends with `Closed` → `None`. If the consumer holds a handle,
+/// that supervisor keeps running.
 pub struct Registry<W: Wire> {
     inner: Arc<RegistryInner<W>>,
 }
@@ -154,8 +154,8 @@ impl<W: Wire> Clone for Registry<W> {
 }
 
 impl<W: Wire> Registry<W> {
-    /// 명부 하나를 세운다. ★받는 것은 [`Registry::add`] · [`Registry::attach`] 가 손잡이마다 돌려주는 [`Inbox`] 로만
-    /// 나온다★. `dialer` 는 `add` 만 쓴다.
+    /// Sets up one registry. ★What is received comes out only through the [`Inbox`] that [`Registry::add`] · [`Registry::attach`] return per handle★.
+    /// `dialer` is used only by `add`.
     pub fn new(
         wire: Arc<W>,
         dialer: Arc<dyn Dialer>,
@@ -178,14 +178,14 @@ impl<W: Wire> Registry<W> {
         }
     }
 
-    /// 상대를 올리고 즉시 붙기 시작한다 — 그 손잡이와 수신단을 돌려준다. 같은 이름표가 이미 있으면 **옛 것을
-    /// 닫고 갈아치운다**.
+    /// Raises a peer and starts attaching at once — it returns that handle and receiver end. If the same name tag already exists, it **closes the old one
+    /// and replaces it**.
     ///
-    /// ★tokio 런타임 안에서 불러야 한다★ — 감독 태스크를 띄우므로 밖에서 부르면 패닉한다. 그 패닉은 명부를 건드리기
-    /// 전이다 — 명부는 그 뒤에도 쓸 수 있고, 같은 이름표로 올라 있던 상대도 그대로 올라 있다.
+    /// ★It must be called inside a tokio runtime★ — it starts a supervisor task, so calling from outside panics. That panic is before the registry is touched
+    /// — the registry can still be used afterwards, and a peer that was raised under the same name tag stays raised.
     ///
-    /// [`Registry::close_all`] 을 부른 뒤면 명부에 올리지 않고 걸기 전에 닫는다 — 수신단은 `Closed` → `None` 으로
-    /// 끝나고 [`Dialer`] 는 불리지 않는다.
+    /// If called after [`Registry::close_all`], it does not raise onto the registry and closes before dialing — the receiver end ends with `Closed` → `None`
+    /// and the [`Dialer`] is not called.
     pub fn add(
         &self,
         id: PeerId,
@@ -196,28 +196,28 @@ impl<W: Wire> Registry<W> {
         self.add_with_policy(id, addr, handshake, policy)
     }
 
-    /// 이 상대에게만 다른 정책을 건다. 런타임 조건 · 접은 명부는 [`Registry::add`] 와 같다.
+    /// Applies a different policy to this peer only. Runtime conditions · a folded registry are the same as [`Registry::add`].
     ///
-    /// ★옛 감독을 먼저 닫고, 그 마지막 세대를 새 감독의 바닥값으로 넘긴다★ — 순서를 뒤집으면 두 소켓이
-    /// 같은 상대에게 동시에 붙고, 바닥값을 안 넘기면 세대가 0 으로 되감겨 소비자의 평범한 방어
-    /// (「최대 세대 미만은 무시」)가 **새 연결을 통째로 버린다**.
+    /// ★Close the old supervisor first, and pass its last generation as the new supervisor's floor value★ — if the order is reversed, two sockets
+    /// attach to the same peer at once, and if the floor value is not passed, the generation is rewound to 0 and the consumer's ordinary defense
+    /// (「최대 세대 미만은 무시」 — ignore anything below the max generation) **discards the new connection entirely**.
     ///
-    /// ★그래도 겹침이 0 이 되지는 않는다★ — [`Peer::close`] 에 완료 신호가 없어 옛 감독은 잠시 더
-    /// 통로를 닫는 중일 수 있고, 그 사이 운영 단계에 들어서 세대를 하나 더 발행할 수도 있다.
-    /// **공용 계수기**가 그 겹침을 해롭지 않게 만드는 장치다 — 붙을 때 뽑는 연결 세대(`Connected` ·
-    /// `Disconnected` · 메시지에 실리는 번호)는 두 번 나오지 않는다. ★한 번도 안 붙은 감독의 세대는 예외다★
-    /// — 바닥값(옛 감독의 마지막 세대)을 그대로 실어, 그 감독의
-    /// [`TransportEvent::Closed`](crate::TransportEvent::Closed) 와 [`Peer::generation`] 은 옛 감독의 것과 같은
-    /// 번호를 보인다. 어느 감독의 것인지는 수신단이 가른다.
+    /// ★Even so, the overlap does not become 0★ — [`Peer::close`] has no completion signal so the old supervisor may be still
+    /// closing the channel for a while, and in that time it may enter the operating phase and issue one more generation.
+    /// The **shared counter** is the device that makes that overlap harmless — the connection generation drawn on attach (`Connected` ·
+    /// `Disconnected` · the number carried on messages) never comes out twice. ★The generation of a supervisor that never attached is an exception★
+    /// — it carries the floor value (the old supervisor's last generation) as is, so that supervisor's
+    /// [`TransportEvent::Closed`](crate::TransportEvent::Closed) and [`Peer::generation`] show the same
+    /// number as the old supervisor's. Which supervisor it belongs to is told by the receiver end.
     ///
-    /// ★세대가 1 부터 다시 가는 것은 `add` 로 올린 적이 없고 지금 명부에도 없는 이름표뿐이다★ — 받아 얹었다가 스스로
-    /// 내렸거나 [`Registry::remove`] 로 내린 이름표를 `add` 하는 것도 여기 든다. 그 밖에는 이 이름표의 계수기(세대
-    /// 표에 있는 것 · 없으면 갈아치우는 손잡이의 것)를 잇고 표에 올린다. 같은 이름표를 동시에 올리는 호출끼리도
-    /// 그렇다 — 어느 호출도 다른 호출이 뺀 손잡이를 못 본 채 새 계수기를 만들지 않는다.
+    /// ★Generations start again from 1 only for a name tag that was never raised with `add` and is not on the registry now★ — calling `add` on a name tag that was put on as an accepted peer and then removed itself
+    /// or was removed with [`Registry::remove`], falls here too. Otherwise it continues this name tag's counter (the one in the generation
+    /// table · if none, the replaced handle's) and puts it on the table. The same holds among calls that raise the same name tag at the same time
+    /// — no call makes a new counter without seeing a handle another call took out.
     ///
-    /// ★같은 이름표라도 수신단은 새것이다★ — 옛 감독은 정리를 마칠 때까지 옛 수신단에 넣고, 그 끝은 `Closed`
-    /// 다음의 `None` 이다. 옛 수신단을 놓으면 옛 감독의 정리가 기다리지 않고 끝나고, 쥔 채 안 비우면
-    /// `peer.rs` 의 `CLOSE_DRAIN_LIMIT` 까지 남는다.
+    /// ★Even under the same name tag the receiver end is new★ — the old supervisor puts into the old receiver end until it finishes teardown, and its end is `None`
+    /// after `Closed`. If the old receiver end is released, the old supervisor's teardown ends without waiting, and if held without draining,
+    /// it remains up to `CLOSE_DRAIN_LIMIT` in `peer.rs`.
     pub fn add_with_policy(
         &self,
         id: PeerId,
@@ -245,8 +245,8 @@ impl<W: Wire> Registry<W> {
         (peer, Inbox { rx })
     }
 
-    /// 받은 통로를 상대로 얹는다 — 그 손잡이와 수신단을 돌려준다. 정책은 명부의 것이다
-    /// ([`Registry::attach_with_policy`] 가 덮는다). 계약은 그쪽에 있다.
+    /// Puts a received channel on as a peer — it returns that handle and receiver end. The policy is the registry's
+    /// ([`Registry::attach_with_policy`] overrides it). The contract is there.
     pub fn attach(
         &self,
         id: PeerId,
@@ -257,37 +257,37 @@ impl<W: Wire> Registry<W> {
         self.attach_with_policy(id, accepted, handshake, policy)
     }
 
-    /// 받은 통로([`Accepted`])를 이 정책으로 상대로 얹는다(TRD 3 §3-1 ①). 런타임 조건 · 같은 이름표 갈아치우기(옛 것을
-    /// 닫는다 · 옛 수신단은 `Closed` → `None` 으로 끝난다 · 수신단은 새것이다)는 [`Registry::add_with_policy`] 와 같다.
+    /// Puts a received channel ([`Accepted`]) on as a peer with this policy (TRD 3 §3-1 ①). Runtime conditions · replacing the same name tag (closes the old one ·
+    /// the old receiver end ends with `Closed` → `None` · the receiver end is new) are the same as [`Registry::add_with_policy`].
     ///
-    /// ★핸드셰이크부터 시작하고 다시 걸지 않는다★ — 운영 단계에 못 들고 끝나거나(거절 · 시한 · 통로 손실) 운영 중
-    /// 끊기면 곧바로 접는다: 수신단은 [`TransportEvent::Closed`](crate::TransportEvent::Closed) 다음 `None` 으로 끝나고
-    /// 그 `cause` 가 진짜 까닭을 싣는다(운영 중 끊김이면 앞의 `Disconnected` 와 같은 까닭 — 읽기 끝 · 쓰기 끝 가름
-    /// 포함). 거는 쪽 사건(`ConnectFailed` · `Rejected` · `GaveUp`)은 오지 않고 [`Peer::state`] 도 `Dialing` ·
-    /// `Backoff` · `GaveUp` 을 거치지 않는다. [`Peer::reconnect_now`] 는 듣지 않는다. 그 밖의 손잡이 계약(보내기 ·
-    /// 닫기 · 비우고 닫기)은 건 상대와 같다.
+    /// ★It starts from the handshake and does not redial★ — if it ends without entering the operating phase (reject · deadline · channel loss) or is cut during operation, it
+    /// folds at once: the receiver end ends with `None` after [`TransportEvent::Closed`](crate::TransportEvent::Closed) and
+    /// its `cause` carries the real reason (for a disconnect during operation, the same cause as the preceding `Disconnected` — including the read-end/write-end distinction).
+    /// Dialing-side events (`ConnectFailed` · `Rejected` · `GaveUp`) do not come and [`Peer::state`] does not pass through `Dialing` ·
+    /// `Backoff` · `GaveUp`. [`Peer::reconnect_now`] is not listened to. The other handle contracts (sending ·
+    /// closing · drain and close) are the same as a dialed peer.
     ///
-    /// ★인증 시한 = [`Accepted::upgraded_at`] + [`Policy::connect_timeout`]★(TRD 3 §5 3) — 청취기의 준비 큐에 앉은
-    /// 시간도 든다. 얹는 순간 이미 지났으면 핸드셰이크를 돌리지 않고 닫는다(`cause` = `Idle`). 그래서 청취기는 이 명부와
-    /// 같은 [`Clock`] 으로 `upgraded_at` 을 찍어야 한다(debug 빌드는 미래 시각을 단언으로 잡는다).
+    /// ★Auth deadline = [`Accepted::upgraded_at`] + [`Policy::connect_timeout`]★ (TRD 3 §5 3) — the time sitting in the listener's
+    /// ready queue counts too. If it has already passed at the moment of putting on, it does not run the handshake and closes (`cause` = `Idle`). So the listener must stamp `upgraded_at` with the same
+    /// [`Clock`] as this registry (a debug build catches a future time with an assertion).
     ///
-    /// ★끝나면 명부에서 스스로 내린다★ — 통로를 버린 뒤 정리(받는 쪽이 수신단을 비우기를 기다린다) 앞에서다. 그 사이
-    /// 같은 이름표로 갈아치웠으면 새것은 그대로 둔다. 감독이 비정상으로 끝나도 내린다. 첫 폴링에 곧바로 끝나는
-    /// 상대(시한이 이미 지났다 · 상대가 이미 끊었다)도 명부에 남지 않는다 — 올린 뒤에 감독을 띄운다.
+    /// ★When it ends it removes itself from the registry★ — after dropping the channel and before teardown (which waits for the receiving side to drain the receiver end). If in the meantime
+    /// it was replaced under the same name tag, the new one is left alone. It removes itself even if the supervisor ends abnormally. A peer that ends at its first poll
+    /// (the deadline had already passed · the peer had already cut) also does not remain on the registry — the supervisor is started after raising.
     ///
-    /// ★세대 표에 안 든다★ — 받는 쪽 이름표는 연결마다 새것이라(TRD 3 §3-1 ① `conn-<ConnId>`) 넣으면 연결 수만큼 표가
-    /// 자란다. 세대 계수기는 표에 그 이름표가 있으면(`add` 로 올린 적이 있다) 그것을, 없으면 갈아치우는 손잡이의 것을,
-    /// 둘 다 없으면 새 것을 쓴다 — 명부에 있는 이름표를 다시 얹으면 동시에 얹어도 세대가 되감기지 않는다. ★세대가 1
-    /// 부터 다시 가는 것은 `add` 로 올린 적이 없고 지금 명부에도 없는 이름표뿐이다★ — 처음 얹는 이름표, 그리고 스스로
-    /// 내렸거나 [`Registry::remove`] 로 내린 뒤 다시 얹는 이름표다(받는 쪽 이름표를 되쓰지 않는다는 전제).
+    /// ★It does not go into the generation table★ — the receiving side's name tag is new for each connection (TRD 3 §3-1 ① `conn-<ConnId>`) so putting it in would grow the table by the
+    /// number of connections. The generation counter uses the one in the table if that name tag is there (it was raised with `add`), the replaced handle's if not,
+    /// and a new one if neither — if you put on a name tag already on the registry again, the generation is not rewound even when put on at the same time. ★Generations start
+    /// again from 1 only for a name tag that was never raised with `add` and is not on the registry now★ — a name tag put on for the first time, and a name tag put on again after it
+    /// removed itself or was removed with [`Registry::remove`] (on the premise that receiving-side name tags are not reused).
     ///
-    /// ★업그레이드 칸([`Accepted`] 의 [`crate::ConnPermit`])은 운영 단계에 들 때 놓는다★ — 못 들고 끝나면 통로를
-    /// 버린 그 자리에서 놓는다(받는 쪽이 수신단을 비우기 전에 — TRD 3 §5 14 「인증에 실패한 상대는 닫히는 즉시 칸을
-    /// 놓는다」). 인증 대기 칸이 아직 없어(3-3 U4) 그 몫까지 이 칸이 진다 — 그 칸이 들어오면 여기서 그것을
-    /// 쥐고 업그레이드 칸을 놓는다.
+    /// ★The upgrade field ([`crate::ConnPermit`] of [`Accepted`]) is released on entering the operating phase★ — if it ends without entering, it is released at the place
+    /// where the channel is dropped (before the receiving side drains the receiver end — TRD 3 §5 14 「인증에 실패한 상대는 닫히는 즉시 칸을 놓는다」 (a peer that failed auth releases its field as soon as it closes)). The auth-waiting field does not exist yet (3-3 U4)
+    /// so this field covers that role too — when that field arrives, this holds it here
+    /// and releases the upgrade field.
     ///
-    /// [`Registry::close_all`] 을 부른 뒤면 명부에 올리지 않고 핸드셰이크 전에 닫는다 — 통로에서 아무것도 읽지도
-    /// 쓰지도 않은 채 닫기([`CloseCode::GOING_AWAY`])를 싣고 버린다.
+    /// If called after [`Registry::close_all`], it does not raise onto the registry and closes before the handshake — it loads a close ([`CloseCode::GOING_AWAY`])
+    /// and drops it without reading or writing anything on the channel.
     pub fn attach_with_policy(
         &self,
         id: PeerId,
@@ -329,33 +329,33 @@ impl<W: Wire> Registry<W> {
         (peer, Inbox { rx: inbox })
     }
 
-    /// `add` · `attach` 의 공통 꼬리 — 감독과 손잡이를 짓고, 명부에 올린 **뒤에** 감독을 띄운다. `record` = 표에 없던
-    /// 이름표면 고른 세대 계수기를 표에 올린다(`add`).
+    /// The common tail of `add` · `attach` — builds the supervisor and handle, and starts the supervisor **after** raising it on the registry. `record` = if the name tag was not in the table,
+    /// puts the chosen generation counter on the table (`add`).
     ///
-    /// ★올리기가 띄우기보다 앞이다★ — 뒤집으면 첫 폴링에 곧바로 끝나는 받은 상대(시한이 이미 지났다 · 상대가 이미
-    /// 끊었다)가 다른 일꾼 스레드에서 명부 내리기까지 마친 뒤에 올라, 끝난 손잡이가 영영 남는다(받는 쪽 이름표는
-    /// 연결마다 새것이라 아무도 다시 내리지 않는다 — 빨리 끊기는 연결 수만큼 명부가 자란다). 접은 명부도 띄우기 전에
-    /// 가르고 닫기를 먼저 넣는다 — 감독은 첫 폴링에서 그것을 보고 걸지도 핸드셰이크하지도 않는다(`peer.rs` 의 `dial` ·
-    /// `shake_hands` 첫 줄). 뒤집으면 다른 일꾼에서 먼저 돈 감독이 한 번 걸거나 핸드셰이크를 시작한다.
+    /// ★Raising comes before starting★ — if reversed, an accepted peer that ends at its first poll (the deadline had already passed · the peer had already
+    /// cut) finishes even removing itself from the registry on another worker thread and is then raised, so the ended handle remains forever (the receiving side's name tag is
+    /// new for each connection so no one removes it again — the registry grows by the number of quickly cut connections). A folded registry is also
+    /// told apart before starting and the close is put in first — the supervisor sees that at its first poll and neither dials nor handshakes (the first line of `dial` ·
+    /// `shake_hands` in `peer.rs`). If reversed, a supervisor that ran first on another worker would dial once or start a handshake.
     ///
-    /// ★계수기 고르기 · 갈아치울 손잡이 빼기 · 올리기가 한 임계 구역이다★ — 쪼개면 같은 이름표를 동시에 올리는 두
-    /// 호출 중 하나가 다른 쪽이 뺀 손잡이도 표의 칸도 못 본 채 새 계수기를 만들어, 이미 나간 세대를 다시 뽑는다.
+    /// ★Choosing the counter · taking out the handle to replace · raising is one critical section★ — if split, one of two
+    /// calls raising the same name tag at the same time would make a new counter without seeing either the handle the other took out or the table field, and draw a generation that already went out again.
     ///
-    /// ★표는 짓기(`prepare_peer`)를 마친 뒤에야 바꾼다★ — 짓다가 패닉하면(주입한 시계 같은 것) 명부는 손대지 않은
-    /// 그대로라, 갈아치우려던 손잡이가 올라 있고 계속 돈다. 그 뒤의 표 바꾸기에는 패닉할 자리가 없다(`roster`).
+    /// ★The table is changed only after building (`prepare_peer`) finishes★ — if it panics while building (like the injected clock), the registry is left untouched
+    /// as it was, so the handle that was to be replaced stays raised and keeps running. The table change after that has no place to panic (`roster`).
     fn launch(
         &self,
         id: PeerId,
         record: bool,
         config: impl FnOnce(Arc<AtomicU64>) -> PeerConfig<W>,
     ) -> Peer<W> {
-        // 런타임 밖이면 여기서 패닉한다 — 명부를 건드리기 전이다(`Registry::add`).
+        // Outside a runtime it panics here — before the registry is touched (`Registry::add`).
         let runtime = tokio::runtime::Handle::current();
         let (peer, supervisor, displaced, folded) = {
             let mut roster = self.inner.roster();
             let generations = roster.counter(&id);
             let (peer, supervisor) = prepare_peer(config(generations.clone()));
-            // `add` 만 고른 계수기를 표에 올린다 — 받은 상대는 표를 읽기만 한다(`Roster::generations`).
+            // Only `add` puts the chosen counter on the table — an accepted peer only reads the table (`Roster::generations`).
             if record {
                 roster.generations.entry(id.clone()).or_insert(generations);
             }
@@ -376,15 +376,15 @@ impl<W: Wire> Registry<W> {
         peer
     }
 
-    /// 받은 상대가 끝날 때 명부에서 스스로 내리는 손 — 그 이름표가 아직 그 손잡이를 가리킬 때만 내린다. ★약한
-    /// 손잡이다★ — 명부를 붙들지 않는다(명부가 먼저 사라지면 내릴 것도 없다).
+    /// The hand by which an accepted peer removes itself from the registry when it ends — it removes only when that name tag still points to that handle. ★It is a weak
+    /// handle★ — it does not hold the registry (if the registry vanished first, there is nothing to remove).
     fn leave_roster(&self, id: PeerId) -> LeaveRoster<W> {
         let registry = Arc::downgrade(&self.inner);
         Box::new(move |me: &Peer<W>| {
             let Some(registry) = registry.upgrade() else {
                 return;
             };
-            // 내린 손잡이는 자물쇠 밖에서 떨어뜨린다.
+            // A removed handle is dropped outside the lock.
             let _left = {
                 let mut roster = registry.roster();
                 match roster.peers.get(&id) {
@@ -395,8 +395,8 @@ impl<W: Wire> Registry<W> {
         })
     }
 
-    /// 명부에서 내리고 그 상대를 닫는다. 그 손잡이의 수신단은 감독이 정리를 마치면 `Closed` → `None` 으로
-    /// 끝난다.
+    /// Removes it from the registry and closes that peer. That handle's receiver end ends with `Closed` → `None` when the supervisor finishes
+    /// teardown.
     pub fn remove(&self, id: &PeerId) {
         let removed = self.inner.roster().peers.remove(id);
         if let Some(peer) = removed {
@@ -404,30 +404,30 @@ impl<W: Wire> Registry<W> {
         }
     }
 
-    /// 명부의 상대를 전부 내리고 각자 받아 둔 나가는 일을 비운 뒤 닫는다([`Peer::close_after_flush`] ·
-    /// [`CloseCode::GOING_AWAY`]) — 그 감독들이 다 끝나기를 `deadline`(명부의 시계)까지 기다린다(TRD 3 §3-0 ④ — 데몬
-    /// 종료가 이것을 기다린다). `Err` = 시한까지 다 안 끝났다 — 남은 감독은 계속 접고 각자의 시한
-    /// ([`Policy::flush_timeout`] · 정리 상한)에 끝난다.
+    /// Removes all peers from the registry, and after each drains the outbound work it had accepted, closes ([`Peer::close_after_flush`] ·
+    /// [`CloseCode::GOING_AWAY`]) — waits for those supervisors to all finish until `deadline` (the registry's clock) (TRD 3 §3-0 ④ — the daemon
+    /// shutdown waits on this). `Err` = not all finished by the deadline — the remaining supervisors keep folding and finish at their own deadlines
+    /// ([`Policy::flush_timeout`] · the teardown limit).
     ///
-    /// ★곧바로 닫지 않고 비운다★ — 닫기 직전에 넣은 마지막 답(정지 Ack 같은 것)이 나가게 하려는 것이 이 함수의
-    /// 까닭이다. 곧바로 닫으려면 [`Registry::remove`].
+    /// ★It drains rather than closing at once★ — the reason for this function is to let the last answer
+    /// put in just before closing (something like a stop Ack) go out. To close at once, use [`Registry::remove`].
     ///
-    /// ★부른 순간 명부에 있던 상대만 기다린다★ — 그 전에 `add` 가 갈아치웠거나 `remove` 로 내려 아직 접는 중인
-    /// 감독은 모른다.
+    /// ★It waits only for peers that were on the registry at the moment of the call★ — it does not know
+    /// a supervisor still folding because `add` replaced it or `remove` took it out before that.
     ///
-    /// ★명부를 접는다 — 다시 열리지 않는다★ — 부른 뒤의 [`Registry::add`] · [`Registry::attach`] 는 명부에 오르지
-    /// 않고 걸거나 핸드셰이크하기 전에 닫힌다(그 수신단은 `Closed` → `None` 으로 끝나고, 받은 통로는 아무것도 읽고
-    /// 쓰지 않은 채 닫기를 싣고 버린다). 이 함수는 그것을
-    /// 기다리지 않는다. 수락 루프가 접기와 엇갈려 얹은 상대가 비운 명부에 닫히지 않은 채 남지 않게 하려는 것이다 —
-    /// 그래도 수락 루프는 먼저 세운다(접은 뒤 받은 통로는 얹어 봐야 곧바로 닫힌다).
+    /// ★It folds the registry — it does not reopen★ — [`Registry::add`] · [`Registry::attach`] after the call do not get onto the registry
+    /// and are closed before dialing or handshaking (their receiver end ends with `Closed` → `None`,
+    /// and an accepted channel loads a close and is dropped
+    /// without reading or writing anything). This function does not wait for that. It is meant so that a peer the accept loop put on crossing the fold does not
+    /// remain unclosed on the emptied registry — even so, stand up the accept loop first (an accepted channel put on after the fold is closed at once anyway).
     ///
-    /// ★닫기는 부른 그 자리에서 시작된다★ — 돌려주는 future 는 기다리기만 한다. 떨어뜨려도 닫기는 이어진다
-    /// ([`Peer::close_after_flush`] 와 같다). 시한은 그 future 를 처음 폴링한 때부터 잰다.
+    /// ★The close starts at the place of the call★ — the returned future only waits. Dropping it, the close continues
+    /// (same as [`Peer::close_after_flush`]). The deadline is measured from the first poll of that future.
     ///
-    /// ★그 상대들의 수신단을 비우는 task 위에서 기다리지 않는다★ — 감독의 끝은 그 받는 쪽이 비우는 데 달려 있어
-    /// (crate 헤더 「알려진 한계」), 거기서 기다리면 그 감독이 정리 상한까지 남아 이 대기가 `deadline` 까지 간다.
-    /// 수신단은 끝(`None`)까지 계속 비운다 — 놓으면 그 상대의 남은 나가는 일이 버려진다(crate 헤더 「받는 쪽
-    /// 불변식」 5).
+    /// ★Do not wait on the task that drains those peers' receiver ends★ — a supervisor's end depends on the receiving side draining
+    /// (crate header 「알려진 한계」 (known limits)), so waiting there leaves that supervisor until the teardown limit and this wait goes to `deadline`.
+    /// Keep draining the receiver end to the end (`None`) — if released, that peer's remaining outbound work is dropped (crate header 「받는 쪽
+    /// 불변식」 (receiver invariants) 5).
     pub fn close_all(
         &self,
         deadline: Duration,
@@ -437,7 +437,7 @@ impl<W: Wire> Registry<W> {
             roster.folded = true;
             roster.peers.drain().map(|(_, peer)| peer).collect()
         };
-        // 손잡이는 여기서 놓아도 된다 — 표지가 제어 채널을 붙들어 비우기가 이어진다(`Peer::close_after_flush`).
+        // The handle may be released here — the marker holds the control channel and the drain continues (`Peer::close_after_flush`).
         let ends: Vec<_> = peers
             .iter()
             .map(|peer| peer.close_after_flush(CloseCode::GOING_AWAY, "going away"))
@@ -454,7 +454,7 @@ impl<W: Wire> Registry<W> {
         self.inner.roster().peers.get(id).cloned()
     }
 
-    /// 이름표 순으로 정렬한 지금 한 장. ★셸이 「앱 전체」를 접는 재료가 이것이다★.
+    /// A snapshot of now, sorted by name tag. ★This is the ingredient the shell uses to fold 「앱 전체」 (the whole app)★.
     pub fn peers(&self) -> Vec<(PeerId, PeerState)> {
         let mut out: Vec<(PeerId, PeerState)> = self
             .inner
@@ -475,24 +475,24 @@ impl<W: Wire> Registry<W> {
         self.len() == 0
     }
 
-    /// 전 상대에게 같은 것을 민다.
+    /// Pushes the same thing to all peers.
     ///
-    /// ★한 번만 인코딩하고 프레임을 나눠 준다★ — 그래서 `W::Out` 에 `Clone` 을 요구하지 않는다. 대가로
-    /// 팬아웃은 **알림 의미 고정**이다: 답장을 기다리지 않는다.
+    /// ★Encode once and hand out the frame★ — so it does not require `Clone` on `W::Out`. In exchange,
+    /// the fanout has **fixed notification semantics**: it does not wait for a reply.
     ///
-    /// 부분 실패는 그 상대의 [`TransportEvent::Dropped`](crate::TransportEvent::Dropped) 로 **그 상대의
-    /// 수신단에** 올라온다 — ★조용히 사라지는 것을 안 만드는 것이 이 함수의 유일한 까다로운 부분이다★(오늘
-    /// `net` 의 팬아웃이 정확히 그 자리에서 조용하다). 세고 신고하는 것은 그 상대의 감독이라, 신고는 그 감독이
-    /// 낸 다른 것과 같은 순서 칸을 지나고 줄이 차 있어도 버려지지 않는다(`Peer::send_frame`).
+    /// A partial failure comes up as that peer's [`TransportEvent::Dropped`](crate::TransportEvent::Dropped) **on that peer's
+    /// receiver end** — ★not creating something that disappears silently is the only tricky part of this function★ (today's
+    /// `net` fanout is silent in exactly that place). What counts and reports is that peer's supervisor, so the report passes the same ordering area as other things that
+    /// supervisor emits and is not dropped even when the line is full (`Peer::send_frame`).
     ///
-    /// ★앱이 [`Peer::close`] 를 부른 상대가 운영 단계가 아니라서 못 넣은 것은 신고하지 않는다★ — 명부에 남아
-    /// 있어도 같다. 앱이 닫겠다고 한 뒤의 유실 개수는 읽을 쪽이 없고 깔끔한 종료가 우선이다(사용자 결정
-    /// 2026-09-26 — `lib.rs` 「알려진 한계」). 그 전에 큐에 든 것은 감독이 센다.
+    /// ★What could not be put in because a peer the app called [`Peer::close`] on is not in the operating phase is not reported★ — the same even if it remains
+    /// on the registry. The count of losses after the app said it would close has no reader and a clean shutdown comes first (user decision
+    /// 2026-09-26 — `lib.rs` 「알려진 한계」 (known limits)). What was in the queue before that is counted by the supervisor.
     pub fn broadcast(&self, out: W::Out) {
         let frame = self.inner.wire.encode(&out);
         let targets: Vec<Peer<W>> = self.inner.roster().peers.values().cloned().collect();
         for peer in targets {
-            // 실패는 그 상대의 감독이 센다(`Peer::send_frame`).
+            // Failure is counted by that peer's supervisor (`Peer::send_frame`).
             let _ = peer.send_frame(frame.clone());
         }
     }
@@ -535,7 +535,7 @@ mod tests {
             }
         }
 
-        /// ★돌려받은 수신단을 쥐고 있어야 한다★ — 떨어뜨리면 감독이 곧바로 접는다.
+        /// ★You must hold the returned receiver end★ — if dropped, the supervisor folds at once.
         fn add(
             &self,
             name: &str,
@@ -553,7 +553,7 @@ mod tests {
         Arc::new(ImmediateHandshake)
     }
 
-    /// 감독 태스크를 비정상으로 끝낸다 — 통로가 열리면 `start` 에서 패닉한다.
+    /// Ends the supervisor task abnormally — if the channel opens, it panics in `start`.
     struct PanickingHandshake;
 
     impl Handshake for PanickingHandshake {
@@ -578,8 +578,8 @@ mod tests {
         out
     }
 
-    /// 감독들을 돌리며 비운다 — 감독이 순서 칸에 붙든 것을 줄로 옮길 틈을 주면서, 한 바퀴에 아무것도 안
-    /// 올라올 때까지.
+    /// Runs the supervisors and drains — while giving the supervisor room to move what it holds in the ordering area into the line, until nothing
+    /// comes up in one turn.
     async fn drain_until_quiet(inbox: &mut Inbox<TestWire>) -> Vec<Incoming<TestWire>> {
         let mut out = Vec::new();
         loop {
@@ -592,8 +592,8 @@ mod tests {
         }
     }
 
-    /// 지금 끝나 있나 — 든 것이 없고 넣는 끝이 놓였다(또는 닫혔다). ★든 것이 있으면 하나를 꺼내 버린다★ —
-    /// 다 꺼낸 뒤에 부른다.
+    /// Has it ended now — nothing held and the enqueue end released (or closed). ★If there is something held, it takes one out and discards it★ —
+    /// call it after taking everything out.
     async fn ended(inbox: &mut Inbox<TestWire>) -> bool {
         matches!(poll_immediate(inbox.recv()).await, Some(None))
     }
@@ -734,7 +734,7 @@ mod tests {
         assert_eq!(eb.frames(), vec![Frame::Text("not|all".into())]);
     }
 
-    // 포기한 상대는 제어만 기다리며 잠들어 있다 — 그 감독이 스스로 깨어 신고해야 한다.
+    // A peer that gave up is asleep waiting only for control — that supervisor must wake by itself and report.
     #[tokio::test]
     async fn a_partial_broadcast_failure_shows_up_as_that_peers_event() {
         let f = Fixture::new(Policy::default());
@@ -794,7 +794,7 @@ mod tests {
         assert_eq!(f.registry.len(), 1);
     }
 
-    // ── N7: 같은 이름표를 다시 올려도 세대가 되감기지 않는다 ──
+    // ── N7: raising the same name tag again does not rewind the generation ──
     #[tokio::test]
     async fn re_adding_the_same_name_never_rewinds_the_generation() {
         let f = Fixture::new(Policy::default());
@@ -821,7 +821,7 @@ mod tests {
         let (_second, _second_inbox) =
             f.registry
                 .add(PeerId::new("a"), Address::new("mem://a2"), immediate());
-        // 아직 아무 태스크도 안 돌린 시점 — 옛 핸들은 이미 종료 신호를 받았어야 한다.
+        // A point where no task has run yet — the old handle should already have received the shutdown signal.
         settle().await;
         assert_eq!(first.peer_state(), PeerState::Closed);
     }
@@ -855,7 +855,7 @@ mod tests {
         assert_eq!(f.net.dials(), 2);
     }
 
-    // ── N1: 위로 올라가는 줄이 찼다고 연결을 끊지도 버리지도 않는다 ──
+    // ── N1: a full upward line neither cuts nor drops the connection ──
     #[tokio::test]
     async fn a_saturated_line_neither_cuts_the_link_nor_loses_anything() {
         let f = Fixture::new(Policy {
@@ -865,7 +865,7 @@ mod tests {
         let (peer, mut inbox) = f.add("a", immediate());
         settle().await;
         let endpoint = f.net.accept().unwrap();
-        // 아무도 안 읽는 채로 밀어 넣고, 상대가 곧바로 닫는다.
+        // Push in with nobody reading, and the peer closes at once.
         for seq in 1..=200 {
             endpoint.push(TestWire::chunk(1, 1, seq));
         }
@@ -898,7 +898,7 @@ mod tests {
         );
     }
 
-    // 데몬 되감기 링 한 벌(4096)이 한꺼번에 오는 모양 — 줄 길이(기본 512)의 여덟 배다.
+    // The shape of one daemon rewind ring (4096) arriving at once — eight times the line length (default 512).
     #[tokio::test]
     async fn a_replay_sized_burst_arrives_whole_while_the_consumer_lags() {
         let f = Fixture::new(Policy::default());
@@ -927,7 +927,7 @@ mod tests {
         let (noisy, _noisy_inbox) = f.add("noisy", immediate());
         settle().await;
         let noisy_link = f.net.accept().unwrap();
-        // 아무도 안 읽는 수신단을 가득 채운다.
+        // Fill to the brim a receiver end that nobody reads.
         for seq in 1..=500 {
             noisy_link.push(TestWire::chunk(1, 1, seq));
         }
@@ -949,7 +949,7 @@ mod tests {
         );
     }
 
-    // ── 3-0 U1d: 안 비운 수신단은 그 상대만 세운다 ──
+    // ── 3-0 U1d: a receiver end that is not drained stalls only that peer ──
     #[tokio::test]
     async fn an_undrained_inbox_stalls_only_its_own_peer() {
         let f = Fixture::new(Policy {
@@ -960,7 +960,7 @@ mod tests {
         let (noisy, mut noisy_inbox) = f.add("noisy", immediate());
         settle().await;
         let noisy_link = f.net.accept().unwrap();
-        // 아무도 안 읽는 채로 시끄러운 쪽이 자기 수신단을 넘치게 채운다.
+        // With nobody reading, the noisy side overfills its own receiver end.
         for seq in 1..=500 {
             noisy_link.push(TestWire::chunk(1, 1, seq));
         }
@@ -990,16 +990,16 @@ mod tests {
         assert_eq!(noisy.peer_state(), PeerState::Live);
         assert_eq!(quiet.peer_state(), PeerState::Live);
 
-        // 넘친 시끄러운 쪽의 것도 그 감독이 붙들고 있다가 순서대로 낸다.
+        // The overflowed noisy side's items too are held by that supervisor and emitted in order.
         let noisy_items = drain_until_quiet(&mut noisy_inbox).await;
         assert_eq!(chunk_seqs(&noisy_items), (1..=500).collect::<Vec<_>>());
     }
 
-    // ── 3-0 U1c: 명부가 바이트 예산을 감독에게 넘긴다 ──
+    // ── 3-0 U1c: the registry hands the byte budget to the supervisor ──
     //
-    // ★실제 예산 값으로 잰다★ — 감독 시험은 작은 예산을 직접 넣으므로, 명부가 엉뚱한 값(0 · 상한 없음)을 넘겨도
-    //   거기서는 안 보인다. 스트림을 안 쓰는 상대는 예산 전부(16 MiB)가 읽기 몫이라 그 절반보다 큰 두 장이면 둘째에서
-    //   읽기 문이 닫힌다(net `CONN_RX_MAX_BYTES` 시험과 같은 모양 — 같은 값이다).
+    // ★Measure with the real budget value★ — supervisor tests put in a small budget directly, so even if the registry handed over a wrong value (0 · no limit)
+    //   it would not show there. For a peer that does not use streams, the whole budget (16 MiB) is the read share, so with two frames larger than half of it
+    //   the read gate closes at the second (the same shape as the net `CONN_RX_MAX_BYTES` test — the same value).
     #[tokio::test]
     async fn the_registry_stops_reading_a_peer_once_it_holds_the_byte_budget() {
         let f = Fixture::new(Policy::default());
@@ -1084,10 +1084,10 @@ mod tests {
         assert_eq!(outbound_losses(&drain(&mut down_inbox)), vec![1]);
     }
 
-    // ── 3-0 U1d: 팬아웃 유실은 그 상대의 감독이 세어 자기 수신단에 낸다 ──
+    // ── 3-0 U1d: fanout loss is counted by that peer's supervisor and emitted to its own receiver end ──
     //
-    // ★시계를 밀지 않는다★ — 백오프 대기가 시계로 깨면 신고가 그 바퀴 첫머리에 묻어 나와, 감독이 스스로 깼는지를
-    //   못 가린다. 줄 길이 1 = `ConnectFailed` 한 장으로 찬 줄이다.
+    // ★Do not push the clock★ — if the backoff wait is woken by the clock, the report comes out stuck on the start of that turn, and we cannot tell whether the supervisor
+    //   woke by itself. Line length 1 = a line filled by one `ConnectFailed`.
     #[tokio::test]
     async fn a_broadcast_loss_wakes_a_backing_off_supervisor_and_survives_a_full_inbox() {
         let f = Fixture::new(Policy {
@@ -1197,7 +1197,7 @@ mod tests {
         assert_eq!(labels(&drain(&mut fresh)), vec!["Connected:2"]);
     }
 
-    // ── 3-0 U1d: 조용한 상대여도 수신단을 닫거나 놓으면 다음 프레임 없이 접는다 ──
+    // ── 3-0 U1d: even with a quiet peer, closing or releasing the receiver end folds without a next frame ──
     #[tokio::test]
     async fn closing_an_inbox_on_a_silent_peer_folds_it_and_still_drains_what_was_queued() {
         let f = Fixture::new(Policy::default());
@@ -1226,8 +1226,8 @@ mod tests {
         );
     }
 
-    // 30 번인 까닭 = 걸기 구간을 폴링하기 전의 검사가 없으면 걸기 future 와 닫힘 팔이 함께 준비돼 어느 쪽이 먼저
-    //   폴링될지가 난수다(`select!`) — 한 번으로는 그 검사가 빠진 것을 놓칠 수 있다.
+    // Why 30 times = without the check before polling the dial phase, the dial future and the closed arm become ready together and which
+    //   is polled first is random (`select!`) — a single run could miss that the check is gone.
     #[tokio::test]
     async fn an_inbox_dropped_before_its_supervisor_runs_never_dials() {
         let f = Fixture::new(Policy::default());
@@ -1245,7 +1245,7 @@ mod tests {
         );
     }
 
-    // ── 3-0 U1d: 같은 이름표를 다시 올리면 옛 수신단은 옛 감독의 끝에서 끝나고 새 수신단은 새 감독의 것만 받는다 ──
+    // ── 3-0 U1d: if the same name tag is raised again, the old receiver end ends at the old supervisor's end and the new receiver end receives only the new supervisor's ──
     #[tokio::test]
     async fn a_re_added_name_ends_the_old_inbox_and_starts_a_new_one() {
         let f = Fixture::new(Policy::default());
@@ -1272,8 +1272,8 @@ mod tests {
         assert!(!ended(&mut new_inbox).await);
     }
 
-    // ★옛 감독은 통로를 다 닫은 뒤에야 `Closed` 를 내고, 그 사이 새 감독이 붙는다★ — 한 줄이었으면 둘이 섞여
-    //   어느 감독의 것인지 세대로 가려야 했다.
+    // ★The old supervisor emits `Closed` only after fully closing the channel, and in the meantime the new supervisor attaches★ — with one line the two would be mixed and
+    //   which supervisor an item belongs to would have to be told by generation.
     #[tokio::test]
     async fn a_name_re_added_while_its_old_supervisor_is_still_closing_splits_by_inbox() {
         let f = Fixture::new(Policy::default());
@@ -1340,7 +1340,7 @@ mod tests {
         let name = PeerId::new("a");
         let mut inboxes = Vec::new();
         for _ in 0..30 {
-            // 감독이 돌기 전에 내린다 — 감독은 걸기 전에 닫기를 보고 `Closed` 하나만 낸 채 끝난다.
+            // Removed before the supervisor runs — the supervisor sees the close before dialing and ends having emitted only a `Closed`.
             let (_peer, inbox) = f
                 .registry
                 .add(name.clone(), Address::new("mem://a"), immediate());
@@ -1355,9 +1355,9 @@ mod tests {
         }
     }
 
-    // ── 3-0 U1d: 정리가 상한을 넘기면 `Closed` 없이 수신단이 끝난다 ──
+    // ── 3-0 U1d: if teardown exceeds the limit, the receiver end ends without `Closed` ──
     //
-    // 줄 길이 1 = `Connected` 한 장으로 찬 줄 — 그 뒤의 알림 · 끊김 · `Closed` 는 감독의 순서 칸에서 기다린다.
+    // Line length 1 = a line filled by one `Connected` — the notifications · disconnect · `Closed` after it wait in the supervisor's ordering area.
     #[tokio::test]
     async fn an_inbox_nobody_drains_ends_without_closed_once_the_teardown_gives_up() {
         for (waited, expected) in [
@@ -1424,10 +1424,10 @@ mod tests {
         );
     }
 
-    // ── 3-0 U1a: 팬아웃 유실은 열린 상대에게 신고된다 · 끝난 상대는 명부에 남아도 아무것도 안 받는다 ──
+    // ── 3-0 U1a: fanout loss is reported to an open peer · an ended peer receives nothing even if it remains on the registry ──
     //
-    // 앱이 닫기를 부른 뒤의 거절을 안 세는 것(사용자 결정 2026-09-26)은 이 시험이 못 잰다 — 감독이 이미 끝나
-    //   수신단이 끝난 뒤라 셈이 있어도 안 보인다. 그 틈은 바로 아래 시험이 잰다.
+    // That the rejection after the app called close is not counted (user decision 2026-09-26) is something this test cannot measure — the supervisor has already ended
+    //   and the receiver end has ended, so even if there were a count it would not show. That gap is measured by the test right below.
     #[tokio::test]
     async fn a_broadcast_loss_is_reported_for_an_open_peer_and_never_reaches_an_ended_one() {
         let f = Fixture::new(Policy::default());
@@ -1447,9 +1447,9 @@ mod tests {
         assert!(ended(&mut shut_inbox).await);
     }
 
-    // ★닫기를 부른 뒤 감독이 그것을 처리하기 전의 틈을 잰다★ — 포기 대기에 잠든 감독은 제어와 깨움을 함께 받으면
-    //   어느 쪽을 먼저 볼지 정해져 있지 않아, 핸들이 그 틈에 세면 `Dropped` 가 `Closed` 앞에 실릴 수 있다. 그래서
-    //   양보 없이 닫고 곧바로 민 뒤 핸들 쪽 셈부터 본다.
+    // ★Measures the gap after calling close and before the supervisor handles it★ — a supervisor asleep in the give-up wait, if it receives control and a wake together,
+    //   has no fixed order for which it looks at first, so if the handle counts in that gap, `Dropped` may be loaded ahead of `Closed`. So we
+    //   close without yielding, push right away, and then look at the handle-side count first.
     #[tokio::test]
     async fn a_broadcast_right_after_close_is_not_counted_before_the_supervisor_sees_the_close() {
         let f = Fixture::new(Policy::default());
@@ -1470,7 +1470,7 @@ mod tests {
         assert!(ended(&mut inbox).await);
     }
 
-    // ── 3-0 U1d: 감독이 정상 정리 없이 끝나면 `Closed` 없이 수신단이 끝난다 ──
+    // ── 3-0 U1d: if the supervisor ends without a normal teardown, the receiver end ends without `Closed` ──
     #[tokio::test]
     async fn a_supervisor_that_ends_abnormally_ends_its_inbox_without_closed() {
         let f = Fixture::new(Policy::default());
@@ -1557,7 +1557,7 @@ mod tests {
         })
         .await;
         let endpoints = [fx.net.accept().unwrap(), fx.net.accept().unwrap()];
-        // ★쓰기를 막아 둔다★ — 「last」가 쓰이는 도중 닫기가 들어와야 곧바로 닫는 회귀와 갈린다.
+        // ★Block the write★ — the close must come in while 「last」 is being written, to tell it from a regression that closes at once.
         for endpoint in &endpoints {
             endpoint.stall_writes(true);
         }
@@ -1599,7 +1599,7 @@ mod tests {
         }
     }
 
-    // ★future 를 기다리지 않아도 닫는다★ — 닫기는 부른 자리에서 시작되고 future 는 기다리기만 한다.
+    // ★It closes even if you do not await the future★ — the close starts at the place of the call and the future only waits.
     #[tokio::test]
     async fn close_all_closes_even_when_nobody_waits_for_it() {
         let fx = Fixture::new(Policy::default());
@@ -1618,8 +1618,8 @@ mod tests {
         assert!(ended(&mut inbox).await);
     }
 
-    // ★close_all 의 시한(1 s · 3 s)을 비우기의 시한(2 s) 양쪽에 둔다★ — 그 안에 못 끝나면 `Err` 이고, 감독은 기다림과
-    //   무관하게 제 시한에 끝난다.
+    // ★Put close_all's deadline (1 s · 3 s) on both sides of the drain's deadline (2 s)★ — if it does not finish within, it is `Err`, and the supervisor
+    //   ends at its own deadline regardless of the waiting.
     #[tokio::test]
     async fn close_all_waits_only_up_to_its_deadline() {
         assert_eq!(Policy::default().flush_timeout, Duration::from_secs(2));
@@ -1657,7 +1657,7 @@ mod tests {
         }
     }
 
-    // ── 3-0 U6b: 받은 상대(`attach`) ──
+    // ── 3-0 U6b: an accepted peer (`attach`) ──
 
     /// An auth window for these tests (they run on `ManualClock`, so the value only sets the step size — the
     /// daemon's real window is 15 s, TRD 3 revision 9 ⑧).
@@ -1671,7 +1671,7 @@ mod tests {
         }
     }
 
-    /// 받는 쪽 인증 — 첫 프레임이 [`GOOD`] 이어야 운영 단계다. 아니면 다시 거는 거절이다(낡은 자격 — TRD 3 §3-0 ⑤).
+    /// Receiving-side auth — the first frame must be [`GOOD`] to be the operating phase. Otherwise it is a reject that makes it redial (stale credentials — TRD 3 §3-0 ⑤).
     struct TokenGate;
 
     impl Handshake for TokenGate {
@@ -1691,7 +1691,7 @@ mod tests {
         }
     }
 
-    /// 받는 쪽 명부와 그 청취기. ★명부의 Dialer 는 세기만 하는 그물이다★ — 받은 상대가 다시 거는지 본다.
+    /// The receiving-side registry and its listener. ★The registry's Dialer is a net that only counts★ — it checks whether an accepted peer redials.
     struct Accepting {
         registry: Registry<TestWire>,
         redials: MemoryNetwork,
@@ -1700,7 +1700,7 @@ mod tests {
         connector: MemoryConnector,
     }
 
-    /// 거는 쪽 끝 — 감독 없이 손으로 몬다.
+    /// The dialing-side end — driven by hand without a supervisor.
     struct Near {
         tx: Box<dyn LinkTx>,
         rx: Box<dyn LinkRx>,
@@ -1729,7 +1729,7 @@ mod tests {
             }
         }
 
-        /// 거는 쪽 끝을 하나 열고 청취기에서 그 통로를 받아 온다 — `upgraded_at` = 지금.
+        /// Opens one dialing-side end and takes that channel from the listener — `upgraded_at` = now.
         async fn connect(&mut self) -> (Near, Accepted) {
             let (tx, rx) = self
                 .connector
@@ -1740,7 +1740,7 @@ mod tests {
             (Near { tx, rx }, accepted)
         }
 
-        /// 마지막 통로의 받는 쪽 끝.
+        /// The receiving-side end of the last channel.
         fn far(&self) -> MemoryLinkControl {
             self.connector.latest().expect("통로").acceptor
         }
@@ -1767,7 +1767,7 @@ mod tests {
                 .expect("거는 쪽 쓰기");
         }
 
-        /// 지금 와 있는 것을 다 읽는다 — 기다리지 않고, 끝(닫힘 · 오류) 뒤로는 안 읽는다.
+        /// Reads everything that has arrived now — it does not wait, and does not read past the end (close · error).
         async fn arrived(&mut self) -> Vec<Seen> {
             let mut out = Vec::new();
             while let Some(read) = poll_immediate(self.rx.recv()).await {
@@ -1790,7 +1790,7 @@ mod tests {
         Seen::Closed(Some(Close::new(CloseCode::GOING_AWAY, "closing")))
     }
 
-    // ★시계를 밀지 않고 끝을 본다★ — 다시 걸기로 가면 백오프 대기에 서서 `Closed` 가 안 온다.
+    // ★See the end without pushing the clock★ — if it goes to reconnect, it stands in the backoff wait and `Closed` does not come.
     #[tokio::test]
     async fn an_accepted_peer_that_loses_its_link_ends_with_that_cause_and_never_redials() {
         let mut a = Accepting::new(auth_policy());
@@ -1816,7 +1816,7 @@ mod tests {
         assert_eq!(a.redials.dials(), 0, "받은 상대는 다시 걸지 않는다");
     }
 
-    // 데몬 어댑터가 읽기 끝(남은 명령을 마저 돌린다)과 쓰기 끝(곧바로 끊는다)을 이 까닭으로 가른다(TRD 3 §3-0 ①).
+    // The daemon adapter tells the read end (finish running the remaining commands) from the write end (cut at once) by this cause (TRD 3 §3-0 ①).
     #[tokio::test]
     async fn read_end_and_write_end_causes_reach_closed_on_the_accepted_side() {
         let write_deadline = Policy::default().write_deadline;
@@ -1857,11 +1857,11 @@ mod tests {
                     settle().await;
                     a.clock.advance(write_deadline);
                     settle().await;
-                    // 통로를 버리는 닫기도 막혀 있다 — 그 대기도 쓰기 시한이 자른다.
+                    // The close that drops the channel is also blocked — that wait too is cut by the write deadline.
                     a.clock.advance(write_deadline);
                     "WriteDeadline"
                 }
-                // 거는 쪽이 안 읽으니 우리 ping 의 대답도 없다.
+                // The dialing side does not read, so there is no reply to our ping either.
                 _ => {
                     for _ in 0..5 {
                         settle().await;
@@ -1870,7 +1870,7 @@ mod tests {
                     "Idle"
                 }
             };
-            // 쓰기 쪽 끝은 그 쓰다 만 알림을 `Dropped` 로 함께 센다 — 여기서 재는 것은 끝 까닭이다.
+            // The write-side end also counts that half-written notification as `Dropped` — what is measured here is the end cause.
             let ends: Vec<String> = labels(&drain_until_quiet(&mut inbox).await)
                 .into_iter()
                 .filter(|label| label != "Dropped")
@@ -1889,14 +1889,14 @@ mod tests {
         }
     }
 
-    // 운영 단계에 못 든 끝도 읽기 끝 · 쓰기 끝을 가른다(`handshake_once` 의 실패 자리마다).
+    // An end that did not enter the operating phase also tells the read end from the write end (at each failure place of `handshake_once`).
     #[tokio::test]
     async fn a_handshake_that_ends_on_the_link_reports_which_end_failed() {
         for case in ["상대가 닫음", "말 없이 사라짐", "쓰기 오류", "쓰기 시한"] {
             let mut a = Accepting::new(auth_policy());
             let (mut near, accepted) = a.connect().await;
             let far = a.far();
-            // 쓰기 쪽 갈래는 먼저 말하는 핸드셰이크로 잰다.
+            // The write-side branch is measured with a handshake that speaks first.
             let handshake: Arc<dyn Handshake> = match case {
                 "쓰기 오류" | "쓰기 시한" => Arc::new(HelloHandshake),
                 _ => Arc::new(TokenGate),
@@ -1955,7 +1955,7 @@ mod tests {
                 "{n}: 거절 코드는 상대에게 간다"
             );
         }
-        // 종결 거절도 끝만 온다 — `Rejected` 는 바로 뒤의 `GaveUp` 을 약속하는 거는 쪽 사건이다.
+        // A terminal reject also comes with only the end — `Rejected` is a dialing-side event that promises a `GaveUp` right after it.
         let (mut near, accepted) = a.connect().await;
         let (_peer, mut inbox) = a.attach(
             "conn-terminal",
@@ -1973,7 +1973,7 @@ mod tests {
                 "version mismatch"
             )))]
         );
-        // 아무 말도 안 하는 통로 — 인증 시한에 닫기 없이 버린다.
+        // A channel that says nothing — dropped without a close at the auth deadline.
         let (mut silent, accepted) = a.connect().await;
         let (_peer, mut inbox) = a.attach("conn-6", accepted, Arc::new(TokenGate));
         settle().await;
@@ -1998,7 +1998,7 @@ mod tests {
         assert_eq!(a.redials.dials(), 0);
     }
 
-    // ★인증 프레임은 이미 와 있다★ — 지난 시한에도 한 번 읽어 보는 길(`with_deadline` 의 0)이면 통과한다.
+    // ★The auth frame has already arrived★ — if the path reads once even on a passed deadline (0 of `with_deadline`), it passes.
     #[tokio::test]
     async fn a_link_that_sat_in_the_ready_queue_past_the_auth_deadline_closes_as_soon_as_it_is_attached(
     ) {
@@ -2079,8 +2079,8 @@ mod tests {
         assert_eq!(a.redials.dials(), 0);
     }
 
-    /// 양쪽이 같은 어휘를 쓰는 최소 패킷 — 묻기와 답하기뿐이다. `TestWire` 는 한쪽(클라) 어휘라 두 명부를 마주 잇지
-    /// 못한다.
+    /// A minimal packet where both sides use the same vocabulary — only asking and answering. `TestWire` is one side's (client's) vocabulary so it cannot connect two registries
+    /// face to face.
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum Talk {
         Ask { tag: u64, body: String },
@@ -2147,7 +2147,7 @@ mod tests {
         }
     }
 
-    /// 수신단에 온 물음마다 그 물음이 온 연결로 답한다. 답한 수를 돌려준다.
+    /// For every question that comes to the receiver end, it answers on the connection the question came from. It returns the number answered.
     async fn answer_asks(peer: &Peer<TalkWire>, inbox: &mut Inbox<TalkWire>) -> usize {
         settle().await;
         let mut answered = 0;
@@ -2169,7 +2169,7 @@ mod tests {
         answered
     }
 
-    // transport 수준의 왕복이다 — 데몬끼리 어휘가 아니라 받는 쪽 자리가 양방향 요청을 나르는지를 잰다(TRD 3 §6-0 U6).
+    // It is a transport-level round trip — it measures not a daemon-to-daemon vocabulary but whether the receiving side's place carries bidirectional requests (TRD 3 §6-0 U6).
     #[tokio::test]
     async fn two_registries_ask_each_other_over_a_dialed_peer_and_an_attached_one() {
         let clock = ManualClock::new();
@@ -2199,7 +2199,7 @@ mod tests {
         })
         .await;
 
-        // 요청은 수신단을 비우는 task 밖에서 기다린다(crate 헤더 「받는 쪽 불변식」 1).
+        // The request is awaited outside the task that drains the receiver end (crate header 「받는 쪽 불변식」 (receiver invariants) 1).
         let ask = |peer: &Peer<TalkWire>, tag: u64, body: &str| {
             let peer = peer.clone();
             let out = Talk::Ask {
@@ -2272,7 +2272,7 @@ mod tests {
         assert!(a.registry.is_empty());
     }
 
-    // ★옛 감독은 새것이 오른 뒤에 끝난다★ — 그 끝의 명부 내리기가 새것을 내리면 안 된다.
+    // ★The old supervisor ends after the new one is raised★ — the registry removal at its end must not remove the new one.
     #[tokio::test]
     async fn re_attaching_a_name_closes_the_old_peer_and_its_end_leaves_the_new_one_listed() {
         let mut a = Accepting::new(auth_policy());
@@ -2309,8 +2309,8 @@ mod tests {
         assert!(a.registry.is_empty());
     }
 
-    // 표에 있는 이름표(`add`)를 받은 통로로 갈아치우면 표의 계수기를 잇고(표는 안 자란다), 받은 상대를 `add` 로
-    //   갈아치우면 그 계수기를 표에 올린다 — 어느 쪽이든 같은 번호를 두 번 뽑지 않는다.
+    // If a name tag in the table (`add`) is replaced by an accepted channel, it continues the table's counter (the table does not grow), and if an accepted peer is replaced
+    //   with `add`, that counter is put on the table — either way the same number is never drawn twice.
     #[tokio::test]
     async fn a_name_passed_between_add_and_attach_never_mints_the_same_generation_twice() {
         let mut a = Accepting::new(auth_policy());
@@ -2438,7 +2438,7 @@ mod tests {
         assert!(a.registry.is_empty());
     }
 
-    // 정리는 받는 쪽이 수신단을 비우기를 기다린다 — 그 사이 명부에 끝난 손잡이가 보이면 안 된다.
+    // Teardown waits for the receiving side to drain the receiver end — in the meantime an ended handle must not be seen on the registry.
     #[tokio::test]
     async fn an_accepted_peer_leaves_the_roster_before_its_teardown_waits_on_the_inbox() {
         let mut a = Accepting::new(Policy {
@@ -2475,15 +2475,15 @@ mod tests {
         assert!(ended(&mut inbox).await, "`Closed` 없는 `None`");
     }
 
-    // ── 3-0 U6b: 일꾼 스레드가 여럿인 런타임에서 올리기 ──
+    // ── 3-0 U6b: raising on a runtime with several worker threads ──
     //
-    // ★`settle` 을 못 쓴다★(current_thread 전용 — `testing.rs`) — 끝은 실시간 시한을 건 대기로 본다. OS 스레드
-    //   `RACE_THREADS` 개가 장벽에서 함께 출발해 같은 명부를 두드린다 — 감독은 그 사이 일꾼 스레드에서 돈다.
+    // ★`settle` cannot be used★ (current_thread only — `testing.rs`) — the end is seen by a wait with a real-time deadline. `RACE_THREADS` OS threads
+    //   start together at a barrier and hammer the same registry — the supervisors meanwhile run on worker threads.
 
     const RACE_THREADS: usize = 4;
     const REAL_WAIT: Duration = Duration::from_secs(10);
 
-    /// 수신단을 끝(`None`)까지 비운다 — 실시간 [`REAL_WAIT`] 안에 안 끝나면 패닉한다.
+    /// Drains the receiver end to the end (`None`) — panics if it does not finish within the real-time [`REAL_WAIT`].
     async fn drain_to_end(inbox: &mut Inbox<TestWire>) -> Vec<Incoming<TestWire>> {
         tokio::time::timeout(REAL_WAIT, async {
             let mut out = Vec::new();
@@ -2496,7 +2496,7 @@ mod tests {
         .expect("수신단이 실시간 시한 안에 안 끝났다")
     }
 
-    /// 조건이 서기를 실시간 [`REAL_WAIT`] 까지 기다린다.
+    /// Waits for a condition to hold up to the real-time [`REAL_WAIT`].
     async fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
         tokio::time::timeout(REAL_WAIT, async {
             while !done() {
@@ -2507,7 +2507,7 @@ mod tests {
         .unwrap_or_else(|_| panic!("실시간 시한 안에 안 섰다: {what}"));
     }
 
-    /// 받은 통로 하나와 그 거는 쪽 끝 — 업그레이드 끝 = `upgraded_at`.
+    /// One accepted channel and its dialing-side end — upgrade end = `upgraded_at`.
     fn accepted_link(pool: &PermitPool, upgraded_at: Instant) -> (Near, Accepted) {
         let (near, far) = memory_link();
         let permit = pool.try_take().expect("업그레이드 칸");
@@ -2521,8 +2521,8 @@ mod tests {
         )
     }
 
-    /// OS 스레드 [`RACE_THREADS`] 개가 런타임 문맥 안에서 장벽을 함께 넘어 `call(스레드 번호)` 를 돌린다. ★이 대기는
-    /// 시험 본문 스레드를 막는다★ — multi_thread 시험의 본문은 일꾼이 아니라 `block_on` 스레드라 감독은 계속 돈다.
+    /// [`RACE_THREADS`] OS threads cross a barrier together inside the runtime context and run `call(스레드 번호)`. ★This wait
+    /// blocks the test-body thread★ — the body of a multi_thread test is not a worker but the `block_on` thread, so the supervisors keep running.
     fn race<T: Send>(call: impl Fn(usize) -> T + Sync) -> Vec<T> {
         let runtime = tokio::runtime::Handle::current();
         let start = std::sync::Barrier::new(RACE_THREADS);
@@ -2544,8 +2544,8 @@ mod tests {
         })
     }
 
-    /// 거는 쪽 끝을 끝(닫힘 · 오류)까지 읽는다 — 실시간 [`REAL_WAIT`] 까지. ★[`Near::arrived`] 를 쓰지 않는다★ — 기다리지
-    /// 않고 한 번만 폴링해, tokio 의 협조 예산이 바닥난 task 에서는 와 있는 것도 못 읽는다.
+    /// Reads the dialing-side end to the end (close · error) — up to the real-time [`REAL_WAIT`]. ★Do not use [`Near::arrived`]★ — it
+    /// does not wait and polls only once, so on a task whose tokio cooperative budget is exhausted it cannot read even what has arrived.
     async fn read_to_end(near: &mut Near) -> Vec<Seen> {
         tokio::time::timeout(REAL_WAIT, async {
             let mut out = Vec::new();
@@ -2576,8 +2576,8 @@ mod tests {
             .collect()
     }
 
-    // 첫 폴링에 곧바로 끝나는 받은 상대 — 시한이 이미 지났거나(`Idle`) 거는 쪽이 이미 끊었다. 올리기가 띄우기보다
-    //   뒤면 다른 일꾼에서 명부 내리기까지 마친 감독의 손잡이가 그 뒤에 올라 영영 남는다(`Registry::launch`).
+    // An accepted peer that ends at its first poll — the deadline has already passed (`Idle`) or the dialing side has already cut. If raising comes after
+    //   starting, the handle of a supervisor that finished even removing itself on another worker is raised afterwards and remains forever (`Registry::launch`).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn accepted_peers_that_end_on_their_first_poll_never_stay_listed() {
         const PER_THREAD: usize = 50;
@@ -2620,7 +2620,7 @@ mod tests {
         assert_eq!(pool.in_use(), 0);
     }
 
-    // 접은 명부에 올린 상대는 띄우기 전에 닫기가 들어 있어, 어느 일꾼에서 먼저 돌든 걸지도 핸드셰이크하지도 않는다.
+    // A peer raised on a folded registry has the close in before starting, so whichever worker it runs on first, it neither dials nor handshakes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn after_close_all_no_attach_shakes_hands_and_no_add_dials_on_a_multi_thread_runtime() {
         const PER_THREAD: usize = 25;
@@ -2670,9 +2670,9 @@ mod tests {
         assert_eq!(pool.in_use(), 0);
     }
 
-    // 같은 이름표를 여러 호출이 동시에 `add` · `attach` 로 갈아치운다. ★표에 칸이 없는 받은 상대가 올라 있을 때가
-    //   경합 자리다★ — 그 손잡이를 빼는 자리와 계수기를 고르는 자리가 갈리면 다른 호출이 손잡이도 표의 칸도 못 보고 새
-    //   계수기를 만들어 이미 나간 세대를 다시 뽑는다(`Registry::launch`). 그래서 이름표마다 그 상태로 시작한다.
+    // Several calls replace the same name tag at once with `add` · `attach`. ★The race place is when an accepted peer with no field in the table is raised★
+    //   — if the place that takes out that handle and the place that chooses the counter split, another call sees neither the handle nor the table field, makes a new
+    //   counter, and draws a generation that already went out again (`Registry::launch`). So each name tag starts in that state.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn racing_replacements_of_one_name_never_mint_the_same_generation_twice() {
         const NAMES: usize = 60;
@@ -2707,7 +2707,7 @@ mod tests {
                     })
                     .collect::<Vec<_>>()
             });
-            // 경합 뒤 표에 남은 계수기로 한 번 더 붙는다 — 경합이 새 계수기를 표에 올렸으면 여기서 1 을 다시 뽑는다.
+            // Attach once more with the counter left in the table after the race — if the race put a new counter on the table, 1 is drawn again here.
             let (last, last_inbox) =
                 registry.add(name.clone(), Address::new("mem://x"), immediate());
             wait_until("마지막 상대 운영", || last.peer_state().is_live()).await;
@@ -2735,11 +2735,11 @@ mod tests {
         }
     }
 
-    /// [`TrippingClock`] 이 터뜨리는 패닉의 값.
+    /// The value of the panic that [`TrippingClock`] sets off.
     struct Tripped;
 
-    /// 정해 둔 스레드의 n 번째 `now()` 에서 한 번 패닉하는 시계 — 그 밖은 [`ManualClock`] 그대로다. ★스레드로
-    /// 거른다★ — 다른 감독이 일꾼 스레드에서 읽는 것이 세는 수에 섞이지 않게.
+    /// A clock that panics once at the n-th `now()` of a designated thread — otherwise it is [`ManualClock`] as is. ★Filter by
+    /// thread★ — so that reads other supervisors make on worker threads do not mix into the count.
     #[derive(Default)]
     struct TrippingClock {
         clock: ManualClock,
@@ -2747,7 +2747,7 @@ mod tests {
     }
 
     impl TrippingClock {
-        /// 부른 스레드의 `nth` 번째 읽기에서 패닉하게 한다.
+        /// Makes the calling thread panic on its `nth` read.
         fn arm(&self, nth: usize) {
             *self.trip.lock().unwrap() = Some((std::thread::current().id(), nth));
         }
@@ -2769,7 +2769,7 @@ mod tests {
                     _ => false,
                 }
             };
-            // 자물쇠를 놓은 뒤에 터뜨린다 — 쥔 채 터지면 그 독이 다른 감독의 읽기까지 터뜨린다.
+            // Sets it off after releasing the lock — if it blew up while holding it, that poison would blow up other supervisors' reads too.
             if fire {
                 std::panic::panic_any(Tripped);
             }
@@ -2781,8 +2781,8 @@ mod tests {
         }
     }
 
-    /// `call` 을 런타임 문맥에 든 OS 스레드에서 패닉을 잡으며 돌린다 — 실시간 [`REAL_WAIT`] 안에 안 끝나면 교착으로
-    /// 보고 패닉한다. ★그 스레드를 떼어 둔다★ — 교착한 스레드를 기다리면 시험이 실패하지 않고 매달린다.
+    /// Runs `call` on an OS thread in the runtime context while catching panics — if it does not finish within the real-time [`REAL_WAIT`], it is treated as a deadlock
+    /// and panics. ★Detach that thread★ — if we waited on a deadlocked thread, the test would hang instead of failing.
     fn off_thread<T: Send + 'static>(
         call: impl FnOnce() -> T + Send + 'static,
     ) -> std::thread::Result<T> {
@@ -2797,10 +2797,10 @@ mod tests {
             .expect("실시간 시한 안에 안 끝났다 — 명부 자물쇠 교착")
     }
 
-    // 갈아치우는 `attach` · `add` 가 명부 자물쇠 안에서 감독을 짓다 패닉한다(주입한 시계). ★받은 상대는 짓기 뒤에
-    //   패닉하면 풀리며 떨어지는 명부 내리기가 같은 스레드에서 자물쇠를 다시 잡는다★(`peer.rs` 의 `new_peer`) — 그
-    //   교착이 시험을 매달지 않게 실시간 시한을 건 스레드에서 부른다. 짓기 전에 표를 바꾸면 갈아치우려던 손잡이가
-    //   명부에서 사라진다(`Registry::launch`).
+    // The replacing `attach` · `add` panics while building the supervisor inside the registry lock (the injected clock). ★If an accepted peer
+    //   panics after being built, the registry removal that is dropped as it unwinds retakes the lock on the same thread★ (`new_peer` in `peer.rs`) — we call it
+    //   on a thread with a real-time deadline so that deadlock does not hang the test. If the table were changed before building, the handle that was to be replaced
+    //   would vanish from the registry (`Registry::launch`).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_replacement_that_panics_while_preparing_leaves_the_roster_untouched_and_usable() {
         let clock = Arc::new(TrippingClock::default());
@@ -2818,7 +2818,7 @@ mod tests {
             registry.len() == 1 && registry.get(&name).is_some_and(|peer| peer.same(&first))
         };
 
-        // debug 빌드는 `attach_with_policy` 의 시계 단언이 짓기의 읽기 하나 앞에 선다.
+        // In a debug build, the clock assertion of `attach_with_policy` stands ahead of one read of the build.
         let nth = if cfg!(debug_assertions) { 2 } else { 1 };
         let (_near, accepted) = accepted_link(&pool, clock.now());
         let attached = off_thread({

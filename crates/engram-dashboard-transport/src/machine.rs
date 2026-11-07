@@ -1,14 +1,14 @@
-//! 연결 하나의 상태 기계 — ★순수 층★.
+//! State machine of one connection — ★pure layer★.
 //!
-//! 입력 = (지금 시각, 사건) · 출력 = 행동 목록. ★future 도 런타임도 I/O 도 없다★ — 그래서 백오프 일정과
-//! 예산 판정을 **실제로 기다리지 않고** 잰다. 게이트가 그 순수성을 지킨다(정본 = `lib.rs` 헤더).
+//! Input = (current time, event) · output = list of actions. ★No future, no runtime, no I/O★ — so the backoff schedule and
+//! the budget decision are measured **without really waiting**. The gate keeps that purity (canonical = `lib.rs` header).
 //!
-//! ★이 파일이 이 crate 의 유일한 「나중에 리팩터 안 하게」 장치다★ — 한 crate 안에서 sans-IO 순수성은
-//! 컴파일러가 강제하지 않아 관례로만 버티는데, 이 저장소엔 그 약점을 메우는 선례가 이미 있다
-//! (`src-tauri/src/daemon_client/replay_flight.rs` 의 순수성 게이트, ADR-0175 결정 3).
+//! ★This file is this crate's only 「나중에 리팩터 안 하게」 (so we never refactor later) device★ — within one crate the compiler does not enforce sans-IO purity,
+//! so it holds only by convention, and this repo already has a precedent that fills that weakness
+//! (the purity gate of `src-tauri/src/daemon_client/replay_flight.rs`, ADR-0175 decision 3).
 //!
-//! ★행동을 **집행하지 않는다**★ — 통로를 열고 닫고 기다리는 것은 전부 [`crate::peer`] 의 감독 태스크다.
-//! 여기서 늘어나는 것은 [`Action`]·[`Input`] 의 variant 뿐이고 그것은 경계를 흔들지 않는다.
+//! ★It does **not execute** actions★ — opening, closing and waiting on links are all the supervisor task of [`crate::peer`].
+//! What grows here is only variants of [`Action`] · [`Input`], and that does not shake the boundary.
 
 use std::time::{Duration, Instant};
 
@@ -17,19 +17,19 @@ use crate::link::{LinkError, RejectKind};
 use crate::mask::mask_reason;
 use crate::policy::Policy;
 
-/// 연결 세대. 단조 증가하고 재사용이 없다. 운영 단계에 들어설 때마다 +1 이다.
+/// Connection generation. Monotonically increasing and never reused. It is +1 every time it enters the operating phase.
 ///
-/// ★같은 이름표를 명부에 다시 올려도 되감기지 않는다★ — [`Machine::new`] 가 **바닥값**을 받고, 명부가
-/// 옛 감독의 마지막 세대를 그 바닥으로 넘긴다. 안 그러면 소비자의 평범한 방어(「최대 세대 미만은
-/// 무시」)가 **새 연결을 통째로 버린다**.
+/// ★It does not rewind even if the same label is put on the registry again★ — [`Machine::new`] takes a **floor value**, and the registry
+/// passes the old supervisor's last generation as that floor. Otherwise the consumer's ordinary defense (「최대 세대 미만은
+/// 무시」 (ignore anything below the max generation)) **throws away the new connection wholesale**.
 ///
-/// ★스트림의 화신 표식([`crate::StreamMark::generation`], u32)과 다른 것이다★ — 이쪽은 **우리 연결이
-/// 몇 번째인가**이고 저쪽은 **상대의 그 스트림이 몇 번째 화신인가**다. 폭도 비교 규칙도 다르다
-/// (이쪽은 대소 비교가 뜻을 갖고, 저쪽은 일치/불일치만 본다).
+/// ★It differs from the stream's incarnation marker ([`crate::StreamMark::generation`], u32)★ — this one is **which of our connections
+/// this is**, while that one is **which incarnation of the peer's stream this is**. The width and the comparison rule differ
+/// (here ordering comparison has meaning, there only match/mismatch is looked at).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Generation(pub u64);
 
-/// 상대 하나의 지금 상태. [`crate::Peer::state`] 로 밖에 노출된다.
+/// The current state of one peer. It is exposed outside only through [`crate::Peer::state`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerState {
     Idle,
@@ -38,7 +38,7 @@ pub enum PeerState {
     Live,
     Backoff,
     GaveUp(GaveUpReason),
-    /// 명시 종료 — 다시 붙지 않는다.
+    /// Explicit exit — it does not connect again.
     Closed,
 }
 
@@ -52,42 +52,42 @@ impl PeerState {
     }
 }
 
-/// 왜 포기했나. ★셸이 팝업 자격을 판정하는 입력이다★(ADR-0180 결정 2) — 둘 다 「사용자가 행동하지
-/// 않으면 영영 복구되지 않는 상태」라 자격을 갖지만, 사용자가 그 자리에서 할 수 있는 일이 달라 화면
-/// 모양이 갈린다.
+/// Why it gave up. ★This is the input from which the shell decides popup eligibility★ (ADR-0180 decision 2) — both are 「사용자가 행동하지
+/// 않으면 영영 복구되지 않는 상태」 (a state that never recovers unless the user acts) and so qualify, but what the user can do on the spot differs, so the screen
+/// shape splits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GaveUpReason {
-    /// 종결 거절([`RejectKind::Terminal`])을 받았다 — 붙었는데 거절당했거나, 거는 쪽이 걸기 전에 그것을 알았다
-    /// ([`crate::DialFailure::Refused`]). 재시도해도 결과가 같다.
+    /// Received a terminal rejection ([`RejectKind::Terminal`]) — it connected and was rejected, or the dialer knew it before dialing
+    /// ([`crate::DialFailure::Refused`]). Retrying gives the same result.
     Rejected,
-    /// 재연결 예산을 다 썼다.
+    /// Used up the reconnect budget.
     BudgetExhausted,
 }
 
-/// 왜 끊겼나. ★오늘 코드에는 이 구분이 없다 — 전부 「끊김」 한 덩어리다★.
+/// Why it disconnected. ★Today's code has no such distinction — everything is one lump of 「끊김」 (disconnected)★.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisconnectCause {
-    /// 상대가 정상 종료했다.
+    /// The peer exited normally.
     PeerClosed,
-    /// 읽는 쪽이 끝났다 — 통로 읽기가 오류를 냈거나, 읽은 것을 못 읽어 끊었다(디코드 실패로 끊는 정책).
-    /// ★[`DisconnectCause::WriteFailed`] 와 가르는 것이 요점이다★ — 데몬 어댑터가 읽기 끝(남은 명령을 마저
-    /// 돌린다)과 쓰기 끝(곧바로 끊는다)을 이 값으로 가른다(TRD 3 §3-0 ①).
+    /// The reading side ended — link reading produced an error, or it disconnected because what was read could not be read (the policy of disconnecting on decode failure).
+    /// ★Telling it apart from [`DisconnectCause::WriteFailed`] is the point★ — the daemon adapter tells the read end (finishes the remaining commands)
+    /// from the write end (disconnects right away) by this value (TRD 3 §3-0 ①).
     ReadFailed,
-    /// 쓰는 쪽이 끝났다 — 프레임 · keepalive 쓰기가 오류를 냈다(시한 초과는 [`DisconnectCause::WriteDeadline`]).
+    /// The writing side ended — a frame · keepalive write produced an error (a deadline overrun is [`DisconnectCause::WriteDeadline`]).
     WriteFailed,
-    /// 상대가 `idle_timeout` 동안 조용했다. 받은 상대([`crate::Registry::attach`])가 인증 시한 안에 핸드셰이크를 못
-    /// 마친 것도 이것이다(`TransportEvent::Closed` 의 `cause`).
+    /// The peer was quiet for `idle_timeout`. An accepted peer ([`crate::Registry::attach`]) failing to finish the handshake within the auth deadline is this too
+    /// (the `cause` of `TransportEvent::Closed`).
     Idle,
-    /// 한 프레임을 미는 데 `write_deadline` 을 넘겼다 — 받은 상대의 핸드셰이크 쓰기면 인증 시한을 넘겼다.
+    /// Exceeded `write_deadline` pushing one frame — for an accepted peer's handshake write, it exceeded the auth deadline.
     WriteDeadline,
-    /// 큐가 찼고 정책이 [`crate::QueueFullPolicy::Disconnect`] 였다.
+    /// The queue was full and the policy was [`crate::QueueFullPolicy::Disconnect`].
     QueueFull,
-    /// 우리가 명시로 닫았다 — 받은 상대에선 우리 핸드셰이크가 거절한 것도 이것이다.
+    /// We closed it explicitly — for an accepted peer, our handshake rejecting it is this too.
     Explicit,
 }
 
 impl DisconnectCause {
-    /// 이 사유로 끊을 때 실을 닫기 코드.
+    /// The close code to carry when disconnecting for this reason.
     pub fn close_code(self) -> CloseCode {
         match self {
             DisconnectCause::Idle => CloseCode::KEEPALIVE_TIMEOUT,
@@ -98,19 +98,19 @@ impl DisconnectCause {
     }
 }
 
-/// 연결이 못 선 이유. ★예산을 가르는 것은 갈래가 아니라 「종결 거절인가」다★(ADR-0180 결정 5 · TRD 3 §3-0 ⑤) —
-/// [`RejectKind::Terminal`] 거절만 예산을 안 쓰고 첫 거절에서 즉시 포기하고, 나머지는 예산을 쓰고 다시 건다.
+/// Why a connection could not stand. ★What splits the budget is not the branch but 「종결 거절인가」 (is it a terminal rejection)★ (ADR-0180 decision 5 · TRD 3 §3-0 ⑤) —
+/// only an [`RejectKind::Terminal`] rejection spends no budget and gives up at the first rejection; the rest spend budget and dial again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectFailure {
-    /// 통로 자체가 안 열렸다 → 예산을 쓴다. ★문구도 상대가 준 글일 수 있다★ — 소비자 [`crate::Dialer`] 가 상대의
-    /// 응답 글을 옮겨 실을 수 있어, 기계를 지난 사건에 실린 이 문구도 [`mask_reason`] 을 거친 것이다.
+    /// The link itself did not open → spends budget. ★The text may be text the peer gave too★ — a consumer [`crate::Dialer`] may carry the peer's
+    /// response text over, so this text carried by an event that passed through the machine has also gone through [`mask_reason`].
     Unreachable(LinkError),
-    /// 상대가(또는 이쪽 핸드셰이크 · 거는 쪽이) 안 받는다고 했다. `kind` 가 예산을 가르고 `code` 는 통로 위에서
-    /// 오간 그 거절의 닫기 코드다(거는 쪽의 [`crate::DialFailure::Refused`] 면 그것이 고른 코드).
+    /// The peer (or this side's handshake · the dialer) said it will not accept. `kind` splits the budget and `code` is the close code of that rejection
+    /// that crossed the link (for the dialer's [`crate::DialFailure::Refused`], the code it chose).
     ///
-    /// ★`reason` 은 상대가 준 글일 수 있다 — 가르지도, 팝업 문안으로 쓰지도 말 것★(TRD 3 §3-0 ⑤ · §5 19). 화면
-    /// 문안은 `code` 로 고르는 소비자의 고정 문구이고 이 글은 세부 · 로그 몫이다. LLM 표면에 실을 때는 「상대가 준
-    /// 데이터」로 표시한다. 기계를 지난 사건에 실린 이 글은 [`mask_reason`] 을 거친 것이다.
+    /// ★`reason` may be text the peer gave — neither decide on it nor use it as popup text★ (TRD 3 §3-0 ⑤ · §5 19). The screen
+    /// text is the consumer's fixed message chosen by `code`, and this text is for details · logs. When carrying it onto an LLM surface, mark it as 「상대가 준
+    /// 데이터」 (data the peer gave). This text carried by an event that passed through the machine has gone through [`mask_reason`].
     Rejected {
         kind: RejectKind,
         code: CloseCode,
@@ -119,7 +119,7 @@ pub enum ConnectFailure {
 }
 
 impl ConnectFailure {
-    /// 사건에 싣기 전에 글을 가린다 — 거절 문구와 못 붙음의 문구 둘 다다.
+    /// Masks the text before carrying it in an event — both the rejection text and the could-not-connect text.
     fn masked(self) -> Self {
         match self {
             ConnectFailure::Rejected { kind, code, reason } => ConnectFailure::Rejected {
@@ -134,30 +134,30 @@ impl ConnectFailure {
     }
 }
 
-/// 감독 태스크가 기계에 넣는 것.
+/// What the supervisor task feeds into the machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Input {
-    /// 명부에 올랐다.
+    /// It was put on the registry.
     Start,
-    /// 통로가 열렸다 — 이제 핸드셰이크다.
+    /// The link opened — now the handshake.
     Dialed,
-    /// 핸드셰이크가 끝났다. ★세대는 감독이 **상대 이름표별 공용 계수기**에서 뽑아 여기 실어 준다★ —
-    /// 기계가 스스로 +1 하면 같은 이름표의 옛 감독과 새 감독이 같은 번호를 발행할 수 있다(D1).
+    /// The handshake finished. ★The supervisor draws the generation from the **shared counter per peer label** and carries it here★ —
+    /// if the machine did +1 itself, an old and a new supervisor of the same label could emit the same number (D1).
     Connected(Generation),
-    /// dial 이나 핸드셰이크가 실패했다.
+    /// The dial or the handshake failed.
     ConnectFailed(ConnectFailure),
-    /// 운영 중 통로를 잃었다.
+    /// Lost the link while operating.
     LinkLost(DisconnectCause),
-    /// 백오프 대기가 끝났다.
+    /// The backoff wait ended.
     BackoffElapsed,
-    /// ★「지금 다시 해라」★ — 예산을 초기화하고 즉시 시도한다(ADR-0180 결정 7).
+    /// ★「지금 다시 해라」 (do it again now)★ — resets the budget and tries at once (ADR-0180 decision 7).
     ReconnectNow,
-    /// 명시 종료.
+    /// Explicit exit.
     Close,
 }
 
-/// 기계가 위로 올리라고 지시하는 사건. [`crate::peer`] 가 여기에 출처 표식을 붙여
-/// [`crate::TransportEvent`] 로 만든다.
+/// An event the machine instructs to raise upward. [`crate::peer`] attaches a source marker to it and turns it into
+/// a [`crate::TransportEvent`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MachineEvent {
     Connected {
@@ -168,18 +168,18 @@ pub enum MachineEvent {
         cause: DisconnectCause,
     },
     ConnectFailed {
-        /// ★이제까지 쓴 **재시도** 예산★(1-기반). 첫 연결 시도는 재시도가 아니라 세지 않으므로,
-        /// `retry_in` 이 `Some` 이면 "이제 `attempt`번째 재시도를 그만큼 뒤에 한다" 로 읽고 `None` 이면
-        /// "`attempt`/`of` 를 다 썼다" 로 읽는다.
+        /// ★The **retry** budget used so far★ (1-based). The first connection attempt is not a retry and is not counted, so
+        /// if `retry_in` is `Some`, read it as "now do the `attempt`th retry after that long", and if `None`, read it as
+        /// "used up `attempt`/`of`".
         attempt: u32,
         of: u32,
         cause: ConnectFailure,
-        /// `None` = 예산을 다 써서 더 안 기다린다 — 그 뜻뿐이다. 종결 거절은 이 사건을 올리지 않는다
-        /// ([`MachineEvent::Rejected`] · [`MachineEvent::GaveUp`] 으로 간다).
+        /// `None` = the budget is used up so it waits no more — that is all it means. A terminal rejection does not raise this event
+        /// (it goes as [`MachineEvent::Rejected`] · [`MachineEvent::GaveUp`]).
         retry_in: Option<Duration>,
     },
-    /// ★종결 거절([`RejectKind::Terminal`])만 올린다★ — 다시 거는 거절은 [`MachineEvent::ConnectFailed`] 의 `cause`
-    /// 로 간다. `reason` 은 가린 글이다([`ConnectFailure::Rejected`]).
+    /// ★Raises only a terminal rejection ([`RejectKind::Terminal`])★ — a rejection that is retried goes as the `cause` of [`MachineEvent::ConnectFailed`].
+    /// `reason` is masked text ([`ConnectFailure::Rejected`]).
     Rejected {
         code: CloseCode,
         reason: String,
@@ -189,55 +189,55 @@ pub enum MachineEvent {
     },
 }
 
-/// 기계가 시키는 일. 집행은 감독 태스크가 한다.
+/// What the machine instructs. The supervisor task carries it out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    /// 통로를 연다. `deadline` 은 **dial 과 핸드셰이크를 함께** 감싼다(현행 `HANDSHAKE_TIMEOUT` 보존).
+    /// Opens a link. `deadline` wraps **dial and handshake together** (preserves the current `HANDSHAKE_TIMEOUT`).
     Dial { deadline: Instant },
-    /// 열린 통로 위에서 핸드셰이크를 돌린다. `deadline` 은 [`Action::Dial`] 이 잡은 그것 그대로다.
+    /// Runs the handshake over the open link. `deadline` is exactly the one [`Action::Dial`] set.
     Handshake { deadline: Instant },
-    /// 지금 통로를 닫고 버린다. 실을 닫기 코드가 `close` 다.
+    /// Closes and discards the current link. The close code to carry is `close`.
     DropLink { code: CloseCode },
-    /// 이 시각까지 기다렸다가 [`Input::BackoffElapsed`] 를 넣는다.
+    /// Waits until this time and then feeds in [`Input::BackoffElapsed`].
     Wait { until: Instant },
-    /// 대기 중인 요청 전원을 이 사유로 깨운다.
+    /// Wakes all waiting requests with this reason.
     FailPending(DisconnectCause),
-    /// 위로 올릴 사건.
+    /// The event to raise upward.
     Emit(MachineEvent),
 }
 
-/// 연결 하나의 수명.
+/// The lifetime of one connection.
 #[derive(Debug)]
 pub struct Machine {
     state: PeerState,
     generation: u64,
-    /// ★못 붙어서 쓴 예산★ — 마지막 성공 연결(또는 [`Input::ReconnectNow`]) 이후 예약한 백오프 대기 수.
-    /// 연결에 성공하면 0 으로 돌아간다.
+    /// ★Budget spent on failing to connect★ — the number of backoff waits reserved since the last successful connection (or [`Input::ReconnectNow`]).
+    /// It returns to 0 when a connection succeeds.
     retries: u32,
-    /// ★붙었다가 금세 끊긴 연속 횟수★ — `live_dwell` 을 못 채운 연결이 이어진 수. 오래 버틴 연결
-    /// 하나가 0 으로 되돌린다.
+    /// ★Consecutive count of connecting and soon disconnecting★ — the number of connections in a row that failed to fill `live_dwell`. One
+    /// connection that lasted long resets it to 0.
     ///
-    /// 축이 둘인 이유: 하나로 합치면 **둘 중 하나가 반드시 깨진다**. 붙을 때마다 예산을 다 채우면
-    /// 붙자마자 끊기는 상대가 영원히 되풀이해 [`GaveUpReason::BudgetExhausted`] 에 닿지 않고(팝업이
-    /// 안 뜬다), 안 채우면 **재시도를 한 번도 안 해 보고** 포기하는 자리가 생긴다 — 데몬이 4초 걸려
-    /// 재시작하는 동안 예산을 다 태우고, 붙은 뒤 10초 만에 한 번 끊기면 그 즉시 포기하는 모양이다.
-    /// 그 상태는 「사용자가 행동하지 않으면 영영 복구되지 않는」이 아니라 **한 번만 더 걸면 붙는**
-    /// 상태라 팝업 자격이 없다(ADR-0180 결정 2).
+    /// Why there are two axes: merge them into one and **one of the two is bound to break**. If the budget is refilled completely on every connect,
+    /// a peer that disconnects as soon as it connects repeats forever and never reaches [`GaveUpReason::BudgetExhausted`] (no popup
+    /// appears), and if it is not refilled, there is a place where it gives up **without ever having retried** — the shape where the daemon takes 4 seconds to
+    /// restart and burns the whole budget during that time, and then one disconnect 10 seconds after connecting makes it give up at once.
+    /// That state is not 「사용자가 행동하지 않으면 영영 복구되지 않는」 (never recovers unless the user acts); it is one that **connects if tried just once more**,
+    /// so it has no popup eligibility (ADR-0180 decision 2).
     flaps: u32,
     policy: Policy,
-    /// 지금 시도의 dial+핸드셰이크 마감. 두 구간이 한 예산을 나눠 쓰므로 기계가 들고 있다.
+    /// The dial+handshake deadline of the current attempt. The machine holds it because the two stretches share one budget.
     connect_deadline: Instant,
-    /// 지금 연결이 운영 단계에 들어선 시각. 예산을 되채울 자격을 이것으로 잰다.
+    /// The time the current connection entered the operating phase. Eligibility to refill the budget is measured by it.
     live_since: Option<Instant>,
-    /// 지터 눈금의 시간 축. `Instant` 는 내부 표현을 안 내주므로 기준점과의 차이를 쓴다.
+    /// The time axis of the jitter scale. `Instant` does not expose its internal representation, so the difference from a reference point is used.
     epoch: Instant,
-    /// 상대마다 다른 눈금이 나오게 하는 씨앗. 부르는 쪽이 `PeerId` 에서 뽑는다.
+    /// A seed that makes each peer get a different scale. The caller draws it from `PeerId`.
     jitter_seed: u64,
 }
 
 impl Machine {
-    /// `generation_floor` = 이 상대의 세대가 여기서부터 이어진다(같은 이름표의 옛 감독이 남긴 값).
-    /// 처음 세우는 상대는 0 이다.
+    /// `generation_floor` = this peer's generation continues from here (the value left by an old supervisor of the same label).
+    /// A peer being set up for the first time has 0.
     pub fn new(policy: Policy, jitter_seed: u64, created: Instant, generation_floor: u64) -> Self {
         Self {
             state: PeerState::Idle,
@@ -260,17 +260,17 @@ impl Machine {
         Generation(self.generation)
     }
 
-    /// 못 붙어서 쓴 예산.
+    /// Budget spent on failing to connect.
     pub fn attempt(&self) -> u32 {
         self.retries
     }
 
-    /// 붙었다가 금세 끊긴 연속 횟수.
+    /// Consecutive count of connecting and soon disconnecting.
     pub fn flaps(&self) -> u32 {
         self.flaps
     }
 
-    /// 사건 하나를 먹이고 할 일을 받는다.
+    /// Feeds in one event and receives the work to do.
     pub fn on(&mut self, now: Instant, input: Input) -> Vec<Action> {
         if self.state == PeerState::Closed {
             return Vec::new();
@@ -281,8 +281,8 @@ impl Machine {
                 let generation = Generation(self.generation);
                 self.state = PeerState::Closed;
                 self.live_since = None;
-                // 대기자를 먼저 깨운다 — DropLink 는 쓰기 시한만큼 늦어질 수 있고, 그 사이 사유를
-                //   묻는 호출자에게 낡은 답이 나간다.
+                // Wake the waiters first — DropLink can be delayed by as much as the write deadline, and in that time a stale answer goes out to
+                //   a caller asking for the reason.
                 let mut acts = vec![Action::FailPending(DisconnectCause::Explicit)];
                 if was_live {
                     acts.push(Action::Emit(MachineEvent::Disconnected {
@@ -304,9 +304,9 @@ impl Machine {
                 _ => Vec::new(),
             },
             Input::ReconnectNow => {
-                // ★대기자를 여기서 깨우지 않으면 아무도 안 깨운다★ — 다음 dial 이 예산을 태우고
-                //   GaveUp 으로 앉으면 이 기계는 다시는 시한을 볼 일이 없고, 그 슬롯은 영구 대기가 된다.
-                //   Close·LinkLost·거절이 전부 FailPending 을 내는데 이 갈래만 안 내던 것이 결함이었다.
+                // ★If the waiters are not woken here, nobody wakes them★ — if the next dial burns the budget and
+                //   lands on GaveUp, this machine never looks at a deadline again, and that slot becomes a permanent wait.
+                //   Close · LinkLost · rejection all emit FailPending, and only this branch did not — that was the defect.
                 let was_live = self.state.is_live();
                 let generation = Generation(self.generation);
                 self.retries = 0;
@@ -340,8 +340,8 @@ impl Machine {
             },
             Input::Connected(generation) => match self.state {
                 PeerState::Handshaking => {
-                    // ★붙었으면 「못 붙는다」 예산은 다시 찬다★ — 그 축이 재는 것은 도달 가능성이고,
-                    //   방금 도달했다. 붙자마자 끊기는 상대를 잡는 것은 아래 `flaps` 축이다.
+                    // ★If it connected, the 「못 붙는다」 (cannot connect) budget fills again★ — what that axis measures is reachability,
+                    //   and it was just reached. Catching a peer that disconnects as soon as it connects is the `flaps` axis below.
                     self.retries = 0;
                     self.live_since = Some(now);
                     self.generation = generation.0;
@@ -358,7 +358,7 @@ impl Machine {
                 PeerState::Live => {
                     let generation = Generation(self.generation);
                     match self.live_since.take() {
-                        // 오래 버틴 연결 하나가 「금세 끊긴다」 기록을 지운다.
+                        // One long-lasting connection clears the 「금세 끊긴다」 (soon disconnects) record.
                         Some(since)
                             if now.saturating_duration_since(since) >= self.policy.live_dwell =>
                         {
@@ -413,7 +413,7 @@ impl Machine {
                     },
                 ]
             }
-            // 다시 거는 거절은 못 붙음과 같은 길이다 — 예산을 쓴다(TRD 3 §3-0 ⑤).
+            // A rejection that is retried takes the same path as failing to connect — it spends budget (TRD 3 §3-0 ⑤).
             retry => {
                 let mut acts = vec![Action::DropLink {
                     code: CloseCode::GOING_AWAY,
@@ -424,11 +424,11 @@ impl Machine {
         }
     }
 
-    /// 다음 시도를 잡거나 예산 소진을 선언한다. `cause` 가 있으면 `ConnectFailed` 를 함께 올린다.
+    /// Sets the next attempt or declares the budget exhausted. If there is a `cause`, it raises `ConnectFailed` too.
     fn schedule_retry(&mut self, now: Instant, cause: Option<ConnectFailure>) -> Vec<Action> {
         let of = self.policy.reconnect.max_attempts;
-        // ★두 축 중 어느 쪽이 바닥나도 포기다★ — `retries` 는 「못 붙는다」, `flaps` 는 「붙어도 안
-        //   버틴다」를 잰다. 어느 쪽도 사용자가 손대지 않으면 안 풀리는 상태다.
+        // ★If either of the two axes runs out, it gives up★ — `retries` measures 「못 붙는다」 (cannot connect), `flaps` measures 「붙어도 안
+        //   버틴다」 (connects but does not last). Either is a state that does not clear unless the user steps in.
         if self.retries >= of || self.flaps >= of {
             self.state = PeerState::GaveUp(GaveUpReason::BudgetExhausted);
             let mut acts = Vec::new();
@@ -465,11 +465,11 @@ impl Machine {
         acts
     }
 
-    /// [0,1) 의 흔들림 눈금. ★새 의존을 들이지 않는다★ — 시계 하위 나노초에 상대별 씨앗과 세대를 섞는다
-    /// (선례 = `agent` 의 `profile.rs` 가 난수 crate 대신 uuid v4 바이트를 쓰는 자리).
+    /// A jitter scale in [0,1). ★No new dependency is brought in★ — it mixes the per-peer seed and the generation into the clock's low-order nanoseconds
+    /// (precedent = the place where `profile.rs` of `agent` uses uuid v4 bytes instead of a random-number crate).
     ///
-    /// **한계 둘:** ① 암호학적 난수가 아니다(지터엔 필요 없다) ② 수동 시계 아래에서는 결정적이 된다 —
-    /// 하네스가 **원하는** 성질이지만, 그래서 지터의 *분산*은 실소켓에서만 관측된다.
+    /// **Two limits:** ① it is not a cryptographic random number (not needed for jitter) ② under a manual clock it becomes deterministic —
+    /// a property the harness **wants**, but that is why the *variance* of jitter can be observed only on a real socket.
     fn jitter_nudge(&self, now: Instant) -> f64 {
         let nanos = now.saturating_duration_since(self.epoch).subsec_nanos() as u64;
         let mixed = nanos
@@ -512,13 +512,13 @@ mod tests {
             .collect()
     }
 
-    /// 감독이 하는 일을 흉내낸다 — ★세대는 기계가 아니라 **밖에서** 배정한다★(D1).
+    /// Mimics what the supervisor does — ★the generation is assigned **from outside**, not by the machine★ (D1).
     fn connect(m: &mut Machine, now: Instant) -> Vec<Action> {
         let minted = Generation(m.generation().0 + 1);
         m.on(now, Input::Connected(minted))
     }
 
-    /// Idle → Dialing → Handshaking → Live 를 한 번에 민다.
+    /// Pushes Idle → Dialing → Handshaking → Live in one go.
     fn go_live(m: &mut Machine, t0: Instant) {
         m.on(t0, Input::Start);
         m.on(t0, Input::Dialed);
@@ -756,7 +756,7 @@ mod tests {
 
     #[test]
     fn an_unreachable_message_is_masked_on_every_connect_failed_event() {
-        // 소비자 dialer 가 상대의 응답 글을 옮겨 실은 못 붙음 — 재시도 사건과 예산 소진 사건 둘 다 가린다.
+        // A failure to connect where a consumer dialer carried the peer's response text — masks both the retry event and the budget-exhausted event.
         let noisy = format!(
             "502 from proxy\r\n\u{2028}\u{e0069}\u{200b}\u{1b}[2J{}",
             "z".repeat(REASON_MAX_BYTES)
@@ -835,7 +835,7 @@ mod tests {
         assert_eq!(waits(&acts, t0), vec![Duration::from_millis(500)]);
     }
 
-    // ── N8: 예산은 「붙었다」가 아니라 「버텼다」로 찬다 ──
+    // ── N8: the budget fills by 「버텼다」 (it lasted), not by 「붙었다」 (it connected) ──
     #[test]
     fn a_connection_that_holds_for_the_dwell_refills_the_budget() {
         let (mut m, t0) = machine();
@@ -861,7 +861,7 @@ mod tests {
         let (mut m, t0) = machine();
         let mut now = t0;
         m.on(now, Input::Start);
-        // 붙자마자 끊기기를 되풀이한다 — dwell 을 한 번도 못 채운다.
+        // Repeats disconnecting as soon as it connects — never once fills the dwell.
         for flap in 1..=3u32 {
             m.on(now, Input::Dialed);
             connect(&mut m, now);
@@ -885,26 +885,26 @@ mod tests {
         );
     }
 
-    // ── B4: 오래 못 붙다가 겨우 붙은 상대는 한 번 더 걸어 봐야 한다 ──
+    // ── B4: a peer that could not connect for a long time and finally connected must be tried once more ──
     #[test]
     fn a_peer_that_reconnected_after_a_long_outage_still_gets_a_retry() {
         let (mut m, t0) = machine();
         let mut now = t0;
         m.on(now, Input::Start);
-        // 데몬 재시작이 길어 「못 붙는다」 예산을 다 태운다.
+        // The daemon restart is long and burns the whole 「못 붙는다」 (cannot connect) budget.
         for _ in 0..3 {
             m.on(now, Input::ConnectFailed(unreachable()));
             assert_eq!(m.state(), PeerState::Backoff);
             m.on(now, Input::BackoffElapsed);
         }
         assert_eq!(m.attempt(), 3);
-        // 그러고 나서 겨우 붙는다.
+        // Then it finally connects.
         m.on(now, Input::Dialed);
         connect(&mut m, now);
         assert_eq!(m.state(), PeerState::Live);
         assert_eq!(m.attempt(), 0, "붙었으면 「못 붙는다」 예산은 다시 찬다");
 
-        // dwell(30s)을 못 채우고 한 번 끊긴다.
+        // It fails to fill dwell (30s) and disconnects once.
         now += Duration::from_secs(10);
         let acts = m.on(now, Input::LinkLost(DisconnectCause::PeerClosed));
         assert_eq!(
@@ -928,7 +928,7 @@ mod tests {
         assert_eq!(m.flaps(), 1, "1초짜리 연결은 「금세 끊긴다」로 센다");
     }
 
-    // ── C1: 어느 갈래로 연결을 버리든 대기자를 깨운다 ──
+    // ── C1: whichever branch drops the connection, wake the waiters ──
     #[test]
     fn every_branch_that_abandons_a_link_wakes_the_waiters() {
         let abandons = [
@@ -976,7 +976,7 @@ mod tests {
         assert_eq!(m.state(), PeerState::Dialing);
     }
 
-    // ── D1: 세대는 기계가 짓지 않고 배정받는다 ──
+    // ── D1: the generation is not built by the machine but assigned to it ──
     #[test]
     fn the_machine_adopts_the_generation_it_is_handed() {
         let t0 = Instant::now();

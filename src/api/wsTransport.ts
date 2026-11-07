@@ -5,8 +5,8 @@
 // **normalized into InboundMessage** and passed up to ProtocolClient (ProtocolClient does not know
 // carrier decoding). Auth/Hello are consumed here (handshake) — only control/output go up.
 //
-// 프로토콜 의미론(request_id 매칭·dedup·epoch 가드·resubscribe)은 ProtocolClient 소유.
-// 이 transport 는 carrier 만 책임진다: 연결·재연결·프레임 인코딩/디코딩.
+// Protocol semantics (request_id matching · dedup · epoch guard · resubscribe) are owned by ProtocolClient.
+// This transport is responsible only for the carrier: connection · reconnection · frame encoding/decoding.
 //
 // ADR-0310: D23 ① — the WebView never receives the daemon token (the three discovery commands drop it), so the Auth
 // token is the constructor's `authToken`, fixed for the transport's life. Without it every connect attempt rejects with

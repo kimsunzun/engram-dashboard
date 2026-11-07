@@ -1,62 +1,62 @@
-//! 소비자가 주는 패킷 어휘 전부.
+//! The whole packet vocabulary the consumer supplies.
 //!
-//! ★이 trait 이 이 crate 의 존재 이유다★ — 지우면 `Out`/`In`/`Tag` 가 사라져 crate 가 바이트 파이프가
-//! 된다(ADR-0177 이 기각한 후보 C). 그래서 여기만 dyn 이 아니라 **제네릭**이다.
+//! ★This trait is the reason this crate exists★ — delete it and `Out`/`In`/`Tag` disappear and the crate
+//! becomes a byte pipe (candidate C, rejected by ADR-0177). That is why this one place is **generic**, not dyn.
 
 use std::hash::Hash;
 
 use crate::frame::Frame;
 use crate::stream::StreamMark;
 
-/// 소비자의 패킷 어휘. ★crate 는 이 안의 어떤 이름도 모른다★ — 같은지(`Eq`)와 있는지(`Option`)만 본다.
+/// The consumer's packet vocabulary. ★The crate knows no name inside it★ — it only looks at whether two are the same (`Eq`) and whether one is present (`Option`).
 ///
-/// ★역할 구분(요청/응답/알림/스트림)은 새 어휘가 아니라 아래 접근자들의 조합이다★. 나가는 쪽은
-/// [`Wire::request_tag`] 의 유무로, 들어오는 쪽은 **[`Wire::reply_tag`] → [`Wire::stream_mark`] → 그 외**
-/// 순으로 가른다. ★그 순서가 계약이다★ — 한 `In` 이 둘 다 `Some` 을 주면 **답장으로 먼저** 처리하고
-/// [`crate::TransportEvent::AmbiguousRole`] 을 올린다(소비자 계약 위반 신호).
+/// ★The roles (request/response/notification/stream) are not a new vocabulary but combinations of the accessors below★. The outgoing side
+/// is told apart by whether [`Wire::request_tag`] is present, the incoming side by **[`Wire::reply_tag`] → [`Wire::stream_mark`] → anything else**,
+/// in that order. ★That order is the contract★ — if one `In` gives `Some` for both, it is handled **as a reply first**
+/// and [`crate::TransportEvent::AmbiguousRole`] is raised (a consumer contract violation signal).
 ///
-/// ★칸을 더하면 모든 소비자가 깨진다★ — 그래서 여섯이 지금 확정이다.
+/// ★Adding a field breaks every consumer★ — that is why the six are final for now.
 pub trait Wire: Send + Sync + 'static {
-    /// 내가 보내는 것.
+    /// What I send.
     type Out: Send + 'static;
-    /// 내가 받는 것.
+    /// What I receive.
     type In: Send + 'static;
-    /// 짝짓기 번호. ★바운드가 `Eq + Hash + Clone` 뿐인 것이 계약이다★ — 순서도 표현도 요구하지 않는다.
+    /// The pairing number. ★The contract is that the bound is only `Eq + Hash + Clone`★ — it requires neither order nor representation.
     type Tag: Eq + Hash + Clone + Send + Sync + 'static;
-    /// 스트림 하나를 가리키는 키.
+    /// The key that points at one stream.
     type StreamKey: Eq + Hash + Clone + Send + Sync + 'static;
-    /// 디코드 실패 사유. ★crate 는 그 분류([`DecodeClass::class`])만 사건에 싣고 **분기하지 않는다**★ — 값 자체는
-    /// 사건에 안 올라간다(그 사유는 [`DecodeClass`]).
+    /// The decode failure reason. ★The crate puts only its classification ([`DecodeClass::class`]) into the event and **does not branch on it**★ — the value itself
+    /// does not go up into the event (the reason is in [`DecodeClass`]).
     type DecodeError: DecodeClass + Send + 'static;
 
     fn encode(&self, out: &Self::Out) -> Frame;
 
-    /// [`Frame::Keepalive`] 는 여기 오지 않는다 — 살아있음 확인은 소비자 어휘와 만나지 않는다.
+    /// [`Frame::Keepalive`] does not come here — keepalive never meets the consumer vocabulary.
     fn decode(&self, frame: Frame) -> Result<Self::In, Self::DecodeError>;
 
-    /// 나가는 것이 답장을 기다리나. `Some` 이면 보내기 **전에** 대기 슬롯을 만든다.
+    /// Whether the outgoing item waits for a reply. If `Some`, a waiting slot is created **before** sending.
     fn request_tag(&self, out: &Self::Out) -> Option<Self::Tag>;
 
-    /// 들어온 것이 누구의 답장인가. `Some` 이면 그 슬롯을 깨운다.
+    /// Whose reply the incoming item is. If `Some`, that slot is woken.
     fn reply_tag(&self, inn: &Self::In) -> Option<Self::Tag>;
 
-    /// 들어온 것이 스트림 조각인가.
+    /// Whether the incoming item is a stream chunk.
     fn stream_mark(&self, inn: &Self::In) -> Option<StreamMark<Self::StreamKey>>;
 
-    /// 스트림을 이어받는 요청을 짓는다. ★crate 는 그 봉투를 모르고 "언제" 부를지만 안다★ — 구멍을
-    /// 만났을 때와 소비자가 [`crate::Peer::resume_stream`] 을 불렀을 때다.
+    /// Builds a request that resumes a stream. ★The crate does not know its envelope and only knows "when" to call it★ — when it
+    /// meets a gap and when the consumer called [`crate::Peer::resume_stream`].
     ///
-    /// `after` 는 **그 번호 뒤부터** 달라는 뜻이고, `None` 이면 상대가 가진 처음부터다.
+    /// `after` means to send **from after that number**, and `None` means from the start of what the peer has.
     fn resume_request(&self, key: &Self::StreamKey, after: Option<u64>) -> Self::Out;
 }
 
-/// 디코드 실패의 분류 — [`crate::TransportEvent::DecodeFailed`] 에 실리는 유일한 것(TRD 3 §3-0 ⑤ · §5 19).
+/// The classification of a decode failure — the only thing carried in [`crate::TransportEvent::DecodeFailed`] (TRD 3 §3-0 ⑤ · §5 19).
 ///
-/// ★`&'static str` 인 것이 요점이다★ — 해독기 오류의 글은 받은 값을 인용하기 쉬워(「invalid type: string "…"」)
-/// 그것을 사건에 실으면 상대가 화면 · LLM 표면에 글을 심는 길이 된다. 고정 낱말은 그 길을 타입으로 막는다. 자세한
-/// 오류는 소비자가 [`Wire::decode`] 안에서 자기 로그로 남긴다(이 crate 에는 로그가 없다).
+/// ★The point is that it is `&'static str`★ — a decoder error message easily quotes the received value (「invalid type: string "…"」)
+/// and putting that in the event would let the peer plant text on the screen and the LLM surface. A fixed word blocks that route by type. The detailed
+/// error is logged by the consumer into its own log inside [`Wire::decode`] (this crate has no logging).
 pub trait DecodeClass {
-    /// 이 실패가 어느 갈래인가 — 예: `"json syntax"` · `"unknown tag"` · `"frame too short"`.
+    /// Which branch this failure is — for example `"json syntax"` · `"unknown tag"` · `"frame too short"`.
     fn class(&self) -> &'static str;
 }
 

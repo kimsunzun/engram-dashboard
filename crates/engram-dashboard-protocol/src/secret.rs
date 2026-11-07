@@ -2,17 +2,17 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-/// 로그 · 오류 · `{:?}` 에 실리면 안 되는 문자열 — 지금은 데몬 접속 토큰(TRD 3 §5 5).
+/// A string that must not appear in logs · errors · `{:?}` — for now the daemon connection token (TRD 3 §5 5).
 ///
-/// - **직렬화 = 안쪽 문자열 그대로**(`serde(transparent)`) — 감싸기 전과 wire · daemon.json 바이트가 같다.
-/// - **`Debug` · `Display` = 고정 자리표시** — 값도 길이도 내지 않는다. 이 타입을 칸으로 가진 구조체의
-///   `derive(Debug)` 도 그래서 값을 못 찍는다.
-/// - 값이 필요한 자리(프레임 짓기 · 비교)는 [`Secret::expose`] 로 꺼낸다 — 꺼낸 `&str` 를 로그 · 오류에
-///   싣지 않는 것은 부르는 쪽 몫이다.
-/// - ★`==` 는 상수시간이 아니다★ — 시험 · 같은 값 대조용이다. 인증 판정은 상수시간 비교를 따로 쓴다.
-/// - ★ADR-0138 이 거부한 로그 레닥션 레이어가 아니다★ — 로그 출력을 거르는 것이 아니라 타입 자체가 값을
-///   가려 우리가 쓰는 문장이 값을 못 찍게 할 뿐이다(채택한 규율 「우리가 쓰는 문장에 자격증명을 넣지 않는다」의
-///   구현). 그러니 그 거부는 그대로 선다.
+/// - **Serialization = the inner string as is** (`serde(transparent)`) — the wire · daemon.json bytes are the same as before wrapping.
+/// - **`Debug` · `Display` = a fixed placeholder** — neither the value nor the length is emitted. So the
+///   `derive(Debug)` of a struct that has this type as a field cannot print the value either.
+/// - Places that need the value (building frames · comparison) take it out with [`Secret::expose`] — not putting the taken-out `&str`
+///   into logs · errors is the caller's job.
+/// - ★`==` is not constant-time★ — it is for tests · same-value comparison. The auth decision uses a separate constant-time comparison.
+/// - ★This is not the log redaction layer that ADR-0138 rejected★: it does not filter log output; the type itself
+///   hides the value so that the sentences we write cannot print it (the implementation of the adopted discipline 「우리가 쓰는 문장에 자격증명을 넣지 않는다」
+///   (we do not put credentials in the sentences we write)). So that rejection stands as is.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Secret(String);

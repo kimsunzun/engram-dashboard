@@ -1,10 +1,10 @@
-//! 실소켓 ① — WS 어댑터가 실제로 붙나(TRD §9-1).
+//! Real socket ① — does the WS adapter really connect (TRD §9-1).
 //!
-//! ★두 끝이 다 이 crate 것이다★ — 받는 쪽 `ws::WsListener` · 거는 쪽 `ws::WsDialer`. 그래서 이 파일은
-//! 다른 crate 도 외부 프로세스도 부르지 않는다.
+//! ★Both ends are this crate's★ — the receiving side `ws::WsListener` · the dialing side `ws::WsDialer`. So this file
+//! calls neither another crate nor an external process.
 //!
-//! ★`test-support` 까지 요구하는 것은 의도★ — 패킷 어휘(`TestWire`)와 두 걸음 핸드셰이크가 그 뒤에
-//! 산다. `--all-features` 가 둘을 함께 켜므로 게이트 ④ 가 이 파일을 실제로 돈다.
+//! ★Requiring even `test-support` is intentional★ — the packet vocabulary (`TestWire`) and the two-step handshake live behind it.
+//! `--all-features` turns both on together, so gate ④ really runs this file.
 #![cfg(all(feature = "ws", feature = "test-support"))]
 
 mod common;
@@ -24,11 +24,11 @@ use engram_dashboard_transport::{
 #[tokio::test]
 async fn a_real_socket_peer_shakes_hands_in_two_steps_and_round_trips_a_request() {
     let mut listener = common::listen();
-    // ★포트를 박지 않는다★ — 0번을 요청하고 커널이 고른 번호를 되읽는다.
+    // ★Do not hard-code a port★ — request number 0 and read back the number the kernel picked.
     assert_ne!(listener.local_addr().port(), 0);
     let addr = listener.dial_address();
 
-    // 받는 쪽: hello 를 받고 welcome 을 돌려준 뒤, 요청 하나에 답장한다.
+    // The receiving side: receives hello, returns welcome, then answers one request.
     let server = tokio::spawn(async move {
         let (mut tx, mut rx) = common::accept_link(&mut listener).await.expect("accept");
         let hello = rx.recv().await.expect("hello 수신");
@@ -84,18 +84,18 @@ async fn a_real_socket_peer_shakes_hands_in_two_steps_and_round_trips_a_request(
     }
 }
 
-/// 아무도 안 듣는 포트를 **잡아 둔 채로** 그 주소를 준다. ★돌려준 소켓을 부르는 쪽이 테스트가 끝날
-/// 때까지 쥔다★ — 놓는 순간 그 번호가 풀려 아래 성질이 함께 사라진다.
+/// Gives the address of a port nobody listens on **while holding it**. ★The caller holds the returned socket until the test
+/// ends★ — the moment it is released that number is freed and the properties below vanish with it.
 ///
-/// ★`listen()` 을 부르지 않는 것이 이 발판의 전부다★(외부 사실) — 듣는 소켓이 없으니 그 포트에 오는
-/// 연결은 성립조차 하지 않고 거절되고([`refusal_of`] 가 그것을 매번 되잰다), bind 는 살아 있으니 그
-/// 번호를 남이 가져가지 못한다(실측 2026-09-07, Windows 11: 평범한 bind 는 `AddrInUse`(10048) 로,
-/// `SO_REUSEADDR` 를 켠 강제 bind 마저 `PermissionDenied`(10013) 로 거부됐다).
+/// ★Not calling `listen()` is the whole of this scaffolding★ (external fact) — with no listening socket, a
+/// connection arriving at that port is refused without even being established ([`refusal_of`] re-measures that every time), and since the bind is alive nobody else can take that
+/// number (measured 2026-09-07, Windows 11: an ordinary bind was refused with `AddrInUse` (10048),
+/// and even a forced bind with `SO_REUSEADDR` on was refused with `PermissionDenied` (10013)).
 ///
-/// ★「열고 바로 닫는다」로 되돌리지 말 것★ — 닫은 뒤 남이 그 번호를 가져가 TCP 를 수락하고 업그레이드
-/// 중에 끊으면, 그 실패도 우리가 건 주소를 담은 `Unreachable` 로 올라오고 문구에는 **`os error 10054`**
-/// 가 붙는다(실측 2026-09-07, Windows 11: 상대가 FIN 으로 놓아도 RST 로 끊어도 같은 번호다). 즉 `os
-/// error` 만 보는 단언은 그 갈래를 전부 초록으로 통과시킨다 — [`refusal_of`] 가 번호까지 못박는 이유다.
+/// ★Do not go back to 「열고 바로 닫는다」 (open and close right away)★ — after closing, if someone else takes that number, accepts TCP, and cuts during the upgrade,
+/// that failure too comes up as an `Unreachable` carrying the address we dialed and the message gets **`os error 10054`**
+/// attached (measured 2026-09-07, Windows 11: the same number whether the peer lets go with FIN or cuts with RST). That is, an assertion that looks only at `os
+/// error` passes that branch entirely green — which is why [`refusal_of`] pins down the number too.
 fn unlistened_port() -> (TcpSocket, SocketAddr) {
     let socket = TcpSocket::new_v4().expect("v4 소켓");
     socket
@@ -106,14 +106,14 @@ fn unlistened_port() -> (TcpSocket, SocketAddr) {
     (socket, addr)
 }
 
-/// 그 주소가 **지금** 내는 거절을 `os error N` 꼴로 잰다. 재는 일 자체가 「아무도 안 듣는다」의 확인이다.
+/// Measures the refusal that address gives **right now** in the form `os error N`. The measuring itself is the confirmation of 「아무도 안 듣는다」 (nobody is listening).
 ///
-/// ★번호를 소스에 박지 않고 매번 재는 이유★ — 값이 플랫폼마다 갈리고(Windows `WSAECONNREFUSED` 10061 ·
-/// Linux `ECONNREFUSED` 111 · macOS 61) 박아 두면 그 목록을 손으로 관리해야 한다.
+/// ★Why the number is measured every time rather than hard-coded in the source★ — the value differs per platform (Windows `WSAECONNREFUSED` 10061 ·
+/// Linux `ECONNREFUSED` 111 · macOS 61) and hard-coding would mean managing that list by hand.
 ///
-/// ★문구 본문은 안 본다★(외부 사실) — `io::Error` 의 `Display` 는 OS 문구 뒤에 `(os error N)` 을 붙이는데
-/// 그 본문은 OS 로케일에 따라 번역된다(실측: Windows 한국어 판이 한글 문구로 돌려준다). 번호는 번역되지
-/// 않으므로 판정을 그쪽에만 건다.
+/// ★It does not look at the message body★ (external fact) — the `Display` of `io::Error` appends `(os error N)` after the OS text, and
+/// that body is translated by the OS locale (measured: the Korean edition of Windows returns Korean text). The number is not
+/// translated, so the decision hangs only on it.
 async fn refusal_of(addr: SocketAddr) -> String {
     let refused = TcpStream::connect(addr)
         .await
@@ -129,8 +129,8 @@ async fn refusal_of(addr: SocketAddr) -> String {
 
 #[tokio::test]
 async fn dialing_a_port_that_nobody_listens_on_is_unreachable_not_rejected() {
-    // ★「못 붙었다」와 「붙었는데 거절」이 갈리는 자리다★ — 갈리지 않으면 거절이 재연결 예산을 안
-    //   쓴다는 계약(ADR-0180 결정 5)을 실소켓에서 확인할 수 없다. 거절 쪽은 `ws_reject.rs` 가 잰다.
+    // ★This is where 「못 붙었다」 (could not connect) and 「붙었는데 거절」 (connected but rejected) are told apart★ — if they are not told apart, the contract that a refusal does not
+    //   spend the reconnect budget (ADR-0180 decision 5) cannot be confirmed on a real socket. The refusal side is measured by `ws_reject.rs`.
     let (_held, closed_at) = unlistened_port();
     let closed = Address::new(format!("ws://{closed_at}/"));
 
@@ -138,11 +138,11 @@ async fn dialing_a_port_that_nobody_listens_on_is_unreachable_not_rejected() {
     let (peer, mut inbox) =
         registry.add(PeerId::new("d1"), closed.clone(), Arc::new(HelloHandshake));
 
-    // ★기대값을 그 포트에서 직접 뽑는다★ — 갈래 이름만으로는 「통로가 수락된 뒤 끊겼다」·「주소 문법이
-    //   틀렸다」·「핸드셰이크가 시한에 걸렸다」가 전부 같은 `Unreachable` 이다. 이 테스트가 만들려는
-    //   자극은 **연결이 성립조차 안 한 것** 하나이고, OS 번호가 그 자극의 유일한 물증이다.
-    // ★감독의 dial 과 **나란히** 잰다★ — 거절 한 번이 loopback 에서 2.0초다(실측 2026-09-07, Windows 11).
-    //   순서대로 재면 그 값이 이 테스트에 두 번 더해지고, 나란히 재면 두 기다림이 겹쳐 한 번에 든다.
+    // ★Extract the expected value directly from that port★ — by branch name alone 「통로가 수락된 뒤 끊겼다」 (the link was cut after being accepted) · 「주소 문법이 틀렸다」 (the address
+    //   syntax is wrong) · 「핸드셰이크가 시한에 걸렸다」 (the handshake hit the deadline) are all the same `Unreachable`. The one stimulus this test means to produce is **the connection
+    //   not even being established**, and the OS number is the only evidence of that stimulus.
+    // ★Measure it **side by side** with the supervisor's dial★ — one refusal takes 2.0 seconds on loopback (measured 2026-09-07, Windows 11).
+    //   Measured in sequence that value would be added to this test twice, and side by side the two waits overlap and cost only one.
     let (refusal, cause) = tokio::join!(
         refusal_of(closed_at),
         common::wait_incoming(

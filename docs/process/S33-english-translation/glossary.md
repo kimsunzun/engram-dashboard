@@ -95,5 +95,24 @@ Every translation batch uses these renderings. A batch that needs a new term add
 | 독 (락) | poison | not "dock" |
 | 배치 (항목·사본) | placement | in the queued-input code; not "batch" (배치 of a layout = layout) |
 | 부재 막 / 막 | absence curtain / curtain | the slot overlay; not "veil" |
+| 물높이 | fill level | byte budget in transport; not "water level" |
+| 앞잡이 줄 / 앞잡이 버퍼 | read-ahead queue / read-ahead buffer | `Policy::frame_buffer`, drained by `salvage_read_ahead`; not "front queue" |
+| 몫 | share (byte / permit budget) · role, part, job (otherwise) | do not use "share" for a duty |
+| 창 상한 | window cap | transport resume window |
+| 유예 (bounded wait) | grace period | a wait with a timeout before a fallback; the flush sense stays "deferral" |
+| 칸 (connection-count permit) | permit | upgrade / auth-wait / operating permits in transport |
+| 도착순 줄 / 우선 줄 | arrival-order lane / priority lane | |
+| 수신 큐 | inbound queue | |
+| 회귀망 | regression net | |
+| 통로 | link | transport connection |
+| 감독 | supervisor | transport peer supervisor task |
+| 이어받기 표식 | resume marker | `continues_conversation` (ADR-0226); not "takeover"; keep 마커 = marker separate |
+| 수신단 | inbox | per-peer lossless receiving end (transport, ADR-0310) |
+| 받는 줄 / 공유 줄 / 상대별 줄 | receiving queue / shared queue / per-peer queue | |
+| 연결별 줄 | per-connection lane | net `ws.rs` |
+| 제어 줄 | control channel | transport `peer.rs` |
+| 정리 유예 | cleanup grace period | bounded wait, see 유예 (bounded wait) |
+| 순서 칸 | ordering area | supervisor-local ordering queue (transport) |
+| 보냄 칸 | the sent field | write without backticks unless the source has them |
 
 Kept in Korean: the ADR lint tokens (`- 상태:` + vocab, `- 관련:`, section headings), text in 「」, names of CLAUDE.md and `.claude/` sections.

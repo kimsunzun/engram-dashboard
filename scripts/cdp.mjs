@@ -1,11 +1,11 @@
-// Raw CDP helper — node 18+ 전역 WebSocket로 9223(WebView2)에 직접 붙는다. MCP 불필요.
-// 사용:
-//   node scripts/cdp.mjs shot <out.png>     대상 페이지 스크린샷 저장(파일명만 주면 _wip/shots/로 라우팅)
-//   node scripts/cdp.mjs eval "<js>"        대상 페이지에서 JS 평가 후 결과 출력(JSON)
-//   node scripts/cdp.mjs info               타깃 목록
-// 환경: CDP_PORT(기본 9223), CDP_MATCH(url·title 부분 매치용 정규식 문자열).
-//   CDP_MATCH 미지정 = 기존 동작(메인, popup/tree 제외). 매치 0건 = exit 1 + 타깃 목록 출력(폴백 금지).
-//   매치 다건 = list 순서상 첫 매치를 선택하고 나머지도 stderr에 표시. 정규식 자체가 무효해도 동일 처리.
+// Raw CDP helper — attaches directly to 9223 (WebView2) with the node 18+ global WebSocket. No MCP needed.
+// Usage:
+//   node scripts/cdp.mjs shot <out.png>     save a screenshot of the target page (a bare file name is routed to _wip/shots/)
+//   node scripts/cdp.mjs eval "<js>"        evaluate JS in the target page and print the result (JSON)
+//   node scripts/cdp.mjs info               target list
+// Environment: CDP_PORT (default 9223), CDP_MATCH (regex string for url·title partial match).
+//   CDP_MATCH unset = existing behavior (main, excluding popup/tree). 0 matches = exit 1 + print the target list (no fallback).
+//   Multiple matches = pick the first match in list order and show the rest on stderr too. An invalid regex itself is handled the same.
 import fs from 'node:fs';
 
 const PORT = process.env.CDP_PORT || '9223';
@@ -16,7 +16,7 @@ async function targets() {
   return await r.json();
 }
 
-// 메인 페이지 선택(디폴트, CDP_MATCH 미지정 시): popup/tree 제외, page 타입.
+// Main page selection (default, when CDP_MATCH is unset): excludes popup/tree, page type.
 function pickMain(list) {
   const pages = list.filter(t => t.type === 'page');
   const main = pages.find(t => /\/(index\.html)?(#\/?)?$/.test(t.url) && !/popup|tree/.test(t.url))
@@ -25,7 +25,7 @@ function pickMain(list) {
   return main;
 }
 
-// CDP_MATCH 선택: url 또는 title에 정규식 매치되는 page 타깃 전부(순서 = list 순서).
+// CDP_MATCH selection: every page target whose url or title matches the regex (order = list order).
 function pickByMatch(list, pattern) {
   const re = new RegExp(pattern);
   return list.filter(t => t.type === 'page' && (re.test(t.url) || re.test(t.title)));
@@ -70,8 +70,8 @@ if (match) {
   try {
     matches = pickByMatch(list, match);
   } catch (e) {
-    // new RegExp(pattern) 이 무효한 CDP_MATCH 에 던지는 SyntaxError — 헤더가 약속한 대로(메시지 +
-    // 타깃 목록 + exit 1) 처리한다. raw stack trace 로 새지 않게.
+    // The SyntaxError that new RegExp(pattern) throws on an invalid CDP_MATCH — handled as the header promises (message +
+    // target list + exit 1). So it does not leak out as a raw stack trace.
     console.error(`CDP_MATCH="${match}" 정규식 무효: ${e.message}. 사용 가능한 타깃:`);
     console.error(JSON.stringify(list.map(t => ({ type: t.type, title: t.title, url: t.url })), null, 2));
     process.exit(1);
@@ -93,7 +93,7 @@ if (!target) { console.error('대상 페이지 없음'); process.exit(1); }
 const c = await cdp(target.webSocketDebuggerUrl);
 
 if (cmd === 'shot') {
-  // 스크린샷 기본 보관함 = _wip/shots/ (gitignore됨). 디렉토리 없이 파일명만 주면 그쪽으로 라우팅해 repo 루트 오염 방지.
+  // Default screenshot store = _wip/shots/ (gitignored). A bare file name with no directory is routed there to avoid polluting the repo root.
   let out = arg || 'cdp-shot.png';
   if (!/[\\/]/.test(out)) {
     fs.mkdirSync('_wip/shots', { recursive: true });

@@ -261,9 +261,9 @@ describe('WsTransport 재연결', () => {
 
   it('in-flight 소켓 중 start() 재호출 → 옛 소켓 detach(onclose 정리) → 옛 close 가 새 소켓 안 깸', async () => {
     const t = new WsTransport({ authToken: TEST_TOKEN })
-    // 1) in-flight: start → discover+openSocket → onopen(Auth) 까지만, Hello 미수신(connected 아님).
-    // p1 은 의도적으로 await 하지 않는다 — 2번째 start 가 ws1 을 cleanup 하면 p1(openSocket(true))의
-    // resolve/reject 는 영영 안 불린다(버려진 promise). reject 무시만 붙인다.
+    // 1) in-flight: start → discover+openSocket → only up to onopen(Auth), Hello not received (not connected).
+    // p1 is deliberately not awaited — when the 2nd start cleans up ws1, the resolve/reject of p1 (openSocket(true))
+    // is never called (an abandoned promise). Only a reject-ignore is attached.
     void t.start().catch(() => {})
     await Promise.resolve()
     await Promise.resolve()
@@ -295,7 +295,7 @@ describe('WsTransport 재연결', () => {
 
   it('in-flight start() 가 새 start() 로 대체되면 옛 promise 가 hang 안 하고 reject (no-hang 회귀 가드)', async () => {
     const t = new WsTransport({ authToken: TEST_TOKEN })
-    // 1) in-flight: start #1 → discover+openSocket → onopen(Auth) 까지만, Hello 미수신.
+    // 1) in-flight: start #1 → discover+openSocket → only up to onopen(Auth), Hello not received.
     const p1 = t.start()
     await Promise.resolve()
     await Promise.resolve()
@@ -321,9 +321,9 @@ describe('WsTransport 재연결', () => {
 
   it('in-flight start() 가 discover 윈도(ws null)에서 새 start() 로 대체돼도 hang 안 하고 reject (pre-ws no-hang 가드)', async () => {
     const t = new WsTransport({ authToken: TEST_TOKEN })
-    // ★mutation 가드(pre-ws)★ — cleanupSocket 이 pendingReject 를 ws null 인 discover 윈도에서도
-    // reject 하지 않으면 이 단언이 timeout(hang). discover 가 in-flight 라 ws 는 아직 생성 전인데,
-    // 두 번째 start()가 cleanupSocket → pendingReject 를 안 깨우면 첫 promise(p1)가 영영 settle 안 됨.
+    // ★mutation guard (pre-ws)★ — if cleanupSocket does not reject pendingReject even in the discover window where ws is null,
+    // this assertion times out (hang). Because discover is in-flight ws is not yet created, and if the second start()'s
+    // cleanupSocket → does not wake pendingReject, the first promise (p1) never settles.
 
     // 1) Block discover_daemon with a controllable deferred to stop the first start()'s await invoke (ws not created).
     let resolveDiscover!: (v: typeof discoverInfo) => void
@@ -397,7 +397,7 @@ describe('WsTransport 재연결', () => {
 
   it('close() during read await → 재개돼도 좀비 소켓 안 생김(WS 수 불변, down 유지) [Blocker-1]', async () => {
     const t = new WsTransport({ authToken: TEST_TOKEN })
-    const ws1 = await connect(t) // 캐시 채움 + connected
+    const ws1 = await connect(t) // cache filled + connected
     invokeMock.mockClear()
 
     // 1) Unintentional disconnect → reconnecting. When reconnectTimer (500ms) expires, openSocket(false) runs.
@@ -689,7 +689,7 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
 
   it('close(명시 종료) 후 ensureReady = reject + spawn 0회(closedByUser 가드)', async () => {
     const t = new WsTransport({ authToken: TEST_TOKEN })
-    await connect(t) // 캐시 채움
+    await connect(t) // cache filled
     t.close() // closedByUser=true → down
     invokeMock.mockClear()
     await expect(t.ensureReady()).rejects.toThrow(/daemon_start/)
@@ -707,7 +707,7 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
 
   it('ensureReady = 캐시 있으면 attach(소켓 재오픈)하되 discover/spawn 은 안 함', async () => {
     const t = new WsTransport({ authToken: TEST_TOKEN })
-    const ws1 = await connect(t) // start: 캐시 채움
+    const ws1 = await connect(t) // start: cache filled
     invokeMock.mockClear()
     ws1.fireClose() // Unintentional disconnect → reconnecting (connectPromise cleaned up)
     // While reconnecting, the command path calls ensureReady → the connectPromise in progress or a new attach.
@@ -749,7 +749,7 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
     const ws1 = await connect(t) // 캐시 = 9999
     invokeMock.mockClear()
 
-    // 데몬이 통째 교체돼 새 port 로 떴다(daemon_stop→daemon_start). daemon.json 이 갱신됨.
+    // The daemon was replaced wholesale and came up on a new port (daemon_stop→daemon_start). daemon.json was updated.
     liveDaemonInfo = { ...discoverInfo, port: 7777 }
 
     ws1.fireClose() // Old connection drops → reconnect
@@ -764,7 +764,7 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
     ws2.fireOpen()
     // Auth carries the constructor token — the DTO has none to follow.
     expect((ws2.parsedSent()[0] as { Auth: { token: string } }).Auth.token).toBe(TEST_TOKEN)
-    // 새 데몬에 Hello 까지 가면 attempt 가 리셋되고 connected.
+    // Once Hello reaches the new daemon, attempt resets and it is connected.
     ws2.fireText({ Hello: { protocol_version: 1 } })
     await Promise.resolve()
     expect(t.connectionState).toBe('connected')
@@ -774,7 +774,7 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
   it('attach 재시도 소진 → discover 없이 down 정착(데몬 죽음, 안 살아남음)', async () => {
     vi.useFakeTimers()
     const t = new WsTransport({ authToken: TEST_TOKEN })
-    // 최초 연결 = 명시 start(타이머 영향 없게 수동 핸드셰이크).
+    // First connection = explicit start (manual handshake so timers have no effect).
     const p = t.start().catch(() => {})
     await Promise.resolve()
     await Promise.resolve()

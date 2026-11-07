@@ -1,15 +1,15 @@
-//! 격리 하네스 — graceful StopDaemon WS 왕복(실프로세스) end-to-end smoke.
+//! Isolation harness — graceful StopDaemon WS round trip (real process) end-to-end smoke.
 //!
-//! 검증 대상: `daemon_client::stop::send_stop(data_dir)` 을 **실제로** 부르면 살아있는 데몬이
-//! graceful 하게(WS Auth → StopDaemon{force} → 데몬 self-exit) 죽는가.
+//! Subject: when `daemon_client::stop::send_stop(data_dir)` is **actually** called, does a live daemon
+//! die gracefully (WS Auth → StopDaemon{force} → daemon self-exit).
 //!
-//! ★ENGRAM_DATA_DIR 격리(WMI 경로와 다름)★: 이 테스트는 **std::process::Command 로 직접 spawn**
-//!   하므로 env 가 상속돼 임시 폴더로 완전 격리된다 — 운영 `.engram-dev` 를 건드리지 않는다.
-//!   (직접 spawn 은 send_stop 왕복 검증 목적상 충분하다 — WMI 의 detached 성질은 send_stop 동작과
-//!   무관.)
+//! ★ENGRAM_DATA_DIR isolation (unlike the WMI path)★: this test **spawns directly with std::process::Command**,
+//!   so the env is inherited and it is fully isolated to a temp folder — it does not touch the production `.engram-dev`.
+//!   (A direct spawn is enough for the purpose of verifying the send_stop round trip — the detached nature of WMI is
+//!   unrelated to send_stop behavior.)
 //!
-//! 실행: `cargo test -p engram-dashboard --test stop_smoke -- --ignored --test-threads=1`
-//!   (기본 `cargo test` 에선 #[ignore] 로 빠진다 — 데몬 exe + 실프로세스 필요. 검증 자산이라 보존.)
+//! Run: `cargo test -p engram-dashboard --test stop_smoke -- --ignored --test-threads=1`
+//!   (skipped by #[ignore] in the default `cargo test` — needs the daemon exe + a real process. Kept as a verification asset.)
 
 #![cfg(windows)]
 
@@ -22,10 +22,10 @@ use std::path::PathBuf;
 use engram_dashboard_lib::daemon_client::stop::{send_stop, StopOutcome};
 use engram_dashboard_lib::discovery::daemon_status;
 
-/// discovery::locate_daemon_exe 의 후보는 current_exe 옆(시험 exe 는 deps/) · cwd 기준이라 시험에서는
-/// cargo 가 시험을 어느 폴더에서 돌리나에 기댄다(테스트 한정 — 운영 경로는 locate_daemon_exe 그대로).
+/// The candidates of discovery::locate_daemon_exe are next to current_exe (the test exe is in deps/) · based on cwd, so in tests
+/// it relies on which folder cargo runs the test in (tests only — the production path stays locate_daemon_exe as is).
 fn daemon_exe_path() -> PathBuf {
-    // 이 테스트 바이너리가 target/<profile>/deps/ 에 있으니 그 두 단계 위가 <profile> 폴더.
+    // This test binary is in target/<profile>/deps/, so two levels above it is the <profile> folder.
     let mut p = std::env::current_exe().expect("current_exe");
     p.pop(); // deps
     p.pop(); // <profile> (debug/release)
@@ -44,13 +44,13 @@ fn wait_alive(data_dir: &Path, timeout: Duration) -> Option<u32> {
     None
 }
 
-/// ★왜 daemon_status 대신 tasklist 인가(load-bearing)★: 본 테스트는 데몬을 std::process 로 직접
-/// spawn 하므로 부모(테스트)가 Child 의 프로세스 HANDLE 을 쥔다. 그 핸들이 열려 있는 한 데몬이
-/// **종료(exit code 0)해도** OpenProcess+GetProcessTimes(=agent liveness 가 쓰는 API)가 죽은 PID 에
-/// 대해 계속 creation_time 을 돌려준다(Windows 동작 — 핸들이 프로세스 객체를 유지). 그래서
-/// daemon_status 는 false-live 가 된다(테스트 하네스 인공물 — 운영 트레이는 데몬을 자식으로 두지
-/// 않고 WMI detached spawn 후 폴링하므로 무관). tasklist 는 **활성 프로세스만** 보여줘 핸들 보유와
-/// 무관하게 "실제 종료" 여부를 본다 → graceful self-exit 의 진실원천.
+/// ★Why tasklist instead of daemon_status (load-bearing)★: this test spawns the daemon directly with std::process, so
+/// the parent (the test) holds the process HANDLE of the Child. As long as that handle is open, **even if the daemon exits (exit code 0)**
+/// OpenProcess+GetProcessTimes (= the API agent liveness uses) keeps returning a creation_time for the dead PID
+/// (Windows behavior — a handle keeps the process object alive). So
+/// daemon_status becomes false-live (a test harness artifact — the production tray does not keep the daemon as a child but
+/// polls after a WMI detached spawn, so it is irrelevant). tasklist shows **only active processes**, so it sees whether it has "actually exited"
+/// regardless of holding a handle → the source of truth for graceful self-exit.
 fn pid_in_tasklist(pid: u32) -> bool {
     let out = Command::new("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
@@ -92,21 +92,21 @@ fn send_stop_makes_real_daemon_self_exit() {
     let tmp = tempfile::tempdir().expect("tempdir 생성");
     let data_dir = tmp.path().to_path_buf();
 
-    // 디버그 빌드 데몬은 콘솔 앱 — stdout/stderr 를 상속해 RUST_LOG=debug 시 Auth 거부/파싱 실패가
-    // 콘솔에 보인다.
+    // The debug-build daemon is a console app — it inherits stdout/stderr so that with RUST_LOG=debug an Auth rejection/parse failure
+    // is visible on the console.
     let mut child: Child = Command::new(&exe)
         .env("ENGRAM_DATA_DIR", &data_dir)
         .spawn()
         .expect("데몬 spawn");
 
-    // RAII 정리 — 단언 실패/패닉에도 child + 그 PID 를 taskkill 로 회수.
+    // RAII cleanup — even on an assertion failure/panic, reclaim the child + its PID with taskkill.
     struct Guard<'a> {
         child: &'a mut Child,
         pid: u32,
     }
     impl Drop for Guard<'_> {
         fn drop(&mut self) {
-            // child.kill 은 직접 자식만 — 혹시 살아있으면 taskkill /T 로 트리째.
+            // child.kill covers only the direct child — if anything is still alive, taskkill /T takes the whole tree.
             let _ = self.child.kill();
             force_kill(self.pid);
         }
@@ -139,7 +139,7 @@ fn send_stop_makes_real_daemon_self_exit() {
 
     let gone = wait_pid_gone(daemon_pid, Duration::from_secs(10));
 
-    // try_wait 로 종료코드를 회수해 좀비를 남기지 않는다.
+    // Reclaim the exit code with try_wait so no zombie is left.
     let exit_code = guard.child.try_wait().ok().flatten();
 
     assert!(
@@ -150,15 +150,15 @@ fn send_stop_makes_real_daemon_self_exit() {
     );
     eprintln!("[stop_smoke] graceful self-exit 확인 — pid={daemon_pid} exit_code={exit_code:?}");
 
-    // guard Drop 이 tmp 삭제 전에 child 정리 → tmp(tempdir) Drop 이 임시 폴더 삭제.
+    // The guard Drop cleans up the child before deleting tmp → the tmp (tempdir) Drop deletes the temp folder.
 }
 
-/// 진단: send_stop 의 close 타이밍이 StopDaemon 미처리를 일으키는지 가린다(QA 근본원인 확정용).
+/// Diagnosis: tells apart whether send_stop's close timing causes StopDaemon to go unprocessed (to pin down the QA root cause).
 ///
-/// 시나리오를 인자로 받아 Auth → StopDaemon 송신 후 close 거동만 바꾼다:
-///   - "noclose"   : flush 후 close 안 함(연결 유지) — diag baseline.
-///   - "delayclose": flush 후 250ms 대기 뒤 close — 데몬이 StopDaemon 을 read 할 시간 부여.
-/// 둘 다 데몬이 OS 에서 사라지면(graceful self-exit) 문제는 send_stop 의 **즉시 close 타이밍**이다.
+/// Takes a scenario as an argument and changes only the close behavior after sending Auth → StopDaemon:
+///   - "noclose"   : no close after flush (connection kept) — diag baseline.
+///   - "delayclose": close after waiting 250ms after flush — gives the daemon time to read StopDaemon.
+/// If in both the daemon vanishes from the OS (graceful self-exit), the problem is send_stop's **immediate close timing**.
 fn diag_send_with_close_mode(mode: &str) -> bool {
     use std::net::TcpStream;
     use tungstenite::Message;
