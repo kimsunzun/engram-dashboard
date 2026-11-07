@@ -2202,6 +2202,10 @@
   - QA = full regression run locally (workspace 5072 passed · gates 30 · frontend 2802 · tsc) · codex lane `backend_contract --ignored` 11/11 ×2 · mutation 2/2 caught · real app: a JSON-mode codex agent answered one turn (`PONG-5968`). Observed only: a TUI-mode codex agent in the app has no xterm scrollback and the mouse wheel goes to codex (alt-screen) — S21 TRD §6-F follow-up, user decision pending.
 - 2026-11-02 — Opened. Number = S32 (not claimed by push — user 「push 금지」). Source = S31 qa codex-lane failure.
 
+## S34 — killing a PTY agent mid-burst wedges the daemon connection (2026-11-07, `v0.5.0/fix/pty-kill-hang`, autonomous session — user 「쭉 진행해」 while away) · folder `docs/process/S34-pty-kill-hang/` · ADR-0206 (premise corrected in comments) · open
+
+- 2026-11-07 — Topic opened. Number = S34 (claim not pushed — push waits for the user). Source = S21 3-2 U4a GUI QA (the link froze while showing "connected"; also on the old driver) → investigation: `Kill` runs inline on the daemon connection task and `ClosePseudoConsole` blocks while the stopped PTY pump leaves conhost output undrained. PRD + TRD written.
+
 ## 다음 (미진행)
 
 - **[✅ 결정 완료 2026-08-14 — ADR-0158] 버전 불일치는 끊지 않고 알린다.** 아래 방향 항목은 이 ADR로 닫혔다. 결정 = 프로토콜 버전 안 올림(상향 기준을 「봉투 문법이 깨질 때」로 좁힘) · 보내기 전 상대 능력 확인(데몬이 연결 직후 먼저 광고하므로 옛 데몬에게 모르는 것을 보낼 일이 없다 — 실측 확인) · 데몬 자동 종료 없음 · **고지 = 앱 시작 시 1회, 알리기만, 닫으면 작은 흔적**(행동 버튼 없음, 모달은 아예 못 붙을 때만) · 버전과 무관하게 마감 시한 + 오류의 상관관계 표시를 함께 깐다. 근거 조사 = `docs/research/daemon-version-mismatch-2026-08-14.md`(적대 리뷰 BLOCK → 추천 수정됨, 그 경위도 그 문서에).
