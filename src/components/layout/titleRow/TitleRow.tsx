@@ -1,18 +1,18 @@
-// TRD S26-window-chrome §7-1 · §7-2 · §7-5: 창 맨 위 제목 줄 = 탭바 → 끌 빈 자리 → 번호 표식 → 창 단추. 웹은 그리기만 한다 —
-//   창 상태는 창 사실(`dock/windowFrame` — 셸이 민다)로 읽고, 바꾸기는 레지스트리 명령으로만 한다(`CaptionButtons`).
-// ★탭이 먼저 준다★ — 탭바만 줄어들고(`TabBar` 뿌리 `flex: 1 1 0px`) 나머지는 고정이다. 그래서 줄이 좁아지면 탭바의 잰 폭이 줄어
-//   Chrome 규칙대로 탭이 줄고 숨는다(`tabStrip/layout.ts` · R13).
-// 끌 자리 = 이 줄 자신(보통 상태 위 여백 · 번호 표식 자리 — 표식은 누름을 받지 않는다) · 탭 줄 빈 곳(`TabBar`) · 끌 빈 자리
-//   (`dragRegion.ts`). 흐림 = `data-window-active` 아래의 글자 토큰(`styles/theme.css`).
-// ★대기 모드(예열 창 — ADR-0299)에도 이 줄을 그린다 · 번호 표식과 창 단추만 뺀다(`standby` · `number` = `null`)★ — 셸 창 모델
-//   밖이라 번호가 없고 창 명령이 그 창을 찾지 못한다. 줄을 통째로 빼면 들일 때 탭바가 다시 마운트되고(탭바 줄 노드가 바뀐다 —
-//   `WindowLayout` 의 빈 틀 조항), 셸이 들일 때 모델에 옮겨 적는 대기 중 캔버스 크기(`src-tauri/src/spare/mod.rs`)가 들인 뒤
-//   화면과 위 여백만큼 어긋난다. 로딩 · 부팅 실패 화면도 이 줄을 그린다 — 번호는 아직 없어도 창 단추 · 끌 자리는 있다(OS
-//   틀이 없어 창을 옮기고 닫는 자리가 이 줄뿐이다 · `WindowLayout`).
-// 최소 창 크기(§7-7)는 이 줄이 그린 것으로 센다 — ★창 번호를 받은 뒤에만 보낸다★(대기 · 로딩 · 부팅 실패는 보내지 않는다).
-//   셸은 창을 열 때 세운 열기 표시를 그 창의 다음 보고에서 거두는데(`src-tauri/src/chrome/book.rs` 머리), 예열 창은 대기 중
-//   보고와 들인 뒤 보고가 같은 페이지라 보고 순번으로 가를 수 없다 — 대기 중 보고가 들일 때의 표시를 먼저 거두면 들인 창이
-//   넓혀 당겨지지 않는다. 번호 없는 화면의 폭(표식 없음)으로 넓히는 것도 같은 어긋남이다.
+// TRD S26-window-chrome §7-1 · §7-2 · §7-5: the title row at the very top of the window = tab bar → empty draggable area → number badge → window buttons. The web only draws —
+//   window state is read as window facts (`dock/windowFrame` — pushed by the shell), and changes are made only by registry commands (`CaptionButtons`).
+// ★Tabs shrink first★ — only the tab bar shrinks (`TabBar` root `flex: 1 1 0px`) and the rest is fixed. So when the row narrows, the tab bar's measured width shrinks and
+//   tabs shrink and hide by the Chrome rules (`tabStrip/layout.ts` · R13).
+// Draggable area = this row itself (the top margin of normal state · the number badge position — the badge does not receive presses) · the empty part of the tab strip (`TabBar`) · the empty draggable area
+//   (`dragRegion.ts`). Dimming = the text tokens under `data-window-active` (`styles/theme.css`).
+// ★Waiting mode (prewarmed window — ADR-0299) also draws this row · only the number badge and window buttons are left out (`standby` · `number` = `null`)★ — it is outside the shell window model,
+//   so there is no number and window commands cannot find that window. If the row were removed entirely, the tab bar would be remounted on adoption (the tab bar row node changes —
+//   the empty frame clause of `WindowLayout`), and the canvas size during waiting that the shell copies into the model on adoption (`src-tauri/src/spare/mod.rs`) would be off from the screen
+//   after adoption by the top margin. Loading · boot failure screens also draw this row — even if there is no number yet, there are window buttons · a draggable area (with no OS
+//   frame, this row is the only place to move and close the window · `WindowLayout`).
+// The minimum window size (§7-7) is computed from what this row drew — ★sent only after the window number is received★ (waiting · loading · boot failure do not send).
+//   The shell withdraws the open mark set when it opened the window at that window's next report (head of `src-tauri/src/chrome/book.rs`), but for a prewarmed window the report
+//   during waiting and the report after adoption are on the same page, so they cannot be told apart by report sequence number — if a report during waiting withdraws the adoption-time mark first, the adopted window is not
+//   pulled wider. Widening by the width of a screen without a number (no badge) is the same mismatch.
 
 import {
   useLayoutEffect,
@@ -33,29 +33,29 @@ import NumberMarker from './NumberMarker'
 
 interface TitleRowProps {
   label: string
-  /** 보이는 창 번호 — `null` = 아직 없다(대기 모드 · 로딩 · 부팅 실패). 표식을 그리지 않고 최소 창 크기를 보내지 않는다. */
+  /** Visible window number — `null` = not yet (waiting mode · loading · boot failure). The badge is not drawn and the minimum window size is not sent. */
   number: number | null
-  /** 대기 모드(예열 창의 빈 틀) — 창 단추를 그리지 않는다. 기본 `false`. */
+  /** Waiting mode (the empty frame of a prewarmed window) — window buttons are not drawn. Default `false`. */
   standby?: boolean
-  /** 창 사실 — 받기(`install`)는 탭바의 끌기 훅이 단다(`pullFrame`). 시험이 갈아 끼운다. */
+  /** Window facts — receiving (`install`) is attached by the tab bar's drag hook (`pullFrame`). Tests swap it in. */
   frame?: WindowFrameSource
-  /** 줄 요소 — 탭바의 놓기 판정이 탭바 구역을 이 줄 전체로 잰다(`UseTabDragSourceOptions.titleRow`). */
+  /** Row element — the tab bar's drop decision measures the tab bar zone against this whole row (`UseTabDragSourceOptions.titleRow`). */
   ref?: Ref<HTMLDivElement>
-  /** 이 창의 탭바(`TabBar`). */
+  /** This window's tab bar (`TabBar`). */
   children: ReactNode
 }
 
 export default function TitleRow({ label, number, standby = false, frame = windowFrame, ref, children }: TitleRowProps) {
   const facts = useSyncExternalStore(frame.subscribe, frame.current)
-  // 창 사실을 받기 전 = 최대화 아님 · 앞 창 · 단추를 그린다(지금 OS 의 크롬 모양 — 받은 뒤 바뀌면 탭 폭이 한 번 바뀐다).
+  // Before window facts are received = not maximized · front window · draws buttons (the current OS chrome shape — if it changes after receipt, the tab width changes once).
   const maximized = facts?.maximized ?? false
   const active = facts?.focused ?? true
   const buttons = !standby && (facts?.caption.buttons ?? true)
   const leading = facts?.caption.leading_inset ?? 0
 
-  // ★layout effect 다★ — 같은 커밋의 `WindowLayout` 첫 화면 effect(passive)보다 먼저 보고를 맡겨야 첫 화면 알림이 그 보고를
-  //   기다린다(§7-7). 다시 재는 때 = 번호 · 단추 · 왼 여백이 바뀔 때와 표식 폭이 바뀔 때(자리 수 · 글꼴 · 배율 — 관측). 번호가
-  //   없으면 보내지 않는다(머리).
+  // ★It is a layout effect★ — the report must be handed over before the `WindowLayout` first-screen effect (passive) of the same commit so that the first-screen notice
+  //   waits for that report (§7-7). When it re-measures = when the number · buttons · left margin change and when the badge width changes (digits · font · scale — observed). If there is no
+  //   number it is not sent (head).
   const markerRef = useRef<HTMLSpanElement>(null)
   useLayoutEffect(() => {
     if (number === null) return
@@ -69,7 +69,7 @@ export default function TitleRow({ label, number, standby = false, frame = windo
       )
     measure()
     const marker = markerRef.current
-    // jsdom 처럼 관측기가 없는 환경은 재기 한 번으로 지나간다.
+    // In environments without an observer such as jsdom, it passes with one measurement.
     if (marker === null || typeof ResizeObserver === 'undefined') return
     const ro = new ResizeObserver(measure)
     ro.observe(marker)

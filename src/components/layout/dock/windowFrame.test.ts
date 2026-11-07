@@ -1,4 +1,4 @@
-// TRD S21-slot-docking §3-8: 창 사실 받기 — 구독 뒤 당기기 · 사건이 당기기 답을 이김 · 깨진 몸 거름 · 떼기 · 바뀜 알림 · Tauri `target`.
+// TRD S21-slot-docking §3-8: receiving window facts — pull after subscribing · an event beats the pull answer · filtering a broken body · detach · change notice · Tauri `target`.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 

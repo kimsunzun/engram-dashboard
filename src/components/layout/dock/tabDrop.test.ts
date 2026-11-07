@@ -1,4 +1,4 @@
-// TRD S21-slot-docking §3-1 · §4-6: `tab_drop` 감싸개 · `tab_drop:done` 듣기 — 가짜 IPC(ADR-0012) + Tauri 어댑터의 `target`.
+// TRD S21-slot-docking §3-1 · §4-6: `tab_drop` wrapper · `tab_drop:done` listening — fake IPC (ADR-0012) + the `target` of the Tauri adapter.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -18,7 +18,7 @@ const DROP: TabDrop = {
   to: { type: 'new_window', by: { type: 'drag_end', effect: 'none' }, size: { w: 800, h: 600 }, grab: { x: 40, y: 14 } },
 }
 
-/** 가짜 IPC — 등록은 시험이 놓을 때까지 붙든다(`release`) · 사건은 `emit` 으로 낸다. */
+/** Fake IPC — registration is held until the test releases it (`release`) · events are issued with `emit`. */
 function fakeIpc() {
   const handlers = new Map<string, (payload: unknown) => void>()
   const unlisten = vi.fn()

@@ -1,5 +1,5 @@
-// TRD S21-slot-docking §8-2 `dragSize`: 셸 `layout/drag_size.rs` 와 **같은 골든 파일**의 새 창 크기 표 + Chrome C5 차례 · 복원 크기
-//   없음 · 탭 하나 팝아웃 · `grab`(r × W1 · 탭 하나 → 누른 점).
+// TRD S21-slot-docking §8-2 `dragSize`: the new window size table of the **same golden file** as the shell `layout/drag_size.rs` + Chrome C5 order · no restore size
+//   · single-tab popout · `grab` (r × W1 · single tab → the pressed point).
 
 import { describe, expect, it } from 'vitest'
 
@@ -65,7 +65,7 @@ describe('새 창 크기 (R22 · Chrome C5)', () => {
 })
 
 describe('grab — 새 창에서 커서가 올 점', () => {
-  // 끄는 머리 100..200 의 가운데를 누름(r = 1/2) · 끌기 영역 왼쪽 4.
+  // Press the middle of the dragged head 100..200 (r = 1/2) · drag area left 4.
   const G: GrabInput = {
     pressed: { x: 150, y: 14 },
     head: { x0: 100, x1: 200 },

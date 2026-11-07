@@ -1,4 +1,4 @@
-// 탭 끌기 열쇠(`getIdentifier`) 묻기 — 유계 재시도 · 소진 뒤 다음 부름에 다시 · 빈 답 · 묻는 중 거듭 부름(ADR-0102).
+// Asking for the tab drag key (`getIdentifier`) — bounded retry · asks again on the next call after exhaustion · empty answer · repeated calls while asking (ADR-0102).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 

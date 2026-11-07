@@ -1,5 +1,5 @@
-// TRD S21-slot-docking §4-2 「그림」: 탭 이름 라벨(VS Code `applyDragImage` 꼴) — 화면 밖에 붙여 `setDragImage(el, −10, −10)` ·
-//   다음 task 에 뗌 · 실패는 새지 않는다. 엔진이 그 요소를 실제로 뜨는지는 여기서 못 잰다(/qa full).
+// TRD S21-slot-docking §4-2 「그림」: tab name label (VS Code `applyDragImage` style) — attached off screen, `setDragImage(el, −10, −10)` ·
+//   removed in the next task · failure does not leak. Whether the engine actually captures that element cannot be measured here (/qa full).
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 

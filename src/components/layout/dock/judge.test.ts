@@ -1,6 +1,6 @@
-// TRD S21-slot-docking §8-2 `judge`: 셸 골든의 점 전부(탭바 구역 · 고른 띠 · 구역 선 — `bands_golden.json` 의 `points`)를 판정으로
-//   다시 낸다 + 골든 밖 표(차례 · 탭바 구역 경계 · 출처 창 = Chrome `insertionIndex` · 다른 창 = `dropIndex` · 끄는 탭 자신의 캔버스
-//   · 막힌 띠).
+// TRD S21-slot-docking §8-2 `judge`: re-emits every point of the shell golden (tab bar zone · chosen band · zone lines — `points` of `bands_golden.json`) as decisions
+//   + tables outside the golden (order · tab bar zone boundary · source window = Chrome `insertionIndex` · other window = `dropIndex` · the dragged tab's own canvas
+//   · blocked bands).
 
 import { describe, expect, it } from 'vitest'
 
@@ -30,7 +30,7 @@ describe('골든 점 — 셸 bands.rs 와 한 파일', () => {
       expect(c.points.length).toBeGreaterThan(0)
       const w = windowOf(c)
       const got = c.points.map(([x, y]) => {
-        // 골든 점은 캔버스 좌표 — 판정은 뷰포트 점을 받는다(4 분의 1 px 격자 + 정수 원점이라 왕복이 정확하다).
+        // Golden points are canvas coordinates — the decision takes viewport points (a quarter-px grid + integer origin make the round trip exact).
         const j = judge(w, { x: x + c.canvas_origin.x, y: y + c.canvas_origin.y })
         return [x, y, j.type === 'strip' ? 'strip' : j.type === 'band' ? j.band : null, j.type === 'strip' ? null : j.zones]
       })
@@ -39,7 +39,7 @@ describe('골든 점 — 셸 bands.rs 와 한 파일', () => {
   }
 })
 
-// 「left-right halves」 — 캔버스 1200 × 800 · 원점 (0, 28) · 탭 끌기 영역 (0, 0)–(600, 28) · 칸 1 | 칸 2.
+// 「left-right halves」 — canvas 1200 × 800 · origin (0, 28) · tab drag area (0, 0)–(600, 28) · area 1 | area 2.
 const HALVES = goldenCase('left-right halves')
 
 describe('차례 — 탭바 구역 > 바깥 띠 > 칸 띠 > 그 밖', () => {
@@ -91,17 +91,17 @@ describe('탭바 구역 경계', () => {
 })
 
 describe('탭바 자리', () => {
-  // 탭 셋 · 각 160 · 끌기 영역 왼쪽 4.
+  // Three tabs · 160 each · drag area left 4.
   const bounds = idealBounds({ widths: [160, 160, 160], visible: [true, true, true] }, 0)
   const zone = canvasZone({ x0: 4, y0: 0, x1: 604, y1: 28 }, HALVES.canvas_origin)!
   const withStrip = (strip: JudgeStrip): JudgeWindow => ({ ...windowOf(HALVES), tabBar: { zone, strip } })
 
   it('출처 창 — Chrome insertionIndex(끄는 머리 왼쪽 = draggedLeft)', () => {
     const w = withStrip({ role: 'source', left: 4, bounds, dragged: 0, grabOffset: 80, available: 600 })
-    // 커서 탭바 x 400 − 잡은 80 = 왼쪽 320 → 셋째 뒤(끄는 탭을 뺀 목록의 끝).
+    // Cursor tab bar x 400 − grabbed 80 = left 320 → after the third (the end of the list without the dragged tab).
     expect(judge(w, { x: 404, y: 10 })).toEqual({ type: 'strip', index: 2, left: 320, marker: null })
     expect(judge(w, { x: 84, y: 10 })).toEqual({ type: 'strip', index: 0, left: 0, marker: null })
-    // 탭 뒤 빈 곳(480..600)으로 끌어도 마지막 자리(320)에서 멈춘다.
+    // Even dragging into the empty space after the tabs (480..600), it stops at the last position (320).
     expect(judge(w, { x: 584, y: 10 })).toEqual({ type: 'strip', index: 2, left: 320, marker: null })
   })
 

@@ -1,29 +1,29 @@
-// TRD S21-slot-docking §4-1 `measure.ts`: 탭바의 DOM 재기 하나 — 탭바 줄 사각형 · 머리들이 쓸 수 있는 폭 · `+` 폭(+ 그것으로
-//   셈한 탭바 구역의 바탕 — `stripZoneArea`).
-//   ★머리는 재지 않는다★ — 탭 경계는 `layout.ts` 폭의 누적(이상적 경계)이다: 끄는 중에는 머리가 비켜남 · 끄는 탭 x 로
-//   옮겨져 그려져 잰 머리가 이상적 자리와 다르다.
+// TRD S21-slot-docking §4-1 `measure.ts`: the tab bar's single DOM measuring — tab bar row rectangle · width the heads can use · `+` width (+ the base of the tab bar zone
+//   computed from it — `stripZoneArea`).
+//   ★Heads are not measured★ — tab bounds are the accumulation of `layout.ts` widths (ideal bounds): during a drag heads are drawn moved by stepping aside · the dragged tab x,
+//   so the measured head differs from the ideal position.
 
 import type { RectCss } from '../dock/overlayTypes'
 import { tabStripLayout } from './layout'
 import { idealBounds, type StripBounds } from './reorderGeometry'
 
 /**
- * 잴 요소. `row` = 탭바 줄 — 그 사각형의 왼쪽이 첫 탭 왼쪽이고 위 · 아래가 탭바 줄이다(왼쪽 패딩 · 테두리 없는 줄).
- * `add` = `+` 단추(없으면 `null` — 그 폭을 빼지 않는다).
+ * Elements to measure. `row` = the tab bar row — the left of its rectangle is the left of the first tab and top · bottom are the tab bar row (a row without left padding · border).
+ * `add` = the `+` button (`null` if absent — that width is not subtracted).
  */
 export interface StripDom {
   row: Element
   add: Element | null
 }
 
-/** 한 번 잰 값 — 좌표는 뷰포트 CSS px. */
+/** Values measured once — coordinates are viewport CSS px. */
 export interface StripMeasure {
   row: RectCss
-  /** 첫 탭 왼쪽 = 끌기 영역 왼쪽(= 탭바 안 순서 이동 좌표의 0). */
+  /** Left of the first tab = left of the drag area (= 0 of the order-move coordinates inside the tab bar). */
   left: number
-  /** 머리들이 쓸 수 있는 폭 = 줄 폭 − `+` 폭(`layout.ts` · `dragAreaWidth` 의 `available`). */
+  /** Width the heads can use = row width − `+` width (`layout.ts` · `available` of `dragAreaWidth`). */
   available: number
-  /** `+` 상자 폭(없으면 0) — 탭바 구역의 오른 끝(`stripZoneArea`). */
+  /** `+` box width (0 if absent) — the right end of the tab bar zone (`stripZoneArea`). */
   addWidth: number
 }
 
@@ -39,22 +39,22 @@ export function measureStrip(dom: StripDom): StripMeasure {
 }
 
 /**
- * `+` 가 서는 x(탭바 좌표 — 첫 탭 왼쪽 0) = 보이는 마지막 머리의 오른 끝 · 보이는 머리가 없으면 0. 탭바가 `+` 를 그리는 자리와
- * 탭바 구역의 오른 끝(`stripZoneArea`)이 이 값 하나를 쓴다.
+ * The x where `+` stands (tab bar coordinates — left of the first tab 0) = the right end of the last visible head · 0 if there is no visible head. The position where the tab bar draws `+` and
+ * the right end of the tab bar zone (`stripZoneArea`) use this one value.
  */
 export function tabsEnd(B: StripBounds): number {
   return B.lastVisible < 0 ? 0 : B.tabs[B.lastVisible].x1
 }
 
 /**
- * 탭바 구역의 바탕 사각형(뷰포트 CSS px — `bands.stripZone` 이 위아래로 넓힌다). 가로 = 첫 탭 왼쪽 ~ `+` 오른 끝(`+` 가 없으면
- * 보이는 마지막 머리 오른 끝 · 보이는 머리가 없으면 `+` 만) — 탭바 줄 오른 끝에서 자른다(그 너머는 탭바가 가로로 잘라 보이지
- * 않는다). 그 오른쪽(빈 곳 · 끌 빈 자리 · 번호 표식 · 창 단추)은 구역이 아니다 — 놓으면 새 창이다(자기 탭이면 떼어 낸다).
- * 세로 = `title`(탭바를 품은 제목 줄 — 위 여백 포함)이 있으면 그 위 ~ 아래 · 없으면 탭바 줄.
+ * Base rectangle of the tab bar zone (viewport CSS px — `bands.stripZone` widens it above and below). Horizontal = left of the first tab ~ right end of `+` (if there is no `+`,
+ * the right end of the last visible head · if there is no visible head, `+` only) — cut at the right end of the tab bar row (beyond it the tab bar clips horizontally so it is not
+ * visible). To its right (empty space · empty draggable area · number badge · window buttons) is not the zone — dropping gives a new window (its own tab is detached).
+ * Vertical = from the top to the bottom of `title` (the title row holding the tab bar — including the top margin) if present · otherwise the tab bar row.
  */
-// 사용자 결정 2026-10-26(T-66) — 탭이 있는 곳(첫 탭 ~ `+`)만 탭바 구역. 자기 탭도 `+` 를 넘으면 구역 밖(떼어짐) · `+` 오른쪽
-//   밑 캔버스 위 끝은 바깥 위 띠다.
-// ADR-0303 — 크롬식 제목 표시줄
+// User decision 2026-10-26 (T-66) — only where tabs are (first tab ~ `+`) is the tab bar zone. Its own tab too, past `+`, is outside the zone (detached) · the top end of the canvas
+//   under the right of `+` is the outer top band.
+// ADR-0303 — Chrome-style title bar
 export function stripZoneArea(
   m: StripMeasure,
   bounds: StripBounds,
@@ -69,15 +69,15 @@ export function stripZoneArea(
 export interface StripBoundsInput {
   available: number | null
   count: number
-  /** 활성으로 그리는 탭의 자리(없으면 −1). */
+  /** Position of the tab drawn as active (−1 if none). */
   active: number
-  /** 끄는 탭의 자리 — 레이아웃이 숨겨도 보이는 탭으로 센다(`idealBounds`). */
+  /** Position of the dragged tab — counted as a visible tab even when the layout hides it (`idealBounds`). */
   dragged?: number
-  /** 닫기 모드의 고정 폭(`closingMode.layoutAvailable`) — 폭 셈에만 건다. */
+  /** Fixed width of closing mode (`closingMode.layoutAvailable`) — applied only to the width computation. */
   widthCap?: number | null
 }
 
-/** 탭바의 이상적 경계 — `layout.ts` 폭 · 숨김 → `idealBounds`. */
+/** Ideal bounds of the tab bar — `layout.ts` width · hiding → `idealBounds`. */
 export function stripBounds(input: StripBoundsInput): StripBounds {
   return idealBounds(tabStripLayout(input.available, input.count, input.active, input.widthCap), input.dragged)
 }
