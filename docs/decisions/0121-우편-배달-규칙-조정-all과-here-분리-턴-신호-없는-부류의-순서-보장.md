@@ -1,54 +1,54 @@
-# ADR-0121: 우편 배달 규칙 조정 — @all과 @here 분리, 턴 신호 없는 부류의 순서 보장
+# ADR-0121: Mail delivery rule adjustment — splitting @all and @here, order guarantee for the class without a turn signal
 
-- 상태: 확정 (2026-07-31, 근거: 사용자 결정 — "@all은 다 보내는 거고 … 방송 명단만 들어오는 건 다른 네이밍", "새로 쏜 편지는 묵은 것하고 같이 보내야지 순서가 있는데") · 부분 폐기 by ADR-0124 (거부한 대안 정통 FIFO 채택 전환)
-- 관련: Amends ADR-0116 (@all 정의와 턴 신호 없는 부류의 배달 순서) · **Amends ADR-0111 (@all 명단 소스)** — 0111 결정 4의 `@all`("발송 순간 살아있는 전원")은 이 ADR에서 `@here`로 개명되고, `@all`은 명부 기준으로 재정의된다. **발신자 제외는 0111이 아니라 spec §4가 정본**(같은 2026-07-29 사용자 결정)이며 두 어휘 모두에 그대로 적용된다 · **Amends ADR-0112 (결정 1 `@all` 명단 소스)** — 같은 정의를 재수록하므로 그 헤더에도 부분 폐기를 박았다(해석 seam의 *방향*은 존속, 어휘만 둘로 늘었다) · ADR-0104(idle 게이트) · ADR-0120(이름 유일성) · ADR-0119(명부 — `@all`의 소스) · `crates/engram-dashboard-messaging/src/groups.rs`·`service.rs`(구현 시 `// ADR-0121` 앵커) · Amended by ADR-0124 (거부한 대안 정통 FIFO 채택 전환)
+- 상태: 확정 (2026-07-31, basis: user decision — "@all은 다 보내는 거고 … 방송 명단만 들어오는 건 다른 네이밍", "새로 쏜 편지는 묵은 것하고 같이 보내야지 순서가 있는데") · 부분 폐기 by ADR-0124 (rejected alternative, strict FIFO, adopted instead)
+- 관련: Amends ADR-0116 (definition of @all and the delivery order of the class without a turn signal) · **Amends ADR-0111 (@all list source)** — the `@all` of 0111 decision 4 ("everyone alive at the moment of sending") is renamed `@here` in this ADR, and `@all` is redefined on the registry basis. **The sender exclusion is canonical in spec §4, not in 0111** (the same 2026-07-29 user decision), and applies unchanged to both vocabularies · **Amends ADR-0112 (decision 1, `@all` list source)** — it restates the same definition, so a partial discard is stamped on its header too (the *direction* of the resolution seam survives; only the vocabulary grew to two) · ADR-0104 (idle gate) · ADR-0120 (name uniqueness) · ADR-0119 (registry — the source of `@all`) · `crates/engram-dashboard-messaging/src/groups.rs`·`service.rs` (`// ADR-0121` anchor at implementation) · Amended by ADR-0124 (rejected alternative, strict FIFO, adopted instead)
 
 ## 맥락
 
-ADR-0116이 두 곳에서 실제와 어긋난다.
+ADR-0116 diverges from reality in two places.
 
-**하나 — `@all`이 전부가 아니다.** 결정 1은 `@all` 펼침이 로스터(= 지금 살아 있는 전원)를 쓴다고 규정한다. 잠든 에이전트는 명단에 안 들어온다. 이름은 "all"인데 동작은 "지금 켜져 있는 것만"이라 **이름이 사실과 다르다.** 사용자 지적: "@all 방송이 명단에 안 들어오면 그건 @all이 아니라 네이밍을 변경해야 될 듯."
+**One — `@all` is not everyone.** Decision 1 specifies that the `@all` expansion uses the roster (= everyone alive right now). A sleeping agent does not enter the list. The name says "all" but the behavior is "only what is on right now", so **the name does not match the facts.** The user's remark: "@all 방송이 명단에 안 들어오면 그건 @all이 아니라 네이밍을 변경해야 될 듯."
 
-**둘 — 순서 보장이 근거 없이 함께 버려졌다.** 결정 7은 턴 신호 없는 백엔드를 "게이트 없이 즉시 주입(**대기·재시도 없음**, 그냥 보내고 뒤돌아보지 않는다)"으로 정했다. 그 결정의 **유일한 근거는 그 CLI가 자기 입력 큐를 갖고 있다는 사용자 관측**이고, 그것이 정당화하는 것은 **idle 게이트 생략**이다. 그런데 "뒤돌아보지 않는다"는 문장이 **선행 파킹분 대기 생략**(FIFO 미적용)까지 함께 끌고 갔다. 이 둘은 다른 문제다 — 앞은 "상대가 받을 준비가 됐나", 뒤는 "편지가 어떤 순서로 도착하나"다.
+**Two — the order guarantee was thrown away along with it, without a basis.** Decision 7 settled the class of backends without a turn signal as "inject immediately without a gate (**no waiting, no retry**, just send and never look back)". **The only basis for that decision was the user's observation that the CLI has its own input queue**, and what that justifies is **skipping the idle gate**. But the sentence "never look back" also dragged along **skipping the wait for earlier parked items** (FIFO not applied). These are different problems — the first is "is the other side ready to receive", the second is "in what order do the letters arrive".
 
-그 결과 지금은 묵은 편지가 파킹돼 있어도 새 편지가 **혼자 앞질러** 배달된다. 사용자 지적: "새로 쏜 편지는 묵은 것하고 같이 보내야지 순서가 있는데 앞지른다고?"
+As a result, today a new letter is delivered **by itself, jumping ahead**, even when older letters are parked. The user's remark: "새로 쏜 편지는 묵은 것하고 같이 보내야지 순서가 있는데 앞지른다고?"
 
 ## 결정
 
-**1. `@all`과 `@here`를 분리한다.**
-- **`@all`** = 명부 전원(산 것 + 잠든 것) **− 발신자**. 잠든 상대 몫은 파킹되고 그 에이전트가 등장할 때 배달된다.
-- **`@here`** = 지금 살아 있는 전원 **− 발신자**. 현행 `@all` 동작이 여기 해당한다.
+**1. Split `@all` and `@here`.**
+- **`@all`** = the whole registry (alive + sleeping) **− the sender**. The share for a sleeping recipient is parked and delivered when that agent appears.
+- **`@here`** = everyone alive right now **− the sender**. The current `@all` behavior corresponds to this.
 
-**발신자 제외는 두 어휘 모두에 적용된다. 그 조항의 정본은 ADR이 아니라 spec §4**("펼침에서 발신자 제외" — 2026-07-29 사용자 결정)이다. ADR-0111 결정 4에는 그 문구가 없으므로 **0111만 보고 구현하면 빠뜨린다**(현행 `groups.rs` 주석이 `spec §4 · ADR-0111 결정 4`로 합동 귀속해 둔 탓에 생긴 혼동 — 정본은 spec 쪽이다). 구현상 작업은 "현행을 `@here`로 개명 + `@all`을 명부 기준으로 신설"이다.
+**The sender exclusion applies to both vocabularies. The canonical source of that clause is spec §4, not an ADR** ("exclude the sender from the expansion" — 2026-07-29 user decision). ADR-0111 decision 4 does not have that wording, so **implementing from 0111 alone misses it** (the confusion arose because the current `groups.rs` comment jointly attributes it to `spec §4 · ADR-0111 결정 4` — the canonical source is the spec). The implementation work is "rename the current behavior to `@here` + add a new `@all` on the registry basis".
 
-**2. 턴 신호 없는 부류도 순서를 지킨다.** 결정 7의 "대기·재시도 없음"을 **"idle 게이트 없음, 단 순서는 지킨다"** 로 좁힌다. 그 수신자 앞에 파킹분이 있으면 새 발송이 앞지르지 않고, **묵은 것부터 오래된 순으로 함께 내보낸다.** idle 게이트 생략(busy를 묻지 않음)은 그대로 유효하다.
+**2. The class without a turn signal also keeps the order.** Narrow decision 7's "no waiting, no retry" to **"no idle gate, but the order is kept"**. If there are parked items ahead of that recipient, a new send does not jump ahead, and **older items go out together with it, oldest first.** Skipping the idle gate (not asking about busy) remains valid.
 
-**배치 도중 주입이 실패하면 그 지점에서 멈추고 남은 항목은 파킹에 남긴다** — 이미 나간 앞부분은 `delivered`, 실패 지점 이후는 `pending` 유지다. 부분 성공을 전량 실패로 되돌리지 않는다(장부 전이 그래프상 `delivered → failed`는 불법이다). 결정 7의 "재시도 없음"은 단건 전제였으므로 배치에서는 이 규칙이 그 자리를 대신한다.
+**If an injection fails midway through a batch, stop at that point and leave the remaining items parked** — the front part already sent stays `delivered`, and the failed item and all subsequent items stay `pending`. A partial success is not turned back into a total failure (in the ledger transition graph, `delivered → failed` is illegal). Decision 7's "no retry" assumed a single item, so in a batch this rule takes its place.
 
-**3. 장부 표기는 바꾸지 않는다.** 터미널 모드도 `delivered`다. 증거가 동일하기 때문이다 — json이든 터미널이든 `delivered`가 뜻하는 것은 "stdin에 썼고 전량 수용됐다"이고, 에이전트가 읽었다는 증거는 어느 쪽에도 없다.
+**3. The ledger notation does not change.** Terminal mode is also `delivered`. The evidence is the same — whether json or terminal, what `delivered` means is "written to stdin and fully accepted", and there is no evidence in either that the agent read it.
 
 ## 거부한 대안
 
-- **`@all` 이름을 그대로 두고 동작만 설명으로 보완** — 이름이 거짓인 채 남으면 발신 LLM이 "전원에게 알렸다"고 믿고 잠든 상대를 놓친다. 문서로 덮을 문제가 아니다.
-- **`@all`을 없애고 `@here` 하나만 두기** — "정말 전원에게"가 필요한 경우가 있다는 사용자 판단("그러라고 만든 기능임"). 잠든 상대에게 쌓아두는 것은 이미 있는 기계(잠듦 파킹)로 성립하므로 신규 비용이 아니다.
-- **순서를 지키되 뒤에 세우기(정통 FIFO — 새 편지를 큐 끝에 넣고 끝)** — 새 편지의 배달이 **파킹 재시도 루프에 묶인다.** 턴 신호 없는 부류는 턴 종료 도어벨이 없어서, 큐가 열리는 계기가 등장(재스폰)과 서비스 내부 자가치유(파킹 직후 재확인·유예 복구)로 제한된다. 사용자 의도는 "한꺼번에 보낸다"이지 "언젠가 재시도로 나간다"가 아니다. *(정확한 자가치유 발화 조건은 구현 때 확인 — 미검증)*
-- **현행 유지(앞지르기)** — 순서가 깨진다. 근거가 덮지 못하는 규칙(§맥락)을 유지할 이유가 없다.
-- **턴 신호 없는 부류는 쓰기 실패 시 파킹하지 말고 즉시 실패 처리**(순서 문제를 뿌리에서 없애는 안) — 검토 후 기각. 쓰기 실패는 **세션 부재 또는 stdin write/flush 오류**이고, 파이프가 살아 있으면 CLI가 바빠도 실패하지 않는다. 즉 실패는 "지금 이 상대에게 넣을 수 없다"는 뜻이고, 그 상대의 프로필은 남아 있다 — 기다렸다가 다시 넣는 것이 ADR-0116 결정 1("프로필이 남아 있으면 기다린다")과 **같은 처리**다. 여기서만 즉시 실패로 가르면 같은 상황인데 편지가 도착한 시점에 따라 기다리기도 하고 죽기도 한다.
-- **터미널 모드 배달을 장부에서 별도 표기**(예: 미검증 완료) — 배달 증거가 json 모드와 문자 그대로 동일해서 표기를 가를 근거가 없다. 실제 위험 차이(주입 순간 모달 위젯에 먹힐 수 있음)는 ADR-0116 결정 7이 이미 "알고 수용"으로 기록했고, spec §7 실측 항목으로 걸려 있다. **관측되면 그때 근거를 갖고 재론한다** — 지금 표기를 늘리면 장부를 읽는 모든 소비자가 두 종류를 다뤄야 한다.
+- **Keep the `@all` name and supplement the behavior with an explanation** — if the name stays false, the sending LLM believes "I told everyone" and misses the sleeping recipients. This is not a problem to cover with documentation.
+- **Drop `@all` and keep only `@here`** — the user judged there are cases that need "really everyone" ("그러라고 만든 기능임"). Piling items up for a sleeping recipient already works with existing machinery (sleep parking), so it is no new cost.
+- **Keep the order but queue behind (strict FIFO — put the new letter at the end of the queue and stop)** — the delivery of the new letter becomes **tied to the parking retry loop.** The class without a turn signal has no turn-end doorbell, so the occasions on which the queue opens are limited to appearance (respawn) and the service's internal self-healing (re-check right after parking, deferral recovery). The user's intent is "send it all at once", not "it goes out sometime by retry". *(The exact conditions under which self-healing fires are to be confirmed at implementation — unverified)*
+- **Keep the current behavior (jumping ahead)** — the order breaks. There is no reason to keep a rule whose basis does not cover it (§맥락).
+- **For the class without a turn signal, do not park on a write failure but fail immediately** (a proposal that removes the ordering problem at the root) — rejected after review. A write failure is **a missing session or a stdin write/flush error**, and while the pipe is alive it does not fail even if the CLI is busy. So a failure means "cannot be put into this recipient right now", and that recipient's profile remains — waiting and putting it in again is **the same treatment** as ADR-0116 decision 1 ("if the profile remains, wait"). If only here we split off immediate failure, then in the same situation a letter sometimes waits and sometimes dies, depending on when it arrived.
+- **Mark terminal-mode delivery separately in the ledger** (e.g. unverified-complete) — the delivery evidence is literally identical to json mode, so there is no basis for splitting the notation. The actual risk difference (at the moment of injection it may be swallowed by a modal widget) was already recorded by ADR-0116 decision 7 as "known and accepted", and is hung as a spec §7 measured item. **If it is observed, we revisit it then, with evidence** — adding a notation now would make every consumer that reads the ledger handle two kinds.
 
 ## 근거
 
-- 사용자 결정(2026-07-31): `@all` 네이밍 — "어쨌든 @all은 다 보내는 거고 @all-일부분? 어쨌든 네이밍 다른 걸로 해서 2개 두자고" · 순서 — "ㅇㅇ 새로 오면 기존 거 뒤에 담아서 한꺼번에 보내는 거고" · 장부 — "어쨌든 별도로 구분하는 것보다 Delivered가 좋다는 거지? 그냥 이대로 진행하고 추후 확인".
-- **`@here` 어휘 선택 근거:** Slack이 같은 구분을 쓴다(`@channel` = 전원 / `@here` = 지금 활성). 에이전트를 구동하는 LLM이 그 관례를 이미 알고 있을 가능성이 높다.
-- **결정 7의 근거 범위 확인(코드 실측):** 현 주석이 FIFO 생략을 "★귀결(알고 수용)★"으로 표기한다 — 독립 결정이 아니라 "그냥 보내고 뒤돌아보지 않는다"에서 파생된 것임을 코드 자신이 밝히고 있다. 이것이 이 개정의 핵심 근거다.
-- **도어벨 경로 확인(코드 실측·교차검증으로 보정):** 턴 종료 신호(`flush_for_agent`)와 등장 로스터 diff 외에도 **서비스 내부에서 같은 flush 경로를 부르는 지점이 있다**(파킹 직후 자가치유·유예 flush 복구·통지 배달). 따라서 "깨울 계기가 등장뿐"이라는 서술은 정확하지 않다 — 위 FIFO 기각 사유를 "영영 못 나간다"가 아니라 "재시도 루프에 묶인다"로 좁힌 근거가 이것이다.
-- **쓰기 실패 조건 확인(코드 실측):** `write_stdin_observed` → 세션 조회 → `transport.send_input`. **Ok = `write_all`과 `flush`가 모두 성공** = 요청 바이트 전량 수용이다. Err는 ① 세션 부재 ② **stdin 핸들이 이미 닫혀 write 시도조차 못 한 경우** ③ write/flush I/O 오류를 포함하며, **프로세스 사망을 증명하지는 않는다**(그 추론은 과했다 — 교차검증 지적으로 철회).
+- User decision (2026-07-31): the `@all` naming — "어쨌든 @all은 다 보내는 거고 @all-일부분? 어쨌든 네이밍 다른 걸로 해서 2개 두자고" · the order — "ㅇㅇ 새로 오면 기존 거 뒤에 담아서 한꺼번에 보내는 거고" · the ledger — "어쨌든 별도로 구분하는 것보다 Delivered가 좋다는 거지? 그냥 이대로 진행하고 추후 확인".
+- **Basis for choosing the `@here` word:** Slack uses the same distinction (`@channel` = everyone / `@here` = currently active). The LLM that drives an agent is likely to already know that convention.
+- **Checking the scope of decision 7's basis (measured in code):** the current comment marks the FIFO skip as "★귀결(알고 수용)★" (★consequence (known and accepted)★) — the code itself states that it is derived from "just send and never look back", not an independent decision. This is the core basis of this revision.
+- **Checking the doorbell path (measured in code, corrected by cross-verification):** besides the turn-end signal (`flush_for_agent`) and the appearance roster diff, **there are points inside the service that call the same flush path** (self-healing right after parking · deferred-flush recovery · notification delivery). So the statement "the only occasion to wake it is appearance" is not accurate — this is the basis for narrowing the FIFO rejection reason above to "tied to the retry loop" rather than "can never go out".
+- **Checking the write-failure conditions (measured in code):** `write_stdin_observed` → session lookup → `transport.send_input`. **Ok = both `write_all` and `flush` succeed** = the requested bytes were fully accepted. Err includes ① a missing session ② **the stdin handle already closed so that not even a write was attempted** ③ write/flush I/O errors, and **does not prove process death** (that inference went too far — withdrawn after a cross-verification remark).
 
 ## 영향 / 불변식
 
-- **`@all`은 명부를 본다, `@here`는 로스터를 본다.** 두 어휘가 같은 소스를 보면 이 결정 위반이다. **둘 다 발신자를 뺀다**(정본 = spec §4. ADR-0111 결정 4에는 이 문구가 없으니 거기서 찾지 말 것 — 빼먹으면 발신자가 자기 편지를 받는다).
-- **`@all`의 대가(명시 수용):** 잠든 항목 수만큼 파킹이 한 번에 생긴다. 24h TTL로 유계지만 보관함 상한을 건드릴 수 있다.
-- **순서 규칙은 한 곳에서 정의한다** — "이 부류는 idle 게이트를 묻지 않는다"는 술어를 하나로 뽑고 판정 지점들이 그것을 부른다. 같은 조건을 두 곳에 각각 쓰면 한쪽만 고쳐져 발송측과 flush측이 다른 세계를 본다(2026-07-30 리뷰가 다른 곳에서 잡은 결함 부류).
-- **idle 게이트 생략은 유지** — 턴 신호 없는 부류에 busy를 묻지 않는 것은 결정 7 그대로다. 이 ADR은 순서만 되돌린다. "관측할 수 없으니 배달할 수 없다"로 되돌리는 것은 여전히 금지(ADR-0116 거부한 대안).
-- **뒤집히는 테스트:** 턴 신호 없는 부류에서 새 발송이 파킹분을 앞지르는 것을 단언하는 커널 테스트가 "묵은 것부터 함께 나간다"로 바뀐다. 결정이 바뀐 것이므로 정상이다.
-- 미검증(구현 때 확인): 서비스 내부 자가치유 flush의 정확한 발화 조건 · 배치 부분 실패 시 장부 행이 전이 그래프를 지키는지.
+- **`@all` looks at the registry, `@here` looks at the roster.** If the two vocabularies look at the same source, this decision is violated. **Both exclude the sender** (canonical = spec §4. ADR-0111 decision 4 does not have this wording, so do not look for it there — if it is missed, the sender receives its own letter).
+- **The price of `@all` (explicitly accepted):** as many parked items arise at once as there are sleeping entries. It is bounded by the 24h TTL, but it can hit the mailbox cap.
+- **Define the order rule in one place** — extract the predicate "this class does not ask the idle gate" as one, and have the decision points call it. If the same condition is written separately in two places, only one gets fixed, and the send side and the flush side see different worlds (a class of defect the 2026-07-30 review caught elsewhere).
+- **Skipping the idle gate stays** — not asking the class without a turn signal about busy is as in decision 7. This ADR reverts only the order. Reverting to "cannot observe, so cannot deliver" is still forbidden (ADR-0116 rejected alternative).
+- **Tests that flip:** the kernel test that asserts a new send jumping ahead of parked items in the class without a turn signal changes to "older ones go out together". That is normal, since the decision changed.
+- Unverified (to confirm at implementation): the exact conditions under which the service-internal self-healing flush fires · whether the ledger rows keep to the transition graph on a partial batch failure.

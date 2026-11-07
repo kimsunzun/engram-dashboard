@@ -1,25 +1,25 @@
-//! 데이터 파일의 공용 규칙 — 읽기 판정([`parse`] · [`classify`] · [`load`]) · 쓰기 판정([`Loaded::write_policy`] ·
-//! [`judge`] · [`check_cap`]) · 상한 읽기([`read_capped`] · [`read_file_capped`]) · 원자 쓰기([`write_atomic`] ·
-//! [`write_atomic_unless`]) · 원자 복사([`copy_atomic`] · [`copy_aside`]) · 남은 임시 파일 쓸기([`sweep_temps`]).
+//! Shared rules for data files — read decisions ([`parse`] · [`classify`] · [`load`]) · write decisions ([`Loaded::write_policy`] ·
+//! [`judge`] · [`check_cap`]) · capped reads ([`read_capped`] · [`read_file_capped`]) · atomic writes ([`write_atomic`] ·
+//! [`write_atomic_unless`]) · atomic copies ([`copy_atomic`] · [`copy_aside`]) · sweeping leftover temp files ([`sweep_temps`]).
 //!
-//! 파일 이름 · 자리 · 스키마 · 버전 키 이름은 모른다 — 그건 각 주인(저장소)이 소유하고, 읽기 규칙에 드는 몫은
-//! [`Spec`] 으로 넘긴다. 여기서 정하는 이름은 대상 옆에 붙는 둘뿐이다: 임시 `<이름>.tmp<pid>.<번호>` · 떠 둔 사본
-//! `<이름>.corrupt`. ★그 꼴을 만드는 곳(`temp_path` · [`copy_aside`])과 읽는 곳(`temp_owner`)이 여기뿐이다★ — 꼴을
-//! 바꾸면 셋을 함께 고친다(시험이 만든 이름을 다시 읽어 맞댄다).
+//! It knows no file names · locations · schemas · version key names — each owner (store) owns those, and the part that
+//! belongs to the read rules is handed over as a [`Spec`]. The only names decided here sit next to the target: the temp file `<이름>.tmp<pid>.<번호>` · the set-aside copy
+//! `<이름>.corrupt`. ★Only here are the code that makes that shape (`temp_path` · [`copy_aside`]) and the code that reads it (`temp_owner`)★ — if the shape
+//! changes, fix all three together (the tests read back the names they made and compare).
 //!
-//! ★「덮어도 되나」는 쓰기마다 그 직전에 지금 파일로 다시 판정한다★ — 판정 규칙은 [`Loaded::write_policy`] 표
-//! 하나이고, 순서(읽기 → 판정 → 떠 두기 → 쓰기)는 주인이 부른다. 새 판이 쓴 파일과 읽다 실패한 파일은 덮지도 떠
-//! 두지도 않는다. 주인의 모양 검사([`Spec::shape`])는 [`parse`] 안에서 돌아, 모양이 깨진 파일은 어느 판정
-//! 길에서나 손상이다.
+//! ★「덮어도 되나」 (may we overwrite?) is decided again for every write, right before it, from the current file★ — the decision rule is one [`Loaded::write_policy`] table,
+//! and the owner drives the order (read → decide → set aside → write). A file written by a newer version and a file that failed to read are neither overwritten nor set
+//! aside. The owner's shape check ([`Spec::shape`]) runs inside [`parse`], so a file with a broken shape is corrupt on any decision
+//! path.
 //!
-//! 폴더: 쓰기 · 복사는 없는 폴더를 대상 폴더까지 만들고 rename 뒤 그 폴더를 동기화한다. 읽기 · 판정은 아무것도
-//! 만들지 않는다.
+//! Folders: writes and copies create missing folders down to the target folder and sync that folder after the rename. Reads and decisions
+//! create nothing.
 //!
-//! ★OS 에 따라 갈리는 몫은 부르는 쪽이 [`OsHooks`] 로 넘긴다★ — 이 crate 는 OS 층 crate 를 부르지 못한다(입주
-//! 조건 ②). 잠김 재시도는 한 길이다: rename · [`read_file_capped`] 의 열기와 읽기 · [`copy_atomic`] 의 원본 열기가
-//! 모두 [`OsHooks::retry`] 를 지난다. 복사 도중의 읽기 실패는 다시 하지 않는다.
+//! ★The OS-dependent part is passed in by the caller as [`OsHooks`]★ — this crate cannot call an OS-layer crate (tenancy
+//! condition ②). Lock retry has one path: the rename, the open and read in [`read_file_capped`], and the source open in [`copy_atomic`]
+//! all go through [`OsHooks::retry`]. A read failure in the middle of a copy is not retried.
 //!
-//! 로그를 내지 않는다 — 값을 돌려주고 부르는 쪽이 자기 문구로 찍는다.
+//! It emits no logs — it returns values and the caller prints them in its own wording.
 // ADR-0291
 
 use std::io;
@@ -28,91 +28,91 @@ use std::time::Duration;
 
 use serde_json::{Map, Value};
 
-/// OS 에 따라 갈리는 둘 — 부르는 쪽이 OS 층 crate(`engram-dashboard-platform` 의 `fs`)의 것을 이어 넘긴다. 운영
-/// 값은 crate 마다 상수다(예산이 다른 읽기를 가진 주인은 둘 — ADR-0291 R14).
+/// Two OS-dependent hooks — the caller passes through the OS-layer crate's (`engram-dashboard-platform`'s `fs`) ones. The production
+/// value is a constant per crate (two owners have reads with a different budget — ADR-0291 R14).
 ///
-/// fn 포인터인 것은 운영 값을 `const` 로 두기 위해서다 — 상태를 쥔 시험 가짜(시도 세기 · 잠김 주입 · 자지 않기 ·
-/// 동기화 기록)는 이것으로 넘기지 않는다.
+/// They are fn pointers so that the production value can be a `const` — stateful test fakes (attempt counting · lock injection · not sleeping ·
+/// sync recording) are not passed through this.
 // ADR-0291
 #[derive(Clone, Copy)]
 pub struct OsHooks {
-    /// 잠깐 쥐어진 파일의 다시 하기 — `attempt` 를 잠김이 풀리거나 예산이 다할 때까지 부르고 마지막 결과를
-    /// 돌려준다. 성공과 잠김 아닌 오류는 바로 돌려준다(없는 파일 `NotFound` · 못 쓸 내용 `InvalidData` 는 다시
-    /// 하지 않는다). 운영 = `fs::retry_busy`(예산 = [`BUSY_RETRIES`] · [`BUSY_PAUSE`] — 주인이 따로 둔 긴 적재 예산은 예외 · R14).
+    /// Retrying a briefly held file — calls `attempt` until the lock clears or the budget runs out and returns the last result.
+    /// Success and non-lock errors are returned at once (a missing file `NotFound` · unusable content `InvalidData` are not
+    /// retried). Production = `fs::retry_busy` (budget = [`BUSY_RETRIES`] · [`BUSY_PAUSE`] — the long load budget an owner sets separately is the exception · R14).
     pub retry: fn(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()>,
-    /// 폴더 안 이름 바꾸기(rename)를 디스크에 영속시키는 폴더 동기화 — 운영 = `fs::sync_dir`. 원자 쓰기 · 복사가
-    /// rename 으로 갈아끼운 뒤에만 그 폴더로 한 번 부르고 결과는 보지 않는다(실패해도 그 쓰기는 성공이다).
+    /// Folder sync that makes a rename inside a folder durable on disk — production = `fs::sync_dir`. Called once on that folder only after an atomic write or copy
+    /// has swapped in by rename, and the result is not looked at (the write succeeds even if it fails).
     pub sync_dir: fn(&Path) -> io::Result<()>,
 }
 
-/// 데이터 파일의 잠김 예산 — 첫 시도 뒤 다시 하는 횟수와 그 사이 기다림. 운영 [`OsHooks::retry`] 가 이 값을 쓴다(주인이 따로 둔 긴 적재 예산은 예외 · ADR-0291 R14).
-/// 최악에 약 100 ms 더 걸리고, 그보다 오래 쥐면 그대로 실패한다.
-// ADR-0265 결정 4: rename 이 잠김이면 짧게 다시 한다.
-// ADR-0291: 어느 실패가 잠김인지와 다시 하기 고리는 OS 층 정책 하나 — 여기는 예산만 쥔다.
+/// Lock budget for data files — the number of retries after the first attempt and the wait between them. The production [`OsHooks::retry`] uses these values (the long load budget an owner sets separately is the exception · ADR-0291 R14).
+/// In the worst case it takes about 100 ms more, and a lock held longer than that fails as is.
+// ADR-0265 decision 4: if rename hits a lock, retry briefly.
+// ADR-0291: which failure is a lock and the retry loop are one OS-layer policy — this holds only the budget.
 pub const BUSY_RETRIES: u32 = 5;
 pub const BUSY_PAUSE: Duration = Duration::from_millis(20);
 
-/// [`OsHooks::retry`] 의 클로저 꼴 — 공개 함수는 운영 fn 포인터를 이 꼴로 풀어 넘기고, 이 모듈의 시험은 상태를
-/// 쥔 가짜를 넘긴다. [`SyncDirHook`] 도 같다.
+/// The closure shape of [`OsHooks::retry`] — public functions unpack the production fn pointer into this shape and pass it, and this module's tests pass a fake
+/// that holds state. [`SyncDirHook`] is the same.
 type RetryHook<'a> = &'a mut dyn FnMut(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()>;
-/// [`OsHooks::sync_dir`] 의 클로저 꼴.
+/// The closure shape of [`OsHooks::sync_dir`].
 type SyncDirHook<'a> = &'a mut dyn FnMut(&Path) -> io::Result<()>;
 
-// ── 읽기 규칙 · 쓰기 판정 ──
+// ── Read rules · write decisions ──
 
-/// 데이터 파일 하나의 읽기 규칙 — 주인(저장소)이 파일마다 상수로 둔다.
+/// Read rules for one data file — the owner (store) sets them as a constant per file.
 // ADR-0291 R1~R7
 #[derive(Clone, Copy)]
 pub struct Spec {
-    /// 판을 싣는 최상위 키(파일마다 지금 그대로 — `$version` · `version` · `schema_version`).
+    /// The top-level key that carries the version (as it stands per file — `$version` · `version` · `schema_version`).
     pub version_key: &'static str,
-    /// 이 빌드가 쓰는 판 — 1 이상. 이보다 큰 판은 [`Parsed::Newer`].
+    /// The version this build writes — 1 or more. A larger version is [`Parsed::Newer`].
     pub current: u64,
-    /// 읽기 상한 = 쓰기 상한(바이트 — 디스크의 원문 그대로, BOM 포함). 넘는 원문은 손상이고 쓰지도 않는다
+    /// Read cap = write cap (bytes — the raw text on disk as is, BOM included). Raw text over it is corrupt and is not written either
     /// ([`check_cap`]).
     pub cap: u64,
-    /// 주인의 모양 검사 — 버전 문을 지난 문서(판 `1..=current`)를 그 주인이 읽을 수 있나. `Err(사유)` = 손상
-    /// ([`Parsed::Unusable`] 에 사유 그대로 — 값을 실을지는 주인이 정한다).
+    /// The owner's shape check — can that owner read a document that passed the version gate (version `1..=current`)? `Err(사유)` = corrupt
+    /// (the reason goes into [`Parsed::Unusable`] as is — the owner decides whether to carry the value).
     ///
-    /// [`parse`] 가 부르므로 모양을 건너뛰는 판정 길이 없다. ★앞 판(`< current`)을 읽을 리더가 없으면 여기서
-    /// `Err` 를 돌려 손상으로 만든다★ — 버전 문은 그 판을 받을지 모른다. 새 판([`Parsed::Newer`])에는 부르지 않는다.
-    /// 모양을 따로 보지 않는 주인은 [`any_shape`].
+    /// [`parse`] calls it, so no decision path skips the shape. ★If there is no reader for an earlier version (`< current`), return
+    /// `Err` here to make it corrupt★ — the version gate may well let that version through. It is not called for a newer version ([`Parsed::Newer`]).
+    /// An owner that does not check shape uses [`any_shape`].
     pub shape: fn(version: u64, doc: &Map<String, Value>) -> Result<(), String>,
 }
 
-/// 모양을 따로 보지 않는 주인의 [`Spec::shape`] — 늘 `Ok`.
+/// The [`Spec::shape`] of an owner that does not check shape — always `Ok`.
 pub fn any_shape(_version: u64, _doc: &Map<String, Value>) -> Result<(), String> {
     Ok(())
 }
 
-/// 원문 하나를 본 결과 — IO 는 모른다.
+/// The result of looking at one raw text — knows no IO.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Parsed {
-    /// 판 `1..=current` 이고 모양 검사를 지났다. `doc` 는 버전 키까지 그대로다.
+    /// Version `1..=current` and passed the shape check. `doc` is as is, version key included.
     Usable {
         version: u64,
         doc: Map<String, Value>,
     },
-    /// 손상 — 사유 문구. 이 모듈이 만드는 사유는 값을 싣지 않는다 · 모양 검사 실패면 주인의 사유 그대로다.
+    /// Corrupt — a reason string. Reasons made by this module carry no value · if the shape check failed, it is the owner's reason as is.
     Unusable(String),
-    /// 이 빌드보다 새 판 — 모양은 보지 않았다(새 판은 모양부터 다를 수 있다).
+    /// A version newer than this build — shape not looked at (a newer version may already differ in shape).
     Newer { found: u64 },
 }
 
-/// 원문 하나를 판정한다 — 상한 · 앞머리 BOM 하나 떼기 · JSON 객체 · 버전 문 · [`Spec::shape`] 순.
+/// Decides one raw text — in the order cap · stripping one leading BOM · JSON object · version gate · [`Spec::shape`].
 ///
-/// - 버전 키가 없으면 1 판이다.
-/// - 버전 값은 1 이상의 정수 값인 수만 받는다(`1` · `1.0`) — 0 · 음수 · 소수 · 문자열 · `u64` 밖은 손상.
-/// - `current` 보다 크면 [`Parsed::Newer`] — 모양 검사 앞에서 끝난다.
+/// - No version key means version 1.
+/// - A version value is accepted only if it is an integer-valued number of 1 or more (`1` · `1.0`) — 0 · negative · fractional · string · outside `u64` is corrupt.
+/// - Larger than `current` is [`Parsed::Newer`] — it ends before the shape check.
 ///
-/// 상한은 [`read_file_capped`] 가 이미 끊었어도 여기서 다시 잰다 — 주인의 IO 이음매가 어떤 길로 읽었든 같은
-/// 손상 정의가 선다.
-// ADR-0291 R1~R5 · R7: 버전 없음 = 1 · 새 판은 따로 · 정수 값인 수만 · BOM 하나 무시 · 모양 실패 = 손상.
+/// The cap is measured again here even if [`read_file_capped`] already cut it — whichever way the owner's IO seam
+/// read, the same definition of corrupt holds.
+// ADR-0291 R1~R5 · R7: no version = 1 · newer version handled separately · integer-valued numbers only · one BOM ignored · shape failure = corrupt.
 pub fn parse(text: &str, spec: &Spec) -> Parsed {
     if text.len() as u64 > spec.cap {
         return Parsed::Unusable(format!("{} 바이트 상한을 넘었다", spec.cap));
     }
-    // 메모장 · PowerShell 은 UTF-8 로 저장하면 BOM 을 붙인다 — 손으로 고친 파일이 그것만으로 못 쓰게 되지 않게.
+    // Notepad · PowerShell add a BOM when saving as UTF-8 — so that a hand-edited file does not become unusable for that reason alone.
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let doc = match serde_json::from_str::<Value>(text) {
         Ok(Value::Object(doc)) => doc,
@@ -140,11 +140,11 @@ pub fn parse(text: &str, spec: &Spec) -> Parsed {
     Parsed::Usable { version, doc }
 }
 
-/// 정수 값인 수만 — 정수 값인 실수(`1.0`)도 받는다(JSON 도구가 수를 실수로 다시 쓰기도 한다). 음수 · 소수 ·
-/// `u64` 범위 밖 · 수가 아닌 값은 `None`.
+/// Integer-valued numbers only — a float with an integer value (`1.0`) is accepted too (JSON tools sometimes rewrite numbers as floats). Negative · fractional ·
+/// outside the `u64` range · non-number values give `None`.
 fn version_number(raw: &Value) -> Option<u64> {
-    // 2^64 — `u64::MAX as f64` 와 같은 값이라 그 자체는 범위 밖이다. `as u64` 는 범위 밖을 u64::MAX 로 눌러
-    //   없는 「새 판」을 지어내므로 자르기 전에 거른다.
+    // 2^64 — the same value as `u64::MAX as f64`, so it is itself out of range. `as u64` clamps out-of-range to u64::MAX and
+    //   invents a nonexistent 「새 판」 (newer version), so filter it out before casting.
     const U64_END: f64 = 18_446_744_073_709_551_616.0;
     raw.as_u64().or_else(|| {
         let float = raw.as_f64()?;
@@ -156,20 +156,20 @@ fn version_number(raw: &Value) -> Option<u64> {
     })
 }
 
-/// 파일 하나를 읽은 결과.
+/// The result of reading one file.
 #[derive(Debug)]
 pub enum Loaded {
     Missing,
     Parsed(Parsed),
-    /// 내용이 아니라 읽기 자체가 실패했다(잠김 예산 뒤 · 권한 · 그 밖 IO). ★손상과 섞지 않는다★ — 잠깐 잠긴
-    /// 멀쩡한 파일을 떠 두거나 덮지 않는다.
+    /// Not the content — the read itself failed (after the lock budget · permissions · other IO). ★Not mixed with corrupt★ — a perfectly fine file that is
+    /// briefly locked is neither set aside nor overwritten.
     Failed(io::Error),
 }
 
-/// 읽기 결과를 판정으로 — `NotFound` = [`Loaded::Missing`] · `InvalidData`(상한 초과 · UTF-8 아님 —
-/// [`read_capped`] 의 계약) = 손상 · 그 밖 오류 = [`Loaded::Failed`] · 원문 = [`parse`].
+/// Turns a read result into a decision — `NotFound` = [`Loaded::Missing`] · `InvalidData` (over the cap · not UTF-8 —
+/// the contract of [`read_capped`]) = corrupt · any other error = [`Loaded::Failed`] · raw text = [`parse`].
 ///
-/// 자기 IO 이음매(시험 가짜를 끼우는 트레이트)로 읽는 주인은 그 읽기 결과를 여기 넣는다. 경로로 바로 읽는 주인은
+/// An owner that reads through its own IO seam (the trait that takes test fakes) feeds that read result in here. An owner that reads directly by path uses
 /// [`load`].
 pub fn classify(read: io::Result<String>, spec: &Spec) -> Loaded {
     match read {
@@ -182,57 +182,57 @@ pub fn classify(read: io::Result<String>, spec: &Spec) -> Loaded {
     }
 }
 
-/// `path` 를 [`Spec::cap`] 까지 읽어([`read_file_capped`] — 잠김이면 `os.retry`) [`classify`] 한다. 아무것도
-/// 만들지 않는다 — 폴더가 없으면 [`Loaded::Missing`] 이다.
+/// Reads `path` up to [`Spec::cap`] ([`read_file_capped`] — `os.retry` on a lock) and runs [`classify`] on it. Creates nothing —
+/// if the folder is missing it is [`Loaded::Missing`].
 pub fn load(path: &Path, spec: &Spec, os: OsHooks) -> Loaded {
     classify(read_file_capped(path, spec.cap, os), spec)
 }
 
-/// 이 실행이 그 파일을 이미 자기 것으로 잡았나 — [`Loaded::write_policy`] 의 한 축.
+/// Has this run already taken that file as its own — one axis of [`Loaded::write_policy`].
 // ADR-0291 R8 (D14)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Claim {
-    /// 적재 판정이 쓸 수 있음이었거나 이번 실행이 그 파일에 한 번이라도 썼다.
+    /// The load decision was writable, or this run has written to that file at least once.
     Adopted,
-    /// 적재 판정이 없음 · 손상이었고 아직 한 번도 안 썼다 — 그 사이 놓인 쓸 만한 파일은 우리 것이 아니라 덮기
-    /// 전에 떠 둔다.
+    /// The load decision was missing or corrupt and nothing has been written yet — a usable file that appeared in between is not ours, so it is set
+    /// aside before overwriting.
     NotYet,
 }
 
-/// 그 파일에 지금 써도 되나.
+/// May we write to that file now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WritePolicy {
     Write,
-    /// [`copy_aside`] 로 떠 둔 뒤 쓴다. 떠 두기가 실패했을 때 그 쓰기를 할지는 주인이 정한다.
+    /// Write after setting it aside with [`copy_aside`]. Whether to still write when the set-aside fails is up to the owner.
     CopyAsideFirst,
-    /// 쓰지 않는다 — 덮지도 떠 두지도 않는다.
+    /// Do not write — neither overwrite nor set aside.
     Refuse(Refused),
 }
 
-/// [`WritePolicy::Refuse`] 의 까닭.
+/// The reason for [`WritePolicy::Refuse`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refused {
-    /// 이 빌드보다 새 판이 쓴 파일이다.
+    /// A file written by a version newer than this build.
     Newer { found: u64 },
-    /// 지금 파일을 못 읽었다([`Loaded::Failed`]) — 무엇이 들었는지 모르므로 덮지 않는다. 그 오류가 필요한 주인은
-    /// [`judge`] 대신 [`load`] 로 [`Loaded`] 를 쥐고 [`Loaded::write_policy`] 를 부른다.
+    /// The current file could not be read ([`Loaded::Failed`]) — what it holds is unknown, so it is not overwritten. An owner that needs that error
+    /// holds the [`Loaded`] via [`load`] instead of [`judge`] and calls [`Loaded::write_policy`].
     ReadFailed,
 }
 
 impl Loaded {
-    /// 이 읽기 결과 위에 써도 되나 — 데이터 파일 공통 규칙 하나다.
+    /// May we write over this read result — one common rule for data files.
     ///
-    /// | 지금 파일 | [`Claim::Adopted`] | [`Claim::NotYet`] |
+    /// | current file | [`Claim::Adopted`] | [`Claim::NotYet`] |
     /// |---|---|---|
-    /// | 없음 | 쓴다 | 쓴다 |
-    /// | 쓸 수 있음 | 쓴다 | 떠 두고 쓴다 |
-    /// | 손상 | 떠 두고 쓴다 | 떠 두고 쓴다 |
-    /// | 새 판 | 거절 | 거절 |
-    /// | 읽기 실패 | 거절 | 거절 |
+    /// | missing | write | write |
+    /// | usable | write | set aside, then write |
+    /// | corrupt | set aside, then write | set aside, then write |
+    /// | newer version | refuse | refuse |
+    /// | read failure | refuse | refuse |
     ///
-    /// ★판정은 쓰기마다 그 직전에 지금 파일을 다시 읽어 한다★ — 적재 때 판정을 들고 있으면 실행 중에 새 판으로
-    /// 바뀐 파일을 덮고, 「손상이라 떠 두고 쓴다」를 들고 있으면 첫 쓰기 뒤 우리 정상 파일을 쓰기마다 떠 두어 진짜
-    /// 손상 사본을 지운다.
+    /// ★The decision is made for every write, right before it, by reading the current file again★ — holding the load-time decision would overwrite a file that
+    /// turned into a newer version during the run, and holding 「손상이라 떠 두고 쓴다」 (corrupt, so set aside and write) would set aside our healthy file on every write after the first and
+    /// delete the real corrupt copy.
     // ADR-0291 R2 · R8 · R16
     pub fn write_policy(&self, claim: Claim) -> WritePolicy {
         match (self, claim) {
@@ -252,13 +252,13 @@ impl Loaded {
     }
 }
 
-/// [`load`] 한 지금 파일의 [`Loaded::write_policy`] — 경로로 바로 읽는 주인의 저장 직전 판정.
+/// The [`Loaded::write_policy`] of the current file just [`load`]ed — the pre-save decision for an owner that reads directly by path.
 pub fn judge(path: &Path, spec: &Spec, os: OsHooks, claim: Claim) -> WritePolicy {
     load(path, spec, os).write_policy(claim)
 }
 
-/// 쓸 원문의 길이가 [`Spec::cap`] 안인가 — 넘으면 `InvalidData`(다음 적재가 그 파일을 통째로 못 쓴다).
-// ADR-0291 R6: 읽기 상한 = 쓰기 상한.
+/// Is the length of the raw text to write within [`Spec::cap`] — if over, `InvalidData` (the next load could not use that file at all).
+// ADR-0291 R6: read cap = write cap.
 pub fn check_cap(len: usize, spec: &Spec) -> io::Result<()> {
     if len as u64 > spec.cap {
         return Err(io::Error::new(
@@ -272,10 +272,10 @@ pub fn check_cap(len: usize, spec: &Spec) -> io::Result<()> {
     Ok(())
 }
 
-// ── 읽기 · 쓰기 장치 ──
+// ── Read · write machinery ──
 
-/// `attempt` 를 `retry` 에 태워 그 값을 꺼낸다 — 훅은 값 타입을 모르므로 값은 여기서 따로 받는다. 훅이 `Ok` 를
-/// 돌려줬는데 값이 없으면(시도를 한 번도 안 불렀다) 패닉하지 않고 `ErrorKind::Other` 다.
+/// Runs `attempt` through `retry` and takes its value out — the hook does not know the value type, so the value is received separately here. If the hook
+/// returns `Ok` but there is no value (the attempt was never called), it is `ErrorKind::Other`, not a panic.
 fn retrying<T>(retry: RetryHook, mut attempt: impl FnMut() -> io::Result<T>) -> io::Result<T> {
     let mut value = None;
     retry(&mut || {
@@ -285,19 +285,19 @@ fn retrying<T>(retry: RetryHook, mut attempt: impl FnMut() -> io::Result<T>) -> 
     value.ok_or_else(|| io::Error::other("다시 하기가 시도를 한 번도 부르지 않았다"))
 }
 
-/// ★상한까지만 읽는다 — 읽고 나서 재지 않는다★.
+/// ★Reads only up to the cap — does not measure after reading★.
 ///
-/// 먼저 통째로 읽어 길이를 재면 상한 검사가 도착하기 전에 메모리가 먼저 바닥난다(밖의 에이전트 · 사람이 쓰는
-/// 파일이라 크기가 우리 손에 없다). 그러면 기본값 접기도 경고도 못 돌고 프로세스가 죽는다.
+/// If it read everything first and then measured the length, memory would run out before the cap check arrived (the file is written by outside agents · people,
+/// so its size is not in our hands). Then neither the default fold nor a warning could run and the process would die.
 ///
-/// 상한 초과와 UTF-8 아님은 **둘 다 `ErrorKind::InvalidData`** 다 — 둘 다 원문을 못 가져온 것이다. 그 밖의 종류는
-/// 읽기 자체의 IO 실패이고, 둘을 가르는 것이 [`classify`] 다 — 내용이 못 쓸 것이면 손상, IO 실패면 손대지
-/// 않는다. 잠김 재시도는 없다 — 파일을 여는 쪽이 필요하면 [`read_file_capped`] 를 쓴다.
+/// Over the cap and not UTF-8 are **both `ErrorKind::InvalidData`** — in both cases the raw text could not be fetched. Other kinds
+/// are IO failures of the read itself, and what tells them apart is [`classify`] — if the content is unusable it is corrupt, if it is an IO failure it is left
+/// alone. There is no lock retry — whoever opens the file uses [`read_file_capped`] if needed.
 pub fn read_capped(source: impl io::Read, cap: u64) -> io::Result<String> {
     use std::io::Read;
 
     let mut buf = Vec::new();
-    // cap + 1 = 「넘었나」를 알 수 있는 최소치. 넘었어도 읽는 양은 여기서 멈춘다.
+    // cap + 1 = the smallest amount that can tell 「넘었나」 (did it go over?). Even if it went over, the amount read stops here.
     source.take(cap + 1).read_to_end(&mut buf)?;
     if buf.len() as u64 > cap {
         return Err(io::Error::new(
@@ -308,11 +308,11 @@ pub fn read_capped(source: impl io::Read, cap: u64) -> io::Result<String> {
     String::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
 }
 
-/// 파일을 열어 [`read_capped`] 로 읽는다 — 열기나 읽기가 잠김으로 실패하면 [`OsHooks::retry`] 로 새로 열어 다시
-/// 한다. 백신 · 색인기가 파일을 잠깐 쥐면 읽기도 그렇게 실패한다.
+/// Opens the file and reads it with [`read_capped`] — if the open or read fails on a lock, it opens again via [`OsHooks::retry`] and
+/// retries. When an antivirus · indexer briefly holds the file, reads fail that way too.
 ///
-/// 그 밖의 오류는 다시 하지 않고 바로 돌려준다 — 없는 파일 = `NotFound` · 상한 초과 · UTF-8 아님 =
-/// `InvalidData`. ★잠김이 예산을 넘으면 그 잠김 오류 그대로다★ — `InvalidData`(못 쓰는 내용)와 섞이지 않는다.
+/// Other errors are returned at once without retry — missing file = `NotFound` · over the cap · not UTF-8 =
+/// `InvalidData`. ★If a lock exceeds the budget, it is that lock error as is★ — not mixed with `InvalidData` (unusable content).
 pub fn read_file_capped(path: &Path, cap: u64, os: OsHooks) -> io::Result<String> {
     read_file_capped_with(|| std::fs::File::open(path), cap, &mut |attempt| {
         (os.retry)(attempt)
@@ -327,33 +327,33 @@ fn read_file_capped_with<R: io::Read>(
     retrying(retry, || read_capped(open()?, cap))
 }
 
-/// [`write_atomic_unless`] 의 결과.
+/// The result of [`write_atomic_unless`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteOutcome {
     Written,
-    /// `skip` 이 서서 rename 하지 않았다 — 임시 파일은 치웠고 대상은 그대로다. 오류가 아니라 다시 하지 않는다.
+    /// `skip` stood and no rename happened — the temp file was removed and the target is unchanged. Not an error, so not retried.
     Skipped,
 }
 
-/// 같은 폴더의 임시 파일에 쓰고 **rename 으로 갈아끼운다** — 쓰다 죽어도 반쪽 파일이 안 남는다. 실패하면 임시
-/// 파일을 치우고 대상은 그대로다. rename 이 잠김이면 [`OsHooks::retry`] 로 다시 한다.
+/// Writes to a temp file in the same folder and **swaps it in by rename** — dying mid-write leaves no half file. On failure the temp
+/// file is removed and the target is unchanged. If rename hits a lock, it retries via [`OsHooks::retry`].
 ///
-/// 대상 폴더가 없으면 그 위로 없는 폴더까지 만든다 — 만든 폴더는 쓰기가 실패해도 남는다. 갈아끼운 뒤에는
-/// [`OsHooks::sync_dir`] 로 그 폴더를 동기화한다(결과는 보지 않는다).
+/// If the target folder is missing, it creates the missing folders above it too — created folders stay even if the write fails. After the swap it
+/// syncs that folder with [`OsHooks::sync_dir`] (the result is not looked at).
 ///
-/// 같은 경로를 동시에 쓰는 호출끼리는 나중에 rename 한 쪽이 남는다 — 어느 쪽이 나중인지는 정하지 않는다. 순서가
-/// 중요하면 호출자가 직렬화한다.
-// ADR-0265 결정 4: 설정 쓰기는 원자적이다(임시 파일 → sync_all → rename).
-// ADR-0291 R10 · R11: rename 뒤 폴더 동기화 · 폴더는 쓰는 쪽이 쓸 때 만든다.
+/// For calls writing the same path concurrently, the one that renames later remains — which is later is not decided. If order
+/// matters, the caller serializes.
+// ADR-0265 decision 4: config writes are atomic (temp file → sync_all → rename).
+// ADR-0291 R10 · R11: folder sync after rename · the writer creates the folder when it writes.
 pub fn write_atomic(path: &Path, bytes: &[u8], os: OsHooks) -> io::Result<()> {
     write_atomic_unless(path, bytes, os, || false).map(drop)
 }
 
-/// [`write_atomic`] 에 「rename 직전에 물을 것」을 더한 것 — `skip` 을 **첫 rename 앞과 잠김 재시도의 rename
-/// 앞마다** 묻고, `true` 면 [`WriteOutcome::Skipped`].
+/// [`write_atomic`] plus 「rename 직전에 물을 것」 (what to ask right before rename) — asks `skip` **before the first rename and before every
+/// rename of a lock retry**, and if `true`, [`WriteOutcome::Skipped`].
 ///
-/// ★`skip` 이 `false` 를 돌려준 직후에 선 표지는 그 rename 을 막지 못한다★ — 묻기와 rename 사이는 원자적이지
-/// 않다.
+/// ★A marker set right after `skip` returned `false` cannot stop that rename★ — the gap between asking and the rename is not
+/// atomic.
 pub fn write_atomic_unless(
     path: &Path,
     bytes: &[u8],
@@ -388,11 +388,11 @@ fn write_atomic_with(
     )
 }
 
-/// `from` 을 `to` 에 원자적으로 복사한다 — 흘려 쓰므로 통째로 메모리에 올리지 않고 크기 상한도 없다. 있던 `to`
-/// 는 덮는다. 실패하면 임시 파일을 치우고 `to` 는 그대로다.
+/// Atomically copies `from` to `to` — it streams, so it does not load everything into memory and has no size cap. An existing `to`
+/// is overwritten. On failure the temp file is removed and `to` is unchanged.
 ///
-/// `from` 열기와 rename 이 잠김이면 [`OsHooks::retry`] 로 다시 한다. 끝내 못 열면 임시 파일도 `to` 의 폴더도
-/// 만들기 전에 그 오류다. 폴더 만들기 · 동기화는 [`write_atomic`] 과 같다.
+/// If opening `from` or rename hits a lock, it retries via [`OsHooks::retry`]. If the open never succeeds, that error comes before either the temp file or the folder of `to` is
+/// created. Folder creation · sync are the same as for [`write_atomic`].
 // ADR-0274
 // ADR-0291 R10 · R11
 pub fn copy_atomic(from: &Path, to: &Path, os: OsHooks) -> io::Result<()> {
@@ -407,8 +407,8 @@ fn copy_atomic_with(
     retry: RetryHook,
     sync_dir: SyncDirHook,
 ) -> io::Result<()> {
-    // `std::fs::copy` 를 쓰지 않는다 — 원본의 권한까지 옮겨(Windows 읽기 전용 속성 · Unix 권한 비트), 읽기 전용
-    //   원본이면 사본도 읽기 전용이 되어 `sync_all` 할 쓰기 핸들을 못 연다.
+    // Does not use `std::fs::copy` — it carries over the source's permissions (the Windows read-only attribute · Unix permission bits), so a read-only
+    //   source makes a read-only copy too, and the write handle for `sync_all` cannot be opened.
     let mut source = retrying(&mut *retry, || std::fs::File::open(from))?;
     replace_with(
         to,
@@ -421,11 +421,11 @@ fn copy_atomic_with(
     .map(drop)
 }
 
-/// 못 쓰는 파일을 옆 이름 `<이름>.corrupt` 에 [`copy_atomic`] 으로 떠 둔다 — 원본은 그 자리에 그대로 둔다.
-/// 돌려주는 값 = 사본의 자리. `Err` 면 앞서 떠 둔 사본도 그대로다.
+/// Sets aside an unusable file with [`copy_atomic`] at the neighboring name `<이름>.corrupt` — the original stays in place.
+/// Return value = the copy's location. On `Err`, a copy set aside earlier stays as it was.
 ///
-/// ★이름이 하나뿐이라 앞서 떠 둔 사본을 덮는다★ — Chromium(`Preferences.bad`) · Firefox(`Invalidprefs.js`)와
-/// 같은 관행이다(TRD S21-storage §10 F21). 사본이 쌓이지 않으므로 크기 상한을 두지 않는다.
+/// ★There is only one name, so it overwrites a copy set aside earlier★ — the same practice as Chromium (`Preferences.bad`) · Firefox (`Invalidprefs.js`)
+/// (TRD S21-storage §10 F21). Copies do not pile up, so no size cap is set.
 // ADR-0274
 pub fn copy_aside(path: &Path, os: OsHooks) -> io::Result<PathBuf> {
     let to = sibling(path, ASIDE_SUFFIX)?;
@@ -433,22 +433,22 @@ pub fn copy_aside(path: &Path, os: OsHooks) -> io::Result<PathBuf> {
     Ok(to)
 }
 
-/// 같은 폴더의 임시 파일을 `stage` 로 채우고 `sync_all` 한 뒤 **rename 으로 `path` 를 갈아끼운다**. `skip` 은
-/// rename 마다 그 앞에서 묻는다([`write_atomic_unless`]).
+/// Fills a temp file in the same folder with `stage`, `sync_all`s it, then **swaps `path` in by rename**. `skip` is asked
+/// before every rename ([`write_atomic_unless`]).
 ///
-/// ★임시 파일은 같은 폴더에 만든다★ — rename 이 갈아끼우기로 도는 것은 같은 볼륨 안에서다. 이름은 `temp_path` —
-/// 두 호출이 임시 이름을 나눠 쓰면 뒤의 생성이 앞의 임시 파일을 비우고, 앞의 rename 이 그 반쪽을 `Ok` 로
-/// 갈아끼운다.
+/// ★The temp file is made in the same folder★ — rename works as a swap only within the same volume. The name is `temp_path` —
+/// if two calls shared a temp name, the later create would empty the earlier temp file, and the earlier rename would swap that half file in
+/// as `Ok`.
 ///
-/// `Written` 이 아니면(실패 · 건너뜀) 임시 파일을 치우고 `path` 를 그대로 둔다 — 안 치우면 데이터 폴더에 쓰레기가
-/// 쌓인다. `Written` 이면 그 폴더를 `sync_dir` 한다 — rename 은 폴더의 항목을 바꾸는 일이라, 파일의 `sync_all`
-/// 만으로는 그 바뀜이 디스크에 남는다는 보장이 없다(POSIX).
+/// If not `Written` (failure · skipped), the temp file is removed and `path` is left as is — if not removed, garbage piles up in the data
+/// folder. If `Written`, `sync_dir` that folder — rename changes an entry of the folder, so the file's `sync_all`
+/// alone does not guarantee that the change lands on disk (POSIX).
 ///
-/// ★rename 이 잠김으로 실패하면 `retry` 로 다시 한다★ — 백신 · 색인기가 대상 파일을 잠깐 쥐면 Windows 의 rename 이
-/// 그렇게 실패한다.
+/// ★If rename fails on a lock, retry with `retry`★ — when an antivirus · indexer briefly holds the target file, rename on Windows
+/// fails that way.
 ///
-/// `rename` · `retry` · `sync_dir` 는 시험의 이음매다 — 운영은 `std::fs::rename` · 부르는 쪽의 [`OsHooks`].
-// ADR-0265 결정 4: rename 이 잠김이면 짧게 다시 한다.
+/// `rename` · `retry` · `sync_dir` are test seams — production is `std::fs::rename` · the caller's [`OsHooks`].
+// ADR-0265 decision 4: if rename hits a lock, retry briefly.
 // ADR-0291 R10 · R11
 fn replace_with(
     path: &Path,
@@ -462,12 +462,12 @@ fn replace_with(
     let dir = folder_of(path);
 
     let staged = (|| {
-        // 적재는 폴더를 만들지 않으므로 첫 쓰기가 만든다 — 실행 중에 지워진 폴더도 여기서 다시 선다.
+        // Loading does not create the folder, so the first write creates it — a folder deleted during the run is set up again here too.
         std::fs::create_dir_all(dir)?;
         let mut file = std::fs::File::create(&tmp)?;
         stage(&mut file)?;
-        // ★flush 로는 부족하다★ — 그건 프로세스 버퍼만 비운다. rename 이 가리키게 될 내용이 실제로
-        //   디스크에 있어야 「반쪽이 안 남는다」가 성립한다.
+        // ★flush is not enough★ — it only empties the process buffer. The content that rename will point to must actually be
+        //   on disk for 「반쪽이 안 남는다」 (no half file is left) to hold.
         file.sync_all()
     })();
     let outcome = staged.and_then(|()| {
@@ -486,8 +486,8 @@ fn replace_with(
     outcome
 }
 
-/// `path` 가 든 폴더 — 폴더 없이 이름만 준 경로(`a.json`)는 지금 폴더(`.`)다. 빈 경로를 넘기면 폴더 동기화가
-/// 그 폴더를 못 연다.
+/// The folder that holds `path` — a path given as a bare name without a folder (`a.json`) is the current folder (`.`). If an empty path is passed, folder sync
+/// cannot open that folder.
 fn folder_of(path: &Path) -> &Path {
     match path.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => dir,
@@ -498,20 +498,20 @@ fn folder_of(path: &Path) -> &Path {
 const TEMP_MARK: &str = ".tmp";
 const ASIDE_SUFFIX: &str = ".corrupt";
 
-/// `path` 옆의 임시 이름 `<이름>.tmp<pid>.<번호>` — pid 는 같은 폴더를 보는 다른 프로세스와, 번호(프로세스 안에서
-/// 부를 때마다 하나씩 는다)는 같은 프로세스의 다른 호출과 가른다.
+/// The temp name next to `path`, `<이름>.tmp<pid>.<번호>` — the pid tells apart other processes looking at the same folder, and the number (one more each time it is
+/// called within the process) tells apart other calls of the same process.
 fn temp_path(path: &Path) -> io::Result<PathBuf> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     sibling(path, &format!("{TEMP_MARK}{}.{n}", std::process::id()))
 }
 
-/// `file_name` 이 `target` 의 임시 이름(`temp_path` 꼴)이면 그 pid. pid · 번호는 `temp_path` 가 적는 십진
-/// 그대로여야 한다(`+` · 앞자리 0 · 범위 밖은 아니다).
+/// If `file_name` is a temp name of `target` (the `temp_path` shape), its pid. The pid · number must be the decimal exactly
+/// as `temp_path` writes it (not `+` · leading zeros · out of range).
 ///
-/// ★번호 없는 `<target>.tmp<pid>`(번호를 더하기 전의 꼴)는 임시 이름으로 보지 않는다★ — 지금 쓸기의 대상인
-/// 파일은 그 꼴로 쓰인 적이 없어 그런 이름은 우리 것이라 단정할 수 없고, 남의 것일 수 있는 파일은 지우지 않는다.
-/// 옛 꼴로 쓰인 대상을 쓸게 되면 이 규칙부터 다시 본다.
+/// ★A `<target>.tmp<pid>` without a number (the shape before the number was added) is not treated as a temp name★ — the target of the current sweep
+/// has never been written in that shape, so we cannot assert such a name is ours, and a file that may be someone else's is not deleted.
+/// If a target written in the old shape is to be swept, look at this rule first.
 fn temp_owner(file_name: &str, target: &str) -> Option<u32> {
     let rest = file_name.strip_prefix(target)?.strip_prefix(TEMP_MARK)?;
     let (pid, n) = rest.split_once('.')?;
@@ -526,14 +526,14 @@ fn exact_decimal<T: std::str::FromStr + ToString>(digits: &str) -> Option<T> {
         .filter(|value| value.to_string() == digits)
 }
 
-/// `dir` 에서 `targets`(파일 이름) 각각의 남은 임시 파일 — 원자 쓰기의 `<대상>.tmp<pid>.<번호>` 와 떠 두기의
-/// `<대상>.corrupt.tmp<pid>.<번호>` — 중 pid 가 이 프로세스거나 `is_alive` 가 죽었다고 한 것을 지운다.
+/// In `dir`, for each of `targets` (file names), deletes the leftover temp files — the atomic write's `<대상>.tmp<pid>.<번호>` and the set-aside's
+/// `<대상>.corrupt.tmp<pid>.<번호>` — whose pid is this process or that `is_alive` said is dead.
 ///
-/// - 산 남의 pid 것은 남긴다 — 같은 폴더를 쓰는 다른 프로세스가 지금 쓰는 중일 수 있다.
-/// - ★자기 pid 것도 지운다★ — 같은 대상을 쓰는 중인 호출이 이 프로세스에 없을 때만 부른다.
+/// - Those of a live other pid are kept — another process using the same folder may be writing right now.
+/// - ★Those of our own pid are deleted too★ — call it only when no call writing the same target is in this process.
 ///
-/// 돌려주는 값 = 지우려 한 파일과 그 결과(그사이 이미 없어졌으면 성공). 폴더가 없으면 빈 목록이다. `Err` = 폴더를
-/// 못 읽었다.
+/// Return value = the files it tried to delete and their results (success if already gone in the meantime). An empty list if the folder is missing. `Err` = the folder
+/// could not be read.
 pub fn sweep_temps(
     dir: &Path,
     targets: &[&str],
@@ -571,7 +571,7 @@ pub fn sweep_temps(
     Ok(swept)
 }
 
-/// `path` 와 같은 폴더의 `<path 이름><suffix>`.
+/// The `<path 이름><suffix>` in the same folder as `path`.
 fn sibling(path: &Path, suffix: &str) -> io::Result<PathBuf> {
     let invalid = |what: &str| {
         io::Error::new(
@@ -595,15 +595,15 @@ mod tests {
 
     use super::*;
 
-    /// 다시 하지 않는 훅 — 실제 파일 시험은 잠김을 만나지 않는다. 상태가 없어 fn 포인터로 선다.
+    /// A hook that does not retry — real-file tests never meet a lock. It stands as an fn pointer because it has no state.
     const ONCE: OsHooks = OsHooks {
         retry: |attempt| attempt(),
         sync_dir: |_| Ok(()),
     };
 
-    /// 운영 다시 하기의 모양을 흉내 낸 가짜 — 잠김(여기서는 `PermissionDenied`)이면 [`BUSY_RETRIES`] 번까지 다시
-    /// 하되, 자지 않고 기다림만 `pauses` 에 센다. 어느 오류가 잠김인지는 운영에선 넘긴 훅(OS 층)의 몫이라, 이
-    /// 모듈의 시험이 재는 것은 그 오류가 훅까지 그대로 가는가다.
+    /// A fake that imitates the shape of the production retry — on a lock (here `PermissionDenied`) it retries up to [`BUSY_RETRIES`] times,
+    /// but does not sleep and only counts the waits in `pauses`. Which error is a lock is, in production, up to the hook passed in (OS layer), so what
+    /// this module's tests measure is whether that error goes to the hook unchanged.
     fn counting_retry(
         pauses: &mut u32,
     ) -> impl FnMut(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()> + '_ {
@@ -650,7 +650,7 @@ mod tests {
         names
     }
 
-    // ── 상한 읽기 ──
+    // ── Capped reads ──
 
     #[test]
     fn a_locked_open_is_retried_until_it_clears() {
@@ -672,7 +672,7 @@ mod tests {
         assert_eq!((text.as_str(), pauses), ("hi", 2));
     }
 
-    /// 첫 `read` 에서 잠김으로 실패하는 원본.
+    /// A source that fails on a lock at the first `read`.
     struct LockedOnRead;
 
     impl io::Read for LockedOnRead {
@@ -752,8 +752,8 @@ mod tests {
         assert_eq!(over.kind(), io::ErrorKind::InvalidData);
     }
 
-    /// 내보낸 바이트를 세는 원본 — 결과만 보면 「다 읽고 나서 반려」와 「끊어 읽고 반려」가 똑같이
-    /// `InvalidData` 라 구분이 안 된다.
+    /// A source that counts the bytes it hands out — looking only at the result, 「다 읽고 나서 반려」 (read it all, then reject) and 「끊어 읽고 반려」 (cut the read, then reject) are both
+    /// `InvalidData` and cannot be told apart.
     struct Counting<'a, R> {
         inner: R,
         produced: &'a Cell<u64>,
@@ -767,7 +767,7 @@ mod tests {
         }
     }
 
-    /// ★상한이 결과가 아니라 **읽는 양**을 끊는다★ — [`read_capped`] 가 존재하는 이유 그 자체다.
+    /// ★The cap cuts the **amount read**, not the result★ — that is the very reason [`read_capped`] exists.
     #[test]
     fn the_cap_stops_the_read_rather_than_the_result() {
         let cap = 16u64;
@@ -795,7 +795,7 @@ mod tests {
         assert_eq!(refused.kind(), io::ErrorKind::InvalidData);
     }
 
-    // ── 원자 쓰기 ──
+    // ── Atomic writes ──
 
     #[test]
     fn an_unskipped_write_replaces_the_target_and_leaves_no_temp() {
@@ -836,7 +836,7 @@ mod tests {
         let dir = temp_dir("skip-retry");
         let path = dir.join("state.json");
         std::fs::write(&path, "old").unwrap();
-        // 첫 물음엔 아니라고 하고, 첫 rename 이 잠김으로 실패한 뒤의 물음엔 그렇다고 한다.
+        // Answers no to the first ask, and yes to the ask after the first rename failed on a lock.
         let asked = Cell::new(0);
         let mut renames = 0;
         let mut pauses = 0;
@@ -923,7 +923,7 @@ mod tests {
         }
     }
 
-    // ── 임시 이름 해석 · 쓸기 ──
+    // ── Temp name parsing · sweeping ──
 
     #[test]
     fn the_owner_of_a_made_temp_name_reads_back_as_this_process() {
@@ -1023,7 +1023,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    // ── 원자 복사 · 떠 두기 ──
+    // ── Atomic copy · setting aside ──
 
     #[test]
     fn copy_atomic_overwrites_the_target_and_leaves_no_temp() {
@@ -1112,7 +1112,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    // ── 폴더 만들기 · 동기화 ──
+    // ── Folder creation · sync ──
 
     #[test]
     fn a_write_creates_the_missing_folders_up_to_the_target() {
@@ -1124,7 +1124,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
         assert_eq!(names_in(&folder), vec!["state.json".to_string()]);
 
-        // 실행 중에 지워진 폴더도 다음 쓰기가 다시 세운다.
+        // A folder deleted during the run is set up again by the next write.
         std::fs::remove_dir_all(dir.join("shell")).unwrap();
         write_atomic(&path, b"again", ONCE).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "again");
@@ -1227,9 +1227,9 @@ mod tests {
         );
     }
 
-    // ── 읽기 규칙 ──
+    // ── Read rules ──
 
-    /// 시험 파일의 규칙 — 버전 키 `v` · 1 판 · 64 바이트 · 모양은 안 본다.
+    /// The rules of the test file — version key `v` · version 1 · 64 bytes · shape not checked.
     const SPEC: Spec = Spec {
         version_key: "v",
         current: 1,
@@ -1237,7 +1237,7 @@ mod tests {
         shape: any_shape,
     };
 
-    /// 최상위 `items` 가 배열이어야 하는 주인 — 모양 실패를 만든다.
+    /// An owner whose top-level `items` must be an array — it produces a shape failure.
     const ITEMS: Spec = Spec {
         shape: items_shape,
         ..SPEC
@@ -1459,7 +1459,7 @@ mod tests {
             judge(&path, &ITEMS, ONCE, Claim::Adopted),
             WritePolicy::CopyAsideFirst
         );
-        // 같은 파일이 모양을 안 보는 주인에겐 쓸 수 있음이다 — 위 판정이 모양 검사에서 왔다는 대조.
+        // The same file is usable for an owner that does not check shape — a contrast showing the decision above came from the shape check.
         assert_eq!(
             judge(&path, &SPEC, ONCE, Claim::Adopted),
             WritePolicy::Write
@@ -1467,7 +1467,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    // ── 쓰기 판정 ──
+    // ── Write decisions ──
 
     #[test]
     fn the_write_policy_table() {
@@ -1535,7 +1535,7 @@ mod tests {
             WritePolicy::CopyAsideFirst
         );
 
-        // 폴더 자리라 열기나 읽기가 내용과 무관하게 실패한다.
+        // It is a folder location, so open or read fails regardless of content.
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
         assert_eq!(

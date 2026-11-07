@@ -1,6 +1,6 @@
-// spareMode 단위테스트 — 듣기(자기 창 대상 · `window_role` 보다 먼저) · `window_role` 답 → 모드 · `spare:adopted` 바뀜 · 한 방향 ·
-//   듣기 실패(`adoptable: false`) · 채택 번호 · 정리.
-//   창 모드가 화면에 닿는 것은 `WindowLayout.test.tsx` 의 대기 모드 시험이 잰다.
+// spareMode unit test — listening (own window target · before `window_role`) · `window_role` answer → mode · `spare:adopted` change · one direction ·
+//   listening failure (`adoptable: false`) · adoption number · cleanup.
+//   How the window mode reaches the screen is measured by the waiting mode test of `WindowLayout.test.tsx`.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -134,7 +134,7 @@ describe('watchSpareMode — 듣기 · 창 모드', () => {
     expect(modes).toEqual([SPARE, normal(3), normal(0)])
   })
 
-  // 몸이 깨져도 채택은 보통 모드로 받는다 — 번호만 잃는다.
+  // Even if the body is broken, adoption is accepted as normal mode — only the number is lost.
   it('번호가 없는 spare:adopted 몸도 normal 이다(번호 null)', async () => {
     invokeMock.mockImplementation(async () => ({ role: 'spare', generation: null }))
     await watched()
@@ -191,7 +191,7 @@ describe('watchSpareMode — 듣기 · 창 모드', () => {
   })
 })
 
-// ── 한 방향(TRD S21-slot-docking §3-9 · §9-2) — 답과 사건은 다른 길로 와 차례가 없다 ──
+// ── one direction (TRD S21-slot-docking §3-9 · §9-2) — the answer and the event come by different paths and have no order ──
 describe('watchSpareMode — 모드는 한 방향', () => {
   function pendingRole(): (reply: unknown) => void {
     let answer: (reply: unknown) => void = () => {}
@@ -230,7 +230,7 @@ describe('watchSpareMode — 모드는 한 방향', () => {
   })
 })
 
-// ── 듣기 실패(I28) — 듣기 없는 대기 창은 채택돼도 빈 채 남는다 ──
+// ── listening failure (I28) — a waiting window without listening stays empty even when adopted ──
 describe('watchSpareMode — spare:adopted 듣기 실패', () => {
   function failListen() {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -266,7 +266,7 @@ describe('watchSpareMode — spare:adopted 듣기 실패', () => {
     })
   }
 
-  // 정리된 감시가 묻으면 StrictMode 의 두 번째 감시가 듣기를 걸었어도 셸이 그 창을 닫는다.
+  // If a cleaned-up watch asks anyway, the shell closes that window even if StrictMode's second watch attached listening.
   it('정리 뒤에 듣기가 실패하면 window_role 을 묻지 않는다', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     let fail: (err: Error) => void = () => {}

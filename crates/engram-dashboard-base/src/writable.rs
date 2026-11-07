@@ -1,35 +1,35 @@
-//! 폴더에 실제로 쓸 수 있나 — 그 안에 파일을 만들어 바이트를 싣고 지워 본다(쓰기 프로브).
+//! Can a folder really be written to — creates a file in it, loads bytes, and deletes it (write probe).
 //!
-//! ★여러 프로세스 · 여러 호출이 같은 폴더를 동시에 검사할 수 있다★ — 프로브 이름은 프로세스 · 호출마다
-//! 다르다. 검사 도중 폴더가 사라지는 경합은 [`probe_write_in`] 이 스스로 다시 해 보지 않는다 — 부르는
-//! 쪽이 그것을 [`retry_if_vanished`] 로 감싸 한 번 더 해 본다. 폴더를 만들지와 실패를 어떤 오류로 접을지도
-//! 부르는 쪽 몫이다.
+//! ★Several processes · several calls may check the same folder at the same time★ — the probe name differs per process ·
+//! call. A race where the folder vanishes mid-check is not retried by [`probe_write_in`] itself — the
+//! caller wraps it in [`retry_if_vanished`] to try once more. Whether to create the folder and which error to fold a failure into is
+//! also the caller's call.
 // ADR-0269
 // ADR-0282
 
 use std::path::{Path, PathBuf};
 
-/// 쓰기 프로브 파일 이름의 앞부분. 뒤에 **프로세스·호출마다 다른 꼬리**가 붙는다 — 폴더에 이 접두로
-/// 시작하는 파일이 남아 있으면 프로브 잔여물이다.
+/// The leading part of the write-probe file name. A **tail that differs per process · call** follows — a file in the folder
+/// that starts with this prefix is probe residue.
 ///
-/// ★고정 이름을 쓰지 말 것(되살리지 마라)★: 여러 프로세스가 같은 폴더를 동시에 프로브할 수 있고, 이름이
-/// 같으면 진 쪽이 `create_new` 에서 실패해 **멀쩡한 폴더를 "쓰기 불가"로 판정**한다. 더해 삭제만 막는
-/// ACL 에서는 남은 파일 하나가 이후 모든 프로브를 영구히 막는다.
+/// ★Do not use a fixed name (do not revive it)★: several processes may probe the same folder at the same time, and if the name is
+/// the same the loser fails at `create_new` and **decides a healthy folder is "not writable"**. On top of that, under an
+/// ACL that blocks only deletion, one leftover file permanently blocks every later probe.
 pub const WRITE_PROBE_PREFIX: &str = ".engram-write-probe-";
 
-/// ★0바이트로 쓰지 말 것★: 디스크가 꽉 찼거나 할당량이 소진된 상태에서도 길이 0 파일 생성은 흔히
-/// 성공한다 — 그러면 프로브는 통과하고 첫 실제 쓰기가 실패한다. 실제로 바이트를 실어야 검사가 된다.
+/// ★Do not write with 0 bytes★: even when the disk is full or the quota is exhausted, creating a zero-length file often
+/// succeeds — then the probe passes and the first real write fails. The check only counts if bytes are actually loaded.
 const WRITE_PROBE_PAYLOAD: &[u8] = b"engram-write-probe";
 
-/// ★sync_all 까지 간다★: 캐시에만 얹힌 쓰기는 꽉 찬 디스크·소진된 할당량을 그대로 통과한다 —
-/// 바이트가 실제로 안착해야 "쓸 수 있다"가 참이다.
+/// ★It goes all the way to sync_all★: a write that only sits in the cache passes straight through a full disk · an exhausted quota —
+/// only when the bytes actually land is "can write" true.
 fn write_probe_payload(mut f: std::fs::File) -> std::io::Result<()> {
     use std::io::Write;
     f.write_all(WRITE_PROBE_PAYLOAD)?;
     f.sync_all()
 }
 
-/// 이 프로세스·이 호출만의 프로브 경로. pid 로 프로세스를, 카운터로 같은 프로세스의 동시 호출을 가른다.
+/// A probe path unique to this process · this call. The pid tells apart processes, the counter tells apart concurrent calls of the same process.
 fn probe_path(dir: &Path) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -37,22 +37,22 @@ fn probe_path(dir: &Path) -> PathBuf {
     dir.join(format!("{WRITE_PROBE_PREFIX}{}-{n}", std::process::id()))
 }
 
-/// `dir` **안에** 파일을 만들어 바이트를 쓸 수 있는지 실제로 해 본다. `dir` 은 이미 존재해야 한다.
+/// Actually tries whether a file can be created **inside** `dir` and bytes written to it. `dir` must already exist.
 ///
-/// 프로브 파일은 `create_new` 로 만든다 — 같은 이름의 기존 파일을 절대 덮어쓰지 않는다. 이미 있으면
-/// 지난 번 정리가 실패한 흔적이므로 지우고 한 번 더 시도한다(존재 자체는 실패 사유가 아니다).
+/// The probe file is created with `create_new` — it never overwrites an existing file of the same name. If it already exists,
+/// it is a trace of a failed cleanup last time, so it is deleted and tried once more (existence itself is not a failure reason).
 ///
-/// ★남길 수 있다(계약)★: 만든 파일은 지우지만, 생성은 되고 삭제는 막는 폴더에서는 **삭제가 실패해
-/// 파일이 남는다**. 그때는 경고 로그를 남기고 성공으로 본다 — 쓸 수 있다는 것은 이미 증명됐다.
+/// ★It may be left behind (contract)★: the created file is deleted, but in a folder that allows creation and blocks deletion **the deletion fails and
+/// the file remains**. Then a warning log is left and it is treated as success — that it can be written has already been proven.
 pub fn probe_write_in(dir: &Path) -> std::io::Result<()> {
     probe_write_at(&probe_path(dir))
 }
 
-/// 프로브 경로를 인자로 받는 본체 — 테스트가 "그 이름으로 파일을 만들 수 없는" 실패 분기를 결정적으로
-/// 재현하려면 이름을 정할 수 있어야 한다. 운영 진입점은 [`probe_write_in`] 뿐이다.
+/// The body that takes the probe path as an argument — for a test to deterministically reproduce the failure branch "cannot create a file with that name",
+/// the name must be settable. The only production entry point is [`probe_write_in`].
 ///
-/// ★`io::Result` 로 돌려주는 이유★: 호출자가 `ErrorKind` 를 봐야 한다 — 폴더가 검사 도중 사라진
-/// `NotFound` 는 "쓸 수 없다"가 아니라 경합이고, 그 둘을 여기서 뭉치면 구분할 방법이 사라진다.
+/// ★Why it returns `io::Result`★: the caller must see the `ErrorKind` — a `NotFound` where the folder vanished mid-check
+/// is a race, not "cannot write", and lumping the two here would remove any way to tell them apart.
 fn probe_write_at(probe: &Path) -> std::io::Result<()> {
     let create = |p: &Path| {
         std::fs::OpenOptions::new()
@@ -63,7 +63,7 @@ fn probe_write_at(probe: &Path) -> std::io::Result<()> {
 
     let file = match create(probe) {
         Ok(f) => f,
-        // 같은 pid 의 지난 실행이 정리에 실패하고 남긴 흔적일 수 있다 — 지우고 한 번만 다시 시도한다.
+        // It may be a trace left by a previous run with the same pid whose cleanup failed — delete it and try once more.
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             std::fs::remove_file(probe)?;
             create(probe)?
@@ -83,12 +83,12 @@ fn probe_write_at(probe: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// `once` 가 `NotFound` 로 실패하면 **한 번만** 더 부르고 그 결과를 돌려준다. 그 밖의 결과는 첫 결과
-/// 그대로다.
+/// If `once` fails with `NotFound`, it is called **just once** more and that result is returned. Any other result is the first result
+/// as is.
 ///
-/// ★왜 필요한가(실재하는 경합)★: 자기가 만든 폴더를 되돌리는 검사가 둘 겹치면, A 가 만든 폴더를 B 가
-/// "있다"고 본 직후 A 가 지워 B 의 프로브가 `NotFound` 로 넘어진다. 그건 권한 문제가 아니라 타이밍이라
-/// 멀쩡한 폴더를 "쓰기 불가"로 판정하면 안 된다.
+/// ★Why it is needed (a real race)★: when two checks that revert a folder they made overlap, right after B sees the folder A made as
+/// "existing", A deletes it and B's probe falls over with `NotFound`. That is timing, not a permission problem, so
+/// a healthy folder must not be decided "not writable".
 pub fn retry_if_vanished(mut once: impl FnMut() -> std::io::Result<()>) -> std::io::Result<()> {
     match once() {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => once(),
@@ -101,7 +101,7 @@ mod tests {
     use super::*;
     use std::io::ErrorKind;
 
-    /// 프로브 전용 유니크 폴더(테스트 병렬 실행에서 서로 밟지 않게).
+    /// A unique folder dedicated to the probe (so parallel test runs do not step on each other).
     fn fresh_probe_dir(tag: &str) -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -114,9 +114,9 @@ mod tests {
         dir
     }
 
-    /// ★프로브의 존재 이유를 겨눈다★: 폴더는 있는데 그 안에 **파일을 만들 수 없는** 경우. 폴더 생성만
-    /// 보는 검사는 여기서 통과해 버린다. ACL 조작 없이 결정적으로 재현하려고 프로브 이름을 주입해
-    /// 그 이름을 폴더로 선점한다 — 그 이름으로는 파일을 만들 수도 지울 수도 없다(실측: 둘 다 code 5).
+    /// ★It aims at the reason the probe exists★: the folder exists but **a file cannot be created** in it. A check that only
+    /// looks at folder creation passes here. To reproduce deterministically without ACL manipulation, the probe name is injected and
+    /// that name is pre-claimed as a folder — a file can neither be created nor deleted with that name (measured: both code 5).
     #[test]
     fn writable_probe_rejects_a_name_it_cannot_create() {
         let dir = fresh_probe_dir("nofile");
@@ -125,7 +125,7 @@ mod tests {
         std::fs::create_dir_all(&taken).expect("프로브 이름을 폴더로 선점");
         let err = probe_write_at(&taken).unwrap_err();
         let _ = std::fs::remove_dir_all(&dir);
-        // 경합(NotFound)과 구분돼야 재시도가 헛돌지 않는다.
+        // It must be told apart from a race (NotFound) so that the retry does not spin in vain.
         assert_ne!(
             err.kind(),
             ErrorKind::NotFound,
@@ -133,7 +133,7 @@ mod tests {
         );
     }
 
-    /// 같은 pid 의 지난 실행이 정리에 실패해 남긴 프로브는 실패 사유가 아니다 — 지우고 다시 만든다.
+    /// A probe left because a previous run with the same pid failed to clean up is not a failure reason — delete it and create it again.
     #[test]
     fn writable_probe_recovers_from_a_leftover_probe_file() {
         let dir = fresh_probe_dir("leftover");
@@ -147,8 +147,8 @@ mod tests {
         assert!(!still_there, "잔여 프로브까지 정리돼야");
     }
 
-    /// 판정 표 — 각 줄 = `once` 가 차례로 낼 결과(`None` = 성공) · 기대 호출 수 · 기대 오류. 겹친 점검
-    /// 경합 시험(소비자 쪽)은 이 표를 확률적으로만 지나가므로 여기서 결정적으로 잰다.
+    /// Decision table — each line = the results `once` yields in turn (`None` = success) · the expected call count · the expected error. The overlapping-check
+    /// race test (consumer side) passes through this table only probabilistically, so it is measured deterministically here.
     #[test]
     fn retry_if_vanished_calls_again_only_after_not_found_and_only_once() {
         use ErrorKind::{NotFound, PermissionDenied};

@@ -1,31 +1,31 @@
-//! 하네스 전용 — 기능 플래그 `test-support` 뒤에 산다(ADR-0012).
+//! Harness only — lives behind the feature flag `test-support` (ADR-0012).
 
 use std::future::Future;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::task::{Context, Poll, Wake, Waker};
 
-/// 패닉 훅은 **프로세스 전역**이라 잡고 되돌리는 구간이 겹치면 안 된다.
+/// The panic hook is **process-global**, so the spans that grab and restore it must not overlap.
 static PANIC_HOOK: Mutex<()> = Mutex::new(());
 
-/// 의도된 패닉의 기본 출력을 끄고 `body` 를 돌린다 — 끝나면 원래 훅을 되돌린다.
+/// Turns off the default output of an intended panic and runs `body` — when done, it restores the original hook.
 ///
-/// ★한 테스트 바이너리의 테스트들은 스레드로 **동시에** 돈다★ — 훅을 각자 갈아 끼우면 늦게 끝난 쪽이
-/// 남의 훅을 원본으로 알고 되돌려 놓거나, 조용해야 할 구간에 남의 패닉 출력이 섞인다. 그 경합을 이
-/// 한 자리로 막는다(잠금은 훅 교체 구간 전체를 덮는다).
-/// ★구간 안에서는 **무관한 스레드**(같은 바이너리의 다른 테스트)의 패닉 출력도 사라진다★ — 훅이
-/// 프로세스 전역이라서다. 그래서 구간은 의도된 패닉이 나는 순간만 덮게 좁게 잡는다. 스레드로 가려
-/// 조용히 하지 않는 것은 의도다 — 의도된 패닉이 본문이 띄운 스레드(codex 라이터 · tokio blocking
-/// pool)에서 나는 호출자가 있다.
-/// ★`body` 밖으로 새는 패닉은 의도된 것이 아니다★ — 그 메시지를 되살려 출력하고 **같은 페이로드**로
-/// 다시 던진다. 호출자에게는 평범한 테스트 실패로 보인다.
+/// ★The tests of one test binary run **concurrently** on threads★ — if each swaps the hook, the one that finishes later
+/// restores another's hook thinking it is the original, or another's panic output gets mixed into a span that should be quiet. This race is
+/// blocked at this one place (the lock covers the whole hook-swap span).
+/// ★Inside the span, panic output from **unrelated threads** (other tests of the same binary) also disappears★ — because the hook is
+/// process-global. So the span is kept narrow to cover only the moment the intended panic occurs. Not silencing by thread is
+/// intentional — there are callers where the intended panic occurs on a thread the body launched (the codex writer · tokio blocking
+/// pool).
+/// ★A panic that leaks out of `body` is not an intended one★ — we revive its message, print it, and rethrow with **the same payload**.
+/// To the caller it looks like an ordinary test failure.
 pub fn with_quiet_panic_hook<T>(body: impl FnOnce() -> T) -> T {
     let _held = PANIC_HOOK.lock().unwrap_or_else(PoisonError::into_inner);
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
-    // ★되돌리기를 `Drop` 으로 옮기지 말 것★ — std 는 패닉 중인 스레드의 `set_hook` 을 거부하고, 그 거부가
-    //   unwind 중인 소멸자 안의 두 번째 패닉이 되어 프로세스가 abort 한다(테스트 바이너리가 메시지 없이
-    //   통째로 죽는다 — Windows `0xC0000409`, 실측). 그렇다고 대입문만 두면 unwind 가 그 줄을 건너뛰어
-    //   조용한 훅이 남는다. 그래서 unwind 를 잡은 **뒤에** 되돌린다.
+    // ★Do not move the restore into `Drop`★ — std refuses `set_hook` on a panicking thread, and that refusal becomes
+    //   a second panic inside a destructor during unwind, so the process aborts (the test binary dies whole with no
+    //   message — Windows `0xC0000409`, measured). But with only an assignment statement, unwind skips that line and
+    //   a quiet hook remains. So we restore **after** catching the unwind.
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
     std::panic::set_hook(previous);
     outcome.unwrap_or_else(|payload| {
@@ -51,11 +51,11 @@ impl Wake for Signal {
     }
 }
 
-/// future 하나를 이 스레드에서 끝까지 돌린다.
+/// Runs one future to completion on this thread.
 ///
-/// ★런타임 crate 를 안 들이려고 직접 돈다★ — 이 crate 는 워크스페이스 의존 0이고 외부 의존도 최소로
-/// 잡았다(lib.rs 불변식 1). 하네스가 도는 future 는 핸들러 하나 또는 가짜 링크 하나뿐이라 스케줄러가
-/// 할 일이 없다.
+/// ★It runs directly so as not to bring in a runtime crate★ — this crate has zero workspace dependencies and keeps external dependencies minimal
+/// too (lib.rs invariant 1). The futures the harness runs are only one handler or one fake link, so the scheduler has
+/// nothing to do.
 pub fn block_on<F: Future>(future: F) -> F::Output {
     let mut future = Box::pin(future);
     let signal = Arc::new(Signal {
@@ -88,7 +88,7 @@ mod tests {
 
     #[test]
     fn a_panicking_body_unwinds_as_an_ordinary_panic_and_the_previous_hook_comes_back() {
-        // abort 가 없다는 단언은 없다 — 되돌리기가 unwind 중으로 돌아가면 이 바이너리가 통째로 죽는다.
+        // There is no assertion that there is no abort — if the restore goes back to being during unwind, this binary dies whole.
         let me = std::thread::current().id();
         let heard = Arc::new(AtomicUsize::new(0));
         let original = {
@@ -114,7 +114,7 @@ mod tests {
         );
         assert_eq!(heard.load(Ordering::SeqCst), 0, "구간 안의 패닉은 조용해야");
 
-        // 탐침은 잠금 안에서 쏜다 — 다른 테스트의 조용한 구간이 겹치면 탐침이 거기 삼켜진다.
+        // The probe is fired inside the lock — if another test's quiet span overlaps, the probe is swallowed there.
         let _held = PANIC_HOOK.lock().unwrap_or_else(PoisonError::into_inner);
         let _ = catch_unwind(|| panic!("probe"));
         let restored = heard.load(Ordering::SeqCst) == 1;

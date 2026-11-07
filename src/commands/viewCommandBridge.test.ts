@@ -1,8 +1,8 @@
-// viewCommandBridge — 무엇을 셸에 내놓나(투영) + 내려온 봉투가 registry 를 지나 답으로 돌아가나.
+// viewCommandBridge — what is offered to the shell (projection) + whether an envelope that came down passes the registry and returns as an answer.
 //
-// ★셸의 예약 이름 필터는 여기서 재지 않는다★ — 그 판정은 Rust 쪽에 한 번만 산다
-// (`src-tauri/src/view_commands.rs` 의 `reserved_names`, 하네스는 `tests/layout_commands.rs`). 여기 사본을
-// 두면 두 목록이 갈린다. 데몬이 답하는 이름은 그 필터도 거르지 않는다 — 벽은 데몬의 등록 반려다(ADR-0270 결정 2).
+// ★The shell's reserved name filter is not measured here★ — that decision lives once on the Rust side
+// (`reserved_names` in `src-tauri/src/view_commands.rs`, the harness is `tests/layout_commands.rs`). Putting a copy here
+// makes the two lists diverge. Names the daemon answers are not filtered by that filter either — the wall is the daemon's registration bounce (ADR-0270 decision 2).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -11,7 +11,7 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: (cmd: string, args?: unknown) => invokeMock(cmd, args),
 }))
 
-// listen mock: 등록된 핸들러를 보관해 테스트가 셸 배달을 직접 흉내낸다(uiSettings.test 와 같은 모양).
+// listen mock: keeps the registered handlers so the test imitates the shell delivery directly (the same shape as uiSettings.test).
 const listeners = new Map<string, (e: { payload: unknown }) => void>()
 const unlistenMock = vi.fn()
 const listenMock = vi.fn(async (event: string, handler: (e: { payload: unknown }) => void) => {
@@ -35,7 +35,7 @@ import { installViewCommandBridge, offeredCommands } from './viewCommandBridge'
 
 const EVT = 'command:request'
 
-/** 마이크로태스크가 다 풀릴 때까지 — invoke·listen 이 전부 async 라 결과가 다음 tick 에 온다. */
+/** Until the microtasks are all drained — invoke · listen are all async so results arrive on the next tick. */
 async function flush(): Promise<void> {
   await Promise.resolve()
   await Promise.resolve()
@@ -102,9 +102,9 @@ describe('offeredCommands — help 를 가진 것만 밖으로 나간다', () =>
 })
 
 describe('installViewCommandBridge — 봉투가 registry 를 지나 답으로 돌아간다', () => {
-  // ★★이 단언을 지우지 말 것★★: `target` 이 빠지면 `listen()` 은 `Any` 로 등록되고, Tauri 는 `Any`
-  //   리스너를 **필터와 무관하게 전부** 깨운다 — 셸이 창 하나를 골라 보내도 main·트리·팝아웃이 다 받아
-  //   같은 명령을 각자 실행하고 각자 답한다(한 봉투에 답장 하나 — TRD §4-⑤ 위반).
+  // ★★Do not delete this assertion★★: if `target` is missing `listen()` registers as `Any`, and Tauri wakes **every**
+  //   `Any` listener **regardless of the filter** — even if the shell picks one window and sends, main · tree · popout all receive it,
+  //   each runs the same command and each answers (one reply per envelope — a TRD §4-⑤ violation).
   it('자기 창 label 로 구독한다 — 안 그러면 창 수만큼 같은 명령이 실행된다', async () => {
     installViewCommandBridge()
     await flush()
@@ -122,7 +122,7 @@ describe('installViewCommandBridge — 봉투가 registry 를 지나 답으로 �
     expect(args).toEqual({
       commands: [{ name: 'slot.empty', help: { summary: '슬롯을 비운다', effect: 'write' } }],
     })
-    // 보고보다 구독이 먼저 — listen 이 풀린 뒤에야 invoke 가 나간다.
+    // Subscription before the report — invoke goes out only after listen resolves.
     expect(listenMock.mock.invocationCallOrder[0]).toBeLessThan(
       invokeMock.mock.invocationCallOrder[0],
     )

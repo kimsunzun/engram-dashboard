@@ -1,12 +1,12 @@
-// 전략: 형제(slotCommands.test.ts)는 store 액션을 spy 로 갈아 "무엇을 불렀나"만 재지만, 여기선 ★실
-//   viewStore★ 를 쓰고 renderModeOverride 를 직접 단언한다. 이유 둘 — ① 토글은 왕복(dom→기본→dom)이
-//   요구사항인데 spy 로는 판정 자체가 store 안에 있어 재지 못한다. ② 무효 인자가 store 에 닿지 않는다는
-//   것은 "spy 가 안 불렸다"보다 "상태가 안 변했다 + store 의 warn 가드가 안 울렸다"로 재는 편이 강하다.
+// Strategy: the sibling (slotCommands.test.ts) swaps store actions for spies and measures only "what was called", but here we use the ★real
+//   viewStore★ and assert renderModeOverride directly. Two reasons — ① the toggle's requirement is a round trip (dom→default→dom), and with a spy
+//   the decision itself lives inside the store so it cannot be measured. ② That an invalid argument does not reach the store is
+//   stronger measured as "state did not change + the store's warn guard did not fire" than as "the spy was not called".
 //
-// ★`./renderModeCommands` 를 직접 import 하지 않는다 — 매니페스트를 통해 들어온다★: 앱이 실제로 다는
-//   것은 `./contributions` 한 줄이고(`App.tsx`), 모듈을 직접 집으면 그 줄이 사라져도 여기 테스트는 계속
-//   초록이다(등록 자체는 직접 import 가 해 주므로). 매니페스트를 태워야 「__engramCmd.list 에 뜬다」가
-//   실제로 물린다. 그 대가로 command 모듈 전량이 로드되므로 stub 집합은 busCommands.test.ts 와 같다.
+// ★Do not import `./renderModeCommands` directly — it comes in through the manifest★: what the app actually attaches
+//   is the one `./contributions` line (`App.tsx`), and if we picked the module directly, tests here would stay green even if that line disappeared
+//   (since the direct import does the registration itself). Only by going through the manifest is 「__engramCmd.list 에 뜬다」 (it shows up in __engramCmd.list)
+//   actually exercised. The price is that every command module loads, so the stub set is the same as busCommands.test.ts.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -22,7 +22,7 @@ vi.mock('../api/clientFactory', () => ({
   bootstrapDaemonIfNeeded: vi.fn(async () => undefined),
 }))
 
-import './contributions' // side-effect register — ★직접 import 금지(위 헤더)★
+import './contributions' // side-effect register — ★no direct import (header above)★
 import { list, run } from './registry'
 import { useViewStore } from '../store/viewStore'
 
@@ -40,8 +40,8 @@ beforeEach(() => useViewStore.setState({ renderModeOverride: {} }))
 afterEach(() => vi.restoreAllMocks())
 
 describe('렌더 모드 command 라우팅', () => {
-  // ★매니페스트 배선 자물쇠★: contributions.ts 의 `import './renderModeCommands'` 를 지우면 여기가 먼저
-  //   깨진다(아래 라우팅 테스트도 전부 「알 수 없는 command id」로 함께 깨진다).
+  // ★Manifest wiring lock★: if you delete `import './renderModeCommands'` from contributions.ts, this breaks first
+  //   (all the routing tests below also break together with 「알 수 없는 command id」 (unknown command id)).
   it('다섯 id 가 매니페스트(contributions)를 타고 레지스트리에 오른다 — __engramCmd.list 가 보는 목록', () => {
     const ids = list().map(c => c.id)
     for (const id of IDS) expect(ids, `${id}: contributions.ts 에 모듈 import 가 있나`).toContain(id)
@@ -54,8 +54,8 @@ describe('렌더 모드 command 라우팅', () => {
     expect(override()['s1']).toBe('terminal')
   })
 
-  // ★대소문자 무관 수용 + 선언 철자 정규화(사용자 결정 2026-09-23)★: store 에 박히는 것은 호출자가 쓴
-  //   철자가 아니라 RENDER_MODES 의 원소다 — 아니면 LayoutLeaf 의 switch 가 조용히 terminal 로 떨군다.
+  // ★Case-insensitive acceptance + declared spelling normalization (user decision 2026-09-23)★: what lands in the store is an element of RENDER_MODES,
+  //   not the spelling the caller wrote — otherwise the switch in LayoutLeaf silently falls to terminal.
   it('mode 대소문자 무관 수용 → 선언 철자로 정규화해 기록', () => {
     run('slot.renderMode.set', { slotId: 's1', mode: 'RICH' })
     expect(override()['s1']).toBe('rich')
@@ -83,7 +83,7 @@ describe('렌더 모드 command 라우팅', () => {
     expect(override()['s1']).toBe('dom')
   })
 
-  // disable = clearRenderMode 라 dom 이 아닌 오버라이드도 함께 걷힌다(별칭의 실제 의미 — "기본으로 복귀").
+  // disable = clearRenderMode, so an override that is not dom is withdrawn too (the real meaning of the alias — "return to default").
   it('slot.domMode.disable → 항목 제거(rich 오버라이드도 함께 걷힌다)', () => {
     run('slot.renderMode.set', { slotId: 's1', mode: 'rich' })
     run('slot.domMode.disable', { slotId: 's1' })
@@ -105,8 +105,8 @@ describe('렌더 모드 command 라우팅', () => {
     expect(override()['s1']).toBe('dom')
   })
 
-  // slotId 는 창 간 전역 고유 UUID 라(ADR-0035) viewId 를 안 받는다 — 다만 슬롯 메뉴 ctx 가방을 그대로
-  //   넘길 수 있어야 하므로 여분 키는 무시한다.
+  // slotId is a globally unique UUID across windows (ADR-0035) so it does not take viewId — but it must be able to take the slot menu ctx bag
+  //   as is, so extra keys are ignored.
   it('여분 viewId 가 섞인 ctx 가방도 그대로 통과', () => {
     run('slot.domMode.enable', { viewId: 'v1', slotId: 's1' })
     expect(override()['s1']).toBe('dom')
@@ -127,8 +127,8 @@ describe('무효 인자 거절(조용한 no-op 금지)', () => {
     expect(override()).toEqual({})
   })
 
-  // ★핵심★: store 의 setRenderMode 는 무효 mode 를 warn 후 무시한다 — 그 경로로 흘러갔다면 호출자에겐
-  //   성공으로 보인다. command 층이 먼저 거절하므로 store 의 warn 가드에는 닿지도 않는다.
+  // ★Key★: the store's setRenderMode warns and ignores an invalid mode — if it flowed down that path, it would look like
+  //   success to the caller. The command layer rejects first, so it never even reaches the store's warn guard.
   it('mode 무효/누락 → throw + store 불변 + store warn 가드 미도달', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     expect(() => run('slot.renderMode.set', { slotId: 's1', mode: 'bogus' })).toThrow(/mode/)
@@ -141,6 +141,6 @@ describe('무효 인자 거절(조용한 no-op 금지)', () => {
   it('mode 만 무효여도 slotId 쪽 부분 적용이 남지 않는다', () => {
     run('slot.renderMode.set', { slotId: 's1', mode: 'dom' })
     expect(() => run('slot.renderMode.set', { slotId: 's1', mode: 'bogus' })).toThrow(/mode/)
-    expect(override()['s1']).toBe('dom') // 옛 값 유지 — 무효 호출이 지우지도 덮지도 않는다.
+    expect(override()['s1']).toBe('dom') // Old value kept — an invalid call neither clears nor overwrites it.
   })
 })

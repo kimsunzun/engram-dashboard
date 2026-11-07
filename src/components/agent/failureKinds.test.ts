@@ -1,7 +1,7 @@
-// 종류별 처분표(ADR-0172 결정 5) — 화면이 문구를 얻는 유일한 곳이 이 표라는 것을 지킨다.
+// The per-kind disposition table (ADR-0172 decision 5) — guards that this table is the only place the screen gets wording.
 //
-// ★리터럴을 여기 적지 않는다★: 적으면 표와 i18n 이 갈려도 통과한다. 대신 "표가 i18n 에서 왔나" 와
-//   "종류가 늘어도 답이 나오나" 를 잰다.
+// ★Do not write literals here★: if written, it passes even when the table and i18n diverge. Instead we measure "did the table come from i18n" and
+//   "does an answer come out even when kinds grow".
 
 import { describe, expect, it } from 'vitest'
 
@@ -25,7 +25,7 @@ describe('failureKinds — 처분표', () => {
     }
   })
 
-  // ★이 표가 이 판정의 유일본이다(러스트 짝 표는 없다 — failureKinds.ts 헤더)★.
+  // ★This table is the single copy of this decision (there is no Rust pair table — failureKinds.ts header)★.
   it('잠그는 종류는 「이어받을 대화 없음」 하나뿐이고 나머지는 재시도 가능(fail-open)', () => {
     expect(failureSpec('NoConversationToResume').retryable).toBe(false)
     expect(failureSpec('SpawnFailed').retryable).toBe(true)

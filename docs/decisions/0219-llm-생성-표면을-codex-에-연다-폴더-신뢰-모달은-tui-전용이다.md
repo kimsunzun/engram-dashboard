@@ -1,47 +1,47 @@
-# ADR-0219: LLM 생성 표면을 codex 에 연다 — 폴더 신뢰 모달은 TUI 전용이다
+# ADR-0219: Open the LLM creation surface to codex — the folder-trust modal is TUI-only
 
-- 상태: 확정 (2026-09-22, 근거: codex-cli 0.155.1 실측 — 아래 「근거」) · 부분 폐기 by ADR-0270 (결정 2의 셸 gate_backend 문과 영향의 셸 거절 팔 가드) · 부분 폐기 by ADR-0279 (결정 5 의 claude 고정 문 축)
-- 관련: Amends ADR-0215 (LLM 생성 표면의 codex 차단 조항) · ADR-0187(codex 의 두 통로 중 app-server 확정) · ADR-0194(터미널이냐 JSON 이냐는 백엔드 중립 축) · ADR-0078(출력 모드는 생성 시점 고정) · ADR-0155(선언은 생산자 옆) · CLAUDE.md 「LLM-우선 제어」 · `crates/engram-dashboard-agent/src/commands.rs`(`LLM_BACKEND_POLICY`) · `src-tauri/src/layout/apply.rs`(`gate_backend`) · `src/commands/registry.ts` · `docs/process/S21-codex-backend/trd.md` §6-G · step-log S21 · Amended by ADR-0270 (결정 2의 셸 gate_backend 문과 영향의 셸 거절 팔 가드) · Amended by ADR-0279 (결정 5 의 claude 고정 문 축)
+- 상태: 확정 (2026-09-22, basis: codex-cli 0.155.1 measured — see 「근거」 below) · 부분 폐기 by ADR-0270 (the shell gate_backend door of decision 2 and the shell rejection-arm guard in the consequences) · 부분 폐기 by ADR-0279 (the claude-pinned door axis of decision 5)
+- 관련: Amends ADR-0215 (the clause blocking codex on the LLM creation surface) · ADR-0187 (app-server confirmed as the codex path of its two) · ADR-0194 (terminal vs JSON is a backend-neutral axis) · ADR-0078 (the output mode is fixed at creation time) · ADR-0155 (declarations sit next to the producer) · CLAUDE.md 「LLM-우선 제어」 · `crates/engram-dashboard-agent/src/commands.rs`(`LLM_BACKEND_POLICY`) · `src-tauri/src/layout/apply.rs`(`gate_backend`) · `src/commands/registry.ts` · `docs/process/S21-codex-backend/trd.md` §6-G · step-log S21 · Amended by ADR-0270 (the shell gate_backend door of decision 2 and the shell rejection-arm guard in the consequences) · Amended by ADR-0279 (the claude-pinned door axis of decision 5)
 
 ## 맥락
 
-2026-09-07 에 사용자가 Phase 1 범위를 「그냥 딱 codex 띄우는 정도만」으로 좁히면서 **§6-G = 「안 연다」**를 골랐다 — LLM 제어 표면(`agent.new` · 셸 `agent.spawnInto` · 프론트 레지스트리)이 codex 를 **만들지 못하게** 둔다는 결정이다. 그 결정을 떠받친 사실은 하나였다: ★codex 는 처음 보는 폴더에서 자기 **폴더 신뢰 확인 모달**을 띄우고, 사람이 아닌 호출자는 그 모달을 못 지난다★. 그러니 지금 열면 「만들 수는 있는데 쓸 수는 없는 에이전트」가 생긴다 — 여는 시점은 「신뢰 창 처리가 정해질 때」로 미뤘다.
+On 2026-09-07 the user narrowed the Phase 1 scope to 「그냥 딱 codex 띄우는 정도만」 (just launching codex, nothing more) and chose **§6-G = 「안 연다」** (do not open) — a decision that the LLM control surfaces (`agent.new` · the shell `agent.spawnInto` · the frontend registry) are left **unable to create** codex. The fact that held up that decision was one: ★codex shows its own **folder-trust confirmation modal** in a folder it has not seen before, and a caller that is not a human cannot get past that modal★. So opening it now would produce 「만들 수는 있는데 쓸 수는 없는 에이전트」 (an agent that can be created but cannot be used) — the time to open was postponed to 「신뢰 창 처리가 정해질 때」 (when the trust-window handling is settled).
 
-그 뒤 Phase 2 가 통로를 `app-server` 로 확정했고(ADR-0187), codex 를 app-server 로 띄우는 경로가 실제로 돌기 시작했다. ★**그러면서 위 전제를 직접 잴 수 있게 됐고, 재 보니 그 경로에는 모달이 없었다.**★ 전제가 죽었으므로 그 위에 선 거절도 근거를 잃는다.
+After that, Phase 2 confirmed `app-server` as the path (ADR-0187), and the path that launches codex through the app-server actually started to run. ★**That made it possible to measure the premise above directly, and when measured, that path had no modal.**★ The premise died, so the rejection standing on it loses its basis too.
 
-그리고 **거절이 살아 있는 동안 실제 혼란이 났다** — 명령 목록의 `agent.spawnInto` 설명이 「`"codex"` 는 아는 낱말이지만 이 표면으로는 지금 만들지 않는다」를 광고하고 있었고, 그것을 읽은 호출자가 codex 를 이 문으로 만들 수 없다고 판단해 우회했다.
+And **real confusion occurred while the rejection was alive** — the description of `agent.spawnInto` in the command list was advertising 「`"codex"` 는 아는 낱말이지만 이 표면으로는 지금 만들지 않는다」 (codex is a known word but is not created through this surface for now), and a caller that read it judged that codex could not be created through this door and worked around it.
 
 ## 결정
 
-1. ★**`agent.new` 의 백엔드 어휘를 `Codex` 에 연다 — 두 출력 모드 다.**★ `LLM_BACKEND_POLICY` 의 codex 줄이 `refusal: None` 이 되고, 선언 어휘 `AgentBackend` 에 `Codex` 변형이 서고, `backend_command` 가 그 짝을 채운다. `output_format` 은 백엔드와 무관하게 실리므로 **낱말 하나를 열면 `Terminal` 과 `StreamJson` 이 함께 열린다**(ADR-0078/0194 의 축 그대로).
-2. **정책 표를 보는 나머지 두 문도 같은 날 함께 열린다** — 셸 `gate_backend`(`agent.spawnInto`)와 프론트 레지스트리의 `humanOnly` 사유. 정책의 집은 여전히 `LLM_BACKEND_POLICY` 한 곳이고, 문마다 자기 목록을 들지 않는다.
-3. ★**신뢰를 확인하는 코드를 두지 않는다.**★ 이 경로에 검사할 게이트가 애초에 없으므로, 있는 척 검사를 지으면 지키는 것 없이 의존만 는다.
-4. **인자 표면은 늘리지 않는다** — `extra_args` 는 비운 채로 둔다. 모델·추론 강도 따위를 고르는 칸을 이번에 두지 않는다(사용자가 범위를 스폰으로 한정했다).
-5. **두 문은 일부러 claude 에 못박은 채로 남는다** — `create_and_start`(코어) 와 프론트 `agent.spawn` 이다. 백엔드·모드를 고르는 자리를 **입구 하나**로 모으기 위해서다. 이 둘은 낱말을 받는 칸 자체가 없으므로 「골라도 정책이 닫는다」와 다른 축이고, 두 축을 뭉개면 다음에 어느 문을 열 때 무엇을 손대야 하는지가 사라진다.
+1. ★**Open the backend vocabulary of `agent.new` to `Codex` — both output modes.**★ The codex line of `LLM_BACKEND_POLICY` becomes `refusal: None`, the `Codex` variant stands in the declaration vocabulary `AgentBackend`, and `backend_command` fills in its pair. `output_format` is carried regardless of the backend, so **opening one word opens `Terminal` and `StreamJson` together** (the axis of ADR-0078/0194 as is).
+2. **The other two doors that look at the policy table are opened together on the same day** — the shell `gate_backend` (`agent.spawnInto`) and the `humanOnly` reason of the frontend registry. The home of the policy is still the single `LLM_BACKEND_POLICY`, and no door carries its own list.
+3. ★**No code that checks trust is placed.**★ There is no gate to check on this path in the first place, so building a check that pretends there is one only adds dependency while guarding nothing.
+4. **The argument surface is not increased** — `extra_args` is left empty. We do not put in a field for choosing the model, reasoning effort and the like this time (the user limited the scope to spawn).
+5. **Two doors are deliberately left pinned to claude** — `create_and_start` (core) and the frontend `agent.spawn`. This is to gather the place where the backend and mode are chosen into **one entrance**. These two have no field that accepts the word in the first place, so they are on a different axis from 「골라도 정책이 닫는다」 (even if chosen, the policy closes it), and if the two axes are mashed together, what has to be touched when opening some door next time is lost.
 
 ## 거부한 대안
 
-- **(a) 스폰 전에 codex 의 `config.toml` 을 읽어 신뢰 상태를 확인한다** — 버렸다. ① 코어 crate 에 TOML 직접 의존이 는다 ② 그 파일의 **경로 키 매칭 규칙**(대소문자 · 구분자 · UNC · 변수 확장)을 따로 실측해야 판정이 선다 ③ 그렇게 지불하고 막는 실패 모드가 **이 경로에는 존재하지 않는다는 것이 측정 결과다**. 지키는 것이 없는 게이트다.
-- **(b) 거절을 그대로 둔다** — 버렸다. 사용자가 요청한 기능을 막고 있고, **그 거절이 내세운 사유가 더는 사실이 아니다**. 사실이 아닌 사유로 닫아 두면 호출자가 그 광고를 믿고 우회한다(실발생 — 위 「맥락」).
-- **(c) 같은 라운드에 모델·추론 강도 인자 표면을 함께 연다** — 버렸다. ★사용자가 이번 범위를 **스폰 전용**으로 명시했다★. 인자 어휘를 정하는 것은 별개 결정이고, 여기 끼워 넣으면 계약 모양이 두 번 바뀐다.
+- **(a) Read codex's `config.toml` before spawn to check the trust state** — dropped. ① TOML direct dependency grows in the core crate ② the **path-key matching rules** of that file (case · separators · UNC · variable expansion) have to be measured separately before the decision stands ③ the failure mode it pays to block **does not exist on this path, as the measurement result shows**. It is a gate that guards nothing.
+- **(b) Leave the rejection as it is** — dropped. It blocks a feature the user requested, and **the reason that rejection put forward is no longer true**. If it is kept closed on a reason that is not true, callers believe that advertisement and work around it (it actually happened — 「맥락」 above).
+- **(c) Open the model and reasoning-effort argument surface in the same round** — dropped. ★The user explicitly set this round's scope to **spawn only**★. Deciding the argument vocabulary is a separate decision, and squeezing it in here changes the contract shape twice.
 
 ## 근거
 
-★**측정 = codex-cli 0.155.1, 2026-09-22.**★ `app-server` 통로로 **한 번도 본 적 없는 폴더**에 `thread/start` 를 보냈다.
+★**Measurement = codex-cli 0.155.1, 2026-09-22.**★ We sent `thread/start` through the `app-server` path to a **folder never seen before**.
 
-- **성공으로 돌아왔다** — 약 **338 ms**, 오류 응답 **없음**, 인바운드 신뢰 요청 **없음**.
-- 그리고 codex 가 그 폴더를 **자기 `config.toml` 에 `trust_level = "trusted"` 로 스스로 적었다**.
-- 즉 ★**폴더 신뢰 모달은 TUI 전용 장치였다**★ — 그 모드에서는 모달이 **화면에 보이고 사람이 답한다**. app-server 경로에는 그 장치가 없다.
+- **It came back as success** — about **338 ms**, **no** error response, **no** inbound trust request.
+- And codex **wrote that folder into its own `config.toml` as `trust_level = "trusted"` by itself**.
+- That is, ★**the folder-trust modal was a TUI-only device**★ — in that mode the modal is **visible on the screen and a human answers it**. The app-server path does not have that device.
 
-2026-09-07 의 결정은 이 측정 없이, TUI 에서 본 모달을 codex 전반의 성질로 읽고 내린 것이다. 그 읽기가 틀렸다는 것이 위 실측이고, 그래서 **결정 자체가 아니라 결정의 전제가 죽었다**.
+The decision of 2026-09-07 was made without this measurement, reading the modal seen in the TUI as a property of codex as a whole. That the reading was wrong is the measurement above, and so it is **not the decision itself but the premise of the decision that died**.
 
 ## 영향 / 불변식
 
-- ★**TUI 모드도 함께 열린다 — 거기서는 신뢰 모달이 진짜다.**★ 수용하는 대가다: 그 모달은 **화면에 보이고 사람이 답할 수 있다**. 「LLM 이 만들었는데 아무도 못 쓰는 에이전트」가 되지 않는 이유가 그것이고, 이 문장이 옛 거절 사유를 대체한다.
-- **정책 표는 비우지 않는다** — 오늘 이 표는 아무 낱말도 안 닫지만, 다음 백엔드가 올 때 「선언 없음 = 닫힘」(`NO_POLICY_DECLARED`)이 그대로 서 있어야 하고, 생성 문 셋이 각자 목록을 들지 않게 하는 자리가 여기다.
-- **어휘와 표는 같은 집합을 열어야 한다** — 재는 자리 셋: `agent` 의 `commands::tests::new_creates_exactly_what_the_llm_backend_policy_opens` · `src-tauri/tests/layout_apply.rs::every_creation_door_reads_one_backend_policy` · `src/commands/agentCommands.test.ts`.
-- ★**`agent.new` 의 정책 팔은 오늘 닿지 않는다 — 그래도 지우지 말 것.**★ 닿지 않는 **사유가 이 결정으로 갈렸다**: 전에는 「선언 어휘가 표보다 좁아서」였고 지금은 「어휘와 표가 여는 집합이 정확히 같아서 + 표가 아무 낱말도 안 닫아서」다. 그 팔이 막는 편집은 **어휘를 넓히면서 표는 안 넓히는 것**이고, 그날 팔이 살아난다.
-- **셸 `gate_backend` 의 거절 팔은 오늘 실행 시 닿지 않는다** — wire 어휘가 `claude`·`codex` 둘뿐이고 둘 다 열렸으므로, 남는 거절은 `parse_backend` 의 오탈자 그물이다. 그 팔은 **다음 백엔드를 위한 가드**로 남긴다(그 사실을 그 자리 주석이 진다).
-- **디스크 호환 이주가 아니다** — `AgentCommand::Codex { extra_args, output_format }` 는 이 결정 전부터 있었고 사람 메뉴가 그 모양 그대로 `agents.json` 에 이미 쓰고 있었다. ★다음 낱말이 같은 값어치를 갖는지는 **짝이 이미 있나**가 가른다★ — `Gemini` 는 짝이 없어 디스크 이주를 함께 설계해야 한다.
-- **명령 목록 세대를 올린다** — 셸 카탈로그(`layout::commands`)와 코어 카탈로그(`agent::commands`) 양쪽. 안 올리면 codex 를 만들어 주는 빌드와 거절하는 빌드가 같은 세대를 보고해 진단이 거짓말을 한다.
-- **미검으로 남은 것** — 이 측정은 **한 번도 본 적 없는 폴더 · app-server 통로 · 0.155.1** 한 조합이다. codex 가 다른 버전에서 그 통로에 신뢰 요청을 도로 들이면 이 결정의 전제가 다시 죽는다. 그때의 좌표는 위 대안 (a) 이고, 되살리려면 **경로 키 매칭 규칙 실측**이 선행 조건이다.
+- ★**TUI mode is opened together — there the trust modal is real.**★ It is the cost we accept: that modal is **visible on the screen and a human can answer it**. That is the reason it does not become 「LLM 이 만들었는데 아무도 못 쓰는 에이전트」 (an agent the LLM created that nobody can use), and this sentence replaces the old rejection reason.
+- **The policy table is not emptied** — today this table closes no word, but when the next backend comes, 「선언 없음 = 닫힘」 (no declaration = closed) (`NO_POLICY_DECLARED`) must still stand, and this is the place that keeps the three creation doors from each carrying their own list.
+- **The vocabulary and the table must open the same set** — three places measure it: `commands::tests::new_creates_exactly_what_the_llm_backend_policy_opens` of `agent` · `src-tauri/tests/layout_apply.rs::every_creation_door_reads_one_backend_policy` · `src/commands/agentCommands.test.ts`.
+- ★**The policy arm of `agent.new` is not reached today — still, do not delete it.**★ The **reason it is not reached has changed with this decision**: before it was 「선언 어휘가 표보다 좁아서」 (because the declaration vocabulary is narrower than the table), and now it is 「어휘와 표가 여는 집합이 정확히 같아서 + 표가 아무 낱말도 안 닫아서」 (because the vocabulary and the table open exactly the same set + the table closes no word). The edit that arm blocks is **widening the vocabulary without widening the table**, and on that day the arm comes alive.
+- **The rejection arm of the shell `gate_backend` is not reached at execution today** — the wire vocabulary is only `claude` and `codex` and both are opened, so the remaining rejection is the typo net of `parse_backend`. That arm is left as **a guard for the next backend** (the comment at that spot carries that fact).
+- **This is not a disk-compatibility migration** — `AgentCommand::Codex { extra_args, output_format }` existed from before this decision and the human menu was already writing it into `agents.json` in exactly that shape. ★Whether the next word has the same worth is decided by **whether a counterpart already exists**★ — `Gemini` has no counterpart, so a disk migration has to be designed along with it.
+- **Raise the command-list generation** — both the shell catalog (`layout::commands`) and the core catalog (`agent::commands`). If not raised, the build that creates codex and the build that rejects it report the same generation, and the diagnosis lies.
+- **What remains unverified** — this measurement is one combination: **a folder never seen before · the app-server path · 0.155.1**. If codex in another version brings a trust request back into that path, the premise of this decision dies again. The coordinate then is alternative (a) above, and to revive it, **measuring the path-key matching rules** is a prerequisite.

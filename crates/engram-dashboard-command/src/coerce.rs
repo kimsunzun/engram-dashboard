@@ -1,39 +1,39 @@
-//! 광고한 스키마와 serde 사이의 조정 — **표가 부르기 직전에** 한 번 돈다(TRD §2-4 ② · §4-③).
+//! Coercion between the advertised schema and serde — runs once, **right before the table calls** (TRD §2-4 ② · §4-③).
 //!
-//! ★어댑터의 성질이 아니라 계약의 성질이다★: 조정을 `blocking_handler` 안에 두면 [`CommandHandler`] 를
-//! 직접 구현한 핸들러(Step 3 의 `await` 하는 셸 명령들)는 같은 `{"type":"integer"}` 를 광고하면서 다르게
-//! 받는다. 그래서 조정 재료를 **선언된 스키마**로 두고 [`crate::CommandTable::call`] 한 곳에서 돈다.
+//! ★This is a property of the contract, not of the adapter★: if the coercion lived inside `blocking_handler`, a handler that implements
+//! [`CommandHandler`] directly (the `await`ing shell commands of Step 3) would advertise the same `{"type":"integer"}` and yet
+//! accept input differently. So the coercion material is the **declared schema**, and it runs in one place, [`crate::CommandTable::call`].
 //!
-//! 조정은 둘이다 — 정수 칸에 온 `1.0`([`integral_numbers_to_integers`])과 열거 칸에 온 다른 대소문자
-//! ([`enum_words_to_declared_spelling`]). 두 규칙 다 **선언이 그 칸을 무엇이라 말했는가**만 재료로 쓴다.
+//! There are two coercions — `1.0` arriving in an integer field ([`integral_numbers_to_integers`]) and a different letter case
+//! arriving in an enum field ([`enum_words_to_declared_spelling`]). Both rules use only **what the declaration said that field is** as their material.
 //!
 //! [`CommandHandler`]: crate::CommandHandler
 
 use serde_json::Value;
 
-/// f64 가 정수를 정확히 담는 한계.
+/// The limit up to which f64 holds an integer exactly.
 const EXACT: f64 = 9_007_199_254_740_992.0;
 
-/// 정수 칸에 온 소수부 없는 실수(`1.0`)를 정수 표기로 옮긴다 — **광고한 스키마가 실제로 받는 것과
-/// 같아지는 자리**다.
+/// Rewrites a real number with no fractional part (`1.0`) in an integer field into integer notation — this is **the point
+/// where the advertised schema matches what is actually accepted**.
 ///
-/// ★스키마 쪽으로는 좁힐 수 없다★: JSON 의 수치 모델에서 `1.0` 과 `1` 은 **같은 값**이고,
-/// `{"type":"integer"}` 는 「소수부가 0 인 수」를 포함한다(draft 6 이후 — 파생 파일이 `$schema` 로 방언을
-/// 밝힌다). 즉 「소수점을 찍지 마라」를 표현하는 키워드가 없다. 그런데 serde 는 정수 칸에 f64 가 오면
-/// 반려하므로, 손대지 않으면 스키마를 보고 인자를 채운 호출자(LLM·JS — 정수를 `1.0` 으로 찍는 일이
-/// 흔하다)가 광고대로 보내고 거절당한다.
+/// ★It cannot be narrowed on the schema side★: in JSON's number model `1.0` and `1` are **the same value**,
+/// and `{"type":"integer"}` includes 「소수부가 0 인 수」 (numbers whose fractional part is 0) (since draft 6 — the derived file
+/// states its dialect through `$schema`). So no keyword expresses 「소수점을 찍지 마라」 (do not write a decimal point). But serde
+/// rejects an f64 arriving in an integer field, so if we leave it alone, a caller that filled the arguments from the schema
+/// (an LLM or JS — writing an integer as `1.0` is common) sends what was advertised and gets rejected.
 ///
-/// ★고치는 자리는 **선언이 정수라고 말한 칸**뿐이다★ — 실수 칸(`{"type":"number"}`)과 선언에 없는 칸은
-/// 손대지 않는다. 그래서 `-0.0` 이 정수 칸에서는 `0` 으로 접히고(정수에 부호 있는 0 이 없다) 실수 칸에는
-/// 그대로 남는다(거기서는 부호가 관측된다).
-/// ★2^53 밖은 건드리지 않는다★ — 거기서는 f64 가 정수를 정확히 담지 못해 옮기는 것 자체가 값을 바꾼다.
-/// 정수 칸이면 그대로 두어 역직렬화가 반려하게 둔다.
+/// ★The only fields we fix are **those the declaration said are integers**★ — real-number fields (`{"type":"number"}`) and
+/// fields absent from the declaration are left alone. So `-0.0` folds to `0` in an integer field (integers have no signed zero) and stays
+/// as is in a real-number field (there the sign is observable).
+/// ★Nothing outside 2^53 is touched★ — there f64 cannot hold an integer exactly, so the rewrite itself changes the value.
+/// For an integer field we leave it as is and let deserialization reject it.
 ///
-/// ★알려진 한계(고치지 않는다)★: `[2^52, 2^53)` 안의 소수부 있는 값은 **여기 오기 전에 이미 망가져
-/// 있다** — JSON→f64 파싱이 그 구간에서 소수부를 표현하지 못해 정수로 반올림하므로, 이 함수가 어떤
-/// 문턱을 골라도 「호출자가 소수를 보냈다」를 되살릴 수 없다. 그리고 이 함수가 읽는 스키마 키워드는
-/// `properties`·`items`·`anyOf`·`type` 넷뿐이다(`$ref`·`oneOf`·`allOf`·`prefixItems` 는 못 따라간다) —
-/// 선언 매크로가 그 넷만 찍기 때문이고, 매크로가 더 찍게 되면 여기도 함께 늘려야 한다.
+/// ★Known limit (not fixed)★: a value with a fractional part inside `[2^52, 2^53)` is **already broken
+/// before it gets here** — JSON→f64 parsing cannot represent a fractional part in that range and rounds to an integer, so
+/// whatever threshold this function picks, it cannot recover 「호출자가 소수를 보냈다」 (the caller sent a decimal). Also, the schema keywords this function reads
+/// are only four: `properties`, `items`, `anyOf`, `type` (it cannot follow `$ref`, `oneOf`, `allOf`, `prefixItems`) —
+/// because the declaration macro emits only those four; if the macro starts emitting more, this must grow with it.
 pub(crate) fn integral_numbers_to_integers(schema: &Value, value: &mut Value) {
     match value {
         Value::Number(_) => {
@@ -67,10 +67,10 @@ pub(crate) fn integral_numbers_to_integers(schema: &Value, value: &mut Value) {
     }
 }
 
-/// 이 자리에 설 수 있는 스키마 마디 전부 — 자기 자신 + `anyOf` 갈래들.
+/// Every schema node that can stand at this position — itself plus the `anyOf` branches.
 ///
-/// `Option<T>` 는 `{"anyOf":[T,{"type":"null"}]}` 로 찍히므로(선언 매크로) 갈래를 안 펴면 선택 필드가
-/// 전부 조정 밖으로 샌다.
+/// `Option<T>` is emitted as `{"anyOf":[T,{"type":"null"}]}` (declaration macro), so without expanding the branches, optional fields
+/// would all leak out of the coercion.
 fn for_each_alternative(schema: &Value, visit: &mut impl FnMut(&Value)) {
     visit(schema);
     if let Some(Value::Array(branches)) = schema.get("anyOf") {
@@ -80,8 +80,8 @@ fn for_each_alternative(schema: &Value, visit: &mut impl FnMut(&Value)) {
     }
 }
 
-/// 갈래 중 하나라도 이 타입을 받나. ★한 갈래라도 `number` 면 조정하지 않는다★ — 두 뜻이 겹친 칸에서
-/// 값을 바꾸면 어느 쪽으로 읽힐지를 우리가 정해 버린다.
+/// Whether any branch accepts this type. ★If even one branch is `number`, do not coerce★ — changing the value
+/// in a field where two meanings overlap means we decide which way it will be read.
 fn accepts(schema: &Value, wanted: &str) -> bool {
     let mut found = false;
     for_each_alternative(schema, &mut |node| match node.get("type") {
@@ -94,18 +94,18 @@ fn accepts(schema: &Value, wanted: &str) -> bool {
     found
 }
 
-/// 열거 칸에 온 낱말을 **선언된 철자로** 옮긴다 — 대소문자만 다른 경우다.
+/// Rewrites a word arriving in an enum field **into the declared spelling** — only when the letter case alone differs.
 ///
-/// ★왜 관용하나★: 이 칸을 채우는 것은 사람·LLM 이 손으로 친 낱말이고, 선언이 `Claude`·`Codex` 처럼
-/// PascalCase 면 `claude` 로 치는 쪽이 자연스럽다(그 반대도 같다). 그 둘을 다른 값으로 읽으면 스키마를
-/// 보고 채운 호출자가 「아는 낱말」을 거절당한다.
-/// ★옮기는 자리는 **선언이 열거라고 말한 칸**뿐이다★ — 자유 문자열 칸은 손대지 않는다. 그 칸의 대소문자는
-/// 값의 일부다(경로·이름·id).
-/// ★안 옮기는 둘★: 선언된 철자와 **이미 정확히 같으면** 그대로 두고(옮길 것이 없다), 대소문자만 다른
-/// 후보가 **둘 이상**이면 그대로 둔다 — 어느 쪽으로 읽을지를 여기서 정해 버리지 않는다(정수·실수가 겹친
-/// 칸을 안 건드리는 것과 같은 판정).
-/// ★모르는 낱말은 여기서 반려하지 않는다★ — 그대로 두면 역직렬화가 기대 낱말을 나열해 거절한다. 이 층이
-/// 흉내 내면 같은 규칙이 두 곳에 산다.
+/// ★Why be lenient★: what fills this field is a word typed by hand by a person or LLM, and if the declaration is
+/// PascalCase like `Claude`, `Codex`, typing `claude` is natural (and the reverse is the same). Reading those two as different values
+/// would reject 「아는 낱말」 (a word it knows) for a caller who filled it from the schema.
+/// ★The only fields we rewrite are **those the declaration said are enums**★ — free-string fields are left alone. The letter case of
+/// such a field is part of the value (paths, names, ids).
+/// ★Two cases we do not rewrite★: if it is **already exactly equal** to the declared spelling, leave it (nothing to rewrite), and if
+/// there are **two or more** candidates differing only in letter case, leave it — we do not decide here which way
+/// to read it (the same decision as not touching a field where integer and real overlap).
+/// ★Unknown words are not rejected here★ — if left alone, deserialization rejects them listing the expected words. If this layer
+/// imitated that, the same rule would live in two places.
 pub(crate) fn enum_words_to_declared_spelling(schema: &Value, value: &mut Value) {
     match value {
         Value::String(given) => {
@@ -139,7 +139,7 @@ pub(crate) fn enum_words_to_declared_spelling(schema: &Value, value: &mut Value)
     }
 }
 
-/// 이 자리에 설 수 있는 열거 낱말 중 `given` 과 **대소문자만 다른** 하나 — 없거나 애매하면 `None`.
+/// The one enum word that can stand at this position and differs from `given` **only in letter case** — `None` if there is none or it is ambiguous.
 fn declared_spelling(schema: &Value, given: &str) -> Option<String> {
     let mut exact = false;
     let mut folded: Option<String> = None;
@@ -213,8 +213,8 @@ mod tests {
         assert_eq!(out["maybe"], json!(3), "선택 칸(anyOf)도 조정된다");
     }
 
-    /// ★타입을 알면 `-0.0` 을 가를 수 있다★ — 정수에 부호 있는 0 이 없으므로 정수 칸에서는 `0` 이고,
-    /// 실수 칸에서는 부호가 관측되므로 그대로 둔다.
+    /// ★Knowing the type lets us tell `-0.0` apart★ — integers have no signed zero, so in an integer field it is `0`, and
+    /// in a real-number field the sign is observable, so we leave it.
     #[test]
     fn negative_zero_folds_for_an_integer_field_and_survives_for_a_number_field() {
         let out = coerced(json!({ "count": -0.0, "ratio": -0.0 }));
@@ -242,16 +242,16 @@ mod tests {
         assert_eq!(out["count"], json!(1e300), "2^53 밖은 옮기면 값이 바뀐다");
     }
 
-    /// 선언에 없는 칸은 손대지 않는다 — 무엇으로 읽힐지 모르는 값을 바꿀 근거가 없다.
+    /// Fields absent from the declaration are left alone — there is no basis for changing a value whose reading is unknown.
     #[test]
     fn a_field_the_schema_does_not_declare_is_left_alone() {
         let out = coerced(json!({ "unknown": 7.0 }));
         assert_eq!(out["unknown"], json!(7.0));
     }
 
-    // ── 열거 낱말의 철자 ────────────────────────────────────────────────────────────────────
+    // ── Spelling of enum words ────────────────────────────────────────────────────────────────────
 
-    /// 선언 매크로가 열거 칸에 찍는 모양 그대로다(`{"enum":[…]}` · 선택 칸은 `anyOf` 로 감싼다).
+    /// Exactly the shape the declaration macro emits for an enum field (`{"enum":[…]}` · an optional field is wrapped in `anyOf`).
     fn word_schema() -> Value {
         serde_json::from_str(
             r#"{"type":"object","properties":{
@@ -289,7 +289,7 @@ mod tests {
         assert_eq!(out["rows"][0], json!("Claude"));
     }
 
-    /// 열거가 아닌 칸의 대소문자는 값의 일부다 — 경로·이름·id 가 여기 든다.
+    /// The letter case of a non-enum field is part of the value — paths, names and ids fall here.
     #[test]
     fn a_free_string_field_and_an_undeclared_field_keep_their_casing() {
         let out = respelled(json!({ "name": "Worker", "unknown": "Claude" }));
@@ -298,14 +298,14 @@ mod tests {
         assert_eq!(out["unknown"], json!("Claude"));
     }
 
-    /// 모르는 낱말은 그대로 둔다 — 반려 문구를 내는 것은 역직렬화 쪽이다.
+    /// Unknown words are left alone — it is deserialization that produces the rejection message.
     #[test]
     fn a_word_the_enum_does_not_declare_is_left_alone() {
         let out = respelled(json!({ "backend": "codx" }));
         assert_eq!(out["backend"], json!("codx"));
     }
 
-    /// ★대소문자만 다른 후보가 둘이면 안 건드린다★ — 어느 쪽으로 읽을지를 이 층이 정해 버린다.
+    /// ★If two candidates differ only in letter case, do not touch★ — this layer would decide which way to read it.
     #[test]
     fn a_word_that_two_declared_spellings_could_be_is_left_alone() {
         let ambiguous: Value =
@@ -317,7 +317,7 @@ mod tests {
         assert_eq!(value, json!("claude"));
     }
 
-    /// ★두 뜻이 겹치면 안 건드린다★ — 정수로 접으면 실수로 읽을 갈래의 값을 우리가 바꿔 버린다.
+    /// ★If two meanings overlap, do not touch★ — folding to an integer would change the value of the branch that would read it as a real number.
     #[test]
     fn a_field_that_accepts_both_integer_and_number_is_left_alone() {
         let both: Value =

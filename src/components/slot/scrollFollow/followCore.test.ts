@@ -1,5 +1,5 @@
-// followCore 표 시험 — 이 파일이 `docs/process/S21-chat-ux/trd.md` §2-2 규칙 1–8 의 시험 표다(ADR-0242).
-//   기하는 한 벌로 고정한다: 내용 1000 · 창 200 → 바닥 = 800. 문턱 = 48.
+// followCore table test — this file is the test table of rules 1–8 in `docs/process/S21-chat-ux/trd.md` §2-2 (ADR-0242).
+//   Geometry is fixed as one set: content 1000 · window 200 → bottom = 800. Threshold = 48.
 
 import { describe, expect, it } from 'vitest'
 
@@ -24,7 +24,7 @@ const state = (over: Partial<FollowState> = {}): FollowState => ({ ...initialFol
 
 const last = <T,>(xs: T[]): T => xs[xs.length - 1]
 
-/** 입력을 차례로 먹이고 마지막 결과와 중간의 쓰기들을 돌려준다. */
+/** Feeds inputs in turn and returns the last result and the writes in between. */
 function run(s: FollowState, ...inputs: FollowInput[]): { state: FollowState; writes: (number | null)[] } {
   const writes: (number | null)[] = []
   let cur = s
@@ -114,8 +114,8 @@ describe('규칙 2 — 풀림', () => {
     expect(out.state).toMatchObject({ frozen: false, savedTop: null, expectTop: null, lastTop: 300 })
   })
 
-  // ★손으로 만든 상태★(TRD §12 low 2): 규칙 1 이 얼 때마다 savedTop 을 채우므로 step 만으로는 이 갈래에
-  //   닿지 않는다.
+  // ★A hand-made state★ (TRD §12 low 2): rule 1 fills savedTop every time it freezes, so step alone does not
+  //   reach this branch.
   it('떨어진 채 풀리는데 savedTop 이 비었으면 쓰지 않는다(손으로 만든 상태)', () => {
     const out = step(state({ frozen: true, pinned: false, savedTop: null }), { type: 'resize', m: at(0) })
     expect(out.scrollTo).toBeNull()
@@ -263,7 +263,7 @@ describe('규칙 7 — 쓰기 예고', () => {
     expect(out.state.lastTop).toBe(BOTTOM)
   })
 
-  // 성장 쓰기(800 → 1000)의 scroll 이벤트가 오기 전에 스크롤바를 900 으로 끌었다 — 이벤트는 합쳐져 900 하나만 온다.
+  // The scrollbar was dragged to 900 before the scroll event of the growth write (800 → 1000) came — events are coalesced and only the single 900 comes.
   it('쓰기의 이벤트가 오기 전 사용자가 위로 끌면 푼다 — 다음 성장이 끌어내리지 않는다', () => {
     const grow = step(state({ lastTop: BOTTOM }), { type: 'resize', m: at(BOTTOM, HEIGHT + 200) })
     expect(grow.scrollTo).toBe(BOTTOM + 200)
@@ -311,7 +311,7 @@ describe('pin · unpin', () => {
 })
 
 describe('조합', () => {
-  // TRD §2-7 ★걸쇠★ — 문턱 안 작은 위 휠 → 그 휠의 위 scroll(문턱 안) → 여전히 떨어짐 → 아래로 문턱 안 → 붙음.
+  // TRD §2-7 ★latch★ — a small upward wheel within the threshold → that wheel's upward scroll (within the threshold) → still off the bottom → down within the threshold → pinned.
   it('걸쇠: 작은 위 휠이 푼 뒤 그 휠의 scroll 은 되붙이지 않고, 아래로 돌아오면 되붙는다', () => {
     const start = state({ lastTop: BOTTOM })
     const wheel = run(start, { type: 'intentUp', m: at(BOTTOM) }, { type: 'scroll', m: at(BOTTOM - 10) })

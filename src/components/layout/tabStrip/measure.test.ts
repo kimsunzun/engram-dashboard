@@ -1,4 +1,4 @@
-// measure 단위테스트 — 잰 값(줄 사각형 · 첫 탭 왼쪽 · 쓸 수 있는 폭 = 줄 폭 − `+` 폭)과 이상적 경계 · 탭바 구역의 바탕.
+// measure unit test — measured values (row rectangle · left of the first tab · usable width = row width − `+` width) and the ideal bounds · base of the tab bar zone.
 
 import { describe, expect, it } from 'vitest'
 
@@ -31,9 +31,9 @@ describe('measureStrip', () => {
   })
 })
 
-// 사용자 결정 2026-10-26(T-66) — 탭이 있는 곳(첫 탭 ~ `+`)만 탭바 구역.
+// User decision 2026-10-26 (T-66) — only where tabs are (first tab ~ `+`) is the tab bar zone.
 describe('stripZoneArea — 탭바 구역의 바탕 = 첫 탭 왼쪽 ~ + 오른 끝 × 제목 줄(없으면 탭바 줄)', () => {
-  // 탭바 줄 x 100..800 · y 40..68 · + 상자 폭 26.
+  // Tab bar row x 100..800 · y 40..68 · + box width 26.
   const m = measureStrip({ row: box(100, 40, 700, 28), add: box(0, 40, 26, 28) })
   const three = idealBounds({ widths: [160, 160, 160], visible: [true, true, true] })
   const TITLE = { top: 34, bottom: 68 }

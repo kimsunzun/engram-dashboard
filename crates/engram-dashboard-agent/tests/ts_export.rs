@@ -1,14 +1,14 @@
-//! 선언 파생물 생성 — `cargo test -p engram-dashboard-agent` 가 `bindings/` 에 쓴다(TRD §2-4).
+//! Generating declaration derivatives — `cargo test -p engram-dashboard-agent` writes into `bindings/` (TRD §2-4).
 //!
-//! ★명시적 export 다(암묵 derive 테스트에 기대지 않는다)★: ts-rs 는 `#[ts(export)]` 타입마다
-//!   `export_bindings_<타입>` 테스트를 자동으로 만드는데, `src-tauri/bindings/` 가 그 암묵 경로에 기댔다가
-//!   로컬(`0xc0000139`)에서도 CI(패키지 제외)에서도 **한 번도 돌지 않는** 손관리 생성물이 됐다(TRD §5 실측).
-//!   ★2026-08-24 갱신★: 로컬 쪽은 풀렸다 — `--test lib_unit` 이 서면서 그 암묵 테스트들이 돌고
-//!   `src-tauri/bindings/` 는 그 스위트를 돌 때마다 자동 재생성된다. **CI 쪽은 그대로 막혀 있고**(그 스위트
-//!   미등재 · 알려진 실패 30건 대기) **그 디렉터리를 보는 동기 게이트도 아직 없다**. 그래서 암묵 경로에
-//!   기대지 않는다는 이 파일의 방침은 유지한다 — 여기서는 protocol 의 `tests/ts_export.rs` 와 같은 형태로
-//!   export 를 직접 부른다.
-//! ★생성물은 커밋한다★ — CI 의 diff 게이트가 이 디렉토리를 봐야 어휘 drift 를 잡는다.
+//! ★It is an explicit export (does not rely on implicit derive tests)★: ts-rs automatically makes, per `#[ts(export)]` type,
+//!   an `export_bindings_<타입>` test, but `src-tauri/bindings/` relied on that implicit path and
+//!   became a hand-maintained artifact that **never ran** either locally (`0xc0000139`) or in CI (package excluded) (TRD §5 measured).
+//!   ★Updated 2026-08-24★: the local side is resolved — with `--test lib_unit` standing, those implicit tests run and
+//!   `src-tauri/bindings/` is regenerated automatically every time that suite runs. **The CI side is still blocked** (that suite
+//!   is not registered · 30 known failures pending) **and there is still no sync gate that watches that directory**. So the policy of this file of not relying on the implicit path
+//!   stays — here we call the export directly, in the same form as
+//!   protocol's `tests/ts_export.rs`.
+//! ★Commit the generated files★ — the CI diff gate must watch this directory to catch vocabulary drift.
 
 use engram_dashboard_agent::commands::{
     AgentCancelQueuedInputArgs, AgentCancelQueuedInputOk, AgentInterruptArgs, AgentInterruptOk,
@@ -20,23 +20,23 @@ use engram_dashboard_agent::commands::{
 use engram_dashboard_command::{catalog_json, command_specs, CommandSpec};
 use ts_rs::TS;
 
-/// 이 테스트 바이너리에 **링크된 선언 전량**, 이름순.
+/// **All declarations linked into** this test binary, sorted by name.
 ///
-/// ★한 모듈의 `COMMAND_SPECS` 를 import 하지 않는 것이 요점이다★ — 그러면 agent 안에 선언 블록이 하나
-/// 더 생겼을 때 그 블록이 커버리지에서도 파생 스키마에서도 조용히 빠진다. 「손으로 적은 숫자」를 없앤
-/// 자리에 「손으로 적은 import」가 들어앉은 셈이라 같은 실패 모드가 그대로 남는다(TRD §5).
-/// ★정렬은 파생 파일을 결정적으로 만들려는 것★ — 링커 수집 순서는 정해져 있지 않고, 흔들리면 CI 의
-/// bindings diff 게이트가 내용과 무관하게 붉어진다.
+/// ★The point is not importing one module's `COMMAND_SPECS`★ — then when one more declaration block appears inside agent, that
+/// block silently drops out of both coverage and the derived schema. Where 「손으로 적은 숫자」 (a hand-written number) was removed,
+/// a 「손으로 적은 import」 (hand-written import) sits in its place, so the same failure mode remains (TRD §5).
+/// ★The sorting is to make the derived file deterministic★ — the linker's collection order is not fixed, and if it wobbles, CI's
+/// bindings diff gate goes red regardless of content.
 fn linked_specs() -> Vec<&'static CommandSpec> {
     let mut specs: Vec<&'static CommandSpec> = command_specs().collect();
     specs.sort_unstable_by_key(|s| s.name);
     specs
 }
 
-/// ★기대값을 손으로 적지 않는다★ — 「선언을 늘리고 목록의 숫자도 함께 고치면 통과」가 되면, 누락을
-/// 만드는 그 편집이 단언까지 함께 고쳐 무장 해제된다(TRD §5 가 `src-tauri/bindings/` 에서 실측한 실패
-/// 모드를 이 파일이 그대로 재현하게 된다). 그래서 기대값은 **선언 자신**([`linked_specs`])에서 나온다:
-/// 아래 export 호출을 빠뜨리면 그 타입의 `.ts` 가 안 생기고 이 대조가 터진다.
+/// ★Do not hand-write the expected value★ — if it became 「선언을 늘리고 목록의 숫자도 함께 고치면 통과」 (add declarations and fix the number in the list too, and it passes), the edit that
+/// creates the omission also fixes the assertion and disarms it (this file would reproduce exactly the failure mode TRD §5 measured in `src-tauri/bindings/`).
+/// So the expected value comes from **the declarations themselves** ([`linked_specs`]):
+/// if the export call below is left out, the `.ts` of that type is not generated and this comparison blows up.
 #[test]
 fn export_typescript_bindings() {
     let out = concat!(env!("CARGO_MANIFEST_DIR"), "/bindings/");
@@ -48,7 +48,7 @@ fn export_typescript_bindings() {
         }
     }
 
-    // 전이 의존(AgentRow 등)은 export_all_to 가 따라 데려온다.
+    // Transitive dependencies (AgentRow etc.) are brought along by export_all_to.
     AgentListArgs::export_all_to(out).expect("AgentListArgs 바인딩 export 실패");
     AgentListOk::export_all_to(out).expect("AgentListOk 바인딩 export 실패");
     AgentResolveArgs::export_all_to(out).expect("AgentResolveArgs 바인딩 export 실패");
@@ -100,14 +100,14 @@ fn export_typescript_bindings() {
     }
 }
 
-/// LLM 용 파생 스키마(TRD §2-4 ②) — 원소는 등록 패킷의 `help` 와 **바이트 동일**하다.
+/// Derived schema for the LLM (TRD §2-4 ②) — the elements are **byte-identical** to the `help` of the registration packet.
 ///
-/// 담는 범위도 [`linked_specs`] 다 — 한 모듈의 목록으로 찍으면 다른 블록의 명령이 파생 파일에서
-/// 통째로 빠지고, 그건 `.ts` 하나가 없는 것보다 나쁘다(스키마가 그 명령을 아예 없다고 말한다).
+/// What it covers is also [`linked_specs`] — if printed from one module's list, the commands of other blocks drop out of the derived file
+/// whole, and that is worse than one `.ts` missing (the schema says that command does not exist at all).
 #[test]
 fn export_command_schema() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/bindings");
-    // ts-rs 가 먼저 돌았는지에 기대지 않는다 — 테스트 순서는 정해져 있지 않다.
+    // Do not rely on ts-rs having run first — test order is not fixed.
     std::fs::create_dir_all(dir).expect("bindings/ 생성 실패");
     let body = catalog_json(CATALOG_VERSION, &linked_specs());
     std::fs::write(format!("{dir}/commands.schema.json"), body)

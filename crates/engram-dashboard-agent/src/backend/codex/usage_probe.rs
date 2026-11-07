@@ -1,16 +1,16 @@
-//! codex 의 사용량 능동 조회 — 짧게 뜨는 `codex app-server --stdio` 와 `initialize` → `initialized` →
-//! `account/rateLimits/read` 를 주고받고 그 응답을 [`UsageObservation`] 으로 푼다. 부르는 쪽은
-//! [`CODEX_USAGE_PROBE`] 를 [`UsageProbe`] 로만 본다.
+//! Active usage query for codex — starts a short-lived `codex app-server --stdio`, exchanges `initialize` → `initialized` →
+//! `account/rateLimits/read`, and decodes the response into a [`UsageObservation`]. Callers see
+//! [`CODEX_USAGE_PROBE`] only as a [`UsageProbe`].
 //!
-//! ★모델 턴이 없다★ — 스레드를 열지 않는다(`thread/start` 없음). 읽기 응답(또는 거절)을 받으면 stdin 을 닫고
-//!   잠깐 기다린 뒤 끝낸다([`finish_after_answer`]).
-//! ★대화 통로(`transport`)의 요청 기계를 쓰지 않는다★ — 그쪽의 대기표·라이터 스레드는 통로의 공유 상태에 묶여
-//!   있다. 여기서는 요청을 하나씩 쓰고 그 응답을 한 스레드에서 읽는다.
-//! ★응답의 `accountId` 는 읽지도 않는다 — 로그·오류 문자열·관측·원문 칸 어디에도 없다★(TRD §1-3): 상류가 준
-//!   문자열(응답 · RPC 오류 문구 · stderr)은 로그와 오류 문자열에 싣지 않는다 — 싣는 것은 우리가 쓴 문장과 수치뿐이다.
-//!   serde 오류 문구도 받은 값을 되풀이할 수 있어 싣지 않는다. 예외 둘 = 표시 칸(plan · 버킷 이름)에 싣는 짧은 이름 ·
-//!   RPC 오류의 `error.message`(원문 전용 칸 [`UsageDetail::upstream`] — `data` 칸은 안 싣는다).
-//! 모양의 출처 = codex-cli 0.156.1 의 JSON Schema(`protocol` 의 `GetAccountRateLimitsResponse` doc).
+//! ★No model turn★ — no thread is opened (no `thread/start`). Once the read response (or a refusal) arrives it closes stdin,
+//!   waits briefly, and ends ([`finish_after_answer`]).
+//! ★It does not use the request machinery of the conversation path (`transport`)★ — that side's wait table and writer thread are tied
+//!   to the path's shared state. Here requests are written one at a time and the response is read on one thread.
+//! ★The response's `accountId` is not even read — it is nowhere in logs · error strings · observations · the raw-text field★ (TRD §1-3): strings
+//!   given by upstream (the response · RPC error text · stderr) are not put into logs or error strings — only sentences we wrote and numbers go in.
+//!   Serde error text can also repeat the received value, so it is not put in either. Two exceptions = short names that go into display fields (plan · bucket name) and
+//!   the RPC error's `error.message` (raw-text-only field [`UsageDetail::upstream`] — the `data` field is not put in).
+//! The source of the shape = codex-cli 0.156.1's JSON Schema (the `GetAccountRateLimitsResponse` doc in `protocol`).
 // ADR-0004
 
 use std::path::Path;
@@ -33,29 +33,29 @@ use crate::usage::{
     UsagePolicy, UsageProbe, UsageSource, UsageVendorKey,
 };
 
-/// 자동 조회 사이의 최소 간격(사용자 결정 2026-09-27 — Claude 와 같은 값).
+/// Minimum interval between automatic queries (user decision 2026-09-27 — the same value as Claude).
 const CODEX_COOLDOWN: Duration = Duration::from_secs(15 * 60);
 
-/// 조회 하나의 시한 — 멈춤 방지다. 실측 전체 0.74–0.94초(0.156.1 · 3회)지만 데몬 재시작 직후 대화 이어받기에서
-/// `initialize` 약 9.7초가 한 번 관측됐다(원인 모름 — TRD §6 #5).
+/// The time limit of one query — it prevents hangs. The measured total is 0.74–0.94 s (0.156.1 · 3 runs), but in conversation resume right after a daemon restart
+/// `initialize` was observed once at about 9.7 s (cause unknown — TRD §6 #5).
 const CODEX_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
 const INITIALIZE_ID: i64 = 1;
 const READ_ID: i64 = 2;
 
-/// 서버 요청을 거절할 때 싣는 문구 — 상대의 로그로 간다.
+/// The text put in when refusing a server request — it goes to the peer's log.
 const REFUSAL_MESSAGE: &str = "engram-dashboard 사용량 조회는 서버 요청을 처리하지 않는다";
 
-/// 외부 문자열(plan·버킷 이름) 칸의 글자 수 상한 — 표시용 이름이라 이보다 길면 잘라 싣는다.
+/// Character cap for external-string fields (plan · bucket name) — they are display names, so anything longer is truncated.
 const PLAN_MAX_CHARS: usize = 32;
 const LABEL_MAX_CHARS: usize = 48;
-/// 모델별 창 목록의 상한. 오늘 응답의 비기본 버킷은 하나다.
+/// Cap on the per-model window list. Today's response has one non-default bucket.
 const MODEL_SCOPED_MAX: usize = 16;
 
-/// 응답 분류 낱말([`UsageDetail::kind`]) — wire 로 나가고 화면이 번역 없이 보인다.
+/// Response classification words ([`UsageDetail::kind`]) — they go out on the wire and the screen shows them without translation.
 const KIND_RPC_ERROR: &str = "rpc_error";
 
-/// codex 사용량 조회기. 부르는 쪽은 싱글턴 [`CODEX_USAGE_PROBE`] 를 쓴다.
+/// The codex usage querier. Callers use the singleton [`CODEX_USAGE_PROBE`].
 pub(crate) struct CodexUsageProbe;
 
 pub(crate) static CODEX_USAGE_PROBE: CodexUsageProbe = CodexUsageProbe;
@@ -74,8 +74,8 @@ impl UsageProbe for CodexUsageProbe {
 
     fn query(&self, env: &ProbeEnv<'_>) -> Result<UsageObservation, ProbeFailure> {
         env.require_time_left()?;
-        // ★선언 순서가 drop 순서를 정한다 — 폴더가 자식보다 먼저다★: 자식이 먼저 drop(트리 kill + 종료 대기)돼야
-        //   Windows 가 그 작업 폴더를 지울 수 있다.
+        // ★Declaration order decides drop order — the folder comes before the child★: the child must be dropped first (tree kill + wait for exit)
+        //   before Windows can delete that working folder.
         let scratch = ScratchDir::create(env.scratch_root)?;
         let mut child = env
             .spawner
@@ -86,8 +86,8 @@ impl UsageProbe for CodexUsageProbe {
     }
 }
 
-/// env 는 데몬 것을 그대로 물려받는다(TRD §3 #9 — 기본 로그인을 본다). 대화용 인자(`--cd`·정책·`-c`)는 없다 —
-/// 스레드를 열지 않는다.
+/// The env is inherited from the daemon as is (TRD §3 #9 — it looks at the default login). There are no conversation arguments (`--cd` · policy · `-c`) —
+/// no thread is opened.
 fn probe_command(scratch: &Path) -> ProbeCommand {
     let (program, args) = console_command(
         CODEX_PROGRAM,
@@ -105,12 +105,12 @@ fn probe_command(scratch: &Path) -> ProbeCommand {
     }
 }
 
-/// 서버가 우리 요청 하나에 준 답 — 성공이면 `result`, 오류 응답이면 그것을 분류한 것([`classify_rpc_error`]).
-/// 바깥 `Result` 의 오류(답을 못 받음)와 가른다 — 답을 받았으면 자식에게 끝낼 유예를 준다.
+/// The server's answer to one request of ours — on success `result`, on an error response its classification ([`classify_rpc_error`]).
+/// It is told apart from the outer `Result` error (no answer received) — once an answer is received, the child is given a grace period to end.
 type Answer = Result<Value, ProbeFailure>;
 
-/// 악수 → 읽기 요청 → 그 답. 요청마다 그 응답이 올 때까지 기다린 뒤 다음 줄을 쓴다. 악수가 거절되면 그 거절이
-/// 답이다(읽기 요청을 안 보낸다).
+/// Handshake → read request → its answer. For each request we wait until its response arrives before writing the next line. If the handshake is refused, that refusal
+/// is the answer (the read request is not sent).
 fn converse(child: &mut dyn ProbeChild, deadline: Instant) -> Result<Answer, ProbeError> {
     let initialize = InitializeParams {
         client_info: ClientInfo {
@@ -119,8 +119,8 @@ fn converse(child: &mut dyn ProbeChild, deadline: Instant) -> Result<Answer, Pro
         },
     };
     let initialize_line = request_text(INITIALIZE_ID, method::INITIALIZE, &initialize)?;
-    // 감싼 셸이 대상을 못 찾고 벌써 끝났으면 첫 쓰기가 먼저 실패한다 — 곧바로 돌아가면 「설치 안 됨」을 싣는 종료
-    //   상태를 못 본다. 오류를 들고 EOF 까지 읽은 뒤 종료로 가른다.
+    // If the wrapping shell could not find the target and already exited, the first write fails first — returning right away misses the exit
+    //   status that carries 「설치 안 됨」 (not installed). Hold the error, read to EOF, then tell apart by the exit.
     let write_error = match send(child, &initialize_line, deadline) {
         Ok(()) => None,
         Err(err @ ProbeError::Io(_)) => Some(err),
@@ -147,19 +147,19 @@ fn request_text<P: Serialize>(id: i64, method: &str, params: &P) -> Result<Strin
         .map_err(|_| ProbeError::Io("codex 사용량 조회 요청 줄을 만들지 못했다".to_owned()))
 }
 
-/// `protocol` 의 줄 도구는 끝 개행까지 붙여 주고 [`ProbeChild::write_line`] 도 붙인다 — 하나를 떼지 않으면 빈 줄이
-/// 한 줄 더 나간다.
+/// The line tool in `protocol` attaches the trailing newline and [`ProbeChild::write_line`] attaches one too — if one is not stripped, an empty line
+/// goes out as an extra line.
 fn send(child: &mut dyn ProbeChild, line: &str, deadline: Instant) -> Result<(), ProbeError> {
     child.write_line(line.strip_suffix('\n').unwrap_or(line), deadline)
 }
 
-/// 우리 요청 `id` 의 응답이 올 때까지 읽는다 — 오류 응답도 답이다(분류해서 돌려준다).
+/// Read until the response for our request `id` arrives — an error response is an answer too (it is classified and returned).
 ///
-/// - 서버 **요청**은 거절 응답으로 답한다 — 답하지 않으면 상대가 그 답을 기다리며 멈출 수 있다.
-/// - 알림 · 다른 id 의 응답 · 봉투로 안 읽히는 줄은 버린다.
-/// - ★우리 id 를 단 줄이 봉투로 안 읽히면(성공과 실패를 함께 싣거나 오류 본문이 깨짐) 곧바로 `Parse` 다★ —
-///   기다려도 다른 응답은 오지 않는다. JSON 자체가 아닌 줄은 id 를 읽을 수 없어 버린다(그때는 시한까지 간다).
-/// - `write_error` = 그 요청의 쓰기가 실패한 입출력 오류 — 응답 없이 끝나고 「설치 안 됨」도 아니면 이것을 돌려준다.
+/// - A server **request** is answered with a refusal response — if we do not answer, the peer may stall waiting for it.
+/// - Notifications · responses with other ids · lines that cannot be read as an envelope are discarded.
+/// - ★If a line carrying our id cannot be read as an envelope (it carries both success and failure, or the error body is broken), it is `Parse` right away★ —
+///   waiting will not bring another response. A line that is not JSON at all cannot have its id read, so it is discarded (then we go to the time limit).
+/// - `write_error` = the I/O error from the failed write of that request — if it ends without a response and is not 「설치 안 됨」 (not installed) either, this is returned.
 fn await_result(
     child: &mut dyn ProbeChild,
     id: i64,
@@ -172,7 +172,7 @@ fn await_result(
         let line = match child.read_line(deadline) {
             Ok(Some(line)) => line,
             Ok(None) => return Err(ended_without_response(child, deadline, read_error)),
-            // 상한에 걸린 한 줄이거나 읽기 실패다 — 앞의 경우 스트림은 다음 줄로 이어지고, 뒤의 경우 곧 EOF 가 온다.
+            // Either a single line that hit the cap or a read failure — in the former the stream continues to the next line, in the latter EOF comes soon.
             Err(err @ ProbeError::Io(_)) => {
                 read_error = Some(err);
                 continue;
@@ -194,7 +194,7 @@ fn await_result(
     }
 }
 
-/// `method` 없이 `id` 가 `id` 이고 `result`·`error` 중 하나라도 실은 줄인가.
+/// Is it a line with no `method`, whose `id` is `id`, and that carries at least one of `result` · `error`.
 fn is_reply_to(line: &str, id: i64) -> bool {
     let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(line) else {
         return false;
@@ -204,8 +204,8 @@ fn is_reply_to(line: &str, id: i64) -> bool {
         && (obj.contains_key("result") || obj.contains_key("error"))
 }
 
-/// ★성공을 위장하지 않는다★ — 승인 요청에 성공 응답을 돌려주면 그것이 자동 승인이다(`transport` 의 같은 자리).
-/// 무슨 요청이었는지는 적지 않는다 — 상류가 정한 문자열이다.
+/// ★Do not fake success★ — returning a success response to an approval request is an automatic approval (the same spot in `transport`).
+/// We do not write down what the request was — it is a string decided by upstream.
 fn refuse(child: &mut dyn ProbeChild, id: &RequestId, deadline: Instant) -> Result<(), ProbeError> {
     tracing::debug!("codex 사용량 조회: 서버 요청을 거절한다");
     send(
@@ -215,7 +215,7 @@ fn refuse(child: &mut dyn ProbeChild, id: &RequestId, deadline: Instant) -> Resu
     )
 }
 
-/// 응답 없이 stdout 이 닫혔다 — 종료 상태로 「설치 안 됨」을 가른다.
+/// stdout closed without a response — tell apart 「설치 안 됨」 (not installed) by the exit status.
 fn ended_without_response(
     child: &mut dyn ProbeChild,
     deadline: Instant,
@@ -228,7 +228,7 @@ fn ended_without_response(
     if exit.looks_not_installed() {
         return ProbeError::NotInstalled;
     }
-    // stderr 내용은 싣지 않는다 — 가린 것은 토큰 모양뿐이고 계정 식별자·경로가 남을 수 있다. 줄 수만 적는다.
+    // The stderr content is not put in — what gets masked is only token shapes, and account identifiers · paths may remain. Only the line count is written.
     tracing::debug!(
         code = ?exit.code(),
         stderr_lines = child.stderr_tail().len(),
@@ -243,10 +243,10 @@ fn ended_without_response(
     })
 }
 
-/// ★이 문구 표는 추정이다★ — codex 의 로그인 안 됨 오류 문구를 아직 못 봤다(TRD §6 #5 — 3단계 실 스모크가 모은다).
-///   틀려도 떨어지는 곳은 `Upstream`(= 조회 실패)이다. 한도 문구를 [`ProbeError::RateLimited`] 로 가르지 않는 것은
-///   TRD §3 #7 의 결정이다. `Upstream` 문구는 고정이다 — 상류 문구를 되풀이하지 않는다(코드 번호만 싣는다).
-/// 근거는 분류와 무관하게 하나다 — [`KIND_RPC_ERROR`] + `error.code` + 원문 `error.message`(공백뿐이면 원문 없음).
+/// ★This phrase table is a guess★ — we have not yet seen codex's not-logged-in error text (TRD §6 #5 — the stage-3 real smoke collects it).
+///   Even if wrong, it falls into `Upstream` (= query failure). Not separating the limit text into [`ProbeError::RateLimited`] is
+///   the decision of TRD §3 #7. The `Upstream` text is fixed — upstream text is not repeated (only the code number is put in).
+/// The evidence is one thing regardless of classification — [`KIND_RPC_ERROR`] + `error.code` + raw `error.message` (no raw text if it is only whitespace).
 fn classify_rpc_error(error: &RpcError) -> ProbeFailure {
     const UNAUTHENTICATED: [&str; 10] = [
         "authenticat",
@@ -282,17 +282,17 @@ fn classify_rpc_error(error: &RpcError) -> ProbeFailure {
     )
 }
 
-/// 읽기 응답의 `result` → 관측.
+/// The read response's `result` → observation.
 ///
-/// - ★기본 버킷 = `rateLimitsByLimitId` 의 [`DEFAULT_LIMIT_ID`] 가 먼저다★ — 최상위 `rateLimits` 는 스키마가 「하위
-///   호환 단일 버킷 보기」라 적어 다른 버킷을 비출 수 있다(피어 t3code 도 맵을 먼저 읽는다). 맵에 없을 때만 최상위를
-///   쓰되, 그 `limitId` 가 기본 버킷을 가리킬 때만이다([`names_default_bucket`]).
-/// - ★기본 버킷을 못 찾으면 `Parse` 다★ — 그것을 「창 없음」으로 읽으면 다른 버킷만 실린 응답이 성공으로 들어가
-///   들고 있던 값을 전부 지운다. 실패면 받는 쪽이 값을 유지한다. `result` 가 객체가 아니어도 `Parse`.
-/// - 창은 길이로 가른다(규칙 = 형제 `usage` 의 [`windows_by_duration`]). `None` 칸 = 안 실렸다(받는 쪽이 유지한다).
-/// - 맵의 나머지 버킷 → 모델별 창([`model_scoped_windows`]) · `planType` → plan(기본 버킷 것, 없으면 최상위 것).
-///   ★맵을 읽었으면 모델별 창은 비어도 `Some` 이다★ — `None` 으로 접으면 사라진 모델 창이 받는 쪽에 영영 남는다.
-///   맵이 없으면(최상위만) 다른 버킷을 모르므로 `None` 이다.
+/// - ★Default bucket = [`DEFAULT_LIMIT_ID`] in `rateLimitsByLimitId` comes first★ — the schema describes the top-level `rateLimits` as a 「하위
+///   호환 단일 버킷 보기」 (backward-compatible single-bucket view), so it can mirror another bucket (the peer t3code also reads the map first). Only when it is not in the map do we use the top level,
+///   and only when its `limitId` points to the default bucket ([`names_default_bucket`]).
+/// - ★If the default bucket is not found, it is `Parse`★ — if we read that as 「창 없음」 (no windows), a response carrying only other buckets would enter as a success
+///   and wipe every value held. On failure the receiving side keeps its values. It is also `Parse` if `result` is not an object.
+/// - Windows are told apart by duration (rule = [`windows_by_duration`] of the sibling `usage`). A `None` field = not carried (the receiving side keeps it).
+/// - The remaining buckets of the map → per-model windows ([`model_scoped_windows`]) · `planType` → plan (the default bucket's, or the top level's if absent).
+///   ★If the map was read, the per-model windows are `Some` even when empty★ — if folded to `None`, a vanished model window stays on the receiving side forever.
+///   If there is no map (top level only), we do not know the other buckets, so it is `None`.
 fn observation_from_result(result: Value) -> Result<UsageObservation, ProbeFailure> {
     let response: GetAccountRateLimitsResponse =
         serde_json::from_value(result).map_err(|_| parse_error("응답 result 가 객체가 아니다"))?;
@@ -326,8 +326,8 @@ fn parse_error(what: &str) -> ProbeError {
     ProbeError::Parse(format!("codex 사용량 응답: {what}"))
 }
 
-/// 기본이 아닌 버킷마다 그 **주간** 창 하나(D8) — 이름 = `limitName`, 쓸 수 없으면 버킷 id. 주간 창이 없거나 이름을
-/// 못 붙이는 버킷은 뺀다. 같은 이름(ASCII 대소문자 무시)은 먼저 온 것만 남긴다(버킷 id 순).
+/// For each non-default bucket, its one **weekly** window (D8) — name = `limitName`, or the bucket id if unusable. Buckets with no weekly window or
+/// that cannot be given a name are left out. Of the same name (ASCII case-insensitive), only the first one stays (in bucket id order).
 fn model_scoped_windows(buckets: &[(String, RateLimitSnapshot)]) -> Vec<ScopedWindowObs> {
     let mut windows: Vec<ScopedWindowObs> = Vec::new();
     for (id, snapshot) in buckets {
@@ -373,7 +373,7 @@ mod tests {
     const WEEKLY_RESET: i64 = 1_790_739_378;
     const MODEL_RESET: i64 = 1_791_018_755;
 
-    /// 가짜 계정 식별자 — 이 값이 어느 결과에도 보이면 안 된다.
+    /// A fake account identifier — this value must not be visible in any result.
     const ACCOUNT_ID: &str = "acct-SECRET-7f3a91";
 
     fn run_with_deadline(
@@ -406,7 +406,7 @@ mod tests {
         assert!(left.is_empty(), "조회 뒤 임시 폴더가 남았다: {left:?}");
     }
 
-    /// 실 `initialize` 응답의 칸 넷(값은 가짜).
+    /// The four fields of a real `initialize` response (values are fake).
     fn init_response() -> String {
         json!({
             "id": 1,
@@ -445,7 +445,7 @@ mod tests {
         })
     }
 
-    /// 조사 문서 §4-1 의 실측 모양(수치는 그 실측 · 식별자는 가짜) + 스키마의 나머지 칸.
+    /// The measured shape of research doc §4-1 (numbers are that measurement · identifiers are fake) + the remaining fields of the schema.
     fn model_bucket() -> Value {
         json!({
             "limitId": "base_model_inference",
@@ -493,7 +493,7 @@ mod tests {
         observation_from_result(result)
     }
 
-    /// 근거가 분류 하나뿐인 `Parse` 인가.
+    /// Is it a `Parse` whose only evidence is the classification.
     fn is_bare_parse(result: &Result<UsageObservation, ProbeFailure>) -> bool {
         matches!(
             result,
@@ -504,7 +504,7 @@ mod tests {
         )
     }
 
-    // ── 정책 ──
+    // ── Policy ──
 
     #[test]
     fn policy_and_key_are_the_codex_values() {
@@ -519,7 +519,7 @@ mod tests {
         );
     }
 
-    // ── 해석 ──
+    // ── Interpretation ──
 
     #[test]
     fn success_reads_the_codex_bucket_and_the_other_buckets_weekly_window() {
@@ -542,7 +542,7 @@ mod tests {
         assert!(!spawner.cut_at_deadline());
     }
 
-    /// 응답 뒤에 stdin 을 닫아도 안 끝나는 자식 — 유예 뒤에 끊기지만 조회는 성공이다.
+    /// A child that does not end even after stdin is closed after the response — it is interrupted after the grace period, but the query succeeds.
     #[test]
     fn a_child_that_lingers_after_the_answer_is_cut_but_the_query_succeeds() {
         let (result, spawner) = run(answering(typical_result()).hang_after_lines());
@@ -552,7 +552,7 @@ mod tests {
         assert!(spawner.child_dropped());
     }
 
-    /// 마감이 이미 지났으면 임시 폴더도 자식도 만들지 않는다.
+    /// If the deadline has already passed, neither a temp folder nor a child is created.
     #[test]
     fn a_passed_deadline_times_out_before_anything_is_created() {
         let root = TempRoot::new("codex-probe-late");
@@ -565,7 +565,7 @@ mod tests {
         assert_scratch_gone(&root);
     }
 
-    /// 조사 문서 §4-1 의 실측처럼 맵에 기본 버킷이 없으면 최상위를 쓰고, 맵의 버킷은 모델별 창이 된다.
+    /// As in the measurement of research doc §4-1, if the map has no default bucket we use the top level, and the map's buckets become per-model windows.
     #[test]
     fn without_the_codex_bucket_in_the_map_the_top_level_view_is_used() {
         let mut top_level = codex_bucket();
@@ -596,7 +596,7 @@ mod tests {
                 "맵을 읽었으면 비어도 실린다: {by_limit_id}"
             );
         }
-        // 맵 칸이 아예 없어도, `limitId` 칸이 없어도 같다.
+        // It is the same if the map field is absent altogether, or the `limitId` field is absent.
         let mut bare = codex_bucket();
         bare.as_object_mut().expect("객체").remove("limitId");
         let obs = observe(json!({ "rateLimits": bare })).expect("관측");
@@ -604,7 +604,7 @@ mod tests {
         assert_eq!(obs.model_scoped, None);
     }
 
-    /// ★최상위가 다른 버킷을 비춰도 맵의 기본 버킷이 이긴다★ — 최상위 값이 계정 창에 들어가면 안 된다.
+    /// ★Even if the top level mirrors another bucket, the map's default bucket wins★ — the top-level value must not go into the account window.
     #[test]
     fn the_map_wins_over_a_top_level_view_of_another_limit() {
         let obs = observe(json!({
@@ -616,7 +616,7 @@ mod tests {
         assert_eq!(obs.weekly, window(Some(58.0), Some(WEEKLY_RESET)));
         assert_eq!(labels(&obs), ["gpt-reserve"]);
 
-        // 맵이 이기는 것은 맵의 창이 비어도 그렇다 — 최상위로 채우지 않는다.
+        // The map winning holds even when the map's window is empty — we do not fill it from the top level.
         let mut empty = codex_bucket();
         empty["primary"] = Value::Null;
         empty["secondary"] = Value::Null;
@@ -681,7 +681,7 @@ mod tests {
         );
         assert_eq!(obs.weekly, None);
 
-        // 모델 버킷의 창이 주간이 아니면 그 버킷은 모델별 창이 없다.
+        // If a model bucket's window is not weekly, that bucket has no per-model window.
         let obs = observe(json!({
             "rateLimits": codex_bucket(),
             "rateLimitsByLimitId": {
@@ -693,7 +693,7 @@ mod tests {
         assert_eq!(obs.model_scoped, Some(vec![]));
     }
 
-    /// ★배열이 칸 순서대로 읽혀 그럴듯한 가짜 창이 되는 일이 어느 층에서도 없다★.
+    /// ★At no layer does an array get read in field order and turn into a plausible fake window★.
     #[test]
     fn arrays_where_objects_are_expected_never_become_windows() {
         let array_bucket = json!([
@@ -712,7 +712,7 @@ mod tests {
             assert!(is_bare_parse(&got), "{result}: {got:?}");
         }
 
-        // 맵 칸이나 그 항목이 객체가 아니면 그 자리만 없다 — 최상위의 기본 버킷을 쓴다.
+        // If the map field or its entry is not an object, only that spot is missing — the top level's default bucket is used.
         for by_limit_id in [
             json!([["codex", codex_bucket()]]),
             json!({ "codex": array_bucket }),
@@ -735,7 +735,7 @@ mod tests {
             );
         }
 
-        // 창 자리가 배열이면 그 창만 없다 · 모델 버킷이 배열이면 그 버킷만 없다.
+        // If the window slot is an array, only that window is missing · if the model bucket is an array, only that bucket is missing.
         let obs = observe(json!({
             "rateLimits": {
                 "limitId": "codex",
@@ -827,7 +827,7 @@ mod tests {
         }
     }
 
-    // ── 오류 ──
+    // ── Errors ──
 
     fn kind(err: &ProbeError) -> &'static str {
         match err {
@@ -882,7 +882,7 @@ mod tests {
         }
     }
 
-    /// 빈 문구는 원문이 없는 것이다 — 코드는 그대로 싣는다.
+    /// An empty text means there is no raw text — the code is put in as is.
     #[test]
     fn a_blank_rpc_message_carries_the_code_without_upstream() {
         for blank in ["", "  ", "   "] {
@@ -901,8 +901,8 @@ mod tests {
         }
     }
 
-    /// 읽기 요청의 오류 응답도, 악수의 오류 응답도 같은 분류를 탄다 — 근거 = [`KIND_RPC_ERROR`] + 코드 + `message`
-    ///   원문(토큰 모양은 가림 · `data` 칸은 안 싣는다)이고, 실패의 `Display`·`Debug` 에는 원문이 안 보인다.
+    /// The read request's error response and the handshake's error response take the same classification — evidence = [`KIND_RPC_ERROR`] + code + the raw `message`
+    ///   text (token shapes masked · the `data` field is not put in), and the raw text is not visible in the failure's `Display` · `Debug`.
     #[test]
     fn rpc_errors_carry_the_code_and_message_only_in_the_detail() {
         const MARKER: &str = "someone@example.com";
@@ -972,7 +972,7 @@ mod tests {
         }
     }
 
-    // ── 대화 ──
+    // ── Conversation ──
 
     #[test]
     fn the_dialogue_is_initialize_then_initialized_then_one_read() {
@@ -1049,7 +1049,7 @@ mod tests {
         assert_eq!(obs.weekly, window(Some(58.0), Some(WEEKLY_RESET)));
     }
 
-    /// 우리 id 를 단 응답이 봉투로 안 읽히면 시한까지 기다리지 않는다.
+    /// If the response carrying our id cannot be read as an envelope, we do not wait until the time limit.
     #[test]
     fn a_broken_reply_to_our_request_is_a_parse_error_without_waiting() {
         for broken in [
@@ -1071,7 +1071,7 @@ mod tests {
         }
     }
 
-    /// 읽기 오류를 먼저 내는 자식 — 실물 스포너의 「상한을 넘은 한 줄」 모양(대본 대역은 오류 줄을 못 낸다).
+    /// A child that emits a read error first — the real spawner's 「상한을 넘은 한 줄」 (a single line over the cap) shape (a scripted stand-in cannot emit an error line).
     struct IoFirstSpawner {
         then_answer: bool,
     }
@@ -1193,7 +1193,7 @@ mod tests {
         assert_eq!(result, Err(ProbeError::NotInstalled.into()));
         assert!(spawner.child_dropped());
 
-        // 악수 뒤에 끝나도 같다 — stderr 는 싣지 않는다(원문 칸에도).
+        // The same holds if it ends after the handshake — stderr is not put in (nor in the raw-text field).
         let stderr = format!("Error: account {ACCOUNT_ID} is not allowed");
         let (result, _) = run(ChildScript::new()
             .line(init_response())
@@ -1220,8 +1220,8 @@ mod tests {
         assert_scratch_gone(&root);
     }
 
-    /// ★첫 쓰기의 실패가 「설치 안 됨」을 가리지 않는다★ — 감싼 셸이 벌써 끝나 악수 쓰기가 실패해도 종료로 가른다.
-    ///   설치된 쪽의 실패면 쓰기 오류 그대로다.
+    /// ★A failure of the first write does not hide 「설치 안 됨」 (not installed)★ — even if the wrapping shell already ended and the handshake write fails, we tell apart by the exit.
+    ///   If it is a failure on the installed side, it is the write error as is.
     #[test]
     fn a_failed_handshake_write_still_reads_the_exit() {
         let (result, spawner) = run(ChildScript::new().fail_writes().exit_not_installed());
@@ -1241,7 +1241,7 @@ mod tests {
         );
     }
 
-    /// 스포너 seam 의 실패는 근거 없이 올라온다(`?`) — 받는 쪽이 분류 낱말로 채운다.
+    /// A spawner seam failure comes up without evidence (`?`) — the receiving side fills it with the classification word.
     #[test]
     fn a_spawn_failure_passes_through_and_cleans_up() {
         let root = TempRoot::new("codex-probe-missing");
@@ -1257,7 +1257,7 @@ mod tests {
         assert_scratch_gone(&root);
     }
 
-    // ── 기동 명세 ──
+    // ── Launch spec ──
 
     #[test]
     fn the_command_is_the_app_server_in_its_own_scratch_dir_with_the_daemon_env() {
@@ -1267,7 +1267,7 @@ mod tests {
         let scan_root = root.path().to_path_buf();
         let spawner =
             ScriptedSpawner::new(ChildScript::new().line(init_response()).reply(move |_| {
-                // 자식이 떠 있는 동안 — 임시 폴더가 제자리에 있어야 한다.
+                // While the child is up — the temp folder must be in place.
                 let dir = fs::read_dir(&scan_root)
                     .expect("루트")
                     .flatten()
@@ -1299,9 +1299,9 @@ mod tests {
         );
     }
 
-    // ── 계정 식별자 ──
+    // ── Account identifier ──
 
-    /// ★응답의 `accountId` 가 관측에도, 어떤 실패의 문구에도 보이지 않는다★.
+    /// ★The response's `accountId` is not visible in the observation or in the text of any failure★.
     #[test]
     fn the_account_id_never_reaches_an_observation_or_an_error() {
         let obs = observe(typical_result()).expect("관측");
@@ -1321,7 +1321,7 @@ mod tests {
             assert_eq!(err.detail, None, "응답을 원문 칸에 싣지 않는다: {result}");
         }
 
-        // 대화 전체로도 — 관측에 싣는 표시 칸(plan·버킷 이름) 밖의 어느 칸에 실려 와도.
+        // Across the whole conversation too — even if it arrives in any field outside the display fields put into the observation (plan · bucket name).
         let mut result = typical_result();
         result["rateLimits"]["accountId"] = json!(ACCOUNT_ID);
         result["rateLimitsByLimitId"]["codex"]["accountId"] = json!(ACCOUNT_ID);
@@ -1331,9 +1331,9 @@ mod tests {
         assert!(!format!("{obs:?}").contains(ACCOUNT_ID), "{obs:?}");
     }
 
-    // ── 무패닉 ──
+    // ── No panic ──
 
-    /// 어느 자리에 무엇이 와도 패닉하지 않는다 — 결과는 관측이거나 `Parse` 다.
+    /// No panic whatever arrives in whatever spot — the result is an observation or `Parse`.
     #[test]
     fn hostile_results_never_panic() {
         let weird = [
@@ -1411,7 +1411,7 @@ mod tests {
             }
         }
 
-        // 대화 쪽 — 봉투로 안 읽히는 줄 묶음 뒤에도 응답을 받는다.
+        // Conversation side — a response is received even after a batch of lines that cannot be read as an envelope.
         let mut script = ChildScript::new();
         for junk in [
             "",

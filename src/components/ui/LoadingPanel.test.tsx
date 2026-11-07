@@ -1,5 +1,5 @@
-// LoadingPanel 계약(ADR-0226). 회전(reduced-motion·e-ink 에서도 늘 돈다 — 사용자 결정 2026-09-24)은
-//   jsdom 이 css 미디어·keyframes 를 돌리지 않아 여기서 못 잰다 — GUI 실측 몫이다.
+// LoadingPanel contract (ADR-0226). The rotation (always spins, even under reduced-motion · e-ink — user decision 2026-09-24)
+//   cannot be measured here because jsdom does not run css media · keyframes — it is for GUI measurement.
 
 import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -17,7 +17,7 @@ describe('LoadingPanel', () => {
     expect(panel.getAttribute('aria-busy')).toBe('true')
     expect(panel.getAttribute('data-loading-panel')).toBe('1')
     expect(panel.textContent).toBe('')
-    // 아이콘은 장식이라 접근성 트리에서 숨긴다 — 이름은 패널이 진다.
+    // The icon is decoration so it is hidden from the accessibility tree — the panel carries the name.
     const icon = panel.querySelector('svg')
     expect(icon).not.toBeNull()
     expect(icon?.getAttribute('aria-hidden')).toBe('true')
@@ -33,7 +33,7 @@ describe('LoadingPanel', () => {
   it.each([false, true, ''])('그리지 않는 label(%j)에는 빈 텍스트 칸을 세우지 않는다', (label) => {
     render(<LoadingPanel label={label} />)
     const panel = screen.getByRole('status')
-    expect(panel.children).toHaveLength(1) // 아이콘뿐
+    expect(panel.children).toHaveLength(1) // Icon only
     expect(panel.firstElementChild?.tagName.toLowerCase()).toBe('svg')
   })
 

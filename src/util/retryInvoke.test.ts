@@ -10,9 +10,9 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-// ★unhandled-rejection 회피★: promise 를 만들자마자 assertion(핸들러)을 붙이고, 그 다음 fake timer 를
-//   진행시킨다. promise 를 인자로 미리 만들어 넘기면 핸들러 부착 전에 timer 가 firing 돼 unhandled
-//   rejection 으로 새므로, 여기서 (핸들러 부착 promise + runAllTimersAsync) 를 함께 await 한다.
+// ★unhandled-rejection avoidance★: attach the assertion (handler) as soon as the promise is made, and then advance the fake
+//   timer. If the promise is made ahead and passed as an argument, the timer fires before the handler is attached and leaks as an unhandled
+//   rejection, so here we await (handler-attached promise + runAllTimersAsync) together.
 async function settleRejects(p: Promise<unknown>, matcher: unknown): Promise<void> {
   const assertion = expect(p).rejects
   const check =
@@ -79,13 +79,13 @@ describe('retryAsync — 재시도 성공/실패/취소(ADR-0102)', () => {
   })
 
   it('마지막 실패 시도 도중 취소 → 소진 throw 대신 RetryCancelledError(FIX-4)', async () => {
-    // 옛 코드는 루프 상단에서만 isCancelled 를 봐서 backend 에러('fail 2')를 그대로 throw → 호출부가
-    //   헛된 최종-실패를 로깅. FIX-4 는 소진 throw 직전 재확인해 RetryCancelledError 로 바꾼다.
+    // The old code looked at isCancelled only at the top of the loop, so it threw the backend error ('fail 2') as is → the call site
+    //   logged a pointless final failure. FIX-4 re-checks right before the exhaustion throw and turns it into RetryCancelledError.
     let calls = 0
     let cancelled = false
     const fn = vi.fn(async () => {
       calls += 1
-      if (calls === 2) cancelled = true // unmount 흉내
+      if (calls === 2) cancelled = true // Imitates unmount
       throw new Error(`fail ${calls}`)
     })
     await settleRejects(

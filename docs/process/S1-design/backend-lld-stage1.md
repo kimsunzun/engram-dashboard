@@ -1,47 +1,47 @@
-# Engram Dashboard — 백엔드 LLD Stage 1 (구조 확정본)
+# Engram Dashboard — Backend LLD Stage 1 (structure finalized)
 
-**작성:** engram-dashboard (ed12), 2026-06-11  
-**기반:** `backend-architecture-final.md` + GPT/Gemini 검토 반영  
-**단계:** 1단계 — 코드 없이 구조 확정. 시그니처/표/의사코드 수준.  
-**다음:** 3자 검증(fable ✅ / Gemini 진행 중 / GPT 진행 중) → 확정 → 2단계 모듈별 코드
+**Author:** engram-dashboard (ed12), 2026-06-11  
+**Basis:** `backend-architecture-final.md` + GPT/Gemini review feedback  
+**Stage:** Stage 1 — structure finalized without code. Signature/table/pseudocode level.  
+**Next:** three-way verification (fable ✅ / Gemini in progress / GPT in progress) → finalize → Stage 2 module-by-module code
 
 ---
 
-## fable 검토 반영 (2026-06-11) — Critical 4건 + Major 수정
+## fable review feedback (2026-06-11) — 4 Critical + Major fixes
 
-| 항목 | 결정 |
+| Item | Decision |
 |---|---|
-| C1 pty/ 격리 모순 | `StatusSink` trait 추가, `PtyManager.app_handle` 제거 |
-| C2 배칭 partial batch 정체 | **즉시 send 방식(option b)** 채택 — read 반환분 즉시 전송, xterm.js 단 배칭 위임 |
-| C3 ConPTY kill→EOF 미보장 | kill 순서 변경: `child.kill() → child.wait() → master.take()` → EOF → join |
-| C4 replay→live 순서 역전 | **subscribers lock 보유 중 replay 전송(option a)** 채택 |
-| M1 AppState 외부 Mutex | `Arc<PtyManager>` 로 변경 (내부 동기화 충분) |
-| M2 unsubscribe 부재 | `subscribe` → `SinkId` 반환, `unsubscribe_agent_output` command 추가 |
-| M3 Cargo.toml 오류 | tauri-build 위치 수정, thiserror/uuid serde 추가 |
-| M4 PtyEvent wire format | **JSON + base64 문자열** 중간 절충, 실측 후 raw IPC 전환 |
-| M5 상태 전이 race | `transition()` 단일 함수, Failed/Exited 기준 정리 |
-| M6 JoinHandle 위치 | `PtySession.drain_handle` 필드 추가 |
-| Minor (확실) | Arc\<dyn OutputSink\>, JobObjectHandle wrapper, windows_subsystem 위치 fix |
-| Gemini 신규 | TerminateJobObject kill 시퀀스에 추가 (손자 프로세스 보장) |
+| C1 pty/ isolation contradiction | Add `StatusSink` trait, remove `PtyManager.app_handle` |
+| C2 batching: partial batch stall | Adopt **immediate send (option b)** — send what each read returned right away, delegate batching to the xterm.js side |
+| C3 ConPTY kill→EOF not guaranteed | Change kill order: `child.kill() → child.wait() → master.take()` → EOF → join |
+| C4 replay→live order inversion | Adopt **send replay while holding the subscribers lock (option a)** |
+| M1 external Mutex on AppState | Change to `Arc<PtyManager>` (internal synchronization is enough) |
+| M2 no unsubscribe | `subscribe` returns `SinkId`, add `unsubscribe_agent_output` command |
+| M3 Cargo.toml errors | Fix tauri-build placement, add thiserror/uuid serde |
+| M4 PtyEvent wire format | **JSON + base64 string** as a middle ground, switch to raw IPC after measurement |
+| M5 status transition race | Single `transition()` function, clarify Failed/Exited criteria |
+| M6 JoinHandle location | Add `PtySession.drain_handle` field |
+| Minor (certain) | Arc\<dyn OutputSink\>, JobObjectHandle wrapper, fix windows_subsystem placement |
+| Gemini new | Add TerminateJobObject to the kill sequence (ensures grandchild processes are covered) |
 | GPT G-1 | JoinHandle timeout → completion channel (drain_done_rx) |
-| GPT G-2 | tauri 2.5→2.4 고정 (Channel silent failure 이슈) |
-| GPT G-3 | 즉시 send 방식으로 final batch flush 문제 원천 차단 확인 |
+| GPT G-2 | Pin tauri 2.5→2.4 (Channel silent failure issue) |
+| GPT G-3 | Confirmed that immediate send removes the final batch flush problem at the root |
 
 ---
 
-## 0. 비목표 (Non-goals)
+## 0. Non-goals
 
-이 LLD 범위 밖:
+Outside the scope of this LLD:
 
-- Tauri 프론트엔드 연동 코드 (TerminalSlot.tsx 등) — 2단계 이후
-- Claude Code 프로세스 자동 시작/재시작 정책 — 추후 결정
-- PTY 세션 영속화 (앱 재시작 후 세션 복원) — 추후 결정
-- 인증/API 키 관리 — 추후 결정
-- Linux 지원 — 현재 타깃 win32 only
+- Tauri frontend integration code (TerminalSlot.tsx etc.) — Stage 2 and later
+- Auto-start/restart policy for the Claude Code process — decide later
+- PTY session persistence (restoring sessions after an app restart) — decide later
+- Authentication/API key management — decide later
+- Linux support — current target is win32 only
 
 ---
 
-## 1. 모듈 맵 + 의존 방향
+## 1. Module map + dependency direction
 
 ```
 src-tauri/src/
@@ -64,7 +64,7 @@ src-tauri/src/
     └── masking.rs                # API 키 마스킹 tracing layer
 ```
 
-**의존 방향 (단방향, 역방향 import 금지):**
+**Dependency direction (one-way, reverse imports forbidden):**
 
 ```
 lib.rs
@@ -77,15 +77,15 @@ lib.rs
   commands/ ─────────────────────── Tauri + pty 연결층 (thin wrapper only)
 ```
 
-**핵심 격리 원칙:**  
-`pty/` 하위 모든 파일은 `tauri` crate import 금지.  
-`OutputSink` trait으로 추상화 → 테스트 시 mock sink, 프로덕션 시 Channel sink.
+**Core isolation principle:**  
+No file under `pty/` may import the `tauri` crate.  
+Abstract through the `OutputSink` trait → a mock sink in tests, a Channel sink in production.
 
-**[모듈 검증 포인트]** `pty/` 에 `tauri::` import 없음을 CI lint(grep)로 강제.
+**[Module verification point]** Enforce with a CI lint (grep) that `pty/` has no `tauri::` import.
 
 ---
 
-## 2. 의존성 버전 고정 (Cargo.toml)
+## 2. Pinned dependency versions (Cargo.toml)
 
 ```toml
 [dependencies]
@@ -114,12 +114,12 @@ tauri-build        = { version = "2.0" }
 tokio-test = "0.4"
 ```
 
-**주의:** `portable-pty 0.8.1` — "0.9.x Windows garbage 이슈" 출처 미확인 (fable M3 지적).  
-smoke test 통과하면 최신 버전으로 업그레이드 검토. `tests/smoke_windows.rs` 기준.
+**Note:** `portable-pty 0.8.1` — the source of the "0.9.x Windows garbage issue" is unconfirmed (fable M3 finding).  
+If the smoke test passes, consider upgrading to the latest version. The baseline is `tests/smoke_windows.rs`.
 
 ---
 
-## 3. 핵심 타입 정의 (`pty/types.rs`)
+## 3. Core type definitions (`pty/types.rs`)
 
 ```rust
 pub type AgentId = uuid::Uuid;
@@ -195,7 +195,7 @@ pub struct PtyEvent {
 
 ---
 
-## 4. PtySession 구조체 (`pty/session.rs`)
+## 4. PtySession struct (`pty/session.rs`)
 
 ```rust
 pub struct PtySession {
@@ -242,9 +242,9 @@ impl ReplayBuffer {
 }
 ```
 
-**왜 PtySession 내부를 필드별 별도 Mutex로 분리하는가:**  
-drain thread가 replay/subscribers lock만 잠그는 동안 write_stdin이 writer lock만 잠글 수 있어 교착 없이 병행 가능.  
-전체 세션 단일 Mutex면 drain 중 stdin 차단, stdin 중 drain 차단 발생.
+**Why PtySession internals are split into a separate Mutex per field:**  
+While the drain thread locks only replay/subscribers, write_stdin can lock only the writer, so they run in parallel without deadlock.  
+With a single Mutex for the whole session, stdin would be blocked during drain and drain would be blocked during stdin.
 
 ---
 
@@ -296,8 +296,8 @@ impl PtyManager {
 ```
 
 **RwLock vs Mutex:**  
-sessions 맵은 read(조회)가 write(추가/삭제)보다 훨씬 빈번 → `RwLock`.  
-read lock은 공유 가능, write lock만 배타적. 조회 경로의 지연 최소화.
+In the sessions map, reads (lookups) are far more frequent than writes (add/remove) → `RwLock`.  
+Read locks can be shared; only the write lock is exclusive. This minimizes latency on the lookup path.
 
 ---
 
@@ -314,7 +314,7 @@ pub fn spawn_drain_thread(
 // 없어(LLD 자체 모순) drain이 종료 알림+완료 신호를 보내려면 주입 필요. manager.spawn_agent가 연결.
 ```
 
-### drain thread 의사코드 (C2 수정: 즉시 send, C3 종료 시퀀스 반영)
+### drain thread pseudocode (C2 fix: immediate send, reflects the C3 shutdown sequence)
 
 ```
 fn drain_loop(session, reader):
@@ -362,12 +362,12 @@ fn drain_loop(session, reader):
     let _ = drain_done_tx.send(())
 ```
 
-### drain thread 종료 메커니즘 (C3 수정: master drop 필수)
+### drain thread shutdown mechanism (C3 fix: master drop is mandatory)
 
-**문제:** ConPTY에서 `child.kill()` 후 `ReadFile`이 반환 안 되는 케이스 존재.  
-`ClosePseudoConsole`(= master drop)이 호출돼야 reader가 해제됨.
+**Problem:** On ConPTY there are cases where `ReadFile` does not return after `child.kill()`.  
+The reader is released only once `ClosePseudoConsole` (= master drop) is called.
 
-**수정된 kill_agent 순서:**
+**Revised kill_agent order:**
 
 ```
 1. session.shutdown.store(true, Release)
@@ -385,15 +385,15 @@ fn drain_loop(session, reader):
    // 단 detach 시 해당 세션 제거 → Arc ref count 감소 → 자연 정리됨
 ```
 
-**왜 TerminateJobObject가 필요한가 (Gemini 지적):**  
-`child.kill()`은 직속 자식(예: cmd.exe)만 종료. 손자 프로세스(빌드 스크립트 등)가 ConPTY slave 핸들을 쥐고 있으면 ConPTY 파이프가 닫히지 않아 `reader.read()` 가 영원히 블로킹됨.  
-`TerminateJobObject`로 Job 전체 종료 → 모든 slave 핸들 해제 → ConPTY 종료 → reader 해제.
+**Why TerminateJobObject is needed (Gemini's finding):**  
+`child.kill()` terminates only the direct child (e.g. cmd.exe). If a grandchild process (a build script etc.) holds the ConPTY slave handle, the ConPTY pipe does not close and `reader.read()` blocks forever.  
+`TerminateJobObject` terminates the whole Job → all slave handles are released → ConPTY ends → the reader is released.
 
-**[drain 검증 포인트]** 2단계 첫 스파이크: kill 후 join이 타임아웃 없이 즉시 완료되는지 Windows 실기기 확인.
+**[drain verification point]** First Stage 2 spike: confirm on a real Windows machine that join completes immediately after kill, without a timeout.
 
 ---
 
-## 7. subscribe + replay → live 전환 seq 무결성
+## 7. subscribe + replay → live switch seq integrity
 
 ```
 subscribe(agent_id, sink: Arc<dyn OutputSink>) → SinkId:
@@ -421,15 +421,15 @@ unsubscribe(agent_id, sink_id):
     session.subscribers.lock().retain(|s| s.sink_id() != sink_id)
 ```
 
-**락 순서 규칙 3 명시적 예외:** subscribe는 `subscribers` lock 보유 중 `replay` lock 취득 가능 (subscribe 함수 단독). drain thread는 절대 두 lock 동시 보유 금지.
+**Explicit exception to lock order rule 3:** subscribe may acquire the `replay` lock while holding the `subscribers` lock (the subscribe function only). The drain thread must never hold both locks at the same time.
 
-**[replay 검증 포인트]** 고속 출력 중 후발 attach 시 seq 연속성 + 순서 테스트.
+**[replay verification point]** Test seq continuity + ordering when a late attach happens during high-speed output.
 
 ---
 
-## 8. Tauri Commands 레이어 (`commands/`)
+## 8. Tauri Commands layer (`commands/`)
 
-commands 층은 **비즈니스 로직 없는 thin wrapper**. PtyManager 호출 + Tauri 타입 변환만.
+The commands layer is a **thin wrapper with no business logic**. It only calls PtyManager and converts Tauri types.
 
 ```rust
 // commands/agent.rs
@@ -501,49 +501,49 @@ pub struct AppState {
 
 ---
 
-## 9. AgentStatus 상태머신 전이표
+## 9. AgentStatus state machine transition table
 
-| 현재 상태 | 전이 → 다음 상태 | 트리거 | 수행 주체 | 정리 자원 |
+| Current state | Transition → next state | Trigger | Performed by | Resources to clean up |
 |---|---|---|---|---|
-| 현재 상태 | 전이 → | 트리거 | 수행 주체 | 정리 자원 |
+| Current state | Transition → | Trigger | Performed by | Resources to clean up |
 |---|---|---|---|---|
-| (없음) | → `Running` | `spawn_command` Ok (Starting 제거 — 단순화) | spawn_agent | — |
-| (없음) | → `Failed` | spawn 오류 | spawn_agent | master, child 핸들 |
-| `Running` | → `Exiting` | `kill_agent` 호출 | kill_agent (manager) | — |
-| `Running` | → `Exited{code}` | drain read EOF + code | drain thread (transition 함수) | drain join |
-| `Exiting` | → `Killed` | drain 종료 완료 | drain thread (transition 함수) | writer, master, drain_handle |
+| (none) | → `Running` | `spawn_command` Ok (Starting removed — simplification) | spawn_agent | — |
+| (none) | → `Failed` | spawn error | spawn_agent | master, child handles |
+| `Running` | → `Exiting` | `kill_agent` call | kill_agent (manager) | — |
+| `Running` | → `Exited{code}` | drain read EOF + code | drain thread (transition function) | drain join |
+| `Exiting` | → `Killed` | drain shutdown complete | drain thread (transition function) | writer, master, drain_handle |
 | `Exited` | (terminal) | — | — | writer, master, drain_handle |
-| `Failed` | (terminal) | — | — | (이미 정리됨) |
-| `Killed` | (terminal) | — | — | (이미 정리됨) |
+| `Failed` | (terminal) | — | — | (already cleaned up) |
+| `Killed` | (terminal) | — | — | (already cleaned up) |
 
-**M5 수정:**
-- `Starting` 제거 — spawn_command 성공 시 즉시 `Running`
-- `Failed` = spawn 실패 / 내부 오류 전용. child exit code ≠ 0 → `Exited { code }` (프론트가 code로 비정상 표시)
-- terminal 전이(Killed/Exited/Failed)는 `transition(session, event)` 단일 함수 경유 — child exit code 선취득 후 **status lock 안에서** `shutdown`(Acquire) 플래그 체크 + terminal 가드(이미 terminal이면 미덮어쓰기)로 Killed/Exited 판정. (구현: drain.rs)
-- **알림 책임 분담 (R-1, 중복 호출 금지):**
-  - 과도기 `Exiting` 전이·알림 = **kill_agent (manager)** 가 담당. status lock 안에서 terminal 아니면 Exiting 설정, **lock 해제 후** `status_changed(Exiting)` 호출(§10 lock 보유 중 외부 호출 금지 준수).
-  - terminal(`Killed`/`Exited`/`Failed`) 전이·알림 = **drain thread 단독**.
-- drain의 terminal 가드가 kill_agent의 Exiting을 안전하게 덮어씀. 자연 EOF 경합 시 가드가 Exited 보존 + Exiting 생략.
+**M5 fix:**
+- `Starting` removed — `Running` immediately when spawn_command succeeds
+- `Failed` = spawn failure / internal error only. child exit code ≠ 0 → `Exited { code }` (the frontend shows abnormal exit based on the code)
+- Terminal transitions (Killed/Exited/Failed) go through the single `transition(session, event)` function — after fetching the child exit code first, it checks the `shutdown` (Acquire) flag **inside the status lock** and decides Killed/Exited with a terminal guard (an already-terminal state is not overwritten). (Implementation: drain.rs)
+- **Division of notification responsibility (R-1, no duplicate calls):**
+  - The transitional `Exiting` transition and notification = handled by **kill_agent (manager)**. Inside the status lock it sets Exiting if the state is not terminal, and calls `status_changed(Exiting)` **after releasing the lock** (complies with the §10 rule against external calls while holding a lock).
+  - Terminal (`Killed`/`Exited`/`Failed`) transitions and notifications = **drain thread alone**.
+- The drain's terminal guard safely overwrites kill_agent's Exiting. When a natural EOF races with it, the guard preserves Exited and skips Exiting.
 
-**주의(프론트, T-4):** kill의 Exiting 알림과 drain의 terminal 알림이 lock 밖 동시 발생 가능 → 프론트는 `status_changed`만으로 terminal 판정 금지. `agent_list_updated`(목록 제거)로 판정.
+**Note (frontend, T-4):** kill's Exiting notification and the drain's terminal notification can occur concurrently outside the lock → the frontend must not decide terminal state from `status_changed` alone. Decide from `agent_list_updated` (removal from the list).
 
 ---
 
-## 10. 동시성 명세
+## 10. Concurrency spec
 
-### 락 목록 및 획득 순서 규칙
+### Lock list and acquisition order rules
 
-| 락 | 타입 | 보유 기간 | 보유 중 외부 호출 허용 여부 |
+| Lock | Type | Held for | External calls allowed while held |
 |---|---|---|---|
-| `PtyManager.sessions` | `RwLock` | lookup 완료 즉시 해제 | Arc clone 후 즉시 해제 |
-| `PtySession.subscribers` | `Mutex` | snapshot 복사 후 즉시 해제 | **금지** — lock 밖에서 send |
-| `PtySession.replay` | `Mutex` | push/snapshot 후 즉시 해제 | **금지** |
-| `PtySession.writer` | `Mutex` | write 완료 후 즉시 해제 | blocking I/O 허용 (자신만) |
-| `PtySession.master` | `Mutex` | resize 완료 후 즉시 해제 | blocking I/O 허용 (자신만) |
-| `PtySession.child` | `Mutex` | kill/wait 후 즉시 해제 | blocking 허용 |
-| `PtySession.status` | `Mutex` | read/write 후 즉시 해제 | **금지** |
+| `PtyManager.sessions` | `RwLock` | released right after lookup completes | released right after Arc clone |
+| `PtySession.subscribers` | `Mutex` | released right after snapshot copy | **forbidden** — send outside the lock |
+| `PtySession.replay` | `Mutex` | released right after push/snapshot | **forbidden** |
+| `PtySession.writer` | `Mutex` | released right after write completes | blocking I/O allowed (its own only) |
+| `PtySession.master` | `Mutex` | released right after resize completes | blocking I/O allowed (its own only) |
+| `PtySession.child` | `Mutex` | released right after kill/wait | blocking allowed |
+| `PtySession.status` | `Mutex` | released right after read/write | **forbidden** |
 
-**락 획득 순서 규칙 (데드락 방지):**
+**Lock acquisition order rules (deadlock prevention):**
 
 ```
 규칙 1: sessions read/write lock 보유 중 session 내부 lock 획득 금지.
@@ -559,41 +559,41 @@ pub struct AppState {
          복구 시도 안 함. drain 등에서 패닉 시 후속 접근은 연쇄 패닉으로 앱 종료(의도된 정책).
 ```
 
-### 스레드 목록
+### Thread list
 
-| 스레드 | spawn 주체 | 수명 | join/detach |
+| Thread | Spawned by | Lifetime | join/detach |
 |---|---|---|---|
-| Tauri main | OS/Tauri | 앱 전체 | — |
-| Tokio runtime workers | Tauri | 앱 전체 | — |
-| drain thread (에이전트당 1개) | `PtyManager.spawn_agent` | PTY EOF까지 | `kill_agent` 시 completion channel recv_timeout(5s) |
+| Tauri main | OS/Tauri | whole app | — |
+| Tokio runtime workers | Tauri | whole app | — |
+| drain thread (one per agent) | `PtyManager.spawn_agent` | until PTY EOF | on `kill_agent`, completion channel recv_timeout(5s) |
 
-### 채널 토폴로지
+### Channel topology
 
-| 채널 | 방향 | 타입 | 가득 찬 경우 |
+| Channel | Direction | Type | When full |
 |---|---|---|---|
-| `OutputSink.send` (drain→frontend) | drain → Tauri Channel → WebView | Tauri IPC Channel | Err 반환 → subscriber 제거 |
-| Tauri Event | Rust → 모든 창 | Tauri Event (저빈도) | 드롭 가능 (저빈도 알림) |
+| `OutputSink.send` (drain→frontend) | drain → Tauri Channel → WebView | Tauri IPC Channel | returns Err → subscriber removed |
+| Tauri Event | Rust → all windows | Tauri Event (low frequency) | may be dropped (low-frequency notifications) |
 
 ---
 
-## 11. 자원 수명 표
+## 11. Resource lifetime table
 
-| 자원 | 생성 시점 | 소유자 | 해제 트리거 | 해제 주체 |
+| Resource | Created at | Owner | Release trigger | Released by |
 |---|---|---|---|---|
-| PTY master | `spawn_agent` | `PtySession.master` | drain 종료 후 session 제거 | PtySession drop |
-| child process | `spawn_agent` | `PtySession.child` | `kill_agent` → child.kill() | kill_agent 호출자 |
-| drain thread | `spawn_agent` | `PtyManager` (JoinHandle) | child 종료 → EOF → loop 탈출 | join() in kill_agent |
-| PTY reader | drain thread (moved in) | drain thread 스택 | drain loop 탈출 | 자동 (out of scope) |
-| writer | `PtySession.writer` | PtySession | session 제거 | PtySession drop |
-| Channel 구독 | `subscribe_agent_output` | `PtySession.subscribers` Vec | send 실패 감지 or 창 닫힘 | drain thread (정리) or unsubscribe |
+| PTY master | `spawn_agent` | `PtySession.master` | session removed after drain ends | PtySession drop |
+| child process | `spawn_agent` | `PtySession.child` | `kill_agent` → child.kill() | kill_agent caller |
+| drain thread | `spawn_agent` | `PtyManager` (JoinHandle) | child exit → EOF → loop exit | join() in kill_agent |
+| PTY reader | drain thread (moved in) | drain thread stack | drain loop exit | automatic (out of scope) |
+| writer | `PtySession.writer` | PtySession | session removed | PtySession drop |
+| Channel subscription | `subscribe_agent_output` | `PtySession.subscribers` Vec | send failure detected or window closed | drain thread (cleanup) or unsubscribe |
 | Windows Job Object | `spawn_agent` (#[cfg(windows)]) | `PtySession.job_handle` | PtySession drop | CloseHandle (drop impl) |
-| ReplayBuffer | `spawn_agent` | `PtySession.replay` | session 제거 | PtySession drop |
+| ReplayBuffer | `spawn_agent` | `PtySession.replay` | session removed | PtySession drop |
 
 ---
 
-## 12. 종료 경로 워크스루 3종
+## 12. Three shutdown path walkthroughs
 
-### (a) child 비정상 종료
+### (a) Abnormal child exit
 
 ```
 Claude Code가 예외로 종료 (exit code ≠ 0)
@@ -608,7 +608,7 @@ Claude Code가 예외로 종료 (exit code ≠ 0)
   → subscribers 목록 clear
 ```
 
-### (b) 앱 전체 종료 시 PTY 전체 정리
+### (b) Cleaning up all PTYs on whole-app exit
 
 ```
 Tauri on_window_event(CloseRequested) 또는 tauri::AppHandle::exit()
@@ -622,7 +622,7 @@ Tauri on_window_event(CloseRequested) 또는 tauri::AppHandle::exit()
   → sessions 맵 clear
 ```
 
-### (c) 창 닫힘/reload 시 구독자 정리
+### (c) Subscriber cleanup on window close/reload
 
 ```
 프론트엔드 창 닫힘 (Tauri WebviewWindow closed)
@@ -636,7 +636,7 @@ Tauri on_window_event(CloseRequested) 또는 tauri::AppHandle::exit()
 
 ---
 
-## 13. Windows 전용 절 (`pty/platform/windows.rs`)
+## 13. Windows-specific section (`pty/platform/windows.rs`)
 
 ```rust
 #[cfg(windows)]
@@ -658,9 +658,9 @@ impl Drop for JobObjectHandle {
 }
 ```
 
-> **D-2 갱신:** 원안 `create_and_assign(pid) -> Result<Self, PtyError>` 단일 함수에서 `new`/`assign`/`terminate` 분리 + `io::Result`로 변경(에러 처리 유리, kill 시퀀스가 terminate 필요). spike 실측 통과. win_err는 `io::Error::other`로 메시지 보존.
+> **D-2 update:** The original single function `create_and_assign(pid) -> Result<Self, PtyError>` is split into `new`/`assign`/`terminate` and changed to `io::Result` (better for error handling, and the kill sequence needs terminate). The spike measurement passed. win_err preserves the message via `io::Error::other`.
 
-**Job Object 생성 흐름:**
+**Job Object creation flow:**
 ```
 CreateJobObject(NULL, NULL)
   → SetInformationJobObject(handle, JobObjectExtendedLimitInformation,
@@ -670,18 +670,18 @@ CreateJobObject(NULL, NULL)
   → AssignProcessToJobObject(handle, child_process_handle)
 ```
 
-**Windows ConPTY 추가 주의:**
-- `portable-pty 0.8.1` 기준 Windows는 `NativePtySystem::openpty()` → `ConPtySystem` 사용
-- 릴리즈 빌드 콘솔 창 숨김: `main.rs` 최상단에 `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` (debug 빌드에서 콘솔/로그 유지)
-- VT sequence는 xterm.js에 raw 전달 — Rust에서 파싱/변환 금지
+**Additional Windows ConPTY notes:**
+- With `portable-pty 0.8.1`, Windows uses `NativePtySystem::openpty()` → `ConPtySystem`
+- Hide the console window in release builds: put `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` at the very top of `main.rs` (console/logs are kept in debug builds)
+- Pass VT sequences to xterm.js raw — no parsing/conversion in Rust
 
-**[Windows 검증 포인트]** spawn → kill_agent 사이클을 작업관리자 강제종료 포함 smoke test.
+**[Windows verification point]** A spawn → kill_agent cycle smoke test, including a forced kill from Task Manager.
 
 ---
 
-## 14. 로깅 + 테스트 가능성 (`logging/`)
+## 14. Logging + testability (`logging/`)
 
-### 로그 설정
+### Log configuration
 
 ```rust
 // logging/mod.rs
@@ -694,21 +694,21 @@ pub fn init_logging();
 pub fn set_log_level(level: &str) -> Result<(), String>;
 ```
 
-> **D-1 갱신:** 원안(ENGRAM_LOG · 기본 INFO · `LogConfig{mask_api_keys}` · handle 반환 · verbose-log feature)에서
-> 코드는 RUST_LOG · 기본 warn(=OFF, 사용자 요구 "릴리스 기본 OFF") · 전역 OnceLock · 인자 없음으로 변경.
-> **`mask_api_keys`(API 키 마스킹)는 폐기 아님 — 보류(tracking T-1).** 기본 OFF라 현재 PTY 출력이 로그로 흐르지 않아 위험 낮음. `set_log_level("debug")`로 PTY 내용이 로그에 찍힐 수 있는 시점(debug 로깅/headless)에 재도입 필수 — 보안 항목.
+> **D-1 update:** Relative to the original (ENGRAM_LOG · default INFO · `LogConfig{mask_api_keys}` · returns a handle · verbose-log feature),
+> the code changed to RUST_LOG · default warn (= OFF, user requirement "릴리스 기본 OFF") · global OnceLock · no arguments.
+> **`mask_api_keys` (API key masking) is not discarded — it is deferred (tracking T-1).** With the default OFF, PTY output does not currently flow into logs, so the risk is low. It must be reintroduced at the point where PTY content can be printed to logs via `set_log_level("debug")` (debug logging/headless) — a security item.
 
-**로그 on/off 방식:**
+**How to turn logging on/off:**
 
-| 방식 | 기본값 | 변경 방법 |
+| Method | Default | How to change |
 |---|---|---|
-| 환경변수 | `ENGRAM_LOG=info` | `ENGRAM_LOG=debug`, `ENGRAM_LOG=off` |
-| 빌드 feature | `verbose-log` feature off | `--features verbose-log` |
-| 런타임 | INFO | `set_log_level()` via Tauri command (디버그 창에서 변경 가능) |
+| Environment variable | `ENGRAM_LOG=info` | `ENGRAM_LOG=debug`, `ENGRAM_LOG=off` |
+| Build feature | `verbose-log` feature off | `--features verbose-log` |
+| Runtime | INFO | `set_log_level()` via Tauri command (can be changed from the debug window) |
 
-**headless 테스트 시:** `ENGRAM_LOG=debug cargo test` → 전 구간 로그 출력.
+**In headless tests:** `ENGRAM_LOG=debug cargo test` → logs are printed for the whole run.
 
-### 코어 격리 = headless 테스트 가능
+### Core isolation = headless testable
 
 ```
 pty/ 에는 Tauri import 없음
@@ -734,86 +734,86 @@ fn test_spawn_and_output() {
 }
 ```
 
-**[테스트 검증 포인트]** `cargo test --package engram-dashboard-backend` — Tauri 없이 통과.
+**[Test verification point]** `cargo test --package engram-dashboard-backend` — passes without Tauri.
 
 ---
 
-## 15. 1차 리뷰 반영 추적표
+## 15. First-review feedback traceability table
 
-| 지적 사항 | 출처 | LLD 반영 절 |
+| Finding | Source | LLD section where addressed |
 |---|---|---|
 | emit_all → Channel | GPT | §8 Commands, §6 drain |
-| PtySession child handle 추가 | GPT | §4 PtySession |
-| Mutex 범위 최소화 | GPT | §10 동시성, §4 |
-| AgentStatus 6단계 | GPT | §9 상태머신 |
-| xterm.js backpressure batching | GPT | §6 drain (배칭 조건) |
+| Add PtySession child handle | GPT | §4 PtySession |
+| Minimize Mutex scope | GPT | §10 Concurrency, §4 |
+| AgentStatus 6 stages | GPT | §9 State machine |
+| xterm.js backpressure batching | GPT | §6 drain (batching condition) |
 | Windows Job Object | Gemini | §13 Windows |
-| Rust 단 배칭 | Gemini | §6 drain |
+| Batching on the Rust side | Gemini | §6 drain |
 | Vec\<u8\> / Uint8Array | Gemini | §3 PtyChunk |
-| fix-path PATH 상속 | Gemini | §16 결정-근거 (구현 시) |
-| Replay attach cols/rows 불일치 | Gemini | §7 subscribe (주석) |
-| drain blocking read 종료 메커니즘 | fable | §6 drain 종료 |
-| lock 보유 중 send 금지 | fable | §10 동시성 규칙3 |
-| subscriber send실패 감지 제거 | fable | §6 drain 의사코드 step8 |
-| replay→live seq 무결성 | fable | §7 |
-| Windows 전용 절 | fable | §13 |
-| 백엔드 단독 테스트 가능성 | 추가제약1 | §14, §1 모듈맵 |
-| 로그 on/off 토글 | 추가제약2 | §14 |
-| 모듈 구조에 제약 반영 | 추가제약3 | §1 모듈맵, §14 |
+| fix-path PATH inheritance | Gemini | §16 Decision-rationale (at implementation) |
+| Replay attach cols/rows mismatch | Gemini | §7 subscribe (comment) |
+| drain blocking read shutdown mechanism | fable | §6 drain shutdown |
+| No send while holding a lock | fable | §10 Concurrency rule 3 |
+| Detect subscriber send failure and remove | fable | §6 drain pseudocode step8 |
+| replay→live seq integrity | fable | §7 |
+| Windows-specific section | fable | §13 |
+| Backend standalone testability | extra constraint 1 | §14, §1 Module map |
+| Log on/off toggle | extra constraint 2 | §14 |
+| Reflect constraints in module structure | extra constraint 3 | §1 Module map, §14 |
 
 ---
 
-## 16. 결정 — 근거 — 기각한 대안
+## 16. Decision — rationale — rejected alternatives
 
-| 결정 | 근거 | 기각한 대안 |
+| Decision | Rationale | Rejected alternative |
 |---|---|---|
-| OutputSink trait 추상화 | pty/ Tauri 격리 → headless test 가능 | Tauri Channel 직접 의존 — Tauri 없이 테스트 불가 |
-| PtySession 필드별 Mutex | 병행성 최대화 — drain/stdin/resize 서로 안 막힘 | 단일 Mutex\<PtySession\> — drain 중 stdin 차단 |
-| RwLock for sessions 맵 | 조회 빈도 >> 추가/삭제 | Mutex — 불필요한 read 직렬화 |
-| child 종료로 blocking read 해제 | portable-pty reader에 read_timeout API 없음 | CancellationToken — async 런타임 필요, OS thread와 불일치 |
-| portable-pty 0.8.1 고정 | 0.9.x Windows garbage issue 확인됨 | 최신 버전 — smoke test 전까지 위험 |
-| subscribers+replay 동시 lock | replay→live gap 원천 차단 | 순차 lock — gap 발생 가능 |
-| drain thread OS thread (not async) | portable-pty blocking I/O와 자연스럽게 일치 | tokio::spawn — blocking read가 async worker 고갈 유발 |
+| OutputSink trait abstraction | pty/ is isolated from Tauri → headless test possible | Direct dependency on Tauri Channel — cannot test without Tauri |
+| Per-field Mutex in PtySession | Maximize concurrency — drain/stdin/resize do not block each other | Single Mutex\<PtySession\> — stdin blocked during drain |
+| RwLock for the sessions map | Lookup frequency >> add/remove | Mutex — needless serialization of reads |
+| Release the blocking read by ending the child | portable-pty reader has no read_timeout API | CancellationToken — needs an async runtime, mismatched with an OS thread |
+| Pin portable-pty 0.8.1 | 0.9.x Windows garbage issue confirmed | Latest version — risky until the smoke test |
+| subscribers+replay held together under lock | Blocks the replay→live gap at the root | Sequential locks — a gap can occur |
+| drain thread is an OS thread (not async) | Matches portable-pty blocking I/O naturally | tokio::spawn — blocking read exhausts async workers |
 
 ---
 
-## 17. 검토 완료 요약 (3자 검증 답변 반영)
+## 17. Review completion summary (three-way verification answers reflected)
 
-1. **drain thread 종료** — EOF 보장 안 됨. 수정됨: master.take() + TerminateJobObject 추가. [§6]
-2. **subscribers+replay 동시 lock** — 데드락 없음. subscribe 함수만 동시 취득(예외로 문서화). [§10]
-3. **OutputSink + Tauri Channel** — 래핑 가능. tauri 2.4 고정. send Ok여도 silent failure 가능 → 스파이크 실측 필요. [§2, G-2]
-4. **RwLock starvation** — 사실상 없음. drain이 sessions 맵 직접 접근 안 함. [§10]
-5. **AppState Mutex** — 제거됨. `Arc<PtyManager>` 확정. [§8]
-6. **추가 발견** — C1(serde tag), TerminateJobObject, completion channel, tauri 2.4 고정, frontend AgentStatus wire 불일치 모두 반영.
+1. **drain thread shutdown** — EOF is not guaranteed. Fixed: added master.take() + TerminateJobObject. [§6]
+2. **subscribers+replay held together under lock** — no deadlock. Only the subscribe function acquires both at once (documented as an exception). [§10]
+3. **OutputSink + Tauri Channel** — can be wrapped. Pin tauri 2.4. Silent failure is possible even when send is Ok → needs spike measurement. [§2, G-2]
+4. **RwLock starvation** — practically none. The drain does not access the sessions map directly. [§10]
+5. **AppState Mutex** — removed. `Arc<PtyManager>` confirmed. [§8]
+6. **Additional findings** — C1 (serde tag), TerminateJobObject, completion channel, pinning tauri 2.4, and the frontend AgentStatus wire mismatch are all reflected.
 
 ---
 
-## 18. S9 개정 (세션 복원) — Stage-1 확정본에 대한 델타
+## 18. S9 revision (session restore) — delta against the Stage-1 finalized version
 
-근거: `../S9-session-restore/session-restore-lld.md`(§12) + `session-restore-code-plan.md`(§E·§H). Stage-1 본문은 보존하고, 세션 복원으로 달라지는 의미론만 여기 모은다. fable 7건 중 백엔드 (a)~(d).
+Basis: `../S9-session-restore/session-restore-lld.md` (§12) + `session-restore-code-plan.md` (§E·§H). The Stage-1 body is preserved; only the semantics that change because of session restore are collected here. Backend items (a)~(d) of the 7 fable findings.
 
-### (a) §9 상태머신 — 같은 AgentId 재진입 허용 + epoch
-- 재시작(restore/restart)은 **같은 AgentId로 새 `PtySession`을 sessions 맵에 교체 삽입**한다. 즉 `Exited`/`Killed`/`Failed`(terminal) → `Running` 재진입을 manager 경로에 한해 허용한다(drain은 여전히 단방향: terminal 가드 유지).
-- 맵 교체가 일어나는 **모든 지점**에서 `ProfileRegistry::bump_epoch(id)`로 `epoch`를 +1 한다(restart + **fresh fallback respawn 포함** — H-1.5). `epoch`는 `AgentInfo`/`agent-status-changed` payload에 실려 프론트 재구독의 결정적 트리거가 된다.
-- 전이표 추가행:
+### (a) §9 state machine — re-entry with the same AgentId allowed + epoch
+- A restart (restore/restart) **replaces the entry in the sessions map with a new `PtySession` under the same AgentId**. That is, re-entry from `Exited`/`Killed`/`Failed` (terminal) → `Running` is allowed on the manager path only (the drain stays one-way: the terminal guard is kept).
+- At **every point** where the map is replaced, increment `epoch` by 1 with `ProfileRegistry::bump_epoch(id)` (restart + **including fresh fallback respawn** — H-1.5). `epoch` rides in the `AgentInfo`/`agent-status-changed` payload and becomes the deterministic trigger for the frontend to resubscribe.
+- Added transition row:
 
-  | 현재 상태 | 전이 → | 트리거 | 수행 주체 | 비고 |
+  | Current state | Transition → | Trigger | Performed by | Note |
   |---|---|---|---|---|
-  | `Exited`/`Killed`/`Failed` | → `Running` (새 세션) | `restore_all`/`restart_agent` | manager | 새 PtySession 맵 교체 + epoch++ |
+  | `Exited`/`Killed`/`Failed` | → `Running` (new session) | `restore_all`/`restart_agent` | manager | new PtySession replaces the map entry + epoch++ |
 
-### (b) §10 스레드 목록 — restart 전용 태스크
-- drain thread는 terminal 전이 후 **직접 respawn하지 않는다**(자기 수명과 얽힘 방지). drain은 manager에 신호만 보내고, **별도 restart 태스크**가 사다리(resume→fresh→정지)·backoff·respawn을 수행한다. 단, restart 자동화는 **게이트**(코어 안정 후) — 코어 GO 단계에선 `restore_all`(부팅 시 1회, 백그라운드)만 구현한다.
-- 스레드 목록 추가행:
+### (b) §10 thread list — restart-only task
+- The drain thread **does not respawn directly** after a terminal transition (to avoid entangling it with its own lifetime). The drain only sends a signal to the manager, and a **separate restart task** performs the ladder (resume→fresh→stop), backoff and respawn. However, restart automation is **gated** (after the core is stable) — in the core GO stage only `restore_all` (once at boot, in the background) is implemented.
+- Added thread list rows:
 
-  | 스레드 | spawn 주체 | 수명 | 비고 |
+  | Thread | Spawned by | Lifetime | Note |
   |---|---|---|---|
-  | session-tracker (단일) | `SessionTracker::start` | 앱 전체 | 모든 에이전트 sid 폴링, 정지 핸들 보유. best-effort |
-  | restart 태스크 | manager(게이트) | 재시작 처리 동안 | 코어 GO 범위 밖 |
+  | session-tracker (single) | `SessionTracker::start` | whole app | polls the sid of every agent, holds a stop handle. best-effort |
+  | restart task | manager (gated) | while handling a restart | outside the core GO scope |
 
-### (c) §7/§10 stale unsubscribe 무해
-- 재시작 직후 프론트가 보낸 **옛 sinkId unsubscribe가 새 세션에 도착**할 수 있다. `subscribers.retain(|s| s.sink_id() != sink_id)`는 not-found여도 무에러 통과하므로 무해(이미 그렇게 설계됨 — 명시만).
+### (c) §7/§10 stale unsubscribe is harmless
+- Right after a restart, an **old sinkId unsubscribe sent by the frontend may arrive at the new session**. `subscribers.retain(|s| s.sink_id() != sink_id)` passes without error even when nothing is found, so it is harmless (already designed that way — stated explicitly only).
 
-### (d) §5/§8 StatusSink 확장 — restore-result + epoch
-- `StatusSink`에 `restore_result(report: RestoreReport)` 통지 경로를 추가하고, `agent-restore-result` 이벤트로 emit한다.
-- `AgentInfo`·`AgentStatusChanged`에 `epoch: u32` 필드 추가(프론트 재구독 트리거 — 프론트 LLD §4 개정과 짝).
-- spawn 진입점이 `spawn_agent(profile, mode)`로 바뀐다(cwd 단독 인자 → 프로필 기반). cwd는 저장 전 `dunce::canonicalize`로 정규화한다.
+### (d) §5/§8 StatusSink extension — restore-result + epoch
+- Add a `restore_result(report: RestoreReport)` notification path to `StatusSink` and emit it as an `agent-restore-result` event.
+- Add an `epoch: u32` field to `AgentInfo` and `AgentStatusChanged` (the frontend resubscribe trigger — paired with the frontend LLD §4 revision).
+- The spawn entry point changes to `spawn_agent(profile, mode)` (a sole cwd argument → profile-based). cwd is normalized with `dunce::canonicalize` before saving.

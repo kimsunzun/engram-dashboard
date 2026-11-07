@@ -6,16 +6,16 @@ import type { PointCss } from "./PointCss";
 import type { SizeCss } from "./SizeCss";
 
 /**
- * 놓을 곳 — 셸은 놓기가 본 상태와 견주지 않는다. 가리킨 것이 놓을 때 있으면 지금 상태에 맞춰 적용하고, 없으면
- * `rejected` 다.
+ * Where to drop — the shell does not compare against the state the drop saw. If what was pointed at exists at drop time, it is applied matched to the current state, and if not,
+ * it is `rejected`.
  *
- * - `tab_bar`: 부른 창의 탭바. `index` = 결과 탭 목록에서의 자리 — 셸이 지금 목록(끄는 탭을 뺀 것)에 넣고, 넘치면
- *   맨 뒤다. 부른 창이 없으면 `WindowNotFound`.
- * - `seam`: 부른 창에 보이던 탭 `target` 의 이음새(`side` 철자 = [`DockSide`] variant 이름). `share` = 감싼 자리에서
- *   끄는 탭이 차지하는 몫(`RATIO_MIN(0.01) ≤ share ≤ 0.5` — 밖이면 `InvalidShare`). `target` 의 지금 배치에 붙인다 —
- *   그사이 나뉘었거나 다른 창으로 갔어도 `target` 과 기준 칸이 있으면 붙고, 없으면 `TabNotFound` · `SlotNotFound`(기준
- *   칸이 다른 탭으로 갔으면 `SlotNotInTab`).
- * - `new_window`: 그 탭만 든 창. `size` = 새 창 안쪽 크기(유한 양수가 아니면 셸 기본 크기 · `null` = 탭 하나뿐인
- *   팝아웃 — 새 창 없이 그 창을 크기 그대로 옮긴다) · `grab` = 새 창 뷰포트에서 커서가 올 점.
+ * - `tab_bar`: the calling window's tab bar. `index` = the position in the resulting tab list — the shell inserts it into the current list (without the dragged tab), and if it overflows, it is
+ *   the very end. If there is no calling window, `WindowNotFound`.
+ * - `seam`: the seam of tab `target` that was visible in the calling window (`side` spelling = [`DockSide`] variant name). `share` = the share the dragged tab takes
+ *   of the wrapped spot (`RATIO_MIN(0.01) ≤ share ≤ 0.5` — outside it, `InvalidShare`). It attaches to `target`'s current layout —
+ *   even if it was split in the meantime or went to another window, it attaches if `target` and the reference area exist, and if not, `TabNotFound` · `SlotNotFound` (if the reference
+ *   area went to another tab, `SlotNotInTab`).
+ * - `new_window`: a window holding only that tab. `size` = the new window's inner size (if not a finite positive number, the shell default size · `null` = a popout with only
+ *   one tab — move that window as is at its size with no new window) · `grab` = the point in the new window's viewport where the cursor will land.
  */
 export type DropTo = { "type": "tab_bar", index: number, } | { "type": "seam", target: string, anchor: DropAnchor, side: DockSide, share: number, } | { "type": "new_window", by: NewWindowBy, size: SizeCss | null, grab: PointCss, };

@@ -1,39 +1,39 @@
-# ADR-0108: request 계약 수명 — 기한 초과에도 미회신은 오픈 유지 + cap 은퇴는 mark-and-sweep (D 게이트 round 2~7)
+# ADR-0108: Request contract lifetime — an unreplied request stays open even past its deadline + cap retirement is mark-and-sweep (D gate rounds 2-7)
 
-- 상태: 확정 (2026-07-27, 근거: D 적대 리뷰 6라운드 실적출 + 사용자 결정 2026-07-27) · 부분 폐기 by ADR-0114 (결정 2 REQUEST_CAPACITY 반려 층위) · 부분 폐기 by ADR-0118 (결정 1 계약 종결 조건)
-- 관련: ADR-0103(회신 계약 본체) · ADR-0107(메일박스 용량 모델 — 압력 회수의 선례 패턴) · spec §3(회신 계약)·§6(REQUEST_CAPACITY) · Amended by ADR-0114 (결정 2 REQUEST_CAPACITY 반려 층위) · Amended by ADR-0118 (결정 1 계약 종결 조건)
+- 상태: 확정 (2026-07-27, basis: 6 rounds of real findings from the D adversarial review + user decision 2026-07-27) · 부분 폐기 by ADR-0114 (decision 2 the REQUEST_CAPACITY reject tier) · 부분 폐기 by ADR-0118 (decision 1 the contract close condition)
+- 관련: ADR-0103(reply contract proper) · ADR-0107(mailbox capacity model — the precedent pattern for pressure reclaim) · spec §3(reply contract)·§6(REQUEST_CAPACITY) · Amended by ADR-0114 (decision 2 the REQUEST_CAPACITY reject tier) · Amended by ADR-0118 (decision 1 the contract close condition)
 
 ## 맥락
 
-D의 `messages`(미결 조회) 툴이 request 계약 추적의 숨은 결함들을 연쇄 노출했다:
+D's `messages` (open-items query) tool exposed, one after another, hidden defects in request contract tracking:
 
-1. **의무 증발** — 이력 링(4096)에서 밀려난 request가 기한 초과 통지 후 purge돼 미결 조회에서 사라졌다. "통지했다 ≠ 회신 받았다"인데 둘을 같은 종결로 취급한 게 원인.
-2. 이를 "회신 전엔 오픈 유지"로 교정하자 **cap 영구 고갈**이 생겼다 — 죽은/무응답 수신자에게 보낸 request는 영영 안 닫혀 전역 상한 `MAX_OPEN_REQUESTS=512`를 채우고, 완화 경로가 없어 데몬 재시작 전까지 전 에이전트가 새 request를 못 열었다(round-2 BLOCK).
-3. 은퇴 구현 1안("제거 후 실패 시 복원" 2단계)은 락 밖 배송 동안 장부가 거짓 상태(피해자 부재·잠정 존재)를 노출해 3라운드(round 3~5) 연속으로 뚫렸다: 반려가 무고한 계약을 지움 → panic 누수·락 분할 513 창·복원 충돌 가드가 원본을 버림 → 잠정 계약이 남의 은퇴 대상이 됨·피해자에게 온 정상 회신 유실·513 영구화.
+1. **Obligation evaporation** — a request pushed out of the history ring (4096) was purged after its deadline-exceeded notice and vanished from the open-items query. The cause was treating "we notified" ≠ "a reply was received" as the same closure.
+2. Correcting that to "stay open until replied" produced **permanent cap exhaustion** — a request sent to a dead or unresponsive recipient never closes, so it fills the global limit `MAX_OPEN_REQUESTS=512`, and with no relief path, no agent could open a new request until the daemon restarted (round-2 BLOCK).
+3. The first retirement implementation (two steps, "remove, then restore on failure") exposed a false ledger state (victim absent, provisional present) during the out-of-lock delivery, and was breached three rounds in a row (rounds 3-5): a reject erased an innocent contract → a panic leak, a 513 window from a lock split, a restore-conflict guard that dropped the original → a provisional contract became another's retirement target, a normal reply addressed to the victim was lost, 513 became permanent.
 
 ## 결정
 
-1. **기한 초과 ≠ 종결.** `reply_by` 초과는 발신자 통지(notice) 사유일 뿐, 계약은 회신(`in_reply_to`)이 올 때까지 오픈이며 미결 조회에 `timed_out=true`로 계속 보인다. purge는 회신으로 닫힌 계약만 대상.
-2. **cap 은퇴 = 가득 차면 오래된 것부터(사용자 결정 2026-07-27).** 512 도달 시 **은퇴 가능 계약 중 최고령**을 은퇴시키고 신규를 수용. 은퇴 가능 = "발신자에게 알릴 약속이 안 남은 것"만 — ① 기한 초과 통지가 이미 나간 계약 ② 기한 자체가 없는 계약(통지 약속 없음). 통지 의무가 미발화한 계약은 절대 은퇴 불가 — 전부 그 상태면 `REQUEST_CAPACITY` 반려가 정답. 은퇴는 발신자에게 통지하지 않음(데몬 info 로그만 — 후속 검토 항목).
-3. **은퇴 메커니즘 = mark-and-sweep.** 배송(락 밖·시간 무제한)이 진행되는 동안 장부에서 아무것도 물리 제거하지 않는다: 피해자는 `pending_retirement` 표시, 신규는 `provisional` 표시로 수용. 성공 커밋 시에만 피해자 실제 제거(+은퇴 로그), 실패/unwind 시 표시 해제 + 잠정 제거(RAII 가드, poison 내성).
-4. **핵심 불변식: 미정산 항목의 수명은 그 가드 소유다.** 잠정 계약은 ⓐ 은퇴 후보 선택에서 제외 ⓑ 닫혀도(빠른 회신) 가드 정산까지 자리 무게 유지 ⓒ purge 면제 ⓓ 기한 스윕 제외(커밋 후 다음 60s 스윕이 원래 시각 기준으로 통지 — 지연될 뿐 유실 없음). 용량 판정은 단일 술어(`occupied_slots`)에서만 파생.
+1. **Deadline exceeded ≠ closed.** Exceeding `reply_by` is only a reason to notify the sender (notice); the contract stays open until a reply (`in_reply_to`) arrives and keeps showing in the open-items query with `timed_out=true`. Purge applies only to contracts closed by a reply.
+2. **Cap retirement = oldest first when full (user decision 2026-07-27).** On reaching 512, retire the **oldest of the retirable contracts** and accept the new one. Retirable = only those with "no promise left to tell the sender" — ① a contract whose deadline-exceeded notice has already gone out ② a contract with no deadline at all (no notice promise). A contract whose notice duty has not yet fired is never retirable — if all of them are in that state, a `REQUEST_CAPACITY` reject is the right answer. Retirement does not notify the sender (only a daemon info log — a follow-up review item).
+3. **Retirement mechanism = mark-and-sweep.** While the delivery (out of the lock, unbounded in time) is in progress, nothing is physically removed from the ledger: the existing victim is marked `pending_retirement`, and the new contract is admitted as `provisional`. Only on a successful commit is the victim actually removed (+ a retirement log); on failure/unwind, the marks are cleared and the provisional one is removed (RAII guard, poison-tolerant).
+4. **Core invariant: the lifetime of an unsettled item is owned by its guard.** A provisional contract is ⓐ excluded from retirement candidate selection ⓑ even if it closes (a quick reply), it keeps its slot weight until the guard settles ⓒ exempt from purge ⓓ excluded from the deadline sweep (after the commit, the next 60s sweep notifies based on the original time — only delayed, nothing lost). The capacity decision is derived from a single predicate (`occupied_slots`) only.
 
 ## 거부한 대안
 
-- **notified 계약 즉시 purge(교정 전 상태)** — "통지 = 종결" 오판. 이력 축출과 겹치면 미회신 의무가 조용히 증발(실적출).
-- **무한 유지(완화 없음)** — 죽은 수신자행 request가 512를 영구 점유, 전역 발송 불능(round-2 BLOCK 실적출).
-- **기한 초과 후 24h 자동 닫기(단독 또는 병행)** — 사용자 비채택(2026-07-27): 은퇴 단독 채택. 닫힌 뒤 늦은 회신이 계약 없는 일반 회신이 되는 어휘 혼선 대비 규칙 추가 이득이 없음.
-- **"제거 후 복원" 2단계 은퇴** — 3라운드 연속 실적출로 폐기. 창을 좁히는 패치(RAII·단일 락·id 예약)마다 다른 모서리가 뚫림 — 창의 존재 자체가 원인.
-- **id 예약(reserved_ids) 기계** — mark-and-sweep 채택으로 불필요(피해자가 장부를 안 떠나므로 정상 추적이 충돌 검사를 커버). 삭제됨.
-- **커밋 후 계약 오픈(창 제거의 다른 방향)** — 주입→오픈 사이에 회신이 도착하면 계약 없는 회신(유령 계약 레이스 — C3 실적출)이라 선오픈이 필수.
+- **Purge a notified contract immediately (the state before the correction)** — the misjudgment "notice = closure". Combined with history eviction, an unreplied obligation silently evaporates (found for real).
+- **Keep forever (no relief)** — requests to dead recipients occupy 512 permanently and global sending becomes impossible (round-2 BLOCK, found for real).
+- **Auto-close 24h after the deadline (alone or together)** — not adopted by the user (2026-07-27): retirement alone is adopted. It adds no benefit as a rule against the vocabulary confusion where a late reply after closure becomes a contract-less ordinary reply.
+- **Two-step "remove then restore" retirement** — discarded after being found for real three rounds in a row. Each patch that narrowed the window (RAII, single lock, id reservation) was breached at another corner — the existence of the window itself is the cause.
+- **The id-reservation (reserved_ids) machinery** — unnecessary once mark-and-sweep is adopted (the victim never leaves the ledger, so normal tracking covers the conflict check). Deleted.
+- **Open the contract after commit (the other direction for removing the window)** — if a reply arrives between injection and open, it is a reply with no contract (a phantom-contract race — found for real in C3), so opening first is mandatory.
 
 ## 근거
 
-- 리뷰 실적출: round 2 BLOCK(영구 고갈) → 3(반려 원자성) → 4(2단계 엣지 4) → 5(창 구조 결함 3 — 재설계 전환점) → 6(술어 엣지 2) → 7 **PASS**. 각 수정 mutation 검증.
-- 수용 잔여(가격 매김): marked-victim ID-ABA(36⁸ 재추첨 × 재선택 — 피해 = 은퇴 1건 취소, rollback_open 주석) · 진짜 병렬 스트레스 테스트 없음(불변식이 단일 mutex 안 강제 + 결정적 재진입 테스트로 커버) · 은퇴 발신자 비통지(백로그).
+- Real findings of the review: round 2 BLOCK (permanent exhaustion) → 3 (reject atomicity) → 4 (4 two-step edges) → 5 (3 window structure defects — the redesign turning point) → 6 (2 predicate edges) → 7 **PASS**. Each fix mutation-verified.
+- Accepted residuals (priced): marked-victim ID-ABA (36⁸ redraw × reselection — damage = one retirement cancelled, rollback_open comment) · no truly parallel stress test (the invariant is enforced inside a single mutex + covered by a deterministic re-entrancy test) · senders not notified when their contracts are retired (backlog).
 
 ## 영향 / 불변식
 
-- `REQUEST_CAPACITY`의 발화 조건이 바뀜: 기한 초과 계약도 슬롯을 점유하며, 반려는 "은퇴 불가 계약만 512개"일 때만. 코드 앵커 `// ADR-0108` 5개 = `ledger.rs`(occupies_slot 술어 · cap 은퇴 최고령 선택 · purge 면제 · due_timeouts 스킵)·`service.rs`(ReservationGuard).
-- 어기면: 미회신 의무 증발(1 위반) / 전역 발송 불능(2 위반) / 반려·panic이 무고한 계약을 지움·513 드리프트·회신 유실(3·4 위반)이 재발한다.
-- spec 정합: §3 회신 계약(오픈 유지·은퇴 정책)·§6 REQUEST_CAPACITY 항이 이 ADR로 갱신됨.
+- The firing condition of `REQUEST_CAPACITY` changes: a deadline-exceeded contract also occupies a slot, and a reject happens only when "512 contracts that cannot be retired". The 5 code anchors `// ADR-0108` = `ledger.rs` (the occupies_slot predicate · cap retirement oldest selection · purge exemption · due_timeouts skip) and `service.rs` (ReservationGuard).
+- If violated: unreplied obligations evaporate (violating 1) / global sending becomes impossible (violating 2) / a reject or panic erases an innocent contract, 513 drift, reply loss (violating 3 and 4) come back.
+- Spec alignment: the §3 reply contract (stay-open and retirement policy) and the §6 REQUEST_CAPACITY entries are updated by this ADR.

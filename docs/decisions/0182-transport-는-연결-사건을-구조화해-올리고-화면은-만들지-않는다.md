@@ -1,43 +1,43 @@
-# ADR-0182: transport 는 연결 사건을 구조화해 올리고 화면은 만들지 않는다
+# ADR-0182: transport raises connection events as structure and does not build a screen
 
-- 상태: 확정 (2026-09-06, 근거: 사용자 결정 + 이 세션의 정적 판독 실측. ★**코드를 한 줄도 고치지 않았다**★)
-- 관련: ADR-0177 결정 9(유실 신호는 **위층이 읽는 스트림**에 실어 올린다 — 이 사건 스트림이 그 실물. ★**순번 구멍 검사 부재의 실측도 그 ADR 이 정본이다**★) · ADR-0177 결정 3(crate 안에 드는 것 — 세대 경계·출처 표식·재연결·★**상대 N개 레지스트리**★) · ADR-0177 「거부한 대안/근거」의 안·밖 분할(★결정 3 의 기각 근거★) · ADR-0177 결정 8(검증 하네스 = 인메모리 + 시간 주입 — 이 결정이 그 하네스에 **단언할 것**을 준다) · ADR-0180(알림 정책 전반 — 무엇을 띠로 내고 무엇을 팝업으로 덮나. ★**이 ADR 은 그것을 되풀지 않는다**★) · ADR-0179(데몬 여럿·클라 여럿 — ★사건이 **상대마다** 난다는 뜻이고, 그 묶음을 어떻게 볼지는 **열린 질문**★, 아래 「영향」) · ADR-0129(net 어휘 격리 — 같은 벽이 `transport` 에도 선다) · ADR-0046(재생 single-flight — 되감기 잘림이 나는 자리) · step-log S21
+- 상태: 확정 (2026-09-06, basis: user decision + static-read measurement in this session. ★**Not one line of code was changed**★)
+- 관련: ADR-0177 decision 9 (a loss signal is carried on **a stream the upper layer reads** — this event stream is that stream's real form. ★**The measurement that sequence-gap checking is absent is also canonical in that ADR**★) · ADR-0177 decision 3 (what goes inside the crate — generation boundary · origin marker · reconnect · ★**the N-peer registry**★) · the inside/outside split in ADR-0177 「거부한 대안/근거」 (★the rejection ground of decision 3★) · ADR-0177 decision 8 (verification harness = in-memory + time injection — this decision gives that harness **what to assert**) · ADR-0180 (notification policy overall — what goes out as a strip and what is covered by a popup. ★**This ADR does not reopen it**★) · ADR-0179 (several daemons, several clients — ★meaning events happen **per peer**, and how to view that bundle is an **open question**★, see 「영향」 below) · ADR-0129 (net vocabulary isolation — the same wall stands at `transport`) · ADR-0046 (replay single-flight — where rewind truncation happens) · step-log S21
 
 ## 맥락
 
-`transport` crate(ADR-0177)를 세우면서 **「무슨 일이 있었나」를 누가 아는가**가 갈린다. 지금 그 사실들은 **crate 가 될 자리 안에서 나고 그 자리에서 죽는다** — 아래 「근거」의 목록이 그것이고, 어느 것도 **위층이 읽는 형태로는 나오지 않는다.**
+Building the `transport` crate (ADR-0177) splits out the question of **who knows 「무슨 일이 있었나」 (what happened)**. Today those facts **arise inside the place that will become the crate and die there** — the list in 「근거」 below is that, and none of them **comes out in a form the upper layer reads.**
 
-그리고 이 범위 결정이 늦으면 비싸다. 사건 지점은 **연결 수명·재연결 루프·되감기 경계 안쪽**에 있어서, crate 를 다 세운 뒤에 뚫으려면 **그 안을 다시 뜯고 인터페이스가 한 번 더 바뀐다.**
+And deciding this scope late is expensive. The event points sit **inside the connection lifetime, the reconnect loop and the rewind boundary**, so once the crate is fully built, opening them up means **tearing into that interior again and changing the interface one more time.**
 
 ## 결정
 
-1. ★**`transport` 가 사건을 구조화해 위층으로 올린다**★ — **붙었다/끊겼다 · 왜 거절당했나 · 몇 번째 재시도인가 · 어디서 몇 개를 잃었나.** 로그 문자열이 아니라 **구조**다.
-2. ★**화면(로그 창)은 이번 범위 밖이다.**★ 나중에 view 가 만든다. 사용자 발언: *"올리는 것까지 해야지. 화면 만드는 건 나중에 view에서 얼마든지 할 수 있으니."*
-3. ★**`transport` 는 자기가 아는 것만 올린다.**★ **에이전트 오류·명령 실패는 위층이 아는 일이라 올리지 않는다.** 나중에 화면이 **여러 출처를 합친다.**
+1. ★**`transport` raises events to the upper layer as structure**★ — **connected/disconnected · why it was refused · which retry attempt this is · how many were lost and where.** It is **structure**, not log strings.
+2. ★**The screen (a log window) is out of scope this time.**★ The view builds it later. User statement: *"올리는 것까지 해야지. 화면 만드는 건 나중에 view에서 얼마든지 할 수 있으니."*
+3. ★**`transport` raises only what it knows itself.**★ **Agent errors and command failures are things the upper layer knows, so they are not raised.** Later the screen **merges several sources.**
 
 ## 거부한 대안
 
-- **사건까지 이번 범위 밖으로 미룬다** — 나중에 사건 지점을 뒤늦게 뚫으면 ★**`transport` 를 다시 뜯고 인터페이스가 한 번 더 바뀐다**★. 사건이 나는 자리가 연결 수명·재연결 루프 안쪽이라 바깥에서 덧댈 수 없다.
-- **화면까지 이번에 만든다** — 범위가 크게 늘고, ★**crate 를 세워 단독 검증하는 첫 단계의 초점이 흐려진다**★(ADR-0177 결정 1 의 작업 방식 = 신설 → 독립 검증 → 적당한 범위로 붙이기).
-- **`transport` 가 에이전트 오류·명령 실패까지 모아 올린다** — ★**crate 경계 위반**★이다(ADR-0177 의 안/밖 분할표 — 밖에 남는 것은 패킷 정의·정책 값이고 에이전트 어휘는 애초에 crate 가 모른다). 모아 올리려면 그 어휘를 알아야 하고, 그 순간 ADR-0129 가 `net` 에 대해 세운 것과 같은 벽이 무너진다.
+- **Defer even the events out of this scope** — if the event points are opened late, ★**`transport` is torn into again and the interface changes one more time**★. The place where events arise is inside the connection lifetime and the reconnect loop, so they cannot be patched on from outside.
+- **Build the screen this time too** — the scope grows a lot, and ★**the focus of the first step, building the crate and verifying it alone, gets blurred**★ (the working method of ADR-0177 decision 1 = build new → verify independently → attach in a suitable scope).
+- **`transport` also collects and raises agent errors and command failures** — ★**a crate boundary violation**★ (the inside/outside split table of ADR-0177 — what stays outside is the packet definition and the policy values, and the crate never knows the agent vocabulary in the first place). To collect and raise them it would have to know that vocabulary, and at that moment the same wall that ADR-0129 set up for `net` collapses.
 
 ## 근거
 
-★**지금 사라지는 것들(실측 — 정적 판독)**★:
+★**Things that disappear now (measured — static reading)**★:
 
-- **재연결 중 거절 사유** → `debug!` 로그로만 남고 버려진다. ★**첫 연결 때는 화면까지 가는데 재연결 중에는 안 간다**★ — 같은 사실이 경로에 따라 보이기도 하고 안 보이기도 한다.
-- **되감기 잘림** → **브라우저 콘솔로만**(릴리스 WebView2 에는 개발자도구가 없어 사실상 아무도 못 본다).
-- **출력 구간 소실** → ★**아무도 검사하지 않는다**★ — 순번 **구멍 검사가 없고 단조 dedup 만** 있다. 즉 빠진 구간은 「지나간 번호」와 구별되지 않는다. ★**이 실측의 정본은 ADR-0177 「근거」이고 검색식도 거기 있다 — 여기서 숫자만 베끼지 않는다.**★
-- **파일 로그는 있으나 앱 안에서 볼 수단이 없다** — 사용자가 파일을 직접 열어야 한다.
-- ★**명령 결말 폐기** → 경고 로그로만. **단 이 항목만 자격이 다르다**★ — 이것은 「**지금 앱 안에서 사라지는 것**」의 사례이지 ★**`transport` 가 올릴 사건이 아니다**★(결정 3 이 명령 계열을 밖으로 뺀다). 여기 적는 이유는 **나중에 화면이 여러 출처를 합칠 때 이것도 그 재료라는 것**이고, 그 합치는 일은 위층이 한다.
+- **Refusal reason during reconnect** → left only as a `debug!` log and thrown away. ★**On the first connection it reaches the screen, but during a reconnect it does not**★ — the same fact is sometimes visible and sometimes not, depending on the path.
+- **Rewind truncation** → **only in the browser console** (the release WebView2 has no developer tools, so in practice nobody can see it).
+- **Output range loss** → ★**nobody checks it**★ — there is no sequence **gap check**, only monotonic dedup. So a missing range cannot be told apart from a 「지나간 번호」 (number that has passed). ★**The canonical source of this measurement is ADR-0177 「근거」 and the search expression is there too — we do not copy only the number here.**★
+- **A file log exists but there is no way to view it inside the app** — the user has to open the file directly.
+- ★**Command outcome discard** → only as a warning log. **But only this item has a different standing**★ — it is an example of 「**지금 앱 안에서 사라지는 것**」 (**what disappears inside the app now**), not ★**an event `transport` raises**★ (decision 3 takes the command family outside). The reason it is written here is that **later, when the screen merges several sources, this too is material for it**, and that merging is done by the upper layer.
 
-★**부가 가치 — 이건 검증 수단이기도 하다**★: 인메모리 테스트가 **「그때 무슨 일이 있었나」를 사건으로 단언**할 수 있어, **실소켓 없이 재연결·유실 로직을 잰다.** ADR-0177 결정 8 이 「로직은 전부 인메모리 + 시간 주입」으로 하네스를 못박았는데, ★**그 하네스가 무엇을 보고 판정할지는 그 ADR 이 주지 않았다**★ — 이 사건 스트림이 그 관측 지점이다.
+★**Added value — this is also a verification tool**★: an in-memory test can **assert 「그때 무슨 일이 있었나」 (what happened at that time) as an event**, so it **measures the reconnect and loss logic without a real socket.** ADR-0177 decision 8 nailed the harness down as 「로직은 전부 인메모리 + 시간 주입」 (all logic in-memory + time injection), but ★**that ADR did not give what the harness looks at to decide**★ — this event stream is that observation point.
 
 ## 영향 / 불변식
 
-- ★**사건 어휘가 곧 crate 경계다**★(결정 3). 「이것도 같이 올리면 편하다」로 에이전트·명령 어휘가 한 칸이라도 들어오면 ADR-0177 의 안/밖 분할과 ADR-0129 의 격리가 그 자리에서 깨진다. **합치는 일은 화면이 한다.**
-- **ADR-0177 결정 9 의 「위층이 읽는 스트림」이 이 사건 스트림이다** — 유실 신호를 **콘솔이 아니라 여기에** 싣는다. 잘림은 참/거짓이 아니라 ★**「지금 유효한 가장 오래된 번호」**★로 준다(그 결정의 형태를 이 ADR 이 바꾸지 않는다).
-- ★**올리기만 하고 화면이 없으므로 당장 사용자에게 보이는 변화가 없다 — 그것이 의도다**★(결정 2). **첫 소비자는 테스트**이고, 화면은 나중에 붙는다. ★이 상태를 「미완성」으로 읽고 급히 로그 창을 짓지 말 것★ — 그 범위를 뺀 것이 이 결정이다.
-- **사건이 알림 표면을 자동으로 얻는 것은 아니다** — 그 정책의 정본은 **ADR-0180** 이다(여기 되풀어 적지 않는다).
-- ★**열린 질문 — 사건은 상대마다 나는데 그것을 어떻게 묶어 볼 것인가**★. ADR-0177 결정 3 이 **상대 N개 레지스트리 + 상대마다 감독**이라 사건에는 **출처 표식**이 붙고, ADR-0179 로 그 상대가 실제로 여럿이 된다. 그러면 「몇 번째 재시도인가」도 「어디서 몇 개를 잃었나」도 **연결마다 따로** 센다. ★**이 ADR 은 그것을 앱 전체로 접을지 연결별로 둘지 정하지 않는다 — 지어내지도 않는다.**★ 사용자가 판단 중이다.
-- ★**검증 안 된 것**★ — 위 「사라지는 것들」은 **정적 판독의 결론**이다. 각 지점을 런타임에서 재현해 확인하지 않았고, **사건 종류의 최종 목록도 이 ADR 이 확정하지 않는다**(결정 1 은 네 갈래를 이름으로 든 것이지 스키마가 아니다). 스키마는 crate 를 세우는 단계에서 정한다.
+- ★**The event vocabulary is the crate boundary**★ (decision 3). If agent or command vocabulary comes in even by one slot on the grounds that 「이것도 같이 올리면 편하다」 (raising this too would be convenient), the inside/outside split of ADR-0177 and the isolation of ADR-0129 break right there. **The screen does the merging.**
+- **The 「위층이 읽는 스트림」 (stream the upper layer reads) of ADR-0177 decision 9 is this event stream** — the loss signal is carried **here, not on the console**. Truncation is given not as true/false but as ★**「지금 유효한 가장 오래된 번호」 (the oldest number valid right now)**★ (this ADR does not change the form of that decision).
+- ★**Events are only raised and there is no screen, so there is no change visible to the user for now — that is the intent**★ (decision 2). **The first consumer is a test**, and the screen is attached later. ★Do not read this state as 「미완성」 (unfinished) and hurry to build a log window★ — removing that scope is this decision.
+- **Events do not automatically gain a notification surface** — the canonical source of that policy is **ADR-0180** (not rewritten here).
+- ★**Open question — events happen per peer, so how do we view them bundled**★. ADR-0177 decision 3 is **an N-peer registry + supervision per peer**, so events carry an **origin marker**, and with ADR-0179 those peers really do become several. Then both 「몇 번째 재시도인가」 (which retry attempt this is) and 「어디서 몇 개를 잃었나」 (how many were lost and where) are counted **separately per connection**. ★**This ADR does not decide whether to fold that into the whole app or keep it per connection — and does not make one up.**★ The user is still deciding.
+- ★**Not verified**★ — the 「사라지는 것들」 (things that disappear) above are **the conclusions of static reading**. We did not reproduce each point at runtime to confirm it, and **this ADR does not fix the final list of event kinds either** (decision 1 names four branches, it is not a schema). The schema is decided in the phase where the crate is built.

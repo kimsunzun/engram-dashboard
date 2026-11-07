@@ -1,6 +1,6 @@
-// NoticeOverlay — 알림을 레이아웃 위에 덮는 층(ADR-0276 · ADR-0277).
+// NoticeOverlay — the layer that covers the layout with notices (ADR-0276 · ADR-0277).
 //
-// jsdom 은 크기를 재지 못한다 — 「밀지 않는다 · 줄만큼만 덮는다」를 계산된 위치와 구조로 단언한다.
+// jsdom cannot measure size — assert 「밀지 않는다 · 줄만큼만 덮는다」 (does not push · covers only as much as its rows) by the computed position and structure.
 
 import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'

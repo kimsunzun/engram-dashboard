@@ -1,44 +1,44 @@
-//! saturation-pilot CLI 인자 파서 (ADR-0090 Stage 2 파일럿).
+//! saturation-pilot CLI argument parser (ADR-0090 Stage 2 pilot).
 //!
-//! ## 역할
-//! `saturation_pilot` bin 의 커맨드라인을 파싱해 검증된 `PilotConfig` 로 만든다. clap 등 인자 파싱
-//! 크레이트를 **추가하지 않는다**(ADR-0090 제약: no new deps) — 플래그 종류가 적고 손조립으로 충분.
+//! ## Role
+//! Parses the command line of the `saturation_pilot` bin into a validated `PilotConfig`. It does **not add** an argument parsing
+//! crate such as clap (ADR-0090 constraint: no new deps) — there are few kinds of flags and hand assembly is enough.
 //!
-//! ## 핵심 불변식 (ADR-0090)
-//! - **하드 캡 클램프**: `fill_target_tokens` 는 파싱 단계에서 하드 클램프된다. 사용자가 상한보다
-//!   크게 줘도 조용히 줄인다(폭주 실험 방지 — 런타임 캡과 이중 방어).
-//! - **미지 플래그 = 거부**: 모르는 플래그는 `ParseError::Unknown` 으로 거부하고 호출자가 exit 2 로
-//!   끝낸다(오타로 인한 잘못된 파라미터 침묵 실행 방지).
+//! ## Core invariants (ADR-0090)
+//! - **Hard-cap clamp**: `fill_target_tokens` is hard-clamped at the parsing stage. Even if the user gives a value
+//!   above the cap it is quietly reduced (prevents a runaway experiment — a double defense with the runtime cap).
+//! - **Unknown flag = refused**: an unknown flag is refused with `ParseError::Unknown` and the caller
+//!   ends with exit 2 (prevents silently running with wrong parameters caused by a typo).
 // ADR-0090
 
 use std::path::PathBuf;
 
-/// fill 목표 토큰 하드 클램프(ADR-0090 불변식).
+/// Hard clamp of the fill target tokens (ADR-0090 invariant).
 pub const FILL_TARGET_CLAMP: u64 = 180_000;
 
-/// ★doc_chars 하드 클램프(ADR-0090 불변식 — finding 7)★: 한 문서가 fill-target(문자 환산 상한)을
-///   넘길 이유가 없으므로 넉넉한 고정 천장을 둔다. 초과 값은 파싱 단계에서 조용히 줄인다.
+/// ★doc_chars hard clamp (ADR-0090 invariant — finding 7)★: there is no reason for one document to exceed the fill-target (character-converted cap),
+///   so a generous fixed ceiling is set. An excess value is quietly reduced at the parsing stage.
 pub const DOC_CHARS_CLAMP: usize = 200_000;
 
-/// 파일럿 런 설정 — 전 파라미터 + seed. JSONL 헤더에 그대로 직렬화(재현성 핀 = ADR-0088 d5a).
+/// Pilot run config — all parameters + seed. Serialized as is into the JSONL header (reproducibility pin = ADR-0088 d5a).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PilotConfig {
-    /// 반복 런 수(각 런 = 새 에이전트 1스폰).
+    /// Number of repeated runs (each run = 1 spawn of a new agent).
     pub runs: u32,
-    /// 포화 목표 토큰(usage 의 context 크기 기준).
+    /// Saturation target tokens (by the usage context size).
     pub fill_target_tokens: u64,
-    /// 주입 시점(fill 진행 분율).
+    /// Injection points (fraction of fill progress).
     pub inject_at: Vec<f64>,
-    /// 주입 후 프로브까지 대기할 fill 턴 수.
+    /// Number of fill turns to wait from injection until the probe.
     pub probe_gap_turns: u32,
-    /// doc 1개의 근사 문자 수.
+    /// Approximate character count of one doc.
     pub doc_chars: usize,
     pub model: String,
-    /// JSONL 출력 디렉토리. None 이면 driver 가 기본(`target/experiments/pilot-<UTC>/`) 생성.
+    /// JSONL output directory. If None the driver creates the default (`target/experiments/pilot-<UTC>/`).
     pub out: Option<PathBuf>,
-    /// 결정적 필러 seed(고정 기본값 — 재현성).
+    /// Deterministic filler seed (fixed default — reproducibility).
     pub seed: u64,
-    /// 워크스페이스 임시 디렉토리를 런 종료 후 보존할지(디버깅용).
+    /// Whether to keep the workspace temp directory after the run ends (for debugging).
     pub keep_workspace: bool,
 }
 
@@ -58,7 +58,7 @@ impl Default for PilotConfig {
     }
 }
 
-/// 파싱 실패 종류. Help 는 정상 종료(exit 0), Unknown/Invalid 는 exit 2.
+/// Kinds of parse failure. Help is a normal exit (exit 0), Unknown/Invalid are exit 2.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParseError {
     Help,
@@ -88,7 +88,7 @@ OPTIONS:
     .to_string()
 }
 
-/// argv(프로그램명 제외)를 파싱한다. 값이 붙는 플래그는 `--flag value` 형식(등호 `--flag=value` 도 허용).
+/// Parse argv (excluding the program name). A flag that takes a value uses the `--flag value` form (the equals form `--flag=value` is also allowed).
 pub fn parse_args<I, S>(args: I) -> Result<PilotConfig, ParseError>
 where
     I: IntoIterator<Item = S>,
@@ -137,9 +137,9 @@ where
     Ok(cfg)
 }
 
-/// ★finding 15 fix★: `--out --keep-workspace` 처럼 값 자리에 또 다른 플래그가 오면, 이전엔 다음 플래그를
-///   값으로 삼켜(out="--keep-workspace") 오타를 침묵 실행했다. (경로가 `--` 로 시작하는 병리적 케이스는
-///   지원 대상 아님 — 실험 인자엔 그런 값이 없다.)
+/// ★finding 15 fix★: when another flag came in the value position like `--out --keep-workspace`, previously the next flag was swallowed
+///   as the value (out="--keep-workspace") and the typo ran silently. (The pathological case of a path starting with `--` is
+///   not supported — experiment arguments have no such value.)
 fn take_value<I: Iterator<Item = String>>(
     it: &mut std::iter::Peekable<I>,
     flag: &str,
@@ -162,8 +162,8 @@ fn take_parse<I: Iterator<Item = String>, T: std::str::FromStr>(
         .map_err(|_| ParseError::Invalid(format!("{flag} 값 파싱 실패: {v:?}")))
 }
 
-/// 각 원소는 (0,1] 범위여야 한다 — 0 은 fill 전이라 무의미, 1 은 포화 도달점. 빈 문자열은 빈
-/// 목록(주입 없음).
+/// Each element must be in the range (0,1] — 0 is meaningless since it is before fill, 1 is the saturation reach point. An empty string is an empty
+/// list (no injection).
 pub fn parse_inject_at(raw: &str) -> Result<Vec<f64>, ParseError> {
     let raw = raw.trim();
     if raw.is_empty() {

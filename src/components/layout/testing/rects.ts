@@ -1,7 +1,7 @@
-// 테스트 전용 — 레이아웃 트리에서 평평한 렌더러(ADR-0227)에 넘길 칸·분할 사각형 픽스처를 만든다.
-// 분할마다 자기 상자를 비율대로 둘로 가르는 단순 재귀다. 겹치지 않는 사각형만 보장하고, 값이 셸
-//   `src-tauri/src/layout/geometry.rs` 와 같다고 주장하지 않는다 — 기하 정확성은 그 Rust 테스트의 몫이다(TRD §5).
-// 방향: `left_right` = x 축을 가르고 a 가 왼쪽, `top_bottom` = y 축을 가르고 a 가 위(ADR-0140).
+// Test only — builds the area · split rectangle fixtures to pass from a layout tree to the flat renderer (ADR-0227).
+// A simple recursion that splits each split's own box in two by ratio. It only guarantees non-overlapping rectangles and does not claim the values equal the shell
+//   `src-tauri/src/layout/geometry.rs` — geometry correctness is the job of that Rust test (TRD §5).
+// Direction: `left_right` = splits the x axis with a on the left, `top_bottom` = splits the y axis with a on top (ADR-0140).
 
 import type { LayoutNode, SlotRect, SplitRect } from '../../../api/layoutTypes'
 
@@ -17,10 +17,10 @@ interface Box {
   y1: number
 }
 
-/** 스냅샷 `ratio_min`/`ratio_max` 자리 — 렌더러 `ratioBounds` 에 그대로 넘긴다. */
+/** Snapshot `ratio_min`/`ratio_max` position — passed as is to the renderer's `ratioBounds`. */
 export const TEST_RATIO_BOUNDS = { min: 0.1, max: 0.9 } as const
 
-/** `node` 를 [0,1]×[0,1] 에 채운 사각형. 배열 순서는 트리 전위 순이다(렌더러가 id 순으로 다시 정렬한다). */
+/** A rectangle filling `node` into [0,1]×[0,1]. The array order is tree pre-order (the renderer re-sorts by id). */
 export function rectsFor(node: LayoutNode): LayoutRects {
   const out: LayoutRects = { slotRects: [], splitRects: [] }
   walk(node, { x0: 0, y0: 0, x1: 1, y1: 1 }, out)

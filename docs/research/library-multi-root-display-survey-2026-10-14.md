@@ -1,82 +1,82 @@
-# 라이브러리 슬롯 — 여러 소스 폴더를 어떻게 보여 주나 (피어 서베이)
+# Library slot — how to show several source folders (peer survey)
 
-- **상태:** 적대 리뷰(BLOCK) 반영본 · 결정 대기(프리셋 PRD 이전 구상 — 화면 1 라이브러리 슬롯 재검토)
-- **날짜:** 2026-10-14
-- **방법:** research medium · 설계-결정 모드. 수집 갈래 3(AI 에이전트 도구 · 게임 엔진/DCC · 일반 파일 라이브러리) · 메인 grounding(아래 「grounding」) · cross-family 적대 리뷰 1회(아래 「적대 리뷰」).
-- **확신도 범례:** 확실 = 원문 확인 + 독립 교차확증 · 가능성 높음 = 원문 확인(단일 출처) 또는 부분 지지 · 불확실 = 기억 기반 · 원문 미확인.
-- **앞선 조사:** `docs/research/agent-preset-components-survey-2026-10-11.md`(부품 · UI 패턴 서베이) — 이 문서는 그 문서의 「라이브러리 목록 모양」 공백을 메운다.
+- **Status:** version with the adversarial review (BLOCK) applied · awaiting decision (a sketch from before the preset PRD — re-examination of the screen 1 library slot)
+- **Date:** 2026-10-14
+- **Method:** research medium · design-decision mode. 3 collection tracks (AI agent tools · game engines/DCC · general file libraries) · main grounding (「grounding」 below) · one cross-family adversarial review (「적대 리뷰」 (adversarial review) below).
+- **Confidence legend:** certain = source text checked + independent cross-confirmation · likely = source text checked (single source) or partly supported · uncertain = from memory · source text unchecked.
+- **Earlier survey:** `docs/research/agent-preset-components-survey-2026-10-11.md` (components · UI pattern survey) — this document fills that document's gap on the 「라이브러리 목록 모양」 (shape of the library list).
 
-## 묻는 것
+## What is asked
 
-사용자는 지시서 · 스킬이 많아 자기 폴더 구조로 정리해 둘 것이다. 그렇다면
+The user will have many instructions · skills and will organize them in their own folder structure. In that case:
 
-1. 라이브러리 가운데 목록을 **평평하게** 늘어놓는 게 맞나, **폴더 트리**를 보여야 하나, **폴더와 무관한 분류**(카탈로그 · 컬렉션 · 태그)를 둬야 하나?
-2. 소스 폴더가 여럿일 때 어떻게 합쳐 보여 주나?
-3. 등록한 루트 밖 파일 하나를 툭 링크하는 길이 있나? 있으면 PC 사이 이식성은 어떻게 다루나?
-4. 루트는 어떻게 등록하나?
+1. In the middle of the library, is it right to lay the list out **flat**, or should it show a **folder tree**, or should it have a **classification unrelated to folders** (catalog · collection · tag)?
+2. When there are several source folders, how are they merged for display?
+3. Is there a way to casually link a single file outside the registered roots? If so, how is portability between PCs handled?
+4. How are roots registered?
 
-## 결론 (위층)
+## Conclusions (top level)
 
-1. **표본 안에서는, 큰 라이브러리를 다루는 DCC · 파일 도구가 「파일이 놓인 곳(물리 폴더)」과 「찾아보는 길(가상 분류)」을 함께 둔다.** 가장 가까운 실물은 **Unreal Content Browser** — 왼쪽 Sources 패널에 프로젝트 폴더 계층 트리와 Collections 목록이 함께 있고(플러그인 · 엔진 콘텐츠 폴더도 켤 수 있다), 폴더를 Ctrl/Shift 로 여러 개 골라 가운데 Asset View 를 거른다. 그 밖에 Lightroom(Folders 패널 ↔ Collections) · foobar2000(폴더 구조 보기 ↔ 아티스트/앨범 보기 전환) · Obsidian(폴더 ↔ 중첩 태그) · Substance 3D Designer(필터는 조건 여럿을 가질 수 있고 리소스 하나가 여러 필터에 나온다 — 배타적이지 않다). **Blender 는 반대쪽 끝** — 왼쪽 트리가 디스크 폴더가 아니라 **파일 위치와 독립된 카탈로그 트리**다(에셋은 카탈로그 하나에만). 「주류」라고 일반화할 만큼 표본이 넓지는 않다. **가능성 높음**(Unreal · Blender · Substance 필터는 원문 확인 · Lightroom · foobar2000 · Obsidian 일부는 스니펫/포럼/기억).
-2. **AI 도구 쪽은 수집에서 「디스크 위치 = 분류」만 확인했고, 가상 분류가 없다고 단정할 수 없다.** 확인한 것: Claude Code 는 범위(Enterprise · Personal · Project · Nested · `--add-dir` · Plugin)로 싣고 이름 충돌을 접두어(`/plugin:skill` · `/apps/web:deploy`)와 우선순위로 가른다 — 이건 이름 충돌 규칙이지 목록 화면 관례의 증거가 아니다. **적대 리뷰가 반례 후보를 들었다**(메인 미확인 — 아래 「적대 리뷰」): TypingMind 프롬프트 라이브러리(태그 · 그룹 공개 범위) · JetBrains AI Assistant Prompt Library · Cursor Rules 관리 UI · Zed Skills 관리자. 파일 기반 스킬과 같지는 않지만 「AI 도구엔 라이브러리 선례가 없다」는 서술은 철회한다. **불확실.**
-3. **여러 루트 표시는 두 갈래가 다 보인다.** ① 루트마다 트리(VS Code 멀티 루트 — 루트별 탐색기 트리 · 검색 결과도 루트별 묶음) ② 한 풀로 병합(Houdini 검색 경로 · Espanso · 음악 라이브러리 감시 폴더). Unreal 은 루트(프로젝트 · 플러그인 · 엔진)를 한 폴더 트리 안의 최상위 노드로 둔다. 병합할 때 출처를 어떻게 표시하는지는 일반 관례로 말할 근거가 없다. **가능성 높음**(①) · **불확실**(출처 표시 관례).
-4. **「루트 밖 파일 하나 링크」의 가장 확실한 선례는 Zotero linked file**이다 — 원본 위치만 기억하고(동기화 · 그룹 · 모바일 불가), **기준 폴더(Linked Attachment Base Directory) 아래에 있는 파일만** 상대경로로 저장해 PC 마다 기준 폴더를 다시 지정하면 맞는다. 기준 폴더 **밖** 링크는 절대경로 그대로라 이식성이 없다. 기준 폴더를 지정하면 끊긴 절대경로 링크를 찾아 한꺼번에 다시 잇자고 제안한다. Claude Code 는 바깥 스킬을 **심볼릭 링크**로 붙이라고 안내한다(같은 대상을 두 경로가 가리키면 한 번만 싣는다). 적대 리뷰는 **Adobe Bridge Collections**(아무 드라이브의 파일을 끌어 넣어 참조로 유지 · 없는 파일 고치기)도 들었다 — 원문이 403 이라 메인 미확인. **확실**(Zotero · Claude Code 원문) · **불확실**(Bridge). → 루트 밖 단발 링크는 **허용하되 이식성 없는 항목**으로 다루는 모양이 선례에 가깝다.
-5. **루트 등록은 「설정의 이름 + 경로 목록」 또는 「폴더 안 매니페스트 + 추가 명령」.** VS Code `.code-workspace` 의 `{name, path}`(상대경로 가능) · foobar2000 Music Folders 목록 · Blender Preferences(기억) · Houdini `HOUDINI_PATH` · Unity `file:` 상대/절대 · Claude Code `marketplace.json` + `claude plugin marketplace add`. 이식성은 **루트 기준 상대경로 + PC 별 루트 위치**(Zotero · Unity · Claude 마켓 — 마켓 루트 기준 상대 · `..` 금지)로 확보한다. Blender UUID 는 **카탈로그**를 가리키는 id 라 루트 위치 이식성 사례가 아니다(초안의 오용 — 리뷰 지적). **가능성 높음.**
-6. **찾을 수 없는 항목은 숨기지 않고 표시 + 폴더 단위로 다시 잇는다.** Lightroom: 없는 폴더에 `?` 아이콘 · 우클릭 「Find Missing Folder」 · 개별 파일보다 폴더 단위 재연결 권장. **가능성 높음**(검색 스니펫 · 원문 페이지 일부 403).
+1. **Within the sample, DCC · file tools that handle large libraries keep both 「파일이 놓인 곳(물리 폴더)」 (where the file sits (physical folder)) and 「찾아보는 길(가상 분류)」 (the way to browse (virtual classification)).** The closest real thing is the **Unreal Content Browser** — in the left Sources panel there are a project folder hierarchy tree and a Collections list together (plugin · engine content folders can also be turned on), and the middle Asset View is filtered by picking several folders with Ctrl/Shift. Others: Lightroom (Folders panel ↔ Collections) · foobar2000 (switching between folder-structure view ↔ artist/album view) · Obsidian (folders ↔ nested tags) · Substance 3D Designer (a filter can have several conditions and one resource shows up in several filters — not exclusive). **Blender is the opposite end** — its left tree is not the disk folders but a **catalog tree independent of file location** (an asset goes in only one catalog). The sample is not wide enough to generalize this as 「주류」 (mainstream). **Likely** (Unreal · Blender · Substance filters have source text checked · Lightroom · foobar2000 · parts of Obsidian are from snippets/forums/memory).
+2. **On the AI-tool side, the collection only confirmed 「디스크 위치 = 분류」 (disk location = classification), and it cannot be asserted that there is no virtual classification.** What was confirmed: Claude Code loads by scope (Enterprise · Personal · Project · Nested · `--add-dir` · Plugin) and separates name collisions by prefix (`/plugin:skill` · `/apps/web:deploy`) and priority — these are name-collision rules, not evidence of list-screen conventions. **The adversarial review raised counterexample candidates** (not checked by main — 「적대 리뷰」 below): the TypingMind prompt library (tags · group visibility) · the JetBrains AI Assistant Prompt Library · the Cursor Rules management UI · the Zed Skills manager. They are not the same as file-based skills, but the statement 「AI 도구엔 라이브러리 선례가 없다」 (AI tools have no library precedent) is withdrawn. **Uncertain.**
+3. **For showing several roots, both tracks are seen.** ① A tree per root (VS Code multi-root — a per-root explorer tree · search results also grouped per root) ② merged into one pool (Houdini search path · Espanso · music-library watch folders). Unreal places the roots (project · plugin · engine) as top-level nodes inside one folder tree. There is no basis for stating a general convention on how the source is shown when merging. **Likely** (①) · **uncertain** (convention for showing the source).
+4. **The surest precedent for 「루트 밖 파일 하나 링크」 (linking a single file outside the roots) is the Zotero linked file** — it remembers only the original location (no sync · groups · mobile), and **only files under the base folder (Linked Attachment Base Directory)** are stored as relative paths, so re-specifying the base folder on each PC makes them match. A link **outside** the base folder stays an absolute path, so it has no portability. When a base folder is specified, it offers to find broken absolute-path links and re-link them all at once. Claude Code instructs attaching outside skills with a **symbolic link** (if two paths point to the same target, it is loaded only once). The adversarial review also cited **Adobe Bridge Collections** (drag in a file from any drive and keep it as a reference · repairing missing files) — the source text returned 403, so main did not check it. **Certain** (Zotero · Claude Code source text) · **uncertain** (Bridge). → Treating a one-off link outside the roots as **allowed but an item without portability** is closer to the precedents.
+5. **Root registration is 「설정의 이름 + 경로 목록」 (a settings name + a path list) or 「폴더 안 매니페스트 + 추가 명령」 (a manifest inside the folder + an add command).** VS Code `.code-workspace` `{name, path}` (relative paths possible) · the foobar2000 Music Folders list · Blender Preferences (from memory) · Houdini `HOUDINI_PATH` · Unity `file:` relative/absolute · Claude Code `marketplace.json` + `claude plugin marketplace add`. Portability is secured by **a path relative to the root + a per-PC root location** (Zotero · Unity · the Claude marketplace — relative to the marketplace root · `..` forbidden). The Blender UUID is an id that points to a **catalog**, so it is not an example of root-location portability (the draft's misuse — review finding). **Likely.**
+6. **A missing item is not hidden but shown, and re-linked per folder.** Lightroom: a `?` icon on a missing folder · right-click 「Find Missing Folder」 · re-linking per folder is recommended over per file. **Likely** (search snippets · parts of the source text pages returned 403).
 
-## Engram 에 옮기면 (해석 — 결정은 사용자)
+## If carried over to Engram (interpretation — the decision is the user's)
 
-지금 브리핑 v13 의 라이브러리 슬롯은 「왼쪽 = 소스 폴더 체크박스 · 가운데 = 평평한 목록(검색 + 칩 + 종류)」이다. 위 결론 1 · 3 에 비추면 **가운데 목록이 폴더 구조를 전혀 못 보여 주는 것**이 빈 곳이다. 선택지:
+The library slot in the current briefing v13 is 「왼쪽 = 소스 폴더 체크박스 · 가운데 = 평평한 목록(검색 + 칩 + 종류)」 (left = source-folder checkboxes · middle = a flat list (search + chips + kind)). In light of conclusions 1 · 3, the gap is that **the middle list shows no folder structure at all**. Options:
 
-| 안 | 모양 | 선례 | 장점 | 단점 |
+| Option | Shape | Precedent | Pros | Cons |
 |---|---|---|---|---|
-| **A. 평평한 목록 유지** | 지금 그대로 · 폴더는 경로 표시로만 | AI 도구 다수(Claude Code 등) | 가장 단순 · 검색 중심 | 파일이 수십 개 넘으면 사용자가 만든 폴더 정리가 버려진다 |
-| **B. 소스마다 폴더 트리** | 가운데가 VS Code 탐색기처럼 루트별 트리 | VS Code 멀티 루트 | 사용자 정리가 그대로 보인다 | 검색 · 「쓰는 중」 같은 가로지르는 거름이 트리와 겹쳐 어색 · 루트가 많으면 길어진다 |
-| **C. 왼쪽 = 폴더 트리 내비, 가운데 = 고른 폴더의 결과** | 왼쪽 소스 폴더를 펼치면 하위 폴더 트리 · 고른 폴더(여러 개 가능)의 항목이 가운데 목록에 · 검색 · 칩은 그대로 | **Unreal Sources 패널**(폴더 트리 · 다중 선택 → Asset View) · Lightroom Folders 패널 · foobar2000 폴더 구조 보기 | 폴더 정리와 검색이 같이 산다 · 지금 화면 구조를 거의 유지 | 왼쪽 칸이 깊어지면 좁다 · 고른 폴더의 하위 폴더까지 보이는지는 Unreal 문서에도 없어 우리가 정해야 한다 |
-| **D. C + 가상 분류(태그 · 컬렉션)** | C 에 더해 왼쪽에 태그 · 컬렉션 구역 | **Unreal**(같은 패널에 Collections) · Lightroom Collections · Substance 필터(비배타) · Blender 카탈로그(폴더 대신 가상 트리) · Obsidian 중첩 태그 | 폴더와 다른 축으로 묶기(브리핑 T-1 과 합류) | 만들 것이 가장 많다 · 태그 저장 위치(T-2) 결정이 따라온다 |
+| **A. Keep the flat list** | as now · folders only as a path display | most AI tools (Claude Code etc.) | simplest · search-centered | once there are more than a few dozen files, the folder organization the user made is thrown away |
+| **B. A folder tree per source** | the middle is a per-root tree like the VS Code explorer | VS Code multi-root | the user's organization is shown as it is | cross-cutting filters such as search · 「쓰는 중」 (in use) overlap awkwardly with the tree · it gets long with many roots |
+| **C. Left = folder-tree navigation, middle = results of the chosen folder** | unfolding a left source folder gives a subfolder tree · the items of the chosen folder (several possible) go in the middle list · search · chips unchanged | **Unreal Sources panel** (folder tree · multi-select → Asset View) · Lightroom Folders panel · foobar2000 folder-structure view | folder organization and search live together · keeps the current screen structure almost intact | the left column is narrow if it gets deep · whether subfolders of a chosen folder are shown is not even in the Unreal docs, so we must decide |
+| **D. C + virtual classification (tags · collections)** | C plus a tag · collection zone on the left | **Unreal** (Collections in the same panel) · Lightroom Collections · Substance filters (non-exclusive) · Blender catalog (a virtual tree instead of folders) · Obsidian nested tags | grouping on an axis different from folders (merges with briefing T-1) | the most to build · the decision on where tags are stored (T-2) follows |
 
-- **D 의 분류 축이 둘이다** — 하나에만 넣는 트리(Blender 카탈로그 — 파일 시스템처럼 배타)와 여러 곳에 넣는 태그 · 컬렉션(Substance 필터 · Lightroom · Unreal). 브리핑 T-1(중첩 태그)은 뒤쪽이다.
-- 루트 밖 단발 링크: 결론 4 를 따르면 **「바깥 링크」를 일급 항목으로 허용하되 이식성 없음으로 표시**하는 쪽이 Zotero 와 닮았다. 왼쪽 칸에 「바깥 링크」 묶음을 하나 두면 C · D 구조에 그대로 들어간다. ★소스 폴더가 Zotero 기준 폴더 역할을 하는 것은 **소스 폴더 안 파일**에 한해서다 — 바깥 링크는 그 덕을 못 본다(초안의 논리 공백 — 리뷰 지적).
-- 찾을 수 없음: 결론 6 을 따라 소스 폴더 단위 「폴더 다시 찾기」를 왼쪽 칸 우클릭에 둔다.
+- **D's classification axes are two** — a tree where an item goes in only one place (Blender catalog — exclusive like a file system) and tags · collections where an item goes in several places (Substance filters · Lightroom · Unreal). Briefing T-1 (nested tags) is the latter.
+- One-off link outside the roots: following conclusion 4, **allowing 「바깥 링크」 (outside link) as a first-class item but marking it as without portability** resembles Zotero. Putting one 「바깥 링크」 group in the left column fits directly into the C · D structure. ★A source folder playing the role of the Zotero base folder holds only for **files inside the source folder** — outside links do not benefit from it (a logic gap in the draft — review finding).
+- Missing: following conclusion 6, put a per-source-folder 「폴더 다시 찾기」 (find the folder again) in the left column's right-click.
 
-## grounding (메인 · 원문 대조)
+## grounding (main · source text comparison)
 
-| 클레임 | 출처 | 판정 |
+| Claim | Source | Verdict |
 |---|---|---|
-| Blender 카탈로그는 파일 디스크 구성과 독립 · 에셋은 카탈로그 하나에만 · 정의 파일 `blender_assets.cats.txt`(`UUID:경로:단순이름`) · 분리 이유 = 파일 사이 자유로운 이동 | https://developer.blender.org/docs/features/asset_system/backend/asset_catalogs/ | 지지 |
-| Zotero 기준 폴더 아래 linked file 은 상대경로 저장 · PC 마다 기준 폴더 지정 · 끊긴 절대경로 자동 재연결 제안 | https://www.zotero.org/support/preferences/advanced | 지지 |
-| Claude Code 스킬 위치 표 · Enterprise > Personal > Project 우선 · 심볼릭 링크 허용(같은 대상 한 번만) · 플러그인 `/plugin:skill` · 중첩 `/apps/web:deploy` · `--add-dir` | https://code.claude.com/docs/en/skills | 지지 |
-| VS Code 루트별 탐색기 트리 · `.code-workspace` folders `{name, path}` 상대경로 | https://code.visualstudio.com/docs/editing/workspaces/multi-root-workspaces | 수집자 원문 확인 · 메인 미재확인 |
-| Lightroom `?` 아이콘 · Find Missing Folder | https://helpx.adobe.com/lightroom-classic/desktop/manage-catalogs-and-files/locate-missing-photos.html | 검색 스니펫만 — 부분 지지 |
-| foobar2000 폴더 구조 보기 ↔ 아티스트/앨범 보기 | https://hydrogenaudio.org/index.php?msg=717049 (포럼) | 부분 지지(공식 문서 아님) |
-| Unity `file:` 상대(Packages 기준)/절대 · 슬래시 권장 | https://docs.unity3d.com/Manual/upm-localpath.html | 수집자 원문 확인 · 메인 미재확인 |
-| Houdini `HOUDINI_PATH/otls` 자동 로드 · 씬 임베드 비권장 | https://www.sidefx.com/docs/houdini/assets/install.html | 수집자 원문 확인 · 메인 미재확인 |
-| Unreal Sources 패널 = 프로젝트 폴더 계층 + Collections 목록 · 플러그인/엔진 폴더 선택 표시 · Ctrl/Shift 다중 폴더 선택 | https://dev.epicgames.com/documentation/unreal-engine/sources-panel-reference-in-unreal-engine?lang=en-US | 지지(리뷰가 찾음 · 메인 확인) |
-| Substance Designer 필터 = 조건 여럿 · 리소스 하나가 여러 필터 · 배타 아님 · 프로젝트 파일 저장 | https://experienceleague.adobe.com/en/docs/substance-3d-designer/using/workspace/library/managing-custom-content-and-filters | 부분 지지(경로 여럿 · 별칭은 그 페이지에 없음) |
-| Claude 마켓 `source` 상대경로(마켓 루트 기준 · `..` 금지) | https://code.claude.com/docs/en/plugin-marketplaces | 수집자 원문 확인 · 메인 미재확인 |
+| Blender catalogs are independent of the file layout on disk · an asset goes in only one catalog · definition file `blender_assets.cats.txt` (`UUID:경로:단순이름`) · reason for separation = free movement between files | https://developer.blender.org/docs/features/asset_system/backend/asset_catalogs/ | supported |
+| Zotero linked files under the base folder are stored as relative paths · base folder specified per PC · offers automatic re-linking of broken absolute paths | https://www.zotero.org/support/preferences/advanced | supported |
+| Claude Code skill-location table · Enterprise > Personal > Project priority · symbolic links allowed (same target once) · plugin `/plugin:skill` · nested `/apps/web:deploy` · `--add-dir` | https://code.claude.com/docs/en/skills | supported |
+| VS Code per-root explorer tree · `.code-workspace` folders `{name, path}` relative paths | https://code.visualstudio.com/docs/editing/workspaces/multi-root-workspaces | collector checked source text · not re-checked by main |
+| Lightroom `?` icon · Find Missing Folder | https://helpx.adobe.com/lightroom-classic/desktop/manage-catalogs-and-files/locate-missing-photos.html | search snippet only — partly supported |
+| foobar2000 folder-structure view ↔ artist/album view | https://hydrogenaudio.org/index.php?msg=717049 (forum) | partly supported (not official docs) |
+| Unity `file:` relative (relative to Packages)/absolute · slashes recommended | https://docs.unity3d.com/Manual/upm-localpath.html | collector checked source text · not re-checked by main |
+| Houdini `HOUDINI_PATH/otls` auto-load · embedding in the scene discouraged | https://www.sidefx.com/docs/houdini/assets/install.html | collector checked source text · not re-checked by main |
+| Unreal Sources panel = project folder hierarchy + Collections list · plugin/engine folders shown by selection · Ctrl/Shift multi-folder selection | https://dev.epicgames.com/documentation/unreal-engine/sources-panel-reference-in-unreal-engine?lang=en-US | supported (found by the review · main checked) |
+| Substance Designer filter = several conditions · one resource in several filters · not exclusive · saved in the project file | https://experienceleague.adobe.com/en/docs/substance-3d-designer/using/workspace/library/managing-custom-content-and-filters | partly supported (several paths · aliases are not on that page) |
+| Claude marketplace `source` relative path (relative to the marketplace root · `..` forbidden) | https://code.claude.com/docs/en/plugin-marketplaces | collector checked source text · not re-checked by main |
 
-## 적대 리뷰
+## Adversarial review
 
-codex(cross-family · effort high · 레벨 2 · 웹 검색) 1회. 판정 **BLOCK** — 초안 기준. 아래처럼 반영했다.
+codex (cross-family · effort high · level 2 · web search), once. Verdict **BLOCK** — on the draft. It was applied as below.
 
-| 지적 | 심각도 | 반영 |
+| Finding | Severity | Applied |
 |---|---|---|
-| 「AI 도구엔 가상 분류 · 라이브러리 선례가 없다」는 과장 — TypingMind 프롬프트 라이브러리(태그) · JetBrains Prompt Library · Cursor Rules · Zed Skills | 높음 | 결론 2 를 「단정 못 함 · 철회」로 고침. **반례 넷은 메인 미확인**(리뷰어 주장) |
-| Blender 를 C(물리 폴더 트리)의 선례로 씀 — Blender 왼쪽 트리는 카탈로그(디스크와 독립) | 높음 | C 에서 빼고 D(가상 분류)로 옮김 |
-| Unreal 을 「못 읽음」으로 둠 — Sources 패널 문서가 폴더 트리 + Collections + 다중 선택 → Asset View 를 보여 준다 | 높음 | **메인이 원문 확인**(https://dev.epicgames.com/documentation/unreal-engine/sources-panel-reference-in-unreal-engine?lang=en-US) — 결론 1 · C · D 의 대표 선례로 올림. 하위 폴더 포함 여부 · 컬렉션 정적/동적은 그 문서에 없음 |
-| Substance Designer 를 미조사로 둠 — 감시 경로 여럿 · 가상 필터 · 경로 별칭 | 높음 | **메인 원문 확인은 부분** — 「필터는 조건 여럿 · 리소스 하나가 여러 필터에 · 배타 아님 · 프로젝트 파일에 저장」만 확인(https://experienceleague.adobe.com/en/docs/substance-3d-designer/using/workspace/library/managing-custom-content-and-filters). 다중 경로 추가 절차 · 경로 별칭은 그 페이지에 없음 → 미확인 유지 |
-| Zotero 를 유일 선례로 둠 — Adobe Bridge Collections 도 바깥 파일 참조 + 없는 파일 고치기 | 중간 | 결론 4 에 리뷰어 주장으로 추가 · 원문 403 이라 **미확인** |
-| 「소스 폴더 = Zotero 기준 폴더」라서 바깥 링크도 이식된다는 논리 공백 — Zotero 상대경로는 기준 폴더 **아래** 파일만 | 높음 | 결론 4 · 옮기면 절에 명시 |
-| Blender UUID 를 루트 위치 이식성 사례로 씀 — 카탈로그 id 다 | 중간 | 결론 5 에서 철회 |
-| 「혼합이 주류」 · 「병합하면 출처 접두어 · 열」은 표본을 넘는 일반화 | 중간 | 결론 1 · 3 의 표현을 「표본 안에서」 · 「불확실」로 낮춤 |
+| 「AI 도구엔 가상 분류 · 라이브러리 선례가 없다」 (AI tools have no virtual-classification · library precedent) is an overstatement — TypingMind prompt library (tags) · JetBrains Prompt Library · Cursor Rules · Zed Skills | high | conclusion 2 changed to 「단정 못 함 · 철회」 (cannot be asserted · withdrawn). **The four counterexamples are not checked by main** (reviewer's claim) |
+| Blender used as a precedent for C (physical folder tree) — Blender's left tree is a catalog (independent of disk) | high | removed from C and moved to D (virtual classification) |
+| Unreal was put as 「못 읽음」 (could not be read) — the Sources panel doc shows folder tree + Collections + multi-select → Asset View | high | **main checked the source text** (https://dev.epicgames.com/documentation/unreal-engine/sources-panel-reference-in-unreal-engine?lang=en-US) — raised to the representative precedent in conclusions 1 · C · D. Whether subfolders are included · whether collections are static/dynamic is not in that doc |
+| Substance Designer was left uninvestigated — several watch paths · virtual filters · path aliases | high | **main source-text check is partial** — only 「필터는 조건 여럿 · 리소스 하나가 여러 필터에 · 배타 아님 · 프로젝트 파일에 저장」 (a filter has several conditions · one resource in several filters · not exclusive · saved in the project file) was confirmed (https://experienceleague.adobe.com/en/docs/substance-3d-designer/using/workspace/library/managing-custom-content-and-filters). The procedure for adding several paths · path aliases are not on that page → left unchecked |
+| Zotero was made the sole precedent — Adobe Bridge Collections also does outside-file references + repairing missing files | medium | added to conclusion 4 as the reviewer's claim · source text returned 403, so **unchecked** |
+| A logic gap that 「소스 폴더 = Zotero 기준 폴더」 (source folder = Zotero base folder) makes outside links portable too — Zotero relative paths are only for files **under** the base folder | high | stated explicitly in conclusion 4 · the carry-over section |
+| The Blender UUID was used as a root-location portability example — it is a catalog id | medium | withdrawn in conclusion 5 |
+| 「혼합이 주류」 (mixed is mainstream) · 「병합하면 출처 접두어 · 열」 (when merged, a source prefix · column) are generalizations beyond the sample | medium | wording in conclusions 1 · 3 lowered to 「표본 안에서」 (within the sample) · 「불확실」 (uncertain) |
 
-- 리뷰어 grounding 스팟체크: Blender 카탈로그 · Zotero 기준 폴더 · Claude Code 스킬 위치 셋 다 **지지** — 단 앞의 둘은 위 두 줄처럼 쓰임새가 틀렸다는 단서.
-- 반영 후 재리뷰는 돌리지 않았다(medium 단일 패스).
+- Reviewer grounding spot-check: the Blender catalog · Zotero base folder · Claude Code skill location are all **supported** — with the caveat that the first two had their use wrong, as in the two rows above.
+- No re-review was run after the changes (medium single pass).
 
-## 한계 · 공백
+## Limits · gaps
 
-- **화면 캡처는 하나도 못 봤다** — 「평평한가 · 트리인가」 판정은 대부분 문서 서술에서 끌어낸 추론이다. 특히 AI 도구의 「폴더 트리를 안 보여 준다」는 「보여 준다는 증거를 못 찾았다」이지 확인된 부재가 아니다.
-- **못 읽음:** Cursor(리다이렉트) · Zed Rules Library(404 — 리뷰어에 따르면 Skills 로 바뀜) · Substance 3D Painter 리소스 경로 · 별칭(403) · Adobe Folders 패널(403) · Adobe Bridge Collections(403) · MusicBee(402).
-- **미조사:** Windsurf · JetBrains AI Assistant · Roo · 전용 프롬프트 매니저 앱 · Godot · Krita · Maya · Figma/Adobe CC Libraries · Logseq · Calibre · Eagle · Raycast/Alfred.
-- 가상 분류를 따로 둔 **이유를 사용자 불만으로 적은 자료**는 못 찾았다 — 확인된 근거는 Blender 설계 문서 하나다.
-- 후속 후보: Substance 경로 별칭(`your_assets://` 류 — 이식성 후보 · 기억 기반) · Unreal Collections 저장 방식 · Blender 라이브러리 등록과 상대경로.
+- **Not a single screen capture was seen** — the 「평평한가 · 트리인가」 (flat or tree) verdicts are mostly inferences drawn from document descriptions. In particular, for AI tools, 「폴더 트리를 안 보여 준다」 (they do not show a folder tree) means 「보여 준다는 증거를 못 찾았다」 (no evidence that they do was found), not a confirmed absence.
+- **Could not be read:** Cursor (redirect) · the Zed Rules Library (404 — per the reviewer, changed to Skills) · Substance 3D Painter resource paths · aliases (403) · the Adobe Folders panel (403) · Adobe Bridge Collections (403) · MusicBee (402).
+- **Not investigated:** Windsurf · JetBrains AI Assistant · Roo · dedicated prompt-manager apps · Godot · Krita · Maya · Figma/Adobe CC Libraries · Logseq · Calibre · Eagle · Raycast/Alfred.
+- No material was found that states, as a user complaint, the **reason** for keeping a separate virtual classification — the confirmed basis is one Blender design document.
+- Follow-up candidates: Substance path aliases (the `your_assets://` kind — a portability candidate · from memory) · how Unreal Collections are stored · Blender library registration and relative paths.

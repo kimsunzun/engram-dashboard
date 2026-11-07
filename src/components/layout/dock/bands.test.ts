@@ -1,6 +1,6 @@
-// TRD S21-slot-docking §8-2 `bands` · `dockedTree`: 셸 `layout/bands.rs` 와 **같은 골든 파일**(창마다 탭바 구역 · 막힌 띠 · 유효
-//   띠 · 칸 틀 · 구역 선 — 점 고르기는 `judge.test.ts`)을 먹는다 + 골든 밖 표(셸 `layout/bands/tests.rs` 의 같은 이름 시험의 짝 —
-//   두 판이 한 파일을 먹지 않으므로 규칙을 고치면 손으로 함께 고친다).
+// TRD S21-slot-docking §8-2 `bands` · `dockedTree`: takes the **same golden file** as the shell `layout/bands.rs` (per window the tab bar zone · blocked bands · effective
+//   bands · area frames · zone lines — point choosing is in `judge.test.ts`) + tables outside the golden (the counterpart of the same-named tests in the shell `layout/bands/tests.rs` —
+//   the two versions do not read one file, so if a rule is changed it is changed by hand together).
 
 import { describe, expect, it } from 'vitest'
 
@@ -34,7 +34,7 @@ const px = (x0: number, y0: number, x1: number, y1: number): PxRect => ({ x0, y0
 const uuid = (n: number): string => `00000000-0000-0000-0000-${n.toString(16).padStart(12, '0')}`
 const NAN_SIZE = { w: Number.NaN, h: Number.NaN }
 
-// ── 골든 ──────────────────────────────────────────────────────────────────────
+// ── golden ──────────────────────────────────────────────────────────────────────
 
 describe('골든 — 셸 bands.rs 와 한 파일', () => {
   it('머리 _constants = 생성물 DOCK_CONSTANTS(상수를 바꾸고 골든을 다시 뜨지 않으면 빨갛다)', () => {
@@ -85,9 +85,9 @@ describe('골든 — 셸 bands.rs 와 한 파일', () => {
   }
 })
 
-// ── 탭바 구역 (R2) ────────────────────────────────────────────────────────────
+// ── tab bar zone (R2) ────────────────────────────────────────────────────────────
 
-// 끌기 영역 = 첫 탭 왼쪽 4 부터 폭 500 · 탭바 줄 0..28.
+// Drag area = from 4 left of the first tab, width 500 · tab bar row 0..28.
 const AREA = { x0: 4, y0: 0, x1: 504, y1: 28 }
 
 describe('탭바 구역', () => {
@@ -118,7 +118,7 @@ describe('탭바 구역', () => {
   })
 })
 
-// ── 띠 두께 · 틀 (R3) ─────────────────────────────────────────────────────────
+// ── band thickness · frame (R3) ─────────────────────────────────────────────────────────
 
 describe('띠 두께 · 띠 틀', () => {
   it('칸 길이의 BAND_SHARE · .5 는 위로 · 최소 BAND_MIN_PX · 칸보다 두껍지 않다(AC39 — 폭 50 칸)', () => {
@@ -181,7 +181,7 @@ describe('띠 두께 · 띠 틀', () => {
   })
 })
 
-// ── 붙는 몫 (R7) ──────────────────────────────────────────────────────────────
+// ── attach share (R7) ──────────────────────────────────────────────────────────────
 
 describe('붙는 몫', () => {
   const len = (w: number, h: number, side: DockSide, t: PxRect): number =>
@@ -220,7 +220,7 @@ describe('붙는 몫', () => {
   })
 })
 
-// ── 창 하나 (골든 밖) ─────────────────────────────────────────────────────────
+// ── a single window (outside the golden) ─────────────────────────────────────────────────────────
 
 describe('창 하나', () => {
   it('모양 칸이 없으면 칸 하나로 친다', () => {
@@ -241,7 +241,7 @@ describe('창 하나', () => {
     const listed = new Set(wb.bands.map(b => `${goldenAnchor(b.anchor)}/${b.side}`))
     for (const b of c.blocked) expect(listed.has(`${b.anchor}/${b.side}`), `${b.anchor} ${b.side}`).toBe(false)
     expect(listed.has(`${uuid(1)}/Top`)).toBe(true)
-    // 칸 오른쪽 띠 자리를 짚어도 고를 것이 없다 — 놓으면 새 창(R8 · AC15).
+    // Pointing at the right band position of an area leaves nothing to choose — dropping gives a new window (R8 · AC15).
     expect(choose(wb.bands, { x: 1150, y: 400 })).toBeNull()
   })
 
@@ -280,7 +280,7 @@ describe('창 하나', () => {
       areas: [r],
     })
     const slot: DropAnchor = { type: 'slot', id: 'a' }
-    // 모서리 (5, 5) — 왼쪽 · 위 띠가 같은 정규화 거리(5 ÷ 20).
+    // Corner (5, 5) — the left · top bands have the same normalized distance (5 ÷ 20).
     const left = band(slot, 'Left', px(0, 0, 20, 100))
     const top = band(slot, 'Top', px(0, 0, 100, 20))
     expect(choose([left, top], { x: 5, y: 5 })).toBe(0)

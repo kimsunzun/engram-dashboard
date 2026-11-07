@@ -1,4 +1,4 @@
-// 도구 행 묶기 · 요약 셈 · 거부 표식 스위치 시험(ADR-0239 · ADR-0241 · TRD S21-chat-ux §4-6 · §4-7 ⑨ 프론트).
+// Tool row bundling · summary count · decline marker switch test (ADR-0239 · ADR-0241 · TRD S21-chat-ux §4-6 · §4-7 ⑨ frontend).
 
 import { describe, expect, it } from 'vitest'
 
@@ -18,11 +18,11 @@ import {
   type ToolGroupSummary,
 } from './toolRuns'
 
-// ── 픽스처 ──
+// ── Fixtures ──
 
 /**
- * `StructuredTextView` 의 `rowKindOf` 를 대신하는 판정 — 묶기 함수가 받는 것은 그 결과뿐이다. 실물과 같은 셋을
- * `'skip'` 으로 본다: usage · 벤더 결과 운반 행(`tool_result`) · 빈 생각.
+ * A decision standing in for `StructuredTextView`'s `rowKindOf` — all the bundling function receives is its result. The same three as the real one are treated as
+ * `'skip'`: usage · the vendor result carrier row (`tool_result`) · empty thoughts.
  */
 function rowKind(item: StructuredItem): ChatRowKind {
   switch (item.kind) {
@@ -72,7 +72,7 @@ const errorRow = (): StructuredItem => ({ kind: 'error', message: 'boom', itemId
 const unsupported = (): StructuredItem => ({ kind: 'unsupported', count: 1, itemId: nextItemId++ })
 const escape = (): StructuredItem => ({ kind: 'structured', label: 'plan', json: '{"steps":[]}', itemId: nextItemId++ })
 
-/** 줄 목록을 비교하기 쉬운 모양으로 — 항목 줄 = itemId · 묶음 = 키 · 멤버 itemId · live. */
+/** Line list in an easy-to-compare shape — item line = itemId · bundle = key · member itemId · live. */
 function shape(rows: DisplayRow[]): unknown[] {
   return rows.map(r =>
     r.kind === 'item'
@@ -263,7 +263,7 @@ describe('groupToolRuns — replay(같은 사건열 = 같은 결과)', () => {
   })
 })
 
-// ── summarizeGroup · 판정 ──
+// ── summarizeGroup · decision ──
 
 describe('summarizeGroup — 종류별 수', () => {
   it('고정 순서(검색 · 읽기 · 목록 · 편집 · 명령 · 웹 · 에이전트 · MCP · 기타) · 0 인 종류는 빠진다', () => {

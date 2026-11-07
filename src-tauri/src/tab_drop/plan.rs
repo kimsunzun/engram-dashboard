@@ -1,6 +1,6 @@
-//! 놓기 명령의 순수 판정 — 명령 하나 · 끌기가 끝난 뒤 읽은 입력 · 출처 창 틀에서 적용할 도킹 요청 또는 취소 · 무시를
-//! 고른다. Tauri · 락 · OS 호출 0 이라 단독 시험이 된다(ADR-0012). 진입점 = [`plan`] · 그 안의 새 창 가름 [`decide`] ·
-//! 새 창 자리 [`new_window_origin`].
+//! The pure decision of the drop command — from one command · the input read after the drag ended · the source window frame, it picks the docking request to apply, or cancel · ignore.
+//! Zero Tauri · locks · OS calls, so it can be tested alone (ADR-0012). Entry point = [`plan`] · the new-window distinction inside it [`decide`] ·
+//! the new-window placement [`new_window_origin`].
 // ADR-0296 · ADR-0297
 // TRD S21-slot-docking §3-3 · §3-5
 
@@ -11,25 +11,25 @@ use crate::layout::dock::DockAnchor;
 use crate::layout::geometry::Insets;
 use crate::layout::manager::{DockMove, FocusPolicy, WindowLabel};
 
-/// 무시 사유(`TabDropReply::Ignored.why` 의 철자).
+/// The ignore reason (the spelling of `TabDropReply::Ignored.why`).
 pub const NO_CURSOR: &str = "no-cursor";
 pub const LOST_DROP: &str = "lost-drop";
 pub const ACCEPTED_OURS: &str = "accepted-ours";
 pub const ACCEPTED_UNKNOWN: &str = "accepted-unknown";
 
-/// 화면의 물리 px 점(가상 화면 좌표 — 주 모니터 왼쪽 위 원점 · 왼쪽 · 위 모니터면 음수). OS 층 crate 의 같은 이름
-/// 타입은 어댑터가 옮긴다 — 이 모듈이 그 crate 에 기대지 않게.
+/// A physical-px point on the screen (virtual-screen coordinates — origin at the primary monitor's top-left · negative for a monitor to the left · above). The adapter converts the same-named
+/// type of the OS-layer crate — so this module does not lean on that crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct PhysPoint {
     pub x: i32,
     pub y: i32,
 }
 
-/// 커서 밑 맨 위 최상위 창(z 순서 — 보이지 않음 · 최소화 · 비쳐 보이는 창은 건너뛴 것).
+/// The topmost top-level window under the cursor (z-order — invisible · minimized · see-through windows skipped).
 ///
-/// - `Ours`: 우리 웹뷰 창(그 label) — 웹뷰 밖 틀(제목 표시줄 · 테두리)도 이것이다.
-/// - `Foreign`: 다른 앱 창 · 바탕화면.
-/// - `Unknown`: 못 읽었다(커서를 못 읽음 · Windows 밖 · OS 가 답하지 않음).
+/// - `Ours`: our webview window (that label) — the frame outside the webview (title bar · border) is this too.
+/// - `Foreign`: another app's window · the desktop.
+/// - `Unknown`: could not be read (cursor unreadable · outside Windows · the OS did not answer).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TopAt {
     Ours(WindowLabel),
@@ -37,12 +37,12 @@ pub enum TopAt {
     Unknown,
 }
 
-/// 끌기가 끝난 뒤 셸이 읽은 입력 — 명령을 받자마자 락 · 장부보다 먼저 읽는다(놓은 점과 같은 순간이 되게).
+/// The input the shell read after the drag ended — read right after receiving the command, before the lock · ledger (so it is the same moment as the drop point).
 ///
-/// - `cursor`: `None` = 못 읽었다.
-/// - `primary_down` · `escape_down`: 그 순간 눌려 있나. `drop` 명령은 읽지 않는다(거짓).
-/// - `top`: `drag_end` 명령만 읽는다(`drop` 은 `Unknown`).
-/// - `scale`: 커서 밑 모니터의 배율 — 못 읽으면 출처 창 배율이다. 유한 양수가 아니면 [`SourceFrame::scale`] 을 쓴다.
+/// - `cursor`: `None` = could not be read.
+/// - `primary_down` · `escape_down`: are they pressed at that moment. A `drop` command does not read them (false).
+/// - `top`: only a `drag_end` command reads it (`drop` is `Unknown`).
+/// - `scale`: the scale factor of the monitor under the cursor — if unreadable, it is the source window's scale factor. If it is not a finite positive number, [`SourceFrame::scale`] is used.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InputNow {
     pub cursor: Option<PhysPoint>,
@@ -52,15 +52,15 @@ pub struct InputNow {
     pub scale: f64,
 }
 
-/// 출처 창(끄는 탭의 창)의 틀 — `insets` = 창 틀(CSS px · `window:frame` 과 같은 셈 [`super::frame_insets`]) · `scale` =
-/// 그 창 배율. 새 창 틀은 출처 창 틀과 같다고 본다(팝아웃과 main 의 틀이 같다).
+/// The frame of the source window (the window of the dragged tab) — `insets` = window frame (CSS px · computed the same as `window:frame` [`super::frame_insets`]) · `scale` =
+/// that window's scale factor. The new window's frame is taken to be the same as the source window's (the frames of popouts and main are the same).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SourceFrame {
     pub insets: Insets,
     pub scale: f64,
 }
 
-/// [`decide`] 의 답 — `Place` = 그 커서 자리에 새 창(또는 탭 하나뿐인 팝아웃을 옮김).
+/// The answer of [`decide`] — `Place` = a new window at that cursor spot (or move a popout that has only one tab).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
     Cancel,
@@ -68,7 +68,7 @@ pub enum Decision {
     Place(PhysPoint),
 }
 
-/// [`plan`] 의 답 — `Dock` 만 모델을 쓴다.
+/// The answer of [`plan`] — only `Dock` writes the model.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Plan {
     Dock(DockRequest),
@@ -76,16 +76,16 @@ pub enum Plan {
     Ignore(&'static str),
 }
 
-/// 놓기 명령 하나를 적용할 것으로 옮긴다. `caller` = 명령을 부른 창 — 탭바 놓기의 창이다(`drop.from` 이 아니다).
+/// Convert one drop command into something to apply. `caller` = the window that called the command — the window of a tab-bar drop (not `drop.from`).
 ///
-/// 모든 도킹 요청이 `FocusPolicy::Reveal` 이고, 다음 활성(`mv.successor`)은 `initial ≠ view`
-/// 일 때만 `initial` 이되 끄는 탭이 적용 때 `from` 창에 있을 때만 쓴다(`mv.successor_window = from` — 다른 창에
-/// 있으면 그 창은 셸 승계를 따른다). 새 창의 크기는 유한 양수일 때만 싣는다.
+/// Every docking request is `FocusPolicy::Reveal`, and the next active (`mv.successor`) is `initial` only when `initial ≠ view`,
+/// and is used only when the dragged tab is in the `from` window at apply time (`mv.successor_window = from` — if it is in another window,
+/// that window follows the shell succession). The new window's size is carried only when it is a finite positive number.
 ///
-/// 놓기가 가리킨 것(끄는 탭 · 대상 탭 · 대상 칸 · 탭바 창)은 모델이 id 로 지금 상태에서 다시 찾는다 — 있으면 지금
-/// 상태에 맞춰 적용하고(탭바 자리는 지금 목록의 끝 자리로 자름 · 그사이 나뉜 칸에도 붙음 · 그사이 다른 창으로 간 끄는
-/// 탭은 지금 창에서 뺌) 없으면 거절한다(모델 그대로). ★놓기가 본 탭 목록 · 판 번호 · 활성 · 출처 창을 견주어 거절하는
-/// 대조를 되살리지 말 것★ — 결과가 조금 어긋나도 사용자가 다시 끌면 되고, 대조는 거절할 예외만 늘린다.
+/// What the drop pointed at (the dragged tab · target tab · target area · tab-bar window) is found again by the model by id in the current state — if present, it is applied matched to the current
+/// state (a tab-bar position is clipped to the end of the current list · it also attaches to an area split in the meantime · a dragged tab that went to another window in the meantime is taken out of its current window), and if absent it is rejected
+/// (model unchanged). ★Do not revive the cross-check that rejects by comparing the tab list · revision number · active tab · source window the drop saw★ —
+/// if the result is slightly off, the user can drag again, and the cross-check only adds exceptions to reject.
 // ADR-0297
 // TRD S21-slot-docking §3-3
 pub fn plan(drop: &TabDrop, caller: &str, input: &InputNow, frame: &SourceFrame) -> Plan {
@@ -141,14 +141,14 @@ pub fn plan(drop: &TabDrop, caller: &str, input: &InputNow, frame: &SourceFrame)
     }
 }
 
-/// 새 창 놓기를 가른다 — 아래 차례가 계약이다(앞의 것이 이긴다). 커서를 못 읽었으면 맨 위 창도 못 읽은 것으로 본다.
+/// Distinguish a new-window drop — the order below is the contract (the earlier wins). If the cursor could not be read, the topmost window is also treated as unread.
 ///
-/// 1. `drop` → 커서 자리에 `Place`(커서 없음 = `Ignore(no-cursor)`).
-/// 2. `drag_end{none}` + (Esc 눌림 ∨ 주 버튼 눌림 ∨ 커서 없음) → `Cancel`. `move` 는 이 줄을 건너뛴다(어딘가가 받았다).
-/// 3. `drag_end` + 맨 위가 우리 창 → `Ignore` — `none` = `lost-drop` · `move` = `accepted-ours`(받은 창의 `drop` 이 따로
-///    온다). 제목 표시줄 · 테두리도 우리 창이라 아무 일 없다.
-/// 4. `drag_end` + 다른 앱 · 바탕화면(`none` · `move` 둘 다) · `drag_end{none}` + 못 읽음 → `Place`.
-/// 5. `drag_end{move}` + 못 읽음 → `Ignore(accepted-unknown)`.
+/// 1. `drop` → `Place` at the cursor spot (no cursor = `Ignore(no-cursor)`).
+/// 2. `drag_end{none}` + (Esc pressed ∨ primary button pressed ∨ no cursor) → `Cancel`. `move` skips this line (somewhere received it).
+/// 3. `drag_end` + topmost is our window → `Ignore` — `none` = `lost-drop` · `move` = `accepted-ours` (the receiving window's `drop` comes
+///    separately). The title bar · border are also our window, so nothing happens.
+/// 4. `drag_end` + another app · the desktop (both `none` · `move`) · `drag_end{none}` + unreadable → `Place`.
+/// 5. `drag_end{move}` + unreadable → `Ignore(accepted-unknown)`.
 // TRD S21-slot-docking §3-5
 pub fn decide(by: &NewWindowBy, i: &InputNow) -> Decision {
     let effect = match by {
@@ -173,8 +173,8 @@ pub fn decide(by: &NewWindowBy, i: &InputNow) -> Decision {
     }
 }
 
-/// 새 창의 바깥 왼쪽 위(물리 px) = `cursor − round((inset_dip + grab) × scale)` — 커서가 새 창 뷰포트의 `grab` 에 온다.
-/// `inset_dip` = 창 틀의 (왼쪽, 위)(CSS px) · `scale` = 놓는 모니터 배율. 반올림은 .5 를 0 에서 먼 쪽으로 한다.
+/// The new window's outer top-left (physical px) = `cursor − round((inset_dip + grab) × scale)` — the cursor lands at `grab` of the new window's viewport.
+/// `inset_dip` = the window frame's (left, top) (CSS px) · `scale` = the scale factor of the monitor dropped on. Rounding takes .5 to the side away from 0.
 // TRD S21-slot-docking §3-5
 pub fn new_window_origin(
     cursor: PhysPoint,
@@ -270,7 +270,7 @@ mod tests {
         }
     }
 
-    // ── ① 대응 (§3-3) ──────────────────────────────────────────────────────────
+    // ── ① Correspondence (§3-3) ──────────────────────────────────────────────────────────
 
     #[test]
     fn a_tab_bar_drop_targets_the_calling_window_without_preconditions() {
@@ -463,7 +463,7 @@ mod tests {
         }
     }
 
-    // ── ② decide (§3-5 표의 차례) ──────────────────────────────────────────────
+    // ── ② decide (the order of the §3-5 table) ──────────────────────────────────────────────
 
     fn tops() -> [TopAt; 3] {
         [TopAt::Ours(POPUP.into()), TopAt::Foreign, TopAt::Unknown]
@@ -513,7 +513,7 @@ mod tests {
             effect: EndEffect::None,
         };
         let c = at(5, 5);
-        // 제목 표시줄 · 테두리도 우리 창이다 — 아무 일 없음(Q38).
+        // The title bar · border are also our window — nothing happens (Q38).
         assert_eq!(
             decide(&by, &input(Some(c), false, false, TopAt::Ours(MAIN.into()))),
             Decision::Ignore(LOST_DROP)
@@ -615,7 +615,7 @@ mod tests {
 
     #[test]
     fn a_lone_popout_dropped_with_the_pressed_point_as_grab_moves_by_the_drag() {
-        // 탭 하나뿐인 팝아웃 — grab = 누른 점(뷰포트). 누를 때 커서 = 창 원점 + (틀 + 누른 점) × 배율.
+        // A popout with only one tab — grab = the pressed point (viewport). Cursor at press = window origin + (frame + pressed point) × scale factor.
         let (scale, inset) = (1.25, (8.0, 32.0));
         let grab = PointCss { x: 40.0, y: 16.0 };
         let origin = at(300, 200);

@@ -1,34 +1,34 @@
-//! 레이아웃 적용 서비스(`layout::apply`) 통합 테스트 — 창·데몬·Tauri 0 (ADR-0012 seam 격리).
+//! Integration test of the layout apply service (`layout::apply`) — zero windows · daemon · Tauri (ADR-0012 seam isolation).
 //!
-//! ★이 파일이 `tests/`(통합 타깃)에 있는 이유★: 재는 대상이 **실 소켓·실 `AppHandle` 없이는 못 세우는
-//! 배선**이라, 그 자리를 포트로 끊어 세우는 통합 하네스가 제자리다(그래서 하네스 자신은 창·데몬·Tauri 를
-//! 하나도 안 쓴다). 새 단언의 배치 기준도 그것이다 — **순수 단위는 모듈 옆 `#[cfg(test)]`**(그쪽은
-//! `--test lib_unit` 으로 돈다 · 그 타깃을 세운 결정 = ADR-0174 · 현황 = `.claude/skill-bindings/qa.md` 「모듈별 명령」),
-//! **배선은 여기.**
-//! 실행: `cargo test -p engram-dashboard --test layout_apply` — ★`-- --test-threads=4` 를 붙이지 않는다★
-//! (이 스위트는 자식 프로세스를 하나도 안 띄운다. 그 플래그의 판정 규칙 정본 = `.claude/skill-bindings/qa.md` 「모듈별 명령」)
+//! ★Why this file is in `tests/` (an integration target)★: what it measures is **wiring that cannot be set up without a real socket · a real `AppHandle`**,
+//! so an integration harness that cuts that place with ports is the right place (so the harness itself uses no windows · daemon · Tauri
+//! at all). That is also the placement criterion for new assertions — **pure units go in `#[cfg(test)]` next to the module** (those run with
+//! `--test lib_unit` · the decision that set up that target = ADR-0174 · status = `.claude/skill-bindings/qa.md` 「모듈별 명령」),
+//! **wiring goes here.**
+//! Run: `cargo test -p engram-dashboard --test layout_apply` — ★do not add `-- --test-threads=4`★
+//! (this suite starts no child process at all. The canonical decision rule for that flag = `.claude/skill-bindings/qa.md` 「모듈별 명령」)
 //!
-//! CI 는 이 타깃만 따로 부르는 전용 스텝도 갖는다(`.github/workflows/ci.yml`).
+//! CI also has a dedicated step that calls only this target (`.github/workflows/ci.yml`).
 //!
-//! 창 label 발급은 **실 `PopupCounter`**(프로브 껍데기만 덧씌운다), 구독 재동기는 **실 `OutputRouter`** 를
-//! 쓴다 — 가짜로 흉내내면 label 단조성·라우팅 계약을 검증하는 게 아니라 가짜를 검증한다. 나머지 세
-//! 포트(알림·OS 창·스폰)는 기록용 가짜다.
+//! Window label issuing uses the **real `PopupCounter`** (only a probe shell is wrapped around it), and subscription resync uses the **real `OutputRouter`**
+//! — if imitated with fakes, one verifies the fake, not the label monotonicity · routing contract. The remaining three
+//! ports (notification · OS window · spawn) are recording fakes.
 //!
-//! ## ★락 위치 프로브(이 하네스의 핵심)★
-//! 이 리팩터가 지키려는 불변식은 "어느 포트가 락 **안**에서 불리고 어느 포트가 **밖**에서 불리나"인데,
-//! 호출을 세는 것만으로는 그게 안 잡힌다 — 위치를 옮겨도 개수가 같다. 그래서 각 가짜 포트가 호출된
-//! **그 자리에서** `try_lock` 으로 락 보유 여부를 직접 본다:
-//! - `LayoutEvents`·`WindowHost`·`LabelSource`·`AgentSpawner` → `WouldBlock` 이 아님(락 **밖**이어야 한다 — 오염된
-//!   락도 밖이다).
-//!   `WindowHost::close` 를 락 안으로 옮기면 운영에서 확정 교착이다(`w.destroy()` → `Destroyed` → 같은 락
-//!   재취득).
-//! - `SubscriptionSync::resync` → `is_err()`(락 **안**이어야 한다). 밖으로 내면 F1/F2 stale-unsubscribe
-//!   결함이 부활한다.
+//! ## ★Lock position probe (the core of this harness)★
+//! The invariant this refactor wants to keep is "which port is called **inside** the lock and which **outside**",
+//! and counting calls alone does not catch it — moving the position leaves the count the same. So each fake port checks directly whether the lock is held with `try_lock` at
+//! **the very place** it is called:
+//! - `LayoutEvents`·`WindowHost`·`LabelSource`·`AgentSpawner` → not `WouldBlock` (must be **outside** the lock — a poisoned
+//!   lock counts as outside).
+//!   If `WindowHost::close` is moved inside the lock, it is a commit deadlock in production (`w.destroy()` → `Destroyed` → re-acquiring the same
+//!   lock).
+//! - `SubscriptionSync::resync` → `is_err()` (must be **inside** the lock). If moved outside, the F1/F2 stale-unsubscribe
+//!   defect comes back.
 //!
-//! 결정론 근거: std `Mutex::try_lock` 은 **같은 스레드가 이미 쥐고 있어도 블록하지 않고 `WouldBlock`** 을
-//! 준다 → 스레드·타이밍 0으로 갈린다. ★단 이 판정은 테스트가 단일 스레드로 도는 것을 전제한다★(다른
-//! 스레드가 락을 쥐고 있으면 `is_err()` 가 거짓 통과할 수 있다 — 이 파일은 스레드를 만들지 않는다).
-//! 실 Tauri 어댑터는 창이 필요해 여기서 못 돌린다(그건 GUI 실측 몫).
+//! Determinism basis: std `Mutex::try_lock` gives **`WouldBlock` without blocking even if the same thread already holds it**
+//! → it splits with zero threads · timing. ★But this decision presumes the test runs on a single thread★ (if another
+//! thread holds the lock, `is_err()` can pass falsely — this file creates no threads).
+//! The real Tauri adapter needs a window and cannot run here (that is the share of the GUI measurement).
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -64,9 +64,9 @@ use engram_dashboard_lib::tab_drop::plan::{
 };
 use engram_dashboard_lib::tab_drop::wire::{DropAnchor, DropTo, NewWindowBy, TabDrop};
 
-// ── 락 위치 프로브 ───────────────────────────────────────────────────────────
+// ── lock position probe ───────────────────────────────────────────────────────
 
-// 같은 `Arc<Mutex<ViewManager>>` 를 공유해 호출 시점의 락 보유 여부를 본다(헤더 §락 위치 프로브).
+// Shares the same `Arc<Mutex<ViewManager>>` and sees whether the lock is held at the time of the call (header §Lock position probe).
 struct Probe(LayoutState);
 
 impl Probe {
@@ -74,7 +74,7 @@ impl Probe {
         Probe(state.clone())
     }
 
-    // 오염된 락은 아무도 쥐지 않은 것이다 — 락 오염 시험이 오염 뒤의 포트 호출도 이 프로브로 본다.
+    // A poisoned lock is held by nobody — the lock poisoning test also sees port calls after the poisoning with this probe.
     fn assert_outside(&self, who: &str) {
         assert!(
             !matches!(self.0 .0.try_lock(), Err(TryLockError::WouldBlock)),
@@ -90,11 +90,11 @@ impl Probe {
     }
 }
 
-// ── 가짜 포트 ────────────────────────────────────────────────────────────────
+// ── fake ports ────────────────────────────────────────────────────────────────
 
-/// 창 포트와 알림 포트를 가로지른 차례 — 둘이 한 기록을 나눠 쓴다(TRD S21-slot-docking §8-1 ⑬ 자리별 차례). 창 포트 =
-/// `"open:<label>"` · `"open_at:<label>"` · `"close:<label>"` · `"place:<label>"` · 예열 창 셋 `"claim:<label>"`(맡겼을
-/// 때만) · `"committed:<label>"` · `"release:<label>"`, 알림 = `"layout"` · `"tabs:<label>"`.
+/// The order across the window port and the notification port — the two share one record (TRD S21-slot-docking §8-1 ⑬ per-place order). Window port =
+/// `"open:<label>"` · `"open_at:<label>"` · `"close:<label>"` · `"place:<label>"` · the three prewarmed window entries `"claim:<label>"` (only when
+/// handed over) · `"committed:<label>"` · `"release:<label>"`, notification = `"layout"` · `"tabs:<label>"`.
 #[derive(Clone, Default)]
 struct Journal(Arc<Mutex<Vec<String>>>);
 
@@ -103,7 +103,7 @@ impl Journal {
         self.0.lock().unwrap().push(entry);
     }
 
-    /// 지금까지의 기록을 비우며 돌려준다.
+    /// Returns the record so far while emptying it.
     fn take(&self) -> Vec<String> {
         std::mem::take(&mut *self.0.lock().unwrap())
     }
@@ -113,10 +113,10 @@ struct Recorder {
     probe: Probe,
     layout: Mutex<Vec<ViewSnapshot>>,
     tabs: Mutex<Vec<WindowTabsPayload>>,
-    /// 알림이 온 차례 — `"layout"` · `"tabs"`.
+    /// The order notifications came in — `"layout"` · `"tabs"`.
     order: Mutex<Vec<&'static str>>,
     journal: Journal,
-    /// 첫 탭 알림에서 락 밖으로 한 번 — 새 창 항목이 모델에 든 뒤 · 확정 전에 다른 경로가 모델을 바꾼 상태를 세운다.
+    /// Once outside the lock at the first tab notification — sets up the state where another path changed the model after the new window entry entered the model · before the commit.
     on_tabs: Mutex<Option<DuringOpen>>,
 }
 
@@ -132,7 +132,7 @@ impl Recorder {
         }
     }
 
-    /// 지금까지 온 차례를 비우며 돌려준다.
+    /// Returns the order that has come so far while emptying it.
     fn take_order(&self) -> Vec<&'static str> {
         std::mem::take(&mut *self.order.lock().unwrap())
     }
@@ -188,40 +188,40 @@ impl SubscriptionSync for Subs {
     }
 }
 
-/// `open` 이 락 밖에서 한 번 부르는 끼어들기 — 창 빌드(phase B) 사이 다른 명령이 모델을 바꾼 상태를 세운다.
-/// `move_window` 의 끼어들기(`during_move`)도 같은 꼴이다.
+/// The interjection that `open` calls once outside the lock — sets up the state where another command changed the model during the window build (phase B).
+/// The interjection of `move_window` (`during_move`) has the same shape.
 type DuringOpen = Box<dyn FnOnce(&LayoutState) + Send>;
 
 struct Host {
     probe: Probe,
-    /// `open` · `open_at` 둘 다 실패한다.
+    /// Both `open` and `open_at` fail.
     fail_open: bool,
-    /// 연 창 label — `open` · `open_at` 둘 다.
+    /// Labels of opened windows — both `open` and `open_at`.
     opened: Mutex<Vec<String>>,
     closed: Mutex<Vec<String>>,
     placed: Mutex<Vec<String>>,
     during_open: Mutex<Option<DuringOpen>>,
-    /// `open_at` 이 받은 `(label, 자리, 활성)`.
+    /// The `(label, 자리, 활성)` (label, placement, activation) that `open_at` received.
     opened_at: Mutex<Vec<(String, WindowPlace, bool)>>,
-    /// `move_window` 이 받은 `(label, 자리)`.
+    /// The `(label, 자리)` (label, placement) that `move_window` received.
     moves: Mutex<Vec<(String, WindowPlace)>>,
-    /// `move_window` 가 실제로 부른 세터 걸음(순서대로) — 실패는 `fail_steps` 로 심는다.
+    /// The setter steps `move_window` actually called (in order) — failures are planted with `fail_steps`.
     steps: Mutex<Vec<MoveStep>>,
     fail_steps: Mutex<Vec<MoveStep>>,
-    /// `move_window` 가 세터를 부르기 전 락 밖에서 한 번 — 옮기는 사이 다른 경로가 출처를 바꾼 상태를 세운다.
+    /// Once outside the lock before `move_window` calls the setters — sets up the state where another path changed the source while moving.
     during_move: Mutex<Option<DuringOpen>>,
     journal: Journal,
-    /// 맡길 숨은 예열 창의 label — 맡기면 비고, 되물리면 돌아온다(TRD S21-slot-docking §8-1 ⑬). 풀의 상태 기계(짓기 ·
-    /// 기다림 · 다시 짓기)는 흉내 내지 않는다 — 부른 차례와 맡김표만 잰다.
+    /// Label of the hidden prewarmed window to hand over — empties when handed over and comes back when taken back (TRD S21-slot-docking §8-1 ⑬). The pool's state machine (build ·
+    /// waiting · rebuild) is not imitated — only the call order and the claim ticket are measured.
     spare: Mutex<Option<String>>,
-    /// 지금 맡겨 둔 맡김표 — 확정 · 되물림이 이것과 같은 맡김표를 한 번 돌려줘야 한다.
+    /// The claim ticket currently handed over — commit · take-back must return a claim ticket equal to this exactly once.
     claimed: Mutex<Option<SpareClaim>>,
-    /// `claim_spare` 가 불린 수 — 맡길 창이 없어 `None` 을 낸 것도 센다.
+    /// Number of times `claim_spare` was called — it also counts the case that gave `None` for lack of a window to hand over.
     claims_asked: AtomicUsize,
     generation: AtomicU32,
-    /// 모델에 든 뒤 · 확정 전에 시험이 모델에서 지운 label — `record_placement` 가 그것에는 모델 항목을 요구하지 않는다.
+    /// Label the test deleted from the model after it entered the model · before the commit — `record_placement` does not require a model entry for it.
     vanished: Mutex<Vec<String>>,
-    /// 참이면 `close` 가 아무것도 하지 않는다(기록만 남긴다) — 「모델에서만 빠지고 OS 창은 남은 창」을 세운다(TRD
+    /// If true, `close` does nothing (only leaves a record) — sets up 「모델에서만 빠지고 OS 창은 남은 창」 (a window removed only from the model while its OS window remains) (TRD
     /// S26-window-chrome §2-3 「시험 몫 도우미」).
     close_does_nothing: AtomicBool,
 }
@@ -250,7 +250,7 @@ impl Host {
         }
     }
 
-    // 맡긴 창이 그 맡김표로 돌아왔다 — 같은 맡김표를 두 번 받거나 다른 맡김표를 받으면 터진다.
+    // The handed-over window came back with that claim ticket — blows up if the same claim ticket is received twice or a different claim ticket is received.
     fn take_claim(&self, claim: &SpareClaim, who: &str) {
         let held = self.claimed.lock().unwrap().take();
         assert_eq!(
@@ -260,7 +260,7 @@ impl Host {
         );
     }
 
-    // 창 열기 몫 — `open` · `open_at` 이 함께 쓴다.
+    // The window opening part — shared by `open` and `open_at`.
     fn opening(&self, kind: &str, label: &str) -> Result<(), String> {
         assert!(
             !self.probe.0 .0.lock().unwrap().windows.contains_key(label),
@@ -272,7 +272,7 @@ impl Host {
         }
         self.opened.lock().unwrap().push(label.to_string());
         if self.fail_open {
-            // 포트 계약 — 맡긴 예열 창을 못 놓았으면 그 창을 거둔 뒤 `Err` 다. 거둔 맡김은 끝났다.
+            // Port contract — if the handed-over prewarmed window could not be dropped, it withdraws that window and gives `Err`. The withdrawn handover is finished.
             let mut claimed = self.claimed.lock().unwrap();
             if claimed.as_ref().is_some_and(|c| c.label == label) {
                 *claimed = None;
@@ -303,7 +303,7 @@ impl Host {
 }
 
 impl WindowHost for Host {
-    // ★모델에 들기 전이어야 한다★ — 새 창을 여는 세 자리가 모두 창을 먼저 열고 모델에 넣는다(TRD S21-slot-docking §3-9
+    // ★It must be before entering the model★ — all three places that open a new window open the window first and put it in the model (TRD S21-slot-docking §3-9
     // 「자리별 차례」 · ADR-0299).
     fn open(&self, label: &str) -> Result<(), String> {
         self.probe.assert_outside("WindowHost::open");
@@ -332,7 +332,7 @@ impl WindowHost for Host {
         Some(claim)
     }
 
-    // 그 label 이 모델에 없어도 받는다 — 확정 전에 빠진 창을 닫는 것은 구현 몫이다(포트 문서).
+    // It is accepted even if that label is not in the model — closing a window that dropped out before commit is the implementation's job (port docs).
     fn committed(&self, claim: &SpareClaim) {
         self.probe.assert_outside("WindowHost::committed");
         self.take_claim(claim, "committed");
@@ -346,7 +346,7 @@ impl WindowHost for Host {
         *self.spare.lock().unwrap() = Some(claim.label.clone());
     }
 
-    // 계약 = 포트 문서 — 위치 → 크기, 첫 실패에서 멈춘다. 빈 칸은 그 걸음을 건너뛴다.
+    // Contract = port docs — position → size, stops at the first failure. An empty field skips that step.
     fn move_window(&self, label: &str, at: &WindowPlace) -> Result<(), MoveFailed> {
         self.probe.assert_outside("WindowHost::move_window");
         self.moves.lock().unwrap().push((label.to_string(), *at));
@@ -371,7 +371,7 @@ impl WindowHost for Host {
         self.closed.lock().unwrap().push(label.to_string());
     }
 
-    // ★모델에 든 뒤여야 한다★ — 운영 구현은 그 label 의 모델 항목에 자리를 적으므로, 먼저 불리면 첫 자리가 버려진다.
+    // ★It must be after entering the model★ — the production implementation writes the placement into that label's model entry, so if called first, the first placement is discarded.
     fn record_placement(&self, label: &str) {
         self.probe.assert_outside("WindowHost::record_placement");
         assert!(
@@ -383,8 +383,8 @@ impl WindowHost for Host {
         self.placed.lock().unwrap().push(label.to_string());
     }
 
-    // ★main 을 특례로 참이라 답한다★ — 정적 config 창이라 이 가짜가 연 적이 없는데, 실 앱에서는 항상 떠
-    // 있다(팝업 슬롯을 main 으로 되돌리는 것이 실사용 경로다). 나머지는 이 가짜가 연 뒤 안 닫은 것뿐.
+    // ★Answers true with main as a special case★ — it is a static config window so this fake has never opened it, but in the real app it is always up
+    // (returning a popup slot to main is the real usage path). The rest are only those this fake opened and did not close.
     fn is_open(&self, label: &str) -> bool {
         self.probe.assert_outside("WindowHost::is_open");
         label == MAIN_WINDOW_LABEL
@@ -393,9 +393,9 @@ impl WindowHost for Host {
     }
 }
 
-// ★실 발급기를 **감싼다**(대체하지 않는다)★: label 단조성은 안쪽 실물이 계속 지고, 이 껍데기는 호출
-// **위치**만 덧본다. 오늘 구현은 순수해서 락 안에서 불려도 안 터지므로, 그 자리를 못 박는 것은 이 프로브뿐이다
-// — 상태를 만지는 구현으로 바뀌는 날 `Destroyed → cleanup_popup_window → state.0.lock()` 와 교착한다.
+// ★It **wraps** the real issuer (does not replace it)★: the inner real one keeps bearing label monotonicity, and this shell only adds a view of the call
+// **position**. Today's implementation is pure, so it does not blow up even if called inside the lock, and what pins that place is this probe alone
+// — the day it changes to an implementation that touches state, it deadlocks with `Destroyed → cleanup_popup_window → state.0.lock()`.
 struct Labels {
     probe: Probe,
     inner: PopupCounter,
@@ -413,9 +413,9 @@ struct Spawner {
     reply: Result<String, String>,
     calls: AtomicUsize,
     cwds: Mutex<Vec<String>>,
-    /// ★고른 백엔드가 포트까지 갔나★ — 스폰 호출 횟수만으로는 그 값이 흘렀는지 안 흘렀는지 못 가른다.
+    /// ★Did the chosen backend reach the port★ — the spawn call count alone cannot tell whether that value flowed or not.
     backends: Mutex<Vec<Option<AgentBackendKind>>>,
-    /// 스폰 중(락 밖)에 한 번 — 스폰하는 사이 다른 쓰기가 배치를 바꾼 상태를 세운다.
+    /// Once during the spawn (outside the lock) — sets up the state where another write changed the layout while spawning.
     during: Mutex<Option<DuringOpen>>,
 }
 
@@ -451,8 +451,8 @@ impl AgentSpawner for Spawner {
         backend: Option<AgentBackendKind>,
     ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
         Box::pin(async move {
-            // 락 안에서 await 하면 명령 future 가 Send 를 잃어 컴파일도 안 되지만, 그 벽이 서 있는지를
-            // 여기서도 본다(형제 포트와 같은 프로브 — 벽이 하나면 조용히 무너진다).
+            // If one awaits inside the lock, the command future loses Send and does not even compile, but whether that wall stands is
+            // also checked here (the same probe as the sibling port — with one wall it silently collapses).
             self.probe.assert_outside("AgentSpawner::spawn_by_cwd");
             if let Some(hook) = self.during.lock().unwrap().take() {
                 hook(&self.probe.0);
@@ -465,17 +465,17 @@ impl AgentSpawner for Spawner {
     }
 }
 
-// ── 하네스 ───────────────────────────────────────────────────────────────────
+// ── harness ───────────────────────────────────────────────────────────────────
 
 struct World {
     state: LayoutState,
     subs: Subs,
     ev: Recorder,
     host: Host,
-    // 실물 발급기(프로브만 덧씌움) — prefix(`slot-popup-`)는 capabilities/popup.json glob 과 짝이고
-    // 단조성은 닫힌 label 재-build 에러를 막는 계약이다.
+    // Real issuer (only a probe wrapped around it) — the prefix (`slot-popup-`) pairs with the capabilities/popup.json glob and
+    // monotonicity is the contract that prevents a closed-label re-build error.
     labels: Labels,
-    /// `ev` · `host` 가 나눠 쓰는 차례 기록.
+    /// The order record shared by `ev` and `host`.
     journal: Journal,
 }
 
@@ -552,21 +552,21 @@ impl World {
         self.subs.unsubscribed.lock().unwrap().clone()
     }
 
-    // 팝업 창 하나(빈 탭 1개) — WindowClosed/close_window 경로의 전제.
+    // One popup window (1 empty tab) — the premise of the WindowClosed/close_window path.
     fn popup(&self) -> String {
         apply::create_window(&self.state, &self.subs, &self.ev, &self.host, &self.labels)
             .expect("창 생성")
             .window
     }
 
-    // 창 포트가 맡길 숨은 예열 창 하나 — 운영처럼 지을 때 발급기에서 label 을 받는다. 반환 = 그 label.
+    // One hidden prewarmed window for the window port to hand over — as in production, it takes a label from the issuer when built. Returns = that label.
     fn prewarm(&self) -> String {
         let label = LabelSource::next_label(&self.labels.inner);
         *self.host.spare.lock().unwrap() = Some(label.clone());
         label
     }
 
-    // 창 포트가 그 맡김을 아직 쥐고 있나(확정 · 되물림 · 거둠 어느 것도 안 됐다).
+    // Does the window port still hold that handover (none of commit · take-back · withdrawal has happened).
     fn claim_outstanding(&self) -> bool {
         self.host.claimed.lock().unwrap().is_some()
     }
@@ -575,8 +575,8 @@ impl World {
         self.host.claims_asked.load(Ordering::Relaxed)
     }
 
-    // 새 창을 열지 않는 길은 예열 창을 묻지도 않는다 — 끝내지 않은 맡김은 하나뿐인 풀 칸을 막는다(TRD S21-slot-docking
-    //   §3-9 I27). `asked` = 그 길을 부르기 전의 물음 수.
+    // A path that does not open a new window does not ask for a prewarmed window either — an unfinished handover blocks the one-field pool (TRD S21-slot-docking
+    //   §3-9 I27). `asked` = the number of asks before calling that path.
     fn assert_spare_not_asked(&self, spare: &str, asked: usize) {
         assert_eq!(
             self.claims_asked(),
@@ -591,7 +591,7 @@ impl World {
     }
 }
 
-// 연 바로 뒤 락을 오염시킨다 — 쥔 채 패닉한 다른 쓰기를 흉내 낸다(같은 스레드 · 되감기로 놓는다).
+// Poisons the lock right after opening — imitates another write that panicked while holding it (same thread · released by unwinding).
 fn poison(state: &LayoutState) {
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _guard = state.0.lock().unwrap();
@@ -600,13 +600,13 @@ fn poison(state: &LayoutState) {
     assert!(state.0.is_poisoned());
 }
 
-// ── 프로브 자체 검증 ─────────────────────────────────────────────────────────
+// ── verifying the probe itself ────────────────────────────────────────────────
 
-// ★프로브가 양방향으로 실제로 문다는 증거★. 「밖」 프로브는 서비스 코드를 락 안으로 옮겨 실패시켜 봤지만
-// (WindowHost·LayoutEvents 실측), 「안」 프로브는 **컴파일 가능한 반례를 만들 수 없다** — `resync` 가
-// `&ViewManager` 를 받아 가드 없이는 부를 방법이 없기 때문이다(타입이 이미 그 절반을 지킨다). 그래서
-// 프로브가 죽은 단언이 아니라는 것을 여기서 직접 증명한다: 이 프로브의 남은 일은 포트 모양이 바뀔 때
-// (예: 소유 스냅샷을 받게 되면 가드 없이도 부를 수 있다) 그 순간을 잡는 것이다.
+// ★Evidence that the probe really bites in both directions★. The 「밖」 (outside) probe was tried by moving the service code inside the lock and watching it fail
+// (measured on WindowHost · LayoutEvents), but for the 「안」 (inside) probe **a compilable counterexample cannot be made** — `resync` takes
+// `&ViewManager`, so there is no way to call it without a guard (the type already guards that half). So
+// we directly prove here that the probe is not a dead assertion: what is left for this probe is to catch the moment the port shape changes
+// (e.g. if it came to take an owned snapshot, it could be called without a guard).
 #[test]
 fn probe_fires_on_both_sides_of_the_lock() {
     use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -629,8 +629,8 @@ fn probe_fires_on_both_sides_of_the_lock() {
     drop(guard);
 }
 
-// 도킹 시험이 이 가짜의 걸음 기록 · 실패 심기에 기대므로, 가짜가 포트 계약(옮기기 = 첫 실패에서 멈춤 · 빈 칸은
-// 건너뜀)을 흉내 내는지 먼저 못 박는다.
+// The docking tests rely on this fake's step record · failure planting, so we first pin down that the fake imitates the port contract (moving = stops at the first failure · an empty field
+// is skipped).
 #[test]
 fn the_fake_window_host_keeps_the_port_contract() {
     let w = World::new();
@@ -718,7 +718,7 @@ fn create_window_registers_model_and_opens_os_window() {
         1,
         "빈 탭 1개"
     );
-    // 새 창의 탭 목록 하나 — OS 제목을 입히는 재료다(TRD S26-window-chrome §2-4 ② · §4-4). 배치는 웹이 마운트 때 당긴다.
+    // One tab list of a new window — the material to apply the OS title (TRD S26-window-chrome §2-4 ② · §4-4). The layout is pulled by the web at mount.
     assert_eq!(w.layout_events(), 0);
     assert_eq!(w.tab_events(), 1);
     let notified = w.last_tabs();
@@ -727,9 +727,9 @@ fn create_window_registers_model_and_opens_os_window() {
     assert!(notified.version > version, "새 판으로 알린다");
 }
 
-// TRD S21-slot-docking §8-1 ⑬ — 새로 짓기 차례 `open` → 모델 넣기 → 탭 알림 → `record_placement`. 모델에 들기 전에
-// 연다는 것은 가짜 `open` 이 스스로 잰다. 넣기가 거절되는 갈래(묘비)는 `commands::popout` 의 셸 단위 시험이 잰다 — 묘비를
-// 다는 함수가 이 crate 에서 닿지 않는다.
+// TRD S21-slot-docking §8-1 ⑬ — the order of a fresh build: `open` → put into the model → tab notification → `record_placement`. That it opens before entering the model
+// is measured by the fake `open` itself. The branch where putting in is rejected (tombstone) is measured by the shell unit test of `commands::popout` — the function that sets the tombstone
+// is not reachable from this crate.
 #[test]
 fn create_window_opens_then_inserts_then_records_the_placement() {
     let w = World::new();
@@ -760,7 +760,7 @@ fn create_window_opens_then_inserts_then_records_the_placement() {
     assert_eq!(w.resyncs(), 1, "넣기 한 번");
 }
 
-// 포트 계약 — `open` 이 `Err` 면 떠 있는 창이 없다. 모델은 손대지 않았으니 되돌릴 것도 거둘 창도 없다.
+// Port contract — if `open` is `Err`, there is no window up. The model was not touched, so there is nothing to roll back and no window to withdraw.
 #[test]
 fn create_window_open_failure_leaves_the_model_untouched() {
     let w = World::failing_host();
@@ -790,9 +790,9 @@ fn create_window_open_failure_leaves_the_model_untouched() {
     );
 }
 
-// ── create_window: 예열 창(TRD S21-slot-docking §8-1 ⑬ · ADR-0299) ──
+// ── create_window: prewarmed window (TRD S21-slot-docking §8-1 ⑬ · ADR-0299) ──
 
-// 예열 차례 `claim_spare` → `open` → 모델 넣기 → 탭 알림 → `committed` → `record_placement`.
+// Prewarm order `claim_spare` → `open` → put into the model → tab notification → `committed` → `record_placement`.
 #[test]
 fn create_window_opens_the_prewarmed_window_inserts_then_commits_before_the_placement() {
     let w = World::new();
@@ -821,7 +821,7 @@ fn create_window_opens_the_prewarmed_window_inserts_then_commits_before_the_plac
     assert_eq!(next, popup_label(2), "맡길 창이 없으면 발급기의 새 label");
 }
 
-// 맡긴 창의 `open` 이 `Err` 면 창 포트가 그 창을 이미 거뒀다 — 확정도 되물림도 없고 모델은 그대로다.
+// If the handed-over window's `open` is `Err`, the window port has already withdrawn that window — no commit, no take-back, and the model is unchanged.
 #[test]
 fn create_window_whose_prewarmed_window_fails_to_open_neither_commits_nor_releases() {
     let w = World::failing_host();
@@ -838,7 +838,7 @@ fn create_window_whose_prewarmed_window_fails_to_open_neither_commits_nor_releas
     assert_eq!(w.resyncs(), 0);
 }
 
-// 모델 넣기가 거절되면(여는 사이 같은 label 의 창이 모델에 섰다) 맡긴 창은 닫지 않고 되물린다.
+// If putting into the model is rejected (a window of the same label stood in the model while opening), the handed-over window is not closed but taken back.
 #[test]
 fn create_window_insert_refusal_gives_the_prewarmed_window_back() {
     let w = World::new();
@@ -862,7 +862,7 @@ fn create_window_insert_refusal_gives_the_prewarmed_window_back() {
     assert!(!w.claim_outstanding());
 }
 
-// 연 뒤 락이 오염돼 넣지 못해도 연 창은 남지 않는다 — 새로 지은 창은 닫고, 맡긴 창은 되물린다.
+// Even if the lock is poisoned after opening and it cannot be put in, no opened window remains — a newly built window is closed, and a handed-over window is taken back.
 #[test]
 fn create_window_on_a_poisoned_lock_withdraws_the_window_it_opened() {
     for prewarmed in [false, true] {
@@ -889,10 +889,10 @@ fn create_window_on_a_poisoned_lock_withdraws_the_window_it_opened() {
     }
 }
 
-// ★실 `PopupCounter` 를 통과시킨다★: prefix 는 capabilities/popup.json 의 glob 과 짝이고(다른 label 이면
-// Destroyed 정리 게이트가 스킵돼 라우팅·구독·Channel 이 샌다), 단조성은 닫힌 label 재-build 에러를 막는다.
-// 이 계약의 단위 테스트는 `popout.rs` 안에 따로 있지만 이 단언은 그대로 둔다 — ★**서비스 경유로 재는 것은
-// 다른 층**★이라 중복이 아니다.
+// ★Passes through the real `PopupCounter`★: the prefix pairs with the glob of capabilities/popup.json (with another label
+// the Destroyed cleanup gate is skipped and routing · subscriptions · Channels leak), and monotonicity prevents a closed-label re-build error.
+// There is a separate unit test of this contract in `popout.rs`, but this assertion is left as it is — ★**what is measured through the service is
+// a different layer**★, so it is not a duplicate.
 #[test]
 fn create_window_issues_monotonic_popup_labels_from_real_counter() {
     let w = World::new();
@@ -907,14 +907,14 @@ fn create_window_issues_monotonic_popup_labels_from_real_counter() {
     assert!(apply::list_windows(&w.state).unwrap().contains(&c));
 }
 
-// ── 창 번호(TRD S26-window-chrome §4-1 · §10-2) ──
+// ── window number (TRD S26-window-chrome §4-1 · §10-2) ──
 
 fn number_of(w: &World, label: &str) -> u32 {
     apply::list_tabs(&w.state, label).unwrap().number
 }
 
-// 새 창의 첫 탭 알림이 번호 · 그 번호를 단 제목 · 방금 쓴 판을 싣는다(TRD S26-window-chrome §10-2). `tab` = 그 창 활성
-//   탭의 보이는 이름.
+// The first tab notification of a new window carries the number · the title carrying that number · the version just written (TRD S26-window-chrome §10-2). `tab` = the visible name of that window's active
+//   tab.
 fn assert_new_window_announced(w: &World, label: &str, tab: &str) {
     let notified = w.notified_tabs_of(label);
     let number = number_of(w, label);
@@ -923,7 +923,7 @@ fn assert_new_window_announced(w: &World, label: &str, tab: &str) {
     assert_eq!(notified.version, w.version(), "{label} — 새 창을 넣은 판");
 }
 
-// 새 창 답의 신원이 그 창의 탭 목록과 같다 — 영속 id · 번호(TRD S26-window-chrome §5-3 · §10-2).
+// The identity in the new-window answer equals that window's tab list — persistent id · number (TRD S26-window-chrome §5-3 · §10-2).
 fn assert_answer_names(w: &World, answer: &NewWindow) {
     let tabs = apply::list_tabs(&w.state, &answer.window).unwrap();
     assert_eq!(
@@ -934,8 +934,8 @@ fn assert_answer_names(w: &World, answer: &NewWindow) {
     );
 }
 
-// 새 창 세 자리가 예열 창이든 새로 지은 창이든 빈 가장 작은 번호를 받고, 탭 목록 페이로드가 번호 · 제목 · 영속 id 를
-// 싣고, 답이 그 창의 영속 id · 번호를 싣는다.
+// The three new-window places, whether a prewarmed window or a newly built window, get the smallest free number, the tab list payload carries the number · title · persistent id,
+// and the answer carries that window's persistent id · number.
 #[test]
 fn every_new_window_path_numbers_the_window_and_the_tabs_payload_carries_it() {
     let w = World::new();
@@ -1005,9 +1005,9 @@ fn every_new_window_path_numbers_the_window_and_the_tabs_payload_carries_it() {
     assert_eq!(ids.len(), labels.len(), "영속 id 는 창마다 다르다");
 }
 
-// 닫은 팝아웃의 OS 창이 아직 있는 동안(가짜 `close` 는 `Destroyed` 를 내지 않는다) 그 번호는 새 창에 가지 않고,
-// `Destroyed` 몫의 번호 풀기가 풀면 다음 새 창이 받는다(AC20 ②). 이 crate 밖에서 부를 수 있는 것은 정리를 못 부르는
-// 갈래의 `release_window_number` 뿐이다 — 정리 갈래(`drop_window_in_model`)는 셸 단위 시험이 잰다.
+// While the OS window of a closed popout still exists (the fake `close` does not emit `Destroyed`), that number does not go to a new window,
+// and once the number release of the `Destroyed` part frees it, the next new window gets it (AC20 ②). What can be called from outside this crate is only the
+// `release_window_number` of the branch that cannot call the cleanup — the cleanup branch (`drop_window_in_model`) is measured by the shell unit test.
 #[test]
 fn a_closed_popouts_number_waits_for_its_destroyed() {
     let w = World::new();
@@ -1059,7 +1059,7 @@ fn switch_tab_foreign_view_is_err() {
     );
 }
 
-// ── switch_tab_if(끌기 되돌리기 — TRD S21-slot-docking §4-6) ───────────────────
+// ── switch_tab_if (drag revert — TRD S21-slot-docking §4-6) ───────────────────
 
 #[test]
 fn switch_tab_if_switches_when_active_matches() {
@@ -1079,7 +1079,7 @@ fn switch_tab_if_switches_when_active_matches() {
     assert_notified(&w, "switch_tab_if");
 }
 
-// 되돌리기가 닿기 전에 사용자 · LLM 이 다른 탭을 골랐다 — 그 선택을 덮지 않고 아무것도 안 건드린다.
+// Before the revert arrives, the user · LLM picked another tab — it does not overwrite that choice and touches nothing.
 #[test]
 fn switch_tab_if_mismatch_is_noop_without_notification() {
     let w = World::new();
@@ -1125,7 +1125,7 @@ fn switch_tab_if_errors_like_switch_tab() {
     let err = apply::switch_tab_if(&w.state, &w.subs, &w.ev, "no-such-window", active, active)
         .unwrap_err();
     assert!(err.contains("window 없음"), "err={err}");
-    // 조건이 맞든 어긋나든 타 창 탭은 오류다.
+    // A tab of another window is an error whether the condition matches or not.
     for expect in [active, foreign] {
         let err =
             apply::switch_tab_if(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, foreign, expect)
@@ -1221,13 +1221,13 @@ fn close_window_main_is_rejected_and_os_window_untouched() {
         .contains(&MAIN_WINDOW_LABEL.to_string()));
 }
 
-// ── 0탭 자가닫힘(TRD S26-window-chrome §5-5 · §10-2) ──
+// ── 0-tab self-close (TRD S26-window-chrome §5-5 · §10-2) ──
 
 fn window_id_of(w: &World, label: &str) -> String {
     apply::list_tabs(&w.state, label).unwrap().window_id
 }
 
-// 닫기가 아무것도 하지 않아 모델에서만 빠지고 OS 창이 남은 팝아웃을 비었으면 닫기가 그 영속 id 로 닫는다(AC24 의 0탭 갈래).
+// For a popout that was removed only from the model while its OS window remained because close did nothing, close-if-empty closes it by that persistent id (the 0-tab branch of AC24).
 #[test]
 fn close_if_empty_closes_a_popout_that_left_the_model_with_its_os_window_open() {
     let w = World::new();
@@ -1246,7 +1246,7 @@ fn close_if_empty_closes_a_popout_that_left_the_model_with_its_os_window_open() 
     assert_eq!(&*w.host.closed.lock().unwrap(), &[label]);
 }
 
-// 탭이 있는 창(그사이 탭이 들어온 창)은 닫지 않고, 영속 id 로만 고르므로 같은 번호를 받은 새 창에도 닿지 않는다(AC32).
+// A window with tabs (a window a tab came into in the meantime) is not closed, and since it picks only by persistent id, it does not touch a new window that got the same number either (AC32).
 #[test]
 fn close_if_empty_keeps_a_window_with_tabs_and_never_reaches_a_new_window() {
     let w = World::new();
@@ -1342,20 +1342,20 @@ fn close_slot_unknown_view_is_err() {
         apply::close_slot(&w.state, &w.subs, &w.ev, Uuid::new_v4(), Uuid::new_v4()).unwrap_err();
 
     assert!(err.contains("view 없음"), "err={err}");
-    // 오류 문자열만 보면 "실패했지만 그 전에 재동기·알림은 나갔다"를 통과시킨다 — 거절은 무행위여야 한다.
+    // Looking only at the error string would let through "it failed but before that the resync · notification went out" — a rejection must be a no-op.
     assert_eq!(w.slots(view), slots_before, "부분변경 금지");
     assert_eq!(w.resyncs(), 0);
     assert_eq!(w.layout_events() + w.tab_events(), 0);
 }
 
-// ── focus_slot (ADR-0066 라우팅 불변) ────────────────────────────────────────
+// ── focus_slot (ADR-0066 routing unchanged) ───────────────────────────────────
 
 #[test]
 fn focus_slot_notifies_without_routing_resync() {
     let w = World::new();
     let view = w.main_active();
     let target = w.empty_slot(view);
-    // 분할이 새 칸으로 포커스를 가져가므로 `target` 은 이제 포커스 밖이다 — 그래야 이동을 잰다.
+    // The split takes focus to the new area, so `target` is now outside focus — only then is the move measured.
     apply::split_slot(&w.state, &w.subs, &w.ev, view, target, SplitDir::LeftRight).unwrap();
     assert_ne!(w.snapshot(view).focused_slot_id, Some(target));
     let (layout_before, tabs_before, resyncs_before) =
@@ -1383,7 +1383,7 @@ fn focus_slot_unknown_slot_is_err() {
     assert_eq!(w.snapshot(view).focused_slot_id, before, "부분변경 금지");
 }
 
-// ── rename_tab (ADR-0057 탭 알림만) ──────────────────────────────────────────
+// ── rename_tab (ADR-0057 tab notification only) ───────────────────────────────
 
 #[test]
 fn rename_tab_notifies_tabs_only() {
@@ -1402,7 +1402,7 @@ fn rename_tab_notifies_tabs_only() {
     );
 }
 
-// AC36 — 빈 이름은 모델이 거절한다(경계가 거르지 않아도) · 알림 없음 · 이름 그대로.
+// AC36 — the model rejects an empty name (even if the boundary does not filter it) · no notification · name unchanged.
 #[test]
 fn rename_tab_refuses_a_blank_name_without_notifying() {
     let w = World::new();
@@ -1428,7 +1428,7 @@ fn rename_tab_unknown_view_is_err() {
     assert_eq!(w.tab_events(), 0);
 }
 
-// ── agent_names_updated (TRD S26-window-chrome §4-3 — 탭 알림만 · 바뀐 창만 · 새 판) ──
+// ── agent_names_updated (TRD S26-window-chrome §4-3 — tab notification only · only changed windows · new version) ──
 
 #[test]
 fn agent_names_updated_announces_only_the_window_whose_tab_name_changed() {
@@ -1592,7 +1592,7 @@ fn usage_of(w: &World, view: Uuid, slot: Uuid) -> Option<SlotContent> {
     tree::find_slot(&w.snapshot(view).layout, slot).cloned()
 }
 
-/// 사용량이 아니던 슬롯 — 뺀 칸은 `true`. 에이전트 슬롯을 덮으면 그 구독이 풀린다(재동기가 락 안에서 돈다).
+/// A slot that was not usage — the area taken out is `true`. Overwriting an agent slot releases that subscription (the resync runs inside the lock).
 #[test]
 fn set_usage_slot_over_other_content_defaults_missing_flags_to_true() {
     let w = World::new();
@@ -1616,7 +1616,7 @@ fn set_usage_slot_over_other_content_defaults_missing_flags_to_true() {
     assert_eq!(w.layout_events(), 2);
 }
 
-/// 이미 사용량이면 뺀 칸은 지금 값 그대로 — 한 칸 토글이 다른 칸을 되돌리지 않는다.
+/// If it is already usage, the area taken out is at its current value as is — toggling one area does not revert another.
 #[test]
 fn set_usage_slot_keeps_the_current_value_of_a_missing_flag() {
     let w = World::new();
@@ -1689,7 +1689,7 @@ fn set_usage_slot_unknown_view_is_err_without_notify() {
     assert_eq!(w.layout_events(), 0);
 }
 
-/// 팝업의 두 토글이 방송 전에 연달아 온 경우 — 칸 하나씩만 쓰므로 어느 순서로 닿아도 끝은 같다.
+/// When two toggles in a popup come in a row before the broadcast — only one area is written each, so the end is the same in whichever order they arrive.
 #[test]
 fn set_usage_slot_single_field_writes_from_both_vendors_land_in_either_order() {
     type Write = (Option<bool>, Option<bool>);
@@ -1745,8 +1745,8 @@ impl World {
         (view, slot, content)
     }
 
-    // ★롤백을 재는 유일한 눈금★: `views` 는 창 목록과 달리 owner 없는 임시 View 까지 센다. 창 수를 세면
-    // 실패 경로엔 창 엔트리가 애초에 안 생겨 롤백을 지워도 초록이다(그 단언은 아무것도 안 잰다).
+    // ★The only gauge that measures rollback★: unlike the window list, `views` also counts temporary Views with no owner. If one counts windows,
+    // on the failure path no window entry is made in the first place, so it is green even if rollback is deleted (that assertion measures nothing).
     fn view_count(&self) -> usize {
         self.state.0.lock().unwrap().views.len()
     }
@@ -1779,8 +1779,8 @@ fn move_slot_to_window_detaches_content_into_a_new_window() {
     );
 }
 
-/// ★알림이 안 나가면 화면은 옛 배치를 그린다★ — 이 명령은 창 **둘**을 바꾸므로(콘텐츠를 잃은 원본 창,
-/// 탭이 하나 는 대상 창) 탭바 알림도 둘이다. 대상 창 몫을 빠뜨리면 새 창 탭바가 빈 채로 뜬다.
+/// ★If the notification does not go out, the screen draws the old layout★ — this command changes **two** windows (the source window that lost its content,
+/// the target window that gained a tab), so there are also two tab bar notifications. If the target window's part is missed, the new window opens with an empty tab bar.
 #[test]
 fn move_slot_to_window_notifies_both_windows() {
     let w = World::new();
@@ -1810,7 +1810,7 @@ fn move_slot_to_window_notifies_both_windows() {
     );
 }
 
-// 기존 창으로 옮긴 답은 그 창의 영속 id · 번호를 싣는다 — main 이면 `main` · 1(TRD S26-window-chrome §3-2).
+// The answer of moving to an existing window carries that window's persistent id · number — for main, `main` · 1 (TRD S26-window-chrome §3-2).
 #[test]
 fn move_slot_to_window_into_an_existing_window_answers_that_windows_id_and_number() {
     let w = World::new();
@@ -1858,8 +1858,8 @@ fn move_slot_to_window_into_an_existing_window_answers_that_windows_id_and_numbe
     );
 }
 
-// TRD S21-slot-docking §8-1 ⑬ — 새로 짓기 차례 단계 A(임시 View) → `open` → 단계 C → 알림 → `record_placement`. 첫 자리
-// 기록은 알림 뒤다.
+// TRD S21-slot-docking §8-1 ⑬ — the order of a fresh build: stage A (temporary View) → `open` → stage C → notification → `record_placement`. The first
+// placement record comes after the notification.
 #[test]
 fn move_slot_to_window_into_a_new_window_records_the_placement_after_the_notifications() {
     let w = World::new();
@@ -1892,9 +1892,9 @@ fn move_slot_to_window_into_a_new_window_records_the_placement_after_the_notific
     );
 }
 
-// ── move_slot_to_window: 예열 창(TRD S21-slot-docking §8-1 ⑬ · ADR-0299) ──
+// ── move_slot_to_window: prewarmed window (TRD S21-slot-docking §8-1 ⑬ · ADR-0299) ──
 
-// 예열 차례 `claim_spare` → 단계 A → `open` → 단계 C → 알림 → `committed` → `record_placement`.
+// Prewarm order `claim_spare` → stage A → `open` → stage C → notification → `committed` → `record_placement`.
 #[test]
 fn move_slot_to_window_opens_the_prewarmed_window_and_commits_after_the_notifications() {
     let w = World::new();
@@ -1941,7 +1941,7 @@ fn move_slot_to_window_opens_the_prewarmed_window_and_commits_after_the_notifica
     );
 }
 
-// 단계 A 가 거절하면(없는 슬롯) 연 창이 없다 — 맡긴 창만 되물린다.
+// If stage A rejects (a nonexistent slot), there is no opened window — only the handed-over window is taken back.
 #[test]
 fn move_slot_to_window_refused_before_the_open_gives_the_prewarmed_window_back() {
     let w = World::new();
@@ -1969,7 +1969,7 @@ fn move_slot_to_window_refused_before_the_open_gives_the_prewarmed_window_back()
     assert!(w.host.opened.lock().unwrap().is_empty());
 }
 
-// 맡긴 창의 `open` 이 `Err` 면 창 포트가 그 창을 거뒀다 — 임시 View 만 되돌리고 확정 · 되물림은 없다.
+// If the handed-over window's `open` is `Err`, the window port has withdrawn that window — only the temporary View is reverted, and there is no commit · take-back.
 #[test]
 fn move_slot_to_window_whose_prewarmed_window_fails_to_open_rolls_back_without_a_release() {
     let w = World::failing_host();
@@ -1994,7 +1994,7 @@ fn move_slot_to_window_whose_prewarmed_window_fails_to_open_rolls_back_without_a
     );
 }
 
-// 단계 C 가 거절하면(여는 사이 같은 label 의 창이 모델에 섰다) 맡긴 창은 닫지 않고 되물린다.
+// If stage C rejects (a window of the same label stood in the model while opening), the handed-over window is not closed but taken back.
 #[test]
 fn move_slot_to_window_refused_at_the_attach_gives_the_prewarmed_window_back() {
     let w = World::new();
@@ -2026,7 +2026,7 @@ fn move_slot_to_window_refused_at_the_attach_gives_the_prewarmed_window_back() {
     );
 }
 
-// 알리는 사이(첫 탭 알림) · 확정 전에 그 창이 모델에서 빠져도 확정은 맡김표를 그대로 넘긴다 — 그 창을 닫는 것은 창 포트 몫이다(TRD
+// Even if that window drops out of the model while notifying (the first tab notification) · before the commit, the commit passes the claim ticket on as it is — closing that window is the window port's job (TRD
 //   §3-9 「자리별 차례」 · I27 · I31).
 #[test]
 fn move_slot_to_window_commits_the_claim_even_if_the_window_left_the_model_before_it() {
@@ -2057,8 +2057,8 @@ fn move_slot_to_window_commits_the_claim_even_if_the_window_left_the_model_befor
     );
 }
 
-// 단계 C 에서 락이 오염돼 있어도 연 창은 남지 않는다 — 새로 지은 창은 닫고, 맡긴 창은 되물린다(임시 View 는 거두지
-//   못한다 — `rollback_detached` 와 같다).
+// Even if the lock is poisoned at stage C, no opened window remains — a newly built window is closed, and a handed-over window is taken back (the temporary View cannot be
+//   withdrawn — same as `rollback_detached`).
 #[test]
 fn move_slot_to_window_on_a_poisoned_lock_withdraws_the_window_it_opened() {
     for prewarmed in [false, true] {
@@ -2089,8 +2089,8 @@ fn move_slot_to_window_on_a_poisoned_lock_withdraws_the_window_it_opened() {
     }
 }
 
-/// ★구독은 창을 갈아타는 동안에도 끊기지 않는다★: agent 는 원본 슬롯에서 사라지지만 같은 순간 대상 탭에
-/// 나타난다. 재동기가 attach 전에 계산되거나 close 후에만 돌면 1→0 이 잡혀 살아 있는 구독이 죽는다.
+/// ★The subscription is not cut while switching windows★: the agent disappears from the source slot but at the same moment
+/// appears in the target tab. If the resync is computed before attach or runs only after close, 1→0 is caught and a live subscription dies.
 #[test]
 fn move_slot_to_window_keeps_the_agent_subscribed_across_the_move() {
     let w = World::new();
@@ -2174,7 +2174,7 @@ fn move_slot_to_window_moves_an_empty_slot_and_promotes_its_sibling() {
     assert!(w.unsubscribed().is_empty(), "{:?}", w.unsubscribed());
 }
 
-// 탭에 칸이 하나뿐이면 닫힌 자리에 새 빈 칸이 선다(`close_slot` 과 같은 규칙) — 원본 탭이 비지 않는다.
+// If the tab has only one area, a new empty area stands in the closed place (same rule as `close_slot`) — the source tab does not become empty.
 #[test]
 fn move_slot_to_window_of_a_lone_empty_slot_leaves_a_fresh_empty_slot() {
     let w = World::new();
@@ -2195,7 +2195,7 @@ fn move_slot_to_window_of_a_lone_empty_slot_leaves_a_fresh_empty_slot() {
     );
 }
 
-// ★거절 사유가 진짜 원인을 말한다★ — 없는 칸·없는 탭을 「빈 슬롯」으로 부르면 호출자가 엉뚱한 것을 고친다.
+// ★The rejection reason names the real cause★ — if a nonexistent area · nonexistent tab is called an 「빈 슬롯」 (empty slot), the caller fixes the wrong thing.
 #[test]
 fn move_slot_to_window_refuses_a_missing_slot_or_view_with_the_real_cause() {
     let w = World::new();
@@ -2220,8 +2220,8 @@ fn move_slot_to_window_refuses_a_missing_slot_or_view_with_the_real_cause() {
     assert_eq!(w.view_count(), views_before, "임시 View 를 남기지 않는다");
 }
 
-/// ★옮기던 빈 칸이 창 빌드 사이 채워지면 원본을 닫지 않는다★ — 대조 기준이 `Empty` 여도 「옮긴 그대로일
-/// 때만 닫는다」가 선다. 닫으면 그 사이 누군가 채운 콘텐츠가 어느 화면에도 안 남는다.
+/// ★If the empty area being moved is filled during the window build, the source is not closed★ — even when the comparison base is `Empty`, 「옮긴 그대로일
+/// 때만 닫는다」 (close only if it is as moved) holds. If closed, the content someone filled in the meantime stays on no screen.
 #[test]
 fn move_slot_to_window_keeps_an_empty_source_that_was_filled_during_the_window_build() {
     let w = World::new();
@@ -2254,9 +2254,9 @@ fn move_slot_to_window_keeps_an_empty_source_that_was_filled_during_the_window_b
     );
 }
 
-/// ★임시 View 가 실제로 회수되는지를 잰다★ — 창 수를 세면 실패 경로엔 창 엔트리가 안 생겨 롤백을
-/// 통째로 지워도 초록이고, 그 사이 owner 없는 View 가 재시도마다 `views` 에 무한히 쌓인다
-/// (`apply.rs` 「owner-less tmp_view」 불변식의 ④ 종점이 사라진다).
+/// ★Measures that the temporary View is actually reclaimed★ — if one counts windows, on the failure path no window entry is made, so it is green even if the whole
+/// rollback is deleted, and in the meantime Views with no owner pile up in `views` endlessly with every retry
+/// (the ④ endpoint of the `apply.rs` 「owner-less tmp_view」 invariant disappears).
 #[test]
 fn move_slot_to_window_rolls_back_when_the_window_cannot_be_built() {
     let w = World::failing_host();
@@ -2291,14 +2291,14 @@ fn move_slot_to_window_rolls_back_when_the_window_cannot_be_built() {
     );
 }
 
-/// ★`is_open` 만이 거를 수 있는 그 상태를 세운다★: 대상 창이 **모델에는 살아 있는데** OS 창은 이미 사라진
-/// 순간(`Destroyed` 정리가 아직 모델을 안 지웠다). `insert_tab_into` 의 모델 재검증은 이것을 통과시키므로,
-/// `is_open` 이 없으면 콘텐츠가 화면 없는 창의 탭으로 들어가고 소스 슬롯은 닫혀 어느 화면에도 안 남는다.
+/// ★Sets up the state that only `is_open` can filter out★: the moment the target window is **alive in the model** but its OS window has already vanished
+/// (the `Destroyed` cleanup has not yet deleted the model). The model re-validation of `insert_tab_into` lets this through, so
+/// without `is_open` the content goes in as a tab of a window with no screen and the source slot is closed, leaving it on no screen.
 #[test]
 fn move_slot_to_window_rejects_a_target_whose_os_window_is_gone() {
     let w = World::new();
     let target = w.popup();
-    // OS 창만 사라진 상태 — 모델 엔트리는 그대로다.
+    // Only the OS window vanished — the model entry is as it was.
     w.host.closed.lock().unwrap().push(target.clone());
     let (view, slot, content) = w.view_with_filled_slot();
     let views_before = w.view_count();
@@ -2330,7 +2330,7 @@ fn move_slot_to_window_rejects_a_target_whose_os_window_is_gone() {
     assert_eq!(w.view_count(), views_before, "임시 View 도 회수된다");
 }
 
-// 모델에도 없는 label 은 `is_open` 이 먼저 걸러 「대상 창 없음」으로 나간다(모델 재검증까지 가지 않는다).
+// A label that is not even in the model is filtered by `is_open` first and goes out as 「대상 창 없음」 (no target window) (it does not reach the model re-validation).
 #[test]
 fn move_slot_to_window_rejects_an_unknown_target_label() {
     let w = World::new();
@@ -2395,8 +2395,8 @@ async fn spawn_into_creates_tab_and_places_agent() {
     assert_eq!(w.layout_events(), 1);
 }
 
-/// ★모르는 낱말만 막는다★ — 오탈자가 통과하면 그 왕복은 데몬에서 죽거나(새 데몬) 조용히 다른 백엔드를
-/// 띄운다(칸을 모르는 옛 데몬). 거절 문구는 어휘를 손으로 적지 않고 wire enum 에서 받아 온다.
+/// ★It blocks only unknown words★ — if a typo passes, that round trip dies in the daemon (a new daemon) or silently starts another backend
+/// (an old daemon that does not know the field). The rejection message takes the vocabulary from the wire enum rather than writing it by hand.
 #[tokio::test]
 async fn spawn_into_rejects_an_unknown_backend_before_spawning() {
     let w = World::new();
@@ -2424,10 +2424,10 @@ async fn spawn_into_rejects_an_unknown_backend_before_spawning() {
     assert_eq!(spawner.calls(), 0, "★스폰 전에 거부★");
 }
 
-/// 아는 낱말은 **포트까지 그대로 간다** — 이 줄이 초록이면 ADR-0058 의 전량 거부가 실제로 걷힌 것이다.
+/// A known word **goes to the port as it is** — if this line is green, the blanket rejection of ADR-0058 has really been lifted.
 ///
-/// ★셸은 정책을 안 본다 — wire 가 아는 낱말은 전부 여기 선다★(정책은 데몬 `SpawnByCwd` 처리부 · ADR-0279).
-/// 그 목록에서 낱말을 빼면 이 파일은 그 낱말이 실제로 포트까지 가는지를 아무 데서도 안 재게 된다.
+/// ★The shell does not look at policy — every word the wire knows stands here★ (policy is in the daemon's `SpawnByCwd` handling part · ADR-0279).
+/// If a word is removed from that list, this file no longer measures anywhere whether that word actually reaches the port.
 #[tokio::test]
 async fn spawn_into_forwards_a_known_backend() {
     for (word, expected) in [
@@ -2487,11 +2487,11 @@ async fn spawn_into_accepts_blank_backend_as_unspecified() {
     .await
     .unwrap();
 
-    // 공백 backend 가 "미지정"으로 통과했는지는 스폰 호출만으로는 안 잡힌다 — 그 뒤 배치까지 끝나야
-    // 통과 경로와 거절 경로가 갈린다(거절 경로는 스폰도 배치도 0).
+    // Whether a blank backend passed as "unspecified" is not caught by the spawn call alone — only after the layout step too does the
+    // pass path split from the rejection path (the rejection path has zero spawns and zero layouts).
     assert_eq!(spawner.calls(), 1);
-    // ★셸은 기본값을 지어내지 않는다★ — 미지정은 미지정인 채로 포트에 간다(그 부재를 거절하는 것은
-    //   데몬이고, 그래야 「어느 칸을 채워라」 문구가 한 곳에서만 나온다).
+    // ★The shell does not invent defaults★ — unspecified goes to the port as unspecified (rejecting that absence is the
+    //   daemon's job, and that way the 「어느 칸을 채워라」 (fill which field) message comes from one place only).
     assert_eq!(&*spawner.backends.lock().unwrap(), &[None]);
     assert_eq!(id, agent.to_string());
     let placed = w.main_active();
@@ -2535,7 +2535,7 @@ async fn spawn_into_rejects_slot_without_tab_before_spawning() {
     assert_eq!(spawner.calls(), 0, "orphan 탭 방지 가드 = pre-spawn");
 }
 
-// 배치 실패를 점유 칸으로 낸다 — 남의 창 탭은 이제 스폰 전에 거절된다(아래 시험).
+// Gives the layout failure as an occupied area — a tab of another window is now rejected before the spawn (test below).
 #[tokio::test]
 async fn spawn_into_reports_live_agent_when_placement_fails() {
     let w = World::new();
@@ -2566,8 +2566,8 @@ async fn spawn_into_reports_live_agent_when_placement_fails() {
     );
 }
 
-/// 탭을 주면 그 탭의 창에 놓는다 — 창을 빼면 그 탭의 창이고, 다른 창 · 없는 탭이면 띄우지 않는다(놓을 곳 없는 에이전트가
-/// 살아 남지 않게 — TRD S28 §7).
+/// If a tab is given, it is placed in that tab's window — without a window it is that tab's window, and for another window · a nonexistent tab it does not launch (so that an agent with no place to be placed does not
+/// survive — TRD S28 §7).
 #[tokio::test]
 async fn spawn_into_takes_the_window_from_the_tab_and_refuses_a_foreign_one_before_spawning() {
     let w = World::new();
@@ -2653,11 +2653,11 @@ async fn spawn_into_propagates_spawn_failure_untouched() {
     assert_eq!(w.resyncs(), 0);
 }
 
-/// ★아는 낱말의 정책 거절은 데몬을 한 번 다녀와 배치 없이 그대로 돌아온다★(ADR-0279) — 셸은 그 낱말을
-/// 그물만 지나 포트로 보내고, 포트의 `Err` 를 문구 그대로 돌려주며 레이아웃을 안 건드린다.
-/// `spawn_into_propagates_spawn_failure_untouched` 는 낱말이 없어 「낱말이 데몬까지 갔다가 거절되어
-/// 돌아온다」를 못 잰다.
-/// 문구는 데몬 정책 거절의 꼴을 흉내 낸 것이다 — 셸은 그 글을 읽지 않으므로 무엇이든 같다.
+/// ★A policy rejection of a known word makes one trip to the daemon and comes back as it is with no layout★ (ADR-0279) — the shell sends that word
+/// through only the net to the port, returns the port's `Err` with its message as it is, and does not touch the layout.
+/// `spawn_into_propagates_spawn_failure_untouched` has no word, so it cannot measure 「낱말이 데몬까지 갔다가 거절되어
+/// 돌아온다」 (the word goes to the daemon, is rejected and comes back).
+/// The message imitates the shape of a daemon policy rejection — the shell does not read that text, so anything is the same.
 #[tokio::test]
 async fn spawn_into_passes_a_daemon_refusal_through_without_placing() {
     let w = World::new();
@@ -2696,10 +2696,10 @@ async fn spawn_into_passes_a_daemon_refusal_through_without_placing() {
     assert_eq!(w.resyncs(), 0);
 }
 
-// ── set_split_ratio (ADR-0227 — 레이아웃 알림은 Applied 일 때만) ──────────────
+// ── set_split_ratio (ADR-0227 — the layout notification only on Applied) ──────
 
 impl World {
-    // main 활성 탭의 첫 칸을 좌우로 나눈 세계 — 반환 = (탭, 그 분할).
+    // A world where the first area of main's active tab is split left/right — returns = (tab, that split).
     fn split_view(&self) -> (Uuid, Uuid) {
         let view = self.main_active();
         let slot = self.empty_slot(view);
@@ -2780,7 +2780,7 @@ fn set_split_ratio_unchanged_or_too_small_notifies_nothing() {
     assert_eq!(same.outcome, SplitRatioOutcome::Unchanged);
     assert_eq!(same.ratio, 0.5);
 
-    // 분할 폭 L = 300px < 2 × 200px — px 범위가 비었다.
+    // Split width L = 300px < 2 × 200px — the px range is empty.
     apply::report_window_canvas(&w.state, MAIN_WINDOW_LABEL, 300, 300).unwrap();
     let mut big_min = one_px_border();
     big_min.min_pane_px = 200;
@@ -2811,8 +2811,8 @@ fn set_split_ratio_unknown_split_is_err_without_notify() {
     assert_eq!((w.layout_events(), w.tab_events()), events_before);
 }
 
-/// 알림을 받는 그 자리에서 다른 쓰기를 끼워 넣는 포트 — 락을 놓은 뒤 전역 카운터를 다시 읽는 구현이면
-/// 돌려주는 version 이 이 끼어든 쓰기의 값으로 어긋난다.
+/// A port that interjects another write at the very place it receives the notification — if the implementation releases the lock and reads the global counter again,
+/// the returned version is off by the value of this interjected write.
 struct Meddler {
     inner: Recorder,
     state: LayoutState,
@@ -2857,7 +2857,7 @@ fn set_split_ratio_returns_the_notified_snapshots_version_not_a_later_one() {
     );
 }
 
-// 쓰기 하나가 알림을 하나 이상 냈다 — 그 차례를 비운다.
+// One write emitted one or more notifications — empties that order.
 fn assert_notified(w: &World, write: &str) {
     assert!(!w.ev.take_order().is_empty(), "{write}: 알림이 있어야 한다");
 }
@@ -2955,15 +2955,15 @@ fn writes_that_change_nothing_notify_nothing() {
         None,
     )
     .unwrap_err();
-    // 마지막 탭을 닫아 창째 사라짐 — 알릴 창이 없다.
+    // The last tab is closed and the whole window vanishes — there is no window to notify.
     apply::close_tab(&w.state, &w.subs, &w.ev, &w.host, &label, popup_tab).unwrap();
 
     assert_eq!(w.ev.take_order(), Vec::<&str>::new());
 }
 
-// ── OS 창 제목(TRD S26-window-chrome §2-4 ② · §4-4 · §10-2) ──
+// ── OS window title (TRD S26-window-chrome §2-4 ② · §4-4 · §10-2) ──
 
-// 창마다 지금 제목 — 조회로 뜬다.
+// Current title per window — picked up by lookup.
 fn titles(w: &World) -> BTreeMap<String, String> {
     apply::list_windows(&w.state)
         .unwrap()
@@ -2975,8 +2975,8 @@ fn titles(w: &World) -> BTreeMap<String, String> {
         .collect()
 }
 
-// 쓰기 하나 앞의 모습 — [`TitleCheck::after`] 가 불변식 2 를 잰다: 제목이 바뀐 창(새 창 포함)마다 그 쓰기가 그 창의 탭
-//   목록을 쓰기 앞보다 큰 판으로 알렸고, 그 창의 마지막 알림이 지금 제목을 싣는다.
+// The picture before one write — [`TitleCheck::after`] measures invariant 2: for every window whose title changed (including a new window), that write announced that window's tab
+//   list with a larger version than before the write, and that window's last notification carries the current title.
 struct TitleCheck {
     titles: BTreeMap<String, String>,
     version: u64,
@@ -2992,7 +2992,7 @@ impl TitleCheck {
         }
     }
 
-    // `changes` = 이 쓰기가 어느 창의 제목을 바꾸는가 — 제목을 안 바꾸는 쓰기만 돌려 헛통과하지 않게 짝으로 본다.
+    // `changes` = which window's title this write changes — seen as a pair so that running only writes that do not change titles does not pass vacuously.
     fn after(self, w: &World, write: &str, changes: bool) {
         let after = titles(w);
         let sent = w.ev.tabs.lock().unwrap()[self.seen..].to_vec();
@@ -3028,7 +3028,7 @@ fn title_write<T>(w: &World, write: &str, changes: bool, run: impl FnOnce() -> T
     out
 }
 
-// 제목을 바꾸는 쓰기 전부(창 · 탭 · 슬롯 · 이름 장부 · 옮기기 · 도킹 · 스폰)가 그 창을 새 판으로 알린다.
+// Every write that changes a title (window · tab · slot · name ledger · move · docking · spawn) announces that window with a new version.
 #[tokio::test]
 async fn every_write_that_changes_a_window_title_announces_that_window_at_a_new_version() {
     let w = World::new();
@@ -3157,7 +3157,7 @@ async fn every_write_that_changes_a_window_title_announces_that_window_at_a_new_
     assert_eq!(titles(&w)[MAIN_WINDOW_LABEL], "에이전트 - Engram:1");
 }
 
-// 부팅의 한 번 — 모든 창을 지금 판 그대로 알리고 판도 모델도 바꾸지 않는다(TRD S26-window-chrome §4-4 ③).
+// One time at boot — announces all windows at the current version as it is and changes neither the version nor the model (TRD S26-window-chrome §4-4 ③).
 #[test]
 fn sync_titles_announces_every_window_once_at_the_current_version() {
     let w = World::new();
@@ -3200,10 +3200,10 @@ fn sync_titles_on_a_poisoned_lock_is_err_without_notify() {
     assert_eq!(w.tab_events(), 0);
 }
 
-// ── 측정 보고 2종 (ADR-0227) ─────────────────────────────────────────────────
+// ── two measurement reports (ADR-0227) ────────────────────────────────────────
 //
-// 두 함수는 알림·재동기 포트를 아예 안 받으므로 「통지 0」은 시그니처가 먼저 지킨다. 여기서 재는 것은 그
-// 나머지 — version 불변과, 성공·실패 어느 쪽이든 형제 명령의 알림이 딸려 나가지 않는다는 것이다.
+// The two functions take no notification · resync ports at all, so 「통지 0」 (zero notifications) is guarded by the signature first. What is measured here is the
+// rest — that the version is unchanged, and that whether it succeeds or fails, no sibling command's notification goes out with it.
 
 fn one_px_border() -> UiMetrics {
     UiMetrics {
@@ -3238,7 +3238,7 @@ fn canvas_and_metrics_reports_notify_nothing_and_keep_version() {
         "측정 보고는 version 을 올리지 않는다"
     );
 
-    // 저장은 됐다 — 셸 계산이 그 값을 읽는다.
+    // It was saved — the shell computation reads that value.
     let view = w.main_active();
     let slot = w.slots(view)[0];
     let px = w
@@ -3275,7 +3275,7 @@ fn rejected_reports_notify_nothing_and_keep_version() {
     bad.frame_insets.l = f64::NAN;
     let err = apply::report_ui_metrics(&w.state, MAIN_WINDOW_LABEL, bad).unwrap_err();
     assert!(err.contains("ui 지표 거절"), "err={err}");
-    // 0 크기는 오류가 아니라 무시다.
+    // Zero size is not an error but an ignore.
     apply::report_window_canvas(&w.state, MAIN_WINDOW_LABEL, 0, 800).unwrap();
 
     assert_eq!(w.layout_events() + w.tab_events(), 0);
@@ -3288,7 +3288,7 @@ fn rejected_reports_notify_nothing_and_keep_version() {
     );
 }
 
-// ── read-only 4종 ────────────────────────────────────────────────────────────
+// ── four read-only ───────────────────────────────────────────────────────────
 
 #[test]
 fn get_view_unknown_is_err() {
@@ -3348,7 +3348,7 @@ fn resolve_spatial_without_view_uses_window_active_tab() {
     let view = w.main_active();
     let by_view = apply::resolve_spatial(&w.state, "top-left", None, Some(view)).unwrap();
 
-    // window 미지정 → main 의 활성 탭.
+    // window unspecified → main's active tab.
     let by_default = apply::resolve_spatial(&w.state, "top-left", None, None).unwrap();
     let by_label =
         apply::resolve_spatial(&w.state, "top-left", Some(MAIN_WINDOW_LABEL), None).unwrap();
@@ -3379,7 +3379,7 @@ fn resolve_spatial_unknown_window_is_err() {
     assert!(err.contains("window 없음"), "err={err}");
 }
 
-// ── 조회는 방금 쓴 값을 본다(read-your-writes — TRD S20 §7) ──────────────────
+// ── a lookup sees the value just written (read-your-writes — TRD S20 §7) ──────
 
 #[test]
 fn reads_observe_writes_immediately() {
@@ -3423,11 +3423,11 @@ fn reads_observe_writes_immediately() {
 
 // ── dock_tab (TRD S21-slot-docking §3-3) ──────────────────────
 //
-// 여기서 안 재는 것: 새 창 자리가 어느 모니터에도 안 걸치면 기본 자리로 가는 규칙은 창 포트의 Tauri 구현 몫이라
-// `state::placement` 의 `resolve_place` 단위 시험(`lib_unit`)이 잰다. 새 창이 붙기 전에 닫혀 묘비가 선 갈래 · 재사용
-// 옮기기 중에 창이 닫힌 갈래는 닫기 요청의 모델 몫이 crate 안 함수라 `commands::popout` 의 시험(`lib_unit`)이 잰다.
+// What is not measured here: the rule that if a new window's place straddles no monitor it goes to the default place belongs to the Tauri implementation of the window port, so
+// the `lib_unit` unit test of `resolve_place` in `state::placement` measures it. The branch where the new window is closed before attaching and a tombstone stands · the branch where a window closes during the reuse
+// move belong to the model part of the close request, a function inside the crate, so the `commands::popout` tests (`lib_unit`) measure them.
 
-// ADR-0057 ①–④ — 소유 쌍이 양쪽에서 맞고 · View 마다 소유 창 하나 · 활성은 그 창의 탭 · main 탭 ≥ 1.
+// ADR-0057 ①–④ — the ownership pair matches on both sides · one owner window per View · the active one is a tab of that window · main tabs ≥ 1.
 fn assert_invariants(w: &World) {
     let mgr = w.state.0.lock().unwrap();
     let mut tabs = 0;
@@ -3461,7 +3461,7 @@ fn bounds(x: f64, y: f64, w: f64, h: f64) -> Option<WindowBounds> {
     WindowBounds::new(x, y, w, h)
 }
 
-// 알림마다 창이 아직 안 닫혔나 본다 — 빈 출처 팝아웃 닫기가 알림 묶음 뒤인지 재는 눈.
+// At every notification, sees whether the window is still not closed — the eye that measures whether closing an empty source popout comes after the notification bundle.
 struct ClosesAfter<'a> {
     inner: &'a Recorder,
     host: &'a Host,
@@ -3511,7 +3511,7 @@ impl World {
         self.state.0.lock().unwrap().windows.contains_key(label)
     }
 
-    // 빈 탭 `n` 개짜리 팝아웃 — 반환 = (label, 탭 순서). 마지막 탭이 활성이다.
+    // A popout with `n` empty tabs — returns = (label, tab order). The last tab is active.
     fn popup_with(&self, n: usize) -> (String, Vec<Uuid>) {
         let label = self.popup();
         let mut tabs = vec![apply::list_tabs(&self.state, &label).unwrap().active];
@@ -3521,7 +3521,7 @@ impl World {
         (label, tabs)
     }
 
-    // 창의 모델 자리를 적는다 — 운영의 `Moved` · `Resized` 처리기와 같은 길.
+    // Writes the window's model place — the same path as production's `Moved` · `Resized` handlers.
     fn observe(&self, label: &str, maximized: bool, bounds: Option<WindowBounds>) {
         self.state
             .0
@@ -3538,8 +3538,8 @@ impl World {
             .unwrap();
     }
 
-    // 준비 쓰기가 남긴 기록을 비운다 — 뒤의 단언은 도킹 한 번만 본다. ★연 창 목록(`opened`)은 남긴다★ — 이 가짜의
-    // `is_open` · 되돌리기가 그것으로 창이 떠 있는지 본다.
+    // Empties the record the preparation writes left — the later assertions see only one docking. ★The opened-window list (`opened`) is kept★ — this fake's
+    // `is_open` · revert look at it to see whether the window is up.
     fn forget(&self) {
         self.ev.take_order();
         self.ev.layout.lock().unwrap().clear();
@@ -3610,7 +3610,7 @@ impl World {
             .unwrap_or_else(|| panic!("{label} 탭 알림"))
     }
 
-    // 낸 스냅숏 · 탭 목록이 전부 지금 `version` 이다 — 변경과 같은 임계 구역에서 떴다.
+    // The snapshots · tab lists it emitted are all at the current `version` — they were taken in the same critical section as the change.
     fn assert_notified_at_current_version(&self) {
         let version = self.version();
         for s in self.ev.layout.lock().unwrap().iter() {
@@ -3622,7 +3622,7 @@ impl World {
     }
 }
 
-// ── dock_tab: 이음새 · 탭바 ──
+// ── dock_tab: seam · tab bar ──
 
 #[test]
 fn dock_tab_seam_moves_the_tab_under_one_lock_and_notifies_after_it() {
@@ -3861,7 +3861,7 @@ fn dock_tab_onto_the_same_place_is_ok_and_silent() {
 
 #[test]
 fn dock_tab_of_mains_last_tab_announces_the_fresh_empty_tab() {
-    // 탭바(다른 창) · 새 창 — 둘 다 main 에 빈 탭이 생기고 그 id 를 돌려주며 그 배치 · 탭 목록이 알림에 실린다.
+    // Tab bar (another window) · new window — in both, an empty tab is created in main and its id is returned, and that layout · tab list ride in the notification.
     for mode in ["tab_bar", "new_window"] {
         let w = World::new();
         let only = w.main_active();
@@ -3904,7 +3904,7 @@ fn dock_tab_of_mains_last_tab_announces_the_fresh_empty_tab() {
     }
 }
 
-// ── dock_tab: 다음 활성 · 붙는 몫(ADR-0295) ──
+// ── dock_tab: next active · attach share (ADR-0295) ──
 
 impl World {
     fn dock_req(&self, req: DockRequest) -> Result<DockOutcome, DockError> {
@@ -3921,7 +3921,7 @@ impl World {
 
 #[test]
 fn dock_tab_hands_the_source_window_to_the_given_successor() {
-    // 팝아웃 [t0, t1, t2] · 활성 t1 — 승계라면 오른쪽 이웃 t2 다.
+    // Popout [t0, t1, t2] · active t1 — if it were succession, the right neighbor t2.
     for (pick, want) in [(Some(0), 0), (None, 2)] {
         let w = World::new();
         let (label, tabs) = w.popup_with(3);
@@ -4004,7 +4004,7 @@ fn dock_tab_seam_with_a_share_outside_its_range_changes_nothing() {
     assert_invariants(&w);
 }
 
-// ── dock_tab: 새 창 ──
+// ── dock_tab: new window ──
 
 #[test]
 fn dock_tab_new_window_opens_then_attaches_and_records_the_placement() {
@@ -4034,7 +4034,7 @@ fn dock_tab_new_window_opens_then_attaches_and_records_the_placement() {
     assert_eq!(w.resyncs(), resyncs + 1);
     assert_eq!(w.notified_views(), [source, first]);
     assert_eq!(w.notified_windows(), [label.as_str(), MAIN_WINDOW_LABEL]);
-    // TRD S21-slot-docking §8-1 ⑬ — `open_at` → `dock` → 알림 → `record_placement`.
+    // TRD S21-slot-docking §8-1 ⑬ — `open_at` → `dock` → notification → `record_placement`.
     assert_eq!(
         w.journal.take(),
         [
@@ -4139,7 +4139,7 @@ fn dock_tab_new_window_closes_the_opened_window_when_phase_c_refuses() {
     let w = World::new();
     let source = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
     w.forget();
-    // 창을 여는 사이 다른 경로가 출처 탭을 닫는다.
+    // While opening the window, another path closes the source tab.
     *w.host.during_open.lock().unwrap() = Some(Box::new(move |state: &LayoutState| {
         state
             .0
@@ -4175,9 +4175,9 @@ fn dock_tab_new_window_closes_the_opened_window_when_phase_c_refuses() {
     assert_invariants(&w);
 }
 
-// ── dock_tab: 새 창 — 예열 창(TRD S21-slot-docking §8-1 ⑬ · ADR-0299) ──
+// ── dock_tab: new window — prewarmed window (TRD S21-slot-docking §8-1 ⑬ · ADR-0299) ──
 
-// 예열 차례 `claim_spare` → `open_at` → `dock` → 알림 → `committed` → `record_placement`.
+// Prewarm order `claim_spare` → `open_at` → `dock` → notification → `committed` → `record_placement`.
 #[test]
 fn dock_tab_new_window_opens_the_prewarmed_window_and_commits_after_the_notifications() {
     let w = World::new();
@@ -4213,7 +4213,7 @@ fn dock_tab_new_window_opens_the_prewarmed_window_and_commits_after_the_notifica
     assert_invariants(&w);
 }
 
-// `Keep` 의 새 창도 예열 창을 쓴다 — 활성 안 함은 맡긴 창의 `open_at` 이 받는다(TRD §3-9 I4).
+// The new window of `Keep` also uses a prewarmed window — not activating is received by the handed-over window's `open_at` (TRD §3-9 I4).
 #[test]
 fn dock_tab_new_window_uses_the_prewarmed_window_without_focus_too() {
     let w = World::new();
@@ -4229,7 +4229,7 @@ fn dock_tab_new_window_uses_the_prewarmed_window_without_focus_too() {
     assert_eq!(&*w.host.opened_at.lock().unwrap(), &[(spare, AT, false)]);
 }
 
-// 맡긴 창의 `open_at` 이 `Err` 면 창 포트가 그 창을 거뒀다 — `WindowOpen` 이고 확정 · 되물림은 없다.
+// If the handed-over window's `open_at` is `Err`, the window port has withdrawn that window — it is `WindowOpen` and there is no commit · take-back.
 #[test]
 fn dock_tab_new_window_whose_prewarmed_window_fails_to_open_changes_nothing() {
     let w = World::failing_host();
@@ -4249,7 +4249,7 @@ fn dock_tab_new_window_whose_prewarmed_window_fails_to_open_changes_nothing() {
     assert!(!w.claim_outstanding(), "창 포트가 거뒀다");
 }
 
-// 붙이기 전 판정이 바뀌면(여는 사이 출처 탭이 닫힘) 맡긴 창은 닫지 않고 되물린다.
+// If the decision before attaching changes (the source tab closed while opening), the handed-over window is not closed but taken back.
 #[test]
 fn dock_tab_new_window_refused_at_the_attach_gives_the_prewarmed_window_back() {
     let w = World::new();
@@ -4281,7 +4281,7 @@ fn dock_tab_new_window_refused_at_the_attach_gives_the_prewarmed_window_back() {
     assert_invariants(&w);
 }
 
-// 알리는 사이(첫 탭 알림) · 확정 전에 그 창이 모델에서 빠져도 확정은 맡김표를 그대로 넘긴다(TRD §3-9 · I27 · I31).
+// Even if that window drops out of the model while notifying (the first tab notification) · before the commit, the commit passes the claim ticket on as it is (TRD §3-9 · I27 · I31).
 #[test]
 fn dock_tab_new_window_commits_the_claim_even_if_the_window_left_the_model_before_it() {
     let w = World::new();
@@ -4311,10 +4311,10 @@ fn dock_tab_new_window_commits_the_claim_even_if_the_window_left_the_model_befor
     );
 }
 
-// ── dock_tab: 재사용 ──
+// ── dock_tab: reuse ──
 
 impl World {
-    // 탭 하나뿐인 팝아웃 — 새 창이 아니라 그 창을 옮긴다(`plan_new_window`). 보통 자리도 적어 둔다. 반환 = (label, 탭).
+    // A popout with only one tab — moves that window rather than a new window (`plan_new_window`). Also writes down the normal place. Returns = (label, tab).
     fn lone_popout(&self) -> (String, Uuid) {
         let (label, tabs) = self.popup_with(1);
         self.observe(&label, false, bounds(40.0, 30.0, 800.0, 600.0));
@@ -4406,8 +4406,8 @@ fn dock_tab_a_lone_popout_without_a_normal_place_is_reused_too() {
 
 #[test]
 fn dock_tab_reuse_finishes_the_drop_even_if_the_source_changes_during_the_move() {
-    // 사용자 결정(2026-10-16) — 끄기가 서면 놓은 자리에 둔다. 옮기는 사이의 쓰기는 다시 판정하지 않고 되돌리지도 않는다:
-    // 그 쓰기가 남긴 모델 그대로 끝난다. (무엇, 끼어든 쓰기, 그 창이 모델에 남나)
+    // User decision (2026-10-16) — once the drag stands, it stays at the place it was dropped. Writes during the move are neither re-decided nor reverted:
+    // it ends with the model that write left. (what, the interjecting write, whether that window remains in the model)
     type Meddle = fn(&mut ViewManager, &str, Uuid, Uuid);
     let cases: [(&str, Meddle, bool); 3] = [
         (
@@ -4520,7 +4520,7 @@ fn dock_tab_reuse_move_failure_is_window_open_and_undoes_nothing() {
     }
 }
 
-// ── dock_tab: 끝 로그 ──
+// ── dock_tab: end log ──
 
 #[derive(Debug, Clone)]
 struct Line {
@@ -4529,7 +4529,7 @@ struct Line {
     fields: Vec<(String, String)>,
 }
 
-/// 이 스레드에서 낸 이벤트를 전부 모은다(`settings` 시험의 같은 이름 가짜와 같은 꼴). 만들 때 [`ASK_ALWAYS`] 를 세운다.
+/// Collects all events emitted on this thread (the same shape as the same-named fake of the `settings` tests). On creation, it sets up [`ASK_ALWAYS`].
 #[derive(Clone)]
 struct Captured(std::sync::Arc<Mutex<Vec<Line>>>);
 
@@ -4540,15 +4540,15 @@ impl Default for Captured {
     }
 }
 
-// tracing-core 0.1.36: 마지막 구독자 등록 때 살아 있던 구독자가 하나뿐이었으면 callsite 의 첫 등록이 **그 스레드의** 기본 구독자에게만 관심을 묻는다
-//   (`Dispatchers::rebuilder` → `JustOne`). capture 밖 시험 스레드가 「도킹 적용」 같은 공용 자리를 capture 도중 처음 때리면
-//   「관심 없음」이 전역에 박혀 그 capture 가 빈손이 된다(실측 — 6 병렬 120 회 중 38 회). 이것을 바이너리 내내 붙들어 두면 첫
-//   등록이 살아 있는 구독자 전부에게 묻고, 이것이 늘 「때마다 묻기」라 「관심 없음」이 박히지 않는다. 남는 틈 = 이것을 처음 세우는
-//   그 순간의 같은 경주 하나(미검 — 새면 증상은 위와 같다).
+// tracing-core 0.1.36: if only one subscriber was alive at the last subscriber registration, the first registration of a callsite asks only **that thread's** default subscriber for interest
+//   (`Dispatchers::rebuilder` → `JustOne`). If a test thread outside the capture hits a shared place such as 「도킹 적용」 (docking applied) for the first time during a capture,
+//   「관심 없음」 (no interest) is pinned globally and that capture comes up empty-handed (measured — 38 of 120 runs with 6 in parallel). If this is held for the whole binary, the first
+//   registration asks all live subscribers, and since this is always 「때마다 묻기」 (ask every time), 「관심 없음」 does not get pinned. The remaining gap = one same race at the
+//   moment this is first set up (untested — if it leaks, the symptom is the one above).
 static ASK_ALWAYS: LazyLock<tracing::Dispatch> =
     LazyLock::new(|| tracing::Dispatch::new(AskAlways));
 
-/// 아무것도 받지 않고 모든 callsite 에 「때마다 묻기」만 답한다 — [`ASK_ALWAYS`].
+/// Receives nothing and answers every callsite only with 「때마다 묻기」 (ask every time) — [`ASK_ALWAYS`].
 struct AskAlways;
 
 impl tracing::Subscriber for AskAlways {
@@ -4672,11 +4672,11 @@ fn dock_tab_onto_the_same_place_logs_that_nothing_changed() {
     );
 }
 
-// ── 놓기 명령 — 놓을 때 대상을 다시 찾는다(ADR-0297 · TRD S21-slot-docking §3-3 · §8-1 ⑦) ─────────────────────
+// ── drop command — find the target again at drop time (ADR-0297 · TRD S21-slot-docking §3-3 · §8-1 ⑦) ─────────────────────
 //
-// 놓기 명령(`tab_drop`)은 웹 스토어로 판정한 것을 싣는다 — 그 스토어가 모델보다 늦어도 놓기가 가리킨 것(끄는 탭 · 대상
-// 탭 · 대상 칸 · 탭바 창)이 지금 있으면 같은 `dock_tab` 이 지금 상태에 맞춰 적용하고, 없으면 거절한다. 요청은 운영과
-// 같은 순수 판정(`tab_drop::plan::plan`)으로 짓는다.
+// The drop command (`tab_drop`) carries what was decided with the web store — even if that store is behind the model, if what the drop pointed to (the dragged tab · target
+// tab · target area · tab bar window) exists now, the same `dock_tab` applies it to the current state, and if not, it rejects. The request is built with the same
+// pure decision as production (`tab_drop::plan::plan`).
 
 const FLAT_FRAME: SourceFrame = SourceFrame {
     insets: Insets {
@@ -4703,7 +4703,7 @@ impl World {
         apply::list_tabs(&self.state, label).unwrap().active
     }
 
-    // 놓기 명령 하나를 판정해 적용한다 — 운영의 `tab_drop` 과 같은 길(입력은 우리 웹뷰의 drop).
+    // Decides and applies one drop command — the same path as production's `tab_drop` (the input is a drop in our webview).
     fn tab_drop(&self, drop: &TabDrop, caller: &str) -> Result<DockOutcome, DockError> {
         match drop_plan::plan(drop, caller, &dropped_at(500, 400), &FLAT_FRAME) {
             Plan::Dock(req) => self.dock_req(req),
@@ -4721,7 +4721,7 @@ impl World {
         }
     }
 
-    // 이음새 놓기 — `target` 의 `anchor` 오른쪽 반.
+    // Seam drop — the right half of `anchor` of `target`.
     fn seam_drop(
         &self,
         view: Uuid,
@@ -4765,7 +4765,7 @@ impl World {
     }
 }
 
-// main = [m0, t] · 팝아웃 = [p] — `t` 를 main 에서 끌기 시작한 뒤 LLM 이 `t` 를 팝아웃으로 옮겼다(D9).
+// main = [m0, t] · popout = [p] — after starting to drag `t` from main, the LLM moved `t` to the popout (D9).
 #[test]
 fn a_drop_whose_tab_left_its_source_window_moves_it_from_where_it_is_now() {
     let setup = || {
@@ -4823,7 +4823,7 @@ fn a_drop_whose_tab_left_its_source_window_moves_it_from_where_it_is_now() {
     assert_invariants(&w);
 }
 
-// `initial` 은 끌기를 시작한 창(main)의 선택이다 — 끄는 탭이 그사이 간 창(팝아웃)은 `initial` 이 거기 있어도 셸 승계를 따른다.
+// `initial` is the selection of the window the drag started in (main) — the window the dragged tab went to in the meantime (the popout) follows the shell succession even if `initial` is there.
 #[test]
 fn a_drop_whose_tab_left_its_source_window_leaves_that_window_to_the_shell_succession() {
     let w = World::new();
@@ -4886,7 +4886,7 @@ fn a_drop_whose_tab_is_gone_is_refused_before_opening_anything() {
 
 #[test]
 fn a_tab_bar_drop_lands_in_the_tab_list_as_it_is_now_and_clamps_to_its_end() {
-    // 판정 뒤 탭이 늘었다 — 자리는 지금 목록에서 센다.
+    // Tabs increased after the decision — the position is counted in the current list.
     let w = World::new();
     let m0 = w.main_active();
     let a = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
@@ -4899,7 +4899,7 @@ fn a_tab_bar_drop_lands_in_the_tab_list_as_it_is_now_and_clamps_to_its_end() {
     assert_eq!(w.active_of(MAIN_WINDOW_LABEL), t, "놓은 탭이 보인다");
     assert_invariants(&w);
 
-    // 판정 뒤 탭이 줄었다 — 넘친 자리는 지금 목록의 끝 자리다.
+    // Tabs decreased after the decision — the overflowed position is the end position of the current list.
     let w = World::new();
     let m0 = w.main_active();
     let a = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
@@ -4913,7 +4913,7 @@ fn a_tab_bar_drop_lands_in_the_tab_list_as_it_is_now_and_clamps_to_its_end() {
     assert_eq!(w.tabs_of(&popout), [tabs[0]]);
     assert_invariants(&w);
 
-    // 같은 창 — 끄는 탭을 뺀 지금 목록에서 센다.
+    // Same window — counted in the current list without the dragged tab.
     let w = World::new();
     let m0 = w.main_active();
     let a = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
@@ -4944,7 +4944,7 @@ fn a_tab_bar_drop_into_a_window_that_closed_is_refused() {
 
 #[test]
 fn a_seam_drop_lands_in_the_target_layout_as_it_is_now() {
-    // 대상 = 팝아웃의 탭 q · 끄는 탭 = main 의 t.
+    // Target = tab q of the popout · dragged tab = t of main.
     let setup = || {
         let w = World::new();
         let t = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
@@ -4954,7 +4954,7 @@ fn a_seam_drop_lands_in_the_target_layout_as_it_is_now() {
         (w, t, popout, q, s)
     };
 
-    // 기준 칸이 그사이 나뉘었다 — 그 칸이 남았으니 그 칸에 붙는다.
+    // The reference area was split in the meantime — that area remains, so it attaches to that area.
     let (w, t, popout, q, s) = setup();
     let moved = w.slots(t);
     let drop = w.seam_drop(t, MAIN_WINDOW_LABEL, None, q, DropAnchor::Slot { id: s });
@@ -4971,14 +4971,14 @@ fn a_seam_drop_lands_in_the_target_layout_as_it_is_now() {
     assert_eq!(w.owner(t), None);
     assert_invariants(&w);
 
-    // 바깥 변 — 그사이 나뉜 대상 탭 전체에 붙는다.
+    // Outer side — attaches to the whole target tab that was split in the meantime.
     let (w, t, popout, q, s) = setup();
     let drop = w.seam_drop(t, MAIN_WINDOW_LABEL, None, q, DropAnchor::Outer);
     apply::split_slot(&w.state, &w.subs, &w.ev, q, s, SplitDir::LeftRight).unwrap();
     assert!(w.tab_drop(&drop, &popout).is_ok());
     assert_invariants(&w);
 
-    // 기준 칸이 그사이 사라졌다 — 거절.
+    // The reference area vanished in the meantime — rejected.
     let (w, t, popout, q, s) = setup();
     let n = apply::split_slot(&w.state, &w.subs, &w.ev, q, s, SplitDir::TopBottom).unwrap();
     let drop = w.seam_drop(t, MAIN_WINDOW_LABEL, None, q, DropAnchor::Slot { id: n });
@@ -4989,7 +4989,7 @@ fn a_seam_drop_lands_in_the_target_layout_as_it_is_now() {
         "기준 칸 없음",
     );
 
-    // 대상 탭이 그사이 사라졌다 — 거절.
+    // The target tab vanished in the meantime — rejected.
     let (w, t, popout, q, _) = setup();
     let other = apply::create_tab(&w.state, &w.subs, &w.ev, &popout, None).unwrap();
     let drop = w.seam_drop(t, MAIN_WINDOW_LABEL, None, q, DropAnchor::Outer);
@@ -5026,7 +5026,7 @@ fn a_seam_drop_onto_a_tab_that_moved_to_another_window_docks_where_that_tab_is_n
     assert_invariants(&w);
 }
 
-// main = [i, d] — d 를 누르면(활성 = d) 끄는 동안 남은 탭 i 를 보이고, 사용자는 i 의 이음새에 놓는다(같은 창).
+// main = [i, d] — pressing d (active = d) shows the remaining tab i during the drag, and the user drops at i's seam (same window).
 #[test]
 fn a_same_window_seam_applies_whichever_tab_the_window_shows_now() {
     let setup = || {
@@ -5037,14 +5037,14 @@ fn a_same_window_seam_applies_whichever_tab_the_window_shows_now() {
         (w, i, d)
     };
 
-    // 놓기가 먼저 닿음 — 활성 = d.
+    // The drop arrives first — active = d.
     let (w, i, d) = setup();
     let drop = w.seam_drop(d, MAIN_WINDOW_LABEL, Some(i), i, DropAnchor::Outer);
     assert!(w.tab_drop(&drop, MAIN_WINDOW_LABEL).is_ok());
     assert_eq!(w.tabs_of(MAIN_WINDOW_LABEL), [i]);
     assert_invariants(&w);
 
-    // 출처의 원래 선택 되돌리기(`switch_tab_if(initial)`)가 먼저 닿음 — 활성 = i.
+    // The source's original-selection revert (`switch_tab_if(initial)`) arrives first — active = i.
     let (w, i, d) = setup();
     let drop = w.seam_drop(d, MAIN_WINDOW_LABEL, Some(i), i, DropAnchor::Outer);
     apply::switch_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, i).unwrap();
@@ -5056,7 +5056,7 @@ fn a_same_window_seam_applies_whichever_tab_the_window_shows_now() {
         "d 가 i 의 이음새에 붙었다"
     );
 
-    // LLM 이 셋째 탭을 보였다 — 그래도 붙고, 대상 탭이 보인다.
+    // The LLM showed a third tab — it still attaches, and the target tab is shown.
     let (w, i, d) = setup();
     let x = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
     apply::switch_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, d).unwrap();
@@ -5104,7 +5104,7 @@ fn a_lone_popout_new_window_drop_reuses_the_window_and_keeps_its_size() {
     assert_invariants(&w);
 }
 
-// ── 대상판 — 대상을 바꾸는 그 락 안에서 푼다(TRD S28 §5-2 · ADR-0307) ─────────────────────────────
+// ── target version — resolved inside the same lock that changes the target (TRD S28 §5-2 · ADR-0307) ─────────────────────────────
 
 impl World {
     fn put(&self, view: Uuid, slot: Uuid, agent: Uuid) {
@@ -5119,7 +5119,7 @@ impl World {
         .unwrap();
     }
 
-    // 칸에 새 에이전트를 넣는다 — 반환 = 그 id.
+    // Puts a new agent into an area — returns = that id.
     fn put_agent(&self, view: Uuid, slot: Uuid) -> Uuid {
         let agent = Uuid::new_v4();
         self.put(view, slot, agent);
@@ -5206,7 +5206,7 @@ const NO_PLACE: WindowPlace = WindowPlace {
     size: None,
 };
 
-// ── 대상판: 풀기 ──
+// ── target version: resolving ──
 
 #[test]
 fn locate_finds_a_tab_and_a_slot_by_id() {
@@ -5275,7 +5275,7 @@ fn locate_finds_a_tab_and_a_slot_by_id() {
 #[test]
 fn locate_by_agent_takes_one_place_and_refuses_several_or_none_with_candidates() {
     let w = World::new();
-    // main 탭 a = [m0 one | m1 twice | m2 twice] · main 탭 b = [b0 spread] · 팝아웃 = [p0 spread]
+    // main tab a = [m0 one | m1 twice | m2 twice] · main tab b = [b0 spread] · popout = [p0 spread]
     let a = w.main_active();
     let m0 = w.empty_slot(a);
     let m1 = w.split(a, m0, SplitDir::LeftRight);
@@ -5374,7 +5374,7 @@ fn locate_by_spatial_word_reads_the_visible_tab_of_the_window() {
     let w = World::new();
     let main = w.main_active();
     let left = w.empty_slot(main);
-    let right = w.split(main, left, SplitDir::LeftRight); // 포커스 = right
+    let right = w.split(main, left, SplitDir::LeftRight); // focus = right
 
     let word = |token, window: Option<&str>| {
         w.locate(&Target::At {
@@ -5418,20 +5418,20 @@ fn locate_by_spatial_word_reads_the_visible_tab_of_the_window() {
     assert_eq!(gone.by(), TargetBy::Spatial);
 }
 
-// ── 대상판: 끼어들기 — 풀기와 적용이 같은 락이다 ──
+// ── target version: interjection — resolving and applying are the same lock ──
 
-// ★이 시험은 차례대로다 — 「한 락에서 풀고 다른 락에서 옮기는」 퇴행을 이 시험이 잡지는 못한다★. 칸 옆 · 탭 줄 도킹이 푸는 일과
-//   옮기는 일을 한 락에서 하는 것은 구조가 지킨다 — 대상을 푸는 클로저가 적용 함수가 잡은 락의 모델(`&ViewManager`)을 인자로만
-//   받아 그 락 밖에서는 부를 수 없다(`apply.rs` 의 `dock_in_place`). 락 사이를 실제로 경주시키는 것은 락을 두 번 잡는 새 창
-//   도킹뿐이다(아래 두 시험 — 창 포트 · 창 옮기기 끼어들기). 운영 코드에 시험용 끼어들기 문을 두지 않았다 — 그 문을 어디 두느냐가
-//   곧 시험이 재는 틈이라, 퇴행한 코드가 그 문을 함께 옮기면 잡지 못한다.
+// ★This test is sequential — it cannot catch the regression of 「한 락에서 풀고 다른 락에서 옮기는」 (resolving in one lock and moving in another)★. That beside-area · tab-row docking does the resolving and
+//   the moving in one lock is kept by the structure — the closure that resolves the target receives the model (`&ViewManager`) of the lock the apply function took only as an argument and
+//   cannot be called outside that lock (`dock_in_place` of `apply.rs`). What really races between locks is only new-window
+//   docking, which takes the lock twice (the two tests below — window port · window move interjection). No test-only interjection door was put in production code — where that door is placed is
+//   exactly the gap the test measures, so if regressed code moves that door too, it would not be caught.
 #[test]
 fn a_tab_the_agent_left_after_its_name_was_resolved_is_never_moved() {
     let w = World::new();
     let (label, tabs) = w.popup_with(2);
     let slot = w.empty_slot(tabs[0]);
-    // 데몬이 이름을 이 id 로 푼 뒤 · 적용 전에 다른 쓰기가 그 칸을 다른 에이전트로 바꿨다. 풀어 둔 탭 id 로 적용하는
-    //   길이면 그 에이전트가 떠난 tabs[0] 을 옮긴다.
+    // After the daemon resolved the name to this id · before applying, another write changed that area to another agent. If the path applied with the resolved tab id,
+    //   it would move tabs[0], which that agent has left.
     let resolved = w.put_agent(tabs[0], slot);
     w.put(tabs[0], slot, Uuid::new_v4());
     let version = w.version();
@@ -5455,7 +5455,7 @@ fn a_tab_the_agent_left_after_its_name_was_resolved_is_never_moved() {
     assert_eq!(w.resyncs(), resyncs);
     assert_eq!(w.ev.take_order(), Vec::<&str>::new());
 
-    // 그 에이전트가 다른 탭으로 옮겨 갔으면 지금 든 탭을 옮긴다 — 풀어 둔 옛 탭이 아니다.
+    // If that agent moved to another tab, the tab it is in now is moved — not the old tab resolved earlier.
     w.put(tabs[1], w.empty_slot(tabs[1]), resolved);
     let out = w
         .dock_t(
@@ -5472,7 +5472,7 @@ fn a_tab_the_agent_left_after_its_name_was_resolved_is_never_moved() {
 
 #[test]
 fn a_detach_whose_target_changes_while_the_window_opens_withdraws_it_and_moves_nothing() {
-    // (예열 창 맡김, id 로 준 탭이 닫힘) — 아니면 그 에이전트가 다른 탭으로 옮겨 간다.
+    // (prewarmed window handover, the tab given by id closed) — otherwise that agent moves to another tab.
     for (prewarmed, closes) in [(false, false), (true, false), (false, true)] {
         let w = World::new();
         let main = w.main_active();
@@ -5545,7 +5545,7 @@ fn a_reused_detach_whose_agent_leaves_while_the_window_moves_answers_moved() {
     let (label, lone) = w.lone_popout();
     let lone_slot = w.empty_slot(lone);
     let agent = w.put_agent(lone, lone_slot);
-    // 창을 옮기는 사이 그 에이전트가 main 탭으로 옮겨 간다 — 재사용한 창의 탭은 더는 그 에이전트의 탭이 아니다.
+    // While moving the window, that agent moves to a main tab — the tab of the reused window is no longer that agent's tab.
     *w.host.during_move.lock().unwrap() = Some(Box::new(move |state: &LayoutState| {
         let mut mgr = state.0.lock().unwrap();
         mgr.set_slot_content(lone, lone_slot, SlotContent::Empty)
@@ -5605,7 +5605,7 @@ fn a_detach_by_agent_opens_a_window_for_its_tab_without_taking_focus() {
     assert_invariants(&w);
 }
 
-// ── 대상판: 탭 줄 자리 ──
+// ── target version: tab row position ──
 
 #[test]
 fn a_tab_bar_move_after_an_agents_tab_lands_right_behind_it() {
@@ -5615,7 +5615,7 @@ fn a_tab_bar_move_after_an_agents_tab_lands_right_behind_it() {
     let x = w.new_tab(MAIN_WINDOW_LABEL);
     let agent = w.put_agent(a, w.empty_slot(a));
 
-    // 같은 창 · 출처가 앞: [s, a, x] → [a, s, x](출처를 뺀 목록에서 센다 — 하나 어긋나지 않는다)
+    // Same window · source first: [s, a, x] → [a, s, x] (counted in the list without the source — no off-by-one)
     let out = w
         .dock_t(Target::Tab(s), after(agent), FocusPolicy::Keep)
         .unwrap();
@@ -5623,18 +5623,18 @@ fn a_tab_bar_move_after_an_agents_tab_lands_right_behind_it() {
     assert_eq!(out.window, MAIN_WINDOW_LABEL);
     assert_eq!(w.tabs_of(MAIN_WINDOW_LABEL), [a, s, x]);
 
-    // 같은 창 · 출처가 뒤: [a, s, x] → [a, x, s]
+    // Same window · source after: [a, s, x] → [a, x, s]
     w.dock_t(Target::Tab(x), after(agent), FocusPolicy::Keep)
         .unwrap();
     assert_eq!(w.tabs_of(MAIN_WINDOW_LABEL), [a, x, s]);
 
-    // 이미 그 자리
+    // Already at that position
     let out = w
         .dock_t(Target::Tab(x), after(agent), FocusPolicy::Keep)
         .unwrap();
     assert!(!out.changed);
 
-    // 다른 창 — 그 탭의 창으로 간다
+    // Another window — goes to that tab's window
     let (label, ptabs) = w.popup_with(2);
     let there = w.put_agent(ptabs[0], w.empty_slot(ptabs[0]));
     let out = w
@@ -5733,12 +5733,12 @@ fn a_target_dock_that_changes_nothing_says_so() {
     assert_eq!(w.tabs_of(&label), [tabs[1], tabs[0]]);
 }
 
-// ── 대상판: 칸 옆에 붙이기 · 기본 몫 ──
+// ── target version: attaching beside an area · default share ──
 
 #[test]
 fn a_seam_dock_without_a_share_takes_the_mouse_formula_or_half_when_unmeasured() {
-    // 대상 탭을 먼저 좌우로 나눠 칸 틀(왼쪽 절반)과 캔버스 전체가 다른 몫을 내게 한다 — 칸 옆이면 칸 틀, 탭 전체면
-    //   캔버스로 셌는지 갈린다. 원래 크기 = 출처 창 캔버스(폭 200).
+    // Splits the target tab left/right first so the area frame (left half) and the whole canvas give different shares — beside an area it is the area frame, and for the whole tab
+    //   whether it was counted by the canvas is told apart. Original size = source window canvas (width 200).
     let slot_frame = PxRect {
         x0: 0,
         y0: 0,
@@ -5752,7 +5752,7 @@ fn a_seam_dock_without_a_share_takes_the_mouse_formula_or_half_when_unmeasured()
         y1: 600,
     };
     let original = SizeCss { w: 200.0, h: 150.0 };
-    // (재었나, 탭 전체, 몫)
+    // (measured?, whole tab, share)
     for (measured, whole, want) in [
         (true, false, 0.4),
         (true, true, 0.2),
@@ -5849,7 +5849,7 @@ fn a_seam_dock_beside_a_tab_needs_whole_and_beside_its_own_slot_is_self() {
     assert_invariants(&w);
 }
 
-// ── 대상판: 칸 · 탭 쓰기 ──
+// ── target version: area · tab writes ──
 
 #[test]
 fn slot_writes_by_target_resolve_inside_their_own_lock() {
@@ -6089,7 +6089,7 @@ async fn spawn_into_at_places_the_agent_in_the_slot_the_word_picks() {
         }
     );
 
-    // 스폰 전에 거른다 — 점유 칸 · 칸을 못 집는 낱말(포커스 = right 의 오른쪽) · 없는 창.
+    // Filters before the spawn — occupied area · a word that picks no area (the right of focus = right) · a nonexistent window.
     for (token, window) in [
         (SpatialToken::TopRight, MAIN_WINDOW_LABEL),
         (SpatialToken::Right, MAIN_WINDOW_LABEL),
@@ -6115,7 +6115,7 @@ async fn spawn_into_at_places_the_agent_in_the_slot_the_word_picks() {
         assert_eq!(w.version(), version);
     }
 
-    // 스폰하는 사이 그 칸이 채워졌다 — 배치 락에서 다시 풀어 거절하고, 살아 있는 id 를 남긴다.
+    // That area was filled during the spawn — it resolves again under the layout lock and rejects, leaving the live id.
     let raced = Spawner::ok(&w.state, Uuid::new_v4());
     let filler = Uuid::new_v4();
     *raced.during.lock().unwrap() = Some(Box::new(move |state: &LayoutState| {
@@ -6152,10 +6152,10 @@ async fn spawn_into_at_places_the_agent_in_the_slot_the_word_picks() {
     );
 }
 
-// 명령 처리기가 스레드를 넘겨 기다리는 future — 락 가드를 await 너머로 쥐면 여기서 컴파일이 멈춘다.
+// A future the command handler waits for across threads — if a lock guard is held across an await, compilation stops here.
 fn assert_send<T: Send>(_: &T) {}
 
-// ── 대상판: 배치 줄 ──
+// ── target version: layout rows ──
 
 type RowShape = (
     String,
@@ -6188,14 +6188,14 @@ fn layout_rows_list_every_slot_in_window_tab_tree_order_with_normalized_boxes() 
     let w = World::new();
     let main = w.main_active();
     let l = w.empty_slot(main);
-    let r = w.split(main, l, SplitDir::LeftRight); // 포커스 = r
-    let second = w.new_tab(MAIN_WINDOW_LABEL); // 빈 탭 · 보이는 탭
+    let r = w.split(main, l, SplitDir::LeftRight); // focus = r
+    let second = w.new_tab(MAIN_WINDOW_LABEL); // empty tab · visible tab
     let s = w.empty_slot(second);
     let (label, ptabs) = w.popup_with(1);
     let top = w.empty_slot(ptabs[0]);
-    let bottom = w.split(ptabs[0], top, SplitDir::TopBottom); // 포커스 = bottom
+    let bottom = w.split(ptabs[0], top, SplitDir::TopBottom); // focus = bottom
     let agent = w.put_agent(main, l);
-    w.put(ptabs[0], bottom, agent); // 같은 에이전트가 두 창에
+    w.put(ptabs[0], bottom, agent); // the same agent in two windows
     w.name(agent, "alpha");
     let main_label = MAIN_WINDOW_LABEL.to_string();
     let alpha = Some("alpha".to_string());
@@ -6355,7 +6355,7 @@ fn a_dock_outcomes_views_give_the_changed_tabs_rows() {
     );
 }
 
-/// 결말의 줄(`DockOutcome::rows`)은 대상판만 싣는다 — 새 창 · 재사용 갈래도 그 탭의 줄이고, id 판(마우스)은 비운다.
+/// The outcome rows (`DockOutcome::rows`) carry only the target version — the new-window · reuse branches are also that tab's rows, and the id version (mouse) leaves them empty.
 #[test]
 fn a_target_dock_carries_the_rows_of_its_views_and_the_id_dock_does_not() {
     let w = World::new();
@@ -6414,7 +6414,7 @@ fn a_target_dock_carries_the_rows_of_its_views_and_the_id_dock_does_not() {
 
 #[tokio::test]
 async fn spawn_into_at_does_not_place_elsewhere_when_the_word_picks_another_slot_after_the_spawn() {
-    // [a | b | c] · 포커스 = b → `left` = a. 스폰하는 사이 포커스가 c 로 가면 `left` = b(역시 빈 칸)지만 거기 놓지 않는다.
+    // [a | b | c] · focus = b → `left` = a. If focus goes to c during the spawn, `left` = b (also an empty area) but it is not placed there.
     let w = World::new();
     let main = w.main_active();
     let a = w.empty_slot(main);
@@ -6451,7 +6451,7 @@ async fn spawn_into_at_does_not_place_elsewhere_when_the_word_picks_another_slot
 
 #[test]
 fn a_reused_detach_whose_tab_left_and_whose_window_closed_answers_moved_by_target_and_ok_by_id() {
-    // 창을 옮기는 사이 그 탭이 main 으로 옮겨 가 혼자인 팝아웃이 비어 닫힌다 — 탭은 그대로 풀리지만 다시 쓴 창은 없다.
+    // While moving the window, that tab moves to main and the popout that was alone becomes empty and closes — the tab is resolved as is but there is no reused window.
     for by_target in [true, false] {
         let w = World::new();
         let (label, lone) = w.lone_popout();

@@ -1,20 +1,20 @@
-// ★잠정(interim) 구현 — 자체 경량 t()★: 지금은 한국어 단일 언어라 외부 i18n 라이브러리 없이 의존성 0으로
-//   충분하다(리서치 결론 — 단일언어·내부툴엔 자체 t()가 정당, anti-pattern 아님). 실제 다국어(복수형·ICU·
-//   날짜·번역가 TMS 등) 본격화 시, 아래 "안정 API 계약"의 seam 을 통해 공개 라이브러리(Lingui = 경량·Vite 공식 /
-//   i18next = 최대 생태계)로 이 t() 뒤(백엔드)를 교체할 예정이다 — 호출부·key·시그니처 불변. 이 파일은 그때까지의
-//   과도기 방편이다. 근거: /research medium 서베이(2026-07-12, ADR-0069 재확인).
+// ★Interim implementation — own lightweight t()★: for now it is Korean-only, so zero dependencies with no external i18n library
+//   is enough (research conclusion — for single-language · internal tools an own t() is justified, not an anti-pattern). When real multilingual support (plurals · ICU ·
+//   dates · translator TMS etc.) gets serious, we plan to replace what is behind this t() (the backend) via the seam of the "stable API contract" below with a public library (Lingui = lightweight · Vite official /
+//   i18next = largest ecosystem) — call sites · key · signature unchanged. This file is a transitional stopgap until then.
+//   Basis: /research medium survey (2026-07-12, ADR-0069 reconfirmed).
 //
-// ADR-0069: `t(key, params?)` accessor — UI 문자열 중앙화의 안정 API.
+// ADR-0069: the `t(key, params?)` accessor — the stable API for centralizing UI strings.
 //
-// ★안정 API 계약★: 지금은 단일 언어(`ko`)만 반환하지만, 나중 로컬화는 이 함수 *내부*(백엔드)만
-//   locale-aware 로 교체하면 되고 `(key, params)` 시그니처·모든 호출부·key 는 불변이다. 그래서 이 형태가
-//   로컬화 base 다(ADR-0069 §영향/불변식).
+// ★Stable API contract★: for now it returns only a single language (`ko`), but later localization only needs to replace the *inside* of this function (the backend) with
+//   locale-aware, and the `(key, params)` signature · all call sites · keys stay unchanged. So this shape is
+//   the localization base (ADR-0069 §consequences/invariants).
 //
-// ★타입세이프 key(필수)★: `key` 타입을 `ko` 테이블에서 파생한 union 으로 만들어 오타·존재하지 않는 키를
-//   tsc 가 컴파일 타임에 잡는다(대량 마이그레이션의 안전망 — ADR-0069 근거).
+// ★Type-safe key (required)★: make the `key` type a union derived from the `ko` table so tsc catches typos · nonexistent keys
+//   at compile time (safety net of the mass migration — ADR-0069 rationale).
 //
-// ★타입세이프 params★: 값 리터럴에서 `{placeholder}` 토큰을 template-literal 타입으로 추출해 params 를
-//   필수/금지로 가른다. ko.ts 의 `as const` 가 이 추론의 전제다.
+// ★Type-safe params★: extract `{placeholder}` tokens from value literals as a template-literal type and split params into
+//   required/forbidden. `as const` in ko.ts is the premise of this inference.
 
 import { ko, type KoTable } from './ko'
 
@@ -23,8 +23,8 @@ export type StringKey = {
 }[keyof KoTable]
 
 /**
- * ★per-key 정밀 인덱싱★: 키-remap 매핑 타입은 sub-값을 union 으로 뭉개므로(placeholder 유무가 섞임)
- *   쓰지 않는다.
+ * ★per-key precise indexing★: a key-remap mapped type crushes sub-values into a union (placeholder presence gets mixed), so
+ *   it is not used.
  */
 type ValueOf<K extends StringKey> = K extends `${infer N}.${infer S}`
   ? N extends keyof KoTable
@@ -35,11 +35,11 @@ type ValueOf<K extends StringKey> = K extends `${infer N}.${infer S}`
   : never
 
 /**
- * ★문법 동기화(FIX A — 최우선)★: 아래 두 정의(타입 추출 `Placeholders` ⊕ 런타임 `WORD_PLACEHOLDER`)는
- *   **반드시 같은 문법**을 봐야 한다. 어긋나면 타입이 param 을 *요구*하는데 런타임은 치환을 *안 하는*(또는 그 반대)
- *   갈라짐이 생긴다(키는 안정 API 라 치명적). 채택 문법 = **비어있지 않은 word char(`[A-Za-z0-9_]`, 즉 `\w`) 토큰**.
- *   `{한글}`·`{first-name}`·`{ }`·`{}` 는 양쪽 모두 placeholder 로 *인식하지 않는다*(param 요구 안 함 + 원문 유지).
- *   런타임 매처(WORD_PLACEHOLDER)를 바꾸면 이 타입도 반드시 함께 바꾼다.
+ * ★Grammar sync (FIX A — top priority)★: the two definitions below (type extraction `Placeholders` ⊕ runtime `WORD_PLACEHOLDER`)
+ *   **must see the same grammar**. If they diverge, a split arises where the type *requires* a param but the runtime *does not* substitute (or the reverse)
+ *   (keys are a stable API, so this is fatal). The adopted grammar = **a non-empty word char (`[A-Za-z0-9_]`, i.e. `\w`) token**.
+ *   `{한글}`·`{first-name}`·`{ }`·`{}` are *not recognized* as placeholders by either side (no param required + the original text is kept).
+ *   If the runtime matcher (WORD_PLACEHOLDER) is changed, this type must be changed together.
  */
 type WordChar =
   | 'a' | 'b' | 'c' | 'd' | 'e' | 'f' | 'g' | 'h' | 'i' | 'j' | 'k' | 'l' | 'm'
@@ -48,7 +48,7 @@ type WordChar =
   | 'N' | 'O' | 'P' | 'Q' | 'R' | 'S' | 'T' | 'U' | 'V' | 'W' | 'X' | 'Y' | 'Z'
   | '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' | '_'
 
-/** 런타임 `\w+` 와 문자 클래스 일치(FIX A 동기화). */
+/** Character class matches the runtime `\w+` (FIX A sync). */
 type IsWord<T extends string> = T extends ''
   ? false
   : T extends `${WordChar}${infer R}`
@@ -58,11 +58,11 @@ type IsWord<T extends string> = T extends ''
     : false
 
 /**
- * `{...}` 안 토큰이 **word char(`\w`) 로만 이뤄진 비어있지 않은 토큰**일 때만 param 으로 인정한다
- * (런타임 `WORD_PLACEHOLDER = /\{(\w+)\}/g` 와 동일 문법 — FIX A).
+ * A token inside `{...}` is accepted as a param only when it is a **non-empty token made only of word chars (`\w`)**
+ * (same grammar as the runtime `WORD_PLACEHOLDER = /\{(\w+)\}/g` — FIX A).
  *
- * ★비탐욕 매칭 주의★: `${string}{${infer P}}${infer Rest}` 는 TS 에서 `P` 를 첫 `}` 까지로 최소 매칭한다.
- *   `{ }`·`{first-name}` 처럼 `P` 가 word 검증에 실패하면 그 토큰은 버리되 `Rest` 를 계속 훑어 뒤쪽 유효 토큰은 살린다.
+ * ★Beware non-greedy matching★: `${string}{${infer P}}${infer Rest}` matches `P` minimally up to the first `}` in TS.
+ *   When `P` fails word validation, like `{ }`·`{first-name}`, that token is dropped but `Rest` is scanned on so valid later tokens survive.
  */
 type Placeholders<S extends string> = S extends `${string}{${infer P}}${infer Rest}`
   ? (IsWord<P> extends true ? P : never) | Placeholders<Rest>
@@ -71,53 +71,53 @@ type Placeholders<S extends string> = S extends `${string}{${infer P}}${infer Re
 type ParamsFor<K extends StringKey> = { [P in Placeholders<ValueOf<K>>]: string }
 
 /**
- * ★튜플 rest 방식★: `t<K>(key: K, ...rest: ParamsArg<K>)` 로 두면 K 는 첫 인자에서 그대로 추론되고
- *   (조건부 타입에 안 묻혀 추론 실패 없음), params 필수/금지는 rest 튜플 길이가 강제한다.
- * ★여분 필드 주의(FIX F)★: TS 의 excess-property 검사는 **인라인 객체 리터럴**을 넘길 때만 여분 필드를 막는다.
- *   미리 만든 객체 변수를 넘기면 구조적 타이핑상 여분 필드가 통과한다(TS 한계 — 완전 차단은 하지 않는다).
- *   런타임은 대응 토큰 없는 여분 필드를 무시하므로 무해하다(index.test.ts 「여분 param」 참조).
+ * ★Tuple rest approach★: with `t<K>(key: K, ...rest: ParamsArg<K>)` K is inferred straight from the first argument
+ *   (not buried in a conditional type, so no inference failure), and params required/forbidden is enforced by the rest tuple length.
+ * ★Beware extra fields (FIX F)★: TS's excess-property check blocks extra fields only when an **inline object literal** is passed.
+ *   If a pre-built object variable is passed, extra fields pass through under structural typing (a TS limit — full blocking is not attempted).
+ *   At runtime extra fields with no matching token are ignored, so it is harmless (see 「여분 param」 (extra param) in index.test.ts).
  */
 type ParamsArg<K extends StringKey> = Placeholders<ValueOf<K>> extends never ? [] : [params: ParamsFor<K>]
 
 /**
- * ★런타임 placeholder 문법(FIX A)★: 위 타입 추출 `Placeholders`/`IsWord` 와 **반드시 일치**하는 단일 매처.
- *   `\w+` = 비어있지 않은 word char(`[A-Za-z0-9_]`) 토큰만 placeholder 로 본다. 이걸 바꾸면 타입 쪽도 함께 바꾼다.
+ * ★Runtime placeholder grammar (FIX A)★: a single matcher that **must match** the type extraction `Placeholders`/`IsWord` above.
+ *   `\w+` = only a non-empty word char (`[A-Za-z0-9_]`) token is seen as a placeholder. If you change this, change the type side too.
  *
- * ★타입↔런타임 grammar 계약(FIX③ — 중첩/짝 안 맞는 `{` 봉인)★: `{a{b}c` 처럼 여는 `{` 가 짝 없이 안에 또
- *   끼면 이 런타임 매처는 안쪽 `{b}` 를 치환하지만, 타입쪽 `Placeholders`(첫 `{` 를 여는 브레이스로 소비 →
- *   `a{b` 가 word 검증 실패)는 `never` 를 뽑는다 → **런타임만 몰래 치환**하는 갈라짐. 이건 순수 정규식으로
- *   막을 수 없다(짝 안 맞는 여는 브레이스 추적은 regular 하지 않다 — 고정폭 lookbehind 로 표현 불가).
- *   그래서 **계약으로 봉인한다**: *테이블 값의 placeholder 는 짝이 맞는 단일 `{\w+}` 뿐이며 중첩/짝 안 맞는
- *   `{` 를 넣지 않는다*(ko.ts 값 작성 규약). 이 계약은 index.test.ts 의 dev-guard(ko 전체 스캔)가 강제해,
- *   미래에 위반 값이 들어오면 테스트가 즉시 실패한다 → real 테이블 값에서 도달 가능한 silent 갈라짐이 없다.
+ * ★Type↔runtime grammar contract (FIX③ — sealing nested/unmatched `{`)★: if an opening `{` gets caught unmatched inside, as in `{a{b}c`,
+ *   this runtime matcher substitutes the inner `{b}`, but the type-side `Placeholders` (consumes the first `{` as the opening brace →
+ *   `a{b` fails word validation) extracts `never` → a split where **only the runtime silently substitutes**. This cannot be
+ *   blocked with a pure regex (tracking unmatched opening braces is not regular — it cannot be expressed with a fixed-width lookbehind).
+ *   So **we seal it with a contract**: *a table value's placeholder is only a matched single `{\w+}` and nested/unmatched
+ *   `{` is not put in* (ko.ts value-writing convention). This contract is enforced by the dev-guard in index.test.ts (full ko scan), so
+ *   if a violating value comes in the future the test fails at once → there is no silent split reachable from real table values.
  */
 const WORD_PLACEHOLDER = /\{(\w+)\}/g
 
-/** 테스트 seam(FIX①): 프로덕션 매처/보간을 그대로 노출 — 테스트가 로컬 복제본 대신 이 실물을 탄다. */
+/** Test seam (FIX①): expose the production matcher/interpolation as is — the test rides this real thing instead of a local copy. */
 export const __test__ = { WORD_PLACEHOLDER, interpolate }
 
 /**
- * ★런타임 조회 seam★: 지금은 `ko` 한 장에서만 값을 꺼낸다. 나중 로컬화는 여기(active locale 선택)만 바꾸면 된다 —
- *   시그니처·호출부 불변(ADR-0069). `found` 는 호출부(t)가 미스일 때 보간을 건너뛰게 한다(FIX②).
+ * ★Runtime query seam★: for now it takes values from the single `ko` sheet only. Later localization only needs to change here (active locale selection) —
+ *   signature · call sites unchanged (ADR-0069). `found` lets the call site (t) skip interpolation on a miss (FIX②).
  */
 function lookup(key: StringKey): [value: string, found: boolean] {
   const dot = key.indexOf('.')
-  // ★no-dot 조기 반환(FIX②)★: 점이 없으면 slice(0,-1) 로 쓰레기 namespace 를 만들지 말고 즉시 키를 그대로 돌려준다.
-  //   (unsafe-boundary 로 들어온 형식 밖 키 — 미스로 취급해 loud 하게 원문 유지.)
+  // ★no-dot early return (FIX②)★: if there is no dot, do not make a garbage namespace with slice(0,-1) but return the key as is at once.
+  //   (A key outside the format that came through the unsafe-boundary — treated as a miss and the original text is kept loudly.)
   if (dot < 0) return [key, false]
   const ns = key.slice(0, dot) as keyof KoTable
   const sub = key.slice(dot + 1)
-  // ★unsafe-boundary backstop(FIX E)★: 정상 경로는 위 StringKey union 이 키 존재를 컴파일 타임에 보장한다.
-  //   그러나 JS/역직렬화 경계(타입 게이트를 우회한 런타임 호출)에선 없는 키가 들어올 수 있다 — 그때
-  //   `undefined.replace(...)` 로 터지지 않도록 키 문자열 자체를 fallback 으로 돌려준다(loud-visible, no-throw).
+  // ★unsafe-boundary backstop (FIX E)★: on the normal path the StringKey union above guarantees at compile time that the key exists.
+  //   But at the JS/deserialization boundary (a runtime call that bypassed the type gate) a nonexistent key can come in — then
+  //   so it does not blow up with `undefined.replace(...)`, the key string itself is returned as the fallback (loud-visible, no-throw).
   const value = (ko[ns] as Record<string, string> | undefined)?.[sub]
   return value === undefined ? [key, false] : [value, true]
 }
 
 /**
- * params 에 없는 토큰은 원문 그대로 남긴다(loud-blank 방지).
- * 문법 = `WORD_PLACEHOLDER`(= 타입쪽 `Placeholders` 와 동기화). replace 콜백은 치환값을 재스캔하지 않으므로
- * 치환값 안의 `{token}`·정규식 특수문자(`$&`·`$1`·`\`)는 리터럴로 그대로 들어간다(백레퍼런스 해석 안 됨).
+ * A token not in params is left as the original text (prevents loud-blank).
+ * Grammar = `WORD_PLACEHOLDER` (= synchronized with the type-side `Placeholders`). The replace callback does not rescan substituted values, so
+ * `{token}` · regex special characters (`$&`·`$1`·`\`) inside a substituted value go in as literals (no backreference interpretation).
  */
 function interpolate(template: string, params: Record<string, string>): string {
   return template.replace(WORD_PLACEHOLDER, (whole, name: string) =>
@@ -128,9 +128,9 @@ function interpolate(template: string, params: Record<string, string>): string {
 export function t<K extends StringKey>(key: K, ...rest: ParamsArg<K>): string {
   const [template, found] = lookup(key)
   const params = rest[0] as Record<string, string> | undefined
-  // ★미스는 loud 유지(FIX②)★: 키를 못 찾으면 fallback 인 raw 키 문자열은 **보간하지 않는다**. 안 그러면
-  //   unsafe-boundary 로 들어온 `missing.{name}` 이 `missing.X` 로 치환돼 "없는 키"라는 신호가 지워진다.
-  //   미스일 땐 원문(키 그대로)을 반환해 식별 가능하게 남긴다.
+  // ★A miss stays loud (FIX②)★: if the key is not found, the fallback raw key string is **not interpolated**. Otherwise
+  //   `missing.{name}` that came through the unsafe-boundary would be substituted into `missing.X` and the "nonexistent key" signal erased.
+  //   On a miss, return the original text (the key as is) so it stays identifiable.
   if (!found) return template
   return params ? interpolate(template, params) : template
 }

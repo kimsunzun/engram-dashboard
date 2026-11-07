@@ -1,5 +1,5 @@
-// TRD S26-window-chrome §10-3 의 제목 줄 몫 — 배치 순서 · 끌 자리 속성 · 번호 표식 · 창 단추(레지스트리 명령 · 상태 · 접근성 ·
-//   main/팝아웃 셋째) · 흐림 · 대기 모드 · 크롬 모양. 탭바 자체는 자리표시 자식이다(탭바 몫 = `TabBar.test.tsx`).
+// The title row's share of TRD S26-window-chrome §10-3 — layout order · draggable area attributes · number badge · window buttons (registry commands · state · accessibility ·
+//   main/popout third) · dimming · waiting mode · chrome shape. The tab bar itself is a placeholder child (the tab bar's share = `TabBar.test.tsx`).
 
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -17,12 +17,12 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: (cmd: string, args?: unknown) =
 vi.mock('@tauri-apps/api/event', () => ({ listen: async () => () => {} }))
 vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({ label: 'main' }) }))
 
-import '../../../commands/tabCommands' // 단추가 부르는 `window.*` 등록(운영은 `commands/contributions.ts`)
+import '../../../commands/tabCommands' // Registration of `window.*` that the buttons call (in production `commands/contributions.ts`)
 import type { WindowFrame, WindowFrameSource } from '../dock/windowFrame'
 import { __resetMinSizeReportForTest, minWindowSizeSettled } from './minSizeReport'
 import TitleRow from './TitleRow'
 
-// theme.css 원문을 Node fs 로 읽는다 — 까닭과 선언 모양은 `store/chatStyleStore.test.ts` 와 같다.
+// Reads the theme.css source with Node fs — the reason and declaration shape are the same as `store/chatStyleStore.test.ts`.
 declare function require(id: string): { readFileSync(p: string, enc: string): string }
 declare const process: { cwd(): string }
 
@@ -236,7 +236,7 @@ describe('TitleRow — 창 단추', () => {
     }
   })
 
-  // TRD §8-4 — 보고 · 맴돎의 세부는 `snapOverlay.test.ts` 가 본다. 여기는 창 사실 칸이 그 길을 여닫는지.
+  // TRD §8-4 — the details of reporting · hover are covered by `snapOverlay.test.ts`. Here, whether the window fact field opens and closes that path.
   it('스냅 오버레이 — caption.snap_overlay 거짓(기본 빌드)이면 최대화 단추 사각형을 보고하지 않는다 · 참이면 보고하고 떼면 걷는다', () => {
     const snapCalls = () => invokeMock.mock.calls.filter(c => c[0] === 'report_max_button_rect')
     const off = renderRow()
@@ -301,7 +301,7 @@ describe('TitleRow — 흐림 · 대기 모드', () => {
     expect(row().getAttribute(DRAG)).toBe('')
   })
 
-  // 로딩 · 부팅 실패 화면 — OS 틀이 없어 창을 옮기고 닫는 자리가 이 줄뿐이다(`WindowLayout`).
+  // Loading · boot failure screens — with no OS frame, this row is the only place to move and close the window (`WindowLayout`).
   it('번호가 아직 없는 보통 화면 = 표식만 빼고 창 단추는 그린다', () => {
     renderRow({ number: null })
     expect([...row().children].map(el => (el as HTMLElement).dataset.testid)).toEqual([
@@ -312,9 +312,9 @@ describe('TitleRow — 흐림 · 대기 모드', () => {
   })
 })
 
-// TRD S26-window-chrome §7-7 — 셈의 숫자는 `metrics.test.ts` 가 본다. 여기는 무엇을 재서 언제 보내나.
+// TRD S26-window-chrome §7-7 — the numbers of the computation are covered by `metrics.test.ts`. Here, what is measured and when it is sent.
 describe('TitleRow — 최소 창 크기 보고', () => {
-  // 순번 · epoch 는 `minSizeReport.test.ts` 가 본다 — 여기는 크기만.
+  // Sequence number · epoch are covered by `minSizeReport.test.ts` — here only the size.
   const minReports = () =>
     invokeMock.mock.calls
       .filter(c => c[0] === 'report_window_min_width')
@@ -322,10 +322,10 @@ describe('TitleRow — 최소 창 크기 보고', () => {
         const { width, height } = c[1] as { width: number; height: number }
         return { width, height }
       })
-  /** 맡은 보고가 다 나갈 때까지 — 그 사이 다음 값을 맡으면 앞 값은 보내지 않는다. */
+  /** Until all the reports in hand have gone out — if the next value is taken in the meantime, the earlier value is not sent. */
   const settle = () => act(() => minWindowSizeSettled())
 
-  // 표식 폭 = 글자 7 px × 자리 수 + 양옆 8(그린 그대로 — jsdom 은 배치를 하지 않는다).
+  // Badge width = 7 px per character × number of digits + 8 on each side (as drawn — jsdom does no layout).
   function measureMarkerByDigits(): void {
     const real = HTMLElement.prototype.getBoundingClientRect
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
@@ -367,8 +367,8 @@ describe('TitleRow — 최소 창 크기 보고', () => {
     ])
   })
 
-  // 셸은 창을 열 때 세운 열기 표시를 그 창의 다음 보고에서 거둔다 — 대기 중 보고가 들일 때의 표시를 먼저 거두면 들인 창이
-  //   넓혀 당겨지지 않는다(`TitleRow` 머리 · `src-tauri/src/chrome/book.rs` 머리).
+  // The shell withdraws the open mark set when it opened the window at that window's next report — if a report during waiting withdraws the adoption-time mark first, the adopted window is not
+  //   pulled wider (`TitleRow` head · head of `src-tauri/src/chrome/book.rs`).
   it('번호가 없으면(대기 · 로딩 · 부팅 실패) 보내지 않는다 · 번호를 받으면 표식 · 단추를 실어 처음 보낸다', async () => {
     const f = fakeFrame()
     const view = render(rowWith(null, f.source, true))

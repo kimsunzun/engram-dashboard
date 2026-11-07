@@ -1,14 +1,14 @@
-//! 바이트 · 문자열 표기 도우미.
+//! Helpers for byte · string notation.
 //!
-//! ★UTF-8 경계 자르기는 여기 두지 않는다★ — std `str::floor_char_boundary`(앞을 남김) ·
-//! `str::ceil_char_boundary`(뒤를 남김) 한 줄이라 감쌀 몫이 없다. 자르는 자리가 그 둘을 직접 부른다.
-//! ★hex 는 `hex` crate 를 들이지 않고 직접 돈다★ — base 에 의존을 늘리지 않는다(ADR-0269 결정 6).
+//! ★UTF-8 boundary truncation is not put here★ — std `str::floor_char_boundary` (keeps the front) ·
+//! `str::ceil_char_boundary` (keeps the back) are one line, so there is nothing to wrap. The truncating site calls those two directly.
+//! ★hex is done directly without pulling in the `hex` crate★ — dependencies are not added to base (ADR-0269 decision 6).
 // ADR-0269
 // ADR-0275
 
 use std::fmt::Write as _;
 
-/// 바이트를 소문자 16진 문자열로 — 바이트 하나당 두 글자(`0x0a` → `"0a"`), 구분자 · 접두 없음.
+/// Bytes to a lowercase hex string — two characters per byte (`0x0a` → `"0a"`), no separator · prefix.
 pub fn hex_lower(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {

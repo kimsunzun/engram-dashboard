@@ -1,46 +1,46 @@
-# ADR-0210: codex 훅은 파일 설치 없이 실행 인자로 등록하고 신뢰는 TUI 심사로 얻는다
+# ADR-0210: The codex hook is registered through an execution argument without installing any file, and trust is obtained through the TUI review
 
-- 상태: **폐기 (Superseded by ADR-0216)** — 훅 승인이 우리 exe 절대경로 해시에 걸려 릴리스마다 다시 뜨고, 그 화면이 떠 있는 동안 터미널 codex 가 아예 안 뜬다. 승인 축 자체가 없는 채널(TUI 상태줄)을 실측으로 찾아 등록·신뢰 결정(1·2·5·6)과 결정 4 의 8.3 경로 절반이 대상을 잃었다. ★단 결정 3(override 는 passthrough 뒤 · 덮으면 경고)과 결정 4 의 fail-open 절반은 죽지 않았다 — ADR-0216 이 일반 규칙으로 물려받았고 우편(ADR-0214)·지시서(ADR-0215)가 거기 기댄다.★ ~~확정 (2026-09-19, 근거: 2차 실측 11회 기동 — `docs/research/codex-session-id-recovery-survey-2026-09-19.md` §10)~~
-- 관련: Amends ADR-0208 (훅 등록 경계와 훅 진단 합류) · ADR-0004(백엔드 확장) · ADR-0185(codex 는 id 를 발급하지 않는다)
+- 상태: **폐기 (Superseded by ADR-0216)** — hook approval hangs on the hash of our exe's absolute path, so it comes up again with every release, and while that screen is up the terminal codex does not start at all. We found, by measurement, a channel with no approval axis at all (the TUI status line), and the registration and trust decisions (1, 2, 5, 6) and the 8.3-path half of decision 4 lost their subject. ★But decision 3 (the override goes after the passthrough · a warning if we overwrite) and the fail-open half of decision 4 did not die — ADR-0216 inherited them as a general rule, and mail (ADR-0214) and the instruction document (ADR-0215) lean on it.★ ~~확정 (2026-09-19, basis: 2nd measurement, 11 launches — `docs/research/codex-session-id-recovery-survey-2026-09-19.md` §10)~~
+- 관련: Amends ADR-0208 (hook registration boundary and merging of hook diagnostics) · ADR-0004(backend extension) · ADR-0185(codex does not issue an id)
 
 ## 맥락
 
-ADR-0208 이 **받을 창구**(`/control/hook` · `engram hook session-start` · 빈 칸에만 채택)를 세웠고, **심는 쪽은 의도적으로 비워 뒀다**. 그 ADR 이 「저장소에 `SessionStart` 를 심는 줄이 0 이다 — 이것은 미완이 아니라 의도된 경계다」라고 적은 그 자리를 이 결정이 넘는다.
+ADR-0208 set up the **receiving endpoint** (`/control/hook` · `engram hook session-start` · adoption only into an empty slot) and **deliberately left the planting side empty**. This decision crosses the spot where that ADR wrote 「저장소에 `SessionStart` 를 심는 줄이 0 이다 — 이것은 미완이 아니라 의도된 경계다」 ("the number of lines in the repository that plant it is 0 — this is not unfinished but an intended boundary").
 
-넘으려니 세 갈래가 동시에 미정이었다. ① **무엇으로 등록하나** — codex 설정 파일을 우리가 고치나, 실행 인자로 넘기나. ② **신뢰를 어떻게 얻나** — codex 0.129+ 는 모든 훅을 `trusted_hash` 로 막고, 신뢰가 없으면 훅이 **완전히 침묵으로 스킵된다**(오류도 로그도 없다). ③ **래퍼가 필요한가** — 「훅 명령은 스폰 가능한 토큰 하나여야 한다」는 선례 독해를 믿으면, 사용자 홈에 고정 경로 래퍼 스크립트를 설치해야 했다.
+In crossing it, three branches were undecided at the same time. ① **What do we register with** — do we edit codex's config file ourselves, or pass it as an execution argument. ② **How do we obtain trust** — codex 0.129+ blocks every hook with `trusted_hash`, and without trust the hook is **skipped in complete silence** (no error, no log). ③ **Is a wrapper needed** — if we believed the precedent reading that 「훅 명령은 스폰 가능한 토큰 하나여야 한다」 (the hook command must be a single spawnable token), we would have had to install a wrapper script at a fixed path in the user's home.
 
-직전 세션까지의 계획은 ②를 **app-server RPC 로 신뢰를 부여**하는 것이었고, 그 뒤 사용자 결정으로 「사람이 한 번 승인」으로 틀었다. 이 라운드는 그 위에서 ①·③을 실측으로 닫았다.
+The plan up to the previous session was to make ② **grant trust through the app-server RPC**, and after that a user decision turned it into 「사람이 한 번 승인」 (a person approves once). This round closed ① and ③ on top of that by measurement.
 
 ## 결정
 
-1. **등록 = 실행 인자 `-c` 하나.** codex 터미널 모드 스폰에 `-c hooks.SessionStart=[…]` 를 얹어 우리 실행 파일을 `SessionStart` 훅으로 등록한다. ★**사용자 기기에 파일을 하나도 만들지 않고 사용자 `config.toml` 도 우리가 쓰지 않는다.**★
-2. **훅 명령은 `<우리 exe> hook session-start` 한 문자열.** 래퍼를 두지 않는다 — 실측상 codex 는 첫 토큰을 프로그램으로 직접 스폰하고 나머지를 인자로 쪼갠다.
-3. ★**override 는 사용자 passthrough 「뒤」에 붙인다.**★ 중복 `-c` 는 **뒤가 이긴다**(실측). 앞에 두면 사용자가 `-c hooks.SessionStart=[]` 한 줄로 우리 훅을 **아무 신호 없이** 지울 수 있다. 대신 사용자가 같은 키를 주면 **우리가 덮었다는 경고를 남긴다** — 조용한 덮어쓰기는 이 결정이 막으려던 바로 그것이다.
-4. **경로에 공백이 있으면 8.3 단축 경로로 바꾸고, 그래도 공백이 남으면 등록을 건너뛰고 경고한다.** 프로그램 토큰에 공백이 있으면 따옴표 유무와 무관하게 실패한다(실측). **어떤 갈래로도 스폰을 실패시키지 않는다** — resume 은 있으면 좋은 것이고 스폰은 필수다.
-5. **신뢰는 codex TUI 심사 프롬프트로만 얻는다.** 우리는 해시를 계산하지도, RPC 로 쓰지도, 우회 플래그를 켜지도 않는다. 우리 터미널 모드가 그 TUI 를 PTY 에 띄우므로 **프롬프트가 우리 화면에 실제로 뜬다**.
-6. **등록은 터미널 모드에만 한다** — app-server 경로는 자기가 id 를 받아 오므로 훅이 **중복**이다. ★이 모드 분기는 사용자 재확인 대상으로 남긴다★(아래 「영향」).
+1. **Registration = a single execution argument `-c`.** We put `-c hooks.SessionStart=[…]` on the codex terminal-mode spawn and register our executable as the `SessionStart` hook. ★**We create not one file on the user's machine, and we do not write the user's `config.toml` either.**★
+2. **The hook command is the one string `<우리 exe> hook session-start`.** We do not put in a wrapper — by measurement, codex spawns the first token directly as the program and splits the rest into arguments.
+3. ★**The override is attached 「뒤」 (after) the user passthrough.**★ With a duplicate `-c`, **the later one wins** (measured). If placed before, the user can erase our hook **with no signal at all** with the single line `-c hooks.SessionStart=[]`. Instead, if the user gives the same key, **we leave a warning that we overwrote it** — a silent overwrite is exactly what this decision meant to prevent.
+4. **If the path has a space, we convert it to an 8.3 short path, and if a space still remains, we skip registration and warn.** If the program token has a space, it fails regardless of quotes (measured). **We do not fail the spawn on any branch** — resume is nice to have and the spawn is mandatory.
+5. **Trust is obtained only through the codex TUI review prompt.** We neither compute the hash, nor write it through RPC, nor turn on a bypass flag. Our terminal mode puts that TUI in the PTY, so **the prompt actually comes up on our screen**.
+6. **Registration is done in terminal mode only** — the app-server path fetches the id itself, so the hook is a **duplicate**. ★We leave this mode branch as an item for user reconfirmation★ (see 「영향」 below).
 
 ## 거부한 대안
 
-- **app-server RPC 로 신뢰를 부여한다**(`hooks/list` → `config/batchWrite`) — 왕복이 실측으로 되는 것은 확인됐다. **기각 = 사용자 결정**(선례 orca 가 자체 해시를 codex 릴리스 3회에 걸쳐 깨뜨린 뒤 RPC 로 갈아탔고, 그 RPC 마저 0.130 에서 깨진 이슈가 있다 — 남의 사설 구현에 매달리는 코드를 안 갖는 쪽이 장기적으로 싸다). ★**기각 근거가 선례 독해라 「약함」이다 — 재론되면 이 줄을 먼저 볼 것.**★
-- **`--dangerously-bypass-hook-trust` 로 심사를 건너뛴다** — 동작은 한다(프롬프트를 건너뛰고 훅이 돌며 신뢰를 안 쓴다). ★**기각 = 실측**★: 플래그가 **전역**이라 미끼 훅 둘을 심어 보니 **사용자 자신의 미심사 훅까지 함께 실행됐다**. 우리가 끝까지 소유하는 홈이 아니면 쓸 수 없다.
-- **사용자 홈에 고정 경로 래퍼 스크립트를 설치한다** — 선례(orca)가 쓰는 형태이고, 신뢰 해시가 명령 문자열을 덮으므로 업그레이드가 공짜라는 이점이 있었다. ★**기각 = 실측**★: 그 전제(명령이 토큰 하나여야 한다)가 **틀렸다** — 인자가 넘어가므로 래퍼가 애초에 불필요하다. 불필요한 자동 실행 스크립트를 사용자 홈에 심지 않는다. ★**단 버린 이점이 재발한다는 것은 적어 둔다**★ — 신뢰 해시가 명령 문자열을 덮으므로, 래퍼가 없으면 **설치 경로가 바뀔 때마다 심사 프롬프트가 한 번 더 뜬다**(업그레이드가 버전 박힌 폴더로 가는 배포라면 매 릴리스마다). **그 대가를 받아들인 것이지 못 본 것이 아니다.** 재론하려면 그 빈도가 실제로 문제가 되는지부터 재고, 「홈에 스크립트를 심지 않는다」와 저울질할 것.
-- **사용자 `config.toml` 에 훅을 직접 써서 등록한다** — ★**기각 = 실측**★: `-c` 만으로 심사·발화·`session_id` 수신이 전부 성립한다. ★**단 신뢰를 얻는 길에 그 파일 쓰기를 피하는 방법은 없다**★ — 승인 순간 **codex 자신이** `trusted_hash` 를 거기 쓴다. 우리가 쓰지 않을 뿐 파일은 바뀐다.
-- **훅 신뢰 해시를 우리가 계산한다** — 기각(선례가 3릴리스에서 깨진 뒤 버린 길). ADR-0208 의 같은 항목을 승계한다.
-- **override 를 passthrough 앞에 둔다** — ★**기각 = 실측**★(결정 3). 한때 그렇게 짜여 있었고 그것이 결함이었다.
+- **Grant trust through the app-server RPC** (`hooks/list` → `config/batchWrite`) — it was confirmed by measurement that the round trip works. **Rejection = user decision** (the precedent orca broke its own hash across 3 codex releases and then switched to the RPC, and there is an issue where even that RPC broke at 0.130 — not holding code that clings to someone else's private implementation is cheaper in the long run). ★**The rejection basis is a precedent reading, so it is 「약함」 (weak) — if this is re-discussed, look at this line first.**★
+- **Skip the review with `--dangerously-bypass-hook-trust`** — it works (it skips the prompt, the hook runs, and trust is not used). ★**Rejection = measurement**★: the flag is **global**, and when we planted two decoy hooks, **the user's own unreviewed hooks were executed along with them**. It cannot be used unless it is a home that we own to the end.
+- **Install a wrapper script at a fixed path in the user's home** — it is the form the precedent (orca) uses, and since the trust hash covers the command string, it had the benefit that upgrades are free. ★**Rejection = measurement**★: its premise (the command must be one token) was **wrong** — arguments are passed through, so the wrapper is unnecessary in the first place. We do not plant unnecessary auto-run scripts in the user's home. ★**But we note that the benefit we gave up comes back**★ — since the trust hash covers the command string, without a wrapper **the review prompt comes up once more every time the install path changes** (at every release, if the upgrade goes to a version-stamped folder in the deployment). **We accepted that price; we did not miss it.** To re-discuss, first measure whether that frequency actually becomes a problem, and weigh it against 「홈에 스크립트를 심지 않는다」 (do not plant scripts in the home).
+- **Register by writing the hook directly into the user's `config.toml`** — ★**Rejection = measurement**★: `-c` alone makes the review, the firing and the `session_id` reception all hold. ★**But there is no way to obtain trust that avoids writing that file**★ — at the moment of approval, **codex itself** writes `trusted_hash` there. We do not write it, but the file changes anyway.
+- **Compute the hook trust hash ourselves** — rejected (the road the precedent abandoned after it broke over 3 releases). We inherit the same item of ADR-0208.
+- **Put the override before the passthrough** — ★**Rejection = measurement**★ (decision 3). It was built that way at one point, and that was a defect.
 
 ## 근거
 
-- **2차 실측 11회 기동**(codex-cli 0.155.0 · 전 구간 홈 사본 · 실 `~/.codex` md5 불변 확인). 정본 = `docs/research/codex-session-id-recovery-survey-2026-09-19.md` §10 — 수치를 여기 베끼지 않는다.
-- 그 절이 닫은 것 중 이 결정을 떠받치는 넷: **훅 명령이 인자를 받는다**(§10-6) · **중복 `-c` 는 뒤가 이기고 빈 배열이 무신호로 훅을 지운다**(§10-7) · **`codex resume <id>` 는 id 를 유지한다**(§10-8) · **생성한 override 가 `cmd.exe` 경유 왕복을 바이트 그대로 견딘다**(§10-9).
-- ★**「끄기가 영구 저장된다」는 실패 모드는 존재하지 않는다**★(§10-1) — ADR-0208 이 가장 무서워한 갈래이고, 그것이 없다는 사실이 「신뢰를 자동화하지 않는다」를 감당 가능하게 만든다.
-- **적대 리뷰 2인**(doc-aware 불변식 breaker + cross-family blind)이 각각 FIX 로 판정했고, 둘이 독립으로 짚은 결함 하나가 결정 3이다.
+- **2nd measurement, 11 launches** (codex-cli 0.155.0 · a home copy throughout · md5 of the real `~/.codex` confirmed unchanged). Canonical source = `docs/research/codex-session-id-recovery-survey-2026-09-19.md` §10 — we do not copy the figures here.
+- Of what that section closed, the four that support this decision: **the hook command accepts arguments** (§10-6) · **with a duplicate `-c` the later one wins, and an empty array erases the hook with no signal** (§10-7) · **`codex resume <id>` keeps the id** (§10-8) · **the generated override survives a round trip through `cmd.exe` byte for byte** (§10-9).
+- ★**The failure mode 「끄기가 영구 저장된다」 (turning it off is saved permanently) does not exist**★ (§10-1) — it is the branch ADR-0208 feared most, and the fact that it does not exist is what makes 「신뢰를 자동화하지 않는다」 (we do not automate trust) bearable.
+- **2 adversarial reviewers** (a doc-aware invariant breaker + a cross-family blind one) each judged FIX, and one defect they pointed out independently is decision 3.
 
 ## 영향 / 불변식
 
-- ★**ADR-0208 의 「심는 줄이 0 이다 — 의도된 경계」 조항은 이 ADR 로 부분 폐기된다.**★ 그 ADR 만 읽는 세션이 없어진 경계를 지키지 않도록 양방향 도장을 박았다.
-- ★**ADR-0208 의 「자격 부재와 연결 실패가 같은 진단 한 줄로 합류한다」도 더는 참이 아니다.**★ 훅 CLI 가 stdin 보다 자격을 **먼저** 읽도록 바뀌면서 자격 부재는 `send` 앞에서 제 문구로 끝난다. 갈래가 갈린 것은 개선이다 — 그 순서가 뒤집히면 **Windows 에서 호출자가 파이프를 안 닫을 때 훅 이벤트마다 프로세스가 하나씩 매달린다.**
-- **터미널 모드 판정 술어 쌍**(`can_resume_stored_session` · `capabilities().session.resume`)이 이 라운드에 함께 켜졌다. ★한쪽만 건드리지 말 것★ — 짝 경고가 두 자리에 박혀 있다.
-- **`assigns_session_id()` 는 여전히 false 다**(ADR-0185). 이 결정은 「우리가 id 를 발급한다」가 아니라 「codex 가 발급한 id 를 훅으로 되받는다」이다.
-- ★**결정 6(터미널 모드에만 등록)은 사용자 재확인 대상이다**★ — ADR-0208 의 「거부한 대안」에서 사용자가 **두 모드 공통 훅 경로**를 골랐는데, 등록 축에서 그 분기가 되살아난다. 실측상 두 경로는 **같은 값**을 실어 오므로 중복 등록의 대가는 「이미 같은 값」 한 줄뿐이고 결함은 아니다 — 그래서 이 라운드는 중복을 피하는 쪽으로 두되 결정을 사용자에게 남긴다.
-- **미검으로 남은 것:** 실 codex 로 훅을 끝까지 몰아 **우리 데몬이 id 를 받는 것**은 아직 확인 안 됐다(측정은 전부 별도 하네스로 했다). **GUI 실측 0.**
+- ★**ADR-0208's clause 「심는 줄이 0 이다 — 의도된 경계」 (the number of lines that plant it is 0 — an intended boundary) is partially discarded by this ADR.**★ We stamped both directions so that a session reading only that ADR does not keep a boundary that is gone.
+- ★**ADR-0208's 「자격 부재와 연결 실패가 같은 진단 한 줄로 합류한다」 (the absence of credentials and a connection failure merge into the same one-line diagnostic) is no longer true either.**★ As the hook CLI changed to read credentials **before** stdin, the absence of credentials ends with its own wording before `send`. The branches diverging is an improvement — if that order is reversed, **on Windows, when the caller does not close the pipe, one process hangs around for every hook event.**
+- **The terminal-mode decision predicate pair** (`can_resume_stored_session` · `capabilities().session.resume`) was turned on together in this round. ★Do not touch just one★ — the paired warning is embedded in two places.
+- **`assigns_session_id()` is still false** (ADR-0185). This decision is not 「우리가 id 를 발급한다」 (we issue the id) but 「codex 가 발급한 id 를 훅으로 되받는다」 (we receive back, through the hook, the id codex issued).
+- ★**Decision 6 (register in terminal mode only) is an item for user reconfirmation**★ — in ADR-0208's 「거부한 대안」, the user chose the **hook path shared by both modes**, and that branch comes back to life on the registration axis. By measurement the two paths carry **the same value**, so the price of a duplicate registration is only a single line 「이미 같은 값」 (already the same value) and not a defect — so this round leaned toward avoiding the duplicate, while leaving the decision to the user.
+- **What remains unverified:** driving the hook all the way with a real codex until **our daemon receives the id** is not yet confirmed (all the measurements were done with a separate harness). **GUI measurement 0.**

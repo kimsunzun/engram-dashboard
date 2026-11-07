@@ -1,23 +1,23 @@
-# claude 설정 스키마 — 어디서 얻나 · 우리가 직접 검사해도 되나
+# claude settings schema — where to get it · whether we may check it ourselves
 
-- **상태:** light 조사 + 실측 · 2026-10-18 · 수집자 1(소스·바이너리 판정) + 메인 grounding(공식 문서 문장 · 추출 파일 대조) · 적대 리뷰 없음
-- **질문:** `claude --settings <json> doctor`(약 2초)를 돌리는 이유는 claude 안의 설정 스키마로 검사받기 위해서다. 그 스키마를 직접 얻거나 공개 스키마로 Engram 이 즉시 검사(문법 · 키가 있나 · 값이 맞나)할 수 있나.
+- **Status:** light investigation + measurement · 2026-10-18 · collector 1 (source/binary decision) + main grounding (official-doc sentences · extracted-file comparison) · no adversarial review
+- **Question:** The reason we run `claude --settings <json> doctor` (about 2 s) is to have settings checked against the settings schema inside claude. Can Engram get that schema directly, or use a public schema, to check immediately (syntax · whether the key exists · whether the value is right)?
 
-## 결론
+## Conclusion
 
-- **claude 내부 스키마(zod)를 JSON 스키마로 꺼낼 수는 있다 — 단 공개된 길이 아니다.** 번들된 `update-config` 스킬이 실행 중에 내부 zod 스키마를 JSON 스키마로 바꿔 프롬프트에 싣는다. 가짜 로컬 API 로 모델이 그 스킬을 부르게 해 잡아냈다(모델 호출 없음 · 약 5초 · claude 2.1.284 → draft 2020-12 · 261 KB · 맨 위 키 176개). 스키마를 찍는 명령 · 플래그 · 패키지 안 스키마 파일은 없다. 버전마다 깨질 수 있다. — 확실(실측 · 추출 파일 확인)
-- **SchemaStore 스키마는 그것과 다른, 커뮤니티가 손으로 관리하는 사본이고 늦게 따라간다.** 문서와 변경 기록을 보고 손으로 맞추며(PR #6131 「reconciled against the full settings.md and env-vars.md reference tables」), 마지막 버전 맞춤 = v2.1.220(2026-07-27). 2.1.284 내부 스키마와 비교하면 48 키 없음 · 14 키 남음 · `managedMcpServers` 타입 다름. — 확실(실측 비교 · 커밋 기록)
-- **공식 문서는 SchemaStore 를 가리킨다** — 「The `$schema` line points to the published JSON schema for Claude Code settings, which gives you autocomplete and inl[ine validation]」(https://code.claude.com/docs/en/settings · 원문 대조). 편집기 자동 완성 · 검사용으로 권한다. 공식 · 자동 생성이라는 문장은 없다. — 확실
-- **버전별 claude 설정 스키마를 Anthropic 이 내놓는 곳은 못 찾았다** — 가능성 높음
-- **codex 는 릴리스마다 `config-schema.json` 을 함께 낸다**(코드에서 생성 · 그 버전과 정확히 맞음). — 확실(자산 존재) · 가능성 높음(생성 방식)
+- **claude's internal schema (zod) can be extracted as a JSON schema — but it is not a public route.** The bundled `update-config` skill converts the internal zod schema to a JSON schema at run time and puts it in the prompt. We captured it by having the model call that skill through a fake local API (no model call · about 5 s · claude 2.1.284 → draft 2020-12 · 261 KB · 176 top-level keys). There is no command, flag, or schema file in the package that prints the schema. It may break with any version. — certain (measured · extracted file checked)
+- **The SchemaStore schema is a different, community-maintained hand copy and lags behind.** It is matched by hand from the docs and changelog (PR #6131 「reconciled against the full settings.md and env-vars.md reference tables」), and the last version sync = v2.1.220 (2026-07-27). Compared with the 2.1.284 internal schema: 48 keys missing · 14 keys left over · `managedMcpServers` has a different type. — certain (measured comparison · commit history)
+- **The official docs point to SchemaStore** — 「The `$schema` line points to the published JSON schema for Claude Code settings, which gives you autocomplete and inl[ine validation]」 (https://code.claude.com/docs/en/settings · checked against the original text). It recommends it for editor autocomplete · validation. There is no sentence saying it is official · auto-generated. — certain
+- **We could not find any place where Anthropic publishes a per-version claude settings schema** — likely
+- **codex ships a `config-schema.json` with every release** (generated from code · matches that version exactly). — certain (asset exists) · likely (how it is generated)
 
-## 함의
+## Implications
 
-- 내부 스키마를 쓰면 claude 와 거의 같게 즉시 검사하지만, 꺼내는 길이 내부 구현(스킬 이름 · 프롬프트 머리글)에 기대 언제든 깨진다.
-- SchemaStore 를 쓰면 가볍고 공식 문서가 권하는 길이지만, 새 키를 모르는 키로 볼 수 있고(48개) 타입이 어긋나는 키가 있다 → 「모르는 키」 를 오류로 잡으면 오경보가 난다.
-- 둘 다 맨 위에서 모르는 키를 허용한다 — 「키가 있나」 는 우리가 `properties` 와 따로 비교해야 한다.
+- Using the internal schema checks almost the same as claude does, immediately, but the way to extract it relies on internal implementation (skill name · prompt header) and can break at any time.
+- Using SchemaStore is light and the route the official docs recommend, but it may treat new keys as unknown keys (48 of them) and some keys have mismatched types → flagging 「모르는 키」 as an error causes false alarms.
+- Both allow unknown keys at the top level — 「키가 있나」 we must compare ourselves, separately against `properties`.
 
-## 공백
+## Gaps
 
-- 추출한 내부 스키마로 Rust `jsonschema` 검사를 돌려 보지 않았다. zod 의 `.catch` · refine 처럼 JSON 스키마로 안 옮겨지는 규칙의 범위 · 스킬의 후처리가 지우는 것은 미확인.
-- 추출 실측 파일(세션 스크래치 · 저장소 밖): `internal-settings-schema.json` · `cap2.js`.
+- We did not run a Rust `jsonschema` check with the extracted internal schema. Unconfirmed: the extent of rules that do not translate into JSON schema, such as zod `.catch` · refine, and what the skill's post-processing removes.
+- Extraction measurement files (session scratch · outside the repository): `internal-settings-schema.json` · `cap2.js`.

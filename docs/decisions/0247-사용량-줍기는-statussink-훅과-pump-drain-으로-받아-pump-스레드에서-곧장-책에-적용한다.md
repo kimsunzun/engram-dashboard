@@ -1,24 +1,24 @@
-# ADR-0247: 사용량 줍기는 StatusSink 훅과 pump drain 으로 받아 pump 스레드에서 곧장 책에 적용한다
+# ADR-0247: Usage picking is received through the StatusSink hook and pump drain and applied straight to the book on the pump thread
 
-- 상태: 확정 (2026-09-27, 근거: 사용자 결정 + TRD §7 #3)
-- 관련: TRD §7 #3(#9 에 딸림) · `docs/decisions/0001-kill-2동사.md`(pump 소유 규율) · step-log S21
+- 상태: 확정 (2026-09-27, basis: user decision + TRD §7 #3)
+- 관련: TRD §7 #3(attached to #9) · `docs/decisions/0001-kill-2동사.md`(pump ownership discipline) · step-log S21
 
 ## 맥락
-대화 에이전트가 출력하는 도중 지나가며 흘리는(passive) 사용량 신호를 어디서 줍고, 언제 상태(책)에 반영할지 정해야 했다. 원래 결정은 "데몬 대기 맵에 모아 뒀다가 다음 요청 때 병합"이었는데, 그러면 줍기 결과가 다음 요청이 올 때까지 화면에 닿지 못한다.
+We had to decide where to pick up the usage signal that a conversational agent drops in passing (passive) while it outputs, and when to reflect it in the state (the book). The original decision was "collect it in the daemon pending map and merge it on the next request", but then the picked result cannot reach the screen until the next request arrives.
 
 ## 결정
-줍기 출구는 **StatusSink 훅 + pump drain**이고, **pump 스레드에서 곧장 책(사용량 상태)에 적용**한다. 이 락은 I/O·await·다른 락을 물지 않는 잎(leaf) 락이라 pump 스레드에서 락을 잡고 병합해도 안전하다고 판단해 락 밖에서 발행한다.
+The picking outlet is the **StatusSink hook + pump drain**, and it is **applied straight to the book (the usage state) on the pump thread**. This lock is a leaf lock that holds no I/O · await · other lock, so we judged it safe to take the lock and merge on the pump thread, and emit outside the lock.
 
 ## 거부한 대안
-- **`open_spawn` 포트 주입** — 디코더에 포트를 쥐여 주려면 `open_spawn` 에 칸이 늘어 구현 셋과 호출 약 열 곳이 따라 바뀌고, 디코더를 부수효과 있게 만든다(drain 은 디코더를 순수하게 둔다 — TRD §1-2 「훅만으로는 안 맞는 이유」 · §3 #1).
-- **`Structured` 배출구**(codex `decoder.rs:18-25` — 작성 시점 줄) — 사용량 한도는 계정 단위 상태인데 `OutputEvent::Structured` 는 에이전트별 replay 링과 구독자 fan-out 을 타는 대화 출력이다. 또 그 탈출구를 쓰면 프론트가 `kind` 를 label 로, payload 를 코드블록으로 그려 codex 메서드 이름·프로토콜 JSON 이 사용자 화면에 뜬다. 출처 = TRD 작성 전 사실 조사 `.claude/handoff/attachments/usage-slot-trd-facts-2026-09-27.md:22-30` · `crates/engram-dashboard-agent/src/backend/codex/decoder.rs` 머리 주석(「모르는 것은 버린다 — `Structured` 를 배출구로 쓰지 않는다」 · 「사용량 한도 알림은 이벤트가 아니라 `take_usage` 로 나간다」).
-- **데몬 대기 맵 + 요청 때 병합**(옛 결정) — 2026-09-27 사용자 결정으로 대체됨: 줍기 결과가 다음 요청 전까지 화면에 못 닿는다는 것이 대체 사유.
-- **전역 FIFO 큐** — 넘치면 버려지고 비우는 순서가 역전될 수 있다.
+- **Injecting a port into `open_spawn`** — handing the decoder a port adds a field to `open_spawn`, so the three implementations and about ten call sites change along with it, and it gives the decoder side effects (drain keeps the decoder pure — TRD §1-2 「훅만으로는 안 맞는 이유」 · §3 #1).
+- **The `Structured` outlet** (codex `decoder.rs:18-25` — lines at time of writing) — the usage limit is per-account state, but `OutputEvent::Structured` is conversation output that rides the per-agent replay ring and subscriber fan-out. Also, if that escape hatch were used, the frontend would draw `kind` as a label and the payload as a code block, so codex method names · protocol JSON would show on the user's screen. Source = the pre-TRD fact survey `.claude/handoff/attachments/usage-slot-trd-facts-2026-09-27.md:22-30` · the head comment of `crates/engram-dashboard-agent/src/backend/codex/decoder.rs` (「모르는 것은 버린다 — `Structured` 를 배출구로 쓰지 않는다」 · 「사용량 한도 알림은 이벤트가 아니라 `take_usage` 로 나간다」).
+- **Daemon pending map + merge on request** (the old decision) — replaced by the 2026-09-27 user decision: the reason for replacing it is that the picked result cannot reach the screen until the next request.
+- **A global FIFO queue** — it drops items when full and the drain order can be reversed.
 
-옛 거부 항목이었던 "pump 스레드에서 책 락을 잡고 병합"은 이번 개정으로 **채택 쪽으로 뒤집혔다** — 그 락이 I/O·await·다른 락이 없는 잎 락이라는 것이 근거다.
+The old rejected item "take the book lock and merge on the pump thread" was **flipped to adopted** by this revision — the ground is that the lock is a leaf lock with no I/O · await · other lock.
 
 ## 근거
-사용자 결정 2026-09-27 · TRD §7 #3.
+User decision 2026-09-27 · TRD §7 #3.
 
 ## 영향 / 불변식
-pump 스레드에서 락을 쥐고 병합하는 패턴이 이번 결정으로 **이 잎 락에 한해** 허용됐다 — 다른 무거운 락(I/O·await·다른 락 보유)에는 이 패턴을 일반화하지 않는다. 구현 커밋: `7aad8f7`, `4fd426a`, `56776d6`.
+The pattern of holding a lock and merging on the pump thread is now allowed by this decision **only for this leaf lock** — do not generalize it to other heavy locks (holding I/O · await · another lock). Implementation commits: `7aad8f7`, `4fd426a`, `56776d6`.

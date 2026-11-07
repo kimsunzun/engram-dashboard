@@ -1,30 +1,30 @@
-// ADR-0304 — 스냅 오버레이 feature
-//! 스냅 레이아웃 오버레이 — Windows 11 이 최대화 단추에 커서를 올리면 띄우는 배치 고르기 메뉴를 웹이 그린 최대화 단추에서도
-//! 뜨게 한다(TRD S26-window-chrome §8-4). ★cargo 기능 `snap-overlay` 뒤 · 기본 꺼짐★(사용자 결정 Q1 2026-10-24 — 켜지 않는다 ·
-//! 코드는 남긴다). 꺼진 채 두는 까닭 = 주석으로 막은 코드는 컴파일되지 않아 썩는다 — 켠 빌드는 CI 가 컴파일한다.
+// ADR-0304 — snap overlay feature
+//! Snap layout overlay — makes the layout-picker menu that Windows 11 shows when the cursor is over the maximize button also
+//! appear on a web-drawn maximize button (TRD S26-window-chrome §8-4). ★Behind the cargo feature `snap-overlay` · off by default★ (user decision Q1 2026-10-24 — we do not turn it on ·
+//! we keep the code). Why it stays off = code blocked by comments is not compiled and rots — a build with it on is compiled by CI.
 //!
-//! 꼴 — 웹 최대화 단추 자리에 시스템 클래스 `STATIC` 자식 창 하나를 맨 위 형제로 얹고, 그 창의 적중 판정(`WM_NCHITTEST`)이
-//! `HTMAXBUTTON` 을 답하게 창 프로시저를 갈아 끼운다 — OS 는 그 자리를 최대화 단추로 보고 메뉴를 띄운다(MS 「Support snap
-//! layouts for desktop apps on Windows 11」 — 사용자 지정 제목 줄은 최대화 단추 자리에서 `HTMAXBUTTON` 을 돌려준다).
-//! - 그 창이 커서를 가져가 웹 단추는 맴돎을 모른다 — 맴돎 바뀜을 부르는 쪽 콜백([`HoverFn`])으로 넘긴다.
-//! - 떼기는 그 창이 부모에 최대화 / 원래 크기 시스템 명령(`WM_SYSCOMMAND`)을 보낸다 — 제목 줄 두 번 누름과 같은 OS 길이라
-//!   명령 버스를 지나지 않는다. 키보드(Tab · Enter)는 웹 단추가 그대로 받는다.
-//! - 웹이 그린 단추가 그대로 보이는 것은 스파이크(2026-10-24 · TRD §1-3 S6)에서 본 것이고 까닭은 재지 않았다.
+//! Design — over the web maximize button's spot, one system-class `STATIC` child window is laid as the topmost sibling, and its window procedure is swapped so that its hit test (`WM_NCHITTEST`)
+//! answers `HTMAXBUTTON` — the OS sees that spot as the maximize button and shows the menu (MS 「Support snap
+//! layouts for desktop apps on Windows 11」 — a custom title bar returns `HTMAXBUTTON` at the maximize button's spot).
+//! - That window takes the cursor, so the web button does not know about hover — the hover change is handed to the caller's callback ([`HoverFn`]).
+//! - On release, that window sends a maximize / restore system command (`WM_SYSCOMMAND`) to the parent — the same OS path as double-clicking the title bar, so
+//!   it does not pass through the command bus. The keyboard (Tab · Enter) is still received by the web button.
+//! - That the web-drawn button stays visible was seen in the spike (2026-10-24 · TRD §1-3 S6) and the reason was not measured.
 //!
-//! 참고 — `Hyph-M/tauri-plugin-snap-layout`(MIT · `src/snap.rs`)의 오버레이를 옮겨 다시 지었다(코드 복붙이 아니라 꼴 차용).
-//! 다른 점: 창 프로시저를 `SetWindowLongPtrW` 로 갈아 끼운다(comctl32 서브클래스 — `Win32_UI_Shell` 바인딩을 들이지 않는다) ·
-//! 사각형은 부르는 쪽이 부모 클라이언트 물리 px 로 준다 · 맴돎은 부르는 쪽 콜백으로 간다 · 오버레이를 부모의 자식 ID 로
-//! 찾는다(전역 표 없음).
+//! Reference — rebuilt by porting the overlay of `Hyph-M/tauri-plugin-snap-layout` (MIT · `src/snap.rs`) (borrowing the shape, not copy-pasting code).
+//! Differences: the window procedure is swapped with `SetWindowLongPtrW` (not a comctl32 subclass — no `Win32_UI_Shell` binding is brought in) ·
+//! the rectangle is given by the caller in parent-client physical px · hover goes to the caller's callback · the overlay is found
+//! by its child ID under the parent (no global table).
 //!
-//! ★스레드★ — 두 함수 다 부모 창을 만든 스레드(메인)에서 부른다(자식 창은 부른 스레드에 묶이고, 창 프로시저 · 콜백도 그
-//! 스레드에서 돈다). 다른 스레드에서 부르면 아무것도 하지 않고 [`WindowError::Os`] 다 — 부모 창 스레드를 대 보는 가드가
-//! 막는다(남의 스레드에서 자식 창을 지으면 부모에 보내는 알림이 그 스레드를 기다려 교착할 수 있고, 지은 창은 부른 스레드가
-//! 끝나면 함께 사라진다). ★콜백 안에서 이 모듈 함수를 부르지 말 것★ — 막지는 않지만(콜백을 갈아 끼워도 · 오버레이를
-//! 걷어도 도는 콜백은 끝까지 돈다) 그 꼴을 시험하지 않았고, 나감(`WM_NCMOUSELEAVE`)은 콜백 뒤 앞 프로시저로 넘기므로
-//! 콜백 안에서 걷으면 부서진 창으로 넘긴다.
+//! ★Threads★ — both functions are called from the thread that created the parent window (main) (a child window is bound to the calling thread, and the window procedure and callback also run on that
+//! thread). Called from another thread, they do nothing and give [`WindowError::Os`] — a guard that checks the parent window's thread
+//! stops it (building a child window on someone else's thread can deadlock because notifications sent to the parent wait on that thread, and the built window vanishes when the calling thread
+//! ends). ★Do not call this module's functions inside the callback★ — it is not blocked (even if the callback is swapped or the overlay
+//! removed, a running callback runs to the end) but that pattern was not tested, and leave (`WM_NCMOUSELEAVE`) is passed to the previous procedure after the callback, so
+//! removing inside the callback passes it to a destroyed window.
 //!
-//! Windows 밖 = [`WindowError::Unsupported`](이 crate 「들이는 규칙」 3 — 자리채움). 켠 빌드의 동작(배율 · 창마다 ·
-//! 포커스)은 켜는 날 다시 잰다(TRD §14 W8).
+//! Outside Windows = [`WindowError::Unsupported`] (this crate's 「들이는 규칙」 3 — placeholder). The behavior of the build with it on (scaling · per window ·
+//! focus) is measured again on the day it is turned on (TRD §14 W8).
 
 // ADR-0266
 
@@ -32,13 +32,13 @@ use raw_window_handle::HasWindowHandle;
 
 use super::{PhysRect, WindowError};
 
-/// 맴돎 바뀜 — 참 = 커서가 오버레이에 들어왔다 · 거짓 = 나갔다. 부모 창 스레드에서 불린다. 오버레이를 걷을 때는 부르지
-/// 않는다 — 걷는 쪽이 자기 맴돎 상태를 거둔다.
+/// Hover change — true = the cursor entered the overlay · false = it left. Called on the parent window's thread. It is not called when
+/// removing the overlay — the remover clears its own hover state.
 pub type HoverFn = Box<dyn Fn(bool)>;
 
-/// `parent` 의 클라이언트 물리 px 사각형 `rect` 에 오버레이를 놓는다 — 없으면 짓고 있으면 옮긴다(맨 위 형제로 다시 올린다).
-/// `on_hover` 는 앞 콜백을 갈아 끼운다. 너비 · 높이가 1 보다 작거나 `parent` 를 만든 스레드가 아닌 스레드에서 부르면
-/// 아무것도 하지 않고 [`WindowError::Os`] 다(빈 사각형이면 부르는 쪽은 걷기를 부른다).
+/// Places the overlay at `rect`, the client physical-px rectangle of `parent` — builds it if absent, moves it if present (raises it again as the topmost sibling).
+/// `on_hover` replaces the previous callback. If the width or height is below 1 or it is called from a thread other than the one that created `parent`,
+/// it does nothing and gives [`WindowError::Os`] (for an empty rectangle the caller calls remove).
 pub fn place_overlay(
     parent: &impl HasWindowHandle,
     rect: PhysRect,
@@ -55,8 +55,8 @@ pub fn place_overlay(
     }
 }
 
-/// `parent` 의 오버레이를 걷는다 — 없으면 무동작 `Ok`. `parent` 를 만든 스레드가 아닌 스레드에서 부르면 아무것도 하지 않고
-/// [`WindowError::Os`] 다.
+/// Removes the overlay of `parent` — a no-op `Ok` if there is none. Called from a thread other than the one that created `parent`, it does nothing and gives
+/// [`WindowError::Os`].
 pub fn remove_overlay(parent: &impl HasWindowHandle) -> Result<(), WindowError> {
     #[cfg(windows)]
     {
@@ -95,17 +95,17 @@ mod win {
     use super::super::win::hwnd_of;
     use super::{HoverFn, PhysRect, WindowError};
 
-    /// 오버레이의 자식 창 ID — 부모에서 [`find`] 가 이 값으로 찾는다. 같은 ID 의 남의 자식 창은 창 프로시저가 우리 것이
-    /// 아니라 걸러진다.
+    /// The overlay's child window ID — [`find`] looks for it by this value under the parent. Someone else's child window with the same ID is filtered out because its window procedure is
+    /// not ours.
     const OVERLAY_ID: i32 = 0x534E;
 
-    /// 오버레이 창 하나의 상태 — `GWLP_USERDATA` 가 쥐고 `WM_NCDESTROY` 가 푼다.
+    /// The state of one overlay window — `GWLP_USERDATA` holds it and `WM_NCDESTROY` releases it.
     struct State {
-        /// 갈아 끼우기 전 창 프로시저(`STATIC` 의 것).
+        /// The window procedure before the swap (`STATIC`'s).
         prev: isize,
         parent: HWND,
         hovering: bool,
-        /// 콜백을 부르는 동안 복제를 쥐어, 그사이 갈아 끼우거나 걷어도 도는 콜백이 끝까지 산다.
+        /// A clone is held while the callback runs, so even if it is swapped or removed meanwhile the running callback lives to the end.
         on_hover: Rc<dyn Fn(bool)>,
     }
 
@@ -117,19 +117,19 @@ mod win {
         overlay_proc as *const () as usize as isize
     }
 
-    /// `parent` 의 오버레이 — 자식 ID 가 맞고 창 프로시저가 우리 것인 자식.
+    /// The overlay of `parent` — the child whose child ID matches and whose window procedure is ours.
     pub(super) fn find(parent: HWND) -> Option<HWND> {
-        // SAFETY: 값만 보는 조회 둘 — 없으면 `Err` · 0 이다.
+        // SAFETY: two queries that only read values — if absent, `Err` · 0.
         unsafe {
             let child = GetDlgItem(parent, OVERLAY_ID).ok()?;
             (GetWindowLongPtrW(child, GWLP_WNDPROC) == proc_addr()).then_some(child)
         }
     }
 
-    /// 부모 창 스레드 가드(머리 「스레드」) — `parent` 를 만든 스레드가 아니면 아무것도 건드리기 전에 거절한다. 그 뒤의
-    /// 상태 읽기 · 쓰기와 창 프로시저가 같은 스레드라 겹치지 않는다는 것도 이 가드가 받친다.
+    /// Parent-window thread guard (header 「스레드」) — if it is not the thread that created `parent`, it refuses before touching anything. This guard also backs that the later
+    /// state reads and writes and the window procedure are on the same thread and so do not overlap.
     fn on_parent_thread(parent: HWND) -> Result<(), WindowError> {
-        // SAFETY: 값만 보는 조회 둘 — 사라진 창이면 0 이라 맞지 않아 거절된다.
+        // SAFETY: two queries that only read values — if the window vanished it is 0, which does not match, so it is refused.
         let (owner, caller) =
             unsafe { (GetWindowThreadProcessId(parent, None), GetCurrentThreadId()) };
         if owner == caller {
@@ -157,8 +157,8 @@ mod win {
         let on_hover: Rc<dyn Fn(bool)> = Rc::from(on_hover);
         let child = match find(parent) {
             Some(child) => {
-                // SAFETY: 우리 오버레이(`find` 가 창 프로시저로 걸렀다)의 상태 — 이 스레드의 창이라 창 프로시저와 겹치지 않는다.
-                //   도는 콜백은 자기 복제를 쥐고 있어 여기서 옛 것을 버려도 된다.
+                // SAFETY: the state of our overlay (filtered by `find` through the window procedure) — it is a window of this thread, so it does not overlap with the window procedure.
+                //   A running callback holds its own clone, so it is fine to drop the old one here.
                 unsafe {
                     let state = GetWindowLongPtrW(child, GWLP_USERDATA) as *mut State;
                     if !state.is_null() {
@@ -169,7 +169,7 @@ mod win {
             }
             None => create(parent, r, on_hover)?,
         };
-        // SAFETY: 살아 있는 자식 창과 값 인자뿐이다. 맨 위 형제로 올려 웹뷰 자식 창 위에 둔다.
+        // SAFETY: only a live child window and value arguments. Raise it as the topmost sibling to put it over the webview child window.
         unsafe {
             SetWindowPos(
                 child,
@@ -185,7 +185,7 @@ mod win {
     }
 
     fn create(parent: HWND, r: PhysRect, on_hover: Rc<dyn Fn(bool)>) -> Result<HWND, WindowError> {
-        // SAFETY: 시스템 클래스 이름 · 값 인자 · 살아 있는 부모(`hwnd_of` 가 걸렀다). 자식 ID 는 `HMENU` 자리로 넘긴다.
+        // SAFETY: a system class name · value arguments · a live parent (filtered by `hwnd_of`). The child ID is passed in the `HMENU` slot.
         let child = unsafe {
             CreateWindowExW(
                 WINDOW_EX_STYLE(0),
@@ -203,8 +203,8 @@ mod win {
             )
         }
         .map_err(|e| os("CreateWindowExW", e))?;
-        // SAFETY: 방금 지은 이 스레드의 창 — 상태를 먼저 싣고 창 프로시저를 갈아 끼운다(갈아 끼운 프로시저는 상태가 있다고
-        //   믿는다). 상태는 `WM_NCDESTROY` 가 푼다.
+        // SAFETY: a window of this thread just built — load the state first and then swap the window procedure (the swapped procedure trusts that state
+        //   exists). The state is released by `WM_NCDESTROY`.
         unsafe {
             let prev = GetWindowLongPtrW(child, GWLP_WNDPROC);
             let state = Box::new(State {
@@ -225,12 +225,12 @@ mod win {
         let Some(child) = find(parent) else {
             return Ok(());
         };
-        // SAFETY: 이 스레드의 우리 오버레이 — 부수면 `WM_NCDESTROY` 가 상태를 푼다.
+        // SAFETY: our overlay on this thread — destroying it makes `WM_NCDESTROY` release the state.
         unsafe { DestroyWindow(child) }.map_err(|e| os("DestroyWindow", e))
     }
 
-    /// 맴돎이 끝나면(커서가 비클라이언트 자리를 떠나면) `WM_NCMOUSELEAVE` 를 받게 한다. 실패하면 나감을 못 듣는다 — 다음
-    /// 적중 판정까지 맴돎이 남는다.
+    /// Makes it receive `WM_NCMOUSELEAVE` when hover ends (the cursor leaves the non-client area). If it fails, leaving goes unheard — hover stays until the next
+    /// hit test.
     fn track_leave(hwnd: HWND) {
         let mut tme = TRACKMOUSEEVENT {
             cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
@@ -238,14 +238,14 @@ mod win {
             hwndTrack: hwnd,
             dwHoverTime: 0,
         };
-        // SAFETY: 지역 구조체 하나를 넘긴다.
+        // SAFETY: passes one local struct.
         let _ = unsafe { TrackMouseEvent(&mut tme) };
     }
 
-    /// 맴돎 칸을 `hover` 로 바꾸고, 바뀌었으면 부를 콜백을 돌려준다 — 상태의 빌림은 콜백을 부르기 전에 끝난다.
+    /// Changes the hover field to `hover` and, if it changed, returns the callback to call — the borrow of the state ends before the callback is called.
     ///
     /// # Safety
-    /// `state` 는 살아 있는 이 창의 상태다.
+    /// `state` is the state of this live window.
     unsafe fn flip(state: *mut State, hover: bool) -> Option<Rc<dyn Fn(bool)>> {
         let s = &mut *state;
         if s.hovering == hover {
@@ -263,7 +263,7 @@ mod win {
     ) -> LRESULT {
         let state = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut State;
         if state.is_null() {
-            // 상태를 싣기 전 · 푼 뒤 — 갈아 끼우기 전 프로시저를 모르니 기본 처리로 넘긴다.
+            // Before the state is loaded · after it is released — the procedure before the swap is unknown, so pass to default handling.
             return DefWindowProcW(hwnd, msg, wparam, lparam);
         }
         let prev: WNDPROC = std::mem::transmute::<isize, WNDPROC>((*state).prev);
@@ -275,15 +275,15 @@ mod win {
                 }
                 return LRESULT(HTMAXBUTTON as isize);
             }
-            // 우리 몫(맴돎 칸 · 콜백)만 하고 앞 프로시저로 넘긴다 — 스파이크가 그렇게 했고 그 빌드에서 메뉴가 떴다(TRD §1-3
-            //   S6 — 사용자 관측). 삼키는 꼴은 화면에서 잰 적이 없다. `prev` 는 위에서 이미 복사해 두어 상태를 다시 읽지
-            //   않는다 — 단 콜백이 오버레이를 걷으면 부서진 창으로 넘기게 되므로 콜백 안에서 걷지 않는다(머리 「스레드」).
+            // Do only our share (hover field · callback) and pass on to the previous procedure — the spike did so and the menu appeared in that build (TRD §1-3
+            //   S6 — user observation). The variant that swallows the message (not passing it on) has never been tested on screen. `prev` was already copied above so the state is not read again
+            //   — but if the callback removes the overlay it would pass to a destroyed window, so do not remove inside the callback (header 「스레드」).
             WM_NCMOUSELEAVE => {
                 if let Some(f) = flip(state, false) {
                     f(false);
                 }
             }
-            // 누름은 삼킨다 — 기본 처리가 OS 캡션 단추 누름 추적을 시작하지 않게.
+            // Swallow the press — so default handling does not start tracking an OS caption button press.
             WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK if wparam.0 == HTMAXBUTTON as usize => {
                 return LRESULT(0);
             }
@@ -297,7 +297,7 @@ mod win {
                 let _ = PostMessageW(parent, WM_SYSCOMMAND, WPARAM(cmd as usize), LPARAM(0));
                 return LRESULT(0);
             }
-            // Windows 캡션 단추는 화살표 커서다(웹 단추의 `cursor: default` 와 같다).
+            // The Windows caption button is an arrow cursor (same as the web button's `cursor: default`).
             WM_SETCURSOR => {
                 if let Ok(c) = LoadCursorW(HINSTANCE::default(), IDC_ARROW) {
                     SetCursor(c);
@@ -315,8 +315,8 @@ mod win {
     }
 }
 
-// 실 창 — 화면 밖 · 숨긴 부모(`test_window`)에 오버레이를 짓는다. 메시지는 같은 스레드의 `SendMessageW` 로 창 프로시저를
-//   곧바로 부르고, 부모에 보낸 시스템 명령은 꺼내기만 해(`PeekMessageW` · `PM_REMOVE`) 창이 실제로 커지지 않는다.
+// Real window — builds the overlay on an off-screen, hidden parent (`test_window`). Messages call the window procedure directly with `SendMessageW`
+//   on the same thread, and the system command sent to the parent is only taken out (`PeekMessageW` · `PM_REMOVE`) so the window does not actually grow.
 #[cfg(all(test, windows))]
 mod tests {
     use std::cell::RefCell;
@@ -343,7 +343,7 @@ mod tests {
 
     fn rect_of(hwnd: HWND) -> PhysRect {
         let mut r = RECT::default();
-        // SAFETY: 살아 있는 창이면 채우고, 아니면 실패한다.
+        // SAFETY: fills it in if the window is live, otherwise fails.
         unsafe { GetWindowRect(hwnd, &mut r) }.expect("창 사각형");
         PhysRect {
             x: r.left,
@@ -353,7 +353,7 @@ mod tests {
         }
     }
 
-    /// 오버레이의 부모 클라이언트 자리 — 부모가 틀 없는 창(`WS_POPUP`)이라 바깥 사각형의 왼쪽 위가 클라이언트 원점이다.
+    /// The overlay's parent-client position — the parent is a frameless window (`WS_POPUP`), so the top left of the outer rectangle is the client origin.
     fn placed(parent: &TestWindow, child: HWND) -> PhysRect {
         let p = parent.outer();
         let c = rect_of(child);
@@ -371,7 +371,7 @@ mod tests {
     }
 
     fn send(child: HWND, msg: u32, wparam: usize) -> isize {
-        // SAFETY: 이 스레드의 창 — 창 프로시저를 곧바로 부른다.
+        // SAFETY: a window of this thread — calls the window procedure directly.
         unsafe { SendMessageW(child, msg, WPARAM(wparam), LPARAM(0)) }.0
     }
 
@@ -388,7 +388,7 @@ mod tests {
         assert_eq!(placed(&parent, child), moved);
 
         remove_overlay(&parent).expect("걷기");
-        // SAFETY: 값만 보는 조회.
+        // SAFETY: a query that only reads a value.
         assert!(!unsafe { IsWindow(child) }.as_bool());
         assert_eq!(find(parent.hwnd()), None);
         remove_overlay(&parent).expect("없을 때 걷기 = 무동작");
@@ -439,7 +439,7 @@ mod tests {
         let child = find(parent.hwnd()).expect("오버레이");
         let take = || {
             let mut msg = MSG::default();
-            // SAFETY: 이 스레드 큐에서 부모에 온 시스템 명령만 꺼낸다 — 내보내지 않아 창이 커지지 않는다.
+            // SAFETY: takes out only the system command that came to the parent in this thread's queue — it is not dispatched, so the window does not grow.
             unsafe {
                 PeekMessageW(
                     &mut msg,
@@ -476,13 +476,13 @@ mod tests {
                 remove_overlay(&handle),
             )
         });
-        // 가드가 빠지면 남의 스레드가 이 창에 메시지를 보내고 답을 기다린다 — 그동안 이 스레드가 받은 메시지를 처리해
-        //   교착 대신 아래 단언의 실패로 끝나게 한다(`PeekMessageW` 가 들여다보는 동안 보내온 메시지를 처리한다).
+        // If the guard is missing, someone else's thread sends a message to this window and waits for the answer — meanwhile this thread handles the messages it received so that, instead of a
+        //   deadlock, it ends in the failure of the assertion below (`PeekMessageW` handles messages sent in while it peeks).
         let deadline = Instant::now() + Duration::from_secs(5);
         while !worker.is_finished() {
             assert!(Instant::now() < deadline, "남의 스레드가 끝나지 않았다");
             let mut msg = MSG::default();
-            // SAFETY: 이 스레드 큐를 들여다보기만 한다(꺼내지 않는다).
+            // SAFETY: only peeks at this thread's queue (does not take anything out).
             let _ = unsafe { PeekMessageW(&mut msg, HWND::default(), 0, 0, PM_NOREMOVE) };
             std::thread::sleep(Duration::from_millis(1));
         }

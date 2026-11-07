@@ -1,6 +1,6 @@
-//! ② 격리 통합테스트 — AgentSession(OutputCore + Box<dyn AgentTransport>) 합성을 직접 단언 검증.
+//! ② Isolated integration test — directly assert-verifies the AgentSession (OutputCore + Box<dyn AgentTransport>) composition.
 //!
-//! 실 PTY(default shell)를 spawn 한다. 가볍고 전역 경합 없어 default(자동 실행).
+//! Spawns a real PTY (default shell). Light and with no global contention, so default (runs automatically).
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -104,17 +104,17 @@ fn session_compose_resize_exiting_kill() {
     let transport: Box<dyn AgentTransport> = Box::new(transport);
     transport.start(core.clone());
 
-    // intent 0 = TerminationIntent::None — 이 smoke 는 set_intent 를 쓰지 않는다.
+    // intent 0 = TerminationIntent::None — this smoke does not use set_intent.
     let intent = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
-    // 이 smoke 는 default_shell 을 띄우므로 backend caps 도 셸 기준(resume=false).
+    // This smoke launches default_shell, so the backend caps are also by shell (resume=false).
     let shell_cmd = engram_dashboard_agent::profile::AgentCommand::Shell {
         program: "cmd.exe".into(),
         args: vec![],
     };
     let backend_caps = ShellBackend.capabilities(&shell_cmd);
     let encoder = engram_dashboard_agent::backend::InputEncoder::Raw;
-    // ★리터럴로 쓰지 마라★: 하네스가 실물과 반대값을 들면 "산 세션 값 == 백엔드 파생값" 이라는 우편
-    //   자격 방어의 전제가 인트리에서 먼저 깨진다. 같은 명령에서 파생시킨다.
+    // ★Do not write it as a literal★: if the harness holds the opposite value from the real one, the premise of the mail
+    //   eligibility defense, "live session value == backend-derived value", breaks in-tree first. Derive it from the same command.
     let reads_messages = engram_dashboard_agent::backend::reads_messages(&shell_cmd);
     let session = AgentSession::new(
         id,

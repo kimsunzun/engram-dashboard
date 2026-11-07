@@ -1,4 +1,4 @@
-//! 콘솔 프로그램을 띄우는 OS 규칙 — 대화형 기본 셸 · CLI 를 그 OS 의 콘솔 셸로 감싸기. std 만 쓴다.
+//! OS rules for launching console programs — the default interactive shell · wrapping a CLI in that OS's console shell. Uses only std.
 
 #[cfg(windows)]
 pub fn default_shell() -> &'static str {
@@ -9,23 +9,23 @@ pub fn default_shell() -> &'static str {
     "bash"
 }
 
-/// CLI 프로그램 하나를 띄울 `(program, args)` 로 바꾼다 — Windows = `("cmd.exe", ["/c", program, args…])`,
-/// 그 밖 = 받은 그대로.
+/// Turns one CLI program into the `(program, args)` to launch — Windows = `("cmd.exe", ["/c", program, args…])`,
+/// elsewhere = as received.
 ///
-/// **왜 감싸나:** Windows 에서 npm 이 까는 CLI 는 확장자 없는 shim(+ `.cmd`)이라 `CreateProcessW`(ConPTY 도
-/// 이것을 쓴다)가 직접 못 띄운다(error 193 — PATHEXT 도 셸 해석도 안 한다). `cmd.exe /c <prog> …` 로 감싸면
-/// cmd 가 `<prog>.cmd` shim 을 해석해 실제 프로세스를 띄운다. `cmd /c` 는 대상이 끝나면 함께 끝나므로
-/// 「띄운 자식 = 그 CLI」 수명이 유지된다(트리째 끄기는 Job Object 가 한다).
+/// **Why wrap:** a CLI that npm installs on Windows is an extensionless shim (+ `.cmd`), so `CreateProcessW` (ConPTY also
+/// uses it) cannot launch it directly (error 193 — it does neither PATHEXT nor shell interpretation). Wrapping it as `cmd.exe /c <prog> …`
+/// lets cmd resolve the `<prog>.cmd` shim and launch the real process. `cmd /c` ends together with its target, so
+/// the 「띄운 자식 = 그 CLI」 (launched child = that CLI) lifetime is kept (killing the whole tree is done by the Job Object).
 ///
-/// - **CLI(shim) 전용이다** — 직접 띄울 수 있는 실행 파일(`cmd.exe` 자신 따위)에는 쓰지 않는다.
-/// - **알려진 한계 — 인자를 cmd 규칙으로 이스케이프하지 않는다.** Windows 에서 인자는 그대로 `cmd.exe` 의
-///   명령줄에 실리고, cmd 메타문자(`%NAME%` — 따옴표 안에서도 환경변수로 펼친다 · `& ^ | < >`)나 cmd 가
-///   따옴표를 세는 `"` · `\` 가 든 인자는 cmd 가 해석해 바뀐 채 닿을 수 있다. 고치지 않기로 한 결정과 그
-///   근거는 agent `backend/codex/mod.rs` 의 `build_spec` 안 「알려진 한계 — `%VAR%` 가 든 경로는 shim 을
-///   지나며 치환된다」 주석이 정본이다. 완화는 부르는 쪽이 값마다 둔다 — 예: daemon `control/priming.rs` 의
-///   `CMD_UNSAFE_CHARS` · `path_is_cli_safe` · codex 의 `developer_instructions_override` · `mcp_attachment`
-///   거절 · claude `--settings` 를 인라인 JSON 대신 파일 경로로 넘기기.
-/// - 이 명령으로 띄운 프로세스는 Windows 에서 그 CLI 가 아니라 `cmd.exe` 래퍼다 — CLI 자신은 그 아래 후손이다.
+/// - **CLI (shim) only** — do not use it for an executable that can be launched directly (`cmd.exe` itself and the like).
+/// - **Known limitation — arguments are not escaped by cmd rules.** On Windows the arguments are carried as is on the
+///   command line of `cmd.exe`, and an argument containing cmd metacharacters (`%NAME%` — expanded as an environment variable even inside quotes · `& ^ | < >`)
+///   or the `"` and `\` that cmd counts as quotes may reach it changed, as cmd interprets them. The decision not to fix it and its
+///   rationale are authoritatively in the comment 「알려진 한계 — `%VAR%` 가 든 경로는 shim 을
+///   지나며 치환된다」 inside `build_spec` in agent `backend/codex/mod.rs`. Mitigation is placed by the caller per value — e.g. daemon `control/priming.rs`'s
+///   `CMD_UNSAFE_CHARS` · `path_is_cli_safe` · codex's `developer_instructions_override` · `mcp_attachment`
+///   rejection · passing claude `--settings` as a file path instead of inline JSON.
+/// - A process launched with this command is, on Windows, the `cmd.exe` wrapper rather than that CLI — the CLI itself is a descendant under it.
 // ADR-0230
 pub fn console_command(program: &str, args: Vec<String>) -> (String, Vec<String>) {
     #[cfg(windows)]
@@ -46,8 +46,8 @@ pub fn console_command(program: &str, args: Vec<String>) -> (String, Vec<String>
 mod tests {
     use super::*;
 
-    /// ★인자는 한 글자도 바뀌지 않고 순서대로 실린다★ — 공백 · cmd 메타문자가 든 인자도 따옴표나 이스케이프가
-    /// 덧붙지 않는다(위 doc 의 「이스케이프하지 않는다」를 잰다).
+    /// ★Arguments are carried in order without changing a single character★ — arguments with spaces or cmd metacharacters also get no quotes or escapes
+    /// added (it measures the 「이스케이프하지 않는다」 (does not escape) in the doc above).
     #[test]
     fn console_command_wraps_only_on_windows_and_keeps_args_verbatim() {
         let args = vec![

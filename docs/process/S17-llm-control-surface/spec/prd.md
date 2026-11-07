@@ -1,134 +1,134 @@
-# PRD — LLM 제어 표면 (release-safe)
+# PRD — LLM control surface (release-safe)
 
-> 상태: **요구 확정 — `/review prd` full 통과(2026-07-14, 2인 blind 적대 3라운드).** 다음 = TRD. 아키텍처 결정 = ADR-0080.
-> 무엇/왜만 담는다(어떻게 = TRD). 근거·거부대안은 ADR로 박제.
+> Status: **requirements confirmed — passed `/review prd` full (2026-07-14, 2 blind adversarial reviewers, round 3).** Next = TRD. Architecture decision = ADR-0080.
+> Contains only what/why (how = TRD). Rationale and rejected alternatives are recorded in ADRs.
 
-## 무엇 / 왜
+## What / why
 
-release 빌드에서 LLM(스폰된 child claude)이 앱을 제어할 수 없다 — dev CDP·`window.__*` 경로가 release exe에서 죽기 때문. **§5(모든 기능 LLM 제어 가능)를 release에서 실현하는 정식 제어 표면**을 만든다.
+In a release build the LLM (a spawned child claude) cannot control the app — because the dev CDP and `window.__*` paths die in the release exe. This builds **the official control surface that realizes §5 (every feature is LLM-controllable) in release**.
 
-**§5 전면 커버 ≠ MVP 완료 (측정 가능한 완료 상태).** §5는 "모든 기능 LLM 제어 가능"을 요구하나 이는 다단계 목표다. MVP는 §5를 *전면* 달성하지 않는다 — 혼동 방지를 위해 완료 기준을 측정 가능하게 못 박는다: **MVP 완료 = 아래 "MVP 명령 카탈로그"에 열거된 명령이 release 빌드에서 LLM(child claude Bash)으로 실제 동작.** §5 전면 커버는 후속 단계이고, 현재 보류분(테마 변경·레이아웃 저장/복원·트리 네비게이션·렌더모드 override)은 §5 갭으로 `docs/tracking.md` T-11(제약 레이어)·D-7(레이아웃 영속) 등으로 추적한다. 즉 MVP 통과가 §5를 "완료"로 주장하지 않는다.
+**Full §5 coverage ≠ MVP completion (a measurable completion state).** §5 requires "every feature is LLM-controllable", but this is a multi-stage goal. The MVP does not achieve §5 *in full* — to prevent confusion the completion criterion is pinned down measurably: **MVP complete = the commands listed in the "MVP command catalog" below actually work in a release build from the LLM (child claude Bash).** Full §5 coverage is a later stage, and what is currently deferred (theme change, layout save/restore, tree navigation, render-mode override) is tracked as §5 gaps in `docs/tracking.md` T-11 (constraint layer), D-7 (layout persistence), etc. That is, passing the MVP does not claim to have "completed" §5.
 
-**범위/전제 — MVP = 단일 클라이언트(앱) 인스턴스.** MVP는 데몬에 연결된 **앱(클라이언트) 인스턴스가 하나**임을 전제한다. 여러 앱 인스턴스 사이에서 "어느 앱을 대상으로 하나"를 고르는 타깃팅은 MVP 밖(보류) — 이 전제가 UI 명령의 대상 모호성을 MVP 범위에서 없앤다. 다중 앱 인스턴스 라우팅·식별은 후속(브로커 라우팅 미결 참조). (에이전트(child claude 프로세스)는 여러 개 = 정상 — 여기서 "단일"은 UI 권위를 쥔 앱 인스턴스를 말한다.)
+**Scope/premise — MVP = a single client (app) instance.** The MVP presumes there is **exactly one app (client) instance** connected to the daemon. Targeting, which picks "which app is the target" among several app instances, is out of the MVP (deferred) — this premise removes the target ambiguity of UI commands from the MVP scope. Routing and identification across multiple app instances is later (see the broker routing open item). (Multiple agents (child claude processes) is normal — here "single" means the app instance that holds UI authority.)
 
-## 배경 (문제)
+## Background (problem)
 
-- 현 임시 경로 = `scripts/cdp.mjs eval`(dev 전용 원격 디버깅 포트). release `tauri.conf.json`엔 그 포트가 없어 붕괴.
-- 제어 핸들(`window.__engramLayout`·`__engramCmd`·`__ENGRAM_AGENT__`)은 **웹뷰 안** → 외부 프로세스(claude)는 못 닿음.
-- 스파이크 `scripts/engram.mjs`(ADR-0014 방향)가 release-safe 경로(daemon.json portfile → 데몬 WS → AgentCommand)를 이미 증명. 단 THROWAWAY(Node·미번들·에러 삼킴·출력 폐기).
+- The current temporary path = `scripts/cdp.mjs eval` (a dev-only remote debugging port). The release `tauri.conf.json` has no such port, so it collapses.
+- The control handles (`window.__engramLayout`, `__engramCmd`, `__ENGRAM_AGENT__`) are **inside the webview** → an external process (claude) cannot reach them.
+- The spike `scripts/engram.mjs` (the ADR-0014 direction) already proved a release-safe path (daemon.json portfile → daemon WS → AgentCommand). But it is THROWAWAY (Node, unbundled, swallows errors, discards output).
 
-## 요구사항 (동작·정책 언어)
+## Requirements (behavior and policy language)
 
-- **R1.** release 빌드에서 동작 — CDP/devtools 비의존.
-- **R2.** 스폰된 child claude가 **자기 Bash 도구로** 제어(별도 통합·유저 설정 없이).
-- **R3.** 백엔드(spawn/kill/list/preset)와 UI(split/tab/focus/move) **둘 다** 제어.
-- **R4.** 명령은 **의미적**(논리 view-tree 연산) — 좌표 비노출. 기기별 **capability 게이트**(PC multi-window / mobile 단일 창).
-- **R5.** **관찰**: 명령 결과 + 비동기 상태(출력·생사·목록 변화)를 유한 primitive로 확인 가능. + **상태 조회 primitive와 안정 주소지정** — 현재 view-tree를 읽어 "빈 슬롯에 넣어줘" 같은 의미적 상대 지정이 가능해야 한다. **공간 어휘 예시(주소지정 = 방향/이웃/순서, 좌표 금지):** "포커스된 슬롯의 오른쪽", "view X의 첫 빈 슬롯", "이 탭의 마지막 슬롯". (전체 어휘 = ADR-0068 정본, 여기선 판단 가능하게 최소 예시만.) **주소지정 2모드(별개 — 서로 섞지 않는다):** 대상 지정은 두 모드로 갈리고, staleness는 그중 하나에만 적용된다.
-  - **(a) ID 지정:** LLM이 read로 얻은 **안정 ID**(`ViewId`·slot id·window label 등)를 그대로 넘긴다 → 그 ID에 결속. 실행 시점에 그 ID가 **닫혔거나 사라졌으면 명시적 stale 에러 코드로 실패**한다 — 조용히 다른 대상으로 리타깃하지 않는다(구현별 발산 방지). staleness는 이 모드에만 적용된다.
-  - **(b) live-상대 지정:** "현재 포커스된 슬롯의 오른쪽"·"이 탭의 마지막 슬롯" 같은 **live 표현**은 **실행 순간의 상태로 해소**한다(항상 "지금" 기준). 이 모드엔 staleness 개념이 없다 — LLM은 대상이 "실행 시점의 현재 포커스·이웃·순서 기준"임을 받아들이고 지정한다. read→execute 사이 포커스·이웃이 바뀌었어도 그건 stale이 아니라 최신 상태로의 정상 해소다.
+- **R1.** Works in a release build — independent of CDP/devtools.
+- **R2.** A spawned child claude controls **with its own Bash tool** (without separate integration or user settings).
+- **R3.** Controls **both** the backend (spawn/kill/list/preset) and the UI (split/tab/focus/move).
+- **R4.** Commands are **semantic** (logical view-tree operations) — coordinates not exposed. A per-device **capability gate** (PC multi-window / mobile single window).
+- **R5.** **Observation**: the command result + asynchronous state (output, liveness, list changes) can be confirmed through a finite set of primitives. + **A state-query primitive and stable addressing** — it must be possible to read the current view-tree and give a semantic relative target such as "put it in an empty slot". **Spatial vocabulary examples (addressing = direction/neighbor/order, no coordinates):** "to the right of the focused slot", "the first empty slot of view X", "the last slot of this tab". (The full vocabulary = ADR-0068 is the source of truth; here only minimal examples so that this can be judged.) **Two addressing modes (separate — do not mix them):** target designation splits into two modes, and staleness applies to only one of them.
+  - **(a) ID designation:** the LLM passes on a **stable ID** it got from a read (`ViewId`, slot id, window label, etc.) as is → bound to that ID. If that ID has been **closed or has vanished** at execution time, it **fails with an explicit stale error code** — it never silently retargets to another target (prevents divergence between implementations). Staleness applies only to this mode.
+  - **(b) live-relative designation:** a **live expression** such as "to the right of the currently focused slot" or "the last slot of this tab" is **resolved against the state at the moment of execution** (always relative to "now"). This mode has no notion of staleness — the LLM accepts that the target is "relative to the current focus, neighbors and order at execution time" and designates accordingly. Even if focus or neighbors changed between read and execute, that is not stale but a normal resolution against the latest state.
 
-  두 모드는 별개다: ID를 넘겼는데 그 ID가 사라진 것(=stale, 실패)과, live 표현이 새 현재로 해소된 것(=정상)은 다른 사건이다. 정확한 코드·모드 판별 뉘앙스는 미결/TRD. (MVP 대부분 충족 — 아래 "MVP 명령 카탈로그" 참조.)
-- **R6.** 결과는 **정직한 구조화 응답**(성공/실패/재시도 가능 여부) — 거짓 success 금지. **파괴적·상태변경 명령은 멱등하거나, "이미 적용됨"을 구분 가능한 결과로 돌려준다** — timeout 후 재시도가 조용히 이중 적용(예: split 중복 → 슬롯 2번 쪼개짐)되지 않도록. 이게 R6의 "거짓 success 금지"에 실효를 준다(전송됨을 성공으로, 재시도를 신규로 오인 금지). **재시도 identity (at-most-once):** 명령은 **클라이언트가 부여한 requestId**를 실어 보내고, **같은 requestId의 재시도는 at-most-once로 dedup**된다 — timeout 후 비멱등 명령(spawn·write 등)을 재시도해도 두 번째 agent가 생기거나 입력이 중복 전달되지 않는다. 이 dedup은 **세션 내 재연결을 넘어 유지**되어야 한다(연결이 끊겼다 붙어도 같은 requestId면 신규 아님). **유효 창(validity window) = 데몬 수명(= 한 세션) 이내.** dedup의 유효성은 데몬이 살아 있는 동안으로 한정된다 — **데몬 재시작은 dedup 상태를 리셋**하므로, 재시작 이후의 재시도는 best-effort(이중 적용 가능)이며 그 경우 LLM은 read 조회로 실제 반영을 확인해 재조정한다. 관찰 가능 계약(WHAT) = at-most-once 그 자체. 메커니즘(dedup 저장소·재연결 생존·정확한 보존 창 = 메모리 vs durable)은 TRD. 나머지 robustness 차원(부분적용 원자성·순서/동시성·버전 협상)은 아래 미결에서 구체화.
-- **R7.** ~~**보안**: child별 권한 스코프(마스터 토큰 all-or-nothing 탈피).~~ → **보류(deferred) — MVP 밖, 알면서 수용한 위험.** 로컬 단일 PC = 단일 신뢰경계라 현행 마스터 토큰 전권을 허용한다(세밀 스코프 미착수). **수용한 위험(명시):** prompt-injection된 child 하나가 공유 마스터 토큰으로 형제 agent를 kill·write하고 전 UI를 조작(child↔child 횡이동)할 수 있다 — "single PC"는 외부 경계만 덮고 내부 오염된 child는 못 덮는다. 이를 알고도 보류를 유지한다(전제 = 로컬·신뢰 콘텐츠, 재도입 = 모바일/원격 데몬 단계). 상세·사용자 재확인 = `docs/tracking.md` **T-11**(2026-07-14 노트). **핵심 귀결:** R7을 보류하면 MVP가 세밀 인가를 아무도 하지 않으므로 "데몬 opaque-relay(UI 의미 무지) ↔ child별 스코프" 모순이 사라진다 — opaque-relay가 깨끗하게 유지된다. (이 모순이 `/review prd` BLOCK이었고, 보류로 해소.)
+  The two modes are separate: an ID that was passed and has vanished (= stale, failure) and a live expression that resolved to a new current (= normal) are different events. The exact code and the nuance of telling the modes apart are open/TRD. (The MVP mostly satisfies this — see the "MVP command catalog" below.)
+- **R6.** The result is an **honest structured response** (success/failure/whether retry is possible) — no false success. **A destructive or state-changing command is idempotent, or returns "already applied" as a distinguishable result** — so that a retry after a timeout is not silently applied twice (e.g. a duplicated split → the slot is split twice). This gives R6's "no false success" real effect (do not mistake sent for success, or a retry for new). **Retry identity (at-most-once):** a command is sent carrying a **client-assigned requestId**, and **a retry with the same requestId is deduplicated as at-most-once** — even if a non-idempotent command (spawn, write, etc.) is retried after a timeout, no second agent appears and the input is not delivered twice. This dedup must **survive reconnects within a session** (even if the connection drops and reattaches, the same requestId is not new). **Validity window = within the daemon lifetime (= one session).** The validity of the dedup is limited to while the daemon is alive — **a daemon restart resets the dedup state**, so a retry after a restart is best-effort (double application possible), and in that case the LLM confirms the actual effect with a read query and reconciles. The observable contract (WHAT) = at-most-once itself. The mechanism (dedup store, surviving reconnect, the exact retention window = memory vs durable) is TRD. The remaining robustness dimensions (atomicity of partial application, ordering/concurrency, version negotiation) are made concrete in the open items below.
+- **R7.** ~~**Security**: a permission scope per child (get away from the all-or-nothing master token).~~ → **Deferred — out of the MVP, a risk accepted knowingly.** A single local PC = a single trust boundary, so the current full-power master token is allowed (fine-grained scope not started). **Accepted risk (explicit):** one prompt-injected child can use the shared master token to kill or write to sibling agents and operate the whole UI (child↔child lateral movement) — "single PC" covers only the external boundary and not an internally contaminated child. The deferral is kept knowing this (premise = local, trusted content; re-introduction = the mobile/remote daemon stage). Details and the user's re-confirmation = `docs/tracking.md` **T-11** (note of 2026-07-14). **Key consequence:** once R7 is deferred, nobody in the MVP does fine-grained authorization, so the contradiction "daemon opaque-relay (UI-semantics-ignorant) ↔ per-child scope" disappears — the opaque-relay stays clean. (This contradiction was the `/review prd` BLOCK, and the deferral resolved it.)
 
-## MVP 명령 카탈로그 (범위 — MVP/보류 경계)
+## MVP command catalog (scope — MVP/deferred boundary)
 
-**원칙: MVP = "동작이 이미 권위에 존재하는 커맨드만" 노출.** S17은 새 백엔드/ViewManager 연산을 만들지 않는다 — release-safe한 *명령 경로*(engram-ctl → 데몬 relay → ViewManager)만 짓는다. 아래 둘 다 이미 dispatch/`#[tauri::command]`로 살아 있는 것들이다.
+**Principle: the MVP exposes "only commands whose behavior already exists in the authority".** S17 builds no new backend/ViewManager operations — it builds only the release-safe *command path* (engram-ctl → daemon relay → ViewManager). Both of the following are already alive as dispatch / `#[tauri::command]`.
 
-**카탈로그 = 닫힌 집합(closed set).** MVP 카탈로그는 **현재 dispatch되는 `AgentManager` wire 명령 전체 + `ViewManager`의 `#[tauri::command]` 전체**와 정확히 같다 — 즉 코드에 이미 존재하는 연산 집합이 곧 카탈로그이고, 새로 발명하지 않는다. 정확히 열거된 닫힌 목록은 **코드에서 뽑아 TRD에 박제**한다(그래서 완결성이 근사치가 아니라 검증 가능하다 — "빠진 게 없다"를 코드 대조로 확인). 아래 카테고리 분류·파일 참조는 방향잡기용으로 그대로 둔다.
+**The catalog = a closed set.** The MVP catalog is exactly equal to **all `AgentManager` wire commands currently dispatched + all `#[tauri::command]` of `ViewManager`** — that is, the set of operations already in the code is the catalog, and nothing is invented. The exact enumerated closed list is **extracted from the code and recorded in the TRD** (so completeness is verifiable rather than approximate — "nothing is missing" is confirmed by cross-checking against the code). The category grouping and file references below are left as they are for orientation.
 
-**MVP *표면*의 구성 (A)+(B).** 위 "권위 명령"은 카탈로그의 (A) 부분이다. MVP가 노출하는 전체 *표면* = **(A) 위 권위 명령(그대로 노출)** + **(B) engram-ctl 관찰·발견 primitive**(`wait` · `events poll` · `output tail` · `list_commands`). (B)는 새 백엔드 연산이 아니라 **기존 Subscribe/epoch/seq/replay 프로토콜 + capability 데이터 위에 얹은 얇은 CLI 표면**이다(R5/관찰/AC에 정의). 따라서 "닫힌 집합"은 (A)와 (B) 둘 다 포함한다.
+**Composition of the MVP *surface* (A)+(B).** The "authority commands" above are part (A) of the catalog. The whole *surface* the MVP exposes = **(A) the authority commands above (exposed as they are)** + **(B) engram-ctl observation and discovery primitives** (`wait` · `events poll` · `output tail` · `list_commands`). (B) is not a new backend operation but **a thin CLI surface laid over the existing Subscribe/epoch/seq/replay protocol + capability data** (defined in R5/observation/AC). So the "closed set" includes both (A) and (B).
 
-**테스트 가능성 요구(전 카탈로그):** **모든 MVP 카탈로그 명령은 경계·에러 케이스를 포함한 결과 계약을 가진다** — 성공 형태뿐 아니라 실패·경계 상황에서 무엇을 돌려주는지 정의되어야 테스트로 검증 가능하다. 대표 경계 예: 이미 종료된 agent를 kill, 비어 있지 않은 slot을 close, 순환이 되는 profile reparent(자기 자손을 부모로), 현재 기기에서 미지원인 명령(capability 게이트 밖). 각 명령별 정확한 에러 코드·계약 표는 TRD.
+**Testability requirement (the whole catalog):** **every MVP catalog command has a result contract that includes boundary and error cases** — what it returns in failure and boundary situations, not only the success shape, must be defined for it to be verifiable by tests. Representative boundary examples: kill an agent that has already exited, close a non-empty slot, a profile reparent that would form a cycle (making your own descendant the parent), a command unsupported on the current device (outside the capability gate). The exact error codes and contract table per command are TRD.
 
-- **백엔드 `AgentManager` (현재 dispatch되는 wire 명령 전체, 닫힌 집합):** spawn / kill / interrupt / write(stdin) / resize / list + **input lease**(acquire/release) + **profile CRUD**(create/delete/rename/reparent/auto-restore/spawn) + **preset CRUD**(create/delete/rename/list) + snapshot. (정의: `crates/engram-dashboard-core/src/agent/manager.rs`, wire = `crates/engram-dashboard-daemon/src/connection_core.rs`. 정확한 열거 = TRD가 코드에서 pin.)
-- **UI `ViewManager` (현재 `#[tauri::command]` 전체, 닫힌 집합):** tabs(create/switch/close/rename), windows(create/close), slots(split/close/focus), content(assign_agent/set_slot_content), popout(move_slot_to_window), **그리고 read 조회**(get_view/list_tabs/list_windows/snapshot). (정의: `src-tauri/src/layout/manager.rs`, 커맨드 = `src-tauri/src/commands/layout.rs`. 정확한 열거 = TRD가 코드에서 pin.)
+- **Backend `AgentManager` (all wire commands currently dispatched, closed set):** spawn / kill / interrupt / write(stdin) / resize / list + **input lease** (acquire/release) + **profile CRUD** (create/delete/rename/reparent/auto-restore/spawn) + **preset CRUD** (create/delete/rename/list) + snapshot. (Definition: `crates/engram-dashboard-core/src/agent/manager.rs`, wire = `crates/engram-dashboard-daemon/src/connection_core.rs`. The exact enumeration = the TRD pins it from the code.)
+- **UI `ViewManager` (all `#[tauri::command]` currently, closed set):** tabs (create/switch/close/rename), windows (create/close), slots (split/close/focus), content (assign_agent/set_slot_content), popout (move_slot_to_window), **and read queries** (get_view/list_tabs/list_windows/snapshot). (Definition: `src-tauri/src/layout/manager.rs`, commands = `src-tauri/src/commands/layout.rs`. The exact enumeration = the TRD pins it from the code.)
 
-### MVP 밖 (§5 갭 — 명시 보류)
+### Outside the MVP (§5 gaps — explicitly deferred)
 
-동작(UI)은 있으나 **권위(ViewManager/backend)에 안 붙어 있어** release-safe 노출에 신규 배선이 필요한 것들. §5 갭을 숨기지 않고 명시한다:
+Things that have a behavior (UI) but are **not attached to the authority (ViewManager/backend)**, so exposing them release-safe needs new wiring. The §5 gaps are stated explicitly rather than hidden:
 
-- **테마 변경** — v1 사용자 명시 거절.
-- **렌더모드 override** (슬롯별 렌더러 강제).
-- **레이아웃 저장/복원** — 현재 미구현(`docs/tracking.md` D-7 참조).
-- **트리 노드 네비게이션** — 현재 LLM read-only.
+- **Theme change** — explicitly declined by the user for v1.
+- **Render-mode override** (forcing the renderer per slot).
+- **Layout save/restore** — not implemented at present (see `docs/tracking.md` D-7).
+- **Tree node navigation** — currently LLM read-only.
 
-## 결정된 설계 방향
+## Decided design direction
 
-### 호출 (invocation)
+### Invocation
 
-`claude Bash 도구 → Rust engram-ctl(protocol crate 공유·컴파일 산출) → 데몬 WS(토큰 auth)`. 모델은 텍스트 또는 tool-use로만 세상에 작용하며, 여기선 **Bash 도구 = 구조화된 행동**이다.
+`claude Bash 도구 → Rust engram-ctl(protocol crate 공유·컴파일 산출) → 데몬 WS(토큰 auth)`. The model acts on the world only through text or tool-use, and here the **Bash tool = a structured action**.
 
-- **MCP over HTTP 배제** — 로컬 부모-자식에 프로토콜 ceremony 과다.
-- **로컬 stdio MCP = MVP 밖·금지 아님** — 명령 카탈로그가 커지거나 "넓은 Bash 대신 좁은 툴 권한"이 중요해지면 재검토(cross-family 리뷰 반론 기록).
-- **chat-text 파싱 배제** — 취약·환각.
+- **MCP over HTTP excluded** — too much protocol ceremony for a local parent-child.
+- **Local stdio MCP = outside the MVP, not forbidden** — revisit if the command catalog grows or "a narrow tool permission instead of a broad Bash" becomes important (cross-family review counterargument recorded).
+- **chat-text parsing excluded** — fragile and hallucination-prone.
 
-### 권위 2도메인 + 라우팅
+### Two authority domains + routing
 
-- **백엔드 권위 = 데몬**(`AgentManager`). `engram-ctl → 데몬 WS` 직행. PC·모바일 이식.
-- **UI/레이아웃 권위 = 앱**(`ViewManager`, ADR-0035). **데몬 opaque-relay**: 데몬은 UI payload를 **해석하지 않고** 대상 앱 연결로 전달 → 앱이 로컬 Tauri 명령과 **같은 ViewManager 경로**로 적용 → 결과 correlation으로 회수. 데몬은 UI 무지 유지(ADR-0035 보존), 역할만 "두 클라이언트(CLI↔앱) 사이 opaque 브로커"로 확장.
+- **Backend authority = the daemon** (`AgentManager`). `engram-ctl → 데몬 WS` directly. Portable to PC and mobile.
+- **UI/layout authority = the app** (`ViewManager`, ADR-0035). **Daemon opaque-relay**: the daemon forwards the UI payload to the target app connection **without interpreting it** → the app applies it through **the same ViewManager path** as a local Tauri command → the result is retrieved by correlation. The daemon stays UI-ignorant (ADR-0035 preserved); only its role is extended to "an opaque broker between two clients (CLI↔app)".
 
-### 명령 모델 (2층)
+### Command model (2 layers)
 
-- **도메인 층(이식):** agent·preset — 전 기기 동일 카탈로그.
-- **표현 층(기기형):** 레이아웃 — 논리 트리 의미 연산(좌표 금지, ADR-0068 공간 어휘: 이웃·순서·방향) + capability 게이트. `list_commands`가 현재 기기 가용 명령을 반환(온디맨드 발견).
+- **Domain layer (portable):** agent, preset — the same catalog on every device.
+- **Presentation layer (device-specific):** layout — logical-tree semantic operations (no coordinates, ADR-0068 spatial vocabulary: neighbor, order, direction) + capability gate. `list_commands` returns the commands available on the current device (on-demand discovery).
 
-### 관찰 (observation)
+### Observation
 
-셸 명령은 지속 스트림을 턴 간 못 잡음 → 유한 primitive: `wait --until running|exited`, `events poll --cursor`, `output tail --agent --epoch --after-seq --until message-done`. 기존 Subscribe/epoch/seq/replay 프로토콜 위에.
+A shell command cannot hold a persistent stream across turns → finite primitives: `wait --until running|exited`, `events poll --cursor`, `output tail --agent --epoch --after-seq --until message-done`. On top of the existing Subscribe/epoch/seq/replay protocol.
 
-**턴 경계 계약(R5/관찰 — 요구):** LLM이 **child agent의 단일 응답 완료(턴 경계)를 신뢰성 있게 감지**할 수 있어야 한다. `output tail --until message-done`은 그 child의 한 응답이 끝나는 지점에서 멈춰야 한다 — 응답 도중에 임의로 끊거나, 다음 응답을 삼켜 이어 붙이지 않는다. **응답 결속(어느 턴인가):** tail은 **알려진 시작점(커서/start point)에서 시작하는 하나의 턴에 결속**한다 — 그래서 버퍼된 이전 출력 뒤의 임의 응답이 아니라 **명확히 정의된 그 응답**을 선택한다(시작 커서 없이 "다음에 오는 아무 done"에 붙지 않는다). **관찰 가능 결과(WHAT):** tail이 (a) 시간 제한 안에 턴 경계에 도달하면 "완료(done)" + 그 지점까지의 출력 + 이어받을 커서를 반환, (b) 시간 제한이 턴 경계 전에 걸리면 "미완(pending/timeout)" + 지금까지 출력 + **이어받기 가능한 커서**, (c) 커서 만료·데몬 재시작이면 "재개 불가(stale/reset)" 신호, (d) **tail 도중 child가 kill/exit되거나 interrupt되면 종결(terminal) 결과**(aborted/exited)를 반환 — 무기한 pending으로 남지 않는다. **어느 경우에도 조용한 잘림(silent truncation) 금지 · 무기한 대기 금지** — 결과는 서로 구분 가능하고 (b)는 재개 가능하며 (d)는 종결이어야 한다. 수용 기준(아래)은 "tail이 무언가 돌려줬다"가 아니라 "**턴 경계에서 멈췄다**"를 실제로 증명해야 한다.
+**Turn-boundary contract (R5/observation — requirement):** the LLM must be able to **reliably detect the completion of a single response of a child agent (the turn boundary)**. `output tail --until message-done` must stop at the point where that child's one response ends — it must not cut off arbitrarily mid-response, nor swallow the next response and run on. **Response binding (which turn):** the tail **binds to one turn that starts at a known starting point (cursor/start point)** — so it selects **that clearly defined response**, not an arbitrary response after previously buffered output (it does not attach to "whichever done comes next" without a start cursor). **Observable result (WHAT):** the tail (a) if it reaches the turn boundary within the time limit, returns "done" + the output up to that point + a cursor to resume from, (b) if the time limit hits before the turn boundary, returns "incomplete (pending/timeout)" + the output so far + **a resumable cursor**, (c) if the cursor has expired or the daemon restarted, a "cannot resume (stale/reset)" signal, (d) **if the child is killed/exits or is interrupted during the tail, returns a terminal result** (aborted/exited) — it does not stay pending forever. **In no case silent truncation · no indefinite waiting** — the results must be distinguishable from each other, (b) must be resumable, and (d) must be terminal. The acceptance criterion (below) must actually prove "**it stopped at the turn boundary**", not "the tail returned something".
 
-**상태 조회(R5) = 기존 ViewManager read 조회로 대부분 충족.** `snapshot`(ADR-0068 방향-이웃 공간 메타 포함)·`list_tabs`·`list_windows`·`get_view`가 view-tree 상태 조회 primitive다. 안정 ID(`ViewId`·slot id·window label)가 이미 존재 → "빈 슬롯에 넣어줘" 식 의미적 상대 지정이 가능. **주소지정 2모드 스탠스(R5와 동일):** (a) **ID 지정** — read로 얻은 안정 ID를 넘기면 그 ID에 결속하고, 실행 시점에 그 ID가 닫혔거나 사라졌으면 명시적 stale 에러로 실패한다(조용한 재해석·리타깃 금지). (b) **live-상대 지정** — "포커스된 슬롯의 오른쪽" 같은 표현은 실행 시점 상태로 live 해소하며 staleness 개념이 없다. stale 에러는 (a)에만 적용 — R5 참조. 정확한 코드·모드 판별은 아래 미결.
+**State query (R5) = mostly satisfied by the existing ViewManager read queries.** `snapshot` (including the ADR-0068 direction-neighbor spatial metadata), `list_tabs`, `list_windows` and `get_view` are the view-tree state-query primitives. Stable IDs (`ViewId`, slot id, window label) already exist → a semantic relative designation such as "put it in an empty slot" is possible. **Two-mode addressing stance (same as R5):** (a) **ID designation** — passing a stable ID obtained by read binds to that ID, and if that ID has been closed or has vanished at execution time it fails with an explicit stale error (no silent reinterpretation or retargeting). (b) **live-relative designation** — an expression such as "to the right of the focused slot" is resolved live against the state at execution time and has no notion of staleness. The stale error applies only to (a) — see R5. The exact code and mode discrimination are in the open items below.
 
-### 결과 계약
+### Result contract
 
-안정 JSON 봉투 — `{v,ok:true,requestId,result}` / `{v,ok:false,error{code,message,retryable}}`. nonzero exit code. **UI 성공은 ViewManager 적용 후에만 확정**(전송됨 ≠ 적용됨).
+A stable JSON envelope — `{v,ok:true,requestId,result}` / `{v,ok:false,error{code,message,retryable}}`. A nonzero exit code. **UI success is confirmed only after the ViewManager applies it** (sent ≠ applied).
 
-**UI 명령 직렬화 (순서 직렬화 · 최신 상태 관찰):** UI 명령은 **단일 `ViewManager` 권위(ADR-0035, in-proc)가 순차 적용**한다 — 그래서 성공은 전송이 아니라 **ViewManager 적용 완료**를 뜻하고(전송됨 ≠ 적용됨 유지), **성공한 명령의 효과는 그 적용 시점에 실재**한다. 이후 read는 **그 시점 이후의 현재 상태**를 반환한다 — 다른 행위자(다른 child·사람)가 그 사이 추가로 상태를 바꿨을 수 있으므로, "read가 반드시 내 효과를 그대로 보여준다"고 보장하지는 않는다(단일 ViewManager가 *순서*는 직렬화하나, *관찰*은 최신 상태 기준). 동시 UI 연산이 MVP 범위에서 분산 경쟁이 아닌 이유가 이것이다: 순서대로 적용하는 권위가 하나뿐이다(단일 앱 인스턴스 전제 = 위 "범위/전제"). 따라서 두 UI 명령의 상대 순서는 도착 순서로 결정되고, 각 명령의 결과는 그 명령이 적용된 뒤의 상태를 반영한다.
+**UI command serialization (order serialization · observing the latest state):** UI commands are **applied sequentially by the single `ViewManager` authority (ADR-0035, in-proc)** — so success means **the ViewManager has finished applying**, not sending (sent ≠ applied is kept), and **the effect of a successful command is real at the moment it is applied**. A later read returns **the current state after that moment** — another actor (another child, a human) may have changed the state further in the meantime, so it does not guarantee that "a read always shows my effect as it is" (the single ViewManager serializes the *order*, but the *observation* is against the latest state). This is why concurrent UI operations are not a distributed race within the MVP scope: there is only one authority that applies in order (single app instance premise = "Scope/premise" above). So the relative order of two UI commands is decided by arrival order, and the result of each command reflects the state after that command was applied.
 
-**write ⟂ input lease:** `write`(stdin)는 **input lease 보유를 전제**한다 — lease 없이 write하면(예: 사람이 그 슬롯에 타이핑 중이거나 다른 보유자가 있음) **조용한 no-op이 아니라 구분 가능한 정직한 에러 코드로 실패**한다. 기존 `AcquireInput`/`ReleaseInput` lease(Zellij식 단일 writer)를 그대로 활용한다. 이로써 사람↔LLM의 stdin 경합이 관찰 가능·정의된 동작이 된다(누가 쥐고 있으면 write는 성공하지 않고 명시적으로 거부). **보유자 소실 시 자동 해제(좀비 lock 방지):** 보유 중인 input lease는 **보유자(연결)가 종료·연결해제·kill되면 자동으로 해제**된다 — 죽은 보유자가 이후의 write를 무기한 막지 못한다. (현행 데몬 동작 = 연결 cleanup 시 lease 자동 해제.)
+**write ⟂ input lease:** `write` (stdin) **presupposes holding the input lease** — writing without the lease (e.g. a human is typing in that slot or another holder exists) **fails with a distinguishable honest error code, not a silent no-op**. The existing `AcquireInput`/`ReleaseInput` lease (a Zellij-style single writer) is used as is. This makes stdin contention between human and LLM an observable, defined behavior (if someone holds it, write does not succeed and is explicitly rejected). **Automatic release when the holder is lost (preventing zombie locks):** a held input lease is **released automatically when the holder (connection) exits, disconnects or is killed** — a dead holder cannot block later writes indefinitely. (Current daemon behavior = the lease is auto-released on connection cleanup.)
 
-### 산출물
+### Deliverable
 
-Node 스파이크(`engram.mjs`) → **컴파일 Rust `engram-ctl`**(번들, protocol crate 공유). Node 런타임 의존·미번들 해소, per-call 스폰 비용↓.
+The Node spike (`engram.mjs`) → **a compiled Rust `engram-ctl`** (bundled, shares the protocol crate). Resolves the Node runtime dependency and being unbundled; lowers per-call spawn cost.
 
-## 수용 기준
+## Acceptance criteria
 
-- **(전제) discoverability(R2):** child claude의 Bash 셸이 **수동 PATH 설정 없이** `engram-ctl`을 이름으로 해석·실행한다(별도 통합·유저 설정 X). 아래 spawn/kill/list AC의 선행 조건 — 이게 안 되면 명령이 애초에 실행 안 됨. (메커니즘 = spawn 오버레이, 미결 참조.)
-- release 빌드에서 child claude가 Bash로 `engram-ctl spawn/kill/list` 성공 + JSON 결과 회수.
-- 앱 실행 중 `engram-ctl split/tab` → `ViewManager` 반영 확인 + 결과 correlation.
-- **라우팅 실패 3종 구분(정직한 결과 코드):** UI 명령의 결과는 아래 셋을 서로 다른 정직한 코드로 구분한다 — (a) 처음부터 앱 미연결 = 명령이 앱에 닿지도 못함(`APP_OFFLINE`, 확정 미적용), (b) 데몬은 접수했으나 결과 correlation 전에 앱 연결이 끊김 = 적용 여부 불명(`APP_DISCONNECTED`/unknown, 확정 성공도 실패도 아님), (c) timeout — 응답 시한 초과, 그 사이 **뒤늦게 적용됐을 수 있음**(`TIMEOUT`, 적용 여부 불명). (a)만 "확정 미적용"이고 (b)(c)는 불명 상태임을 결과가 드러내야 한다. **재조정 스탠스:** 불명(b/c) 상태는 read 조회(snapshot 등)로 실제 반영 여부를 확인해 재조정한다 — 결과 코드가 "적용됨"을 거짓 주장하지 않는다(R6: 거짓 success 금지). 정확한 코드 집합·correlation/타임아웃 재조정 메커니즘은 TRD.
-- 관찰 primitive로 spawn 성공·출력 tail 확인. **(턴 경계)** `output tail --until message-done`이 child의 한 응답 완료 지점에서 멈추는 것을 실증한다 — 두 번 응답을 시키고 첫 tail이 **첫 응답 경계에서 멈춰 done + 커서를 반환**(둘째 응답을 삼키지 않음), 이어서 그 커서로 둘째 응답을 회수. 시한이 경계 전에 걸리면 pending + 이어받기 커서(조용한 잘림 아님)를 확인. "무언가 돌려줬다"가 아니라 "경계에서 멈췄다"를 증명해야 통과.
-- **상태 조회(R5):** `engram-ctl` read 명령(get_view/list_tabs/list_windows/snapshot)이 현재 view-tree(안정 ID + ADR-0068 공간 메타)를 JSON으로 반환 → 의미적 상대 지정("빈 슬롯")의 근거를 LLM이 회수.
-- **경계·에러 계약(테스트 가능성):** 대표 경계 케이스가 조용한 실패·거짓 success 없이 구분 가능한 정직한 결과를 돌려준다 — 이미 종료된 agent kill(no-op/already-gone 구분), 비어 있지 않은 slot close, 순환 profile reparent 거부, 현재 기기 미지원 명령(capability 게이트 밖 거부). stale-ref 주소지정은 명시적 에러(리타깃 금지, R5 스탠스). 명령별 정확한 코드 = TRD.
-- **멱등성/중복(R6):** 파괴적 명령을 timeout 후 재시도해도 이중 적용되지 않는다 — 예: 같은 의도의 split을 재시도하면 슬롯이 두 번 쪼개지지 않고 멱등 성공 또는 "이미 적용됨"으로 구분 반환. **재시도 identity(at-most-once):** 같은 requestId로 spawn을 재시도하면 두 번째 agent가 생기지 않고 dedup된 단일 결과가 온다(비멱등 명령의 at-most-once, R6).
-- **다대상 non-blocking 감시(events poll):** agent A를 spawn한 뒤, `events poll --cursor`로 A의 죽음·agent-list 변화를 **블로킹 대기 없이** 커서 델타로 감지한다. 이것이 다중 agent 병렬 감독 경로다 — 단일 대상을 블로킹으로 기다리는 `wait`와 구분된다(한 대상에 매여 다른 agent를 못 보는 상황을 피한다).
-- **write→tail 왕복(다른 claude 대화 구동, end-to-end):** child agent에게 `write`(stdin)로 프롬프트를 넣고, 이어서 `output tail --until message-done`이 **바로 그 한 응답**을 회수하고 그 경계에서 멈춘다 — 이것이 "다른 claude를 대화로 구동하는" 루프의 처음부터 끝까지 실증이다(write가 lease를 전제로 성공한 뒤 tail이 그 응답에 결속).
-- **backend↔UI 조인(join key):** 백엔드 `snapshot`/list(agent 생사·목록)와 UI `snapshot`(slot↔agent 매핑)이 **안정적 조인 키**(agentId ↔ slot이 참조하는 agent)를 공유해, LLM이 "지금 죽은 agent가 있던 슬롯을 찾아 거기서 respawn"을 답할 수 있다. 두 도메인이 조인 가능한 안정 키를 노출함을 실증한다.
-- **list_commands 부트스트랩(온디맨드 발견):** LLM의 첫 턴 `list_commands`가 **현재 기기에서 가용한 명령 집합**을 반환한다(온디맨드 발견) — mobile 프로파일 기기에서는 표현 층 명령이 capability 게이트에 따라 달라진다(도메인 명령은 동일).
-- (모바일 가정) 도메인 명령 동일, 표현 명령은 capability 게이트로 상이.
+- **(Premise) discoverability (R2):** the Bash shell of child claude resolves and runs `engram-ctl` by name **without manual PATH setup** (no separate integration or user settings). A precondition of the spawn/kill/list AC below — if this does not work the commands do not run at all. (Mechanism = the spawn overlay, see open items.)
+- In a release build the child claude succeeds at `engram-ctl spawn/kill/list` through Bash + retrieves the JSON result.
+- While the app is running, `engram-ctl split/tab` → confirm reflection in `ViewManager` + result correlation.
+- **Telling 3 routing failures apart (honest result codes):** the result of a UI command distinguishes the following three with different honest codes — (a) the app was not connected from the start = the command could not even reach the app (`APP_OFFLINE`, confirmed not applied), (b) the daemon accepted it but the app connection dropped before result correlation = whether it was applied is unknown (`APP_DISCONNECTED`/unknown, neither confirmed success nor failure), (c) timeout — the response deadline was exceeded, and **it may have been applied late** in the meantime (`TIMEOUT`, whether it was applied is unknown). The result must reveal that only (a) is "confirmed not applied" and (b)(c) are unknown states. **Reconciliation stance:** an unknown (b/c) state is reconciled by confirming the actual effect with a read query (snapshot, etc.) — the result code does not falsely claim "applied" (R6: no false success). The exact code set and the correlation/timeout reconciliation mechanism are TRD.
+- With observation primitives, confirm spawn success and the output tail. **(Turn boundary)** Demonstrate that `output tail --until message-done` stops at the completion point of one response of the child — have it respond twice, and the first tail **stops at the first response boundary and returns done + a cursor** (does not swallow the second response), then retrieve the second response with that cursor. If the time limit hits before the boundary, confirm pending + a resume cursor (not silent truncation). It passes only by proving "it stopped at the boundary", not "it returned something".
+- **State query (R5):** the `engram-ctl` read commands (get_view/list_tabs/list_windows/snapshot) return the current view-tree (stable IDs + ADR-0068 spatial metadata) as JSON → the LLM retrieves the basis for semantic relative designation ("empty slot").
+- **Boundary and error contract (testability):** representative boundary cases return distinguishable honest results with no silent failure or false success — killing an already-exited agent (distinguish no-op/already-gone), closing a non-empty slot, rejecting a cyclic profile reparent, a command unsupported on the current device (rejected as outside the capability gate). Stale-ref addressing is an explicit error (no retargeting, R5 stance). The exact code per command = TRD.
+- **Idempotency/duplication (R6):** a destructive command retried after a timeout is not applied twice — e.g. retrying a split of the same intent does not split the slot twice and returns an idempotent success or a distinguishable "already applied". **Retry identity (at-most-once):** retrying a spawn with the same requestId does not create a second agent and returns a single deduplicated result (at-most-once of a non-idempotent command, R6).
+- **Multi-target non-blocking watching (events poll):** after spawning agent A, detect A's death and agent-list changes as cursor deltas with `events poll --cursor` **without blocking waits**. This is the path for supervising multiple agents in parallel — distinct from `wait`, which waits blockingly on a single target (avoids being tied to one target and unable to see other agents).
+- **write→tail round trip (driving another claude conversation, end-to-end):** put a prompt to a child agent with `write` (stdin), then `output tail --until message-done` retrieves **exactly that one response** and stops at its boundary — this is the end-to-end demonstration of the loop "drive another claude by conversation" (after write succeeds on the premise of the lease, the tail binds to that response).
+- **backend↔UI join (join key):** the backend `snapshot`/list (agent liveness and list) and the UI `snapshot` (slot↔agent mapping) share a **stable join key** (agentId ↔ the agent a slot references), so the LLM can answer "find the slot where a now-dead agent was and respawn there". Demonstrate that the two domains expose a stable key they can be joined on.
+- **list_commands bootstrap (on-demand discovery):** the LLM's first-turn `list_commands` returns **the set of commands available on the current device** (on-demand discovery) — on a mobile-profile device the presentation-layer commands differ according to the capability gate (the domain commands are the same).
+- (Mobile assumption) the domain commands are the same, the presentation commands differ by capability gate.
 
-## 거부한 대안 (→ ADR-0080 거부 대안)
+## Rejected alternatives (→ ADR-0080 rejected alternatives)
 
-- **MCP over HTTP:** 로컬 부모-자식에 HTTP/JSON-RPC/핸드셰이크 ceremony 과다.
-- **chat-text 파싱:** 취약·환각, tool-use 대비 열등.
-- **CDP-in-release:** 디버깅 포트 = 보안 노출 + WebView2 실측 미검증(Chrome 136 근거는 WebView2에 미적용).
-- **UI용 앱-소유 별도 엔드포인트:** 2차 엔드포인트·discovery·auth 중복 → 데몬 relay 대비 비용↑(모바일에선 원격 데몬이 유일 경로라 relay가 이식성도 우위).
+- **MCP over HTTP:** too much HTTP/JSON-RPC/handshake ceremony for a local parent-child.
+- **chat-text parsing:** fragile, hallucination-prone, inferior to tool-use.
+- **CDP-in-release:** the debugging port = a security exposure + WebView2 measurement unverified (the Chrome 136 basis does not apply to WebView2).
+- **An app-owned separate endpoint for the UI:** a second endpoint, duplicated discovery and auth → higher cost than the daemon relay (on mobile the remote daemon is the only path, so the relay is also superior in portability).
 
-## 미결 (TRD로)
+## Open (to TRD)
 
-- 제어 토큰 주입: `profile.env` 금지(agents.json 평문) → ephemeral spawn 오버레이(상속 핸들). (child별 스코프 자체는 R7 보류 = `docs/tracking.md` T-11 — MVP는 현행 단일 마스터 토큰 전권.)
-- **engram-ctl discoverability(R2):** child claude의 Bash 셸이 `engram-ctl`을 이름으로 해석할 수 있어야 한다("유저 설정 없이"). 방향 = 데몬이 child 스폰 시 그 프로세스 환경(PATH 또는 전용 env var)에 번들된 engram-ctl 경로를 주입 — 위 제어 토큰 주입과 **같은 spawn 오버레이 훅**. 정확한 형태(PATH prepend vs env var)는 TRD. (순수 내부 메커니즘 — 사용자 체감 X.)
-- event journal(durable cursor) vs `ListAgents` 재조정.
-- 명령 카탈로그 노출 형태·발견(`list_commands`) — 대상 연산은 위 "MVP 명령 카탈로그"로 확정, 어휘·인자·게이트 표현은 TRD.
-- 데몬 브로커 라우팅: 앱 identity/lease, 다중 창(main+popout), offline 정책, request→result 타임아웃.
-- **stale-ref 의미론(R5) — 스탠스 결정(R5 2모드: ID 지정 = stale 에러·리타깃 금지 / live-상대 = 실행 시점 해소·staleness 없음), 메커니즘 TRD:** 정확한 에러 코드 집합, live 해소의 구현(어느 시점 상태로 해소하나), 자동 재해석 예외(있다면)의 조건 — TRD.
-- **재시도 identity(at-most-once) — 스탠스 결정(R6: 같은 requestId 재시도 = 신규 아님·세션 내 재연결 넘어 생존, 단 유효 창 = 데몬 수명 이내·데몬 재시작 시 리셋), 메커니즘 TRD:** dedup 저장소 형태·재연결 생존 방식·정확한 보존 창(메모리 vs durable)·requestId 수명 — TRD.
-- **순서/동시성 — 스탠스 결정(결과 계약: 단일 ViewManager 권위가 순차 적용 → 순서 직렬화; 관찰은 최신 상태 기준 = 엄격 read-your-writes 아님), 메커니즘 TRD:** 순차 적용 큐/락 형태, 동시 도착 명령의 순서 확정 지점 — TRD.
-- **R6 robustness — 진짜 미결(hard):** 멱등성·재시도 identity·순서는 위에서 스탠스 확정. 여기 남는 진짜 열린 hard 차원 = **다중 명령 의도의 부분적용 원자성**(하나의 논리적 의도가 여러 명령으로 쪼개졌을 때 중간 실패 시 원자성), **mixed-version 협상**(engram-ctl↔데몬↔앱 버전 불일치 시 협상). — TRD.
+- Control token injection: `profile.env` forbidden (agents.json plaintext) → an ephemeral spawn overlay (inherited handle). (Per-child scope itself is deferred as R7 = `docs/tracking.md` T-11 — the MVP uses the current single master token with full power.)
+- **engram-ctl discoverability (R2):** the Bash shell of child claude must be able to resolve `engram-ctl` by name ("without user settings"). The direction = when spawning the child, the daemon injects the path of the bundled engram-ctl into that process's environment (PATH or a dedicated env var) — **the same spawn overlay hook** as the control token injection above. The exact form (PATH prepend vs env var) is TRD. (A purely internal mechanism — not perceptible to the user.)
+- event journal (durable cursor) vs `ListAgents` reconciliation.
+- The exposed form and discovery (`list_commands`) of the command catalog — the target operations are fixed by the "MVP command catalog" above; the vocabulary, arguments and gate representation are TRD.
+- Daemon broker routing: app identity/lease, multiple windows (main+popout), offline policy, request→result timeout.
+- **Stale-ref semantics (R5) — stance decided (R5 2 modes: ID designation = stale error, no retargeting / live-relative = resolved at execution time, no staleness), mechanism TRD:** the exact error code set, the implementation of live resolution (resolved against the state of which moment), the conditions of an automatic reinterpretation exception (if any) — TRD.
+- **Retry identity (at-most-once) — stance decided (R6: a retry with the same requestId = not new, survives reconnects within a session, but validity window = within the daemon lifetime, reset on daemon restart), mechanism TRD:** the form of the dedup store, how it survives reconnect, the exact retention window (memory vs durable), requestId lifetime — TRD.
+- **Ordering/concurrency — stance decided (result contract: the single ViewManager authority applies sequentially → order serialization; observation is against the latest state = not strict read-your-writes), mechanism TRD:** the form of the sequential-apply queue/lock, the point where the order of concurrently arriving commands is fixed — TRD.
+- **R6 robustness — truly open (hard):** idempotency, retry identity and ordering have stances fixed above. The truly open hard dimensions left here = **atomicity of partial application of a multi-command intent** (atomicity on a mid-way failure when one logical intent is split across several commands), **mixed-version negotiation** (negotiation when the engram-ctl↔daemon↔app versions mismatch). — TRD.
 
-## 메시지 흐름 (전송수단별)
+## Message flow (by transport)
 
 ```mermaid
 flowchart TD
@@ -151,16 +151,16 @@ flowchart TD
   RESULT["결과·관찰: 앱/데몬 → WS → engram-ctl → stdout JSON 봉투 → LLM (Bash 출력)"]
 ```
 
-- **claude ↔ engram-ctl:** Bash 도구(프로세스 exec) — tool-use.
-- **engram-ctl ↔ 데몬:** WebSocket(127.0.0.1, 현행 단일 마스터 토큰 — per-child 스코프 = T-11 보류). 명령↑ · 결과·이벤트↓.
-- **데몬 → 백엔드:** in-proc(AgentManager 직접).
-- **데몬 → 앱(UI):** WebSocket opaque-relay(기존 데몬↔앱 연결 재사용).
-- **앱(src-tauri) → ViewManager:** in-proc(로컬 Tauri 명령과 동일 경로).
-- **src-tauri ↔ 프론트:** `emit`(이벤트 하행) · `invoke`(사람·로컬 명령 상행).
-- **데몬 → 앱:** Tauri Channel(바이너리 출력 프레임).
+- **claude ↔ engram-ctl:** Bash tool (process exec) — tool-use.
+- **engram-ctl ↔ daemon:** WebSocket (127.0.0.1, current single master token — per-child scope = T-11 deferred). Commands up · results and events down.
+- **daemon → backend:** in-proc (AgentManager directly).
+- **daemon → app (UI):** WebSocket opaque-relay (reuses the existing daemon↔app connection).
+- **app (src-tauri) → ViewManager:** in-proc (the same path as a local Tauri command).
+- **src-tauri ↔ frontend:** `emit` (events downstream) · `invoke` (human and local commands upstream).
+- **daemon → app:** Tauri Channel (binary output frames).
 
-## 링크
+## Links
 
-- 근거: `docs/research/control-surface-and-fleet.md`, `command-control-surface-survey-2026-06-28.md`, `llm-control-surface-message-command-scope-2026-06-28.md`.
-- 방향 앵커: ADR-0014(데몬 CLI-via-Bash) · 권위: ADR-0035(레이아웃=src-tauri) · 공간어휘: ADR-0068 · 스파이크: `scripts/engram.mjs`.
-- 다음: ADR-0080(제어표면 아키텍처) + `/review prd` + TRD.
+- Basis: `docs/research/control-surface-and-fleet.md`, `command-control-surface-survey-2026-06-28.md`, `llm-control-surface-message-command-scope-2026-06-28.md`.
+- Direction anchors: ADR-0014 (daemon CLI-via-Bash) · authority: ADR-0035 (layout = src-tauri) · spatial vocabulary: ADR-0068 · spike: `scripts/engram.mjs`.
+- Next: ADR-0080 (control-surface architecture) + `/review prd` + TRD.

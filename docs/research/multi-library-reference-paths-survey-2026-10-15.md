@@ -1,98 +1,98 @@
-# 라이브러리 여러 개 — 참조 경로 관행 · 여러 루트일 때 생기는 문제 · 우리 같은 형태의 선례
+# Multiple Libraries — Reference-Path Practice · Problems That Arise with Several Roots · Precedents with a Shape Like Ours
 
-- **상태:** 적대 리뷰(FIX) 반영본 · 결정 대기(프리셋 PRD 이전 구상 — 사용자가 「첫 판부터 라이브러리 여러 개」 쪽으로 기울었고, 결정 전에 관행부터 보자고 했다)
-- **날짜:** 2026-10-15
-- **방법:** research medium · 설계-결정 모드. 수집 갈래 2(AI 에이전트 도구 · 에셋/파일 브라우저와 개발 도구) · 메인 grounding(아래 「grounding」) · cross-family 적대 리뷰 1회(아래 「적대 리뷰」).
-- **확신도 범례:** 확실 = 원문 확인 + 독립 교차확증 · 가능성 높음 = 원문 확인(단일 출처) 또는 부분 지지 · 불확실 = 기억 · 요약 기반 · 원문 미확인.
-- **앞선 조사:** `docs/research/library-multi-root-display-survey-2026-10-14.md`(여러 루트를 어떻게 **보여 주고 등록하나**) · `docs/research/preset-asset-reference-base-survey-2026-10-14.md`(참조 기준 = 라이브러리 맨 위부터의 절대경로로 결정). 이 문서는 **여러 루트일 때 참조를 어떻게 적나 · 무엇이 깨지나**만 다룬다.
+- **Status:** version with the adversarial review (FIX) applied · awaiting decision (a pre-preset-PRD idea — the user leaned toward 「첫 판부터 라이브러리 여러 개」, and asked to look at practice before deciding)
+- **Date:** 2026-10-15
+- **Method:** research medium · design-decision mode. 2 collection tracks (AI agent tools · asset/file browsers and dev tools) · main grounding (「grounding」 below) · one cross-family adversarial review (「적대 리뷰」 below).
+- **Confidence legend:** certain = source text confirmed + independently cross-confirmed · likely = source text confirmed (single source) or partly supported · uncertain = from memory · based on a summary · source text not confirmed.
+- **Earlier surveys:** `docs/research/library-multi-root-display-survey-2026-10-14.md` (how several roots are **shown and registered**) · `docs/research/preset-asset-reference-base-survey-2026-10-14.md` (reference base = decided as an absolute path from the very top of the library). This document covers only **how references are written when there are several roots · what breaks**.
 
-## 묻는 것
+## What is asked
 
-지금 결정은 「라이브러리 하나 · 프리셋 안 참조 = 라이브러리 맨 위부터의 경로(`스킬/리뷰/review`)」다. 라이브러리를 여럿 두고 A 의 프리셋이 B 의 스킬을 쓰게 하면
+The current decision is 「라이브러리 하나 · 프리셋 안 참조 = 라이브러리 맨 위부터의 경로(`스킬/리뷰/review`)」 (one library · a reference inside a preset = a path from the very top of the library). If we keep several libraries and let A's preset use B's skill:
 
-1. 참조 한 줄에 「어느 라이브러리인가」를 어떻게 적나 — 관행은?
-2. 여러 루트라서 생기는 문제는 무엇이고, 피어는 각각 어떻게 다루나?
-3. 우리 같은 형태(여러 사용자 폴더 라이브러리 + 루트를 가로질러 부품을 묶는 프리셋)가 있나?
+1. How does one reference line say 「어느 라이브러리인가」 (which library) — what is the practice?
+2. What problems arise because there are several roots, and how does each peer handle them?
+3. Is there anything shaped like ours (several user-folder libraries + presets that bundle parts across roots)?
 
-## 결론 (위층)
+## Conclusions (top layer)
 
-1. **이번 표본에서 가장 많이 보인 꼴 = 「루트 이름 + 그 루트 안 경로」이고, 루트 이름과 디스크 위치는 따로 적힌다.** ★「주류」라고까지는 말하지 않는다★ — 적대 리뷰 지적: VS Code 는 일부 설정에서 펼쳐지는 변수이고 Claude Code 는 등록소에서 이름으로 찾는 것이라, 셋 다 「파일에 저장된 항목 참조」의 관행이라고 묶기엔 메커니즘이 다르다. 저장된 참조의 꼴로 직접 맞는 것은 Unreal 하나다. Obsidian URI 는 「볼트 id + 볼트 안 경로」를 받는다(리뷰어 보고 · 메인 미확인 — 링크용 URI 이지 노트 안 참조 꼴은 아니다).
-   - **Unreal** — 마운트 포인트 이름(`/Engine/` · `/PluginName/`)과 디스크 위치(`ContentPath`)를 따로 등록한다. 참조는 이름 쪽(`/PluginName/...`)을 쓴다. **확실**에 가까운 **가능성 높음**(API 문서 원문).
-   - **VS Code 멀티 루트** — `${workspaceFolder:Client}` 처럼 루트 폴더 이름을 붙여 형제 루트를 가리킨다. 루트 이름은 `name` 속성으로 디스크 폴더 이름과 다르게 줄 수 있다. **가능성 높음**(변수 문서 원문 · `name` 속성은 수집자 보고).
-   - **Claude Code 플러그인 의존** — `"name@marketplace"` 로 다른 마켓플레이스의 플러그인을 가리킨다. 마켓플레이스 이름이 신원이고, 사용자는 이름 하나에 마켓플레이스 하나만 등록한다. **가능성 높음**(원문).
-   - **Unity 패키지** — `Packages/<패키지 이름>/...`. **불확실**(수집자 보고 · 메인 미확인).
-   - 결과: 디스크 폴더를 옮겨도 등록된 위치만 바꾸면 참조는 그대로다. 대신 **루트 이름을 바꾸면 그 이름을 적은 참조가 다 걸린다.** 피함 수단으로 리뷰어가 든 것 — 참조엔 바뀌지 않는 id 를 적고 이름은 화면 표시용으로만 쓰기(Obsidian 볼트 id · Blender 에셋 라이브러리 이름은 화면용이라 바꿔도 된다 — 리뷰어 보고 · 메인 미확인). 「이름을 바꾸면 참조를 일괄 고친다」를 적어 둔 피어는 여전히 못 찾았다.
-2. **다른 꼴은 셋이고, 우리에게는 덜 맞는다.**
-   - **id + 경로 대체**(Godot `uid://` · Unity GUID) — id 를 파일 옆이나 안에 둔다(Unity = 모든 에셋 옆 `.meta` · Godot = 스크립트 · 셰이더만 옆 `.uid`, 씬 · 리소스는 파일 안, 임포트 리소스는 `.import` — 적대 리뷰가 고친 세부). 바깥에서 옮길 때 그 파일도 같이 옮겨야 한다. Godot 은 id 가 깨지면 함께 적어 둔 경로로 찾고 경고를 낸다. **가능성 높음**(Godot 원문). 이미 「무거운 엔진 모델」로 버린 꼴이다(앞선 조사).
-   - **검색 경로에서 이름으로 찾기**(Houdini `HOUDINI_PATH` · Claude Code 스킬의 범위 우선순위 Enterprise > Personal > Project) — 같은 이름이면 앞선 쪽이 이긴다(가림). Houdini 쪽은 **불확실**(검색 스니펫 · 기억).
-   - **참조하는 파일 기준 상대경로**(Blender — 링크한 라이브러리 경로를 참조하는 `.blend` 기준 상대로 두고, 다른 이름으로 저장할 때 다시 맞춘다 — 리뷰어가 원문으로 확인했다고 보고 · 메인 미확인). **가능성 높음**에 못 미치는 **불확실**.
-3. **여러 루트라서 생기는 문제 여섯과 피어의 처리.**
+1. **The shape seen most often in this sample = 「루트 이름 + 그 루트 안 경로」 (root name + a path inside that root), and the root name and the disk location are written separately.** ★We do not go as far as calling it 「주류」 (mainstream)★ — adversarial review pointed out: VS Code's is a variable that expands in some settings and Claude Code's is a lookup by name in a registry, so the mechanisms differ too much to group all three as the practice of 「파일에 저장된 항목 참조」 (references to items stored in a file). Only Unreal directly matches the shape of a stored reference. The Obsidian URI takes 「볼트 id + 볼트 안 경로」 (vault id + a path inside the vault) (reviewer report · not confirmed by main — it is a URI for links, not the shape of a reference inside a note).
+   - **Unreal** — registers the mount point name (`/Engine/` · `/PluginName/`) and the disk location (`ContentPath`) separately. A reference uses the name side (`/PluginName/...`). **Likely**, close to **certain** (API doc text).
+   - **VS Code multi-root** — points to a sibling root by attaching the root folder name, like `${workspaceFolder:Client}`. The root name can differ from the disk folder name via the `name` property. **Likely** (variables doc text · the `name` property is a collector report).
+   - **Claude Code plugin dependencies** — `"name@marketplace"` points to a plugin in another marketplace. The marketplace name is the identity, and a user registers only one marketplace per name. **Likely** (source text).
+   - **Unity packages** — `Packages/<패키지 이름>/...`. **Uncertain** (collector report · not confirmed by main).
+   - Result: if you move the disk folder, you only change the registered location and the reference stays the same. In exchange, **renaming a root breaks every reference that wrote that name.** The reviewer's way to avoid this — write a never-changing id in the reference and use the name only for on-screen display (Obsidian vault id · a Blender asset library name is for the screen, so changing it is fine — reviewer report · not confirmed by main). We still found no peer that documents 「이름을 바꾸면 참조를 일괄 고친다」 (when you rename, fix the references in bulk).
+2. **Three other shapes, and they fit us less.**
+   - **id + path fallback** (Godot `uid://` · Unity GUID) — the id sits beside or inside the file (Unity = a `.meta` beside every asset · Godot = a `.uid` beside scripts and shaders only, inside the file for scenes and resources, `.import` for imported resources — a detail the adversarial review corrected). When moving from outside, that file must move too. If the id breaks, Godot finds the file by the path written alongside and shows a warning. **Likely** (Godot source text). Already discarded as the 「무거운 엔진 모델」 (heavy engine model) (earlier survey).
+   - **Lookup by name through a search path** (Houdini `HOUDINI_PATH` · Claude Code skill scope priority Enterprise > Personal > Project) — with the same name, the earlier one wins (shadowing). The Houdini side is **uncertain** (search snippet · memory).
+   - **Path relative to the referencing file** (Blender — keeps the linked library path relative to the referencing `.blend`, and re-fixes it when saving under another name — the reviewer reported confirming it from source text · not confirmed by main). **Uncertain**, short of **likely**.
+3. **Six problems that arise because there are several roots, and how peers handle them.**
 
-   | 문제 | 피어의 처리 | 확신도 |
+   | Problem | Peer handling | Confidence |
    |---|---|---|
-   | ① 같은 경로가 두 루트에 있다 | 루트 이름 접두로 아예 갈린다(Unreal · VS Code · Claude `name@marketplace`). 접두가 없는 곳은 순서로 가린다 — Unreal 은 겹치는 마운트를 「override chain 앞에 두어 이기게」 한다 · Claude Code 스킬은 범위 우선순위 · 플러그인 스킬은 `/plugin:skill` 접두로 공존 | 가능성 높음 |
-   | ② 다른 루트를 가리키는 참조를 믿어도 되나 | **Claude Code 는 기본으로 막는다** — 다른 마켓플레이스의 의존은 설치하지 않는다(이미 설치 · 활성화돼 있으면 예외). 이유 원문: 「한 마켓플레이스가 사용자가 검토하지 않은 출처의 플러그인을 조용히 설치하지 못하게」. 풀려면 뿌리 쪽 `marketplace.json` 의 허용 목록에 넣는다 | 가능성 높음(원문) |
-   | ③ 남에게 넘길 때 다른 루트에 기대는 참조 | 받는 쪽이 **같은 이름으로** 그 루트를 등록해야 풀린다(Claude Code · claude.ai 동기화 플러그인 설명). 묶어 주는 별도 단계를 두는 곳: Ableton 「Collect All and Save」(밖의 파일을 프로젝트로 복사) · Blender Append(사본으로 들여오기) | 가능성 높음(Claude 원문) · 불확실(Ableton · Blender — 요약) |
-   | ④ 루트가 없다(폴더 삭제 · 드라이브 빠짐) | Claude Code: 때에 따라 갈린다 — 마켓 쪽에 적은 의존이 허용 밖이면 **설치 자체를 거부**하고, `plugin.json` 에 적은 의존은 설치는 되지만 **플러그인이 로드되지 않는다** · 로컬 사본이 꺼져 있으면 `is disabled — enable it or remove the dependency`(이 문장은 로컬 시험 절의 것 — 적대 리뷰가 일반화를 지적). Lightroom: 없는 폴더 표시 + 「Find Missing Folder」로 폴더 단위 재연결 | 가능성 높음(Claude 원문) · 불확실(Lightroom — 커뮤니티) |
-   | ⑤ 항목을 다른 루트로 옮긴다 | **YAML 같은 저장 참조를 루트 간 이동에서 자동으로 고쳐 쓰는 피어는 못 찾았다.** 가까운 선례 — Blender 「Relocate」(링크된 항목을 다른 라이브러리로 다시 겨눔) · Adobe Bridge 컬렉션(여러 드라이브의 파일을 묶고, Bridge 안에서 옮기면 컬렉션 소속 유지 · 바깥 이동은 고치기 제공). 한 프로젝트 안 이동은 도구가 고친다(Godot FileSystem dock · Unity Project 창). Unreal 은 옮긴 자리에 리다이렉터(옛 자리 → 새 자리 안내)를 남기고 나중에 일괄 정리한다 | 가능성 높음(Godot · Unreal 원문) · 불확실(Blender · Bridge — 리뷰어 보고, 메인 미확인) |
-   | ⑥ 프리셋 안 프리셋이 루트를 넘나든다 | 순환(A→B→A)과 줄줄이 이어진 의존을 정해야 한다. AgentsRoom 은 프롬프트 연결의 줄줄이 사슬과 순환 감지를 문서에 적어 둔다 · Claude Code 는 같은 의존에 다른 판(버전)을 요구하면 설치를 거부한다(`has conflicting version requirements`) | 불확실(AgentsRoom — 리뷰어 보고, 메인 fetch 실패) · 가능성 높음(Claude 원문) |
+   | ① The same path exists in two roots | The root-name prefix separates them outright (Unreal · VS Code · Claude `name@marketplace`). Where there is no prefix, order shadows — Unreal makes overlapping mounts win by 「override chain 앞에 두어 이기게」 (putting them at the front of the override chain) · Claude Code skills use scope priority · plugin skills coexist with a `/plugin:skill` prefix | likely |
+   | ② Can a reference pointing to another root be trusted | **Claude Code blocks it by default** — it does not install a dependency from another marketplace (exception if already installed and enabled). Reason in the source text: 「한 마켓플레이스가 사용자가 검토하지 않은 출처의 플러그인을 조용히 설치하지 못하게」 (back-translated: so that one marketplace cannot silently install plugins from sources the user has not reviewed). To lift it, add it to the allow list in the root-side `marketplace.json` | likely (source text) |
+   | ③ A reference that depends on another root when handing over to someone else | The receiving side must register that root **under the same name** for it to resolve (Claude Code · claude.ai sync plugin description). Places with a separate bundling step: Ableton 「Collect All and Save」 (copies outside files into the project) · Blender Append (brings in as a copy) | likely (Claude source text) · uncertain (Ableton · Blender — summaries) |
+   | ④ The root is gone (folder deleted · drive missing) | Claude Code: depends on the case — if a dependency written on the marketplace side is outside the allowance it **refuses the install itself**, and a dependency written in `plugin.json` installs but **the plugin does not load** · if the local copy is disabled, `is disabled — enable it or remove the dependency` (this sentence is from the local-testing section — the adversarial review pointed out the generalization). Lightroom: shows the missing folder + reconnects per folder with 「Find Missing Folder」 | likely (Claude source text) · uncertain (Lightroom — community) |
+   | ⑤ Moving an item to another root | **We found no peer that automatically rewrites a stored reference such as YAML on a move between roots.** Close precedents — Blender 「Relocate」 (re-points a linked item to another library) · Adobe Bridge collections (bundle files from several drives; moving inside Bridge keeps collection membership · a move from outside gets a fix-up offered). A move within one project is fixed by the tool (Godot FileSystem dock · Unity Project window). Unreal leaves a redirector (a pointer from the old place → the new place) at the moved spot and cleans up in bulk later | likely (Godot · Unreal source text) · uncertain (Blender · Bridge — reviewer report, not confirmed by main) |
+   | ⑥ A preset inside a preset crosses roots | Cycles (A→B→A) and chained dependencies must be decided. AgentsRoom documents chains of prompt links and cycle detection · Claude Code refuses to install when the same dependency requires different versions (`has conflicting version requirements`) | uncertain (AgentsRoom — reviewer report, main fetch failed) · likely (Claude source text) |
 
-4. **우리와 똑같은 형태(사용자 폴더 여러 개 + 루트를 가로질러 묶는 프리셋 + 폴더 브라우저)는 찾지 못했다. 다만 적대 리뷰가 가까운 둘을 더 찾았다** — 수집 갈래가 놓친 것이다.
-   - **Skills Manager**(`xingkongliang/skills-manager` · React 19 + Rust 데스크톱 앱 — 우리와 같은 스택) — 「여러 코딩 도구의 에이전트 스킬을 한 앱에서 관리」. **스킬을 이름 붙은 프리셋으로 묶고** 워크스페이스에서 프리셋을 눌러 한꺼번에 켠다 · 프리셋 적용은 「한 번 복사이지 실시간 동기가 아니다」 · **아무 폴더나 스킬 루트로 붙일 수 있지만 그 루트는 전역 프리셋 동기에 끼지 않는 따로 된 워크스페이스로 다룬다** — 즉 루트를 가로지른 프리셋을 막아 둔 모양. 프리셋이 스킬을 이름으로 가리키는지 경로로 가리키는지는 문서에 없다. 폴더 브라우저는 아니다(프리셋 · 라이브러리 관리 화면). **가능성 높음**(README 원문 — 메인 확인).
-   - **AgentsRoom**(링크된 프롬프트) — 프롬프트가 다른 프롬프트를 줄줄이 끌어오고 순환을 감지하며, **프로젝트 링크와 전역 링크를 일부러 따로 둔다**(리뷰어 보고). **불확실**(메인 fetch 가 413 으로 실패 — 미확인).
-   - 둘 다 「루트를 가로지른 묶음」을 **막거나 갈라 두는 쪽**이다 — Claude Code 의 기본 거부(②)와 같은 방향이다.
-   - 그 밖에 가까운 둘:
-   - **Claude Code 마켓플레이스** — 부품 묶음이 여러 출처를 가로질러 의존한다는 점이 같다. 다만 폴더 브라우저가 아니라 **등록소(레지스트리) + 이름** 모델이고, 출처를 가로지르는 의존을 기본으로 막는다.
-   - **Unreal 콘텐츠 브라우저** — 여러 루트(프로젝트 · 플러그인 · 엔진)를 한 트리에 보여 주고 루트 이름으로 참조한다는 점이 같다. 다만 무거운 엔진이다.
-   - 수집 범위 밖이라 못 본 곳: Cursor · Zed · Aider · OpenHands · Gemini CLI 확장 · 프롬프트 관리 도구 · Obsidian(볼트 여럿) · Zotero · REAPER. **「없다」는 단정이 아니라 「이번 표본에서 못 찾았다」다.**
+4. **We found nothing with exactly our shape (several user folders + presets that bundle across roots + a folder browser). However, the adversarial review found two close ones more** — which the collection tracks missed.
+   - **Skills Manager** (`xingkongliang/skills-manager` · a React 19 + Rust desktop app — the same stack as ours) — 「여러 코딩 도구의 에이전트 스킬을 한 앱에서 관리」 (manage agent skills of several coding tools in one app). **It bundles skills into named presets** and turns them on together by clicking a preset in a workspace · applying a preset is 「한 번 복사이지 실시간 동기가 아니다」 · **any folder can be attached as a skill root, but that root is treated as a separate workspace that does not take part in the global preset sync** — that is, it looks like presets that cross roots are blocked. The docs do not say whether a preset points to a skill by name or by path. It is not a folder browser (a preset · library management screen). **Likely** (README source text — confirmed by main).
+   - **AgentsRoom** (linked prompts) — a prompt pulls in other prompts in a chain and detects cycles, and **it deliberately keeps project links and global links separate** (reviewer report). **Uncertain** (the main fetch failed with a 413 — not confirmed).
+   - Both are on the side of **blocking or separating** 「루트를 가로지른 묶음」 (bundles that cross roots) — the same direction as Claude Code's default refusal (②).
+   - Two other close ones:
+   - **Claude Code marketplace** — the same in that a bundle of parts depends across several sources. But it is a **registry + name** model, not a folder browser, and it blocks dependencies across sources by default.
+   - **Unreal Content Browser** — the same in that it shows several roots (project · plugin · engine) in one tree and references them by root name. But it is a heavy engine.
+   - Places not seen because they were outside the collection scope: Cursor · Zed · Aider · OpenHands · Gemini CLI extensions · prompt management tools · Obsidian (several vaults) · Zotero · REAPER. **「없다」 (there is none) is not an assertion; it means 「이번 표본에서 못 찾았다」 (we did not find one in this sample).**
 
-## Engram 에 옮기면 (후보 — 결정 아님)
+## If we carry this into Engram (candidates — not a decision)
 
-관행을 우리 결정(절대경로 · 앱 안 옮기기가 참조를 고침 · 이름으로 다시 잇기)에 얹으면 이런 모양이 된다. **사용자 결정 전이다.**
+Putting the practice on top of our decisions (absolute path · moving inside the app fixes references · reconnecting by name) gives this shape. **Before the user's decision.**
 
-- **참조 꼴 — 구분자 후보 셋**(2026-10-15 사용자 질문 「`@` 냐 `/` 냐」):
-  - `업무/스킬/리뷰/review` — 라이브러리 이름을 경로 첫 칸에(Unreal `/PluginName/...` 꼴). **세션 추천** — 트리에서 내려간 길 = 참조 줄 · 하나일 때 꼴에 칸 하나만 더함. 대가 = 「첫 칸은 항상 라이브러리 이름」 규칙으로만 갈린다.
-  - `업무:스킬/리뷰/review` — VS Code `${workspaceFolder:업무}` · Godot `res://` 꼴. 윈도우 드라이브 `C:` 와 헷갈린다.
-  - `review@업무` — Claude Code `플러그인@마켓` 꼴. 이름으로 찾는 등록소 모델이라 폴더 경로를 안 담는다 — 폴더 브라우저에선 같은 이름이 흔해 못 가린다(이름 참조를 버린 이유와 같다).
-  - 라이브러리 이름 → 디스크 폴더는 설정에 따로 둔다(Unreal · VS Code 꼴). 이름 대신 바뀌지 않는 id 를 참조에 적는 길(Obsidian 볼트 id 꼴)도 있으나 사람이 읽는 YAML 이 불투명해진다.
-- **이름은 겹치지 않게**(Claude Code 의 「이름 하나에 하나」).
-- **디스크 폴더를 옮기면** 설정의 위치만 고친다 — 참조는 그대로.
-- **라이브러리 이름을 바꾸면** 앱이 프리셋 줄을 같이 고친다 — 우리 「옮기기 · 이름 바꾸기가 참조를 고친다」 결정을 라이브러리 단위로 넓힌 것. 피어에 선례가 없는 부분이다.
-- **라이브러리를 가로지른 옮기기**도 앱이 참조를 고친다 — 역시 선례 없음(⑤).
-- **열린 질문:** 다른 라이브러리를 가리키는 참조를 그냥 허용할지, 표시 · 경고할지(② — 피어는 막거나 갈라 두는 쪽: Claude Code 기본 거부 · Skills Manager 따로 된 워크스페이스) · 프리셋 안 프리셋이 라이브러리를 넘나들 때 순환 · 줄줄이 의존(⑥) · 남에게 줄 때 다른 라이브러리에 기대는 부품을 어떻게 알릴지(③ — 「내보내기」는 이미 「나중」으로 미뤄 둠) · 라이브러리가 없을 때 프리셋을 어떻게 보일지(④).
+- **Reference shape — three separator candidates** (user question on 2026-10-15, 「`@` 냐 `/` 냐」):
+  - `업무/스킬/리뷰/review` — the library name in the first path segment (the Unreal `/PluginName/...` shape). **Session recommendation** — the route down the tree = the reference line · with one library the shape just gets one more segment. Cost = it is separated only by the rule 「첫 칸은 항상 라이브러리 이름」 (the first segment is always the library name).
+  - `업무:스킬/리뷰/review` — the VS Code `${workspaceFolder:업무}` · Godot `res://` shape. Confusable with the Windows drive `C:`.
+  - `review@업무` — the Claude Code `플러그인@마켓` shape. It is a registry-by-name model, so it carries no folder path — in a folder browser the same name is common and cannot be told apart (the same reason we dropped name references).
+  - The mapping library name → disk folder is kept separately in settings (the Unreal · VS Code shape). There is also a way to write a never-changing id in the reference instead of the name (the Obsidian vault id shape), but then the human-readable YAML turns opaque.
+- **Names must not overlap** (Claude Code's 「이름 하나에 하나」 (one per name)).
+- **Moving the disk folder** only fixes the location in settings — references stay the same.
+- **Renaming a library** makes the app fix the preset lines too — our 「옮기기 · 이름 바꾸기가 참조를 고친다」 (moving · renaming fixes references) decision widened to the library level. No peer has a precedent for this.
+- **Moving across libraries** also makes the app fix references — again no precedent (⑤).
+- **Open questions:** whether to simply allow references pointing to another library, or to mark · warn (②: peers block or separate — Claude Code default refusal · Skills Manager separate workspace) · cycles and chained dependencies when a preset inside a preset crosses libraries (⑥) · how to tell someone that a part depends on another library when handing over (③: 「내보내기」 (export) is already deferred to 「나중」 (later)) · how to show a preset when a library is missing (④).
 
-## grounding (메인 외부 체크)
+## grounding (main external check)
 
-| 클레임 | 출처 | 판정 |
+| Claim | Source | Decision |
 |---|---|---|
-| Claude Code `"name@marketplace"` · 다른 마켓 의존 기본 거부 · 이유 · 허용 목록은 뿌리 마켓 것만 · 이미 활성화된 의존은 예외 · `plugin.json` 에 적으면 설치 후 로드 실패 | https://code.claude.com/docs/en/plugin-dependencies.md (원문 직접 읽음) | 지지 |
-| Claude Code 꺼진 의존 → `is disabled — enable it or remove the dependency` | 같은 문서(`--plugin-dir` 절 — 로컬 사본 맥락) | 부분지지(로컬 사본 맥락의 문장) |
-| Claude Code 마켓 이름 하나에 하나 · 플러그인 스킬 `/plugin-name:skill-name` 공존 · 범위 우선순위 | 수집자 인용(marketplace-reference · skills 문서) | 미확인(메인 직접 대조 안 함 — 수집자 인용은 원문 문구) |
-| VS Code `${workspaceFolder:Client}` 로 형제 루트 | https://code.visualstudio.com/docs/editor/variables-reference (요약기 경유 인용) | 지지 |
-| Unreal `RegisterMountPoint` — RootPath(`/Engine/` · `/PluginName/`) · ContentPath(디스크) · override chain 앞에 두어 겹치면 이김 | https://dev.epicgames.com/documentation/unreal-engine/API/Runtime/CoreUObject/FPackageName/RegisterMountPoint (요약기 경유 인용) | 지지 |
-| Godot UID + 경로 대체 · dock 안 이동은 고침 · 바깥 이동은 `.uid` 도 옮김 · 바깥 이동 시 경고 | https://godotengine.org/article/uid-changes-coming-to-godot-4-4/ (요약기 경유 인용) | 지지 |
-| Unreal 리다이렉터 · Unity `.meta` · Ableton · Lightroom · Blender · Houdini · Continue · Goose | 수집자 보고(일부 요약 · 403 · 목차만) | 미확인 — 위 표에서 확신도를 낮춰 적음 |
+| Claude Code `"name@marketplace"` · default refusal of dependencies from another marketplace · reason · the allow list belongs only to the root marketplace · an already-enabled dependency is an exception · written in `plugin.json` it fails to load after install | https://code.claude.com/docs/en/plugin-dependencies.md (source text read directly) | supported |
+| Claude Code disabled dependency → `is disabled — enable it or remove the dependency` | same doc (`--plugin-dir` section — in the local-copy context) | partly supported (a sentence in the local-copy context) |
+| Claude Code one marketplace per name · plugin skills coexist as `/plugin-name:skill-name` · scope priority | collector quotes (marketplace-reference · skills docs) | unconfirmed (main did not check directly — the collector quotes are the source wording) |
+| VS Code `${workspaceFolder:Client}` for a sibling root | https://code.visualstudio.com/docs/editor/variables-reference (quote via a summarizer) | supported |
+| Unreal `RegisterMountPoint` — RootPath (`/Engine/` · `/PluginName/`) · ContentPath (disk) · placing at the front of the override chain wins on overlap | https://dev.epicgames.com/documentation/unreal-engine/API/Runtime/CoreUObject/FPackageName/RegisterMountPoint (quote via a summarizer) | supported |
+| Godot UID + path fallback · a move inside the dock is fixed · a move from outside also moves `.uid` · a warning on an outside move | https://godotengine.org/article/uid-changes-coming-to-godot-4-4/ (quote via a summarizer) | supported |
+| Unreal redirector · Unity `.meta` · Ableton · Lightroom · Blender · Houdini · Continue · Goose | collector reports (partly summaries · 403 · table of contents only) | unconfirmed — confidence lowered in the table above |
 
-| Skills Manager — 스킬 프리셋 · 아무 폴더를 스킬 루트로 · 그 루트는 전역 프리셋 동기 밖 · 적용 = 한 번 복사 · React 19 + Rust | https://github.com/xingkongliang/skills-manager/blob/main/README.md (요약기 경유 인용) | 지지 |
-| AgentsRoom 링크된 프롬프트 · 순환 감지 · 프로젝트/전역 링크 분리 | https://agentsroom.dev/features/linked-prompts | 불확실(fetch 413 — 메인 미확인) |
+| Skills Manager — skill presets · any folder as a skill root · that root is outside the global preset sync · apply = copy once · React 19 + Rust | https://github.com/xingkongliang/skills-manager/blob/main/README.md (quote via a summarizer) | supported |
+| AgentsRoom linked prompts · cycle detection · project/global link separation | https://agentsroom.dev/features/linked-prompts | uncertain (fetch 413 — not confirmed by main) |
 
-## 적대 리뷰
+## Adversarial review
 
-codex(cross-family) · effort high · 레벨 2 · 웹 검색 켬 · 판정 **FIX**. 반영:
+codex (cross-family) · effort high · level 2 · web search on · decision **FIX**. Applied:
 
-1. 「주류」 과장(높음) → 결론 1 을 「이번 표본에서 가장 많이 보인 꼴」로 낮추고 메커니즘 차이를 적음.
-2. 가까운 피어 누락(높음) → Skills Manager(메인 확인) · AgentsRoom(미확인) 을 결론 4 에 더함.
-3. 「루트 간 이동 고치기 선례 없음」의 제한적 반박(중간) → Blender Relocate · Adobe Bridge 컬렉션을 ⑤ 에 더하고 「YAML 저장 참조를 자동으로 고쳐 쓰는 선례는 없다」로 좁힘.
-4. 루트 이름 바꾸기의 대안 누락(중간) → 결론 1 끝에 id 참조 + 화면용 이름 길을 더함.
-5. Claude 오류 문장 일반화(중간) → ④ 를 경우별로 고침.
-6. Godot `.uid` 세부(낮음) → 결론 2 를 고침.
-7. 문제 목록 누락 — 순환 · 줄줄이 의존(중간) → ⑥ 을 더함.
+1. Overstated 「주류」 (mainstream) (high) → lowered conclusion 1 to 「이번 표본에서 가장 많이 보인 꼴」 (the shape seen most often in this sample) and noted the mechanism differences.
+2. Missing close peers (high) → added Skills Manager (confirmed by main) · AgentsRoom (unconfirmed) to conclusion 4.
+3. A limited rebuttal of 「루트 간 이동 고치기 선례 없음」 (no precedent for fixing references on a move across roots) (medium) → added Blender Relocate · Adobe Bridge collections to ⑤ and narrowed to 「YAML 저장 참조를 자동으로 고쳐 쓰는 선례는 없다」 (there is no precedent for automatically rewriting a stored YAML reference).
+4. Missing alternative for renaming a root (medium) → added the id-reference + display-name route at the end of conclusion 1.
+5. Generalization of a Claude error sentence (medium) → fixed ④ per case.
+6. Godot `.uid` details (low) → fixed conclusion 2.
+7. Missing from the problem list — cycles and chained dependencies (medium) → added ⑥.
 
-리뷰어 스팟 grounding: Unreal · VS Code · Claude · Godot 지지 · Blender 상대경로와 Ableton Collect All and Save 도 원문으로 지지했다고 보고(메인 미확인).
+Reviewer spot grounding: reported that Unreal · VS Code · Claude · Godot were supported, and that Blender relative paths and Ableton Collect All and Save were also supported by source text (not confirmed by main).
 
-## 공백 · 한계
+## Gaps and limits
 
-- 루트 이름을 바꿀 때 참조를 일괄 고치는 방법 · YAML 같은 저장 참조를 루트 간 이동에서 고쳐 쓰는 방법 — 이번 표본에 선례 없음.
-- 리뷰어가 든 Obsidian 볼트 id · Blender Relocate · Adobe Bridge · AgentsRoom 은 메인이 원문을 직접 확인하지 않았다.
-- 수집 범위 밖(위 결론 4 의 목록) — 우리 같은 형태가 그쪽에 있을 수 있다.
-- Blender 원문은 목차만 읽혔다 · Ableton 도움말은 403 · Continue · Goose 의 상대경로 기준은 문서에서 못 찾았다.
+- How to fix references in bulk when a root name is renamed · how to rewrite a stored reference such as YAML on a move between roots — no precedent in this sample.
+- The reviewer's Obsidian vault id · Blender Relocate · Adobe Bridge · AgentsRoom were not confirmed from the source text by main.
+- Outside the collection scope (the list in conclusion 4 above) — something shaped like ours may exist there.
+- Only the table of contents of the Blender source text could be read · the Ableton help returned 403 · the relative-path base of Continue · Goose was not found in their docs.

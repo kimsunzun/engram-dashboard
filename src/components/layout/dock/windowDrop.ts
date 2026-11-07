@@ -1,17 +1,17 @@
-// TRD S21-slot-docking §4-3 · §2-4: 한 창(웹뷰)의 끌기 받는 쪽 — 뿌리에 온 우리 탭 끌기를 판정(`judge`)해 안내(미리보기 · 구역
-//   선 · 레이아웃 틀) · 다른 창 탭바 세로선 · 출처 창 자기 탭바 판정을 적고, drop 에서 놓기 명령 하나를 낸다. 정하는 것은 여기뿐이고
-//   DOM 은 모른다 — 문서 사건을 이 값으로 잇는 것은 `useWindowDrop` 이다.
-// ★끌기 명령은 drop 에서만 보낸다★(ADR-0296 · ADR-0297) — 이 모듈의 셸 호출은 drop 의 `tab_drop` 하나뿐이고, 같은 창 같은 자리면
-//   그것도 없다. 끄는 동안 바깥(창 크기 · 탭 · 레이아웃)은 막지 않고 흐르므로 판정은 늘 지금 값을 쓴다 — 셸이 놓을 때 대상을 다시
-//   찾는다.
-// ★안내는 끌기 회차 하나에만 선다★ — 회차는 dragenter 가 열고 drop · 창 떠남(dragleave · 관련 대상 없음) · dragover 없는
-//   `GUIDE_IDLE_MS` · mousemove 뒤 `GUIDE_IDLE_MS` 가 닫는다. dragover 는 열린 회차의 것만 그린다 — 닫힌 뒤 늦게 온 dragover 가 새
-//   dragenter 없이 안내 · 세로선을 되살리지 않는다(TRD §8-3). 닫는 시한은 건 회차를 쥐고 울려 「지금 회차가 그 회차인가」 하나로
-//   가른다 — 사건 · 시한이 닿는 차례에 기대지 않는다. 받기(`preventDefault`)는 회차와 무관하게 늘 한다 — 그래야 drop 이 온다.
-// 값싸게(S1 처리기 ≤ 0.5 ms) — 띠 · 유효성은 보이는 탭 · 그 캐시 · 캔버스 크기 · 탭바 구역이 바뀔 때만 다시 세고, dragover 마다는
-//   탭바 기하 읽기와 점 고르기만 한다. 캔버스는 dragenter 와 회차 동안의 크기 바뀜(`watchCanvas`)에만 다시 잰다 — 바뀌면 마지막
-//   점으로 다시 판정해 dragover 를 기다리지 않고 미리보기가 새 크기를 따른다.
-// ★끌기는 LLM 명령이 아니다★(TRD §3-6) — 사람 손의 입력과 그 측정이라 전역 핸들 · 버스에 올리지 않는다.
+// TRD S21-slot-docking §4-3 · §2-4: the receiving side of a drag in one window (webview) — decides (`judge`) our tab drag that arrived at the root and records the guide (preview · zone
+//   lines · layout frame) · another window's tab bar vertical line · the source window's own tab bar decision, and issues one drop command at drop. Deciding happens only here and
+//   it does not know the DOM — connecting document events to these values is `useWindowDrop`.
+// ★The drag command is sent only at drop★ (ADR-0296 · ADR-0297) — the only shell call of this module is the `tab_drop` at drop, and for the same window, same place
+//   even that is absent. During a drag the outside (window size · tabs · layout) is not blocked and keeps flowing, so the decision always uses current values — the shell looks up the target
+//   again at drop.
+// ★The guide stands for one drag round only★ — a round is opened by dragenter and closed by drop · window leave (dragleave · no related target) · `GUIDE_IDLE_MS` without dragover ·
+//   `GUIDE_IDLE_MS` after mousemove. A dragover draws only for an open round — a dragover arriving late after closing does not revive the guide · vertical line without a new
+//   dragenter (TRD §8-3). The closing deadline is fired holding the round it was set for and decided by a single 「지금 회차가 그 회차인가」 —
+//   it does not rely on the order in which events · deadlines arrive. Accepting (`preventDefault`) is always done regardless of the round — so that drop arrives.
+// Cheaply (S1 handler ≤ 0.5 ms) — bands · validity are recomputed only when the visible tab · its cache · canvas size · tab bar zone changes, and per dragover only
+//   tab bar geometry reading and point choosing are done. The canvas is re-measured only at dragenter and on size changes during a round (`watchCanvas`) — on a change it re-decides with the last
+//   point, so the preview follows the new size without waiting for dragover.
+// ★A drag is not an LLM command★ (TRD §3-6) — it is human input and its measurement, so it is not put on a global handle · bus.
 
 import type { LayoutNode } from '../../../api/layoutTypes'
 import type { DropTo } from '../../../../src-tauri/bindings/DropTo'
@@ -25,30 +25,30 @@ import type { LocalDrag, OutgoingDrag } from './localDrag'
 import type { OverlayView, RectCss } from './overlayTypes'
 import { readTabDragType, readTabDragValue, type TabDragHead } from './tabDragData'
 
-/** 안내 · 세로선을 지우는 시한 — dragover 없이 이만큼 · mousemove 뒤 이만큼(VS Code 꼴 · 웹에만 있는 값 — TRD §4-5). */
+/** Deadline to clear the guide · vertical line — this long without dragover · this long after mousemove (VS Code style · a value that exists only on the web — TRD §4-5). */
 export const GUIDE_IDLE_MS = 300
 
-/** 보이는 탭의 캐시 — 띠 셈의 재료(`viewStore.CachedView` 의 칸). 같은 캐시면 같은 객체여야 띠를 다시 세지 않는다. */
+/** Cache of the visible tab — material for the band computation (fields of `viewStore.CachedView`). It must be the same object for the same cache so bands are not recomputed. */
 export interface DropView {
   layout: LayoutNode
   ratioMin: number
   ratioMax: number
 }
 
-/** 이 창의 모델 탭 상태(스토어) — `tabs` = 모델 순서 탭 id. */
+/** This window's model tab state (store) — `tabs` = tab ids in model order. */
 export interface DropModel {
   tabs: readonly string[]
   active: string | null
 }
 
-/** 바깥 — 운영은 `useWindowDrop` 이 스토어 · 탭바 기하 · Tauri 로 채우고 시험은 가짜를 꽂는다(ADR-0012). */
+/** The outside — in production `useWindowDrop` fills it with the store · tab bar geometry · Tauri, and tests plug in a fake (ADR-0012). */
 export interface WindowDropPorts {
-  /** Tauri identifier(소문자) — `null` = 아직 모름(어떤 끌기도 우리 것으로 읽지 않는다). */
+  /** Tauri identifier (lowercase) — `null` = not known yet (no drag is read as ours). */
   app(): string | null
   local: LocalDrag
-  /** 탭 캔버스 영역(뷰포트 CSS px) — `null` = 없음. */
+  /** Tab canvas area (viewport CSS px) — `null` = none. */
   canvasRect(): { left: number; top: number; width: number; height: number } | null
-  /** 이 창 캔버스가 지금 보이는 탭(출처 창의 R15 남은 탭 포함 — `WindowLayout` 이 그리는 그 값). */
+  /** The tab this window's canvas shows now (including the source window's R15 remaining tab — the value `WindowLayout` draws). */
   shownTab(): string | null
   view(id: string): DropView | null
   model(): DropModel
@@ -56,13 +56,13 @@ export interface WindowDropPorts {
   setTimer(fn: () => void, ms: number): unknown
   clearTimer(handle: unknown): void
   /**
-   * 캔버스 크기 바뀜을 지켜본다 — `onResize` 는 크기가 바뀔 때 부른다(첫 관측 등 같은 크기로도 부를 수 있다). 돌려준 함수가
-   * 멈춘다. 캔버스가 없으면 아무것도 지켜보지 않는다.
+   * Observe canvas size changes — `onResize` is called when the size changes (it may also be called with the same size, e.g. at first observation). The returned function
+   * stops it. If there is no canvas, nothing is observed.
    */
   watchCanvas(onResize: () => void): () => void
 }
 
-/** 뿌리 사건 — DOM `DragEvent` 가 그대로 맞는다. 좌표 = 뷰포트 CSS px. */
+/** Root event — a DOM `DragEvent` fits as is. Coordinates = viewport CSS px. */
 export interface RootDragEvent {
   readonly clientX: number
   readonly clientY: number
@@ -77,40 +77,40 @@ export interface WindowDrop {
   dragOver(e: RootDragEvent): void
   dragLeave(e: RootDragEvent): void
   drop(e: RootDragEvent): void
-  /** 이 문서의 mousemove — `buttons` 가 0 이 아니면 보지 않는다. */
+  /** This document's mousemove — ignored if `buttons` is not 0. */
   mouseMove(buttons: number): void
-  /** 지금 그릴 안내 — 바뀔 때만 새 객체다. */
+  /** The guide to draw now — a new object only when it changes. */
   getGuide(): OverlayView | null
   subscribe(cb: () => void): () => void
-  /** 열린 회차를 닫는다(떼기) — 그 뒤에도 쓸 수 있다. */
+  /** Close the open round (detach) — usable after that too. */
   reset(): void
 }
 
-/** 캔버스 — `size` = 반올림한 크기(`null` = 캔버스가 없거나 크기 0). 다시 잰 값이 같으면 객체를 바꾸지 않는다(띠 캐시 열쇠). */
+/** Canvas — `size` = rounded size (`null` = no canvas or size 0). If the re-measured value is the same, the object is not replaced (band cache key). */
 interface Canvas {
   origin: PointCss
   size: CanvasPx | null
 }
 
-/** 보이는 탭의 띠 셈 — 열쇠(보이는 탭 · 그 캐시 · 끄는 탭 자신인가 · 탭바 구역 · 캔버스)가 같으면 다시 쓴다. */
+/** Band computation of the visible tab — reused if the key (visible tab · its cache · whether it is the dragged tab itself · tab bar zone · canvas) is the same. */
 interface Bands {
   shown: string | null
   view: DropView | null
   self: boolean
   zone: RectCss | null
   canvas: Canvas
-  /** `null` = 띠 없음(끄는 탭 자신이 보이는 캔버스 — `SelfTarget` · 보이는 탭의 캐시 · 캔버스가 없음). */
+  /** `null` = no bands (the canvas where the dragged tab itself is visible — `SelfTarget` · no cache of the visible tab · no canvas). */
   bands: WindowBands | null
 }
 
-/** 판정 하나와 그때 쓴 상태 — drop 이 이것으로 명령을 짓는다(미리보기 = 결과 — R4 · TRD §4-3). */
+/** One decision and the state used at that time — drop builds the command from this (preview = result — R4 · TRD §4-3). */
 interface Decision {
   j: Judgement
-  /** 이 웹뷰에서 나간 그 끌기(이 창 = 출처) · 아니면 `null`. */
+  /** That drag that left this webview (this window = source) · otherwise `null`. */
   source: OutgoingDrag | null
-  /** 판정한 탭바가 끄는 탭을 담은 출처 자기 탭바였다. */
+  /** The tab bar decided on was the source's own tab bar holding the dragged tab. */
   ownStrip: boolean
-  /** 탭바 좌표 0 의 뷰포트 x. */
+  /** Viewport x of tab bar coordinate 0. */
   stripLeft: number
   bands: Bands
 }
@@ -119,9 +119,9 @@ interface Session {
   head: TabDragHead
   canvas: Canvas
   bands: Bands | null
-  /** 마지막 판정 — 회차는 dragenter 의 판정으로 열리므로 열린 회차에서는 늘 있다. */
+  /** Last decision — a round is opened by the decision of dragenter, so one always exists in an open round. */
   last: Decision | null
-  /** 마지막 판정의 점 — 캔버스 크기가 바뀌면 이 점으로 다시 판정한다. */
+  /** Point of the last decision — if the canvas size changes, it is re-decided with this point. */
   point: PointCss | null
   idle: unknown | null
   mouse: unknown | null
@@ -144,7 +144,7 @@ export function createWindowDrop(ports: WindowDropPorts): WindowDrop {
     for (const cb of [...listeners]) cb()
   }
 
-  // 우리 끌기인가 — 열린 회차와 같은 타입 문자열이면 다시 읽지 않는다(앱 열쇠는 그 회차를 열 때 맞췄다).
+  // Is it our drag — if it is the same type string as the open round, it is not re-read (the app key was matched when that round was opened).
   function ours(e: RootDragEvent): TabDragHead | null {
     const dt = e.dataTransfer
     const app = ports.app()
@@ -170,7 +170,7 @@ export function createWindowDrop(ports: WindowDropPorts): WindowDrop {
     return { head, canvas: measure(), bands: null, last: null, point: null, idle: null, mouse: null, unwatch: null }
   }
 
-  // 다시 잰 캔버스가 다르면 바꿔 두고 `true`.
+  // If the re-measured canvas differs, replace it and return `true`.
   function remeasure(s: Session): boolean {
     const c = measure()
     const a = s.canvas
@@ -213,7 +213,7 @@ export function createWindowDrop(ports: WindowDropPorts): WindowDrop {
   }
 
   function decide(s: Session, point: PointCss): Decision {
-    // ★끌기 id 를 견준 뒤에만 출처로 본다★ — 나간 끌기 표시는 dragend 뒤 바꿔 그리기가 풀릴 때까지 남는다.
+    // ★Treat it as the source only after comparing the drag id★ — the outgoing drag mark stays until swap redraw is released after dragend.
     const out = local.getOutgoing()
     const source = out !== null && s.head.drag !== null && out.drag === s.head.drag ? out : null
     const g = local.readStripGeometry()
@@ -247,14 +247,14 @@ export function createWindowDrop(ports: WindowDropPorts): WindowDrop {
     let d = decide(s, point)
     const { j } = d
     if (d.source !== null) {
-      // 출처 창 뿌리 판정 — 늘 새 객체로 적는다(같은 객체는 바뀐 것으로 치지 않는다) · `null` = 자기 탭바 구역을 떠남.
+      // Source window root decision — always written as a new object (the same object is not counted as changed) · `null` = left its own tab bar zone.
       local.setSourceStrip(
         j.type === 'strip' && j.left !== null ? { index: j.index, left: j.left, x: point.x - d.stripLeft } : null,
       )
     }
     local.setTargetMarker(j.type === 'strip' ? j.marker : null)
-    // 위 적기가 출처 창의 보이는 탭을 바꿨으면(R15 — 구역을 떠나 남은 탭 · 돌아와 끄는 탭) 그 탭의 띠로 다시 판정한다 — 한
-    //   dragover 늦게 그리지 않게. 탭바 구역 판정은 보이는 탭과 무관해 다시 볼 것이 없다.
+    // If the write above changed the source window's visible tab (R15 — the remaining tab after leaving the zone · the dragged tab after coming back), re-decide with that tab's bands — so it is not
+    //   drawn one dragover late. The tab bar zone decision is independent of the visible tab, so there is nothing to look at again.
     if (j.type !== 'strip' && ports.shownTab() !== d.bands.shown) d = decide(s, point)
     s.last = d
     s.point = point
@@ -275,7 +275,7 @@ export function createWindowDrop(ports: WindowDropPorts): WindowDrop {
     const slot = j.zones === null ? null : wb.zones[j.zones]
     if (band === null) return slot === null ? null : { bands: [], outer: [], preview: null, slot }
     const b = wb.bands[band]
-    // 레이아웃 틀은 바깥 띠를 고른 때만 — 틀이 서는 것은 이 목록이 비지 않음이다(사용자 결정 2026-10-19).
+    // The layout frame only when an outer band is chosen — the frame stands when this list is not empty (user decision 2026-10-19).
     const outer = b.anchor.type === 'outer' ? wb.bands.filter(x => x.anchor.type === 'outer').flatMap(x => x.areas) : []
     return { bands: [], outer, preview: b.landing, slot }
   }
@@ -308,15 +308,15 @@ export function createWindowDrop(ports: WindowDropPorts): WindowDrop {
     if (j.type === 'strip') {
       let index = j.index
       if (d.ownStrip && d.source !== null) {
-        // 출처 자기 탭바 — 놓을 자리 = 지금 그린 순서의 끄는 탭 자리(순서 문턱을 넘어 확정한 자리 · 판정의 날 자리가 아니다).
-        //   drop 때 다시 읽는다 — 마지막 dragover 가 확정한 자리는 그 뒤 그림에서야 기하에 실린다.
+        // Source's own tab bar — position to drop = the dragged tab's position in the order drawn now (the position confirmed past the order threshold · not the raw position of the decision).
+        //   Re-read at drop — the position the last dragover confirmed is carried into the geometry only in a later drawing.
         const view = d.source.view
         const drawn = local.readStripGeometry()?.tabs.indexOf(view) ?? -1
         if (drawn >= 0) index = drawn
-        // ★제자리인가는 지금 스토어로 가른다★(ADR-0297) — 마지막 판정 뒤 끄는 탭이 다른 창으로 갔으면(LLM) 그때 본 모델은 여전히
-        //   「제자리」라, 보내지 않으면 탭이 그 창에 남는다. 서지 않으면 보내고 셸이 id 로 다시 찾는다.
+        // ★Whether it is in place is decided by the current store★ (ADR-0297) — if after the last decision the dragged tab went to another window (LLM), the model seen then is still
+        //   「제자리」, so not sending would leave the tab in that window. If it does not hold, send it and the shell looks it up again by id.
         if (index === ports.model().tabs.indexOf(view)) {
-          // 같은 창 같은 자리 — 보내지 않고 출처 dragend 가 곧바로 풀게 적어 둔다(TRD §2-4 ④).
+          // Same window, same place — do not send, and record it so the source dragend releases immediately (TRD §2-4 ④).
           local.markLocalDrop(d.source.drag)
           return
         }
@@ -338,7 +338,7 @@ export function createWindowDrop(ports: WindowDropPorts): WindowDrop {
     }
     to ??= { type: 'new_window', by: { type: 'drop' }, size: value.size, grab: value.grab }
     ports.send({ drag: value.drag, view: value.view, from: value.from, initial: value.initial, to }).then(
-      // 결과는 출처가 `tab_drop:done` 으로 받는다(TRD §4-6) — 여기는 남기기만 한다.
+      // The result is received by the source as `tab_drop:done` (TRD §4-6) — here we only leave it.
       reply => console.debug('[windowDrop] tab_drop(drop) 답:', reply),
       err => console.warn('[windowDrop] tab_drop(drop) 실패:', err),
     )
@@ -380,7 +380,7 @@ export function createWindowDrop(ports: WindowDropPorts): WindowDrop {
       const head = ours(e)
       if (head === null) return
       e.stopPropagation()
-      // 관련 대상이 있으면 문서 안 요소 사이를 건넌 것이다 — Chromium 은 새 요소의 dragenter 를 먼저 낸다.
+      // If there is a related target, it crossed between elements in the document — Chromium emits the new element's dragenter first.
       if (e.relatedTarget !== null) return
       const out = local.getOutgoing()
       if (out !== null && head.drag !== null && out.drag === head.drag) local.setSourceStrip(null)
@@ -390,11 +390,11 @@ export function createWindowDrop(ports: WindowDropPorts): WindowDrop {
     drop(e) {
       const head = ours(e)
       if (head === null) return
-      // ★우리 끌기면 첫 일이 `preventDefault` 다★ — 그래야 출처 dragend 가 `move` 다(TRD §4-3). 그 앞의 일은 타입 문자열 읽기뿐이다.
+      // ★For our drag the first thing is `preventDefault`★ — so that the source dragend is `move` (TRD §4-3). Before it there is only reading the type string.
       e.preventDefault()
       e.stopPropagation()
       const s = session
-      // 열린 회차가 없으면(시한 · mousemove 가 닫았다) 그 자리를 지금 판정한다 — 그 drop 을 버리지 않는다.
+      // If there is no open round (a deadline · mousemove closed it), decide that position now — do not discard that drop.
       const d = s !== null && s.head.mime === head.mime && s.last !== null ? s.last : decide(open(head), { x: e.clientX, y: e.clientY })
       if (s !== null) end(s)
       if (e.dataTransfer !== null) deliver(head, d, e.dataTransfer)
@@ -402,7 +402,7 @@ export function createWindowDrop(ports: WindowDropPorts): WindowDrop {
 
     mouseMove(buttons) {
       const s = session
-      // 주 버튼을 쥔 이동은 거른다 — 끄는 동안의 합성 · 밀린 이동이다(M11).
+      // Filter out moves with the primary button held — they are synthetic · delayed moves during a drag (M11).
       if (s === null || buttons !== 0 || s.mouse !== null) return
       arm(s, 'mouse')
     },

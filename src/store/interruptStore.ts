@@ -1,37 +1,37 @@
-// ADR-0244: 채팅 칸에서 끊기를 보낸 뒤 그 턴이 끝날 때까지의 「중단하는 중」 — 에이전트마다 그 끊기 요청을 쥔다.
-//   프론트 전용 · 인메모리 · 창마다 따로다(zustand 모듈 스토어 — 창마다 자기 인스턴스를 갖는다).
-//   ★세우는 곳은 창 명령 `agent.interrupt`(`commands/agentCommands.ts`) 하나다★ — 사람 Esc 와 LLM 이 같은 길을 지난다
-//   (CLAUDE.md 「LLM-우선 제어」). 두 번째 길을 만들지 말 것. 걷는 곳 —
-//   ① 그 요청이 거절됐을 때(명령)
-//   ② 대화 뷰(RichSlot)가 라이브로 받은 턴 경계(MessageDone · TurnEnd — 결말 무관) · 처음 따라잡았는데 열린 턴이 없을 때 ·
-//      대기 표시가 켜짐 → 꺼짐일 때 · 새 화신(비우기)일 때 · 에이전트가 없어졌거나 연결이 끊겼을 때
-//   ③ 그 에이전트의 마지막 대화 뷰가 풀릴 때(아래 `watch`) — 구독이 멈춘 뷰(`detached` · `error`)는 풀린 것으로 센다.
-//   ★이 창에 그 에이전트의 대화 뷰가 하나도 없으면 세우지 않는다(`watch`)★ — 턴 끝을 보고 걷을 쪽이 없어, 세우면 그 뒤
-//   이 창의 끊기 명령이 전부 「이미 보냈다」로 답하고 보내지 않는다. 같은 까닭으로 마지막 뷰가 사라질 때 걷는다.
-//   버스로 곧장 보낸 끊기(`engram agent.interrupt …`)는 이 창 명령을 지나지 않아 여기 서지 않는다 — 의도된 범위다.
+// ADR-0244: the 「중단하는 중」 (interrupting) from sending an interrupt in a chat area until that turn ends — each agent holds its interrupt request.
+//   Frontend-only · in-memory · separate per window (a zustand module store — each window has its own instance).
+//   ★The one place that sets it is the window command `agent.interrupt` (`commands/agentCommands.ts`)★ — a human Esc and the LLM take the same path
+//   (CLAUDE.md 「LLM-우선 제어」). Do not make a second path. Where it is cleared —
+//   ① when that request was refused (the command)
+//   ② when the conversation view (RichSlot) received live a turn boundary (MessageDone · TurnEnd — regardless of outcome) · when it caught up for the first time and there was no open turn ·
+//      when the waiting indicator goes on → off · on a new incarnation (clear) · when the agent is gone or the connection dropped
+//   ③ when that agent's last conversation view is released (`watch` below) — a view whose subscription stopped (`detached` · `error`) counts as released.
+//   ★If this window has no conversation view of that agent at all, it is not set (`watch`)★ — there is no one to clear it on seeing the turn end, so if set, afterwards
+//   every interrupt command in this window answers 「이미 보냈다」 (already sent) and does not send. For the same reason it is cleared when the last view disappears.
+//   An interrupt sent straight over the bus (`engram agent.interrupt …`) does not pass through this window's command so it is not set here — an intended scope.
 
 import { create } from 'zustand'
 
 export interface InterruptState {
-  /** 끊기를 보내고 그 턴이 끝나기를 기다리는 에이전트 → 그 끊기 요청. 칸이 없으면 기다리지 않는다. */
+  /** Agent that sent an interrupt and waits for that turn to end → its interrupt request. If there is no entry it is not waiting. */
   pending: Record<string, Promise<void>>
-  /** 에이전트 → 이 창에 지금 마운트된 그 에이전트의 대화 뷰 수. 칸이 없으면 0 이다. */
+  /** Agent → number of conversation views of that agent currently mounted in this window. 0 if there is no entry. */
   views: Record<string, number>
   /**
-   * 그 에이전트의 대화 뷰가 마운트됐다. @returns 해제 함수 — 마운트 해제(정리)에서 부른다. 두 번 불러도 한 번만 센다.
-   *   마지막 뷰가 풀리면 기다림도 걷는다.
+   * A conversation view of that agent was mounted. @returns a release function — call it on unmount (cleanup). Calling it twice counts only once.
+   *   When the last view is released the wait is cleared too.
    */
   watch(agentId: string): () => void
-  /** 그 에이전트가 기다리는 중이 된다. 이 창에 그 에이전트의 대화 뷰가 없으면 아무것도 안 한다(머리 주석). */
+  /** That agent becomes waiting. If this window has no conversation view of that agent it does nothing (header comment). */
   begin(agentId: string, request: Promise<void>): void
   /**
-   * 기다림을 걷는다. `request` 를 주면 지금 쥔 것이 그 요청일 때만 걷는다 — 늦게 온 옛 요청의 거절이 그 뒤 새 요청의
-   * 기다림을 지우지 않게. 없으면 누구의 것이든 걷는다(턴 끝). 기다리는 중이 아니면 아무것도 안 한다.
+   * Clear the wait. If `request` is given, clear only when what is held now is that request — so a late old request's refusal does not erase
+   * the wait of the new request after it. If omitted, clear whoever's it is (turn end). If not waiting, does nothing.
    */
   end(agentId: string, request?: Promise<void>): void
 }
 
-// 에이전트 id 는 밖(LLM)에서도 온다 — 맨 인덱스로 읽으면 `'constructor'` 같은 프로토타입 이름이 칸으로 읽힌다.
+// Agent ids also come from outside (the LLM) — reading with a bare index would read a prototype name like `'constructor'` as an entry.
 function own<T>(record: Record<string, T>, key: string): T | undefined {
   return Object.prototype.hasOwnProperty.call(record, key) ? record[key] : undefined
 }
@@ -42,7 +42,7 @@ function without<T>(record: Record<string, T>, key: string): Record<string, T> {
   return next
 }
 
-/** 그 에이전트가 기다리는 끊기 요청 — 없으면 `undefined`(중단하는 중이 아니다). */
+/** The interrupt request that agent is waiting on — `undefined` if none (not interrupting). */
 export function pendingInterrupt(
   state: Pick<InterruptState, 'pending'>,
   agentId: string,

@@ -1,6 +1,6 @@
-// 거부 표식 스위치의 대안 값(`DECLINED_MARK = 'error'` — 거부를 오류로 함께 센다)이 화면까지 닿나(ADR-0241 · TRD
-//   S21-chat-ux §4-7 ⑨). 스위치는 모듈 상수라 파일 단위 모킹으로만 바꿀 수 있어 따로 떼었다 — 기본값('own')의 모양은
-//   `StructuredTextView.test.tsx` 가 본다.
+// Does the alternative value of the declined-marker switch (`DECLINED_MARK = 'error'` — counts a decline as an error too) reach the screen (ADR-0241 · TRD
+//   S21-chat-ux §4-7 ⑨)? The switch is a module constant that can be changed only by file-level mocking, so it is split out — the shape of the default ('own') is
+//   checked by `StructuredTextView.test.tsx`.
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'

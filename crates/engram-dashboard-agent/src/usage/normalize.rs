@@ -1,36 +1,36 @@
-//! 생산자(각 벤더의 해석기)가 외부 값을 [`super::WindowObs`] 칸에 싣기 전에 거치는 정규화.
+//! The normalization a producer (each vendor's interpreter) applies before putting an external value into a [`super::WindowObs`] field.
 //!
-//! ★전부 전함수(total)다 — 받을 수 없는 값은 `None` 이 되고 패닉하지 않는다★: 사용량 조회 쪽 패닉은 가둠
-//!   표시 밖이라 데몬을 끝내고 pump 해석기 쪽 패닉은 그 에이전트를 `Failed` 로 끝낸다(ADR-0292) — 모양 하나
-//!   바뀐 외부 응답이 그러면 안 된다. 호출자는 `None` 을 받은 **그 칸만** 비우고 창·관측 전체를 버리지 않는다.
+//! ★All of them are total functions — a value that cannot be accepted becomes `None` and does not panic★: a panic on the usage-query side is outside the containment
+//!   mark, so it ends the daemon, and a panic in the pump interpreter ends that agent as `Failed` (ADR-0292) — an external response whose shape
+//!   changed must not do that. The caller empties **only the field** that got `None` and does not discard the whole window · observation.
 
 use serde_json::Value;
 
-/// 사용률 칸에 싣는 소수 자릿수(10^4 = 넷째 자리).
+/// Number of decimal places carried in the usage-rate field (10^4 = fourth place).
 ///
-/// ★반올림을 빼지 말 것★: 0–1 값을 ×100 하면 이진 부동소수 오차가 붙는다(0.55 × 100 =
-///   55.00000000000001). 받는 쪽이 남은 양 `floor(100 − used)` 를 보여 주므로 그 오차가 44 를
-///   만든다(참값 45). 넷째 자리면 벤더가 주는 정밀도(소수 둘째 자리 안팎)는 다 남는다.
+/// ★Do not drop the rounding★: multiplying a 0–1 value by 100 attaches binary floating-point error (0.55 × 100 =
+///   55.00000000000001). The receiver shows the remaining amount `floor(100 − used)`, so that error would
+///   make 44 (true value 45). With the fourth place, the precision vendors give (around two decimal places) is fully kept.
 const PCT_SCALE: f64 = 10_000.0;
 
-/// 리셋 시각으로 받는 epoch 초의 상한 — 9999-12-31T23:59:59Z. ISO 8601 네 자리 연도로 적을 수 있고
-/// 받는 쪽(ms 단위 시계)으로 옮겨도 넘치지 않는 범위다.
+/// Upper bound of epoch seconds accepted as a reset time — 9999-12-31T23:59:59Z. A range that can be written with an ISO 8601 four-digit year and
+/// does not overflow when moved to the receiving side (an ms-unit clock).
 const MAX_EPOCH_SECS: i64 = 253_402_300_799;
 
-/// 이미 0–100 단위인 사용률 → 칸 값. 비유한(NaN·±inf) → `None` · [0, 100] 밖 → 절단 · 소수 넷째 자리
-/// 반올림(근거 = [`PCT_SCALE`]).
+/// Usage rate already in 0–100 units → field value. Non-finite (NaN · ±inf) → `None` · outside [0, 100] → clamped · rounded to the fourth decimal place
+/// (grounds = [`PCT_SCALE`]).
 pub fn used_pct_from_percent(percent: f64) -> Option<f64> {
     if !percent.is_finite() {
         return None;
     }
     let rounded = (percent.clamp(0.0, 100.0) * PCT_SCALE).round() / PCT_SCALE;
-    // −0 은 직렬화에 `-0.0` 으로 남는다 — 0 으로 접는다.
+    // −0 stays as `-0.0` in serialization — fold it to 0.
     Some(if rounded == 0.0 { 0.0 } else { rounded })
 }
 
-/// 0–1 단위 사용률 → 칸 값(×100 뒤 [`used_pct_from_percent`] 와 같은 규칙).
-/// ★유한한 거대 값은 ×100 에서 무한대가 될 수 있다★ — 비유한 판정을 곱하기 **전에** 하므로 그 값은
-///   `None` 이 아니라 100 으로 절단된다(음수 쪽은 0).
+/// Usage rate in 0–1 units → field value (after ×100, the same rule as [`used_pct_from_percent`]).
+/// ★A finite huge value can become infinity at ×100★ — the non-finite check is done **before** multiplying, so that value is
+///   clamped to 100, not `None` (to 0 on the negative side).
 pub fn used_pct_from_fraction(fraction: f64) -> Option<f64> {
     if !fraction.is_finite() {
         return None;
@@ -43,16 +43,16 @@ pub fn used_pct_from_fraction(fraction: f64) -> Option<f64> {
     }
 }
 
-/// epoch 초 → 리셋 시각 칸 값. 1970 이하(0·음수)와 [`MAX_EPOCH_SECS`] 초과 → `None`.
-/// ★0 을 받지 않는 것은 의도다★ — 실제 리셋이 1970 에 있을 리 없고, 0 은 「값 없음」 자리채움으로 흔히 쓰인다.
-///   받아 두면 받는 쪽이 그 창을 「이미 리셋됨」으로 그린다.
+/// epoch seconds → reset-time field value. 1970 and below (0 · negative) and above [`MAX_EPOCH_SECS`] → `None`.
+/// ★Not accepting 0 is intended★ — a real reset cannot be in 1970, and 0 is commonly used as a 「값 없음」 (no value) placeholder.
+///   If accepted, the receiver would draw that window as 「이미 리셋됨」 (already reset).
 pub fn resets_at_from_epoch_secs(secs: i64) -> Option<i64> {
     (1..=MAX_EPOCH_SECS).contains(&secs).then_some(secs)
 }
 
-/// JSON 값 → 리셋 시각 칸 값. **정수 JSON 수만** 받는다(범위는 [`resets_at_from_epoch_secs`]).
-/// ★소수점이 있는 수는 `None` 이다★ — 부동소수 → 정수 변환을 외부 값에 하지 않는다. 오늘 확인된 벤더
-///   모양은 전부 정수다. 문자열·`null`·그 밖 타입도 `None`.
+/// JSON value → reset-time field value. Accepts **only integer JSON numbers** (range in [`resets_at_from_epoch_secs`]).
+/// ★A number with a decimal point is `None`★ — we do not do float → integer conversion on external values. All vendor
+///   shapes confirmed today are integers. A string · `null` · any other type is also `None`.
 pub fn resets_at_from_json(value: &Value) -> Option<i64> {
     let secs = match value.as_i64() {
         Some(secs) => secs,
@@ -65,9 +65,9 @@ pub fn resets_at_from_json(value: &Value) -> Option<i64> {
 mod tests {
     use super::*;
 
-    // ── 사용률 ──
+    // ── Usage rate ──
 
-    /// 이 반올림이 없으면 받는 쪽의 내림이 45 를 44 로 보인다(`PCT_SCALE` 근거).
+    /// Without this rounding, the receiver's floor makes 45 look like 44 (grounds of `PCT_SCALE`).
     #[test]
     fn fraction_rounding_removes_binary_float_residue() {
         assert_eq!(
@@ -112,7 +112,7 @@ mod tests {
         assert!(pct == 0.0 && pct.is_sign_positive(), "{pct:?}");
     }
 
-    // ── 리셋 시각 ──
+    // ── Reset time ──
 
     #[test]
     fn epoch_range_is_positive_and_bounded() {

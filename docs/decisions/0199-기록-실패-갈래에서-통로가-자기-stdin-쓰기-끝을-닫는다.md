@@ -1,49 +1,49 @@
-# ADR-0199: 기록 실패 갈래에서 통로가 자기 stdin 쓰기 끝을 닫는다
+# ADR-0199: On the record-failure branch the transport closes its own stdin write end
 
-- 상태: 확정 (2026-09-15, 근거: 리뷰 3라운드 · 코더 변이 검증 2건) · 부분 폐기 by ADR-0200 (stdin 을 닫는 갈래 범위) · 부분 폐기 by ADR-0292 (릴리스 도달 불가 근거의 abort 전제)
-- 관련: CLAUDE.md 「핵심 불변식」 kill 인과 · ADR-0001 · ADR-0005 · ADR-0185 결정 2 · `crates/engram-dashboard-agent/src/backend/codex/transport.rs` `record_session_id`·`writer_loop` · Amended by ADR-0200 (stdin 을 닫는 갈래 범위) · Amended by ADR-0292 (릴리스 도달 불가 근거의 abort 전제)
+- 상태: 확정 (2026-09-15, basis: review round 3 · 2 coder mutation verifications) · 부분 폐기 by ADR-0200 (the scope of branches that close stdin) · 부분 폐기 by ADR-0292 (the abort premise of the ground that release is unreachable)
+- 관련: CLAUDE.md 「핵심 불변식」 kill causality · ADR-0001 · ADR-0005 · ADR-0185 decision 2 · `crates/engram-dashboard-agent/src/backend/codex/transport.rs` `record_session_id`·`writer_loop` · Amended by ADR-0200 (the scope of branches that close stdin) · Amended by ADR-0292 (the abort premise of the ground that release is unreachable)
 
 ## 맥락
 
-codex app-server 가 발급한 thread id 를 프로필에 적는 배선(ADR-0185 Phase 2 ①)을 깔면서, **기록 호출이 실패하면 어디로 가는가**가 새로 생겼다. 처음 구현은 그 실패를 **기존 핸드셰이크 실패 분기**에 합쳤다.
+While laying down the wiring that writes the thread id issued by the codex app-server into the profile (ADR-0185 Phase 2 ①), a new question arose: **where does a failure of the record call go?** The first implementation merged that failure into the **existing handshake-failure branch**.
 
-그 분기는 원래 **핸드셰이크 자체가 실패한 경우**를 위해 만들어졌다. 그 전제에서는 자식이 이미 죽었거나 말이 없어서, 분기가 `Link::Down` 을 세우고 큐를 비우고 실패 결말 하나를 내는 것으로 충분했다. 그 분기는 `closed` 표식을 세우지 않고 자식을 건드리지도 않는다 — 그럴 필요가 없었다.
+That branch was originally made for the case where **the handshake itself failed**. Under that premise the child was already dead or silent, so it was enough for the branch to set `Link::Down`, empty the queue, and produce one failure outcome. That branch does not set the `closed` marker and does not touch the child — there was no need to.
 
-**새 진입 경로에서는 그 전제가 깨진다.** 기록 실패는 핸드셰이크가 **성공한 뒤**에 일어나므로 자식이 멀쩡히 살아 stdin 을 읽고 있다. 그러면:
+**On the new entry path, that premise breaks.** A record failure happens **after the handshake has succeeded**, so the child is alive and reading stdin. Then:
 
-- `closed` 가 서지 않아 `next_job` 이 `None` 을 돌려주지 않고, writer 는 `Job::Sweep` 을 영원히 돈다
-- 자식이 살아 있어 리더가 EOF 를 못 보고, 따라서 `OutputCore::finish` 가 돌지 않는다
-- 종결 전이가 없으니 수거기가 그 세션을 가져가지 않는다
+- `closed` is not set, so `next_job` does not return `None`, and the writer cycles `Job::Sweep` forever
+- the child is alive, so the reader does not see EOF, and therefore `OutputCore::finish` does not run
+- there is no terminal transition, so the reaper does not take that session
 
-정착 상태 = **화면엔 도는 것으로 보이는데 입력은 전부 거절되고, 자식 하나·스레드 둘·Job Object 가 사람이 죽일 때까지 붙잡혀 있다.** 즉 첫 구현은 「조용히 굳는다」를 고치려다 **다른 모양의 굳음**으로 바꿨다.
+Settled state = **on screen it looks like it is running, but all input is rejected, and one child, two threads and a Job Object stay held until a person kills them.** That is, the first implementation, in trying to fix 「조용히 굳는다」 (“freezing quietly”), **swapped it for a freeze of a different shape.**
 
 ## 결정
 
-**기록 실패 갈래에서만** 통로가 **자기 stdin 쓰기 끝을 닫는다.** 그러면 자식이 스스로 나가고, 그 뒤는 **기존 인과가 그대로 처리한다** — 리더 EOF → `ReaderExit::drop` 이 `closed`·`Link::Down` → pump 가 `finish` → 종결 전이 → 수거.
+**Only on the record-failure branch** the transport **closes its own stdin write end.** Then the child exits by itself, and after that **the existing causality handles it as is** — reader EOF → `ReaderExit::drop` sets `closed`·`Link::Down` → the pump runs `finish` → terminal transition → reap.
 
-실패 사유를 `HandshakeFailure { reason, while_recording }` 로 갈라, 프로토콜 왕복이 실패한 기존 갈래는 **손대지 않는다.** 그 갈래에는 「상대가 살아 있을 수 있으니 루프는 돈다」는 기존 결정이 그대로 유효하다(답하지 않으면 상대가 영구 정지한다).
+We split the failure reason into `HandshakeFailure { reason, while_recording }`, and the existing branch where the protocol round trip failed is **left untouched.** For that branch the existing decision that 「상대가 살아 있을 수 있으니 루프는 돈다」 (“the peer may be alive, so the loop keeps running”) stays valid (if we do not answer, the peer stops permanently).
 
-**선 = writer 가 `child.kill()`·`TerminateJobObject`·`core.finish` 중 하나라도 부르는 순간 위반이다.** 지금은 그중 아무것도 부르지 않는다.
+**The line = it is a violation the moment the writer calls any one of `child.kill()`·`TerminateJobObject`·`core.finish`.** Right now it calls none of them.
 
 ## 거부한 대안
 
-- **그대로 둔다(첫 구현 상태)** — 위 굳음이 실재한다. 코더가 stdin 닫기를 껐더니 새 회귀망이 **상태 전이 0건**으로 실패했다(변이 검증). 동시성 렌즈가 그 인터리빙을 먼저 구성했고 변이 검증이 그것을 재현했다. 실측으로 기각.
-- **통로가 정상 종료 경로를 직접 구동한다(kill 포함)** — ADR-0001 의 두 동사(`transport.shutdown()` → `core.join_pump(5s)`)는 **kill 핸들러 소유**이고, 통로가 자기 수명을 끝내지 않는다는 것이 그 파일 헤더의 불변식이다. 통로에서 kill 을 부르면 그 경계가 무너지고, 종결 전이의 단일 소유자(pump)도 흔들린다. ADR·코드로 기각.
-- **`closed` 만 세운다 / shutdown 원자만 세운다** — writer 는 멈추지만 **자식이 고아가 된다**(동시성 렌즈 지적). 프로세스·Job Object 가 그대로 남아 원래 문제의 절반만 해결한다. 코드로 기각.
+- **Leave it (the first implementation state)** — the freeze above is real. When the coder turned stdin closing off, the new regression net failed with **zero state transitions** (mutation verification). The concurrency lens constructed that interleaving first and the mutation verification reproduced it. Rejected by measurement.
+- **The transport drives the normal termination path directly (including kill)** — the two verbs of ADR-0001 (`transport.shutdown()` → `core.join_pump(5s)`) are **owned by the kill handler**, and the transport not ending its own lifetime is the invariant in that file's header. If the transport calls kill, that boundary collapses, and the single owner of the terminal transition (the pump) is shaken too. Rejected by ADR and code.
+- **Set only `closed` / set only the shutdown atom** — the writer stops, but **the child is orphaned** (pointed out by the concurrency lens). The process and the Job Object remain as they are, and only half of the original problem is solved. Rejected by code.
 
 ## 근거
 
-두 리뷰 렌즈가 **독립적으로** 이 경로가 ADR-0001 위반이 아니라고 판정했다:
+Two review lenses **independently** judged that this path is not a violation of ADR-0001:
 
-- 이 경로는 자식에게 신호를 보내지 않고, 자식이 쥔 핸들을 건드리지 않고, `core.finish` 를 부르지 않는다. 우리가 닫는 것은 **우리 쪽 쓰기 끝** 하나다.
-- 종결 전이는 여전히 **pump 단독**이다(ADR-0005 무손상). 이 갈래가 하는 일은 그 pump 를 깨우는 **입력을 만드는 것**이지 그 전이를 대신하는 것이 아니다.
-- 같은 파일에 선례가 있다 — `shutdown()` 자신이 stdin take 를 kill 과 **별개의 best-effort 단계**로 취급한다.
+- This path does not send a signal to the child, does not touch handles the child holds, and does not call `core.finish`. What we close is **one write end on our side**.
+- The terminal transition is still **the pump's alone** (ADR-0005 undamaged). What this branch does is **make the input** that wakes that pump, not substitute for that transition.
+- There is a precedent in the same file — `shutdown()` itself treats the stdin take as a **separate best-effort step** apart from kill.
 
-ADR-0001 의 본문은 두 동사의 **순서**와 **소유자**를 규정하며, 「자식은 우리 kill 로만 죽을 수 있다」고 주장하지 않는다.
+The body of ADR-0001 prescribes the **order** and **owner** of the two verbs, and does not claim that 「자식은 우리 kill 로만 죽을 수 있다」 (“the child can die only by our kill”).
 
 ## 영향 / 불변식
 
-- ★**이 갈래는 릴리스 빌드에서 도달 불가다**★ — 기록 실패의 유일한 원천이 **잡힌 패닉**이고 루트 `Cargo.toml` 의 `[profile.release]` 가 `panic = "abort"` 라 unwinding 이 없다. 그래서 이 결정이 만드는 동작은 **unwind 빌드(디버그·테스트)에서만 관측된다.** 릴리스에서 같은 패닉은 데몬 전체 abort 다.
-- ★**새 인과의 첫 칸은 「상대의 EOF 행동」이고 유계 backstop 이 없다**★ — 통로는 kill 을 부를 수 없으므로 상대가 stdin EOF 에서 안 죽으면 위 굳음이 **무신호로** 돌아온다. codex 는 스스로 업데이트하고 이 프로토콜엔 버전 칸이 없다. **누가 유계 대기와 그 처분을 소유하나는 미결**이고, 그것을 정하는 것이 이 한계를 닫는 전제다.
-- ★**파일 헤더의 「stdin 은 kill 보다 먼저 닫지 않는다」는 teardown 경로 한정으로 좁혔다**★ — 그 문장을 근거로 이 갈래를 걷어내지 말 것. **거꾸로 이 갈래를 근거로 `shutdown()` 의 순서를 뒤집지도 말 것** — 뒤엣것이 실제 회귀이고 `shutdown_completes_even_if_a_write_blocks_on_a_full_pipe` 가 그것을 지킨다.
-- **닫기의 안전은 「운영 호출 그래프에서는 막는 stdin 락 자리가 둘뿐」이라는 성질에 기댄다.** 파일 전체로는 거짓이다 — 테스트 모듈이 그 성질을 깨는 스레드를 이미 띄운다. 그 성질을 재는 게이트가 생겼다(운영 구획의 블로킹 stdin 락 획득 수 = 2). 그 수를 올리기 전에 새 자리의 호출 스레드를 판정할 것.
+- ★**This branch is unreachable in a release build**★ — the only source of a record failure is a **caught panic**, and the root `Cargo.toml`'s `[profile.release]` has `panic = "abort"`, so there is no unwinding. So the behavior this decision creates is **observed only in unwind builds (debug·test).** In release the same panic is an abort of the whole daemon.
+- ★**The first link of the new causality is 「상대의 EOF 행동」 (“the peer's EOF behavior”), and there is no bounded backstop**★ — since the transport cannot call kill, if the peer does not die on stdin EOF, the freeze above comes back **with no signal**. codex updates itself and this protocol has no version field. **Who owns the bounded wait and its disposition is undecided**, and deciding that is the precondition for closing this limit.
+- ★**「stdin 은 kill 보다 먼저 닫지 않는다」 (“Do not close stdin before kill”) in the file header has been narrowed to the teardown path only**★ — do not remove this branch on the basis of that sentence. **And conversely, do not reverse the order of `shutdown()` on the basis of this branch** — the latter is the real regression and `shutdown_completes_even_if_a_write_blocks_on_a_full_pipe` guards it.
+- **The safety of closing rests on the property that 「운영 호출 그래프에서는 막는 stdin 락 자리가 둘뿐」 (“in the production call graph there are only two places that block on the stdin lock”).** For the file as a whole it is false — the test module already spawns a thread that breaks that property. A gate that measures that property now exists (the number of blocking stdin lock acquisitions in the production section = 2). Before raising that number, decide the calling thread of the new spot.

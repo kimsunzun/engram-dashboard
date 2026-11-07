@@ -1,13 +1,13 @@
-# 세션 저장/복원 + 에이전트 프로필 + 자동 재시작 — 설계 초안 (검토용)
+# Session save/restore + agent profile + auto-restart — design draft (for review)
 
-상태: **초안.** fable / 웹 Gemini / 웹 GPT 3자 검증 대기. 전제: `wezterm-failure-analysis.md`.
-범위: ① 세션 저장/복원 + spawn 설정화(에이전트 프로필) + ② 프로세스 자동 재시작. (메시지 시스템 제외)
+Status: **draft.** Waiting for 3-party verification by fable / web Gemini / web GPT. Premise: `wezterm-failure-analysis.md`.
+Scope: ① session save/restore + making spawn configurable (agent profile) + ② process auto-restart. (The messaging system is excluded)
 
-## 0. 핵심 결정 (검토 포인트)
+## 0. Core decision (review point)
 
-**AgentId(uuid v4) = claude `--session-id`로 통합.** 우리가 UUID를 생성해 spawn 시 `claude --session-id <AgentId>`로 지정 → claude 세션 ID를 우리가 통제. 복원은 `claude --resume <AgentId>`. 이로써 wezterm 실패의 비결정성/위치매핑을 근본 회피.
+**AgentId (uuid v4) = unified with claude `--session-id`.** We generate the UUID and, at spawn, specify it as `claude --session-id <AgentId>` → we control the claude session ID. Restore is `claude --resume <AgentId>`. This avoids the root of wezterm's non-determinism/position mapping failures.
 
-## 1. 데이터 모델
+## 1. Data model
 
 ```rust
 // 에이전트 프로필 — spawn 단위이자 persist 단위
@@ -25,16 +25,16 @@ enum AgentCommand {
     Shell  { program: String, args: Vec<String> },  // cmd/pwsh/커스텀
 }
 ```
-- spawn 설정화(③) = `AgentCommand`로 "무엇을". cwd로 "어디서". (현재 claude 하드코딩 대체)
+- Configurable spawn (③) = "what" through `AgentCommand`. "Where" through cwd. (Replaces the current hardcoded claude)
 
-## 2. Persist (저장)
+## 2. Persist (save)
 
-- **무엇:** `AgentProfile` 목록만. (claude 대화 자체는 claude가 `~/.claude/projects/`에 저장 — 우리는 안 건드림)
-- **형식:** JSON 파일 (`<app_data>/agents.json`). 단순·검사 용이. SQLite는 과함(에이전트 수십 개 규모).
-- **시점:** 프로필 변경 시(spawn/kill/rename) 즉시 저장 + 앱 종료 시. (주기 저장은 불필요 — 프로필은 저빈도 변경)
-- **레이아웃 분리:** 슬롯↔AgentId 매핑은 **프론트(slotStore) 책임**. 백엔드는 프로필만. (wezterm 위치결합 함정 회피)
+- **What:** only the `AgentProfile` list. (The claude conversation itself is saved by claude in `~/.claude/projects/` — we do not touch it)
+- **Format:** a JSON file (`<app_data>/agents.json`). Simple · easy to inspect. SQLite is overkill (the scale is a few dozen agents).
+- **When:** immediately on a profile change (spawn/kill/rename) + at app exit. (Periodic saving is unnecessary — profiles change at low frequency)
+- **Layout separation:** the slot↔AgentId mapping is the **frontend (slotStore) responsibility**. The backend holds only profiles. (Avoids the wezterm position-coupling trap)
 
-## 3. spawn (프로필 기반)
+## 3. spawn (profile-based)
 
 ```
 spawn_agent(profile):
@@ -46,9 +46,9 @@ spawn_agent(profile):
   }
   PTY spawn (cwd, env) → 기존 PtyManager.spawn_agent 흐름
 ```
-- 기존 `spawn_agent(cwd)` → `spawn_agent(profile)`로 확장. PtySession/drain/manager 코어는 불변(인터페이스만).
+- Extend the existing `spawn_agent(cwd)` to `spawn_agent(profile)`. The PtySession/drain/manager core is unchanged (interface only).
 
-## 4. 복원 (앱 시작)
+## 4. Restore (app start)
 
 ```
 restore_all():
@@ -58,10 +58,10 @@ restore_all():
     spawn_agent(p)
     // claude --resume <id> 실패 시 → fallback (아래)
 ```
-- **fallback (방어 — claude 복원 100% 불신):** `--resume`가 실패(세션 부재/손상)하면 자동으로 `--session-id <id>`(fresh)로 재spawn. 우리 프로필 메타는 보존되므로 에이전트는 살아남고 대화만 새로 시작.
-- **실패 감지 신호:** spike로 확정 필요 — `--resume <없는id>`의 exit code/stderr/행 여부 (불확실 ②).
+- **fallback (defense — we fully distrust claude restore):** if `--resume` fails (session missing/damaged), automatically re-spawn with `--session-id <id>` (fresh). Our profile metadata is preserved, so the agent survives and only the conversation starts anew.
+- **Failure detection signal:** must be settled by a spike — the exit code/stderr/whether it hangs for `--resume <없는id>` (uncertain ②).
 
-## 5. 자동 재시작 (②)
+## 5. Auto-restart (②)
 
 ```
 정책: AgentProfile.restart_policy = { Never | OnCrash | Always }, max_retries
@@ -69,29 +69,29 @@ drain thread가 terminal 전이 감지 (Exited{code≠0} or 비정상) →
   manager가 정책 확인 → OnCrash & code≠0 & retries<max →
     claude --resume <id> 로 재spawn (대화 이어가기)
 ```
-- 정상 종료(code=0, 사용자 kill)는 재시작 안 함.
-- 재시작도 `--resume`라 대화 유지. 실패 시 fresh fallback.
-- 무한 재시작 방지: max_retries + backoff.
+- A normal exit (code=0, user kill) is not restarted.
+- A restart also uses `--resume`, so the conversation is kept. On failure, the fresh fallback.
+- Preventing infinite restarts: max_retries + backoff.
 
-## 6. spike 필요 (wezterm 교훈 — 실측 우선)
+## 6. Spike needed (the wezterm lesson — measurement first)
 
-본 구현 전 Windows 실측:
-1. `claude --session-id <uuid>` spawn → 정상 동작? 같은 uuid 재spawn 시 append/error? (불확실 ①)
-2. `claude --resume <없는/손상 uuid>` → exit code/stderr (fallback 트리거 확정, 불확실 ②)
-3. `claude --resume <id>` 다른 크기 PTY → TUI redraw 정상? (불확실 ③)
+Windows measurement before the real implementation:
+1. `claude --session-id <uuid>` spawn → works normally? When re-spawning the same uuid, append/error? (uncertain ①)
+2. `claude --resume <없는/손상 uuid>` → exit code/stderr (settles the fallback trigger, uncertain ②)
+3. `claude --resume <id>` on a PTY of a different size → does the TUI redraw normally? (uncertain ③)
 
-## 7. 방어 원칙 (wezterm-failure-analysis §3 적용)
+## 7. Defensive principles (applying wezterm-failure-analysis §3)
 
-1. 세션 = AgentId(위치 무관) ✅ — 슬롯 인덱스에 안 묶음
-2. claude 추적 = 우리 spawn child PID/AgentId ✅ — 프로세스명(node) 감지 안 함
-3. 세션 ID = `--session-id`로 우리가 통제 ✅ — 비결정성 제거
-4. 레이아웃↔세션 분리 ✅ — 프론트 슬롯 / 백엔드 프로필
-5. 복원 실패 graceful ✅ — fresh fallback, 프로필 메타 보존
+1. Session = AgentId (independent of position) ✅ — not bound to a slot index
+2. claude tracking = our spawned child PID/AgentId ✅ — no process-name (node) detection
+3. Session ID = controlled by us through `--session-id` ✅ — removes non-determinism
+4. Layout↔session separation ✅ — frontend slots / backend profiles
+5. Graceful restore failure ✅ — fresh fallback, profile metadata preserved
 
-## 8. 검토 질문 (3자에게)
+## 8. Review questions (to the 3 parties)
 
-- AgentId=session-id 통합이 타당한가? (1 AgentId ↔ 1 claude 세션 가정의 허점은?)
-- JSON persist + 변경시 저장 정책이 충분한가? (동시성/크래시 중 저장 손상?)
-- 자동 재시작 `--resume`가 재시작 루프/대화 오염 위험은?
-- fallback(resume 실패→fresh) 시 사용자가 "대화 날아감"을 어떻게 인지? (UX 신호)
-- spike 3항목 외 놓친 claude CLI 함정은?
+- Is unifying AgentId=session-id valid? (What are the holes in the assumption 1 AgentId ↔ 1 claude session?)
+- Is the JSON persist + save-on-change policy sufficient? (Concurrency / save corruption during a crash?)
+- Does auto-restart `--resume` risk a restart loop / conversation contamination?
+- On the fallback (resume failed → fresh), how does the user notice "the conversation was lost"? (UX signal)
+- Besides the 3 spike items, what claude CLI traps did we miss?

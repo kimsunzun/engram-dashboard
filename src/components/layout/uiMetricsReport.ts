@@ -1,8 +1,8 @@
-// ADR-0227: 칸 틀 기본 지표 보고(TRD §2d) — 웹뷰당 한 번, 잎이 마운트될 때 그 잎의 테두리 요소를 재서
-//   `report_ui_metrics` 로 보낸다. 셸은 이 값과 창 캔버스로 칸 px 를 계산하고 화면에 묻지 않는다.
-// 상태가 모듈 범위인 이유: 「보냈음」은 웹뷰 하나에 하나이고, 웹뷰 재로드가 모듈을 새로 실행하며 함께 초기화된다.
-//   부팅 때 잎 N 개가 한꺼번에 마운트되므로 진행 중인 보고 하나를 모두가 공유한다.
-// 컴포넌트 파일과 떼어 둔 이유는 `windowCanvasReport.ts` 와 같다(HMR 은 고친 모듈만 다시 실행 · Fast Refresh 경계).
+// ADR-0227: area frame default metrics report (TRD §2d) — once per webview, when a leaf mounts, the border element of that leaf is measured and sent with
+//   `report_ui_metrics`. The shell computes area px from this value and the window canvas and does not ask the screen.
+// Why the state is module scope: 「보냈음」 is one per webview, and a webview reload re-executes the module and resets it together.
+//   At boot N leaves mount at once, so everyone shares the one report in progress.
+// The reason for keeping it apart from the component file is the same as `windowCanvasReport.ts` (HMR re-executes only the modified module · Fast Refresh boundary).
 
 import { invoke } from '@tauri-apps/api/core'
 import type { CSSProperties } from 'react'
@@ -12,17 +12,17 @@ import { retryAsync } from '../../util/retryInvoke'
 import { MIN_PANE_PX } from './splitPreview'
 
 interface UiMetricsReportState {
-  /** 셸이 성공 응답했다. 실패로는 세우지 않는다. */
+  /** The shell responded with success. It is not set on failure. */
   reported: boolean
-  /** 지금 보내는 작업(재시도 대기 포함). 끝나면 성공·실패와 무관하게 비운다. */
+  /** The job being sent now (including retry waits). Cleared when it ends regardless of success or failure. */
   inFlight: Promise<void> | null
 }
 
 /**
- * 칸 틀 테두리 — 잎(`LayoutLeaf`)과 대기 모드의 빈 캔버스(`WindowLayout`)가 함께 입는다. 지표는 이 테두리를 잰 값이라
- * 둘이 갈리면 셸의 칸 content 가 어긋난다.
- * ★단축 속성(`border`)으로 합치지 않는다★ — 폭이 `var()` 와 한 선언에 섞이면 jsdom 이 계산된 폭을 못 줘서 지표 측정을
- * 시험으로 잴 수 없다.
+ * Area frame border — worn together by a leaf (`LayoutLeaf`) and the empty canvas of waiting mode (`WindowLayout`). The metrics are the measured value of this border, so
+ * if the two diverge, the shell's area content is off.
+ * ★Do not merge into a shorthand property (`border`)★ — if the width is mixed with `var()` in one declaration, jsdom cannot give the computed width, so the metrics measurement
+ * cannot be measured in a test.
  */
 export const SLOT_FRAME_BORDER = {
   borderWidth: 1,
@@ -30,10 +30,10 @@ export const SLOT_FRAME_BORDER = {
   borderColor: 'var(--border)',
 } as const satisfies CSSProperties
 
-// 초기화가 상태 객체를 통째로 갈아 끼우므로, 그 전에 떠난 작업의 응답은 버려진 객체에만 쓴다.
+// Initialization replaces the whole state object, so the response of a job that left before it is written only to the discarded object.
 let uiMetricsReport: UiMetricsReportState = { reported: false, inFlight: null }
 
-/** 칸 테두리 요소의 계산된 테두리 폭 넷(CSS px) + 정책 상수. 폭 하나라도 유한한 수로 읽히지 않으면 null. */
+/** The four computed border widths of the area border element (CSS px) + policy constant. null if any one width does not read as a finite number. */
 export function measureUiMetrics(borderEl: Element): UiMetrics | null {
   const cs = getComputedStyle(borderEl)
   const t = parseFloat(cs.borderTopWidth)
@@ -45,9 +45,9 @@ export function measureUiMetrics(borderEl: Element): UiMetrics | null {
 }
 
 /**
- * 이 웹뷰가 아직 지표를 성공적으로 보내지 않았으면 `borderEl` 을 재서 보낸다. 보내는 중이면 그 작업을 함께 기다린다.
- * 유계 재시도(`retryAsync`) 끝에 실패하면 오류를 남기고 비워 두어 다음 호출(다음 잎 마운트)이 다시 시도한다.
- * 반환 프라미스는 거부하지 않는다.
+ * If this webview has not yet successfully sent the metrics, measure `borderEl` and send. If it is sending, wait together for that job.
+ * If it fails after bounded retry (`retryAsync`), leave an error and keep it cleared so the next call (the next leaf mount) tries again.
+ * The returned promise does not reject.
  */
 export function reportUiMetrics(borderEl: Element): Promise<void> {
   const st = uiMetricsReport
@@ -55,7 +55,7 @@ export function reportUiMetrics(borderEl: Element): Promise<void> {
   if (st.inFlight !== null) return st.inFlight
   const metrics = measureUiMetrics(borderEl)
   if (metrics === null) {
-    // 셸은 유한하지 않은 inset 을 거절한다 — 보내 봐야 재시도만 소진한다.
+    // The shell rejects a non-finite inset — sending it only exhausts retries.
     console.error('[uiMetricsReport] 칸 테두리 폭을 수로 읽지 못해 보고하지 않는다:', borderEl)
     return Promise.resolve()
   }
@@ -75,7 +75,7 @@ export function reportUiMetrics(borderEl: Element): Promise<void> {
   return job
 }
 
-/** 테스트 전용 — 모듈 상태 초기화(테스트 간 격리). 프로덕션 코드에서 호출 금지. */
+/** Test only — reset module state (isolation between tests). Do not call from production code. */
 export function __resetUiMetricsReportForTest(): void {
   uiMetricsReport = { reported: false, inFlight: null }
 }

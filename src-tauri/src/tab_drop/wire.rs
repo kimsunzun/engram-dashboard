@@ -1,5 +1,5 @@
-//! 놓기 명령 `tab_drop` · 창 사실 `window:frame` 의 웹뷰 ↔ 셸 wire 타입 — ts-rs 가 `src-tauri/bindings/` 로 굽는다.
-//! 좌표 · 크기는 그 창 뷰포트의 CSS px(논리)다. 셸이 읽는 커서 · 입력 상태는 여기 실리지 않는다.
+//! The webview ↔ shell wire types of the drop command `tab_drop` · the window fact `window:frame` — ts-rs bakes them into `src-tauri/bindings/`.
+//! Coordinates · sizes are CSS px (logical) of that window's viewport. The cursor · input state the shell reads is not carried here.
 // TRD S21-slot-docking §3-1 · §3-8
 
 use ts_rs::TS;
@@ -9,16 +9,16 @@ use crate::layout::bands::{PointCss, SizeCss};
 use crate::layout::dock::DockSide;
 use crate::layout::geometry::Insets;
 
-/// `tab_drop` 의 인자 — 끌기 하나에 많아야 둘(출처 dragend 의 `drag_end` · 받은 창의 `drop`)이 온다. 부른 창 label 은
-/// 인자가 아니라 Tauri 가 넣어 주는 창에서 꺼낸다.
+/// The argument of `tab_drop` — at most two come per drag (the source dragend's `drag_end` · the receiving window's `drop`). The calling window's label is taken
+/// from the window Tauri injects, not from the argument.
 ///
-/// - `drag`: 출처가 dragstart 에 뽑는 끌기 id — 셸 장부의 열쇠다(같은 끌기의 두 번째 처리는 `duplicate`).
-/// - `view`: 끄는 탭.
-/// - `from`: dragstart 때 그 탭의 창 label — 결과 알림(`tab_drop:done`)을 받는 창이다. 그 탭이 그사이 다른 창으로
-///   갔으면 셸은 지금 창에서 옮긴다.
-/// - `initial`: 누르기 전 `from` 창의 모델 활성 탭 — `view` 가 아니고 끄는 탭이 놓을 때 `from` 에 있으면 놓은 뒤
-///   `from` 에 남은 탭 중 활성이 된다. 그 밖(`null` · `view` 와 같음 · 끄는 탭이 다른 창에 있음)은 셸 규칙(오른쪽
-///   이웃 → 왼쪽)이다.
+/// - `drag`: the drag id the source draws at dragstart — the key of the shell ledger (the second processing of the same drag is `duplicate`).
+/// - `view`: the dragged tab.
+/// - `from`: the label of that tab's window at dragstart — the window that receives the result notification (`tab_drop:done`). If that tab went to another window
+///   in the meantime, the shell moves it from the current window.
+/// - `initial`: the model's active tab of the `from` window before pressing — if it is not `view` and the dragged tab is in `from` at drop time, it becomes the active one
+///   among the tabs left in `from` after the drop. Otherwise (`null` · same as `view` · the dragged tab is in another window) it is the shell rule (right
+///   neighbor → left).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct TabDrop {
@@ -32,17 +32,17 @@ pub struct TabDrop {
     pub to: DropTo,
 }
 
-/// 놓을 곳 — 셸은 놓기가 본 상태와 견주지 않는다. 가리킨 것이 놓을 때 있으면 지금 상태에 맞춰 적용하고, 없으면
-/// `rejected` 다.
+/// Where to drop — the shell does not compare against the state the drop saw. If what was pointed at exists at drop time, it is applied matched to the current state, and if not,
+/// it is `rejected`.
 ///
-/// - `tab_bar`: 부른 창의 탭바. `index` = 결과 탭 목록에서의 자리 — 셸이 지금 목록(끄는 탭을 뺀 것)에 넣고, 넘치면
-///   맨 뒤다. 부른 창이 없으면 `WindowNotFound`.
-/// - `seam`: 부른 창에 보이던 탭 `target` 의 이음새(`side` 철자 = [`DockSide`] variant 이름). `share` = 감싼 자리에서
-///   끄는 탭이 차지하는 몫(`RATIO_MIN(0.01) ≤ share ≤ 0.5` — 밖이면 `InvalidShare`). `target` 의 지금 배치에 붙인다 —
-///   그사이 나뉘었거나 다른 창으로 갔어도 `target` 과 기준 칸이 있으면 붙고, 없으면 `TabNotFound` · `SlotNotFound`(기준
-///   칸이 다른 탭으로 갔으면 `SlotNotInTab`).
-/// - `new_window`: 그 탭만 든 창. `size` = 새 창 안쪽 크기(유한 양수가 아니면 셸 기본 크기 · `null` = 탭 하나뿐인
-///   팝아웃 — 새 창 없이 그 창을 크기 그대로 옮긴다) · `grab` = 새 창 뷰포트에서 커서가 올 점.
+/// - `tab_bar`: the calling window's tab bar. `index` = the position in the resulting tab list — the shell inserts it into the current list (without the dragged tab), and if it overflows, it is
+///   the very end. If there is no calling window, `WindowNotFound`.
+/// - `seam`: the seam of tab `target` that was visible in the calling window (`side` spelling = [`DockSide`] variant name). `share` = the share the dragged tab takes
+///   of the wrapped spot (`RATIO_MIN(0.01) ≤ share ≤ 0.5` — outside it, `InvalidShare`). It attaches to `target`'s current layout —
+///   even if it was split in the meantime or went to another window, it attaches if `target` and the reference area exist, and if not, `TabNotFound` · `SlotNotFound` (if the reference
+///   area went to another tab, `SlotNotInTab`).
+/// - `new_window`: a window holding only that tab. `size` = the new window's inner size (if not a finite positive number, the shell default size · `null` = a popout with only
+///   one tab — move that window as is at its size with no new window) · `grab` = the point in the new window's viewport where the cursor will land.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(export)]
@@ -64,11 +64,11 @@ pub enum DropTo {
     },
 }
 
-/// 새 창 놓기를 보낸 쪽.
+/// The side that sent the new-window drop.
 ///
-/// - `drop`: 우리 웹뷰의 drop — 놓기가 확실하다.
-/// - `drag_end`: 출처의 dragend(`dropEffect` 가 무엇이든 늘 하나) — 셸이 끌기가 끝난 뒤의 입력 상태 · 커서 밑 맨 위
-///   창으로 취소 · 무시 · 새 창을 가른다. 같은 끌기의 `drop` 이 따로 오면 그것이 이긴다.
+/// - `drop`: a drop in our webview — the drop is certain.
+/// - `drag_end`: the source's dragend (always exactly one whatever `dropEffect` is) — the shell distinguishes cancel · ignore · new window by the input state after the drag ended · the topmost
+///   window under the cursor. If the same drag's `drop` comes separately, it wins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(export)]
@@ -77,8 +77,8 @@ pub enum NewWindowBy {
     DragEnd { effect: EndEffect },
 }
 
-/// 출처 dragend 의 `dropEffect` — wire 값은 그 문자열 그대로(`none` · `move`). `move` = 어딘가(우리 웹뷰 · 다른 앱)가
-/// 놓기를 받았다.
+/// The `dropEffect` of the source dragend — the wire value is that string as is (`none` · `move`). `move` = somewhere (our webview · another app) received
+/// the drop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
@@ -87,7 +87,7 @@ pub enum EndEffect {
     Move,
 }
 
-/// 이음새의 기준 — `slot` = 대상 탭의 그 칸 · `outer` = 대상 탭 전체(바깥 변).
+/// The reference of the seam — `slot` = that area of the target tab · `outer` = the whole target tab (outer edge).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(export)]
@@ -99,21 +99,21 @@ pub enum DropAnchor {
     Outer,
 }
 
-/// `tab_drop` 의 답. `duplicate` 밖의 결과는 출처 창(`from`)에 [`TabDropDone`] 으로도 간다.
+/// The answer of `tab_drop`. Results other than `duplicate` also go to the source window (`from`) as [`TabDropDone`].
 ///
-/// - `applied`: 옮겼다(같은 창 같은 자리면 바뀐 것 없이). `window` = 옮긴 탭이 든 창의 label · `window_id` · `number`
-///   = 그 창의 영속 id · 번호(뜻은 `NewWindow` 와 같다 — 새 창이든 기존 창이든 그 창의 것. 창 인자로 넘길 값은
-///   `window_id` 다) · `reused` = 새 창 없이 출처 창을 옮겼다(모델은 그대로). `window_id` · `number` 는 함께
-///   `null` 이거나 함께 값이다 — `null` = 재사용 길에서 창을 옮기는 사이 그 창이 닫혔다.
-/// - `canceled`: 취소다(Esc · 주 버튼을 쥔 채 끝남 · 커서를 못 읽음) — 셸은 모델을 쓰지 않았다.
-/// - `ignored`: 아무 일 없다 — 셸은 모델을 쓰지 않았다. `why` = `no-cursor`(drop 인데 커서를 못 읽음) ·
-///   `lost-drop`(우리 창 위에서 떼었는데 받은 drop 이 없음 — 제목 표시줄 · 테두리 포함) · `accepted-ours`(우리 창이
-///   받음 — 그 창의 `drop` 이 따로 온다) · `accepted-unknown`(어딘가가 받았는데 커서 밑 창을 못 읽음).
-/// - `duplicate`: 같은 끌기를 이미 처리했다 — 이 호출은 알림도 없다. 같은 끌기의 `drag_end` 새 창이 진행 중일 때 닿은
-///   `drop` 도 이것으로 답하되 셸이 맡아 둔다 — 그 새 창이 거절되면 셸이 그 `drop` 을 이어 처리하고 그 결과는
-///   [`TabDropDone`] 으로만 간다.
-/// - `rejected`: 모델이 거절했다 — 모델 그대로. `kind` = 거절 종류 낱말(`TabNotFound` · `WindowNotFound` ·
-///   `SlotNotFound` · `ZeroArea` · `WindowOpen` 따위 — 셸 도킹 오류 문구의 괄호 속 낱말) · `reason` = 사람이 읽는 문장.
+/// - `applied`: moved (with nothing changed if the same window and same position). `window` = the label of the window holding the moved tab · `window_id` · `number`
+///   = that window's persistent id · number (the meaning is the same as for `NewWindow` — that window's, whether new or existing. The value to pass as a window argument is
+///   `window_id`) · `reused` = the source window was moved with no new window (the model is unchanged). `window_id` · `number` are together
+///   `null` or together values — `null` = on the reuse path, that window was closed while moving it.
+/// - `canceled`: a cancel (Esc · ended while holding the primary button · cursor unreadable) — the shell did not write the model.
+/// - `ignored`: nothing happens — the shell did not write the model. `why` = `no-cursor` (a drop but the cursor could not be read) ·
+///   `lost-drop` (released over our window but no drop was received — including the title bar · border) · `accepted-ours` (our window
+///   received it — that window's `drop` comes separately) · `accepted-unknown` (somewhere received it but the window under the cursor could not be read).
+/// - `duplicate`: the same drag was already processed — this call has no notification either. A `drop` that arrives while the same drag's `drag_end` new window is in progress
+///   is also answered with this, but the shell parks it — if that new window is rejected, the shell continues that `drop` and its result goes
+///   only by [`TabDropDone`].
+/// - `rejected`: the model rejected it — the model is unchanged. `kind` = the rejection kind word (`TabNotFound` · `WindowNotFound` ·
+///   `SlotNotFound` · `ZeroArea` · `WindowOpen`, etc. — the word in the parentheses of the shell docking error text) · `reason` = a human-readable sentence.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(export)]
@@ -135,10 +135,10 @@ pub enum TabDropReply {
     },
 }
 
-/// 사건 `tab_drop:done` 의 몸 — `tab_drop` 처리마다 출처 창(명령의 `from`)에 많아야 한 번. 내지 않는 것 = `duplicate` ·
-/// 거절된 `drag_end` 새 창 중 그 거절 전에 같은 끌기의 `drop` 을 맡아 둔 것(그 `drop` 의 결과가 대신 간다) · 그 창이
-/// 닫혔음. 적용이면 그 쓰기의 모델 알림(`layout:updated` · `window:tabs-updated`) 뒤에 온다. 같은 `drag` 에 둘이 올
-/// 수 있다(무시된 `drag_end` · 맡은 것 없이 거절된 `drag_end` 새 창 뒤 이기는 `drop`) — 뒤의 것이 그 끌기의 결과다.
+/// The body of the event `tab_drop:done` — at most once to the source window (the command's `from`) per `tab_drop` processing. What is not emitted = `duplicate` ·
+/// a rejected `drag_end` new window that had parked the same drag's `drop` before that rejection (that `drop`'s result goes instead) · that window
+/// having been closed. If applied, it comes after that write's model notification (`layout:updated` · `window:tabs-updated`). Two can come for the same `drag`
+/// (after an ignored `drag_end` · a `drag_end` new window rejected with nothing parked, the winning `drop`) — the later one is that drag's result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct TabDropDone {
@@ -147,7 +147,7 @@ pub struct TabDropDone {
     pub outcome: DropOutcome,
 }
 
-/// [`TabDropDone`] 의 결과 — 뜻은 [`TabDropReply`] 의 같은 이름.
+/// The result of [`TabDropDone`] — the meaning is the same-named one of [`TabDropReply`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
@@ -158,17 +158,17 @@ pub enum DropOutcome {
     Rejected,
 }
 
-/// 창 사실 — 셸 → 그 창 사건 `window:frame`(값이 바뀔 때만) · 마운트 때 당기는 `window_frame` 의 답.
+/// Window fact — shell → that window's event `window:frame` (only when the value changes) · the answer of `window_frame`, pulled at mount.
 ///
-/// - `restored`: 그 창의 보통(복원) 안쪽 크기 — 최대화 중이어도 최대화 전 크기다. 아직 모르면 `null`.
-/// - `maximized`: 최대화돼 있나.
-/// - `insets`: 창 틀 = 바깥 사각형 − 안쪽 사각형(CSS px — 그 창 배율로 나눈 값 · 보이지 않는 크기 조절 테두리 포함).
-/// - `focused`: 그 창이 OS 전경 창인가(제목 줄 흐림 몫 — TRD S26-window-chrome §6-5). 그 창의 포커스 사건이 민 값은
-///   그 사건의 값이고, 당기기 · 그 밖의 밀기는 그때의 OS 전경 창 판정이다 — 두 값이 잠깐 어긋날 수 있다(미검 · S12).
-/// - `caption`: 제목 줄 크롬 모양 — OS 상수라 창마다 · 실행 내내 같다.
+/// - `restored`: that window's normal (restored) inner size — even while maximized it is the size before maximize. `null` if not yet known.
+/// - `maximized`: is it maximized.
+/// - `insets`: window frame = outer rectangle − inner rectangle (CSS px — divided by that window's scale factor · including the invisible resize border).
+/// - `focused`: is that window the OS foreground window (for dimming the title bar — TRD S26-window-chrome §6-5). The value pushed by that window's focus event is
+///   that event's value, and a pull · any other push is the OS foreground-window decision at that time — the two values may briefly disagree (unverified · S12).
+/// - `caption`: the title-bar chrome shape — an OS constant, so the same for every window · throughout a run.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
-// ADR-0303 — 크롬식 제목 표시줄
+// ADR-0303 — Chrome-style title bar
 pub struct WindowFrame {
     pub restored: Option<SizeCss>,
     pub maximized: bool,
@@ -177,12 +177,12 @@ pub struct WindowFrame {
     pub caption: CaptionChrome,
 }
 
-/// 제목 줄 크롬 모양(TRD S26-window-chrome §3-2 · §7-11).
+/// The title-bar chrome shape (TRD S26-window-chrome §3-2 · §7-11).
 ///
-/// - `buttons`: 최소화 · 최대화 · 닫기 단추를 웹이 그린다. 거짓 = OS 가 그린다(macOS 몫 — 지금은 늘 참).
-/// - `leading_inset`: 제목 줄 왼쪽에서 웹이 비워 둘 폭(CSS px — OS 가 그 자리에 단추를 그린다 · 지금은 늘 0).
-/// - `snap_overlay`: 셸이 스냅 레이아웃 오버레이를 켠 빌드인가 — 참일 때만 웹이 최대화 단추 사각형을 보고한다(셸 기능
-///   `snap-overlay` 로 지은 빌드만 참 · 기본 꺼짐 · §8-4).
+/// - `buttons`: the web draws the minimize · maximize · close buttons. False = the OS draws them (macOS's share — always true for now).
+/// - `leading_inset`: the width the web leaves empty at the left of the title bar (CSS px — the OS draws buttons there · always 0 for now).
+/// - `snap_overlay`: is this a build where the shell turned on the snap-layout overlay — only when true does the web report the maximize-button rectangle (only a build made with the shell feature
+///   `snap-overlay` is true · off by default · §8-4).
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct CaptionChrome {

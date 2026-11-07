@@ -1,13 +1,13 @@
-//! 셸 실행 잠금 `<셸 run 폴더>\state.lock`(TRD S21-storage §6-5 ① · §6-6 · I1) — 부팅 단계가 상태 파일을 읽기
-//! 전에 잡고 정상 종료 쓰기(`Final`) 뒤에 놓는다.
+//! Shell run lock `<셸 run 폴더>\state.lock` (TRD S21-storage §6-5 ① · §6-6 · I1) — the boot stage takes it before reading the state
+//! files and releases it after the normal shutdown write (`Final`).
 //!
-//! 단일 인스턴스 관문만으로는 모자란다 — 그 플러그인은 `RunEvent::Exit` 에서 뮤텍스를 우리 `Final` 보다 먼저 놓아,
-//! 앞 인스턴스가 정상 종료를 쓰는 동안 새 인스턴스가 관문을 지난다(§6-5 사실 ②). 이 잠금이 그 새 인스턴스를
-//! 앞 인스턴스의 마지막 쓰기 뒤로 세운다.
+//! The single-instance gate alone is not enough — that plugin releases the mutex at `RunEvent::Exit` before our `Final`,
+//! so while the previous instance writes its normal shutdown, a new instance passes the gate (§6-5 fact ②). This lock puts that new instance
+//! behind the previous instance's last write.
 //!
-//! ★못 잡아도 앱은 뜬다★ — 폴더 · 파일을 못 열거나 [`LOCK_WAIT`] 안에 못 잡으면 log 하고 잠금 없이 진행한다
-//! (D8 정신 · §12 R11). 그 길의 남은 위험은 앞 인스턴스의 `Final` 과 엇갈리는 것뿐이고, 어느 쪽이 이겨도 파일은
-//! 온전하다.
+//! ★The app comes up even if it cannot take it★ — if the folder · file cannot be opened or it cannot be taken within [`LOCK_WAIT`], it logs and proceeds without the lock
+//! (D8 spirit · §12 R11). The only remaining risk on that path is crossing with the previous instance's `Final`, and whichever wins, the file is
+//! intact.
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
@@ -17,14 +17,14 @@ use super::saver::REPLY_DEADLINE;
 
 pub const LOCK_FILE: &str = "state.lock";
 
-/// 앞 인스턴스의 정상 종료 쓰기 마감([`REPLY_DEADLINE`]) + 여유. 짧으면 새 인스턴스가 그 쓰기를 기다리지 않는다.
+/// Deadline of the previous instance's normal shutdown write ([`REPLY_DEADLINE`]) + margin. If short, the new instance does not wait for that write.
 pub const LOCK_WAIT: Duration = Duration::from_secs(3);
 const _: () = assert!(LOCK_WAIT.as_millis() > REPLY_DEADLINE.as_millis());
 
-/// 잡혀 있는 동안 다시 해 보는 간격 — 앞 인스턴스가 놓으면 이 안에 잡는다.
+/// Interval of retrying while it is held — when the previous instance releases it, it is taken within this.
 const RETRY_PAUSE: Duration = Duration::from_millis(50);
 
-/// 쥔 잠금 — 놓는 길은 drop 하나다(P3b3 = `Final` 뒤 · 가드면 `Final` 없이). 프로세스가 죽으면 OS 가 푼다.
+/// The lock held — the only way to release is drop (P3b3 = after `Final` · for a guard without `Final`). When the process dies the OS releases it.
 #[derive(Debug)]
 pub struct StateLock {
     file: File,
@@ -32,8 +32,8 @@ pub struct StateLock {
 }
 
 impl Drop for StateLock {
-    // 핸들을 닫기 전에 명시적으로 푼다 — Windows `LockFileEx` 문서: 닫힌 핸들의 잠금은 OS 가 풀되 그 시점이 시스템
-    //   자원에 달려 있어, 바로 뒤에 기다리는 새 인스턴스가 그만큼 더 막힐 수 있다.
+    // Release explicitly before closing the handle — Windows `LockFileEx` docs: the OS releases the lock of a closed handle, but the timing depends on system
+    //   resources, so a new instance waiting right after could be blocked that much longer.
     fn drop(&mut self) {
         if let Err(e) = self.file.unlock() {
             tracing::warn!(
@@ -46,8 +46,8 @@ impl Drop for StateLock {
     }
 }
 
-/// `run_dir` 를 만들고(없으면) 그 안의 [`LOCK_FILE`] 을 배타로 잡는다 — 잡혀 있으면 [`LOCK_WAIT`] 까지 다시 해
-/// 본다. `None` = 잠금 없이 진행한다(사유는 이미 log 했다).
+/// Creates `run_dir` (if missing) and takes the [`LOCK_FILE`] inside it exclusively — if held, retries
+/// until [`LOCK_WAIT`]. `None` = proceeds without the lock (the reason was already logged).
 pub fn acquire(run_dir: &Path) -> Option<StateLock> {
     acquire_with(run_dir, LOCK_WAIT, Instant::now, std::thread::sleep)
 }
@@ -71,7 +71,7 @@ fn acquire_with(
         proceed_without("폴더를 못 만든다", &e);
         return None;
     }
-    // 내용은 쓰지도 읽지도 않는다 — 비우지 않게 `truncate(false)`.
+    // The content is neither written nor read — `truncate(false)` so it is not emptied.
     let file = match OpenOptions::new()
         .write(true)
         .create(true)
@@ -85,7 +85,7 @@ fn acquire_with(
         }
     };
     let start = now();
-    // 한 번이라도 막혔을 때만 「기다려 잡았다」를 적는다 — 두 시각의 차는 거의 늘 0 이 아니다.
+    // Writes 「기다려 잡았다」 (took it after waiting) only when it was blocked at least once — the difference of the two times is almost never 0.
     let mut contended = false;
     loop {
         match file.try_lock() {
@@ -124,10 +124,10 @@ fn acquire_with(
 
 #[cfg(test)]
 mod tests {
-    //! ★다른 프로세스 대신 같은 프로세스의 두 핸들로 경합을 만든다★ — std 잠금은 Windows 에서 `LockFileEx`(핸들
-    //! 마다) · Unix 에서 `flock`(열린 파일 설명마다)이라 따로 연 두 핸들도 서로 막는다. 그래서 이 시험은 「다른
-    //! 핸들이 쥐었을 때의 대기 · 포기 · 잡기」를 재고, 프로세스 사이의 실제 경합(앞 인스턴스의 종료와 겹치는
-    //! 부팅)은 재지 않는다 — 그쪽은 P3b3 GUI 실측(§12 R11).
+    //! ★Creates the contention with two handles of the same process instead of another process★ — the std lock is `LockFileEx` on Windows (per handle) and `flock` on Unix
+    //! (per open file description), so even two handles opened separately block each other. So this test measures 「다른
+    //! 핸들이 쥐었을 때의 대기 · 포기 · 잡기」 (waiting · giving up · taking it when another handle holds it) and does not measure real contention between processes (a boot overlapping the previous
+    //! instance's shutdown) — that is the P3b3 GUI measurement (§12 R11).
 
     use std::cell::Cell;
 
@@ -144,7 +144,7 @@ mod tests {
         ))
     }
 
-    /// 잠이 시계를 그만큼 밀 뿐인 가짜 시간 — 시험이 실제로 3초를 자지 않는다.
+    /// Fake time where sleeping only pushes the clock that much — the test does not actually sleep 3 seconds.
     struct FakeTime {
         now: Cell<Instant>,
         sleeps: Cell<u32>,
@@ -248,7 +248,7 @@ mod tests {
     fn a_run_folder_that_cannot_be_made_proceeds_without_the_lock_and_without_waiting() {
         let root = temp_dir("blocked");
         std::fs::create_dir_all(&root).unwrap();
-        // 폴더 자리에 파일이 있어 폴더를 못 만든다.
+        // A file is in the place of the folder, so the folder cannot be created.
         let run_dir = root.join("run");
         std::fs::write(&run_dir, "not a folder").unwrap();
         let time = FakeTime::new();

@@ -1,84 +1,84 @@
-# PRD(후보) — 에이전트/데몬 수명 정책: 변수 스키마 단계
+# PRD (candidate) — agent/daemon lifecycle policy: variable-schema stage
 
-- 상태: **선택 대기** (consult 교차검증 완료, 사용자 결정으로 PRD 확정 예정)
-- 범위: persist 데몬이 든 claude 에이전트의 (1)부팅 복원 (2)런타임 재시작 (3)크래시 폭주 가드. **이번 단계 = 변수(스키마)만 정의, 동작 로직은 TODO.**
-- 근거: `/consult` job `20260616-001941-consult-lifecycle-policy` — GPT·Gemini·Claude(opus) 블라인드 교차검증 + judge 판정. 원자료: `I:\Engram\agents\web-runner\shared\<job>\`.
+- Status: **awaiting selection** (consult cross-validation done; PRD to be finalized by user decision)
+- Scope: for claude agents held by the persist daemon: (1) boot restore (2) runtime restart (3) crash runaway guard. **This stage = define variables (schema) only; the behavior logic is TODO.**
+- Basis: `/consult` job `20260616-001941-consult-lifecycle-policy` — GPT, Gemini and Claude (opus) blind cross-validation + judge decision. Raw material: `I:\Engram\agents\web-runner\shared\<job>\`.
 
-## ★결정 (2026-06-16, 사용자) — 확정/잠정★
-- **B-1 restart_policy 기본값 = `Always` (확정).** "항상 살아있게"가 제품 방향. 컨설의 Never 권고는 사용자가 override.
-- **B-2 가드 = 단순 카운터 (확정).** `consecutive_failures` 시도마다 +1, 한도 5 초과 시 Failed 정지. **리셋은 수동 재시작(사람/LLM)만** — 자동 리셋·안정가동 리셋·슬라이딩 윈도·`stable_secs` **전부 폐기**(과방어). "살아남으면 자동 리셋"을 안 하므로 35초 폭주 루프도 그냥 5번에 멈춤. `last_start_at`은 기록(디버깅)용일 뿐 리셋 판정에 안 씀.
-- **B-3 Failed 콜드부팅 = 영속·`SkipUntilManualRestart` (잠정 추천).** 부팅해도 Failed 유지, 수동 재시작 전까지 자동복원 제외.
-- **B-4 복원 대상 = "꺼두지 않은 한 마지막 running 복원" (잠정).** `auto_restore` AND `last_known_state != Stopped`. 사람이 명시적으로 끈 건 부활 안 함.
-- **B-5 가드 카운터 영속 = agents.json에 영속 (잠정).** 데몬 재부팅이 카운터를 0으로 날려 무한루프 나는 것 방지(컨설 적출).
-- **폐기:** ADR-0008의 "물어보기(UI에서 복원할까 묻기)" 모드 — 컨설에서 **UI가 복원 트리거가 되는 안티패턴**으로 판정. 복원 기본은 "자동"(UI 무관). ADR-0008 정정은 후속.
-- 잠정(B-3·B-4·B-5)은 틀린 것만 사용자가 짚으면 수정. 확정(B-1·B-2)은 안 흔듦.
+## ★Decisions (2026-06-16, user) — certain/provisional★
+- **B-1 restart_policy default = `Always` (certain).** "Always keep it alive" is the product direction. The user overrode the consult's recommendation of Never.
+- **B-2 guard = simple counter (certain).** `consecutive_failures` +1 on every attempt; past the limit of 5 it stops in Failed. **The only reset is a manual restart (human/LLM)** — automatic reset, stable-uptime reset, sliding window and `stable_secs` are **all discarded** (over-defense). Because there is no "reset automatically if it survives", even a 35-second runaway loop simply stops after 5 attempts. `last_start_at` is only for recording (debugging) and is not used to decide a reset.
+- **B-3 Failed cold boot = persisted, `SkipUntilManualRestart` (provisional recommendation).** Failed is kept across boot and excluded from automatic restore until a manual restart.
+- **B-4 restore target = "restore the last running one unless it was turned off" (provisional).** `auto_restore` AND `last_known_state != Stopped`. Anything the user explicitly turned off is not revived.
+- **B-5 guard counter persistence = persist in agents.json (provisional).** Prevents the infinite loop where a daemon reboot wipes the counter to 0 (raised by the consult).
+- **Discarded:** the "ask (물어보기: ask in the UI whether to restore)" mode of ADR-0008 — the consult decided it is the **anti-pattern where the UI becomes the restore trigger**. The restore default is "automatic" (independent of the UI). The ADR-0008 correction is a follow-up.
+- Provisional items (B-3, B-4, B-5) are changed only if the user points out something wrong. Certain items (B-1, B-2) are not shaken.
 
-## 고정 제약 (재론 금지)
-- 데몬 = persist-until-kill, 콘솔=detachable 뷰어 (ADR-0015). UI 열림이 복원 트리거가 되면 안 됨.
-- 스케줄러 = 독립 캡슐, 이번 범위 밖.
-- 변수만 정의, 동작 TODO.
+## Fixed constraints (no reopening)
+- Daemon = persist-until-kill, console = detachable viewer (ADR-0015). Opening the UI must not become a restore trigger.
+- The scheduler = an independent capsule, out of scope this time.
+- Define variables only; behavior is TODO.
 
-## A. 합의된 결론 (3종 + judge 일치 — 거의 확정, 변수에 반영)
-1. **`auto_restore`(의도) ≠ "마지막 running"(관측)은 직교 축 — 분리.** 한 필드로 뭉개면 "사용자가 끈 걸 데몬이 부활"·"잠깐 멈춤이 영구 제외" 혼란. → 관측 상태를 별도 변수로.
-2. **Failed는 콜드부팅 간 영속돼야** — 현재 `agents.json`에 status 필드가 없어 부팅하면 Failed가 증발하고 무조건 복원 사다리 재진입. "Failed=자동재시도 중단·데이터 보존"을 부팅 너머로 유지하려면 영속 변수 필요.
-3. **데몬 가드 × 에이전트 가드 카운터 휘발 상호작용** — 데몬 재부팅이 in-memory 에이전트 카운터를 0으로 리셋하면 무한루프를 못 막음. 가드 상태 일부 영속 필요(또는 데몬 가드가 잡아줌).
-4. **전역 튜닝값은 신규 `daemon-config.json`** (C2) — `agents.json`은 per-agent라 부적합. `schema_version` 포함. ProfileStore 동형 trait으로 격리.
-5. **`last_restore` → `last_start_at` rename** — 소비자 0건이라 ts-rs 재생성만으로 충분(deprecated 호환레이어 불필요).
-6. **per-agent 가드 분리 잘됨**(전역 카운터 아님), **스케줄러 분리 잘됨**(wake/restore에 시각·주기 안 섞임).
-7. **데몬 재spawn 가드 주체 = Tauri Core(Rust 메인 런타임), 프론트(React) 아님** — UI 닫힌 채 데몬이 죽을 수 있으므로. 변수도 Rust 측에.
-8. **exit-kind 분류 필요** — `Killed`(사람이 죽인 것)는 절대 자동재시작 대상 아님(안 그러면 kill해도 부활). OnCrash 판정의 전제.
+## A. Agreed conclusions (3 models + judge agree — nearly certain, reflected in the variables)
+1. **`auto_restore` (intent) ≠ "last running" (observation) are orthogonal axes — separate them.** Lumping them into one field causes confusion: "the daemon revives what the user turned off" and "a brief stop becomes a permanent exclusion". → Put the observed state in a separate variable.
+2. **Failed must persist across cold boots** — `agents.json` currently has no status field, so on boot Failed evaporates and the agent unconditionally re-enters the restore ladder. A persisted variable is needed to keep "Failed = automatic retry stopped, data preserved" beyond boot.
+3. **Daemon guard × agent guard counter volatility interaction** — if a daemon reboot resets the in-memory agent counter to 0, the infinite loop cannot be stopped. Part of the guard state must be persisted (or the daemon guard must catch it).
+4. **Global tuning values go in a new `daemon-config.json`** (C2) — `agents.json` is per-agent and does not fit. Include `schema_version`. Isolate it with a trait isomorphic to ProfileStore.
+5. **Rename `last_restore` → `last_start_at`** — there are zero consumers, so regenerating ts-rs is enough (no deprecated compatibility layer needed).
+6. **The per-agent guard is well separated** (not a global counter), and **the scheduler is well separated** (no time or period mixed into wake/restore).
+7. **The subject of the daemon re-spawn guard = Tauri Core (Rust main runtime), not the frontend (React)** — because the daemon can die while the UI is closed. The variables also live on the Rust side.
+8. **An exit-kind classification is needed** — `Killed` (killed by a human) is never an automatic restart target (otherwise it is revived even after a kill). This is the precondition for the OnCrash decision.
 
-## B. ★사용자 결정 대기 쟁점★ (PRD 확정에 필요)
+## B. ★Issues awaiting user decision★ (needed to finalize the PRD)
 
-### B-1. restart_policy 기본값 — Never vs OnCrash
-- **Never(추천: 변수 단계 안전)**: 동작 구현 순간 "기존 프로필 전부 자동재시작"되는 의미 전환(마이그레이션 충격) 회피. exit-kind 분류도 미구현이라 보수적이 맞음.
-- **OnCrash(제품 철학)**: 자율 에이전트 데몬엔 자연스러우나, 가드·exit판정 검증 전엔 위험.
-- **절충안(judge가 우위로 본 것)**: **스키마 default = Never**로 두고, **신규 생성 UI의 프리셋만 OnCrash**로 — "스키마 기본값 ≠ 생성폼 프리셋" 분리. → **결정 필요.**
+### B-1. restart_policy default — Never vs OnCrash
+- **Never (recommended: safe at the variable stage)**: avoids the semantic switch (migration shock) where, the moment the behavior is implemented, "every existing profile restarts automatically". The exit-kind classification is not implemented yet either, so being conservative is right.
+- **OnCrash (product philosophy)**: natural for an autonomous-agent daemon, but risky until the guard and exit decision are verified.
+- **Compromise (the one the judge saw as superior)**: set the **schema default = Never** and make only the **preset of the new-creation UI OnCrash** — separate "schema default ≠ creation-form preset". → **Decision needed.**
 
-### B-2. ★가드 리셋 stable_secs 값 + 슬라이딩 윈도 보조★ (가장 중요 — 내 이전 제안 정정)
-- 내가 앞서 제안한 **stable_secs=30초는 claude엔 위험**으로 판정됨(Gemini 단독 정량 적출, judge 인정): claude는 정상 1프롬프트가 **1~2분** 걸리는데, 30초 안정 기준이면 "35초 살다 죽는"(API 타임아웃·요금부족) 루프가 **매번 카운터를 0으로 리셋해 무한 폭주**를 못 막음.
-- 올바른 방향(두 개 병행 권장):
-  - (a) **stable_secs를 워크로드에 맞게 크게** — 예: **300초(5분)** 이상.
-  - (b) **슬라이딩 윈도 보조 스키마 자리만 지금 열어둠** — `window_secs: Option`, `window_max: Option`(초기 None). "stable_secs보다 약간 길게 살다 반복적으로 죽는" 케이스 대비.
-- → **결정 필요: stable_secs 값(예 300) + 슬라이딩 윈도 보조 필드를 지금 열지.**
+### B-2. ★Guard reset stable_secs value + sliding-window assist★ (most important — corrects my earlier proposal)
+- The **stable_secs=30s I proposed earlier was decided to be dangerous for claude** (quantified by Gemini alone, accepted by the judge): a normal single prompt takes claude **1~2 minutes**, so with a 30-second stability criterion a loop that "lives 35 seconds and dies" (API timeout, insufficient credit) **resets the counter to 0 every time and cannot stop the infinite runaway**.
+- The right direction (recommend doing both):
+  - (a) **Make stable_secs large to fit the workload** — e.g. **300 seconds (5 minutes)** or more.
+  - (b) **Open only a placeholder for the sliding-window assist schema now** — `window_secs: Option`, `window_max: Option` (initially None). For the case of "living slightly longer than stable_secs and dying repeatedly".
+- → **Decision needed: the stable_secs value (e.g. 300) + whether to open the sliding-window assist fields now.**
 
-### B-3. Failed 콜드부팅 정책 — 유지 vs 1회 재시도
-- `SkipUntilManualRestart`(추천): 부팅해도 Failed 유지, 사람/LLM이 풀 때까지 자동복원 제외.
-- `RetryOnDaemonColdBoot`: OS 재부팅·업데이트 후 1회 재시도(환경 문제였으면 회복). 단 데몬폭주×에이전트폭주 합쳐질 위험.
-- enum으로 두 선택지 다 표현 가능. → **기본값 결정 필요.**
+### B-3. Failed cold-boot policy — keep vs one retry
+- `SkipUntilManualRestart` (recommended): Failed is kept across boot; excluded from automatic restore until a human/LLM releases it.
+- `RetryOnDaemonColdBoot`: one retry after an OS reboot or update (recovers if the cause was environmental). But there is a risk of daemon runaway × agent runaway combining.
+- Both choices can be expressed with the enum. → **Default decision needed.**
 
-### B-4. 복원 대상 — 단순(auto_restore 전부) vs 관측결합(auto_restore AND was_running)
-- 합의는 "의도/관측 분리"(A.1)지만, **초기 동작**을 단순(auto_restore=true 전부 복원)으로 갈지, 관측(`was_running`)까지 결합할지는 선택. persist-until-kill이라 "마지막 running"은 *데몬 크래시/OS재부팅* 때만 의미(평상시 무관). → **결정 필요**(변수는 어차피 까두되, 복원 함수가 무엇을 보는지).
+### B-4. Restore target — simple (all auto_restore) vs observation-coupled (auto_restore AND was_running)
+- The agreement is "separate intent/observation" (A.1), but whether the **initial behavior** is simple (restore everything with auto_restore=true) or also coupled to observation (`was_running`) is a choice. Because of persist-until-kill, "last running" only matters at a *daemon crash/OS reboot* (irrelevant in normal operation). → **Decision needed** (the variable is laid down anyway; the question is what the restore function looks at).
 
-### B-5. 가드 카운터 영속 여부
-- A.3 때문에 필요는 인정. **per-agent `consecutive_failures`를 `agents.json`에 영속**(데몬 재부팅 넘어 유지, 단 죽음마다 파일 rewrite 비용) vs **in-memory + 데몬 가드가 폭주를 잡음**. → **결정 필요.**
+### B-5. Whether to persist the guard counter
+- The need is acknowledged because of A.3. **Persist per-agent `consecutive_failures` in `agents.json`** (kept across daemon reboots, but with the cost of rewriting the file on every death) vs **in-memory + the daemon guard catches the runaway**. → **Decision needed.**
 
-## C. TRD로 넘길 seam 결정 (변수만으로 안 닫힘 — A=Claude 단독 적출)
-- **★런타임 죽음 관측 훅이 코드에 없음★**: 현재 `AgentManager`는 terminal 신호(`status_changed`, pump 단독 발행)를 **구독하지 않는다**. 즉 "에이전트가 런타임에 죽었다"를 manager가 알 방법이 없음 → **재시작 캡슐은 단순 동작 TODO가 아니라 "관측 seam 신설"이 전제.** 후보: StatusSink 되먹임 / OutputCore done_rx supervisor join / 신규 LifecycleSink. (TRD에서 결정)
-- **부팅 복원 이중 경로**: 데몬 + src-tauri(Embedded) 둘 다 `restore_all` 호출 — "평상시 복원 안 돎" 가정이 Embedded 직접 실행서 깨짐. 모드 토글 정착 전까지 처리 방침 필요.
-- daemon_respawn 가드: `ensure_daemon`에 재시도 루프 자체가 없음 → Tauri Core 측 신규 상태+루프 필요.
-- (참고) PTY 고아: 데몬 급사 시 JobObject(`KILL_ON_JOB_CLOSE`)가 자식 동반 종료를 이미 보장 → Gemini의 "고아 이중 토큰" 우려는 Windows에선 완화됨(비Windows·비정상 경로만 주의).
+## C. Seam decisions to hand to the TRD (not closed by variables alone — A = raised by Claude alone)
+- **★There is no runtime death-observation hook in the code★**: currently `AgentManager` does **not subscribe** to the terminal signal (`status_changed`, emitted by the pump alone). So the manager has no way to know "the agent died at runtime" → **the restart capsule is not a simple behavior TODO; it presupposes "creating an observation seam".** Candidates: StatusSink feedback / OutputCore done_rx supervisor join / a new LifecycleSink. (Decided in the TRD)
+- **Boot restore dual path**: both the daemon and src-tauri (Embedded) call `restore_all` — the "restore does not run in normal operation" assumption breaks in direct Embedded execution. A handling policy is needed until the mode toggle settles.
+- daemon_respawn guard: `ensure_daemon` has no retry loop itself → new state + loop needed on the Tauri Core side.
+- (Reference) PTY orphans: on a sudden daemon death the JobObject (`KILL_ON_JOB_CLOSE`) already guarantees the children die with it → Gemini's "orphan double-token" concern is mitigated on Windows (watch only non-Windows and abnormal paths).
 
-## D. correctness-merge 변수 스키마 초안 (선택에 따라 가감)
-> 골격=GPT, E값/슬라이딩=Gemini, 죽음관측 seam·last_restore 처리=Claude 채택. judge가 틀렸다 한 것 제외(30s 단언·PTY고아 과장·deprecated 레이어).
+## D. correctness-merge variable schema draft (add or remove depending on the choices)
+> Skeleton = GPT, E values/sliding window = Gemini, death-observation seam and last_restore handling = adopted from Claude. Excludes what the judge said was wrong (the 30s assertion, the PTY-orphan exaggeration, the deprecated layer).
 
 **per-profile (agents.json):**
-- `auto_restore: bool` (있음) — 복원 의도/자격.
-- `restart_policy: {Never,OnCrash,Always}` (있음) — 기본값 B-1 결정.
-- `last_known_state: {Stopped,Running,Failed}` — 신규. 관측 상태(A.1)+Failed 영속(A.2). "Stopped=사용자가 끔 / Failed=가드 격리".
-- `last_start_at: Option<i64>` — `last_restore` rename(A.5). 안정가동 리셋 경과시간 측정.
-- `consecutive_failures: u32` — 신규. 가드 카운터(영속 여부 B-5).
-- (선택) `last_exit_kind: Option<{ManualStop,NormalExit,CrashExit,SpawnFailed,RestoreFailed,DaemonShutdown,Unknown}>`, `failed_at`, `failed_reason` — exit 분류·Failed 사유(A.8). 지금 다 넣을지 결정.
+- `auto_restore: bool` (exists) — restore intent/eligibility.
+- `restart_policy: {Never,OnCrash,Always}` (exists) — default decided in B-1.
+- `last_known_state: {Stopped,Running,Failed}` — new. Observed state (A.1) + Failed persistence (A.2). "Stopped = the user turned it off / Failed = isolated by the guard".
+- `last_start_at: Option<i64>` — `last_restore` renamed (A.5). Measures elapsed time for the stable-uptime reset.
+- `consecutive_failures: u32` — new. Guard counter (whether to persist: B-5).
+- (Optional) `last_exit_kind: Option<{ManualStop,NormalExit,CrashExit,SpawnFailed,RestoreFailed,DaemonShutdown,Unknown}>`, `failed_at`, `failed_reason` — exit classification and Failed reason (A.8). Decide whether to put them all in now.
 
-**전역 (daemon-config.json 신규):**
+**Global (new daemon-config.json):**
 - `schema_version: u32`
-- `restore_target_policy: {AutoRestoreProfiles, LastRunningOnly}` (B-4, 기본 AutoRestoreProfiles)
+- `restore_target_policy: {AutoRestoreProfiles, LastRunningOnly}` (B-4, default AutoRestoreProfiles)
 - `failed_restore_policy: {SkipUntilManualRestart, RetryOnDaemonColdBoot}` (B-3)
 - `agent_restart_guard: { stable_secs(예 300), restart_max(예 5), window_secs: Option, window_max: Option }` (B-2)
 - `daemon_respawn_guard: { stable_secs(예 60), respawn_max(예 3) }`
 
-**Tauri Core(Rust, in-memory) — 데몬 감시 (A.7):**
-- `DaemonSupervisorState { daemon_respawn_count: u32, last_daemon_start_at: Option<Instant> }` — 프론트 아님, daemon-config와 분리.
+**Tauri Core (Rust, in-memory) — daemon watching (A.7):**
+- `DaemonSupervisorState { daemon_respawn_count: u32, last_daemon_start_at: Option<Instant> }` — not the frontend, separate from daemon-config.
 
-## 다음
-- 위 **B-1~B-5 + (선택) exit-kind 필드 범위**를 사용자가 고르면 → PRD 확정 → TRD(C의 seam 결정) → ADR-0016 → 코더로 필드 추가(동작 0).
+## Next
+- Once the user picks **B-1 to B-5 + the scope of the (optional) exit-kind fields above** → PRD finalized → TRD (the seam decisions of C) → ADR-0016 → coder adds the fields (behavior 0).

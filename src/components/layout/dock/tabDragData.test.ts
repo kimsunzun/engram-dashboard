@@ -1,5 +1,5 @@
-// TRD S21-slot-docking §8-2 `tabDragData`: 짓기 → 읽기 왕복 · 대소문자 · 빠진 칸 · 깨진 칸 · 다른 판 · 값 JSON · 남의 끌기 ·
-//   모양 왕복.
+// TRD S21-slot-docking §8-2 `tabDragData`: build → read round trip · letter case · missing field · broken field · other version · value JSON · someone else's drag ·
+//   shape round trip.
 
 import { describe, expect, it } from 'vitest'
 
@@ -27,7 +27,7 @@ const split = (dir: 'left_right' | 'top_bottom', ratio: number, a: LayoutNode, b
   b,
 })
 
-/** 좌우(0.3) — 왼쪽 칸 · 오른쪽 위아래(1/3) 분할. */
+/** Left-right (0.3) — left area · right top-bottom (1/3) split. */
 const NESTED = split('left_right', 0.3, leaf('a'), split('top_bottom', 1 / 3, leaf('b'), leaf('c')))
 
 describe('타입 문자열 — 짓기 → 읽기', () => {
@@ -46,7 +46,7 @@ describe('타입 문자열 — 짓기 → 읽기', () => {
     const mime = buildTabDragType({ app: 'Com.Engram.Dashboard', drag: DRAG, original: null, shape: null })
     expect(mime).toBe(mime.toLowerCase())
     expect(readTabDragType([mime], 'COM.ENGRAM.DASHBOARD')?.drag).toBe(DRAG)
-    // OS 가 대문자를 그대로 넘겨도 같은 끌기다.
+    // Even if the OS passes uppercase as is, it is the same drag.
     expect(readTabDragType([`APPLICATION/X-ENGRAM-TAB;APP=${APP.toUpperCase()};DRAG=${DRAG}`], APP)?.drag).toBe(DRAG)
   })
 
@@ -67,7 +67,7 @@ describe('타입 문자열 — 짓기 → 읽기', () => {
     for (const bad of ['', 'x', 'h0.5_l', 'h0.5_lll', 'h_ll', 'hnan_ll', 'h0.5ll', 'hinfinity_ll', 'h1e999_ll']) {
       expect(read(`shape=${bad}`).shape, bad).toBeNull()
     }
-    // 깨진 칸이 있어도 우리 끌기다 — 나머지 칸은 그대로 읽는다.
+    // Even with a broken field it is our drag — the remaining fields are read as is.
     expect(read(`w=0;h=10;drag=${DRAG}`).drag).toBe(DRAG)
   })
 

@@ -1,15 +1,15 @@
-// TRD S21-slot-docking §4-1 · §8-5 M10 · PRD AC22: 우리 창에 파일 · URL 을 끌어 놓으면 웹뷰가 그것으로 탐색해 앱 화면이 사라진다 — 그 놓기를
-//   막는다. 늘 켜 둔다(끌기 세션과 무관).
-// ★파일 · URL 을 실은 끌기만 막는다★ — 드롭 처리기를 끈 창에서 웹뷰가 놓기로 탐색하는 것은 그 둘뿐이다(Chromium
-//   `DragData::ContainsURL`). 다른 끌기까지 막으면 입력창(챗 작성란 등)에 글자를 끌어 놓는 기본 동작이 거절된다.
-// ★끊지 않는다(`stopPropagation` 없음)★ — 에이전트 트리의 react-dnd HTML5 백엔드가 뿌리 `window` 의 버블 리스너로 자기 끌기를
-//   받는다.
+// TRD S21-slot-docking §4-1 · §8-5 M10 · PRD AC22: if a file · URL is dragged and dropped onto our window, the webview navigates to it and the app screen disappears — that drop is
+//   blocked. Always on (independent of the drag session).
+// ★Only drags carrying a file · URL are blocked★ — those two are the only ones the webview navigates on drop in a window with the drop handler off (Chromium
+//   `DragData::ContainsURL`). Blocking other drags too would reject the default behavior of dropping text into an input (chat composer, etc.).
+// ★It does not stop propagation (no `stopPropagation`)★ — the react-dnd HTML5 backend of the agent tree receives its own drag through a bubble listener on the root
+//   `window`.
 
-/** 이 문서에 막기를 단다. 반환 = 떼기. */
+/** Attach the block to this document. Return = detach. */
 export function installFileDropGuard(): () => void {
-  // ★`dragenter` 도 막는다★ — Chromium 은 커서 밑 요소가 바뀐 걸음에 `dragenter` 만 낸다(`EventHandler::UpdateDragAndDrop`).
-  //   그것을 안 막으면 그 걸음 동안 문서가 끌기를 안 받는 것으로 쳐져 파일 · URL 에 copy 가 서고, 그 틈(~16–60 ms)에 떼면
-  //   `drop` 사건 없이(`PerformDrop`) 탐색으로 간다 — 아래 `drop` 막기가 안 돈다.
+  // ★`dragenter` is blocked too★ — on a step where the element under the cursor changed, Chromium emits only `dragenter` (`EventHandler::UpdateDragAndDrop`).
+  //   If that is not blocked, during that step the document is treated as not accepting the drag, so copy stands for file · URL, and releasing in that gap (~16–60 ms) goes
+  //   to navigation without a `drop` event (`PerformDrop`) — the `drop` block below does not run.
   const onEnterOver = (e: DragEvent): void => {
     const dt = navigatingTransfer(e)
     if (dt === null) return

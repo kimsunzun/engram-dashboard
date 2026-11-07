@@ -1,16 +1,16 @@
-//! ADR-0086 스텝 1 통합 테스트 — 데몬 MCP 제어 채널 입구(토큰 auth + 세션 바인딩 + engram_ping).
+//! ADR-0086 step 1 integration test — the daemon MCP control channel entrance (token auth + session binding + engram_ping).
 //!
-//! 실 claude 없이(in-process) 데몬 MCP 엔드포인트를 띄우고, HTTP/MCP 클라이언트로 검증한다.
+//! Without a real claude (in-process), bring up the daemon MCP endpoint and verify with an HTTP/MCP client.
 
 use std::sync::Arc;
 
 use engram_dashboard_agent::types::{AgentId, ControlChannelNeeds};
 
-/// MCP 가능 스폰이 넘기는 축 셋 — 이 파일은 채널 물리(토큰 발급)만 재므로 운영이 그 값을 어디서 읽는지는
-/// 관심사 밖이다(그 판정을 재는 자리 = `mail_gate.rs`).
+/// The three axes an MCP-capable spawn passes — this file measures only the channel physics (token issue) so where production reads those values from is
+/// outside its concern (the place that measures that decision = `mail_gate.rs`).
 ///
-/// ★claude 모양이다★ — 파일 축까지 켠 행. 「MCP 는 쓰는데 우리 파일은 안 읽는」 행(codex)을 재는 자리는
-///   데몬 `control/mod.rs` 의 그 시험이다(ADR-0209).
+/// ★It is claude-shaped★ — a row with even the file axis turned on. The place that measures the row 「MCP 는 쓰는데 우리 파일은 안 읽는」 (uses MCP but does not read our file) (codex)
+///   is that test in the daemon `control/mod.rs` (ADR-0209).
 fn mcp_needs() -> ControlChannelNeeds {
     ControlChannelNeeds {
         accepts_mcp_config: true,
@@ -23,7 +23,7 @@ use engram_dashboard_daemon::control::mcp_server::{
 };
 use engram_dashboard_daemon::control::registry::ControlRegistry;
 
-/// 이 파일의 테스트는 send/flush 를 부르지 않으므로 슬롯은 빈 채로 둔다.
+/// The tests in this file do not call send/flush so the slot is left empty.
 fn empty_slot() -> Arc<ManagerSlot> {
     Arc::new(ManagerSlot::new())
 }
@@ -128,11 +128,11 @@ async fn post_tools_list(url: &str, bearer: &str, session_id: &str) -> reqwest::
         .status()
 }
 
-/// ★반환이 Result 인 이유(Windows 특성)★: RequestBodyLimitLayer 는 Content-Length 가 상한을 넘으면
-///   body 를 읽지 않고 즉시 413 을 응답하고 연결을 닫는다. 그런데 클라(reqwest)가 아직 큰 body 를
-///   업로드하는 중이라 서버가 소켓을 먼저 닫으면 OS 가 연결을 reset 해(WinError 10053), reqwest 가 413
-///   응답을 읽기 전에 ConnectionAborted 로 실패할 수 있다. 둘 다 "상한 초과 → 처리 거부"의 표현이므로
-///   호출자가 (Ok(413) | Err(connection-abort)) 를 모두 거부로 받아들이게 Result 를 그대로 돌려준다.
+/// ★Why the return is a Result (Windows-specific behavior)★: RequestBodyLimitLayer, if Content-Length exceeds the cap, responds 413 at once without reading the
+///   body and closes the connection. But the client (reqwest) is still uploading the big body, so if the server closes the socket first the OS resets the connection (WinError 10053),
+///   and reqwest can fail with ConnectionAborted before reading the 413
+///   response. Both are expressions of "cap exceeded → processing refused", so
+///   the Result is returned as is so the caller accepts both (Ok(413) | Err(connection-abort)) as refusal.
 async fn post_tools_list_with_padding(
     url: &str,
     bearer: &str,
@@ -165,7 +165,7 @@ async fn missing_unknown_stale_tokens_are_rejected_before_session() {
     registry.issue(id, 0, "valid-token-epoch0".to_string(), true);
     registry.issue(id, 1, "valid-token-epoch1".to_string(), true);
 
-    // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
+    // ★The collector must be held★ — if dropped, the seat ticket is closed on the spot and every round trip after it is bounced.
     let (relay_bus, _relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     let handle = start_mcp_server_without_help(
@@ -216,7 +216,7 @@ async fn valid_token_initializes_binds_session_and_ping_returns_identity() {
     let id = AgentId::new_v4();
     registry.issue(id, 7, "good-token".to_string(), true);
 
-    // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
+    // ★The collector must be held★ — if dropped, the seat ticket is closed on the spot and every round trip after it is bounced.
     let (relay_bus, _relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     let handle = start_mcp_server_without_help(
@@ -229,7 +229,7 @@ async fn valid_token_initializes_binds_session_and_ping_returns_identity() {
     .await
     .expect("start mcp server");
 
-    // auth_header 는 raw 토큰 — rmcp 클라가 reqwest .bearer_auth 로 "Bearer " 를 붙인다.
+    // auth_header is the raw token — the rmcp client prepends "Bearer " via reqwest .bearer_auth.
     let config =
         StreamableHttpClientTransportConfig::with_uri(handle.url.clone()).auth_header("good-token");
     let transport = StreamableHttpClientTransport::from_config(config);
@@ -248,7 +248,7 @@ async fn valid_token_initializes_binds_session_and_ping_returns_identity() {
         tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>()
     );
 
-    // CallToolRequestParams 는 #[non_exhaustive](타 크레이트) → 리터럴 불가, Default 후 필드 설정.
+    // CallToolRequestParams is #[non_exhaustive] (another crate) → no literal, set fields after Default.
     let mut params = CallToolRequestParams::default();
     params.name = "engram_ping".into();
     params.arguments = Some(serde_json::Map::new());
@@ -267,11 +267,11 @@ async fn valid_token_initializes_binds_session_and_ping_returns_identity() {
     handle.shutdown().await;
 }
 
-// ── FIX 9: GET/DELETE 무토큰 ────────────────────────────────────────────────────────
+// ── FIX 9: GET/DELETE without token ────────────────────────────────────────────────────────
 #[tokio::test]
 async fn get_and_delete_without_token_are_rejected() {
     let registry = Arc::new(ControlRegistry::new());
-    // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
+    // ★The collector must be held★ — if dropped, the seat ticket is closed on the spot and every round trip after it is bounced.
     let (relay_bus, _relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     let handle = start_mcp_server_without_help(
@@ -299,7 +299,7 @@ async fn get_and_delete_without_token_are_rejected() {
     handle.shutdown().await;
 }
 
-// ── FIX 9/7: cross-token 세션 탈취 ──────────────────────────────────────────────────
+// ── FIX 9/7: cross-token session takeover ──────────────────────────────────────────────────
 #[tokio::test]
 async fn cross_token_session_takeover_is_rejected() {
     let registry = Arc::new(ControlRegistry::new());
@@ -308,7 +308,7 @@ async fn cross_token_session_takeover_is_rejected() {
     registry.issue(id_a, 0, "token-a".to_string(), true);
     registry.issue(id_b, 0, "token-b".to_string(), true);
 
-    // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
+    // ★The collector must be held★ — if dropped, the seat ticket is closed on the spot and every round trip after it is bounced.
     let (relay_bus, _relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     let handle = start_mcp_server_without_help(
@@ -341,14 +341,14 @@ async fn cross_token_session_takeover_is_rejected() {
     handle.shutdown().await;
 }
 
-// ── FIX 9: 세션 중간 revoke ─────────────────────────────────────────────────────────
+// ── FIX 9: mid-session revoke ─────────────────────────────────────────────────────────
 #[tokio::test]
 async fn revoked_mid_session_request_is_rejected() {
     let registry = Arc::new(ControlRegistry::new());
     let id = AgentId::new_v4();
     registry.issue(id, 0, "live-token".to_string(), true);
 
-    // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
+    // ★The collector must be held★ — if dropped, the seat ticket is closed on the spot and every round trip after it is bounced.
     let (relay_bus, _relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     let handle = start_mcp_server_without_help(
@@ -381,8 +381,8 @@ async fn revoked_mid_session_request_is_rejected() {
     handle.shutdown().await;
 }
 
-// ── FIX 9: epoch 회전 ───────────────────────────────────────────────────────────────
-// registry 회전(issue)의 구 토큰 evict 는 registry unit 이 커버한다 — 여기선 config 파일 수명까지 본다.
+// ── FIX 9: epoch rotation ───────────────────────────────────────────────────────────────
+// The old-token evict of registry rotation (issue) is covered by the registry unit — here we also look at the config file lifetime.
 #[tokio::test]
 async fn epoch_rotation_revokes_old_token_and_config_file() {
     use engram_dashboard_agent::types::ControlChannel;
@@ -391,7 +391,7 @@ async fn epoch_rotation_revokes_old_token_and_config_file() {
     use engram_dashboard_daemon::control::DaemonControlChannel;
 
     let registry = Arc::new(ControlRegistry::new());
-    // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
+    // ★The collector must be held★ — if dropped, the seat ticket is closed on the spot and every round trip after it is bounced.
     let (relay_bus, _relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     let handle = start_mcp_server_without_help(
@@ -458,7 +458,7 @@ async fn orphaned_session_attach_is_rejected() {
     registry.issue(id_a, 0, "token-a".to_string(), true);
     registry.issue(id_b, 0, "token-b".to_string(), true);
 
-    // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
+    // ★The collector must be held★ — if dropped, the seat ticket is closed on the spot and every round trip after it is bounced.
     let (relay_bus, _relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     let handle = start_mcp_server_without_help(
@@ -493,13 +493,13 @@ async fn orphaned_session_attach_is_rejected() {
     handle.shutdown().await;
 }
 
-// ── round-2 F1: 바인딩된 적 없는 세션 id ─────────────────────────────────────────────
+// ── round-2 F1: a session id that was never bound ─────────────────────────────────────────────
 #[tokio::test]
 async fn unknown_session_id_is_rejected_not_forwarded() {
     let registry = Arc::new(ControlRegistry::new());
     let id = AgentId::new_v4();
     registry.issue(id, 0, "valid".to_string(), true);
-    // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
+    // ★The collector must be held★ — if dropped, the seat ticket is closed on the spot and every round trip after it is bounced.
     let (relay_bus, _relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     let handle = start_mcp_server_without_help(
@@ -522,13 +522,13 @@ async fn unknown_session_id_is_rejected_not_forwarded() {
     handle.shutdown().await;
 }
 
-// ── Codex LOW: malformed(비-UTF-8) Mcp-Session-Id 헤더 ───────────────────────────────
+// ── Codex LOW: malformed (non-UTF-8) Mcp-Session-Id header ───────────────────────────────
 #[tokio::test]
 async fn malformed_session_id_header_is_rejected_with_400() {
     let registry = Arc::new(ControlRegistry::new());
     let id = AgentId::new_v4();
     registry.issue(id, 0, "malformtok".to_string(), true);
-    // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
+    // ★The collector must be held★ — if dropped, the seat ticket is closed on the spot and every round trip after it is bounced.
     let (relay_bus, _relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     let handle = start_mcp_server_without_help(
@@ -565,13 +565,13 @@ async fn malformed_session_id_header_is_rejected_with_400() {
     handle.shutdown().await;
 }
 
-// ── security lens: 세션 operation(GET/DELETE) 무-세션id ──────────────────────────────
+// ── security lens: session operation (GET/DELETE) without session id ──────────────────────────────
 #[tokio::test]
 async fn session_ops_without_session_id_are_rejected_with_400() {
     let registry = Arc::new(ControlRegistry::new());
     let id = AgentId::new_v4();
     registry.issue(id, 0, "optok".to_string(), true);
-    // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
+    // ★The collector must be held★ — if dropped, the seat ticket is closed on the spot and every round trip after it is bounced.
     let (relay_bus, _relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     let handle = start_mcp_server_without_help(
@@ -599,13 +599,13 @@ async fn session_ops_without_session_id_are_rejected_with_400() {
     handle.shutdown().await;
 }
 
-// ── REGRESSION: POST initialize(무-세션id) ───────────────────────────────────────────
+// ── REGRESSION: POST initialize (without session id) ───────────────────────────────────────────
 #[tokio::test]
 async fn post_initialize_without_session_id_still_reaches_inner() {
     let registry = Arc::new(ControlRegistry::new());
     let id = AgentId::new_v4();
     registry.issue(id, 0, "inittok".to_string(), true);
-    // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
+    // ★The collector must be held★ — if dropped, the seat ticket is closed on the spot and every round trip after it is bounced.
     let (relay_bus, _relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     let handle = start_mcp_server_without_help(
@@ -638,13 +638,13 @@ async fn post_initialize_without_session_id_still_reaches_inner() {
     handle.shutdown().await;
 }
 
-// ── round-2 F4: body 상한 + 정상 요청 무영향 ─────────────────────────────────────────
+// ── round-2 F4: body cap + normal requests unaffected ─────────────────────────────────────────
 #[tokio::test]
 async fn oversize_body_is_rejected_with_413() {
     let registry = Arc::new(ControlRegistry::new());
     let id = AgentId::new_v4();
     registry.issue(id, 0, "sizetok".to_string(), true);
-    // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
+    // ★The collector must be held★ — if dropped, the seat ticket is closed on the spot and every round trip after it is bounced.
     let (relay_bus, _relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     let handle = start_mcp_server_without_help(
@@ -658,7 +658,7 @@ async fn oversize_body_is_rejected_with_413() {
     .expect("start mcp server");
     let url = &handle.url;
 
-    // body-limit 가 auth·세션 검사와 독립임을 보이려 **유효** 세션에 건다.
+    // To show the body-limit is independent of auth and session checks, apply it to a **valid** session.
     let (status, sid) = open_session(url, "sizetok").await;
     assert_eq!(status, reqwest::StatusCode::OK);
     let sid = sid.expect("session id");

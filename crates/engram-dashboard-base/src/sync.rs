@@ -1,21 +1,21 @@
-//! 락 오염(poison) 되찾기 — 오염된 자물쇠에서도 가드를 그대로 돌려준다. 경고는 내지 않는다.
+//! Lock poison recovery — returns the guard as is even from a poisoned lock. It emits no warning.
 //!
-//! 계약 셋:
-//! 1. **오염 표시를 걷지 않는다**(`clear_poison` 을 부르지 않는다) — 같은 자물쇠를 `.expect` · `try_lock`
-//!    으로 쓰는 이웃이 보는 신호를 지우지 않는다. 표시를 걷어야 하는 자리는 이 모듈을 쓰지 않고 자기
-//!    도우미를 둔다(ADR-0231 · ADR-0275).
-//! 2. **로그 · 다른 락 · 밖 호출을 하지 않는다** — 더하는 동작이 없으므로, 「쥔 채 로그 · IO · 밖 호출
-//!    금지」 규율이 걸린 자물쇠의 자리가 이것을 불러도 그 규율이 그대로다. 무엇을 언제 잡는지는 부르는
-//!    쪽 몫이다.
-//! 3. **운영 프로세스(데몬 · 셸)에서 이 갈래에 닿는 오염은 가둔 단위 안의 패닉이 남긴 것뿐이다** — 「가두는 중」
-//!    표시 밖의 패닉은 훅이 되감기 전에 프로세스를 끝내 오염이 생기지 않는다. 가둔 단위(데몬의 에이전트 펌프 셋 ·
-//!    입력 라이터 — 버스 명령 실행과 셸은 가두지 않는다 · ADR-0293)가 자물쇠를 쥔 채 패닉하면 그 자물쇠는 오염된 채
-//!    남고 프로세스는 계속 돈다(그 패닉의 사유 줄은 훅이 표시와 무관하게 남긴다). 그 뒤 여기로 잡는 쪽은 패닉
-//!    직전의 값을 받는다 — 반쯤 고친 값일 수 있고, 그래도 되는지는 부르는 쪽이 판단한다. 훅 없는 시험 빌드에선
-//!    어디서 난 오염이든 이 갈래로 온다.
+//! Three contracts:
+//! 1. **It does not clear the poison mark** (it does not call `clear_poison`) — it does not erase the signal that neighbors using the same lock
+//!    with `.expect` · `try_lock` see. A site that must clear the mark does not use this module and keeps its own
+//!    helper (ADR-0231 · ADR-0275).
+//! 2. **No logging · other locks · outside calls** — it adds no behavior, so even when a site of a lock bound by the 「쥔 채 로그 · IO · 밖 호출
+//!    금지」 (no log · IO · outside call while holding) discipline calls this, that discipline stays as it is. What is taken and when is up to the
+//!    caller.
+//! 3. **In production processes (daemon · shell), the only poison that reaches this branch is what a panic inside a contained unit left** — a panic outside the 「가두는 중」
+//!    (containing) mark ends the process in the hook before unwinding, so no poison arises. If a contained unit (the daemon's three agent pumps ·
+//!    input writer — bus command execution and the shell are not contained · ADR-0293) panics while holding a lock, that lock stays poisoned
+//!    and the process keeps running (the reason line of that panic is left by the hook regardless of the mark). A caller that then takes it here gets the value from just before
+//!    the panic — it may be half-fixed, and whether that is acceptable is the caller's call. In a test build without the hook,
+//!    poison from anywhere comes to this branch.
 //!
-//! ★경고를 더하지 말 것★ — 경고는 가드를 쥔 채 찍히므로 2가 깨진다. 더하려면 부르는 자리 전체의
-//! 「쥔 채 로그 금지」 감사를 처음부터 다시 해야 한다(ADR-0275).
+//! ★Do not add a warning★ — a warning is printed while holding the guard, so 2 breaks. To add one, the whole of the calling sites'
+//! 「쥔 채 로그 금지」 (no logging while holding) audit would have to be redone from scratch (ADR-0275).
 // ADR-0269
 // ADR-0275
 // ADR-0292
@@ -64,7 +64,7 @@ mod tests {
         assert!(m.is_poisoned(), "시험 전제: 자물쇠가 오염됐다");
     }
 
-    // 쓰기 가드로 패닉한다 — 읽기 가드를 쥔 채의 패닉은 `RwLock` 을 오염시키지 않는다.
+    // Panics with a write guard — a panic while holding a read guard does not poison an `RwLock`.
     fn poison_rwlock(l: &RwLock<u32>, left: u32) {
         let r = catch_unwind(AssertUnwindSafe(|| {
             let mut g = l.write().expect("시험 전제: 아직 깨끗하다");
@@ -75,7 +75,7 @@ mod tests {
         assert!(l.is_poisoned(), "시험 전제: 자물쇠가 오염됐다");
     }
 
-    // ── 깨끗한 자물쇠 ──
+    // ── Clean lock ──
 
     #[test]
     fn a_clean_lock_gives_its_guard_and_stays_clean() {
@@ -100,7 +100,7 @@ mod tests {
         assert!(!m.is_poisoned());
     }
 
-    // ── 오염된 자물쇠 — 되찾고, 값은 패닉 직전 그대로, 표시는 남는다 ──
+    // ── Poisoned lock — recovered, the value is exactly as just before the panic, the mark remains ──
 
     #[test]
     fn lock_recovers_a_poisoned_mutex_and_keeps_the_mark() {

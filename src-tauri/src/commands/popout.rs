@@ -1,17 +1,17 @@
-//! 슬롯 팝업 분리(move_slot_to_window) invoke 껍데기 + 런타임 창 label·빌드·destroy(= 적용 서비스의 OS
-//! 창 포트·label 발급 포트 어댑터, `crate::layout::apply`) — 탭 소유 모델(ADR-0057).
+//! Slot popup detach (move_slot_to_window) invoke shell + runtime window label·build·destroy (= the apply service's OS
+//! window port · label issuing port adapter, `crate::layout::apply`) — tab-owning model (ADR-0057).
 //!
-//! ★§5 LLM 제어 표면★: 사람 우클릭(프론트 레지스트리의 `slot.popout` → `viewStore.moveSlotToWindow`
-//! invoke)과 LLM(명령 버스의 `slot.popout`)이 **같은 적용 서비스**에 떨어진다 — 이 파일에 MOVE 로직은
-//! 없다(`apply::move_slot_to_window`).
-//! 여기 남는 것은 Tauri 세계로의 번역뿐이다: 창 빌드·destroy·존재 확인, label·탭 이름 발급, 창 정리.
+//! ★§5 LLM control surface★: a human right-click (`slot.popout` of the frontend registry → `viewStore.moveSlotToWindow`
+//! invoke) and the LLM (`slot.popout` of the command bus) land on the **same apply service** — there is no MOVE logic
+//! in this file (`apply::move_slot_to_window`).
+//! What remains here is only translation into the Tauri world: window build·destroy·existence check, label·tab name issuing, window cleanup.
 //!
-//! ★두 경로가 **백엔드에서만** 합류한다 — 그 앞은 아직 다르다★: 프론트는 invoke 전에 그 슬롯의 렌더 모드
-//! 오버라이드를 지운다(`src/store/viewStore.ts` 의 `clearRenderMode` — 슬롯이 사라지므로 누수 방지). 버스
-//! 경로엔 그 단계가 없어 죽은 slot id 의 오버라이드가 웹뷰에 남는다. 같은 부류가 셋 더 있다 —
-//! `slot.close`·`slot.assignAgent`·`layout.setSlotContent` 도 프론트 쪽에서 같은 정리를 하고 버스 쪽에서는
-//! 안 한다. 해소는 웹뷰 소유 상태를 백엔드로 올리는 후속 스텝 몫이다(여기서 흉내내지 말 것 — 셸은 그
-//! 상태를 갖고 있지 않다).
+//! ★The two paths join **only in the backend — before that they still differ**★: before the invoke the frontend clears that slot's render mode
+//! override (`clearRenderMode` of `src/store/viewStore.ts` — the slot disappears, so this prevents a leak). The bus
+//! path has no such step, so the override of a dead slot id remains in the webview. There are three more of the same kind —
+//! `slot.close`·`slot.assignAgent`·`layout.setSlotContent` also do the same cleanup on the frontend side and do not
+//! on the bus side. Resolving it is the job of a follow-up step that lifts webview-owned state into the backend (do not imitate it here — the shell does not
+//! hold that state).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -36,32 +36,32 @@ use crate::spare::pool::Opening;
 use crate::state::placement::{self, Fallback};
 use crate::webview_env::{Backdrop, WebviewEnv};
 
-// 팝업/런타임 창 label prefix. capabilities/popup.json·usage-links.json 의 `"slot-popup-*"` glob 과 짝(변경 시
-// 함께 동기).
-// ★의미 확장(ADR-0057/G8)★: "팝업" → "런타임 창"(create_window 포함). prefix 값은 불변(Destroyed 정리
-// 게이트 is_popup_label 재사용 — 다른 label 이면 cleanup 스킵 → 라우팅/구독/Channel 누수).
+// Popup/runtime window label prefix. Paired with the `"slot-popup-*"` glob of capabilities/popup.json·usage-links.json (when changed,
+// sync them together).
+// ★Meaning extension (ADR-0057/G8)★: "popup" → "runtime window" (including create_window). The prefix value is unchanged
+// (reuse of the Destroyed cleanup gate is_popup_label — with a different label cleanup is skipped → routing/subscription/Channel leak).
 const POPUP_LABEL_PREFIX: &str = "slot-popup-";
 
-// 실행 표식 — 프로세스마다 한 번 뽑는 소문자 hex 8 자(TRD S26-window-chrome §4-5 · 메인 결정 M8). 순번은 실행마다 1 부터
-//   다시 세므로, 표식이 없으면 앞 실행의 label 을 쥔 버스 호출자가 이번 실행의 다른 창을 집는다. 앞 실행과 같은 표식일
-//   확률(2⁻³²)은 받아들인다.
+// Run marker — 8 lowercase hex characters drawn once per process (TRD S26-window-chrome §4-5 · main decision M8). The sequence number restarts from 1
+//   on every run, so without the marker a bus caller holding a label from a previous run would pick a different window of this run. The probability of the same marker as a previous run
+//   (2⁻³²) is accepted.
 fn run_marker() -> &'static str {
     static RUN: OnceLock<String> = OnceLock::new();
     RUN.get_or_init(|| Uuid::new_v4().simple().to_string()[..8].to_string())
 }
 
-/// 이 실행의 `n` 번째 팝업/런타임 창 label — `slot-popup-<실행 표식>-<n>`. [`PopupCounter`] 가 이 꼴로 발급한다.
+/// The label of the `n`-th popup/runtime window of this run — `slot-popup-<실행 표식>-<n>` (the bracketed part is the run marker). [`PopupCounter`] issues it in this form.
 pub fn popup_label(n: u64) -> String {
     format!("{POPUP_LABEL_PREFIX}{}-{n}", run_marker())
 }
 
-// 팝업/런타임 창 label 발급용 단조 카운터. app-level 공유(app.manage). ★재사용 금지 불변식★: fetch_add
-// 로 단조 증가만 하고 창을 닫아도 되돌리지 않는다(닫힌 label 재-build 에러 회피).
+// Monotonic counter for issuing popup/runtime window labels. app-level shared (app.manage). ★No-reuse invariant★: fetch_add
+// only increases monotonically and is not rolled back even when a window is closed (avoids a closed-label re-build error).
 #[derive(Default)]
 pub struct PopupCounter(pub AtomicU64);
 
 impl PopupCounter {
-    // ADR-0302 — 창 상태 명령(팝아웃 label 재사용 금지)
+    // ADR-0302 — window state command (no reuse of pop-out labels)
     fn next_label(&self) -> String {
         popup_label(self.0.fetch_add(1, Ordering::Relaxed) + 1)
     }
@@ -73,7 +73,7 @@ impl LabelSource for PopupCounter {
     }
 }
 
-// 적용 서비스의 OS 창 포트(`crate::layout::apply`) — 창 빌드·destroy·존재 확인은 이 파일이 소유한 Tauri 기법이다.
+// The apply service's OS window port (`crate::layout::apply`) — window build·destroy·existence check is the Tauri technique this file owns.
 pub(crate) struct TauriWindowHost<'a> {
     pub app: &'a AppHandle,
 }
@@ -119,11 +119,11 @@ impl WindowHost for TauriWindowHost<'_> {
     }
 }
 
-// 창 포트의 새 창 열기 — 맡긴 예열 창이면 짓지 않고 숨긴 채 놓고, 풀과 무관한 label 이면 새로 짓는다. `at = None` =
-//   `open`(계단 자리 · 기본 크기). 새로 짓는 창은 열 때 정한다 — 활성 요청이고 전경이 우리면 지금처럼 포커스를 받으며
-//   짓고, 아니면 포커스 없이 지어 올리기만 하는 보이기로 둔다(I30). 맡긴 창의 활성화는 보이기 바로 앞에 정한다(I5).
-//   `window_open` 줄 = 예열 창 · 새로 짓기 지연을 가르는 재료(TRD S21-slot-docking §3-9 「로그」 · M14 — 열기 → 보임은
-//   첫 화면 풀림 줄의 `reveal_ms` · 짓는 중 기다림은 `spare_claim` 줄의 `wait_ms`).
+// The window port's open new window — an entrusted prewarmed window is not built but placed hidden, and a label unrelated to the pool is built anew. `at = None` =
+//   `open` (staircase place · default size). A newly built window decides at open — if it is an activating request and the foreground is ours, it is built receiving focus as it is now,
+//   otherwise it is built without focus and shown in a raise-only way (I30). Activation of an entrusted window is decided right before showing (I5).
+//   The `window_open` line = material that tells prewarmed window · fresh-build latency apart (TRD S21-slot-docking §3-9 「로그」 · M14 — open → visible is
+//   `reveal_ms` of the first-paint release line · waiting during build is `wait_ms` of the `spare_claim` line).
 // ADR-0299
 fn open_new_window(
     app: &AppHandle,
@@ -168,8 +168,8 @@ fn open_new_window(
                     crate::first_paint::hold_built(&window, focused, started);
                 }
             }
-            // 새로 지은 창 — 그 창의 첫 최소 크기 보고가 넓혀 당긴다(TRD S26-window-chrome §7-7). 맡긴 예열 창은 확정이
-            //   세운다(`commands::spare::commit`).
+            // A newly built window — that window's first minimum-size report widens and pulls in (TRD S26-window-chrome §7-7). For an entrusted prewarmed window, the commit
+            //   raises the mark (`commands::spare::commit`).
             crate::chrome::mark_opening(app, label);
             tracing::info!(
                 module = "spare",
@@ -185,15 +185,15 @@ fn open_new_window(
     }
 }
 
-/// 맡긴 예열 창을 놓은 뒤의 배율 — 다른 배율 모니터로 옮긴 채택을 가르는 로그 몫(I9 · M16).
+/// The scale after placing an entrusted prewarmed window — the log's share that tells apart an adoption moved to a monitor with a different scale (I9 · M16).
 struct SparePlaced {
     scale_from: f64,
     scale_to: Option<f64>,
 }
 
-// 맡긴 예열 창을 숨긴 채 놓는다([`spare_spot`] · 위치 → 크기 — 까닭 = [`placement::place`]). 보이지 않는다 — 보이기는
-//   확정 뒤 첫 화면이다. 못 놓으면 그 창을 거두고 `Err` 다(창 포트 `open_at` 계약 — 떠 있는 창이 없다 · 그 `Destroyed` 가
-//   맡김을 끝내고 다시 짓는다). 창이 이미 없으면 거둘 것 없이 `Err` 다 — 그 label 로 새로 짓지 않는다(I20).
+// Place an entrusted prewarmed window hidden ([`spare_spot`] · position → size — reason = [`placement::place`]). It is not visible — showing is the
+//   first paint after commit. If it cannot be placed, withdraw that window and `Err` (window port `open_at` contract — there is no window left up · its `Destroyed` ends
+//   the entrusting and rebuilds). If the window is already gone, there is nothing to withdraw and `Err` — it is not rebuilt with that label (I20).
 // ADR-0299
 fn place_claimed(
     app: &AppHandle,
@@ -240,10 +240,10 @@ fn place_claimed(
     })
 }
 
-// 맡긴 예열 창의 자리 — 물리 바깥 왼쪽 위 · 논리 안쪽 크기. 새로 짓는 창([`open_runtime_window_at`] · [`build_window`])과
-//   같은 셈이다 — `at` 이 어느 모니터에 걸치면 그 착지, 아니면 label 의 계단 자리를 그 창의 지금 배율 `scale` 로 푼 것(Tauri
-//   의 논리 위치 세터와 같은 풀이) · 크기 = `at.size`(없거나 쓸 수 없으면 기본). 돌려받은 예열 창은 앞선 놓기가 옮기고 크기를
-//   바꿨을 수 있어 `open`(`at = None`)도 계단 자리 · 기본 크기를 다시 입힌다(I18).
+// The place of an entrusted prewarmed window — physical outer top-left · logical inner size. The same computation as a newly built window ([`open_runtime_window_at`] · [`build_window`])
+//   — if `at` straddles some monitor, that landing; otherwise the staircase place of the label unfolded by that window's current scale `scale` (the same unfolding as Tauri's
+//   logical position setter) · size = `at.size` (the default if absent or unusable). A returned prewarmed window may have been moved and resized by an earlier placement,
+//   so `open` (`at = None`) also re-applies the staircase place · default size (I18).
 fn spare_spot(
     label: &str,
     at: Option<&WindowPlace>,
@@ -272,19 +272,19 @@ fn spare_spot(
     )
 }
 
-// lib.rs Destroyed arm 이 main 과 구분하는 데 쓴다.
+// Used by the lib.rs Destroyed arm to distinguish it from main.
 pub fn is_popup_label(label: &str) -> bool {
     label.starts_with(POPUP_LABEL_PREFIX)
 }
 
-// ★URL 키 = `?window=<label>`(ADR-0057/§3-3)★: 팝업 페이지는 "고정 뷰"가 아니라 "이 창의 활성 탭"을
-// 그린다(활성 탭은 백엔드 `windows[label].active` 가 권위).
+// ★URL key = `?window=<label>` (ADR-0057/§3-3)★: the popup page draws "this window's active tab", not a "fixed view"
+// (the active tab is authoritative in the backend `windows[label].active`).
 fn window_url(label: &str) -> String {
     format!("index.html#/popup?window={label}")
 }
 
-// 대각 cascade 위치(창이 겹쳐 뜨는 것 방지) — label 끝 `-<n>` 의 순번으로 고른다. 실행 표식까지 수로 풀면 모든 창이
-//   같은 계단에 선다(TRD S26-window-chrome §4-5).
+// Diagonal cascade position (prevents windows from opening overlapped) — chosen by the sequence number at the end `-<n>` of the label. If the run marker were unfolded into a number too, every window
+//   would stand on the same staircase (TRD S26-window-chrome §4-5).
 fn cascade_position(label: &str) -> (f64, f64) {
     let n: u32 = label
         .strip_prefix(POPUP_LABEL_PREFIX)
@@ -295,15 +295,15 @@ fn cascade_position(label: &str) -> (f64, f64) {
     (140.0 + step * 72.0, 110.0 + step * 60.0)
 }
 
-// WebviewWindowBuilder 로 런타임 창을 빌드(★락 밖에서만 호출 — 데드락 회피★). 웹뷰 환경은 공통 마무리
-// (`WebviewEnv::finish`)가 붙인다 — 빠뜨리면 유령 창(ADR-0054).
+// Build a runtime window with WebviewWindowBuilder (★call only outside the lock — avoids deadlock★). The webview environment is attached by the common finish
+// (`WebviewEnv::finish`) — if omitted, a ghost window (ADR-0054).
 //
-// `at` = 빌더에 줄 첫 자리 — `None` 이면 label 순번의 계단 자리 · 기본 크기. 저장된 자리를 정확히 놓는 것은 부르는
-//   쪽(`state::placement`)이 만든 뒤에 한다: tao 는 빌더의 논리 위치를 모니터를 열거 순으로 훑어 처음 들어맞는 것의
-//   배율로 풀어(tao 0.35 `platform_impl/windows/window.rs` `init`), 배율이 다른 모니터가 섞이면 다른 모니터에 뜰 수 있다.
+// `at` = the first place to give the builder — `None` means the label sequence's staircase place · default size. Placing a saved place exactly is done by the caller
+//   (`state::placement`) after building: tao unfolds the builder's logical position with the scale of the first monitor that fits when scanning monitors in enumeration order
+//   (tao 0.35 `platform_impl/windows/window.rs` `init`), so if monitors with different scales are mixed it can appear on another monitor.
 //
-// ★숨긴 채 만든다 — 보이기는 부르는 쪽 몫이다★: 자리 · 최대화를 입힌 뒤 첫 화면에 보이거나
-//   (`first_paint::hold_window`), 런타임 복원 수락이 모델에 넣은 뒤 보이기로 정하면 첫 화면에 보인다
+// ★Built hidden — showing is the caller's job★: after applying the place · maximize, it is shown at first paint
+//   (`first_paint::hold_window`), or if the runtime restore acceptance puts it in the model and then decides to show, it is shown at first paint
 //   (`first_paint::reveal_held` · TRD S21-storage §6-7 ② ④).
 pub(crate) fn build_runtime_window(
     app: &AppHandle,
@@ -313,21 +313,21 @@ pub(crate) fn build_runtime_window(
     build_window(app, label, at, true)
 }
 
-/// 예비 창(TRD S21-slot-docking §3-9) — 보통 팝아웃과 같은 빌더 · URL(예비 표시 없음)로 숨긴 채 · 포커스 없이
-/// 짓는다(tao 의 보이기가 활성화하지 않게). 모델에 넣지 않고 자리도 적지 않는다 — 풀에 적기는 부르는 쪽
-/// (`commands::spare` 의 예비 창 짓기)이다.
+/// Spare window (TRD S21-slot-docking §3-9) — built hidden · without focus with the same builder · URL as a normal pop-out (no spare marker)
+/// (so that tao's show does not activate it). It is not put in the model and its place is not recorded — recording in the pool is the caller's job
+/// (spare window building of `commands::spare`).
 // ADR-0295
 pub(crate) fn build_spare_window(app: &AppHandle, label: &str) -> Result<WebviewWindow, String> {
     build_window(app, label, None, false)
 }
 
-/// 팝아웃 기본 크기(논리) — 자리 없이 여는 런타임 창과, 크기를 고르지 않은 도킹 새 창.
+/// Pop-out default size (logical) — a runtime window opened without a place, and a docking new window whose size was not chosen.
 pub(crate) const POPOUT_DEFAULT_SIZE: (f64, f64) = (720.0, 500.0);
 
-// 도킹의 새 창(창 포트 `open_at`) — `at` 이 어느 모니터에 걸치면 빌더에 첫 자리를 주고 만든 뒤 그 자리를 다시
-//   정확히 입힌다(위치 먼저 — 그 까닭 = [`placement::place`] · [`build_runtime_window`] 머리). 안 걸치거나 위치가 없으면
-//   label 의 계단 자리다. 크기가 없거나 쓸 수 없는 값이면 기본 크기다. `activate` = 포커스를 받으며 짓는다(아니면 올리기만
-//   하는 보이기 — `first_paint::hold_built`) · `opened` = 창 포트가 열기를 시작한 때.
+// A docking new window (window port `open_at`) — if `at` straddles some monitor, give the builder the first place and after building apply that place again
+//   exactly (position first — the reason = head of [`placement::place`] · [`build_runtime_window`]). If it does not straddle or there is no position, it is the
+//   label's staircase place. If the size is absent or unusable, it is the default size. `activate` = built while receiving focus (otherwise a raise-only
+//   show — `first_paint::hold_built`) · `opened` = when the window port began opening.
 // TRD S21-slot-docking §3-9 「`open_at`(맡긴 label)」 · 「폴백」
 fn open_runtime_window_at(
     app: &AppHandle,
@@ -350,8 +350,8 @@ fn open_runtime_window_at(
         Some(landed) => {
             let window = build_window(app, label, Some(placement::first_place(landed)), activate)?;
             let (bounds, landing) = landed;
-            // 고른 자리를 못 입혔으면 그 창을 거두고 실패로 답한다 — 남기면 도킹이 엉뚱한 자리의 창에 탭을 붙인다(창 포트
-            //   `open_at` 계약).
+            // If the chosen place could not be applied, withdraw that window and answer failure — if left, docking attaches the tab to a window at the wrong place (window port
+            //   `open_at` contract).
             let placed = placement::move_steps(
                 &window.as_ref().window(),
                 Some((landing.x, landing.y)),
@@ -384,11 +384,11 @@ fn open_runtime_window_at(
     Ok(())
 }
 
-// `focused = false` = 만들되 포커스를 가져가지 않는다(도킹 새 창의 `FocusPolicy::Keep` · 예비 창). `true` 면 숨은 동안에도
-//   포커스가 이 창으로 간다(wry 가 만들자마자 웹뷰에 넣는다 — `state::placement` 의 main 짓기 주석) — 보이기 전과 같은
-//   때다.
+// `focused = false` = build but do not take focus (the `FocusPolicy::Keep` of a docking new window · a spare window). If `true`, even while hidden
+//   focus goes to this window (wry puts it into the webview as soon as it is made — see the main-build comment in `state::placement`) — the same
+//   moment as before showing.
 //
-// ★늘 숨긴 채 짓는다 — 빌더에 `visible(true)` 를 주지 말 것(`crate::first_paint` 머리 — 첫 프레임의 비침)★.
+// ★Always built hidden — do not give the builder `visible(true)` (head of `crate::first_paint` — first-frame bleed-through)★.
 fn build_window(
     app: &AppHandle,
     label: &str,
@@ -399,13 +399,13 @@ fn build_window(
         Some((at, size)) => ((at.x, at.y), (size.width, size.height)),
         None => (cascade_position(label), POPOUT_DEFAULT_SIZE),
     };
-    // 웹뷰 환경 없이 만들지 않는다 — 마무리를 건너뛴 창은 다른 창과 환경이 갈린다(ADR-0054).
+    // Do not build without the webview environment — a window that skipped the finish diverges in environment from other windows (ADR-0054).
     let env = app
         .try_state::<Arc<WebviewEnv>>()
         .ok_or_else(|| "런타임 창 생성 실패: 웹뷰 환경이 등록돼 있지 않다".to_owned())?;
     env.finish(
         WebviewWindowBuilder::new(app, label, WebviewUrl::App(window_url(label).into()))
-            // 번호 없는 모델 밖 창(숨은 예열 창 포함)의 제목 — 모델에 들면 탭 알림이 덮는다(TRD S26-window-chrome §4-4).
+            // The title of an unnumbered window outside the model (including a hidden prewarmed window) — once it enters the model, the tab notification overwrites it (TRD S26-window-chrome §4-4).
             .title(window_title(None, None))
             .inner_size(w, h)
             .position(x, y)
@@ -417,17 +417,17 @@ fn build_window(
     .map_err(|e| format!("런타임 창 생성 실패: {e}"))
 }
 
-// Destroyed 이벤트 → lib.rs Destroyed arm → cleanup_popup_window 가 잔여 정리.
-// ★창 닫힘 = 백엔드 단일 소스(§5-2/G2)★: 프론트로 별도 view:closed 를 안 쏜다(이중 발화·재진입 방지).
-// registry 는 여기선 안 건드린다(Destroyed→cleanup 이 정리) — 그래서 인자로도 안 받는다(F5).
+// The Destroyed event → the lib.rs Destroyed arm → cleanup_popup_window cleans up the remainder.
+// ★Window closed = backend single source (§5-2/G2)★: no separate view:closed is sent to the frontend (prevents double firing · reentry).
+// The registry is not touched here (Destroyed→cleanup cleans it) — so it is not taken as an argument either (F5).
 pub fn destroy_window(app: &AppHandle, label: &str) {
     if let Err(e) = try_destroy_window(app, label) {
         tracing::warn!(label, "destroy_window 실패(창 이미 닫힘일 수 있음): {e}");
     }
 }
 
-/// [`destroy_window`] 와 같되 실패를 돌려준다 — 거두기를 다시 해 보거나 남은 창을 알려야 하는 쪽(런타임 복원 수락)이
-/// 쓴다. OS 창이 없으면 `Ok`.
+/// Same as [`destroy_window`] but returns the failure — used by the side that has to retry the withdrawal or report the remaining window (runtime restore acceptance).
+/// If the OS window is absent, `Ok`.
 pub(crate) fn try_destroy_window(app: &AppHandle, label: &str) -> Result<(), String> {
     match app.get_webview_window(label) {
         Some(w) => w.destroy().map_err(|e| e.to_string()),
@@ -438,9 +438,9 @@ pub(crate) fn try_destroy_window(app: &AppHandle, label: &str) -> Result<(), Str
     }
 }
 
-// 슬롯을 다른 창의 새 탭으로 MOVE — 로직·락 규율·롤백은 전부 적용 서비스가 소유한다.
+// MOVE a slot to a new tab of another window — logic · lock discipline · rollback are all owned by the apply service.
 //
-// ★async fn 필수★: WebviewWindowBuilder 데드락 회피(새 창 타깃은 서비스의 phase B 에서 빌드된다).
+// ★async fn required★: avoids a WebviewWindowBuilder deadlock (a new-window target is built in the service's phase B).
 #[tauri::command]
 pub async fn move_slot_to_window(
     app: AppHandle,
@@ -470,17 +470,17 @@ pub async fn move_slot_to_window(
     )
 }
 
-// ★창 Destroyed 정리(수명/누수 임계 — 멀티탭, G1)★. 팝업/런타임 창이 닫히면(titlebar close·강제 destroy·
-// close_tab/close_window 경유 destroy) lib.rs Destroyed arm 이 이걸 부른다. titlebar close 는 닫기 요청
-// ([`close_requested_popup_window`])이 모델을 먼저 지웠으므로 여기서는 재계산 · 닫히는 창 번호 풀기 · Channel 떼기만
-// 남는다. 창 번호는 이것이 푼다 — 부르는 쪽은 번호를 따로 풀지 않는다(TRD S26-window-chrome §4-1).
+// ★Window Destroyed cleanup (lifetime/leak critical — multi-tab, G1)★. When a popup/runtime window closes (titlebar close · forced destroy ·
+// destroy via close_tab/close_window), the lib.rs Destroyed arm calls this. For titlebar close, the close request
+// ([`close_requested_popup_window`]) already cleared the model first, so only recomputing · releasing the closing window's number · detaching the Channel
+// remain here. The window number is released by this — the caller does not release the number separately (TRD S26-window-chrome §4-1).
 //
-// ★현 버그 수정(G1)★: 옛 코드는 단일 바인딩 하나만 정리해 멀티탭 팝업을 강제 종료하면 나머지 탭이 잔류
-// + Unsubscribe 누락.
+// ★Current bug fix (G1)★: the old code cleaned up only a single binding, so force-closing a multi-tab popup left the remaining tabs
+// + missed Unsubscribe.
 //
-// ★이 함수는 command 가 아니다★ — Rust 이벤트 핸들러(on_window_event)에서 직접 호출. State 대신 이미
-// 손에 쥔 Arc 참조들을 인자로 받는다(lib.rs 가 app.state 로 꺼내 넘김). `_app` 은 현재 미사용(향후 즉시
-// emit 여지로 시그니처 통일).
+// ★This function is not a command★ — it is called directly from the Rust event handler (on_window_event). Instead of State it takes
+// the Arc references already in hand as arguments (lib.rs takes them out with app.state and passes them). `_app` is currently unused (the signature is unified
+// to leave room for an immediate emit later).
 pub fn cleanup_popup_window(
     _app: &tauri::AppHandle,
     label: &str,
@@ -489,22 +489,22 @@ pub fn cleanup_popup_window(
     registry: &crate::output_channel::WindowChannelRegistry,
     client: &DaemonClient,
 ) {
-    // main 은 절대 정리 대상 아님(불변식 4 — hide only, Destroyed 안 남). 방어적으로 스킵.
+    // main is never a cleanup target (invariant 4 — hide only, no Destroyed). Skipped defensively.
     if label == MAIN_WINDOW_LABEL {
         return;
     }
 
-    // 1) 모델 정리 · 창 번호 풀기 — ViewManager 락 한 번 안(아래 함수). 닫기 요청이 먼저 지웠으면 0.
+    // 1) Model cleanup · window number release — inside one ViewManager lock (the function below). 0 if the close request cleared it first.
     let Some(dropped_views) =
         drop_window_in_model(label, DropCause::Destroyed, state, router, client)
     else {
         return;
     };
 
-    // 2) 출력 Channel registry 에서 이 label 제거(누수 방지 — 죽은 webview Channel 이 남지 않게). Tauri
-    //   부분이라 별도 락(ViewManager 무관) — 코어(모델·라우팅) 밖이라 락 밖 유지 OK(F1).
-    //   ★poison 이어도 뺀다(ADR-0231)★ — 옛 건너뛰기는 죽은 Channel 을 남겼다(근거 정본 = `output_channel`
-    //   모듈 헤더).
+    // 2) Remove this label from the output Channel registry (prevents leaks — so that no dead webview Channel remains). It is the Tauri
+    //   part, so a separate lock (unrelated to ViewManager) — outside the core (model · routing), so keeping it outside the lock is OK (F1).
+    //   ★Remove even if poisoned (ADR-0231)★ — the old skip left dead Channels behind (canonical rationale = the `output_channel`
+    //   module header).
     crate::output_channel::unregister_window(registry, label);
 
     tracing::info!(
@@ -514,17 +514,17 @@ pub fn cleanup_popup_window(
     );
 }
 
-/// 팝아웃의 닫기 요청(`lib.rs` 의 `CloseRequested`) — 창 정리의 모델 몫([`drop_window_in_model`] · 묘비 포함)을
-/// 소멸을 기다리지 않고 지금 한다. 뒤이은 `Destroyed` 정리([`cleanup_popup_window`])가 같은 몫을 다시 하면 바뀌는
-/// 것은 그 창 번호 풀기뿐이다. main 은 무동작이다(main 의 닫기 요청은 숨기기 — 부르는 쪽 갈래).
-/// TRD S21-slot-docking 5.8판 §1-2 「닫히는 창」
+/// A pop-out's close request (`CloseRequested` in `lib.rs`) — does the model share of window cleanup ([`drop_window_in_model`] · including the tombstone)
+/// now, without waiting for destruction. If the following `Destroyed` cleanup ([`cleanup_popup_window`]) does the same share again, the only thing that changes
+/// is releasing that window number. For main it is a no-op (main's close request is hide — the caller's branch).
+/// TRD S21-slot-docking edition 5.8 §1-2 「닫히는 창」
 pub(crate) fn close_requested_popup_window(
     label: &str,
     state: &LayoutState,
     router: &OutputRouter,
     client: &DaemonClient,
 ) {
-    // 0 = 모델이 아직 그 창을 몰랐다(새 창 옮기기의 창 열기와 모델 확정 사이) — 묘비만 선다.
+    // 0 = the model did not yet know that window (between window opening and model commit of a new-window move) — only the tombstone stands.
     if let Some(dropped_views) =
         drop_window_in_model(label, DropCause::CloseRequested, state, router, client)
     {
@@ -559,7 +559,7 @@ pub(crate) fn drop_window_in_model(
     router: &OutputRouter,
     client: &DaemonClient,
 ) -> Option<usize> {
-    // main 은 닫지 않는다(ADR-0057 ④) — 묘비가 서면 main 으로의 도킹이 막힌다.
+    // main is not closed (ADR-0057 ④) — if a tombstone stands, docking into main is blocked.
     if label == MAIN_WINDOW_LABEL {
         return None;
     }
@@ -571,26 +571,26 @@ pub(crate) fn drop_window_in_model(
         return None;
     };
     let dropped_views = mgr.windows.get(label).map_or(0, |w| w.tabs.len());
-    // 창이 이미 모델에서 지워졌으면 rebuild 만.
+    // If the window is already deleted from the model, only rebuild.
     let delta = crate::output_router::cleanup_window_core(&mut mgr, router, label, cause);
     if cause == DropCause::Destroyed {
         mgr.release_closing(label);
     }
-    // 묘비는 모델 삭제와 같은 락 안 — 이 락 뒤의 도킹 · 새 창 확정은 그 창을 「없음」이나 묘비로 만나 무변경이다
-    //   (TRD S21-slot-docking 5.8판 §1-2 「닫히는 창」 (c)).
+    // The tombstone is inside the same lock as the model deletion — a docking · new-window commit after this lock meets that window as 「없음」 (absent) or a tombstone and changes nothing
+    //   (TRD S21-slot-docking edition 5.8 §1-2 「닫히는 창」 (c)).
     mgr.mark_closed(label);
-    // 이 창이 마지막이던 agent 는 1→0 → Unsubscribe(락 안 발화 — F1).
+    // An agent for which this window was the last is 1→0 → Unsubscribe (fired inside the lock — F1).
     for a in delta.to_unsubscribe {
         client.unsubscribe(a);
     }
-    // ★모델이 이 창을 쥐고 있었는지로 가르지 않는다(TRD S21 usage-limit-slot §1-7 「창 소멸」)★ — 숨김 표시는
-    //   모델과 따로 선다: 새 창으로 슬롯 옮기기는 OS 창을 먼저 열고 모델 창을 나중에 더하므로, 그 틈에 숨겨졌다
-    //   닫힌 창은 모델에 없어도 표시가 남는다. label 은 다시 쓰이지 않아(`PopupCounter`) 여기서 안 지우면 샌다.
+    // ★Do not distinguish by whether the model held this window (TRD S21 usage-limit-slot §1-7 「창 소멸」)★ — the hidden mark
+    //   stands separately from the model: moving a slot to a new window opens the OS window first and adds the model window later, so a window hidden and
+    //   closed in that gap keeps its mark even though it is not in the model. The label is not reused (`PopupCounter`), so if not erased here it leaks.
     client.usage_window_destroyed(label, &mgr);
     Some(dropped_views)
 }
 
-// ── 테스트: label 발급·prefix 판정(창 생성 자체는 running app 필요라 GUI 검증) ──────────
+// ── tests: label issuing · prefix decision (window creation itself needs a running app, so GUI verification) ──────────
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -605,7 +605,7 @@ mod tests {
         assert_ne!(a, b, "label 재사용 금지 — 단조 증가");
     }
 
-    // TRD S26-window-chrome §4-5 · §10-1 — `slot-popup-<소문자 hex 8>-<n>` · 표식은 발급기가 여럿이어도 한 실행에 하나.
+    // TRD S26-window-chrome §4-5 · §10-1 — `slot-popup-<소문자 hex 8>-<n>` (8 lowercase hex digits) · the marker is one per run even with several issuers.
     #[test]
     fn popup_labels_carry_one_run_marker_per_process() {
         let a = PopupCounter::default().next_label();
@@ -628,8 +628,8 @@ mod tests {
         assert_eq!(run, run_marker());
     }
 
-    // 부팅 · 런타임 복원이 팝아웃을 (길이, 글자) 순으로 세워 발급 순을 되찾는다(`state::placement` · `state::restore`) —
-    //   실행 표식이 붙어도 그 순서가 발급 순이다(자리 수가 느는 9 → 10 포함).
+    // Boot · runtime restore line pop-outs up by (length, characters) order to recover the issue order (`state::placement` · `state::restore`) —
+    //   even with the run marker attached, that order is the issue order (including when the digit count grows, 9 → 10).
     #[test]
     fn popup_labels_sorted_by_length_then_text_come_back_in_issue_order() {
         let c = PopupCounter::default();
@@ -651,7 +651,7 @@ mod tests {
 
     #[test]
     fn window_url_uses_window_key() {
-        // ★URL 키 = ?window=<label>(ADR-0057)★ — 옛 ?view=<id> 아님.
+        // ★URL key = ?window=<label> (ADR-0057)★ — not the old ?view=<id>.
         assert_eq!(
             window_url("slot-popup-3"),
             "index.html#/popup?window=slot-popup-3"
@@ -662,14 +662,14 @@ mod tests {
     fn cascade_position_offsets_by_label_index() {
         assert_eq!(cascade_position(&popup_label(1)), (140.0, 110.0));
         assert_eq!(cascade_position(&popup_label(2)), (212.0, 170.0));
-        // 9번째는 wrap(8개마다).
+        // The 9th wraps (every 8).
         assert_eq!(cascade_position(&popup_label(9)), (140.0, 110.0));
-        // 끝 순번을 푼다 — 숫자뿐인 실행 표식을 순번으로 읽지 않는다.
+        // Unfold the trailing sequence number — a run marker made only of digits is not read as a sequence number.
         assert_eq!(cascade_position("slot-popup-12345678-2"), (212.0, 170.0));
         assert_eq!(cascade_position("slot-popup-3"), (284.0, 230.0));
     }
 
-    // ── 맡긴 예열 창의 자리(TRD S21-slot-docking §3-9 「`open_at`(맡긴 label)」 · I18) ──
+    // ── place of an entrusted prewarmed window (TRD S21-slot-docking §3-9 「`open_at`(맡긴 label)」 · I18) ──
 
     const SCREEN: placement::MonitorArea = placement::MonitorArea {
         x: 0,
@@ -773,12 +773,12 @@ mod close_request_tests {
             }
         }
 
-        // `lib.rs` 의 `CloseRequested` 팝아웃 갈래.
+        // The `CloseRequested` pop-out branch of `lib.rs`.
         fn close_requested(&self, label: &str) {
             close_requested_popup_window(label, &self.state, &self.router, &self.client);
         }
 
-        // `lib.rs` 의 `Destroyed` 정리(상태가 다 있는 갈래) 중 모델 몫 — 운영처럼 이것 하나가 창 번호까지 푼다.
+        // The model share of the `Destroyed` cleanup of `lib.rs` (the branch where all state is present) — as in production, this one call also releases the window number.
         fn destroyed(&self, label: &str) -> Option<usize> {
             drop_window_in_model(
                 label,
@@ -789,14 +789,14 @@ mod close_request_tests {
             )
         }
 
-        // 런타임 크래시 사본 수락의 모델 몫(`state::restore` — 팝아웃 없는 사본) — 지금 팝아웃은 항목째 빠진다.
+        // The model share of runtime crash copy acceptance (`state::restore` — a copy without pop-outs) — now the pop-out drops out entry and all.
         fn adopt_crash_copy(&self) {
             let mut mgr = self.state.0.lock().unwrap();
             mgr.adopt_restored(ViewManager::new()).unwrap();
             self.subs().resync(&mgr);
         }
 
-        // `window` 에 탭 하나를 더한다(없으면 그 창째 만든다).
+        // Add one tab to `window` (if absent, create that window too).
         fn add_tab(&self, window: &str) -> Uuid {
             let mut mgr = self.state.0.lock().unwrap();
             let view = if mgr.windows.contains_key(window) {
@@ -816,7 +816,7 @@ mod close_request_tests {
             tree::first_slot_id(&self.state.0.lock().unwrap().views[&view].layout)
         }
 
-        // 탭 `view` 의 첫 슬롯에 `agent` 를 앉힌다 — 라우팅 표도 맞춘다.
+        // Seat `agent` in the first slot of tab `view` — the routing table is matched too.
         fn seat(&self, view: Uuid, agent: Uuid) {
             let slot = self.first_slot(view);
             let mut mgr = self.state.0.lock().unwrap();
@@ -837,7 +837,7 @@ mod close_request_tests {
         }
     }
 
-    // ADR-0057 ① ② — 창 없는 View(롤백이 못 거둔 임시 View 포함)가 남지 않았다 · 창 번호 불변식(TRD S26-window-chrome §10-1).
+    // ADR-0057 ① ② — no windowless View (including a temporary View the rollback could not withdraw) remains · window number invariant (TRD S26-window-chrome §10-1).
     fn assert_owned(mgr: &ViewManager) {
         let tabs: usize = mgr.windows.values().map(|w| w.tabs.len()).sum();
         assert_eq!(mgr.views.len(), tabs, "어느 창의 탭도 아닌 View 가 남았다");
@@ -849,18 +849,18 @@ mod close_request_tests {
         mgr.assert_number_invariants();
     }
 
-    // pop-out 이 락을 놓은 틈 — 창을 확인(`is_open` → 열려 있음)하거나 연(`open`) 바로 뒤에 사용자가 그 창을 닫는다.
-    //   `adopts_on_open` 이면 연 바로 뒤의 일이 닫기가 아니라 런타임 크래시 사본 수락이다.
+    // The gap where pop-out released the lock — right after checking the window (`is_open` → open) or opening it (`open`), the user closes that window.
+    //   If `adopts_on_open`, what happens right after opening is not a close but runtime crash copy acceptance.
     struct ClosingHost<'a> {
         rig: &'a Rig,
         adopts_on_open: bool,
         closed: Mutex<Vec<String>>,
         placed: Mutex<Vec<String>>,
-        // 한 번 맡길 예열 창(TRD S21-slot-docking §8-1 ⑬).
+        // A prewarmed window to be entrusted once (TRD S21-slot-docking §8-1 ⑬).
         spare: Mutex<Option<SpareClaim>>,
-        // 창 포트가 불린 차례 — `"claim:"` · `"open:"` · `"committed:"` · `"release:"` · `"close:"` · `"place:"` + label.
+        // The order in which the window port was called — `"claim:"` · `"open:"` · `"committed:"` · `"release:"` · `"close:"` · `"place:"` + label.
         journal: Mutex<Vec<String>>,
-        // 확정 · 되물림이 돌려준 맡김표.
+        // The claim ticket returned by commit · release.
         returned: Mutex<Vec<SpareClaim>>,
     }
 
@@ -904,9 +904,9 @@ mod close_request_tests {
         }
     }
 
-    // 새 창 · 재사용 옮기기도 같은 틈이다 — 열거나 옮긴 바로 뒤에 닫힌다.
+    // A new window · a reuse move is the same gap — it is closed right after opening or moving.
     impl WindowHost for ClosingHost<'_> {
-        // ★모델에 들기 전이어야 한다★ — 새 창을 여는 세 자리가 모두 창을 먼저 열고 모델에 넣는다(TRD S21-slot-docking
+        // ★It must be before entering the model★ — all three places that open a new window open the window first and put it in the model (TRD S21-slot-docking
         // §3-9 「자리별 차례」 · ADR-0299).
         fn open(&self, label: &str) -> Result<(), String> {
             let mgr = self
@@ -970,9 +970,9 @@ mod close_request_tests {
         }
     }
 
-    // 빈 새 창이 열린 바로 뒤 · 모델에 넣기 전에 사용자가 닫는다(`Destroyed` 정리도 같은 모델 몫 — 묘비) — 넣기가 묘비를
-    //   만나 연 창을 거두고, OS 창 없는 팝아웃 항목이 모델 · `window.list` 에 남지 않는다(남으면 다음 부팅에 빈 팝업으로
-    //   복원된다). TRD S21-slot-docking §8-1 ⑬ · §3-9 「자리별 차례」
+    // The user closes right after an empty new window opened · before it is put in the model (the `Destroyed` cleanup is also the same model share — the tombstone) — the insertion meets the tombstone and
+    //   withdraws the opened window, and a pop-out entry without an OS window does not remain in the model · `window.list` (if it remained, the next boot
+    //   would restore it as an empty popup). TRD S21-slot-docking §8-1 ⑬ · §3-9 「자리별 차례」
     #[tokio::test]
     async fn a_close_before_the_insert_refuses_a_created_window_and_closes_it() {
         let rig = Rig::new();
@@ -1001,7 +1001,7 @@ mod close_request_tests {
             .iter()
             .any(|w| w == fresh));
 
-        // 그 창의 `Destroyed` 도 바꾸는 것이 없다.
+        // That window's `Destroyed` changes nothing either.
         assert_eq!(
             rig.destroyed(fresh),
             Some(0),
@@ -1010,8 +1010,8 @@ mod close_request_tests {
         assert_eq!(rig.fingerprint(), before);
     }
 
-    // 같은 틈의 예열 창 판 — 넣기가 묘비로 거절되면 맡긴 창은 닫지 않고 그 맡김표 그대로 되물린다(확정 · 자리 기록
-    //   없음). TRD S21-slot-docking §8-1 ⑬
+    // The prewarmed-window version of the same gap — if the insertion is rejected by the tombstone, the entrusted window is not closed but handed back with that same claim ticket (no commit · no
+    //   place record). TRD S21-slot-docking §8-1 ⑬
     #[tokio::test]
     async fn a_close_before_the_insert_refuses_a_prewarmed_window_and_gives_it_back() {
         let rig = Rig::new();
@@ -1054,8 +1054,8 @@ mod close_request_tests {
             .any(|w| *w == spare));
     }
 
-    // 빈 새 창이 열린 바로 뒤 · 모델에 넣기 전에 크래시 사본 수락이 창 묶음을 갈아끼운다 — 그 수락은 모델이 아직 모르는
-    //   그 창을 지우지 않으므로(묘비도 없다) 넣기가 서고, 창은 남아 모델의 창이 된다(정한 결말 — 리뷰 2026-10-21).
+    // Right after an empty new window opened · before it is put in the model, crash copy acceptance swaps the window set — that acceptance does not delete the window the model
+    //   does not yet know (there is no tombstone either), so the insertion stands, and the window remains and becomes the model's window (the decided outcome — review 2026-10-21).
     //   TRD S21-slot-docking §3-9 「자리별 차례」
     #[tokio::test]
     async fn a_crash_copy_adopted_during_the_open_keeps_the_created_window_in_the_model() {
@@ -1118,15 +1118,15 @@ mod close_request_tests {
         );
         assert_eq!(rig.routed(shared), [MAIN_WINDOW_LABEL]);
 
-        // 뒤이은 `Destroyed` — 같은 몫을 다시 해도 바뀌는 것이 없다.
+        // The following `Destroyed` — doing the same share again changes nothing.
         assert_eq!(rig.destroyed(POPUP), Some(0), "닫기 요청이 이미 지웠다");
         assert_eq!(rig.fingerprint(), after);
         assert!(rig.routed(only_popout).is_empty());
         assert_eq!(rig.routed(shared), [MAIN_WINDOW_LABEL]);
     }
 
-    // TRD S26-window-chrome §4-1 — 닫기 요청은 번호를 그 창의 `Destroyed` 까지 쥐고 `Destroyed` 가 푼다. 닫기 요청 없이 온
-    //   `Destroyed`(모델에 남은 창)는 곧바로 푼다.
+    // TRD S26-window-chrome §4-1 — a close request holds the number until that window's `Destroyed` and `Destroyed` releases it. A `Destroyed` that came without a close request
+    //   (a window left in the model) releases it immediately.
     #[tokio::test]
     async fn a_close_request_holds_the_number_until_destroyed_frees_it() {
         let rig = Rig::new();
@@ -1157,7 +1157,7 @@ mod close_request_tests {
         rig.add_tab(POPUP);
         assert_eq!(rig.destroyed(POPUP), Some(2));
         assert_eq!(rig.destroyed(POPUP), Some(0), "두 번째는 지울 것이 없다");
-        // 새 창 옮기기의 창 열기와 모델 확정 사이 — 모델이 아직 모르는 창에도 묘비가 선다.
+        // Between window opening and model commit of a new-window move — a tombstone stands even for a window the model does not yet know.
         let fresh = "slot-popup-99";
         assert_eq!(rig.destroyed(fresh), Some(0));
         let main = rig.main_tab();
@@ -1211,7 +1211,7 @@ mod close_request_tests {
             );
             assert_eq!(mgr.version, version);
         }
-        // 팝아웃(`slot.popout`)의 새 창 phase C 도 묘비 앞에서 멈춘다.
+        // The new-window phase C of a pop-out (`slot.popout`) also stops at the tombstone.
         let slot = tree::first_slot_id(&mgr.views[&source].layout);
         let (tmp, _) = mgr.prepare_detached_view(source, slot).unwrap();
         assert_eq!(
@@ -1220,7 +1220,7 @@ mod close_request_tests {
         );
         mgr.drop_detached_view(tmp);
         drop(mgr);
-        // 임시 View 를 만들고 거둔 만큼 `version` 은 오른다 — 창 · 탭 소유만 본다.
+        // `version` rises by as much as the temporary Views made and withdrawn — only window · tab ownership is looked at.
         let after = rig.fingerprint();
         assert_eq!((after.1, after.2), (before.1, before.2));
     }
@@ -1307,7 +1307,7 @@ mod close_request_tests {
         );
         assert_eq!(rig.routed(agent), [MAIN_WINDOW_LABEL]);
 
-        // 그 창의 `Destroyed` 도 바꾸는 것이 없다.
+        // That window's `Destroyed` changes nothing either.
         assert_eq!(
             rig.destroyed(fresh),
             Some(0),
@@ -1330,7 +1330,7 @@ mod close_request_tests {
             "main 은 정리하지 않는다"
         );
         assert_eq!(rig.fingerprint(), before);
-        // main 에 묘비가 서지 않았다.
+        // No tombstone stood on main.
         rig.state
             .0
             .lock()
@@ -1370,7 +1370,7 @@ mod close_request_tests {
         .map(drop)
     }
 
-    // 도킹 새 창이 열린 바로 뒤 사용자가 닫는다 — phase C 가 묘비를 만나 연 창을 거두고 탭은 출처에 남는다.
+    // The user closes right after a docking new window opened — phase C meets the tombstone and withdraws the opened window, and the tab stays at its source.
     #[tokio::test]
     async fn a_close_request_before_the_attach_closes_the_new_dock_window_and_keeps_the_tab() {
         let rig = Rig::new();
@@ -1395,8 +1395,8 @@ mod close_request_tests {
         assert_eq!(rig.routed(agent), [MAIN_WINDOW_LABEL]);
     }
 
-    // 재사용으로 옮긴 바로 뒤 사용자가 그 창을 닫는다 — 놓기는 그대로 끝나고(다시 판정하지 않는다) 모델은 닫기가 남긴
-    // 그대로다. 연 창이 없으니 닫을 것도 없다.
+    // Right after moving by reuse, the user closes that window — the drop finishes as is (it is not decided again) and the model is exactly as the close left it. There is no opened window
+    // so there is nothing to close.
     #[tokio::test]
     async fn a_close_request_during_a_reuse_move_lets_the_drop_finish() {
         let rig = Rig::new();

@@ -1,17 +1,17 @@
 import { isThemeName, type ThemeName } from '../store/themeStore'
 import { themeManager } from './ThemeManager'
 
-// 셸 밖(맨 브라우저 · dev 서버 직접 열기)과 셸이 박지 않는 창의 첫 테마 — themeStore 초기값 ·
-//   index.css 의 바탕 폴백과 같은 값이다.
+// The first theme for outside the shell (a bare browser · opening the dev server directly) and for windows the shell does not plant one in — the same value as the themeStore initial value ·
+//   the background fallback in index.css.
 const DEFAULT_BOOT_THEME: ThemeName = 'dark'
 
 /**
- * 첫 페인트 전에 테마를 붙이고 그 값을 돌려준다 — `createRoot` 보다 먼저 부른다.
+ * Attach the theme before the first paint and return that value — call it before `createRoot`.
  *
- * 이미 박힌 `data-theme` 이 세 철자 중 하나면 그 값을 그대로 두고 스토어만 맞추고, 없거나 모르는 철자면 dark 를 박는다.
- * 셸은 창을 만들 때 그 창의 유효 테마를 — 다시 읽기면 그 창이 마지막으로 칠한 테마(`themeMemory.ts`)를 — 페이지
- * 스크립트보다 먼저 박는다(`src-tauri/src/webview_env.rs` 의 `Backdrop::Theme`). ★그 값을 dark 로 덮지 말 것★ — light · e-ink 창이 셸의 테마가 IPC 로 닿기까지 dark 로 한 번
- * 그려진다. 그 뒤 셸이 주는 값(`uiSettings.ts`)이 이긴다.
+ * If the already planted `data-theme` is one of the three spellings, leave that value and only sync the store; if absent or an unknown spelling, plant dark.
+ * The shell plants the window's effective theme when creating the window — on a reload, the theme that window last painted (`themeMemory.ts`) — before the page
+ * script (`Backdrop::Theme` in `src-tauri/src/webview_env.rs`). ★Do not overwrite that value with dark★ — light · e-ink windows get drawn once in dark until the shell's theme arrives by IPC. Then
+ * the value the shell gives (`uiSettings.ts`) wins.
  */
 export function applyBootTheme(): ThemeName {
   const preset = document.documentElement.dataset.theme

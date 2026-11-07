@@ -1,0 +1,67 @@
+# Commits that only translated comments and docs to English (S33).
+# GitHub reads this file; locally: git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+8dbae2e211fd7f3ec2d5ff81a519f428043df90d # S33: docs(i18n): translate ADR-0001..0005 to English (pilot)
+52d76e280632321c524e88ca957ea3e93cc13365 # S33: docs(i18n): translate ADR-0006..0020 to English, add the glossary
+e332824d520433d2d0d9ba49ff9b0eb774cd528a # S33: docs(i18n): translate ADR-0021..0030 to English
+d85592d58eb49e13c8ca3be079d33af3fd2e1f98 # S33: docs(i18n): translate ADR-0031..0060 to English
+cfa6a1d0a9ba610d6e0fd578c2780d620738d603 # S33: docs(i18n): translate ADR-0061..0090 to English
+4bb48c5f7f89d10eaf9b700cbe39ef6568573a97 # S33: docs(i18n): translate ADR-0091..0135 to English
+060f358234c9934187332db358edf6784bece825 # S33: docs(i18n): translate ADR-0136..0180 to English
+0b44f8f6b5aedfd2a3a3bb69a7ee7029852b7f1c # S33: docs(i18n): translate ADR-0181..0224 to English
+6d6860f26dc105b5182e7feb819978e666607b29 # S33: docs(i18n): translate ADR-0225..0285 to English
+22f7756bebcac189d7ad79f56a294bc1cc5b0b7f # S33: docs(i18n): translate ADR-0286..0309 to English - all ADRs done
+f905497d954d73fee7c47bcd2df3e4176c020130 # S33: docs(i18n): translate docs/research group 1 (18 reports) to English
+a042c6c1e5c95fc0137dd1f09699de7a0eae41dc # S33: docs(i18n): translate docs/research group 2 (8 reports) to English
+640d86b008665d6670d992b408c617dbf3fe4744 # S33: docs(i18n): keep 13 ADRs that open branches edit in Korean for now
+84f886d307ea3d10e856ea9a01e94c93614f2f9b # S33: docs(i18n): translate docs/research groups 3-4 (27 reports) to English
+b5abd9d0494abd31ac03303a20c34b292ba06050 # S33: docs(i18n): translate docs/research group 5 (19 reports) to English
+34a9cc08fb243785d2aca455502647fcc9952fc3 # S33: docs(i18n): translate docs/research group 6 (6 reports) to English
+bad1c4f5f0881a293631284a700e32c8a101e20a # S33: docs(i18n): translate docs/research group 7 (9 reports) to English
+feceea957fa895a3bad35e46ca251cf4edfe6f06 # S33: docs(i18n): translate docs/research group 8 (11 reports) to English
+1b2443c2acf64bb2fa03d7de6d2730c495f09ed5 # S33: docs(i18n): translate docs/research group 9 (10 reports) to English
+5e3c91bf7272c40bd4c7dc545d14f31b9174558b # S33: docs(i18n): translate docs/research group 10 (14 reports) to English
+8405a065c4c1371c325a213b1e6f612c85b49d97 # S33: docs(i18n): translate docs/research group 11 (12 reports) to English - research done
+1cdd37af24a2138e4dc67369dc3037ed91655b95 # S33: docs(i18n): translate docs/process S16-S18 notes (7 files) to English
+94111fc704c314a7bdd0599bf588366f5e5712cb # S33: docs(i18n): translate docs/process S1 design and S12 daemonization notes (8 files) to English
+0290ca949820e76cb3fa5bf07519d66092c793e5 # S33: docs(i18n): translate docs README, handbook, B-wezterm-tabs, C-slot-content and S0 notes (12 files) to English
+9a2445197eb1e57fe1a2b003342bd8e04954dc4c # S33: docs(i18n): translate docs/process S12-S15 daemonization, tray and layout notes (12 files) to English
+47125af3cab11e654b21d82b27f0c00204bc6a29 # S33: docs(i18n): translate S18 messaging v1 spec and S2 phase0 spike (2 files) to English
+e30719ec3b3f492c08d3f3df4d1d50c60a26e2c5 # S33: docs(i18n): translate S21 codex-backend TRD to English
+cb2dcdeff1e46b86259ac5dabb52c2be44a8ab58 # S33: docs(i18n): translate S21 codex-backend TRD resume-after-first-turn to English
+9d121fe522e1072cbc7f32bf1c7c8e471e380d4f # S33: docs(i18n): translate S21 chat-ux TRD T-40 and codex-backend PRD mid-turn input queue to English
+a68ffca89fbcdb08e36f5b9df2b3f18c128ae2c6 # S33: docs(i18n): translate S21 flat-split-renderer and panic-policy TRDs to English
+5547cd4614801ba86ec3cbd24bdcd8a0d2b61df3 # S33: docs(i18n): translate S21 usage-limit-slot PRD and transport-crate TRD to English
+985f2f284c409cfd5857da3df72dc48734fe9f98 # S33: docs(i18n): translate docs/process S3-S9 step notes and S26-S31 READMEs (24 files) to English
+c179b6027d97d7b31dc8aa1297320d549a376e40 # S33: docs(i18n): translate S21 window-chrome PRD, S28 layout-commands TRD and S26-S29 READMEs (6 files) to English
+9b6ee0b66f8591d232cb112aa8d76045379896aa # S33: docs(i18n): translate docs/refactoring surveys and docs/reference conventions (7 files) to English
+83555bb035f822c5d6ab93fa18205eb1b1637f4c # S33: docs(i18n): translate S20 command-bus TRD to English
+61a1301641eaef36dd65a12440d9190a84535182 # S33: docs(i18n): translate S21 chat-ux TRD to English
+fc9f111451880fe8ef6ae698c7bcaa1cb9c9a1c5 # S33: docs(i18n): translate S21 slot-docking PRD to English
+2c17b6e84709dead1400a818adef5165b46796eb # S33: docs(i18n): translate S26 window-chrome TRD to English
+ea745323bca75b4e0e47be8dd0c09ce3d37e9b28 # S33: docs(i18n): translate reference/structure session-path-ownership to English
+aefa3d715ce0229c523be9ff6538c84eb7a3510b # S33: docs(i18n): translate S21 storage TRD to English
+eff6d210616197cbf770fd9b2dc4a0ccfe6cfe88 # S33: docs(i18n): translate S21 slot-docking TRD to English
+ece0210a072b0d00ce3e6fe58c9c3d1ae7c551c7 # S33: docs(i18n): translate S21 usage-limit-slot TRD to English
+7d99e71d6d02bb28f5fb4fb0c0291219e3d8d635 # S33: docs(i18n): translate S21 codex-backend TRD phase 2a to English
+d644082d16de6aa5d1e294d30d0c613ddf9f6363 # S33: docs(i18n): translate S21 codex-backend TRD mid-turn input queue to English
+c505728f4beb32a6e24806ac47179a7b24198af3 # S33: docs(i18n): translate engram-dashboard-base code comments to English
+c37bd55775b83a3a6d9dfaf5453c9e811a6a30b3 # S33: docs(i18n): translate engram-dashboard-cli code comments to English
+e5fe9c60ffd03dbd691560d8b3e94b32440640e9 # S33: docs(i18n): translate engram-dashboard-command code comments to English
+f9decc05d36b03cf506317a5039944aeec365a98 # S33: docs(i18n): translate engram-dashboard-platform code comments to English
+e1ddc027fed6526e4563874a5915d03a48abcdb9 # S33: docs(i18n): translate protocol and net code comments to English (non-overlapping files)
+6edf85ceee0c674e29190d6431a3a9464e7a90ce # S33: docs(i18n): translate messaging service.rs code comments to English
+b4f9e95f602a1ff266c6f4b36e0e02c29b8c112c # S33: docs(i18n): translate messaging ledger/mailbox/envelope/busy/groups/lib code comments to English
+1e38a88decf4a7d975be57838f24987aaa36c660 # S33: docs(i18n): translate engram-dashboard-daemon code comments to English (non-overlapping files)
+3a6dae1b66dd4f3a566528f7c83d2021aeb5ae29 # S33: docs(i18n): translate src-tauri state/tab_drop/tray/view_commands/webview_env code comments to English
+cfbfd877ef8a446592e712fa99f2caafd3a1e94d # S33: docs(i18n): translate src-tauri layout/settings/spare/state code comments to English
+87fd56102addf3826518fff94cfd929feee3917f # S33: docs(i18n): translate src-tauri chrome/commands/daemon_client/discovery/layout code comments to English; regenerate bindings
+5692800ffb6891f961d78673ed427f54525f7407 # S33: docs(i18n): translate frontend src/ comments to English (batch 1: tests, clients, commands, layout start)
+ca3f6d0d683d255b05df2aa12ac50adb33d52c50 # S33: docs(i18n): translate frontend src/components/layout comments to English (batch 2)
+d72b2bec12e17b45a8f8f5ca839659b5cbf0130f # S33: docs(i18n): translate frontend src/ comments to English (batch 3: split drag, slot components)
+af7f7b9b7110632e33a396da4c59ee3878f0b524 # S33: docs(i18n): translate frontend src/ comments to English (batch 4: scroll follow, stores, theme, util); glossary rows
+8253ab700d76199e3fa32afe56fffe2893dbb864 # S33: docs(i18n): translate agent crate code comments to English (batch 2: codex thread lock, output core, queued input, transports)
+4402bf30e4622fb92d6e5054cda67c4282c7197a # S33: docs(i18n): translate # comments in Cargo.toml files, rust-toolchain.toml, scripts and .gitignore to English
+ca0a8ef94ecbf460f7acc9920ebd5873707022ef # S33: docs(i18n): translate agent crate code comments to English (batch 1: spikes, claude backend, codex decoder/protocol)
+b4cfc4a0ddd9c1a58171e6378f51a98dbe60cfb8 # S33: docs(i18n): translate agent crate (batch 3: spawn, stdio, turn, usage) and transport code comments to English
+b7757646d9e53cdeef956b06e9f7e5c3b8afea91 # S33: docs(i18n): translate daemon mcp_server.rs code comments to English

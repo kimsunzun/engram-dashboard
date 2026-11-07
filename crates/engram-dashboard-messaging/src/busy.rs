@@ -1,40 +1,40 @@
-//! busy — 수신자 턴 상태 해석 + idle 게이트 seam(ADR-0104 결정 3 · ADR-0113 결정 2).
+//! busy — recipient turn-state interpretation + idle gate seam (ADR-0104 decision 3 · ADR-0113 decision 2).
 //!
-//! ★역할 = **정책**뿐★: "지금 턴 중인가" 라는 **사실**은 호스트의 공용 관측 계층이 들고 있고(ADR-0113
-//!   결정 1), 이 모듈은 그 사실을 **우편의 가치판단으로 해석**한다. 조각 셋:
-//!     ① `TurnFacts` — 사실을 읽어 오는 포트(호스트 어댑터가 구현).
-//!     ② `BusyPolicy` — 그 사실 + 이 모듈의 정책(positive-knowledge-only · `BUSY_MAX_TURN` 상한)으로
-//!        `BusyGate` 답을 만들고, 상한을 넘긴 턴을 도어벨로 깨운다.
-//!     ③ `BusyGate`/`IdleNotifier` — 서비스가 묻는 문과 flush 도어벨 출구.
+//! ★Role = **policy** only★: the **fact** "is it mid-turn right now" is held by the host's shared observation layer (ADR-0113
+//!   decision 1), and this module **interprets that fact as a value judgment of mail**. Three pieces:
+//!     ① `TurnFacts` — the port that reads the facts (implemented by the host adapter).
+//!     ② `BusyPolicy` — builds the `BusyGate` answer from those facts + this module's policy (positive-knowledge-only · the `BUSY_MAX_TURN` limit),
+//!        and wakes turns past the limit with a doorbell.
+//!     ③ `BusyGate`/`IdleNotifier` — the door the service asks through, and the flush doorbell exit.
 //!
-//! ★바쁨 = 사용자 대기 목록이 있다 ∨ 오류 뒤 멈춤 ∨ (턴 중 ∧ 상한 안쪽)(ADR-0231)★: 앞의 두 사실에는 상한이
-//!   없다 — 사용자 입력이 먼저이고(N6·N8), 진짜 오류 뒤에 우편을 밀어 넣지 않는다(N11). ADR-0104
-//!   「늦게 가는 것 < 안 가는 것」의 의도된 예외다.
+//! ★Busy = a user-waiting list exists ∨ stopped after an error ∨ (mid-turn ∧ within the limit) (ADR-0231)★: the first two facts have no
+//!   limit — user input comes first (N6·N8), and mail is not pushed in after a real error (N11). It is an intended exception to
+//!   ADR-0104 「늦게 가는 것 < 안 가는 것」 (going late is better than not going).
 //!
-//! ★positive-knowledge-only(load-bearing — spec §5 capability 폴백)★: 관측이 **없는** (id, epoch) 는 전부
-//!   **idle 취급**이다(= 즉시 주입). "모른다" 를 busy 로 해석하면 관측 불가 백엔드·관측이 아직 시작되지
-//!   않은 창에서 배달이 **영구 대기**한다. busy 는 **관측된 사실이 있을 때만** 참이다.
+//! ★positive-knowledge-only (load-bearing — spec §5 capability fallback)★: an (id, epoch) with **no** observation is entirely
+//!   **treated as idle** (= inject at once). Reading "unknown" as busy would make delivery **wait forever** for backends that cannot be observed or in the window before
+//!   observation has started. busy is true **only when there is an observed fact**.
 //!
-//! ★사실 계층을 **변형하지 않는다**(ADR-0113 결정 2 — 절대 위반 금지)★: 상한 판정도, sweep 도 표에서
-//!   항목을 지우지 않는다. 그 표는 다른 소비자(UI 입력 잠금 등)와 공유하는 공용 시설이고, 소비자마다
-//!   상한이 다르다 — 한 소비자가 "늙었다" 고 지우면 다른 소비자의 사실이 증발한다. 여기서 하는 일은
-//!   **읽고 자기 기준으로 판정**하는 것뿐이다.
+//! ★The fact layer is **not mutated** (ADR-0113 decision 2 — never violate)★: neither the limit decision nor the sweep removes
+//!   entries from the table. That table is a shared facility used with other consumers (UI input locking etc.), and each consumer has a
+//!   different limit — if one consumer erases an entry as "old", another consumer's fact evaporates. All done here is
+//!   **read and decide by one's own criterion**.
 //!
-//! ★busy 관측 대상 = 턴 신호를 내는 백엔드★: 턴 이벤트는 백엔드 decoder 가 있는
-//!   에이전트에서만 나오고, decoder 는 구조화 출력 capability 와 **정확히 같은 조건**으로 존재한다.
-//!   그 프록시 값은 `LiveAgent::turn_signal` 로 로스터 항목에 실려 오고(ADR-0116 결정 7), 발송 경로는
-//!   `turn_signal == false` 인 부류에 이 게이트를 **아예 묻지 않고** 즉시 주입한다. 프록시가 깨지는 날
-//!   (구조화인데 턴 이벤트가 없는 백엔드 등장) 진짜 capability 필드를 추가한다 — ADR-0104 capability
-//!   원칙과 정합(관측 불가 = 즉시 주입 폴백).
+//! ★busy observation targets = backends that emit turn signals★: turn events come only from agents that have a backend decoder,
+//!   and the decoder exists under **exactly the same condition** as the structured-output capability.
+//!   That proxy value rides on the roster entry as `LiveAgent::turn_signal` (ADR-0116 decision 7), and the send path
+//!   injects at once for the kind with `turn_signal == false` **without asking this gate at all**. The day the proxy breaks
+//!   (a backend appears that is structured but has no turn events), a real capability field will be added — consistent with the ADR-0104 capability
+//!   principle (unobservable = immediate-injection fallback).
 //!
-//! ★콜백 규율(load-bearing — 절대 위반 금지)★: `IdleNotifier::notify_idle` 은 **호스트의 출력 pump
-//!   스레드**에서도 불린다. 그 구현이 하는 일은 논블록 통지 send **하나뿐**이어야 한다 — 주입·messaging
-//!   락 취득·blocking write 를 하면 출력 pump 가 배달 작업 뒤에서 막혀 전 에이전트의 출력 스트림이
-//!   지연된다. 실제 flush 는 통지를 받은 flush worker 가 수행한다.
+//! ★Callback discipline (load-bearing — never violate)★: `IdleNotifier::notify_idle` is also called on **the host's output pump
+//!   thread**. Its implementation must do **only one thing**, a non-blocking notification send — doing injection, taking the messaging
+//!   lock or a blocking write would block the output pump behind delivery work and delay every agent's output stream.
+//!   The actual flush is done by the flush worker that received the notification.
 //!
-//! ★알려진 미확인(측정 항목 — spec §7)★: 중첩 Task 서브에이전트의 `result` 라인이 **부모 턴 종료**
-//!   신호로 새는지 미검증이다. 새면 부모가 아직 턴 중인데 idle 로 오판해 조기 주입할 수 있다
-//!   (유실은 없고 타이밍만 어긋남). 해결하지 않고 실 하네스 측정 항목으로 남긴다.
+//! ★Known unverified (measurement item — spec §7)★: it is unverified whether the `result` line of a nested Task subagent leaks as a **parent turn end**
+//!   signal. If it does, the parent could be misjudged as idle while still mid-turn and injected early
+//!   (no loss, only timing off). It is left unresolved as a real-harness measurement item.
 // ADR-0104
 // ADR-0110
 // ADR-0113
@@ -46,53 +46,53 @@ use std::time::{Duration, Instant};
 
 use crate::PeerId;
 
-/// ★busy 상한(fail-open 안전 밸브 — round-3 finding 4, 내부 선택: **30분**)★: 마지막 턴 신호로부터 이
-///   시간을 넘긴 "턴 중" 관측은 **비정상 종료된 턴의 잔해**로 보고 idle 로 판정한다.
+/// ★busy limit (fail-open safety valve — round-3 finding 4, internal choice: **30 minutes**)★: a "mid-turn" observation older than this
+///   from the last turn signal is judged idle, seen as **wreckage of an abnormally ended turn**.
 ///
-/// ★왜 상한이 필요한가★: 턴 종료 신호는 유일한 in-band 해제다. 턴이 비정상 종료(파싱 실패·decoder
-///   이상·종료 라인 누락)하면 그 수신자 앞 모든 배달이 도어벨마다 접히고 결국 TTL 로 만료된다
-///   ("안 가는 것" = 메시징 최악 실패 모드). 발생 빈도는 미측정(spec §7 항목).
-/// ★왜 상한이 안전한가(무엇을 잃나)★: 오판(실제로는 턴 중인데 idle 로 봄)의 결과는 **턴 중 주입**이고,
-///   claude CLI 는 턴 중 stdin 을 내부 큐에 넣어 **다음 턴에 읽는다**(실측된 사용자 대면 동작 — spec §7).
-///   즉 최악의 대가는 "언제 읽히나" 가 흐려지는 것뿐이며 **유실은 없다**. 반면 상한이 없으면 그 수신자 앞
-///   메일이 TTL 까지 전부 안 간다 — 비교 불가하게 나쁘다(ADR-0104 "늦게 가는 것 < 안 가는 것").
-/// ★왜 30분인가★: 사람 대화 수준 메시지율에서 30분 무-출력 턴은 정상 범위를 크게 벗어난다(도구 호출·
-///   delta·usage 중 하나라도 오면 사실 계층이 시각을 갱신하므로, 30분은 "출력이 완전히 멈춘 채 턴 종료
-///   신호도 없는" 구간을 뜻한다). 더 짧으면 정상 장기 턴을 자르고, 더 길면 회복이 늦다.
-/// ★턴 관측(`in_turn`)에만 건다★ — `inputs_pending`·`last_end_failed` 는 이 상한이 풀지 않는다(모듈 헤더).
+/// ★Why a limit is needed★: the turn-end signal is the only in-band release. If a turn ends abnormally (parse failure · decoder
+///   fault · missing end line), every delivery addressed to that recipient is folded at every doorbell and finally expires by TTL
+///   ("not arriving" = the worst failure mode of messaging). Frequency of occurrence is unmeasured (spec §7 item).
+/// ★Why the limit is safe (what is lost)★: the consequence of a misjudgment (seeing idle when it is actually mid-turn) is **injection mid-turn**,
+///   and the claude CLI puts stdin into an internal queue mid-turn and **reads it on the next turn** (measured user-facing behavior — spec §7).
+///   So the worst cost is only that "when it is read" gets blurry, and **there is no loss**. Without the limit, on the other hand, all mail
+///   addressed to that recipient does not arrive until TTL — incomparably worse (ADR-0104 "going late is better than not going").
+/// ★Why 30 minutes★: at human-conversation message rates a 30-minute no-output turn is far outside the normal range (any one of a tool call ·
+///   delta · usage arriving makes the fact layer refresh the time, so 30 minutes means the span "output has completely stopped and there is
+///   no turn-end signal either"). Shorter cuts normal long turns, and longer delays recovery.
+/// ★Applied only to turn observation (`in_turn`)★ — this limit does not release `inputs_pending` or `last_end_failed` (module header).
 pub const BUSY_MAX_TURN: Duration = Duration::from_secs(30 * 60);
 
-/// ★idle 게이트 조회 seam(ADR-0012)★ — MessagingService 가 "이 수신자가 지금 우편을 받을 수 있나" 를 묻는
-/// 유일한 문. 서비스가 부르는 것은 `busy_reason` 하나다(배달 판정 = `is_some()`, 힌트 문구 = 그 값).
+/// ★idle gate lookup seam (ADR-0012)★ — the only door through which MessagingService asks "can this recipient receive mail right now".
+/// The service calls only `busy_reason` (delivery decision = `is_some()`, hint text = that value).
 ///
-/// ★계약★: 순수 조회 — 부작용 없음, 블로킹 없음(짧은 락만). messaging 락을 **든 채** 불려도 안전해야
-///   한다(현 호출부는 락 밖에서 부르지만, 이 계약을 지켜 두면 미래 호출 지점이 늘어도 데드락이 없다).
+/// ★Contract★: a pure query — no side effects, no blocking (short locks only). It must be safe to call **while holding** the messaging lock
+///   (current call sites call it outside the lock, but keeping this contract means no deadlock even if future call sites grow).
 pub trait BusyGate: Send + Sync {
     fn is_busy(&self, id: PeerId, epoch: u32) -> bool;
 
-    /// 바쁘면 그 사유, 아니면 `None`. ★서비스는 이 값의 `is_some()` 으로 배달을 막고 그 값으로 힌트 문구를
-    /// 고른다★ — `MessagingService` 는 `is_busy` 를 부르지 않는다.
-    /// ★`is_busy` 는 언제나 이것의 `is_some()` 과 같아야 한다★: 둘 중 하나를 재정의하면 둘이 어긋나지 않게
-    /// 함께 맞춘다. 사유를 모르는 구현은 기본값(`is_busy` 면 턴 중)으로 답한다.
+    /// The reason if busy, otherwise `None`. ★The service blocks delivery on the `is_some()` of this value and picks the hint text
+    /// by that value★ — `MessagingService` does not call `is_busy`.
+    /// ★`is_busy` must always equal the `is_some()` of this★: if one of the two is overridden, adjust both
+    /// together so they do not diverge. An implementation that does not know the reason answers with the default (if `is_busy`, mid-turn).
     // ADR-0231
     fn busy_reason(&self, id: PeerId, epoch: u32) -> Option<BusyReason> {
         self.is_busy(id, epoch).then_some(BusyReason::InTurn)
     }
 }
 
-/// 수신자가 우편을 못 받는 사유 — 힌트 문구 선택용. 둘 이상 겹치면 위에 적힌 것이 이긴다(`BusyPolicy::busy_reason`).
+/// Why the recipient cannot receive mail — for choosing hint text. If two or more overlap, the one written higher wins (`BusyPolicy::busy_reason`).
 // ADR-0231
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BusyReason {
-    /// 마지막 턴이 오류로 끝났고 그 뒤 성공한 턴이 아직 없다.
+    /// The last turn ended in an error and there is no successful turn since.
     HaltedAfterError,
-    /// 턴 중이다(상한으로 잔해 판정된 턴은 여기 들지 않는다).
+    /// Mid-turn (a turn judged wreckage by the limit does not count here).
     InTurn,
-    /// 턴은 아니지만 사용자 대기 목록이 비지 않았다.
+    /// Not a turn, but the user-waiting list is not empty.
     InputsPending,
 }
 
-/// 게이트 미배선/관측 불가 폴백 — **항상 idle**(= 즉시 주입, spec §5 capability 폴백).
+/// Gate-unwired / unobservable fallback — **always idle** (= inject at once, spec §5 capability fallback).
 pub struct AlwaysIdleGate;
 
 impl BusyGate for AlwaysIdleGate {
@@ -101,61 +101,61 @@ impl BusyGate for AlwaysIdleGate {
     }
 }
 
-/// 한 화신의 턴 관측 사실 — 해석이 붙지 않은 원값(ADR-0113 결정 1).
+/// Turn observation facts of one incarnation — raw values with no interpretation attached (ADR-0113 decision 1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TurnFact {
     pub in_turn: bool,
-    /// 마지막 턴 신호 시각 — `in_turn` 일 때만 읽힌다(상한 판정).
+    /// Last turn signal time — read only when `in_turn` (limit decision).
     pub last_signal: Instant,
-    /// 그 화신의 사용자 대기 목록이 비지 않았다.
+    /// That incarnation's user-waiting list is not empty.
     // ADR-0231
     pub inputs_pending: bool,
-    /// 그 화신의 마지막 턴 끝이 오류였고 그 뒤 깨끗한 성공 끝이 아직 없다(오류 뒤 멈춤).
+    /// That incarnation's last turn end was an error and there is no clean successful end after it (stopped after an error).
     // ADR-0231
     pub last_end_failed: bool,
 }
 
-/// ★턴 사실 조회 포트(ADR-0110 결정 3 · ADR-0113 결정 1)★ — 호스트의 공용 관측 계층을 커널이 **타입으로도
-///   모른 채** 읽는 문. 운영 구현은 호스트 어댑터가 소유한다.
+/// ★Turn-fact lookup port (ADR-0110 decision 3 · ADR-0113 decision 1)★ — the door through which the kernel reads the host's shared observation layer **without
+///   knowing it even as a type**. The production implementation is owned by the host adapter.
 ///
-/// ★읽기 전용이 계약이다★: 이 포트에 "지워라/표시해라" 를 추가하지 말 것(근거 = 모듈 헤더).
-/// ★값들을 한 번에 돌려주는 이유★: 따로 물으면 두 조회 사이에 신호가 끼어 "턴 중인데 시각은 옛것"·
-///   "턴은 끝났는데 오류는 아직 안 적혔다" 같은 합성 불가능한 조합으로 판정하게 된다.
+/// ★Read-only is the contract★: do not add "erase/mark" to this port (basis = module header).
+/// ★Why the values are returned together★: if asked separately, a signal slips in between the two lookups and the decision is made on an impossible combination like "mid-turn but the time is old" or
+///   "the turn ended but the error is not yet written".
 pub trait TurnFacts: Send + Sync {
-    /// 이 (id, epoch)의 관측값. `None` = 미관측(어느 사실도 없다).
+    /// The observed value of this (id, epoch). `None` = unobserved (no fact at all).
     fn turn_fact(&self, id: PeerId, epoch: u32) -> Option<TurnFact>;
 
-    /// 지금 턴 중으로 관측된 전원 `(id, epoch, 마지막 신호 시각)` — 상한 sweep 의 입구.
+    /// Everyone currently observed as mid-turn `(id, epoch, 마지막 신호 시각)` — the entry of the limit sweep.
     fn in_turn_snapshot(&self) -> Vec<(PeerId, u32, Instant)>;
 }
 
-/// ★턴 종료(idle 전이) 통지 seam★ — 호스트가 "이 에이전트 턴이 끝났다" 를 알리는 입구이자, 상한 sweep 이
-///   멈춘 턴을 깨우는 출구. 운영 구현은 flush worker 채널로 논블록 send 한다.
+/// ★Turn-end (idle transition) notification seam★ — the entry where the host reports "this agent's turn has ended", and the exit where the limit sweep
+///   wakes a stopped turn. The production implementation does a non-blocking send to the flush worker channel.
 ///
-/// ★계약(load-bearing)★: **논블록·비-재진입**(근거 = 모듈 헤더 콜백 규율).
-/// ★idempotency 의존(수용된 설계)★: 통지는 **턴 종료 신호마다** 나간다(전이 여부를 따지지 않는다). 왜:
-///   "직전이 busy 였을 때만" 으로 좁히면, 어시스턴트 이벤트 없이 곧장 끝나는 턴에서 통지가 빠져 파킹이
-///   다음 턴까지 stranded 된다 — 배달 누락(치명)보다 **잉여 통지(무해)** 를 택한다. 잉여 통지의 대가는
-///   빈 큐 drain no-op 뿐이다. 채널 압력의 상한은 호스트 통지 구현이 책임진다.
+/// ★Contract (load-bearing)★: **non-blocking and non-reentrant** (basis = module header callback discipline).
+/// ★Idempotency dependence (accepted design)★: a notification goes out on **every turn-end signal** (whether it was a transition or not). Why:
+///   narrowing it to "only when the previous state was busy" would drop the notification for a turn that ends at once with no assistant event, and parking would be
+///   stranded until the next turn — we choose a **redundant notification (harmless)** over a missed delivery (fatal). The cost of a redundant notification is
+///   only an empty-queue drain no-op. The upper bound on channel pressure is the host notification implementation's responsibility.
 pub trait IdleNotifier: Send + Sync {
     fn notify_idle(&self, id: PeerId);
 }
 
-/// ★BusyPolicy — 사실 위에 우편의 정책을 얹는 게이트(C2 · ADR-0113 결정 2)★. 데몬 부팅에서 하나 만들어
-///   MessagingService(게이트 조회)와 sweep task(상한 fail-open)가 공유한다.
+/// ★BusyPolicy — the gate that puts the mail policy on top of the facts (C2 · ADR-0113 decision 2)★. One is made at daemon boot and
+///   shared by MessagingService (gate lookup) and the sweep task (limit fail-open).
 ///
-/// ★유일한 상태 = 상한 판정 장부이고 그건 **정책** 상태다★: 사실은 전부 포트 너머에 있다. 공용 표를 못
-///   지우므로(모듈 헤더) "이 화신의 이 신호는 잔해로 본다" 는 판정을 이쪽에 적어 둔다 — 그게 곧 게이트의
-///   답이자 "이미 깨웠다" 표시다.
-/// ★시계를 읽지 않는다(결정론 유지)★: 상한 비교는 `now` 를 인자로 받는 `sweep_stale_busy` 안에서만
-///   일어나고, 조회(`is_busy`)는 그 장부를 볼 뿐이다. 그래서 crate 순수성 규율(clock injection)이 이
-///   모듈에서도 성립하고, 판정 시점이 sweep 주기에 고정돼 관측 가능한 동작이 결정적이다.
-/// ★락 = 이 장부 하나, 통지는 락 밖(ADR-0006)★: `notify_idle` 은 외부 호출이라 락을 든 채 부르지 않는다.
+/// ★The only state is the limit-decision ledger, and that is **policy** state★: all facts are beyond the port. Since the shared table cannot be
+///   erased (module header), the judgment "this signal of this incarnation is seen as wreckage" is written down on this side — that is both the gate's
+///   answer and the "already woken" mark.
+/// ★It does not read the clock (determinism kept)★: the limit comparison happens only inside `sweep_stale_busy`, which takes `now` as an argument,
+///   and the lookup (`is_busy`) just looks at that ledger. So the crate purity discipline (clock injection) holds in this
+///   module too, and the decision time is pinned to the sweep period, making observable behavior deterministic.
+/// ★Lock = this one ledger, notification outside the lock (ADR-0006)★: `notify_idle` is an external call, so it is not called while holding the lock.
 pub struct BusyPolicy {
     facts: Arc<dyn TurnFacts>,
     notifier: Arc<dyn IdleNotifier>,
-    /// 상한 초과로 **잔해 판정**한 화신 → 그때 본 마지막 신호 시각. 값이 어긋나면(새 신호가 왔다) 판정은
-    /// 무효다 — 그래서 다음 신호가 오는 순간 sweep 을 기다리지 않고 다시 busy 로 돌아간다.
+    /// The incarnation **judged wreckage** by exceeding the limit → the last signal time seen then. If the value changes (a new signal came) the judgment is
+    /// void — so the moment the next signal comes it returns to busy without waiting for the sweep.
     stale: Mutex<HashMap<(PeerId, u32), Instant>>,
 }
 
@@ -168,15 +168,15 @@ impl BusyPolicy {
         }
     }
 
-    /// ★상한 sweep(round-3 finding 4)★ — `BUSY_MAX_TURN` 을 넘긴 "턴 중" 관측을 **잔해로 판정**하고 그
-    ///   주인을 **도어벨로 깨운다**(대기 중인 파킹이 그때 배달된다). 데몬의 주기 sweep task 가 부른다.
-    ///   반환 = 이번에 깨운 id 수.
+    /// ★Limit sweep (round-3 finding 4)★ — **judges wreckage** for "mid-turn" observations past `BUSY_MAX_TURN` and **wakes**
+    ///   their owner **with a doorbell** (the waiting parking is delivered then). Called by the daemon's periodic sweep task.
+    ///   Return = the number of ids woken this time.
     ///
-    /// ★깨우기가 fix 의 절반이다★: 판정만 뒤집으면 그 수신자 앞 파킹은 **다음 트리거**(등장/턴 종료/새 발송)
-    ///   까지 그대로 앉아 있다 — 그런데 애초에 이 상황은 "그 트리거가 오지 않는" 상황이다(턴 종료 신호 유실).
-    /// ★잔해 하나당 도어벨 1회★: 사실을 지울 수 없으므로 같은 잔해가 매 주기 다시 보인다 — 마지막 신호
-    ///   시각이 장부와 같으면 이미 처리한 잔해다. 새 신호가 왔다가 다시 멈추면 그건 새 잔해다.
-    /// ★장부는 매번 "지금 잔해인 것" 으로 갈아 끼운다★: 되살아났거나 reap 된 화신의 항목이 쌓이지 않는다.
+    /// ★Waking is half of the fix★: flipping only the decision leaves the parking addressed to that recipient sitting there until the **next trigger** (appearance/turn end/new send)
+    ///   — but this situation is by definition one where "that trigger does not come" (turn-end signal lost).
+    /// ★One doorbell per wreckage★: since the fact cannot be erased, the same wreckage is seen again every period — if the last signal
+    ///   time equals the ledger, it is wreckage already handled. If a new signal comes and stops again, that is new wreckage.
+    /// ★The ledger is swapped each time for "what is wreckage now"★: entries of incarnations that revived or were reaped do not pile up.
     pub fn sweep_stale_busy(&self, now: Instant) -> usize {
         let stale_now: Vec<(PeerId, u32, Instant)> = self
             .facts
@@ -213,10 +213,10 @@ impl BusyPolicy {
         self.busy_reason(id, epoch).is_some()
     }
 
-    /// 바쁨 판정과 그 사유를 한 번의 사실 조회로 낸다 — `is_busy` 는 이것의 `is_some()` 이다.
+    /// Produces the busy decision and its reason in one fact lookup — `is_busy` is the `is_some()` of this.
     pub fn busy_reason(&self, id: PeerId, epoch: u32) -> Option<BusyReason> {
         let fact = self.facts.turn_fact(id, epoch)?;
-        // ADR-0231: 상한 장부를 보지 않는다 — 이 두 사실은 30 분이 지나도 바쁨이다(모듈 헤더).
+        // ADR-0231: does not look at the limit ledger — these two facts are busy even after 30 minutes (module header).
         if fact.last_end_failed {
             return Some(BusyReason::HaltedAfterError);
         }
@@ -241,7 +241,7 @@ impl BusyGate for BusyPolicy {
     }
 }
 
-/// ★하네스/테스트 전용 사실 소스★ — 호스트 관측 계층 대신 손으로 사실을 심어 정책을 결정적으로 구동한다.
+/// ★Harness/test-only fact source★ — plants facts by hand instead of the host observation layer to drive the policy deterministically.
 #[cfg(any(test, feature = "test-harness"))]
 #[derive(Default)]
 pub struct ScriptedTurnFacts {
@@ -254,7 +254,7 @@ impl ScriptedTurnFacts {
         Arc::new(Self::default())
     }
 
-    /// 이 화신을 "턴 중, 마지막 신호 = `at`" 으로 심는다 — 이미 심은 대기 목록·멈춤 칸은 그대로 둔다.
+    /// Plants this incarnation as "mid-turn, last signal = `at`" — leaves the already planted waiting-list and stopped slots as they are.
     pub fn set_in_turn(&self, id: PeerId, epoch: u32, at: Instant) {
         self.update(id, epoch, at, |f| {
             f.in_turn = true;
@@ -262,8 +262,8 @@ impl ScriptedTurnFacts {
         });
     }
 
-    /// 이 화신을 "턴 끝남, 마지막 신호 = `at`" 으로 심는다(관측은 있으나 턴 중은 아님). 대기 목록·멈춤
-    /// 칸은 그대로 둔다.
+    /// Plants this incarnation as "turn ended, last signal = `at`" (observed but not mid-turn). Leaves the waiting-list and stopped
+    /// slots as they are.
     pub fn set_idle(&self, id: PeerId, epoch: u32, at: Instant) {
         self.update(id, epoch, at, |f| {
             f.in_turn = false;
@@ -271,13 +271,13 @@ impl ScriptedTurnFacts {
         });
     }
 
-    /// 대기 목록 칸만 바꾼다. 사실이 아직 없으면 "턴 아님, 마지막 신호 = `at`" 위에 심는다.
+    /// Changes only the waiting-list slot. If there is no fact yet, plants it on top of "not a turn, last signal = `at`".
     // ADR-0231
     pub fn set_inputs_pending(&self, id: PeerId, epoch: u32, pending: bool, at: Instant) {
         self.update(id, epoch, at, |f| f.inputs_pending = pending);
     }
 
-    /// 오류 뒤 멈춤 칸만 바꾼다. 사실이 아직 없으면 "턴 아님, 마지막 신호 = `at`" 위에 심는다.
+    /// Changes only the stopped-after-error slot. If there is no fact yet, plants it on top of "not a turn, last signal = `at`".
     // ADR-0231
     pub fn set_last_end_failed(&self, id: PeerId, epoch: u32, failed: bool, at: Instant) {
         self.update(id, epoch, at, |f| f.last_end_failed = failed);
@@ -371,7 +371,7 @@ mod tests {
 
     #[test]
     fn state_is_keyed_by_epoch_no_leak_across_incarnations() {
-        // 옛 epoch 의 관측이 새 epoch 판정에 새면 새 incarnation 앞 메일이 근거 없이 대기한다.
+        // If an old epoch's observation leaks into the new epoch's decision, mail addressed to the new incarnation waits without grounds.
         let (p, f, _n) = policy();
         let id = PeerId::new_v4();
         f.set_in_turn(id, 0, Instant::now());
@@ -478,7 +478,7 @@ mod tests {
         assert_eq!(n.seen(), vec![id, id]);
     }
 
-    // ── 대기 목록 · 오류 뒤 멈춤(ADR-0231) ──
+    // ── waiting list · stopped after error (ADR-0231) ──
 
     #[test]
     fn each_fact_alone_is_busy_and_all_false_is_idle() {
@@ -550,7 +550,7 @@ mod tests {
 
     #[test]
     fn a_stale_turn_with_waiting_input_reports_the_input_not_the_turn() {
-        // 잔해로 판정된 턴은 사유가 아니다 — 바쁨을 떠받치는 것은 대기 목록뿐이다.
+        // A turn judged wreckage is not a reason — only the waiting list holds busy up.
         let (p, f, _n) = policy();
         let id = PeerId::new_v4();
         let t0 = Instant::now();

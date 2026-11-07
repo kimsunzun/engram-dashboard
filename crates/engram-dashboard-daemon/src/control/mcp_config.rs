@@ -1,12 +1,12 @@
-//! 에이전트별 **스폰 부착 파일** 생성·정리(ADR-0086 · S18 D) — claude 가 경로로 읽는 두 JSON.
+//! Creation and cleanup of the per-agent **spawn attachment files** (ADR-0086 · S18 D) — two JSONs claude reads by path.
 //!
-//! ★역할★: provision 시 (AgentId, epoch)용 파일을 [`McpDir`] 에 쓰고 revoke 시 지운다. 두 종류다:
-//!   ① **mcp-config**(`--mcp-config`) — 제어 채널 엔드포인트 + Bearer 토큰.
-//!   ② **세션 설정 조각**(`--settings`, S18 D) — 그 세션에만 engram MCP 서버를 허용하는 최소 조각.
-//!   아래 설명은 ①을 기준으로 읽되, 생성/삭제/스윕 규율은 ②에도 그대로 적용된다. claude 는 ① 을 읽어
-//!   initialize/tools/list/tools/call 전 요청에 Authorization 헤더를 실어 보낸다(claude 2.1.170 실측).
+//! ★Role★: on provision, write the files for (AgentId, epoch) into [`McpDir`]; on revoke, delete them. There are two kinds:
+//!   ① **mcp-config** (`--mcp-config`) — control channel endpoint + Bearer token.
+//!   ② **session settings fragment** (`--settings`, S18 D) — a minimal fragment that allows the engram MCP server for that session only.
+//!   Read the description below with ① as the reference, but the create/delete/sweep discipline applies to ② unchanged. claude reads ① and
+//!   sends the Authorization header on every request: initialize/tools/list/tools/call (measured on claude 2.1.170).
 //!
-//! ★스키마(claude Streamable HTTP MCP 서버)★:
+//! ★Schema (claude Streamable HTTP MCP server)★:
 //! ```json
 //! { "mcpServers": { "engram": {
 //!     "type": "http",
@@ -14,37 +14,37 @@
 //!     "headers": { "Authorization": "Bearer <token>" }
 //! } } }
 //! ```
-//!   ※ 이 스키마는 mcp-config 공통 형식이지 claude CLI **플래그** 지식이 아니다 — 플래그(`--mcp-config`)는
-//!   backend/claude/ 단독(ADR-0004). 파일 내용 생성은 데몬 관심사(토큰·엔드포인트는 데몬 소유)라
-//!   여기 둔다. backend 는 이 파일 경로만 `--mcp-config` 로 가리킨다.
+//!   ※ This schema is the common mcp-config format, not knowledge of claude CLI **flags** — the flag (`--mcp-config`) belongs to
+//!   backend/claude/ alone (ADR-0004). Generating the file content is a daemon concern (the token and endpoint are owned by the daemon),
+//!   so it lives here. The backend only points `--mcp-config` at this file's path.
 //!
-//! ★보안(ADR-0086 §Secrets)★:
-//!   - 파일은 토큰을 평문으로 담는다 → 데이터 폴더의 `run` 아래에 두고 **revoke 시 반드시 삭제**한다.
-//!   - 토큰은 로그에 절대 찍지 않는다(경로·AgentId 만).
+//! ★Security (ADR-0086 §Secrets)★:
+//!   - The file holds the token in plaintext → put it under `run` in the data folder and **always delete it on revoke**.
+//!   - Never print the token in logs (only the path and AgentId).
 //!
-//! tauri import 0(daemon crate).
+//! tauri import 0 (daemon crate).
 
 use std::path::{Path, PathBuf};
 
 use engram_dashboard_agent::types::AgentId;
 
-/// ★서버 논리명(mcpServers 키) = `engram`★ — **단일 출처(ADR-0094)**. claude 의 `system:init` 에 이
-///   이름으로 서버가 뜨고, mcp-config JSON 의 `mcpServers.<이 값>` 키도 이 값이다. ADR-0094 발신 권한
-///   grant 가 `mcp__{server}__{tool}` 패턴을 만들 때 이 상수를 server 로 쓴다(DaemonControlChannel.provision).
-///   ADR-0086 §engram-ctl 이름 재사용 금지 — 데몬 자체 브랜드로 `engram`(폐기된 크레이트명 아님).
+/// ★Server logical name (the mcpServers key) = `engram`★ — **single source (ADR-0094)**. The server shows up in claude's `system:init` under this
+///   name, and the `mcpServers.<이 값>` (this value) key of the mcp-config JSON is this value too. When the ADR-0094 send-permission
+///   grant builds the `mcp__{server}__{tool}` pattern, it uses this constant as the server (DaemonControlChannel.provision).
+///   ADR-0086 §do not reuse the engram-ctl name — `engram` is the daemon's own brand (not a discarded crate name).
 ///
-/// ★정의는 여기가 아니라 agent crate 다 — 되돌려 여기 리터럴을 다시 적지 말 것★: 이 이름을 쓰는 둘째
-///   소비자가 backend 폴더에 생겼고(codex 의 `-c mcp_servers.<name>=…`), 그쪽은 데몬을 의존할 수 없다.
-///   이 re-export 는 기존 `mcp_config::MCP_SERVER_NAME` 호출부를 그대로 세워 두기 위한 것이다.
+/// ★The definition is in the agent crate, not here — do not move it back and write the literal here again★: a second
+///   consumer of this name has appeared in the backend folder (codex's `-c mcp_servers.<name>=…`), and it cannot depend on the daemon.
+///   This re-export is there to keep the existing `mcp_config::MCP_SERVER_NAME` call sites standing as they are.
 // ADR-0209
 pub use engram_dashboard_agent::types::MCP_SERVER_NAME;
 
-/// 스폰 부착 파일 폴더 **자체**(데이터 폴더가 아니다) — 운영 = `data_dir::DataLayout::mcp_config_dir`
-/// (데몬 `run` 아래). 이 모듈의 파일은 전부 이 안에 바로 놓이고, [`sweep_stale_configs`] 는 이 안의 파일을
-/// **전부** 지운다.
+/// The spawn attachment folder **itself** (not the data folder) — in production = `data_dir::DataLayout::mcp_config_dir`
+/// (under the daemon's `run`). Every file of this module is placed directly inside it, and [`sweep_stale_configs`] deletes **all**
+/// the files inside it.
 ///
-/// ★맨 `Path` 로 되돌리지 말 것★: 데이터 폴더를 넘기는 실수가 그대로 컴파일되고, 그러면 토큰 파일이 데이터
-/// 폴더 바닥에 쓰이며 부팅 스윕이 그 폴더의 파일(명부 포함)을 지운다. 생성자 하나로 의도를 적게 한다.
+/// ★Do not turn it back into a bare `Path`★: the mistake of passing the data folder would compile as is, and then the token file would be written at the bottom of
+/// the data folder, and the boot sweep would delete that folder's files (including the registry). One constructor makes the intent explicit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpDir(PathBuf);
 
@@ -58,15 +58,15 @@ impl McpDir {
     }
 }
 
-/// epoch 를 파일명에 넣어 회전 시 옛 파일과 충돌하지 않게 한다.
+/// Put the epoch in the file name so that a rotation does not collide with the old file.
 pub fn config_path(mcp_dir: &McpDir, id: AgentId, epoch: u32) -> PathBuf {
     mcp_dir.0.join(format!("{id}-{epoch}.json"))
 }
 
-/// escape 는 serde_json 이 처리(손조립 금지).
+/// Escaping is handled by serde_json (no hand assembly).
 ///
-/// ★typed struct 직렬화(키 순서 결정적)★: serde 는 struct 필드를 선언 순서대로 쓴다 — 스키마를 사양
-///   그대로 드러낸다(claude 는 임의 순서 수용).
+/// ★Typed struct serialization (deterministic key order)★: serde writes struct fields in declaration order — it exposes the schema
+///   as the spec has it (claude accepts any order).
 pub fn render_config(url: &str, token: &str) -> String {
     #[derive(serde::Serialize)]
     struct Root<'a> {
@@ -97,13 +97,13 @@ pub fn render_config(url: &str, token: &str) -> String {
         },
     );
     let root = Root { mcp_servers };
-    // to_string_pretty 는 이 형태에선 실패하지 않음 — 방어적 unwrap_or_default.
+    // to_string_pretty does not fail on this shape — defensive unwrap_or_default.
     serde_json::to_string_pretty(&root).unwrap_or_default()
 }
 
-/// (새 데이터 루트엔 폴더가 없다 — 원자 쓰기가 만든다.)
-// ADR-0291: 원자 쓰기의 임시 파일도 같은 폴더에 놓여 토큰이 거기 잠깐 실린다 — 같은 ACL 이고, 꺼짐이나 지우기
-//   실패로 남은 것은 부팅 스윕(폴더 안 파일 전부)이 거둔다.
+/// (A new data root has no folder — the atomic write creates it.)
+// ADR-0291: the atomic write's temp file is also placed in the same folder, so the token is briefly carried there — same ACL, and what remains from a power-off or a failed
+//   delete is swept up by the boot sweep (all files in the folder).
 fn write_attached(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     engram_dashboard_base::file::write_atomic(path, bytes, crate::file_hooks::OS_HOOKS)
 }
@@ -121,24 +121,24 @@ pub fn write_config(
     Ok(path)
 }
 
-/// ★왜 mcp-config 와 **같은 폴더**인가(load-bearing — 수명 관리 단일화)★: 이 조각은 mcp-config 와 정확히
-///   같은 수명이다(같은 (id,epoch)에 provision 때 생기고 revoke 때 사라진다). 전용 폴더를 새로 파면
-///   ① revoke ② 부팅 스윕 ③ 데이터 디렉토리 규약이 각각 두 벌이 되고, 한쪽만 갱신되면 조각 파일이 영원히
-///   쌓인다. 같은 폴더를 쓰면 **기존 부팅 스윕(`sweep_stale_configs`)이 폴더 안 파일을 전부 지우므로**
-///   추가 스윕 코드 없이 청소가 따라온다. 파일명 접미(`.settings.json`)로 mcp-config(`.json`)와 구분한다.
+/// ★Why the **same folder** as mcp-config (load-bearing — single lifetime management)★: this fragment has exactly
+///   the same lifetime as mcp-config (it appears at provision and vanishes at revoke for the same (id,epoch)). Creating a dedicated folder would make
+///   ① revoke ② boot sweep ③ data directory convention each exist in two copies, and if only one side is updated, fragment files pile up
+///   forever. Using the same folder means **the existing boot sweep (`sweep_stale_configs`) deletes all files in the folder**, so
+///   cleanup follows with no extra sweep code. The file name suffix (`.settings.json`) tells it apart from mcp-config (`.json`).
 pub fn settings_path(mcp_dir: &McpDir, id: AgentId, epoch: u32) -> PathBuf {
     mcp_dir.0.join(format!("{id}-{epoch}.settings.json"))
 }
 
-/// ★내용 = `{"allowedMcpServers":[{"serverName":"engram"}]}`(spec §6)★. 유저 전역 설정의
-///   `allowedMcpServers: []`(전면 차단)가 스폰 에이전트에도 적용돼 engram MCP 서버가 툴 목록에서 사라지는
-///   문제(실측 2026-07-24)를 **이 세션에만** 뒤집는다. 전역 파일은 건드리지 않는다.
-/// ★최소 조각 원칙(load-bearing)★: 이 파일에 **다른 설정을 더 넣지 않는다**. `--settings` 는 설정 계층의
-///   높은 우선순위 층이라(user → project → local → `--settings` → managed), 여기 들어간 키는 사용자의
-///   프로젝트/로컬 설정을 조용히 덮어쓴다. 그래서 우리가 반드시 필요한 한 키만 싣는다 — 이 파일이
-///   "잡다한 스폰 설정" 서랍이 되면 사용자 설정을 침범한다(설정 IR 레이어가 오면 그쪽이 정본이 된다).
-// ADR-0103 (spec §6 allowedMcpServers 대책)
-// ADR-0109 (--settings 조각 — 단일 키 유지·파일 주입)
+/// ★Content = `{"allowedMcpServers":[{"serverName":"engram"}]}` (spec §6)★. This reverses, **for this session only**, the problem (measured 2026-07-24) where the user's global setting
+///   `allowedMcpServers: []` (block everything) also applies to the spawned agent and the engram MCP server vanishes from the tool list.
+///   The global file is not touched.
+/// ★Minimal fragment principle (load-bearing)★: **do not put any other setting into this file**. `--settings` is a
+///   high-priority layer in the settings hierarchy (user → project → local → `--settings` → managed), so a key put here quietly
+///   overrides the user's project/local settings. So we carry only the one key we absolutely need — if this file
+///   became a "miscellaneous spawn settings" drawer it would intrude on user settings (once the settings IR layer arrives, it becomes the authority).
+// ADR-0103 (spec §6 allowedMcpServers countermeasure)
+// ADR-0109 (--settings fragment — keep a single key · file injection)
 pub fn render_settings() -> String {
     #[derive(serde::Serialize)]
     struct Root<'a> {
@@ -165,7 +165,7 @@ pub fn write_settings(mcp_dir: &McpDir, id: AgentId, epoch: u32) -> std::io::Res
     Ok(path)
 }
 
-/// 삭제 실패는 provision/revoke 를 막지 않는다 — 이 파일엔 비밀이 없고, 다음 부팅 스윕이 어차피 쓸어낸다.
+/// A delete failure does not block provision/revoke — this file holds no secret, and the next boot sweep sweeps it up anyway.
 pub fn remove_settings(mcp_dir: &McpDir, id: AgentId, epoch: u32) {
     let path = settings_path(mcp_dir, id, epoch);
     match std::fs::remove_file(&path) {
@@ -175,11 +175,11 @@ pub fn remove_settings(mcp_dir: &McpDir, id: AgentId, epoch: u32) {
     }
 }
 
-/// ★삭제 실패는 provision 을 막지 않는다(무해 이유 — FIX 5)★: 파일 삭제가 실패해도 warn 만 남기고
-///   진행한다. 그 잔여 파일은 **inert** 하다 — 그 안의 토큰은 registry.revoke 가 이미 evict 했으므로
-///   (validate 가 None → 401), 파일이 디스크에 남아도 어떤 에이전트도 그 토큰으로 인증할 수 없다.
-///   즉 남은 파일은 dead credential(더 이상 유효하지 않은 문자열)일 뿐 보안 창을 열지 않는다. 다음
-///   부팅의 boot sweep 이 어차피 쓸어낸다(registry 는 부팅마다 빈 상태로 시작 → 모든 기존 파일이 dead).
+/// ★A delete failure does not block provision (why it is harmless — FIX 5)★: even if deleting the file fails, only a warn is left and
+///   we proceed. That leftover file is **inert** — the token inside it was already evicted by registry.revoke
+///   (validate returns None → 401), so even if the file stays on disk no agent can authenticate with that token.
+///   That is, the remaining file is merely a dead credential (a string that is no longer valid) and opens no security window. The next
+///   boot's boot sweep sweeps it up anyway (the registry starts empty on every boot → every existing file is dead).
 pub fn remove_config(mcp_dir: &McpDir, id: AgentId, epoch: u32) {
     let path = config_path(mcp_dir, id, epoch);
     match std::fs::remove_file(&path) {
@@ -191,14 +191,14 @@ pub fn remove_config(mcp_dir: &McpDir, id: AgentId, epoch: u32) {
     }
 }
 
-/// ★부팅 스윕(FIX 5)★: 데몬 크래시나 세션 등록 전 실패로 stale 파일이 살아남을 수 있다. 평문 토큰
-/// 파일을 디스크에 방치하지 않으려 부팅 시 일괄 청소한다. 개별 파일 삭제 실패는 warn 만 남기고
-/// 계속한다(다음 부팅이 재시도 — 청소 실패로 데몬 기동을 막지 않는다).
+/// ★Boot sweep (FIX 5)★: a daemon crash or a failure before session registration can leave stale files alive. To avoid leaving plaintext-token
+/// files on disk, clean up in bulk at boot. A failure to delete an individual file leaves only a warn and
+/// continues (the next boot retries — a cleanup failure does not block daemon startup).
 pub fn sweep_stale_configs(mcp_dir: &McpDir) {
     let dir = mcp_dir.as_path();
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
-        // 첫 부팅엔 폴더 자체가 없다 — 청소할 것도 없다.
+        // On the first boot the folder itself does not exist — there is nothing to clean.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
         Err(e) => {
             tracing::warn!(
@@ -278,7 +278,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// 새 데이터 루트엔 폴더가 아직 없다 — 쓰기가 루트까지 만들어야 첫 스폰이 선다(ADR-0291 R11).
+    /// A new data root has no folder yet — the write must create up to the root for the first spawn to stand (ADR-0291 R11).
     #[test]
     fn writes_into_a_folder_that_does_not_exist_yet() {
         let root = std::env::temp_dir().join(format!("engram-mcpcfg-fresh-{}", AgentId::new_v4()));
@@ -295,7 +295,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// 꺼짐으로 남은 원자 쓰기 임시 파일(토큰이 실렸을 수 있다)도 부팅 스윕이 거둔다.
+    /// Atomic-write temp files left by a power-off (a token may have been loaded in them) are also swept up by the boot sweep.
     #[test]
     fn boot_sweep_collects_a_leftover_atomic_write_temp() {
         let root = std::env::temp_dir().join(format!("engram-mcpcfg-tmp-{}", AgentId::new_v4()));
@@ -311,7 +311,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    // ── S18 D(spec §6): 세션 한정 설정 조각 ──────────────────────────────────────────────
+    // ── S18 D (spec §6): session-scoped settings fragment ──────────────────────────────────────────────
     #[test]
     fn render_settings_allows_exactly_the_engram_server() {
         let s = render_settings();

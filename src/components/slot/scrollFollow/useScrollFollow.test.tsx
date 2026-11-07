@@ -1,9 +1,9 @@
-// useScrollFollow — DOM 배선 시험(ADR-0242 · TRD §2-3 · §2-7). 판정 규칙 자체는 followCore.test.ts 가 잰다 —
-//   여기는 입력이 코어에 제대로 먹히고 그 결과가 노드·관측 표면·손잡이 맵에 닿는지만 잰다.
+// useScrollFollow — DOM wiring test (ADR-0242 · TRD §2-3 · §2-7). The decision rules themselves are measured by followCore.test.ts —
+//   here we only measure whether input is fed into the core correctly and the result reaches the node, the observation surface and the handle map.
 //
-// 전략: jsdom 엔 레이아웃도 ResizeObserver 도 없다. 가짜 RO 를 seam 으로 꽂고, `data-vp` 가 붙은 노드만
-//   scrollHeight · clientHeight 를 갖게 Element 원형의 접근자를 바꾼다(scrollTop 은 노드마다 저장 + 바닥 클램프).
-//   브라우저는 위치가 바뀐 노드에 **다음 프레임에** scroll 이벤트를 하나 낸다 — `frame()` 이 그 자리다.
+// Strategy: jsdom has neither layout nor ResizeObserver. Plug a fake RO in as a seam, and replace the Element prototype accessors so only nodes with `data-vp`
+//   have scrollHeight · clientHeight (scrollTop is stored per node + clamped at the bottom).
+//   The browser emits one scroll event on a node whose position changed **on the next frame** — `frame()` is that place.
 
 import { StrictMode, type ReactElement } from 'react'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
@@ -40,7 +40,7 @@ const tops = new WeakMap<Element, number>()
 const moved = new Set<Element>()
 const isVp = (el: Element): boolean => el.hasAttribute('data-vp')
 
-/** 다음 프레임 — 위치가 바뀐 뷰포트마다 scroll 이벤트 하나. */
+/** Next frame — one scroll event per viewport whose position changed. */
 function frame(): void {
   for (const el of [...moved]) {
     moved.delete(el)
@@ -108,21 +108,21 @@ function Harness({
 const vp = (): HTMLElement => screen.getByTestId('vp')
 const followAttr = (): string | null => vp().getAttribute('data-scroll-follow')
 
-/** 붙이고 우리 첫 쓰기의 scroll 이벤트까지 받는다. */
+/** Pin and receive the scroll event of our first write. */
 function mount(ui: ReactElement): ReturnType<typeof render> {
   const out = render(ui)
   frame()
   return out
 }
 
-/** 사용자가 그 자리로 스크롤했다 — 앞선 쓰기의 이벤트가 먼저 오고, 그다음 이 움직임의 이벤트. */
+/** The user scrolled to that position — the earlier write's event arrives first, then this move's event. */
 function userScroll(top: number): void {
   frame()
   vp().scrollTop = top
   frame()
 }
 
-/** 스크롤할 것이 있는 상태에서 작은 위 휠로 따라가기를 푼다. */
+/** With something to scroll, release following with a small up-wheel. */
 function wheelUp(target: Element = vp()): void {
   fireEvent.wheel(target, { deltaY: -40 })
 }
@@ -157,7 +157,7 @@ describe('위로 가는 입력', () => {
     expect(followAttr()).toBe('free')
     expect(latest!.pinned).toBe(false)
 
-    userScroll(bottom() - 10) // 그 휠이 만든 위 scroll(문턱 안) — 걸쇠가 되붙이지 않는다.
+    userScroll(bottom() - 10) // The up scroll that wheel produced (within the threshold) — the latch does not re-pin.
     geo.height = 1600
     liveRO()[0].fire()
     expect(vp().scrollTop).toBe(790)
@@ -198,7 +198,7 @@ describe('위로 가는 입력', () => {
     expect(followAttr()).toBe('pinned')
   })
 
-  // 뷰포트가 클릭으로 포커스를 받으므로(tabIndex -1) 키는 뷰포트를 과녁으로 온다.
+  // The viewport takes focus on click (tabIndex -1), so keys arrive with the viewport as the target.
   it('포커스를 받은 뷰포트의 ArrowUp 은 푼다', () => {
     mount(<Harness />)
     vp().focus()
@@ -218,7 +218,7 @@ describe('위로 가는 입력', () => {
 })
 
 describe('우리 쓰기와 사용자 스크롤이 겹칠 때', () => {
-  // 성장 쓰기(800 → 1400)의 scroll 이벤트가 오기 전에 스크롤바를 끌었다 — 브라우저는 둘을 이벤트 하나로 합친다.
+  // The scrollbar was dragged before the scroll event of the growth write (800 → 1400) arrived — the browser merges the two into one event.
   it('쓰기의 이벤트가 오기 전 위로 끌면 푼다 — 다음 성장이 끌어내리지 않는다', () => {
     mount(<Harness />)
     geo.height = 1600
@@ -278,7 +278,7 @@ describe('손잡이 pin · unpin', () => {
   it('리렌더 뒤에도 viewportRef · pin · unpin 이 같은 함수다', () => {
     const { rerender } = mount(<Harness />)
     const first = latest!
-    wheelUp() // pinned 상태가 바뀌어 리렌더가 한 번 돈다
+    wheelUp() // The pinned state changes, so one re-render runs
     rerender(<Harness />)
     expect(latest).not.toBe(first)
     expect(latest!.viewportRef).toBe(first.viewportRef)
@@ -309,7 +309,7 @@ describe('숨은 탭(display:none — client 0)', () => {
     userScroll(300)
     geo.client = 0
     liveRO()[0].fire()
-    tops.set(vp(), 0) // display:none 을 지나며 위치를 잃었다고 친다(보존되는지는 GUI 실측 몫 — TRD §8-2 F1 ①)
+    tops.set(vp(), 0) // Assume the position was lost passing through display:none (whether it is preserved is for GUI measurement — TRD §8-2 F1 ①)
     geo.client = 200
     liveRO()[0].fire()
     expect(vp().scrollTop).toBe(300)
@@ -322,7 +322,7 @@ describe('숨은 탭(display:none — client 0)', () => {
     userScroll(300)
     geo.client = 0
     geo.height = 0
-    // 얼지 않고 읽으면 「아래로 움직여 바닥 거리 ≤ 문턱」이라 되붙는 값이다.
+    // Read without freezing, it is a value that re-pins as 「아래로 움직여 바닥 거리 ≤ 문턱」 (moved down, bottom distance ≤ threshold).
     tops.set(vp(), 310)
     fireEvent.scroll(vp())
     expect(followAttr()).toBe('free')
@@ -343,7 +343,7 @@ describe('노드 수명', () => {
     expect(newNode.getAttribute('data-scroll-follow')).toBe('pinned')
     expect(newNode.scrollTop).toBe(bottom())
 
-    fireEvent.wheel(oldNode, { deltaY: -40 }) // 떼어 낸 옛 노드의 입력은 코어에 닿지 않는다
+    fireEvent.wheel(oldNode, { deltaY: -40 }) // Input from a detached old node does not reach the core
     expect(latest!.pinned).toBe(true)
   })
 
@@ -395,10 +395,10 @@ describe('노드 수명', () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('[scrollFollow]'))
   })
 
-  // ★Radix 구조 자물쇠(TRD §9)★: 내용 성장은 Radix 가 Viewport 안에 두는 첫 자식 래퍼로 본다. Radix 가 그 구조를
-  //   바꾸면 여기가 먼저 깨진다.
+  // ★Radix structure lock (TRD §9)★: content growth is watched through the first child wrapper Radix puts inside the Viewport. If Radix changes
+  //   that structure, this breaks first.
   it('실 ScrollArea 의 Viewport 첫 자식(Radix 래퍼)을 관찰한다', () => {
-    vi.stubGlobal('ResizeObserver', FakeRO) // Radix 내부가 쓸 수 있다 — 우리 것은 아래 하위 클래스로 가른다.
+    vi.stubGlobal('ResizeObserver', FakeRO) // Radix internals may use it — ours is told apart by the subclass below.
     class OurRO extends FakeRO {}
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     function Real() {

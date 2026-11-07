@@ -1,11 +1,11 @@
-# 모듈 7 — commands/ + lib.rs 브리핑 (담당: dcs24, Sonnet)
+# Module 7 — commands/ + lib.rs briefing (owner: dcs24, Sonnet)
 
-발신: ed12 (매니저)
-근거: backend-lld-stage1.md §8(commands), AppState(§8 끝), frontend-integration-lld.md(event 이름).
-목적: **Phase 2 — Tauri 연결 계층.** PTY 코어(pty/)를 Tauri에 노출한다. 이게 백엔드 마지막 wiring.
-선행: dco23이 channel_spike 임시코드 정리 완료 상태에서 시작(깨끗한 lib.rs).
+From: ed12 (manager)
+Source: backend-lld-stage1.md §8 (commands), AppState (end of §8), frontend-integration-lld.md (event names).
+Purpose: **Phase 2 — the Tauri connection layer.** Expose the PTY core (pty/) to Tauri. This is the last wiring of the backend.
+Prerequisite: starts after dco23 has finished cleaning up the temporary channel_spike code (a clean lib.rs).
 
-## 구성
+## Layout
 
 ```
 commands/
@@ -15,9 +15,9 @@ commands/
 lib.rs              # AppState, TauriStatusSink, ChannelOutputSink, setup, invoke_handler
 ```
 
-## 1. commands/ — thin wrapper (§8 그대로, 비즈니스 로직 0)
+## 1. commands/ — thin wrappers (§8 as written, zero business logic)
 
-§8 시그니처 정확히 따른다. 전부 `async`, `Result<_, String>`(에러는 `e.to_string()`). agent_id는 String→Uuid 파싱(`Uuid::parse_str`, 실패 시 Err).
+Follow the §8 signatures exactly. All `async`, `Result<_, String>` (errors via `e.to_string()`). agent_id is parsed String→Uuid (`Uuid::parse_str`, Err on failure).
 
 ```rust
 #[tauri::command]
@@ -27,7 +27,7 @@ pub async fn spawn_agent(state: State<'_, AppState>, cwd: String) -> Result<Agen
 // kill_agent/get_agents/write_stdin(data: Vec<u8>)/resize_pty/get_agent_snapshot 동일 패턴
 ```
 
-`subscribe_agent_output`만 특별 — Channel을 OutputSink로 래핑:
+Only `subscribe_agent_output` is special — it wraps the Channel as an OutputSink:
 ```rust
 #[tauri::command]
 pub async fn subscribe_agent_output(
@@ -39,14 +39,14 @@ pub async fn subscribe_agent_output(
 }
 ```
 
-## 2. lib.rs — 핵심 연결부
+## 2. lib.rs — the core wiring
 
 ### AppState
 ```rust
 pub struct AppState { pub manager: Arc<PtyManager> }   // 외부 Mutex 없음(M1)
 ```
 
-### ChannelOutputSink (OutputSink의 Tauri 구현) — pty/ 밖이라 tauri import OK
+### ChannelOutputSink (the Tauri implementation of OutputSink) — outside pty/, so tauri imports are OK
 ```rust
 pub struct ChannelOutputSink { id: SinkId, channel: tauri::ipc::Channel<PtyEvent> }
 impl ChannelOutputSink {
@@ -60,7 +60,7 @@ impl OutputSink for ChannelOutputSink {
 }
 ```
 
-### TauriStatusSink (StatusSink의 Tauri 구현) — AppHandle로 event emit
+### TauriStatusSink (the Tauri implementation of StatusSink) — emits events through AppHandle
 ```rust
 pub struct TauriStatusSink { app: tauri::AppHandle }
 impl StatusSink for TauriStatusSink {
@@ -73,11 +73,11 @@ impl StatusSink for TauriStatusSink {
     }
 }
 ```
-> emit 실패는 무시(로그만) — 창이 닫히는 중일 수 있음. 패닉 금지.
-> event 페이로드 구조체(AgentStatusChanged 등)는 serde Serialize. 프론트 타입과 일치시킬 것.
+> Ignore emit failures (log only) — the window may be closing. No panics.
+> The event payload structs (AgentStatusChanged etc.) are serde Serialize. Match them to the frontend types.
 
-### setup (manager 생성 타이밍 주의)
-TauriStatusSink는 AppHandle이 필요하므로 **manager를 setup 안에서 생성**:
+### setup (mind when the manager is created)
+TauriStatusSink needs an AppHandle, so **create the manager inside setup**:
 ```rust
 .setup(|app| {
     logging::init_logging();                                  // 기본 warn(OFF)
@@ -93,17 +93,17 @@ TauriStatusSink는 AppHandle이 필요하므로 **manager를 setup 안에서 생
 ])
 ```
 
-## 불변 규칙 (리뷰 필수)
+## Invariants (mandatory for review)
 
-- `pty/` 는 **건드리지 않는다**. tauri import는 commands/lib.rs에만.
-- commands는 thin — 파싱/위임/에러변환만, 로직 0.
-- emit/channel.send 실패는 패닉 금지(무시+로그).
-- dead_code 경고가 이제 대부분 사라져야 함(manager/session 등이 command 통해 used).
+- **Do not touch** `pty/`. tauri imports only in commands/lib.rs.
+- commands are thin — parsing/delegating/error conversion only, zero logic.
+- No panic on emit/channel.send failure (ignore + log).
+- Most dead_code warnings should now be gone (manager/session etc. are used through the commands).
 
-## 검증 & 보고
+## Verification and report
 
-- `cargo fmt --check` + `cargo build` (경고 대폭 감소 확인) + `grep 'use tauri' src/pty/` → 0건 유지.
-- `npm run tauri dev` 떠서 빌드/기동 정상인지(아직 프론트 연결은 Phase3라 호출은 안 됨, 컴파일·기동만).
-- 보고: `orch 12 "⟁dcs24 commands+lib.rs 완료 — 8 command 등록/TauriStatusSink/ChannelOutputSink/setup, fmt/build OK, dead_code N건"`
+- `cargo fmt --check` + `cargo build` (confirm warnings drop sharply) + `grep 'use tauri' src/pty/` → stays at 0 hits.
+- Bring up `npm run tauri dev` and check that build/startup is normal (the frontend connection is Phase 3, so nothing is called yet — only compile and startup).
+- Report: `orch 12 "⟁dcs24 commands+lib.rs 완료 — 8 command 등록/TauriStatusSink/ChannelOutputSink/setup, fmt/build OK, dead_code N건"`
 
-막히면 30분 내 중간보고. setup의 manager 생성 타이밍(AppHandle 의존)이 까다로우면 질문.
+If stuck, send an interim report within 30 minutes. If the timing of manager creation in setup (the AppHandle dependency) is tricky, ask.

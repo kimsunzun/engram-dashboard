@@ -1,8 +1,8 @@
-// WsTransport 단위테스트 — WS carrier 책임(핸드셰이크/재연결/프레임 정규화).
+// WsTransport unit test — WS carrier responsibilities (handshake/reconnect/frame normalization).
 //
-// invoke('discover_daemon') + globalThis.WebSocket 을 mock. FakeWebSocket 으로 onopen/onmessage/
-// onclose 를 수동 발화. carrier 만 검증(프로토콜 의미론은 protocolClient.test). 통합 회귀(재연결
-// resume)는 WsTransport+ProtocolClient 조합으로 별도 검증한다.
+// Mocks invoke('discover_daemon') + globalThis.WebSocket. FakeWebSocket fires onopen/onmessage/
+// onclose manually. Verifies the carrier only (protocol semantics are protocolClient.test). Integration regression (reconnect
+// resume) is verified separately with the WsTransport+ProtocolClient combination.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -14,12 +14,12 @@ const discoverInfo = {
   port: 9999,
   protocol_version: 1,
 }
-// read_daemon_info(no-spawn 재조회, ADR-0021)가 돌려줄 현재 daemon.json. 기본은 discoverInfo 와 동일
-// (hot-swap 아닌 경우 = 같은 데몬). 테스트가 hot-swap/죽음을 흉내내려면 이 값을 바꾼다(null=죽음).
+// The current daemon.json that read_daemon_info (no-spawn re-query, ADR-0021) will return. By default the same as discoverInfo
+// (when not a hot-swap = the same daemon). For a test to imitate a hot-swap/death, change this value (null = death).
 let liveDaemonInfo: typeof discoverInfo | null = discoverInfo
 const invokeMock = vi.fn(async (cmd: string, ..._rest: unknown[]) => {
   if (cmd === 'discover_daemon') return discoverInfo
-  // read_daemon_info = read-only(spawn 안 함). 재연결이 옮겨간 데몬을 따라가는 경로.
+  // read_daemon_info = read-only (no spawn). The path by which reconnect follows a daemon that moved.
   if (cmd === 'read_daemon_info') return liveDaemonInfo
   throw new Error('unexpected invoke: ' + cmd)
 })
@@ -34,7 +34,7 @@ import type { InboundMessage } from './transport'
 
 const OPEN = 1
 const CLOSED = 3
-// WsTransport.MAX_RECONNECT_ATTEMPTS 와 동기화(attach-only 재시도 소진 후 down).
+// Kept in sync with WsTransport.MAX_RECONNECT_ATTEMPTS (down after the attach-only retries are exhausted).
 const WS_MAX_ATTEMPTS = 5
 
 class FakeWebSocket {
@@ -130,8 +130,8 @@ afterEach(() => {
 
 const AGENT = '12345678-9abc-def0-1234-56789abcdef0'
 
-/** 명시 start(spawn 허용) 트리거 + 핸드셰이크 완료(discover→onopen→Auth→Hello).
- * ADR-0021 B-1: 최초 연결은 명시 start 만 가능(ensureReady 는 attach-only 라 캐시 없으면 reject). */
+/** Trigger an explicit start (spawn allowed) + complete the handshake (discover→onopen→Auth→Hello).
+ * ADR-0021 B-1: the first connection is possible only through an explicit start (ensureReady is attach-only, so it rejects with no cache). */
 async function connect(t: WsTransport): Promise<FakeWebSocket> {
   const p = t.start().catch(() => {})
   await Promise.resolve()
@@ -213,7 +213,7 @@ describe('WsTransport 정규화', () => {
     t.close()
   })
 
-  // ADR-0231: 버리면 그 seq 에 구멍이 서서 붙든 뷰가 멈춘다 — 셸 중계와 같게 같은 seq 의 자리채움으로 올린다.
+  // ADR-0231: dropping it leaves a hole at that seq and the view holding on stalls — like the shell relay, raise it as a placeholder with the same seq.
   it('모르는 tag 의 binary frame → 같은 seq·화신의 자리채움(tag1 Error)으로 올린다', async () => {
     const t = new WsTransport({ authToken: TEST_TOKEN })
     const got: InboundMessage[] = []
@@ -237,7 +237,7 @@ describe('WsTransport 정규화', () => {
     ws.fireBinary(new ArrayBuffer(FRAME_HEADER_LEN - 1))
     expect(got.filter((m) => m.kind === 'output')).toEqual([])
     expect(ws.closed).toBe(true)
-    ws.fireClose() // 브라우저가 close() 뒤에 내는 close 사건
+    ws.fireClose() // The close event the browser emits after close()
     expect(t.connectionState).toBe('reconnecting')
     t.close()
   })
@@ -268,20 +268,20 @@ describe('WsTransport 재연결', () => {
     await Promise.resolve()
     await Promise.resolve()
     const ws1 = FakeWebSocket.last!
-    ws1.fireOpen() // Auth 전송됨, 아직 Hello 안 옴 → state != 'connected'
+    ws1.fireOpen() // Auth sent, Hello not yet received → state != 'connected'
 
-    // 2) orphan 생성 경로: start() 재호출(이전 in-flight 소켓을 cleanup 후 새 소켓 오픈).
+    // 2) The orphan creation path: call start() again (clean up the previous in-flight socket, then open a new one).
     const p2 = t.start().catch(() => {})
     await Promise.resolve()
     await Promise.resolve()
     const ws2 = FakeWebSocket.last!
     expect(ws2).not.toBe(ws1)
 
-    // ★mutation 가드★ — start()에서 cleanupSocket 선행이 빠지면 ws1.onclose 가 살아있어 이 단언이
-    // 깨지고, 이어지는 ws1.fireClose() 가 handleClose 로 새 소켓(ws2)의 this.ws 를 null 로 clobber 한다.
+    // ★mutation guard★ — if the cleanupSocket-first step in start() is missing, ws1.onclose stays alive and this assertion
+    // breaks, and the following ws1.fireClose() clobbers this.ws of the new socket (ws2) to null through handleClose.
     expect('onclose' in ws1).toBe(false)
 
-    // 3) 옛 소켓의 뒤늦은 close — 새 소켓을 망가뜨리면 안 됨.
+    // 3) A late close of the old socket — it must not break the new socket.
     ws1.fireClose()
     const instancesAfterClose = FakeWebSocket.instances.length
 
@@ -300,14 +300,14 @@ describe('WsTransport 재연결', () => {
     await Promise.resolve()
     await Promise.resolve()
     const ws1 = FakeWebSocket.last!
-    ws1.fireOpen() // Auth 전송, Hello 미수신 → in-flight(미settle)
+    ws1.fireOpen() // Auth sent, Hello not received → in-flight (not settled)
 
-    // 2) start #2 → cleanupSocket(ws1) 이 옛 in-flight 의 pendingReject 를 호출해야 한다.
+    // 2) start #2 → cleanupSocket(ws1) must call the pendingReject of the old in-flight.
     const p2 = t.start().catch(() => {})
     await Promise.resolve()
     await Promise.resolve()
 
-    // ★no-hang 가드★: pendingReject-settle 이 없으면 p1 은 영영 settle 안 돼 이 await 가 timeout.
+    // ★no-hang guard★: without the pendingReject settle, p1 never settles and this await times out.
     await expect(p1).rejects.toThrow(/superseded/)
 
     const ws2 = FakeWebSocket.last!
@@ -325,7 +325,7 @@ describe('WsTransport 재연결', () => {
     // reject 하지 않으면 이 단언이 timeout(hang). discover 가 in-flight 라 ws 는 아직 생성 전인데,
     // 두 번째 start()가 cleanupSocket → pendingReject 를 안 깨우면 첫 promise(p1)가 영영 settle 안 됨.
 
-    // 1) discover_daemon 을 제어 가능한 deferred 로 막아 첫 start()의 await invoke 를 멈춘다(ws 미생성).
+    // 1) Block discover_daemon with a controllable deferred to stop the first start()'s await invoke (ws not created).
     let resolveDiscover!: (v: typeof discoverInfo) => void
     const deferred = new Promise<typeof discoverInfo>((r) => {
       resolveDiscover = r
@@ -335,19 +335,19 @@ describe('WsTransport 재연결', () => {
       throw new Error('unexpected invoke: ' + cmd)
     })
 
-    // 2) p1: discover 가 pending → openSocket 실행자는 동기로 pendingReject 설정, ws 는 아직 null.
+    // 2) p1: discover pending → the openSocket executor sets pendingReject synchronously, ws is still null.
     const p1 = t.start()
-    await Promise.resolve() // 실행자 동기 본문 + run() 진입 → await invoke 에서 멈춤
+    await Promise.resolve() // Executor synchronous body + entering run() → stops at await invoke
     await Promise.resolve()
     expect(FakeWebSocket.last).toBeNull()
 
-    // 3) p2: 두 번째 start() → this.ws 가 null 인 채 cleanupSocket 진입.
+    // 3) p2: the second start() → enters cleanupSocket with this.ws still null.
     const p2 = t.start().catch(() => {})
 
-    // ★no-hang(pre-ws) 가드★: bounded — reorder 빠지면 여기서 timeout.
+    // ★no-hang (pre-ws) guard★: bounded — if the reorder is missing, this times out here.
     await expect(p1).rejects.toThrow(/superseded/)
 
-    // 4) 두 번째 start 의 discover 는 기본 mock(즉시 discoverInfo) → 핸드셰이크 완료.
+    // 4) The second start's discover uses the default mock (immediate discoverInfo) → handshake completes.
     await Promise.resolve()
     await Promise.resolve()
     const ws2 = FakeWebSocket.last!
@@ -357,7 +357,7 @@ describe('WsTransport 재연결', () => {
     await p2
     expect(t.connectionState).toBe('connected')
 
-    // 5) 매달린 첫 deferred 정리(unhandled 방지) — p1 은 이미 reject 됐고 cachedInfo 만 갱신.
+    // 5) Clean up the dangling first deferred (to avoid unhandled) — p1 is already rejected, and only cachedInfo is updated.
     resolveDiscover(discoverInfo)
     t.close()
   })
@@ -372,7 +372,7 @@ describe('WsTransport 재연결', () => {
     ws.fireText({ Hello: { protocol_version: 1 } })
     await expect(p).resolves.toBeUndefined()
     expect(t.connectionState).toBe('connected')
-    // healthy close — cleanupSocket 이 아무것도 reject 하지 않아야 한다(unhandled rejection 없음).
+    // Healthy close — cleanupSocket must reject nothing (no unhandled rejection).
     expect(() => t.close()).not.toThrow()
     expect(t.connectionState).toBe('down')
     await expect(p).resolves.toBeUndefined()
@@ -390,21 +390,21 @@ describe('WsTransport 재연결', () => {
     expect(t.connectionState).toBe('down')
   })
 
-  // ── Blocker-1: 재연결 read_daemon_info await yield 중 좀비 소켓 생성 race (openGen 세대 가드) ──
-  // 재연결 경로 openSocket(false)에 read_daemon_info await 가 생기면서, 그 await 가 yield 한 사이
-  // close()/start()(=cleanupSocket)가 끼면 재개된 run() 본체가 new WebSocket 을 만들어 좀비가 된다.
-  // pendingReject 는 outer promise 만 settle 하지 본체 재개를 못 막는다 → 세대 토큰(openGen)으로 차단.
+  // ── Blocker-1: zombie socket creation race while the reconnect read_daemon_info await yields (openGen generation guard) ──
+  // Since the reconnect path openSocket(false) gained a read_daemon_info await, if close()/start() (= cleanupSocket) slips in while that await yields,
+  // the resumed run() body creates a new WebSocket and becomes a zombie.
+  // pendingReject only settles the outer promise and cannot stop the body from resuming → block it with a generation token (openGen).
 
   it('close() during read await → 재개돼도 좀비 소켓 안 생김(WS 수 불변, down 유지) [Blocker-1]', async () => {
     const t = new WsTransport({ authToken: TEST_TOKEN })
     const ws1 = await connect(t) // 캐시 채움 + connected
     invokeMock.mockClear()
 
-    // 1) 비의도 끊김 → reconnecting. reconnectTimer(500ms) 만료 시 openSocket(false) 가 돈다.
+    // 1) Unintentional disconnect → reconnecting. When reconnectTimer (500ms) expires, openSocket(false) runs.
     ws1.fireClose()
     expect(t.connectionState).toBe('reconnecting')
 
-    // 2) 재연결의 read_daemon_info 를 제어 가능한 deferred 로 막는다(await yield 윈도 생성).
+    // 2) Block the reconnect's read_daemon_info with a controllable deferred (creating the await yield window).
     let resolveRead!: (v: typeof discoverInfo) => void
     const readDeferred = new Promise<typeof discoverInfo>((r) => {
       resolveRead = r
@@ -414,16 +414,16 @@ describe('WsTransport 재연결', () => {
       throw new Error('unexpected invoke: ' + cmd)
     })
 
-    // 3) reconnectTimer 만료 → openSocket(false) 진입 → read_daemon_info await 에서 멈춤(ws 미생성).
+    // 3) reconnectTimer expires → enters openSocket(false) → stops at the read_daemon_info await (ws not created).
     await new Promise((r) => setTimeout(r, 600))
-    const instancesBefore = FakeWebSocket.instances.length // 아직 새 소켓 없음(read 가 pending)
+    const instancesBefore = FakeWebSocket.instances.length // No new socket yet (read is pending)
 
-    // 4) ★race★: read 가 pending 인 동안 close() — cleanupSocket 이 openGen++ 로 in-flight 시도를 무효화.
+    // 4) ★race★: close() while read is pending — cleanupSocket invalidates the in-flight attempt with openGen++.
     t.close()
     expect(t.connectionState).toBe('down')
 
-    // 5) 멈춰있던 read 가 뒤늦게 resolve → run() 본체 재개. 세대 가드가 없으면 여기서 new WebSocket
-    //    (좀비)이 생기고 onopen/Hello 로 끊은 연결이 부활한다. 가드가 stale 로 폐기해야 한다.
+    // 5) The stalled read resolves late → the run() body resumes. Without the generation guard a new WebSocket
+    //    (zombie) is created here and the severed connection revives through onopen/Hello. The guard must discard it as stale.
     resolveRead(discoverInfo)
     await new Promise((r) => setTimeout(r, 0))
     await new Promise((r) => setTimeout(r, 0))
@@ -440,34 +440,34 @@ describe('WsTransport 재연결', () => {
     ws1.fireClose()
     expect(t.connectionState).toBe('reconnecting')
 
-    // 2) 재연결 read_daemon_info 를 deferred 로 막는다.
+    // 2) Block the reconnect read_daemon_info with a deferred.
     let resolveRead!: (v: typeof discoverInfo) => void
     const readDeferred = new Promise<typeof discoverInfo>((r) => {
       resolveRead = r
     })
     invokeMock.mockImplementationOnce(async (cmd: string) => {
       if (cmd === 'read_daemon_info') return readDeferred
-      // 이후 호출(start 의 discover_daemon 등)은 기본 mock 으로.
+      // Later calls (start's discover_daemon, etc.) use the default mock.
       if (cmd === 'discover_daemon') return discoverInfo
       throw new Error('unexpected invoke: ' + cmd)
     })
 
-    // 3) reconnectTimer 만료 → openSocket(false) 가 read await 에서 멈춤(좀비 후보 in-flight).
+    // 3) reconnectTimer expires → openSocket(false) stops at the read await (a zombie candidate in-flight).
     await new Promise((r) => setTimeout(r, 600))
 
-    // 4) ★race★: 명시 start() — cleanupSocket(openGen++) + openSocket(true)(openGen++)로 정식 소켓 생성.
+    // 4) ★race★: explicit start() — create the proper socket with cleanupSocket (openGen++) + openSocket(true) (openGen++).
     const pStart = t.start().catch(() => {})
     await Promise.resolve()
     await Promise.resolve()
-    const wsReal = FakeWebSocket.last! // 정식(start) 소켓
+    const wsReal = FakeWebSocket.last! // The proper (start) socket
     wsReal.fireOpen()
     wsReal.fireText({ Hello: { protocol_version: 1 } })
     await pStart
     expect(t.connectionState).toBe('connected')
     const instancesAfterReal = FakeWebSocket.instances.length
 
-    // 5) 멈춰있던 reconnect read 가 뒤늦게 resolve → 재개. 가드 없으면 좀비가 new WebSocket 으로
-    //    this.ws 를 hijack(정식 소켓 핸들 덮어씀)한다. 세대 가드가 stale 로 폐기해야 한다.
+    // 5) The stalled reconnect read resolves late → resumes. Without the guard the zombie hijacks this.ws with a new WebSocket
+    //    (overwriting the proper socket handle). The generation guard must discard it as stale.
     resolveRead(discoverInfo)
     await new Promise((r) => setTimeout(r, 0))
     await new Promise((r) => setTimeout(r, 0))
@@ -475,7 +475,7 @@ describe('WsTransport 재연결', () => {
     expect(FakeWebSocket.instances.length).toBe(instancesAfterReal)
     expect(t.connectionState).toBe('connected')
 
-    // 정식 소켓이 살아있는지 = send 가 정식 소켓으로 나가는지 확인(this.ws hijack 안 됨).
+    // Check that the proper socket is alive = that send goes out through the proper socket (this.ws was not hijacked).
     const before = wsReal.sent.length
     t.send({ ping: 1 })
     expect(wsReal.sent.length).toBe(before + 1)
@@ -489,7 +489,7 @@ describe('WsTransport requestReplay single-flight(FIX-4)', () => {
   it('in-flight 중 동시 요청은 wire Subscribe 를 겹쳐 안 보내고 다음 1개 gen 으로 병합', async () => {
     const t = new WsTransport({ authToken: TEST_TOKEN })
     const ws = await connect(t)
-    ws.sent.length = 0 // handshake Auth 제거.
+    ws.sent.length = 0 // Remove the handshake Auth.
 
     const gen1 = await t.requestReplay(AGENT)
     expect(gen1).toBe(1n)
@@ -543,8 +543,8 @@ describe('WsTransport requestReplay single-flight(FIX-4)', () => {
     t.close()
   })
 
-  // ADR-0226: 직결 경로는 마커가 없으니 Ack 의 칸을 그 요청에 기억해 성공 경계에 싣는다. ★요청마다 새로
-  //   시작한다★ — 앞 요청의 참이 뒤 요청(칸 없는 옛 데몬 Ack)으로 새면 첫 화면 대신 로딩이 뜬다.
+  // ADR-0226: the direct path has no marker, so remember the Ack's field on that request and carry it on the success boundary. ★Start fresh
+  //   for every request★ — if the previous request's true leaks into the next request (an old daemon Ack without the field), loading shows instead of the first screen.
   it('SubscribeAck 의 continues_conversation 이 그 요청의 성공 경계로 가고, 다음 요청에 새지 않는다', async () => {
     const t = new WsTransport({ authToken: TEST_TOKEN })
     const ws = await connect(t)
@@ -552,7 +552,7 @@ describe('WsTransport requestReplay single-flight(FIX-4)', () => {
     t.onMessage((m) => got.push(m))
 
     await t.requestReplay(AGENT)
-    const p2 = t.requestReplay(AGENT) // in-flight 중 병합 — 첫 경계 뒤 승격된다
+    const p2 = t.requestReplay(AGENT) // Merge during in-flight — promoted after the first boundary
     ws.fireText({
       SubscribeAck: {
         agent_id: AGENT,
@@ -580,8 +580,8 @@ describe('WsTransport requestReplay single-flight(FIX-4)', () => {
     t.close()
   })
 
-  // ADR-0231: 직결 경로엔 셸 마커가 없어 replay 머리를 Ack 에서 받아 그 요청의 성공 경계에 싣는다.
-  //   ★요청마다 새로 시작한다★ — 앞 요청의 머리가 뒤 요청으로 새면 뷰가 그 사이 이력을 건너뛴다.
+  // ADR-0231: the direct path has no shell marker, so take the replay head from the Ack and carry it on that request's success boundary.
+  //   ★Start fresh for every request★ — if the previous request's head leaks into the next request, the view skips the history in between.
   it('SubscribeAck 의 replay_from 이 그 요청의 성공 경계로 가고, 다음 요청에 새지 않는다', async () => {
     const t = new WsTransport({ authToken: TEST_TOKEN })
     const ws = await connect(t)
@@ -589,14 +589,14 @@ describe('WsTransport requestReplay single-flight(FIX-4)', () => {
     t.onMessage((m) => got.push(m))
 
     await t.requestReplay(AGENT)
-    const p2 = t.requestReplay(AGENT) // in-flight 중 병합 — 첫 경계 뒤 승격된다
+    const p2 = t.requestReplay(AGENT) // Merge during in-flight — promoted after the first boundary
     ws.fireText({ SubscribeAck: { agent_id: AGENT, current_epoch: 4, replay_from: 40, truncated: true } })
     ws.fireText({ ReplayComplete: { agent_id: AGENT, epoch: 4 } })
     expect(got.find((m) => m.kind === 'replayBoundary')).toMatchObject({ gen: 1n, replayFrom: 40 })
 
     await p2
     got.length = 0
-    ws.fireText({ ReplayComplete: { agent_id: AGENT, epoch: 4 } }) // Ack 를 못 본 요청 — 직결 근사 0
+    ws.fireText({ ReplayComplete: { agent_id: AGENT, epoch: 4 } }) // A request that never saw the Ack — direct-path approximation 0
     expect(got.find((m) => m.kind === 'replayBoundary')).toMatchObject({ gen: 2n, replayFrom: 0 })
     t.close()
   })
@@ -629,28 +629,28 @@ describe('WsTransport requestReplay single-flight(FIX-4)', () => {
   })
 })
 
-// ── FIX-B: replay single-flight 상태가 소켓 종료를 넘어 stuck 되지 않음 ──────────────────────
+// ── FIX-B: the replay single-flight state does not get stuck across a socket close ──────────────────────
 describe('WsTransport replay single-flight — 소켓 종료 시 상태 리셋 + 대기자 reject(FIX-B)', () => {
   it('gen1 in-flight + gen2 pending 중 소켓 close → pending 대기자 reject, 재연결 후 새 wire Subscribe 재송신', async () => {
     const t = new WsTransport({ authToken: TEST_TOKEN })
     const ws1 = await connect(t)
-    ws1.sent.length = 0 // handshake Auth 제거.
+    ws1.sent.length = 0 // Remove the handshake Auth.
 
-    // 1) gen1 요청 → 즉시 wire Subscribe 송신 + 이미 resolve 된 promise(gen 동기 반환).
+    // 1) gen1 request → send the wire Subscribe immediately + an already resolved promise (gen returned synchronously).
     const gen1 = await t.requestReplay(AGENT)
     expect(gen1).toBe(1n)
     let subs = ws1.parsedSent().filter((m) => typeof m === 'object' && m && 'Subscribe' in m)
     expect(subs.length).toBe(1)
 
-    // 2) gen1 in-flight(ReplayComplete 전) 중 gen2 요청 → wire 안 나감, pending 병합(미settle promise).
+    // 2) gen2 request while gen1 is in-flight (before ReplayComplete) → no wire send, pending merge (unsettled promise).
     const p2 = t.requestReplay(AGENT)
-    // p2 가 reject 될 것이므로 unhandled-rejection 소음 방지용 no-op catch 를 미리 붙인다.
+    // p2 will be rejected, so attach a no-op catch up front to prevent unhandled-rejection noise.
     let p2Rejected: unknown = null
     void p2.catch((e) => (p2Rejected = e))
     subs = ws1.parsedSent().filter((m) => typeof m === 'object' && m && 'Subscribe' in m)
     expect(subs.length).toBe(1)
 
-    // 3) ★ReplayComplete 전에 소켓 close★ → handleClose 가 wsReplay 를 비우고 pending 대기자 reject.
+    // 3) ★Socket close before ReplayComplete★ → handleClose empties wsReplay and rejects the pending waiters.
     ws1.fireClose()
     await expect(p2).rejects.toThrow(/closed before replay complete/)
     expect(p2Rejected).not.toBeNull()
@@ -662,27 +662,27 @@ describe('WsTransport replay single-flight — 소켓 종료 시 상태 리셋 +
     ws2.fireText({ Hello: { protocol_version: 1 } })
     await Promise.resolve()
     expect(t.connectionState).toBe('connected')
-    ws2.sent.length = 0 // 재연결 Auth 제거.
+    ws2.sent.length = 0 // Remove the reconnect Auth.
 
-    // 5) ★재연결 후 fresh requestReplay★: wsReplay 가 close 때 비워졌으므로 entry.inflight 가 없다 →
-    //   새 wire Subscribe 를 다시 송신(FIX-B 이전엔 stale inflight 때문에 안 보내 영구 stuck).
+    // 5) ★Fresh requestReplay after reconnect★: wsReplay was emptied at close, so there is no entry.inflight →
+    //   send a new wire Subscribe again (before FIX-B, a stale inflight meant nothing was sent and it was stuck for good).
     const gen3 = await t.requestReplay(AGENT)
-    expect(gen3).toBe(3n) // gen 카운터는 계속 증가(gen1=1, gen2=2 소각, gen3=3).
+    expect(gen3).toBe(3n) // The gen counter keeps increasing (gen1=1, gen2=2 burned, gen3=3).
     subs = ws2.parsedSent().filter((m) => typeof m === 'object' && m && 'Subscribe' in m)
     expect(subs.length).toBe(1)
     t.close()
   })
 })
 
-// ── ADR-0021 B-1: 명령(ensureReady=attach-only) / 명시(start=spawn) 분리 ──────────────
+// ── ADR-0021 B-1: command (ensureReady = attach-only) / explicit (start = spawn) separation ──────────────
 describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0021)', () => {
-  // ★mutation 가드★: 이 테스트가 깨지면 ensureReady 가 spawn(discover)을 하고 있다는 뜻 =
-  // "데몬 끈 뒤 키 한 번/리사이즈로 respawn" 버그(B-1) 재발. ensureReady 를 openSocket(true)로
-  // 되돌리면 reject 대신 discover 가 불려 이 단언(spawn 0회 + reject)이 실패한다.
+  // ★mutation guard★: if this test breaks, ensureReady is spawning (discover) =
+  // the "respawn from one key press/resize after turning the daemon off" bug (B-1) has come back. If ensureReady is reverted to openSocket(true),
+  // discover is called instead of a reject and this assertion (0 spawns + reject) fails.
   it('ensureReady = 캐시 없으면 reject + discover/spawn 0회(명령이 데몬 못 깨움)', async () => {
     const t = new WsTransport({ authToken: TEST_TOKEN })
     await expect(t.ensureReady()).rejects.toThrow(/daemon_start/)
-    expect(invokeMock).not.toHaveBeenCalled() // discover(=spawn 유발) 절대 안 함
+    expect(invokeMock).not.toHaveBeenCalled() // Never calls discover (= triggers a spawn)
     expect(FakeWebSocket.instances.length).toBe(0)
     expect(t.connectionState).toBe('down')
   })
@@ -693,7 +693,7 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
     t.close() // closedByUser=true → down
     invokeMock.mockClear()
     await expect(t.ensureReady()).rejects.toThrow(/daemon_start/)
-    expect(invokeMock).not.toHaveBeenCalled() // 캐시는 있지만 closedByUser 라 attach 도 안 함
+    expect(invokeMock).not.toHaveBeenCalled() // There is a cache but it is closedByUser, so it does not even attach
     expect(t.connectionState).toBe('down')
   })
 
@@ -709,17 +709,17 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
     const t = new WsTransport({ authToken: TEST_TOKEN })
     const ws1 = await connect(t) // start: 캐시 채움
     invokeMock.mockClear()
-    ws1.fireClose() // 비의도 끊김 → reconnecting (connectPromise 정리)
-    // reconnecting 중 명령 경로가 ensureReady 호출 → 진행 중 connectPromise 또는 새 attach.
+    ws1.fireClose() // Unintentional disconnect → reconnecting (connectPromise cleaned up)
+    // While reconnecting, the command path calls ensureReady → the connectPromise in progress or a new attach.
     await new Promise((r) => setTimeout(r, 600))
     const ws2 = FakeWebSocket.last!
     ws2.fireOpen()
     ws2.fireText({ Hello: { protocol_version: 1 } })
     await Promise.resolve()
     const er = t.ensureReady()
-    await er // 이미 connected → 즉시 resolve
-    // ★spawn 금지 유지★: attach 경로는 discover_daemon(spawn 유발)을 절대 부르지 않는다.
-    // read_daemon_info(no-spawn 재조회, ADR-0021 hot-swap 추적)는 재연결 중 호출될 수 있다(허용).
+    await er // Already connected → resolves immediately
+    // ★No-spawn kept★: the attach path never calls discover_daemon (which triggers a spawn).
+    // read_daemon_info (no-spawn re-query, ADR-0021 hot-swap tracking) may be called during reconnect (allowed).
     expect(invokeMock).not.toHaveBeenCalledWith('discover_daemon')
     t.close()
   })
@@ -727,7 +727,7 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
   it('재연결은 discover_daemon(spawn) 금지 — read_daemon_info(no-spawn) 재조회로 현재 데몬에 attach', async () => {
     const t = new WsTransport({ authToken: TEST_TOKEN })
     const ws1 = await connect(t)
-    expect(invokeMock).toHaveBeenCalledTimes(1) // 최초 discover 1회만
+    expect(invokeMock).toHaveBeenCalledTimes(1) // Only the first discover, once
     invokeMock.mockClear()
 
     ws1.fireClose()
@@ -735,9 +735,9 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
     await new Promise((r) => setTimeout(r, 600))
 
     expect(invokeMock).not.toHaveBeenCalledWith('discover_daemon')
-    // ★ADR-0021 hot-swap 추적★: 대신 read_daemon_info(no-spawn)로 현재 daemon.json 을 재조회한다.
+    // ★ADR-0021 hot-swap tracking★: instead, re-query the current daemon.json with read_daemon_info (no-spawn).
     expect(invokeMock).toHaveBeenCalledWith('read_daemon_info')
-    // read_daemon_info 가 돌려준 host:port 로 새 소켓을 연다(여기선 같은 데몬 = 같은 url).
+    // Open a new socket with the host:port that read_daemon_info returned (here the same daemon = the same url).
     const ws2 = FakeWebSocket.last!
     expect(ws2).not.toBe(ws1)
     expect(ws2.url).toBe('ws://127.0.0.1:9999')
@@ -752,11 +752,11 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
     // 데몬이 통째 교체돼 새 port 로 떴다(daemon_stop→daemon_start). daemon.json 이 갱신됨.
     liveDaemonInfo = { ...discoverInfo, port: 7777 }
 
-    ws1.fireClose() // 옛 연결 끊김 → 재연결
+    ws1.fireClose() // Old connection drops → reconnect
     expect(t.connectionState).toBe('reconnecting')
     await new Promise((r) => setTimeout(r, 600))
 
-    // 캐시(9999)가 아니라 read_daemon_info 가 준 새 주소(7777)로 attach 한다(spawn 아님 — read-only).
+    // It attaches to the new address (7777) that read_daemon_info gave, not the cache (9999) (not a spawn — read-only).
     expect(invokeMock).not.toHaveBeenCalledWith('discover_daemon')
     expect(invokeMock).toHaveBeenCalledWith('read_daemon_info')
     const ws2 = FakeWebSocket.last!
@@ -784,11 +784,11 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
     await p
     invokeMock.mockClear()
 
-    // 데몬이 죽었다고 가정 — daemon.json 도 죽은 데몬이라 read_daemon_info 는 None(살아있는 데몬 없음).
-    // 끊긴 뒤 매 attach 시도가 즉시 onclose(연결 거부)로 실패.
+    // Assume the daemon died — daemon.json is also a dead daemon's, so read_daemon_info is None (no live daemon).
+    // After the disconnect, every attach attempt fails at once with onclose (connection refused).
     liveDaemonInfo = null
     ws1.fireClose()
-    // 5회 백오프(500/1s/2s/4s/8s) 각각 진행 → 매번 새 소켓이 곧장 닫힘.
+    // Each of the 5 backoffs (500/1s/2s/4s/8s) proceeds → every time the new socket closes right away.
     for (let i = 0; i < WS_MAX_ATTEMPTS; i++) {
       await vi.advanceTimersByTimeAsync(11000)
       const w = FakeWebSocket.last!
@@ -797,8 +797,8 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
     }
     await vi.advanceTimersByTimeAsync(11000)
 
-    // ★spawn 금지 유지★: 죽은 데몬을 따라가려 read_daemon_info(no-spawn)는 부를 수 있지만,
-    // discover_daemon(spawn 유발)은 끝까지 0회 — 데몬이 안 살아남고 'down' 정착.
+    // ★No-spawn kept★: read_daemon_info (no-spawn) may be called to follow a dead daemon,
+    // but discover_daemon (which triggers a spawn) is 0 calls to the end — the daemon does not come back and it settles at 'down'.
     expect(invokeMock).not.toHaveBeenCalledWith('discover_daemon')
     expect(t.connectionState).toBe('down')
     t.close()
@@ -808,11 +808,11 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
   it('down 후 start(명시 재시작) → 다시 discover 허용 + 재연결 루프 부활', async () => {
     const t = new WsTransport({ authToken: TEST_TOKEN })
     const ws1 = await connect(t)
-    t.close() // 명시 종료 → down
+    t.close() // Explicit stop → down
     expect(t.connectionState).toBe('down')
     invokeMock.mockClear()
 
-    // 사용자 명시 재시작(daemon_start 진입점 = start) — discover 허용, closedByUser 해제.
+    // Explicit user restart (the daemon_start entry point = start) — discover allowed, closedByUser cleared.
     const ws2 = await connect(t)
     expect(invokeMock).toHaveBeenCalledTimes(1)
     expect(invokeMock).toHaveBeenCalledWith('discover_daemon')
@@ -822,11 +822,11 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
   })
 })
 
-// ── 통합 회귀: WsTransport + ProtocolClient 조합(ADR-0046 뷰 직결 replay — legacy 직결 근사 경로) ──
-//    ADR-0046 재설계 후: 프론트는 wire Subscribe/Unsubscribe 를 resubscribeAll 로 안 보낸다(BLOCK-1
-//    전면화). 뷰 mount·재연결은 transport.requestReplay 로 전량 재replay 를 요청한다. WsTransport(legacy
-//    직결)는 자체 wire Subscribe{after_seq:null} 를 보내고 per-agent gen 을 부여하며, 데몬 ReplayComplete
-//    관측 시 replayBoundary 를 합성한다. ProtocolClient 는 그 마커에 gen 펜스로 flush 한다.
+// ── Integration regression: the WsTransport + ProtocolClient combination (ADR-0046 view direct replay — legacy direct-connection approximation path) ──
+//    After the ADR-0046 redesign: the frontend no longer sends wire Subscribe/Unsubscribe through resubscribeAll (BLOCK-1
+//    rolled out everywhere). View mount · reconnect request a full re-replay through transport.requestReplay. WsTransport (legacy
+//    direct) sends its own wire Subscribe{after_seq:null}, assigns a per-agent gen, and synthesizes a replayBoundary when it
+//    observes the daemon ReplayComplete. ProtocolClient flushes on that marker with the gen fence.
 const V1 = 'view-1'
 
 describe('WsTransport + ProtocolClient 통합(ADR-0046 뷰 직결 replay)', () => {
@@ -843,19 +843,19 @@ describe('WsTransport + ProtocolClient 통합(ADR-0046 뷰 직결 replay)', () =
     }
     expect(sub).toBeTruthy()
     expect(sub.Subscribe.agent_id).toBe(AGENT)
-    expect(sub.Subscribe.after_seq).toBeNull() // 전량 재replay(full-from-oldest)
+    expect(sub.Subscribe.after_seq).toBeNull() // Full re-replay (full-from-oldest)
 
     const E = 5
     ws1.fireText({ SubscribeAck: { agent_id: AGENT, current_epoch: E, replay_from: 0, truncated: false } })
     ws1.fireBinary(buildFrame({ agentId: AGENT, epoch: E, seq: 0 }))
     ws1.fireBinary(buildFrame({ agentId: AGENT, epoch: E, seq: 1 }))
     ws1.fireBinary(buildFrame({ agentId: AGENT, epoch: E, seq: 2 }))
-    // 아직 buffering — 마커(ReplayComplete) 전엔 flush 안 함.
+    // Still buffering — no flush before the marker (ReplayComplete).
     expect(received).toEqual([])
-    // ReplayComplete → WsTransport 가 replayBoundary 합성 → ProtocolClient flush.
+    // ReplayComplete → WsTransport synthesizes a replayBoundary → ProtocolClient flush.
     ws1.fireText({ ReplayComplete: { agent_id: AGENT, epoch: E } })
     expect(received).toEqual([0, 1, 2])
-    // 이후 라이브 프레임 직행.
+    // After that, live frames go straight through.
     ws1.fireBinary(buildFrame({ agentId: AGENT, epoch: E, seq: 3 }))
     expect(received).toEqual([0, 1, 2, 3])
     c.close()
@@ -886,8 +886,8 @@ describe('WsTransport + ProtocolClient 통합(ADR-0046 뷰 직결 replay)', () =
     c.close()
   })
 
-  // ADR-0231: 링이 잘린 새 에이전트 — 뷰의 커서는 −1 이라 머리(Ack 의 replay_from)를 모르면 0 을 기다리며
-  //   3·4 를 붙든 채 멈춘다.
+  // ADR-0231: a new agent whose ring was trimmed — the view's cursor is −1, so if it does not know the head (the Ack's replay_from) it waits for 0 and
+  //   stalls holding 3 and 4.
   it('SubscribeAck 의 replay_from 이 flush 시작점이 된다(잘린 replay 의 머리 점프)', async () => {
     const t = new WsTransport({ authToken: TEST_TOKEN })
     const c = new ProtocolClient(t)
@@ -906,9 +906,9 @@ describe('WsTransport + ProtocolClient 통합(ADR-0046 뷰 직결 replay)', () =
     c.close()
   })
 
-  // ★재요청 계기 = 명부이지 소켓이 아니다(사용자 결정 2026-08-20)★: 소켓이 서는 것만으로는 아무것도
-  //   나가지 않고, 그 에이전트가 명부에 있다는 관측이 부착시킨다. 여기선 명부에서 빠진 적이 없으므로
-  //   같은 세션 이어보기 = 커서 유지 → 전량 재replay 의 겹치는 앞부분은 dedup 이 흡수한다.
+  // ★The re-request trigger = the registry, not the socket (user decision 2026-08-20)★: a socket coming up alone sends
+  //   nothing out; the observation that the agent is in the registry attaches it. Here it was never dropped from the registry, so
+  //   resuming the same session = the cursor is kept → dedup absorbs the overlapping front part of the full re-replay.
   it('재연결 → 명부 부착 → 재요청(전량 재replay) → 이미 그린 앞부분은 dedup', async () => {
     const t = new WsTransport({ authToken: TEST_TOKEN })
     const c = new ProtocolClient(t)
@@ -932,22 +932,22 @@ describe('WsTransport + ProtocolClient 통합(ADR-0046 뷰 직결 replay)', () =
     await Promise.resolve()
     await Promise.resolve()
 
-    // 소켓만 선 시점 — 아직 아무것도 안 나간다(명부를 기다린다).
+    // The moment only the socket is up — nothing goes out yet (waiting for the registry).
     expect(ws2.parsedSent().some((m) => typeof m === 'object' && m && 'Subscribe' in m)).toBe(false)
 
-    // 권위 명부에 그 에이전트가 **같은 표식으로** 있다 → 같은 화신 이어보기 → 부착 → WsTransport 가 wire
-    //   Subscribe{after_seq:null} 송신. ★표식을 빼면 이 케이스가 성립하지 않는다★ — 표식 없는 명부는
-    //   "같은 화신" 을 증명하지 못해 회전으로 취급되고, 커서 유지를 재는 이 단언이 무의미해진다.
+    // The authoritative registry has that agent **with the same marker** → resume of the same incarnation → attach → WsTransport sends the wire
+    //   Subscribe{after_seq:null}. ★Without the marker this case does not hold★ — a registry without a marker
+    //   cannot prove "the same incarnation" and is treated as a rotation, making this assertion that measures cursor retention meaningless.
     ws2.fireText({ AgentListUpdated: { agents: [{ id: AGENT, epoch: E }] } })
-    await Promise.resolve() // myGen 확정(requestReplay 회수) — 그 전 마커는 held 로 밀린다
+    await Promise.resolve() // myGen is fixed (requestReplay retrieved) — markers before that are pushed to held
     const resub = ws2.parsedSent().find((m) => typeof m === 'object' && m && 'Subscribe' in m) as {
       Subscribe: { agent_id: string; after_seq: number | null }
     }
     expect(resub).toBeTruthy()
-    expect(resub.Subscribe.after_seq).toBeNull() // 전량 재replay(full-from-oldest, ADR-0046)
+    expect(resub.Subscribe.after_seq).toBeNull() // Full re-replay (full-from-oldest, ADR-0046)
 
-    // 데몬이 0,1,2,3 전량 재전송 — 뷰 buffering 이 축적 후 마커에 flush. 커서가 2 에 남아 있으므로 앞
-    //   세 개는 dedup 탈락하고 끊긴 동안 놓친 seq 3 만 새로 그려진다.
+    // The daemon resends 0,1,2,3 in full — view buffering accumulates and flushes on the marker. The cursor stays at 2, so the first
+    //   three drop out in dedup and only seq 3, missed during the disconnect, is newly drawn.
     ws2.fireText({ SubscribeAck: { agent_id: AGENT, current_epoch: E, replay_from: 0, truncated: false } })
     ws2.fireBinary(buildFrame({ agentId: AGENT, epoch: E, seq: 0 }))
     ws2.fireBinary(buildFrame({ agentId: AGENT, epoch: E, seq: 1 }))
@@ -958,10 +958,10 @@ describe('WsTransport + ProtocolClient 통합(ADR-0046 뷰 직결 replay)', () =
     c.close()
   })
 
-  // ★거절도 미종결 요청을 종결시킨다★: 안 그러면 이 carrier 의 entry.inflight 가 영영 남아 그 에이전트의
-  //   requestReplay 가 전부 병합되고 wire Subscribe 가 두 번 다시 안 나간다 — src-tauri 에서 고친 좀비와
-  //   같은 결함이다(실측 2026-08-19). 운영 carrier 는 TauriTransport 지만(ADR-0029/0036) 같은 wire 를
-  //   먹으면서 한쪽만 멀쩡한 상태를 남기지 않는다.
+  // ★A rejection also closes an unfinished request★: otherwise this carrier's entry.inflight stays forever, every requestReplay of that agent
+  //   gets merged, and the wire Subscribe never goes out again — the same defect as the zombie fixed in src-tauri (measured 2026-08-19). The
+  //   production carrier is TauriTransport (ADR-0029/0036), but since it consumes the same wire, we do not leave one side
+  //   healthy and the other broken.
   it('SubscribeFailed → 실패 경계 합성 + in-flight 해제(다음 요청이 다시 wire 로 나간다)', async () => {
     const t = new WsTransport({ authToken: TEST_TOKEN })
     const c = new ProtocolClient(t)
@@ -972,22 +972,22 @@ describe('WsTransport + ProtocolClient 통합(ADR-0046 뷰 직결 replay)', () =
     expect(before).toBe(1)
 
     ws1.fireText({ SubscribeFailed: { agent_id: AGENT, reason: `agent ${AGENT} not found` } })
-    // 실패 경계 → 뷰는 flush 하지 않고 사다리(재요청)로 간다. 뷰가 아직 buffering 인 것이 그 증거다.
+    // Failure boundary → the view does not flush and goes to the ladder (re-request). That the view is still buffering is the proof.
     expect(c.getViewOutputState(V1)?.phase).toBe('buffering')
 
-    // ★핵심★: 슬롯이 풀렸으니 새 요청이 다시 wire 로 나간다(고치기 전엔 영원히 병합만 됐다).
+    // ★Key★: the slot was released, so a new request goes out on the wire again (before the fix it was merged forever).
     void t.requestReplay(AGENT)
     const after = ws1.parsedSent().filter((m) => typeof m === 'object' && m && 'Subscribe' in m).length
     expect(after).toBe(2)
     c.close()
   })
 
-  // 병합 대기자가 있으면 거절이 그 세대를 승격한다 — 성공 종결과 같은 뒷정리를 공유한다(settleReplay).
+  // If there is a merge waiter, the rejection promotes that generation — it shares the same cleanup as a success close (settleReplay).
   it('SubscribeFailed → 병합된 다음 세대의 Subscribe 를 정확히 1회 송신', async () => {
     const t = new WsTransport({ authToken: TEST_TOKEN })
     const ws1 = await connect(t)
     const gen1 = await t.requestReplay(AGENT)
-    const waiter = t.requestReplay(AGENT) // in-flight 중 → 병합
+    const waiter = t.requestReplay(AGENT) // During in-flight → merge
     expect(ws1.parsedSent().filter((m) => typeof m === 'object' && m && 'Subscribe' in m).length).toBe(1)
 
     ws1.fireText({ SubscribeFailed: { agent_id: AGENT, reason: 'nope' } })
@@ -997,8 +997,8 @@ describe('WsTransport + ProtocolClient 통합(ADR-0046 뷰 직결 replay)', () =
     t.close()
   })
 
-  // ★방어★: Ack 를 받은(=데몬이 받아들인) 요청은 거절로 풀지 않는다. 풀면 뒤따라오는 ReplayComplete 가
-  //   빈 슬롯을 만나 무시되고, 그 replay 를 기다리던 뷰가 성공 마커를 영영 못 받는다.
+  // ★Defense★: a request that received the Ack (= accepted by the daemon) is not released by a rejection. If released, the ReplayComplete that follows
+  //   meets an empty slot and is ignored, and the view waiting for that replay never gets a success marker.
   it('acked 요청은 SubscribeFailed 로 풀리지 않는다(정상 완료 경로 생존)', async () => {
     const t = new WsTransport({ authToken: TEST_TOKEN })
     const c = new ProtocolClient(t)
@@ -1011,10 +1011,10 @@ describe('WsTransport + ProtocolClient 통합(ADR-0046 뷰 직결 replay)', () =
     ws1.fireText({ SubscribeAck: { agent_id: AGENT, current_epoch: E, replay_from: 0, truncated: false } })
     ws1.fireBinary(buildFrame({ agentId: AGENT, epoch: E, seq: 0 }))
     ws1.fireText({ SubscribeFailed: { agent_id: AGENT, reason: '잘못 발화한 거절' } })
-    expect(received).toEqual([]) // 아직 경계 전 — 실패 경계도 안 났다.
+    expect(received).toEqual([]) // Still before the boundary — no failure boundary came either.
 
     ws1.fireText({ ReplayComplete: { agent_id: AGENT, epoch: E } })
-    expect(received).toEqual([0]) // 성공 마커가 살아서 flush 됐다.
+    expect(received).toEqual([0]) // The success marker survived and was flushed.
     c.close()
   })
 })

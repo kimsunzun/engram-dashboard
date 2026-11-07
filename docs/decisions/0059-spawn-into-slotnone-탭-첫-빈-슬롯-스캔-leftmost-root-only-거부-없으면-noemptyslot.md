@@ -1,26 +1,26 @@
-# ADR-0059: spawn_into slot=None = 탭 첫 빈 슬롯 스캔 (leftmost-root-only 거부 — 없으면 NoEmptySlot)
+# ADR-0059: spawn_into slot=None = scan for the tab's first empty slot (leftmost-root-only rejected — NoEmptySlot if none)
 
-- 상태: 확정 (2026-07-09, 근거: 스테이지 5 커밋 88134e2 + /review code full 폐쇄 PASS)
-- 관련: TRD `docs/process/B-wezterm-tabs/TRD.md` §6 G9(spawn_into 슬롯 정책) · `src-tauri/src/layout/manager.rs:498-532`(resolve_spawn_slot·SpawnSlotError) · `src-tauri/src/layout/tree.rs:52`(first_empty_slot_id) · ADR-0057(탭 소유 모델) · step-log Phase 2 스테이지 5
+- 상태: 확정 (2026-07-09, basis: stage 5 commit 88134e2 + /review code full closed with PASS)
+- 관련: TRD `docs/process/B-wezterm-tabs/TRD.md` §6 G9 (spawn_into slot policy) · `src-tauri/src/layout/manager.rs:498-532` (resolve_spawn_slot, SpawnSlotError) · `src-tauri/src/layout/tree.rs:52` (first_empty_slot_id) · ADR-0057 (tab ownership model) · step-log Phase 2 stage 5
 
-> ★**아래 「관련」 · 「결정」 · 「영향 / 불변식」이 적은 함수 자리는 낡았다**★(주석 2026-10-04, 결정 무변경 — 「결정」이 이름 붙인 `tree::first_empty_slot_id` 는 이제 자동 배치에 쓰이지 않는다 · 아래 ②). 저장 관리 P3b1(`5a2cf7f` · TRD `docs/process/S21-storage/trd.md` §6-2)이 셋을 바꿨다. ① `resolve_spawn_slot` 은 `ViewManager` 메서드가 됐다(`ViewManager::resolve_spawn_slot(view_id, slot)` — `src-tauri/src/layout/manager.rs`) — 여전히 스폰 · 락 · emit 을 모르는 정책 판정이다. ② 빈/점유 판정은 `ViewManager::slot_is_free` 하나다 — **빈 = `SlotContent::Empty` ∧ 모르는 내용 곁표(`unknown_content`)에 그 슬롯 항목이 없음.** 더 새 판이 저장한 모르는 슬롯 내용은 메모리에서 `Empty` 로 서지만 점유로 친다 — 자동 배치가 그 원문을 덮지 않게. `slot=None` 의 전위 순회 첫 빈 슬롯 · `NoEmptySlot` · `SlotOccupied` 규칙은 그대로이고 「빈」의 판정만 좁아졌다. `tree::first_empty_slot_id` 는 트리만 봐서 곁표 슬롯을 비었다고 답하므로 자동 배치에 쓰지 않는다(그 함수 주석). ③ `tree::assign_in_tree` 는 걷었다 — 트리의 내용 쓰기는 `tree::set_in_tree` 하나이고 `ViewManager` 는 그것을 자기 쓰기 문 `write_slot_content` 로만 부른다. **`assign_agent` 의 덮어쓰기 시맨틱은 그대로다** — 점유 방어는 여전히 `resolve_spawn_slot` 층에서만 한다.
+> ★**The function locations named in 「관련」, 「결정」 and 「영향 / 불변식」 below are out of date**★ (note 2026-10-04, decision unchanged — the `tree::first_empty_slot_id` named in 「결정」 is no longer used for automatic placement · see ② below). Storage management P3b1 (`5a2cf7f` · TRD `docs/process/S21-storage/trd.md` §6-2) changed three things. ① `resolve_spawn_slot` became a `ViewManager` method (`ViewManager::resolve_spawn_slot(view_id, slot)` — `src-tauri/src/layout/manager.rs`) — it is still a policy decision that knows nothing about spawn, locks or emit. ② The free/occupied decision is the single `ViewManager::slot_is_free` — **free = `SlotContent::Empty` ∧ the unknown-content side table (`unknown_content`) has no entry for that slot.** Unknown slot content saved by a newer version stands as `Empty` in memory but counts as occupied — so that automatic placement does not overwrite that raw text. The rules of `slot=None` (the first empty slot in a pre-order walk), `NoEmptySlot` and `SlotOccupied` are unchanged, and only the decision of 「빈」 became narrower. `tree::first_empty_slot_id` looks only at the tree and so answers that a side-table slot is empty, so it is not used for automatic placement (the comment on that function). ③ `tree::assign_in_tree` was removed — the single content write to the tree is `tree::set_in_tree`, and `ViewManager` calls it only through its own write statement `write_slot_content`. **The overwrite semantics of `assign_agent` are unchanged** — the occupancy defense is still done only at the `resolve_spawn_slot` layer.
 
 ## 맥락
-`spawn_into`에서 `slot`을 지정하지 않으면 대상 탭의 어느 슬롯에 에이전트를 배정할지 정해야 한다. TRD §6 G9는 "대상 탭의 **빈 root 슬롯**"이라 적었는데, 이 문구가 두 해석으로 갈린다: (a) root(최상위/좌측) 슬롯 한 칸만 보고 그게 점유면 실패 — 새로 만든 탭(빈 슬롯 1개)엔 맞지만 split된 탭에선 좌측이 차 있으면 우측이 비어도 실패, (b) 트리를 훑어 첫 번째 빈 슬롯을 찾음. G9는 코더 추측을 막으려 넣은 항목인데 이 지점이 여전히 모호했다.
+When `slot` is not specified in `spawn_into`, we must decide which slot of the target tab the agent is assigned to. TRD §6 G9 wrote "the **empty root slot** of the target tab", and this wording splits into two readings: (a) look at only one cell, the root (topmost/leftmost) slot, and fail if it is occupied — right for a newly created tab (1 empty slot), but in a split tab it fails when the left is filled even if the right is empty, (b) walk the tree and find the first empty slot. G9 was an item put in to stop the coder from guessing, but this point was still ambiguous.
 
 ## 결정
-`slot=None`은 **트리를 전위(pre-order, 좌-우선) 순회해 첫 번째 빈 슬롯**을 고른다(신규 `tree::first_empty_slot_id`). 빈 슬롯이 하나도 없으면 `SpawnSlotError::NoEmptySlot`으로 실패한다 — **자동 split이나 덮어쓰기를 하지 않는다**. `slot=Some(s)`는 별개: `s`가 트리에 없으면 `SlotNotFound`, 비어 있으면 `s`, 점유면 `SlotOccupied`(자동 split/replace 안 함). 이 해석으로 TRD §6 G9의 "빈 root 슬롯" 문구를 확정한다.
+`slot=None` picks **the first empty slot by a pre-order (left-first) walk of the tree** (new `tree::first_empty_slot_id`). If there is no empty slot at all, it fails with `SpawnSlotError::NoEmptySlot` — **no automatic split or overwrite is done**. `slot=Some(s)` is separate: `SlotNotFound` if `s` is not in the tree, `s` if it is empty, `SlotOccupied` if it is occupied (no automatic split/replace). This reading settles the wording "empty root slot" in TRD §6 G9.
 
 ## 거부한 대안
-- **leftmost-root-only (a) — root/좌측 슬롯 한 칸만 검사.** split된 탭에서 좌측이 점유면 우측이 비어 있어도 `SlotOccupied`로 실패한다 — 사용자·LLM이 "빈 자리가 있는데 왜 실패하냐"로 혼란한다. 배치 지정 스폰의 의도(빈 자리에 얹기)와 어긋나 거부.
-- **빈 슬롯 없을 때 자동 split/덮어쓰기.** 호출자가 명시하지 않은 레이아웃 변경(분할)이나 기존 에이전트 파괴(덮어쓰기)를 조용히 일으킨다 — 되돌리기 어렵고 의도 밖. `NoEmptySlot`로 fail-loud해 호출자가 split을 명시하게 함.
+- **leftmost-root-only (a) — check only one cell, the root/leftmost slot.** In a split tab, if the left is occupied it fails with `SlotOccupied` even when the right is empty — users and the LLM get confused by "why does it fail when there is an empty spot?". It conflicts with the intent of a placement-specified spawn (put it in an empty spot), so rejected.
+- **Automatic split/overwrite when there is no empty slot.** It silently causes a layout change (a split) that the caller did not specify, or destruction of an existing agent (an overwrite) — hard to undo and outside the intent. Fail-loud with `NoEmptySlot` so the caller specifies the split explicitly.
 
 ## 근거
-- `/review code full` 2-family 적대 리뷰 1R에서 슬롯 정책 모호·테스트 부재 지적 → `first_empty_slot_id` 도입 + 단위 테스트(single-empty/single-occupied/skips-occupied-leftmost/all-occupied) 추가 후 폐쇄 PASS.
-- throwaway verbatim-mount 하네스에서 `resolve_spawn_slot`/`first_empty_slot_id` 경로 테스트 통과(스테이지 5 qa).
-- 사용자 결정: 이번 세션 대화에서 "2-b"(첫 빈 슬롯 스캔) 확정.
+- In round 1 of the `/review code full` 2-family adversarial review, the ambiguous slot policy and missing tests were pointed out → closed with PASS after introducing `first_empty_slot_id` + adding unit tests (single-empty/single-occupied/skips-occupied-leftmost/all-occupied).
+- The `resolve_spawn_slot`/`first_empty_slot_id` path tests passed in a throwaway verbatim-mount harness (stage 5 qa).
+- User decision: "2-b" (first-empty-slot scan) was settled in this session's conversation.
 
 ## 영향 / 불변식
-- `resolve_spawn_slot`(순수, `manager.rs:498-532`)이 slot 정책의 단일 출처다 — spawn_into는 배정 전 이걸로 점유 검사를 자체 수행한다.
-- **`assign_agent`/`tree::assign_in_tree`의 덮어쓰기 시맨틱을 바꾸지 않는다** — `move_slot_to_window` 등이 의존한다. 점유 방어는 resolve_spawn_slot 층에서만.
-- `NoEmptySlot`/`SlotOccupied`는 스폰이 **이미 성공한 뒤** 배정 단계에서 나므로, command는 이 에러에서 에이전트를 kill하지 않고 생존시킨 채 보고한다(`list_agents`로 재부착 가능 — layout.rs `alive_err`).
+- `resolve_spawn_slot` (pure, `manager.rs:498-532`) is the single source of the slot policy — spawn_into performs the occupancy check itself with it before assignment.
+- **Do not change the overwrite semantics of `assign_agent`/`tree::assign_in_tree`** — `move_slot_to_window` and others depend on them. The occupancy defense only at the resolve_spawn_slot layer.
+- `NoEmptySlot`/`SlotOccupied` arise at the assignment stage **after the spawn has already succeeded**, so the command reports these errors while keeping the agent alive without killing it (it can be reattached via `list_agents` — layout.rs `alive_err`).

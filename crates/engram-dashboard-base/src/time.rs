@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-/// 벽시계 epoch 밀리초. 시계가 1970 보다 앞이면 0 이다 — 실패를 돌려주지 않는다.
+/// Wall-clock epoch milliseconds. If the clock is before 1970 it is 0 — it does not return a failure.
 pub fn now_epoch_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -14,20 +14,20 @@ pub fn now_epoch_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// 「지금 읽기」 seam — 시각으로 갈리는 판정을 시험이 실시간 대기 없이 시각을 손으로 밀어 재게 한다
-/// (ADR-0269 결정 3-1).
+/// The 「지금 읽기」 (read now) seam — lets a test move the time by hand to measure decisions that split by time, without real-time waiting
+/// (ADR-0269 decision 3-1).
 ///
-/// ★기다리기는 여기 두지 않는다★(ADR-0269 결정 3-2) — 잠이 필요한 쪽은 자기 트레이트가 이것을 상위
-/// 트레이트로 두고 `sleep` 을 더한다. 막는 잠 · future 잠 · 스레드 기동처럼 쓰는 쪽마다 모양이 달라 한
-/// 트레이트로 묶이지 않는다.
+/// ★Waiting is not put here★ (ADR-0269 decision 3-2) — a side that needs sleep makes this the supertrait of its own trait and
+/// adds `sleep`. A blocking sleep · a future sleep · a thread launch differ in shape for each user, so they are not
+/// bound into one trait.
 // ADR-0275
 pub trait Clock: Send + Sync {
     fn now(&self) -> Instant;
 }
 
-/// 운영 시계 — [`Instant::now`].
+/// The production clock — [`Instant::now`].
 ///
-/// ★자물쇠도 기다림도 없다★ — 다른 자물쇠를 쥔 채 시계를 읽는 자리에도 그대로 꽂히게 한다.
+/// ★No lock and no waiting★ — so it plugs in as is even at sites that read the clock while holding another lock.
 pub struct SystemClock;
 
 impl Clock for SystemClock {
@@ -36,11 +36,11 @@ impl Clock for SystemClock {
     }
 }
 
-/// 손으로 미는 시험용 시계(`test-support` 기능 뒤 · ADR-0275 결정 5). 만든 순간의 시각에 멈춰 있고
-/// [`ManualClock::advance`] 로만 앞으로 간다.
+/// A hand-moved test clock (behind the `test-support` feature · ADR-0275 decision 5). It stays stopped at the time of creation and
+/// moves forward only through [`ManualClock::advance`].
 ///
-/// ★자물쇠가 없다★ — 다른 자물쇠를 쥔 채 시계를 읽는 자리에도 그대로 꽂히게 한다.
-/// ★`Clone` 을 달지 않는다★ — 복제본은 따로 흐르는 다른 시계가 된다. 나눠 쥐려면 `Arc` 로 감싼다.
+/// ★No lock★ — so it plugs in as is even at sites that read the clock while holding another lock.
+/// ★No `Clone`★ — a copy becomes a different clock that flows separately. To share one, wrap it in `Arc`.
 #[cfg(any(test, feature = "test-support"))]
 pub struct ManualClock {
     origin: Instant,
@@ -56,8 +56,8 @@ impl ManualClock {
         }
     }
 
-    /// `by` 만큼 앞으로 민다. 쌓인 폭이 `u64` 나노초(약 584년)를 넘으면 패닉한다 — 감아 돌아 시각이 뒤로
-    /// 가는 것보다 시끄러운 실패가 낫다.
+    /// Moves forward by `by`. If the accumulated amount exceeds `u64` nanoseconds (about 584 years) it panics — a loud failure is better than wrapping around and the time
+    /// going backwards.
     pub fn advance(&self, by: Duration) {
         let by = u64::try_from(by.as_nanos())
             .expect("ManualClock: 한 번에 미는 폭이 u64 나노초를 넘는다");
@@ -96,7 +96,7 @@ mod tests {
             .as_millis() as i64
     }
 
-    /// 단위가 밀리초인지 잰다 — 초나 마이크로초면 앞뒤 읽기 사이에 들지 못한다.
+    /// Measures that the unit is milliseconds — seconds or microseconds could not fall between the before and after reads.
     #[test]
     fn the_reading_falls_between_two_wall_clock_reads_in_milliseconds() {
         let before = wall_ms();
@@ -142,7 +142,7 @@ mod tests {
         );
     }
 
-    /// 나눠 쥔 손잡이가 같은 시각을 본다 — 운영 쪽이 `Arc<dyn Clock>` 으로 받고 시험이 원본으로 민다.
+    /// Shared handles see the same time — production receives it as `Arc<dyn Clock>` and the test moves it through the original.
     #[test]
     fn a_shared_handle_sees_an_advance_made_on_another_thread() {
         let clock = Arc::new(ManualClock::new());

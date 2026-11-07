@@ -1,27 +1,27 @@
-// 레이아웃 wire 타입 = src-tauri 권위(ADR-0035). ts-rs 가 src-tauri/bindings/*.ts 로 자동생성한다.
-// 프론트는 그 타입을 직접 재정의하지 않고(드리프트 원천) 이 한 곳에서 re-export 해 src 안에서 참조한다
-// — bindings 는 tsconfig include("src") 밖이라, 컴포넌트/스토어가 src-tauri 상대경로를 흩뿌리지 않도록
-// 단일 진입점으로 모은다(경로 변경 시 여기만).
+// Layout wire types = src-tauri authority (ADR-0035). ts-rs generates them automatically into src-tauri/bindings/*.ts.
+// The frontend does not redefine those types (a source of drift) but re-exports them from this one place to reference within src
+// — bindings is outside the tsconfig include ("src"), so we gather them into a
+// single entry point so components/stores do not scatter src-tauri relative paths (only this file changes when the path changes).
 export type { LayoutNode } from '../../src-tauri/bindings/LayoutNode'
 export type { SlotContent } from '../../src-tauri/bindings/SlotContent'
 export type { SplitDir } from '../../src-tauri/bindings/SplitDir'
 export type { View } from '../../src-tauri/bindings/View'
 export type { ViewMeta } from '../../src-tauri/bindings/ViewMeta'
 export type { ViewSnapshot } from '../../src-tauri/bindings/ViewSnapshot'
-// ADR-0068: 슬롯 공간 타깃 파생(방향 이웃 + 읽기 순서) — ViewSnapshot.slot_spatial 에 실린다.
+// ADR-0068: slot spatial target derivation (directional neighbors + reading order) — carried in ViewSnapshot.slot_spatial.
 export type { SlotSpatial } from '../../src-tauri/bindings/SlotSpatial'
 export type { Neighbors } from '../../src-tauri/bindings/Neighbors'
-// ADR-0227: 셸 기하(정규화 경계 꼴 사각형) — ViewSnapshot.slot_rects / split_rects 에 실린다.
+// ADR-0227: shell geometry (rectangles in normalized boundary form) — carried in ViewSnapshot.slot_rects / split_rects.
 export type { SlotRect } from '../../src-tauri/bindings/SlotRect'
 export type { SplitRect } from '../../src-tauri/bindings/SplitRect'
-// ADR-0227: 분할 비율 쓰기(`set_split_ratio`)의 답.
+// ADR-0227: the reply to a split ratio write (`set_split_ratio`).
 export type { SplitRatioApplied } from '../../src-tauri/bindings/SplitRatioApplied'
 export type { SplitRatioOutcome } from '../../src-tauri/bindings/SplitRatioOutcome'
-// ADR-0227: 칸 틀 기본 지표 보고(`report_ui_metrics`)의 인자.
+// ADR-0227: argument of the area frame default metrics report (`report_ui_metrics`).
 export type { UiMetrics } from '../../src-tauri/bindings/UiMetrics'
-// TRD S26-window-chrome §3-2: 새 창 답(`create_window`) — label · 영속 id · 번호.
+// TRD S26-window-chrome §3-2: new window reply (`create_window`) — label · persistent id · number.
 export type { NewWindow } from '../../src-tauri/bindings/NewWindow'
-// TRD S26-window-chrome §6-4: 창 상태 동작(`window_control`)의 인자 · 답.
+// TRD S26-window-chrome §6-4: argument and reply of the window state action (`window_control`).
 export type { WindowControlAction } from '../../src-tauri/bindings/WindowControlAction'
 export type { WindowControlOutcome } from '../../src-tauri/bindings/WindowControlOutcome'
 export type { WindowCloseResult } from '../../src-tauri/bindings/WindowCloseResult'

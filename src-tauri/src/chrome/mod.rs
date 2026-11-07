@@ -1,13 +1,13 @@
-//! 창 크롬의 Tauri 어댑터 — [`book::ChromeBook`] 을 잎 락으로 쥐고 OS 창에 입힌다(TRD S26-window-chrome §2-2 · §4-4 ·
-//! §5-1 · §7-7). 입히는 것 = OS 창 제목 · 웹이 보고한 최소 창 크기(OS 최소 크기 · 열 때 한 번 넓혀 당기기).
+//! Tauri adapter of the window chrome — holds [`book::ChromeBook`] under a leaf lock and applies it to the OS window (TRD S26-window-chrome §2-2 · §4-4 ·
+//! §5-1 · §7-7). What it applies = the OS window title · the minimum window size the web reported (OS minimum size · widen-and-pull-in once on opening).
 //!
-//! 제목 값의 정본은 탭 알림 페이로드(`layout::apply::WindowTabsPayload` 의 `title` · `version`)다. 알림 포트의 Tauri
-//! 구현(`commands::layout::TauriEvents`)이 emit 뒤에 [`push_title`] 을 부른다 — 알림은 레이아웃 락 밖에서 여러 스레드가
-//! 내 차례가 뒤바뀔 수 있어, 메인 스레드 한 줄 + 장부의 판 비교가 옛 판을 버린다.
+//! The source of truth for the title value is the tab notification payload (`title` · `version` of `layout::apply::WindowTabsPayload`). The Tauri
+//! implementation of the notification port (`commands::layout::TauriEvents`) calls [`push_title`] after the emit — notifications are outside the layout lock, so several threads
+//! may see their order reversed; one main-thread line + the ledger's version comparison discards an old version.
 //!
-//! 최소 크기의 정본은 웹이다(정책 상수 정본 = 화면 — ADR-0227 선례). 보고(invoke `report_window_min_width` →
-//! [`report_min_size`]) · 열기 표시([`mark_opening`]) · 새 자리 앞의 걷기([`lift_min`]) · 크기 바뀜([`on_resized`])이 모두
-//! 메인 스레드 일 하나 안에서 장부를 보고 입힌다 — 무엇을 언제 입히나는 `book` 머리.
+//! The source of truth for the minimum size is the web (the source of policy constants = the screen — precedent of ADR-0227). Reports (invoke `report_window_min_width` →
+//! [`report_min_size`]) · the opening mark ([`mark_opening`]) · the lift before a new place ([`lift_min`]) · size changes ([`on_resized`]) all
+//! look at the ledger and apply inside a single main-thread job — what is applied and when is in the `book` head.
 
 mod book;
 
@@ -21,12 +21,12 @@ use tauri::{AppHandle, LogicalSize, Manager, Window};
 use crate::layout::WindowTabsPayload;
 use crate::state::placement::{self, MonitorArea};
 
-/// 셸 상태로 등록하는 장부 — 제목 일 · 최소 크기 보고와 `Destroyed` 가 같은 인스턴스를 본다.
+/// The ledger registered as shell state — title jobs · minimum-size reports and `Destroyed` see the same instance.
 #[derive(Default)]
 pub(crate) struct ChromeState(Mutex<book::ChromeBook>);
 
-/// 탭 알림 `tabs` 의 제목을 그 OS 창에 입히는 일을 메인 스레드에 넘기고 기다리지 않는다. 메인 스레드에서 부르면 그
-/// 자리에서 돈다(tauri-runtime-wry 2.11.3 `send_user_message`) — 그래서 ★어떤 락도 쥔 채 부르지 않는다★.
+/// Hand the job of applying the title of tab notification `tabs` to that OS window to the main thread and do not wait. If called on the main thread it runs
+/// on the spot (tauri-runtime-wry 2.11.3 `send_user_message`) — so ★do not call it while holding any lock★.
 pub(crate) fn push_title(app: &AppHandle, tabs: &WindowTabsPayload) {
     let handle = app.clone();
     let label = tabs.label.clone();
@@ -51,13 +51,13 @@ pub(crate) fn push_title(app: &AppHandle, tabs: &WindowTabsPayload) {
     }
 }
 
-/// 셸이 창 `label` 을 막 열었다 — 열기 표시를 적어 넓혀 당기기를 한 번 판정하게 한다(TRD §7-7 — 창 포트의 새로 짓기 ·
-/// 맡긴 예열 창의 확정 · 부팅 복원 창 짓기 · 사본 수락의 숨긴 팝아웃 짓기 · 사본 수락의 main 자리 입히기). 그 창의 최소
-/// 크기를 아직 받지 않았으면 다음 보고가 판정하고, 받았으면(다시 짓지 않는 창) 이 일이 판정해 입힌다(`book::ChromeBook::
-/// mark_opening`). 창을 지은 뒤(다시 짓지 않는 창이면 자리를 입힌 뒤)에 부른다. 적기는 메인 스레드 일로 넘기고 기다리지
-/// 않는다 — 그 일이 창이 있는 것을 본 뒤에만 적는다(`book` 머리). 그 창의 웹 페이지가 보고하기 전에 그 일이 돈다: 메인
-/// 스레드는 한 줄이고 보고는 페이지를 읽은 뒤에 같은 줄로 온다. 메인 스레드에서 부르면 그 자리에서 돈다 — ★어떤 락도 쥔
-/// 채 부르지 않는다★.
+/// The shell has just opened window `label` — record the opening mark so that widen-and-pull-in is decided once (TRD §7-7 — a window port's fresh build ·
+/// confirmation of an entrusted prewarmed window · boot-restore window build · the hidden pop-out build of copy acceptance · placing the main slot of copy acceptance). If that window's minimum
+/// size has not yet been received, the next report decides; if received (a window that is not rebuilt), this job decides and applies (`book::ChromeBook::
+/// mark_opening`). Call it after building the window (for a window that is not rebuilt, after applying the place). Recording is handed to a main-thread job and does not
+/// wait — that job records only after seeing that the window exists (`book` head). That job runs before that window's web page reports: the main
+/// thread is a single line and the report comes on the same line after the page is loaded. If called on the main thread it runs on the spot — ★do not call it while holding
+/// any lock★.
 pub(crate) fn mark_opening(app: &AppHandle, label: &str) {
     let handle = app.clone();
     let owned = label.to_owned();
@@ -72,7 +72,7 @@ pub(crate) fn mark_opening(app: &AppHandle, label: &str) {
         let Some(state) = handle.try_state::<ChromeState>() else {
             return;
         };
-        // 창의 크기 상태는 장부 락 밖에서 읽는다(잎 락 — 쥔 채 OS 를 부르지 않는다).
+        // The window's size state is read outside the ledger lock (a leaf lock — the OS is not called while holding it).
         let frame = frame_state(&window);
         let plan = sync::lock(&state.0).mark_opening(&owned, frame);
         book::apply_min(&state.0, &owned, plan, &window);
@@ -85,12 +85,12 @@ pub(crate) fn mark_opening(app: &AppHandle, label: &str) {
     }
 }
 
-/// 창 `label` 의 웹이 보고한 최소 창 크기를 적고 입힌다 — invoke `report_window_min_width` 가 부른다. 범위 밖이면 `Err`
-/// 이고 직전 값을 유지한다(`book::MinSize::new`). 그 OS 창이 없거나 `order` 가 그 창에 받아들인 순번보다 새 것이 아니면
-/// 적지 않고 `Ok`(`book::ChromeBook::record_min`). 보통 크기 창이면 OS 최소 크기를 입히고, 열기 표시가 있으면 먼저 넓혀
-/// 당긴다(`book::ChromeBook::on_min_report`). 창 확인 · 상태 읽기 · 적기 · 입히기가 한 메인 스레드 일 안이어야
-/// `Destroyed` 의 잊기 · 크기 바뀜이 그 사이에 끼지 않는다(`book` 머리) — 비동기가 아닌 Tauri 명령은 메인 스레드에서
-/// 돈다(Tauri 2 문서 「Calling Rust from the Frontend」 · 이 셸의 동기 명령이 기대는 사실).
+/// Record and apply the minimum window size the web reported for window `label` — called by invoke `report_window_min_width`. If out of range it is `Err`
+/// and the previous value is kept (`book::MinSize::new`). If that OS window is absent or `order` is not newer than the sequence accepted for that window,
+/// nothing is recorded and `Ok` (`book::ChromeBook::record_min`). For a normal-size window the OS minimum size is applied, and if the opening mark is up, it widens and
+/// pulls in first (`book::ChromeBook::on_min_report`). Checking the window · reading the state · recording · applying must be inside one main-thread job so that
+/// the forgetting on `Destroyed` and size changes cannot come in between (`book` head) — a non-async Tauri command runs on the main thread
+/// (Tauri 2 docs 「Calling Rust from the Frontend」 · the fact this shell's synchronous commands rely on).
 pub(crate) fn report_min_size(
     app: &AppHandle,
     label: &str,
@@ -117,33 +117,33 @@ pub(crate) fn report_min_size(
     Ok(())
 }
 
-/// 창의 크기가 바뀌었다(`WindowEvent::Resized` — 메인 스레드) — 최대화 · 최소화에서 보통 크기로 돌아왔고 적어 둔 최소 크기를
-/// 아직 OS 에 입히지 않았으면 입힌다(`book::ChromeBook::on_frame`). ★어떤 락도 쥔 채 부르지 않는다★.
-// ADR-0303 — 크롬식 제목 표시줄
+/// The window's size changed (`WindowEvent::Resized` — main thread) — if it returned to normal size from maximize · minimize and the recorded minimum size
+/// has not yet been applied to the OS, apply it (`book::ChromeBook::on_frame`). ★Do not call it while holding any lock★.
+// ADR-0303 — chrome-style title bar
 pub(crate) fn on_resized(window: &Window) {
     let Some(state) = window.app_handle().try_state::<ChromeState>() else {
         return;
     };
     let label = window.label();
-    // 창의 크기 상태는 장부 락 밖에서 읽는다(잎 락 — 쥔 채 OS 를 부르지 않는다).
+    // The window's size state is read outside the ledger lock (a leaf lock — the OS is not called while holding it).
     let frame = frame_state(window);
     let plan = sync::lock(&state.0).on_frame(label, frame);
     book::apply_min(&state.0, label, plan, window);
 }
 
-/// 셸이 다시 짓지 않는 창 `label` 에 새 보통 자리를 입히기 직전 — 입혀 둔 OS 최소 크기를 걷고 열기 표시를 세운다(보통
-/// 크기일 때만 걷는다 — `book::ChromeBook::lift_min`). 자리를 입힌 뒤 [`mark_opening`] 을 부른다 — 그 일이 넓혀 당기고 다시
-/// 입힌다. 지금 쓰는 곳 = 런타임 사본 수락의 main(`state::placement::TauriRestoreWindows::place_main` — 다시 짓는 창은 새
-/// 창이라 걷을 것이 없다).
+/// Just before the shell applies a new normal place to window `label`, which it does not rebuild — lift the OS minimum size that was applied and raise the opening mark (lifted
+/// only at normal size — `book::ChromeBook::lift_min`). After applying the place, call [`mark_opening`] — that job widens and pulls in and re-applies.
+/// Used now by = main in runtime copy acceptance (`state::placement::TauriRestoreWindows::place_main` — a rebuilt window is a new
+/// window, so there is nothing to lift).
 ///
-/// ★크기 상태 읽기 · 장부 적기 · OS 걷기를 메인 스레드 일 하나로 넘기고 기다리지 않는다★(`book::lift`) — 걷기를 부르는 쪽
-/// 스레드에서 적고 OS 걷기만 메인 스레드로 줄 세우면, 그 사이에 돈 그 창의 보고(메인 스레드 동기 명령)가 입힌 값을 뒤늦은
-/// 걷기가 지워 장부만 「입혔다」로 남았다(U8b 리뷰 2 · TRD §7-7). 부르는 쪽이 메인 스레드 밖이면 이 일 · 그 뒤 자리 세터 ·
-/// [`mark_opening`] 의 일이 넘긴 차례대로 돈다 — 셋 다 같은 이벤트 루프 줄에 선다(tauri-runtime-wry 2.11.3
-/// `send_user_message` → `proxy.send_event`). 자리 입히기와 열기 표시 사이에 보고가 끼어도 열기 표시가 받아 둔 값으로 다시
-/// 넓혀 당기고 입힌다(`book::ChromeBook::mark_opening`). 메인 스레드에서 부르면 그 자리에서 돈다 — ★어떤 락도 쥔 채 부르지
-/// 않는다★.
-// ADR-0303 — 크롬식 제목 표시줄
+/// ★Hand reading the size state · writing the ledger · lifting the OS to a single main-thread job and do not wait★ (`book::lift`) — if the writing is done on the caller's
+/// thread and only the OS lift is queued to the main thread, a report of that window that ran in between (a main-thread synchronous command) has its applied value erased by the late
+/// lift, and only the ledger stays 「입혔다」 (applied) (U8b review 2 · TRD §7-7). If the caller is off the main thread, this job · the place setter after it ·
+/// the job of [`mark_opening`] run in the order handed over — all three stand in the same event-loop line (tauri-runtime-wry 2.11.3
+/// `send_user_message` → `proxy.send_event`). Even if a report slips in between applying the place and the opening mark, the opening mark widens and pulls in again with the stored value
+/// and applies it (`book::ChromeBook::mark_opening`). If called on the main thread it runs on the spot — ★do not call it while holding any
+/// lock★.
+// ADR-0303 — chrome-style title bar
 pub(crate) fn lift_min(app: &AppHandle, label: &str) {
     let handle = app.clone();
     let owned = label.to_owned();
@@ -158,7 +158,7 @@ pub(crate) fn lift_min(app: &AppHandle, label: &str) {
         let Some(state) = handle.try_state::<ChromeState>() else {
             return;
         };
-        // 창의 크기 상태는 장부 락 밖에서 읽는다(잎 락 — 쥔 채 OS 를 부르지 않는다).
+        // The window's size state is read outside the ledger lock (a leaf lock — the OS is not called while holding it).
         let frame = frame_state(&window);
         book::lift(&state.0, &owned, frame, &window);
     });
@@ -170,14 +170,14 @@ pub(crate) fn lift_min(app: &AppHandle, label: &str) {
     }
 }
 
-/// 창 `label` 의 장부 항목을 잊는다 — 그 OS 창의 `Destroyed`(메인 스레드).
+/// Forget the ledger entry of window `label` — the `Destroyed` of that OS window (main thread).
 pub(crate) fn forget(app: &AppHandle, label: &str) {
     if let Some(state) = app.try_state::<ChromeState>() {
         sync::lock(&state.0).forget(label);
     }
 }
 
-// tao 의 최대화 · 최소화 깃발(OS 최소 크기 세터가 건드리는 그 깃발 — `book` 머리)로 가른다. 못 읽으면 건드리지 않는 쪽이다.
+// Tell apart by tao's maximize · minimize flags (the very flags the OS minimum-size setter touches — `book` head). If unreadable, it is on the side of not touching.
 fn frame_state(window: &Window) -> book::FrameState {
     match (window.is_maximized(), window.is_minimized()) {
         (Ok(false), Ok(false)) => book::FrameState::Normal,
@@ -186,9 +186,9 @@ fn frame_state(window: &Window) -> book::FrameState {
 }
 
 impl book::MinWindow for Window {
-    // 보통 자리 = 물리 바깥 위치 · 논리 안쪽 크기(`state::placement` 머리). 작업 영역 = 그 창이 놓인 모니터의 것(숨은 창은
-    //   가장 가까운 모니터) · 배율 = 그 창의 배율(논리 폭을 물리로 푸는 값 — tao 의 크기 세터와 같다). 바깥 폭 − 안쪽 폭 =
-    //   OS 틀을 걷은 창에도 남는 크기 조절용 보이지 않는 테두리(tao 0.35.3 `calculate_insets_for_dpi`).
+    // Normal place = physical outer position · logical inner size (`state::placement` head). Work area = that of the monitor the window sits on (a hidden window uses the
+    //   nearest monitor) · scale = that window's scale (the value that unfolds a logical width to physical — same as tao's size setter). Outer width − inner width =
+    //   the invisible border for resizing that remains even on a window with the OS frame removed (tao 0.35.3 `calculate_insets_for_dpi`).
     fn widen_to(&self, min_w: u32) -> Result<bool, String> {
         let scale = self.scale_factor().map_err(|e| e.to_string())?;
         let at = self.outer_position().map_err(|e| e.to_string())?;
@@ -215,7 +215,7 @@ impl book::MinWindow for Window {
         if fitted == bounds {
             return Ok(false);
         }
-        // QA 재료(AC27 · AC34 — 넓힌 폭 · 당긴 자리를 작업 영역과 견준다).
+        // QA material (AC27 · AC34 — compare the widened width · pulled-in place with the work area).
         tracing::debug!(
             module = "chrome",
             label = self.label(),
@@ -225,7 +225,7 @@ impl book::MinWindow for Window {
             frame,
             "넓혀 당기기"
         );
-        // 위치를 바꿀 때만 위치를 입힌다 — 크기만 넓히면 왼쪽 끝이 그대로다(크기 세터는 위치를 두고 크기만 바꾼다).
+        // Apply the position only when the position changes — widening only the size leaves the left edge as is (the size setter leaves the position and changes only the size).
         let pos = (fitted.x() != bounds.x())
             .then(|| (fitted.x().round() as i32, fitted.y().round() as i32));
         placement::move_steps(self, pos, Some((fitted.w(), fitted.h())))
@@ -233,8 +233,8 @@ impl book::MinWindow for Window {
         Ok(true)
     }
 
-    // 세터에 보이지 않는 테두리(바깥 − 안쪽)를 더해 넘긴다 — tao 의 최소 추적 크기가 그 테두리를 빼먹어 안쪽이 그만큼 더
-    //   줄어든다(`book::os_min_size` 의 까닭). 보통 크기 창에서만 불리므로(`book` 머리) 잰 차이가 그 창의 테두리다.
+    // Add the invisible border (outer − inner) to the setter's argument — tao's minimum tracking size leaves out that border, so the inner area shrinks that much more
+    //   (the reason for `book::os_min_size`). It is called only for normal-size windows (`book` head), so the measured difference is that window's border.
     fn apply_min_size(&self, min: book::MinSize) -> Result<(), String> {
         let scale = self.scale_factor().map_err(|e| e.to_string())?;
         let inner = self.inner_size().map_err(|e| e.to_string())?;

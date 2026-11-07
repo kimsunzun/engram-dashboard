@@ -1,16 +1,16 @@
-//! 예열 창 풀(TRD S21-slot-docking §3-9 「풀」) — 칸 하나의 순수 상태 기계. 락 · 조건 변수 · 첫 화면 문 · 창은 모른다
-//! (그 몫 = [`super::SpareState`]). 자료와 판정뿐이다 — 창을 만들거나 만지지 않는다.
+//! Prewarmed window pool (TRD S21-slot-docking §3-9 「풀」) — a pure state machine of one field. It knows nothing of locks · condition variables · the first-paint gate · windows
+//! (that part = [`super::SpareState`]). It is only data and decisions — it neither creates nor touches windows.
 //!
-//! 「예열 창인가」는 label 의 성질이 아니라 지금 상태라 접두가 아니라 이 풀로 가른다 — 채택한 창은 보통 팝아웃이 되는데
-//! label 은 바꿀 수 없다.
+//! 「예열 창인가」 (is it a prewarmed window) is not a property of the label but the current state, so it is decided by this pool, not by a prefix — an adopted window usually becomes a popout and
+//! its label cannot be changed.
 //!
-//! - 칸이 쥔 label 의 창(짓는 중 · 지어짐 · 맡김 · 닫는 중)은 트레이 보이기 · 숨기기 · `--hidden` 과 자리 기록에서
-//!   빠진다([`SparePool::contains`]). 맡긴 뒤 확정 전에는 그 label 이 이미 모델에 있어도 풀의 술어가 이긴다.
-//! - 그 창 웹뷰의 재기 보고는 모델 대신 여기 적힌다([`SparePool::record`]) — 확정이 모델로 옮긴다.
-//! - 짓기는 칸 하나에 하나다 — 자리를 먼저 잡고([`SparePool::reserve`]) 그 뒤 팝아웃 번호를 받는다(I13 — 거절된
-//!   짓기가 번호를 태우지 않는다).
-//! - 보임을 기다리는 채택 창(`awaiting_reveal`)이 있는 동안은 짓지 않는다 — 다시 짓기는 그 창의 보임 완료 하나가
-//!   띄운다(I25).
+//! - A window of the label the field holds (being built · built · handed over · closing) is excluded from tray show · hide · `--hidden` and placement recording
+//!   ([`SparePool::contains`]). After handover and before commit, even if that label is already in the model, the pool's predicate wins.
+//! - The measurement report of that window's webview is recorded here instead of the model ([`SparePool::record`]) — the commit moves it to the model.
+//! - A build is one per field — the place is secured first ([`SparePool::reserve`]) and the popout number is taken after that (I13 — a rejected
+//!   build does not burn a number).
+//! - While there is an adopted window waiting to be shown (`awaiting_reveal`), no build happens — a rebuild is kicked off by the completion of that window's show alone
+//!   (I25).
 // ADR-0295 · ADR-0299
 
 use std::collections::BTreeSet;
@@ -19,29 +19,29 @@ use std::time::{Duration, Instant};
 use crate::layout::manager::{check_metrics, reported_canvas, WindowLabel};
 use crate::layout::{CanvasPx, LayoutError, SpareClaim, UiMetrics};
 
-/// 듣기 실패가 잇달아 이만큼이면 그 실행 내내 풀을 끈다(I28).
+/// If listening failures reach this many in a row, the pool is turned off for the whole run (I28).
 pub const LISTEN_FAILURE_LIMIT: u8 = 3;
 
-/// 예열 창 웹뷰가 보고한 재기 둘 — 모델 창 항목의 `canvas` · `metrics` 와 같은 꼴 · 같은 받는 규칙이다. `None` = 아직
-/// 보고가 없다.
+/// The two measurements the prewarmed window's webview reported — the same shape · same acceptance rule as `canvas` · `metrics` of a model window entry. `None` = no
+/// report yet.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SpareMeasures {
     pub canvas: Option<CanvasPx>,
     pub metrics: Option<UiMetrics>,
 }
 
-/// 웹뷰가 보낸 재기 하나 — 받는 규칙은 모델 항목과 같다(`ViewManager::set_window_canvas` · `set_ui_metrics`).
+/// One measurement the webview sent — the acceptance rule is the same as the model entry (`ViewManager::set_window_canvas` · `set_ui_metrics`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Measure {
     Canvas { w: u32, h: u32 },
     Metrics(UiMetrics),
 }
 
-/// 칸 하나의 상태. label 은 팝아웃 번호에서 받아 다시 쓰이지 않는다.
+/// State of one field. The label is taken from the popout number and not reused.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Slot {
     Empty,
-    /// 짓는 중 — `label = None` 은 자리만 잡고 번호를 아직 받지 않았다.
+    /// Being built — `label = None` means the place is secured and a number has not been taken yet.
     Building {
         label: Option<WindowLabel>,
         measures: SpareMeasures,
@@ -50,8 +50,8 @@ pub enum Slot {
         label: WindowLabel,
         measures: SpareMeasures,
     },
-    /// 한 호출자에게 맡겼다(확정 · 되물림 전). `activate` = 그 label 의 `open_at` 인자 — 맡긴 직후 · `open` 은 참.
-    /// `opened_at` = 그 label 을 마지막으로 연(놓은) 때 — 로그 몫.
+    /// Handed over to one caller (before commit · take-back). `activate` = the `open_at` argument of that label — right after handover · `open` is true.
+    /// `opened_at` = when that label was last opened (dropped) — for the log.
     Claimed {
         label: WindowLabel,
         measures: SpareMeasures,
@@ -59,8 +59,8 @@ pub enum Slot {
         activate: bool,
         opened_at: Option<Instant>,
     },
-    /// 확정 때 모델에 없어 닫기로 정한 맡긴 창 — 그 `Destroyed` 가 빼고 다시 짓는다. 그동안 아무도 맡지 못하고 어느
-    /// 맡김표도 맞지 않는다(I27 — 풀로 돌아가는 길은 되물림 하나뿐이다).
+    /// A handed-over window that was decided to be closed at commit because it is not in the model — its `Destroyed` removes it and rebuilds. Meanwhile nobody can take it and no
+    /// claim ticket matches (I27 — the only way back to the pool is a take-back).
     Closing {
         label: WindowLabel,
         generation: u32,
@@ -90,116 +90,116 @@ impl Slot {
     }
 }
 
-/// 짓기 자리를 잡지 못한 까닭.
+/// Why the build place could not be secured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoBuild {
-    /// 칸에 이미 예열 창(짓는 중 포함)이 있다.
+    /// The field already has a prewarmed window (including one being built).
     Occupied,
-    /// 채택한 창의 보임을 기다린다 — 그 완료가 짓기를 띄운다(I25).
+    /// Waiting for the adopted window to be shown — its completion kicks off a build (I25).
     AwaitingReveal,
     Exiting,
-    /// 듣기 실패로 꺼졌다(I28).
+    /// Turned off by listening failure (I28).
     Disabled,
 }
 
-/// 맡기기 한 걸음의 판정.
+/// Decision of one step of handover.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaimStep {
     Claimed(SpareClaim),
-    /// 짓는 중 — 지어질 때까지 기다린다. `build` = 그 짓기의 차례 — 깬 뒤 다음 걸음에 `awaited` 로 넘긴다.
+    /// Being built — wait until built. `build` = the turn of that build — after waking, passed as `awaited` to the next step.
     Wait {
         build: u64,
     },
-    /// 맡길 창이 없다 — 부른 쪽은 새로 짓는다. `build` = 예열 창 짓기도 띄운다(I16).
+    /// There is no window to hand over — the caller builds a new one. `build` = also kicks off building a prewarmed window (I16).
     Fresh {
         build: bool,
     },
 }
 
-/// 확정 ① 의 판정.
+/// Decision of commit ①.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CommitDecision {
-    /// 칸을 비우고 `awaiting_reveal` 을 세웠다 — 쥐던 재기를 모델로 옮긴다.
+    /// Emptied the field and set `awaiting_reveal` — moves the measurements it held to the model.
     Adopt {
         measures: SpareMeasures,
         activate: bool,
         opened_at: Option<Instant>,
     },
-    /// 모델에 그 label 이 없다 — 칸은 [`Slot::Closing`] 이 됐고 그 창을 닫는다.
+    /// That label is not in the model — the field became [`Slot::Closing`] and that window is closed.
     Close,
-    /// 맡김표가 지금의 맡김이 아니다 — 아무것도 바꾸지 않았다.
+    /// The claim ticket is not the current handover — nothing was changed.
     Stale,
 }
 
-/// 창 `Destroyed` 의 판정.
+/// Decision of a window `Destroyed`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gone {
     NotOurs,
-    /// 칸의 창이었다 — 칸을 비웠다. `claimed` = 맡긴 창이었다 · `closing` = 확정이 닫기로 정한 창이었다(기다리던
-    /// 사라짐) · `rebuild` = 다시 짓는다.
+    /// It was the field's window — the field was emptied. `claimed` = it was a handed-over window · `closing` = it was a window the commit decided to close (the awaited
+    /// vanishing) · `rebuild` = rebuild.
     Removed {
         claimed: bool,
         closing: bool,
         rebuild: bool,
     },
-    /// 보임을 기다리던 채택 창이었다 — 다시 짓기 완료다(`build` = 짓는다).
+    /// It was an adopted window waiting to be shown — a rebuild completion (`build` = build).
     RevealDone {
         build: bool,
     },
 }
 
-/// `window_role` 의 듣기 결과 판정(I28).
+/// Decision on the listening result of `window_role` (I28).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Listen {
-    /// 칸의 창이 아니다 — 셈하지 않는다.
+    /// Not the field's window — not counted.
     NotPool,
-    /// 칸의 창이 듣기를 걸었다 — 셈을 0 으로 되돌렸다.
+    /// The field's window set up listening — the count was reset to 0.
     Kept,
-    /// 칸의 창이 듣기를 못 걸었다 — 칸을 비웠다(부른 쪽이 그 창을 닫는다 · 그 `Destroyed` 는 다시 짓지 않는다).
-    /// `disabled_now` = 이 실패로 풀이 꺼졌다.
+    /// The field's window could not set up listening — the field was emptied (the caller closes that window · its `Destroyed` does not rebuild).
+    /// `disabled_now` = the pool was turned off by this failure.
     Removed { claimed: bool, disabled_now: bool },
 }
 
-/// 맡긴 label 을 열(놓을) 때의 판정.
+/// Decision when opening (dropping) a handed-over label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Opening {
-    /// 지금 맡긴 창이다 — 짓지 않고 그 창을 놓는다(`activate` 를 그 맡김에 적었다).
+    /// It is a window handed over now — drop that window without building (`activate` was written into that handover).
     Claimed,
-    /// 맡겼던 창이 사라졌거나 맡긴 창이 아니다 — 그 label 로 새로 짓지 않고 `Err` 다(I20).
+    /// The handed-over window vanished or is not a handed-over window — it does not build anew with that label and gives `Err` (I20).
     Unavailable,
-    /// 풀과 무관한 label — 새로 짓는다.
+    /// A label unrelated to the pool — build anew.
     Fresh,
 }
 
-/// 숨긴 UI 를 다시 보일 때 술어로 건너뛴 예열 창 label 의 판정(TRD §3-9 「숨어 있기」).
+/// Decision for a prewarmed window label skipped by the predicate when the hidden UI is shown again (TRD §3-9 「숨어 있기」).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayShow {
-    /// 맡긴 창 — 올림을 다시 걸었다. 확정 ③ 이 그것을 올린다.
+    /// A handed-over window — the placement was set again. Commit ③ places it.
     Rehold,
-    /// 그사이 확정으로 칸을 떠났다 — 보통 창처럼 곧바로 보인다.
+    /// Meanwhile it left the field by a commit — it is shown at once like a normal window.
     Adopted,
-    /// 맡기지 않은 예열 창 — 그대로 둔다.
+    /// A prewarmed window that was not handed over — left as it is.
     Untouched,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SparePool {
     slot: Slot,
-    /// 확정 ① 이 세우고 다시 짓기 완료가 비운다 — 그동안 `window_role` 이 그 번호를 싣는다(I26).
+    /// Set by commit ① and emptied by the rebuild completion — meanwhile `window_role` carries that number (I26).
     awaiting_reveal: Option<(WindowLabel, u32)>,
-    /// `awaiting_reveal` 을 세운 때 — [`Self::expire_reveal`] 몫. 확정 ① 밖에서 세운 기다림(시험)은 `None` 이다.
+    /// When `awaiting_reveal` was set — the share of [`Self::expire_reveal`]. A wait set outside commit ① (tests) is `None`.
     reveal_since: Option<Instant>,
     exiting: bool,
     disabled: bool,
     listen_failures: u8,
     last_generation: u32,
-    /// 자리를 잡은 짓기의 차례(잡을 때마다 하나 는다) — 칸의 창은 늘 마지막 차례의 짓기가 지은 것이다.
+    /// Turn of the build that secured the place (one more each time it is secured) — the field's window is always the one built by the build of the last turn.
     last_build: u64,
-    /// 맡긴 채 사라진 label — 맡은 쪽의 늦은 열기가 그 label 로 새로 짓지 않게(I20).
+    /// Labels that vanished while handed over — so the late open of the one that took it does not build anew with that label (I20).
     lost: BTreeSet<WindowLabel>,
-    /// 다시 짓기 완료가 짓기를 띄운 때 — 다음 짓기의 `after_reveal_ms` 로그 몫.
+    /// When a rebuild completion kicked off a build — for the `after_reveal_ms` log of the next build.
     revealed_at: Option<Instant>,
-    /// 짓는 중인 창을 기다리며 선 맡기기 수.
+    /// Number of handovers standing and waiting for a window being built.
     waiting: u32,
 }
 
@@ -244,12 +244,12 @@ impl SparePool {
         self.waiting
     }
 
-    /// 칸이 쥔 창인가 — 트레이 · 자리 기록이 빼는 창.
+    /// Is it a window the field holds — the window that tray · placement recording skip.
     pub fn contains(&self, label: &str) -> bool {
         self.slot.label() == Some(label)
     }
 
-    /// 보임을 기다리는 채택 창이면 그 채택 번호(I26).
+    /// If it is an adopted window waiting to be shown, its adoption number (I26).
     pub fn reveal_generation(&self, label: &str) -> Option<u32> {
         self.awaiting_reveal()
             .and_then(|(l, generation)| (l == label).then_some(generation))
@@ -259,10 +259,10 @@ impl SparePool {
         self.exiting = true;
     }
 
-    // ── 짓기(I13 · I16 · I25) ──
+    // ── build (I13 · I16 · I25) ──
 
-    /// 짓기 자리를 잡는다(label 없는 [`Slot::Building`]) — 번호는 그 뒤에 받는다. 성공이면 직전 다시 짓기 완료의 때를
-    /// 넘긴다(로그 몫).
+    /// Secures the build place (a [`Slot::Building`] with no label) — the number is taken after that. On success, passes the time of the previous rebuild completion
+    /// (for the log).
     // ADR-0299
     pub fn reserve(&mut self) -> Result<Option<Instant>, NoBuild> {
         if self.exiting {
@@ -285,7 +285,7 @@ impl SparePool {
         Ok(self.revealed_at.take())
     }
 
-    /// 잡은 자리에 받은 label 을 적는다 — `false` = 자리가 그사이 바뀌었다.
+    /// Writes the label received into the place secured — `false` = the place changed in the meantime.
     pub fn assign(&mut self, label: WindowLabel) -> bool {
         match &mut self.slot {
             Slot::Building { label: slot, .. } if slot.is_none() => {
@@ -296,7 +296,7 @@ impl SparePool {
         }
     }
 
-    /// 그 창이 지어졌다 — `false` = 짓는 동안 사라져 칸을 떠났다.
+    /// That window was built — `false` = it vanished during the build and left the field.
     pub fn mark_built(&mut self, label: &str) -> bool {
         match std::mem::replace(&mut self.slot, Slot::Empty) {
             Slot::Building {
@@ -313,7 +313,7 @@ impl SparePool {
         }
     }
 
-    /// 짓기 실패 — 칸을 비운다(두면 「예열 창 있음」이 늘 참이라 다시 짓지 못한다). `false` = 칸이 이미 그 창이 아니다.
+    /// Build failure — empties the field (if left, 「예열 창 있음」 (a prewarmed window exists) stays true and it cannot rebuild). `false` = the field is already not that window.
     pub fn build_failed(&mut self, label: &str) -> bool {
         let ours = matches!(&self.slot, Slot::Building { label: Some(l), .. } if l == label);
         if ours {
@@ -322,16 +322,16 @@ impl SparePool {
         ours
     }
 
-    // ── 맡기기 · 열기 · 되물림(I2 · I4 · I27) ──
+    // ── handover · open · take-back (I2 · I4 · I27) ──
 
     fn next_generation(&mut self) -> u32 {
         self.last_generation = self.last_generation.wrapping_add(1);
         self.last_generation
     }
 
-    /// 맡기기 한 걸음. `awaited` = 이 맡기기가 앞서 기다리기 시작한 짓기(그때의 [`ClaimStep::Wait`] 의 `build`) — 그
-    /// 짓기가 실패하거나 사라진 뒤 다른 짓기가 칸을 잡았으면 그것을 따라 기다리지도 맡지도 않고 `Fresh` 다(I2 —
-    /// 기다리던 짓기의 실패 · 사라짐은 곧바로 `None`).
+    /// One step of handover. `awaited` = the build this handover started waiting for earlier (the `build` of the [`ClaimStep::Wait`] at that time) — if
+    /// that build failed or vanished and another build took the field, it neither follows it to wait nor takes it and gives `Fresh` (I2 —
+    /// failure · vanishing of the awaited build gives `None` right away).
     // ADR-0299
     pub fn take_built(&mut self, awaited: Option<u64>) -> ClaimStep {
         if self.exiting || self.disabled {
@@ -395,8 +395,8 @@ impl SparePool {
         }
     }
 
-    /// 확정 전 되물림 — 맡김표가 지금의 맡김(label · 채택 번호 둘 다)일 때만 숨긴 채 칸에 돌려놓는다(다시 맡길 수
-    /// 있다). 쥐던 재기는 그대로다.
+    /// Take-back before commit — only if the claim ticket is the current handover (both label · adoption number), returns it to the field hidden (it can be handed over
+    /// again). The measurements it held stay as they are.
     pub fn release(&mut self, claim: &SpareClaim) -> bool {
         match std::mem::replace(&mut self.slot, Slot::Empty) {
             Slot::Claimed {
@@ -415,10 +415,10 @@ impl SparePool {
         }
     }
 
-    // ── 확정(I21 · I25 · I27 · I31) ──
+    // ── commit (I21 · I25 · I27 · I31) ──
 
-    /// 확정 ① — 맡김표가 지금의 맡김이면 칸을 비우며 같은 자리에서 `awaiting_reveal` 을 세운다(그 뒤의 둘째 맡기기는
-    /// 짓기를 띄우지 않는다 · I25). `in_model` = 부른 쪽이 레이아웃 락 안에서 본 그 label 의 모델 항목 여부.
+    /// Commit ① — if the claim ticket is the current handover, empties the field and sets `awaiting_reveal` in the same place (a second handover after that does not
+    /// kick off a build · I25). `in_model` = whether that label has a model entry, as seen by the caller inside the layout lock.
     // ADR-0299
     pub fn commit(&mut self, claim: &SpareClaim, in_model: bool, now: Instant) -> CommitDecision {
         match std::mem::replace(&mut self.slot, Slot::Empty) {
@@ -448,8 +448,8 @@ impl SparePool {
         }
     }
 
-    /// 확정이 닫기로 정한 창을 두 번 다 못 닫았다 — 칸을 비운다(다음 맡기기가 짓는다 · I31). `false` = 칸이 이미 그 창이
-    /// 아니다(그사이 `Destroyed` 가 뺐다).
+    /// The window the commit decided to close could not be closed either time — empties the field (the next handover builds · I31). `false` = the field is already not that
+    /// window (a `Destroyed` removed it in the meantime).
     pub fn close_failed(&mut self, claim: &SpareClaim) -> bool {
         let ours = matches!(&self.slot, Slot::Closing { label, generation }
             if *label == claim.label && *generation == claim.generation);
@@ -459,10 +459,10 @@ impl SparePool {
         ours
     }
 
-    // ── 다시 짓기 완료 · `Destroyed`(I8 · I25) ──
+    // ── rebuild completion · `Destroyed` (I8 · I25) ──
 
-    /// 다시 짓기 완료(보임 · 기다리던 label 의 `Destroyed` · 안전 시한) — 보임을 기다리는 label 이 그것이면 비우고
-    /// `Some(짓나)`, 아니면 `None`(먼저 온 쪽이 이미 끝냈다). label 마다 한 번이다.
+    /// Rebuild completion (show · the `Destroyed` of the awaited label · safety deadline) — if the label waiting to be shown is that one, empties it and gives
+    /// `Some(짓나)`, otherwise `None` (the one that came first already finished it). Once per label.
     // ADR-0299
     pub fn complete_reveal(&mut self, label: &str, now: Instant) -> Option<bool> {
         self.reveal_generation(label)?;
@@ -475,9 +475,9 @@ impl SparePool {
         Some(build)
     }
 
-    /// 보임 기다림이 `older_than` 넘게 섰으면 그 다시 짓기 완료를 지금 한다 — 안전 시한(확정 뒤 창 쪽이 건다)이 끝내지
-    /// 못한 기다림의 그물이다. 남기면 그 실행 내내 짓기 자리를 잡지 못해 예열이 멈춘다. `Some` = 끝낸 기다림의 label ·
-    /// 채택 번호(짓기 여부는 [`Self::complete_reveal`] 과 같다 — 맡기기의 `Empty` 갈래가 이어서 띄운다).
+    /// If a show-wait has stood longer than `older_than`, does that rebuild completion now — a net for a wait that the safety deadline (set on the window side after commit) could not
+    /// end. If left, no build place can be secured for the whole run and prewarming stops. `Some` = the label of the wait that ended ·
+    /// the adoption number (whether to build is the same as [`Self::complete_reveal`] — the `Empty` branch of handover kicks it off next).
     // ADR-0299
     pub fn expire_reveal(
         &mut self,
@@ -513,7 +513,7 @@ impl SparePool {
         }
     }
 
-    // ── 듣기 실패(I28) ──
+    // ── listening failure (I28) ──
 
     pub fn listen(&mut self, label: &str, adoptable: bool) -> Listen {
         if !self.contains(label) {
@@ -547,10 +547,10 @@ impl SparePool {
         }
     }
 
-    // ── 재기 ──
+    // ── measurements ──
 
-    /// 칸의 창이 보낸 재기를 적는다 — `None` = 칸의 창이 아니다(부르는 쪽이 모델에 적는다 · 닫는 중인 창 포함). `Some(Err)`
-    /// = 범위 밖 지표라 거절하고 직전 값을 유지한다. 0 크기 캔버스는 무시하고 `Some(Ok)` 다.
+    /// Records the measurements the field's window sent — `None` = not the field's window (the caller records it in the model · including a window that is closing). `Some(Err)`
+    /// = rejected because the metrics are out of range, and the previous value is kept. A zero-size canvas is ignored and it is `Some(Ok)`.
     pub fn record(&mut self, label: &str, measure: Measure) -> Option<Result<(), LayoutError>> {
         if !self.contains(label) {
             return None;
@@ -631,7 +631,7 @@ mod tests {
         Instant::now()
     }
 
-    // ── 짓기 자리 ──
+    // ── build place ──
 
     #[test]
     fn the_build_place_is_taken_before_the_label_and_only_once() {
@@ -673,7 +673,7 @@ mod tests {
         assert!(!pool.mark_built(P1), "실패한 짓기는 지어짐을 세우지 못한다");
     }
 
-    // ── 맡기기 ──
+    // ── handover ──
 
     #[test]
     fn only_a_built_spare_is_handed_out_and_each_claim_gets_a_new_generation() {
@@ -737,7 +737,7 @@ mod tests {
         );
     }
 
-    // ── 확정 ──
+    // ── commit ──
 
     #[test]
     fn commit_empties_the_slot_and_sets_the_pending_reveal_in_one_step() {
@@ -775,7 +775,7 @@ mod tests {
         assert!(!pool.close_failed(&claim));
     }
 
-    // ── 다시 짓기 완료 ──
+    // ── rebuild completion ──
 
     #[test]
     fn a_reveal_completion_while_disabled_clears_without_building() {
@@ -838,7 +838,7 @@ mod tests {
         assert_eq!(pool.reserve(), Ok(None));
     }
 
-    // ── 트레이 보이기 ──
+    // ── tray show ──
 
     #[test]
     fn a_tray_show_tells_claimed_adopted_and_untouched_apart() {
@@ -850,7 +850,7 @@ mod tests {
         assert_eq!(pool.tray_show(P1), TrayShow::Adopted);
     }
 
-    // ── 재기 받기 ──
+    // ── receiving measurements ──
 
     #[test]
     fn a_label_outside_the_slot_is_left_to_the_model() {

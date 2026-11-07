@@ -1,13 +1,13 @@
-# 모듈 1 — pty/types.rs 브리핑 (담당: dcs24, Sonnet)
+# Module 1 — pty/types.rs briefing (owner: dcs24, Sonnet)
 
-발신: ed12 (매니저)
-근거 문서: `docs/backend-lld-stage1.md` §3 (타입 정의). 반드시 §3 원문을 읽고 그대로 따른다.
+From: ed12 (manager)
+Source document: `docs/backend-lld-stage1.md` §3 (type definitions). Read the original §3 and follow it exactly.
 
-## 목표
+## Goal
 
-`src-tauri/src/pty/types.rs` 작성. PTY 백엔드 전체가 공유하는 타입·trait 정의.
+Write `src-tauri/src/pty/types.rs`. The types and traits shared by the whole PTY backend.
 
-## 필수 포함 (LLD §3)
+## Must include (LLD §3)
 
 ```rust
 pub type AgentId = uuid::Uuid;
@@ -48,28 +48,28 @@ pub trait StatusSink: Send + Sync + 'static {
 pub enum SinkError { #[error("sink closed")] Closed, /* 필요시 추가 */ }
 ```
 
-## ReplayBuffer (LLD §3 — 늦게 붙는 창을 위한 ring buffer)
+## ReplayBuffer (LLD §3 — ring buffer for late-attaching windows)
 
-- 용량 상한 **2MB**. 초과 시 앞에서부터 버림(ring).
-- `push(chunk: PtyChunk)`, `snapshot() -> Vec<PtyChunk>` (clone) 제공.
-- 내부 구조는 `VecDeque<PtyChunk>` + 누적 바이트 카운터. 구현 자유, 단 2MB 상한 정확히.
-- LLD §3에 시그니처 명시돼 있으면 그대로 따를 것.
+- Capacity cap **2MB**. When exceeded, drop from the front (ring).
+- Provide `push(chunk: PtyChunk)` and `snapshot() -> Vec<PtyChunk>` (clone).
+- Internal structure: `VecDeque<PtyChunk>` + a cumulative byte counter. Implementation is up to you, but the 2MB cap must be exact.
+- If LLD §3 spells out the signatures, follow them exactly.
 
-## 불변 규칙 (리뷰 필수 항목)
+## Invariants (mandatory review items)
 
-- **이 파일에 `use tauri` / tauri 타입 0개.** (`grep "use tauri" src/pty/types.rs` → 0줄)
-- `AgentStatus` 에 `#[serde(tag = "type")]` 필수.
-- 파생 매크로(Clone/Debug/Serialize)는 LLD에 맞춰. 과하게 달지 말 것.
+- **Zero `use tauri` / tauri types in this file.** (`grep "use tauri" src/pty/types.rs` → 0 lines)
+- `AgentStatus` must have `#[serde(tag = "type")]`.
+- Derive macros (Clone/Debug/Serialize) follow the LLD. Do not add too many.
 
-## 코드 품질 (10년 유지보수)
+## Code quality (10-year maintenance)
 
-- 각 타입 위에 **무엇을 위한 타입인지 1줄 한국어 주석**. 자명한 필드엔 주석 금지.
-- `cargo fmt` 통과. 논리 블록 사이 빈 줄.
+- Above each type, **a one-line Korean comment on what the type is for**. No comments on self-evident fields.
+- `cargo fmt` passes. Blank lines between logical blocks.
 
-## 빌드 확인 & 보고
+## Build check and report
 
-- `pty/mod.rs` 에 `pub mod types;` 추가하고 `lib.rs` 에서 `mod pty;` 가 잡히게 최소 연결.
-- `cargo build` 통과 확인 (Cargo.toml 의존성은 dco23이 이미 추가함 — uuid/thiserror/serde 사용 가능).
-- 완료 보고: `orch 12 "⟁dcs24 types.rs 완료 — cargo build OK"` (실패 시 에러 발췌 첨부)
+- Add `pub mod types;` to `pty/mod.rs` and make the minimal connection so that `mod pty;` is picked up in `lib.rs`.
+- Confirm `cargo build` passes (dco23 already added the Cargo.toml dependencies — uuid/thiserror/serde are usable).
+- Completion report: `orch 12 "⟁dcs24 types.rs 완료 — cargo build OK"` (attach an error excerpt on failure)
 
-막히면 30분 내 중간보고. 버전/스펙 변경 필요하면 임의 변경 말고 ed12에 보고.
+If stuck, send an interim report within 30 minutes. If a version/spec change is needed, do not change it on your own; report to ed12.

@@ -1,16 +1,16 @@
-// ★버스에 오르는 화면 command 의 **명단 자물쇠**★.
+// ★The **list lock** of the screen commands that go on the bus★.
 //
-// 왜 필요한가: 무엇이 밖으로 나가나는 `help` 한 칸이 정하고(`viewCommandBridge.offeredCommands`), 그 칸을
-// 더하거나 빼는 것은 **한 줄 편집**이다. 그런데 그 한 줄은 데몬 명부의 어휘를 바꾼다 — 명단을 아무 데서도
-// 안 물면 「등록되던 command 가 조용히 사라졌다」·「의도 없이 하나가 밖으로 나갔다」가 diff 에 안 보인다.
-// 손으로 적은 이 배열이 그 편집을 **눈에 보이는 변경**으로 만든다(테스트를 함께 고쳐야 초록이 된다).
+// Why it is needed: what goes out is decided by one field, `help` (`viewCommandBridge.offeredCommands`), and
+// adding or removing that field is a **one-line edit**. But that one line changes the vocabulary of the daemon registry — if nothing
+// anywhere pins the list down, 「등록되던 command 가 조용히 사라졌다」 (a command that used to register silently vanished) · 「의도 없이 하나가 밖으로 나갔다」 (one went out unintentionally) do not show in the diff.
+// This hand-written array makes that edit a **visible change** (the test must be fixed along with it to turn green).
 //
-// ★help 를 전 command 에 강제하지 않는 이유(사용자 결정)★: 증명용 몇 개만 올리고 나머지는 이연이다.
-// 그래서 `help` 는 선택 칸으로 두고, 대신 **어느 것이 그 칸을 갖는지**를 여기서 못 박는다.
+// ★Why help is not forced on every command (user decision)★: only a few for proof go up and the rest are deferred.
+// So `help` is left as an optional field, and instead **which ones have that field** is pinned down here.
 //
-// ★셸·데몬이 답하는 이름과의 충돌은 여기서 안 잰다★ — 셸 표 이름은 Rust 한 곳에서 거르고
-// (`src-tauri/src/view_commands.rs` 의 `reserved_names`, 하네스는 `tests/layout_commands.rs`), 데몬이 답하는
-// 이름의 벽은 데몬의 등록 반려다(ADR-0270 결정 2).
+// ★Collisions with names the shell and daemon answer are not measured here★ — the shell table names are filtered in one place in Rust
+// (`reserved_names` in `src-tauri/src/view_commands.rs`, the harness is `tests/layout_commands.rs`), and the wall for names the daemon
+// answers is the daemon's registration bounce (ADR-0270 decision 2).
 
 import { describe, expect, it, vi } from 'vitest'
 
@@ -26,15 +26,15 @@ vi.mock('../api/clientFactory', () => ({
   bootstrapDaemonIfNeeded: vi.fn(async () => undefined),
 }))
 
-import './contributions' // side-effect: 전 command 등록
+import './contributions' // side-effect: register all commands
 import { list } from './registry'
 import { offeredCommands } from './viewCommandBridge'
 
 /**
- * 오늘 버스에 오르는 화면 command 전량 — 늘리거나 줄이면 이 줄을 함께 고친다.
+ * All the screen commands that go on the bus today — when you increase or decrease them, fix this line along with it.
  *
- * ★비지 않아야 한다★: 여기가 비면 셸이 명부에 얹을 화면 몫이 하나도 없어 **웹뷰 배달 경로 전체가
- * 무검증**이 된다(ADR-0167 이 테마 명령 둘을 내리면서 남긴 조건 — 그 둘을 뺀 자리가 이 둘이다).
+ * ★It must not be empty★: if this is empty the shell has no screen share at all to put on the registry, so **the whole webview delivery path
+ * goes unverified** (a condition left by ADR-0167 when it took down the two theme commands — the place left by removing those two is these two).
  */
 const ON_THE_BUS = ['slot.empty', 'tab.next']
 
@@ -46,9 +46,9 @@ describe('화면 command 중 버스에 오르는 것', () => {
   it('오르는 것은 전부 summary 와 effect 를 갖는다', () => {
     for (const offered of offeredCommands()) {
       expect(offered.help.summary.trim().length, `${offered.name}: summary`).toBeGreaterThan(0)
-      // ★effect 를 안 실으면 셸이 등록에서 뺀다★ — 기본값을 고르면 명부가 거짓 표식을 광고하기 때문이다
-      //   (`src-tauri/src/view_commands.rs` 의 `ViewEffect`). 타입이 이미 강제하지만, 그 타입이 느슨해지는
-      //   날 이 단언이 먼저 걸린다.
+      // ★If effect is not carried the shell drops it from registration★ — because picking a default would make the registry advertise a false marker
+      //   (`ViewEffect` in `src-tauri/src/view_commands.rs`). The type already enforces it, but on the
+      //   day that type loosens, this assertion is hit first.
       expect(['read', 'write'], `${offered.name}: effect`).toContain(offered.help.effect)
     }
   })

@@ -2,10 +2,10 @@
 import type { SchemaItem } from "./SchemaItem";
 
 /**
- * `settings_schema` 의 답 — 버스 `settings.schema` 와 같은 모양(TRD §5-4).
+ * The answer of `settings_schema` — same shape as bus `settings.schema` (TRD §5-4).
  */
 export type SettingsSchema = { 
 /**
- * 표 순서.
+ * Table order.
  */
 items: Array<SchemaItem>, };

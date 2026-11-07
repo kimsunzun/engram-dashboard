@@ -1,42 +1,42 @@
-# ADR-0184: PTY transport 가 자식에게 터미널 정체성을 선언한다
+# ADR-0184: The PTY transport declares a terminal identity to the child
 
-- 상태: 확정 (2026-09-08, 근거: codex TUI 렌더 A/B 실측 2026-09-08 + 2인 적대 리뷰)
-- 관련: ADR-0049(env 기본값 주입 규율 — explicit-skip · `eq_ignore_ascii_case`) · ADR-0004(백엔드 지식 격리 — `CommandSpec` 산출) · ADR-0003(코어 격리) · `crates/engram-dashboard-agent/src/transport/pty.rs`(`// ADR-0184` 앵커)
+- 상태: 확정 (2026-09-08, basis: codex TUI render A/B measurement 2026-09-08 + two-person adversarial review)
+- 관련: ADR-0049 (env default injection discipline — explicit-skip · `eq_ignore_ascii_case`) · ADR-0004 (backend knowledge isolation — `CommandSpec` output) · ADR-0003 (core isolation) · `crates/engram-dashboard-agent/src/transport/pty.rs` (`// ADR-0184` anchor)
 
 ## 맥락
 
-PTY 자식은 부모 환경을 통째로 물려받고, 우리는 거기에 프로필 env 만 얹었다. 그런데 **데몬은 WMI(`Win32_Process.Create`)로 뜨므로 부모가 `WmiPrvSE.exe`이고, 물려받는 환경은 터미널 환경이 아니라 서비스 환경이다** — `TERM` 도 `COLORTERM` 도 없다. portable-pty 도 그 둘을 합성하지 않는다(합성하는 것은 unix 의 `SHELL` 뿐). 저장소 전체에서 그 두 이름을 심는 줄이 0 이었다.
+A PTY child inherits the parent environment wholesale, and we only layered the profile env on top of it. But **the daemon is started through WMI (`Win32_Process.Create`), so the parent is `WmiPrvSE.exe` and the environment it inherits is not a terminal environment but a service environment** — there is no `TERM` and no `COLORTERM`. portable-pty does not synthesize those two either (the only thing it synthesizes is unix `SHELL`). Across the whole repository, the number of lines that set those two names was 0.
 
-결과로 codex TUI 가 우리 xterm.js 슬롯에서 열화됐다: 둥근 헤더 박스가 아래 테두리를 잃고 엉뚱한 자리에 세로줄이 남았으며 `directory:` 줄이 통째로 빠졌고, 사용자 프롬프트 줄의 회색 배경 블록이 사라졌다. 같은 codex 를 Windows Terminal 에서 띄우면 멀쩡했다 — 그쪽은 자식에게 그 값을 심어 주기 때문이다.
+As a result the codex TUI degraded in our xterm.js slot: the rounded header box lost its bottom border and left a vertical line in the wrong place, the `directory:` line was missing entirely, and the gray background block of the user prompt line disappeared. The same codex launched in Windows Terminal was fine — because that terminal sets those values for the child.
 
-★**이것은 codex 만의 문제가 아니었다**★ — claude 터미널 모드도 같은 `TransportShape::Pty` 경로라 똑같이 `TERM` 없이 돌고 있었다.
+★**This was not a codex-only problem**★ — claude terminal mode goes through the same `TransportShape::Pty` path, so it was running without `TERM` in exactly the same way.
 
 ## 결정
 
-**PTY transport 가 자식에게 `TERM=xterm-256color` 와 `COLORTERM=truecolor` 를 선언한다**(`build_pty_command`).
+**The PTY transport declares `TERM=xterm-256color` and `COLORTERM=truecolor` to the child** (`build_pty_command`).
 
-- **선언 주체 = PTY 를 내주는 계층.** 이 두 값은 *우리가 어떤 터미널인가*를 서술하지 어느 백엔드인가를 서술하지 않는다. 그래서 백엔드를 가리지 않는다.
-- **주입 규율은 ADR-0049 를 그대로 따른다** — 프로필(`spec.env`)에 같은 키가 이미 있으면 **주입하지 않는다**(explicit-skip; 병합 순서 last-wins 에 기대지 않는다), 키 비교는 `eq_ignore_ascii_case`.
-- ★**상속값은 덮는다**★ — 양보 대상은 프로필뿐이다. 자식은 데몬을 띄운 무언가가 아니라 우리 xterm.js 위젯에 그리므로, 상속된 `TERM` 은 그 위젯을 서술하지 않는다.
-- **값의 근거:** 우리 렌더러는 xterm.js 6.0 이고 xterm 호환 + 256색을 실제로 그린다. 24비트 색은 terminfo 체계에 항목 자체가 없어 `COLORTERM` 이 관례적 통로다. 둘 다 참인 선언이다 — ★못 그리는 것을 선언하면 자식이 우리가 못 그리는 것을 보낸다★.
+- **The declarer = the layer that hands out the PTY.** These two values describe *which terminal we are*, not which backend. So they do not distinguish between backends.
+- **The injection discipline follows ADR-0049 as is** — if the profile (`spec.env`) already has the same key, **do not inject** (explicit-skip; do not rely on last-wins merge order), and keys are compared with `eq_ignore_ascii_case`.
+- ★**Inherited values are overridden**★ — only the profile is yielded to. The child draws into our xterm.js widget, not into whatever started the daemon, so an inherited `TERM` does not describe that widget.
+- **Ground for the values:** our renderer is xterm.js 6.0, and it is xterm-compatible and actually draws 256 colors. 24-bit color has no entry in the terminfo system at all, so `COLORTERM` is the conventional channel. Both are true declarations — ★declaring what we cannot draw makes the child send what we cannot draw★.
 
 ## 거부한 대안
 
-- **codex 백엔드에만 주입** — 백엔드 지식이 아니라 터미널 지식이라 자리가 틀렸고(ADR-0004 「백엔드 지식 격리」의 반대 방향 누출), 실제로도 codex 만의 문제가 아니었다. claude 터미널 모드가 같은 경로로 같은 결핍을 겪고 있었다(실측 2026-09-08). 백엔드마다 같은 두 줄을 복제하는 결과가 된다.
-- **`backend::build_command_spec` 에서 주입(`CommandSpec` 이 자식 환경의 완전한 서술이어야 한다 — ADR-0004 인용, 이번 리뷰에서 실제 제기된 대안)** — 두 값은 **transport shape 에 따라 갈린다**(PTY 면 참, stdio 면 거짓). 백엔드가 그것을 알려면 백엔드가 transport 를 알아야 하고, 그게 더 나쁜 누출이다. ★**알려진 대가**★: 이 결정으로 `CommandSpec` 은 더 이상 자식 환경의 완전한 서술이 아니며, `backend/claude/mod.rs` 의 `env_value(&CommandSpec, key)` 는 이 두 키에 한해 부정확하다. 그 대가를 알고 택했다.
-- **stdio 전송에도 함께 주입** — stdio/ndjson 자식에겐 PTY 가 없다. 터미널이 아닌데 터미널이라 선언하는 것은 **거짓 선언**이고, 위 「값의 근거」가 금하는 바로 그것이다. 전송 방식에 따라 자식 env 가 갈리는 것은 결함이 아니라 의도다.
-- **부재할 때만 채우기(fill-if-absent, 상속 환경까지 존중)** — 데몬을 실제 터미널에서 띄우면(`scripts/run-*.bat`) 그 터미널의 `TERM` 이 상속되는데, 그 값은 자식이 그려질 xterm.js 를 서술하지 않는다. 그것을 존중하면 **띄운 방법에 따라 렌더가 갈린다.**
+- **Inject only for the codex backend** — it is terminal knowledge, not backend knowledge, so the place is wrong (a leak in the opposite direction of ADR-0004 「백엔드 지식 격리」), and in fact it was not a codex-only problem. claude terminal mode was suffering the same lack through the same path (measured 2026-09-08). It would end up copying the same two lines into every backend.
+- **Inject in `backend::build_command_spec` (`CommandSpec` must be a complete description of the child environment — a quote from ADR-0004, an alternative actually raised in this review)** — the two values **differ by transport shape** (true for PTY, false for stdio). For the backend to know that, the backend would have to know the transport, and that is a worse leak. ★**Known cost**★: with this decision `CommandSpec` is no longer a complete description of the child environment, and `env_value(&CommandSpec, key)` in `backend/claude/mod.rs` is inaccurate for these two keys only. We chose it knowing that cost.
+- **Inject for stdio transport as well** — a stdio/ndjson child has no PTY. Declaring it a terminal when it is not one is a **false declaration**, which is exactly what 「값의 근거」 above forbids. That the child env differs by transport method is not a defect but the intent.
+- **Fill only when absent (fill-if-absent, respecting even the inherited environment)** — if the daemon is started from a real terminal (`scripts/run-*.bat`), that terminal's `TERM` is inherited, and that value does not describe the xterm.js the child will be drawn in. Respecting it makes **the render differ by how it was started.**
 
 ## 근거
 
-- **A/B 실측(2026-09-08, 스크린샷 2장).** 단일 변수 = 이 두 환경변수. 없을 때: 헤더 박스 테두리 결손 + `directory:` 줄 소실 + 프롬프트 배경 없음. 넣었을 때: Windows Terminal 과 동일. 수정 후 **프로필 env 를 비운 채** 재현해 코드 경로에서 나온 값만으로 같은 결과임을 확인했다.
-- **claude 터미널 모드 육안 확인** — 수정 후 정상(로고·색·입력창·상태줄). ★수정 *전* 화면은 남기지 않아 개선 여부는 미측정★.
-- **2인 적대 리뷰(code/full).** cross-family(blind) = PASS. doc-aware = FIX — 그 지적으로 ① 단위테스트가 공전하던 것(개발 셸의 `TERM`·`COLORTERM` 이 단언값과 같아, 주입을 지워도 통과했다)과 ② ADR-0049 규율과의 불일치를 잡아 반영했다. 테스트는 변이 실험으로 실패 가능함을 증명했다.
+- **A/B measurement (2026-09-08, two screenshots).** The single variable = these two environment variables. When absent: header box border missing + `directory:` line gone + no prompt background. When set: identical to Windows Terminal. After the fix we reproduced it **with the profile env left empty** and confirmed that the values coming only from the code path give the same result.
+- **claude terminal mode checked by eye** — normal after the fix (logo · colors · input box · status line). ★The screen from *before* the fix was not kept, so whether it improved is unmeasured★.
+- **Two-person adversarial review (code/full).** cross-family (blind) = PASS. doc-aware = FIX — its findings caught and fixed ① the unit test spinning idle (the `TERM` and `COLORTERM` of the dev shell equaled the asserted values, so it passed even with the injection deleted) and ② the inconsistency with the ADR-0049 discipline. The test was shown able to fail by a mutation experiment.
 
 ## 영향 / 불변식
 
-- **PTY 로 뜨는 모든 백엔드가 대상이다.** `TransportShape::Pty` 는 기본값이라 codex·claude 터미널 외에 앞으로 늘어나는 PTY 백엔드도 자동으로 포함된다.
-- ★**선언은 참이어야 한다**★ — 렌더러를 xterm.js 아닌 것으로 바꾸거나 색 능력이 줄면 이 두 값도 함께 고친다. 안 고치면 자식이 우리가 못 그리는 것을 보낸다.
-- **대소문자 무시 가드는 Windows 에서 실패할 수 없다** — portable-pty 가 Windows 에서 env 키를 소문자로 접어 두 철자가 한 항목이 되기 때문이다. CI 가 Windows 전용이라 **그 가드의 CI 신호는 0**이고, unix 대비 그물로만 존재한다(테스트 주석에 명시).
-- **미해결 — 셸 백엔드가 열리면 재검토할 것.** 능력 있는 `TERM` 을 받은 자식이 페이저(`less`)를 대화형으로 띄우면 LLM 주도 셸 에이전트가 멈출 수 있다. 지금은 wire 의 `AgentBackendKind` 가 `Claude`·`Codex` 뿐이라 **도달 불가**다. 셸 백엔드를 wire 에 올리는 결정이 이 항목을 되살린다.
-- **미측정 — `resume_failure_kind` 취약성.** `backend/claude/mod.rs` 가 ANSI 를 벗기지 않은 출력 꼬리에서 문자열을 찾아 resume 실패를 분류한다(ADR-0172). 터미널 능력을 올리면 그 바이트열의 제어 문자 배치가 달라질 수 있다. 기존부터 있던 취약점이고 이번에 재보지 않았다.
+- **Every backend that starts through a PTY is covered.** `TransportShape::Pty` is the default, so PTY backends that are added in the future, besides codex and claude terminal, are included automatically.
+- ★**The declaration must be true**★ — if the renderer is changed to something other than xterm.js or its color capability shrinks, fix these two values along with it. If not fixed, the child sends what we cannot draw.
+- **The case-insensitive guard cannot fail on Windows** — because portable-pty folds env keys to lowercase on Windows, so the two spellings become one entry. CI is Windows-only, so **the CI signal for that guard is 0**, and it exists only as a unix-side safety net (stated in the test comment).
+- **Unresolved — revisit when a shell backend opens.** If a child that received a capable `TERM` launches a pager (`less`) interactively, an LLM-driven shell agent can stall. For now the wire's `AgentBackendKind` is only `Claude` and `Codex`, so it is **unreachable**. The decision to put a shell backend on the wire revives this item.
+- **Unmeasured — `resume_failure_kind` fragility.** `backend/claude/mod.rs` classifies a resume failure by finding a string in the tail of the output with ANSI not stripped (ADR-0172). Raising the terminal capability may change the placement of control characters in that byte sequence. It is a pre-existing weakness and we did not re-measure it this time.

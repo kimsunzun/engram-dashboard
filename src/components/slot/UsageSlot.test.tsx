@@ -1,9 +1,9 @@
-// UsageSlot — 사용량 슬롯 화면(TRD S21 usage-limit-slot §4 「프론트 표시」 행 중 컴포넌트 몫).
+// UsageSlot — the usage slot screen (the component's share of the 「프론트 표시」 (frontend display) row of TRD S21 usage-limit-slot §4).
 //
-// 스토어는 실물(`usageStore`)이고 값은 `setState` 로 심는다 — 받기 규칙(merge)은 `usageStore.test.ts` 가 잰다.
-// command 도 실물(`usageSlot.*` 등록)이다 — ⟳·표시 토글이 command 를 거쳐 스토어·레이아웃 쓰기에 닿는 것까지 잰다.
-// 시계는 둘 다 가짜다: 벽시계(`Date`)는 가짜 타이머, 받은 시각 기준 시계(`performance.now`)는 spy.
-// jsdom 엔 레이아웃이 없어 폭은 가짜 ResizeObserver 로 직접 준다(슬롯 폭 · ⟳ 자리 폭 + 두 단계의 자연 폭).
+// The store is the real one (`usageStore`) and values are planted with `setState` — the receive rule (merge) is measured by `usageStore.test.ts`.
+// The command is the real one too (`usageSlot.*` registration) — measures that the ⟳ · display toggle reach store and layout writes through the command.
+// Both clocks are fake: the wall clock (`Date`) is a fake timer, and the received-time reference clock (`performance.now`) is a spy.
+// jsdom has no layout, so widths are given directly by a fake ResizeObserver (slot width · ⟳ area width + the natural widths of two stages).
 
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -21,7 +21,7 @@ vi.mock('../../api/clientFactory', () => ({ agentClient: client }))
 const opener = vi.hoisted(() => ({ openUrl: vi.fn(async (_url: string) => undefined) }))
 vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: opener.openUrl }))
 
-// 표시 토글은 command → viewStore → 셸 invoke 까지 실물로 흐르고, 그 끝의 invoke 인자로 잰다(`usageCommands.test` 와 같다).
+// The display toggle flows for real through command → viewStore → shell invoke, and is measured by the invoke argument at the end (same as `usageCommands.test`).
 const invokeMock = vi.hoisted(() => vi.fn(async (_cmd: string, _args?: unknown) => undefined as unknown))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => vi.fn()) }))
@@ -29,19 +29,19 @@ vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: () => ({ close: vi.fn(async () => undefined), label: () => 'main' }),
 }))
 
-// `?raw` 인 이유 = `index.css.test.ts` 와 같다(@types/node 가 없어 fs 를 쓰면 tsc 게이트가 깨진다).
+// Why `?raw` = same as `index.css.test.ts` (there is no @types/node, so using fs would break the tsc gate).
 import usageLinksSource from '../../../src-tauri/capabilities/usage-links.json?raw'
-import '../../commands/usageCommands' // side-effect: usageSlot.* 등록
+import '../../commands/usageCommands' // side-effect: usageSlot.* registration
 import { useUsageStore } from '../../store/usageStore'
 import UsageSlot, { USAGE_PAGE_URL } from './UsageSlot'
 import { ANCHOR_GAP } from './SlotContextMenu'
 import { formatAge, formatClock, formatResetAt, STALE_AFTER_SECS, statusLine, statusSentence } from './usageFormat'
 
-// theme.css 원문을 Node fs 로 읽는다 — 까닭과 선언 모양은 `store/chatStyleStore.test.ts` 와 같다.
+// Reads the theme.css source with Node fs — the reason and declaration shape are the same as `store/chatStyleStore.test.ts`.
 declare function require(id: string): { readFileSync(p: string, enc: string): string }
 declare const process: { cwd(): string }
 
-const NOW = 1_900_000_000 // 벽시계(초)
+const NOW = 1_900_000_000 // Wall clock (seconds)
 let perfNow = 50_000 // performance.now()(ms)
 
 class FakeResizeObserver {
@@ -129,7 +129,7 @@ function summary(): HTMLElement {
   return q('[data-usage-summary]')!
 }
 
-/** 작은 표시의 ⟳(요약 버튼 밖). */
+/** The ⟳ of the small display (outside the summary button). */
 function refreshButton(): HTMLButtonElement | null {
   return q('[data-usage-slot] [data-usage-refresh]') as HTMLButtonElement | null
 }
@@ -138,7 +138,7 @@ function valueOf(vendor: string, window: string, root: ParentNode = summary()): 
   return q(`[data-usage-vendor="${vendor}"][data-usage-window="${window}"] [data-usage-value]`, root)
 }
 
-/** ⟳ 자리의 폭(⟳ + 오른쪽 여백)과 요약 버튼의 좌우 여백 합 — 실물 값에 맞춘 가짜 크기. */
+/** The width of the ⟳ area (⟳ + right margin) plus the left/right margins of the summary button — a fake size matched to real values. */
 const REFRESH_AREA_W = 26
 const SUMMARY_PAD_X_TOTAL = 12
 
@@ -148,7 +148,7 @@ function liveObserver(): FakeResizeObserver {
   return live[0]
 }
 
-/** 관찰자가 받는 크기를 그대로 준다 — 슬롯 루트 · ⟳ 자리 · 1·2단 측정 사본. */
+/** Gives the observer the size it receives as is — slot root · ⟳ area · stage 1·2 measurement copies. */
 function fireSizes(s: { rootW: number; rootH: number; refreshW: number; s1: number; s2: number; s2h: number }): void {
   act(() =>
     liveObserver().fire([
@@ -161,8 +161,8 @@ function fireSizes(s: { rootW: number; rootH: number; refreshW: number; s1: numb
 }
 
 /**
- * 내용이 쓸 폭(`avail`)과 1·2단 자연 폭을 준다 — 슬롯 폭은 `avail` + ⟳ 자리 + 요약 버튼 여백으로 거꾸로 세운다.
- * 높이는 기본으로 넉넉하다(슬롯 1000 · 2단 30) — 단계는 높이를 보지 않지만(ADR-0259) 관찰자는 높이도 싣는다.
+ * Gives the width the content will use (`avail`) and the natural widths of stages 1·2 — the slot width is built backwards as `avail` + ⟳ area + summary button margins.
+ * Height is generous by default (slot 1000 · stage 2 30) — stages do not look at height (ADR-0259) but the observer carries height too.
  */
 function setWidths(avail: number, s1: number, s2: number, { rootH = 1000, s2h = 30 } = {}): void {
   const refreshW = refreshButton() ? REFRESH_AREA_W : 0
@@ -170,8 +170,8 @@ function setWidths(avail: number, s1: number, s2: number, { rootH = 1000, s2h = 
 }
 
 /**
- * 리셋 시각의 보이는 글자 — 포맷터와 따로 세운 기대값(`Date` 의 로컬 getter). 지금(`NOW`)과 같은 로컬 날짜면 「HH:MM」,
- * 아니면 「M/D HH:MM」. 시간대에 따라 NOW + 몇 시간이 자정을 넘을 수 있어 날짜를 늘 직접 견준다.
+ * The visible text of the reset time — an expected value built apart from the formatter (the local getters of `Date`). If it is the same local date as now (`NOW`) 「HH:MM」,
+ * otherwise 「M/D HH:MM」. Depending on the time zone NOW + a few hours can cross midnight, so the date is always compared directly.
  */
 function resetText(epochSecs: number): string {
   const d = new Date(epochSecs * 1000)
@@ -182,12 +182,12 @@ function resetText(epochSecs: number): string {
   return sameDay ? time : `${d.getMonth() + 1}/${d.getDate()} ${time}`
 }
 
-/** 리셋 시각의 이름(툴팁·보조기술) — 보이는 자리엔 낱말 대신 모래시계가 선다(ADR-0259). */
+/** The name of the reset time (tooltip · assistive tech) — in the visible spot an hourglass stands instead of a word (ADR-0259). */
 function resetName(epochSecs: number): string {
   return `리셋 ${resetText(epochSecs)}`
 }
 
-/** 팝업 창 줄의 리셋 자리 — 모래시계 표식(툴팁 = 이름)과 그 뒤의 남은 시간. */
+/** The reset spot of the popup window row — the hourglass marker (tooltip = name) and the remaining time after it. */
 function popupReset(row: ParentNode): { mark: HTMLElement; text: string; name: string | null; after: string } {
   const at = q('[data-usage-reset-at]', row)!
   const mark = q('[role="img"]', at)!
@@ -199,7 +199,7 @@ function popupReset(row: ParentNode): { mark: HTMLElement; text: string; name: s
   }
 }
 
-/** 팝업의 회사 머리 — 회사 섹션의 첫 줄. */
+/** The company head of the popup — the first line of the company section. */
 function popupHead(popup: ParentNode, vendor: string): HTMLElement {
   return q(`[data-usage-popup-vendor="${vendor}"]`, popup)!.firstElementChild as HTMLElement
 }
@@ -208,7 +208,7 @@ function vendorRefresh(popup: ParentNode, vendor: string): HTMLButtonElement {
   return q(`[data-usage-vendor-refresh="${vendor}"]`, popup) as HTMLButtonElement
 }
 
-/** 격자 칸 목록 — `minmax(…, …)` 안의 공백은 칸을 가르지 않는다. */
+/** Grid cell list — whitespace inside `minmax(…, …)` does not separate cells. */
 function tracks(template: string): string[] {
   return template.match(/minmax\([^)]*\)|\S+/g) ?? []
 }
@@ -250,7 +250,7 @@ const FIVE_STATES: Array<[string, UsageVendorState]> = [
   ['Rejected', { kind: 'Rejected', retry_in_secs: 720, detail: { kind: 'rate_limited', code: 429, upstream: null } }],
 ]
 
-// ── 마운트 · 켠 회사 ──
+// ── Mount · enabled company ──
 describe('마운트와 켠 회사', () => {
   it('마운트하면 셸 캐시를 한 번 당긴다(TRD §3 #82)', () => {
     mount()
@@ -289,7 +289,7 @@ describe('마운트와 켠 회사', () => {
     expect(q('[data-usage-status-line]', popup)).toBeNull()
     expect(vendorRefresh(popup, 'codex')).toBeNull()
     expect(vendorRefresh(popup, 'claude')).not.toBeNull()
-    // 이름이 남는 자리는 표시 토글 줄뿐이다(다시 켤 자리) — 꺼진 채로(ADR-0259 결정 7).
+    // The only place where the name remains is the display toggle row (the place to turn it back on) — while off (ADR-0259 decision 7).
     const toggles = q('[data-usage-show-toggles]', popup)!
     for (const child of popup.children) {
       if (child !== toggles) expect(child.textContent).not.toContain('Codex')
@@ -307,7 +307,7 @@ describe('마운트와 켠 회사', () => {
   })
 })
 
-// ── 값 · 색 · 막대 ──
+// ── Value · color · bar ──
 describe('값·색·막대', () => {
   it('남은 양을 DOM 텍스트로(R27) — Claude 사용률 38 → 62%', () => {
     seed(snap('claude'))
@@ -382,12 +382,12 @@ describe('값·색·막대', () => {
   })
 })
 
-// ── 폭 단계(R3·D16) ──
+// ── Width stages (R3·D16) ──
 describe('폭 단계', () => {
   it('들어가는 가장 넓은 단계 — 회사당 한 줄 → 창마다 한 줄 → 숫자만', () => {
     seed(snap('claude'))
     mount(true, false)
-    expect(stage()).toBe('1') // 재기 전엔 가장 자세한 단계
+    expect(stage()).toBe('1') // The most detailed stage before measuring
     setWidths(400, 400, 200)
     expect(stage()).toBe('1')
     setWidths(399, 400, 200)
@@ -396,7 +396,7 @@ describe('폭 단계', () => {
     expect(stage()).toBe('2')
     setWidths(199, 400, 200)
     expect(stage()).toBe('3')
-    // 자연 폭이 줄면(값·문구가 바뀌어 숨은 렌더가 다시 재어지면) 다시 넓은 단계로.
+    // When the natural width shrinks (values·text change and the hidden render is measured again), back to the wide stage.
     setWidths(199, 150, 100)
     expect(stage()).toBe('1')
   })
@@ -415,7 +415,7 @@ describe('폭 단계', () => {
       expect(cell('weekly').textContent).not.toMatch(/[일월화수목금토]/)
       expect(cell('five_hour').getAttribute('title')).toBe(resetName(NOW + 7_980))
       expect(cell('weekly').getAttribute('title')).toBe(resetName(NOW + 86_400 * 3))
-      // 낱말 「리셋」 은 툴팁에만 — DOM 글자에서는 빠진다(ADR-0259 결정 3).
+      // The word 「리셋」 (reset) is only in the tooltip — it is absent from the DOM text (ADR-0259 decision 3).
       expect(summary().textContent).not.toMatch(/리셋|뒤|↻/)
     }
     toStage(3)
@@ -450,7 +450,7 @@ describe('폭 단계', () => {
       expect(m.querySelector('[aria-label]')).toBeNull()
       expect(m.querySelector('[title]')).toBeNull()
       expect(m.textContent).toContain('62%')
-      // 보이는 쪽과 같은 모양 — 한 격자 · 아이콘 · 리셋 시각.
+      // Same shape as the visible side — one grid · icon · reset time.
       expect((m.firstElementChild as HTMLElement).style.display).toBe('grid')
       expect(m.querySelectorAll('svg:not(.lucide)')).toHaveLength(1)
       expect(m.querySelectorAll('svg.lucide-refresh-cw')).toHaveLength(0)
@@ -461,7 +461,7 @@ describe('폭 단계', () => {
   })
 })
 
-// ── 상태 배지(R31) ──
+// ── Status badge (R31) ──
 describe('상태 배지와 문장', () => {
   for (const [name, state] of FIVE_STATES) {
     it(`${name} — 모든 폭 단계에서 이름 옆 「!」 배지 · aria-label = title = 팝업 맨 위 줄`, () => {
@@ -523,7 +523,7 @@ describe('상태 배지와 문장', () => {
   })
 })
 
-// ── 오래됨·만료·갱신 중(R32) ──
+// ── Stale · expired · refreshing (R32) ──
 describe('오래됨 · 만료 · 갱신 중', () => {
   it('30분 넘은 값 → 작은 표시는 숫자만 흐리게(나이 문구 없음) · 팝업은 흐리지 않고 회사 머리의 나이를 호박색으로', () => {
     seed(
@@ -540,7 +540,7 @@ describe('오래됨 · 만료 · 갱신 중', () => {
     const fresh = valueOf('claude', 'weekly')!
     expect(fresh.hasAttribute('data-usage-stale')).toBe(false)
     expect(fresh.style.opacity).toBe('')
-    // 흐리게 하는 것은 숫자뿐 — 막대·이름은 그대로.
+    // Only the number is dimmed — the bar and name stay as they are.
     expect(q('[data-usage-vendor="claude"][data-usage-window="five_hour"] [data-usage-bar]')!.style.opacity).toBe('')
     expect(summary().textContent).not.toMatch(/분 전|방금/)
 
@@ -548,7 +548,7 @@ describe('오래됨 · 만료 · 갱신 중', () => {
     expect(q('[data-usage-value][data-usage-stale]', popup)).toBeNull()
     expect(q('[data-usage-window] [data-usage-age]', popup)).toBeNull()
     expect(popup.querySelectorAll('[data-usage-age]')).toHaveLength(1)
-    // 머리의 나이 = 두 창 가운데 오래된 쪽(1801초) — 30분을 넘어 호박색이다(ADR-0259 결정 4).
+    // The head's age = the older of the two windows (1801 seconds) — past 30 minutes it is amber (ADR-0259 decision 4).
     const age = q('[data-usage-age]', popupHead(popup, 'claude'))!
     expect(age.textContent).toBe('30분 전')
     expect(age.hasAttribute('data-usage-stale')).toBe(true)
@@ -626,7 +626,7 @@ describe('오래됨 · 만료 · 갱신 중', () => {
     advance(60_000)
     expect(reset().after).toBe('(2시간 12분 뒤)')
     expect(q('[data-usage-age]', popup)!.textContent).toBe(formatAge(60))
-    // 다음 시도 시각 자체는 같은 순간을 가리킨다(받은 순간 기준 상대 초 − 흐른 초 + 지금).
+    // The next attempt time itself points to the same instant (relative seconds from the receipt moment − elapsed seconds + now).
     expect(q('[data-usage-badge]')!.getAttribute('aria-label')).toBe(before)
     expect(client.getUsageSnapshot).toHaveBeenCalledTimes(1)
     expect(client.refreshUsageLimits).not.toHaveBeenCalled()
@@ -641,7 +641,7 @@ describe('오래됨 · 만료 · 갱신 중', () => {
   })
 })
 
-// ── 팝업(R5–R7·D8·D14) ──
+// ── Popup (R5–R7·D8·D14) ──
 describe('팝업', () => {
   it('요약 영역은 네이티브 버튼 — 클릭(Enter·Space 는 브라우저가 같은 click 으로 부른다)으로 열고 포커스를 옮긴다', () => {
     seed(snap('claude'))
@@ -795,7 +795,7 @@ describe('팝업', () => {
   })
 })
 
-// ── 팝업 회사 머리(ADR-0259 결정 1·2·4·5) — 「<아이콘> <이름> 플랜: max · 1분 전 ⟳」 ──
+// ── Popup company head (ADR-0259 decisions 1·2·4·5) — 「<아이콘> <이름> 플랜: max · 1분 전 ⟳」 (icon, name, plan: max, 1 minute ago) ──
 describe('팝업 회사 머리', () => {
   const REJECTED = { kind: 'Rejected' as const, retry_in_secs: 600, detail: null }
 
@@ -819,7 +819,7 @@ describe('팝업 회사 머리', () => {
     expect(sep.getAttribute('aria-hidden')).toBe('true')
     expect([...group.children]).toEqual([q('[data-usage-age]', head), vendorRefresh(popup, 'claude')])
     expect(q('[data-usage-age]', head)!.textContent).toBe('1분 전')
-    // lucide 아이콘은 ⟳ 하나뿐 — 나이에 시계 아이콘을 붙이지 않는다.
+    // The lucide icon is only ⟳ — no clock icon is attached to the age.
     expect([...head.querySelectorAll('svg.lucide')].map(svg => svg.closest('button'))).toEqual([
       vendorRefresh(popup, 'claude'),
     ])
@@ -910,7 +910,7 @@ describe('팝업 회사 머리', () => {
     expect(stale.hasAttribute('data-usage-stale')).toBe(true)
     expect(stale.style.color).toBe('var(--usage-stale)')
     expect(stale.getAttribute('title')).toBe('30분 넘게 새로 들어오지 않은 값')
-    // 작은 표시는 숫자만 흐리다 — 같은 창이 같은 순간에 오래됨으로 넘어간다.
+    // In the small display only the number is dimmed — the same window goes stale at the same moment.
     expect(valueOf('claude', 'five_hour')!.hasAttribute('data-usage-stale')).toBe(true)
   })
 
@@ -944,7 +944,7 @@ describe('팝업 회사 머리', () => {
     expect(client.refreshUsageLimits.mock.calls.map(c => c[0])).toEqual(['codex'])
     expect(screen.getByRole('dialog')).toBe(popup)
     expect(document.activeElement).toBe(vendorRefresh(popup, 'codex'))
-    // 그 회사만 「갱신 중」 — 다른 회사의 ⟳ 는 누를 수 있다.
+    // Only that company is 「갱신 중」 (refreshing) — another company's ⟳ can be pressed.
     expect(vendorRefresh(popup, 'codex').getAttribute('aria-busy')).toBe('true')
     expect(vendorRefresh(popup, 'claude').hasAttribute('aria-busy')).toBe(false)
     fireEvent.click(vendorRefresh(popup, 'codex'))
@@ -1020,11 +1020,11 @@ describe('팝업 회사 머리', () => {
   })
 })
 
-// ── 모래시계(ADR-0259 결정 3) — 낱말 「리셋」 은 이름에만 · 화살표 아이콘 없음 ──
+// ── Hourglass (ADR-0259 decision 3) — the word 「리셋」 (reset) only in the name · no arrow icon ──
 describe('리셋 표기 = 모래시계', () => {
   const NOT_HOURGLASS = /lucide-(refresh|rotate|history|repeat|undo|redo|arrow|clock|alarm|calendar)/
 
-  /** `scope` = 표식을 품은 요소 — 이름으로 찾아 같은 요소인지 본다(`title` 이 이름이 된다). */
+  /** `scope` = the element that holds the marker — find it by name and check it is the same element (`title` becomes the name). */
   function expectHourglass(scope: HTMLElement, mark: HTMLElement, at: number): void {
     expect(mark.getAttribute('role')).toBe('img')
     expect(mark.getAttribute('title')).toBe(resetName(at))
@@ -1059,10 +1059,10 @@ describe('리셋 표기 = 모래시계', () => {
       const row = q(`[data-usage-window="${w}"]`, popup)!
       const reset = popupReset(row)
       expectHourglass(row, reset.mark, at)
-      // 남은 시간은 이름을 진 표식 밖 — 보이는 글자로 남고(보조기술도 읽는다) 이름엔 들지 않는다.
+      // The remaining time is outside the marker that carries the name — it stays as visible text (assistive tech reads it too) and is not part of the name.
       expect(reset.mark.contains(q('[data-usage-reset-in]', row))).toBe(false)
       expect(reset.name).not.toContain('뒤')
-      // DOM 글자로 읽어도 시각과 남은 시간이 떨어져 있다(R27).
+      // Even read as DOM text, the time and the remaining time are separated (R27).
       expect(q('[data-usage-reset-at]', row)!.textContent).toBe(`${resetText(at)} ${reset.after}`)
     }
   })
@@ -1080,7 +1080,7 @@ describe('리셋 표기 = 모래시계', () => {
     const marks = [
       ...document.querySelectorAll<HTMLElement>('[data-usage-reset-clock], [data-usage-reset-at] [role="img"]'),
     ]
-    // 작은 표시 두 창 + 팝업 세 줄(5시간·주간·Opus).
+    // Two windows of the small display + three popup rows (5-hour · weekly · Opus).
     expect(marks).toHaveLength(5)
     for (const mark of marks) {
       expect(mark.hasAttribute('title')).toBe(true)
@@ -1104,7 +1104,7 @@ describe('리셋 표기 = 모래시계', () => {
   })
 })
 
-// ── 작은 표시의 ⟳(사용자 결정 2026-09-29) — 켠 회사를 한 번에 · command 경로 · 팝업과 따로 ──
+// ── The ⟳ of the small display (user decision 2026-09-29) — enabled companies at once · command path · separate from the popup ──
 describe('작은 표시의 ⟳', () => {
   it('세 폭 단계 모두 격자 오른쪽에 하나 — 테두리 있는 아이콘 버튼 · 이름 「사용량 새로고침」', () => {
     seed(snap('claude'))
@@ -1177,7 +1177,7 @@ describe('작은 표시의 ⟳', () => {
     expect(refreshButton()!.getAttribute('aria-busy')).toBe('true')
     fireEvent.click(refreshButton()!)
     expect(client.refreshUsageLimits).not.toHaveBeenCalled()
-    // 상대가 스스로 도는 조회(in_flight)도 같다.
+    // A query the other side runs by itself (in_flight) is the same.
     act(() => {
       useUsageStore.setState({ pending: {} })
       seed(snap('claude', { revision: 2, in_flight: true }))
@@ -1197,11 +1197,11 @@ describe('작은 표시의 ⟳', () => {
     mount()
     const refresh = refreshButton()!
     expect(refresh.getAttribute('aria-disabled')).toBe('true')
-    expect(refresh.disabled).toBe(false) // 포커스를 쥘 수 있게 남긴다
+    expect(refresh.disabled).toBe(false) // Left so it can hold focus
     const warn = vi.spyOn(console, 'warn')
     fireEvent.click(refresh)
     expect(client.refreshUsageLimits).not.toHaveBeenCalled()
-    expect(warn).not.toHaveBeenCalled() // command 까지 가서 거절당한 것이 아니다
+    expect(warn).not.toHaveBeenCalled() // It is not that it went all the way to the command and was refused
   })
 
   it('포커스된 ⟳ 가 거절로 바뀌어도 포커스를 쥔 채 누름만 막힌다', () => {
@@ -1235,12 +1235,12 @@ describe('작은 표시의 ⟳', () => {
   })
 })
 
-// ── 팝업의 표시 토글 줄(사용자 결정 2026-09-29) ──
+// ── The popup's display toggle row (user decision 2026-09-29) ──
 describe('팝업의 표시 토글 줄', () => {
   function toggles(popup: HTMLElement): HTMLInputElement[] {
     return within(q('[data-usage-show-toggles]', popup)!).getAllByRole('checkbox') as HTMLInputElement[]
   }
-  /** 셸로 나간 표시 칸 쓰기의 인자 — 다른 invoke 는 거른다. */
+  /** The argument of a display field write that went out to the shell — other invokes are filtered out. */
   function usageWrites(): unknown[] {
     return invokeMock.mock.calls.filter(([cmd]) => cmd === 'set_usage_slot').map(([, args]) => args)
   }
@@ -1342,7 +1342,7 @@ describe('팝업의 표시 토글 줄', () => {
   })
 })
 
-// ── 단계 고르기와 ⟳ — ⟳ 는 내용 바로 옆 · 단계 판정의 폭은 슬롯 폭 − ⟳ 자리 ──
+// ── Stage picking and ⟳ — ⟳ is right next to the content · the width for the stage decision is slot width − ⟳ area ──
 describe('단계 측정과 ⟳', () => {
   it('줄 = 요약 버튼 · ⟳ 자리(줄지 않음) 둘뿐 — ⟳ 는 측정 사본·요약 버튼 안에 없다(넣으면 ⟳ 몫을 두 번 뺀다)', () => {
     seed(snap('claude'))
@@ -1377,7 +1377,7 @@ describe('단계 측정과 ⟳', () => {
     toStage(3)
     expect(row.style.width).toBe('fit-content')
     expect(row.style.maxWidth).toBe('100%')
-    // 줄이 줄어도 요약 버튼은 슬롯보다 좁아질 수 있어야 한다 — 내용을 자르고 ⟳ 자리는 남긴다.
+    // Even when the line shrinks the summary button must be able to get narrower than the slot — cut the content and keep the ⟳ area.
     expect(parseFloat(summary().style.minWidth)).toBe(0)
     expect(q('[data-usage-content]')!.style.overflow).toBe('hidden')
     toStage(1)
@@ -1402,7 +1402,7 @@ describe('단계 측정과 ⟳', () => {
     seed(snap('claude'))
     seed(snap('codex'))
     mount()
-    // 단계에 따라 폭이 바뀌는 요소(줄 · 요약 버튼 · 보이는 내용)는 관찰 대상이 아니다.
+    // Elements whose width changes with the stage (line · summary button · visible content) are not observation targets.
     const observed = liveObserver().observed
     for (const sel of ['[data-usage-row]', '[data-usage-summary]', '[data-usage-content]']) {
       expect(observed).not.toContain(q(sel))
@@ -1412,10 +1412,10 @@ describe('단계 측정과 ⟳', () => {
     expect(stage()).toBe('1')
     fireSizes({ ...wide, rootW: 120 })
     expect(stage()).toBe('3')
-    // 3단 그림으로 다시 배치된 뒤 같은 크기를 또 알려도 3단에 머문다(오가지 않는다).
+    // After being laid out again with the stage-3 picture, even if the same size is notified again it stays at stage 3 (it does not go back and forth).
     fireSizes({ ...wide, rootW: 120 })
     expect(stage()).toBe('3')
-    // 관찰 대상이 아닌 요소(3단에서 줄어든 내용)의 알림은 판정에 들지 않는다.
+    // A notification from an element that is not an observation target (content shrunk at stage 3) does not enter the decision.
     act(() => liveObserver().fire([[q('[data-usage-content]')!, 40]]))
     expect(stage()).toBe('3')
     fireSizes(wide)
@@ -1464,12 +1464,12 @@ describe('단계 측정과 ⟳', () => {
   })
 })
 
-// ── 낮은 슬롯(단계는 폭으로만) · 리셋만 실린 창 · 팝업 자리 · 포커스 · Esc · 회전 ──
+// ── Low slot (stage by width only) · window carrying only reset · popup place · focus · Esc · rotation ──
 function rect(left: number, top: number, width: number, height: number): DOMRect {
   return { left, top, width, height, right: left + width, bottom: top + height, x: left, y: top, toJSON() {} } as DOMRect
 }
 
-/** 요약·팝업의 화면 사각형을 준다(jsdom 엔 레이아웃이 없다). */
+/** Gives the on-screen rectangles of the summary and popup (jsdom has no layout). */
 function stubRects(summaryRect: DOMRect, popupRect: DOMRect): void {
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
     if (this.hasAttribute('data-usage-popup')) return popupRect
@@ -1489,7 +1489,7 @@ describe('높이 · 리셋만 실린 창', () => {
       expect(stage()).toBe('2')
     }
     expect(q('[data-usage-slot]')!.style.overflow).toBe('hidden')
-    // 잘려 보이지 않아도 배지는 DOM 에 그대로 있다(받아들인 대가 — 가려질 뿐 사라지지 않는다).
+    // Even when it is cut off and not visible, the badge is still in the DOM (the price of accepting — it is only hidden, not gone).
     expect(q('[data-usage-badge="claude"]')).not.toBeNull()
     setWidths(500, 400, 200, { rootH: 10, s2h: 45 })
     expect(stage()).toBe('1')
@@ -1613,7 +1613,7 @@ describe('팝업 자리 · 포커스 · Esc', () => {
     seed(snap('claude', { in_flight: true }))
     mount(true, false)
     const svg = () => q('svg.lucide-refresh-cw', refreshButton()!)!
-    // jsdom 엔 AnimationEvent 가 없어 React 가 접두 붙은 이름으로 듣는다 — 두 이름을 다 쏜다.
+    // jsdom has no AnimationEvent so React listens under the prefixed name — fire both names.
     const roundEnds = () => {
       fireEvent.animationIteration(svg())
       fireEvent(svg(), new Event('webkitAnimationIteration', { bubbles: true }))
@@ -1624,16 +1624,16 @@ describe('팝업 자리 · 포커스 · Esc', () => {
       expect(refreshButton()!.hasAttribute('aria-busy')).toBe(false)
     }
     expect(svg().getAttribute('class')).toContain('animate-spin')
-    // 조회가 도는 동안의 경계에선 멈추지 않는다.
+    // It does not stop at a boundary while the query is running.
     roundEnds()
     expect(svg().getAttribute('class')).toContain('animate-spin')
-    // 꼬리 — 조회는 끝났고 돌던 바퀴를 마저 돈다. 조회 중이 아니므로 속성·aria-busy 가 없다.
+    // Tail — the query is done and the wheel that was turning finishes its turn. It is not querying, so there is no attribute or aria-busy.
     act(() => seed(snap('claude', { revision: 2 })))
     expectTail()
     roundEnds()
     expect(svg().getAttribute('class')).not.toContain('animate-spin')
 
-    // 경계 전에 누르면 = 보통 누름 — 명령 하나 · 아이콘을 새로 붙여 처음부터.
+    // Pressing before the boundary = an ordinary press — one command · attach the icon anew and start from the beginning.
     act(() => seed(snap('claude', { revision: 3, in_flight: true })))
     act(() => seed(snap('claude', { revision: 4 })))
     expectTail()
@@ -1669,7 +1669,7 @@ describe('팝업 자리 · 포커스 · Esc', () => {
   })
 })
 
-// ── 작은 표시 개편(사용자 결정 2026-09-29) — 회사 아이콘 · 한 격자 세로 정렬 · ⚠ 없음 ──
+// ── Small display overhaul (user decision 2026-09-29) — company icon · one-grid vertical alignment · no ⚠ ──
 describe('회사 아이콘', () => {
   it('모든 폭 단계에서 이름 대신 아이콘 — role=img · aria-label = title = 회사 이름 · 색은 회사 토큰', () => {
     seed(snap('claude'))
@@ -1688,7 +1688,7 @@ describe('회사 아이콘', () => {
         expect(icon.style.color).toBe(`var(--usage-vendor-${vendor})`)
         expect(q('svg', icon)!.getAttribute('width')).toBe('16')
       }
-      // 이름 글자는 작은 표시에서 빠졌다 — 요약 버튼의 접근성 이름만 이름을 진다.
+      // The name text was dropped from the small display — only the summary button's accessibility name carries the name.
       expect(summary().textContent).not.toMatch(/Claude|Codex|Cl|Cx/)
       expect(summary().getAttribute('aria-label')).toMatch(/^Claude .* · Codex /)
     }
@@ -1740,7 +1740,7 @@ describe('회사 아이콘', () => {
 
   it('사용량 색 토큰은 세 테마 모두 바탕 토큰만 가리킨다(리터럴 없음 — 색 프리셋 대비) · e-ink 바탕은 본문색', () => {
     const css = require('node:fs').readFileSync(`${process.cwd()}/src/styles/theme.css`, 'utf8')
-    // 테마 줄마다 선언 블록 둘 — 바탕(`--bg` 로 시작) 과 사용량(`--usage-ok` 로 시작).
+    // Two declaration blocks per theme line — the base (starting with `--bg`) and usage (starting with `--usage-ok`).
     const block = (theme: string, first: string): string => {
       const m = css.match(new RegExp(`:root\\[data-theme='${theme}'\\]\\s*\\{\\s*${first}[^}]*\\}`))
       expect(m, `${theme} 의 ${first} 블록이 없다`).not.toBeNull()
@@ -1751,7 +1751,7 @@ describe('회사 아이콘', () => {
       expect(usage).toContain('--usage-danger: var(--status-danger);')
       expect(usage).toContain('--usage-vendor-claude: var(--vendor-claude);')
       expect(usage).toContain('--usage-vendor-codex: var(--vendor-codex);')
-      // 팝업 머리의 오래된 나이(호박색 — ADR-0259 결정 4).
+      // The old age in the popup head (amber — ADR-0259 decision 4).
       expect(usage).toContain('--usage-stale: var(--status-blocked);')
       expect(usage, `${theme} 사용량 줄에 색 리터럴`).not.toMatch(/#[0-9a-fA-F]{3,8}\b/)
       const base = block(theme, '--bg')
@@ -1760,7 +1760,7 @@ describe('회사 아이콘', () => {
       }
     }
     const eink = block('e-ink', '--bg')
-    // e-ink 의 호박색은 본문색이다 — 색 단서 없이 흐린 글자보다 진해질 뿐이다(TRD §6 #30 미정).
+    // Amber in e-ink is the body color — it only gets darker than the dim text with no color cue (TRD §6 #30 undecided).
     for (const token of ['--status-danger', '--status-blocked', '--vendor-claude', '--vendor-codex']) {
       expect(eink).toContain(`${token}: var(--text);`)
     }
@@ -1768,7 +1768,7 @@ describe('회사 아이콘', () => {
 })
 
 describe('한 격자 세로 정렬', () => {
-  /** 한 창의 칸(= 값 표식을 단 `display: contents` 의 자식들). */
+  /** The cells of one window (= the children of the `display: contents` that carries the value marker). */
   function cells(vendor: string, window: string): HTMLElement[] {
     const seg = q(`[data-usage-vendor="${vendor}"][data-usage-window="${window}"]`, summary())!
     expect(seg.style.display).toBe('contents')
@@ -1795,7 +1795,7 @@ describe('한 격자 세로 정렬', () => {
       expect(`${iconCell.style.gridRow}:${iconCell.style.gridColumn}`).toBe(`${row}:1`)
       expect(grid.contains(q(`[data-usage-vendor="${vendor}"][data-usage-window="weekly"]`, summary()))).toBe(true)
     }
-    // 같은 창의 같은 칸은 같은 열, 회사마다 다른 줄.
+    // The same cell of the same window is the same column, and a different row for each company.
     for (const window of ['five_hour', 'weekly']) {
       const a = cells('claude', window)
       const b = cells('codex', window)
@@ -1805,7 +1805,7 @@ describe('한 격자 세로 정렬', () => {
     }
     expect(cells('claude', 'five_hour').map(c => c.style.gridColumn)).toEqual(['2', '3', '4', '5'])
     expect(cells('claude', 'weekly').map(c => c.style.gridColumn)).toEqual(['6', '7', '8', '9'])
-    // % 칸은 오른쪽 정렬 — 1% 와 62% 의 자리 수가 달라도 끝이 맞는다.
+    // The % cell is right-aligned — the ends line up even if 1% and 62% have different digit counts.
     for (const vendor of ['claude', 'codex']) {
       expect(valueOf(vendor, 'five_hour')!.parentElement!.style.textAlign).toBe('right')
     }
@@ -1862,9 +1862,9 @@ describe('한 격자 세로 정렬', () => {
   })
 })
 
-// ── 팝업 한 표(ADR-0261 · TRD §3 #108) — jsdom 은 배치를 계산하지 않아 구조·열 번호로 단언한다 ──
+// ── Popup as one table (ADR-0261 · TRD §3 #108) — jsdom does not compute layout, so assert by structure · column number ──
 describe('팝업 한 표', () => {
-  /** 팝업 창 줄에서 열 자리를 박은 칸들의 열(DOM 순서). */
+  /** The columns (DOM order) of the cells whose column position is pinned in a popup window row. */
   function columns(row: HTMLElement): string[] {
     return [...row.querySelectorAll<HTMLElement>('*')].filter(el => el.style.gridColumn !== '').map(el => el.style.gridColumn)
   }
@@ -1973,7 +1973,7 @@ describe('측정 사본과 단계 고르기', () => {
       const copyGrid = m[n].firstElementChild as HTMLElement
       expect(copyGrid.style.gridTemplateColumns).toBe(shownGrid.style.gridTemplateColumns)
       expect(m[n].textContent).toBe(shown.textContent)
-      // 회사 아이콘·모래시계는 같은 수.
+      // Company icons and hourglasses are the same in number.
       expect(m[n].querySelectorAll('svg:not(.lucide)')).toHaveLength(shown.querySelectorAll('svg:not(.lucide)').length)
       expect(m[n].querySelectorAll('svg.lucide-hourglass')).toHaveLength(shown.querySelectorAll('svg.lucide-hourglass').length)
       const placed = shown.querySelectorAll('[style*="grid-column"]').length
@@ -2000,7 +2000,7 @@ describe('측정 사본과 단계 고르기', () => {
   })
 })
 
-// ── 「사용량 페이지 ↗」 목적지 = 셸 opener 허용 목록 — 쿼리·끝 슬래시 하나라도 다르면 셸이 여는 것을 거절한다 ──
+// ── 「사용량 페이지 ↗」 (usage page) destination = shell opener allow list — if even one query or trailing slash differs the shell refuses to open it ──
 describe('사용량 페이지 주소 = 셸 허용 목록(src-tauri/capabilities/usage-links.json)', () => {
   it('회사별 주소가 허용 목록과 글자까지 같다 · 목록에 남는 주소도 없다', () => {
     const cap = JSON.parse(usageLinksSource) as {

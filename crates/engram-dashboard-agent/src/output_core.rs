@@ -1,13 +1,13 @@
-//! OutputCore — 에이전트 1개의 출력 측 핵심 상태(seq/replay/subscribers/status)와
-//! 그 위의 동작(emit/finish/subscribe/...)을 transport·session에서 분리한 공용 struct.
+//! OutputCore — a shared struct that separates an agent's output-side core state (seq/replay/subscribers/status)
+//! and the behavior on top of it (emit/finish/subscribe/...) out of transport · session.
 //!
-//! 왜 분리하는가: 출력 fanout·종료 전이·구독은 PTY든 API든 transport 종류와 무관하게
-//! 동일하다. transport는 바이트·이벤트를 만들어 `emit`/`finish`로 넘기기만 하면 된다.
+//! Why separate: output fanout · terminal transitions · subscription are identical for PTY and API,
+//! regardless of the transport kind. A transport only needs to produce bytes/events and hand them to `emit`/`finish`.
 //!
-//! transport(pump)가 emit/finish로 출력·종료를 넘기고, manager/AgentSession이 subscribe/
-//! status/snapshot으로 조회한다.
+//! The transport (pump) hands output and termination over via emit/finish, and manager/AgentSession query via subscribe/
+//! status/snapshot.
 //!
-//! tauri import 0. S9 drain/session의 락 규율·불변식을 글자 그대로 보존한다.
+//! tauri import 0. The S9 drain/session lock discipline and invariants are preserved literally.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -30,128 +30,128 @@ use crate::types::{
 
 type OnTerminalHook = Box<dyn Fn(TerminalReason) + Send + Sync>;
 
-/// 진단 스트림 버퍼의 상한 — 이 화신의 stderr 를 **뒤에서부터** 이만큼만 붙든다.
+/// The cap of the diagnostic stream buffer — it holds only this much of this incarnation's stderr, counted **from the end**.
 ///
-/// ★출력 링과 다른 물건이다 — 합치지 말 것★: 링은 터미널 화면과 stream-json 파서가 **함께** 먹는
-///   스트림이라, 거기 stderr 를 섞으면 NDJSON 중간에 비-JSON 라인이 껴 파서가 깨지고 화면에도 진단이
-///   새 나온다(근거 정본 = `transport::stdio` 모듈의 ADR-0044 주석). 그래서 별도의 작은 버퍼다.
-/// ★크기 근거★: 이 버퍼를 읽는 소비자는 활성화 실패 분류 하나뿐이고(`AgentManager` 의 조기 판정),
-///   그가 찾는 것은 claude 가 내는 한 줄짜리 진단 문구다. 몇 KB 면 그 줄이 뒤 출력에 밀려나지 않는다.
-///   ★상한을 지우면 안 된다★ — 이 버퍼는 세션이 사는 내내 자라므로 무제한이면 진행 로그를 뱉는
-///   에이전트에서 그대로 메모리 누수가 된다.
+/// ★It is a different thing from the output ring — do not merge them★: the ring is a stream that the terminal screen and the stream-json parser consume **together**,
+///   so mixing stderr in there wedges a non-JSON line in the middle of NDJSON, breaking the parser and leaking diagnostics
+///   onto the screen too (source of record for the grounds = the ADR-0044 comment in the `transport::stdio` module). So it is a separate small buffer.
+/// ★Size grounds★: the only consumer reading this buffer is activation-failure classification (the early decision in `AgentManager`),
+///   and what it looks for is the one-line diagnostic text claude emits. A few KB keeps that line from being pushed out by later output.
+///   ★The cap must not be removed★ — this buffer grows for as long as the session lives, so if unbounded, an agent that spews
+///   progress logs leaks memory as is.
 // ADR-0172
 const DIAGNOSTIC_CAP_BYTES: usize = 8 * 1024;
 
-/// 에이전트 1개의 출력 측 핵심 상태. 필드별 독립 Mutex(session.rs 모듈 주석의 분리 동기와 동일):
-/// emit이 replay/subscribers lock만 짧게 잡는 동안 다른 경로(status 등)와 교착 없이 병행 가능.
+/// An agent's output-side core state. An independent Mutex per field (same as the split motive in the session.rs module comment):
+/// while emit holds only the replay/subscribers lock briefly, it can run in parallel with other paths (status, etc.) without deadlock.
 pub struct OutputCore {
-    // ── 불변 (생성 후 변경 없음) ──────────────────────────────
+    // ── Immutable (no change after creation) ──────────────────
     id: AgentId,
     epoch: u32,
 
-    // ── 출력 시퀀스 / 상태 ────────────────────────────────────
+    // ── Output sequence / status ──────────────────────────────
     seq: AtomicU64,
     status: Mutex<AgentStatus>,
     finalized: AtomicBool,
 
-    // ── 출력 구독 ─────────────────────────────────────────────
+    // ── Output subscription ───────────────────────────────────
     subscribers: Mutex<Vec<Arc<dyn OutputSink>>>,
 
     // ── Replay buffer ─────────────────────────────────────────
     replay: Mutex<Ring>,
 
-    // ── 진단 스트림 (ADR-0172 분류 입구) ──────────────────────
-    /// 이 화신의 **stderr 텍스트** 꼬리(bounded). 출력 링과 **분리된** 별도 버퍼이고, 그 이유와
-    /// 크기 근거는 `DIAGNOSTIC_CAP_BYTES`. PTY 세션은 stderr 가 콘솔 스트림에 병합돼 오므로 여기는
-    /// 항상 비어 있다(정상 — 그쪽 증거는 `terminal_tail` 이 진다).
+    // ── Diagnostic stream (ADR-0172 classification entrance) ──
+    /// The tail (bounded) of this incarnation's **stderr text**. A separate buffer **split** from the output ring, and its reason and
+    /// size grounds are in `DIAGNOSTIC_CAP_BYTES`. In a PTY session stderr arrives merged into the console stream, so this is
+    /// always empty here (normal — the evidence on that side is carried by `terminal_tail`).
     diagnostics: Mutex<String>,
 
-    // ── 상태 알림 ─────────────────────────────────────────────
+    // ── Status notification ───────────────────────────────────
     status_sink: Arc<dyn StatusSink>,
 
-    // ── pump thread 제어 ──────────────────────────────────────
+    // ── Pump thread control ───────────────────────────────────
     drain_handle: Mutex<Option<JoinHandle<()>>>,
     drain_done_rx: Mutex<Option<Receiver<()>>>,
 
-    // ── finalize 1회 hook (ADR-0019 reaper) ───────────────────
-    /// 단위테스트는 OutputCore::new 만 쓰고 hook 을 주입하지 않으므로 Option(None=no-op).
+    // ── Finalize once hook (ADR-0019 reaper) ──────────────────
+    /// Unit tests use only OutputCore::new and do not inject the hook, so it is an Option (None = no-op).
     on_terminal: Mutex<Option<OnTerminalHook>>,
 
-    // ── ADR-0113 턴 관측 ──────────────────────────────────────
-    /// 생성 후 불변이라 hot path 에 원자 load 도 락도 없다.
+    // ── ADR-0113 turn observation ─────────────────────────────
+    /// Immutable after creation, so there is neither an atomic load nor a lock on the hot path.
     turn: TurnWiring,
 
-    // ── ADR-0231 대기 입력 명부 ───────────────────────────────
-    /// 이 화신의 명부 — 세션이 이 Arc 로 읽는다. 명부를 바꾸는 길은 이 코어가 replay 락 안에서 먹이는
-    /// 환원 하나뿐이다(그래서 명부 = 링 접두의 환원값).
+    // ── ADR-0231 pending-input registry ───────────────────────
+    /// This incarnation's registry — the session reads through this Arc. The only way to change the registry is the reduction this core feeds inside the replay lock
+    /// (so registry = the reduced value of the ring prefix).
     queued_inputs: Arc<QueuedInputs>,
-    /// 우편 바쁨이 읽는 대기 목록 표. `None` = 명부가 우편에 안 보이는 조립(하네스) — 표도 초인종도 없다.
+    /// The pending-list table that mail busyness reads. `None` = an assembly where the registry is not visible to mail (harness) — no table, no doorbell either.
     inputs_pending: Option<Arc<InputsPendingTable>>,
-    /// 「봉인됨」 — `finish` 의 종료 합성이 세운다. 그 뒤의 `Queued` 는 링에 `Dropped{AgentEnded}` 로 선다.
-    /// ★replay 락 안에서만 읽고 쓴다★ — 순서(합성이 훑은 뒤인가)는 그 락이 나르고 원자값은 내부 가변성일 뿐이라
-    /// `Relaxed` 다. 락 밖에서 읽는 자리를 만들면 합성과 봉인 사이로 `Queued` 가 빠져나간다.
+    /// 「봉인됨」 (sealed) — set by the terminal synthesis of `finish`. A `Queued` after it stands in the ring as `Dropped{AgentEnded}`.
+    /// ★Read and written only inside the replay lock★ — the order (whether it is after the synthesis swept) is carried by that lock and the atomic value is only interior mutability, so it is
+    /// `Relaxed`. If a spot that reads outside the lock is made, a `Queued` slips out between the synthesis and the seal.
     sealed: AtomicBool,
 }
 
-/// 대기 입력 명부 배선(ADR-0231) — 명부와 대기 목록 표는 항상 같이 꽂힌다. 명부만 있고 표가 없으면 사용자
-/// 목록이 찬 동안에도 우편이 한가로 읽혀 사용자 글보다 먼저 stdin 에 닿는다.
+/// Pending-input registry wiring (ADR-0231) — the registry and the pending-list table are always plugged in together. With a registry but no table, mail reads as idle even while the user
+/// list is full and reaches stdin before the user's text.
 ///
-/// ★`registry` 는 그 화신 전용 새 명부다★ — 화신마다 새로 만든다(묘비·「받음 불가 판명」이 화신 사실이다).
-/// ★`pending` 은 그 화신을 `register` 한 표여야 한다★ — 표는 등록 없는 쓰기를 버리므로, 빠뜨리면 목록이
-/// 우편에 영영 안 보인다(오류는 없다).
+/// ★`registry` is a new registry dedicated to that incarnation★ — created anew for each incarnation (the tombstone and 「받음 불가 판명」 (acceptance-impossible finding) are incarnation facts).
+/// ★`pending` must be the table on which that incarnation was `register`ed★ — the table drops writes without registration, so if missed, the list
+/// never shows to mail (and there is no error).
 // ADR-0231
 pub struct QueuedWiring {
     pub registry: Arc<QueuedInputs>,
     pub pending: Arc<InputsPendingTable>,
 }
 
-/// 목록 사건 하나가 replay 락 안에서 남긴 것 — 락을 놓은 뒤의 단계(턴 관측 · 「비었다」 · fanout)가 쓴다.
+/// What one list event left inside the replay lock — used by the steps after the lock is released (turn observation · 「비었다」 (became empty) · fanout).
 struct ListStep {
-    /// 링에 선 줄(발급 순) — 바꿔 적기로 한 사건이 두 줄이 될 수 있다.
+    /// Lines that stood in the ring (in issue order) — through rewriting, one event can become two lines.
     numbered: Vec<(u64, OutputEvent)>,
-    /// 분류기에 넘길 원 사건의 자리. `None` = 원 사건이 봉인으로 바꿔 적혔다.
+    /// The slot for the original event to hand to the classifier. `None` = the original event was rewritten as a seal.
     classify_at: Option<usize>,
-    /// 이 사건이 명부를 비웠다 — 그 seq 로 「비었다」를 적고 초인종을 울린다(락 밖, 턴 관측 뒤).
+    /// This event emptied the registry — with that seq write 「비었다」 (became empty) and ring the doorbell (outside the lock, after turn observation).
     drained_at: Option<u64>,
-    /// 이 구간이 이 화신의 「받음 불가 판명」을 처음 환원했다 — 락 밖에서 판정 로그를 한 번 남긴다.
+    /// This span was the first to reduce this incarnation's 「받음 불가 판명」 (acceptance-impossible finding) — leave the decision log once outside the lock.
     ack_unavailable_judged: bool,
 }
 
-/// 턴 관측 배선 한 벌(ADR-0113) — 표(어디에 쌓나)와 분류자(무엇이 신호인가)는 항상 같이 꽂힌다.
-/// 둘을 따로 두면 "표는 있는데 분류자가 없는" 반쪽 상태가 생긴다.
+/// One set of turn-observation wiring (ADR-0113) — the table (where to accumulate) and the classifier (what is a signal) are always plugged in together.
+/// Keeping them separate would create a half state of "a table exists but no classifier".
 ///
-/// ★`OutputCore::new` 의 **필수 인자**인 게 이 타입의 요점이다(ADR-0002 §0 — 싸고 오래 가는 경계는
-///   지금 깐다)★: 사후 주입(setter)이면 새 spawn 경로가 그걸 빠뜨려도 컴파일이 통과하고, 그 에이전트는
-///   **영구히 idle 로 보고돼** 턴 중에 메일이 꽂힌다 — 에러도 로그도 없이. 인자로 만들면 그 실수가
-///   컴파일 에러가 된다. 관측이 필요 없는 조립은 `detached()` 로 **명시**한다(빠뜨림과 구분된다).
+/// ★The point of this type is that it is a **required argument** of `OutputCore::new` (ADR-0002 §0 — lay down early
+///   the boundaries that are cheap and long-lived)★: with post-hoc injection (a setter), even if a new spawn path misses it, it compiles, and that agent is
+///   **reported as idle forever** and mail gets inserted mid-turn — with neither error nor log. Making it an argument turns that mistake into a
+///   compile error. An assembly that needs no observation is **stated explicitly** with `detached()` (distinct from a miss).
 pub struct TurnWiring {
     table: Arc<TurnObservations>,
     classify: TurnClassifier,
 }
 
 impl TurnWiring {
-    /// 운영 배선 — 매니저의 공용 표 + 그 세션 백엔드의 분류자(`backend::turn_classifier`).
+    /// Production wiring — the manager's shared table + that session backend's classifier (`backend::turn_classifier`).
     pub fn new(table: Arc<TurnObservations>, classify: TurnClassifier) -> Self {
         Self { table, classify }
     }
 
-    /// ★관측을 쓰지 않는 조립 전용(하네스·독립 smoke)★ — 아무도 읽지 않는 자기 표 + 침묵 분류자.
-    ///   신호를 하나도 만들지 않으므로 관측 소비자 관점에서 "그 에이전트는 관측된 적 없음" 과 같다.
+    /// ★Only for assemblies that do not use observation (harness · standalone smoke)★ — its own table that nobody reads + a silent classifier.
+    ///   It produces no signal at all, so from the observation consumer's viewpoint it equals "that agent has never been observed".
     ///
-    /// ★운영 spawn 경로는 절대 쓰지 않는다★: 이걸 쓰면 그 에이전트의 턴 게이트가 조용히 꺼진다
-    ///   (= 턴 중 주입). 운영은 반드시 `new(manager 표, backend 분류자)` 를 쓴다 — 이름이 다른 이유가
-    ///   그것이다. ★그 구분을 강제하는 장치는 **없다**★: `use tauri` 격리나 메시징 격리와 달리 이 호출을
-    ///   막는 grep 게이트가 없으므로, 이건 컴파일러가 아니라 규약이 지키는 경계다(운영 호출이 0 인지는
-    ///   리뷰가 본다).
+    /// ★The production spawn path never uses it★: if used, that agent's turn gate is silently turned off
+    ///   (= mid-turn injection). Production must always use `new(manager 표, backend 분류자)` — that is why the names
+    ///   differ. ★There is **no** device that enforces that distinction★: unlike the `use tauri` isolation or messaging isolation, there is
+    ///   no grep gate that blocks this call, so this is a boundary kept by convention, not by the compiler (whether production calls are 0 is
+    ///   checked in review).
     ///
-    /// ★왜 `test-harness` feature 로 잠그지 않았나(기록된 트레이드오프)★: 그렇게 하면 core 자체 통합
-    ///   테스트(`tests/*.rs`)가 lib 을 **외부 crate 로** 링크하는데 그 기능이 꺼져 있어, core 에도
-    ///   self-dev-dependency 를 얹어야 한다. 그 패턴은 이 워크스페이스에 이미 있다(daemon Cargo.toml 의
-    ///   ADR-0088 트릭) — 그러니 불가능해서가 아니다. 걸리는 건 그 파일이 함께 문서화한 비용이다:
-    ///   cargo 는 한 호출 안에서 같은 crate 의 feature 를 **합집합**하므로, `--all-targets` 로 lib 과
-    ///   테스트 타깃을 같이 빌드하면 그 기능이 공유 lib 빌드로 유니피케이션돼 **배포 산출물에 하네스
-    ///   표면이 박힌다**. 그 위험을 지금 core 까지 넓히는 값이, "이름이 다른 생성자" 가 이미 주는 방어보다
-    ///   크다고 봤다. 잠그기로 결정이 바뀌면 그 릴리스 빌드 규칙(`--all-targets` 금지)이 core 에도 걸린다.
+    /// ★Why it was not locked behind the `test-harness` feature (a recorded trade-off)★: doing so would make core's own integration
+    ///   tests (`tests/*.rs`) link the lib **as an external crate** with that feature off, so a
+    ///   self-dev-dependency would have to be added to core too. That pattern already exists in this workspace (the ADR-0088 trick in daemon Cargo.toml)
+    ///   — so it is not because it is impossible. What weighs is the cost that file documented together:
+    ///   cargo takes the **union** of one crate's features within a single invocation, so building the lib and the
+    ///   test targets together with `--all-targets` unifies that feature into the shared lib build and **embeds the harness
+    ///   surface in the shipped artifact**. We judged the price of widening that risk to core now to be
+    ///   larger than the defense a "constructor with a different name" already gives. If the decision changes to locking it, the release build rule (`--all-targets` forbidden) will apply to core too.
     #[doc(hidden)]
     pub fn detached() -> Self {
         Self {
@@ -188,10 +188,10 @@ impl OutputCore {
         }
     }
 
-    /// 대기 입력 명부를 꽂는다 — 부르지 않으면(기본) 아무도 안 읽는 자기 명부에 표가 없다. 봉인·바꿔 적기·사본
-    /// 채우기는 어느 쪽이든 같게 돈다(링의 모양은 배선과 무관하다).
-    /// ★생성 직후, 첫 사건 전에 부른다★ — 뒤에 갈아 끼우면 명부가 링 접두의 환원값이 아니게 된다.
-    /// ★운영 spawn 은 반드시 부른다★ — 빠뜨려도 컴파일되고, 그 화신의 사용자 목록은 우편에 안 보인다.
+    /// Plugs in the pending-input registry — if not called (default), there is a registry of its own that nobody reads, and no table. Sealing · rewriting · copy
+    /// filling run the same either way (the ring's shape is independent of wiring).
+    /// ★Call it right after creation, before the first event★ — if swapped in later, the registry is no longer the reduced value of the ring prefix.
+    /// ★Production spawn must always call it★ — it compiles even if missed, and that incarnation's user list is not visible to mail.
     // ADR-0231
     pub fn with_queued(mut self, wiring: QueuedWiring) -> Self {
         self.queued_inputs = wiring.registry;
@@ -199,7 +199,7 @@ impl OutputCore {
         self
     }
 
-    /// 이 화신의 명부. ★가드를 쥔 채 이 코어에 emit 하지 말 것★ — 락 순서가 replay → 명부라 거꾸로 잡는다.
+    /// This incarnation's registry. ★Do not emit into this core while holding the guard★ — the lock order is replay → registry, so you would take them backwards.
     // ADR-0231
     pub fn queued_inputs(&self) -> &Arc<QueuedInputs> {
         &self.queued_inputs
@@ -209,36 +209,36 @@ impl OutputCore {
         self.id
     }
 
-    /// finalize-시점 hook 주입 — spawn_session 이 sessions 맵 등록 전에 1회 호출한다.
-    /// 클로저는 finalized.swap 승자 경로에서만(=정확히 1회) 불린다. ★race 방지★:
-    /// 클로저 내부에서 intent·shutting_down 을 그 순간 snapshot 해 ReapMsg 를 빌드·송신해야 한다.
+    /// Inject the finalize-time hook — spawn_session calls it once before registering in the sessions map.
+    /// The closure is called only on the finalized.swap winner path (= exactly once). ★Race prevention★:
+    /// inside the closure, intent · shutting_down must be snapshotted at that moment to build and send the ReapMsg.
     pub fn set_on_terminal(&self, hook: OnTerminalHook) {
         *self.on_terminal.lock().expect("on_terminal poisoned") = Some(hook);
     }
 
-    /// ADR-0079: resume 스폰 시 `.jsonl` transcript 에서 복원한 과거 이벤트를 replay 버퍼에 **seed**한다.
+    /// ADR-0079: on a resume spawn, **seed** the replay buffer with past events restored from the `.jsonl` transcript.
     ///
-    /// ★seed-before-publish 불변식(ADR-0079, load-bearing — seed before publish: closes
+    /// ★seed-before-publish invariant (ADR-0079, load-bearing — seed before publish: closes
     ///   empty-ring-replay + seq-interleave window, cross-family review 2026-07-13)★: manager.
-    ///   spawn_session 이 이 core 를 **sessions 맵에 insert 하기 전에**(= 세션이 관측 가능해지기 전에)
-    ///   호출한다. 구독·emit 경로 모두 sessions 맵 조회(get_session)를 거치므로, insert 전이면 다른
-    ///   스레드가 이 core 에 닿을 수 없다 → seed 도중 재접속 구독이 빈 Ring 을 replay 하거나(seed 는
-    ///   fanout 안 함 → 과거 영구 유실), 동시 emit 이 seq 를 뒤섞는(Ring 순서 [0,2,1]) 윈도가 원천 차단된다.
-    ///   insert 전이니 당연히 pump(라이브 emit) 시작 전이기도 하다 — 그래서 아직 구독자·라이브 이벤트가 없다.
+    ///   spawn_session calls this **before inserting this core into the sessions map** (= before the session becomes observable).
+    ///   Both the subscribe and emit paths go through the sessions map lookup (get_session), so before the insert no other
+    ///   thread can reach this core → the windows are blocked at the source where a reconnecting subscription during seeding replays an empty Ring (seed does not
+    ///   fanout → past is lost permanently), or a concurrent emit scrambles seq (Ring order [0,2,1]).
+    ///   Being before the insert, it is naturally also before the pump (live emit) starts — so there are no subscribers or live events yet.
     ///
-    /// ★fanout 없음(seed 시점 특성)★: emit 과 달리 subscribers 로 send 하지 않는다 — 구독자가 아직
-    ///   없으므로 무의미하고, 있더라도 seed 는 "버퍼 사전 적재"라 replay 경로(subscribe→replay)로만
-    ///   전달돼야 한다(라이브 fanout 이 아니다). 그래서 replay lock 만 짧게 잡아 Ring 에 push 하고 seq 만
-    ///   전진시킨다(ADR-0006 락 규율 유지 — subscribers lock 미취득).
+    /// ★No fanout (a property of seed time)★: unlike emit, it does not send to subscribers — there are no
+    ///   subscribers yet so it is meaningless, and even if there were, seed is a "buffer pre-load" and must be
+    ///   delivered only through the replay path (subscribe→replay) (it is not a live fanout). So it takes only the replay lock briefly, pushes to the Ring, and only advances
+    ///   seq (ADR-0006 lock discipline kept — the subscribers lock is not taken).
     ///
-    /// ★seq 연속성★: seed 한 이벤트마다 emit 과 동일하게 `seq.fetch_add(1)` 로 seq 를 발급한다. 그래서
-    ///   seed 뒤 첫 라이브 emit 의 seq 가 seed 마지막 seq+1 로 자연히 이어진다(gap·중복 없음).
-    ///   finalize·status 는 건드리지 않는다(ADR-0005 — seed 는 종료 전이가 아니다).
+    /// ★seq continuity★: for each seeded event it issues seq via `seq.fetch_add(1)`, same as emit. So
+    ///   the seq of the first live emit after the seed naturally continues as the last seed seq + 1 (no gap or duplicate).
+    ///   It does not touch finalize · status (ADR-0005 — seed is not a terminal transition).
     ///
-    /// ★턴 관측도 건드리지 않는다 — 되살리지 말 것(ADR-0113)★: transcript 는 **지나간 기록**이라
-    ///   턴 중간에 끊긴 것일 수 있고(killed incarnation), 그러면 진행 신호로 끝나고 종료 신호가 없다. 그걸
-    ///   관측으로 먹이면 새 화신이 "턴 중" 으로 찍히는데 그 턴의 종료는 **영원히 오지 않는다** — 그 상태를
-    ///   기다리는 소비자(우편 파킹 등)가 깨울 수 없이 멈춘다. 관측은 라이브 emit 에서만 시작한다.
+    /// ★It does not touch turn observation either — do not revive it (ADR-0113)★: the transcript is a **past record**, so
+    ///   it may have been cut mid-turn (killed incarnation), in which case it ends with progress signals and no end signal. If that is
+    ///   fed as observation, the new incarnation is marked "in turn" and that turn's end **never comes** — consumers
+    ///   waiting on that state (mail parking, etc.) stall with no way to wake them. Observation starts only from live emit.
     pub fn seed(&self, events: Vec<OutputEvent>) {
         let mut replay = self.replay.lock().expect("replay poisoned");
         for event in events {
@@ -253,79 +253,79 @@ impl OutputCore {
         }
     }
 
-    /// **payload-generic (S15 B4)** — 모든 OutputEvent variant(콘솔 바이트 + 구조화)를 받아
-    /// Ring 에 저장하고 payload-generic 으로 fanout 한다(ADR-0002 출력 종류 비가정).
+    /// **payload-generic (S15 B4)** — it takes every OutputEvent variant (console bytes + structured),
+    /// stores it in the Ring, and fans out payload-generically (ADR-0002, no assumption on output kind).
     ///
-    /// ★핵심 불변식 (ADR-0006 §10 규칙3 — payload 만 바뀌지 락 구조는 불변)★
-    /// - `sink.send()` 호출 시 어떤 lock도 보유하지 않는다. subscribers를 clone으로
-    ///   스냅샷 뜨고 lock을 즉시 해제한 뒤, 복사본을 돌며 send.
-    /// - replay lock과 subscribers lock을 동시에 보유하지 않는다(각각 짧게).
-    ///   두 lock 동시 취득은 subscribe 함수 단독 예외이며 emit은 절대 금지.
+    /// ★Core invariants (ADR-0006 §10 rule 3 — only the payload changes, the lock structure is unchanged)★
+    /// - No lock is held when `sink.send()` is called. Take a snapshot of the subscribers by clone,
+    ///   release the lock immediately, then loop over the copy and send.
+    /// - The replay lock and the subscribers lock are not held at the same time (each briefly).
+    ///   Taking both locks at once is an exception for the subscribe function alone; it is strictly forbidden in emit.
     pub fn emit(&self, event: OutputEvent) {
         self.emit_inner(event, true);
     }
 
-    /// 같은 이벤트를 **똑같이** 내보내되, ★이 줄을 「이 화신이 턴 중이라는 증거」로 세지 않는다★
-    /// (ADR-0113 의 사실 계층에 아무것도 적지 않는다).
+    /// Emit the same event **exactly the same**, but ★do not count this line as 「이 화신이 턴 중이라는 증거」 (evidence that this incarnation is in a turn)★
+    /// (nothing is written to ADR-0113's fact layer).
     ///
-    /// ★존재 이유★: 「화면에 보여야 한다」와 「이 화신이 턴 중이다」는 같은 사실이 아니다. 상대가
-    ///   **우리가 연 적 없는 턴**의 줄을 흘리면 그 내용은 화면에 보여야 하지만(버리면 조용한 유실이다),
-    ///   그것을 진행 신호로 적으면 그 턴의 종료는 우리 것이 아니라 귀속 게이트에 막히고 — 아무도 그
-    ///   사실을 되돌리지 못한 채 30 분 fail-open 밸브까지 우편이 막힌다. 그 비대칭을 닫는 문이다.
-    /// ★그래서 턴 표를 움직여야 하는 종료는 이 문으로 보내지 않는다★ — 이 문은 도어벨
-    ///   (`StatusSink::turn_ended`)도 함께 건너뛰므로, 우리 턴의 끝을 여기로 보내면 턴 표가 「턴 중」에
-    ///   남고 그 끝을 기다리는 소비자가 깨어나지 않는다. ★예외는 화면만을 위한 경계 하나다★ — 턴 표가
-    ///   이미 한가라 적을 것도 깨울 소비자도 없는 자리에서 프론트의 대기 표시만 끄는 `TurnEnd{turn_id:
-    ///   None}`(아래 ③). 그것을 보통 문으로 내면 분류기가 깨끗한 끝으로 접어 앞선 오류 끝
-    ///   (`last_end_failed`)을 지운다 — 멈춰 있어야 할 우편이 흐른다. 판정 한 줄: **이 문은 턴 표에
-    ///   아무것도 적지 않는 자리다 — 진행도 종료도. 턴 표를 움직여야 하는 줄은 이 문으로 보내지 않는다.**
-    /// ★정리 호출자를 늘리지 않는다(ADR-0127)★ — 관측을 아예 안 적으므로 지울 것도 없다. 그래서
-    ///   `finish` + `emit` 의 finalize 재확인이라는 두 자리는 그대로다.
-    /// ★호출자는 셋이고 **모두 같은 파일**이다★(`backend/codex/transport.rs`):
-    ///   ① 상대가 흘린 미귀속 줄(우리 턴 밖에서 온 늦은 받음과 그 말풍선 포함) ② 통로가 합성하는 한가할
-    ///   때의 사용자 말풍선(ADR-0127 — 보통 문으로 내면 분류기가 진행으로 적어, 그 글의 `turn/start` 가
-    ///   거절될 때 열린 적 없는 턴이 「진행 중」으로 남는다) ③ 열린 턴이 없을 때 온 받음 뒤에 세우는
-    ///   화면용 경계(위 예외 — ADR-0231).
-    ///   ★이어받기 직후 페이지로 받아 온 지난 화면(ADR-0203)은 이 문이 아니라
-    ///   [`Self::emit_batch_without_turn_observation`] 으로 온다★ — 한 덩이로 실어야 링에서 쪼개지지 않는다.
-    ///   그 덩이가 `seed` 가 아니라 fanout 하는 문으로 오는 것은 **시점이 다르기 때문**이다 — `seed` 는
-    ///   세션이 명부에 오르기 전에만 옳고(fanout 이 없어도 구독자가 없다), 그 덩이는 핸드셰이크 뒤라 이미
-    ///   붙은 구독자가 있을 수 있다. 거기서 fanout 없는 문을 쓰면 그 구독자는 빈 링을 replay 한 뒤라 지난
-    ///   화면을 **영영 못 본다**.
+    /// ★Reason to exist★: 「화면에 보여야 한다」 (it must be visible on screen) and 「이 화신이 턴 중이다」 (this incarnation is in a turn) are not the same fact. If the peer
+    ///   leaks a line of a **turn we never opened**, its content must be visible on screen (dropping it is a silent loss), but
+    ///   if we record it as a progress signal, the end of that turn, not being ours, is blocked by the attribution gate — and with nobody able to
+    ///   undo that fact, mail stays blocked until the 30-minute fail-open valve. This door closes that asymmetry.
+    /// ★So an end that must move the turn table is not sent through this door★ — this door also skips the doorbell
+    ///   (`StatusSink::turn_ended`), so if our turn's end is sent here, the turn table stays at 「턴 중」 (in turn)
+    ///   and the consumer waiting for that end is not woken. ★The one exception is a boundary for the screen only★ — a `TurnEnd{turn_id:
+    ///   None}` (③ below) that turns off only the frontend's wait indicator at a place where the turn table is
+    ///   already idle, so there is nothing to write and no consumer to wake. If that were emitted through the normal door, the classifier would fold it into a clean end and erase the earlier error end
+    ///   (`last_end_failed`) — mail that should stay stopped would flow. One-line decision: **this door is a place that writes
+    ///   nothing to the turn table — neither progress nor end. A line that must move the turn table is not sent through this door.**
+    /// ★Do not add cleanup callers (ADR-0127)★ — it writes no observation at all, so there is nothing to erase. So
+    ///   the two places, `finish` + the finalize recheck in `emit`, stay as they are.
+    /// ★There are three callers and **all in the same file**★ (`backend/codex/transport.rs`):
+    ///   ① unattributed lines the peer leaks (including a late receipt that arrived outside our turn, and its bubble) ② the user bubble the path synthesizes when idle
+    ///   (ADR-0127 — if emitted through the normal door, the classifier records it as progress, so when that text's `turn/start` is
+    ///   rejected, a turn that was never opened remains 「진행 중」 (in progress)) ③ the screen-only
+    ///   boundary set after a receipt that arrived when there was no open turn (the exception above — ADR-0231).
+    ///   ★The past screen fetched as a page right after resume (ADR-0203) comes not through this door but through
+    ///   [`Self::emit_batch_without_turn_observation`]★ — it must be loaded as one chunk so it is not split in the ring.
+    ///   That the chunk comes through a fanout door rather than `seed` is **because the timing differs** — `seed` is right only
+    ///   before the session is on the registry (there are no subscribers even without fanout), and that chunk comes after the handshake, so there may already be
+    ///   attached subscribers. If a door without fanout were used there, that subscriber would have replayed an empty ring and would **never see**
+    ///   the past screen.
     // ADR-0113
     // ADR-0127
     pub(crate) fn emit_without_turn_observation(&self, event: OutputEvent) {
         self.emit_inner(event, false);
     }
 
-    /// 같은 문으로 **여러 건을 한 덩이로** 내보낸다 — ★그 사이에 다른 emit 이 끼어들 수 없다★.
+    /// Emit **several items as one chunk** through the same door — ★no other emit can slip in between★.
     ///
-    /// ★존재 이유 = 「끼어들 수 없다」 하나다★: 낱개로 부르면 각 호출이 replay 락을 따로 잡으므로, 그
-    ///   틈마다 pump 의 라이브 emit 이 seq 를 가져갈 수 있다. 복원된 대화 **한가운데**에 새 줄이 박히는
-    ///   것이 그 결과다(ADR-0203 의 이력 복원이 이 문을 쓰는 이유). 한 락 구간 안에서 seq 를 연달아
-    ///   발급하면 그 덩이는 링에서 반드시 연속이다.
-    /// ★★그 「끼어들 수 없다」는 **링 안에서만** 참이다 — 배달까지로 넓혀 읽지 말 것★★: 아래 구현이
-    ///   fanout 은 락을 놓고 하므로(그 규율의 근거 = [`Self::emit`]), **이미 붙어 있는** 구독자에게는
-    ///   [덩이 seq N] → [라이브 seq N+k] → [덩이 seq N+1] 순서로 갈 수 있다. 그 결말은 폐기가 아니라
-    ///   **프론트의 재정렬**이다 — 프론트(`src/api/protocolClient.ts`)는 뷰에 늘 `마지막+1` 만 흘리고 구멍
-    ///   뒤 프레임은 붙들었다가 구멍이 메워지면 seq 순으로 흘린다(ADR-0231 — 붙듦 상한을 넘으면 버퍼 국면으로
-    ///   돌아가 전량 replay 를 다시 청한다). 그래서 화면에는 링 순서로 선다 — 뒤섞이는 것은 wire 도착 순서뿐이다.
-    ///   ★**나중에 붙는** 구독자는 영향이 없다★(링에서 replay 하므로 순서가 온전하다).
-    /// ★그리고 **덩이 앞**도 막지 못한다★ — 이 덩이보다 먼저 도착한 라이브 줄은 여전히 앞에 선다.
-    /// ★그래서 이 문이 파는 것은 「**링 안에서** 이력이 쪼개지지 않는다」 하나다★ — 배달 순서와 「이력이
-    ///   맨 앞이다」는 이 문이 주는 것이 아니고, 그 둘을 함께 닫는 길은 생산자 쪽에서 라이브 emit 을
-    ///   게이트까지 붙드는 것뿐이다(그 큐의 상한·넘침 처분이 선결이라 별건이다 — 그 별건은 **안 만들기로
-    ///   닫혔다**: ADR-0205. 위 한계는 열린 채로 남는다).
-    /// ★락 규율은 [`Self::emit`] 과 같다(ADR-0006)★ — 발급·push 는 replay 락 안에서, fanout 은 락을 놓고
-    ///   subscribers 스냅샷으로. 두 락을 동시에 쥐지 않는다.
-    /// ★관측·상태·finalize 를 건드리지 않는 것도 낱개 문과 같다★(ADR-0005/0113/0127).
+    /// ★The reason to exist = 「끼어들 수 없다」 (cannot slip in), just that★: if called singly, each call takes the replay lock separately, so
+    ///   at each gap the pump's live emit can take a seq. A new line stuck **in the middle** of the restored conversation
+    ///   is the result (this is why ADR-0203's history restore uses this door). Issuing seq consecutively
+    ///   within one lock span makes that chunk always contiguous in the ring.
+    /// ★★That 「끼어들 수 없다」 (cannot slip in) is true **only inside the ring** — do not read it as extending to delivery★★: the implementation below
+    ///   does fanout after releasing the lock (the grounds for that discipline = [`Self::emit`]), so **already attached** subscribers
+    ///   can receive them in the order [chunk seq N] → [live seq N+k] → [chunk seq N+1]. The outcome is not discarding but
+    ///   **reordering on the frontend** — the frontend (`src/api/protocolClient.ts`) always passes only `마지막+1` to the view, holds frames
+    ///   after a gap, and passes them in seq order once the gap is filled (ADR-0231 — past the hold cap it returns to the buffer phase and
+    ///   asks for a full replay again). So on screen they stand in ring order — only the wire arrival order gets scrambled.
+    ///   ★**Later-attached** subscribers are unaffected★ (they replay from the ring, so the order is intact).
+    /// ★And it cannot block what comes **before the chunk** either★ — a live line that arrived before this chunk still stands ahead.
+    /// ★So what this door sells is just 「**링 안에서** 이력이 쪼개지지 않는다」 (history is not split inside the ring)★ — delivery order and 「이력이
+    ///   맨 앞이다」 (history is at the very front) are not what this door gives, and the only way to close both is to hold the live emit at the
+    ///   producer side up to the gate (that queue's cap and overflow handling are prerequisites so it is a separate matter — that separate matter was **closed as not
+    ///   to be built**: ADR-0205. The limitation above stays open).
+    /// ★The lock discipline is the same as [`Self::emit`] (ADR-0006)★ — issue · push inside the replay lock, fanout without the lock using
+    ///   the subscribers snapshot. The two locks are not held together.
+    /// ★Not touching observation · status · finalize is also the same as the single-item door★ (ADR-0005/0113/0127).
     // ADR-0203
     // ADR-0205
     pub(crate) fn emit_batch_without_turn_observation(&self, events: Vec<OutputEvent>) {
         if events.is_empty() {
             return;
         }
-        // 1. 발급 + push 를 **한 번의** replay 락 안에서 — 이 구간이 곧 「끼어들 수 없다」의 실물이다.
+        // 1. Issue + push within **one** replay lock — this span is the actual form of 「끼어들 수 없다」 (cannot slip in).
         let numbered: Vec<(u64, OutputEvent)> = {
             let mut replay = self.replay.lock().expect("replay poisoned");
             events
@@ -344,12 +344,12 @@ impl OutputCore {
                 .collect()
         };
 
-        // 2. fanout 은 락을 놓고.
+        // 2. Fanout after releasing the lock.
         self.fan_out(&numbered);
     }
 
-    /// 여러 줄을 subscribers 스냅샷으로 락 없이 내보낸다 — 죽은 sink 는 낱개 문과 같은 방식으로 한 번에
-    /// 걷어낸다. 호출자는 replay 락을 놓은 뒤에 부른다(ADR-0006).
+    /// Send several lines through the subscribers snapshot without a lock — dead sinks are reaped in one go
+    /// the same way as the single-item door. The caller calls it after releasing the replay lock (ADR-0006).
     fn fan_out(&self, numbered: &[(u64, OutputEvent)]) {
         if numbered.is_empty() {
             return;
@@ -388,12 +388,12 @@ impl OutputCore {
         }
     }
 
-    /// 디코더가 내준 사용량 관측을 상태 sink 로 넘긴다 — 출력 pump 가 디코더의 `take_usage` 결과를 그대로
-    /// 건넨다([`crate::transport::OutputDecoder::take_usage`]).
-    /// ★링·seq·구독자·턴 관측을 건드리지 않는다★ — 사용량은 이 화신의 출력이 아니라 계정 단위 상태다.
-    /// ★락을 하나도 쥐지 않고 부른다★ — sink 계약(논블록·비재진입)을 믿는 쪽이 여기다.
+    /// Pass the usage observation the decoder yielded to the status sink — the output pump hands over the decoder's `take_usage` result as is
+    /// ([`crate::transport::OutputDecoder::take_usage`]).
+    /// ★It does not touch the ring · seq · subscribers · turn observation★ — usage is not this incarnation's output but account-level state.
+    /// ★Called holding no lock at all★ — this is where the side that trusts the sink contract (non-blocking, non-reentrant) sits.
     pub(crate) fn report_usage(&self, observations: Vec<crate::usage::UsageObservation>) {
-        // ADR-0292 결정 3: 관측은 계정 단위 공유 책을 고친다 — 펌프의 가둠 안에서 불려도 표시를 끈다.
+        // ADR-0292 decision 3: the observation fixes the account-level shared ledger — it turns off the indicator even when called inside the pump's containment.
         uncontained(|| {
             for obs in observations {
                 self.status_sink.usage_observed(obs);
@@ -408,20 +408,20 @@ impl OutputCore {
         };
         let cost_bytes = estimate_cost_bytes(&event);
 
-        // 3~4. ★seq 발급 + replay push 를 replay 락 안에서 원자적으로★ — brief lock(락 순서 1단계,
-        //    ADR-0006). **순서 중요(gap 방지)**: replay.push 가 fanout 보다 먼저여야, subscribe 가
-        //    이 사이에 끼어들어도 새 sink 는 replay 에서 이 seq 를 받는다(최악 dup, 프론트 seq dedup 이
-        //    흡수). 역순이면 gap 발생.
+        // 3~4. ★Issue seq + push to replay atomically inside the replay lock★ — a brief lock (lock order stage 1,
+        //    ADR-0006). **Order matters (gap prevention)**: replay.push must come before fanout, so that even if subscribe
+        //    slips in between, the new sink receives this seq from replay (worst case dup, absorbed by the frontend's seq dedup).
+        //    In reverse order a gap occurs.
         //
-        // ★ADR-0079: seq 발급을 replay 락 안에서 push 직전에 한다(왜 락 밖이면 안 되나)★
-        //    pump 스레드(transport stdio/pty)와 write_input 의 synthetic user-echo(session.rs)가
-        //    동시에 emit 을 호출한다. seq 를 락 밖에서 fetch_add 하면 두 caller 가 N/N+1 을 발급받고도
-        //    락 진입 순서가 뒤집혀 ring 에 N+1 을 N 보다 먼저 push 할 수 있다 → ring 이 seq 로 정렬
-        //    깨짐. subscribe_from 은 `partition_point(|c| c.seq <= s)`(seq 오름차순 전제)로 replay
-        //    slice 를 자르므로, ring 비단조면 replay 슬라이싱이 무너진다. 발급+push 를 같은 락 구간에
-        //    묶어 원자화하면 락 획득 순서가 곧 seq 순서 = ring 항상 단조. (cross-family review 2026-07-13
-        //    발견 — seed() 도 동일하게 락 안에서 발급하므로 두 경로가 일치한다.)
-        //    Ordering::Relaxed 유지: 락이 순서(happens-before)를 제공하므로 atomic 은 유일성만 담당.
+        // ★ADR-0079: issue seq inside the replay lock right before the push (why it must not be outside the lock)★
+        //    The pump thread (transport stdio/pty) and write_input's synthetic user-echo (session.rs)
+        //    call emit concurrently. If seq is fetch_add'ed outside the lock, two callers get N/N+1 yet
+        //    the lock-entry order can flip, so N+1 may be pushed to the ring before N → the ring's seq ordering
+        //    breaks. subscribe_from cuts the replay slice with `partition_point(|c| c.seq <= s)` (assuming seq ascending),
+        //    so if the ring is non-monotonic, replay slicing collapses. Binding issue+push into the same lock span
+        //    to make it atomic means lock acquisition order is the seq order = the ring is always monotonic. (Found in the cross-family review 2026-07-13
+        //    — seed() also issues inside the lock the same way, so the two paths agree.)
+        //    Ordering::Relaxed kept: the lock provides ordering (happens-before), so the atomic is responsible only for uniqueness.
         let seq;
         {
             let mut replay = self.replay.lock().expect("replay poisoned");
@@ -442,8 +442,8 @@ impl OutputCore {
             other => OutputPayload::Event(other),
         };
 
-        // 5. ★불변식 1(ADR-0006 §10 규칙3)★ send 는 blocking/try_send 가능하므로 lock 을 쥔 채
-        //    send 하면 subscribe/다른 send 와 교착·정체.
+        // 5. ★Invariant 1 (ADR-0006 §10 rule 3)★ send may be blocking/try_send, so sending while holding a lock
+        //    deadlocks or stalls with subscribe/other sends.
         let frame = OutputFrame {
             agent_id: self.id,
             epoch: self.epoch,
@@ -471,17 +471,17 @@ impl OutputCore {
         }
     }
 
-    /// 목록 사건(`QueuedInput`)의 문 — 낱개 문과 같은 단계에 명부 환원과 대기 목록 표 쓰기가 끼어 있다.
+    /// The door for a list event (`QueuedInput`) — the same stages as the single-item door, with registry reduction and the pending-list table write inserted among them.
     ///
-    /// ★replay 락 안(한 구간)★: 봉인 → 판정 뒤 바꿔 적기 → `AckUnavailable` 사본 채우기 → 발급·push·환원 →
-    ///   「찼다」. 명부를 이 구간에서 먹이므로 명부 = 링 접두의 환원값이고, 봉인·바꿔 적기의 판정도 링 순서를
-    ///   따른다(원자값 `DeliveryAck` 를 읽지 않는다 — 읽으면 링 재생과 명부가 서로 다른 순서를 본다).
-    /// ★락 밖★: 턴 관측(바꿔 적지 않은 원 사건만) → 「비었다」 + 초인종 → fanout.
-    ///   「비었다」를 턴 관측 **뒤**에 적는 이유: 목록을 비우는 claude `Delivered` 는 그 턴의 진행이라, 락
-    ///   안에서 적으면 진행이 표에 오르기 전 두 사실이 함께 「한가」인 순간이 생기고 그때 바쁨을 물은 우편이
-    ///   사용자의 턴에 접혀 든다. 「찼다」는 반대로 락 안이다 — 늦추면 `Queued` 가 링에 선 뒤에도 우편이 한가로
-    ///   읽혀 사용자 글보다 먼저 stdin 에 닿을 수 있다. 락 밖으로 미룬 「비었다」가 그 사이 다른 스레드가 적은
-    ///   더 늦은 「찼다」를 덮지 않는 것은 표의 seq 규칙이 진다.
+    /// ★Inside the replay lock (one span)★: seal → rewrite after decision → fill the `AckUnavailable` copy → issue · push · reduce →
+    ///   「찼다」 (became full). Since the registry is fed in this span, registry = the reduced value of the ring prefix, and the seal · rewrite decisions also follow the ring
+    ///   order (they do not read the atomic `DeliveryAck` — if read, ring replay and the registry would see different orders).
+    /// ★Outside the lock★: turn observation (only the original event that was not rewritten) → 「비었다」 (became empty) + doorbell → fanout.
+    ///   Why 「비었다」 is written **after** turn observation: the claude `Delivered` that empties the list is progress of that turn, so if written inside
+    ///   the lock, there is a moment before the progress reaches the table when both facts are 「한가」 (idle), and mail that asked for busyness then
+    ///   gets folded into the user's turn. 「찼다」 is the opposite, inside the lock — if delayed, mail would read as idle even after `Queued` stands in the ring
+    ///   and could reach stdin before the user's text. That the 「비었다」 deferred outside the lock does not overwrite a later
+    ///   「찼다」 written by another thread in between is carried by the table's seq rule.
     // ADR-0231
     fn emit_list_event(&self, op: QueuedInputEvent, observe_turn: bool) {
         let step = {
@@ -491,11 +491,11 @@ impl OutputCore {
         self.finish_list_step(step, observe_turn);
     }
 
-    /// 취소 요청의 문 — 명부 확인과 `CancelRequested` 기록이 **한 replay 구간**이다.
+    /// The door for a cancel request — the registry check and the `CancelRequested` record are **one replay span**.
     ///
-    /// ★확인과 기록 사이에 펌프의 결말(`Delivered` 등)이 끼지 못한다★: 명부를 바꾸는 길은 replay 락 안의 환원
-    ///   하나뿐이라, 락 밖에서 확인하고 따로 emit 하면 그 틈에 닫힌 항목에 대해 `Requested` 를 답하고 벤더에
-    ///   취소 줄까지 보낸다. 여기서는 확인이 `Queued` 를 본 경우에만 기록하므로 답이 명부와 어긋나지 않는다.
+    /// ★The pump's outcome (`Delivered`, etc.) cannot slip between check and record★: the only way to change the registry is the reduction inside the replay lock,
+    ///   so checking outside the lock and emitting separately would answer `Requested` for an item that closed in that gap and even send the
+    ///   cancel line to the vendor. Here we record only when the check saw `Queued`, so the answer does not diverge from the registry.
     // ADR-0231
     pub(crate) fn emit_cancel_request(&self, id: &str) -> CancelRequest {
         let step = {
@@ -520,21 +520,21 @@ impl OutputCore {
         CancelRequest::Recorded
     }
 
-    /// 세션 분류가 읽는 바쁨 — 대기 목록 표가 「찼다」거나 턴 관측이 턴 중이다. 명부는 읽지 않는다.
+    /// The busyness the session classification reads — the pending-list table says 「찼다」 (full) or turn observation says in a turn. It does not read the registry.
     ///
-    /// ★표 먼저, 턴 관측 나중★: 목록을 비우는 `Delivered` 의 emit 은 턴 관측의 진행을 적은 **뒤에** 「비었다」를
-    ///   적으므로, 이 순서로 읽으면 「비었다」를 본 읽기가 그 진행도 본다. 거꾸로 읽거나 명부를 읽으면 그 emit
-    ///   도중에 들어온 입력이 「빔 + 턴 없음」을 보고 한가로 분류된다.
-    /// ★표가 없는 조립(하네스)은 목록이 늘 빈 것으로 읽는다★ — 턴 관측만 남는다.
+    /// ★Table first, turn observation later★: the emit of the `Delivered` that empties the list writes 「비었다」 (became empty) **after** recording turn observation's progress,
+    ///   so a read in this order that saw 「비었다」 also sees that progress. Reading in reverse or reading the registry lets input arriving in the middle of that emit
+    ///   see 「빔 + 턴 없음」 (empty + no turn) and be classified as idle.
+    /// ★An assembly without the table (harness) reads the list as always empty★ — only turn observation remains.
     // ADR-0231
     pub(crate) fn classified_input_busy(&self) -> bool {
         pending_then_in_turn(self)
     }
 
-    /// 목록 사건 한 구간을 락 밖에서 마무리한다 — 턴 관측 → 「비었다」 + 초인종 → fanout.
+    /// Finish one span of a list event outside the lock — turn observation → 「비었다」 (became empty) + doorbell → fanout.
     fn finish_list_step(&self, step: ListStep, observe_turn: bool) {
         if step.ack_unavailable_judged {
-            // ADR-0231: 옛 CLI 판정은 화신당 한 번이다(명부의 판명 표식이 거짓 → 참인 구간 하나).
+            // ADR-0231: the old-CLI decision is once per incarnation (one span where the registry's finding marker goes false → true).
             tracing::info!(
                 agent = %self.id,
                 epoch = self.epoch,
@@ -553,20 +553,20 @@ impl OutputCore {
         self.fan_out(&step.numbered);
     }
 
-    /// replay 락 구간의 목록 단계. 호출자가 replay 락을 쥐고 부른다.
-    // ADR-0231: 락 순서 = (세션 `input_order` →) replay → 명부 → 대기 목록 표. 명부 가드는 이 replay 구간
-    //   안에서만 잡고, 표는 잎이며, `StatusSink` 는 어느 락도 쥐지 않은 채 부른다(`write_drained`). 명부를 먼저
-    //   쥐고 replay 를 기다리는 자리를 만들면 이 둘이 서로를 기다린다 — 명부만 읽는 쪽(목록 조회·통로 정책의 취소
-    //   검증)은 명부 락 하나만 잡고 emit 하지 않고, 세션 분류의 취소 검증은 replay 락 아래에서 읽는다
+    /// The list stage inside the replay lock span. The caller calls it holding the replay lock.
+    // ADR-0231: lock order = (session `input_order` →) replay → registry → pending-list table. The registry guard is taken only inside this replay span,
+    //   the table is a leaf, and `StatusSink` is called holding no lock (`write_drained`). If you make a place that takes the registry first
+    //   and waits for replay, the two wait on each other — the side that reads only the registry (list query · cancel validation of the path policy)
+    //   takes only the registry lock and does not emit, and the session classification's cancel validation reads under the replay lock
     //   (`emit_cancel_request`).
     fn record_list_event(&self, replay: &mut Ring, op: QueuedInputEvent) -> ListStep {
         let mut registry = self.queued_inputs.lock();
         let was_empty = registry.is_empty();
         let was_judged = registry.ack_unavailable_seen();
-        // 봉인이 바꿔 적기보다 먼저다 — 종료 뒤의 `Queued` 는 받음이 아니라 버림이다.
+        // The seal comes before the rewrite — a `Queued` after termination is not a receipt but a drop.
         let (events, classify_at) = match op {
             QueuedInputEvent::Queued { id, .. } if self.sealed.load(Ordering::Relaxed) => {
-                // 사용자 글이 전달 없이 버려지는 자리라 흔적을 남긴다 — 본문은 싣지 않는다(id 만).
+                // This is a place where the user's text is dropped without delivery, so we leave a trace — the body is not put in (id only).
                 tracing::debug!(
                     agent = %self.id,
                     epoch = self.epoch,
@@ -581,8 +581,8 @@ impl OutputCore {
                     None,
                 )
             }
-            // 판명 뒤의 `Queued` 는 그 자리에서 받음으로 닫는다 — `Delivered` 가 아니라 사본을 실은
-            //   `AckUnavailable` 을 잇는 이유: 링 상한이 두 줄 사이를 잘라도 닫는 줄이 본문을 쥔다.
+            // A `Queued` after the finding is closed on the spot as a receipt — the reason we chain an `AckUnavailable` carrying the copy rather than a `Delivered`:
+            //   even if the ring cap cuts between the two lines, the closing line holds the body.
             queued @ QueuedInputEvent::Queued { .. } if registry.ack_unavailable_seen() => (
                 vec![
                     queued,
@@ -596,8 +596,8 @@ impl OutputCore {
         };
         let mut numbered = Vec::with_capacity(events.len());
         for mut op in events {
-            // ★사본은 늘 코어가 채운다★(디코더는 빈 채로 낸다) — 환원 **전**의 열린 항목이 그 환원이 받음으로
-            //   닫는 항목이다.
+            // ★The core always fills the copy★ (the decoder emits it empty) — the open item **before** the reduction is the item that reduction
+            //   closes with a receipt.
             if let QueuedInputEvent::AckUnavailable { delivered } = &mut op {
                 *delivered = registry.open_copies();
             }
@@ -625,7 +625,7 @@ impl OutputCore {
                 }
             }
             (false, true) => drained_at = Some(last_seq),
-            // 판정 뒤 바꿔 적기는 빔 → 빔이다 — 목록이 찬 순간을 아무도 못 보므로 적을 것도 울릴 것도 없다.
+            // A rewrite after the decision is empty → empty — nobody sees the moment the list was full, so there is nothing to write or ring.
             _ => {}
         }
         ListStep {
@@ -636,8 +636,8 @@ impl OutputCore {
         }
     }
 
-    /// 「비었다」를 적고 초인종을 울린다 — 어느 락도 쥐지 않은 채. 표가 없는 조립은 둘 다 하지 않는다.
-    /// 표가 먼저다: 초인종을 받은 쪽이 곧바로 바쁨을 다시 묻는다.
+    /// Write 「비었다」 (became empty) and ring the doorbell — holding no lock. An assembly without the table does neither.
+    /// The table comes first: the side that gets the doorbell asks for busyness again right away.
     // ADR-0231
     fn write_drained(&self, seq: u64) {
         if let Some(pending) = &self.inputs_pending {
@@ -646,53 +646,53 @@ impl OutputCore {
         }
     }
 
-    /// 분류자가 낸 턴 신호를 표에 적고, 종료면 도어벨을 울린다. 호출자는 replay 락을 놓은 뒤에 부른다.
+    /// Write the turn signal the classifier produced into the table, and ring the doorbell if it is an end. The caller calls it after releasing the replay lock.
     fn record_turn_signal(&self, seq: u64, event: &OutputEvent) {
-        // ★ADR-0113 턴 관측★: 표 갱신을 **fanout·통지보다 먼저** 한다. 통지를 받은 소비자가 곧바로
-        //   표를 조회하므로(도어벨→flush 등) 순서가 뒤집히면 그 조회가 갱신 전 값을 본다.
-        //   락 규율: 표 갱신은 자기 락 하나만 짧게 잡고(core 락 미보유), 통지는 그 락을 놓은 뒤 한다.
+        // ★ADR-0113 turn observation★: update the table **before fanout · notification**. The consumer that got the notification
+        //   queries the table right away (doorbell→flush, etc.), so if the order flips, that query sees the pre-update value.
+        //   Lock discipline: the table update takes only its own lock briefly (not holding the core lock), and the notification is made after releasing that lock.
         if let Some(signal) = (self.turn.classify)(event) {
-            // ★신호에 **출력 순서(seq)** 를 실어 보낸다★: emit 호출자는 둘이라(pump · 입력 에코를 낸
-            //   주입 스레드) 두 emit 이 병행하면 표 적용 순서가 발행 순서와 뒤집힐 수 있다. seq 는 replay
-            //   락 안에서 발급돼 **출력의 정본 순서**이므로, 표가 그걸로 늦은 신호를 걸러낸다(turn.rs).
+            // ★Carry the **output order (seq)** on the signal★: there are two emit callers (the pump · the
+            //   injection thread that produced the input echo), so if the two emits run in parallel, the table's apply order can flip against the emission order. seq is issued inside the replay
+            //   lock and is the **canonical order of output**, so the table filters late signals with it (turn.rs).
             self.turn.table.observe(self.id, self.epoch, seq, signal);
-            // ★종료 후 지각 emit 이 유령 항목을 되살리지 못하게(load-bearing)★: 주입 스레드가 transport
-            //   write 에 막혀 있는 동안 pump 가 EOF→`finish` 를 지나 표를 비울 수 있고, 그 뒤 깨어난 에코가
-            //   **같은 epoch** 으로 항목을 다시 만든다(더 작은 epoch 만 버리는 표 쪽 규칙으론 못 막는다).
-            //   그 항목은 종료 신호가 영영 오지 않아 아무도 못 지운다.
-            //   ★무엇이 순서를 만드나 = **표의 뮤텍스**(이 인자를 지우지 말 것)★: 그 락이 우리 insert 와
-            //   `finish` 의 forget 을 **전순서**로 놓는다. forget 이 먼저인 순서에서는 forget 의 unlock
-            //   (release)이 우리 lock(acquire)과 synchronizes-with 하므로, forget 앞의 `finalized` swap 이
-            //   우리 load 보다 happens-before → load 는 false 를 읽을 수 없다. 반대 순서면 우리 insert 가
-            //   먼저이므로 뒤따르는 forget 이 그걸 지운다. 어느 쪽이든 유령이 남지 않는다.
-            //   ★그래서 이 load 의 `Acquire` 가 근거가 아니다★ — `Relaxed` 여도 결론은 같고, 순서를 나르는
-            //   것은 뮤텍스다. 표 갱신을 락 밖(lock-free)으로 "최적화" 하면 이 증명이 조용히 무너진다.
+            // ★So that a late emit after termination cannot revive a ghost entry (load-bearing)★: while the injection thread is blocked on the transport
+            //   write, the pump can pass EOF→`finish` and empty the table, and the echo that wakes up afterwards
+            //   recreates the entry with the **same epoch** (the table-side rule that drops only smaller epochs cannot stop it).
+            //   That entry never gets an end signal, so nobody can erase it.
+            //   ★What creates the order = **the table's mutex** (do not delete this argument)★: that lock puts our insert and
+            //   `finish`'s forget in a **total order**. In the order where forget comes first, forget's unlock
+            //   (release) synchronizes-with our lock (acquire), so the `finalized` swap before forget
+            //   happens-before our load → the load cannot read false. In the opposite order our insert comes
+            //   first, so the following forget erases it. Either way no ghost remains.
+            //   ★So the `Acquire` of this load is not the grounds★ — the conclusion is the same with `Relaxed`, and what carries the order
+            //   is the mutex. If the table update is "optimized" outside the lock (lock-free), this proof silently collapses.
             if self.finalized.load(Ordering::Acquire) {
                 self.turn.table.forget(self.id, self.epoch);
             }
-            // ★통지는 epoch·finalize·seq 게이트를 걸지 않는다(위 표 갱신과 의도적으로 비대칭)★: 표는
-            //   **상태**라 죽은/옛 화신이 쓰면 산 화신의 사실이 오염되지만, 도어벨은 **일회성 자극**이라
-            //   잉여는 빈 큐 no-op 으로 흡수되고(소비자가 실행 시점에 재검증) 누락은 대기를 만든다
-            //   ("누락 < 잉여" — StatusSink::turn_ended 계약).
+            // ★The notification does not apply epoch · finalize · seq gates (intentionally asymmetric with the table update above)★: the table is
+            //   **state**, so if a dead/old incarnation writes it, the live incarnation's facts get polluted, but the doorbell is a **one-shot stimulus**,
+            //   so a surplus is absorbed as an empty-queue no-op (the consumer re-verifies at run time) and an omission creates a wait
+            //   ("omission < surplus" — the StatusSink::turn_ended contract).
             if matches!(signal, TurnSignal::Ended(_)) {
                 self.status_sink.turn_ended(self.id, self.epoch);
             }
         }
     }
 
-    /// 종료 전이 — pump가 루프 탈출 후 1회 호출. finalize 정확히 1회 게이트로 중복 호출을 흡수한다.
+    /// Terminal transition — called once by the pump after it leaves the loop. The finalize exactly-once gate absorbs duplicate calls.
     ///
-    /// terminal 알림 주체는 pump(=여기) 단독. reason→AgentStatus 매핑은 impl-spec 표 그대로.
-    /// ★남은 목록 항목의 `Dropped{AgentEnded}` 가 종점 전이보다 먼저 나간다(ADR-0231)★ — 구독자는 목록이
-    ///   닫힌 뒤에 종점을 본다.
+    /// The terminal notification emitter is the pump (= here) alone. The reason→AgentStatus mapping is exactly the impl-spec table.
+    /// ★The remaining list items' `Dropped{AgentEnded}` go out before the terminal transition (ADR-0231)★ — subscribers see the terminal
+    ///   after the list is closed.
     pub fn finish(&self, reason: TerminalReason) {
         if self.finalized.swap(true, Ordering::AcqRel) {
             return;
         }
 
-        // ★ADR-0231 종료 합성 + 봉인 = 한 replay 락 구간★: 낱개 emit 은 호출마다 락을 따로 잡으므로, 훑기와
-        //   봉인 사이에 선 `Queued` 가 둘 다를 빠져나가 영구 항목(= 상한 없는 우편 막힘)이 된다. 이 덩이는 턴
-        //   관측을 지나지 않는다(관측 정리 지점을 늘리지 않는다 — ADR-0127).
+        // ★ADR-0231 terminal synthesis + seal = one replay lock span★: single emits take the lock separately per call, so a `Queued` standing between the sweep and
+        //   the seal slips past both and becomes a permanent item (= mail blocked with no cap). This chunk does not pass through turn
+        //   observation (we do not add observation cleanup points — ADR-0127).
         let synthesized = {
             let mut replay = self.replay.lock().expect("replay poisoned");
             self.synthesize_ended_and_seal(&mut replay)
@@ -705,14 +705,14 @@ impl OutputCore {
                 "종료 합성: 남은 대기 입력을 Dropped(AgentEnded) 로 닫음"
             );
         }
-        // ★종료 합성은 목록을 비워도 「비었다」를 적지도 초인종을 울리지도 않는다★: 대기 목록 표의 이 화신
-        //   항목은 아래에서 턴 항목과 함께 거두므로 적어 봐야 곧 지워지고, 초인종은 종점 전이를 앞둔 화신에게
-        //   우편을 흘려보내라는 자극이 된다. 파킹된 우편은 다음 화신의 등장 flush 가 나른다.
+        // ★Even when terminal synthesis empties the list, it neither writes 「비었다」 (became empty) nor rings the doorbell★: this incarnation's entry in the pending-list table
+        //   is reaped below together with the turn entry, so writing it would just be erased soon, and the doorbell would be a stimulus to flow mail into an incarnation
+        //   about to make its terminal transition. Parked mail is carried by the next incarnation's appearance flush.
         // ADR-0231
         self.fan_out(&synthesized);
 
-        // AgentStatus 변형 추가 금지(impl-spec 표).
-        // ★reason 은 reaper hook 에도 넘겨야 하므로 매핑 전에 clone 해 둔다(소비 전 보존).
+        // Adding AgentStatus variants is forbidden (impl-spec table).
+        // ★reason must also be passed to the reaper hook, so clone it before mapping (preserve before consuming).
         let new_status = match reason.clone() {
             TerminalReason::Exited { code } => AgentStatus::Exited { code },
             TerminalReason::Killed => AgentStatus::Killed,
@@ -727,27 +727,27 @@ impl OutputCore {
             *status = new_status.clone();
         }
 
-        // ★ADR-0113: 이 화신의 턴 관측을 여기서 거둔다★ — finalize 승자 경로라 **정확히 1회**고(ADR-0005),
-        //   terminal 로 넘어간 화신은 더 이상 사실을 만들지 않는다. 안 지우면 턴 중에 죽은 에이전트가
-        //   "턴 중" 으로 남아 그 앞에서 기다리던 소비자(우편 파킹 등)가 영영 풀리지 않는다.
-        //   ★왜 여기고 reaper 가 아닌가★: reaper 는 이 finish 가 보낸 ReapMsg 로만 깨어나므로 **늘 뒤**고,
-        //   무엇보다 `finalized` 플래그와 같은 지점이어야 emit 쪽 지각 삽입과의 경쟁이 순서로 닫힌다
-        //   (emit 의 finalize 재확인 주석이 그 인과의 다른 반쪽). epoch 일치 검사는 forget 이 한다.
+        // ★ADR-0113: reap this incarnation's turn observation here★ — it is the finalize winner path so **exactly once** (ADR-0005),
+        //   and an incarnation that has moved to terminal no longer produces facts. If not erased, an agent that died mid-turn stays
+        //   "in turn" and consumers waiting on it (mail parking, etc.) are never released.
+        //   ★Why here and not the reaper★: the reaper wakes only from the ReapMsg this finish sends, so it is **always later**,
+        //   and above all it must be at the same point as the `finalized` flag so the race with the late insert on the emit side is closed by order
+        //   (the finalize recheck comment in emit is the other half of that causality). The epoch-match check is done by forget.
         // ADR-0113
         self.turn.table.forget(self.id, self.epoch);
-        // 대기 목록 표도 같은 자리에서 거둔다. ★emit 쪽 finalize 재확인은 이 표에 필요 없다★ — 표의 `set` 은
-        //   항목을 만들지 않으므로(`register` 만 만든다) 지각한 쓰기가 거둔 항목을 되살릴 수 없다.
+        // The pending-list table is also reaped at the same place. ★The emit-side finalize recheck is not needed for this table★ — the table's `set` does not
+        //   create entries (only `register` does), so a late write cannot revive a reaped entry.
         // ADR-0231
         if let Some(pending) = &self.inputs_pending {
             pending.forget(self.id, self.epoch);
         }
 
-        // status lock 해제 후 외부 호출(§10: status lock 보유 중 외부호출 금지).
+        // External calls after releasing the status lock (§10: no external calls while holding the status lock).
         self.status_sink
             .status_changed(self.id, new_status, self.epoch);
 
-        // ★ADR-0019 reaper hook★: on_terminal lock 은 짧게 잡고 즉시 clone 없이 호출 — 다른 core
-        //   lock 미보유 구간이라 안전.
+        // ★ADR-0019 reaper hook★: take the on_terminal lock briefly and call it immediately without clone — safe because it is a span where no other core
+        //   lock is held.
         if let Some(hook) = self
             .on_terminal
             .lock()
@@ -758,8 +758,8 @@ impl OutputCore {
         }
     }
 
-    /// 열린 항목마다 `Dropped{AgentEnded}` 를 발급·push·환원하고 봉인을 세운다. 호출자가 replay 락을 쥐고
-    /// 부른다(`finish` 한 곳). 반환 = 링에 선 줄.
+    /// For each open item issue · push · reduce `Dropped{AgentEnded}` and set the seal. The caller calls it holding the replay lock
+    /// (`finish` only). Returns = the lines that stood in the ring.
     // ADR-0231
     fn synthesize_ended_and_seal(&self, replay: &mut Ring) -> Vec<(u64, OutputEvent)> {
         let mut registry = self.queued_inputs.lock();
@@ -786,21 +786,21 @@ impl OutputCore {
         numbered
     }
 
-    /// 과도기 Exiting 전이 — manager kill 0.5단계용. Exiting 알림 주체가 이 경로.
-    /// 이미 finalize됐거나 terminal이면 false(덮어쓰지 않음). Running 등 비-terminal일 때만
-    /// Exiting 기록 + status_changed(Exiting) 발행 후 true.
+    /// Transitional Exiting transition — for manager kill stage 0.5. This path is the Exiting notification emitter.
+    /// Returns false if already finalized or terminal (no overwrite). Only when non-terminal such as Running,
+    /// records Exiting + emits status_changed(Exiting), then true.
     ///
-    /// **보호 범위(정확히):** 아래 finalized/terminal 검사가 보호하는 것은 **status 필드 값**이다
-    /// (terminal이 Exiting으로 덮여 고착되는 것 방지). status_sink로 나가는 **알림 순서**는
-    /// 보호하지 않는다 — finish의 status_changed와 lock 밖에서 경합할 수 있다.
-    /// 단, 정상 kill 경로는 manager가 enter_exiting() 완주 후에야 transport.shutdown()을 호출하므로
-    /// (그제서야 pump가 깨어 finish), Exiting 알림이 terminal 알림보다 먼저 완주해 순서가 보장된다.
-    /// 알림 역전 창은 "프로세스 자연 종료가 kill과 동시에 겹치는 순간"뿐이며, 이는 S9 원본
-    /// (manager.kill_agent의 Exiting 발행 vs drain.transition의 terminal 발행)에도 동일하게 존재하는
-    /// 기존 동작이다. 프론트는 terminal 판정을 status_changed가 아니라 agent-list-updated(목록)로
-    /// 하므로(`docs/reference/architecture.md` 「런타임 불변식」 I4) 늦은 Exiting을 받아도 고착되지 않는다 — 설계상 완화됨.
+    /// **Protection scope (precisely):** what the finalized/terminal check below protects is the **status field value**
+    /// (preventing terminal from being overwritten by Exiting and sticking). It does not protect the **notification order**
+    /// going out to status_sink — it can race with finish's status_changed outside the lock.
+    /// However, the normal kill path calls transport.shutdown() only after the manager completes enter_exiting()
+    /// (only then does the pump wake and finish), so the Exiting notification completes before the terminal notification and the order is guaranteed.
+    /// The notification inversion window is only "the moment a natural process exit overlaps with kill", and this is existing behavior that exists identically in the S9 original
+    /// (manager.kill_agent's Exiting emission vs drain.transition's terminal emission).
+    /// The frontend decides terminal not by status_changed but by agent-list-updated (the list)
+    /// (`docs/reference/architecture.md` 「런타임 불변식」 (runtime invariants) I4), so even receiving a late Exiting it does not stick — mitigated by design.
     pub fn enter_exiting(&self) -> bool {
-        // 이미 종료 처리됐으면 Exiting을 쓰지 않는다(빠른 경로 — 실제 status 필드 보호는 아래 lock 구간).
+        // If termination has already been handled, do not write Exiting (fast path — the real status field protection is the lock span below).
         if self.finalized.load(Ordering::Acquire) {
             return false;
         }
@@ -816,14 +816,14 @@ impl OutputCore {
             *status = AgentStatus::Exiting;
         }
 
-        // status lock 해제 후 외부 호출.
+        // External calls after releasing the status lock.
         self.status_sink
             .status_changed(self.id, AgentStatus::Exiting, self.epoch);
         true
     }
 
-    /// pump 종료 대기 — kill 6단계. 수신측이 이미 사라졌어도(타임아웃 후 detach) 무시 가능하도록
-    /// 결과를 버린다.
+    /// Wait for pump termination — kill stage 6. Discard the result so it can be ignored even if the receiver
+    /// is already gone (detach after timeout).
     pub fn join_pump(&self, timeout: Duration) {
         let rx = self
             .drain_done_rx
@@ -835,21 +835,21 @@ impl OutputCore {
         }
     }
 
-    /// pump 핸들/done_rx 적재 — transport.start(stage 3)가 pump 스레드를 띄운 뒤 호출.
+    /// Load the pump handle/done_rx — called after transport.start (stage 3) has launched the pump thread.
     pub fn attach_pump(&self, handle: JoinHandle<()>, done_rx: Receiver<()>) {
         *self.drain_handle.lock().expect("drain_handle poisoned") = Some(handle);
         *self.drain_done_rx.lock().expect("drain_done_rx poisoned") = Some(done_rx);
     }
 
-    /// 구독자 등록 + replay 전송. SinkId 반환(unsubscribe용).
+    /// Subscriber registration + replay send. Returns a SinkId (for unsubscribe).
     ///
-    /// **C4 (LLD §7, 절대 준수):** subscribers lock을 보유한 채로 replay를 전송한다.
-    /// 이렇게 하면 emit의 live send와 이 replay send가 같은 subscribers lock으로
-    /// 직렬화되어 replay→live 순서 역전이 원천 차단된다. emit은 step 5에서 subscribers
-    /// lock을 잡으려다 잠깐 대기하지만, replay 전송은 일회성이라 허용된다.
+    /// **C4 (LLD §7, strictly observed):** the replay is sent while holding the subscribers lock.
+    /// This way emit's live send and this replay send are serialized by the same subscribers lock,
+    /// so a replay→live order inversion is blocked at the source. emit briefly waits trying to take the subscribers
+    /// lock at step 5, but the replay send is one-shot so it is allowed.
     ///
-    /// **락 순서 규칙 3 예외 (LLD §10):** subscribe 함수만 subscribers→replay 두 lock을
-    /// 동시에 취득한다(항상 이 순서). emit은 두 lock 동시 보유 절대 금지.
+    /// **Lock order rule 3 exception (LLD §10):** only the subscribe function takes both the subscribers→replay locks
+    /// at once (always in this order). emit must never hold both locks at once.
     pub fn subscribe(&self, sink: Arc<dyn OutputSink>) -> SinkId {
         let sink_id = sink.sink_id();
 
@@ -861,8 +861,8 @@ impl OutputCore {
             replay_guard.snapshot()
         };
 
-        // snapshot의 seq와 이후 live chunk의 seq가 끊기지 않아 프론트가 seq로 dedup/정렬 가능.
-        // 막 등록된 sink라 send 실패는 unlikely → 무시(§7).
+        // The snapshot's seq and the following live chunk's seq are not broken, so the frontend can dedup/sort by seq.
+        // It is a just-registered sink, so a send failure is unlikely → ignore (§7).
         for stored in &snapshot {
             let payload = match &stored.event {
                 OutputEvent::TerminalBytes(v) => OutputPayload::Bytes(v),
@@ -882,21 +882,21 @@ impl OutputCore {
         sink_id
     }
 
-    /// after_seq/epoch 기반 선택적 replay 구독. `subscribe`의 C4 패턴(subscribers lock 보유 중
-    /// replay 전송)을 그대로 따르되, 보낼 범위를 분기한다.
+    /// Selective replay subscription based on after_seq/epoch. It follows `subscribe`'s C4 pattern (sending the replay while holding the subscribers lock)
+    /// as is, but branches the range to send.
     ///
-    /// 분기:
-    /// - epoch 불일치(epoch_matches=false) 또는 after_seq=None → FromOldest(전체).
-    /// - epoch 일치 & after_seq=Some(s):
-    ///     - 버퍼 비었으면 → Resumed(전송 0).
-    ///     - s < oldest → Truncated(oldest 부터 전체).
-    ///     - s >= oldest → Resumed(seq>s 인 tail 만).
+    /// Branches:
+    /// - epoch mismatch (epoch_matches=false) or after_seq=None → FromOldest (everything).
+    /// - epoch match & after_seq=Some(s):
+    ///     - if the buffer is empty → Resumed (send 0).
+    ///     - s < oldest → Truncated (everything from oldest).
+    ///     - s >= oldest → Resumed (only the tail with seq>s).
     ///
-    /// `on_ready`: 분기·메타(oldest/latest/kind/replay_from)가 확정된 뒤 **replay 를 sink 로
-    ///   전송하기 직전**에 1회 호출된다. 데몬이 이 안에서 SubscribeAck 를 먼저 큐잉해
-    ///   "Ack→replay binary" FIFO 순서(불변식 2)를 보장하면서도, Ack 필드를 이 단일 스냅샷
-    ///   기준 outcome 으로 채워 TOCTOU(스냅샷 A/B 불일치)를 제거한다. **on_ready 안에서 블로킹 금지**
-    ///   (subscribers lock 보유 중 호출 — non-blocking try_send 만).
+    /// `on_ready`: called once after the branch · meta (oldest/latest/kind/replay_from) are fixed, **right before the replay is
+    ///   sent to the sink**. The daemon queues the SubscribeAck first inside it,
+    ///   guaranteeing the "Ack→replay binary" FIFO order (invariant 2) while filling the Ack fields with the outcome
+    ///   based on this single snapshot, eliminating TOCTOU (snapshot A/B mismatch). **No blocking inside on_ready**
+    ///   (called while holding the subscribers lock — only non-blocking try_send).
     pub fn subscribe_from(
         &self,
         sink: Arc<dyn OutputSink>,
@@ -907,8 +907,8 @@ impl OutputCore {
         let sink_id = sink.sink_id();
         let mut subscribers_guard = self.subscribers.lock().expect("subscribers poisoned");
         subscribers_guard.push(sink.clone());
-        // ★다음 발급 seq 는 스냅숏과 같은 replay 락 아래에서 읽는다★ — 발급은 전부 그 락 안이라(emit ·
-        //   seed · 배치 · 목록 사건 · 종료 합성) 이 값이 곧 스냅숏 바로 뒤에 올 첫 seq 다.
+        // ★Read the next issue seq under the same replay lock as the snapshot★ — all issuing is inside that lock (emit ·
+        //   seed · batch · list event · terminal synthesis), so this value is the first seq that will come right after the snapshot.
         let (snapshot, next_seq) = {
             let replay_guard = self.replay.lock().expect("replay poisoned");
             (replay_guard.snapshot(), self.seq.load(Ordering::Relaxed))
@@ -926,7 +926,7 @@ impl OutputCore {
                 } else if s < oldest {
                     (ReplayKind::Truncated, 0usize)
                 } else {
-                    // seq<=s 인 prefix 를 건너뛴다(seq 연속 보장 → partition_point 안전).
+                    // Skip the prefix with seq<=s (seq continuity guaranteed → partition_point is safe).
                     let idx = snapshot.partition_point(|c| c.seq <= s);
                     (ReplayKind::Resumed, idx)
                 }
@@ -935,9 +935,9 @@ impl OutputCore {
 
         let to_send = &snapshot[start_idx..];
 
-        // ★빈 ring 은 다음 발급 seq(ADR-0231)★ — 옛 `latest+1` 은 빈 ring 의 `latest` 를 0 으로 읽어 새
-        //   화신에서 1 이 됐다(첫 발급은 0). 뷰가 이 값을 빈 replay 의 flush 시작점으로 쓰므로 하나 크면
-        //   마커 뒤로 늦게 온 seq 0 을 건너뛴다. 비지 않은 ring 은 옛 값 그대로다.
+        // ★An empty ring is the next issue seq (ADR-0231)★ — the old `latest+1` read an empty ring's `latest` as 0, so on a new
+        //   incarnation it became 1 (the first issue is 0). The view uses this value as the flush start point of an empty replay, so if it is one larger
+        //   it skips a seq 0 that arrives late behind the marker. A non-empty ring keeps the old value.
         let replay_from = to_send.first().map(|c| c.seq).unwrap_or_else(|| {
             if snapshot.is_empty() {
                 next_seq
@@ -985,13 +985,13 @@ impl OutputCore {
             .retain(|s| s.sink_id() != sink_id);
     }
 
-    /// replay 스냅샷 — 늦게 붙는 창의 초기 복원용(get_snapshot → wire SnapshotChunk 경로).
+    /// Replay snapshot — for the initial restore of a late-attaching window (get_snapshot → wire SnapshotChunk path).
     ///
-    /// ★계약 유지(B5)★: 이 게터는 여전히 `Vec<OutputChunk>`(바이트 전용 wire 미러)를 반환한다 —
-    /// 호출부(manager.get_snapshot → daemon snapshot_chunk_to_wire)가 이 형태에 의존한다. Ring 은
-    /// payload-generic(StoredOutput) 이지만, 이 경로의 wire 타입(OutputChunk{seq,data})은 아직 바이트
-    /// 전용이라 **TerminalBytes 만** 변환한다. 구조화 이벤트의 snapshot wire 매핑은 B7(daemon adapter)
-    /// 몫이라 여기선 스킵한다 — 현재 구조화 이벤트 생산자가 없어(B3 미배선) 런타임 유실 없음.
+    /// ★Contract kept (B5)★: this getter still returns `Vec<OutputChunk>` (a byte-only wire mirror) —
+    /// the callers (manager.get_snapshot → daemon snapshot_chunk_to_wire) depend on this shape. The Ring is
+    /// payload-generic (StoredOutput), but this path's wire type (OutputChunk{seq,data}) is still byte-only, so it converts **only TerminalBytes**.
+    /// The snapshot wire mapping of structured events belongs to B7 (daemon adapter), so it is skipped here — there is currently no structured event producer
+    /// (B3 unwired), so no runtime loss.
     pub fn snapshot(&self) -> Vec<OutputChunk> {
         self.replay
             .lock()
@@ -1000,13 +1000,13 @@ impl OutputCore {
             .into_iter()
             .filter_map(|s| match s.event {
                 OutputEvent::TerminalBytes(data) => Some(OutputChunk { seq: s.seq, data }),
-                // ★무음 유실 관측 훅★: subscribe_from replay 경로는 payload-generic 이라 정상 전달돼
-                // 두 복원 경로가 비대칭 — B3 배선 순간 무음 유실이 되므로 drop 을 warn 으로 관측
-                // 가능하게 남긴다.
+                // ★Silent-loss observation hook★: the subscribe_from replay path is payload-generic and delivers normally, so
+                // the two restore paths are asymmetric — it would become a silent loss the moment B3 is wired, so we leave the drop
+                // observable as a warn.
                 ref other => {
-                    // variant 태그만 로그(payload 내용은 로그에 싣지 않음 — 민감/대용량 회피).
+                    // Log only the variant tag (payload content is not put in the log — avoids sensitive/large data).
                     let kind = match other {
-                        OutputEvent::TerminalBytes(_) => "TerminalBytes", // 위 arm 이 처리 — 도달 안 함
+                        OutputEvent::TerminalBytes(_) => "TerminalBytes", // Handled by the arm above — never reached
                         OutputEvent::TextDelta { .. } => "TextDelta",
                         OutputEvent::ToolCall { .. } => "ToolCall",
                         OutputEvent::ToolResult { .. } => "ToolResult",
@@ -1028,13 +1028,13 @@ impl OutputCore {
             .collect()
     }
 
-    /// 이 화신이 마지막으로 낸 **콘솔 바이트**를 최대 `max_bytes` 만큼(뒤에서부터) 돌려준다.
+    /// Return the **console bytes** this incarnation last emitted, up to `max_bytes` (counted from the end).
     ///
-    /// ★`snapshot()` 의 형제가 아니다 — 그걸 대신 쓰지 말 것★: `snapshot()` 은 링 전체를 clone 하고
-    ///   (문서상 최대 2MB) 콘솔 바이트가 아닌 항목마다 warn 을 찍는다. 이 게터의 호출자는 죽은 세션의
-    ///   종료 문구 몇 줄만 보므로, 그 비용과 로그 폭주를 치를 이유가 없다.
-    /// ★상한은 정확히 지켜진다★: 마지막 청크가 상한을 넘으면 그 청크의 **끝쪽만** 잘라 담는다.
-    /// ★빈 결과가 정상이다★: 구조화(NDJSON) 세션의 링에는 콘솔 바이트가 하나도 없다.
+    /// ★Not a sibling of `snapshot()` — do not use it instead★: `snapshot()` clones the whole ring
+    ///   (documented max 2MB) and prints a warn for every item that is not console bytes. The caller of this getter looks at only a few lines of a dead session's
+    ///   exit text, so there is no reason to pay that cost and log flood.
+    /// ★The cap is kept exactly★: if the last chunk exceeds the cap, only the **end part** of that chunk is cut and kept.
+    /// ★An empty result is normal★: the ring of a structured (NDJSON) session has no console bytes at all.
     // ADR-0172
     pub fn terminal_tail(&self, max_bytes: usize) -> Vec<u8> {
         self.replay
@@ -1043,33 +1043,33 @@ impl OutputCore {
             .terminal_tail(max_bytes)
     }
 
-    /// 이 화신의 진단(stderr) 한 줄을 붙든다 — transport 의 stderr drain 스레드가 부른다.
+    /// Hold one line of this incarnation's diagnostic (stderr) — called by the transport's stderr drain thread.
     ///
-    /// ★로그와 **독립**이어야 한다(load-bearing)★: 같은 줄이 `tracing::debug!(target: "agent_stderr")`
-    ///   로도 나가지만 기본 로그 필터는 `warn` 이라 그 줄은 평소 **버려진다**. 분류를 그 로그에 매달면
-    ///   로그 레벨이 기능을 켜고 끄게 된다(= 개발자 머신에서만 되는 기능). 그래서 여기 쌓는 것은 레벨과
-    ///   무관하게 항상 일어나고, 호출자는 로그 매크로보다 **먼저** 이걸 부른다.
-    /// ★마스킹된 텍스트를 받는다(호출자 의무)★: 외부 프로세스 출력이라 자격증명이 섞일 수 있고, 이
-    ///   버퍼는 분류 근거로 읽히는 것에 더해 실패 사유로 로그·보고에 실릴 수 있는 자리다.
-    /// ★상한은 앞에서부터 버려 지킨다★ — 최신 줄이 증거이므로 뒤를 남긴다.
+    /// ★It must be **independent** of the log (load-bearing)★: the same line also goes out through `tracing::debug!(target: "agent_stderr")`
+    ///   but the default log filter is `warn`, so that line is normally **discarded**. Hanging classification on that log makes
+    ///   the log level switch a feature on and off (= a feature that works only on the developer's machine). So what accumulates here
+    ///   happens regardless of level, and the caller calls this **before** the log macro.
+    /// ★It takes masked text (caller's duty)★: it is external process output so credentials may be mixed in, and this
+    ///   buffer, besides being read as classification grounds, is a place that may be carried into logs and reports as the failure reason.
+    /// ★The cap is kept by discarding from the front★ — the latest lines are the evidence, so keep the back.
     // ADR-0172
     pub fn push_diagnostic(&self, line: &str) {
         let mut buf = self.diagnostics.lock().expect("diagnostics poisoned");
         buf.push_str(line);
         buf.push('\n');
         if buf.len() > DIAGNOSTIC_CAP_BYTES {
-            // ★자르는 위치를 **문자 경계**로 밀어 올린다★: 바이트로 그냥 자르면 멀티바이트 문자를
-            //   쪼개 `String` 불변식이 깨지고 `drain` 이 panic 한다 — claude 진단에 한글·이모지가
-            //   섞이면 실제로 걸린다.
+            // ★Push the cut position up to a **char boundary**★: cutting by bytes alone splits a
+            //   multibyte character, breaks the `String` invariant, and `drain` panics — it actually hits when Korean · emoji
+            //   are mixed into claude's diagnostics.
             let cut = buf.ceil_char_boundary(buf.len() - DIAGNOSTIC_CAP_BYTES);
             buf.drain(..cut);
         }
     }
 
-    /// 지금까지 붙든 진단 텍스트 전부(최대 `DIAGNOSTIC_CAP_BYTES`).
+    /// All the diagnostic text held so far (at most `DIAGNOSTIC_CAP_BYTES`).
     ///
-    /// ★빈 결과가 정상이다★: PTY 세션은 stderr 를 콘솔 스트림에 병합해 내보내므로 이 버퍼를 쓰지
-    ///   않는다 — 그쪽 증거는 `terminal_tail` 이 진다. 호출자는 둘을 **합쳐** 분류에 넘긴다.
+    /// ★An empty result is normal★: a PTY session emits stderr merged into the console stream so it does not use this buffer
+    ///   — that side's evidence is carried by `terminal_tail`. The caller passes the two **combined** to classification.
     // ADR-0172
     pub fn diagnostic_tail(&self) -> String {
         self.diagnostics
@@ -1103,10 +1103,10 @@ mod diagnostic_tests {
         )
     }
 
-    /// 진단 버퍼는 **분리돼 있고 비어 있는 것이 기본**이다 — 링에 아무것도 흘리지 않는다.
+    /// The diagnostic buffer is **separate and empty by default** — nothing is leaked into the ring.
     ///
-    /// ★이 단언이 지키는 것★: 이 버퍼를 출력 링으로 합치는 변경이 오면 여기가 붉어진다. 합치면 NDJSON
-    ///   파서 중간에 비-JSON 라인이 껴 구조화 세션이 깨지고, 터미널 화면에도 진단이 새 나온다.
+    /// ★What this assertion guards★: if a change merging this buffer into the output ring arrives, this goes red. Merging would wedge a non-JSON line
+    ///   into the middle of the NDJSON parser and break the structured session, and diagnostics would leak onto the terminal screen too.
     #[test]
     fn diagnostics_never_leak_into_the_output_ring() {
         let core = core();
@@ -1123,16 +1123,16 @@ mod diagnostic_tests {
         assert!(core.snapshot().is_empty(), "링에 이벤트가 생겨서도 안 된다");
     }
 
-    /// 상한을 넘겨도 **최신 줄이 남고**, 멀티바이트 문자를 쪼개지 않는다.
+    /// Even past the cap the **latest line stays**, and no multibyte character is split.
     ///
-    /// ★후자가 panic 회귀다★: 바이트 위치로 그냥 자르면 `String` 불변식이 깨져 `drain` 이 panic 한다 —
-    ///   claude 진단에 한글·이모지가 섞이면 실제로 걸린다. 그 패닉은 stderr drain 스레드(가둠 표시 밖)에서
-    ///   나므로 운영 프로세스에서는 훅이 데몬을 끝낸다(ADR-0292) — 훅 없는 시험 빌드에서는 조용히 진단 캡처만
-    ///   죽는다.
+    /// ★The latter is the panic regression★: cutting by byte position alone breaks the `String` invariant and `drain` panics —
+    ///   it actually hits when Korean · emoji are mixed into claude's diagnostics. That panic happens on the stderr drain thread (outside the containment marker),
+    ///   so in the production process a hook ends the daemon (ADR-0292) — in a test build without the hook only diagnostic capture
+    ///   silently dies.
     #[test]
     fn the_diagnostic_buffer_is_bounded_and_utf8_safe() {
         let core = core();
-        // 한 줄이 순수 멀티바이트라 어느 지점에서 잘라도 경계에 걸린다.
+        // A line is purely multibyte, so wherever it is cut it lands on a boundary.
         let noisy = "가".repeat(512); // 3 bytes each = 1536B/line
         for _ in 0..32 {
             core.push_diagnostic(&noisy);
@@ -1151,35 +1151,35 @@ mod diagnostic_tests {
         );
     }
 
-    /// 자르는 자리가 글자 한가운데면 **다음** 경계로 올라간다 — 상한을 넘기지 않으면서 가장 적게 버린다.
+    /// If the cut position is in the middle of a character, it moves up to the **next** boundary — discarding the least without exceeding the cap.
     ///
-    /// 위 시험은 자르는 자리가 어디 떨어지는지 정하지 않는다. 여기서는 자를 바이트 수를 2 로 박아
-    /// `'가'`(0..3) 의 한가운데에 떨군다: 내려가면(0) 상한을 넘기고, 2 에서 그냥 자르면 `drain` 이 panic 한다.
+    /// The test above does not decide where the cut lands. Here we pin the number of bytes to cut at 2
+    /// and drop it in the middle of `'가'`(0..3): going down (0) exceeds the cap, and cutting at 2 as is makes `drain` panic.
     #[test]
     fn a_cut_inside_a_character_moves_up_to_the_next_boundary() {
         let core = core();
         core.push_diagnostic("가");
         let filler = "a".repeat(DIAGNOSTIC_CAP_BYTES - 3);
         core.push_diagnostic(&filler);
-        // "가\n" 4 + filler + "\n" = 상한 + 2 → 자를 자리 2.
+        // "가\n" 4 + filler + "\n" = cap + 2 → cut position 2.
         assert_eq!(core.diagnostic_tail(), format!("\n{filler}\n"));
     }
 }
 
-// ── S15 B4: payload-generic replay 버퍼 ───────────────────────────────────────────
+// ── S15 B4: payload-generic replay buffer ─────────────────────────────────────────
 //
-// ADR-0002: 출력 종류 비가정 — 버퍼가 바이트/이벤트를 차별하지 않는다.
+// ADR-0002: no assumption on output kind — the buffer does not discriminate bytes/events.
 
 #[derive(Debug, Clone)]
 pub struct StoredOutput {
     pub seq: u64,
     pub event: OutputEvent,
-    /// eviction 바이트 예산 산정용 근사 크기(정확한 wire 크기 아님 — 아래 estimate_cost_bytes 참조).
+    /// Approximate size for the eviction byte budget (not the exact wire size — see estimate_cost_bytes below).
     pub cost_bytes: usize,
 }
 
-/// 목록 사건은 명부를 먹이는 낱개 문(`emit` 계열)으로만 링에 든다 — `seed`·덩이 문으로 들면 명부가 링 접두의
-/// 환원값이 아니게 된다(그 줄은 명부를 모른 채 링에만 선다).
+/// A list event enters the ring only through the single-item door that feeds the registry (the `emit` family) — if it enters via `seed` or the chunk door, the registry is no longer the ring prefix's
+/// reduced value (that line stands only in the ring without the registry knowing it).
 // ADR-0231
 fn debug_assert_not_list_event(event: &OutputEvent) {
     debug_assert!(
@@ -1188,25 +1188,25 @@ fn debug_assert_not_list_event(event: &OutputEvent) {
     );
 }
 
-/// [`OutputCore::emit_cancel_request`] 의 답 — 명부 확인과 기록을 한 replay 구간에서 본 결과.
+/// The answer of [`OutputCore::emit_cancel_request`] — the result of seeing the registry check and record in one replay span.
 // ADR-0231
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CancelRequest {
-    /// `Queued` 였다 — `CancelRequested` 를 링에 세웠다. 벤더 취소 줄은 호출자가 쓴다.
+    /// It was `Queued` — `CancelRequested` was put in the ring. The vendor cancel line is written by the caller.
     Recorded,
-    /// 이미 취소 대기다 — 아무것도 세우지 않았다(멱등).
+    /// It is already waiting for cancel — nothing was put in (idempotent).
     AlreadyCancelling,
-    /// 목록에 없다(모름 · 이미 결말) — 아무것도 세우지 않았다.
+    /// It is not in the list (unknown · already resolved) — nothing was put in.
     NotListed,
 }
 
-/// 세션 분류가 읽는 두 표 — 읽기 하나에 이름 하나. 순서는 부르는 쪽이 아니라 [`pending_then_in_turn`] 한 곳이
-/// 정한다(부르는 자리에서 두 읽기를 뒤바꿀 여지를 없앤다).
+/// The two tables the session classification reads — one name per read. The order is decided in one place, [`pending_then_in_turn`], not by the caller
+/// (removing any room to swap the two reads at the call site).
 // ADR-0231
 trait BusyReads {
-    /// 대기 목록 표가 이 화신을 「찼다」로 적었나. 표가 없는 조립(하네스)은 `false`.
+    /// Did the pending-list table record this incarnation as 「찼다」 (full). An assembly without the table (harness) is `false`.
     fn read_pending_listed(&self) -> bool;
-    /// 턴 관측 표가 이 화신을 턴 중으로 적었나.
+    /// Did the turn-observation table record this incarnation as in a turn.
     fn read_in_turn(&self) -> bool;
 }
 
@@ -1223,25 +1223,25 @@ impl BusyReads for OutputCore {
     }
 }
 
-/// 세션 분류의 두 읽기를 **이 순서로** 한다 — 대기 목록 표가 참이면 턴 관측은 읽지 않는다. 순서의 근거는
+/// Do the session classification's two reads **in this order** — if the pending-list table is true, turn observation is not read. The grounds for the order are
 /// [`OutputCore::classified_input_busy`].
 // ADR-0231
 fn pending_then_in_turn(reads: &impl BusyReads) -> bool {
     reads.read_pending_listed() || reads.read_in_turn()
 }
 
-/// OutputEvent 의 **eviction 예산용** 크기 근사.
+/// An **eviction-budget** size approximation of an OutputEvent.
 ///
-/// ★왜 근사인가(TRD 핵심)★: core 는 직렬화를 못 한다(ADR-0003 — wire 변환은 daemon adapter 몫).
-/// 그래서 정확한 wire 바이트 수를 계산할 수 없다. 하지만 큰 `args_json`(도구 인자)·`json`(Structured)
-/// 이벤트가 "건수 1" 로만 세지면 max_bytes(2MB) 상한을 우회해 버퍼가 무한정 커진다. 이를 막으려
-/// **payload 문자열 필드들의 바이트 길이 합**을 구조적으로 근사해 예산에 반영한다. 이 값은 eviction
-/// 판단 전용이며 정확한 직렬화 크기가 아니다(태그·구분자·escape 오버헤드 무시).
-/// ★`pub(crate)` 인 것은 **링 바깥에서 「이만큼이면 링을 채운다」를 셀 수 있어야 하기 때문이다**★:
-/// 복원 이력을 상대에게 **요청해서** 받는 backend(codex app-server)는 몇 건을 받아 올지 스스로 정해야
-/// 하는데, 그 천장은 [`REPLAY_MAX_BYTES`]·[`REPLAY_MAX_EVENTS`] 이고 무게를 세는 축은 이 함수다. 다른
-/// 축으로 어림잡으면 그 backend 가 링이 버릴 것을 더 받아 오거나(순 비용) 실을 수 있는 것을 덜 받아
-/// 온다(화면 손실). (ADR-0203)
+/// ★Why an approximation (TRD core)★: the core cannot serialize (ADR-0003 — wire conversion belongs to the daemon adapter).
+/// So it cannot compute the exact wire byte count. But if large `args_json` (tool args) · `json` (Structured)
+/// events were counted only as "count 1", they would bypass the max_bytes (2MB) cap and the buffer would grow without bound. To prevent this,
+/// we structurally approximate the **sum of byte lengths of the payload string fields** and reflect it in the budget. This value is for eviction
+/// decisions only and is not the exact serialized size (tag · delimiter · escape overhead ignored).
+/// ★`pub(crate)` because **someone outside the ring must be able to count 「이만큼이면 링을 채운다」 (this much fills the ring)**★:
+/// a backend that **requests** the restored history from the peer (codex app-server) must decide by itself how many items to fetch,
+/// and the ceiling is [`REPLAY_MAX_BYTES`] · [`REPLAY_MAX_EVENTS`], and the axis that counts weight is this function. If estimated on another
+/// axis, that backend would either fetch more of what the ring will discard (pure cost) or fetch less of what can be loaded
+/// (screen loss). (ADR-0203)
 pub(crate) fn estimate_cost_bytes(event: &OutputEvent) -> usize {
     match event {
         OutputEvent::TerminalBytes(v) => v.len(),
@@ -1250,7 +1250,7 @@ pub(crate) fn estimate_cost_bytes(event: &OutputEvent) -> usize {
             turn_id,
             message_id,
         } => text.len() + opt_len(turn_id) + opt_len(message_id),
-        // 종류는 고정 크기 enum 이라 무게가 없다.
+        // The kind is a fixed-size enum so it has no weight.
         OutputEvent::ToolCall {
             name,
             args_json,
@@ -1259,15 +1259,15 @@ pub(crate) fn estimate_cost_bytes(event: &OutputEvent) -> usize {
             message_id,
             category: _,
         } => name.len() + args_json.len() + opt_len(id) + opt_len(turn_id) + opt_len(message_id),
-        // 결말은 고정 크기 enum 이라 무게가 없다.
+        // The outcome is a fixed-size enum so it has no weight.
         OutputEvent::ToolResult { id, outcome: _ } => id.len(),
-        // Usage 는 고정 크기 수치 필드 — turn_id 문자열만 반영(u64 두 개는 무시).
+        // Usage is fixed-size numeric fields — only the turn_id string is counted (the two u64s are ignored).
         OutputEvent::Usage { turn_id, .. } => opt_len(turn_id),
         OutputEvent::MessageDone {
             turn_id,
             message_id,
         } => opt_len(turn_id) + opt_len(message_id),
-        // 결말의 실패 사유만 길이를 상대가 정한다 — 나머지 세 갈래는 무게가 없다.
+        // Only the failure reason of the outcome has a length decided by the peer — the other three branches have no weight.
         OutputEvent::TurnEnd { turn_id, outcome } => {
             opt_len(turn_id)
                 + match outcome {
@@ -1277,7 +1277,7 @@ pub(crate) fn estimate_cost_bytes(event: &OutputEvent) -> usize {
         }
         OutputEvent::Error(s) => s.len(),
         OutputEvent::Structured { kind, json } => kind.len() + json.len(),
-        // 본문을 싣는 둘 — `Queued` 의 글과 받음 불가 판명의 말풍선 사본.
+        // The two that carry body text — `Queued`'s text and the bubble copy of the acceptance-impossible finding.
         // ADR-0231
         OutputEvent::QueuedInput(ev) => match ev {
             QueuedInputEvent::Queued { id, text } => id.len() + text.len(),
@@ -1299,14 +1299,14 @@ fn opt_len(s: &Option<String>) -> usize {
     s.as_deref().map(str::len).unwrap_or(0)
 }
 
-/// 늦게 붙는 창을 위한 출력 replay ring buffer — 상한 2MB **그리고** event 수 상한.
-/// StoredOutput 전용 구체 타입으로 둔다(제네릭 `Ring<T>` 는 이 프로젝트에 다른 저장 대상이 없어
-/// 과함 — 단순한 쪽).
+/// Output replay ring buffer for late-attaching windows — a 2MB cap **and** an event-count cap.
+/// Kept as a concrete type dedicated to StoredOutput (a generic `Ring<T>` is excessive since this project has no other storage target
+/// — the simpler side).
 ///
-/// ★event 수 상한 이유(S12 consult, GPT 단독 catch): byte 상한만 있으면 1바이트 청크가
-/// 폭주할 때 event 수가 수백만으로 불어, 신규 구독자가 replay를 받을 때 bounded mpsc를
-/// 즉시 가득 채워 매 재연결이 slow-consumer로 끊기는 영구 루프가 생긴다. 둘 중 하나라도
-/// 초과하면 앞부터 evict.
+/// ★Reason for the event-count cap (S12 consult, GPT-only catch): with only a byte cap, when 1-byte chunks
+/// run away the event count balloons into the millions, and when a new subscriber receives the replay it fills the bounded mpsc
+/// instantly, creating a permanent loop where every reconnect is cut as a slow-consumer. If either of the two
+/// is exceeded, evict from the front.
 pub struct Ring {
     items: VecDeque<StoredOutput>,
     total_bytes: usize,
@@ -1314,12 +1314,12 @@ pub struct Ring {
     max_events: usize,
 }
 
-/// 링의 바이트 천장. ★상수로 꺼내 둔 것은 [`estimate_cost_bytes`] 와 같은 사유다★ — 이력을 요청해서
-/// 받는 backend 가 「여기까지만 받으면 된다」를 이 값으로 판정한다(ADR-0203). 링 자신이 쓰는 자리는
-/// 아래 [`Ring::new`] 하나다.
+/// The byte ceiling of the ring. ★It is pulled out as a constant for the same reason as [`estimate_cost_bytes`]★ — a backend that requests history and
+/// receives it decides 「여기까지만 받으면 된다」 (this much is enough to receive) with this value (ADR-0203). The only place the ring itself uses it is
+/// [`Ring::new`] below.
 pub(crate) const REPLAY_MAX_BYTES: usize = 2 * 1024 * 1024;
 
-/// 링의 건수 천장 — 사유는 [`REPLAY_MAX_BYTES`] 와 같다.
+/// The count ceiling of the ring — the reason is the same as [`REPLAY_MAX_BYTES`].
 pub(crate) const REPLAY_MAX_EVENTS: usize = 4096;
 
 impl Ring {
@@ -1328,23 +1328,23 @@ impl Ring {
             items: VecDeque::new(),
             total_bytes: 0,
             max_bytes: REPLAY_MAX_BYTES,
-            // 4096: 데몬 WS 송신 큐 cap(예 4608) − control_slack(512) 이하로 잡아
-            // replay만으로 신규 구독자 큐가 넘치지 않게 한다.
+            // 4096: set at or below the daemon WS send queue cap (e.g. 4608) − control_slack (512) so that
+            // replay alone does not overflow a new subscriber's queue.
             max_events: REPLAY_MAX_EVENTS,
         }
     }
 
-    /// StoredOutput 을 뒤에 추가하고, 이중 상한(cost_bytes 합 OR 건수) 초과 시 앞부터 evict.
-    /// total_bytes 는 push 마다 cost_bytes 로 누적, evict 마다 차감해 항상 items 합과 일치한다.
+    /// Append a StoredOutput at the back, and evict from the front when the dual cap (sum of cost_bytes OR count) is exceeded.
+    /// total_bytes accumulates cost_bytes on each push and is subtracted on each evict, so it always matches the sum of items.
     pub fn push(&mut self, item: StoredOutput) {
         self.total_bytes += item.cost_bytes;
         self.items.push_back(item);
-        // ★최신 1건 보존 불변식(len() > 1 가드)★: 방금 push 한 단일 이벤트의 cost_bytes 가
-        // max_bytes(2MB)를 홀로 초과하면(예: 큰 args_json/Structured.json), len() > 1 가드가 없을 때
-        // eviction 루프가 그 최신 이벤트까지 pop_front 로 빼내 버퍼가 비어 버린다 → 늦게 붙는 구독자가
-        // **최신 seq 를 통째로 놓친다**. 그래서 오래된 것만 evict 하고 마지막 1건은 항상 남긴다.
-        // 트레이드오프: 단일 이벤트가 예산을 넘으면 메모리는 "가장 큰 단일 이벤트 크기"까지 초과할 수
-        // 있으나(byte 상한 일시 위반), replay 정합(늦은 구독자가 늘 최신을 본다) > 엄격 byte 상한.
+        // ★Keep-the-latest-one invariant (len() > 1 guard)★: if the cost_bytes of the single event just pushed
+        // alone exceeds max_bytes (2MB) (e.g. a large args_json/Structured.json), without the len() > 1 guard
+        // the eviction loop would pop_front even that latest event and the buffer would be empty → a late-attaching subscriber
+        // **misses the latest seq entirely**. So only older ones are evicted and the last one is always kept.
+        // Trade-off: if a single event exceeds the budget, memory can exceed it by up to "the size of the largest single event"
+        // (a temporary violation of the byte cap), but replay consistency (a late subscriber always sees the latest) > the strict byte cap.
         while self.items.len() > 1
             && (self.total_bytes > self.max_bytes || self.items.len() > self.max_events)
         {
@@ -1356,12 +1356,12 @@ impl Ring {
         }
     }
 
-    /// 뒤에서부터 `TerminalBytes` 만 최대 `max_bytes` 모아 **시간순**으로 돌려준다.
+    /// From the back, collect only `TerminalBytes` up to `max_bytes` and return them in **chronological** order.
     ///
-    /// ★상한은 하드다★: 경계에 걸친 청크는 그 **끝쪽**만 잘라 담으므로 반환 길이가 `max_bytes` 를 넘지
-    ///   않는다(청크 하나가 통째로 넘어오면 상한이 상한이 아니게 된다).
-    /// ★clone 하지 않는다★: 슬라이스만 모아 마지막에 한 번 이어 붙인다 — 링 전체 복사(`snapshot`)와의
-    ///   차이가 이 메서드의 존재 이유다.
+    /// ★The cap is hard★: a chunk straddling the boundary is cut and only its **end part** is kept, so the returned length does not exceed `max_bytes`
+    ///   (if a chunk came through whole, the cap would stop being a cap).
+    /// ★No clone★: only slices are collected and joined once at the end — the difference from copying the whole ring (`snapshot`)
+    ///   is the reason this method exists.
     // ADR-0172
     pub fn terminal_tail(&self, max_bytes: usize) -> Vec<u8> {
         let mut parts: Vec<&[u8]> = Vec::new();
@@ -1380,8 +1380,8 @@ impl Ring {
         parts.concat()
     }
 
-    /// 현재 버퍼 전체를 clone 해 반환(seq 오름차순). 호출부가 after_seq 필터는 partition_point 로.
-    /// 호출부(subscribe)가 lock 밖에서 borrow 하려면 소유 스냅샷이 필요하다(락 보유 시간 최소화).
+    /// Clone and return the whole current buffer (seq ascending). The caller filters after_seq with partition_point.
+    /// An owned snapshot is needed so the caller (subscribe) can borrow it outside the lock (minimizing lock hold time).
     pub fn snapshot(&self) -> Vec<StoredOutput> {
         self.items.iter().cloned().collect()
     }
@@ -1399,7 +1399,7 @@ mod tests {
     use crate::types::ToolCategory;
     use std::sync::Mutex;
 
-    /// 받은 출력을 (seq, bytes, is_event)로 순서대로 수집하는 mock OutputSink.
+    /// A mock OutputSink that collects received output in order as (seq, bytes, is_event).
     struct MockSink {
         id: SinkId,
         events: Mutex<Vec<(u64, Vec<u8>, bool)>>,
@@ -1477,7 +1477,7 @@ mod tests {
         OutputCore::new(uuid::Uuid::new_v4(), 0, status_sink, TurnWiring::detached())
     }
 
-    // ── ADR-0292: 사용량 관측은 가둠 표시 밖에서 sink 에 닿는다 ─────────────────────────
+    // ── ADR-0292: usage observation reaches the sink outside the containment marker ─────────────────────────
 
     #[test]
     fn report_usage_reaches_the_sink_outside_the_contain_mark() {
@@ -1515,9 +1515,9 @@ mod tests {
         assert!(after, "관측을 넘긴 뒤 펌프의 표시가 되살아나지 않았다");
     }
 
-    // ── ADR-0113: emit → 턴 관측 표 + 턴 종료 push ───────────────────────────────────
+    // ── ADR-0113: emit → turn observation table + turn end push ───────────────────────────────────
 
-    /// 표 + claude 분류자를 꽂은 core(운영 spawn_session 배선과 동형 — 같은 dispatch 로 뽑는다).
+    /// A core with the table + claude classifier plugged in (same shape as the production spawn_session wiring — taken through the same dispatch).
     fn core_with_turns(
         status_sink: Arc<dyn StatusSink>,
         epoch: u32,
@@ -1564,7 +1564,7 @@ mod tests {
         assert!(!turns.is_in_turn(id, 7), "종료 신호 → 턴 아님");
     }
 
-    /// 초인종 순간의 표를 읽는 sink — 「표 갱신 → 통지」 순서의 관찰창.
+    /// A sink that reads the table at the doorbell moment — an observation window on the order 「표 갱신 → 통지」 (table update → notification).
     struct HaltAtDoorbell {
         turns: Arc<TurnObservations>,
         seen: Mutex<Vec<bool>>,
@@ -1578,7 +1578,7 @@ mod tests {
         }
     }
 
-    /// 오류 끝을 싣는 분류자 — 운영 분류기가 아직 오류 끝을 안 내므로 시험이 직접 짓는다.
+    /// A classifier that carries an error end — the production classifier does not yet emit an error end, so the test builds it directly.
     fn classify_outcome(event: &OutputEvent) -> Option<TurnSignal> {
         use crate::turn::TurnEndKind;
         use crate::types::TurnOutcome;
@@ -1625,10 +1625,10 @@ mod tests {
     }
 
     type Park = (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
-    /// 오류 줄을 분류하는 순간 그 스레드를 세워 두는 자리 — seq 는 발급됐고 표에는 아직 안 적힌 틈이다(시험 전용).
+    /// A spot that holds that thread at the moment it classifies an error line — a gap where seq is issued and the table is not yet written (test only).
     static PARK_ERROR: Mutex<Option<Park>> = Mutex::new(None);
 
-    /// 오류 줄 = `Failed`(붙잡힘) · 입력 에코 = 진행 · 턴 끝 = 깨끗한 끝.
+    /// Error line = `Failed` (caught) · input echo = progress · turn end = clean end.
     fn classify_parking_error(event: &OutputEvent) -> Option<TurnSignal> {
         use crate::turn::TurnEndKind;
         match event {
@@ -1648,8 +1648,8 @@ mod tests {
         }
     }
 
-    /// ★멈춤 칸의 커서 회귀(실 emit 경로)★: pump 의 오류 줄(seq N)이 표에 적히기 전에 주입 스레드의 진행
-    /// (N+1)이 먼저 적힌다 — 진행 커서로 거르면 그 오류가 버려져 턴 끝(N+2)이 깨끗하게 접힌다.
+    /// ★Cursor regression of the stuck field (real emit path)★: the injection thread's progress
+    /// (N+1) is written first, before the pump's error line (seq N) is written to the table — filtering by the progress cursor drops that error, so the turn end (N+2) folds cleanly.
     // ADR-0231
     #[test]
     fn an_error_written_behind_a_newer_progress_still_halts_at_the_turn_end() {
@@ -1666,7 +1666,7 @@ mod tests {
             TurnWiring::new(turns.clone(), classify_parking_error),
         ));
 
-        // 출력 pump — 오류 줄(분류에서 붙잡힘) 뒤에 턴 끝 줄.
+        // The output pump — a turn end line after the error line (caught in classification).
         let pump = {
             let core = core.clone();
             std::thread::spawn(move || {
@@ -1677,7 +1677,7 @@ mod tests {
         entered_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("오류 줄의 seq 가 발급된 채 붙잡혔다");
-        // 주입 스레드의 입력 에코.
+        // The injection thread's input echo.
         core.emit(OutputEvent::Structured {
             kind: "user".into(),
             json: "{}".into(),
@@ -1711,9 +1711,9 @@ mod tests {
         assert!(!o.in_turn, "턴 끝이 가장 새 신호다");
     }
 
-    /// ★진행 신호를 적지 않는 문★ — 같은 이벤트가 화면(fanout)·replay 로는 그대로 가되 사실
-    /// 계층에는 아무 것도 안 남는다. 이 성질이 깨지면 미귀속 줄이 턴 중 표시를 켜 놓고 그 종료는 귀속
-    /// 게이트에 막혀, 30 분 fail-open 밸브까지 우편이 막힌다(ADR-0127 이 닫은 그 기전).
+    /// ★A door that writes no progress signal★ — the same event goes to the screen (fanout) · replay as is, but nothing is left in the fact
+    /// layer. If this property breaks, an unattributed line turns on the in-turn indicator and its end is blocked by the attribution
+    /// gate, so mail is blocked until the 30-minute fail-open valve (the very mechanism ADR-0127 closed).
     #[test]
     fn the_unobserved_door_fans_out_and_replays_but_writes_no_turn_fact() {
         let (core, turns, id) = core_with_turns(MockStatusSink::new(), 3);
@@ -1733,7 +1733,7 @@ mod tests {
             "replay 에도 남아야 한다"
         );
 
-        // 같은 core 의 보통 문은 그대로 적는다 — 문이 갈린 것이지 표가 꺼진 것이 아니다.
+        // The same core's normal door still writes — the doors were split, the table was not turned off.
         core.emit(delta());
         assert!(turns.is_in_turn(id, 3));
     }
@@ -1786,7 +1786,7 @@ mod tests {
         core.finish(TerminalReason::Exited { code: Some(0) });
         assert_eq!(turns.get(id, 0), None, "finish 가 자기 항목을 거둔다");
 
-        // 막혀 있던 주입 스레드가 이제야 에코를 낸다(같은 epoch).
+        // The injection thread that was blocked now emits the echo (same epoch).
         core.emit(OutputEvent::Structured {
             kind: "user".into(),
             json: "{}".into(),
@@ -1810,7 +1810,7 @@ mod tests {
         });
         let wiring = |t: &Arc<TurnObservations>| TurnWiring::new(t.clone(), classify);
 
-        // 앞선 화신(epoch 0) — 한동안 돌다 종료한다.
+        // The earlier incarnation (epoch 0) — runs for a while and then terminates.
         let dead = OutputCore::new(id, 0, MockStatusSink::new(), wiring(&turns));
         for _ in 0..5 {
             dead.emit(delta());
@@ -1818,12 +1818,12 @@ mod tests {
         dead.finish(TerminalReason::Killed);
         assert_eq!(turns.get(id, 0), None, "종료가 자기 항목을 거둔다(전제)");
 
-        // 새 화신(epoch 1) — 같은 AgentId, 새 core 라 seq 는 0 부터 다시 센다.
+        // The new incarnation (epoch 1) — same AgentId, a new core, so seq counts from 0 again.
         let live = OutputCore::new(id, 1, MockStatusSink::new(), wiring(&turns));
         live.emit(delta());
         assert!(turns.is_in_turn(id, 1), "산 화신이 턴 중으로 관측됨(전제)");
 
-        // 죽은 화신의 주입 스레드가 이제야 깨어 에코를 낸다 — seq 는 산 화신의 것보다 **크다**.
+        // The dead incarnation's injection thread wakes up only now and emits an echo — its seq is **larger** than the live incarnation's.
         dead.emit(OutputEvent::Structured {
             kind: "user".into(),
             json: "{}".into(),
@@ -1881,12 +1881,12 @@ mod tests {
         core.seed(vec![delta(), message_done(), delta()]);
         assert_eq!(turns.get(id, 0), None, "seed 는 관측이 아니다");
         assert!(sink.turn_ends().is_empty(), "seed 는 통지도 내지 않는다");
-        // 라이브 emit 부터 관측이 시작된다(seed 가 관측을 막아 버리는 것도 아니다).
+        // Observation starts from live emit (it is not that seed blocks observation either).
         core.emit(delta());
         assert!(turns.is_in_turn(id, 0));
     }
 
-    /// 덩이 문의 기본 계약 — 링에도 들어가고, 붙어 있는 구독자에게도 **순서대로** 나가며, seq 가 이어진다.
+    /// The chunk door's basic contract — it enters the ring, goes out **in order** to attached subscribers, and seq continues.
     #[test]
     fn a_batch_lands_in_the_ring_and_fans_out_in_order() {
         let core = new_core(MockStatusSink::new());
@@ -1900,13 +1900,13 @@ mod tests {
         ]);
 
         assert_eq!(sink.seqs(), vec![0, 1, 2]);
-        // 늦게 붙는 구독자도 링에서 같은 셋을 받는다.
+        // A late-attaching subscriber also receives the same set from the ring.
         let late = MockSink::new();
         core.subscribe(late.clone());
         assert_eq!(late.seqs(), vec![0, 1, 2]);
     }
 
-    /// 빈 덩이는 seq 를 쓰지 않는다 — 안 그러면 복원할 것이 없는 세션마다 번호가 하나씩 밀린다.
+    /// An empty chunk uses no seq — otherwise every session with nothing to restore would shift the numbering by one.
     #[test]
     fn an_empty_batch_consumes_no_seq() {
         let core = new_core(MockStatusSink::new());
@@ -1917,8 +1917,8 @@ mod tests {
         assert_eq!(sink.seqs(), vec![0]);
     }
 
-    /// 덩이 문도 낱개 문과 같이 **관측을 적지 않는다** — 지나간 기록이 새 화신을 「턴 중」으로 만들면
-    /// 그 턴의 종료가 영영 오지 않는다(ADR-0113/0127 · `seed` 가 지키던 그 규율).
+    /// Like the single-item door, the chunk door **writes no observation** — if a past record made the new incarnation 「턴 중」 (in a turn),
+    /// the end of that turn would never come (ADR-0113/0127 · the same discipline `seed` kept).
     #[test]
     fn a_batch_never_bootstraps_turn_observation() {
         let sink = MockStatusSink::new();
@@ -1928,8 +1928,8 @@ mod tests {
         assert!(sink.turn_ends().is_empty(), "덩이 문이 통지를 냈다");
     }
 
-    /// ★★덩이 **안으로** 다른 emit 이 끼어들 수 없다★★ — 이것이 이 문의 존재 이유다(ADR-0203).
-    /// 낱개로 부르는 구현이면 경쟁 스레드가 중간 seq 를 가져가 복원된 대화가 쪼개진다.
+    /// ★★No other emit can slip **into** the chunk★★ — this is the reason this door exists (ADR-0203).
+    /// An implementation called singly would let a competing thread take a middle seq and split the restored conversation.
     #[test]
     fn nothing_can_interleave_inside_a_batch() {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -1956,7 +1956,7 @@ mod tests {
         stop.store(true, Ordering::Relaxed);
         racer.join().unwrap();
 
-        // 링에서 덩이 항목들의 seq 를 뽑아 **연속**인지 본다.
+        // Pull the seqs of the chunk items from the ring and check they are **contiguous**.
         let stored = core.replay.lock().unwrap().snapshot();
         let seqs: Vec<u64> = stored
             .iter()
@@ -2046,7 +2046,7 @@ mod tests {
     fn seed_pushes_to_ring_in_order_without_fanout_then_live_seq_continues() {
         let core = new_core(MockStatusSink::new());
 
-        // (1) 구독자 없는 상태에서 과거 이벤트 3건 seed(=resume 시 .jsonl 복원분 흉내).
+        // (1) Seed 3 past events with no subscribers (= imitating the .jsonl restore on resume).
         core.seed(vec![
             OutputEvent::Structured {
                 kind: "user".into(),
@@ -2063,8 +2063,8 @@ mod tests {
             },
         ]);
 
-        // Ring 에 seq 0,1,2 로 순서대로 적재됐는지(snapshot 은 TerminalBytes 만 변환하므로 seq 검증은
-        // 아래 늦은 구독자 replay 로 한다 — snapshot() 은 구조화 이벤트를 스킵).
+        // Check they were loaded into the Ring in order as seq 0,1,2 (snapshot converts only TerminalBytes, so seq is verified through
+        // the late subscriber replay below — snapshot() skips structured events).
         let late = MockSink::new();
         core.subscribe(late.clone());
         assert_eq!(
@@ -2088,7 +2088,7 @@ mod tests {
     #[test]
     fn seed_does_not_fanout_to_existing_subscriber() {
         let core = new_core(MockStatusSink::new());
-        // (비정상 순서지만 방어 검증용) 구독자를 먼저 붙인 뒤 seed 한다.
+        // (An abnormal order, but for defensive verification) attach a subscriber first and then seed.
         let sink = MockSink::new();
         core.subscribe(sink.clone());
 
@@ -2116,7 +2116,7 @@ mod tests {
     fn subscribe_replays_then_lives_without_seq_gap() {
         let core = new_core(MockStatusSink::new());
 
-        // 구독 전에 2건 emit → replay에만 쌓임.
+        // Emit 2 events before subscribing → they accumulate only in replay.
         core.emit(OutputEvent::TerminalBytes(b"a".to_vec()));
         core.emit(OutputEvent::TerminalBytes(b"b".to_vec()));
 
@@ -2128,7 +2128,7 @@ mod tests {
         assert_eq!(sink.seqs(), vec![0, 1, 2]);
     }
 
-    // ── S15 B4 Ring 단위테스트(격리) ──────────────────────────────────────────────
+    // ── S15 B4 Ring unit tests (isolation) ──────────────────────────────────────────────
 
     fn stored(seq: u64, event: OutputEvent) -> StoredOutput {
         let cost_bytes = estimate_cost_bytes(&event);
@@ -2139,7 +2139,7 @@ mod tests {
         }
     }
 
-    // ── ADR-0172: 실패 분류가 읽는 꼬리(상한이 하드인가 · 콘솔 바이트만인가) ────────────────
+    // ── ADR-0172: the tail that failure classification reads (is the cap hard · is it console bytes only) ────────────────
 
     #[test]
     fn terminal_tail_returns_the_last_console_bytes_in_order() {
@@ -2151,7 +2151,7 @@ mod tests {
 
     #[test]
     fn terminal_tail_is_a_hard_bound_even_when_one_chunk_exceeds_it() {
-        // ★청크를 통째로 담으면 상한이 상한이 아니다★ — 경계에 걸친 청크는 끝쪽만 잘라야 한다.
+        // ★If a chunk is kept whole, the cap is not a cap★ — a chunk straddling the boundary must be cut at its end part only.
         let mut ring = Ring::new();
         ring.push(stored(
             0,
@@ -2176,7 +2176,7 @@ mod tests {
 
     #[test]
     fn terminal_tail_skips_structured_events_and_can_be_empty() {
-        // 구조화(NDJSON) 세션의 링에는 콘솔 바이트가 하나도 없다 — 빈 값이 정상 결과다.
+        // The ring of a structured (NDJSON) session has no console bytes at all — an empty value is the normal result.
         let mut ring = Ring::new();
         ring.push(stored(0, OutputEvent::Error("boom".into())));
         ring.push(stored(
@@ -2216,7 +2216,7 @@ mod tests {
     #[test]
     fn ring_evicts_on_byte_budget_independent_of_count() {
         let mut ring = Ring::new();
-        // 각 ~1MB args_json 이벤트 3건 → cost 합 ~3MB > 2MB → 가장 오래된 것 evict.
+        // 3 events of ~1MB args_json each → cost sum ~3MB > 2MB → the oldest is evicted.
         let big = "x".repeat(1024 * 1024);
         ring.push(stored(
             0,
@@ -2262,22 +2262,22 @@ mod tests {
 
     #[test]
     fn ring_evicts_on_event_count_cap() {
-        // 작은 이벤트 5000건 → byte 예산엔 한참 못 미치지만 건수 상한(4096)에 걸려 cap.
+        // 5000 small events → far below the byte budget but capped by the count cap (4096).
         let mut ring = Ring::new();
         for seq in 0..5000u64 {
             ring.push(stored(seq, OutputEvent::TerminalBytes(vec![b'x'])));
         }
         let snap = ring.snapshot();
         assert_eq!(snap.len(), 4096);
-        // 가장 오래된 것부터 evict → 남은 첫 seq = 5000-4096 = 904.
+        // Evict from the oldest → the first remaining seq = 5000-4096 = 904.
         assert_eq!(snap.first().unwrap().seq, 904);
         assert_eq!(snap.last().unwrap().seq, 4999);
     }
 
     #[test]
     fn ring_preserves_latest_when_single_event_exceeds_byte_budget() {
-        // FIX-A: 방금 push 한 단일 이벤트의 cost_bytes 가 max_bytes(2MB)를 홀로 초과해도,
-        // 최신 1건 보존 불변식(len() > 1 가드)에 의해 그 이벤트는 replay 버퍼에 남아야 한다.
+        // FIX-A: even if the cost_bytes of the single event just pushed exceeds max_bytes (2MB) alone,
+        // by the keep-the-latest-one invariant (len() > 1 guard) that event must remain in the replay buffer.
         let mut ring = Ring::new();
         let huge = "y".repeat(3 * 1024 * 1024); // > 2MB (max_bytes)
         ring.push(stored(
@@ -2294,11 +2294,11 @@ mod tests {
 
     #[test]
     fn ring_evicts_only_old_when_latest_exceeds_budget() {
-        // FIX-A: 오래된 작은 이벤트들 + 예산을 홀로 초과하는 큰 최신 이벤트.
+        // FIX-A: old small events + a large latest event that alone exceeds the budget.
         let mut ring = Ring::new();
         ring.push(stored(0, OutputEvent::TerminalBytes(b"old0".to_vec())));
         ring.push(stored(1, OutputEvent::TerminalBytes(b"old1".to_vec())));
-        let huge = "z".repeat(3 * 1024 * 1024); // > 2MB → 이것만으로 예산 초과
+        let huge = "z".repeat(3 * 1024 * 1024); // > 2MB → this alone exceeds the budget
         ring.push(stored(
             2,
             OutputEvent::Structured {
@@ -2318,7 +2318,7 @@ mod tests {
             estimate_cost_bytes(&OutputEvent::TerminalBytes(vec![0u8; 100])),
             100
         );
-        // 구조화(ToolCall) → name + args_json + optional 문자열 합.
+        // Structured (ToolCall) → sum of name + args_json + optional strings.
         let cost = estimate_cost_bytes(&OutputEvent::ToolCall {
             name: "read".into(),           // 4
             args_json: "{\"p\":1}".into(), // 7
@@ -2335,7 +2335,7 @@ mod tests {
             message_id: None,
         });
         assert_eq!(cost2, 5 + 2);
-        // ToolResult → id 만(결말은 고정 크기).
+        // ToolResult → id only (the outcome is fixed-size).
         let cost3 = estimate_cost_bytes(&OutputEvent::ToolResult {
             id: "exec-1".into(), // 6
             outcome: crate::types::ToolOutcome::Failed,
@@ -2343,7 +2343,7 @@ mod tests {
         assert_eq!(cost3, 6);
     }
 
-    /// 명부 사건은 본문(글 · 말풍선 사본)을 링 무게로 센다 — 긴 글이 「건수 1」로 링 상한을 우회하지 않게.
+    /// Registry events count the body (text · bubble copy) as ring weight — so a long text does not bypass the ring cap as 「건수 1」 (count 1).
     #[test]
     fn ring_cost_bytes_counts_queued_text_and_ack_copies() {
         use crate::types::{DeliveredCopy, DropCause};
@@ -2393,8 +2393,8 @@ mod tests {
         assert!(matches!(core.status(), AgentStatus::Killed));
     }
 
-    /// ADR-0019 reaper hook(on_terminal) 1회 보장: finalize 승자 경로(finalized.swap 통과)에서
-    /// hook 이 정확히 1회 호출되고, 중복 finish(swap 패자)에서는 0회임을 단언한다.
+    /// ADR-0019 reaper hook (on_terminal) exactly-once guarantee: assert that on the finalize winner path (passing finalized.swap)
+    /// the hook is called exactly once, and 0 times on a duplicate finish (swap loser).
     #[test]
     fn on_terminal_hook_fires_exactly_once() {
         let core = new_core(MockStatusSink::new());
@@ -2438,7 +2438,7 @@ mod tests {
     #[test]
     fn subscribe_from_truncated_when_after_below_oldest() {
         let core = new_core(MockStatusSink::new());
-        // 1바이트 청크 5000개 emit → event 상한(4096) 초과로 oldest=904 까지 evict.
+        // Emit 5000 1-byte chunks → the event cap (4096) is exceeded so evict up to oldest=904.
         for _ in 0..5000u64 {
             core.emit(OutputEvent::TerminalBytes(vec![b'x']));
         }
@@ -2472,7 +2472,7 @@ mod tests {
             core.emit(OutputEvent::TerminalBytes(vec![b'a' + i]));
         }
         let sink = MockSink::new();
-        // after_seq=2(=latest) → 보낼 tail 없음.
+        // after_seq=2 (=latest) → no tail to send.
         let out = core.subscribe_from(sink.clone(), Some(2), true, |_| {});
         assert_eq!(out.kind, ReplayKind::Resumed);
         assert_eq!(out.replayed, 0);
@@ -2483,9 +2483,9 @@ mod tests {
         assert_eq!(sink.seqs(), vec![3]);
     }
 
-    // ★빈 ring 의 replay 머리 = 다음 발급 seq(ADR-0231)★ — 새 화신은 0. 옛 값(`latest+1` = 1)이면 뷰가
-    //   빈 replay 의 flush 를 1 부터 시작해, 마커 뒤로 늦게 온 seq 0 을 건너뛴다. 세 갈래(전량 · 화신 표식
-    //   불일치 · 같은 화신 이어받기)가 모두 같은 값을 싣는다.
+    // ★The replay head of an empty ring = the next issue seq (ADR-0231)★ — 0 for a new incarnation. With the old value (`latest+1` = 1) the view
+    //   would start the flush of an empty replay from 1 and skip a seq 0 that arrives late behind the marker. All three branches (full · incarnation marker
+    //   mismatch · resume of the same incarnation) carry the same value.
     #[test]
     fn subscribe_from_empty_ring_replay_from_is_the_next_seq() {
         for (after_seq, epoch_matches) in [(None, true), (Some(5), false), (Some(5), true)] {
@@ -2521,8 +2521,8 @@ mod tests {
         assert_eq!(out.replay_from, 0);
     }
 
-    /// M-A fix 검증: on_ready 콜백이 (1) replay 전송 **전**에, (2) 정확히 1회 호출되고,
-    /// (3) 콜백이 받는 outcome 이 반환 outcome 과 동일(단일 스냅샷 기준)임을 확인.
+    /// M-A fix verification: confirm the on_ready callback is (1) called **before** the replay send, (2) called exactly once,
+    /// and (3) the outcome the callback receives is the same as the returned outcome (single-snapshot basis).
     #[test]
     fn subscribe_from_calls_on_ready_before_replay() {
         struct OrderSink {
@@ -2551,7 +2551,7 @@ mod tests {
         });
 
         let call_count = Arc::new(AtomicU64::new(0));
-        // 콜백이 본 outcome 을 캡처해 반환 outcome 과 비교(SubscribeOutcome 는 Copy).
+        // Capture the outcome the callback saw and compare it with the returned outcome (SubscribeOutcome is Copy).
         let seen: Arc<Mutex<Option<SubscribeOutcome>>> = Arc::new(Mutex::new(None));
 
         let cc = call_count.clone();
@@ -2567,7 +2567,7 @@ mod tests {
         });
 
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
-        // replay 가 실제로 전송됐는지(after_seq=1 → seq 2 전송) → started true.
+        // Whether the replay was really sent (after_seq=1 → seq 2 sent) → started true.
         assert!(replay_started.load(Ordering::SeqCst));
         let seen = seen.lock().unwrap().expect("콜백이 호출됨");
         assert_eq!(seen.kind, out.kind);
@@ -2593,23 +2593,23 @@ mod tests {
         assert!(!core.enter_exiting());
     }
 
-    /// ADR-0079 회귀 방지: 동시 emit 하에서도 replay ring 이 seq 오름차순(단조)을 유지하는지.
+    /// ADR-0079 regression guard: whether the replay ring keeps seq ascending (monotonic) even under concurrent emit.
     ///
-    /// ★왜 이 테스트가 성립하나(hermetic)★: pump 스레드와 write_input synthetic echo 가 동시에 emit 을
-    ///   부르는 실제 상황을 여러 스레드의 emit 루프로 재현한다. 확률적이지만 스레드×반복이 크면
-    ///   발급/push 역전 창을 거의 확실히 밟아 회귀를 잡는다(플래키하지 않게 반복 수를 넉넉히 잡음).
+    /// ★Why this test holds (hermetic)★: the real situation where the pump thread and the write_input synthetic echo call emit
+    ///   concurrently is reproduced with emit loops on several threads. It is probabilistic, but with large threads×iterations it
+    ///   almost surely steps into the issue/push inversion window and catches the regression (the iteration count is generous so it is not flaky).
     #[test]
     fn concurrent_emit_keeps_replay_ring_monotonic() {
         let core = Arc::new(new_core(MockStatusSink::new()));
         const THREADS: u64 = 4;
-        const PER_THREAD: u64 = 500; // 4*500 = 2000 < max_events(4096) → eviction 없음.
+        const PER_THREAD: u64 = 500; // 4*500 = 2000 < max_events(4096) → no eviction.
 
         let handles: Vec<_> = (0..THREADS)
             .map(|_| {
                 let core = core.clone();
                 std::thread::spawn(move || {
                     for _ in 0..PER_THREAD {
-                        // 작은 payload — 2MB max_bytes 도 안 건드림. emit 이 유일한 seq 소비자.
+                        // Small payload — does not touch even the 2MB max_bytes. emit is the only seq consumer.
                         core.emit(OutputEvent::TerminalBytes(vec![b'x']));
                     }
                 })
@@ -2633,7 +2633,7 @@ mod tests {
     }
 }
 
-// ── ADR-0231 대기 입력 명부 — 코어 관찰(명부 환원 · 종료 합성·봉인 · 바꿔 적기 · 대기 목록 표 순서) ──────────
+// ── ADR-0231 pending-input registry — core observation (registry reduction · terminal synthesis · seal · rewriting · pending-list table order) ──────────
 #[cfg(test)]
 mod queued_tests {
     use super::*;
@@ -2645,7 +2645,7 @@ mod queued_tests {
     use crate::types::{AgentInfo, DeliveredCopy, SinkError};
 
     const EPOCH: u32 = 5;
-    /// 시험 스레드가 서로를 기다리는 상한 — 넘으면 매달리지 않고 실패한다.
+    /// The cap for test threads waiting on each other — past it, the test fails instead of hanging.
     const WAIT: Duration = Duration::from_secs(5);
 
     fn queued(id: &str, text: &str) -> OutputEvent {
@@ -2703,14 +2703,14 @@ mod queued_tests {
         fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
     }
 
-    /// 초인종 두 개가 울리는 순간의 두 표를 적는다 — 「표 갱신 → 통지」 · 「턴 관측 → 비었다」 순서의 관찰창.
+    /// Write the two tables at the moment two doorbells ring — an observation window on the orders 「표 갱신 → 통지」 (table update → notification) · 「턴 관측 → 비었다」 (turn observation → became empty).
     struct DoorbellProbe {
         id: AgentId,
         pending: Arc<InputsPendingTable>,
         turns: Arc<TurnObservations>,
-        /// 턴 끝 초인종 순간의 대기 목록 표.
+        /// The pending-list table at the turn-end doorbell moment.
         at_turn_end: Mutex<Vec<Option<bool>>>,
-        /// 비었다 초인종 순간의 (대기 목록 표, 턴 중).
+        /// (pending-list table, in turn) at the became-empty doorbell moment.
         at_drain: Mutex<Vec<(Option<bool>, bool)>>,
     }
     impl DoorbellProbe {
@@ -2734,7 +2734,7 @@ mod queued_tests {
         }
     }
 
-    /// 받은 프레임의 seq 와 목록 사건을 적는 sink.
+    /// A sink that records the received frames' seq and list events.
     struct Recorder {
         id: SinkId,
         got: Mutex<Vec<(u64, Option<QueuedInputEvent>)>>,
@@ -2772,7 +2772,7 @@ mod queued_tests {
         })
     }
 
-    /// 목록을 비우는 받음이 턴 끝이기도 한 분류자 — 턴 끝 초인종이 「비었다」보다 앞에 오는지 가르려고 짓는다.
+    /// A classifier where the receipt that empties the list is also a turn end — built to tell whether the turn-end doorbell comes before 「비었다」 (became empty).
     fn delivered_ends_the_turn(event: &OutputEvent) -> Option<TurnSignal> {
         matches!(
             event,
@@ -2781,7 +2781,7 @@ mod queued_tests {
         .then_some(TurnSignal::Ended(TurnEndKind::Clean))
     }
 
-    /// 한 화신의 두 표 — 코어는 운영 spawn 과 같은 모양으로 짓는다(두 표 등록 + 새 명부).
+    /// The two tables of one incarnation — the core is built in the same shape as the production spawn (two table registrations + a new registry).
     struct Fixture {
         id: AgentId,
         turns: Arc<TurnObservations>,
@@ -2833,7 +2833,7 @@ mod queued_tests {
         core.replay.lock().unwrap().snapshot()
     }
 
-    /// 링의 목록 사건만(seq 순).
+    /// Only the ring's list events (in seq order).
     fn ring_ops(core: &OutputCore) -> Vec<(u64, QueuedInputEvent)> {
         ring(core)
             .into_iter()
@@ -2848,11 +2848,11 @@ mod queued_tests {
         core.queued_inputs().snapshot().0
     }
 
-    // ── 명부 = 링 접두의 환원값 ────────────────────────────────────────────────────────────────
+    // ── Registry = the reduced value of the ring prefix ────────────────────────────────────────────────────────────────
 
-    /// 두 스레드가 목록 사건을 섞어 내는 동안 셋째가 명부 스냅숏을 뜬다 — 뜬 (행, S) 는 링 접두 `seq <= S` 를
-    /// 새 환원기에 먹인 결과와 같아야 한다. 명부를 replay 락 밖에서 먹이면 두 스레드의 환원 순서가 링 순서와
-    /// 갈려 이 대조가 깨진다.
+    /// While two threads emit list events interleaved, a third takes a registry snapshot — the taken (row, S) must equal the result of feeding the ring prefix `seq <= S` into
+    /// a fresh reducer. If the registry is fed outside the replay lock, the two threads' reduction order diverges from the ring order
+    /// and this comparison breaks.
     #[test]
     fn the_registry_snapshot_is_the_reduction_of_the_ring_prefix_it_names() {
         let fx = Fixture::new();
@@ -2936,9 +2936,9 @@ mod queued_tests {
         assert_eq!(core.queued_inputs().snapshot().1, Some(1));
     }
 
-    // ── 종료 합성 + 봉인 ─────────────────────────────────────────────────────────────────────
+    // ── Terminal synthesis + seal ─────────────────────────────────────────────────────────────────────
 
-    /// 합성 `Dropped{AgentEnded}` 가 링·구독자 양쪽에서 종점 전이보다 앞 · 대기 목록 표도 거둔다.
+    /// The synthesized `Dropped{AgentEnded}` comes before the terminal transition in both the ring and the subscribers · the pending-list table is also reaped.
     #[test]
     fn finish_drops_every_open_row_before_the_terminal_transition() {
         struct Log {
@@ -3010,7 +3010,7 @@ mod queued_tests {
         );
     }
 
-    /// 봉인: 종료 합성 뒤의 `Queued` 는 링에 `Dropped{AgentEnded}` 로 선다(→ 묘비) — 영구 항목을 못 만든다.
+    /// Seal: a `Queued` after terminal synthesis stands in the ring as `Dropped{AgentEnded}` (→ tombstone) — it cannot make a permanent item.
     #[test]
     fn a_queued_after_finish_lands_in_the_ring_as_agent_ended() {
         let fx = Fixture::new();
@@ -3027,8 +3027,8 @@ mod queued_tests {
         assert_eq!(core.queued_inputs().lock().tombstone("late"), Some(false));
     }
 
-    /// 다른 스레드가 `Queued` 를 쉼 없이 내는 동안 `finish` — 합성 덩이와 봉인 사이에 `Queued` 가 없고, 합성은
-    /// 그때 열린 항목 전부를 한 덩이로 닫고, 명부에 비종결 항목이 남지 않는다.
+    /// `finish` while another thread emits `Queued` nonstop — there is no `Queued` between the synthesis chunk and the seal, the synthesis
+    /// closes every item open at that moment in one chunk, and no non-terminal item remains in the registry.
     #[test]
     fn finish_synthesis_and_seal_are_one_lock_section() {
         let fx = Fixture::new();
@@ -3037,8 +3037,8 @@ mod queued_tests {
         let emitter = {
             let core = core.clone();
             std::thread::spawn(move || {
-                // 상한 = 링 축출 없이 전량 남는 크기(`Queued` + 합성 `Dropped` < `REPLAY_MAX_EVENTS`). 스케줄
-                //   탓에 상한까지 종료를 못 보면 이 판은 겹침을 못 잰다 — 봉인 단독은 위 시험이 잰다.
+                // Cap = a size that stays whole without ring eviction (`Queued` + synthesized `Dropped` < `REPLAY_MAX_EVENTS`). If scheduling
+                //   keeps it from seeing termination up to the cap, this run cannot measure the overlap — the seal alone is measured by the test above.
                 let mut after_final = 0;
                 for i in 0..1800 {
                     core.emit(queued(&format!("q{i}"), "t"));
@@ -3088,10 +3088,10 @@ mod queued_tests {
         assert!(rows(&core).is_empty(), "명부에 비종결 항목이 남았다");
     }
 
-    // ── 판정 뒤 바꿔 적기 · 사본 ─────────────────────────────────────────────────────────────
+    // ── Rewriting after the decision · copy ─────────────────────────────────────────────────────────────
 
-    /// 판명 앞에 선 `Queued` 는 그대로 적히고 판명이 옮긴다 · 판명 뒤의 `Queued` 는 `Queued` + 그 항목 하나의
-    /// 사본을 실은 `AckUnavailable`(두 seq) — 명부 결과는 받음이고 목록은 찬 적이 없다.
+    /// A `Queued` that stood before the finding is written as is and the finding moves it · a `Queued` after the finding is a `Queued` + an `AckUnavailable`
+    /// carrying one copy of that item (two seqs) — the registry result is a receipt and the list was never full.
     #[test]
     fn a_queued_after_the_ack_verdict_is_closed_by_its_own_copy_in_the_same_lock() {
         let fx = Fixture::new();
@@ -3148,9 +3148,9 @@ mod queued_tests {
         );
     }
 
-    /// 디코더가 빈 채로 낸 판명에 코어가 그 환원이 받음으로 닫는 항목(`Queued` · 취소 대기 못 뺐다·응답
-    /// 없음)의 사본을 목록 순으로 채운다 — 취소로 닫힌 것은 없다 · 디코더가 채워 보낸 것은 덮는다 · 링 무게가
-    /// 사본 본문을 센다.
+    /// Into a finding the decoder emitted empty, the core fills in the copies of the items that reduction closes with a receipt (`Queued` · cancel-pending could not be removed · no
+    /// response) in list order — none is closed by cancel · what the decoder filled in is overwritten · the ring weight counts
+    /// the copy body.
     #[test]
     fn the_core_fills_the_ack_copies_from_the_rows_it_closes_as_delivered() {
         let fx = Fixture::new();
@@ -3216,7 +3216,7 @@ mod queued_tests {
         assert!(registry.ack_unavailable_seen());
     }
 
-    // ── 턴 관측 가드 ─────────────────────────────────────────────────────────────────────────
+    // ── Turn observation guard ─────────────────────────────────────────────────────────────────────────
 
     thread_local! {
         static CLASSIFIED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
@@ -3234,14 +3234,14 @@ mod queued_tests {
         None
     }
 
-    /// 코어가 바꿔 적거나 지은 사건(봉인의 `Dropped` · 판정 뒤 잇는 `AckUnavailable` · 종료 합성)은 분류기를
-    /// 지나지 않는다 — 벤더 출력의 사실이 아니다. 원 사건(디코더의 판명 포함)은 지난다.
+    /// Events the core rewrote or built (the seal's `Dropped` · the `AckUnavailable` chained after a decision · terminal synthesis) do not pass through
+    /// the classifier — they are not facts of vendor output. The original event (including the decoder's finding) passes.
     #[test]
     fn events_the_core_writes_itself_never_reach_the_turn_classifier() {
         let classified = || CLASSIFIED.with(|c| std::mem::take(&mut *c.borrow_mut()));
         classified();
 
-        // 종료 합성(열린 항목 x) · 봉인(y).
+        // Terminal synthesis (open items x) · seal (y).
         let fx = Fixture::new();
         let core = fx.core(Arc::new(Quiet), record_classified);
         core.emit(queued("x", "X"));
@@ -3258,7 +3258,7 @@ mod queued_tests {
             "종료 합성·봉인이 분류기를 지났다"
         );
 
-        // 판정 뒤 바꿔 적기 — 원 사건(디코더의 판명 포함)만 지난다.
+        // Rewriting after the decision — only the original event (including the decoder's finding) passes.
         let fx = Fixture::new();
         let core = fx.core(Arc::new(Quiet), record_classified);
         core.emit(queued("a", "A"));
@@ -3272,7 +3272,7 @@ mod queued_tests {
         );
     }
 
-    /// 운영 claude 분류기로 — 받음(`Delivered`) 말고는 목록 사건이 턴 관측을 켜지 않는다(바꿔 적은 사건 포함).
+    /// With the production claude classifier — except for the receipt (`Delivered`), list events do not turn on turn observation (including rewritten events).
     #[test]
     fn list_events_other_than_delivered_never_turn_on_the_turn_observation() {
         let fx = Fixture::new();
@@ -3292,9 +3292,9 @@ mod queued_tests {
         );
     }
 
-    // ── 대기 목록 표의 적는 순서 ─────────────────────────────────────────────────────────────
+    // ── Write order of the pending-list table ─────────────────────────────────────────────────────────────
 
-    /// 「찼다」는 환원한 replay 락 안 — 그 emit 의 fanout 을 받은 쪽이 이미 참을 읽는다.
+    /// 「찼다」 (became full) is inside the replay lock that reduced it — the side that received that emit's fanout already reads true.
     #[test]
     fn filled_is_written_inside_the_lock_that_reduced_it() {
         struct ReadsPendingOnQueued {
@@ -3332,8 +3332,8 @@ mod queued_tests {
         assert_eq!(*sink.seen.lock().unwrap(), vec![Some(true)]);
     }
 
-    /// 「비었다」는 그 emit 의 턴 관측 **뒤** — 목록을 비우는 받음이 턴 끝이기도 하면 턴 끝 초인종 순간엔 표가
-    /// 아직 참이고, 비었다 초인종 순간엔 거짓이다.
+    /// 「비었다」 (became empty) is **after** that emit's turn observation — if the receipt that empties the list is also a turn end, the table is
+    /// still true at the turn-end doorbell moment and false at the became-empty doorbell moment.
     #[test]
     fn drained_is_written_after_the_turn_observation_of_the_same_emit() {
         let fx = Fixture::new();
@@ -3345,8 +3345,8 @@ mod queued_tests {
         assert_eq!(probe.drains(), vec![(Some(false), false)]);
     }
 
-    /// 목록을 비우는 claude `Delivered`(drain 턴의 진행) — 표가 거짓이 되는 순간 턴 관측은 이미 진행이다.
-    /// 어댑터와 같은 순서(표 먼저, 턴 관측 나중)로 쉼 없이 읽는 관찰자가 「둘 다 한가」를 한 번도 못 본다.
+    /// The claude `Delivered` that empties the list (progress of the drain turn) — at the moment the table turns false, turn observation is already progress.
+    /// An observer reading nonstop in the same order as the adapter (table first, turn observation later) never sees 「둘 다 한가」 (both idle) even once.
     #[test]
     fn a_draining_claude_delivery_is_never_observed_idle_on_both_facts() {
         let fx = Fixture::new();
@@ -3382,8 +3382,8 @@ mod queued_tests {
         assert_eq!(probe.drains(), vec![(Some(false), true)]);
     }
 
-    /// 턴 관측을 지나지 않는 문도 목록을 비우면 락을 놓은 뒤 곧바로 적고 울린다 · 종료 합성 덩이는 목록을
-    /// 비워도 울리지 않고 표에서 거두기만 한다.
+    /// A door that does not pass through turn observation also, when it empties the list, writes and rings right after releasing the lock · a terminal synthesis chunk
+    /// does not ring even if it empties the list and only reaps from the table.
     #[test]
     fn unobserved_emits_drain_and_ring_but_the_finish_batch_only_forgets() {
         let fx = Fixture::new();
@@ -3398,8 +3398,8 @@ mod queued_tests {
         assert_eq!(fx.pending(), Some(true));
         core.finish(TerminalReason::Killed);
         assert!(rows(&core).is_empty(), "종료 합성이 목록을 비웠다(전제)");
-        // ADR-0231: 종료 합성은 초인종을 울리지 않는다 — 대기 목록 표 항목은 곧바로 거두고, 초인종은 종점 전이를
-        //   앞둔 화신에게 우편을 흘려보내라는 자극이 된다(파킹된 우편은 다음 화신의 등장 flush 가 나른다).
+        // ADR-0231: terminal synthesis does not ring the doorbell — the pending-list table entry is reaped right away, and the doorbell would be a stimulus to flow mail into an incarnation about to make its
+        //   terminal transition (parked mail is carried by the next incarnation's appearance flush).
         assert_eq!(
             probe.drains().len(),
             1,
@@ -3408,11 +3408,11 @@ mod queued_tests {
         assert_eq!(fx.pending(), None, "표에서 거둔다");
     }
 
-    /// 표는 더 작은 seq 의 쓰기를 버린다 — 락 밖으로 미룬 「비었다」(seq N)가 다른 스레드가 그 사이 락 안에서
-    /// 적은 「찼다」(seq N+1)를 덮지 않는다.
+    /// The table drops writes with a smaller seq — a 「비었다」 (became empty) (seq N) deferred outside the lock does not overwrite a 「찼다」 (became full) (seq N+1) that another thread
+    /// wrote inside the lock in between.
     #[test]
     fn a_deferred_drain_never_overwrites_a_later_fill() {
-        /// 첫 턴 끝 초인종에서 붙잡는다 — 「비었다」를 쓰기 직전의 스레드를 세워 두는 자리다(시험 전용).
+        /// Catch at the first turn-end doorbell — a spot that holds the thread right before it writes 「비었다」 (became empty) (test only).
         struct HoldFirstTurnEnd {
             hold: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
         }
@@ -3455,7 +3455,7 @@ mod queued_tests {
         assert_eq!(rows(&core).len(), 1);
     }
 
-    /// 초인종은 비는 순간 한 번 — 턴 끝 없이 목록만 빈 경우 포함, 찬 채인 동안은 울리지 않는다.
+    /// The doorbell rings once at the moment of emptying — including when only the list empties without a turn end, and it does not ring while it stays full.
     #[test]
     fn the_drain_doorbell_rings_once_per_drain() {
         let fx = Fixture::new();
@@ -3482,7 +3482,7 @@ mod queued_tests {
         );
     }
 
-    /// 명부를 꽂지 않은 코어도 링의 모양(봉인 · 바꿔 적기 · 사본)은 같다 — 표 쓰기와 초인종만 없다.
+    /// A core without the registry plugged in has the same ring shape (seal · rewriting · copy) — only table writes and the doorbell are missing.
     #[test]
     fn a_core_without_queued_wiring_shapes_the_ring_the_same_but_rings_nothing() {
         struct CountsDrains(AtomicU64);
@@ -3533,12 +3533,12 @@ mod queued_tests {
         assert_eq!(drains.0.load(Ordering::SeqCst), 0);
     }
 
-    // ── 라이브 배달(§5-7 전제) ───────────────────────────────────────────────────────────────
+    // ── Live delivery (§5-7 premise) ───────────────────────────────────────────────────────────────
 
-    /// 두 스레드가 emit 하고 시험 sink 가 한쪽 send 를 붙잡아 역전을 만든다(시험 전용 — 운영 sink 는 막히지
-    /// 않는다) → 그 sink 는 N+1 을 N 보다 먼저 받지만 **둘 다** 받는다 · 그 사이 붙은 새 sink 도 발급된 seq 를
-    /// 빠짐없이 받는다(replay 또는 라이브). 근거 = 링 push 가 fanout 보다 앞이고 구독이 subscribers 락을 쥔 채
-    /// replay 를 뜬다 — 어느 쪽이 뒤집히면 새 sink 가 N 을 잃는다.
+    /// Two threads emit and the test sink holds one side's send to create an inversion (test only — the production sink is not
+    /// blocked) → that sink receives N+1 before N but receives **both** · a new sink attached in between also receives every issued seq
+    /// without a miss (replay or live). Grounds = the ring push is before fanout and subscribe takes the replay while holding the subscribers lock
+    /// — if either flips, the new sink loses N.
     #[test]
     fn a_held_send_reorders_delivery_but_every_sink_gets_every_seq() {
         struct HoldsSeq {
@@ -3605,7 +3605,7 @@ mod queued_tests {
         );
     }
 
-    // TRD §7-1: 분류는 대기 목록 표 → 턴 관측 순으로 읽는다(읽힌 순서를 기록한다) · 표가 참이면 턴 관측은 안 읽는다.
+    // TRD §7-1: classification reads in the order pending-list table → turn observation (the read order is recorded) · if the table is true, turn observation is not read.
     #[test]
     fn the_classification_reads_the_pending_table_before_the_turn_table() {
         for (pending, in_turn, busy, reads) in [
@@ -3640,8 +3640,8 @@ mod queued_tests {
         }
     }
 
-    /// 두 읽기는 각자 제 표만 읽는다 — 이름이 가리키는 표와 실제로 읽는 표가 뒤바뀌면 여기서 깨진다(위 순서
-    /// 단언이 이름에 기대므로 그 짝이다).
+    /// The two reads each read only their own table — if the table the name points to and the table actually read are swapped, it breaks here (the order
+    /// assertion above leans on the names, so this is its pair).
     // ADR-0231
     #[test]
     fn each_busy_reader_reads_only_its_own_table() {
@@ -3666,8 +3666,8 @@ mod queued_tests {
         );
     }
 
-    /// 옛 CLI 판정 로그의 조건 — 명부의 판명 표식이 거짓 → 참으로 바뀐 구간 하나에서만 선다. 둘째 판정도, 판명
-    /// 뒤 `Queued` 에 코어가 잇는 `AckUnavailable` 도 다시 세우지 않는다.
+    /// The condition of the old-CLI decision log — stands only in the one span where the registry's finding marker changes false → true. Neither a second decision nor the `AckUnavailable`
+    /// the core chains onto a `Queued` after the finding is raised again.
     // ADR-0231
     #[test]
     fn the_ack_unavailable_verdict_is_flagged_once_per_incarnation() {
@@ -3711,7 +3711,7 @@ mod queued_tests {
         );
     }
 
-    // 취소 요청의 문 — `Queued` 행에만 `CancelRequested` 를 세우고, 그 밖은 링을 건드리지 않는다.
+    // The door for a cancel request — sets `CancelRequested` only on a `Queued` row, and otherwise does not touch the ring.
     #[test]
     fn a_cancel_request_is_recorded_only_for_a_queued_row() {
         let fx = Fixture::new();

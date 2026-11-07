@@ -1,12 +1,12 @@
-//! 셸 기하 — 레이아웃 트리를 뷰 정규화 사각형(경계 꼴)과 정수 CSS px 로 옮기는 순수 계산(ADR-0227).
-//! Tauri·락·I/O 무의존이라 단독 headless 테스트가 된다(ADR-0012 격리).
+//! Shell geometry — pure computation that converts a layout tree into view-normalized rectangles (boundary form) and integer CSS px (ADR-0227).
+//! It has no dependency on Tauri, locks or I/O, so it becomes a standalone headless test (ADR-0012 isolation).
 //!
-//! 셸과 화면이 함께 쓸 칸·분할 기하다. 진입점 = `compute`(트리 → 칸·분할 사각형) ·
-//! `frame_px`/`px_edge`(정규화 → 정수 px) · `content_rect`(틀 − 안쪽 여백).
+//! This is the area and split geometry that the shell and the screen use together. Entry points = `compute` (tree → area and split rectangles) ·
+//! `frame_px`/`px_edge` (normalized → integer px) · `content_rect` (frame − inner margin).
 //!
-//! ★불변식 — 맞닿는 경계는 비트 단위로 같다★: 자식은 부모 경계 값을 그대로 복사하고, 새로 계산하는
-//! 값은 분할 경계 `at` 하나뿐이다. a 의 끝 경계와 b 의 시작 경계가 같은 `at` 이라 깊이와 무관하게
-//! `==` 가 선다. 경계를 `x + w` 로 다시 만들지 말 것 — 부동소수 끝자리에서 갈려 화면에 머리카락 틈이 난다.
+//! ★Invariant — touching boundaries are bit-for-bit equal★: a child copies the parent's boundary values as they are, and the only
+//! value computed anew is the split boundary `at`. The end boundary of a and the start boundary of b are the same `at`, so
+//! `==` holds regardless of depth. Do not rebuild a boundary as `x + w` — it diverges in the floating-point last digits and leaves a hairline gap on screen.
 
 use ts_rs::TS;
 use uuid::Uuid;
@@ -14,8 +14,8 @@ use uuid::Uuid;
 use super::tree::clamp_ratio;
 use super::types::{LayoutNode, SplitDir};
 
-/// 한 칸의 사각형 — 뷰 기준 정규화 [0,1] 경계 꼴(`x0 <= x1`, `y0 <= y1`).
-/// 이웃 칸과 맞닿는 경계 값은 비트 단위로 같다(`src-tauri/src/layout/geometry.rs` 모듈 헤더 불변식).
+/// Rectangle of one area — view-normalized [0,1] boundary form (`x0 <= x1`, `y0 <= y1`).
+/// Boundary values that touch a neighboring area are bit-for-bit equal (invariant in the module header of `src-tauri/src/layout/geometry.rs`).
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct SlotRect {
@@ -27,8 +27,8 @@ pub struct SlotRect {
     pub y1: f64,
 }
 
-/// 한 분할 노드 — 이 분할 자신의 상자(두 자식을 합친 영역, 뷰 기준 정규화 [0,1] 경계 꼴) + 경계 좌표 `at`.
-/// `at` 은 `dir` 이 `left_right` 면 x 축 값(a = 왼쪽), `top_bottom` 이면 y 축 값(a = 위)이다.
+/// One split node — this split's own box (the region of both children combined, view-normalized [0,1] boundary form) + boundary coordinate `at`.
+/// `at` is an x-axis value if `dir` is `left_right` (a = left), and a y-axis value if `top_bottom` (a = top).
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct SplitRect {
@@ -42,14 +42,14 @@ pub struct SplitRect {
     pub at: f64,
 }
 
-/// `compute` 결과. 두 목록 모두 트리 전위 순(노드 → a 서브트리 → b 서브트리)이다 — id 정렬은 소비자 몫.
+/// Result of `compute`. Both lists are in tree preorder (node → a subtree → b subtree) — sorting by id is the consumer's job.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayoutGeometry {
     pub slots: Vec<SlotRect>,
     pub splits: Vec<SplitRect>,
 }
 
-/// 정수 CSS px 경계 꼴(캔버스 원점 기준). 폭 = `x1 - x0` — 반올림한 두 경계의 차다.
+/// Integer CSS px boundary form (relative to the canvas origin). Width = `x1 - x0` — the difference of two rounded boundaries.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PxRect {
     pub x0: u32,
@@ -58,8 +58,8 @@ pub struct PxRect {
     pub y1: u32,
 }
 
-/// 칸 틀 안쪽 여백(CSS px, 소수 허용 — 배율에 따라 테두리 폭이 소수로 잴 수 있다).
-// `UiMetrics`(웹뷰 보고 wire)에 실려 가므로 serde·ts-rs 를 단다. `PxRect`·`RectF64` 는 셸 내부라 안 단다.
+/// Inner margin of the area frame (CSS px, fractions allowed — depending on scale the border width can measure as a fraction).
+// It rides in `UiMetrics` (the webview report wire), so it carries serde and ts-rs. `PxRect` and `RectF64` are shell-internal, so they do not.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct Insets {
@@ -69,7 +69,7 @@ pub struct Insets {
     pub l: f64,
 }
 
-/// f64 경계 꼴 사각형(`x0 <= x1`, `y0 <= y1`). 단위는 만든 함수가 정한다 — `content_rect` 는 CSS px.
+/// f64 boundary-form rectangle (`x0 <= x1`, `y0 <= y1`). The unit is set by the function that makes it — `content_rect` gives CSS px.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RectF64 {
     pub x0: f64,
@@ -78,8 +78,8 @@ pub struct RectF64 {
     pub y1: f64,
 }
 
-/// 루트 칸 = (0,0,1,1). 트리의 비율은 `[RATIO_MIN, RATIO_MAX]` 로 클램프해 읽고, NaN 은 0.5 로 읽는다
-/// (±∞ 는 클램프가 한계로 보낸다). 그래서 모든 좌표가 유한하고 [0,1] 안이다.
+/// Root area = (0,0,1,1). Tree ratios are read clamped to `[RATIO_MIN, RATIO_MAX]`, and NaN is read as 0.5
+/// (±∞ is sent to the limit by the clamp). So every coordinate is finite and inside [0,1].
 pub fn compute(node: &LayoutNode) -> LayoutGeometry {
     let mut out = LayoutGeometry {
         slots: Vec::new(),
@@ -111,7 +111,7 @@ fn walk(node: &LayoutNode, r: RectF64, out: &mut LayoutGeometry) {
             a,
             b,
         } => {
-            // ADR-0140: LeftRight = x 축 분할(a 왼쪽) · TopBottom = y 축 분할(a 위).
+            // ADR-0140: LeftRight = x-axis split (a left) · TopBottom = y-axis split (a top).
             let (at, ra, rb) = match dir {
                 SplitDir::LeftRight => {
                     let at = boundary(r.x0, r.x1, *ratio);
@@ -137,12 +137,12 @@ fn walk(node: &LayoutNode, r: RectF64, out: &mut LayoutGeometry) {
     }
 }
 
-/// 축 구간 `[lo, hi]` 를 비율 `ratio`(a 쪽 몫)로 나누는 경계 좌표 — `compute` 가 모든 분할에 쓰는 바로 그 식.
-/// 분할 가드가 새 경계를 미리 잴 때도 이것을 불러 실제 계산과 한 비트도 갈리지 않게 한다.
+/// Boundary coordinate that splits the axis interval `[lo, hi]` by ratio `ratio` (a's share) — exactly the formula `compute` uses for every split.
+/// The split guard also calls this when it measures a new boundary ahead of time, so it never differs from the real computation by even one bit.
 // ADR-0227
 pub fn boundary(lo: f64, hi: f64, ratio: f64) -> f64 {
-    // 쓰기 경로가 한계·유한을 보장해도 트리에 직접 심은 값을 여기서도 거른다 — 0.0 등이 면적 0 잎을
-    // 만들지 않게 자르고, NaN 은 클램프를 그대로 통과해 자손 좌표 전체로 번지므로 반분으로 읽는다.
+    // Even though the write path guarantees limits and finiteness, values planted directly in the tree are also filtered here — 0.0 etc. are cut so they do not make
+    // zero-size leaves, and NaN passes the clamp unchanged and spreads to all descendant coordinates, so it is read as a halving.
     let t = if ratio.is_nan() {
         0.5
     } else {
@@ -151,18 +151,18 @@ pub fn boundary(lo: f64, hi: f64, ratio: f64) -> f64 {
     lo + (hi - lo) * t
 }
 
-/// 두 축 모두 엄격히 `x0 < x1` · `y0 < y1`. 면적 0 칸은 f64 경계가 무너질 만큼 깊은
-/// 트리에서만 생긴다.
+/// Strictly `x0 < x1` · `y0 < y1` on both axes. A zero-size area arises only in a tree
+/// deep enough for the f64 boundary to collapse.
 // ADR-0227
 pub(crate) fn has_area(r: &SlotRect) -> bool {
     r.x0 < r.x1 && r.y0 < r.y1
 }
 
-/// 정규화 경계 `e` 를 캔버스 축 길이 `canvas` 위의 정수 px 경계로 = `round(canvas · e)`.
+/// Normalized boundary `e` as an integer px boundary on canvas axis length `canvas` = `round(canvas · e)`.
 ///
-/// 동률은 0 에서 먼 쪽이다 — 입력이 음수가 아니므로 CSS `round(nearest)`(+∞ 쪽)와 같다. 칸 폭은 이 값
-/// 둘의 차로 구하고 폭을 따로 반올림하지 않는다 — 그래서 이웃 칸의 px 경계가 언제나 같은 정수다.
-/// 범위 밖 `e` 는 `as` 캐스트 포화를 따른다(음수·NaN → 0, `u32` 초과 → `u32::MAX`).
+/// Ties go to the side farther from 0 — since the input is non-negative, this equals CSS `round(nearest)` (toward +∞). Area width is got from the difference
+/// of two such values and the width is not rounded separately — so the px boundaries of neighboring areas are always the same integer.
+/// An out-of-range `e` follows the `as` cast saturation (negative·NaN → 0, over `u32` → `u32::MAX`).
 pub fn px_edge(canvas: u32, e: f64) -> u32 {
     (f64::from(canvas) * e).round() as u32
 }
@@ -176,8 +176,8 @@ pub fn frame_px(canvas_w: u32, canvas_h: u32, r: &SlotRect) -> PxRect {
     }
 }
 
-/// 틀을 여백만큼 줄인 콘텐츠 영역(CSS px). 폭·높이는 0 아래로 내려가지 않는다(`x1 >= x0`, `y1 >= y0`).
-/// 틀이 여백 합보다 좁으면 `x0` 는 `frame.x0 + l` 그대로라 틀 오른쪽 경계 너머에 놓일 수 있다.
+/// Content region (CSS px) of the frame shrunk by the margin. Width and height do not go below 0 (`x1 >= x0`, `y1 >= y0`).
+/// If the frame is narrower than the sum of margins, `x0` stays `frame.x0 + l` as is, so it can lie beyond the frame's right boundary.
 pub fn content_rect(frame: &PxRect, insets: &Insets) -> RectF64 {
     let x0 = f64::from(frame.x0) + insets.l;
     let y0 = f64::from(frame.y0) + insets.t;
@@ -234,7 +234,7 @@ mod tests {
         a.to_bits() == b.to_bits()
     }
 
-    // 비율을 이진 표현이 안 되는 값으로 — 끝자리 오차가 실제로 생기는 트리.
+    // Ratios as values with no binary representation — a tree where last-digit error actually arises.
     fn nested() -> LayoutNode {
         split(
             100,
@@ -251,7 +251,7 @@ mod tests {
         )
     }
 
-    // ── 단일 슬롯 · 방향 ───────────────────────────────────────────────────────
+    // ── single slot · direction ───────────────────────────────────────────────
 
     #[test]
     fn single_slot_is_unit_square() {
@@ -306,7 +306,7 @@ mod tests {
         assert_eq!(s.at, 0.75, "위아래 분할의 at 은 y 축 값");
     }
 
-    // ── 이웃 경계 비트 동일 · 분할 상자 ─────────────────────────────────────────
+    // ── neighbor boundaries bit-identical · split boxes ───────────────────────
 
     #[test]
     fn shared_boundaries_are_bit_identical_in_three_level_nesting() {
@@ -319,20 +319,20 @@ mod tests {
             slot_of(&g, 5),
         );
 
-        // 루트 LR 경계: 왼쪽 열의 오른쪽 끝 = 오른쪽 열의 왼쪽 끝.
+        // Root LR boundary: right end of the left column = left end of the right column.
         assert!(same(s1.x1, s4.x0) && same(s1.x1, s5.x0));
         assert!(same(s3.x1, s4.x0), "깊은 잎의 오른쪽 끝도 같은 값");
-        // TB(0.7) 경계: s1 아래 = s2·s3 위.
+        // TB(0.7) boundary: bottom of s1 = top of s2·s3.
         assert!(same(s1.y1, s2.y0) && same(s1.y1, s3.y0));
-        // LR(0.35) 경계.
+        // LR(0.35) boundary.
         assert!(same(s2.x1, s3.x0));
-        // TB(0.45) 경계.
+        // TB(0.45) boundary.
         assert!(same(s4.y1, s5.y0));
-        // 부모 끝 경계는 복사된다 — 3단 아래 잎도 뷰 끝(1.0)을 정확히 갖는다.
+        // The parent's end boundary is copied — a leaf three levels down also has exactly the view end (1.0).
         assert!(same(s2.y1, 1.0) && same(s3.y1, 1.0) && same(s5.y1, 1.0));
         assert!(same(s1.x0, 0.0) && same(s2.x0, 0.0));
 
-        // 분할 상자 = 두 자식을 합친 영역 · at = 두 자식 사이 경계.
+        // Split box = region of both children combined · at = boundary between the two children.
         let root = split_of(&g, 100);
         assert_eq!((root.x0, root.y0, root.x1, root.y1), (0.0, 0.0, 1.0, 1.0));
         assert!(same(root.at, s1.x1));
@@ -365,8 +365,8 @@ mod tests {
 
     #[test]
     fn lists_are_in_tree_pre_order() {
-        // 얕은 잎(s2·s3)이 깊은 잎(s1·s4) 뒤에 오고 id 도 단조가 아니게 — 너비 우선·id 정렬·역 id 정렬·
-        // 후위 순 어느 것으로 회귀해도 두 목록 중 하나 이상이 어긋난다.
+        // Shallow leaves (s2·s3) come after deep leaves (s1·s4) and ids are not monotonic either — if it regressed to breadth-first, id order, reverse id order or
+        // postorder, at least one of the two lists would be off.
         let g = compute(&split(
             103,
             SplitDir::LeftRight,
@@ -386,7 +386,7 @@ mod tests {
         assert_eq!(splits, vec![id(103), id(100), id(102), id(101)]);
     }
 
-    // ── 정확값(직사각형 상자 안의 중첩) ─────────────────────────────────────────
+    // ── exact values (nesting inside a rectangular box) ───────────────────────
 
     fn rect(n: u128, x0: f64, y0: f64, x1: f64, y1: f64) -> SlotRect {
         SlotRect {
@@ -410,9 +410,9 @@ mod tests {
         }
     }
 
-    // 정사각형이 아닌 상자 안의 분할, 원점이 0 이 아닌 상자 안의 같은 방향 분할(103) 포함 — `at` 을
-    // 다른 축의 길이·원점으로 구하거나 원점을 빠뜨리는 실수가 값으로 드러난다. 비율은 이진 표현이
-    // 정확한 값이라 `==` 로 단언한다.
+    // Includes a split inside a non-square box and a same-direction split (103) inside a box whose origin is not 0 — a mistake of computing `at` with
+    // the other axis's length·origin or dropping the origin shows up in the values. The ratios are values with an
+    // exact binary representation, so they are asserted with `==`.
     #[test]
     fn nested_left_right_exact_values() {
         let g = compute(&split(
@@ -485,7 +485,7 @@ mod tests {
         );
     }
 
-    // ── px 변환 ─────────────────────────────────────────────────────────────
+    // ── px conversion ───────────────────────────────────────────────────────
 
     #[test]
     fn px_edge_rounds_half_away_from_zero() {
@@ -493,7 +493,7 @@ mod tests {
         assert_eq!(px_edge(1920, 0.0), 0);
         assert_eq!(px_edge(1920, 1.0), 1920);
         assert_eq!(px_edge(0, 0.7), 0);
-        // .5 동률은 올린다 — 짝수 쪽 반올림이었다면 2.5 → 2.
+        // A .5 tie rounds up — with round-half-to-even, 2.5 → 2.
         assert_eq!(px_edge(3, 0.5), 2, "1.5 → 2");
         assert_eq!(px_edge(5, 0.5), 3, "2.5 → 3");
         assert_eq!(px_edge(10, 0.14), 1, "1.4 → 1");
@@ -542,7 +542,7 @@ mod tests {
 
     #[test]
     fn zero_and_one_px_frames_have_non_negative_content_and_no_overlap() {
-        // 2×1 캔버스 — 틀 폭이 1·1·0, 높이가 1 이 되게 고른 크기.
+        // 2×1 canvas — a size chosen so the frame widths come out 1·1·0 and the height 1.
         let g = compute(&split(
             100,
             SplitDir::LeftRight,
@@ -574,7 +574,7 @@ mod tests {
         }
     }
 
-    // ── 비율 한계 ───────────────────────────────────────────────────────────
+    // ── ratio limits ────────────────────────────────────────────────────────
 
     #[test]
     fn out_of_range_ratios_are_clamped() {
@@ -595,7 +595,7 @@ mod tests {
 
     #[test]
     fn nan_ratio_reads_as_half() {
-        // 루트 NaN + 원점이 0 이 아닌 상자 안의 NaN — 0.5 는 뷰가 아니라 그 분할 상자 기준이다.
+        // Root NaN + NaN inside a box whose origin is not 0 — 0.5 is relative to that split box, not to the view.
         let g = compute(&split(
             100,
             SplitDir::TopBottom,

@@ -1,16 +1,16 @@
-// ADR-0303 — 크롬식 제목 표시줄
-// TRD S26-window-chrome §7-2: 창 끌 자리 = Tauri `data-tauri-drag-region`(Q5 = ①). 누름 · 두 번 누름(최대화 토글)은 Tauri
-//   `drag.js` 가 OS 에 넘긴다 — 버스를 지나지 않는다(D7). 권한 = `core:window:allow-start-dragging`(main · 팝아웃 — §9).
-// ★값 없는 속성 = 그 요소 자신을 누를 때만 끈다★ — 누른 요소부터 위로 걸으며 처음 만난 표시가 자기 자신이 아니면 끌지 않는다
-//   (`drag.js` `isDragRegion`). 그래서 자식 탭 머리 · `+` · 단추는 끌기를 시작하지 않는다. `"deep"` 으로 바꾸면 탭 머리
-//   누름이 창 끌기가 된다.
-// ★CSS `app-region: drag` 로 바꾸지 말 것★ — 그 영역의 적중 판정이 최상위 창(HWND)으로 가 파일만 받는 tao 의 놓기 받는 쪽에
-//   닿아, 그 위에 놓은 탭이 받는 쪽 없이 끝난다(디버그 세션 실측 2026-10-24).
-// ★끌 자리 누름은 document 의 거품 단계 `mousedown` 에 닿지 않는다★ — `drag.js`(tauri 2.11.3 `src/window/scripts/drag.js`)가
-//   초기화 스크립트로 가장 먼저 document 에 거품 단계 `mousedown` 을 걸고, 끌 자리의 왼쪽 누름이면 `preventDefault` 와
-//   `stopImmediatePropagation` 을 부른다. 그래서 그 뒤에 건 document · window 의 거품 단계 `mousedown` 이 불리지 않고, 기본
-//   동작(포커스 옮김)도 없어 입력 칸이 포커스를 잃지 않는다. 바깥 누름으로 닫는 쪽은 캡처 단계(`addEventListener(…, true)`)로
-//   듣는다 — `pointerdown` 은 막지 않는다.
+// ADR-0303 — Chrome-style title bar
+// TRD S26-window-chrome §7-2: window draggable area = Tauri `data-tauri-drag-region` (Q5 = ①). Press · double press (maximize toggle) are passed to the OS by Tauri
+//   `drag.js` — they do not go through the bus (D7). Permission = `core:window:allow-start-dragging` (main · popout — §9).
+// ★An attribute without a value = drags only when that element itself is pressed★ — walking upward from the pressed element, if the first mark met is not the element itself, it does not drag
+//   (`drag.js` `isDragRegion`). So child tab heads · `+` · buttons do not start a drag. Changing to `"deep"` would make a tab head
+//   press a window drag.
+// ★Do not switch to CSS `app-region: drag`★ — hit testing in that region goes to the top-level window (HWND), reaches the drop-receiving side of tao that accepts only files,
+//   and a tab dropped on it ends with no receiver (measured in a debug session 2026-10-24).
+// ★A press on the draggable area does not reach the document's bubble-phase `mousedown`★ — `drag.js` (tauri 2.11.3 `src/window/scripts/drag.js`) attaches a bubble-phase `mousedown`
+//   to document first as an initialization script, and for a left press on a draggable area it calls `preventDefault` and
+//   `stopImmediatePropagation`. So the document · window bubble-phase `mousedown` attached after it are not called, and since the default
+//   action (focus move) does not happen either, an input field does not lose focus. The side that closes on an outside press listens in the capture phase (`addEventListener(…, true)`) —
+//   `pointerdown` is not blocked.
 
 import { useEffect, type RefObject } from 'react'
 
@@ -21,15 +21,15 @@ export function dragProps(): typeof DRAG_REGION {
   return DRAG_REGION
 }
 
-/** 누른 요소가 끌 자리인가 — 값 없는 표시만 쓰므로 그 요소 자신이 표시를 단 경우다(자식 위 누름은 끌 자리가 아니다). */
+/** Is the pressed element a draggable area — only the valueless mark is used, so this is the case where the element itself carries the mark (a press on a child is not a draggable area). */
 function isDragRegionTarget(target: EventTarget | null): boolean {
   return target instanceof Element && target.hasAttribute(DRAG_REGION_ATTR)
 }
 
 /**
- * `editing` 인 동안 창 끌 자리를 누르면 입력 칸 `input` 의 포커스를 뺀다 — 그 누름은 포커스를 옮기지 않으므로(머리) 편집이
- * 포커스 잃음으로 확정되는 칸은 이것 없이는 끌 자리 누름에 끝나지 않는다. 확정 자체는 그 칸의 blur 처리가 한다. 캡처 단계라
- * `drag.js` 보다 먼저 듣는다.
+ * While `editing`, pressing a window draggable area takes focus off the input field `input` — that press does not move focus (head), so a field whose edit is
+ * committed by focus loss would not end on a draggable area press without this. The commit itself is done by that field's blur handler. It is the capture phase, so it listens
+ * before `drag.js`.
  */
 export function useBlurOnDragRegionPress(editing: boolean, input: RefObject<HTMLInputElement | null>): void {
   useEffect(() => {

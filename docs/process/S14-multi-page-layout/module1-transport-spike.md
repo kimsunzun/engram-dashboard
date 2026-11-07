@@ -1,42 +1,42 @@
-# 모듈① 전송 중계 통일 — 구현 설계 spike (ADR-0036)
+# Module ① transport relay unification — implementation design spike (ADR-0036)
 
-**상태:** T1~T4 구현 완료 / **T5~T8 코딩 전 — D1~D5 결정 완료 + 리서치 반영(§7)**
-**작성:** 2026-06-27 (dashboard2, opus Plan 에이전트 spike — 실제 코드 확인 기반) · **§7 추가 2026-06-28**(carrier/fan-out 리서치 반영)
-**근거:** ADR-0036(전송 중계 통일·phasing 없음·동시성-치명) · ADR-0035(레이아웃 권위=src-tauri) · ADR-0037(전송 의미론=Rust 단독) · TRD rev.5 · **리서치 `docs/research/tauri-channel-multiwindow-carrier-research-2026-06-28.md`**
+**Status:** T1~T4 implemented / **T5~T8 before coding — D1~D5 decided + research reflected (§7)**
+**Written:** 2026-06-27 (dashboard2, opus Plan agent spike — based on checking the actual code) · **§7 added 2026-06-28** (carrier/fan-out research reflected)
+**Basis:** ADR-0036 (transport relay unification · no phasing · concurrency-critical) · ADR-0035 (layout authority = src-tauri) · ADR-0037 (transport semantics = Rust alone) · TRD rev.5 · **research `docs/research/tauri-channel-multiwindow-carrier-research-2026-06-28.md`**
 
-> 동시성-치명 모듈. 현 TS `wsTransport.ts`(389줄)+`protocolClient.ts`(435줄)의 전송 의미론을 src-tauri Rust로 이전. 코딩은 T1~T8 단위로, 각각 코더→`/review code deep`→QA.
+> A concurrency-critical module. Moves the transport semantics of the current TS `wsTransport.ts` (389 lines) + `protocolClient.ts` (435 lines) to src-tauri Rust. Coding goes in units T1~T8, each coder → `/review code deep` → QA.
 
 ---
 
-## 0. 요약
-- src-tauri에 `DaemonClient`(연결·프로토콜 의미론) + `OutputRouter`(ViewManager 라우팅, lock-free snapshot) 신설. 프론트는 `TauriTransport`(얇은 carrier) 위 기존 `ProtocolClient` 인터페이스(ADR-0011) 유지.
-- **재사용 Rust 자산:** protocol crate `AgentCommand/AgentEvent/decode_frame/encode_terminal_frame`, discovery crate `read_live_daemon`·동기 tungstenite 패턴, src-tauri `ViewManager`(라우팅 테이블 토대).
-- **첫 장애물:** src-tauri Cargo.toml에 tokio·tokio-tungstenite·futures-util·serde_json이 **현재 전부 없음**(ADR-0029에서 제거). 복원이 T1.
-- **데몬 불변 확인:** 데몬 WS 서버(`ws.rs`)는 클라 1개든 N개든 동일, ConnId만 관리하고 View 모름 → ADR-0036 "데몬 불변" 코드상 사실.
+## 0. Summary
+- Create in src-tauri a `DaemonClient` (connection · protocol semantics) + an `OutputRouter` (ViewManager routing, lock-free snapshot). The frontend keeps the existing `ProtocolClient` interface (ADR-0011) on top of `TauriTransport` (a thin carrier).
+- **Reused Rust assets:** protocol crate `AgentCommand/AgentEvent/decode_frame/encode_terminal_frame`, discovery crate `read_live_daemon` · the synchronous tungstenite pattern, src-tauri `ViewManager` (the base of the routing table).
+- **First obstacle:** src-tauri's Cargo.toml has **none at present** of tokio · tokio-tungstenite · futures-util · serde_json (removed in ADR-0029). Restoring them is T1.
+- **Daemon-unchanged confirmation:** the daemon WS server (`ws.rs`) is the same with 1 client or N, manages only ConnId and does not know Views → "daemon unchanged" of ADR-0036 is a fact in the code.
 
-## 1. 현행 TS가 지키는 동시성 불변식 (Rust 이전 대상)
+## 1. Concurrency invariants the current TS upholds (to move to Rust)
 
-| TS 위치 | 불변식 | race 시나리오 |
+| TS location | Invariant | Race scenario |
 |---|---|---|
-| `wsTransport` `openGen` 세대 토큰 | zombie-socket 가드. openSocket 진입마다 ++, await 재개·소켓 생성 직전 myGen!==openGen이면 폐기 | await yield 중 start()/close()가 끼면 재개된 run()이 this.ws hijack |
-| `wsTransport` `pendingReject` | detach된 소켓의 resolve/reject가 closure에 갇혀 안 불림 → 밖에서 깨움 | 두 번째 start()가 첫 promise 안 깨우면 호출자 hang |
-| `wsTransport` `cleanupSocket` #13133 | 핸들러 delete(null 아님) 후 close — 옛 onclose가 새 소켓 clobber 방지 | 버려진 소켓 onclose가 새 this.ws null화 |
-| `wsTransport` `scheduleReconnect` | 지수 백오프 500ms→10s MAX 5 → down. attach-only(read_daemon_info no-spawn) | 명령 부수효과로 데몬 respawn(B-1) |
-| `wsTransport` Auth/Hello | 첫 frame=Auth, Hello=인증성공(내부 소비) | Hello를 control로 올리면 오해 |
-| ensureReady vs start (ADR-0021) | ensure=attach-only, start=명시 spawn 유일 진입점 | 데몬 끈 뒤 키/resize가 respawn |
-| `protocolClient` epoch 가드 | output frame epoch≠st.epoch drop | 옛 세션 잔여가 화면 오염 |
-| `protocolClient` seq high-water dedup | seq<=lastDeliveredSeq drop | 재연결 경계 중복 배달 |
-| epoch 변경 시 high-water 리셋 | current_epoch 바뀌면 lastDeliveredSeq=-1 | 새 세션 출력 전멸 방지 |
-| `resubscribeAll` | connected 재전이 시 epoch=st.epoch + after_seq=last → Resume(tail-only) | epoch=null이면 전체 replay 중복 |
-| request_id pending map | side-effect 명령을 randomUUID로 매칭, 전용 reply variant echo | broadcast에 조회응답 편승 |
-| connected→끊김 pending reject | 진행 명령 전부 reject(1회성) | promise leak |
-| `eventBus` resync 가드 | connected *재*전이만 getAgents+refreshProfiles | 첫 연결 중복/끊긴 동안 변경 누락 |
+| `wsTransport` `openGen` generation token | zombie-socket guard. ++ on every openSocket entry; discard if myGen!==openGen after an await resumes or just before socket creation | start()/close() slips in during an await yield and the resumed run() hijacks this.ws |
+| `wsTransport` `pendingReject` | the resolve/reject of a detached socket is trapped in the closure and never called → wake it from outside | if a second start() does not wake the first promise, the caller hangs |
+| `wsTransport` `cleanupSocket` #13133 | delete the handlers (not null) then close — prevents an old onclose from clobbering the new socket | an abandoned socket's onclose nulls the new this.ws |
+| `wsTransport` `scheduleReconnect` | exponential backoff 500ms→10s MAX 5 → down. attach-only (read_daemon_info no-spawn) | a daemon respawn as a command side effect (B-1) |
+| `wsTransport` Auth/Hello | the first frame = Auth, Hello = authentication success (consumed internally) | raising Hello to control would mislead |
+| ensureReady vs start (ADR-0021) | ensure = attach-only, start = the only explicit spawn entry point | after the daemon is turned off, keys/resize respawn it |
+| `protocolClient` epoch guard | drop an output frame with epoch≠st.epoch | leftovers of an old session pollute the screen |
+| `protocolClient` seq high-water dedup | drop seq<=lastDeliveredSeq | duplicate delivery at the reconnect boundary |
+| high-water reset on epoch change | when current_epoch changes, lastDeliveredSeq=-1 | prevents wiping out the new session's output |
+| `resubscribeAll` | on the connected re-transition, epoch=st.epoch + after_seq=last → Resume (tail-only) | if epoch=null, full replay duplicates |
+| request_id pending map | match side-effect commands by randomUUID, echo a dedicated reply variant | lookup responses piggybacking on broadcast |
+| connected→disconnect pending reject | reject every in-flight command (once) | promise leak |
+| `eventBus` resync guard | getAgents+refreshProfiles only on a connected *re*-transition | first-connection duplicates / missing changes while disconnected |
 
-**라우팅:** 현재 없음 — 각 창이 데몬에 N개 WS 직결, 자기 구독 agentId만. ADR-0036이 없애려는 N중복.
+**Routing:** none currently — each window connects directly to the daemon over its own WS (N in total), subscribing only to its own agentIds. This is the N duplication ADR-0036 aims to remove.
 
-## 2. Rust 재배치 설계
+## 2. Rust relocation design
 
-### 배치
+### Placement
 ```
 src-tauri/src/
   daemon_client/         ← 신규 ★동시성-치명
@@ -49,44 +49,44 @@ src-tauri/src/
 src/api/tauriTransport.ts ← 신규 Transport 구현(얇은 carrier)
 ```
 
-### DaemonClient — 단일 연결 actor
-- 런타임 tokio multi-thread(데몬처럼 tokio-tungstenite 0.26 + futures-util split). discovery의 동기 tungstenite는 fire-and-forget용이라 상시 연결엔 부적합 → 비동기.
-- **단일 연결 task(actor)**가 `WebSocketStream`·`pending: HashMap<RequestId,oneshot>`·`subs: HashMap<AgentId,SubState>`를 단독 소유(Mutex 없이, protocolClient self-contained 상태와 동형). invoke는 `cmd_tx.send(req{cmd,reply:oneshot})` 후 await.
-- generation 가드(openGen)는 **task 재시작**으로 자연 대체(옛 task는 채널 닫혀 폐기) — ★단 가정, 검증 필요(§6 리스크 1).
-- 상태(connected/reconnecting/down)·control 이벤트는 `app.emit` broadcast, request reply는 oneshot.
+### DaemonClient — a single-connection actor
+- Runtime tokio multi-thread (tokio-tungstenite 0.26 + futures-util split like the daemon). discovery's synchronous tungstenite is for fire-and-forget so it is unsuitable for a permanent connection → async.
+- **A single connection task (actor)** solely owns the `WebSocketStream` · `pending: HashMap<RequestId,oneshot>` · `subs: HashMap<AgentId,SubState>` (no Mutex, isomorphic to protocolClient's self-contained state). invoke does `cmd_tx.send(req{cmd,reply:oneshot})` then awaits.
+- The generation guard (openGen) is naturally replaced by **task restart** (the old task's channel closes and it is discarded) — ★but an assumption, needs verification (§6 risk 1).
+- State (connected/reconnecting/down) · control events are an `app.emit` broadcast, request replies are oneshot.
 
 ### OutputRouter — lock-free (FIX-F6)
 ```rust
 pub struct OutputRouter { table: ArcSwap<RoutingTable> }  // arc-swap: 읽기 lock-free
 struct RoutingTable { by_agent: HashMap<AgentId, Vec<WindowSink>> }
 ```
-- 읽기(핫패스): `table.load()` → by_agent.get → 각 WindowSink 전달. 락 0.
-- 쓰기(저빈도): ViewManager mutation 후(락 드롭 뒤, emit 단계) 테이블 재계산 → `table.store`. ADR-0006 위반 없음.
+- Read (hot path): `table.load()` → by_agent.get → deliver to each WindowSink. Zero locks.
+- Write (low frequency): after a ViewManager mutation (after the lock is dropped, in the emit stage) recompute the table → `table.store`. No ADR-0006 violation.
 
-### TauriTransport (프론트)
-- `Transport` 인터페이스 구현, 두뇌는 Rust. `send`→invoke('agent_command'), `onMessage`→listen+출력 Channel, state→listen('daemon-connection-state'), start/ensure/close→invoke. `clientFactory`는 `new WsTransport()`→`new TauriTransport()`. agentClient=ProtocolClient 싱글톤 유지(ADR-0011). ensure/start 분리는 Rust로 이전.
+### TauriTransport (frontend)
+- Implements the `Transport` interface; the brain is Rust. `send`→invoke('agent_command'), `onMessage`→listen + output Channel, state→listen('daemon-connection-state'), start/ensure/close→invoke. `clientFactory` goes from `new WsTransport()`→`new TauriTransport()`. agentClient = the ProtocolClient singleton kept (ADR-0011). The ensure/start split moves to Rust.
 
-## 3. 불변식 매핑 (Rust 보존 + race 위험)
+## 3. Invariant mapping (Rust preservation + race risk)
 
-| 불변식 | Rust 보존 | race 위험 |
+| Invariant | Rust preservation | Race risk |
 |---|---|---|
-| zombie 가드(openGen) | task 재시작(옛 task 채널 닫힘) + 명시 generation | ★높음 — "자연해결" 가정 틀리면 최위험. tokio abort 타이밍·in-flight await 재개 정밀 테스트. TS `[Blocker-1]` 2케이스 반드시 이식 |
-| 재연결 백오프 | task 내 tokio sleep 루프 + read_live_daemon(no-spawn) MAX5→down | 중 |
-| ensure/start 분리 | DaemonClient connect()/ensure() 분리 | 중 — 단일 클라라 다중 WebView 동시 ensure 사라짐(이득), discovery ensure_lock 불필요해질 수도(D5) |
-| epoch 가드 | 연결 task SubState | 낮음(순차) |
-| seq dedup | SubState last_delivered_seq, replay_from 기준 안 씀(버그B 가드) | 낮음 |
-| epoch 변경 high-water 리셋 | current_epoch 바뀌면 -1 | 낮음 |
-| resubscribe resume(버그A) | connected 재전이 시 subs 순회 Subscribe{epoch:Some,after_seq:last} | 중 |
-| replay→live 순서 | **데몬 소유(ws.rs 단일 writer FIFO)** — 클라 seq dedup만 | 낮음 |
-| finalize 1회(ADR-0005) | **데몬 소유 — 클라 무관** | 없음 |
-| kill 인과(ADR-0001) | **데몬 소유 — 클라는 Kill 전송+Ack** | 없음 |
-| 락 순서(ADR-0006) | OutputRouter 핫패스 락 0(arc-swap), 테이블 갱신은 ViewManager 락 드롭 후 | 중 — 갱신을 락 안에 넣으면 위반 |
-| pending 매칭 | 연결 task HashMap | 낮음 |
-| 끊김 시 pending reject | task 종료/재시작 시 전부 Err | 중 — task 교체 시 옛 pending 정리 누락 |
+| zombie guard (openGen) | task restart (old task's channel closed) + explicit generation | ★high — if the "resolved naturally" assumption is wrong this is the riskiest. Precisely test the tokio abort timing and the resumption of in-flight awaits. Both cases of TS `[Blocker-1]` must be ported |
+| reconnect backoff | tokio sleep loop inside the task + read_live_daemon (no-spawn) MAX5→down | medium |
+| ensure/start split | DaemonClient connect()/ensure() split | medium — with a single client, simultaneous ensure from multiple WebViews disappears (a gain), and discovery's ensure_lock may become unnecessary (D5) |
+| epoch guard | connection task SubState | low (sequential) |
+| seq dedup | SubState last_delivered_seq, replay_from is not used as a criterion (bug-B guard) | low |
+| high-water reset on epoch change | -1 when current_epoch changes | low |
+| resubscribe resume (bug A) | on the connected re-transition iterate subs with Subscribe{epoch:Some,after_seq:last} | medium |
+| replay→live order | **daemon-owned (ws.rs single-writer FIFO)** — the client only does seq dedup | low |
+| finalize once (ADR-0005) | **daemon-owned — irrelevant to the client** | none |
+| kill causality (ADR-0001) | **daemon-owned — the client sends Kill + Ack** | none |
+| lock order (ADR-0006) | OutputRouter hot path has 0 locks (arc-swap), the table update happens after the ViewManager lock is dropped | medium — putting the update inside the lock violates it |
+| pending matching | connection task HashMap | low |
+| pending reject on disconnect | on task end/restart all Err | medium — missing cleanup of old pending on task replacement |
 
-**race 핵심 3곳:** ① task 교체 중 in-flight 명령/구독(Blocker-1 이식 단언) ② OutputRouter 갱신↔ViewManager 락 순서 ③ 재연결 resubscribe와 동시 unsub/재구독.
+**Three core race spots:** ① in-flight commands/subscriptions during task replacement (Blocker-1 port assertions) ② OutputRouter update ↔ ViewManager lock order ③ reconnect resubscribe with a concurrent unsub/re-subscribe.
 
-## 4. 코더 단위 분해 (T1~T8)
+## 4. Coder unit breakdown (T1~T8)
 ```
 T1 deps복원 → T2 connect/handshake → T3 protocol_state(epoch/dedup/pending)
                     │                        │
@@ -101,138 +101,138 @@ T1 deps복원 → T2 connect/handshake → T3 protocol_state(epoch/dedup/pending
               T8 React 정리(slotStore삭제·PopupPage·eventBus)+InProc mock(D4)
 ```
 
-| T | 내용 | 격리 하네스(실 데몬 없이) |
+| T | Content | Isolated harness (without a real daemon) |
 |---|---|---|
-| T1 | Cargo.toml tokio·tokio-tungstenite·futures-util·serde_json·arc-swap 복원 + AppState manage 자리 | cargo build |
-| T2 | DaemonClient 연결 task: discover→WS→Auth→Hello, connect/ensure 분리 | integration bin(daemon `tests/ws_e2e.rs` start_test_server 재사용) 또는 mock WS 서버 |
-| T3 | protocol_state: epoch·dedup·resubscribe·pending **순수 함수 분리** | headless unit — `protocolClient.test.ts` 21케이스 1:1 이식, SubState 직접 주입 |
-| T4 | 재연결 백오프 + generation 가드 + read_live_daemon | headless unit + tokio `time::pause()` — `wsTransport.test.ts` Blocker-1·hot-swap·소진→down 이식 |
-| T5 | OutputRouter arc-swap + 갱신 트리거 | headless unit — ViewManager mutation→테이블 재계산→load 검증, 핫패스 락 0 단언 |
-| T6 | invoke(spawn/kill/write/resize/subscribe)→DaemonClient | integration bin |
-| T7 | TauriTransport + clientFactory 교체 | vitest invoke mock |
-| T8 | React 정리 + InProc mock 처리(D4) | vitest + cargo test 루트 회귀 + cdp.mjs 실측 |
+| T1 | Restore tokio · tokio-tungstenite · futures-util · serde_json · arc-swap in Cargo.toml + the AppState manage slot | cargo build |
+| T2 | DaemonClient connection task: discover→WS→Auth→Hello, connect/ensure split | integration bin (reuse the daemon's `tests/ws_e2e.rs` start_test_server) or a mock WS server |
+| T3 | protocol_state: epoch · dedup · resubscribe · pending **split into pure functions** | headless unit — port the 21 cases of `protocolClient.test.ts` 1:1, inject SubState directly |
+| T4 | Reconnect backoff + generation guard + read_live_daemon | headless unit + tokio `time::pause()` — port Blocker-1 · hot-swap · exhaustion→down of `wsTransport.test.ts` |
+| T5 | OutputRouter arc-swap + update trigger | headless unit — verify ViewManager mutation→table recompute→load, assert 0 locks on the hot path |
+| T6 | invoke (spawn/kill/write/resize/subscribe)→DaemonClient | integration bin |
+| T7 | TauriTransport + clientFactory replacement | vitest invoke mock |
+| T8 | React cleanup + InProc mock handling (D4) | vitest + cargo test root regression + cdp.mjs measurement |
 
-**TS 테스트 2파일(40+케이스)이 Rust 이식의 명세서.** 격리 토대 이미 존재: discovery Clock/DaemonReader trait 주입, daemon start_test_server.
+**The 2 TS test files (40+ cases) are the specification for the Rust port.** The isolation foundation already exists: discovery Clock/DaemonReader trait injection, the daemon's start_test_server.
 
-## 5. 사용자 결정 필요 (D1~D5)
+## 5. User decisions needed (D1~D5)
 
-- **D1 (가장 큼) dedup/epoch 가드 위치:** (A) Rust 단독 — ProtocolClient handleOutput 죽이고 Rust가 깨끗한 청크만 emit(단일 진실원·라우팅 전 1회, 단 ProtocolClient 껍데기화→ADR-0011 정체성 충돌) / (B) Rust 1차 + JS 방어적 2차(기존 보존·점진, 의미론 두 곳) / (C) JS 단독·Rust raw relay(라우팅 위해 agentId 부분디코드 필요 + N창 가드 N회 → ADR-0036 이점 반감).
-- **D2 ProtocolClient 두께:** D1 종속. A면 거의 사라지고 TauriTransport가 곧 클라 / B·C면 거의 그대로 + carrier만.
-- **D3 라우팅 출력 carrier:** Tauri Channel(바이너리 효율, 창 생명주기 결합 복잡) vs emit_to(단순, JSON 팽창). 고대역 출력 직결 → §6 성능.
-- **D4 InProc mock 테스트:** `protocolClient.test.ts` InProc describe + MockTransport(ADR-0020 흔적). 폐기 / Rust 이식 / TauriTransport 재작성.
-- **D5 `commands/discovery.rs` ensure_lock:** 단일 DaemonClient면 다중 WebView 동시 ensure 사라져 불필요할 수 있음. 제거 vs 보존.
+- **D1 (biggest) location of the dedup/epoch guard:** (A) Rust alone — kill ProtocolClient's handleOutput and Rust emits only clean chunks (single source of truth · once before routing, but ProtocolClient becomes a shell → conflicts with the ADR-0011 identity) / (B) Rust primary + JS defensive secondary (existing kept · gradual, semantics in two places) / (C) JS alone · Rust raw relay (needs a partial decode of agentId for routing + the N-window guard N times → halves the ADR-0036 benefit).
+- **D2 ProtocolClient thickness:** dependent on D1. With A it nearly vanishes and TauriTransport is the client / with B·C it stays nearly as is + only the carrier.
+- **D3 routed output carrier:** Tauri Channel (binary efficiency, complex coupling to the window lifecycle) vs emit_to (simple, JSON bloat). Directly tied to high-bandwidth output → §6 performance.
+- **D4 InProc mock tests:** the `protocolClient.test.ts` InProc describe + MockTransport (traces of ADR-0020). Discard / port to Rust / rewrite for TauriTransport.
+- **D5 `commands/discovery.rs` ensure_lock:** with a single DaemonClient, simultaneous ensure from multiple WebViews disappears so it may be unnecessary. Remove vs keep.
 
-## 6. 리스크·미지수
-1. **연결 task 교체 zombie/hijack 차단(T4)** — task 모델이 openGen 가드를 "구조적 해결"한다는 건 가정. tokio abort 타이밍·oneshot drop 순서에서 새 race 가능. Blocker-1 이식 통과가 안전 게이트.
-2. **OutputRouter 갱신↔ViewManager 락 순서(ADR-0006)** — arc-swap 핫패스는 OK, 갱신 트리거를 락 안에 넣으면 위반+데드락.
-3. **재연결 resubscribe N창 구독 union** — 에이전트당 구독 1회(중복제거)면 "구독 ref-count" 필요(마지막 창 닫힐 때만 Unsubscribe). TS에 없던 신규 동시성 표면.
-- **고대역 relay 오버헤드 실측:** 데몬→src-tauri WS(1회)→Router→창(IPC) 한 홉 추가. D3 emit_to면 JSON/base64 팽창 부활 위험. `cdp.mjs eval`로 throughput 측정(ADR-0036 "로컬 IPC 미미"는 가정, QA full 검증).
-- **미지수(코드 미확인):** Tauri 2 `ipc::Channel` 멀티윈도우 per-window 생성/정리 안전성(context7 확인) · src-tauri tokio multi-thread 재도입과 Tauri 런타임 상호작용.
+## 6. Risks · unknowns
+1. **Blocking zombie/hijack on connection task replacement (T4)** — that the task model "structurally resolves" the openGen guard is an assumption. A new race is possible in the tokio abort timing and the oneshot drop order. Passing the Blocker-1 port is the safety gate.
+2. **OutputRouter update ↔ ViewManager lock order (ADR-0006)** — the arc-swap hot path is OK, but putting the update trigger inside the lock violates it + deadlocks.
+3. **The union of N-window subscriptions on reconnect resubscribe** — subscribing once per agent (deduplicated) needs a "subscription ref-count" (Unsubscribe only when the last window closes). A new concurrency surface that TS did not have.
+- **Measuring high-bandwidth relay overhead:** daemon→src-tauri WS (once)→Router→window (IPC) adds one hop. With D3 emit_to there is a risk of reviving JSON/base64 bloat. Measure throughput with `cdp.mjs eval` (ADR-0036's "local IPC is negligible" is an assumption, verified in QA full).
+- **Unknowns (code not checked):** per-window creation/cleanup safety of Tauri 2 `ipc::Channel` in multi-window (check with context7) · the interaction between reintroducing tokio multi-thread in src-tauri and the Tauri runtime.
 
-## 7. 리서치 반영 (2026-06-28) — T5~T8 확정 디테일
+## 7. Research reflected (2026-06-28) — T5~T8 confirmed details
 
-> cross-family deep 리서치(보고서: `docs/research/tauri-channel-multiwindow-carrier-research-2026-06-28.md`)가 D3 carrier와 fan-out 설계의 미지수(§6)를 닫음. **현 버전 기준: `tauri = 2.11.2` / `@tauri-apps/api ^2.11.0`.**
+> The cross-family deep research (report: `docs/research/tauri-channel-multiwindow-carrier-research-2026-06-28.md`) closed the unknowns (§6) of the D3 carrier and the fan-out design. **Per current version: `tauri = 2.11.2` / `@tauri-apps/api ^2.11.0`.**
 
-### D3 carrier — Channel 확정 + ★raw byte 함정
-- carrier 이원화 확정: **고대역 출력 = `Channel` (per-window) / 레이아웃 control = `emit`**(저빈도 JSON OK, 모듈② 현행 유지). 공식이 "child process output"을 Channel 용례로 직접 명시.
-- **★ 터미널 바이트는 `Channel<tauri::ipc::Response>`(`Response::new(bytes)`) 또는 `InvokeResponseBody::Raw`로 보낸다.** `Channel<Vec<u8>>`/`Channel<&[u8]>`는 blanket `impl<T:Serialize> IpcResponse`가 **JSON 배열로 직렬화**(공식 4096B 예제의 `Channel<&[u8]>`조차 JSON으로 샘). protocol crate `encode_terminal_frame` 바이트를 Response/Raw에 실어 보내면 정합.
-- Channel은 호출 webview에 태생 바인딩 → 창마다 Channel = per-window 라우팅 자연 해결(emit_to 불필요).
+### D3 carrier — Channel confirmed + ★raw byte pitfall
+- Carrier split confirmed: **high-bandwidth output = `Channel` (per-window) / layout control = `emit`** (low-frequency JSON is OK, module ② current state kept). The official docs explicitly name "child process output" as a Channel use case.
+- **★ Send terminal bytes with `Channel<tauri::ipc::Response>` (`Response::new(bytes)`) or `InvokeResponseBody::Raw`.** `Channel<Vec<u8>>`/`Channel<&[u8]>` are **serialized as a JSON array** by the blanket `impl<T:Serialize> IpcResponse` (even the official 4096B example's `Channel<&[u8]>` leaks as JSON). Carrying the bytes of the protocol crate's `encode_terminal_frame` in Response/Raw is consistent.
+- A Channel is natively bound to the calling webview → a Channel per window solves per-window routing naturally (emit_to unnecessary).
 
-### T5 OutputRouter — arc-swap snapshot (open item 해소)
-- `ArcSwap<RoutingSnapshot { by_agent: HashMap<AgentId, Arc<[WindowId]>> }>` — **핫패스(프레임마다) `load()` 락0**, 레이아웃 변경 시에만 `store(Arc::new(..))`. arc-swap 공식 "routing table read with every packet" 용례.
-- **Pitfall(테스트로 단언):** `load()` Guard를 `.await` 너머로 보유 금지(슬롯 고갈) → async 경유 시 `load_full()`. (ADR-0006 핫패스 락0 = 이미 §2 FIX-F6.)
-- 기각 대안: `RwLock`(읽기 경합), `broadcast`(느린 수신자 `Lagged` **유실** → 무손실 터미널에 위험), `left-right`/`evmap`(eventual consistency 복잡), `watch`(snapshot 배포엔 OK·핫패스 lookup 부적합).
+### T5 OutputRouter — arc-swap snapshot (open item resolved)
+- `ArcSwap<RoutingSnapshot { by_agent: HashMap<AgentId, Arc<[WindowId]>> }>` — **the hot path (every frame) `load()` takes 0 locks**, `store(Arc::new(..))` only on a layout change. The arc-swap official "routing table read with every packet" use case.
+- **Pitfall (assert with tests):** do not hold the `load()` Guard across an `.await` (slot exhaustion) → use `load_full()` when going through async. (ADR-0006 hot path 0 locks = already §2 FIX-F6.)
+- Rejected alternatives: `RwLock` (read contention), `broadcast` (a slow receiver's `Lagged` **loses data** → dangerous for a lossless terminal), `left-right`/`evmap` (eventual-consistency complexity), `watch` (OK for snapshot distribution · unsuitable for hot-path lookups).
 
-### 구독 union ref-count (§6 리스크3 "신규 동시성 표면" 해소)
-- 핫패스와 **분리**: `Mutex<HashMap<AgentId, usize>>` (레이아웃/창 수명 이벤트에만 변경). **0→1 전이 = `Subscribe` / 1→0 = `Unsubscribe`.**
-- `SubscriptionGuard { agent_id, owner }` + `Drop`으로 슬롯/창 수명에 묶음. **★ async Drop 금지** — `Drop`은 await 불가 → unsubscribe를 **DaemonClient cmd_tx로 enqueue**(actor 모델과 정합, 직접 await X).
+### Subscription union ref-count (resolves §6 risk 3 "new concurrency surface")
+- **Separated** from the hot path: `Mutex<HashMap<AgentId, usize>>` (changed only on layout/window lifetime events). **0→1 transition = `Subscribe` / 1→0 = `Unsubscribe`.**
+- Bind it to the slot/window lifetime with `SubscriptionGuard { agent_id, owner }` + `Drop`. **★ No async Drop** — `Drop` cannot await → **enqueue** the unsubscribe on the **DaemonClient cmd_tx** (consistent with the actor model, no direct await).
 
-### 정리·생명주기 규약 (T6/T7)
-- **dead window:** `Channel::send`는 `Result<()>` — 소멸 webview면 `Err`(에러 타입 미문서화). **`Err` 감지 시 라우팅 registry에서 해당 채널 제거**(절대 `unwrap()` 금지).
-- **창 close:** `onCloseRequested`에서 명시 `unsubscribe` + `unlisten` — **#15583(webview 소멸 시 백엔드 리스너 미정리)이 2.11.2에서 미해결**.
-- **대용량 큐:** `ChannelDataIpcQueue` 잔류 가능(창이 fetch 전 닫힘) → close/unsubscribe 시 정리 확인.
-- **프론트 채널 정리:** `delete channel.onmessage`(null 아님 — #13133, 기존 micro-rule 유지).
+### Cleanup · lifecycle conventions (T6/T7)
+- **dead window:** `Channel::send` returns `Result<()>` — `Err` for a destroyed webview (the error type is undocumented). **On detecting `Err`, remove that channel from the routing registry** (never `unwrap()`).
+- **window close:** explicit `unsubscribe` + `unlisten` in `onCloseRequested` — **#15583 (backend listeners not cleaned up when a webview is destroyed) is unresolved in 2.11.2**.
+- **Large queue:** `ChannelDataIpcQueue` may linger (the window closes before fetching) → confirm cleanup on close/unsubscribe.
+- **Frontend channel cleanup:** `delete channel.onmessage` (not null — #13133, existing micro-rule kept).
 
-### ⚠️ 버전 (의존성 — 결정 보고 대상)
-- **#13133(콜백 누수, v2.5.0 fix)·#12065(순서 역전, 2.2.0 fix) = 우리 2.11.2에서 이미 해소.**
-- **tauri 2.11.3에서 channel-data 데드락 수정 — 우리는 2.11.2(한 패치 아래).** T5~T7 Channel 배선 전 **2.11.3+ 업글 검토**(의존성 변경 = 사용자 보고).
+### ⚠️ Version (dependency — a decision-report item)
+- **#13133 (callback leak, fixed in v2.5.0) · #12065 (order inversion, fixed in 2.2.0) = already resolved in our 2.11.2.**
+- **The channel-data deadlock is fixed in tauri 2.11.3 — we are on 2.11.2 (one patch below).** Consider an **upgrade to 2.11.3+** before wiring the T5~T7 Channel (a dependency change = report to the user).
 
-### 미검증(실측 영역 — QA full)
-- raw Channel 실제 throughput·한 홉 오버헤드는 문서/소스 추정 → `cdp.mjs eval` throughput 실측으로 ADR-0036 "로컬 IPC 미미" 가정 확정(수용기준 §3 trd / spike §6).
+### Unverified (measurement area — QA full)
+- The raw Channel's actual throughput · one-hop overhead is estimated from docs/source → confirm ADR-0036's "local IPC is negligible" assumption with a `cdp.mjs eval` throughput measurement (acceptance criterion §3 trd / spike §6).
 
-## 8. T5 OutputRouter — TRD 상세 (2026-06-29)
+## 8. T5 OutputRouter — TRD details (2026-06-29)
 
-> 통합 표면 매핑(Explore) + carrier 리서치(§7) 반영. **순수 내부 결정은 확정(아래), 굵은 갈림길 2개(F-A/F-B)는 사용자 결정 대기.**
+> Integration surface mapping (Explore) + carrier research (§7) reflected. **Purely internal decisions are confirmed (below); the two major forks (F-A/F-B) await user decisions.**
 
-### 확정된 seam·타입 (코드 실측)
-- **입력 seam:** `src-tauri/src/daemon_client/connection.rs:668` `Message::Binary(bytes)` 자리(현 `// TODO(T5)`). 흐름: `protocol::decode_frame(bytes) → DecodedFrame{agent_id, epoch, seq, payload:&[u8]}` → `protocol_state::decide_output(&mut sub, epoch, seq)` → **`Deliver`면 `router.route(agent_id, payload, seq)`**, `Drop*`면 무시. (`main_loop`에 `router: &OutputRouter` Arc 주입 — 재연결 넘어 app-level 공유.)
-- **라우팅 소스:** `layout/manager.rs` `ViewManager{views, active_view_id, window_bindings:HashMap<label,view_id>, version}` + `LayoutNode::Slot{agent_id:Option<String>}`. `agent_id → [window_label]` = 각 View 트리에서 해당 agent 슬롯 탐색 → (View==active_view_id면 "main") + (window_bindings에서 그 view_id에 바인딩된 label들).
-- **출력 carrier:** **per-window `Channel<tauri::ipc::Response>` 1개**가 그 창의 모든 agent 출력을 운반(프레임에 agent_id 태그). 창은 T6 invoke(`subscribe_output(channel)`)로 등록. (§7 raw byte: `Response`/`Raw`로 적재.)
-- **★타입 브리지(코더 주의):** 프레임 `agent_id`=`AgentId`(protocol, UUID newtype) ↔ 슬롯 `agent_id`=`String`. 라우팅 키를 한쪽으로 정규화(권장: `AgentId` → 슬롯 저장 시점에 동일 문자열). 기존 spawn 경로의 String↔AgentId 변환 재사용.
+### Confirmed seams · types (measured in code)
+- **Input seam:** `src-tauri/src/daemon_client/connection.rs:668` the `Message::Binary(bytes)` spot (currently `// TODO(T5)`). Flow: `protocol::decode_frame(bytes) → DecodedFrame{agent_id, epoch, seq, payload:&[u8]}` → `protocol_state::decide_output(&mut sub, epoch, seq)` → **if `Deliver`, `router.route(agent_id, payload, seq)`**, ignore `Drop*`. (Inject `router: &OutputRouter` Arc into `main_loop` — shared app-level across reconnects.)
+- **Routing source:** `layout/manager.rs` `ViewManager{views, active_view_id, window_bindings:HashMap<label,view_id>, version}` + `LayoutNode::Slot{agent_id:Option<String>}`. `agent_id → [window_label]` = search each View tree for that agent's slots → (if View==active_view_id then "main") + (the labels bound to that view_id in window_bindings).
+- **Output carrier:** **one per-window `Channel<tauri::ipc::Response>`** carries all agent output of that window (frames tagged with agent_id). The window registers through the T6 invoke (`subscribe_output(channel)`). (§7 raw byte: load as `Response`/`Raw`.)
+- **★Type bridge (coder beware):** the frame's `agent_id` = `AgentId` (protocol, UUID newtype) ↔ the slot's `agent_id` = `String`. Normalize the routing key to one side (recommended: `AgentId` → the same string at slot-store time). Reuse the existing String↔AgentId conversion of the spawn path.
 
-### 내부 결정 (확정 — 보고용, 사용자 결정 아님)
-- **D1 WindowId = Tauri window label(String)** — `window_bindings` 키와 동일, 별도 numeric 레지스트리 불필요. `RoutingSnapshot{ by_agent: HashMap<AgentId, Arc<[String]>> }`.
-- **D2 rebuild-always** — 레이아웃 변경은 저빈도라 매 변경 시 snapshot 전체 재계산 후 `ArcSwap::store`. version-cache 분기 불채택(복잡도 대비 무이득).
-- **D3 rebuild 호출 = ViewManager 락 *보유 중*(layout mutation과 같은 critical section)에서 `router.rebuild(&mgr)`** → 반환 delta는 **unlock 후** T6가 cmd_tx로 송신. **(★rev 2026-06-29 — `/review code deep` 3인 수렴: 옛 "emit_after_unlock(락 밖) 호출"은 `load(prev)→delta→store`가 비원자라 동시 rebuild 시 델타 drift[중복 Subscribe·누락 Unsubscribe]+ABA[낡은 store가 새 store 덮음]. 기존 ViewManager 락으로 RMW 직렬화 + `&mgr` 현재성 보장.)** ADR-0006 위반 아님 — 본문=순수 계산 + lock-free `ArcSwap::store`, 락 안 외부 I/O 0(emit/DaemonClient/network 0), 송신만 unlock 후. 별도 rebuild mutex·콜백/역참조 불채택(기존 락 재사용으로 충분).
-- **D4 carrier = per-window Channel(태그)** — §7 리서치 확정(per-(window,agent) 채널 폭증 기각 / emit 브로드캐스트 JSON·정확성 기각).
-- **D6 정리** — `Channel::send` `Err`→해당 window sink 제거 + rebuild(절대 unwrap 금지) · 창 close `onCloseRequested`→명시 unsubscribe + unlisten(#15583 2.11.3 미해결).
+### Internal decisions (confirmed — for reporting, not user decisions)
+- **D1 WindowId = Tauri window label (String)** — same as the `window_bindings` key, no separate numeric registry needed. `RoutingSnapshot{ by_agent: HashMap<AgentId, Arc<[String]>> }`.
+- **D2 rebuild-always** — layout changes are low-frequency, so recompute the whole snapshot on every change then `ArcSwap::store`. A version-cache branch is not adopted (no gain for the complexity).
+- **D3 the rebuild call = `router.rebuild(&mgr)` made *while holding* the ViewManager lock (in the same critical section as the layout mutation)** → the returned delta is sent by T6 over cmd_tx **after unlock**. **(★rev 2026-06-29 — `/review code deep` 3-reviewer convergence: the old "emit_after_unlock (call outside the lock)" makes `load(prev)→delta→store` non-atomic, so concurrent rebuilds cause delta drift [duplicate Subscribe · missing Unsubscribe] + ABA [a stale store overwrites a new store]. The existing ViewManager lock serializes the RMW + guarantees the currency of `&mgr`.)** Not an ADR-0006 violation — the body = pure computation + lock-free `ArcSwap::store`, 0 external I/O inside the lock (0 emit/DaemonClient/network), only sending after unlock. A separate rebuild mutex · callback/back-reference not adopted (reusing the existing lock is enough).
+- **D4 carrier = per-window Channel (tagged)** — §7 research confirmed (a per-(window,agent) channel explosion rejected / emit broadcast rejected for JSON · correctness).
+- **D6 cleanup** — `Channel::send` `Err` → remove that window sink + rebuild (never unwrap) · on window close `onCloseRequested` → explicit unsubscribe + unlisten (#15583 unresolved in 2.11.3).
 
-### 굵은 갈림길 — 결정 완료 (2026-06-29, 사용자)
-- **F-A 슬라이싱 = ① T5 단독 먼저.** OutputRouter 코어(snapshot 재계산 + route)만, headless unit(ViewManager mutation→table→load·핫패스 락0 단언)으로 격리 검증 → 이후 T6(invoke+channel 등록)·T7·T8 각각 코더→`/review code deep`→`/qa`.
-- **F-B 구독 union 소스 = ① layout 파생.** 별도 카운터 없음 — snapshot rebuild마다 현재 agent union 집합을 직전과 diff해 0→1 `Subscribe`/1→0 `Unsubscribe`. **라우팅 snapshot 재계산과 같은 트리 순회에 piggyback(단일 패스: 라우팅표 + 구독 diff 동시 산출).** 근거: SSOT=ViewManager(ADR-0035), 출력 소비자=View뿐 + 데몬이 출력 보관(Unsubscribe 후 재구독=`Resume(after_seq)` tail 리플레이라 유실0)이라 ②(명시 ref-count)는 현재 무이점. **async Drop 직접 await 금지(설사 정리 경로 쓰더라도 cmd_tx enqueue).**
-  - **확장 메모(YAGNI — 지금 안 함):** 비-화면 출력 소비자(예: §5 백엔드 LLM이 다른 agent 출력을 프로그램 소비 = 목표 ⑤ 메시징 트랙, a1·연기)가 생기면 "①의 레이아웃 파생 집합 ∪ 별도 구독자 집합"으로 확장. ②를 통째로 까지 않음.
-  - **개념 분리(혼동 방지):** 출력 구독(T5, 렌더 대상) ≠ 포커스(`focused_slot_id`, 키 입력 대상) ≠ agent↔agent 메시징(목표 ⑤, data-plane). T5는 출력 구독만.
+### Major forks — decided (2026-06-29, user)
+- **F-A slicing = ① T5 alone first.** Only the OutputRouter core (snapshot recompute + route), verified in isolation with headless unit (ViewManager mutation→table→load · assert hot-path 0 locks) → afterwards T6 (invoke + channel registration) · T7 · T8 each coder→`/review code deep`→`/qa`.
+- **F-B subscription union source = ① layout-derived.** No separate counter — on every snapshot rebuild, diff the current agent union set against the previous one for 0→1 `Subscribe`/1→0 `Unsubscribe`. **Piggyback on the same tree traversal as the routing snapshot recompute (single pass: routing table + subscription diff produced together).** Rationale: SSOT = ViewManager (ADR-0035), the only output consumer is the View + the daemon keeps the output (re-subscribing after Unsubscribe = a `Resume(after_seq)` tail replay so 0 loss), so ② (explicit ref-count) has no benefit for now. **No direct await in async Drop (even if a cleanup path is used, enqueue on cmd_tx).**
+  - **Extension memo (YAGNI — not now):** if a non-screen output consumer appears (e.g. the §5 backend LLM consuming another agent's output programmatically = goal ⑤ messaging track, a1 · deferred), extend to "the layout-derived set of ① ∪ a separate subscriber set". Do not adopt ② wholesale.
+  - **Concept separation (to avoid confusion):** output subscription (T5, render target) ≠ focus (`focused_slot_id`, key-input target) ≠ agent↔agent messaging (goal ⑤, data-plane). T5 is output subscription only.
 
-## 9. T6 — 배선 TRD (2026-06-29, 통합 표면 매핑 반영)
+## 9. T6 — wiring TRD (2026-06-29, integration surface mapping reflected)
 
-> T5(라우팅 코어, headless) 위에 **실 IPC 배선**. 7+ 파일 통합 — 자체 `/review code deep` 라운드 필요. forks 대부분 내부 결정(보고용), 아래 확정. **동시성-치명 인접**(connection task ↔ Tauri Channel ↔ layout lock).
+> **Real IPC wiring** on top of T5 (the routing core, headless). A 7+ file integration — needs its own `/review code deep` round. Most forks are internal decisions (for reporting), confirmed below. **Adjacent to concurrency-critical** (connection task ↔ Tauri Channel ↔ layout lock).
 
-### T6 시퀀스 (코더 단위)
-1. **`ConnectionCommand` variant 채움**(`connection.rs:~131`, 현 `__Placeholder`): `SendCommand{cmd: AgentCommand, reply: oneshot}` + `Subscribe{agent_id, epoch, after_seq, reply}` + `Unsubscribe{agent_id, reply}`. (Fork B = B1)
-2. **`DaemonClient::send_command`**(`mod.rs:~357`, 현 TODO): `cmd_tx.send` 후 oneshot await 래퍼 노출. **끊김 시 pending oneshot drain**(T4 reconnect 정리와 정합 — 확인 필요).
-3. **AppState 등록**(`lib.rs` setup): `Arc<DaemonClient>` · `Arc<OutputRouter>` · **window Channel registry** `Arc<Mutex<HashMap<WindowLabel, Channel<Response>>>>`. (Fork A = A1)
-4. **`commands/agent.rs`(신설)**: invoke spawn/kill/write/resize → `ConnectionCommand::SendCommand` 빌드+reply await. + **`subscribe_output(label, channel)`** invoke = 창 mount 시 registry insert. (Fork D/E = D1/E1)
-5. **`commands/layout.rs` 전 mutation 커맨드 수정**: critical section **락 안**에서 `router.rebuild(&mgr)` 호출(FIX-1/D3), **unlock 후** delta→`send_command(Subscribe/Unsubscribe)`. (Fork C = C1 확정)
-6. **`connection.rs` main_loop 배선**: (a) cmd_rx arm(`:686`) — variant를 wire 인코딩해 `sink.send` + reply 처리. (b) Binary arm(`:668`) — `decode_frame → decide_output → Deliver면 router.targets(agent_id) → registry 의 각 창 Channel 로 fan-out`(`Response::new(bytes)` raw, §7).
+### T6 sequence (coder units)
+1. **Fill the `ConnectionCommand` variants** (`connection.rs:~131`, currently `__Placeholder`): `SendCommand{cmd: AgentCommand, reply: oneshot}` + `Subscribe{agent_id, epoch, after_seq, reply}` + `Unsubscribe{agent_id, reply}`. (Fork B = B1)
+2. **`DaemonClient::send_command`** (`mod.rs:~357`, currently TODO): expose a wrapper that awaits a oneshot after `cmd_tx.send`. **On disconnect drain the pending oneshots** (consistent with T4 reconnect cleanup — needs confirmation).
+3. **AppState registration** (`lib.rs` setup): `Arc<DaemonClient>` · `Arc<OutputRouter>` · **window Channel registry** `Arc<Mutex<HashMap<WindowLabel, Channel<Response>>>>`. (Fork A = A1)
+4. **`commands/agent.rs` (new)**: invoke spawn/kill/write/resize → build `ConnectionCommand::SendCommand` + await reply. + the **`subscribe_output(label, channel)`** invoke = registry insert on window mount. (Fork D/E = D1/E1)
+5. **Modify all mutation commands of `commands/layout.rs`**: call `router.rebuild(&mgr)` **inside the lock** in the critical section (FIX-1/D3), and **after unlock** delta→`send_command(Subscribe/Unsubscribe)`. (Fork C = C1 confirmed)
+6. **`connection.rs` main_loop wiring**: (a) cmd_rx arm (`:686`) — wire-encode the variant and `sink.send` + reply handling. (b) Binary arm (`:668`) — `decode_frame → decide_output → Deliver면 router.targets(agent_id) → registry 의 각 창 Channel 로 fan-out` (`Response::new(bytes)` raw, §7).
 
-### 확정 내부 결정 (forks — 보고용)
-- **A=A1** window Channel registry = `Arc<Mutex<HashMap<WindowLabel, Channel<Response>>>>` in AppState. connection task가 Arc clone 보유, route 시 lock→send. 창 close→deregister + send `Err`→registry remove(dead window). (per-(win,agent) 폭증·emit JSON 기각)
-- **B=B1** ConnectionCommand 3 variant + oneshot reply. (Box<dyn Any> 타입소거 기각)
-- **C=C1** rebuild 락 안 / delta 송신 unlock 후 (FIX-1·D3 확정).
-- **D/E=D1/E1** 창당 Channel 1개 mount 시 `subscribe_output` 등록, close 시 deregister + #15583 unlisten.
+### Confirmed internal decisions (forks — for reporting)
+- **A=A1** window Channel registry = `Arc<Mutex<HashMap<WindowLabel, Channel<Response>>>>` in AppState. The connection task holds an Arc clone, lock→send when routing. Window close → deregister + send `Err` → registry remove (dead window). (per-(win,agent) explosion · emit JSON rejected)
+- **B=B1** ConnectionCommand 3 variants + oneshot reply. (Box<dyn Any> type erasure rejected)
+- **C=C1** rebuild inside the lock / delta sent after unlock (FIX-1 · D3 confirmed).
+- **D/E=D1/E1** one Channel per window registered via `subscribe_output` on mount, on close deregister + #15583 unlisten.
 
-### ★T6 미해결 — 코더 진입 전 해소 필요
-- **(G1) Subscribe epoch/after_seq 출처:** delta는 "agent X 구독해라"만 안다. epoch/after_seq는 **protocol_state `SubState`**(연결 task 소유, T3)에서 와야 함 — 신규=epoch None(전체 replay)/재구독=tail-only(`resubscribe_params` 재사용). delta→Subscribe 변환을 **연결 task 안에서** SubState 조회로 채울지, layout 커맨드가 채울지 결정 필요(전자가 정합 — SubState는 task 소유).
-- **(G2) `Channel::send` from tokio task:** connection task(tokio 런타임)가 Tauri `Channel::send`를 호출해도 안전한지 실측(Channel은 Send+Sync, 내부 webview.eval 마샬링 — 가능성 높음이나 미검증). `cdp.mjs`로 첫 출력 도달 실측 = T6 GUI 게이트.
-- **(G3) registry ↔ connection task 수명:** registry는 AppState(Tauri) 소유, connection task는 DaemonClient 소유 — task에 registry Arc를 어떻게 주입하나(start_connection 인자 추가). layout label("main"/"slot-popup") ↔ window_bindings label 일치 확인.
+### ★T6 unresolved — to be resolved before the coder enters
+- **(G1) Source of Subscribe epoch/after_seq:** the delta only knows "subscribe to agent X". epoch/after_seq must come from the **protocol_state `SubState`** (owned by the connection task, T3) — new = epoch None (full replay) / re-subscribe = tail-only (reuse `resubscribe_params`). A decision is needed on whether to fill the delta→Subscribe conversion **inside the connection task** by looking up SubState, or in the layout command (the former is consistent — SubState is owned by the task).
+- **(G2) `Channel::send` from a tokio task:** measure whether it is safe for the connection task (tokio runtime) to call Tauri's `Channel::send` (Channel is Send+Sync, internal webview.eval marshaling — likely but unverified). Measuring first-output arrival with `cdp.mjs` = the T6 GUI gate.
+- **(G3) registry ↔ connection task lifetime:** the registry is owned by AppState (Tauri) and the connection task by DaemonClient — how to inject the registry Arc into the task (add an argument to start_connection). Confirm the layout label ("main"/"slot-popup") ↔ window_bindings label match.
 
-## 10. T6b 완료 + 잔여(T7로 이연) (2026-06-29)
+## 10. T6b done + remainder (deferred to T7) (2026-06-29)
 
-**완료:** 출력 평면 배선 — Binary arm fan-out(`decode_frame`→`decide_output` 가드→`router.targets`→창 `Channel<Response>`) · SubscribeAck epoch 갱신(`apply_subscribe_ack`) · Subscribe/Unsubscribe/Fire(fire-and-forget) · **`router.current_agents()` 기반 resubscribe**(C1+C2) · **`mark_delivered` 분리**(fan_out 1+창 성공 후에만 high-water 전진, C4) · layout 6 mutation rebuild+delta(락 안 rebuild/락 밖 송신) · `subscribe_output` invoke · window Channel registry(`output_channel.rs`). `cargo test --workspace` **148 green**.
+**Done:** output-plane wiring — Binary arm fan-out (`decode_frame`→`decide_output` guard→`router.targets`→window `Channel<Response>`) · SubscribeAck epoch update (`apply_subscribe_ack`) · Subscribe/Unsubscribe/Fire (fire-and-forget) · **resubscribe based on `router.current_agents()`** (C1+C2) · **`mark_delivered` separated** (the high-water advances only after fan_out succeeds in 1+ windows, C4) · rebuild+delta on layout's 6 mutations (rebuild inside the lock / send outside the lock) · the `subscribe_output` invoke · window Channel registry (`output_channel.rs`). `cargo test --workspace` **148 green**.
 
-**검증:** `/review code deep` 2라운드(opus doc-aware ×2 + Codex blind). 1R C1~C4 적출 → 수정 → 2R 재검증 = **C1~C4 닫힘**(데이터 손상/오염 0). ADR-0006(fan_out 락 보유 중 await 0·rebuild 락안/송신 락밖)·ADR-0037(가드 라우팅 전 1회) 정상.
+**Verification:** `/review code deep` 2 rounds (opus doc-aware ×2 + Codex blind). Round 1 raised C1~C4 → fixed → round 2 re-verification = **C1~C4 closed** (data corruption/contamination 0). ADR-0006 (0 awaits while holding the fan_out lock · rebuild inside the lock / send outside the lock) · ADR-0037 (guard once before routing) fine.
 
-**★잔여 = T7 영역** (현재 **dead path** — 프론트가 아직 `wsTransport` 직결, 이 경로 미사용이라 화면 안 깨짐):
-- **N1** 멀티창/늦은 mount: 같은 agent를 여러 창에 동시 표시 시 per-agent 단일 seq로 창별 진도 못 챙김 + 미배달 frame 재배달 트리거 부재.
-  - **근본(리서치 2026-06-29, `research/study-notes/`):** 우리는 출력을 **seq 큐 소비 모델**(per-agent high-water + dedup)로 다루나, 터미널 업계 표준은 **state-render 모델**(tmux/Zellij/VS Code — 서버 중앙 보관 + attach 시 redraw, 출력에 단일 consumed cursor 없음). → **seq(데몬↔게이트웨이 전송 무손실)와 렌더(창 채우기) 분리**가 N1 해소 방향.
-  - **새 창 채우기 갈림(T7 PRD/TRD에서 결정):** (A) 데몬 재요청(업계 표준·단순·2홉 loopback) vs (B) src-tauri 게이트웨이 캐시(2계층 적합·비표준·동기화 비용). 리서치 결론: 중앙 보관+재요청이 표준, 게이트웨이 캐시는 web 렌더러 편의일 뿐 authoritative store 아님.
-- **N5** subs 운영 중 정리(retain은 재연결 시에만 — 연결 유지 중 누수 잔존). **N6** resubscribe 중 동시 layout mutation → 중복 Subscribe(데몬 Subscribe 멱등성 확인 필요). **N4** fan_out Binary 배선 통합 테스트 부재(seam 도입 시 headless 가능 / 또는 T7 GUI 실측).
+**★Remainder = T7 area** (currently a **dead path** — the frontend still connects directly through `wsTransport` and does not use this path, so the screen does not break):
+- **N1** multi-window / late mount: when the same agent is shown in several windows at once, a per-agent single seq cannot track per-window progress + there is no trigger to re-deliver undelivered frames.
+  - **Root cause (research 2026-06-29, `research/study-notes/`):** we treat output as a **seq-queue consumption model** (per-agent high-water + dedup), but the terminal industry standard is the **state-render model** (tmux/Zellij/VS Code — the server keeps it centrally + redraws on attach, no single consumed cursor on the output). → **Separating seq (lossless transport between daemon↔gateway) from render (filling the window)** is the direction to resolve N1.
+  - **Fork on filling a new window (decided in the T7 PRD/TRD):** (A) re-request from the daemon (industry standard · simple · 2-hop loopback) vs (B) a src-tauri gateway cache (fits 2 layers · non-standard · sync cost). Research conclusion: central storage + re-request is the standard; a gateway cache is only a convenience for the web renderer, not an authoritative store.
+- **N5** operating-time cleanup of subs (retain happens only at reconnect — a leak remains while the connection stays up). **N6** duplicate Subscribe when a layout mutation happens concurrently during resubscribe (confirm the idempotency of the daemon's Subscribe). **N4** no integration test for the fan_out Binary wiring (headless is possible once a seam is introduced / or T7 GUI measurement).
 
-**T7 = `TauriTransport`+`clientFactory` 교체** 시 위 전송/렌더 분리·A/B를 PRD/TRD로 결정 + GUI 실측(G2 = 실제 창 출력 도달, `cdp.mjs`).
+**T7 = replacing `TauriTransport` + `clientFactory`**: decide the transport/render separation · A/B above via a PRD/TRD + GUI measurement (G2 = real window output arrival, `cdp.mjs`).
 
-## 11. T7 TRD — TauriTransport cutover + N1 (seq/render 분리) (2026-06-29)
+## 11. T7 TRD — TauriTransport cutover + N1 (seq/render separation) (2026-06-29)
 
-> T7 목표: T6b 배선을 실활성화(clientFactory 교체)하면서, dead path 상태에서 미룬 N1(멀티창·늦은 mount)을 같이 닫는다.
+> T7 goal: actually activate the T6b wiring (replace clientFactory) while also closing N1 (multi-window · late mount), which was postponed while it was a dead path.
 
-### 확정 결정
+### Confirmed decisions
 
-- **N1 방향 = 안 B(데몬 프로토콜 변경 없음):** 데몬은 에이전트만 알고 창을 모른다. 창별 render cursor는 src-tauri 내부에서만 관리한다. 데몬에 window_id를 넘기는 안 A는 계층 위반이라 기각.
-- **epoch는 per-agent 그대로:** agent 세션 개념이라 창과 무관. `SubState.epoch`는 유지.
-- **render_seq는 per-window per-agent:** 새로 `WindowEntry.render_seqs`에 위치.
+- **N1 direction = plan B (no daemon protocol change):** the daemon knows only agents and does not know windows. The per-window render cursor is managed only inside src-tauri. Plan A, which passes a window_id to the daemon, is rejected as a layer violation.
+- **epoch stays per-agent:** it is an agent-session concept, so it is unrelated to windows. `SubState.epoch` is kept.
+- **render_seq is per-window per-agent:** newly placed in `WindowEntry.render_seqs`.
 
-### 현행 구조의 문제 (N1 근본)
+### Problem of the current structure (root of N1)
 
-`SubState.last_delivered_seq`가 역할 두 개를 섞어 들고 있다:
+`SubState.last_delivered_seq` mixes two roles:
 
 ```
 역할 ①  재연결 after_seq 계산 (데몬↔src-tauri 전송 레벨)
@@ -242,7 +242,7 @@ T1 deps복원 → T2 connect/handshake → T3 protocol_state(epoch/dedup/pending
   기존 decide_output이 seq ≤ last_delivered_seq → DropDuplicate 처리해 버림.
 ```
 
-### 구조 변경 전체 지도
+### Whole map of the structural change
 
 ```
 변경 전                                변경 후
@@ -270,7 +270,7 @@ resubscribe_params(st)          ───▶   after_seq = registry.min_render_s
   after_seq = st.last_delivered_seq       (모든 창 중 최솟값, 어느 창이라도 None → None)
 ```
 
-### 파일별 변경 명세
+### Per-file change specification
 
 #### `protocol_state.rs`
 
@@ -292,8 +292,8 @@ pub fn resubscribe_params(st: &SubState, after_seq: Option<u64>) -> SubscribePar
 //   after_seq = registry.min_render_seq(agent_id)로 호출자가 계산해 넘김
 ```
 
-- 기존 seq dedup 테스트(dedup_same_seq_dropped 등) → `output_channel.rs` 테스트로 이전
-- epoch-only 테스트는 그대로 유지, 시그니처만 맞게 수정
+- The existing seq dedup tests (dedup_same_seq_dropped etc.) → move to the `output_channel.rs` tests
+- The epoch-only tests are kept as is, with only the signatures adjusted
 
 #### `output_channel.rs`
 
@@ -326,13 +326,13 @@ pub fn min_render_seq(registry: &HashMap<WindowLabel, WindowEntry>, agent_id: Ag
 pub fn reset_all_windows_for_agent(registry: &mut HashMap<WindowLabel, WindowEntry>, agent_id: AgentId)
 ```
 
-단위 테스트:
+Unit tests:
 - `should_deliver`: None → true, Some(last) → seq>last=true / seq≤last=false
-- `mark_rendered`: 전진 단조성
-- `min_render_seq`: 혼재(Some/None) → None, 전부 Some → min값, 창 없음 → None
-- `reset_all_windows_for_agent`: 모든 창의 해당 agent seq = None
+- `mark_rendered`: monotonic advance
+- `min_render_seq`: mixed (Some/None) → None, all Some → the min value, no windows → None
+- `reset_all_windows_for_agent`: that agent's seq in all windows = None
 
-#### `connection.rs` Binary arm (fan_out 부분)
+#### `connection.rs` Binary arm (fan_out part)
 
 ```rust
 // 변경 전
@@ -357,10 +357,10 @@ Message::Binary(bytes) → decode_frame → decide_epoch(sub_state, frame_epoch)
       // (별도 collect 후 remove — lock 보유 중 정리, send가 동기라 가능)
 ```
 
-★동시성 주의★:
-- `registry.lock()` 보유 중 `Channel::send`(동기) → await 없음 → ADR-0006 미위반
-- `router.targets()`는 lock-free이므로 registry lock 전에 호출 → 락 순서 없음
-- dead window 정리: `send` Err 수집 후 동일 lock 보유 중 remove (재진입 없음)
+★Concurrency notes★:
+- While holding `registry.lock()`, `Channel::send` (synchronous) → no await → ADR-0006 not violated
+- `router.targets()` is lock-free, so it is called before the registry lock → no lock order
+- dead window cleanup: remove under the same lock after collecting the `send` Errs (no reentrancy)
 
 #### `connection.rs` resubscribe_all
 
@@ -387,9 +387,9 @@ fn resubscribe_all(subs, router, registry, cmd_tx) {
 }
 ```
 
-★ADR-0006★: registry lock 보유 중 cmd_tx.send(tokio mpsc) 금지 — collect 후 lock 해제 뒤 송신.
+★ADR-0006★: no cmd_tx.send (tokio mpsc) while holding the registry lock — collect, release the lock, then send.
 
-#### `connection.rs` SubscribeAck 처리 — epoch 변경 시 render_seq 리셋
+#### `connection.rs` SubscribeAck handling — reset render_seq on epoch change
 
 ```rust
 AgentEvent::SubscribeAck { agent_id, current_epoch, .. } => {
@@ -403,7 +403,7 @@ AgentEvent::SubscribeAck { agent_id, current_epoch, .. } => {
 }
 ```
 
-#### `commands/agent.rs` — subscribe_output 변경
+#### `commands/agent.rs` — subscribe_output change
 
 ```rust
 // 변경 전: channel만 registry에 insert
@@ -425,10 +425,10 @@ pub fn subscribe_output(
 }
 ```
 
-`request_resubscribe()`: cmd_tx로 `ConnectionCommand::Resubscribe` 전송 → connection task가 `resubscribe_all` 실행.
-새 창 mount 직후 resubscribe_all 발동 → min_render_seq가 None(새 창)이므로 after_seq=None → 데몬 full replay.
+`request_resubscribe()`: sends `ConnectionCommand::Resubscribe` over cmd_tx → the connection task runs `resubscribe_all`.
+resubscribe_all fires right after a new window mounts → min_render_seq is None (new window), so after_seq=None → the daemon does a full replay.
 
-#### `src/api/tauriTransport.ts` (신규)
+#### `src/api/tauriTransport.ts` (new)
 
 ```ts
 import { invoke } from '@tauri-apps/api/core'
@@ -476,31 +476,31 @@ export const agentClient = new ProtocolClient(new WsTransport(...))
 export const agentClient = new ProtocolClient(new TauriTransport())
 ```
 
-### 구현 분해 (T7a~T7d)
+### Implementation breakdown (T7a~T7d)
 
-| 단계 | 내용 | 격리 하네스 |
+| Step | Content | Isolated harness |
 |---|---|---|
-| T7a | `protocol_state.rs` SubState 축소 + `decide_epoch` + 테스트 수정 | `cargo test -p engram-dashboard-core` |
-| T7b | `WindowEntry` 확장 + `output_channel.rs` 헬퍼 + `connection.rs` fan_out·resubscribe·epoch reset | headless unit(output_channel) + cargo test --workspace |
-| T7c | `TauriTransport.ts` + `clientFactory` 교체 | vitest mock invoke |
-| T7d | GUI 실측(G2) + N5/N6 처리 | cdp.mjs + `/qa full` |
+| T7a | `protocol_state.rs` SubState shrink + `decide_epoch` + test fixes | `cargo test -p engram-dashboard-core` |
+| T7b | `WindowEntry` extension + `output_channel.rs` helpers + `connection.rs` fan_out · resubscribe · epoch reset | headless unit (output_channel) + cargo test --workspace |
+| T7c | `TauriTransport.ts` + `clientFactory` replacement | vitest mock invoke |
+| T7d | GUI measurement (G2) + N5/N6 handling | cdp.mjs + `/qa full` |
 
-각 단계: 코더→`/review code deep`→`/qa`.
+Each step: coder→`/review code deep`→`/qa`.
 
-### 검증 기준
+### Verification criteria
 
-- **G2(T7d):** `cdp.mjs eval` → 실제 창에 에이전트 출력 도달 확인
-- **멀티창(T7d):** 같은 agent 두 창 → 두 창 모두 출력 도달, 기존 창 중복 없음
-- **늦은 mount(T7d):** 창 닫았다 다시 열기 → 기존 출력 replay 수신
-- **재연결(T7b):** mock WS 끊기 → 재연결 후 미배달 없음
-- **cargo test --workspace:** T7b 후 전체 green 유지
+- **G2 (T7d):** `cdp.mjs eval` → confirm agent output reaches a real window
+- **Multi-window (T7d):** the same agent in two windows → output reaches both windows, no duplicates in the existing window
+- **Late mount (T7d):** close a window and reopen it → receives the replay of existing output
+- **Reconnect (T7b):** mock WS disconnect → no undelivered output after reconnect
+- **cargo test --workspace:** stay fully green after T7b
 
-### N5/N6 처리 (T7d 묶음)
+### N5/N6 handling (T7d bundle)
 
-- **N5** subs 운영 중 정리: `resubscribe_all` 이후 router에 없는 agent 항목을 `subs`에서 `retain`으로 정리 (재연결 시에만 했던 것 → 매 resubscribe_all 시 실행).
-- **N6** 중복 Subscribe 멱등성: 데몬 `ws.rs` Subscribe 멱등성 확인 후 N6 닫음(코드 확인 필요, T7d 진입 전).
+- **N5** operating-time cleanup of subs: after `resubscribe_all`, `retain` away the agent entries that are not in the router from `subs` (what used to be done only at reconnect → run on every resubscribe_all).
+- **N6** duplicate Subscribe idempotency: close N6 after confirming the idempotency of the daemon `ws.rs` Subscribe (needs a code check, before entering T7d).
 
 ---
 
-## 참조 코드
-`src/api/wsTransport.ts`(이전 원본) · `protocolClient.ts`(이전 원본) · `crates/engram-dashboard-daemon/src/ws.rs`(서버 actor 대칭) · `src-tauri/src/layout/manager.rs`(라우팅 소스) · `src/api/wsTransport.test.ts`·`protocolClient.test.ts`(Rust 이식 명세서) · `crates/engram-dashboard-protocol`(`encode_terminal_frame` → Response/Raw 적재).
+## Reference code
+`src/api/wsTransport.ts` (the original being moved) · `protocolClient.ts` (the original being moved) · `crates/engram-dashboard-daemon/src/ws.rs` (server actor symmetry) · `src-tauri/src/layout/manager.rs` (routing source) · `src/api/wsTransport.test.ts` · `protocolClient.test.ts` (Rust port specification) · `crates/engram-dashboard-protocol` (`encode_terminal_frame` → loaded into Response/Raw).

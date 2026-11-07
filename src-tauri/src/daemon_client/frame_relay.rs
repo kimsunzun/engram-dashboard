@@ -1,21 +1,21 @@
-//! 데몬 출력 binary frame 한 장의 중계 판정 — 디코드 → 진행 신호 → 화신 표식 거름 → 보는 창으로 통과.
+//! Relay decision for one daemon output binary frame — decode → progress signal → incarnation marker filter → pass to the viewing window.
 //!
-//! ## ★seq 를 건너뛰지 않는다(ADR-0231, load-bearing)★
-//! 뷰는 live 에서 `seq > 마지막+1` 을 시한 없이 붙들고 `마지막+1` 이 와야 흘린다. 그래서 이 중계가 한 프레임을
-//! 말없이 버리면 그 뒤 프레임이 붙듦 상한까지 쌓이고 — 한가한 에이전트면 영영 — 그 뷰가 멈춘다. 해독이
-//! 거절된 프레임은 둘로 가른다:
-//! - **모르는 tag(`UnknownTag`) → 자리채움을 만들어 평소 경로로 흘린다.** agent id · 화신 표식 · seq 는 tag
-//!   와 무관한 고정 자리라 헤더 길이만 되면 읽힌다 — 그 칸으로 **데몬 sink 와 같은** tag1 `Error` 자리채움
-//!   (`engram_dashboard_protocol::placeholder_error_frame`)을 만든다. 그 에이전트의 챗 뷰에 오류 행 하나이고
-//!   다른 에이전트·연결은 그대로다. ★끊지 않는 이유★ — 원인은 대개 결정적이라, 끊으면 전량 replay 가 같은
-//!   프레임을 다시 실어 와 그 셸의 모든 뷰가 끊김·replay 를 끝없이 되풀이한다.
-//! - **짧은 프레임(`TooShort`) → 연결을 끊는다.** seq 를 읽을 수 없어 자리채움을 만들 수 없다. 다시 붙은 뷰들은
-//!   전량 replay 로 돌아온다. 데몬의 이진 출력 프레임은 전부 헤더를 먼저 쓰는 인코더를 지나므로 이 모양은 그
-//!   인코더를 우회한 생산자에서만 나고, 오늘 그런 생산자는 없다. 결정적이면 재연결이 되풀이된다 — 조용한
-//!   멈춤 대신 드러나는 쪽을 택했다(횟수·시한 상한은 정답을 가르는 매직 넘버라 두지 않는다 — ADR-0038).
+//! ## ★Do not skip seq (ADR-0231, load-bearing)★
+//! In live, a view holds `seq > 마지막+1` (seq > last+1) with no deadline and releases only when `마지막+1` (last+1) arrives. So if this relay
+//! silently discards one frame, the frames after it pile up to the hold cap — forever for an idle agent — and that view stalls. A frame whose decoding
+//! was rejected is split in two:
+//! - **Unknown tag (`UnknownTag`) → make a placeholder and flow it on the usual path.** The agent id · incarnation marker · seq are at fixed positions
+//!   independent of the tag, so they can be read as long as the header length is present — from those fields it makes the tag1 `Error` placeholder **the same as the daemon sink's**
+//!   (`engram_dashboard_protocol::placeholder_error_frame`). It is one error row in that agent's chat view and
+//!   other agents · connections are untouched. ★Why it does not disconnect★ — the cause is usually deterministic, so disconnecting makes the full replay bring the same
+//!   frame again, and every view of that shell repeats disconnect · replay endlessly.
+//! - **Short frame (`TooShort`) → disconnect.** seq cannot be read so a placeholder cannot be made. The re-attached views
+//!   come back through a full replay. All of the daemon's binary output frames pass through an encoder that writes the header first, so this shape arises only from a
+//!   producer that bypassed that encoder, and today there is no such producer. If deterministic, reconnects repeat — we chose the visible side over a silent
+//!   stall (no count · deadline cap is set, since it would be a magic number that decides the answer — ADR-0038).
 //!
-//! 그 밖의 거름(다른 화신 표식 · 보는 창 없음)은 그 뷰가 받을 seq 줄기에 구멍을 내지 않는다 — 화신이 바뀐
-//! 뷰는 재부착이 전량 replay 를 청하고, 안 보는 창은 붙을 때 replay 를 청한다.
+//! Other filters (a different incarnation marker · no viewing window) do not make a hole in the seq stream that view will receive — a view whose incarnation changed
+//! asks for a full replay on re-attach, and a window that is not viewing asks for replay when it attaches.
 //!
 //! ## ★Why it lives outside the connection driver★
 //! This verdict used to live inside the old connection task's `select!`, which needed a real socket. Here it runs
@@ -34,29 +34,29 @@ use super::protocol_state::{self, EpochDecision, SubState};
 use super::replay_flight::ReplayFlightSet;
 use crate::output_router::{OutputRouter, WindowLabel};
 
-/// [`relay_binary_frame`] 의 결말 — 연결 루프가 무엇을 할지.
+/// The outcome of [`relay_binary_frame`] — what the connection loop does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameRelay {
-    /// 처리했다(통과 · 자리채움 · 거름 중 하나). 루프는 계속 돈다.
+    /// Handled (one of pass · placeholder · filtered). The loop keeps running.
     Continue,
-    /// 연결을 끊는다 — 루프가 `Disconnected` 로 빠져 백오프 재연결 대상이 된다.
+    /// Disconnect — the loop exits with `Disconnected` and becomes a target of backoff reconnection.
     Disconnect,
 }
 
-/// 이 연결에서 이미 warn 한 (에이전트, 모르는 tag) 짝 — 원인이 결정적이면 같은 tag 가 프레임마다 오므로
-/// 첫 번째만 warn 하고 나머지는 debug 로 내린다. 연결 루프가 연결마다 새로 만들어 `&mut` 로 빌려준다(재연결
-/// 뒤엔 다시 한 번 warn 한다).
+/// The (agent, unknown tag) pairs already warned on this connection — if the cause is deterministic the same tag comes in every frame, so
+/// only the first is warned and the rest are lowered to debug. The connection loop makes it afresh per connection and lends it as `&mut` (after a reconnect
+/// it warns once again).
 #[derive(Debug, Default)]
 pub struct UnknownTagLog {
     warned: HashSet<(AgentId, u8)>,
 }
 
 impl UnknownTagLog {
-    // 상한 — 넘으면 비우고 다시 센다. 짝은 연결 하나 동안 (에이전트 수 × 256) 을 못 넘지만 에이전트 수에
-    //   바닥이 없어 둔다. 비우면 경고가 다시 날 뿐 숨지 않는다.
+    // Cap — when exceeded, clear and count again. The pairs cannot exceed (number of agents × 256) during one connection, but the number of agents
+    //   is unbounded, so the cap is kept. Clearing only makes the warning appear again; it does not hide anything.
     const CAP: usize = 4096;
 
-    /// 이 짝을 처음 보면 `true`(= warn 할 차례).
+    /// `true` if this pair is seen for the first time (= time to warn).
     pub fn first_sighting(&mut self, agent: AgentId, tag: u8) -> bool {
         if self.warned.len() >= Self::CAP && !self.warned.contains(&(agent, tag)) {
             self.warned.clear();
@@ -65,7 +65,7 @@ impl UnknownTagLog {
     }
 }
 
-/// 데몬이 보낸 binary frame 한 장을 판정하고, 통과분을 `deliver` 로 넘긴다.
+/// Decide on one binary frame sent by the daemon and hand the passing ones to `deliver`.
 // ADR-0231
 pub fn relay_binary_frame(
     bytes: &[u8],
@@ -80,7 +80,7 @@ pub fn relay_binary_frame(
     let (agent_id, epoch, out): (AgentId, u32, &[u8]) = match decode_frame(bytes) {
         Ok(frame) => (frame.agent_id, frame.epoch, bytes),
         Err(CodecError::UnknownTag(tag)) => {
-            // `decode_frame` 은 헤더 길이를 본 뒤에야 tag 를 거절하므로 헤더는 늘 읽힌다.
+            // `decode_frame` rejects the tag only after checking the header length, so the header can always be read.
             let Ok(header) = peek_frame_header(bytes) else {
                 return FrameRelay::Disconnect;
             };
@@ -110,26 +110,26 @@ pub fn relay_binary_frame(
             return FrameRelay::Disconnect;
         }
     };
-    // ★진행 신호(deadline 리셋)★: 그 agent 의 frame 이 오면 replay 가 살아 진행 중 → single-flight deadline
-    //   리셋(healthy-slow replay 무오탐). epoch 필터 전에 리셋한다 — stale frame 이어도 데몬이 살아있다는 신호.
+    // ★Progress signal (deadline reset)★: when that agent's frame arrives the replay is alive and in progress → reset the single-flight deadline
+    //   (no false positives on a healthy-slow replay). Reset before the epoch filter — even a stale frame is a signal that the daemon is alive.
     flight.note_progress(agent_id, now);
-    // ★epoch 필터(ADR-0046 T5)★: SubState.epoch(SubscribeAck 로 갱신)와 불일치(=옛 세션 잔여)면 통과 전
-    //   drop. epoch None(첫 Ack 전)이면 통과(초반 출력 유실 방지 — decide_epoch 내부 규약). 자리채움도 같은
-    //   거름을 지난다.
+    // ★epoch filter (ADR-0046 T5)★: if it mismatches SubState.epoch (updated by SubscribeAck) (= a leftover of an old session), drop
+    //   before passing. If epoch is None (before the first Ack), pass (prevents losing early output — an internal convention of decide_epoch). A placeholder passes
+    //   the same filter.
     let st = subs.entry(agent_id).or_default();
     if protocol_state::decide_epoch(st, epoch) == EpochDecision::DropEpochMismatch {
         return FrameRelay::Continue;
     }
-    // ★targets∩registered 로 통과★: router.targets 는 핫패스 락 0(ArcSwap). 어느 창도 안 보면(labels 비면)
-    //   배달구가 early return, 미등록 label 은 그 안에서 skip. 정상 프레임은 원본 bytes 그대로 나간다.
+    // ★Pass by targets∩registered★: router.targets is a hot path with 0 locks (ArcSwap). If no window is viewing (labels empty), the
+    //   delivery port returns early, and an unregistered label is skipped inside it. A normal frame goes out with its original bytes unchanged.
     deliver(&router.targets(agent_id), out);
     FrameRelay::Continue
 }
 
 #[cfg(test)]
 mod tests {
-    //! TRD §7-1 「셸 중계」 행 — 짧은 프레임 = 끊는다 · 모르는 tag = 같은 seq 의 자리채움 통과 · 정상 통과 ·
-    //! 다른 화신 표식 거름(자리채움 포함).
+    //! The TRD §7-1 「셸 중계」 row — short frame = disconnect · unknown tag = a same-seq placeholder passes · normal pass ·
+    //! filtering of a different incarnation marker (placeholder included).
     use std::time::Duration;
 
     use engram_dashboard_protocol::{
@@ -140,7 +140,7 @@ mod tests {
     use super::*;
     use crate::layout::{tree, ViewManager, MAIN_WINDOW_LABEL};
 
-    // 실 라우팅 표 — 목적지를 테스트가 지어내면 지어낸 값을 검증하는 꼴이 된다.
+    // A real routing table — if the test invents the destination, it ends up verifying the invented value.
     fn router_showing(agent: AgentId) -> OutputRouter {
         let mut mgr = ViewManager::new();
         let view = mgr
@@ -228,7 +228,7 @@ mod tests {
         assert!(h.delivered.is_empty());
     }
 
-    // ★핵심★ — 모르는 tag 의 프레임 자리에 같은 seq 의 자리채움이 서서 뷰의 seq 줄기에 구멍이 없다.
+    // ★Key★ — a same-seq placeholder stands in the place of the unknown-tag frame, so there is no hole in the view's seq stream.
     #[test]
     fn an_unknown_tag_frame_becomes_a_placeholder_at_the_same_seq() {
         let agent = AgentId::new_v4();
@@ -262,7 +262,7 @@ mod tests {
     fn a_stale_epoch_is_dropped_without_disconnecting_placeholder_included() {
         let agent = AgentId::new_v4();
         let mut h = Harness::new(agent);
-        // 현 화신 표식 = 3(SubscribeAck 가 각인한 것).
+        // Current incarnation marker = 3 (what SubscribeAck stamped).
         protocol_state::apply_subscribe_ack(h.subs.entry(agent).or_default(), 3);
 
         assert_eq!(
@@ -283,8 +283,8 @@ mod tests {
         assert_eq!(h.delivered_seqs(), vec![7], "현 화신의 자리채움은 통과");
     }
 
-    // 모르는 tag 도 진행 신호다 — 데몬이 살아 그 에이전트의 replay 를 흘리고 있다는 증거라 무진행 만료를
-    //   미룬다(자리채움은 평소 경로를 그대로 지난다).
+    // An unknown tag is also a progress signal — it is evidence that the daemon is alive and flowing that agent's replay, so it postpones the no-progress expiry
+    //   (the placeholder passes through the usual path as is).
     #[test]
     fn an_unknown_tag_frame_still_counts_as_replay_progress() {
         let agent = AgentId::new_v4();
@@ -311,7 +311,7 @@ mod tests {
         );
     }
 
-    // 같은 (에이전트, tag) 는 한 연결에 한 번만 warn — 결정적 원인이면 프레임마다 오므로.
+    // The same (agent, tag) is warned only once per connection — since with a deterministic cause it comes with every frame.
     #[test]
     fn an_unknown_tag_warns_once_per_agent_and_tag() {
         let (a, b) = (AgentId::new_v4(), AgentId::new_v4());

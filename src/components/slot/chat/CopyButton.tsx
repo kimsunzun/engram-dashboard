@@ -1,4 +1,4 @@
-// 의존 최소화: ui/button·cva·radix 없이 순수 <button> + lucide 아이콘만 쓴다(우리 자체 구현).
+// Minimize dependencies: only a plain <button> + lucide icons, with no ui/button·cva·radix (our own implementation).
 import { Check, Copy } from 'lucide-react'
 import { useCallback, useState } from 'react'
 
@@ -7,7 +7,7 @@ import { t } from '../../../i18n'
 const COPIED_MS = 1500
 
 interface CopyButtonProps {
-  /** 지연 계산 — 코드블록 textContent 는 렌더 후에야 안다. */
+  /** Lazy computation — a code block's textContent is known only after render. */
   getText: () => string | null | undefined
   label?: string
 }

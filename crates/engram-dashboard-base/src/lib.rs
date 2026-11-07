@@ -1,74 +1,74 @@
-//! # engram-dashboard-base — 바닥 기반층, 잎 crate (도메인 지식 0)
+//! # engram-dashboard-base — the bottom foundation layer, a leaf crate (zero domain knowledge)
 //!
-//! 의존 그래프의 바닥 기반층이다 — 범용 도우미와 기반 인프라를 **목적 이름의 모듈**로 갈라 담는다
-//! (ADR-0269 결정 1 · 9). 지금 입주자는 아홉이다: [`file`](mod@file)(데이터 파일의 읽기 판정(버전 · 손상) · 「덮어도
-//! 되나」 쓰기 판정 · 상한 읽기 · 원자 쓰기 · 원자 복사 · 손상 사본 · 남은 임시 파일 쓸기 — OS 에 따라 갈리는 몫은
-//! 부르는 쪽이 넘긴다) · [`logging`](tracing 전역
-//! 초기화 + 프로세스 실행 1회분 파일 로그) · [`text`](바이트 → 소문자 hex) · [`time`](벽시계 epoch 밀리초 ·
-//! 「지금 읽기」 시계 seam) · [`path`](사람이 친 경로의 철자 고르기) · [`sync`](락 오염 되찾기 — 경고 없이,
-//! 오염 표시 유지) · `testing`(시험 대기 — 조건이 설 때까지 폴링) · [`writable`](폴더에 실제로 쓸 수 있나 —
-//! 쓰기 프로브 · 검사 도중 사라진 폴더의 재시도 한 번) · [`panic`](mod@panic)(패닉 가둠 표시 — 가둠 · 표시 끔 ·
-//! 표시 밖이면 끝내는 훅 몸통). 각 모듈(헤더와 공개 함수 문서)이 그 책임의 정본이다.
+//! It is the bottom foundation layer of the dependency graph — general helpers and foundation infrastructure go into **purpose-named modules**
+//! (ADR-0269 decisions 1 · 9). There are nine tenants now: [`file`](mod@file) (read decisions for data files (version · corruption) · 「덮어도
+//! 되나」 (may we overwrite?) write decisions · capped reads · atomic writes · atomic copies · corrupt copies · sweeping leftover temp files — the OS-dependent part is
+//! passed in by the caller) · [`logging`](tracing global
+//! init + a file log for one process run) · [`text`](bytes → lowercase hex) · [`time`](wall-clock epoch milliseconds ·
+//! the 「지금 읽기」 (read now) clock seam) · [`path`](normalizing the spelling of hand-typed paths) · [`sync`](reclaiming lock poisoning — without a warning,
+//! keeping the poison mark) · `testing`(test waiting — polls until a condition holds) · [`writable`](can a folder really be written to —
+//! write probe · one retry for a folder that vanished mid-check) · [`panic`](mod@panic)(panic containment mark — containment · mark off ·
+//! hook body that ends the process when outside the mark). Each module (header and public function docs) is the source of truth for its responsibility.
 //!
-//! ★`testing` 과 `time` 의 가짜 시계는 cargo 기능 `test-support` 뒤다★(ADR-0275 결정 5) — 이 crate
-//! 자기 시험(`cfg(test)`)과 그 기능을 dev 의존으로 켠 소비자 시험만 본다. 그 기능이 데몬 · 셸 · CLI 의 운영
-//! 의존 그래프에 없다는 것은 CI 게이트가 잰다(`.github/workflows/ci.yml` — 0줄 기대와 짝인 1줄 이상 기대).
+//! ★The fake clocks of `testing` and `time` are behind the cargo feature `test-support`★ (ADR-0275 decision 5) — only this crate's
+//! own tests (`cfg(test)`) and tests of consumers that turn that feature on as a dev dependency see them. That feature is absent from the production
+//! dependency graph of the daemon · shell · CLI, which the CI gate measures (`.github/workflows/ci.yml` — a 0-line expectation paired with an at-least-1-line expectation).
 //!
-//! ## 입주 조건 셋 (하나라도 못 채우면 여기가 아니다)
+//! ## Three tenancy conditions (if even one is unmet, it does not belong here)
 //!
-//! 1. **지금 여러 곳에서 쓰이거나 복사돼 있을 것**(ADR-0269 결정 7 — ADR-0175 의 「소비자 crate 둘
-//!    이상」을 대신한다). 기준을 미리 잡지 않고 지금의 쓰임으로 판단한다 — 판단은 메인 세션이 하고
-//!    사용자에게 묻지 않고 보고한다. 사본이 하나뿐인 것은 그 소비자 안의 모듈이다.
-//! 2. **도메인 지식 0.** 에이전트 런타임·wire 계약·데몬 살림을 타입으로도 모른다. 그래서 이 crate 는
-//!    워크스페이스 crate 를 하나도 의존하지 않는다(아래 게이트가 그 벽이다).
-//! 3. **이 crate 안에서 서로를 참조하지 않을 것.** 입주자끼리 엮이면 그건 한 덩어리이고, 한 덩어리를
-//!    바닥에 두면 그 덩어리 전체가 모든 소비자에게 딸려 간다 — 이 crate 를 만든 이유가 사라진다.
+//! 1. **Used or copied in several places right now** (ADR-0269 decision 7 — replaces ADR-0175's 「소비자 crate 둘
+//!    이상」 (at least two consumer crates)). The standard is not set in advance but judged by present use — the main session judges and
+//!    reports without asking the user. Something with only one copy is a module inside that consumer.
+//! 2. **Zero domain knowledge.** It does not know the agent runtime · wire contract · daemon lifecycle management even as types. So this crate
+//!    depends on no workspace crate at all (the gate below is that wall).
+//! 3. **No references to each other inside this crate.** If tenants are entangled, they are one lump, and putting one lump
+//!    at the bottom drags that whole lump along to every consumer — the reason for making this crate disappears.
 //!
-//! ★OS 에 따라 달라지는 **운영** 코드는 셋을 다 채워도 여기가 아니다★ — OS 층 crate
-//! `engram-dashboard-platform` 몫이다(ADR-0266 결정 2 · 4). 그래서 이 crate 는 `windows` 를 의존하지
-//! 않는다. 시험의 OS 분기(`#[cfg(windows)]` 시험)는 이 규칙 밖이다(ADR-0266 「근거」).
+//! ★OS-dependent **production** code does not belong here even if it meets all three★ — it is for the OS-layer crate
+//! `engram-dashboard-platform` (ADR-0266 decisions 2 · 4). So this crate does not depend on `windows`.
+//! Test OS branches (`#[cfg(windows)]` tests) are outside this rule (ADR-0266 「근거」 (rationale)).
 //!
-//! ★**목적별 작은 crate 로 쪼개지 않고 이름도 base 그대로 둔다**★(ADR-0269 결정 1) — 안에서 목적 이름의
-//! 모듈로 가른다. 바닥에 있고 서로 엮인 데가 적어 나중에 쪼개도 품이 적다는 판단이고, 그 「엮인 데가
-//! 적다」를 지금 받치는 것이 아래 게이트 ③ 이다. ADR-0175 의 「셋째 입주자를 받기 전에 「거부한 대안」을
-//! 다시 연다」 조항은 이 결정이 대신한다 — 입주자가 늘 때마다 그 재론을 다시 꺼내지 않는다.
+//! ★**It is not split into small purpose-specific crates, and the name stays base**★ (ADR-0269 decision 1) — it is divided into
+//! purpose-named modules inside. The judgment is that, sitting at the bottom with little entanglement, splitting later costs little, and what now backs that 「엮인 데가
+//! 적다」 (little entanglement) is gate ③ below. ADR-0175's clause 「셋째 입주자를 받기 전에 「거부한 대안」을
+//! 다시 연다」 (reopen the rejected alternative before accepting a third tenant) is replaced by this decision — the debate is not raised again each time tenants grow.
 //!
-//! ## 격리 게이트(불변) — 셋이고, 각각 다른 축이다
+//! ## Isolation gates (invariant) — three, each on a different axis
 //!
-//! **① 워크스페이스 의존 상한**(입주 조건 ②의 벽 — 컴파일러는 잎 성질을 강제하지 않는다):
+//! **① Workspace dependency ceiling** (the wall of tenancy condition ② — the compiler does not enforce leaf-ness):
 //! `cargo tree -p engram-dashboard-base --depth 1 --prefix none -e normal,dev,build --target all`
-//! `--all-features | rg "^engram-dashboard" | sort -u` → **정확히 1줄 = 자기 자신**.
-//! ★매니페스트 텍스트를 grep 으로 바꾸지 말 것★ — rename · `[dependencies.<이름>]` 테이블 형 ·
-//! `[build-dependencies]` · 비활성 target · `optional` 이 전부 정상 Cargo 문법으로 빠져나간다.
-//! 플래그도 줄이지 않는다(그만큼 형태가 샌다 — messaging·command 상한 게이트와 같은 근거).
+//! `--all-features | rg "^engram-dashboard" | sort -u` → **exactly 1 line = itself**.
+//! ★Do not replace this with a grep over manifest text★ — rename · the `[dependencies.<이름>]` table form ·
+//! `[build-dependencies]` · inactive targets · `optional` all slip through in normal Cargo syntax.
+//! Do not trim the flags either (the shape leaks that much — same reasoning as the messaging · command ceiling gates).
 //!
-//! **② Tauri import 0**(ADR-0003):
-//! `rg "^\s*use tauri" crates/engram-dashboard-base/src/` → **0줄**.
-//! ★①이 이 축을 덮는다고 읽지 말 것★ — ①은 `rg "^engram-dashboard"` 로 **워크스페이스 멤버만** 세므로
-//! 서드파티인 `tauri` 는 그대로 통과한다. 두 게이트는 겹치지 않는다.
-//! ★"잎 crate 라 안전하다" 도 아니다★ — ADR-0003 의 불변식이 걸리는 축은 crate 이름도 잎 성질도 아니라
-//! **어느 바이너리에 링크되나** 이고, 이 crate 는 headless 데몬에 링크된다. 창도 webview 도 없는 그
-//! 바이너리가 전송 방식에 묶인다는 뜻이다. `logging` 의 초기화 함수가 "이벤트 하나만
-//! 쏘면 편한" 대표 자리다. 패턴이 import 라인 앵커인 것은 이 헤더가 자기 자신에 걸리지 않게 하기 위해서다.
+//! **② Tauri import 0** (ADR-0003):
+//! `rg "^\s*use tauri" crates/engram-dashboard-base/src/` → **0 lines**.
+//! ★Do not read ① as covering this axis★ — ① counts **only workspace members** with `rg "^engram-dashboard"`, so the
+//! third-party `tauri` passes straight through. The two gates do not overlap.
+//! ★Nor is "it is a leaf crate, so it is safe" true★ — the axis ADR-0003's invariant hangs on is neither the crate name nor leaf-ness but
+//! **which binary it is linked into**, and this crate is linked into the headless daemon. It means that binary, with no window or webview, is
+//! bound to a transport method. The `logging` init function is the typical spot where "firing just one event
+//! is convenient". The pattern is anchored on the import line so this header does not trip itself.
 //!
-//! **③ 입주자끼리 서로 참조하지 않는다**(입주 조건 ③의 벽):
-//! `rg "(crate|super)\s*::\s*(logging|text|time|path|sync|testing|writable|file|panic)" crates/engram-dashboard-base/src/` → **0줄**.
-//! ★`crate::` 단독으로 넓히지 말 것★ — 그건 평범한 Rust 라 게이트가 아니라 잡음이 된다. 대가로 모듈
-//! **이름**을 손으로 박으므로 **입주자가 늘면 여기 이름을 더해야 보인다**(messaging 정규식과 같은 종류의
-//! 구멍이고, ①이 그 구멍을 덮지 않는다 — ①은 crate 밖만 본다).
-//! ★알려진 한계★: `logging` 이 나중에 하위 모듈을 가지면, 그 하위 모듈이 crate 루트를 거쳐 **자기 부모**를
-//! 부르는 경로가 오탐된다(게이트는 그것과 형제 참조를 구별하지 못한다). 그때는 상대 경로로 부르거나 이
-//! 게이트를 다시 판정한다. 정규식이 이름 뒤 경계를 보지 않아, 흔한 낱말인 입주자 이름으로 **시작하는**
-//! 다른 이름(형제 함수 · 하위 모듈)도 같은 접두 뒤에 오면 걸린다 — 시끄러운 오탐이라 놓칠 일은 없다.
-//! 여러 항목을 중괄호로 묶은 import(`use crate::{a::x, b::y};` 꼴)는 **놓친다** — 접두와 입주자 이름 사이에
-//! `{` 가 끼기 때문이다. rustfmt 가 한 항목짜리 묶음은 풀어 쓰므로 빠져나가는 것은 두 항목 이상 묶음뿐이다.
-//! ★주석도 잡는다★ — 이 crate 의 주석에 그 경로 철자를 쓰면 그 줄이 걸린다.
-//! ★이 절에 그 경로를 예시로 적지 말 것★ — 적는 순간 이 헤더가 게이트에 자기 자신을 물린다. 지금 위
-//! 명령줄이 안 걸리는 것은 정규식의 괄호 덕이다(net 게이트 4·2b 와 같은 방어).
+//! **③ Tenants do not reference each other** (the wall of tenancy condition ③):
+//! `rg "(crate|super)\s*::\s*(logging|text|time|path|sync|testing|writable|file|panic)" crates/engram-dashboard-base/src/` → **0 lines**.
+//! ★Do not widen it to bare `crate::`★ — that is plain Rust, so it becomes noise, not a gate. The price is that module
+//! **names** are hand-written, so **when tenants grow, names must be added here to be seen** (the same kind of
+//! hole as the messaging regex, and ① does not cover that hole — ① looks only outside the crate).
+//! ★Known limit★: if `logging` later gets submodules, the path by which such a submodule calls **its own parent** via the crate root
+//! is falsely flagged (the gate cannot tell it from a sibling reference). Then call by a relative path or re-decide this
+//! gate. The regex does not check the boundary after the name, so another name (a sibling function · submodule) that **starts with** a tenant name that is a common word
+//! is also caught if it comes after the same prefix — a noisy false positive, so there is no way to miss it.
+//! An import that groups several items in braces (the `use crate::{a::x, b::y};` shape) is **missed** — because
+//! a `{` sits between the prefix and the tenant name. rustfmt unfolds one-item groups, so only groups of two or more items slip through.
+//! ★It catches comments too★ — if a comment in this crate spells that path, that line is caught.
+//! ★Do not write that path as an example in this section★ — the moment you do, this header makes the gate bite itself. The command line above
+//! is not caught only thanks to the parentheses in the regex (the same defense as net gates 4 · 2b).
 //!
-//! ★이 crate 는 생성물을 만들지 않는다★ — `serde_json` 은 있지만(`file` 의 읽기 판정이 JSON 문서를 본다 —
-//! ADR-0291 결정 3) serde derive 도 ts-rs 도 `declare_commands!` 도 없으므로 `bindings/` 디렉터리가 없다. CI 의
-//! ts-rs sync 게이트 경로 목록에 넣지 말 것.
+//! ★This crate produces no generated artifacts★ — `serde_json` is here (the read decision of `file` looks at JSON documents —
+//! ADR-0291 decision 3), but there is no serde derive, no ts-rs, no `declare_commands!`, so there is no `bindings/` directory. Do not add it to the CI
+//! ts-rs sync gate path list.
 
 // ADR-0175
 // ADR-0269

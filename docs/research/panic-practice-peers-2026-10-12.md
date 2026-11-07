@@ -1,79 +1,79 @@
-# Rust 장기 실행 프로그램의 패닉 처리 관행 — 우리 안이 과한가 (2026-10-12)
+# Panic handling practice in long-running Rust programs — is our design excessive? (2026-10-12)
 
-- **상태:** medium · 적대 리뷰 1회 반영(codex BLOCK → 지적 7 반영) · 결정 대기 — 패닉 TRD 11판(`docs/process/S21-panic-policy/trd.md`) 결정 (가)(나)의 근거 자료.
-- **계기:** 사용자 「우리가 너무 민감하지 않나. 다른 곳은 보통 어떻게 하나」(2026-10-12) — TRD 11판의 (가) 「공유 락을 쥔 동안 가드 표시를 끈다」 안을 두고.
-- **방법:** 수집 갈래 셋(서버·인프라 / 데스크톱·에디터·터미널 / Rust 공식 문서·커뮤니티) 병렬 → 메인 grounding(핵심 넷을 원본 소스로 재확인: rust-analyzer · materialize · tikv · zed) → codex 적대 리뷰.
-- **확신도 범례:** 확실 = 소스 원문 확인 · 가능성 높음 = 단일 출처 또는 부분 확인 · 불확실 = 확인 못 함. 줄 번호는 2026-10-12 기본 브랜치 기준이고 움직인다.
-- 이전 조사 = `origin/v0.3.3/feat/panic-policy` 브랜치의 `docs/research/panic-policy-peers-2026-10-08.md`(선택지 1~4 비교). 이 문서는 그 위에 「보통은 어디까지 가두나 · 락 오염을 어떻게 다루나」를 더한다.
+- **Status:** medium · reflects 1 adversarial review (codex BLOCK → 7 findings addressed) · awaiting decision — basis material for decisions (A) and (B) of panic TRD edition 11 (`docs/process/S21-panic-policy/trd.md`).
+- **Trigger:** user 「우리가 너무 민감하지 않나. 다른 곳은 보통 어떻게 하나」 (2026-10-12) (are we too sensitive? what do other projects usually do?) — about option (A) of TRD edition 11, 「공유 락을 쥔 동안 가드 표시를 끈다」 (turn off the guard marker while holding a shared lock).
+- **Method:** three collection tracks (servers/infrastructure / desktop, editors, terminals / official Rust docs and community) in parallel → main-session grounding (re-checked the four key ones against original source: rust-analyzer · materialize · tikv · zed) → codex adversarial review.
+- **Confidence legend:** certain = source text verified · likely = single source or partially verified · uncertain = could not verify. Line numbers are against the default branch on 2026-10-12 and drift.
+- Earlier survey = `docs/research/panic-policy-peers-2026-10-08.md` on the `origin/v0.3.3/feat/panic-policy` branch (comparison of options 1~4). This document adds 「보통은 어디까지 가두나 · 락 오염을 어떻게 다루나」 (how far do projects usually contain panics, and how do they handle lock poisoning) on top of it.
 
-## 결론
+## Conclusions
 
-(적대 리뷰 반영판 — 리뷰가 BLOCK 으로 짚은 과장 · 누락을 고쳤다. 고친 곳 = 아래 「적대 리뷰」.)
+(Version after the adversarial review — the exaggerations and omissions the review flagged as BLOCK are fixed. Where they were fixed = 「적대 리뷰」 (adversarial review) below.)
 
-1. **「가두지 못한 패닉 = 끝」은 흔한 모양이다 — 우리 「즉시 종료」는 과민하지 않다(가능성 높음).** 표본 중 tikv(`_exit(1)`/`abort()`) · materialize(`abort()`) · zed(미니덤프 뒤 `abort()`) · zellij(세션 정리 뒤 종료)는 훅이나 서버가 끝낸다. 배포판을 아예 abort 로 두는 곳도 있다 — deno · OpenVMM · Turso, 그리고 Oxide 의 프로그램 대부분(작성자 진술). 훅이 없는 unwind 프로그램(vector · linkerd2-proxy 등)은 그 스레드만 죽고 프로세스는 남는다 — 「끝낸다」가 보편은 아니다.
-2. **가두는 범위는 대개 좁고, 우리 안은 넓은 편이다(가능성 높음).** 가두는 자리는 주로 상태를 안 바꾸거나 격리된 단위다 — rust-analyzer 읽기 전용 요청 · nushell 자동완성 소스 · materialize 의 이름 붙은 자리 · herdr FFI 콜백 하나. 반례도 있다 — Qdrant 는 공유 준비 상태를 바꾸는 상태 점검 future 를 통째로 가두고 다시 돌린다. tokio 태스크 패닉 전달(기본) · tower-http `CatchPanicLayer`(기능 `catch-panic` + 명시 레이어 — 옵트인)는 공유 상태 문제를 다루지 않는다. 우리 안은 상태를 바꾸는 요청 · 에이전트까지 가두므로 표본 대부분보다 넓다.
-3. **뭉치 1·2(가드 표시 + 표시 밖이면 훅이 끝냄)는 materialize 에 선례가 있다(확실).** 스레드별 카운터(`CATCHING_UNWIND`)로 「자기 `catch_unwind` 안」을 표시하고 훅이 그 밖이면 abort 한다. ★단 async 쪽은 스레드별이 아니라 **tokio 태스크별 표시**(`CATCHING_UNWIND_ASYNC` · `src/ore/src/future.rs`)를 따로 둔다★ — 멀티스레드 런타임에서 future 는 `.await` 마다 스레드를 옮길 수 있어 스레드 표시만으로는 틀린다. 우리 요청 쪽 가드(WS 명령 · 제어 HTTP · MCP)는 async 라 TRD 가 이것을 다뤄야 한다.
-4. **원칙(「락을 쥔 중의 패닉 = 공유 불변식이 깨졌을 수 있다 → 계속 쓰지 말라」)은 선례가 있고, 메커니즘(락을 쥔 동안 가드 표시를 꺼서 즉시 종료)은 못 찾았다(가능성 높음).** 원칙 = std `Mutex` 문서(「likely tainted」 · `unwrap()` 으로 전파) · sunshowers 「on poisoning」(임계 구역 안 패닉 = 공유 불변식 손상 · abort 를 대응으로 논한다). 같은 글은 **읽기 전용 임계 구역 · 불변식을 깨지 않는 단순 쓰기는 다르다**고 가른다 — 「공유 락 전부」를 같은 규칙으로 묶는 것은 그보다 거칠다. rust-analyzer 는 같은 원칙을 「상태를 바꾸는 처리는 아예 안 가둔다」로 푼다.
-5. **락 오염에 따로 정책을 세운 곳은 표본에 없다(가능성 높음).** 두 갈래 — ① `parking_lot`(오염 없음 — 패닉 때 말없이 풀린다 · zed · wezterm · helix · tikv) ② std 락 `.lock().unwrap()`(다음에 잡는 스레드가 패닉 — zellij 약 227곳 · herdr 약 179곳). ★둘 다 프로세스 종료를 보장하지 않는다★ — ①은 깨졌을 수 있는 데이터로 계속 가고, ②는 그 스레드를 죽일 뿐이다. 종료는 1의 훅이 따로 낸다.
+1. **「가두지 못한 패닉 = 끝」 (a panic that cannot be contained = the end) is a common shape — our 「즉시 종료」 (immediate exit) is not oversensitive (likely).** In the sample, tikv (`_exit(1)`/`abort()`) · materialize (`abort()`) · zed (`abort()` after a minidump) · zellij (exits after cleaning up the session) have a hook or a server that ends the process. Some projects set the release profile to abort outright — deno · OpenVMM · Turso, and most of Oxide's programs (author's statement). Unwind programs without a hook (vector · linkerd2-proxy, etc.) lose only that thread and the process stays alive — 「끝낸다」 (it ends the process) is not universal.
+2. **The containment scope is usually narrow, and our design is on the wide side (likely).** Containment sits mostly at places that do not change state or at isolated units — rust-analyzer read-only requests · nushell completion sources · materialize's named places · a single herdr FFI callback. There are counterexamples — Qdrant contains a whole health-check future that changes shared readiness state, and runs it again. tokio's task panic propagation (default) and tower-http `CatchPanicLayer` (feature `catch-panic` + an explicit layer — opt-in) do not address the shared-state problem. Our design also contains requests and agents that change state, so it is wider than most of the sample.
+3. **Bundles 1 and 2 (guard marker + the hook ends the process when outside the marker) have a precedent in materialize (certain).** A per-thread counter (`CATCHING_UNWIND`) marks 「자기 `catch_unwind` 안」 (inside its own catch_unwind), and the hook aborts when outside it. ★But for async it keeps a separate **per-tokio-task marker**, not a per-thread one★ (`CATCHING_UNWIND_ASYNC` · `src/ore/src/future.rs`) — in a multithreaded runtime a future can move threads at every `.await`, so a thread marker alone is wrong. Our request-side guards (WS command · control HTTP · MCP) are async, so the TRD must handle this.
+4. **The principle (「락을 쥔 중의 패닉 = 공유 불변식이 깨졌을 수 있다 → 계속 쓰지 말라」, a panic while holding a lock = the shared invariant may be broken → do not keep using it) has precedent, but I found no precedent for the mechanism (turn off the guard marker while holding a lock, so the process exits immediately) (likely).** Principle = std `Mutex` docs (「likely tainted」 · propagate with `unwrap()`) · sunshowers 「on poisoning」 (a panic inside a critical section = damaged shared invariant · it discusses abort as the response). The same post separates out that **read-only critical sections and simple writes that do not break the invariant are different** — grouping 「공유 락 전부」 (all shared locks) under one rule is coarser than that. rust-analyzer resolves the same principle as 「상태를 바꾸는 처리는 아예 안 가둔다」 (do not contain state-changing handling at all).
+5. **No project in the sample set a separate policy for lock poisoning (likely).** Two branches — ① `parking_lot` (no poisoning — the lock is released silently on panic · zed · wezterm · helix · tikv) ② std lock `.lock().unwrap()` (the next thread to take the lock panics — zellij about 227 places · herdr about 179 places). ★Neither guarantees that the process exits★ — ① goes on with possibly broken data, and ② only kills that thread. Exit comes separately, from the hook in 1.
 
-**우리에게 주는 뜻(메인 해석):** 「즉시 종료」 자체는 과민하지 않다. 복잡도의 원인은 **표본 대부분보다 넓게 가두기로 한 것**(ADR-0288 「패닉에 의한 종료는 최대한 하지 않는다」)이고, (가)의 락 규칙은 그 넓은 가두기의 값이다. 고르는 축 = ① 넓게 가두고 락 규칙을 둔다(지금 안 — 원칙은 선례 있음 · 메커니즘은 우리 설계) ② rust-analyzer 처럼 공유 상태를 바꾸는 요청은 안 가둬 락 규칙을 없앤다. 어느 쪽이든 async 가드는 태스크별 표시가 필요하다(결론 3).
+**What this means for us (main-session interpretation):** 「즉시 종료」 itself is not oversensitive. The cause of the complexity is **the decision to contain more widely than most of the sample** (ADR-0288 「패닉에 의한 종료는 최대한 하지 않는다」 (avoid exiting because of a panic as far as possible)), and the lock rule of (A) is the price of that wide containment. The axis to choose on: ① contain widely and add the lock rule (the current proposal — the principle has precedent · the mechanism is our own design) ② like rust-analyzer, do not contain requests that change shared state, so the lock rule goes away. Either way the async guard needs a per-task marker (conclusion 3).
 
-## 프로젝트별 (축: 배포판 panic · 가두는 범위 · 훅 · 락 오염)
+## By project (axes: release-profile panic · containment scope · hook · lock poisoning)
 
-### 서버 · 인프라
+### Servers · infrastructure
 
-| 프로젝트 | 배포판 | 가두는 범위 | 훅 | 락 오염 |
+| Project | Release profile | Containment scope | Hook | Lock poisoning |
 |---|---|---|---|---|
-| tikv | unwind 명시(`Cargo.toml:447`) 확실 | 몇 곳(범위 미확인) 불확실 | 「Exit the whole process when panic」 — 로그 → `abort()` 또는 `_exit(1)`(`components/tikv_util/src/lib.rs:525-607`) 확실 | `parking_lot` 의존 확실 · 주력인지는 가능성 높음 |
-| materialize | unwind(기본) 확실 | 자기 `catch_unwind` 를 부르는 이름 붙은 자리만 가능성 높음 | 백트레이스 · Sentry → 「Instructs the entire process to abort if any thread panics」 · 자기 래퍼 안이면 예외(`src/ore/src/panic.rs:42,115-140,261`) 확실 | 모름 |
-| deno | abort 확실 | — | 미확인 | 모름 |
-| databend | unwind 확실 | 모름 | 로그만으로 보임 가능성 높음 | 모름 |
-| sccache | unwind 확실 | 모름 | 진단용(위치 기록) 확실 | 모름 |
-| vector · linkerd2-proxy | unwind 확실 | 모름 | 운영 훅 없음 가능성 높음(→ 기본 동작: 그 스레드만 죽음) | 모름 |
-| tokio(라이브러리) | — | 기본 `UnhandledPanic::Ignore` — 태스크 패닉은 `JoinHandle` 로 가고 런타임은 계속(`tokio/src/runtime/builder.rs`) 확실 | — | — |
-| tower-http(라이브러리) | — | `CatchPanicLayer` = 패닉 → 500 응답 · 「using panics for error handling is _not_ recommended」 · 공유 상태 언급 없음 확실 | — | — |
+| tikv | unwind explicit (`Cargo.toml:447`) certain | a few places (scope not checked) uncertain | 「Exit the whole process when panic」 — log → `abort()` or `_exit(1)` (`components/tikv_util/src/lib.rs:525-607`) certain | depends on `parking_lot` certain · whether it is the main lock is likely |
+| materialize | unwind (default) certain | only named places that call its own `catch_unwind` likely | backtrace · Sentry → 「Instructs the entire process to abort if any thread panics」 · exception when inside its own wrapper (`src/ore/src/panic.rs:42,115-140,261`) certain | unknown |
+| deno | abort certain | — | not checked | unknown |
+| databend | unwind certain | unknown | appears to log only likely | unknown |
+| sccache | unwind certain | unknown | diagnostic (records the location) certain | unknown |
+| vector · linkerd2-proxy | unwind certain | unknown | no operational hook likely (→ default behavior: only that thread dies) | unknown |
+| tokio (library) | — | default `UnhandledPanic::Ignore` — a task panic goes to the `JoinHandle` and the runtime continues (`tokio/src/runtime/builder.rs`) certain | — | — |
+| tower-http (library) | — | `CatchPanicLayer` = panic → 500 response · 「using panics for error handling is _not_ recommended」 · no mention of shared state certain | — | — |
 
-### 데스크톱 · 에디터 · 터미널
+### Desktop · editors · terminals
 
-| 프로젝트 | 배포판 | 가두는 범위 | 훅 | 락 오염 |
+| Project | Release profile | Containment scope | Hook | Lock poisoning |
 |---|---|---|---|---|
-| rust-analyzer | unwind 확실 | 읽기 전용 요청만 — 「they don't modify the state, so it's OK to recover」 · 상태를 바꾸는 `on_sync_mut` 은 「isn't guarded by `catch_unwind`, so, please, don't make bugs :-)」(`crates/rust-analyzer/src/handlers/dispatch.rs:34-44`) 확실 | 모름 | 모름 |
-| zed | unwind 확실 | 사실상 없음 가능성 높음 | 크래시 처리 하위 프로세스로 미니덤프 → `abort()`(`crates/crashes/src/crashes.rs`) 확실 | `parking_lot` 확실 |
-| wezterm | unwind 확실 | 모름 | 치명 알림 토스트 → 기본 훅 확실 | `parking_lot` 확실 |
-| zellij | unwind 확실 | 없음 가능성 높음 | 메인 스레드면 보고 → `exit(1)` · 그 밖이면 서버가 모든 클라이언트를 내보내고 세션 종료(`zellij-utils/src/errors.rs:812-869`) 확실 | std 락 `.unwrap()` 약 227곳 → 연쇄 확실 |
-| nushell | unwind 확실 | 자동완성 소스만 패닉 → `ShellError` 확실 | 터미널 복구 → 보고 · 종료 안 함 확실 | 모름 |
-| alacritty | unwind 확실 | 없음 불확실 | Windows 오류 상자 확실 | 모름 |
-| herdr | unwind(기본) 확실 | FFI 콜백 하나 확실 | 클라이언트 = 터미널 복구 → 기본 훅 확실 | `into_inner` 한 곳 · 나머지 약 179곳 `unwrap`/`expect` 확실 |
-| helix | unwind 확실 | 모름 | 모름 | `parking_lot` 확실 |
+| rust-analyzer | unwind certain | read-only requests only — 「they don't modify the state, so it's OK to recover」 · the state-changing `on_sync_mut` is 「isn't guarded by `catch_unwind`, so, please, don't make bugs :-)」 (`crates/rust-analyzer/src/handlers/dispatch.rs:34-44`) certain | unknown | unknown |
+| zed | unwind certain | effectively none likely | minidump via a crash-handling child process → `abort()` (`crates/crashes/src/crashes.rs`) certain | `parking_lot` certain |
+| wezterm | unwind certain | unknown | fatal-notice toast → default hook certain | `parking_lot` certain |
+| zellij | unwind certain | none likely | on the main thread: report → `exit(1)` · elsewhere: the server removes all clients and ends the session (`zellij-utils/src/errors.rs:812-869`) certain | std lock `.unwrap()` about 227 places → cascade certain |
+| nushell | unwind certain | only completion sources: panic → `ShellError` certain | restore terminal → report · does not exit certain | unknown |
+| alacritty | unwind certain | none uncertain | Windows error box certain | unknown |
+| herdr | unwind (default) certain | one FFI callback certain | client = restore terminal → default hook certain | `into_inner` in one place · about 179 other places `unwrap`/`expect` certain |
+| helix | unwind certain | unknown | unknown | `parking_lot` certain |
 
-## Rust 공식 문서 · 커뮤니티
+## Official Rust docs · community
 
-- `catch_unwind` 문서: 「It is not recommended to use this function for a general try/catch mechanism」 — 예상되는 실패는 `Result`(https://doc.rust-lang.org/std/panic/fn.catch_unwind.html) 확실.
-- std `Mutex` 문서: 오염 = 「likely tainted (some invariant is not being upheld)」 · 「Most usage of a mutex will simply unwrap() these results, propagating panics among threads」 · 오염은 「only advisory」(`into_inner` 로 꺼낼 수 있다)(https://doc.rust-lang.org/std/sync/struct.Mutex.html) 확실.
-- 오염을 없앨지 논쟁 중 — `std::sync::nonpoison` 추적 이슈 #134645(unstable 구현 · 안정화 PR 없음) · Edition 2027 기본 락 논의 #149359(합의 없음 — 남기자 쪽 = 깨진 데이터로 계속 가는 것을 막는다 · 없애자 쪽 = abort 앱엔 값어치가 적고 운영에서 서비스를 영구 고장 낼 수 있다) 가능성 높음(요약 페이지로 읽음).
-- sunshowers 「on poisoning」: 오염 찬성 · `.lock().unwrap()` 권고 · 앱은 abort 도 괜찮다(https://sunshowers.io/posts/on-poisoning/) 가능성 높음.
-- `parking_lot` 월 약 8,540만 내려받기 · 직접 의존 8,610(lib.rs, 2026-10) — 오염이 없어서 고른 것인지 속도 때문인지는 구분 안 됨.
-- crash-only / microreboot(Candea & Fox): 작은 격리 단위를 다시 띄우는 것은 상태가 격리되거나 밖으로 빠져 있을 때만 성립한다(https://www.usenix.org/legacy/events/osdi04/tech/full_papers/candea/candea_html/) 확실(개념) — 「공유 락을 쥔 중의 패닉 = 격리 실패 → 전체로 올림」은 그 원칙의 메인 해석이다(출처 없음).
+- `catch_unwind` docs: 「It is not recommended to use this function for a general try/catch mechanism」 — expected failures go through `Result` (https://doc.rust-lang.org/std/panic/fn.catch_unwind.html) certain.
+- std `Mutex` docs: poisoning = 「likely tainted (some invariant is not being upheld)」 · 「Most usage of a mutex will simply unwrap() these results, propagating panics among threads」 · poisoning is 「only advisory」 (it can be taken out with `into_inner`) (https://doc.rust-lang.org/std/sync/struct.Mutex.html) certain.
+- Whether to remove poisoning is under debate — `std::sync::nonpoison` tracking issue #134645 (unstable implementation · no stabilization PR) · Edition 2027 default-lock discussion #149359 (no consensus — the keep side = it prevents continuing with broken data · the remove side = little value for abort apps, and in operations it can break a service permanently) likely (read from summary pages).
+- sunshowers 「on poisoning」: in favor of poisoning · recommends `.lock().unwrap()` · abort is fine for apps (https://sunshowers.io/posts/on-poisoning/) likely.
+- `parking_lot` about 85.4 million downloads per month · 8,610 direct dependents (lib.rs, 2026-10) — it cannot be told apart whether it was chosen for the lack of poisoning or for speed.
+- crash-only / microreboot (Candea & Fox): restarting a small isolated unit holds only when the state is isolated or kept outside (https://www.usenix.org/legacy/events/osdi04/tech/full_papers/candea/candea_html/) certain (concept) — 「공유 락을 쥔 중의 패닉 = 격리 실패 → 전체로 올림」 (a panic while holding a shared lock = isolation failed → escalate to the whole) is the main session's interpretation of that principle (no source).
 
-## 공백 · 기권
+## Gaps · abstentions
 
-- Tauri 앱의 관행 · helix 훅 · wezterm 가두는 범위 · deno 훅 내용 — 확인 못 함(GitHub code search 속도 제한).
-- 배포판 abort 를 쓰는 crate 비율 통계 — 없음.
-- Mara Bos · BurntSushi · matklad 의 오염 입장 — 출처를 찾지 못해 인용하지 않는다.
-- Erlang 「let it crash」 1차 자료 — 읽지 않았다.
+- Practice of Tauri apps · helix hook · wezterm containment scope · content of the deno hook — could not verify (GitHub code search rate limit).
+- Statistics on the share of crates using release-profile abort — none.
+- Mara Bos · BurntSushi · matklad on poisoning — no source found, so they are not cited.
+- Primary sources on Erlang 「let it crash」 — not read.
 
-## 적대 리뷰
+## Adversarial review
 
-codex(cross-family · effort high · 웹 검색) 1회 — 판정 **BLOCK**(결론이 근거보다 넓다). 인용 넷(rust-analyzer · materialize · tikv · zellij)은 원문과 맞다고 확인했다. 지적 일곱 전부 반영(위 결론 1~5 재작성):
+codex (cross-family · effort high · web search), 1 round — decision: **BLOCK** (the conclusions are wider than the evidence). It confirmed that the four citations (rust-analyzer · materialize · tikv · zellij) match the original text. All seven findings addressed (conclusions 1~5 above rewritten):
 
-| 지적 | 유형 · 심각도 | 반영 |
+| Finding | Type · severity | How addressed |
 |---|---|---|
-| Qdrant 가 공유 상태를 바꾸는 future 를 가두고 다시 돈다(`src/common/health.rs`) | 반례 · high | 결론 2 「뿐」 → 「대개」 + 반례 명시 |
-| sunshowers 가 임계 구역 패닉과 공유 불변식 손상을 잇고 abort 를 논한다 | 누락 선례 · high | 결론 4 = 원칙은 선례 있음 · 메커니즘은 못 찾음 |
-| `parking_lot` · `unwrap()` 이 프로세스 종료를 뜻하지 않는다 | 잘못된 추론 · high | 결론 5 정정 |
-| materialize 는 async 에 태스크별 표시를 따로 둔다(`src/ore/src/future.rs`) | 불완전한 비유 · high | 결론 3 에 추가 — TRD 반영 대상 |
-| 배포판 abort 가 예외적이라는 추론 — OpenVMM · Turso · Oxide | 표본 누락 · medium | 결론 1 정정 |
-| 읽기 전용 임계 구역 · 불변식 보존 쓰기를 구분하지 않았다 | 논리 공백 · medium | 결론 4 에 명시 |
-| tower-http `CatchPanicLayer` 는 기본값이 아니다(기능 + 명시 레이어) | 사실 오류 · medium | 결론 2 정정 |
+| Qdrant contains a future that changes shared state and runs it again (`src/common/health.rs`) | counterexample · high | conclusion 2: 「뿐」 (only) → 「대개」 (usually) + counterexample stated |
+| sunshowers links a critical-section panic to damaged shared invariants and discusses abort | missing precedent · high | conclusion 4 = the principle has precedent · the mechanism was not found |
+| `parking_lot` · `unwrap()` do not imply process exit | wrong inference · high | conclusion 5 corrected |
+| materialize keeps a separate per-task marker for async (`src/ore/src/future.rs`) | incomplete analogy · high | added to conclusion 3 — to be reflected in the TRD |
+| the inference that release-profile abort is exceptional — OpenVMM · Turso · Oxide | sample omission · medium | conclusion 1 corrected |
+| did not distinguish read-only critical sections from invariant-preserving writes | logic gap · medium | stated in conclusion 4 |
+| tower-http `CatchPanicLayer` is not the default (feature + explicit layer) | factual error · medium | conclusion 2 corrected |
 
-메인 재확인 안 한 것: Qdrant · OpenVMM · Turso 소스, sunshowers 글의 해당 문단(리뷰어가 읽은 것 — 확신도 가능성 높음으로 둔다).
+Not re-verified by the main session: the Qdrant · OpenVMM · Turso sources, and the relevant paragraph of the sunshowers post (read by the reviewer — confidence kept at likely).

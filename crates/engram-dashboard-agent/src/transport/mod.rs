@@ -1,8 +1,8 @@
-//! AgentTransport — 에이전트 1개의 데이터 채널 + 자원 제어 seam.
+//! AgentTransport — one agent's data channel + resource control seam.
 //!
-//! transport는 바이트·이벤트를 만들어 `OutputCore::emit`/`finish`로 넘기기만 하면 된다.
-//! 출력 fanout·종료 전이·구독 같은 공용 로직은 OutputCore가 담당하고, transport는
-//! 자기 자원의 수명만 책임진다.
+//! A transport only needs to produce bytes/events and hand them to `OutputCore::emit`/`finish`.
+//! Shared logic such as output fanout · terminal transition · subscription is handled by OutputCore, and the transport
+//! is responsible only for the lifetime of its own resources.
 //!
 //! tauri import 0.
 
@@ -19,166 +19,166 @@ pub mod pty;
 pub(crate) mod spawn;
 pub mod stdio;
 
-/// 출력 바이트 → OutputEvent 정제 seam (backend-agnostic — ADR-0004/0045).
+/// Output bytes → OutputEvent refinement seam (backend-agnostic — ADR-0004/0045).
 ///
-/// ★왜 이 트레이트가 필요한가(ADR-0004 격리)★: transport(StdioTransport)는 **바보 파이프**라
-///   자식 stdout 바이트가 무슨 스키마인지(claude stream-json / codex 프로토콜 / 평문) 몰라야 한다.
-///   그런데 json 모드는 그 바이트를 구조화 OutputEvent 로 정제해야 한다 — 그 파싱 지식은 backend
-///   소유다(claude 라면 `ClaudeStreamDecoder`, backend/claude/ 단독). 그래서 파싱 로직을 이
-///   트레이트 뒤에 숨겨 **transport 는 "어떤 디코더인지 모른 채" 주입받아 적용만** 한다.
+/// ★Why this trait is needed (ADR-0004 isolation)★: the transport (StdioTransport) is a **dumb pipe**, so
+///   it must not know what schema the child stdout bytes are (claude stream-json / codex protocol / plain text).
+///   But the json mode must refine those bytes into structured OutputEvents — that parsing knowledge is owned by
+///   the backend (for claude, `ClaudeStreamDecoder`, in backend/claude/ alone). So the parsing logic is hidden behind this
+///   trait and **the transport only has one injected and applies it "without knowing which decoder it is"**.
 ///
-/// ★수명·상태(pump 스레드 단독 소유)★: decoder 는 라인 재조립을 위해 부분 라인 버퍼 등 **가변
-///   상태**를 들고, pump 스레드(단일)가 `&mut` 로 배타 소유한다 — 그래서 `Send`(스레드로 move)만
-///   요구하고 `Sync` 는 요구하지 않는다(공유 접근 없음). epoch 교체 = 새 transport = 새 decoder 라
-///   리셋이 자동이다.
+/// ★Lifetime · state (owned solely by the pump thread)★: the decoder holds **mutable state** such as a partial-line buffer for line reassembly,
+///   and the pump thread (single) owns it exclusively by `&mut` — so it requires only `Send` (move to a thread)
+///   and not `Sync` (no shared access). Epoch replacement = new transport = new decoder so
+///   reset is automatic.
 ///
-/// agent 도메인 타입(OutputEvent)만 생성한다 — Serialize 무관(ADR-0003: agent 는 wire 를 모른다).
+/// It produces only agent domain types (OutputEvent) — unrelated to Serialize (ADR-0003: the agent does not know the wire).
 pub trait OutputDecoder: Send {
-    /// 임의 크기 바이트 청크를 밀어 넣고, 이번 청크로 **완성된** 이벤트만 돌려준다.
-    /// 미완성 꼬리(개행 없는 부분 라인 등)는 구현체가 내부 버퍼에 남겨 다음 청크와 합친다.
+    /// Push in byte chunks of arbitrary size, and return only the events **completed** by this chunk.
+    /// An incomplete tail (a partial line with no newline, etc.) is kept by the implementation in an internal buffer and combined with the next chunk.
     fn decode(&mut self, chunk: &[u8]) -> Vec<OutputEvent>;
 
-    /// 스트림 종료 시 최대 1회 호출 — 개행으로 종단되지 않은 잔여 라인을 마저 처리한다.
+    /// Called at most once at stream end — handles the remaining line not terminated by a newline.
     fn flush(&mut self) -> Vec<OutputEvent>;
 
-    /// 지금까지 해석하며 모아 둔 사용량 한도 관측을 **꺼내 비운다**(도착 순). 부르는 쪽은 출력 pump 이고
-    /// `decode`·`flush` 를 부를 때마다 곧이어 부른다 — 그래서 구현체가 쌓아 두는 양은 청크 하나 분량이다.
-    /// ★기본 = 빈 벡터★: 사용량을 싣지 않는 스트림의 디코더는 구현하지 않는다.
-    /// ★`OutputEvent` 로 내지 않는 이유★: 사용량은 계정 단위 상태라 에이전트별 replay·구독자 fan-out 을
-    ///   타면 안 된다 — pump 가 이것을 [`crate::types::StatusSink::usage_observed`] 로 따로 넘긴다.
-    /// ★감싸는 디코더는 이 메서드도 반드시 넘긴다★ — 기본 몸체가 있어 빠뜨려도 컴파일된다. 그러면 통과형
-    ///   감싸개는 관측을 조용히 잃고, 막는 감싸개([`crate::usage::UsageGate`])는 안쪽을 영영 비우지 않아 그
-    ///   벡터가 에이전트 수명 내내 자란다.
+    /// **Take out and empty** the usage-limit observations collected while interpreting so far (in arrival order). The caller is the output pump and
+    /// it calls this right after every call of `decode` · `flush` — so the amount the implementation piles up is one chunk's worth.
+    /// ★Default = an empty vector★: decoders of streams that do not carry usage do not implement it.
+    /// ★Why it is not emitted as an `OutputEvent`★: usage is account-level state so it must not ride per-agent replay · subscriber fan-out
+    ///   — the pump passes it separately through [`crate::types::StatusSink::usage_observed`].
+    /// ★A wrapping decoder must pass this method through too★ — it has a default body so it compiles even if missed. Then a pass-through
+    ///   wrapper silently loses observations, and a blocking wrapper ([`crate::usage::UsageGate`]) never empties the inside so that
+    ///   vector grows for the whole agent lifetime.
     fn take_usage(&mut self) -> Vec<crate::usage::UsageObservation> {
         Vec::new()
     }
 }
 
-// ★PTY 출력 바이트를 backend 클로저에 흘리는 seam 을 여기 되살리지 말 것(ADR-0217/ADR-0218)★ —
-//   유일 소비자가 codex 의 TUI 상태줄 스캐너였고, 그 회수가 화면 읽기에서 **락 소유 판정**으로
-//   옮겨 가며 함께 걷혔다(오늘 그 회수는 통로를 아예 지나지 않는다). 되살리면 pump(유일한 PTY
-//   리더) 위에서 남의 코드가 도는 구조가 돌아온다 — 거기서 락을 잡거나 panic 하면 각각 자식
-//   역압과 「멀쩡한 세션이 Failed 로 보고」가 된다.
+// ★Do not revive here the seam that flows PTY output bytes into a backend closure (ADR-0217/ADR-0218)★ —
+//   its only consumer was codex's TUI status-line scanner, and it was withdrawn together when that recovery moved from screen reading to
+//   **lock ownership decision** (today that recovery does not pass through the path at all). Reviving it brings back a structure where someone else's code runs above the pump (the only PTY
+//   reader) — taking a lock or panicking there become child
+//   backpressure and 「멀쩡한 세션이 Failed 로 보고」 (a healthy session reported as Failed) respectively.
 // ADR-0217
 // ADR-0218
 
 pub trait AgentTransport: Send + Sync {
-    /// 출력 pump/stream 기동 → core 연결. spawn 직후 1회 호출.
+    /// Start the output pump/stream → connect to the core. Called once right after spawn.
     fn start(&self, core: Arc<OutputCore>);
 
-    /// ★수령 의미는 **「받았다」이지 「갔다」가 아니다**★: `Ok` = 전량을 순서까지 확정해 받았다,
-    ///   `Err` = 받지 않았다(부분 수용을 `Ok` 로 축소 보고하지 않는다). 오늘 구현체 셋이 전부 유계 큐에
-    ///   담고 전담 라이터가 빼서 쓰므로, **이 호출은 OS 쓰기를 기다리지 않는다** — 그것이 이 seam 의
-    ///   요점이다(자식이 stdin 을 안 읽어도 부른 쪽이 함께 매달리지 않는다).
-    /// ★그 대가 = 받아 둔 뒤에 실패한 쓰기는 이 호출자에게 돌아갈 길이 없다★. 그 실패가 나타나는 곳은
-    ///   **다음 호출의 `Err`** 와 로그, 그리고 대개 곧 이어지는 종점 전이다. 계약·상한·처분의 정본은
-    ///   [`input_queue`] 모듈 헤더(콘솔 계열)와 codex 통로의 `send_input` doc 이다.
+    /// ★The acceptance meaning is **「받았다」 (received), not 「갔다」 (gone)**★: `Ok` = we accepted all of it with its order fixed,
+    ///   `Err` = we did not accept it (a partial acceptance is not reported down as `Ok`). Today all three implementations put it into a bounded queue
+    ///   and a dedicated writer pulls and writes, so **this call does not wait for the OS write** — that is the point of
+    ///   this seam (even if the child does not read stdin, the caller does not hang with it).
+    /// ★Its price = a write that fails after being accepted has no way back to this caller★. Where that failure appears is
+    ///   **the `Err` of the next call**, the log, and usually the terminal transition that follows soon. The source of record for the contract · cap · handling is
+    ///   the [`input_queue`] module header (console family) and the `send_input` doc of the codex path.
     fn send_input(&self, input: InputEvent) -> Result<(), PtyError>;
 
-    /// 턴 하나를 출처와 함께 넘긴다 — 세션은 `MidTurnPolicy::TransportOwned` 일 때만 부른다. 수령 의미는
-    /// [`AgentTransport::send_input`] 과 같다.
-    /// ★기본 구현 = 본문을 `send_input(Raw)` 로 그대로★ — 턴을 스스로 분류하지 않는 통로(PTY·stdio)는 이것을
-    ///   구현하지 않는다. `InputEvent` 에 변형을 더하는 길은 쓰지 않는다: 그 통로들의 반박 불가 패턴
-    ///   (`let InputEvent::Raw(b) = input`)이 깨진다.
+    /// Hand over one turn together with its origin — the session calls it only when `MidTurnPolicy::TransportOwned`. The acceptance meaning is
+    /// the same as [`AgentTransport::send_input`].
+    /// ★Default implementation = the body as `send_input(Raw)` as is★ — a path that does not classify turns by itself (PTY · stdio) does not
+    ///   implement this. The route of adding a variant to `InputEvent` is not used: it would break those paths' irrefutable pattern
+    ///   (`let InputEvent::Raw(b) = input`).
     // ADR-0231
     fn send_turn(&self, turn: TurnInput) -> Result<(), PtyError> {
         self.send_input(InputEvent::Raw(turn.body))
     }
 
-    /// 대기 입력 하나를 거둔다 — 세션의 취소가 `MidTurnPolicy::TransportOwned` 일 때 이리로 넘어온다.
-    /// 목록 사건(거둠 · 취소 요청)은 **통로가** 낸다 — 그 항목을 쥐었는지 넘겼는지는 통로만 안다.
-    /// ★기본 구현 = `NotHeld`★ — 아무것도 쥐지 않는 통로다.
+    /// Withdraw one pending input — when the session's cancel is `MidTurnPolicy::TransportOwned`, it comes over here.
+    /// List events (withdrawal · cancel request) are emitted **by the path** — only the path knows whether it holds that item or handed it over.
+    /// ★Default implementation = `NotHeld`★ — a path that holds nothing.
     // ADR-0231
     fn withdraw(&self, _id: &str) -> Withdraw {
         Withdraw::NotHeld
     }
 
-    /// 수락 모름으로 쥔 대기 입력의 id — 넘겼는데 벤더가 받았는지 모르는 항목(목록 조회가 `unconfirmed` 로
-    /// 덧댄다). 그 전이는 목록 사건이 없어 명부에는 `Queued` 그대로다.
-    /// ★조회 순간의 통로 상태다★ — 명부 스냅숏과 한 원자가 아니고, 호출자는 명부 락을 놓은 **뒤** 부른다
-    ///   (두 락을 겹쳐 쥐지 않는다 — ADR-0006).
-    /// ★기본 구현 = 빈 목록이고, 오늘 이것을 덮는 통로는 없다★ — codex 통로도 수락 모름 단계를 걷어(ADR-0235) 기본
-    ///   구현을 쓴다. 이 동사와 목록 낱말 `unconfirmed` 는 잠든 채 남는다.
+    /// The ids of pending inputs held as acceptance unknown — items handed over where it is unknown whether the vendor received them (the list query overlays them as `unconfirmed`).
+    /// That transition has no list event so in the registry it stays `Queued`.
+    /// ★It is the path state at the query moment★ — not one atom with the registry snapshot, and the caller calls it **after** releasing the registry lock
+    ///   (the two locks are not held overlapping — ADR-0006).
+    /// ★Default implementation = an empty list, and today no path overrides it★ — the codex path also withdrew the acceptance-unknown stage (ADR-0235) and uses the default
+    ///   implementation. This verb and the list word `unconfirmed` stay dormant.
     // ADR-0231
     fn unconfirmed_inputs(&self) -> Vec<String> {
         Vec::new()
     }
 
-    /// ★이 호출 시점까지 받아 둔 입력이 **실제로 나갈 때까지** 기다린다★ — `Ok` = 나갔다.
+    /// ★Wait until the input accepted up to the time of this call **has actually gone out**★ — `Ok` = gone out.
     ///
-    /// ★왜 있나★: [`AgentTransport::send_input`] 의 `Ok` 는 「받았다」이지 「갔다」가 아니다. 그 둘의
-    ///   차이를 **배달 영수증에 실으면 안 되는** 호출자가 하나 있다 — 우편 배달이다(ADR-0088 이 가르려는
-    ///   "전송 실패" 와 "모델이 무시" 가 뒤집힌다). 그 호출자만 이 동사를 지나 `Ok` 의 뜻을 되돌린다.
-    /// ★★키 입력 경로는 이것을 부르지 않는다 — 부르면 안 된다★★: 거기서 기다리면 큐가 없애려던 바로 그
-    ///   head-of-line blocking 이 되돌아온다. 이 동사를 새 호출부에 붙이기 전에 그 호출부가 **이미
-    ///   블로킹을 감수하는 경로인지** 먼저 답할 것.
-    /// ★기본 구현이 `Unsupported` 인 것은 의도다 — `Ok` 로 위장하지 않는다★: 쓰기 완료를 확인할 수단이
-    ///   없는 통로가 `Ok` 를 돌려주면 그것이 곧 위 뒤집힘이다. 확인 수단이 없다고 **말하는** 쪽이 정직하고,
-    ///   호출자는 그 신호를 보고 「예전과 같은 수준의 앎」으로 다룰 수 있다(그 판단은 호출부가 적는다).
+    /// ★Why it exists★: the `Ok` of [`AgentTransport::send_input`] is 「받았다」 (received), not 「갔다」 (gone). There is one caller that **must not put
+    ///   the difference between the two on the delivery receipt** — mail delivery (the "transmission failure" and "model ignored" that ADR-0088 wants to tell apart get flipped).
+    ///   Only that caller passes this verb and restores the meaning of `Ok`.
+    /// ★★The keystroke path does not call this — it must not★★: waiting there would bring back the very
+    ///   head-of-line blocking the queue meant to remove. Before attaching this verb to a new call site, first answer whether that call site is **already a path
+    ///   that accepts blocking**.
+    /// ★The default implementation being `Unsupported` is intended — it does not disguise itself as `Ok`★: if a path with no means to
+    ///   confirm write completion returned `Ok`, that would be exactly the flip above. It is more honest for the side that **says** it has no means of confirmation, and
+    ///   the caller can see that signal and treat it as 「예전과 같은 수준의 앎」 (knowledge at the same level as before) (that judgment is written by the call site).
     fn flush_input(&self, _timeout: Duration) -> Result<(), PtyError> {
         Err(PtyError::Unsupported(
             "flush_input (이 통로는 쓰기 완료를 확인할 수단이 없다)".into(),
         ))
     }
 
-    /// cols/rows의 보존(atomic 저장)은 AgentSession 책임.
+    /// Preserving cols/rows (atomic storage) is AgentSession's responsibility.
     fn resize(&self, cols: u16, rows: u16) -> Result<(), PtyError>;
 
-    /// ≠kill. 진행 중 작업만 중단 — 프로세스는 살아 있다.
+    /// ≠kill. Stops only the work in progress — the process stays alive.
     fn interrupt(&self) -> Result<(), PtyError>;
 
-    /// 이 통로가 곧 물러난다는 예고 — manager 가 이 화신을 끝내기로 정한 첫 걸음에서(권한 회수 · `Exiting` ·
-    /// [`Self::shutdown`] 보다 먼저) 아무 락 없이 부른다. 뒤에서 도는 일을 가진 통로는 이것을 보고 그 일을 멈출 수 있다.
-    /// ★자원은 거두지 않는다 — 그것은 [`Self::shutdown`] 몫이고 kill 인과(ADR-0001)는 그대로다★. 막히지 않아야 하고
-    ///   (kill 경로가 그 뒤에 선다) 여러 번 불려도 같아야 한다.
-    /// ★밖에서 관측될 결말(상태 전이 · 연결 결말 배달 · 입력 거절)을 여기서 내지 않는다★ — 이 예고는 사용자 종료 의도
-    ///   ([`crate::session::AgentSession::termination_intent`])가 서기 **전**에 온다. 결말이 의도보다 먼저 보이면
-    ///   활성화 판정이 사용자의 취소를 실패로 읽는다.
-    /// ★모든 끝내기 길이 이것을 먼저 부르지는 않는다★ — 물러남을 알아야 하는 통로는 [`Self::shutdown`] 에서도 같은
-    ///   것을 세운다. 기본 구현 = 무동작.
+    /// A notice that this path will retire soon — called with no lock at the first step where the manager decides to end this incarnation (before revoking permissions · `Exiting` ·
+    /// [`Self::shutdown`]). A path with work running in the background can see this and stop that work.
+    /// ★It does not reap resources — that is [`Self::shutdown`]'s job and the kill causality (ADR-0001) stays as is★. It must not block
+    ///   (the kill path stands behind it) and must be the same when called many times.
+    /// ★It does not emit here the outcomes observable from outside (state transition · connection outcome delivery · input rejection)★ — this notice comes **before** the user's termination intent
+    ///   ([`crate::session::AgentSession::termination_intent`]) stands. If an outcome were seen before the intent,
+    ///   the activation decision would read the user's cancel as a failure.
+    /// ★Not every ending path calls this first★ — a path that needs to know about retiring also sets the same
+    ///   thing in [`Self::shutdown`]. Default implementation = no-op.
     fn begin_retire(&self) {}
 
-    /// 자원 강제 종료(멱등). pump 종료 대기는 여기서 안 함(core.join_pump 몫).
+    /// Forced resource termination (idempotent). Waiting for pump termination is not done here (it is core.join_pump's job).
     fn shutdown(&self);
 
     fn capabilities(&self) -> TransportCaps;
 }
 
-/// 이 통로가 연결의 결말을 **배달할** 곳. `None` = 세울 연결이 없다(PTY·stdio 는 프로세스가 뜬
-/// 순간부터 쓸 수 있어 이 축이 아예 없다).
+/// The place where this path **delivers** the connection outcome. `None` = there is no connection to establish (PTY · stdio can be used from the moment
+/// the process is up, so this axis does not exist at all).
 ///
-/// ★★셀에 담아 두고 **읽히기를 기다리지 않는다** — 그것이 이 포트의 존재 이유다★★:
-///   옛 모양은 통로가 연결 상태를 셀에 두고 감독자가 루프에서 그것을 **읽었다**. 그 사이가 곧 결함
-///   넷이었다 — 읽은 뒤 행동하기까지 통로가 움직이면, 감독자는 이미 사라진 사실 위에서 판정한다.
-///   (① 수거된 화신의 정리가 산 후임을 죽이고 ② `Establishing` 을 읽은 뒤 `Ready` 가 서도 시한이
-///   실패로 확정하며 ③ 사용자 kill 이 만든 `Down` 이 이어받기 실패로 기록되고 ④ stdout EOF 뒤에도
-///   `Up` 이 남아 성공으로 읽힌다.) 한 번 **배달된** 값은 철회되지 않으므로 그 틈이 아예 없다.
-/// ★화신 표식은 **조립점이 찍는다**★ — 이 포트는 `Fn(LinkResolution)` 이고 통로는 화신을 모른다
-///   ([`SessionIdSink`] 와 같은 모양·같은 사유). 소비자는 그 표식을 **일치/불일치로만** 본다
-///   (ADR-0163/0164 — 대소로 「더 새 것」을 유도하면 ①이 되돌아온다).
-/// ★★계약은 **많아야 한 번**(zero-or-once)이다 — 「정확히 한 번」이 아니다★★. 두 결말이 있다:
-///   - **한 번** — 연결이 결말을 내는 그 순간. 그 뒤로는 부르지 않는다.
-///   - **영(零)** — 사용자가 이 화신을 껐다. kill 때문에 풀린 핸드셰이크는 「상대가 답했다」가 아니라서
-///     배달하지 않는다(그 갈래를 배달하면 사용자의 취소가 이어받기 실패로 기록된다 — 결함 ③).
-/// ★★그래서 **받는 쪽이 「영」을 처리해야 한다 — 이것이 이 문단의 요점이다**★★: 한때 이 자리가
-///   「정확히 한 번」과 「껐으면 안 부른다」를 세 줄 간격으로 함께 적고 있었고, 앞엣것을 믿고 쓴 소비자가
-///   [`crate::manager::AgentManager::link_activation_verdict`] 의 채널 소멸 갈래였다 — 배달이 억제되면
-///   보내는 끝이 떨어지는데, 그것을 「통로가 결말을 못 냈다」로 읽어 **사용자의 취소를 활성화 실패로
-///   기록했다.** 지금 그 갈래는 종료 의도 래치를 **먼저** 본다.
-/// ★억제되는 것은 **메시지뿐이고 채널 소멸은 아니다**★ — 이 포트를 쥔 것은 라이터 스레드 하나라, 그
-///   스레드가 끝나면 보내는 끝이 떨어진다. 그 신호는 억제할 수 없으므로 「영」의 관측 가능한 형태가
-///   곧 **채널 소멸**이다. 받는 쪽은 그것을 결말로 읽어서는 안 된다.
-/// ★배달은 종료를 **몰지 않는다**★ — 통로는 여전히 아무것도 죽이지 않고 `finish` 도 부르지 않는다
-///   (ADR-0199 의 선). 결말을 말하는 것과 결말을 집행하는 것은 다른 일이다.
+/// ★★Putting it in a cell and **waiting to be read** is not done — that is the reason this port exists★★:
+///   In the old shape the path kept the connection state in a cell and the supervisor **read** it in a loop. The gap between was exactly four
+///   defects — if the path moves between reading and acting, the supervisor decides on a fact that has already vanished.
+///   (① the cleanup of a reaped incarnation kills a live successor ② even if `Ready` stands after reading `Establishing`, the deadline
+///   confirms failure ③ a `Down` made by a user kill is recorded as a resume failure ④ even after stdout EOF
+///   `Up` remains and is read as success.) A value, once **delivered**, is not withdrawn, so that gap does not exist at all.
+/// ★The incarnation marker is **stamped by the assembly point**★ — this port is `Fn(LinkResolution)` and the path does not know the incarnation
+///   (the same shape and reason as [`SessionIdSink`]). The consumer looks at that marker **only as match/mismatch**
+///   (ADR-0163/0164 — deriving 「더 새 것」 (the newer one) by magnitude brings ① back).
+/// ★★The contract is **at most once** (zero-or-once) — not 「정확히 한 번」 (exactly once)★★. There are two outcomes:
+///   - **Once** — the moment the connection yields an outcome. It is not called after that.
+///   - **Zero (零)** — the user turned this incarnation off. A handshake released by kill is not 「상대가 답했다」 (the peer answered), so
+///     it is not delivered (if that branch were delivered, the user's cancel would be recorded as a resume failure — defect ③).
+/// ★★So **the receiving side must handle 「영」 (zero) — this is the point of this paragraph**★★: this spot once
+///   wrote 「정확히 한 번」 (exactly once) and 「껐으면 안 부른다」 (if turned off, not called) together three lines apart, and the consumer written on trust of the former was
+///   the channel-gone branch of [`crate::manager::AgentManager::link_activation_verdict`] — when delivery is suppressed
+///   the sending end drops, and it read that as 「통로가 결말을 못 냈다」 (the path could not produce an outcome) and **recorded the user's cancel as an activation failure.**
+///   Now that branch looks at the termination-intent latch **first**.
+/// ★What is suppressed is **only the message, not the channel-gone**★ — the one holding this port is a single writer thread, so when that
+///   thread ends the sending end drops. That signal cannot be suppressed, so the observable form of 「영」 (zero) is
+///   **channel-gone**. The receiving side must not read it as an outcome.
+/// ★Delivery does not **drive** termination★ — the path still kills nothing and does not call `finish` either
+///   (the line of ADR-0199). Stating an outcome and enforcing an outcome are different things.
 pub type LinkSink = Arc<dyn Fn(LinkResolution) + Send + Sync>;
 
-/// 연결이 어떻게 끝났나 — ★두 값뿐이고 둘 다 **확정**이다★(「아직」은 배달되지 않는다).
+/// How the connection ended — ★only two values and both are **confirmed**★ (「아직」 (not yet) is not delivered).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkResolution {
-    /// 상대가 **입력을 받을 준비가 됐다고 신호했다** = 활성화 성립(사용자 결정).
+    /// The peer **signaled that it is ready to receive input** = activation established (user decision).
     Ready,
-    /// 연결이 서지 못했다. `reason` = 사람이 읽을 사유이자 backend 분류의 입력 — 이 통로의 실패
-    /// 문구는 stdout 의 JSON-RPC 오류라 콘솔 꼬리에도 stderr 진단 꼬리에도 없다.
+    /// The connection could not be established. `reason` = a human-readable reason and the input to backend classification — this path's failure
+    /// text is a JSON-RPC error on stdout so it is in neither the console tail nor the stderr diagnostic tail.
     Failed { reason: String },
 }
 
@@ -188,7 +188,7 @@ mod tests {
     use crate::types::{ControlCaps, InputCaps, InputOrigin, OutputCaps};
     use std::sync::Mutex;
 
-    /// 기본 구현만 쓰는 통로 — `send_input` 만 기록한다.
+    /// A path that uses only the default implementation — records only `send_input`.
     struct RawOnly(Mutex<Vec<Vec<u8>>>);
     impl AgentTransport for RawOnly {
         fn start(&self, _core: Arc<OutputCore>) {}
@@ -263,8 +263,8 @@ mod tests {
     }
 }
 
-/// 세 펌프(PTY · stdio · codex 리더)의 가둠 시험이 함께 쓰는 가짜 — 첫 프레임에서 panic 하는 구독자로 펌프 본체 안에
-/// 가둔 panic 을 내고, 그때와 `finish` 가 상태를 알릴 때의 표시를 적는다.
+/// A fake shared by the containment tests of the three pumps (PTY · stdio · codex reader) — a subscriber that panics on the first frame raises a panic contained inside the pump body,
+/// and it records the marker at that time and the marker when `finish` announces the state.
 // ADR-0292
 #[cfg(test)]
 pub(crate) mod pump_marks {
@@ -295,7 +295,7 @@ pub(crate) mod pump_marks {
         fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
     }
 
-    /// 첫 프레임에서만 표시를 적고 panic 한다 — 그 뒤 프레임은 받기만 한다.
+    /// It records the marker and panics only on the first frame — later frames are only received.
     struct PanicAtFirstSend(Arc<Marks>, SinkId);
 
     impl OutputSink for PanicAtFirstSend {
@@ -311,7 +311,7 @@ pub(crate) mod pump_marks {
         }
     }
 
-    /// 상태를 `marks` 로 알리고 그 구독자를 단 core.
+    /// A core with the subscriber attached that announces the state through `marks`.
     pub(crate) fn core(marks: &Arc<Marks>) -> Arc<OutputCore> {
         let core = Arc::new(OutputCore::new(
             AgentId::new_v4(),
@@ -323,7 +323,7 @@ pub(crate) mod pump_marks {
         core
     }
 
-    /// 펌프 본체는 표시 안에서 panic 했고, 그 panic 은 `Failed` 한 번으로 접혔으며, `finish` 는 표시 밖에서 알렸다.
+    /// The pump body panicked inside the marker, that panic was folded into one `Failed`, and `finish` announced outside the marker.
     pub(crate) fn assert_contained_body_and_unmarked_finish(marks: &Marks) {
         assert_eq!(
             *marks.at_send.lock().unwrap(),

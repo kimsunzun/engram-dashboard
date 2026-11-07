@@ -1,6 +1,6 @@
-// ★reject 누수 안전은 여기서 재테스트하지 않는다★: 메뉴가 bespoke .catch 를 버리고 fireAndForget 만 부르므로
-//   "sync throw·async reject·thenable 을 삼켜 누수 없음" 계약은 dispatch.test.ts 가 소유한다(구조적 상속).
-//   여기 관심사는 "메뉴가 그 공유 helper 로 라우팅하는가"뿐.
+// ★Reject leak safety is not retested here★: the menu drops its bespoke .catch and calls only fireAndForget, so
+//   the contract "swallows sync throw · async reject · thenable with no leak" is owned by dispatch.test.ts (structural inheritance).
+//   The only concern here is "does the menu route through that shared helper".
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -47,7 +47,7 @@ describe('SlotContextMenu — 바깥 누름으로 닫기', () => {
     const drag = document.createElement('div')
     drag.setAttribute('data-tauri-drag-region', '')
     document.body.appendChild(drag)
-    // `drag.js` 흉내 — 메뉴보다 먼저 건 document 거품 단계 듣는 쪽이 끌 자리 누름을 끊는다.
+    // Imitates `drag.js` — a document bubble-phase listener registered before the menu cuts the press on a draggable spot.
     const dragJs = (e: MouseEvent) => {
       if (e.target !== drag) return
       e.preventDefault()
@@ -145,7 +145,7 @@ describe('SlotContextMenu — 공유 dispatch 경로(FIX-3)', () => {
   })
 })
 
-// ── 켜고 끄는 항목 · 비활성 · 역할(ADR-0252) ──
+// ── on/off items · disabled · role (ADR-0252) ──
 describe('SlotContextMenu — checked · enabled · 역할', () => {
   const slotCtx = {
     viewId: 'v1',
@@ -208,7 +208,7 @@ describe('SlotContextMenu — checked · enabled · 역할', () => {
   })
 
   it('실행 인자 = 좌표 + 슬롯 내용(content) — ctx 에 더해진 다른 칸도 호출자 표지도 넘기지 않는다', () => {
-    const withState = { ...slotCtx, menuState: true } // 조립처가 메뉴 상태 칸을 더한 경우
+    const withState = { ...slotCtx, menuState: true } // A case where the assembler added a menu state field
     render(<SlotContextMenu x={0} y={0} items={[item('toggle.x')]} ctx={withState} onClose={vi.fn()} />)
     fireEvent.click(screen.getByText('toggle.x'))
     const [id, args] = dispatchMock.fireAndForget.mock.calls[0] as [string, Record<string, unknown>]
@@ -277,7 +277,7 @@ describe('SlotContextMenu — checked · enabled · 역할', () => {
     )
     expect(row('a').getAttribute('aria-checked')).toBe('false')
     expect(row('b').getAttribute('aria-disabled')).toBe('true')
-    // 다시 그릴 때마다 판정하므로 횟수가 아니라 항목별로 본다.
+    // It is decided on every redraw, so look per item rather than per count.
     expect(error).toHaveBeenCalledWith(expect.stringMatching(/checked 판정 실패 — "a"/), expect.any(Error))
     expect(error).toHaveBeenCalledWith(expect.stringMatching(/enabled 판정 실패 — "b"/), expect.any(Error))
   })
@@ -294,9 +294,9 @@ describe('SlotContextMenu — checked · enabled · 역할', () => {
   })
 })
 
-// ── ★뷰포트 clamp(Bug1)★: 순수 helper clampMenuPosition 을 폭넓게 단위테스트한다. jsdom 은
-//    getBoundingClientRect 가 0을 돌려 컴포넌트 경로로는 넘침을 못 만들므로, 실제 clamp 로직은 이 helper
-//    테스트가 소유한다(컴포넌트는 이 helper 를 호출만 — GUI 실측은 별도). ──
+// ── ★Viewport clamp (Bug1)★: unit-tests the pure helper clampMenuPosition broadly. In jsdom
+//    getBoundingClientRect returns 0 so the component path cannot produce overflow, so the real clamp logic is owned by this helper
+//    test (the component only calls this helper — GUI measurement is separate). ──
 describe('clampMenuPosition — 넘치면 뒤집는다(앵커는 메뉴 밖 간격만큼 떨어져 유지)', () => {
   const VW = 1000
   const VH = 800
@@ -304,17 +304,17 @@ describe('clampMenuPosition — 넘치면 뒤집는다(앵커는 메뉴 밖 간�
   const H = 300
 
   /**
-   * ★요구치는 구현 상수(ANCHOR_GAP)와 따로 적는다★: `ANCHOR_GAP` 을 그대로 단언에 쓰면 그 상수를 0 으로
-   * 바꿔도 단언이 함께 0 이 되어 무력화된다. 여기 값은 OS 에서 유도한 *하한*이다 — Windows 기본 더블클릭
-   * 허용 사각형이 4px(=반경 2px)이므로 그 2배를 요구한다. 구현이 8 에서 6 으로 줄어도 통과하지만, 반경
-   * 이하로 줄면 실패한다.
+   * ★The required value is written apart from the implementation constant (ANCHOR_GAP)★: if `ANCHOR_GAP` were used in the assertion as is, then
+   * changing that constant to 0 would make the assertion go to 0 with it and be neutralized. The value here is a *lower bound* derived from the OS — the Windows default double-click
+   * tolerance rectangle is 4px (= radius 2px), so twice that is required. It passes if the implementation shrinks from 8 to 6, but fails if it shrinks below
+   * the radius.
    */
   const REQUIRED_GAP = 4
 
   /**
-   * 앵커에서 메뉴 사각형까지의 축별 거리 중 *큰* 값. 둘째 클릭이 메뉴에 떨어지려면 두 축 모두 사각형 안이어야
-   * 하므로, 한 축이라도 이만큼 떨어져 있으면 그 허용 반경 안에서는 메뉴에 닿지 않는다. 0 이면 앵커가 사각형
-   * 안(= 커서 밑에 항목)이다.
+   * The *larger* of the per-axis distances from the anchor to the menu rectangle. For the second click to land on the menu, both axes must be inside the rectangle,
+   * so if even one axis is this far off, it does not reach the menu within that tolerance radius. If 0, the anchor is inside the rectangle
+   * (= an item is under the cursor).
    */
   function anchorClearance(x: number, y: number, pos: { top: number; left: number }, w: number, h: number) {
     const dx = Math.max(pos.left - x, x - (pos.left + w), 0)
@@ -350,21 +350,21 @@ describe('clampMenuPosition — 넘치면 뒤집는다(앵커는 메뉴 밖 간�
   })
 
   it('메뉴가 뷰포트보다 큼(h>vh) → 뒤집어도 안 들어가므로 밀기 폴백(상단 고정, 음수 방지)', () => {
-    // 퇴화 케이스에선 "화면 안에 있다"가 앵커 규칙(간격 포함)을 이긴다 — 앵커가 안으로 들어오는 것을 허용한다.
+    // In a degenerate case "it is inside the screen" beats the anchor rule (including the gap) — the anchor is allowed to come inside.
     const { top } = clampMenuPosition(100, 700, W, 900, VW, VH)
     expect(top).toBe(4)
   })
 
   it('간격까지 정확히 맞음(y+GAP+h===vh)은 넘침 아님 → 뒤집지 않는다', () => {
-    // 넘침 판정 경계가 간격을 포함하는지 고정한다(간격을 빼고 판정하면 메뉴가 1..GAP px 화면 밖으로 나간다).
+    // Pins that the overflow decision boundary includes the gap (deciding without the gap lets the menu go 1..GAP px off screen).
     const y = VH - H - ANCHOR_GAP
     expect(clampMenuPosition(0, y, W, H, VW, VH).top).toBe(VH - H)
   })
 
-  // ★속성 단언★: 특정 수치가 아니라 "앵커는 메뉴에서 요구 간격 이상 떨어져 있다 + 메뉴는 화면 안에 있다"를
-  //   고정한다 — 배치 수식을 다시 손대도 이 성질이 깨지면 여기서 잡힌다(메뉴 ≤ 뷰포트인 정상 범위 전체).
-  //   ★"안에 들어가지만 않으면 된다"에서 강화됨(ADR-0143 결정 4)★: 모서리에 딱 붙는 배치는 옛 단언을
-  //   통과했지만 더블클릭 둘째 클릭이 항목을 실행했다.
+  // ★Property assertion★: pins not a specific number but "the anchor is at least the required gap away from the menu + the menu is inside the screen"
+  //   — even if the placement formula is touched again, if this property breaks it is caught here (the whole normal range where menu ≤ viewport).
+  //   ★Strengthened from "it is enough that it does not go inside" (ADR-0143 decision 4)★: a placement flush against a corner
+  //   passed the old assertion, but the second click of a double-click executed an item.
   it('뷰포트 안 어느 앵커에서도 앵커는 메뉴에서 요구 간격 이상 떨어지고 메뉴는 화면 안에 있다', () => {
     for (const x of [0, 1, 100, 500, 841, 842, 843, 950, 999, VW]) {
       for (const y of [0, 1, 100, 400, 491, 492, 493, 700, 799, VH]) {
@@ -380,12 +380,12 @@ describe('clampMenuPosition — 넘치면 뒤집는다(앵커는 메뉴 밖 간�
   })
 })
 
-// ── ★서브메뉴 flyout 배치(ADR-0065)★ ──
+// ── ★Submenu flyout placement (ADR-0065)★ ──
 describe('flyoutPosition — 서브메뉴 우측/좌측 전개', () => {
   const VW = 1000
   const VH = 800
-  const FW = 150 // flyout 폭
-  const FH = 200 // flyout 높이
+  const FW = 150 // flyout width
+  const FH = 200 // flyout height
 
   it('우측 공간 충분 → 부모 오른쪽 가장자리(anchorRight)에서 오른쪽으로 편다', () => {
     expect(flyoutPosition(100, 250, 100, FW, FH, VW, VH)).toEqual({ top: 100, left: 250 })
@@ -409,7 +409,7 @@ describe('flyoutPosition — 서브메뉴 우측/좌측 전개', () => {
   })
 })
 
-// ── 컴포넌트 경로 ──
+// ── Component path ──
 describe('SlotContextMenu — 마운트 후 뷰포트 배치 적용(Bug1)', () => {
   const origRect = HTMLElement.prototype.getBoundingClientRect
   afterEach(() => {
@@ -435,7 +435,7 @@ describe('SlotContextMenu — 마운트 후 뷰포트 배치 적용(Bug1)', () =
     const topPx = parseInt(fixed.style.top, 10)
     expect(topPx).toBe(vh - 50 - ANCHOR_GAP - 300)
     expect(topPx + 300).toBeLessThanOrEqual(vh)
-    // 메뉴 하단이 앵커(y)보다 ANCHOR_GAP 위 = 커서 밑에 항목이 없고, 더블클릭 둘째 클릭도 못 닿는다.
+    // The menu bottom is ANCHOR_GAP above the anchor (y) = no item under the cursor, and the second click of a double-click cannot reach it either.
     expect(topPx + 300).toBe(vh - 50 - ANCHOR_GAP)
   })
 })

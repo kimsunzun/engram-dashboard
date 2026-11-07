@@ -1,35 +1,35 @@
-# ADR-0090: Stage 2 컨텍스트 포화 실측 실행 설계 — 파일럿 선행·전용 실험 bin·sonnet 핀·안전 범위 해석
+# ADR-0090: Stage 2 context saturation measurement execution design — pilot first, a dedicated experiment bin, the sonnet pin, interpretation of the safety scope
 
-- 상태: 확정 (2026-07-20, 근거: 사용자 방향 위임(야간 자율 진행 지시) + Explore 정찰 실측 + ADR-0088 결정 2·5의 구체화)
-- 관련: ADR-0088(사다리·하네스 요건 정본 — 이 ADR은 그 Stage 2 항목의 실행 설계) · ADR-0087(스파이크 sonnet 기준선) · ADR-0004(백엔드 지식 격리 — 모델 핀은 extra_args 주입이라 백엔드 변경 없음) · CLAUDE.md 「구현 실행 규약」
+- 상태: 확정 (2026-07-20, basis: the user's delegation of direction (an overnight autonomous-run instruction) + Explore reconnaissance measurement + the concretization of ADR-0088 decisions 2 and 5)
+- 관련: ADR-0088 (the canonical source of the ladder and harness requirements — this ADR is the execution design of its Stage 2 item) · ADR-0087 (the spike sonnet baseline) · ADR-0004 (backend knowledge isolation — the model pin is injected through extra_args, so there is no backend change) · CLAUDE.md 「구현 실행 규약」
 
 ## 맥락
-ADR-0088 결정 2가 Stage 2(컨텍스트 포화 실측 — 요인: 길이×필러종류×봉투위치×지연사용×compaction 전후, 판정: 지속 처리)를 지정했지만 **차원 수준까지만**이고, 실행 형태(하네스 모양·모델·안전 적용 범위·셀 배분 수치)는 미정이었다. 정찰(Explore) 결과: 실 claude 스폰 선례(`control_send.rs`의 stream-json spawn + skip_no_claude 가드)와 토큰 관측(`OutputEvent::Usage`)은 있으나, **compaction 외부 감지·필러 생성·재현성 핀(CLI 버전·해석 모델 ID·데몬 커밋)은 전부 부재**. 판당 비용도 미지라 통계 사전등록(ADR-0088 결정 5c)의 숫자를 세울 근거가 없다. 사용자는 2026-07-20 새벽 방향을 메인에 위임하고 무정지 진행·커밋/푸시 일임을 지시했다.
+ADR-0088 decision 2 designated Stage 2 (context saturation measurement — factors: length × filler kind × envelope position × delayed use × before/after compaction, decision: sustained processing), but **only down to the dimension level**, and the execution form (the harness shape, model, safety application scope, cell allocation numbers) was undecided. Reconnaissance (Explore) result: a precedent for spawning a real claude (the stream-json spawn + skip_no_claude guard in `control_send.rs`) and token observation (`OutputEvent::Usage`) exist, but **external compaction detection, filler generation, and reproducibility pins (CLI version, resolved model ID, daemon commit) are all absent**. The per-run cost is also unknown, so there is no basis for setting the numbers of the statistical pre-registration (ADR-0088 decision 5c). In the early morning of 2026-07-20 the user delegated the direction to the main agent and instructed non-stop progress and leaving commit/push to it.
 
 ## 결정
-1. **파일럿 선행 슬라이스.** 하네스 최소 골격 + 실 claude 2~4스폰 파일럿으로 ① 포화 유도 가능성 ② compaction 관측 가능성(stream-json 신호 카탈로그) ③ 판당 토큰·시간 비용을 실측한 뒤, 그 수치로 통계 사전등록을 작성하고 본런(축소 요인설계)에 진입한다. 파일럿 실측 없이 본런 셀 배분을 확정하지 않는다.
-2. **하네스 = daemon crate 전용 실험 bin + JSONL 영속.** `test-harness` feature 뒤(운영 빌드 미포함, `required-features`)의 실험 드라이버 바이너리. 배달은 실 control 경로(`handle_send` → `wrap_message` → `write_stdin_observed`)를 그대로 태워 실험 대상 = 운영 경로 동일성을 보장한다. 런마다 관측치를 JSONL로 영속(중간 저장·사후 분석·재개 가능). 필러 원문은 로그에 담지 않고 해시·길이만 기록(파일 크기·노이즈 억제).
-3. **모델 핀 = sonnet.** `AgentCommand::Claude.extra_args`로 `--model sonnet` 주입(백엔드 코드 무변경). 재현성 핀에는 stream-json init이 보고하는 **해석된 정확 모델 ID**를 기록한다. ADR-0087의 포맷 스파이크 sonnet 기준선과 정합 — 단계 간 비교 가능.
-4. **안전 범위 해석 — Stage 2는 네트워크 허용.** ADR-0088 결정 5b의 "네트워크 차단"은 근거 문구상 주입/셸 확장 케이스(1i·전파, Stage 4 영역) 전제의 강제다. Stage 2 필러·프로브는 양성이고 실 claude는 API 통신이 필수이므로, **격리 워크스페이스(임시 빈 디렉토리 cwd)·비밀 미노출·툴 사용 불요 과제 설계·스폰/턴/토큰/시간 하드 상한**을 적용하고 네트워크는 허용한다. 주입/셸 확장 케이스는 이 하네스로 돌리지 않는다(Stage 4에서 5b 전체 요건과 함께).
-5. **사전등록 승인 게이트의 1회성 위임.** 본래 사전등록은 사용자 승인 게이트이나, 이 세션은 사용자가 방향·진행을 명시 위임(야간 자율 런)했으므로 메인이 채택하고 **사후 보고 의무**로 대체한다. 이는 이 세션 한정 — 이후 세션은 기본 규약(사용자 승인)으로 복귀한다.
+1. **A pilot slice first.** With a minimal harness skeleton + a pilot of 2~4 real claude spawns, measure ① whether saturation can be induced ② whether compaction can be observed (a catalog of stream-json signals) ③ the token and time cost per run, then write the statistical pre-registration with those numbers and enter the main run (the reduced factorial design). Do not fix the main-run cell allocation without the pilot measurement.
+2. **The harness = a dedicated experiment bin in the daemon crate + JSONL persistence.** An experiment driver binary behind the `test-harness` feature (not included in production builds, `required-features`). Delivery runs through the real control path (`handle_send` → `wrap_message` → `write_stdin_observed`) as is, guaranteeing that the experiment subject = the production path. Observations are persisted as JSONL per run (intermediate saving, post-hoc analysis, and resuming possible). The filler text is not put in the log; only the hash and length are recorded (suppressing file size and noise).
+3. **Model pin = sonnet.** Inject `--model sonnet` through `AgentCommand::Claude.extra_args` (no backend code change). In the reproducibility pin, record the **resolved exact model ID** that the stream-json init reports. Consistent with the format spike sonnet baseline of ADR-0087 — comparable across stages.
+4. **Interpretation of the safety scope — Stage 2 allows the network.** The "network blocked" of ADR-0088 decision 5b is, by the wording of its basis, an enforcement premised on the injection/shell expansion cases (1i, propagation, the Stage 4 area). Stage 2 fillers and probes are benign and a real claude must talk to the API, so we apply **an isolated workspace (a temporary empty directory cwd) · no secrets exposed · a task design that needs no tool use · hard caps on spawns/turns/tokens/time**, and allow the network. Do not run the injection/shell expansion cases with this harness (in Stage 4, together with the full 5b requirements).
+5. **A one-time delegation of the pre-registration approval gate.** The pre-registration is originally a user approval gate, but in this session the user explicitly delegated direction and progress (an overnight autonomous run), so the main agent adopts it, replaced by an **obligation to report afterwards**. This is limited to this session — later sessions return to the default convention (user approval).
 
 ## 거부한 대안
-- **바로 풀 요인설계 하네스 일괄 구축** — compaction 감지·포화 유도라는 관측 가정이 미검증인 채 전부 지으면 가정이 틀릴 때 하네스·사전등록을 통째 재작업한다. 판당 비용 미지로 사전등록 숫자도 전부 추측이 된다. ADR-0088이 포맷 스파이크에 적용한 "검증 먼저, 비싼 런 낭비 방지" 논리와 동일.
-- **cargo test 통합 하네스(control_send.rs 패턴 확장)** — 실험은 pass/fail이 아니라 데이터 수집이라 테스트 러너 프레임(timeout·단정 중심·결과 휘발)과 안 맞고, 장시간 런·중간 저장·부분 재개가 어색하다. 인프라 재사용은 bin에서도 동일하게 가능(같은 crate 공개 API).
-- **CLI 기본 모델 사용** — 실사용 대표성은 높지만 포화 런(판당 컨텍스트 fill 100K+ 토큰)의 비용이 최대이고, 사용자 환경 설정에 따라 흔들려 재현성 핀이 약해진다.
-- **haiku 고정** — 최저가이나 포화·compaction 거동이 상위 모델과 다를 위험이 있어 결과 대표성이 떨어진다.
-- **Stage 2에도 네트워크 차단 전면 적용** — 실 claude가 API에 못 붙으면 실험 자체가 불성립. 5b의 차단 근거(실제 명령 실행·전파 위험)는 양성 필러에는 해당 없음.
+- **Building the full factorial design harness all at once right away** — if everything is built while the observation assumptions of compaction detection and saturation induction are unverified, then when the assumptions are wrong the harness and pre-registration are redone entirely. With the per-run cost unknown, the pre-registration numbers would also be all guesses. The same logic as "verify first, avoid wasting expensive runs" that ADR-0088 applied to the format spike.
+- **A cargo test integration harness (extending the control_send.rs pattern)** — the experiment is data collection, not pass/fail, so it does not fit the test runner frame (timeouts, assertion-centric, volatile results), and long runs, intermediate saving, and partial resuming are awkward. Infrastructure reuse is equally possible from a bin (the same crate's public API).
+- **Using the CLI default model** — high representativeness of real use, but the saturation runs (context fill of 100K+ tokens per run) cost the most, and it wobbles with the user's environment settings, weakening the reproducibility pin.
+- **Fixing haiku** — the cheapest, but saturation and compaction behavior may differ from higher models, lowering the representativeness of the results.
+- **Applying the network block fully to Stage 2 as well** — if the real claude cannot reach the API, the experiment itself does not hold. The basis for the block in 5b (the risk of actually executing and propagating commands) does not apply to benign fillers.
 
 ## 근거
-- 사용자 위임(2026-07-20 새벽 채팅): 방향 일임 + "멈추지 말고 쭉 진행, 커밋푸시 알아서, 마지막 스텝까지 결과".
-- Explore 정찰(2026-07-20): 실 스폰 선례 `crates/engram-dashboard-daemon/tests/control_send.rs`(spawn_json_agent·skip_no_claude), 토큰 관측 `OutputEvent::Usage`(backend/claude.rs), compaction 감지·필러·재현성 핀 부재 확인.
-- 환경 실측: claude CLI 2.1.170(스폰 선례 주석과 동일 버전), node v24.14.0.
-- ADR-0088 결정 2(b 슬라이스 증분 취지)·결정 5(하네스 요건)의 구체화 — 상위 결정과 모순 없음.
+- User delegation (chat of the early morning of 2026-07-20): delegating the direction + "do not stop, keep going, commit and push on your own, results through the last step".
+- Explore reconnaissance (2026-07-20): the real spawn precedent `crates/engram-dashboard-daemon/tests/control_send.rs` (spawn_json_agent, skip_no_claude), token observation `OutputEvent::Usage` (backend/claude.rs), confirmed absence of compaction detection, fillers, and reproducibility pins.
+- Environment measurement: claude CLI 2.1.170 (the same version as in the spawn precedent comment), node v24.14.0.
+- The concretization of ADR-0088 decision 2 (the intent of b-slice increments) and decision 5 (harness requirements) — no contradiction with the parent decisions.
 
 ## 영향 / 불변식
-- **파일럿 실측 없이 본런 셀 배분 확정 금지** — 사전등록의 수치(셀·반복·상한)는 파일럿 실측치에서만 도출한다.
-- **실험 bin은 운영 빌드 미포함** — `required-features = ["test-harness"]`. 릴리즈 아티팩트에 실험 코드가 유입되면 이 ADR 위반(기존 do-not "릴리즈를 --all-targets로 빌드 금지"와 같은 계열).
-- **하드 상한 없는 실험 런 금지** — 스폰 수·런당 누적 토큰·턴 수·wallclock 상한이 코드에 박혀야 실행 가능.
-- **판정 = 지속 처리 유지** — 즉시 ack를 성공 판정으로 쓰지 않는다(ADR-0088 재확인).
-- **주입/셸 확장 케이스는 이 하네스 사용 금지** — Stage 4에서 ADR-0088 5b 전체 요건(네트워크 차단 포함)과 함께만.
-- 사전등록 자동 채택은 이 세션 1회성 — 다음 세션부터 사용자 승인 게이트 복귀.
+- **No fixing the main-run cell allocation without the pilot measurement** — the numbers of the pre-registration (cells, repetitions, caps) are derived only from the pilot measurements.
+- **The experiment bin is not included in production builds** — `required-features = ["test-harness"]`. If experiment code flows into a release artifact, this ADR is violated (the same family as the existing do-not "do not build the release with --all-targets").
+- **No experiment run without hard caps** — it is executable only if caps on spawn count, cumulative tokens per run, turn count, and wallclock are planted in the code.
+- **Decision = sustained processing is kept** — do not use an immediate ack as a success decision (ADR-0088 reconfirmed).
+- **No use of this harness for injection/shell expansion cases** — only in Stage 4, together with the full ADR-0088 5b requirements (including the network block).
+- The automatic adoption of the pre-registration is one-time for this session — from the next session the user approval gate returns.

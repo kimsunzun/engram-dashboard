@@ -26,8 +26,8 @@ vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: () => ({ label: () => 'slot-popup-1' }),
 }))
 
-// ── WindowLayout stub — 내부 로직은 WindowLayout.test 가 커버 · 알림 층은 `notices` 로 받아 그 안에 그린다(제목 줄 아래
-//   자리는 WindowLayout.test 「알림 층의 자리」 몫) ──
+// ── WindowLayout stub — internal logic is covered by WindowLayout.test · the notice layer is received as `notices` and drawn inside it (the spot below the title bar
+//   is WindowLayout.test's 「알림 층의 자리」 (the notice layer's spot) share) ──
 vi.mock('../components/layout/WindowLayout', () => ({
   default: ({ label, notices }: { label: string; notices?: ReactNode }) => (
     <div data-testid="window-layout" data-label={label}>
@@ -36,7 +36,7 @@ vi.mock('../components/layout/WindowLayout', () => ({
   ),
 }))
 
-// ── 연결 상태 표면 대역 — 연결 띠를 띄우려고(ConnectionNotice.test 와 같은 모양) ──
+// ── Connection-state surface stand-in — to bring up the connection strip (same shape as ConnectionNotice.test) ──
 const { connection } = vi.hoisted(() => {
   const listeners = new Set<() => void>()
   const connection = {
@@ -87,12 +87,12 @@ describe('PopoutPage (탭 소유 모델, ADR-0057)', () => {
 
   it('★view:closed 은퇴(G2)★: PopoutPage 는 view:closed 를 구독하지 않는다(자가종료 리스너 제거)', () => {
     render(<PopoutPage />)
-    // 옛 버그: view:closed 리스너로 창 자가종료 → 이중 발화/재진입.
+    // Old bug: window self-exit via a view:closed listener → double fire/re-entry.
     expect(listeners.has('view:closed')).toBe(false)
   })
 })
 
-// jsdom 은 크기를 재지 못한다 — 「밀지 않는다」를 계산된 위치와 구조로 단언한다.
+// jsdom cannot measure sizes — assert 「밀지 않는다」 (does not push) with computed position and structure.
 describe('PopoutPage — 연결 띠는 레이아웃을 덮는다(ADR-0277)', () => {
   function mount(connectionError: string | null) {
     connection.connectionError = connectionError
@@ -107,7 +107,7 @@ describe('PopoutPage — 연결 띠는 레이아웃을 덮는다(ADR-0277)', () 
     }
   }
 
-  // 덮는 자리는 WindowLayout 이 정한다 — 제목 줄 아래 캔버스 칸(사용자 결정 2026-10-26 · T-66).
+  // The covering spot is decided by WindowLayout — the canvas area below the title bar (user decision 2026-10-26 · T-66).
   it('연결 띠는 덮는 층 안이고, 층은 WindowLayout 의 notices 로 넘어가 계산된 위치가 absolute 로 기준 칸의 맨 위에 붙는다', () => {
     const { box, overlay, windowLayout } = mount('폴더 문제')
     const alert = screen.getByRole('alert')
@@ -116,7 +116,7 @@ describe('PopoutPage — 연결 띠는 레이아웃을 덮는다(ADR-0277)', () 
     expect(style.position).toBe('absolute')
     expect([style.top, style.left, style.right]).toEqual(['0px', '0px', '0px'])
     expect(windowLayout.contains(overlay)).toBe(true)
-    // 감싼 칸 = WindowLayout 의 자리(positioned 로 둔다 — 알림 층의 기준은 WindowLayout 안 칸이다).
+    // Wrapping area = WindowLayout's spot (keep it positioned — the notice layer's reference is an area inside WindowLayout).
     expect(getComputedStyle(box).position).toBe('relative')
   })
 

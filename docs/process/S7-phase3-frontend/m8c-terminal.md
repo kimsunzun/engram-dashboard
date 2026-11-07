@@ -1,11 +1,11 @@
-# 모듈 8c — Phase 3c: TerminalSlot 실제 PTY 연결 브리핑 (담당: dcs24, Sonnet)
+# Module 8c — Phase 3c: connect TerminalSlot to the real PTY briefing (owner: dcs24, Sonnet)
 
-발신: ed12 (매니저)
-근거: `docs/frontend-integration-lld.md` §4(TerminalSlot), §4-1(에러/Exited 가드), §8.
-목적: **첫 E2E.** 더미 write → 실제 PTY subscribe. spawn→출력→입력→kill이 실제 창에서 동작.
-선행: 기존 src/components/slot/TerminalSlot.tsx, SlotContextMenu.tsx, slotStore/agentStore 읽고 연결.
+From: ed12 (manager)
+Source: `docs/frontend-integration-lld.md` §4 (TerminalSlot), §4-1 (error/Exited guard), §8.
+Purpose: **the first E2E.** Dummy write → real PTY subscribe. spawn→output→input→kill works in a real window.
+Prerequisite: read the existing src/components/slot/TerminalSlot.tsx, SlotContextMenu.tsx, slotStore/agentStore and connect to them.
 
-## 1. decodeBase64Bytes 헬퍼 (src/api/ 또는 util)
+## 1. decodeBase64Bytes helper (src/api/ or util)
 ```ts
 export function decodeBase64Bytes(b64: string): Uint8Array {
   // feature-detect Uint8Array.fromBase64 (신규), 없으면 atob fallback
@@ -17,9 +17,9 @@ export function decodeBase64Bytes(b64: string): Uint8Array {
 }
 ```
 
-## 2. TerminalSlot.tsx — 더미 제거, 실제 연결 (§4 패턴 그대로)
+## 2. TerminalSlot.tsx — remove the dummy, connect for real (§4 pattern as written)
 
-**subscribe (핵심 — C2/T-2/G-1 전부 준수):**
+**subscribe (the core — comply with all of C2/T-2/G-1):**
 ```ts
 useEffect(() => {
   if (!agentId) return
@@ -43,7 +43,7 @@ useEffect(() => {
 }, [agentId])
 ```
 
-**키 입력 → stdin:**
+**Key input → stdin:**
 ```ts
 useEffect(() => {
   if (!agentId || !terminal) return
@@ -52,22 +52,22 @@ useEffect(() => {
 }, [agentId, terminal])
 ```
 
-**resize → resizePty:** 기존 FitAddon 흐름에 추가 — fit 후 `ptyApi.resizePty(agentId, terminal.cols, terminal.rows)`. (ResizeObserver/allotment 리사이즈 핸들러가 이미 있으면 거기에 호출 추가)
+**resize → resizePty:** add to the existing FitAddon flow — after fit, `ptyApi.resizePty(agentId, terminal.cols, terminal.rows)`. (If a ResizeObserver/allotment resize handler already exists, add the call there)
 
-**Exited 가드 (M4):** agentStore의 해당 agent status.type이 Exited/Failed/Killed면 입력 비활성 + overlay 표시(종료됨). T-4대로 status는 표시용.
+**Exited guard (M4):** if the agent's status.type in agentStore is Exited/Failed/Killed, disable input + show an overlay (terminated). Per T-4, status is for display.
 
-## 3. SlotContextMenu.tsx — spawn/kill 트리거 (§8)
-- 기존 splitSlot 외에 **spawnAgent**(cwd) + **killAgent** 추가.
-- spawnAgent: `ptyApi.spawnAgent(cwd)` → 반환 AgentInfo.id를 해당 slot에 할당(slotStore). cwd는 일단 고정 기본값(예: 사용자 홈 또는 입력 프롬프트 — 검증 단계라 단순하게).
-- killAgent: 현재 slot의 agentId로 `ptyApi.killAgent`.
+## 3. SlotContextMenu.tsx — spawn/kill triggers (§8)
+- Besides the existing splitSlot, add **spawnAgent**(cwd) + **killAgent**.
+- spawnAgent: `ptyApi.spawnAgent(cwd)` → assign the returned AgentInfo.id to that slot (slotStore). For cwd, use a fixed default for now (e.g. the user's home or an input prompt — keep it simple since this is a verification stage).
+- killAgent: `ptyApi.killAgent` with the current slot's agentId.
 
-## 4. AgentTree.tsx — 더미 → 실제 (§8)
-- `dummyAgents`/`dummyGroups` 제거 → `useAgentStore`의 `agents`(AgentInfo[]) 사용.
-- status 색상: `agent.status.type`('Running'|'Exiting'|'Exited'|'Failed'|'Killed') 기반 분기.
-- 트리 클릭 → 포커스 slot에 agentId 할당(기존 slotStore 흐름 유지).
+## 4. AgentTree.tsx — dummy → real (§8)
+- Remove `dummyAgents`/`dummyGroups` → use `agents` (AgentInfo[]) from `useAgentStore`.
+- Status color: branch on `agent.status.type` ('Running'|'Exiting'|'Exited'|'Failed'|'Killed').
+- Tree click → assign the agentId to the focused slot (keep the existing slotStore flow).
 
-## 5. (선행) 3b minor 수정 — initEventBus in-flight 가드
-StrictMode 이중마운트 레이스 방지. 모듈 레벨:
+## 5. (Prerequisite) 3b minor fix — initEventBus in-flight guard
+Prevents the StrictMode double-mount race. At module level:
 ```ts
 let initPromise: Promise<void> | null = null
 export function initEventBus() {
@@ -78,17 +78,17 @@ export function initEventBus() {
 // HMR dispose에서 initPromise = null 도 리셋
 ```
 
-## 규칙·품질
-- C2(reset)/T-2(dedup)/G-1(delete onmessage)/명시적 unsubscribe 전부 필수 — 누락 시 메모리 누수·중복 출력.
-- StrictMode 이중 effect 안전(cancelled flag).
-- 주석: 각 가드의 이유(왜 reset, 왜 dedup, 왜 delete).
+## Rules and quality
+- C2 (reset) / T-2 (dedup) / G-1 (delete onmessage) / explicit unsubscribe are all required — omitting any causes memory leaks and duplicate output.
+- Safe under StrictMode's double effect (cancelled flag).
+- Comments: the reason for each guard (why reset, why dedup, why delete).
 
-## 검증 & 보고 (E2E — 실제 화면)
-`npm run tauri dev` 띄우고:
-1. context menu로 spawnAgent → slot에 PTY 셸 출력 뜸
-2. 키보드 입력 → 셸에 반영(echo)
-3. 창/슬롯 리사이즈 → 셸 cols/rows 따라감(깨짐 없음)
-4. killAgent → 종료 overlay, 목록에서 제거(T-4)
+## Verification and report (E2E — the real screen)
+Bring up `npm run tauri dev` and:
+1. spawnAgent from the context menu → PTY shell output appears in the slot
+2. Keyboard input → reflected in the shell (echo)
+3. Window/slot resize → shell cols/rows follow (no breakage)
+4. killAgent → terminated overlay, removed from the list (T-4)
 
-보고: `orch 12 "⟁dcs24 Phase3c 완료 — TerminalSlot subscribe/입력/resize + spawn/kill, E2E 화면동작: <관찰>"`
-※ 이건 사용자가 직접 화면 확인할 단계다. 동작 스크린샷/로그 첨부하면 좋음. 막히면 30분 내 중간보고.
+Report: `orch 12 "⟁dcs24 Phase3c 완료 — TerminalSlot subscribe/입력/resize + spawn/kill, E2E 화면동작: <관찰>"`
+※ This is a stage where the user checks the screen directly. Attaching a screenshot/log of the behavior is good. If stuck, send an interim report within 30 minutes.

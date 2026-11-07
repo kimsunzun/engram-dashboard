@@ -1,15 +1,15 @@
-//! 통로가 자식을 띄우는 자리 — 세 통로(stdio · pty · codex)가 함께 쓰는 띄우기 실패 가드 [`ChildGuard`] 와 무리
-//! 넣기 [`new_group_with`], 파이프 통로 둘(stdio · codex)의 띄우기 [`spawn_piped`] 와 stderr 비우기 [`drain_stderr`].
+//! Where a path spawns its child — the spawn-failure guard [`ChildGuard`] shared by the three paths (stdio · pty · codex), the group
+//! adoption [`new_group_with`], and the spawning [`spawn_piped`] and stderr draining [`drain_stderr`] of the two pipe paths (stdio · codex).
 //!
-//! ★띄운 뒤 통로가 서기 전의 실패 경로는 무리와 가드가 정리한다★ — 띄운 바로 다음에 가드를 세우고, 띄운 뒤 첫 실패
-//!   가능 걸음이 무리 넣기다. 넣은 뒤의 `?` 하나가 돌아가면 무리가 넣은 자식과 그 뒤에 뜬 후손을, 가드가 직속 자식을
-//!   끝낸다(순서 = [`new_group_with`] doc). 둘 다 이 띄우기 **실패** 경로만 다룬다: 통로가 선 뒤의 끄기는 통로
-//!   `shutdown()` 의 kill 인과(ADR-0001) 그대로이고, 성공 경로에서 가드는 아무것도 끄지 않고 풀린다. 그 배치는 소스
-//!   시험 `the_guard_is_armed_and_the_child_adopted_first_after_spawn` 이 잰다 — 실패를 주입할 이음매가 없는 자리다.
-//! ★넣기 전에 뜬 후손은 어느 경로에서도 안 끝난다 — 이 모듈은 닫지 않는다★: 셋 다 깨운 채 띄운 뒤 무리에 넣으므로,
-//!   넣기 전에 직속 자식(`cmd.exe`)이 이미 띄운 손자는 무리 밖이다(platform `group` 의 `adopt` doc). 성공 경로에서는
-//!   통로를 닫아도(`KILL_ON_JOB_CLOSE`) 안 끝나고, 실패 경로에서는 가드가 직속 자식만 끈다. 무리 넣기 자체가 실패해도
-//!   같다. 닫는 법 = 멈춘 채 띄우기(stdio · codex 만 — portable-pty 엔 그 길이 없다)이고 범위 밖이다(TRD
+//! ★The group and the guard clean up the failure path after spawn and before the path stands★ — the guard is set up right after spawn, and the first failable
+//!   step after spawn is group adoption. If a single `?` after adoption returns, the group ends the adopted child and the descendants spawned after it, and the guard
+//!   ends the direct child (order = [`new_group_with`] doc). Both cover only this spawn **failure** path: ending after the path stands is
+//!   the kill causality of the path's `shutdown()` (ADR-0001) unchanged, and on the success path the guard is released without ending anything. That placement is
+//!   measured by the source test `the_guard_is_armed_and_the_child_adopted_first_after_spawn` — there is no seam to inject a failure here.
+//! ★A descendant spawned before adoption is not ended on any path — this module does not close this gap★: all three spawn awake and then adopt into the group,
+//!   so a grandchild that the direct child (`cmd.exe`) already spawned before adoption is outside the group (the `adopt` doc of platform `group`). On the success path
+//!   closing the path does not end it either (`KILL_ON_JOB_CLOSE`), and on the failure path the guard ends only the direct child. The same holds
+//!   when group adoption itself fails. The way to close it = spawn suspended (stdio · codex only — portable-pty has no such route) and is out of scope (TRD
 //!   `docs/process/S21-crate-boundaries/trd-A-data-file-unification.md` §3-7 · `docs/tracking.md` T-53).
 // ADR-0291
 
@@ -25,17 +25,17 @@ use engram_dashboard_platform::spawn::hide_console_window;
 use crate::output_core::OutputCore;
 use crate::types::{CommandSpec, PtyError};
 
-/// [`ChildGuard`] 가 쥘 수 있는 자식 — std `Child` 와 portable-pty 자식을 같은 규칙으로 끄고 거두게 한다.
+/// A child that [`ChildGuard`] can hold — lets a std `Child` and a portable-pty child be ended and reaped by the same rule.
 ///
-/// ★구현은 거둘 때까지 자식의 프로세스 핸들을 쥐어야 한다★ — [`new_group_with`] 가 가드의 번호로 자식을 여는데,
-///   핸들을 쥐는 동안에는 그 번호가 다른 프로세스로 넘어가지 않는다. 둘 다 버려질 때 핸들을 닫는다.
+/// ★An implementation must hold the child's process handle until it is reaped★ — [`new_group_with`] opens the child by the guard's pid, and
+///   while the handle is held that pid is not handed to another process. Both close the handle when dropped.
 pub(crate) trait Reap {
-    /// `None` = 번호를 모른다 — 무리에 넣지 못한다.
+    /// `None` = the pid is unknown — the child cannot be put into the group.
     fn pid(&self) -> Option<u32>;
-    /// 직속 자식에게 끝내기를 건다 — 기다리지 않는다. 이미 끝난 자식이면 `Ok` 다. ★Windows 에서는 `Ok` 가 끝내기가
-    /// 먹었다는 뜻이 아니다★(두 구현의 doc).
+    /// Requests the direct child to end — does not wait. If the child has already ended it is `Ok`. ★On Windows `Ok` does not mean the end request
+    /// took effect★ (docs of both implementations).
     fn kill_direct(&mut self) -> io::Result<()>;
-    /// 끝났으면 거두고 `true` · 아직 돌면 `false` — 기다리지 않는다. `Err` = 끝났는지 물을 수 없다.
+    /// Reaps and returns `true` if it has ended · `false` if it is still running — does not wait. `Err` = cannot ask whether it has ended.
     fn try_reap(&mut self) -> io::Result<bool>;
 }
 
@@ -44,8 +44,8 @@ impl Reap for Child {
         Some(self.id())
     }
 
-    /// std 의 Windows `kill` 은 `TerminateProcess` 가 접근 거부로 실패해도 그 자식이 아직 돌면(`try_wait` 가 `Err` 가
-    /// 아니면) `Ok` 다.
+    /// std's Windows `kill` returns `Ok` even if `TerminateProcess` fails with access denied, as long as that child is still running (`try_wait` is
+    /// not `Err`).
     fn kill_direct(&mut self) -> io::Result<()> {
         self.kill()
     }
@@ -60,7 +60,7 @@ impl Reap for Box<dyn portable_pty::Child + Send + Sync> {
         self.process_id()
     }
 
-    /// portable-pty 0.8.1 의 Windows `kill` 은 `TerminateProcess` 의 결과를 버리고 늘 `Ok` 다.
+    /// portable-pty 0.8.1's Windows `kill` discards the result of `TerminateProcess` and always returns `Ok`.
     fn kill_direct(&mut self) -> io::Result<()> {
         self.kill()
     }
@@ -70,27 +70,27 @@ impl Reap for Box<dyn portable_pty::Child + Send + Sync> {
     }
 }
 
-/// 가드가 끈 직속 자식을 거두려고 기다리는 상한 — 넘기면 warn 하고 핸들을 놓는다.
+/// Upper bound on how long the guard waits to reap the direct child it ended — past it, warn and release the handle.
 ///
-/// ★상한이 있어야 한다★ — Windows 에서는 [`Reap::kill_direct`] 의 `Ok` 가 끝내기가 먹었다는 뜻이 아니어서, 시한 없이
-///   기다리면 끄기가 실제로 실패한 자식이 스스로 끝날 때까지 띄우기를 부른 쪽이 선다. 2 초는 재지 않은 여유값이다.
+/// ★A bound is required★ — on Windows the `Ok` of [`Reap::kill_direct`] does not mean the end request took effect, so waiting without a deadline
+///   would stall the caller of spawn until a child whose kill really failed ends by itself. 2 seconds is an unmeasured margin.
 const REAP_BUDGET: Duration = Duration::from_secs(2);
 const REAP_POLL: Duration = Duration::from_millis(10);
 
-/// 띄운 자식을 통로가 넘겨받기 전까지 쥐는 가드 — 풀지 않고 버려지면 직속 자식을 끄고 [`REAP_BUDGET`] 까지 기다려
-/// 거둔다.
+/// A guard that holds the spawned child until the path takes it over — if dropped without being released, it ends the direct child and waits up to [`REAP_BUDGET`]
+/// to reap it.
 ///
-/// ★`Child` 는 drop 으로 자식을 끄지 않는다★ — 띄운 바로 다음 줄에서 이것으로 감싸고, 통로를 세울 마지막 실패 가능
-///   걸음 뒤에 [`Self::into_inner`] 로 푼다. 그 뒤의 끄기는 통로 몫이다.
-/// ★끄는 것은 직속 자식뿐이다 — 후손은 무리가 끝낸다★: Windows 의 claude · codex 는 backend 가 platform
-///   `console_command` 로 감싼 `cmd.exe /c <CLI>` 로 떠 실제 CLI 가 손자다. 가드를 세운 바로 다음 걸음이
-///   [`new_group_with`] 라, 넣은 뒤의 실패에서는 무리가 넣은 뒤에 뜬 후손까지 끝내고 이 가드는 직속 자식을 다시 끈다
-///   (이미 끝났으면 무해). 넣기 전에 뜬 후손 · 넣기 자체가 실패한 경우 · 무리가 없는 OS(Windows 밖)는 직속 자식만
-///   끝난다(모듈 doc).
-/// ★번호로 후손을 찾아 끄지 말 것★ — `taskkill /T`(platform `process::kill_tree`)는 부모 번호만으로 나무를 엮고 시작
-///   시각을 안 봐, 죽은 부모의 번호를 단 프로세스가 흔한 이 PC 에서(실측 2026-10-10 · U7 리뷰) 그 번호를 다시 받은
-///   `cmd.exe` 아래로 남의 나무까지 끈다. 신원 목록을 찍고(platform `process::subtree`) 하나씩 시작시각을 다시 읽어
-///   끄는 길도 찍은 뒤 읽기 전에 번호가 넘어가면 남을 끈다(ADR-0291 「거부한 대안」).
+/// ★`Child` does not end the child on drop★ — wrap it with this on the line right after spawn, and release it with [`Self::into_inner`] after the last
+///   step that can fail before the path stands. Ending after that is the path's job.
+/// ★It ends the direct child only — the group ends the descendants★: on Windows claude · codex are wrapped by the backend with platform
+///   `console_command` and run as `cmd.exe /c <CLI>`, so the real CLI is a grandchild. The step right after the guard is set up is
+///   [`new_group_with`], so on a failure after adoption the group ends even the descendants spawned after adoption and this guard ends the direct child again
+///   (harmless if already ended). Descendants spawned before adoption · a failed adoption · an OS with no group (outside Windows) end only the direct child
+///   (module doc).
+/// ★Do not find and end descendants by pid★ — `taskkill /T` (platform `process::kill_tree`) builds the tree from parent pids alone and does not look at start
+///   time, so on this PC, where processes carrying a dead parent's pid are common (measured 2026-10-10 · U7 review), it kills even a stranger's tree under the
+///   `cmd.exe` that got that pid again. The route of snapshotting an identity list (platform `process::subtree`) and re-reading each start time before
+///   ending it also kills a stranger if the pid is handed over after the snapshot and before the read (ADR-0291 「거부한 대안」).
 // ADR-0291
 pub(crate) struct ChildGuard<C: Reap> {
     child: Option<C>,
@@ -111,7 +111,7 @@ impl<C: Reap> ChildGuard<C> {
             .expect("가드는 풀리기 전까지 자식을 쥔다")
     }
 
-    /// 가드를 풀고 자식을 넘긴다 — 이 뒤로는 가드가 아무것도 끄지 않는다.
+    /// Releases the guard and hands the child over — after this the guard ends nothing.
     pub(crate) fn into_inner(mut self) -> C {
         self.child.take().expect("가드는 한 번만 풀린다")
     }
@@ -154,15 +154,15 @@ impl<C: Reap> Drop for ChildGuard<C> {
     }
 }
 
-/// 새 무리를 만들고 `pid` 를 넣는다. `None` = 넣을 번호가 없다(빈 무리만 만든다).
+/// Creates a new group and adopts `pid` into it. `None` = no pid to adopt (creates only an empty group).
 ///
-/// ★띄운 자식을 쥔 [`ChildGuard`] 를 세운 바로 다음, 띄운 뒤의 **첫** 실패 가능 걸음으로 부른다★ — 넣기가 늦을수록
-///   직속 자식이 무리 밖에서 띄우는 후손이 는다(모듈 doc). `pid` = 가드의 번호(가드가 핸들을 쥐어 번호가 안 넘어간다
+/// ★Call it as the **first** failable step after spawn, right after setting up the [`ChildGuard`] that holds the spawned child★ — the later the adoption,
+///   the more descendants the direct child spawns outside the group (module doc). `pid` = the guard's pid (the guard holds the handle, so the pid is not handed over
 ///   — [`Reap`] doc).
-/// 실패 경로의 정리 — 부르는 쪽 지역 변수는 선언 역순으로 버려지고, 가드를 먼저 선언하므로:
-///   - 이것 뒤의 걸음이 실패하면 돌려받은 무리 주인이 먼저 버려져 Job 이 닫히며 OS 가 넣은 자식과 넣은 뒤에 뜬 후손을
-///     끝내고(`KILL_ON_JOB_CLOSE`), 이어 가드가 직속 자식을 다시 끄고(이미 끝났으면 무해) 거둔다.
-///   - 이것이 실패하면 무리가 없다(넣기 실패면 이 안에서 빈 무리가 먼저 버려진다) — 가드가 직속 자식만 끈다.
+/// Cleanup on the failure path — the caller's locals are dropped in reverse declaration order, and the guard is declared first:
+///   - If a step after this fails, the returned group owner is dropped first and the Job closes, so the OS ends the adopted child and the descendants spawned after adoption
+///     (`KILL_ON_JOB_CLOSE`), then the guard ends the direct child again (harmless if already ended) and reaps it.
+///   - If this fails there is no group (on a failed adoption the empty group is dropped first inside this) — the guard ends only the direct child.
 // ADR-0291
 pub(crate) fn new_group_with(pid: Option<u32>) -> Result<GroupOwner, PtyError> {
     let group = GroupOwner::new()?;
@@ -172,10 +172,10 @@ pub(crate) fn new_group_with(pid: Option<u32>) -> Result<GroupOwner, PtyError> {
     Ok(group)
 }
 
-/// [`spawn_piped`] 이 넘기는 것 — 무리에 든 자식과 그 파이프 셋.
+/// What [`spawn_piped`] hands over — the child in the group and its three pipes.
 ///
-/// ★여기서부터는 가드가 없다★ — 받는 통로는 실패할 걸음 없이 자기 칸에 옮긴다. 이것을 버리면 Windows 는 무리
-///   주인이 함께 버려지며 멤버를 끝내지만, 무리가 없는 OS(Windows 밖)에서는 자식이 남는다.
+/// ★There is no guard from here on★ — the receiving path moves it into its own field with no failable step. Dropping this on Windows drops the group
+///   owner too and ends the members, but on an OS with no group (outside Windows) the child is left running.
 pub(crate) struct PipedChild {
     pub(crate) child: Child,
     pub(crate) stdin: Option<ChildStdin>,
@@ -184,10 +184,10 @@ pub(crate) struct PipedChild {
     pub(crate) group: GroupOwner,
 }
 
-/// `spec` 을 파이프 셋 · 창 없이 띄워 새 무리에 넣는다. 넣기가 실패하면 [`ChildGuard`] 가 직속 자식을 끄고 돌아간다.
-/// `what` = 띄우기 실패 문구의 머리(`"{what} spawn: …"`).
+/// Spawns `spec` with three pipes and no window, and puts it into a new group. If adoption fails, [`ChildGuard`] ends the direct child and it returns early.
+/// `what` = the head of the spawn-failure message (`"{what} spawn: …"`).
 ///
-/// `spec` 을 그대로 띄운다 — Windows shim 감싸기(`cmd.exe /c …`)는 backend 가 platform `console_command` 로 이미 했다.
+/// Spawns `spec` as is — the Windows shim wrapping (`cmd.exe /c …`) was already done by the backend with platform `console_command`.
 // ADR-0291
 pub(crate) fn spawn_piped(spec: &CommandSpec, what: &str) -> Result<PipedChild, PtyError> {
     let mut cmd = Command::new(&spec.program);
@@ -196,12 +196,12 @@ pub(crate) fn spawn_piped(spec: &CommandSpec, what: &str) -> Result<PipedChild, 
     for (k, v) in &spec.env {
         cmd.env(k, v);
     }
-    // 세 파이프 모두 확보 — stdout/stderr를 우리가 읽어야 자식이 파이프 버퍼 full로 블록되지 않는다.
+    // All three pipes secured — we must read stdout/stderr, or the child blocks on a full pipe buffer.
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    // 헤드리스 백그라운드 프로세스다 — 데몬은 창 없는 프로세스일 수 있어 cmd.exe shim 이 콘솔을 새로 띄운다.
+    // A headless background process — the daemon may be a windowless process, so the cmd.exe shim opens a new console.
     hide_console_window(&mut cmd);
 
     let child = cmd
@@ -224,19 +224,19 @@ pub(crate) fn spawn_piped(spec: &CommandSpec, what: &str) -> Result<PipedChild, 
     })
 }
 
-/// 자식 stderr 를 줄 단위로 끝까지 비우는 스레드를 띄운다 — 줄마다 마스킹해 `core` 의 진단 버퍼에 쌓고 debug 로
-/// 흘린다. 스레드를 못 띄우면 삼키지 않고 warn 을 남긴 뒤 돌아간다(FIX 4). `thread_name` = 스레드 이름 · `what` = 그
-/// warn 의 머리.
+/// Spawns a thread that drains the child's stderr to the end line by line — masks each line, accumulates it into `core`'s diagnostic buffer, and
+/// sends it to debug. If the thread cannot be spawned, it leaves a warn instead of swallowing the failure and returns (FIX 4). `thread_name` = the thread name · `what` = the head of that
+/// warn.
 ///
-/// ★비우지 않으면 자식이 stderr 파이프 버퍼 full 로 블록해 진행이 멈춘다★.
-/// ★출력 스트림에 섞지 않는다(ADR-0044)★: 구조화 모드의 stdout 은 줄 단위 JSON 이라 비-JSON 진단 줄이 끼면 파서가
-///   깨진다.
-/// ★출력 링이 아니라 진단 버퍼에 쌓는다(ADR-0172)★: 구조화 세션에서는 이 텍스트가 활성화 실패의 **유일한 증거**다
-///   (claude 의 "No conversation found with session ID: …" 가 여기로만 온다). 계약은 `OutputCore::push_diagnostic`.
-///   ★이 스레드가 stderr 를 읽는 유일한 자리다★ — 파이프는 두 번 읽을 수 없으니 두 번째 캡처를 만들지 않는다.
-/// ★마스킹은 버퍼에도 그대로 적용한다(FIX 4)★: 외부 프로세스 출력이라 자격증명이 섞일 수 있고, 이 텍스트는 실패
-///   사유로 다시 로그에 실릴 수 있다 — 원문을 붙들면 마스킹을 우회하는 경로가 생긴다.
-/// ★레벨 = debug(FIX 4)★: claude 는 진행 · 진단 텍스트를 stderr 로 흘리는 것이 정상이다 — warn 이면 로그를 범람시킨다.
+/// ★If not drained, the child blocks on a full stderr pipe buffer and stops making progress★.
+/// ★Do not mix it into the output stream (ADR-0044)★: stdout in structured mode is line-delimited JSON, so a non-JSON diagnostic line in between breaks the
+///   parser.
+/// ★Accumulate into the diagnostic buffer, not the output ring (ADR-0172)★: in a structured session this text is the **only evidence** of an activation failure
+///   (claude's "No conversation found with session ID: …" arrives only here). Contract = `OutputCore::push_diagnostic`.
+///   ★This thread is the only place that reads stderr★ — a pipe cannot be read twice, so do not make a second capture.
+/// ★Masking applies to the buffer as well (FIX 4)★: it is external process output and may contain credentials, and this text may be logged again as a failure
+///   reason — keeping the raw text would create a path around masking.
+/// ★Level = debug (FIX 4)★: it is normal for claude to stream progress · diagnostic text to stderr — at warn it would flood the log.
 // ADR-0044
 // ADR-0172
 pub(crate) fn drain_stderr(
@@ -255,8 +255,8 @@ pub(crate) fn drain_stderr(
                 match line {
                     Ok(l) if !l.is_empty() => {
                         let masked = mask_secrets(&l);
-                        // ★쌓기가 로그보다 **먼저**다★: 기본 로그 필터는 warn 이라 아래 debug 줄은 평소 버려진다 —
-                        //   분류를 그 줄에 매달면 로그 레벨이 기능을 켜고 끈다.
+                        // ★Accumulating comes **before** logging★: the default log filter is warn, so the debug line below is normally discarded —
+                        //   hanging the classification on that line would let the log level switch the feature on and off.
                         diag_core.push_diagnostic(&masked);
                         tracing::debug!(target: "agent_stderr", agent = %agent_id, "{}", masked)
                     }
@@ -275,8 +275,8 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// 운영 구획만 — 첫 시험 모듈 앞에서 자르고 줄마다 `//` 뒤를 걷는다. 이 저장소의 주석은 자기가 지키는 이름을 그대로
-    /// 인용하므로, 걷지 않으면 주석 한 줄이 실물 호출 행세를 한다.
+    /// Production section only — cut before the first test module and strip everything after `//` on each line. Comments in this repo quote the names they
+    /// guard verbatim, so unless stripped, a single comment line would pass for a real call.
     fn production(src: &str) -> String {
         src.split("mod tests {")
             .next()
@@ -287,7 +287,7 @@ mod tests {
             .join("\n")
     }
 
-    /// `code` 에서 `signature` 로 시작하는 함수의 본문 — 첫 `{` 부터 짝 맞는 `}` 까지.
+    /// The body of the function in `code` that starts with `signature` — from the first `{` to the matching `}`.
     fn body<'a>(code: &'a str, signature: &str) -> &'a str {
         let start = code
             .find(signature)
@@ -315,7 +315,7 @@ mod tests {
         body[from..to].trim()
     }
 
-    /// `code` 에서 낱말 `word` 가 선 자리 — 앞뒤가 식별자 글자가 아닌 것만.
+    /// The positions where the word `word` stands in `code` — only where neither neighbor is an identifier character.
     fn word_positions(code: &str, word: &str) -> Vec<usize> {
         let ident = |c: char| c.is_alphanumeric() || c == '_';
         code.match_indices(word)
@@ -327,8 +327,8 @@ mod tests {
             .collect()
     }
 
-    /// `?` 말고 함수를 일찍 떠나는 철자 — `return` 과 `let … else` 의 `else`. 둘을 가르는 것은 `else` 바로 앞이다:
-    /// `if … else` 는 `} else` 이고, `let … else` 는 초기식이 `}` 로 끝날 수 없다(Rust 문법).
+    /// Spellings other than `?` that leave a function early — `return` and the `else` of `let … else`. What tells them apart is right before `else`:
+    /// `if … else` is `} else`, and in `let … else` the initializer cannot end with `}` (Rust grammar).
     fn early_exits(code: &str) -> Vec<usize> {
         let mut found = word_positions(code, "return");
         found.extend(
@@ -349,8 +349,8 @@ mod tests {
         }
     }
 
-    /// `spawned` 의 `?` 뒤에서 — 가드 무장(`ChildGuard::new(`)이 무리 넣기(`new_group_with(`)보다 앞이고, 첫 `?` 가 무리
-    /// 넣기의 것이며, 모든 `?` 가 가드 풀기(`.into_inner()`) 앞이다. `?` 말고 일찍 떠나는 철자는 없다.
+    /// After the `?` of `spawned` — guard arming (`ChildGuard::new(`) comes before group adoption (`new_group_with(`), the first `?` is the one of group
+    /// adoption, and every `?` is before guard release (`.into_inner()`). There is no early-leave spelling other than `?`.
     fn assert_adoption_is_the_first_fallible_step_after_spawn(
         file: &str,
         body: &str,
@@ -400,11 +400,11 @@ mod tests {
         }
     }
 
-    /// ★띄운 바로 다음에 가드가 서고, 띄운 뒤 첫 실패 가능 걸음이 무리 넣기다 — 세 통로 모두★.
+    /// ★The guard is set up right after spawn, and the first failable step after spawn is group adoption — on all three paths★.
     ///
-    /// 소스에서 재는 이유 = 그 배치는 실패를 주입할 수 없는 자리다(`GroupOwner::new` · `adopt` · pty 의 `try_clone_reader`
-    /// · `take_writer` 를 실패시키는 이음매가 없다). 아래 실프로세스 항목은 가드와 무리가 끄는 것만 재고 어디에 서
-    /// 있는지는 못 본다.
+    /// Why it is measured in the source = that placement is a place where a failure cannot be injected (there is no seam to fail `GroupOwner::new` · `adopt` · the pty's `try_clone_reader`
+    /// · `take_writer`). The real-process items below measure only what the guard and the group end, and cannot see where they
+    /// stand.
     #[test]
     fn the_guard_is_armed_and_the_child_adopted_first_after_spawn() {
         let stdio = include_str!("stdio.rs");
@@ -463,7 +463,7 @@ mod tests {
         }
     }
 
-    /// 위 항목의 이른 반환 찾기가 눈멀지 않았다 — `return` 과 `let … else` 는 잡고 `if … else` 는 안 잡는다.
+    /// The early-return finder of the item above is not blind — it catches `return` and `let … else` and does not catch `if … else`.
     #[test]
     fn the_early_exit_scan_sees_return_and_let_else_but_not_if_else() {
         assert_eq!(early_exits("let x = f();\nreturn Err(e);").len(), 1);
@@ -475,7 +475,7 @@ mod tests {
         assert!(early_exits("let returned = elsewhere();").is_empty());
     }
 
-    /// 끄기는 `Ok` 인데 끝내 「아직 돈다」로 답하는 자식 — Windows 에서 끄기가 실제로 실패한 자식의 모양.
+    /// A child that, although its kill is `Ok`, still answers 「아직 돈다」 (still running) in the end — the shape of a child whose kill really failed on Windows.
     struct Unending {
         polls: Arc<AtomicUsize>,
     }
@@ -495,7 +495,7 @@ mod tests {
         }
     }
 
-    /// ★안 끝나는 직속 자식은 시한까지만 기다리고 놓는다★ — 시한 없이 기다리면 띄우기를 부른 쪽이 선다.
+    /// ★A direct child that does not end is waited for only until the deadline and then released★ — waiting without a deadline stalls the caller of spawn.
     #[test]
     fn dropping_the_guard_gives_up_on_a_child_that_does_not_end() {
         let polls = Arc::new(AtomicUsize::new(0));
@@ -518,9 +518,9 @@ mod tests {
         );
     }
 
-    // ── 실프로세스 ──────────────────────────────────────────────────────────────────
+    // ── Real processes ──────────────────────────────────────────────────────────
 
-    /// ★가드를 풀면 아무것도 끄지 않는다★ — 성공 경로의 끄기는 통로 `shutdown()` 몫이다(ADR-0001).
+    /// ★Releasing the guard ends nothing★ — ending on the success path is the path's `shutdown()` (ADR-0001).
     #[cfg(windows)]
     #[test]
     fn releasing_the_guard_leaves_the_child_running() {
@@ -534,14 +534,14 @@ mod tests {
         drop(ChildGuard::new(child));
     }
 
-    /// ★가드를 버리면 직속 자식이 끝난다★ — 무리 넣기가 실패한 자리의 정리가 이것 하나다.
+    /// ★Dropping the guard ends the direct child★ — at the place where group adoption failed this is the only cleanup.
     #[cfg(windows)]
     #[test]
     fn dropping_the_guard_ends_the_child() {
         assert_dropping_the_guard_ends(ping_child());
     }
 
-    /// 같은 규칙이 pty 통로의 자식(portable-pty)에도 선다.
+    /// The same rule stands for the pty path's child (portable-pty) too.
     #[cfg(windows)]
     #[test]
     fn dropping_the_guard_ends_a_pty_child() {
@@ -552,8 +552,8 @@ mod tests {
         drop(pair);
     }
 
-    /// ★이미 끝난 직속 자식의 끄기는 `Ok` 다★ — 넣은 뒤의 실패에서 무리가 먼저 끝낸 자식을 가드가 다시 끌 때 warn
-    /// 없이 거두기로 간다(`Err` 면 거두지 않는다).
+    /// ★Killing an already-ended direct child is `Ok`★ — when the guard kills again a child that the group already ended after a failure post-adoption, it goes to reaping without a warn
+    /// (with `Err` it does not reap).
     #[cfg(windows)]
     #[test]
     fn killing_an_already_ended_child_is_ok() {
@@ -563,8 +563,8 @@ mod tests {
         assert!(Reap::kill_direct(&mut child).is_ok());
     }
 
-    /// ★넣은 뒤에 실패하면 직속 자식과 손자가 함께 끝난다(무리)★ — 실제 CLI 자리에 `ping` 을 띄운다. 넣은 뒤에야
-    /// `ping` 을 띄우도록 문을 단다(`spawn_gated_cmd`).
+    /// ★If it fails after adoption, the direct child and the grandchild end together (the group)★ — `ping` is spawned in place of the real CLI. Only after adoption does
+    /// `ping` get spawned: a gate is put in front (`spawn_gated_cmd`).
     #[cfg(windows)]
     #[test]
     fn a_failure_after_adoption_ends_the_child_and_its_grandchild() {
@@ -582,8 +582,8 @@ mod tests {
         assert_tree_ended(failed, seen);
     }
 
-    /// 같은 규칙이 pty 통로의 자식에도 선다. 문도 같다 — `set /p` 가 콘솔에서 한 줄을 받을 때까지 `ping` 을 띄우지
-    /// 않고, 넣은 뒤에 master 쓰기로 그 한 줄을 준다.
+    /// The same rule stands for the pty path's child too. The gate is the same — `ping` is not spawned until `set /p` receives a line from the console,
+    /// and after adoption that one line is given by a write to the master.
     #[cfg(windows)]
     #[test]
     fn a_failure_after_adoption_ends_a_pty_child_and_its_grandchild() {
@@ -604,8 +604,8 @@ mod tests {
             "127.0.0.1",
         ]);
         let child = pair.slave.spawn_command(cmd).expect("pty 기동");
-        // 판정이 끝날 때까지 쥔다 — 입력 끝을 닫으면 conhost 가 세션을 내려 손자가 무리 아닌 길로 끝날 수 있다(재 보지
-        // 않았다).
+        // Hold it until the decision is finished — closing the input end makes conhost tear down the session, and the grandchild may end by a path other than the group (not
+        // measured).
         let mut gate = pair.master.take_writer().expect("pty 쓰기");
 
         let mut seen = None;
@@ -618,8 +618,8 @@ mod tests {
         drop(pair);
     }
 
-    /// 통로 `open` 의 배치 그대로 — 가드를 세우고 곧바로 넣은 뒤 `probe` 를 부르고 실패로 돌아간다. 돌아가며 지역
-    /// 변수가 선언 역순(무리 → 가드)으로 버려진다.
+    /// Same placement as the path's `open` — set up the guard, adopt right away, call `probe`, and return as a failure. On return the locals
+    /// are dropped in reverse declaration order (group → guard).
     #[cfg(windows)]
     fn fail_after_adoption<C: Reap>(
         child: C,
@@ -631,7 +631,7 @@ mod tests {
         Err(PtyError::SpawnFailed("주입한 실패".into()))
     }
 
-    /// 직속 자식과 그 아래 손자 `ping` 의 번호 — 손자가 무리 밖이면(넣기 전에 떴다) 실험이 성립하지 않아 패닉한다.
+    /// The pids of the direct child and the grandchild `ping` under it — if the grandchild is outside the group (it was spawned before adoption), the experiment does not hold and it panics.
     #[cfg(windows)]
     fn grandchild_in<C: Reap>(guard: &ChildGuard<C>, group: &GroupOwner) -> (u32, u32) {
         let root = guard.pid().expect("직속 자식 번호");
@@ -676,7 +676,7 @@ mod tests {
         let root = child.pid().expect("직속 자식 번호");
         let started = Instant::now();
         drop(ChildGuard::new(child));
-        // 바쁜 러너에서 스케줄 지연으로 시한을 살짝 넘겨도 거둠은 성공일 수 있다 — 여유를 둔다.
+        // On a busy runner, scheduling delay may push it slightly past the deadline and the reaping can still succeed — leave margin.
         assert!(
             started.elapsed() < REAP_BUDGET + Duration::from_secs(3),
             "가드가 끈 직속 자식을 시한 안에 못 거뒀다"
@@ -687,7 +687,7 @@ mod tests {
         );
     }
 
-    /// `ping.exe` 를 직속 자식으로 — 손자를 남기지 않아 가드 하나로 다 거둔다.
+    /// `ping.exe` as the direct child — no grandchild is left, so one guard reaps everything.
     #[cfg(windows)]
     fn ping_child() -> Child {
         let mut cmd = Command::new("ping");
@@ -711,7 +711,7 @@ mod tests {
             .expect("openpty")
     }
 
-    /// `root` 아래 손자 `ping` 의 번호 — 10 초 안에 못 보면 실험이 성립하지 않아 패닉한다.
+    /// The pid of the grandchild `ping` under `root` — if it is not seen within 10 seconds the experiment does not hold and it panics.
     #[cfg(windows)]
     fn ping_under(root: u32) -> u32 {
         use engram_dashboard_base::testing::wait_until;

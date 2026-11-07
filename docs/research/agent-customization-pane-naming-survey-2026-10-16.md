@@ -1,32 +1,32 @@
-# 에이전트 꾸미기 묶음과 그 창의 이름 관행 — light 조사
+# Naming practice for the agent-customization bundle and its pane — light survey
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| 상태 | 조사 완료 · 결정 = 슬롯 이름 「라이브러리 1~4」(뒤에 붙이지 않음 — 범용 · 사용자 2026-10-16) |
-| 날짜 | 2026-10-16 |
-| 방법 | `/research` light — 수집자 1명(검색 4회) · 메인 grounding 스팟체크 2건(WebFetch) · 적대 리뷰 없음 |
-| 질문 | 지시서 · 스킬 · 설정 · 프리셋(묶음)을 함께 둘러보는 슬롯을 무엇이라 부르나. 후보 = 라이브러리 · 에셋 · 프리셋 브라우저 · 커스터마이징 · 블록 |
-| 확신도 범례 | 확실 = 독립 교차확증 · 가능성 높음 = grounding 지지 단일 출처 · 불확실 = 미확인 |
+| Status | survey done · decision = slot name 「라이브러리 1~4」 (nothing appended — generic · user 2026-10-16) |
+| Date | 2026-10-16 |
+| Method | `/research` light — 1 collector (4 searches) · 2 main grounding spot-checks (WebFetch) · no adversarial review |
+| Question | What do we call the slot for browsing instructions · skills · settings · presets (bundles) together. Candidates = library · asset · preset browser · customization · block |
+| Confidence legend | certain = independent cross-confirmation · likely = single source backed by grounding · uncertain = unconfirmed |
 
-## 결론
+## Conclusion
 
-- **AI 코딩 도구에서 가장 가까운 선례는 Cursor 의 「Customize」 페이지다** — 플러그인 · 스킬 · MCP · 규칙 · 서브에이전트 · 명령 · 훅을 한 곳에 모아 사용자 · 팀 · 워크스페이스 범위로 관리한다. (가능성 높음 — 메인이 원문 확인) ★단 쓰임새가 다르다★ — 그 범위의 에이전트 전체에 일괄로 거는 설정 모음이고, 우리처럼 에이전트마다 다른 묶음을 골라 붙이는 곳이 아니다(겹치는 재료 = 규칙↔지시서 · 스킬 · 플러그인↔프리셋뿐). 그래서 이름의 근거로는 약하다.
-- **「에셋」을 이 묶음의 총칭으로 쓰는 AI 코딩 도구는 찾지 못했다.** (불확실 — 4회 검색 범위 안에서)
-- **「라이브러리」를 이 창의 이름으로 쓰는 곳도 이 조사에선 안 나왔다.** 목록 UI 는 Claude Code `/plugin` 의 Discover · marketplace 처럼 「마켓 · 허브」 꼴이 보였다.
-- 묶음(우리 프리셋)에 해당하는 이름은 도구마다 다르다 — Claude Code = plugin. 「preset」 을 쓰는 곳은 못 찾았다.
+- **The closest precedent among AI coding tools is Cursor's 「Customize」 page** — it gathers plugins · skills · MCP · rules · subagents · commands · hooks in one place and manages them at user · team · workspace scope. (Likely — the main agent checked the original text.) ★But the use is different★ — it is a collection of settings applied in bulk to every agent in that scope, not a place where each agent picks and attaches its own bundle, as ours does (the only overlapping material = rules↔instructions · skills · plugins↔presets). So it is weak as a basis for the name.
+- **We did not find any AI coding tool that uses 「에셋」 as the umbrella term for this bundle.** (Uncertain — within the range of 4 searches)
+- **We did not find anyone using 「라이브러리」 as the name of this pane either, in this survey.** List UIs looked like a 「마켓 · 허브」 (market · hub), as with Discover and the marketplace in Claude Code `/plugin`.
+- The name for a bundle (our preset) differs by tool — Claude Code = plugin. We did not find anyone using 「preset」.
 
-## 발견
+## Findings
 
-| 도구 | 총칭 (원문) | 창 · UI 이름 (원문) | 출처 | 확신도 · grounding |
+| Tool | Umbrella term (original) | Pane · UI name (original) | Source | Confidence · grounding |
 |---|---|---|---|---|
-| Cursor | "Plugins, skills, and MCPs let you customize Cursor" | 사이드바의 「Customize」 페이지 — 플러그인 · 스킬 · MCP · 규칙 · 서브에이전트 · 명령 · 훅 | https://cursor.com/docs/customize-cursor | 가능성 높음 · 메인 확인 = 지지 |
-| VS Code + Copilot | customization (문서 경로 `copilot-customization` — 사용자 지시 · 프롬프트 파일 · 채팅 모드) | 전용 패널 이름 모름 | https://code.visualstudio.com/docs/copilot/copilot-customization | 가능성 높음 · 메인 미확인 |
-| Claude Code | plugin (스킬 · 에이전트 · 훅 · MCP 등을 한 단위로 묶음) | `/plugin` 의 Discover 탭 · marketplace | https://code.claude.com/docs/en/plugins/overview | 가능성 높음 · 메인 미확인 |
-| Continue | 수집자 보고 = blocks(조각) · assistants(묶음) · Hub | 수집자 보고 = Hub | https://docs.continue.dev/reference | **불확실 — 메인 확인 = 미지지**(그 페이지에 blocks · assistants · Hub 정의가 없다) |
-| Windsurf | Rules · customization 아이콘(2차 출처) | 모름 | 2차 출처(platzi) | 불확실 |
+| Cursor | "Plugins, skills, and MCPs let you customize Cursor" | 「Customize」 page in the sidebar — plugins · skills · MCP · rules · subagents · commands · hooks | https://cursor.com/docs/customize-cursor | likely · main check = supported |
+| VS Code + Copilot | customization (doc path `copilot-customization` — user instructions · prompt files · chat modes) | name of a dedicated panel unknown | https://code.visualstudio.com/docs/copilot/copilot-customization | likely · not checked by main |
+| Claude Code | plugin (bundles skills · agents · hooks · MCP and more into one unit) | Discover tab of `/plugin` · marketplace | https://code.claude.com/docs/en/plugins/overview | likely · not checked by main |
+| Continue | collector report = blocks (pieces) · assistants (bundles) · Hub | collector report = Hub | https://docs.continue.dev/reference | **uncertain — main check = not supported** (that page has no definition of blocks · assistants · Hub) |
+| Windsurf | Rules · customization icon (secondary source) | unknown | secondary source (platzi) | uncertain |
 
-## 공백
+## Gaps
 
-- Cline · JetBrains AI · OpenAI Codex 는 검색하지 않았다.
-- VS Code 최신 채팅 꾸미기 UI 의 패널 이름 · Windsurf 패널 이름은 모른다.
-- 게임 · 3D 도구(언리얼 Content Browser · 블렌더 Asset Browser)의 「에셋 · 브라우저」 관행은 이번 조사 범위 밖이다(세션 기억 기준 — 미확인).
+- Cline · JetBrains AI · OpenAI Codex were not searched.
+- The panel name of VS Code's latest chat-customization UI and the Windsurf panel name are unknown.
+- The 「에셋 · 브라우저」 (asset · browser) practice of game · 3D tools (Unreal Content Browser · Blender Asset Browser) is outside the scope of this survey (from session memory — unconfirmed).

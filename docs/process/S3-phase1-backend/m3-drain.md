@@ -1,17 +1,17 @@
-# 모듈 3 — pty/drain.rs 브리핑 (담당: dco23, Opus)
+# Module 3 — pty/drain.rs briefing (owner: dco23, Opus)
 
-발신: ed12 (매니저)
-근거: `docs/backend-lld-stage1.md` §6 (drain thread), §9 (상태머신), §10 (동시성).
-**§6 의사코드를 그대로 구현**한다. 이 모듈의 불변식 위반은 데드락/유실로 직결.
+From: ed12 (manager)
+Source: `docs/backend-lld-stage1.md` §6 (drain thread), §9 (state machine), §10 (concurrency).
+**Implement the §6 pseudocode as written.** A violation of this module's invariants leads directly to deadlock or loss.
 
-## 목표
+## Goal
 
 `src-tauri/src/pty/drain.rs`:
-1. `spawn_drain_thread(...)` — OS thread 생성 (tokio 아님, std::thread)
-2. `drain_loop(...)` — read→send 루프
-3. drain 종료 시 상태 전이 + 완료 신호
+1. `spawn_drain_thread(...)` — create an OS thread (std::thread, not tokio)
+2. `drain_loop(...)` — the read→send loop
+3. State transition + completion signal when drain ends
 
-## 시그니처 (인자 보강 — LLD §6 의사코드는 reader만 보여주나 실제 필요한 것)
+## Signature (argument addendum — the LLD §6 pseudocode shows only the reader, but this is what is actually needed)
 
 ```rust
 pub fn spawn_drain_thread(
@@ -22,11 +22,11 @@ pub fn spawn_drain_thread(
 ) -> std::thread::JoinHandle<()>;
 ```
 
-> session.new()가 drain_handle/done_rx를 None으로 두고 manager가 사후 주입하는 구조와 맞물린다.
-> manager의 spawn_agent가: (tx,rx)=channel() → session.drain_done_rx에 rx 주입 → spawn_drain_thread(session, reader, status_sink, tx) → 반환 handle을 session.drain_handle에 주입.
-> 이 연결은 manager.rs(모듈 5)에서 한다. drain.rs는 위 시그니처만 제공.
+> This fits the structure where session.new() leaves drain_handle/done_rx as None and manager injects them afterwards.
+> Manager's spawn_agent: (tx,rx)=channel() → inject rx into session.drain_done_rx → spawn_drain_thread(session, reader, status_sink, tx) → inject the returned handle into session.drain_handle.
+> This wiring is done in manager.rs (module 5). drain.rs provides only the signature above.
 
-## drain_loop (§6 의사코드 — 그대로)
+## drain_loop (§6 pseudocode — as written)
 
 ```
 buf = [0u8; 4096]
@@ -63,25 +63,25 @@ status_sink.status_changed(session.id, <new status>);
 let _ = done_tx.send(());
 ```
 
-## ★핵심 불변식 (리뷰 필수)★
+## ★Core invariants (mandatory for review)★
 
-1. **`sink.send()` 호출 시 어떤 lock도 보유 금지.** subscribers를 `clone()`으로 스냅샷 뜬 뒤 lock 해제하고, 그 복사본을 돌며 send. (§10 규칙3)
-2. `replay.lock()` 과 `subscribers.lock()` 을 **동시 보유 금지** — 각각 짧게 잡고 즉시 해제. (subscribe 함수만 두 lock 동시, drain은 절대 금지)
-3. 종료 경로는 한 번만 실행 — EOF/Err/shutdown 어느 것으로 깨든 transition은 단일 함수로 idempotent하게.
+1. **Hold no lock when calling `sink.send()`.** Snapshot subscribers with `clone()`, release the lock, then iterate the copy and send. (§10 rule 3)
+2. **Never hold `replay.lock()` and `subscribers.lock()` at the same time** — take each briefly and release immediately. (Only the subscribe function holds both locks; drain never does.)
+3. The exit path runs only once — whether the loop broke on EOF, Err or shutdown, the transition goes through a single function and is idempotent.
 
-## 상태 전이 (transition)
+## State transition (transition)
 
-§9 상태머신 참고. shutdown flag가 켜져 있으면 `Killed`, 아니면 child exit code로 `Exited{code}`.
-transition 함수 위치는 dco23 판단(session impl 또는 drain 내부 헬퍼). 단 status는 Mutex<AgentStatus>이므로 lock 후 전이.
+See the §9 state machine. If the shutdown flag is set, `Killed`; otherwise `Exited{code}` from the child exit code.
+Where the transition function lives is dco23's call (a session impl or a helper inside drain). But status is a Mutex<AgentStatus>, so lock it and then transition.
 
-## 규칙·품질
+## Rules and quality
 
-- tauri import 0, unsafe 0. std::thread::spawn 사용.
-- base64는 base64 crate (Engine::encode). `use base64::Engine`.
-- 동시성 불변식마다 *왜* 한국어 주석. 특히 "lock 밖 send" 이유.
-- **완료 전 cargo fmt 필수** → cargo fmt --check 통과. cargo build 통과.
+- Zero tauri imports, zero unsafe. Use std::thread::spawn.
+- base64 uses the base64 crate (Engine::encode). `use base64::Engine`.
+- A Korean comment on *why* for each concurrency invariant. Especially the reason for "send outside the lock".
+- **Run cargo fmt before finishing** → cargo fmt --check passes. cargo build passes.
 
-## 보고
+## Report
 
 `orch 12 "⟁dco23 drain.rs 완료 — drain_loop(lock밖send)+종료전이+done_tx, fmt/build OK"`
-주의: session.rs가 dr26 리뷰 중이다. session 구조 변경 블로커가 나오면 ed12가 알린다 — 그 경우 drain 일부 조정 가능. 막히면 30분 내 중간보고.
+Note: session.rs is under dr26 review. If a blocker that changes the session structure comes up, ed12 will tell you — in that case part of drain may be adjusted. If stuck, send an interim report within 30 minutes.

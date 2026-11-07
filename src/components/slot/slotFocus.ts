@@ -1,10 +1,10 @@
-// ADR-0237 (U6 「칸 안 어디든」): 칸 안 버튼이 눌린 뒤 사라지거나 잠기면 포커스가 문서 body 로 떨어져, 그 칸의 Esc 가
-//   칸 루트의 capture 에 닿지 않는다(끊기가 무반응이 된다). 그 버튼이 쥔 포커스를 가장 가까운 「클릭으로 포커스를
-//   받는 칸 컨테이너」(tabindex -1 — 스크롤 뷰포트 · RichSlot 루트)로 옮긴다.
+// ADR-0237 (U6 「칸 안 어디든」 (anywhere in the area)): if a button in the area disappears or locks after being pressed, focus falls to document body, and that area's Esc
+//   does not reach the area root's capture (interrupt becomes unresponsive). Moves the focus the button held to the nearest 「클릭으로 포커스를
+//   받는 칸 컨테이너」 (area container that takes focus on click; tabindex -1 — scroll viewport · RichSlot root).
 
 /**
- * `button` 이 지금 포커스를 쥐었을 때만 옮긴다 — 안 쥐었으면 잃을 것이 없고, 다른 칸의 포커스를 빼앗으면 그 칸 대신
- * 이 칸의 턴이 Esc 에 끊긴다. 받을 조상이 없으면 아무것도 하지 않는다. 버튼의 동작 뒤(같은 처리기 안)에 부른다.
+ * Moves only if `button` currently holds focus — if not, there is nothing to lose, and stealing another area's focus makes this
+ * area's turn get interrupted by Esc instead of that area's. If there is no ancestor to receive it, does nothing. Call after the button's action (inside the same handler).
  */
 export function keepFocusInSlot(button: HTMLElement): void {
   if (button.ownerDocument.activeElement !== button) return
