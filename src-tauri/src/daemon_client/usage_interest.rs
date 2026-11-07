@@ -23,15 +23,15 @@
 //! carry a set, and the connection-task-only methods (`sync`·`on_socket_open`·`on_socket_lost`·`on_snapshot`) are not opened outside
 //! `daemon_client`.
 //!
-//! ## ★Socket marker guard★
-//! Every method the connection task calls carries its own socket marker (`socket_epoch` — ADR-0195 · `0` = no socket) and
-//! does nothing if it is not the current marker (for the open of open/close, if it is not larger than the largest marker seen) — so that a late call from a task
-//! superseded by succession cannot overwrite the new socket's `sent` · cache. Magnitude comparison has meaning because the marker numbering counter
-//! is never rewound (`lifecycle.rs`), so it holds only within the shell process lifetime.
+//! ## ★Socket epoch guard★
+//! Every method the connection driver calls carries its socket epoch (`socket_epoch` — the transport connection
+//! generation · ADR-0195 · `0` = no socket) and does nothing unless it is the current one (an open does nothing unless
+//! it is greater than the largest seen) — so a late call for an older connection cannot overwrite the new one's
+//! `sent` or cache. Ordering by size means something because generations never rewind (the transport mints them from
+//! one counter per peer name within a registry), so it holds within one shell process.
 //!
 //! ## Lock order
-//! The lock wrapping this state is in the middle of the `ViewManager → 사용량 관심 → lifecycle` order — it is **not** a leaf (the place that
-//! puts in a nudge takes the lifecycle lock). This file does not know about locks.
+//! The lock around this state comes after `ViewManager` (`super::SharedUsageInterest` doc). This file knows no lock.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
@@ -246,14 +246,16 @@ impl UsageInterest {
         }
     }
 
-    /// The `UsageSubscribe` set the connection task will write to socket `socket_epoch` — `None` = nothing to write.
+    /// The `UsageSubscribe` set the connection driver writes on connection `socket_epoch` — `None` = nothing to write.
     ///
-    /// - `force` = right before writing a ⟳ refresh frame — always gives the interest (idempotent on the daemon if the set is the same).
-    /// - When taking out a nudge (`force = false`): if a reduction is waiting, only when interest has a company outside `sent` (a pure reduction
-    ///   is up to the deadline), otherwise only when interest ≠ `sent`.
+    /// - `force` = right before a ⟳ refresh frame — always gives the interest (the daemon is idempotent for the same
+    ///   set).
+    /// - When a nudge is taken (`force = false`): with a pending shrink, only if the interest has a vendor outside
+    ///   `sent` (a pure shrink is the deadline's job); otherwise only if the interest ≠ `sent`.
     ///
-    /// If `Some`, `sent := 관심` · a waiting reduction becomes invalid. It is based on `sent`, so even if called repeatedly the second onward is `None` (idempotent —
-    /// the nudge right after storing the new socket's `cmd_tx` relies on this). `None` if it is not the current socket.
+    /// `Some` means `sent := interest` and the pending shrink is void. Being based on `sent`, repeated calls give
+    /// `None` from the second on (idempotent — the nudge right after a connection opens relies on it). Not the
+    /// current connection → `None`.
     pub(super) fn sync(
         &mut self,
         socket_epoch: u64,

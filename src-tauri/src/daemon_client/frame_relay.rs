@@ -17,10 +17,11 @@
 //! Other filters (a different incarnation marker · no viewing window) do not make a hole in the seq stream that view will receive — a view whose incarnation changed
 //! asks for a full replay on re-attach, and a window that is not viewing asks for replay when it attaches.
 //!
-//! ## ★Why it was detached from the connection loop★
-//! This decision lived inside the connection task's `select!` and that place requires a real socket. Lowered here, it can be driven
-//! one frame at a time without a socket · Tauri (the tests below). The reason `deliver` is an argument is the same as `connection::apply_replay_event` — the real
-//! delivery port requires `tauri::ipc::Channel`, but **to which window · with what bytes** it sends is decided here.
+//! ## ★Why it lives outside the connection driver★
+//! This verdict used to live inside the old connection task's `select!`, which needed a real socket. Here it runs
+//! one frame at a time with no socket or Tauri (the tests below). `deliver` is a parameter for the same reason as in
+//! `replay_events::apply_replay_event` — the real carrier needs a `tauri::ipc::Channel`, but **which window and which
+//! bytes** are decided here.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;

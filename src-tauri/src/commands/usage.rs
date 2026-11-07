@@ -28,7 +28,7 @@ pub fn get_usage_snapshot(client: State<'_, Arc<DaemonClient>>) -> UsageSnapshot
     usage_snapshot_reply(&client, Instant::now())
 }
 
-/// The body of [`get_usage_snapshot`] — the harness drives it without `State` (`daemon_client/tests.rs`).
+/// [`get_usage_snapshot`] 의 본체 — `State` 없이 하네스가 태운다(`daemon_client/connection/tests.rs`).
 pub(crate) fn usage_snapshot_reply(client: &DaemonClient, now: Instant) -> UsageSnapshotReply {
     let pulled = client.usage_interest().lock().snapshot_for_webview(now);
     UsageSnapshotReply {

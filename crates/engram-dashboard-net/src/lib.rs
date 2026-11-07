@@ -6,9 +6,10 @@
 //! (`instance` 단일 인스턴스 가드 · `portfile` daemon.json 쓰기/읽기·stale 판정 — ADR-0135 이후
 //! **둘이 같은 파일 하나**를 다룬다: 가드가 붙잡는 파일이 곧 클라이언트가 읽는 접속 파일이다).
 //! 모듈별 책임은 각 파일 헤더가 정본이다.
-//! ★그 전부가 `server` feature 뒤에 있고 **기본은 비어 있다**★: 켜지 않으면 남는 것은 `auth` 하나 —
-//! **핸드셰이크 프레임 모양만 필요한 소비자**(지금 `src-tauri`)가 async 런타임을 지지 않게 하는
-//! 경계다(기본 feature 에 async 런타임이 없다는 것은 CI `platform gate 7` 이 잰다). 서버 행을 쓰는
+//! ★그 전부가 `server` feature 뒤에 있고 **기본은 비어 있다**★: 켜지 않으면 남는 것은 `auth`(protocol
+//! 핸드셰이크 프레임의 재수출) 하나 — **프레임 모양만 필요한 소비자**가 async 런타임을 지지 않게 하는
+//! 경계다(기본 feature 에 async 런타임이 없다는 것은 CI `platform gate 7` 이 잰다). ★지금 그 조합을 쓰는
+//! 소비자는 없다★ — 셸은 프레임을 protocol 에서 직접 가져간다(TRD 3단계 3-1 U2). 서버 행을 쓰는
 //! 쪽이 `features = ["server"]` 로 명시해 켠다(데몬 crate). 어떤 의존이 그 뒤로 들어갔는지·왜 기본을
 //! 비웠는지·이득의 범위가 어디까지인지는 **Cargo.toml 의 `[features]` 주석이
 //! 정본**이다(여기서 목록을 다시 세지 말 것).
@@ -24,8 +25,9 @@
 //!
 //! ★모르는 것 = 에이전트 어휘 — 예외 0(0-4 완료)★: 프레임에 실린 내용이 무엇인지(명령·이벤트·출력·
 //! 메시징)를 **타입으로도** 알지 못한다. 다만 프레임 디코딩이 "전부 위층" 이라는 뜻은 아니다 —
-//! **auth 첫 프레임 하나만** 이 crate 가 파싱한다. 그건 어휘 예외가 아니라 **이 crate 가 모양을 소유한
-//! 프레임**이기 때문이다(`auth::AuthFrame` — 토큰 인증은 소켓을 살릴지 판정하는 네트워크 살림이다).
+//! **auth 첫 프레임 하나만** 이 crate 가 파싱한다. 그건 어휘 예외가 아니다 — 그 프레임은 명령 enum 의
+//! 변형이 아니라 따로 된 핸드셰이크 타입이다(`auth::AuthFrame` = protocol `handshake::AuthFrame` 의 재수출 ·
+//! ADR-0310 결정 9 — 토큰 인증은 소켓을 살릴지 판정하는 네트워크 살림이다).
 //! 그 하나를 뺀 나머지는 규칙 그대로다: 프레임의 의미 해석·인코딩·디스패치는 위층(에이전트 시스템)이
 //! 소유하고, 이 crate 는 `frame_port` 계약을 통해서만 그것과 만난다.
 //!
@@ -37,12 +39,12 @@
 //! `discovery → daemon` 이 필요해져 기존 `daemon → discovery`(경로 헬퍼)와 **순환**을 이뤘다. 네트워크
 //! 행이 자기 crate 로 떨어져 `discovery → 이 crate` 가 비순환이 된 것이 0-4 를 푼 열쇠다(실제로 0-4 가
 //! `discovery → 이 crate` · `engram-dashboard → 이 crate` 두 간선을 새로 놨다). 지금 이 crate 를 부르는
-//! 쪽은 데몬 · 셸이다.
+//! 쪽은 데몬뿐이다(셸은 이 crate 를 의존하지 않는다 — CI `shell gate 3`).
 //! ★확인 레시피 — **워크스페이스-로컬 forward 폐포**를 볼 것★:
 //!   `cargo tree -p engram-dashboard-net -e normal --target all --all-features --prefix none`
 //!   `| rg "^engram-dashboard" | sort -u`
 //!   → 자기 자신 + `command` + `platform` + `protocol`(`command` 는 `protocol` 을 거쳐 온다). 목록에
-//!   소비자(데몬 · 셸)가 없다 = **이 crate 는 소비자에 도달하지 않는다**. 그래서 `소비자 → 이 crate` 를
+//!   소비자(데몬)가 없다 = **이 crate 는 소비자에 도달하지 않는다**. 그래서 `소비자 → 이 crate` 를
 //!   더해도 닫히는 고리가 없다.
 //!   ★`--target all --all-features` 를 빼지 말 것★: 호스트 target 만 보면 `cfg(unix)` 같은 **비활성 target**
 //!   의존과 **optional** 의존이 출력에서 사라진다(실측). 외부 crate 까지 다 찍히면 수백 줄이라 워크스페이스
@@ -106,7 +108,8 @@
 //!     `--all-features | rg "^engram-dashboard" | sort -u`
 //!     → **정확히 3줄** = 자기 자신 · `engram-dashboard-platform` · `engram-dashboard-protocol`.
 //!     ★줄이려 들지 말 것★ — `platform` 자리는 portfile 의 liveness 헬퍼와 instance 의 공유 제한 열기
-//!     (게이트 2a)를 받는 간선이고, `protocol` 자리는 `DaemonInfo` 파일 포맷 계약이다(Cargo.toml 의 의존 주석).
+//!     (게이트 2a)를 받는 간선이고, `protocol` 자리는 `DaemonInfo` 파일 포맷 계약 · 핸드셰이크 프레임
+//!     재수출이다(Cargo.toml 의 의존 주석).
 //!     ★이 게이트가 닫는 것(딱 이만큼)★: **선언된 직접 워크스페이스 의존**이 매니페스트 문법에 관계없이
 //!     드러난다 — rename · `[dependencies.<이름>]` 테이블 형 · 들여쓴 선언 · `[build-dependencies]` ·
 //!     비활성 target(`cfg(unix)`) · `optional` 6형태를 **주입→관측→원복으로 실측**해 전부 잡는 것을 확인했다.
@@ -123,8 +126,9 @@
 //!   · **게이트 4 — auth 어휘 재유입 금지**(`src/` 범위, 0-4 가 추가):
 //!     `rg "(A)gentCommand|(P)ROTOCOL_VERSION" crates/engram-dashboard-net/src/` → **0줄**
 //!     ★무엇을 지키나★: 0-4 가 닫은 마지막 어휘 구멍(핸드셰이크가 위층 명령 enum 과 버전 상수를 빌려
-//!     쓰던 것)이 **다시 열리는 것**을 막는다. 프레임 모양은 `auth::AuthFrame` 이 소유하고 기대 버전은
-//!     `ws::handle_connection` 이 주입받으므로, 이 두 이름이 `src/` 에 다시 나타난다 = 되돌아간 것이다.
+//!     쓰던 것)이 **다시 열리는 것**을 막는다. 프레임 모양은 protocol `handshake::AuthFrame` 이 소유하고
+//!     (`auth` 는 재수출뿐) 기대 버전은 `ws::handle_connection` 이 주입받으므로, 이 두 이름이 `src/` 에 다시
+//!     나타난다 = 되돌아간 것이다.
 //!     ★주석·테스트까지 범위다(의도)★: 컴파일러는 `#[cfg(test)]` 안의 재유입도 잡지만 주석은 못 잡고,
 //!     테스트가 위층 타입으로 형태를 대조하기 시작하면 그게 곧 재유입의 첫 걸음이다.
 //!     ★부분 문자열까지 문다(의도 — 좁히지 말 것)★: 단어 경계를 안 걸어서 `TEST_(P)ROTOCOL_VERSION` 같은
@@ -132,18 +136,19 @@
 //!     맞다: 이 crate 안엔 프로토콜 버전 비슷한 것조차 두지 않겠다는 불변식이고, 걸리면 이름을 바꾸는
 //!     쪽이 대응이다(`ws.rs` 의 `TEST_WIRE_VERSION`). `\b` 로 좁히면 그 규율이 사라진다.
 //!   · **게이트 5 — 두 feature 조합이 각각 컴파일된다**(`-p` 범위, `default = []` 전환이 추가):
-//!     `cargo test -p engram-dashboard-net` → **성공해야 PASS**(feature 0개 = `auth` 단독 + golden 테스트)
+//!     `cargo test -p engram-dashboard-net` → **성공해야 PASS**(feature 0개 = `auth` 재수출 단독 — 그 조합의
+//!     테스트는 0개다. golden 은 protocol `handshake` 에 있다)
 //!     `cargo test -p engram-dashboard-net --all-features` → **성공해야 PASS**(`server` 행)
 //!     ★판정 방식이 위 넷과 다르다★: 1·4 는 매치 유무로, 2·3 은 줄 수로 읽지만 이건 **성공 여부**로 읽는다.
 //!     ★왜 두 줄인가★: 기본이 비어 있어 맨 명령은 feature 0개만 컴파일하고, `#[cfg(feature = "server")]`
-//!     아래 모듈은 **컴파일 대상에서 빠진다**(가려진 코드는 오류를 내지 않는다) — 실측 2026-08-14 로 맨
-//!     명령은 **6개**, `--all-features` 는 **42개**를 돌린다. 반대 방향으로, 워크스페이스 스코프 명령은
+//!     아래 모듈은 **컴파일 대상에서 빠진다**(가려진 코드는 오류를 내지 않는다) — 맨 명령은 테스트 **0개**로
+//!     컴파일만 재고, `--all-features` 가 서버 행 테스트를 돈다. 반대 방향으로, 워크스페이스 스코프 명령은
 //!     데몬이 `server` 를 켜므로 항상 ON 쪽만 본다 — `-p` 범위에서 ON 쪽을 컴파일하는 명령은 둘째 줄뿐이다.
 //!     각 줄이 상대가 못 보는 쪽을 맡으므로 한 줄로 줄이지 말 것.
 //!     ★`--features server` 가 아니라 `--all-features` 인 이유★: 게이트 3 이 이미 그 플래그를 쓰므로 net
 //!     게이트의 ON 쪽 표기를 하나로 맞춘다. feature 가 `server` 하나뿐인 지금 두 형태는 같은 집합이다.
-//!     ★`build` 가 아니라 `test` 인 이유★: dev-의존 경로까지 문다 — `auth.rs` 의 golden 테스트가 쓰는
-//!     `serde_json` 은 `[dependencies]` 쪽에선 optional 이라 feature 0개 빌드에 없다.
+//!     ★`build` 가 아니라 `test` 인 이유★: `#[cfg(test)]` 와 dev-의존 경로까지 컴파일한다(feature 0개
+//!     조합에서 그 경로는 지금 비었다 — golden 은 protocol 에 있다).
 //!     ★이 게이트가 닫지 **않는** 것★: 새 의존을 `optional` 없이 적어 feature 0개 소비자에게 조용히
 //!     지우는 형태는 컴파일을 깨지 않으므로 여기서 안 걸린다 — 근거·대안 게이트는 Cargo.toml 의
 //!     `[features]` 주석.

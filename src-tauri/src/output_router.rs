@@ -105,9 +105,9 @@ impl OutputRouter {
         }
     }
 
-    // Being `pub(crate)`, it can be called from other test modules in the crate (daemon_client::tests) too.
-    // ★ADR-0046★: the old eager resubscribe (iterating current_agents) was deleted — the helper is kept because routing (targets) tests
-    //   can use it again (currently unused → allow).
+    // `pub(crate)` 라 crate 내 다른 테스트 모듈(daemon_client 의 시험들)에서도 호출 가능.
+    // ★ADR-0046★: 옛 eager resubscribe(current_agents 순회)는 삭제됐다 — 헬퍼는 라우팅(targets) 테스트가
+    //   다시 쓸 수 있어 남긴다(현재는 미사용 → allow).
     #[cfg(test)]
     #[allow(dead_code)]
     pub(crate) fn set_visible_agents_for_test(&self, agents: &[AgentKey]) {

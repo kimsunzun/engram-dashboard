@@ -63,12 +63,13 @@ use engram_dashboard_protocol::{
     AgentSpawnCommand as WireSpawnCommand, Capabilities as WireCaps,
     ControlCaps as WireControlCaps, DeliveredCopy as WireDeliveredCopy, DropCause as WireDropCause,
     EnvelopeFormat as WireEnvelopeFormat, InputCaps as WireInputCaps, ModelCaps as WireModelCaps,
-    OutputCaps as WireOutputCaps, Preset as WirePreset, QueuedInputCancel as WireQueuedInputCancel,
-    QueuedInputEvent as WireQueuedInputEvent, QueuedInputRow as WireQueuedInputRow,
-    RestartPolicy as WireRestartPolicy, RestoreOutcome as WireRestoreOutcome, RestoreReport,
-    SessionCaps as WireSessionCaps, SnapshotChunk as WireSnapshotChunk,
-    StructuredEvent as WireStructuredEvent, SubscribeAction, ToolCategory as WireToolCategory,
-    ToolOutcome as WireToolOutcome, TurnOutcome as WireTurnOutcome, PROTOCOL_VERSION,
+    OutputCaps as WireOutputCaps, OwnerToken as WireOwnerToken, Preset as WirePreset,
+    QueuedInputCancel as WireQueuedInputCancel, QueuedInputEvent as WireQueuedInputEvent,
+    QueuedInputRow as WireQueuedInputRow, RestartPolicy as WireRestartPolicy,
+    RestoreOutcome as WireRestoreOutcome, RestoreReport, SessionCaps as WireSessionCaps,
+    SnapshotChunk as WireSnapshotChunk, StructuredEvent as WireStructuredEvent, SubscribeAction,
+    ToolCategory as WireToolCategory, ToolOutcome as WireToolOutcome,
+    TurnOutcome as WireTurnOutcome, PROTOCOL_VERSION,
 };
 
 use tokio::sync::watch;
@@ -78,9 +79,12 @@ use crate::command_roster::CommandRoster;
 use crate::control::registry::ControlRegistry;
 use crate::usage_service::book::RequestKind;
 use crate::usage_service::UsageService;
-use engram_dashboard_command::{CommandDecl, CommandError, ErrorCode, OwnerToken};
+use engram_dashboard_command::{
+    CommandDecl, CommandEnvelope, CommandError, CommandReply, ErrorCode, OwnerToken,
+};
 use engram_dashboard_messaging::envelope::EnvelopeFormat as CoreEnvelopeFormat;
 use engram_dashboard_net::frame_port::{ConnId, FrameFanout};
+use serde_json::value::RawValue;
 
 // ── OutboundSink seam(ADR-0003 OutputSink 결을 따름) ──────────────────────────────
 
@@ -210,6 +214,60 @@ pub(crate) fn inbound_lane(cmd: &AgentCommand) -> InboundLane {
         //   곳이 「줄에 선다」 = 순서 보존 = 안전한 쪽이다. 새 variant 가 말없이 이 기본값을 받는 것이
         //   바로 바라는 동작이라, 컴파일 에러로 묻을 이유가 없다.
         _ => InboundLane::Ordered,
+    }
+}
+
+/// 받은 명령을 **답 없이 거절할 때** 그 `Error` 에 실을 `request_id`(지금 쓰는 곳 = 수신 줄 포화 거절 —
+/// `agent_conn` 의 `on_inbound_saturated`).
+///
+/// 갈래가 셸의 짝 맞추기(`daemon_client::protocol_state::command_request_id`)와 같다 — 거절이 보낸 쪽의 대기
+/// 슬롯을 깨우려면 그 슬롯의 키와 같은 번호여야 한다. `None` = 보낸 쪽이 대기 슬롯을 걸지 않는 명령이라 거절은
+/// `Error{request_id: None}` 으로 나간다. 봉투가 깨진 `Command` 도 `None` 이다(ADR-0272 결정 6).
+/// ★`_ =>` 를 두지 않는다★ — 새 variant 가 말없이 `None` 을 받으면 그 명령의 거절이 보낸 쪽을 마감시각까지
+/// 매달아 둔다.
+// ADR-0272
+pub(crate) fn command_request_id(
+    cmd: &AgentCommand,
+) -> Option<engram_dashboard_protocol::RequestId> {
+    match cmd {
+        AgentCommand::Spawn { request_id, .. }
+        | AgentCommand::Kill { request_id, .. }
+        | AgentCommand::Interrupt { request_id, .. }
+        | AgentCommand::WriteStdin { request_id, .. }
+        | AgentCommand::AcquireInput { request_id, .. }
+        | AgentCommand::ReleaseInput { request_id, .. }
+        | AgentCommand::ListAgents { request_id }
+        | AgentCommand::StopDaemon { request_id, .. }
+        | AgentCommand::SpawnByCwd { request_id, .. }
+        | AgentCommand::ListProfiles { request_id }
+        | AgentCommand::CreateProfile { request_id, .. }
+        | AgentCommand::DeleteProfile { request_id, .. }
+        | AgentCommand::SpawnProfile { request_id, .. }
+        | AgentCommand::SetProfileAutoRestore { request_id, .. }
+        | AgentCommand::RenameProfile { request_id, .. }
+        | AgentCommand::ReparentProfile { request_id, .. }
+        | AgentCommand::GetSnapshot { request_id, .. }
+        | AgentCommand::ListPresets { request_id }
+        | AgentCommand::CreatePreset { request_id, .. }
+        | AgentCommand::DeletePreset { request_id, .. }
+        | AgentCommand::RenamePreset { request_id, .. }
+        | AgentCommand::SetEnvelopeFormat { request_id, .. }
+        | AgentCommand::RegisterCommands { request_id, .. }
+        | AgentCommand::UpdateCommands { request_id, .. }
+        | AgentCommand::ListCommands { request_id }
+        | AgentCommand::ListQueuedInputs { request_id, .. }
+        | AgentCommand::CancelQueuedInput { request_id, .. }
+        | AgentCommand::RefreshUsageLimits { request_id, .. } => Some(*request_id),
+        // 상관 키가 봉투 안에 있다 — 풀어서 읽는다(ADR-0272 결정 4).
+        AgentCommand::Command { envelope } => envelope_from_wire(envelope)
+            .ok()
+            .map(|envelope| engram_dashboard_protocol::RequestId(envelope.request_id.0)),
+        AgentCommand::Resize { .. }
+        | AgentCommand::Subscribe { .. }
+        | AgentCommand::Unsubscribe { .. }
+        | AgentCommand::UsageSubscribe { .. }
+        // 보낸 쪽의 답장이다 — 그 안의 키는 이 데몬이 낸 요청의 것이라 보낸 쪽 대기 슬롯이 없다.
+        | AgentCommand::CommandOutcome { .. } => None,
     }
 }
 
@@ -1094,6 +1152,68 @@ pub(crate) fn core_report_to_wire(report: CoreRestoreReport) -> RestoreReport {
 
 pub(crate) fn core_status_to_wire(status: CoreStatus) -> engram_dashboard_protocol::AgentStatus {
     status_to_wire(&status)
+}
+
+// ADR-0310: 등록 패킷의 주인 표지는 protocol 사본이다 — 명부 · 판정이 쓰는 도구 crate 타입으로 여기서 옮긴다.
+fn owner_from_wire(owner: WireOwnerToken) -> OwnerToken {
+    OwnerToken(owner.0)
+}
+
+/// 명령 패킷의 봉투 칸(원문 JSON)을 명부 · 배달이 쓰는 도구 crate 봉투로 푼다(ADR-0272 결정 4).
+///
+/// `Err` = 패킷은 풀렸는데 봉투 모양이 틀렸다(ADR-0272 결정 6) — 받는 쪽은 그 명령을 `Error{request_id: None}`
+/// 으로 거절한다(번호를 못 읽었으니 실을 번호가 없다).
+// ADR-0272
+pub(crate) fn envelope_from_wire(raw: &RawValue) -> Result<CommandEnvelope, serde_json::Error> {
+    serde_json::from_str(raw.get())
+}
+
+/// 배달할 봉투를 패킷의 원문 칸으로 다시 싼다(ADR-0272 결정 6 의 중계 다시 싸기). 중계가 고친 인자(ADR-0308
+/// `resolve_agent_args`)는 이 바이트에 실린다 — 받은 원문을 그대로 넘기면 그 고침이 사라진다.
+// ADR-0272
+pub(crate) fn envelope_to_wire(
+    envelope: &CommandEnvelope,
+) -> Result<Box<RawValue>, serde_json::Error> {
+    serde_json::value::to_raw_value(envelope)
+}
+
+/// 주인이 돌려준 결말 패킷(`CommandOutcome`)의 답장 칸(원문 JSON)을 배달 표가 쓰는 도구 crate 답장으로
+/// 푼다(ADR-0272 결정 4).
+///
+/// `Err` = 패킷은 풀렸는데 답장 모양이 틀렸다(ADR-0272 결정 6) — 받는 쪽은 번호를 못 읽어 왕복에 붙이지 못하고
+/// 그 결말을 `Error{request_id: None}` 으로 거절한다.
+// ADR-0272
+pub(crate) fn reply_from_wire(raw: &RawValue) -> Result<CommandReply, serde_json::Error> {
+    serde_json::from_str(raw.get())
+}
+
+/// 호출자에게 낼 답장을 답장 패킷(`AgentEvent::CommandReply`)의 원문 칸으로 싼다. 중계가 내린 재시도 지시
+/// (`command_delivery::send_reply`)는 이 바이트에 실린다 — 주인이 보낸 원문을 그대로 넘기면 그 지시가 사라진다.
+// ADR-0272
+pub(crate) fn reply_to_wire(reply: &CommandReply) -> Result<Box<RawValue>, serde_json::Error> {
+    serde_json::value::to_raw_value(reply)
+}
+
+/// 등록 패킷(`RegisterCommands.decls` · `UpdateCommands.added`)의 항목 목록 칸(원문 JSON)을 명부가 쓰는 도구 crate
+/// 등록 항목으로 푼다(ADR-0272 결정 3). 에이전트 참조 칸(`agent_args`)은 이 풀기로 명부에 얹혀 중계 전 다시 쓰기
+/// (`command_delivery::resolve_agent_args`)가 읽는다 — 칸이 없는 옛 항목은 빈 목록이다(ADR-0308).
+///
+/// `Err` = 패킷은 풀렸는데 목록 모양이 틀렸다(ADR-0272 결정 6) — 받는 쪽은 그 패킷을 명부에 손대지 않고 칸 밖의
+/// `request_id` 로 거절한다(`INVALID_ARGUMENT`).
+// ADR-0272
+// ADR-0308
+pub(crate) fn decls_from_wire(raw: &RawValue) -> Result<Vec<CommandDecl>, serde_json::Error> {
+    serde_json::from_str(raw.get())
+}
+
+/// 항목 목록 칸이 깨진 등록 패킷의 거절(ADR-0272 결정 6). ★번호는 칸 밖이라 그 패킷의 `request_id` 로 답한다★ —
+/// 보낸 쪽 대기가 곧바로 깬다(셸의 등록 · 차분 대기는 상한이 없어 `None` 으로 답하면 연결이 끊길 때까지 매달린다).
+/// 봉투 · 답장 칸이 깨지면 `Error{request_id: None}` 인 것은 번호가 그 칸 안이라서다. 코드는 명부가 틀린 패킷에
+/// 쓰는 `INVALID_ARGUMENT` 이고, 패킷 통째로 반려라 명부는 그대로다.
+fn broken_decls_refusal(e: &serde_json::Error) -> CommandError {
+    CommandError::invalid_argument(format!(
+        "invalid command declarations: {e} — this packet was not applied"
+    ))
 }
 
 /// wire 벤더 → 사용량 칸의 벤더 키. `None` = 그 벤더의 조회기가 없다.
@@ -2018,9 +2138,22 @@ impl ConnectionCore {
                 // ADR-0154
                 note_claimed_owner(
                     session,
-                    &claimed,
+                    &owner_from_wire(claimed),
                     self.commands.attached_owner(conn_id).as_ref(),
                 );
+                let decls = match decls_from_wire(&decls) {
+                    Ok(decls) => decls,
+                    Err(e) => {
+                        reply_roster(
+                            sink,
+                            conn_id,
+                            "register",
+                            request_id,
+                            Err(broken_decls_refusal(&e)),
+                        );
+                        return DispatchFlow::Continue;
+                    }
+                };
                 // ★`catalog_version` 으로 거절하지 않는다★: 세대 번호는 crate 마다라 받는 쪽이 자기
                 //   번호와 비교해 뜻을 부여하면 틀린다 — 진단용이다(TRD §4-①).
                 tracing::debug!(
@@ -2053,9 +2186,22 @@ impl ConnectionCore {
                 // ADR-0154
                 note_claimed_owner(
                     session,
-                    &claimed,
+                    &owner_from_wire(claimed),
                     self.commands.attached_owner(conn_id).as_ref(),
                 );
+                let added = match decls_from_wire(&added) {
+                    Ok(added) => added,
+                    Err(e) => {
+                        reply_roster(
+                            sink,
+                            conn_id,
+                            "update",
+                            request_id,
+                            Err(broken_decls_refusal(&e)),
+                        );
+                        return DispatchFlow::Continue;
+                    }
+                };
                 tracing::debug!(
                     conn = conn_id,
                     added = added.len(),
@@ -2087,9 +2233,10 @@ impl ConnectionCore {
             }
 
             // ★답장은 이 자리에서 안 낸다 — **왕복이 끝난 뒤** 배달 태스크가 원 연결로 실어 보낸다★
-            //   (`command_delivery::deliver`). 그래서 여기 `sink` 를 쓰지 않는다: 답장은 이 dispatch 가
+            //   (`command_delivery::deliver`). 그래서 답장에 여기 `sink` 를 쓰지 않는다: 답장은 이 dispatch 가
             //   반환한 한참 뒤에 나므로 빌린 `OutboundSink` 로는 닿을 수 없고, 명부가 든 그 연결의 프레임
-            //   출구로 나간다(둘 다 같은 단일 writer 큐에 합류하므로 순서는 보존된다).
+            //   출구로 나간다(둘 다 같은 단일 writer 큐에 합류하므로 순서는 보존된다). `sink` 를 쓰는 것은
+            //   왕복이 시작되기 전의 깨진 봉투 거절 하나다(아래).
             // ★★여기서 왕복을 기다리면 안 된다 — 이유가 **자리를 옮겼을 뿐 살아 있다**★★: 한 연결의
             //   프레임은 그 연결의 **도착순 소비자 하나**가 한 장씩 끝까지 기다려 처리하므로, 주인이 곧
             //   이 연결일 때(셸이 자기 이름을 얹고 자기가 부르는 경로가 그렇다) 주인이 돌려줄
@@ -2105,6 +2252,19 @@ impl ConnectionCore {
             //   통째로 선다(TRD §3-6 — 셸·데몬·웹뷰 공통 규칙).
             // ADR-0154
             AgentCommand::Command { envelope } => {
+                // ADR-0272 결정 6: 패킷은 풀렸는데 봉투가 깨졌으면 번호를 못 읽는다 — 파싱 실패 갈래와 같은
+                //   모양(`Error{request_id: None}`)으로 답하고 연결은 살린다.
+                let envelope = match envelope_from_wire(&envelope) {
+                    Ok(envelope) => envelope,
+                    Err(e) => {
+                        tracing::warn!(conn = conn_id, "명령 봉투를 풀 수 없다: {e}");
+                        let _ = sink.enqueue(Outbound::event(AgentEvent::Error {
+                            request_id: None,
+                            message: format!("invalid command envelope: {e}"),
+                        }));
+                        return DispatchFlow::Continue;
+                    }
+                };
                 tracing::debug!(
                     conn = conn_id,
                     request_id = %envelope.request_id,
@@ -2126,7 +2286,7 @@ impl ConnectionCore {
             // ★붙일 자리가 없어도 **침묵하지 않는다**★: 조용히 버리면 보낸 쪽은 답도 오류도 없이 자기
             //   마감시각을 다 쓴다 — 이 파일이 다른 자리에서 이미 적어 둔 그 손실(`reply` 헬퍼 주석).
             // ★그 답은 `Error{request_id: None}` 다★ — 이 프레임에는 **내가 낸 요청의 상관 키가 없으므로**
-            //   (protocol `command_request_id` 가 이 variant 에 `None`) 붙일 pending 이 애초에 없다. 여기서
+            //   (셸의 짝 맞추기 `command_request_id` 가 이 variant 에 `None`) 붙일 pending 이 애초에 없다. 여기서
             //   `CommandReply` 를 되쏘면 그 키의 답장이 **두 번** 나가고(하나는 이미 원 연결로 갔다), 그것이
             //   TRD §4-⑤ 위반이다.
             // ★두 원인을 **가르지 않는다**★: 마감이 지나 자리가 거둬진 늦은 결말과 아무도 안 물은 결말은
@@ -2134,6 +2294,20 @@ impl ConnectionCore {
             //   (자취를 두면 그 목록이 무한히 자란다 — ADR-0150 가 명부에서 자취를 버린 것과 같은 이유).
             // ADR-0154
             AgentCommand::CommandOutcome { reply } => {
+                // ADR-0272 결정 6: 패킷은 풀렸는데 답장이 깨졌으면 번호를 못 읽어 어느 왕복에도 못 붙인다 —
+                //   깨진 봉투 갈래와 같은 처분(`Error{request_id: None}` · 연결은 산다). 그 왕복은 자기 마감시각에
+                //   호출자에게 답한다.
+                let reply = match reply_from_wire(&reply) {
+                    Ok(reply) => reply,
+                    Err(e) => {
+                        tracing::warn!(conn = conn_id, "명령 결말의 답장을 풀 수 없다: {e}");
+                        let _ = sink.enqueue(Outbound::event(AgentEvent::Error {
+                            request_id: None,
+                            message: format!("invalid command reply: {e}"),
+                        }));
+                        return DispatchFlow::Continue;
+                    }
+                };
                 let request_id = reply.request_id;
                 // ★거절 사유가 둘이고 **무게가 다르다**★: 「붙일 자리가 없다」는 흔한 정상 경합(마감이
                 //   먼저 지났다)이고, 「위임한 적 없다」는 **있을 수 없는 프레임**이다 — 그 번호의 왕복은
@@ -2657,8 +2831,6 @@ mod tests {
     /// variant 가 빠뜨려지는 것은 이 테스트가 아니라 `dispatch_order` 의 exhaustive match 가 잡는다.
     #[test]
     fn only_the_activations_and_the_usage_refresh_leave_the_arrival_queue() {
-        use engram_dashboard_command::OwnerToken;
-
         let detached = vec![
             AgentCommand::Spawn {
                 profile_id: uuid::Uuid::new_v4(),
@@ -2727,14 +2899,14 @@ mod tests {
             AgentCommand::Unsubscribe { agent_id },
             // ④ 명령 명부
             AgentCommand::RegisterCommands {
-                owner: OwnerToken::new("shell"),
-                decls: vec![],
+                owner: WireOwnerToken::new("shell"),
+                decls: RawValue::from_string("[]".to_string()).unwrap(),
                 catalog_version: 1,
                 request_id: rid(),
             },
             AgentCommand::UpdateCommands {
-                owner: OwnerToken::new("shell"),
-                added: vec![],
+                owner: WireOwnerToken::new("shell"),
+                added: RawValue::from_string("[]".to_string()).unwrap(),
                 removed: vec![],
                 request_id: rid(),
             },
@@ -4213,12 +4385,35 @@ mod tests {
         assert_eq!(logged[0].0, tracing::Level::WARN, "{logged:?}");
     }
 
+    /// 끝자락 옮겨 담기가 안쪽 문자열을 그대로 나르고, 두 타입의 wire 바이트가 같아 되돌려 풀어도 원래 값이다.
+    #[test]
+    fn the_wire_owner_crosses_into_the_bus_type_unchanged() {
+        for raw in [
+            "",
+            "engram-dashboard-shell",
+            "conn-7",
+            "주인 \"따옴표\"\n\u{7f}",
+        ] {
+            let wire = WireOwnerToken::new(raw);
+            let owner = owner_from_wire(wire.clone());
+            assert_eq!(owner.as_str(), raw);
+
+            let bytes = serde_json::to_string(&wire).unwrap();
+            assert_eq!(bytes, serde_json::to_string(&owner).unwrap(), "{raw:?}");
+            assert_eq!(serde_json::from_str::<OwnerToken>(&bytes).unwrap(), owner);
+            assert_eq!(
+                serde_json::from_str::<WireOwnerToken>(&bytes).unwrap(),
+                wire
+            );
+        }
+    }
+
     /// ★주인 칸에 파생값이 **아닌** 토큰을 일부러 싣는다★ — 명부의 주인이 패킷이 아니라 연결에서
     /// 난다는 것이 이 wire 의 계약이다(`ConnectionSession::owner_token`).
     fn register(decls: Vec<CommandDecl>, request_id: RequestId) -> AgentCommand {
         AgentCommand::RegisterCommands {
-            owner: OwnerToken::new("whatever-the-client-thinks"),
-            decls,
+            owner: WireOwnerToken::new("whatever-the-client-thinks"),
+            decls: decls_slot(&decls),
             catalog_version: 7,
             request_id,
         }
@@ -4226,12 +4421,20 @@ mod tests {
 
     fn update(added: Vec<CommandDecl>, removed: Vec<&str>, request_id: RequestId) -> AgentCommand {
         AgentCommand::UpdateCommands {
-            owner: OwnerToken::new("whatever-the-client-thinks"),
-            added,
+            owner: WireOwnerToken::new("whatever-the-client-thinks"),
+            added: decls_slot(&added),
             removed: removed.into_iter().map(str::to_string).collect(),
             request_id,
         }
     }
+
+    /// 등록 항목 목록을 패킷의 원문 칸으로 싼다 — 운영에서 싸는 쪽은 셸이라(데몬은 풀기만 한다) 시험 몫이다.
+    fn decls_slot(decls: &[CommandDecl]) -> Box<RawValue> {
+        serde_json::value::to_raw_value(decls).expect("등록 항목 직렬화")
+    }
+
+    /// protocol 등록 golden(`messages.rs` 의 `MIXED_DECLS`) · 셸 `protocol_state` 시험과 같은 칸 바이트.
+    const MIXED_DECLS: &str = r#"[{"name":"slot.focus","help":"{}","agent_args":["agent","after_tab"]},{"name":"tab.focus","help":"{}"}]"#;
 
     /// 연결이 선 상태의 세션 — 명부는 **붙어 있는 연결**의 등록만 받으므로, 명단에 올리는 이 한 줄이
     /// 운영의 `on_connect` 자리다(`CommandRoster::attach`).
@@ -4307,6 +4510,165 @@ mod tests {
             names,
             vec!["tab.create".to_string(), "tab.split".to_string()],
             "내린 이름은 자리째 사라지고(ADR-0150) 차분에 안 실린 이름은 그대로다"
+        );
+    }
+
+    /// ★에이전트 참조 칸은 원문 등록 칸을 푼 데서 명부로 간다★(ADR-0308 · TRD trd-3 §6-1 U4 의 A4) — 중계 전 다시
+    /// 쓰기(`command_delivery::resolve_agent_args`)가 읽는 표가 이 풀기로 채워진다. 등록 · 차분 둘 다 같은 칸이다.
+    #[tokio::test]
+    async fn the_register_slot_hands_agent_args_to_the_roster() {
+        let (core, _rx) = test_core();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = attached(&core, 1);
+
+        let registered = rid();
+        core.dispatch(
+            AgentCommand::RegisterCommands {
+                owner: WireOwnerToken::new("shell"),
+                decls: RawValue::from_string(MIXED_DECLS.to_string()).unwrap(),
+                catalog_version: 1,
+                request_id: registered,
+            },
+            &session,
+            &mock,
+        )
+        .await;
+        let updated = rid();
+        core.dispatch(
+            AgentCommand::UpdateCommands {
+                owner: WireOwnerToken::new("shell"),
+                added: RawValue::from_string(
+                    r#"[{"name":"tab.dock","help":"{}","agent_args":["agent"]}]"#.to_string(),
+                )
+                .unwrap(),
+                removed: vec![],
+                request_id: updated,
+            },
+            &session,
+            &mock,
+        )
+        .await;
+
+        match mock.events().as_slice() {
+            [AgentEvent::Ack { request_id: a }, AgentEvent::Ack { request_id: b }] => {
+                assert_eq!((*a, *b), (registered, updated));
+            }
+            other => panic!("등록 · 차분 둘 다 Ack: {other:?}"),
+        }
+        let commands = core.commands();
+        assert_eq!(
+            commands.agent_args_of("slot.focus"),
+            vec!["agent".to_string(), "after_tab".to_string()],
+            "선언 순서 그대로"
+        );
+        assert!(commands.agent_args_of("tab.focus").is_empty());
+        assert_eq!(
+            commands.agent_args_of("tab.dock"),
+            vec!["agent".to_string()]
+        );
+    }
+
+    /// ★칸이 빠진 옛 항목은 빈 `agent_args` 로 풀린다★(ADR-0308 — 「바꿀 칸 없음」) · 칸이 든 목록은 선언 그대로
+    /// 풀린다. protocol `decl_agent_args_are_optional_on_the_wire` 가 패킷 쪽(칸 바이트가 그대로 건넌다)을 잰다.
+    #[test]
+    fn an_old_register_slot_unpacks_to_no_agent_args() {
+        let old =
+            RawValue::from_string(r#"[{"name":"tab.focus","help":"{}"}]"#.to_string()).unwrap();
+        match decls_from_wire(&old).expect("옛 항목도 풀린다").as_slice() {
+            [decl] => {
+                assert_eq!(decl.name, "tab.focus");
+                assert!(decl.agent_args.is_empty(), "칸이 없으면 빈 목록");
+            }
+            other => panic!("항목 하나여야: {other:?}"),
+        }
+
+        let mixed = RawValue::from_string(MIXED_DECLS.to_string()).unwrap();
+        let decls = decls_from_wire(&mixed).expect("칸이 든 목록");
+        assert_eq!(
+            decls
+                .iter()
+                .map(|decl| (decl.name.as_str(), decl.agent_args.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "slot.focus",
+                    vec!["agent".to_string(), "after_tab".to_string()]
+                ),
+                ("tab.focus", Vec::new()),
+            ]
+        );
+    }
+
+    /// ★패킷은 풀렸는데 항목 목록이 깨지면 그 패킷의 번호로 거절한다★(ADR-0272 결정 6 · `broken_decls_refusal`) —
+    /// 번호가 칸 밖이라 읽히므로 보낸 쪽 대기를 곧바로 깨운다. 패킷 통째로 반려라 명부는 그대로고(차분의 `removed`
+    /// 도 적용되지 않는다) 연결은 산다.
+    #[tokio::test]
+    async fn a_broken_register_slot_is_refused_with_its_request_id_and_applies_nothing() {
+        let (core, _rx) = test_core();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = attached(&core, 1);
+        core.dispatch(register(vec![decl("tab.create")], rid()), &session, &mock)
+            .await;
+
+        let registered = rid();
+        let flow = core
+            .dispatch(
+                AgentCommand::RegisterCommands {
+                    owner: WireOwnerToken::new("shell"),
+                    decls: RawValue::from_string(r#"[{"name":1}]"#.to_string()).unwrap(),
+                    catalog_version: 1,
+                    request_id: registered,
+                },
+                &session,
+                &mock,
+            )
+            .await;
+        assert_eq!(flow, DispatchFlow::Continue, "연결은 산다");
+        let updated = rid();
+        let flow = core
+            .dispatch(
+                AgentCommand::UpdateCommands {
+                    owner: WireOwnerToken::new("shell"),
+                    added: RawValue::from_string(r#"{"name":"tab.split"}"#.to_string()).unwrap(),
+                    removed: vec!["tab.create".to_string()],
+                    request_id: updated,
+                },
+                &session,
+                &mock,
+            )
+            .await;
+        assert_eq!(flow, DispatchFlow::Continue, "연결은 산다");
+
+        match mock.events().as_slice() {
+            [AgentEvent::Ack { .. }, AgentEvent::Error {
+                request_id: Some(a),
+                message: first,
+            }, AgentEvent::Error {
+                request_id: Some(b),
+                message: second,
+            }] => {
+                assert_eq!((*a, *b), (registered, updated), "그 패킷의 번호로 답한다");
+                for message in [first, second] {
+                    assert!(
+                        message.starts_with("INVALID_ARGUMENT: invalid command declarations"),
+                        "{message}"
+                    );
+                }
+            }
+            other => panic!("깨진 등록 · 차분은 번호 실은 Error: {other:?}"),
+        }
+        let names: Vec<String> = core
+            .commands()
+            .entries()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec!["tab.create".to_string()],
+            "깨진 패킷은 명부를 건드리지 않는다"
         );
     }
 
@@ -4543,20 +4905,23 @@ mod tests {
         args: serde_json::Value,
         request_id: engram_dashboard_command::RequestId,
     ) -> AgentCommand {
+        // ★목적지 칸은 부르는 쪽이 아무 값이나 적어 온다★ — 지목은 데몬이 자기 명부로 한다(ADR-0154).
+        let envelope = engram_dashboard_command::CommandEnvelope {
+            name: name.to_string(),
+            request_id,
+            owner: OwnerToken::new("whatever-the-caller-thinks"),
+            proto_ver: 7,
+            args,
+        };
         AgentCommand::Command {
-            // ★목적지 칸은 부르는 쪽이 아무 값이나 적어 온다★ — 지목은 데몬이 자기 명부로 한다(ADR-0154).
-            envelope: engram_dashboard_command::CommandEnvelope {
-                name: name.to_string(),
-                request_id,
-                owner: OwnerToken::new("whatever-the-caller-thinks"),
-                proto_ver: 7,
-                args,
-            },
+            envelope: envelope_to_wire(&envelope).expect("봉투 직렬화"),
         }
     }
 
     fn bus_outcome(reply: engram_dashboard_command::CommandReply) -> AgentCommand {
-        AgentCommand::CommandOutcome { reply }
+        AgentCommand::CommandOutcome {
+            reply: reply_to_wire(&reply).expect("답장 직렬화"),
+        }
     }
 
     fn on_current_thread<T>(body: impl std::future::Future<Output = T>) -> T {
@@ -4643,6 +5008,7 @@ mod tests {
 
         match next_frame_event(&mut owner_inbox).await {
             AgentEvent::CommandRequest { envelope } => {
+                let envelope = envelope_from_wire(&envelope).expect("데몬이 다시 싼 봉투는 풀린다");
                 assert_eq!(envelope.request_id, req, "id 는 전 구간 동일");
                 assert_eq!(
                     Some(envelope.owner),
@@ -4670,6 +5036,7 @@ mod tests {
 
         match next_frame_event(&mut caller_inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = reply_from_wire(&reply).expect("데몬이 싼 답장은 풀린다");
                 assert_eq!(reply.request_id, req);
                 assert_eq!(
                     reply.outcome,
@@ -4698,6 +5065,227 @@ mod tests {
             0,
             "끝난 왕복은 표에서 빠진다"
         );
+    }
+
+    /// ★패킷은 풀렸는데 봉투가 깨지면 번호 없는 거절이다★(ADR-0272 결정 6 · 데몬 쪽) — 번호를 못 읽으니
+    /// `Error{request_id: None}` 이고(파싱 실패 갈래와 같은 처분), 왕복을 열지 않고 연결은 산다.
+    #[tokio::test]
+    async fn a_broken_envelope_is_refused_without_a_request_id_and_opens_no_round_trip() {
+        let (core, _rx) = test_core();
+        let (owner, mut owner_inbox) = attached_with_inbox(&core, 1);
+        let (caller, _caller_inbox) = attached_with_inbox(&core, 2);
+        let (tx, _spill) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let owner_mock = MockOutboundSink::new(tx.clone());
+        let caller_mock = MockOutboundSink::new(tx);
+        core.dispatch(
+            register(vec![decl("tab.create")], rid()),
+            &owner,
+            &owner_mock,
+        )
+        .await;
+
+        let broken = AgentCommand::Command {
+            envelope: RawValue::from_string(r#"{"name":"tab.create"}"#.to_string()).unwrap(),
+        };
+        assert_eq!(
+            command_request_id(&broken),
+            None,
+            "포화 거절에도 실을 번호가 없다"
+        );
+        let flow = core.dispatch(broken, &caller, &caller_mock).await;
+
+        assert_eq!(flow, DispatchFlow::Continue, "연결은 산다");
+        match caller_mock.events().as_slice() {
+            [AgentEvent::Error {
+                request_id: None,
+                message,
+            }] => assert!(message.starts_with("invalid command envelope"), "{message}"),
+            other => panic!("번호 없는 Error 하나여야: {other:?}"),
+        }
+        // 배달이 spawn 된 태스크로 나가는 회귀라면 그 태스크가 돌 틈을 줘야 아래 부정 단언이 그것을 본다.
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            owner_inbox.try_recv().is_err(),
+            "깨진 봉투는 주인에게 가지 않는다"
+        );
+        assert_eq!(core.deliveries().in_flight(), 0, "왕복을 열지 않는다");
+    }
+
+    /// 받은 명령의 거절 번호 — 봉투 안의 uuid 를 그대로 읽고(ADR-0081 결정 4), 보낸 쪽 답장(`CommandOutcome`)엔
+    /// 번호가 없다(그 안의 키는 이 데몬이 낸 요청의 것이다).
+    #[test]
+    fn the_refusal_reads_the_request_id_inside_the_envelope() {
+        let req = engram_dashboard_command::RequestId::new();
+        assert_eq!(
+            command_request_id(&bus_command("tab.create", req)),
+            Some(RequestId(req.0))
+        );
+        assert_eq!(
+            command_request_id(&bus_outcome(engram_dashboard_command::CommandReply::ok(
+                req,
+                serde_json::Value::Null,
+            ))),
+            None
+        );
+    }
+
+    /// ★중계가 다시 싼 패킷은 protocol golden 과 같은 바이트다★(ADR-0272 결정 6 — protocol
+    /// `command_request_json_golden_and_roundtrip` 의 리터럴) — 다시 싸기가 봉투 모양 · 칸 순서를 바꾸면 주인이
+    /// 받는 바이트가 달라진다. 거꾸로 그 바이트는 같은 봉투로 풀린다.
+    #[test]
+    fn the_relay_repacks_the_envelope_into_the_golden_bytes() {
+        let envelope = engram_dashboard_command::CommandEnvelope {
+            name: "tab.create".to_string(),
+            request_id: engram_dashboard_command::RequestId(uuid::Uuid::nil()),
+            owner: OwnerToken::new("shell"),
+            proto_ver: 1,
+            args: serde_json::json!({ "window": "main" }),
+        };
+        let packet = event_json(&AgentEvent::CommandRequest {
+            envelope: envelope_to_wire(&envelope).unwrap(),
+        })
+        .unwrap();
+        assert_eq!(
+            packet,
+            r#"{"CommandRequest":{"envelope":{"name":"tab.create","request_id":"00000000-0000-0000-0000-000000000000","owner":"shell","proto_ver":1,"args":{"window":"main"}}}}"#
+        );
+        let AgentEvent::CommandRequest { envelope: raw } = serde_json::from_str(&packet).unwrap()
+        else {
+            panic!("CommandRequest 여야");
+        };
+        assert_eq!(envelope_from_wire(&raw).unwrap(), envelope);
+    }
+
+    /// ★패킷은 풀렸는데 답장이 깨지면 번호 없는 거절이다★(ADR-0272 결정 6 · 데몬 쪽 — 깨진 봉투와 같은 처분) —
+    /// 번호를 못 읽으니 어느 왕복에도 붙지 않고 `Error{request_id: None}` 이 결말을 보낸 연결로 간다. 원문에 맞는
+    /// 번호가 적혀 있어도 번호만 골라 읽지 않는다(ADR-0272 「거부한 대안」 — 부분 파싱). 그 왕복은 열린 채 남아 성한
+    /// 결말이 오면 그대로 닫힌다.
+    #[tokio::test]
+    async fn a_broken_outcome_is_refused_without_a_request_id_and_settles_nothing() {
+        let (core, _rx) = test_core();
+        let (owner, mut owner_inbox) = attached_with_inbox(&core, 1);
+        let (caller, mut caller_inbox) = attached_with_inbox(&core, 2);
+        let (tx, _spill) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let owner_mock = MockOutboundSink::new(tx.clone());
+        let caller_mock = MockOutboundSink::new(tx);
+        core.dispatch(
+            register(vec![decl("tab.create")], rid()),
+            &owner,
+            &owner_mock,
+        )
+        .await;
+        let req = engram_dashboard_command::RequestId::new();
+        core.dispatch(bus_command("tab.create", req), &caller, &caller_mock)
+            .await;
+        assert!(matches!(
+            next_frame_event(&mut owner_inbox).await,
+            AgentEvent::CommandRequest { .. }
+        ));
+
+        let broken = AgentCommand::CommandOutcome {
+            reply: RawValue::from_string(format!(r#"{{"request_id":"{req}"}}"#)).unwrap(),
+        };
+        let flow = core.dispatch(broken, &owner, &owner_mock).await;
+
+        assert_eq!(flow, DispatchFlow::Continue, "연결은 산다");
+        match owner_mock.events().as_slice() {
+            [.., AgentEvent::Error {
+                request_id: None,
+                message,
+            }] => assert!(message.starts_with("invalid command reply"), "{message}"),
+            other => panic!("결말을 보낸 쪽에 번호 없는 Error 가 마지막이어야: {other:?}"),
+        }
+        assert_eq!(
+            core.deliveries().in_flight(),
+            1,
+            "깨진 답장은 왕복을 닫지 않는다"
+        );
+        assert!(
+            caller_inbox.try_recv().is_err(),
+            "물어본 쪽에는 아무것도 안 간다"
+        );
+
+        core.dispatch(
+            bus_outcome(engram_dashboard_command::CommandReply::ok(
+                req,
+                serde_json::json!({ "tab": 4 }),
+            )),
+            &owner,
+            &owner_mock,
+        )
+        .await;
+        match next_frame_event(&mut caller_inbox).await {
+            AgentEvent::CommandReply { reply } => assert_eq!(
+                reply_from_wire(&reply)
+                    .expect("데몬이 싼 답장은 풀린다")
+                    .request_id,
+                req
+            ),
+            other => panic!("성한 결말은 그 왕복을 닫는다: {other:?}"),
+        }
+    }
+
+    /// ★중계가 싼 답장 패킷은 protocol golden 과 같은 바이트다★(ADR-0272 — protocol
+    /// `command_reply_json_golden_and_roundtrip` 의 리터럴) — 답장 → 원문 칸이 모양 · 칸 순서를 바꾸면 호출자가
+    /// 받는 바이트가 달라진다. 거꾸로 그 바이트는 같은 답장으로 풀린다.
+    #[test]
+    fn the_relay_repacks_the_reply_into_the_golden_bytes() {
+        let nil = engram_dashboard_command::RequestId(uuid::Uuid::nil());
+        for (reply, golden) in [
+            (
+                CommandReply::err(nil, CommandError::of(ErrorCode::NotFound, "no view 'x'")),
+                r#"{"CommandReply":{"reply":{"request_id":"00000000-0000-0000-0000-000000000000","outcome":{"Err":{"code":"NOT_FOUND","message":"no view 'x'","retry":"never"}}}}}"#,
+            ),
+            (
+                CommandReply::ok(nil, serde_json::json!({ "view_id": "v1" })),
+                r#"{"CommandReply":{"reply":{"request_id":"00000000-0000-0000-0000-000000000000","outcome":{"Ok":{"view_id":"v1"}}}}}"#,
+            ),
+        ] {
+            let packet = event_json(&AgentEvent::CommandReply {
+                reply: reply_to_wire(&reply).unwrap(),
+            })
+            .unwrap();
+            assert_eq!(packet, golden);
+            let AgentEvent::CommandReply { reply: raw } = serde_json::from_str(&packet).unwrap()
+            else {
+                panic!("CommandReply 여야");
+            };
+            assert_eq!(reply_from_wire(&raw).unwrap(), reply);
+        }
+    }
+
+    /// ★손으로 적은 TS 답장 칸(protocol `AgentCommand::CommandOutcome` · `AgentEvent::CommandReply` 의
+    /// `#[ts(type = …)]`)이 광고하는 **관용**을 답장을 푸는 이 끝자락에 못박는다★ — 원문 칸이라 protocol 은 답장
+    /// 모양을 못 본다(ADR-0272).
+    ///
+    /// 그 칸은 컴파일러가 안 보므로, 답장 타입이 나중에 조여지면(세 칸을 필수로 만들거나 계약 밖 필드를 거부) 광고가
+    /// 조용히 거짓이 된다 — 그때 TS 호출자는 데몬이 받는 값을 타입으로 표현할 수 없게 된다. 위 golden 은 이 클래스를
+    /// 못 잡는다(답장 → 바이트 한 방향만 본다). 그래서 방향을 뒤집어 잰다.
+    #[test]
+    fn the_outcome_slot_accepts_everything_its_ts_type_advertises() {
+        let nil = "00000000-0000-0000-0000-000000000000";
+        // 세 칸 전부 **부재** + 계약 밖 필드.
+        let sparse = RawValue::from_string(format!(
+            r#"{{"request_id":"{nil}","outcome":{{"Err":{{"detail":{{"n":1}}}}}}}}"#
+        ))
+        .unwrap();
+        let reply =
+            reply_from_wire(&sparse).expect("세 칸이 없어도 받는다(TS 칸이 그렇게 광고한다)");
+        assert!(reply.outcome.is_err());
+        // ★계약 밖 필드는 되보낼 때 살아 있어야 한다★ — additive 확장이 중계 홉에서 증발하지 않는다는 계약.
+        assert!(
+            reply_to_wire(&reply).unwrap().get().contains("\"detail\""),
+            "계약 밖 필드가 중계에서 사라졌다"
+        );
+
+        // 세 칸 전부 **`null`**.
+        let nulls = RawValue::from_string(format!(
+            r#"{{"request_id":"{nil}","outcome":{{"Err":{{"code":null,"message":null,"retry":null}}}}}}"#
+        ))
+        .unwrap();
+        reply_from_wire(&nulls).expect("null 세 칸도 받는다");
     }
 
     /// ★마감이 지나면 답장이 **정확히 한 번** 나가고, 늦게 온 결말은 두 번째 답장을 만들지 못한다★
@@ -4754,6 +5342,7 @@ mod tests {
         let (timed_out, events, caller_quiet, in_flight) = seen.expect("본문이 돌았다");
         match timed_out {
             AgentEvent::CommandReply { reply } => {
+                let reply = reply_from_wire(&reply).expect("데몬이 싼 답장은 풀린다");
                 let err = reply.outcome.expect_err("마감 초과");
                 assert_eq!(err.code(), ErrorCode::Timeout);
                 assert_eq!(
@@ -6931,6 +7520,7 @@ mod tests {
 
         let agent_id = match next_frame_event(&mut inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = reply_from_wire(&reply).expect("데몬이 싼 답장은 풀린다");
                 assert_eq!(reply.request_id, made);
                 let ok = reply.outcome.expect("등록 성공");
                 assert_eq!(ok["state"], "sleeping", "만들기는 띄우지 않는다: {ok}");
@@ -6950,6 +7540,7 @@ mod tests {
 
         match next_frame_event(&mut inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = reply_from_wire(&reply).expect("데몬이 싼 답장은 풀린다");
                 assert_eq!(reply.request_id, listed);
                 let ok = reply.outcome.expect("조회 성공");
                 let agents = ok["agents"].as_array().expect("배열");
@@ -6984,6 +7575,7 @@ mod tests {
 
         match next_frame_event(&mut inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = reply_from_wire(&reply).expect("데몬이 싼 답장은 풀린다");
                 let err = reply.outcome.expect_err("모르는 칸은 반려");
                 assert_eq!(
                     err.code(),
@@ -7040,6 +7632,7 @@ mod tests {
         .await;
         match next_frame_event(&mut stranger_inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = reply_from_wire(&reply).expect("데몬이 싼 답장은 풀린다");
                 let err = reply.outcome.expect_err("비보유자는 거절");
                 assert_eq!(err.code(), engram_dashboard_command::ErrorCode::Conflict);
                 assert_eq!(err.message(), INPUT_LOCKED_REFUSAL, "WS 와 같은 글자");
@@ -7059,6 +7652,7 @@ mod tests {
         .await;
         match next_frame_event(&mut holder_inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = reply_from_wire(&reply).expect("데몬이 싼 답장은 풀린다");
                 let err = reply.outcome.expect_err("오늘은 동사가 NOT_FOUND");
                 assert_eq!(
                     err.code(),

@@ -8,16 +8,22 @@ description = "Engram Dashboard 재사용 전송 lib — 프레임 경계·요�
 name = "engram_dashboard_transport"
 path = "src/lib.rs"
 
-# ★`default = []` — 사유는 `net` 과 같다: 조용한 회귀보다 시끄러운 실패★. 하네스가 필요한 소비자가
-#   `features = ["test-support"]` 를 명시로 켠다(선례 = `engram-dashboard-command`).
-#   ★이 저장소에서 빈 default 의 실이득을 넘겨 읽지 말 것★ — feature 합집합은 cargo 호출 1회 단위라
-#   루트 빌드에서는 어차피 켜진다. 얻는 것은 **소비자 쪽 실수가 컴파일 오류로 말하는 것**이다.
+# ★`default = []` — same reason as `net`: a loud failure beats a silent regression★. A consumer that needs the harness
+#   turns on `features = ["test-support"]` explicitly, ★in its `[dev-dependencies]` only★ (precedent =
+#   `engram-dashboard-command` · base · platform). The release graph is checked by CI: `ci.yml` `shell gate 5` for the
+#   shell (the daemon line comes with 3-3 U4).
+#   ★What the empty default buys in this repo★ — features are unified per cargo invocation under resolver 2: a plain
+#   `cargo build` (root or `--workspace`) leaves `test-support` off (measured 2026-11-04: lib features `default` · `ws`),
+#   and it turns on only when the call builds a consumer's dev graph that requests it (a root or `--workspace` test run —
+#   the shell) or selects this crate with `--all-features`; `cargo test -p engram-dashboard-transport` alone keeps it
+#   off (transport gate ④ line 1 relies on that).
+#   The gain is that a consumer's mistake speaks as a compile error.
 [features]
 default = []
 test-support = []
 # ★`tokio/net` 은 오늘 이 줄 없이도 켜진다★ — `tokio-tungstenite` 0.26.2 의 default feature `connect` 가
 #   `tokio/net` 을 함의한다(그 매니페스트: `connect = ["stream", "tokio/net", "handshake"]`). 그래도
-#   명시로 적는다: 받는 쪽(`ws::WsListener`)이 `TcpListener`·`TcpStream` 을 직접 쓰는데 무조건 의존의
+#   명시로 적는다: 받는 쪽(`ws::WsListener`)이 `TcpSocket`·`TcpListener`·`TcpStream` 을 직접 쓰는데 무조건 의존의
 #   tokio 는 `rt`·`sync`·`time`·`macros` 뿐이라, 안 적으면 **남의 default feature 에 조용히 얹힌 상태**가
 #   된다. TLS 결정 등으로 아래 `tokio-tungstenite` 에 `default-features = false` 를 걸면 그 경로가 끊긴다.
 #   (선례 = `net` 도 tokio 의 `net` 을 자기 목록에 적는다 — 같은 `tokio-tungstenite` 0.26 을 물고서다.)
@@ -26,16 +32,19 @@ ws = ["dep:tokio-tungstenite", "tokio/net"]
 # ★워크스페이스 crate 를 여기 적지 않는다★ — ADR-0177 결정 1(재사용 lib)의 실물이 이 빈 자리다.
 #   기계 강제 = lib.rs 헤더의 게이트 1(해석된 의존 그래프를 읽는다 — 매니페스트 텍스트 grep 이 아니다).
 [dependencies]
-# rt = 상대마다 감독 태스크 + 연결마다 reader 태스크 spawn · sync = mpsc(나가는 큐·인바운드 한 줄)·
+# rt = 상대마다 감독 태스크 + 연결마다 reader 태스크 spawn · sync = mpsc(나가는 큐·손잡이별 수신단)·
 #   watch(PeerState)·oneshot(대기 슬롯) · time = `SystemClock::sleep` · macros = `select!` 와 `#[tokio::test]`.
-# ★`rt-multi-thread` 를 넣지 않는다★ — 이 crate 에 런타임 빌더도 `flavor = "multi_thread"` 도 없고,
-#   감독 태스크는 `rt` 만으로 뜬다. 소비자가 멀티스레드 런타임을 쓰는 것은 그쪽 feature 선택이다.
-tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+# ★운영 의존에는 `rt-multi-thread` 를 넣지 않는다★ — 이 crate 에 런타임 빌더가 없고 감독 태스크는 `rt` 만으로
+#   뜬다. 소비자가 멀티스레드 런타임을 쓰는 것은 그쪽 feature 선택이다(시험만 켠다 — 아래 `[dev-dependencies]`).
+# ★바닥 1.37 = mpsc `Receiver::{len, is_empty, is_closed}` 가 들어온 판★ — 운영 루프의 굶주림 방지 규칙이 나가는
+#   큐 깊이를 `len` 으로 읽는다(`peer.rs` 의 `next_turn` 호출).
+tokio = { version = "1.37", features = ["rt", "sync", "time", "macros"] }
 # `BoxFuture` — dyn seam(`Dialer`·`LinkTx`·`LinkRx`·`Clock`)이 `async fn` in trait 을 못 써서 수동 박싱한다
 #   (net 의 `frame_port` 가 같은 이유로 같은 형태다). `with_deadline` 의 `select` 도 여기서 온다.
 futures-util = "0.3"
 
-# 실소켓 WS 어댑터(`ws.rs`) 전용 — 거는 쪽 `connect_async`, 받는 쪽 `accept_async`, 그리고 `Message`.
+# 실소켓 WS 어댑터(`ws.rs`) 전용 — 거는 쪽 `connect_async_with_config`, 받는 쪽 `accept_hdr_async_with_config`(Origin ·
+#   Host 머리 검사 · 크기 설정), 그리고 `Message`.
 # ★버전 0.26 은 워크스페이스 핀이다★ — `net`(`crates/engram-dashboard-net/Cargo.toml`)·`daemon`·
 #   `src-tauri` 가 전부 그 판이고, 같은 crate 두 판이 한 그래프에 서는 것 자체가 결함이다.
 # default feature(`connect` + `handshake`) 를 그대로 쓴다 — 거는 쪽과 받는 쪽이 각각 그 둘을 요구한다.
@@ -48,3 +57,8 @@ tokio-tungstenite = { version = "0.26", optional = true }
 #   thiserror — 오류 타입이 적어 `Display` 를 손으로 쓴다(net 도 같다).
 #   rand — 지터 난수원은 `Clock::now()` 하위 나노초 + `PeerId` 해시다(선례 = agent 의 profile.rs).
 #   uuid — `Tag`·`StreamKey` 가 제네릭이라 이 crate 는 uuid 를 보지 않는다.
+
+[dev-dependencies]
+# rt-multi-thread = 명부의 올리기 경합을 일꾼 스레드 여럿 위에서 재는 시험(`registry.rs` 의 `flavor = "multi_thread"`).
+#   운영 빌드에는 안 든다 — dev 의존의 feature 는 운영 그래프로 합쳐지지 않는다(resolver 2).
+tokio = { version = "1.37", features = ["rt-multi-thread"] }

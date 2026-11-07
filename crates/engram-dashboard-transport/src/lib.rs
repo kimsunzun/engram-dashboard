@@ -13,20 +13,62 @@
 //! ```text
 //! ① 타입은 제네릭, 자원은 dyn.
 //!      제네릭 = Wire(소비자의 패킷 어휘)
-//!      dyn    = Dialer/Link(전송) · Clock(시간)
+//!      dyn    = Dialer/Listener/Link(전송) · Clock(시간)
 //! ② 순수 층과 구동 층을 파일로 가른다(아래 게이트 3 이 그 벽이다).
 //! ③ 상대는 처음부터 N 개다.
-//! ④ 위로 올라가는 것은 Incoming 한 줄뿐이다 — 옆 채널을 두지 않는다.
+//! ④ 위로 올라가는 것은 Incoming 하나뿐이다 — 패킷과 사건이 같은 흐름을 타고 옆 채널을 두지 않는다.
 //! ```
 //!
 //! ## 진입점
 //!
-//! [`Registry::new`] 가 명부와 [`Inbound`] 를 낸다 · [`Registry::add`] 가 상대를 올리고 [`Peer`] 를 준다 ·
-//! [`Peer::request`]/[`Peer::notify`]/[`Peer::resume_stream`]/[`Peer::reconnect_now`]/[`Peer::close`] 가
-//! 조작 표면 · [`Inbound::recv`] 가 유일한 수신 표면.
+//! [`Registry::new`] 가 명부를 세운다 · [`Registry::add`] 가 상대를 올리고 그 [`Peer`] 와 수신단 [`Inbox`] 를
+//! 준다 · [`Registry::attach`] 는 받은 통로([`Listener`] 가 낸 [`Accepted`])를 같은 모양으로 얹는다(다시 걸지 않고
+//! 끝나면 명부에서 내린다 — 수락 루프는 소비자가 돈다) · [`Peer::request`]/[`Peer::notify`]/[`Peer::resume_stream`]/
+//! [`Peer::reconnect_now`]/[`Peer::drop_link_in`]/[`Peer::close`]/[`Peer::close_after_flush`] 가 조작 표면 · [`Inbox::recv`] 가 유일한 수신
+//! 표면이다 — 손잡이마다 하나이고 그 감독 하나가 낸 것만 온다. 명부를 접을 때는 [`Registry::close_all`] 이 전부를
+//! 비우고 닫으며 끝을 기다린다.
+//! ★보내는 것은 연결 하나에 묶인다★ — `request` · `notify` 는 부른 순간의 지금 세대에, [`Peer::request_in`] ·
+//! [`Peer::notify_in`] 은 부르는 쪽이 준 세대(받은 메시지의 [`Arrival::generation`])에 묶이고, 그 연결이 아니면
+//! 나가지 않는다(TRD 3 §3-0 ③ — `peer.rs` 헤더).
 //!
 //! ★[`machine`]·[`pending`]·[`stream`] 이 공개인 것은 의도★ — 순수 층이라 소비자가 자기 하네스에서
 //! 그대로 돌려 볼 수 있다(ADR-0012). **지지되는 표면**은 위 진입점이고, 순수 층은 관측용이다.
+//!
+//! ## 받는 쪽 불변식 (TRD 3 §3-0 ① — 소비자가 지는 것 포함)
+//!
+//! 받는 쪽이 밀리면 이 crate 는 버리지 않고 그 상대의 읽기를 세운다(배압 — 아래 「알려진 한계」의 줄 항목).
+//! 그 선택에서 나오는 규칙이다.
+//!
+//! 1. ★[`Inbox`] 를 비우는 task 위에서 [`Peer::request`] 를 기다리지 않는다★ — 배압으로 그 상대의 읽기가
+//!    서면 답장도 못 들어와, 그 요청은 시한([`Policy::request_timeout`])까지 매달리다 시한 초과로 끝난다.
+//!    요청은 따로 띄운 task 에서 한다.
+//! 2. ★배압으로 붙든 동안 그 상대의 침묵 판정과 이어받기 창의 시한은 멈춘다★ — 막은 것은 우리 쪽이다. 감독이
+//!    풀림을 알아챈 순간을 마지막 수신으로 삼아 다시 세고, 열린 창은 붙든 시간만큼 늦게 닫힌다 — 감독이 쓰기를
+//!    기다리던 사이 시작됐거나 그 사이 시작돼 끝난 붙듦도 붙든 시간이다. 창은 그보다 더 늦게 닫힐 수는 있어도(풀림을
+//!    늦게 알아챘다 · 창을 열기 전의 붙듦도 민다 — 잃는 것이 없는 쪽) 일찍 닫히지는 않는다. ★예외 하나★ — 붙듦과
+//!    무관하게 창 시한이 쓰기 도중 지나고 그 사이 재생분이 앞잡이 줄에 들어왔으면 창이 그 재생분보다 먼저 닫힐 수
+//!    있다(아래 「알려진 한계」). 우리 ping 은 그동안에도 나간다.
+//! 3. 사건 · 메시지는 감독마다 한 줄(그 손잡이의 수신단)에 그 감독이 낸 순서대로 탄다(감독의 순서 칸 —
+//!    `peer.rs` 헤더). 상대가 보내고 곧바로 닫으면 닫힘은 그 앞 것들 뒤에 온다 — 줄이 차 있으면 그 앞 것들이
+//!    순서 칸을 떠난 뒤에야(받는 쪽이 다 꺼낼 때까지는 아니다), 받아 쥔 바이트가 읽기 몫(아래 「알려진 한계」의
+//!    줄 항목) 이상이면 그 밑으로 내려온 뒤에야 닫힘이 읽힌다.
+//! 4. 데몬의 쓰기 시한과 셸의 배압이 맞물리는 자리(TRD 3 R7)는 인메모리 하네스로 못 잰다 — TCP 버퍼가 없다.
+//!    실소켓 시험 몫이다(TRD 3 §6-2 U4).
+//! 5. ★수신단은 끝(`None`)까지 비운다 — 끝을 [`Peer::state`] 만으로 보지 않는다★ — 안 비우면 감독이 그 상대를
+//!    안 읽어 상대의 닫힘조차 못 읽고, `state()` 는 끝을 영영 못 본다. 끝은 [`TransportEvent::Closed`] 다음의
+//!    `None` 이다. ★`Closed` 없는 `None` 은 — 받는 쪽이 스스로 [`Inbox::close`] 를 부른 게 아니라면 — 감독이
+//!    정상 정리 없이 끝났다는 뜻이다★: 정리가 상한을 넘겨 남은 것을 버렸거나 태스크가 비정상으로 끝났다(패닉 ·
+//!    런타임 종료). 상한 초과로만 읽지 않는다. `close` 를 부른 뒤의 `None` 은 감독이 아직 돌고 있어도 온다
+//!    ([`Inbox`]). ★거꾸로 받는 쪽이 수신단을 놓거나 [`Inbox::close`] 를 부르면 감독은 곧바로 접는다★ — 넣을 것이
+//!    없어도(상대가 조용해도) 기다리지 않고 다시 걸지도 않는다. 감독이 걸기를 시작하기 전이면 아예 안 건다 —
+//!    감독은 [`Registry::add`] · [`Registry::attach`] 가 곧바로 띄우므로 그 부름과 놓기 사이에 기다림이 끼거나
+//!    다중 스레드 런타임이면 이미 걸고(받은 상대면 핸드셰이크를 돌리고) 있을 수 있다. 걸기 · 핸드셰이크
+//!    도중이면 닫힘 쪽이 이기는 대로 그 시도를 버린다 — 핸드셰이크가 막 끝난 참이라 그 끝남이 이기면 세대를
+//!    하나 뽑고 운영 단계에 든 뒤 곧바로 닫기를 보내며 접는다(해는 없다). 감독은 대기 루프와 쓰기마다 수신단
+//!    닫힘을 지켜본다 — 안 지켜보는 것은 통로를 버릴 때의 닫기 한 번뿐이다(길어야
+//!    [`Policy::write_deadline`] · `peer.rs` 헤더). ★받아 둔 나가는 일도 함께 버려진다★ — 큐에 든 명령은 거절되고
+//!    쓰던 프레임은 버려진다(세지만 신고할 데가 없다). 그래서 보내고 떠나려는 받는 쪽은 `Closed` · `None` 까지
+//!    비운 뒤에 놓는다 — [`Peer::close_after_flush`] · [`Registry::close_all`] 로 닫을 때도 그 끝까지 쥐고 비운다.
 //!
 //! ## 격리 게이트 — 각각 다른 축이고 아래 목록이 정본이다
 //!
@@ -36,8 +78,11 @@
 //! ★매니페스트 텍스트를 grep 으로 바꾸지 말 것★ — rename · `[dependencies.<이름>]` 테이블 형 ·
 //! `[build-dependencies]` · 비활성 target · `optional` 이 전부 정상 Cargo 문법으로 빠져나간다. 플래그도
 //! 줄이지 않는다(`command`·`base`·`messaging` 상한 게이트와 같은 근거).
-//! ★공통으로 남는 구멍★ — 멤버를 `engram-dashboard` **이름 접두**로 식별하므로 다른 이름을 단 멤버는
-//! 그냥 통과한다. 그래서 이 crate 의 패키지 이름에서 그 접두를 떼면 게이트가 조용히 눈을 감는다.
+//! ★남는 구멍 둘★ — 멤버를 `engram-dashboard` **이름 접두**로 식별하기 때문이다(ADR-0151 「개명 함정」).
+//! (a) 그 접두가 없는 워크스페이스 멤버를 의존하면 이 게이트를 그냥 통과한다. (b) 이 crate 가 그 접두를
+//! 떼면 이 게이트는 빨개지지만(`-p` 가 죽거나 자기 줄이 접두를 잃는다), **다른** crate 의 상한 게이트와
+//! 메시징 이름 정규식은 이 crate 로 가는 간선을 못 보게 된다(명단은 CLAUDE.md 「빌드·검증 명령」 — 여기 베끼지
+//! 않는다).
 //!
 //! **② Tauri import 0**(ADR-0003):
 //! `rg "^\s*use tauri" crates/engram-dashboard-transport/src/` → **0줄**.
@@ -74,16 +119,23 @@
 //! 로 죽는다). 재는 것이 컴파일 성립 하나뿐이라 `test` 가 아니라 `check` 다.
 //! ★「이 조합에는 돌 테스트가 0개다」로 읽지 말 것 — 거짓이다★ — `cfg(test)` 가 하네스를 함께 노출해서
 //! `cargo test -p engram-dashboard-transport --features ws` 는 단위 테스트를 그대로 돌린다. 0개인 것은
-//! `tests/` 의 실소켓 스위트 셋뿐이다.
+//! `tests/` 의 실소켓 스위트 넷뿐이다.
 //!
-//! **⑤ 실소켓 스위트 셋이 비지 않았다**(`tests/` 범위):
-//! `cargo test -p engram-dashboard-transport --all-features --test <ws_dial|ws_reject|ws_write_deadline>`
+//! **⑤ 실소켓 스위트 넷이 비지 않았다**(`tests/` 범위):
+//! `cargo test -p engram-dashboard-transport --all-features --test <ws_dial|ws_reject|ws_write_deadline|ws_accept>`
 //! `-- --list` → 각각 **`: test` 로 끝나는 줄이 1개 이상**.
-//! ★④가 이 축을 못 본다★ — 세 파일이 파일 수준 `#![cfg(all(feature = "ws", feature = "test-support"))]`
-//! 뒤에 있어 그 조건이 거짓이 되면(이름 오타·개명·다른 feature 로 접기) 세 바이너리가 **테스트 0개로
+//! ★④가 이 축을 못 본다★ — 네 파일이 파일 수준 `#![cfg(all(feature = "ws", feature = "test-support"))]`
+//! 뒤에 있어 그 조건이 거짓이 되면(이름 오타·개명·다른 feature 로 접기) 네 바이너리가 **테스트 0개로
 //! 컴파일되고 성공**하고, ④의 판정이 성공 여부라 그대로 통과한다.
+//! ★스위트 이름 명단은 사본이 셋이다★ — 이 줄 · `ci.yml` 의 `transport gate 4c` · qa 바인딩의 transport ⑤ 줄. 스위트를
+//! 더하거나 빼면 셋을 같은 변경에서 고친다(명단 밖 스위트는 이 게이트가 안 본다).
 //! ★기대값은 최소 1이고 실수를 올리지 않는다★ — 올리면 개수의 정본이 둘이 된다. 그래서 이 게이트는
 //! 스위트가 **완전히** 빈 것과 타깃이 사라진 것만 잡고, 3개가 1개로 줄어드는 것은 못 잡는다.
+//!
+//! **Consumer side — `test-support` stays out of release graphs.** The harness ([`testing`]) is for consumers' tests
+//! only: a consumer turns the feature on in its `[dev-dependencies]`, never in `[dependencies]`. Unlike ①–⑤ (which
+//! watch this crate) this is checked on the consumer: `.github/workflows/ci.yml` `shell gate 5` holds the shell's release
+//! graph at 0 lines of the feature, paired with ≥ 1 in its dev graph (the daemon line comes with TRD 3 §6-3 U4).
 //!
 //! ## 알려진 한계 (보증으로 읽지 말 것)
 //!
@@ -105,9 +157,11 @@
 //! - ★**닫기 코드가 상대에게 닿는 자리는 좁다**★ — RFC 6455 §7.4.1 이 `1006` 을 와이어로 못 보내는
 //!   예약값으로 못박는다. **우리가 끊을 때는(종료·재연결) 코드를 실어 보내려 끝까지 밀어 넣지만**
 //!   (그 자리 정본 = `Supervisor::drop_link`), 혼잡한 소켓에서는 `Policy::write_deadline` 이 그 대기를
-//!   잘라 코드 없이 끊긴다. 즉 **코드가 반드시 전달되는 자리는 없다** — 핸드셰이크 거절도 남은
-//!   핸드셰이크 시한 안에서만 밀어 넣고, 거절 직전의 마지막 프레임이 못 나갔으면 닫기를 아예 건너뛴다
-//!   (그 자리 정본 = `handshake_once`). [`LinkRead::Closed`] 가 그 코드를 나르는 유일한 통로다.
+//!   잘라 코드 없이 끊긴다. ★[`Peer::close_after_flush`] 로 닫을 때는 더 좁다★ — 닫기 프레임에 `write_deadline` 과
+//!   남은 비우기 시한([`Policy::flush_timeout`]) 중 짧은 쪽만 주고, 앞선 쓰기가 그 시한을 다 썼으면 0 이라 한 번
+//!   밀어 볼 뿐이다 — 느리게 읽는 상대는 준 닫기 코드를 못 받는다. 즉 **코드가 반드시 전달되는 자리는 없다** —
+//!   핸드셰이크 거절도 남은 핸드셰이크 시한 안에서만 밀어 넣고, 거절 직전의 마지막 프레임이 못 나갔으면 닫기를
+//!   아예 건너뛴다(그 자리 정본 = `handshake_once`). [`LinkRead::Closed`] 가 그 코드를 나르는 유일한 통로다.
 //! - ★**운영 중 끊김은 사유 **문구**를 안 나른다**★ — [`TransportEvent::Disconnected`] 가 싣는 것은
 //!   [`DisconnectCause`] 뿐이라 통로가 준 문구도, 상대가 실은 닫기 코드도 갈 곳이 없다.
 //! - ★**`tracing` 이 없다**★ — 사건 스트림([`TransportEvent`])이 그 자리다. **소비자가 사건을 안 읽는
@@ -117,12 +171,24 @@
 //! - ★**[`TransportEvent::StreamTruncated`] 의 `oldest_valid` 는 상대가 말해 준 값이 아니라 관측값이다**★ —
 //!   [`Wire`] 의 여섯 칸에 「지금 유효한 가장 오래된 번호」를 실어 오는 입구가 없다. 재요청을 낸 뒤
 //!   그 답(`after + 1` 번 조각)을 기다리는 동안 도착한 순서 밖 조각을 **붙들어 두고**, 창이 닫히면
-//!   (시한 초과 · [`Policy::resume_buffer`] 포화 · 스트림 축출) **그 첫 번호부터 순서대로 내보내면서**
-//!   그 번호를 올린다. 그래서 값이 참이다 — 실제로 그 번호부터 배달한다. 상대의 권위 값(우리 wire 의
+//!   (시한 초과 · [`Policy::resume_buffer`] 포화 · 붙든 바이트 상한 · 스트림 축출 · 감독의 정리) **그 첫 번호부터
+//!   순서대로 내보내면서** 그 번호를 올린다. 그래서 값이 참이다 — 실제로 그 번호부터 배달한다. 진도는 붙든 것의
+//!   끝 번호까지 밀어, 늦게 온 재생분이 내보낸 번호를 다시 올리지 않는다. 상대의 권위 값(우리 wire 의
 //!   `SubscribeAck.oldest_seq`)을 쓰려면 `Wire` 에 칸이 하나 늘어야 하고, ★그건 소비자 전부를 깨는
 //!   계약 변경이라 사용자 승인 사항이다★.
 //! - ★**붙드는 동안은 배달이 밀린다**★ — 순서를 지키려고 창이 닫힐 때까지 그 스트림의 조각을 안 올린다.
-//!   최대 지연 = [`Policy::resume_timeout`], 최대 적재 = [`Policy::resume_buffer`] 개.
+//!   최대 지연 = [`Policy::resume_timeout`] + 그 사이 배압으로 붙든 시간(받는 쪽이 밀린 만큼 더 밀린다 —
+//!   위 「받는 쪽 불변식」 2), 최대 적재 = 스트림마다 [`Policy::resume_buffer`] 개 · 감독마다 창 상한 8 MiB(스트림을
+//!   쓰는 감독의 바이트 예산의 반 — 아래 줄 항목 · 넘으면 그 창을 잘림으로 닫는다). ★창 상한을 넘길 조각이 새 구멍이면 창을 아예 열지 않는다★ — 재요청 없이 곧바로
+//!   잘림([`TransportEvent::StreamTruncated`])을 신고하고 그 조각부터 이어 간다. ★창 상한은 감독의 모든 스트림이
+//!   함께 쓴다★ — 한 스트림의 열린 창이 상한을 채우고 있으면 다른 스트림의 새 구멍은 메울 기회 없이 곧바로
+//!   잘림이 된다.
+//! - ★**창 시한이 쓰기 도중 지나고 그 사이 재생분이 앞잡이 줄에 들어왔으면 그 재생분은 창에 못 닿는다 — 배압이
+//!   없어도**★ — 운영 루프는 시한이 지났으면 프레임보다 타이머를 먼저 본다(`peer.rs` 의 `next_turn`). 쓰기가 끝난
+//!   뒤 첫 바퀴가 창 시한이 지난 것을 보고 창을 잘림으로 닫고, 그 뒤 처리되는 재생분은 지나간 번호로 버려진다.
+//!   쓰기가 창 시한보다 길 필요는 없다 — 열린 창의 시한을 가로지르는 쓰기 하나면 난다. 배압으로 붙든 시간은
+//!   이것과 따로 뺀다(위 「받는 쪽 불변식」 2).
+//!   TODO(stream-replay-vs-timer): 그 경우에 프레임과 시한의 우선순위를 가른다.
 //! - ★**스트림 장부는 [`Policy::max_streams`] 에서 잘린다**★ — 넘치면 **가장 오래 안 쓴** 것부터 잊고
 //!   [`TransportEvent::StreamForgotten`] 으로 신고한다(붙들고 있던 조각은 함께 돌려준다).
 //!   ★잊은 스트림이 나중에 다시 나타나면 장부가 처음부터 시작되므로 **진도가 되감긴다**★ — 그것을
@@ -130,24 +196,64 @@
 //! - ★**재연결 예산은 축이 둘이다**★ — 「못 붙는다」(연결 성공이 0 으로 되돌린다)와 「붙어도 안
 //!   버틴다」([`Policy::live_dwell`] 을 못 채운 연속 횟수). 어느 쪽이 바닥나도 포기하고, 둘 다
 //!   [`ReconnectPolicy::max_attempts`] 를 상한으로 쓴다.
-//! - ★**공유 줄 포화는 연결을 안 끊는다**★ — [`Policy::inbound_queue`] 는 상대 전부가 함께 쓰므로 그것이
-//!   찼다고 어떤 상대를 끊으면 시끄러운 상대가 조용한 상대를 죽인다. 세어 두었다가
-//!   [`TransportEvent::Dropped`] 로 신고할 뿐이고, **그 사이 도착한 패킷은 실제로 사라진다.**
-//!   연결마다 따로 재는 자원은 [`Policy::frame_buffer`] 쪽이다.
-//! - ★**[`Peer::close`] 에 완료 신호가 없다**★ — 돌아온 시점에 감독이 아직 통로를 닫는 중일 수 있다.
+//! - ★**위로 올라가는 줄은 손잡이마다 따로이고, 줄이 차도 버리지 않는다 — 대신 그 상대의 읽기를 세운다**★ —
+//!   [`Registry::add`] 가 올릴 때마다 줄을 하나 세워 그 받는 끝([`Inbox`])을 돌려준다(같은 이름표를 다시 올려도
+//!   새 줄이다). 그래서 시끄러운 상대가 조용한 상대를 밀어내지 못하고(ADR-0180 결정 8), 수신단 하나를 안
+//!   비우면 그 상대만 선다. 줄([`Policy::inbound_queue`] — 상대별 덮어쓰기 반영)이 차면 그 상대의 감독이 자기
+//!   순서 칸에 붙들었다가 자리가 나는 대로 낸 순서대로 싣는다(`peer.rs` 헤더) — 패킷도 생애 사건도 버려지지
+//!   않고, 줄이 찼다고 연결을 끊지도 않는다. 순서 칸이 붙드는 동안 감독은 그 상대의 프레임을 더 꺼내지 않아
+//!   앞잡이 줄([`Policy::frame_buffer`])이 차면 통로 읽기가 서고, 받아 쥔 바이트가 읽기 몫 이상이어도 통로를 안
+//!   읽는다. 바이트는 감독마다 셈 하나(예산 16 MiB)가 앞잡이 줄 · 순서 칸 · 줄 · 이어받기 창을 함께 덮는다. 스트림
+//!   조각을 한 번이라도 받은 감독은 그 예산을 읽기 몫과 창 상한으로 반씩(8 MiB · 8 MiB) 나누고, 안 받은 감독(스트림
+//!   층을 안 쓰는 두 소비자 — ADR-0310 결정 16)은 읽기 몫이 16 MiB 전부다(창 상한 0 · `budget.rs`). 그래서 받는 쪽이
+//!   밀리면 그 상대만
+//!   밀리고 밀린 것은 통로 쪽에 남는다. ★창이 붙든 스트림 조각은 읽기 몫에서 빠진다★ — 그 조각이 읽기를 세우면
+//!   구멍을 메울 재생분을 못 읽어 메울 수 있던 구멍이 손실이 된다. 감독 하나가 쥐는 바이트의 천장은 16 MiB +
+//!   한 메시지다(TRD 3 §3-0 ① 「B + M」 — 그 까닭의 정본 = `budget.rs` 헤더). 개수 천장은 위 두 길이 + 순서 칸(프레임
+//!   한 장 또는 타이머 한 바퀴가 낳는 것 — 그 바퀴에 닫혀 내보내는 창의 붙든 조각 포함 — 과 생애 사건 몇 개,
+//!   통로를 버릴 때 앞잡이 줄에서 건진 것) + 창이 붙든 조각(스트림마다 [`Policy::resume_buffer`] 미만)이다.
+//!   ★한 메시지의 상한은 어댑터 몫이다★ — `ws` 어댑터는 소비자가 준 값(`ws::AcceptPolicy::max_message_bytes` ·
+//!   `ws::WsDialer::new`)을 받는 쪽 tungstenite 설정에 건다(TRD 3 §5 15). 그래서 그 어댑터 위의 천장은 16 MiB + 그
+//!   값이다(운영 값 16 MiB 면 32 MiB).
+//!   ★우리 쪽이 통로를 버릴 때(앱이 닫음 · 다시 걸기 · 쓰기 실패 등) 이미 읽은 것(앞잡이 줄)은 끊김 사건 앞에
+//!   넘긴다★ — 읽기 태스크를 접고 그 줄을 기다림 없이 비워 운영 중과 같은 길로 보낸다(답장은 기다리던
+//!   호출자에게 · 그 밖은 지금 세대 표식으로 줄에 · 디코드 못 한 한 장이 있어도 그 뒤까지). 통로에 남은 것(아직
+//!   안 읽었다)은 함께 버리고 세지도 신고하지도 않는다.
+//!   ★배압 아래에서는 상대가 마지막 말을 보내고 닫은 것을 쓰기 실패로 먼저 알아챌 수 있다★ — 그 닫힘이 밀린
+//!   것 뒤에 줄 서 안 읽힌 채 ping 쓰기가 먼저 실패하면, 앞잡이 줄에 이미 읽어 둔 것만 위 비우기로 살아남는다.
+//!   통로에 남은 프레임은 함께 버려진다(그 마지막 말이 아직 거기 있었으면 그것도). 끊김 원인은 그 닫힘이 앞잡이
+//!   줄에 이미 들어 있었으면 상대의 닫힘([`DisconnectCause::PeerClosed`] — 먼저 났다)이고, 아직 통로에 있었으면
+//!   쓰기 쪽 끝([`DisconnectCause::WriteFailed`] · 시한이면 [`DisconnectCause::WriteDeadline`])이다.
+//! - ★**[`Peer::close`] 에 완료 신호가 없다**★ — 돌아온 시점에 감독이 아직 통로를 닫는 중일 수 있다. 끝을
+//!   기다리려면 [`Peer::close_after_flush`] 가 돌려주는 future 를 쓴다(비우고 닫는다).
 //!   같은 이름표를 다시 올릴 때 그 겹침이 해롭지 않은 것은 **세대 바닥값** 덕이지 순서 덕이 아니다.
-//! - ★**앱이 스스로 닫을 때는 마지막 유실 신고가 빠질 수 있다 — 고치지 않기로 했다**★ —
-//!   [`Peer::close`] 뒤 정리 단계는 [`TransportEvent::Dropped`] 신고를 한 번만 시도한다. 그때 공유 줄이
-//!   차 있으면 그 신고는 사라지고, 핸들 쪽에서 센 몫(큐가 차 못 넣은 것·끊긴 동안 거절한 것)은 그 단계에서
-//!   합산조차 안 된다. 재연결·통로 끊김에는 해당 없다 — 다음 바퀴가 합산하고, 신고는 성공할 때까지 남는다.
-//!   **앱이 닫겠다고 한 뒤의 유실 개수는 읽을 쪽이 없고 깔끔한 종료가 우선이다**(사용자 결정 2026-09-26).
-//!   공유 줄이 찼을 때의 정책 자체는 열려 있다(`docs/process/S21-transport-crate/trd.md` §12 12번).
-//! - ★**하네스는 current_thread 런타임 전용이다**★ — [`testing::settle`] 이 협조적 양보로만 동기화하고,
-//!   그 위반을 스스로 패닉으로 잡는다.
-//! - ★**받는 쪽 seam 이 아직 없다**★ — [`Handshake`] 는 이미 방향 대칭이고 `ws::WsListener` 가 실소켓
-//!   통로를 받아 오지만, `link.rs` 에 `Listener` trait 이 없고 [`Registry`] 는 **들어오는 연결을 모른다**
-//!   (받은 통로를 감독 태스크에 얹는 일을 아무도 안 한다). 그 seam 이 들어오면 [`Registry::new`]
-//!   시그니처가 바뀐다(TRD §12-7 의 열린 질문).
+//!   읽는 쪽에서는 그 손잡이 수신단의 끝([`TransportEvent::Closed`] 다음의 `None`)이 감독의 끝을 알린다. 옛
+//!   감독은 옛 수신단에만 넣어 같은 이름표의 다음 감독 것과 섞이지 않지만, 두 수신단 사이의 순서는 없다 —
+//!   옛 끝이 새 감독의 사건보다 늦게 읽힐 수 있다(합쳐 읽는 쪽이 거르는 규칙 = TRD 3 §3-3).
+//!   ★정리 중인 감독은 붙든 것을 다 실을 때까지 남는다★ — 받는 쪽이 옛 수신단을 쥔 채 안 읽으면 그런 감독이
+//!   쌓이고, 각자 상한(`peer.rs` 의 `CLOSE_DRAIN_LIMIT`)이 지나야 끝난다 — 그때 남은 것은 세지도 신고하지도
+//!   않고 버린다. 옛 수신단을 놓으면 그 정리는 기다리지 않고 끝난다. ★그래서 감독의 끝은 받는 쪽이 그 수신단을
+//!   비우거나 놓는 데 달렸다★ — 그 끝을 기다리는 것([`Peer::close_after_flush`] 의 future · [`Registry::close_all`])을
+//!   그 수신단을 비우는 task 위에서 await 하지 말 것: 비울 쪽이 그 대기에 서 있으니 상한까지(`close_all` 이면 그
+//!   시한까지) 매달린다.
+//! - ★**앱이 스스로 닫을 때는 핸들 쪽 유실 개수가 신고에서 빠진다 — 고치지 않기로 했다**★ —
+//!   [`Peer::close`] 뒤 정리 단계의 [`TransportEvent::Dropped`] 신고는 감독이 센 몫만 싣고(순서 칸을 지나
+//!   `Closed` 앞에 실린다 — 받는 쪽이 상한 안에 안 비우면 함께 사라진다), 핸들 쪽에서 센 몫(큐가 차 못
+//!   넣은 것·끊긴 동안 거절한 것)은 그 단계에서 합산조차 안 된다. 재연결·통로 끊김에는 해당 없다 — 다음
+//!   바퀴가 합산한다. **앱이 닫겠다고 한 뒤의 유실 개수는 읽을 쪽이 없고 깔끔한 종료가 우선이다**(사용자
+//!   결정 2026-09-26).
+//! - ★**하네스의 settle 계열([`testing::settle`] · [`testing::settle_until`])만 current_thread 런타임 전용이다**★
+//!   — 협조적 양보로만 동기화하고, 그 위반을 스스로 패닉으로 잡는다. 인메모리 부품(`MemoryNetwork` · `memory_link` ·
+//!   `ManualClock` …)과 [`PermitPool`] 은 실시간 시한을 건 대기와 함께 multi_thread 에서도 쓴다(`registry.rs` 의
+//!   3-0 U6b 시험).
+//! - ★**받는 쪽 칸은 업그레이드 칸 하나뿐이다**★ — [`Registry::attach`] 는 받은 통로의 업그레이드 칸을 운영 단계에 들
+//!   때까지 쥐어 인증 대기 칸 몫까지 진다(TRD 3 §5 14). 인증 대기 칸 · 운영 칸은 아직 없다(3-3 U4) — 그래서 운영 중인
+//!   받은 상대의 수에는 상한이 없다. [`Accepted`] 를 내는 청취기는 실소켓 `ws::WsListener` 와 인메모리
+//!   `testing::MemoryListener` 둘이다.
+//! - ★**받은 상대의 이름표는 되쓰지 않는다는 전제다**★ — 받은 상대는 세대 표에 안 들어(연결 수만큼 자라지 않게),
+//!   `add` 로 올린 적이 없고 지금 명부에도 없는 이름표는 운영 세대가 1 부터 다시 간다 — 명부에서 내려간 받은
+//!   이름표를 다시 얹을 때도, 그 이름표를 [`Registry::add`] 할 때도다([`Registry::attach_with_policy`] ·
+//!   [`Registry::add_with_policy`]). 연결마다 새 이름표(TRD 3 §3-1 ① `conn-<ConnId>` — ConnId 단조)를 쓰면 생기지 않는다.
 //! - ★**어댑터가 하나뿐이고 그 한계는 그 파일 헤더가 정본이다**★ — [`ws`](feature `ws`) 가 유일한
 //!   실전송 구현체이고, 정본은 `src/ws.rs` 헤더의 「알려진 한계」·「통로 성질」 두 절이다(**미검** 항목도
 //!   그 안에 있다). ★그 목록을 여기 일부라도 베끼지 않는다★ — 손으로 옮긴 목록은 낡고, 넷만 적혀 있으면
@@ -157,18 +263,22 @@
 //!
 //! `cargo test -p engram-dashboard-transport --all-features` 가 이 crate 만으로 돈다 — 다른 crate 도
 //! 외부 프로세스도 부르지 않는다. 인메모리 스위트는 [`testing::ManualClock`] 위에서 시간을 손으로 돌려
-//! **아무것도 기다리지 않는다**(ADR-0177 결정 8). ★단 feature 로 가려진 실소켓 스위트 셋은 **실시간과
+//! **아무것도 기다리지 않는다**(ADR-0177 결정 8). ★단 feature 로 가려진 실소켓 스위트 넷은 **실시간과
 //! 실 TCP 소켓** 위에서 돌아 실제로 기다린다★.
 //!
-//! 그 셋은 `tests/` 의 `ws_dial`·`ws_reject`·`ws_write_deadline` 이고 전부
+//! 그 넷은 `tests/` 의 `ws_dial`·`ws_reject`·`ws_write_deadline`·`ws_accept` 이고 전부
 //! `all(feature = "ws", feature = "test-support")` 뒤에 있다. 포트는 **0번을 요청하고 되읽는다**.
-//! ★셋이 같은 이유로 있는 것이 아니다★:
+//! ★넷이 같은 이유로 있는 것이 아니다★:
 //! - `ws_dial`·`ws_write_deadline` = **인메모리로 못 재는 것**. 그중 **쓰기 시한이 커널 버퍼 앞에서
 //!   실제로 잘라내나**는 원리상 하네스로 만들 수 없다. ADR-0177 결정 8 이 실소켓으로 열거한 둘이 이것들이다.
 //! - `ws_reject` = 하네스가 **이미 내리는 판정을 일부러 다시 재는 것**. 하네스의 거절은 닫기를 **값으로**
 //!   건네므로 닫기 **코드와 문구가 커널을 건너오나**는 값 전달로 안 재진다 — 어댑터의 성질이다. 사유의
 //!   정본은 `tests/ws_reject.rs` 헤더이고, ★이 스위트는 위 열거 밖이라 결정 기록이 아직 없다★.
-//! ★그 셋을 「인메모리 하네스로 옮기면 빨라진다」로 읽지 말 것★ — 옮기는 순간 재던 것이 사라진다.
+//! - `ws_accept` = 받는 쪽 수락 정책이 **실제 HTTP 업그레이드와 실 TCP** 에 서나 — 403 이 상대에게 닿나 · 시한이 실제
+//!   TCP 를 닫나 · 크기 상한이 tungstenite 설정에 들어갔나(양방향) · 칸 셈이 실제 수락 순서에서 맞나 · 받은 통로가
+//!   명부에 얹혀 양쪽으로 요청이 흐르나. 머리 판정 표 자체는 `ws.rs` 단위 테스트가 소켓 없이 잰다. 실소켓으로 재라는
+//!   요구는 TRD 3 §6-0 U7 행이다(사유의 정본 = `tests/ws_accept.rs` 헤더).
+//! ★그 넷을 「인메모리 하네스로 옮기면 빨라진다」로 읽지 말 것★ — 옮기는 순간 재던 것이 사라진다.
 //!
 //! ★`-- --test-threads=4` 를 붙이지 않는다★ — 이 crate 는 자식 프로세스를 하나도 안 띄운다.
 //! `.claude/skill-bindings/qa.md` 「모듈별 명령」의 판정 규칙 그대로이고 `command`·`protocol`·`messaging`·`net` 과 같은 처지다.
@@ -178,11 +288,14 @@
 // ADR-0181
 // ADR-0182
 // ADR-0183
+// ADR-0310
+mod budget;
 pub mod clock;
 pub mod event;
 pub mod frame;
 pub mod link;
 pub mod machine;
+mod mask;
 pub mod peer;
 pub mod pending;
 pub mod policy;
@@ -199,14 +312,18 @@ pub mod ws;
 pub use clock::{with_deadline, Clock, Elapsed, SystemClock};
 pub use event::{Arrival, Direction, Incoming, PeerId, TransportEvent};
 pub use frame::{Close, CloseCode, Frame};
-pub use link::{Address, Dialer, Handshake, HandshakeStep, LinkError, LinkRead, LinkRx, LinkTx};
+pub use link::{
+    Accepted, Address, ConnPermit, DialFailure, Dialer, Handshake, HandshakeStep, LinkError,
+    LinkInfo, LinkRead, LinkRx, LinkTx, Listener, PermitPool, RejectKind,
+};
 pub use machine::{
     Action, ConnectFailure, DisconnectCause, GaveUpReason, Generation, Input, Machine,
     MachineEvent, PeerState,
 };
+pub use mask::mask_reason;
 pub use peer::{Peer, SendError};
 pub use pending::{Insert, Pending, RequestError};
 pub use policy::{DecodeFailurePolicy, Policy, QueueFullPolicy, ReconnectPolicy};
-pub use registry::{Inbound, Registry};
+pub use registry::{Inbox, Registry};
 pub use stream::{StreamMark, Streams, Verdict};
-pub use wire::Wire;
+pub use wire::{DecodeClass, Wire};

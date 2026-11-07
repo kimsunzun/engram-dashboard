@@ -536,21 +536,22 @@ pub(crate) fn close_requested_popup_window(
     }
 }
 
-// The model share of pop-out window cleanup — drop all tab Views of the window + remove the windows entry + recompute the routing table + fire the subscription cleanup +
-// recompute usage interest + label tombstone, ★all inside the same lock★. Both the close request and `Destroyed` call it, and the second changes nothing except releasing the closing window's
-// number (if the window is already gone, only recompute · the tombstone is a set). Answer = the number of tabs removed from the model (0 if the window was already absent) · `None` =
-// no cleanup (main · lock poisoned). It stands without a window (`AppHandle`), so shell unit tests call this directly.
-//   ★F1 REAL concurrency bug fix★: the old code computed the delta (cleanup_window_core rebuild) inside the lock and fired
-//   `to_unsubscribe` after dropping the lock → if another command (assign_agent/spawn/move) re-added
-//   that agent between computing and firing, a stale 1→0 unsubscribe killed the live subscription just formed
-//   (a violation of the call contract of `output_router::rebuild` — the canonical source is that function's comment, and ★ADR-0006 has no clause 「델타 enqueue
-//   는 락 안」 ("delta enqueue is inside the lock")★). Now, consistent with the apply service (`SubscriptionSync::resync`) · move_slot_to_window,
-//   firing is also inside the lock (unsubscribe is a synchronous try_send — await/network 0, independent of the lifecycle lock →
-//   no deadlock).
-// Window number (TRD S26-window-chrome §4-1) — a window cleared by a close request holds its number until its `Destroyed`, and `Destroyed` releases that
-//   number inside the same lock (immediately if it was a window still in the model). ★Do not detach the number release of `Destroyed` outside this lock★
-//   — if the model window is first removed under another lock, a window removed without a tombstone is seen in that gap and the removed tab count is always 0.
-//   Only the extreme that cannot call this (`lib.rs` — there is no state) has `layout::release_window_number` release the number.
+// The model's share of cleaning up a popout window — drop every tab View of the window, remove its windows entry,
+// recompute the routing table, send the subscription cleanup, recompute the usage interest and set the label
+// tombstone, ★all under one lock★. The close request and `Destroyed` both call it; the second changes nothing but
+// freeing the closing window's number (a window already gone gets only the recomputes · the tombstones are a set).
+// Answer = the number of tabs removed from the model (0 when the window was already gone) · `None` = not cleaned up
+// (main · a poisoned lock). It stands without windows (`AppHandle`), so the shell's unit tests call it directly.
+//   ★F1 — a real concurrency bug★: computing the delta under the lock and sending `to_unsubscribe` after dropping it
+//   let another command (assign_agent/spawn/move) re-add the agent in between, and the stale 1→0 unsubscribe killed
+//   the live subscription just formed (it breaks `output_router::rebuild`'s call contract — that comment is canonical,
+//   ★ADR-0006 has no "delta queued under the lock" clause★). So the send is under the lock too, as in the apply
+//   service (`SubscriptionSync::resync`) and move_slot_to_window — unsubscribe only sends to the connection driver's
+//   actor (no await, no network, no other lock), so there is no deadlock.
+// 창 번호(TRD S26-window-chrome §4-1) — 닫기 요청이 지운 창은 번호를 그 `Destroyed` 까지 쥐고, `Destroyed` 는 그
+//   번호를 같은 락 안에서 푼다(아직 모델에 있던 창이면 곧바로). ★`Destroyed` 의 번호 풀기를 이 락 밖으로 떼지
+//   않는다★ — 먼저 다른 락에서 모델 창을 빼면 그 틈에 묘비 없이 빠진 창이 보이고 지운 탭 수가 늘 0 이 된다.
+//   이것을 못 부르는 극단(`lib.rs` — 상태가 없다)만 `layout::release_window_number` 가 번호를 푼다.
 pub(crate) fn drop_window_in_model(
     label: &str,
     cause: DropCause,
@@ -722,20 +723,18 @@ mod tests {
     }
 }
 
-// ── tests: the model share of a pop-out close request (TRD S21-slot-docking edition 5.8 §1-2 「닫히는 창」) — stands without a window ──────────
-// The routing table · subscription resync are the same real objects as production (`OutputRouter` · `RouterSubs`) and do not attach to the daemon (the release firing
-// is a no-op because the endpoint is closed — the firing count is measured by the `daemon_client` tests). The window-event wiring of `lib.rs` is for on-screen measurement.
+// ── Tests: the model's share of a popout close request (TRD S21-slot-docking 5.8판 §1-2 「닫히는 창」) — no windows ──
+// The routing table and the subscription resync are production's (`OutputRouter` · `RouterSubs`); the client never
+// connects, so an unsubscribe has no open connection to go out on and does nothing (how many go out is measured by the
+// `daemon_client` suite). The window-event wiring in `lib.rs` is left to on-screen measurement.
 #[cfg(test)]
 mod close_request_tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
-    use std::time::Duration;
 
-    use engram_dashboard_protocol::DaemonInfo;
     use tokio::runtime::Handle;
 
     use super::*;
-    use crate::daemon_client::DaemonDiscovery;
     use crate::layout::dock::{DockAnchor, DockSide, DOCK_NEW_SHARE};
     use crate::layout::manager::{DockError, DockMove, DockTo, FocusPolicy};
     use crate::layout::{
@@ -744,17 +743,6 @@ mod close_request_tests {
     };
 
     const POPUP: &str = "slot-popup-7";
-
-    struct NoDaemon;
-
-    impl DaemonDiscovery for NoDaemon {
-        fn ensure_spawn(&self, _timeout: Duration) -> Result<DaemonInfo, String> {
-            Err("이 시험은 연결하지 않는다".to_string())
-        }
-        fn read_live(&self) -> Option<DaemonInfo> {
-            None
-        }
-    }
 
     struct NoEvents;
 
@@ -774,7 +762,7 @@ mod close_request_tests {
             Rig {
                 state: LayoutState::new(),
                 router: Arc::new(OutputRouter::new()),
-                client: Arc::new(DaemonClient::new(Handle::current(), Arc::new(NoDaemon))),
+                client: Arc::new(DaemonClient::unconnected(Handle::current())),
             }
         }
 

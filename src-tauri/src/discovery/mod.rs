@@ -201,7 +201,7 @@ pub trait Clock: engram_dashboard_base::time::Clock {
 // ── 순수 오케스트레이션 ────────────────────────────────────────────────────────────
 
 /// info 소유권을 호출자가 유지하도록 참조 기반 판정 — Accept 는 데이터 없이 신호만 준다.
-// pub(crate) = daemon_client::stop 전용(3-2 까지) · ADR-0271
+// pub(crate) for daemon_client::stop and daemon_client::link::endpoint · ADR-0271
 pub(crate) enum AcceptCheck {
     Accept,
     DeadPid,
@@ -211,7 +211,7 @@ pub(crate) enum AcceptCheck {
 // ADR-0196: 생존 확인이 버전 대조보다 **먼저**다 — 뒤집지 마라. 그리고 이 판정은 **버전 방향을 일부러
 // 보지 않는다**: 죽은 기록은 우리보다 낮든 높든 stale 이라, 방향 판정을 더해 「더 새 기록이면 물러난다」로
 // 고치지 말 것.
-// pub(crate) = daemon_client::stop 전용(3-2 까지) · ADR-0271
+// pub(crate) for daemon_client::stop and daemon_client::link::endpoint · ADR-0271
 pub(crate) fn check_acceptable(info: &DaemonInfo, liveness: &dyn PidLiveness) -> AcceptCheck {
     if liveness.is_dead(info.pid, info.start_time) {
         return AcceptCheck::DeadPid;
@@ -417,8 +417,8 @@ pub fn daemon_status(data_dir: &Path) -> DaemonStatus {
     status_with(&reader, &RealLiveness)
 }
 
-/// ★daemon_status 와의 차이★: daemon_status 는 pid/port 만 주는 lifecycle probe 다(token 없음). 이
-/// 함수는 **재연결이 옮겨간 데몬을 attach** 하는 데 쓰여 host/port/token 전부가 필요하다.
+/// ★How it differs from daemon_status★: daemon_status is a lifecycle probe giving pid/port only. This returns the
+/// full record (the token included) — see [`read_live_daemon`] for who receives it.
 fn read_live_with(reader: &dyn DaemonReader, liveness: &dyn PidLiveness) -> Option<DaemonInfo> {
     match reader.read() {
         Ok(Some(info)) => match check_acceptable(&info, liveness) {
@@ -429,11 +429,13 @@ fn read_live_with(reader: &dyn DaemonReader, liveness: &dyn PidLiveness) -> Opti
     }
 }
 
-/// 살아있는 데몬의 접속 정보(token 포함)를 daemon.json 에서 읽어 반환(real 진입점).
+/// Reads the live daemon's record (the token included) from `daemon.json` (real entry point).
 ///
-/// ★재연결의 "옮겨간 데몬 추적" 수단(ADR-0021)★: hot-swap(daemon_stop→start)·크래시-재spawn 으로
-/// 데몬이 새 port/token 으로 떠도, 재연결 루프가 캐시된 옛 주소 대신 이 함수로 **현재 daemon.json** 을
-/// 재조회해 그 주소로 attach 한다. ★spawn 하지 않는다★ — 단지 떠 있으면 따라갈 뿐, 깨우지 않는다.
+/// ★How the direct-path reconnect follows a moved daemon (ADR-0021)★: after a hot swap (daemon_stop → start) or a
+/// crash respawn the daemon comes up on a new port; the dev `wsTransport` reconnect re-reads the **current
+/// `daemon.json`** through this (via the `read_daemon_info` command, its only caller, which strips the token before it
+/// reaches the WebView — ADR-0310 D23 ①) instead of a cached address. The shell's own link reads `daemon.json` itself
+/// (`daemon_client/link/endpoint.rs`). ★It never spawns★ — it follows a daemon that is up, it does not wake one.
 pub fn read_live_daemon(data_dir: &Path) -> Option<DaemonInfo> {
     let reader = FileReader {
         path: DataLayout::new(data_dir).daemon_file(),
@@ -607,7 +609,7 @@ impl DaemonReader for FileReader {
     }
 }
 
-// pub(crate) = daemon_client::stop 전용(3-2 까지) · ADR-0271
+// pub(crate) for daemon_client::stop and daemon_client::link::endpoint · ADR-0271
 pub(crate) struct RealLiveness;
 
 impl PidLiveness for RealLiveness {

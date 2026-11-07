@@ -2,9 +2,9 @@
 //!
 //! ★이 파일이 재는 것 = 실 소켓을 건너온 닫기를 **어떻게 분류하나**★ — 상대가 실은 닫기 **코드와
 //! 문구**가 소켓을 건너와 [`LinkRead::Closed`] 로 올라오나, 그리고 그 분류가 **재연결 예산을 태우나**
-//! (ADR-0180 결정 5). 앞의 것이 없으면 뒤의 것은 판정 재료가 없어서 「거절은 예산을 안 쓴다」가 코드로
+//! (ADR-0180 결정 5). 앞의 것이 없으면 뒤의 것은 판정 재료가 없어서 「종결 거절은 예산을 안 쓴다」가 코드로
 //! 성립하지 않는다 — `link.rs` 의 [`LinkRead`] rustdoc 이 못박은 그 자리다. 자극은 갈래마다 세운다:
-//! 거절인 닫기 · 코드를 실었지만 거절이 **아닌** 닫기 · 말 없이 사라진 상대.
+//! 종결 거절인 닫기 · 다시 거는 거절인 닫기 · 코드를 실었지만 거절이 **아닌** 닫기 · 말 없이 사라진 상대.
 //!
 //! ★스위트 크기를 세지 말 것★ — 손으로 적은 개수는 테스트가 하나 늘 때마다 조용히 어긋나고, 낡은 개수는
 //! 아예 없는 것보다 나쁘다(다음 읽는 사람이 그것을 믿는다). 무엇을 재는 파일인지는 위 문단이 말한다.
@@ -26,10 +26,9 @@ use std::sync::Arc;
 
 use engram_dashboard_transport::policy::MIN_BACKOFF;
 use engram_dashboard_transport::testing::ListeningHandshake;
-use engram_dashboard_transport::ws::{WsDialer, WsListener};
 use engram_dashboard_transport::{
-    Close, CloseCode, ConnectFailure, Dialer, GaveUpReason, LinkRead, PeerId, PeerState, Policy,
-    ReconnectPolicy, TransportEvent,
+    Close, CloseCode, ConnectFailure, Dialer, GaveUpReason, LinkRead, Listener, PeerId, PeerState,
+    Policy, ReconnectPolicy, RejectKind, TransportEvent,
 };
 
 /// ★상대가 실제로 이 문자열을 실어 보내고 거는 쪽이 그것을 되읽는지가 이 파일의 요점이다★.
@@ -67,8 +66,8 @@ fn spends_budget_without_waiting() -> Policy {
 
 #[tokio::test]
 async fn a_close_code_from_the_peer_is_a_rejection_that_spends_no_reconnect_budget() {
-    let listener = WsListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.dial_address().expect("dial_address");
+    let mut listener = common::listen();
+    let addr = listener.dial_address();
     let accepted = Arc::new(AtomicUsize::new(0));
 
     // 받는 쪽: 프레임을 하나도 안 보고 코드+문구로 닫는다(= ADR-0178 의 버전 거절이 하는 일).
@@ -76,7 +75,7 @@ async fn a_close_code_from_the_peer_is_a_rejection_that_spends_no_reconnect_budg
     let server = tokio::spawn({
         let accepted = accepted.clone();
         async move {
-            while let Ok((mut tx, rx)) = listener.accept().await {
+            while let Ok((mut tx, rx)) = common::accept_link(&mut listener).await {
                 accepted.fetch_add(1, Ordering::AcqRel);
                 tx.close(Close::new(CloseCode::HANDSHAKE_REJECTED, REASON))
                     .await;
@@ -88,19 +87,18 @@ async fn a_close_code_from_the_peer_is_a_rejection_that_spends_no_reconnect_budg
 
     // ★이 파일에서 여기만 기본 정책이다★ — 「거절은 예산을 안 쓴다」는 쓸 예산이 실제로 있을 때만
     //   재진다. 태우는 구현이면 500ms 뒤 둘째 통로가 붙어 아래 계수가 1을 넘는다.
-    let (registry, mut inbound) = common::registry(Arc::new(WsDialer), Policy::default());
-    let peer = registry.add(PeerId::new("d1"), addr, Arc::new(ListeningHandshake));
+    let registry = common::registry(Arc::new(common::dialer()), Policy::default());
+    let (peer, mut inbox) = registry.add(PeerId::new("d1"), addr, Arc::new(ListeningHandshake));
 
-    let (code, reason) = common::wait_incoming(&mut inbound, "Rejected 사건", |msg| {
-        match msg.as_event() {
+    let (code, reason) =
+        common::wait_incoming(&mut inbox, "Rejected 사건", |msg| match msg.as_event() {
             Some(TransportEvent::Rejected { code, reason, .. }) => Some((*code, reason.clone())),
             _ => None,
-        }
-    })
-    .await;
+        })
+        .await;
     assert_eq!(
         code,
-        Some(CloseCode::HANDSHAKE_REJECTED),
+        CloseCode::HANDSHAKE_REJECTED,
         "닫기 코드가 소켓을 건너오지 않았다"
     );
     assert_eq!(reason, REASON, "닫기 문구가 소켓을 건너오지 않았다");
@@ -124,16 +122,82 @@ async fn a_close_code_from_the_peer_is_a_rejection_that_spends_no_reconnect_budg
 }
 
 #[tokio::test]
+async fn a_retryable_close_code_from_the_peer_spends_budget_and_dials_again() {
+    // ★종류는 코드가 나른다★(TRD 3 §3-0 ⑤) — 다시 거는 거절 코드가 소켓을 건너와 예산을 쓰는 갈래로 읽히나. 위
+    //   테스트만 있으면 「코드가 실리면 무엇이든 종결」인 구현도 통과한다.
+    let mut listener = common::listen();
+    let addr = listener.dial_address();
+    let accepted = Arc::new(AtomicUsize::new(0));
+
+    let server = tokio::spawn({
+        let accepted = accepted.clone();
+        async move {
+            while let Ok((mut tx, rx)) = common::accept_link(&mut listener).await {
+                accepted.fetch_add(1, Ordering::AcqRel);
+                tx.close(Close::new(CloseCode::HANDSHAKE_RETRYABLE, REASON))
+                    .await;
+                drop((tx, rx));
+            }
+        }
+    });
+
+    let registry = common::registry(Arc::new(common::dialer()), spends_budget_without_waiting());
+    let (peer, mut inbox) = registry.add(PeerId::new("d1"), addr, Arc::new(ListeningHandshake));
+
+    let picked =
+        common::wait_incoming(
+            &mut inbox,
+            "ConnectFailed 또는 Rejected 사건",
+            |msg| match msg.as_event() {
+                Some(TransportEvent::ConnectFailed { cause, .. }) => Some(Ok(cause.clone())),
+                Some(TransportEvent::Rejected { code, reason, .. }) => {
+                    Some(Err((*code, reason.clone())))
+                }
+                _ => None,
+            },
+        )
+        .await;
+    let cause = picked.unwrap_or_else(|(code, reason)| {
+        panic!("다시 거는 거절이 종결 거절로 올라왔다: code={code:?} reason={reason}")
+    });
+    assert_eq!(
+        cause,
+        ConnectFailure::Rejected {
+            kind: RejectKind::Retryable,
+            code: CloseCode::HANDSHAKE_RETRYABLE,
+            reason: REASON.into(),
+        },
+        "코드가 소켓을 건너와 다시 거는 거절로 읽혀야 한다"
+    );
+
+    let settled = common::wait_state(&peer, "포기", |state| {
+        matches!(state, PeerState::GaveUp(_))
+    })
+    .await;
+    assert_eq!(
+        settled,
+        PeerState::GaveUp(GaveUpReason::BudgetExhausted),
+        "다시 거는 거절은 예산이 바닥나야 포기한다"
+    );
+    assert!(
+        accepted.load(Ordering::Acquire) > 1,
+        "예산을 쓰는 갈래인데 재시도가 없었다"
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn a_peer_that_vanishes_without_speaking_is_unreachable_and_does_spend_budget() {
     // ★말 없는 종료는 거절이 **아니다**★ — 위 테스트만 있으면 「닫기면 무엇이든 거절」인 구현도 통과한다.
     //
-    // ★이 갈래가 짚는 자리는 `is_rejection` 이 아니다★ — 통로를 그냥 버린 WS 상대는 tungstenite 에서
+    // ★이 갈래가 짚는 자리는 `RejectKind::of` 가 아니다★ — 통로를 그냥 버린 WS 상대는 tungstenite 에서
     //   **읽기 오류**로 올라오므로(실측 2026-09-07: `handshake_once` 의 `Ok(Err(err))` 팔이 잡는다)
     //   [`LinkRead::Closed`] 를 아예 안 지난다. 그 실측을 아래 [`READ_ERROR_PREFIX`] 단언이 붙들고 있어,
     //   의존성이 EOF 로 신고하기 시작하면 이 주석이 조용히 거짓이 되는 대신 그 자리가 빨개진다.
-    //   `is_rejection` 쪽 반대편은 아래 `going_away` 테스트다.
-    let listener = WsListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.dial_address().expect("dial_address");
+    //   `RejectKind::of` 쪽 반대편은 아래 `going_away` 테스트다.
+    let mut listener = common::listen();
+    let addr = listener.dial_address();
     let accepted = Arc::new(AtomicUsize::new(0));
 
     let server = tokio::spawn({
@@ -147,24 +211,24 @@ async fn a_peer_that_vanishes_without_speaking_is_unreachable_and_does_spend_bud
         }
     });
 
-    let (registry, mut inbound) =
-        common::registry(Arc::new(WsDialer), spends_budget_without_waiting());
-    let peer = registry.add(PeerId::new("d1"), addr, Arc::new(ListeningHandshake));
+    let registry = common::registry(Arc::new(common::dialer()), spends_budget_without_waiting());
+    let (peer, mut inbox) = registry.add(PeerId::new("d1"), addr, Arc::new(ListeningHandshake));
 
     // ★거절 사건도 함께 집는다★ — 안 집으면 「이 자극을 거절로 읽는」 회귀가 상한 초과(10초)로
     //   신고돼 원인이 「사건이 안 온다」로 둔갑한다.
-    let picked = common::wait_incoming(
-        &mut inbound,
-        "ConnectFailed 또는 Rejected 사건",
-        |msg| match msg.as_event() {
-            Some(TransportEvent::ConnectFailed { cause, .. }) => Some(Ok(cause.clone())),
-            Some(TransportEvent::Rejected { code, reason, .. }) => {
-                Some(Err((*code, reason.clone())))
-            }
-            _ => None,
-        },
-    )
-    .await;
+    let picked =
+        common::wait_incoming(
+            &mut inbox,
+            "ConnectFailed 또는 Rejected 사건",
+            |msg| match msg.as_event() {
+                Some(TransportEvent::ConnectFailed { cause, .. }) => Some(Ok(cause.clone())),
+                Some(TransportEvent::Rejected { code, reason, .. }) => {
+                    Some(Err((*code, reason.clone())))
+                }
+                _ => None,
+            },
+        )
+        .await;
     let cause = picked.unwrap_or_else(|(code, reason)| {
         panic!("못 붙은 것이 아니라 거절로 올라왔다: code={code:?} reason={reason}")
     });
@@ -177,7 +241,7 @@ async fn a_peer_that_vanishes_without_speaking_is_unreachable_and_does_spend_bud
          신고하기 시작했다」이고, 그러면 이 테스트의 실측 주석도 함께 낡은 것이다: {err}"
     );
 
-    let reason = common::wait_incoming(&mut inbound, "GaveUp 사건", |msg| match msg.as_event() {
+    let reason = common::wait_incoming(&mut inbox, "GaveUp 사건", |msg| match msg.as_event() {
         Some(TransportEvent::GaveUp { reason, .. }) => Some(*reason),
         _ => None,
     })
@@ -202,17 +266,17 @@ async fn a_peer_that_vanishes_without_speaking_is_unreachable_and_does_spend_bud
 
 #[tokio::test]
 async fn a_graceful_going_away_is_not_a_rejection_and_does_spend_budget() {
-    // ★`is_rejection` 의 반대편이다★ — 상대가 **코드를 실어** 닫았지만 그 코드가 「정상 종료」면 거절이
+    // ★`RejectKind::of` 의 반대편이다★ — 상대가 **코드를 실어** 닫았지만 그 코드가 「정상 종료」면 거절이
     //   아니고 예산을 쓴다(데몬 재시작 중이면 다음 시도에 붙는다). 이 갈래가 없으면 「코드가 실려
     //   있으면 무엇이든 거절」인 구현이 앞의 갈래들을 그대로 통과한다.
-    let listener = WsListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.dial_address().expect("dial_address");
+    let mut listener = common::listen();
+    let addr = listener.dial_address();
     let accepted = Arc::new(AtomicUsize::new(0));
 
     let server = tokio::spawn({
         let accepted = accepted.clone();
         async move {
-            while let Ok((mut tx, rx)) = listener.accept().await {
+            while let Ok((mut tx, rx)) = common::accept_link(&mut listener).await {
                 accepted.fetch_add(1, Ordering::AcqRel);
                 tx.close(Close::going_away()).await;
                 drop((tx, rx));
@@ -222,11 +286,12 @@ async fn a_graceful_going_away_is_not_a_rejection_and_does_spend_budget() {
 
     // ① ★전제: 이 서버의 닫기 코드가 실제로 소켓을 건너온다★ — 안 재면 아래 ②가 「프레임이 유실돼
     //    읽기 오류 팔이 돌았다」와 구별되지 않는다. 두 팔은 분류·예산 소비·종점이 전부 같아서 어느
-    //    쪽이든 ②가 초록이고, 그러면 `is_rejection` 의 정상 종료 예외를 지워도 초록이다.
-    let (probe_tx, mut probe_rx) = tokio::time::timeout(common::PATIENCE, WsDialer.dial(&addr))
-        .await
-        .expect("직접 dial 상한 — TCP 는 붙었는데 WS 업그레이드가 안 끝난 것이 첫 가설이다")
-        .expect("직접 dial");
+    //    쪽이든 ②가 초록이고, 그러면 `RejectKind::of` 의 정상 종료 예외를 지워도 초록이다.
+    let (probe_tx, mut probe_rx) =
+        tokio::time::timeout(common::PATIENCE, common::dialer().dial(&addr))
+            .await
+            .expect("직접 dial 상한 — TCP 는 붙었는데 WS 업그레이드가 안 끝난 것이 첫 가설이다")
+            .expect("직접 dial");
     let read = tokio::time::timeout(common::PATIENCE, probe_rx.recv())
         .await
         .expect("닫기 상한")
@@ -250,24 +315,24 @@ async fn a_graceful_going_away_is_not_a_rejection_and_does_spend_budget() {
     let probe = accepted.load(Ordering::Acquire);
 
     // ② 그 닫기가 거절이 아니고 예산을 쓴다.
-    let (registry, mut inbound) =
-        common::registry(Arc::new(WsDialer), spends_budget_without_waiting());
-    let peer = registry.add(PeerId::new("d1"), addr, Arc::new(ListeningHandshake));
+    let registry = common::registry(Arc::new(common::dialer()), spends_budget_without_waiting());
+    let (peer, mut inbox) = registry.add(PeerId::new("d1"), addr, Arc::new(ListeningHandshake));
 
     // ★거절 사건도 함께 집는다★ — 안 집으면 「이 자극을 거절로 읽는」 회귀가 상한 초과(10초)로
     //   신고돼 원인이 「사건이 안 온다」로 둔갑한다.
-    let picked = common::wait_incoming(
-        &mut inbound,
-        "ConnectFailed 또는 Rejected 사건",
-        |msg| match msg.as_event() {
-            Some(TransportEvent::ConnectFailed { cause, .. }) => Some(Ok(cause.clone())),
-            Some(TransportEvent::Rejected { code, reason, .. }) => {
-                Some(Err((*code, reason.clone())))
-            }
-            _ => None,
-        },
-    )
-    .await;
+    let picked =
+        common::wait_incoming(
+            &mut inbox,
+            "ConnectFailed 또는 Rejected 사건",
+            |msg| match msg.as_event() {
+                Some(TransportEvent::ConnectFailed { cause, .. }) => Some(Ok(cause.clone())),
+                Some(TransportEvent::Rejected { code, reason, .. }) => {
+                    Some(Err((*code, reason.clone())))
+                }
+                _ => None,
+            },
+        )
+        .await;
     let cause = picked.unwrap_or_else(|(code, reason)| {
         panic!("못 붙은 것이 아니라 거절로 올라왔다: code={code:?} reason={reason}")
     });
@@ -282,7 +347,7 @@ async fn a_graceful_going_away_is_not_a_rejection_and_does_spend_budget() {
          통로에서는 유실됐다는 뜻이다: {err}"
     );
 
-    let reason = common::wait_incoming(&mut inbound, "GaveUp 사건", |msg| match msg.as_event() {
+    let reason = common::wait_incoming(&mut inbox, "GaveUp 사건", |msg| match msg.as_event() {
         Some(TransportEvent::GaveUp { reason, .. }) => Some(*reason),
         _ => None,
     })
@@ -311,12 +376,13 @@ async fn a_read_after_a_failed_read_is_still_an_error_never_a_spoken_close() {
     //   이름으로 올라오면, 그 값으로 분기하는 소비자가 「거절당했다/곱게 갔다」를 「끊겼다」와 맞바꾼다.
     //   위 `vanishes_without_speaking` 은 그 자극에 대한 **감독의 분류**를 재고, 여기서는 그 분류가 앉아
     //   있는 바닥 — 어댑터에서 읽기를 **두 번** 하는 자리 — 을 잰다.
-    let listener = WsListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.dial_address().expect("dial_address");
+    let mut listener = common::listen();
+    let addr = listener.dial_address();
 
     // 거는 쪽과 받는 쪽이 서로를 기다리므로 함께 폴링해야 핸드셰이크가 끝난다.
+    let dialer = common::dialer();
     let (accepted, dialed) = tokio::time::timeout(common::PATIENCE, async {
-        tokio::join!(listener.accept(), WsDialer.dial(&addr))
+        tokio::join!(common::accept_link(&mut listener), dialer.dial(&addr))
     })
     .await
     .expect("핸드셰이크 상한 — TCP 는 붙었는데 WS 업그레이드가 안 끝난 것이 첫 가설이다");

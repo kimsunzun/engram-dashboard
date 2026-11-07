@@ -25,13 +25,12 @@
 crate 의존(화살표 = 의존한다, 운영 그래프):
 
 ```text
-src-tauri ─▶ protocol · command · net(auth 만) · base · platform      (agent 는 의존하지 않는다)
+src-tauri ─▶ protocol · command · base · platform · transport(ws)      (agent 는 의존하지 않는다)
 daemon    ─▶ agent · protocol · net(server) · messaging · command · base · platform
 cli       ─▶ agent · command
 agent     ─▶ command · base · platform
-protocol  ─▶ command
-net       ─▶ protocol · platform   (둘 다 server 기능 뒤)
-base · platform · command · messaging · transport ─▶ 워크스페이스 의존 0
+net       ─▶ protocol · platform   (platform only behind the server feature)
+base · platform · command · messaging · transport · protocol ─▶ 워크스페이스 의존 0
 ```
 
 ## 모듈
@@ -45,11 +44,11 @@ base · platform · command · messaging · transport ─▶ 워크스페이스 
 - **cli** — `engram.exe`. 스폰된 에이전트가 `ENGRAM_TOKEN` · `ENGRAM_CONTROL_URL` 로 데몬 제어 라우트에 HTTP 로 붙는다. 인증 + 배송만 하고 help 화면도 데몬이 낸다. bin 이름 = agent `CLI_EXE_NAME`.
 - **protocol** — 셸 ↔ 데몬 wire 계약(메시지 · 출력 binary frame codec · ts-rs 바인딩). 도메인 로직 없음.
 - **command** — 명령 버스 도구(봉투 · 오류 · 선언 매크로 · 표 · 라우팅). 명령은 0개이고 생산자 옆에서 선언한다(`agent.*` = agent, `mail.*` = daemon, `window/tab/slot` = 셸, 웹뷰 명령 = 프론트).
-- **net** — 데몬의 네트워크 행(WS 업그레이드 · Origin · 토큰 핸드셰이크 · 연결 수명 · 단일 writer · keepalive · 팬아웃 · 단일 인스턴스 가드 · `daemon.json`). 전부 `server` 기능 뒤이고, 기능 없이 남는 것은 핸드셰이크 프레임(`auth`) 하나 — 셸이 그것만 쓴다.
+- **net** — the daemon's network row (WS upgrade · Origin · token handshake · connection lifetime · single writer · keepalive · fan-out · single-instance guard · `daemon.json`). Everything sits behind the `server` feature; without it only `auth` remains, a re-export of protocol's handshake frame. Only the daemon depends on net — the shell's edge was cut by ADR-0310 decision 9.
 - **messaging** — 에이전트 간 우편 커널(배달 · 파킹 · 반려 · 장부). 워크스페이스 의존 0, 접합은 커널이 소유한 포트 trait 뿐이고 실물 어댑터는 데몬이 갖는다.
 - **base** — 바닥 기반층 잎 crate. 도메인 지식 0 의 범용 도우미(데이터 파일 읽기 판정·원자 쓰기 · 로깅 · 시계 seam · 패닉 가둠 등). 입주 조건 정본 = 그 `lib.rs` 헤더.
 - **platform** — OS 층 잎 crate. OS 에 따라 갈리는 운영 코드(프로세스 · Job Object · 띄우기 · 창 · 입력 · 파일 잠금)는 여기에만 둔다.
-- **transport** — 재사용 전송 lib(ADR-0177). 아직 어떤 crate 도 의존하지 않는다 — 자기 시험만 쓴다.
+- **transport** — reusable transport lib (ADR-0177). The shell depends on it (`ws` feature) for its daemon link `daemon_client/link/` (stage 3 3-2 · ADR-0310); the shell's daemon connection runs on it in every build (driver = `daemon_client/connection.rs`). The daemon attaches in 3-3.
 
 ## 런타임 불변식
 

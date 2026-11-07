@@ -36,13 +36,17 @@ fn ensure_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-// 프론트로 넘기는 DaemonInfo. token 을 그대로 노출(로컬 IPC) 하나 **로그 금지**.
+/// The daemon's address as handed to the WebView by `discover_daemon` · `daemon_start` · `read_daemon_info`.
+///
+/// Never carries the daemon token: any script in the WebView (`csp: null`) can read a command's result, and the token
+/// would let it leave the WebView (another process · a direct socket). The shell reads the token from `daemon.json`
+/// for its own link; the WebView never needs it.
+// ADR-0310: D23 ① — the token stays out of this DTO; do not add it back.
 #[derive(serde::Serialize)]
 pub struct DaemonInfoDto {
     pub pid: u32,
     pub host: String,
     pub port: u16,
-    pub token: String,
     pub protocol_version: u32,
 }
 
@@ -52,7 +56,6 @@ impl From<engram_dashboard_protocol::DaemonInfo> for DaemonInfoDto {
             pid: i.pid,
             host: i.host,
             port: i.port,
-            token: i.token,
             protocol_version: i.protocol_version,
         }
     }
@@ -95,12 +98,13 @@ pub fn daemon_status() -> Result<DaemonStatusDto, String> {
     })
 }
 
-// 살아있는 데몬의 접속 정보(token 포함)를 daemon.json 에서 읽어 반환. ★spawn 안 함★(ADR-0021:
-// 재연결은 깨우지 않는다 — 단지 데몬이 옮겨갔으면 새 주소를 따라가게 한다). 데몬 없거나 죽었으면 None.
+// Reads the live daemon's address from daemon.json. ★Never spawns★ (ADR-0021: reconnect never wakes a daemon — it
+// only follows a daemon that moved to its new address). No daemon or a dead one → None.
 //
-// ★재연결 hot-swap 추적용★: daemon_stop→daemon_start(통째 교체)나 크래시-재spawn 으로 데몬이 새
-// port/token 으로 뜨면, 프론트 재연결 루프(wsTransport)가 캐시된 옛 주소 대신 이 command 로 현재
-// daemon.json 을 재조회해 새 주소로 attach 한다. read-only 라 discover_daemon(spawn 동반)과 분리된다.
+// ★For hot-swap tracking on reconnect★: when daemon_stop→daemon_start (full replacement) or a crash respawn brings the
+// daemon up on a new port, the frontend reconnect loop (wsTransport) re-reads the current daemon.json through this
+// command instead of its cached old address and attaches at the new one. Read-only, so it is kept apart from
+// discover_daemon (which spawns).
 //
 // daemon.json 없음/깨짐/죽은 PID/버전 불일치 → Ok(None)(보수). 살아있는 호환 데몬이면 Ok(Some(DTO)).
 #[tauri::command]
@@ -133,18 +137,17 @@ pub fn daemon_close(client: tauri::State<'_, std::sync::Arc<crate::daemon_client
     client.close();
 }
 
-// ★리로드 자가복구 pull 조회(Fix-D)★.
+// ★Reload self-heal pull (Fix-D)★.
 //
-// ★왜 필요한가★: Rust DaemonClient 는 `daemon-connection-state` 이벤트를 상태 *전이* 시에만 emit
-// 한다 — connect()/ensure() 는 이미 Connected 면 emit 없이 Ok 로 단락한다(connection.rs 는 전이에서만
-// app.emit). 그래서 웹뷰가 리로드되면(TauriTransport 재생성, _state='down') 새 창은 "이미 연결됨"을
-// 알 방법이 없어 출력 Channel 을 등록하지 못하고 replay/live 가 전부 두절된다(창 단위 사각지대).
-// 프론트 self-heal 이 리스너 등록 후 이 command 를 1회 pull 해 현재 상태를 확인한다.
+// ★Why it is needed★: the Rust DaemonClient emits `daemon-connection-state` only on state *transitions* — a
+// connect()/ensure() on an already connected link answers Ok with no emit (the driver's routing emits on transitions
+// only). So after a webview reload (TauriTransport recreated, _state='down') the new window has no way to learn "already
+// connected", cannot register its output Channel, and replay/live are cut off (a per-window blind spot). The frontend
+// self-heal pulls this command once after registering its listeners to read the current state.
 //
-// ★문자열 어휘 정합★: `daemon-connection-state` 이벤트 payload 와 **동일한 어휘**("connected"/
-// "reconnecting"/"down")로 직렬화한다 — 프론트가 이벤트 핸들러와 같은 코드 경로로 먹일 수 있게.
-// Connecting(전이 중)은 이벤트로 emit 되지 않으므로(connection.rs 는 connected/reconnecting/down 만
-// emit) 여기서도 "down"으로 접는다 — 프론트 ConnectionState 어휘(connected/reconnecting/down)와 일치.
+// ★Same vocabulary★: serialized with **the same words** as the `daemon-connection-state` payload ("connected" /
+// "reconnecting" / "down") so the frontend feeds it through the event handler's path — the frontend ConnectionState
+// vocabulary.
 #[tauri::command]
 pub fn daemon_connection_state(
     client: tauri::State<'_, std::sync::Arc<crate::daemon_client::DaemonClient>>,
@@ -153,7 +156,7 @@ pub fn daemon_connection_state(
     match client.state() {
         ConnectionState::Connected => "connected",
         ConnectionState::Reconnecting => "reconnecting",
-        ConnectionState::Connecting | ConnectionState::Down => "down",
+        ConnectionState::Down => "down",
     }
     .to_string()
 }
@@ -214,7 +217,7 @@ mod tests {
             pid: 4321,
             host: "127.0.0.1".into(),
             port: 51000,
-            token: "c".repeat(64),
+            token: engram_dashboard_protocol::Secret::new("c".repeat(64)),
             protocol_version: 7,
             start_time: 999,
         };
@@ -222,7 +225,45 @@ mod tests {
         assert_eq!(dto.pid, 4321);
         assert_eq!(dto.host, "127.0.0.1");
         assert_eq!(dto.port, 51000);
-        assert_eq!(dto.token, "c".repeat(64));
         assert_eq!(dto.protocol_version, 7);
+    }
+
+    // ADR-0310: D23 ① — pins the three commands' return type to `DaemonInfoDto`; returning anything else (e.g. the
+    // protocol `DaemonInfo`, which serializes the token) stops this module from compiling.
+    #[test]
+    fn the_three_commands_return_the_tokenless_dto() {
+        fn returns_dto<A, Fut>(_: impl Fn(Option<u64>, A) -> Fut)
+        where
+            Fut: std::future::Future<Output = Result<DaemonInfoDto, String>>,
+        {
+        }
+        returns_dto(|timeout_ms, ()| discover_daemon(timeout_ms));
+        returns_dto(daemon_start);
+        let _: fn() -> Result<Option<DaemonInfoDto>, String> = read_daemon_info;
+    }
+
+    // ADR-0310: D23 ① — all three commands (`discover_daemon` · `daemon_start` · `read_daemon_info`) return this DTO,
+    // so its serialized form is what the WebView receives.
+    #[test]
+    fn serialized_dto_carries_no_token() {
+        let token = "c".repeat(64);
+        let info = engram_dashboard_protocol::DaemonInfo {
+            pid: 4321,
+            host: "127.0.0.1".into(),
+            port: 51000,
+            token: engram_dashboard_protocol::Secret::new(token.clone()),
+            protocol_version: 7,
+            start_time: 999,
+        };
+        let json = serde_json::to_value(DaemonInfoDto::from(info)).expect("DTO serializes");
+        let fields = json.as_object().expect("DTO serializes to an object");
+        assert!(!fields.contains_key("token"), "token field leaked: {json}");
+        assert!(
+            !json.to_string().contains(&token),
+            "token value leaked: {json}"
+        );
+        let mut keys: Vec<&str> = fields.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["host", "pid", "port", "protocol_version"]);
     }
 }

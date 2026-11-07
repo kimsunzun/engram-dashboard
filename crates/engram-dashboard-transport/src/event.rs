@@ -1,6 +1,6 @@
 //! 위로 올라가는 것의 어휘 — 자료형뿐이고 로직이 없다.
 //!
-//! ★올라가는 줄은 하나다★([`Incoming`]) — 패킷과 사건이 같은 줄로 흐른다. 옆 채널을 두지 않는 것이
+//! ★손잡이마다 올라가는 줄은 하나다★([`Incoming`]) — 패킷과 사건이 같은 줄로 흐른다. 옆 채널을 두지 않는 것이
 //! 결정이다(ADR-0177 결정 9): 신호를 소비자가 **이미 읽는** 스트림에 넣지 않으면 안 들었을 때 없는 것과
 //! 같다. 대가 = 패킷만 원하는 소비자도 `match` 를 한 겹 쓴다.
 //!
@@ -55,21 +55,29 @@ impl fmt::Display for PeerId {
 }
 
 /// 어느 방향에서 버려졌나.
+///
+/// ★받는 쪽 갈래는 없다★ — 위로 올라가는 줄이 차도 감독이 자기 순서 칸에 붙들어 버리지 않는다
+/// (`peer.rs` 헤더 「순서 칸」 · TRD 3 §3-0 ②).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
-    /// 위로 올라가는 줄이 찼다.
-    Inbound,
     /// 상대에게 나갈 것을 못 내보냈다. 큐 포화만이 아니라 끊겨서 버린 것도 들고, 그중에는 **쓰는 도중
     /// 끊긴** 알림·팬아웃도 있다(같은 처지의 요청은 여기 안 들고 오류로 깨어난다).
     ///
-    /// ★「확실히 잃었다」가 아니라 「쓰기가 `Ok` 로 끝나는 것을 못 봤다」다 — 부풀 수 있다★. 부푸는 자리가
-    /// 둘이다:
-    /// - 쓰는 도중 끊긴 프레임은 이미 어댑터 버퍼에 들어가 있었을 수 있고, WS 어댑터에서는 통로를 버릴
-    ///   때 보내는 닫기가 그것을 먼저 밀어낼 수 있다(소스 판독 — `ws.rs` 「통로 성질」). 같은 혼잡이면 그
-    ///   닫기도 쓰기 시한에 잘릴 수 있다.
-    /// - [`crate::Registry::broadcast`] 가 큐 포화로 못 넣은 프레임은 **두 번** 셀 수 있다 — 명부가 한
-    ///   건을 따로 올리고, 그 상대의 감독도 같은 것을 센다(명부 쪽은 공유 줄이 차면 사라지고, 닫히는
-    ///   중이면 감독 쪽이 신고되지 않는다).
+    /// ★「확실히 잃었다」가 아니라 「쓰기가 `Ok` 로 끝나는 것을 못 봤다」다 — 부풀 수 있다★. 부푸는 자리는
+    /// 쓰는 도중 끊긴 프레임이다 — 이미 어댑터 버퍼에 들어가 있었을 수 있고, WS 어댑터에서는 통로를 버릴 때
+    /// 보내는 닫기가 그것을 먼저 밀어낼 수 있다(소스 판독 — `ws.rs` 「통로 성질」). 같은 혼잡이면 그 닫기도
+    /// 쓰기 시한에 잘릴 수 있다.
+    ///
+    /// [`crate::Registry::broadcast`] 가 못 넣은 프레임은 그 상대의 감독이 한 번 센다(큐 포화 · 운영 단계
+    /// 아님). 단 앱이 [`crate::Peer::close`] 를 부른 뒤 운영 단계가 아니라서 못 넣은 것은 세지 않는다(`lib.rs`
+    /// 「알려진 한계」) — 닫기를 부른 뒤라도 아직 운영 중인 상대에 넣다 큐가 찬 것은 센다.
+    ///
+    /// ★묶인 세대가 쓰기 직전에 지금 세대가 아니라서 안 쓴 것도 든다★(TRD 3 §3-0 ③ — [`crate::Peer::notify_in`])
+    /// — 큐에 넣을 때는 그 연결이 운영 중이었지만 쓰기 전에 다시 붙었다. 그 신고는 다음 연결의
+    /// [`TransportEvent::Connected`] 뒤에 올 수 있다 — 버린 것은 앞 연결 몫이다. `notify` · `notify_in` 이 입구에서
+    /// 묶은 세대가 운영 중이 아니라 `Err`([`crate::SendError::Disconnected`])를 받은 것은 세지 않는다 — 큐가 차 받은
+    /// `Err` 는 센다(큐 포화). 팬아웃 · 이어받기는 부르는 쪽이 오류를 못 받으므로 입구의 거절도 센다(위). 끝난
+    /// 세대에서 찬 큐는 신고만 하고 다음 연결을 끊지 않는다.
     ///
     /// 거꾸로 안 센 것도 도착을 보증하지 않는다 — 쓰기의 `Ok` 는 전송 버퍼까지다.
     Outbound,
@@ -81,6 +89,15 @@ pub struct Arrival<W: Wire> {
     pub peer: PeerId,
     /// ★세대 경계★ — 이 조각이 어느 **연결** 세대의 것인가. 재연결을 가로질러도 핸들은 살아 있으므로,
     /// 경계가 보이는 자리는 여기다.
+    ///
+    /// ★스트림 조각은 더 새 세대의 [`TransportEvent::Connected`] 뒤에 옛 세대 번호를 달고 올 수 있다★ — 이어받기
+    /// 창이 붙든 조각은 다시 붙은 뒤 닫힐 때 올라가도 실어 온 연결의 세대를 단다. 그래서 스트림 층을 켜는 결정이
+    /// 서면(지금 두 소비자는 안 쓴다 — ADR-0310 결정 16) 그 받는 쪽은 스트림 조각을 세대로 거르지 않아야 한다 —
+    /// 거르면 창이 붙들었다 올린 조각을 버린다. 세대 거름은 스트림이 아닌 메시지에만 건다.
+    ///
+    /// ★이 메시지에 걸린 답 · 요청을 실어 온 그 연결로만 내려면 이 값을 [`crate::Peer::notify_in`] ·
+    /// [`crate::Peer::request_in`] 에 넘긴다★ — 그 사이 다시 붙었으면 다음 연결로 넘어가지 않고 안 나간다(TRD 3
+    /// §3-0 ③).
     pub generation: Generation,
     pub msg: W::In,
 }
@@ -98,7 +115,7 @@ where
     }
 }
 
-/// 명부 위로 올라오는 것 전부.
+/// 수신단([`crate::Inbox`])으로 올라오는 것 전부.
 pub enum Incoming<W: Wire> {
     Message(Arrival<W>),
     Event(TransportEvent<W>),
@@ -167,14 +184,50 @@ pub enum TransportEvent<W: Wire> {
         cause: ConnectFailure,
         retry_in: Option<Duration>,
     },
-    /// 왜 거절당했나. ★이 문구가 팝업 문안이 된다★(ADR-0178 의 버전 거절이 여기로 올라온다).
+    /// ★종결 거절([`crate::RejectKind::Terminal`])★ — 바로 뒤에 [`TransportEvent::GaveUp`] 이 온다(ADR-0178 의 버전
+    /// 거절 · 거는 쪽의 [`crate::DialFailure::Refused`] 가 여기로 올라온다). 다시 거는 거절은 여기 오지 않고
+    /// [`TransportEvent::ConnectFailed`] 의 `cause` 로 간다.
+    ///
+    /// ★팝업 문안은 `code` 로 고르는 고정 로컬 문구다 — `reason` 이 아니다★(TRD 3 §3-0 ⑤). `reason` 은 상대가 준 글일
+    /// 수 있어 가르지도 화면 문안으로 쓰지도 않고 세부 · 로그로만 보낸다 — 가린 글이다
+    /// ([`crate::mask_reason`] · [`crate::ConnectFailure::Rejected`]).
     Rejected {
         peer: PeerId,
-        code: Option<CloseCode>,
+        code: CloseCode,
         reason: String,
     },
     /// 셸이 팝업 자격을 판정하는 입력(ADR-0180 결정 2).
     GaveUp { peer: PeerId, reason: GaveUpReason },
+    /// ★이 감독의 마지막 사건이자 그 손잡이 수신단([`crate::Inbox`])의 마지막 항목★ — 정리가 통로를 다 닫고
+    /// 순서 칸에 붙든 것을 다 실은 뒤 맨 끝에 내고, 감독이 넣는 끝을 놓아 그 수신단의 다음 `recv` 는 `None`
+    /// 이다(TRD 3 §3-0 ②).
+    ///
+    /// `generation` = 이 감독의 마지막 연결 세대(한 번도 안 붙었으면 명부가 준 바닥값) · `cause` = 끝낸 까닭.
+    /// ★건 상대([`crate::Registry::add`])는 늘 [`DisconnectCause::Explicit`] 다★ — 감독이 끝나는 길이 닫기 하나뿐이다
+    /// (앱이 닫았거나, 그 손잡이가 다 사라졌거나, 받는 쪽이 수신단을 닫았다). ★받은 상대([`crate::Registry::attach`])는
+    /// 진짜 까닭이다★ — 다시 걸지 않아 연결을 잃는 것이 곧 끝이다: 운영 중 끊김이면 앞의 `Disconnected` 와 같은 까닭,
+    /// 운영 단계에 못 들었으면 핸드셰이크가 멈춘 자리(우리 핸드셰이크의 거절 = `Explicit` · 상대가 닫음 = `PeerClosed` ·
+    /// 읽기 · 쓰기 오류 = `ReadFailed` · `WriteFailed` · 쓰기가 시한을 넘김 = `WriteDeadline` · 인증 시한까지 상대가 못
+    /// 마침 = `Idle`), 앱 · 받는 쪽이 닫았으면 `Explicit`.
+    ///
+    /// ★`generation` 으로 감독을 가르지 않는다 — 수신단이 가른다★ — 바닥값은 같은 이름표의 앞 감독이
+    /// 마지막으로 뽑은 세대라, 한 번도 안 붙고 끝난 감독의 이것은 앞 감독의 이것과 똑같을 수 있다. 감독마다
+    /// 수신단이 따로라 둘이 한 수신단에 섞이지 않는다.
+    ///
+    /// ★안 올 수 있다★ — 받는 쪽이 수신단을 닫거나 놓은 뒤에는 실을 데가 없다(닫기 전에 이미 실린 이것은
+    /// 닫은 뒤에도 꺼낼 수 있다). 감독이 정상 정리 없이 끝나도
+    /// 안 온다 — 산 채 안 비우는 받는 쪽에 정리가 상한(`peer.rs` 의 `CLOSE_DRAIN_LIMIT`)을 넘겨 남은 것과 함께
+    /// 이것도 버렸거나(세지도 신고하지도 않는다), 태스크가 비정상으로 끝났다(패닉 · 런타임 종료). 어느 쪽이든 넣는
+    /// 끝이 떨어져 `Closed` 없는 `None` 이 끝을 알린다 — 그것을 상한 초과로만 읽지 말 것.
+    ///
+    /// 운영 중 끊김의 읽기 끝 · 쓰기 끝 가름([`DisconnectCause::ReadFailed`] · [`DisconnectCause::WriteFailed`])은
+    /// 그 앞의 [`TransportEvent::Disconnected`] 가 싣는다 — 받은 상대는 이것도 싣는다(데몬 어댑터가 이 까닭 하나로 읽기
+    /// 끝 · 쓰기 끝을 가른다 — TRD 3 §3-0 ①).
+    Closed {
+        peer: PeerId,
+        generation: Generation,
+        cause: DisconnectCause,
+    },
     /// 어디서 몇 개를 잃었고 무엇을 다시 청했나. ★오늘은 순번 구멍 검사가 아예 없다★.
     StreamGap {
         peer: PeerId,
@@ -230,10 +283,12 @@ pub enum TransportEvent<W: Wire> {
         count: u64,
     },
     /// [`Wire::decode`] 가 실패했다. 연결을 끊을지는 [`crate::DecodeFailurePolicy`] 가 정한다.
+    ///
+    /// `reason` = 소비자 해독 오류의 분류([`crate::wire::DecodeClass::class`]) — ★고정 낱말이고 받은 값을 안 담는다★.
     DecodeFailed {
         peer: PeerId,
         generation: Generation,
-        reason: String,
+        reason: &'static str,
     },
     /// 한 `In` 이 답장이면서 스트림 조각이라고 신고됐다 — [`Wire`] 계약 위반 신호다.
     AmbiguousRole { peer: PeerId },
@@ -247,6 +302,7 @@ impl<W: Wire> TransportEvent<W> {
             | Self::ConnectFailed { peer, .. }
             | Self::Rejected { peer, .. }
             | Self::GaveUp { peer, .. }
+            | Self::Closed { peer, .. }
             | Self::StreamGap { peer, .. }
             | Self::StreamTruncated { peer, .. }
             | Self::StreamGenerationChanged { peer, .. }
@@ -267,6 +323,7 @@ impl<W: Wire> TransportEvent<W> {
             Self::ConnectFailed { .. } => "ConnectFailed",
             Self::Rejected { .. } => "Rejected",
             Self::GaveUp { .. } => "GaveUp",
+            Self::Closed { .. } => "Closed",
             Self::StreamGap { .. } => "StreamGap",
             Self::StreamTruncated { .. } => "StreamTruncated",
             Self::StreamGenerationChanged { .. } => "StreamGenerationChanged",
@@ -326,6 +383,16 @@ where
                 .debug_struct("GaveUp")
                 .field("peer", peer)
                 .field("reason", reason)
+                .finish(),
+            Self::Closed {
+                peer,
+                generation,
+                cause,
+            } => f
+                .debug_struct("Closed")
+                .field("peer", peer)
+                .field("generation", generation)
+                .field("cause", cause)
                 .finish(),
             Self::StreamGap {
                 peer,
@@ -454,6 +521,11 @@ mod tests {
                 generation: Generation(1),
             },
             TransportEvent::AmbiguousRole { peer: peer.clone() },
+            TransportEvent::Closed {
+                peer: peer.clone(),
+                generation: Generation(1),
+                cause: DisconnectCause::Explicit,
+            },
             TransportEvent::Dropped {
                 peer: peer.clone(),
                 direction: Direction::Outbound,

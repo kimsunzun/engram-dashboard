@@ -31,10 +31,10 @@ use tokio::sync::watch;
 use crate::command_delivery::{CommandDeliveries, LocalCommands};
 use crate::command_roster::CommandRoster;
 use crate::connection_core::{
-    agent_list_event, broadcast_lease_changed, dispatch_order, event_json, hello_event,
-    inbound_lane, output_event_to_wire, ConnectionCore, ConnectionSession, DispatchFlow,
-    DispatchOrder, InboundLane, MultiViewState, Outbound, OutboundSink as CoreOutboundSink,
-    SinkError as CoreSinkError, SATURATED_REFUSAL,
+    agent_list_event, broadcast_lease_changed, command_request_id, dispatch_order, event_json,
+    hello_event, inbound_lane, output_event_to_wire, ConnectionCore, ConnectionSession,
+    DispatchFlow, DispatchOrder, InboundLane, MultiViewState, Outbound,
+    OutboundSink as CoreOutboundSink, SinkError as CoreSinkError, SATURATED_REFUSAL,
 };
 use crate::usage_service::book::wire_vendor;
 use crate::usage_service::watch::{UsageEncoder, UsageFrame, UsageOutlet};
@@ -258,8 +258,8 @@ pub struct AgentConnection {
 /// `on_text` 이 명령 디코드에 실패한 뒤에만 부른다(ADR-0129 0-4).
 ///
 /// ★왜 필요한가★: 인증은 이미 네트워크 행이 첫 프레임에서 끝냈으므로 그 뒤에 오는 핸드셰이크는
-/// **프로토콜 위반**이다. 0-4 로 그 모양이 네트워크 lib 소유가 되면서 명령으로 디코드되지 않으니
-/// 여기서 되잡는다.
+/// **프로토콜 위반**이다. 그 프레임은 명령 enum 의 변형이 아니라(protocol `handshake::AuthFrame` — 0-4)
+/// 명령으로 디코드되지 않으니 여기서 되잡는다.
 ///
 /// ★온전함이 아니라 **태그**로 판정한다★: 필드가 빠졌거나 본문 모양이 어긋난 Auth 프레임도 핸드셰이크로
 /// 센다. 온전한 것만 세면 낡은 클라가 ``unknown variant `Auth` `` 를 받는데, 이 서버가 첫 프레임으로
@@ -268,7 +268,7 @@ pub struct AgentConnection {
 /// `IgnoredAny` 로 건너뛰어 값 트리를 만들지 않는다 — 피어가 프레임마다 도달시킬 수 있는 경로라
 /// 할당을 얹지 않는다.
 fn is_handshake_frame(text: &str) -> bool {
-    /// ★태그 문자열의 정본은 `engram_dashboard_net::auth::AuthFrame`★ — 아래
+    /// ★태그 문자열의 정본은 `engram_dashboard_protocol::handshake::AuthFrame`★ — 아래
     /// `handshake_frame_is_recognized_after_auth` 가 그 타입을 직렬화한 바이트로 이 판정을 걸어,
     /// 두 쪽이 갈라지면 깨지게 한다.
     #[derive(serde::Deserialize)]
@@ -428,9 +428,7 @@ impl ConnectionHandler for AgentConnection {
         }
         let sink = FrameOutboundSink::new(frames.clone());
         let refusal = sink.enqueue(Outbound::event(AgentEvent::Error {
-            request_id: cmd
-                .as_ref()
-                .and_then(engram_dashboard_protocol::command_request_id),
+            request_id: cmd.as_ref().and_then(command_request_id),
             message: SATURATED_REFUSAL.to_string(),
         }));
         match refusal {
@@ -805,8 +803,8 @@ mod tests {
     // ── 2b. 2차 핸드셰이크 판별(ADR-0129 0-4) ────────────────────────────────────
     #[test]
     fn handshake_frame_is_recognized_after_auth() {
-        let frame = engram_dashboard_net::auth::AuthFrame::Auth {
-            token: "deadbeef".into(),
+        let frame = engram_dashboard_protocol::handshake::AuthFrame::Auth {
+            token: engram_dashboard_protocol::Secret::new("deadbeef"),
             protocol_version: 3,
         };
         assert!(is_handshake_frame(&serde_json::to_string(&frame).unwrap()));
@@ -1148,8 +1146,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_disconnect_removes_that_connections_commands_from_the_roster() {
-        use engram_dashboard_command::{CommandDecl, OwnerToken};
-        use engram_dashboard_protocol::RequestId;
+        use engram_dashboard_command::CommandDecl;
+        use engram_dashboard_protocol::{OwnerToken, RequestId};
 
         let factory = test_factory();
         let owner = factory.handler_for(1);
@@ -1168,11 +1166,12 @@ mod tests {
 
         let registration = command_json(&AgentCommand::RegisterCommands {
             owner: OwnerToken::new("shell"),
-            decls: vec![CommandDecl {
+            decls: serde_json::value::to_raw_value(&[CommandDecl {
                 name: "tab.create".to_string(),
                 help: "{}".to_string(),
                 agent_args: Vec::new(),
-            }],
+            }])
+            .unwrap(),
             catalog_version: 1,
             request_id: RequestId(uuid::Uuid::new_v4()),
         });
@@ -1234,6 +1233,7 @@ mod tests {
     #[tokio::test]
     async fn a_disconnect_also_reclaims_that_connections_command_round_trips() {
         use engram_dashboard_command::{CommandDecl, CommandEnvelope, OwnerToken, RequestId};
+        use engram_dashboard_protocol::OwnerToken as WireOwnerToken;
 
         let commands = CommandRoster::new();
         let deliveries = CommandDeliveries::new();
@@ -1256,12 +1256,13 @@ mod tests {
             let _ = next_event(&mut caller_rx).await;
         }
         let registration = command_json(&AgentCommand::RegisterCommands {
-            owner: OwnerToken::new("shell"),
-            decls: vec![CommandDecl {
+            owner: WireOwnerToken::new("shell"),
+            decls: serde_json::value::to_raw_value(&[CommandDecl {
                 name: "tab.create".to_string(),
                 help: "{}".to_string(),
                 agent_args: Vec::new(),
-            }],
+            }])
+            .unwrap(),
             catalog_version: 1,
             request_id: engram_dashboard_protocol::RequestId(uuid::Uuid::new_v4()),
         });
@@ -1271,14 +1272,15 @@ mod tests {
             AgentEvent::Ack { .. }
         ));
 
+        let envelope = CommandEnvelope {
+            name: "tab.create".to_string(),
+            request_id: RequestId::new(),
+            owner: OwnerToken::new("whatever-the-caller-thinks"),
+            proto_ver: 1,
+            args: serde_json::json!({}),
+        };
         let request = command_json(&AgentCommand::Command {
-            envelope: CommandEnvelope {
-                name: "tab.create".to_string(),
-                request_id: RequestId::new(),
-                owner: OwnerToken::new("whatever-the-caller-thinks"),
-                proto_ver: 1,
-                args: serde_json::json!({}),
-            },
+            envelope: serde_json::value::to_raw_value(&envelope).expect("봉투 직렬화"),
         });
         caller.on_text(2, &request, &caller_frames).await;
         // 봉투가 주인에게 나간 것을 본 시점부터 그 왕복은 답을 기다리는 중이다.

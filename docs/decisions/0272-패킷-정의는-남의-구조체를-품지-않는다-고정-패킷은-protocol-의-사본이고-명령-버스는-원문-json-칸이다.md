@@ -1,7 +1,7 @@
 # ADR-0272: 패킷 정의는 남의 구조체를 품지 않는다 고정 패킷은 protocol 의 사본이고 명령 버스는 원문 JSON 칸이다
 
-- 상태: 확정 (2026-10-02, 근거: 사용자 결정 2026-10-02 (`docs/refactoring/architecture-discussion-2026-09-26.md` 결정 후보 8 — 원칙 · 확정 모양) + 답장 짝 맞추기는 메인 판단 + 조사 `docs/research/wire-shared-types-placement-2026-10-02.md`(medium · cross-family 적대 리뷰 FIX → 반영))
-- 관련: Amends ADR-0177 (결정 4의 짝짓기 번호 함수 정본 위치) · ADR-0155(통합 command 버스 — 도장 없음, 아래 영향) · TRD `docs/process/S20-command-bus/trd.md` §3-1 · §5 protocol 행(「protocol → command 의존 0 → 1」의 실제 출처 — 이 결정이 그것을 되돌린다) · ADR-0081 결정 4(단일 `request_id` 왕복 — 그대로) · ADR-0129(wire JSON 모양 보존 전제) · ADR-0270(클라는 agent 를 모른다) · 결정 후보 7(transport TRD 때 박는다)(인증 메시지 → `protocol`) · `crates/engram-dashboard-protocol/src/messages.rs` · `crates/engram-dashboard-protocol/src/ids.rs` · step-log S21 · Amends ADR-0175 (영향의 의존 그래프 중 protocol 이 command 를 쥐는 줄)
+- 상태: 확정 (2026-10-02, 근거: 사용자 결정 2026-10-02 (`docs/refactoring/architecture-discussion-2026-09-26.md` 결정 후보 8 — 원칙 · 확정 모양) + 답장 짝 맞추기는 메인 판단 + 조사 `docs/research/wire-shared-types-placement-2026-10-02.md`(medium · cross-family 적대 리뷰 FIX → 반영)) · 부분 폐기 by ADR-0310 (영향의 열린 OwnerToken 처분과 TS 바인딩 JSON 화)
+- 관련: Amends ADR-0177 (결정 4의 짝짓기 번호 함수 정본 위치) · ADR-0155(통합 command 버스 — 도장 없음, 아래 영향) · TRD `docs/process/S20-command-bus/trd.md` §3-1 · §5 protocol 행(「protocol → command 의존 0 → 1」의 실제 출처 — 이 결정이 그것을 되돌린다) · ADR-0081 결정 4(단일 `request_id` 왕복 — 그대로) · ADR-0129(wire JSON 모양 보존 전제) · ADR-0270(클라는 agent 를 모른다) · 결정 후보 7(transport TRD 때 박는다)(인증 메시지 → `protocol`) · `crates/engram-dashboard-protocol/src/messages.rs` · `crates/engram-dashboard-protocol/src/ids.rs` · step-log S21 · Amends ADR-0175 (영향의 의존 그래프 중 protocol 이 command 를 쥐는 줄) · Amended by ADR-0310 (영향의 열린 OwnerToken 처분과 TS 바인딩 JSON 화)
 
 ## 맥락
 

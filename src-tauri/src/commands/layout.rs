@@ -39,10 +39,10 @@ const EVT_LAYOUT_UPDATED: &str = "layout:updated";
 // The frontend reacts only when `label` matches its own window (§7-1).
 const EVT_WINDOW_TABS_UPDATED: &str = "window:tabs-updated";
 
-// ★Called while holding the ViewManager lock — enqueue the subscription-cleanup delta to DaemonClient (fire-and-forget)★. Called **inside the same
-// critical section** as rebuild to establish "enqueue order = rebuild order" (prevents interleaving of concurrent invokes).
-// The method called is a synchronous `try_send` (await/network 0), so inside the lock it is not an ADR-0006 violation (the lifecycle lock is also independent —
-// deadlock 0). If not connected, DaemonClient quietly no-ops.
+// ★Called holding the ViewManager lock — queues the subscription cleanup delta on the DaemonClient (fire-and-forget)★.
+// Called **inside the same critical section** as the rebuild so the queue order is the rebuild order (no interleaving
+// of concurrent invokes). The method only sends to the connection driver's actor (no await, no network, no other
+// lock), so calling it under the lock keeps ADR-0006. With no open connection the client does nothing.
 pub(crate) fn send_subscription_delta(client: &DaemonClient, delta: SubscriptionDelta) {
     for agent_id in delta.to_unsubscribe {
         client.unsubscribe(agent_id);

@@ -4,7 +4,7 @@
 //! `lib.rs` 헤더). 깨우는 손잡이(`oneshot::Sender` 같은 것)는 **제네릭 슬롯 `S`** 로 받아 두기만 하고,
 //! 실제로 깨우는 것은 [`crate::peer`] 의 감독 태스크다.
 //!
-//! ★표를 감독 태스크가 단독 소유한다(락 없음)★ — 오늘 셸의 `PendingMap<T>` 과 같은 모양이다.
+//! ★The supervisor task owns the table alone (no lock)★.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -19,18 +19,32 @@ pub enum RequestError {
     /// 시한이 지났다. ★자동 재전송하지 않는다★ — 무응답은 "실패" 가 아니라 **"모른다"** 라, 다시 보내면
     /// 상대가 실은 처리했던 조작이 두 번 적용된다(ADR-0181 결정 3).
     TimedOut { after: Duration },
-    /// 보내기 전에 연결이 끊겼거나, 보낸 뒤 답장 전에 끊겼다.
+    /// 끊겨서 끝났다 — 보내기 전이거나 보낸 뒤 답장 전이다. 어느 쪽인지는 `sent` 가 가른다(TRD 3 D12).
     Disconnected {
+        /// 이 요청이 묶인 연결 — 부르는 쪽이 잡은 세대다([`crate::Peer::request_in`] · `request` 는 부른 순간의 지금
+        /// 세대). 보낸 요청이면 보낸 그 연결이다.
         generation: Generation,
+        /// 아는 마지막 끊김 사유. ★`generation` 이 끝난 까닭이 아닐 수 있다★ — 그 뒤에 또 끊겼으면 그 뒤 것이다.
         cause: DisconnectCause,
+        /// ★상대에게 갔을 수 있나★. `false` = 통로에 넘기기 전에 끝났다(운영 단계가 아니었다 · 큐에 든 채 끊겼다 ·
+        /// 묶인 세대가 지금 세대가 아니었다) — 상대에게 안 갔으므로 다시 보내도 두 번 적용되지 않는다. `true` = 대기
+        /// 표에 오른 뒤(쓰기 직전에 오른다) 끊겼다 — 상대가 받아 처리했을 수 있으니 결과를 모른다(맹목 재시도 금지 —
+        /// [`RequestError::TimedOut`] 과 같은 처지).
+        /// ★`true` 는 부풀 수 있고 `false` 는 보증이다★ — 표에 오른 뒤 쓰기가 한 번도 폴링되지 않은 채 끊겨도,
+        /// 감독이 비정상으로 사라져(패닉 · 런타임 종료) 어디까지 갔는지 모를 때도 `true` 다.
+        sent: bool,
     },
     /// 나가는 큐가 찼다.
     QueueFull,
-    /// 같은 번호가 겹쳐 새 요청이 슬롯을 승계했다 — 옛 대기자가 이것으로 깨어난다.
+    /// 같은 번호의 옛 요청이 아직 답을 기다리는데 새 요청이 그 번호를 다시 썼다 — 옛 대기자가 이것으로 깨어난다.
+    /// ★새 요청은 슬롯을 승계하지 않고 [`RequestError::TagRetired`] 로 거절된다(둘 다 실패)★ — 상관 키가 그 번호
+    /// 하나뿐이라 먼저 나간 요청의 늦은 답장을 새 요청의 짝과 가를 수 없다(`lib.rs` 「알려진 한계」 ·
+    /// [`Insert::Collided`]).
     Superseded,
     /// 이 명령은 답장을 안 받는다([`crate::Wire::request_tag`] 가 `None`). `notify` 를 쓰라는 뜻이다.
     NotARequest,
-    /// 만료됐던 번호를 다시 썼다.
+    /// 은퇴한 번호를 다시 썼다 — 시한 만료로 은퇴한 번호이거나, 대기 중인 번호와 겹친 새 요청이다(그 번호도 이때
+    /// 은퇴한다 — [`RequestError::Superseded`] 의 짝).
     TagRetired,
 }
 
@@ -38,13 +52,28 @@ impl fmt::Display for RequestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TimedOut { after } => write!(f, "no reply within {after:?}"),
-            Self::Disconnected { generation, cause } => {
-                write!(f, "disconnected (generation {}, {cause:?})", generation.0)
+            Self::Disconnected {
+                generation,
+                cause,
+                sent,
+            } => {
+                let sent = if *sent {
+                    "may have been sent"
+                } else {
+                    "not sent"
+                };
+                write!(
+                    f,
+                    "disconnected (generation {}, {cause:?}, {sent})",
+                    generation.0
+                )
             }
             Self::QueueFull => f.write_str("outbound queue full"),
             Self::Superseded => f.write_str("request id reused by a newer request"),
             Self::NotARequest => f.write_str("this message does not take a reply"),
-            Self::TagRetired => f.write_str("request id was retired by an earlier timeout"),
+            Self::TagRetired => {
+                f.write_str("request id is retired (an earlier timeout or a collision)")
+            }
         }
     }
 }
@@ -394,9 +423,21 @@ mod tests {
         assert!(RequestError::NotARequest.to_string().contains("reply"));
         assert!(RequestError::Disconnected {
             generation: Generation(3),
-            cause: DisconnectCause::Idle
+            cause: DisconnectCause::Idle,
+            sent: false,
         }
         .to_string()
         .contains('3'));
+        // ★두 처지를 글에서도 가른다★ — 셸이 이 둘을 다른 문구(재전송 안전 · 결과 모름)로 낸다(TRD 3 D12).
+        let text = |sent| {
+            RequestError::Disconnected {
+                generation: Generation(3),
+                cause: DisconnectCause::Idle,
+                sent,
+            }
+            .to_string()
+        };
+        assert!(text(false).contains("not sent"));
+        assert!(text(true).contains("may have been sent"));
     }
 }

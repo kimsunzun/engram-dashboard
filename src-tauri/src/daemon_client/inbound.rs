@@ -12,29 +12,22 @@
 //! that window, and if it is not there either, it goes out as `UNKNOWN_COMMAND`.
 //!
 //! ## Wiring
-//! The call site is the `Message::Text` branch of `connection.rs` (that file's `accept_inbound`), and the wire
-//! frames that carry the envelope are also in place — `AgentEvent::CommandRequest` (daemon→shell) and `AgentCommand::CommandOutcome` (shell→daemon).
-//! The shell putting its own names onto the daemon registry also goes out on every (re)connect (`register_own_commands`).
-//! The sending side exists now too — the daemon finds the owner in its own registry and writes the envelope to that connection
-//! (`engram_dashboard_daemon::command_delivery` · ADR-0154). A name not in the shell table goes one hop further down here
-//! and reaches the webview ([`ViewCommandPort`] · real implementation = `crate::view_commands`).
+//! The caller is the connection driver (`connection.rs` `accept_inbound`, for a daemon `CommandRequest`); the wire
+//! frames are `AgentEvent::CommandRequest` (daemon → shell) and `AgentCommand::CommandOutcome` (shell → daemon). The
+//! shell's own names go onto the daemon's roster on every connect (`connection.rs` `register_commands`, packet =
+//! [`registration_command`]).
+//! 보내는 쪽도 이제 있다 — 데몬이 자기 명부에서 주인을 찾아 그 연결로 봉투를 쓴다
+//! (`engram_dashboard_daemon::command_delivery` · ADR-0154). 셸 표에 없는 이름은 여기서 한 홉 더 내려가
+//! 웹뷰에 닿는다([`ViewCommandPort`] · 실물 = `crate::view_commands`).
 //!
 //! ★But **the opposite direction does not reach yet**★: the reply of the daemon→shell round trip (`AgentEvent::CommandReply`) is not yet separated by the webview's
 //! `handleEvent` (`src/api/protocolClient.ts`), so the promise of a command issued by the webview does not resolve
 //! (the source of truth for that fact = the `AgentEvent::CommandReply` comment of `engram_dashboard_protocol`). It is a separate bridge from the direction this module runs
 //! (daemon→shell).
 //!
-//! ★Where verification stands★: the connection select loop **requires a real socket** — only that branch selection is left uncovered here,
-//! and everything below it (slot lookup · outcome assembly · channel delivery · registration packet contents) is covered with real code by a harness without a socket
-//! — the source of truth for the remaining list is the header of `tests/layout_commands.rs`.
-//! ★But that requirement is **a cost, not an impossibility**★: `src/daemon_client/tests.rs` of the same package
-//! sets up a loopback WS and actually runs that loop. What is bought here is the determinism and speed obtained without a socket.
-//! ★Before 2026-08-24 this place said 「어떤 하네스로도 세울 수 없다」★ — that was true, but the
-//! reason was not the socket but **a short-circuit that did not launch the connection task at all without an `AppHandle`**. When that short-circuit
-//! was removed (source of truth = the `start_connection` 「단락 이야기」 of `mod.rs`), the sentence went stale along with it.
-//!
-//! ★Beware of name collision★: `connection.rs` has a **different** `CommandReply` (`oneshot::Sender`). So that file
-//! aliases the envelope's reply type as `BusReply` — do not just bring both names into one scope.
+//! ★Where it is verified★: `tests/layout_commands.rs` drives the receiver, the outcome writer and the registration
+//! packet without a connection (its residue list is canonical); the driver's suite (`connection/tests.rs`) drives the
+//! driver's arm on a memory network.
 // ADR-0155
 // ADR-0081
 
@@ -46,6 +39,9 @@ use engram_dashboard_command::{
     route, CommandDecl, CommandEnvelope, CommandError, CommandLink, CommandReply, CommandTable,
     ErrorCode, InboundCommands, OwnerLookup, OwnerLookupSource, ReplySink,
 };
+use engram_dashboard_protocol::{AgentCommand, RequestId};
+
+use super::protocol_state;
 
 /// One task — it has no output (the reply is carried by [`ReplySink`]).
 pub type BoxedTask = Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -192,12 +188,12 @@ impl InboundReceiver {
 
     /// The **single entry point** the connection loop calls — receives the envelope and returns the reply through `deliver`.
     ///
-    /// ★The point is not taking the correlation key as an argument★: `request_id` is taken **directly** from the envelope to make the reply slot,
-    /// so the caller has no way to send a different request's key (that mistake would attach the answer to someone else's round trip).
-    /// `deliver` is called **exactly once** — whether an answer was given (`send`) or the task vanished without one (the `Drop` of [`ReplySink`]
-    /// emits an error reply). So the caller does not handle 「답이 안 올 수도 있다」 (the answer may not come).
-    /// ★`deliver` is called from the application task — not the connection task★. To write to the socket it must go through the channel
-    /// that hands over to that task (`ConnectionCommand`) (single writer convention — `connection.rs` header 「동시성」).
+    /// ★상관 키를 인자로 받지 않는 것이 요점이다★: `request_id` 를 봉투에서 **직접** 꺼내 답장 자리를
+    /// 만들므로, 부르는 쪽이 다른 요청의 키를 실어 보낼 방법이 없다(그 실수는 남의 왕복에 답을 붙인다).
+    /// `deliver` 는 **정확히 한 번** 불린다 — 답을 냈든(`send`), 태스크가 답 없이 사라졌든([`ReplySink`] 의
+    /// `Drop` 이 오류 답장을 낸다). 그래서 부르는 쪽은 「답이 안 올 수도 있다」를 다루지 않는다.
+    /// ★`deliver` runs on the apply task, not on the connection driver's actor★ — it writes through a registry clone
+    /// on the connection the request came on (`link::route::send_command_outcome`).
     pub fn accept(
         &self,
         env: CommandEnvelope,
@@ -250,4 +246,54 @@ impl Default for InboundSlot {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ── 자기 이름 등록 ────────────────────────────────────────────────────────────
+//
+// ★등록 패킷의 `owner` 는 **광고**다★ — 데몬은 이 값을 쓰지 않고 **그 패킷이 온 연결**에서 주인 토큰을
+//   파생한다(protocol `AgentCommand::RegisterCommands` doc · daemon `note_claimed_owner`). 그래서 여기 무엇을
+//   적어도 명부의 주인은 안 바뀐다 — 쓸모는 데몬 로그에서 이 연결이 누구인지 사람이 알아보는 것뿐이다.
+// ★데몬의 토큰 접두(`conn-`)를 흉내내지 않는다★ — 그 형태를 적으면 데몬이 「남의 주인 토큰을 적은 등록」으로
+//   보고 경고를 남긴다(`note_claimed_owner` 의 접두 분기).
+//
+// ★★이 값을 「클라이언트가 만든 식별자」로 승격하지 말 것(ADR-0150 결정 1)★★ — 그 식별자는 **연결마다
+//   유일**해야 하는데 이 리터럴은 고정이라 두 셸이 같은 값을 쓴다. 데몬 명부는 등록을 이름 단위 last-wins 로
+//   덮고 연결 해제를 주인 단위로 제거하므로(ADR-0150 결정 3), 그 승격은 **두 셸이 서로의 이름을 빼앗고 서로를
+//   지우는** 동작이 된다. 식별자를 들일 때는 이 상수를 고치는 것이 아니라 연결마다 새 값을 만들어야 한다.
+const SHELL_OWNER_ADVERT: &str = "engram-dashboard-shell";
+
+/// 등록·차분 패킷이 함께 쓰는 광고 문자열 — ★두 곳에서 따로 짓지 않는다★. 갈리면 데몬 로그에서 같은
+/// 셸의 두 패킷이 남남으로 보인다(명부의 주인 판정은 이 값과 무관하다 — 위 주석).
+pub fn shell_owner_advert() -> engram_dashboard_protocol::OwnerToken {
+    engram_dashboard_protocol::OwnerToken::new(SHELL_OWNER_ADVERT)
+}
+
+/// The registration packet this client sends — `None` when there is nothing to register or the declarations do not fit
+/// the raw slot (error log · ADR-0272).
+///
+/// ★Why `pub` and apart from the send★: sending needs a connection (the driver queues it on every connect), but
+/// **what is sent** (the advertised names · the catalog version · the owner string) does not. Apart, a harness asserts
+/// the very packet that goes out (`tests/layout_commands.rs`) — a packet rebuilt by hand would stay green when the two
+/// drift.
+pub fn registration_command(receiver: &InboundReceiver) -> Option<AgentCommand> {
+    let decls = receiver.declarations();
+    if decls.is_empty() {
+        return None;
+    }
+    let decls = match protocol_state::decls_to_wire(&decls) {
+        Ok(decls) => decls,
+        Err(e) => {
+            tracing::error!(
+                names = decls.len(),
+                "등록 항목 목록을 원문 칸으로 싸지 못했다 — 이 연결에서는 등록하지 않는다: {e}"
+            );
+            return None;
+        }
+    };
+    Some(AgentCommand::RegisterCommands {
+        owner: shell_owner_advert(),
+        decls,
+        catalog_version: receiver.catalog_version(),
+        request_id: RequestId::new(),
+    })
 }

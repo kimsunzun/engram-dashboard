@@ -5,13 +5,13 @@
 //!
 //! ★근거 없이 고른 값에는 그 자리에 「미검」을 적어 둔다★ — 적어 두지 않으면 다음 세션이 추측을 실측으로
 //! 읽는다. 미검인 것: `request_timeout` · `write_deadline` · `reconnect.jitter` · `inbound_queue` ·
-//! `frame_buffer` · `retired_tags` · `max_streams` · `resume_timeout` · `live_dwell`. 나머지는 현행
-//! 코드값 보존이다.
+//! `frame_buffer` · `retired_tags` · `max_streams` · `resume_timeout` · `live_dwell` · `flush_timeout`.
+//! 나머지는 현행 코드값 보존이다.
 
 use std::time::Duration;
 
-/// 큐가 찼을 때. ★나가는 큐에만 적용된다★ — 들어오는 한 줄은 상대들이 **함께 쓰는** 자원이라 그쪽의
-/// 포화로 연결을 끊으면 시끄러운 상대가 조용한 상대를 죽인다(ADR-0180 결정 8).
+/// 큐가 찼을 때. ★나가는 큐에만 적용된다★ — 위로 올라가는 줄이 차는 것은 소비자가 그 상대를 못
+/// 따라간다는 뜻이지 연결의 잘못이 아니고, 그 처분은 끊기가 아니라 배압으로 정해졌다(ADR-0310 결정 17).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueFullPolicy {
     /// 그 연결을 끊는다(현행 유지 — ADR-0177 결정 6). 다시 붙어 처음부터 맞추는 쪽이 낫다.
@@ -140,7 +140,9 @@ pub struct Policy {
     ///
     /// ★미검 — 에이전트 spawn 실소요를 잰 적이 없다★. 그 ADR 이 8초의 유일한 실질 위험으로 적은 자리다.
     pub request_timeout: Duration,
-    /// dial 과 핸드셰이크를 **함께** 감싸는 상한(현행 `HANDSHAKE_TIMEOUT` 보존).
+    /// dial 과 핸드셰이크를 **함께** 감싸는 상한(현행 `HANDSHAKE_TIMEOUT` 보존). ★받은 상대
+    /// ([`crate::Registry::attach`])에선 인증 시한이다★ — 붙인 때가 아니라 업그레이드 끝([`crate::Accepted::upgraded_at`])
+    /// 부터 잰다(TRD 3 §5 3). 받은 상대는 다시 걸지 않아 [`Policy::reconnect`] · [`Policy::live_dwell`] 을 안 쓴다.
     pub connect_timeout: Duration,
     /// 한 프레임을 미는 데 허용하는 상한. ★미검 — 업계 참고값뿐★(NATS 10s · nginx 60s · gRPC keepalive
     /// timeout 20s). 불변식: `write_deadline < ping_interval` — 안 그러면 쓰기 하나가 keepalive 를
@@ -160,12 +162,20 @@ pub struct Policy {
     pub reconnect: ReconnectPolicy,
     /// 나가는 큐 길이(현행 셸값 보존).
     pub outbound_queue: usize,
-    /// ★상대 전부가 함께 쓰는★ 위로 올라가는 한 줄의 길이. ★미검 — 오늘 대응물이 없다★(셸은 Tauri
-    /// Channel 로 직행해 이 큐 자체가 없다). 즉 이 crate 는 **새 실패 모드를 하나 만든다**(TRD §12-12).
+    /// ★손잡이 하나의★ 수신단([`crate::Inbox`]) 길이(개수). [`crate::Registry::add`] · [`crate::Registry::attach`]
+    /// 가 올릴 때마다 줄을 하나 이 길이로 세운다(같은 이름표를 다시 올려도 새 줄이다). 쥐는 총량은 살아 있는 수신단
+    /// 길이들의 합이고(옛 감독이 정리를 마치지 않은 옛 수신단 포함) ★이 값은 개수만 잰다★ — 바이트는 감독마다 crate 내부
+    /// 예산(16 MiB — 앞잡이 줄 · 순서 칸 · 이 줄 · 이어받기 창을 셈 하나가 덮는다. 스트림 조각을 한 번이라도 받은
+    /// 감독만 읽기 몫 · 창 상한으로 반씩 나누고, 안 받은 감독은 읽기 몫이 예산 전부다)이 잰다(`lib.rs` 「알려진
+    /// 한계」). 차면 그 손잡이의 감독이 자기 순서 칸에 붙들고 그 상대의 읽기를 세운다 — 버리지 않는다(배압).
+    /// ★미검 — 오늘 대응물이 없다★(셸은 Tauri Channel 로 직행해 이 큐 자체가 없다). 즉 이 crate 는
+    /// **새 실패 모드를 하나 만든다**(TRD §12-12).
     pub inbound_queue: usize,
-    /// 연결 하나의 읽기 앞잡이 버퍼. ★[`Policy::inbound_queue`] 와 **다른 자원**이다★ — 이쪽이 차면
-    /// 읽기 태스크가 멈춰 전송 계층 배압이 걸릴 뿐이고, 저쪽이 차면 다른 상대까지 영향을 받는다.
-    /// 하나로 합치면 「상대 하나를 위해 고른 값」이 「전체를 위해 고른 값」을 덮어쓴다. ★미검★.
+    /// 연결 하나의 읽기 앞잡이 버퍼(개수). ★[`Policy::inbound_queue`] 와 **다른 자원**이다★ — 이쪽이 차면
+    /// 읽기 태스크가 멈춰 전송 계층 배압이 걸리고, 저쪽이 차면 그 상대의 사건·패킷이 감독의 순서 칸에
+    /// 붙들리며 감독이 이쪽을 더 안 비운다 — 그래서 저쪽이 차면 이쪽도 곧 찬다. 바이트는 이 값과 따로 감독의
+    /// 예산이 잰다(위 `inbound_queue` 의 같은 문장).
+    /// ★미검★.
     pub frame_buffer: usize,
     pub full_queue: QueueFullPolicy,
     pub decode_failure: DecodeFailurePolicy,
@@ -179,13 +189,22 @@ pub struct Policy {
     ///
     /// ★이 값이 「상대가 못 준다」와 「아직 안 왔다」를 가른다★ — 그 사이에 도착하는 순서 밖 조각은
     /// 상대가 재요청을 받기 전에 이미 띄운 것일 수 있으므로 버리고 답을 기다린다. 이 시한을 넘겨야
-    /// [`crate::TransportEvent::StreamTruncated`] 를 올린다. ★미검★.
+    /// [`crate::TransportEvent::StreamTruncated`] 를 올린다. ★배압으로 그 상대의 읽기를 세운 동안은 이 시계가
+    /// 멈춘다★ — 그 사이 답이 와도 우리가 못 읽는다(`lib.rs` 「받는 쪽 불변식」 2). ★미검★.
     pub resume_timeout: Duration,
     /// 재요청의 답을 기다리는 동안 스트림 하나가 **붙들어 두는** 조각 수 상한.
     ///
     /// 순서를 지키려고 붙드는 것이라 버리면 안 되지만, 상한이 없으면 상대가 이 버퍼로 우리 메모리를
-    /// 민다. 차면 창을 그 자리에서 닫고 붙든 것을 순서대로 내보낸다. ★미검★.
+    /// 민다. 차면 창을 그 자리에서 닫고 붙든 것을 순서대로 내보낸다. 바이트로는 감독마다 crate 내부 창 상한
+    /// (8 MiB — 바이트 예산의 반 · 모든 스트림의 붙든 조각 합)이 함께 재고, 넘으면 같은 길로 닫는다 — 새 구멍이면
+    /// 창을 열지 않고 곧바로 잘림이다(`lib.rs` 「알려진 한계」). ★미검★.
     pub resume_buffer: usize,
+    /// [`crate::Peer::close_after_flush`] 하나가 쓰는 시한 — 감독이 그 닫기를 알아챈 때부터 표지 앞의 쓰기 ·
+    /// keepalive · 닫기 프레임까지 **전부를 함께** 덮는다. 넘기면 남은 것을 안 쓰고 닫는다.
+    ///
+    /// ★[`Policy::write_deadline`] 으로 대신하지 않는다★ — 그것은 쓰기 한 번 단위라, 느리게 읽는 상대가 큐 길이 ×
+    /// 쓰기 시한 동안 닫기를 붙들 수 있다(TRD 3 §3-0 ④). ★미검★ — TRD 3 §3-0 ④ 의 가안 값 그대로다.
+    pub flush_timeout: Duration,
 }
 
 impl Default for Policy {
@@ -207,6 +226,7 @@ impl Default for Policy {
             max_streams: 1024,
             resume_timeout: Duration::from_secs(2),
             resume_buffer: 256,
+            flush_timeout: Duration::from_secs(2),
         }
     }
 }
@@ -229,6 +249,9 @@ impl Policy {
         }
         if self.max_streams == 0 || self.resume_buffer == 0 {
             return Err("max_streams / resume_buffer must be non-zero");
+        }
+        if self.flush_timeout.is_zero() {
+            return Err("flush_timeout must be non-zero");
         }
         if self.reconnect.base < MIN_BACKOFF {
             return Err("reconnect.base >= MIN_BACKOFF");
@@ -268,6 +291,7 @@ mod tests {
         assert_eq!(p.retired_tags, 256);
         assert_eq!(p.full_queue, QueueFullPolicy::Disconnect);
         assert_eq!(p.reconnect.max_attempts, 3);
+        assert_eq!(p.flush_timeout, Duration::from_secs(2));
     }
 
     #[test]
@@ -275,6 +299,15 @@ mod tests {
         let mut p = Policy::default();
         p.write_deadline = p.ping_interval;
         assert!(p.check().is_err());
+    }
+
+    #[test]
+    fn a_zero_flush_timeout_is_rejected() {
+        let p = Policy {
+            flush_timeout: Duration::ZERO,
+            ..Policy::default()
+        };
+        assert_eq!(p.check(), Err("flush_timeout must be non-zero"));
     }
 
     #[test]
@@ -469,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn the_shared_line_and_the_per_link_buffer_are_two_values() {
+    fn the_upward_line_and_the_read_ahead_are_two_values() {
         let p = Policy {
             inbound_queue: 8,
             frame_buffer: 4096,

@@ -21,7 +21,7 @@
 //!   (ADR-0081 「relay 적용은 액터 밖」이 막는 self-deadlock 그대로).
 //!
 //! ## ★무엇이 실코드로 덮이고 무엇이 안 덮이나★
-//! 잔여 목록의 정본은 아래 「연결 arm 이 걷는 바이트 경로」 절 머리다 — 이 헤더에 베끼지 않는다(두 곳에 적으면
+//! 잔여 목록의 정본은 아래 「연결 구동이 걷는 바이트 경로」 절 머리다 — 이 헤더에 베끼지 않는다(두 곳에 적으면
 //! 한쪽이 낡는다).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -36,16 +36,21 @@ use engram_dashboard_command::{
     CommandFuture, CommandHandler, CommandReply, CommandTable, ErrorCode, InboundCommands,
     OwnerToken, ReplySink, RequestId, Roster, TableError,
 };
-use engram_dashboard_protocol::{
-    command_request_id, event_reply_request_id, AgentCommand, AgentEvent,
+use engram_dashboard_protocol::{AgentCommand, AgentEvent};
+use engram_dashboard_transport::testing::{
+    settle_until, ImmediateHandshake, ManualClock, MemoryEndpoint, MemoryNetwork,
 };
+use engram_dashboard_transport::{Address, Frame, Peer, PeerId, PeerState, Policy, Registry};
 
 use engram_dashboard_lib::commands::popout::{popup_label, PopupCounter};
-use engram_dashboard_lib::daemon_client::connection::{
-    accept_inbound, outcome_sink, registration_command, ConnectionCommand, OutcomeSender,
-};
 use engram_dashboard_lib::daemon_client::inbound::{
-    BoxedTask, InboundReceiver, InboundSlot, RuntimeSpawner, TaskSpawner, ViewCommandPort,
+    registration_command, BoxedTask, InboundReceiver, InboundSlot, RuntimeSpawner, TaskSpawner,
+    ViewCommandPort,
+};
+use engram_dashboard_lib::daemon_client::link::route::send_command_outcome;
+use engram_dashboard_lib::daemon_client::link::wire::ShellWire;
+use engram_dashboard_lib::daemon_client::protocol_state::{
+    command_request_id, decls_from_wire, envelope_from_wire, event_reply_request_id,
 };
 use engram_dashboard_lib::layout::apply;
 use engram_dashboard_lib::layout::commands::{
@@ -4270,55 +4275,80 @@ async fn a_slow_handler_does_not_stall_the_read_loop() {
     );
 }
 
-// ── (B) 연결 arm 이 걷는 바이트 경로 ────────────────────────────────────────
+// ── (B) 연결 구동이 걷는 바이트 경로 ────────────────────────────────────────
 //
-// ★실코드를 태운다 — 손으로 다시 지은 경로가 아니다★: 디코드한 봉투를 `accept_inbound` 에 그대로 넘기므로
-// 슬롯 조회 · 결말 조립 · 소켓 세대 각인 · 채널 배달 · 표 부재 갈래가 모두 실제 함수로 덮인다. 그 함수를
-// 지우면 이 테스트들은 컴파일되지 않는다.
+// ★The driver's daemon-command arm, rebuilt from its real parts★: the daemon's frame decodes as `AgentEvent`, the
+// envelope is unwrapped by the same edge function, the receiver gets the outcome writer the driver hands it
+// (`link::route::send_command_outcome` on the connection the request came on), and the outcome is read back as the
+// frame the shell wrote on a memory link. Delete any of those functions and these tests do not compile.
 //
-// ## ★그래도 안 덮이는 것(잔여 목록 — 이 자리가 정본)★
-// - **select arm 의 갈래 선택**(`connection.rs` 의 `else if let AgentEvent::CommandRequest`) — 그 루프는
-//   **실 소켓을 요구한다**. ★그것은 불가능이 아니라 비용이다★ — 같은 패키지의 `src/daemon_client/tests.rs`
-//   가 루프백 WS 를 세워 `run_connection`→`main_loop` 를 실제로 돌린다(`recording_events_capture_connected_then_broadcasts`).
-//   그러니 이 갈래가 무커버인 것은 「태울 수 없어서」가 아니라, 갈래 하나를 재려고 매번 소켓·핸드셰이크를
-//   세우는 값이 비싸서다. 여기서 사는 것은 소켓 없이 얻는 결정론과 속도다.
-//   ★2026-08-24 전에는 이 자리에 「실 `AppHandle` 도 함께 요구한다」·「`connection.rs` 의 코드 커버는 전부
-//   이 파일이 진다」고 적혀 있었다★ — 앞은 emit 이 포트로 끊기면서(`src/daemon_client/events.rs`) 그 파일이
-//   `AppHandle` 을 이름으로도 모르게 돼 사라졌고, 뒤는 그 단위 스위트가 같은 루프를 태우기 시작하면서 낡았다.
-// - **sink 로의 실제 소켓 쓰기**(`send_fire` 의 직렬화·전송 실패 갈래 포함).
-// - **`register_own_commands` 의 전송부**(pending 슬롯 · 결말 로그) — 실리는 내용물은 `registration_command`
-//   테스트가 덮는다.
-// - **끊김 drain 과 소켓 세대 대조 arm 자체** — 결말에 그 세대가 실린다는 것까지만 아래가 잰다.
-
-/// 인바운드 봉투가 도착한 소켓의 세대 — 0이 아니어야 한다(기본값 0이 우연히 통과하는 것을 막는다).
-const SOCKET: u64 = 7;
+// ## ★What stays uncovered (residue — this spot is canonical)★
+// - The driver choosing this arm, its skip rules and its no-table answer (`connection.rs` `on_driver_event` ·
+//   `accept_inbound`) — the lib suite drives those on a memory network (`daemon_client::connection::tests`).
+// - The registration's send (`register_commands`) — what it carries is covered by the `registration_command` tests.
 
 struct WireTrip {
     world: World,
-    /// 결말 프레임(`AgentCommand::CommandOutcome`)의 `reply` 노드.
+    /// The `reply` node of the outcome frame (`AgentCommand::CommandOutcome`).
     reply: serde_json::Value,
     request_id: RequestId,
+}
+
+/// A live connection on the shell wire over a memory network — `endpoint` is the daemon's side. The other fields keep
+/// the link alive (a dropped inbox ends the peer).
+struct LiveLink {
+    peer: Peer<ShellWire>,
+    endpoint: Arc<MemoryEndpoint>,
+    _inbox: engram_dashboard_transport::Inbox<ShellWire>,
+    _registry: Registry<ShellWire>,
+    _net: MemoryNetwork,
+    _clock: ManualClock,
+}
+
+async fn live_link() -> LiveLink {
+    let net = MemoryNetwork::new();
+    let clock = ManualClock::new();
+    let registry = Registry::new(
+        Arc::new(ShellWire),
+        net.dialer(),
+        clock.handle(),
+        Policy::default(),
+    );
+    let (peer, inbox) = registry.add(
+        PeerId::new("daemon"),
+        Address::new("mem"),
+        Arc::new(ImmediateHandshake),
+    );
+    settle_until("live", || peer.peer_state() == PeerState::Live).await;
+    let endpoint = net.accept().expect("a link was opened");
+    LiveLink {
+        peer,
+        endpoint,
+        _inbox: inbox,
+        _registry: registry,
+        _net: net,
+        _clock: clock,
+    }
 }
 
 async fn wire_round_trip(name: &str, args: serde_json::Value) -> WireTrip {
     let (world, ports) = World::build();
     let queue = Arc::new(Queued::default());
-    let slot = Arc::new(InboundSlot::new());
-    slot.set(Arc::new(InboundReceiver::new(
+    let receiver = InboundReceiver::new(
         make_table(ports),
         Arc::clone(&queue) as Arc<dyn TaskSpawner>,
         CATALOG_VERSION,
-    )));
-    // 연결 태스크의 명령 채널 — 결말은 소켓이 아니라 **이 채널**로 돌아온다(단일 writer 규약).
-    let (cmd_tx, mut cmd_rx) = mpsc::channel::<ConnectionCommand>(8);
+    );
+    let link = live_link().await;
 
     let request_id = RequestId::new();
     let sent = serde_json::to_string(&AgentEvent::CommandRequest {
-        envelope: envelope(name, args, request_id),
+        envelope: serde_json::value::to_raw_value(&envelope(name, args, request_id))
+            .expect("봉투 직렬화"),
     })
     .expect("데몬이 보낼 Text 프레임");
 
-    // 연결 루프의 디코드 — ★이 프레임은 「내가 기다린 답장」이 아니다★(그러면 pending 이 삼킨다).
+    // The connection's decode — ★this frame is not a reply the shell waits for★ (a pending slot would swallow it).
     let ev: AgentEvent = serde_json::from_str(&sent).expect("AgentEvent 로 디코드된다");
     assert_eq!(
         event_reply_request_id(&ev),
@@ -4328,26 +4358,33 @@ async fn wire_round_trip(name: &str, args: serde_json::Value) -> WireTrip {
     let AgentEvent::CommandRequest { envelope } = ev else {
         panic!("CommandRequest arm 으로 갈라져야 한다");
     };
+    // The envelope unwrap the driver does before handing it over (ADR-0272 decision 4) — the same edge function.
+    let envelope = envelope_from_wire(&envelope).expect("데몬이 지은 봉투는 풀린다");
 
-    accept_inbound(&slot, &cmd_tx.downgrade(), SOCKET, envelope);
+    let peer = link.peer.clone();
+    let generation = peer.generation();
+    receiver.accept(envelope, move |reply| {
+        send_command_outcome(&peer, generation, &reply)
+    });
     run(&queue).await;
 
-    let Some(ConnectionCommand::CommandOutcome { reply, socket }) = cmd_rx.recv().await else {
-        panic!("결말이 연결 태스크의 명령 채널로 돌아온다");
+    // The outcome frame the shell wrote on that connection.
+    let mut frames = Vec::new();
+    settle_until("the outcome is written", || {
+        frames.extend(link.endpoint.frames());
+        !frames.is_empty()
+    })
+    .await;
+    assert_eq!(frames.len(), 1, "{frames:?}");
+    let Frame::Text(text) = frames.remove(0) else {
+        panic!("결말은 Text 프레임이다");
     };
-    assert_eq!(
-        socket, SOCKET,
-        "결말에 소켓 세대가 실려야 옛 소켓 몫을 폐기할 수 있다"
-    );
-
-    // 연결 태스크가 그 소켓으로 내보내는 프레임.
-    let outcome = AgentCommand::CommandOutcome { reply };
+    let outcome: AgentCommand = serde_json::from_str(&text).expect("결말 프레임은 AgentCommand");
     assert_eq!(
         command_request_id(&outcome),
         None,
         "답장을 보내며 pending 슬롯을 만들면 깨울 짝이 없다"
     );
-    let text = serde_json::to_string(&outcome).expect("결말 프레임");
     let back: serde_json::Value = serde_json::from_str(&text).expect("결말은 JSON");
     WireTrip {
         world,
@@ -4389,8 +4426,9 @@ async fn an_unknown_name_from_the_daemon_comes_back_as_a_typed_error() {
 
 // ── (B) 등록 패킷 · 늦게 채워지는 슬롯 ──────────────────────────────────────
 
-/// ★실제로 나가는 그 패킷을 잰다★ — `register_own_commands` 가 보내는 것이 `registration_command` 의 반환값
-/// 그대로다(그 함수를 지우면 이 테스트가 컴파일되지 않는다). 손으로 다시 지은 패킷을 재면 둘이 갈려도 초록이다.
+/// ★Measures the packet that actually goes out★ — the connection driver (`register_commands`) sends exactly what
+/// `registration_command` returns (delete that function and this test does not compile). A packet rebuilt by hand would
+/// stay green when the two drift.
 #[test]
 fn the_registration_packet_is_the_one_the_connection_sends() {
     let (_world, ports) = World::build();
@@ -4411,6 +4449,7 @@ fn the_registration_packet_is_the_one_the_connection_sends() {
     else {
         panic!("얹을 이름이 있으면 등록 패킷이 나온다");
     };
+    let decls = decls_from_wire(&decls).expect("셸이 싼 등록 칸은 풀린다");
     assert_eq!(
         decls.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
         plugged
@@ -4657,6 +4696,7 @@ async fn the_registration_packet_carries_shell_names_once_and_leaves_daemon_name
     let Some(AgentCommand::RegisterCommands { decls, .. }) = registration_command(&receiver) else {
         panic!("얹을 이름이 있으면 등록 패킷이 나온다");
     };
+    let decls = decls_from_wire(&decls).expect("셸이 싼 등록 칸은 풀린다");
     for name in &shell_names {
         let carried: Vec<_> = decls.iter().filter(|d| d.name == *name).collect();
         assert_eq!(carried.len(), 1, "{name}: 셸 표 이름은 한 번만 실린다");
@@ -5053,6 +5093,7 @@ async fn a_report_that_arrives_after_the_table_still_rides_the_next_registration
     let AgentCommand::RegisterCommands { decls, .. } = before else {
         panic!("RegisterCommands");
     };
+    let decls = decls_from_wire(&decls).expect("셸이 싼 등록 칸은 풀린다");
     assert!(
         !decls.iter().any(|d| d.name == "tab.next"),
         "아직 아무 창도 보고하지 않았다"
@@ -5064,6 +5105,7 @@ async fn a_report_that_arrives_after_the_table_still_rides_the_next_registration
     let AgentCommand::RegisterCommands { decls, .. } = after else {
         panic!("RegisterCommands");
     };
+    let decls = decls_from_wire(&decls).expect("셸이 싼 등록 칸은 풀린다");
     assert!(
         decls.iter().any(|d| d.name == "tab.next"),
         "다음 (재)핸드셰이크의 패킷에는 웹뷰 몫이 합쳐져 있다"
@@ -5361,88 +5403,6 @@ async fn a_reported_command_without_a_summary_is_left_out() {
 
     assert_eq!(outcome.refused, vec!["tab.next".to_string()]);
     assert!(outcome.accepted.is_empty());
-}
-
-// ── (B) 결말 출구가 연결 수명을 붙들지 않는다 ────────────────────────────────
-
-/// ★연결 태스크가 쥐는 송신단은 **weak** 이라는 것을 타입으로 못박는다★.
-///
-/// 아래 EOF 테스트는 `outcome_sink` 만 태우므로, `run_connection`·`main_loop` 의 칸이 강한 `mpsc::Sender` 로
-/// 되돌아가도 침묵한다. 이 한 줄은 그 칸들이 쓰는 **별칭의 뜻**이 바뀌는 것을 컴파일 에러로 만든다
-/// (`run_connection` 은 `pub(crate)` 라 여기서 부를 수 없어 이것이 붙잡을 수 있는 전부다).
-const _: fn(mpsc::WeakSender<ConnectionCommand>) -> OutcomeSender = |sender| sender;
-
-/// ★이 채널의 **강한 송신단 수가 연결 태스크의 수명**이다★ — 결말 출구가 강한 clone 을 쥐면 그 수명 신호가
-/// 영원히 오지 않는다.
-///
-/// 무엇이 깨지나: `DaemonClient::close()` 는 소켓을 닫지도 abort 핸들을 쥐지도 않고 **송신단을 놓을 뿐**이고,
-/// `main_loop` 의 select 에는 취소 arm 이 없다 → EOF 가 유일한 즉시 종료 경로다. 같은 EOF 가 stale 연결 억제도
-/// 진다(세대가 밀린 연결은 저장을 거부당하고 그 송신단이 drop 된다). 강한 clone 하나가 그 둘을 동시에 없애고,
-/// 그러면 닫힌 줄 아는 연결이 계속 프레임을 읽어 같은 `router`/`registry` 로 팬아웃한다.
-///
-/// ★고치기 전에는 이 테스트가 timeout 으로 죽는다★(`recv()` 가 영원히 안 돌아온다) — 그래서 상한을 걸어
-/// hang 대신 이름 붙은 실패로 만든다.
-#[tokio::test]
-async fn the_outcome_sink_does_not_keep_the_command_channel_alive() {
-    let (cmd_tx, mut cmd_rx) = mpsc::channel::<ConnectionCommand>(4);
-    let request_id = RequestId::new();
-    let sink = outcome_sink(cmd_tx.downgrade(), request_id, SOCKET);
-
-    // lifecycle 이 `close()` 로 자기 송신단을 놓은 상태 — 이제 강한 송신단은 0이어야 한다.
-    drop(cmd_tx);
-
-    let eof = tokio::time::timeout(Duration::from_secs(5), cmd_rx.recv())
-        .await
-        .expect(
-            "cmd 채널이 EOF 에 닿지 못했다 — 누군가 강한 송신단을 쥐고 있다(close() 와 stale 억제가 함께 죽는다)",
-        );
-    assert!(eof.is_none(), "EOF 는 곧 연결 태스크의 종료 신호다");
-
-    // 보낼 곳이 사라졌어도 출구는 값으로 끝난다(패닉 없음) — 답장은 유실된다.
-    sink(CommandReply::ok(request_id, json!({})));
-}
-
-/// 결말에는 **받은 소켓의 세대**가 실린다 — 그 값이 없으면 끊김 직전에 큐에 든 답장이 다음 소켓으로 나간다.
-#[tokio::test]
-async fn the_outcome_sink_stamps_the_socket_it_belongs_to() {
-    let (cmd_tx, mut cmd_rx) = mpsc::channel::<ConnectionCommand>(4);
-    let request_id = RequestId::new();
-    outcome_sink(cmd_tx.downgrade(), request_id, SOCKET)(CommandReply::ok(request_id, json!({})));
-
-    let Some(ConnectionCommand::CommandOutcome { reply, socket }) = cmd_rx.recv().await else {
-        panic!("결말은 자기 variant 로 큐에 든다(Fire 로 보내면 소켓 대조를 할 수 없다)");
-    };
-    assert_eq!(socket, SOCKET);
-    assert_eq!(reply.request_id, request_id);
-}
-
-/// 표가 안 꽂힌 채 봉투가 오면 **오류 답장이 나간다** — 조용히 버리면 보낸 쪽이 마감시각까지 매달린다.
-#[tokio::test]
-async fn an_envelope_arriving_before_the_table_still_gets_an_answer() {
-    let slot = Arc::new(InboundSlot::new());
-    let (cmd_tx, mut cmd_rx) = mpsc::channel::<ConnectionCommand>(4);
-    let request_id = RequestId::new();
-
-    accept_inbound(
-        &slot,
-        &cmd_tx.downgrade(),
-        SOCKET,
-        envelope(
-            "tab.create",
-            json!({ "window": MAIN_WINDOW_LABEL }),
-            request_id,
-        ),
-    );
-
-    let Some(ConnectionCommand::CommandOutcome { reply, .. }) = cmd_rx.recv().await else {
-        panic!("표가 없어도 답장은 나간다");
-    };
-    assert_eq!(reply.request_id, request_id);
-    assert_eq!(
-        reply.outcome.expect_err("표 부재는 실패다").code(),
-        ErrorCode::Internal,
-        "조립 누락은 재시도로 낫지 않는다 — retry: never"
-    );
 }
 
 /// 답을 못 내고 태스크가 사라져도 호출자는 마감시각까지 매달리지 않는다 — [`ReplySink`] 의 `Drop` 이 낸다.

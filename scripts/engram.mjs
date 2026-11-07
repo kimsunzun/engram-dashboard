@@ -207,7 +207,7 @@ async function connect() {
   // ★open 이후 onerror 를 떼어낸다★: 안 그러면 나중 소켓 리셋이 이 핸들러를 다시 태워 이미 정착된 위
   //   프라미스에 헛rej 하면서 probeTcpReason(최대 800ms)까지 또 돌아 Hello 대기만 지연시킨다.
   ws.onerror = null
-  // 첫 프레임 = Auth. 데몬은 1s 안에 Auth 안 오면 끊는다.
+  // First frame = Auth. The daemon drops the connection if Auth does not arrive within its AUTH_TIMEOUT (net ws.rs).
   ws.send(JSON.stringify({ Auth: { token: info.token, protocol_version: info.protocol_version } }))
   const waitFor = (match, ms = 5000) => new Promise((res, rej) => {
     const found = texts.find(match)

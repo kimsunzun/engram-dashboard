@@ -19,12 +19,11 @@ export interface DaemonStatus {
   port: number | null
 }
 
-/** discover_daemon/daemon_start return (mirror of DaemonInfoDto). The token is exposed but must not be logged. */
+/** discover_daemon/daemon_start result (mirrors DaemonInfoDto). Carries no daemon token — the WebView never receives it. */
 export interface DaemonInfo {
   pid: number
   host: string
   port: number
-  token: string
   protocol_version: number
 }
 
@@ -88,9 +87,10 @@ export class DaemonDaemonControl implements DaemonControl {
         // Graceful failure (active agents rejection, etc.) — force termination with the fallback kill below (force intent).
       }
     }
-    // 2) note3 (reconnect noise removed): right after graceful, client.disconnect() sets closedByUser=true →
-    //    settles to 'down' immediately. Without it, when the daemon closes the socket after the Ack, attach-only reconnect makes 5 futile attempts.
-    //    ★No respawn★: disconnect only does transport.close (no spawn). Recovery only through an explicit start.
+    // 2) note3 (no reconnect noise): right after graceful, client.disconnect() sets closedByUser=true and settles on
+    //    'down' at once. Without it, when the daemon closes the socket after its Ack the attach-only reconnect keeps
+    //    retrying a daemon that is gone (the shell link without limit — ADR-0346).
+    //    ★No respawn★: disconnect only calls transport.close (never spawns). Recovery is an explicit start only.
     this.client.disconnect()
     // 3) M-1 (eases the graceful/taskkill race): if graceful was Acked, the daemon is exiting on its own —
     //    do not taskkill right away; check still-alive with daemon_status and fall back only if it is alive.

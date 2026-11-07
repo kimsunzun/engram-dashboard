@@ -330,7 +330,7 @@ mod tests {
             pid: std::process::id(),
             host: "127.0.0.1".into(),
             port: 54321,
-            token: "a".repeat(64),
+            token: engram_dashboard_protocol::Secret::new("a".repeat(64)),
             protocol_version: 1,
             start_time: 0,
         }

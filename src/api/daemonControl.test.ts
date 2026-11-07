@@ -51,7 +51,7 @@ describe('DaemonDaemonControl (daemon 모드)', () => {
   it('start 성공 → 남아 있던 이유를 지운다', async () => {
     const report = vi.fn(() => undefined)
     const ctrl = new DaemonDaemonControl(fakeClient('down', { reportConnectionError: report }))
-    invokeMock.mockResolvedValueOnce({ pid: 1, host: '127.0.0.1', port: 5, token: 't', protocol_version: 1 })
+    invokeMock.mockResolvedValueOnce({ pid: 1, host: '127.0.0.1', port: 5, protocol_version: 1 })
     await ctrl.start()
     expect(report).toHaveBeenCalledWith(null)
   })
@@ -59,7 +59,7 @@ describe('DaemonDaemonControl (daemon 모드)', () => {
   it('start → daemon_start invoke(console/timeout 전달) + client.connect(명시 spawn 연결)', async () => {
     const connect = vi.fn(async () => undefined)
     const ctrl = new DaemonDaemonControl(fakeClient('down', { connect }))
-    invokeMock.mockResolvedValueOnce({ pid: 1, host: '127.0.0.1', port: 5, token: 't', protocol_version: 1 })
+    invokeMock.mockResolvedValueOnce({ pid: 1, host: '127.0.0.1', port: 5, protocol_version: 1 })
     await ctrl.start({ console: true, timeoutMs: 3000 })
     expect(invokeMock).toHaveBeenCalledWith('daemon_start', { console: true, timeoutMs: 3000 })
     // ADR-0021 §1: only start calls client.connect (= transport.start, spawn allowed).
@@ -68,7 +68,7 @@ describe('DaemonDaemonControl (daemon 모드)', () => {
 
   it('start 기본값 → console=false, timeoutMs=null', async () => {
     const ctrl = new DaemonDaemonControl(fakeClient('down'))
-    invokeMock.mockResolvedValueOnce({ pid: 1, host: '127.0.0.1', port: 5, token: 't', protocol_version: 1 })
+    invokeMock.mockResolvedValueOnce({ pid: 1, host: '127.0.0.1', port: 5, protocol_version: 1 })
     await ctrl.start()
     expect(invokeMock).toHaveBeenCalledWith('daemon_start', { console: false, timeoutMs: null })
   })

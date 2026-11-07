@@ -5,8 +5,13 @@
 // **normalized into InboundMessage** and passed up to ProtocolClient (ProtocolClient does not know
 // carrier decoding). Auth/Hello are consumed here (handshake) — only control/output go up.
 //
-// Protocol semantics (request_id matching · dedup · epoch guard · resubscribe) are owned by ProtocolClient.
-// This transport is responsible only for the carrier: connect · reconnect · frame encoding/decoding.
+// 프로토콜 의미론(request_id 매칭·dedup·epoch 가드·resubscribe)은 ProtocolClient 소유.
+// 이 transport 는 carrier 만 책임진다: 연결·재연결·프레임 인코딩/디코딩.
+//
+// ADR-0310: D23 ① — the WebView never receives the daemon token (the three discovery commands drop it), so the Auth
+// token is the constructor's `authToken`, fixed for the transport's life. Without it every connect attempt rejects with
+// `WS_NO_AUTH_TOKEN_ERROR` before any invoke or socket. This direct path is not production (production = TauriTransport
+// through the shell, ADR-0029); a daemon replaced with a new token is reached at its new port but refuses the old token.
 
 import { invoke } from '@tauri-apps/api/core'
 
@@ -24,9 +29,12 @@ interface DaemonInfoDto {
   pid: number
   host: string
   port: number
-  token: string
   protocol_version: number
 }
+
+/** Rejection text of every connect attempt (`start` · `ensureReady` · reconnect) on a transport built without `authToken`. */
+export const WS_NO_AUTH_TOKEN_ERROR =
+  'direct daemon connection has no auth token — the WebView does not receive the daemon token; connect through TauriTransport'
 
 type WireEvent = Record<string, unknown>
 
@@ -46,6 +54,17 @@ interface WsReplayEntry {
 }
 
 export class WsTransport implements Transport {
+  private readonly authToken: string | undefined
+
+  /**
+   * `authToken` = the daemon token sent in Auth on every socket this transport opens; omitted = cannot connect.
+   * Dev/test only — production has no source of this token on purpose (ADR-0310 D23 ①): do not add a shell command
+   * that hands it to the WebView to revive this path. (TS `private` is not private at runtime.)
+   */
+  constructor(opts?: { authToken?: string }) {
+    this.authToken = opts?.authToken
+  }
+
   private ws: WebSocket | null = null
 
   private _state: ConnectionState = 'down'
@@ -63,12 +82,12 @@ export class WsTransport implements Transport {
   private reconnectAttempt = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
-  // ADR-0021: a cache for separating ensure (explicit spawn) from reconnect (attach-only).
-  // Holds the host/port/token obtained from discover_daemon at the first explicit connection. The reconnect loop
-  // uses this cache as the starting point, but before every retry it re-queries the current daemon.json with read_daemon_info (no-spawn)
-  // to **follow the new address of a daemon that moved (hot-swap · crash respawn)** (see the openSocket comment below).
-  // ★Invariant kept★: reconnect never calls discover/spawn — read_daemon_info is
-  // read-only, so it does not wake the daemon. If there is no live daemon: backoff/exhausted → 'down' (recovered by the user's explicit start).
+  // ADR-0021: the cache that keeps ensure (explicit spawn) apart from reconnect (attach-only).
+  // Holds the host/port the first explicit connect got from discover_daemon. The reconnect loop starts from it but
+  // re-reads the current daemon.json through read_daemon_info (no-spawn) before every retry and **follows a daemon
+  // that moved (hot-swap · crash respawn) to its new address** (see openSocket).
+  // ★Invariant★: reconnect never calls discover/spawn — read_daemon_info is read-only and never wakes a daemon. With
+  // no live daemon it backs off until exhausted → 'down' (recovery = the user's explicit start).
   private cachedInfo: DaemonInfoDto | null = null
 
   // ★Generation token (Blocker-1 zombie socket guard)★: incremented on every openSocket entry to identify "the currently valid attempt".
@@ -147,6 +166,8 @@ export class WsTransport implements Transport {
   // resize after the user turns the daemon off revives it does not occur. A spawn happens only in an explicit
   // start(). Resetting closedByUser/attempt is also not done here (that is the explicit start's responsibility).
   ensureReady(): Promise<void> {
+    // Ahead of the closed / no-cache rejections: their "daemon_start" recovery cannot work without a token.
+    if (this.authToken === undefined) return Promise.reject(new Error(WS_NO_AUTH_TOKEN_ERROR))
     if (this.ws && this.ws.readyState === WebSocket.OPEN && this._state === 'connected') {
       return Promise.resolve()
     }
@@ -190,14 +211,15 @@ export class WsTransport implements Transport {
   }
 
   /**
-   * Open the socket once + send Auth + wait for Hello. Resolves on success, rejects on failure (handled by the caller).
+   * Opens one socket, sends Auth, waits for Hello. Resolves on success, rejects on failure (the caller handles it).
    *
-   * ADR-0021 ensure/reconnect separation:
-   *  - allowDiscover=true (explicit connect): call discover_daemon (spawn if absent) → keep the result in cachedInfo.
-   *  - allowDiscover=false (reconnect loop): **discover/spawn strictly forbidden.** However, re-query the current daemon.json with read_daemon_info (no-spawn)
-   *    to **follow a daemon that moved** (hot-swap · crash respawn — new port/token).
-   *    This is tracking the attach target, not a spawn (read-only, does not wake the daemon). If there is no live daemon,
-   *    make one last try with the cached host/port, and if there is none either, reject (exhausted → down). Reconnect does not create a new daemon.
+   * ADR-0021 ensure / reconnect split:
+   *  - allowDiscover=true (explicit connect): calls discover_daemon (spawns if none) → keeps the result in cachedInfo.
+   *  - allowDiscover=false (reconnect loop): **never discovers or spawns.** It re-reads the current daemon.json
+   *    through read_daemon_info (no spawn) and **follows a moved daemon** (hot swap · crash respawn — new port).
+   *    That tracks the attach target; it is not a spawn (read-only, never wakes a daemon). With no live daemon it
+   *    makes a last try on the cached host/port, and rejects if there is none (exhausted → down). A reconnect never
+   *    creates a daemon.
    */
   private openSocket(allowDiscover: boolean): Promise<void> {
     // ★Blocker-1 zombie guard★: capture this attempt's generation token synchronously before every await. If another start()/close() raises
@@ -219,6 +241,8 @@ export class WsTransport implements Transport {
       // settleReject and then return (before creating a WebSocket · assigning this.ws = no zombie appears).
       const isStale = (): boolean => myGen !== this.openGen
       const run = async () => {
+        const authToken = this.authToken
+        if (authToken === undefined) throw new Error(WS_NO_AUTH_TOKEN_ERROR)
         let info: DaemonInfoDto
         if (allowDiscover) {
           info = await invoke<DaemonInfoDto>('discover_daemon')
@@ -230,9 +254,9 @@ export class WsTransport implements Transport {
           }
           this.cachedInfo = info
         } else {
-          // Reconnect = attach-only. ★Tracking a moved daemon (ADR-0021)★: instead of spawning, re-query the
-          // current daemon.json with read_daemon_info (no-spawn). Even if the daemon comes up on a new
-          // port/token through a hot-swap (stop→start) or crash respawn, follow that address and attach (read-only — does not create or wake the daemon).
+          // Reconnect = attach-only. ★Follow a daemon that moved (ADR-0021)★: instead of spawning, re-read the current
+          // daemon.json through read_daemon_info (no-spawn). When hot-swap (stop→start) or a crash respawn brings the
+          // daemon up on a new port, attach at that address (read-only — never creates or wakes a daemon).
           const fresh = await invoke<DaemonInfoDto | null>('read_daemon_info').catch(() => null)
           // ★Stale check right after the await resumes (Blocker-1)★: if the cleanupSocket (openGen++) of close()/start() slipped in while
           // read_daemon_info yielded, it is invalid — discard. pendingReject alone settles only the outer promise and
@@ -270,7 +294,7 @@ export class WsTransport implements Transport {
           // The first frame = Auth (JSON text). protocol_version echoes the value discover gave.
           ws.send(
             JSON.stringify({
-              Auth: { token: info.token, protocol_version: info.protocol_version },
+              Auth: { token: authToken, protocol_version: info.protocol_version },
             }),
           )
         }

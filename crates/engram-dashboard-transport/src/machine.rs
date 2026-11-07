@@ -13,7 +13,8 @@
 use std::time::{Duration, Instant};
 
 use crate::frame::CloseCode;
-use crate::link::LinkError;
+use crate::link::{LinkError, RejectKind};
+use crate::mask::mask_reason;
 use crate::policy::Policy;
 
 /// 연결 세대. 단조 증가하고 재사용이 없다. 운영 단계에 들어설 때마다 +1 이다.
@@ -56,7 +57,8 @@ impl PeerState {
 /// 모양이 갈린다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GaveUpReason {
-    /// 붙었는데 거절당했다. 재시도해도 결과가 같다.
+    /// 종결 거절([`RejectKind::Terminal`])을 받았다 — 붙었는데 거절당했거나, 거는 쪽이 걸기 전에 그것을 알았다
+    /// ([`crate::DialFailure::Refused`]). 재시도해도 결과가 같다.
     Rejected,
     /// 재연결 예산을 다 썼다.
     BudgetExhausted,
@@ -67,15 +69,20 @@ pub enum GaveUpReason {
 pub enum DisconnectCause {
     /// 상대가 정상 종료했다.
     PeerClosed,
-    /// 통로가 오류를 냈다.
-    LinkError,
-    /// 상대가 `idle_timeout` 동안 조용했다.
+    /// 읽는 쪽이 끝났다 — 통로 읽기가 오류를 냈거나, 읽은 것을 못 읽어 끊었다(디코드 실패로 끊는 정책).
+    /// ★[`DisconnectCause::WriteFailed`] 와 가르는 것이 요점이다★ — 데몬 어댑터가 읽기 끝(남은 명령을 마저
+    /// 돌린다)과 쓰기 끝(곧바로 끊는다)을 이 값으로 가른다(TRD 3 §3-0 ①).
+    ReadFailed,
+    /// 쓰는 쪽이 끝났다 — 프레임 · keepalive 쓰기가 오류를 냈다(시한 초과는 [`DisconnectCause::WriteDeadline`]).
+    WriteFailed,
+    /// 상대가 `idle_timeout` 동안 조용했다. 받은 상대([`crate::Registry::attach`])가 인증 시한 안에 핸드셰이크를 못
+    /// 마친 것도 이것이다(`TransportEvent::Closed` 의 `cause`).
     Idle,
-    /// 한 프레임을 미는 데 `write_deadline` 을 넘겼다.
+    /// 한 프레임을 미는 데 `write_deadline` 을 넘겼다 — 받은 상대의 핸드셰이크 쓰기면 인증 시한을 넘겼다.
     WriteDeadline,
     /// 큐가 찼고 정책이 [`crate::QueueFullPolicy::Disconnect`] 였다.
     QueueFull,
-    /// 우리가 명시로 닫았다.
+    /// 우리가 명시로 닫았다 — 받은 상대에선 우리 핸드셰이크가 거절한 것도 이것이다.
     Explicit,
 }
 
@@ -91,16 +98,40 @@ impl DisconnectCause {
     }
 }
 
-/// 연결이 못 선 이유. ★이 두 갈래가 예산을 가른다★(ADR-0180 결정 5).
+/// 연결이 못 선 이유. ★예산을 가르는 것은 갈래가 아니라 「종결 거절인가」다★(ADR-0180 결정 5 · TRD 3 §3-0 ⑤) —
+/// [`RejectKind::Terminal`] 거절만 예산을 안 쓰고 첫 거절에서 즉시 포기하고, 나머지는 예산을 쓰고 다시 건다.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectFailure {
-    /// 통로 자체가 안 열렸다 → 예산을 쓴다.
+    /// 통로 자체가 안 열렸다 → 예산을 쓴다. ★문구도 상대가 준 글일 수 있다★ — 소비자 [`crate::Dialer`] 가 상대의
+    /// 응답 글을 옮겨 실을 수 있어, 기계를 지난 사건에 실린 이 문구도 [`mask_reason`] 을 거친 것이다.
     Unreachable(LinkError),
-    /// 통로는 열렸고 상대가 안 받아 줬다 → ★예산을 안 쓰고 첫 거절에서 즉시 포기★.
+    /// 상대가(또는 이쪽 핸드셰이크 · 거는 쪽이) 안 받는다고 했다. `kind` 가 예산을 가르고 `code` 는 통로 위에서
+    /// 오간 그 거절의 닫기 코드다(거는 쪽의 [`crate::DialFailure::Refused`] 면 그것이 고른 코드).
+    ///
+    /// ★`reason` 은 상대가 준 글일 수 있다 — 가르지도, 팝업 문안으로 쓰지도 말 것★(TRD 3 §3-0 ⑤ · §5 19). 화면
+    /// 문안은 `code` 로 고르는 소비자의 고정 문구이고 이 글은 세부 · 로그 몫이다. LLM 표면에 실을 때는 「상대가 준
+    /// 데이터」로 표시한다. 기계를 지난 사건에 실린 이 글은 [`mask_reason`] 을 거친 것이다.
     Rejected {
-        code: Option<CloseCode>,
+        kind: RejectKind,
+        code: CloseCode,
         reason: String,
     },
+}
+
+impl ConnectFailure {
+    /// 사건에 싣기 전에 글을 가린다 — 거절 문구와 못 붙음의 문구 둘 다다.
+    fn masked(self) -> Self {
+        match self {
+            ConnectFailure::Rejected { kind, code, reason } => ConnectFailure::Rejected {
+                kind,
+                code,
+                reason: mask_reason(&reason),
+            },
+            ConnectFailure::Unreachable(err) => {
+                ConnectFailure::Unreachable(LinkError::new(mask_reason(&err.message)))
+            }
+        }
+    }
 }
 
 /// 감독 태스크가 기계에 넣는 것.
@@ -143,11 +174,14 @@ pub enum MachineEvent {
         attempt: u32,
         of: u32,
         cause: ConnectFailure,
-        /// `None` = 더 안 기다린다(예산 소진 또는 거절).
+        /// `None` = 예산을 다 써서 더 안 기다린다 — 그 뜻뿐이다. 종결 거절은 이 사건을 올리지 않는다
+        /// ([`MachineEvent::Rejected`] · [`MachineEvent::GaveUp`] 으로 간다).
         retry_in: Option<Duration>,
     },
+    /// ★종결 거절([`RejectKind::Terminal`])만 올린다★ — 다시 거는 거절은 [`MachineEvent::ConnectFailed`] 의 `cause`
+    /// 로 간다. `reason` 은 가린 글이다([`ConnectFailure::Rejected`]).
     Rejected {
-        code: Option<CloseCode>,
+        code: CloseCode,
         reason: String,
     },
     GaveUp {
@@ -358,12 +392,19 @@ impl Machine {
 
     fn on_connect_failed(&mut self, now: Instant, cause: ConnectFailure) -> Vec<Action> {
         match cause {
-            ConnectFailure::Rejected { code, reason } => {
+            ConnectFailure::Rejected {
+                kind: RejectKind::Terminal,
+                code,
+                reason,
+            } => {
                 self.state = PeerState::GaveUp(GaveUpReason::Rejected);
                 self.live_since = None;
                 vec![
                     Action::FailPending(DisconnectCause::PeerClosed),
-                    Action::Emit(MachineEvent::Rejected { code, reason }),
+                    Action::Emit(MachineEvent::Rejected {
+                        code,
+                        reason: mask_reason(&reason),
+                    }),
                     Action::Emit(MachineEvent::GaveUp {
                         reason: GaveUpReason::Rejected,
                     }),
@@ -372,11 +413,12 @@ impl Machine {
                     },
                 ]
             }
-            unreachable => {
+            // 다시 거는 거절은 못 붙음과 같은 길이다 — 예산을 쓴다(TRD 3 §3-0 ⑤).
+            retry => {
                 let mut acts = vec![Action::DropLink {
                     code: CloseCode::GOING_AWAY,
                 }];
-                acts.extend(self.schedule_retry(now, Some(unreachable)));
+                acts.extend(self.schedule_retry(now, Some(retry.masked())));
                 acts
             }
         }
@@ -440,6 +482,7 @@ impl Machine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mask::REASON_MAX_BYTES;
 
     fn policy() -> Policy {
         Policy {
@@ -594,7 +637,8 @@ mod tests {
         let acts = m.on(
             t0,
             Input::ConnectFailed(ConnectFailure::Rejected {
-                code: Some(CloseCode::HANDSHAKE_REJECTED),
+                kind: RejectKind::Terminal,
+                code: CloseCode::HANDSHAKE_REJECTED,
                 reason: "version 3 != 4".into(),
             }),
         );
@@ -613,6 +657,138 @@ mod tests {
         )));
     }
 
+    fn retryable(reason: &str) -> ConnectFailure {
+        ConnectFailure::Rejected {
+            kind: RejectKind::Retryable,
+            code: CloseCode::HANDSHAKE_RETRYABLE,
+            reason: reason.into(),
+        }
+    }
+
+    #[test]
+    fn a_retryable_rejection_spends_budget_and_redials_like_unreachability() {
+        let (mut m, t0) = machine();
+        m.on(t0, Input::Start);
+        m.on(t0, Input::Dialed);
+        let acts = m.on(t0, Input::ConnectFailed(retryable("stale token")));
+        assert_eq!(m.state(), PeerState::Backoff);
+        assert_eq!(m.attempt(), 1, "예산을 쓴다");
+        assert_eq!(waits(&acts, t0), vec![Duration::from_millis(500)]);
+        let evs = events(&acts);
+        assert!(
+            !evs.iter().any(|e| matches!(
+                e,
+                MachineEvent::Rejected { .. } | MachineEvent::GaveUp { .. }
+            )),
+            "다시 거는 거절은 포기하지 않는다: {evs:?}"
+        );
+        assert!(evs.iter().any(|e| matches!(
+            e,
+            MachineEvent::ConnectFailed {
+                cause: ConnectFailure::Rejected {
+                    kind: RejectKind::Retryable,
+                    ..
+                },
+                retry_in: Some(_),
+                ..
+            }
+        )));
+        assert!(matches!(
+            m.on(t0 + Duration::from_millis(500), Input::BackoffElapsed)
+                .as_slice(),
+            [Action::Dial { .. }]
+        ));
+    }
+
+    #[test]
+    fn retryable_rejections_end_in_budget_exhaustion_not_in_a_rejection() {
+        let (mut m, t0) = machine();
+        m.on(t0, Input::Start);
+        let mut acts = Vec::new();
+        for _ in 0..4 {
+            m.on(t0, Input::Dialed);
+            acts = m.on(t0, Input::ConnectFailed(retryable("stale token")));
+            m.on(t0, Input::BackoffElapsed);
+        }
+        assert_eq!(m.state(), PeerState::GaveUp(GaveUpReason::BudgetExhausted));
+        assert!(events(&acts).iter().any(|e| matches!(
+            e,
+            MachineEvent::GaveUp {
+                reason: GaveUpReason::BudgetExhausted
+            }
+        )));
+    }
+
+    #[test]
+    fn both_rejection_paths_mask_the_reason_before_it_leaves_the_machine() {
+        let noisy = format!(
+            "x\u{1b}]0;pwn\u{7}\n\u{2028}\u{e0041}{}",
+            "y".repeat(REASON_MAX_BYTES)
+        );
+        let reason_of = |kind: RejectKind| {
+            let (mut m, t0) = machine();
+            m.on(t0, Input::Start);
+            m.on(t0, Input::Dialed);
+            let acts = m.on(
+                t0,
+                Input::ConnectFailed(ConnectFailure::Rejected {
+                    kind,
+                    code: kind.close_code(),
+                    reason: noisy.clone(),
+                }),
+            );
+            events(&acts)
+                .into_iter()
+                .find_map(|e| match e {
+                    MachineEvent::Rejected { reason, .. }
+                    | MachineEvent::ConnectFailed {
+                        cause: ConnectFailure::Rejected { reason, .. },
+                        ..
+                    } => Some(reason.clone()),
+                    _ => None,
+                })
+                .expect("거절 문구를 실은 사건")
+        };
+        for kind in [RejectKind::Terminal, RejectKind::Retryable] {
+            assert_eq!(reason_of(kind), mask_reason(&noisy), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn an_unreachable_message_is_masked_on_every_connect_failed_event() {
+        // 소비자 dialer 가 상대의 응답 글을 옮겨 실은 못 붙음 — 재시도 사건과 예산 소진 사건 둘 다 가린다.
+        let noisy = format!(
+            "502 from proxy\r\n\u{2028}\u{e0069}\u{200b}\u{1b}[2J{}",
+            "z".repeat(REASON_MAX_BYTES)
+        );
+        let (mut m, t0) = machine();
+        m.on(t0, Input::Start);
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            let acts = m.on(
+                t0,
+                Input::ConnectFailed(ConnectFailure::Unreachable(LinkError::new(noisy.clone()))),
+            );
+            seen.extend(events(&acts).into_iter().filter_map(|e| match e {
+                MachineEvent::ConnectFailed {
+                    cause: ConnectFailure::Unreachable(err),
+                    retry_in,
+                    ..
+                } => Some((err.message.clone(), retry_in.is_some())),
+                _ => None,
+            }));
+            m.on(t0, Input::BackoffElapsed);
+        }
+        assert_eq!(m.state(), PeerState::GaveUp(GaveUpReason::BudgetExhausted));
+        assert_eq!(
+            seen.iter().map(|(_, retry)| *retry).collect::<Vec<_>>(),
+            vec![true, true, true, false]
+        );
+        for (message, _) in seen {
+            assert_eq!(message, mask_reason(&noisy));
+        }
+    }
+
     #[test]
     fn rejection_and_unreachability_land_in_different_states_from_the_same_attempt_count() {
         let (mut rejected, t0) = machine();
@@ -621,7 +797,8 @@ mod tests {
         rejected.on(
             t0,
             Input::ConnectFailed(ConnectFailure::Rejected {
-                code: None,
+                kind: RejectKind::Terminal,
+                code: CloseCode::HANDSHAKE_REJECTED,
                 reason: "no".into(),
             }),
         );
@@ -759,7 +936,8 @@ mod tests {
             Input::ReconnectNow,
             Input::LinkLost(DisconnectCause::Idle),
             Input::ConnectFailed(ConnectFailure::Rejected {
-                code: None,
+                kind: RejectKind::Terminal,
+                code: CloseCode::HANDSHAKE_REJECTED,
                 reason: "no".into(),
             }),
         ];
@@ -844,7 +1022,8 @@ mod tests {
         m.on(
             t0,
             Input::ConnectFailed(ConnectFailure::Rejected {
-                code: None,
+                kind: RejectKind::Terminal,
+                code: CloseCode::HANDSHAKE_REJECTED,
                 reason: "no".into(),
             }),
         );

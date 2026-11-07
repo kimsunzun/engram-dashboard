@@ -1,0 +1,41 @@
+You are a subagent — this brief is the source of truth. You act as the coder for stage 3-2 unit U3c of the Engram Dashboard repo `I:\Engram\apps\engram-dashboard`, branch `v0.4.1/refactor/transport-attach`. Base = the HEAD you find at start (expected `1d3a8486`; U3a `a835aeb3` and U3b `db6ae571` have landed). Check `git status` is clean before you start; if not, stop and report.
+
+## Goal — U3c only (U4 = production switch, later)
+On the new driver `src-tauri/src/daemon_client/connection_v2.rs` (still test-only, `#[cfg(test)]`), port the three remaining old-driver pieces that are no-ops on a V2 client today:
+
+1. **Inbound daemon commands.** `Routed::ToDriver` carrying a `CommandRequest` → `envelope_from_wire` + `accept_inbound` (old: `connection.rs` ~`:1901`, call site ~`:1063-1076`). The outcome goes back with `link::route::send_command_outcome(peer, arrival_generation, reply)` (exists since U2 — never `notify()`); keep the request's `generation` with it so the outcome is written only on the connection it arrived on (old path: `outcome_sink` ~`:1871` + arm ~`:1175-1198`). A broken `CommandReply` → log only (old ~`:1083-1090`). `install_command_table` (`mod.rs`, reads `self.inbound` + `self.rt`) must work for a V2 client.
+2. **Command registration on every connect.** `register_own_commands` (old `connection.rs` ~`:1963`, called ~`:969`), `registration_command` (~`:1934`), refusal box `RefusalAlerts` (field `refusals`). In V2 trigger on `Routed::LinkUp { generation }`; its reply must NOT be awaited on the actor — spawn a task that uses `peer.request_in(generation, ..)` (or the generation-bound equivalent the transport offers).
+3. **Usage interest.** Open/lost per routed connection (old: `usage.lock().on_socket_open` ~`:309`/`:888` + `write_usage_on_open` ~`:1460`; `on_socket_lost` ~`:689`); nudge (`DaemonClient::nudge_usage_interest` in `mod.rs`, old arm ~`connection.rs:1200-1205` + `send_usage_subscribe` ~`:1429`) as a new `DriverCmd` written by the actor with `notify_in`; snapshot relay (`UsageLimitsUpdated` arm ~`:1093-1107` → `relay_usage_snapshot` ~`:1477`); the post-connect nudge in `start_connection` (`mod.rs` ~`:751`); the ⟳ pre-subscribe for `RefreshUsageLimits` inside `send_request` (old ~`connection.rs:1354`, `:1374`) — in V2 `send_command` must get the usage subscribe written before the request on the same Peer queue (decide how without breaking "callers' round trips run on the caller's task"; if ordering on one queue needs the actor, say how you kept it ordered). The usage "socket epoch" maps to the routed connection generation (`LinkUp{generation}`).
+
+4. **Decide the `dropping` case deliberately** (U3b review note): today a `ToDriver` event on a connection being dropped (`self.dropping == Some(generation)`, `is_dropping(generation, "event")`) is skipped with a debug log — that now includes an inbound `CommandRequest`. Default (main's choice, parity): keep skipping it — the old driver stopped reading the socket once it decided to disconnect, and the daemon fails its pending inbound command when that link closes. Confirm from code that the daemon side does fail/clean up the pending command on link close (cite file:line in the daemon); if it does not, stop and report instead of picking. Document the choice in the comment at the skip arm and pin it with a test. Likewise decide registration/usage on a dropping generation (expected: no `LinkUp` work is lost because a dropped link produces `LinkDown` and the next `LinkUp` re-registers — confirm).
+
+Line numbers above are from earlier memos — re-grep before relying on any.
+
+## Read first (must)
+- `.claude/handoff/attachments/20261105-s21-3-2-u3a-handover-for-u3b.md` — §1 (what U3a built), §2 "U3c", §3 seam, §4 contracts and traps (actor never awaits a request; routing is the only state emitter; hold test endpoints; `advance_until` only in `Backoff`; `wait_for` polling; Bench/Harness; log capture; bindings restore; name diff). It is a claim — confirm with code. §2 "U3b" and §5 are done (U3b landed); rebase notes in §3 are moot.
+- Current `connection_v2.rs` + `connection_v2/tests.rs` as U3b left them (actor fields `open`, `dropping`, `subs`, `flight`, `Ports`; every actor write uses `notify_in`; "drop the connection" = generation-bound `Peer::drop_link_in` through the link-lost path).
+- `C:\Users\kimsunzun\.claude\skills\engram-code-conventions\references\conventions.md`.
+- `CLAUDE.md` (design principles, modules, language rules).
+- TRD `docs/process/S21-crate-boundaries/trd-3-transport.md` — extract with `sed -n`/`grep` only: line 24 (revision 9), the §6-2 U3 row (`grep -n '^| \*\*U3\*\* | 새 연결'`), the "셸 시험 운명" fate table ("그 밖(pending · usage · replay · 명령 글)" row = move onto the new driver; old suite stays on the old driver — do not parametrize). Lines are very long; cut with `grep -o`/`cut`.
+- ADRs `docs/decisions/0344-*.md` … `0347-*.md` for context (no decision here changes them).
+
+## Tests (completion criteria)
+- Inbound command: daemon `CommandRequest` on the live connection → outcome written on that generation; outcome after the link changed generation is not written on the new link (old-driver equivalent test if one exists — move per the fate table; find with `grep -n "fn .*inbound\|fn .*outcome\|fn .*command_request" src-tauri/src/daemon_client/tests.rs`).
+- Broken `CommandReply` → log only (log capture, filter by level + structured field).
+- Registration: on each `LinkUp` (first connect and re-connect) the registration request is written once; refusal reply → `RefusalAlerts` path; the actor stays responsive while the reply is pending (e.g. a `DriverCmd` round trip completes before the daemon answers).
+- Usage: subscribe written on open when there is interest; lost clears; nudge writes; snapshot relayed to the events port; ⟳ `RefreshUsageLimits` writes the usage subscribe before the request on the wire.
+- `dropping` choice pinned by a test.
+- Move the old-suite tests the fate table assigns to these areas (pending · usage · command text) onto the new driver where they cover U3c behaviour; list which you moved and which you left with the reason.
+- Full shell `lib_unit` green; `cargo fmt -p engram-dashboard --check` 0 diffs; workspace build green.
+
+## Rules
+- Production keeps the old driver; nothing in production may call the new code. Old driver behaviour and its tests unchanged (except tests moved per the fate table).
+- `src-tauri/src/daemon_client/link/` stays free of any `tauri`/`tauri_*`/`engram_dashboard_agent` path, alias or `use` (shell gate 4); transport `test-support` stays out of the shell release graph (gate 5).
+- Actor never awaits a request / `close_after_flush` / `close_all`; replies the actor needs go on spawned tasks. Never emit `Down`/`Reconnecting` from the driver.
+- Comments and new log messages in English; structured fields; never log tokens. Do not restate constant values in comments.
+- Before coding, count the call sites / items this brief names (old-driver arms, `DaemonClient` methods that reach `current_cmd_tx()` for these features); if they differ from the brief, stop and report first.
+- Long runs via `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Command "<cargo ...>" -WorkDir "I:/Engram/apps/engram-dashboard" -LogFile "<scratch>/<name>.log"`; scratch = `C:\Users\kimsunzun\AppData\Local\Temp\claude\I--Engram-apps-engram-dashboard\31fa411b-c656-4850-8c1d-2128bb9a19dd\scratchpad\u3c\`. Shell tests only as `cargo test -p engram-dashboard --test lib_unit …` (cargo accepts one TESTNAME before `--`). Restore byte-identical `bindings/*.ts` files the test run marks modified (memo §4 command). Write edit scripts with the Write tool (heredocs fold backslashes).
+- Forbidden: spawning subagents · committing · editing ADRs / TRD / step-log / handoff files.
+
+## Report (write it also to `<scratch>/coder-report.md`)
+1. Change summary + file list. 2. Tests: commands, counts, full shell `lib_unit` name diff vs your base (lost 0 · added N, or explain each lost/moved). 3. Self-check (surfaces re-read; doubts raised as they are, not resolved silently). 4. Differs from memo / TRD / this brief (with reasons) — including the `dropping` decision with the daemon file:line evidence and how ⟳ ordering is kept. 5. Most expensive step.

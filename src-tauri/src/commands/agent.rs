@@ -187,7 +187,8 @@ pub async fn request_replay(
 // JSON 으로 보내면 Rust DaemonClient 를 통해 데몬으로 전달한다.
 //
 // ★계약★: `cmd` 는 AgentCommand 의 externally-tagged JSON(e.g. `{"Kill":{…}}`). 파싱 실패는
-// 에러 반환(JSON 구조 불일치).
+// 에러 반환(JSON 구조 불일치). `Command` 의 봉투 칸 · `CommandOutcome` 의 답장 칸 · `RegisterCommands` ·
+// `UpdateCommands` 의 등록 목록 칸이 깨진 것도 같은 에러 반환이다.
 //
 // ## ★reply 평면 (Fix-B / 안 ②)★
 // 프론트 ProtocolClient 는 reply 를 oneshot(pending 맵)으로 기다리고, 그 reply 를 `onMessage`(control
@@ -213,13 +214,18 @@ pub async fn forward_daemon_command(
     forward_to_daemon(&client, cmd).await
 }
 
-/// [`forward_daemon_command`] 의 본체 — `State` 없이 하네스가 태운다(`daemon_client/tests.rs`).
+/// [`forward_daemon_command`] 의 본체 — `State` 없이 하네스가 태운다(`daemon_client/connection/tests.rs`).
 pub(crate) async fn forward_to_daemon(
     client: &DaemonClient,
     cmd: serde_json::Value,
 ) -> Result<Option<serde_json::Value>, String> {
     let agent_cmd: engram_dashboard_protocol::AgentCommand =
         serde_json::from_value(cmd).map_err(|e| format!("AgentCommand 파싱 실패: {e}"))?;
+    // 명령 칸(봉투 · 답장 · 등록 목록)은 원문이라 위 파싱이 그 모양을 안 본다 — 깨진 칸을 여기서 막지 않으면
+    //   봉투는 번호 없는 일방 발사로 나가 프론트 pending 이 끝내 reject 되지 않고, 답장은 데몬이 번호 없는 거절로
+    //   받아 프론트가 실패를 모른다(ADR-0272).
+    let agent_cmd = crate::daemon_client::protocol_state::reseal_webview_command_slots(agent_cmd)
+        .map_err(|e| format!("AgentCommand 명령 칸 파싱 실패: {e}"))?;
 
     // ★데몬 구독 소유 = src-tauri 단독(ADR-0035/0037 — BLOCK-1)★: 프론트가 보낸 Subscribe/Unsubscribe
     //   는 데몬으로 흘리지 않고 여기서 차단(drop)한다. 데몬 구독·재구독은 layout 구독 델타(ViewManager
@@ -255,38 +261,14 @@ pub(crate) async fn forward_to_daemon(
     // ★끊김 처리★: send_command 가 Err(연결 끊김/응답 못 받음)면 그 메시지를 프론트로 전달해
     //   ProtocolClient.sendCommand 의 send().catch 가 해당 pending 을 reject 하게 한다(영구 hang 차단).
     //
-    // ## ★reply 타임아웃 (Fix-C ③ — 영구 hang 2차 차단)★
-    // send_command 의 끊김 감지는 *carrier 레벨* 끊김(소켓 죽음 → 연결 task 종료 → drain/oneshot drop)만
-    // 잡는다. 그러나 "연결은 살아있는데 데몬이 그 request_id 응답만 누락"하는 경로가 있다:
-    //   - 데몬 dispatch(connection_core.rs)의 Ack/Error sink.enqueue 가 SinkError 로 *무시*(`let _ =`)
-    //     되는 경우(큐 포화 등, ADR-0020 R6 의도된 behavior-preserving) → reply 가 영영 안 온다.
-    // 그러면 send_command 의 `reply_rx.await` 는 carrier 가 안 끊겨 영구 대기 → invoke 가 안 끝나 →
-    // 프론트 ProtocolClient.pending 도 영구 hang(send().catch 도 안 불림). 이를 닫으려 reply 대기에
-    // 상한을 둔다. 타임아웃 시 Err → invoke reject → 프론트 send().catch → 해당 pending reject.
-    //
-    // ★값(30s)★: 데몬은 명령을 enqueue 한 *직후* Ack 를 sink 로 보낸다(무거운 작업 완료를 기다리지
-    //   않음 — connection_core.rs dispatch). 정상 경로의 왕복은 loopback 에서 수 ms 라 30s 에 절대 안
-    //   닿는다. 넉넉히 잡아 "느린 데몬"을 타임아웃으로 오판하지 않으면서, 무한 hang 만 확정적으로 끊는다.
-    //
-    // ★데몬측 enqueue 실패 승격 대신 클라측 타임아웃을 택한 이유★: connection_core.rs 의 enqueue
-    //   실패 무시(`let _ = sink.enqueue(..)`)를 "연결 종료로 승격"하면 ADR-0020 R6(behavior-preserving)을
-    //   깨고 데몬 crate 회귀 위험이 크다(정상 단일 연결도 일시적 큐 포화로 끊길 수 있음). 타임아웃은
-    //   src-tauri(클라) 레이어에 격리돼 데몬 동작을 안 건드리고, 락 순서(ADR-0006)와도 무관하다 —
-    //   send_command 는 락을 잡았다 즉시 풀고 Sender clone 만 반환하므로 이 timeout 래핑은 추가 락을
-    //   보유하지 않는다.
-    const REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-    match tokio::time::timeout(REPLY_TIMEOUT, client.send_command(agent_cmd)).await {
-        Ok(Ok(event)) => {
-            let value =
-                serde_json::to_value(&event).map_err(|e| format!("reply 직렬화 실패: {e}"))?;
-            Ok(Some(value))
-        }
-        Ok(Err(e)) => Err(e),
-        Err(_elapsed) => Err(
-            "daemon reply timeout — 연결은 살아있으나 데몬이 응답을 보내지 않음(30s 초과)"
-                .to_string(),
-        ),
-    }
+    // A reply that never comes while the link stays up (the daemon drops one answer) is bounded by the transport's
+    //   request timeout — the shared one of every round trip (ADR-0181 · ADR-0310 D15 ① ·
+    //   `daemon_client::connection::link_policy`), whose text is `link::errors::reply_timeout_text`. No second
+    //   timeout here. A command sent while the connection is live but not yet opened by the driver first waits for the
+    //   open, bounded by the same value — so the worst case is about twice it (the open gap is normally milliseconds).
+    let event = client.send_command(agent_cmd).await?;
+    let value = serde_json::to_value(&event).map_err(|e| format!("reply 직렬화 실패: {e}"))?;
+    Ok(Some(value))
 }
 
 fn expect_ack(result: CmdResult) -> Result<(), String> {

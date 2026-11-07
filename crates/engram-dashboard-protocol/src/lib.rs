@@ -12,6 +12,9 @@
 //!
 //! ## Tauri import 금지. 도메인 로직 금지(순수 타입·serde·codec 만).
 //!
+//! ## No workspace crate dependencies (ADR-0272 「영향」)
+//! Gate = the `ci.yml` step `protocol gate 1` (direct workspace deps = exactly self).
+//!
 //! ## ★ 이름 충돌 메모:
 //! 이 crate 의 [`AgentCommand`] = **클→데몬 요청 envelope**(설계 §3 명칭).
 //! 기존 `agent(profile.rs)::AgentCommand` = **spawn 종류**(Claude/Shell) — 그쪽의 wire 미러는 이 enum 이
@@ -25,10 +28,12 @@
 mod codec;
 mod discovery;
 mod domain;
+pub mod handshake;
 mod ids;
 mod messages;
 // ADR-0231: 싣지 못한 출력 사건의 seq 를 비우지 않는 자리채움 — 데몬 sink 와 셸 중계가 한 벌을 쓴다.
 mod placeholder;
+mod secret;
 
 pub use codec::{
     decode_frame, encode_structured_frame, encode_terminal_frame, peek_frame_header, CodecError,
@@ -43,13 +48,14 @@ pub use domain::{
     SnapshotChunk, UsageLimitSnapshot, UsageScopedWindow, UsageStateDetail, UsageVendorState,
     UsageWindow,
 };
-pub use ids::{AgentId, PresetId, ProfileId, RequestId};
+pub use ids::{AgentId, OwnerToken, PresetId, ProfileId, RequestId};
 pub use messages::{
-    command_request_id, event_reply_request_id, AgentCommand, AgentEvent, CommandListEntry,
-    DeliveredCopy, DropCause, OutputChunk, QueuedInputCancel, QueuedInputEvent, QueuedInputRow,
-    StructuredEvent, SubscribeAction, ToolCategory, ToolOutcome, TurnOutcome,
+    AgentCommand, AgentEvent, CommandListEntry, DeliveredCopy, DropCause, OutputChunk,
+    QueuedInputCancel, QueuedInputEvent, QueuedInputRow, StructuredEvent, SubscribeAction,
+    ToolCategory, ToolOutcome, TurnOutcome,
 };
 pub use placeholder::{placeholder_error_frame, PLACEHOLDER_ERROR_MESSAGE};
+pub use secret::Secret;
 
 /// 깨지는 변경(필드 의미 변경·제거)에서만 +1(설계 결정 #6: 버전 처리 deferred,
 /// 지금은 상수만 두고 Hello 에 실어 보냄 — 불일치 시 팝업 가이드는 나중).

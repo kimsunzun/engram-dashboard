@@ -84,6 +84,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Co
   grep -oE 'test result: [a-zA-Z]+\. [0-9]+ passed' "$QA_TMP/<이름>.log" | awk '{s+=$4} END {print "passed=" s+0; exit !(s>0)}'
   ```
 - `--exact` 로 이름을 집은 줄은 통과 수가 집은 이름 수와 같아야 PASS 다.
+- net 기능 끔 줄(`cargo test -p engram-dashboard-net`)은 시험이 0개다 — 시험은 protocol 로 옮겼다(ADR-0310 결정 9). 그 줄은 기능 끔 조합의 컴파일 확인(CI `net gate 5a`)이라 통과 수 규칙을 쓰지 않는다:
+  - PASS = `__EXIT=0` + 로그에 `running 0 tests` 줄이 1개 이상. 보고에는 「컴파일 PASS (시험 0개)」로 적고 시험 통과로 세지 않는다.
+  - 로그에 통과 수가 1 이상인 `test result:` 줄이 있으면 이 예외를 쓰지 않고 위 통과 수 규칙으로 판정한다.
+  - net crate 를 지우는 3단계 3-3 U6 에서 이 항목도 걷는다.
 - 실패가 나면 로그의 `failures:` 이름 목록을 그대로 옮긴다.
 - 타이밍 · flaky 실패는 다시 돌려 통과시키지 않는다 — FAIL 로 보고하고 ADR-0038(`docs/reference/debugging-conventions.md`)을 단다.
 

@@ -5,7 +5,7 @@
 //! (`commands/settings.rs`·`commands/layout.rs` 와 같은 분담).
 //!
 //! ## ★차분을 여기서 미는 이유★
-//! 셸의 등록은 **핸드셰이크 직후 한 번** 나간다(`daemon_client::connection` 의 `register_own_commands`).
+//! 셸의 등록은 **핸드셰이크 직후 한 번** 나간다(`daemon_client::connection` 의 `register_commands`).
 //! 웹뷰의 보고는 그 시점과 아무 순서 관계가 없다 — 창 스크립트가 늦게 올라오면 그 연결의 등록 패킷에는
 //! 화면 이름이 **하나도 안 실린다**. 그대로 두면 다음 재연결까지 화면 명령이 통째로 `UNKNOWN_COMMAND` 다.
 //! 그래서 명단이 실제로 바뀐 보고에 한해 `UpdateCommands` 를 낸다(TRD §3-7 조항 3).
@@ -16,7 +16,7 @@ use std::sync::Arc;
 use engram_dashboard_protocol::{AgentCommand, RequestId};
 use tauri::{AppHandle, Manager, State, Window};
 
-use crate::daemon_client::protocol_state::CommandFailure;
+use crate::daemon_client::protocol_state::{self, CommandFailure};
 use crate::daemon_client::refusal::RefusalSite;
 use crate::daemon_client::DaemonClient;
 use crate::view_commands::{ViewCommandBridge, ViewCommandDecl};
@@ -93,10 +93,22 @@ async fn push_delta(
     else {
         return None;
     };
+    // ADR-0272: 원문 칸으로 싼다. 실패는 셸 로컬 실패(아래 `Local` 갈래)처럼 warn 만 남기고 박스를 띄우지 않는다
+    //   (박스는 데몬 출처만 — ADR-0281).
+    let added = match protocol_state::decls_to_wire(&added) {
+        Ok(added) => added,
+        Err(e) => {
+            tracing::error!(
+                window = %label,
+                "웹뷰 명령 차분을 원문 칸으로 싸지 못했다 — 이 차분은 데몬에 안 나간다: {e}"
+            );
+            return None;
+        }
+    };
     let cmd = AgentCommand::UpdateCommands {
         // ★데몬은 이 칸을 쓰지 않는다★ — 명부 주인은 그 패킷이 온 연결에서 파생된다. 등록 패킷과 **같은
         //   광고 문자열**을 적어 데몬 로그에서 두 패킷이 같은 셸의 것으로 보이게 한다.
-        owner: crate::daemon_client::connection::shell_owner_advert(),
+        owner: crate::daemon_client::inbound::shell_owner_advert(),
         added,
         removed,
         request_id: RequestId::new(),

@@ -1,15 +1,13 @@
 //! Integration test of the daemon client's replay single-flight **wiring** — zero sockets · daemons · Tauri.
 //!
-//! ★Why this file is in `tests/` (the integration target)★: what it measures is **wiring that requires a real socket**, so an integration harness that
-//! cuts that spot off with a port is the right place (so the harness itself uses no socket · daemon · Tauri at all).
-//! ★It is "requires", not "cannot be stood up"★ — the loopback WS harness of `tests.rs` below actually runs that wiring.
-//! What is bought here is determinism and speed without a socket, not the only possibility.
-//! Pure unit assertions go in `#[cfg(test)]` next to the module and those run with `--test lib_unit`
-//! (the mock WS harness of `src/daemon_client/tests.rs` is there · the decision that set up that target = ADR-0174 · the current state =
+//! ★Why `tests/` (an integration target)★: the rules measured here sit behind a connection in the driver, and the
+//! functions that hold them (`daemon_client::replay_events`) are driven here without one — no socket, daemon or Tauri.
+//! The driver's own suite (`src/daemon_client/connection/tests.rs`, `--test lib_unit`) drives the same path on a memory
+//! network; this target buys determinism and speed, not the only way (the target's decision = ADR-0174 · status =
 //! `.claude/skill-bindings/qa.md` 「모듈별 명령」). Run:
-//! `cargo test -p engram-dashboard --test daemon_client_replay` (it starts no child process at all, so
-//! do not add `-- --test-threads=4` — canonical decision rule = `.claude/skill-bindings/qa.md` 「모듈별 명령」).
-//! CI also has a dedicated step that calls only this target (`.github/workflows/ci.yml`).
+//! `cargo test -p engram-dashboard --test daemon_client_replay`(자식 프로세스를 하나도 안 띄우므로
+//! `-- --test-threads=4` 를 붙이지 않는다 — 판정 규칙 정본 = `.claude/skill-bindings/qa.md` 「모듈별 명령」).
+//! CI 는 이 타깃만 따로 부르는 전용 스텝도 갖는다(`.github/workflows/ci.yml`).
 //!
 //! ## ★What it guards — a refused subscription can go out again★
 //! Right after a daemon restart there is no session (boot auto-restore OFF), so the `Subscribe` of the reconnect replay is refused. A refusal is not
@@ -26,20 +24,18 @@
 //! junction** connecting the daemon's new event to the production carrier's slot release. Here that junction is exercised: an event goes in, the marker goes out **all the way to the window**, and the merged generation's
 //! `Subscribe` is built, measured with a real `OutputRouter`.
 //!
-//! ## ★What is not covered (honesty)★
-//! The remaining unverified surface is **two lines** of the call site — the line that calls this function and the line that pushes the returned command with `send_fire` onto a real
-//! socket. That spot requires a real socket
-//! (the same residual recorded in the headers of `tests/daemon_client_pending.rs` · `tests/layout_commands.rs`).
-//! The delivery outlet (`output_channel::send_to_windows`) does not run either — it needs a `tauri::ipc::Channel`. Instead, **which
-//! window · what bytes** are sent is measured with the real routing table.
+//! ## ★What is not covered here★
+//! The driver's call of this function and its write of the returned `Subscribe` — the driver's suite covers those on
+//! a memory network. The delivery itself (`output_channel::send_to_windows`) needs a `tauri::ipc::Channel`; instead
+//! **which windows · which bytes** are measured against a real routing table.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use engram_dashboard_lib::daemon_client::connection::{
+use engram_dashboard_lib::daemon_client::protocol_state::SubState;
+use engram_dashboard_lib::daemon_client::replay_events::{
     apply_replay_event, plan_subscribe_refusal, ReplayFollowUp,
 };
-use engram_dashboard_lib::daemon_client::protocol_state::SubState;
 use engram_dashboard_lib::daemon_client::replay_flight::{
     Marker, ReplayFlightSet, MARKER_FRAME_LEN, MARKER_TAG,
 };
