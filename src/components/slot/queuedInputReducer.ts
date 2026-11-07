@@ -1,11 +1,11 @@
-// 대기 입력 명부의 TS 판 — 링의 `QueuedInput` 사건을 링 순서대로 환원해 목록(항목)과 묘비를 쥔다(순수 TS).
+// TS edition of the queued-input registry — reduces the ring's `QueuedInput` events in ring order and holds the list (items) and tombstones (pure TS).
 //
-// ★agent `queued_input.rs` 환원기와 한 벌이다★: 규칙을 한 줄도 따로 짓지 않는다. 둘 다 골든
-//   `crates/engram-dashboard-agent/src/queued_input_golden.json` 을 먹으므로 갈라지면 한쪽이 빨개진다 —
-//   규칙을 고치면 Rust 판·골든·이 파일을 같은 변경에서 고친다.
-// ★환원 상태만 쥔다 — 말풍선은 모른다★: 「이미 그린 uuid」 거름·말풍선 배치는 누산기의 그리기 규칙이다.
-//   여기서 그 거름을 하면 명부·골든과 갈린다.
-// ★규칙은 이력이 아니라 지금 상태로 선다★ — 같은 사건열은 늘 같은 상태로 떨어진다(replay 멱등).
+// ★This is one set with the agent `queued_input.rs` reducer★: not a single rule is written separately. Both eat the golden
+//   `crates/engram-dashboard-agent/src/queued_input_golden.json`, so if they diverge one side goes red —
+//   when a rule is changed, fix the Rust edition · the golden · this file in the same change.
+// ★It holds only reduction state — it knows nothing of bubbles★: the 「이미 그린 uuid」 (already drawn uuid) filter and bubble placement are the accumulator's drawing rules.
+//   Doing that filter here would diverge from the registry and the golden.
+// ★Rules stand on current state, not on history★ — the same event sequence always lands in the same state (replay idempotent).
 // ADR-0231
 
 import type { DeliveredCopy } from '../../../crates/engram-dashboard-protocol/bindings/DeliveredCopy'
@@ -13,38 +13,38 @@ import type { DropCause } from '../../../crates/engram-dashboard-protocol/bindin
 import type { QueuedInputEvent } from '../../../crates/engram-dashboard-protocol/bindings/QueuedInputEvent'
 import type { QueuedInputRow } from '../../../crates/engram-dashboard-protocol/bindings/QueuedInputRow'
 
-/** 묘비 상한 — 넘치면 가장 먼저 든 묘비부터 버린다(FIFO). ★골든 머리의 `tombstone_cap` 과 같아야 한다★. */
+/** Tombstone cap — on overflow the tombstone that went in first is dropped first (FIFO). ★Must equal `tombstone_cap` in the golden head★. */
 // ADR-0231
 export const TOMBSTONE_CAP = 1024
 
 /**
- * 취소 대기 항목의 「응답」 칸. `'none'` = 아직 응답이 없다 · `'not_removed'` = `removed:false` 를 받았거나
- * 요청 자체가 실패했다(`CancelFailed`). 「뺐다」는 칸에 남지 않는다 — 그 응답이 곧바로 취소됨으로 닫는다.
- * 낱말은 골든·목록 조회 행의 `cancel.answer` 와 같다.
+ * The 「응답」 (answer) field of a cancel-pending item. `'none'` = no answer yet · `'not_removed'` = `removed:false` was received or
+ * the request itself failed (`CancelFailed`). 「뺐다」 (it was removed) does not remain in the field — that answer closes it at once as cancelled.
+ * The words are the same as `cancel.answer` of the golden and the list query row.
  */
 export type CancelAnswer = 'none' | 'not_removed'
 
 /**
- * 둘 다 비종결이다. `vendorClosed` = 그 id 의 벤더 닫힘(`Dropped{Unknown}`)을 이미 봤다 — 그것이 우리
- * 취소였는지는 `answer` 가 가른다.
+ * Both are non-terminal. `vendorClosed` = the vendor's close (`Dropped{Unknown}`) of that id was already seen — whether it was our
+ * cancel is told apart by `answer`.
  */
 export type QueuedPhase =
   | { readonly state: 'queued' }
   | { readonly state: 'cancelling'; readonly answer: CancelAnswer; readonly vendorClosed: boolean }
 
-/** 목록 한 줄. 객체는 바꾸지 않는다 — 상태가 바뀌면 새 객체로 갈아 끼운다(이전 스냅숏이 그대로 남는다). */
+/** One list line. The object is not mutated — when state changes it is replaced with a new object (the previous snapshot stays as it was). */
 export interface QueuedEntry {
   readonly id: string
   readonly text: string
   readonly phase: QueuedPhase
   /**
-   * 통로가 벤더에 넘겼다(마지막 `HandedOver` 의 값) — 단계와 따로 선다(넘긴 뒤의 ✕ 는 취소 대기이면서 넘긴 행이다).
-   * 결말이 아니다 — 행은 받음·거둠까지 남고, 그리기는 넘긴 행의 ✕ 를 숨긴다.
+   * The path handed it to the vendor (the value of the last `HandedOver`) — stands apart from the stage (✕ after the handover is a cancel-pending and handed-over row).
+   * It is not an outcome — the row stays until receipt or withdrawal, and drawing hides the handed-over row's ✕.
    */
   readonly sent: boolean
 }
 
-/** 한 id 가 종결에 닿은 결말. `Discarded` 의 원인은 `Withdrawn` 이 아니다(그 원인은 늘 `Cancelled`). */
+/** The outcome where an id reached a terminal. The cause of `Discarded` is not `Withdrawn` (that cause is always `Cancelled`). */
 export type QueuedVerdict =
   | { readonly kind: 'Delivered' }
   | { readonly kind: 'Cancelled' }
@@ -62,7 +62,7 @@ function discarded(cause: DropCause): QueuedVerdict {
   return { kind: 'Discarded', cause }
 }
 
-/** ★되살림 정의 — 한 벌★: 원인 `Unknown` 으로 닫힌 것만 되살림 가능 묘비다(어느 사건이 그 모름을 만들었든). */
+/** ★Revival definition — one set★: only what closed with cause `Unknown` is a revivable tombstone (whichever event made that unknown). */
 function resurrectable(verdict: QueuedVerdict): boolean {
   return verdict.kind === 'Discarded' && verdict.cause === 'Unknown'
 }
@@ -72,10 +72,10 @@ function verdictOfDrop(cause: DropCause): QueuedVerdict {
 }
 
 /**
- * 목록 조회 행(wire `QueuedInputRow`) → 환원 상태 한 줄. `unconfirmed` 는 조회 순간 덧댄 표지라 환원으로는
- * `queued` 다 · `sent` 는 넘김 표지가 선 `queued` 다(취소 대기 행은 표지를 싣지 않는다 — 넘기지 않은 것으로 읽는다).
- * 모르는 낱말·깨진 모양(더 새 데몬)이면 `null` — 그 행은 대조에서 빠지고 그 id 는 누산기의 지금
- * 상태 그대로 남는다(던지지 않는다).
+ * List query row (wire `QueuedInputRow`) → one line of reduction state. `unconfirmed` is a marker overlaid at query time so in reduction it is
+ * `queued` · `sent` is a `queued` with the handover marker standing (a cancel-pending row carries no marker — read as not handed over).
+ * With an unknown word or a broken shape (a newer daemon) it is `null` — that row drops out of the check and that id stays in the accumulator's current
+ * state as it is (it does not throw).
  */
 // ADR-0231
 export function entryOfListedRow(row: QueuedInputRow): QueuedEntry | null {
@@ -104,21 +104,21 @@ export function entryOfListedRow(row: QueuedInputRow): QueuedEntry | null {
 }
 
 /**
- * 명부 본체. id 하나의 자리는 셋 중 하나다 — **항목**(`rows`) · **묘비**(종결 — 본문 없이 「되살림 가능」
- * 표시 하나) · **모름**.
+ * The registry body. The place of one id is one of three — an **item** (`rows`) · a **tombstone** (terminal — a single 「되살림 가능」 (revivable)
+ * mark with no body) · **unknown**.
  */
 export class QueuedInputRegistry {
   private items: QueuedEntry[] = []
-  // 묘비 = id → 되살림 가능. ★Map 의 삽입 순서가 곧 FIFO 순서다★ — 이미 있는 키에 set 해도 자리가 안 옮겨진다.
+  // Tombstone = id → revivable. ★The Map's insertion order is the FIFO order★ — setting an existing key does not move its place.
   private readonly tombstones = new Map<string, boolean>()
-  // 「받음 불가 판명」 표식. ★환원 규칙은 이 칸을 읽지 않는다★(골든이 이 칸도 잰다).
+  // The 「받음 불가 판명」 (found unable to receive) marker. ★The reduction rule does not read this field★ (the golden measures this field too).
   private ackUnavailable = false
 
   /**
-   * 사건 하나를 환원한다. 반환 = 이 사건으로 결말이 선 id 와 그 결말(환원 순서).
-   * ★항목이 닫힌 것만 돌려주지 않는다★ — 모르는 id 에 묘비만 남긴 종결, 되살림(`Delivered`), 받음 뒤
-   * 거절의 고쳐 읽기(`Discarded`·`Rejected`)도 돌려준다. 항목이 있었는지는 호출자가 환원 전 상태로 가른다.
-   * @returns `null` = 모르는 `kind`(더 새 데몬) — 상태를 건드리지 않았다.
+   * Reduces one event. Return = the ids whose outcome stood from this event and that outcome (in reduction order).
+   * ★It does not return only item closes★ — it also returns a terminal that left only a tombstone for an unknown id, a revival (`Delivered`), and the re-reading of
+   * a rejection after receipt (`Discarded`·`Rejected`). Whether an item existed is told by the caller from the state before reduction.
+   * @returns `null` = an unknown `kind` (a newer daemon) — the state was not touched.
    */
   reduce(op: QueuedInputEvent): QueuedClosure[] | null {
     const closed: QueuedClosure[] = []
@@ -149,7 +149,7 @@ export class QueuedInputRegistry {
         this.onAckUnavailable(op.delivered, closed)
         break
       default: {
-        // `never` 대입 = 이 셸의 bindings 에 변형이 늘면 컴파일이 여기서 깨진다(누산기 default arm 과 같은 규율).
+        // `never` assignment = if variants grow in this shell's bindings, compilation breaks here (the same discipline as the accumulator's default arm).
         const exhaustive: never = op
         void exhaustive
         return null
@@ -158,7 +158,7 @@ export class QueuedInputRegistry {
     return closed
   }
 
-  /** 열린 항목(든 순서 — 가장 오래된 것이 앞). 취소 대기 항목도 든다. */
+  /** Open items (in the order held — oldest first). Cancel-pending items are included. */
   rows(): readonly QueuedEntry[] {
     return this.items
   }
@@ -171,7 +171,7 @@ export class QueuedInputRegistry {
     return this.ackUnavailable
   }
 
-  /** 그 id 의 묘비. `true` = 되살림 가능 · `undefined` = 묘비가 없다(항목이거나 모름). */
+  /** The tombstone of that id. `true` = revivable · `undefined` = no tombstone (an item or unknown). */
   tombstone(id: string): boolean | undefined {
     return this.tombstones.get(id)
   }
@@ -180,7 +180,7 @@ export class QueuedInputRegistry {
     return this.tombstones.size
   }
 
-  /** 묘비까지 전부 비운다(누산기 `reset()` — 링 전량 재생 전). */
+  /** Clears everything including tombstones (accumulator `reset()` — before the full ring replay). */
   clear(): void {
     this.items = []
     this.tombstones.clear()
@@ -188,14 +188,14 @@ export class QueuedInputRegistry {
   }
 
   /**
-   * 재부착 대조 — 스냅숏 행마다 그 상태에서 출발해 `later`(스냅숏 seq **뒤**의 사건, 링 순서) 중 그 id 의 것과
-   * `AckUnavailable` 만 다시 환원하고, 그 결과로 이 명부의 그 id 자리를 갈아 끼운다(열림 = 항목 · 닫힘 = 묘비).
-   * 스냅숏에 없는 열린 항목은 `later` 에 그 id 의 `Queued` 가 있으면(스냅숏 뒤에 섰다) 그대로 두고, 없으면
-   * 원인 모름으로 닫는다(되살림 가능 묘비 — 아래 본문).
-   * ★seq ≤ 스냅숏 seq 인 사건을 `later` 에 넣지 말 것★ — 스냅숏에 이미 들어 있어 두 번 환원된다.
-   * 순서 = 남은 스냅숏 행(데몬 명부 순) 다음에 나머지(스냅숏 뒤에 선 항목). 말풍선은 모른다(목록만 고친다).
-   * @param listed 답에 실린 **모든** 행의 id — `rows` 가 거른 행(모르는 낱말)의 id 도 든다. 그 id 는 「있다」로
-   *   세어 닫지 않는다(모르는 낱말이지 결말이 아니다).
+   * Re-attach check — for each snapshot row, starting from that state, re-reduces only the events of that id among `later` (events **after** the snapshot seq, in ring order) and
+   * `AckUnavailable`, and replaces that id's place in this registry with the result (open = item · closed = tombstone).
+   * An open item not in the snapshot is left as is if `later` has a `Queued` for that id (it stood after the snapshot), and otherwise is closed
+   * with unknown cause (a revivable tombstone — body below).
+   * ★Do not put events with seq ≤ snapshot seq in `later`★ — they are already in the snapshot and would be reduced twice.
+   * Order = the remaining snapshot rows (daemon registry order), then the rest (items that stood after the snapshot). It knows nothing of bubbles (it fixes only the list).
+   * @param listed ids of **all** rows carried in the answer — including the ids of rows `rows` filtered out (unknown words). Those ids are
+   *   counted as 「있다」 (present) and not closed (an unknown word is not an outcome).
    */
   // ADR-0231
   adoptSnapshot(
@@ -203,10 +203,10 @@ export class QueuedInputRegistry {
     later: readonly QueuedInputEvent[],
     listed: ReadonlySet<string>,
   ): void {
-    // ADR-0231: TRD 8판 §5-7 은 「스냅숏에 없는 id 는 누산기가 이미 봤다」라 뒀지만(9판이 지우고 이 규칙으로 바꿨다 — TRD §5-7 「9판」 줄) 머리 점프가 그 전제를 깬다 —
-    //   flush 가 커서를 뒤의 replay 머리로 건너뛰면(같은 화신 재부착 · 붙듦 넘침 재버퍼) 누산기는 비우지 않은 채
-    //   닫힘 사건만 링에서 밀려나 잃는다. 스냅숏 seq 에 열려 있던 항목은 스냅숏에 든다는 것이 이 판정의 근거라,
-    //   점프가 없으면 오늘과 같은 결과다.
+    // ADR-0231: TRD edition 8 §5-7 put it as 「스냅숏에 없는 id 는 누산기가 이미 봤다」 (an id not in the snapshot was already seen by the accumulator) (edition 9 erased it and changed to this rule — the TRD §5-7 「9판」 line), but a head jump breaks that premise —
+    //   if flush skips the cursor to the head of a later replay (same-incarnation reattach · re-buffer after hold overflow), the accumulator is not cleared and
+    //   only the close event is pushed out of the ring and lost. The basis of this decision is that items open at the snapshot seq are in the snapshot,
+    //   so with no jump the result is the same as today.
     const queuedLater = new Set<string>()
     for (const op of later) if (op.kind === 'Queued') queuedLater.add(op.id)
     this.items = this.items.filter((entry) => {
@@ -216,7 +216,7 @@ export class QueuedInputRegistry {
     })
     const adopted: QueuedEntry[] = []
     for (const row of rows) {
-      // 환원 규칙은 id 마다 따로 선다(모두에 걸리는 것은 `AckUnavailable` 하나) — 한 행짜리 명부로 다시 돌린다.
+      // Reduction rules stand per id (only `AckUnavailable` applies to all) — re-run with a one-row registry.
       const scratch = new QueuedInputRegistry()
       scratch.items = [row]
       for (const op of later) {
@@ -244,14 +244,14 @@ export class QueuedInputRegistry {
     this.items[at] = { ...this.items[at], phase }
   }
 
-  /** 항목을 지우고 묘비로 접는다 — 본문은 쥐지 않는다. */
+  /** Deletes the item and folds it into a tombstone — the body is not kept. */
   private close(at: number, verdict: QueuedVerdict, closed: QueuedClosure[]): void {
     const [entry] = this.items.splice(at, 1)
     this.bury(entry.id, resurrectable(verdict))
     closed.push({ id: entry.id, verdict })
   }
 
-  /** ★집합이다★ — 이미 있는 id 는 무동작이고 자리도 안 옮긴다. */
+  /** ★It is a set★ — an id already there is a no-op and does not move its place. */
   private bury(id: string, canRevive: boolean): void {
     if (this.tombstones.has(id)) return
     if (this.tombstones.size >= TOMBSTONE_CAP) {
@@ -261,7 +261,7 @@ export class QueuedInputRegistry {
     this.tombstones.set(id, canRevive)
   }
 
-  /** 결말을 아는 묘비 — 이미 있으면 되살림 표시만 고친다(자리는 그대로 — FIFO 순서가 안 흔들린다). */
+  /** A tombstone with a known outcome — if already there only the revival mark is fixed (the place stays — so the FIFO order does not shake). */
   private entomb(id: string, canRevive: boolean): void {
     if (this.tombstones.has(id)) this.tombstones.set(id, canRevive)
     else this.bury(id, canRevive)
@@ -272,12 +272,12 @@ export class QueuedInputRegistry {
   }
 
   private onQueued(id: string, text: string): void {
-    // 이미 항목이면 무동작(재방출 없음) · 묘비면 버린다(늦은 `Queued` 가 영구 항목을 만들지 않게).
+    // If already an item, a no-op (no re-emit) · if a tombstone, dropped (so a late `Queued` does not create a permanent item).
     if (this.position(id) !== -1 || this.tombstones.has(id)) return
     this.items.push({ id, text, phase: { state: 'queued' }, sent: false })
   }
 
-  /** 넘김 표지 — 항목이면 단계와 무관하게 표지만 갈아 끼운다(결말 없음). 모르는 id · 묘비는 무동작(행을 지어내지 않는다). */
+  /** Handover marker — if an item, only the marker is swapped regardless of stage (no outcome). An unknown id · tombstone is a no-op (no row is invented). */
   private onHandedOver(id: string, sent: boolean): void {
     const at = this.position(id)
     if (at !== -1) this.items[at] = { ...this.items[at], sent }
@@ -290,15 +290,15 @@ export class QueuedInputRegistry {
     }
   }
 
-  /** `removed:true` — 수명주기 줄을 기다리지 않고 닫는다(그 줄이 끝내 안 오면 항목이 목록을 쥔 채 남는다). */
+  /** `removed:true` — closes without waiting for the lifecycle line (if that line never comes the item stays in the list). */
   private onRemoved(id: string, closed: QueuedClosure[]): void {
     const at = this.position(id)
     if (at !== -1 && this.items[at].phase.state === 'cancelling') this.close(at, CANCELLED, closed)
   }
 
   /**
-   * `removed:false` · 요청 실패. ★대기로 되돌리지 않는다★ — 응답 칸(`not_removed`)이 뒤이은 벤더 닫힘의 원인을
-   * 가른다(그리기는 이 행을 넘긴 행처럼 ✕ 없이 그린다 — ADR-0235).
+   * `removed:false` · request failure. ★It is not put back to waiting★ — the answer field (`not_removed`) tells the cause of a following vendor close apart
+   * (drawing draws this row like a handed-over row with no ✕ — ADR-0235).
    */
   private onNotRemoved(id: string, closed: QueuedClosure[]): void {
     const at = this.position(id)
@@ -306,7 +306,7 @@ export class QueuedInputRegistry {
     const phase = this.items[at].phase
     if (phase.state === 'queued') return
     if (phase.vendorClosed) {
-      // 벤더가 이미 닫았는데 우리 취소가 아니었다.
+      // The vendor had already closed it but it was not our cancel.
       this.close(at, discarded('Unknown'), closed)
     } else {
       this.setPhase(at, { state: 'cancelling', answer: 'not_removed', vendorClosed: false })
@@ -324,11 +324,11 @@ export class QueuedInputRegistry {
       this.bury(id, false)
       closed.push({ id, verdict: DELIVERED })
     } else if (mark) {
-      // 「모름」으로 버린 항목에 벤더 받음이 뒤늦게 왔다(되살림).
+      // A vendor receipt came belatedly for an item dropped as 「모름」 (unknown) (revival).
       this.clearResurrectable(id)
       closed.push({ id, verdict: DELIVERED })
     }
-    // 되살림 불가 묘비 — 같은 id 의 둘째 `Delivered`(codex `item/started`·`item/completed`)도 여기서 끝난다.
+    // A non-revivable tombstone — a second `Delivered` of the same id (codex `item/started`·`item/completed`) also ends here.
   }
 
   private onDropped(id: string, cause: DropCause, closed: QueuedClosure[]): void {
@@ -342,12 +342,12 @@ export class QueuedInputRegistry {
       } else if (cause !== 'Unknown') {
         this.close(at, discarded(cause), closed)
       } else if (phase.vendorClosed) {
-        // 벤더 닫힘을 이미 봤다 — 둘째 닫힘은 새 사실이 없다.
+        // The vendor close was already seen — a second close has no new fact.
       } else if (phase.answer === 'not_removed') {
-        // 실패·끊긴 턴이 닫았다 — 우리 취소는 이미 「못 뺐다」로 답했다.
+        // A failed or interrupted turn closed it — our cancel already answered 「못 뺐다」 (could not remove).
         this.close(at, discarded('Unknown'), closed)
       } else {
-        // 우리 취소가 뺐다면 그 응답이 뒤따른다 — 취소 대기 그대로 두고 기다린다.
+        // If our cancel removed it, that answer follows — leave it as cancel-pending and wait.
         this.setPhase(at, { state: 'cancelling', answer: 'none', vendorClosed: true })
       }
       return
@@ -358,15 +358,15 @@ export class QueuedInputRegistry {
       this.bury(id, resurrectable(verdict))
       closed.push({ id, verdict })
     } else if (cause === 'Rejected') {
-      // 받음 뒤 거절 — 결말을 고쳐 읽고 되살림을 막는다.
+      // Rejection after receipt — re-read the outcome and block revival.
       this.clearResurrectable(id)
       closed.push({ id, verdict: discarded('Rejected') })
     }
   }
 
   /**
-   * 열린 항목 전부를 이 링 자리의 받음으로 닫는다(취소 대기도 응답을 기다리지 않는다). 사본의 id 는 그 뒤
-   * `Delivered` 와 같게 환원한다 — 방금 닫힌 항목은 무동작 · 모르는 id 는 묘비만.
+   * Closes all open items with this ring place's receipt (cancel-pending ones too do not wait for an answer). The copy's ids are then reduced
+   * the same as `Delivered` — an item just closed is a no-op · an unknown id gets only a tombstone.
    */
   private onAckUnavailable(delivered: readonly DeliveredCopy[], closed: QueuedClosure[]): void {
     this.ackUnavailable = true

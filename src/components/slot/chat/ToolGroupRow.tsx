@@ -1,8 +1,8 @@
-// ADR-0239: 도구 묶음 한 줄 — 요약 머리와 펼침 · 접힘. 대화 뷰에서 펼침 상태를 읽고 바꾸는 것은 이 컴포넌트뿐이다 —
-//   `StructuredTextView` 는 state · effect · 스토어 구독이 없는 순수 렌더로 남는다(ADR-0050).
-//   ★안쪽에 `ChatRow` 레일을 두지 않는다★(ADR-0051): 묶음이 레일 한 행이고 레일 위치는 행 목록으로 계산된다 — 멤버마다
-//   레일을 그리면 계산과 DOM 이 갈린다. 멤버 행은 `renderMember` 로 받는다 — 행 컴포넌트는 `StructuredTextView` 안에
-//   있고, 그 파일을 여기서 import 하면 순환이다.
+// ADR-0239: tool bundle one line — summary head and expand · collapse. This component alone reads and changes the expansion state in the conversation view —
+//   `StructuredTextView` stays a pure render with no state · effect · store subscription (ADR-0050).
+//   ★No `ChatRow` rail inside★ (ADR-0051): the bundle is one rail row and rail positions are computed from the row list — if each member
+//   drew a rail, the calculation and the DOM would diverge. Member rows are received via `renderMember` — the row component lives inside `StructuredTextView`,
+//   and importing that file here would be circular.
 
 import { Fragment, type ReactNode } from 'react'
 import { ChevronDown, ChevronRight, Layers } from 'lucide-react'
@@ -25,16 +25,16 @@ export type ToolGroupDisplayRow = Extract<DisplayRow, { kind: 'toolGroup' }>
 
 export interface ToolGroupRowProps {
   row: ToolGroupDisplayRow
-  /** 벤더 결과 본문이 오류인 호출 id(`vendorErrorIdsOf`) — 한 렌더에 한 번 지어 모든 묶음이 나눠 쓴다. */
+  /** Call ids whose vendor result body is an error (`vendorErrorIdsOf`) — built once per render and shared by all bundles. */
   vendorErrorIds: ReadonlySet<string>
   runPos: RailRunPosition | undefined
-  /** 이 묶음이 목록의 마지막 묶음인가 — `onGroupToggle` 에 그대로 실린다. */
+  /** Is this bundle the last bundle of the list — carried as is in `onGroupToggle`. */
   isLast: boolean
-  /** 머리 밑 멤버 한 줄(펼쳤을 때 · 도는 동안의 마지막 호출) — 레일 없는 행 컴포넌트를 돌려준다. */
+  /** One member line under the head (when expanded · the last call while running) — returns a row component without a rail. */
   renderMember: (item: StructuredItem) => ReactNode
-  /** 펼침 상태의 슬롯 — 없으면 고른 값이 없는 묶음으로 그리고 머리를 눌러도 바뀌지 않는다. */
+  /** The slot of expansion state — without it the bundle is drawn as one with no chosen value and pressing the head changes nothing. */
   slotId?: string
-  /** 사람이 머리를 눌러 펼쳤다 — 접을 때와 command 로 바뀔 때는 부르지 않는다. */
+  /** A human pressed the head to expand — not called on collapse or when changed by a command. */
   onGroupToggle?: (isLast: boolean) => void
 }
 
@@ -53,15 +53,15 @@ export function ToolGroupRow({
 }: ToolGroupRowProps) {
   const chosen = useToolGroupStore((s) => chosenOpen(s, slotId, row.key))
   const open = chosen ?? false
-  // ADR-0263 결정 1: 고른 값이 없으면 도는 동안 지금 도는 호출(마지막 호출) 한 줄을 머리 밑에 두고, 끝나면 머리만 남긴다.
-  //   고른 값은 양방향으로 이긴다 — 도는 중에 접으면 그 한 줄도 없다.
+  // ADR-0263 decision 1: with no chosen value, while running the call running now (the last call) is put as one line under the head, and when done only the head remains.
+  //   The chosen value wins both ways — if collapsed while running, that one line is gone too.
   const shown = open ? row.members : chosen === undefined && row.live ? row.calls.slice(-1) : []
-  // ADR-0241: 요약 셈은 펼친 행 배지와 같은 판정(`toolCallVerdict`)이다 — 거부는 오류 수에 안 든다.
+  // ADR-0241: the summary count is the same decision as the expanded row badge (`toolCallVerdict`) — a decline does not count toward the error number.
   const parts = summaryParts(summarizeGroup(row.calls, vendorErrorIds, DECLINED_MARK))
   const toggle = () => {
     if (slotId === undefined) return
     const next = !open
-    // ★펼침을 바꾸는 길은 스토어 `setOpen` 하나다★ — 사람 토글과 LLM command 가 같은 길을 탄다(CLAUDE.md 「LLM-우선 제어」).
+    // ★The only way to change expansion is the store `setOpen`★ — the human toggle and the LLM command take the same path (CLAUDE.md 「LLM-우선 제어」).
     if (!useToolGroupStore.getState().setOpen(slotId, row.key, next)) {
       console.warn(`[ToolGroupRow] 슬롯 '${slotId}' 이 묶여 있지 않아 묶음 펼침을 적지 못했다 — 대화 뷰의 bind 가 빠졌다`)
       return
@@ -105,7 +105,7 @@ export function ToolGroupRow({
               </Fragment>
             ))}
           </span>
-          {/* ADR-0263: 진행형 표시는 `live` 가 정한다. 요약 칸 밖에 두어 좁은 폭에서 잘리는 쪽은 요약이다. */}
+          {/* ADR-0263: the progressive indicator is decided by `live`. It is put outside the summary area, so what gets cut at narrow width is the summary. */}
           {row.live && (
             <span className="flex-none animate-pulse text-muted">{t('chat.toolGroupRunning')}</span>
           )}

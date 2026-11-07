@@ -1,5 +1,5 @@
-// ADR-0050: 결정적 어댑터 동작(매핑·흡수·필터)을 검증하고, leaf 내부 렌더(chat/*)는 스모크 수준만 본다
-//   (react-markdown 등 세부는 leaf 자체 테스트의 몫).
+// ADR-0050: verifies deterministic adapter behavior (mapping · absorption · filtering), and checks the leaf's internal render (chat/*) only at smoke level
+//   (details like react-markdown are the leaf's own tests' job).
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -15,13 +15,13 @@ import {
 import { t } from '../../i18n'
 import { useToolGroupStore } from '../../store/toolGroupStore'
 
-// 도구 묶음 펼침 스토어는 zustand 싱글톤이라 시험 간 격리.
+// The tool bundle expansion store is a zustand singleton, so isolate between tests.
 beforeEach(() => useToolGroupStore.setState({ bySlot: {} }))
 afterEach(() => cleanup())
 
-// (computeRailRunPositions 순수 함수 테스트는 ADR-0053 구조 분할로 ./chat/railPositions.test.ts 로 이사.)
+// (The computeRailRunPositions pure function test moved to ./chat/railPositions.test.ts with the ADR-0053 structural split.)
 
-// ── ADR-0051: rail 연결선 clean-ends 렌더 ──────────────────────────────────────────
+// ── ADR-0051: rail connector clean-ends render ──────────────────────────────────────────
 describe('StructuredTextView rail line clean-ends (ADR-0051)', () => {
   it('단일 assistant 행(single)은 연결선을 그리지 않는다(dot 만)', () => {
     const items: StructuredItem[] = [{ kind: 'text', text: 'solo', itemId: 0 }]
@@ -82,8 +82,8 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     expect(screen.getByText('let me reason')).toBeTruthy()
   })
 
-  // 빈 thinking = 암호화 thinking(opus 는 signature 만 emit). rowKindOf 도 'skip' 으로 동기화해 rail 계산과
-  //   DOM 이 일치(ADR-0051).
+  // Empty thinking = encrypted thinking (opus emits only the signature). rowKindOf is synced to 'skip' too so the rail calculation and
+  //   DOM agree (ADR-0051).
   it('빈 thinking(공백/누락) → 아무 행도 렌더하지 않는다(빈 "Thought" 클러터 제거)', () => {
     const items: StructuredItem[] = [
       { kind: 'structured', label: 'thinking', json: JSON.stringify({ thinking: '   ' }), itemId: 0 },
@@ -153,7 +153,7 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     expect(screen.getByText('boom happened')).toBeTruthy()
   })
 
-  // ── 턴 결말 셋은 화면에서 서로 구별된다(그 구별이 결말 칸의 존재 이유) ──────────────────
+  // ── The three turn outcomes are told apart on screen (that distinction is the outcome field's reason to exist) ──────────────────
   it('outcome=failed → 실패 문구 + 사유(detail) 노출', () => {
     const items: StructuredItem[] = [
       { kind: 'outcome', outcome: 'failed', detail: 'model refused', itemId: 0 },
@@ -180,7 +180,7 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     expect(screen.getByText(t('chat.turnInterrupted'))).toBeTruthy()
     expect(screen.queryByText(t('chat.turnFailed'))).toBeNull()
     expect(container.querySelector('.text-red-500')).toBeNull()
-    // rail 점도 실패 톤이 아니다(error 는 bg-red-500 점을 쓴다).
+    // The rail dot is not a failure tone either (error uses the bg-red-500 dot).
     expect(container.querySelector('.rounded-full.bg-red-500')).toBeNull()
   })
 
@@ -198,12 +198,12 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     expect(new Set(labels).size).toBe(3)
   })
 
-  // ── 모르는 이벤트 표식 — 보이되 프로토콜 낱말은 안 보인다 ─────────────────────────────
+  // ── Unknown event marker — visible, but no protocol word shows ─────────────────────────────
   it('unsupported item → 건수를 담은 고지 한 줄(원본 이름·JSON 없음)', () => {
     const items: StructuredItem[] = [{ kind: 'unsupported', count: 3, itemId: 0 }]
     const { container } = render(<StructuredTextView items={items} />)
     expect(screen.getByText(t('chat.unsupportedEvent', { count: '3' }))).toBeTruthy()
-    // 펼칠 것도 없다 — GenericItemRow(JSON 코드블록)로 새지 않는다.
+    // Nothing to expand either — it does not leak into GenericItemRow (JSON code block).
     expect(container.querySelectorAll('button').length).toBe(0)
     expect(container.querySelector('pre')).toBeNull()
   })
@@ -221,16 +221,16 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     expect(spacer?.className).toContain('h-3')
   })
 
-  // 사용자 결정 2026-10-01: 대기 표시는 목록 밖 입력창 위 줄(RichSlot · `chat/WaitRow.tsx`)의 몫이다.
+  // User decision 2026-10-01: the wait indicator is the job of the row above the input box outside the list (RichSlot · `chat/WaitRow.tsx`).
   it('streaming 이어도 목록 안에 대기 표시를 그리지 않고, 마지막 행이 그쪽으로 레일을 잇지 않는다', () => {
     const items: StructuredItem[] = [{ kind: 'text', text: 'working', itemId: 0 }]
     const { container } = render(<StructuredTextView items={items} streaming />)
     expect(screen.queryByText('Wait')).toBeNull()
     expect(container.querySelector('[data-wait-strip]')).toBeNull()
-    expect(container.querySelector('.w-px.bg-border')).toBeNull() // 한 행 = single — 연결선 없음
+    expect(container.querySelector('.w-px.bg-border')).toBeNull() // One row = single — no connector
   })
 
-  // ── 마지막 행 아래 여백 — 턴 구분선과 같은 높이(h-3) 블록이 정확히 하나 ──────────────────────
+  // ── Margin below the last row — exactly one block of the same height (h-3) as the turn divider ──────────────────────
   const bottomSpacers = (c: HTMLElement) => c.querySelectorAll('[data-chat-bottom-spacer]')
   const lastChildClass = (c: HTMLElement) => (c.firstElementChild as HTMLElement).lastElementChild?.className ?? ''
 
@@ -263,7 +263,7 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     expect(container.querySelectorAll('div[aria-hidden].h-3')).toHaveLength(0)
   })
 
-  // ★턴 끝에 목록 높이가 들썩이지 않는다★ — 여백 블록이 구분선과 자리를 바꿀 뿐, 끝의 h-3 은 하나 그대로다.
+  // ★The list height does not bounce at turn end★ — the margin block just swaps places with the divider, and there is still exactly one h-3 at the end.
   it('턴이 끝나 구분선이 붙어도 끝의 h-3 은 정확히 하나다', () => {
     const reply: StructuredItem = { kind: 'text', text: 'reply', itemId: 0 }
     const { container, rerender } = render(<StructuredTextView items={[reply]} streaming />)
@@ -278,12 +278,12 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     const items: StructuredItem[] = [
       { kind: 'structured', label: 'thinking', json: '{bad json', itemId: 0 },
     ]
-    // extractText 폴백 = raw json → 비어있지 않으므로 ThoughtRow(인터랙티브 "Thought")가 뜬다(throw 없이).
+    // extractText fallback = raw json → not empty, so ThoughtRow (interactive "Thought") shows up (without a throw).
     expect(() => render(<StructuredTextView items={items} />)).not.toThrow()
     expect(screen.getByRole('button', { name: /Thought/ })).toBeTruthy()
   })
 
-  // ── FIX 1: tool_result 흡수는 label 무관 ──────────────────────────────────────────
+  // ── FIX 1: tool_result absorption is label-independent ──────────────────────────────────────────
   it('structured tool_result 가 NON-user label 이어도 독립 렌더하지 않는다(label 무관 흡수 — FIX 1)', () => {
     const items: StructuredItem[] = [
       {
@@ -294,13 +294,13 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
       },
     ]
     const { container } = render(<StructuredTextView items={items} />)
-    // 이전 버그: user 분기 밖 tool_result 가 GenericItemRow 로 standalone 렌더됐다.
+    // Previous bug: a tool_result outside the user branch was rendered standalone as GenericItemRow.
     expect(screen.queryByText('HIDDEN_BODY')).toBeNull()
     expect(screen.queryByRole('button', { name: /mystery/ })).toBeNull()
     expect(container.querySelectorAll('button').length).toBe(0)
   })
 
-  // ── tool id=null: OUT 없이 안전 렌더 ──────────────────────────────────────────────
+  // ── tool id=null: safe render without OUT ──────────────────────────────────────────────
   it('tool item 이 id=null 이면 OUT 블록 없이 name/hint 만 렌더하고 crash 하지 않는다', () => {
     const items: StructuredItem[] = [
       { kind: 'tool', name: 'Glob', argsJson: '{"pattern":"**/*.ts"}', id: null, category: 'Search', resultMark: null, itemId: 0 },
@@ -312,7 +312,7 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     expect(screen.queryByText('Out')).toBeNull()
   })
 
-  // ── 매칭 안 되는 tool_result: standalone 렌더 안 함 ───────────────────────────────
+  // ── unmatched tool_result: not rendered standalone ───────────────────────────────
   it('id 가 어떤 tool 과도 매칭되지 않는 tool_result 는 standalone 렌더하지 않는다', () => {
     const items: StructuredItem[] = [
       { kind: 'tool', name: 'Read', argsJson: '{"path":"a.ts"}', id: 'tu_1', category: 'Read', resultMark: null, itemId: 0 },
@@ -325,11 +325,11 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     ]
     render(<StructuredTextView items={items} />)
     expect(screen.queryByText('ORPHAN_BODY')).toBeNull()
-    // 유일한 button = 매칭 없는 tool 헤더(Read) 하나뿐(고아 tool_result 는 button 을 만들지 않음).
+    // The only button = the single unmatched tool header (Read) (an orphan tool_result makes no button).
     expect(screen.getAllByRole('button').length).toBe(1)
   })
 
-  // ── malformed json 폴백(throw 금지) — tool args + generic json ────────────────────
+  // ── malformed json fallback (no throw) — tool args + generic json ────────────────────
   it('malformed argsJson·generic json 이 와도 폴백 렌더하고 throw 하지 않는다', () => {
     const items: StructuredItem[] = [
       { kind: 'tool', name: 'Bad', argsJson: '{not valid', id: 'tu_2', category: 'Other', resultMark: null, itemId: 0 },
@@ -344,7 +344,7 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     expect(pres.some((p) => p.textContent?.includes('{also bad'))).toBe(true)
   })
 
-  // ── FIX 2: 도구 OUT 의 삼중 백틱은 inert(마크다운 승격 금지) ─────────────────────
+  // ── FIX 2: triple backticks in tool OUT are inert (no markdown promotion) ─────────────────────
   it('도구 OUT 에 삼중 백틱+마크다운이 있어도 inert 하다(heading 등 마크다운 요소 미생성 — FIX 2)', () => {
     const evil = '```\n# NOT_A_HEADING\n[link](http://evil.example)\n```'
     const items: StructuredItem[] = [
@@ -365,7 +365,7 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     expect(pres.some((p) => p.textContent?.includes('[link](http://evil.example)'))).toBe(true)
   })
 
-  // ── ADR-0050: dot-rail 스켈레톤 구조 ───────────────────────────────────────────────
+  // ── ADR-0050: dot-rail skeleton structure ───────────────────────────────────────────────
   it('점선(border-dashed) 레일 대신 dot-rail 골격을 쓴다', () => {
     const items: StructuredItem[] = [
       { kind: 'text', text: 'hi', itemId: 0 },
@@ -373,22 +373,22 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     ]
     const { container } = render(<StructuredTextView items={items} />)
     expect(container.querySelector('.border-dashed')).toBeNull()
-    // rail 행은 ChatRow 래퍼(relative flex px-4)로 감싸진다 — top-padding 은 CSS 변수 inline style(ADR-0051).
+    // A rail row is wrapped in a ChatRow wrapper (relative flex px-4) — top-padding is a CSS variable inline style (ADR-0051).
     expect(container.querySelector('.relative.flex.px-4')).toBeTruthy()
   })
 
   it('assistant-side 행(text)은 좌측 rail gutter + 점 마커를 렌더한다', () => {
     const items: StructuredItem[] = [{ kind: 'text', text: 'hello', itemId: 0 }]
     const { container } = render(<StructuredTextView items={items} />)
-    // rail 모드 래퍼는 flex 행(relative flex px-4) — top-padding 은 CSS 변수 inline style(ADR-0051).
+    // The rail-mode wrapper is a flex row (relative flex px-4) — top-padding is a CSS variable inline style (ADR-0051).
     const row = container.querySelector('.relative.flex.px-4')
     expect(row).toBeTruthy()
     expect(row?.className).toContain('flex')
     const dot = container.querySelector('.rounded-full.bg-muted')
     expect(dot).toBeTruthy()
-    // 콘텐츠 컬럼은 flex-1 min-w-0(긴 토큰 오버플로 방지).
+    // The content column is flex-1 min-w-0 (prevents long-token overflow).
     expect(container.querySelector('.flex-1.min-w-0')).toBeTruthy()
-    // ※연결선(w-px bg-border)은 run 길이에 따라 조건부다(single=없음) — 별도 clean-ends 테스트 참조.
+    // ※ The connector (w-px bg-border) is conditional on run length (single = none) — see the separate clean-ends test.
   })
 
   it('rail 점 색 = 행 종류: tool 은 초록(bg-green-500), 추론/본문은 muted', () => {
@@ -408,7 +408,7 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     const { container } = render(<StructuredTextView items={items} />)
     expect(container.querySelector('.rounded-full.bg-muted')).toBeNull()
     expect(container.querySelector('.flex-1.min-w-0')).toBeNull()
-    // outer 래퍼는 여전히 relative px-4(flex 아님) — top-padding 은 CSS 변수 inline style(ADR-0051).
+    // The outer wrapper is still relative px-4 (not flex) — top-padding is a CSS variable inline style (ADR-0051).
     const row = container.querySelector('.relative.px-4')
     expect(row).toBeTruthy()
     expect(row?.className).not.toContain('flex')
@@ -420,7 +420,7 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     ]
     const { container } = render(<StructuredTextView items={items} />)
     const bubble = screen.getByText('do the thing')
-    // bg-elevated = 다크에서 페이지보다 한 단계 밝은 배경(가시성).
+    // bg-elevated = a background one step brighter than the page in dark (visibility).
     expect(bubble.className).toContain('rounded-[0.75rem]')
     expect(bubble.className).toContain('border')
     expect(bubble.className).toContain('bg-elevated')
@@ -440,7 +440,7 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
   })
 })
 
-// ── ADR-0239 · ADR-0241: 도구 묶음 · 끝 표식 (TRD S21-chat-ux §4-6 · §4-7 ⑨ 프론트) ──────────────
+// ── ADR-0239 · ADR-0241: tool bundle · end marker (TRD S21-chat-ux §4-6 · §4-7 ⑨ frontend) ──────────────
 
 let nextToolItemId = 1000
 function toolItem(
@@ -460,7 +460,7 @@ function toolItem(
     ...extra,
   }
 }
-/** claude 가 결과 본문을 싣는 운반 행 — 그리지 않는다(skip). */
+/** A carrier row on which claude puts the result body — not drawn (skip). */
 function resultCarrier(toolUseId: string, isError: boolean): StructuredItem {
   return {
     kind: 'structured',
@@ -515,7 +515,7 @@ describe('StructuredTextView 도구 묶음 (ADR-0239)', () => {
     expect(groupHeader(g).textContent).toBe(
       summary(t('chat.toolGroupSearch', { count: '1' }), t('chat.toolGroupRead', { count: '1' })),
     )
-    // 접힌 묶음은 멤버 행을 그리지 않는다.
+    // A collapsed bundle does not draw its member rows.
     expect(screen.queryByRole('button', { name: 'Read' })).toBeNull()
   })
 
@@ -534,7 +534,7 @@ describe('StructuredTextView 도구 묶음 (ADR-0239)', () => {
       textItem('after'),
     ]
     const { container } = render(<StructuredTextView items={items} />)
-    // 글 · 묶음 · 글 = 세 행 — 셋이 이어져 연결선도 셋(top · mid · bottom).
+    // text · bundle · text = three rows — the three connect, so there are three connectors too (top · mid · bottom).
     expect(railRows(container)).toBe(3)
     expect(railDots(container)).toBe(3)
     expect(container.querySelectorAll('.w-px.bg-border').length).toBe(3)
@@ -569,7 +569,7 @@ describe('StructuredTextView 도구 묶음 (ADR-0239)', () => {
     expect(railDots(container)).toBe(3)
   })
 
-  // ADR-0263 결정 1: 도는 묶음은 통째로 펼치지 않는다 — 머리(진행형) + 지금 도는 마지막 호출 한 줄, 끝나면 머리만(과거형).
+  // ADR-0263 decision 1: a running bundle is not expanded whole — head (progressive) + the last call running now as one line, and when done just the head (past tense).
   const readCall = (id: string) => toolItem('Read', id, 'Read', { argsJson: JSON.stringify({ path: `${id}.ts` }) })
   const shownHints = () => screen.queryAllByText(/^r\d\.ts$/).map((el) => el.textContent)
 
@@ -586,7 +586,7 @@ describe('StructuredTextView 도구 묶음 (ADR-0239)', () => {
 
     const more = [...calls, thoughtItem('hmm'), readCall('r3')]
     rerender(<StructuredTextView items={more} streaming />)
-    expect(groups(container)[0]).toBe(g) // 같은 노드에서 수만 는다
+    expect(groups(container)[0]).toBe(g) // Only the count grows on the same node
     expect(groupHeader(g)).toBe(head)
     expect(g.getAttribute('data-tool-group-count')).toBe('3')
     expect(g.getAttribute('data-tool-group-open')).toBe('0')
@@ -622,7 +622,7 @@ describe('StructuredTextView 도구 묶음 (ADR-0239)', () => {
 
     fireEvent.click(groupHeader(groups(container)[0]))
     expect(groups(container)[0].getAttribute('data-tool-group-open')).toBe('0')
-    expect(shownHints()).toEqual([]) // 도는 중이어도 고른 접힘은 마지막 호출 줄까지 걷는다
+    expect(shownHints()).toEqual([]) // Even while running, a chosen collapse also takes away the last call line
     fireEvent.click(groupHeader(groups(container)[0]))
 
     const ended = [...more, textItem('answer')]
@@ -716,7 +716,7 @@ describe('StructuredTextView 도구 끝 표식 (ADR-0241)', () => {
     expect(badge.style.borderColor).toBe('var(--status-blocked)')
     expect(screen.queryByText('Error')).toBeNull()
     expect(container.querySelector('.text-red-500, .border-red-500, .border-red-500\\/60')).toBeNull()
-    // 머리(도구 이름)는 기본 톤이다.
+    // The head (tool name) is the default tone.
     expect(screen.getByText('commandExecution').className).toContain('text-foreground')
 
     const row = container.querySelector('[data-tool-mark]') as HTMLElement
@@ -804,8 +804,8 @@ describe('StructuredTextView 도구 끝 표식 (ADR-0241)', () => {
     expect([railRows(marked.container), railDots(marked.container)]).toEqual(plainCounts)
   })
 
-  // ★TRD §11 ⑪ · §4-7 ⑨ ⓐ 고정★: 끊긴 턴의 도구 실패는 그대로 붉은 「오류」로 보이고, 바로 아래 강조된 「중단됨」
-  //   행이 맥락을 준다 — 끊긴 턴 안의 실패를 따로 가르지 않는다.
+  // ★TRD §11 ⑪ · §4-7 ⑨ ⓐ pinned★: a tool failure in an interrupted turn shows as it is as a red 「오류」 (error), and the emphasized 「중단됨」 (interrupted)
+  //   row right below gives the context — failures inside an interrupted turn are not separated out.
   it('ⓐ claude(합성 줄 없는 경우) — 끊긴 턴 도구의 tool_result is_error → 붉은 「Error」 · 머리 「오류 1」 · 아래에 중단 행', () => {
     useToolGroupStore.getState().bind('s1', 'agent-1')
     const items: StructuredItem[] = [
@@ -832,7 +832,7 @@ describe('StructuredTextView 도구 끝 표식 (ADR-0241)', () => {
     expect(g.compareDocumentPosition(outcome) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
-  // ADR-0243: claude 의 실제 모양 — 죽은 도구의 is_error 결과 뒤에 합성 끊김 줄이 오고, 결말 행은 없다.
+  // ADR-0243: the real shape of claude — a synthetic interruption line comes after the dead tool's is_error result, and there is no outcome row.
   it('ⓐ claude — 끊긴 도구 is_error → 붉은 「Error」 · 머리 「오류 1」 · 아래에 끊김 표시 행 · 중단 결말 행 없음', () => {
     const acc = new StructuredEventAccumulator()
     const feed = (ev: unknown) => acc.feed(new TextEncoder().encode(JSON.stringify(ev as StructuredEvent)))
@@ -933,7 +933,7 @@ describe('StructuredTextView 도구 끝 표식 (ADR-0241)', () => {
   })
 })
 
-// ── ADR-0237 U8: 중단 행 강조 ────────────────────────────────────────────────────────────
+// ── ADR-0237 U8: interrupt row emphasis ────────────────────────────────────────────────────────────
 describe('StructuredTextView 결말 행 톤 (ADR-0237 U8)', () => {
   const titleOf = (outcome: 'failed' | 'interrupted' | 'unknown', text: string) => {
     render(<StructuredTextView items={[{ kind: 'outcome', outcome, detail: null, itemId: 0 }]} />)
@@ -964,7 +964,7 @@ describe('StructuredTextView 결말 행 톤 (ADR-0237 U8)', () => {
   })
 })
 
-// ── ADR-0243: claude 끊김 표시 행 ───────────────────────────────────────────────────────
+// ── ADR-0243: claude interruption display row ───────────────────────────────────────────────────────
 describe('StructuredTextView 끊김 표시 행 (ADR-0243)', () => {
   const noteItem = (text: string): StructuredItem => ({ kind: 'interruptNote', text, itemId: nextToolItemId++ })
 
@@ -1009,7 +1009,7 @@ describe('StructuredTextView 끊김 표시 행 (ADR-0243)', () => {
     ]
     const { container } = render(<StructuredTextView items={items} />)
     expect(groups(container)).toHaveLength(2)
-    // 묶음 · 표시 행 · 묶음 = 세 행.
+    // bundle · display row · bundle = three rows.
     expect(railRows(container)).toBe(3)
     expect(railDots(container)).toBe(3)
   })

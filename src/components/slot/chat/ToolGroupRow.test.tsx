@@ -1,5 +1,5 @@
-// 도구 묶음 한 줄 시험 — 요약 머리(시제 포함) · 펼침 상태(기본 접힘 · 스토어 · command 경로) · 펼침 알림(ADR-0239 · ADR-0241 ·
-//   TRD S21-chat-ux §4-3 · §4-4 · §4-5). 멤버 행 모양은 `StructuredTextView.test.tsx` 가 본다 — 여기서는 멤버를 표지로만 그린다.
+// Tool bundle one-line test — summary head (including tense) · expansion state (default collapsed · store · command path) · expansion notification (ADR-0239 · ADR-0241 ·
+//   TRD S21-chat-ux §4-3 · §4-4 · §4-5). Member row shapes are checked by `StructuredTextView.test.tsx` — here members are drawn only as markers.
 
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -78,7 +78,7 @@ describe('ToolGroupRow — 요약 머리', () => {
     )
   })
 
-  // ADR-0263 (ADR-0239 결정 4 개정): 도는 동안 진행형 · 끝나면 그 표시가 빠져 종류별 수만 남는다(과거형).
+  // ADR-0263 (amendment of ADR-0239 decision 4): progressive while running · when done that indicator drops and only the per-kind count remains (past tense).
   it('live 면 요약 뒤에 진행형 표시가 붙고, 끝나면 빠진다 — 그 사이 수는 제자리에서 자란다', () => {
     const [a, b, c] = [tool('a'), tool('b'), tool('c')]
     const { container, rerender } = renderRow(group([a, b], true))
@@ -101,7 +101,7 @@ describe('ToolGroupRow — 펼침', () => {
   const shownIds = (c: HTMLElement) =>
     Array.from(c.querySelectorAll('[data-member]')).map((el) => el.getAttribute('data-member'))
 
-  // ADR-0263 결정 1(사용자 결정 2026-10-01): 도는 동안 머리 + 마지막 호출 한 줄 · 끝나면 머리만.
+  // ADR-0263 decision 1 (user decision 2026-10-01): while running head + the last call as one line · when done head only.
   it('고른 값이 없으면 도는 동안 마지막 호출 한 줄만 · 호출이 늘면 그 줄이 새 마지막으로 바뀐다 · 끝나면 머리만', () => {
     const [a, b, c] = [tool('a'), tool('b'), tool('c')]
     const { container, rerender } = renderRow(group([a, b], true))
@@ -154,10 +154,10 @@ describe('ToolGroupRow — 펼침', () => {
     expect(memberCount(container)).toBe(2)
     fireEvent.click(header())
     expect(useToolGroupStore.getState().bySlot['s1'].open).toEqual({ [row.key]: false })
-    expect(memberCount(container)).toBe(0) // 도는 중이어도 고른 접힘은 마지막 호출 줄까지 걷는다
+    expect(memberCount(container)).toBe(0) // Even while running, a chosen collapse also takes away the last call line
     fireEvent.click(header())
 
-    // 턴이 끝나도 사람이 펼친 묶음은 펼친 채다 — 접으면 접힌 값이 적힌다.
+    // A bundle a human expanded stays expanded even when the turn ends — if collapsed, the collapsed value is recorded.
     rerender(
       <ToolGroupRow row={group(calls, false)} vendorErrorIds={new Set()} runPos="single" isLast renderMember={member} slotId="s1" />,
     )

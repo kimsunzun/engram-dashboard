@@ -97,9 +97,9 @@ describe('filterMonitoringCandidates — 실행중 ∩ 검색어', () => {
     expect(filterMonitoringCandidates(list, [], '').map(c => c.id)).toEqual(['z', 'a'])
   })
 
-  // ADR-0061: 표시명은 트리(mergeTreeNodes)와 동일하게 프로필에서 파생한다.
+  // ADR-0061: the display name is derived from the profile the same as the tree (mergeTreeNodes).
   it('프로필의 display_name 이 있으면 그 이름을 쓴다(cwd basename 아님)', () => {
-    // rename 시나리오.
+    // rename scenario.
     const list = [agent('a', 'C:/repos/Filter Library')]
     const profiles = [profile('a', { display_name: 'ABC', name: 'orig', cwd: 'C:/repos/Filter Library' })]
     expect(filterMonitoringCandidates(list, profiles, '').map(c => c.name)).toEqual(['ABC'])
@@ -108,10 +108,10 @@ describe('filterMonitoringCandidates — 실행중 ∩ 검색어', () => {
 
   it('display_name 이 없으면 cwd basename 폴백(profile.name 은 cwd 문자열이라 미사용 — 트리와 동일)', () => {
     const list = [
-      agent('a', 'C:/work/alpha'), // 프로필 있으나 display_name=null
-      agent('b', 'C:/work/beta'), // 매칭 프로필 없는 ad-hoc
+      agent('a', 'C:/work/alpha'), // Has a profile but display_name=null
+      agent('b', 'C:/work/beta'), // ad-hoc with no matching profile
     ]
-    // profile.name 을 일부러 cwd 전체 경로로 둔다 — 실제 createClaudeProfile 동작.
+    // profile.name is deliberately set to the full cwd path — the real createClaudeProfile behavior.
     const profiles = [profile('a', { display_name: null, name: 'C:/work/alpha', cwd: 'C:/work/alpha' })]
     expect(filterMonitoringCandidates(list, profiles, '').map(c => c.name)).toEqual(['alpha', 'beta'])
   })

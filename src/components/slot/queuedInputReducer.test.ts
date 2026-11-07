@@ -1,4 +1,4 @@
-// ADR-0231: TS 환원기가 agent 환원기와 **같은 골든 파일**을 먹는다 — 두 판이 갈라지면 한쪽이 빨개진다.
+// ADR-0231: the TS reducer eats the **same golden file** as the agent reducer — if the two editions diverge one side goes red.
 import { describe, expect, it } from 'vitest'
 
 import type { QueuedInputEvent } from '../../../crates/engram-dashboard-protocol/bindings/QueuedInputEvent'
@@ -99,7 +99,7 @@ describe('queuedInputReducer — 이 판만의 표면', () => {
     expect(registry.tombstoneCount()).toBe(0)
   })
 
-  // ADR-0231: 머리 점프로 닫힘 사건을 잃은 항목 — 결말을 모르니 원인 모름과 같은 되살림 가능 묘비다.
+  // ADR-0231: an item that lost its close event to a head jump — its outcome is unknown, so it is a revivable tombstone, the same as unknown cause.
   it('adoptSnapshot: 스냅숏에도 뒤의 Queued 에도 없는 열린 항목은 되살림 가능 묘비로 접는다', () => {
     const registry = new QueuedInputRegistry()
     registry.reduce({ kind: 'Queued', id: 'gone', text: 'G' })
@@ -110,7 +110,7 @@ describe('queuedInputReducer — 이 판만의 표면', () => {
     expect(registry.tombstone('gone')).toBe(true)
     expect(registry.tombstone('listed')).toBeUndefined()
     expect(registry.tombstone('fresh')).toBeUndefined()
-    // 되살림: 뒤늦은 벤더 받음은 결말을 받음으로 고쳐 읽는다.
+    // Revival: a belated vendor receipt re-reads the outcome as receipt.
     expect(registry.reduce({ kind: 'Delivered', id: 'gone' })).toEqual([
       { id: 'gone', verdict: { kind: 'Delivered' } },
     ])

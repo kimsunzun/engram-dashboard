@@ -1,4 +1,4 @@
-// 「맨 아래로」 버튼 — U3(바닥이 아니면 늘 · 스크롤할 것이 있을 때만 · 150 ms 늦춤) 시험(ADR-0242 · TRD §2-4).
+// 「맨 아래로」 (jump to bottom) button — U3 (always when not at the bottom · only when there is something to scroll · delayed 150 ms) test (ADR-0242 · TRD §2-4).
 
 import { act, cleanup, fireEvent, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -77,7 +77,7 @@ describe('JumpToBottom', () => {
     expect(f.pin).toHaveBeenCalledTimes(1)
   })
 
-  // ADR-0237: 누르면 이 버튼이 사라진다 — 포커스가 문서로 떨어지면 그 칸의 Esc 가 칸 루트에 닿지 않는다.
+  // ADR-0237: pressing makes this button vanish — if focus drops to the document, that area's Esc does not reach the area root.
   it('누르면 버튼이 쥔 포커스가 둘러싼 뷰포트(tabindex -1)로 옮겨 간다', () => {
     const { getByTestId } = render(
       <div data-testid="viewport" tabIndex={-1}>

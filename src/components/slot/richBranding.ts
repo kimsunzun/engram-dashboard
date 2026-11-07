@@ -1,14 +1,14 @@
-// RichSlot 백엔드 표기 — 제목·표식·색조를 **한 판정**에서 낸다(statusGlyph.ts 와 같은 결: 순수 매핑만
-//   두고 JSX·스타일값은 그리는 쪽이 소유한다).
+// RichSlot backend notation — title · marker · color tone come out of **one decision** (the same grain as statusGlyph.ts: only the pure mapping is
+//   kept, and JSX · style values are owned by the drawing side).
 //
-// ★왜 필요한가★: 리치(구조화) 모드는 claude 와 codex 를 똑같이 그려서, 화면만 보고는 누구와 말하는지 알
-//   수 없었다. 여기서 가르는 것은 **무엇을 그리느냐(렌더러)** 가 아니라 **누구와 말하느냐(표기)** 다 —
-//   렌더러 선택은 여전히 `capabilities.output.structured` 한 칸이 가른다(`api/types.ts` AgentBackendKind 주석).
+// ★Why it is needed★: rich (structured) mode drew claude and codex identically, so from the screen alone you could not tell
+//   who you were talking to. What is told apart here is not **what to draw (renderer)** but **who you talk to (notation)** —
+//   renderer selection is still decided by the single field `capabilities.output.structured` (`api/types.ts` AgentBackendKind comment).
 //
-// ★제어 표면을 늘리지 않는다★: 제목·표식·색조는 프로필(`command.kind`)에서 파생되는 표시값이라 사람이 고를
-//   설정도, 화면 상태도, 개별 command 도 두지 않는다 — 바꾸는 길은 프로필 자체이고 그 길은 이미 있다
-//   (CLAUDE.md 「LLM-우선 제어」 — 기존 표면에 얹는다). 옛 근거 ADR-0167 결정 1(표시 상태 = 「데이터 + 다시
-//   읽기」)은 ADR-0265 가 폐기했다. 대신 아래 `brand` 토큰이 DOM 에 나가 자동화가 읽는다.
+// ★No control surface is added★: title · marker · tone are display values derived from the profile (`command.kind`), so there is no setting for a person to choose,
+//   no screen state, no separate command — the way to change it is the profile itself and that way already exists
+//   (CLAUDE.md 「LLM-우선 제어」 — put on the existing surface). The old basis ADR-0167 decision 1 (display state = 「데이터 + 다시
+//   읽기」) (data + re-read) was discarded by ADR-0265. Instead the `brand` token below goes out to the DOM for automation to read.
 
 import type { ComponentType } from 'react'
 
@@ -17,28 +17,28 @@ import { ClaudeMascot } from './ClaudeMascot'
 import { CodexMascot } from './CodexMascot'
 
 /**
- * DOM 관측 표면(테스트·CDP·LLM 셀렉터)에 나가는 안정 토큰. 표식은 svg 라 글자를 남기지 않고, 대화가
- * 시작되면 제목·표식이 모두 접히므로(ADR-0145 빈 상태) 이 토큰이 유일한 관측 근거다.
+ * A stable token that goes out to the DOM observation surface (tests · CDP · LLM selectors). The marker is an svg so it leaves no text, and when a conversation
+ * starts the title and marker both fold (ADR-0145 empty state), so this token is the only basis for observation.
  *
- * ★기존 토큰을 지우거나 이름을 바꾸지 말 것★(statusGlyph 의 `shape` 와 같은 규율) — 셀렉터가 걸려 있어
- *   개명은 조용한 파괴다. **늘리는 것만 안전하다.**
- * ★wire `AgentBackendKind` 와 글자가 같지만 다른 것이다★ — 저쪽은 스폰 패킷이 고르는 백엔드고, 이쪽은
- *   화면 표기 토큰이다. 값을 서로 대입하지 말 것(판정은 아래 `command.kind` 가 한다).
+ * ★Do not delete or rename an existing token★ (the same discipline as `shape` of statusGlyph) — selectors hang on it so
+ *   renaming is silent destruction. **Only growing is safe.**
+ * ★It is spelled the same as wire `AgentBackendKind` but is a different thing★ — that one is the backend the spawn packet picks, and this one is
+ *   a screen notation token. Do not assign values between them (the decision is made by `command.kind` below).
  */
 export type RichBrand = 'claude' | 'codex'
 
 export interface RichBranding {
   brand: RichBrand
   /**
-   * 빈 상태 제목. ★번역 대상이 아니다★ — 제품명이라 그대로 쓴다(ADR-0145 가 "Claude Code" 를 i18n 밖에
-   * 둔 그 규율).
+   * Empty-state title. ★Not a translation target★ — it is a product name so it is used as is (the same discipline by which ADR-0145 put "Claude Code" outside
+   * i18n).
    */
   title: string
-  /** 빈 상태 표식 컴포넌트. 형태·색은 각 표식 파일이 소유한다. */
+  /** Empty-state marker component. Shape and color are owned by each marker file. */
   Mascot: ComponentType
   /**
-   * 패널 색조 클래스(정의처 = `richBranding.css`). `''` = 색조 없음.
-   * ★루트에만 건다★ — `:root` 를 고치면 세 테마·모든 슬롯·터미널까지 함께 물든다.
+   * Panel tone class (defined in `richBranding.css`). `''` = no tone.
+   * ★Applied to the root only★ — editing `:root` would tint all three themes · every slot · even the terminal.
    */
   tintClass: string
 }
@@ -47,26 +47,26 @@ const CLAUDE: RichBranding = {
   brand: 'claude',
   title: 'Claude Code',
   Mascot: ClaudeMascot,
-  // 색조 없음 = 지금까지의 모습 그대로. 여기에 claude 색조를 더하면 기존 화면이 전부 바뀐다.
+  // No tone = the look as it is until now. Adding a claude tone here changes every existing screen.
   tintClass: '',
 }
 
 const CODEX: RichBranding = {
   brand: 'codex',
-  // 제품명은 "Codex" 다 — 표면 이름("Codex CLI")을 쓰지 않는 이유는 같은 백엔드가 대화형 TUI 와 상주
-  //   JSON 서버(codex app-server) 두 모양으로 뜨기 때문이다(`agentClient.createCodexProfile`).
+  // The product name is "Codex" — the reason the surface name ("Codex CLI") is not used is that the same backend comes up in two shapes, an interactive TUI and a resident
+  //   JSON server (codex app-server) (`agentClient.createCodexProfile`).
   title: 'Codex',
   Mascot: CodexMascot,
   tintClass: 'rich-tint-codex',
 }
 
 /**
- * 프로필의 실행 명령 종류 → 표기.
+ * Kind of the profile's run command → notation.
  *
- * ★모르면 claude 다(회귀 없는 기본값)★: 프로필이 없는 경로는 실재한다(ad-hoc 세션 · 프로필을 안 채우는
- * 단위테스트 mock — `RichSlot` 의 `profiles?.` 주석). 그 자리를 「알 수 없음」 같은 중립 표기로 바꾸면
- * **지금 claude 로 보이던 모든 패널의 표기가 함께 갈린다** — 알아낸 것이 없는데 화면만 바뀌는 쪽이 더
- * 나쁘다. 그래서 갈라지는 것은 codex 로 **확인된** 경우 하나뿐이다.
+ * ★If unknown, claude (a regression-free default)★: paths with no profile really exist (ad-hoc sessions · unit test mocks that do not fill the
+ * profile — see the `profiles?.` comment in `RichSlot`). Changing that place to a neutral notation like 「알 수 없음」 (unknown) would
+ * **change the notation of every panel that looks like claude now** — a screen that changes with nothing learned is
+ * worse. So the only thing that splits is the single case **confirmed** as codex.
  */
 export function richBranding(kind: AgentCommand['kind'] | null | undefined): RichBranding {
   return kind === 'Codex' ? CODEX : CLAUDE

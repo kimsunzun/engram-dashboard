@@ -1,8 +1,8 @@
-// ADR-0050: 구조화 채팅 렌더 dispatch. 벤치마크 룩 = Claude Code VSCode 확장(1차 근사치, 사용자가
-//   스크린샷으로 후속 조정). 이전 라운드에서 도입했던 외부(Apache-2.0) 이식물은 전부 제거하고 자체
-//   구현으로 대체했다.
+// ADR-0050: structured chat render dispatch. Benchmark look = the Claude Code VSCode extension (first approximation, the user
+//   adjusts afterward from screenshots). All external (Apache-2.0) ports introduced in an earlier round were removed and replaced with
+//   our own implementation.
 //
-// ★이 파일의 책임★: **순수 렌더** — 구독/누적은 RichSlot 소관.
+// ★This file's responsibility★: **pure render** — subscription/accumulation is RichSlot's concern.
 
 import { useState, type ComponentType, type ReactNode } from 'react'
 import {
@@ -39,7 +39,7 @@ import {
 } from './structuredAccumulator'
 import { Markdown } from './chat/Markdown'
 import { ThoughtRow } from './chat/ThoughtRow'
-// ADR-0053 구조 분할: 이 파일은 dispatch 오케스트레이터로만 남긴다(순수 로직 ↔ 컴포넌트 경계).
+// ADR-0053 structural split: this file is left only as the dispatch orchestrator (the boundary between pure logic ↔ components).
 import { ChatRow } from './chat/ChatRow'
 import {
   computeRailRunPositions,
@@ -55,7 +55,7 @@ import {
   vendorErrorIdsOf,
 } from './chat/toolRuns'
 
-// ── 안전 파서 헬퍼(절대 throw 금지 — bad json 폴백) ────────────────────────────────
+// ── Safe parser helpers (never throw — bad json fallback) ────────────────────────────────
 
 function pretty(json: string): string {
   try {
@@ -85,7 +85,7 @@ function extractText(json: string, mode: 'thinking' | 'user'): string {
   }
 }
 
-/** Anthropic content 블록(문자열 | 블록 배열) 스키마에 맞춘 추출. */
+/** Extraction matched to the Anthropic content block (string | block array) schema. */
 function contentToText(content: unknown): string {
   if (typeof content === 'string') return content
   if (Array.isArray(content)) {
@@ -127,8 +127,8 @@ function parseToolResult(json: string): { toolUseId: string; result: ToolResult 
 }
 
 /**
- * 같은 tool_use_id 가 중복되면 last-write-wins(Map.set) — tool_use id 는 Anthropic 이 고유 보장하고
- * 상류(누산기)가 seq dedup 하므로 실전 중복은 없다. 있어도 마지막 결과로 덮는 것이 안전한 폴백.
+ * If the same tool_use_id is duplicated, last-write-wins (Map.set) — Anthropic guarantees tool_use ids are unique
+ * and upstream (the accumulator) does seq dedup, so there are no real duplicates. Even if there were, overwriting with the last result is a safe fallback.
  */
 function buildToolResultMap(items: StructuredItem[]): Map<string, ToolResult> {
   const map = new Map<string, ToolResult>()
@@ -157,7 +157,7 @@ function shortArgs(argsJson: string): string {
   }
 }
 
-// ── 채팅 룩 프리미티브 ────────────────────────────────────────────────────────────
+// ── Chat look primitives ────────────────────────────────────────────────────────────
 
 const HEADER_CLASSNAMES = 'flex items-center gap-2.5 mb-3'
 
@@ -174,14 +174,14 @@ const CATEGORY_ICON: Record<Exclude<ToolCategory, 'Other'>, LucideIcon> = {
   Mcp: Plug,
 }
 
-// ADR-0239: 종류를 모르면(`'Other'` — 옛 데몬도 여기 든다) 이름 휴리스틱으로 — 옛 데몬에서 오늘 모습 그대로다.
+// ADR-0239: if the kind is unknown (`'Other'` — an old daemon falls in here too), use the name heuristic — it looks exactly as today on an old daemon.
 function toolIconOf(category: ToolCategory, name: string): LucideIcon {
-  // 거르기는 타입 밖 낱말(캐스트로 든 항목)이 `undefined` 컴포넌트로 렌더를 깨뜨리지 않게 하려는 것이다.
+  // The filtering is so that a word outside the type (an item that got in by cast) does not break the render with an `undefined` component.
   const known = normalizeToolCategory(category)
   return known === 'Other' ? toolIconFor(name) : CATEGORY_ICON[known]
 }
 
-/** 도구 이름만 보고 고르는 아이콘 — 종류(`category`)가 `'Other'` 일 때만 쓴다. */
+/** Icon chosen by tool name alone — used only when the kind (`category`) is `'Other'`. */
 function toolIconFor(name: string): LucideIcon {
   const n = name.toLowerCase()
   if (n.includes('multiedit') || n.includes('edit') || n.includes('write') || n.includes('replace'))
@@ -200,7 +200,7 @@ function toolIconFor(name: string): LucideIcon {
   return Wrench
 }
 
-/** 아이콘은 size-3.5(≈14px)로 우리 폰트 스케일에 맞춘다. */
+/** Icons are size-3.5 (≈14px) to match our font scale. */
 function RowHeader({
   icon: Icon,
   title,
@@ -220,14 +220,14 @@ function RowHeader({
   )
 }
 
-// ── 어댑터 행 ──────────────────────────────────────────────────────────
+// ── Adapter rows ──────────────────────────────────────────────────────────
 
 /**
- * ★FIX 2 (fenced-code escape 방어)★: 도구 IN(args)/OUT(result)·탈출구 json 은 신뢰할 수 없는 텍스트다.
- *   이 콘텐츠를 마크다운 렌더러에 먹이면 내용에 삼중 백틱(```) 줄이 있을 때 펜스가 조기 종료돼 나머지가
- *   마크다운으로 파싱된다(활성 링크/이미지·heading 주입). 그래서 이 콘텐츠는 마크다운을 **절대 태우지 않고**
- *   리터럴 <pre><code> 로만 그린다 — React 텍스트 자식은 자동 이스케이프되므로 삼중 백틱·`# heading` 이
- *   있어도 태그로 승격되지 않는다(inert). 전체 마크다운은 assistant text(Markdown) 에만 허용.
+ * ★FIX 2 (fenced-code escape defense)★: tool IN(args)/OUT(result) and the escape-hatch json are untrusted text.
+ *   Feeding this content to a markdown renderer ends the fence early if the content has a triple-backtick (```) line, and the rest
+ *   is parsed as markdown (active link/image · heading injection). So this content is **never put through markdown**
+ *   and is drawn only as a literal <pre><code> — React text children are auto-escaped, so even with triple backticks or `# heading`
+ *   they are not promoted to tags (inert). Full markdown is allowed only for assistant text (Markdown).
  */
 function InertCode({ code }: { code: string }) {
   return (
@@ -237,14 +237,14 @@ function InertCode({ code }: { code: string }) {
   )
 }
 
-// ADR-0241: 거부 행의 주황 경고 토큰 — 새 토큰을 짓지 않는다(e-ink 무력화가 이미 들어 있다 · ADR-0173).
+// ADR-0241: the orange warning token of a decline row — we do not make a new token (e-ink neutralization is already in it · ADR-0173).
 const DECLINED_COLOR = 'var(--status-blocked)'
 const DECLINED_BOX_BORDER = 'color-mix(in srgb, var(--status-blocked) 60%, transparent)'
 
 /**
- * 줄 뿌리의 `data-tool-mark` — 누산기 표식에서 곧바로 온다(판정 `toolCallVerdict` 가 아니다): claude 의 벤더 오류
- * 본문은 표식이 아니라 속성이 없다. 우리 거절(`refused`)도 `"declined"` 이고 출처는 사유 줄의 `data-tool-declined-reason`
- * 이 가른다(ADR-0241).
+ * `data-tool-mark` on the line root — comes straight from the accumulator marker (not from the decision `toolCallVerdict`): claude's vendor error
+ * body is not a marker and has no attribute. Our refusal (`refused`) is also `"declined"` and the source is told apart by
+ * `data-tool-declined-reason` on the reason line (ADR-0241).
  */
 function toolMarkAttr(mark: ToolResultMark | null): 'failed' | 'declined' | undefined {
   if (mark === 'failed') return 'failed'
@@ -253,7 +253,7 @@ function toolMarkAttr(mark: ToolResultMark | null): 'failed' | 'declined' | unde
 }
 
 /**
- * IN/OUT 은 신뢰할 수 없는 텍스트이므로 InertCode(리터럴 <pre>)로만 렌더 — 마크다운 파싱 금지(FIX 2).
+ * IN/OUT is untrusted text, so it is rendered only with InertCode (a literal <pre>) — no markdown parsing (FIX 2).
  */
 function ToolItemRow({
   name,
@@ -270,7 +270,7 @@ function ToolItemRow({
 }) {
   const [open, setOpen] = useState(false)
   const hint = shortArgs(argsJson)
-  // ADR-0241: 배지는 묶음 요약과 같은 판정이다 — 두 곳이 따로 가르면 머리의 「오류 N」과 펼친 배지가 어긋난다.
+  // ADR-0241: the badge is the same decision as the bundle summary — if two places split separately, the head's 「오류 N」 (N errors) and the expanded badge diverge.
   const verdict = toolCallVerdict(mark, result?.isError === true, DECLINED_MARK)
   const isErr = verdict === 'error'
   const isDeclined = verdict === 'declined'
@@ -278,7 +278,7 @@ function ToolItemRow({
   const Icon = toolIconOf(category, name)
   return (
     <div data-tool-mark={toolMarkAttr(mark)}>
-      {/* ADR-0241: 거부 행의 머리는 기본 톤이다 — 실행되지 않은 호출을 붉게 칠하지 않는다. */}
+      {/* ADR-0241: the head of a decline row is the default tone — a call that did not run is not painted red. */}
       <RowHeader icon={Icon} title={name} tone={isErr ? 'error' : 'default'} />
       <div
         className={cn(
@@ -287,8 +287,8 @@ function ToolItemRow({
         )}
         style={isDeclined ? { borderColor: DECLINED_BOX_BORDER } : undefined}
       >
-        {/* aria-label 에 도구명을 실어 접근성 이름을 헤더와 일치시킨다(sub-header 텍스트는 인자 힌트라
-            도구명이 없으므로, 스크린리더/테스트가 "어느 도구의 세부인지" 식별하게 name 을 명시). */}
+        {/* Puts the tool name in aria-label to make the accessible name match the header (the sub-header text is an argument hint and
+            has no tool name, so name is stated explicitly so screen readers/tests can identify "which tool's detail this is"). */}
         <button
           type="button"
           onClick={() => setOpen((o) => !o)}
@@ -321,7 +321,7 @@ function ToolItemRow({
           )}
         </button>
         {reasonKey !== null && (
-          // ADR-0241: 사유 줄은 이 줄 상자 안이다 — 새 항목도 레일 행도 아니다(ADR-0051) · 세부를 접어도 보인다.
+          // ADR-0241: the reason line is inside this line's box — it is neither a new item nor a rail row (ADR-0051) · it shows even if the detail is collapsed.
           <div data-tool-declined-reason={reasonKey} className="px-2.5 pb-2 text-xs text-muted">
             {t(reasonKey)}
           </div>
@@ -353,15 +353,15 @@ function ToolItemRow({
 }
 
 /**
- * 턴 결말 표식 — 실패/중단/모름 셋이 ★화면에서 서로 구별돼야 한다★(그 구별이 결말 칸의 존재 이유다).
- * 가르는 축 셋: 아이콘 · 문구 · 톤. ★색 하나에 기대지 않는다★ — e-ink 테마는 색을 무력화하므로
- * 색만 다르면 셋이 한 모양이 된다.
- * ★중단·모름은 붉게 칠하지 않는다★ — 중단은 사용자가 끊은 정상 경로이고, 모름은 「모른다」이지
- * 「실패했다」가 아니다. 실패만 error 톤을 쓴다(Error 행과 같은 어휘).
+ * Turn outcome marker — failure/interrupt/unknown, the three ★must be told apart on screen★ (that distinction is the outcome field's reason to exist).
+ * Three axes tell them apart: icon · text · tone. ★Do not lean on color alone★ — the e-ink theme neutralizes color, so
+ * if only color differed the three would become one shape.
+ * ★Interrupt and unknown are not painted red★ — an interrupt is a normal path the user cut, and unknown means 「모른다」 (we do not know), not
+ * 「실패했다」 (it failed). Only failure uses the error tone (the same vocabulary as the Error row).
  */
 /**
- * 중단의 강조 줄(U8 — 굵게 · 강조색 · `CircleStop`). 결말 행의 중단 갈래와 끊김 표시 행이 함께 쓴다 — 두 행이 같은
- * 모양이어야 한다(ADR-0243).
+ * The interrupt emphasis line (U8 — bold · accent color · `CircleStop`). Used by both the interrupt branch of the outcome row and the interruption display row — the two rows must have the same
+ * shape (ADR-0243).
  */
 // ADR-0237
 function InterruptedLine({ children, note = false }: { children: ReactNode; note?: boolean }) {
@@ -375,7 +375,7 @@ function InterruptedLine({ children, note = false }: { children: ReactNode; note
 
 function OutcomeRow({ outcome, detail }: { outcome: TurnOutcomeMark; detail: string | null }) {
   const isErr = outcome === 'failed'
-  // ADR-0237: 사용자 결정 U8 — 중단은 굵게 + 강조색. 실패의 빨강 · 거부의 주황과 갈리고, 모름은 그대로 muted 다.
+  // ADR-0237: user decision U8 — interrupt is bold + accent color. It is distinct from failure's red · decline's orange, and unknown stays muted as is.
   const Icon = isErr ? AlertTriangle : CircleHelp
   return (
     <div className="my-1">
@@ -390,7 +390,7 @@ function OutcomeRow({ outcome, detail }: { outcome: TurnOutcomeMark; detail: str
         </div>
       )}
       {detail !== null && detail !== '' && (
-        // 사유는 상대가 준 신뢰할 수 없는 텍스트 — 마크다운을 태우지 않고 리터럴로만 그린다(FIX 2 와 같은 규율).
+        // The reason is untrusted text from the other side — drawn only as a literal, without markdown (the same discipline as FIX 2).
         <div
           className={cn(
             'mt-1 whitespace-pre-wrap break-words',
@@ -405,8 +405,8 @@ function OutcomeRow({ outcome, detail }: { outcome: TurnOutcomeMark; detail: str
 }
 
 /**
- * 백엔드가 끊긴 턴에 적는 끊김 표시(오늘 내는 곳 = claude 합성 줄) — 글은 원문이고 마크다운을 태우지 않는다(FIX 2 와
- * 같은 규율).
+ * The interruption display the backend writes on an interrupted turn (where it is emitted today = the claude synthetic line) — the text is the original and is not put through markdown (the same
+ * discipline as FIX 2).
  */
 // ADR-0243
 function InterruptNoteRow({ text }: { text: string }) {
@@ -418,11 +418,11 @@ function InterruptNoteRow({ text }: { text: string }) {
 }
 
 /**
- * 이 셸이 모르는 이벤트가 왔다는 표식(누산기 default arm).
+ * A marker that an event this shell does not know has arrived (the accumulator's default arm).
  *
- * ★이벤트 이름·payload 를 그리지 않는다★ — 프로토콜 낱말을 사용자 화면에 올리지 않는다(trd-phase2a §6-2).
- *   진단에 필요한 이름은 누산기가 console 로만 내보낸다.
- * ★assistant 본문처럼 보이면 안 된다★ — muted 톤 한 줄로 두어 「우리 쪽 한계 고지」로 읽히게 한다.
+ * ★Do not draw the event name or payload★ — protocol words are not put on the user's screen (trd-phase2a §6-2).
+ *   The accumulator sends the name needed for diagnosis to the console only.
+ * ★It must not look like assistant body text★ — keep it to one muted-tone line so it reads as a 「우리 쪽 한계 고지」 (a notice of our own limit).
  */
 function UnsupportedRow({ count }: { count: number }) {
   return (
@@ -460,19 +460,19 @@ function GenericItemRow({ label, json }: { label: string; json: string }) {
   )
 }
 
-// ── 항목 dispatch ───────────────────────────────────────────────────────────────────
+// ── Item dispatch ───────────────────────────────────────────────────────────────────
 
 /**
- * ADR-0051: 공백만 = opus 암호화 thinking(signature 만 옴, 평문 없음). rowKindOf 와 renderItem 이 **같은**
- * 판정을 써야 rail 계산과 실제 DOM 이 일치한다(빈 thinking = skip = 렌더 안 함).
+ * ADR-0051: whitespace only = opus encrypted thinking (only a signature comes, no plain text). rowKindOf and renderItem must use the **same**
+ * decision so the rail calculation and the real DOM agree (empty thinking = skip = not rendered).
  */
 function isEmptyThinking(json: string): boolean {
   return extractText(json, 'thinking').trim() === ''
 }
 
 /**
- * ADR-0051: renderItem 의 null 반환 규칙과 반드시 일치해야 한다(흡수된 tool_result·usage·빈 thinking =
- * skip = DOM 없음).
+ * ADR-0051: must match renderItem's null return rule (absorbed tool_result · usage · empty thinking =
+ * skip = no DOM).
  */
 function rowKindOf(item: StructuredItem): ChatRowKind {
   switch (item.kind) {
@@ -496,9 +496,9 @@ function rowKindOf(item: StructuredItem): ChatRowKind {
 }
 
 /**
- * 이 항목이 화면에 행을 그리나 — `rowKindOf` 의 skip 판정 그대로다(ADR-0051 null 반환 규칙과 한 몸).
- * 턴 구분선(`separator`)도 참이다 — 빈 스페이서지만 DOM 행이다. ADR-0226 의 "이력이 도착했나" 판정은
- * 이 위에서 구분선을 따로 뺀다(RichSlot).
+ * Does this item draw a row on screen — exactly the skip decision of `rowKindOf` (one body with the ADR-0051 null return rule).
+ * The turn divider (`separator`) is true too — an empty spacer, but a DOM row. The "did history arrive?" decision of ADR-0226
+ * takes the divider out separately above this (RichSlot).
  */
 export function isRenderedItem(item: StructuredItem): boolean {
   return rowKindOf(item) !== 'skip'
@@ -518,8 +518,8 @@ function toolRowOf(item: ToolItem, results: Map<string, ToolResult>): ReactNode 
 }
 
 /**
- * 펼친 묶음 안의 멤버 한 줄 — 레일(`ChatRow`) 없이 행 컴포넌트만(ADR-0051 — 묶음이 레일 한 행이다). 멤버는 도구 행과
- * 비지 않은 생각뿐이다(`groupToolRuns` 의 계약) — 그 계약이 넓어지면 여기 갈래를 더한다.
+ * One member line inside an expanded bundle — only the row component, without the rail (`ChatRow`) (ADR-0051 — the bundle is one rail row). Members are only tool rows and
+ * non-empty thoughts (the contract of `groupToolRuns`) — if that contract widens, add a branch here.
  */
 function renderGroupMember(item: StructuredItem, results: Map<string, ToolResult>): ReactNode {
   if (item.kind === 'tool') return toolRowOf(item, results)
@@ -529,7 +529,7 @@ function renderGroupMember(item: StructuredItem, results: Map<string, ToolResult
   return null
 }
 
-/** runPos(ADR-0051): rail 행의 run 내 위치 — 연결선 clean-ends. */
+/** runPos (ADR-0051): the position of a rail row within its run — connector clean-ends. */
 function renderItem(
   item: StructuredItem,
   results: Map<string, ToolResult>,
@@ -539,7 +539,7 @@ function renderItem(
   const pos = runPos ?? undefined
   switch (item.kind) {
     case 'text':
-      // 긴 토큰(URL·경로)이 컨테이너를 넘지 않게 행 컨테이너에 wrap-anywhere overflow-hidden.
+      // wrap-anywhere overflow-hidden on the row container so a long token (URL · path) does not go beyond the container.
       return (
         <ChatRow key={k} rail runPos={pos}>
           <div className="wrap-anywhere overflow-hidden">
@@ -549,10 +549,10 @@ function renderItem(
       )
 
     case 'structured':
-      // ★FIX 1 (tool_result 흡수 — label 무관)★: json.type==='tool_result' 인 structured 는 label 이
-      //   무엇이든(user 든 아니든) 매칭 도구의 OUT 에 흡수되므로 독립 렌더하지 않는다. 이 검사는 label
-      //   분기보다 **먼저** 와야 한다 — 이전엔 user 분기 안에만 있어 다른 label 의 tool_result 가 standalone
-      //   으로 새 나갔다(계약 위반). 매칭 tool 이 없어도 흡수 규칙은 동일(어디에도 안 그린다).
+      // ★FIX 1 (tool_result absorption — label-independent)★: a structured with json.type==='tool_result' is absorbed into the matching tool's OUT
+      //   whatever the label (user or not), so it is not rendered independently. This check must come **before** the label
+      //   branch — before, it was only inside the user branch, so a tool_result with another label leaked out as standalone
+      //   (contract violation). Even with no matching tool the absorption rule is the same (it is drawn nowhere).
       if (parseToolResult(item.json)) return null
 
       if (item.label === 'user') {
@@ -577,9 +577,9 @@ function renderItem(
         )
       }
       if (item.label === 'thinking') {
-        // 내용이 비면(opus 암호화 thinking — signature 만 옴) 빈 "Thought" 클러터가 매 응답마다 뜨므로
-        //   아무것도 그리지 않는다(null). rowKindOf 도 같은 isEmptyThinking 검사로 'skip' 을 반환해야
-        //   rail 계산과 DOM 이 일치한다(ADR-0051).
+        // When the content is empty (opus encrypted thinking — only a signature comes) an empty "Thought" clutter would show on every response, so
+        //   nothing is drawn (null). rowKindOf must also return 'skip' by the same isEmptyThinking check so that
+        //   the rail calculation and the DOM agree (ADR-0051).
         if (isEmptyThinking(item.json)) return null
         const content = extractText(item.json, 'thinking')
         return (
@@ -602,7 +602,7 @@ function renderItem(
       )
 
     case 'usage':
-      // 메시지별 토큰 칩은 표시하지 않는다(누적 item 종류 자체는 유지 — 렌더만 생략).
+      // The per-message token chip is not shown (the accumulated item kind itself is kept — only the render is omitted).
       return null
 
     case 'error':
@@ -614,8 +614,8 @@ function renderItem(
       )
 
     case 'outcome':
-      // ★정상 완료는 여기 오지 않는다★ — 누산기가 표식 없이 구분선만 남긴다(평범한 끝맺음이 경고처럼
-      //   보이지 않게). 그래서 이 행이 그리는 것은 실패·중단·모름 셋뿐이다.
+      // ★A normal completion does not come here★ — the accumulator leaves only a divider with no marker (so an ordinary ending does not
+      //   look like a warning). So what this row draws is only the three: failure · interrupt · unknown.
       return (
         <ChatRow key={k} rail tone={item.outcome === 'failed' ? 'error' : 'default'} runPos={pos}>
           <OutcomeRow outcome={item.outcome} detail={item.detail} />
@@ -637,7 +637,7 @@ function renderItem(
       )
 
     case 'separator':
-      // 턴 경계 — 점선 레일/구분선 없이 아주 옅은 세로 스페이서만(눈에 띄는 divider 지양).
+      // Turn boundary — no dotted rail/divider, only a very faint vertical spacer (avoid a conspicuous divider).
       return <div key={k} aria-hidden className="h-3" />
   }
 }
@@ -650,21 +650,21 @@ export function StructuredTextView({
 }: {
   items: StructuredItem[]
   streaming?: boolean
-  /** 도구 묶음 펼침 상태를 둘 슬롯(`store/toolGroupStore.ts`) — 없으면 묶음은 고른 값 없이 그리고 머리를 눌러도 바뀌지 않는다. */
+  /** The slot (`store/toolGroupStore.ts`) that holds the tool bundle expansion state — without it the bundle is drawn with no chosen value and pressing the head changes nothing. */
   slotId?: string
   /**
-   * 사람이 도구 묶음 머리를 눌러 펼쳤다 — 접을 때는 부르지 않는다. `isLast` = 그 묶음이 목록의 마지막 묶음인가.
-   * TRD S21-chat-ux §4-5: 마지막이 아닌 묶음을 펼치면 바닥 따라가기를 푼다(붙은 채면 누른 머리가 화면 위로 밀려난다).
+   * A human pressed the tool bundle head to expand it — not called on collapse. `isLast` = is that bundle the last bundle of the list.
+   * TRD S21-chat-ux §4-5: expanding a non-last bundle releases bottom-follow (if kept pinned, the pressed head is pushed up off the screen).
    */
   onGroupToggle?: (isLast: boolean) => void
 }) {
   const results = buildToolResultMap(items)
-  // ADR-0241: 벤더 오류 id 는 한 렌더에 한 번 짓고 모든 묶음의 요약이 나눠 쓴다.
+  // ADR-0241: the vendor error id is built once per render and shared by the summaries of all bundles.
   const vendorErrorIds = vendorErrorIdsOf(results)
-  // ADR-0239: 묶기는 렌더 중 파생이다 — 누산기도 백엔드도 묶음을 만들지 않고, 펼침 상태는 `ToolGroupRow` 가 읽는다.
+  // ADR-0239: bundling is derived during render — neither the accumulator nor the backend makes bundles, and `ToolGroupRow` reads the expansion state.
   const rows = groupToolRuns(items, streaming, rowKindOf)
-  // ADR-0051: rail run 위치를 순수 계산으로 미리 뽑는다(렌더 중 파생 — state/effect 아님, ADR-0050 순수성
-  //   유지). ★항목이 아니라 행 목록으로 센다★ — 묶음은 레일 한 행(assistant)이고 멤버는 레일을 그리지 않는다.
+  // ADR-0051: the rail run positions are extracted in advance by pure computation (derived during render — not state/effect, keeping ADR-0050 purity).
+  //   ★Counted by row list, not by item★ — a bundle is one rail row (assistant) and members do not draw the rail.
   const kinds = rows.map((row) => (row.kind === 'toolGroup' ? 'assistant' : rowKindOf(row.item)))
   const positions = computeRailRunPositions(kinds)
   let lastGroup = -1
@@ -674,15 +674,15 @@ export function StructuredTextView({
     if (kinds[i] !== 'skip') lastDrawn = i
   })
   const lastRow = lastDrawn >= 0 ? rows[lastDrawn] : undefined
-  // 마지막 행 아래 여백 — 턴 구분선(h-3)이 끝이면 그것이 여백이고, 아니면 같은 높이의 빈 블록을 둔다. 턴이 끝나 구분선이
-  //   붙는 순간 이 블록과 자리를 바꿀 뿐 목록 높이는 그대로다. ★패딩이 아니라 실제 높이 블록★: Radix ScrollArea 의
-  //   display:table 래퍼가 마지막 요소의 하단 패딩을 scrollHeight 에 안 넣어, 바닥에 붙어 따라가는 동안(ADR-0242) 패딩은
-  //   뷰포트 밖으로 밀려 안 보인다(실측 2026-07-08).
+  // Margin below the last row — if the turn divider (h-3) is the end it is the margin, otherwise an empty block of the same height is placed. The moment the turn ends and the divider
+  //   attaches, it just swaps places with this block and the list height stays the same. ★A real height block, not padding★: Radix ScrollArea's
+  //   display:table wrapper does not count the last element's bottom padding in scrollHeight, so while following pinned to the bottom (ADR-0242) the padding is
+  //   pushed out of the viewport and not seen (measured 2026-07-08).
   const bottomSpacer = lastRow !== undefined && !(lastRow.kind === 'item' && lastRow.item.kind === 'separator')
   const renderMember = (item: StructuredItem) => renderGroupMember(item, results)
   return (
-    // 채팅 루트 폰트/줄간격을 여기에만 스코프한다(트리·터미널 슬롯 등 앱 나머지는 영향 없음).
-    //   CSS 변수로 뺀 건 LLM 제어용(ADR-0051).
+    // Scopes the chat root font/line-height to here only (the rest of the app, such as the tree and terminal slots, is unaffected).
+    //   Pulling them out as CSS variables is for LLM control (ADR-0051).
     <div
       className="flex flex-col pb-3 font-sans text-foreground"
       style={{ fontSize: 'var(--chat-font-size)', lineHeight: 'var(--chat-line-height)' }}

@@ -1,29 +1,29 @@
-// 리치 슬롯 백엔드 표기 회귀 — 제목·표식·색조가 claude 와 codex 를 가르나.
+// Rich slot backend notation regression — do title · marker · color tone tell claude and codex apart?
 //
-// 배경: 리치(구조화) 모드는 두 백엔드를 똑같이 그려 누구와 말하는지 화면에 신호가 없었다. 가르는 근거는
-//   프로필의 `command.kind` 하나이고, **프로필이 없으면 claude 표기 그대로**가 규약이다(회귀 없는 기본값
-//   — ad-hoc 세션과 프로필을 안 채우는 mock 이 그 경로를 실제로 탄다).
+// Background: rich (structured) mode drew the two backends identically, so the screen had no signal of who you are talking to. The basis for telling them apart is
+//   the profile's `command.kind` alone, and the convention is that **with no profile the claude notation stays**
+//   (a regression-free default — ad-hoc sessions and mocks that do not fill the profile really take that path).
 //
-// 관측 표면: 빈 상태 제목 글자 · 표식의 `data-rich-brand` · 루트의 `data-rich-brand` + 색조 클래스.
-//   ★루트 토큰을 따로 재는 이유★: 대화가 시작되면 제목·표식이 함께 접혀(ADR-0145) 그때 백엔드를 말하는
-//   DOM 은 루트 속성뿐이다.
+// Observation surface: empty-state title text · the marker's `data-rich-brand` · the root's `data-rich-brand` + tone class.
+//   ★Why the root token is measured separately★: when a conversation starts the title and marker fold away together (ADR-0145) and then the
+//   only DOM that tells the backend is the root attribute.
 //
-// 전략: agentClient(clientFactory)·agentStore 를 RichSlot.test.tsx 와 동일 패턴으로 stub 하고,
-//   복원 완료 신호('live')를 발화해 빈 상태를 연다.
+// Strategy: stub agentClient (clientFactory) and agentStore with the same pattern as RichSlot.test.tsx,
+//   and fire the restore-complete signal ('live') to open the empty state.
 
 import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { OutputChunk, ViewPhase } from '../../api/agentClient'
 
-// ── subscribeOutput 콜백 캡처(상태 콜백만 쓴다 — 빈 상태 게이트를 여는 신호). ──
+// ── subscribeOutput callback capture (only the state callback is used — the signal that opens the empty-state gate). ──
 const captured = vi.hoisted(() => ({
   onState: null as ((s: ViewPhase) => void) | null,
 }))
 
 vi.mock('../../api/clientFactory', () => ({
   agentClient: {
-    // ADR-0046 시그니처 (viewId, agentId, onChunk, onState?, onReset?).
+    // ADR-0046 signature (viewId, agentId, onChunk, onState?, onReset?).
     subscribeOutput: vi.fn(
       async (
         _viewId: string,
@@ -38,7 +38,7 @@ vi.mock('../../api/clientFactory', () => ({
     writeStdin: vi.fn(async () => undefined),
     resizePty: vi.fn(async () => undefined),
     connectionState: 'connected',
-    // 등록 즉시 현재 상태로 1회 통지 + disposer 반환(실물 계약).
+    // Notifies the current state once on registration + returns a disposer (the real contract).
     onConnectionStateChange: (cb: (s: string) => void) => {
       cb('connected')
       return () => {}
@@ -47,7 +47,7 @@ vi.mock('../../api/clientFactory', () => ({
   getAgentClient: vi.fn(),
 }))
 
-// ── agentStore stub — 부재 판정(agents·agentsLoaded)과 표기 판정(profiles)이 여기를 읽는다. ──
+// ── agentStore stub — the absent decision (agents·agentsLoaded) and the notation decision (profiles) read here. ──
 const agentStoreState = vi.hoisted(() => ({
   agents: [] as unknown[],
   agentsLoaded: false,
@@ -57,13 +57,13 @@ vi.mock('../../store/agentStore', () => ({
   useAgentStore: (selector: (s: typeof agentStoreState) => unknown) => selector(agentStoreState),
 }))
 
-// ── 테스트 대상 ────────────────────────────────────────────────────────────────
+// ── Test subject ────────────────────────────────────────────────────────────────
 import RichSlot from './RichSlot'
 import { richBranding } from './richBranding'
 
 const AGENT = 'aaaa-bbbb-cccc-dddd'
 
-/** 프로필 최소 형태 — 슬롯이 읽는 칸(id·command·cwd·display_name)만 채운다. */
+/** Minimal profile shape — fills only the fields the slot reads (id·command·cwd·display_name). */
 function profile(kind: 'Claude' | 'Codex' | 'Shell'): unknown {
   const command =
     kind === 'Shell'
@@ -79,7 +79,7 @@ async function flush(): Promise<void> {
   })
 }
 
-/** 마운트 + 복원 완료 신호 → 빈 상태(표식·제목)가 열린 화면. */
+/** Mount + restore-complete signal → a screen with the empty state (marker·title) open. */
 async function renderEmpty(): Promise<void> {
   render(<RichSlot viewId="v1" agentId={AGENT} />)
   await flush()
@@ -119,11 +119,11 @@ describe('richBranding — 순수 매핑', () => {
     const b = richBranding('Claude')
     expect(b.brand).toBe('claude')
     expect(b.title).toBe('Claude Code')
-    // 색조 없음 = 지금까지의 모습. 여기 클래스가 생기면 기존 화면이 전부 갈린다.
+    // No tone = the look until now. If a class appears here, every existing screen diverges.
     expect(b.tintClass).toBe('')
   })
 
-  // ★기본값 규약★: 모르는 것을 중립 표기로 바꾸지 않는다 — 알아낸 것 없이 화면만 갈리는 쪽이 더 나쁘다.
+  // ★Default convention★: what is not known is not changed to a neutral notation — a screen that changes with nothing learned is worse.
   it('프로필 부재(null·undefined)와 미지 종류는 claude 표기로 떨어진다', () => {
     expect(richBranding(null).brand).toBe('claude')
     expect(richBranding(undefined).brand).toBe('claude')
@@ -154,13 +154,13 @@ describe('RichSlot — 빈 상태 표기', () => {
   })
 
   it('프로필이 없으면 claude 표기 — 색조도 붙지 않는다(현행 모습 유지)', async () => {
-    await renderEmpty() // profiles = undefined(단위테스트 mock·ad-hoc 세션 경로)
+    await renderEmpty() // profiles = undefined (unit test mock · ad-hoc session path)
     expect(screen.getByText('Claude Code')).toBeTruthy()
     expect(mascot()?.getAttribute('data-rich-brand')).toBe('claude')
     expect(root().className).not.toContain('rich-tint-codex')
   })
 
-  // 표식은 순수 장식이라 접근성 트리에서 숨긴다(ADR-0146 불변식) — 형제와 같은 규율을 codex 표식도 진다.
+  // The marker is pure decoration so it is hidden from the accessibility tree (ADR-0146 invariant) — the codex marker bears the same discipline as its sibling.
   it('codex 표식도 aria-hidden 이고 기존 표식 셀렉터에 그대로 걸린다', async () => {
     agentStoreState.profiles = [profile('Codex')]
     await renderEmpty()
@@ -170,12 +170,12 @@ describe('RichSlot — 빈 상태 표기', () => {
 })
 
 describe('RichSlot — 대화 중에도 백엔드가 관측된다', () => {
-  // 빈 상태가 닫히면 제목·표식이 함께 사라진다 — 그 구간의 유일한 근거가 루트 토큰이다.
+  // When the empty state closes the title and marker disappear together — the only basis in that span is the root token.
   it('빈 상태가 아니어도 루트 토큰·색조는 남는다', async () => {
     agentStoreState.profiles = [profile('Codex')]
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
-    act(() => captured.onState!('buffering')) // 복원 중 = 빈 상태 게이트가 닫힌 구간
+    act(() => captured.onState!('buffering')) // Restoring = the span where the empty-state gate is closed
 
     expect(mascot()).toBeNull()
     expect(screen.queryByText('Codex')).toBeNull()
