@@ -1,20 +1,20 @@
-//! codex 스레드 id 를 **락 파일의 소유자**로 회수한다 — 우리가 띄운 자식이 쥐고 있는 락 파일의 이름이
-//! 곧 그 자식의 스레드 id 다(ADR-0218 결정 1).
+//! Recover the codex thread id as the **owner of a lock file** — the name of the lock file held by the child we
+//! spawned is that child's thread id (ADR-0218 decision 1).
 //!
-//! ★이 파일이 쥐는 codex 지식은 둘뿐★ — 락 디렉터리의 위치([`lock_dir`])와 파일 이름이 곧 id 라는 것.
-//! 「이 파일을 누가 쥐고 있나」와 「이 PID 아래 무엇이 살아 있나」는 도메인 지식이 0 이라 OS 층 crate 의
-//! [`engram_dashboard_platform::file_holders`]·[`engram_dashboard_platform::process::subtree`] 가 답한다
-//! (ADR-0004 · ADR-0218 결정 11 · ADR-0266). ★**파일 내용은 읽지 않는다**★ — 0바이트이고, 읽기 시작하면 벤더
-//! 저장 포맷 의존이 된다(ADR-0203).
+//! ★This file holds only two pieces of codex knowledge★ — the location of the lock directory ([`lock_dir`]) and that the file name is the id.
+//! 「이 파일을 누가 쥐고 있나」 (who holds this file) and 「이 PID 아래 무엇이 살아 있나」 (what is alive under this PID) need zero domain knowledge, so the OS-layer crate's
+//! [`engram_dashboard_platform::file_holders`] and [`engram_dashboard_platform::process::subtree`] answer them
+//! (ADR-0004 · ADR-0218 decision 11 · ADR-0266). ★**The file content is never read**★ — it is 0 bytes, and starting to read it would make us depend on the vendor
+//! storage format (ADR-0203).
 //!
-//! 진입점 둘 — [`plan_capture`](이 spawn 에서 회수를 돌릴지와 그 재료를 고른다)와
-//! [`spawn_capture`](그 재료로 폴링 스레드를 띄운다). 판정은 [`scan_for_child`] 가 지고, 기다림과
-//! 자식 생존 확인은 [`CaptureClock`] 이 진다. 파일시스템·OS 질의가 전부 그 둘과 [`LockHolderProbe`]
-//! 뒤에 있어 루프 규칙을 OS 없이 잰다(ADR-0012).
+//! Two entry points — [`plan_capture`] (chooses whether to run recovery for this spawn, and its inputs)
+//! and [`spawn_capture`] (starts the polling thread with those inputs). [`scan_for_child`] carries the decision, and
+//! [`CaptureClock`] carries the waiting and the child liveness check. All filesystem and OS queries sit behind those two and [`LockHolderProbe`],
+//! so the loop rules are measured without an OS (ADR-0012).
 //!
-//! ★회수한 값이 나가는 길은 [`crate::backend::SessionIdSink`] 하나다★ — 조립점이 화신 표식을 묶어
-//! 건넨 그 동사이고, 이 파일은 프로필도 그 스키마도 모른다(ADR-0004 · ADR-0218 결정 6). 둘째 쓰기
-//! 경로를 만들지 말 것 — 그 순간 화신 가드를 우회하는 갈래가 생긴다.
+//! ★The recovered value leaves through exactly one path, [`crate::backend::SessionIdSink`]★ — the same verb
+//! the assembly point handed over bound to the incarnation marker, and this file knows neither the profile nor its schema (ADR-0004 · ADR-0218 decision 6). Do not
+//! create a second write path — the moment you do, there is a branch that bypasses the incarnation guard.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -27,68 +27,68 @@ use uuid::Uuid;
 
 use crate::backend::SessionIdSink;
 
-/// codex 홈 아래 writer 락이 사는 폴더 이름.
+/// The name of the folder under the codex home where the writer locks live.
 ///
-/// ★문서화되지 않은 배치다★ — 상류가 바꾸면 오류가 아니라 조용히 후보 0 개가 된다(ADR-0218 「근거」의
-/// 미측정 ③). 실패 모드가 「못 받음」이라 그 조용함이 오검출로 번지지는 않는다.
+/// ★This is an undocumented layout★ — if upstream changes it, we silently get 0 candidates instead of an error (ADR-0218 「근거」 (rationale),
+/// unmeasured item ③). The failure mode is 「못 받음」 (not received), so that silence does not spread into false detections.
 const LOCK_DIR: &str = "thread-writer-locks";
 
-/// 락 파일의 확장자. 이름의 나머지가 스레드 id 다.
+/// The extension of the lock file. The rest of the name is the thread id.
 const LOCK_EXTENSION: &str = "lock";
 
-/// [`CODEX_HOME_ENV`] 가 없을 때의 codex 홈(사용자 홈 기준 상대 경로).
+/// The codex home when [`CODEX_HOME_ENV`] is absent (a path relative to the user home).
 const CODEX_HOME_SUBDIR: &str = ".codex";
 
-/// codex 상태 디렉터리를 통째로 옮기는 env 변수 — 실재를 실측으로 확인했고, **건 프로세스에만**
-/// 적용된다(`docs/research/codex-session-id-recovery-survey-2026-09-19.md` 의 `CODEX_HOME` 절).
+/// The env variable that moves the whole codex state directory — its existence is confirmed by measurement, and it applies **only to the process that sets it**
+/// (the `CODEX_HOME` section of `docs/research/codex-session-id-recovery-survey-2026-09-19.md`).
 pub(super) const CODEX_HOME_ENV: &str = "CODEX_HOME";
 
-/// 이 모듈이 OS 를 만나는 자리 전부 — 파일 홀더 · 폴더 목록 · 우리 프로세스 나무.
+/// Every place where this module meets the OS — file holders · folder listing · our process tree.
 ///
-/// ★셋을 한 seam 에 둔 것은 판정 규칙을 OS 없이 재기 위해서다★ — 그래야 [`scan_for_child`] 가
-/// 실제 파일 한 개, 실제 프로세스 한 개 없이 돌아간다(ADR-0012).
+/// ★The three sit on one seam so the decision rules can be measured without an OS★ — that way [`scan_for_child`] runs
+/// without a single real file or a single real process (ADR-0012).
 pub(crate) trait LockHolderProbe {
-    /// 못 물어본 것과 홀더가 없는 것을 **가르지 않는다** — 둘 다 빈 목록이다. 어차피 판정이 같은
-    /// 자리(「후보 아님」)로 떨어지고, 폴링이 다음 바퀴에 다시 묻는다.
+    /// **No distinction** between "could not ask" and "no holders" — both are an empty list. The decision lands in the same
+    /// place either way (「후보 아님」 (not a candidate)), and polling asks again on the next round.
     fn holders(&self, path: &Path) -> Vec<Holder>;
 
-    /// 우리가 띄운 자식과 그 아래 **살아 있는** 후손 전부의 신원. 빈 목록 = 그 PID 가 더는 우리
-    /// 자식이 아니다.
+    /// The identities of the child we spawned and every **live** descendant under it. An empty list = that PID is no longer our
+    /// child.
     ///
-    /// ★왜 나무인가 — 우리가 쥔 PID 는 codex 가 아니다★: Windows 에서 스폰은 `cmd.exe /c codex …`
-    ///   한 겹을 지나므로([`engram_dashboard_platform::shell::console_command`]) 통로가 돌려준 PID 는
-    ///   **그 래퍼**다. 락을 쥔 것은 그 아래의 `codex.exe` 자신이다(ADR-0218 「근거」 — 홀더는 래퍼도 자식도 아닌
-    ///   codex.exe 였다). ★래퍼 PID 하나만 대조하면 일치가 **영영** 안 나고 증상은 오류가 아니라
-    ///   침묵이다★ — 스레드가 에이전트 수명 내내 빈손으로 돈다(실측 2026-09-21: `cmd.exe /c …` →
-    ///   래퍼 38240 · 그 아래 4816,19468).
-    /// ★바퀴마다 다시 푼다 — 한 번 떠 둔 명단을 재사용하지 말 것★: shim 이 codex 를 늦게 띄우고
-    ///   codex 가 또 도구를 띄우므로 나무는 시간에 따라 자란다. 굳혀 두면 늦게 뜬 codex 를 못 본다.
-    /// ★나무 규칙이 이 회수에서 막는 것과 받아들인 잔여★ — 규칙(뿌리 신원 확인 · 부모보다 먼저 태어난
-    ///   항목 버리기)과 그 규칙이 못 거르는 경우 ①②③ 의 사실 정본은 [`process::subtree`] 의 doc 이다.
-    ///   여기는 그것이 codex 회수에 무엇을 뜻하나만 적는다.
-    ///   - **순서 규칙이 막는 실제 시퀀스:** 사용자가 손으로 띄운 `codex.exe` 가 고아가 되어 기록된 ppid
-    ///     `P` 를 그대로 달고 남고, Windows 가 `P` 를 우리 래퍼에 **재사용**한다. 규칙이 없으면 그 남이
-    ///     우리 자식으로 열거되고, 그 남은 자기 락의 홀더와 자기 신원이 당연히 맞으므로 **우리 codex 가
-    ///     락을 만들기 전 0.7~21 초 동안 유일한 후보**가 된다 — `Ambiguous` 도 안 뜨고 남의 스레드를 우리
-    ///     손잡이에 적는다(ADR-0218 「영향/불변식」이 이름 붙인 그 조용한 고장).
-    ///   - ★**잔여 ①②③ 은 받아들인다(다시 논쟁하지 말 것 — 2026-09-21 결정)**★. ① 열거와 시작시각 읽기
-    ///     사이의 PID 재사용은 원자적으로 고칠 수단이 없고 창이 마이크로초 단위다. ② 같은 눈금은 막으면 정상
-    ///     자식을 잃는다. ③ 명시 부모 지정이 **실제 오검출**이 되려면 그 남이 우리 `CODEX_HOME` 아래
-    ///     `<uuid>.lock` 까지 쥐고 있어야 한다 — 흔한 경로(재사용된 ppid 의 고아)를 닫은 것으로 규칙의
-    ///     값어치는 그대로다.
-    ///   - 나무 열거가 실패해 덜 돌려준 것도 오류로 받지 않는다 — 「후보 아님」과 다르게 처리할 방법이 없고
-    ///     다음 바퀴에 다시 묻는다.
+    /// ★Why a tree — the PID we hold is not codex★: on Windows the spawn passes through a `cmd.exe /c codex …`
+    ///   layer ([`engram_dashboard_platform::shell::console_command`]), so the PID the path returned is
+    ///   **that wrapper**. The one holding the lock is the `codex.exe` below it (ADR-0218 「근거」 (rationale) — the holder was neither the wrapper nor the child but
+    ///   codex.exe). ★Compare only the wrapper PID and a match **never** shows up, and the symptom is silence, not an error★
+    ///   — the thread spins empty-handed for the whole agent lifetime (measured 2026-09-21: `cmd.exe /c …` →
+    ///   wrapper 38240 · 4816,19468 below it).
+    /// ★Resolve it again every round — do not reuse a list copied aside once★: the shim launches codex late and
+    ///   codex launches more tools, so the tree grows over time. Freeze it and the late-launched codex goes unseen.
+    /// ★What the tree rules block in this recovery, and the residue we accepted★ — the factual source of record for the rules (root identity check · dropping
+    ///   entries born before their parent) and for the cases ①②③ they cannot filter is the doc of [`process::subtree`].
+    ///   Here we only write what that means for codex recovery.
+    ///   - **The real sequence the ordering rule blocks:** a `codex.exe` the user launched by hand becomes an orphan and stays with the recorded ppid
+    ///     `P` intact, and Windows **reuses** `P` for our wrapper. Without the rule that stranger is
+    ///     enumerated as our child, and since the stranger's own identity matches its own lock holder, it becomes **the only candidate for 0.7–21 seconds
+    ///     before our codex creates its lock** — not even `Ambiguous` shows up, and another party's thread is written into our
+    ///     handle (the silent failure ADR-0218 「영향/불변식」 (impact/invariants) names).
+    ///   - ★**We accept residue ①②③ (do not argue it again — decision of 2026-09-21)**★. ① PID reuse between enumeration and start-time reading
+    ///     has no atomic fix and the window is microseconds. ② Blocking the same tick would lose a normal
+    ///     child. ③ For an explicit-parent case to become a **real false detection**, the stranger would have to hold a `<uuid>.lock` under our `CODEX_HOME`
+    ///     as well — closing the common path (an orphan with a reused ppid) keeps the rule's
+    ///     worth intact.
+    ///   - A tree enumeration that fails and returns less is also not treated as an error — there is no way to handle it differently from 「후보 아님」 (not a candidate),
+    ///     and the next round asks again.
     fn our_processes(&self, root_pid: u32, root_start_time: u64) -> Vec<ProcessIdentity> {
         process::subtree(root_pid, root_start_time)
     }
 
-    /// `dir` 바로 아래의 **정규 파일** 경로 전부(이름 판정은 [`scan_for_child`] 몫). 못 읽으면 빈
-    /// 목록이다: 아직 안 생긴 디렉터리가 정상 경로라 오류로 올리지 않는다.
+    /// All **regular file** paths directly under `dir` (the name decision belongs to [`scan_for_child`]). If it cannot be read, an empty
+    /// list: a directory that does not exist yet is a normal path, so we do not raise an error.
     ///
-    /// ★디렉터리와 재분석 지점(symlink·junction)은 후보에서 뺀다★ — `<uuid>.lock` 이라는 이름의
-    ///   폴더는 락이 아니고, 재분석 지점을 홀더 조회에 넘기면 우리가 고르지 않은 대상이 열린다.
-    ///   `file_type()` 은 링크를 따라가지 않으므로 `is_file()` 이 그 둘을 함께 거른다. 형식을
-    ///   못 읽는 항목도 뺀다 — 모르는 것을 후보로 올리지 않는다.
+    /// ★Directories and reparse points (symlink·junction) are left out of the candidates★ — a folder named `<uuid>.lock`
+    ///   is not a lock, and passing a reparse point to the holder query opens a target we did not choose.
+    ///   `file_type()` does not follow links, so `is_file()` filters out both. Entries whose type
+    ///   cannot be read are left out too — we do not promote what we do not know to a candidate.
     fn entries(&self, dir: &Path) -> Vec<PathBuf> {
         let Ok(read) = std::fs::read_dir(dir) else {
             return Vec::new();
@@ -100,8 +100,8 @@ pub(crate) trait LockHolderProbe {
     }
 }
 
-/// 운영에서 쓰는 구현 — [`engram_dashboard_platform::file_holders`] 에 묻고, 물음 자체가 실패하면 빈 목록으로
-/// 접는다(그 접기의 사유는 [`LockHolderProbe::holders`] 의 계약).
+/// The implementation used in production — asks [`engram_dashboard_platform::file_holders`], and if the query itself fails folds to an empty
+/// list (the reason for that folding is the contract of [`LockHolderProbe::holders`]).
 pub(crate) struct RestartManagerProbe;
 
 impl LockHolderProbe for RestartManagerProbe {
@@ -116,49 +116,49 @@ impl LockHolderProbe for RestartManagerProbe {
     }
 }
 
-/// [`scan_for_child`] 의 답. ★채택 가능한 것은 `Found` 뿐이다★.
+/// The answer of [`scan_for_child`]. ★Only `Found` can be adopted★.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScanOutcome {
-    /// 우리 나무 안의 프로세스가 쥔 락이 정확히 하나 — 그 파일 이름의 스레드 id.
+    /// Exactly one lock held by a process in our tree — the thread id of that file name.
     Found(Uuid),
-    /// 후보 0 개. 아직 락이 안 생겼거나 이 자식이 락을 만들지 않는다 — 계속 기다린다(ADR-0218 결정 4).
+    /// 0 candidates. No lock yet, or this child does not create a lock — keep waiting (ADR-0218 decision 4).
     NotYet,
-    /// 후보 n(≥2) 개 — ★이 바퀴에는 아무것도 채택하지 않는다★. 한 codex 프로세스가 락을 둘 이상 쥐는
-    /// 경우가 있는지 미측정이라, 추측 대신 거절한다(ADR-0218 결정 3 · 못 받는 것이 잘못 받는 것보다
-    /// 낫다). ★「거절」이 「포기」는 아니다 — 폴링은 계속된다★(결정 4 의 멈춤 목록에 이 결말은 없다).
+    /// n (≥2) candidates — ★adopt nothing this round★. It is unmeasured whether one codex process can hold two or more locks,
+    /// so we refuse instead of guessing (ADR-0218 decision 3 · not receiving is
+    /// better than receiving wrongly). ★「거절」 (refusal) is not 「포기」 (giving up) — polling continues★ (this outcome is not in decision 4's list of stops).
     Ambiguous(usize),
 }
 
-/// `lock_dir` 안에서 **우리 나무 안의 프로세스가 쥔** 락 파일을 찾아 그 이름의 스레드 id 를 돌려준다.
+/// Within `lock_dir`, find the lock file **held by a process in our tree** and return the thread id of its name.
 ///
-/// 판정 규칙(전부 ADR-0218):
-/// - **대조 상대는 `child_pid` 하나가 아니라 그 PID 를 뿌리로 하는 나무 전부다**
-///   ([`LockHolderProbe::our_processes`] 가 사유의 정본 — 우리가 쥔 PID 는 `cmd.exe` 래퍼이고 락을
-///   쥔 것은 그 아래 `codex.exe` 다).
-/// - 후보 = 이름이 `<uuid>.lock` 이고, 홀더 중 **PID 와 시작시각이 둘 다** 나무의 한 항목과 같은 것이
-///   있는 파일. ★어느 한쪽만 맞는 것은 후보가 아니다★ — PID 는 재사용되므로 그 판정이 남의 스레드를
-///   우리 손잡이에 적는다(결정 2). 나무를 넓혔다고 이 쌍이 풀리는 것이 아니다: 후손의 시작시각도
-///   열거하는 그 자리에서 함께 읽어 온다.
-/// - ★**세는 것은 파일이 아니라 「맞은 홀더」다**★ — 결정 3 의 「후보가 정확히 하나」는 **짝**의 수이지
-///   파일 이름의 수가 아니다. 한 파일을 우리 프로세스 둘이 함께 쥐고 있으면 「그 락이 누구 것인가」가
-///   하나로 안 좁혀진 상태이고, 파일만 세면 그 상태가 `Found` 로 통과한다.
-///   ★그 대가를 알고 고른다★: 자식이 핸들을 물려받는 경우(codex 가 띄운 도구가 같은 락 핸들을 상속)가
-///   있으면 그 구간 내내 채택이 안 된다. 그것이 견딜 만한 것은 [`run_capture`] 가 `Ambiguous` 에서
-///   **멈추지 않기** 때문이다 — 상속한 쪽이 끝나면 다음 바퀴에 채택한다. 상속이 실제로 일어나는지는
-///   미측정이고, 일어난다면 증상은 「회수가 늦어진다」이지 오검출이 아니다.
-///   ★**이 대가에 이견이 있다 — 다시 꺼내기 전에 이 줄을 읽을 것**★(2026-09-21): 「둘 다 **우리** 것이면
-///   그 락은 우리 것이니 채택이 옳다」는 반론이 있었고, 그 판정 자체는 이 라운드의 범위 밖이라 코드를
-///   그대로 뒀다. 즉 지금 모양은 **결정이 아니라 보류**다. 바꾸려면 상속이 실재하는지를 먼저 재고
-///   ADR-0218 결정 3 을 그 측정 위에서 다시 열 것 — 여기서 조용히 뒤집지 말 것.
-/// - 맞은 홀더가 정확히 하나면 [`ScanOutcome::Found`], 0 이면 [`ScanOutcome::NotYet`], 둘 이상이면
-///   [`ScanOutcome::Ambiguous`](결정 3).
-/// - `child_pid` 나 `child_start_time` 이 0 이면 **묻지도 않고** `NotYet` 이다. 0 은 「미상」이고, 미상을
-///   일치로 세면 남는 것은 PID 단독 대조라 결정 2 가 금한 판정이 된다.
-/// - 나무가 비면(자식이 죽었거나 PID 가 재사용됐다) 파일을 하나도 묻지 않고 `NotYet` 이다 —
-///   홀더 조회는 바퀴당 후보 파일 수만큼 Restart Manager 세션을 여는 비싼 물음이라, 답이 정해진
-///   자리에서 태우지 않는다.
+/// Decision rules (all ADR-0218):
+/// - **The comparison target is not `child_pid` alone but the whole tree rooted at that PID**
+///   ([`LockHolderProbe::our_processes`] is the source of record for the reason — the PID we hold is the `cmd.exe` wrapper and the one holding the
+///   lock is the `codex.exe` below it).
+/// - Candidate = a file named `<uuid>.lock` where some holder matches an entry of the tree on **both PID and start time**.
+///   ★A match on only one of them is not a candidate★ — PIDs are reused, so that decision would write another party's thread
+///   into our handle (decision 2). Widening the tree does not loosen this pair: the start time of descendants is
+///   read together at the same place where they are enumerated.
+/// - ★**What we count is not files but 「맞은 홀더」 (matched holders)**★ — decision 3's 「후보가 정확히 하나」 (exactly one candidate) is the number of **pairs**, not
+///   the number of file names. If two of our processes hold one file together, 「그 락이 누구 것인가」 (who owns that lock) is
+///   not narrowed to one, and counting only files lets that state pass as `Found`.
+///   ★We chose this knowing its cost★: if a child inherits the handle (a tool launched by codex inherits the same lock handle),
+///   adoption does not happen during that whole span. It is tolerable because [`run_capture`] does **not stop** on `Ambiguous`
+///   — once the inheriting side ends, we adopt on the next round. Whether inheritance really happens is
+///   unmeasured, and if it does, the symptom is 「회수가 늦어진다」 (recovery gets late), not a false detection.
+///   ★**There is dissent on this cost — read this line before raising it again**★ (2026-09-21): there was a counterargument 「둘 다 **우리** 것이면
+///   그 락은 우리 것이니 채택이 옳다」 (if both are ours, the lock is ours so adopting is right), and that decision itself was outside this round's scope, so the code was
+///   left as is. That is, the current shape is **a hold, not a decision**. To change it, first measure whether inheritance exists and
+///   reopen ADR-0218 decision 3 on top of that measurement — do not flip it silently here.
+/// - Exactly one matched holder gives [`ScanOutcome::Found`], 0 gives [`ScanOutcome::NotYet`], two or more give
+///   [`ScanOutcome::Ambiguous`] (decision 3).
+/// - If `child_pid` or `child_start_time` is 0, the answer is `NotYet` **without even asking**. 0 means 「미상」 (unknown), and counting unknown as
+///   a match leaves a PID-only comparison, which is the decision decision 2 forbids.
+/// - If the tree is empty (the child died or the PID was reused), `NotYet` without asking about a single file —
+///   the holder query opens one Restart Manager session per candidate file per round and is an expensive question, so we do not burn it
+///   where the answer is already fixed.
 ///
-/// 같은 파일을 여러 프로세스가 열고 있어도 된다 — 그중 하나가 우리 나무 안이면 후보다.
+/// Many processes may have the same file open — if one of them is inside our tree, it is a candidate.
 pub(crate) fn scan_for_child(
     lock_dir: &Path,
     child_pid: u32,
@@ -200,26 +200,26 @@ pub(crate) fn scan_for_child(
     }
 }
 
-/// **우리 프로세스의** 환경에서 본 락 디렉터리. 홈을 못 찾으면 `None`.
+/// The lock directory as seen from **our process's** environment. `None` if the home cannot be found.
 ///
-/// ★스폰이 자기 [`CODEX_HOME_ENV`] 를 싣는 경우는 이 함수가 답하지 않는다★ — 프로필 env 로 그 변수를
-/// 건 자식은 다른 홈을 쓴다. 그 자리에서는 [`lock_dir_under`] 에 그 홈을 직접 준다.
+/// ★This function does not answer for a spawn that carries its own [`CODEX_HOME_ENV`]★ — a child that set that variable
+/// through the profile env uses another home. In that case pass that home directly to [`lock_dir_under`].
 pub(crate) fn lock_dir() -> Option<PathBuf> {
     Some(lock_dir_under(&codex_home()?))
 }
 
-/// 홈을 아는 호출자용 — `<codex home>/thread-writer-locks`.
+/// For callers that know the home — `<codex home>/thread-writer-locks`.
 pub(crate) fn lock_dir_under(codex_home: &Path) -> PathBuf {
     codex_home.join(LOCK_DIR)
 }
 
-/// 락 파일 이름 → 스레드 id. `<uuid>.lock` 이 아니면 `None` — 오류가 아니라 **건너뛴다**(실측: 같은
-/// 폴더에 `.coordination.lock` 처럼 id 가 아닌 파일이 함께 산다).
+/// Lock file name → thread id. `None` if it is not `<uuid>.lock` — it is **skipped**, not an error (measured: files that are not ids, like `.coordination.lock`,
+/// live in the same folder).
 ///
-/// ★정규형(하이픈 36자)만 받는다 — `Uuid::parse_str` 단독으로 두지 말 것★: 그 함수는 하이픈 없는
-///   32자·중괄호·`urn:uuid:` 까지 받아서, codex 가 만들지 않는 이름이 후보로 올라온다. 후보가 하나 더
-///   늘면 판정이 `Found` 에서 `Ambiguous` 로 뒤집혀 **회수가 통째로 멈춘다** — 우리가 만들지 않은 파일
-///   하나가 남의 폴더에 놓인 것만으로 그렇게 된다. 대소문자는 안 가린다(Windows 파일 이름이 그렇다).
+/// ★Accept only the canonical form (36 chars with hyphens) — do not leave `Uuid::parse_str` alone★: that function
+///   also accepts 32 chars without hyphens, braces and `urn:uuid:`, so names codex never creates come up as candidates. One more
+///   candidate flips the decision from `Found` to `Ambiguous` and **recovery stops entirely** — and it happens just because
+///   one file we did not create sits in someone else's folder. Case is not distinguished (Windows file names behave that way).
 fn thread_id_from_lock_name(path: &Path) -> Option<Uuid> {
     if !path.extension()?.eq_ignore_ascii_case(LOCK_EXTENSION) {
         return None;
@@ -236,7 +236,7 @@ fn codex_home() -> Option<PathBuf> {
     )
 }
 
-/// [`codex_home`] 의 규칙만 — env 를 건드리지 않고 재려고 갈라 뒀다.
+/// Only the rule of [`codex_home`] — split off so it can be measured without touching env.
 fn codex_home_from(override_var: Option<OsString>, user_home: Option<PathBuf>) -> Option<PathBuf> {
     if let Some(dir) = override_var {
         if !dir.is_empty() {
@@ -246,38 +246,38 @@ fn codex_home_from(override_var: Option<OsString>, user_home: Option<PathBuf>) -
     user_home.map(|home| home.join(CODEX_HOME_SUBDIR))
 }
 
-/// 첫 스캔까지의 대기. ★0 이 아닌 것이 의도다★ — 실측된 스폰→락 생성 지연의 최솟값이 0.735 초라
-/// (ADR-0218 「근거」) 띄우자마자 훑으면 확실한 빈손 한 바퀴를 공짜로 산다.
+/// The wait until the first scan. ★Non-zero is intended★ — the measured minimum of the spawn→lock-creation delay is 0.735 s
+/// (ADR-0218 「근거」 (rationale)), so scanning right at launch buys one certain empty-handed round for free.
 const FIRST_DELAY: Duration = Duration::from_millis(500);
 
-/// 빈손일 때마다 대기를 두 배로 늘릴 때의 상한.
+/// The cap when the wait is doubled after each empty-handed round.
 ///
-/// ★왜 백오프인가 — 한 바퀴가 공짜가 아니다★: [`scan_for_child`] 는 후보 파일 **하나마다** Restart
-///   Manager 세션을 하나 연다. 실사용자의 락 폴더에 파일이 8 개 있었다(실측). 그래서 고정 짧은 주기는
-///   락을 영영 안 만드는 자식(상류가 배치를 바꿨거나 `codex exec` 인 경우) 아래에서 그 에이전트가 사는
-///   내내 초당 수 건의 RM 세션을 태운다.
-/// ★그런데도 상한 **시각**은 두지 않는다(ADR-0218 결정 4)★ — 판정이 시각이 아니라 소유권이라 늦게
-///   잡아도 오검출이 늘지 않는다. 느려질 뿐 포기하지 않는 것이 백오프와 시간창의 차이다.
-/// ★첫 몇 바퀴가 촘촘한 이유★: 0.735 · 0.879 · 0.907 · 1.891 초가 실측된 생성 지연이고, 재현되지 않은
-///   21 초 사례가 하나 있다. 0.5 초에서 두 배씩 늘리면 여섯째 바퀴가 30 초 근처라 그 꼬리도 덮는다.
+/// ★Why backoff — a round is not free★: [`scan_for_child`] opens one Restart
+///   Manager session per candidate file. A real user's lock folder had 8 files (measured). So a fixed short interval,
+///   under a child that never creates a lock (upstream changed the layout, or it is `codex exec`), burns several RM sessions per second
+///   for as long as that agent lives.
+/// ★Even so, we set no upper **time** limit (ADR-0218 decision 4)★ — the decision is ownership, not time, so
+///   catching late adds no false detections. Slowing down without giving up is the difference between backoff and a time window.
+/// ★Why the first few rounds are dense★: 0.735 · 0.879 · 0.907 · 1.891 s are the measured creation delays, and there is one
+///   21 s case that was not reproduced. Doubling from 0.5 s puts the sixth round near 30 s, which covers that tail too.
 const MAX_DELAY: Duration = Duration::from_secs(15);
 
-/// 폴링 루프가 OS 를 만나는 나머지 두 자리 — 자식이 아직 살아 있나와 다음 바퀴까지의 기다림.
+/// The other two places where the polling loop meets the OS — whether the child is still alive, and the wait until the next round.
 ///
-/// ★[`LockHolderProbe`] 와 갈라 둔 것은 축이 다르기 때문이다★ — 그쪽은 「무엇이 보이나」, 이쪽은
-///   「언제 다시 보나 · 볼 이유가 남았나」다. 둘을 합치면 루프 규칙을 잴 때 시계까지 가짜로 만들어야
-///   하는 자리와 목록만 바꾸면 되는 자리가 섞인다.
+/// ★It is split from [`LockHolderProbe`] because the axis differs★ — that one is 「무엇이 보이나」 (what is visible), this one is
+///   「언제 다시 보나 · 볼 이유가 남았나」 (when to look again, and whether a reason to look remains). Merging them mixes a place where measuring the loop rules would force faking the clock too
+///   with a place where only the list needs to change.
 pub(crate) trait CaptureClock {
-    /// `false` = 그 PID 가 더는 **우리 자식이 아니다**(죽었거나 PID 가 재사용됐다). 루프의 정상 종료
-    /// 조건이고 오류가 아니다.
+    /// `false` = that PID is no longer **our child** (it died or the PID was reused). It is the loop's normal exit
+    /// condition and not an error.
     fn child_alive(&self) -> bool;
 
-    /// 다음 바퀴까지 기다린다. ★락을 하나도 쥐지 않은 채 불린다★ — 이 자리가 루프에서 가장 오래
-    /// 머무는 곳이다.
+    /// Wait until the next round. ★Called while holding no lock at all★ — this is the place where the loop
+    /// spends the most time.
     fn sleep(&self, delay: Duration);
 }
 
-/// 운영에서 쓰는 시계 — 자식 판정은 PID 와 시작시각을 **함께** 본다(ADR-0218 결정 2 와 같은 규칙).
+/// The clock used in production — the child decision looks at PID and start time **together** (the same rule as ADR-0218 decision 2).
 struct ChildClock {
     pid: u32,
     start_time: u64,
@@ -293,46 +293,46 @@ impl CaptureClock for ChildClock {
     }
 }
 
-/// 이 spawn 에서 회수를 돌릴 재료 한 벌. ★만들어졌다는 것 자체가 「돌릴 조건을 다 채웠다」다★ —
-/// [`plan_capture`] 가 하나라도 못 채우면 `None` 이라, [`run_capture`] 안에 조건문이 남지 않는다.
+/// One set of inputs for running recovery in this spawn. ★That it was built at all means 「돌릴 조건을 다 채웠다」 (all conditions to run are met)★ —
+/// if [`plan_capture`] misses even one it is `None`, so no conditional is left inside [`run_capture`].
 pub(crate) struct CapturePlan {
-    /// 이 **자식이** 쓰는 락 폴더 — 우리 것이 아니다([`plan_capture`] 의 계약).
+    /// The lock folder used by this **child** — not ours (the contract of [`plan_capture`]).
     pub(crate) lock_dir: PathBuf,
     pub(crate) child_pid: u32,
     pub(crate) child_start_time: u64,
-    /// 조립점이 화신 표식을 묶어 건넨 기록 동사. 회수한 값이 나가는 **유일한** 길이다.
+    /// The record verb the assembly point handed over bound to the incarnation marker. It is the **only** path the recovered value leaves through.
     ///
-    /// ★이 `Arc` 가 무엇을 살려 두나 — 재 봤다★: 안쪽 클로저가 `Arc<ProfileRegistry>` 를 쥔다.
-    ///   그런데 그 명부는 `AgentManager` 가 **데몬 수명 내내** 들고 있는 단일 소유물이라, 이
-    ///   clone 은 그 수명을 한 순간도 늘리지 않는다. 늘리는 것은 스레드 자기 수명뿐이고 그것은
-    ///   자식이 죽으면 끝난다([`run_capture`] 의 멈춤 조건).
-    ///   ★`Weak` 으로 바꾸지 않은 이유★: 강한 쪽을 들고 있을 자리가 없다 — 조립점은 이 동사를
-    ///   `open_spawn` 에 넘기고 그대로 놓는다. 세션이 들게 하려면 `AgentSession` 의 소유물 분할
-    ///   (「소유권 분할」 불변식)을 고쳐야 하고, 그것은 이 회수 경로 혼자 요구할 변경이 아니다.
+    /// ★What does this `Arc` keep alive — checked again★: the inner closure holds an `Arc<ProfileRegistry>`.
+    ///   But that registry is a single owned object that `AgentManager` holds **for the whole daemon lifetime**, so this
+    ///   clone does not extend that lifetime for even a moment. What it extends is only the thread's own lifetime, and that
+    ///   ends when the child dies (the stop condition of [`run_capture`]).
+    ///   ★Why it is not a `Weak`★: there is no place to hold the strong side — the assembly point passes this verb to
+    ///   `open_spawn` and lets go. To make the session hold it, the ownership split of `AgentSession` (the
+    ///   「소유권 분할」 (ownership split) invariant) would have to change, and that is not a change this recovery path alone should demand.
     pub(crate) sink: SessionIdSink,
 }
 
-/// 이 spawn 이 락 회수를 돌려야 하나 — 돌린다면 그 재료를, 아니면 `None`.
+/// Should this spawn run lock recovery — if so, its inputs, otherwise `None`.
 ///
-/// 조건(하나라도 빠지면 `None`):
-/// - **이 spawn 이 이어받기 argv 를 내지 않는다**(`resumes_by_argv == false`). ★묻는 것이
-///   「저장된 손잡이가 있나」가 **아니라** 「그 손잡이가 실제로 argv 로 나갔나」인 것이 요점이다★ —
-///   손잡이가 있어도 그 값을 실을 수 없으면(`resume_argument` 가 거절하는 값) codex 는 **새 대화로**
-///   뜨고, 그 화신의 id 는 아무도 안 적는다. 「있다」로 판정하던 옛 형태가 정확히 그 구멍이었다
-///   (적출 2026-09-21). 두 결정이 **같은 술어 하나**를 보게 해서 그 어긋남을 없앤다
-///   (ADR-0218 결정 5 · 술어 정본 = `super::resume_argument`).
-///   ★Fresh 인데 손잡이가 실려 오는 조합은 조립점이 막는다★ — `manager::resume_handle_for`
-///   (그 doc 과 그 시험이 정본). 그래서 이 칸은 모드를 안 받고도 성립한다.
-/// - 기록할 곳이 있다(`sink`). 없으면 받아도 남길 데가 없다.
-/// - 자식의 PID 와 **시작시각**을 둘 다 안다. 어느 하나라도 미상이면 판정이 PID 단독 대조로 내려앉아
-///   ADR-0218 결정 2 가 금한 모양이 된다 — 그래서 여기서 끊는다.
-/// - 락 폴더를 안다.
+/// Conditions (if any one is missing, `None`):
+/// - **This spawn does not emit resume argv** (`resumes_by_argv == false`). ★The point is that what is asked is
+///   not 「저장된 손잡이가 있나」 (is there a stored handle) but 「그 손잡이가 실제로 argv 로 나갔나」 (did that handle actually go out as argv)★ —
+///   even with a handle, if its value cannot be loaded (a value `resume_argument` refuses) codex comes up as a **new conversation**,
+///   and nobody writes the id of that incarnation. The old form that decided on 「있다」 (there is one) was exactly that hole
+///   (found 2026-09-21). We make the two decisions look at the **same single predicate** to remove that mismatch
+///   (ADR-0218 decision 5 · source of record for the predicate = `super::resume_argument`).
+///   ★The combination of Fresh with a handle coming along is blocked by the assembly point★ — `manager::resume_handle_for`
+///   (its doc and its tests are the source of record). So this entry holds without taking the mode.
+/// - There is somewhere to record (`sink`). Without it, there is nowhere to keep what we receive.
+/// - Both the child's PID and **start time** are known. If either is unknown, the decision sinks to a PID-only comparison
+///   and becomes the shape ADR-0218 decision 2 forbids — so we cut it off here.
+/// - The lock folder is known.
 ///
-/// ★락 폴더는 **자식의** 환경에서 푼다 — 우리 것으로 대신하지 말 것★: `CODEX_HOME` 은 건 프로세스에만
-///   적용되므로, 프로필이 그 값을 걸면 자식의 락은 우리가 보는 폴더에 **영영 안 생긴다**. 그 어긋남은
-///   오류가 아니라 「계속 빈손」이라 화면에 아무 신호가 없다.
-/// `our_lock_dir` = 자식이 우리 환경을 그대로 물려받았을 때 쓸 값([`lock_dir`]). 인자로 받는 것은
-///   이 판정을 env 없이 재기 위해서다.
+/// ★Resolve the lock folder from the **child's** environment — do not substitute ours★: `CODEX_HOME` applies only to the process that sets it,
+///   so if the profile sets that value, the child's lock **never** appears in the folder we look at. That mismatch is
+///   not an error but 「계속 빈손」 (still empty-handed), so there is no signal on screen.
+/// `our_lock_dir` = the value to use when the child inherited our environment as is ([`lock_dir`]). It is taken as an argument
+///   so this decision can be measured without env.
 // ADR-0218
 pub(crate) fn plan_capture(
     child_env: &[(String, String)],
@@ -353,15 +353,15 @@ pub(crate) fn plan_capture(
     })
 }
 
-/// [`plan_capture`] 의 폴더 규칙만 — 스폰 env 가 `CODEX_HOME` 을 걸면 그 홈이, 아니면 우리 것이 이긴다.
+/// Only the folder rule of [`plan_capture`] — if the spawn env sets `CODEX_HOME`, that home wins, otherwise ours does.
 ///
-/// ★**마지막** 항목을 고른다★ — 스폰 env 는 목록이고 같은 키가 두 번 실릴 수 있는데, 통로가 그 목록을
-///   순서대로 `cmd.env` 에 밀어 넣으므로 자식이 실제로 받는 것은 뒤엣것이다.
-/// ★키 대조는 OS 의 환경변수 이름 규칙([`env_key_eq`])을 따른다★ — Windows 에서는 대소문자를 안 가린다.
-/// ★빈 값은 「안 걸었다」로 본다★ — [`codex_home_from`] 이 우리 쪽 env 를 그렇게 읽으므로 같은 규칙을 쓴다.
-/// ★알려진 구멍 — 상대 경로★: 그런 값은 나중에 **우리** cwd 기준으로 풀리는데 자식은 자기 cwd 로
-///   풀 테니 둘이 갈릴 수 있다. 증상은 오검출이 아니라 「계속 빈손」이다 — 후보 판정은 그대로 자식의
-///   PID·시작시각을 요구한다. 실제로 그런 프로필이 있는지는 미확인이라 고치지 않고 적어만 둔다.
+/// ★Pick the **last** entry★ — the spawn env is a list and the same key can be loaded twice, and the path pushes that list
+///   into `cmd.env` in order, so what the child actually receives is the later one.
+/// ★Key comparison follows the OS rule for environment variable names ([`env_key_eq`])★ — on Windows case is not distinguished.
+/// ★An empty value counts as 「안 걸었다」 (not set)★ — [`codex_home_from`] reads our side's env that way, so we use the same rule.
+/// ★Known hole — relative paths★: such a value is resolved later against **our** cwd, but the child would resolve it
+///   against its own cwd, so the two can diverge. The symptom is not a false detection but 「계속 빈손」 (still empty-handed) — candidate decision still requires the child's
+///   PID and start time. Whether such a profile really exists is unconfirmed, so we do not fix it and only write it down.
 fn child_lock_dir(
     child_env: &[(String, String)],
     our_lock_dir: Option<PathBuf>,
@@ -378,13 +378,13 @@ fn child_lock_dir(
     }
 }
 
-/// 회수 폴링을 **별도 스레드**로 띄운다 — 실패해도 스폰은 그대로 간다.
+/// Start the recovery polling on a **separate thread** — the spawn goes ahead even if it fails.
 ///
-/// ★스폰 경로도 pump 도 막지 않는다★: 이 스레드는 `sleep` 과 OS 질의만 하고 세션의 어떤 락도 쥐지
-///   않는다. 세션을 붙들지도 않는다 — 쥐고 있는 것은 기록 동사 하나뿐이라, 이 스레드가 남아 있다고
-///   해서 에이전트가 늦게 거두어지지 않는다.
-/// ★스레드를 못 띄우면 경고만 남기고 끝낸다★ — 실패 모드는 「id 를 못 받음」이고 그것은 스폰을 끊을
-///   이유가 아니다(ADR-0218 결정 10 의 같은 처분).
+/// ★It blocks neither the spawn path nor the pump★: this thread only does `sleep` and OS queries and holds none of the session's
+///   locks. It does not hold the session either — what it holds is just one record verb, so the agent is not reaped late
+///   because this thread remains.
+/// ★If the thread cannot be started, only a warning is left and it ends★ — the failure mode is 「id 를 못 받음」 (cannot receive the id) and that is not a reason
+///   to cut the spawn (the same handling as ADR-0218 decision 10).
 pub(crate) fn spawn_capture(plan: CapturePlan) {
     let clock = ChildClock {
         pid: plan.child_pid,
@@ -403,43 +403,43 @@ pub(crate) fn spawn_capture(plan: CapturePlan) {
     }
 }
 
-/// 잡을 때까지 폴링한다 — ★멈추는 조건은 셋뿐이고 시한은 그중에 없다★(ADR-0218 결정 4).
+/// Poll until caught — ★there are only three stop conditions and a time limit is not among them★ (ADR-0218 decision 4).
 ///
-/// 1. [`ScanOutcome::Found`] — 채택하고 멈춘다.
-/// 2. 자식이 죽었다([`CaptureClock::child_alive`]).
-/// 3. 세션이 내려간다 — ★별도 신호가 없는 것이 의도다★: 종료는 통로가 자식을 죽이는 것으로 시작하므로
-///    (「kill 인과」) 그 결말이 2 번으로 도착한다. 둘째 신호를 달면 종료 순서에 이 관찰자가 끼어든다.
+/// 1. [`ScanOutcome::Found`] — adopt and stop.
+/// 2. The child died ([`CaptureClock::child_alive`]).
+/// 3. The session goes down — ★having no separate signal is intended★: shutdown starts with the path killing the child
+///    (「kill 인과」 (kill causality)), so its outcome arrives as item 2. Attaching a second signal would put this observer into the shutdown order.
 ///
-/// ★[`ScanOutcome::Ambiguous`] 는 멈춤이 아니다 — 「이번 바퀴에 채택 안 함」이다★: ADR-0218 결정 3 이
-///   말하는 것은 **거절**이고, 결정 4 의 멈춤 목록에 이 결말은 없다. 겹침이 한때뿐일 수 있는데
-///   (스레드가 갈리는 순간의 짧은 중첩) 거기서 스레드를 끝내면 그 에이전트는 회수를 **영영** 잃는다.
-///   경고는 첫 바퀴에만 낸다 — 매 바퀴 내면 로그가 그 한 사실로 뒤덮인다.
+/// ★[`ScanOutcome::Ambiguous`] is not a stop — it means 「이번 바퀴에 채택 안 함」 (not adopted this round)★: what ADR-0218 decision 3
+///   says is **refusal**, and this outcome is not in decision 4's list of stops. The overlap may be momentary
+///   (a short overlap at the moment the thread switches), and if the thread ended there the agent would lose recovery **forever**.
+///   The warning is emitted only on the first round — emitting it every round would bury the log under that one fact.
 ///
-/// 채택은 [`CapturePlan::sink`] 로만 나간다 — 그 동사가 값을 버려도(죽은 화신의 기록이라 거절된
-/// 경우) 여기서 다른 길로 새지 않고 그대로 끝낸다.
+/// Adoption goes out only through [`CapturePlan::sink`] — even if that verb discards the value (refused
+/// because it is a dead incarnation's record), we end right there without leaking through another path.
 ///
-/// ★kill 과 기록 사이의 창은 닫지 않았다 — 재 보고 남긴 결론이다★: 생존 확인을 지난 뒤 자식이
-///   죽어도 이 바퀴의 기록은 나간다. **그것이 옳다** — 적히는 값은 방금 죽은 그 화신이 실제로 쓰던
-///   스레드 id 이고, 다음 활성화가 그 대화를 이어받는 것이 목적이다. 해로운 조합은 그 사이에
-///   **다음 화신이 이미 선** 경우 하나인데, 그때는 표식이 갈려 조립점의 화신 가드가 거절한다.
-///   ★그 「거절한다」가 왜 빈틈없나 — 결론만 적지 않고 근거를 남긴다(다음 읽는 사람이 다시 유도하지
-///   않게)★:
-///     1. 화신 표식을 **올리는** 자리는 `ProfileRegistry::epoch_for_spawn` 하나뿐이다. 나머지 한
-///        쓰기(`merge_preserving_live`)는 live 값을 그대로 **보존**할 뿐 올리지 않는다.
-///     2. `AgentManager::spawn_agent` 이 그것을 spawn 당 정확히 한 번 부르고, 그 호출은 Fresh 가
-///        손잡이를 비우는 `release_session_id` 보다 **앞**이다.
-///     그래서 「표식은 그대로인데 손잡이만 비워진」 구간이 없다 — 지각 기록이 옛 표식으로 들어올 수
-///     있는 시점에는 비우기가 아직 안 일어났고, 비우기가 일어났으면 표식은 이미 갈려 있다. 프로필이
-///     통째로 지워진 경우는 조립점의 기록 동사(`commit_session_id`)의 조회 자체가 실패해 같은 자리에서
-///     떨어진다.
-///   ★「기록이 나간다」는 이 화신의 첫 제출 래치에 **건넨다**는 뜻이다(ADR-0226)★ — 명부에 적히는 것은
-///     제출이 있었을 때뿐이다. 제출 없이 죽은 화신의 값은 적히지 않는다(이어받을 대화가 없다).
-///   그래서 여기에 취소 신호를 새로 달지 않았다 — 닫을 구멍이 아니라 **의도된 결말**이다.
+/// ★The window between kill and record was not closed — a conclusion we left after re-checking★: if the child dies
+///   after the liveness check, this round's record still goes out. **That is correct** — the written value is the thread id
+///   that incarnation, which just died, actually used, and the point is for the next activation to resume that conversation. The only harmful combination is
+///   the case where **the next incarnation is already up** in between, and then the markers differ and the assembly point's incarnation guard refuses.
+///   ★Why that 「거절한다」 (refuses) has no gap — we leave the grounds, not only the conclusion (so the next reader does not derive it
+///   again)★:
+///     1. The only place that **raises** the incarnation marker is `ProfileRegistry::epoch_for_spawn`. The one other
+///        write (`merge_preserving_live`) only **preserves** the live value and does not raise it.
+///     2. `AgentManager::spawn_agent` calls it exactly once per spawn, and that call is **before** `release_session_id`,
+///        where Fresh clears the handle.
+///     So there is no span where 「표식은 그대로인데 손잡이만 비워진」 (the marker is unchanged but only the handle is cleared) exists. At the moment a late record can arrive with the old marker,
+///     the clearing has not yet happened, and if the clearing has happened the marker has already changed. When the profile is
+///     deleted entirely, the lookup itself fails in the assembly point's record verb (`commit_session_id`) and it
+///     drops out at the same place.
+///   ★「기록이 나간다」 (the record goes out) means it is **handed** to this incarnation's first-submission latch (ADR-0226)★ — it is written to the registry only
+///     when there was a submission. The value of an incarnation that died without a submission is not written (there is no conversation to resume).
+///   That is why we did not add a new cancellation signal here — it is not a hole to close but an **intended outcome**.
 ///
-/// ★한 번 잡으면 그 뒤 스레드가 바뀌어도 안 따라간다 — 알려진 미확인이다★: 사용자가 대화 도중
-///   새 스레드를 열면 codex 가 락을 갈아 쥘 텐데(미측정), 이 루프는 이미 멈춰 있어 프로필에는 첫
-///   스레드 id 가 남는다. 그 상태로 이어받으면 사용자가 마지막으로 보던 대화가 아니라 그 첫 대화가
-///   열린다. 「잡으면 즉시 멈춘다」는 ADR-0218 결정 4 의 선택이라 여기서 뒤집지 않는다.
+/// ★Once caught, it does not follow later thread changes — a known unconfirmed item★: if the user opens
+///   a new thread mid-conversation, codex will take over the lock anew (unmeasured), but this loop has already stopped, so the profile keeps the first
+///   thread id. Resuming in that state opens that first conversation, not the conversation the user was last looking at.
+///   「잡으면 즉시 멈춘다」 (stop immediately once caught) is a choice of ADR-0218 decision 4, so we do not flip it here.
 fn run_capture(plan: &CapturePlan, probe: &dyn LockHolderProbe, clock: &dyn CaptureClock) {
     let mut delay = FIRST_DELAY;
     let mut warned_ambiguous = false;
@@ -474,7 +474,7 @@ fn run_capture(plan: &CapturePlan, probe: &dyn LockHolderProbe, clock: &dyn Capt
     }
 }
 
-/// 빈손 한 바퀴 뒤의 다음 대기 — 두 배씩, [`MAX_DELAY`] 에서 멈춘다(사유 = 그 상수의 doc).
+/// The next wait after an empty-handed round — doubled each time, stopping at [`MAX_DELAY`] (reason = the doc of that constant).
 fn next_delay(previous: Duration) -> Duration {
     (previous * 2).min(MAX_DELAY)
 }
@@ -484,23 +484,23 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    // ★가짜 나무는 **운영에서 실제로 나오는 모양**이다 — 이것이 평평하면 시험 전체가 거짓이 된다★:
-    //   우리가 쥐는 PID 는 `cmd.exe` 래퍼이고(`engram_dashboard_platform::shell::console_command`) 락을
-    //   쥐는 것은 그 아래 `codex.exe` 다. 홀더를 래퍼 PID 로 심어 두면 「래퍼만 대조하는」 구현도 초록이 된다 — 실제로 그렇게
-    //   심어 뒀다가 회수가 영영 안 되는 구현을 통과시켰다(적출 2026-09-21).
+    // ★The fake tree is **the shape that actually appears in production** — if it is flat, the whole test becomes a lie★:
+    //   the PID we hold is the `cmd.exe` wrapper (`engram_dashboard_platform::shell::console_command`) and the one holding the lock is the
+    //   `codex.exe` below it. If the holder is planted with the wrapper PID, even an implementation that 「래퍼만 대조하는」 (compares only the wrapper) goes green — we actually
+    //   planted it that way once and it passed an implementation whose recovery never happens (found 2026-09-21).
     const WRAPPER_PID: u32 = 4242;
     const WRAPPER_START: u64 = 134_344_468_098_866_343;
-    /// 래퍼의 자식 = 실제로 락을 쥐는 프로세스.
+    /// The wrapper's child = the process that actually holds the lock.
     const CODEX_PID: u32 = 4816;
     const CODEX_START: u64 = 134_344_468_099_111_111;
-    /// codex 가 띄운 도구 — 나무가 한 단 더 깊어도 잡아야 한다.
+    /// A tool launched by codex — must be caught even if the tree is one level deeper.
     const TOOL_PID: u32 = 19_468;
     const TOOL_START: u64 = 134_344_468_099_222_222;
 
     const ID_A: &str = "01a0c2c4-97f5-75e2-8ea0-4855b7a0997d";
     const ID_B: &str = "01a0c2c3-4f4c-7ee2-a858-3db9f72c2e78";
 
-    /// 목록·홀더·나무를 통째로 들고 있는 가짜 — 파일시스템도 OS 도 안 탄다.
+    /// A fake holding the list, holders and tree whole — it touches neither the filesystem nor the OS.
     struct FakeProbe {
         entries: Vec<PathBuf>,
         holders: HashMap<PathBuf, Vec<Holder>>,
@@ -508,7 +508,7 @@ mod tests {
     }
 
     impl Default for FakeProbe {
-        /// 기본 나무 = 래퍼 + codex 두 단. 더 깊은 나무가 필요한 시험만 [`FakeProbe::with_tool`] 로 넓힌다.
+        /// Default tree = wrapper + codex, two levels. Only tests that need a deeper tree widen it with [`FakeProbe::with_tool`].
         fn default() -> Self {
             Self {
                 entries: Vec::new(),
@@ -539,7 +539,7 @@ mod tests {
         fn holders(&self, path: &Path) -> Vec<Holder> {
             self.holders.get(path).cloned().unwrap_or_default()
         }
-        /// 뿌리의 신원이 안 맞으면 나무가 없다 — 실물 `process::subtree` 와 같은 규칙.
+        /// If the root's identity does not match there is no tree — the same rule as the real `process::subtree`.
         fn our_processes(&self, root_pid: u32, root_start_time: u64) -> Vec<ProcessIdentity> {
             if root_pid != WRAPPER_PID || root_start_time != WRAPPER_START {
                 return Vec::new();
@@ -572,7 +572,7 @@ mod tests {
         }
     }
 
-    /// 락을 쥐는 쪽 — ★우리가 쥔 PID 가 아니라 그 **자식**이다★.
+    /// The side holding the lock — ★not the PID we hold but its **child**★.
     fn codex() -> Holder {
         Holder {
             pid: CODEX_PID,
@@ -587,7 +587,7 @@ mod tests {
         }
     }
 
-    /// ★언제나 **래퍼** PID 로 묻는다 — 운영에서 우리가 쥐는 것이 그것이다★.
+    /// ★Always ask with the **wrapper** PID — that is what we hold in production★.
     fn scan(probe: &FakeProbe) -> ScanOutcome {
         scan_for_child(Path::new("Z:/locks"), WRAPPER_PID, WRAPPER_START, probe)
     }
@@ -596,17 +596,17 @@ mod tests {
         ScanOutcome::Found(Uuid::parse_str(id).unwrap())
     }
 
-    // ── 채택 ────────────────────────────────────────────────────────────────────────
+    // ── Adoption ────────────────────────────────────────────────────────────────────
 
-    /// ★이 항목이 지키는 것 = 「래퍼 PID 하나만 대조하면 안 된다」★: 묻는 PID 는 래퍼인데 홀더는 그
-    /// 자식이다. 대조 상대를 나무로 넓히지 않으면 여기서 `NotYet` 이 나온다.
+    /// ★What this entry guards = 「래퍼 PID 하나만 대조하면 안 된다」 (do not compare only the wrapper PID)★: the PID asked is the wrapper but the holder is its
+    /// child. Unless the comparison target is widened to the tree, `NotYet` comes out here.
     #[test]
     fn a_lock_held_by_our_childs_child_is_found() {
         let probe = FakeProbe::default().file(&format!("{ID_A}.lock"), &[codex()]);
         assert_eq!(scan(&probe), found(ID_A));
     }
 
-    /// 나무가 한 단 더 깊어도 잡는다 — codex 가 띄운 도구가 쥔 자리.
+    /// Caught even when the tree is one level deeper — a lock held by a tool launched by codex.
     #[test]
     fn a_lock_held_by_a_deeper_descendant_is_found() {
         let probe = FakeProbe::default()
@@ -615,14 +615,14 @@ mod tests {
         assert_eq!(scan(&probe), found(ID_A));
     }
 
-    /// 열거가 못 본 프로세스가 쥔 락은 후보가 아니다 — 우리 것이라고 말할 근거가 없다.
+    /// A lock held by a process the enumeration did not see is not a candidate — there is no ground to say it is ours.
     #[test]
     fn a_holder_outside_the_reported_tree_is_not_a_candidate() {
         let probe = FakeProbe::default().file(&format!("{ID_A}.lock"), &[tool()]);
         assert_eq!(scan(&probe), ScanOutcome::NotYet);
     }
 
-    /// 나무가 비면(자식이 죽었거나 PID 재사용) 파일을 묻지도 않는다.
+    /// If the tree is empty (the child died or the PID was reused) we do not even ask about files.
     #[test]
     fn an_empty_tree_short_circuits_to_not_yet() {
         let probe = FakeProbe::default()
@@ -631,7 +631,7 @@ mod tests {
         assert_eq!(scan(&probe), ScanOutcome::NotYet);
     }
 
-    /// 뿌리의 신원이 어긋나면 나무 자체가 안 선다 — 남의 PID 나무를 우리 것이라 부르지 않는다.
+    /// If the root's identity is off, the tree itself does not stand — we do not call another party's PID tree ours.
     #[test]
     fn a_root_whose_start_time_drifted_owns_no_tree() {
         let probe = FakeProbe::default().file(&format!("{ID_A}.lock"), &[codex()]);
@@ -677,7 +677,7 @@ mod tests {
         assert_eq!(scan(&probe), found(ID_A));
     }
 
-    // ── 두 칸이 **함께** 맞아야 한다(ADR-0218 결정 2) ──────────────────────────────
+    // ── Both fields must match **together** (ADR-0218 decision 2) ───────────────────
 
     #[test]
     fn same_pid_with_a_different_start_time_is_not_a_match() {
@@ -730,7 +730,7 @@ mod tests {
         );
     }
 
-    // ── 후보 0 개 / 2 개 이상 ──────────────────────────────────────────────────────
+    // ── 0 candidates / 2 or more ────────────────────────────────────────────────────
 
     #[test]
     fn an_empty_directory_is_not_yet() {
@@ -751,7 +751,7 @@ mod tests {
         assert_eq!(scan(&probe), ScanOutcome::Ambiguous(2));
     }
 
-    // ── 이름 판정 ──────────────────────────────────────────────────────────────────
+    // ── Name decision ───────────────────────────────────────────────────────────────
 
     #[test]
     fn names_that_are_not_a_uuid_lock_are_skipped() {
@@ -774,8 +774,8 @@ mod tests {
         assert_eq!(scan(&probe), ScanOutcome::NotYet);
     }
 
-    /// ★정규형이 아닌 uuid 이름은 후보가 아니다★ — 받아 주면 우리가 만들지 않은 파일 하나가 후보 수를
-    /// 늘려 판정을 `Ambiguous` 로 뒤집고, 그 에이전트의 회수가 통째로 멈춘다.
+    /// ★A uuid name that is not in canonical form is not a candidate★ — if accepted, one file we did not create raises the candidate count,
+    /// flips the decision to `Ambiguous`, and that agent's recovery stops entirely.
     #[test]
     fn non_canonical_uuid_names_are_not_candidates() {
         let simple = ID_A.replace('-', "");
@@ -793,15 +793,15 @@ mod tests {
         }
     }
 
-    /// 대문자 하이픈형은 받는다 — Windows 파일 이름은 대소문자를 안 가린다.
+    /// The uppercase hyphenated form is accepted — Windows file names do not distinguish case.
     #[test]
     fn an_uppercase_canonical_name_is_still_a_candidate() {
         let probe = FakeProbe::default().file(&format!("{}.lock", ID_A.to_uppercase()), &[codex()]);
         assert_eq!(scan(&probe), found(ID_A));
     }
 
-    /// ★세는 것은 파일이 아니라 맞은 **홀더**다★ — 한 락을 우리 프로세스 둘이 쥐고 있으면 「그 락이
-    /// 누구 것인가」가 아직 하나로 안 좁혀졌다. 파일만 세면 그 상태가 `Found` 로 통과한다.
+    /// ★What we count is not files but matched **holders**★ — if two of our processes hold one lock, 「그 락이 누구 것인가」 (who owns that lock)
+    /// has not been narrowed to one yet. Counting only files lets that state pass as `Found`.
     #[test]
     fn two_of_our_processes_on_one_lock_are_ambiguous() {
         let probe = FakeProbe::default()
@@ -810,7 +810,7 @@ mod tests {
         assert_eq!(scan(&probe), ScanOutcome::Ambiguous(2));
     }
 
-    /// 남이 함께 쥐고 있는 것은 수를 안 늘린다 — 세는 것은 **우리** 홀더뿐이다.
+    /// Something held jointly by others does not raise the count — we count only **our** holders.
     #[test]
     fn strangers_sharing_the_lock_do_not_make_it_ambiguous() {
         let probe = FakeProbe::default().file(
@@ -826,7 +826,7 @@ mod tests {
         assert_eq!(scan(&probe), found(ID_A));
     }
 
-    // ── 경로 산출 ──────────────────────────────────────────────────────────────────
+    // ── Path derivation ─────────────────────────────────────────────────────────────
 
     #[test]
     fn the_lock_dir_hangs_off_the_codex_home() {
@@ -864,19 +864,19 @@ mod tests {
         assert_eq!(codex_home_from(None, None), None);
     }
 
-    // ── 회수 루프(ADR-0218 결정 4·5·6) ───────────────────────────────────────────
+    // ── Recovery loop (ADR-0218 decisions 4·5·6) ────────────────────────────────────
 
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
     use std::sync::{Arc, Mutex};
 
-    /// 바퀴 수를 세는 칸 — 가짜 시계가 올리고 가짜 프로브가 읽어, 「n 번째 바퀴에는 이것이 보인다」를
-    /// 쓴다. 두 가짜가 같은 칸을 보는 것이 이 묶음의 전부다.
+    /// The field that counts rounds — the fake clock raises it and the fake probe reads it, writing 「n 번째 바퀴에는 이것이 보인다」 (this is visible on round n).
+    /// Both fakes looking at the same field is the whole of this bundle.
     type Ticks = Rc<Cell<usize>>;
 
     struct FakeClock {
         ticks: Ticks,
-        /// 이 바퀴 수까지만 자식이 살아 있다.
+        /// The child is alive only up to this round count.
         alive_through: usize,
         slept: RefCell<Vec<Duration>>,
     }
@@ -911,7 +911,7 @@ mod tests {
         }
     }
 
-    /// 바퀴마다 다른 폴더 모습을 보여 주는 프로브 — 목록이 바닥나면 마지막 모습이 계속 간다.
+    /// A probe that shows a different folder state each round — when the list runs out the last state keeps going.
     struct ScriptedProbe {
         ticks: Ticks,
         rounds: Vec<FakeProbe>,
@@ -931,9 +931,9 @@ mod tests {
         fn holders(&self, path: &Path) -> Vec<Holder> {
             self.round().holders(path)
         }
-        /// ★세 메서드를 **전부** 위임한다 — 하나라도 빠뜨리면 그 자리만 조용히 실 OS 를 탄다★.
-        /// 실제로 이것을 빠뜨렸더니 나무 조회가 기본 구현으로 새서 가짜 PID 로 진짜 프로세스 표를
-        /// 훑었고, 답이 늘 빈손이라 루프가 안 끝났다(실측 2026-09-21 — 세 항목이 60초 넘게 매달렸다).
+        /// ★Delegate **all** three methods — miss even one and only that spot silently goes to the real OS★.
+        /// When this was actually missed, the tree query leaked to the default implementation, scanned the real process table with a fake PID,
+        /// and since the answer was always empty-handed the loop never ended (measured 2026-09-21 — three items hung for over 60 seconds).
         fn our_processes(&self, root_pid: u32, root_start_time: u64) -> Vec<ProcessIdentity> {
             self.round().our_processes(root_pid, root_start_time)
         }
@@ -942,7 +942,7 @@ mod tests {
         }
     }
 
-    /// 받은 문자열을 그대로 쌓는 기록 동사 — 조립점이 건네는 것과 **같은 타입**이다.
+    /// A record verb that accumulates the strings it receives as is — the **same type** the assembly point hands over.
     fn recording_sink() -> (SessionIdSink, Arc<Mutex<Vec<String>>>) {
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let write = seen.clone();
@@ -992,9 +992,9 @@ mod tests {
         assert_eq!(rounds, 3, "빈손 두 바퀴를 지나 세 번째에 멈춰야 한다");
     }
 
-    /// ★거절이지 포기가 아니다(ADR-0218 결정 3 대 결정 4)★ — 겹침이 풀리면 그다음 바퀴에 채택한다.
-    /// 여기서 스레드를 끝내 버리면 스레드가 갈리는 순간의 짧은 중첩 하나가 그 에이전트의 회수를 영영
-    /// 끝낸다.
+    /// ★A refusal, not a giving up (ADR-0218 decision 3 vs decision 4)★ — once the overlap clears, we adopt on the next round.
+    /// If the thread were ended here, one short overlap at the moment the thread switches would end that agent's recovery
+    /// for good.
     #[test]
     fn an_ambiguous_scan_adopts_nothing_but_keeps_polling() {
         let (got, rounds) = drive(
@@ -1014,7 +1014,7 @@ mod tests {
         assert_eq!(rounds, 2, "겹친 바퀴에서 스레드를 끝내 버렸다");
     }
 
-    /// 겹침이 안 풀리면 채택은 끝까지 안 한다 — 「거절」 쪽은 그대로다.
+    /// If the overlap never clears, adoption never happens — the 「거절」 (refusal) side stays as is.
     #[test]
     fn an_ambiguous_scan_that_never_clears_adopts_nothing() {
         let (got, rounds) = drive(
@@ -1036,12 +1036,12 @@ mod tests {
         assert_eq!(rounds, 3, "생존 확인이 실패한 바퀴에서 끝나야 한다");
     }
 
-    /// ★채택은 건네받은 동사 **하나로만** 나간다 — 그 동사가 값을 버려도 둘째 길이 없다★.
+    /// ★Adoption goes out through the handed-over verb **alone** — even if that verb discards the value there is no second path★.
     ///
-    /// 여기 쓰는 가짜는 죽은 화신의 기록 동사와 같은 모양이다(받되 프로필에는 아무것도 안 남긴다).
-    /// 운영 동사에 실제로 화신 가드가 실려 있다는 것은 조립점 쪽
-    /// `manager::tests::a_dead_incarnations_sink_cannot_overwrite_a_live_value` 가 잰다 —
-    /// `ProfileRegistry` 를 backend 로 들이지 않는 것이 ADR-0004 라, 이 자리는 **거절하는 동사**로 세운다.
+    /// The fake used here has the same shape as a dead incarnation's record verb (it receives but leaves nothing in the profile).
+    /// That the production verb really carries the incarnation guard is measured on the assembly point's side by
+    /// `manager::tests::a_dead_incarnations_sink_cannot_overwrite_a_live_value` —
+    /// ADR-0004 says `ProfileRegistry` does not enter the backend, so this spot is set up with a **refusing verb**.
     #[test]
     fn a_sink_that_drops_the_value_does_not_make_the_loop_look_elsewhere() {
         let calls = Arc::new(Mutex::new(0usize));
@@ -1076,7 +1076,7 @@ mod tests {
         );
     }
 
-    // ── 회수를 돌릴 조건(ADR-0218 결정 5) ────────────────────────────────────────
+    // ── Conditions to run recovery (ADR-0218 decision 5) ────────────────────────────
 
     const OUR_HOME: &str = "C:/Users/x/.codex";
 
@@ -1104,8 +1104,8 @@ mod tests {
         )
     }
 
-    /// ★계획은 **건네받은** 기록 동사를 그대로 싣는다★ — 여기서 다른 동사를 지어내면 조립점이 묶어 둔
-    /// 화신 가드가 통째로 빠진다(그 가드의 실물은 `manager::session_id_sink`).
+    /// ★The plan carries the **handed-over** record verb as is★ — if another verb is invented here, the incarnation guard the assembly point
+    /// bound goes missing entirely (the real guard is `manager::session_id_sink`).
     #[test]
     fn the_plan_carries_the_sink_it_was_handed() {
         let (sink, seen) = recording_sink();
@@ -1136,9 +1136,9 @@ mod tests {
         assert_eq!(made.lock_dir, lock_dir_under(Path::new(OUR_HOME)));
     }
 
-    /// ★게이트가 보는 것은 「argv 가 실제로 이어받았나」다★ — 「손잡이가 있나」가 아니다. 그 둘을
-    /// 가르는 자리(실을 수 없는 손잡이)는 이 폴더의
-    /// `tests::a_handle_we_refuse_to_resume_with_is_still_captured` 가 잰다.
+    /// ★What the gate looks at is 「argv 가 실제로 이어받았나」 (did argv actually resume)★ — not 「손잡이가 있나」 (is there a handle). The spot that
+    /// tells the two apart (a handle that cannot be loaded) is measured by this folder's
+    /// `tests::a_handle_we_refuse_to_resume_with_is_still_captured`.
     #[test]
     fn a_resume_incarnation_never_starts_the_loop() {
         assert!(
@@ -1181,8 +1181,8 @@ mod tests {
         .is_none());
     }
 
-    /// ★프로필이 건 `CODEX_HOME` 이 우리 것을 이긴다★ — 그 변수는 건 프로세스에만 적용되므로, 우리
-    /// 폴더를 훑으면 그 자식의 락은 영영 안 보인다(오류 없이 계속 빈손).
+    /// ★A `CODEX_HOME` set by the profile beats ours★ — that variable applies only to the process that sets it, so if we
+    /// scan our folder the child's lock is never seen (empty-handed forever, with no error).
     #[test]
     fn the_lock_dir_comes_from_the_childs_environment() {
         let made = plan(
@@ -1232,11 +1232,11 @@ mod tests {
         assert_eq!(made.lock_dir, lock_dir_under(Path::new(OUR_HOME)));
     }
 
-    // ── 실 프로브와의 결합(Windows) ────────────────────────────────────────────────
+    // ── Coupling with the real probe (Windows) ──────────────────────────────────────
 
-    /// 가짜가 아니라 [`RestartManagerProbe`] 로 한 바퀴 — 이 프로세스가 연 `<uuid>.lock` 을 자식인 척
-    /// 찾는다(자기 PID·시작시각으로 묻는다). 같은 폴더에 **안 쥔** 락과 id 가 아닌 이름을 함께 두어
-    /// 목록 쪽 규칙도 실물로 지난다.
+    /// One round with [`RestartManagerProbe`] instead of a fake — it finds the `<uuid>.lock` this process opened, pretending it is the child
+    /// (asking with its own PID and start time). We put in the same folder a lock that is **not held** and a name that is not an id,
+    /// so the list-side rules also pass through the real thing.
     #[cfg(windows)]
     #[test]
     fn the_real_probe_finds_a_lock_this_process_holds() {
