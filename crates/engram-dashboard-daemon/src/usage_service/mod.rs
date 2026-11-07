@@ -1,21 +1,21 @@
-//! 사용량 한도 서비스 — 벤더 중립.
+//! Usage limit service — vendor-neutral.
 //!
-//! ★벤더 이름·키 목록·정책(쿨타임·시한)을 여기 두지 않는다★ — 전부 받은 조회기(실물 =
-//! `engram_dashboard_agent::backend::usage_probes()`)에서 받는다. 벤더 match·벤더 리터럴이 이 모듈에 생기면
-//! 「백엔드 확장」 위반이다.
+//! ★Vendor names · key lists · policy (cooldown · deadline) are not put here★ — all of it is received from the probers handed in (real =
+//! `engram_dashboard_agent::backend::usage_probes()`). If a vendor match or vendor literal appears in this module it is a
+//! violation of 「백엔드 확장」 (backend extension).
 //!
-//! [`UsageService`] 가 책([`book::UsageBook`])·구독 명부([`watch::UsageWatch`])·시계·인코더·조회기·스케줄러
-//! 깨우기 송신단을 쥐고 줍기 적용·구독 교체·요청·조회 구동·발행을 몬다(TRD §1-4).
-//! ★락 순서 = 명부 → 책 · 책은 잎이다★ — 책을 쥔 채 명부·출구·인코더·깨우기·합류자 깨우기·조회 스레드 기동을
-//!   하지 않는다.
-//! ★발행은 「적용 먼저, 대상 열거 나중」이다★ — 책 락을 놓은 **뒤** 명부에서 대상을 뜨고, 어느 락도 없이
-//!   나른다([`watch::deliver`]). 구독 교체의 「등록 먼저, 스냅숏 나중」과 짝을 이뤄 겹친 교체·발행이 그 연결에
-//!   책의 값 이상을 닿게 한다(TRD §3 #57).
-//! ★한 연결에 닿는 차례는 경로끼리 보장하지 않는다★ — 보내기가 락 밖이라 두 경로(줍기·교체·조회·스케줄러)의
-//!   한 장이 뒤바뀌어 작은 revision 이 늦게 닿거나 같은 한 장이 두 번 닿을 수 있다. 받는 쪽이 칸마다 큰 revision
-//!   만 남기는 것(TRD §1-7·§1-8)에 기댄 설계다.
-//! ★조회는 시작한 쪽과 무관하게 한 벌의 끝을 탄다★ — 요청이 시작했든 스케줄러가 시작했든 [`ProbeGuard`] 가
-//!   닫고, 합류한 요청은 그 끝을 기다린다. 조회 스레드는 서비스를 `Weak` 로만 쥔다.
+//! [`UsageService`] holds the book ([`book::UsageBook`]) · the subscription registry ([`watch::UsageWatch`]) · the clock · the encoder · the probers · the scheduler
+//! wake sender, and drives pickup application · subscription replacement · requests · query launching · emission (TRD §1-4).
+//! ★Lock order = registry → book · the book is a leaf★ — while holding the book, it does not touch the registry · outlets · encoder · wake · joiner wake ·
+//!   starting a query thread.
+//! ★Emission is 「적용 먼저, 대상 열거 나중」 (apply first, enumerate targets later)★ — after the book lock is released, take the targets from the registry, and
+//!   carry them without any lock ([`watch::deliver`]). Paired with 「등록 먼저, 스냅숏 나중」 (register first, snapshot later) of subscription replacement, overlapping replacement and emission make that connection
+//!   receive at least the book's value (TRD §3 #57).
+//! ★The order of arrival at one connection is not guaranteed across paths★ — sending is outside the lock, so one sheet from two paths (pickup · replacement · query · scheduler)
+//!   can be swapped so a smaller revision arrives late or the same sheet arrives twice. The design leans on the receiving side keeping only the larger revision
+//!   per cell (TRD §1-7 · §1-8).
+//! ★A query rides one set of endings regardless of who started it★ — whether a request or the scheduler started it, [`ProbeGuard`]
+//!   closes it, and a joined request waits for that end. The query thread holds the service only as a `Weak`.
 // ADR-0004
 // ADR-0006
 
@@ -47,38 +47,38 @@ use book::{Coalesce, Judgment, Now, RequestKind, TickPlan, UsageBook};
 use clock::UsageClock;
 use watch::{deliver, Replaced, UsageEncoder, UsageOutlet, UsageWatch};
 
-/// 요청이 조회 끝을 기다리는 상한(§3 #16) — 버스 마감 7초·셸 답장 상한 30초 아래. 넘으면 캐시 + `in_flight`
-/// 로 답하고 조회는 계속된다.
+/// The cap on how long a request waits for a query end (§3 #16) — under the bus deadline of 7 seconds and the shell reply cap of 30 seconds. If exceeded it answers with cache + `in_flight`
+/// and the query continues.
 pub const REPLY_WAIT_MAX: Duration = Duration::from_secs(5);
 
-/// 요청의 답이 그 요청이 기다린 조회에서 나온 값인가.
+/// Is the request's answer a value that came from the query that request waited on.
 ///
-/// ★데몬 안에서만 쓴다 — wire 스냅숏은 싣지 않는다★: wire 스냅숏은 방송과 셸 캐시로만 흐르고(⟳ 답은
-///   `Ack`) 거기선 늘 `Cached` 라 뜻이 없다(TRD §3 #50·#81). 싣는 곳은 버스 행이다.
+/// ★Used only inside the daemon — the wire snapshot does not carry it★: the wire snapshot flows only to broadcasts and the shell cache (the ⟳ answer is
+///   `Ack`) and there it is always `Cached` so it carries no meaning (TRD §3 #50·#81). The place that carries it is the bus row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsageServed {
-    /// 이 요청이 기다린 조회(또는 그 뒤의 조회)가 성공해 받아 온 값이다.
+    /// The value was obtained from a successful query that this request waited on (or a later one).
     Fresh,
-    /// 이번 요청 동안 새로 받은 값이 없다(조회 안 함 · 실패 · 기다림 상한 초과) — 서비스가 들고 있던 값이다.
+    /// No new value was received during this request (no query made · failure · wait cap exceeded) — it is the value the service was holding.
     Cached,
 }
 
-/// 요청 하나의 답 — 답하는 순간의 한 장.
+/// The answer to one request — one sheet at the moment of answering.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageAnswer {
     pub snapshot: UsageLimitSnapshot,
     pub served: UsageServed,
 }
 
-/// 조회 스레드를 띄우는 손잡이 — 실물 = [`OsProbeThreads`].
+/// The handle that launches a query thread — real = [`OsProbeThreads`].
 pub trait ProbeThreads: Send + Sync {
-    /// `run` 을 새 스레드에서 한 번 돌리고 곧바로 돌아온다(기다리지 않는다). `Err` = 못 띄웠다 — 부르는 쪽이
-    /// 그 자리에서 조회를 실패로 닫는다. `run` 을 놓든 쥐든(뒤에 돌리든) 조회는 한 번만 닫힌다.
+    /// Runs `run` once on a new thread and returns at once (does not wait). `Err` = could not launch — the caller
+    /// closes the query as a failure on the spot. Whether `run` is dropped or held (run later), the query is closed only once.
     fn spawn(&self, run: Box<dyn FnOnce() + Send>) -> io::Result<()>;
 }
 
-/// 이름 `usage-probe` 인 분리 std 스레드 — tokio blocking 풀이 아니라 런타임 drop 이 기다리지 않고, 자식은 Job 이
-/// 데몬과 함께 거둔다(§3 #39).
+/// A detached std thread named `usage-probe` — not the tokio blocking pool, so runtime drop does not wait, and the child is reaped by the Job together with
+/// the daemon (§3 #39).
 pub struct OsProbeThreads;
 
 impl ProbeThreads for OsProbeThreads {
@@ -90,73 +90,73 @@ impl ProbeThreads for OsProbeThreads {
     }
 }
 
-/// [`UsageService::new`] 가 받는 것 — 실물은 조립이 준다.
+/// What [`UsageService::new`] takes — the assembly gives the real ones.
 pub struct UsageParts {
-    /// 칸 = 조회기마다 기본 계정 하나(키·정책은 조회기가 준다 · 같은 키가 둘이면 앞의 것 · wire 벤더로 못 바꾸는
-    /// 키는 칸이 없다 — [`UsageBook::new`]).
+    /// Cell = one default account per prober (key and policy come from the prober · if two have the same key the first wins · a key that cannot be turned into a wire vendor
+    /// has no cell — [`UsageBook::new`]).
     pub probes: Vec<&'static dyn UsageProbe>,
     pub spawner: Arc<dyn ProbeSpawner>,
-    /// 조회마다 임시 폴더를 만들 부모 폴더([`ProbeEnv::scratch_root`]) — 데몬 전용 폴더.
+    /// The parent folder in which a temp folder is made per query ([`ProbeEnv::scratch_root`]) — a daemon-only folder.
     pub scratch_root: PathBuf,
     pub threads: Arc<dyn ProbeThreads>,
     pub clock: Arc<dyn UsageClock>,
     pub encoder: Arc<dyn UsageEncoder>,
 }
 
-/// 책 락 하나가 함께 쥐는 것 — 책과 칸마다의 조회 끝 기록. 합류자 등록(요청 판정)과 조회 끝 적용(완료 가드)이
-/// 같은 락 안에서 차례로 서므로, 합류한 요청이 기다리는 끝이 어느 조회의 끝인지 어긋나지 않는다.
+/// What one book lock holds together — the book and each cell's query end record. Joiner registration (request decision) and query end application (completion guard)
+/// stand in turn inside the same lock, so which query's end a joined request is waiting for never goes out of step.
 struct Desk {
     book: UsageBook,
     runs: HashMap<UsageKey, Runs>,
 }
 
-/// 칸 하나의 조회 끝 기록 — 칸마다 조회는 많아야 하나가 진행 중이므로(책의 `in_flight`) 진행 중인 조회는 늘
-/// `finished + 1` 번째 끝이다.
+/// One cell's query end record — each cell has at most one query in flight (the book's `in_flight`), so the in-flight query is always
+/// the `finished + 1`-th end.
 #[derive(Default)]
 struct Runs {
     finished: u64,
-    /// 마지막으로 성공한 끝의 번호(0 = 없음) — 기다린 끝 이후에 성공이 있었으면 그 요청의 답은 `Fresh` 다.
+    /// The number of the last successful end (0 = none) — if there was a success after the end waited for, that request's answer is `Fresh`.
     last_ok: u64,
-    /// 진행 중인 조회를 기다리는 버스 요청 — 완료 가드가 꺼내 깨운다(받는 쪽이 이미 떠났으면 버려진다).
+    /// A bus request waiting for an in-flight query — the completion guard takes it out and wakes it (if the receiving side has already left it is discarded).
     blocking: Vec<SyncSender<()>>,
 }
 
-/// 데몬마다 하나.
+/// One per daemon.
 ///
-/// ★기다리는 것은 요청 둘([`UsageService::request`]·[`UsageService::request_blocking`])뿐이다★ — 나머지는 전부
-///   논블록이다: 잡는 락은 책·명부의 짧은 메모리 구간뿐이고, 보내기는 출구의
-///   `try_send` · 깨우기는 채널 `try_send` · 조회는 분리 스레드다. 그래서 pump 스레드(줍기)와 연결 태스크(구독
-///   교체)에서 곧장 부른다.
+/// ★Only two requests wait ([`UsageService::request`]·[`UsageService::request_blocking`])★ — everything else is
+///   non-blocking: the only locks taken are short in-memory sections of the book and registry, sending is the outlet's
+///   `try_send` · waking is a channel `try_send` · queries are on detached threads. So it is called directly from the pump thread (pickup) and the connection task (subscription
+///   replacement).
 pub struct UsageService {
-    /// 책 락 — 잎이다.
+    /// Book lock — a leaf.
     desk: Mutex<Desk>,
     watch: UsageWatch,
     probes: Vec<&'static dyn UsageProbe>,
     spawner: Arc<dyn ProbeSpawner>,
     scratch_root: PathBuf,
     threads: Arc<dyn ProbeThreads>,
-    /// 칸마다 끝난 조회 수 — async 합류자가 기다린다. 값은 [`Runs::finished`] 를 따라가고 줄지 않는다.
+    /// The number of finished queries per cell — async joiners wait on it. The value follows [`Runs::finished`] and does not shrink.
     finished: HashMap<UsageKey, tokio::sync::watch::Sender<u64>>,
     clock: Arc<dyn UsageClock>,
     encoder: Arc<dyn UsageEncoder>,
-    /// 스케줄러 깨우기 — 용량 1. ★사본을 밖(조회 스레드 등)에 주지 않는다★ — 주면 서비스가 사라져도 받는 쪽이
-    /// `Disconnected` 를 못 봐 스케줄러가 끝나지 않는다.
+    /// Scheduler wake — capacity 1. ★No copy is given outside (query thread etc.)★ — if given, even after the service is gone the receiver
+    /// cannot see `Disconnected` and the scheduler does not end.
     wake: SyncSender<()>,
     reply_wait: Duration,
-    /// 완료 가드에 넘기는 자기 참조 — 조회 스레드가 서비스를 붙들지 않게 약하게만.
+    /// A self-reference passed to the completion guard — only weakly, so the query thread does not hold the service.
     me: Weak<Self>,
 }
 
-/// 요청 판정 뒤 — 곧바로 답하거나, 그 끝 번호까지 기다린다.
+/// After the request decision — answer at once, or wait until that end number.
 enum Opened {
     Answer(UsageAnswer),
     Wait(u64),
 }
 
 impl UsageService {
-    /// 함께 돌려주는 수신단은 스케줄러 스레드 몫이다([`schedule::spawn_scheduler`] 에 넘긴다) — 깸(`()`)은 많아야
-    /// 하나가 대기하고, 서비스가 drop 되면 `Disconnected` 가 된다. 받는 쪽이 없어도(버렸음) 서비스는 그대로 돈다 —
-    /// 깨우기만 허공에 간다.
+    /// The receiver returned together is the scheduler thread's share (handed to [`schedule::spawn_scheduler`]) — at most one wake (`()`)
+    /// is pending, and when the service is dropped it becomes `Disconnected`. Even if there is no receiver (discarded) the service runs as is —
+    /// only the wake goes into the void.
     pub fn new(parts: UsageParts) -> (Arc<Self>, Receiver<()>) {
         Self::build(parts, REPLY_WAIT_MAX)
     }
@@ -199,13 +199,13 @@ impl UsageService {
         (service, wakes)
     }
 
-    /// 줍기 관측 한 건 — pump 스레드가 그 자리에서 부른다(쌓지 않는다). 바뀐 것이 없으면 발행도 깨우기도 없다.
-    /// 책에 칸이 없는 벤더면 아무것도 안 한다.
+    /// One pickup observation — the pump thread calls it on the spot (does not pile them up). If nothing changed there is neither emission nor wake.
+    /// If the book has no cell for the vendor it does nothing.
     pub fn observe(&self, obs: &UsageObservation) {
         let key = account_key(obs.vendor);
         let (applied, coalesce) = {
             let mut desk = self.desk();
-            // 시각은 책 락 안에서 읽는다 — 두 pump 스레드의 적용 순서와 시각 순서가 어긋나지 않는다.
+            // The time is read inside the book lock — so the application order and time order of the two pump threads do not go out of step.
             let now = self.now();
             let applied = desk.book.apply_passive(obs, now);
             let coalesce = if applied.changed {
@@ -224,13 +224,13 @@ impl UsageService {
         }
     }
 
-    /// `UsageSubscribe` — 그 연결의 구독 집합을 통째로 바꾼다(빈 집합 = 해제). 한 연결의 교체는 도착순으로 부른다.
+    /// `UsageSubscribe` — replaces that connection's whole subscription set (empty set = unsubscribe). Replacements of one connection are called in arrival order.
     ///
-    /// 차례: ① 요청 집합의 벤더마다 시각 평가 — 새긴 것(래치·거절 끝)이 있으면 그 벤더의 **지금** 구독자 전부에게
-    /// 한 장 ② 명부 교체 — 새로 든 벤더마다 첫 한 장을 이 연결에만 ③ 스케줄러 깨우기(첫 한 장은 빚을 갚지 않고,
-    /// 새로 든 벤더의 자동 조회 기한이 이미 지났을 수 있다). 끊긴 뒤 늦게 든 교체는 버린다 — 칸을 되살리지 않고
-    /// 그 연결에는 아무것도 보내지 않는다(① 의 래치 발행은 그 벤더의 다른 구독자에게 나간다). 책에 칸이 없는
-    /// 벤더는 명부 집합에만 들고 한 장이 없다.
+    /// Order: ① time evaluation for each vendor in the requested set — if anything was stamped (latch · refusal end), one sheet to **all current** subscribers of that vendor
+    /// ② registry replacement — for each newly added vendor, the first sheet only to this connection ③ scheduler wake (the first sheet does not repay the debt,
+    /// and the automatic query deadline of a newly added vendor may already have passed). A replacement that arrives late after the drop is discarded — the cell is not revived and
+    /// nothing is sent to that connection (the latch emission of ① goes to the vendor's other subscribers). A vendor with no cell in the book
+    /// is held only in the registry set and has no sheet.
     pub fn replace_subscription(&self, conn: ConnId, vendors: BTreeSet<UsageVendorKey>) {
         let latched: Vec<(UsageVendorKey, UsageLimitSnapshot)> = {
             let mut desk = self.desk();
@@ -252,7 +252,7 @@ impl UsageService {
             self.publish(*vendor, sheet);
         }
 
-        // 명부 락 안에서 불린다(명부 → 책) — 책의 메모리 일만 한다.
+        // Called inside the registry lock (registry → book) — it does only the book's in-memory work.
         let replaced = self.watch.replace(conn, vendors, |added| {
             let mut desk = self.desk();
             let now = self.now();
@@ -279,36 +279,36 @@ impl UsageService {
         self.wake_scheduler();
     }
 
-    /// 연결이 붙었다(`on_connect`) — 빈 집합의 명부 칸([`UsageWatch::attach`]).
+    /// A connection attached (`on_connect`) — the registry cell with an empty set ([`UsageWatch::attach`]).
     pub fn attach(&self, conn: ConnId, outlet: impl UsageOutlet + 'static) {
         self.watch.attach(conn, outlet);
     }
 
-    /// 연결이 끊겼다(`on_disconnect`) — 명부 칸을 지우고 그 출구를 **반환 전에** 거둔다([`UsageWatch::detach`]).
-    /// 반환 = 칸이 있었다.
+    /// A connection dropped (`on_disconnect`) — erase the registry cell and withdraw its outlet **before returning** ([`UsageWatch::detach`]).
+    /// Return = there was a cell.
     pub fn detach(&self, conn: ConnId) -> bool {
         self.watch.detach(conn)
     }
 
-    /// ⟳(연결 태스크)의 요청 하나(§1-4 요청 표) — `None` = 칸이 없는 벤더.
+    /// One request of ⟳ (connection task) (§1-4 request table) — `None` = a vendor with no cell.
     ///
-    /// 판정 전에 시각 평가를 새기고(래치·거절 끝 — 새겼으면 구독자 전부에게 한 장) 표의 행 순서대로 답한다:
-    /// - 캐시·거절 → 곧바로 지금 한 장(`Cached`). ★거절은 보이든 안 보이든 같은 갈래다★ — 한 장의 상태가
-    ///   보이는 거절이면 `Rejected{retry_in_secs}` 이고, 값이 와서 `Ready` 로 보이는 동안이면 조용한 캐시다(§3 #88 ⓑ).
-    /// - 시작 → 「갱신 중」 한 장을 구독자 전부에게 낸 뒤 조회를 띄운다 · 합류 → 진행 중인 조회에 붙는다. 둘 다 그
-    ///   조회의 끝을 `REPLY_WAIT_MAX` 까지 기다린 뒤 지금 한 장을 답한다 — 기다린 끝 이후에 성공한 조회가 있으면
-    ///   `Fresh`, 아니면 `Cached`(실패 → 실패 상태 · 상한 초과 → `in_flight = true` 이고 조회는 계속된다 — 끝나면
-    ///   구독자에게 방송으로 닿는다).
+    /// Stamp the time evaluation before the decision (latch · refusal end — if stamped, one sheet to all subscribers) and answer in the table's row order:
+    /// - Cache · refusal → one sheet right now (`Cached`). ★A refusal is the same branch whether visible or not★ — if the sheet's state is
+    ///   a visible refusal it is `Rejected{retry_in_secs}`, and while a value has come and shows as `Ready` it is a quiet cache (§3 #88 ⓑ).
+    /// - Start → emit one 「갱신 중」 (refreshing) sheet to all subscribers, then launch the query · join → attach to the in-flight query. Both wait for that
+    ///   query's end up to `REPLY_WAIT_MAX` and then answer one sheet of the moment — if a query succeeded after the end waited for, it is
+    ///   `Fresh`, otherwise `Cached` (failure → failure state · cap exceeded → `in_flight = true` and the query continues — when it ends
+    ///   it reaches subscribers by broadcast).
     pub async fn request(&self, vendor: UsageVendorKey, kind: RequestKind) -> Option<UsageAnswer> {
         let key = account_key(vendor);
         let target = match self.open(&key, kind, None)? {
             Opened::Answer(answer) => return Some(answer),
             Opened::Wait(target) => target,
         };
-        // 판정 뒤에 받아도 끝을 놓치지 않는다 — `wait_for` 는 지금 값부터 본다.
+        // Receiving after the decision does not miss the end — `wait_for` looks from the current value.
         if let Some(done) = self.finished.get(&key) {
             let mut finished = done.subscribe();
-            // 상한 초과든 끝이든 지금 책으로 답한다 — 초과의 답은 `in_flight` 를 싣는다.
+            // Whether the cap is exceeded or the end comes, answer with the book now — the answer for exceeding carries `in_flight`.
             let _ =
                 tokio::time::timeout(self.reply_wait, finished.wait_for(|&seen| seen >= target))
                     .await;
@@ -316,10 +316,10 @@ impl UsageService {
         self.close(&key, target)
     }
 
-    /// 버스(`usage.*` — blocking 풀 스레드)의 요청 하나 — 판정·답은 [`UsageService::request`] 와 같다.
+    /// One request from the bus (`usage.*` — blocking pool thread) — the decision and answer are the same as [`UsageService::request`].
     ///
-    /// 기다림은 std 채널의 `recv_timeout` 이다 — ★tokio 타이머를 쓰지 않는다★: 종료 중 런타임이 시간 드라이버를
-    ///   내리면 타이머 poll 이 패닉할 수 있고 그 패닉은 가둠 표시 밖이라 곧 데몬 종료다(훅 · ADR-0292 · §3 #17).
+    /// The wait is the std channel's `recv_timeout` — ★the tokio timer is not used★: if the runtime takes down the time driver during shutdown,
+    ///   the timer poll can panic, and that panic is outside the containment mark so it ends the daemon (hook · ADR-0292 · §3 #17).
     pub fn request_blocking(
         &self,
         vendor: UsageVendorKey,
@@ -331,13 +331,13 @@ impl UsageService {
             Opened::Answer(answer) => return Some(answer),
             Opened::Wait(target) => target,
         };
-        // 깸이든 상한 초과든 지금 책으로 답한다 — 초과의 답은 `in_flight` 를 싣는다.
+        // Whether woken or the cap is exceeded, answer with the book now — the answer for exceeding carries `in_flight`.
         let _ = woken.recv_timeout(self.reply_wait);
         self.close(&key, target)
     }
 
-    /// 요청의 앞 몫 — 책 락 안에서 시각 평가·판정·(기다리면) 합류자 등록을 하고, 락을 놓은 뒤 발행 → 조회 기동 →
-    /// 깨우기. `joined` = 버스 요청의 깨움 송신단(기다릴 때만 등록한다).
+    /// The front share of a request — inside the book lock do time evaluation · decision · (if waiting) joiner registration, and after releasing the lock emission → query launch →
+    /// wake. `joined` = the wake sender of a bus request (registered only when waiting).
     fn open(
         &self,
         key: &UsageKey,
@@ -388,7 +388,7 @@ impl UsageService {
         Some(opened)
     }
 
-    /// 요청의 뒤 몫 — 지금 한 장을 뜬다(그 사이 선 래치가 있으면 새겨 구독자 전부에게도). `target` = 기다린 끝 번호.
+    /// The back share of a request — take one sheet of the moment (if a latch stood in between, stamp it and also emit to all subscribers). `target` = the end number waited for.
     fn close(&self, key: &UsageKey, target: u64) -> Option<UsageAnswer> {
         let (answer, latched) = {
             let mut guard = self.desk();
@@ -421,12 +421,12 @@ impl UsageService {
         Some(answer)
     }
 
-    /// 스케줄러 한 번의 계획을 나른다 — 한 장들을 구독자 전부에게 낸 뒤 시작한 조회를 띄운다(§1-4 경로 표 ·
-    /// 「갱신 중」 한 장은 `plan.publish` 에 이미 들었다). 돌려주는 값 = `plan.sleep`.
+    /// Carry the plan of one scheduler pass — emit the sheets to all subscribers, then launch the queries started (§1-4 path table ·
+    /// the 「갱신 중」 (refreshing) sheet is already in `plan.publish`). Returned value = `plan.sleep`.
     ///
-    /// ★계획을 뜬 책 락을 놓은 뒤 부른다★ — 락을 쥔 채 부르면 교착이다(발행이 명부를, 못 띄운 조회의 가드가 책을
-    ///   잡는다). 계획의 조회는 책이 이미 `in_flight` 를 세웠으므로 여기서 반드시 띄운다(안 띄우면 그 칸은 영영
-    ///   진행 중이다).
+    /// ★Called after the book lock that took the plan is released★ — calling while holding the lock is a deadlock (emission takes the registry, and the guard of a query that failed to launch
+    ///   takes the book). The plan's query already had `in_flight` set by the book so it must be launched here (if not launched that cell stays
+    ///   in flight forever).
     fn carry_out(&self, plan: TickPlan) -> Duration {
         let TickPlan {
             start,
@@ -442,18 +442,18 @@ impl UsageService {
         sleep
     }
 
-    /// 책이 이미 `in_flight` 를 세운 조회 하나를 띄운다 — [`Judgment::Start`]·[`TickPlan::start`] 뒤, 그 책 락을
-    /// 놓고 부른다. 논블록이다.
+    /// Launch one query for which the book already set `in_flight` — after [`Judgment::Start`] · [`TickPlan::start`], called with that book lock
+    /// released. Non-blocking.
     ///
-    /// ★끝은 반드시 한 번 온다★ — 완료 가드를 띄우기 **전에** 만들어 칸에 두고, 일은 돌기 시작할 때 칸에서 꺼내
-    ///   간다. 스레드를 못 띄우면 여기서 꺼내 놓고(띄우기 실패로 닫힘) · 조회가 패닉하면 풀리며 놓인다(훅 없는
-    ///   시험 빌드. 운영 프로세스에서는 표시 밖 패닉이라 훅이 끝낸다 · ADR-0292). 가드는 하나라 어느 쪽이 꺼내든 닫힘은 한 번이다. 조회는 늦어도 마감 + `KILL_WAIT` + 임시
-    ///   폴더 지우기 재시도(약 0.2초) 안에 돌아온다([`UsageProbe::query`] 의 계약).
+    /// ★The end comes exactly once★ — the completion guard is made **before** launching and put in a cell, and the job takes it out of the cell
+    ///   when it starts running. If the thread cannot be launched it is taken out here (closed as launch failure) · if the query panics it is dropped by unwinding (a hook-less
+    ///   test build. In a production process it is an out-of-mark panic so the hook ends it · ADR-0292). The guard is single so whichever side takes it out, closing happens once. The query returns at the latest within deadline + `KILL_WAIT` + temp
+    ///   folder deletion retry (about 0.2 seconds) (the contract of [`UsageProbe::query`]).
     fn start_probe(&self, key: UsageKey) {
         let vendor = key.vendor;
         let mut guard = ProbeGuard::new(self.me.clone(), key);
         let Some(probe) = self.probe_for(vendor) else {
-            // 칸은 조회기로만 서므로 오지 않는 갈래다 — 오면 진행 중으로 남기지 않고 닫는다.
+            // A cell stands only from a prober so this is a branch that does not come — if it comes, it is closed rather than left in flight.
             tracing::warn!(
                 vendor = vendor.as_str(),
                 "조회기가 없는 칸의 조회가 시작됐다 — 곧바로 닫는다"
@@ -461,7 +461,7 @@ impl UsageService {
             guard.outcome = Err(ProbeError::Unsupported.into());
             return;
         };
-        // 못 띄운 일을 스레드 쪽이 놓는지에 기대지 않는다 — `Ok` 가 올 때까지 가드는 이쪽이 꺼낼 수 있다.
+        // Do not lean on the thread side dropping a job that failed to launch — until `Ok` comes the guard can be taken out from this side.
         let slot = Arc::new(Mutex::new(Some(guard)));
         let handed = slot.clone();
         let spawner = self.spawner.clone();
@@ -471,7 +471,7 @@ impl UsageService {
                 return;
             };
             guard.outcome = Err(ProbeError::Io("사용량 조회가 답 없이 끝났다".to_owned()).into());
-            // 시한이 넘치면 지금 마감 — 조회기가 곧바로 `Timeout` 으로 돌아온다(패닉하지 않는다).
+            // If the deadline overflows it is the deadline now — the prober returns at once with `Timeout` (does not panic).
             let deadline = Instant::now()
                 .checked_add(probe.policy().timeout)
                 .unwrap_or_else(Instant::now);
@@ -482,7 +482,7 @@ impl UsageService {
             });
         });
         if let Err(e) = self.threads.spawn(run) {
-            // 기본 결과(띄우기 실패)로 닫힌다 — 칸 락 밖에서.
+            // Closed with the default result (launch failure) — outside the cell lock.
             drop(take_guard(&slot));
             tracing::warn!(
                 vendor = vendor.as_str(),
@@ -492,9 +492,9 @@ impl UsageService {
         }
     }
 
-    /// 조회 하나를 닫는다 — [`ProbeGuard`] 만 부른다(§1-4 「조회 끝」). 책 락 안에서 결과 적용 · 끝 번호 · 한 장 ·
-    /// 합류자 꺼냄 → 락 밖에서 발행 → 스케줄러 깨우기 → 합류자 깨우기. 발행은 바뀐 것이 없어도 한다(`in_flight` 가
-    /// 풀렸다).
+    /// Close one query — only [`ProbeGuard`] calls it (§1-4 「조회 끝」 (query end)). Inside the book lock: apply the result · end number · one sheet ·
+    /// take out joiners → outside the lock: emit → wake scheduler → wake joiners. Emission happens even if nothing changed (`in_flight` was
+    /// released).
     fn finish_probe(&self, key: &UsageKey, outcome: Result<UsageObservation, ProbeFailure>) {
         let ok = outcome.is_ok();
         let (sheet, finished, joiners) = {
@@ -515,7 +515,7 @@ impl UsageService {
         }
         self.wake_scheduler();
         if let Some(done) = self.finished.get(key) {
-            // 두 끝의 알림이 락 밖에서 뒤바뀌어도 값이 되감기지 않게 — 큰 쪽만 남긴다.
+            // So that the value is not rewound even if the notifications of the two ends are swapped outside the lock — keep only the larger one.
             done.send_if_modified(|seen| {
                 let newer = finished > *seen;
                 if newer {
@@ -525,19 +525,19 @@ impl UsageService {
             });
         }
         for joiner in joiners {
-            // 용량 1 에 한 번만 보낸다 — 실패 = 기다리던 요청이 이미 떠났다.
+            // Send only once at capacity 1 — failure = the waiting request has already left.
             let _ = joiner.try_send(());
         }
     }
 
-    /// 빚을 갚은 한 장을 그 벤더의 지금 구독자 전부에게 나른다. ★어느 락도 쥐지 않은 채 부른다★.
+    /// Carry the sheet whose debt was repaid to all current subscribers of that vendor. ★Called while holding no lock★.
     fn publish(&self, vendor: UsageVendorKey, sheet: &UsageLimitSnapshot) {
         deliver(sheet, self.watch.targets(vendor), self.encoder.as_ref());
     }
 
     fn wake_scheduler(&self) {
-        // `Full` = 깸 하나가 이미 대기 중이라 같은 뜻이다 · `Disconnected` = 받는 스케줄러가 없다. 어느 쪽이든
-        //   깨우는 쪽(pump 스레드 포함)을 막지 않는다.
+        // `Full` = one wake is already pending so it means the same · `Disconnected` = there is no scheduler to receive. Either way
+        //   it does not block the waking side (including the pump thread).
         let _ = self.wake.try_send(());
     }
 
@@ -553,22 +553,22 @@ impl UsageService {
     }
 
     fn desk(&self) -> MutexGuard<'_, Desk> {
-        // poison 을 견딘다 — 여기서 패닉하면 운영 프로세스에선 데몬이 끝난다. 책의 메서드는 패닉하지 않고, 이 락을 쥔
-        //   패닉은 가둠 표시 밖이라(pump 쪽은 표시 끔 안) 운영 프로세스에서는 훅이 되감기 전에 끝내므로 poison 은
-        //   훅 없는 시험 빌드에서만 선다(ADR-0292).
+        // Tolerates poison — a panic here ends the daemon in a production process. The book's methods do not panic, and a panic holding this lock
+        //   is outside the containment mark (the pump side is inside mark-off) so in a production process the hook ends it before unwinding, so poison
+        //   arises only in hook-less test builds (ADR-0292).
         sync::lock(&self.desk)
     }
 }
 
-/// 조회 하나의 끝을 지는 가드 — 놓이는 자리가 어디든(조회를 마침 · 조회가 패닉해 풀림 · 스레드를 못 띄워 부른
-/// 쪽이 꺼내 놓음) 한 번 [`UsageService::finish_probe`] 로 닫는다. 서비스가 이미 없으면(upgrade 실패) 결과를 버린다.
+/// A guard that carries the end of one query — wherever it is dropped (query finished · query panicked and unwound · thread could not be launched so the caller
+/// took it out) it closes once with [`UsageService::finish_probe`]. If the service is already gone (upgrade fails) the result is discarded.
 ///
-/// ★서비스를 `Weak` 로만 쥔다★ — 막힌 조회가 서비스를 붙들면 서비스 drop → 스케줄러 끝(깨우기 `Disconnected`)이
-///   조회 시한까지 밀린다.
+/// ★Holds the service only as a `Weak`★ — if a blocked query held the service, service drop → scheduler end (wake `Disconnected`) would
+///   be pushed back to the query deadline.
 struct ProbeGuard {
     service: Weak<UsageService>,
     key: UsageKey,
-    /// 놓일 때 적용할 결과 — 조회가 답하기 전에 놓이면 그 자리의 기본 실패다.
+    /// The result to apply when dropped — if dropped before the query answered, it is that spot's default failure.
     outcome: Result<UsageObservation, ProbeFailure>,
 }
 
@@ -584,7 +584,7 @@ impl ProbeGuard {
 
 impl Drop for ProbeGuard {
     fn drop(&mut self) {
-        // 가드는 한 번만 놓인다 — 자리채움은 읽히지 않는다.
+        // The guard is dropped only once — the placeholder is never read.
         let outcome = std::mem::replace(&mut self.outcome, Err(ProbeError::Timeout.into()));
         let Some(service) = self.service.upgrade() else {
             tracing::debug!(
@@ -601,7 +601,7 @@ fn take_guard(slot: &Mutex<Option<ProbeGuard>>) -> Option<ProbeGuard> {
     sync::lock(slot).take()
 }
 
-/// 벤더의 기본 계정 칸 — 계정 낱말은 지금 늘 기본값이다(`UsageAccountKey`).
+/// A vendor's default account cell — the account word is always the default for now (`UsageAccountKey`).
 fn account_key(vendor: UsageVendorKey) -> UsageKey {
     UsageKey {
         vendor,
@@ -628,12 +628,12 @@ mod tests {
 
     const H: i64 = 3_600;
     pub(super) const T0: i64 = 1_900_000_000;
-    /// 깨움을 기다려야 하는 시험의 요청 기다림 — 깨우기가 사라지면 그 시험이 이 상한에서 드러난다.
+    /// The request wait of a test that must wait for a wake — if the wake disappears, that test is exposed at this cap.
     const LONG_WAIT: Duration = Duration::from_secs(10);
-    /// 시험 쪽의 모든 기다림의 상한 — 교착·깨우기 유실이 매달리는 대신 실패하게.
+    /// The cap on every wait on the test side — so a deadlock or a lost wake fails instead of hanging.
     const BOUND: Duration = Duration::from_secs(10);
 
-    // 조회기 키로만 칸을 만든다 — 시험에도 벤더 리터럴을 두지 않는다.
+    // Make cells only from prober keys — do not put vendor literals in tests either.
     fn vendor(i: usize) -> UsageVendorKey {
         usage_probes()[i].key()
     }
@@ -646,14 +646,14 @@ mod tests {
         indices.iter().map(|&i| vendor(i)).collect()
     }
 
-    /// 가짜 조회기 한 번의 대본.
+    /// The script for one run of the fake prober.
     pub(super) enum Scripted {
         Answer(Result<UsageObservation, ProbeFailure>),
         Panic,
     }
 
-    /// 가짜 조회기 — 조회마다 대본 하나를 받을 때까지 막힌다. 보낼 쪽([`Rig`])이 사라지면 시한 초과로 끝난다.
-    /// 키·정책은 실 조회기에서 받는다. 조회기는 `'static` 이라 시험마다 하나씩 샌다.
+    /// Fake prober — blocks on each query until it receives one script. If the sending side ([`Rig`]) disappears it ends as a timeout.
+    /// Key and policy come from the real prober. A prober is `'static` so one leaks per test.
     struct FakeProbe {
         key: UsageVendorKey,
         policy: UsagePolicy,
@@ -685,7 +685,7 @@ mod tests {
         }
     }
 
-    /// 가짜 조회기는 자식을 안 띄운다 — 불리면 실패다.
+    /// The fake prober launches no child — it is a failure if called.
     struct NoChildren;
 
     impl ProbeSpawner for NoChildren {
@@ -701,13 +701,13 @@ mod tests {
     #[derive(Default)]
     struct ThreadCounts {
         spawned: AtomicUsize,
-        /// 일이 끝난 수 — 끝났다 = 완료 가드까지 놓였다.
+        /// The number of jobs finished — finished = even the completion guard was dropped.
         ended: AtomicUsize,
         panicked: AtomicUsize,
     }
 
-    /// 조회 스레드 대역 — `refuse` 면 띄우지 않고 받은 일을 **쥔 채**(`kept`) `Err` 다. 못 띄운 일을 놓는지에
-    /// 서비스가 기대지 않음을 재고, 쥔 일은 시험이 뒤늦게 돌려 볼 수 있다.
+    /// Query thread stand-in — if `refuse`, it does not launch and **holds** the job it received (`kept`) and returns `Err`. It measures that the
+    /// service does not lean on a job that failed to launch being dropped, and the test can run the held job late.
     #[derive(Default)]
     struct TestThreads {
         refuse: AtomicBool,
@@ -742,7 +742,7 @@ mod tests {
         threads: Arc<TestThreads>,
     }
 
-    /// 칸 = 실 조회기 앞에서부터 `count` 개(키·정책만 빌린 가짜).
+    /// Cells = the first `count` real probers (fakes that borrow only key and policy).
     fn rig_full(clock: Arc<dyn UsageClock>, count: usize, reply_wait: Duration) -> Rig {
         let (probes, scripts): (Vec<&'static FakeProbe>, Vec<_>) = usage_probes()[..count]
             .iter()
@@ -793,7 +793,7 @@ mod tests {
     }
 
     impl Rig {
-        /// 붙이고 구독까지 — 첫 한 장과 깸은 비워 둔다.
+        /// Attach and even subscribe — the first sheet and wake are left empty.
         pub(super) fn subscriber(&self, conn: ConnId, indices: &[usize]) -> Arc<Log> {
             let (outlet, log) = recording();
             self.service.attach(conn, outlet);
@@ -832,7 +832,7 @@ mod tests {
             self.probes[i].queries.load(Ordering::SeqCst)
         }
 
-        /// 그 칸의 진행 중인 조회를 기다리는 요청 수 — 버스 + async.
+        /// The number of requests waiting for that cell's in-flight query — bus + async.
         pub(super) fn joiners(&self, i: usize) -> usize {
             let blocking = self.service.desk().runs[&key(i)].blocking.len();
             blocking + self.service.finished[&key(i)].receiver_count()
@@ -887,7 +887,7 @@ mod tests {
             .and_then(|w| w.used_pct)
     }
 
-    // ── 줍기 ──
+    // ── Pickup ──
 
     #[test]
     fn an_observed_change_goes_to_that_vendors_subscribers_only_and_a_repeat_sends_nothing() {
@@ -977,7 +977,7 @@ mod tests {
         assert_eq!(last_pct(&a), Some(40.0));
     }
 
-    // 조회 시작(곧바로 갚을 빚)을 아직 안 냈으면 1초 안의 줍기가 그것까지 곧바로 낸다.
+    // If the query start (a debt to repay at once) has not been emitted yet, a pickup within 1 second emits that too at once.
     #[test]
     fn a_passive_right_after_an_unpublished_probe_start_publishes_at_once() {
         let (rig, clock) = rig();
@@ -1011,7 +1011,7 @@ mod tests {
         assert_eq!(rig.drain_wakes(), 0);
     }
 
-    // ── 구독 교체 ──
+    // ── Subscription replacement ──
 
     #[test]
     fn a_latch_due_at_subscription_is_published_to_existing_subscribers_too() {
@@ -1121,9 +1121,9 @@ mod tests {
         assert!(got[0].snapshot.five_hour.as_ref().expect("창").expired);
     }
 
-    // ── 락 ──
+    // ── Locks ──
 
-    /// 처음 받을 때 서비스를 다시 부르는 출구 — 줍기·교체·자기 해제.
+    /// An outlet that calls back into the service when first received — pickup · replacement · self-release.
     struct CallsBack {
         service: Arc<OnceLock<Weak<UsageService>>>,
         calls: Arc<AtomicUsize>,
@@ -1145,7 +1145,7 @@ mod tests {
 
     #[test]
     fn an_outlet_may_call_back_into_the_service() {
-        // 교착이면 매달리는 대신 실패하도록 다른 스레드에서 돌린다.
+        // Run on another thread so a deadlock fails instead of hanging.
         let (done_tx, done_rx) = mpsc::channel();
         std::thread::spawn(move || {
             let (rig, _clock) = rig();
@@ -1170,10 +1170,10 @@ mod tests {
         assert!(union.is_empty(), "출구 안에서 부른 해제가 칸을 지웠다");
     }
 
-    // ── 동시성 ──
+    // ── Concurrency ──
 
-    /// 읽을 때마다 단조 시간이 2초 흐르는 시계 — 바뀜마다 합침 창이 이미 닫혀 곧바로 나간다(이 시험엔 끝 발행을
-    /// 낼 스케줄러가 없다). 벽시계는 멈춰 있어 래치가 서지 않는다.
+    /// A clock whose monotonic time flows 2 seconds on every read — on every change the coalescing window is already closed so it goes out at once (this test has no scheduler to
+    /// emit the end emission). The wall clock is stopped so no latch stands.
     struct Ticking(AtomicU64);
 
     impl UsageClock for Ticking {
@@ -1186,10 +1186,10 @@ mod tests {
         }
     }
 
-    /// 연결 둘이 구독을 바꾸는 동안 줍기 둘이 두 벤더를 바꾸는 판 하나 — 겹침은 판마다 달라지고 일의 양은 정해져
-    /// 있다. 연결 0 은 정해진 만큼 바꾸다 비우고 판이 끝난 뒤 다시 구독한다. 연결 1 은 정해진 만큼 바꾼 뒤 비우고,
-    /// 줍기 0 의 마지막 바뀜 둘과 **같은 순간에** 다시 구독한다 — 마지막 값이 발행으로 닿을지 첫 한 장으로 닿을지는
-    /// 그 겹침이 정한다(TRD §3 #57 의 두 차례가 맞물리는 자리). 돌려주는 것 = 어긋난 칸마다 한 줄.
+    /// One round in which two connections change subscriptions while two pickups change two vendors — the overlap differs per round and the amount of work is fixed.
+    /// Connection 0 changes the fixed amount, empties, and subscribes again after the round ends. Connection 1 changes the fixed amount then empties,
+    /// and subscribes again **at the same moment** as pickup 0's last two changes — whether the last value arrives by emission or by the first sheet is
+    /// decided by that overlap (the spot where the two passes of TRD §3 #57 interlock). What it returns = one line per mismatched cell.
     fn race_trial(trial: usize) -> Vec<String> {
         const OBSERVERS: usize = 2;
         const OBSERVATIONS: usize = 16;
@@ -1241,7 +1241,7 @@ mod tests {
                     service.observe(&five(n % 2, pct, far_reset()));
                 }
                 if observer == 0 {
-                    // 앞의 값은 모두 100 아래라 늘 바뀜이다.
+                    // The preceding values are all below 100 so it is always a change.
                     endgame.wait();
                     for i in 0..2 {
                         service.observe(&five(i, 100.0, far_reset()));
@@ -1273,12 +1273,12 @@ mod tests {
         misses
     }
 
-    /// 판마다 그 연결이 받은 최고 revision = 책의 마지막 revision. 올바른 코드에서는 겹침과 무관하게 선다 — 시계가
-    /// 읽을 때마다 2초 흘러 바뀜마다 곧바로 나가고, 벽시계가 멈춰 래치가 없다.
+    /// Per round the highest revision that connection received = the book's last revision. In correct code it holds regardless of overlap — the clock
+    /// flows 2 seconds on every read so every change goes out at once, and the wall clock is stopped so there is no latch.
     #[test]
     fn racing_replaces_and_observations_leave_each_subscriber_at_the_final_revision() {
         const TRIALS: usize = 2_000;
-        // 락 차례가 깨져 교착하면 매달리는 대신 실패하도록 다른 스레드에서 돌린다.
+        // Run on another thread so that if the lock order breaks and deadlocks it fails instead of hanging.
         let (done_tx, done_rx) = mpsc::channel();
         std::thread::spawn(move || {
             let misses: Vec<String> = (0..TRIALS).flat_map(race_trial).collect();
@@ -1295,9 +1295,9 @@ mod tests {
         );
     }
 
-    // ── 요청·조회 ──
+    // ── Requests · queries ──
 
-    /// 기다림 상한을 재는 시험의 요청 기다림.
+    /// The request wait of a test that measures the wait cap.
     const SHORT_WAIT: Duration = Duration::from_millis(200);
 
     pub(super) fn active(i: usize, pct: f64) -> UsageObservation {
@@ -1311,7 +1311,7 @@ mod tests {
         Scripted::Answer(Ok(obs))
     }
 
-    /// 조건이 설 때까지 짧게 쉬며 본다 — [`BOUND`] 를 넘으면 실패한다.
+    /// Look while resting briefly until the condition stands — fails if [`BOUND`] is exceeded.
     pub(super) fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
         let deadline = Instant::now() + BOUND;
         while !ready() {
@@ -1320,7 +1320,7 @@ mod tests {
         }
     }
 
-    /// 버스 요청을 다른 스레드에서 — 받는 쪽([`answered`])의 상한이 매달림을 실패로 만든다.
+    /// A bus request on another thread — the cap of the receiving side ([`answered`]) turns a hang into a failure.
     pub(super) fn bus_request(
         service: &Arc<UsageService>,
         i: usize,
@@ -1461,7 +1461,7 @@ mod tests {
         assert_eq!(answer.served, UsageServed::Cached);
         assert!(answer.snapshot.in_flight, "조회는 계속된다");
 
-        // async 도 같은 상한 — 진행 중인 조회에 합류해 기다리다 포기한다.
+        // async has the same cap — it joins an in-flight query, waits, and gives up.
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
@@ -1636,7 +1636,7 @@ mod tests {
     fn a_tick_plan_publishes_its_sheets_then_starts_its_probes() {
         let (rig, _clock) = rig();
         let log = rig.subscriber(1, &[0]);
-        // 못 띄운 조회는 `carry_out` 안에서 곧바로 닫혀 끝 한 장을 낸다 — 두 장의 차례가 곧 발행과 기동의 차례다.
+        // A query that could not be launched is closed at once inside `carry_out` and emits an end sheet — the order of the two sheets is the order of emission and launch.
         rig.threads.refuse.store(true, Ordering::SeqCst);
         let plan = {
             let now = rig.service.now();
@@ -1659,7 +1659,7 @@ mod tests {
         assert!(!rig.in_flight(0));
     }
 
-    /// ★⟳ 에 최소 간격이 없다(사용자 결정 2026-09-29)★ — 시계를 한 틱도 안 움직인 두 번째 ⟳ 도 조회한다.
+    /// ★⟳ has no minimum interval (user decision 2026-09-29)★ — a second ⟳ with the clock not moved even one tick also queries.
     #[test]
     fn a_refresh_right_after_a_finished_probe_starts_a_new_probe() {
         let (rig, _clock) = rig();
@@ -1712,7 +1712,7 @@ mod tests {
     fn a_joiner_that_gives_up_after_an_earlier_success_answers_cached() {
         let clock = Arc::new(ManualUsageClock::new(Duration::from_secs(100), T0));
         let rig = rig_full(clock, 2, SHORT_WAIT);
-        // 앞의 성공은 요청 없이 띄워 끝낸다 — 짧은 기다림에 걸리지 않게.
+        // The preceding success is launched and ended without a request — so it does not get caught in the short wait.
         assert!(rig.service.desk().book.begin_probe(&key(0)));
         rig.service.start_probe(key(0));
         rig.answer(0, ok(active(0, 30.0)));
@@ -1728,8 +1728,8 @@ mod tests {
         assert_eq!(pct(&answer.snapshot), Some(30.0));
     }
 
-    /// 무장한 뒤 받은 끝 한 장(`in_flight` 아님)에서 멈췄다고 알리고 `release` 가 올 때까지 `send` 안에 머무는 출구.
-    /// 시간 상한이 없다 — 시험이 실패해 `release` 송신단이 사라지면 그때 풀린다.
+    /// An outlet that, after being armed, reports it stopped at the end sheet received (not `in_flight`) and stays inside `send` until `release` comes.
+    /// There is no time cap — it is freed when the `release` sender disappears because the test failed.
     struct Parking {
         armed: Arc<AtomicBool>,
         parked: mpsc::Sender<()>,
@@ -1751,7 +1751,7 @@ mod tests {
     #[test]
     fn joiners_wake_only_after_the_end_sheet_is_published() {
         let clock = Arc::new(ManualUsageClock::new(Duration::from_secs(100), T0));
-        // 합류자의 기다림을 시험 쪽 상한보다 넉넉히 — 멈춰 있는 동안 기다림 초과로 답하는 갈래를 없앤다.
+        // Make the joiner's wait more generous than the test-side cap — removes the branch that answers with a wait overrun while stopped.
         let rig = rig_full(clock, 2, BOUND * 6);
         let armed = Arc::new(AtomicBool::new(false));
         let (parked_tx, parked) = mpsc::channel();
@@ -1769,7 +1769,7 @@ mod tests {
 
         let pending = bus_request(&rig.service, 0, RequestKind::Refresh);
         wait_until("조회가 떴다", || rig.queries(0) == 1);
-        // 시험이 직접 쥔 버스 합류자 하나 — 깸이 왔는지를 시각 없이 본다(조회는 대본을 기다리며 진행 중이다).
+        // One bus joiner the test holds directly — sees whether the wake came without timing (the query is in flight waiting for a script).
         let (joined, woken) = mpsc::sync_channel(1);
         rig.service
             .desk()
@@ -1783,7 +1783,7 @@ mod tests {
         parked
             .recv_timeout(BOUND)
             .expect("끝 한 장이 출구 안에서 멈췄다");
-        // 멈춘 동안 — 깨우기가 발행보다 앞섰다면 이미 와 있다.
+        // While stopped — if the wake was ahead of the emission it has already arrived.
         assert!(
             matches!(woken.try_recv(), Err(TryRecvError::Empty)),
             "발행이 끝나기 전에 버스 합류자를 깨웠다"

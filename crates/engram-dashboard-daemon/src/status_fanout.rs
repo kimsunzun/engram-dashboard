@@ -1,21 +1,21 @@
-//! 상태 → wire 팬아웃(ADR-0129 — 에이전트 시스템 행).
+//! State → wire fan-out (ADR-0129 — agent system layer).
 //!
-//! `AgentManager` 에 주입되는 **전역 `StatusSink`** 하나만 산다. 코어가 동기 스레드에서 밀어 올린
-//! 상태 사실(status_changed / agent_list_updated / restore_result)을 `AgentEvent` JSON 으로 인코딩해
-//! 팬아웃 포트(`engram_dashboard_net::frame_port::FrameFanout`)로 한 번 밀어 넣는다.
+//! Only one **global `StatusSink`** injected into `AgentManager` lives. It encodes the state facts
+//! the core pushes up from a sync thread (status_changed / agent_list_updated / restore_result) as `AgentEvent` JSON
+//! and pushes them once into the fan-out port (`engram_dashboard_net::frame_port::FrameFanout`).
 //!
-//! ★왜 에이전트 시스템 쪽인가(분리 축)★: 이 파일은 코어 어휘(`AgentId`·`AgentStatus`·`AgentInfo`·
-//!   `RestoreReport`)와 wire 어휘(`AgentEvent`)를 **둘 다** 안다 — 네트워크 행이 타입으로도 알아선
-//!   안 되는 것들이다(ADR-0129 결정 1). 반대로 이 파일은 연결이 몇 개인지·누가 등록돼 있는지를
-//!   모른다: 포트 너머로 넘길 수 있는 것은 불투명 text 하나뿐이다
-//!   (ADR-0129 2026-08-04 note — 구멍은 연결당·전-연결 두 모양이다).
-//! ★여기서 정책이 바뀌지 않는다★: terminal 판정·이벤트 합성은 코어 몫이고(ADR-0005 상태 알림 분담)
-//!   이 sink 는 코어가 부른 것을 인코딩해 흘리기만 한다 — 판정하지도, 이벤트를 만들어 내지도 않는다.
-//!   코어가 상태를 **한 갈래로만** 밀어 올리기로 한 구조(ADR-0028 — 기능마다 별도 관측자를 달지 않는다)의
-//!   그 한 갈래 끝이 여기다.
-//! ★"이벤트당 1회 송신" 이 아니다(오독 주의)★: 이 파일에서의 인코딩·팬아웃 호출은 이벤트당 1회지만
-//!   **실제 송신은 등록된 연결 수만큼**이다 — 포트 구현이 연결마다 try_send 한다. ADR-0028 은 *푸시
-//!   갈래가 하나*라는 결정이지 *전송이 한 번*이라는 보장이 아니다.
+//! ★Why the agent system side (the separation axis)★: this file knows **both** the core vocabulary (`AgentId`·`AgentStatus`·`AgentInfo`·
+//!   `RestoreReport`) and the wire vocabulary (`AgentEvent`) — things the network layer must not know even by type (ADR-0129 decision 1). Conversely this file does not
+//!   know how many connections there are or who is registered:
+//!   the only thing that can be passed across the port is one opaque text
+//!   (ADR-0129 2026-08-04 note — the holes have two shapes: per-connection and all-connections).
+//! ★Policy does not change here★: the terminal decision and event synthesis belong to the core (ADR-0005 status notification split),
+//!   and this sink only encodes what the core called and lets it flow — it neither decides nor produces events.
+//!   Here is the end of the one branch of the structure where the core pushes state up **through a single branch only** (ADR-0028 — no separate
+//!   observer is attached per feature).
+//! ★It is not "one send per event" (beware of misreading)★: the encoding and fan-out call in this file is once per event but
+//!   **the actual sending is as many as the number of registered connections** — the port implementation does try_send per connection. ADR-0028 is a decision that *there is one
+//!   push branch*, not a guarantee that *sending happens once*.
 // ADR-0129
 // ADR-0005
 // ADR-0028
@@ -137,8 +137,8 @@ mod tests {
         }
     }
 
-    /// 위 `info` fixture 가 wire 로 나왔을 때의 **전체** 모양. 필드를 하나도 빼지 않고 적는다 —
-    /// 부분 단언은 검사 안 한 필드의 오염·추가 필드를 통과시킨다(그게 이 헬퍼의 존재 이유).
+    /// The **whole** shape of the `info` fixture above when it came out on the wire. Write it without dropping a single field —
+    /// a partial assertion lets pollution or an extra field in an unchecked field through (that is the reason this helper exists).
     fn expected_agent(
         id: AgentId,
         name: &str,
@@ -170,8 +170,8 @@ mod tests {
 
     #[test]
     fn a_status_change_goes_out_as_exactly_one_whole_envelope() {
-        // ★payload 를 지닌 상태(`Exited{code}`)를 쓰는 이유★: 유닛 variant 만 태우면 상태 payload 를
-        //   떨어뜨리는 회귀가 안 잡힌다.
+        // ★Why a state carrying a payload (`Exited{code}`) is used★: if only unit variants are run, a regression that drops the state payload
+        //   is not caught.
         let (sink, fanout) = sink_with_fanout();
         let id = AgentId::new_v4();
 
@@ -191,10 +191,10 @@ mod tests {
 
     #[test]
     fn a_roster_update_carries_the_whole_list_including_agents_that_are_not_running() {
-        // ★이 sink 는 로스터를 **거르지 않는다**(load-bearing)★: 산 것만 추리는 술어(`is_live`)는 배달
-        //   판정 쪽 관심사고, 프론트 목록은 죽은 것까지 봐야 terminal 전이를 판정한다(ADR-0005 —
-        //   프론트는 status_changed 가 아니라 이 목록으로 terminal 을 판정한다). 그래서 fixture 에
-        //   **비-Running 을 섞는다** — 여기에 필터가 생기면 프론트가 종료를 영영 못 본다.
+        // ★This sink **does not filter** the roster (load-bearing)★: the predicate that picks only the live (`is_live`) is a concern of the delivery
+        //   decision side, and the frontend list must see even the dead to decide a terminal transition (ADR-0005 —
+        //   the frontend decides terminal by this list, not by status_changed). So the fixture
+        //   **mixes in non-Running** — if a filter appears here the frontend never sees an exit.
         let (sink, fanout) = sink_with_fanout();
         let (a, b, c) = (AgentId::new_v4(), AgentId::new_v4(), AgentId::new_v4());
 
@@ -228,9 +228,9 @@ mod tests {
 
     #[test]
     fn every_restore_outcome_is_forwarded_with_its_payload() {
-        // ★결말 **전 variant** 를 태운다★: 한 종류만 태우면 `Resumed` 를 하드코딩한 구현이 통과하고,
-        //   payload 를 지닌 결말(FreshFallback/Failed/Blocked)이 깨져도 안 잡힌다. FreshFallback 은
-        //   Uuid→String 변환까지 지나므로 그 경계도 여기서 함께 못 박힌다.
+        // ★Run **all variants** of the outcome★: if only one kind is run, an implementation that hardcodes `Resumed` passes,
+        //   and a break in the outcomes carrying a payload (FreshFallback/Failed/Blocked) goes uncaught. FreshFallback also passes
+        //   through the Uuid→String conversion so that boundary is nailed down here as well.
         let old = uuid::Uuid::new_v4();
         let new = uuid::Uuid::new_v4();
         let cases = vec![
@@ -289,8 +289,8 @@ mod tests {
         }
     }
 
-    /// ★날 관측은 여기서 방송하지 않는다★ — 사용량은 서비스가 병합한 한 장을 그 벤더를 구독한 연결에만
-    /// 보낸다(`usage_service`). 여기서 흘리면 구독 안 한 연결까지 병합 전 값을 받는다.
+    /// ★Raw observations are not broadcast here★ — usage sends the one sheet the service merged only to connections subscribed to that vendor
+    /// (`usage_service`). If it flowed from here, even unsubscribed connections would receive the pre-merge value.
     #[test]
     fn a_usage_observation_is_not_broadcast() {
         use engram_dashboard_agent::usage::{UsageObservation, UsageSource, UsageVendorKey};

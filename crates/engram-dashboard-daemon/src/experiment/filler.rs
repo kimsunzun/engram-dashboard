@@ -1,29 +1,29 @@
-//! 결정적 필러 문서 생성기 (ADR-0090 Stage 2 파일럿).
+//! Deterministic filler document generator (ADR-0090 Stage 2 pilot).
 //!
-//! ## 역할
-//! 컨텍스트 포화용 **자연어 산문(natural prose)** 문서를 **결정적(seed 고정)** 으로 만든다. 같은 seed·
-//! 같은 doc 번호·같은 목표 길이면 런마다 **바이트 단위로 동일한** 문서가 나온다(재현성 핀 = ADR-0088 d5a).
+//! ## Role
+//! Makes **natural-language prose** documents for context saturation **deterministically (seed fixed)**. With the same seed ·
+//! same doc number · same target length, a **byte-for-byte identical** document comes out on every run (reproducibility pin = ADR-0088 d5a).
 //!
-//! ## ★content-filter 안전(파일럿 발견 2026-07-20)★
-//! 초기 xorshift pseudo-prose(단어 사전에서 난수로 뽑아 나열)는 claude 의 content filter 에 "violates
-//! Usage Policy" 로 걸려 스모크 런이 거부됐다. 무의미한 토큰 난열이 의심 신호로 잡힌 것으로 추정. 대체:
-//! **템플릿 기반 자연어**(물류 보고서·기상 일지·시설 점검 노트 — 문법적 영어 문장).
+//! ## ★content-filter safety (pilot finding 2026-07-20)★
+//! The initial xorshift pseudo-prose (words drawn from a vocabulary by random numbers and listed) was caught by claude's content filter as "violates
+//! Usage Policy" and the smoke run was refused. A meaningless run of tokens is presumed to have been caught as a suspicious signal. Replacement:
+//! **template-based natural language** (logistics reports · weather logs · facility inspection notes — grammatical English sentences).
 //!
-//! ## 핵심 불변식
-//! - **결정성**: 난수원은 seed 로 시드된 xorshift64 하나뿐 — 외부 상태·시계·env 참조 0.
-//! - **문법적 자연어**: 본문의 모든 문장은 `SENTENCE_TEMPLATES` 중 하나를 슬롯 채운 것이다 — content
-//!   filter 안전 + "no gibberish" 단위 테스트가 이 불변식을 검증한다.
-//! - **근사 길이**: `approx_chars` 는 목표치일 뿐 정확치가 아니다 — 문단 경계에서 끊으므로 ±한 문단
-//!   오차가 난다. 포화 루프는 우리가 보낸 누적 문자수(우리 통제)를 진행 신호로 쓰므로 이 근사면 충분하다.
+//! ## Core invariants
+//! - **Determinism**: the only random source is one xorshift64 seeded by the seed — 0 references to external state, clock or env.
+//! - **Grammatical natural language**: every sentence in the body is one of the `SENTENCE_TEMPLATES` with slots filled — content
+//!   filter safety + the "no gibberish" unit test verify this invariant.
+//! - **Approximate length**: `approx_chars` is only a target, not an exact value — it cuts at paragraph boundaries so an error of ±one paragraph
+//!   arises. The saturation loop uses the cumulative character count we sent (under our control) as the progress signal, so this approximation is enough.
 
-/// 인라인 xorshift64 PRNG(SplitMix 계열 상수로 시드) — 통계적 품질은 요구하지 않는다(슬롯 선택
-/// 다양성만 필요).
+/// Inline xorshift64 PRNG (seeded with SplitMix-family constants) — statistical quality is not required (only the diversity of slot
+/// selection is needed).
 pub struct Xorshift64 {
     state: u64,
 }
 
 impl Xorshift64 {
-    /// seed 로 시드. seed==0 이면 xorshift64 가 고정점(항상 0)이라 SplitMix 상수로 대체해 비-0 보장.
+    /// Seeded by the seed. If seed==0, xorshift64 has a fixed point (always 0), so it is replaced with a SplitMix constant to guarantee non-zero.
     pub fn new(seed: u64) -> Self {
         let state = if seed == 0 {
             0x9E37_79B9_7F4A_7C15
@@ -42,7 +42,7 @@ impl Xorshift64 {
         x
     }
 
-    /// n==0 분기는 방어적 — 호출자는 비-0 만 넘긴다.
+    /// The n==0 branch is defensive — the caller passes only non-zero.
     fn below(&mut self, n: usize) -> usize {
         if n == 0 {
             0
@@ -60,7 +60,7 @@ impl Xorshift64 {
     }
 }
 
-// ── benign 어휘 슬롯 ──────────────────────────────────────────────────────────────────
+// ── benign vocabulary slots ──────────────────────────────────────────────────────────────────
 
 const PLACES: &[&str] = &[
     "warehouse",
@@ -165,7 +165,7 @@ const SENTENCE_TEMPLATES: &[&str] = &[
     "The inspection of the {place} showed the {item} to be {cond} and ready for use.",
 ];
 
-/// 본문 어휘와 분리해 제목이 시각적으로 구분되게 한다.
+/// Separated from the body vocabulary so the title is visually distinct.
 const TITLE_ADJ: &[&str] = &[
     "Northern",
     "Coastal",
@@ -202,11 +202,11 @@ const TITLE_NOUN: &[&str] = &[
     "records",
 ];
 
-/// doc n 의 **결정적 제목**. `(seed, n)` 만의 함수 — 드라이버가 이 함수를 그대로 불러 프로브 정답
-/// (doc1_title_recalled)을 재구성하므로, 제목 산출 규칙은 여기 하나에만 존재한다(단일 출처).
+/// The **deterministic title** of doc n. A function of `(seed, n)` alone — the driver calls this function as is to reconstruct the probe answer
+/// (doc1_title_recalled), so the title derivation rule exists only here (single source).
 ///
-/// 세 토큰이라 claude 가 정확 회상하기엔 적당히 어렵고(그냥 "the document" 로 뭉개면 실패), 채점은
-/// exact match 로 명확하다.
+/// Being three tokens, it is moderately hard for claude to recall exactly (just smearing it into "the document" fails), and grading is clear by
+/// exact match.
 pub fn doc_title(seed: u64, n: u32) -> String {
     let mut rng = Xorshift64::new(seed ^ (0xD1B5_4A32_D192_ED03u64.wrapping_mul(n as u64 + 1)));
     let adj = rng.pick(TITLE_ADJ);
@@ -215,14 +215,14 @@ pub fn doc_title(seed: u64, n: u32) -> String {
     format!("{adj} {noun1} {noun2}")
 }
 
-/// doc n 의 완결 본문 — `DOC-<n>: <제목>\n` 헤더 + 자연어 문단들.
+/// The complete body of doc n — the `DOC-<n>: <제목>\n` (title) header + natural-language paragraphs.
 ///
-/// 본문 PRNG 는 제목과 다른 교란 시드라 제목/본문이 독립적이다(제목만 회상하고 본문은 못 하는 상황을
-/// 분리 관측 가능).
+/// The body PRNG uses a perturbed seed different from the title's, so title and body are independent (the situation of recalling only the title and not the body can be
+/// observed separately).
 pub fn filler_doc(seed: u64, n: u32, approx_chars: usize) -> String {
-    // ★방어적 상한(finding 7)★: approx_chars 가 폭주 값(usize::MAX 등)이면 with_capacity 예약·문단 루프가
-    //   즉시 OOM/panic 이다. CLI 가 이미 클램프하지만, 이 순수 함수를 직접 부르는 경로(테스트·미래
-    //   호출자)도 있으니 여기서도 하드 상한을 건다.
+    // ★Defensive cap (finding 7)★: if approx_chars is a runaway value (usize::MAX etc.) the with_capacity reservation and the paragraph loop
+    //   are an immediate OOM/panic. The CLI already clamps, but there are paths that call this pure function directly (tests · future
+    //   callers), so a hard cap is put here too.
     let approx_chars = approx_chars.min(super::cli::DOC_CHARS_CLAMP);
     let title = doc_title(seed, n);
     let mut out = String::with_capacity(approx_chars + 256);
@@ -248,11 +248,11 @@ fn paragraph(rng: &mut Xorshift64) -> String {
     p
 }
 
-/// `{role}` 이 문두인 템플릿은 role 어휘의 첫 글자가 소문자("the ...")이므로 대문자화가 필요하다.
+/// A template that starts with `{role}` needs capitalization because the first letter of the role vocabulary is lowercase ("the ...").
 fn fill_template(rng: &mut Xorshift64) -> String {
-    // ★슬롯 채우기 순서 고정★: **슬롯 타입별 고정 순서**로 뽑으면 안 된다(문장마다 슬롯 조합이 달라
-    //   PRNG 소비량이 흔들려 재현성이 깨진다). 템플릿 문자열을 왼→오로 스캔하며 등장하는 슬롯마다
-    //   순차로 뽑는다(등장 순서 = 소비 순서 고정).
+    // ★Fixed slot-filling order★: do not draw in a **fixed order per slot type** (the slot combination differs per sentence so
+    //   the PRNG consumption varies and reproducibility breaks). Scan the template string left→right and draw
+    //   sequentially for each slot as it appears (appearance order = fixed consumption order).
     let template = rng.pick(SENTENCE_TEMPLATES);
     let mut out = String::with_capacity(template.len() + 64);
     let mut rest = template;
@@ -262,7 +262,7 @@ fn fill_template(rng: &mut Xorshift64) -> String {
         let close = match after.find('}') {
             Some(c) => c,
             None => {
-                // 닫는 중괄호 없음 — 있을 수 없는 템플릿에 대한 방어.
+                // No closing brace — a defense against a template that cannot exist.
                 out.push_str(&rest[open..]);
                 rest = "";
                 break;
@@ -276,7 +276,7 @@ fn fill_template(rng: &mut Xorshift64) -> String {
             "action" => rng.pick(ACTIONS),
             "weather" => rng.pick(WEATHER),
             "role" => rng.pick(ROLES),
-            _ => "", // 미지 슬롯 — 있을 수 없음.
+            _ => "", // Unknown slot — cannot happen.
         };
         out.push_str(value);
         rest = &after[close + 1..];
