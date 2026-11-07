@@ -8,7 +8,7 @@ const host = process.env.TAURI_DEV_HOST;
 
 export default defineConfig(async () => ({
   plugins: [react(), tailwindcss()],
-  // ADR-0047: `@/*` → src/* 경로 별칭(shadcn 관례). tsconfig paths 와 짝.
+  // ADR-0047: `@/*` → src/* path alias (shadcn convention). Paired with tsconfig paths.
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),
@@ -26,12 +26,12 @@ export default defineConfig(async () => ({
           port: 1421,
         }
       : undefined,
-    // 감시 제외 = **프론트 소스가 없는 경로**들. 개발 서버 전용 설정이라 릴리스 빌드엔 로드조차 안 된다.
-    // ★`target/**`·`crates/**` 를 빼는 이유(실측 2026-08-17)★: dev 앱을 띄워 둔 채 러스트를 빌드·테스트하면
-    //   `target/` 아래에 산출물이 쏟아지는데, 그게 감시에 걸려 **창 전체가 주기적으로 리로드**된다 —
-    //   화면을 보며 실측하는 동안 계속 갱신돼 관찰이 불가능해진다.
-    // `.engram-dev/**` = 디버그 빌드의 데이터 폴더(저장소 루트 안이다 — ADR-0136). 데몬이 로그·명부를 계속 쓴다.
-    // `.engram-data/**` = 옛 배치의 개발 데이터 폴더(ADR-0264 결정 5) — 전환기에 옛 데몬이 아직 로그를 쓸 수 있다.
+    // Watch exclusions = paths **that have no frontend source**. It is a dev-server-only setting so it is not even loaded in a release build.
+    // ★Why `target/**` · `crates/**` are excluded (measured 2026-08-17)★: if you build/test Rust with the dev app up,
+    //   artifacts pour out under `target/`, which trips the watcher and **the whole window reloads periodically** —
+    //   it keeps refreshing while you measure by looking at the screen, so observation becomes impossible.
+    // `.engram-dev/**` = the data folder of the debug build (inside the repository root — ADR-0136). The daemon keeps writing logs · the registry.
+    // `.engram-data/**` = the development data folder of the old layout (ADR-0264 decision 5) — during the transition the old daemon may still write logs.
     watch: {
       ignored: [
         "**/src-tauri/**",

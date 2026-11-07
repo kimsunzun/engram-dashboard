@@ -5,9 +5,9 @@
 //! The driver's own suite (`src/daemon_client/connection/tests.rs`, `--test lib_unit`) drives the same path on a memory
 //! network; this target buys determinism and speed, not the only way (the target's decision = ADR-0174 · status =
 //! `.claude/skill-bindings/qa.md` 「모듈별 명령」). Run:
-//! `cargo test -p engram-dashboard --test daemon_client_replay`(자식 프로세스를 하나도 안 띄우므로
-//! `-- --test-threads=4` 를 붙이지 않는다 — 판정 규칙 정본 = `.claude/skill-bindings/qa.md` 「모듈별 명령」).
-//! CI 는 이 타깃만 따로 부르는 전용 스텝도 갖는다(`.github/workflows/ci.yml`).
+//! `cargo test -p engram-dashboard --test daemon_client_replay` (it launches no child process at all, so
+//! do not add `-- --test-threads=4` — the authority for the decision rule = `.claude/skill-bindings/qa.md` 「모듈별 명령」).
+//! CI also has a dedicated step that calls only this target (`.github/workflows/ci.yml`).
 //!
 //! ## ★What it guards — a refused subscription can go out again★
 //! Right after a daemon restart there is no session (boot auto-restore OFF), so the `Subscribe` of the reconnect replay is refused. A refusal is not
@@ -430,7 +430,7 @@ fn a_replay_complete_delivers_a_success_marker_to_the_same_windows() {
     );
 }
 
-// ★The Ack's takeover marker reaches bit2 of the bytes going to the window (ADR-0226)★ — the webview uses this bit to draw loading instead of the first
+// ★The Ack's resume marker reaches bit2 of the bytes going to the window (ADR-0226)★ — the webview uses this bit to draw loading instead of the first
 //   screen. truncated · the marker value are flipped relative to the test right above, so even if the two fields are wired swapped, one of the
 //   two goes red.
 #[test]
