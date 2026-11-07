@@ -1,8 +1,8 @@
-//! 요청/응답 상관 — ★순수 층★. 대기 표 · 시한 · 만료 번호 재사용 거절.
+//! Request/response correlation — ★pure layer★. The pending table · deadlines · rejecting reuse of expired numbers.
 //!
-//! ★이 파일에는 tokio 도 소켓도 워크스페이스 crate 도 없다★ — 게이트가 그것을 잰다(정본 =
-//! `lib.rs` 헤더). 깨우는 손잡이(`oneshot::Sender` 같은 것)는 **제네릭 슬롯 `S`** 로 받아 두기만 하고,
-//! 실제로 깨우는 것은 [`crate::peer`] 의 감독 태스크다.
+//! ★This file has no tokio, no socket, and no workspace crate★ — the gate measures that (canonical =
+//! the `lib.rs` header). The waking handle (something like `oneshot::Sender`) is only held as a **generic slot `S`**,
+//! and what actually wakes it is the supervisor task of [`crate::peer`].
 //!
 //! ★The supervisor task owns the table alone (no lock)★.
 
@@ -13,38 +13,38 @@ use std::time::{Duration, Instant};
 
 use crate::machine::{DisconnectCause, Generation};
 
-/// 요청이 실패하는 방식 전부.
+/// All the ways a request fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestError {
-    /// 시한이 지났다. ★자동 재전송하지 않는다★ — 무응답은 "실패" 가 아니라 **"모른다"** 라, 다시 보내면
-    /// 상대가 실은 처리했던 조작이 두 번 적용된다(ADR-0181 결정 3).
+    /// The deadline passed. ★No automatic resend★ — no response is not "failure" but **"unknown"**, so if sent again
+    /// an operation the peer had actually processed is applied twice (ADR-0181 decision 3).
     TimedOut { after: Duration },
-    /// 끊겨서 끝났다 — 보내기 전이거나 보낸 뒤 답장 전이다. 어느 쪽인지는 `sent` 가 가른다(TRD 3 D12).
+    /// Ended because it was disconnected — either before sending or after sending and before the reply. Which one is told by `sent` (TRD 3 D12).
     Disconnected {
-        /// 이 요청이 묶인 연결 — 부르는 쪽이 잡은 세대다([`crate::Peer::request_in`] · `request` 는 부른 순간의 지금
-        /// 세대). 보낸 요청이면 보낸 그 연결이다.
+        /// The connection this request is bound to — the generation the caller captured ([`crate::Peer::request_in`] · `request` uses the current
+        /// generation at the moment of the call). For a sent request it is the connection it was sent on.
         generation: Generation,
-        /// 아는 마지막 끊김 사유. ★`generation` 이 끝난 까닭이 아닐 수 있다★ — 그 뒤에 또 끊겼으면 그 뒤 것이다.
+        /// The last known disconnect cause. ★It may not be why `generation` ended★ — if it disconnected again after that, it is the later one.
         cause: DisconnectCause,
-        /// ★상대에게 갔을 수 있나★. `false` = 통로에 넘기기 전에 끝났다(운영 단계가 아니었다 · 큐에 든 채 끊겼다 ·
-        /// 묶인 세대가 지금 세대가 아니었다) — 상대에게 안 갔으므로 다시 보내도 두 번 적용되지 않는다. `true` = 대기
-        /// 표에 오른 뒤(쓰기 직전에 오른다) 끊겼다 — 상대가 받아 처리했을 수 있으니 결과를 모른다(맹목 재시도 금지 —
-        /// [`RequestError::TimedOut`] 과 같은 처지).
-        /// ★`true` 는 부풀 수 있고 `false` 는 보증이다★ — 표에 오른 뒤 쓰기가 한 번도 폴링되지 않은 채 끊겨도,
-        /// 감독이 비정상으로 사라져(패닉 · 런타임 종료) 어디까지 갔는지 모를 때도 `true` 다.
+        /// ★May it have reached the peer★. `false` = it ended before being handed to the channel (not in the operating phase · disconnected while in the queue ·
+        /// the bound generation was not the current one) — it did not reach the peer, so sending again is not applied twice. `true` = it disconnected after
+        /// getting into the pending table (it gets in just before the write) — the peer may have received and processed it so we do not know the result (no blind retry —
+        /// the same position as [`RequestError::TimedOut`]).
+        /// ★`true` can be inflated and `false` is a guarantee★ — it is `true` even if it disconnected with the write never polled after getting into the table,
+        /// and even when the supervisor vanished abnormally (panic · runtime shutdown) and we do not know how far it got.
         sent: bool,
     },
-    /// 나가는 큐가 찼다.
+    /// The outbound queue is full.
     QueueFull,
-    /// 같은 번호의 옛 요청이 아직 답을 기다리는데 새 요청이 그 번호를 다시 썼다 — 옛 대기자가 이것으로 깨어난다.
-    /// ★새 요청은 슬롯을 승계하지 않고 [`RequestError::TagRetired`] 로 거절된다(둘 다 실패)★ — 상관 키가 그 번호
-    /// 하나뿐이라 먼저 나간 요청의 늦은 답장을 새 요청의 짝과 가를 수 없다(`lib.rs` 「알려진 한계」 ·
+    /// An old request with the same number is still waiting for its answer and a new request reused that number — the old waiter wakes with this.
+    /// ★The new request does not inherit the slot and is rejected as [`RequestError::TagRetired`] (both fail)★ — the correlation key is that number
+    /// alone, so the late reply of the request that went out first cannot be told apart from the new request's counterpart (`lib.rs` 「알려진 한계」 (known limits) ·
     /// [`Insert::Collided`]).
     Superseded,
-    /// 이 명령은 답장을 안 받는다([`crate::Wire::request_tag`] 가 `None`). `notify` 를 쓰라는 뜻이다.
+    /// This command takes no reply ([`crate::Wire::request_tag`] is `None`). It means use `notify`.
     NotARequest,
-    /// 은퇴한 번호를 다시 썼다 — 시한 만료로 은퇴한 번호이거나, 대기 중인 번호와 겹친 새 요청이다(그 번호도 이때
-    /// 은퇴한다 — [`RequestError::Superseded`] 의 짝).
+    /// It reused a retired number — either a number retired by deadline expiry, or a new request that overlapped a waiting number (that number is also
+    /// retired then — the counterpart of [`RequestError::Superseded`]).
     TagRetired,
 }
 
@@ -80,11 +80,11 @@ impl fmt::Display for RequestError {
 
 impl std::error::Error for RequestError {}
 
-/// 만료된 번호를 기억하는 유계 링.
+/// A bounded ring that remembers expired numbers.
 ///
-/// ★진짜 보증은 여기가 아니라 **번호를 만드는 쪽**에 있다★ — 우리 경우 uuid v4 다. 이 링이 할 수 있는
-/// 것은 **최근** 만료 번호가 다시 오면 거절하는 것뿐이고, 기억은 무한할 수 없다. 넘치면 가장 오래된
-/// 것부터 조용히 잊고, 그 번호는 다시 쓸 수 있게 된다. ★이 한계를 보증으로 읽지 말 것★.
+/// ★The real guarantee is not here but in **the side that makes the numbers**★ — in our case a uuid v4. All this ring can do
+/// is reject when a **recent** expired number comes back, and memory cannot be infinite. When it overflows it quietly forgets from the oldest,
+/// and that number becomes reusable. ★Do not read this limit as a guarantee★.
 #[derive(Debug)]
 struct RetiredRing<T> {
     order: VecDeque<T>,
@@ -122,20 +122,20 @@ impl<T: Eq + Hash + Clone> RetiredRing<T> {
     }
 }
 
-/// [`Pending::insert`] 의 결과. 어느 갈래든 **슬롯을 잃지 않는다** — 못 넣은 슬롯은 그대로 돌려주므로
-/// 부르는 쪽이 반드시 깨운다.
+/// The result of [`Pending::insert`]. On any branch it **does not lose the slot** — a slot that could not be put in is returned as is, so
+/// the caller must wake it.
 #[derive(Debug)]
 pub enum Insert<S> {
-    /// 자리를 잡았다.
+    /// Took a place.
     Placed,
-    /// 같은 번호가 이미 **대기 중**이었다 — 그 번호를 은퇴시키고 양쪽을 다 깨운다.
+    /// The same number was already **waiting** — retire that number and wake both.
     ///
-    /// 옛 대기자는 [`RequestError::Superseded`](오늘 동작 보존), 새 요청은
-    /// [`RequestError::TagRetired`] 다. 새 것을 그대로 승계시키면 안 되는 이유: 상관 키가 이 번호
-    /// 하나뿐이라 **먼저 나간 요청의 늦은 답장이 나중 요청의 짝으로 배달된다.** 어느 쪽 답장인지
-    /// 구별할 재료가 wire 에 없으므로, 잘못 배달하느니 둘 다 실패시킨다.
+    /// The old waiter gets [`RequestError::Superseded`] (preserving today's behavior), the new request gets
+    /// [`RequestError::TagRetired`]. Why we must not let the new one inherit it: the correlation key is this number
+    /// alone, so **the late reply of the request that went out first would be delivered as the counterpart of the later request.** There is nothing on the wire to
+    /// tell which one a reply belongs to, so rather than deliver wrongly we fail both.
     Collided { displaced: S, rejected: S },
-    /// 만료됐던 번호를 다시 썼다.
+    /// Reused a number that had expired.
     Retired(S),
 }
 
@@ -145,29 +145,29 @@ struct Waiter<S> {
     deadline: Instant,
 }
 
-/// 짝짓기 번호 → 대기 슬롯.
+/// Pairing number → pending slot.
 ///
-/// ## ★알려진 한계 — 늦은 답장의 오배달을 **불가능하게 만들지 못한다**★ (고치려 들지 말 것)
+/// ## ★Known limit — it cannot **make misdelivery of a late reply impossible**★ (do not try to fix)
 ///
-/// 소비자가 `Tag` 를 **되쓰는** 타입으로 고르면 이 crate 는 늦은 답장이 엉뚱한 요청에 배달되는 것을
-/// 막을 수 없고, **막으려 하지도 않는다.** 기제와 상한은 이렇다:
+/// If the consumer picks a type that **reuses** `Tag`, this crate cannot prevent a late reply from being delivered to the wrong request,
+/// and **does not try to.** The mechanism and its limit are as follows:
 ///
-/// - 시한 만료로 걷힌 번호는 [`Pending`] 이 **유계 링**에 넣어 두고, 다시 오면
-///   [`RequestError::TagRetired`] 로 거절한다. 링 길이 = [`crate::Policy::retired_tags`](기본 256).
-/// - 링은 **FIFO** 다. 그 뒤로 256개가 더 은퇴하면 가장 오래된 번호는 **잊힌다**.
-/// - ★잊힌 뒤에 그 번호의 늦은 답장이 도착하면, 같은 번호를 쓴 **새 요청**의 짝으로 배달된다.★
-///   상관 키가 그 번호 하나뿐이라 두 답장을 가를 재료가 wire 에 없다.
+/// - A number collected by deadline expiry is put into a **bounded ring** by [`Pending`], and if it comes again it is rejected with
+///   [`RequestError::TagRetired`]. Ring length = [`crate::Policy::retired_tags`] (default 256).
+/// - The ring is **FIFO**. If 256 more retire after that, the oldest number is **forgotten**.
+/// - ★If a late reply for that number arrives after it is forgotten, it is delivered as the counterpart of a **new request** that used the same number.★
+///   The correlation key is that number alone, so there is nothing on the wire to tell the two replies apart.
 ///
-/// ★**잊는 것이 결함이 아니라 이 링이 하는 일의 절반이다**★ — 잊지 않으면 그 번호를 **정당하게**
-/// 다시 쓰는 것도 영구히 막힌다. 즉 「오배달 완전 차단」과 「정당한 재사용 허용」은 같은 손잡이의
-/// 양 끝이고, 상한 없는 기억은 애초에 불가능하다(무한히 자란다).
+/// ★**Forgetting is not a defect but half of what this ring does**★ — if it did not forget, **legitimately**
+/// reusing that number would be blocked forever too. That is, 「오배달 완전 차단」 (blocking misdelivery completely) and 「정당한 재사용 허용」 (allowing legitimate reuse) are the two
+/// ends of the same knob, and unbounded memory is impossible from the start (it grows without limit).
 ///
-/// ★두 리뷰어가 여기서 갈렸고 그 갈림 자체가 기록이다★ — 한쪽은 「누수 없음, 잊는 것이 정당한
-/// 재사용을 가능케 한다」, 다른 쪽은 「그 잊음이 원래 답장을 새 대기자에게 보낸다」로 읽었다. 둘 다
-/// 맞고, **유계 링을 지금 모양 그대로 두는 것이 사용자 결정이다**(2026-09-06). 근거: 우리 실제
-/// `Tag` 는 UUID 라 **정당한 충돌이 애초에 안 난다**. 남는 구멍은 ★소비자 버그(번호 되쓰기)★와
-/// ★링 하나를 가득 채울 만큼(기본 256회) 더 은퇴한 뒤에야 도착하는 답장★이 **동시에** 필요하다.
-/// 회귀망 = `the_retired_ring_forgets_its_oldest_when_it_overflows`(그 잊음을 **의도로** 못 박는다).
+/// ★The two reviewers split here and the split itself is the record★ — one read it as 「누수 없음, 잊는 것이 정당한
+/// 재사용을 가능케 한다」 (no leak; forgetting makes legitimate reuse possible), the other as 「그 잊음이 원래 답장을 새 대기자에게 보낸다」 (that forgetting sends the original reply to a new waiter). Both are
+/// right, and **leaving the bounded ring exactly as it is now is the user's decision** (2026-09-06). Basis: our real
+/// `Tag` is a UUID so **a legitimate collision never occurs in the first place**. The remaining hole needs ★a consumer bug (reusing numbers)★ and
+/// ★a reply that arrives only after more retirements than fill one ring (default 256 times)★ **at the same time**.
+/// The regression net = `the_retired_ring_forgets_its_oldest_when_it_overflows` (it pins that forgetting **as intended**).
 #[derive(Debug)]
 pub struct Pending<T, S> {
     waiting: HashMap<T, Waiter<S>>,
@@ -182,7 +182,7 @@ impl<T: Eq + Hash + Clone, S> Pending<T, S> {
         }
     }
 
-    /// 슬롯을 등록한다. ★보내기 **전에** 부른다★ — 뒤집으면 빠른 답장이 슬롯을 못 찾는다.
+    /// Registers a slot. ★Call it **before sending**★ — reverse it and a fast reply cannot find its slot.
     pub fn insert(&mut self, tag: T, slot: S, deadline: Instant) -> Insert<S> {
         if self.retired.contains(&tag) {
             return Insert::Retired(slot);
@@ -198,12 +198,12 @@ impl<T: Eq + Hash + Clone, S> Pending<T, S> {
         Insert::Placed
     }
 
-    /// 답장이 왔다. 슬롯이 없으면 `None` — ★만료 뒤 늦게 온 답장이 그렇게 조용히 버려진다★.
+    /// A reply came. If there is no slot, `None` — ★a reply that arrives late after expiry is quietly dropped that way★.
     pub fn take(&mut self, tag: &T) -> Option<S> {
         self.waiting.remove(tag).map(|w| w.slot)
     }
 
-    /// 시한이 지난 것들을 걷는다. 걷힌 번호는 링에 등재되어 이후 재사용이 거절된다.
+    /// Collects those whose deadline has passed. A collected number is registered in the ring and later reuse is rejected.
     pub fn expire(&mut self, now: Instant) -> Vec<(T, S)> {
         let due: Vec<T> = self
             .waiting
@@ -220,13 +220,13 @@ impl<T: Eq + Hash + Clone, S> Pending<T, S> {
             .collect()
     }
 
-    /// 끊겼다 — 대기자 전원을 걷는다. ★이쪽은 링에 등재하지 않는다★: 그 번호가 죽은 것이 아니라 연결이
-    /// 죽은 것이라, 소비자가 같은 번호로 다시 청하는 것이 정당하다.
+    /// Disconnected — collects all waiters. ★This side does not register in the ring★: it is not that the number died but that the connection
+    /// died, so it is legitimate for the consumer to request again with the same number.
     pub fn drain(&mut self) -> Vec<(T, S)> {
         self.waiting.drain().map(|(t, w)| (t, w.slot)).collect()
     }
 
-    /// 가장 이른 시한. `None` 이면 기다리는 것이 없다.
+    /// The earliest deadline. `None` means nothing is waiting.
     pub fn next_deadline(&self) -> Option<Instant> {
         self.waiting.values().map(|w| w.deadline).min()
     }
@@ -318,7 +318,7 @@ mod tests {
         assert!(p.is_empty());
     }
 
-    // ── M1: 상관 키가 하나뿐이라 겹친 번호는 배달을 못 가른다 ──
+    // ── M1: there is only one correlation key, so an overlapping number cannot tell deliveries apart ──
     #[test]
     fn a_colliding_tag_wakes_both_sides_and_retires_the_number() {
         let mut p = table();
@@ -428,7 +428,7 @@ mod tests {
         }
         .to_string()
         .contains('3'));
-        // ★두 처지를 글에서도 가른다★ — 셸이 이 둘을 다른 문구(재전송 안전 · 결과 모름)로 낸다(TRD 3 D12).
+        // ★Tell the two positions apart in the text too★ — the shell emits these two with different wording (safe to resend · result unknown) (TRD 3 D12).
         let text = |sent| {
             RequestError::Disconnected {
                 generation: Generation(3),

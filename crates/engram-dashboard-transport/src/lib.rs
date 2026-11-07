@@ -46,7 +46,7 @@
 //!    restarts the count, taking the moment it notices the release as the last receipt, and an open window closes later by the time it was held — a hold that started while the supervisor
 //!    was waiting to write, or that started and ended in that time, is held time too. The window may close later than that (it noticed the release
 //!    late · a hold from before the window opened also pushes it back — erring on the side where nothing is lost) but never earlier. ★One exception★ — regardless of holds,
-//!    if the window deadline passes during a write and a replay entered the front queue in the meantime, the window may close before that replay
+//!    if the window deadline passes during a write and a replay entered the read-ahead queue in the meantime, the window may close before that replay
 //!    (「알려진 한계」 (known limits) below). Our ping goes out during that time too.
 //! 3. Events · messages ride one line per supervisor (that handle's inbox) in the order that supervisor produced them (the supervisor's ordering area —
 //!    `peer.rs` header). If the peer sends and closes right away, the close comes after what preceded it — if the line is full, the close is read only after those
@@ -183,7 +183,7 @@
 //!   truncation ([`TransportEvent::StreamTruncated`]) at once without a re-request and continues from that fragment. ★The window cap is shared by all
 //!   of a supervisor's streams★ — if one stream's open window is filling the cap, another stream's new hole becomes
 //!   truncation at once, with no chance to fill it.
-//! - ★**If the window deadline passes during a write and a replay entered the front queue in the meantime, that replay cannot reach the window — even
+//! - ★**If the window deadline passes during a write and a replay entered the read-ahead queue in the meantime, that replay cannot reach the window — even
 //!   without backpressure**★ — when the deadline has passed, the operating loop looks at the timer before the frame (`next_turn` in `peer.rs`). The first
 //!   turn after the write ends sees the window deadline passed, closes the window as truncated, and the replay processed after that is discarded as a past number.
 //!   The write does not need to be longer than the window deadline — one write that crosses the open window's deadline is enough. Time held by backpressure
@@ -202,8 +202,8 @@
 //!   undrained stalls only that peer. When the line ([`Policy::inbound_queue`] — per-peer override applied) fills, that peer's supervisor holds the items in its own
 //!   ordering area and loads them in the order produced as room opens (`peer.rs` header) — neither packets nor lifecycle events are
 //!   discarded, and a full line does not cut the connection. While the ordering area holds, the supervisor takes no more of that peer's frames, so
-//!   when the front queue ([`Policy::frame_buffer`]) fills, link reading stops, and it also stops reading the link when the bytes held are at or above the read share.
-//!   For bytes, one tally per supervisor (budget 16 MiB) covers the front queue · ordering area · line · resume window together. A supervisor that
+//!   when the read-ahead queue ([`Policy::frame_buffer`]) fills, link reading stops, and it also stops reading the link when the bytes held are at or above the read share.
+//!   For bytes, one tally per supervisor (budget 16 MiB) covers the read-ahead queue · ordering area · line · resume window together. A supervisor that
 //!   has received a stream fragment even once splits that budget in half into read share and window cap (8 MiB · 8 MiB), and a supervisor that has not (the two consumers not
 //!   using the stream layer — ADR-0310 decision 16) has the whole 16 MiB as its read share (window cap 0 · `budget.rs`). So when the receiver
 //!   falls behind, only that peer
@@ -211,18 +211,18 @@
 //!   the replay that would fill the hole could not be read and a hole that could have been filled would become a loss. The ceiling of bytes one supervisor holds is 16 MiB +
 //!   one message (TRD 3 §3-0 ① 「B + M」 — the canonical source of the reason = the `budget.rs` header). The count ceiling is the two lengths above + the ordering area (what one
 //!   frame or one turn of the timer yields — including the fragments held by a window that closes and releases on that turn — and a few lifecycle events,
-//!   and what was salvaged from the front queue when the link was discarded) + the fragments the window holds (fewer than [`Policy::resume_buffer`] per stream).
+//!   and what was salvaged from the read-ahead queue when the link was discarded) + the fragments the window holds (fewer than [`Policy::resume_buffer`] per stream).
 //!   ★The cap for one message is the adapter's job★ — the `ws` adapter applies the value the consumer gave (`ws::AcceptPolicy::max_message_bytes` ·
 //!   `ws::WsDialer::new`) to the receiving tungstenite settings (TRD 3 §5 15). So the ceiling over that adapter is 16 MiB + that
 //!   value (32 MiB at the operating value of 16 MiB).
-//!   ★When our side discards the link (the app closed it · redial · write failure and so on), what was already read (the front queue) is handed over
+//!   ★When our side discards the link (the app closed it · redial · write failure and so on), what was already read (the read-ahead queue) is handed over
 //!   before the disconnect event★ — it folds the read task and drains that line without waiting and sends it down the same path as while operating (replies to
 //!   the waiting callers · everything else onto the line with the current generation marker · even past one frame that could not be decoded). What is left on the link (not yet
 //!   read) is discarded together and neither counted nor reported.
 //!   ★Under backpressure, the supervisor may first notice through a write failure that the peer sent its last words and closed★ — if that close is queued
-//!   behind the backed-up items and unread, and the ping write fails first, only what was already read into the front queue survives via the drain above.
+//!   behind the backed-up items and unread, and the ping write fails first, only what was already read into the read-ahead queue survives via the drain above.
 //!   Frames left on the link are discarded together (the last words too, if they were still there). The disconnect cause is the peer's close
-//!   ([`DisconnectCause::PeerClosed`] — it came first) if that close was already in the front queue, and the write-side end
+//!   ([`DisconnectCause::PeerClosed`] — it came first) if that close was already in the read-ahead queue, and the write-side end
 //!   ([`DisconnectCause::WriteFailed`] · [`DisconnectCause::WriteDeadline`] if it was the deadline) if it was still on the link.
 //! - ★**[`Peer::close`] has no completion signal**★ — at the time it returns, the supervisor may still be closing the link. To
 //!   wait for the end, use the future [`Peer::close_after_flush`] returns (it drains and closes).

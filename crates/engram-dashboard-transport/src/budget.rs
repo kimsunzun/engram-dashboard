@@ -1,12 +1,12 @@
 //! Byte tally of what has been received — ★driving layer★ (TRD 3 §3-0 ① · ADR-0310 decision 17).
 //!
 //! One tally per supervisor ([`Ledger`]). The moment the read task reads a frame off the link, it adds that payload length
-//! ([`Ledger::charge`]); that share ([`Charge`]) travels with the item through the front queue → ordering area → upward queue (it may
+//! ([`Ledger::charge`]); that share ([`Charge`]) travels with the item through the read-ahead queue → ordering area → upward queue (it may
 //! be held by the resume window along the way) and is subtracted when it drops — when the receiver takes it out, or when the supervisor discards it (a reply · an overlapping
 //! fragment · a fragment the window drops when the answer arrives). ★So one tally covers the three layers and the window★ — measuring each layer separately would let each fill up to its own cap
-//! so the sum grows as a product (front queue 512 entries × the one-message cap is that shape).
+//! so the sum grows as a product (read-ahead queue 512 entries × the one-message cap is that shape).
 //!
-//! ★The share rides on the item, not on a layer★ — while an item crosses the front queue · ordering area · inbox ([`crate::Inbox`]),
+//! ★The share rides on the item, not on a layer★ — while an item crosses the read-ahead queue · ordering area · inbox ([`crate::Inbox`]),
 //! it must hold the tally of the supervisor that put it in, so that one tally covers all three layers. Dropping the inbox
 //! drops the shares along with the items it holds.
 //!

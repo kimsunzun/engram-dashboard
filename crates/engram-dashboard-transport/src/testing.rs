@@ -232,7 +232,7 @@ impl MemoryEndpoint {
     }
 
     /// The number of items (frames, closes, failures) pushed in but not yet read by the client. ★This is how to see whether
-    /// backpressure reached the link★ — if the supervisor does not drain the front queue or the bytes it holds exceed the read share, the read task does not read the link and
+    /// backpressure reached the link★ — if the supervisor does not drain the read-ahead queue or the bytes it holds exceed the read share, the read task does not read the link and
     /// the items stay here.
     pub fn unread(&self) -> usize {
         self.unread.load(Ordering::Acquire)
