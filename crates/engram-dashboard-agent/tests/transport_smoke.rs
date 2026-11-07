@@ -1,6 +1,6 @@
-//! ② 격리 통합테스트 — PtyTransport + OutputCore 신경로를 manager 없이 직접 단언 검증.
+//! ② Isolated integration test — directly assert-verifies the PtyTransport + OutputCore new path without a manager.
 //!
-//! 실 PTY(default shell)를 spawn 한다. 가볍고 전역 경합 없어 default(자동 실행).
+//! Spawns a real PTY (default shell). Light and with no global contention, so default (runs automatically).
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -119,7 +119,7 @@ fn transport_open_input_resize_shutdown() {
         core.status()
     );
 
-    // 20s = 개별 단계(5s)보다 느슨한 여유 상한 — 전체 hang 회귀만 잡는다.
+    // 20s = a looser leeway bound than the individual stages (5s) — catches only a whole-hang regression.
     assert!(
         started.elapsed() < Duration::from_secs(20),
         "전체 흐름이 비정상적으로 오래 걸림: {:?}",
@@ -128,13 +128,13 @@ fn transport_open_input_resize_shutdown() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════
-// 입력 큐(ADR 미부여 — `transport::input_queue`) — PTY 쪽 회귀망
+// Input queue (no ADR assigned — `transport::input_queue`) — regression net on the PTY side
 // ═══════════════════════════════════════════════════════════════════════════════════════════
 
-/// ★증명한다★: 큐를 거쳐도 **FIFO 가 보존된다** — 따로따로 넣은 세 줄이 자식에게 그 순서로 도착해
-///   그 순서로 echo 된다. 라이터가 큐를 뒤섞거나 덩이를 합치는 회귀는 아래 부분열 단언에 걸린다.
-/// ★단언을 "부분열"로 잡은 이유★: PTY 는 프롬프트·ANSI 를 섞어 뱉으므로 정확 일치는 셸 의존이 된다.
-///   세 표식이 **이 순서로** 나타나는지만 본다 — 그것이 재려는 성질(순서)의 전부다.
+/// ★Proves★: **FIFO is preserved** even through the queue — three lines put in separately arrive at the child in that order and
+///   are echoed in that order. A regression where the writer scrambles the queue or merges chunks is caught by the subsequence assertion below.
+/// ★Why the assertion is set as a "subsequence"★: a PTY spits out prompts · ANSI mixed in, so an exact match would depend on the shell.
+///   We look only at whether the three markers appear **in this order** — that is all of the property being measured (order).
 #[test]
 fn pty_input_queue_preserves_fifo_order() {
     let spec = CommandSpec {
@@ -160,7 +160,7 @@ fn pty_input_queue_preserves_fifo_order() {
         "5s 내 PTY 초기 출력 미수신"
     );
 
-    // 세 번 나눠 넣는다 — 큐가 순서를 지키는지 재는 것이므로 한 덩이로 합쳐 보내면 의미가 없다.
+    // Put in three separate times — we are measuring whether the queue keeps order, so sending as one chunk would be meaningless.
     for marker in ["fifo-alpha", "fifo-bravo", "fifo-charlie"] {
         transport
             .send_input(InputEvent::Raw(format!("echo {marker}\r\n").into_bytes()))
@@ -189,12 +189,12 @@ fn pty_input_queue_preserves_fifo_order() {
     core.join_pump(Duration::from_secs(5));
 }
 
-/// ★증명한다★: 상한 초과는 `Err` 로 **거절**되고(버리지 않는다), `shutdown` 뒤의 입력도 거절된다 —
-///   즉 라이터가 사라진 뒤에 바이트가 조용히 쌓이는 자리가 없다.
-/// ★`shutdown` 뒤 거절이 라이터 종료의 관측 창이다★ — 그 스레드는 아무도 join 하지 않으므로(그것이
-///   kill 인과를 지연시키지 않는 근거다) 직접 죽음을 볼 수단이 없다. 대신 그 스레드를 끝내는 바로 그
-///   신호(큐 닫힘)를 밖에서 관측한다. 루프 자체가 그 신호로 끝나는 것은
-///   `transport::input_queue` 의 `close_terminates_the_drain_loop` 가 잰다.
+/// ★Proves★: exceeding the bound is **refused** with `Err` (not discarded), and input after `shutdown` is refused too —
+///   that is, there is no place for bytes to silently pile up after the writer is gone.
+/// ★The refusal after `shutdown` is the observation window of the writer's termination★ — no one joins that thread (that is
+///   the basis for it not delaying the kill causality), so there is no way to see its death directly. Instead we observe from outside the very
+///   signal that ends that thread (the queue closing). That the loop itself ends on that signal is measured by
+///   `close_terminates_the_drain_loop` in `transport::input_queue`.
 #[test]
 fn pty_input_queue_refuses_overflow_and_writes_after_shutdown() {
     use engram_dashboard_agent::transport::input_queue::INPUT_QUEUE_MAX_BYTES;
@@ -215,8 +215,8 @@ fn pty_input_queue_refuses_overflow_and_writes_after_shutdown() {
     ));
     let transport: Box<dyn AgentTransport> = Box::new(transport);
 
-    // ★`start()` 전에 잰다★ — 라이터가 없으면 큐가 드레인되지 않아 상한 판정이 결정적이다(라이터가
-    //   돌면 얼마나 빠졌는지에 따라 경계가 흔들린다). 큐는 `start()` 전에도 받는다는 사실도 함께 잰다.
+    // ★Measured before `start()`★ — with no writer the queue is not drained, so the bound decision is deterministic (once the writer
+    //   runs, the boundary wobbles by how much was drained). Also measures the fact that the queue accepts even before `start()`.
     let err = transport
         .send_input(InputEvent::Raw(vec![b'z'; INPUT_QUEUE_MAX_BYTES + 1]))
         .expect_err("상한 초과는 거절돼야 한다");
