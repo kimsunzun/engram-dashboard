@@ -20,8 +20,8 @@ use crate::daemon_client::{CHANNEL_GONE, NOT_CONNECTED, NO_REQUEST_ID};
 /// only — one that went out has an unknown outcome ([`SENT_OUTCOME_UNKNOWN`]).
 pub(crate) const UNSENT_ON_DISCONNECT: &str = "daemon 연결 끊김 — 명령 미전송(재전송 안전)";
 
-/// 끊김으로 **답을 못 받은** 명령이 받는 문구 — 위 [`UNSENT_ON_DISCONNECT`] 와 갈리는 축은 「wire 에
-/// 나갔나」 하나뿐이고, 그 차이가 곧 재시도 안전성이다(나간 것은 데몬이 실행했는지 알 수 없다).
+/// The message a command **that got no answer** because of a disconnect receives — the only axis that tells it apart from [`UNSENT_ON_DISCONNECT`] above is 「wire 에
+/// 나갔나」 (did it go out on the wire), and that difference is exactly retry safety (for one that went out, there is no way to know whether the daemon executed it).
 pub(crate) const SENT_OUTCOME_UNKNOWN: &str =
     "daemon 연결 끊김 — 명령 전송됨·응답 못 받음(결과 불명; 부작용 명령 맹목 재시도 금지)";
 
