@@ -86,5 +86,12 @@ Every translation batch uses these renderings. A batch that needs a new term add
 | 녹 / 빨강 (측정) | green / red | "M9 · M10 녹" = M9 and M10 passed; not "folded in" |
 | \<id\> 앞 (파킹분·드레인) | addressed to \<id\> | not "in front of" (no queue position meant) |
 | N차 (개정) | Nth amendment | amendment generation, not a review round |
+| 칸 | area (UI / layout region) · field (struct, JSON, wire) · entry (list) | never "slot" — slot is 슬롯 |
+| 바람 (숨은 창의 최대화) | desire | the deferred-maximize record; 거두다 on it = clear the desire |
+| 재기 | measurements | UI metrics; not timers |
+| 떠 두다 | copy aside / capture | `copy_aside`; "captured at launch" for spawn settings |
+| 맡기다 / 맡김표 / 되물림 | hand over / claim ticket / take back | prewarmed-window handover |
+| 네트워크 행 | network layer | the `net` crate, not a row |
+| 독 (락) | poison | not "dock" |
 
 Kept in Korean: the ADR lint tokens (`- 상태:` + vocab, `- 관련:`, section headings), text in 「」, names of CLAUDE.md and `.claude/` sections.
