@@ -4,7 +4,7 @@
 //! `lib.rs` 헤더). 깨우는 손잡이(`oneshot::Sender` 같은 것)는 **제네릭 슬롯 `S`** 로 받아 두기만 하고,
 //! 실제로 깨우는 것은 [`crate::peer`] 의 감독 태스크다.
 //!
-//! ★표를 감독 태스크가 단독 소유한다(락 없음)★ — 오늘 셸의 `PendingMap<T>` 과 같은 모양이다.
+//! ★The supervisor task owns the table alone (no lock)★.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;

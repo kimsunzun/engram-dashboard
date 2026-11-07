@@ -105,7 +105,7 @@ impl OutputRouter {
         }
     }
 
-    // `pub(crate)` 라 crate 내 다른 테스트 모듈(daemon_client::tests)에서도 호출 가능.
+    // `pub(crate)` 라 crate 내 다른 테스트 모듈(daemon_client 의 시험들)에서도 호출 가능.
     // ★ADR-0046★: 옛 eager resubscribe(current_agents 순회)는 삭제됐다 — 헬퍼는 라우팅(targets) 테스트가
     //   다시 쓸 수 있어 남긴다(현재는 미사용 → allow).
     #[cfg(test)]

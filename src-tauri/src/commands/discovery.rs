@@ -142,8 +142,8 @@ pub fn daemon_close(client: tauri::State<'_, std::sync::Arc<crate::daemon_client
 // self-heal pulls this command once after registering its listeners to read the current state.
 //
 // ★Same vocabulary★: serialized with **the same words** as the `daemon-connection-state` payload ("connected" /
-// "reconnecting" / "down") so the frontend feeds it through the event handler's path. Connecting is never emitted (the
-// link driver never shows it), so it folds into "down" here — matching the frontend ConnectionState vocabulary.
+// "reconnecting" / "down") so the frontend feeds it through the event handler's path — the frontend ConnectionState
+// vocabulary.
 #[tauri::command]
 pub fn daemon_connection_state(
     client: tauri::State<'_, std::sync::Arc<crate::daemon_client::DaemonClient>>,
@@ -152,7 +152,7 @@ pub fn daemon_connection_state(
     match client.state() {
         ConnectionState::Connected => "connected",
         ConnectionState::Reconnecting => "reconnecting",
-        ConnectionState::Connecting | ConnectionState::Down => "down",
+        ConnectionState::Down => "down",
     }
     .to_string()
 }

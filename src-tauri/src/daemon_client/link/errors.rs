@@ -1,27 +1,39 @@
-//! Transport send and request failures as the texts the old driver gives its callers (TRD S21 trd-3 §6-2 U2).
+//! Transport send and request failures as the texts the shell gives its callers (TRD S21 trd-3 §6-2 U2).
 //!
-//! ★Byte-identical to the old driver★ — callers tell outcomes apart by these strings (the frontend, the LLM surface,
-//! `daemon_client::tests` `DisconnectBranch`). The old driver's constants are imported in place; the reply-timeout text
-//! lives here — the frontend command path (`commands::agent`) gets it from a request timeout, having no timeout of its
-//! own. Failures the old driver never had (a full queue, a retired request id) read as its send failure with the
-//! transport's reason.
+//! ★The texts are a contract★ — callers tell outcomes apart by these strings (the frontend, the LLM surface), so they
+//! stay byte-identical to what the shell gave before it ran on the transport. Failures the shell never had before (a
+//! full queue, a retired request id) read as its send failure with the transport's reason.
 //!
 //! ★Pre-check first★ — [`RequestError::Disconnected`] with `sent: false` covers both "the peer was not live when
-//! called" and "it dropped before the command reached the wire". The old driver gives those two different texts
-//! ([`NOT_CONNECTED`] · [`UNSENT_ON_DISCONNECT`]), so a caller runs [`require_live`] before `request` / `notify` and
-//! maps what the transport returns afterwards with [`request_error_text`] / [`send_error_text`].
+//! called" and "it dropped before the command reached the wire". Those two get different texts ([`NOT_CONNECTED`] ·
+//! [`UNSENT_ON_DISCONNECT`]), so a caller runs [`require_live`] before `request` / `notify` and maps what the transport
+//! returns afterwards with [`request_error_text`] / [`send_error_text`].
 // ADR-0195
 
 use std::time::Duration;
 
 use engram_dashboard_transport::{PeerState, RequestError, SendError};
 
-use crate::daemon_client::connection::{
-    PENDING_SUPERSEDED, SEND_FAILED_PREFIX, SENT_OUTCOME_UNKNOWN, UNSENT_ON_DISCONNECT,
-};
 use crate::daemon_client::{CHANNEL_GONE, NOT_CONNECTED, NO_REQUEST_ID};
 
-/// `Err(NOT_CONNECTED)` unless the peer is live — the old driver's "no socket takes commands now" (ADR-0195).
+/// The text of a command that never reached the wire because the link dropped. "Safe to resend" holds on this path
+/// only — one that went out has an unknown outcome ([`SENT_OUTCOME_UNKNOWN`]).
+pub(crate) const UNSENT_ON_DISCONNECT: &str = "daemon 연결 끊김 — 명령 미전송(재전송 안전)";
+
+/// 끊김으로 **답을 못 받은** 명령이 받는 문구 — 위 [`UNSENT_ON_DISCONNECT`] 와 갈리는 축은 「wire 에
+/// 나갔나」 하나뿐이고, 그 차이가 곧 재시도 안전성이다(나간 것은 데몬이 실행했는지 알 수 없다).
+pub(crate) const SENT_OUTCOME_UNKNOWN: &str =
+    "daemon 연결 끊김 — 명령 전송됨·응답 못 받음(결과 불명; 부작용 명령 맹목 재시도 금지)";
+
+/// The prefix of a command that could not be handed to the link (the cause follows). A send failure, not a drop like
+/// the two above — hence its own text.
+pub const SEND_FAILED_PREFIX: &str = "명령 송신 실패";
+
+/// The text of the older of two waiting round trips that share one request id — the transport fails both (M1 —
+/// transport TRD §4-1); the newer one reads as a send failure (`RequestError::TagRetired`).
+pub const PENDING_SUPERSEDED: &str = "중복 request_id — 옛 요청 취소";
+
+/// `Err(NOT_CONNECTED)` unless the peer is live — "no connection takes commands now" (ADR-0195).
 pub fn require_live(state: PeerState) -> Result<(), String> {
     if state.is_live() {
         Ok(())
@@ -32,8 +44,7 @@ pub fn require_live(state: PeerState) -> Result<(), String> {
 
 /// The text a failed `request` gives its caller, assuming [`require_live`] passed just before.
 ///
-/// `QueueFull` and `TagRetired` have no counterpart in the old driver (its queue waited instead of failing, and a
-/// reused request id took the slot over) — they read as a send failure with the transport's reason.
+/// `QueueFull` and `TagRetired` read as a send failure with the transport's reason.
 pub fn request_error_text(err: &RequestError) -> String {
     match err {
         RequestError::TimedOut { after } => reply_timeout_text(*after),
@@ -99,7 +110,7 @@ mod tests {
     }
 
     #[test]
-    fn request_failures_read_as_the_old_driver_texts_byte_for_byte() {
+    fn request_failures_read_as_the_shell_texts_byte_for_byte() {
         assert_eq!(
             request_error_text(&disconnected(false)),
             UNSENT_ON_DISCONNECT
@@ -134,7 +145,7 @@ mod tests {
     }
 
     #[test]
-    fn send_failures_read_as_the_old_driver_texts_byte_for_byte() {
+    fn send_failures_read_as_the_shell_texts_byte_for_byte() {
         assert_eq!(
             send_error_text(&SendError::Disconnected),
             UNSENT_ON_DISCONNECT

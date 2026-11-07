@@ -214,7 +214,7 @@ pub async fn forward_daemon_command(
     forward_to_daemon(&client, cmd).await
 }
 
-/// [`forward_daemon_command`] 의 본체 — `State` 없이 하네스가 태운다(`daemon_client/tests.rs`).
+/// [`forward_daemon_command`] 의 본체 — `State` 없이 하네스가 태운다(`daemon_client/connection/tests.rs`).
 pub(crate) async fn forward_to_daemon(
     client: &DaemonClient,
     cmd: serde_json::Value,
@@ -263,7 +263,7 @@ pub(crate) async fn forward_to_daemon(
     //
     // A reply that never comes while the link stays up (the daemon drops one answer) is bounded by the transport's
     //   request timeout — the shared one of every round trip (ADR-0181 · ADR-0310 D15 ① ·
-    //   `daemon_client::connection_v2::link_policy`), whose text is `link::errors::reply_timeout_text`. No second
+    //   `daemon_client::connection::link_policy`), whose text is `link::errors::reply_timeout_text`. No second
     //   timeout here. A command sent while the connection is live but not yet opened by the driver first waits for the
     //   open, bounded by the same value — so the worst case is about twice it (the open gap is normally milliseconds).
     let event = client.send_command(agent_cmd).await?;

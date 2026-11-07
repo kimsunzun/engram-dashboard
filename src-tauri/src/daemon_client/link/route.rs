@@ -9,8 +9,7 @@
 //! arrive. Run them on another task.
 //! ★This module is the only place the link's connection state and lifecycle are logged★ — the transport has no
 //! logging of its own. Lifecycle and refusal logging here never carries the daemon's text, and no daemon text reaches the
-//! UI from here; the one exception is the moved `emit_broadcast`, which still warn-logs a daemon `Error` broadcast's
-//! message as the old driver did.
+//! UI from here; the one exception is `emit_broadcast`, which warn-logs a daemon `Error` broadcast's message.
 //!
 //! ## Key filter — every item of a key (§3-3, three rules)
 //!
@@ -67,7 +66,7 @@ pub enum Routed {
     /// Exactly one per `LinkUp`, also when a re-add ([`RouteState::adopt`]) or an abnormal inbox end ([`route_end`])
     /// ends it.
     LinkDown { generation: Generation },
-    /// A connection-state edge for the frontend: emitted only when the shown state changes. Never `Connecting`.
+    /// A connection-state edge for the frontend: emitted only when the shown state changes.
     /// ★Routing is the only emitter of the link's connection state★ — a driver that also emitted (e.g. `Down` from its
     /// own `close()`) would double the edges; a close shows `Down` through the `Closed` it produces.
     State(ConnectionState),
@@ -75,8 +74,7 @@ pub enum Routed {
     Notice(LinkNotice),
     /// An event for the frontend — the driver hands it to [`emit_broadcast`].
     Broadcast(AgentEvent),
-    /// An event the driver handles itself (replay · daemon requests · broken replies · usage) — the same split as the
-    /// old driver's read arm (`connection.rs` `main_loop`).
+    /// An event the driver handles itself (replay · daemon requests · broken replies · usage).
     ToDriver {
         generation: Generation,
         event: AgentEvent,
@@ -689,7 +687,7 @@ mod tests {
     use super::super::test_log::capture;
     use crate::daemon_client::events::ConnectionStateEvent;
     use crate::daemon_client::replay_flight::ReplayFlightSet;
-    use crate::daemon_client::tests::wire_agent;
+    use crate::daemon_client::test_support::wire_agent;
 
     // ── item builders ──────────────────────────────────────────────────────────────────────────
 
@@ -1588,7 +1586,7 @@ mod tests {
     }
 
     /// The driver part this mapping test needs: a dropped link clears the replay flights, a broadcast reaches the
-    /// ports (the old driver does the same per event).
+    /// ports (the driver does the same per event).
     fn apply(out: Vec<Routed>, flight: &mut ReplayFlightSet, rec: &Recorder) {
         for routed in out {
             match routed {

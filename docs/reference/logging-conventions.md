@@ -57,7 +57,7 @@
 - **동시성 전이:** 상태 변화, 가드 발동(stale 세대 폐기·재시작 등).
 - **외부 경계:** spawn, 파일 IO, 네트워크 accept/close.
 
-> S14 `daemon_client`(연결·핸드셰이크·generation 가드)는 이 의무에 맞춰 **계측 완료**(`src-tauri/src/daemon_client/{mod,connection}.rs`) — 연결 시작/수립/종료(info), 접속·Auth·핸드셰이크 실패(warn), stale 가드 발동(debug). 가드 판정 로그는 호출자 레이어에 두고 `lifecycle.rs`는 무계측(이중 로깅 회피, 파일 헤더 참조). 본보기는 `crates/.../ws.rs`(연결/인증 흐름).
+> The shell's daemon connection is instrumented to this duty (`src-tauri/src/daemon_client/{connection.rs, link/route.rs}` — S21 3-2): link up/down and state transitions (info), connect/handshake failures and refusals (warn, throttled per handle), stale items of a replaced handle (debug). The transport crate logs its own supervisor events; the shell does not log them twice. Example of a connection/auth flow: `crates/.../ws.rs`.
 
 ## 보안
 

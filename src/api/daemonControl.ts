@@ -88,9 +88,10 @@ export class DaemonDaemonControl implements DaemonControl {
         // graceful 실패(active agents 거부 등) — 아래 fallback kill 로 강제 종료(force 의도).
       }
     }
-    // 2) note3(재연결 노이즈 제거): graceful 직후 client.disconnect() 로 closedByUser=true →
-    //    즉시 'down' 정착. 안 하면 데몬이 Ack 후 소켓을 닫을 때 attach-only 재연결이 5회 헛시도한다.
-    //    ★respawn 금지★: disconnect 는 transport.close 만(spawn 안 함). 복구는 명시 start 로만.
+    // 2) note3 (no reconnect noise): right after graceful, client.disconnect() sets closedByUser=true and settles on
+    //    'down' at once. Without it, when the daemon closes the socket after its Ack the attach-only reconnect keeps
+    //    retrying a daemon that is gone (the shell link without limit — ADR-0346).
+    //    ★No respawn★: disconnect only calls transport.close (never spawns). Recovery is an explicit start only.
     this.client.disconnect()
     // 3) M-1(graceful/taskkill race 완화): graceful 이 Ack 됐으면 데몬이 자진 종료 중 —
     //    바로 taskkill 하지 말고 daemon_status 로 still-alive 확인 후 살아있을 때만 fallback.

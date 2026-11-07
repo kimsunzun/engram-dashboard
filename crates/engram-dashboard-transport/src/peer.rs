@@ -3103,6 +3103,43 @@ mod tests {
         settle_until("운영 진입", || h.peer.peer_state() == PeerState::Live).await;
     }
 
+    // A dial that lands but whose handshake never answers fails at the connect deadline (dial and handshake share it)
+    //   as a network-class failure, and the peer backs off.
+    #[tokio::test]
+    async fn a_handshake_that_never_answers_fails_at_the_connect_deadline_and_backs_off() {
+        let mut h = build(Policy::default(), Arc::new(HelloHandshake));
+        settle_until("handshaking", || {
+            h.peer.peer_state() == PeerState::Handshaking
+        })
+        .await;
+        // Held and never answered.
+        let _endpoint = h.net.accept().expect("a link was opened");
+        let deadline = Policy::default().connect_timeout;
+
+        h.clock.advance(deadline - Duration::from_millis(1));
+        settle().await;
+        assert_eq!(
+            h.peer.peer_state(),
+            PeerState::Handshaking,
+            "not before the deadline"
+        );
+
+        h.clock.advance(Duration::from_millis(1));
+        settle_until("backoff", || h.peer.peer_state() == PeerState::Backoff).await;
+        let cause = h
+            .events()
+            .into_iter()
+            .find_map(|event| match event {
+                TransportEvent::ConnectFailed { cause, .. } => Some(cause),
+                _ => None,
+            })
+            .expect("the attempt failed");
+        assert!(
+            matches!(&cause, ConnectFailure::Unreachable(e) if e.message == "handshake timed out"),
+            "{cause:?}"
+        );
+    }
+
     // ── D1: 세대는 이름표별 공용 계수기에서 나온다 ──
     #[tokio::test]
     async fn the_supervisor_mints_its_generation_from_the_shared_counter() {

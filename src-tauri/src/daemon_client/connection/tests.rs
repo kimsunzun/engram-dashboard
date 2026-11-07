@@ -11,7 +11,8 @@ use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant};
 
 use engram_dashboard_protocol::{
-    encode_terminal_frame, AgentStatus, RequestId, Secret, SubscribeAction, PROTOCOL_VERSION,
+    encode_terminal_frame, AgentStatus, RequestId, Secret, SubscribeAction, UsageVendorState,
+    PROTOCOL_VERSION,
 };
 use engram_dashboard_transport::testing::{ManualClock, MemoryEndpoint, MemoryNetwork};
 use engram_dashboard_transport::{
@@ -23,20 +24,22 @@ use tokio::task::JoinHandle;
 use engram_dashboard_command::{CommandDecl, CommandTable, OwnerLookup, OwnerToken};
 
 use crate::commands::layout::RouterSubs;
-use crate::commands::popout::close_requested_popup_window;
+use crate::commands::popout::{close_requested_popup_window, drop_window_in_model, PopupCounter};
 use crate::daemon_client::inbound::{BoxedTask, InboundReceiver, TaskSpawner, ViewCommandPort};
 use crate::daemon_client::link::endpoint::{Current, Endpoint};
 use crate::daemon_client::refusal::RecordingRefusals;
 use crate::daemon_client::replay_flight::MARKER_TAG;
-use crate::daemon_client::tests::{
+use crate::daemon_client::test_support::{
     active_slot, bus_request, bus_table, relayout, usage_update, wire_agent, NoLayoutEvents,
-    RecordingEvents, POPUP,
+    OpenWindows, RecordingEvents, POPUP,
 };
 use crate::daemon_client::usage_interest::{InterestAction, USAGE_INTEREST_SHRINK_DELAY};
 use crate::daemon_client::DaemonClient;
 use crate::layout::commands::CATALOG_VERSION;
 use crate::layout::{apply, LayoutState, MAIN_WINDOW_LABEL};
 use crate::output_channel::register_window;
+use crate::output_router::DropCause;
+use crate::tray::actions::{for_each_ui_window, LayoutUsageVisibility, UsageVisibility};
 
 const TOKEN: &str = "cccc2222cccc2222cccc2222cccc2222cccc2222cccc2222cccc2222cccc2222";
 
@@ -191,7 +194,7 @@ impl Harness {
     }
 
     fn link(&self) -> &LinkClient {
-        self.client.link.as_ref().expect("built on the link driver")
+        &self.client.link
     }
 
     fn peer_state(&self) -> Option<PeerState> {
@@ -460,7 +463,7 @@ async fn a_daemon_error_in_the_handshake_stops_for_good_without_a_second_dial() 
 }
 
 #[tokio::test]
-async fn command_round_trips_and_their_failures_read_as_the_old_driver_texts() {
+async fn command_round_trips_and_their_failures_read_as_the_shell_texts() {
     let h = Harness::new(live());
     let list = || AgentCommand::ListAgents {
         request_id: RequestId::new(),
@@ -531,7 +534,7 @@ async fn command_round_trips_and_their_failures_read_as_the_old_driver_texts() {
         joined("the dropped request", task)
             .await
             .expect_err("the link dropped"),
-        crate::daemon_client::connection::SENT_OUTCOME_UNKNOWN
+        crate::daemon_client::link::errors::SENT_OUTCOME_UNKNOWN
     );
 }
 
@@ -805,7 +808,7 @@ async fn a_handle_routed_as_connected_counts_as_live_until_its_loss_is_routed() 
     assert_eq!(b.driver.dialer.registered(), 1);
 }
 
-// The old driver's order, which the frontend relies on (`src/api/tauriTransport.ts` `doConnect`): the state watch and
+// The order the frontend relies on (`src/api/tauriTransport.ts` `doConnect`): the state watch and
 // the frontend's `connected` come before the connect resolves.
 #[tokio::test]
 async fn a_connect_resolves_only_after_its_connected_is_shown() {
@@ -1176,7 +1179,7 @@ async fn a_replay_without_progress_gets_one_failure_marker_after_the_deadline_on
     assert!(is_unsubscribe(&h.command(&endpoint).await, other));
 }
 
-// Copied from the old suite, which keeps its own until U4 (TRD §6-2 U3 — the A1 safety on the single actor): a
+// Copied from the old suite (TRD §6-2 U3 — the A1 safety on the single actor): a
 // replay request a dying popout's webview sends after its close request unsubscribed sends no Subscribe; a request
 // for an agent another window shows goes out.
 #[tokio::test]
@@ -1232,7 +1235,7 @@ async fn a_replay_request_after_the_close_request_sends_no_subscribe() {
     );
 }
 
-// Copied from the old suite, which keeps its own until U4 (TRD §6-2 U3 — A2): the names sink gets each daemon list
+// Copied from the old suite (TRD §6-2 U3 — A2): the names sink gets each daemon list
 // after the frontend event, as it came; a broadcast that is not a list does not reach it.
 #[tokio::test]
 async fn agent_names_sink_receives_each_daemon_list_after_the_frontend_event() {
@@ -1303,7 +1306,7 @@ async fn a_re_add_of_a_once_connected_key_shows_its_first_failure_as_down() {
     assert_eq!(
         h.states(),
         ["state:connected", "state:reconnecting", "state:down"],
-        "an explicit connect that fails shows Down, as the old driver does"
+        "an explicit connect that fails shows Down"
     );
 }
 
@@ -1970,7 +1973,7 @@ async fn a_command_sent_as_soon_as_the_peer_is_live_goes_out_after_the_registrat
     joined("connect", connect).await.expect("connected");
 }
 
-// Copied from the old suite, which keeps its own until U4 (TRD §6-2 — moved onto the new driver).
+// Copied from the old suite (TRD §6-2).
 #[tokio::test]
 async fn a_usage_broadcast_notifies_once_with_labels_and_socket_epoch() {
     let h = Harness::new(live());
@@ -2590,7 +2593,7 @@ async fn a_fire_and_forget_then_a_round_trip_go_out_in_that_order_on_an_opened_c
     assert!(joined("the round trip", caller).await.is_ok());
 }
 
-// F4: `close()` followed at once by a write fails it — as the old driver's closed command window did.
+// F4: `close()` followed at once by a write fails it.
 #[tokio::test]
 async fn a_command_right_after_a_close_fails_at_once_and_nothing_goes_out() {
     let h = Harness::new(live());
@@ -3006,4 +3009,878 @@ async fn the_production_transport_attaches_answers_and_follows_the_daemon_to_a_n
     })
     .await;
     round_trip("the round trip after the loss", &client, &mut ws).await;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════════
+// Ported from the old driver's suite (TRD §6-2 「셸 시험 운명」 — the 「옮김」 rows this suite had not yet copied).
+// ══════════════════════════════════════════════════════════════════════════════════
+
+// A second connect on a connected client answers at once — no second search, no second dial.
+#[tokio::test]
+async fn connect_idempotent_when_already_connected() {
+    let h = Harness::new(live());
+    let _endpoint = h.connected().await;
+    joined("the second connect", h.connect())
+        .await
+        .expect("already connected");
+    assert_eq!(h.record.searches(), 1, "no second search");
+    assert_eq!(h.net.dials(), 1, "no second dial");
+}
+
+/// A daemon search that panics — `connect`'s search runs on the blocking pool, so the panic ends that task only.
+struct PanickingSearch;
+
+impl EndpointSource for PanickingSearch {
+    fn ensure(&self, _timeout: Duration) -> Result<Endpoint, String> {
+        panic!("the daemon search panicked (test)");
+    }
+
+    fn current(&self) -> Current {
+        Current::Absent
+    }
+}
+
+// A search that dies is a search failure: the caller gets `Discovery`, and every window learns `down` once.
+#[tokio::test]
+async fn connect_discovery_join_failure_tells_every_window_down() {
+    let net = MemoryNetwork::new();
+    let clock = ManualClock::new();
+    let events = Arc::new(RecordingEvents::default());
+    let client = DaemonClient::new_on_link(
+        Handle::current(),
+        net.dialer(),
+        Arc::new(PanickingSearch),
+        clock.handle(),
+        events.clone(),
+        events.clone(),
+        Arc::new(RecordingRefusals::new()),
+    );
+    let err = client.connect().await.expect_err("the search died");
+    assert!(
+        matches!(&err, HandshakeError::Discovery(m) if m.contains("the daemon search task failed")),
+        "{err:?}"
+    );
+    wait_for("Down", || client.state() == ConnectionState::Down).await;
+    wait_for("the down event", || !events.seen().is_empty()).await;
+    assert_eq!(events.seen(), ["state:down"]);
+}
+
+// A webview `UsageSubscribe` never reaches the daemon (usage subscriptions are the shell's alone) — having no request
+// id, it would go out as a fire-and-forget if not stopped. The marker being the next frame means nothing went out.
+#[tokio::test]
+async fn forward_drops_a_webview_usage_subscribe() {
+    let h = Harness::new(live());
+    let endpoint = h.connected().await;
+    let cmd = serde_json::to_value(AgentCommand::UsageSubscribe {
+        vendors: vec![AgentBackendKind::Claude],
+    })
+    .unwrap();
+    assert_eq!(
+        crate::commands::agent::forward_to_daemon(&h.client, cmd).await,
+        Ok(None)
+    );
+    let m = marker(&h.client);
+    assert_eq!(
+        label(&h.command(&endpoint).await),
+        m,
+        "웹뷰의 사용량 구독은 소켓에 안 나간다"
+    );
+}
+
+// A broken command slot from the webview (envelope · reply) fails the invoke and never reaches the link. The slots are
+// raw, so the packet parse passes — unstopped, an envelope would go out as a fire-and-forget without an id (the
+// frontend's pending never rejects) and a reply would be refused by the daemon without an id (the frontend never learns
+// of the failure).
+async fn assert_forward_refuses_and_writes_nothing(cmd: serde_json::Value) {
+    let h = Harness::new(live());
+    let endpoint = h.connected().await;
+    let refused = crate::commands::agent::forward_to_daemon(&h.client, cmd).await;
+    assert!(
+        matches!(&refused, Err(m) if m.starts_with("AgentCommand 명령 칸 파싱 실패")),
+        "{refused:?}"
+    );
+    let m = marker(&h.client);
+    assert_eq!(
+        label(&h.command(&endpoint).await),
+        m,
+        "a broken slot does not go out"
+    );
+}
+
+#[tokio::test]
+async fn forward_rejects_a_webview_command_with_a_broken_envelope() {
+    assert_forward_refuses_and_writes_nothing(
+        serde_json::json!({ "Command": { "envelope": { "name": "tab.create" } } }),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn forward_rejects_a_webview_outcome_with_a_broken_reply() {
+    assert_forward_refuses_and_writes_nothing(serde_json::json!({
+        "CommandOutcome": { "reply": { "request_id": "00000000-0000-0000-0000-000000000000" } }
+    }))
+    .await;
+}
+
+// `get_usage_snapshot` = the whole cache (aged by the seconds since it arrived) + the current connection's epoch; no
+// connection → an empty list and 0. The aging is measured as a difference of two reads — the arrival time is unknown,
+// but two reads a whole number of seconds apart differ by exactly that many seconds.
+#[tokio::test]
+async fn get_usage_snapshot_hands_off_the_cache_with_the_socket_epoch() {
+    use crate::commands::usage::{usage_snapshot_reply, UsageSnapshotReply};
+
+    let h = Harness::new(live());
+    assert_eq!(
+        usage_snapshot_reply(&h.client, Instant::now()),
+        UsageSnapshotReply {
+            socket_epoch: 0,
+            snapshots: Vec::new(),
+        },
+        "no connection"
+    );
+
+    let _ = relayout(h.client.usage_interest(), true, false);
+    let endpoint = h.connected().await;
+    assert_eq!(label(&h.command(&endpoint).await), "usage[Claude]");
+    let socket = usage_socket(&h.client);
+    assert_ne!(socket, 0);
+    let mut update = usage_update(AgentBackendKind::Claude, 4, &[AgentBackendKind::Claude]);
+    if let AgentEvent::UsageLimitsUpdated { snapshot, .. } = &mut update {
+        snapshot.five_hour = Some(engram_dashboard_protocol::UsageWindow {
+            used_pct: Some(12.0),
+            resets_at: None,
+            age_secs: 10,
+            expired: false,
+        });
+    }
+    endpoint.push(text(&update));
+    wait_for("the usage notice", || h.events.seen().len() >= 2).await;
+
+    let now = Instant::now();
+    let age = |reply: &UsageSnapshotReply| {
+        assert_eq!(reply.socket_epoch, socket);
+        assert_eq!(reply.snapshots.len(), 1);
+        assert_eq!(reply.snapshots[0].revision, 4);
+        reply.snapshots[0].five_hour.as_ref().unwrap().age_secs
+    };
+    let early = usage_snapshot_reply(&h.client, now);
+    let later = usage_snapshot_reply(&h.client, now + Duration::from_secs(100));
+    assert!(age(&early) >= 10);
+    assert_eq!(age(&later), age(&early) + 100, "받은 뒤 흐른 초만큼 늙는다");
+
+    let wire = serde_json::to_value(&later).unwrap();
+    let mut keys: Vec<&str> = wire
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["snapshots", "socket_epoch"],
+        "웹뷰 계약 = snake_case 두 칸"
+    );
+}
+
+// A daemon command that comes before a command table is installed **is answered with an error** — dropped silently,
+// the sender would hold until its deadline. An assembly miss does not heal on retry (Internal).
+#[tokio::test]
+async fn an_envelope_arriving_before_the_table_still_gets_an_answer() {
+    let h = Harness::new(live());
+    let endpoint = h.connected().await;
+    let (request_id, request) = command_request("tab.create");
+    endpoint.push(text(&request));
+    let AgentCommand::CommandOutcome { reply } = h.command(&endpoint).await else {
+        panic!("the answer is a command outcome");
+    };
+    let reply = protocol_state::reply_from_wire(&reply).expect("a readable outcome");
+    assert_eq!(reply.request_id, request_id);
+    assert_eq!(
+        reply.outcome.expect_err("no table is a failure").code(),
+        engram_dashboard_command::ErrorCode::Internal
+    );
+}
+
+const CONFLICT_REFUSAL: &str = "CONFLICT: answered by this daemon itself, so they cannot be registered: agent.rename — pick different names; this packet was not applied";
+const LAST_REFUSAL: &str = "INVALID_ARGUMENT: 표지 — 마지막 연결의 거절(시험)";
+
+impl Harness {
+    /// Answers the registration the shell wrote first on `endpoint` with a daemon refusal.
+    async fn refuse_registration(&self, endpoint: &MemoryEndpoint, message: &str) {
+        let AgentCommand::RegisterCommands { request_id, .. } = self.command(endpoint).await else {
+            panic!("the registration comes first");
+        };
+        endpoint.push(text(&AgentEvent::Error {
+            request_id: Some(request_id),
+            message: message.into(),
+        }));
+    }
+
+    /// Waits until `message` reached the refusal box record — the positive signal that what came before is handled.
+    async fn box_shows(&self, message: &str) {
+        wait_for("the refusal reaches the box", || {
+            self.refusals
+                .shown()
+                .iter()
+                .any(|(_, shown)| shown == message)
+        })
+        .await;
+    }
+}
+
+// One box per (site, text), across reconnects too — the client holds one filter, never one per connection.
+#[tokio::test]
+async fn a_conflict_refusal_shows_one_box_and_the_same_refusal_after_a_reconnect_shows_none() {
+    let h = Harness::new(live());
+    let state = LayoutState::new();
+    h.client.install_command_table(
+        bus_table(&state, &h.client),
+        CATALOG_VERSION,
+        Arc::new(HeldView::default()),
+    );
+    // The filter's holders at rest — the client and the actor's ports. A registration's reply task holds one more
+    //   until it has handled the reply, so dropping back to this count is the completion barrier.
+    let at_rest = Arc::strong_count(&h.client.refusals);
+    let first = h.connected().await;
+    h.refuse_registration(&first, CONFLICT_REFUSAL).await;
+    h.box_shows(CONFLICT_REFUSAL).await;
+
+    let second = h.reconnected(&first).await;
+    h.refuse_registration(&second, CONFLICT_REFUSAL).await;
+    wait_for("the repeated refusal is handled", || {
+        Arc::strong_count(&h.client.refusals) == at_rest
+    })
+    .await;
+    assert_eq!(
+        h.refusals.shown(),
+        [(RefusalSite::Register, CONFLICT_REFUSAL.to_owned())],
+        "the repeated refusal shows no box"
+    );
+    let third = h.reconnected(&second).await;
+    h.refuse_registration(&third, LAST_REFUSAL).await;
+    h.box_shows(LAST_REFUSAL).await;
+    assert_eq!(
+        h.refusals.shown(),
+        [
+            (RefusalSite::Register, CONFLICT_REFUSAL.to_owned()),
+            (RefusalSite::Register, LAST_REFUSAL.to_owned()),
+        ],
+        "the same (site, text) shows once across reconnects"
+    );
+}
+
+// A code this shell does not know still shows once the daemon answered with it — new codes are an allowed extension
+// (`engram_dashboard_command::ErrorCode` doc).
+#[tokio::test]
+async fn an_unknown_code_refusal_shows_one_box() {
+    const UNKNOWN: &str = "BRAND_NEW_CODE: a refusal this shell has never heard of";
+    let h = Harness::new(live());
+    let state = LayoutState::new();
+    h.client.install_command_table(
+        bus_table(&state, &h.client),
+        CATALOG_VERSION,
+        Arc::new(HeldView::default()),
+    );
+    let endpoint = h.connected().await;
+    h.refuse_registration(&endpoint, UNKNOWN).await;
+    h.box_shows(UNKNOWN).await;
+    assert_eq!(
+        h.refusals.shown(),
+        [(RefusalSite::Register, UNKNOWN.to_owned())]
+    );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════════
+// The usage interest's recompute sites (TRD S21 usage-limit-slot §1-7 「재계산 자리」 · §4 셸 관심 행) — a layout write,
+// a popup's destruction and the tray's hide · show recompute the interest and handle the result (a nudge at once · the
+// 1.5 s shrink timer). Ported from the old suite onto this driver: the actor is built and never started, so every nudge
+// and unsubscribe waits in its command channel, and the test plays the actor's usage step (`sync`) itself. The shrink
+// delay runs on paused tokio time — the timer is the client's runtime sleep, not the transport clock.
+// ══════════════════════════════════════════════════════════════════════════════════
+
+/// A client whose actor is built and never started — what its callers send waits in `cmds`.
+struct Idle {
+    client: DaemonClient,
+    cmds: tokio::sync::mpsc::UnboundedReceiver<DriverCmd>,
+    _driver: Driver,
+    _routable_rx: tokio::sync::mpsc::Receiver<Routable>,
+}
+
+/// The connection generation the idle client's usage state is opened on — what the actor's `LinkUp` would hand it.
+const IDLE_SOCKET: u64 = 1;
+
+/// The usage state opened on [`IDLE_SOCKET`] with an empty interest (`sent` = ∅).
+fn idle_client() -> Idle {
+    let mut parts = None;
+    let client = DaemonClient::around_link(
+        Handle::current(),
+        None,
+        Arc::new(RecordingEvents::default()),
+        Arc::new(crate::daemon_client::NoAgentNames),
+        Arc::new(RefusalAlerts::new(Arc::new(RecordingRefusals::new()))),
+        Arc::new(OutputRouter::new()),
+        WindowChannelRegistry::default(),
+        |rt, ports| {
+            let (link, driver, cmds, routable_rx) = LinkClient::build(
+                rt,
+                MemoryNetwork::new().dialer(),
+                Record::new(Current::Absent),
+                ManualClock::new().handle(),
+                ports,
+            );
+            parts = Some((driver, cmds, routable_rx));
+            link
+        },
+    );
+    let (driver, cmds, routable_rx) = parts.expect("the link was built");
+    assert_eq!(
+        client.usage_interest().lock().on_socket_open(IDLE_SOCKET),
+        None
+    );
+    Idle {
+        client,
+        cmds,
+        _driver: driver,
+        _routable_rx: routable_rx,
+    }
+}
+
+fn kinds(cmds: &[DriverCmd]) -> Vec<&'static str> {
+    cmds.iter()
+        .map(|cmd| match cmd {
+            DriverCmd::IsLive { .. } => "IsLive",
+            DriverCmd::Add { .. } => "Add",
+            DriverCmd::Close => "Close",
+            DriverCmd::Unsubscribe { .. } => "Unsubscribe",
+            DriverCmd::RequestReplay { .. } => "RequestReplay",
+            DriverCmd::UsageNudge => "UsageNudge",
+            DriverCmd::CurrentHandle { .. } => "CurrentHandle",
+        })
+        .collect()
+}
+
+/// The nudges waiting for the actor. Any other command breaks this section's premise.
+fn nudges(rx: &mut tokio::sync::mpsc::UnboundedReceiver<DriverCmd>) -> usize {
+    let mut count = 0;
+    while let Ok(cmd) = rx.try_recv() {
+        assert!(
+            matches!(cmd, DriverCmd::UsageNudge),
+            "not a nudge: {:?}",
+            kinds(&[cmd])
+        );
+        count += 1;
+    }
+    count
+}
+
+/// What the actor does when it takes a nudge — the set it would write on the connection.
+fn sync_as_the_actor(client: &DaemonClient, socket: u64) -> Option<BTreeSet<AgentBackendKind>> {
+    client.usage_interest().lock().sync(socket, false)
+}
+
+fn set_usage_slot(
+    state: &LayoutState,
+    client: &DaemonClient,
+    window: &str,
+    show_claude: bool,
+    show_codex: bool,
+) {
+    let (view, slot) = active_slot(state, window);
+    apply::set_usage_slot(
+        state,
+        &RouterSubs {
+            router: &client.router,
+            client,
+        },
+        &NoLayoutEvents,
+        view,
+        slot,
+        Some(show_claude),
+        Some(show_codex),
+    )
+    .expect("the usage slot is placed");
+}
+
+/// main's active tab = a usage slot with Claude only, and that interest already sent (`sent` = {Claude}).
+fn subscribed_to_claude(
+    state: &LayoutState,
+    client: &DaemonClient,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<DriverCmd>,
+    socket: u64,
+) {
+    set_usage_slot(state, client, MAIN_WINDOW_LABEL, true, false);
+    assert_eq!(nudges(rx), 1, "a grown interest nudges at once");
+    assert_eq!(
+        sync_as_the_actor(client, socket),
+        Some(BTreeSet::from([AgentBackendKind::Claude]))
+    );
+}
+
+/// Room for a timer task woken on the paused clock to run — `yield_now` turns the driver once before waking.
+async fn settle() {
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+}
+
+// ── 레이아웃 쓰기 한 번 → 재계산 한 번(`RouterSubs::resync`) ─────────────────────────────
+// `sent` 가 빈 채로(연결 태스크가 꺼내지 않는다) 늘어난 관심은 재계산마다 넛지를 한 장씩 낸다 — 넛지 수가 곧
+// 재계산 수다.
+#[tokio::test]
+async fn one_layout_write_recomputes_the_usage_interest_once() {
+    let Idle {
+        client,
+        cmds: mut rx,
+        _driver,
+        _routable_rx,
+    } = idle_client();
+    let state = LayoutState::new();
+    set_usage_slot(&state, &client, MAIN_WINDOW_LABEL, true, true);
+    assert_eq!(nudges(&mut rx), 1);
+}
+
+// ── 트레이 숨김 → 기한 뒤 줄인 관심 · 보임 → 곧바로 늘어난 관심 ─────────────────────────────
+// 트레이 두 함수가 창마다 하는 일(`for_each_ui_window` + 운영 구현 `LayoutUsageVisibility`)을 그대로 태운다 —
+// 빠진 것은 창 목록을 OS 에서 뜨는 것과 OS 창 호출뿐이다.
+#[tokio::test(start_paused = true)]
+async fn tray_hide_shrinks_after_the_delay_and_show_grows_at_once() {
+    let Idle {
+        client,
+        cmds: mut rx,
+        _driver,
+        _routable_rx,
+    } = idle_client();
+    let socket = IDLE_SOCKET;
+    let state = LayoutState::new();
+    subscribed_to_claude(&state, &client, &mut rx, socket);
+    let tray = LayoutUsageVisibility {
+        state: &state,
+        client: &client,
+    };
+
+    for_each_ui_window(
+        [MAIN_WINDOW_LABEL],
+        false,
+        &tray,
+        |_| false,
+        |_| {},
+        |_| true,
+    );
+    settle().await;
+    assert_eq!(nudges(&mut rx), 0, "줄임은 곧바로 안 나간다");
+    tokio::time::advance(USAGE_INTEREST_SHRINK_DELAY - Duration::from_millis(100)).await;
+    settle().await;
+    assert_eq!(nudges(&mut rx), 0, "기한 전");
+    tokio::time::advance(Duration::from_millis(200)).await;
+    settle().await;
+    assert_eq!(nudges(&mut rx), 1, "기한에 넛지 한 장");
+    assert_eq!(
+        sync_as_the_actor(&client, socket),
+        Some(BTreeSet::new()),
+        "그 넛지가 보내는 것 = 줄인 관심"
+    );
+
+    for_each_ui_window(
+        [MAIN_WINDOW_LABEL],
+        true,
+        &tray,
+        |_| false,
+        |_| {},
+        |_| true,
+    );
+    assert_eq!(nudges(&mut rx), 1, "늘어남은 기다리지 않는다");
+    assert_eq!(
+        sync_as_the_actor(&client, socket),
+        Some(BTreeSet::from([AgentBackendKind::Claude]))
+    );
+}
+
+// ── 기한 안에 다시 보이면 줄임이 물러진다 — 뒤늦게 깬 타이머는 아무것도 안 낸다 ─────────────────
+#[tokio::test(start_paused = true)]
+async fn showing_again_within_the_delay_cancels_the_shrink() {
+    let Idle {
+        client,
+        cmds: mut rx,
+        _driver,
+        _routable_rx,
+    } = idle_client();
+    let socket = IDLE_SOCKET;
+    let state = LayoutState::new();
+    subscribed_to_claude(&state, &client, &mut rx, socket);
+    let tray = LayoutUsageVisibility {
+        state: &state,
+        client: &client,
+    };
+
+    tray.set_visible(MAIN_WINDOW_LABEL, false);
+    tokio::time::advance(USAGE_INTEREST_SHRINK_DELAY / 2).await;
+    settle().await;
+    tray.set_visible(MAIN_WINDOW_LABEL, true);
+    assert_eq!(nudges(&mut rx), 0, "`sent` 로 돌아왔다 — 보낼 것이 없다");
+
+    tokio::time::advance(USAGE_INTEREST_SHRINK_DELAY * 2).await;
+    settle().await;
+    assert_eq!(nudges(&mut rx), 0, "물러진 줄임의 타이머가 넛지를 냈다");
+    assert_eq!(sync_as_the_actor(&client, socket), None);
+}
+
+// ── 팝업 소멸 → 그 창의 관심이 기한 뒤에 빠진다 ─────────────────────────────────────────
+#[tokio::test(start_paused = true)]
+async fn a_destroyed_popup_leaves_the_interest_after_the_delay() {
+    let Idle {
+        client,
+        cmds: mut rx,
+        _driver,
+        _routable_rx,
+    } = idle_client();
+    let socket = IDLE_SOCKET;
+    let state = LayoutState::new();
+    state.0.lock().unwrap().create_window(POPUP).unwrap();
+    set_usage_slot(&state, &client, POPUP, true, false);
+    assert_eq!(nudges(&mut rx), 1);
+    assert_eq!(
+        sync_as_the_actor(&client, socket),
+        Some(BTreeSet::from([AgentBackendKind::Claude]))
+    );
+
+    assert_eq!(
+        drop_window_in_model(POPUP, DropCause::Destroyed, &state, &client.router, &client),
+        Some(1)
+    );
+    settle().await;
+    assert_eq!(nudges(&mut rx), 0, "줄임은 곧바로 안 나간다");
+    tokio::time::advance(USAGE_INTEREST_SHRINK_DELAY + Duration::from_millis(100)).await;
+    settle().await;
+    assert_eq!(nudges(&mut rx), 1);
+    assert_eq!(sync_as_the_actor(&client, socket), Some(BTreeSet::new()));
+}
+
+// ── 팝업 소멸은 모델이 그 창을 쥐지 않았어도 숨김 표시를 잊는다 ─────────────────────────────────
+// 새 창으로 슬롯 옮기기는 OS 창을 먼저 열고 모델 창을 나중에 더한다 — 그 틈에 트레이가 숨기고 창이 닫히면 모델엔
+// 그 창이 없다. 같은 label 의 창을 묘비 없는 새 모델에 세우면(시험만 — 운영 label 은 다시 안 쓰이고, 묘비가 선 label 은
+// 모델이 받지 않는다) 잊힌 표시는 보임으로 센다.
+#[tokio::test]
+async fn a_destroyed_popup_forgets_its_hidden_mark_even_when_the_model_never_held_it() {
+    let Idle {
+        client,
+        cmds: mut rx,
+        _driver,
+        _routable_rx,
+    } = idle_client();
+    let state = LayoutState::new();
+    LayoutUsageVisibility {
+        state: &state,
+        client: &client,
+    }
+    .set_visible(POPUP, false);
+    assert_eq!(
+        drop_window_in_model(POPUP, DropCause::Destroyed, &state, &client.router, &client),
+        Some(0)
+    );
+    assert_eq!(nudges(&mut rx), 0);
+
+    let state = LayoutState::new();
+    state.0.lock().unwrap().create_window(POPUP).unwrap();
+    set_usage_slot(&state, &client, POPUP, true, false);
+    assert_eq!(
+        nudges(&mut rx),
+        1,
+        "숨김 표시가 남아 그 창을 숨은 창으로 셌다"
+    );
+}
+
+// ── 팝아웃 닫기 요청이 그 창에만 보이던 에이전트의 구독을 한 번 풀고, 뒤이은 소멸 정리는 아무것도 안 보낸다 ─────────
+// 닫기 요청이 모델을 먼저 지우므로(TRD S21-slot-docking 5.8판 §1-2 「닫히는 창」) 해제는 그때 나가고, 소멸 정리는 같은 몫을
+// 다시 해도 낼 것이 없다.
+#[tokio::test]
+async fn a_popout_close_request_unsubscribes_once_and_the_later_destroyed_sends_nothing() {
+    let Idle {
+        client,
+        cmds: mut rx,
+        _driver,
+        _routable_rx,
+    } = idle_client();
+    let state = LayoutState::new();
+    let agent = uuid::Uuid::new_v4();
+    state.0.lock().unwrap().create_window(POPUP).unwrap();
+    let (view, slot) = active_slot(&state, POPUP);
+    apply::assign_agent(
+        &state,
+        &RouterSubs {
+            router: &client.router,
+            client: &client,
+        },
+        &NoLayoutEvents,
+        view,
+        slot,
+        agent.to_string(),
+    )
+    .expect("팝아웃 슬롯에 배정");
+    assert!(rx.try_recv().is_err(), "배정은 해제를 내지 않는다");
+
+    close_requested_popup_window(POPUP, &state, &client.router, &client);
+    let mut sent = Vec::new();
+    while let Ok(cmd) = rx.try_recv() {
+        sent.push(cmd);
+    }
+    assert!(
+        matches!(sent.as_slice(), [DriverCmd::Unsubscribe { agent_id }] if *agent_id == agent),
+        "{:?}",
+        kinds(&sent)
+    );
+
+    assert_eq!(
+        drop_window_in_model(POPUP, DropCause::Destroyed, &state, &client.router, &client),
+        Some(0)
+    );
+    assert!(rx.try_recv().is_err(), "소멸 정리가 명령을 냈다");
+}
+
+// ── 닫기 요청 없이 온 소멸(모델에 남은 팝아웃) — `lib.rs` 의 `Destroyed` 정리가 부르는 모델 몫 한 번이 구독 해제 ·
+//   묘비 · 사용량 관심 줄임 · 창 번호 풀기를 다 한다(TRD S26-window-chrome §4-1) ─────────────────────────
+#[tokio::test(start_paused = true)]
+async fn a_destroyed_popout_still_in_the_model_is_cleaned_up_in_one_pass_and_frees_its_number() {
+    let Idle {
+        client,
+        cmds: mut rx,
+        _driver,
+        _routable_rx,
+    } = idle_client();
+    let socket = IDLE_SOCKET;
+    let state = LayoutState::new();
+    let subs = RouterSubs {
+        router: &client.router,
+        client: &client,
+    };
+    let agent = uuid::Uuid::new_v4();
+    state.0.lock().unwrap().create_window(POPUP).unwrap();
+    let (view, slot) = active_slot(&state, POPUP);
+    apply::assign_agent(
+        &state,
+        &subs,
+        &NoLayoutEvents,
+        view,
+        slot,
+        agent.to_string(),
+    )
+    .expect("팝아웃 슬롯에 배정");
+    apply::create_tab(&state, &subs, &NoLayoutEvents, POPUP, None).expect("팝아웃의 둘째 탭");
+    set_usage_slot(&state, &client, POPUP, true, false);
+    assert_eq!(nudges(&mut rx), 1);
+    assert_eq!(
+        sync_as_the_actor(&client, socket),
+        Some(BTreeSet::from([AgentBackendKind::Claude]))
+    );
+
+    assert_eq!(
+        drop_window_in_model(POPUP, DropCause::Destroyed, &state, &client.router, &client),
+        Some(2)
+    );
+    let mut sent = Vec::new();
+    while let Ok(cmd) = rx.try_recv() {
+        sent.push(cmd);
+    }
+    assert!(
+        matches!(sent.as_slice(), [DriverCmd::Unsubscribe { agent_id }] if *agent_id == agent),
+        "{:?}",
+        kinds(&sent)
+    );
+    tokio::time::advance(USAGE_INTEREST_SHRINK_DELAY + Duration::from_millis(100)).await;
+    settle().await;
+    assert_eq!(nudges(&mut rx), 1);
+    assert_eq!(sync_as_the_actor(&client, socket), Some(BTreeSet::new()));
+
+    let mut mgr = state.0.lock().unwrap();
+    assert!(!mgr.windows.contains_key(POPUP));
+    assert!(mgr.closing_numbers().is_empty());
+    assert_eq!(
+        mgr.create_window(POPUP),
+        Err(crate::layout::LayoutError::WindowClosed(POPUP.to_string())),
+        "묘비가 섰다"
+    );
+    mgr.create_window("slot-popup-8").unwrap();
+    assert_eq!(
+        mgr.windows["slot-popup-8"].number, 2,
+        "풀린 번호를 다음 새 창이 받는다"
+    );
+    mgr.assert_number_invariants();
+}
+
+// ── 트레이 숨기기가 실패한 창은 보이는 창으로 남는다 — 관심이 줄지 않는다 ─────────────────────────
+#[tokio::test(start_paused = true)]
+async fn a_failed_tray_hide_keeps_the_window_in_the_interest() {
+    let Idle {
+        client,
+        cmds: mut rx,
+        _driver,
+        _routable_rx,
+    } = idle_client();
+    let socket = IDLE_SOCKET;
+    let state = LayoutState::new();
+    subscribed_to_claude(&state, &client, &mut rx, socket);
+    let tray = LayoutUsageVisibility {
+        state: &state,
+        client: &client,
+    };
+
+    for_each_ui_window(
+        [MAIN_WINDOW_LABEL],
+        false,
+        &tray,
+        |_| false,
+        |_| {},
+        |_| false,
+    );
+    tokio::time::advance(USAGE_INTEREST_SHRINK_DELAY * 2).await;
+    settle().await;
+    assert_eq!(nudges(&mut rx), 0, "숨기지 못한 창을 관심에서 뺐다");
+    assert_eq!(sync_as_the_actor(&client, socket), None);
+}
+
+// ── 사용량 슬롯을 새 창으로 옮겨도 데몬에 아무것도 안 간다(TRD §1-9 #9) ─────────────────────────────
+// 옮기기의 모든 단계가 재계산한다 — phase A(임시 뷰로 떼기)는 원본 슬롯을 그대로 두고, phase C 가 새 창에 붙인 **같은
+// 락 안에서** 원본을 닫는다. 그래서 어느 재계산에서도 관심이 `sent` 를 떠나지 않아 줄임조차 서지 않는다. 옮긴 뒤의
+// 방송은 새 창으로 간다.
+#[tokio::test(start_paused = true)]
+async fn moving_a_usage_slot_to_a_new_window_sends_nothing() {
+    let Idle {
+        client,
+        cmds: mut rx,
+        _driver,
+        _routable_rx,
+    } = idle_client();
+    let socket = IDLE_SOCKET;
+    let state = LayoutState::new();
+    subscribed_to_claude(&state, &client, &mut rx, socket);
+    let (view, slot) = active_slot(&state, MAIN_WINDOW_LABEL);
+
+    let moved = apply::move_slot_to_window(
+        &state,
+        &RouterSubs {
+            router: &client.router,
+            client: &client,
+        },
+        &NoLayoutEvents,
+        &OpenWindows,
+        &PopupCounter::default(),
+        view,
+        slot,
+        None,
+    )
+    .expect("새 창으로 옮기기");
+    assert_ne!(moved.window, MAIN_WINDOW_LABEL);
+    assert_eq!(nudges(&mut rx), 0, "옮기는 동안 넛지가 났다");
+    tokio::time::advance(USAGE_INTEREST_SHRINK_DELAY * 2).await;
+    settle().await;
+    assert_eq!(nudges(&mut rx), 0, "옮긴 뒤 줄임 타이머가 넛지를 냈다");
+    assert_eq!(sync_as_the_actor(&client, socket), None);
+
+    let outcome = client.usage_interest().lock().on_snapshot(
+        socket,
+        &UsageLimitSnapshot {
+            vendor: AgentBackendKind::Claude,
+            account_key: "default".into(),
+            five_hour: None,
+            weekly: None,
+            model_scoped: Vec::new(),
+            plan: None,
+            in_flight: false,
+            state: UsageVendorState::Ready,
+            revision: 1,
+        },
+        &[AgentBackendKind::Claude],
+        Instant::now(),
+    );
+    assert_eq!(outcome.labels, [moved.window], "방송은 새 창으로");
+    assert_eq!(outcome.resend, None);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════════
+// Backoff rows of the old suite rewritten on the manual clock and the memory network (TRD §6-2 「다시 씀」).
+// ══════════════════════════════════════════════════════════════════════════════════
+
+// From `reconnect_close_during_backoff_no_zombie`: a close while the link waits in backoff after a loss ends it — Down,
+// and no dial however long the clock runs.
+#[tokio::test]
+async fn a_close_during_the_reconnect_backoff_shows_down_and_never_dials_again() {
+    let h = Harness::new(live());
+    let old = h.connected().await;
+    old.close();
+    wait_for("backoff", || h.peer_state() == Some(PeerState::Backoff)).await;
+
+    h.client.close();
+    wait_for("Down", || h.client.state() == ConnectionState::Down).await;
+    for _ in 0..10 {
+        h.clock.advance(Duration::from_secs(60));
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert_eq!(h.net.dials(), 1, "a closed link does not redial");
+    assert_eq!(
+        h.states(),
+        ["state:connected", "state:reconnecting", "state:down"]
+    );
+}
+
+// From `reconnect_connect_during_backoff_no_hijack`: a connect while the link waits in backoff connects on one new link,
+// and the handle it replaced dials nothing more.
+#[tokio::test]
+async fn a_connect_during_the_reconnect_backoff_connects_on_one_new_link() {
+    let h = Harness::new(live());
+    let old = h.connected().await;
+    old.close();
+    wait_for("backoff", || h.peer_state() == Some(PeerState::Backoff)).await;
+
+    let task = h.connect();
+    let (endpoint, _) = h.next_link().await;
+    endpoint.push(hello());
+    joined("connect", task).await.expect("connected");
+    assert_eq!(h.client.state(), ConnectionState::Connected);
+    // Past the longest backoff step — a replaced handle that still ran would dial now.
+    h.clock.advance(Duration::from_secs(11));
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert_eq!(
+        h.net.dials(),
+        2,
+        "one dial for the connect, none from the old handle"
+    );
+    assert_eq!(h.client.state(), ConnectionState::Connected);
+}
+
+// ADR-0195 — the shell adapter row of the fate table: a command sent while the link waits in backoff after a loss fails
+// at once as not connected, and nothing of it reaches the next connection.
+#[tokio::test]
+async fn a_command_during_the_reconnect_backoff_fails_at_once_and_never_reaches_the_next_link() {
+    let h = Harness::new(live());
+    let old = h.connected().await;
+    old.close();
+    wait_for("backoff", || h.peer_state() == Some(PeerState::Backoff)).await;
+
+    let rid = RequestId::new();
+    let sent = tokio::time::timeout(
+        Duration::from_secs(10),
+        h.client
+            .send_command(AgentCommand::ListAgents { request_id: rid }),
+    )
+    .await
+    .expect("fails at once, never waits");
+    assert_eq!(sent.expect_err("not live"), NOT_CONNECTED);
+
+    h.advance_until("the redial", || h.net.open_endpoints() > 0)
+        .await;
+    let (endpoint, _) = h.next_link().await;
+    endpoint.push(hello());
+    wait_for("connected again", || {
+        h.client.state() == ConnectionState::Connected
+    })
+    .await;
+    let m = marker(&h.client);
+    assert_eq!(
+        label(&h.command(&endpoint).await),
+        m,
+        "the failed command never reaches the next connection"
+    );
 }

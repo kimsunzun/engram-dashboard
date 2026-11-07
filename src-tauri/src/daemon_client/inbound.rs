@@ -11,10 +11,11 @@
 //! 있나 → 명부에 있나 → 오류. 셸의 2단계는 **웹뷰 몫**이다([`ViewCommandPort`]) — 표에 없는 이름은
 //! 그 창으로 내려가고, 거기에도 없으면 `UNKNOWN_COMMAND` 로 나간다.
 //!
-//! ## 배선
-//! 부르는 자리는 `connection.rs` 의 `Message::Text` 갈래이고(그 파일의 `accept_inbound`), 봉투를 나르는 wire
-//! 프레임도 서 있다 — `AgentEvent::CommandRequest`(데몬→셸)와 `AgentCommand::CommandOutcome`(셸→데몬).
-//! 셸이 자기 이름을 데몬 명부에 얹는 것도 매 (재)연결마다 나간다(`register_own_commands`).
+//! ## Wiring
+//! The caller is the connection driver (`connection.rs` `accept_inbound`, for a daemon `CommandRequest`); the wire
+//! frames are `AgentEvent::CommandRequest` (daemon → shell) and `AgentCommand::CommandOutcome` (shell → daemon). The
+//! shell's own names go onto the daemon's roster on every connect (`connection.rs` `register_commands`, packet =
+//! [`registration_command`]).
 //! 보내는 쪽도 이제 있다 — 데몬이 자기 명부에서 주인을 찾아 그 연결로 봉투를 쓴다
 //! (`engram_dashboard_daemon::command_delivery` · ADR-0154). 셸 표에 없는 이름은 여기서 한 홉 더 내려가
 //! 웹뷰에 닿는다([`ViewCommandPort`] · 실물 = `crate::view_commands`).
@@ -24,17 +25,9 @@
 //! (그 사실의 정본 = `engram_dashboard_protocol` 의 `AgentEvent::CommandReply` 주석). 이 모듈이 도는 방향
 //! (데몬→셸)과는 별개의 다리다.
 //!
-//! ★검증이 서는 자리★: 연결 select 루프는 **실 소켓을 요구한다** — 그 갈래 선택만 여기서 무커버로 남고,
-//! 그 아래 전부(슬롯 조회 · 결말 조립 · 채널 배달 · 등록 패킷 내용)는 소켓 없는 하네스가 실코드로 덮는다
-//! — 잔여 목록의 정본은 `tests/layout_commands.rs` 헤더다.
-//! ★단 그 요구는 **비용이지 불가능이 아니다**★: 같은 패키지의 `src/daemon_client/tests.rs` 가 루프백 WS 를
-//! 세워 그 루프를 실제로 돌린다. 여기서 사는 것은 소켓 없이 얻는 결정론과 속도다.
-//! ★2026-08-24 전에는 이 자리에 「어떤 하네스로도 세울 수 없다」고 적혀 있었다★ — 그 말은 참이었지만
-//! 사유가 소켓이 아니라 **`AppHandle` 이 없으면 연결 태스크를 아예 안 띄우던 단락**이었다. 그 단락이
-//! 지워지면서(정본 = `mod.rs` 의 `start_connection` 「단락 이야기」) 문장도 함께 낡았다.
-//!
-//! ★이름 충돌 주의★: `connection.rs` 에는 **다른** `CommandReply`(`oneshot::Sender`)가 있다. 그래서 그 파일은
-//! 봉투의 답장 타입을 `BusReply` 로 별칭해 쓴다 — 두 이름을 한 스코프에 그냥 들이지 말 것.
+//! ★Where it is verified★: `tests/layout_commands.rs` drives the receiver, the outcome writer and the registration
+//! packet without a connection (its residue list is canonical); the driver's suite (`connection/tests.rs`) drives the
+//! driver's arm on a memory network.
 // ADR-0155
 // ADR-0081
 
@@ -46,6 +39,9 @@ use engram_dashboard_command::{
     route, CommandDecl, CommandEnvelope, CommandError, CommandLink, CommandReply, CommandTable,
     ErrorCode, InboundCommands, OwnerLookup, OwnerLookupSource, ReplySink,
 };
+use engram_dashboard_protocol::{AgentCommand, RequestId};
+
+use super::protocol_state;
 
 /// 태스크 하나 — 출력이 없다(답장은 [`ReplySink`] 가 나른다).
 pub type BoxedTask = Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -196,8 +192,8 @@ impl InboundReceiver {
     /// 만들므로, 부르는 쪽이 다른 요청의 키를 실어 보낼 방법이 없다(그 실수는 남의 왕복에 답을 붙인다).
     /// `deliver` 는 **정확히 한 번** 불린다 — 답을 냈든(`send`), 태스크가 답 없이 사라졌든([`ReplySink`] 의
     /// `Drop` 이 오류 답장을 낸다). 그래서 부르는 쪽은 「답이 안 올 수도 있다」를 다루지 않는다.
-    /// ★`deliver` 는 적용 태스크에서 불린다 — 연결 태스크가 아니다★. 소켓에 쓰려면 그 태스크로 넘기는
-    /// 채널(`ConnectionCommand`)을 통해야 한다(단일 writer 규약 — `connection.rs` 헤더 「동시성」).
+    /// ★`deliver` runs on the apply task, not on the connection driver's actor★ — it writes through a registry clone
+    /// on the connection the request came on (`link::route::send_command_outcome`).
     pub fn accept(
         &self,
         env: CommandEnvelope,
@@ -250,4 +246,54 @@ impl Default for InboundSlot {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ── 자기 이름 등록 ────────────────────────────────────────────────────────────
+//
+// ★등록 패킷의 `owner` 는 **광고**다★ — 데몬은 이 값을 쓰지 않고 **그 패킷이 온 연결**에서 주인 토큰을
+//   파생한다(protocol `AgentCommand::RegisterCommands` doc · daemon `note_claimed_owner`). 그래서 여기 무엇을
+//   적어도 명부의 주인은 안 바뀐다 — 쓸모는 데몬 로그에서 이 연결이 누구인지 사람이 알아보는 것뿐이다.
+// ★데몬의 토큰 접두(`conn-`)를 흉내내지 않는다★ — 그 형태를 적으면 데몬이 「남의 주인 토큰을 적은 등록」으로
+//   보고 경고를 남긴다(`note_claimed_owner` 의 접두 분기).
+//
+// ★★이 값을 「클라이언트가 만든 식별자」로 승격하지 말 것(ADR-0150 결정 1)★★ — 그 식별자는 **연결마다
+//   유일**해야 하는데 이 리터럴은 고정이라 두 셸이 같은 값을 쓴다. 데몬 명부는 등록을 이름 단위 last-wins 로
+//   덮고 연결 해제를 주인 단위로 제거하므로(ADR-0150 결정 3), 그 승격은 **두 셸이 서로의 이름을 빼앗고 서로를
+//   지우는** 동작이 된다. 식별자를 들일 때는 이 상수를 고치는 것이 아니라 연결마다 새 값을 만들어야 한다.
+const SHELL_OWNER_ADVERT: &str = "engram-dashboard-shell";
+
+/// 등록·차분 패킷이 함께 쓰는 광고 문자열 — ★두 곳에서 따로 짓지 않는다★. 갈리면 데몬 로그에서 같은
+/// 셸의 두 패킷이 남남으로 보인다(명부의 주인 판정은 이 값과 무관하다 — 위 주석).
+pub fn shell_owner_advert() -> engram_dashboard_protocol::OwnerToken {
+    engram_dashboard_protocol::OwnerToken::new(SHELL_OWNER_ADVERT)
+}
+
+/// The registration packet this client sends — `None` when there is nothing to register or the declarations do not fit
+/// the raw slot (error log · ADR-0272).
+///
+/// ★Why `pub` and apart from the send★: sending needs a connection (the driver queues it on every connect), but
+/// **what is sent** (the advertised names · the catalog version · the owner string) does not. Apart, a harness asserts
+/// the very packet that goes out (`tests/layout_commands.rs`) — a packet rebuilt by hand would stay green when the two
+/// drift.
+pub fn registration_command(receiver: &InboundReceiver) -> Option<AgentCommand> {
+    let decls = receiver.declarations();
+    if decls.is_empty() {
+        return None;
+    }
+    let decls = match protocol_state::decls_to_wire(&decls) {
+        Ok(decls) => decls,
+        Err(e) => {
+            tracing::error!(
+                names = decls.len(),
+                "등록 항목 목록을 원문 칸으로 싸지 못했다 — 이 연결에서는 등록하지 않는다: {e}"
+            );
+            return None;
+        }
+    };
+    Some(AgentCommand::RegisterCommands {
+        owner: shell_owner_advert(),
+        decls,
+        catalog_version: receiver.catalog_version(),
+        request_id: RequestId::new(),
+    })
 }

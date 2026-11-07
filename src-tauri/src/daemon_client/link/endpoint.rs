@@ -1,4 +1,4 @@
-//! Where a daemon is and which credential it takes (TRD S21 trd-3 §3-6 — the seam that widens `DaemonDiscovery`).
+//! Where a daemon is and which credential it takes (TRD S21 trd-3 §3-6 — the seam that replaced the old `DaemonDiscovery`).
 //!
 //! - [`EndpointSource::ensure`] may spawn a daemon; [`EndpointSource::current`] never does. Only the first connection
 //!   calls `ensure`, outside `Registry::add`; every dial calls `current` (`link::dialer`) — so a reconnect cannot wake a
@@ -131,7 +131,7 @@ impl LocalEndpointSource {
 impl EndpointSource for LocalEndpointSource {
     fn ensure(&self, timeout: Duration) -> Result<Endpoint, String> {
         let exe = crate::discovery::locate_daemon_exe().map_err(|e| e.to_string())?;
-        // console = false: a windowless spawn, the same as `RealDiscovery::ensure_spawn`.
+        // console = false: a windowless spawn, as the shell has always spawned its daemon.
         match crate::discovery::ensure_daemon(&self.data_dir, &exe, timeout, false) {
             Ok(info) => Ok(self.endpoint(info)),
             Err(e) => {

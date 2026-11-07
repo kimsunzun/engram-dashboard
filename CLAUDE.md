@@ -47,7 +47,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 - **net** — 데몬 네트워크 행(WS · 핸드셰이크 · 단일 인스턴스 · `daemon.json`).
 - **messaging** — 에이전트 간 우편 커널(워크스페이스 의존 0, 포트 trait 로만 접합).
 - **base** · **platform** — 잎 crate. 범용 도우미 · OS 에 따라 갈리는 운영 코드.
-- **transport** — 재사용 전송 lib. 셸이 의존한다(`daemon_client/link/` — 3-2 진행 중, 운영은 아직 옛 연결 코드). 데몬은 3-3 에서 붙는다.
+- **transport** — 재사용 전송 lib. 셸의 데몬 연결이 그 위에서 돈다(`daemon_client/link/` · 구동 = `daemon_client/connection.rs`). 데몬은 3-3 에서 붙는다.
 
 크레이트·패키지를 더하거나 바꾸면 사용자에게 보고한다.
 

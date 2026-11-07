@@ -48,7 +48,7 @@ base · platform · command · messaging · transport · protocol ─▶ 워크�
 - **messaging** — 에이전트 간 우편 커널(배달 · 파킹 · 반려 · 장부). 워크스페이스 의존 0, 접합은 커널이 소유한 포트 trait 뿐이고 실물 어댑터는 데몬이 갖는다.
 - **base** — 바닥 기반층 잎 crate. 도메인 지식 0 의 범용 도우미(데이터 파일 읽기 판정·원자 쓰기 · 로깅 · 시계 seam · 패닉 가둠 등). 입주 조건 정본 = 그 `lib.rs` 헤더.
 - **platform** — OS 층 잎 crate. OS 에 따라 갈리는 운영 코드(프로세스 · Job Object · 띄우기 · 창 · 입력 · 파일 잠금)는 여기에만 둔다.
-- **transport** — reusable transport lib (ADR-0177). The shell depends on it (`ws` feature) for its daemon link `daemon_client/link/` (stage 3 3-2 · ADR-0310); production still runs the old connection code until 3-2 U4 switches over. The daemon attaches in 3-3.
+- **transport** — reusable transport lib (ADR-0177). The shell depends on it (`ws` feature) for its daemon link `daemon_client/link/` (stage 3 3-2 · ADR-0310); the shell's daemon connection runs on it in every build (driver = `daemon_client/connection.rs`). The daemon attaches in 3-3.
 
 ## 런타임 불변식
 

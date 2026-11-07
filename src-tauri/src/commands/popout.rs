@@ -536,17 +536,18 @@ pub(crate) fn close_requested_popup_window(
     }
 }
 
-// 팝아웃 창 정리의 모델 몫 — 창의 모든 탭 View 드롭 + windows 엔트리 제거 + 라우팅 표 재계산 + 구독 정리 발화 +
-// 사용량 관심 재계산 + label 묘비, ★전부 같은 락 안★. 닫기 요청과 `Destroyed` 가 둘 다 부르고 두 번째는 닫히는 창
-// 번호 풀기 말고 바뀌는 것이 없다(창이 이미 없으면 재계산만 · 묘비는 집합). 답 = 모델에서 지운 탭 수(창이 이미 없었으면 0) · `None` =
-// 정리하지 않음(main · 락 오염). 창(`AppHandle`) 없이 서므로 셸 단위 시험이 이것을 직접 부른다.
-//   ★F1 REAL 동시성 버그 수정★: 옛 코드는 델타(cleanup_window_core rebuild)를 락 안에서 계산하고
-//   `to_unsubscribe` 발화를 락 드롭 뒤에 했다 → 계산~발화 사이 다른 command(assign_agent/spawn/move)가
-//   그 agent 를 재추가하면 stale 1→0 unsubscribe 가 방금 형성된 라이브 구독을 죽인다
-//   (`output_router::rebuild` 의 호출 계약 위반 — 정본은 그 함수 주석이고 ★ADR-0006 에 「델타 enqueue
-//   는 락 안」 조항은 없다★). 이제 적용 서비스(`SubscriptionSync::resync`)·move_slot_to_window 와
-//   일관되게 발화도 락 안이다(unsubscribe 는 동기 try_send — await/network 0, lifecycle 락 독립 →
-//   데드락 없음).
+// The model's share of cleaning up a popout window — drop every tab View of the window, remove its windows entry,
+// recompute the routing table, send the subscription cleanup, recompute the usage interest and set the label
+// tombstone, ★all under one lock★. The close request and `Destroyed` both call it; the second changes nothing but
+// freeing the closing window's number (a window already gone gets only the recomputes · the tombstones are a set).
+// Answer = the number of tabs removed from the model (0 when the window was already gone) · `None` = not cleaned up
+// (main · a poisoned lock). It stands without windows (`AppHandle`), so the shell's unit tests call it directly.
+//   ★F1 — a real concurrency bug★: computing the delta under the lock and sending `to_unsubscribe` after dropping it
+//   let another command (assign_agent/spawn/move) re-add the agent in between, and the stale 1→0 unsubscribe killed
+//   the live subscription just formed (it breaks `output_router::rebuild`'s call contract — that comment is canonical,
+//   ★ADR-0006 has no "delta queued under the lock" clause★). So the send is under the lock too, as in the apply
+//   service (`SubscriptionSync::resync`) and move_slot_to_window — unsubscribe only sends to the connection driver's
+//   actor (no await, no network, no other lock), so there is no deadlock.
 // 창 번호(TRD S26-window-chrome §4-1) — 닫기 요청이 지운 창은 번호를 그 `Destroyed` 까지 쥐고, `Destroyed` 는 그
 //   번호를 같은 락 안에서 푼다(아직 모델에 있던 창이면 곧바로). ★`Destroyed` 의 번호 풀기를 이 락 밖으로 떼지
 //   않는다★ — 먼저 다른 락에서 모델 창을 빼면 그 틈에 묘비 없이 빠진 창이 보이고 지운 탭 수가 늘 0 이 된다.
@@ -722,20 +723,18 @@ mod tests {
     }
 }
 
-// ── 테스트: 팝아웃 닫기 요청의 모델 몫(TRD S21-slot-docking 5.8판 §1-2 「닫히는 창」) — 창 없이 선다 ──────────
-// 라우팅 표 · 구독 재동기는 운영과 같은 실물(`OutputRouter` · `RouterSubs`)이고 데몬에는 붙지 않는다(해제 발화는
-// 창구가 닫혀 no-op — 발화 횟수는 `daemon_client` 시험이 잰다). `lib.rs` 의 창 사건 배선은 화면 실측 몫이다.
+// ── Tests: the model's share of a popout close request (TRD S21-slot-docking 5.8판 §1-2 「닫히는 창」) — no windows ──
+// The routing table and the subscription resync are production's (`OutputRouter` · `RouterSubs`); the client never
+// connects, so an unsubscribe has no open connection to go out on and does nothing (how many go out is measured by the
+// `daemon_client` suite). The window-event wiring in `lib.rs` is left to on-screen measurement.
 #[cfg(test)]
 mod close_request_tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
-    use std::time::Duration;
 
-    use engram_dashboard_protocol::DaemonInfo;
     use tokio::runtime::Handle;
 
     use super::*;
-    use crate::daemon_client::DaemonDiscovery;
     use crate::layout::dock::{DockAnchor, DockSide, DOCK_NEW_SHARE};
     use crate::layout::manager::{DockError, DockMove, DockTo, FocusPolicy};
     use crate::layout::{
@@ -744,17 +743,6 @@ mod close_request_tests {
     };
 
     const POPUP: &str = "slot-popup-7";
-
-    struct NoDaemon;
-
-    impl DaemonDiscovery for NoDaemon {
-        fn ensure_spawn(&self, _timeout: Duration) -> Result<DaemonInfo, String> {
-            Err("이 시험은 연결하지 않는다".to_string())
-        }
-        fn read_live(&self) -> Option<DaemonInfo> {
-            None
-        }
-    }
 
     struct NoEvents;
 
@@ -774,7 +762,7 @@ mod close_request_tests {
             Rig {
                 state: LayoutState::new(),
                 router: Arc::new(OutputRouter::new()),
-                client: Arc::new(DaemonClient::new(Handle::current(), Arc::new(NoDaemon))),
+                client: Arc::new(DaemonClient::unconnected(Handle::current())),
             }
         }
 

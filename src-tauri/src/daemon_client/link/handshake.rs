@@ -5,7 +5,7 @@
 //! a close code after it (net `ws.rs` `send_error_and_close`), which the transport would read as "could not connect"
 //! and retry without limit, and no refusal is retried on the local path (ADR-0346). Which refusal it was (token ·
 //! version · anything else) is never read from the daemon's text — the text is only logged, masked. Anything else that
-//! arrives before `Hello` is dropped, the same as the old driver's `wait_for_hello`.
+//! arrives before `Hello` is dropped.
 //!
 //! The credential comes from a [`CredentialSlot`] that the dialer of the same registration fills on every dial
 //! (`link::dialer`) — the dial and the handshake of one attempt run in that order on one supervisor task, so the

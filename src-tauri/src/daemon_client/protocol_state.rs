@@ -1,4 +1,5 @@
-//! 프로토콜 의미론(순수 상태/결정 함수) — epoch 가드 · pending 매칭 (S14 모듈①, ADR-0037).
+//! Protocol semantics as pure state and decision functions — the epoch guard · request id extraction · reply
+//! classification · command-slot edges (S14 module ①, ADR-0037).
 //!
 //! ## 무엇 / 왜 (load-bearing)
 //! 프론트 `src/api/protocolClient.ts` 가 carrier-무관 JS 한 곳에 모았던 전송 의미론을 Rust 로 옮긴 것이다
@@ -6,17 +7,16 @@
 //! **epoch 가드는 여기 Rust 가 유일한 진실원** — JS 2차 방어선이 없어 판정이 한 치 어긋나면 출력이 화면에서
 //! 전멸한다. dedup/진도는 이 레이어에 없다(ADR-0046 이 ADR-0037 의 거처 조항을 웹뷰 뷰(slot) 단위로 개정).
 //!
-//! ## ★순수성(테스트 격리)★
-//! 이 모듈은 소켓·tokio runtime·Tauri 의존이 **0**이다. 모든 함수는 `&mut SubState` / `&mut PendingMap`
-//! 를 인자로 받아 결정만 내린다(부수효과는 호출자 = 연결 task 가 수행: 실제 frame 배달·wire send·
-//! reply resolve). 그래서 단위 테스트가 런타임 없이 동기로 돈다. `protocolClient.test.ts` 의 케이스
-//! 중 **순수 결정에 해당하는 부분만** 옮긴다(event-routing/콜백 배선은 제외 — 아래 tests mod 주석).
+//! ## ★Purity (test isolation)★
+//! This module depends on no socket, tokio runtime or Tauri. Its functions take their state (`&mut SubState`, a
+//! command, an event) and only decide; the caller (the connection driver) does the effects — frame delivery, wire
+//! sends, waking callers. So the unit tests run synchronously without a runtime. Only the pure-decision part of the
+//! `protocolClient.test.ts` cases is ported (event routing and callback wiring are not — see the tests module doc).
 //!
 //! ## 와이어 타입 정합 (TS number → Rust 분리)
 //! TS 는 epoch/seq 가 둘 다 `number` 였지만, protocol crate wire 는 `epoch: u32` · `seq: u64` 다
 //! (`codec.rs`·`messages.rs`). 그대로 재사용한다(로컬 재정의 안 함). `request_id` 는 `RequestId(Uuid)`.
 
-use std::collections::HashMap;
 use std::fmt;
 
 use engram_dashboard_command::CommandEnvelope;
@@ -206,8 +206,7 @@ pub fn command_request_id(cmd: &AgentCommand) -> Option<RequestId> {
 /// = 명령 무관 오류(broadcast 성격, 매칭 안 함). SubscribeAck 는 request_id 가 없어(agent_id 기반) 여기
 /// None — 데몬 클라이언트의 pending 매칭 대상이 아니다(Subscribe 는 request_id 없는 명령).
 /// ★A `CommandReply` whose reply is broken is `None` too★ (ADR-0272 decision 6) — no slot to wake is found, so that
-/// wait ends at the link's request timeout (`connection_v2::link_policy`). On the old driver, which has no reply bound,
-/// it lasts until the link drops (`daemon_client/mod.rs` `send_command_on_old_driver` "Known residual").
+/// wait ends at the link's request timeout (`connection::link_policy`).
 pub fn event_reply_request_id(ev: &AgentEvent) -> Option<RequestId> {
     match ev {
         AgentEvent::Ack { request_id }
@@ -264,7 +263,7 @@ pub fn event_reply_request_id(ev: &AgentEvent) -> Option<RequestId> {
 /// - `Daemon` = 데몬이 그 명령에 `Error` 로 답했다 — 코드 접두가 있든 없든, 셸이 아는 코드든 아니든.
 /// - `Local` = 데몬의 답 없이 셸 쪽에서 끝났다(미연결 · 미전송 · 송신 실패 · 끊김으로 결과 불명 · 답 유실 ·
 ///   승계 등 — 문구는 자리마다 다르다). ★「적용되지 않았다」가 아니다★ — 결과 불명
-///   (`connection::SENT_OUTCOME_UNKNOWN`)처럼 데몬이 이미 실행했을 수 있는 갈래가 섞여 있다.
+///   (`link::errors::SENT_OUTCOME_UNKNOWN`)처럼 데몬이 이미 실행했을 수 있는 갈래가 섞여 있다.
 ///
 /// `Display` 는 담은 글을 꾸밈 없이 그대로 낸다 — `DaemonClient::send_command` 가 이것으로 `String` 을 만들므로,
 /// 출처를 안 보는 호출자는 데몬 문구 원문 · 로컬 문구를 바이트 그대로 받는다.
@@ -284,10 +283,11 @@ impl fmt::Display for CommandFailure {
     }
 }
 
-/// 대기 슬롯의 결말(`connection::CommandReply`)을 출처 타입으로 가른다(ADR-0281).
+/// Sorts a round trip's outcome by its source (ADR-0281).
 ///
-/// `Ok(Error{..})` → `Daemon` · 그 밖의 `Ok` → 그대로 · `Err` → `Local`. 슬롯의 `Err` 가 셸 로컬 실패뿐인
-/// 것은 슬롯 계약이다(`connection::CommandReply` doc).
+/// `Ok(Error{..})` → `Daemon` · any other `Ok` → as is · `Err` → `Local`. ★The caller puts the daemon's reply in `Ok`,
+/// its `Error` included, and only shell-local failures in `Err`★ (the driver's `send_command`) — fold an `Error` into
+/// `Err` and the refusal box (ADR-0270 decision 4) dies silently.
 /// ★문구를 읽지 않는다★ — 출처는 「데몬이 답했나」가 정한다. 코드 접두가 없든 셸이 모르는 코드든 데몬이
 /// 답했으면 `Daemon` 이다(코드 추가는 허용된 확장 — `engram_dashboard_command::ErrorCode` doc).
 pub fn classify_reply(slot: Result<AgentEvent, String>) -> Result<AgentEvent, CommandFailure> {
@@ -327,10 +327,6 @@ pub enum EpochDecision {
     // epoch 불일치 — 옛 세션 잔여 frame. 화면 오염 방지로 버린다.
     DropEpochMismatch,
 }
-
-// pending request_id → reply 콜백 슬롯의 키→값 타입. 값(T)은 호출자가 정한다 —
-// 운영에선 `oneshot::Sender<reply>`, 테스트에선 결과를 적재하는 mock. 이 모듈은 매칭 로직만 소유한다.
-pub type PendingMap<T> = HashMap<RequestId, T>;
 
 // ── output frame epoch 가드 ─────────────────────────────────────────────────────────
 /// epoch 가드만 판정한다. dedup(seq high-water)은 src-tauri 에 없다 — 프론트 뷰가 전담한다(ADR-0046).
@@ -372,26 +368,6 @@ pub fn apply_subscribe_ack(st: &mut SubState, current_epoch: u32) -> bool {
     epoch_changed
 }
 
-// ── pending request_id 매칭(JS resolvePending/rejectPending + connected→down reject 승격) ──
-// request_id 에 대응하는 pending 슬롯을 꺼낸다(매칭 성공 시 맵에서 제거 — 1회성). `None` 이면 무시
-// (JS `resolvePending` 의 "없으면 no-op"). 호출자가 반환된 슬롯을 resolve/reject 한다.
-//
-// ★편승 매칭 제거(protocol v2)★: 조회도 전용 reply variant(AgentList/ProfileList/Snapshot)가
-// request_id 를 echo 하므로 broadcast(AgentListUpdated 등)가 조회 응답에 편승하지 않는다 — 호출자가
-// broadcast variant 는 이 함수를 안 거치고 콜백만 호출하면 된다.
-pub fn take_pending<T>(pending: &mut PendingMap<T>, request_id: &RequestId) -> Option<T> {
-    pending.remove(request_id)
-}
-
-// connected→비connected 전이 시 **모든** pending 을 꺼내 비운다(JS handleClose 의 일괄 reject).
-// 호출자가 각 슬롯을 "connection lost" 로 reject 한다. spawn/kill 등 1회성이라 자동 재전송은 중복
-// 부작용 위험 — 호출자가 catch 후 재시도가 단순·안전(JS 주석 보존). 반환 후 맵은 빈다.
-//
-// ★1회성★: 한 번 끊기면 모든 in-flight 가 동시에 죽는다 — 부분 reject 없음(전부 또는 없음).
-pub fn drain_pending<T>(pending: &mut PendingMap<T>) -> Vec<T> {
-    pending.drain().map(|(_k, v)| v).collect()
-}
-
 #[cfg(test)]
 mod tests {
     //! `src/api/protocolClient.test.ts` 케이스 중 **순수 상태/결정 함수**에 해당하는 부분만 옮긴다
@@ -399,90 +375,28 @@ mod tests {
     //! 섞으면 결정 부분만 이식한다.
     //!
     //! ★검증 범위★: seq dedup/high-water 테스트는 없다 — 그 진도 상태 자체가 src-tauri 에 없다(ADR-0046).
-    //!   여기 박는 것은 순수 결정 함수뿐이다(봉투 · 답장 · 등록 목록 칸 풀기 · request_id 추출·reply 분류 · pending
-    //!   매칭 · epoch 가드 · apply_subscribe_ack 반환값).
+    //!   Only pure decision functions are pinned here (unwrapping the envelope · reply · declaration slots, request id
+    //!   extraction, reply classification, the epoch guard, `apply_subscribe_ack`'s return value).
     //!
     //! ★event-routing(M=5)은 여기서 검증하지 않는다★: InboundMessage variant 라우팅 + 콜백 호출/
     //!   unsubscribe 는 순수 결정이 아니라 protocol_state 단독으론 보호 대상이 없다 → 실제 배선이 도는
-    //!   연결 task main_loop · eventBus 표면 테스트가 담당한다(헛 단언 이식 금지). 해당 TS 케이스 목록 =
+    //!   연결 구동의 라우팅(`link::route`) · eventBus 표면 테스트가 담당한다(헛 단언 이식 금지). 해당 TS 케이스 목록 =
     //!   아래 event-routing 구획 주석. transport.close/connect/disconnect 위임(`:399~`,`:411~`)도 carrier
     //!   배선이라 여기 없다.
 
     use super::*;
     use engram_dashboard_protocol::AgentCommand;
 
-    fn rid(s: &str) -> RequestId {
-        // 테스트용 결정적 RequestId — 문자열을 FNV-1a 64bit 해시 → u128 로 Uuid 생성(v5 feature 없이도
-        // 서로 다른 입력=서로 다른 id, 같은 입력=같은 id). 충돌은 테스트 범위에선 무시 가능.
-        let mut h: u64 = 0xcbf29ce484222325;
-        for b in s.as_bytes() {
-            h ^= *b as u64;
-            h = h.wrapping_mul(0x00000100000001B3);
-        }
-        RequestId(uuid::Uuid::from_u128(h as u128))
-    }
-
-    // ── request_id pending 매칭 ─────────────────────────────────────────────────────
-
-    // TS: "spawnAgent → SpawnByCwd{request_id} 전송 + Spawned{request_id,agent} resolve"
-    // 순수 핵심: 등록된 request_id 의 reply 가 도착하면 그 슬롯이 정확히 매칭돼 꺼내진다.
-    #[test]
-    fn pending_resolve_on_matching_reply() {
-        let mut pending: PendingMap<&str> = PendingMap::new();
-        let r = rid("req-1");
-        pending.insert(r, "agent-a1");
-        let got = take_pending(&mut pending, &r);
-        assert_eq!(got, Some("agent-a1"));
-        assert!(pending.is_empty(), "매칭 후 슬롯 제거(1회성)");
-    }
-
-    // TS: "killAgent → Ack{request_id} 로 void resolve"
-    // 순수 핵심: void 응답(payload 없음)도 request_id 로만 매칭된다(여기선 unit 값).
-    #[test]
-    fn pending_resolve_void_ack() {
-        let mut pending: PendingMap<()> = PendingMap::new();
-        let r = rid("kill-1");
-        pending.insert(r, ());
-        assert_eq!(take_pending(&mut pending, &r), Some(()));
-        assert!(pending.is_empty());
-    }
-
-    // TS: "Error{request_id} 로 reject"
-    // 순수 핵심: Error 도 request_id echo 로 같은 슬롯을 꺼낸다(호출자가 reject — 여기선 take 까지).
-    #[test]
-    fn pending_take_for_error() {
-        let mut pending: PendingMap<&str> = PendingMap::new();
-        let r = rid("kill-2");
-        pending.insert(r, "slot");
-        assert_eq!(take_pending(&mut pending, &r), Some("slot"));
-        assert!(pending.is_empty());
-    }
-
-    // TS: "잘못된 request_id 의 응답은 무시(pending 유지)"
-    // 순수 핵심: 매칭 안 되는 request_id 면 None 반환 + 기존 슬롯 보존.
-    #[test]
-    fn pending_unknown_request_id_ignored() {
-        let mut pending: PendingMap<&str> = PendingMap::new();
-        let mine = rid("kill-mine");
-        pending.insert(mine, "slot");
-        let got = take_pending(&mut pending, &rid("nonexistent"));
-        assert_eq!(got, None, "없는 id → None");
-        assert_eq!(pending.get(&mine), Some(&"slot"), "기존 pending 유지");
-    }
-
-    // ── event-routing 케이스(여기서 검증 안 함 — 정직성) ────────────────────────────────
-    //   아래 TS 케이스들은 "순수 결정 레이어"가 아니라 InboundMessage variant 라우팅 + 콜백 호출/
-    //   unsubscribe 동작이라 protocol_state 단독으론 보호 대상이 없다. HashMap 존재·동작만 재확인하는
-    //   헛 단언(vacuous)으로 false confidence 를 주지 않으려 여기서 이식하지 않고, 실제 배선이 도는
-    //   연결 task main_loop · eventBus 표면 테스트에서 검증한다:
-    //     - broadcast-no-consume (`protocolClient.test.ts:141`): 진짜 의미 = broadcast variant
-    //       (AgentListUpdated)가 take_pending 경로를 우회하고 콜백만 호출 = variant 라우팅.
-    //     - two-concurrent-ordering (`:161`): 도착순서 무관 resolve = 역순 reply variant 라우팅.
-    //     - StatusChanged 콜백 + off()/unsubscribe (`:302`)
-    //     - RestoreResult{report} 콜백 (`:315`)
-    //     - ProfileListUpdated 콜백 + off()/unsubscribe (`:325`)
-    //   (take_pending 의 순수 매칭 자체는 위 pending_resolve_*/pending_unknown_request_id_ignored 가
-    //    이미 박는다 — 위 케이스의 라우팅 분기가 추가 검증 대상.)
+    // ── Event-routing cases (not verified here — on purpose) ──────────────────────────
+    //   The TS cases below are variant routing plus callback calls / unsubscribes, not pure decisions, so this module
+    //   alone has nothing to protect; a vacuous re-check would only give false confidence. They are verified where the
+    //   wiring runs — the connection driver's routing (`link::route`) and the eventBus surface tests:
+    //     - broadcast-no-consume (`protocolClient.test.ts:141`): a broadcast variant (AgentListUpdated) wakes no
+    //       waiting request and only reaches the callbacks — variant routing.
+    //     - two-concurrent-ordering (`:161`): replies resolve whatever their arrival order — reply routing by id.
+    //     - StatusChanged callback + off()/unsubscribe (`:302`)
+    //     - RestoreResult{report} callback (`:315`)
+    //     - ProfileListUpdated callback + off()/unsubscribe (`:325`)
 
     // ── epoch 가드(decide_epoch) ───────────────────────────────────────────────────
 
@@ -566,33 +480,6 @@ mod tests {
     // ── resubscribe_params/initial_subscribe_params 테스트가 없는 이유(ADR-0046) ────────
     //    src-tauri 는 connected 재전이 시 Subscribe 를 재발행하지 않고 초기 구독 파라미터도 산출하지
     //    않는다 — wire 구독 형성은 프론트 request_replay(뷰 주도 전량 재replay) 단독이라 박을 함수가 없다.
-
-    // ── pending drain ───────────────────────────────────────────────────────────────
-
-    // TS: "connected→reconnecting 전이 시 pending 명령 reject(connection lost)"
-    // 순수 핵심: 끊김 시 drain_pending 이 **모든** in-flight 를 꺼내 비운다(호출자가 일괄 reject).
-    #[test]
-    fn drain_pending_on_disconnect() {
-        let mut pending: PendingMap<&str> = PendingMap::new();
-        pending.insert(rid("kill-a"), "a");
-        pending.insert(rid("kill-b"), "b");
-        let drained = drain_pending(&mut pending);
-        assert_eq!(drained.len(), 2, "전부 꺼냄(1회성)");
-        assert!(pending.is_empty(), "drain 후 비어야 promise leak 없음");
-    }
-
-    // ── close ──────────────────────────────────────────────────────────────────────
-
-    // TS: "close() → pending reject + transport.close 호출"
-    // 순수 핵심: close 시 모든 pending 을 꺼내 비운다(transport.close 호출은 carrier 배선 = T6).
-    #[test]
-    fn close_drains_all_pending() {
-        let mut pending: PendingMap<&str> = PendingMap::new();
-        pending.insert(rid("kill-1"), "p");
-        let drained = drain_pending(&mut pending);
-        assert_eq!(drained, vec!["p"]);
-        assert!(pending.is_empty());
-    }
 
     // ── request_id 추출 + reply outcome 분류 ──────────────────────────────────────────
 
@@ -714,7 +601,7 @@ mod tests {
             }
         }
 
-        let local = crate::daemon_client::connection::SENT_OUTCOME_UNKNOWN;
+        let local = crate::daemon_client::link::errors::SENT_OUTCOME_UNKNOWN;
         match classify_reply(Err(local.to_string())) {
             Err(failure @ CommandFailure::Local(_)) => {
                 assert_eq!(failure.to_string(), local, "Display = 로컬 문구 그대로")

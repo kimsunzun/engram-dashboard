@@ -39,10 +39,10 @@ const EVT_LAYOUT_UPDATED: &str = "layout:updated";
 // 프론트는 `label` 이 자기 창과 일치할 때만 반응한다(§7-1).
 const EVT_WINDOW_TABS_UPDATED: &str = "window:tabs-updated";
 
-// ★ViewManager 락 보유 중 호출 — 구독 정리 델타를 DaemonClient 로 enqueue(fire-and-forget)★. rebuild 와
-// **같은 critical section 안**에서 불러 "enqueue 순서 = rebuild 순서"를 세운다(동시 invoke 인터리브 방지).
-// 부르는 메서드는 동기 `try_send`(await/network 0)라 락 안에서 ADR-0006 위반 아님(lifecycle 락도 독립 —
-// 데드락 0). 비연결이면 DaemonClient 가 조용히 no-op.
+// ★Called holding the ViewManager lock — queues the subscription cleanup delta on the DaemonClient (fire-and-forget)★.
+// Called **inside the same critical section** as the rebuild so the queue order is the rebuild order (no interleaving
+// of concurrent invokes). The method only sends to the connection driver's actor (no await, no network, no other
+// lock), so calling it under the lock keeps ADR-0006. With no open connection the client does nothing.
 pub(crate) fn send_subscription_delta(client: &DaemonClient, delta: SubscriptionDelta) {
     for agent_id in delta.to_unsubscribe {
         client.unsubscribe(agent_id);

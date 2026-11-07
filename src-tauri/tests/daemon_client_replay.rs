@@ -1,12 +1,10 @@
 //! 데몬 클라이언트의 replay single-flight **배선** 통합 테스트 — 소켓·데몬·Tauri 0.
 //!
-//! ★이 파일이 `tests/`(통합 타깃)에 있는 이유★: 재는 대상이 **실 소켓을 요구하는 배선**이라, 그 자리를
-//! 포트로 끊어 세우는 통합 하네스가 제자리다(그래서 하네스 자신은 소켓·데몬·Tauri 를 하나도 안 쓴다).
-//! ★"요구한다"이지 "못 세운다"가 아니다★ — 아래 `tests.rs` 의 루프백 WS 하네스가 그 배선을 실제로
-//! 돌린다. 여기서 사는 것은 소켓 없이 얻는 결정론과 속도이지 유일한 가능성이 아니다.
-//! 순수 단위 단언은 모듈 옆 `#[cfg(test)]` 로 가고 그쪽은 `--test lib_unit` 으로 돈다
-//! (`src/daemon_client/tests.rs` 의 mock WS 하네스가 거기 있다 · 그 타깃을 세운 결정 = ADR-0174 · 현황 =
-//! `.claude/skill-bindings/qa.md` 「모듈별 명령」). 실행:
+//! ★Why `tests/` (an integration target)★: the rules measured here sit behind a connection in the driver, and the
+//! functions that hold them (`daemon_client::replay_events`) are driven here without one — no socket, daemon or Tauri.
+//! The driver's own suite (`src/daemon_client/connection/tests.rs`, `--test lib_unit`) drives the same path on a memory
+//! network; this target buys determinism and speed, not the only way (the target's decision = ADR-0174 · status =
+//! `.claude/skill-bindings/qa.md` 「모듈별 명령」). Run:
 //! `cargo test -p engram-dashboard --test daemon_client_replay`(자식 프로세스를 하나도 안 띄우므로
 //! `-- --test-threads=4` 를 붙이지 않는다 — 판정 규칙 정본 = `.claude/skill-bindings/qa.md` 「모듈별 명령」).
 //! CI 는 이 타깃만 따로 부르는 전용 스텝도 갖는다(`.github/workflows/ci.yml`).
@@ -26,20 +24,18 @@
 //! 접합**인데도. 여기서 그 접합을 태운다: 이벤트가 들어가 마커가 **창까지** 나가고 병합된 세대의
 //! `Subscribe` 가 만들어지는 것을 실 `OutputRouter` 로 잰다.
 //!
-//! ## ★무엇이 안 덮이나(정직성)★
-//! 남은 무검증 표면은 호출부의 **두 줄**이다 — 이 함수를 부르는 줄과, 돌려받은 명령을 `send_fire` 로 실
-//! 소켓에 미는 줄. 그 자리는 실 소켓을 요구한다
-//! (`tests/daemon_client_pending.rs`·`tests/layout_commands.rs` 헤더가 적는 같은 잔여다).
-//! 배달구(`output_channel::send_to_windows`)도 안 돈다 — `tauri::ipc::Channel` 이 필요하다. 대신 **어느
-//! 창으로 · 무슨 바이트를** 보내는지는 실 라우팅 표로 잰다.
+//! ## ★What is not covered here★
+//! The driver's call of this function and its write of the returned `Subscribe` — the driver's suite covers those on
+//! a memory network. The delivery itself (`output_channel::send_to_windows`) needs a `tauri::ipc::Channel`; instead
+//! **which windows · which bytes** are measured against a real routing table.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use engram_dashboard_lib::daemon_client::connection::{
+use engram_dashboard_lib::daemon_client::protocol_state::SubState;
+use engram_dashboard_lib::daemon_client::replay_events::{
     apply_replay_event, plan_subscribe_refusal, ReplayFollowUp,
 };
-use engram_dashboard_lib::daemon_client::protocol_state::SubState;
 use engram_dashboard_lib::daemon_client::replay_flight::{
     Marker, ReplayFlightSet, MARKER_FRAME_LEN, MARKER_TAG,
 };

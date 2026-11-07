@@ -1,177 +1,140 @@
-//! 단일 연결 task(actor) 본체 + Auth/Hello 핸드셰이크 (S14 모듈① T2, ADR-0036).
+//! The daemon connection driver on the transport crate (TRD S21 trd-3 §6-2 U3).
 //!
-//! 데몬 WS 서버(`crates/engram-dashboard-net/src/ws.rs` — ADR-0129 로 데몬 crate 에서 이사)의
-//! **대칭 클라이언트**다. 서버측 기대:
-//!   1) After the WS upgrade the first frame must be the handshake frame (`AuthFrame`, Text JSON) within
-//!      `AUTH_TIMEOUT` — otherwise the server sends an Error and closes (`handle_connection` step 2).
-//!   2) 토큰·protocol_version 일치 시 서버가 `AgentEvent::Hello`(Text JSON) → `AgentListUpdated`
-//!      를 push 한다(ws.rs step 4 `hello_event`). 불일치면 Error 후 close.
-//! 그래서 이 task 는 소켓 open 직후 **가장 먼저 Auth 를 보내고**, 첫 Hello 를 internal 소비해
-//! connected 로 전이한다.
+//! Every `DaemonClient` runs on it: production (`DaemonClient::new_real_with_owned_runtime`) on the ws dialer and the
+//! system clock; tests (`DaemonClient::new_on_link`) on a memory network and a manual clock.
 //!
-//! ## ★동시성(load-bearing)★
-//! - 이 task 가 `WebSocketStream` 을 **split 해 read/write 양쪽을 단독 소유**한다(Mutex 없음).
-//!   외부(invoke)는 `cmd_rx` 로만 의도를 보내고, 실제 write 는 이 task 의 send arm 한 곳뿐 —
-//!   데몬 ws.rs "연결당 단일 writer" 와 대칭. 이게 SplitSink 동시 write 불가를 구조로 회피한다.
-//! - 핸드셰이크 결과는 `ready_tx`(oneshot) 1회로 호출자에게 보고하고, 이후 상태 전이는
-//!   `state_tx`(watch) 로 broadcast 한다.
+//! One actor task per client owns the routing: the registry's dialer registrations, [`RouteState`] and the inbox pumps
+//! all meet on it, and it is the only place that applies what [`route`] returns (connection state · frontend
+//! broadcasts · replay events · daemon command requests · usage snapshots · output frames). Callers' round trips run on
+//! the callers' tasks through a registry clone, never on the actor.
+//!
+//! - ★The actor never awaits anything that waits on an inbox★ (transport invariant 1, transitively — see `link::pump`):
+//!   no `Peer::request`, no `Peer::close_after_flush` future, no `Registry::close_all`. Its awaits are its two
+//!   channels and the replay deadline timer on the injected clock; it writes with `notify_in`, and the one request it
+//!   makes (the registration) it only queues — the reply is awaited on another task.
+//! - ★Every add is one actor step★ — `register` (a fresh dial address) + `adopt` + `Registry::add` + `spawn_pump`,
+//!   with `adopt`'s output applied; a re-add of the key takes the same step. Every `Ended` gives its dial registration
+//!   back, current or replaced handle.
+//! - ★Routing is the only source of connection state★ — `close` removes the peer and shows nothing itself; the
+//!   `Closed` that follows shows `Down`.
+//! - ★Retries never run out★ — network failures retry without limit on the capped backoff ([`link_policy`] —
+//!   ADR-0346). ★No refusal is retried★: terminal ones stop in the transport (the dialer's version check ·
+//!   `ShellHandshake`), and a refusal the transport would retry (a refusal close code other than 4001 — `RejectKind::of`;
+//!   1000 · 1001 · 4000 are not refusals and retry as network failures) stops here: the actor removes the peer when it
+//!   routes that `ConnectFailed`. ★Best effort★ — the transport has already scheduled its next attempt by then, so an
+//!   actor delayed past the first backoff lets one more dial out before the stop lands. A first connect shows its first
+//!   failure as `Down` at once and keeps retrying in the background (`link::route`).
+//! - ★Every decision that a close must order runs on the actor★ — "already connected" and "was this connect overtaken
+//!   by a close" are answered there, in channel order after any earlier `Close`. A close bumps the close epoch at once;
+//!   a connect / ensure carries the epoch it began under, and an add older than the last close builds nothing (a close
+//!   during `connect`'s daemon search wins).
+//! - `connect` / `ensure` resolve on their handle's first answer — `Connected` (once it is shown: state watch and
+//!   frontend event first — the frontend relies on that order), or its first failure; no live daemon (no or an unusable record)
+//!   answers `NoLiveDaemon`. A connect that a re-add overtakes gets the new handle's answer; a close before the answer
+//!   ends it with `ClosedBeforeHello`.
+//! - ★Subscribe · Unsubscribe · RequestReplay go through this one actor, in order, onto one peer queue★ (TRD §6-2 U3 —
+//!   master re-check A1). A replay request checks the window routing when the actor takes it, so an `Unsubscribe`
+//!   queued before it is written first and the check sees the routing that `Unsubscribe` came from. The `Subscribe`
+//!   of a merged request is checked again when the one before it resolves.
+//! - ★Replay flights belong to the routed connection★ (`LinkUp` … `LinkDown`): every write goes out with `notify_in`
+//!   on that connection only, and `LinkDown` clears the flights. A replay `Subscribe` that cannot be written, or an
+//!   output frame too short to read, drops that connection (`Peer::drop_link_in` — bound to it, back to the backoff);
+//!   the actor clears its flights at once and handles none of its later output frames or driver events (its
+//!   broadcasts and lifecycle events still pass).
+//!
+//! - ★A connection is opened by the actor before any caller writes on it★ — on its `LinkUp` the actor queues the
+//!   usage subscribe and the command registration (`RegisterCommands`, every connect — TRD §3-7 clause 1), then
+//!   publishes the generation as opened, with the close epoch of its handle. Callers bind their writes to the
+//!   connection live when they were called and write only once it is published, never on "the peer is live" alone: a
+//!   round trip that comes while that connection is live but not yet opened waits for the publish (bounded by the
+//!   request timeout) and fails if the connection ends meanwhile — it never moves on to a later connection (ADR-0195);
+//!   a fire-and-forget then waits in the gate's pending list, which the actor writes out when that connection opens
+//!   (older ones dropped). So a command sent while a connection opens goes out after that connection's on-open
+//!   writes. A publish older than a close the caller saw counts as closed, so `close()` followed by a write fails at
+//!   once.
+//! - ★The gate★ (`Gate` — one leaf lock shared by the callers and the actor) holds the opened connection and the
+//!   pending fire-and-forgets. A caller writes a fire-and-forget on an opened connection while holding it; the actor
+//!   writes the pending ones and sets the opened connection while holding it; a round trip writes only after it saw
+//!   the opened connection there. So ★one caller's fire-and-forget then round trip keep their order, at all times★.
+//!   ★There is no order across callers★, and none between fire-and-forgets and Subscribe · Unsubscribe ·
+//!   RequestReplay (those go through the actor — A1 above; fire-and-forgets go to the peer directly, as in 3-2 U3b).
+//! - ★The registration's reply is never awaited on the actor★ — its request is queued in the `LinkUp` step and the
+//!   reply is read on a spawned task, which logs it and shows a daemon refusal in the refusal box.
+//! - ★A daemon command request is applied off the actor★ (`InboundReceiver::accept`) and its outcome goes back only on
+//!   the connection it came on (`send_command_outcome` with the request's generation).
+//! - ★Usage subscribes are read and queued under the usage lock★ — the actor's (open · nudge · snapshot resend) and a
+//!   caller's ⟳ pre-subscribe alike, so the order the interest is read in is the order the subscribes reach the peer
+//!   queue and the last one on the wire is the latest interest (TRD S21 usage-limit-slot §1-7). The usage socket
+//!   epoch is the routed generation; it does not rewind across re-adds (`Registry::add`).
+// ADR-0046
+// ADR-0310
+// ADR-0346
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::task::{Context, Poll, Waker};
+use std::time::Duration;
 
-use engram_dashboard_protocol::{AgentCommand, AgentEvent, AgentId, RequestId};
+use engram_dashboard_base::sync;
+use engram_dashboard_command::{CommandEnvelope, CommandError, CommandReply as BusReply};
+use engram_dashboard_protocol::{
+    AgentBackendKind, AgentCommand, AgentEvent, AgentId, UsageLimitSnapshot,
+};
+use engram_dashboard_transport::{
+    mask_reason, Address, Clock, ConnectFailure, Dialer, DisconnectCause, Generation, Incoming,
+    Peer, PeerState, Policy, Registry, RejectKind, RequestError, TransportEvent,
+};
+use futures_util::future::BoxFuture;
+use tokio::runtime::Handle;
+use tokio::sync::{mpsc, oneshot, watch};
 
-// ★별칭이 필수다★: 이 파일의 `CommandReply` 는 **다른 것**(요청/응답 상관용 `oneshot::Sender`)이다.
-//   같은 이름 둘이 한 스코프에 들어오면 어느 쪽인지 읽는 사람이 못 가리고, 봉투의 답장을 pending 슬롯으로
-//   착각하는 편집이 그 자리에서 컴파일된다.
-use engram_dashboard_command::CommandReply as BusReply;
-
-use tokio::sync::{mpsc, oneshot};
-
-use super::inbound::{InboundReceiver, InboundSlot};
-use super::protocol_state::{self, PendingMap, SubState};
-use super::replay_flight::{self, RefusalOutcome, ReplayFlightSet, Resolution};
+use super::events::{ConnectionStateEvent, DaemonEvents};
+use super::frame_relay::{relay_binary_frame, FrameRelay, UnknownTagLog};
+use super::inbound::{registration_command, InboundSlot};
+use super::link::dialer::{no_live_daemon_cause, LocalDaemonDialer};
+use super::link::endpoint::{Endpoint, EndpointSource};
+use super::link::errors::{
+    request_error_text, require_live, send_error_text, SEND_FAILED_PREFIX, UNSENT_ON_DISCONNECT,
+};
+use super::link::pump::{spawn_pump, Routable};
+use super::link::route::{
+    emit_broadcast, refusal_message, route, route_end, send_command_outcome, LinkNotice,
+    RouteState, Routed,
+};
+use super::link::wire::{ShellIn, ShellWire};
+use super::link::{DaemonKey, HandleToken};
+use super::protocol_state::{self, CommandFailure, SubState};
+use super::refusal::{RefusalAlerts, RefusalSite};
+use super::replay_events::{
+    apply_replay_event, known_epoch, ReplayFollowUp, REPLAY_DEADLINE, REPLAY_DEADLINE_TICK,
+};
+use super::replay_flight::{encode_marker_frame, ReplayFlightSet};
+use super::{
+    AgentNamesSink, ConnectionState, SharedUsageInterest, CHANNEL_GONE, DEFAULT_CONNECT_TIMEOUT,
+    NOT_CONNECTED, NO_REQUEST_ID, REPLAY_UNSENT,
+};
+use crate::output_channel::{send_to_windows, WindowChannelRegistry};
 use crate::output_router::{OutputRouter, WindowLabel};
 
-// The connection task's own imports — it runs only under the old driver's test constructors (gone with 3-2 U4b).
-#[cfg(test)]
-use std::collections::BTreeSet;
-
-#[cfg(test)]
-use engram_dashboard_protocol::handshake::AuthFrame;
-#[cfg(test)]
-use engram_dashboard_protocol::{
-    AgentBackendKind, DaemonInfo, UsageLimitSnapshot, PROTOCOL_VERSION,
-};
-
-#[cfg(test)]
-use futures_util::{SinkExt, StreamExt};
-#[cfg(test)]
-use tokio::net::TcpStream;
-#[cfg(test)]
-use tokio::runtime::Handle;
-#[cfg(test)]
-use tokio_tungstenite::tungstenite::Message;
-#[cfg(test)]
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
-
-// ADR-0012: 프론트 알림은 포트로만 나간다 — 이 파일은 실 `AppHandle` 을 이름으로도 알지 못한다.
-//   그 덕에 이 태스크는 소켓만 있으면 서고, 하네스가 핸드셰이크·재연결·왕복을 실코드로 잰다.
-#[cfg(test)]
-use super::events::{ConnectionStateEvent, DaemonEvents};
-#[cfg(test)]
-use super::frame_relay::{self, FrameRelay};
-#[cfg(test)]
-use super::lifecycle::{Lifecycle, ReconnectVerdict};
-#[cfg(test)]
-use super::link::route::emit_broadcast;
-#[cfg(test)]
-use super::protocol_state::CommandFailure;
-#[cfg(test)]
-use super::refusal::{RefusalAlerts, RefusalSite};
-#[cfg(test)]
-use super::{AgentNamesSink, ConnectionState, DaemonDiscovery, SharedUsageInterest};
-#[cfg(test)]
-use crate::output_channel::{self, WindowChannelRegistry};
-
-// ★replay 진행 기반 deadline(ADR-0046)★. single-flight in-flight 가 이 시간 동안 진행(frame/Ack) 0 이면
-// 실패 마커로 종결한다(agent 소멸·subscribe 실패로 Ack/Complete 자체가 안 오는 경로). healthy-slow replay
-// (디버그 빌드·경합)는 frame/Ack 마다 리셋돼 절대 트립 안 된다(진행 기반). 운영 10s급.
-pub(super) const REPLAY_DEADLINE: Duration = Duration::from_secs(10);
-
-// The deadline sweep period — the granularity at which expired in-flight replays are swept (the link driver arms it
-// only while a replay waits; the old driver ticked it in its main loop).
-pub(super) const REPLAY_DEADLINE_TICK: Duration = Duration::from_secs(1);
-
-/// SendCommand 의 대기 슬롯(T6a) — request_id 로 짝지은 데몬 답, 또는 셸 로컬 실패를 호출자에게 나른다.
-///
-/// - `Ok(event)` = 데몬의 짝 답 **전부**(Ack/Spawned/Created/AgentList/…) — 데몬 `Error` 도
-///   `Ok(AgentEvent::Error{..})` 로 온다.
-/// - `Err(msg)` = **셸 로컬 실패뿐**이다(끊김 drain · 미전송 · request_id 없음 · 송신 · 직렬화 실패 · 승계 —
-///   문구는 그 자리마다 다르다).
-///
-/// ★데몬 답을 슬롯에 넣는 자리는 `main_loop` 의 짝 맞추기 한 곳이고, 거기서 `Error` 도 `Ok` 로 넣는다
-/// (ADR-0281)★. ★`Error` 를 `Err` 로 접지 말 것★ — 접으면 출처 분류(`protocol_state::classify_reply`)가
-/// 데몬 거절을 셸 로컬 실패로 읽어 거절 박스(ADR-0270 결정 4)가 오류 없이 조용히 죽는다. 「`Err` 는 로컬뿐」은
-/// 타입이 아니라 이 배치가 지킨다.
-/// 수신단은 `DaemonClient::send_command_with_origin` 과 등록 결말 태스크([`register_own_commands`])가
-/// await 해 `classify_reply` 로 가른다.
-pub type CommandReply = oneshot::Sender<Result<AgentEvent, String>>;
-
-#[cfg(test)]
-type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
-
-// Upper bound for the handshake (socket open → Hello). A normal handshake on loopback takes well under 1 s, so
-// it is never reached; without it `wait_for_hello` waits forever when the server accepts the socket and stays
-// silent (Fix A). It bounds the connect and the Hello wait separately (the Auth send itself has no bound), and it
-// is shorter than the server's `AUTH_TIMEOUT` (15 s, ws.rs) — so a stall while reading the upgrade response gives
-// up here first; a stall after the socket opens can still meet the daemon's "auth timeout". Production default;
-// tests inject a short value through `run_connection`'s `handshake_timeout` (so the const never makes a test
-// wait 10 s).
-pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-
-// ★재연결 백오프(T4 — wsTransport `scheduleReconnect` 500ms→10s MAX5 이식)★.
-// attach-only 재연결 최대 시도 횟수. 데몬이 죽으면(graceful stop·kill·크래시) 캐시/read_live 주소로의
-// 재연결이 전부 실패한다 — 무한 reconnecting 으로 매달리지 않고 이 횟수만큼 시도한 뒤 Down 으로
-// 정착시킨다(꺼진 채 유지). 일시적 끊김은 이 안에서 회복된다. 복구는 명시 connect 로만.
-pub const MAX_RECONNECT_ATTEMPTS: u32 = 5;
-
-// 백오프 기준 지연(500ms). attempt 마다 2^attempt 배(500ms→1s→2s→4s→8s), 상한 BACKOFF_CAP.
-#[cfg(test)]
-const BACKOFF_BASE: Duration = Duration::from_millis(500);
-
-// 백오프 상한(10s). 지수 증가가 이 값을 넘지 않게 클램프(wsTransport `Math.min(..., 10000)`).
-#[cfg(test)]
-const BACKOFF_CAP: Duration = Duration::from_secs(10);
-
-// attempt 번째 재연결 시도의 백오프 지연. attempt=0 → 500ms, 1 → 1s, …, 상한 10s.
-// ★shift 안전★: 2^attempt 가 u64 를 넘기지 않게 checked_shl 로 클램프한 뒤 곱한다(MAX5 라 실제론 최대 8s).
-#[cfg(test)]
-pub(crate) fn backoff_delay(attempt: u32) -> Duration {
-    // attempt 가 커도 곱셈 오버플로 없이 BACKOFF_CAP 으로 수렴하게: 먼저 shift 후 cap 으로 min.
-    let factor = 1u64.checked_shl(attempt).unwrap_or(u64::MAX);
-    let millis = (BACKOFF_BASE.as_millis() as u64).saturating_mul(factor);
-    Duration::from_millis(millis).min(BACKOFF_CAP)
-}
-
-// 메인 루프 종료 사유 — 재연결 대상(데몬 끊김)인지 명시 종료(close)인지 가른다(T4).
-//
-// ★load-bearing★: 이 구분이 재연결 진입 여부를 결정한다. `Disconnected` 만 재연결 루프로 가고,
-// `Closed`(cmd_rx EOF = close()/stale 미저장)는 재연결하지 않는다 — 사용자가 닫았거나(respawn 금지)
-// 더 새 연결이 이미 떴기(stale 미저장 = 좀비 방지) 때문이다. 단, `Disconnected` 라도 진입 직후
-// reconnect_guard(generation + closed_by_user)를 한 번 더 보고 Stop 이면 재연결 안 한다(끊김과 close 가
-// 동시에 들어온 경우).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg(test)]
-enum LoopExit {
-    // 데몬 stream 이 끊김/오류/Close frame → 재연결 대상. (비의도 끊김)
-    Disconnected,
-    // cmd_rx 가 EOF(모든 sender drop) = 명시 close() 또는 stale 미저장 → 재연결 안 함(종료).
-    Closed,
-}
-
-// 핸드셰이크 실패 사유. wsTransport 의 reject 문자열에 대응.
+/// Why a `connect` / `ensure` failed — its `Display` is the text callers get.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HandshakeError {
-    // 발견/spawn 단계 실패(connect 경로). discovery 에러 메시지를 그대로 싣는다(token 미포함).
+    /// `connect`'s daemon search (which may start a daemon) failed — carries its error (no token).
     Discovery(String),
     /// No live daemon to attach to — no endpoint record, or one that cannot be used. Carries the cause (a local
     /// diagnostic, no file content). The text names the cause and asks whether the daemon runs — it does not tell the
     /// caller to start one (ADR-0021: attaching never spawns; the caller decides).
     NoLiveDaemon(String),
-    // ws://host:port 접속 실패(데몬 죽음/거부).
+    /// The daemon could not be reached (a network-class failure).
     Connect(String),
-    AuthSend(String),
-    // 데몬이 Hello 전에 Error 를 보냄(토큰/버전 불일치 등).
+    /// The daemon refused the handshake (token · version · identity).
     AuthRejected(String),
+    /// A close came before `Hello`.
     ClosedBeforeHello,
-    // 핸드셰이크(소켓 open ~ Hello 수신)가 HANDSHAKE_TIMEOUT 을 넘김. 서버가 소켓만 받고 Hello/
-    // Error/Close 중 무엇도 안 보내면 wait_for_hello 가 무한 대기하므로(깨울 외부 경로 없음),
-    // 상한을 둬 확정적으로 실패로 빠진다. ★Fix A★ — 영구 hang 방지.
-    Timeout,
-    // 연결 task 가 ready 신호 전에 사라짐(stale self-close 등 — panic 은 운영 셸에선 훅이 셸째 끝내 훅 없는
-    //   시험 빌드에서만 여기로 온다 · ADR-0292).
+    /// The driver ended or a close overtook the call before its first answer.
     TaskGone,
 }
 
@@ -183,13 +146,9 @@ impl std::fmt::Display for HandshakeError {
                 write!(f, "no live daemon ({cause}) — is the daemon running?")
             }
             HandshakeError::Connect(m) => write!(f, "daemon websocket 접속 실패: {m}"),
-            HandshakeError::AuthSend(m) => write!(f, "Auth 전송 실패: {m}"),
             HandshakeError::AuthRejected(m) => write!(f, "daemon auth failed: {m}"),
             HandshakeError::ClosedBeforeHello => {
                 write!(f, "daemon websocket closed before handshake")
-            }
-            HandshakeError::Timeout => {
-                write!(f, "daemon handshake timeout — Hello 가 시간 내 안 옴")
             }
             HandshakeError::TaskGone => write!(f, "연결 task 가 핸드셰이크 전 종료됨"),
         }
@@ -198,1926 +157,1528 @@ impl std::fmt::Display for HandshakeError {
 
 impl std::error::Error for HandshakeError {}
 
-// 연결 task 로 보내는 명령(단일 task 소유 — invoke 는 이걸 보내고 task 가 처리).
-//
-// ★평면 구분★: `SendCommand` = 요청/응답(reply 기대) — request_id ↔ oneshot 상관을 main_loop 가
-// `PendingMap` 으로 한다. `Subscribe`/`Unsubscribe`/`Fire` = **fire-and-forget**(reply 없음).
-// Subscribe/Unsubscribe 는 wire 인코딩 시 `SubState`(epoch/after_seq) 조회가 필요해 전용 variant 로
-// 두고, Resize 처럼 SubState 무관한 reply 없는 명령은 그냥 `Fire` 로 wire 송신한다.
-//
-// ★ADR-0195 — `socket` 칸을 든 것은 **그 소켓에서만** 처리된다★. ★이 칸이 왜 있나의 정본이 여기다★:
-// **`cmd_rx` 는 소켓보다 오래 산다**(재연결을 넘어 carry 된다 — 이 파일의 다른 자리들은 이 문장을 다시
-// 적지 않고 여기를 가리킨다). 칸이 없으면 한 소켓 몫으로 들어온 것이 **다음 소켓**에서 처리된다 —
-// 다른 데몬일 수도 있다.
-//
-// ★칸을 박는 쪽도 어긋났을 때의 결말도 **두 갈래이고, 갈래마다 다르다**★:
-//   - 바깥에서 들어오는 다섯(`SendCommand`·`Unsubscribe`·`Fire`·`RequestReplay`·`UsageInterest`)은
-//     `lifecycle::Lifecycle::current_cmd_tx` 가 채널 clone 과 **함께** 박는다. 어긋나면
-//     [`reject_foreign_command`] 가 **기다리는 쪽이 있으면 깨운 뒤** 버린다 — 안 깨우면 호출자가 매달린다.
-//   - 되돌아 나가는 `CommandOutcome` 은 적용 태스크가 `main_loop` 의 값을 받아 박고(`accept_inbound`
-//     → `outcome_sink`), 어긋나면 **자기 팔이** 경고만 남기고 버린다(깨울 대기자가 없다). 그래서 위
-//     함수는 이 variant 를 일부러 통과시킨다.
-// ★새 variant 를 더할 땐 어느 갈래인지 먼저 정한다★ — 깨울 대기자를 든 채 뒤쪽 취급을 받으면 그
-// 호출자는 영영 안 깨어난다. 그것이 이 ADR 이 고친 결함의 모양 그대로다.
-#[derive(Debug)]
-pub enum ConnectionCommand {
-    // 요청/응답 명령(T6a). `cmd` 의 request_id 로 reply 를 매칭한다. main_loop 가:
-    //   1) reply 를 PendingMap[request_id] 에 넣고 → 2) cmd 를 JSON 으로 sink.send.
-    //   ⟳(`RefreshUsageLimits`)만 1) 앞에 사용량 구독 한 장을 쓴다([`send_request`]).
-    // 데몬 reply(request_id echo) 도착 시 take_pending → oneshot 에 `Ok(ev)` 그대로 — 데몬 `Error` 도 `Ok` 다.
-    //   이 슬롯의 `Err` 는 send/끊김 같은 셸 로컬 실패뿐이다 — `Error` 를 `Err` 로 접지 말 것(접으면 거절 박스가
-    //   조용히 죽는다 — 사유 = [`CommandReply`] doc · ADR-0281).
-    SendCommand {
-        cmd: AgentCommand,
-        reply: CommandReply,
-        socket: u64,
+/// The one daemon of stage 3 (D4 ① — the registry is built for N).
+pub(super) const DAEMON: &str = "local";
+
+/// Room in the pumps → actor channel. A full channel is backpressure, not loss (`link::pump`).
+const ROUTABLE_QUEUE: usize = 256;
+
+/// Fire-and-forget commands pending in the gate for a connection not opened yet. Past it the caller drops the command
+/// (logged).
+const QUEUED_FIRES_MAX: usize = 512;
+
+/// A connection the actor opened, and the close epoch its handle was added under — a caller that read a later epoch
+/// (a close came since) does not write on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Opened {
+    generation: Generation,
+    closes: u64,
+}
+
+/// The callers' and the actor's shared view of the opened connection (module doc). ★A leaf lock★ — no other lock is
+/// taken while it is held (the registry and the usage lock are read before it); under it there are only these fields
+/// and non-blocking `Peer::notify_in` writes. Logging happens after it is released.
+#[derive(Default)]
+struct Gate {
+    /// The connection the actor opened — its on-open writes and its pending fire-and-forgets are queued on the peer.
+    opened: Option<Opened>,
+    /// Fire-and-forget commands for a live connection the actor has not opened yet, in the order sent, each with that
+    /// connection's generation.
+    pending: VecDeque<(Generation, AgentCommand)>,
+    /// The close epoch the current handle was added under — set before that handle's peer exists. A caller that read a
+    /// newer epoch saw a close after it: its fire-and-forget is dropped, opened or not.
+    handle_closes: u64,
+}
+
+fn lock_gate(gate: &Mutex<Gate>) -> MutexGuard<'_, Gate> {
+    sync::lock(gate)
+}
+
+/// The transport policy of the shell's daemon link: the crate defaults (TRD §7 — every other value there is the
+/// default), except two. Network-class failures retry without limit (ADR-0346 decision 1 — production never reaches
+/// `GaveUp(BudgetExhausted)`), and a reply is awaited [`REQUEST_TIMEOUT`] — one value for every round trip, the
+/// registration and the wait for a connection to open included.
+pub(crate) fn link_policy() -> Policy {
+    let mut policy = Policy::default();
+    policy.reconnect.max_attempts = u32::MAX;
+    policy.request_timeout = REQUEST_TIMEOUT;
+    policy
+}
+
+// ADR-0181 · ADR-0310 (decision 21, D15 ①): one shared request timeout. 30 s, not the crate's 8 s — D15 ① keeps the
+//   frontend command path's
+//   former 30 s until agent spawn time is measured (ADR-0181 "검증 안 된 것" 1).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Where the actor hands what it routes.
+pub(crate) struct Ports {
+    pub events: Arc<dyn DaemonEvents>,
+    pub names: Arc<dyn AgentNamesSink>,
+    /// Which windows show which agent — the replay request check and every output frame read it.
+    pub router: Arc<OutputRouter>,
+    /// The windows' output channels. Output frames and replay markers go through the same channel so the frontend
+    /// sees them in arrival order (ADR-0046).
+    pub windows: WindowChannelRegistry,
+    /// The command table slot — the `DaemonClient`'s own, so a table installed after the start is seen (daemon command
+    /// requests · the registration on every connect).
+    pub inbound: Arc<InboundSlot>,
+    /// The refusal box filter — the `DaemonClient`'s own, so its repeat suppression spans connections.
+    pub refusals: Arc<RefusalAlerts>,
+    /// The usage interest — the `DaemonClient`'s own, which the layout recomputes and the webview pull reads.
+    pub usage: SharedUsageInterest,
+}
+
+/// The callers' side of the driver — `DaemonClient` holds one.
+pub(crate) struct LinkClient {
+    key: DaemonKey,
+    rt: Handle,
+    source: Arc<dyn EndpointSource>,
+    registry: Registry<ShellWire>,
+    /// The actor's dialer — held here for tests of its registrations.
+    #[cfg(test)]
+    dialer: Arc<LocalDaemonDialer>,
+    /// The pumps' channel into the actor — tests feed a replaced handle's tail through it.
+    #[cfg(test)]
+    routable_tx: mpsc::Sender<Routable>,
+    /// Bumped by every `close` before it queues `Close` (module doc).
+    closes: Arc<AtomicU64>,
+    cmd_tx: mpsc::UnboundedSender<DriverCmd>,
+    state_rx: watch::Receiver<ConnectionState>,
+    /// Shared with the actor (module doc).
+    gate: Arc<Mutex<Gate>>,
+    /// Changes whenever the actor changes the gate's opened connection — wakes round trips waiting for it.
+    opened_rx: watch::Receiver<()>,
+    /// The ⟳ pre-subscribe reads the interest here.
+    usage: SharedUsageInterest,
+    /// Times the wait for an opened connection.
+    clock: Arc<dyn Clock>,
+}
+
+/// Nudges the actor's usage interest without keeping the actor alive — the usage shrink timer holds one
+/// (`DaemonClient::run_usage_action`). A nudge after the client is gone does nothing.
+pub(crate) struct UsageNudger(mpsc::WeakUnboundedSender<DriverCmd>);
+
+impl UsageNudger {
+    pub(crate) fn nudge(&self) {
+        if let Some(cmd_tx) = self.0.upgrade() {
+            let _ = cmd_tx.send(DriverCmd::UsageNudge);
+        }
+    }
+}
+
+enum DriverCmd {
+    /// Is the key's current peer live?
+    IsLive {
+        reply: oneshot::Sender<bool>,
     },
-    // 출력 구독 해제(정리, ADR-0046 BLOCK-1). main_loop 가 `AgentCommand::Unsubscribe` 를 wire 로 송신한다.
-    // wire 구독 형성(Subscribe)은 `RequestReplay` 단독이고, layout 델타는 1→0 정리만 이걸로 보낸다.
+    /// Start a handle for the key — the first one or a re-add — unless the current peer is live (`first` gets `Ok`)
+    /// or a close came after `closes` was read (`first` gets an error). Otherwise `first` gets the new handle's first
+    /// answer.
+    Add {
+        closes: u64,
+        /// The endpoint `connect`'s daemon search found — the new registration's last-known endpoint.
+        found: Option<Endpoint>,
+        first: oneshot::Sender<Result<(), HandshakeError>>,
+    },
+    Close,
+    /// Write `Unsubscribe` on the open connection. With none open there is nothing to undo — the daemon drops a
+    /// connection's subscriptions with it.
     Unsubscribe {
-        agent_id: engram_dashboard_protocol::AgentId,
-        socket: u64,
+        agent_id: AgentId,
     },
-    // reply 없는 fire-and-forget 명령(Resize 등). main_loop 가 그냥 JSON 으로 wire 송신한다.
-    Fire {
-        cmd: AgentCommand,
-        socket: u64,
-    },
-    // ★뷰 주도 replay 채번(ADR-0046 — single-flight)★. 뷰 mount/remount 시 도착한다. main_loop 가
-    // `ReplayFlightSet::request_replay` 로 gen 을 채번하고, idle 이면 즉시 wire `Subscribe{after_seq:None}`
-    // (epoch=SubState 현재값)를 보내거나 in-flight 중이면 다음 1회 Subscribe 에 병합한다. 배정된 gen 은
-    // `reply`(Some)로 회수한다(`request_replay` 커맨드). `Option` 인 것은 seam 자리 유지용 — 현재 모든
-    // 발행이 `Some`(구 프론트 fire-and-forget alias `resync_output` 은 M3 에서 삭제).
+    /// Start the agent's replay or join the one in flight (single flight — ADR-0046 M1); `reply` gets the generation
+    /// assigned (a joined request writes nothing and still gets one), or [`REPLAY_UNSENT`] / [`NOT_CONNECTED`] when no
+    /// generation can be served: no open connection, no window shows the agent, or its `Subscribe` could not be written.
     RequestReplay {
-        agent_id: engram_dashboard_protocol::AgentId,
-        reply: Option<oneshot::Sender<u64>>,
-        socket: u64,
+        agent_id: AgentId,
+        reply: oneshot::Sender<Result<u64, String>>,
     },
-    // ★인바운드 명령의 결말 — 받은 **그 소켓**으로만 나간다★. 적용 태스크가 만들어 이 채널로 넘기고
-    //   (소켓 쓰기는 연결 태스크 하나뿐 — 헤더 「동시성」), main_loop 가 `socket` 을 지금 소켓과 대조해
-    //   같을 때만 보낸다.
-    // ★왜 `Fire` 가 아닌 자기 variant 인가★: 위 carry 때문에 `Fire` 로 보내면 소켓 A 의 답장이 소켓 B 로
-    //   나간다 — A 의 호출자는 답을 못 받고, B 의 상대는 자기가 안 보낸 요청의 답을 받는다. 대조할 칸이
-    //   있어야 그 오배달을 **의도적으로** 버릴 수 있다.
-    CommandOutcome {
-        reply: BusReply,
-        socket: u64,
-    },
-    // ★사용량 관심이 바뀌었을 수 있다 — 집합을 싣지 않는다(TRD S21 usage-limit-slot §1-7 「한 직렬 경로」)★.
-    //   main_loop 가 꺼낼 때 `UsageInterest::sync` 로 그때의 관심을 읽어 `UsageSubscribe` 로 쓴다 — 읽는 순서 =
-    //   보내는 순서라 소켓의 마지막 한 장이 늘 최신 관심이다(`super::DaemonClient::nudge_usage_interest`).
-    UsageInterest {
-        socket: u64,
+    /// The usage interest may have changed — the set is read when the actor takes this (TRD S21 usage-limit-slot §1-7
+    /// "one serial path"), so it carries none.
+    UsageNudge,
+    /// The key's current handle.
+    #[cfg(test)]
+    CurrentHandle {
+        reply: oneshot::Sender<Option<HandleToken>>,
     },
 }
 
-/// 연결 task 본체. 소켓을 열어 Auth/Hello 핸드셰이크를 마치고, 그 결과를 `ready_tx` 로 1회 보고한
-/// 뒤 메인 루프(read/write/cmd)로 들어간다. 이 함수가 stream 을 split 해 단독 소유한다.
-///
-/// ## ★generation 가드(load-bearing, Fix B — 락으로 원자화)★
-/// `my_gen` = 이 task 가 spawn 될 때 캡처한 세대값, `lifecycle` = 공유 lifecycle 락(DaemonClient 소유).
-/// 동시 connect/ensure·close-in-flight 로 더 새 task 가 떠 세대가 올라가면, **밀려난(stale) task 는
-/// 공유 상태(watch 전이 · cmd_tx 슬롯)를 건드리지 않고 자기 소켓만 닫고 조용히 종료**한다.
-/// ⚠️ 첫 핸드셰이크는 취소 경쟁 밖이라(cancel 구독은 connected 직후 — T4 는 재연결 경로만
-/// 덮었다) 소켓 2개가 동시에 열릴 수 있음(둘 다 connect_async 진행)은 허용한다 — stale task 는 *공유
-/// 상태를 안 건드리고* stale 판정 시 self-close 하므로 관찰 가능한 오염(고아 Down clobber·좀비 채널·
-/// Connected 부활)은 없앤다.
-///
-/// ## ★ADR-0006 — 락 .await across 보유 금지★
-/// `publish_if_current`/`store_cmd_if_current` 는 전부 동기(내부에서 await 안 함)다. 따라서 아래
-/// `connect_async`·`sink.send`·`wait_for_hello`·`sink.close` 등 모든 await 는 lifecycle 락을 보유하지
-/// 않은 채 일어난다(락은 publish_if_current 호출 안에서만 잡혔다 즉시 풀린다).
-#[allow(clippy::too_many_arguments)]
-#[cfg(test)]
-pub(crate) async fn run_connection(
-    info: DaemonInfo,
-    my_gen: u64,
-    lifecycle: Arc<Lifecycle>,
-    discovery: Arc<dyn DaemonDiscovery>,
-    rt: Handle,
-    handshake_timeout: Duration,
-    cmd_rx: mpsc::Receiver<ConnectionCommand>,
-    // ★자기 채널의 송신단(inbound 결말 되돌리기 전용)★: 인바운드 명령의 답장은 **적용 태스크**에서 만들어지고
-    //   소켓 쓰기는 이 태스크 하나만 한다(헤더 「동시성」의 단일 writer). 그래서 답장은 여기로 되보내
-    //   `ConnectionCommand::Fire` 로 나간다 — 적용 태스크가 sink 를 직접 만지면 그 규약이 깨진다.
-    cmd_tx: OutcomeSender,
-    ready_tx: oneshot::Sender<Result<(), HandshakeError>>,
-    // ★T6b 출력 평면 주입(G3)★: router=agent_id→[window_label] 라우팅(app-level 공유), registry=
-    //   window_label→Channel. 둘 다 Arc 라 재연결 task 수명을 넘어 산다 — main_loop 가 Binary frame 을
-    //   디코드해 router.targets 로 라우팅하고 registry 의 각 창 Channel 로 fan-out 한다.
-    router: Arc<OutputRouter>,
-    registry: WindowChannelRegistry,
-    // ★T7c: 데몬 broadcast 이벤트를 프론트로 내보내는 포트(emit 경로 — ADR-0012 seam).
-    //   Text arm 의 broadcast(request_id 없는 AgentListUpdated/StatusChanged/…)를 전 webview 에 push 한다.
-    //   실물은 `events::TauriEmitter`, 창 없는 조립은 `events::NoDaemonEvents`(버림).
-    events: Arc<dyn DaemonEvents>,
-    // 데몬 목록의 이름 몫(TRD S26-window-chrome §4-3) — `AgentListUpdated` 팔이 프론트 알림 뒤에 부른다.
-    names: Arc<dyn AgentNamesSink>,
-    // 등록 거절 박스의 거르개 — `DaemonClient` 가 쥔 것을 그대로 받는다(사유 = 그 칸 doc).
-    refusals: Arc<RefusalAlerts>,
-    // ADR-0155 결정 4: 데몬이 배달한 명령의 입구. 늦게 채워지므로 슬롯으로 받는다(`inbound::InboundSlot` doc).
-    inbound: Arc<InboundSlot>,
-    usage: SharedUsageInterest,
-) {
-    // 1) 첫 핸드셰이크 — 결과를 ready_tx 로 caller(connect/ensure)에 1회 보고한다.
-    let connected = handshake(&info, my_gen, handshake_timeout).await;
-    let (sink, stream, socket_epoch) = match connected {
-        Ok(mut conn) => {
-            // 핸드셰이크 성공이라도 stale 일 수 있다 — 명령 창구 개방(+Connected 발행)을 가드된 한 락으로
-            // 시도한다(ADR-0195). current 면 ready Ok + main_loop, stale 이면 소켓 닫고 종료(ready 는 drop
-            // → caller TaskGone).
-            let Some(socket_epoch) = lifecycle.open_socket_if_current(my_gen) else {
-                tracing::debug!(
-                    generation = my_gen,
-                    "stale 연결 폐기 — Hello 수신했으나 세대가 밀림"
-                );
-                let _ = conn.sink_close().await; // ★락 밖 await★
-                return;
-            };
-            tracing::info!(
-                generation = my_gen,
-                "데몬 WS 연결 수립(Hello 수신, 인증 성공)"
-            );
-            // 관심 상태에 새 소켓을 알리는 것은 발화 앞, 그 집합을 쓰는 것은 뒤다([`write_usage_on_open`]).
-            let usage_open = usage.lock().on_socket_open(socket_epoch);
-            // ★T7c★: 첫 connected 전이를 프론트에 push.
-            events.connection_state(ConnectionStateEvent::Connected);
-            write_usage_on_open(&mut conn.sink, usage_open, my_gen).await;
-            if ready_tx.send(Ok(())).is_err() {
-                // 호출자(connect await)가 사라짐 → 정리 종료.
-                tracing::debug!(
-                    generation = my_gen,
-                    "연결 수립 후 호출자 사라짐(ready 수신자 drop) — 정리 종료"
-                );
-                let _ = conn.sink_close().await;
-                // ★Connected 를 이미 알린 뒤라 Down 도 반드시 알린다★: 내부 상태만 접으면 전 webview 가
-                //   connected 로 굳은 채 죽은 연결에 출력 채널을 걸고 앉는다 — 프론트의 연결 상태 자가복구는
-                //   리로드 시 pull 1회뿐이라(`tauriTransport.ts` selfHeal) 살아 있는 창은 영영 못 깨어난다.
-                // ★가드는 그대로★: stale 이면 미발행 — 더 새 연결의 Connected 를 Down 으로 clobber 하지 않는다.
-                // ADR-0195: 방금 연 창구도 같은 가드로 닫는다(소켓이 없는데 열려 있으면 그 자체가 거짓말).
-                lifecycle.close_socket_if_current(my_gen);
-                usage.lock().on_socket_lost(socket_epoch);
-                if lifecycle.publish_if_current(my_gen, ConnectionState::Down) {
-                    events.connection_state(ConnectionStateEvent::Down);
-                } else {
-                    tracing::debug!(
-                        generation = my_gen,
-                        "호출자 소멸 정리 — Down 미발행(더 새 연결이 current)"
-                    );
-                }
-                return;
-            }
-            let (sink, stream) = conn.into_split();
-            (sink, stream, socket_epoch)
-        }
-        Err(e) => {
-            // 핸드셰이크 실패(접속/Auth/타임아웃/Hello 전 close 등). caller 에 실패 보고 + Down 가드.
-            tracing::warn!(generation = my_gen, "데몬 WS 핸드셰이크 실패: {e}");
-            let _ = ready_tx.send(Err(e));
-            // ★원자 가드★ stale 이면 Down 미송신(current 의 Connected clobber 방지).
-            // ★실패도 알린다★: 이 실패를 아는 것은 `ready_tx` 를 받은 그 호출자 하나뿐이고, 나머지 창은
-            //   마지막으로 들은 상태에 머문다 — 끊김 뒤 재진입(직전 발화가 `reconnecting`)이면 아무도
-            //   재시도하지 않는데 화면만 재연결 중으로 굳는다(첫 핸드셰이크 실패는 재연결 루프에 못 든다).
-            if lifecycle.publish_if_current(my_gen, ConnectionState::Down) {
-                events.connection_state(ConnectionStateEvent::Down);
-            } else {
-                tracing::debug!(
-                    generation = my_gen,
-                    "핸드셰이크 실패 — Down 미발행(더 새 연결이 current)"
-                );
-            }
-            return;
-        }
-    };
-
-    // 2) connected 이후: main_loop + (비의도 끊김 시) 재연결 루프. 명시 close/stale 종료면 재연결 안 함.
-    //    ★재연결 취소 receiver 를 여기서 구독★: 이후 재연결 루프의 모든 await 를 이 receiver 와 select! 로
-    //    경쟁시켜, close()/승계 connect 가 in-flight 재연결을 즉시 끊는다(소켓 open 전 탈출).
-    let cancel_rx = lifecycle.cancel_subscribe();
-    connected_lifetime(
-        sink,
-        stream,
-        socket_epoch,
-        cmd_rx,
-        cmd_tx,
-        info,
-        my_gen,
-        lifecycle,
-        discovery,
-        rt,
-        handshake_timeout,
-        cancel_rx,
-        router,
-        registry,
-        events,
-        names,
-        refusals,
-        inbound,
-        usage,
-    )
-    .await;
-}
-
-// 한 소켓의 핸드셰이크 산출물 — split 된 sink/stream 을 들고, 정리(sink_close)·소유 이전(into_split)을
-// 제공한다. 첫 연결과 재연결이 같은 핸드셰이크 경로를 공유하게 묶는다.
-#[cfg(test)]
-struct Handshaked {
-    sink: futures_util::stream::SplitSink<Ws, Message>,
-    stream: futures_util::stream::SplitStream<Ws>,
-}
-
-#[cfg(test)]
-impl Handshaked {
-    async fn sink_close(mut self) -> Result<(), tokio_tungstenite::tungstenite::Error> {
-        self.sink.close().await
+impl LinkClient {
+    /// Starts the actor on `rt`. `inner` dials the resolved daemon address (the transport's ws dialer in production,
+    /// a memory network in tests); `clock` drives the registry, the failure log and the replay deadlines.
+    pub(crate) fn start(
+        rt: &Handle,
+        inner: Arc<dyn Dialer>,
+        source: Arc<dyn EndpointSource>,
+        clock: Arc<dyn Clock>,
+        ports: Ports,
+    ) -> Self {
+        let (client, driver, cmd_rx, routable_rx) = Self::build(rt, inner, source, clock, ports);
+        rt.spawn(driver.run(cmd_rx, routable_rx));
+        client
     }
-    fn into_split(
-        self,
+
+    /// The client and its actor, not yet running.
+    fn build(
+        rt: &Handle,
+        inner: Arc<dyn Dialer>,
+        source: Arc<dyn EndpointSource>,
+        clock: Arc<dyn Clock>,
+        ports: Ports,
     ) -> (
-        futures_util::stream::SplitSink<Ws, Message>,
-        futures_util::stream::SplitStream<Ws>,
+        Self,
+        Driver,
+        mpsc::UnboundedReceiver<DriverCmd>,
+        mpsc::Receiver<Routable>,
     ) {
-        (self.sink, self.stream)
-    }
-}
-
-// Builds the first (handshake) frame text — the daemon expects it within the net lib's `AUTH_TIMEOUT`.
-//
-// ★단일 산출점(2026-08-05 통합)★: `handshake` 와 `handshake_cancellable` 이 **각자** 같은 프레임을
-// 조립하고 있었다. 그 중복이 위험한 이유는 아래 Fix C 불변식이 **두 벌**이었다는 것 — 한쪽만 고치면
-// 재연결 경로에서만 조용히 게이트가 죽는다. 그래서 조립을 여기로 모았다(에러 처리는 두 함수의 반환
-// 타입이 달라 각자 남는다 — 이 함수는 serde 에러를 그대로 올린다).
-//
-// ★Fix C — protocol_version 은 **우리가 컴파일된 PROTOCOL_VERSION**(protocol crate)이다★:
-// `DaemonInfo` 가 준 값을 되쏘면(echo) 서버의 버전 비교가 항상 통과해 버전 게이트가 무력화된다.
-// 불일치 시 서버가 거부하는 게 의도된 게이트다(`daemon_client::stop` 의 `build_auth_command` 와 동형).
-// ★타입 출처(ADR-0129 0-4)★: 프레임은 protocol `handshake::AuthFrame` 이다 — 명령 enum 이 아니다.
-// ★token 은 wire 로만★(로그·에러에 미노출).
-#[cfg(test)]
-fn auth_frame_text(info: &DaemonInfo) -> Result<String, serde_json::Error> {
-    serde_json::to_string(&AuthFrame::Auth {
-        token: info.token.clone(),
-        protocol_version: PROTOCOL_VERSION,
-    })
-}
-
-// 1회 소켓 열기 + Auth 송신 + Hello 대기(=인증 성공). 성공 시 split 된 소켓을 돌려준다. 공유 상태
-// 전이(Connected/Down)는 **호출자가** 가드(publish_if_current)와 함께 결정한다 — 첫 연결은 ready 보고가
-// 딸리고 재연결은 안 딸려, 그 분기를 호출자에 두는 게 깔끔하다(이 함수는 순수 소켓 핸드셰이크만 —
-// lifecycle 미접촉).
-#[cfg(test)]
-async fn handshake(
-    info: &DaemonInfo,
-    my_gen: u64,
-    handshake_timeout: Duration,
-) -> Result<Handshaked, HandshakeError> {
-    // 1) ws://host:port 접속(host 는 항상 127.0.0.1 loopback — DaemonInfo).
-    let url = format!("ws://{}:{}", info.host, info.port);
-    // ★token 미노출★: url·generation 만 필드로(DaemonInfo.token 은 절대 로그에 싣지 않음 — 보안).
-    tracing::debug!(%url, generation = my_gen, "데몬 WS 연결 시도");
-    // ★connect 타임아웃(load-bearing — T4 재연결 진행성)★: connect_async 를 handshake_timeout 으로
-    //   감싼다. 죽은 데몬 port 로의 TCP connect 는 OS 타임아웃(수십초~분)까지 hang 할 수 있어, 감싸지
-    //   않으면 재연결 루프가 첫 시도에서 멈춰 백오프 소진(→Down)에 영원히 못 닿는다(테스트로 적출). Hello
-    //   대기 timeout 과 같은 상한을 쓴다(운영 10s, 테스트 주입). loopback 정상 연결은 <1s 라 안 닿는다.
-    let ws = match tokio::time::timeout(handshake_timeout, connect_async(&url)).await {
-        Ok(Ok((ws, _resp))) => ws,
-        Ok(Err(e)) => {
-            // ★token 미노출★: url 만 싣는다(DaemonInfo.token 은 절대 에러에 넣지 않음).
-            tracing::warn!(%url, generation = my_gen, "데몬 WS 접속 실패: {e}");
-            return Err(HandshakeError::Connect(format!("{url}: {e}")));
-        }
-        Err(_elapsed) => {
-            tracing::warn!(%url, generation = my_gen, "데몬 WS 접속 타임아웃");
-            return Err(HandshakeError::Connect(format!("{url}: connect timeout")));
-        }
-    };
-
-    // 2) split.
-    let (mut sink, mut stream) = ws.split();
-
-    // 3) ★첫 frame = Auth(Text JSON)★ — 조립은 `auth_frame_text`(이 파일의 단일 산출점).
-    let auth_text = match auth_frame_text(info) {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::warn!(generation = my_gen, "Auth 직렬화 실패: {e}");
-            let _ = sink.close().await; // ★락 밖 await★
-            return Err(HandshakeError::AuthSend(format!("직렬화: {e}")));
-        }
-    };
-    if let Err(e) = sink.send(Message::Text(auth_text.into())).await {
-        // ★token 미노출★: 송신 실패 에러만(Auth frame 내용=token 은 절대 로그 금지 — 보안).
-        tracing::warn!(generation = my_gen, "Auth frame 송신 실패: {e}");
-        let _ = sink.close().await;
-        return Err(HandshakeError::AuthSend(e.to_string()));
+        let key = DaemonKey::new(DAEMON);
+        let dialer = Arc::new(LocalDaemonDialer::new(inner));
+        let registry = Registry::new(
+            Arc::new(ShellWire),
+            dialer.clone(),
+            clock.clone(),
+            link_policy(),
+        );
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (state_tx, state_rx) = watch::channel(ConnectionState::Down);
+        let (routable_tx, routable_rx) = mpsc::channel(ROUTABLE_QUEUE);
+        let closes = Arc::new(AtomicU64::new(0));
+        let (opened_tx, opened_rx) = watch::channel(());
+        let gate = Arc::new(Mutex::new(Gate::default()));
+        let Ports {
+            events,
+            names,
+            router,
+            windows,
+            inbound,
+            refusals,
+            usage,
+        } = ports;
+        let client = Self {
+            key: key.clone(),
+            rt: rt.clone(),
+            source: source.clone(),
+            registry: registry.clone(),
+            #[cfg(test)]
+            dialer: dialer.clone(),
+            #[cfg(test)]
+            routable_tx: routable_tx.clone(),
+            closes: closes.clone(),
+            cmd_tx,
+            state_rx,
+            gate: gate.clone(),
+            opened_rx,
+            usage: usage.clone(),
+            clock: clock.clone(),
+        };
+        let driver = Driver {
+            key,
+            source,
+            registry,
+            dialer,
+            route: RouteState::new(clock.clone()),
+            clock,
+            routable_tx,
+            registrations: HashMap::new(),
+            current: None,
+            first: None,
+            closes,
+            state_tx,
+            events,
+            names,
+            router,
+            windows,
+            open: None,
+            subs: HashMap::new(),
+            flight: ReplayFlightSet::new(REPLAY_DEADLINE),
+            unknown_tags: UnknownTagLog::default(),
+            dropping: None,
+            inbound,
+            refusals,
+            usage,
+            gate,
+            opened_tx,
+        };
+        (client, driver, cmd_rx, routable_rx)
     }
 
-    // 4) Hello 대기(=인증 성공). Hello 전 Error = Auth 실패 → reject. 소켓 닫힘 = ClosedBeforeHello.
-    //    ★Fix A★ wait_for_hello 를 timeout 으로 감싼다 — 서버가 침묵하면 영구 hang 이므로 상한을 둔다.
-    //    ★Hello 전 도착하는 다른 control(없어야 정상이나)·binary 는 핸드셰이크 단계에선 무시한다.★
-    let result = match tokio::time::timeout(handshake_timeout, wait_for_hello(&mut stream)).await {
-        Ok(result) => result,
-        Err(_elapsed) => Err(HandshakeError::Timeout),
-    };
-    match result {
-        // Hello 수신 = 인증 성공. split 된 소켓을 호출자에 넘긴다(상태 전이·ready 보고는 호출자 몫).
-        Ok(()) => Ok(Handshaked { sink, stream }),
-        Err(e) => {
-            // 핸드셰이크 실패(타임아웃·Auth 거부·Hello 전 close 등). 소켓만 닫고 에러 반환.
-            tracing::warn!(%url, generation = my_gen, "데몬 WS 핸드셰이크 실패: {e}");
-            let _ = sink.close().await; // ★락 밖 await★
-            Err(e)
-        }
-    }
-}
-
-// ★취소 가능 핸드셰이크 산출(T4 — in-flight 취소)★. 재연결 루프가 쓰는 핸드셰이크 결과 3분기.
-// `Ok`=성공, `Err`=실패(데몬 죽음/거부/타임아웃), `Cancelled`=close()/승계가 cancel 을 켜서 중단됨
-// (소켓을 안 열었거나, connect_async 가 이미 연 소켓을 즉시 닫음 — 어느 쪽이든 데몬에 Auth 안 보냄).
-#[cfg(test)]
-enum HandshakeOutcome {
-    Ok(Handshaked),
-    Err(HandshakeError),
-    // 취소로 중단 — 호출자가 reconnect_guard 로 재확인 후 탈출/재시도. **소켓은 이미 정리됨**(연 적이
-    // 없거나 self-close 완료)이라 호출자가 추가로 닫을 필요 없다.
-    Cancelled,
-}
-
-// 재연결 전용 취소 가능 핸드셰이크. `handshake` 와 같은 단계(connect→Auth→Hello)를 밟되, **모든 await
-// 를 `cancel_rx.changed()` 와 `select!` 로 경쟁**시킨다(작업 지시: connect_async·핸드셰이크 각 await 를
-// 취소와 select). close()/승계 connect 가 cancel 을 켜면:
-//   - connect_async 단계 취소 → **소켓을 아예 안 연다**(데몬 무접촉).
-//   - Auth send / wait_for_hello 단계 취소 → 이미 연 소켓을 **즉시 self-close** 하고 Cancelled 반환
-//     (Auth 가 나갔을 수는 있으나 stale 소켓이 *살아남아* 계속 점유/통신하는 창은 닫는다).
-// 이게 "close 후 stale task 가 소켓 open + Auth 를 보낸다"는 Codex 적출 결함의 1차 방어선이다.
-// generation 가드(publish_if_current)는 상태 발행을 막는 2차 방어선으로 남는다.
-//
-// ★cancel-safe★: 모든 arm 의 `cancel_rx.changed()` 와 IO future 는 cancel-safe 라, 한 arm 이 이기면
-// 진 arm 은 부작용 없이 폐기된다(select! 표준). 따라서 부분 진행 상태가 새지 않는다.
-#[cfg(test)]
-async fn handshake_cancellable(
-    info: &DaemonInfo,
-    my_gen: u64,
-    handshake_timeout: Duration,
-    cancel_rx: &mut tokio::sync::watch::Receiver<u64>,
-) -> HandshakeOutcome {
-    let url = format!("ws://{}:{}", info.host, info.port);
-    tracing::debug!(%url, generation = my_gen, "데몬 WS 재연결 시도(취소 가능)");
-
-    // 1) connect_async 를 취소·timeout 과 동시에 경쟁. ★취소가 이기면 connect future 를 drop 한다★ —
-    //    진행 중이던 WS 업그레이드가 중단돼 *우리가 쥔* 소켓 핸들은 생기지 않고(split→Auth 단계 미도달),
-    //    이미 부분적으로 열린 TCP/스트림은 future drop 으로 함께 닫힌다.
-    //    ★정직 표기(nit — 과대표기 금지)★: 그 시점에 OS 레벨 TCP SYN/connect 는 *이미 데몬에 닿았을 수 있다*
-    //    (커널 backlog 에 들어간 연결은 우리가 future 를 drop 해도 되돌릴 수 없다). 그래서 이 취소의 계약은
-    //    "재연결 소켓에서 stale **Auth**(token) 0 · 살아남아 통신을 *유지*하는 stale 소켓 0" 이지 "TCP SYN 0"
-    //    이 아니다. connect_async 단계에서 취소되면 split 전이라 Auth 를 절대 안 보내고, 부분 소켓은 drop 으로
-    //    닫혀 살아남지 않는다(서버가 곧 EOF 를 본다). 이게 보안상 핵심(token 미송신)을 지키는 지점이다.
-    let ws = tokio::select! {
-        biased; // 취소를 먼저 본다 — close 후 굳이 소켓을 여는 일이 없게(공정성보다 취소 우선).
-        _ = cancel_rx.changed() => return HandshakeOutcome::Cancelled,
-        connected = tokio::time::timeout(handshake_timeout, connect_async(&url)) => match connected {
-            Ok(Ok((ws, _resp))) => ws,
-            Ok(Err(e)) => {
-                tracing::warn!(%url, generation = my_gen, "데몬 WS 재연결 접속 실패: {e}");
-                return HandshakeOutcome::Err(HandshakeError::Connect(format!("{url}: {e}")));
-            }
-            Err(_elapsed) => {
-                tracing::warn!(%url, generation = my_gen, "데몬 WS 재연결 접속 타임아웃");
-                return HandshakeOutcome::Err(HandshakeError::Connect(format!(
-                    "{url}: connect timeout"
-                )));
-            }
-        },
-    };
-
-    // 2) split.
-    let (mut sink, mut stream) = ws.split();
-
-    // 3) Auth 송신 — 소켓이 이미 열렸으므로 여기부터 취소되면 self-close 로 정리한다(stale 소켓 점유 차단).
-    //    조립은 `handshake` 와 **같은 산출점**(auth_frame_text) — 두 벌로 갈라져 있던 것을 합쳤다.
-    let auth_text = match auth_frame_text(info) {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::warn!(generation = my_gen, "Auth 직렬화 실패: {e}");
-            let _ = sink.close().await;
-            return HandshakeOutcome::Err(HandshakeError::AuthSend(format!("직렬화: {e}")));
-        }
-    };
-    // ★취소 경쟁★: Auth send await 도중 close/승계가 끼면 즉시 깨어 소켓을 닫는다(stale 소켓이 살아
-    //   서버와 계속 통신하는 창을 닫는다). send 가 이기면 Auth 가 나간 것이고, 그 직후 wait_for_hello 에서
-    //   다시 취소를 경쟁한다.
-    let send_res = tokio::select! {
-        biased;
-        _ = cancel_rx.changed() => {
-            let _ = sink.close().await; // ★연 소켓 즉시 정리★
-            return HandshakeOutcome::Cancelled;
-        }
-        r = sink.send(Message::Text(auth_text.into())) => r,
-    };
-    if let Err(e) = send_res {
-        tracing::warn!(generation = my_gen, "Auth frame 송신 실패: {e}");
-        let _ = sink.close().await;
-        return HandshakeOutcome::Err(HandshakeError::AuthSend(e.to_string()));
+    /// The connection state routing last showed.
+    pub(crate) fn state_rx(&self) -> watch::Receiver<ConnectionState> {
+        self.state_rx.clone()
     }
 
-    // 4) Hello 대기 — timeout + 취소를 함께 경쟁. 취소면 소켓 닫고 Cancelled.
-    let hello = tokio::select! {
-        biased;
-        _ = cancel_rx.changed() => {
-            let _ = sink.close().await; // ★연 소켓 즉시 정리★
-            return HandshakeOutcome::Cancelled;
+    /// Explicit connect (ADR-0021 — may start a daemon). A failed search still starts the handle — unless a close
+    /// overtook this connect, then nothing is built: it reads `daemon.json` on every attempt and connects once a
+    /// daemon is there, and the caller gets the search's error.
+    pub(crate) async fn connect(&self) -> Result<(), HandshakeError> {
+        let closes = self.closes.load(Ordering::SeqCst);
+        if self.is_live().await {
+            return Ok(());
         }
-        result = tokio::time::timeout(handshake_timeout, wait_for_hello(&mut stream)) => match result {
-            Ok(result) => result,
-            Err(_elapsed) => Err(HandshakeError::Timeout),
-        },
-    };
-    match hello {
-        Ok(()) => HandshakeOutcome::Ok(Handshaked { sink, stream }),
-        Err(e) => {
-            tracing::warn!(%url, generation = my_gen, "데몬 WS 재연결 핸드셰이크 실패: {e}");
-            let _ = sink.close().await;
-            HandshakeOutcome::Err(e)
-        }
-    }
-}
-
-// connected 이후 수명주기 — main_loop 를 돌고, **비의도 끊김**이면 재연결 루프로, **명시 close/stale**
-// 이면 종료한다(T4). 단일 task 가 전체를 들고 돌아 generation 가드가 task lifetime 과 한 몸이 된다.
-//
-// ## ★재연결 generation/closedByUser 가드(load-bearing — T4 안전 게이트)★
-// 재연결 루프의 매 백오프·재시도 전에 `lifecycle.reconnect_guard(my_gen)` 로 "내가 current + 사용자
-// 안 닫음"을 **원자로** 확인한다. close()(세대 bump + closed_by_user)나 새 connect(세대 bump)가 끼면
-// Stop 을 받아 즉시 종료한다 — 이게 wsTransport `closedByUser` + `openGen` 좀비 가드의 task-lifetime
-// 판이다. ★왜 충분한가★: TS 의 좀비 race 는 "await yield 중 새 소켓 생성 → this.ws hijack" 이었다.
-// Rust 단일 task 모델엔 *공유 가변 소켓 핸들이 없다*(소켓은 이 task 스택에만 산다) → hijack 자체가
-// 불가능하고, 남는 위험은 stale task 가 *공유 상태*(watch/cmd_tx)를 건드리는 것뿐인데 그건 전부
-// publish_if_current/store_cmd_if_current/reconnect_guard 한 락으로 닫혀 있다.
-#[allow(clippy::too_many_arguments)]
-#[cfg(test)]
-async fn connected_lifetime(
-    mut sink: futures_util::stream::SplitSink<Ws, Message>,
-    mut stream: futures_util::stream::SplitStream<Ws>,
-    // ★이 소켓의 표식 — 채번의 단일 권위는 `lifecycle` 이다(ADR-0195)★. 여기서 직접 올리지 않고 창구를
-    //   열 때 받은 값을 그대로 들고 돌며, 소켓이 갈릴 때 다시 받는다. 무엇을 막는 표식인지는
-    //   [`ConnectionCommand`] doc.
-    mut socket_epoch: u64,
-    mut cmd_rx: mpsc::Receiver<ConnectionCommand>,
-    cmd_tx: OutcomeSender,
-    mut info: DaemonInfo,
-    my_gen: u64,
-    lifecycle: Arc<Lifecycle>,
-    discovery: Arc<dyn DaemonDiscovery>,
-    rt: Handle,
-    handshake_timeout: Duration,
-    mut cancel_rx: tokio::sync::watch::Receiver<u64>,
-    router: Arc<OutputRouter>,
-    registry: WindowChannelRegistry,
-    events: Arc<dyn DaemonEvents>,
-    names: Arc<dyn AgentNamesSink>,
-    refusals: Arc<RefusalAlerts>,
-    inbound: Arc<InboundSlot>,
-    usage: SharedUsageInterest,
-) {
-    // ★pending 소유(T6a — 단일 actor 가 단독 소유, Mutex 없음)★: request_id → reply oneshot 상관 맵을
-    //   이 task 가 소유한다. main_loop 에 `&mut` 로 빌려줘 SendCommand(insert)·reply 도착(take)·끊김
-    //   (drain→Err) 을 한 actor 안에서 직렬 처리한다. 재연결 루프(이 함수)가 owner 라 소켓이 바뀌어도
-    //   맵은 유지되지만, ★끊김마다 drain★ 한다(아래) — 옛 소켓의 in-flight 는 새 소켓에서 reply 가 안
-    //   오므로 hang 방지를 위해 Err 로 깨운다(request_id idempotency: 호출자가 재시도, spike §3 불변식).
-    let mut pending: PendingMap<CommandReply> = PendingMap::new();
-    // ★subs 소유(단일 actor 단독 소유, Mutex 없음)★: agent_id → SubState(epoch 가드). pending 과 동형으로
-    //   이 task 가 단독 소유하고 main_loop 에 `&mut` 로 빌려준다. SubscribeAck 가 epoch 를 갱신하고, binary
-    //   frame 은 decide_epoch 로 stale epoch 를 통과 전 drop 한다. ★ADR-0046: seq/cursor/버퍼 없음★ — dedup·
-    //   진도는 웹뷰 뷰 단위가 단독 소유한다(src-tauri 는 epoch 가드 + 요청 부기만).
-    let mut subs: HashMap<AgentId, SubState> = HashMap::new();
-    // ★single-flight replay 부기 소유(ADR-0046 M1)★: agent 당 gen 채번·in-flight·대기열. subs 와 동형으로
-    //   재연결을 넘어 *유지*하되(gen_counter 단조), 끊김마다 in-flight/대기열은 클리어한다(아래 on_disconnect).
-    let mut flight = ReplayFlightSet::new(REPLAY_DEADLINE);
-    let mut attempt: u32 = 0;
-    loop {
-        // main_loop 가 끝난 사유로 재연결 여부를 가른다.
-        let exit = main_loop(
-            sink,
-            stream,
-            &mut cmd_rx,
-            &cmd_tx,
-            socket_epoch,
-            &mut pending,
-            &mut subs,
-            &mut flight,
-            my_gen,
-            &router,
-            &registry,
-            events.as_ref(),
-            names.as_ref(),
-            &refusals,
-            &inbound,
-            &usage,
-        )
-        .await;
-        // ★ADR-0195 — 창구를 **아래 두 drain 보다 먼저** 닫는다★. 이 소켓은 끝났고, 닫는 것이 drain 보다
-        //   뒤면 훑은 직후에 들어온 명령이 그대로 남아 **다음 소켓**에서 실행된다(이 결정이 고치는 결함
-        //   그 자체다). 먼저 닫으면 두 drain 이 큐를 마지막으로 보는 자리가 되어, 그 둘은 지금의 정직한
-        //   분담을 그대로 지킨다(전송됨·결과 불명 / 미전송·재전송 안전).
-        // ★`ConnectionState` 를 게이트로 쓸 수 없는 이유도 이 순서에 있다★: 이 자리는 아직 아무 전이도
-        //   발행하지 않았고(Reconnecting 은 drain 뒤에 나간다) watch 는 여전히 `Connected` 를 읽는다.
-        // ★한 자리에서 닫는 것이 네 사유(끊김·명시 종료·재연결 소진·Stop)를 모두 덮는다★ — 저 아래
-        //   어느 갈래로 빠지든 다시 여는 자리는 재연결 성공 하나뿐이다.
-        // ★가드되어 있다★: 밀려난 task 의 종료가 이미 선 새 연결의 창구를 닫지 못한다.
-        lifecycle.close_socket_if_current(my_gen);
-        // 사용량 관심도 이 소켓을 잊는다 — 세대가 아니라 소켓 표식으로 가드된다(밀려난 task 의 늦은 호출은 새
-        //   소켓의 캐시·`sent` 를 못 건드린다). 끝난 사유와 무관하게 여기 한 자리다.
-        usage.lock().on_socket_lost(socket_epoch);
-        // ★단절 시 single-flight 클리어(ADR-0046 rev4)★: in-flight/대기열을 내부 클리어(마커 미발행 — 재요청
-        //   구동자는 프론트 connected 전이 단독). gen_counter 는 단조 유지(구세대 마커 오인 방지).
-        flight.on_disconnect();
-        // ★끊김/종료 시 pending drain(no-leak 불변식, spike §3)★: 이 소켓 수명이 끝났으므로 in-flight
-        //   명령은 매칭될 reply 가 더는 안 온다 → 전부 꺼내 Err 로 깨운다(호출자 hang 방지). Closed/
-        //   Disconnected 둘 다 동일(재연결되더라도 옛 request_id reply 는 새 소켓에 안 옴 — 호출자 재시도).
-        // ★정직한 drain 메시지(FIX-2 — ids.rs no-auto-retry 의도와 정합)★: pending 은 *이미 wire 로
-        //   나갔으나* reply 를 못 받은 명령이다 — 데몬이 실행했는지 불명이라, 부작용 명령(WriteStdin 등)을
-        //   맹목 재시도하면 입력 중복이 된다(ids.rs RequestId 주석). 그래서 "재시도 필요"가 아니라
-        //   "결과 불명·맹목 재시도 금지"로 명시한다(호출자가 reconnect 후 결과 조회로 판단).
-        for reply in protocol_state::drain_pending(&mut pending) {
-            let _ = reply.send(Err(SENT_OUTCOME_UNKNOWN.to_string()));
-        }
-        // ★cmd_rx 버퍼 drain(FIX-1 — queued-but-not-pending)★: select! 경합에서 진 채 cmd_rx mpsc 버퍼에
-        //   들어왔지만 actor 가 아직 안 꺼낸 SendCommand 는 pending 에 *없다* — 위 drain 이 못 깨운다. 그대로
-        //   두면 재연결 후 *다음 소켓* 에서 실행돼 부작용이 이중 적용된다(WriteStdin 등). 그래서 지금 버퍼에
-        //   있는 것만 try_recv 로 비워(EOF 아님 — Empty 까지) Err 로 깨운다. ★cmd_rx 는 닫지 않는다★:
-        //   미래 명령용으로 살려 두는 채널이라 여기서 close 하면 안 된다. 이 명령들은 wire 로
-        //   *나간 적이 없으므로* 메시지가 그렇게 말해야 한다(FIX-2 — "미전송·재전송 안전"). 그 밖의
-        //   variant(Unsubscribe/Fire/RequestReplay/UsageInterest)는 drop — RequestReplay 의 reply oneshot 은
-        //   여기서 drop 되면 awaiting request_replay 가 RecvError 로 Err 를 받는다(no-hang, 프론트가 재요청).
-        //   사용량 넛지는 버려도 잃는 것이 없다 — 새 소켓은 창구를 열 때 관심을 통째로 다시 보낸다.
-        // ★이 훑기는 **마지막이 아니다**(ADR-0195)★: 위에서 창구를 닫았으므로 이 뒤로 *새로 창구를
-        //   여는* 호출자는 없지만, 닫히기 **전에** clone 을 집어 간 호출자는 몇이든 있을 수 있고 그들은
-        //   이 훑기가 지난 뒤에도 enqueue 에 성공한다(clone 은 락 밖에서 살아 있다).
-        // ★그 몫이 어떻게 깨어나는지는 **다음 소켓이 서느냐**에 갈린다★:
-        //   - 선다 → `main_loop` 의 표식 대조가 [`UNSENT_ON_DISCONNECT`] 로 깨운다(이 훑기와 같은 문구).
-        //     ★단 시점은 보장이 아니다★ — 백오프 동안 `main_loop` 가 안 돌아 그 소켓이 설 때까지 늦는다.
-        //   - 안 선다(재연결 소진 · `LoopExit::Closed` · Stop) → 이 함수가 끝나며 `cmd_rx` 가 떨어지고
-        //     그 명령의 reply oneshot 도 함께 죽는다. 대조를 **지나지 않으므로** 호출자가 보는 것은
-        //     위 문구가 아니라 `DaemonClient::send_command` 의 RecvError 갈래다(네 번째 문구).
-        //   어느 쪽이든 깨어나고(hang 없음) 어느 쪽이든 실행되지 않는다 — 그 잔여를 백오프 루프의
-        //   drain 으로 메우지 않기로 한 것이 결정이다.
-        while let Ok(buffered) = cmd_rx.try_recv() {
-            match buffered {
-                ConnectionCommand::SendCommand { reply, .. } => {
-                    let _ = reply.send(Err(UNSENT_ON_DISCONNECT.to_string()));
-                }
-                // ★결말은 자기 소켓과 함께 죽는다★ — 그 소켓이 사라졌으니 보낼 곳이 없고, 다음 소켓으로
-                //   흘리면 남의 왕복에 답이 붙는다. 폐기는 의도이므로 로그로 남긴다(보낸 쪽은 자기 마감으로
-                //   회수해야 한다 — 그 마감이 아직 없다는 것은 `outcome_sink` 주석).
-                ConnectionCommand::CommandOutcome { reply, .. } => {
-                    tracing::warn!(
-                        request_id = %reply.request_id,
-                        "연결 끊김으로 명령 결말 폐기 — 그 결말은 자기 소켓으로만 나간다"
-                    );
-                }
-                ConnectionCommand::Unsubscribe { .. }
-                | ConnectionCommand::Fire { .. }
-                | ConnectionCommand::RequestReplay { .. }
-                | ConnectionCommand::UsageInterest { .. } => {}
-            }
-        }
-        match exit {
-            LoopExit::Closed => {
-                // cmd_rx EOF = 명시 close() 또는 stale 미저장 → 재연결 안 함. 종료 Down 가드.
-                // ★원자 가드(Fix B)★: stale task 의 종료가 current 의 Connected 를 Down 으로 clobber
-                //    하지 않게 publish_if_current 로 비교+send 를 한 락에 묶는다.
-                if lifecycle.publish_if_current(my_gen, ConnectionState::Down) {
-                    events.connection_state(ConnectionStateEvent::Down);
-                } else {
-                    tracing::debug!(
-                        generation = my_gen,
-                        "stale task 종료(close 경로) — Down 미발행(더 새 연결이 current)"
-                    );
-                }
-                return;
-            }
-            LoopExit::Disconnected => {
-                // 비의도 끊김 — 재연결 대상. 먼저 closedByUser/세대 가드를 본다(끊김과 동시에 close 가
-                // 들어왔으면 재연결 금지). Stop 이면 종료 Down 가드.
-                if lifecycle.reconnect_guard(my_gen) == ReconnectVerdict::Stop {
-                    if lifecycle.publish_if_current(my_gen, ConnectionState::Down) {
-                        events.connection_state(ConnectionStateEvent::Down);
-                    } else {
-                        tracing::debug!(
-                            generation = my_gen,
-                            "끊김 직후 stale/close — Down 미발행(superseded 또는 close 가 이미 Down)"
-                        );
-                    }
-                    return;
-                }
-                // 재연결 진입 — reconnecting 전이(가드된). stale 이면 발행 안 되고 아래 루프가 Stop 으로 종료.
-                if lifecycle.publish_if_current(my_gen, ConnectionState::Reconnecting) {
-                    events.connection_state(ConnectionStateEvent::Reconnecting);
-                }
-                tracing::info!(generation = my_gen, "데몬 끊김 — 재연결 루프 진입");
-            }
-        }
-
-        // ── 재연결 백오프 루프(attach-only — read_live no-spawn) ──────────────────────────
-        // 성공하면 새 sink/stream 으로 main_loop 를 다시 돌리려고 outer loop 로 continue. 소진/Stop 이면
-        // Down 후 return. ★ADR-0038★: sleep 은 tokio::time::sleep — 테스트가 time::pause/advance 로
-        // 결정론적으로 진행시킨다(매직 실벽시계 0).
-        let reconnected = loop {
-            // 매 시도 전 가드 — 백오프 sleep 사이에 close/새 connect 가 끼면 즉시 멈춘다.
-            if lifecycle.reconnect_guard(my_gen) == ReconnectVerdict::Stop {
-                break None;
-            }
-            if attempt >= MAX_RECONNECT_ATTEMPTS {
-                // 소진 — 데몬이 안 살아남는다. Down 정착(가드된). 복구는 명시 connect 로만.
+        tracing::info!(peer = %self.key.peer_id(), "connecting to the daemon (may start it)");
+        let source = self.source.clone();
+        let searched = match self
+            .rt
+            .spawn_blocking(move || source.ensure(DEFAULT_CONNECT_TIMEOUT))
+            .await
+        {
+            Ok(found) => found,
+            Err(e) => Err(format!("the daemon search task failed: {e}")),
+        };
+        let first = self.add(closes, searched.as_ref().ok().cloned());
+        match searched {
+            Ok(_) => first.await,
+            Err(e) => {
                 tracing::warn!(
-                    generation = my_gen,
-                    attempt,
-                    "재연결 소진 — Down 정착(attach-only, 명시 connect 로만 복구)"
+                    peer = %self.key.peer_id(),
+                    error = %e,
+                    "finding or starting the daemon failed — retrying daemon.json in the background"
                 );
-                break None;
+                Err(HandshakeError::Discovery(e))
             }
-            // 지수 백오프. ★취소 경쟁(T4 in-flight 취소)★: sleep 을 cancel_rx 와 select! 한다 — 백오프
-            //   대기 중 close()/승계 connect 가 cancel 을 켜면 sleep 을 끝까지 안 기다리고 즉시 깨어
-            //   reconnect_guard 로 재확인 → Stop 이면 소켓을 열기 전에 탈출한다(이 창은 read_live·소켓
-            //   open 이전이라 데몬 무접촉). ★락 밖 await★(reconnect_guard 는 동기).
-            let delay = backoff_delay(attempt);
-            attempt += 1;
-            tokio::select! {
-                _ = cancel_rx.changed() => {
-                    // 취소 신호 도착(또는 baseline 변경) — guard 로 진짜 Stop 인지 재확인(거짓 wakeup 무시).
-                    if lifecycle.reconnect_guard(my_gen) == ReconnectVerdict::Stop {
-                        break None;
-                    }
-                }
-                _ = tokio::time::sleep(delay) => {}
-            }
-            // sleep 후 다시 가드 — sleep 동안 close 가 들어왔을 수 있다(가장 흔한 race 창).
-            if lifecycle.reconnect_guard(my_gen) == ReconnectVerdict::Stop {
-                break None;
-            }
+        }
+    }
 
-            // ★ADR-0021 attach-only★: read_live(no-spawn)로 현재 daemon.json 을 재조회해 **옮겨간
-            //   데몬(hot-swap·크래시 재spawn)의 새 주소를 따라간다**. read_live 는 read-only(데몬 안
-            //   깨움). blocking(파일 IO)이라 spawn_blocking 으로 감싼다(async executor 미차단).
-            // ★취소 경쟁(T4)★: spawn_blocking 의 *join await* 를 cancel_rx 와 select! 한다. read_live 자체는
-            //   spawn_blocking 이라 시작되면 abort 불가지만, side-effect 없는 파일 읽기라 **결과를 버려도
-            //   안전**하다 — await 만 select 로 버리고(blocking task 는 백그라운드에서 알아서 끝남) 취소면
-            //   소켓을 열기 전에 탈출한다(아직 connect_async 이전 = 데몬 무접촉).
-            let disco = discovery.clone();
-            let mut read_live_join = rt.spawn_blocking(move || disco.read_live());
-            // ★&mut JoinHandle 로 select★: JoinHandle 은 &mut 로 poll 가능 — 취소 arm 이 이겨도 handle 의
-            //   소유권이 안 빠져나가, 거짓 wakeup 시 같은 handle 을 마저 await 할 수 있다.
-            let fresh = tokio::select! {
-                _ = cancel_rx.changed() => {
-                    if lifecycle.reconnect_guard(my_gen) == ReconnectVerdict::Stop {
-                        break None;
-                    }
-                    // 거짓 wakeup(아직 current)이면 join 을 마저 기다린다(read_live 결과가 필요).
-                    read_live_join.await
-                }
-                joined = &mut read_live_join => joined,
-            };
-            let fresh = match fresh {
-                Ok(f) => f,
-                Err(e) => {
-                    tracing::warn!(generation = my_gen, "read_live join 실패: {e}");
-                    None
-                }
-            };
-            if let Some(new_info) = fresh {
-                // 살아있는 데몬 발견(옮겨갔을 수 있음) → 그 주소로 attach(캐시 갱신).
-                info = new_info;
-            }
-            // fresh=None 이면 옛 info(마지막 알려진 주소)로 마지막 시도 — 여전히 attach-only(spawn 아님).
-            //   일시적 daemon.json 부재일 수 있어 옛 주소로 시도하고, 실패하면 다음 백오프로.
+    /// Attach-only connect (ADR-0021 — never starts a daemon).
+    pub(crate) async fn ensure(&self) -> Result<(), HandshakeError> {
+        let closes = self.closes.load(Ordering::SeqCst);
+        tracing::info!(peer = %self.key.peer_id(), "attaching to a running daemon");
+        self.add(closes, None).await
+    }
 
-            // 소켓을 열기 직전 마지막 가드 — read_live join 사이에 close 가 들어왔으면 여기서 멈춰
-            //   connect_async 를 아예 시작하지 않는다(소켓 open + Auth 전송 창을 닫는 핵심 지점).
-            if lifecycle.reconnect_guard(my_gen) == ReconnectVerdict::Stop {
-                break None;
-            }
+    /// The actor's answer — ordered after every `close` called before.
+    async fn is_live(&self) -> bool {
+        let (reply, answer) = oneshot::channel();
+        if self.cmd_tx.send(DriverCmd::IsLive { reply }).is_err() {
+            return false;
+        }
+        answer.await.unwrap_or(false)
+    }
 
-            // 재핸드셰이크 시도. ★취소 경쟁(T4 — 핵심 결함 수정)★: handshake 내부의 connect_async·Auth
-            //   send·wait_for_hello await 를 cancel_rx 와 경쟁시킨다(handshake 가 cancel_rx 를 받아 각 await
-            //   를 select). close()/승계가 끼면 **소켓을 열지 않거나(connect_async 취소) 연 소켓을 즉시
-            //   닫고** Cancelled 로 빠진다 — close 후 stale 소켓이 살아 Auth 를 보내는 창을 닫는다.
-            //   성공하면 새 소켓을 outer loop 로 올린다.
-            match handshake_cancellable(&info, my_gen, handshake_timeout, &mut cancel_rx).await {
-                HandshakeOutcome::Cancelled => {
-                    // 취소(close/승계) — guard 로 재확인. Stop 이면 탈출(소켓 미오픈 또는 self-close 완료).
-                    if lifecycle.reconnect_guard(my_gen) == ReconnectVerdict::Stop {
-                        break None;
-                    }
-                    // 거짓 취소(아직 current)면 다음 백오프로 재시도(continue inner loop).
-                    tracing::debug!(
-                        generation = my_gen,
-                        "재연결 취소 wakeup 이나 still current — 재시도"
-                    );
+    /// Sends the add now and returns the wait for its first answer.
+    fn add(
+        &self,
+        closes: u64,
+        found: Option<Endpoint>,
+    ) -> impl std::future::Future<Output = Result<(), HandshakeError>> {
+        let (first, answer) = oneshot::channel();
+        let sent = self.cmd_tx.send(DriverCmd::Add {
+            closes,
+            found,
+            first,
+        });
+        async move {
+            if sent.is_err() {
+                return Err(HandshakeError::TaskGone);
+            }
+            answer.await.unwrap_or(Err(HandshakeError::TaskGone))
+        }
+    }
+
+    /// Explicit close — the link does not reconnect. Returns at once; the state follows through routing.
+    ///
+    /// ★Bump the epoch before queueing `Close`★ — the actor reads the epoch after it takes `Close`, so an `Add` that
+    /// captured the old epoch is seen as stale. The other order lets an `Add` queued behind `Close` still read the old
+    /// value and revive the link.
+    pub(crate) fn close(&self) {
+        tracing::info!(peer = %self.key.peer_id(), "closing the daemon link");
+        self.closes.fetch_add(1, Ordering::SeqCst);
+        let _ = self.cmd_tx.send(DriverCmd::Close);
+    }
+
+    /// One command round trip on the caller's task, on the opened connection ([`Self::opened_generation`]); failure
+    /// texts are `link::errors`', plus one for a connection that did not open in time.
+    ///
+    /// ★⟳ (`RefreshUsageLimits`) is one act with the usage subscribe★ (TRD S21 usage-limit-slot §1-7 "⟳"): the interest
+    /// goes out first on the same connection, even when it equals what was sent; when it cannot be queued the refresh
+    /// is not sent either.
+    pub(crate) async fn send_command(
+        &self,
+        cmd: AgentCommand,
+    ) -> Result<AgentEvent, CommandFailure> {
+        use CommandFailure::Local;
+
+        if protocol_state::command_request_id(&cmd).is_none() {
+            return Err(Local(NO_REQUEST_ID.to_owned()));
+        }
+        // Read first — a close called before this call must be seen by every check below.
+        let closes = self.closes.load(Ordering::SeqCst);
+        let Some(peer) = self.registry.get(self.key.peer_id()) else {
+            return Err(Local(NOT_CONNECTED.to_owned()));
+        };
+        require_live(peer.peer_state()).map_err(Local)?;
+        let generation = self.opened_generation(&peer, closes).await.map_err(Local)?;
+        if matches!(cmd, AgentCommand::RefreshUsageLimits { .. }) {
+            self.write_refresh_subscribe(&peer, generation)
+                .map_err(Local)?;
+        }
+        match peer.request_in(generation, cmd).await {
+            Ok(ShellIn::Event(event)) => protocol_state::classify_reply(Ok(event)),
+            // `ShellWire::reply_tag` never tags an output frame, so none answers a request.
+            Ok(ShellIn::Output(bytes)) => Err(Local(format!(
+                "{SEND_FAILED_PREFIX}: an output frame answered the request ({} bytes)",
+                bytes.len()
+            ))),
+            Err(e) => Err(Local(request_error_text(&e))),
+        }
+    }
+
+    /// A command without a reply, for the connection live now. Never blocks. Not live, or a close came → dropped
+    /// (ADR-0195).
+    ///
+    /// On the opened connection it is written here, under the gate; on a live connection the actor has not opened yet
+    /// it waits in the gate's pending list (at most [`QUEUED_FIRES_MAX`], then dropped) and the actor writes it when
+    /// that connection opens — in either case ahead of any later round trip of this caller (module doc).
+    pub(crate) fn send_fire_and_forget(&self, cmd: AgentCommand) {
+        let closes = self.closes.load(Ordering::SeqCst);
+        let peer = self
+            .registry
+            .get(self.key.peer_id())
+            .filter(|peer| require_live(peer.peer_state()).is_ok());
+        let Some(peer) = peer else {
+            tracing::debug!(
+                peer = %self.key.peer_id(),
+                why = "not live",
+                "fire-and-forget: dropped"
+            );
+            return;
+        };
+        let generation = peer.generation();
+        let outcome = {
+            let mut gate = lock_gate(&self.gate);
+            match gate.opened {
+                _ if gate.handle_closes < closes => FireOutcome::Closed,
+                Some(opened) if opened.generation == generation => {
+                    FireOutcome::Written(peer.notify_in(generation, cmd))
                 }
-                HandshakeOutcome::Ok(mut conn) => {
-                    // 핸드셰이크 성공 — 명령 창구 개방(+Connected 발행, 가드). stale 이면 소켓 닫고 Stop.
-                    //   ★여기가 창구를 다시 여는 유일한 자리다(ADR-0195)★.
-                    let Some(next_socket) = lifecycle.open_socket_if_current(my_gen) else {
-                        tracing::debug!(
-                            generation = my_gen,
-                            "재연결 핸드셰이크 성공했으나 stale — 폐기"
-                        );
-                        let _ = conn.sink_close().await;
-                        break None;
-                    };
-                    // 알리기는 발화 앞, 쓰기는 뒤([`write_usage_on_open`]).
-                    let usage_open = usage.lock().on_socket_open(next_socket);
-                    events.connection_state(ConnectionStateEvent::Connected);
-                    write_usage_on_open(&mut conn.sink, usage_open, my_gen).await;
-                    // 회복 — attempt 리셋(wsTransport `reconnectAttempt=0` on Hello). 다음 끊김은 처음부터.
-                    attempt = 0;
-                    tracing::info!(generation = my_gen, "데몬 재연결 성공(Hello 수신)");
-                    break Some((conn.into_split(), next_socket));
+                _ if gate.pending.len() < QUEUED_FIRES_MAX => {
+                    gate.pending.push_back((generation, cmd));
+                    FireOutcome::Pending
                 }
-                HandshakeOutcome::Err(e) => {
-                    // 시도 실패(데몬 죽음/거부) — 다음 백오프로. 소진 시 위 attempt 가드가 None.
-                    tracing::debug!(generation = my_gen, attempt, "재연결 시도 실패: {e}");
+                _ => FireOutcome::Full,
+            }
+        };
+        match outcome {
+            FireOutcome::Written(Ok(())) | FireOutcome::Pending => {}
+            FireOutcome::Written(Err(e)) => tracing::debug!(
+                peer = %self.key.peer_id(),
+                generation = generation.0,
+                error = %send_error_text(&e),
+                "fire-and-forget: not sent"
+            ),
+            FireOutcome::Closed => tracing::debug!(
+                peer = %self.key.peer_id(),
+                why = "closed",
+                "fire-and-forget: dropped"
+            ),
+            FireOutcome::Full => tracing::debug!(
+                peer = %self.key.peer_id(),
+                generation = generation.0,
+                why = "pending full",
+                "fire-and-forget: too many waiting for a connection that has not opened yet — dropped"
+            ),
+        }
+    }
+
+    /// The usage interest may have changed — the actor writes the interest of the moment on the open connection, if it
+    /// differs from what that connection got. Never blocks; with no connection open it does nothing — the next one
+    /// gets the whole interest when it opens.
+    pub(crate) fn nudge_usage(&self) {
+        let _ = self.cmd_tx.send(DriverCmd::UsageNudge);
+    }
+
+    pub(crate) fn usage_nudger(&self) -> UsageNudger {
+        UsageNudger(self.cmd_tx.downgrade())
+    }
+
+    /// The generation of `peer`'s live connection once the actor opened it — the generation a caller writes on.
+    ///
+    /// ★Bound to the connection live at the call★ (ADR-0195): waits while the actor has not opened it yet (routing
+    /// trails the peer), bounded by the request timeout, and never moves on to a later connection — the next one may
+    /// be another daemon. `closes` = the close epoch the caller read on entry. `Err` = the text for a command that
+    /// never went out: a close came ([`NOT_CONNECTED`]), the connection ended while waiting
+    /// ([`UNSENT_ON_DISCONNECT`]), the actor is gone ([`CHANNEL_GONE`]), or it did not open in time (a text with
+    /// [`SEND_FAILED_PREFIX`]).
+    async fn opened_generation(
+        &self,
+        peer: &Peer<ShellWire>,
+        closes: u64,
+    ) -> Result<Generation, String> {
+        let bound = peer.generation();
+        // Both receivers before the first check, so a change after it wakes the wait.
+        let mut state = peer.state();
+        let mut opened = self.opened_rx.clone();
+        opened.borrow_and_update();
+        if opened_now(peer, bound, closes, &self.gate)? {
+            return Ok(bound);
+        }
+        let wait = async {
+            loop {
+                tokio::select! {
+                    changed = opened.changed() => if changed.is_err() {
+                        return Err(CHANNEL_GONE.to_owned());
+                    },
+                    changed = state.changed() => if changed.is_err() {
+                        return Err(UNSENT_ON_DISCONNECT.to_owned());
+                    },
+                }
+                if opened_now(peer, bound, closes, &self.gate)? {
+                    return Ok(bound);
                 }
             }
         };
-
-        match reconnected {
-            Some(((new_sink, new_stream), next_socket)) => {
-                // 새 소켓으로 main_loop 재진입(outer loop continue). ★표식은 위에서 창구를 열 때 받은
-                //   것을 그대로 쓴다★ — 여기서 따로 세면 권위가 둘이 되고, 그 둘이 어긋나는 날 대조가
-                //   조용히 무력해진다.
-                socket_epoch = next_socket;
-                sink = new_sink;
-                stream = new_stream;
-            }
-            None => {
-                // 소진 또는 Stop(close/stale) → Down 가드 후 종료.
-                if lifecycle.publish_if_current(my_gen, ConnectionState::Down) {
-                    events.connection_state(ConnectionStateEvent::Down);
-                } else {
-                    tracing::debug!(
-                        generation = my_gen,
-                        "재연결 종료 — Down 미발행(stale/close 가 이미 처리)"
-                    );
-                }
-                return;
+        let after = link_policy().request_timeout;
+        tokio::select! {
+            // An outcome of the connection itself wins over a timeout that is due at the same poll.
+            biased;
+            opened = wait => opened,
+            () = self.clock.sleep(after) => {
+                tracing::warn!(
+                    peer = %self.key.peer_id(),
+                    generation = bound.0,
+                    after_secs = after.as_secs(),
+                    "a command waited for its daemon connection to open and gave up — not sent"
+                );
+                Err(format!(
+                    "{SEND_FAILED_PREFIX}: the daemon connection did not finish opening within {}s",
+                    after.as_secs()
+                ))
             }
         }
     }
+
+    /// Queues the ⟳ pre-subscribe on `generation`, read and queued under the usage lock (module doc). Nothing to queue
+    /// when the usage state does not see `generation` as its socket (it ended meanwhile).
+    // Known residue: the `Err` branch (the subscribe could not be queued, so the ⟳ is not sent and fails with the send
+    //   text) has no test — it needs `notify_in` to refuse on a connection that is opened (full queue · lost link).
+    fn write_refresh_subscribe(
+        &self,
+        peer: &Peer<ShellWire>,
+        generation: Generation,
+    ) -> Result<(), String> {
+        let mut usage = self.usage.lock();
+        let Some(vendors) = usage.sync(generation.0, true) else {
+            return Ok(());
+        };
+        peer.notify_in(generation, usage_subscribe(vendors))
+            .map_err(|e| {
+                tracing::debug!(
+                    peer = %self.key.peer_id(),
+                    generation = generation.0,
+                    error = %e,
+                    "the usage subscribe ahead of a refresh was not queued — the refresh is not sent"
+                );
+                send_error_text(&e)
+            })
+    }
+
+    /// Queues the unsubscribe on the actor, behind every earlier unsubscribe and replay request. Never blocks — the
+    /// layout calls it under its lock.
+    pub(crate) fn unsubscribe(&self, agent_id: AgentId) {
+        let _ = self.cmd_tx.send(DriverCmd::Unsubscribe { agent_id });
+    }
+
+    /// The generation the frontend fences this replay with (ADR-0046 M1). `Err` = no open connection
+    /// ([`NOT_CONNECTED`]), or no window shows the agent / its `Subscribe` could not be written ([`REPLAY_UNSENT`]).
+    pub(crate) async fn request_replay(&self, agent_id: AgentId) -> Result<u64, String> {
+        let (reply, answer) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(DriverCmd::RequestReplay { agent_id, reply })
+            .is_err()
+        {
+            return Err(NOT_CONNECTED.to_owned());
+        }
+        answer
+            .await
+            .unwrap_or_else(|_| Err(REPLAY_UNSENT.to_owned()))
+    }
 }
 
-// 메인 read/write 루프(connected 이후). 단일 task 가 stream/sink 를 단독 소유한 채
-// `tokio::select!` 로 (a) 데몬 수신 (b) cmd 채널 (c) deadline tick 을 동시에 대기한다. 종료 사유
-// (`LoopExit`)를 돌려줘 호출자(`connected_lifetime`)가 재연결(Disconnected) vs 종료(Closed)를 가른다.
-//
-// ★상태 전이는 호출자가★: 이 함수는 종료 시 Down 을 발행하지 않는다 — 사유(`LoopExit`)만 보고하고
-// 상태 결정(Down/Reconnecting)은 호출자에 모은다(lifecycle 미접촉). sink 는 소유로 받아 루프 종료 시
-// 여기서 닫는다(재연결 시 새 소켓이 오므로 옛 소켓은 확실히 정리).
-//
-// ★ADR-0006★: `registry.lock()`(std Mutex) 보유 중 `.await` 절대 금지 — `Channel::send` 는 동기라 OK.
-#[allow(clippy::too_many_arguments)]
-#[cfg(test)]
-async fn main_loop(
-    mut sink: futures_util::stream::SplitSink<Ws, Message>,
-    mut stream: futures_util::stream::SplitStream<Ws>,
-    cmd_rx: &mut mpsc::Receiver<ConnectionCommand>,
-    cmd_tx: &OutcomeSender,
-    // 이 소켓의 표식. 들어온 명령과 나갈 결말이 **자기 소켓에서만** 처리되게 대조하는 값이다
-    //   ([`reject_foreign_command`] · `CommandOutcome` 팔).
-    socket_epoch: u64,
-    pending: &mut PendingMap<CommandReply>,
-    subs: &mut HashMap<AgentId, SubState>,
-    flight: &mut ReplayFlightSet,
-    my_gen: u64,
-    router: &Arc<OutputRouter>,
-    registry: &WindowChannelRegistry,
-    events: &dyn DaemonEvents,
-    names: &dyn AgentNamesSink,
-    refusals: &Arc<RefusalAlerts>,
-    inbound: &Arc<InboundSlot>,
-    usage: &SharedUsageInterest,
-) -> LoopExit {
-    // ★진행 기반 deadline sweep tick(ADR-0046)★: single-flight in-flight 의 무진행 만료를 이 주기로 훑는다.
-    //   interval 첫 tick 은 즉시 완료(빈 flight 라 no-op). MissedTickBehavior::Skip 으로 밀린 tick 은 합친다.
-    let mut deadline_tick = tokio::time::interval(REPLAY_DEADLINE_TICK);
-    deadline_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // ★인증 통과 직후 · 재연결마다 자기 명령 이름을 등록한다★. 이 자리가 그 둘을 함께 만족하는 유일한
-    //   지점이다 — 이 함수는 첫 핸드셰이크 뒤와 **매 재핸드셰이크 뒤** 새 소켓으로 다시 불린다(호출자
-    //   `connected_lifetime` 의 outer loop). 첫 인사 프레임에 **합치지 않고** 통과 직후 별도 메시지로 보내는
-    //   것은 ADR-0150 결정 4 이고, 붙는 순간 전량을 한 방에 얹고 재연결마다 다시 보내는 것은 TRD §3-7 조항 1
-    //   이다(protocol `RegisterCommands` doc 이 그 짝을 적고 있다).
-    //   ★재전송이 쌓이지 않고 덮이는 것은 데몬 명부의 이름 단위 last-wins 에 달려 있다(ADR-0150 결정 3 의 제거
-    //   + 등록 인수인계)★ — 오늘은 재연결이 새 연결 id 를 받아 옛 등록이 끊길 때 지워진다.
-    register_own_commands(&mut sink, pending, my_gen, inbound, refusals).await;
-    // 모르는 tag 경고의 짝 기록 — 이 소켓 수명 동안만(재연결 뒤엔 다시 한 번 warn 한다).
-    let mut unknown_tags = frame_relay::UnknownTagLog::default();
-    // 루프 종료 사유를 한 곳에서 로깅하려고 break 로 사유를 끌어올린다(핫패스 frame 수신 본문엔
-    // 로그 미부착 — Text/Binary 청크는 per-frame 빈도라 trace 미사용 정책 유지).
-    let exit = loop {
-        tokio::select! {
-            // ★의도적으로 biased 미사용(공정 폴링)★ — 연속 출력으로 stream arm 이 항상 ready 여도
-            //   cmd(RequestReplay 등)·deadline arm 이 굶지 않아야 한다(biased + stream 우선이면 지속 출력 시
-            //   request_replay 가 무기한 지연될 수 있음 — cross-family 리뷰 적출). deadline sweep 이 ready 한
-            //   frame 보다 먼저 이겨 거짓 실패 마커를 낼 수 있는 race 는 좀비 의미론(FIX-1) 하에서 무해:
-            //   뒤이은 진짜 Complete 가 *같은 gen* 성공 마커를 내고, 뷰는 실패 마커에 버퍼를 유지한다(TRD 전이표).
-            // 데몬 → 클라 수신.
-            incoming = stream.next() => {
-                match incoming {
-                    Some(Ok(msg)) => {
-                        match msg {
-                            Message::Text(text) => {
-                                // 데몬 control 이벤트. reply(request_id echo) 면 pending 매칭→resolve.
-                                //   broadcast(request_id 없음)는 매칭 우회 — 알림 포트로 전 webview 에
-                                //   push 한다(아래 emit_broadcast, else 분기).
-                                // 파싱 실패는 무시(데몬은 valid JSON 만 보낸다 — 부분/미래 프레임 방어).
-                                if let Ok(ev) = serde_json::from_str::<AgentEvent>(&text) {
-                                    if let Some(rid) = protocol_state::event_reply_request_id(&ev) {
-                                        // 내 in-flight 요청의 reply — oneshot 으로 resolve(Ok/Err).
-                                        //   모르는 request_id(take_pending=None)면 무시(편승/중복 reply 방어).
-                                        if let Some(reply) = protocol_state::take_pending(pending, &rid)
-                                        {
-                                            // ADR-0281: 데몬 답은 접지 않고 그대로 넣는다 — `Error` 도 `Ok` 로
-                                            //   (슬롯 계약 = [`CommandReply`] doc).
-                                            let _ = reply.send(Ok(ev));
-                                        } else {
-                                            // ★짝 없는 답장은 여기가 유일한 흔적이다★ — 아래 emit_broadcast 는
-                                            //   request_id 있는 이벤트를 아예 못 본다(이 가지가 먼저 삼킨다).
-                                            //   승계(register_pending)·중복 답장이면 정상이지만, 승계도 없었는데
-                                            //   답장이 짝을 잃었다면 그 명령의 호출자는 끊김까지 매달린다.
-                                            tracing::debug!(
-                                                request_id = %rid.0,
-                                                "짝 없는 답장 폐기(승계/중복 또는 이미 만료된 요청)"
-                                            );
-                                        }
-                                    } else {
-                                        // ★replay 3종(Ack·Complete·거절)은 **한 함수**가 해석한다★ — 여기서
-                                        //   갈래를 펼치면 그 갈래는 소켓 하네스에서만 돌 수 있어 실제로는
-                                        //   아무도 안 태운다(그게 거절 팔에 실제로 났던 일이다). 이 줄이
-                                        //   하는 일은 창으로의 배달구를 꽂아 넘기는 것뿐이다.
-                                        let mut deliver =
-                                            |labels: &[WindowLabel], bytes: &[u8]| {
-                                                output_channel::send_to_windows(
-                                                    registry, labels, bytes,
-                                                );
-                                            };
-                                        // ★결말을 먼저 바인딩한다★ — `match` 스크루티니에 `&ev` 를 두면
-                                        //   그 빌림이 match 끝까지 살아 아래 팔이 `ev` 를 못 옮긴다.
-                                        let follow_up = apply_replay_event(
-                                            &ev,
-                                            flight,
-                                            subs,
-                                            router,
-                                            Instant::now(),
-                                            &mut deliver,
-                                        );
-                                        match follow_up {
-                                            ReplayFollowUp::Handled(next) => {
-                                                if let Some(cmd) = next {
-                                                    // ★송신 실패 = 연결을 끊는다(RequestReplay 팔과 같은 규칙)★.
-                                                    //   근거 정본은 그쪽 주석 — 요약하면, 못 나간 Subscribe 의
-                                                    //   세대는 이미 in-flight 로 추적되는데 그 슬롯을 풀 응답이
-                                                    //   영영 안 와서 단절 말고는 해제 경로가 없다.
-                                                    if !send_fire(
-                                                        &mut sink,
-                                                        &cmd,
-                                                        my_gen,
-                                                        "Subscribe(replay-next)",
-                                                    )
-                                                    .await
-                                                    {
-                                                        tracing::warn!(
-                                                            ?cmd,
-                                                            "replay-next Subscribe 송신 실패 — 연결을 끊는다(못 나간 세대는 단절로만 풀린다)"
-                                                        );
-                                                        break LoopExit::Disconnected;
-                                                    }
-                                                }
-                                            }
-                                            // ★데몬이 배달한 명령 — 이 arm 이 유일한 인바운드 입구다
-                                            //   (ADR-0155 결정 4)★. 여기서 하는 일은 넘기는 것뿐이고 적용은
-                                            //   연결 태스크 **밖**에서 돈다(`inbound::InboundReceiver::accept`
-                                            //   — 인라인으로 되돌리면 합성 명령이 자기 답을 자기가 못 꺼내
-                                            //   교착한다).
-                                            ReplayFollowUp::NotHandled => match ev {
-                                                // ADR-0272 결정 6: 패킷은 풀렸는데 봉투가 깨졌으면 답장에
-                                                //   실을 요청 번호가 없다 — 실행도 답장도 못 하고 로그만
-                                                //   남긴다(그 왕복은 데몬이 자기 마감시각으로 접는다).
-                                                AgentEvent::CommandRequest { envelope } => {
-                                                    match protocol_state::envelope_from_wire(&envelope) {
-                                                        Ok(envelope) => accept_inbound(
-                                                            inbound,
-                                                            cmd_tx,
-                                                            socket_epoch,
-                                                            envelope,
-                                                        ),
-                                                        Err(e) => tracing::warn!(
-                                                            error = %e,
-                                                            "데몬이 배달한 봉투를 풀 수 없다 — 답장에 실을 요청 번호가 없어 버린다"
-                                                        ),
-                                                    }
-                                                }
-                                                // ADR-0272 decision 6: a reply lands here only when it is broken
-                                                //   and its number unreadable (a sound one is taken by the pending
-                                                //   arm above) — no wait to wake, so it is logged and dropped; that
-                                                //   wait lasts until the link drops (this driver has no reply bound
-                                                //   — `mod.rs` `send_command_on_old_driver` "Known residual").
-                                                AgentEvent::CommandReply { reply } => {
-                                                    if let Err(e) = protocol_state::reply_from_wire(&reply) {
-                                                        tracing::warn!(
-                                                            error = %e,
-                                                            "데몬이 보낸 답장을 풀 수 없다 — 깨울 요청 번호가 없어 버린다"
-                                                        );
-                                                    }
-                                                }
-                                                // ★사용량 팔은 `emit_broadcast` 안이 아니라 여기다★ — 사유는
-                                                //   `relay_usage_snapshot` doc.
-                                                AgentEvent::UsageLimitsUpdated {
-                                                    snapshot,
-                                                    subscribed,
-                                                } => {
-                                                    relay_usage_snapshot(
-                                                        usage,
-                                                        events,
-                                                        &mut sink,
-                                                        socket_epoch,
-                                                        &snapshot,
-                                                        &subscribed,
-                                                        my_gen,
-                                                    )
-                                                    .await;
-                                                }
-                                                // ★T7c: request_id 없는 broadcast 를 알림 포트로 전
-                                                //   webview push. 실패는 포트 구현이 삼킨다(webview
-                                                //   없음/채널 오류 등은 치명적이지 않다).
-                                                ev => emit_broadcast(events, names, &ev),
-                                            },
-                                        }
-                                    }
-                                }
-                            }
-                            Message::Binary(bytes) => {
-                                // ★출력 binary frame → 무상태 통과(ADR-0046)★ — 판정 전부(디코드 · 진행 신호 ·
-                                //   화신 표식 거름 · 보는 창)는 `frame_relay` 한 함수가 소유한다. 이 줄은
-                                //   배달구를 꽂고 「끊는다」 판정을 루프 종료로 옮길 뿐이다.
-                                let mut deliver = |labels: &[WindowLabel], bytes: &[u8]| {
-                                    output_channel::send_to_windows(registry, labels, bytes);
-                                };
-                                if frame_relay::relay_binary_frame(
-                                    &bytes,
-                                    flight,
-                                    subs,
-                                    router,
-                                    &mut unknown_tags,
-                                    Instant::now(),
-                                    &mut deliver,
-                                ) == FrameRelay::Disconnect
-                                {
-                                    break LoopExit::Disconnected;
-                                }
-                            }
-                            // Ping/Pong 은 tungstenite 가 자동 응답(내부). Close 면 끊김(재연결 대상).
-                            Message::Close(_) => break LoopExit::Disconnected,
-                            Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
-                        }
-                    }
-                    // 데몬이 연결을 닫음/오류 → 끊김(재연결 대상 — 호출자가 백오프 재연결).
-                    Some(Err(_)) | None => break LoopExit::Disconnected,
-                }
+/// The actor — see the module doc.
+struct Driver {
+    key: DaemonKey,
+    source: Arc<dyn EndpointSource>,
+    registry: Registry<ShellWire>,
+    dialer: Arc<LocalDaemonDialer>,
+    route: RouteState,
+    clock: Arc<dyn Clock>,
+    /// Cloned into every pump.
+    routable_tx: mpsc::Sender<Routable>,
+    /// The dial address of every handle whose inbox has not ended.
+    registrations: HashMap<HandleToken, Address>,
+    /// The newest handle — the key's current one. `None` after a user close or a refusal stop, so a late event of
+    /// that handle cannot act on the key again.
+    current: Option<HandleToken>,
+    /// The current handle and the callers waiting for its first answer — callers of a handle it replaced included.
+    first: Option<(
+        HandleToken,
+        Vec<oneshot::Sender<Result<(), HandshakeError>>>,
+    )>,
+    closes: Arc<AtomicU64>,
+    state_tx: watch::Sender<ConnectionState>,
+    events: Arc<dyn DaemonEvents>,
+    names: Arc<dyn AgentNamesSink>,
+    router: Arc<OutputRouter>,
+    windows: WindowChannelRegistry,
+    /// The connection routed as `LinkUp` and not yet as `LinkDown` — the one replay flights and callers' writes
+    /// belong to.
+    open: Option<Generation>,
+    /// The last known epoch of each agent (ADR-0046 T5). Kept across connections.
+    subs: HashMap<AgentId, SubState>,
+    /// Single-flight replay bookkeeping. Its generation counters live as long as the actor; its flights end with
+    /// their connection.
+    flight: ReplayFlightSet,
+    /// Unknown output tags already warned about on the open connection.
+    unknown_tags: UnknownTagLog,
+    /// A connection this actor decided to drop and whose `LinkDown` has not come yet — its later output frames and
+    /// driver events are not handled (`drop_connection`); its broadcasts and lifecycle events still pass.
+    dropping: Option<Generation>,
+    inbound: Arc<InboundSlot>,
+    refusals: Arc<RefusalAlerts>,
+    usage: SharedUsageInterest,
+    /// Shared with the callers (module doc): its opened connection is set at the end of a `LinkUp` step and cleared by
+    /// that connection's `LinkDown`, its drop and a close.
+    gate: Arc<Mutex<Gate>>,
+    /// Signalled after every change of the gate's opened connection.
+    opened_tx: watch::Sender<()>,
+}
+
+impl Driver {
+    async fn run(
+        mut self,
+        mut cmd_rx: mpsc::UnboundedReceiver<DriverCmd>,
+        mut routable_rx: mpsc::Receiver<Routable>,
+    ) {
+        // Armed only while a replay waits for its deadline — an idle actor (no daemon, no replay) does not wake.
+        let mut sweep: Option<BoxFuture<'static, ()>> = None;
+        loop {
+            if !self.flight.awaits_deadline() {
+                sweep = None;
+            } else if sweep.is_none() {
+                sweep = Some(self.clock.sleep(REPLAY_DEADLINE_TICK));
             }
-            // invoke → 연결 task 명령. cmd_rx 가 None(모든 sender drop = 명시 close/stale 미저장) 이면
-            // 종료(재연결 안 함). DaemonClient.close() 가 cmd_tx 를 drop → 여기로 온다.
-            cmd = cmd_rx.recv() => {
-                let Some(cmd) = cmd else { break LoopExit::Closed };
-                // ADR-0195: 이 소켓 몫이 아니면 여기서 걸러진다(사유·계약 = 그 함수 doc).
-                let Some(cmd) = reject_foreign_command(cmd, socket_epoch) else { continue };
-                match cmd {
-                    ConnectionCommand::SendCommand { cmd, reply, .. } => {
-                        send_request(
-                            &mut sink,
-                            pending,
-                            usage,
-                            socket_epoch,
-                            cmd,
-                            reply,
-                            my_gen,
-                        )
-                        .await;
+            tokio::select! {
+                cmd = cmd_rx.recv() => match cmd {
+                    Some(DriverCmd::IsLive { reply }) => {
+                        let _ = reply.send(self.is_live());
                     }
-                    ConnectionCommand::Unsubscribe { agent_id, .. } => {
-                        let cmd = AgentCommand::Unsubscribe { agent_id };
-                        send_fire(&mut sink, &cmd, my_gen, "Unsubscribe").await;
+                    Some(DriverCmd::Add {
+                        closes,
+                        found,
+                        first,
+                    }) => self.add(closes, found, first),
+                    Some(DriverCmd::Close) => self.close(),
+                    Some(DriverCmd::Unsubscribe { agent_id }) => self.unsubscribe(agent_id),
+                    Some(DriverCmd::RequestReplay { agent_id, reply }) => {
+                        let _ = reply.send(self.request_replay(agent_id));
                     }
-                    ConnectionCommand::Fire { cmd, .. } => {
-                        send_fire(&mut sink, &cmd, my_gen, "Fire").await;
+                    Some(DriverCmd::UsageNudge) => self.nudge_usage(),
+                    #[cfg(test)]
+                    Some(DriverCmd::CurrentHandle { reply }) => {
+                        let _ = reply.send(self.current);
                     }
-                    // ★결말은 자기 소켓으로만 나간다 — 깨울 대기자가 없어 폐기가 곧 결말이다★. 이 팔이
-                    //   위 [`reject_foreign_command`] 를 안 타는 이유가 그것이다(사유 정본 = 그 doc 과
-                    //   [`ConnectionCommand`] 의 「두 갈래」).
-                    ConnectionCommand::CommandOutcome { reply, socket } => {
-                        if socket != socket_epoch {
-                            tracing::warn!(
-                                request_id = %reply.request_id,
-                                socket,
-                                current = socket_epoch,
-                                "명령 결말이 속한 소켓이 이미 사라졌다 — 폐기(다른 소켓으로 보내지 않는다)"
-                            );
-                            continue;
-                        }
-                        // ADR-0272: 결말을 원문 칸으로 싼다. 직렬화 실패는 `send_fire` 의 직렬화 실패 갈래와
-                        //   같은 처분이다(로그만 — 보낸 쪽 데몬은 자기 마감으로 회수한다).
-                        match protocol_state::reply_to_wire(&reply) {
-                            Ok(reply) => {
-                                let cmd = AgentCommand::CommandOutcome { reply };
-                                send_fire(&mut sink, &cmd, my_gen, "CommandOutcome").await;
-                            }
-                            Err(e) => tracing::warn!(
-                                request_id = %reply.request_id,
-                                error = %e,
-                                "명령 결말을 원문 칸으로 싸지 못했다 — 폐기"
-                            ),
-                        }
+                    None => break,
+                },
+                // Never `None` — `self.routable_tx` is a sender.
+                Some(routable) = routable_rx.recv() => self.on_routable(routable),
+                () = async {
+                    match sweep.as_mut() {
+                        Some(tick) => tick.await,
+                        None => std::future::pending().await,
                     }
-                    // 집합은 지금 읽는다 — 넛지를 넣던 때가 아니라 꺼내는 때의 관심이다(variant doc).
-                    ConnectionCommand::UsageInterest { .. } => {
-                        let set = usage.lock().sync(socket_epoch, false);
-                        if let Some(set) = set {
-                            send_usage_subscribe(&mut sink, set, my_gen, "UsageSubscribe(넛지)").await;
-                        }
-                    }
-                    ConnectionCommand::RequestReplay { agent_id, reply, .. } => {
-                        // ★어느 창에도 안 보이는 에이전트는 구독하지 않는다★ — 그 출력을 받을 창이 없고(배달도 같은
-                        //   `targets` 를 본다), 그 구독을 풀 해제도 다시 오지 않는다(해제는 레이아웃의 1→0 전이에서만
-                        //   나간다). 닫히는 팝아웃의 웹뷰는 닫기 요청이 해제를 낸 뒤에도 잠깐 살아 replay 를 청할 수 있다
-                        //   (TRD S21-slot-docking 5.8판 §1-2 「닫히는 창」). 요청 쪽(invoke)이 아니라 꺼내는 이 자리에서 보는
-                        //   것은 그 해제와 순서를 맞추기 위해서다 — 라우팅 표는 해제를 넣기 전에 같은 레이아웃 락 안에서
-                        //   바뀌므로, 이 채널에서 해제 뒤에 꺼낸 요청은 그 해제를 낸 표나 그보다 새 표를 본다. reply 는 drop(요청 쪽 =
-                        //   「미전송 · 재요청 안전」) · `flight` 는 건드리지 않는다.
-                        if router.targets(agent_id).is_empty() {
-                            tracing::debug!(
-                                %agent_id,
-                                "request_replay: 그 에이전트를 보이는 창이 없다 — Subscribe 를 보내지 않는다"
-                            );
-                            continue;
-                        }
-                        let epoch = known_epoch(subs, agent_id);
-                        let outcome = flight.request_replay(agent_id, Instant::now());
-                        // send_now=false 가 **반복**되면 슬롯이 좀비라는 뜻이다(정상 병합은 뷰 동시
-                        //   remount 순간에만 몰린다). 위 만료 warn 과 짝지어 읽는다.
-                        tracing::debug!(
-                            %agent_id,
-                            gen = outcome.generation,
-                            send_now = outcome.send_now,
-                            "request_replay 채번"
-                        );
-                        if outcome.send_now {
-                            let cmd = AgentCommand::Subscribe {
-                                agent_id,
-                                epoch,
-                                after_seq: None,
-                            };
-                            // ★송신 실패 = 그 자리에서 연결을 끊는다 — replay Subscribe 세 자리 **전부**
-                            //   같은 규칙이다(이 주석이 그 근거의 정본, 나머지 자리는 여기를 가리킨다)★.
-                            //   ★이유는 "추적을 잃은 Subscribe" 가 아니다(그 논증은 여기 안 선다)★: 이
-                            //   세대는 `flight.request_replay` 가 **보내기 전에** in-flight 로 박아 뒀고,
-                            //   replay-next 두 자리도 `advance_next` 가 같은 순서로 박는다. 세 자리 다
-                            //   똑같이 추적되므로 그 말로는 어느 쪽도 가릴 수 없다.
-                            //   ★실제 이유 = 그 슬롯을 풀 응답이 영영 오지 않는다★: 명령이 wire 에 못 나갔
-                            //   으면 데몬은 그 구독을 모른다 — Ack 도 Complete 도 거절도 안 온다. 그런데
-                            //   해제 경로는 그 셋과 단절뿐이고(만료는 슬롯을 붙잡는다), 그 사이 새 요청은
-                            //   전부 이 슬롯에 병합돼 wire 로 못 나간다. 즉 계속 폴링하면 그 에이전트의
-                            //   replay 가 **조용히 영구 차단**된다(고치려던 그 증상 그대로). 끊으면
-                            //   `on_disconnect` 가 일괄 청소하고 프론트가 connected 재전이에서 전량
-                            //   재요청한다.
-                            //   ★대가(정직 표기)★: 일시적 송신 실패 하나가 **모든** 에이전트의 구독을
-                            //   떨군다. 그래도 이쪽인 이유는 반대쪽이 관측 신호조차 안 남기는 영구 차단이기
-                            //   때문이다. 게다가 `send_fire` 는 직렬화 실패에도 false 를 내는데, 그 갈래는
-                            //   소켓이 멀쩡해서 단절이 저절로 오지도 않는다.
-                            //   reply(있으면)는 여기서 drop 되어 awaiting request_replay 가 RecvError → Err.
-                            if !send_fire(&mut sink, &cmd, my_gen, "Subscribe(replay)").await {
-                                tracing::warn!(
-                                    %agent_id,
-                                    gen = outcome.generation,
-                                    "replay Subscribe 송신 실패 — 연결을 끊는다(추적 잃은 Subscribe 금지)"
-                                );
-                                break LoopExit::Disconnected;
-                            }
-                        }
-                        if let Some(reply) = reply {
-                            // 프론트가 gen 을 회수(gen 펜스). 수신단이 이미 drop 됐어도(요청 취소) 무해.
-                            let _ = reply.send(outcome.generation);
-                        }
-                    }
-                }
-            }
-            // ★진행 기반 deadline sweep(ADR-0046 + FIX-1 zombie 의미론)★: 무진행 만료된 single-flight
-            //   in-flight 를 **실패 마커로 1회 발행**하고 좀비(failed)로 표시하되 **슬롯은 유지 + 큐 전진 안
-            //   함**(check_deadlines 가 send_next 를 반환하지 않는다). ★왜 다음 Subscribe 를 여기서 안 보내나★:
-            //   타임아웃이 큐를 전진시키면 만료 세대의 늦은 Ack/Complete 가 *새* in-flight 에 오각인돼 replay 가
-            //   안 돈 gen 에 성공 마커가 붙는다(gen 펜스 붕괴, cross-family 리뷰어 적출). 좀비로 슬롯을 붙잡아
-            //   두면 Ack/Complete 는 유일 outstanding 인 그 좀비만 가리킨다(오귀속 구조적 불가). 다음 Subscribe 는
-            //   오직 좀비의 late Complete 각인(on_complete) 또는 disconnect 후 재요청에서만 나간다. agent-gone
-            //   (Ack/Complete 영영 안 옴)이면 슬롯은 disconnect 까지 좀비로 남는다(실패 마커는 이미 나갔고 UX 는
-            //   뷰 bounded 사다리+agent-list teardown 이 처리 — 수용). 마커는 binary 와 같은 Channel::send 경로로
-            //   흘린다(순서 보존). ★epoch 는 권위값이 아니다★ — 실패엔 Ack 이 없어 확정할 방법이 없으므로
-            //   마지막으로 알려진 SubState.epoch(없으면 0)를 싣고, 뷰는 실패 마커에 epoch 펜스를 적용하지
-            //   않는다(plan_subscribe_refusal 문단이 그 짝의 정본).
-            _ = deadline_tick.tick() => {
-                for (agent_id, marker) in flight.check_deadlines(Instant::now()) {
-                    // ★이 줄이 좀비가 생기는 순간이다★ — 슬롯은 여기서 해제되지 않으므로(위 주석),
-                    //   이 뒤로 그 에이전트의 Subscribe 는 late Complete 나 disconnect 전까지 못 나간다.
-                    //   그 상태를 뒤에서 관측할 다른 신호가 없다(실측 2026-08-19).
-                    tracing::warn!(
-                        %agent_id,
-                        gen = marker.generation,
-                        "replay 무진행 만료 — 실패 마커 발행, 슬롯은 좀비로 유지(이 agent 의 Subscribe 는 \
-                         late Complete/disconnect 전까지 못 나간다)"
-                    );
-                    // 읽기만 한다(규칙·근거 = `known_epoch`). 만료 마커의 epoch 는 권위값이 아니라
-                    //   최선치라 미지면 0 을 싣는다 — 뷰는 실패 마커에 epoch 펜스를 걸지 않는다.
-                    let epoch = known_epoch(subs, agent_id).unwrap_or(0);
-                    let frame = replay_flight::encode_marker_frame(agent_id, epoch, marker);
-                    let labels = router.targets(agent_id);
-                    output_channel::send_to_windows(registry, &labels, &frame);
+                } => {
+                    self.sweep_replay_deadlines();
+                    sweep = None;
                 }
             }
         }
-    };
-    // 루프 1회 종료 = 이 소켓의 수명 끝. 옛 소켓은 확실히 닫는다(재연결이면 새 소켓이 온다). ★락 밖★.
-    tracing::info!(generation = my_gen, ?exit, "데몬 WS main_loop 종료");
-    let _ = sink.close().await;
-    // 상태 전이(Down/Reconnecting)는 호출자(connected_lifetime)가 가드와 함께 결정한다 — 여기선 사유만.
-    exit
-}
+        tracing::debug!(peer = %self.key.peer_id(), "the daemon client is gone — closing its link");
+        // Dropping `routable_rx` with the actor makes every pump close its inbox and drain it (`link::pump`).
+        self.registry.remove(self.key.peer_id());
+        for address in self.registrations.values() {
+            self.dialer.unregister(address);
+        }
+    }
 
-// ★fire-and-forget 송신(T6b)★: reply 없는 명령(Subscribe/Unsubscribe/Resize)을 JSON 으로 wire 송신.
-// 송신 실패(소켓 죽음)는 로깅만 — reply 가 없어 깨울 oneshot 이 없고, 소켓은 곧 끊겨 다음 select 가
-// Disconnected 로 빠진다(재연결 시 layout 이 다시 rebuild/resubscribe).
-//
-// ★반환★: `true` = wire 로 나감, `false` = 직렬화/송신 실패. Unsubscribe·Fire·CommandOutcome 은 반환을
-// 무시(fire-and-forget)하지만, **replay `Subscribe` 세 자리는 전부 `false` 에서 연결을 끊는다** — 옛
-// `abort_in_flight` 롤백은 삭제됐고 되살리지 않는다(그 근거는 형제 모듈 `replay_flight` 의 "송신 실패 롤백
-// 진입점은 의도적으로 없다" 주석, 끊는 쪽 근거는 `RequestReplay` 팔의 주석이 정본).
-// ★두 실패가 한 값으로 접힌다★: 직렬화 실패는 소켓이 멀쩡한 채로도 나므로, 호출자가 이 `false` 를
-// "소켓이 곧 끊긴다" 로 읽으면 안 된다.
-#[cfg(test)]
-async fn send_fire(
-    sink: &mut futures_util::stream::SplitSink<Ws, Message>,
-    cmd: &AgentCommand,
-    my_gen: u64,
-    kind: &str,
-) -> bool {
-    match serde_json::to_string(cmd) {
-        Ok(text) => match sink.send(Message::Text(text.into())).await {
+    /// The current handle's peer is live, or its connection is still open as routed. Routing trails the peer (the
+    /// supervisor publishes `Live` before it queues `Connected`), so a connection that ended but whose `Disconnected`
+    /// is not routed yet still counts — a connect then answers `Ok` instead of re-adding behind its loss.
+    fn is_live(&self) -> bool {
+        self.current
+            .is_some_and(|token| self.route.is_open(&self.key, token))
+            || self
+                .registry
+                .get(self.key.peer_id())
+                .is_some_and(|peer| peer.peer_state().is_live())
+    }
+
+    /// The link does not reconnect; a late item of the handle no longer counts as the current one's (no refusal
+    /// stops it, no notice follows the close). Callers still waiting for the first answer get `ClosedBeforeHello` now —
+    /// a later handle's answer is not theirs.
+    fn close(&mut self) {
+        self.current = None;
+        self.registry.remove(self.key.peer_id());
+        {
+            let mut gate = lock_gate(&self.gate);
+            gate.opened = None;
+            gate.pending.clear();
+        }
+        self.opened_tx.send_replace(());
+        if let Some((_, waiting)) = self.first.take() {
+            for caller in waiting {
+                let _ = caller.send(Err(HandshakeError::ClosedBeforeHello));
+            }
+        }
+    }
+
+    fn add(
+        &mut self,
+        closes: u64,
+        found: Option<Endpoint>,
+        first: oneshot::Sender<Result<(), HandshakeError>>,
+    ) {
+        if closes != self.closes.load(Ordering::SeqCst) {
+            tracing::info!(
+                peer = %self.key.peer_id(),
+                "a close came after this connect began — not connecting"
+            );
+            let _ = first.send(Err(HandshakeError::TaskGone));
+            return;
+        }
+        if self.is_live() {
+            let _ = first.send(Ok(()));
+            return;
+        }
+        // Before the peer exists — a caller that sees it live must not read the previous handle's epoch.
+        lock_gate(&self.gate).handle_closes = closes;
+        let token = HandleToken::mint();
+        let (address, handshake) = self.dialer.register(&self.key, self.source.clone(), found);
+        let ended = self.route.adopt(self.key.clone(), token);
+        let (_peer, inbox) =
+            self.registry
+                .add(self.key.peer_id().clone(), address.clone(), handshake);
+        spawn_pump(inbox, self.key.clone(), token, self.routable_tx.clone());
+        self.registrations.insert(token, address);
+        self.current = Some(token);
+        // Callers of the replaced handle had no answer yet (no close came — it would have answered them): this handle
+        // carries on their connect.
+        let mut waiting = self
+            .first
+            .take()
+            .map(|(_, waiting)| waiting)
+            .unwrap_or_default();
+        waiting.push(first);
+        self.first = Some((token, waiting));
+        self.apply(ended);
+    }
+
+    fn on_routable(&mut self, routable: Routable) {
+        match routable {
+            Routable::Item { key, token, item } => {
+                let connected = matches!(item, Incoming::Event(TransportEvent::Connected { .. }));
+                let out = self.route_item(&key, token, item);
+                self.apply(out);
+                // After the state watch and the frontend's `connected` — the frontend registers its listeners before
+                //   it calls connect and relies on that order (`src/api/tauriTransport.ts` `doConnect`).
+                if connected {
+                    self.answer_first_with(token, Ok(()));
+                }
+            }
+            Routable::Ended { key, token } => {
+                if let Some(address) = self.registrations.remove(&token) {
+                    self.dialer.unregister(&address);
+                }
+                self.answer_first_with(token, Err(HandshakeError::TaskGone));
+                let out = route_end(&mut self.route, &key, token);
+                self.apply(out);
+            }
+        }
+    }
+
+    /// What one inbox item becomes. A refusal the transport would retry stops the peer here, its notice ahead of what
+    /// routing returns — the order of a terminal refusal (`Notice`, then `Down`).
+    fn route_item(
+        &mut self,
+        key: &DaemonKey,
+        token: HandleToken,
+        item: Incoming<ShellWire>,
+    ) -> Vec<Routed> {
+        self.answer_first(token, &item);
+        let mut out = Vec::new();
+        if let Some(code) = self.retryable_refusal(token, &item) {
+            self.stop_refused(code);
+            out.push(Routed::Notice(LinkNotice::Refused { code }));
+        }
+        out.extend(route(&mut self.route, key, token, item));
+        out
+    }
+
+    /// The close code of a refusal the transport would retry, on the current handle (ADR-0346 — none is retried here).
+    fn retryable_refusal(
+        &self,
+        token: HandleToken,
+        item: &Incoming<ShellWire>,
+    ) -> Option<engram_dashboard_transport::CloseCode> {
+        match item {
+            Incoming::Event(TransportEvent::ConnectFailed {
+                cause:
+                    ConnectFailure::Rejected {
+                        kind: RejectKind::Retryable,
+                        code,
+                        ..
+                    },
+                ..
+            }) if self.current == Some(token) => Some(*code),
+            _ => None,
+        }
+    }
+
+    /// Ends the current peer after a refusal, as the transport ends a terminal one; the `Closed` the removal produces
+    /// shows `Down` (the caller sends the notice).
+    fn stop_refused(&mut self, code: engram_dashboard_transport::CloseCode) {
+        tracing::warn!(
+            peer = %self.key.peer_id(),
+            code = code.0,
+            "the daemon refused the connection — not retrying"
+        );
+        self.close();
+    }
+
+    /// The first answer of the newest handle, when it is a failure. Only that handle is the key's current one (`adopt`
+    /// in the same step as the add), so the handle check is the routing's rule ①; items before it carry no older
+    /// generation of it. A `Connected` is answered by [`Self::on_routable`] after it is applied.
+    fn answer_first(&mut self, token: HandleToken, item: &Incoming<ShellWire>) {
+        let Incoming::Event(event) = item else {
+            return;
+        };
+        let answer = match event {
+            TransportEvent::ConnectFailed {
+                cause: ConnectFailure::Unreachable(e),
+                ..
+            } => Err(match no_live_daemon_cause(&e.message) {
+                Some(cause) => HandshakeError::NoLiveDaemon(cause),
+                None => HandshakeError::Connect(e.to_string()),
+            }),
+            // The refusal's own text can be the daemon's — the fixed local text for its code instead (ADR-0342).
+            TransportEvent::ConnectFailed {
+                cause: ConnectFailure::Rejected { code, .. },
+                ..
+            }
+            | TransportEvent::Rejected { code, .. } => Err(HandshakeError::AuthRejected(
+                refusal_message(*code).to_owned(),
+            )),
+            TransportEvent::GaveUp { .. } | TransportEvent::Closed { .. } => {
+                Err(HandshakeError::ClosedBeforeHello)
+            }
+            _ => return,
+        };
+        self.answer_first_with(token, answer);
+    }
+
+    fn answer_first_with(&mut self, token: HandleToken, answer: Result<(), HandshakeError>) {
+        if self
+            .first
+            .as_ref()
+            .is_some_and(|(newest, _)| *newest == token)
+        {
+            if let Some((_, waiting)) = self.first.take() {
+                for caller in waiting {
+                    // The caller may have stopped waiting.
+                    let _ = caller.send(answer.clone());
+                }
+            }
+        }
+    }
+
+    /// The open connection and the peer to write on — `None` before `LinkUp`, after `LinkDown`, and once a close
+    /// removed the peer.
+    fn open_peer(&self) -> Option<(Peer<ShellWire>, Generation)> {
+        let generation = self.open?;
+        let peer = self.registry.get(self.key.peer_id())?;
+        Some((peer, generation))
+    }
+
+    fn unsubscribe(&self, agent_id: AgentId) {
+        let Some((peer, generation)) = self.open_peer() else {
+            tracing::debug!(
+                peer = %self.key.peer_id(),
+                %agent_id,
+                "unsubscribe: no open daemon connection — nothing to undo"
+            );
+            return;
+        };
+        if let Err(e) = peer.notify_in(generation, AgentCommand::Unsubscribe { agent_id }) {
+            tracing::debug!(
+                peer = %self.key.peer_id(),
+                %agent_id,
+                generation = generation.0,
+                error = %e,
+                "unsubscribe: not written"
+            );
+        }
+    }
+
+    fn request_replay(&mut self, agent_id: AgentId) -> Result<u64, String> {
+        let Some((peer, generation)) = self.open_peer() else {
+            return Err(NOT_CONNECTED.to_owned());
+        };
+        // The window check: a `Subscribe` for an agent no window shows would leave a subscription that no
+        //   `Unsubscribe` ever undoes. Running it here, when the actor takes the request, is what orders it after an
+        //   earlier `Unsubscribe` (module doc).
+        if self.router.targets(agent_id).is_empty() {
+            tracing::debug!(
+                peer = %self.key.peer_id(),
+                %agent_id,
+                "replay request: no window shows the agent — no Subscribe"
+            );
+            return Err(REPLAY_UNSENT.to_owned());
+        }
+        let epoch = known_epoch(&self.subs, agent_id);
+        let outcome = self.flight.request_replay(agent_id, self.clock.now());
+        tracing::debug!(
+            peer = %self.key.peer_id(),
+            %agent_id,
+            gen = outcome.generation,
+            send_now = outcome.send_now,
+            "replay request"
+        );
+        if outcome.send_now && !self.write_subscribe(&peer, generation, agent_id, epoch) {
+            return Err(REPLAY_UNSENT.to_owned());
+        }
+        Ok(outcome.generation)
+    }
+
+    /// Writes a replay `Subscribe` on connection `generation`; returns whether it went into the peer queue. Its
+    /// generation is already in flight, and a `Subscribe` that never went out gets no answer — the slot would stay
+    /// taken and every later request of the agent would merge into it. So a failed write drops the connection, which
+    /// clears every flight (`drop_connection`).
+    fn write_subscribe(
+        &mut self,
+        peer: &Peer<ShellWire>,
+        generation: Generation,
+        agent_id: AgentId,
+        epoch: Option<u32>,
+    ) -> bool {
+        let subscribe = AgentCommand::Subscribe {
+            agent_id,
+            epoch,
+            after_seq: None,
+        };
+        match peer.notify_in(generation, subscribe) {
             Ok(()) => true,
             Err(e) => {
-                tracing::debug!(generation = my_gen, "{kind} fire 송신 실패: {e}");
+                tracing::warn!(
+                    peer = %self.key.peer_id(),
+                    %agent_id,
+                    generation = generation.0,
+                    error = %e,
+                    "a replay Subscribe was not written"
+                );
+                self.drop_connection(generation, DisconnectCause::WriteFailed);
                 false
             }
-        },
-        Err(e) => {
-            tracing::warn!(generation = my_gen, "{kind} 직렬화 실패: {e}");
-            false
         }
     }
-}
 
-/// 요청/응답 명령 한 장 — main_loop 의 `SendCommand` 팔 본체. `reply` 는 여기서 오류로 깨어나거나 pending 에
-/// 든다(그 뒤는 답장 · 끊김 drain 이 깨운다) — 어느 갈래도 그냥 drop 하지 않는다.
-///
-/// ★⟳(`RefreshUsageLimits`)는 구독과 한 동작이다(TRD S21 usage-limit-slot §1-7 「⟳」)★ — 쓰기 순서 = 강제 구독
-/// 프레임(`UsageSubscribe{관심}` · 관심이 비었어도 쓴다) → pending 등록 → 새로고침 프레임. 구독이 못 나가면
-/// 새로고침은 등록도 쓰기도 안 된 채 [`SEND_FAILED_PREFIX`] 로 깨어난다: 아무것도 안 나갔으므로
-/// [`SENT_OUTCOME_UNKNOWN`] 이 아니고, `reply` 를 drop 하면 호출자가 「안 나갔다」 대신 수신 오류 문구를 본다.
-/// ★구독을 넛지로 따로 넣지 말 것★ — 넛지(`try_enqueue`)는 명령 채널이 차면 버려지는데 새로고침은 자리를
-/// 기다려 나가므로, 구독 없는 새로고침이 돌아 ⟳ 가 아무것도 안 보인다.
-///
-/// `pub(crate)` 인 것은 `tests.rs` 가 쓰기에 실패하는 가짜 sink 로 태우기 때문이다 — 루프백 소켓으로는 쓰기
-/// 실패를 결정론으로 못 만든다. 그 팔이 이 함수를 부르는 줄은 `tests.rs` 의 실 소켓 순서 시험이 잰다.
-#[cfg(test)]
-pub(crate) async fn send_request<S>(
-    sink: &mut S,
-    pending: &mut PendingMap<CommandReply>,
-    usage: &SharedUsageInterest,
-    socket_epoch: u64,
-    cmd: AgentCommand,
-    reply: CommandReply,
-    my_gen: u64,
-) where
-    S: futures_util::Sink<Message> + Unpin,
-    S::Error: std::fmt::Display,
-{
-    // send_command 가 request_id 있는 명령만 넣지만, 방어적으로 None 이면 즉시 Err
-    //   (매칭 키 없는 명령은 reply 가 안 와 영구 pending = hang 이므로).
-    let Some(rid) = protocol_state::command_request_id(&cmd) else {
-        let _ = reply.send(Err(
-            "send_command: request_id 없는 명령은 reply 매칭 불가".to_string()
-        ));
-        return;
-    };
-    if matches!(cmd, AgentCommand::RefreshUsageLimits { .. }) {
-        // `None` = 관심 상태가 이미 더 새 소켓을 본다(승계로 밀려나는 중) — 그 소켓의 구독은 새 소켓이 열 때
-        //   보낸다. 새로고침은 여느 명령처럼 이 소켓으로 나간다.
-        let set = usage.lock().sync(socket_epoch, true);
-        if let Some(vendors) = set {
-            let subscribe = AgentCommand::UsageSubscribe {
-                vendors: vendors.into_iter().collect(),
-            };
-            if let Err(e) = write_command(sink, &subscribe).await {
-                tracing::debug!(
-                    generation = my_gen,
-                    "⟳ 앞 UsageSubscribe 송신 실패 — 새로고침은 안 보낸다: {e}"
-                );
-                let _ = reply.send(Err(e));
-                return;
-            }
+    /// Ends connection `generation` as a lost link (`Peer::drop_link_in`): the handle stays, `Reconnecting` follows
+    /// from the `Disconnected`, and the next dial waits the usual backoff — a daemon that keeps sending what made us
+    /// drop cannot drive a reconnect loop. ★Bound to that connection★: when it already ended, the transport does nothing
+    /// (its `LinkDown` is on the way) and never drops a newer connection.
+    ///
+    /// ★The connection is over for this actor at once★: its flights are cleared
+    /// now and `open` goes, and its output frames and replay events still in the inbox (or salvaged before its
+    /// `Disconnected`) are not relayed until its `LinkDown` — a later `ReplayComplete` would mark a replay complete
+    /// that is missing the frame we could not read.
+    ///
+    /// The actor-side part runs with or without a peer — after a close the registry no longer holds one, but the tail of
+    /// the connection is still routed until its `LinkDown`.
+    // A drop lost in the transport would leave a live connection blacked out here; `link_policy` keeps
+    //   `QueueFullPolicy::Disconnect`, under which a drop that meets a full queue drops the link anyway.
+    fn drop_connection(&mut self, generation: Generation, cause: DisconnectCause) {
+        tracing::info!(
+            peer = %self.key.peer_id(),
+            generation = generation.0,
+            ?cause,
+            "dropping the daemon connection if it is still the live one — the link reconnects after its backoff"
+        );
+        if let Some(peer) = self.registry.get(self.key.peer_id()) {
+            peer.drop_link_in(generation, cause);
+        }
+        self.dropping = Some(generation);
+        if self.open == Some(generation) {
+            self.open = None;
+            self.flight.on_disconnect();
+            self.close_gate();
         }
     }
-    // ★send 전에 pending 등록★: 인코딩/송신 사이에 reply 가 먼저 도착해도(loopback 극단) take 할 슬롯이
-    //   있어야 한다. 송신 실패 시 아래서 도로 꺼낸다.
-    // ★중복 request_id 가드(FIX-4 — 계약 명시)★: insert 가 prior oneshot 을 *조용히* 떨어뜨리면 그 호출자는
-    //   영구 hang 한다. 그래서 승계 규칙을 한 함수에 모아 태운다 — 옛 슬롯을 Err 로 깨우고(no-hang) 새 reply 가
-    //   그 번호를 잇는다. ★이 번호는 바깥 호출자 것이라 겹칠 수 있다★(그래서 여기서 패닉하지 않는다 —
-    //   `register_pending` doc).
-    register_pending(pending, rid, reply, my_gen);
-    if let Err(e) = write_command(sink, &cmd).await {
-        // 방금 넣은 reply 를 도로 꺼내 Err 로 깨운다(맵에 좀비 안 남김). 소켓이 죽었으면 다음 select 가
-        //   Disconnected.
-        if let Some(reply) = protocol_state::take_pending(pending, &rid) {
-            let _ = reply.send(Err(e));
-        }
-    }
-}
 
-/// 명령 한 장을 JSON Text frame 으로 쓴다. `Err` = 요청 명령의 `reply` 에 그대로 실을 문구 — 직렬화 실패
-/// [`SERIALIZE_FAILED_PREFIX`](있어선 안 되는 갈래) · 소켓 쓰기 실패 [`SEND_FAILED_PREFIX`], 뒤에 원인.
-#[cfg(test)]
-async fn write_command<S>(sink: &mut S, cmd: &AgentCommand) -> Result<(), String>
-where
-    S: futures_util::Sink<Message> + Unpin,
-    S::Error: std::fmt::Display,
-{
-    let text = serde_json::to_string(cmd).map_err(|e| format!("{SERIALIZE_FAILED_PREFIX}: {e}"))?;
-    sink.send(Message::Text(text.into()))
-        .await
-        .map_err(|e| format!("{SEND_FAILED_PREFIX}: {e}"))
-}
-
-// ── 사용량 구독(TRD S21 usage-limit-slot §1-7) ──────────────────────────────────────────
-// `UsageSubscribe` 를 소켓에 쓰는 자리 — 새 소켓([`write_usage_on_open`]) · 넛지(main_loop 의 `UsageInterest` 팔) ·
-// 대조([`relay_usage_snapshot`]) · ⟳ 새로고침 직전([`send_request`]). 모두 연결 task 안이라 순서가 이 task
-// 하나로 선다.
-
-/// 사용량 구독 집합 한 장. ★실패해도 연결을 끊지 않는다★ — 소켓이 죽었으면 다음 select 가 끊김을 보고 그
-/// 자리에서 `sent` 가 비워지며(`on_socket_lost`) 새 소켓이 관심을 다시 보낸다. replay `Subscribe` 와 달리 풀어야
-/// 할 슬롯이 없다.
-#[cfg(test)]
-async fn send_usage_subscribe(
-    sink: &mut futures_util::stream::SplitSink<Ws, Message>,
-    vendors: BTreeSet<AgentBackendKind>,
-    my_gen: u64,
-    kind: &str,
-) {
-    let cmd = AgentCommand::UsageSubscribe {
-        vendors: vendors.into_iter().collect(),
-    };
-    send_fire(sink, &cmd, my_gen, kind).await;
-}
-
-/// 새 소켓에 관심을 직접 한 장 쓴다 — `opened` = 창구를 연 직후 부른 `on_socket_open` 의 결과(`None` = 쓸 것
-/// 없음: 관심이 비었고 새 연결의 데몬 쪽 구독은 빈 집합이다). main_loop 가 명령 채널을 읽기 **전에** 부른다 —
-/// 넛지로 넣지 않는 이유: 이미 채널에 든 명령보다 앞서야 한다.
-///
-/// ★두 자리(첫 연결 · 재연결)가 둘로 나눠 부른다 — 관심 상태에 알리기는 Connected 발화 **앞**, 이 쓰기는
-/// **뒤**★:
-/// - 알리기가 앞이라 Connected 를 본 뒤의 웹뷰 pull 은 소켓 없음(`0`)이 아니라 새 표식과 비운 캐시를 본다.
-/// - 쓰기(await)가 뒤라 창구를 연 자리와 발화 사이에 await 가 끼지 않는다 — 그 틈에 `close()` 가 들면 그 Down
-///   뒤에 이 Connected 가 나가 창들이 connected 로 굳는다. 틈은 원래 있고, await 를 두면 그것이 넓어진다.
-/// - ★대가 — 첫 연결에서 Connected 에 반응해 웹뷰가 곧바로 보낸 명령은 호출자가 명령 채널을 꽂기 전까지
-///   [`super::NOT_CONNECTED`] 를 받는데, 이 쓰기(소켓 한 장)만큼 그 틈이 길어진다★ — 위 `close()` 경합보다
-///   가벼워 받아들였다.
-///
-/// 알린 뒤의 관심 변경은 이 집합에 없다 — 첫 연결은 `ready` 뒤 호출자가 명령 채널을 꽂은 직후의 넛지가
-/// (`DaemonClient::start_connection`), 재연결은 이미 산 채널에 든 넛지가 main_loop 에서 메운다. 짝은 창구를 닫는
-/// 두 자리의 `on_socket_lost` 다.
-///
-/// 되보내도 멱등이다 — 전량 교체이고, 존재를 전제하지 않아(회사 낱말은 데몬의 정적 조회기 등록부로 푼다)
-/// 재기동한 데몬도 거절할 것이 없다. 그래서 소켓 전이를 계기로 한 재구독을 거부한 ADR-0164 에 안 걸린다.
-#[cfg(test)]
-async fn write_usage_on_open(
-    sink: &mut futures_util::stream::SplitSink<Ws, Message>,
-    opened: Option<BTreeSet<AgentBackendKind>>,
-    my_gen: u64,
-) {
-    if let Some(set) = opened {
-        send_usage_subscribe(sink, set, my_gen, "UsageSubscribe(새 소켓)").await;
-    }
-}
-
-/// 데몬 방송 `UsageLimitsUpdated` 한 장 — 대조 → 받을 창에 알림 → 어긋났으면 같은 소켓에 바라는 집합 한 장.
-///
-/// ★이 팔은 [`emit_broadcast`] 안이 아니라 그 호출 자리에 선다★: 대조에는 관심 상태 · 이 소켓의 표식 · 소켓
-/// 출구가 필요한데 [`emit_broadcast`] 는 알림 포트 둘과 `ev` 만 받는다. 그리로 떨어지면 `_ => {}` 가 조용히
-/// 삼키고 컴파일러는 못 잡는다 — `tests.rs` 의 「방송 한 줄 → 알림 한 번」 시험이 유일한 벽이다.
-/// ★받을 창이 없으면 알리지 않는다★ — 옛 소켓의 한 장이거나 사용량 슬롯이 있는 창이 없다. 웹뷰는 자기 label 이
-/// 든 것만 받으므로 빈 `labels` 는 아무도 안 받는다.
-#[cfg(test)]
-async fn relay_usage_snapshot(
-    usage: &SharedUsageInterest,
-    events: &dyn DaemonEvents,
-    sink: &mut futures_util::stream::SplitSink<Ws, Message>,
-    socket_epoch: u64,
-    snapshot: &UsageLimitSnapshot,
-    subscribed: &[AgentBackendKind],
-    my_gen: u64,
-) {
-    let outcome = usage
-        .lock()
-        .on_snapshot(socket_epoch, snapshot, subscribed, Instant::now());
-    if !outcome.labels.is_empty() {
-        events.usage_limits_updated(snapshot, &outcome.labels, socket_epoch);
-    }
-    if let Some(set) = outcome.resend {
-        send_usage_subscribe(sink, set, my_gen, "UsageSubscribe(대조)").await;
-    }
-}
-
-/// 끊김으로 **wire 에 나가지 못한** 명령이 받는 문구 — 두 자리가 함께 쓴다(끊김 edge 의 `cmd_rx` 버퍼
-/// drain · [`reject_foreign_command`]). 같은 사실이므로 같은 말이어야 한다: 갈라 적으면 호출자가 한
-/// 결말을 두 가지 일로 읽는다. 「재전송 안전」은 이 두 경로에서만 참이다(이미 나간 것은 결과 불명이다).
-pub(crate) const UNSENT_ON_DISCONNECT: &str = "daemon 연결 끊김 — 명령 미전송(재전송 안전)";
-
-/// 끊김으로 **답을 못 받은** 명령이 받는 문구 — 위 [`UNSENT_ON_DISCONNECT`] 와 갈리는 축은 「wire 에
-/// 나갔나」 하나뿐이고, 그 차이가 곧 재시도 안전성이다(나간 것은 데몬이 실행했는지 알 수 없다).
-pub(crate) const SENT_OUTCOME_UNKNOWN: &str =
-    "daemon 연결 끊김 — 명령 전송됨·응답 못 받음(결과 불명; 부작용 명령 맹목 재시도 금지)";
-
-/// 소켓으로 **밀어 넣는 데** 실패했을 때의 접두(뒤에 원인이 붙는다). 위 둘과 달리 끊김이 아니라 소켓
-/// 오류이고, 그래서 문구도 갈라 둔다 — 하네스는 이 접두로 갈래를 식별한다.
-/// ★직렬화 실패는 여기 안 든다★ — 소켓이 멀쩡한 채로도 나는 별개 갈래라 아래 상수를 쓴다.
-pub(crate) const SEND_FAILED_PREFIX: &str = "명령 송신 실패";
-
-/// 명령을 JSON 으로 굽는 데 실패했을 때의 접두. ★오늘 이 문구를 실제로 내는 경로는 없다★(그 자리 주석대로
-/// 있어선 안 되는 갈래다) — 그래도 상수로 두는 것은, 하네스의 갈래 명단이 **빠짐없다**는 것 자체가
-/// 단언의 전제이기 때문이다(`tests.rs` 의 `DisconnectBranch`). 명단에 구멍이 있으면 그 구멍에 빠진
-/// *정상* 결말이 「모르는 문구」로 분류돼 옳은 동작에서 빨개진다.
-#[cfg(test)]
-pub(crate) const SERIALIZE_FAILED_PREFIX: &str = "명령 직렬화 실패";
-
-/// ★ADR-0195 — 명령은 한 연결 경계를 넘지 않는다★. 지금 소켓 몫이면 그대로 돌려주고, 아니면 기다리는
-/// 쪽을 깨운 뒤 `None` 을 돌려준다(호출자는 그 명령을 버린다). 어느 variant 가 어느 갈래인지는
-/// [`ConnectionCommand`] doc 의 「두 갈래」가 정본이다.
-///
-/// ## ★왜 창구(`lifecycle::Lifecycle::current_cmd_tx`)만으로는 부족한가★
-/// 창구는 채널 **clone** 을 내주고 락을 놓는다. 닫히기 전에 clone 을 집어 간 호출자는 **몇이든** 닫힌
-/// 뒤에도 enqueue 에 성공한다 — 창구는 그 창을 좁힐 뿐 닫지 못하고, 끊김 edge 의 버퍼 drain 도 한 번
-/// 훑고 끝나 그 뒤에 들어온 것을 못 본다. 이 대조가 그 몫을 잡는 **유일한** 자리다.
-///
-/// ## ★답장과 비대칭인 것은 의도다★
-/// 낡은 [`ConnectionCommand::CommandOutcome`] 은 조용히 버려도 된다(보낸 쪽이 자기 마감으로 회수한다).
-/// 낡은 **명령**은 반드시 깨워야 한다 — 안 깨우면 호출자가 그 자리에 매달린다. 답장 쪽 대조는 자기 팔이
-/// `request_id` 와 함께 이미 하므로 여기서는 통과시킨다(그 자리가 정본).
-///
-/// ## ★무엇이 이 함수를 지키나 — 검사와 **호출** 둘 다 재야 한다★
-/// `pub(crate)` 인 것은 `tests.rs` 의 단위 테스트가 이 함수를 직접 돌리기 때문이고, 그것이 재는 것은
-/// **검사 본문**뿐이다. ★그것만으로는 `main_loop` 에서 이 함수를 부르는 **줄**이 무보호로 남는다★ —
-/// 실제로 그 줄을 지워도 스위트가 통째로 초록이던 시기가 있었다(실측). 그 줄을 재는 것은
-/// `tests.rs` 의 `held_clone_enqueued_after_disconnect_is_rejected_and_never_runs` 이고, 하네스가
-/// 창구 clone 을 **직접 쥐고 있다가** 끊긴 뒤에 넣어 그 창을 결정론으로 만든다. ★「실 소켓으로는 이
-/// 창을 겨냥할 수 없다」로 적혀 있던 옛 문장은 거짓이었다 — 되살리지 말 것★.
-#[cfg(test)]
-pub(crate) fn reject_foreign_command(
-    cmd: ConnectionCommand,
-    socket_epoch: u64,
-) -> Option<ConnectionCommand> {
-    let stamp = match &cmd {
-        ConnectionCommand::SendCommand { socket, .. }
-        | ConnectionCommand::Unsubscribe { socket, .. }
-        | ConnectionCommand::Fire { socket, .. }
-        | ConnectionCommand::RequestReplay { socket, .. }
-        | ConnectionCommand::UsageInterest { socket } => *socket,
-        ConnectionCommand::CommandOutcome { .. } => return Some(cmd),
-    };
-    if stamp == socket_epoch {
-        return Some(cmd);
-    }
-    match cmd {
-        ConnectionCommand::SendCommand { reply, .. } => {
-            tracing::warn!(
-                socket = stamp,
-                current = socket_epoch,
-                "옛 소켓 몫 명령 폐기 — 다른 소켓에서 실행하지 않는다(호출자는 미전송 Err 로 깨어난다)"
-            );
-            let _ = reply.send(Err(UNSENT_ON_DISCONNECT.to_string()));
-        }
-        // reply 는 `u64` 만 나르는 통로라 실어 보낼 오류값이 없다 — 여기서 drop 하면 기다리던
-        //   `DaemonClient::request_replay` 가 RecvError 로 깨어나 자기 자리의 문구로 Err 를 낸다.
-        ConnectionCommand::RequestReplay { agent_id, .. } => {
-            tracing::warn!(
-                %agent_id,
-                socket = stamp,
-                current = socket_epoch,
-                "옛 소켓 몫 replay 요청 폐기 — 요청자는 미전송 Err 로 깨어난다"
-            );
-        }
-        // 깨울 대기자가 없다 — 버리는 것이 곧 결말이라 로그가 유일한 흔적이다(끊김 edge 의 drain 과 동형).
-        ConnectionCommand::Unsubscribe { agent_id, .. } => {
-            tracing::warn!(%agent_id, socket = stamp, current = socket_epoch, "옛 소켓 몫 Unsubscribe 폐기");
-        }
-        // ★명령 내용을 찍지 않는다(로깅 규약 「보안」)★ — 여기 닿는 것은 `commands/agent.rs` 가
-        //   request_id **유무**로 걸러 보낸 것들이고, 그 필터는 내용으로 가르지 않는다. 오늘은 `Resize`
-        //   하나뿐이라 무해하지만 내용을 나르는 request_id 없는 명령이 하나 생기는 순간 릴리즈 데몬의
-        //   상시 파일 sink 로 그대로 샌다. ★`?cmd` 를 되살리지 말 것★ — 폐기 사실을 읽는 데 필요한 것은
-        //   두 표식뿐이고, 그것이 어느 평면이었나는 이 문구가 말한다.
-        ConnectionCommand::Fire { .. } => {
-            tracing::warn!(
-                socket = stamp,
-                current = socket_epoch,
-                "옛 소켓 몫 fire-and-forget(Fire) 폐기"
-            );
-        }
-        // 깨울 대기자가 없고 잃는 것도 없다 — 이 넛지가 뜻하던 변경은 새 소켓이 창구를 열 때 읽은 관심에 이미
-        //   들어 있다(넛지는 그 창구가 열리기 **전에** 옛 표식을 받았다).
-        ConnectionCommand::UsageInterest { .. } => {
+    /// An item of a connection being dropped — not relayed.
+    fn is_dropping(&self, generation: Generation, what: &'static str) -> bool {
+        let dropping = self.dropping == Some(generation);
+        if dropping {
             tracing::debug!(
-                socket = stamp,
-                current = socket_epoch,
-                "옛 소켓 몫 사용량 넛지 폐기"
+                peer = %self.key.peer_id(),
+                generation = generation.0,
+                what,
+                "an item of a daemon connection being dropped — not relayed"
             );
         }
-        // 위 `stamp` 매치에서 이미 통과시켰다.
-        ConnectionCommand::CommandOutcome { .. } => {}
+        dropping
     }
-    None
-}
 
-/// [`apply_replay_event`] 의 결말.
-#[derive(Debug)]
-pub enum ReplayFollowUp {
-    /// replay 계열 이벤트가 아니다 — 호출자가 자기 갈래(인바운드 명령 / broadcast)로 넘긴다.
-    NotHandled,
-    /// 처리했다. `Some(cmd)` = 지금 wire 로 내야 할 **다음 세대 `Subscribe`**(병합돼 있던 요청).
-    Handled(Option<AgentCommand>),
-}
-
-/// 데몬이 보낸 replay 3종(`SubscribeAck`·`ReplayComplete`·`SubscribeFailed`)을 single-flight 상태기계에
-/// 반영하고, 그 결과 창으로 흘릴 경계 마커를 `deliver` 로 넘긴다.
-///
-/// ★셋을 한 함수에 모은 이유(load-bearing)★: 이 배선은 연결 태스크의 `select!` 안에 살았고, **그 자리는
-/// 실 소켓을 요구한다**. ★그것은 불가능이 아니라 비용이다★ — 같은 패키지의 `tests.rs` 가 루프백 WS 를
-/// 세워 `run_connection`→`main_loop` 를 실제로 돌리므로 태울 방법 자체는 있다. 다만 상태기계 한 갈래를
-/// 재려고 매번 소켓·핸드셰이크를 세우는 값이 비싸고, 인라인으로 두면 그 값 때문에 **아무도 안 태운다** —
-/// 실제로 거절 팔이 그 상태였고, 그 팔을 통째로 지워도 모든 테스트가 초록이었다. 갈래를 여기로 내리면
-/// 하네스(`tests/daemon_client_replay.rs`)가 소켓 없이 태울 수 있고, 남는 무검증 표면은 호출부의
-/// **한 줄**(이 함수를 부르는 것 + 반환 명령을 `send_fire` 하는 것)뿐이다.
-///
-/// ★2026-08-24 전에는 이 자리에 「어떤 하네스로도 태울 수 없다」고 적혀 있었다★ — 그 말은 실 `AppHandle`
-/// 이 없으면 연결 태스크를 **아예 안 띄우던 단락** 때문에 우연히 참이었다. emit 을 포트로 끊어
-/// (`events.rs`) 그 단락을 지우면서 문장이 낡았다. 남은 요구는 소켓 하나이고, 그것은 비용 판단이다.
-///
-/// ★`deliver` 가 인자인 이유★: 실제 배달구(`output_channel::send_to_windows`)는 `tauri::ipc::Channel` 을
-/// 요구해 하네스에서 세울 수 없다. 대신 **어느 창으로 보내는지**(`router.targets`)와 **무슨 바이트를
-/// 보내는지**는 여기서 확정되므로, 그 둘을 하네스가 잡아 단언한다.
-///
-/// ★마커는 binary frame 과 **같은 경로**로 흘려야 한다(ADR-0046)★ — 알림 포트(`events`)를 태우면 순서가
-/// 무너진다.
-/// 그래서 `deliver` 의 운영 구현은 binary 팬아웃과 같은 함수다.
-pub fn apply_replay_event(
-    ev: &AgentEvent,
-    flight: &mut ReplayFlightSet,
-    subs: &mut HashMap<AgentId, SubState>,
-    router: &OutputRouter,
-    now: Instant,
-    deliver: &mut dyn FnMut(&[WindowLabel], &[u8]),
-) -> ReplayFollowUp {
-    match ev {
-        // ★구독 ack★: SubState.epoch 갱신(binary 팔 decide_epoch 의 기준) + in-flight 를 acked 로 전이 +
-        //   truncated·continues_conversation(ADR-0226)·replay 머리 `replay_from`(ADR-0231) 기억(성공 마커에
-        //   전파) + 진행(deadline 리셋).
-        //   ★ADR-0046: 버퍼/커서 reset 없음★ —
-        //   epoch 전환 재구독은 프론트의 권위 명부 관측(observeRoster)이 담당한다(ADR-0164 결정 8) —
-        //   구독 deps `[viewId, agentId]`는 화신 표식을 의도적으로 제외한다.
-        // ★반환 bool(epoch_changed) 의도적 무시★: 옛 배선은 이 값으로 창 render_seq 를 리셋했으나, 미러
-        //   버퍼 제거(ADR-0046)로 진도 상태가 src-tauri 에 없다 → 리셋 대상이 없다. epoch 채택은 프론트가
-        //   성공 마커 epoch 로 한다(gen 펜스).
-        // ★`replay_from` 을 버리지 말 것(ADR-0231)★: 뷰는 성공 flush 를 `max(마지막+1, replay_from)` 에서
-        //   시작한다. 버퍼의 최소 seq 로 대신하면 빈 replay(새 화신)에서 마커 뒤로 늦게 온 seq 0 을 건너뛴다.
-        AgentEvent::SubscribeAck {
-            agent_id,
-            current_epoch,
-            replay_from,
-            truncated,
-            continues_conversation,
-            ..
-        } => {
-            let _ = protocol_state::apply_subscribe_ack(
-                subs.entry(*agent_id).or_default(),
-                *current_epoch,
-            );
-            flight.on_ack(
-                *agent_id,
-                *truncated,
-                *continues_conversation,
-                *replay_from,
-                now,
-            );
-            ReplayFollowUp::Handled(None)
-        }
-        // ★replay 경계 각인(ADR-0046 M1)★: acked in-flight 를 성공 마커로 해소한다(Ack 전 도착 Complete =
-        //   전대 고아 → Ignore). 대기열이 있으면 병합된 다음 Subscribe 를 호출자에게 돌려준다.
-        AgentEvent::ReplayComplete { agent_id, epoch } => {
-            match flight.on_complete(*agent_id, now) {
-                Resolution::Ignore => ReplayFollowUp::Handled(None),
-                Resolution::Emit { marker, send_next } => {
-                    let frame = replay_flight::encode_marker_frame(*agent_id, *epoch, marker);
-                    deliver(&router.targets(*agent_id), &frame);
-                    // 마커의 epoch(= 방금 끝난 replay 의 것)과 다음 재구독의 epoch 는 별개다 — 다음 replay 는
-                    //   **현재 알려진** epoch 로 전량 재구독한다.
-                    ReplayFollowUp::Handled(send_next.then(|| AgentCommand::Subscribe {
-                        agent_id: *agent_id,
-                        epoch: known_epoch(subs, *agent_id),
-                        after_seq: None,
-                    }))
-                }
-            }
-        }
-        // ★거절 = single-flight 슬롯의 해제 계기★. 거절된 Subscribe 엔 Ack 도 Complete 도 뒤따르지 않으므로
-        //   (데몬 `handle_subscribe` 가 Ack 발행 전 return) 슬롯을 지금 풀어도 오귀속될 응답이 없다 —
-        //   만료(좀비) 해제를 택하지 않은 이유가 이 차이다(근거 정본 = `replay_flight::check_deadlines`).
-        //   ★안 풀면 어떻게 되나★: 그 에이전트의 Subscribe 가 두 번 다시 못 나가 재spawn 해도 출력이 모든
-        //   창에서 영구 두절된다(실측 2026-08-19).
-        // ★warn 유지★: 거절이 `Error` 를 떠났으니 `emit_broadcast` 의 error 팔이 더는 이걸 못 잡는다. 이
-        //   줄이 그 진단을 잇는다(사유 문장은 데몬이 쓴 것).
-        AgentEvent::SubscribeFailed { agent_id, reason } => {
-            tracing::warn!(
+    /// The `Subscribe` of a merged replay request, released by the resolution of the one before it. ★The window check
+    /// again★ — the agent's last window may have closed since the request merged, and its `Unsubscribe` is already
+    /// written: a `Subscribe` now would leak the subscription (the A1 shape). Then nothing is written and the slot is
+    /// released as a refusal releases it — no answer can come for a `Subscribe` that never went out.
+    fn write_follow_up(&mut self, generation: Generation, agent_id: AgentId, epoch: Option<u32>) {
+        if self.router.targets(agent_id).is_empty() {
+            tracing::debug!(
+                peer = %self.key.peer_id(),
                 %agent_id,
-                // The daemon's free text — masked as the transport masks handshake text.
-                reason = %engram_dashboard_transport::mask_reason(reason),
-                "데몬이 Subscribe 를 거절 — single-flight 슬롯 해제"
+                "no window shows the agent any more — its merged replay request is dropped"
             );
-            let plan = plan_subscribe_refusal(flight, subs, *agent_id, now);
-            if let Some(frame) = plan.marker_frame {
-                deliver(&router.targets(*agent_id), &frame);
-            }
-            ReplayFollowUp::Handled(plan.next_subscribe)
-        }
-        _ => ReplayFollowUp::NotHandled,
-    }
-}
-
-/// 그 에이전트에 대해 **마지막으로 알려진** epoch(모르면 `None`).
-///
-/// ★읽기는 항목을 만들지 않는다 — 이 맵의 증가 규칙 전부★: `subs` 에 항목을 **넣는** 자리는 두 곳뿐이다 —
-/// `SubscribeAck` 각인과 binary frame 의 epoch 게이트. 둘 다 "그 에이전트가 실재한다" 는 증거를 손에 쥔
-/// 자리다. 반면 읽는 자리(다음 세대 재구독 · 만료 마커 · 거절 마커)엔 그 증거가 없다 — 거기서
-/// `entry().or_default()` 를 쓰면 사라진 에이전트의 빈 항목이 연결 수명 내내 쌓인다. 읽는 자리를 전부 이
-/// 함수로 모아 그 규칙이 사이트마다 갈리지 않게 한다.
-pub(super) fn known_epoch(subs: &HashMap<AgentId, SubState>, agent_id: AgentId) -> Option<u32> {
-    subs.get(&agent_id).and_then(|st| st.epoch)
-}
-
-/// 거절 한 건이 낳는 부작용 둘 — 창으로 흘릴 실패 마커 프레임과 wire 로 나갈 다음 세대 `Subscribe`.
-/// 실제 송신은 호출자(연결 태스크)가 한다.
-#[derive(Debug)]
-pub struct RefusalPlan {
-    /// tag=255 마커 프레임. `None` = 풀 슬롯이 없었거나 이 세대의 실패 마커가 이미 1회 나갔다(중복 금지).
-    pub marker_frame: Option<Vec<u8>>,
-    /// 병합된 대기열의 `Subscribe`. `None` = 대기열 없음.
-    pub next_subscribe: Option<AgentCommand>,
-}
-
-/// 데몬이 `Subscribe` 를 거절했을 때(`AgentEvent::SubscribeFailed`) 무엇을 내보낼지 정한다 — 슬롯 해제·
-/// 마커 합성·대기열 전진이 여기 한 곳에 있다.
-///
-/// ★`pub` 인 이유(= `register_pending` 과 같은 사정)★: **이 파일의 select 루프는 실 소켓을 요구한다.**
-/// 그래서 이 함수가 그 배선을 소켓 없이 태울 수 있는 지점이고, 하네스 = `tests/daemon_client_replay.rs` 다.
-/// ★이 `pub` 은 불가능이 아니라 **비용 트레이드**다★ — 같은 패키지의 `tests.rs` 가 루프백 WS 로 그 루프를
-/// 실제로 돌리므로, 되돌리려면 소켓 하네스로 같은 규칙을 재면 된다. 그때 잃는 것은 결정론과 속도다.
-///
-/// ★실패 마커의 `epoch` 는 권위값이 아니다(최선치)★: 거절엔 `SubscribeAck` 이 없어 이 세대가 어느 세션의
-/// 것인지 확정할 방법이 없다. 그래서 마지막으로 알려진 `SubState.epoch`(없으면 0)를 싣는다 — 그 값은
-/// 재연결을 넘어 살아남는 맵에서 오므로 **지난 데몬의 것일 수 있다**. 받는 쪽이 이 값을 신뢰하지 않는 것이
-/// 짝이다: 뷰는 실패 마커에 epoch 펜스를 적용하지 않는다(`src/api/protocolClient.ts` `evalMarker`) —
-/// 적용하면 마커가 조용히 버려지고 뷰가 10초 watchdog 을 기다려, 마커를 낸 이유 자체가 사라진다.
-///
-/// ★`subs` 를 읽기만 한다★ — 규칙과 그 근거는 [`known_epoch`] 가 단독 소유한다(거절은 "그 에이전트가
-/// 없다" 가 가장 흔한 사유라 여기가 그 규칙이 가장 아픈 자리다).
-pub fn plan_subscribe_refusal(
-    flight: &mut ReplayFlightSet,
-    subs: &HashMap<AgentId, SubState>,
-    agent_id: AgentId,
-    now: Instant,
-) -> RefusalPlan {
-    let epoch = known_epoch(subs, agent_id);
-    match flight.on_refused(agent_id, now) {
-        RefusalOutcome::Ignore => RefusalPlan {
-            marker_frame: None,
-            next_subscribe: None,
-        },
-        RefusalOutcome::Released { marker, send_next } => RefusalPlan {
-            // 실패 마커는 뷰의 대기를 지금 끊는다(없으면 10초 deadline 을 기다린다).
-            marker_frame: marker
-                .map(|m| replay_flight::encode_marker_frame(agent_id, epoch.unwrap_or(0), m)),
-            // 다음 replay 는 **현재 알려진 epoch** 로 재구독한다(마커의 epoch 와 별개).
-            next_subscribe: send_next.then_some(AgentCommand::Subscribe {
-                agent_id,
-                epoch,
-                after_seq: None,
-            }),
-        },
-    }
-}
-
-/// 승계당한 옛 대기 슬롯이 받는 문구 — 하네스가 **이 상수**를 단언한다(문구를 두 곳에 적으면 갈린다).
-pub const PENDING_SUPERSEDED: &str = "중복 request_id — 옛 요청 취소";
-
-/// pending 슬롯을 건다 — 같은 `request_id` 가 이미 걸려 있으면 **옛 슬롯을 오류로 깨우고 새 것이 승계**한다.
-///
-/// ## ★전제가 바뀌었다 — 이 번호는 더 이상 우리 것이 아니다★
-/// 옛 코드는 이 자리의 충돌을 「UUIDv4 라 사실상 불가」로 적고 `debug_assert!(false)` 로 터뜨렸다. 그 전제는
-/// 이 키를 *우리 코드가* 만들 때만 참이었다. 지금은 아니다 — `AgentCommand::Command { envelope }` 의 키는
-/// **봉투를 지은 바깥 호출자**의 것이고([`protocol_state::command_request_id`] 가 봉투를 풀어
-/// 그 `request_id` 를 그대로 이 맵의 키로 넘긴다), 웹뷰가 그 봉투를 `forward_daemon_command`
-/// (`src-tauri/src/commands/agent.rs`)로 실어 보낸다. 즉 유일성은 **통제 못 하는 입력의 성질**이지 우리
-/// 코드의 불변식이 아니다. 겹친 번호로 패닉하면 운영 셸은 훅이 셸째 끝내고(ADR-0292), 훅 없는 빌드에선 이 연결
-/// 태스크만 죽어 그 뒤 모든 명령이 「연결 task 가 명령을 받지 못함」으로 끊기고 재연결도 없다(디버그 빌드 GUI
-/// 실측 2026-08-18 — 명부 0, 창은 살아 있는 채 단절).
-///
-/// ## ★겹침의 답은 데몬이 짓는다★
-/// 배달 쪽은 이 겹침을 견디도록 이미 지어져 있다 — `engram_dashboard_daemon::command_delivery` 가 같은 번호의
-/// 재질의를 `Seat::Coalesced`(같은 연결·같은 요청 = 진행 중 왕복에 합침) · `Seat::Conflict`
-/// (`ErrorCode::RequestIdConflict`) · `Seat::Taken`(임자 생존이면 `REQUEST_ID_CONFLICT`, 떠났으면
-/// `OUTCOME_UNKNOWN`)로 가르고 **타입 있는 답을 낸다**. 그 답이 셸에 닿기도 전에 셸이 죽으면 한쪽만 견디는
-/// 짝이 된다.
-///
-/// ## 그래서 하는 일
-/// 디버그·릴리즈가 **같은 길**을 간다(옛 코드의 릴리즈 동작으로 통일): 옛 슬롯을 `Err` 로 깨워 영구 hang 을
-/// 막고, 새 슬롯이 그 번호를 승계하고, 관측은 `warn!` 하나로 남는다. 승계 뒤 그 번호로 오는 답장은 **먼저
-/// 도착한 한 장**만 새 슬롯을 풀고 나머지는 짝 없는 답장으로 무시된다([`protocol_state::take_pending`] 이
-/// `None`) — 어느 쪽도 매달리지 않는다.
-///
-/// ★`pub` 인 이유★: 이 파일의 select 루프는 실 소켓을 요구해(그래서 이 파일엔 `#[cfg(test)]` 가 없다)
-/// 이 함수가 그 승계 규칙을 **소켓 없이 태울 수 있는 지점**이다 — `tests/daemon_client_pending.rs` 가
-/// 여기를 태운다. ★"요구한다"이지 "세울 수 없다"가 아니다★: 같은 패키지의 `tests.rs` 가 루프백 WS 로 그
-/// 루프를 돌린다. 이 `pub` 이 사는 것은 소켓 없는 결정론이지 유일한 가능성이 아니다.
-pub fn register_pending(
-    pending: &mut PendingMap<CommandReply>,
-    request_id: RequestId,
-    reply: CommandReply,
-    generation: u64,
-) {
-    let Some(prev) = pending.insert(request_id, reply) else {
-        return;
-    };
-    tracing::warn!(
-        generation,
-        request_id = %request_id.0,
-        "같은 request_id 로 새 요청이 들어왔다 — 옛 대기 슬롯을 오류로 깨우고 새 요청이 그 번호를 승계한다(번호는 바깥 호출자가 정한다)"
-    );
-    let _ = prev.send(Err(PENDING_SUPERSEDED.to_string()));
-}
-
-// ── 명령 버스: 인바운드 배달 + 자기 이름 등록 ────────────────────────────────
-//
-// ★등록 패킷의 `owner` 는 **광고**다★ — 데몬은 이 값을 쓰지 않고 **그 패킷이 온 연결**에서 주인 토큰을
-//   파생한다(protocol `AgentCommand::RegisterCommands` doc · daemon `note_claimed_owner`). 그래서 여기 무엇을
-//   적어도 명부의 주인은 안 바뀐다 — 쓸모는 데몬 로그에서 이 연결이 누구인지 사람이 알아보는 것뿐이다.
-// ★데몬의 토큰 접두(`conn-`)를 흉내내지 않는다★ — 그 형태를 적으면 데몬이 「남의 주인 토큰을 적은 등록」으로
-//   보고 경고를 남긴다(`note_claimed_owner` 의 접두 분기).
-//
-// ★★이 값을 「클라이언트가 만든 식별자」로 승격하지 말 것(ADR-0150 결정 1)★★ — 그 식별자는 **연결마다
-//   유일**해야 하는데 이 리터럴은 고정이라 두 셸이 같은 값을 쓴다. 데몬 명부는 등록을 이름 단위 last-wins 로
-//   덮고 연결 해제를 주인 단위로 제거하므로(ADR-0150 결정 3), 그 승격은 **두 셸이 서로의 이름을 빼앗고 서로를
-//   지우는** 동작이 된다. 식별자를 들일 때는 이 상수를 고치는 것이 아니라 연결마다 새 값을 만들어야 한다.
-const SHELL_OWNER_ADVERT: &str = "engram-dashboard-shell";
-
-/// 등록·차분 패킷이 함께 쓰는 광고 문자열 — ★두 곳에서 따로 짓지 않는다★. 갈리면 데몬 로그에서 같은
-/// 셸의 두 패킷이 남남으로 보인다(명부의 주인 판정은 이 값과 무관하다 — 위 주석).
-pub fn shell_owner_advert() -> engram_dashboard_protocol::OwnerToken {
-    engram_dashboard_protocol::OwnerToken::new(SHELL_OWNER_ADVERT)
-}
-
-/// 결말을 이 연결의 단일 writer 로 되보내는 송신단 — ★반드시 **weak** 이다(load-bearing)★.
-///
-/// ## ★왜 weak 인가 — 이 채널의 송신단 수가 연결 태스크의 수명이다★
-/// tokio mpsc 는 **강한 송신단이 전부 사라질 때** 닫히고, 이 파일은 그 EOF 를 수명 신호로 쓴다:
-/// `cmd_rx.recv() == None` → `LoopExit::Closed`. 두 계약이 거기 얹혀 있다.
-/// - **명시 종료.** `DaemonClient::close()` 는 소켓을 닫지도, abort 핸들을 쥐지도 않는다 — lifecycle 이 쥔
-///   송신단을 **놓는 것**이 곧 종료 신호다(`lifecycle::close`). `main_loop` 의 `select!` 에 취소 arm 이 없어
-///   이 EOF 가 유일한 즉시 종료 경로다.
-/// - **stale 연결 억제.** 핸드셰이크 중 세대가 밀린 연결은 `store_cmd_if_current` 가 저장을 거부하고 그
-///   송신단이 그 자리에서 drop 된다 → EOF → 그 태스크가 스스로 접힌다.
-///
-/// ★그래서 연결 태스크와 적용 태스크는 **강한 clone 을 쥐어선 안 된다**★ — 하나라도 쥐면 EOF 가 영원히 오지
-/// 않아 `close()` 가 무력해지고(태스크가 계속 프레임을 읽고 emit·fan-out 한다) stale 소켓 둘이 같은
-/// `router`/`registry` 로 동시에 팬아웃한다. weak 은 보낼 때만 [`mpsc::WeakSender::upgrade`] 로 잠깐 승격하고,
-/// 승격 실패 = 연결이 이미 사라짐이라 아래 유실 경로로 그대로 떨어진다.
-pub type OutcomeSender = mpsc::WeakSender<ConnectionCommand>;
-
-/// 인바운드 명령의 결말을 되보내는 **일회용 출구** — 소켓을 직접 만지지 않고 이 연결의 명령 채널로 넘긴다.
-///
-/// 소켓 쓰기는 연결 태스크 하나만 하기 때문이다(헤더 「동시성」의 단일 writer). `try_send` 라 부르는 쪽
-/// (적용 태스크)이 블록되지 않는다. ★`pub` 인 이유★: 창·소켓 없이 이 계약(weak 이라 채널을 붙들지 않는다 ·
-/// 넘기는 프레임 모양)을 단언하는 하네스가 이 함수를 태운다(`tests/layout_commands.rs`).
-pub fn outcome_sink(
-    outbound: OutcomeSender,
-    request_id: engram_dashboard_command::RequestId,
-    socket: u64,
-) -> impl FnOnce(BusReply) + Send + 'static {
-    move |reply: BusReply| {
-        // 승격 실패 = 강한 송신단 0(연결 종료·stale 폐기) → 보낼 곳이 없다. 큐 full(512)도 같은 유실이다.
-        let sent = outbound.upgrade().is_some_and(|tx| {
-            tx.try_send(ConnectionCommand::CommandOutcome { reply, socket })
-                .is_ok()
-        });
-        if !sent {
-            // ★이 유실을 메우는 마감시각은 **아직 어디에도 없다**(알려진 미비)★: 배달 다리를 짓는 쪽이
-            //   봉투 마감을 함께 얹어야 한다 — 없으면 큐가 찬 순간 그 요청은 무한 대기가 된다.
-            tracing::warn!(
-                request_id = %request_id,
-                "명령 결말을 연결 태스크에 넘기지 못했다(연결 종료 또는 큐 full) — 답장 유실"
-            );
-        }
-    }
-}
-
-/// 데몬이 배달한 봉투를 적용 태스크로 넘긴다 — ★기다리지 않는다★(ADR-0155 결정 4).
-///
-/// `socket` = 이 봉투가 도착한 소켓의 세대. 답장이 그 소켓에만 나가게 [`outcome_sink`] 로 함께 실린다.
-/// ★`pub` 인 이유★: 이 파일의 select 루프는 실 소켓을 요구해(그래서 이 파일엔 `#[cfg(test)]` 가 없다)
-/// 이 함수가 **소켓 없이 태울 수 있는 가장 바깥 지점**이다 — 그 요구는 비용이지 불가능이 아니다(같은
-/// 패키지 `tests.rs` 가 루프백 WS 로 그 루프를 돌린다). 하네스가 여기를 태우면
-/// 슬롯 조회 · 결말 프레임 조립 · 채널 배달 · 표 부재 갈래가 실코드로 덮인다
-/// (남는 것 = select arm 의 갈래 선택 하나 — `tests/layout_commands.rs` 헤더가 그 잔여를 적는다).
-pub fn accept_inbound(
-    inbound: &Arc<InboundSlot>,
-    cmd_tx: &OutcomeSender,
-    socket: u64,
-    envelope: engram_dashboard_command::CommandEnvelope,
-) {
-    let request_id = envelope.request_id;
-    let deliver = outcome_sink(cmd_tx.clone(), request_id, socket);
-    match inbound.get() {
-        Some(receiver) => receiver.accept(envelope, deliver),
-        // ★조용히 버리지 않는다★ — 답을 안 내면 보낸 쪽이 마감시각까지 매달린다. 표가 안 꽂힌 것은 전이
-        //   상태가 아니라 조립 누락(`install_command_table` 미호출)이라 재시도로 낫지 않는다 → retry: never.
-        None => {
-            tracing::error!(
-                request_id = %request_id,
-                "명령 표가 안 꽂힌 채 봉투가 도착했다 — 조립 누락(install_command_table)"
-            );
-            deliver(BusReply::err(
-                request_id,
-                engram_dashboard_command::CommandError::internal(
-                    "this client has no command table installed",
-                ),
-            ));
-        }
-    }
-}
-
-/// 이 클라이언트가 얹을 등록 패킷 — 얹을 것이 없거나 항목 목록을 원문 칸으로 싸지 못하면(error 로그 · ADR-0272)
-/// `None`.
-///
-/// ★`pub` 이고 [`register_own_commands`] 와 갈라져 있는 이유★: 보내는 쪽은 실 소켓을 요구하지만
-/// **무엇을 보내나**(광고 이름 · 세대 · 주인 문자열)는 소켓과 무관하다. 갈라 두면 하네스가 실제로 나가는 그
-/// 패킷을 단언할 수 있다 — 손으로 다시 지은 패킷을 재면 그 둘이 갈려도 아무도 모른다.
-pub fn registration_command(receiver: &InboundReceiver) -> Option<AgentCommand> {
-    let decls = receiver.declarations();
-    if decls.is_empty() {
-        return None;
-    }
-    let decls = match protocol_state::decls_to_wire(&decls) {
-        Ok(decls) => decls,
-        Err(e) => {
-            tracing::error!(
-                names = decls.len(),
-                "등록 항목 목록을 원문 칸으로 싸지 못했다 — 이 연결에서는 등록하지 않는다: {e}"
-            );
-            return None;
-        }
-    };
-    Some(AgentCommand::RegisterCommands {
-        owner: shell_owner_advert(),
-        decls,
-        catalog_version: receiver.catalog_version(),
-        request_id: RequestId::new(),
-    })
-}
-
-// 자기 명령 이름을 데몬 명부에 얹는다(TRD §3-7 조항 1). 부르는 자리·재전송 근거는 호출부 주석.
-//
-// ★결말을 여기서 await 하지 않는다★: 그 답장(Ack/Error)을 stream 에서 꺼내는 것이 **이 루프 자신**이라,
-// 여기서 기다리면 그 자리에서 교착이다. 그래서 pending 슬롯만 걸어 두고 별도 태스크가 결말을 로그로 남기고
-// 데몬 거절이면 박스를 띄운다(`refusals`) — 등록은 relay 전체의 선행 조건이라 조용히 실패하면 안 된다(데몬도
-// 자기 쪽 거절을 warn 으로 남긴다).
-#[cfg(test)]
-async fn register_own_commands(
-    sink: &mut futures_util::stream::SplitSink<Ws, Message>,
-    pending: &mut PendingMap<CommandReply>,
-    my_gen: u64,
-    inbound: &Arc<InboundSlot>,
-    refusals: &Arc<RefusalAlerts>,
-) {
-    let Some(receiver) = inbound.get() else {
-        tracing::debug!(generation = my_gen, "명령 표 미설치 — 등록할 이름이 없다");
-        return;
-    };
-    let Some(cmd) = registration_command(receiver) else {
-        return;
-    };
-    // 위 생성자가 방금 채운 값 — 이 두 칸을 다시 쓰지 않고 그 패킷에서 읽는다(두 곳에서 지으면 갈린다).
-    let AgentCommand::RegisterCommands {
-        request_id,
-        ref decls,
-        ..
-    } = cmd
-    else {
-        // `registration_command` 는 이 variant 만 만든다 — 다른 것이 오면 그 함수가 바뀐 것이다.
-        tracing::error!("등록 패킷 생성자가 RegisterCommands 가 아닌 것을 냈다");
-        return;
-    };
-    // ADR-0272: 방금 싼 칸이라 늘 풀린다 — 못 풀리면 위 생성자가 바뀐 것이다.
-    let count = match protocol_state::decls_from_wire(decls) {
-        Ok(decls) => decls.len(),
-        Err(e) => {
-            tracing::error!("등록 패킷 생성자가 풀리지 않는 항목 목록 칸을 냈다: {e}");
+            // Nothing is merged behind it — the resolution just promoted it; its failure marker has no window to go to.
+            let _ = self.flight.on_refused(agent_id, self.clock.now());
             return;
         }
-    };
-
-    let (outcome_tx, outcome_rx) = oneshot::channel();
-    // 송신 **전에** 슬롯을 건다 — loopback 에서 답장이 먼저 도착해도 담을 자리가 있어야 한다(형제 경로와 동형).
-    // ★승계도 형제와 **같은 함수**를 탄다★: 이 번호는 방금 우리가 만든 것이라 겹칠 일이 없지만, 맵은 바깥
-    //   호출자의 번호와 **한 칸을 나눠 쓴다**(`SendCommand` 경로) — 규율을 갈라 두면 다음 편집이 느슨한
-    //   쪽을 본보기로 삼는다.
-    register_pending(pending, request_id, outcome_tx, my_gen);
-    if !send_fire(sink, &cmd, my_gen, "RegisterCommands").await {
-        // 송신 실패 → 슬롯 회수(좀비 pending 금지). 소켓은 곧 끊기고 재연결이 다시 등록한다.
-        let _ = protocol_state::take_pending(pending, &request_id);
-        return;
-    }
-    let refusals = Arc::clone(refusals);
-    tokio::spawn(async move {
-        match outcome_rx.await.map(protocol_state::classify_reply) {
-            Ok(Ok(_)) => tracing::info!(names = count, "셸 명령 등록 완료"),
-            // ★거절은 이 연결에서 재시도하지 않는다 — 다음 재연결까지 이름이 **없는 채로** 남는다(알려진 한계)★.
-            //   그 사이 데몬이 배달할 수 있는 이 셸의 명령은 0이므로 LLM 이 창·탭·슬롯을 못 만진다. 재시도를 안
-            //   붙인 이유는 **재시도를 깨울 것이 이 루프에 없어서**다: 백오프 타이머를 넣으려면 select 에 네
-            //   번째 arm 과 재시도 정책(간격·상한·거절 종류별 분기 — 명부 상한은 남이 끊기면 풀리지만 스키마
-            //   거절은 코드가 바뀔 때까지 영구다)이 필요하고, 그 둘은 이 자리에서 정할 결정이 아니다.
-            Ok(Err(CommandFailure::Daemon { message })) => {
-                tracing::warn!(
-                    names = count,
-                    "셸 명령 등록 거절 — 다음 재연결까지 이 셸의 명령은 데몬 명부에 없다: {message}"
-                );
-                refusals.surface(RefusalSite::Register, &message);
+        match self.registry.get(self.key.peer_id()) {
+            Some(peer) => {
+                self.write_subscribe(&peer, generation, agent_id, epoch);
             }
-            // 셸 로컬 실패도 같은 「거절」 라벨로 남긴다 — 데몬이 거절한 것은 아니다(TRD 2-1 §8 O4). 답 전에
-            //   끊기면 여기로 온다 — 끊김의 pending drain 이 슬롯에 `SENT_OUTCOME_UNKNOWN` 을 넣는다.
-            //   박스는 없다 — 박스는 이 warn 팔이 아니라 데몬 출처를 따른다(ADR-0281).
-            Ok(Err(CommandFailure::Local(message))) => tracing::warn!(
-                names = count,
-                "셸 명령 등록 거절 — 다음 재연결까지 이 셸의 명령은 데몬 명부에 없다: {message}"
+            // Closed — the `LinkDown` before its `Closed` clears the flight.
+            None => tracing::debug!(
+                peer = %self.key.peer_id(),
+                generation = generation.0,
+                "the next replay Subscribe has no peer to go to — the link was closed"
             ),
-            // 슬롯이 답 없이 떨어졌다 — 연결 태스크가 pending drain 을 지나지 않고 끝났다.
-            Err(_) => tracing::debug!("셸 명령 등록 결말 미도착(연결 종료)"),
         }
-    });
-}
+    }
 
-// Hello 가 올 때까지 stream 을 읽는다(internal 소비). Hello=Ok, Error=AuthRejected, 닫힘=ClosedBeforeHello.
-//
-// ★Hello 내부 소비(wsTransport 와 동형)★: Hello 는 핸드셰이크 신호라 control 로 위로 올리지
-// 않는다 — 여기서 먹고 connected 로만 전이한다. Hello 전에 오는 다른 control/binary 는 정상
-// 흐름엔 없지만(데몬은 Hello 를 가장 먼저 push), 방어적으로 무시하고 Hello 만 기다린다.
-#[cfg(test)]
-async fn wait_for_hello(
-    stream: &mut futures_util::stream::SplitStream<Ws>,
-) -> Result<(), HandshakeError> {
-    while let Some(item) = stream.next().await {
-        let msg = match item {
-            Ok(m) => m,
-            Err(e) => return Err(HandshakeError::Connect(e.to_string())),
-        };
-        match msg {
-            Message::Text(text) => {
-                // 데몬 control event 파싱. Hello=성공, Error=인증 실패.
-                match serde_json::from_str::<AgentEvent>(&text) {
-                    Ok(AgentEvent::Hello { .. }) => return Ok(()),
-                    Ok(AgentEvent::Error { message, .. }) => {
-                        return Err(HandshakeError::AuthRejected(message))
+    /// An event of connection `generation` the driver handles itself: a replay event (`SubscribeAck` ·
+    /// `ReplayComplete` · `SubscribeFailed` — the follow-up `Subscribe` goes out on that connection), a daemon command
+    /// request, a command reply too broken to match a request, a usage snapshot.
+    fn on_driver_event(&mut self, generation: Generation, event: AgentEvent) {
+        let windows = &self.windows;
+        let mut deliver =
+            |labels: &[WindowLabel], bytes: &[u8]| send_to_windows(windows, labels, bytes);
+        let follow_up = apply_replay_event(
+            &event,
+            &mut self.flight,
+            &mut self.subs,
+            &self.router,
+            self.clock.now(),
+            &mut deliver,
+        );
+        match follow_up {
+            ReplayFollowUp::Handled(None) => {}
+            ReplayFollowUp::Handled(Some(AgentCommand::Subscribe {
+                agent_id, epoch, ..
+            })) => self.write_follow_up(generation, agent_id, epoch),
+            ReplayFollowUp::Handled(Some(other)) => tracing::warn!(
+                peer = %self.key.peer_id(),
+                ?other,
+                "a replay follow-up that is not a Subscribe — not written"
+            ),
+            ReplayFollowUp::NotHandled => match event {
+                // ADR-0272 decision 6: an envelope that does not parse has no request id to answer with — it is
+                //   neither run nor answered; the daemon ends that round trip by its own deadline.
+                AgentEvent::CommandRequest { envelope } => {
+                    match protocol_state::envelope_from_wire(&envelope) {
+                        Ok(envelope) => self.accept_inbound(generation, envelope),
+                        Err(e) => tracing::warn!(
+                            peer = %self.key.peer_id(),
+                            generation = generation.0,
+                            event = "CommandRequest",
+                            class = ?e.classify(),
+                            line = e.line(),
+                            column = e.column(),
+                            "a daemon command envelope does not parse — no request id to answer with; dropped"
+                        ),
                     }
-                    // 그 외 control(정상 흐름엔 Hello 가 먼저라 없음) — 무시하고 Hello 계속 대기.
-                    Ok(_) => {}
-                    // 파싱 실패도 무시(부분 프레임 등) — 데몬은 valid JSON 만 보낸다.
-                    Err(_) => {}
+                }
+                // ADR-0272 decision 6: a reply reaches the driver only when its request id cannot be read (a readable
+                //   one is matched in the transport, or reported there as unmatched) — no waiter to wake, log only.
+                AgentEvent::CommandReply { reply } => match protocol_state::reply_from_wire(&reply)
+                {
+                    Err(e) => tracing::warn!(
+                        peer = %self.key.peer_id(),
+                        generation = generation.0,
+                        event = "CommandReply",
+                        class = ?e.classify(),
+                        line = e.line(),
+                        column = e.column(),
+                        "a daemon command reply does not parse — no request id to wake; dropped"
+                    ),
+                    Ok(reply) => tracing::debug!(
+                        peer = %self.key.peer_id(),
+                        generation = generation.0,
+                        request_id = %reply.request_id,
+                        "a daemon command reply reached the driver — dropped"
+                    ),
+                },
+                AgentEvent::UsageLimitsUpdated {
+                    snapshot,
+                    subscribed,
+                } => self.relay_usage_snapshot(generation, &snapshot, &subscribed),
+                other => tracing::debug!(
+                    peer = %self.key.peer_id(),
+                    event = event_kind(&other),
+                    "a daemon event this driver does not handle — dropped"
+                ),
+            },
+        }
+    }
+
+    /// Hands a daemon command request to the command table, off the actor (ADR-0155 decision 4); its outcome goes back
+    /// only on connection `generation`, the one it came on.
+    fn accept_inbound(&self, generation: Generation, envelope: CommandEnvelope) {
+        let request_id = envelope.request_id;
+        let deliver = self.outcome_sink(generation);
+        match self.inbound.get() {
+            Some(receiver) => receiver.accept(envelope, deliver),
+            // Not dropped silently — the daemon would hold the round trip until its deadline. A missing table is an
+            //   assembly miss (`install_command_table` not called), so a retry would not help.
+            None => {
+                tracing::error!(
+                    peer = %self.key.peer_id(),
+                    %request_id,
+                    "a daemon command request came before a command table was installed — assembly miss \
+                     (install_command_table)"
+                );
+                deliver(BusReply::err(
+                    request_id,
+                    CommandError::internal("this client has no command table installed"),
+                ));
+            }
+        }
+    }
+
+    /// Where a command outcome goes — connection `generation` of the key's peer at the time the outcome is ready, never
+    /// a later connection (`send_command_outcome`).
+    fn outcome_sink(&self, generation: Generation) -> impl FnOnce(BusReply) + Send + 'static {
+        let registry = self.registry.clone();
+        let peer_id = self.key.peer_id().clone();
+        move |reply: BusReply| match registry.get(&peer_id) {
+            Some(peer) => send_command_outcome(&peer, generation, &reply),
+            None => tracing::warn!(
+                peer = %peer_id,
+                request_id = %reply.request_id,
+                generation = generation.0,
+                "a command outcome has no peer to go to — the link was closed; dropped"
+            ),
+        }
+    }
+
+    /// A usage snapshot of connection `generation`: matched against the interest, a resend queued on that connection
+    /// when the daemon's set differs, then handed to the windows with a usage slot (`UsageInterest::on_snapshot`).
+    /// ★The resend is queued under the usage lock★ (module doc) — so ahead of the frontend notice, which goes out with
+    /// no lock held (ADR-0006).
+    fn relay_usage_snapshot(
+        &self,
+        generation: Generation,
+        snapshot: &UsageLimitSnapshot,
+        subscribed: &[AgentBackendKind],
+    ) {
+        // Before the usage lock — the registry takes its own lock.
+        let peer = self.registry.get(self.key.peer_id());
+        let labels = {
+            let mut usage = self.usage.lock();
+            // The real clock, not the injected one — the webview pull ages the cache against `Instant::now()`.
+            let outcome = usage.on_snapshot(
+                generation.0,
+                snapshot,
+                subscribed,
+                std::time::Instant::now(),
+            );
+            if let Some(vendors) = outcome.resend {
+                match &peer {
+                    Some(peer) => write_usage_subscribe(peer, generation, vendors, "resend"),
+                    None => tracing::debug!(
+                        peer = %self.key.peer_id(),
+                        generation = generation.0,
+                        "a usage resend has no peer to go to — the link was closed"
+                    ),
                 }
             }
-            // Hello 전 binary 는 정상엔 없음 — 무시.
-            Message::Binary(_) => {}
-            Message::Close(_) => return Err(HandshakeError::ClosedBeforeHello),
-            Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
+            outcome.labels
+        };
+        // No window to receive it: a snapshot of a socket that is no longer current, or no window has a usage slot.
+        if !labels.is_empty() {
+            self.events
+                .usage_limits_updated(snapshot, &labels, generation.0);
         }
     }
-    // 스트림 종료(None) = 닫힘.
-    Err(HandshakeError::ClosedBeforeHello)
+
+    /// Writes the interest of the moment on the open connection when it differs from what that connection got.
+    fn nudge_usage(&self) {
+        let Some((peer, generation)) = self.open_peer() else {
+            tracing::debug!(
+                peer = %self.key.peer_id(),
+                "usage nudge: no open daemon connection — the next one gets the interest when it opens"
+            );
+            return;
+        };
+        let mut usage = self.usage.lock();
+        if let Some(vendors) = usage.sync(generation.0, false) {
+            write_usage_subscribe(&peer, generation, vendors, "nudge");
+        }
+    }
+
+    /// No connection is opened any more — callers wait or fail; pending fire-and-forgets stay for a later connection.
+    fn close_gate(&self) {
+        lock_gate(&self.gate).opened = None;
+        self.opened_tx.send_replace(());
+    }
+
+    /// Opens connection `generation` (module doc): the usage subscribe and the command registration are queued, then —
+    /// under the gate — the pending fire-and-forgets of this connection are written (older ones dropped, newer ones
+    /// kept) and the connection is set as opened. With no peer (the user closed, the connection's tail is still routed)
+    /// nothing is written or opened; the usage state still pairs this open with the `LinkDown` to come.
+    fn on_link_up(&mut self, generation: Generation) {
+        self.open = Some(generation);
+        let peer = self.registry.get(self.key.peer_id());
+        // The interest first, then the registration.
+        {
+            let mut usage = self.usage.lock();
+            let opened = usage.on_socket_open(generation.0);
+            if let (Some(vendors), Some(peer)) = (opened, &peer) {
+                write_usage_subscribe(peer, generation, vendors, "open");
+            }
+        }
+        let Some(peer) = peer else {
+            return;
+        };
+        self.register_commands(&peer, generation);
+        let (mut failed, mut dropped) = (Vec::new(), 0usize);
+        // ★The drain and the publish stay one critical section, before the signal★ — a caller's round trip writes
+        // only after it saw `opened` under the gate, so its own pending fire-and-forgets are already on the peer
+        // queue. Draining after the publish (or after the signal) lets that round trip overtake them.
+        {
+            let mut gate = lock_gate(&self.gate);
+            for (pending, cmd) in std::mem::take(&mut gate.pending) {
+                if pending == generation {
+                    if let Err(e) = peer.notify_in(generation, cmd) {
+                        failed.push(e);
+                    }
+                } else if pending > generation {
+                    gate.pending.push_back((pending, cmd));
+                } else {
+                    dropped += 1;
+                }
+            }
+            gate.opened = Some(Opened {
+                generation,
+                closes: gate.handle_closes,
+            });
+        }
+        self.opened_tx.send_replace(());
+        if dropped > 0 {
+            tracing::debug!(
+                peer = %self.key.peer_id(),
+                generation = generation.0,
+                dropped,
+                "fire-and-forget: pending for a connection that never opened — dropped"
+            );
+        }
+        for e in failed {
+            tracing::debug!(
+                peer = %self.key.peer_id(),
+                generation = generation.0,
+                error = %send_error_text(&e),
+                "fire-and-forget: not sent"
+            );
+        }
+    }
+
+    /// Sends this shell's command names to the daemon roster on connection `generation` (TRD §3-7 clause 1 — every
+    /// connect; a resend replaces the names, as the daemon roster is last-wins per name — ADR-0150 decision 3). The
+    /// request is queued in this step; the reply is read on a spawned task (module doc).
+    ///
+    /// ★A refusal is not retried on this connection★ — the names stay off the roster until the next one. Known limit:
+    /// the reply has the transport's request timeout ([`link_policy`]) — a daemon slower than that leaves a warn and no
+    /// refusal box.
+    fn register_commands(&self, peer: &Peer<ShellWire>, generation: Generation) {
+        let Some(receiver) = self.inbound.get() else {
+            tracing::debug!(
+                peer = %self.key.peer_id(),
+                generation = generation.0,
+                "no command table installed — nothing to register"
+            );
+            return;
+        };
+        let Some(cmd) = registration_command(receiver) else {
+            return;
+        };
+        let names = match &cmd {
+            AgentCommand::RegisterCommands { decls, .. } => {
+                // Just encoded by `registration_command` — failing to decode means that function changed.
+                match protocol_state::decls_from_wire(decls) {
+                    Ok(decls) => decls.len(),
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "the registration packet carries a declaration list that does not decode"
+                        );
+                        return;
+                    }
+                }
+            }
+            other => {
+                tracing::error!(?other, "the registration packet is not RegisterCommands");
+                return;
+            }
+        };
+        let refusals = self.refusals.clone();
+        let peer = peer.clone();
+        match start_now(async move { peer.request_in(generation, cmd).await }) {
+            Ok(answer) => report_registration(answer, names, generation, &refusals),
+            Err(reply) => {
+                tokio::spawn(async move {
+                    report_registration(reply.await, names, generation, &refusals);
+                });
+            }
+        }
+    }
+
+    /// One output frame of connection `generation` to the windows that show its agent (`frame_relay`).
+    fn relay_output(&mut self, generation: Generation, bytes: &[u8]) {
+        let windows = &self.windows;
+        let mut deliver =
+            |labels: &[WindowLabel], bytes: &[u8]| send_to_windows(windows, labels, bytes);
+        let relayed = relay_binary_frame(
+            bytes,
+            &mut self.flight,
+            &mut self.subs,
+            &self.router,
+            &mut self.unknown_tags,
+            self.clock.now(),
+            &mut deliver,
+        );
+        if relayed == FrameRelay::Disconnect {
+            self.drop_connection(generation, DisconnectCause::ReadFailed);
+        }
+    }
+
+    /// Fails every replay that made no progress within [`REPLAY_DEADLINE`]: one failure marker each, the slot kept (why = `ReplayFlightSet::check_deadlines`).
+    fn sweep_replay_deadlines(&mut self) {
+        for (agent_id, marker) in self.flight.check_deadlines(self.clock.now()) {
+            tracing::warn!(
+                peer = %self.key.peer_id(),
+                %agent_id,
+                gen = marker.generation,
+                "a replay made no progress before its deadline — failure marker sent; its Subscribe slot stays taken \
+                 until a late answer or the connection ends"
+            );
+            // Best effort — a failure has no Ack to take the epoch from; the view does not fence failure markers.
+            let epoch = known_epoch(&self.subs, agent_id).unwrap_or(0);
+            let frame = encode_marker_frame(agent_id, epoch, marker);
+            send_to_windows(&self.windows, &self.router.targets(agent_id), &frame);
+        }
+    }
+
+    fn apply(&mut self, out: Vec<Routed>) {
+        for routed in out {
+            match routed {
+                Routed::State(state) => {
+                    self.state_tx.send_replace(state);
+                    self.events.connection_state(frontend_state(state));
+                }
+                Routed::Broadcast(event) => {
+                    emit_broadcast(self.events.as_ref(), self.names.as_ref(), &event)
+                }
+                // The band / reconnect surface for notices is 3-2 U5 (ADR-0344/0345); routing already logged the
+                // refusal.
+                Routed::Notice(notice) => {
+                    tracing::debug!(peer = %self.key.peer_id(), ?notice, "daemon link notice")
+                }
+                Routed::LinkUp { generation } => self.on_link_up(generation),
+                // The per-connection reset: flights cleared without markers (the frontend re-requests on its
+                //   `connected` edge), unknown tags warned again on the next connection, the usage state forgets the
+                //   socket. Publishing `None` always wakes callers waiting for an opened connection, so they see the
+                //   loss now.
+                Routed::LinkDown { generation } => {
+                    self.open = None;
+                    self.flight.on_disconnect();
+                    self.unknown_tags = UnknownTagLog::default();
+                    if self.dropping == Some(generation) {
+                        self.dropping = None;
+                    }
+                    self.usage.lock().on_socket_lost(generation.0);
+                    self.close_gate();
+                }
+                // ★A daemon command request on a connection being dropped is skipped too — not run, not answered★. The
+                //   daemon does not fail it when the link closes: its delivery table reaps only
+                //   the round trips the closing connection started (`command_delivery.rs` `drop_origin` doc), so the
+                //   round trip ends at its delivery deadline as `TIMEOUT` (`CommandDeliveries::expire`). Running it
+                //   here would apply its side effects with an outcome that can never reach the daemon — the drop is
+                //   queued ahead of it and the connection is gone after.
+                Routed::ToDriver { generation, .. } if self.is_dropping(generation, "event") => {}
+                // ★Likewise a daemon command request in a closed link's tail★ (`close` leaves the old handle routed
+                //   until its `LinkDown`): its outcome can never reach the daemon — the peer is removed — so running it
+                //   would apply side effects for nothing; the daemon ends the round trip at its delivery deadline as
+                //   `TIMEOUT`, as above.
+                Routed::ToDriver {
+                    generation,
+                    event: AgentEvent::CommandRequest { .. },
+                } if self.current.is_none() => tracing::debug!(
+                    peer = %self.key.peer_id(),
+                    generation = generation.0,
+                    "a daemon command request of a closed link — not run"
+                ),
+                Routed::ToDriver { generation, event } => self.on_driver_event(generation, event),
+                Routed::Output { generation, .. } if self.is_dropping(generation, "output") => {}
+                Routed::Output { generation, bytes } => self.relay_output(generation, &bytes),
+            }
+        }
+    }
 }
+
+/// Whether connection `bound` of `peer` is opened for a caller that read close epoch `closes`; `false` while the actor
+/// has not opened it yet. `Err`: the peer was closed, or a close came after the connection was opened
+/// ([`NOT_CONNECTED`]), or connection `bound` is no longer the live one
+/// ([`UNSENT_ON_DISCONNECT`]).
+fn opened_now(
+    peer: &Peer<ShellWire>,
+    bound: Generation,
+    closes: u64,
+    gate: &Mutex<Gate>,
+) -> Result<bool, String> {
+    match peer.peer_state() {
+        PeerState::Closed => return Err(NOT_CONNECTED.to_owned()),
+        state if !state.is_live() => return Err(UNSENT_ON_DISCONNECT.to_owned()),
+        _ if peer.generation() != bound => return Err(UNSENT_ON_DISCONNECT.to_owned()),
+        _ => {}
+    }
+    let opened = lock_gate(gate).opened;
+    match opened {
+        Some(opened) if opened.generation == bound && opened.closes < closes => {
+            Err(NOT_CONNECTED.to_owned())
+        }
+        Some(opened) => Ok(opened.generation == bound),
+        None => Ok(false),
+    }
+}
+
+/// What became of a fire-and-forget at the caller.
+enum FireOutcome {
+    Written(Result<(), engram_dashboard_transport::SendError>),
+    Pending,
+    Closed,
+    Full,
+}
+
+fn usage_subscribe(vendors: BTreeSet<AgentBackendKind>) -> AgentCommand {
+    AgentCommand::UsageSubscribe {
+        vendors: vendors.into_iter().collect(),
+    }
+}
+
+/// Queues the usage subscribe on connection `generation`. ★A failure does not drop the connection★ — unlike a replay
+/// `Subscribe` no slot waits on it, and a connection that ended sends the whole interest again on its successor.
+fn write_usage_subscribe(
+    peer: &Peer<ShellWire>,
+    generation: Generation,
+    vendors: BTreeSet<AgentBackendKind>,
+    why: &'static str,
+) {
+    if let Err(e) = peer.notify_in(generation, usage_subscribe(vendors)) {
+        tracing::debug!(
+            peer = %peer.id(),
+            generation = generation.0,
+            why,
+            error = %e,
+            "a usage subscribe was not queued"
+        );
+    }
+}
+
+/// Polls `future` once on this task, so what it does before its first wait happens in this step (a request is queued
+/// on the peer); the rest is handed back to run elsewhere. Polled with a no-op waker: the next poll, on the task that
+/// takes it, registers that task's waker.
+fn start_now<F: Future>(future: F) -> Result<F::Output, Pin<Box<F>>> {
+    let mut future = Box::pin(future);
+    match future
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+    {
+        Poll::Ready(output) => Ok(output),
+        Poll::Pending => Err(future),
+    }
+}
+
+/// Logs the registration's answer; a daemon refusal also goes to the refusal box (ADR-0281 — a local failure does not).
+fn report_registration(
+    answer: Result<ShellIn, RequestError>,
+    names: usize,
+    generation: Generation,
+    refusals: &RefusalAlerts,
+) {
+    let generation = generation.0;
+    match answer {
+        // A daemon `Error` reply is the daemon's refusal (ADR-0281 — `protocol_state::classify_reply`).
+        Ok(ShellIn::Event(AgentEvent::Error { message, .. })) => {
+            tracing::warn!(
+                names,
+                generation,
+                reason = %mask_reason(&message),
+                "the daemon refused the shell's command registration — its commands stay off the daemon roster \
+                 until the next connection"
+            );
+            refusals.surface(RefusalSite::Register, &message);
+        }
+        Ok(ShellIn::Event(_)) => {
+            tracing::info!(names, generation, "shell commands registered with the daemon")
+        }
+        // `ShellWire::reply_tag` never tags an output frame.
+        Ok(ShellIn::Output(bytes)) => tracing::warn!(
+            names,
+            generation,
+            bytes = bytes.len(),
+            "an output frame answered the shell's command registration"
+        ),
+        Err(RequestError::TimedOut { after }) => tracing::warn!(
+            names,
+            generation,
+            after_secs = after.as_secs(),
+            "the daemon did not answer the shell's command registration within the request timeout — its commands \
+             may be off the daemon roster until the next connection"
+        ),
+        Err(RequestError::Disconnected { sent: false, .. }) => tracing::debug!(
+            names,
+            generation,
+            "the shell's command registration was not sent — its connection already ended; a next connection, if \
+             any, registers again"
+        ),
+        Err(e) => tracing::warn!(
+            names,
+            generation,
+            error = %request_error_text(&e),
+            "the shell's command registration failed — its commands stay off the daemon roster until the next \
+             connection"
+        ),
+    }
+}
+
+fn frontend_state(state: ConnectionState) -> ConnectionStateEvent {
+    match state {
+        ConnectionState::Connected => ConnectionStateEvent::Connected,
+        ConnectionState::Reconnecting => ConnectionStateEvent::Reconnecting,
+        ConnectionState::Down => ConnectionStateEvent::Down,
+    }
+}
+
+fn event_kind(event: &AgentEvent) -> &'static str {
+    match event {
+        AgentEvent::SubscribeAck { .. } => "SubscribeAck",
+        AgentEvent::ReplayComplete { .. } => "ReplayComplete",
+        AgentEvent::SubscribeFailed { .. } => "SubscribeFailed",
+        AgentEvent::CommandRequest { .. } => "CommandRequest",
+        AgentEvent::CommandReply { .. } => "CommandReply",
+        AgentEvent::UsageLimitsUpdated { .. } => "UsageLimitsUpdated",
+        _ => "other",
+    }
+}
+
+#[cfg(test)]
+mod tests;

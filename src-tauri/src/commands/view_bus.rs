@@ -5,7 +5,7 @@
 //! (`commands/settings.rs`·`commands/layout.rs` 와 같은 분담).
 //!
 //! ## ★차분을 여기서 미는 이유★
-//! 셸의 등록은 **핸드셰이크 직후 한 번** 나간다(`daemon_client::connection` 의 `register_own_commands`).
+//! 셸의 등록은 **핸드셰이크 직후 한 번** 나간다(`daemon_client::connection` 의 `register_commands`).
 //! 웹뷰의 보고는 그 시점과 아무 순서 관계가 없다 — 창 스크립트가 늦게 올라오면 그 연결의 등록 패킷에는
 //! 화면 이름이 **하나도 안 실린다**. 그대로 두면 다음 재연결까지 화면 명령이 통째로 `UNKNOWN_COMMAND` 다.
 //! 그래서 명단이 실제로 바뀐 보고에 한해 `UpdateCommands` 를 낸다(TRD §3-7 조항 3).
@@ -108,7 +108,7 @@ async fn push_delta(
     let cmd = AgentCommand::UpdateCommands {
         // ★데몬은 이 칸을 쓰지 않는다★ — 명부 주인은 그 패킷이 온 연결에서 파생된다. 등록 패킷과 **같은
         //   광고 문자열**을 적어 데몬 로그에서 두 패킷이 같은 셸의 것으로 보이게 한다.
-        owner: crate::daemon_client::connection::shell_owner_advert(),
+        owner: crate::daemon_client::inbound::shell_owner_advert(),
         added,
         removed,
         request_id: RequestId::new(),

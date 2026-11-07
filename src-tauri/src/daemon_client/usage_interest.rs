@@ -23,15 +23,15 @@
 //! 싣지 않고, 연결 태스크 전용 메서드(`sync`·`on_socket_open`·`on_socket_lost`·`on_snapshot`)는 `daemon_client`
 //! 밖에 열지 않는다.
 //!
-//! ## ★소켓 표식 가드★
-//! 연결 태스크가 부르는 메서드는 모두 자기 소켓 표식(`socket_epoch` — ADR-0195 · `0` = 소켓 없음)을 싣고,
-//! 지금 표식이 아니면(여닫기의 열기는 본 가장 큰 표식보다 크지 않으면) 아무것도 안 한다 — 승계로 밀려난
-//! 태스크의 늦은 호출이 새 소켓의 `sent`·캐시를 덮지 못하게. 대소 비교가 뜻을 갖는 것은 표식 채번기가
-//! 되감기지 않기 때문이고(`lifecycle.rs`), 그래서 셸 프로세스 수명 안에서만 성립한다.
+//! ## ★Socket epoch guard★
+//! Every method the connection driver calls carries its socket epoch (`socket_epoch` — the transport connection
+//! generation · ADR-0195 · `0` = no socket) and does nothing unless it is the current one (an open does nothing unless
+//! it is greater than the largest seen) — so a late call for an older connection cannot overwrite the new one's
+//! `sent` or cache. Ordering by size means something because generations never rewind (the transport mints them from
+//! one counter per peer name within a registry), so it holds within one shell process.
 //!
-//! ## 락 차례
-//! 이 상태를 감싸는 락은 `ViewManager → 사용량 관심 → lifecycle` 차례의 가운데다 — 잎이 **아니다**(넛지를
-//! 넣는 자리가 lifecycle 락을 잡는다). 이 파일은 락을 모른다.
+//! ## Lock order
+//! The lock around this state comes after `ViewManager` (`super::SharedUsageInterest` doc). This file knows no lock.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
@@ -246,14 +246,16 @@ impl UsageInterest {
         }
     }
 
-    /// 연결 태스크가 소켓 `socket_epoch` 에 쓸 `UsageSubscribe` 집합 — `None` = 쓸 것 없음.
+    /// The `UsageSubscribe` set the connection driver writes on connection `socket_epoch` — `None` = nothing to write.
     ///
-    /// - `force` = ⟳ 새로고침 프레임을 쓰기 직전 — 늘 관심을 준다(같은 집합이면 데몬에서 멱등).
-    /// - 넛지를 꺼낼 때(`force = false`): 대기 중인 줄임이 있으면 관심에 `sent` 밖 회사가 있을 때만(순수 줄임은
-    ///   기한의 몫), 없으면 관심 ≠ `sent` 일 때만.
+    /// - `force` = right before a ⟳ refresh frame — always gives the interest (the daemon is idempotent for the same
+    ///   set).
+    /// - When a nudge is taken (`force = false`): with a pending shrink, only if the interest has a vendor outside
+    ///   `sent` (a pure shrink is the deadline's job); otherwise only if the interest ≠ `sent`.
     ///
-    /// `Some` 이면 `sent := 관심` · 대기 중인 줄임 무효. `sent` 기준이라 거푸 불러도 둘째부터 `None` 이다(멱등 —
-    /// 새 소켓의 `cmd_tx` 저장 직후 넛지가 여기 기댄다). 지금 소켓이 아니면 `None`.
+    /// `Some` means `sent := interest` and the pending shrink is void. Being based on `sent`, repeated calls give
+    /// `None` from the second on (idempotent — the nudge right after a connection opens relies on it). Not the
+    /// current connection → `None`.
     pub(super) fn sync(
         &mut self,
         socket_epoch: u64,

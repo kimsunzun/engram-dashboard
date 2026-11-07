@@ -17,10 +17,11 @@
 //! 그 밖의 거름(다른 화신 표식 · 보는 창 없음)은 그 뷰가 받을 seq 줄기에 구멍을 내지 않는다 — 화신이 바뀐
 //! 뷰는 재부착이 전량 replay 를 청하고, 안 보는 창은 붙을 때 replay 를 청한다.
 //!
-//! ## ★연결 루프 밖으로 뗀 이유★
-//! 이 판정은 연결 태스크의 `select!` 안에 살았고 그 자리는 실 소켓을 요구한다. 여기로 내리면 소켓·Tauri 없이
-//! 한 장씩 태울 수 있다(아래 시험). `deliver` 가 인자인 이유는 `connection::apply_replay_event` 와 같다 — 실
-//! 배달구는 `tauri::ipc::Channel` 을 요구하지만 **어느 창으로 · 무슨 바이트를** 보내는지는 여기서 정해진다.
+//! ## ★Why it lives outside the connection driver★
+//! This verdict used to live inside the old connection task's `select!`, which needed a real socket. Here it runs
+//! one frame at a time with no socket or Tauri (the tests below). `deliver` is a parameter for the same reason as in
+//! `replay_events::apply_replay_event` — the real carrier needs a `tauri::ipc::Channel`, but **which window and which
+//! bytes** are decided here.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;

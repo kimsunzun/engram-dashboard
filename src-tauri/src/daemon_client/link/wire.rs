@@ -64,8 +64,8 @@ impl Wire for ShellWire {
     type DecodeError = ShellDecodeError;
 
     fn encode(&self, out: &AgentCommand) -> Frame {
-        // Every field of `AgentCommand` serializes infallibly (no non-string map keys; raw slots are already JSON) —
-        //   `connection::SERIALIZE_FAILED_PREFIX` documents the same branch as one that must not occur.
+        // Every field of `AgentCommand` serializes infallibly (no non-string map keys; raw slots are already JSON), so
+        //   this branch cannot occur.
         Frame::Text(serde_json::to_string(out).expect("AgentCommand always serializes to JSON"))
     }
 
@@ -215,8 +215,8 @@ mod tests {
     }
 
     #[test]
-    fn encode_is_the_same_json_text_the_old_driver_writes() {
-        // Byte equality with `connection::write_command` (`serde_json::to_string` → one text frame).
+    fn encode_is_one_text_frame_of_the_serde_json_text() {
+        // The daemon reads one JSON text frame per command (`serde_json::to_string` → one text frame).
         let cmd = AgentCommand::ListAgents {
             request_id: RequestId::new(),
         };
