@@ -2,7 +2,7 @@
 
 > Strength: light (1 collector · main-session spot grounding). Trigger: confirming the source of S21-storage TRD §10 F17 「최근 3 개 회전 보관(Firefox 류)」. Link: `docs/process/S21-storage/trd.md` §6-7 · §10 F17.
 > **Conclusion: there is no precedent for 「크래시 스냅숏 N 개 회전」 (rotating N crash snapshots).** Mature apps keep only the live file + a copy one generation back (+ the last clean-exit copy). Firefox's 「3 개」 (3 items) applies **only to upgrade backups**.
-> **Decision (2026-10-02, user decisions D1–D3):** F17 「최근 3 개 회전 보관」 withdrawn · crash copy = a single `shell\state\state.crash.json` · after a crash, always ask (Chromium style — rejected = Firefox style of quietly restoring the first crash). Reflected in TRD §6-5 · §6-7 · §14-9. **D8** (2026-10-02 — write failures are not handled separately) rests on the 「덧붙임」 (Addendum) below — TRD §6-4 · §14-10.
+> **Decision (2026-10-02, user decisions D1–D3):** F17 「최근 3 개 회전 보관」 withdrawn · crash copy = a single `shell\state\state.crash.json` · after a crash, always ask (Chromium style — rejected = Firefox style of quietly restoring the first crash). Reflected in TRD §6-5 · §6-7 · §14-9. **D8** (2026-10-02 — write failures are not handled separately) rests on the "Addendum" below — TRD §6-4 · §14-10.
 
 ## Comparison
 

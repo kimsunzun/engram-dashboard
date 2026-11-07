@@ -46,8 +46,8 @@ pub struct PhysRect {
 /// Window identity — compare whether it is the same window (the answer of [`top_level_at`]) · used as the reference of [`ZOrder::After`]. The caller does not
 /// know the inside (Windows = the HWND value).
 ///
-/// ★The value remains even after the window is gone★ — the OS may give the same value again to a new window, so equality between long-held values does not
-/// guarantee "the same window".
+/// ★The value remains even after the window is gone★ — the OS may give the same value again to a new window, so equality between long-held values does not guarantee 「같은
+/// 창」 (the same window).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NativeWindow(isize);
 

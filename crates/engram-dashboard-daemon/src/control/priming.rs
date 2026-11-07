@@ -160,7 +160,7 @@ fn normalized_token(raw: &str) -> String {
 ///     send`), aliases and calls split across lines are not seen. Instead of growing this into a parser, if that class really appears, we then
 ///     fix the priming side.
 ///   - **Bracket-type separators**: `{}` and quotes are folded as between-word symbols but `()` and `[]` are not — this is to avoid a false positive where prose like `engram
-///     (mail) family` gets caught as a command (that side is worse).
+///     (mail) 계열` (engram (mail) family) gets caught as a command (that side is worse).
 /// ★Limiting the family **to mail** is also intentional (do not widen it to arbitrary families)★: the invariant this decision guards is
 ///   ADR-0128/0099's **mail** teaching↔wiring equality, and the misattributed observation is also a mail send (`B_SENT`). The control family
 ///   (`engram help` · the later `engram agent …`) is a surface **every** spawn uses (ADR-0132 decisions 4 and 5), so counting even that

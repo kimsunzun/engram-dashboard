@@ -40,11 +40,11 @@
 | # | Point | Verdict | Applied |
 |---|---|---|---|
 | 1 | 「두 번 파싱 안 한다」 (it does not parse twice) is wrong — `RawValue` also has one validation scan on the outside + one parse at the edge | with a counter-proof · accepted | conclusion 2 corrected |
-| 2 | Reply matching inside `protocol` reads the `request_id` inside the envelope (`messages.rs:1048`) — missing how to pull out the number with an opaque field | accepted | as an open question in 「우리에게」 (For us) |
+| 2 | Reply matching inside `protocol` reads the `request_id` inside the envelope (`messages.rs:1048`) — missing how to pull out the number with an opaque field | accepted | as an open question in "For us" |
 | 3 | `RawValue` owned-form · buffering · untagged enum constraints omitted | accepted | conclusion 2 |
 | 4 | Zed is evidence for a central typed packet, not for an opaque field | accepted (the report already said so) | — |
 | 5 | Using the JSON precedent as performance evidence is an exaggeration | accepted | conclusion 1 |
-| 6 | Alternatives comparison omitted — `Value` · `Box<RawValue>` · generic packet `Packet<T>` · definition-only crate · evolution · TS impact | accepted | the alternatives table in 「우리에게」 |
+| 6 | Alternatives comparison omitted — `Value` · `Box<RawValue>` · generic packet `Packet<T>` · definition-only crate · evolution · TS impact | accepted | the alternatives table in "For us" |
 | 7 | Citation corrections — #355 is an adoption-request issue · the wezterm path is `mux::pane::PaneId` | accepted | source · body corrected |
 
 ## What was not seen
