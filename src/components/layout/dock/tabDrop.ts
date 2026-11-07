@@ -1,7 +1,7 @@
-// TRD S21-slot-docking §3-1 · §4-2 · §4-6: 놓기 명령 `tab_drop` 의 감싸개와 결과 알림 `tab_drop:done` 듣기 — 끌기 하나에 명령은
-//   끝난 뒤 많아야 둘(출처 dragend 의 `drag_end` · 받은 창의 `drop`)이고, 결과는 답이 아니라 출처 창의 `done` 으로 온다.
-// ★invoke/listen 을 직접 부른다★: 놓기는 셸이 주인인 웹뷰 안 배선이라 agentClient 가 나를 것이 아니고, 버스 명령도 아니다(같은
-//   동작의 LLM 명령 = T-65 `tab.dock` · TRD §3-6). 둘은 `TabDropIpc` 로 끊어 시험이 가짜를 꽂는다(ADR-0012).
+// TRD S21-slot-docking §3-1 · §4-2 · §4-6: the wrapper of the drop command `tab_drop` and listening to the result notice `tab_drop:done` — per drag at most two commands after
+//   it ends (`drag_end` of the source dragend · `drop` of the receiving window), and the result comes not as an answer but as the source window's `done`.
+// ★Call invoke/listen directly★: the drop is wiring inside a webview that the shell owns, so agentClient should not carry it, and it is not a bus command either (the LLM command
+//   for the same action = T-65 `tab.dock` · TRD §3-6). The two are cut apart with `TabDropIpc` so the test plugs in a fake (ADR-0012).
 // ADR-0296
 
 import { invoke } from '@tauri-apps/api/core'
@@ -20,18 +20,18 @@ export type { DropOutcome, DropTo, TabDrop, TabDropDone, TabDropReply }
 export const CMD_TAB_DROP = 'tab_drop'
 export const EVT_TAB_DROP_DONE = 'tab_drop:done'
 
-/** Tauri 와의 접점. `listen` 은 이 창으로 지목된 사건만 받고, 등록이 끝나면 푸는 함수로 풀린다. */
+/** Contact point with Tauri. `listen` receives only events addressed to this window, and when registration finishes it is released by the unlisten function. */
 export interface TabDropIpc {
   invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T>
   listen(event: string, handler: (payload: unknown) => void): Promise<() => void>
 }
 
 export interface TabDropClient {
-  /** 놓기 하나를 보낸다. 답은 로그용이다 — 결과는 `onDone` 으로 온다(`duplicate` 는 알림이 없다). IPC 오류면 거절한다. */
+  /** Send one drop. The answer is for logging — the result arrives through `onDone` (`duplicate` has no notice). If the IPC errors, it rejects. */
   send(drop: TabDrop): Promise<TabDropReply>
   /**
-   * 이 창으로 온 `tab_drop:done` 을 듣는다(출처 창만 받는다 — 셸이 명령의 `from` 에만 낸다). 반환 = 떼기 — 등록이 끝나기 전에
-   * 떼도 늦게 풀린 등록을 곧바로 푼다. 몸 모양이 계약과 다르면 경고하고 버린다.
+   * Listen to `tab_drop:done` that came to this window (only the source window receives it — the shell emits only to the command's `from`). Return = detach — even if detached before registration
+   * finishes, a late-resolved registration is released immediately. If the body shape differs from the contract, it warns and discards.
    */
   onDone(handler: (done: TabDropDone) => void): () => void
 }
@@ -74,7 +74,7 @@ export function createTabDropClient(ipc: TabDropIpc): TabDropClient {
         })
         .catch(err => {
           if (err instanceof RetryCancelledError) return
-          // 이 창은 놓기 결과를 못 받는다 — 바꿔 그리기는 그물(다음 tabs-updated · pointerdown)이 푼다.
+          // This window cannot receive the drop result — swap redraw is released by the net (next tabs-updated · pointerdown).
           console.error(`[tabDrop] ${EVT_TAB_DROP_DONE} 구독 최종 실패:`, err)
         })
       return () => {
@@ -87,11 +87,11 @@ export function createTabDropClient(ipc: TabDropIpc): TabDropClient {
 }
 
 const tauriIpc: TabDropIpc = {
-  // ★`target` = 자기 label★ — 셸이 `emit_to` 로 그 창에만 내도 기본 타깃 `Any` 는 남의 창으로 지목된 알림까지 받는다(TRD §2-2 ·
-  //   `api/restoreClient.ts` 의 같은 조항). 몸에 창 label 이 없어 받은 쪽이 가를 수도 없다.
+  // ★`target` = its own label★ — even if the shell emits only to that window with `emit_to`, the default target `Any` also receives notices addressed to another window (TRD §2-2 ·
+  //   the same clause of `api/restoreClient.ts`). The body has no window label, so the receiver cannot tell them apart either.
   listen: (event, handler) => listen<unknown>(event, e => handler(e.payload), { target: getCurrentWindow().label }),
   invoke: <T>(cmd: string, args?: Record<string, unknown>) => invoke<T>(cmd, args),
 }
 
-/** 웹뷰마다 하나. */
+/** One per webview. */
 export const tabDropClient: TabDropClient = createTabDropClient(tauriIpc)

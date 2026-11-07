@@ -1,20 +1,20 @@
-// ★임시/PROVISIONAL★: 사용자가 추후 정식 재설계 예정 — 지금은 최소 자족(self-contained) 구현이다.
+// ★Temporary/PROVISIONAL★: the user plans a proper redesign later — for now it is a minimal self-contained implementation.
 //
-// 사용자 결정 2026-10-01: 대기 표시는 대화 스크롤 목록 밖, 입력창 바로 위의 자기 줄(`WaitStrip`)에 선다. ★그 줄은 늘
-//   마운트돼 있고 높이는 `--chat-wait-strip-h` 하나로 고정이다★ — 표시가 켜지고 꺼져도 대화 목록 높이가 그대로라 글이
-//   튀지 않는다. 목록 끝 꼬리로 되돌리면 턴이 끝날 때마다 마지막 줄들이 표시 높이만큼 들썩인다.
-// ★타이머 정체성(load-bearing)★: 경과 초는 `WaitRow` 인스턴스가 쥔다 — `streaming` 이 켜질 때 마운트돼 0 부터 세고
-//   꺼질 때 사라진다. 줄 안 같은 자리에 같은 타입 하나뿐이라 그 사이 리렌더로는 다시 마운트되지 않는다.
-// ★「중단하는 중」(ADR-0244)은 같은 인스턴스의 prop 이다★ — 다른 컴포넌트·key 로 갈라 그리면 끊기가 거절돼 대기
-//   표시로 돌아올 때 경과 초가 0 이 된다. 그래서 그동안에도 타이머는 돈다(보이지만 않는다).
+// User decision 2026-10-01: the wait indicator stands outside the conversation scroll list, on its own row (`WaitStrip`) right above the input box. ★That row is always
+//   mounted and its height is fixed by the single `--chat-wait-strip-h`★ — even when the indicator turns on and off the conversation list height stays the same, so text
+//   does not jump. Moving it back to a tail at the end of the list would make the last lines bounce by the indicator height every time a turn ends.
+// ★Timer identity (load-bearing)★: the elapsed seconds are held by the `WaitRow` instance — it mounts when `streaming` turns on and counts from 0,
+//   and disappears when it turns off. It is the only one of the same type in the same position in the row, so a re-render in between does not remount it.
+// ★「중단하는 중」 (interrupting) (ADR-0244) is a prop of the same instance★ — if drawn split into another component or key, then when the interrupt is refused and it goes back to the wait
+//   indicator the elapsed seconds would be 0. So the timer keeps running in the meantime (it is just not visible).
 
 import { useEffect, useState, type ReactNode } from 'react'
 import { CircleStop } from 'lucide-react'
 
 import { t } from '../../../i18n'
 
-// ADR-0263 — 입력창 위 고정 대기 줄(ADR-0244 구현 세부 b 개정).
-/** @param label 오른쪽 칸 — 대기 글이 먼저 자리를 잡고 좁으면 이쪽이 줄어든다(넘기는 쪽이 `min-w-0 truncate` 를 단다). */
+// ADR-0263 — fixed wait row above the input box (amendment of ADR-0244 implementation detail b).
+/** @param label right-hand area — wait text takes its place first and this side shrinks when narrow (the passing side attaches `min-w-0 truncate`). */
 export function WaitStrip({
   streaming,
   interrupting,
@@ -28,7 +28,7 @@ export function WaitStrip({
     <div
       data-wait-strip="1"
       className="flex flex-none items-center gap-2 overflow-hidden pr-3"
-      // 왼쪽 = 대화 행 본문 들여쓰기(ChatRow px-4 + 레일 칸) — 레일 점·연결선은 그리지 않는다.
+      // Left = conversation row body indentation (ChatRow px-4 + rail area) — the rail dot · connector are not drawn.
       style={{ height: 'var(--chat-wait-strip-h)', paddingLeft: 'calc(1rem + var(--chat-rail-gutter))' }}
     >
       {streaming && (
@@ -45,13 +45,13 @@ export function WaitRow({ interrupting = false }: { interrupting?: boolean }) {
   const [seconds, setSeconds] = useState(0)
 
   useEffect(() => {
-    // cleanup 의 clearInterval 은 불변 — 누수·테스트 act 경고 방지.
+    // The cleanup clearInterval is invariant — prevents leaks and test act warnings.
     const id = setInterval(() => setSeconds((s) => s + 1), 1000)
     return () => clearInterval(id)
   }, [])
 
   if (interrupting) {
-    // 결말 행(중단 — 굵게 · 강조색)과 같은 아이콘을 쓰되 톤은 대기 표시 그대로다 — 아직 멈춘 것이 아니다.
+    // Uses the same icon as the outcome row (interrupt — bold · accent color) but the tone stays that of the wait indicator — it has not stopped yet.
     return (
       <div
         data-wait-interrupting="1"

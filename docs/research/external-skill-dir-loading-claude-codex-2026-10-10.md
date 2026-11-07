@@ -1,171 +1,171 @@
-# 바깥 스킬 폴더를 claude · codex 에 네이티브 스킬로 적재할 수 있나 (2026-10-10)
+# Can an outside skill folder be loaded as native skills in claude · codex (2026-10-10)
 
-- **상태:** 조사 완료 · 결정 전(스킬 프리셋 구상 단계 — PRD 이전)
-- **방법:** `/research` medium · 갈래 2(claude · codex — 각 주계열 수집자 1, 공식 문서 + 설치본 실측) · 메인 grounding(실측 기록 · 생성 스키마 대조) · cross-family 적대 리뷰 1회(codex, effort high · 레벨 2~3 — 판정 FIX 6건, 아래 반영)
-- **대상판:** Claude Code 2.1.284 · codex-cli 0.156.1(소스 대조 = openai/codex main `d3f9b22`, 2026-10-09) · Windows 11
-- **확신도 범례:** 확실 = 실측 + 문서/소스 교차 · 가능성 높음 = 한 출처 지지, 반증 없음 · 불확실 = 미검
+- **Status:** survey done · before the decision (skill preset idea stage — before the PRD)
+- **Method:** `/research` medium · 2 tracks (claude · codex — 1 primary-family collector each, official docs + measured on the installed build) · main-session grounding (measurement records · comparison with the generated schema) · 1 cross-family adversarial review (codex, effort high · level 2~3 — verdict FIX with 6 items, applied below)
+- **Target versions:** Claude Code 2.1.284 · codex-cli 0.156.1 (source comparison = openai/codex main `d3f9b22`, 2026-10-09) · Windows 11
+- **Confidence legend:** certain = measured + cross-checked with docs/source · likely = supported by one source, no counter-evidence · uncertain = not checked
 
-## 결론
+## Conclusion
 
-**claude 는 두 모드 모두, codex 는 JSON 모드만 프로세스(또는 서버) 단위로 바깥 폴더를 네이티브 스킬로 붙일 수 있다.** codex 터미널 모드에는 실행 인자 · `-c` · 환경변수로 스킬 폴더를 더하는 길이 없고, 남는 길은 파일 시스템 배치(전역 · 작업 폴더)나 로컬 플러그인 설치(전역 설정을 바꾼다)다.
+**claude can attach an outside folder as native skills in both modes, and codex only in JSON mode, per process (or server).** codex terminal mode has no way to add a skill folder through a launch argument · `-c` · environment variable, and what remains is file system placement (global · working folder) or a local plugin install (which changes global settings).
 
-| | 길 | 단위 | 확신도 |
+| | Path | Unit | Confidence |
 |---|---|---|---|
-| claude | `--plugin-dir <dir>` → `<dir>/skills/<이름>/SKILL.md` (이름이 `<폴더>:<스킬>` 로 붙는다 · manifest 불요) | 프로세스 | 확실 |
-| claude | `--add-dir <dir>` → `<dir>/.claude/skills/<이름>/SKILL.md` (이름 접두 없음 · 그 폴더 읽기 권한도 준다) | 프로세스 | 확실 |
-| codex JSON | app-server 메서드 `skills/extraRoots/set {extraRoots:[절대경로]}` | app-server 프로세스 전체(스레드별 아님) | 확실(스키마 · `skills/list` 실측) · 실제 턴 적재는 가능성 높음 |
-| codex 터미널 | `~/.agents/skills` · `$CODEX_HOME/skills` · 작업 폴더~프로젝트 루트의 `.agents/skills` (디렉터리 정션 · 심볼릭 링크를 따라간다) | 전역 또는 작업 폴더 | 확실 |
-| codex 터미널 | 로컬 플러그인: `codex plugin marketplace add <로컬경로>` → `codex plugin add <PLUGIN@MARKETPLACE>` | 전역 설치(설정 파일을 바꾼다) | 가능성 높음(명령 존재만 확인 · 적재 미측) |
+| claude | `--plugin-dir <dir>` → `<dir>/skills/<이름>/SKILL.md` (the name gets `<폴더>:<스킬>` prefixed · no manifest needed) | process | certain |
+| claude | `--add-dir <dir>` → `<dir>/.claude/skills/<이름>/SKILL.md` (no name prefix · also grants read permission on that folder) | process | certain |
+| codex JSON | app-server method `skills/extraRoots/set {extraRoots:[절대경로]}` | the whole app-server process (not per thread) | certain (schema · `skills/list` measured) · loading in an actual turn is likely |
+| codex terminal | `~/.agents/skills` · `$CODEX_HOME/skills` · `.agents/skills` from the working folder up to the project root (directory junctions · symbolic links are followed) | global or working folder | certain |
+| codex terminal | local plugin: `codex plugin marketplace add <로컬경로>` → `codex plugin add <PLUGIN@MARKETPLACE>` | global install (changes the settings file) | likely (only the existence of the commands was confirmed · loading not measured) |
 
-**SKILL.md 형식은 양쪽이 같다**(frontmatter `name` · `description` + 본문 · 목록만 시스템 프롬프트에 오르고 본문은 쓸 때 읽는다). 이 PC 에선 `~/.agents/skills` 가 이미 `I:\Engram\core\claude-global-shared\skills` 로 정션돼 있어(2026-07-21) codex 전역에 공유 스킬이 이미 실려 있다(확실 — `dir` 실측).
+**The SKILL.md format is the same on both sides** (frontmatter `name` · `description` + body · only the list goes into the system prompt and the body is read when used). On this PC `~/.agents/skills` is already junctioned to `I:\Engram\core\claude-global-shared\skills` (2026-07-21), so the shared skills are already loaded in codex globally (certain — `dir` measured).
 
-## 발견
+## Findings
 
 ### claude
 
-1. **`--plugin-dir` · `--add-dir` 로 바깥 스킬이 네이티브로 실린다** — 확실. 실측: 가짜 스킬 셋을 만들어 `claude -p … --output-format stream-json --plugin-dir plug --plugin-dir nomanifest --add-dir adddir` → init 이벤트 `skills` 에 `zebra-adddir` · `zprobe:zebra-plug` · `nomanifest:zebra-nomani` 가 실렸고, 스킬을 쓰라 하자 Skill 도구 호출로 본문의 비밀어를 돌려줬다. 출처: https://code.claude.com/docs/en/skills · https://code.claude.com/docs/en/cli-reference
-   - **조건(리뷰 반영):** `--add-dir` 스킬 발견은 설정 출처 `project` 가 켜져 있어야 한다(기본 켬). `--safe-mode` · `strictPluginOnlyCustomization` 이면 안 실린다. `--bare` 는 자동 발견을 끄지만 `--add-dir` 스킬은 실린다(문서).
-2. **스킬 폴더를 더하는 설정 키 · 환경변수는 없다** — 가능성 높음(문서 요약 + `--help` 부재 · 설정 레퍼런스 전수 grep 은 안 했다). `permissions.additionalDirectories` 는 파일 접근만 준다. 간접 길로 개인 스킬 폴더 안의 심볼릭 링크, `CLAUDE_CONFIG_DIR`(설정 홈 전체를 옮긴다 — 인증 · 세션까지 딸려 가 프리셋 스위치로는 부적합 · 미측)가 있다.
-3. **작업 폴더 밖 파일 읽기는 기본 거부** — 확실(실측 `permission_denials:[Read …]`). `--add-dir` 또는 `--settings '{"permissions":{"additionalDirectories":[…]}}'` 로 풀린다(실측). **플러그인 스킬 본문은 읽기 권한 없이 실린다** — 단 SKILL.md 가 옆 파일 · 스크립트를 읽게 하면 그 폴더 권한이 따로 필요하다.
-4. **이어받기(`--resume`)** — 스킬 목록은 프로세스마다 새로 만든다(확실 — 플러그인 A 로 만든 세션을 B 만 주고 이어받자 init 목록에 B 만 있었다). **그러나 시스템 프롬프트(`--append-system-prompt-file` 포함)는 첫 요청 때 떠 둔 사본을 이어받기 뒤에도 쓴다** — 확실(CLI 레퍼런스 원문 · 압축되거나 새 대화일 때 바뀐다 · `--system-prompt-snapshot off` 로 끈다). **리뷰 반영:** 목록이 바뀌어도 이미 호출된 스킬 본문은 대화 맥락에 남고 압축도 예산 안에서 넘긴다(skills 문서). CLAUDE.md 가 그 사본 안인지는 불확실.
-5. **대체 주입 길** — `--append-system-prompt-file`(아무 절대경로 · 지금 쓰는 길) · CLAUDE.md `@경로` import(절대경로 허용 · 프로젝트 메모리에서 바깥을 가리키면 첫 회 승인 창 — 승인 안 했으면 조용히 안 실린다) · `.claude/rules/*.md`(`paths:` 로 범위 한정 가능) · `~/.claude/rules` 와 사용자 CLAUDE.md 는 승인 없이 바깥 import. 출처: https://code.claude.com/docs/en/memory
-6. **미검(리뷰 반영):** 실측은 전부 `-p` 였다 — 대화형 모드의 작업 폴더 신뢰 창과 `--add-dir` 스킬의 상호작용은 재지 않았다(permissions 문서상 `-p` 는 신뢰 창을 건너뛴다).
+1. **`--plugin-dir` · `--add-dir` load outside skills natively** — certain. Measured: made three fake skills and ran `claude -p … --output-format stream-json --plugin-dir plug --plugin-dir nomanifest --add-dir adddir` → the init event `skills` carried `zebra-adddir` · `zprobe:zebra-plug` · `nomanifest:zebra-nomani`, and when told to use the skill, it returned the body's secret word through a Skill tool call. Sources: https://code.claude.com/docs/en/skills · https://code.claude.com/docs/en/cli-reference
+   - **Conditions (review applied):** `--add-dir` skill discovery needs the settings source `project` to be on (on by default). With `--safe-mode` · `strictPluginOnlyCustomization` they are not loaded. `--bare` turns off automatic discovery, but `--add-dir` skills are still loaded (docs).
+2. **There is no settings key · environment variable that adds a skill folder** — likely (docs summary + no `--help` entry · a full grep of the settings reference was not done). `permissions.additionalDirectories` gives file access only. Indirect paths are a symbolic link inside the personal skill folder and `CLAUDE_CONFIG_DIR` (moves the whole settings home — authentication · sessions come along, so it is unsuitable as a preset switch · not measured).
+3. **Reading files outside the working folder is denied by default** — certain (measured `permission_denials:[Read …]`). It is lifted by `--add-dir` or `--settings '{"permissions":{"additionalDirectories":[…]}}'` (measured). **A plugin skill body is loaded without read permission** — but if SKILL.md makes it read neighboring files · scripts, permission on that folder is needed separately.
+4. **Resume (`--resume`)** — the skill list is rebuilt per process (certain — when a session made with plugin A was resumed with only B given, only B was in the init list). **However, the system prompt (including `--append-system-prompt-file`) uses the copy taken at the first request even after resume** — certain (CLI reference primary text · it changes when compacted or on a new conversation · turned off with `--system-prompt-snapshot off`). **Review applied:** even if the list changes, an already invoked skill body stays in the conversation context and compaction passes it along within budget (skills docs). Whether CLAUDE.md is inside that copy is uncertain.
+5. **Alternative injection paths** — `--append-system-prompt-file` (any absolute path · the path in use now) · CLAUDE.md `@경로` import (absolute paths allowed · when project memory points outside, a first-time approval dialog — if not approved, it silently does not load) · `.claude/rules/*.md` (scope can be limited with `paths:`) · `~/.claude/rules` and the user CLAUDE.md import from outside without approval. Source: https://code.claude.com/docs/en/memory
+6. **Not checked (review applied):** all measurements were `-p` — the interaction between the interactive mode's working-folder trust dialog and `--add-dir` skills was not measured (per the permissions docs, `-p` skips the trust dialog).
 
 ### codex
 
-7. **SKILL.md 스킬은 정식 기능이다(기능 플래그 불요)** — 확실. 발견 위치: `$CODEX_HOME/skills`(호환용 · deprecated) · `<OS 홈>/.agents/skills` · 시스템 폴더 · 프로젝트 `.codex/skills` · 프로젝트 루트(`.git`)~작업 폴더 각 층의 `.agents/skills` · 플러그인 스킬 · `extra_skill_roots`. 소스 `codex-rs/ext/skills/src/host_roots.rs:58-185`.
-8. **스킬 폴더를 더하는 CLI 인자 · `-c` 키 · 환경변수는 없다** — 확실(소스). `[skills]` 설정(`bundled.enabled` · `include_instructions` · `max_context_tokens` · `config=[{path|name, enabled}]`)은 이미 발견된 스킬을 켜고 끌 뿐이다. **그 켜고 끄기 규칙은 사용자 층과 세션 플래그 층에서만 읽는다**(`config/src/skills_config.rs:158-180` — 프로젝트 설정의 `[skills.config]` 는 안 먹는다 · `-c` 는 먹는다). 터미널 모드에선 값에 TOML 따옴표가 필요해 우리 명령줄 문자 가드에 걸린다(추론).
-9. **app-server `skills/extraRoots/set`** — 확실(0.156.1 생성 스키마 `v2/SkillsExtraRootsSetParams.json` 실재 · 실측: 설정 후 맨 작업 폴더에서 `skills/list` 가 바깥 스킬을 냈고 `skills/changed` 알림이 왔다). 실행 중 프로세스 전역이고 다음 턴의 개발자 메시지 목록에 반영된다(상류 시험 `app-server/tests/suite/v2/host_skills.rs` · 실제 모델 턴으로는 미측).
-10. **app-server `thread/resume` 도 `developerInstructions` · `config` 를 받는다** — 확실(0.156.1 생성 스키마 `v2/ThreadResumeParams.json` 에 칸 실재). ★우리 코드(`backend/codex/protocol.rs` 의 `ThreadResumeParams` 주석)는 「그 칸의 존재를 재 보지 않아 비워 둔다 — 실측으로 확인되면 더한다」고 적혀 있다 — **그 실측이 이것이다.** 단 이미 올라가 도는 스레드면 이어받기의 덮어쓰기가 무시되고 불일치만 보고된다(`thread_processor.rs:217-229`). ★**정정(같은 날 실측): 새 프로세스로 이어받아도 새 값은 오류 없이 버려진다**★ — 칸이 스키마에 있다는 것과 먹는다는 것은 다르다(아래 「codex 프리셋 주입, 실제 턴」).
-11. **`CODEX_HOME`** 은 설정 · 스킬 · 전역 AGENTS.md · 세션 · 인증을 통째로 옮긴다 — 에이전트별로 바꾸면 이어받기 조회와 인증이 깨진다(소스 확실 · 부작용은 가능성 높음). `~/.agents/skills` 는 OS 홈을 따라 같이 안 움직인다.
-12. **AGENTS.md 대체 길** — 층마다 `AGENTS.override.md` > `AGENTS.md` > `project_doc_fallback_filenames`(경로 구분자 · 점이 든 이름은 거절 — 절대경로 불가) · 프로젝트 루트~작업 폴더 · 상한 32 KiB · import 문법 없음. 바깥 파일을 절대경로로 가리킬 길이 없다(확실 — `core/src/agents_md.rs`).
-13. **샌드박스 `workspace-write` 는 디스크 전체 읽기를 준다**(쓰기만 제한) — 가능성 높음(소스 `protocol/src/permissions.rs:819-870` · Windows 실행 미측).
-14. **이어받기** — 스킬 목록은 턴마다 현재 디스크 · 설정으로 다시 만든다(가능성 높음 · 소스). developer_instructions 는 이어받기 메타데이터에 영속되지 않고 이어받기 인자 · 설정에서 온다.
-15. **로컬 플러그인 길(리뷰가 잡은 누락)** — `codex plugin marketplace add` 가 로컬 경로를 받고 `codex plugin add` 가 설치한다(설치본 `--help` 확인). 플러그인 스킬 폴더는 발견 위치에 든다(소스 `host_roots.rs:58-62`). 설치는 전역 설정을 바꾸므로 에이전트별 스위치가 아니다. 실행 단위로 `-c plugins."<id>".enabled=true` 를 쓸 수 있는지는 미검이고, 터미널 모드에선 큰따옴표가 가드에 걸린다(추론).
+7. **SKILL.md skills are an official feature (no feature flag needed)** — certain. Discovery locations: `$CODEX_HOME/skills` (for compatibility · deprecated) · `<OS 홈>/.agents/skills` · the system folder · project `.codex/skills` · `.agents/skills` at each level from the project root (`.git`) to the working folder · plugin skills · `extra_skill_roots`. Source `codex-rs/ext/skills/src/host_roots.rs:58-185`.
+8. **There is no CLI argument · `-c` key · environment variable that adds a skill folder** — certain (source). The `[skills]` settings (`bundled.enabled` · `include_instructions` · `max_context_tokens` · `config=[{path|name, enabled}]`) only turn already discovered skills on and off. **Those on/off rules are read only from the user layer and the session flag layer** (`config/src/skills_config.rs:158-180` — `[skills.config]` in project settings has no effect · `-c` does). In terminal mode the value needs TOML quotes, which trips our command-line character guard (inference).
+9. **app-server `skills/extraRoots/set`** — certain (the 0.156.1 generated schema `v2/SkillsExtraRootsSetParams.json` exists · measured: after setting it, `skills/list` from a bare working folder returned the outside skill and a `skills/changed` notification arrived). It is global to the running process and is reflected in the next turn's developer message list (upstream test `app-server/tests/suite/v2/host_skills.rs` · not measured with an actual model turn).
+10. **app-server `thread/resume` also accepts `developerInstructions` · `config`** — certain (the fields exist in the 0.156.1 generated schema `v2/ThreadResumeParams.json`). ★Our code (the `ThreadResumeParams` comment in `backend/codex/protocol.rs`) says 「그 칸의 존재를 재 보지 않아 비워 둔다 — 실측으로 확인되면 더한다」 — **that measurement is this one.** But for a thread that is already loaded and running, resume's overwrite is ignored and only the mismatch is reported (`thread_processor.rs:217-229`). ★**Correction (measured the same day): even when resuming in a new process, the new value is discarded without an error**★ — a field being in the schema is different from it taking effect (see 「codex 프리셋 주입, 실제 턴」 below).
+11. **`CODEX_HOME`** moves settings · skills · the global AGENTS.md · sessions · authentication all together — changing it per agent breaks resume lookup and authentication (source certain · side effects likely). `~/.agents/skills` follows the OS home and does not move with it.
+12. **AGENTS.md alternative path** — per layer `AGENTS.override.md` > `AGENTS.md` > `project_doc_fallback_filenames` (names containing path separators · dots are rejected — absolute paths impossible) · project root to working folder · cap 32 KiB · no import syntax. There is no way to point at an outside file by absolute path (certain — `core/src/agents_md.rs`).
+13. **The sandbox `workspace-write` grants read of the whole disk** (only writes are restricted) — likely (source `protocol/src/permissions.rs:819-870` · Windows execution not measured).
+14. **Resume** — the skill list is rebuilt every turn from the current disk · settings (likely · source). developer_instructions is not persisted in the resume metadata and comes from the resume arguments · settings.
+15. **Local plugin path (an omission the review caught)** — `codex plugin marketplace add` accepts a local path and `codex plugin add` installs it (confirmed in the installed build's `--help`). A plugin skill folder falls under the discovery locations (source `host_roots.rs:58-62`). Installing changes global settings, so it is not a per-agent switch. Whether `-c plugins."<id>".enabled=true` can be used per run is not checked, and in terminal mode the double quotes trip the guard (inference).
 
-### 추가 실측 — claude 이어받기의 시스템 프롬프트 사본 (2026-10-10)
+### Additional measurement — the system prompt copy on claude resume (2026-10-10)
 
-발견 4 의 문서 근거를 실측으로 굳혔다(haiku · `-p` · 같은 세션 id 로 이어받기 — `-p` 의 `--resume` 은 세션을 갈라 새로 만들지 않는다). **확실.**
+The docs basis of finding 4 was confirmed by measurement (haiku · `-p` · resume with the same session id — `--resume` in `-p` does not fork a new session). **Certain.**
 
-| 실행 | 인자 | 답(비밀어) |
+| Run | Arguments | Answer (secret word) |
 |---|---|---|
-| 1 | 새 대화 + a.md(ALPHA-7) | — |
-| 2 | 이어받기 + b.md(BRAVO-9) | **ALPHA-7** — 새 파일 무시, 첫 요청 사본 사용 |
-| 3 | 이어받기 + b.md + `--system-prompt-snapshot off` | **BRAVO-9** — 새 파일 반영 |
-| 4 | 새 대화 + b.md(대조) | BRAVO-9 |
-| 5 | 이어받기, 파일 인자 없음 | ALPHA-7 — off 실행이 사본을 덮어쓰지 않았다(대화 기록에 두 답이 다 있어 단독으로는 약한 증거) |
+| 1 | new conversation + a.md (ALPHA-7) | — |
+| 2 | resume + b.md (BRAVO-9) | **ALPHA-7** — new file ignored, first-request copy used |
+| 3 | resume + b.md + `--system-prompt-snapshot off` | **BRAVO-9** — new file reflected |
+| 4 | new conversation + b.md (control) | BRAVO-9 |
+| 5 | resume, no file argument | ALPHA-7 — the off run did not overwrite the copy (the conversation record holds both answers, so on its own this is weak evidence) |
 
-`claude --help`(2.1.284) 원문: `--system-prompt-snapshot <on|off>` — 기본 on 이면 첫 요청의 프롬프트(`--append-system-prompt` 포함)를 기록해 그 뒤 모든 요청 · 이어받기에 그대로 보내고(다른 글을 줘도) 압축 때까지 유지, off 면 매 요청 새로 만든다(「프롬프트 글을 다듬는 용도」라고 적혀 있다). 미검: off 가 프롬프트 캐시 적중에 주는 영향.
+`claude --help` (2.1.284) primary text: `--system-prompt-snapshot <on|off>` — by default on, it records the first request's prompt (including `--append-system-prompt`) and sends it unchanged on every later request · resume (even if given different text) and keeps it until compaction; off rebuilds it on every request (it says 「프롬프트 글을 다듬는 용도」). Not checked: the effect of off on prompt cache hits.
 
-### 추가 실측 — codex 프리셋 주입, 실제 턴 (2026-10-10)
+### Additional measurement — codex preset injection, actual turns (2026-10-10)
 
-codex-cli 0.156.1 · 모델 gpt-6-sol · effort low · 실제 턴 약 15회. 터미널 모드는 같은 `-c` 를 받는 `codex exec` 로 대신 쟀다(대화형 TUI 미측). **확실(이 판 · 대조 실행으로 확인).**
+codex-cli 0.156.1 · model gpt-6-sol · effort low · about 15 actual turns. Terminal mode was measured instead with `codex exec`, which accepts the same `-c` (interactive TUI not measured). **Certain (this build · confirmed with control runs).**
 
-| 모드 | 부품 | 새 대화 | 이어받기 |
+| Mode | Part | New conversation | Resume |
 |---|---|---|---|
-| JSON | 지시문(`developerInstructions`) | **됨** | **안 됨** — 새 값을 오류 · 경고 없이 버린다(대조: 지시문 없이 시작한 스레드를 새 값으로 이어받자 「NONE」 · 기록에 새 값 0회). 지시문 없이 이어받으면 첫 지시문이 기록에서 그대로 살아 있다 |
-| JSON | 네이티브 스킬(`skills/extraRoots/set` → `thread/start`) | **됨** — 모델이 SKILL.md 를 읽고 ZULU-42 | **됨 — 새 프로세스에서 다시 set 해야** 한다. 스킬 목록은 턴마다 지금 프로세스 기준으로 다시 만들어 새 블록을 덧붙인다(set 안 하면 목록에서 빠지고, set 하면 돌아온다) |
-| 터미널(`codex exec`) | 지시문(`-c developer_instructions=…`) | **됨** | **안 됨** — `codex exec resume` 의 `-c developer_instructions` 를 말없이 버린다(대조 「NONE」) |
-| 터미널 | 네이티브 스킬 | **경로 없음** — `--help` · 설정 스키마 · 바이너리 문자열 모두 스킬 폴더를 더하는 키 · 인자 · 환경변수가 없다. `-c skills.config=[{path=…}]` 는 이미 발견된 스킬만 켜고 끈다(실측 NOSKILL). 작업 폴더 `.agents/skills` 정션만 됨(ZULU-42 · 작업 폴더를 건드린다) | 미측 |
+| JSON | instructions (`developerInstructions`) | **works** | **does not work** — the new value is discarded without an error · warning (control: when a thread started without instructions was resumed with a new value, 「NONE」 · the new value appears 0 times in the record). When resumed without instructions, the first instructions stay alive in the record unchanged |
+| JSON | native skills (`skills/extraRoots/set` → `thread/start`) | **works** — the model read SKILL.md and said ZULU-42 | **works — must be set again in the new process**. The skill list is rebuilt every turn against the current process and a new block is appended (if not set, it drops out of the list; if set, it comes back) |
+| terminal (`codex exec`) | instructions (`-c developer_instructions=…`) | **works** | **does not work** — `codex exec resume` silently discards `-c developer_instructions` (control 「NONE」) |
+| terminal | native skills | **no path** — `--help` · the settings schema · binary strings all have no key · argument · environment variable that adds a skill folder. `-c skills.config=[{path=…}]` only turns already discovered skills on and off (measured NOSKILL). Only a working-folder `.agents/skills` junction works (ZULU-42 · it touches the working folder) | not measured |
 
-- 미측 갈래: `thread/resume` 의 `config`(자유 형식 객체) · `baseInstructions` 가 이어받기에 먹는지. 대화형 TUI `codex resume`.
+- Branches not measured: whether `config` (a free-form object) and `baseInstructions` of `thread/resume` take effect on resume. Interactive TUI `codex resume`.
 
-### 추가 실측 · 웹 — codex 이어받기에서 지시문을 바꾸는 길 (2026-10-10)
+### Additional measurement · web — ways to change instructions on codex resume (2026-10-10)
 
-대조 설계: 지시문 없이 시작한 스레드 → 새 프로세스로 이어받으며 후보로 「preset word X」 전달 → 「없으면 NONE」. 각 1회 · 판정 근거는 답 + 롤아웃(`~/.codex/sessions`)에 X 가 적혔나.
+Control design: a thread started without instructions → resumed in a new process passing 「preset word X」 as the candidate → 「없으면 NONE」. Once each · the basis of the verdict is the answer + whether X was written in the rollout (`~/.codex/sessions`).
 
-| 후보 | 모드 | 결과 |
+| Candidate | Mode | Result |
 |---|---|---|
-| `thread/resume.developerInstructions` · `config.developer_instructions` | JSON | **무시**(오류 · 경고 없음) |
-| `codex exec resume -c developer_instructions=…` | 터미널 | **무시** |
-| `collaborationMode.settings.developer_instructions`(default 모드 · `turn/start` 와 `thread/settings/update` 둘 다 · 실험 API) | JSON | **무시** — 설정엔 적히나 모델 입력에 안 들어간다 |
-| 같은 것, plan 모드 | JSON | 먹음 — 단 에이전트가 plan 모드로 바뀌어 일반 작업에 못 쓴다 |
-| `thread/resume.baseInstructions` | JSON | 먹음 — 단 codex 기본 지시문 **전체를 대체**하고 영속되지 않는다(매 이어받기 재전송 필요) · 프리셋 통로로 부적합 |
-| **`turn/start.additionalContext` `{키:{value, kind:"application"}}`(실험 API)** | JSON | **먹음** — developer 역할 메시지로 기록에 한 번 적히고 이어받기 뒤에도 남는다. `kind:"untrusted"` 는 user 역할 인용문으로 들어간다 |
-| **`thread/inject_items` developer 메시지(실험 API)** | JSON | **먹음** — 위와 같고 턴에 묶이지 않는다 |
-| **작업 폴더 AGENTS.md 변경 · 신설** | JSON · 터미널 | **먹음** — 이어받을 때(스레드를 올릴 때) 다시 읽어 「이전 AGENTS.md 지시를 모두 대체한다」 메시지를 덧붙인다. 같은 프로세스 안 턴 사이에는 다시 읽지 않는다 |
-| `project_doc_fallback_filenames=["ENGRAM.md"]`(이어받기 `config` · 터미널 `-c`) | JSON · 터미널 | 먹음 — **단 작업 폴더에 AGENTS.md 가 없을 때만**(있으면 AGENTS.md 만 실린다 · `AGENTS.override.md` 는 AGENTS.md 를 가린다) |
+| `thread/resume.developerInstructions` · `config.developer_instructions` | JSON | **ignored** (no error · warning) |
+| `codex exec resume -c developer_instructions=…` | terminal | **ignored** |
+| `collaborationMode.settings.developer_instructions` (default mode · both `turn/start` and `thread/settings/update` · experimental API) | JSON | **ignored** — it is written in the settings but does not enter the model input |
+| the same, plan mode | JSON | takes effect — but the agent switches to plan mode and cannot be used for ordinary work |
+| `thread/resume.baseInstructions` | JSON | takes effect — but it **replaces the whole** codex default instructions and is not persisted (must be resent on every resume) · unsuitable as a preset channel |
+| **`turn/start.additionalContext` `{키:{value, kind:"application"}}` (experimental API)** | JSON | **takes effect** — written once in the record as a developer-role message and remains after resume. `kind:"untrusted"` enters as a user-role quotation |
+| **`thread/inject_items` developer message (experimental API)** | JSON | **takes effect** — same as above and not tied to a turn |
+| **Changing · creating the working folder's AGENTS.md** | JSON · terminal | **takes effect** — it is read again on resume (when the thread is loaded) and a message 「이전 AGENTS.md 지시를 모두 대체한다」 is appended. It is not read again between turns within the same process |
+| `project_doc_fallback_filenames=["ENGRAM.md"]` (resume `config` · terminal `-c`) | JSON · terminal | takes effect — **but only when the working folder has no AGENTS.md** (if it does, only AGENTS.md is loaded · `AGENTS.override.md` hides AGENTS.md) |
 
-- **덧붙이기만 된다** — `additionalContext` · `inject_items` 는 옛 프리셋을 지우지 못한다. 바뀐 것은 「바뀌었다」고 명시해 덧붙여야 하고(그렇게 했을 때 새것을 따랐다 · n=1), 충돌 시 새것 우선은 보장이 아니다.
-- **웹(원문 · `gh api` 로 이슈 상태 확인):** openai/codex #19045(open) — 이어받기 · 포크의 `developerInstructions` 무시는 **알려진 버그**(이미 올라간 스레드의 무시는 의도 — `thread_processor.rs` 의 mismatch 문자열). #43295 · #43309(open) — AGENTS.md 가 바뀌면 묶음 전체를 덧붙여 맥락이 넘칠 수 있다 · 「얼리기」 정책 요청. #16607(open) — 이어받은 스레드가 옛 스킬 목록을 유지한다는 보고이나, **우리 0.156.1 실측(`extraRoots` 재설정)에서는 새 스킬 블록이 덧붙었다.** 최신 릴리스는 rust-v0.162.1(설치본 0.156.1).
-- **웹(t3code 소스 주석 · 미검):** codex 는 압축 때 클라이언트가 넣은 developer 메시지를 버린다 — t3code 는 압축 뒤 `thread/inject_items` 로 다시 넣는다. paseo · t3code 는 `turn/start` 마다 `collaborationMode` 지시문을 싣는다(위 실측상 default 모드에서는 안 먹었다 — 모델 카탈로그 덮어쓰기가 가릴 수 있다는 소스 주석이 있다).
-- 미측: 대화형 TUI · 압축 뒤 `additionalContext` 생존 · 「바뀌었다」 문구 없는 충돌.
+- **Only appending works** — `additionalContext` · `inject_items` cannot erase an old preset. What changed must be appended with an explicit 「바뀌었다」 (when done that way, the new one was followed · n=1), and that the new one wins on conflict is not guaranteed.
+- **Web (primary text · issue state checked with `gh api`):** openai/codex #19045 (open) — ignoring `developerInstructions` on resume · fork is a **known bug** (ignoring on an already loaded thread is intended — the mismatch string in `thread_processor.rs`). #43295 · #43309 (open) — when AGENTS.md changes, the whole bundle is appended and the context can overflow · a request for a 「얼리기」 policy. #16607 (open) — a report that a resumed thread keeps the old skill list, but **in our 0.156.1 measurement (resetting `extraRoots`) a new skill block was appended.** The latest release is rust-v0.162.1 (installed 0.156.1).
+- **Web (t3code source comments · not checked):** codex discards client-inserted developer messages on compaction — t3code puts them back with `thread/inject_items` after compaction. paseo · t3code carry the `collaborationMode` instructions on every `turn/start` (per the measurement above, they did not take effect in default mode — a source comment says a model catalog override may hide them).
+- Not measured: interactive TUI · whether `additionalContext` survives compaction · conflicts without a 「바뀌었다」 phrase.
 
-### 추가 실측 — codex JSON 프리셋 수명 전체 (2026-10-10)
+### Additional measurement — the full lifetime of a codex JSON preset (2026-10-10)
 
-codex-cli 0.156.1 · gpt-6-sol · effort low · 단계마다 새 app-server 프로세스 · 각 1회. 결론 = **이어받으며 프리셋(지시서 + 네이티브 스킬)을 바꿀 수 있다 — 단 처리 셋이 더 필요하다.** 가능성 높음(n=1).
+codex-cli 0.156.1 · gpt-6-sol · effort low · a new app-server process at each step · once each. Conclusion = **the preset (instructions + native skills) can be changed while resuming — but three more handlings are needed.** Likely (n=1).
 
-| 단계 | 결과 |
+| Step | Result |
 |---|---|
-| 시작: `extraRoots`=A + `developerInstructions`=A | 지시 A · 스킬 alpha 동작 |
-| 이어받기: `extraRoots`=B + `additionalContext` B | 지시 B 적용 · 스킬 목록이 새로 덧붙어 alpha 빠지고 bravo 들어옴. **단 alpha 로 앞서 읽은 내용은 대화 기록에 남아 모델이 기억한다** |
-| 이어받기, 아무것도 안 보냄 | B 유지(기록) |
-| 같은 키 · 같은 값 재전송 | 프로세스 안에서는 한 번만 적힌다(키+값 중복 제거, 압축 뒤에도 유지). 새 프로세스의 첫 턴은 다시 적는다 |
-| **압축(`thread/compact/start`)** | **developer 메시지가 전부 빠진다 — 프리셋 B 와 시작 때 `developerInstructions` A 까지.** B 는 암호화된 요약을 통해서만 답에 살아남았고 A 는 사라졌다. 같은 값 재전송은 중복 제거로 안 적히고, 값을 바꾸거나(`[rev 2]`) `thread/inject_items` 로 다시 넣으면 적힌다 |
-| 「바뀌었다」 문구 없는 충돌(시작 CHERRY → 이어받기 DATE) | DATE 를 따랐다. 물으면 둘 다 본다고 답한다 |
+| Start: `extraRoots`=A + `developerInstructions`=A | instructions A · skill alpha worked |
+| Resume: `extraRoots`=B + `additionalContext` B | instructions B applied · the skill list was appended anew, alpha dropped out and bravo came in. **But what was read earlier through alpha stays in the conversation record and the model remembers it** |
+| Resume, nothing sent | B kept (record) |
+| Resend the same key · same value | written only once within a process (key+value deduplication, kept even after compaction). The first turn of a new process writes it again |
+| **Compaction (`thread/compact/start`)** | **all developer messages drop out — preset B and even the `developerInstructions` A from the start.** B survived in the answer only through the encrypted summary and A disappeared. Resending the same value is not written because of deduplication, and changing the value (`[rev 2]`) or putting it back with `thread/inject_items` does get written |
+| Conflict without a 「바뀌었다」 phrase (start CHERRY → resume DATE) | followed DATE. When asked, it answers that it sees both |
 
-- **캐시:** 바꾸지 않은 이어받기는 약 99% 캐시 적중. 프리셋 교체는 한 번에 약 6.6k 토큰을 캐시 없이 읽는다 — 대부분 스킬 목록 전체 재전송(약 21k 글자) 몫이고 프리셋 글 자체는 작다. 스킬 목록은 원격 플러그인 캐시가 바뀌기만 해도 다시 실려 같은 비용이 교체 없이도 생긴다. 다시 실릴 때마다 맥락이 그만큼 늘어난다(다음 압축까지).
-- ★**기존 동작에 대한 곁가지 발견:**★ 지금 우리 codex JSON 프라이밍(ADR-0215 · `developerInstructions`)도 압축 뒤 빠진다는 뜻이다 — 이어받은 프로세스에서 쟀고, 스레드를 연 그 프로세스 안의 압축은 미측.
-- 미측: 같은 프로세스 압축 뒤 `developerInstructions` 복원 여부 · 압축 요약과 충돌하는 재주입.
+- **Cache:** a resume with no change gets about 99% cache hits. A preset swap reads about 6.6k tokens uncached at once — most of it is the share of resending the whole skill list (about 21k characters) and the preset text itself is small. The skill list is reloaded merely when the remote plugin cache changes, so the same cost arises without a swap. Each reload grows the context by that much (until the next compaction).
+- ★**A side finding about existing behavior:**★ it means our current codex JSON priming (ADR-0215 · `developerInstructions`) also drops out after compaction — measured in a resumed process, and compaction inside the process that opened the thread was not measured.
+- Not measured: whether `developerInstructions` is restored after compaction within the same process · re-injection that conflicts with the compaction summary.
 
-### 피어 — orca · herdr 는 지시서 · 스킬을 어떻게 싣나 (소스 정독 2026-10-10)
+### Peers — how orca · herdr load instructions · skills (source read 2026-10-10)
 
-orca = upstream main `6cbbe456`(2026-10-10 · 로컬 클론 `df7460af` 는 낡아 새로 받았다) · herdr = 로컬 `v0.9.1`(`065ef9d`) + master `2563803d` 부분 대조. **둘 다 터미널 에이전트에 시스템 프롬프트 · developer 지시를 넣지 않는다 — 이 문제의 선례가 아니다.** 확실(grep 전수 · 핵심 줄 메인 대조).
+orca = upstream main `6cbbe456` (2026-10-10 · the local clone `df7460af` was stale so a fresh one was fetched) · herdr = local `v0.9.1` (`065ef9d`) + partial comparison with master `2563803d`. **Neither puts a system prompt · developer instructions into a terminal agent — they are not precedents for this problem.** Certain (full grep · key lines cross-checked by main).
 
-- **orca 지시:** 작업 지시(「You are a dispatched worker」 머리말)를 **터미널에 사용자 차례로 친다**(`src/main/runtime/orchestration/preamble.ts:87` · 보내기 `coordinator-task-dispatch.ts:140-146`). 문구를 일부러 순하게 쓴 이유 = claude 가 붙여 넣은 글을 프롬프트 주입으로 의심하기 때문(STA-8200 주석). `--append-system-prompt` 류는 사용자 인자 파싱 표에만 나온다. 구조화(SDK · app-server) 경로는 별도이고 거기도 지시를 덧붙이지 않는다.
-- **orca 스킬:** `orca skills install`(→ `npx skills add`)로 네이티브 전역 · 프로젝트 스킬 폴더에 설치 — 실행마다 붙이지 않는다. SKILL.md 는 얇은 껍데기이고 본문은 CLI(`orca skills get …`)가 낸다.
-- **orca 이어받기 · 압축:** 이어받기는 원래 명령 + 이어받기 인자뿐(`src/shared/tui-agent-resume-startup.ts:78` `followupPrompt: null`) — 다시 넣는 것 없음. 압축은 화면 상태 표시에만 쓴다(PreCompact 는 일부러 등록 안 함 — `src/shared/claude-compact-completion.ts:3-6`).
-- **herdr:** 지시 주입 0 · 상태 보고 훅만 설치 · 스킬은 사용자가 한 번 전역 설치(`npx skills add … -g`) 또는 `herdr --skill` 출력 · 이어받기는 맨 인자 · 압축은 상태 표시만.
-- **함의(추론 · 미측):** codex 압축은 사용자 메시지를 남기고 developer 메시지를 버렸다(위 수명 실측의 `replacement_history`). orca 처럼 지시를 **사용자 차례**로 넣으면 codex 압축에서 살아남을 수 있다 — 대신 화면에 사용자 말풍선으로 보이고, claude 는 붙여 넣은 지시를 의심할 수 있다(orca 주석).
+- **orca instructions:** it **types the task instructions (the 「You are a dispatched worker」 preamble) into the terminal as a user turn** (`src/main/runtime/orchestration/preamble.ts:87` · sending `coordinator-task-dispatch.ts:140-146`). The reason the wording is deliberately mild = claude suspects pasted text of being a prompt injection (STA-8200 comment). `--append-system-prompt` kinds appear only in the user-argument parsing table. The structured (SDK · app-server) path is separate and it does not append instructions there either.
+- **orca skills:** `orca skills install` (→ `npx skills add`) installs into the native global · project skill folders — not attached on every run. SKILL.md is a thin shell and the body is produced by the CLI (`orca skills get …`).
+- **orca resume · compaction:** resume is just the original command + resume arguments (`src/shared/tui-agent-resume-startup.ts:78` `followupPrompt: null`) — nothing is re-inserted. Compaction is used only for the screen status display (PreCompact is deliberately not registered — `src/shared/claude-compact-completion.ts:3-6`).
+- **herdr:** zero instruction injection · only status-report hooks installed · skills are installed globally once by the user (`npx skills add … -g`) or through `herdr --skill` output · resume is bare arguments · compaction is only a status display.
+- **Implication (inference · not measured):** codex compaction kept user messages and discarded developer messages (`replacement_history` in the lifetime measurement above). Inserting instructions as a **user turn** like orca may let them survive codex compaction — instead they show on screen as a user bubble, and claude may suspect pasted instructions (orca comment).
 
-### 추가 실측 — 이어받기와 프롬프트 캐시 (2026-10-10)
+### Additional measurement — resume and the prompt cache (2026-10-10)
 
-haiku · `-p` · 덧붙인 md ≈ 16.7k 토큰 · 첫 요청 총 ≈ 31.7k · 각 경우 1회(반복 없음). 수치 = 요청별 `usage`(`cache_creation_input_tokens` / `cache_read_input_tokens`). **확실(이 판 · n=1).**
+haiku · `-p` · appended md ≈ 16.7k tokens · first request total ≈ 31.7k · once per case (no repetition). Figures = per-request `usage` (`cache_creation_input_tokens` / `cache_read_input_tokens`). **Certain (this build · n=1).**
 
-| 경우 | 이어받기 결과 |
+| Case | Resume result |
 |---|---|
-| 기본(on) | 적중 — 31,695 읽기 · 새로 쓰기는 새 차례 몫 ≈ 80 |
-| off · md 그대로 | 적중 — on 과 같은 수치(첫 요청 바이트가 on 과 같다) |
-| off · 도중에 md 교체 | 바꾼 그 한 번만 md 부터 뒤를 다시 씀(읽기 15,046 · 쓰기 16,839) → 다음 이어받기는 다시 전부 적중 |
-| off · 사이에 git 커밋 | 적중 — 환경 정보의 git 상태는 off 여도 첫 대화 값으로 남아 있었다(새 커밋이 안 보였다) |
-| md 없음(대조) | 적중 |
+| default (on) | hit — 31,695 read · new write is the new turn's share ≈ 80 |
+| off · md unchanged | hit — same figures as on (the first request bytes are the same as on) |
+| off · md swapped midway | only that one swap rewrites from the md onward (read 15,046 · write 16,839) → the next resume hits fully again |
+| off · git commit in between | hit — the git state in the environment info stayed at the first conversation's value even with off (the new commit was not visible) |
+| no md (control) | hit |
 
-- 결론: `--system-prompt-snapshot off` 를 늘 붙여도 md 가 그대로면 캐시 손해가 없고, md 를 바꾼 이어받기만 그 뒤를 한 번 다시 쓴다.
-- 한계: 캐시가 실행 사이에 이어져 첫 요청 수치는 실행 순서의 영향을 받는다. on 상태에서 md 를 바꾼 경우는 재지 않았다. 캐시 구분점 위치는 사용량 수치로 추정했다.
+- Conclusion: always attaching `--system-prompt-snapshot off` costs no cache if the md is unchanged, and only a resume with a changed md rewrites what follows once.
+- Limit: the cache carries across runs, so the first-request figures are affected by run order. The case where the md changes while on was not measured. The position of the cache breakpoint was estimated from the usage figures.
 
-### 추가 실측 — CLAUDE.md 는 이어받기에 다시 읽힌다 (2026-10-10)
+### Additional measurement — CLAUDE.md is read again on resume (2026-10-10)
 
-같은 방식(haiku · `-p` · git init 한 빈 작업 폴더). **확실(이 판 기준).**
+Same method (haiku · `-p` · an empty working folder with git init). **Certain (this build).**
 
-| 실행 | 그때 CLAUDE.md | 인자 | 답 |
+| Run | CLAUDE.md at the time | Arguments | Answer |
 |---|---|---|---|
-| 1 | LIMA-3 | 새 대화 | — |
-| 2 | MIKE-4 로 고침 | 이어받기 | **MIKE-4** |
-| 3 | MIKE-4 | 새 대화(대조) | MIKE-4 |
+| 1 | LIMA-3 | new conversation | — |
+| 2 | edited to MIKE-4 | resume | **MIKE-4** |
+| 3 | MIKE-4 | new conversation (control) | MIKE-4 |
 
-- **실리는 자리가 다르다.** `--append-system-prompt-file` 은 세션 기록(`~/.claude/projects/<폴더>/<세션>.jsonl`)에 `attachment.type = "prompt_snapshot"` 으로 시스템 프롬프트 전문이 저장되고 이어받기는 그것을 다시 보낸다. CLAUDE.md 는 시스템 프롬프트가 아니라 `attachment.type = "instructions"` 첨부로 대화 줄기에 실리고, 이어받을 때 파일을 다시 읽어 **바뀐 파일만** 새 첨부(`changed: true` · `reason: "session_start"`)로 덧붙인다.
-- **옛 사본은 지워지지 않는다** — LIMA-3 첨부가 대화 기록에 남아 둘 다 맥락에 있고, 모델은 나중 것을 골랐다. 지시끼리 충돌하면 최신 우선이 보장되는 것은 아니다(n=1).
-- 미검: `--add-dir` 폴더의 CLAUDE.md(`CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`)도 같은 첨부 · 같은 이어받기 갱신을 타는지.
+- **It is loaded in a different place.** `--append-system-prompt-file` is stored in the session record (`~/.claude/projects/<폴더>/<세션>.jsonl`) as `attachment.type = "prompt_snapshot"` with the full system prompt, and resume sends that again. CLAUDE.md is not the system prompt but is carried in the conversation thread as an `attachment.type = "instructions"` attachment, and on resume the file is read again and **only the changed file** is appended as a new attachment (`changed: true` · `reason: "session_start"`).
+- **The old copy is not erased** — the LIMA-3 attachment stays in the conversation record so both are in context, and the model picked the later one. When instructions conflict, newest-first is not guaranteed (n=1).
+- Not checked: whether CLAUDE.md in an `--add-dir` folder (`CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`) rides the same attachment · the same resume refresh.
 
-## 적대 리뷰 결과 (codex · FIX → 반영)
+## Adversarial review result (codex · FIX → applied)
 
-| 대상 | 결함 | 처리 |
+| Target | Defect | Handling |
 |---|---|---|
-| codex 터미널 「길은 파일 배치뿐」 | 로컬 플러그인 길 누락(high) | 발견 15 · 결론 표에 추가 |
-| claude `--add-dir` | 조건 누락(`project` 출처 · safe-mode) | 발견 1 조건 |
-| claude 이어받기 | 호출된 스킬 본문이 맥락에 남는다 | 발견 4 |
-| claude 설정 키 없음 | 간접 길(심볼릭 링크 · `CLAUDE_CONFIG_DIR`) 누락 | 발견 2 |
-| codex `skills.config` | 읽는 층 한정 누락 | 발견 8 |
-| claude 신뢰 창 | `-p` 실측만으로 대화형을 말할 수 없다 | 발견 6 |
+| codex terminal 「길은 파일 배치뿐」 (the only path is file placement) | local plugin path omitted (high) | added to finding 15 · the conclusion table |
+| claude `--add-dir` | conditions omitted (`project` source · safe-mode) | finding 1 conditions |
+| claude resume | an invoked skill body stays in context | finding 4 |
+| claude no settings key | indirect paths (symbolic link · `CLAUDE_CONFIG_DIR`) omitted | finding 2 |
+| codex `skills.config` | the restriction on which layers are read omitted | finding 8 |
+| claude trust dialog | `-p` measurements alone cannot speak for interactive mode | finding 6 |
 
-반박(근거 동반)으로 뒤집힌 load-bearing 주장은 없다.
+No load-bearing claim was overturned by a rebuttal (with evidence).
 
-## 공백
+## Gaps
 
-- codex `skills/extraRoots/set` 을 실제 모델 턴으로 재지 않았다(`skills/list` + 상류 시험).
-- codex `-c skills.config` 끄기 필터 · 플러그인 실행 단위 켜기 · 파일 심볼릭 링크 SKILL.md 미측.
-- codex Windows 샌드박스 바깥 읽기 실행 미측.
-- claude 대화형 모드(신뢰 창) · `CLAUDE_CONFIG_DIR` 미측. claude 이어받기에서 CLAUDE.md 가 사본 안인지 불확실.
-- codex 공식 스킬 문서(developers.openai.com/codex/skills)는 읽지 않았다 — 소스 기준.
+- codex `skills/extraRoots/set` was not measured with an actual model turn (`skills/list` + upstream tests).
+- codex `-c skills.config` off filter · enabling plugins per run · file symbolic link SKILL.md not measured.
+- codex Windows sandbox execution of reading outside not measured.
+- claude interactive mode (trust dialog) · `CLAUDE_CONFIG_DIR` not measured. Whether CLAUDE.md is inside the copy on claude resume is uncertain.
+- The official codex skills doc (developers.openai.com/codex/skills) was not read — source-based.
 
-실측 기록(이 저장소 밖 · 세션 스크래치라 남지 않는다): claude 가짜 스킬 실측 7회(haiku) · codex app-server JSON-RPC 실측 스크립트 · `codex app-server generate-json-schema` 산출.
+Measurement records (outside this repository · session scratch, so they do not persist): 7 claude fake-skill measurements (haiku) · the codex app-server JSON-RPC measurement script · the output of `codex app-server generate-json-schema`.

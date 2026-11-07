@@ -1,15 +1,15 @@
-// DomSlot 에이전트 부재 표시(ADR-0148 결정 1~3).
+// DomSlot agent-absent display (ADR-0148 decisions 1~3).
 //
-// ★왜 이 슬롯에도 필요한가★: DomSlot 은 관측용 read-only 슬롯이라 입력 경로가 없지만, 부재 막 하나가
-//   유일한 상태 표면이다. 종료(kill)의 실제 결말은 reaper 가 세션을 수거하며 **명부에서 지우는** 것이라
-//   status 로만 판정하면 그 순간 막이 사라져 죽은 슬롯이 살아있는 것처럼 보인다.
+// ★Why this slot needs it too★: DomSlot is a read-only slot for observation with no input path, but the absent curtain is
+//   its only status surface. The real outcome of a kill is that the reaper collects the session and **removes it from the registry**, so
+//   deciding by status alone would make the curtain vanish at that moment and a dead slot would look alive.
 //
-// 전략: slotTagGate.test.tsx 와 동일 패턴으로 clientFactory·agentStore 를 stub 한다(구독은 no-op).
+// Strategy: stub clientFactory and agentStore with the same pattern as slotTagGate.test.tsx (subscriptions are no-ops).
 
 import { act, cleanup, fireEvent, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-// jsdom 은 ResizeObserver 를 제공하지 않는다 — DomSlot 이 쓰는 Radix ScrollArea 내부가 참조한다.
+// jsdom does not provide ResizeObserver — the Radix ScrollArea internals that DomSlot uses refer to it.
 globalThis.ResizeObserver ||= class {
   observe() {}
   unobserve() {}
@@ -21,7 +21,7 @@ vi.mock('../../api/clientFactory', () => ({
     subscribeOutput: vi.fn(async () => ({ unsubscribe: vi.fn() })),
     writeStdin: vi.fn(async () => undefined),
     connectionState: 'connected',
-    // 연결 상태 표면 — 슬롯이 부재 막 판정에 읽는다(등록 즉시 1회 통지 + disposer 반환).
+    // Connection state surface — the slot reads it to decide the absent curtain (one notification on registration + returns a disposer).
     onConnectionStateChange: (cb: (s: string) => void) => {
       cb('connected')
       return () => {}
@@ -41,7 +41,7 @@ import { getFollow } from './scrollFollow/followRegistry'
 
 const AGENT = 'aaaa-bbbb-cccc-dddd'
 
-/** 구독 등록 마이크로태스크를 비운다. */
+/** Flushes the subscription-registration microtask. */
 async function flush(): Promise<void> {
   await Promise.resolve()
   await Promise.resolve()
@@ -78,8 +78,8 @@ describe('DomSlot — 에이전트 부재 표시(ADR-0148 결정 1~3)', () => {
     expect(veil()).toBeNull()
   })
 
-  // ★사유를 글로 남기지 않는다(사용자 결정 2026-08-20)★: 옛 배지는 `Failed: <메시지>` 를 그대로 적었다.
-  //   지금은 세 슬롯이 심볼 하나로만 말한다 — 이 단언이 그 결정의 회귀망이다.
+  // ★Do not leave the reason as text (user decision 2026-08-20)★: the old badge wrote `Failed: <메시지>` as is.
+  //   Now the three slots speak with a single symbol only — this assertion is the regression net for that decision.
   it('terminal 상태로 발견돼도 사유를 글로 적지 않는다(심볼만)', async () => {
     agentStoreState.agentsLoaded = true
     agentStoreState.agents = [
@@ -95,8 +95,8 @@ describe('DomSlot — 에이전트 부재 표시(ADR-0148 결정 1~3)', () => {
   })
 })
 
-// ★스크롤 따라가기 배선(ADR-0242 · TRD §2-1)★: 판정·훅은 scrollFollow/ 시험이 잰다. 여기는 이 슬롯이 그 훅을
-//   관측 뷰포트에 꽂았고 비우기가 다시 붙이는지만 잰다. 레이아웃이 없어 Radix Viewport 만 기하를 갖게 한다.
+// ★Scroll-follow wiring (ADR-0242 · TRD §2-1)★: the decision and the hook are measured by the scrollFollow/ tests. Here we only check that this slot
+//   plugged the hook into the observation viewport and that clearing re-attaches it. There is no layout, so only the Radix Viewport is given geometry.
 describe('DomSlot — 스크롤 따라가기(ADR-0242)', () => {
   const tops = new WeakMap<Element, number>()
   const isViewport = (el: Element): boolean => el.hasAttribute('data-radix-scroll-area-viewport')

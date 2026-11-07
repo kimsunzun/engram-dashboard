@@ -1,5 +1,5 @@
-// TRD S21-slot-docking §8-2 `dockedTree`: 골든(`bands.test.ts` · `judge.test.ts`)이 못 가르는 셸 `docked_tree` · `geometry` 규칙의 짝 —
-//   오류 차례 · 원래부터 면적 0 인 칸 · 경계 셈 · px 반올림(셸 `layout/dock.rs` · `geometry.rs` 시험과 같은 뜻).
+// TRD S21-slot-docking §8-2 `dockedTree`: the counterpart of the shell `docked_tree` · `geometry` rules that the golden (`bands.test.ts` · `judge.test.ts`) cannot tell apart —
+//   error order · areas that were zero-area from the start · boundary computation · px rounding (same meaning as the shell `layout/dock.rs` · `geometry.rs` tests).
 
 import { describe, expect, it } from 'vitest'
 
@@ -17,7 +17,7 @@ const split = (id: string, dir: 'left_right' | 'top_bottom', ratio: number, a: L
   b,
 })
 
-// 반분 사슬 — 셸 시험 `half_chain` 과 같은 모양(새 칸이 a · 남은 사슬이 b).
+// Halving chain — the same shape as the shell test `half_chain` (new area is a · the remaining chain is b).
 function halfChain(dir: 'left_right' | 'top_bottom', depth: number, base: string): LayoutNode {
   let node = leaf(`${base}-0`)
   for (let i = 1; i <= depth; i += 1) node = split(`${base}-s${i}`, dir, 0.5, leaf(`${base}-${i}`), node)
@@ -56,7 +56,7 @@ describe('끼운 나무', () => {
       ok: false,
       error: 'slot-id-overlap',
     })
-    // 좌우 사슬 53 단을 좌우로 붙이면 깊은 칸이 무너지고, 위아래로 붙이면 폭이 그대로라 선다.
+    // Attaching a 53-level left/right chain left/right collapses the deep area, but attaching it top/bottom keeps the width, so it stands.
     const chain = halfChain('left_right', 53, 'k')
     expect(computeSlots(chain, RATIO).every(r => r.x0 < r.x1 && r.y0 < r.y1)).toBe(true)
     expect(dockedTree(leaf('a'), { type: 'slot', id: 'a' }, 'Right', chain, 1 / 3, RATIO)).toEqual({ ok: false, error: 'zero-area' })

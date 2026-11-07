@@ -1,44 +1,44 @@
-// ADR-0306 — 알림 띠 자리(제목 줄 아래)
-// 알림을 레이아웃 위에 덮는 층 — 레이아웃을 밀지 않는다. 고정된 배치에서 일하므로 알림이 뜰 때 그것이 밀리면 안 되고,
-// 캔버스 위쪽을 가려도 된다 — 알림은 ✕ 로 닫는다. 여럿이면 쌓고 넘치면 스크롤한다(사용자 결정 2026-10-06 · ADR-0276 ·
-// 연결 띠 = ADR-0277).
-// ★제목 줄은 가리지 않는다★ — 창 단추 · 끌 자리가 알림에 덮이면 창을 옮기지도 닫지도 못한다. 그래서 호출부는 이 층을
-//   `WindowLayout` 의 `notices` 로 넘겨 제목 줄 아래 캔버스 칸에 붙인다(사용자 결정 2026-10-26 · T-66 — 그 전에는
-//   탭바를 가려도 됐다).
-// 팝업이 아닌 알림(띠)은 전부 이 층에 얹고 층 높이는 그려진 알림 줄만큼이다(사용자 결정 2026-10-08) — 어떤 사건이
-//   띠냐 팝업이냐는 ADR-0180 결정 2 가 가른다.
+// ADR-0306 — notice band area (below the title bar)
+// The layer that covers the layout with notices — it does not push the layout. Since the work happens in a fixed arrangement, a notice must not push it when it appears,
+// and covering the top of the canvas is acceptable — a notice is closed with ✕. Several stack and overflow scrolls (user decision 2026-10-06 · ADR-0276 ·
+// connection band = ADR-0277).
+// ★The title bar is not covered★ — if window buttons · the draggable area were covered by a notice, the window could neither be moved nor closed. So the call site passes this layer
+//   as `WindowLayout`'s `notices` to attach it to the canvas area below the title bar (user decision 2026-10-26 · T-66 — before that
+//   covering the tab bar was acceptable).
+// Every non-popup notice (band) goes on this layer and the layer height equals the drawn notice rows (user decision 2026-10-08) — which events are
+//   bands and which are popups is decided by ADR-0180 decision 2.
 // ADR-0287
-// ★자리 기준은 호출부가 깐다★ — 이 층은 가장 가까운 positioned 조상의 맨 위에 붙는다. 호출부는 positioned 조상을
-//   대고, 그 조상의 크기는 이 층이 바꾸지 않는다(층은 흐름 밖이다).
+// ★The positioning reference is laid by the call site★ — this layer attaches to the very top of the nearest positioned ancestor. The call site
+//   supplies a positioned ancestor, and this layer does not change that ancestor's size (the layer is out of flow).
 
 import type { ReactNode } from 'react'
 
 import { ScrollArea } from '../ui/scroll-area'
 
 /**
- * `children` = 쌓을 알림들, 위에서부터 그 차례로. 알림이 하나도 안 그려지면(전부 `null`) 층의 높이는 0 이다.
+ * `children` = the notices to stack, in that order from the top. If no notice is drawn (all `null`) the layer's height is 0.
  *
- * ★알림 줄은 바탕이 불투명해야 한다★ — 층은 줄 사이 틈을 그리려고 자기 바탕을 깐다(아래 `notice-stack` 의 주석).
- * 투명한 줄은 그 바탕 위에 그려진다.
+ * ★A notice row must have an opaque background★ — the layer lays its own background to draw the gaps between rows (the comment on `notice-stack` below).
+ * A transparent row is drawn over that background.
  *
- * ★알림의 글 칸은 아무 데서나 줄을 바꿔야 한다(`wrap-anywhere`)★ — Radix Viewport 는 children 을
- * `display: table; min-width: 100%` 로 감싼다(`@radix-ui/react-scroll-area` 1.2.11). 끊을 데 없는 긴 낱말(경로)이
- * 표를 창보다 넓히면 가로는 잘려 ✕ 가 화면 밖으로 밀린다(정적 판독 — GUI 로 재지 않았다).
+ * ★The notice's text area must wrap at any position (`wrap-anywhere`)★ — Radix Viewport wraps children in
+ * `display: table; min-width: 100%` (`@radix-ui/react-scroll-area` 1.2.11). If a long word with no break point (a path)
+ * widens the table beyond the window, the horizontal side is clipped and the ✕ is pushed off screen (a static read — not measured in the GUI).
  */
 export default function NoticeOverlay({ children }: { children: ReactNode }) {
   return (
-    // ★자리는 감싼 div 가 잡는다★ — Radix ScrollArea 의 Root 는 인라인 `position: relative` 를 박아 클래스로 못 덮는다.
-    // ★층의 높이는 알림 줄만큼이다★ — 전체 높이의 투명 막을 깔면 줄 밖의 클릭까지 먹는다. 상한 = 창 높이의 1/3(세션
-    //   판단 — 쌓여도 배치의 2/3 는 보인다). 그림자는 그려진 줄의 모양을 따르는 `drop-shadow` 라 줄이 없으면 안 그린다.
-    // z 40 = 분할선 · 칸 막(z-20) 위 · 복원 모달(z-50 — main 만) · 메뉴(1000 이상) 아래.
+    // ★The position is taken by the wrapping div★ — the Root of Radix ScrollArea plants an inline `position: relative` that a class cannot override.
+    // ★The layer's height equals the notice rows★ — laying a transparent curtain of full height would eat clicks outside the rows too. Upper bound = 1/3 of the window height (session
+    //   judgment — even stacked, 2/3 of the arrangement is visible). The shadow is a `drop-shadow` that follows the shape of the drawn rows, so it is not drawn with no rows.
+    // z 40 = above the split lines · area curtain (z-20) · below the restore modal (z-50 — main only) · menus (1000 and above).
     <div
       data-testid="notice-overlay"
       className="drop-shadow-md"
       style={{ position: 'absolute', top: 0, left: 0, right: 0, zIndex: 40 }}
     >
       <ScrollArea viewportClassName="max-h-[33vh]">
-        {/* 줄 사이 1px 틈에 앱 바탕을 비춘다 — 다크에서 알림 바탕(`--surface-elevated`)과 테두리(`--border`)가 거의 같아
-              겹친 줄의 경계가 안 보인다(세션 판단). */}
+        {/* Let the app background show through the 1px gap between rows — in dark, the notice background (`--surface-elevated`) and the border (`--border`) are nearly the same, so
+              the boundary of overlapped rows is not visible (session judgment). */}
         <div data-testid="notice-stack" className="flex flex-col gap-px bg-background">
           {children}
         </div>

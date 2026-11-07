@@ -1,29 +1,29 @@
-// 이 웹뷰의 첫 화면을 셸에 알린다(`webview_painted`) — 셸은 main · 팝아웃 창을 숨긴 채 만들고 이 알림에 창을 보인다
-// (`src-tauri/src/first_paint.rs` — 알림이 오지 않으면 시한 뒤). 셸이 기다리지 않는 창(다시 읽기 · 맡기기 전 예열 창 ·
-// `--hidden` 부팅)의 알림은 셸이 무시한다. 부르는 쪽은 탭 창의 `WindowLayout` 이다 — 탭을 받기 전의 바탕만 있는 화면이
-// 아니라 첫 화면(탭바 + 활성 탭)이 커밋된 뒤에 부른다.
-// 상태가 모듈 범위인 이유: 알림은 페이지 읽기 하나에 한 번이고(채택 번호가 새로 오면 한 번 더), 다시 읽기가 모듈을 새로
-//   실행하며 함께 초기화된다 — StrictMode 의 effect 두 번 실행에도 한 번만 보낸다.
+// Tells the shell this webview's first screen (`webview_painted`) — the shell creates main · pop-out windows hidden and shows the window on this notice
+// (`src-tauri/src/first_paint.rs` — after a time limit if no notice arrives). A notice from a window the shell does not wait for (reload · pre-handoff warm-up window ·
+// `--hidden` boot) is ignored by the shell. The caller is the tab window's `WindowLayout` — it is called after the first screen (tab bar + active tab) has been committed, not
+// the screen with only a background before tabs are received.
+// Why state is module-scoped: the notice is once per page load (once more when a new adoption number arrives), and a reload re-runs the module and resets it together —
+//   even if StrictMode runs the effect twice, it is sent only once.
 
 import { invoke } from '@tauri-apps/api/core'
 
-// 보이는 페이지에서 프레임 둘을 기다리다 프레임이 오지 않을 때 보내는 상한 — 페이지가 보인다고 답하면서 프레임 콜백이
-//   돌지 않는 경우(숨긴 창 안 페이지의 가시성 · 프레임이 어떤지 [미검])에 셸 시한(1500 ms)까지 끌려가지 않게. 숨은 페이지의
-//   타이머는 조여질 수 있어 이 값보다 늦을 수 있다.
+// Upper bound after which we send when frames do not arrive while waiting for two frames on a visible page — so that when the page answers visible but frame callbacks do not
+//   run (visibility of a page inside a hidden window · how frames behave is [unverified]) it is not dragged all the way to the shell time limit (1500 ms). The timer of a hidden page
+//   can be throttled, so it may be later than this value.
 const FRAME_WAIT_CAP_MS = 100
 
-// 마지막으로 보낸 알림의 채택 번호 — `undefined` = 아직 보내지 않았다.
+// Adoption number of the last notice sent — `undefined` = none sent yet.
 let reported: number | null | undefined = undefined
 
 /**
- * 보일 화면이 커밋된 뒤(effect)에 부른다. 페이지가 보이는 중이면 프레임 둘 뒤(그 화면이 그려진 뒤 — 프레임이 오지
- * 않으면 `FRAME_WAIT_CAP_MS` 뒤)에, 숨은 중이면 곧바로 보낸다 — 숨긴 창 안 페이지는 숨은 상태로 보여 프레임 콜백이 돌지
- * 않을 수 있고[미검 — WebView2 가 부모 창 숨김을 페이지 가시성에 싣는지], 그때는 DOM 이 커밋된 지금 보내 보인 뒤의 첫
- * 프레임이 그 DOM 을 그리게 한다.
- * `generation` = 이 페이지가 받은 채택 번호(`spare:adopted` 몸 · `window_role` 답 — TRD S21-slot-docking §3-9 I26) · 없으면
- * `null`. 알림에 실린다 — 채택한 창의 셸 문은 그 번호를 실은 알림만 받는다. 이미 보낸 페이지도 새 번호로 부르면 한 번 더
- * 보낸다(채택 전 알림 · 부팅 실패 알림은 셸이 버렸다). 같은 번호 · `null` 로 거듭 부르면 보내지 않는다.
- * 실패(셸 밖 · 명령 없음)는 경고로만 남긴다 — 셸은 시한 뒤 어차피 보인다.
+ * Call it after the screen to be shown has been committed (effect). If the page is visible, send after two frames (after that screen has been drawn — after `FRAME_WAIT_CAP_MS` if no frame
+ * comes), and immediately if hidden — a page inside a hidden window appears hidden so frame callbacks may not run
+ * [unverified — whether WebView2 carries the parent window's hiding into page visibility], and then we send now that the DOM is committed so the first
+ * frame after it becomes visible draws that DOM.
+ * `generation` = the adoption number this page received (`spare:adopted` body · `window_role` answer — TRD S21-slot-docking §3-9 I26) · `null` if none.
+ * It is carried in the notice — the shell door of the adopting window accepts only notices carrying that number. A page that already sent is sent once more if called with a new number
+ * (the pre-adoption notice · boot-failure notice was discarded by the shell). Repeated calls with the same number · `null` do not send.
+ * A failure (outside the shell · command missing) is left only as a warning — the shell shows the window after the time limit anyway.
  */
 // ADR-0299
 export function reportFirstPaint(generation: number | null): void {
@@ -43,7 +43,7 @@ export function reportFirstPaint(generation: number | null): void {
   }
 }
 
-/** 테스트 전용 — 모듈 상태 초기화(테스트 간 격리). 프로덕션 코드에서 호출 금지. */
+/** Test only — reset module state (isolation between tests). Do not call from production code. */
 export function __resetFirstPaintForTest(): void {
   reported = undefined
 }

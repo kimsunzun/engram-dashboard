@@ -1,31 +1,31 @@
-# ADR-0078: 렌더 모드는 에이전트 생성 시 결정·고정 (per-activation 활성화 오버라이드 폐기)
+# ADR-0078: The render mode is decided and fixed at agent creation (per-activation activation override discarded)
 
-- 상태: 확정 (2026-07-13, 근거: 사용자 결정 + 라이브 GUI 실측 + /review code full·/qa PASS)
-- 관련: CLAUDE.md §5(LLM 제어) · ADR-0044(output_format 렌더 모드) · ADR-0064/0065(slot 메뉴 단일 기여 API·1단 서브메뉴 container) · ADR-0076/0077(활성화 resume·fresh-fallback) · `src/commands/agentCommands.ts` · step-log 2026-07-13
+- 상태: 확정 (2026-07-13, basis: user decision + live GUI measurement + /review code full, /qa PASS)
+- 관련: CLAUDE.md §5(LLM 제어) · ADR-0044 (output_format render mode) · ADR-0064/0065 (single contribution API for the slot menu, 1-level submenu container) · ADR-0076/0077 (activation resume, fresh-fallback) · `src/commands/agentCommands.ts` · step-log 2026-07-13
 
 ## 맥락
-예약 노드(claude reserved 프로필)를 활성화할 때 렌더 모드 — Terminal(PTY/xterm) vs StreamJson(헤드리스 NDJSON→RichSlot 챗) — 를 어디서 정할지가 문제였다. 두 모드 자체는 ADR-0044로 이미 존재하고, `createClaudeProfile`은 생성 시 `output_format`을 받아 프로필에 영속한다. 초기 구현은 트리 우클릭 "활성화"에 [클로드 터미널/클로드 JSON] 서브메뉴를 달아 **매 활성화마다** 모드를 고르는 per-activation 오버라이드였다(저장 프로필의 output_format은 불변으로 유지하려는 의도).
+When activating a reserved node (a claude reserved profile), the question was where to decide the render mode — Terminal (PTY/xterm) vs StreamJson (headless NDJSON→RichSlot chat). The two modes themselves already exist through ADR-0044, and `createClaudeProfile` takes `output_format` at creation and persists it in the profile. The initial implementation attached a [클로드 터미널/클로드 JSON] ([Claude Terminal / Claude JSON]) submenu to the tree right-click "활성화" (Activate) so the mode was chosen **at every activation**, a per-activation override (the intent was to keep the stored profile's output_format immutable).
 
 ## 결정
-렌더 모드는 **에이전트(프로필) 생성 시점에 결정하고 이후 불변**으로 한다 — 모드는 에이전트의 본질 속성이다.
+The render mode is **decided at the time the agent (profile) is created and immutable afterwards** — the mode is an essential property of the agent.
 
-- 트리 pane 배경 우클릭 "에이전트 생성"을 1단 서브메뉴 **[클로드 터미널 생성 / 클로드 JSON 생성]**(ADR-0064/0065 slot 메뉴 container)로 확장한다. 각 자식이 `createClaudeProfile`을 `'Terminal'`/`'StreamJson'`으로 호출해 프로필에 output_format을 영속한다(ADR-0044 재사용).
-- 활성화는 단일 "활성화"(모드 선택 없음) — 저장된 모드 그대로 스폰한다.
-- §5(LLM 제어): 생성 command 3종 — `agentlist.createTerminal`(`'Terminal'`) · `agentlist.createJson`(`'StreamJson'`) · `agentlist.createAgent`(파라미터화 프리미티브, `args.outputFormat ?? 'StreamJson'`, 유효값 외 입력은 다이얼로그 열기 전 fail-loud throw). 메뉴는 command id만 참조한다(ADR-0064 불변식).
+- Expand the tree pane background right-click "에이전트 생성" (Create agent) into a 1-level submenu **[클로드 터미널 생성 / 클로드 JSON 생성]** ([Create Claude Terminal / Create Claude JSON]) (the ADR-0064/0065 slot menu container). Each child calls `createClaudeProfile` with `'Terminal'`/`'StreamJson'` and persists output_format in the profile (reusing ADR-0044).
+- Activation is a single "활성화" (Activate) (no mode selection) — it spawns with the stored mode as is.
+- §5 (LLM control): 3 creation commands — `agentlist.createTerminal` (`'Terminal'`) · `agentlist.createJson` (`'StreamJson'`) · `agentlist.createAgent` (a parameterized primitive, `args.outputFormat ?? 'StreamJson'`, an input outside the valid values throws fail-loud before the dialog opens). The menu references only command ids (the ADR-0064 invariant).
 
 ## 거부한 대안
-- **per-activation 렌더모드 오버라이드** — 활성화 우클릭 서브메뉴로 매 활성화마다 모드를 고르고, 저장 프로필은 불변으로 두는 방식(`effective_command` threading + 프로토콜 `SpawnProfile.output_format` 오버라이드 필드 + 코어 `with_output_format_override`). 세 가지 이유로 버렸다:
-  - **① 개념 부정합** — 렌더 모드가 에이전트의 본질 속성인데 같은 예약 노드가 활성화마다 성격이 바뀌는 건 부정합이다(사용자 결정 2026-07-13).
-  - **② 구현 복잡도** — 저장 프로필 불변을 지키려 프론트를 넘어 프로토콜·코어까지 오버라이드를 배선해야 했다(생성-고정 방식은 프론트 변경만으로 끝난다 — createClaudeProfile이 이미 output_format을 받으므로).
-  - **③ 실측 결함** — resume 조기종료 → fresh-fallback(ADR-0077) 경로에서 오버라이드가 떨어져, Terminal로 활성화해도 StreamJson으로 스폰되는 **반쯤-작동** 상태였다(라이브 실측 2026-07-13). 생성-고정 방식은 저장값이 유일 출처라 이 결함이 원천 소거된다.
-  - **보존** — 시도 코드는 `git stash@{0}`("adr-0078 per-activation override")에 보존.
+- **A per-activation render mode override** — a way to choose the mode at every activation through an activation right-click submenu while leaving the stored profile immutable (`effective_command` threading + a protocol `SpawnProfile.output_format` override field + a core `with_output_format_override`). Discarded for three reasons:
+  - **① Conceptual mismatch** — the render mode is an essential property of the agent, so the same reserved node changing character at every activation is a mismatch (user decision 2026-07-13).
+  - **② Implementation complexity** — to keep the stored profile immutable, the override had to be wired beyond the frontend into the protocol and core (the fixed-at-creation way ends with frontend changes only — because createClaudeProfile already takes output_format).
+  - **③ Measured defect** — on the early resume exit → fresh-fallback (ADR-0077) path the override was dropped, leaving a **half-working** state in which activating with Terminal still spawned StreamJson (live measurement 2026-07-13). In the fixed-at-creation way the stored value is the only source, so this defect is eliminated at the source.
+  - **Preservation** — the attempted code is preserved in `git stash@{0}` ("adr-0078 per-activation override").
 
 ## 근거
-- 사용자 결정(2026-07-13): "한번 생성하면 다른 모드로는 안 되어야, 생성 이후 고정이 맞다."
-- 라이브 GUI 실측: per-activation 오버라이드가 fresh-fallback 경로에서 Terminal→StreamJson으로 새어 반쯤만 작동함을 확인(process command line ground truth).
-- 게이트: /review code full(cross-family, doc-aware+blind) PASS(입력 검증 fail-loud FIX 반영) · /qa PASS(vitest 613 green·tsc 0·코어 격리 0) · 생성 서브메뉴 라이브 GUI 실측 PASS.
+- User decision (2026-07-13): "Once created, it must not be possible to use another mode; fixed after creation is right."
+- Live GUI measurement: confirmed that the per-activation override leaked from Terminal to StreamJson on the fresh-fallback path and so worked only halfway (process command line ground truth).
+- Gates: /review code full (cross-family, doc-aware+blind) PASS (input validation fail-loud FIX applied) · /qa PASS (vitest 613 green · tsc 0 · core isolation 0) · live GUI measurement of the creation submenu PASS.
 
 ## 영향 / 불변식
-- **프론트 전용 변경** — protocol/core/daemon(crates/**) diff 없음. ADR-0044(output_format 렌더)·ADR-0064/0065(slot 메뉴)·ADR-0076/0077(활성화 resume·fresh-fallback)는 유효(폐기 아님) — 활성화 경로는 HEAD 그대로다.
-- 모드 변경은 **재생성**으로 한다. 기존 프로필의 output_format을 사후 편집하는 command는 현재 범위 밖(필요 시 별도 ADR).
-- 앵커: `src/commands/agentCommands.ts`(`createReservedProfile` · `create*` commands · `registerSlotMenu('agent_list', ...)` container). 이 파일이 생성-시-고정 계약의 단일 지점 — 활성화에 모드 선택 서브메뉴를 다시 붙이면 이 결정을 어기는 것이다.
+- **Frontend-only change** — no protocol/core/daemon (crates/**) diff. ADR-0044 (output_format render) · ADR-0064/0065 (slot menu) · ADR-0076/0077 (activation resume, fresh-fallback) remain valid (not discarded) — the activation path is exactly as at HEAD.
+- A mode change is done by **recreation**. A command that edits an existing profile's output_format after the fact is out of scope for now (a separate ADR if needed).
+- Anchors: `src/commands/agentCommands.ts` (`createReservedProfile` · the `create*` commands · the `registerSlotMenu('agent_list', ...)` container). This file is the single point of the fixed-at-creation contract — attaching a mode selection submenu to activation again breaks this decision.

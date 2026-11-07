@@ -1,7 +1,7 @@
-//! ApiTransport — 껍데기. 인터페이스만 만족, HTTP 스트림·이벤트 변환은 API 모델 붙는 날 채움.
+//! ApiTransport — a shell. It only satisfies the interface; HTTP stream · event conversion is filled in the day the API model is attached.
 //!
-//! 설계 의도: `unimplemented!()` 패닉 없이 호출돼도 안전하게 `PtyError::Unsupported`를 반환한다.
-//! manager 라우팅은 없음.
+//! Design intent: even if called, it returns `PtyError::Unsupported` safely without an `unimplemented!()` panic.
+//! There is no manager routing.
 //!
 //! tauri import 0.
 
@@ -34,7 +34,7 @@ impl AgentTransport for ApiTransport {
         ))
     }
 
-    /// HTTP 스트림에는 터미널 크기 개념이 없다.
+    /// An HTTP stream has no concept of terminal size.
     fn resize(&self, _cols: u16, _rows: u16) -> Result<(), PtyError> {
         Err(PtyError::Unsupported(
             "ApiTransport::resize (껍데기)".into(),

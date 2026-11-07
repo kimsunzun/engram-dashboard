@@ -1,12 +1,12 @@
-// ConnectionNotice — 연결 실패 이유 표시(ADR-0134 결정 4).
+// ConnectionNotice — display of the connection failure reason (ADR-0134 decision 4).
 //
-// 이 스위트가 지키는 핵심은 "사용자가 원인을 못 보는 상태로 고착되지 않는다" 하나다.
+// What this suite guards is just one thing: "the user is never stuck in a state where they cannot see the cause".
 
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-// agentClient 싱글톤을 최소 표면으로 대역한다 — 실제 transport/IPC 없이 구독 통지만 재현한다.
-// ★vi.hoisted 필수★: vi.mock 팩토리는 파일 최상단으로 끌어올려져 일반 top-level 변수를 못 본다.
+// Stand in for the agentClient singleton with a minimal surface — reproduce only the subscription notification, with no real transport/IPC.
+// ★vi.hoisted required★: the vi.mock factory is hoisted to the top of the file and cannot see ordinary top-level variables.
 const { listeners, fake } = vi.hoisted(() => {
   const listeners = new Set<() => void>()
   const fake = {
@@ -22,8 +22,8 @@ const { listeners, fake } = vi.hoisted(() => {
   return { listeners, fake }
 })
 
-// 구독 통지는 React 밖에서 오는 이벤트라 act 로 감싸야 상태 반영이 flush 된다(운영에서도 Tauri
-// 이벤트 콜백이 같은 모양이다).
+// Subscription notifications are events coming from outside React, so they must be wrapped in act for the state update to flush (in production too the Tauri
+// event callback has the same shape).
 function emit(next: string | null) {
   act(() => {
     fake.connectionError = next
@@ -56,7 +56,7 @@ describe('ConnectionNotice', () => {
     expect(alert.textContent).toContain('쓰기 가능한 위치')
   })
 
-  // 덮는 층의 줄 계약(`NoticeOverlay` doc) — `wrap-anywhere` 를 잃으면 긴 이유가 ✕ 를 화면 밖으로 민다.
+  // The row contract of the covering layer (the `NoticeOverlay` doc) — if `wrap-anywhere` is lost, a long reason pushes the ✕ off screen.
   it('줄은 불투명 바탕이고 글 칸은 아무 데서나 줄을 바꾼다', () => {
     render(<ConnectionNotice />)
     emit('폴더 문제')
@@ -72,7 +72,7 @@ describe('ConnectionNotice', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
-  // 띠는 덮는 층에 얹힌다 — 같은 이유의 다음 통지가 띠를 되살리면 ✕ 가 무력해 가린 자리가 다시 막힌다.
+  // The band sits on the covering layer — if the next notification of the same reason revives the band, the ✕ is powerless and the covered area is blocked again.
   it('닫은 뒤 같은 이유로 다시 통지돼도 뜨지 않는다', () => {
     render(<ConnectionNotice />)
     emit('폴더 문제')
@@ -89,8 +89,8 @@ describe('ConnectionNotice', () => {
     expect(screen.getByRole('alert').textContent).toContain('두 번째 이유')
   })
 
-  // ★F3 회귀 방지★: 닫힘 기억을 이유 문자열로만 들고 있으면, 고쳐서 연결된 뒤 **똑같은 문구**로
-  //   재발했을 때 아무것도 안 뜬다. 같은 원인의 재발이 오히려 흔한 경우다.
+  // ★F3 regression guard★: if the closed memory is held only as the reason string, then when it recurs with **the identical wording** after being fixed and
+  //   connected, nothing shows. A recurrence of the same cause is in fact the common case.
   it('닫고 → 연결 성공으로 이유가 지워진 뒤 → 같은 이유가 재발하면 다시 뜬다', () => {
     render(<ConnectionNotice />)
     const same = '데이터 폴더에 쓸 수 없음(C:\\x) — 쓰기 가능한 위치에 압축을 풀어 주세요'
@@ -99,10 +99,10 @@ describe('ConnectionNotice', () => {
     fireEvent.click(screen.getByLabelText('알림 닫기'))
     expect(screen.queryByRole('alert')).toBeNull()
 
-    emit(null) // 사용자가 폴더를 고쳐 연결 성공 → 이유 해제
+    emit(null) // The user fixes the folder and the connection succeeds → the reason is cleared
     expect(screen.queryByRole('alert')).toBeNull()
 
-    emit(same) // 나중에 같은 실패가 재발
+    emit(same) // Later the same failure recurs
     expect(screen.getByRole('alert')?.textContent).toContain('쓰기 가능한 위치')
   })
 })

@@ -1,9 +1,9 @@
-// TRD S21-slot-docking §4-4 「안내」: 끌기 안내를 그 창 캔버스 위 층에 그린다 — 커서 밑 칸의 구역 선(가운데 사각형 + 칸
-//   모서리에서 그 모서리로 가는 대각선 넷) · 바깥 띠에 들면 레이아웃 틀 · 고른 띠의 붙을 사각형(옅은 채움 + 얇은 테두리).
-//   판정은 하지 않는다 — 받은 `OverlayView` 를 그대로 그린다. 빗금 · 짙은 채움을 쓰지 않는다 — 안내가 칸 내용을 가리지 않게
-//   (사용자 결정 2026-10-19).
-// 움직임 = VS Code(TRD §9-4 — 나타남 · 사라짐 150 ms 페이드 · 자리 옮김 70 ms). 사라지는 것은 마지막 자리에 남겨 두고 흐려지고,
-//   처음 나타나는 붙을 사각형은 옛 자리에서 미끄러져 오지 않고 제자리에서 나타난다. `prefers-reduced-motion: reduce` 면 곧바로.
+// TRD S21-slot-docking §4-4 「안내」: draws the drag guide on the layer over that window's canvas — the zone lines of the area under the cursor (a center rectangle + four diagonals from the area
+//   corners to that corner) · the layout frame when inside an outer band · the rectangle to attach for the chosen band (light fill + thin border).
+//   It does not decide — it draws the received `OverlayView` as is. No hatching · dark fill — so the guide does not hide area content
+//   (user decision 2026-10-19).
+// Motion = VS Code (TRD §9-4 — appear · disappear 150 ms fade · move 70 ms). A disappearing one stays at its last position and fades,
+//   and a rectangle to attach appearing for the first time does not slide in from an old position but appears in place. With `prefers-reduced-motion: reduce`, immediately.
 
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
 
@@ -22,7 +22,7 @@ function rectBox(r: RectCss): CSSProperties {
   return { position: 'absolute', left: r.x0, top: r.y0, width: r.x1 - r.x0, height: r.y1 - r.y0 }
 }
 
-/** `value` 가 `null` 이 돼도 마지막 값을 `last` 로 쥔다 · `moving` = 직전 값도 있었다(자리 옮김을 움직일 때). */
+/** Even when `value` becomes `null`, the last value is held as `last` · `moving` = a previous value also existed (when animating a move). */
 function useLast<T>(value: T | null): { last: T | null; moving: boolean } {
   const [s, setS] = useState({ value, last: value, moving: false })
   if (value === s.value) return s
@@ -32,9 +32,9 @@ function useLast<T>(value: T | null): { last: T | null; moving: boolean } {
 }
 
 /**
- * 끌기 안내 — `guide` = 그릴 것(좌표 = 이 층 CSS px) · `null` = 치운다(150 ms 흐려진 뒤 층을 걷는다). 뿌리는
- * `position: absolute; inset: 0` 이라 위치를 가진 상자(그 창 캔버스) 안에 둔다. 늘 마운트해 두고 `null` 로 치운다 — 조건부로
- * 내리면 사라짐 페이드가 없다.
+ * Drag guide — `guide` = what to draw (coordinates = this layer's CSS px) · `null` = clear (the layer is withdrawn after the 150 ms fade). The root is
+ * `position: absolute; inset: 0`, so place it inside a positioned box (that window's canvas). Keep it always mounted and clear with `null` — taking it down
+ * conditionally loses the disappear fade.
  */
 export function DockOverlayView({ guide }: { guide: OverlayView | null }) {
   const reduced = reducedMotion()
@@ -57,7 +57,7 @@ export function DockOverlayView({ guide }: { guide: OverlayView | null }) {
 function GuideLayer({ view, shown, fadeMs, moveMs }: { view: OverlayView; shown: boolean; fadeMs: number; moveMs: number }) {
   const ref = useRef<HTMLDivElement>(null)
   const [entered, setEntered] = useState(false)
-  // 불투명도 0 을 브라우저가 한 번 셈한 뒤 1 로 올린다 — 셈 없이 한 스타일 바뀜 안에서 0 → 1 이면 전환이 일지 않는다.
+  // After the browser has computed opacity 0 once, raise it to 1 — if it goes 0 → 1 within one style change without that computation, no transition occurs.
   useLayoutEffect(() => {
     ref.current?.getBoundingClientRect()
     setEntered(true)
@@ -130,7 +130,7 @@ function SlotLines({ zones }: { zones: SlotZones }) {
     [s.x1, s.y1, c.x1, c.y1],
     [s.x0, s.y1, c.x0, c.y1],
   ]
-  // 가운데는 `<rect>` 가 아니라 닫힌 경로 — 좁은 칸에서 폭 0 이 되면 `<rect>` 는 아무것도 그리지 않는다.
+  // The center is a closed path, not a `<rect>` — if width becomes 0 in a narrow area, a `<rect>` draws nothing.
   const centre = `M${c.x0} ${c.y0}H${c.x1}V${c.y1}H${c.x0}Z`
   return (
     <>

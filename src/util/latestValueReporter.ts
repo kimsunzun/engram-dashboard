@@ -1,42 +1,42 @@
-// 측정값 보고의 보내는 쪽 도우미 — 「한 번에 하나 · 같은 값 안 보냄 · 디바운스」(ADR-0227 · TRD S21-slot-docking §5-3). 창 캔버스
-//   크기(`windowCanvasReport.ts`)가 쓴다. 셸에 남는 값 = 마지막으로 성공한 보고다.
-// ★한 보고기의 invoke 는 한 번에 하나만 날린다★: 겹친 두 요청을 셸이 도착 역순으로 처리하면 셸의 값이 다음 보고까지 낡은 채
-//   남는다. WebView2 가 겹친 요청을 JS 발행 순서대로 올리는지는 문서에 없다(모름). 하나씩이면 응답 순서가 곧 셸 적용 순서라,
-//   취소된 작업의 성공도 셸의 지금 값으로 믿을 수 있다. 대가: 응답이 끝내 안 오면 그 보고기는 거기서 멈춘다.
-// 날아가는 동안 온 값은 대기 칸 하나에 두고 새 값이 덮는다 — 응답 뒤 그 마지막 값만 보낸다.
-// 실패는 스스로 유계 재시도(`retryAsync`)한다 — 측정은 바뀔 때만 오므로 다음 측정을 기다리면 영영 안 갈 수 있다. 그 사이 다른
-//   값이 오면 옛 값의 재시도를 그친다.
+// Sender-side helper for measurement reporting — 「한 번에 하나 · 같은 값 안 보냄 · 디바운스」 (one at a time · the same value is not sent · debounce) (ADR-0227 · TRD S21-slot-docking §5-3). The window canvas
+//   size (`windowCanvasReport.ts`) uses it. The value left in the shell = the last successful report.
+// ★One reporter's invoke is launched only one at a time★: if the shell handles two overlapping requests in reverse arrival order, the shell's value
+//   stays stale until the next report. Whether WebView2 sends overlapping requests in JS issue order is not documented (unknown). With one at a time the response order is the shell's apply order, so
+//   even the success of a cancelled job can be trusted as the shell's current value. Cost: if a response never comes, that reporter stops there.
+// A value that arrives while one is in flight is put in a single pending field and a new value overwrites it — after the response only that last value is sent.
+// A failure is retried by itself with a bounded retry (`retryAsync`) — measurements come only when they change, so waiting for the next measurement may mean it never goes out. If a different
+//   value arrives meanwhile, the old value's retry stops.
 
 import { retryAsync, RetryCancelledError } from './retryInvoke'
 
-/** 측정 보고의 디바운스(ms) — 관측이 잦은 보고(캔버스 크기 · 창 틀)가 함께 쓴다. */
+/** Debounce (ms) of measurement reports — reports with frequent observations (canvas size · window frame) use it together. */
 export const REPORT_DEBOUNCE_MS = 100
 
 export interface LatestValueReporterOptions<T> {
-  /** 셸에 보낸다 — 거절은 던진다. */
+  /** Send to the shell — a refusal throws. */
   send: (value: T) => Promise<unknown>
   same: (a: T, b: T) => boolean
-  /** 로그 머리(`[log]`). */
+  /** Log head (`[log]`). */
   log: string
-  /** 로그에 실을 보고 이름 — 예: `report_window_canvas(800x600)`. */
+  /** Report name to put in the log — e.g. `report_window_canvas(800x600)`. */
   describe: (value: T) => string
   /**
-   * 셸이 `lastSent` 와 다른 값을 성공 응답해 `lastSent` 가 바뀐 뒤 부른다 — 실패 · 같은 값의 재성공에는 부르지 않는다.
-   * ★던지지 말 것★ — 응답 처리 안에서 불려, 던지면 보고 실패로 셈해 같은 값을 다시 보낸다.
+   * Called after the shell answered success with a value different from `lastSent` and `lastSent` changed — not called on a failure · a repeat success of the same value.
+   * ★Do not throw★ — it is called inside response handling, and if it throws it is counted as a report failure and the same value is sent again.
    */
   onAccepted?: (value: T) => void
 }
 
 export class LatestValueReporter<T extends object> {
   private readonly opts: LatestValueReporterOptions<T>
-  /** 보낼 차례를 기다리는 값. 하나만 두고 새 값이 덮는다. */
+  /** A value waiting for its turn to be sent. Only one is kept and a new value overwrites it. */
   private pending: T | null = null
   private sent: T | null = null
-  /** 지금 보내는 작업(재시도 대기 포함). 취소되면 null. */
+  /** The job sending now (including retry waits). null when cancelled. */
   private job: { value: T; gen: number } | null = null
-  /** invoke 가 응답을 기다리는 중인가 — 재시도의 backoff 대기와는 따로 센다. */
+  /** Is invoke waiting for a response — counted separately from the retry's backoff wait. */
   private inAir = false
-  /** 작업 세대 — 바뀌면 그 전 작업의 재시도는 더 시도하지 않는다. */
+  /** Job generation — when it changes, the earlier job's retry tries no more. */
   private gen = 0
   private timer: ReturnType<typeof setTimeout> | null = null
 
@@ -44,21 +44,21 @@ export class LatestValueReporter<T extends object> {
     this.opts = opts
   }
 
-  /** 셸이 성공 응답한 마지막 값 — 같은 값의 재성공은 참조를 갈지 않는다. */
+  /** The last value the shell answered success for — a repeat success of the same value does not replace the reference. */
   get lastSent(): T | null {
     return this.sent
   }
 
   /**
-   * 디바운스 전의 관측 하나 — 보내는 값 · 대기 값이 이 값과 다르면 디바운스를 기다리지 않고 거둔다. 기다리면 그 사이 옛 재시도나
-   * 응답 뒤 차례가 낡은 값을 한 번 더 보낸다.
+   * One observation before debounce — if the value being sent · the pending value differs from this, withdraw it without waiting for the debounce. If we waited, in the meantime an old retry or
+   * the turn after a response would send a stale value once more.
    */
   observe(value: T): void {
     if (this.job && !this.opts.same(this.job.value, value)) this.cancelJob()
     if (this.pending !== null && !this.opts.same(this.pending, value)) this.pending = null
   }
 
-  /** 곧바로 보낼 차례에 올린다(디바운스 없음). `lastSent` 와 같으면 보내지 않는다. */
+  /** Put it in the turn to be sent immediately (no debounce). If equal to `lastSent`, do not send. */
   submit(value: T): void {
     this.observe(value)
     this.pending = value
@@ -66,8 +66,8 @@ export class LatestValueReporter<T extends object> {
   }
 
   /**
-   * `delayMs` 뒤 `measure` 를 불러 그 값을 `submit` 한다 — 그 사이 다시 부르면 타이머를 다시 잡고 마지막 `measure` 만 쓴다.
-   * 재는 것을 타이머 끝으로 미루므로 그때의 DOM 을 잰다. `measure` 가 `null` 을 주면 보내지 않는다.
+   * After `delayMs` call `measure` and `submit` that value — if called again in between, reset the timer and use only the last `measure`.
+   * Since measuring is deferred to the end of the timer, it measures the DOM at that time. If `measure` gives `null`, nothing is sent.
    */
   schedule(measure: () => T | null, delayMs: number = REPORT_DEBOUNCE_MS): void {
     if (this.timer !== null) clearTimeout(this.timer)
@@ -79,8 +79,8 @@ export class LatestValueReporter<T extends object> {
   }
 
   /**
-   * 관측을 뗄 때 — 디바운스 · 대기 값을 버리고 재시도를 멈춘다. 날아가던 invoke 와 `lastSent` 는 남긴다 — 그 응답이 셸의 지금
-   * 값을 맞추고, 다시 붙은 쪽도 그 응답을 기다려 한 번에 하나가 지켜진다.
+   * When detaching the observation — discard the debounce · pending value and stop retrying. Keep the in-flight invoke and `lastSent` — that response sets the shell's current
+   * value, and the reattached side also waits for that response so one at a time is kept.
    */
   release(): void {
     if (this.timer !== null) clearTimeout(this.timer)
@@ -94,7 +94,7 @@ export class LatestValueReporter<T extends object> {
     this.job = null
   }
 
-  /** 대기 값을 내보낸다. 날아가는 invoke 가 있으면 그 응답 뒤(`start` 의 `finally`)에 다시 불린다. */
+  /** Send out the pending value. If there is an invoke in flight, it is called again after that response (the `finally` of `start`). */
   private pump(): void {
     if (this.inAir || this.pending === null) return
     const value = this.pending
@@ -114,7 +114,7 @@ export class LatestValueReporter<T extends object> {
       this.inAir = true
       try {
         await this.opts.send(value)
-        // 같은 값이면 객체를 갈지 않는다 — 구독자가 읽는 값의 참조가 알림 없이 바뀌지 않게.
+        // If the value is the same, do not replace the object — so the reference of the value subscribers read does not change without a notification.
         if (this.sent === null || !this.opts.same(this.sent, value)) {
           this.sent = value
           this.opts.onAccepted?.(value)

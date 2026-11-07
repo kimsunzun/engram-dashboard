@@ -1,6 +1,6 @@
-// TRD S21-slot-docking §8-2 「훅 · 컴포넌트」의 출처 몫(정하는 곳 `dragSource` — 보내기 · 풀기 · 되돌리기 · 순서 이동 확정) ·
-//   §8-3 출처 창 순서 시험(fast-check `fc.scheduler()` — `done` · invoke 응답 · `window:tabs-updated` · `layout:updated` ·
-//   dragend 를 아무 순서로 섞는다). 바깥은 가짜 포트(ADR-0012) · 탭바 기하는 탭바가 그리는 셈을 그대로 흉내 낸다.
+// TRD S21-slot-docking §8-2 the source's share of 「훅 · 컴포넌트」 (where decisions are made `dragSource` — send · release · revert · order move confirmation) ·
+//   §8-3 source window order test (fast-check `fc.scheduler()` — mixes `done` · invoke responses · `window:tabs-updated` · `layout:updated` ·
+//   dragend in any order). The outside is a fake port (ADR-0012) · the tab bar geometry exactly emulates how the tab bar draws.
 
 import fc from 'fast-check'
 import { describe, expect, it, vi } from 'vitest'
@@ -19,7 +19,7 @@ import { stripBounds, stripZoneArea } from './measure'
 
 const WIN = 'main'
 const DRAG = 'drag-1'
-/** 누르기 전 활성 A · 누름이 B 를 활성으로 했다(R2). 탭 셋 · 쓸 수 있는 폭 480 → 머리 160 씩. */
+/** Active A before the press · the press made B active (R2). Three tabs · usable width 480 → heads of 160 each. */
 const AT_START: WindowModel = { tabs: ['A', 'B', 'C'], active: 'B' }
 const START: DragStart = {
   window: WIN,
@@ -33,12 +33,12 @@ const START: DragStart = {
   x: 244,
 }
 
-/** `+` 상자 폭(틈 4 + 원 22 — `TabBar.tsx` `ADD_STYLE`). */
+/** `+` box width (gap 4 + circle 22 — `ADD_STYLE` of `TabBar.tsx`). */
 const ADD_W = 26
 
 /**
- * 탭바가 그리는 순서 · 경계 · 구역 그대로(`TabBar` · `useTabDragSource.geometryOf` 의 셈) — 탭바 줄 x 0..`available` + `+` 폭 ·
- * y 0..28(제목 줄 없음).
+ * Exactly the order · bounds · zone the tab bar draws (computation of `TabBar` · `useTabDragSource.geometryOf`) — tab bar row x 0..`available` + `+` width ·
+ * y 0..28 (no title row).
  */
 function geometryOf(snap: DragSourceSnapshot, model: WindowModel, available = 480): StripGeometry {
   const motion = snap.window === WIN && stripHeld(snap.override, model) ? snap.motion : null
@@ -103,7 +103,7 @@ function harness(over: Partial<Pick<DragSourcePorts, 'send' | 'switchTabIf'>> = 
   }
 }
 
-/** dragstart 를 지난 task 로 보낸다 — 엔진이 접은 끌기가 아니다. */
+/** Send dragstart to a past task — it is not a drag the engine collapsed. */
 function started(h: Harness, s: DragStart = START): void {
   h.src.start(s)
   for (const fn of h.later.splice(0)) fn()
@@ -138,10 +138,10 @@ describe('dragSource — 끄는 동안(출처 탭바 판정)', () => {
     expect(h.src.getSnapshot().motion).toEqual({ view: 'B', index: 1, left: 170, settled: false })
   })
 
-  // 사용자 결정 2026-10-26(T-66 · D-a) — 자기 탭도 커서가 `+` 오른 끝을 넘으면 구역 밖이다(거부한 대안 = 쓸 수 있는 폭 끝까지
-  //   붙여 두기). 판정은 출처 창 뿌리의 `windowDrop` 이 탭바 기하의 구역(`stripZoneArea`)으로 한다.
+  // User decision 2026-10-26 (T-66 · D-a) — for its own tab too, once the cursor passes the right end of `+` it is outside the zone (rejected alternative = keep it attached up to the end of the usable width).
+  //   The decision is made by the source window root's `windowDrop` with the tab bar geometry's zone (`stripZoneArea`).
   it('가로 넘침 — 커서가 + 오른 끝을 넘으면 구역 밖(순서 이동 멈춤 · 남은 탭) · 돌아오면 순서 이동이 다시 선다', () => {
-    // 머리 셋 160(0..480) · + 480..506 · 쓸 수 있는 폭 600(줄 0..626 — 옛 구역은 600 까지였다) · 캔버스 원점 (0, 28).
+    // Three heads of 160 (0..480) · + 480..506 · usable width 600 (row 0..626 — the old zone went up to 600) · canvas origin (0, 28).
     const h = harness({}, 600)
     const type = buildTabDragType({ app: 'com.engram.test', drag: DRAG, original: { w: 800, h: 600 }, shape: 'l' })
     const root = createWindowDrop({
@@ -169,18 +169,18 @@ describe('dragSource — 끄는 동안(출처 탭바 판정)', () => {
     root.dragEnter(at(244))
     expect(h.local.getSourceStrip()).toEqual({ index: 1, left: 164, x: 244 })
     expect(h.src.getSnapshot().motion).toEqual({ view: 'B', index: 1, left: 164, settled: false })
-    // + 위는 구역 안 — 끄는 머리는 끝자리(320)에 머문다.
+    // Over + is inside the zone — the dragged head stays at the end position (320).
     root.dragOver(at(500))
     expect(h.local.getSourceStrip()).toEqual({ index: 2, left: 320, x: 500 })
     expect(h.src.getSnapshot().motion?.index).toBe(2)
-    // + 오른 끝(506) 너머 빈 곳 — 구역 밖: 순서 이동을 거두고 남은 탭(누르기 전 활성 A)을 보인다.
+    // Empty space beyond the right end of + (506) — outside the zone: withdraw the order move and show the remaining tab (A, active before the press).
     root.dragOver(at(506))
     expect(h.local.getSourceStrip()).toBeNull()
     expect(h.src.getSnapshot().motion).toBeNull()
     expect(h.shown()).toBe('A')
     root.dragOver(at(590))
     expect(h.local.getSourceStrip()).toBeNull()
-    // 다시 들면 곧바로 확정(문턱 없이) · 끄는 탭을 다시 보인다.
+    // Re-entering confirms immediately (no threshold) · the dragged tab is shown again.
     root.dragOver(at(300))
     expect(h.local.getSourceStrip()).toEqual({ index: 1, left: 220, x: 300 })
     expect(h.src.getSnapshot().motion).toEqual({ view: 'B', index: 1, left: 220, settled: false })
@@ -190,22 +190,22 @@ describe('dragSource — 끄는 동안(출처 탭바 판정)', () => {
   it('순서 문턱 — 구역에 든 첫 판정은 곧바로 확정 · 그 뒤는 마지막 이동 점에서 문턱(16 px)을 넘어야 판정의 자리로', () => {
     const h = harness()
     started(h)
-    // 첫 판정(justAttached) — 커서가 거의 안 움직였어도 자리 2 를 확정.
+    // First decision (justAttached) — position 2 is confirmed even if the cursor barely moved.
     h.local.setSourceStrip({ index: 2, left: 250, x: 250 })
     expect(h.src.getSnapshot().motion?.index).toBe(2)
-    // 문턱 안의 되돌림 — 머리만 따른다.
+    // A return within the threshold — only the head follows.
     h.local.setSourceStrip({ index: 1, left: 240, x: 240 })
     expect(h.src.getSnapshot().motion).toEqual({ view: 'B', index: 2, left: 240, settled: false })
-    // 문턱을 넘으면 그 판정의 자리로.
+    // Past the threshold, to that decision's position.
     h.local.setSourceStrip({ index: 1, left: 200, x: 200 })
     expect(h.src.getSnapshot().motion?.index).toBe(1)
-    // 구역을 떠나면 모델 순서 · 다시 들면 곧바로 확정.
+    // Leaving the zone gives the model order · re-entering confirms immediately.
     h.local.setSourceStrip(null)
     expect(h.src.getSnapshot().motion).toBeNull()
     h.local.setSourceStrip({ index: 2, left: 205, x: 205 })
     expect(h.src.getSnapshot().motion?.index).toBe(2)
-    // 문턱을 넘었어도 자리가 같으면 마지막 이동 점은 그대로(205) — 그 점을 옮기면 다음 판정(180 − 187 = 7)이 문턱 안이 된다.
-    //   ★문턱 16 은 이 하네스(탭 셋 · 480 px)의 값이다 — 폭이나 탭 수를 바꾸면 187 이 문턱을 넘는지 다시 셈한다★
+    // Even past the threshold, if the position is the same the last move point stays (205) — if that point were moved, the next decision (180 − 187 = 7) would be inside the threshold.
+    //   ★The threshold 16 is the value of this harness (three tabs · 480 px) — if the width or tab count changes, recompute whether 187 passes the threshold★
     h.local.setSourceStrip({ index: 2, left: 187, x: 187 })
     expect(h.src.getSnapshot().motion?.index).toBe(2)
     h.local.setSourceStrip({ index: 1, left: 180, x: 180 })
@@ -353,7 +353,7 @@ describe('dragSource — 결과 알림 · 원래 선택 되돌리기(§4-6)', ()
 
   it('탭 알림은 적용마다 계기다 — 내용이 같아도(이름 바꿈 따위) dragend 뒤 활성이 끄는 탭이 아니면 푼다(②)', () => {
     const h = harness()
-    // 누름의 전환 메아리가 아직 안 왔다 — 모델 활성 = A.
+    // The press's switch echo has not come yet — model active = A.
     h.setModel({ tabs: ['A', 'B', 'C'], active: 'A' })
     started(h)
     h.src.end('B', 'move')
@@ -373,7 +373,7 @@ describe('dragSource — 결과 알림 · 원래 선택 되돌리기(§4-6)', ()
 })
 
 describe('dragSource — 되돌리기가 닿기 전 누름(forceSwitch)', () => {
-  /** 취소된 끌기 B 의 되돌리기(A, expect B)를 낸 뒤 — 모델 활성은 아직 B. */
+  /** After issuing the revert (A, expect B) of the cancelled drag B — the model active is still B. */
   function reverted(over: Partial<Pick<DragSourcePorts, 'switchTabIf'>> = {}): Harness {
     const h = harness(over)
     started(h)
@@ -387,7 +387,7 @@ describe('dragSource — 되돌리기가 닿기 전 누름(forceSwitch)', () => 
     const h = reverted()
     expect(h.src.forceSwitch(WIN, 'A')).toBe(false)
     expect(h.src.forceSwitch('slot-popup-1', 'B')).toBe(false)
-    // 캔버스 누름이 바꿔 그리기를 풀었다 — 되돌리기는 아직 날아간다.
+    // A canvas press released the swap redraw — the revert is still in flight.
     h.src.pointerDown()
     expect(h.src.getSnapshot().override.phase).toBe('idle')
     h.setModel({ tabs: ['A', 'B', 'C'], active: 'B' })
@@ -439,34 +439,34 @@ describe('dragSource — 되돌리기가 닿기 전 누름(forceSwitch)', () => 
   })
 })
 
-// ── 순서 시험 — 출처 창(§8-3) ──────────────────────────────────────────────────
+// ── order test — source window (§8-3) ──────────────────────────────────────────────────
 
 interface Arrival {
   label: string
-  /** 닿는 것 — 모델 알림(그 창 스토어 적용) · `done` · `layout:updated`. */
+  /** What arrives — model notice (applied to that window's store) · `done` · `layout:updated`. */
   run(h: Harness): void
-  /** dragend 뒤에만 닿는다(그 dragend 가 낳은 것 · dragend 뒤에 바뀐 것). */
+  /** Arrives only after dragend (what that dragend produced · what changed after dragend). */
   after?: boolean
 }
 
 interface Scenario {
   name: string
   effect: EndEffect
-  /** dragend 전에 출처 탭바 구역을 떠났다. */
+  /** Left the source tab bar zone before dragend. */
   out?: boolean
-  /** dragend 전 구역 안에서 자리 2 로 옮겼다. */
+  /** Moved to position 2 inside the zone before dragend. */
   move?: boolean
-  /** 같은 웹뷰 제자리 놓기 — 뿌리 drop 이 표시를 남긴다. */
+  /** Same-webview in-place drop — the root drop leaves a mark. */
   local?: boolean
-  /** 자기 `DragEnd` invoke — 답과 그 뒤의 `done`(없으면 알림 없음 · `null` = invoke 오류). */
+  /** Its own `DragEnd` invoke — the answer and the `done` after it (if none, no notice · `null` = invoke error). */
   dragEnd: { reply: TabDropReply; done: DropOutcome | null } | null
   arrivals: Arrival[]
-  /** 끝에 풀려 있어야 한다. */
+  /** It must be released at the end. */
   releases: boolean
   reverts: number
-  /** 끄는 탭이 그 창을 떠난다 — 바꿔 그린 뒤로 한 프레임도 끄는 탭을 그리지 않는다. */
+  /** The dragged tab leaves that window — after the swap redraw, the dragged tab is not drawn for even one frame. */
   leaves?: boolean
-  /** 같은 창 순서 바꿈 — 순서 이동은 모델 순서가 바뀐 그 프레임까지 그리고 그 프레임에 거둔다. */
+  /** Same-window reorder — the order move is drawn until the frame where the model order changes and withdrawn on that frame. */
   reorder?: boolean
 }
 
@@ -476,7 +476,7 @@ const doneOf = (label: string, outcome: DropOutcome, after = false): Arrival => 
   run: h => h.src.done({ drag: DRAG, outcome }),
   after,
 })
-// `layout:updated` 는 뷰 레이아웃 캐시만 바꾼다 — 그 창 탭 상태(`windows[label]`)를 건드리지 않아 출처에 닿는 것이 없다.
+// `layout:updated` changes only the view layout cache — it does not touch that window's tab state (`windows[label]`), so nothing reaches the source.
 const layoutNoise: Arrival = { label: 'layout:updated', run: () => {} }
 
 const SCENARIOS: Scenario[] = [
@@ -592,7 +592,7 @@ async function play(sc: Scenario, s: fc.Scheduler) {
       }
       return s.schedule(Promise.resolve(de.reply), 'reply')
     },
-    // 되돌리기의 왕복 — 셸에 닿은 때 그 창 활성이 아직 `expect` 면 바꾸고 알림이 뒤따른다(그사이 바뀌었으면 아무것도 안 함).
+    // The revert round trip — when it reaches the shell, if that window's active is still `expect` it is changed and a notice follows (if it changed in the meantime, nothing happens).
     switchTabIf: (_w, to, expect) =>
       s.schedule(Promise.resolve(), 'switch_tab_if').then(() => {
         const m = h!.model()
@@ -619,7 +619,7 @@ async function play(sc: Scenario, s: fc.Scheduler) {
     scheduleAll(true)
   })
   await s.waitIdle()
-  // invoke 응답의 처리(오류면 풀기)는 응답을 넘겨받은 뒤라 사건 프레임에 안 잡힌다 — 끝 상태를 한 번 더 적는다.
+  // Handling the invoke response (releasing on error) comes after the response is handed over, so it is not caught in the event frame — record the end state once more.
   frame('idle')
   return { h, frames, sentWhileLive }
 }
@@ -637,21 +637,21 @@ describe('dragSource — 순서 시험(fc.scheduler · 출처 창)', () => {
             const { h, frames, sentWhileLive } = await play(sc, s)
             const where = () => s.report().map(r => r.label).join(' → ')
 
-            // 보내기 — 제자리 놓기 밖은 dragend 하나에 정확히 하나 · 늘 리듀서에 끝을 넣은 뒤.
+            // Send — outside an in-place drop, exactly one per dragend · always after feeding the end into the reducer.
             expect(h.sends.length, where()).toBe(sc.local ? 0 : 1)
             expect(sentWhileLive, where()).toBe(false)
 
-            // ① 풀려야 하는 갈래는 끝에 풀렸다 · ③ 풀린 뒤 그리는 탭 = 모델 활성.
+            // ① The branch that must be released was released at the end · ③ the tab drawn after release = the model active.
             const last = frames[frames.length - 1]
             if (sc.releases) expect(last.snap.override.phase, where()).toBe('idle')
             expect(shownOf(last), where()).toBe(last.model.active)
             if (sc.releases) expect(h.local.getOutgoing(), where()).toBeNull()
 
-            // ② 끄는 탭이 그 창을 떠나는 갈래 — 바꿔 그린 뒤로는 한 프레임도 끄는 탭을 그리지 않는다(시한 뒤집기 없음).
+            // ② The branch where the dragged tab leaves that window — after the swap redraw, the dragged tab is not drawn for even one frame (no deadline flip).
             if (sc.leaves) for (const f of frames) expect(shownOf(f), `${f.label} @ ${where()}`).not.toBe('B')
 
-            // ④ 같은 창 순서 바꿈 — 순서 이동은 모델 순서가 바뀐 그 프레임까지 그리고 그 프레임에 거둔다(튐 없음). 이 갈래에서는
-            //   그 전에 풀 계기가 없다 — 먼저 거두면 머리가 옛 순서로 돌아갔다가 모델 순서로 다시 튄다.
+            // ④ Same-window reorder — the order move is drawn until the frame where the model order changes and withdrawn on that frame (no jump). In this branch
+            //   there is no release trigger before that — withdrawing first would return the head to the old order and then jump again to the model order.
             if (sc.reorder) {
               for (const f of frames) {
                 const same = f.model.tabs.join() === AT_START.tabs.join()
@@ -659,7 +659,7 @@ describe('dragSource — 순서 시험(fc.scheduler · 출처 창)', () => {
               }
             }
 
-            // ⑤ 되돌리기는 많아야 한 번 · 갈래마다 정확한 수.
+            // ⑤ At most one revert · the exact count per branch.
             expect(h.switches.length, where()).toBe(sc.reverts)
           }),
           { numRuns: 150 },

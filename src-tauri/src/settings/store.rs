@@ -1,23 +1,23 @@
-//! 설정 파일(`<셸 config 폴더>\settings.json`)을 아는 유일한 자리 — 이름 · 위치 · 형식 · 관용 규칙(TRD §5-3).
+//! The only place that knows the settings file (`<셸 config 폴더>\settings.json`) — name · location · format · tolerance rules (TRD §5-3).
 //!
-//! 형식 = 평평한 점 키 객체 + 예약 키 `"$version": 1`. **기본값과 다른 값만 적는다.**
+//! Format = a flat dotted-key object + the reserved key `"$version": 1`. **Only values that differ from the default are written.**
 //!
-//! - **적재([`load`])는 파일을 만들지도 고치지도 않는다** — 셸 빌드 전에 돈다(TRD §5-3 서비스 수명). 로거도
-//!   그 전이라 적재는 로그를 내지 않고 [`LoadNote`] 로 모은다 — 서비스가 로거가 선 뒤에 낸다.
-//! - **쓰기([`write`])는 읽고-고치고-쓰기다** — 호출자가 읽은 문서([`read_document`])에서 받은 키만 바꾼다.
-//!   앱 밖에서 고친 다른 키와 모르는 키가 그대로 남는다. 서비스의 쓰기 직렬화 락 아래서만 부른다 — 두
-//!   쓰기의 읽고-고치고-쓰기가 겹치면 나중 쓰기가 먼저 쓰기의 변경을 지운다.
-//! - **읽기 판정 · 덮어도 되나는 base `file` 규칙 하나다** — 이 파일의 몫은 [`SPEC`](버전 키 · 판 · 상한)뿐이다.
-//! - **통째로 못 쓰는 파일**(JSON 아님 · 객체 아님 · 상한 초과 · UTF-8 아님 · `$version` 꼴이 틀림)은 적재가
-//!   기본값으로 접고 손대지 않는다. 그 위에 쓰는 첫 쓰기가 원본을 `settings.json.corrupt` 로 **떠 둔 뒤** 그
-//!   자리를 원자적으로 갈아끼운다 — 파일이 없는 순간이 없다. 새 파일은 메모리의 값에서 다시 짓는다. 사본은
-//!   하나뿐이다([`SettingsFiles::copy_aside`]). 떠 두기가 실패하면 그 쓰기도 실패하고 원본은 그대로다.
-//!   ★읽기 자체의 IO 실패는 그 무리가 아니다★ — 잠깐 잠긴 멀쩡한 파일을 덮지 않도록 그때 쓰기는 실패한다.
-//! - **이 셸보다 새 판이 쓴 파일**(`$version` 이 1 보다 크다)도 적재가 기본값으로 접지만 ★덮지도 떠 두지도
-//!   않는다★ — 그 위의 쓰기는 거절이다([`WriteError::Newer`]). 쓸 때마다 다시 읽으므로 파일이 바뀌면 풀린다.
-//! - **아는 키의 못 쓸 값**은 기본값으로 접는다 — 파일에서는 그 키를 쓰거나 되돌릴 때까지 그대로다.
+//! - **Load ([`load`]) neither creates nor edits the file** — it runs before the shell build (TRD §5-3 service lifetime). The logger is
+//!   also later than that, so the load emits no logs and collects them into [`LoadNote`] — the service emits them after the logger is up.
+//! - **Write ([`write`]) is read-modify-write** — it changes only the keys received, in the document the caller read ([`read_document`]).
+//!   Other keys edited from outside the app and unknown keys stay as they are. It is called only under the service's write serialization lock — if the
+//!   read-modify-write of two writes overlaps, the later write erases the earlier write's change.
+//! - **The read decision · whether it may be overwritten is one base `file` rule** — this file's share is only [`SPEC`] (version key · version · upper bound).
+//! - **A file unusable as a whole** (not JSON · not an object · over the upper bound · not UTF-8 · wrong `$version` shape) is collapsed to
+//!   the defaults by the load and left untouched. The first write on top of it **copies aside** the original as `settings.json.corrupt` and then atomically swaps that
+//!   place — there is no moment with no file. The new file is rebuilt from the values in memory. There is only one
+//!   copy ([`SettingsFiles::copy_aside`]). If copying aside fails, that write fails too and the original stays as it is.
+//!   ★An IO failure of the read itself is not in that group★ — so as not to overwrite a healthy file that is briefly locked, the write fails then.
+//! - **A file written by a version newer than this shell** (`$version` greater than 1) is also collapsed to the defaults by the load, but ★it is neither overwritten nor copied
+//!   aside★ — a write on top of it is rejected ([`WriteError::Newer`]). It reads again at every write, so it clears when the file changes.
+//! - **An unusable value of a known key** is collapsed to the default — in the file it stays as is until that key is written or reverted.
 // ADR-0265
-// ADR-0291: 버전 없음 = 1 판 · 새 판이 쓴 파일은 덮지 않는다 · 판정은 쓰기마다 다시 한다.
+// ADR-0291: no version = version 1 · a file written by a newer version is not overwritten · the decision is redone at every write.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -32,11 +32,11 @@ use crate::file_hooks::OS_HOOKS;
 const SETTINGS_FILE: &str = "settings.json";
 const VERSION_KEY: &str = "$version";
 const VERSION: u64 = 1;
-/// 사람이 손으로 늘려도 여기까진 정상인 선 — 실제 크기는 1 KiB 안팎이다. ★쓰기도 이 선을 넘지 않는다★ —
-/// 넘는 원문을 쓰면 다음 적재가 그 파일 전체를 못 쓴다고 접는다.
+/// The line up to which things are still normal even if a person grows it by hand — the real size is around 1 KiB. ★Writes do not exceed this line either★ —
+/// if text over it is written, the next load collapses the whole file as unusable.
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
 
-/// 설정 파일의 읽기 규칙 — 모양은 따로 보지 않는다(키마다 관용 — 못 쓸 값은 그 키만 기본값).
+/// Read rule of the settings file — the shape is not looked at separately (tolerant per key — an unusable value defaults only that key).
 // ADR-0291
 const SPEC: file::Spec = file::Spec {
     version_key: VERSION_KEY,
@@ -45,26 +45,26 @@ const SPEC: file::Spec = file::Spec {
     shape: file::any_shape,
 };
 
-/// 설정 파일 하나에 대한 IO seam — 시험은 메모리 가짜(`fake::MemFiles`)로 돈다.
+/// IO seam for one settings file — tests run with an in-memory fake (`fake::MemFiles`).
 ///
-/// ★서비스의 쓰기 직렬화 락을 쥔 채 불린다★ — 구현이 [`super::SettingsService`] 의 쓰기를 다시 부르면
-/// 교착이다(읽기는 그 락을 안 잡는다).
+/// ★Called while holding the service's write serialization lock★ — if an implementation calls a write of [`super::SettingsService`] again, it is a
+/// deadlock (reads do not take that lock).
 // ADR-0012
 pub trait SettingsFiles: Send {
-    /// 원문 — [`file::read_file_capped`] 와 같은 계약: 없으면 `NotFound` · 상한 초과 · UTF-8 아님은
-    /// `InvalidData`(못 쓰는 파일) · 그 밖은 읽기 자체의 IO 실패(권한 · 잠김 재시도 뒤 등)다. 마지막 것이면 쓰기는
-    /// 파일을 덮지 않고 실패한다.
+    /// Original text — same contract as [`file::read_file_capped`]: `NotFound` if missing · over the upper bound · not UTF-8 is
+    /// `InvalidData` (an unusable file) · anything else is an IO failure of the read itself (permission · after lock retries, etc.). In the last case the write
+    /// fails without overwriting the file.
     fn read(&self) -> io::Result<String>;
-    /// 원자적으로 통째로 갈아끼운다. 폴더가 없으면 만든다.
+    /// Atomically swap the whole file. Create the folder if it is missing.
     fn write_atomic(&self, text: &str) -> io::Result<()>;
-    /// 지금 파일을 옆 이름(`<이름>.corrupt`)에 **떠 두고** 그 자리를 돌려준다 — 원본은 그 자리에 그대로 둔다.
-    /// ★앞서 떠 둔 사본을 덮는다★(이름이 하나뿐 — [`file::copy_aside`]). `Err` 면 앞선 사본도 그대로다.
+    /// **Copy aside** the current file to a neighboring name (`<이름>.corrupt`) and return that place — the original is left in that place as it is.
+    /// ★It overwrites a copy made aside earlier★ (there is only one name — [`file::copy_aside`]). On `Err` the earlier copy is also left as it is.
     fn copy_aside(&self) -> io::Result<PathBuf>;
-    /// 로그에 실을 출처(경로).
+    /// Origin (path) to put in the log.
     fn origin(&self) -> String;
 }
 
-/// 운영 구현 — `<dir>\settings.json`.
+/// Production implementation — `<dir>\settings.json`.
 pub struct FsSettingsFiles {
     path: PathBuf,
 }
@@ -82,7 +82,7 @@ impl SettingsFiles for FsSettingsFiles {
         file::read_file_capped(&self.path, SPEC.cap, OS_HOOKS)
     }
 
-    // 셸 config 폴더는 아무도 미리 만들지 않는다 — 적재가 만들면 안 되므로 첫 쓰기가 만든다(`file::write_atomic`).
+    // Nobody creates the shell config folder in advance — the load must not create it, so the first write creates it (`file::write_atomic`).
     fn write_atomic(&self, text: &str) -> io::Result<()> {
         file::write_atomic(&self.path, text.as_bytes(), OS_HOOKS)
     }
@@ -96,14 +96,14 @@ impl SettingsFiles for FsSettingsFiles {
     }
 }
 
-/// 파일을 한 번 읽어 판정한 것 — base 판정([`file::classify`]) 그대로다.
+/// What was decided by reading the file once — exactly the base decision ([`file::classify`]).
 #[derive(Debug)]
 pub(super) struct Document(Loaded);
 
 impl Document {
-    /// 파일의 `key` 항목이 목표와 다른가 — 목표 `None` = 그 키가 없어야 한다(기본값) · `Some(v)` = 정규 문자열
-    /// `v` 여야 한다. 철자만 다른 값(`"LIGHT"`)도 다르다. `None` = 가를 수 없다(못 읽었거나 통째로 못 쓰는 파일 ·
-    /// 새 판이 쓴 파일).
+    /// Does the file's `key` entry differ from the target — target `None` = that key must be absent (default) · `Some(v)` = must be the canonical string
+    /// `v`. A value that differs only in spelling (`"LIGHT"`) also differs. `None` = cannot tell (could not read, or a file unusable as a whole ·
+    /// a file written by a newer version).
     pub(super) fn differs(&self, key: &str, target: Option<&str>) -> Option<bool> {
         match &self.0 {
             Loaded::Missing => Some(target.is_some()),
@@ -117,33 +117,33 @@ impl Document {
     }
 }
 
-/// 파일을 한 번 읽어 판정한다 — 버전 없음 = 1 판 · `1.0` 도 1 판 · BOM 하나는 무시(base `file::parse`).
+/// Reads the file once and decides — no version = version 1 · `1.0` is also version 1 · one BOM is ignored (base `file::parse`).
 pub(super) fn read_document(files: &dyn SettingsFiles) -> Document {
     Document(file::classify(files.read(), &SPEC))
 }
 
-/// 기본값과 다른 값(정규형)만 — 키 = 표의 키.
+/// Only values that differ from the default (canonical form) — key = the table's key.
 pub(super) type Overrides = BTreeMap<&'static str, String>;
 
-/// 적재가 남길 로그 한 줄 — [`LoadNote::emit`] 이 적재 때 냈을 수준 · 필드 그대로 낸다. ★값은 싣지 않는다★ —
-/// 밖에서 쓰는 파일이라 무엇이 들었는지 우리가 정하지 않는다.
+/// One log line the load leaves — emitted at the level · with the fields that [`LoadNote::emit`] would have emitted at load time. ★The value is not included★ —
+/// it is a file written from outside, so we do not decide what it contains.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum LoadNote {
     Missing,
-    /// 통째로 못 쓰는 파일 — 사유 문구.
+    /// A file unusable as a whole — reason message.
     Unusable(String),
-    /// 이 셸보다 새 판이 쓴 파일 — 그 판.
+    /// A file written by a version newer than this shell — that version.
     Newer {
         found: u64,
     },
-    /// 읽기 자체의 IO 실패 — 오류 문구.
+    /// An IO failure of the read itself — error message.
     ReadFailed(String),
-    /// 아는 키의 못 쓸 값 — 사유 문구([`registry::SettingDef::normalize`] 의 `Err` 는 값을 싣지 않는다).
+    /// An unusable value of a known key — reason message (the `Err` of [`registry::SettingDef::normalize`] does not include the value).
     BadValue {
         key: &'static str,
         reason: String,
     },
-    /// 다 읽었다 — 덮어쓴 키 수 · 모르는 키 수(모르는 키는 이름도 싣지 않는다).
+    /// Finished reading — number of overridden keys · number of unknown keys (unknown keys do not include the name either).
     Loaded {
         overrides: usize,
         unknown: usize,
@@ -193,8 +193,8 @@ impl LoadNote {
     }
 }
 
-/// 파일 → 기본값과 다른 값 + 남길 로그. ★실패는 전부 기본값으로 접는다★(패닉 · 전파 없음) · 파일을 건드리지
-/// 않는다 · 로그를 내지 않는다(모듈 헤더).
+/// File → values that differ from the default + logs to leave. ★Every failure is collapsed to the defaults★ (no panic · no propagation) · it does not touch the
+/// file · it does not emit logs (module header).
 pub(super) fn load(files: &dyn SettingsFiles) -> (Overrides, Vec<LoadNote>) {
     let map = match read_document(files).0 {
         Loaded::Parsed(Parsed::Usable { doc, .. }) => doc,
@@ -240,14 +240,14 @@ pub(super) fn load(files: &dyn SettingsFiles) -> (Overrides, Vec<LoadNote>) {
     (overrides, notes)
 }
 
-/// [`write`] 가 그 파일을 쓰지 않은 까닭.
+/// Why [`write`] did not write that file.
 #[derive(Debug)]
 pub(super) enum WriteError {
-    /// 이 셸보다 새 판이 쓴 파일이다 — 덮지도 떠 두지도 않았다.
+    /// It is a file written by a version newer than this shell — it was neither overwritten nor copied aside.
     Newer { found: u64 },
-    /// 지금 파일을 못 읽었다(잠김 예산 뒤 · 권한) — 무엇이 들었는지 몰라 덮지도 떠 두지도 않았다.
+    /// Could not read the current file (after the lock budget · permission) — it was neither overwritten nor copied aside, since we do not know what it contains.
     Unreadable(io::Error),
-    /// 떠 두기나 쓰기가 실패했다 · 지은 원문이 읽기 상한을 넘는다.
+    /// Copying aside or writing failed · the text built exceeds the read upper bound.
     Io(io::Error),
 }
 
@@ -257,17 +257,17 @@ impl From<io::Error> for WriteError {
     }
 }
 
-/// 받은 키만 바꿔 다시 쓴다 — `Some` = 그 값을 적는다 · `None` = 그 키를 지운다(기본값).
+/// Rewrites changing only the keys received — `Some` = write that value · `None` = remove that key (default).
 ///
-/// `document` = 이 쓰기 직전에 [`read_document`] 로 읽은 것 — 덮어도 되나는 그것으로 base 규칙
-/// ([`Loaded::write_policy`])이 정한다. 파일이 없거나 통째로 못 쓰면 새 파일을 `memory`(지금 유효한 덮어쓰기
-/// 전부)에서 짓는다 — 안 그러면 쓰기 한 번이 화면에 아직 보이는 다른 값을 디스크에서 지운다. 통째로 못 쓰는
-/// 파일은 갈아끼우기 전에 옆에 떠 둔다([`SettingsFiles::copy_aside`]). 새 판이 쓴 파일 · 못 읽은 파일은 덮지도
-/// 떠 두지도 않는다.
+/// `document` = what was read with [`read_document`] just before this write — whether it may be overwritten is decided by the base rule
+/// ([`Loaded::write_policy`]) from it. If the file is missing or unusable as a whole, the new file is built from `memory` (all currently effective
+/// overrides) — otherwise one write would delete from the disk another value still visible on screen. A file unusable as a whole is
+/// copied aside before being swapped ([`SettingsFiles::copy_aside`]). A file written by a newer version · a file that could not be read is neither overwritten nor
+/// copied aside.
 ///
-/// `Err` 면 파일은 그대로다. ★떠 두기 뒤의 실패면 앞서 떠 둔 사본은 이미 이 원본으로 덮였다★(사본 이름이
-/// 하나뿐). 지은 원문이 읽기 상한을 넘으면 떠 두지도 쓰지도 않고 `Err`.
-/// ★한 호출 = 한 파일(TRD §5-2)★ — 키가 여러 파일로 갈리게 되면 여기서 걸치는 묶음을 거절한다.
+/// On `Err` the file stays as it is. ★If the failure is after copying aside, the copy made aside earlier has already been overwritten by this original★ (there is only one
+/// copy name). If the text built exceeds the read upper bound, it neither copies aside nor writes and gives `Err`.
+/// ★One call = one file (TRD §5-2)★ — if keys come to split across several files, a bundle that spans them is rejected here.
 // ADR-0265
 // ADR-0291 R8 · R16
 pub(super) fn write(
@@ -276,12 +276,12 @@ pub(super) fn write(
     memory: &Overrides,
     changes: &[(&'static str, Option<String>)],
 ) -> Result<(), WriteError> {
-    // 설정은 그 파일을 통째로 덮지 않고 지금 파일 위에 바꾼 키만 얹으므로 늘 이 실행의 것으로 친다.
+    // Settings does not overwrite that file as a whole but puts only the changed keys on top of the current file, so it always counts it as this run's.
     let copy_aside_first = match document.0.write_policy(file::Claim::Adopted) {
         WritePolicy::Write => false,
         WritePolicy::CopyAsideFirst => true,
         WritePolicy::Refuse(Refused::Newer { found }) => return Err(WriteError::Newer { found }),
-        // 거절 — 그 읽기 오류는 아래 `Loaded::Failed` 갈래가 싣고 돌려준다.
+        // Rejection — that read error is carried and returned by the `Loaded::Failed` branch below.
         WritePolicy::Refuse(Refused::ReadFailed) => false,
     };
     let from_memory = || -> Map<String, Value> {
@@ -305,7 +305,7 @@ pub(super) fn write(
     map.insert(VERSION_KEY.to_string(), Value::from(VERSION));
     let mut text = serde_json::to_string_pretty(&Value::Object(map))
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    // 사람이 손으로도 고치는 파일이라 줄 끝을 남긴다.
+    // It is a file people also edit by hand, so the line ending is kept.
     text.push('\n');
     file::check_cap(text.len(), &SPEC)?;
     if copy_aside_first {
@@ -321,7 +321,7 @@ pub(super) fn write(
     Ok(files.write_atomic(&text)?)
 }
 
-/// 메모리 가짜 디스크 — 시험이 손잡이를 쥔 채 서비스에 넘긴다.
+/// In-memory fake disk — the test hands it to the service while holding the handle.
 #[cfg(test)]
 pub(super) mod fake {
     use std::io;
@@ -332,17 +332,17 @@ pub(super) mod fake {
 
     #[derive(Default)]
     pub struct Disk {
-        /// 지금 파일 원문. `None` = 없음.
+        /// Current file text. `None` = missing.
         pub text: Option<String>,
-        /// 원문이 못 된다(상한 초과 흉내) — `text` 보다 먼저 본다.
+        /// The text cannot be read (imitating an exceeded upper bound) — looked at before `text`.
         pub unusable: bool,
         pub fail_read: bool,
         pub fail_write: bool,
         pub fail_copy: bool,
         pub writes: usize,
-        /// 떠 둔 사본 자리(`memory.corrupt` — 하나뿐이라 뜰 때마다 덮인다)의 원문. `None` = 사본 없음.
+        /// Text of the place of the copy made aside (`memory.corrupt` — there is only one, so it is overwritten each time one is made). `None` = no copy.
         pub corrupt: Option<String>,
-        /// 떠 둔 횟수.
+        /// Number of times copied aside.
         pub copies: usize,
     }
 
@@ -433,7 +433,7 @@ mod tests {
         write(files, document, &Overrides::new(), changes)
     }
 
-    // ── 적재 ──
+    // ── load ──
 
     #[test]
     fn a_missing_file_loads_as_defaults() {
@@ -537,7 +537,7 @@ mod tests {
         assert_eq!(files.disk().copies, 0);
     }
 
-    /// ADR-0291 R2: 새 판이 쓴 파일은 읽지 않고(기본값) · 적재 로그가 그 판을 싣는다 · 손대지 않는다.
+    /// ADR-0291 R2: a file written by a newer version is not read (defaults) · the load log carries that version · it is not touched.
     #[test]
     fn a_newer_version_file_loads_as_defaults_and_is_left_alone() {
         let text = r#"{"$version":2,"theme.default":"light"}"#;
@@ -550,7 +550,7 @@ mod tests {
         assert_eq!((disk.writes, disk.copies), (0, 0));
     }
 
-    /// ADR-0291 R2 · R8: 새 판이 쓴 파일 위의 쓰기는 거절이다 — 덮지도 떠 두지도 않는다.
+    /// ADR-0291 R2 · R8: a write on top of a file written by a newer version is rejected — neither overwritten nor copied aside.
     #[test]
     fn a_write_over_a_newer_version_file_is_refused_without_a_copy() {
         for text in [
@@ -600,7 +600,7 @@ mod tests {
         );
     }
 
-    // ── 문서 대조 ──
+    // ── document comparison ──
 
     #[test]
     fn differs_compares_the_raw_entry_with_the_target() {
@@ -640,7 +640,7 @@ mod tests {
         );
     }
 
-    // ── 쓰기 ──
+    // ── write ──
 
     #[test]
     fn a_write_creates_the_file_with_the_version_key() {
@@ -774,7 +774,7 @@ mod tests {
             assert_eq!(disk.corrupt.as_deref(), Some("{broken"));
         }
 
-        // 밖에서 다른 못 쓰는 원문으로 고쳤다 — 앞서 떠 둔 사본은 덮인다(TRD §10 F21).
+        // It was edited from outside into another unusable text — the copy made aside earlier is overwritten (TRD §10 F21).
         files.disk().text = Some("{BROKEN".to_string());
         attempt().unwrap_err();
         assert_eq!(files.disk().corrupt.as_deref(), Some("{BROKEN"));

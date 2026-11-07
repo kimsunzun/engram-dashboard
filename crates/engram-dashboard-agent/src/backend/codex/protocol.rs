@@ -1,49 +1,49 @@
-//! codex app-server 와이어 타입 — 봉투 · 메서드 이름 · 우리가 보내고 받는 payload.
+//! codex app-server wire types — the envelope · method names · the payloads we send and receive.
 //!
-//! ★출처와 재생성 방법(다시 추론하지 말 것)★: 이 파일의 필드 이름·필수 여부·enum 값은
-//!   codex-cli **0.154.0** 이 낸 JSON Schema 에서 읽은 것이다 — ★예외 하나 = 사용량 한도 절
-//!   (`AccountRateLimitsUpdatedNotification`·`GetAccountRateLimits*` 와 그 아래 타입)은 **0.156.1** 의 스키마에서
-//!   읽었다★. 다시 뽑는 명령 =
-//!   `codex app-server generate-json-schema --out <dir>` — `v2/` 아래에 타입별 파일 266 개가
-//!   떨어진다. 상류가 바뀌었나를 확인할 때는 이 파일을 읽지 말고 그 명령으로 다시 뽑아 대조한다.
+//! ★Source and how to regenerate (do not infer again)★: the field names · required-ness · enum values in this file were
+//!   read from the JSON Schema that codex-cli **0.154.0** emitted — ★one exception = the usage limit
+//!   section (`AccountRateLimitsUpdatedNotification`·`GetAccountRateLimits*` and the types under them) was read from the **0.156.1** schema★.
+//!   The command to extract it again =
+//!   `codex app-server generate-json-schema --out <dir>` — 266 per-type files
+//!   land under `v2/`. To check whether upstream changed, do not read this file but extract again with that command and compare.
 //!
-//! ★봉투가 JSON-RPC 2.0 이 아니다★ — `jsonrpc` 필드가 스키마 전체에 0 회다. 보내지도 말고
-//!   받을 때 요구하지도 말 것.
+//! ★The envelope is not JSON-RPC 2.0★ — the `jsonrpc` field appears 0 times in the whole schema. Do not send it and
+//!   do not require it on receipt.
 //!
-//! ★인바운드 구조체는 **우리가 읽는 칸만** 싣는다★ — serde 는 모르는 칸을 무시하므로, 안 읽는
-//!   필수 칸까지 옮겨 적으면 얻는 것 없이 역직렬화 실패 지점만 는다. 반대로 **아웃바운드**는
-//!   스키마가 required 로 표시한 칸을 전부 싣는다 — 빠지면 서버가 거절한다.
+//! ★Inbound structs carry **only the fields we read**★ — serde ignores unknown fields, so copying even the required fields
+//!   we do not read gains nothing and only adds deserialization failure points. Conversely **outbound** carries every field
+//!   the schema marks required — if missing, the server rejects it.
 //!
-//! ★`deny_unknown_fields` 를 어디에도 달지 않는다 — 취향이 아니라 정확성 요구다★(실측 0.154.0):
-//!   실 응답은 스키마에 **아예 없는** 칸을 싣고 온다. `thread/start` 응답에서 관측된 것만도
+//! ★`deny_unknown_fields` is attached nowhere — it is a correctness requirement, not taste★ (measured 0.154.0):
+//!   real responses carry fields that are **not in the schema at all**. In the `thread/start` response alone, what was observed is
 //!   `environments`·`runtimeWorkspaceRoots`·`extra`·`canAcceptDirectInput`·`daybreakEnabled`
-//!   ·`multiAgentMode`·`activePermissionProfile`·`historyMode` 다. 모르는 칸을 거부하는 순간
-//!   정상 응답이 해독 실패가 된다.
+//!   ·`multiAgentMode`·`activePermissionProfile`·`historyMode`. The moment unknown fields are rejected,
+//!   a normal response becomes a decode failure.
 //!
-//! ★crate 전역 `rename_all` 을 쓰지 않는다★ — 이 프로토콜은 자기 안에서 케이싱이 섞인다
-//!   (`input_text` 옆에 `inputText`, `approved_for_session` 옆에 `acceptForSession`).
-//!   `rename_all` 은 **그 타입의 칸이 전부 camelCase 라고 스키마에서 확인한 타입에만** 단다.
+//! ★A crate-wide `rename_all` is not used★ — this protocol mixes casing within itself
+//!   (`input_text` alongside `inputText`, `approved_for_session` alongside `acceptForSession`).
+//!   `rename_all` is attached **only to types whose fields were all confirmed camelCase in the schema**.
 //!
-//! 이 파일은 I/O 를 하지 않는다 — 문자열 in, 타입 out.
+//! This file does no I/O — string in, type out.
 
-// chunk 1 은 타입과 번역기만 세우고 배선은 하나도 하지 않는다. 아래 표면의 소비자(통로 구현체)는
-//   chunk 2 가 만들고, 그때 이 allow 를 걷는다.
+// chunk 1 only sets up the types and the translator and does no wiring at all. The consumer of the surface below (the path implementation)
+//   is made by chunk 2, and this allow is removed then.
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-// ── 봉투 ──────────────────────────────────────────────────────────────────────
+// ── Envelope ──────────────────────────────────────────────────────────────────────
 
-/// JSON-RPC id. 스키마는 `anyOf[string, i64]` 이고 string 을 먼저 적는다(`RequestId.json`).
+/// JSON-RPC id. The schema is `anyOf[string, i64]` and lists string first (`RequestId.json`).
 ///
-/// ★서버가 낸 id 는 **글자 그대로** 되돌려 줘야 한다★ — 그래서 숫자로 정규화하지 않는다.
-/// i64 인 것도 의도다: 스키마가 `format: int64` 라 JS 쪽 피어가 2^53 을 넘는 id 를 보낼 수 있다.
+/// ★An id the server issued must be returned **character for character**★ — so it is not normalized to a number.
+/// Being i64 is also intentional: the schema is `format: int64`, so a JS-side peer may send an id above 2^53.
 ///
-/// ★`null` 로 직렬화될 수 있는 변형이 없는 것이 이 타입의 불변식이다★(실측 0.154.0):
-/// `id: null` 을 보내면 서버의 untagged 봉투 union 이 그 줄을 **알림으로 재분류해 조용히
-/// 버린다** — 오류도, stderr 한 줄도 없다. `Option` 으로 감싸거나 Null 변형을 더하면 그 침묵이
-/// 되살아난다.
+/// ★That there is no variant that can serialize as `null` is the invariant of this type★ (measured 0.154.0):
+/// if `id: null` is sent, the server's untagged envelope union **reclassifies that line as a notification and quietly
+/// drops it** — no error, not one line on stderr. Wrapping in `Option` or adding a Null variant
+/// would revive that silence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub(crate) enum RequestId {
@@ -51,18 +51,18 @@ pub(crate) enum RequestId {
     Num(i64),
 }
 
-/// `JSONRPCErrorError` — 오류 봉투의 본문.
+/// `JSONRPCErrorError` — the body of the error envelope.
 ///
-/// ★`code` 는 불투명한 i64 다★: 스키마에 enum·const·min/max 가 없고 `-32xxx` 대역이 **한 번도**
-/// 안 나온다(`-32001` 포함 — grep 0 히트). 과부하·레이트리밋은 이 봉투가 아니라 `error`
-/// **알림**의 `codexErrorInfo`(`serverOverloaded`·`rateLimitExceeded`)로 온다.
-/// ★런타임에 `-32001` 같은 코드가 실제로 오는지는 미검증★ — 숫자로 분기하는 코드를 여기 두지
-/// 않는다. 특정 코드 취급이 필요해지면 실 서버 관측이 먼저다.
+/// ★`code` is an opaque i64★: the schema has no enum · const · min/max, and the `-32xxx` range appears **not once**
+/// (including `-32001` — grep 0 hits). Overload · rate limit come not in this envelope but in the `error`
+/// **notification**'s `codexErrorInfo` (`serverOverloaded`·`rateLimitExceeded`).
+/// ★Whether a code like `-32001` actually arrives at runtime is unverified★ — we put no code that branches on the number
+/// here. If handling of a specific code becomes necessary, real-server observation comes first.
 ///
-/// 실측 0.154.0: 모르는 메서드에 대한 답은 `-32600` 이고 `data` 칸은 **오지 않았다**(그래도
-/// optional 로 둔다 — 스키마가 허용한다). ★`message` 가 4KB 에 이를 수 있다★ — 모르는 메서드
-/// 오류의 본문이 유효 메서드 160 개를 전부 열거한다. 이 문자열을 로그·화면으로 옮기는 쪽은
-/// 반드시 잘라 쓴다.
+/// Measured 0.154.0: the answer to an unknown method is `-32600` and the `data` field **did not come** (we still make it
+/// optional — the schema allows it). ★`message` can reach 4KB★ — the body of an unknown-method
+/// error lists all 160 valid methods. Whoever carries this string to a log · the screen
+/// must cut it.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct RpcError {
     pub(crate) code: i64,
@@ -71,40 +71,40 @@ pub(crate) struct RpcError {
     pub(crate) data: Option<Value>,
 }
 
-/// 서버에서 들어온 한 줄의 봉투 모양 넷.
+/// The four envelope shapes of one line coming in from the server.
 ///
-/// ★판별은 **칸의 유무**로 한다 — id 값으로는 원리상 못 가른다★: 서버가 낸 id 를 그대로
-/// 되돌려 줘야 하므로 두 id 공간은 겹칠 수밖에 없다(TRD §4-4).
-/// `#[serde(untagged)]` 로 만들지 않는다 — 네 모양의 required 집합이 겹치고 어느 것도 여분 칸을
-/// 금하지 않아, 순서가 의미를 결정하는 함정이 된다(`JSONRPCMessage` 가 그 모양이다).
+/// ★Discrimination is by **presence of fields** — in principle it cannot be told by the id value★: the id the server issued must be
+/// returned as is, so the two id spaces are bound to overlap (TRD §4-4).
+/// It is not made `#[serde(untagged)]` — the required sets of the four shapes overlap and none forbids extra fields, so
+/// order would become a trap that decides meaning (`JSONRPCMessage` has that shape).
 #[derive(Debug, Clone)]
 pub(crate) enum Inbound {
-    /// `method` + `id` — 서버가 우리에게 묻는다. ★답하지 않으면 그 에이전트는 영구 정지다★.
+    /// `method` + `id` — the server asks us. ★If not answered, that agent freezes permanently★.
     Request {
         id: RequestId,
         method: String,
         params: Option<Value>,
     },
-    /// `method` 만 — 아무도 답을 기다리지 않는다. 번역기가 받는 것은 이것뿐이다.
+    /// `method` only — nobody waits for an answer. This is all the translator receives.
     ///
-    /// ★실 알림 봉투에는 `method`·`params` 와 나란히 `emittedAtMs` 가 하나 더 붙는다★
-    /// (실측 0.154.0 — 알림 12/12 에 있었고 응답 8/8 에는 없었다. 스키마에는 없는 칸이다).
-    /// 여기서는 **의도적으로 안 싣는다** — 이 단계의 번역은 순서에 기대지 않는다. 필요해지면
-    /// 원본 줄에서 그 키를 읽으면 된다(판별은 그 칸이 있어도 그대로 선다).
+    /// ★A real notification envelope carries one more `emittedAtMs` alongside `method`·`params`★
+    /// (measured 0.154.0 — present in 12/12 notifications and absent in 8/8 responses. It is a field not in the schema).
+    /// Here we **deliberately do not carry** it — translation at this stage does not depend on order. If needed,
+    /// read that key from the original line (discrimination stands as it is even with that field present).
     Notification {
         method: String,
         params: Option<Value>,
     },
-    /// `id` + `result` — 우리가 낸 요청의 답.
+    /// `id` + `result` — the answer to a request we sent.
     Response { id: RequestId, result: Value },
-    /// `id` + `error` — 우리가 낸 요청의 실패.
+    /// `id` + `error` — the failure of a request we sent.
     Error { id: RequestId, error: RpcError },
 }
 
-/// [`classify`] 가 한 줄을 네 봉투 중 어느 것으로도 못 읽은 사유.
+/// The reason [`classify`] could not read a line as any of the four envelopes.
 ///
-/// ★전부 비-치명이다★ — 호출자는 그 줄 하나를 로그로 남기고 버리며, 스트림을 끊지 않는다
-/// (TRD §4-6: 비-JSON stdout 라인으로 죽지 않는다).
+/// ★All are non-fatal★ — the caller logs that one line and drops it, and does not cut the stream
+/// (TRD §4-6: we do not die on a non-JSON stdout line).
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ParseError {
     #[error("JSON 이 아니다: {0}")]
@@ -119,43 +119,43 @@ pub(crate) enum ParseError {
     BadError(serde_json::Error),
     #[error("`{0}` 봉투에 `id` 가 없다")]
     MissingId(&'static str),
-    /// `result` 와 `error` 가 한 줄에 함께 왔다. 성공과 실패를 동시에 주장하는 줄이라 어느 쪽으로
-    /// 읽어도 틀릴 수 있다 — ★먼저 나오는 칸을 이기게 두면 실패를 성공으로 읽는다★.
+    /// `result` and `error` came together in one line. It is a line claiming success and failure at once, so reading it either way may be wrong —
+    /// ★if the field that appears first is let to win, a failure is read as a success★.
     #[error("`result` 와 `error` 가 한 봉투에 함께 있다")]
     ConflictingEnvelope,
     #[error("네 봉투 모양 중 어느 것도 아니다 — method·result·error 가 전부 없다")]
     UnknownShape,
 }
 
-/// 한 **줄**을 봉투 하나로 읽는다. 줄 분할은 호출자 몫이고 이 함수는 개행을 다루지 않는다.
+/// Read one **line** as one envelope. Line splitting is the caller's job and this function does not handle newlines.
 ///
-/// 판별 순서가 계약이다: `method` 가 있으면 요청/알림이고(그때 `id` 유무가 둘을 가른다),
-/// 없을 때만 `result`·`error` 를 본다. ★`method` 와 `id` 가 함께 온 줄은 언제나 요청이다★ —
-/// 그 줄을 알림으로 읽으면 답해야 할 요청을 버리게 된다.
+/// The discrimination order is the contract: if `method` is present it is a request/notification (then the presence of `id` splits the two),
+/// and only when absent are `result`·`error` looked at. ★A line with `method` and `id` together is always a request★ —
+/// reading it as a notification would drop a request that must be answered.
 ///
-/// ★모르는 형제 칸이 있어도 판별은 그대로 선다★ — 실 알림에는 `emittedAtMs` 가 늘 함께 오고
-/// (실측 0.154.0), 상류는 스키마에 없는 칸을 언제든 더한다. "여분 칸이 있으니 네 모양 중 아무
-/// 것도 아니다" 로 읽으면 정상 줄이 통째로 버려진다.
+/// ★Discrimination stands even with unknown sibling fields★ — real notifications always come with `emittedAtMs`
+/// (measured 0.154.0), and upstream may add fields not in the schema at any time. If read as "there is an extra field so it is none of the four
+/// shapes", normal lines would be dropped whole.
 ///
-/// JSON 이 아닌 줄, JSON 이지만 네 모양 어디에도 안 맞는 줄은 **오류**로 돌아온다 — panic 도
-/// 조용한 버림도 아니다.
+/// A line that is not JSON, or is JSON but fits none of the four shapes, comes back as an **error** — neither a panic nor
+/// a quiet drop.
 ///
-/// ★호출자에게 거는 요구 하나 — 나간 요청마다 마감 시한을 둘 것★(실측 0.154.0): 서버는 자기가
-/// **해독하지 못한 봉투에는 `id` 가 실려 있어도 아무 답도 하지 않는다**(`{"id":90}` 한 줄에
-/// stderr 로그만 남고 stdout 은 영영 조용했다). 답이 오는 것은 봉투가 읽힌 뒤의 *파라미터* 오류
-/// 뿐이다. 그래서 "답이 올 때까지 기다린다" 는 대기표는 언젠가 반드시 영구히 매달린다.
+/// ★One requirement on the caller — put a deadline on every request sent★ (measured 0.154.0): the server
+/// **gives no answer to an envelope it could not decode, even if an `id` is carried** (for the one line `{"id":90}`
+/// only a stderr log was left and stdout stayed silent forever). Answers come only for *parameter* errors after the envelope was read.
+/// So a waiting ticket that "waits until the answer comes" will sooner or later hang forever.
 ///
-/// ★알려진 한계 — 중복 키를 거르지 않는다★: `{"id":1,"id":2,"result":{}}` 같은 줄에서 serde_json
-/// 은 **마지막 값을 취한다**. 그래서 그런 줄이 오면 우리는 `id=2` 로 읽고, 그 응답은 **엉뚱한
-/// 대기자에게 배달된다**(원래 요청은 영영 안 풀리고 남의 요청이 남의 답을 받는다). 거르려면 맵을
-/// 거치지 않는 전용 visitor 가 필요해 여기서는 하지 않았다 — 미검증이고, 실 서버가 그런 줄을 내는
-/// 것을 본 적은 없다.
+/// ★Known limitation — duplicate keys are not filtered★: for a line like `{"id":1,"id":2,"result":{}}` serde_json
+/// **takes the last value**. So if such a line comes we read `id=2`, and that response is **delivered to the
+/// wrong waiter** (the original request is never released and someone else's request gets someone else's answer). To filter,
+/// a dedicated visitor that does not go through a map is needed, so it is not done here — unverified, and we have
+/// never seen a real server emit such a line.
 pub(crate) fn classify(line: &str) -> Result<Inbound, ParseError> {
     let value: Value = serde_json::from_str(line).map_err(ParseError::NotJson)?;
     let obj = value.as_object().ok_or(ParseError::NotObject)?;
 
-    // ★method 분기보다 먼저 본다★ — 모순은 봉투 종류와 무관하고, 나중에 보면 `result` 를 먼저
-    //   집는 분기가 실패를 성공으로 읽어 버린다.
+    // ★Look at it before the method branch★ — the contradiction is independent of the envelope kind, and if looked at later, the branch that picks `result` first
+    //   reads a failure as a success.
     if obj.contains_key("result") && obj.contains_key("error") {
         return Err(ParseError::ConflictingEnvelope);
     }
@@ -205,33 +205,33 @@ fn parse_id(raw: &Value) -> Result<RequestId, ParseError> {
     }
 }
 
-// ── 메서드 이름 ───────────────────────────────────────────────────────────────
+// ── Method names ───────────────────────────────────────────────────────────────
 
-/// 와이어 메서드 이름. ★버전 접두가 없다★ — 스키마 트리의 `v1/`·`v2/` 는 소스 정리용
-/// 디렉터리일 뿐이고 메서드는 `thread/start` 처럼 맨 이름으로 나간다.
+/// Wire method names. ★There is no version prefix★ — `v1/`·`v2/` in the schema tree are merely directories for source organization,
+/// and methods go out as bare names like `thread/start`.
 pub(crate) mod method {
-    // 우리 → 서버 요청
+    // Us → server requests
     pub(crate) const INITIALIZE: &str = "initialize";
     pub(crate) const THREAD_START: &str = "thread/start";
     pub(crate) const THREAD_RESUME: &str = "thread/resume";
     pub(crate) const TURN_START: &str = "turn/start";
-    /// 도는 턴에 입력 하나를 넣는다 — 턴을 열지 않는다(ADR-0231).
+    /// Put one input into a running turn — it does not open a turn (ADR-0231).
     pub(crate) const TURN_STEER: &str = "turn/steer";
     pub(crate) const TURN_INTERRUPT: &str = "turn/interrupt";
 
-    /// 이어받은 스레드의 지난 item 을 **페이지로** 받는다(ADR-0203).
+    /// Receive the past items of a resumed thread **as pages** (ADR-0203).
     ///
-    /// ★쌍둥이 `thread/turns/list` 를 쓰지 않는다★ — 우리가 화면에 그리는 단위는 turn 이 아니라
-    /// item 이고, 그쪽은 같은 item 을 turn 봉투 안에 한 겹 더 싸서 준다. 벗길 봉투만 하나 는다.
+    /// ★The twin `thread/turns/list` is not used★ — the unit we draw on the screen is the item, not the turn, and that one
+    /// wraps the same item one more layer inside a turn envelope. It only adds one envelope to peel.
     pub(crate) const THREAD_ITEMS_LIST: &str = "thread/items/list";
 
-    /// 우리 → 서버 알림. ★클라이언트가 보낼 수 있는 알림은 이것 하나뿐이고 params 칸이 아예
-    /// 없다★(`ClientNotification.json`).
-    /// ★보내는 것이 의무가 아니다★(실측 0.154.0 — 보낸 경우와 안 보낸 경우 둘 다에서
-    /// `thread/start` 가 똑같이 성공했다). 보내도 해롭지 않아 핸드셰이크 모양을 맞추는 쪽으로 둔다.
+    /// Us → server notification. ★The only notification a client can send is this one, and it has no params field
+    /// at all★ (`ClientNotification.json`).
+    /// ★Sending it is not a duty★ (measured 0.154.0 — in both the sent and unsent cases
+    /// `thread/start` succeeded the same). Sending is harmless, so we keep it on the side of matching the handshake shape.
     pub(crate) const INITIALIZED: &str = "initialized";
 
-    // 서버 → 우리 알림 중 번역기가 이름으로 아는 것
+    // Among server → us notifications, the ones the translator knows by name
     pub(crate) const ITEM_AGENT_MESSAGE_DELTA: &str = "item/agentMessage/delta";
     pub(crate) const ITEM_STARTED: &str = "item/started";
     pub(crate) const ITEM_COMPLETED: &str = "item/completed";
@@ -239,61 +239,61 @@ pub(crate) mod method {
     pub(crate) const ERROR: &str = "error";
     pub(crate) const DEPRECATION_NOTICE: &str = "deprecationNotice";
 
-    /// ★화면 이벤트가 아니라 사용량 관측으로 옮긴다★ — 계정 단위 상태라 에이전트별 replay 를 타면 안 된다
-    /// (`decoder` 의 이 arm · 해석 = 이 폴더 `usage`).
+    /// ★Carried into a usage observation, not a screen event★ — it is account-level state, so it must not go through per-agent replay
+    /// (this arm of `decoder` · interpretation = this folder's `usage`).
     pub(crate) const ACCOUNT_RATE_LIMITS_UPDATED: &str = "account/rateLimits/updated";
 
-    /// 우리 → 서버 요청 — 사용량 능동 조회 하나만 보낸다(이 폴더 `usage_probe`). 대화 통로는 이것을 안 보낸다.
+    /// Us → server request — only one active usage query is sent (this folder's `usage_probe`). The conversation path does not send this.
     pub(crate) const ACCOUNT_RATE_LIMITS_READ: &str = "account/rateLimits/read";
 
-    /// ★이 이름 하나에 소비자가 둘이다★ — 번역기가 턴 경계로 옮기고(`decoder`), 통로가 큐 해제의
-    /// 상태 기계 입력으로 읽는다(`transport`). 둘은 같은 줄을 각자 본다.
+    /// ★This one name has two consumers★ — the translator carries it into a turn boundary (`decoder`), and the path reads it as input to the queue-release
+    /// state machine (`transport`). The two each look at the same line.
     pub(crate) const TURN_COMPLETED: &str = "turn/completed";
 
-    // 서버 → 우리 요청 중 통로가 이름으로 아는 것. ★거절은 어느 요청에나 똑같이 한다★ — 이 둘은 그 위에 거절한
-    // item 을 기억해, 그 item 의 끝을 우리 거절로 귀속한다(ADR-0241).
+    // Among server → us requests, the ones the path knows by name. ★Refusal is done the same way for any request★ — on top of that these two remember the refused
+    // item and attribute the end of that item to our refusal (ADR-0241).
     pub(crate) const ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL: &str =
         "item/commandExecution/requestApproval";
     pub(crate) const ITEM_FILE_CHANGE_REQUEST_APPROVAL: &str = "item/fileChange/requestApproval";
 }
 
-/// `TurnStatus` 의 네 값 전량(스키마 0.154.0 `definitions.TurnStatus` — 닫힌 `enum`).
+/// All four values of `TurnStatus` (schema 0.154.0 `definitions.TurnStatus` — a closed `enum`).
 ///
-/// ★문자열 상수로 두고 Rust `enum` 으로 받지 않는다★: 닫힌 타입으로 역직렬화하면 상류가 다섯째 값을
-/// 더한 날 `turn/completed` 줄 **전체**가 실패하고, 그러면 턴 경계가 통째로 사라져 화면의 대기
-/// 인디케이터가 영영 돈다. 그 결말이 이 상수들이 고치는 결함 그 자체다.
+/// ★Kept as string constants and not received as a Rust `enum`★: if deserialized into a closed type, the day upstream adds a fifth value
+/// the **whole** `turn/completed` line fails, and then the turn boundary vanishes entirely and the screen's waiting
+/// indicator spins forever. That outcome is the very defect these constants fix.
 pub(crate) mod turn_status {
     pub(crate) const COMPLETED: &str = "completed";
     pub(crate) const INTERRUPTED: &str = "interrupted";
     pub(crate) const FAILED: &str = "failed";
     pub(crate) const IN_PROGRESS: &str = "inProgress";
 
-    /// 등급을 가르는 용도 — 여기 **없는** 값은 상류 드리프트이고, 여기 있는데 결말로 안 옮겨지는 값
-    /// (오늘 [`IN_PROGRESS`] 하나)은 「뜻을 아직 모른다」다. 어느 쪽이든 번역은 그래도 한다.
+    /// For telling grades apart — a value **not** here is upstream drift, and a value that is here but not carried into an outcome
+    /// (today [`IN_PROGRESS`] alone) is 「뜻을 아직 모른다」 (meaning not yet known). Either way the translation is still done.
     pub(crate) const ALL: &[&str] = &[COMPLETED, INTERRUPTED, FAILED, IN_PROGRESS];
 }
 
-/// 우리가 모르는 인바운드 **요청**을 거절할 때 싣는 코드.
+/// The code carried when refusing an inbound **request** we do not know.
 ///
-/// ★스키마는 코드 대역을 정하지 않는다★ — `JSONRPCErrorError.code` 는 제약 없는 i64 이고
-/// `-32xxx` 가 스키마에 한 번도 안 나온다. 우리가 봉투를 정의하는 쪽이므로 값은 우리가 고르고,
-/// JSON-RPC 2.0 관례의 "method not found" 를 빌려 쓴다(읽는 사람에게 뜻이 통한다).
-/// ★승인 요청에 온 이 답을 app-server 는 「승인 요청 실패」로 읽는다★(실측 codex-cli 0.156.1 · fixture
-/// `refuse_u2a`): 그 item 을 실행하지 않은 채 곧바로 닫고(명령 = `failed` · 파일 변경 = `declined`) 턴은 이어져
-/// `completed` 로 끝난다 — `error` 알림은 없다. 승인 아닌 요청에 대한 반응은 미검증이다. 어느 쪽이든 버리는 것보다
-/// 낫다: 버리면 그 에이전트가 영구 정지한다(TRD §6-2).
+/// ★The schema does not fix a code range★ — `JSONRPCErrorError.code` is an unconstrained i64 and
+/// `-32xxx` never appears in the schema. We are the side that defines the envelope, so we pick the value, borrowing
+/// the JSON-RPC 2.0 convention's "method not found" (its meaning is clear to a reader).
+/// ★The app-server reads this answer to an approval request as 「승인 요청 실패」 (approval request failed)★ (measured codex-cli 0.156.1 · fixture
+/// `refuse_u2a`): it closes that item right away without executing it (command = `failed` · file change = `declined`), and the turn continues and
+/// ends with `completed` — there is no `error` notification. The reaction to a non-approval request is unverified. Either way it is better than dropping:
+/// if dropped, that agent freezes permanently (TRD §6-2).
 ///
-/// 참고로 **codex 자신은 모르는 메서드에 `-32600` 을 돌려준다**(실측 0.154.0) — 즉 상대는
-/// "모르는 메서드" 를 따로 세지 않는다. 그래도 우리 쪽 값은 관례 뜻이 분명한 -32601 로 둔다:
-/// 이 숫자를 읽는 첫 독자는 로그를 여는 사람이다.
+/// For reference, **codex itself returns `-32600` for an unknown method** (measured 0.154.0) — that is, the peer
+/// does not count "unknown method" separately. Still, our value is -32601, whose conventional meaning is clear:
+/// the first reader of this number is the person who opens the log.
 pub(crate) const METHOD_NOT_FOUND: i64 = -32601;
 
-// ── 직렬화 헬퍼 ───────────────────────────────────────────────────────────────
+// ── Serialization helpers ───────────────────────────────────────────────────────────────
 
-/// 요청 한 줄을 만든다. ★돌려주는 문자열은 **개행까지 포함한 완성된 줄**이다★ — 호출자가
-/// `\n` 을 따로 붙이면 빈 줄이 하나 더 나간다.
+/// Build one request line. ★The returned string is a **complete line including the newline**★ — if the caller
+/// also appends `\n`, one extra empty line goes out.
 ///
-/// `params` 직렬화가 실패하면 오류다(우리 타입은 실패할 수 없지만 제네릭이라 계약상 열어 둔다).
+/// If `params` serialization fails it is an error (our types cannot fail, but it is generic so the contract leaves it open).
 pub(crate) fn request_line<P: Serialize>(
     id: &RequestId,
     method: &str,
@@ -306,16 +306,16 @@ pub(crate) fn request_line<P: Serialize>(
     Ok(format!("{}\n", Value::Object(obj)))
 }
 
-/// params 없는 알림 한 줄(개행 포함). `initialized` 가 유일한 소비자다.
+/// One notification line without params (newline included). `initialized` is the only consumer.
 pub(crate) fn notification_line(method: &str) -> String {
     format!("{}\n", serde_json::json!({ "method": method }))
 }
 
-/// 서버 요청을 거절하는 오류 응답 한 줄(개행 포함).
+/// One error response line that refuses a server request (newline included).
 ///
-/// ★`id` 는 받은 것을 그대로 싣는다★ — 서버의 대기표 키라서 정규화하면 그 요청이 영영 안 풀린다.
-/// ★성공을 위장하면 안 된다★ — 승인 요청에 성공 응답을 돌려주면 그것이 자동 승인이 되어
-/// 승인 정책을 우회한다(TRD §6-2).
+/// ★`id` is carried exactly as received★ — it is the server's waiting-ticket key, so if normalized that request is never released.
+/// ★Success must not be disguised★ — if a success response is returned to an approval request it becomes an automatic approval and
+/// bypasses the approval policy (TRD §6-2).
 pub(crate) fn error_response_line(id: &RequestId, code: i64, message: &str) -> String {
     format!(
         "{}\n",
@@ -328,32 +328,32 @@ pub(crate) fn error_response_line(id: &RequestId, code: i64, message: &str) -> S
 
 // ── initialize ────────────────────────────────────────────────────────────────
 
-/// `initialize` 에 싣는 클라이언트 이름(대화 통로·사용량 조회 공용). 상대는 이 값을 자기 로그·`user_agent` 에 적는다.
+/// The client name carried in `initialize` (shared by the conversation path · usage query). The peer writes this value into its own log · `user_agent`.
 pub(crate) const CLIENT_NAME: &str = "engram-dashboard";
 
-/// ★한 번만 보낼 수 있다★(실측 0.154.0) — 두 번째 `initialize` 는 `-32600` `"Already
-/// initialized"` 로 돌아온다. 재시도 경로가 이것을 다시 보내지 않게 할 책임은 호출자에 있다.
+/// ★It can be sent only once★ (measured 0.154.0) — a second `initialize` comes back as `-32600` `"Already
+/// initialized"`. The responsibility to keep a retry path from sending this again lies with the caller.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct InitializeParams {
     pub(crate) client_info: ClientInfo,
-    // ★`capabilities` 를 싣지 않는 것은 의도다★ — 모든 칸이 optional 이고 우리가 원하는 값이
-    //   전부 기본값이다. 특히 `requestAttestation` 이 기본 false 라 답할 수 없는
-    //   `attestation/generate` 요청이 오지 않는다(그 요청엔 거절 모양이 아예 없다). 켜려면
-    //   그 결과를 감당할 코드를 함께 들여야 한다.
+    // ★Not carrying `capabilities` is intentional★ — every field is optional and all the values we want
+    //   are defaults. In particular `requestAttestation` defaults to false, so the unanswerable
+    //   `attestation/generate` request does not come (that request has no refusal shape at all). To turn it on,
+    //   code that can bear the consequence must be brought in together.
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ClientInfo {
     pub(crate) name: String,
     pub(crate) version: String,
-    // `title` 은 optional 이라 안 싣는다.
+    // `title` is optional so it is not carried.
 }
 
-/// ★여기엔 프로토콜 버전이 없다★ — 스키마 전체에 `protocolVersion` 이 0 회다.
-/// `initialize` 가 협상하는 것은 버전이 아니라 capability 집합이고, 우리는 그것도 안 보낸다.
-/// 상류 드리프트를 사후에 가르는 유일한 값이 `user_agent` 와 `Thread.cliVersion` 이라 기동 시
-/// 한 번 기록한다(TRD §4-7 의 1).
+/// ★There is no protocol version here★ — `protocolVersion` appears 0 times in the whole schema.
+/// What `initialize` negotiates is not a version but a capability set, and we do not send that either.
+/// The only values that tell upstream drift after the fact are `user_agent` and `Thread.cliVersion`, so they are recorded once at
+/// startup (TRD §4-7 item 1).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct InitializeResponse {
@@ -365,9 +365,9 @@ pub(crate) struct InitializeResponse {
 
 // ── thread/start · thread/resume ──────────────────────────────────────────────
 
-/// 승인 정책. 스키마는 `oneOf[문자열 3 종, GranularAskForApproval]` 인데 ★우리는 문자열 갈래만
-/// 보낸다★ — granular 쪽은 우리가 쓰지 않는 칸이라 모양을 옮겨 적지 않았다.
-/// 값 철자가 kebab-case 인 것에 주의: 같은 프로토콜의 다른 승인 enum 은 camelCase 다.
+/// Approval policy. The schema is `oneOf[문자열 3 종, GranularAskForApproval]` but ★we send only the string branch★
+/// — the granular side is a field we do not use, so we did not copy its shape.
+/// Note that the value spelling is kebab-case: the other approval enums of the same protocol are camelCase.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub(crate) enum AskForApproval {
     #[serde(rename = "untrusted")]
@@ -378,11 +378,11 @@ pub(crate) enum AskForApproval {
     Never,
 }
 
-/// `thread/start`·`thread/resume` 의 `sandbox` 칸 타입.
+/// The type of the `sandbox` field of `thread/start`·`thread/resume`.
 ///
-/// ★같은 이름의 다른 타입과 헷갈리지 말 것★ — `TurnStartParams.sandboxPolicy` 와
-/// `ThreadStartResponse.sandbox` 는 구조화 union(`SandboxPolicy`)이고 이 문자열 enum 이 아니다.
-/// 응답의 `sandbox` 를 그대로 이 칸에 되돌려 넣을 수 없다.
+/// ★Do not confuse it with the differently-typed same name★ — `TurnStartParams.sandboxPolicy` and
+/// `ThreadStartResponse.sandbox` are a structured union (`SandboxPolicy`) and not this string enum.
+/// The response's `sandbox` cannot be put back into this field as it is.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub(crate) enum SandboxMode {
     #[serde(rename = "read-only")]
@@ -393,9 +393,9 @@ pub(crate) enum SandboxMode {
     DangerFullAccess,
 }
 
-/// ★스키마에 `required` 배열이 아예 없다 — `{}` 가 유효한 params 다★. 그래서 모든 칸이
-/// `Option` + `skip_serializing_if` 여야 한다: 그러지 않으면 codex 가 "부재" 를 기대한 자리에서
-/// 명시적 `null` 을 받는다.
+/// ★The schema has no `required` array at all — `{}` is valid params★. So every field must be
+/// `Option` + `skip_serializing_if`: otherwise codex receives an explicit `null`
+/// where it expected "absence".
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ThreadStartParams {
@@ -405,24 +405,24 @@ pub(crate) struct ThreadStartParams {
     pub(crate) approval_policy: Option<AskForApproval>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) sandbox: Option<SandboxMode>,
-    /// codex 기본 지시문 **뒤에 덧붙는** 지시문. 부재 = 아무것도 덧붙이지 않는다.
+    /// Instructions **appended after** codex's default instructions. Absent = nothing is appended.
     ///
-    /// ★대체가 아니라 덧붙이기다★ — 이 칸에 무엇을 실어도 codex 자신의 기본 지시문은 그대로 남는다
-    ///   (실측 0.155.0: 본문이 `input[0]` 의 `developer` 역할 메시지로 앞에 서고 기본 프롬프트는 무손상).
-    /// ★터미널 모드의 `-c developer_instructions=…` 와 **같은 것을 나르지만 같은 통로가 아니다**★:
-    ///   이쪽은 JSON 본문이라 명령줄 길이 상한도, `%VAR%` 치환도, 줄바꿈 절단도 없다. 그래서 값을
-    ///   **손대지 않고 그대로** 싣는다 — 그쪽의 줄바꿈 변환·문자 가드를 여기로 가져오지 말 것(가져오면
-    ///   아무 위험도 막지 못한 채 에이전트가 읽는 문서만 망가진다).
+    /// ★It is appending, not replacing★ — whatever is put in this field, codex's own default instructions remain
+    ///   (measured 0.155.0: the body stands in front as a `developer`-role message at `input[0]` and the default prompt is undamaged).
+    /// ★It **carries the same thing as the terminal mode's `-c developer_instructions=…` but is not the same path**★:
+    ///   this one is a JSON body, so there is no command-line length cap, no `%VAR%` substitution, no line-break truncation. So the value is carried
+    ///   **untouched, as it is** — do not bring that side's line-break conversion · character guard over here (it would block no
+    ///   risk while only ruining the document the agent reads).
     // ADR-0215
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) developer_instructions: Option<String>,
 }
 
-/// ★여기엔 `developerInstructions` 짝이 **없다 — 없는 채로 두는 것이 결정이다**★: 그 칸이 이 요청의
-/// 스키마에도 있는지를 재 보지 않았고, 모르는 칸을 JSON-RPC params 에 얹는 대가는 「거절당한 핸드셰이크」
-/// 라 이어받기 스폰이 통째로 죽는다. 그래서 **이어받은 app-server 스레드는 프라이밍을 못 받는다** —
-/// 터미널 모드는 argv 라 이어받기에도 그대로 실리므로, 갭은 이 한 갈래뿐이다. 실측으로 칸의 존재가
-/// 확인되면 그때 더한다.
+/// ★There is **no** `developerInstructions` counterpart here — leaving it absent is the decision★: we have not measured whether that field is in this request's
+/// schema either, and the price of putting an unknown field on JSON-RPC params is a 「거절당한 핸드셰이크」 (rejected handshake),
+/// so the resume spawn would die entirely. So **a resumed app-server thread gets no priming** —
+/// terminal mode is argv so it is carried on resume as well, so the gap is this one branch only. If the field's existence is
+/// confirmed by measurement, we add it then.
 // ADR-0215
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -434,38 +434,38 @@ pub(crate) struct ThreadResumeParams {
     pub(crate) approval_policy: Option<AskForApproval>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) sandbox: Option<SandboxMode>,
-    /// true 면 `thread.turns` 를 안 채워 보낸다 — 전체 이력 수화는 상류가 deprecated 로 적었다.
+    /// If true, `thread.turns` is not filled in — upstream marks full-history hydration as deprecated.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) exclude_turns: Option<bool>,
 }
 
-/// 핸드셰이크의 **둘째 요청** — 새 스레드를 여나, 저장된 스레드를 이어받나.
+/// The **second request** of the handshake — open a new thread, or resume a saved thread.
 ///
-/// ★고르는 자리는 `backend/codex/mod.rs` 의 [`crate::backend::AgentBackend::open_spawn`] 하나다★ —
-/// 통로는 받은 것을 그대로 낸다. 통로가 자기 상태를 보고 다시 판정하면 가르는 자리가 둘이 된다
-/// (ADR-0191 이 통로 선택에서 걷어낸 것과 같은 모양).
+/// ★The one place that chooses is [`crate::backend::AgentBackend::open_spawn`] in `backend/codex/mod.rs`★ —
+/// the path emits what it received as is. If the path looked at its own state and decided again, there would be two places that decide
+/// (the same shape as what ADR-0191 withdrew from path selection).
 // ADR-0185
 pub(crate) enum ThreadOpen {
     Start(ThreadStartParams),
     Resume(ThreadResumeParams),
 }
 
-/// ★thread id 가 여기 산다 — 응답 최상위가 아니라 `thread.id` 다★.
+/// ★The thread id lives here — it is `thread.id`, not the response top level★.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct ThreadStartResponse {
     pub(crate) thread: Thread,
 }
 
-/// `thread/resume` 응답. 칸 구성은 `thread/start` 응답에 커서 둘이 더 붙은 것이다.
+/// The `thread/resume` response. Its field composition is the `thread/start` response with two more cursors attached.
 ///
-/// ★그 커서 중 하나를 이제 읽는다 — 그것이 화면 복원의 **진입점**이다★(ADR-0203). 쓰는 법은 스키마
-/// (0.154.0)가 그 칸의 설명에 직접 적어 둔다: "Pass this as `cursor` to `thread/items/list` with
+/// ★One of those cursors is now read — it is the **entry point** of screen restore★ (ADR-0203). How to use it the schema
+/// (0.154.0) writes directly in that field's description: "Pass this as `cursor` to `thread/items/list` with
 /// `sortDirection: \"desc\"`. The first page includes the item identified by the cursor."
-/// ★`default` 로 두는 것은 스키마가 그렇기 때문이다★ — `required` 목록에 없고 `default: null` 이다.
-/// 부재 = 되돌아갈 이력이 없다는 뜻이고, **실패가 아니다**(복원을 건너뛴다).
-/// ★`thread/start` 응답에는 이 칸이 아예 없다★ — 그래서 새 대화는 이 경로를 탈 재료가 없다.
-/// ★나머지 커서(`turnsBackwardsCursor`)는 여전히 안 읽는다★ — 위 [`method::THREAD_ITEMS_LIST`] 가
-/// 그 쌍둥이를 안 쓰는 사유를 진다.
+/// ★It is left `default` because the schema is so★ — it is not in the `required` list and has `default: null`.
+/// Absent = there is no history to go back to, and it is **not a failure** (restore is skipped).
+/// ★The `thread/start` response has no such field at all★ — so a new conversation has no material to take this path.
+/// ★The other cursor (`turnsBackwardsCursor`) is still not read★ — [`method::THREAD_ITEMS_LIST`] above carries the
+/// reason for not using that twin.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ThreadResumeResponse {
@@ -474,10 +474,10 @@ pub(crate) struct ThreadResumeResponse {
     pub(crate) items_backwards_cursor: Option<String>,
 }
 
-/// 페이지를 어느 방향으로 걷나 — 스키마의 닫힌 `enum` 두 값 전량(0.154.0 `SortDirection`).
+/// Which direction to walk the page — all two values of the schema's closed `enum` (0.154.0 `SortDirection`).
 ///
-/// ★[`SortDirection::Asc`] 는 오늘 아무도 안 쓴다 — 그래도 적어 둔다★: 이것은 **나가는** 칸이라 값을
-/// 지어낼 수 없고, 둘을 함께 적어 두면 방향을 뒤집는 변경이 상수를 새로 만들지 않는다.
+/// ★[`SortDirection::Asc`] is used by nobody today — we write it anyway★: this is an **outgoing** field so the value cannot be
+/// invented, and with both written, a change that reverses direction does not create a new constant.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub(crate) enum SortDirection {
     #[serde(rename = "asc")]
@@ -486,10 +486,10 @@ pub(crate) enum SortDirection {
     Desc,
 }
 
-/// `thread/items/list` 요청. ★`threadId` 만 required 다★(스키마 0.154.0) — 나머지는 전부 생략 가능이라
-/// `Option` + `skip_serializing_if` 로 둔다([`ThreadStartParams`] 와 같은 사유: 부재를 기대하는 자리에
-/// 명시적 `null` 을 보내지 않는다).
-/// ★한 턴으로 좁히는 `turnId` 는 옮겨 적지 않았다★ — 우리는 스레드 전체를 끝에서부터 걷는다.
+/// `thread/items/list` request. ★Only `threadId` is required★ (schema 0.154.0) — all the rest may be omitted, so they are left as
+/// `Option` + `skip_serializing_if` (the same reason as [`ThreadStartParams`]: an explicit
+/// `null` is not sent where absence is expected).
+/// ★`turnId`, which narrows to one turn, was not copied★ — we walk the whole thread from the end.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ThreadItemsListParams {
@@ -502,11 +502,11 @@ pub(crate) struct ThreadItemsListParams {
     pub(crate) sort_direction: Option<SortDirection>,
 }
 
-/// 페이지 한 장.
+/// One page.
 ///
-/// ★`nextCursor` 가 없거나 `null` 이면 그 방향으로 더 볼 것이 없다★ — 스키마가 그렇게 적고, 실측으로도
-/// 마지막 페이지에서 `null` 이 왔다(2026-09-16, 실 0.154.0 · 28 item 스레드가 25+3 으로 끝났다).
-/// ★방향을 뒤집을 때 쓰는 `backwardsCursor` 는 옮겨 적지 않았다★ — 우리는 한 방향으로만 걷는다.
+/// ★If `nextCursor` is absent or `null`, there is nothing more to see in that direction★ — the schema says so, and in measurement too
+/// `null` came on the last page (2026-09-16, real 0.154.0 · a 28-item thread ended as 25+3).
+/// ★`backwardsCursor`, used when reversing direction, was not copied★ — we walk in one direction only.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ThreadItemsListResponse {
@@ -515,12 +515,12 @@ pub(crate) struct ThreadItemsListResponse {
     pub(crate) next_cursor: Option<String>,
 }
 
-/// 페이지에 실린 item 한 개 + 그것이 속한 turn.
+/// One item carried in a page + the turn it belongs to.
 ///
-/// ★`item` 이 [`ItemNotification`] 의 그 칸과 **같은 타입**이라는 것이 ADR-0203 의 근거다★ — 벤더
-/// 스키마에서 `item/completed` 알림·resume 응답·페이지 응답의 항목 정의 해시가 전부 같다(19 variants).
-/// 그래서 번역기를 새로 짜지 않고 봉투만 벗긴다. [`Value`] 로 받는 사유도 그쪽과 같다 — 모르는 변형
-/// 하나가 페이지 **전체**를 죽이면 안 된다.
+/// ★That `item` is the **same type** as that field of [`ItemNotification`] is the ground of ADR-0203★ — in the vendor
+/// schema the item definition hash is the same for the `item/completed` notification · resume response · page response (19 variants).
+/// So we do not write a new translator but only peel the envelope. The reason for taking [`Value`] is also the same as that side — one unknown variant
+/// must not kill the **whole** page.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ThreadItemEntry {
@@ -531,22 +531,22 @@ pub(crate) struct ThreadItemEntry {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Thread {
-    /// codex 가 발급한다 — ★호출자가 정할 수 없다★. 값은 UUIDv7 문자열이고 `thread.sessionId`
-    /// 가 같은 값을 담는다(실측 0.154.0). 자리는 응답 최상위가 아니라 `result.thread.id` 다.
+    /// Issued by codex — ★the caller cannot decide it★. The value is a UUIDv7 string and `thread.sessionId`
+    /// holds the same value (measured 0.154.0). It sits at `result.thread.id`, not at the response top level.
     pub(crate) id: String,
-    /// ★스키마는 required 로 적지만 우리는 부재를 허용한다★ — 진단용 값 하나가 사라졌다고
-    /// 스레드 기동 전체를 실패시키는 것이 더 나쁘다. 상류 드리프트를 사후에 가르는 값이다.
+    /// ★The schema marks it required but we allow absence★ — failing the whole thread start because one diagnostic value is gone is
+    /// worse. It is the value that tells upstream drift after the fact.
     #[serde(default)]
     pub(crate) cli_version: Option<String>,
 }
 
 // ── turn/start · turn/interrupt ───────────────────────────────────────────────
 
-/// 턴 입력 한 조각. 스키마는 7 변형(text·image·localImage·audio·localAudio·skill·mention)인데
-/// ★우리가 보내는 것은 `text` 하나뿐★이라 나머지를 옮겨 적지 않았다.
+/// One piece of turn input. The schema has 7 variants (text·image·localImage·audio·localAudio·skill·mention) but
+/// ★what we send is `text` alone★, so we did not copy the rest.
 ///
-/// ★`text_elements` 를 싣지 않는 것도 의도다★ — optional 이고 기본 `[]` 이며, 철자가 이
-/// camelCase 타입 안에서 혼자 snake_case 다. 필요해지면 그 철자 그대로 써야 한다.
+/// ★Not carrying `text_elements` is also intentional★ — it is optional with default `[]`, and its spelling is the only snake_case
+/// in this camelCase type. If needed it must be written with that spelling.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub(crate) enum UserInput {
@@ -559,22 +559,22 @@ pub(crate) enum UserInput {
 pub(crate) struct TurnStartParams {
     pub(crate) thread_id: String,
     pub(crate) input: Vec<UserInput>,
-    /// 첫 입력의 되울림(`userMessage`)에 `clientId` 로 돌아오는 우리 id(0.140.0 부터 — 실측 0.156.1).
-    /// ★`None` 이면 칸 자체를 안 싣는다★ — 식별자 없는 입력과 하한 미달 화신의 봉투가 이 칸이 생기기
-    /// 전과 바이트 단위로 같다.
+    /// Our id that comes back as `clientId` on the echo (`userMessage`) of the first input (since 0.140.0 — measured 0.156.1).
+    /// ★If `None`, the field itself is not carried★ — the envelopes of inputs without an identifier and of incarnations below the minimum codex version are
+    /// byte-for-byte the same as before this field existed.
     // ADR-0231
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) client_user_message_id: Option<String>,
 }
 
-/// `turn/steer` — 도는 턴에 입력 하나를 넣는다. 성공 응답은 `{turnId}` 이고 그것은 **수락**이지 받음이
-/// 아니다(받음은 `clientId` 단 되울림 — 실측 0.156.1). 응답 본문은 읽지 않는다.
+/// `turn/steer` — put one input into a running turn. The success response is `{turnId}` and that is **acceptance**, not a receipt
+/// (the receipt is the echo carrying `clientId` — measured 0.156.1). The response body is not read.
 ///
-/// ★`expectedTurnId` 는 벤더가 요구하는 선행조건이다★ — 그 턴이 이미 끝났거나 id 가 어긋나면 오류
-///   응답(`-32600 "no active turn to steer"`)이 온다. 그래서 끝난 턴에 늦게 닿은 steer 가 다음 턴에 섞이지
-///   않는다.
-/// ★`clientUserMessageId` 를 `Option` 으로 두지 않은 것은 의도다★ — 스키마에서는 선택 칸이지만 steer 는
-///   하한 충족 화신의 식별자 든 항목만 나간다(식별자가 없으면 넘긴 글을 되울림으로 대조할 수 없다).
+/// ★`expectedTurnId` is a precondition the vendor requires★ — if that turn has already ended or the id mismatches, an error
+///   response (`-32600 "no active turn to steer"`) comes. So a steer that reaches an ended turn late does not mix into the
+///   next turn.
+/// ★Not making `clientUserMessageId` an `Option` is intentional★ — it is an optional field in the schema, but steer is sent only for entries that
+///   have an identifier from an incarnation that meets the minimum codex version (without an identifier the handed-over text cannot be matched against the echo).
 // ADR-0231
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -590,11 +590,11 @@ pub(crate) struct TurnStartResponse {
     pub(crate) turn: Turn,
 }
 
-/// 턴 — ★`turn/start` **응답**을 읽는 타입이고 `turn/completed` 알림은 이것으로 읽지 않는다★.
-/// 그 알림의 `turn` 은 같은 스키마 타입이지만 번역기가 [`Value`] 로 직접 훑는다(사유 정본은
-/// [`crate::backend::codex::decoder`] 의 `turn/completed` 자리 — 한 칸이 어긋나도 턴 경계는 서야 한다).
-/// 여기서 필요한 것은 `turn/interrupt` 에 실을 id 하나뿐이라 나머지 칸(`status`·`items`·`error`
-/// ·`startedAt`·`completedAt`·`durationMs`·`itemsView`)을 옮겨 적지 않았다.
+/// Turn — ★this type reads the `turn/start` **response**, and the `turn/completed` notification is not read with it★.
+/// The `turn` of that notification is the same schema type, but the translator scans it directly as a [`Value`] (source of truth for the reason is
+/// the `turn/completed` spot of [`crate::backend::codex::decoder`] — even if one field is off, the turn boundary must stand).
+/// All that is needed here is the one id to put into `turn/interrupt`, so we did not copy the other fields (`status`·`items`·`error`
+/// ·`startedAt`·`completedAt`·`durationMs`·`itemsView`).
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct Turn {
     pub(crate) id: String,
@@ -607,18 +607,18 @@ pub(crate) struct TurnInterruptParams {
     pub(crate) turn_id: String,
 }
 
-/// `turn/interrupt` 의 결과 — ★스키마상 properties 도 required 도 없는 진짜 빈 객체다★.
-/// 우리는 이것을 **받기만 한다**(우리가 내는 유일한 응답은 거절 오류다).
+/// The result of `turn/interrupt` — ★a truly empty object, with neither properties nor required in the schema★.
+/// We **only receive** this (the only response we emit is the refusal error).
 ///
-/// 중괄호를 단 struct 로 쓴 것은 의도다 — unit struct 는 `{}` 가 아니라 `null` 로 직렬화된다.
-/// 지금은 그 방향으로 나가는 줄이 없지만, 이 타입이 언젠가 나가는 줄에 실릴 때 모양이 조용히
-/// 바뀌지 않게 못 박아 둔다(회귀망이 그 직렬화를 잰다).
+/// Writing it as a struct with braces is intentional — a unit struct serializes as `null`, not `{}`.
+/// Right now no line goes out in that direction, but we pin it so the shape does not change quietly when this type is some day carried on an outgoing line
+/// (the regression net measures that serialization).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct TurnInterruptResponse {}
 
-// ── 번역하는 알림의 params ────────────────────────────────────────────────────
+// ── params of the notifications we translate ────────────────────────────────────────────────────
 
-/// `item/agentMessage/delta` — 어시스턴트 본문 스트림. 네 칸 전부 required 이고 그중 셋을 읽는다.
+/// `item/agentMessage/delta` — the assistant body stream. All four fields are required and we read three of them.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AgentMessageDeltaNotification {
@@ -627,13 +627,13 @@ pub(crate) struct AgentMessageDeltaNotification {
     pub(crate) delta: String,
 }
 
-/// `item/started` · `item/completed` 의 공통 읽기 칸.
+/// The common read fields of `item/started` · `item/completed`.
 ///
-/// ★두 알림의 차이는 `startedAtMs` 냐 `completedAtMs` 냐뿐이고 `item` union 은 같다★ — 그래서
-/// 타입 하나로 읽고 분기는 `method` 로 한다.
-/// `item` 을 타입으로 안 받고 [`Value`] 로 받는 것은 의도다 — internally-tagged enum 은 모르는
-/// `type` 을 만나면 **줄 전체가 역직렬화 실패**가 되는데, 이 union 은 오늘 19 변형이고 상류가
-/// 계속 늘린다. 모르는 변형 하나가 그 줄을 죽이면 안 된다.
+/// ★The two notifications differ only in `startedAtMs` vs `completedAtMs`, and the `item` union is the same★ — so
+/// we read with one type and branch by `method`.
+/// Taking `item` as a [`Value`] and not as a type is intentional — an internally-tagged enum meeting an unknown
+/// `type` makes **the whole line a deserialization failure**, and this union has 19 variants today and upstream keeps
+/// growing it. One unknown variant must not kill the line.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ItemNotification {
@@ -649,21 +649,21 @@ pub(crate) struct ThreadTokenUsageUpdatedNotification {
     pub(crate) token_usage: ThreadTokenUsage,
 }
 
-/// ★`last` 와 `total` 이 무엇을 세는지 스키마가 설명하지 않는다★ — 설명 문자열이 없고 둘 다
-/// required 다. 이름만 보고 `last` = 방금 끝난 모델 요청, `total` = 누적으로 읽었고, 번역기는
-/// `last` 를 쓴다(사유는 [`crate::backend::codex::decoder`] 의 usage 번역 자리).
+/// ★The schema does not explain what `last` and `total` count★ — there is no description string and both are
+/// required. We read by name alone, `last` = the model request that just ended, `total` = cumulative, and the translator
+/// uses `last` (the reason is at the usage translation spot of [`crate::backend::codex::decoder`]).
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct ThreadTokenUsage {
     pub(crate) last: TokenUsageBreakdown,
 }
 
-/// ★우리 `Usage` 어휘에 칸이 둘뿐이라 나머지는 잃는다★ — `cachedInputTokens`
-/// ·`reasoningOutputTokens`·`totalTokens`·`cacheWriteInputTokens` 가 그것이다. 어휘를 늘리는
-/// 것은 wire 변경이라 이 단계의 범위가 아니다.
+/// ★Our `Usage` vocabulary has only two fields, so the rest is lost★ — they are `cachedInputTokens`
+/// ·`reasoningOutputTokens`·`totalTokens`·`cacheWriteInputTokens`. Growing the vocabulary is
+/// a wire change and outside the scope of this stage.
 ///
-/// ★부호 있는 `i64` 인 것은 스키마가 `format: int64` 로 선언하기 때문이다★ — `u64` 로 좁히면
-/// 음수·범위 밖 값 하나에 **알림 전체가 역직렬화 실패**하고 그 턴의 `Usage` 가 통째로 사라진다.
-/// 우리 어휘 칸이 `u64` 라 음수는 번역 자리에서 0 으로 눌린다(그 자리 주석이 정본).
+/// ★It is a signed `i64` because the schema declares `format: int64`★ — if narrowed to `u64`, a single
+/// negative or out-of-range value makes **the whole notification fail deserialization** and that turn's `Usage` vanishes entirely.
+/// Our vocabulary field is `u64`, so a negative is clamped to 0 at the translation spot (the comment there is the source of truth).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TokenUsageBreakdown {
@@ -671,11 +671,11 @@ pub(crate) struct TokenUsageBreakdown {
     pub(crate) output_tokens: i64,
 }
 
-/// `error` 알림.
+/// `error` notification.
 ///
-/// ★`threadId`·`turnId`·`willRetry` 는 스키마가 required 로 적지만 여기서는 부재를 허용한다★ —
-/// 해독 못 한 오류를 통째로 버리는 것이 이 프로토콜에서 가장 나쁜 결말이라, 오류 본문만 있으면
-/// 흘릴 수 있게 둔다.
+/// ★`threadId`·`turnId`·`willRetry` are marked required by the schema but absence is allowed here★ —
+/// dropping an undecodable error whole is the worst outcome in this protocol, so
+/// we let it through as long as the error body is present.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ErrorNotification {
@@ -684,14 +684,14 @@ pub(crate) struct ErrorNotification {
     pub(crate) will_retry: bool,
 }
 
-/// ★이 타입을 나르는 칸이 둘이다★ — `error` 알림의 `error`, 그리고 `Turn.error`. 스키마가 후자에
-/// 「Only populated when the Turn's status is failed」를 적는다(0.154.0). 그래서 실패한 턴의 사유는
-/// 이 타입 하나로 읽히고, 화면 문자열을 만드는 자리도 하나다.
+/// ★Two fields carry this type★ — the `error` of the `error` notification, and `Turn.error`. The schema writes on the latter
+/// 「Only populated when the Turn's status is failed」 (0.154.0). So the reason of a failed turn is read by this one type,
+/// and the place that makes the screen string is also one.
 ///
-/// ★`codexErrorInfo` 를 [`Value`] 로 받는 것은 의도다★ — 문자열 enum 13 종과 래퍼 객체 5 종이
-/// 섞인 union(= `oneOf` 멤버 6)이고, 우리가 쓰는 것은 사람이 읽을 라벨 하나뿐이다. 이 안에
-/// `serverOverloaded`·`rateLimitExceeded` 가 있다 — 스키마가 가진 유일한 백프레셔 어휘이고,
-/// 숫자 오류 코드가 아니라 **이 알림**으로 온다.
+/// ★Taking `codexErrorInfo` as a [`Value`] is intentional★ — it is a union mixing 13 string enums and 5 wrapper objects
+/// (= `oneOf` members 6), and all we use is one label a person can read. Inside it are
+/// `serverOverloaded`·`rateLimitExceeded` — the schema's only backpressure vocabulary,
+/// and it comes via **this notification**, not a numeric error code.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TurnError {
@@ -704,22 +704,22 @@ pub(crate) struct TurnError {
     pub(crate) misalignment: Option<MisalignmentErrorDetails>,
 }
 
-/// 모델 정렬 위반으로 턴이 막힌 경우의 상세. ★`message` 만으로는 "왜 막혔나" 도 "무엇을 하면
-/// 되나" 도 알 수 없다★ — 이 셋이 그 둘을 나른다.
+/// Detail for when a turn is blocked by a model-alignment violation. ★`message` alone cannot tell "why it was blocked" nor "what to
+/// do"★ — these three carry those two.
 ///
-/// 스키마에 `required` 배열이 없다 — 세 칸 모두 optional 이고 셋 다 nullable 이다.
+/// The schema has no `required` array — all three fields are optional and all three are nullable.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MisalignmentErrorDetails {
-    /// 이미 지역화된 설명이 온다(스키마 설명: "A substantive localized explanation").
+    /// An already localized explanation comes (schema description: "A substantive localized explanation").
     #[serde(default)]
     pub(crate) detailed_explanation: Option<String>,
-    /// ★닫힌 enum 이 아니다★ — 스키마가 "clients must accept categories added by Responses" 로
-    /// 열어 두었으므로 문자열 그대로 받는다.
+    /// ★Not a closed enum★ — the schema left it open with "clients must accept categories added by Responses",
+    /// so it is received as a string as is.
     #[serde(default)]
     pub(crate) error_type: Option<String>,
-    /// 계속하기로 한다면 **다음 턴 입력으로 그대로 제출할 문장**이다 — 우리가 지어내는 문장이
-    /// 아니라 codex 가 준 것이다.
+    /// If we decide to continue, it is the **sentence to submit as-is as the next turn input** — not a sentence we invent,
+    /// but one codex gave.
     #[serde(default)]
     pub(crate) steer: Option<MisalignmentSteer>,
 }
@@ -729,17 +729,17 @@ pub(crate) struct MisalignmentSteer {
     pub(crate) message: String,
 }
 
-// ── 사용량 한도 알림의 params ─────────────────────────────────────────────────
+// ── params of the usage limit notification ─────────────────────────────────────────────────
 
-/// `account/rateLimits/updated`. ★이 절의 칸은 0.154.0 이 아니라 **codex-cli 0.156.1** 의 스키마에서 읽었다★
-/// (`v2/AccountRateLimitsUpdatedNotification.json` — 재생성 명령은 이 파일 헤더).
+/// `account/rateLimits/updated`. ★The fields of this section were read from the schema of **codex-cli 0.156.1**, not 0.154.0★
+/// (`v2/AccountRateLimitsUpdatedNotification.json` — the regeneration command is in this file's header).
 ///
-/// ★알림 하나 = 한도 버킷 **하나**의 희소 갱신이다★ — 버킷은 [`RateLimitSnapshot::limit_id`] 가 가른다. 스키마
-/// 설명이 「가장 최근 `account/rateLimits/read` 응답에 병합하라 — 비어 온 값은 앞 값을 지우지 않는다」를 적는다.
-/// 턴 중에 도착한다는 것까지 실측됐고(`docs/process/S21-codex-backend/trd-phase2a.md` L7) 실린 값은 캡처된 적이 없다.
+/// ★One notification = a sparse update of **one** limit bucket★ — buckets are told apart by [`RateLimitSnapshot::limit_id`]. The schema
+/// description says 「가장 최근 `account/rateLimits/read` 응답에 병합하라 — 비어 온 값은 앞 값을 지우지 않는다」 (merge into the most recent account/rateLimits/read response — an empty value does not erase the earlier value).
+/// It was measured that it arrives mid-turn (`docs/process/S21-codex-backend/trd-phase2a.md` L7), and no carried value has ever been captured.
 ///
-/// ★params 와 `rateLimits` 가 JSON **객체**가 아니면 역직렬화 실패다([`object_only`])★ — 칸 단위로 느슨한 아래
-///   두 타입과 달리 여기서는 그 줄을 통째로 버린다: 알림 전체나 스냅숏 전체가 다른 모양이면 살릴 칸이 없다.
+/// ★If params and `rateLimits` are not JSON **objects**, it is a deserialization failure ([`object_only`])★ — unlike the two field-lenient types below,
+///   here that line is dropped whole: if the whole notification or the whole snapshot has another shape, there is no field to save.
 #[derive(Debug, Clone)]
 pub(crate) struct AccountRateLimitsUpdatedNotification {
     pub(crate) rate_limits: RateLimitSnapshot,
@@ -760,16 +760,16 @@ impl<'de> Deserialize<'de> for AccountRateLimitsUpdatedNotification {
     }
 }
 
-/// 한도 버킷 하나의 스냅숏(스키마 `RateLimitSnapshot` — 칸이 전부 optional·nullable).
+/// A snapshot of one limit bucket (schema `RateLimitSnapshot` — all fields optional · nullable).
 ///
-/// ★칸마다 따로 실패한다★ — 타입이 틀린 칸은 그 칸만 `None` 이 되고 스냅숏은 산다([`lenient`]·[`lenient_object`]).
-/// 한 칸의 모양 변화가 알림 전체를 역직렬화 실패로 만들면 그 버킷의 나머지 값까지 잃는다.
-/// ★`limit_id` 만 원문 [`Value`] 로 받는 것은 의도다★ — 이 칸은 「어느 버킷인가」를 가르는데, 틀린 타입을
-///   `None` 으로 접으면 부재(= 기본 버킷으로 읽히는 쪽)와 구별되지 않는다. 해석은 소비자가 한다.
-/// ★이 타입 자체는 JSON 배열도 칸 순서대로 읽어 버린다★ — 객체 강제는 이 타입을 싣는 쪽(알림 ·
-///   [`GetAccountRateLimitsResponse`])의 [`object_only`] 가 진다. 새 경로에서 이 타입을 읽을 때도 반드시 그 관문을
-///   거친다 — 안 거치면 그럴듯한 가짜 창이 생긴다.
-/// `limit_name`·`plan_type` 은 조회 응답만 읽는다(줍기는 플랜·모델별 창을 싣지 않는다 — 이 폴더 `usage`).
+/// ★Each field fails separately★ — a field of the wrong type becomes `None` for that field alone and the snapshot survives ([`lenient`]·[`lenient_object`]).
+/// If one field's shape change made the whole notification a deserialization failure, the bucket's remaining values would be lost too.
+/// ★Only `limit_id` is taken as a raw [`Value`] intentionally★ — this field tells 「어느 버킷인가」 (which bucket it is), and if a wrong type were folded into
+///   `None` it could not be told apart from absence (= the side read as the default bucket). The consumer interprets.
+/// ★This type itself would read even a JSON array in field order★ — enforcing an object is carried by the [`object_only`] of the side that carries this type (the notification ·
+///   [`GetAccountRateLimitsResponse`]). When this type is read on a new path, it must also pass that gate — if not, a
+///   plausible fake window appears.
+/// `limit_name`·`plan_type` are read only by the query response (pickup does not carry plan · per-model windows — this folder's `usage`).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RateLimitSnapshot {
@@ -781,17 +781,17 @@ pub(crate) struct RateLimitSnapshot {
     pub(crate) primary: Option<RateLimitWindow>,
     #[serde(default, deserialize_with = "lenient_object")]
     pub(crate) secondary: Option<RateLimitWindow>,
-    /// 스키마는 닫힌 enum(`PlanType`)이지만 문자열로 받는다 — 상류가 값을 더한 날 이 칸만 읽히면 된다.
+    /// The schema is a closed enum (`PlanType`) but we receive it as a string — the day upstream adds a value, only this field needs to be read.
     #[serde(default, deserialize_with = "lenient")]
     pub(crate) plan_type: Option<String>,
 }
 
-/// 한도 창 하나(스키마 `RateLimitWindow`). 스키마 타입 = `usedPercent` int32(required) · `windowDurationMins`
-/// int64 · `resetsAt` int64(epoch 초) — 셋 다 범위 제약이 없어 범위 판정은 소비자가 한다.
+/// One limit window (schema `RateLimitWindow`). Schema types = `usedPercent` int32 (required) · `windowDurationMins`
+/// int64 · `resetsAt` int64 (epoch seconds) — none has a range constraint, so the consumer decides range.
 ///
-/// ★`primary`/`secondary` 는 자리 이름이지 5시간/주간이 아니다★(실측 — 소비자는 `window_duration_mins` 로 가른다).
-/// ★`used_percent` 를 `f64` 로 받는 것은 의도다★ — 스키마는 정수지만 소수가 와도 거부할 이유가 없고, 칸 값이
-///   어차피 `f64` 다. 리셋 시각은 반대로 정수만 받는다(부동소수 → 정수 변환을 외부 값에 하지 않는다).
+/// ★`primary`/`secondary` are slot names, not 5-hour/weekly★ (measured — the consumer tells them apart by `window_duration_mins`).
+/// ★Taking `used_percent` as `f64` is intentional★ — the schema says integer, but there is no reason to reject a fraction, and the field value is
+///   `f64` anyway. The reset time, by contrast, accepts integers only (we do not do float → integer conversion on external values).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RateLimitWindow {
@@ -805,29 +805,29 @@ pub(crate) struct RateLimitWindow {
 
 // ── account/rateLimits/read ───────────────────────────────────────────────────
 
-/// `account/rateLimits/read` 의 params — ★칸을 하나도 싣지 않는다(`{}`)★. 스키마(0.156.1
-/// `v2/NullableGetAccountRateLimitsParams.json`)는 `null` 또는 칸이 전부 optional 인 객체를 받고, 탐침이 `{}` 로
-/// 실측했다(`.claude/handoff/attachments/codex-usage-probe.mjs`).
-/// ★`excludeResetCreditDetails` 를 싣지 않는 것은 실측 모양을 지키려는 것이다★ — 스키마 설명은 「배경 폴링용 —
-///   리셋 크레딧 상세 조회를 건너뛴다」이고 우리 쓰임새에 맞지만, 그 칸을 실은 요청은 재 보지 않았다.
+/// The params of `account/rateLimits/read` — ★no field is carried at all (`{}`)★. The schema (0.156.1
+/// `v2/NullableGetAccountRateLimitsParams.json`) accepts `null` or an object whose fields are all optional, and the probe measured with `{}`
+/// (`.claude/handoff/attachments/codex-usage-probe.mjs`).
+/// ★Not carrying `excludeResetCreditDetails` is to keep the measured shape★ — the schema description is 「배경 폴링용 —
+///   리셋 크레딧 상세 조회를 건너뛴다」 (for background polling — skips the reset credit detail query) and fits our use, but a request carrying that field has not been measured.
 ///
-/// 중괄호를 단 struct 인 것은 [`TurnInterruptResponse`] 와 같은 사유다 — unit struct 는 `null` 로 직렬화된다.
+/// Being a struct with braces is for the same reason as [`TurnInterruptResponse`] — a unit struct serializes as `null`.
 #[derive(Debug, Clone, Default, Serialize)]
 pub(crate) struct GetAccountRateLimitsParams {}
 
-/// `account/rateLimits/read` 응답(스키마 0.156.1 `v2/GetAccountRateLimitsResponse.json`) — 읽는 칸 둘만.
+/// The `account/rateLimits/read` response (schema 0.156.1 `v2/GetAccountRateLimitsResponse.json`) — only two fields read.
 ///
-/// ★`accountId` 를 싣지 않는 것은 결정이다★ — 응답 최상위에 계정 식별자가 온다. 읽지 않으면 이 값이 로그·오류
-///   문자열로 샐 길이 타입에서부터 없다(TRD §1-3). 필요해지면(계정 키 — TRD §3 #33) 그 값의 출구부터 정한다.
-/// ★스냅숏 자리는 전부 객체만 받는다([`object_only`])★ — 응답 자체가 객체가 아니면 역직렬화 실패이고, 스냅숏
-///   자리(`rateLimits` · 맵의 각 항목)가 객체가 아니면 **그 자리만** 없는 것으로 둔다.
+/// ★Not carrying `accountId` is a decision★ — an account identifier comes at the response top level. If not read, there is no way for this value to leak into logs · error
+///   strings starting from the type (TRD §1-3). If it becomes needed (account key — TRD §3 #33), decide that value's exit first.
+/// ★Snapshot slots accept objects only ([`object_only`])★ — if the response itself is not an object it is a deserialization failure, and if a snapshot
+///   slot (`rateLimits` · each map entry) is not an object, **only that slot** is treated as absent.
 #[derive(Debug, Clone)]
 pub(crate) struct GetAccountRateLimitsResponse {
-    /// 스키마 설명 = "Backward-compatible single-bucket view" — ★기본 버킷이라는 보장이 없다★(다른 버킷을 비출 수
-    /// 있다). `None` = 없거나 `null` 이거나 객체가 아니다.
+    /// Schema description = "Backward-compatible single-bucket view" — ★no guarantee it is the default bucket★ (it may reflect another bucket).
+    /// `None` = absent, `null`, or not an object.
     pub(crate) rate_limits: Option<RateLimitSnapshot>,
-    /// `rateLimitsByLimitId` — 버킷 id → 스냅숏, **id 순 정렬**(JSON 맵 순서는 serde_json 기능 조합마다 달라서
-    /// 우리가 정한다). `None` = 칸이 없거나 `null` 이거나 객체가 아니다.
+    /// `rateLimitsByLimitId` — bucket id → snapshot, **sorted by id** (JSON map order differs with each serde_json feature combination so
+    /// we decide). `None` = the field is absent, `null`, or not an object.
     pub(crate) rate_limits_by_limit_id: Option<Vec<(String, RateLimitSnapshot)>>,
 }
 
@@ -861,7 +861,7 @@ impl<'de> Deserialize<'de> for GetAccountRateLimitsResponse {
     }
 }
 
-/// 칸 하나를 읽되 모양이 틀리면(`null` 포함) **그 칸만** `None` 으로 둔다. 빠진 칸은 `#[serde(default)]` 가 맡는다.
+/// Read one field, and if its shape is wrong (including `null`) put **that field only** as `None`. A missing field is handled by `#[serde(default)]`.
 fn lenient<'de, D, T>(de: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -871,9 +871,9 @@ where
     Ok(serde_json::from_value(value).ok())
 }
 
-/// [`lenient`] 와 같되 JSON **객체**만 받는다.
-/// ★객체 검사를 빼지 말 것★ — serde 가 만든 struct 역직렬화는 배열도 받아 칸 순서대로 채운다. 창 자리에 배열이
-///   오면 그 수들이 선언 순서대로 사용률·창 길이·리셋으로 읽혀 그럴듯한 가짜 창이 된다.
+/// Same as [`lenient`] but accepts only JSON **objects**.
+/// ★Do not remove the object check★ — struct deserialization made by serde also accepts arrays and fills in field order. If an array
+///   comes at a window slot, those numbers are read as utilization · window length · reset in declaration order and become a plausible fake window.
 fn lenient_object<'de, D, T>(de: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -887,8 +887,8 @@ where
     })
 }
 
-/// JSON **객체**만 읽고 그 밖은 오류다. 객체 검사의 근거는 [`lenient_object`] 와 같다 — 배열이 칸 순서대로 읽혀
-/// 그럴듯한 가짜 값이 된다(`[{…스냅숏…}]` 인 params · `["codex", {…창…}, {…창…}]` 인 스냅숏).
+/// Read only JSON **objects** and anything else is an error. The ground of the object check is the same as [`lenient_object`] — an array is read in field order
+/// and becomes a plausible fake value (params that are `[{…스냅숏…}]` · a snapshot that is `["codex", {…창…}, {…창…}]`).
 fn object_only<'de, D, T>(de: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -910,7 +910,7 @@ mod tests {
             .unwrap_or_else(|| panic!("필드 `{key}` 가 없다: {v}"))
     }
 
-    // ── 봉투 판별 ────────────────────────────────────────────────────────────
+    // ── Envelope discrimination ────────────────────────────────────────────────────────────
 
     #[test]
     fn notification_has_method_and_no_id() {
@@ -993,14 +993,14 @@ mod tests {
         ));
     }
 
-    /// 성공과 실패를 동시에 주장하는 줄 — 둘 중 하나를 골라 읽으면 실패를 성공으로 읽을 수 있다.
+    /// A line claiming success and failure at once — picking one of the two to read can read a failure as a success.
     #[test]
     fn result_and_error_together_is_an_error_not_a_response() {
         assert!(matches!(
             classify(r#"{"id":7,"result":{},"error":{"code":-1,"message":"failed"}}"#),
             Err(ParseError::ConflictingEnvelope)
         ));
-        // method 가 함께 있어도 모순이 이긴다 — 분기 순서에 기대지 않는다.
+        // Even if method is present, the contradiction wins — it does not depend on branch order.
         assert!(matches!(
             classify(r#"{"method":"x","result":{},"error":{"code":-1,"message":"f"}}"#),
             Err(ParseError::ConflictingEnvelope)
@@ -1031,8 +1031,8 @@ mod tests {
         ));
     }
 
-    /// 실측 0.154.0 — 알림 봉투에는 `emittedAtMs` 가 늘 함께 온다. 여분 형제 칸 때문에 판별이
-    /// 흔들리면 정상 알림이 통째로 버려진다.
+    /// Measured 0.154.0 — notification envelopes always come with `emittedAtMs`. If discrimination wobbles because of the extra sibling field,
+    /// normal notifications would be dropped whole.
     #[test]
     fn an_extra_sibling_key_does_not_break_classification() {
         let line =
@@ -1043,8 +1043,8 @@ mod tests {
         }
     }
 
-    /// 실측 0.154.0 — 응답에 스키마에 없는 칸이 여럿 실려 온다. 모르는 칸을 거부하면 정상 응답이
-    /// 해독 실패가 된다.
+    /// Measured 0.154.0 — responses carry several fields not in the schema. If unknown fields are rejected, a normal response
+    /// becomes a decode failure.
     #[test]
     fn unknown_fields_on_a_response_are_tolerated() {
         let v = serde_json::json!({
@@ -1064,7 +1064,7 @@ mod tests {
         }
     }
 
-    // ── 직렬화 헬퍼 ──────────────────────────────────────────────────────────
+    // ── Serialization helpers ──────────────────────────────────────────────────────────
 
     #[test]
     fn request_line_is_one_newline_terminated_line_that_classifies_back() {
@@ -1129,8 +1129,8 @@ mod tests {
         }
     }
 
-    /// 실측 0.154.0 — `id: null` 인 요청은 서버가 **알림으로 재분류해 조용히 버린다**(오류도
-    /// stderr 도 없다). 그래서 우리 id 가 어느 경로로도 `null` 이 되면 안 된다.
+    /// Measured 0.154.0 — a request with `id: null` is **reclassified as a notification by the server and quietly dropped** (no error and no
+    /// stderr). So our id must never become `null` by any path.
     #[test]
     fn ids_never_serialize_as_null() {
         for id in [RequestId::Str(String::new()), RequestId::Num(0)] {
@@ -1151,7 +1151,7 @@ mod tests {
         assert_eq!(field(&v, "id").as_i64(), Some(9_007_199_254_740_993));
     }
 
-    // ── 아웃바운드 params 의 와이어 철자 ─────────────────────────────────────
+    // ── Wire spelling of outbound params ─────────────────────────────────────
 
     #[test]
     fn initialize_params_field_names() {
@@ -1186,8 +1186,8 @@ mod tests {
         assert_eq!(field(&v, "cwd"), "C:/w");
         assert_eq!(field(&v, "approvalPolicy"), "never");
         assert_eq!(field(&v, "sandbox"), "workspace-write");
-        // ★camelCase 로 나가는 것이 계약이다★ — snake_case 로 새면 codex 가 모르는 칸으로 읽어 조용히
-        //   버리고, 증상은 「프라이밍이 안 먹는다」 하나다(오류가 없다).
+        // ★Going out as camelCase is the contract★ — if it leaks out as snake_case, codex reads it as an unknown field and quietly
+        //   drops it, and the one symptom is 「프라이밍이 안 먹는다」 (priming has no effect) (there is no error).
         assert_eq!(field(&v, "developerInstructions"), "be brief");
     }
 
@@ -1300,7 +1300,7 @@ mod tests {
         assert_eq!(s, "{}");
     }
 
-    // ── 인바운드 payload ─────────────────────────────────────────────────────
+    // ── Inbound payload ─────────────────────────────────────────────────────
 
     #[test]
     fn thread_start_response_reads_the_nested_thread_id() {
@@ -1354,7 +1354,7 @@ mod tests {
         assert!(n.error.codex_error_info.is_none());
     }
 
-    /// 스키마가 `int64` 로 선언한 칸을 `u64` 로 좁히면 이 알림이 통째로 사라진다.
+    /// If a field the schema declares as `int64` is narrowed to `u64`, this notification vanishes whole.
     #[test]
     fn token_counts_accept_the_full_declared_int64_range() {
         let n: ThreadTokenUsageUpdatedNotification = serde_json::from_value(serde_json::json!({

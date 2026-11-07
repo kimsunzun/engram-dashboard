@@ -1,23 +1,23 @@
-// ADR-0242: 스크롤 따라가기의 판정 — 입력 하나와 지금 상태를 받아 다음 상태와 쓸 위치를 내는 순수 함수(DOM 0).
-//   규칙표의 정본 = `docs/process/S21-chat-ux/trd.md` §2-2(번호가 그 표의 번호다 — `followCore.test.ts` 가 그 표다).
+// ADR-0242: scroll-follow decision — a pure function (no DOM) that takes one input and the current state and returns the next state and the position to write.
+//   Canonical rule table = `docs/process/S21-chat-ux/trd.md` §2-2 (the numbers are that table's numbers — `followCore.test.ts` is that table).
 //
-// ★붙음(`pinned`)은 scroll 이벤트와 위로 가는 입력으로만 바뀐다 — 크기가 바뀌어도(`resize`) 다시 재지 않는다★:
-//   재면 스트리밍 성장이 「위로 올렸다」로 읽힌다(ADR-0242 거부한 대안). 명시 `pin`·`unpin` 은 예외다.
-// ★붙어 있으면 `unseenGrowth` 는 늘 false 다★ — 붙게 하는 길(규칙 4 되붙기 · `pin`)이 함께 내린다.
+// ★Pinned (`pinned`) changes only on scroll events and upward-going inputs — a size change (`resize`) does not re-measure it★:
+//   re-measuring reads streaming growth as 「위로 올렸다」 (scrolled up) (alternative rejected in ADR-0242). Explicit `pin`·`unpin` are the exception.
+// ★While pinned, `unseenGrowth` is always false★ — the paths that pin (rule 4 re-pin · `pin`) clear it too.
 
-/** ADR-0242: 피어 범위 40–64 의 가운데(t3code 40 · paseo 64). 바닥 거리가 이 안이면 「바닥」이다. */
+/** ADR-0242: the middle of the peer range 40–64 (t3code 40 · paseo 64). A distance from the bottom within this counts as 「바닥」 (bottom). */
 export const FOLLOW_THRESHOLD_PX = 48
 
-/** 우리 쓰기의 scroll 이벤트로 알아보는 폭(규칙 3). */
+/** Width within which a scroll event is recognized as our own write (rule 3). */
 const OWN_WRITE_TOLERANCE_PX = 1
 
 /**
- * 이 폭 안이면 이미 그 자리로 친다(규칙 7) — 쓰지도 예고하지도 않는다. 브라우저는 제자리 쓰기에 scroll
- * 이벤트를 안 내므로, 예고를 남기면 뒤에 오는 사용자 스크롤을 우리 것으로 오인한다.
+ * Within this width it already counts as at that position (rule 7) — we neither write nor announce. The browser emits no scroll
+ * event for an in-place write, so leaving an announcement would mistake a later user scroll for ours.
  */
 const SAME_POSITION_PX = 0.5
 
-/** 뷰포트를 한 번 잰 값(px) — `scrollTop` · `scrollHeight` · `clientHeight`. */
+/** One measurement of the viewport (px) — `scrollTop` · `scrollHeight` · `clientHeight`. */
 export interface Metrics {
   top: number
   height: number
@@ -26,14 +26,14 @@ export interface Metrics {
 
 export interface FollowState {
   pinned: boolean
-  /** 뷰포트가 `display:none` 안이다(`client === 0` — ADR-0056 keep-alive 탭). 이 동안 잰 값은 무효다. */
+  /** The viewport is inside `display:none` (`client === 0` — ADR-0056 keep-alive tab). Values measured meanwhile are invalid. */
   frozen: boolean
   lastTop: number
-  /** 우리가 쓰고 아직 scroll 이벤트로 못 본 위치. `null` = 기다리는 쓰기 없음. */
+  /** The position we wrote that no scroll event has yet shown us. `null` = no write pending. */
   expectTop: number | null
-  /** 얼 때 적어 둔 위치 — 떨어진 채 풀리면 되살린다. `null` = 되살릴 것 없음(처음 · 풀린 뒤). */
+  /** Position recorded at freeze time — restored if it thaws while detached. `null` = nothing to restore (initial · after thaw). */
   savedTop: number | null
-  /** 떨어진 동안 크기가 바뀌었다. 버튼 조건 `'whenUnseen'`(U3 대안)만 읽는다. */
+  /** The size changed while detached. Read only by the button condition `'whenUnseen'` (U3 alternative). */
   unseenGrowth: boolean
 }
 
@@ -45,13 +45,13 @@ export type FollowInput =
   | { type: 'pin' }
   | { type: 'unpin' }
 
-/** `scrollTo` 가 `null` 이 아니면 호출자가 그 값을 `scrollTop` 에 쓴다. */
+/** If `scrollTo` is not `null`, the caller writes that value to `scrollTop`. */
 export interface FollowStep {
   state: FollowState
   scrollTo: number | null
 }
 
-/** 규칙 8. */
+/** Rule 8. */
 export function initialFollowState(): FollowState {
   return {
     pinned: true,
@@ -68,9 +68,9 @@ const stay = (state: FollowState): FollowStep => ({ state, scrollTo: null })
 const bottomOf = (m: Metrics): number => Math.max(0, m.height - m.client)
 
 /**
- * 규칙 7. ★`lastTop` 은 쓰기가 닿을 자리로 옮긴다★ — 쓰기의 scroll 이벤트가 오기 전에 사용자가 위로 끌면
- * 그 이벤트는 우리 쓰기와 합쳐져 한 번만 온다. 옛 자리를 기준으로 두면 끈 자리가 그보다 아래라 「위로」가
- * 안 읽혀 붙은 채 남고, 다음 성장이 도로 끌어내린다. 쓰기 자신의 이벤트는 `expectTop` 이 따로 알아본다.
+ * Rule 7. ★`lastTop` moves to where the write will land★ — if the user drags up before the write's scroll event arrives,
+ * that event arrives only once, merged with our write. With the old position as the baseline, the dragged spot is below it, so 「위로」 (up) is
+ * not read and it stays pinned, and the next growth pulls it back down. The write's own event is recognized separately by `expectTop`.
  */
 function writeTo(s: FollowState, m: Metrics, target: number): FollowStep {
   if (Math.abs(m.top - target) <= SAME_POSITION_PX) return stay(s)
@@ -78,16 +78,16 @@ function writeTo(s: FollowState, m: Metrics, target: number): FollowStep {
 }
 
 /**
- * 스크롤할 것이 있나 — 「맨 아래로」 버튼 조건(훅이 싣는다). 붙음 판정은 이것을 쓰지 않는다(규칙 5 는
- * `height > client` 그대로 — 정수 px 에서 둘은 같다).
+ * Is there anything to scroll — the 「맨 아래로」 (scroll to bottom) button condition (the hook supplies it). The pinned decision does not use it (rule 5 stays
+ * `height > client` — the two are the same at integer px).
  */
 export function isScrollable(m: Metrics): boolean {
   return m.height - m.client > SAME_POSITION_PX
 }
 
 /**
- * 규칙 2. ★`expectTop` 도 비운다★ — 숨기 전에 쓴 위치의 scroll 이벤트는 얼어 있는 동안 버려졌고, 여기서
- * 위치를 다시 쟀으므로 남은 예고는 뒤의 사용자 스크롤을 우리 것으로 오인하게 할 뿐이다.
+ * Rule 2. ★`expectTop` is cleared too★ — the scroll event of a position written before hiding was dropped while frozen, and
+ * the position was re-measured here, so a leftover announcement would only make a later user scroll look like ours.
  */
 function thaw(s: FollowState, m: Metrics): FollowStep {
   const base: FollowState = { ...s, frozen: false, lastTop: m.top, expectTop: null, savedTop: null }
@@ -96,21 +96,21 @@ function thaw(s: FollowState, m: Metrics): FollowStep {
   return stay(base)
 }
 
-/** 규칙 3 · 4. */
+/** Rules 3 · 4. */
 function onScroll(s: FollowState, m: Metrics): FollowStep {
   if (s.expectTop !== null && Math.abs(m.top - s.expectTop) <= OWN_WRITE_TOLERANCE_PX) {
     return stay({ ...s, lastTop: m.top, expectTop: null })
   }
-  // ★맞지 않는 scroll 이 오면 예고도 버린다★: 브라우저는 한 프레임의 위치 변화를 이벤트 하나로 합친다 —
-  //   우리 쓰기 뒤 사용자가 움직였으면 그 쓰기의 이벤트는 따로 오지 않는다.
+  // ★A scroll that does not match also discards the announcement★: the browser merges one frame's position changes into one event —
+  //   if the user moved after our write, that write's event does not arrive separately.
   const next: FollowState = { ...s, lastTop: m.top, expectTop: null }
   const distance = m.height - m.top - m.client
   if (s.pinned) {
-    // 문턱 안의 위 움직임은 내용이 줄어 생긴 클램프일 수 있다 — 풀지 않는다.
+    // An upward move within the threshold may be a clamp caused by shrunk content — do not unpin.
     if (distance > FOLLOW_THRESHOLD_PX && m.top < s.lastTop) next.pinned = false
   } else if (m.top > s.lastTop && distance <= FOLLOW_THRESHOLD_PX) {
-    // ★위 의도 걸쇠★: 되붙기는 아래로 움직여 문턱에 든 scroll 에서만이다 — 작은 위 휠이 규칙 5 로 푼 뒤,
-    //   그 휠이 만든 위 scroll(문턱 안)이 곧바로 되붙이지 않게 한다.
+    // ★Upward-intent latch★: re-pinning happens only on a scroll that moved down into the threshold — so after a small up-wheel unpins by rule 5,
+    //   the up scroll (within the threshold) that wheel produced does not re-pin right away.
     next.pinned = true
     next.unseenGrowth = false
   }
@@ -118,7 +118,7 @@ function onScroll(s: FollowState, m: Metrics): FollowStep {
 }
 
 export function step(s: FollowState, i: FollowInput): FollowStep {
-  // 규칙 10 — 얼어 있어도 붙음만 바꾼다(규칙 1). 쓰기는 훅이 뒤이어 먹이는 잰 값이나 풀림(규칙 2)이 낸다.
+  // Rule 10 — even while frozen only pinned changes (rule 1). The write comes from the measurement the hook feeds next or from the thaw (rule 2).
   if (i.type === 'pin') return stay({ ...s, pinned: true, unseenGrowth: false })
   if (i.type === 'unpin') return stay({ ...s, pinned: false })
 
@@ -128,13 +128,13 @@ export function step(s: FollowState, i: FollowInput): FollowStep {
     return stay(s)
   }
   if (m.client === 0) {
-    // 규칙 1 — 이 순간의 `m.top` 은 이미 무효일 수 있어 마지막으로 유효하게 본 값을 적는다.
+    // Rule 1 — `m.top` at this moment may already be invalid, so record the last value seen as valid.
     return stay({ ...s, frozen: true, savedTop: s.expectTop ?? s.lastTop })
   }
 
   switch (i.type) {
     case 'attach': {
-      // 규칙 9 — 새 노드다. 옛 노드에 쓴 위치의 이벤트는 여기로 오지 않는다.
+      // Rule 9 — a new node. Events of positions written to the old node do not arrive here.
       const base: FollowState = { ...s, lastTop: m.top, expectTop: null }
       return s.pinned ? writeTo(base, m, bottomOf(m)) : stay(base)
     }

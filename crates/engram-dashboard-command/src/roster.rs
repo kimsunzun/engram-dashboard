@@ -1,35 +1,35 @@
-//! 주인 명부 — **런타임 등록만으로** 차고, 주인이 끊기면 그 몫이 자취 없이 사라진다
+//! Owner registry — filled **by runtime registration alone**, and when an owner disconnects, its share vanishes without a trace
 //! (TRD §3-7 · ADR-0150).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{CommandDecl, CommandError, ErrorCode, OwnerToken};
 
-/// 이름 하나의 명부 항목 — 명부에 있는 것은 **주인이 있는 이름뿐**이다(ADR-0150).
+/// A registry entry for one name — the registry holds **only names that have an owner** (ADR-0150).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RosterEntry {
     pub name: String,
-    /// 등록 패킷이 실어 온 모양. ★불투명 문자열이다★ — 파싱·검증·분기 금지(ADR-0156).
+    /// The shape the registration packet carried. ★An opaque string★ — no parsing, validation or branching (ADR-0156).
     pub help: String,
     pub owner: OwnerToken,
 }
 
-/// 이름 하나를 물었을 때의 두 답.
+/// The two answers when asked about one name.
 ///
-/// ★「주인이 자리 비움」이라는 답은 없다★ — 끊긴 주인의 등록이 명부에서 사라지므로 그 이름은 **한 번도
-/// 본 적 없는 이름**과 같은 답을 받는다(ADR-0150 가 감수한 것 — 자취를 두지 않는 근거는 [`Roster`]).
-/// 그 구분이 실제로 필요해지면 자취를 되살리는 것이 아니라 연결 목록을 응답에 싣는 쪽으로 푼다.
+/// ★There is no answer 「주인이 자리 비움」 (the owner is away)★ — the disconnected owner's registration vanishes from the registry, so that name gets the same answer as a name
+/// **never seen before** (what ADR-0150 accepted — the reason for leaving no trace is in [`Roster`]).
+/// If that distinction is ever really needed, it is solved not by reviving the trace but by putting the connection list in the response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnerLookup {
     Available(OwnerToken),
     Unknown,
 }
 
-/// 「이 이름의 주인은 누구인가」 하나만 묻는 창구 — [`crate::route`] 가 명부에 대해 필요로 하는 전부다.
+/// An endpoint that asks only one thing, 「이 이름의 주인은 누구인가」 (who is the owner of this name) — all that [`crate::route`] needs from the registry.
 ///
-/// ★배달이 명부를 **왕복 내내** 붙들지 않게 하는 자리다★: 공유 명부를 쥔 조립부가 `route` 에 참조를
-/// 넘기려면 답장이 올 때까지 락을 들고 있어야 하고, 그동안 등록도 연결 정리도 다른 배달도 전부 멈춘다
-/// (느린 상대 하나가 명부 전체를 세운다). 구현이 락을 **이 호출 안에서만** 잡으면 그 정지가 없어진다.
+/// ★This is what keeps delivery from holding the registry **for the whole round trip**★: for the assembly code holding the shared registry to
+/// pass a reference to `route`, it would have to hold the lock until the reply arrives, and meanwhile registration, connection cleanup and every other delivery all stop
+/// (one slow peer halts the whole registry). If the implementation takes the lock **only within this call**, that halt disappears.
 pub trait OwnerLookupSource: Send + Sync {
     fn lookup(&self, name: &str) -> OwnerLookup;
 }
@@ -40,28 +40,28 @@ impl OwnerLookupSource for Roster {
     }
 }
 
-/// ★빌드 목록을 조회하지 않는다★ — 명부가 런타임 등록만으로 차야 「지금 부를 수 있는가」가 사실이 된다
-/// (TRD §3-7 금지 조항).
+/// ★Does not consult the build list★ — only when the registry is filled by runtime registration alone is 「지금 부를 수 있는가」 (can it be called now) a fact
+/// (TRD §3-7 prohibition clause).
 ///
-/// ★주인이 끊기면 그 주인의 항목이 사라진다 — 자취도 표식도 남기지 않는다★([`Roster::disconnect`])
+/// ★When an owner disconnects, its entries vanish — leaving neither a trace nor a marker★ ([`Roster::disconnect`])
 ///
-/// 자취를 남기는 형태로 되돌리지 말 것. 주인 토큰은 연결마다 새로 나므로(`OwnerToken`) 같은 클라이언트가
-/// 재접속하면 명부 눈에는 남남이고, 그래서 자취는 덮이지 않고 **쌓인다**. 만료도 회수 경로도 없어
-/// [`Roster::MAX_NAMES`] 에 닿으면 명부에 없던 이름을 실은 등록이 전부 거절되고 — 그 이름들이
-/// `UNKNOWN_COMMAND`(= 「재시도 말고 다시 발견하라」, TRD §4-②)로 나간다 — 데몬 재시작 말고는 안 풀린다
-/// (ADR-0150 결정 3).
-/// ★단 그것만으로 크기가 묶이지는 않는다★ — 이름은 등록 패킷이 실어 온 **문자열**이라(빌드 상수가
-/// 아니다) 붙어 있는 주인 하나가 얼마든 많은 이름을 보낼 수 있다. 그 축은 개수·길이 상한이 닫는다
+/// Do not revert to a form that leaves a trace. The owner token is new per connection (`OwnerToken`), so if the same client
+/// reconnects it is a stranger to the registry, and so traces are not overwritten but **pile up**. With neither expiry nor a reclaim path,
+/// once [`Roster::MAX_NAMES`] is reached every registration carrying a name not already in the registry is rejected, and — those names go out as
+/// `UNKNOWN_COMMAND` (= 「재시도 말고 다시 발견하라」 (do not retry, rediscover), TRD §4-②) — nothing but a daemon restart clears it
+/// (ADR-0150 decision 3).
+/// ★But that alone does not bound the size★ — a name is a **string** the registration packet carried (not a build constant),
+/// so a single attached owner can send any number of names. That axis is closed by count and length caps
 /// ([`Roster::MAX_NAMES_PER_OWNER`] · [`Roster::MAX_NAMES`] · [`Roster::MAX_NAME_BYTES`] ·
 /// [`Roster::MAX_HELP_BYTES`] · [`Roster::MAX_AGENT_ARGS`]).
-/// ★이름 하나에 주인은 하나다★ — 뒤에 등록한 쪽이 이긴다. 서로 다른 두 주인이 같은 이름을 얹으면 앞
-/// 주인은 그 이름을 잃고, 나중 주인이 끊길 때 그 이름은 앞 주인에게 돌아가지 않고 사라진다. 이름 하나에
-/// 주인 여럿은 유보된 안건이다(ADR-0150 대안 G).
+/// ★One name has one owner★ — the later registrant wins. If two different owners claim the same name, the earlier
+/// owner loses that name, and when the later owner disconnects, the name does not return to the earlier owner but vanishes. Several
+/// owners for one name is a deferred agenda item (ADR-0150 alternative G).
 // ADR-0156
 // ADR-0150
 #[derive(Debug, Default)]
 pub struct Roster {
-    /// 이름 → 그 이름을 **마지막으로** 등록한 주인. 끊긴 주인의 항목은 남지 않는다.
+    /// Name → the owner that registered that name **last**. A disconnected owner's entries do not remain.
     entries: BTreeMap<String, Registration>,
 }
 
@@ -69,66 +69,66 @@ pub struct Roster {
 struct Registration {
     owner: OwnerToken,
     help: String,
-    /// 등록 패킷이 표시한 에이전트 참조 칸 — 배달이 중계 전에 읽는다([`Roster::agent_args`]).
+    /// The agent-reference fields the registration packet marked — delivery reads them before relaying ([`Roster::agent_args`]).
     agent_args: Vec<String>,
 }
 
 impl Roster {
-    /// 주인 하나가 명부에 **누적으로** 쥘 수 있는 이름 수 — 지금 보낸 패킷이 아니라 그 주인 앞으로
-    /// 명부에 있는 전량에 이번 패킷을 더한 값을 잰다([`Roster::check_room_for`]).
+    /// The number of names one owner can hold in the registry **cumulatively** — measured as everything already in the registry under that owner
+    /// plus this packet, not the packet just sent ([`Roster::check_room_for`]).
     ///
-    /// ★이름은 등록 패킷이 실어 온 **문자열**이지 빌드 상수가 아니다★ — 상한이 없으면 오작동하거나
-    /// 악의적인 주인 하나가 붙어 있는 동안 명부를 무한히 불린다.
-    /// 값의 근거: 지금 어휘 전량이 60 남짓이고(화면 33 · agent 5 · daemon 3 · `src-tauri` 17) 가장 큰
-    /// 주인이 33이다. 512 = 그 여덟 배 — 실무가 닿지 않으면서 폭주는 막는 자리다.
+    /// ★A name is a **string** the registration packet carried, not a build constant★ — without a cap, a single malfunctioning
+    /// or malicious owner would grow the registry without bound while attached.
+    /// Basis for the value: the whole current vocabulary is a bit over 60 (screen 33 · agent 5 · daemon 3 · `src-tauri` 17) and the largest
+    /// owner has 33. 512 = eight times that — a spot that real use does not reach while still stopping runaway.
     pub const MAX_NAMES_PER_OWNER: usize = 512;
 
-    /// 명부 전체의 이름 수 — 주인이 여럿이어도 여기서 멈춘다(주인당 상한만 두면 주인 수로 우회된다).
+    /// The number of names in the whole registry — it stops here even with many owners (a per-owner cap alone would be bypassed by the number of owners).
     pub const MAX_NAMES: usize = 4096;
 
-    /// 이름 한 개의 최대 바이트 수.
+    /// The maximum bytes of one name.
     ///
-    /// 값의 근거: 지금 실재하는 가장 긴 이름이 `agentlist.createTerminal`(24바이트)이다. 128 = 그 다섯
-    /// 배 남짓 — 계열을 더 깊게 파도 닿지 않으면서, 이름 하나로 명부를 부풀리는 길은 닫는다.
+    /// Basis for the value: the longest name that exists now is `agentlist.createTerminal` (24 bytes). 128 = a bit over five
+    /// times that — not reached even if a family goes deeper, while closing the path of inflating the registry with a single name.
     pub const MAX_NAME_BYTES: usize = 128;
 
-    /// `help` 한 칸의 최대 바이트 수.
+    /// The maximum bytes of the `help` field.
     ///
-    /// ★이 문자열은 그 주인이 붙어 있는 동안 상주한다★ — 상한이 없으면 과장된 `help` 하나가 명부의
-    /// 메모리를 통째로 먹는다.
-    /// 값의 근거: 지금 가장 큰 항목이 `agent.spawn` 의 591바이트다(`agent/bindings/commands.schema.json`
-    /// 실측). 4096 = 그 일곱 배로, 중첩 struct 를 몇 겹 더 편 선언도 넉넉히 든다.
-    /// 이 상한과 이름 · 에이전트 참조 칸 상한을 합치면 명부의 상주 상한이 [`Roster::MAX_NAMES`] ×
-    /// (128 + 4096 + 8 × 128) ≈ 20 MiB 로 닫힌다.
+    /// ★This string stays resident while its owner is attached★ — without a cap, one exaggerated `help` eats the registry's
+    /// whole memory.
+    /// Basis for the value: the largest entry now is `agent.spawn` at 591 bytes (measured in `agent/bindings/commands.schema.json`).
+    /// 4096 = seven times that, comfortably holding a declaration that unfolds nested structs a few more levels.
+    /// Adding this cap to the name and agent-reference field caps closes the registry's resident cap at [`Roster::MAX_NAMES`] ×
+    /// (128 + 4096 + 8 × 128) ≈ 20 MiB.
     pub const MAX_HELP_BYTES: usize = 4096;
 
-    /// 이름 하나가 표시할 수 있는 에이전트 참조 칸 수(ADR-0308). 칸 이름 한 개의 길이는
-    /// [`Roster::MAX_NAME_BYTES`] 로 함께 묶는다.
+    /// The number of agent-reference fields one name can mark (ADR-0308). The length of a single field name is
+    /// bounded together by [`Roster::MAX_NAME_BYTES`].
     ///
-    /// ★이 칸도 등록 패킷이 실어 온 문자열이라 상주한다★ — 상한이 없으면 `help` 상한을 비켜 명부를 부풀린다.
-    /// 값의 근거: 한 명령이 에이전트를 가리키는 칸은 지금 많아야 셋이다(`slot.assignAgent` · `layout.setSlotContent` —
-    /// 넣을 에이전트 `assign` · 그 옛 이름 `agent_id` · 칸 지목 `slot_of`). 8 = 그 두 배 남짓.
+    /// ★This field is also a string the registration packet carried, so it stays resident★ — without a cap, it would bypass the `help` cap to inflate the registry.
+    /// Basis for the value: a command has at most three fields pointing at an agent now (`slot.assignAgent` · `layout.setSlotContent` —
+    /// `assign`, the agent to put in; `agent_id`, its old name; `slot_of`, the slot pointer). 8 = a bit over twice that.
     pub const MAX_AGENT_ARGS: usize = 8;
 
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 붙을 때 한 방 — 그 주인의 **전량**이다. 재연결 재전송이 같은 경로를 타므로 이 주인이 이번에
-    /// 싣지 않은 옛 이름은 명부에서 내려간다(주인 단위 last-wins, ADR-0081 「RegisterRole 재전송」).
-    /// 그래서 빈 목록으로 부르면 그 주인의 자리가 온전히 빈다.
+    /// All at once on attach — it is that owner's **entire set**. A reconnect resend takes the same path, so an old name this owner did not
+    /// carry this time comes down from the registry (per-owner last-wins, ADR-0081 「RegisterRole 재전송」 (RegisterRole resend)).
+    /// So calling it with an empty list leaves that owner's place completely empty.
     ///
-    /// ★상한을 넘으면 **한 이름도 넣지 않고** `INVALID_ARGUMENT` 로 돌려보낸다★ — 넘치는 만큼만 잘라
-    /// 넣으면 주인은 성공으로 알고 일부 이름이 조용히 없는 상태가 된다(그 이름은 `UNKNOWN_COMMAND` 로
-    /// 나가는데, 등록한 쪽에는 그럴 이유가 없다). 거절은 명부를 **건드리기 전에** 판정하므로 실패한
-    /// 등록이 기존 상태를 바꾸지 않는다.
-    /// ★남이 쥔 이름을 가져가는 것이 여기서는 적법하다★ — 등록은 **붙는 순간**에 매인 전량 선언이라
-    /// (TRD §3-7 조항 1) 새 연결이 옛 연결의 이름을 이어받는 것이 인수인계 그 자체다. 붙어 있는 동안의
-    /// 차분([`Roster::update`])에는 그 닻이 없어 같은 인수인계가 허용되지 않는다.
-    /// ★끊긴 주인의 늦은 등록을 **여기서 막지 않는다**★ — 명부에는 그 주인의 흔적이 없어(끊길 때 지운다)
-    /// 산 주인이 보낸 것과 구분할 근거가 없다. 그 그물은 연결 수명을 아는 쪽 **한 곳뿐**이다
-    /// (`engram-dashboard-daemon` 의 `CommandRoster::refuse_if_detached`) — 여기에 두 번째 그물을 세우면
-    /// 주인 단위 상태를 따로 들어야 하고, 그 목록이 자취와 똑같이 무한히 자란다.
+    /// ★If the cap is exceeded, **not one name is entered** and `INVALID_ARGUMENT` is returned★ — if we cut off only the overflow
+    /// and entered the rest, the owner would take it as success and some names would silently be missing (those names go out as `UNKNOWN_COMMAND`,
+    /// though from the registering side's view there is no reason for that). The rejection is decided **before the registry is touched**, so a failed
+    /// registration does not change existing state.
+    /// ★Taking a name held by another is legitimate here★ — registration is an entire-set declaration tied to **the moment of attaching**
+    /// (TRD §3-7 clause 1), so a new connection inheriting an old connection's names is the handover itself. The diff while attached
+    /// ([`Roster::update`]) has no such anchor, so the same handover is not allowed.
+    /// ★A late registration from a disconnected owner is **not blocked here**★ — the registry has no trace of that owner (it is erased on disconnect),
+    /// so there is no basis to tell it apart from one sent by a live owner. That net is in **one place only**, the side that knows connection lifetime
+    /// (`CommandRoster::refuse_if_detached` in `engram-dashboard-daemon`) — putting a second net here
+    /// would mean holding per-owner state separately, and that list would grow without bound just like a trace.
     // ADR-0150
     pub fn register(
         &mut self,
@@ -136,7 +136,7 @@ impl Roster {
         decls: Vec<CommandDecl>,
     ) -> Result<(), CommandError> {
         self.check_room_for(owner, &decls)?;
-        // 전량 선언이라 이번에 안 실린 이 주인의 이름은 자리째 내려간다.
+        // It is an entire-set declaration, so this owner's names not carried this time come down along with their slot.
         self.remove_owner(owner);
         for decl in decls {
             self.entries.insert(
@@ -151,39 +151,39 @@ impl Roster {
         Ok(())
     }
 
-    /// 붙어 있는 동안의 **차분** — 늦게 뜬 기능이 이름을 더하고 꺼진 기능이 이름을 내린다(TRD §3-7 조항 3).
-    /// 전량 재전송은 [`Roster::register`] 뿐이다.
+    /// The **diff** while attached — a late-starting feature adds names and a switched-off feature takes names down (TRD §3-7 clause 3).
+    /// A full resend is [`Roster::register`] only.
     ///
-    /// ★`removed` 는 이름을 **지운다** — 자취로 남기지 않는다★: 자취로 남기면 끊기지 않은 주인이
-    /// `added`=새 이름 · `removed`=옛 이름을 되풀이해 자기 몫([`Roster::MAX_NAMES_PER_OWNER`])을 영구히
-    /// 채울 수 있고, 그러면 연결을 끊지 않고도 자취가 명부를 영구히 메우는 같은 사고가 재현된다
-    /// (ADR-0150 결정 3이 끊김에 대해 닫은 축의 나머지 절반).
-    /// ★`removed` 는 **자기가 쥔 이름만** 지운다★ — [`Roster::disconnect`] 와 같은 규칙이다. 지나간
-    /// 주인의 늦은 차분이 방금 붙은 주인의 등록을 지우면 살아 있는 명령이 사라진다(재연결 겹침). 남의
-    /// 이름·없는 이름은 조용히 지나간다 — 차분은 「내 몫을 이렇게 바꿔라」이지 남의 상태에 대한 주장이
-    /// 아니다.
-    /// ★`added` 는 남이 쥔 이름을 가져가지 못한다 — 여기가 [`Roster::register`] 와 갈리는 자리다★.
-    /// 등록의 last-wins 는 **붙는 순간**에 매여 있어(TRD §3-7 조항 1) 인수인계로 읽히지만, 차분은 정의상
-    /// 「붙어 있는 동안」이라 그 닻이 없다. 닻 없는 덮어쓰기를 허용하면 죽은 연결의 늦은 차분이 방금 붙은
-    /// 셸의 등록을 **자기 토큰으로 덮어** 조회가 죽은 주인을 `Available` 로 답하고, 산 셸은 다시 등록할
-    /// 계기가 없어(등록은 붙을 때 한 번뿐) 그 상태가 그대로 굳는다.
-    /// ★조용히 넘기지 않고 반려하는 이유★(`removed` 의 남의 이름은 조용히 지나간다): 남의 이름을 안
-    /// 지우는 것은 차분이 말한 「내 몫」이 이미 그러하다는 뜻이라 잃는 것이 없지만, `added` 를 조용히
-    /// 무시하면 **성공을 보고하면서** 호출자는 그 이름이 자기 앞으로 온다고 믿는다. 반려는 `CONFLICT`
-    /// 다 — 패킷이 틀린 것이(`INVALID_ARGUMENT`) 아니라 명부의 **상태**가 아니라고 답한다.
-    /// ★끊긴 주인의 차분을 **여기서 막지 않는다**★ — [`Roster::register`] 와 같은 이유이고, 그 그물이 선
-    /// 곳도 같은 한 곳이다.
-    /// ★한 이름이 `added` 와 `removed` 양쪽에 실린 패킷은 **`INVALID_ARGUMENT` 로 통째 반려한다**★ —
-    /// 적용 순서를 정하지 않는다. 어느 순서를 골라도 호출자는 결과를 알 수 없다: 더한 뒤 지우면 **성공을
-    /// 받고도** 그 이름이 명부에 없어 `UNKNOWN_COMMAND` 로 나가고([`Roster::register`] 의 상한 반려가 막는
-    /// 그 사고 그대로 —
-    /// 「주인은 성공으로 알고 일부 이름이 조용히 없는 상태가 된다」), 지운 뒤 더하면 내리라는 지시가 조용히
-    /// 무시된다. **성공 보고와 실제 상태가 갈리는 쪽이 순서를 잘못 고르는 것보다 나쁘다** — 호출자는 조용한
-    /// 삭제를 성공한 등록과 구분할 수단이 없다. 순서를 정한 조항이 ADR-0150 에도 TRD §3-7 조항 3 에도 없으니
-    /// 그 자리를 여기서 임의로 메우지 않는다.
+    /// ★`removed` **erases** the name — it does not leave a trace★: if it left a trace, an owner that is still connected could
+    /// repeat `added`=new name · `removed`=old name and permanently fill its own share ([`Roster::MAX_NAMES_PER_OWNER`]),
+    /// and then the same accident of traces permanently filling the registry would recur without even disconnecting
+    /// (the other half of the axis ADR-0150 decision 3 closed for disconnects).
+    /// ★`removed` erases **only names it holds itself**★ — the same rule as [`Roster::disconnect`]. If a late diff from a past
+    /// owner erased the registration of the owner that just attached, a live command would disappear (reconnect overlap). Another
+    /// owner's name or a nonexistent name passes silently — a diff means 「내 몫을 이렇게 바꿔라」 (change my share like this), not
+    /// a claim about someone else's state.
+    /// ★`added` cannot take a name held by another — this is where it parts from [`Roster::register`]★.
+    /// Registration's last-wins is tied to **the moment of attaching** (TRD §3-7 clause 1), so it reads as a handover, but a diff is by definition
+    /// 「붙어 있는 동안」 (while attached), so it has no such anchor. If an anchorless overwrite were allowed, a late diff from a dead connection would
+    /// **overwrite with its own token** the registration of the shell that just attached, so lookups would answer the dead owner as `Available`, and the live shell would have no
+    /// occasion to register again (registration happens only once on attaching), so that state would be frozen in place.
+    /// ★Why it is rejected rather than passed silently★ (another owner's name in `removed` passes silently): not
+    /// erasing another's name means 「내 몫」 (my share) as the diff stated it is already so, so nothing is lost, but if `added` were silently
+    /// ignored, the caller would **be told success** while believing that name comes to itself. The rejection is `CONFLICT`
+    /// — it answers not that the packet is wrong (`INVALID_ARGUMENT`) but that the **state** of the registry is not so.
+    /// ★A diff from a disconnected owner is **not blocked here**★ — the same reason as [`Roster::register`], and the net
+    /// stands in the same single place.
+    /// ★A packet carrying one name in both `added` and `removed` is **rejected whole with `INVALID_ARGUMENT`**★ —
+    /// we do not fix an application order. Whichever order is picked, the caller cannot know the result: adding then removing means that **even after receiving success**
+    /// the name is not in the registry and goes out as `UNKNOWN_COMMAND` (the cap rejection of [`Roster::register`] blocks
+    /// that very accident —
+    /// 「주인은 성공으로 알고 일부 이름이 조용히 없는 상태가 된다」 (the owner takes it as success and some names silently end up missing)), and removing then adding means the instruction to take it down is silently
+    /// ignored. **A success report that diverges from actual state is worse than picking the wrong order** — the caller has no means to tell a silent
+    /// deletion from a successful registration. No clause fixes an order in ADR-0150 or in TRD §3-7 clause 3, so
+    /// we do not fill that gap arbitrarily here.
     ///
-    /// 상한은 `added` 만 세어 다시 본다 — 넘치면 **한 이름도 건드리지 않는다**([`Roster::register`] 와
-    /// 같은 계약이고, 위 반려 둘도 같다).
+    /// The cap is checked again counting only `added` — if exceeded, **not one name is touched** (the same contract as [`Roster::register`],
+    /// and the two rejections above are the same).
     // ADR-0150
     pub fn update(
         &mut self,
@@ -191,8 +191,8 @@ impl Roster {
         added: Vec<CommandDecl>,
         removed: Vec<String>,
     ) -> Result<(), CommandError> {
-        // 길이 상한을 먼저 통과시킨다 — 아래 반려들이 이름을 문구에 인용한다(`check_room_for` 안의
-        //   같은 순서와 같은 이유).
+        // Pass the length caps first — the rejections below quote the name in their message (same order and
+        //   same reason as inside `check_room_for`).
         self.check_room_for(owner, &added)?;
         Self::check_lists_are_disjoint(&added, &removed)?;
         self.check_added_are_not_taken(owner, &added)?;
@@ -218,16 +218,16 @@ impl Roster {
         Ok(())
     }
 
-    /// 한 이름이 두 목록에 함께 실려 있지 않나 — **명부를 건드리기 전에** 본다([`Roster::check_room_for`] 와
-    /// 같은 계약). 반려하는 이유와 「적용 순서를 정하지 않는다」는 [`Roster::update`] 주석.
+    /// Whether one name is carried in both lists — checked **before the registry is touched** (the same contract as [`Roster::check_room_for`]).
+    /// The reason for rejecting and 「적용 순서를 정하지 않는다」 (we do not fix an application order) are in the [`Roster::update`] comment.
     ///
-    /// ★명부를 안 본다 — 그래서 `self` 를 받지 않는다★: 판정 대상이 **패킷 하나**이고 그 코드가
-    /// `INVALID_ARGUMENT` 인 것도 같은 이유다(같은 왕복을 다시 보내도 같은 답이 난다). 형제
-    /// [`Roster::check_added_are_not_taken`] 는 반대로 명부 **상태**를 말하므로 `CONFLICT` 이고 상태가
-    /// 바뀌면 답이 바뀐다.
-    /// ★순회는 `added` 쪽이다★ — 문구에 인용할 이름은 [`Roster::MAX_NAME_BYTES`] 를 통과한 것이어야 하는데
-    /// 길이를 재는 것은 `decls` 뿐이다(`removed` 는 안 잰다). 겹친 이름은 정의상 `added` 에도 있으므로 이
-    /// 순회가 인용하는 값은 항상 그 상한 안이다.
+    /// ★It does not look at the registry — so it takes no `self`★: the subject of the decision is **one packet**, and that is also why its code is
+    /// `INVALID_ARGUMENT` (sending the same round trip again gives the same answer). Its sibling
+    /// [`Roster::check_added_are_not_taken`] by contrast speaks about the registry's **state**, so it is `CONFLICT` and the answer changes
+    /// if the state changes.
+    /// ★The iteration is over `added`★ — the name quoted in the message must be one that passed [`Roster::MAX_NAME_BYTES`], and
+    /// only `decls` has its length measured (`removed` is not measured). An overlapping name is by definition also in `added`, so the value
+    /// this iteration quotes is always within that cap.
     fn check_lists_are_disjoint(
         added: &[CommandDecl],
         removed: &[String],
@@ -244,8 +244,8 @@ impl Roster {
         Ok(())
     }
 
-    /// `added` 가 **남의 등록**을 덮지 않나 — 명부에 남는 항목은 주인이 있는 것뿐이라(ADR-0150) 주인
-    /// 비교 하나로 판정된다.
+    /// Whether `added` **overwrites another's registration** — the only entries that remain in the registry have an owner (ADR-0150), so it is decided by
+    /// one owner comparison.
     fn check_added_are_not_taken(
         &self,
         owner: &OwnerToken,
@@ -266,32 +266,32 @@ impl Roster {
         Ok(())
     }
 
-    /// 이 등록이 상한 안인가 — **명부를 건드리기 전에** 본다.
+    /// Whether this registration is within the cap — checked **before the registry is touched**.
     ///
-    /// ★주인당 상한은 패킷 하나가 아니라 그 주인의 **누적**을 잰다★: 패킷만 재면 서로 겹치지 않는
-    /// 512개짜리 차분을 잇달아 보내는 주인 하나가 명부 전체를 혼자 채운다. 그러면 진짜 셸의 등록이 전체
-    /// 상한에 막히고 `tab.*`·`window.*` 가 전부 `UNKNOWN_COMMAND` 로 나가는데, 그 코드는 「재시도가
-    /// 무의미하니 이름을 다시 발견하라」는 뜻이라(TRD §4-②) 호출자는 실재하는 명령을 영영 포기한다.
-    /// 그래서 전체 상한이 **주인별 몫 없는 공유 자원**이 되지 않게 여기서 막는다. 이번 패킷에 실린 이름은
-    /// 덮어쓰기라 자리를 새로 먹지 않으므로 두 번 세지 않는다.
-    /// ★이 상한은 거부된 TTL 과 다른 축이다★ — 거기서 거부한 것은 **시간**이라 같은 질문의 답이 시계에
-    /// 따라 갈렸다(ADR-0156 대안 C · ADR-0150 대안 F). 개수 상한은 명부에 든 이름의 답을 바꾸지 않는다.
-    /// ★판정이 변경보다 앞이라 **과대측정**이다(알고 남긴 것)★: 이번 왕복에서 내려갈 이름도 아직 명부에
-    /// 있으므로 함께 센다 — [`Roster::register`] 가 갈아치울 자기 이름과 [`Roster::update`] 의 `removed`
-    /// 가 그렇다. 대가는 「몫이 꽉 찬 주인은 이름 전량을 한 패킷에 갈아치우지 못한다」뿐이고, 빈 전량
-    /// 등록을 한 번 보내면 자기 자리가 온전히 비어 그 길이 열린다. 명부가 자라는 축이 아니라서 정밀하게
-    /// 고치지 않았다 — 정확히 재려면 상한 판정이 변경 결과를 모델링해야 하고, 그러면 「명부를 건드리기
-    /// 전에 판정한다」는 이 함수의 계약이 흐려진다.
+    /// ★The per-owner cap measures that owner's **cumulative** total, not one packet★: if only the packet were measured, one owner sending
+    /// non-overlapping 512-name diffs one after another would fill the whole registry by itself. Then the real shell's registration would be blocked by the overall
+    /// cap and `tab.*` and `window.*` would all go out as `UNKNOWN_COMMAND`, a code that means 「재시도가
+    /// 무의미하니 이름을 다시 발견하라」 (retrying is pointless, rediscover the name) (TRD §4-②), so the caller would give up on a command that really exists for good.
+    /// So it is blocked here so that the overall cap does not become a **shared resource with no per-owner share**. The names carried in this packet
+    /// are overwrites and do not take new slots, so they are not counted twice.
+    /// ★This cap is a different axis from the rejected TTL★ — what was rejected there was **time**, so the answer to the same question varied
+    /// with the clock (ADR-0156 alternative C · ADR-0150 alternative F). A count cap does not change the answer for a name in the registry.
+    /// ★The decision comes before the change, so this **over-measures** (left knowingly)★: names that will come down in this round trip are still
+    /// in the registry, so they are counted too — [`Roster::register`]'s own names about to be replaced and `removed`
+    /// of [`Roster::update`] are such cases. The cost is only that 「몫이 꽉 찬 주인은 이름 전량을 한 패킷에 갈아치우지 못한다」 (an owner whose share is full cannot replace its entire name set in one packet), and sending
+    /// one empty full registration empties its own place completely and opens that path. It is not an axis along which the registry grows, so
+    /// we did not fix it precisely — measuring exactly would require the cap decision to model the result of the change, and then this function's contract 「명부를 건드리기
+    /// 전에 판정한다」 (decide before touching the registry) would blur.
     ///
-    /// 이름·`help` 는 등록 패킷이 실어 온 문자열이라 길이도 함께 잰다 — 과장된 `help` 하나가 그 주인이
-    /// 붙어 있는 동안 명부 메모리를 통째로 먹는다.
+    /// Names and `help` are strings the registration packet carried, so length is measured too — one exaggerated `help` eats the registry memory
+    /// whole for as long as that owner is attached.
     fn check_room_for(
         &self,
         owner: &OwnerToken,
         decls: &[CommandDecl],
     ) -> Result<(), CommandError> {
         for decl in decls {
-            // 이름을 먼저 잰다 — 그래야 아래 `help` 오류가 이름을 안전하게 인용할 수 있다.
+            // Measure the name first — that way the `help` error below can quote the name safely.
             if decl.name.len() > Self::MAX_NAME_BYTES {
                 return Err(CommandError::invalid_argument(format!(
                     "a command name may be at most {} bytes (got {})",
@@ -355,17 +355,17 @@ impl Roster {
         Ok(())
     }
 
-    /// 연결이 끊겼다 — **그 주인 앞으로 남은 항목을 자리째 지운다.** 자취도 표식도 남기지 않으므로 그
-    /// 이름들은 한 번도 등록되지 않았던 것과 같은 답을 받는다([`OwnerLookup`]).
+    /// The connection was cut — **erase the entries remaining under that owner along with their slot.** Since it leaves neither trace nor marker, those
+    /// names get the same answer as names that were never registered ([`OwnerLookup`]).
     ///
-    /// ★**자기가 아직 주인인 이름만** 내린다★ — 재연결 겹침(새 연결이 등록한 뒤 옛 연결의 정리가 도착)에서
-    /// 방금 붙은 주인의 등록을 지우지 않기 위해서다.
-    /// ★끊김을 처리하는 자리는 이것 하나다★ — 부르는 경로도 데몬의 `on_disconnect → detach` 하나뿐이고
-    /// (ADR-0150), 두 번째를 만들면 인과가 갈라진다.
-    /// ★반환 = **이 호출이 지운 이름 전량**(오름차순)★ — 지운 뒤에는 명부에 그 사건의 자취가 없으므로
-    /// (자취를 두지 않는 근거는 이 타입 주석) 무엇이 사라졌는지 말할 수 있는 값이 이 반환뿐이다. 계측은
-    /// **연결 수명을 아는 쪽**이 한다(`engram-dashboard-daemon` 의 `CommandRoster::detach`) — 이 crate 는
-    /// 로깅 의존을 지지 않는다(워크스페이스·서드파티 의존 상한 = `lib.rs` 헤더).
+    /// ★It takes down **only names the owner still owns**★ — so that in a reconnect overlap (the new connection registers, then the old connection's cleanup arrives)
+    /// it does not erase the registration of the owner that just attached.
+    /// ★This is the only place that handles disconnects★ — the only calling path is the daemon's `on_disconnect → detach`
+    /// (ADR-0150), and making a second would split causality.
+    /// ★Return = **all names this call erased** (ascending)★ — after erasing, the registry has no trace of the event
+    /// (the reason for leaving no trace is in this type's comment), so this return is the only value that can say what disappeared. Instrumentation is
+    /// done by **the side that knows connection lifetime** (`CommandRoster::detach` in `engram-dashboard-daemon`) — this crate bears
+    /// no logging dependency (the workspace and third-party dependency cap = the `lib.rs` header).
     // ADR-0150
     pub fn disconnect(&mut self, owner: &OwnerToken) -> Vec<String> {
         self.remove_owner(owner)
@@ -378,7 +378,7 @@ impl Roster {
         }
     }
 
-    /// 이 이름의 주인이 표시한 에이전트 참조 칸(등록 순서). 모르는 이름 · 표시 없음 = 빈 슬라이스.
+    /// The agent-reference fields the owner of this name marked (registration order). Unknown name · no marking = empty slice.
     // ADR-0308
     pub fn agent_args(&self, name: &str) -> &[String] {
         self.entries
@@ -403,8 +403,8 @@ impl Roster {
         self.entries.is_empty()
     }
 
-    /// 반환 = 내려간 이름들(오름차순 — `BTreeMap` 순회 순서). [`Roster::register`] 는 그 값을 쓰지 않는다
-    /// (전량 선언이 자기 자리를 갈아치우는 것은 사건이 아니라 그 호출의 정의다).
+    /// Return = the names taken down (ascending — `BTreeMap` iteration order). [`Roster::register`] does not use that value
+    /// (an entire-set declaration replacing its own place is not an event but the definition of that call).
     fn remove_owner(&mut self, owner: &OwnerToken) -> Vec<String> {
         let mut removed = Vec::new();
         self.entries.retain(|name, reg| {
@@ -431,10 +431,10 @@ mod tests {
         }
     }
 
-    /// ★재연결 겹침 — 옛 연결의 cleanup 이 새 등록을 내리면 안 된다★
+    /// ★Reconnect overlap — an old connection's cleanup must not take down a new registration★
     ///
-    /// 주인 토큰은 연결마다 새로 나므로 셸이 재연결하면 등록(새 토큰)이 먼저 오고 옛 연결의 정리가
-    /// 뒤늦게 온다. 정리가 이름 단위로 내려가면 방금 붙은 셸의 명령이 조용히 사라진다.
+    /// The owner token is new per connection, so when the shell reconnects, the registration (new token) comes first and the old connection's cleanup
+    /// arrives late. If the cleanup took names down per name, the commands of the shell that just attached would silently vanish.
     #[test]
     fn a_superseded_owners_cleanup_does_not_take_down_the_current_registration() {
         let old = OwnerToken::new("shell-conn-1");
@@ -473,8 +473,8 @@ mod tests {
         assert_eq!(roster.lookup("tab.create"), OwnerLookup::Available(second));
     }
 
-    /// ★재접속을 되풀이해도 명부에 쌓이는 것이 없다★ — 주인 토큰은 연결마다 새로 나므로 자취를 남기는
-    /// 형태에서는 이 되풀이가 명부를 상한까지 영구히 채웠다(ADR-0150 결정 3).
+    /// ★Nothing accumulates in the registry however often it reconnects★ — the owner token is new per connection, so in the form that left a trace, this repetition
+    /// permanently filled the registry up to the cap (ADR-0150 decision 3).
     #[test]
     fn reconnecting_many_times_leaves_nothing_behind() {
         let mut roster = Roster::new();
@@ -491,7 +491,7 @@ mod tests {
         assert_eq!(roster.lookup("tab.create"), OwnerLookup::Unknown);
     }
 
-    /// 나중에 등록한 주인의 `help` 가 그 이름의 모양이다 — 이름 하나에 항목도 하나다.
+    /// The `help` of the owner that registered later is the shape of that name — one name has one entry.
     #[test]
     fn the_surviving_entry_carries_the_latest_shape() {
         let first = OwnerToken::new("shell-1");
@@ -526,8 +526,8 @@ mod tests {
         (0..count).map(|i| decl(&format!("{prefix}.{i}"))).collect()
     }
 
-    /// ★붙어 있는 한 주인이 명부를 무한히 불릴 수 없다★ — 이름은 등록 패킷이 보낸 문자열이고, 그 주인이
-    /// 끊기기 전에는 회수가 없으므로 상한이 유일한 제동이다.
+    /// ★An attached owner cannot grow the registry without bound★ — a name is a string the registration packet sent, and until that owner
+    /// disconnects there is no reclaim, so the cap is the only brake.
     #[test]
     fn a_registration_over_the_per_owner_cap_is_refused_whole() {
         let owner = OwnerToken::new("shell-1");
@@ -545,10 +545,10 @@ mod tests {
         assert_eq!(roster.len(), Roster::MAX_NAMES_PER_OWNER);
     }
 
-    /// ★상한 판정이 변경보다 앞이라 이번 패킷이 밀어낼 자기 이름도 함께 센다★
+    /// ★The cap decision comes before the change, so it also counts the owner's own names this packet will push out★
     ///
-    /// 과대측정이고 알고 남긴 것이다(근거 = `check_room_for`). 대가가 「몫이 꽉 찬 주인은 이름 전량을 한
-    /// 패킷에 갈아치우지 못한다」에 그치는 것과, **빈 전량 등록 한 번이 그 길을 연다**는 것을 함께 박는다.
+    /// It is an over-measure and left knowingly (basis = `check_room_for`). We pin down together that the cost is limited to 「몫이 꽉 찬 주인은 이름 전량을 한
+    /// 패킷에 갈아치우지 못한다」 (an owner whose share is full cannot replace its entire name set in one packet), and that **one empty full registration opens that path**.
     #[test]
     fn a_full_owners_disjoint_snapshot_is_measured_before_the_old_names_come_down() {
         let owner = OwnerToken::new("shell-1");
@@ -576,7 +576,7 @@ mod tests {
         assert_eq!(roster.len(), Roster::MAX_NAMES_PER_OWNER);
     }
 
-    /// 끊기면 그 주인의 몫이 온전히 빈다 — 상한을 잡고 있던 이름이 자리째 사라진다(ADR-0150 결정 3).
+    /// On disconnect that owner's share is completely empty — the names holding the cap vanish along with their slot (ADR-0150 decision 3).
     #[test]
     fn a_disconnect_frees_that_owners_whole_cap() {
         let owner = OwnerToken::new("shell-1");
@@ -594,8 +594,8 @@ mod tests {
         assert_eq!(roster.lookup("wave0.0"), OwnerLookup::Unknown);
     }
 
-    /// ★이름·`help` 는 등록 패킷이 실어 온 문자열이다★ — 길이를 안 재면 과장된 `help` 하나가 그 주인이
-    /// 붙어 있는 동안 명부 메모리를 통째로 먹는다.
+    /// ★Names and `help` are strings the registration packet carried★ — if length were not measured, one exaggerated `help` would eat the registry
+    /// memory whole for as long as that owner is attached.
     #[test]
     fn an_oversized_name_or_help_is_refused_whole() {
         let owner = OwnerToken::new("shell-1");
@@ -642,9 +642,9 @@ mod tests {
         }
     }
 
-    // ── 에이전트 참조 칸(ADR-0308) ───────────────────────────────────────────────────
+    // ── Agent-reference fields (ADR-0308) ───────────────────────────────────────────────────
 
-    /// 배달이 중계 전에 읽는 값 — 등록 · 차분 · 재등록이 모두 그 이름의 표시를 갈아 끼운다.
+    /// The value delivery reads before relaying — registration · diff · re-registration all swap that name's marking.
     #[test]
     fn agent_args_follow_register_and_update() {
         let owner = OwnerToken::new("shell-1");
@@ -693,7 +693,7 @@ mod tests {
         );
     }
 
-    /// 표시 칸도 상주하는 패킷 문자열이다 — 개수 · 길이를 재고, 넘으면 통째 반려한다.
+    /// The marking fields are also resident packet strings — count and length are measured, and if exceeded the packet is rejected whole.
     #[test]
     fn oversized_agent_args_are_refused_whole() {
         let owner = OwnerToken::new("shell-1");
@@ -742,7 +742,7 @@ mod tests {
         );
     }
 
-    /// 주인당 상한만 두면 주인 수로 우회된다 — 전체 상한이 그 축을 닫는다.
+    /// A per-owner cap alone is bypassed by the number of owners — the overall cap closes that axis.
     #[test]
     fn the_total_cap_holds_across_owners() {
         let mut roster = Roster::new();
@@ -765,14 +765,14 @@ mod tests {
         assert_eq!(err.code(), crate::ErrorCode::InvalidArgument);
         assert_eq!(roster.len(), Roster::MAX_NAMES, "명부는 그대로다");
 
-        // ★이미 있는 이름은 자리를 새로 먹지 않는다★ — 꽉 찬 명부에서도 재등록은 통과해야 한다.
+        // ★A name that already exists does not take a new slot★ — re-registration must pass even in a full registry.
         roster
             .register(&newcomer, vec![decl("owner0.0")])
             .expect("덮어쓰기는 크기를 안 늘린다");
         assert_eq!(roster.len(), Roster::MAX_NAMES);
     }
 
-    /// 같은 이름을 여러 번 실어 보내도 자리는 하나다 — 중복으로 상한을 태우지 않는다.
+    /// Carrying the same name several times still takes one slot — duplicates do not burn the cap.
     #[test]
     fn duplicate_names_in_one_packet_count_once() {
         let owner = OwnerToken::new("shell-1");
@@ -784,13 +784,13 @@ mod tests {
         assert_eq!(roster.len(), 1);
     }
 
-    /// ★사라진 방어선의 등록 쪽 — 끊긴 주인의 늦은 **등록**도 명부는 막지 않는다★
+    /// ★The registration side of the vanished line of defense — the registry does not block a disconnected owner's late **registration** either★
     ///
-    /// 등록은 「붙는 순간의 전량 선언」이라 산 남의 이름까지 이어받는 것이 적법한데(인수인계), 명부에는
-    /// 그 주인이 이미 끊겼다는 기억이 없으므로 죽은 연결의 늦은 등록과 진짜 인수인계가 구분되지 않는다.
-    /// 그래서 이 패킷이 통과하면 그 이름은 **없는 주인** 앞으로 `Available` 이 되고, 그 연결엔 다시 올
-    /// 정리가 없어 데몬 수명 내내 굳는다(배달이 끊긴 링크로 나간다). 막는 그물은 연결 수명을 아는 쪽
-    /// **한 곳뿐**이다 — `engram-dashboard-daemon` 의 `CommandRoster::refuse_if_detached`.
+    /// Registration is a 「붙는 순간의 전량 선언」 (entire-set declaration at the moment of attaching), so inheriting even a live owner's names is legitimate (handover), but the registry has
+    /// no memory that the owner has already disconnected, so a dead connection's late registration cannot be told apart from a genuine handover.
+    /// So if this packet passes, that name becomes `Available` under a **nonexistent owner**, and that connection has no further
+    /// cleanup coming, so it stays frozen for the whole daemon lifetime (delivery goes out over a cut link). The blocking net is in the side that knows connection lifetime,
+    /// **one place only** — `CommandRoster::refuse_if_detached` in `engram-dashboard-daemon`.
     #[test]
     fn the_roster_alone_cannot_refuse_a_late_registration_from_a_disconnected_owner() {
         let old = OwnerToken::new("shell-conn-1");
@@ -815,11 +815,11 @@ mod tests {
         );
     }
 
-    // ── 차분 등록(TRD §3-7 조항 3) ────────────────────────────────────────────────────────────
+    // ── Diff registration (TRD §3-7 clause 3) ────────────────────────────────────────────────────────────
 
-    /// ★차분은 `removed` 만 지운다★ — 자취를 남기면 끊기지 않은 주인이 add/remove 를 되풀이해 자기 몫을
-    /// 영구히 채운다(ADR-0150). 안 실린 이름을 손대지 않는 것이 `register` 의 전량 last-wins 와 갈리는
-    /// 자리다.
+    /// ★A diff erases only `removed`★ — if it left a trace, an owner that is still connected would repeat add/remove and permanently fill its own share
+    /// (ADR-0150). Not touching names that are not carried is where it parts from `register`'s
+    /// entire-set last-wins.
     #[test]
     fn an_update_removes_only_the_names_it_lists() {
         let owner = OwnerToken::new("shell-1");
@@ -846,8 +846,8 @@ mod tests {
         assert_eq!(roster.len(), 2, "내린 이름은 자리째 사라진다");
     }
 
-    /// ★차분의 `removed` 가 자리를 비운다★ — 자취로 남기면 붙어 있는 주인이 이름을 바꿔 가며 자기 몫
-    /// 상한을 영구히 채울 수 있어, 끊김 없이도 같은 무한 증식이 재현된다(ADR-0150).
+    /// ★A diff's `removed` empties the place★ — if left as a trace, an attached owner could keep changing names and permanently fill its own share
+    /// cap, and the same unbounded growth would recur even without disconnecting (ADR-0150).
     #[test]
     fn swapping_names_forever_does_not_eat_an_owners_cap() {
         let owner = OwnerToken::new("shell-1");
@@ -876,10 +876,10 @@ mod tests {
         );
     }
 
-    /// ★재연결 겹침 — 차분에도 같은 그물이 서야 한다★
+    /// ★Reconnect overlap — the same net must stand for the diff too★
     ///
-    /// 옛 연결의 늦은 차분이 이름 단위로 내려가면, 같은 이름을 방금 등록한 새 연결의 명령이 조용히
-    /// 사라진다(`disconnect` 가 막는 것과 같은 사고).
+    /// If an old connection's late diff took names down per name, the commands of the new connection that just registered the same name would silently
+    /// vanish (the same accident `disconnect` prevents).
     #[test]
     fn an_update_from_a_superseded_owner_does_not_take_down_the_current_registration() {
         let old = OwnerToken::new("shell-conn-1");
@@ -903,11 +903,11 @@ mod tests {
         );
     }
 
-    /// ★재연결 겹침 — `added` 쪽에도 같은 그물이 서야 한다★
+    /// ★Reconnect overlap — the same net must stand on the `added` side too★
     ///
-    /// 위 테스트의 거울이다. 옛 연결의 늦은 차분이 같은 이름을 **더하면** 항목이 죽은 토큰으로 덮이고,
-    /// 조회는 그 죽은 주인을 `Available` 로 답해 배달이 끊긴 링크로 나간다. 산 셸은 다시 등록할 계기가
-    /// 없으므로(등록은 붙을 때 한 번) 그 상태는 저절로 풀리지 않는다.
+    /// The mirror of the test above. If an old connection's late diff **adds** the same name, the entry is overwritten with a dead token,
+    /// and lookup answers that dead owner as `Available`, so delivery goes out over a cut link. The live shell has no occasion to register again
+    /// (registration happens once on attaching), so that state does not resolve by itself.
     #[test]
     fn an_update_from_a_superseded_owner_does_not_add_over_the_current_registration() {
         let old = OwnerToken::new("shell-conn-1");
@@ -932,12 +932,12 @@ mod tests {
         );
     }
 
-    /// ★한 이름이 `added` 와 `removed` 양쪽에 실리면 **패킷째** 반려한다★
+    /// ★If one name is carried in both `added` and `removed`, it is rejected **whole packet**★
     ///
-    /// 적용 순서를 고르면 어느 쪽으로 골라도 호출자가 결과를 알 수 없다: 더한 뒤 지우면 **성공을 받고도**
-    /// 그 이름이 명부에 없어 `UNKNOWN_COMMAND` 로 나가고(`register` 가 상한에서 막는 그 사고 그대로 —
-    /// 「주인은 성공으로 알고 일부 이름이 조용히 없는 상태가 된다」), 지운 뒤 더하면 내리라는 지시가
-    /// 조용히 무시된다. 순서를 정한 조항이 ADR-0150 에도 TRD §3-7 조항 3 에도 없어 반려가 답이다.
+    /// If an application order is picked, the caller cannot know the result whichever way: adding then removing means that **even after receiving success**
+    /// the name is not in the registry and goes out as `UNKNOWN_COMMAND` (exactly the accident `register` blocks at the cap —
+    /// 「주인은 성공으로 알고 일부 이름이 조용히 없는 상태가 된다」 (the owner takes it as success and some names silently end up missing)), and removing then adding means the instruction to take it down is
+    /// silently ignored. No clause fixes an order in ADR-0150 or in TRD §3-7 clause 3, so rejection is the answer.
     #[test]
     fn an_update_carrying_one_name_in_both_lists_is_refused_whole() {
         let owner = OwnerToken::new("shell-1");
@@ -946,7 +946,7 @@ mod tests {
             .register(&owner, vec![decl("tab.create")])
             .expect("상한 안");
 
-        // 이미 쥔 이름 — 옛 적용 순서에서는 넣었다가 지워 **성공과 함께 사라졌다**.
+        // A name already held — under the old application order it was added then erased and **vanished along with a success**.
         let err = roster
             .update(
                 &owner,
@@ -966,7 +966,7 @@ mod tests {
             "반려는 명부를 건드리지 않는다"
         );
 
-        // 새 이름 — 이쪽은 「넣었다가 지운다」가 처음부터 없던 이름을 만들지도 않지만, 판정은 같다.
+        // A new name — here 「넣었다가 지운다」 (add then erase) would not create a name that never existed from the start either, but the decision is the same.
         let err = roster
             .update(
                 &owner,
@@ -979,9 +979,9 @@ mod tests {
         assert_eq!(roster.len(), 1);
     }
 
-    /// 끊김이 **무엇을 지웠는지** 부르는 쪽에 돌려준다 — 명부에 자취가 남지 않으므로(ADR-0150) 그 사건을
-    /// 나중에 재구성할 값은 이 반환뿐이다. 계측은 연결 수명을 아는 데몬이 한다
-    /// (`CommandRoster::detach` — 도구 crate 에 로깅 의존을 들이지 않는다).
+    /// Returns to the caller **what the disconnect erased** — since no trace remains in the registry (ADR-0150), this return is the only value from which that event
+    /// can be reconstructed later. Instrumentation is done by the daemon, which knows connection lifetime
+    /// (`CommandRoster::detach` — no logging dependency is brought into the tool crate).
     #[test]
     fn a_disconnect_reports_the_names_it_removed() {
         let owner = OwnerToken::new("shell-1");
@@ -1012,8 +1012,8 @@ mod tests {
         );
     }
 
-    /// 끊긴 주인이 쥐었던 이름은 **아무도 안 쥔 이름**이 된다 — 산 등록을 뺏는 것이 아니므로 차분이
-    /// 그대로 가져간다.
+    /// A name the disconnected owner held becomes a name **nobody holds** — it does not take away a live registration, so the diff
+    /// takes it as is.
     #[test]
     fn an_update_may_claim_a_name_whose_owner_has_disconnected() {
         let old = OwnerToken::new("shell-conn-1");
@@ -1035,7 +1035,7 @@ mod tests {
         assert_eq!(roster.lookup("tab.create"), OwnerLookup::Available(new));
     }
 
-    /// 상한은 차분에서도 **누적**으로 재고, 넘치면 한 이름도 안 들어간다.
+    /// The cap is measured **cumulatively** for a diff too, and if exceeded not one name enters.
     #[test]
     fn an_update_over_the_per_owner_cap_is_refused_whole() {
         let owner = OwnerToken::new("shell-1");
@@ -1053,9 +1053,9 @@ mod tests {
         assert_eq!(roster.lookup("one.more"), OwnerLookup::Unknown);
     }
 
-    /// ★끊기면 자취 없이 사라진다★ — 주인 토큰은 연결마다 새로 나므로 자취를 남기면 같은 클라이언트의
-    /// 재접속이 덮기가 아니라 **쌓기**가 되고, 만료도 회수 경로도 없어 명부가 상한까지 영구히 찬다
-    /// (ADR-0150 결정 3).
+    /// ★On disconnect it vanishes without a trace★ — the owner token is new per connection, so if a trace were left, the same client's
+    /// reconnect would be **piling up**, not overwriting, and with neither expiry nor a reclaim path the registry would permanently fill up to the cap
+    /// (ADR-0150 decision 3).
     #[test]
     fn a_disconnect_empties_that_owners_share_of_the_roster() {
         let owner = OwnerToken::new("shell-1");
@@ -1075,7 +1075,7 @@ mod tests {
         );
     }
 
-    /// 재접속은 **완전히 새 항목**이다 — 새 연결이 안 실은 옛 이름은 어디에도 남지 않는다.
+    /// A reconnect is a **completely new entry** — old names the new connection did not carry remain nowhere.
     #[test]
     fn a_reconnect_registers_as_a_wholly_new_entry() {
         let old = OwnerToken::new("shell-conn-1");
@@ -1095,14 +1095,14 @@ mod tests {
         assert_eq!(roster.lookup("tab.close"), OwnerLookup::Unknown);
     }
 
-    /// ★사라진 방어선을 못으로 박는다 — 끊긴 주인의 늦은 패킷을 **명부는 못 막는다**★
+    /// ★Pin down the vanished line of defense — the registry **cannot block** a disconnected owner's late packet★
     ///
-    /// 자취가 없어지면 명부에는 그 주인의 죽음을 기억할 자리가 없다. 그래서 늦은 차분이 그대로 통과하고,
-    /// 그 이름은 **없는 주인** 앞으로 `Available` 이 되어 데몬 수명 내내 굳는다(그 연결엔 다시 올 정리가
-    /// 없다). 막는 그물은 연결 수명을 아는 쪽 **한 곳뿐**이다 — `engram-dashboard-daemon` 의
-    /// `CommandRoster::refuse_if_detached`(살아 있는 연결 명단). 여기에 두 번째 그물을 세우지 말 것:
-    /// 명부가 주인 단위 상태를 따로 들면 만료 없는 자료에 무한히 자라는 목록이 하나 더 생긴다(자취를
-    /// 버린 것과 같은 이유 — ADR-0150).
+    /// Once the trace is gone, the registry has no place to remember that owner's death. So a late diff passes as is,
+    /// and that name becomes `Available` under a **nonexistent owner** and stays frozen for the whole daemon lifetime (that connection has no cleanup
+    /// coming). The blocking net is in the side that knows connection lifetime, **one place only** — `CommandRoster::refuse_if_detached` in `engram-dashboard-daemon`
+    /// (the list of live connections). Do not put a second net here:
+    /// if the registry held per-owner state separately, expiry-less data would gain one more unboundedly growing list (the same reason
+    /// the trace was discarded — ADR-0150).
     #[test]
     fn the_roster_alone_cannot_refuse_a_late_delta_from_a_disconnected_owner() {
         let owner = OwnerToken::new("shell-1");

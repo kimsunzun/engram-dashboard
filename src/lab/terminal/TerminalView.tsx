@@ -1,13 +1,13 @@
-// 터미널 모드 랩 뷰 — xterm + FitAddon, OSS(gotty 변형) resize 패턴 격리 검증용.
+// Terminal mode lab view — xterm + FitAddon, for isolated verification of the OSS (gotty variant) resize pattern.
 //
-// 메인 TerminalSlot.tsx 와 달리 agentClient(데몬) 의존이 없다. 입력은 props 로만 받는다
-// (output = mock ANSI bytes, onResize = PTY 전파 mock). 이렇게 격리해야 데몬/PTY 없이
-// "fit → resize 전파" 패턴 자체를 브라우저에서 검증할 수 있다.
+// Unlike the main TerminalSlot.tsx it has no dependency on agentClient (the daemon). Input comes only through props
+// (output = mock ANSI bytes, onResize = PTY propagation mock). Isolating it this way lets us verify the
+// "fit → resize propagation" pattern itself in a browser without a daemon/PTY.
 //
-// ★검증 대상 패턴(OSS 기준)★: 마운트(=구독) 직후 초기 크기를 1회 전파한다. ResizeObserver
-// 는 크기 *변화* 시에만 발화하므로(처음부터 최종 크기인 슬롯에선 안 울림), 이 초기 1회가
-// 없으면 PTY 가 spawn 시 기본값(80×24)에 고착된다 — 이게 메인 Task 1 버그의 핵심.
-// 근거: ttyd(client-first) / gotty(구독 후 첫 resize) 코드 대조.
+// ★Pattern under verification (OSS baseline)★: propagate the initial size once right after mount (= subscribe). ResizeObserver
+// fires only on size *change* (it does not fire in a slot that was at the final size from the start), so without this initial one-time call
+// the PTY gets stuck at the spawn default (80×24) — that is the core of the main Task 1 bug.
+// Basis: comparison of ttyd (client-first) / gotty (first resize after subscribe) code.
 
 import { useRef, useEffect } from 'react'
 import { Terminal } from '@xterm/xterm'
@@ -15,15 +15,15 @@ import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 
 interface TerminalViewProps {
-  /** 실제 메인에선 subscribeOutput 청크가 이 자리. */
+  /** In the real main, a subscribeOutput chunk goes in this place. */
   output: string
-  /** 메인에선 agentClient.resizePty. */
+  /** In main it is agentClient.resizePty. */
   onResize?: (cols: number, rows: number) => void
 }
 
 export function TerminalView({ output, onResize }: TerminalViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
-  // onResize 최신값을 effect 재실행 없이 쓰기 위한 ref(메인 TerminalSlot 패턴 동일).
+  // A ref to use the latest onResize without re-running the effect (same as the main TerminalSlot pattern).
   const onResizeRef = useRef(onResize)
   useEffect(() => {
     onResizeRef.current = onResize
@@ -41,7 +41,7 @@ export function TerminalView({ output, onResize }: TerminalViewProps) {
     term.open(containerRef.current)
     fit.fit()
 
-    // ★OSS 패턴 핵심★: 마운트 직후 초기 크기 1회 전파(gotty 변형). 이게 Task 1 픽스.
+    // ★Core of the OSS pattern★: propagate the initial size once right after mount (gotty variant). This is the Task 1 fix.
     onResizeRef.current?.(term.cols, term.rows)
 
     term.write(output)

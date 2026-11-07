@@ -1,20 +1,20 @@
-# 세션 경로 소유권·수명 지도 — 2026-09-09 실측 스냅샷
+# Session path ownership and lifetime map — measured snapshot of 2026-09-09
 
-> ★**이 문서는 그 시점의 코드를 추적한 기록이고 정본이 아니다**★ — 정본은 코드와 그 안의 `// ADR-` 앵커다.
-> 줄 번호는 **2026-09-09 · 브랜치 `v0.3.0/feat/codex-backend`** 기준이고, 코드가 움직이면 낡는다.
-> 의심되면 여기 적힌 주장을 그 파일에서 다시 확인한다.
+> ★**This document is a record of tracing the code at that point in time, and it is not the source of truth** — the source of truth is the code and the `// ADR-` anchors inside it.
+> Line numbers are as of **2026-09-09 · branch `v0.3.0/feat/codex-backend`** and go stale as the code moves.
+> When in doubt, re-check the claims written here in the file itself.
 >
-> **왜 만들었나:** codex 를 두 번째 백엔드로 붙이는 설계가 두 라운드 연속 적대 리뷰에서 BLOCK 을 받았고,
-> 원인이 「층 이름(`transport`·`backend`·`decoder`·`capabilities`)으로 설계하고 코드를 나중에 대 본 것」으로
-> 진단됐다. 블로커 13건 중 12건이 **외부 도구가 아니라 우리 구조와** 충돌했다. 그래서 설계를 더 쓰기 전에
-> 「무엇이 무엇을 쥐고 있고, 누가 언제 지우고, 어느 층이 무엇을 알 수 있나」를 코드에서 먼저 뽑았다.
+> **Why it was made:** The design for attaching codex as a second backend received a BLOCK in adversarial review two rounds in a row,
+> and the cause was diagnosed as 「층 이름(`transport`·`backend`·`decoder`·`capabilities`)으로 설계하고 코드를 나중에 대 본 것」.
+> 12 of the 13 blockers collided with **our own structure, not with the external tool**. So before writing more design,
+> we first extracted 「무엇이 무엇을 쥐고 있고, 누가 언제 지우고, 어느 층이 무엇을 알 수 있나」 from the code.
 >
-> **읽는 법 — 세 부분이다:** PART A = 객체별 소유·수명 목록(14개) · PART B = 설계가 실제로 필요로 하는
-> 질문 10개의 답 · PART C = ★**「그 일을 할 함수나 필드가 없는 자리」 70건**★. 설계 문서(`docs/process/S21-codex-backend/trd-phase2a.md`)가
-> PART B·C 를 입력으로 쓴다 — **거기서 베끼지 않고 가리킨다.**
+> **How to read it — three parts:** PART A = per-object list of ownership and lifetime (14 objects) · PART B = answers to the 10
+> questions the design actually needs · PART C = ★**「그 일을 할 함수나 필드가 없는 자리」, 70 items**★. The design document (`docs/process/S21-codex-backend/trd-phase2a.md`)
+> uses PART B and C as input — **it points there instead of copying from them.**
 >
-> **본문은 영어다.** 추적 결과를 옮겨 적을 때 번역을 끼우면 원문 대조가 어려워지므로 그대로 실었다
-> (이 저장소 문서 규약은 한국어이고, 이 머리말이 그 예외를 명시한다).
+> **The body is in English.** When carrying over tracing results, inserting translation would make it hard to compare against the original text, so it is included as is
+> (this repository's document convention is Korean, and this preface states that exception explicitly).
 
 ---
 
@@ -50,15 +50,15 @@ pub trait AgentTransport: Send + Sync {
 - `&self` everywhere — no `&mut self`. Interior mutability is each impl's own business, and
   `Send + Sync` is required (mod.rs:41).
 - Doc comments that forbid / constrain:
-  - `start`: "출력 pump/stream 기동 → core 연결. spawn 직후 1회 호출." — called exactly once,
+  - `start`: "출력 pump/stream 기동 → core 연결. spawn 직후 1회 호출." [start the output pump/stream → connect to the core; called once right after spawn] — called exactly once,
     right after spawn (mod.rs:42).
-  - `resize`: "cols/rows의 보존(atomic 저장)은 AgentSession 책임." — transport must not own the
+  - `resize`: "cols/rows의 보존(atomic 저장)은 AgentSession 책임." [AgentSession is responsible for keeping cols/rows (atomic store)] — transport must not own the
     persisted size (mod.rs:47).
-  - `interrupt`: "≠kill. 진행 중 작업만 중단 — 프로세스는 살아 있다." (mod.rs:50).
-  - `shutdown`: "자원 강제 종료(멱등). pump 종료 대기는 여기서 안 함(core.join_pump 몫)."
+  - `interrupt`: "≠kill. 진행 중 작업만 중단 — 프로세스는 살아 있다." [not kill; only stops the work in progress — the process stays alive] (mod.rs:50).
+  - `shutdown`: "자원 강제 종료(멱등). pump 종료 대기는 여기서 안 함(core.join_pump 몫)." [force-close resources (idempotent); waiting for the pump to end is not done here (core.join_pump's job)]
     — idempotent, and **must not** wait for the pump (mod.rs:53).
   - Module header: "transport는 바이트·이벤트를 만들어 `OutputCore::emit`/`finish`로 넘기기만 하면
-    된다 … transport는 자기 자원의 수명만 책임진다." + "tauri import 0." (mod.rs:1-7).
+    된다 … transport는 자기 자원의 수명만 책임진다." [a transport only has to produce bytes and events and hand them to the core; a transport is responsible only for the lifetime of its own resources] + "tauri import 0." (mod.rs:1-7).
 - **What the trait does NOT have** (checked by reading the whole 57-line file): no `close_stdin`,
   no `request(...)`, no `cancel(id)`, no `is_alive()`, no `child_pid()`, no `kind()`/`name()`,
   no `set_decoder`, no way to learn *why* shutdown was called.
@@ -82,14 +82,14 @@ pub trait OutputDecoder: Send {
   the backend's own tripwire tests reach it (backend/mod.rs:876).
 - Thread: pump thread only. Doc states this explicitly — "decoder 는 … 가변 상태를 들고, pump
   스레드(단일)가 `&mut` 로 배타 소유한다 — 그래서 `Send`(스레드로 move)만 요구하고 `Sync` 는 요구하지
-  않는다(공유 접근 없음). epoch 교체 = 새 transport = 새 decoder 라 리셋이 자동이다." (mod.rs:26-29).
+  않는다(공유 접근 없음). epoch 교체 = 새 transport = 새 decoder 라 리셋이 자동이다." [the decoder holds mutable state, and the (single) pump thread owns it exclusively — so it requires only the bound for moving into a thread and does not require the bound for sharing (no shared access). An epoch swap = a new transport = a new decoder, so the reset is automatic.] (mod.rs:26-29).
 - **It can send nothing back.** Both methods return `Vec<OutputEvent>` and take no sink, no channel,
   no handle to the transport, no handle to the core. Its only output channel is the return value,
   which the pump immediately feeds to `pump_core.emit(ev)` (stdio.rs:230-232). A decoder cannot
   write to stdin, cannot ask a question, cannot see the child, cannot see the session.
 - It is dropped when the pump thread exits (moved-in local, stdio.rs:209).
 - Contract note: "agent 도메인 타입(OutputEvent)만 생성한다 — Serialize 무관(ADR-0003: agent 는 wire
-  를 모른다)." (mod.rs:31).
+  를 모른다)." [it generates only the agent domain type (OutputEvent) — Serialize is irrelevant (the agent does not know the wire)] (mod.rs:31).
 - `PtyTransport` never receives one: `PtyTransport::open(spec, cols, rows)` has no decoder parameter
   at all (pty.rs:41-45), and neither the trait default (backend/mod.rs:160) nor claude's terminal
   branch (backend/claude/mod.rs:375) constructs one for it. Nothing is dropped on the floor any more
@@ -102,12 +102,12 @@ pub trait OutputDecoder: Send {
 - `child: Arc<Mutex<Child>>` (:39) — **shared**, not exclusive. Touched by the pump thread
   (`try_wait`, :261-268) and by `shutdown` (`kill`+`wait`, :344-347). Doc: "std Child는 wait 후 exit
   status를 캐시하므로 shutdown이 먼저 reap해도 pump의 try_wait가 같은 status를 회수한다(이중 wait
-  무해)." (:37-38)
+  무해)." [std Child caches the exit status after wait, so even if shutdown reaps first, the pump's try_wait retrieves the same status (a double wait is harmless)] (:37-38)
 - `stdin: Mutex<Option<ChildStdin>>` (:40) — **transport-private and exclusive**. No `Arc`, so no
   reference can leave the transport. Only two touchers: `send_input` (blocking `lock()`, :295) and
   `shutdown` (`try_lock`, :358).
 - `stdout: Mutex<Option<ChildStdout>>` (:42) — exclusive until `start` `take()`s it and moves it
-  into the pump thread (:147-150, read at :217). "None이면 이미 시작됨" is the idempotence guard.
+  into the pump thread (:147-150, read at :217). "None이면 이미 시작됨" [if None, already started] is the idempotence guard.
 - `stderr: Mutex<Option<ChildStderr>>` (:44) — exclusive until `start` `take()`s it into a
   **second** thread, the stderr drain (:167-171).
 - `shutdown: Arc<AtomicBool>` (:46) — **shared**. Set `Release` by `shutdown()` (:340); read
@@ -118,7 +118,7 @@ pub trait OutputDecoder: Send {
   (`ClaudeBackend::open_spawn` calls `StdioTransport::open(spec, true, …)`,
   backend/claude/mod.rs:372) and reported verbatim by `capabilities()` (:372). Doc: "'구조화냐'는
   파이프가 아니라 그 프로그램의 출력 형식(backend 지식)이 정하므로, 이 통로를 만드는 backend 가
-  `open` 인자로 주입한다(하드코딩 금지 — 평문 stdio 엔 false)." (:47-49)
+  `open` 인자로 주입한다(하드코딩 금지 — 평문 stdio 엔 false)." [whether it is "structured" is decided not by the pipe but by that program's output format (backend knowledge), so the backend that builds this channel injects it as an argument (hardcoding forbidden — false for plain-text stdio)] (:47-49)
 - `decoder: Mutex<Option<Box<dyn OutputDecoder>>>` (:53) — exclusive until `take()`n into the pump
   thread (:204-207).
 - `job_handle: JobObjectHandle` `#[cfg(windows)]` (:55) — **transport-private, no `Arc`**.
@@ -130,7 +130,7 @@ pub trait OutputDecoder: Send {
   child (`Command::spawn`, :92-94) with all three pipes (`Stdio::piped()` x3, :79-81) plus
   `CREATE_NO_WINDOW` on Windows (:85-90), then creates a fresh Job Object and assigns the child pid
   (:102-109). Returns `(StdioTransport, Option<u32> child_pid)`. **The pump is not started here** —
-  "**pump는 아직 안 띄운다**(start에서)" (:59).
+  "**pump는 아직 안 띄운다**(start에서)" [**the pump is not started yet** (in start)] (:59).
 - Sole production caller: the stream-json branch of `ClaudeBackend::open_spawn`
   (backend/claude/mod.rs:372), reached through the free dispatcher `backend::open_spawn`
   (backend/mod.rs:397-404), which `spawn_agent` calls at manager.rs:1009. Every other call site is a
@@ -174,11 +174,11 @@ not "a turn is running". The PTY side is the reverse since ADR-0245: `Unsupporte
 > send_input 은 stdin Mutex 를 blocking write_all 내내 쥔다. 자식이 stdin 을 안 읽으면
 > (파이프 backpressure) 그 write_all 이 영원히 블록해 락을 놓지 않는다. 이때 kill 전에
 > `stdin.lock()` 으로 닫으려 하면 그 락을 영영 못 얻어 kill 에 도달조차 못 하고 → pump 가
-> 깨지 못해 → core.join_pump 가 영구 hang 한다(ADR-0001 인과가 멈춤).
+> 깨지 못해 → core.join_pump 가 영구 hang 한다(ADR-0001 인과가 멈춤). [Ordering invariant — the stdin close must never come before the kill (deadlock, FIX 1): send_input holds the stdin Mutex for the whole blocking write_all. If the child does not read stdin (pipe backpressure), that write_all blocks forever and never releases the lock. If we then try to close it before the kill, we can never get that lock, never even reach the kill, → the pump cannot wake → core.join_pump hangs permanently (the causality stops).]
 
 Continues (:334-337): "그래서 kill + Job terminate 를 먼저 한다 … 그 뒤에야 try_lock 으로 stdin 을
 best-effort 정리한다(blocking lock 절대 금지). 그래프-exit-via-stdin-close 는 필요 없다 — 어차피
-여기서 kill 하므로." (last sentence in the original: "graceful-exit-via-stdin-close 는 필요 없다")
+여기서 kill 하므로." (last sentence in the original: "graceful-exit-via-stdin-close 는 필요 없다") [so we do kill + Job terminate first … only after that do we clean up stdin on a best-effort basis with try_lock (blocking lock strictly forbidden). Graceful-exit-via-stdin-close is not needed — we kill here anyway.]
 
 Body in absolute order (stdio.rs:338-361):
 1. `self.shutdown.store(true, Release)` (:340)
@@ -189,7 +189,7 @@ Body in absolute order (stdio.rs:338-361):
 
 Causality note (:325-328): "파이프는 자식 트리가 stdout write 핸들을 모두 닫아야 reader가 EOF로 깬다.
 그래서 child.kill + Job terminate(손자 claude까지)로 트리를 통째 죽여 write 핸들을 닫는 것이 인과의
-핵심이다(cmd.exe만 죽이고 claude가 살아 있으면 write 핸들이 안 닫혀 EOF가 안 온다)."
+핵심이다(cmd.exe만 죽이고 claude가 살아 있으면 write 핸들이 안 닫혀 EOF가 안 온다)." [A pipe wakes the reader with EOF only when the child tree has closed every stdout write handle. So killing the whole tree with child.kill + Job terminate (down to the grandchild claude) to close the write handles is the heart of the causality (if only cmd.exe is killed and claude stays alive, the write handle does not close and EOF never comes).]
 
 ### The pump loop (stdio.rs:209-284)
 
@@ -204,10 +204,10 @@ Causality note (:325-328): "파이프는 자식 트리가 stdout write 핸들을
 - Post-loop `decoder.flush()` is **conditional on `!shutdown.load(Acquire)`** (:251-257). Reason
   (:242-247): a killed stream's tail is a truncated fragment, and flushing could synthesize a fake
   event — "flush(=consume_line 1회)가 우연히 그 잘린 조각을 파싱 가능한 JSON 으로 읽어 가짜
-  이벤트(예: 부분 result → MessageDone)를 방출할 여지를 원천 차단한다."
+  이벤트(예: 부분 result → MessageDone)를 방출할 여지를 원천 차단한다." [it blocks at the source any chance that flush (= one consume_line) happens to read that truncated fragment as parseable JSON and emits a fake event (e.g. partial result → MessageDone)]
   It also states the only discriminator that exists (:248-250): "read 레벨에선 자연 EOF 와 kill 이 둘
   다 Ok(0) 이라 구분이 안 되지만, kill 은 반드시 shutdown.store(Release) 를 거치므로 여기서 Acquire 로
-  읽어 확실히 구분된다(아래 reason 산출과 동일 신호원)."
+  읽어 확실히 구분된다(아래 reason 산출과 동일 신호원)." [at the read level, natural EOF and kill both give Ok(0) and cannot be told apart, but a kill always goes through shutdown.store(Release), so reading it here with Acquire tells them apart for certain (the same signal source as the reason computation below)]
 - Reason: `if shutdown.load(Acquire) { Killed } else { Exited { code } }` (:271-275), `code` from
   `child.try_wait()` (:260-269).
 - Then `pump_core.finish(reason)` (:280), `let _ = done_tx.send(())` (:283). Back on the spawning
@@ -219,7 +219,7 @@ Causality note (:325-328): "파이프는 자식 트리가 stdout write 핸들을
 - Each non-empty line: `mask_secrets` (:180) then `diag_core.push_diagnostic(&masked)` (:183) then
   `tracing::debug!(target: "agent_stderr", …)` (:184). Order is load-bearing (:181-182): "쌓기가
   로그보다 먼저다: 기본 로그 필터는 warn 이라 아래 debug 줄은 평소 버려진다 — 분류를 그 줄에 매달면
-  로그 레벨이 기능을 켜고 끈다."
+  로그 레벨이 기능을 켜고 끈다." [accumulating comes before logging: the default log filter is warn, so the debug line below is normally discarded — if classification hung off that line, the log level would switch the feature on and off]
 - Three documented reasons for its existence: keep the child from blocking on a full stderr pipe
   (:153-154); stderr must NOT be merged into the output stream or NDJSON parsing breaks (:155-157);
   it is the **only** evidence of an activation failure on a structured session (:160-163).
@@ -251,12 +251,12 @@ whether the backend injected an interrupt line (see `interrupt` above).
   every 50 ms (:186-192, :198); on exit does `master.lock().take()` (:195) → ConPTY close → reader
   EOF → the normal pump path. Reason (:160-166): "Windows ConPTY 는 master 가 살아있는 한 자식이 스스로
   exit 해도 reader 에 EOF 를 주지 않는다 … pump 의 blocking read 가 영원히 안 깬다 → core.finish
-  미호출 → reaper 신호 안 감." It deliberately does **not** touch the shutdown flag (:168-172 —
-  "set 하면 pump 가 Killed 로 전이한다"). The handle is detached, never joined (:201-202).
+  미호출 → reaper 신호 안 감." [Windows ConPTY does not give the reader EOF as long as the master is alive, even if the child exits on its own … the pump's blocking read never wakes → core.finish is not called → no reaper signal goes out] It deliberately does **not** touch the shutdown flag (:168-172 —
+  "set 하면 pump 가 Killed 로 전이한다" [if set, the pump transitions to Killed]). The handle is detached, never joined (:201-202).
 - stdio needs no watcher (stdio.rs:11-14): "파이프는 자식(및 자식 트리)이 write 핸들을 모두 닫으면
-  read가 EOF(Ok(0))로 깬다 — 자연 종료든 kill이든 동일하게 pump가 깨므로 별도 watcher가 없다."
+  read가 EOF(Ok(0))로 깬다 — 자연 종료든 kill이든 동일하게 pump가 깨므로 별도 watcher가 없다." [a pipe wakes the read with EOF (Ok(0)) once the child (and the child tree) has closed every write handle — the pump wakes the same way for a natural exit and for a kill, so there is no separate watcher]
 - `shutdown` order (pty.rs:316-335): flag → `child.kill()`+`wait()` → Job terminate →
-  `master.take()` ("5. master.take() → drop → ClosePseudoConsole → reader EOF — 인과의 핵심", :334).
+  `master.take()` ("5. master.take() → drop → ClosePseudoConsole → reader EOF — 인과의 핵심" [the heart of the causality], :334).
   Note the **opposite** write discipline: `send_input` locks `writer` (:284), and `shutdown` never
   touches `writer` — dropping the master is what unblocks a stuck write. stdio has no such lever,
   which is exactly why its ordering invariant exists.
@@ -268,7 +268,7 @@ whether the backend injected an interrupt line (see `interrupt` above).
 
 Unit struct, no fields. `start` no-op (:29); `send_input`/`resize`/`interrupt` all return
 `PtyError::Unsupported` (:31-48); `shutdown` no-op (:50); all twelve caps `false` (:52-73).
-"manager 라우팅은 없음" (:4) — **unreachable**: every transport is built inside a backend's
+"manager 라우팅은 없음" [there is no manager routing] (:4) — **unreachable**: every transport is built inside a backend's
 `open_spawn`, and neither the trait default (backend/mod.rs:153-169) nor claude's two branches
 (backend/claude/mod.rs:370-377) constructs it. It is a placeholder, not a seam in use.
 
@@ -277,10 +277,10 @@ Unit struct, no fields. `start` no-op (:29); `send_input`/`resize`/`interrupt` a
 ### Fields (output_core.rs:42-78) — every one
 
 Immutable after construction: `id: AgentId` (:44), `epoch: u32` (:45), `turn: TurnWiring` (:77 —
-"생성 후 불변이라 hot path 에 원자 load 도 락도 없다", :76).
+"생성 후 불변이라 hot path 에 원자 load 도 락도 없다" [immutable after creation, so the hot path has neither an atomic load nor a lock], :76).
 
 Mutable, each behind its own independent lock (the doc's stated reason, :40-41 — "필드별 독립 Mutex …
-emit이 replay/subscribers lock만 짧게 잡는 동안 다른 경로(status 등)와 교착 없이 병행 가능"):
+emit이 replay/subscribers lock만 짧게 잡는 동안 다른 경로(status 등)와 교착 없이 병행 가능" [an independent Mutex per field … while emit briefly holds only the replay/subscribers locks, other paths (status etc.) can run in parallel without deadlock]):
 
 - `seq: AtomicU64` (:48) — issued only inside the `replay` lock (see emit).
 - `status: Mutex<AgentStatus>` (:49) — initial `Running` (:135).
@@ -289,7 +289,7 @@ emit이 replay/subscribers lock만 짧게 잡는 동안 다른 경로(status 등
 - `replay: Mutex<Ring>` (:56) — the replay ring, byte- and count-capped (`Ring`, :759-830).
 - `diagnostics: Mutex<String>` (:62) — bounded by `DIAGNOSTIC_CAP_BYTES = 8 * 1024` (:38). Doc:
   "이 화신의 stderr 텍스트 꼬리(bounded). 출력 링과 분리된 별도 버퍼 … PTY 세션은 stderr 가 콘솔
-  스트림에 병합돼 오므로 여기는 항상 비어 있다(정상)" (:59-61).
+  스트림에 병합돼 오므로 여기는 항상 비어 있다(정상)" [this incarnation's stderr text tail (bounded). A separate buffer apart from the output ring … in a PTY session stderr arrives merged into the console stream, so this is always empty (normal)] (:59-61).
 - `status_sink: Arc<dyn StatusSink>` (:65) — injected, shared with the manager (manager.rs:1196).
 - `drain_handle: Mutex<Option<JoinHandle<()>>>` (:68) — **written at :396, never read anywhere.**
   Verified: `rg drain_handle` in the agent crate returns exactly three hits — the declaration (:68),
@@ -302,17 +302,17 @@ emit이 replay/subscribers lock만 짧게 잡는 동안 다른 경로(status 등
 `TurnWiring` (:87-122) holds `table: Arc<TurnObservations>` and `classify: TurnClassifier` (:88-89).
 It is a **required** `new` argument on purpose (:83-86): "사후 주입(setter)이면 새 spawn 경로가 그걸
 빠뜨려도 컴파일이 통과하고, 그 에이전트는 영구히 idle 로 보고돼 턴 중에 메일이 꽂힌다 — 에러도 로그도
-없이." `TurnWiring::detached()` (:116-121) is the harness escape and is `#[doc(hidden)]`;
+없이." [with after-the-fact injection (a setter), the compile passes even if a new spawn path forgets it, and that agent is reported as idle forever, so mail is stuffed in mid-turn — with neither an error nor a log] `TurnWiring::detached()` (:116-121) is the harness escape and is `#[doc(hidden)]`;
 the doc concedes there is **no gate** enforcing that production never calls it (:103-105): "그 구분을
-강제하는 장치는 없다 … 이건 컴파일러가 아니라 규약이 지키는 경계다."
+강제하는 장치는 없다 … 이건 컴파일러가 아니라 규약이 지키는 경계다." [there is no device that enforces that distinction … this is a boundary kept by convention, not by the compiler.]
 
 ### Who may call what
 
 - `emit` (:203-291) — **producers only.** Two callers exist in production: the pump thread
   (stdio.rs:231/234, pty.rs) and the *input-echo* path on whatever thread called write
   (session.rs:176). This is stated twice as load-bearing (output_core.rs:212-213; turn.rs:14-17).
-- `finish` (:299-352) — **pump only, exactly once.** "pump가 루프 탈출 후 1회 호출" (:294);
-  "terminal 알림 주체는 pump(=여기) 단독" (:296).
+- `finish` (:299-352) — **pump only, exactly once.** "pump가 루프 탈출 후 1회 호출" [called once by the pump after it leaves the loop] (:294);
+  "terminal 알림 주체는 pump(=여기) 단독" [the emitter of the terminal notification is the pump (= here) alone] (:296).
 - `seed` (:182-193) — `spawn_session` only, and only **before** the sessions-map insert (:161-167).
 - `subscribe`/`subscribe_from`/`unsubscribe`/`snapshot`/`terminal_tail`/`diagnostic_tail`/`status` —
   consumers (manager, daemon).
@@ -337,16 +337,16 @@ the doc concedes there is **no gate** enforcing that production never calls it (
    - The finalize recheck is explicitly load-bearing (:241-254) and the ordering proof rests on the
      **table's mutex**, not on the `Acquire`: "무엇이 순서를 만드나 = 표의 뮤텍스(이 인자를 지우지 말
      것) … 그래서 이 load 의 `Acquire` 가 근거가 아니다 — `Relaxed` 여도 결론은 같고, 순서를 나르는
-     것은 뮤텍스다. 표 갱신을 락 밖(lock-free)으로 '최적화' 하면 이 증명이 조용히 무너진다."
+     것은 뮤텍스다. 표 갱신을 락 밖(lock-free)으로 '최적화' 하면 이 증명이 조용히 무너진다." [what creates the ordering = the table's mutex (do not delete this argument) … so the acquire ordering of this load is not the basis — the conclusion is the same even if it were relaxed, and what carries the ordering is the mutex. If you "optimize" the table update to outside the lock (lock-free), this proof silently collapses.]
    - The doorbell is deliberately asymmetric — **no epoch, no finalize, no seq gate** (:258-261):
      "표는 상태라 죽은/옛 화신이 쓰면 산 화신의 사실이 오염되지만, 도어벨은 일회성 자극이라 잉여는
-     빈 큐 no-op 으로 흡수되고 … ('누락 < 잉여')."
+     빈 큐 no-op 으로 흡수되고 … ('누락 < 잉여')." [the table is state, so if a dead/old incarnation writes to it the live incarnation's facts are polluted, but the doorbell is a one-shot stimulus, so a surplus is absorbed as an empty-queue no-op … ("omission < surplus").]
 4. Payload mapping: `TerminalBytes(v) => OutputPayload::Bytes(v)`, everything else
    `=> OutputPayload::Event(other)` (:266-269).
 5. Fanout: clone the `subscribers` vec, **release the lock**, then `sink.send(frame)` on the copy
    (:277-287). Invariant quoted (:198-202): "sink.send() 호출 시 어떤 lock도 보유하지 않는다 …
    replay lock과 subscribers lock을 동시에 보유하지 않는다(각각 짧게). 두 lock 동시 취득은 subscribe
-   함수 단독 예외이며 emit은 절대 금지."
+   함수 단독 예외이며 emit은 절대 금지." [no lock is held when sink.send() is called … the replay lock and the subscribers lock are not held at the same time (each briefly). Taking both locks at once is an exception for the subscribe function alone, and is strictly forbidden for emit.]
 6. Dead sinks (send returned `Err`) are retained-out in a second short lock (:288-290).
 
 ### `finish` (output_core.rs:299-352) — the finalize swap
@@ -358,7 +358,7 @@ the doc concedes there is **no gate** enforcing that production never calls it (
 3. `*status = new_status.clone()` under the status lock, then **release** (:317-320).
 4. `self.turn.table.forget(self.id, self.epoch)` (:327). Doc (:321-326) states why here and not in
    the reaper: "reaper 는 이 finish 가 보낸 ReapMsg 로만 깨어나므로 늘 뒤고, 무엇보다 `finalized`
-   플래그와 같은 지점이어야 emit 쪽 지각 삽입과의 경쟁이 순서로 닫힌다."
+   플래그와 같은 지점이어야 emit 쪽 지각 삽입과의 경쟁이 순서로 닫힌다." [the reaper wakes only on the ReapMsg sent by this finish, so it is always later, and above all it must be at the same point as the flag so that the race with a late insert on the emit side is closed by ordering]
 5. `self.status_sink.status_changed(self.id, new_status, self.epoch)` — outside the status lock
    (:334-336, rule cited at :333).
 6. `on_terminal` hook called under its own short lock (:340-350) → this is what mints the `ReapMsg`.
@@ -375,7 +375,7 @@ timeout is indistinguishable from success at the call site, and the receiver is 
 `tracing::warn!`-ed and dropped (:558-579). The variant-name match arm (:562-570) is a hand-written
 seven-way list — a new `OutputEvent` variant forces an edit here (non-exhaustive `ref other` would
 not compile against a new variant since the arms are exhaustive by name). Doc admits the asymmetry
-(:551-557): "subscribe_from replay 경로는 payload-generic 이라 정상 전달돼 두 복원 경로가 비대칭."
+(:551-557): "subscribe_from replay 경로는 payload-generic 이라 정상 전달돼 두 복원 경로가 비대칭." [the subscribe_from replay path is payload-generic and so delivers normally, making the two restore paths asymmetric.]
 
 ### `terminal_tail` / `diagnostic_tail` (output_core.rs:584-590, :622-627)
 
@@ -399,10 +399,10 @@ exactly that (manager.rs:1514-1521).
 - `encoder: InputEncoder` (:38) — a `Copy` enum tag, not an object (backend/mod.rs:382-390).
 - `reads_messages: bool` (:47) — mail-recipient eligibility. Held by the **session**, not the
   profile, deliberately (:43-46): "`DeleteProfile` 은 산 세션을 죽이지 않는다. 프로필로 판정하면
-  프로필이 지워진 산 셸이 '모름' 이 되어 명단에 되돌아오고, 봉투가 명령으로 실행된다."
+  프로필이 지워진 산 셸이 '모름' 이 되어 명단에 되돌아오고, 봉투가 명령으로 실행된다." [deleting a profile does not kill a live session. If it were decided by the profile, a live shell whose profile was deleted would become "unknown", come back onto the list, and an envelope would be executed as a command.]
 - `submit_pacing: Duration` (:53) — hard-set by `new` from `backend::SUBMIT_PACING`, **not** a
   constructor argument, on purpose (:50-52): "호출자가 값을 고를 수 있게 하면 어느 조립 경로 하나가 0 을
-  넘기는 순간 이 결함이 조용히 재발한다."
+  넘기는 순간 이 결함이 조용히 재발한다." [if the caller could choose the value, this defect would silently recur the moment any one assembly path passes 0.]
 - `sleeper: fn(Duration)` (:56) — test seam; production is `blocking_sleep` (:62-64).
 - `core: Arc<OutputCore>` (:55).
 - `transport: Box<dyn AgentTransport>` (:56) — **`Box`, not `Arc`.** Answering the question
@@ -414,7 +414,7 @@ exactly that (manager.rs:1514-1521).
 
 - `AgentSession::new(...)` (session.rs:68-99) takes eleven arguments; the sole production caller is
   `spawn_session` (manager.rs:1242-1254). "**start는 여기서 호출하지 않는다** — manager가 new 이전에
-  `transport.start(core.clone())`를 직접 부른다" (:66-67) — note the comment is stale about the
+  `transport.start(core.clone())`를 직접 부른다" [**start is not called here** — the manager calls it directly before new] (:66-67) — note the comment is stale about the
   order: in current code `start_pump` is called *after* `new` and after the map insert
   (manager.rs:1285).
 - Removed from the map (and thus dropped, modulo other Arc holders) only by `reaper.rs:53-76`.
@@ -435,22 +435,22 @@ Ok(WriteOutcome { bytes_requested: n, bytes_written: n, msg_uuid, epoch: self.ep
 
 - **The encoder is reached as a `Copy` enum tag on the session**, and every decision behind it is a
   free-function dispatch into `backend_for_encoder` (backend/mod.rs:296-302). The session does not
-  know the wire shape: "session은 태그만 들고 형태를 모른다" (:132).
+  know the wire shape: "session은 태그만 들고 형태를 모른다" [the session holds only the tag and does not know the shape] (:132).
 - `bytes_written` is *assumed* equal to `bytes_requested`; completeness is signalled by `Ok`/`Err`
   only (:151-155, and types.rs:663).
 - The synthetic echo is emitted **on the caller's thread** after a successful write (:176) — this is
   the second `emit` caller and therefore the second writer into the turn table.
 - Call contract for structured mode, quoted (:136-140): "json 모드에서 `1 write_input 호출 == 완결된
   유저 턴 1개` … 터미널 경로처럼 키 입력 1글자씩 호출하면 글자마다 한 글자짜리 잘못된 턴이 만들어져
-  대화가 깨진다."
+  대화가 깨진다." [in json mode, 1 write_input call == 1 completed user turn … if it is called one keystroke at a time like the terminal path, a wrong one-character turn is made for every character and the conversation breaks.]
 
 ### `submit_input_observed` (session.rs:203-225)
 
 `write_input_observed` then, if `encoder.submit_sequence()` is `Some`, sleeps `submit_pacing`
 (:208) and issues a **second** `send_input` with the submit bytes (:214). If the second write fails
 it returns `Err` after a `warn` that names the exact residue ("본문은 썼으나 제출 write 실패 — 수신자
-입력창에 미제출 봉투가 남았고 재시도가 그 위에 덧쓴다", :215-221). Why this layer (:195-197):
-"transport 를 소유해 `send_input` 을 두 번 낼 수 있는 가장 낮은 층이 여기다."
+입력창에 미제출 봉투가 남았고 재시도가 그 위에 덧쓴다" [the body was written but the submit write failed — an unsubmitted envelope remains in the recipient's input box and a retry writes over it], :215-221). Why this layer (:195-197):
+"transport 를 소유해 `send_input` 을 두 번 낼 수 있는 가장 낮은 층이 여기다." [this is the lowest layer that owns the transport and can issue the write twice.]
 `SUBMIT_PACING = 500ms` (backend/mod.rs:463), `Raw => Some(b"\r")`, `ClaudeStreamJson => None`
 (backend/mod.rs:451-454).
 
@@ -463,12 +463,12 @@ pub fn kill(&self, timeout: Duration) {
 }
 ```
 Doc: "**이 2동사 순서(shutdown THEN join_pump)가 kill 인과의 핵심.** … 역전 시 hang(아직 살아있는
-pump를 기다림)" (:241-243).
+pump를 기다림)" [**this order of the 2 verbs (shutdown THEN join_pump) is the heart of the kill causality.** … if reversed, a hang (waiting on a pump that is still alive)] (:241-243).
 
 ### `interrupt` / `resize` (session.rs:236-238, :228-233)
 
 `interrupt` is pure delegation, no local state. `resize` updates the atomics **only on success**
-(:229-232) — "실패 시 옛 값 유지" (:228).
+(:229-232) — "실패 시 옛 값 유지" [on failure keep the old value] (:228).
 
 ### `capabilities` (session.rs:258-260)
 
@@ -481,7 +481,7 @@ pump를 기다림)" (:241-243).
 - `sessions: Arc<RwLock<HashMap<AgentId, Arc<AgentSession>>>>` (:320) — **shared with the reaper**
   (same `Arc`, cloned at manager.rs:475 into `ReaperDeps.sessions`, reaper.rs:39).
 - `status_sink: Arc<dyn StatusSink>` (:321) — shared into every `OutputCore` (:1196) and the reaper.
-- `profiles: Arc<ProfileRegistry>` (:323) — "프로필 단일 소유자"; **no public accessor** (there is
+- `profiles: Arc<ProfileRegistry>` (:323) — "프로필 단일 소유자" [single owner of profiles]; **no public accessor** (there is
   `pub fn presets` at :502 but no `pub fn profiles`).
 - `presets: Arc<PresetRegistry>` (:326), `tracker: Arc<SessionTracker>` (:327).
 - `shutting_down: Arc<AtomicBool>` (:332) — captured by every finalize hook (:1227).
@@ -489,19 +489,19 @@ pump를 기다림)" (:241-243).
 - `control: Arc<dyn ControlChannel>` (:341) — shared with the reaper.
 - `spawning: Arc<Mutex<HashSet<AgentId>>>` (:350) — the double-spawn reservation set; declared a
   **separate leaf lock** (":348-349 — sessions 맵과 별개 leaf lock … 이 Mutex 보유 중 sessions/status 락을
-  잡지 않는다").
+  잡지 않는다" [a leaf lock separate from the sessions map … while this Mutex is held, the sessions/status locks are not taken]).
 - `name_allocation: Arc<Mutex<()>>` (:367) — stateless serialization lock. Order rule quoted (:356-358):
   "락 순서 = name_allocation → sessions/profiles 단방향. 이 락을 잡는 곳은 셋
-  (`create_agent`·`rename_agent`·`register_for_spawn`)이고 셋 다 잡은 뒤에야 명부를 만진다."
+  (`create_agent`·`rename_agent`·`register_for_spawn`)이고 셋 다 잡은 뒤에야 명부를 만진다." [lock order = name_allocation → sessions/profiles, one-directional. There are three places that take this lock (the three listed above), and all three touch the registry only after taking it.]
   Cost warning (:360-365): the critical section does a `dunce::canonicalize` syscall per dormant
-  agent and a whole-file `agents.json` write; but "메일 배달은 막히지 않는다 — 이 성질을 깨뜨리지 말 것."
+  agent and a whole-file `agents.json` write; but "메일 배달은 막히지 않는다 — 이 성질을 깨뜨리지 말 것." [mail delivery is not blocked — do not break this property.]
 - `turns: Arc<TurnObservations>` (:378) — leaf, shared with every core.
 
 ### `sessions` lock discipline
 
 Stated at the module head (manager.rs:10-12): "`sessions` RwLock은 조회 전용이다. Arc<AgentSession>을
 clone하고 lock을 즉시 해제한 뒤에야 session 내부 lock(core/transport)을 취득한다. sessions lock 보유 중
-session 내부 lock 취득은 금지(데드락 방지)." Enforced by funnelling every read through
+session 내부 lock 취득은 금지(데드락 방지)." [the RwLock is for lookup only. Clone the Arc<AgentSession> and release the lock immediately, and only then take the session's internal locks (core/transport). Taking a session-internal lock while holding the sessions lock is forbidden (deadlock prevention).] Enforced by funnelling every read through
 `get_session` (manager.rs:1781-1790), which clones the `Arc` and drops the guard in one expression.
 Write-lock holders: `spawn_session`'s insert (:1270-1273), `insert_test_session` (:1658-1662,
 feature-gated), and `reaper.rs:53-64`.
@@ -515,7 +515,7 @@ claude overrides with two branches on `is_stream_json` —
 `PtyTransport::open(spec, cols, rows)` (:375). The `structured` flag is hard-coded `true` on the
 stdio branch — the *only* way a stdio transport can report `structured:false` is a call site that
 does not exist in production. Doc (backend/claude/mod.rs:358-360): "★`structured: true` 를 주입하는
-자리가 여기다(ADR-0044/0030)★ … 아는 쪽은 `--output-format` 을 고른 이 backend 다." The assembly point
+자리가 여기다(ADR-0044/0030)★ … 아는 쪽은 `--output-format` 을 고른 이 backend 다." [★this is the place that injects it★ … the party that knows is this backend that chose it.] The assembly point
 still names no transport type — `open_spawn` returns `SpawnParts` (backend/mod.rs:308-315) whose
 `transport` field is a `Box<dyn AgentTransport>` (:309). (ADR-0191)
 
@@ -524,7 +524,7 @@ still names no transport type — `open_spawn` returns `SpawnParts` (backend/mod
 1. Pre-check `get_session(profile.id)` → `Ok` means `SpawnOutcome::Moot` (:884-890). Known
    **unclosed race**, documented (:878-883): the read lock is dropped before the write-lock insert,
    so two connections can both pass this and `activate_profile`'s pre-check. "이 window 는 ADR-0082
-   이전부터 있던 선재(pre-existing) 레이스이며 이번 변경이 도입하지도 닫지도 않았다."
+   이전부터 있던 선재(pre-existing) 레이스이며 이번 변경이 도입하지도 닫지도 않았다." [this window is a pre-existing race that existed before that ADR, and this change neither introduces nor closes it.]
 2. `SpawnReservation::reserve` (:892-900) — second guard, RAII (:384-409).
 3. `register_for_spawn(profile)?` (:902) — name allocation + roster capacity.
 4. `dunce::canonicalize(&profile.cwd)` best-effort (:905).
@@ -534,11 +534,11 @@ still names no transport type — `open_spawn` returns `SpawnParts` (backend/mod
    `Resume => profiles.ensure_session_id(id)` (:918), `Fresh => profiles.new_session_id(id)` (:919);
    else `None`. Doc (:907-914) states this is the single authority: "spawn_agent 이 이 판정의 단일
    권위점이라 어떤 호출자(Spawn/SpawnProfile/restore/fallback)든 mode 만 맞게 넘기면 sid 충돌이 원천
-   봉인된다."
+   봉인된다." [spawn_agent is the single point of authority for this decision, so whichever caller (Spawn/SpawnProfile/restore/fallback) passes the right mode, sid collisions are sealed at the source.]
 6. **Epoch minting** (:939): `self.profiles.epoch_for_spawn(profile.id)` — `?` aborts the spawn if
    the profile vanished. Doc (:925-938) is emphatic that this must stay in one place: "옛날엔 발급이
    `activate_profile` 의 Resume 갈래에만 있어서 Fresh 재spawn 경로들이 죽은 화신의 표식을 그대로
-   재사용했다. 그 재사용은 (AgentId, epoch) 를 키로 쓰는 모든 구조를 무너뜨린다." Mode-agnostic by
+   재사용했다. 그 재사용은 (AgentId, epoch) 를 키로 쓰는 모든 구조를 무너뜨린다." [in the past the issuance was only in the Resume branch of that function, so the Fresh re-spawn paths reused the dead incarnation's marker as is. That reuse breaks every structure that uses (AgentId, epoch) as a key.] Mode-agnostic by
    design.
 7. Control-channel provision, backend-conditional and fail-closed (:960-975), then `ProvisionGuard`
    armed (:976-981).
@@ -550,7 +550,7 @@ still names no transport type — `open_spawn` returns `SpawnParts` (backend/mod
     builds its own transport and returns the rest of the session's assembly values in `SpawnParts`.
     **This is where the child process starts**, and the code pins it after step 9 (:1007-1008):
     "★이 호출이 자식 프로세스를 띄운다 — 위 transcript 읽기보다 반드시 뒤★: 앞뒤를 바꾸면 그 프로그램이
-    이미 도는 상태에서 그 대화 파일을 읽게 된다."
+    이미 도는 상태에서 그 대화 파일을 읽게 된다." [★this call launches the child process — it must come after the transcript read above★: if the order is swapped, that program is already running when the conversation file is read.]
 11. `spawn_session(...)` (:1011-1012).
 12. `provision_guard.disarm()` (:1014-1016).
 13. Session-id watcher attach (:1021-1029): only if `sid.is_some() && child_pid.is_some() && needs`,
@@ -578,9 +578,9 @@ Each of those four "before"s has its own quoted invariant:
 - seed before publish (:1200-1209): "empty-ring replay" and "seq interleave" windows are closed
   *because* nothing can reach the core before the insert.
 - `turns.register` before insert (:1256-1263): "뒤집히면 그 첫 신호가 앞 화신 표식과 안 맞아 버려지고,
-  이 화신은 앞 화신의 항목이 거둬질 때까지 미관측(=턴 아님)으로 답한다 — 턴 중 우편 주입이 그 결말이다."
+  이 화신은 앞 화신의 항목이 거둬질 때까지 미관측(=턴 아님)으로 답한다 — 턴 중 우편 주입이 그 결말이다." [if reversed, that first signal does not match the previous incarnation's marker and is discarded, and this incarnation answers "unobserved" (= not a turn) until the previous incarnation's entry is withdrawn — mail injection mid-turn is the outcome.]
 - insert before `start_pump` (:1266-1269): "insert 전에 start 하면 빠른 종료 시 hook send 가 맵에 없는
-  id 를 가리켜 reap 가 no-op→세션 좀비화."
+  id 를 가리켜 reap 가 no-op→세션 좀비화." [if start comes before insert, on a fast exit the hook send points at an id that is not in the map, so reap is a no-op → the session becomes a zombie.]
 - `auto_restore = true` before `start_pump` (:1275-1282): otherwise an instantly-crashing agent's
   reaper downgrade is overwritten by this flip → crash loop.
 
@@ -596,13 +596,13 @@ Each of those four "before"s has its own quoted invariant:
 - **Read by exactly one reader**: the finalize hook, which snapshots it into `ReapMsg.intent_at_finish`
   (manager.rs:1232-1236). Doc (:1222-1224): "core.finish 의 finalize 승자 경로에서 1회 호출되며, 그
   순간 intent·shutting_down 을 snapshot 해 ReapMsg 를 송신한다(reap 시점 live read 금지 — 크래시→
-  유저kill 오분류 race 방지)."
+  유저kill 오분류 race 방지)." [called once on the finalize winner path of core.finish, and at that moment snapshots intent and shutting_down and sends the ReapMsg (no live read at reap time — prevents the crash → user-kill misclassification race).]
 - **There is no getter.** `rg` over the crate shows `set_intent` and the hook's `intent_hook.load`;
   no `fn intent()` exists on `AgentSession`. So nothing below the manager, and nothing at all outside
   the finalize hook, can read it — including the transport, the decoder, and the pump.
 - Design rationale, quoted (types.rs:89-93): "유저 의도 — kill 핸들러가 채운다(ADR-0019). PTY 관측
   사실(TerminalReason)과 **분리**한다: 종료를 관측해 의도를 추론하면 데몬 셧다운 Job-kill 이 유저 kill
-  로 오분류되므로, 의도는 '종료를 일으킨 행동 지점'(kill 커맨드 핸들러)에서 명시적으로 태깅한다."
+  로 오분류되므로, 의도는 '종료를 일으킨 행동 지점'(kill 커맨드 핸들러)에서 명시적으로 태깅한다." [user intent — filled in by the kill handler. It is **kept separate** from the observed PTY fact (TerminalReason): if intent were inferred by observing the exit, a daemon-shutdown Job-kill would be misclassified as a user kill, so the intent is tagged explicitly at the "point of action that caused the exit" (the kill command handler).]
 - **And today it changes nothing.** `decide(&msg)` (reaper.rs:105-111) branches only on
   `shutting_down_at_finish`; `intent_at_finish` is carried in `ReapMsg` (types.rs:122) and never
   consulted. ADR-0083 collapsed the disposition table, so the field is a live wire with no consumer.
@@ -614,7 +614,7 @@ Each of those four "before"s has its own quoted invariant:
    `session.set_intent(UserKill)` (:1716) → `session.enter_exiting()` (:1718) →
    `session.kill(Duration::from_secs(5))` (:1723) → `tracker.unwatch(agent_id)` (:1726).
    It does **not** remove the session from the map: "**맵 제거·disposition·통지는 하지 않는다** …
-   반환 직후에도 세션이 아직 맵에 있을 수 있다" (:1701-1704).
+   반환 직후에도 세션이 아직 맵에 있을 수 있다" [**it does not do map removal, disposition, or notification** … even right after it returns, the session may still be in the map] (:1701-1704).
 2. `shutdown_all()` (manager.rs:1755-1779) — `shutting_down.store(true)` **first** (:1760, rationale
    :1756-1759) → `tracker.stop()` (:1763) → snapshot ids under a read lock (:1768-1771) → a
    `thread::scope` fan-out of `kill_agent` per id (:1772-1778).
@@ -623,7 +623,7 @@ Each of those four "before"s has its own quoted invariant:
    `finish` and thus the same reap path.
 5. **Implicit**: dropping the last `Arc<AgentSession>` drops the transport, which drops the Job
    handle. On Windows a Job Object handle drop terminates remaining members — reaper.rs:71 notes
-   "`JobObjectHandle::drop` 은 마지막 참조가 사라질 때 그대로 돈다."
+   "`JobObjectHandle::drop` 은 마지막 참조가 사라질 때 그대로 돈다." [it runs as is when the last reference disappears.]
 
 There is **no cancel path, no graceful-shutdown path, and no interrupt-then-kill path.**
 `ControlCaps.graceful_shutdown` is `false` in all three transports (stdio.rs:381, pty.rs:357,
@@ -634,25 +634,25 @@ api.rs:70) and nothing reads it.
 - Single serial supervisor thread named `"engram-reaper"`, created once by `spawn_reaper(deps)`
   (reaper.rs:193) from `AgentManager::new_with_control` (manager.rs:480). Consumes
   `ReaperCmd::{Reap(ReapMsg), Stop}` (reaper.rs:31-34) off an `mpsc` channel; "Stop 없이도 모든
-  Sender drop 시 recv 가 Err 로 끝나 루프가 종료된다" (:30).
-- `ReaperDeps` shares the manager's own `Arc`s verbatim (:37-43) — "사본 금지" (:36-37).
+  Sender drop 시 recv 가 Err 로 끝나 루프가 종료된다" [even without Stop, when every Sender drops, recv ends with Err and the loop terminates] (:30).
+- `ReaperDeps` shares the manager's own `Arc`s verbatim (:37-43) — "사본 금지" [no copies] (:36-37).
 - **`reap_one` is the only thing that removes a session** (reaper.rs:47-97), in this order:
   1. Write lock: `match sessions.get(&msg.id) { Some(s) if s.epoch == msg.epoch => sessions.remove(&msg.id), _ => return }`
      (:57-64). **Epoch equality, not ordering** (:16-18). Poison-tolerant via `into_inner` (:52-56).
   2. `if removed.is_none() { return }` — idempotence, one winner (:66-69).
   3. `drop(removed)` (:76) — and the doc explicitly refuses to claim this is the last `Arc`
      reference (:65-73): the early-activation observer may hold it for up to 100 ms more.
-  4. `self.control.revoke(msg.id, msg.epoch)` (:83) — "여기가 모든 terminal 의 단일 수렴점" (:78).
+  4. `self.control.revoke(msg.id, msg.epoch)` (:83) — "여기가 모든 terminal 의 단일 수렴점" [this is the single convergence point of every terminal] (:78).
   5. `if !msg.shutting_down_at_finish { apply_disposition(profiles, id, epoch, decide(&msg)) }`
      (:86-89), **outside** the sessions lock because it does disk IO (:85).
   6. `status_sink.agent_list_updated(list_agents(&sessions, &profiles))` (:92-93).
 - `decide` (:105-111): `shutting_down_at_finish => KeepAsIs`, everything else
   `=> KeepDisableAutoRestore`. Table quoted at :100-104. **No delete disposition exists** — ADR-0083
-  (types.rs:127-130): "reaper 는 어떤 종료에도 프로필을 자동 삭제하지 않는다."
+  (types.rs:127-130): "reaper 는 어떤 종료에도 프로필을 자동 삭제하지 않는다." [the reaper does not automatically delete the profile on any exit.]
 - `apply_disposition` (:124-142) is **downgrade-only** and takes the epoch guard *inside* the
   profile lock closure (:134-136), never touching the sessions lock (:121-123).
 - The reaper knows nothing about: the turn table (verified — no reference in the file), the
-  `SessionTracker` (manager.rs:1725: "reaper 는 tracker 를 모른다"), the transport, or the decoder.
+  `SessionTracker` (manager.rs:1725: "reaper 는 tracker 를 모른다" [the reaper does not know the tracker]), the transport, or the decoder.
 
 ## A10. The two activation entrances
 
@@ -669,10 +669,10 @@ enough. The socket entrance keeps one bypass on top of it (the wire `resume` fla
      ```
      The doc above it states the rule is shared with the WS path (ADR-0076) and now points at the
      shared helper — "여기서 다른 규칙을 쓰면 같은 에이전트가 어느 입구로 깨우느냐에 따라 대화 이력을
-     잃는다". Regression net: `commands::tests::waking_does_not_resume_a_profile_whose_backend_cannot_resume`.
+     잃는다" [if a different rule is used here, the same agent loses its conversation history depending on which entrance wakes it]. Regression net: `commands::tests::waking_does_not_resume_a_profile_whose_backend_cannot_resume`.
    - `create_and_start` (commands.rs:533-...): always `SpawnMode::Fresh` (:547), with the command
      built from `backend_command(AgentBackend::Claude, NEW_AGENT_OUTPUT_FORMAT)` (:544) — the verb
-     has no backend or format field ("이 동사에는 형식·백엔드 칸이 없다", :537).
+     has no backend or format field ("이 동사에는 형식·백엔드 칸이 없다" [this verb has no format or backend field], :537).
 2. **Socket entrance** — `crates/engram-dashboard-daemon/src/connection_core.rs`.
    - `AgentCommand::SpawnProfile { profile_id, resume, request_id }` (:1109-1113):
      ```rust
@@ -685,7 +685,7 @@ enough. The socket entrance keeps one bypass on top of it (the wire `resume` fla
      `connection_core::tests::ws_spawn_profile_still_honours_an_explicit_resume_request`, with the
      guarded path pinned by `…_does_not_resume_a_profile_whose_backend_cannot_resume`. Doc (:1114-1123): "저장된 세션이
      있으면 wire `resume` 플래그(프론트는 false 로 보낸다)와 무관하게 항상 Resume 이다 … 단 '안전하다'
-     고 읽지 말 것: 방금 발급한 sid 에는 이어받을 대화 실물이 없어서 claude 는 즉사한다."
+     고 읽지 말 것: 방금 발급한 sid 에는 이어받을 대화 실물이 없어서 claude 는 즉사한다." [if there is a stored session, it is always Resume regardless of the wire flag (the frontend sends false) … but do not read it as "safe": a freshly issued sid has no actual conversation to continue, so claude dies instantly.]
    - `AgentCommand::Spawn { profile_id, request_id }` (:795-817): **always `SpawnMode::Fresh`**
      (:809), with no mode derivation at all. Doc (:800-806) explains it routes through
      `activate_profile` rather than `spawn_agent` so both handles move the same lever.
@@ -726,13 +726,13 @@ it is not used for reset decisions (:228). Removal of the reserved trio is expli
 
 Invariants quoted:
 - `cwd` is never canonicalized (:149-152): "★저장된 값은 raw 다 — 정규화되지 않는다(load-bearing)★:
-  이 필드를 canonicalize 하는 코드는 없다 … 정규화는 이 값을 쓰는 쪽이 각자 한다."
+  이 필드를 canonicalize 하는 코드는 없다 … 정규화는 이 값을 쓰는 쪽이 각자 한다." [★the stored value is raw — it is not normalized (load-bearing)★: no code canonicalizes this field … normalization is done by each side that uses this value.]
 - `backend_session_id` is mutable and backend-neutral by name (:157-165): "현재 백엔드 세션 id.
   **가변** … ★이름이 중립인 것은 의도★ — 누가 id 를 뽑는지를 말하지 않는다. claude 는 우리가 정한
-  id 를 `--session-id` 로 건네받고, codex 는 자기가 뽑은 id 를 우리에게 알린다." Renamed from
+  id 를 `--session-id` 로 건네받고, codex 는 자기가 뽑은 id 를 우리에게 알린다." [the current backend session id. **Mutable** … ★the neutral name is intentional★ — it does not say who picks the id. claude is handed the id we chose as an argument, and codex tells us the id it picked itself.] Renamed from
   `claude_session_id` on 2026-09-07 with no back-compat shim (:163-164).
 - `last_failure` single-writer rule (:201-203): only `AgentManager::note_activation_result`;
-  "호출자를 늘리면 인과가 갈라진다."
+  "호출자를 늘리면 인과가 갈라진다." [if the callers are increased, the causality splits.]
 - Save-inside-the-lock discipline (:365-372): the profiles lock → store lock order is one-way, so
   `persisted == observed` and no interleaved A/B snapshot can leave memory newest and disk stale.
 
@@ -806,11 +806,11 @@ section (:401-408). Predicate `false` → skips normalize, snapshot and save, re
   `ensure_session_id` (:596), `new_session_id` (:614), `epoch_for_spawn` (:667),
   `observe_session_id`.
 - Deliberate bypass: `set_last_failure` takes the mutex directly and never saves (:574-590),
-  justified at :568-571 ("`#[serde(skip)]` 이라 저장해도 파일 내용이 한 바이트도 달라지지 않는다").
+  justified at :568-571 ("`#[serde(skip)]` 이라 저장해도 파일 내용이 한 바이트도 달라지지 않는다" [since it is serde-skipped, saving would not change the file content by a single byte]).
   Note the inconsistency: `epoch_for_spawn` triggers a full save on **every spawn** although the
   serialized bytes are unchanged (epoch always writes `0`).
-  > ★2026-10-11 개정(경계 리팩터링 A · ADR-0291 결정 10 · U5b-1a): `epoch_for_spawn` 은 더는 저장하지 않는다 —
-  > `set_last_failure` 처럼 락만 잡아 표식을 간다(이 어긋남은 닫혔다)★
+  > ★Amended 2026-10-11 (boundary refactoring A · ADR-0291 decision 10 · U5b-1a): `epoch_for_spawn` no longer saves —
+  > like `set_last_failure` it only takes the lock and swaps the marker (this mismatch is closed)★
 - Path `<data_dir>/agents.json`, temp `agents.json.tmp` (persistence/mod.rs:22-24, :50-54);
   `data_dir` = `default_data_dir()` (daemon/src/lib.rs:252, :62; discovery/src/lib.rs:84).
 - Format `serde_json::to_vec_pretty(ProfilesFile { schema_version: 1, profiles })`
@@ -824,15 +824,15 @@ section (:401-408). Predicate `false` → skips normalize, snapshot and save, re
   **schema_version mismatch → empty, file left in place with NO backup rename** (:121-126), so the
   next mutation's save overwrites the preserved file. That is an unprotected data-loss path, unlike
   the parse-error path.
-  > ★2026-10-11 개정(경계 리팩터링 A · ADR-0291 · TRD `docs/process/S21-crate-boundaries/trd-A-data-file-unification.md`)
-  > — 위 세 줄과 바로 위 「Atomic write」 줄은 그 뒤 낡았다. 읽기 · 쓰기는 base `file` 규칙이다(presets 도 같은 구현):
-  > 없음 → 빈 목록 · 읽기 IO 실패(잠김이면 약 1 초 다시 읽은 뒤) → 빈 목록 + **그 실행 내내 읽기 전용** · 손상(JSON 아님 ·
-  > 모양 실패 · 16 MiB 초과 · 리더 없는 앞 판) → 적재 때 error + 빈 목록 · 첫 저장 직전에 고정 이름 `agents.json.corrupt` 로
-  > **복사**(덮어쓰기 · 이동 아님 · 이미 있는 `.corrupt-<ms>` 는 건드리지 않는다) · **새 판 `schema_version` → 읽지도 ·
-  > 덮지도 · 떠 두지도 않고 그 실행 내내 읽기 전용**(이 「무보호 손실 경로」가 닫혔다) · `schema_version` 키가 없으면 1 판.
-  > 저장마다 그 직전에 파일을 다시 판정한다 · 임시 = `agents.json.tmp<pid>.<번호>`(옛 고정 `.tmp` 는 저장소가 지운다) ·
-  > 저장 실패는 이제 호출자에게 간다 — 부르는 쪽 있는 변경(`try_*`)은 오류 · 메모리 그대로, 내부 변경은 메모리 적용 +
-  > dirty(다음 성공 저장이 싣는다) · 저장소 상태는 버스 `agent.list` 의 `store` 칸에 실린다★
+  > ★Amended 2026-10-11 (boundary refactoring A · ADR-0291 · TRD `docs/process/S21-crate-boundaries/trd-A-data-file-unification.md`)
+  > — the three lines above and the 「Atomic write」 line right above them have since gone stale. Reads and writes follow the base `file` rule (presets use the same implementation):
+  > absent → empty list · read IO failure (after re-reading for about 1 second if locked) → empty list + **read-only for that whole run** · corrupt (not JSON ·
+  > shape failure · over 16 MiB · an earlier edition with no reader) → error at load + empty list · just before the first save, **copied** to the fixed name `agents.json.corrupt`
+  > (overwrite · not a move · an existing `.corrupt-<ms>` is left untouched) · **a newer edition `schema_version` → neither read, nor
+  > overwritten, nor backed up, and read-only for that whole run** (this 「무보호 손실 경로」 is closed) · if the `schema_version` key is absent, edition 1.
+  > Before every save the file is decided again right then · temp = `agents.json.tmp<pid>.<번호>` (the store deletes the old fixed `.tmp`) ·
+  > save failure now goes to the caller — a change that has a caller (`try_*`) gets an error and the memory stays as it was, an internal change is applied to memory +
+  > dirty (the next successful save carries it) · the store state rides in the `store` slot of the bus `agent.list`★
 - Crash loses: any sid change not yet observed. Exposure window = poll interval (1 s) plus pid
   resolution latency (up to 15 polls). `epoch` and `last_failure` never reach disk by design.
 
@@ -851,7 +851,7 @@ Registry lifetime = daemon process lifetime; entry lifetime = disk-file lifetime
 - Session death does not touch entries: `decide()` returns `KeepDisableAutoRestore` for every
   runtime exit (reaper.rs:108-113) and `apply_disposition` only lowers `auto_restore` under an epoch
   equality guard (:129-142). Doc (reaper.rs:104-106): "모든 런타임 종료는 세션만 맵에서 수거하고
-  프로필은 시체로 보존한다(backend_session_id 유지 → 재활성화 시 --resume 로 이어받음)."
+  프로필은 시체로 보존한다(backend_session_id 유지 → 재활성화 시 --resume 로 이어받음)." [every runtime exit collects only the session from the map and preserves the profile as a corpse (backend_session_id is kept → on re-activation it is continued with --resume).]
 - **Entry removal has exactly one trigger**: `ProfileRegistry::remove` (:479) ←
   `AgentManager::delete_agent` (manager.rs:651-653) ← the explicit user/LLM delete verb. No reaper
   removal, no crash pruning, no TTL, no shutdown sweep.
@@ -865,11 +865,11 @@ Registry lifetime = daemon process lifetime; entry lifetime = disk-file lifetime
   `None` means the profile vanished and the caller must abort.
 - Single production mint site: manager.rs:939, mode-agnostic (profile.rs:658-661).
 - **Equality only** (:170-174): "★화신(incarnation) 하나를 가리키는 불투명 표식★ — 순서에 뜻이 없다 …
-  그래서 비교는 일치/불일치만 쓴다 — 두 값의 대소로 '더 새 것' 을 유도하지 말 것."
+  그래서 비교는 일치/불일치만 쓴다 — 두 값의 대소로 '더 새 것' 을 유도하지 말 것." [★an opaque marker that points at one incarnation★ — order has no meaning … so comparison uses only match/mismatch — do not derive "newer" from the magnitude of two values.]
 - Read/write asymmetry (:176-186): "★읽기를 건너뛰는 것이 의미의 일부다★: 화신은 이 데몬 프로세스보다
   오래 살지 못하므로 그 표식을 디스크에서 되살리지 않는다 … ★그런데 쓰기는 건너뛰지 않는다 — 키는 `0`
   으로 실어 보낸다★: 앞 릴리스의 구조체는 이 필드를 필수로 선언했으므로 키가 없는 파일을 읽으면
-  `missing field` 로 파싱이 깨진다." Writer: `serialize_zero_placeholder` always emits literal `0`
+  `missing field` 로 파싱이 깨진다." [★skipping the read is part of the meaning★: an incarnation cannot outlive this daemon process, so its marker is not revived from disk … ★but the write is not skipped — the key is carried out as zero★: the previous release's struct declared this field as required, so reading a file without the key breaks parsing with a missing-field error.] Writer: `serialize_zero_placeholder` always emits literal `0`
   (:681-683).
 - **The asymmetry's boundary is disk only (`agents.json`).** The wire mirror is a plain
   `pub epoch: u32` with no attributes (protocol/src/domain.rs:340) and `profile_to_wire` copies the
@@ -883,7 +883,7 @@ Registry lifetime = daemon process lifetime; entry lifetime = disk-file lifetime
   first mint on a fresh profile (whose default is `0`), and the one mint right after a mint that
   happened to land on `0`. Every other mint can be `0` at 2^-32. The unit test says exactly that in its own assertion
   message (`epoch_for_spawn_never_repeats_the_previous_incarnations_tag`): "새 프로필의 기본값이 0
-  이라 첫 발급만은 0 을 피한다(그 뒤 발급엔 이 보장이 없다)". The disk `0` is a placeholder only
+  이라 첫 발급만은 0 을 피한다(그 뒤 발급엔 이 보장이 없다)" [since a new profile's default is 0, only the first issuance avoids 0 (later issuances have no such guarantee)]. The disk `0` is a placeholder only
   because the reader skips the field; nothing grants `0` that meaning anywhere else. No production
   site reads it back as a sentinel today — no `== 0` on this field exists in `crates/`, `src/` or
   `src-tauri/` (the one `socket_epoch == 0` in daemon_client/lifecycle.rs is an unrelated axis).
@@ -896,8 +896,8 @@ Registry lifetime = daemon process lifetime; entry lifetime = disk-file lifetime
 ### Every disk file the agent crate touches
 
 Writes (ours): `<data_dir>/agents.json` + `.tmp` + `.corrupt-<ms>`, owner `FileProfileStore`
-★(2026-10-11 개정 — 경계 리팩터링 A: 임시 `.tmp<pid>.<번호>` · 손상 사본 고정 `.corrupt`(첫 저장 직전 복사) · presets 는
-복제가 아니라 같은 내부 구현을 부른다 — 위 PART A 「Load failure matrix」 아래 개정 표시)★
+★(amended 2026-10-11 — boundary refactoring A: temp `.tmp<pid>.<번호>` · corrupt-copy fixed name `.corrupt` (copied just before the first save) · presets call the same internal implementation instead of a
+clone — see the amendment mark under PART A 「Load failure matrix」 above)★
 (persistence/mod.rs:22-24, :39, :57-93). `<data_dir>/presets.json` + `.tmp` + `.corrupt-<ms>`, owner
 `FilePresetStore`, a deliberate clone of the same strategy (persistence/presets.rs:1-6, :18-20, :36,
 :53-86); `Preset {id, cwd, name}` (preset.rs:24-33).
@@ -1022,7 +1022,7 @@ for `forget`, and incomplete as a statement about entry removal.**
   production `forget` calls.
 - **Third removal path, not a `forget`:** `register_at`'s unconditional `insert` evicts whatever
   entry held that id (turn.rs:125-133), documented as such at :109 ("있던 항목이 무엇이든 무조건
-  갈아치운다"), with a regression test at :296-297.
+  갈아치운다" [it unconditionally replaces whatever entry was there]), with a regression test at :296-297.
 - **Whole-map clear: no mechanism exists.** No `clear`, `retain` or drain; the only `remove` in the
   file is :245. The map dies only when the `AgentManager` (and its `Arc`) drops.
 - The reaper does **not** clean up: `reaper.rs` has no reference to the turn layer (removed by
@@ -1469,7 +1469,7 @@ Not reachable / gated:
   `shutdown()` (:340) and read `Acquire` by the pump (:251, :271). It is the *only* discriminator,
   and its necessity is documented (stdio.rs:248-250): "read 레벨에선 자연 EOF 와 kill 이 둘 다 Ok(0)
   이라 구분이 안 되지만, kill 은 반드시 shutdown.store(Release) 를 거치므로 여기서 Acquire 로 읽어
-  확실히 구분된다."
+  확실히 구분된다." [at the read level, natural EOF and kill both give Ok(0) and cannot be told apart, but a kill always goes through shutdown.store(Release), so reading it here with Acquire tells them apart for certain.]
 - **Owner:** the transport, privately. There is no accessor — no `is_shutting_down()` on
   `AgentTransport` (transport/mod.rs:41-57).
 - What escapes upward is only the *classification*: `TerminalReason::Killed` vs
@@ -1503,12 +1503,12 @@ lifetimes:
 |---|---|---|---|
 | `ProfileRegistry` + each `AgentProfile` entry | daemon process / disk file. No `Drop` impl anywhere; entry removal has exactly one trigger, the explicit delete verb (profile.rs:479 ← manager.rs:651-653) | **yes** | **yes — this is the only durable slot.** But `epoch` and `last_failure` are `#[serde(skip*)]` (profile.rs:190, :207) and the only functional resume input is `backend_session_id: Option<Uuid>` (:165) |
 | `TurnObservations` (the fact table) | daemon process (`Arc` on the manager, manager.rs:378/:472). Entry per id is evicted by the next `register` (turn.rs:125-133) or removed by `forget` | **table yes, entry no** | no — no serde, no persistence, and its port is read-only by contract (busy.rs:86) |
-| `SessionTracker` | daemon process (`Arc`, manager.rs:327). One polling thread | **yes** | no — `WatchEntry` holds a `Box<dyn SessionIdSource>` whose learned `resolved_pid` dies with the incarnation (session_file.rs:136). And it leaks: the only `unwatch` is in `kill_agent` (manager.rs:1726), and "reaper 는 tracker 를 모른다" (:1725) — a naturally-exited agent leaves a live polling entry for the daemon's lifetime |
+| `SessionTracker` | daemon process (`Arc`, manager.rs:327). One polling thread | **yes** | no — `WatchEntry` holds a `Box<dyn SessionIdSource>` whose learned `resolved_pid` dies with the incarnation (session_file.rs:136). And it leaks: the only `unwatch` is in `kill_agent` (manager.rs:1726), and "reaper 는 tracker 를 모른다" [the reaper does not know the tracker] (:1725) — a naturally-exited agent leaves a live polling entry for the daemon's lifetime |
 | `BusyPolicy.stale` ledger | daemon process (busy.rs:132) | **yes** | no — replaced wholesale each sweep (busy.rs:156-164) |
 | `AgentSession` | one incarnation. Dropped at reaper.rs:76 | no | — |
 | `OutputCore` (ring, seq, subscribers, diagnostics) | one incarnation, dropped with the session | no | no — `output_core.rs` has no serde derive at all |
 | `StdioTransport` / `PtyTransport` (+ stdin, Job handle, decoder) | one incarnation, `Box`ed inside the session | no | — |
-| `OutputDecoder` | one incarnation, moved into the pump thread (stdio.rs:204-209) | no | no — and by design: "epoch 교체 = 새 transport = 새 decoder 라 리셋이 자동이다" (transport/mod.rs:28-29) |
+| `OutputDecoder` | one incarnation, moved into the pump thread (stdio.rs:204-209) | no | no — and by design: "epoch 교체 = 새 transport = 새 decoder 라 리셋이 자동이다" [an epoch swap = a new transport = a new decoder, so the reset is automatic] (transport/mod.rs:28-29) |
 | `ControlChannel` token + mcp-config file | `(AgentId, epoch)` — revoked by `kill_agent` (manager.rs:1714) and again by the reaper (reaper.rs:83) | no | no — deliberately scoped to one incarnation |
 | The `intent` `Arc<AtomicU8>` | one incarnation (created manager.rs:1223) | no | — |
 
@@ -1582,7 +1582,7 @@ if the notification rides on the existing `OutputEvent` stream.**
 
 - `Capabilities { input, output, control, session, model }` (types.rs:451-456).
   `Capabilities::compose(t: TransportCaps, b: BackendCaps)` is documented as "Capabilities 의 **유일한
-  정상 생성 경로** — 출처가 섞이지 않게 타입으로 박았다" (types.rs:476-487). The split is enforced by
+  정상 생성 경로** — 출처가 섞이지 않게 타입으로 박았다" [the **only normal creation path** of Capabilities — the type pins it so the sources do not get mixed] (types.rs:476-487). The split is enforced by
   the types: `TransportCaps` has no `session`/`model` fields (:461-464, comment :460),
   `BackendCaps` has no `input`/`output`/`control` (:470-473, comment :467-468).
 - Sole production call site: `AgentSession::capabilities` (session.rs:259).
@@ -1592,7 +1592,7 @@ if the notification rides on the existing `OutputEvent` stream.**
   3. `ApiTransport::capabilities` (api.rs:52-73) — 12 literals; unreachable (B/A5).
   4. `backend::backend_caps(c)` → `AgentBackend::capabilities(&self, command)`
      (backend/mod.rs:328-330; trait :104), per backend. It takes the `command` because "같은
-     프로그램(claude)이라도 모드에 따라 caps 가 다르다" (backend/mod.rs:98-103).
+     프로그램(claude)이라도 모드에 따라 caps 가 다르다" [even for the same program (claude), caps differ by mode] (backend/mod.rs:98-103).
   5. The `structured` injection in `ClaudeBackend::open_spawn` (backend/claude/mod.rs:372) — this is
      the only value computed at assembly time rather than declared by an impl.
 - **Can a value be injected per spawn? Only one, and only indirectly.** `structured` is passed as a
@@ -1619,10 +1619,10 @@ Two very different answers depending on *where* the unknown-ness sits. Traced to
 
 **(a) Unknown `Structured.kind` (the modelled escape hatch) → it renders.**
 `OutputEvent::Structured { kind, json }` (types.rs:66-68, "위 정형 variant로 안 잡히는 backend별
-구조화 이벤트의 탈출구(forward-compat)") → `emit` → `OutputPayload::Event` (output_core.rs:268) →
+구조화 이벤트의 탈출구(forward-compat)" [the escape hatch for backend-specific structured events not caught by the structured variants above (forward-compat)]) → `emit` → `OutputPayload::Event` (output_core.rs:268) →
 daemon codec → `tag=1` frame → `RichSlot` tag gate passes (`RichSlot.tsx:161`) → `acc.feed` →
 `consume`'s `Structured` case pushes `{ kind: 'structured', label: ev.kind, json: ev.json, itemId }`
-(`structuredAccumulator.ts:125-126`, comment "알 수 없는 종류(kind)도 흘려 유실 방지") →
+(`structuredAccumulator.ts:125-126`, comment "알 수 없는 종류(kind)도 흘려 유실 방지" [let unknown kinds flow through too, to prevent loss]) →
 `renderItem` dispatch (`StructuredTextView.tsx:397-401`) → `GenericItemRow` (:279-304) renders the
 **label plus pretty-printed JSON** in a collapsed row (:299 via `pretty`, :41-47). `rowKindOf`
 classifies the unknown label as `'assistant'` (:334). **This works today and is the one door that
@@ -1654,9 +1654,9 @@ carriers do `if (!f) return` (`tauriTransport.ts:339`, `wsTransport.ts:294`). No
 **Concurrent writes: serialized, correctly, by the `stdin` mutex. Not interleaved, not lost.**
 `send_input` takes `self.stdin.lock()` and holds it across `write_all` + `flush`
 (stdio.rs:295-304), so N concurrent callers become N sequential complete writes. This is asserted by
-an integration test whose header calls it "물리 파이프 계층의 **응용계층(application-layer) 직렬화**"
+an integration test whose header calls it "물리 파이프 계층의 **응용계층(application-layer) 직렬화**" [application-layer serialization of the physical pipe layer]
 (`crates/engram-dashboard-agent/tests/stdio_physical_pipe.rs:91`) and by a daemon test asserting
-"캡처된 write 수 == N(각 send_input 이 완결 봉투 1개 — 잘림/합병 없음)"
+"캡처된 write 수 == N(각 send_input 이 완결 봉투 1개 — 잘림/합병 없음)" [captured write count == N (each send_input is one complete envelope — no truncation or merging)]
 (`crates/engram-dashboard-daemon/tests/control_send.rs:1491`).
 PTY does the same with its `writer` mutex (pty.rs:284-292).
 
@@ -1685,8 +1685,8 @@ Code order in `spawn_session`: `sessions.write().insert(id, session.clone())` (m
 then `session.start_pump()` (:1285). Quoted invariant (manager.rs:1265-1269):
 "★ADR-0019 — sessions 등록은 pump 기동(start)보다 **먼저**★: finish hook 이 ReapMsg 를 보내는데,
 pump 가 즉시 EOF→finish 하면 그 시점에 세션이 맵에 있어야 reaper 가 reap 한다. insert 전에 start 하면
-빠른 종료 시 hook send 가 맵에 없는 id 를 가리켜 reap 가 no-op→세션 좀비화." Restated at
-session.rs:117-120 and in `docs/reference/architecture.md` 「런타임 불변식」 I10 ("등록 순서") — and the failure mode
+빠른 종료 시 hook send 가 맵에 없는 id 를 가리켜 reap 가 no-op→세션 좀비화." [★sessions registration comes **before** pump start★: the finish hook sends a ReapMsg, and if the pump immediately goes EOF→finish, the session must be in the map at that moment for the reaper to reap it. If start comes before insert, on a fast exit the hook send points at an id that is not in the map, so reap is a no-op → the session becomes a zombie.] Restated at
+session.rs:117-120 and in `docs/reference/architecture.md` 「런타임 불변식」 I10 ("등록 순서" [registration order]) — and the failure mode
 is **silent at runtime**; only the reaper test catches a regression.
 
 Three more orderings ride on the same line and are each separately named:
@@ -1749,7 +1749,7 @@ Assume a stdio/structured session, natural death (no `shutdown()` call), with a 
    ring, the diagnostics buffer, the subscriber list, and the unjoined pump `JoinHandle`.
 
 **What is NOT touched by any of this — verified:**
-- `profile.backend_session_id` and `old_session_ids` survive untouched ("시체 보존", reaper.rs:104-106).
+- `profile.backend_session_id` and `old_session_ids` survive untouched ("시체 보존" [corpse preservation], reaper.rs:104-106).
 - `profile.epoch` stays at the dead incarnation's value until the next `epoch_for_spawn`
   (manager.rs:939).
 - `profile.last_failure` is not written by this path — only `note_activation_result` writes it
@@ -1778,7 +1778,7 @@ would want to do, and why it cannot today.
 2. **Shut down gracefully — send a shutdown request and wait for the peer to exit on its own** — no
    verb exists; `ControlCaps.graceful_shutdown` is `false` in all three transports (stdio.rs:381,
    pty.rs:357, api.rs:70) and **nothing reads it**. `shutdown()` is defined as
-   "자원 강제 종료(멱등)" (transport/mod.rs:53) and unconditionally kills the process tree.
+   "자원 강제 종료(멱등)" [force-close resources (idempotent)] (transport/mod.rs:53) and unconditionally kills the process tree.
 3. **Cancel an in-flight operation** — `interrupt()` on stdio returns `Unsupported`
    (stdio.rs:316-321) and `ControlCaps.cancel` is `false` everywhere and read by nothing.
 4. **Learn, above the transport, that a shutdown is our own deliberate kill** — the discriminating
@@ -1911,13 +1911,13 @@ would want to do, and why it cannot today.
     no `turn_started`.
 36. **Read turn state from the frontend or an LLM** — nothing turn-shaped exists in the wire protocol
     or in `src-tauri`; the daemon's `turn_ended` decorator forwards inward to a default no-op and its
-    own comment calls the path "예정" (messaging_host.rs:878-882).
+    own comment calls the path "예정" [planned] (messaging_host.rs:878-882).
 37. **Ask "is this agent busy" without an epoch** — every read verb requires `(id, epoch)`
     (turn.rs:207, :219; busy.rs:91).
 38. **Correlate a turn end to its start / count turns** — `turn_id`/`message_id` are always `None`
     (backend/claude/mod.rs:869-870), so the table is "last observation wins" (turn.rs:191-194).
 39. **Clear or mark a fact from a consumer** — forbidden by explicit port contract (busy.rs:86:
-    "이 포트에 '지워라/표시해라' 를 추가하지 말 것"); the only removal verbs are `forget`
+    "이 포트에 '지워라/표시해라' 를 추가하지 말 것" [do not add "clear it / mark it" to this port]); the only removal verbs are `forget`
     (turn.rs:242) and `register`'s eviction (:125-133).
 40. **Clear the whole fact map** — no `clear`, no `retain`, no drain (turn.rs, read in full); the map
     dies only with the `AgentManager`.
@@ -2004,19 +2004,19 @@ would want to do, and why it cannot today.
     `#[serde(skip)]` (:207) so it dies with the daemon.
 54. **Surface a save failure to a caller, the UI, or the LLM** — swallowed with `tracing::error!`
     only (persistence/mod.rs:99-106); the contract explicitly says so (profile.rs:310-311).
-    ★2026-10-11 개정(경계 리팩터링 A · ADR-0291 결정 6): 이제 한다 — 저장이 `Result` 이고 부르는 쪽 있는 변경은
-    `CONFLICT`(저장 거절) · `INTERNAL`(쓰기 IO 실패)로 돌아오며 저장소 상태가 `agent.list` 에 실린다(화면 안내는 없다)★
+    ★Amended 2026-10-11 (boundary refactoring A · ADR-0291 decision 6): it does now — the save is `Result` and a change that has a caller
+    gets back `CONFLICT` (save refused) · `INTERNAL` (write IO failure), and the store state rides in `agent.list` (there is no on-screen notice)★
 55. **Batch, debounce, or flush-on-shutdown the profile store** — every mutation rewrites the whole
     file synchronously inside the profiles mutex (profile.rs:395, :406); there is no dirty flag and
     no hook to attach one. `epoch_for_spawn` pays a full file write on **every spawn** for bytes that
     never change.
-    ★2026-10-11 개정(A): dirty 표시는 생겼다(내부 변경의 저장 실패 때만 — 다음 성공 저장이 싣는다) · `epoch_for_spawn` 은
-    저장하지 않는다. 묶기 · 디바운스 · 종료 때 비우기는 여전히 없다(종료 때 남은 dirty 는 잃는다)★
+    ★Amended 2026-10-11 (A): a dirty mark now exists (only on a save failure of an internal change — the next successful save carries it) · `epoch_for_spawn` does
+    not save. Batching · debounce · flushing on shutdown still do not exist (a dirty mark left at shutdown is lost)★
 56. **Migrate `agents.json` across schema versions** — a version mismatch yields an empty in-memory
     list with the file left **un-backed-up** (persistence/mod.rs:121-126), and the next save
     overwrites it (profile.rs:395). Unlike the parse-error path, which does rename to `.corrupt-<ms>`.
-    ★2026-10-11 개정(A · ADR-0291 R2 · R3): 새 판은 덮지 않는다(그 실행 내내 읽기 전용) · 리더 없는 앞 판은 손상으로
-    첫 저장 직전 `.corrupt` 에 복사된다. 판 사이 이주 자체는 여전히 없다(지금 판 = 1)★
+    ★Amended 2026-10-11 (A · ADR-0291 R2 · R3): a newer edition is not overwritten (read-only for that whole run) · an earlier edition with no reader is treated as corrupt and
+    copied to `.corrupt` just before the first save. Migration between editions itself still does not exist (current edition = 1)★
 57. **Read back what was persisted** — `ProfileStore::load` has exactly one caller,
     `ProfileRegistry::new` (profile.rs:380); nothing re-reads after boot.
 58. **Roll back a partially-applied `mutate_if` closure** — the closure gets `&mut` to the map with
@@ -2025,7 +2025,7 @@ would want to do, and why it cannot today.
 59. **Garbage-collect corpse profiles** — removal has one trigger, the explicit delete verb
     (manager.rs:651-653); no TTL, no capacity eviction, no crash pruning.
 60. **Unwatch a tracker entry when the child dies on its own** — the only `unwatch` is in `kill_agent`
-    (manager.rs:1726) and "reaper 는 tracker 를 모른다" (:1725). Naturally-exited agents leave a live
+    (manager.rs:1726) and "reaper 는 tracker 를 모른다" [the reaper does not know the tracker] (:1725). Naturally-exited agents leave a live
     polling entry for the daemon's lifetime.
 61. **Re-arm a `Degraded` session-id observer** — the doc says unwatch+watch is required
     (session_tracker.rs:60-62) and nothing calls that pair.
@@ -2036,7 +2036,7 @@ would want to do, and why it cannot today.
     `AgentBackend::open_spawn` impl (trait default backend/mod.rs:153-169, claude's two branches
     backend/claude/mod.rs:370-377), and the assembly point only ever receives a
     `Box<dyn AgentTransport>` in `SpawnParts` (backend/mod.rs:309), so it has no type to switch on.
-    `ApiTransport` exists but is unreachable (api.rs:4, "manager 라우팅은 없음").
+    `ApiTransport` exists but is unreachable (api.rs:4, "manager 라우팅은 없음" [there is no manager routing]).
 63. **Prevent a double spawn of the same profile from two connections** — the `get_session`
     pre-check drops its read lock before the write-lock insert, and the code documents the window as
     open and pre-existing (manager.rs:878-883). `SpawnReservation` (:892-900) narrows but does not
@@ -2050,7 +2050,7 @@ would want to do, and why it cannot today.
     manager.rs:480) consumes every session's terminal for the whole daemon.
 67. **Enforce that production never assembles a core with turn observation disabled** —
     `TurnWiring::detached()` is `#[doc(hidden)]` and the doc concedes "그 구분을 강제하는 장치는
-    **없다** … 이건 컴파일러가 아니라 규약이 지키는 경계다" (output_core.rs:103-105).
+    **없다** … 이건 컴파일러가 아니라 규약이 지키는 경계다" [there is **no** device that enforces that distinction … this is a boundary kept by convention, not by the compiler] (output_core.rs:103-105).
 68. ~~**Choose the activation mode on any basis other than "is a session id stored"**~~ — **no longer
     true.** All three entrances now call `backend::can_resume_profile`, which ANDs the stored sid
     with the backend's resume axis, so a sid on a backend that cannot resume selects `Fresh`. What

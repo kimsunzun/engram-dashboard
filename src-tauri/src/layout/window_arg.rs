@@ -1,38 +1,38 @@
-//! 창 인자 해석기(TRD S26-window-chrome §4-5) — 버스 동사 · invoke 껍데기가 받은 창 인자 하나를 지금 모델 안 창의
-//! label 로 푼다. 받는 꼴 = `main` · 영속 id(재시작을 넘어 같은 창) · 이번 실행의 label. 창 번호는
-//! 받지 않는다 — 번호는 닫힌 창의 것을 다시 쓰므로 쥐고 있던 번호가 다른 창을 가리킬 수 있다.
+//! Window argument resolver (TRD S26-window-chrome §4-5) — resolves one window argument received by a bus verb · invoke shell to the label of a window in the current model.
+//! Accepted forms = `main` · persistent id (the same window across restarts) · label of this run. A window number is not
+//! accepted — numbers of closed windows are reused, so a number held could point to a different window.
 //!
-//! 모델(`ViewManager`)만 읽고 Tauri 를 모른다. 부르는 쪽이 레이아웃 락을 잠깐 잡아 넘긴다 — 푼 label 로 적용
-//! 서비스를 부르기 전에 락을 놓으므로, 그 사이 창이 닫히면 적용 서비스가 「창 없음」으로 거절한다.
+//! It only reads the model (`ViewManager`) and knows nothing of Tauri. The caller briefly takes the layout lock and hands it over — the lock is released before calling the apply
+//! service with the resolved label, so if the window closes in between, the apply service rejects with 「창 없음」(no such window).
 
 use uuid::Uuid;
 
 use super::manager::{ViewManager, WindowLabel, MAIN_WINDOW_LABEL};
 
-/// 창 인자를 못 푼 까닭. 부르는 쪽이 코드로 옮긴다 — 버스는 `NumberGiven` = `INVALID_ARGUMENT` · `NotFound` =
-/// `CONFLICT`(레이아웃 적용 실패와 같은 코드).
+/// Why the window argument could not be resolved. The caller converts it to a code — on the bus `NumberGiven` = `INVALID_ARGUMENT` · `NotFound` =
+/// `CONFLICT` (the same code as a layout apply failure).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WindowArgError {
-    /// 숫자만 준 인자 — 창 번호로 읽힌다.
+    /// An argument given as digits only — read as a window number.
     #[error("창 번호는 창 인자로 받지 않는다 — 번호는 다시 쓰인다. window.list 의 details 에서 그 번호의 window_id 를 찾아 넘기거나, layout.get 줄의 window(label)를 넘기라")]
     NumberGiven,
-    /// 지금 모델에 그 창이 없다 — 닫힌 창의 영속 id · 앞 실행의 label · 닫힌 창의 label · 모르는 낱말. 받은 인자를 싣는다.
+    /// No such window in the current model — persistent id of a closed window · label of a previous run · label of a closed window · unknown word. Carries the argument received.
     #[error("window 없음: {0} — window.list 의 창 label 이나 그 창의 window_id 를 넘기라(label 은 그 실행 안에서만 맞는다)")]
     NotFound(String),
 }
 
-/// 창 인자 `arg`(앞뒤 공백은 깎는다)를 모델 안 창의 label 로 푼다.
+/// Resolves window argument `arg` (leading and trailing whitespace trimmed) to the label of a window in the model.
 ///
 /// - `main` → `main`.
-/// - 숫자만(`"2"`) → [`WindowArgError::NumberGiven`] — 영속 id · label 보다 먼저 가른다.
-/// - 모델 안 창의 영속 id 와 철자가 같으면 그 창의 label. 저장된 id 는 `state.json` 에서 검사 없이 읽혀 정규 UUID
-///   철자가 아닐 수 있다 — 앱이 내준 id(`window.list` · 생성 답)를 그대로 돌려주면 언제나 풀리게 철자 비교가 먼저다.
-/// - UUID 로 읽히면(대소문자 · 중괄호 등 다른 철자도) → UUID 값이 같은 영속 id 를 가진 창의 label. 그런 창이
-///   없으면 다음 갈래로 넘어간다 — UUID 꼴 label 도 label 로 풀린다.
-/// - 그 밖 → 모델에 그 label 의 창이 있으면 그대로(같은 실행 안 별칭). 운영 label 은 `main` 과 팝아웃 접두
-///   (`slot-popup-`)뿐이라 이 갈래가 표의 「접두 label」 갈래다. 영속 id 와 label 이 같은 철자면 id 가 이긴다.
-/// - 어디에도 없으면 `NotFound` — 닫히는 창의 id · label 도 모델에 없어 여기다.
-// ADR-0302 — 창 상태 명령
+/// - Digits only (`"2"`) → [`WindowArgError::NumberGiven`] — decided before persistent id · label.
+/// - If the spelling equals the persistent id of a window in the model, that window's label. A saved id is read from `state.json` without validation and may not be in canonical UUID
+///   spelling — the spelling comparison comes first so that giving back an id the app handed out (`window.list` · creation reply) always resolves.
+/// - If it reads as a UUID (also other spellings such as case · braces) → the label of the window whose persistent id has the same UUID value. If there is no such
+///   window, it moves on to the next branch — a UUID-shaped label also resolves as a label.
+/// - Otherwise → if the model has a window with that label, as is (alias within the same run). The production labels are only `main` and the popout prefix
+///   (`slot-popup-`), so this branch is the 「접두 label」(prefix label) branch of the table. If a persistent id and a label have the same spelling, the id wins.
+/// - If it is nowhere → `NotFound` — the id · label of a closing window is not in the model either, so it lands here.
+// ADR-0302 — window state command
 pub fn resolve(mgr: &ViewManager, arg: &str) -> Result<WindowLabel, WindowArgError> {
     let arg = arg.trim();
     if arg == MAIN_WINDOW_LABEL {
@@ -61,7 +61,7 @@ pub fn resolve(mgr: &ViewManager, arg: &str) -> Result<WindowLabel, WindowArgErr
     Err(WindowArgError::NotFound(arg.to_string()))
 }
 
-/// 숫자만인 인자를 거절한다. 해석기 밖 갈래도 같은 거절을 먼저 하도록 따로 연다(TRD §4-5 동사 차례 ① —
+/// Rejects an argument that is digits only. It is opened separately so that branches outside the resolver also make the same rejection first (TRD §4-5 verb order ① —
 /// `window.close { if_empty }`).
 pub fn reject_number(arg: &str) -> Result<(), WindowArgError> {
     let arg = arg.trim();
@@ -107,7 +107,7 @@ mod tests {
         );
     }
 
-    // 손으로 고친 state.json 이 정규형이 아닌 id 를 남겨도 앱이 내준 그 철자 · 정규 철자 둘 다 그 창이다.
+    // Even if a hand-edited state.json leaves a non-canonical id, both the spelling the app handed out and the canonical spelling are that window.
     #[test]
     fn a_non_canonical_stored_window_id_resolves_by_spelling_and_by_value() {
         let (mut mgr, id) = model();
@@ -131,7 +131,7 @@ mod tests {
         assert_eq!(resolve(&mgr, &ghost), Err(WindowArgError::NotFound(ghost)));
     }
 
-    // 닫기 요청이 모델에서 뺀 창(OS 창은 아직 있다 — `closing`)의 영속 id 도 모델 밖이다.
+    // The persistent id of a window that a close request removed from the model (the OS window still exists — `closing`) is also outside the model.
     #[test]
     fn the_window_id_of_a_closed_window_is_not_found() {
         let (mut mgr, id) = model();
@@ -174,7 +174,7 @@ mod tests {
         );
     }
 
-    // 앞 실행이 쓴 label — 실행 표식이 없는 옛 꼴 · 다른 실행 표식 — 은 이번 실행의 창을 가리키지 않는다.
+    // A label written by a previous run — the old form with no run marker · a marker of a different run — does not point to a window of this run.
     #[test]
     fn a_label_from_a_previous_run_is_not_found() {
         let (mgr, _) = model();

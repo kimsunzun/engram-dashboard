@@ -1,12 +1,12 @@
-// 테스트 전용 — agent 환원기와 공유하는 골든(`queued_input_golden.json`)을 **경로에서** 읽는다(ADR-0231).
-// ★사본을 두지 않는다★ — 사본이면 Rust 쪽 골든만 고쳐도 TS 시험이 초록으로 남아 두 판이 조용히 갈라진다.
-// 파일 형식의 정본은 그 파일 머리의 `_format` 이다.
+// Test only — reads the golden shared with the agent reducer (`queued_input_golden.json`) **from its path** (ADR-0231).
+// ★No copy is kept★ — with a copy, fixing only the Rust-side golden would leave the TS test green and the two editions quietly diverge.
+// The canonical file format is `_format` at the head of that file.
 
 import goldenSource from '../../../../crates/engram-dashboard-agent/src/queued_input_golden.json?raw'
 import type { QueuedInputEvent } from '../../../../crates/engram-dashboard-protocol/bindings/QueuedInputEvent'
 import type { QueuedEntry } from '../queuedInputReducer'
 
-/** 골든 행 = 목록 조회 행과 같은 낱말(`state` · `cancel`). `sent` 는 넘김 표지가 선 행에만 `true` 로 실린다(없으면 안 넘김). */
+/** Golden row = same words as a list query row (`state` · `cancel`). `sent` is carried as `true` only on a row where the handoff marker stood (absent = not handed off). */
 export interface GoldenRow {
   id: string
   text: string

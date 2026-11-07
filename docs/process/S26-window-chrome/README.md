@@ -1,5 +1,5 @@
-# S26 — 창 크롬 · 이름 (T-66)
+# S26 — Window chrome · naming (T-66)
 
-- 주제 브랜치 = `v0.5.0/feat/window-chrome`(2026-10-23 master `adcac433` 에서 판다).
-- **PRD 는 여기가 아니라 `../S21-window-chrome/prd.md` 에 있다** — 슬롯 도킹 시절(스텝 S21)에 0.3판 초안으로 썼고 지금은 0.4판(2026-10-23 사용자 결정 반영 · 리뷰 전)이다. 그 자리에 둔다(CLAUDE.md 「브랜치·커밋」 이행 — 이미 있는 `S21-*` 폴더는 옮기지 않는다).
-- 이 주제의 새 설계 문서(TRD 등)는 이 폴더에 둔다.
+- Topic branch = `v0.5.0/feat/window-chrome` (created from master `adcac433` on 2026-10-23).
+- **The PRD is not here; it is in `../S21-window-chrome/prd.md`** — it was written as a draft 0.3 during the slot-docking period (step S21) and is now edition 0.4 (reflects the 2026-10-23 user decisions · before review). It stays in place (per the CLAUDE.md 「브랜치·커밋」 transition rule — existing `S21-*` folders are not moved).
+- New design documents for this topic (TRD etc.) go in this folder.

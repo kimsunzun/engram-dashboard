@@ -1,12 +1,12 @@
-// viewStore 단위테스트 — emit↔invoke 루프(ADR-0035/0057 수직 슬라이스, 탭 소유 모델).
+// viewStore unit test — emit↔invoke loop (ADR-0035/0057 vertical slice, tab ownership model).
 //
-// invoke('@tauri-apps/api/core') + listen('@tauri-apps/api/event') 를 mock 해, 액션이 올바른 invoke 를
-// 부르는지 + 백엔드 emit(layout:updated/window:tabs-updated)을 받아 상태가 갱신되는지 + version 가드가
-// stale emit 을 폐기하는지 + ★창별 active 탭 판정(useCurrentViewId 계열)★을 검증한다. 실제 Tauri 없이 순수 로직만.
+// Mocks invoke('@tauri-apps/api/core') + listen('@tauri-apps/api/event') to verify that actions call the correct invoke
+// + that state updates on receiving the backend emit (layout:updated/window:tabs-updated) + that the version guard discards
+// stale emits + ★per-window active tab decision (useCurrentViewId family)★. Pure logic only, with no real Tauri.
 //
-// ★검증하는 불변식(탭 소유 모델, ADR-0057)★: 옛 전역 activeViewId 는 사라졌다. 창(label)이 탭 목록을
-// 소유하고, viewStore.windows[label].active 가 그 창의 활성 탭이다. layout 은 view_id 별 캐시(전역 단조
-// version 가드). window:tabs-updated 도 창별 version 가드로 stale emit 을 폐기한다(G10).
+// ★Invariant verified (tab ownership model, ADR-0057)★: the old global activeViewId is gone. The window (label)
+// owns the tab list, and viewStore.windows[label].active is that window's active tab. layout is a per-view_id cache (global monotonic
+// version guard). window:tabs-updated also discards stale emits with a per-window version guard (G10).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -17,7 +17,7 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: (cmd: string, ...rest: unknown[]) => invokeMock(cmd, ...rest),
 }))
 
-// listen mock: 등록된 핸들러를 이벤트명별로 보관해, 테스트가 직접 emit 을 흉내낸다(emit helper).
+// listen mock: keeps registered handlers per event name so the test imitates emit directly (emit helper).
 const listeners = new Map<string, (e: { payload: unknown }) => void>()
 const unlistenMock = vi.fn()
 const listenMock = vi.fn(async (event: string, handler: (e: { payload: unknown }) => void) => {
@@ -39,7 +39,7 @@ import {
   type WindowTabsPayload,
 } from './viewStore'
 
-/** 백엔드 emit 흉내 — subscribeViewEvents 가 등록한 핸들러로 payload 를 흘려보낸다. */
+/** Imitates a backend emit — pours the payload into the handler subscribeViewEvents registered. */
 function emit(event: string, payload: unknown): void {
   const h = listeners.get(event)
   if (!h) throw new Error(`no listener for ${event} — subscribeViewEvents 호출했나?`)
@@ -52,7 +52,7 @@ function snap(overrides: Partial<ViewSnapshot> = {}): ViewSnapshot {
     layout: { type: 'slot', id: 's1', content: { type: 'empty' } }, // ADR-0060
     focused_slot_id: 's1',
     foreign_slots: [],
-    slot_spatial: [], // ADR-0068: 공간 파생(이 테스트는 안 씀 — 빈 배열로 타입 충족)
+    slot_spatial: [], // ADR-0068: space derivation (not used in this test — fills the type with an empty array)
     slot_rects: [{ slot_id: 's1', x0: 0, y0: 0, x1: 1, y1: 1 }], // ADR-0227
     split_rects: [],
     ratio_min: 0.1,
@@ -84,7 +84,7 @@ beforeEach(() => {
   unlistenMock.mockClear()
   listenMock.mockClear()
   useViewStore.setState({ layouts: {}, windows: {}, renderModeOverride: {} })
-  window.location.hash = '#/' // 기본 = main 창
+  window.location.hash = '#/' // Default = main window
 })
 afterEach(() => {
   vi.restoreAllMocks()
@@ -225,7 +225,7 @@ describe('viewStore 탭/창 액션 → invoke (탭 소유 모델, ADR-0057)', ()
     const moved = { window: 'slot-popup-2', tab: 'v-new', window_id: '7d2f0b8e-1c3a-4f5e-9b6d-2a4c6e8f0a1b', number: 2 }
     invokeMock.mockResolvedValueOnce(moved)
     const res = await useViewStore.getState().moveSlotToWindow('v1', 's1')
-    // null = 새 팝업 창.
+    // null = new popup window.
     expect(invokeMock).toHaveBeenCalledWith('move_slot_to_window', {
       viewId: 'v1',
       slotId: 's1',
@@ -294,7 +294,7 @@ describe('viewStore emit 수신 → 상태 갱신', () => {
     expect(cached.ratioMax).toBe(0.85)
   })
 
-  // TRD S21-storage §6-2: 모르는 내용 슬롯은 `empty` 로 실린다 — 이 칸을 버리면 프론트가 그 슬롯을 빈 칸으로 고른다.
+  // TRD S21-storage §6-2: unknown-content slots are carried as `empty` — if this field is dropped the frontend picks that slot as an empty area.
   it('layout:updated → foreign_slots 를 캐시 항목에 싣고, 다음 스냅샷에서 빠지면 함께 빠진다', async () => {
     {
       const { ready } = subscribeViewEvents()
@@ -389,7 +389,7 @@ describe('selectView (창 캔버스 렌더 selector)', () => {
   })
 })
 
-/** layout 캐시에 직접 seed(emit 경로 없이) — selectView 단위테스트 헬퍼. */
+/** Seed directly into the layout cache (without the emit path) — selectView unit test helper. */
 function emit_seed_layout(viewId: string, over: Partial<ViewSnapshot>): void {
   useViewStore.getState().applyLayoutUpdated(snap({ view_id: viewId, ...over }))
 }
@@ -412,8 +412,8 @@ describe('initMainWindowFromBackend 부팅 init(read-only pull)', () => {
     expect(selectView(st, 'v1')?.focusedSlotId).toBe('s1')
   })
 
-  // ★ADR-0102: list_tabs 가 조기 transient 로 몇 번 실패해도 재시도로 회수해 창 상태를 채운다★.
-  //   main 은 이벤트 복구 경로가 없어(window:tabs-updated 는 탭 변형 시에만) 이 pull 이 one-shot 이면 안 된다.
+  // ★ADR-0102: even if list_tabs fails a few times with early transients, retry recovers it and fills the window state★.
+  //   main has no event recovery path (window:tabs-updated fires only on tab mutations), so this pull must not be one-shot.
   it('list_tabs 가 2번 reject 후 resolve → 재시도로 회수해 windows["main"] 이 채워진다(ADR-0102)', async () => {
     let listTabsCalls = 0
     invokeMock.mockImplementation(async (cmd: string) => {
@@ -426,14 +426,14 @@ describe('initMainWindowFromBackend 부팅 init(read-only pull)', () => {
       return undefined
     })
     await initMainWindowFromBackend()
-    expect(listTabsCalls).toBeGreaterThanOrEqual(3) // 첫 시도 + 재시도 2회 이상.
+    expect(listTabsCalls).toBeGreaterThanOrEqual(3) // First attempt + 2 or more retries.
     const st = useViewStore.getState()
     expect(st.windows['main'].active).toBe('v1')
     expect(selectView(st, 'v1')?.focusedSlotId).toBe('s1')
   }, 10000)
 
-  // ★ADR-0102: 재시도 소진 후에도 실패하면 조용히 삼키지 않고 throw 로 최종 실패를 전파한다★
-  //   (호출자 eventBus 가 console.error 로 표면화 — win 이 영영 안 채워지는데 신호가 없으면 원인 불명 고착).
+  // ★ADR-0102: if it still fails after retries are exhausted, do not swallow it silently but propagate the final failure with throw★
+  //   (the caller eventBus surfaces it via console.error — if win is never filled and there is no signal, it is a stuck state with unknown cause).
   it('list_tabs 가 계속 reject → 재시도 소진 후 throw(최종 실패 전파, ADR-0102)', async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === 'list_tabs') throw new Error('backend down')
@@ -448,14 +448,14 @@ describe('initMainWindowFromBackend 부팅 init(read-only pull)', () => {
       const { ready } = subscribeViewEvents()
       await ready
     }
-    // 구독이 먼저 걸린 상태에서, init pull 보다 *먼저* 더 최신 emit(version 5)이 캐시에 들어왔다고 가정.
+    // With the subscription already hooked, assume a newer emit (version 5) entered the cache *before* the init pull.
     emit('layout:updated', snap({
       view_id: 'v1',
       version: 5,
       focused_slot_id: 's-new',
       layout: { type: 'slot', id: 's-new', content: { type: 'empty' } },
     }))
-    // 그 뒤 늦게 완료된 init 의 get_view pull(낡은 version 0)이 도착.
+    // Then the init's get_view pull (stale version 0), completed late, arrives.
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === 'list_tabs') {
         return tabsPayload({ label: 'main', tabs: [{ id: 'v1', name: 'View 1', named: true }], active: 'v1', version: 0 })
@@ -494,9 +494,9 @@ describe('subscribeViewEvents 등록/해제', () => {
     expect(unlistenMock).toHaveBeenCalledTimes(2)
   })
 
-  // ★누수 가드★: ready 가 pending(listen 등록 미완) 인 동안 dispose 가 불리면, 뒤늦게 등록이 끝나 도착한
-  // unlisten 핸들을 *즉시* 호출해야 한다(안 부르면 영구 누수). listen 을 deferred 로 잡아 등록 await 윈도를
-  // 열어두고, 그 사이 dispose → 이후 listen resolve 순으로 실제 race 를 재현한다.
+  // ★Leak guard★: if dispose is called while ready is pending (listen registration unfinished), the
+  // unlisten handle that arrives when registration finishes late must be called *immediately* (if not, a permanent leak). Hold listen as deferred to
+  // keep the registration await window open, and reproduce the real race in the order dispose in between → then listen resolve.
   it('ready pending 중 dispose → 늦게 도착한 unlisten 핸들을 즉시 호출(누수 가드)', async () => {
     const resolveListen = new Map<string, (fn: typeof unlistenMock) => void>()
     listenMock.mockImplementation(
@@ -561,7 +561,7 @@ describe('subscribeViewEvents 등록/해제', () => {
   })
 })
 
-// ★렌더 모드 오버라이드(§5, 프론트 전용)★: set/clear + slot 생명주기 정리(FIX-1) + 미타입 진입 가드(FIX-4).
+// ★Render mode override (§5, frontend-only)★: set/clear + slot lifecycle cleanup (FIX-1) + untyped entry guard (FIX-4).
 describe('renderModeOverride 오버라이드 + 생명주기 정리(§5)', () => {
   beforeEach(() => {
     useViewStore.setState({ renderModeOverride: {} })
@@ -628,8 +628,8 @@ describe('renderModeOverride 오버라이드 + 생명주기 정리(§5)', () => 
   })
 })
 
-// ★창 판정(§3-3/§3-4, G7)★: readWindowLabelFromHash·currentViewId 가 이 웹뷰가 어느 창인지, 그 창의 active
-// 탭이 무엇인지 URL + windows 상태로 판정한다. 팝업(?window=)·main·모르는 라우트(main 폴백)를 커버.
+// ★Window decision (§3-3/§3-4, G7)★: readWindowLabelFromHash · currentViewId decide which window this webview is and what that window's active
+// tab is from the URL + windows state. Covers a popup (?window=) · main · an unknown route (main fallback).
 describe('readWindowLabelFromHash + currentViewId (창 컨텍스트 해소, ADR-0057)', () => {
   const origHash2 = window.location.hash
   afterEach(() => {

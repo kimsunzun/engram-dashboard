@@ -1,14 +1,14 @@
-# 모듈 8a — Phase 3a: API 레이어 브리핑 (담당: dcs24, Sonnet)
+# Module 8a — Phase 3a: API layer briefing (owner: dcs24, Sonnet)
 
-발신: ed12 (매니저)
-근거: `docs/frontend-integration-lld.md` §1(타입), §2(ptyApi). 반드시 원문 읽고 따른다.
-목적: 프론트가 백엔드 command/event를 호출하는 타입·래퍼 레이어. **화면 영향 없음**(다음 단계에서 소비).
+From: ed12 (manager)
+Source: `docs/frontend-integration-lld.md` §1 (types), §2 (ptyApi). Read the original and follow it.
+Purpose: the type and wrapper layer through which the frontend calls backend commands/events. **No screen impact** (consumed in the next step).
 
-## 선행: 기존 코드 파악
+## Prerequisite: understand the existing code
 
-`src/store/agentStore.ts` 읽어서 현재 더미 Agent 타입 확인. 백엔드 AgentInfo와 조율(통합 또는 매핑) — 충돌 시 백엔드 타입 기준, 더미 전용 필드(cost 등 UI용)는 별도 유지.
+Read `src/store/agentStore.ts` and check the current dummy Agent type. Reconcile it with the backend AgentInfo (merge or map) — on conflict the backend type is the reference, and dummy-only fields (UI ones such as cost) stay separate.
 
-## 1. src/api/types.ts (Rust 타입 미러 — 백엔드와 정확히 일치)
+## 1. src/api/types.ts (a mirror of the Rust types — must match the backend exactly)
 
 ```ts
 // AgentStatus: 백엔드 #[serde(tag="type")]와 일치 (internally-tagged)
@@ -27,9 +27,9 @@ export interface AgentInfo { id: string; cwd: string; status: AgentStatus; cols:
 export interface AgentStatusChanged { id: string; status: AgentStatus }
 ```
 
-## 2. src/api/ptyApi.ts (invoke 래퍼 + Channel)
+## 2. src/api/ptyApi.ts (invoke wrapper + Channel)
 
-`@tauri-apps/api/core`의 invoke + Channel 사용. 8개 command 1:1 래핑:
+Use invoke + Channel from `@tauri-apps/api/core`. Wrap the 8 commands 1:1:
 
 ```ts
 import { invoke, Channel } from '@tauri-apps/api/core'
@@ -58,18 +58,18 @@ export const ptyApi = {
 }
 ```
 
-> **인자명 주의:** Tauri는 command 인자를 camelCase로 받음(`agentId`→Rust `agent_id` 자동 매핑). LLD §2 확인.
-> **T-7:** getSnapshot wire 포맷(PtyChunk number[])은 live PtyEvent base64와 다름. 3c에서 snapshot 쓸지 결정 — 일단 래퍼만 두고 미사용.
+> **Mind the argument names:** Tauri receives command arguments in camelCase (`agentId`→Rust `agent_id` is mapped automatically). Check LLD §2.
+> **T-7:** the getSnapshot wire format (PtyChunk number[]) differs from the live PtyEvent base64. Whether to use the snapshot is decided in 3c — for now only the wrapper is placed, unused.
 
-## 규칙·품질
+## Rules and quality
 
-- 백엔드 타입과 1:1 정확히. AgentStatus internally-tagged 유지(프론트가 `status.type`으로 분기).
-- 주석: 각 타입/함수에 1줄. wire 포맷 주의점(base64, number[]) 명시.
-- 기존 코드 안 깨뜨림 — types.ts/ptyApi.ts 신규 추가만, 아직 컴포넌트 연결 안 함.
+- Match the backend types 1:1 exactly. Keep AgentStatus internally-tagged (the frontend branches on `status.type`).
+- Comments: one line on each type/function. State the wire-format cautions (base64, number[]).
+- Do not break existing code — only add new types.ts/ptyApi.ts, no component connection yet.
 
-## 검증 & 보고
+## Verification and report
 
-- `npx tsc --noEmit` (또는 `npm run build`의 타입체크) 통과 — 타입 에러 0.
-- 보고: `orch 12 "⟁dcs24 Phase3a 완료 — types.ts/ptyApi.ts, tsc 통과"`
+- `npx tsc --noEmit` (or the type check of `npm run build`) passes — zero type errors.
+- Report: `orch 12 "⟁dcs24 Phase3a 완료 — types.ts/ptyApi.ts, tsc 통과"`
 
-막히면 30분 내 중간보고. agentStore 더미 타입과 조율 애매하면 질문.
+If stuck, send an interim report within 30 minutes. If the reconciliation with the agentStore dummy type is ambiguous, ask.

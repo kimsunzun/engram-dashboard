@@ -1,10 +1,10 @@
-// AgentClient 팩토리 — daemon-only 단일 경로 (ADR-0029: embedded 표면 제거).
+// AgentClient factory — daemon-only single path (ADR-0029: embedded surface removed).
 //
-// T7c: WsTransport → TauriTransport 교체. 창이 몇 개든 데몬엔 Rust DaemonClient 연결 1개
-// (ADR-0036 목표). 프론트는 Rust app.emit 으로 broadcast를 수신하고, invoke 로 명령을 전달한다.
+// T7c: WsTransport → TauriTransport swap. However many windows there are, the daemon sees one Rust DaemonClient connection
+// (ADR-0036 goal). The frontend receives broadcasts through Rust app.emit and sends commands through invoke.
 //
-// §5 LLM-우선 제어: 제어 표면(AgentClient·DaemonControl)을 window 에 노출해 cdp.mjs eval /
-// (미래) 백엔드측 LLM 이 사람 클릭과 동일 진입점을 호출할 수 있게 한다(임시 경로, 정식 command 버스 전까지).
+// §5 LLM-first control: expose the control surface (AgentClient · DaemonControl) on window so that cdp.mjs eval /
+// a (future) backend-side LLM can call the same entry points as a human click (temporary path, until the real command bus).
 
 import type { AgentClient } from './agentClient'
 import { type DaemonControl, DaemonDaemonControl } from './daemonControl'
@@ -15,29 +15,29 @@ import { retryAsync } from '../util/retryInvoke'
 let instance: AgentClient | null = null
 let daemonControlInstance: DaemonControl | null = null
 
-// ★T7c: TauriTransport 는 async init(리스너 등록)이 필요 — 싱글톤 초기화를 async 로 보호한다.
+// ★T7c: TauriTransport needs an async init (listener registration) — guard the singleton initialization with async.
 let initPromise: Promise<void> | null = null
 
-/** 단일 AgentClient 인스턴스. 컴포넌트·스토어·(미래)LLM 이 모두 이걸 통한다. */
+/** The single AgentClient instance. Components · stores · the (future) LLM all go through it. */
 export function getAgentClient(): AgentClient {
   if (!instance) {
     const transport = new TauriTransport()
     instance = new ProtocolClient(transport)
     daemonControlInstance = new DaemonDaemonControl(instance)
-    // §5 LLM-우선 제어: 제어 표면을 window 에 노출 — cdp.mjs eval / (미래) 백엔드측 LLM 이
-    // 사람 클릭과 동일 진입점을 호출할 수 있게 한다.
+    // §5 LLM-first control: expose the control surface on window — so that cdp.mjs eval / a (future) backend-side LLM
+    // can call the same entry points as a human click.
     ;(window as unknown as { __ENGRAM_AGENT__?: AgentClient }).__ENGRAM_AGENT__ = instance
-    // 데몬 제어(start/stop/status)도 동일하게 노출 — 트레이(#2)·LLM·cdp 가 같은 핸들을 흔든다.
+    // Expose daemon control (start/stop/status) the same way — the tray (#2) · the LLM · cdp all drive the same handle.
     ;(window as unknown as { __ENGRAM_DAEMON__?: DaemonControl }).__ENGRAM_DAEMON__ =
       daemonControlInstance
-    // ★T7c: TauriTransport Tauri 이벤트 리스너 등록(async). 리스너가 등록되기 전 도착하는 이벤트는
-    // 유실될 수 있으나, 부팅 직후 bootstrapDaemonIfNeeded 가 connect 를 보장하므로 그 이후 이벤트는
-    // 안전하다. 리스너 등록 완료 전엔 connection 상태가 'down' 이므로 ProtocolClient 가 명령을 보내지
-    // 않는다(ensureReady reject).
+    // ★T7c: register the TauriTransport Tauri event listeners (async). Events arriving before the listeners are registered
+    // may be lost, but bootstrapDaemonIfNeeded guarantees connect right after boot, so events after that
+    // are safe. Until registration completes the connection state is 'down', so ProtocolClient does not send
+    // commands (ensureReady rejects).
     //
-    // ★재시도 안전성★: init() 내부 registerListeners() 는 부분 실패 시 등록분을 즉시 정리하고 throw
-    // 한다(unlisten 을 비운 채 나옴). 그러면 다음 시도에서 registerListeners() 는 처음부터 재등록하므로
-    // 이중 리스너 위험이 없다. ADR-0102 패턴을 init 경로까지 확장한다.
+    // ★Retry safety★: on partial failure, registerListeners() inside init() cleans up what it registered right away and throws
+    // (leaving with unlisten emptied). Then on the next attempt registerListeners() re-registers from scratch, so there is
+    // no double-listener risk. This extends the ADR-0102 pattern to the init path.
     initPromise = retryAsync(() => transport.init(), {
       onRetry: (err, attempt) => {
         console.warn(`[clientFactory] TauriTransport 리스너 등록 재시도 #${attempt}:`, err)
@@ -49,27 +49,27 @@ export function getAgentClient(): AgentClient {
   return instance
 }
 
-/** TauriTransport 초기화(리스너 등록) 완료 대기. 부팅 시 bootstrapDaemonIfNeeded 전에 호출 권장. */
+/** Wait for TauriTransport initialization (listener registration) to finish. Recommended to call before bootstrapDaemonIfNeeded at boot. */
 export async function waitForTransportInit(): Promise<void> {
-  getAgentClient() // 싱글톤 생성 보장.
+  getAgentClient() // Guarantees singleton creation.
   if (initPromise) await initPromise
 }
 
 export function getDaemonControl(): DaemonControl {
-  if (!daemonControlInstance) getAgentClient() // 동시 초기화 보장.
+  if (!daemonControlInstance) getAgentClient() // Ensures both are initialized together.
   return daemonControlInstance!
 }
 
 /**
- * 부팅 시 **명시 ensure 1회**(ADR-0021 §1: spawn=명시 시점만). daemonControl.start() 로 데몬을
- * 띄운다(tmux attach 가 서버를 띄우는 것과 동치). 명령 경로(ensureReady)는 attach-only 라 데몬을
- * 못 깨우므로, 이 부팅 start 가 없으면 부팅 시 데몬이 안 뜬다.
- * 멱등 — start 는 이미 connected 면 즉시 resolve. 실패(데몬 spawn 불가)는 삼켜 부팅을 막지 않는다.
+ * **Explicit ensure once** at boot (ADR-0021 §1: spawn only at an explicit point). daemonControl.start() brings the daemon
+ * up (equivalent to tmux attach starting the server). The command path (ensureReady) is attach-only and cannot
+ * wake the daemon, so without this boot start the daemon would not come up at boot.
+ * Idempotent — start resolves immediately if already connected. Failure (daemon spawn impossible) is swallowed so it does not block boot.
  */
 export async function bootstrapDaemonIfNeeded(): Promise<void> {
-  // ADR-0102: 부팅 레이스로 인한 일시적 실패를 재시도로 자가복구한다(초기 IPC 준비 전 순간 거부 방어).
-  // 최종 실패는 console.error 로 표면화 — 이 함수가 throw 하면 이후 getAgents/구독이 전부 막히므로
-  // 삼켜 부팅을 이어가되, 로그는 warn(일시실패) → error(수동 복구 필요)로 강도를 높인다.
+  // ADR-0102: self-heal a transient failure caused by a boot race with retries (guards against an instant rejection before initial IPC is ready).
+  // The final failure is surfaced with console.error — if this function threw, every later getAgents/subscription would be blocked, so
+  // it is swallowed to let boot continue, and the log escalates from warn (transient failure) → error (manual recovery needed).
   try {
     await retryAsync(() => getDaemonControl().start(), {
       onRetry: (err, attempt) => {
@@ -77,11 +77,11 @@ export async function bootstrapDaemonIfNeeded(): Promise<void> {
       },
     })
   } catch (err) {
-    // ★이유 기록은 여기가 아니라 DaemonControl.start 안이다★: 명시 시작 경로가 전부 거기를 지나므로
-    //   한 곳에서 싣는다. 여기서 또 실으면 두 곳이 갈릴 뿐이다.
+    // ★The reason is recorded not here but inside DaemonControl.start★: every explicit start path goes through there, so
+    //   it is recorded in one place. Recording it here too would only make the two places diverge.
     console.error('[clientFactory] 부팅 daemon start 최종 실패 — 수동 daemon_start 필요:', err)
   }
 }
 
-/** 모듈 로드 시점 싱글톤(대부분 컴포넌트는 이걸 import). */
+/** Module-load-time singleton (most components import this). */
 export const agentClient = getAgentClient()

@@ -1,66 +1,66 @@
-# 합성 산출물 — 상주 데몬 ↔ 독립 업그레이드 클라이언트의 버전 불일치
+# Synthesis output — version mismatch between a resident daemon ↔ an independently upgrading client
 
-## 우리 상황(제약)
-데스크톱 앱 + 로컬 상주 데몬. 데몬은 **앱을 꺼도 살아남는 것이 존재 이유**다 — 살아 있는 자식 프로세스(에이전트 세션)를 붙들고 있다. 그래서 "업그레이드 시 데몬 재시작"은 공짜가 아니라 지키려던 것을 죽인다.
-현재: 프로토콜 버전 = 정수 하나, **동등 비교**. 불일치면 클라가 그 데몬을 거부하고 **그 위에 새 데몬을 띄우지도 않는다** → 사용자가 손으로 죽일 때까지 앱이 못 붙고 에이전트가 발이 묶인다. 과거 1→2 올렸을 때 실제로 "무한 재연결 중"이 났고, 원래 설계에 있던 "불일치 시 팝업 가이드"는 미구현.
-지금 새 명령 3종을 프로토콜에 추가했고(아직 아무도 안 보냄), 옛 데몬은 그 봉투를 디코드조차 못 한다. 옛 데몬이 돌려주는 오류에는 상관관계 id가 없어 보낸 쪽이 영원히 기다린다.
-프론트에는 모달·배너·토스트가 **하나도 없다**. 프로젝트 원칙상 새 UI 기능엔 LLM 호출 경로가 동반돼야 한다.
+## Our situation (constraints)
+A desktop app + a local resident daemon. The **daemon's reason to exist is to survive the app being closed** — it holds live child processes (agent sessions). So "restart the daemon on upgrade" is not free; it kills what the daemon was meant to protect.
+Currently: protocol version = one integer, **compared for equality**. On a mismatch the client rejects that daemon and **does not start a new daemon on top of it either** → until the user kills it by hand, the app cannot attach and agents are stuck. When it was raised from 1→2 in the past, "reconnecting forever" actually happened, and the "popup guide on mismatch" in the original design was never implemented.
+We have just added 3 new commands to the protocol (nobody sends them yet), and an old daemon cannot even decode that envelope. The error an old daemon returns has no correlation id, so the sender waits forever.
+The frontend has **no modal, banner or toast at all**. By project principle, a new UI feature must be accompanied by an LLM call path.
 
-## F1. 자동 kill+restart는 "잃을 게 없을 때만" 쓰인다
-- Bazel은 데몬 자동 재시작을 채택 — 상태가 재계산 가능한 빌드 캐시라서. (확신도: 확실)
-- tmux는 정수 동등 비교 + **연결 거부**, 자동 재시작 없음. 서버를 죽이면 세션이 그냥 죽는다. 수동 우회뿐. (확실)
-- Docker는 유일하게 **구조로 회피** — 컨테이너를 쥔 주체를 버전 민감한 제어 데몬 밖(containerd-shim)으로 빼고 live-restore를 둬서, 데몬이 죽어도 컨테이너가 산다. (확실)
-- **함의:** 우리 데몬은 "잃을 게 있는" 쪽이다. 따라서 자동 kill+restart 계열은 부적합.
+## F1. Automatic kill+restart is used "only when there is nothing to lose"
+- Bazel adopts automatic daemon restart — because its state is a build cache that can be recomputed. (Confidence: certain)
+- tmux uses integer equality comparison + **connection refusal**, with no automatic restart. If you kill the server, the sessions simply die. Manual workarounds only. (certain)
+- Docker is the only one that **avoids it structurally** — it moves the party holding the containers out of the version-sensitive control daemon (containerd-shim) and sets live-restore, so containers live even if the daemon dies. (certain)
+- **Implication:** our daemon is on the "has something to lose" side. So the automatic kill+restart family is unsuitable.
 
-## F2. 버전 숫자 단일 동등 비교는 컷오버를 의도할 때만 남아 있다
-- 실무 주류 = **포맷 차원의 min/max 범위 협상 + 그 위에 capability 협상 + 아래에 타임아웃**. (확실)
-- Kafka는 프로토콜 전체가 아니라 **메시지 타입마다 개별 [min,max] 버전**을 갖고, 클라가 연결 직후 지원표를 조회해 그 범위에서만 호출한다 → **새 메시지 타입 추가가 다른 것에 영향을 안 준다.** 우리 문제의 정면 반증. (확실)
-- MCP·LSP는 **버전(포맷 호환)과 capability(기능 가능 여부)를 별개 계층**으로 겹쳐 쓴다. (확실)
-- Watchman은 **버전 숫자 비교를 권장하지 않고** 이름 기반 capability 프로브를 쓰라고 문서가 명시. (확실)
-- MCP가 명시한 버전 상향 기준 = **"하위호환이 깨질 때만"**. (확실)
-- Gradle·VS Code Remote는 버전별 인스턴스를 병존시켜 불일치 자체를 안 만든다(대신 유휴 리소스 누적 비용). (확실)
+## F2. A single equality comparison of a version number survives only when a cutover is intended
+- The mainstream in practice = **min/max range negotiation at the format level + capability negotiation on top + timeouts underneath**. (certain)
+- Kafka has **an individual [min,max] version per message type**, not for the whole protocol, and the client queries the support table right after connecting and calls only within that range → **adding a new message type does not affect anything else.** A direct refutation of our problem. (certain)
+- MCP·LSP layer **version (format compatibility) and capability (whether a feature is possible) as separate layers**. (certain)
+- Watchman's docs state explicitly that **comparing version numbers is not recommended** and name-based capability probes should be used. (certain)
+- The criterion MCP states for bumping the version = **only when backward compatibility breaks**. (certain)
+- Gradle·VS Code Remote let per-version instances coexist so the mismatch itself never arises (at the cost of accumulating idle resources). (certain)
 
-## F3. "새 메시지 종류를 몰라서 무한 대기"는 세 겹으로 막는다
-- (a) **self-describing 프레임** — JSON-RPC는 method 이름을 몰라도 봉투를 열어 같은 id로 "method 없음" 오류를 돌려줄 수 있다. (확실)
-- (b) **사전 게이팅** — Kafka·Docker는 보내기 전에 상대 지원 범위를 먼저 확인하고 그 안에서만 호출. (확실)
-- (c) **타임아웃이 최종 백스톱** — gRPC 공식 문서가 "데드라인을 안 걸면 클라이언트가 사실상 영원히 기다릴 수 있다"며 항상 명시적 데드라인을 권고. (확실)
-- **함의:** 우리가 "버전을 올려야 한다"고 본 근거(무한 대기)는 **버전 문제가 아니라 타임아웃 부재 + 오류에 상관관계 id 부재 문제**다. 버전은 그 증상을 가리는 도구였을 뿐이다.
+## F3. "Waiting forever because it does not know the new message kind" is blocked in three layers
+- (a) **self-describing frames** — JSON-RPC can open the envelope even without knowing the method name and return a "method not found" error with the same id. (certain)
+- (b) **pre-gating** — Kafka·Docker first check the peer's supported range before sending and call only within it. (certain)
+- (c) **the timeout is the final backstop** — gRPC's official docs warn that without a deadline the client may effectively wait forever, and recommend always setting an explicit deadline. (certain)
+- **Implication:** the ground on which we judged "the version must be raised" (waiting forever) is **not a version problem but a problem of no timeout + no correlation id on the error.** The version was only a tool that masked that symptom.
 
-## F4. 고지 표면은 심각도 2분법이 정본이다
-- **모달은 "지금 하려는 일이 막혔다"에만.** Apple HIG: alert는 즉시 필요한 치명 정보에만, 아껴 쓰라. Microsoft: 앱 상호작용 전체를 막아야 할 만큼 심각할 때만 ContentDialog. Win32: "치명적인가 · 즉시 행동이 필요한가"가 모달 기준. (확실)
-- **자동으로 발생했고 특정 사용자 행동과 무관한 실패 = 배너(InfoBar)**라고 MS 가이드가 명시적으로 분기한다 — 우리 시나리오와 사실상 동일. (확실)
-- **고지 시점은 감지 즉시가 아니라 사용 시점.** kubectl은 client/server skew 경고를 모든 명령이 아니라 `kubectl version`을 칠 때만 띄우도록 **의도적으로 설계**했다(노이즈 회피). k8s API 서버의 폐기 경고도 사전 통지가 아니라 실제 요청에 헤더로 얹는다. Win32는 "몇 초 안에 스스로 해결될 수 있으면 알림을 지연하라"고 명시. Tailscale은 빌드 메타데이터만 달라도 mismatch 경고가 뜨는 실제 노이즈 버그를 냈다. (확실)
-- **알림 피로는 실측된 대가가 있다** — 브라우저 보안 경고 클릭스루 최대 70.2%(2500만+ 노출 필드 스터디), SSL 경고 약 90% 무시. Win32는 과다 고지의 대가가 "그 앱 알림 전체 차단"이라고 명시. (확실)
-- **메시지는 행동을 제공해야 유용하다** — 제목=무엇이 잘못됐나 / 본문=어떻게 고치나 / 버튼=명확한 동작. (확실)
-- **사람과 자동화에 같은 신호를 주는 것이 표준 관행** — k8s Conditions는 machine-readable Reason + human-readable Message를 한 객체에 둔다. LSP는 심각도가 프로토콜 타입 자체다. (확실)
+## F4. For the notification surface, a two-way severity split is canonical
+- **A modal only for "what you are trying to do now is blocked."** Apple HIG: use alerts sparingly, only for critical information needed immediately. Microsoft: a ContentDialog only when it is severe enough to block the whole app interaction. Win32: whether it is critical · whether it needs immediate action is the modal criterion. (certain)
+- **A failure that occurred automatically and has nothing to do with a particular user action = a banner (InfoBar)** — the MS guidance branches on this explicitly, which is effectively identical to our scenario. (certain)
+- **The time of notification is not the moment of detection but the time of use.** kubectl **deliberately designed** the client/server skew warning to appear only when you type `kubectl version`, not on every command (avoiding noise). The k8s API server's deprecation warning is also attached as a header on the actual request rather than as an advance notice. Win32 states explicitly that if it can resolve itself within a few seconds, the notification should be delayed. Tailscale shipped a real noise bug where a mismatch warning appeared even when only the build metadata differed. (certain)
+- **Notification fatigue has a measured cost** — browser security warning click-through up to 70.2% (a field study with 25 million+ exposures), about 90% of SSL warnings ignored. Win32 states that the cost of over-notifying is blocking all notifications from that app. (certain)
+- **A message is useful only if it offers an action** — title = what went wrong / body = how to fix it / button = a clear action. (certain)
+- **Giving the same signal to humans and automation is standard practice** — k8s Conditions put a machine-readable Reason + a human-readable Message in one object. In LSP, severity is itself a protocol type. (certain)
 
-## 도출한 선택지
-- **㉠ 버전 안 올림 + capability 협상 + 타임아웃 + 사용 시점 배너.** F2·F3·F4가 전부 이쪽을 가리킨다.
-- **㉡ 버전 올림 + 모달로 안내 + 데몬 교체 정책 신설.** F1이 반대(우리는 잃을 게 있는 쪽), F4가 모달을 반대.
-- **㉢ (장기) Docker식 구조 분리** — 세션 소유를 버전 민감한 제어 경로 밖으로. 가장 깊은 해법이나 큰 재설계.
+## Derived options
+- **㉠ Do not bump the version + capability negotiation + timeout + a banner at the time of use.** F2·F3·F4 all point this way.
+- **㉡ Bump the version + guide with a modal + introduce a daemon replacement policy.** F1 is against it (we are on the "has something to lose" side), and F4 is against the modal.
+- **㉢ (long term) Docker-style structural separation** — move session ownership out of the version-sensitive control path. The deepest solution but a large redesign.
 
-## 확인 못 한 것 / 기권
-- **GUI 앱이 백그라운드 데몬 버전 불일치를 모달·배너로 알리는 성숙 선례를 못 찾았다.** 조사한 피어가 대부분 CLI 도구였다. 즉 F4의 고지 지침은 일반 UI 가이드라인에서 왔지 "같은 문제를 푼 GUI 선례"에서 온 게 아니다.
-- "capability 협상이 과하다"는 1차 반대 근거를 못 찾았다(없다는 뜻이 아니라 못 찾았다는 뜻).
-- "타임아웃이 버전 협상보다 상위 안전장치"라고 서열을 명시한 1차 문서는 못 찾음(간접 증거만).
-- VS Code Remote가 활성 세션 도중 클라 업그레이드 시 옛 서버를 어떻게 처리하는지 미확인.
+## What could not be confirmed / abstentions
+- **No mature precedent was found of a GUI app notifying a background daemon version mismatch with a modal or banner.** Most of the peers surveyed were CLI tools. That is, F4's notification guidance came from general UI guidelines, not from "a GUI precedent that solved the same problem."
+- No primary counter-argument that "capability negotiation is excessive" was found (this means it was not found, not that none exists).
+- No primary document was found that states an explicit ranking that "a timeout is a higher-level safeguard than version negotiation" (indirect evidence only).
+- Unconfirmed how VS Code Remote handles the old server when the client is upgraded in the middle of an active session.
 
 ---
 
-## 적대 리뷰 결과 (cross-family · medium tier 필수 게이트)
+## Adversarial review result (cross-family · mandatory gate at the medium tier)
 
-**판정: BLOCK — 위 추천은 그대로는 서지 못했다.** 아래는 리뷰가 깎은 것과 그 결과 바뀐 결론이다. **위 본문은 리뷰 전 합성본이며, 최종 결론은 ADR-0158이다.**
+**Verdict: BLOCK — the recommendation above could not stand as it was.** Below is what the review cut down and the conclusion that changed as a result. **The body above is the pre-review synthesis, and the final conclusion is ADR-0158.**
 
-- **「무한 대기는 버전 문제가 아니다」는 논리 비약이었다.** 마감 시한은 기다림을 끊을 뿐이고, 상관관계 표시는 상대가 봉투를 **열 수 있었을 때만** 붙는다. 봉투 자체를 못 여는 상대는 짝지을 수 있는 답을 아예 못 준다. 정확한 표현 = **「버전 불일치가 원래 있던 결함 둘을 드러냈다」.**
-- **「이미 설치된 옛 상대에게 능력을 어떻게 묻나」가 최대 약점으로 지목됐다** — 모르는 것을 물어보면 그것부터 못 알아듣는다. **우리 구조에서는 막혀 있음을 실측으로 확인**: `AgentEvent::Hello`가 데몬→클라 방향으로 데몬 전체 능력을 먼저 광고하고, 이 프로토콜 crate에 모르는 칸을 거부하는 선언이 0곳이다. 즉 새 앱이 옛 데몬에게 모르는 것을 보낼 일이 없다.
-- **「모달 vs 띠는 정본 2분법」은 과장.** 벤더 지침에는 더 많은 표면이 있고, **상태가 앱 상호작용 전체를 막을 만큼 심각하면 모달로 올리라**고도 적혀 있다. 다만 능력 확인으로 가면 「못 붙는」 상태 자체가 안 생기므로 우리 경우엔 띠가 맞다.
-- **「사용 시점 고지가 유일하게 지지된다」도 과장.** 기준은 **영향 범위**다 — 지속적·앱 차원 저하는 **미리 알리는 띠**, 선택 기능은 사용 시점. 옛 데몬은 지속 조건이므로 **시작 시 고지가 맞다**(사용자 판단과 일치).
-- **GUI 선례는 존재한다**(합성본의 「못 찾았다」는 조사 한계였다) — 콘솔·서버 버전 불일치에 **띠 + 행동 버튼**을 쓰는 상용 관리 도구, 「백그라운드 서비스 버전 불일치」 제목의 팝업을 쓰는 도구, **거슬리는 팝업을 없애고 띠만 남긴** 사례.
-- **아무도 제시하지 않았던 네 번째 길** — **세대 겹치기 + 옛 세대 말려 죽이기**(새 데몬을 별도 자리에 띄우고 새 연결만 보내며, 옛 데몬은 자기 세션이 끝날 때까지 그대로 둔다). 프록시 서버 계열의 정식 기법. **「데몬을 죽이면 안 된다」를 구조로 푸는 유일한 길** — 장기 방향으로 적립.
-- 개별 피어 서술의 과장 여럿도 지적됐다(어떤 도구의 무손실 재시작은 옵트인이고 기본값이 아니며 메이저 업그레이드는 보장 밖 · 어떤 도구는 소켓을 나눠 서버를 병존시킬 수 있어 「수동 우회뿐」이 과함 · 인용한 경고 무시율 수치는 특정 브라우저·특정 실험 조건의 값이지 일반화된 값이 아님). **위 본문의 확신도 표기는 이 지적만큼 낮춰 읽을 것.**
+- **「무한 대기는 버전 문제가 아니다」 was a logical leap.** A deadline only cuts the wait, and the correlation marker is attached only when the peer **could open** the envelope. A peer that cannot open the envelope at all cannot give an answer that can be paired. The accurate expression = **「버전 불일치가 원래 있던 결함 둘을 드러냈다」.**
+- **「이미 설치된 옛 상대에게 능력을 어떻게 묻나」 was pointed to as the biggest weakness** — if you ask about something it does not know, it cannot understand even that. **In our structure, we confirmed by measurement that this is blocked**: `AgentEvent::Hello` first advertises the daemon's entire capabilities in the daemon→client direction, and there are zero declarations in this protocol crate that reject an unknown field. That is, there is no case where the new app sends something unknown to an old daemon.
+- **「모달 vs 띠는 정본 2분법」 is an overstatement.** Vendor guidance has more surfaces, and it also says **to raise it to a modal if the state is severe enough to block the whole app interaction.** However, going the capability-check route means the 「못 붙는」 state itself never arises, so in our case the band is right.
+- **「사용 시점 고지가 유일하게 지지된다」 is also an overstatement.** The criterion is the **scope of impact** — persistent, app-wide degradation gets a **band that notifies in advance**, an optional feature gets notification at the time of use. An old daemon is a persistent condition, so **notifying at startup is right** (consistent with the user's judgment).
+- **GUI precedents do exist** (the synthesis's 「못 찾았다」 was a limit of the survey) — commercial management tools that use a **band + action button** for console·server version mismatch, a tool that uses a popup titled 「백그라운드 서비스 버전 불일치」, and a case that **removed the intrusive popup and kept only the band**.
+- **A fourth path nobody had proposed** — **generation overlap + letting the old generation wither** (start the new daemon in a separate place and send only new connections to it, and leave the old daemon as it is until its own sessions end). A formal technique of the proxy-server family. **The only path that solves 「데몬을 죽이면 안 된다」 structurally** — recorded as a long-term direction.
+- Several exaggerations in individual peer descriptions were also pointed out (one tool's lossless restart is opt-in and not the default, and major upgrades are outside its guarantee · one tool can split sockets so that servers coexist, so 「수동 우회뿐」 is too strong · the quoted warning-ignore rate figures are values from a specific browser and specific experimental conditions and are not generalized values). **Read the confidence labels in the body above as lowered by these findings.**
 
-## 쟁점 / 한계
+## Points of contention / limits
 
-- 「능력 협상이 과하다」는 1차 반대 근거를 **못 찾았다**(없다는 뜻이 아니라 못 찾았다는 뜻).
-- 「마감 시한이 버전 협상보다 상위 안전장치」라고 서열을 명시한 1차 문서 **없음**(간접 증거만).
-- 조사한 피어 대부분이 CLI 도구라, GUI 고지 지침은 일반 인터페이스 가이드라인에서 왔지 「같은 문제를 푼 GUI 선례」에서 온 것이 아니다(선례 자체는 리뷰가 찾아냈으나 그 UX의 최종 형태까지는 미검증).
+- No primary counter-argument that 「능력 협상이 과하다」 was **found** (this means it was not found, not that none exists).
+- **No** primary document states an explicit ranking that 「마감 시한이 버전 협상보다 상위 안전장치」 (indirect evidence only).
+- Most of the peers surveyed are CLI tools, so the GUI notification guidance came from general interface guidelines and not from 「같은 문제를 푼 GUI 선례」 (the review found the precedents themselves, but the final form of that UX is unverified).

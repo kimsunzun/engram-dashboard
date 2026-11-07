@@ -1,5 +1,5 @@
-// uiMetricsReport 단위테스트 — 칸 틀 기본 지표 보고(ADR-0227, TRD §2d). 웹뷰당 한 번 · 진행 중 공유 ·
-// 성공 뒤에만 「보냈음」 · 유계 재시도 · 최종 실패면 다음 호출이 다시 시도.
+// uiMetricsReport unit test — area frame default metrics report (ADR-0227, TRD §2d). Once per webview · shared while in progress ·
+//   「보냈음」 only after success · bounded retry · if the final failure, the next call tries again.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -24,7 +24,7 @@ function borderEl(t = '1px', r = '1px', b = '1px', l = '1px'): HTMLElement {
   return el
 }
 
-/** 재시도 backoff(150·300·600ms)를 전부 넘길 만큼. */
+/** Enough to get past all the retry backoffs (150·300·600ms). */
 const RETRY_SPAN_MS = 5000
 
 let errorSpy: ReturnType<typeof vi.spyOn>
@@ -55,7 +55,7 @@ describe('measureUiMetrics', () => {
 
   it('폭이 수로 읽히지 않으면 null', () => {
     const el = document.createElement('div')
-    // 단축 속성에 var() 가 섞이면 jsdom 은 longhand 를 계산하지 못한다(`medium`).
+    // If var() is mixed into a shorthand property, jsdom cannot compute the longhand (`medium`).
     el.style.border = '1px solid var(--border)'
     document.body.appendChild(el)
     expect(measureUiMetrics(el)).toBeNull()

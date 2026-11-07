@@ -1,7 +1,7 @@
-// slot.scrollToBottom — 창 안 command 시험(ADR-0242 · TRD §2-5).
+// slot.scrollToBottom — in-window command test (ADR-0242 · TRD §2-5).
 //
-// ★`./scrollCommands` 를 직접 import 하지 않는다 — 매니페스트를 통해 들어온다★(사유 = renderModeCommands.test.ts
-//   머리): 그래야 contributions.ts 의 import 한 줄이 사라지면 여기가 깨진다. stub 집합도 그 파일과 같다.
+// ★Do not import `./scrollCommands` directly — it comes in through the manifest★ (reason = the head of renderModeCommands.test.ts):
+//   that way this breaks if the one import line in contributions.ts disappears. The stub set is also the same as that file's.
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -17,7 +17,7 @@ vi.mock('../api/clientFactory', () => ({
   bootstrapDaemonIfNeeded: vi.fn(async () => undefined),
 }))
 
-import './contributions' // side-effect register — ★직접 import 금지(위 헤더)★
+import './contributions' // side-effect register — ★no direct import (header above)★
 import { list, run } from './registry'
 import { registerFollow, type FollowHandle } from '../components/slot/scrollFollow/followRegistry'
 
@@ -40,7 +40,7 @@ describe('slot.scrollToBottom', () => {
     expect(list().map(c => c.id)).toContain(ID)
   })
 
-  // ★버스 미승선(ADR-0167)★: 스크롤 위치는 창마다 따로 있는 프론트 상태다 — 사유는 scrollCommands.ts 머리.
+  // ★Not on the bus (ADR-0167)★: scroll position is frontend state that exists separately per window — the reason is at the head of scrollCommands.ts.
   it('help 가 없다 — 버스에 오르지 않고 이 창 안에만 남는다', () => {
     expect(list().find(c => c.id === ID)!.help).toBeUndefined()
   })

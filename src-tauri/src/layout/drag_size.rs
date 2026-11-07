@@ -1,15 +1,15 @@
-//! 끌기의 크기 셈 정본(TRD S21-slot-docking §4-2 · §4-5 · PRD R7 · R22) — 새 창 크기(Chrome
-//! `CalculateDraggedWindowSize`) · 끄는 탭의 원래 크기. 단위 = 논리(DIP) px.
+//! Canonical size computation for a drag (TRD S21-slot-docking §4-2 · §4-5 · PRD R7 · R22) — new window size (Chrome
+//! `CalculateDraggedWindowSize`) · original size of the dragged tab. Unit = logical (DIP) px.
 //!
-//! ★웹 거울과 한 벌이다★ — 출처 웹뷰가 dragstart 에 같은 규칙(`dock/dragSize.ts`)으로 셈해 싣는다. 둘은 골든
-//! `bands_golden.json` 의 `drag_size` 표를 함께 먹는다. 상수는 `bands.rs` 머리 한 벌이다.
+//! ★One set with the web mirror★ — the source webview computes it with the same rule (`dock/dragSize.ts`) at dragstart and sends it. The two both consume the
+//! `drag_size` table of the golden `bands_golden.json`. The constants are one set at the head of `bands.rs`.
 
 use super::bands::{SizeCss, MAXIMIZED_INSET_DIP};
 use super::geometry::Insets;
 use super::manager::WindowBounds;
 
-/// 출처 창의 복원(보통) 크기 — 모델의 보통 자리 크기(`bounds` — 안쪽 논리 크기 · 최대화 중이어도 보통 크기)에
-/// `frame`(그 크기에 더할 틀 — 안쪽 크기를 셀 때는 0)을 더한다. 모델 값이 없으면 `current`(같은 쪽의 지금 크기)다.
+/// Restored (normal) size of the source window — the model's normal place size (`bounds` — inner logical size · the normal size even while maximized) plus
+/// `frame` (the frame to add to that size — 0 when computing the inner size). If there is no model value, `current` (the current size of the same side).
 pub fn restored_size(bounds: Option<WindowBounds>, frame: SizeCss, current: SizeCss) -> SizeCss {
     match bounds {
         Some(b) => SizeCss {
@@ -20,9 +20,9 @@ pub fn restored_size(bounds: Option<WindowBounds>, frame: SizeCss, current: Size
     }
 }
 
-/// 새 창 크기 — Chrome `CalculateDraggedWindowSize`(TDC#2760-2791) 그대로: `restored` 에서 ① 작업 영역 `work` 보다
-/// 큰 변은 `max(0, work − 2 × MAXIMIZED_INSET_DIP)` ② 출처가 최대화(`maximized` = 그 크기)면 각 변을 그 절반 이상으로.
-/// ★②가 마지막이라 이긴다(C5)★ — 순서를 바꾸지 말 것. 세 크기는 같은 쪽(셋 다 바깥 · 셋 다 안쪽)이어야 한다.
+/// New window size — exactly Chrome `CalculateDraggedWindowSize` (TDC#2760-2791): from `restored`, ① a side larger than the work area `work` becomes
+/// `max(0, work − 2 × MAXIMIZED_INSET_DIP)` ② if the source is maximized (`maximized` = that size), each side is raised to at least half of it.
+/// ★② comes last, so it wins (C5)★ — do not change the order. The three sizes must be on the same side (all outer · all inner).
 // ADR-0295
 pub fn dragged_size(restored: SizeCss, maximized: Option<SizeCss>, work: SizeCss) -> SizeCss {
     let mut s = restored;
@@ -39,40 +39,40 @@ pub fn dragged_size(restored: SizeCss, maximized: Option<SizeCss>, work: SizeCss
     s
 }
 
-/// 끄기 시작 때 출처 창의 사실 — 출처 웹뷰가 `window:frame` · `screen.avail*` · 뷰포트에서 읽는 것과 같다.
+/// Facts about the source window when the drag starts — the same as what the source webview reads from `window:frame` · `screen.avail*` · the viewport.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SourceWindow {
-    /// 복원(보통) 안쪽 크기(`window:frame.restored`) — 모르면 `None`(지금 크기로 친다).
+    /// Restored (normal) inner size (`window:frame.restored`) — `None` if unknown (the current size is used).
     pub restored: Option<SizeCss>,
     pub maximized: bool,
-    /// 창 틀 = 바깥 − 안쪽(`window:frame.insets`).
+    /// Window frame = outer − inner (`window:frame.insets`).
     pub insets: Insets,
-    /// 지금 안쪽 크기(뷰포트) — 최대화면 최대화 안쪽 크기다.
+    /// Current inner size (viewport) — when maximized, the maximized inner size.
     pub viewport: SizeCss,
-    /// 끄는 창 모니터의 작업 영역(바깥 크기의 한계 — `screen.availWidth` · `availHeight`).
+    /// Work area of the dragged window's monitor (limit on the outer size — `screen.availWidth` · `availHeight`).
     pub work: SizeCss,
-    /// 새 창(보통 상태로 뜬다)의 크롬 = 뷰포트 − 탭 캔버스(제목 줄 높이 · 왼쪽 여백 따위) + 제목 줄 높이 차(보통 − 출처의
-    /// 지금 — 출처가 최대화면 0 이 아니다 · TRD S26-window-chrome §7-6). 그 차는 부르는 쪽이 더해 넘긴다 — 웹 거울은 더한다
-    /// (`useTabDragSource` 의 `rowGrowth`). 셸에는 아직 운영 소비자가 없다(골든만 — 첫 소비자는 LLM 명령 T-65).
+    /// Chrome of the new window (it opens in the normal state) = viewport − tab canvas (title bar height · left margin etc.) + title bar height difference (normal − the source's
+    /// current — if the source is maximized, it is not 0 · TRD S26-window-chrome §7-6). The caller adds that difference and passes it in — the web mirror adds it
+    /// (`rowGrowth` of `useTabDragSource`). The shell has no production consumer yet (golden only — the first consumer is the LLM command T-65).
     pub chrome: SizeCss,
-    /// 탭 하나뿐인 팝아웃 — 새 창을 만들지 않고 그 창을 옮긴다(Q34).
+    /// Popout with only one tab — does not create a new window but moves that window (Q34).
     pub single: bool,
 }
 
-/// [`drag_sizes`] 의 답.
+/// Answer of [`drag_sizes`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DragSizes {
-    /// 새 창 안쪽 크기(R22) — `None` = 탭 하나뿐인 팝아웃(그 창을 크기 그대로 옮긴다).
+    /// New window inner size (R22) — `None` = popout with only one tab (that window is moved at its size as is).
     pub size: Option<SizeCss>,
-    /// 끄는 탭의 원래 크기(R7 — 붙는 몫의 재료) = 캔버스 크기. 음수는 0 으로 친다.
+    /// Original size of the dragged tab (R7 — material for the attach share) = canvas size. Negative values count as 0.
     pub original: SizeCss,
 }
 
-/// 끄는 탭의 새 창 크기와 원래 크기(TRD §4-2 「크기」).
+/// New window size and original size of the dragged tab (TRD §4-2 「크기」).
 ///
-/// - 탭이 둘 이상인 창 — `size` = [`dragged_size`] 를 안쪽 크기로 옮긴 것: 복원 크기(없으면 지금 크기) · 작업 영역 −
-///   틀 · 최대화면 그 안쪽 크기. `original` = `size` − 크롬.
-/// - 탭 하나뿐인 팝아웃 — `size` 없음 · `original` = (최대화면 복원 크기 · 아니면 지금 크기) − 크롬.
+/// - Window with two or more tabs — `size` = [`dragged_size`] converted to the inner size: restored size (current size if none) · work area −
+///   frame · if maximized, that inner size. `original` = `size` − chrome.
+/// - Popout with only one tab — no `size` · `original` = (restored size if maximized · otherwise current size) − chrome.
 pub fn drag_sizes(s: &SourceWindow) -> DragSizes {
     let canvas = |v: SizeCss| SizeCss {
         w: (v.w - s.chrome.w).max(0.0),
@@ -118,7 +118,7 @@ mod tests {
         l: 0.0,
     };
 
-    // ── 복원 크기 ─────────────────────────────────────────────────────────────
+    // ── restored size ─────────────────────────────────────────────────────────
 
     #[test]
     fn the_restored_size_adds_the_frame_to_the_model_bounds() {
@@ -139,7 +139,7 @@ mod tests {
         );
     }
 
-    // ── 새 창 크기 (C5) ───────────────────────────────────────────────────────
+    // ── new window size (C5) ──────────────────────────────────────────────────
 
     #[test]
     fn a_restored_size_inside_the_work_area_is_kept() {
@@ -194,8 +194,8 @@ mod tests {
 
     #[test]
     fn the_half_floor_comes_last_and_beats_the_work_area_cap() {
-        // 작은 모니터(작업 영역 800 × 600)로 커서가 갔고 큰 최대화 창(2560 × 1400)에서 뗐다 — 작업 영역 상한 뒤에
-        // 절반 하한이 와서 이긴다(TDC#2760-2791).
+        // The cursor went to a small monitor (work area 800 × 600) and the tab was torn off a large maximized window (2560 × 1400) — the half
+        // lower bound comes after the work area upper bound and wins (TDC#2760-2791).
         assert_eq!(
             dragged_size(
                 dip(1000.0, 700.0),
@@ -206,7 +206,7 @@ mod tests {
         );
     }
 
-    // ── 새 창 크기 · 원래 크기 (§4-2) ─────────────────────────────────────────
+    // ── new window size · original size (§4-2) ────────────────────────────────
 
     fn source() -> SourceWindow {
         SourceWindow {
@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn the_work_area_cap_is_taken_inside_the_frame() {
-        // 작업 영역 1920 × 1032 − 틀(16 × 39) = 1904 × 993 → 넘는 변은 그 − 20.
+        // Work area 1920 × 1032 − frame (16 × 39) = 1904 × 993 → a side that exceeds it becomes that − 20.
         let s = SourceWindow {
             restored: Some(dip(1910.0, 1000.0)),
             ..source()

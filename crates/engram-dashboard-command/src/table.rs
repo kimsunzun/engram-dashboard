@@ -1,4 +1,4 @@
-//! 프로세스별 핸들러 표 — 「내 표」(TRD §3-3).
+//! Per-process handler table — 「내 표」 (my table) (TRD §3-3).
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -18,13 +18,13 @@ pub trait CommandHandler: Send + Sync {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableError {
-    /// 같은 이름이 두 번 들어왔다 — 조용한 덮어쓰기를 하지 않는다.
+    /// The same name came in twice — we do not silently overwrite.
     Duplicate(&'static str),
-    /// 이 표를 만든 crate 의 선언 집합에 없는 이름 — 두 번째 어휘가 생기는 것을 여기서 막는다.
+    /// A name not in the declaration set of the crate that made this table — blocks a second vocabulary from arising here.
     NotDeclared(&'static str),
-    /// 선언의 스키마 텍스트(`args` 또는 `ok`)가 JSON 이 아니다 — 광고할 수도, 그것으로 인자를 맞출
-    /// 수도 없다. ★두 칸을 함께 본다★ — 어느 쪽이 깨져도 등록 패킷의 `help` 가 통째로 깨진다.
-    /// (`lint_spec` 이 선언 crate 의 테스트에서 먼저 잡지만, 조립도 이것을 싣고 달리지 않는다.)
+    /// The declaration's schema text (`args` or `ok`) is not JSON — it can be neither advertised nor used to fit
+    /// arguments. ★Both fields are checked together★ — if either breaks, the registration packet's `help` breaks whole.
+    /// (`lint_spec` catches it first in the declaration crate's tests, but assembly does not run carrying it either.)
     InvalidSchema(&'static str),
 }
 
@@ -46,15 +46,15 @@ impl std::error::Error for TableError {}
 
 struct Entry {
     spec: &'static CommandSpec,
-    /// 선언된 인자 스키마 — **조립 때 한 번** 판다. 배달 경로에 파서를 앉히지 않으려는 것이다.
+    /// The declared argument schema — parsed **once at assembly**. This is so no parser sits on the delivery path.
     args_schema: serde_json::Value,
     handler: Arc<dyn CommandHandler>,
 }
 
-/// 한 프로세스(정확히는 한 조립 단위)가 **직접 실행할 수 있는** 명령의 표.
+/// The table of commands one process (strictly, one assembly unit) **can run directly**.
 ///
-/// ★전역 static 이 아니다★ — `make_table(deps)` 가 조립 때 만들고 핸들러는 그때 주입된다(규칙 T-1).
-/// 그래서 하네스가 가짜 의존을 꽂아 프로세스 없이 핸들러를 단언할 수 있다(ADR-0012).
+/// ★It is not a global static★ — `make_table(deps)` builds it at assembly and handlers are injected then (rule T-1).
+/// So a harness can plug in fake dependencies and assert handlers without a process (ADR-0012).
 // ADR-0155
 pub struct CommandTable {
     declared: &'static [&'static CommandSpec],
@@ -62,11 +62,11 @@ pub struct CommandTable {
 }
 
 impl CommandTable {
-    /// `declared` = **이 표를 만드는 crate 가 선언한 집합**(선언 매크로가 만드는 `COMMAND_SPECS`).
-    /// 바이너리 전량([`crate::command_specs`])이 아니다 — 남의 crate 이름을 내 표에 넣는 것도 막아야 한다.
+    /// `declared` = **the set the crate building this table declared** (`COMMAND_SPECS`, made by the declaration macro).
+    /// It is not the whole binary ([`crate::command_specs`]) — putting another crate's names into my table must be blocked too.
     ///
-    /// ★같은 이름이 두 번 선언돼 있으면 여기서 패닉한다★ — 조립보다 먼저 터뜨린다. 중복은 빌드가
-    /// 정하는 값이라 런타임에 달라지지 않고, 그대로 두면 표와 광고 스키마가 서로 다른 선언을 가리킨다.
+    /// ★If the same name is declared twice, it panics here★ — blow up before assembly. A duplicate is a value
+    /// decided by the build and does not change at runtime, and if left, the table and the advertised schema would point at different declarations.
     pub fn new(declared: &'static [&'static CommandSpec]) -> Self {
         for (i, spec) in declared.iter().enumerate() {
             if declared[i + 1..]
@@ -99,10 +99,10 @@ impl CommandTable {
         let Ok(args_schema) = serde_json::from_str::<serde_json::Value>(spec.args_schema) else {
             return Err(TableError::InvalidSchema(name));
         };
-        // ★`ok_schema` 는 표가 쓰지 않지만 여기서 함께 본다★: `spec_item_json` 이 그것을 `help` 안에
-        //   **그대로 이어 붙이므로**(`spec.rs`) 깨진 `ok` 하나가 등록 패킷의 `help` 를 통째로 JSON 이
-        //   아니게 만든다. 데몬은 그것을 불투명 문자열로 저장하는 것이 옳으므로(ADR-0156) 깨짐은 그
-        //   문자열을 읽는 LLM·CLI 앞에서야 드러난다 — 조립이 마지막 검문소다. 값은 안 쓰니 버린다.
+        // ★The table does not use `ok_schema`, but we check it here too★: since `spec_item_json` attaches it into `help`
+        //   **as is** (`spec.rs`), a single broken `ok` makes the registration packet's `help` as a whole not JSON.
+        //   Since it is right for the daemon to store that as an opaque string (ADR-0156), the breakage would only surface in front of the LLM or CLI reading that
+        //   string — assembly is the last checkpoint. We do not use the value, so we discard it.
         if serde_json::from_str::<serde::de::IgnoredAny>(spec.ok_schema).is_err() {
             return Err(TableError::InvalidSchema(name));
         }
@@ -117,14 +117,14 @@ impl CommandTable {
         Ok(())
     }
 
-    /// 이름 하나를 **광고한 계약대로** 실행한다 — 표에 없으면 `None` 이고 `args` 는 손대지 않은 채 남는다
-    /// (다음 단계인 명부가 그것을 그대로 실어 보내야 한다).
+    /// Runs one name **by the advertised contract** — if it is not in the table, `None`, and `args` remains untouched
+    /// (the next step, the registry, must carry it as is).
     ///
-    /// ★핸들러를 꺼내 주는 문을 두지 않는 것이 요점이다★: 인자와 선언 스키마를 맞추는 자리가 여기
-    /// 하나라야 「광고한 것을 실제로 받는다」가 어댑터별 성질이 아니라 **표 전체의 성질**이 된다
-    /// ([`crate::coerce`]). 그래서 [`CommandHandler`] 를 직접 구현한 핸들러도 같은 조정을 받는다.
-    /// 본문 패닉을 접는 그물은 여기 없다 — 부르는 쪽([`crate::route`])이 두 진입점(`call` · 첫 poll)을
-    /// 함께 덮는다.
+    /// ★The point is that there is no door that hands out the handler★: only if fitting arguments to the declared schema happens in this
+    /// one place does 「광고한 것을 실제로 받는다」 (what is advertised is actually accepted) become a property of **the whole table**, not of each adapter
+    /// ([`crate::coerce`]). So a handler that implements [`CommandHandler`] directly gets the same coercion.
+    /// The net that folds body panics is not here — the caller ([`crate::route`]) covers both entry points (`call` · first poll)
+    /// together.
     pub fn call(&self, name: &str, args: &mut serde_json::Value) -> Option<CommandFuture> {
         let entry = self.entries.get(name)?;
         crate::coerce::integral_numbers_to_integers(&entry.args_schema, args);
@@ -132,30 +132,30 @@ impl CommandTable {
         Some(entry.handler.call(args.take()))
     }
 
-    /// 인자가 **선언과 맞는지** 부르기 전에 본다 — 모르는 칸·빠진 필수 칸을 이름 지어 반려한다.
+    /// Checks **whether the arguments match the declaration** before the call — rejects unknown fields and missing required fields by naming them.
     ///
-    /// ★부르는 자리는 사람·LLM 이 방금 친 것이 들어오는 표면뿐이다(ADR-0157)★. 홉 간 배선에서 부르면
-    /// 버전이 앞선 호출자가 실은 신규 칸이 옛 주인을 하드 실패시켜 additive 진화가 죽는다(TRD §4-③) —
-    /// [`crate::route`] 가 이것을 부르지 않는 것이 그 결정의 실물이고, 거기 끼워 넣으면 무너진다.
+    /// ★The only place that calls it is the surface where what a person or LLM just typed comes in (ADR-0157)★. If it were called in inter-hop wiring,
+    /// a new field sent by a caller on a newer version would hard-fail an old owner and additive evolution would die (TRD §4-③) —
+    /// [`crate::route`] not calling it is the concrete form of that decision, and wedging it in there would break it.
     ///
-    /// 반려 문구는 **틀린 칸과 선언된 칸 전량**을 함께 싣는다 — 호출자가 스스로 고칠 수 있어야 그물이
-    /// 값을 한다. ★문구에 호출 표면의 어휘를 넣지 않는다★: 그 표면이 무엇인지 이 crate 는 모르고, 자기
-    /// 안내는 어댑터가 [`CommandError::set_message`] 로 덧붙인다.
+    /// The rejection message carries **the wrong fields and the whole set of declared fields** together — the net is only worth something if the caller can fix it
+    /// itself. ★Do not put the vocabulary of the calling surface in the message★: this crate does not know what that surface is, and
+    /// its own guidance is added by the adapter through [`CommandError::set_message`].
     ///
-    /// 통과시키는 것 셋(검사할 재료가 없는 자리다):
-    /// - **이 표에 없는 이름** — 그 계약은 남이 쥐고 있어 대조할 선언이 여기 없다. ★뒤에서 아무도 대신
-    ///   봐 주지 않는다★: 명부가 그 이름을 알면 배달은 봉투를 **그대로 전달**하고, 받는 홉의
-    ///   [`crate::route`]→[`CommandTable::call`] 도 검문하지 않는다(바로 위 문단의 그 결정이다). 그래서
-    ///   사람·LLM 이 남의 이름을 오타 낀 칸과 함께 치면 그 칸은 어디서도 안 걸리고, 역직렬화가 조용히
-    ///   버린 뒤 성공이 보고된다 — ADR-0157 이 막으려던 그 실패가 한 홉 건너에서 그대로 산다(그 결정의
-    ///   층 가름은 **출처**이지 이름의 주인이 아니다).
-    ///   ★이 구멍은 입구 어댑터 **쌍**의 의무로 남아 있다 — 배선 wave 가 어느 쪽인지 정한다★: 치는 쪽
-    ///   어댑터는 남의 선언을 안 들고(명부의 모양은 데몬에게 불투명 문자열이다 — ADR-0156), 주인 쪽
-    ///   어댑터는 그 봉투가 사람·LLM 이 방금 친 것인지를 봉투만 보고 모른다. 어느 쪽이 그 재료를 갖게
-    ///   할지가 결정 사항이라 이 crate 에서 닫지 않는다.
-    /// - **`properties` 를 안 실은 선언** — 허용 집합을 모르는 채로 반려하면 멀쩡한 인자를 막는다.
-    /// - **꼭대기 아래** — 여기는 스키마 검증기가 아니라 선언 속성 집합과의 대조다. 중첩 객체 안의 오타는
-    ///   통과하고, 그 자리는 역직렬화가 잡는다(선언된 칸이면 타입이 안 맞고, 아니면 무시된다).
+    /// Three things pass through (places with no material to check):
+    /// - **A name not in this table** — that contract is held by another, so there is no declaration here to compare against. ★Nobody behind it
+    ///   checks on our behalf★: if the registry knows the name, delivery **forwards the envelope as is**, and the receiving hop's
+    ///   [`crate::route`]→[`CommandTable::call`] does not screen either (that is the decision in the paragraph just above). So
+    ///   if a person or LLM types another owner's name with a mistyped field, that field is caught nowhere, deserialization silently
+    ///   drops it, and success is reported — the very failure ADR-0157 meant to block lives on one hop further along (the layering
+    ///   of that decision is by **origin**, not by who owns the name).
+    ///   ★This hole remains a duty of the entry adapter **pair** — the wiring wave decides which side★: the typing-side
+    ///   adapter does not hold another's declaration (the registry's shape is an opaque string to the daemon — ADR-0156), and the owner-side
+    ///   adapter cannot tell from the envelope alone whether it is what a person or LLM just typed. Which side gets that material
+    ///   is a decision item, so this crate does not close it.
+    /// - **A declaration that does not carry `properties`** — rejecting without knowing the allowed set would block perfectly good arguments.
+    /// - **Below the top level** — this is a comparison against the declaration's property set, not a schema validator. A typo inside a nested object
+    ///   passes, and that spot is caught by deserialization (if it is a declared field the type does not match, otherwise it is ignored).
     // ADR-0157
     pub fn check_args(&self, name: &str, args: &serde_json::Value) -> Result<(), CommandError> {
         let Some(entry) = self.entries.get(name) else {
@@ -174,10 +174,10 @@ impl CommandTable {
         else {
             return Ok(());
         };
-        // 모르는 칸을 먼저 본다 — 오타는 「모르는 칸 하나 + 빠진 필수 칸 하나」로 함께 걸리는데, 호출자가
-        //   고칠 것은 **자기가 친 그 칸**이다.
-        // ★틀린 칸을 **전부** 센다★: 하나만 짚으면 호출자는 고치고 다시 보내고 또 반려당하기를 반복한다
-        //   (칸 순서는 사전순이라 「먼저 친 것」도 아니다). 오타 셋을 한 번에 보여 주는 것이 그물의 값이다.
+        // Look at unknown fields first — a typo is caught together as 「모르는 칸 하나 + 빠진 필수 칸 하나」 (one unknown field + one missing required field), but what the caller
+        //   should fix is **the very field it typed**.
+        // ★Count **all** wrong fields★: if only one is pointed out, the caller fixes it, resends, and is rejected again, repeatedly
+        //   (field order is alphabetical, so it is not 「먼저 친 것」 (the one typed first) either). Showing three typos at once is what the net is worth.
         let unknown: Vec<&String> = given
             .keys()
             .filter(|key| !declared.contains_key(key.as_str()))
@@ -206,7 +206,7 @@ impl CommandTable {
         self.entries.contains_key(name)
     }
 
-    /// 데몬에 등록할 명단 — 이름과 **모양**을 함께 나른다(ADR-0156).
+    /// The list to register with the daemon — carries the name and the **shape** together (ADR-0156).
     pub fn decls(&self) -> Vec<CommandDecl> {
         self.entries
             .values()
@@ -236,16 +236,16 @@ impl CommandTable {
     }
 }
 
-/// 반려 문구가 싣는 허용 집합 — 자르지 않는다. 잘린 목록은 호출자가 고르지 못한 이름이 잘린 쪽에
-/// 있는지 알 수 없어 스스로 고칠 수 없다(이 이름들은 **우리 선언**이라 크기가 우리 손에 있다 —
-/// 호출자가 준 문자열은 [`quoted_input`] 이 자른다).
+/// The allowed set the rejection message carries — not truncated. With a truncated list the caller cannot tell whether the name it failed to pick is
+/// on the truncated side, so it cannot fix it itself (these names are **our declaration**, so the size is in our hands —
+/// the string the caller gave is truncated by [`quoted_input`]).
 fn declared_names(args_schema: &serde_json::Value) -> String {
     let Some(properties) = args_schema
         .get("properties")
         .and_then(serde_json::Value::as_object)
     else {
-        // 허용 집합을 안 실은 선언 — 그 자리는 통과시키므로(`check_args`) 여기 오는 것은 객체가 아닌
-        //   인자로 걸린 경우뿐이다.
+        // A declaration that does not carry the allowed set — that case passes through (`check_args`), so what arrives here is only the case caught as
+        //   a non-object argument.
         return "(not declared)".to_string();
     };
     if properties.is_empty() {
@@ -258,28 +258,28 @@ fn declared_names(args_schema: &serde_json::Value) -> String {
         .join(", ")
 }
 
-/// 한 문구에 이름 지어 싣는 **틀린 칸 수**의 상한.
+/// The upper bound on the **number of wrong fields** named in one message.
 ///
-/// ★전부 세되 전부 싣지는 않는다★: 칸 수는 요청 바디 크기만큼 늘 수 있어(수천 개) 상한이 없으면 반려
-/// 문구가 그만큼 커진다 — 그 비용은 친 쪽이 아니라 받는 쪽이 낸다([`quoted_input`] 과 같은 논거). 넘치면
-/// **몇 개가 더 있는지 말한다**(말 안 하면 호출자는 목록을 전부로 읽고 남은 칸을 못 고친다).
-/// ★이름 지어지는 여덟은 「호출자가 먼저 친 여덟」이 **아니다**★ — 인자 맵은 정렬 자료구조라 사전순 앞
-/// 여덟이고, 그 순서는 호출자가 만든 것이 아니다. 「먼저 친 것부터」를 원하면 맵을 삽입 순서 보존형으로
-/// 바꿔야 하고 그건 이 crate 밖 결정이다(아래 테스트가 이 선택을 못박는다).
+/// ★Count them all but do not carry them all★: the number of fields can grow as large as the request body (thousands), and without a cap the rejection
+/// message grows by that much — and that cost is paid by the receiving side, not the typing side (same argument as [`quoted_input`]). If exceeded,
+/// it **says how many more there are** (if it did not, the caller would read the list as everything and could not fix the remaining fields).
+/// ★The eight named are **not** 「호출자가 먼저 친 여덟」 (the eight the caller typed first)★ — the argument map is a sorted data structure so they are the first
+/// eight alphabetically, and that order was not made by the caller. To get 「먼저 친 것부터」 (from the one typed first), the map would have to be changed
+/// to an insertion-order-preserving form, and that is a decision outside this crate (the test below pins this choice).
 const MAX_NAMED_UNKNOWN: usize = 8;
 
-/// 이름 하나의 **리터럴**(`"…"` — 여닫이 따옴표와 말줄임표 포함) 크기 상한(바이트).
+/// The size cap (bytes) of one name's **literal** (`"…"` — including the opening and closing quotes and the ellipsis).
 ///
-/// ★없으면 100 MiB 짜리 칸 이름 하나가 그만한 문구를 만든다★ — 그 문구는 오류 답장에 실려 선을 타고,
-/// 그것을 만드는 비용은 인자를 친 쪽이 아니라 받는 쪽이 낸다. 값은 사람이 자기 오타를 알아볼 만큼이다.
-/// ★이 수가 **재는 것과 안 재는 것**★: 재는 것은 리터럴이고, 문구에 실제로 들어가는 조각은 여기에 잘림
-/// 표시(`(truncated, input was N bytes)` — 30 B 남짓)가 더 붙어 **~170 B**까지 간다. 조각 전체의 수가 필요하면
-/// 그 합을 쓸 것 — 이 상수를 그 자리에 그대로 옮겨 적지 말 것.
-/// ★줄이려고 두는 상한이 아니다★: 이스케이프 표기가 129~158 B 인 입력에서는 잘린 형태가 원본 표기보다 오히려
-/// **길다**(꼬리표가 붙으니까). 이 상한이 지키는 것은 평균 크기가 아니라 **꼬리의 유한함**이다.
+/// ★Without it, one 100 MiB field name would make a message of that size★ — that message is carried in the error reply onto the wire,
+/// and the cost of making it is paid by the receiving side, not the side that typed the arguments. The value is just enough for a person to recognize their own typo.
+/// ★What this number **measures and does not measure**★: it measures the literal, and the piece that actually goes into the message adds the truncation
+/// marker (`(truncated, input was N bytes)` — a bit over 30 B) on top, reaching up to **~170 B**. If you need a count for the whole piece,
+/// use that sum — do not copy this constant over into that place.
+/// ★It is not a cap set in order to shrink things★: for input whose escaped notation is 129~158 B, the truncated form is actually
+/// **longer** than the original notation (because the tag is attached). What this cap guards is not the average size but **the finiteness of the tail**.
 const MAX_QUOTED_INPUT_BYTES: usize = 128;
 
-/// 틀린 칸 이름들을 문구에 싣는다 — 각 이름은 [`quoted_input`] 상한을, 개수는 [`MAX_NAMED_UNKNOWN`] 을 탄다.
+/// Puts the wrong field names into the message — each name is subject to the [`quoted_input`] cap, and the count to [`MAX_NAMED_UNKNOWN`].
 fn quoted_list(keys: &[&String]) -> String {
     let named: Vec<String> = keys
         .iter()
@@ -293,27 +293,27 @@ fn quoted_list(keys: &[&String]) -> String {
     }
 }
 
-/// 호출자가 준 이름을 문구에 인용할 수 있게 다듬는다 — 자를 때는 **잘랐다고 말한다**(안 그러면 호출자는
-/// 잘린 이름을 자기가 친 이름으로 읽고 멀쩡한 칸을 고치러 간다).
+/// Trims a name the caller gave so it can be quoted in the message — when it truncates it **says it truncated** (otherwise the caller
+/// would read the truncated name as the name it typed and go fix a perfectly good field).
 ///
-/// ★이름은 Rust 문자열 리터럴 표기로 감싼다★: 작은따옴표로 감싸면 `a', 'b` 라는 칸 **하나**가 `'a', 'b'`
-/// 로 찍혀 **틀린 칸 둘**로 읽힌다 — 호출자는 있지도 않은 칸을 고치러 간다. `{:?}` 는 따옴표·역슬래시·제어
-/// 문자를 이스케이프해 그 애매함을 없앤다.
-/// ★잘린 이름도 **따옴표를 닫는다**(load-bearing)★: 안 닫으면 이름 여럿을 이어 붙인 문구에서 따옴표 짝이
-/// 어긋나, 방금 없앤 그 애매함이 그대로 돌아온다(닫는 따옴표 없는 조각 + 다음 이름의 여는 따옴표가 한 쌍으로
-/// 읽힌다).
-/// ★상한은 **이스케이프한 뒤** 건다★: 먼저 자르면 제어문자 한 글자가 `\u{1b}` 여섯 바이트로 부풀어 문구가
-/// 상한의 여섯 배까지 커진다 — 상한이 「입력 종류에 따라」 달라져 문서에 적은 숫자가 거짓이 된다.
-/// ★이스케이프 시퀀스 한가운데서 자르지 않는다★: 글자 단위로 쌓다가 예산에서 멈추므로 `\` 하나만 남는
-/// 조각이 생기지 않는다 — 그런 조각은 표기가 깨져 위의 「리터럴 표기」 약속을 어긴다.
-/// ★잘림 표시는 **무엇을 센 수인지** 밝힌다★: 보이는 것은 이스케이프된 표기이고 수는 원본 바이트라, 라벨이
-/// 없으면 제어문자 30개(표기로는 180자)가 「30 바이트를 잘랐다」로 읽혀 서로 어긋나 보인다.
+/// ★The name is wrapped in Rust string-literal notation★: if wrapped in single quotes, **one** field `a', 'b` would be printed as `'a', 'b'`
+/// and read as **two wrong fields** — the caller would go fix fields that do not even exist. `{:?}` escapes quotes, backslashes and control
+/// characters and removes that ambiguity.
+/// ★A truncated name also **closes its quote** (load-bearing)★: if it did not, in a message joining several names the quote pairing
+/// would go out of step and the very ambiguity just removed would come back (a piece with no closing quote + the next name's opening quote would
+/// read as a pair).
+/// ★The cap is applied **after escaping**★: if truncated first, one control character would swell to six bytes as `\u{1b}` and the message
+/// would grow up to six times the cap — the cap would vary 「입력 종류에 따라」 (by input kind) and the number written in the docs would become false.
+/// ★Do not truncate in the middle of an escape sequence★: it accumulates character by character and stops at the budget, so no piece
+/// with only a lone `\` is produced — such a piece has broken notation and would violate the 「리터럴 표기」 (literal notation) promise above.
+/// ★The truncation marker states **what the number counts**★: what is visible is the escaped notation while the number is original bytes, so without a label
+/// 30 control characters (180 characters in notation) would read as 「30 바이트를 잘랐다」 (truncated 30 bytes) and the two would look inconsistent.
 fn quoted_input(text: &str) -> String {
     let quoted = format!("{text:?}");
     if quoted.len() <= MAX_QUOTED_INPUT_BYTES {
         return quoted;
     }
-    // 여는 따옴표 · 닫는 따옴표 · 말줄임표 자리를 미리 뺀다.
+    // Reserve in advance the room for the opening quote, closing quote and ellipsis.
     let budget = MAX_QUOTED_INPUT_BYTES.saturating_sub('"'.len_utf8() * 2 + '…'.len_utf8());
     let mut shown = String::with_capacity(budget);
     for ch in text.chars() {
@@ -338,9 +338,9 @@ where
     O: serde::Serialize + Send + 'static,
 {
     fn call(&self, args: serde_json::Value) -> CommandFuture {
-        // ★본문은 future 안에서 돈다(`call` 안이 아니라)★: `call` 이 일을 끝내고 결과만 담은 future 를
-        //   돌려주면 `timeout(d, handler.call(args))` 가 **절대 발화하지 않는다** — 마감시각(TRD §4-⑥)이
-        //   이 형태 위엔 못 선다. 폴링 전이면 취소가 실제로 취소가 된다.
+        // ★The body runs inside the future (not inside `call`)★: if `call` finished the work and returned a future holding only the result,
+        //   `timeout(d, handler.call(args))` would **never fire** — the deadline (TRD §4-⑥)
+        //   cannot stand on this shape. Before polling, cancellation really is cancellation.
         let run = Arc::clone(&self.run);
         Box::pin(async move { crate::route::guard_panic(|| Self::apply(&run, args)) })
     }
@@ -360,14 +360,14 @@ where
     }
 }
 
-/// 동기(블로킹) 본문을 핸들러로 감싼다 — 인자 역직렬화와 반환 직렬화를 여기서 한 번만 한다.
+/// Wraps a synchronous (blocking) body as a handler — argument deserialization and return serialization are done here, once.
 ///
-/// ★blocking 계약(호출자가 지킬 것)★: 본문은 **첫 poll 에서 끝까지 돈다**. 조립부가 async 런타임
-/// 스레드에서 폴링하면 그 스레드를 막는다 — 에이전트 제어 동사들은 프로필 락을 쥔 채 디스크를 쓰고
-/// resume 조기 종료를 폴링하므로(daemon `control/commands.rs` 의 같은 계약) `spawn_blocking` 뒤에서 불러야 한다.
-/// 인자 역직렬화 실패 = `INVALID_ARGUMENT` · 본문 패닉 = `INTERNAL`(답장 없이 끝나지 않는다).
-/// ★스키마와 serde 의 조정은 여기 없다★ — [`CommandTable::call`] 이 선언을 보고 하므로 이 어댑터에
-/// 다시 넣으면 두 자리가 서로 다른 규칙을 갖는다.
+/// ★Blocking contract (for the caller to keep)★: the body **runs to the end on the first poll**. If the assembly code polls it on an async runtime
+/// thread, it blocks that thread — the agent control verbs write to disk while holding the profile lock and
+/// poll for early resume exit (the same contract in daemon `control/commands.rs`), so it must be called behind `spawn_blocking`.
+/// Argument deserialization failure = `INVALID_ARGUMENT` · body panic = `INTERNAL` (it does not end without a reply).
+/// ★The coercion between schema and serde is not here★ — [`CommandTable::call`] does it by looking at the declaration, so putting it
+/// back into this adapter would give the two places different rules.
 pub fn blocking_handler<A, O, F>(run: F) -> Arc<dyn CommandHandler>
 where
     F: Fn(A) -> Result<O, CommandError> + Send + Sync + 'static,
@@ -401,7 +401,7 @@ mod tests {
         agent_args: &[],
     };
 
-    /// 정수·실수 칸을 함께 든 선언 — 표가 스키마를 보고 인자를 맞추는지 여기서 본다.
+    /// A declaration holding both integer and real fields — checks here that the table fits arguments by looking at the schema.
     static NUMBERS: CommandSpec = CommandSpec {
         name: "fixture.numbers",
         effect: Effect::Write,
@@ -420,7 +420,7 @@ mod tests {
         ok_type: "NumbersOk",
         agent_args: &[],
     };
-    /// 필수 칸과 생략 가능한 칸을 함께 든 선언 — 입구 검문이 그 둘을 가르는지 여기서 본다.
+    /// A declaration holding both required and omittable fields — checks here that the entry screening tells the two apart.
     static ENTRANCE: CommandSpec = CommandSpec {
         name: "fixture.entrance",
         effect: Effect::Write,
@@ -467,7 +467,7 @@ mod tests {
         assert!(table.is_empty());
     }
 
-    /// ★조용히 하나를 고르지 않는다★ — 같은 이름의 두 선언은 계약이 둘이라는 뜻이다.
+    /// ★Do not silently pick one★ — two declarations of the same name mean there are two contracts.
     #[test]
     fn a_name_declared_twice_fails_the_table_instead_of_picking_one() {
         static OTHER_PING: CommandSpec = CommandSpec {
@@ -504,8 +504,8 @@ mod tests {
         assert_eq!(args, json!({ "kept": 1 }), "못 찾으면 인자를 안 가져간다");
     }
 
-    /// ★조립이 광고할 수 없는 선언을 싣고 달리지 않는다★ — 스키마 텍스트가 JSON 이 아니면 등록 패킷의
-    /// `help` 도 깨지고 인자를 맞출 재료도 없다.
+    /// ★Assembly does not run carrying a declaration it cannot advertise★ — if the schema text is not JSON, the registration packet's
+    /// `help` breaks too and there is no material to fit arguments either.
     #[test]
     fn a_declaration_whose_schema_is_not_json_is_refused_at_assembly() {
         static BROKEN: CommandSpec = CommandSpec {
@@ -530,9 +530,9 @@ mod tests {
         assert!(table.is_empty());
     }
 
-    /// ★`ok` 가 깨져도 같다★ — 표는 `ok_schema` 를 안 쓰지만 `spec_item_json` 이 그것을 `help` 에 그대로
-    /// 이어 붙이므로 인자 스키마만 보면 **깨진 `help` 를 실은 등록 패킷이 통과한다**. 데몬은 불투명
-    /// 문자열로 저장하는 것이 맞으니(ADR-0156) 그때는 이미 잡을 자리가 없다.
+    /// ★The same holds when `ok` is broken★ — the table does not use `ok_schema`, but `spec_item_json` attaches it into `help` as is,
+    /// so looking only at the argument schema would let **a registration packet carrying a broken `help` through**. The daemon is right to store it as an opaque
+    /// string (ADR-0156), so by then there is no place left to catch it.
     #[test]
     fn a_declaration_whose_ok_schema_is_not_json_is_refused_at_assembly() {
         static BROKEN_OK: CommandSpec = CommandSpec {
@@ -555,7 +555,7 @@ mod tests {
             Err(TableError::InvalidSchema("fixture.broken-ok"))
         );
         assert!(table.is_empty());
-        // 이 선언이 통과했다면 나갔을 `help` — JSON 이 아니다.
+        // The `help` that would have gone out had this declaration passed — it is not JSON.
         assert!(
             serde_json::from_str::<serde_json::Value>(&crate::spec_item_json(&BROKEN_OK)).is_err()
         );
@@ -570,21 +570,21 @@ mod tests {
         assert_eq!(decls.len(), 1);
         assert_eq!(decls[0].name, "fixture.ping");
         assert_eq!(decls[0].help, crate::spec_item_json(&PING));
-        // 파생 파일의 원소와 **같은 출처**여야 한다(ADR-0156).
+        // It must have **the same origin** as the elements of the derived file (ADR-0156).
         let parsed: serde_json::Value = serde_json::from_str(&decls[0].help).expect("help 는 JSON");
         assert_eq!(parsed["name"], "fixture.ping");
         assert_eq!(parsed["effect"], "Read");
         assert_eq!(parsed["summary"], "두 칸 들여쓴 요약");
         assert_eq!(parsed["ok"]["properties"]["pong"]["type"], "boolean");
         assert_eq!(parsed["errors"][0], "INTERNAL");
-        // 표가 얹는 공통 오류가 광고에 들어 있다(선언엔 없다).
+        // The common errors the table adds are in the advertisement (they are not in the declaration).
         assert_eq!(parsed["errors"][1], "INVALID_ARGUMENT");
     }
 
-    /// ★디스크 파일과 등록 패킷이 **같은 한 출처**라는 주장을 바이트로 확인한다★(ADR-0156).
+    /// ★Confirms in bytes the claim that the disk file and the registration packet have **the same single origin**★ (ADR-0156).
     ///
-    /// 두 경로를 서로 견주면 같은 함수를 두 번 부른 항등식이라 **둘이 함께 틀어져도 통과한다** — 그래서
-    /// 고정한 기대 바이트를 가운데 둔다.
+    /// If we compared the two paths against each other, it would be an identity that calls the same function twice, so **it passes even if both drift together** — so
+    /// we put a fixed expected byte string in the middle.
     #[test]
     fn the_schema_file_element_is_byte_identical_to_help() {
         const EXPECTED: &str = concat!(
@@ -605,7 +605,7 @@ mod tests {
         );
     }
 
-    /// ★표시는 `help` 가 아니라 따로 난 칸으로 나간다★(ADR-0308) — 데몬은 `help` 를 열지 않는다.
+    /// ★The marking goes out in a separate field, not in `help`★ (ADR-0308) — the daemon does not open `help`.
     #[test]
     fn decls_carry_the_agent_reference_marks_beside_the_help() {
         static MARKED: CommandSpec = CommandSpec {
@@ -653,7 +653,7 @@ mod tests {
     fn bad_arguments_become_invalid_argument() {
         let table_handler = handler();
         let outcome = block_on(table_handler.call(json!({ "unexpected": [1, 2] })));
-        // 모르는 필드는 무시되고(deny_unknown_fields 를 달지 않는다 — additive 규칙) 성공한다.
+        // Unknown fields are ignored (we do not attach deny_unknown_fields — additive rule) and it succeeds.
         assert!(outcome.is_ok());
 
         let outcome = block_on(table_handler.call(json!("not an object")));
@@ -676,9 +676,9 @@ mod tests {
         size: u32,
     }
 
-    /// ★어댑터를 안 거치는 핸들러★ — 조정이 `blocking_handler` 의 성질이면 이 핸들러는 같은 스키마를
-    /// 광고하고 다르게 받는다. 그래서 조정 테스트를 이 형태 위에 세운다(Step 3 의 `await` 하는 명령들이
-    /// 이 형태다).
+    /// ★A handler that does not go through the adapter★ — if the coercion were a property of `blocking_handler`, this handler would advertise the same schema
+    /// and accept input differently. So we build the coercion test on this shape (the `await`ing commands of Step 3 are
+    /// this shape).
     struct RawNumbers;
     impl CommandHandler for RawNumbers {
         fn call(&self, args: serde_json::Value) -> CommandFuture {
@@ -711,8 +711,8 @@ mod tests {
         block_on(future)
     }
 
-    /// ★광고한 스키마가 받는 것을 실제로 받는다★ — `{"type":"integer"}` 는 `1.0` 을 포함하는데(JSON 수치
-    /// 모델에 `1` 과 `1.0` 의 구분이 없다) serde 는 정수 칸의 f64 를 반려한다. 그 갈림을 표가 메운다.
+    /// ★What the advertised schema accepts is actually accepted★ — `{"type":"integer"}` includes `1.0` (JSON's number
+    /// model has no distinction between `1` and `1.0`) yet serde rejects an f64 in an integer field. The table fills that gap.
     #[test]
     fn an_integral_float_is_accepted_the_way_the_schema_says() {
         let outcome = call_numbers(json!({
@@ -741,7 +741,7 @@ mod tests {
         );
     }
 
-    /// ★2^53 밖에서는 f64 가 정수를 정확히 담지 못한다★ — 옮기는 것 자체가 값을 바꾸므로 그대로 둔다.
+    /// ★Outside 2^53 f64 cannot hold an integer exactly★ — the rewrite itself would change the value, so we leave it as is.
     #[test]
     fn a_float_beyond_exact_integer_range_is_left_alone() {
         let outcome = call_numbers(json!({
@@ -754,7 +754,7 @@ mod tests {
         );
     }
 
-    // ── 입구 검문(ADR-0157) ──────────────────────────────────────────────────────────────────
+    // ── Entry screening (ADR-0157) ──────────────────────────────────────────────────────────────────
 
     fn entrance_table() -> CommandTable {
         let mut table = CommandTable::new(DECLARED);
@@ -764,8 +764,8 @@ mod tests {
         table
     }
 
-    /// ★모르는 칸을 조용히 무시하면 **성공이 보고된다**★ — 호출자는 자기가 지시한 것과 다른 일이 일어난
-    /// 줄 모른다(ADR-0157 이 이 그물을 세운 이유). 그래서 반려하되 **스스로 고칠 재료**를 함께 낸다.
+    /// ★If an unknown field is silently ignored, **success is reported**★ — the caller does not know that something different from what it
+    /// instructed happened (the reason ADR-0157 set up this net). So it rejects, but also gives **material to fix it itself**.
     #[test]
     fn an_undeclared_argument_field_is_named_and_refused() {
         let err = entrance_table()
@@ -788,8 +788,8 @@ mod tests {
         );
     }
 
-    /// ★틀린 칸이 여럿이면 여럿 다 나온다★ — 하나만 짚으면 호출자는 반려·수정·재시도를 오타 수만큼
-    /// 반복한다. 칸 순서는 사전순이라 「처음 친 칸」이라는 뜻도 없다.
+    /// ★If there are several wrong fields, all of them come out★ — if only one is pointed out, the caller repeats reject, fix, retry as many
+    /// times as there are typos. Field order is alphabetical, so there is no meaning of 「처음 친 칸」 (the field typed first) either.
     #[test]
     fn every_undeclared_argument_field_is_named_not_just_the_first() {
         let err = entrance_table()
@@ -808,17 +808,17 @@ mod tests {
         }
     }
 
-    /// 선언에 없는 칸 `count` 개(각 `key_bytes` 바이트)를 실은 반려 문구.
+    /// A rejection message carrying `count` fields absent from the declaration (each `key_bytes` bytes).
     ///
-    /// ★넣는 순서를 **사전 역순**으로 둔다★: 오름차순으로 넣으면 삽입 순서와 사전순이 같아져, 맵이 삽입
-    /// 순서 보존형으로 바뀌어도(`preserve_order`) 「사전순 앞 여덟」 단언이 그대로 통과한다 — 그 단언이
-    /// 재려던 성질이 사라진 줄 아무도 모른다.
+    /// ★Insert in **reverse alphabetical order**★: if inserted ascending, insertion order and alphabetical order coincide, so even if the map changes
+    /// to an insertion-order-preserving form (`preserve_order`) the 「사전순 앞 여덟」 (first eight alphabetically) assertion still passes — and nobody would
+    /// know the property that assertion meant to measure is gone.
     fn flood_refusal(count: usize, key_bytes: usize) -> String {
         flood_refusal_of(count, key_bytes, "x")
     }
 
-    /// `fill` = 이름을 채우는 문자 — 인쇄 가능 문자와 이스케이프되는 문자가 같은 상한을 타는지 재려고
-    /// 갈라 둔다(이스케이프 확장은 상한을 종류별로 다르게 만들 수 있는 축이다).
+    /// `fill` = the character that fills the name — kept separate so we can measure whether printable characters and escaped characters fall under the same cap
+    /// (escape expansion is an axis that can make the cap differ by kind).
     fn flood_refusal_of(count: usize, key_bytes: usize, fill: &str) -> String {
         let mut given = serde_json::Map::new();
         given.insert("cwd".to_string(), json!("C:/x"));
@@ -832,7 +832,7 @@ mod tests {
             .to_string()
     }
 
-    /// 개수 상한을 넘으면 **몇 개가 더 있는지** 말한다 — 목록이 전부인 줄 알면 남은 칸을 못 고친다.
+    /// If the count cap is exceeded it says **how many more there are** — if the caller thinks the list is everything it cannot fix the remaining fields.
     #[test]
     fn a_flood_of_unknown_fields_is_capped_and_says_how_many_are_left() {
         let message = flood_refusal(40, 0);
@@ -847,27 +847,27 @@ mod tests {
         );
     }
 
-    /// ★문구 길이는 요청 크기와 **무관**하다★ — 지켜야 할 성질은 「몇 바이트 이하」가 아니라 「입력이 커져도
-    /// 안 자란다」다. 이름 하나의 상한은 [`quoted_input`], 이름 개수의 상한은 [`MAX_NAMED_UNKNOWN`] 이 잡고,
-    /// 둘이 함께 서야 이 성질이 선다(한쪽만 있으면 다른 축으로 자란다).
+    /// ★The message length is **unrelated** to the request size★ — the property to keep is not 「몇 바이트 이하」 (at most so many bytes) but 「입력이 커져도
+    /// 안 자란다」 (does not grow as the input grows). The cap on one name is held by [`quoted_input`] and the cap on the number of names by [`MAX_NAMED_UNKNOWN`], and
+    /// only with both standing does this property stand (with only one, it grows along the other axis).
     ///
-    /// 실측 최악은 **약 1.4 KB**(이름 여덟 × 인용 상한 128B + 잘림 표시 + 선언 집합)이고, 이스케이프되는
-    /// 이름도 같은 값이다(상한이 이스케이프 **뒤**에 걸리므로) — 그래도 숫자를 계약처럼 읽지 말 것. 계약은
-    /// 아래 첫 단언(입력이 커져도 문구는 자릿수만큼만 는다)이다.
+    /// The measured worst case is **about 1.4 KB** (eight names × quote cap 128B + truncation marker + declared set), and an escaped
+    /// name gives the same value (since the cap applies **after** escaping) — still, do not read that number as a contract. The contract is
+    /// the first assertion below (even if the input grows, the message grows only by the number of digits).
     #[test]
     fn the_refusal_message_does_not_grow_with_the_body() {
         let small = flood_refusal(40, 1 << 10);
         let huge = flood_refusal(4_000, 1 << 14);
 
-        // 자라도 되는 폭 = **자릿수뿐**이다: 이름 여덟의 「N 바이트」 표기와 「+N more」의 숫자가 길어진다.
-        //   여유 32 는 그 자릿수 증가분(입력이 1000배여도 십진 자릿수는 몇 자리만 는다)을 덮는 크기다.
+        // The width allowed to grow = **the number of digits only**: the 「N 바이트」 (N bytes) notation of the eight names and the number in 「+N more」 get longer.
+        //   The margin of 32 is sized to cover that growth in digits (even if the input is 1000 times larger, decimal digits grow by only a few).
         assert!(
             huge.len() <= small.len() + 32,
             "칸 수 100배·이름 크기 16배인데 문구가 자릿수 이상으로 자랐다: {} → {} 바이트",
             small.len(),
             huge.len()
         );
-        // 이스케이프되는 이름도 같은 상한을 탄다 — 여기가 이전 두 판에서 문서 숫자를 거짓으로 만든 축이다.
+        // Escaped names fall under the same cap — this is the axis that made the number in the docs false in the previous two editions.
         let escaped = flood_refusal_of(40, 1 << 10, "\u{1b}");
         for (label, measured) in [("printable", small.len()), ("escaped", escaped.len())] {
             assert!(
@@ -877,17 +877,17 @@ mod tests {
         }
     }
 
-    /// ★이름 지어지는 여덟은 **사전순 앞 여덟**이고, 실리는 **차례도 사전순**이다★ — 호출자가 먼저 친
-    /// 여덟이 아니다(인자 맵이 정렬 자료구조다). 픽스처가 사전 **역순**으로 넣으므로 맵이 삽입 순서
-    /// 보존형으로 바뀌면 여기가 빨개진다.
-    /// ★이름을 잘리게 두는 것이 요점이다★: 이름 상한과 개수 상한이 **함께** 걸리는 조합이라야 둘이 서로를
-    /// 가리지 않는지 본다(짧은 이름만 쓰면 잘림 경로가 이 조합에서 한 번도 안 돈다).
+    /// ★The eight named are **the first eight alphabetically**, and the **order carried is also alphabetical**★ — they are not the eight the caller
+    /// typed first (the argument map is a sorted data structure). The fixture inserts in **reverse** alphabetical order, so if the map changes to an insertion-order-
+    /// preserving form this turns red.
+    /// ★Letting the names be truncated is the point★: only a combination where the name cap and the count cap apply **together** checks that the two do not
+    /// mask each other (with only short names, the truncation path never runs once in this combination).
     #[test]
     fn the_named_subset_is_the_alphabetically_first_ones_in_order() {
         let message = flood_refusal(40, 1 << 8);
 
         let at = |name: &str| message.find(name);
-        // 양 끝만 보면 가운데 여섯이 섞여도 통과한다 — 여덟 자리를 전부 본다.
+        // Looking only at both ends would pass even if the middle six got mixed up — we look at all eight positions.
         let places: Vec<usize> = (0..MAX_NAMED_UNKNOWN)
             .map(|i| at(&format!("stray{i:04}")).expect("이름 지어진 여덟"))
             .collect();
@@ -909,7 +909,7 @@ mod tests {
         );
     }
 
-    /// 잘린 조각을 `"본문…"` + 잘림 표시로 가른다 — 본문에 무엇이 들었나를 재려면 경계가 필요하다.
+    /// Splits a truncated piece into `"본문…"` + truncation marker — measuring what the body holds needs a boundary.
     fn literal_and_body(rendered: &str) -> (&str, &str) {
         let marker = rendered
             .find("(truncated")
@@ -922,13 +922,13 @@ mod tests {
         (literal, body)
     }
 
-    /// ★잘린 이름도 **닫힌 문자열 리터럴**이어야 한다★ — 이름 여럿을 이어 붙인 문구에서 따옴표 짝이
-    /// 어긋나면 `{:?}` 로 없애려던 애매함(칸 하나가 둘로 읽힘)이 그대로 돌아온다.
+    /// ★A truncated name must also be a **closed string literal**★ — if in a message joining several names the quote pairing goes
+    /// out of step, the ambiguity `{:?}` was meant to remove (one field read as two) comes right back.
     ///
-    /// ★재는 것은 셋이고, 셋 다 있어야 한다★: ① 리터럴 **크기**가 상한을 지키나(예산에서 여닫이 따옴표
-    /// 자리를 빼먹으면 여기서 걸린다) ② 본문에 **이스케이프 안 된 따옴표**가 없나(잘림 갈래에서 이스케이프를
-    /// 빼먹으면 여기서 걸린다 — 그래서 픽스처 이름이 따옴표를 품는다) ③ 이스케이프 중간에서 안 잘렸나.
-    /// 셋 중 하나라도 빠지면 이 함수의 옛 판본들이 실제로 낸 결함이 그대로 통과한다.
+    /// ★Three things are measured, and all three are needed★: ① whether the literal **size** keeps the cap (if the budget forgets the room for the opening and closing quotes,
+    /// this catches it) ② whether the body has no **unescaped quote** (if the truncation branch forgets to escape,
+    /// this catches it — which is why the fixture name contains a quote) ③ whether it was not truncated in the middle of an escape.
+    /// If any one of the three is missing, the defects that the old versions of this function actually produced pass through.
     #[test]
     fn a_truncated_name_is_still_a_closed_string_literal() {
         let key = format!("a\"b{}", "c".repeat(300));
@@ -950,8 +950,8 @@ mod tests {
             "무엇을 센 수인지 밝힌다: {rendered}"
         );
 
-        // ★본문의 따옴표는 **전부 이스케이프돼 있어야** 한다★ — 하나라도 날것이면 그 자리가 칸 경계로
-        //   읽힌다(개수만 세면 `\"` 도 한 개로 세어져 이 결함을 놓친다).
+        // ★Every quote in the body **must be escaped**★ — if even one is raw, that spot is read as a field boundary
+        //   (counting alone would count `\"` as one too and miss this defect).
         let mut escaped = false;
         for ch in body.chars() {
             match ch {
@@ -962,19 +962,19 @@ mod tests {
             }
         }
 
-        // ★본문의 **마지막 이스케이프가 온전한지**를 본다★: `\u{1b}` 는 여섯 글자라 중간에서 잘릴 자리가
-        //   다섯이고, 그중 「`\` 바로 뒤」 하나만 역슬래시 홀짝으로 잡힌다. 나머지 넷(`\u`·`\u{`·`\u{1`·
-        //   `\u{1b`)은 홀짝 검사를 그대로 통과하므로, 마지막 `\` 부터 끝까지가 **닫힌 시퀀스**인지 본다.
+        // ★Checks **whether the last escape of the body is intact**★: `\u{1b}` is six characters so there are five places to be cut in the middle, and of those only 「`\` 바로 뒤」 (right after the backslash) is
+        //   caught by backslash parity. The other four (`\u`·`\u{`·`\u{1`·
+        //   `\u{1b`) pass the parity check as is, so we check whether everything from the last `\` to the end is a **closed sequence**.
         let control = quoted_input(&"\u{1b}".repeat(200));
         let (control_literal, control_body) = literal_and_body(&control);
         if let Some(last) = control_body.rfind('\\') {
             let tail = &control_body[last..];
             let complete = match tail.chars().nth(1) {
-                // `\u{…}` 는 닫는 중괄호까지 있어야 한 글자를 뜻한다.
+                // `\u{…}` means one character only if it has the closing brace.
                 Some('u') => tail.contains('}'),
-                // 한 글자짜리 이스케이프(`\n`·`\\`·`\"` 등)는 그 한 글자가 붙어 있으면 온전하다.
+                // A one-character escape (`\n`·`\\`·`\"` etc.) is intact if that one character is attached.
                 Some(_) => true,
-                // 역슬래시로 끝났다 — 아무것도 안 이스케이프하는 조각이다.
+                // It ended with a backslash — a piece that escapes nothing.
                 None => false,
             };
             assert!(
@@ -993,9 +993,9 @@ mod tests {
         );
     }
 
-    /// ★상한은 입력 **종류**와도 무관해야 한다★: 이스케이프 전에 자르면 제어문자 한 글자가 여섯 바이트로
-    /// 부풀어, 같은 상한이 인쇄 가능 문자에는 128 B·제어문자에는 그 여섯 배로 달라진다 — 문서에 적은 숫자가
-    /// 그 순간 거짓이 된다.
+    /// ★The cap must also be unrelated to the input **kind**★: if truncated before escaping, one control character swells to six bytes,
+    /// and the same cap becomes 128 B for printable characters and six times that for control characters — the number written in the docs
+    /// becomes false at that moment.
     #[test]
     fn an_escape_heavy_key_obeys_the_same_bound_as_a_printable_one() {
         let refusal_len = |key: String| {
@@ -1017,8 +1017,8 @@ mod tests {
         );
     }
 
-    /// ★핸들러가 돌기 전에 걸린다★ — 검문은 순수한 사전 판정이라 본문이 없어도, 본문이 터지는 것이어도
-    /// 같은 답을 낸다(터지는 핸들러가 그것을 단언한다).
+    /// ★It is caught before the handler runs★ — the screening is a pure up-front decision, so it gives the same answer whether or not there is a body, and even if the body blows up
+    /// (a handler that blows up asserts that).
     #[test]
     fn a_missing_required_field_is_refused_before_the_handler() {
         let mut table = CommandTable::new(DECLARED);
@@ -1058,8 +1058,8 @@ mod tests {
             .expect("실어도 된다");
     }
 
-    /// ★반려는 **언제나** 허용 집합을 함께 낸다★ — 「객체가 아니다」만 받은 호출자는 무엇을 실어야 하는지
-    /// 모르는 채로 다시 찍어 봐야 한다(스스로 고칠 재료를 내는 것이 이 검문의 계약이다).
+    /// ★The rejection **always** carries the allowed set★ — a caller that received only 「객체가 아니다」 (not an object) would have to try again
+    /// without knowing what to carry (giving material to fix it itself is this screening's contract).
     #[test]
     fn a_non_object_refusal_also_carries_the_declared_set() {
         let err = entrance_table()
@@ -1074,8 +1074,8 @@ mod tests {
         );
     }
 
-    /// ★반려 문구는 호출자가 준 문자열을 되받아 인용한다★ — 상한이 없으면 거대한 칸 이름 하나가 그만한
-    /// 문구를 만들고, 그것이 오류 답장에 실려 선을 탄다.
+    /// ★The rejection message quotes back the string the caller gave★ — without a cap, one huge field name would make a message of that size,
+    /// and it would be carried in the error reply onto the wire.
     #[test]
     fn a_huge_unknown_key_is_quoted_within_a_bound() {
         let huge = "k".repeat(1 << 20);
@@ -1087,9 +1087,9 @@ mod tests {
             .check_args("fixture.entrance", &serde_json::Value::Object(given))
             .expect_err("선언에 없는 칸");
 
-        // 이름 하나짜리 문구의 실측은 ~230 바이트다(인용 상한 128 + 잘림 표시 + 선언 집합) — 아래 숫자는
-        //   그 실측에 여유를 준 값이지 계약이 아니다. 계약은 「입력 크기와 무관」이고
-        //   `the_refusal_message_does_not_grow_with_the_body` 가 그것을 잰다.
+        // The measured size of a single-name message is ~230 bytes (quote cap 128 + truncation marker + declared set) — the numbers below are
+        //   that measurement plus margin, not a contract. The contract is 「입력 크기와 무관」 (unrelated to input size) and
+        //   `the_refusal_message_does_not_grow_with_the_body` measures it.
         assert!(
             err.message().len() < 512,
             "1 MiB 이름 하나가 그만한 문구를 만들었다: {} 바이트",
@@ -1102,8 +1102,8 @@ mod tests {
         );
     }
 
-    /// ★문구가 호출 표면을 배우면 안 된다★ — 이 crate 는 자기 반려가 어느 표면에 뜨는지 모른다. 표면별
-    /// 안내는 어댑터가 [`CommandError::set_message`] 로 덧붙이므로, 여기서 지어내면 두 안내가 어긋난다.
+    /// ★The message must not learn the calling surface★ — this crate does not know which surface its rejection appears on. The per-surface
+    /// guidance is added by the adapter through [`CommandError::set_message`], so if we invent it here the two pieces of guidance diverge.
     #[test]
     fn check_args_does_not_know_any_cli_vocabulary() {
         let table = entrance_table();
@@ -1135,8 +1135,8 @@ mod tests {
         }
     }
 
-    /// ★남의 이름은 판정하지 않는다★ — 그 계약은 이 표에 없다. 여기서 반려하면 명부로 갈 봉투가 입구에서
-    /// 죽어 2단 배달(TRD §3-8)이 성립하지 않는다.
+    /// ★Another owner's name is not decided★ — that contract is not in this table. If rejected here, the envelope headed for the registry would
+    /// die at the entry and two-stage delivery (TRD §3-8) would not hold.
     #[test]
     fn a_name_this_table_does_not_hold_is_left_to_the_next_step() {
         entrance_table()
@@ -1144,8 +1144,8 @@ mod tests {
             .expect("남의 이름은 통과한다");
     }
 
-    /// ★그물은 표에도 있다★ — 라우팅 밖에서 핸들러를 직접 부르는 경로(하네스 · 조립부)에서도 패닉이
-    /// 답장을 삼키면 안 된다. 이 단언이 없으면 `route` 의 바깥 그물이 이 자리의 결함을 가린다.
+    /// ★The net is in the table too★ — even on a path that calls a handler directly outside routing (harness · assembly code), a panic
+    /// must not swallow the reply. Without this assertion, `route`'s outer net would mask a defect at this spot.
     #[test]
     fn a_panicking_body_is_folded_into_an_error_without_route() {
         let panicking = blocking_handler(|_: NoArgs| -> Result<serde_json::Value, CommandError> {

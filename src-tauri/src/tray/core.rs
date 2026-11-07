@@ -1,18 +1,18 @@
-//! tray core — 트레이 동작의 **순수 로직**(OS/GUI/네트워크 무의존).
+//! tray core — the **pure logic** of tray behavior (no dependence on OS/GUI/network).
 //!
-//! 순수성 불변식: tauri/discovery import 0 — 슬라이스/enum 만 다룬다(CLAUDE.md 「코어 격리」).
-//! Launcher/DaemonProbe/dispatch 류 seam 은 **의도적 부재** — 통합 앱은 트레이 핸들러가
-//! discovery command 를 직접 부르므로 불필요하다(ADR-0026, TRD §2).
-//! 메뉴에 QuitTray 가 없는 건 트레이=앱 통합이라 무의미해서다(ADR-0026).
-//! ★주의: show_main_ui/hide_main_ui actions·command 는 유지★ — ShowUi/HideUi 는 메뉴 *항목*만
-//! 뺀 것이고(트레이 좌클릭이 대체), LLM/cdp 제어(CLAUDE.md 「LLM-우선 제어」)가 같은 actions 함수를 계속 쓴다.
+//! Purity invariant: zero tauri/discovery imports — it deals only with slices/enums (CLAUDE.md 「코어 격리」).
+//! Seams of the Launcher/DaemonProbe/dispatch kind are **deliberately absent** — in the integrated app the tray handler calls the
+//! discovery command directly, so they are unnecessary (ADR-0026, TRD §2).
+//! There is no QuitTray in the menu because tray = app integration makes it meaningless (ADR-0026).
+//! ★Note: the show_main_ui/hide_main_ui actions·commands are kept★ — for ShowUi/HideUi only the menu *item* was removed
+//! (the tray left click replaces it), and LLM/cdp control (CLAUDE.md 「LLM-우선 제어」) keeps using the same actions functions.
 
 use crate::layout::MAIN_WINDOW_LABEL;
 
-// ── 메뉴 의도 ──────────────────────────────────────────────────────────────────
+// ── Menu intent ──────────────────────────────────────────────────────────────────
 
-// 트레이 메뉴 클릭이 표현하는 **의도**. 사람 클릭·LLM 호출·단축키가 모두 이 의도로
-// 수렴한다(CLAUDE.md 「LLM-우선 제어」).
+// The **intent** a tray menu click expresses. Human clicks · LLM calls · shortcuts all converge
+// on this intent (CLAUDE.md 「LLM-우선 제어」).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuAction {
     StartDaemon,
@@ -22,7 +22,7 @@ pub enum MenuAction {
 }
 
 impl MenuAction {
-    // 안정 id — 라벨이 바뀌어도 불변(클릭 매핑 안정).
+    // Stable id — unchanged even if the label changes (click mapping stays stable).
     pub const fn menu_id(self) -> &'static str {
         match self {
             MenuAction::StartDaemon => "start_daemon",
@@ -53,7 +53,7 @@ pub fn action_for_menu_id(id: &str) -> Option<MenuAction> {
     MenuAction::ALL.into_iter().find(|a| a.menu_id() == id)
 }
 
-// ── 상태 → 표시 매핑(순수) ─────────────────────────────────────────────────────────
+// ── State → display mapping (pure) ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IconState {
@@ -69,17 +69,17 @@ pub fn icon_state_for(alive: bool) -> IconState {
     }
 }
 
-// ── 보이기·숨기기 대상 창(순수) ──────────────────────────────────────────────────────
+// ── Target windows for show·hide (pure) ──────────────────────────────────────────────────────
 
-// 트레이 보이기·숨기기가 다룰 창 = 팝아웃 전부(번호 오름차순) 뒤에 메인. 그 밖의 창은 뺀다 — 사람에게 보이려고
-// 만든 창이 아닌 것을 트레이가 띄우지 않게.
-// ★메인이 마지막인 것이 계약이다★: 호출자가 받은 순서대로 창을 펼치고 포커스를 주는데 그 셋이 모두 창을
-//   활성화한다(tao 0.35 Windows = `SW_SHOW` · `SW_RESTORE` · `SetForegroundWindow`) — 메인 뒤에 다룬
-//   팝아웃이 있으면 포커스를 그쪽이 가져간다. 같은 이유로 번호가 가장 큰 팝아웃이 메인 바로 아래에 온다.
-// ★팝아웃을 받은 순서대로 두지 말 것★: 호출자가 넘기는 `webview_windows()` 는 부를 때마다 무작위 해셔의
-//   새 HashMap 이라(tauri 2.11.3 `src/lib.rs:588-601`) 순서를 따르면 보이기마다 팝아웃 겹침 순서가 뒤섞인다.
-// 팝아웃 판정은 인자로 받는다 — 테스트 밖 코드가 Tauri 에 묶인 `commands` 모듈에 기대지 않게 하려는 것이고,
-//   테스트는 정본 판정(`commands::popout::is_popup_label`)을 그대로 넘겨 계약을 못 박는다.
+// The windows tray show·hide handle = all popouts (ascending number) and then main. Other windows are left out — so the tray does not bring up windows
+// that were not made to be shown to a person.
+// ★Main being last is the contract★: the caller shows · unminimizes windows and gives focus in the order received, and all three of those activate the window
+//   (tao 0.35 Windows = `SW_SHOW` · `SW_RESTORE` · `SetForegroundWindow`) — if a popout is handled after main, it takes
+//   the focus. For the same reason the popout with the largest number comes right below main.
+// ★Do not keep popouts in the order received★: the `webview_windows()` the caller passes is a new HashMap with a random hasher on every call
+//   (tauri 2.11.3 `src/lib.rs:588-601`), so following that order would shuffle the popout stacking order on every show.
+// The popout decision is taken as an argument — so that code outside tests does not lean on the Tauri-bound `commands` module,
+//   and tests pass the canonical decision (`commands::popout::is_popup_label`) as is to pin down the contract.
 // ADR-0229
 pub fn ui_windows<'a>(
     labels: impl IntoIterator<Item = &'a str>,
@@ -94,8 +94,8 @@ pub fn ui_windows<'a>(
             windows.push(label);
         }
     }
-    // 번호 있는 것 먼저(번호순), 번호 없는 것은 뒤에 라벨순. 같은 번호("7"·"007")도 라벨로 갈라 전순서를 만든다
-    //   — 숫자·문자 비교를 섞는 비교자는 전순서가 아니라 정렬이 패닉할 수 있다.
+    // Numbered ones first (by number), unnumbered ones after by label. The same number ("7"·"007") is also split by label to make a total order
+    //   — a comparator mixing numeric·text comparison is not a total order and the sort may panic.
     windows.sort_by_key(|&label| {
         let n = popout_number(label);
         (n.is_none(), n, label)
@@ -104,22 +104,22 @@ pub fn ui_windows<'a>(
     windows
 }
 
-// 번호 = 마지막 `-` 뒤 꼬리. 발급 라벨(`slot-popup-<실행 표식>-<n>` — TRD S26-window-chrome §4-5)에선 발급 순번 n 이다 —
-// 접두 상수는 Tauri 에 묶인 `commands::popout` 에 있어 여기서 쓰지 않는다. 빈 꼬리·숫자 아님·u64 초과는 `None`.
+// Number = the tail after the last `-`. For an issued label (`slot-popup-<실행 표식>-<n>` — TRD S26-window-chrome §4-5) it is the issue sequence number n —
+// the prefix constant is in the Tauri-bound `commands::popout` and is not used here. An empty tail · non-digits · over u64 is `None`.
 fn popout_number(label: &str) -> Option<u64> {
     label.rsplit_once('-')?.1.parse().ok()
 }
 
-// ── 아이콘 픽셀 변환(순수) ──────────────────────────────────────────────────────────
+// ── Icon pixel conversion (pure) ──────────────────────────────────────────────────────────
 
-// `rgba.len()` 은 `w*h*4` 여야 한다(RGBA 4채널). 이 전제는 호출자(Tauri `Image::from_bytes` 로
-// 디코드한 `.rgba()`)가 보장한다 — 디코드 결과가 `(width, height)` 와 정합하는 길이의 버퍼다.
-// len ≠ w*h*4 는 전부 계약 위반(4의 배수 여부 무관). debug 빌드는 아래 debug_assert 가 즉시
-// panic 으로 잡고, 릴리스는 하류가 잡되 **soft** 하다 — 직접 소비처 `Image::new_owned(_, w, h)`
-// 는 무검증 생성자지만, 그 `Image` 가 트레이에 닿기 전 `TryFrom → tray_icon::Icon::from_rgba`
-// 의 길이 검증을 거친다(builder 경로 = `.ok()` 로 삼켜 아이콘 미설정 / `set_icon` 경로 = warn
-// 로그 degrade — 어느 쪽도 panic 아님). 즉 debug_assert 는 유일한 방어선이 아니라 유일하게
-// 즉시·시끄럽게 잡는 방어선이다. 전제가 지켜지면 chunks_exact 잔여는 없다.
+// `rgba.len()` must be `w*h*4` (RGBA 4 channels). This precondition is guaranteed by the caller (the `.rgba()` decoded with Tauri `Image::from_bytes`) —
+// the decode result is a buffer of a length consistent with `(width, height)`.
+// len ≠ w*h*4 is always a contract violation (regardless of being a multiple of 4). A debug build catches it at once with the debug_assert below as a
+// panic, and release is caught downstream but **soft** — the direct consumer `Image::new_owned(_, w, h)`
+// is an unvalidated constructor, but before that `Image` reaches the tray it goes through the length check of `TryFrom → tray_icon::Icon::from_rgba`
+// (builder path = swallowed with `.ok()` so the icon is not set / `set_icon` path = warn
+// log degrade — neither is a panic). So debug_assert is not the only line of defense but the only one that catches immediately
+// and loudly. If the precondition holds, there is no chunks_exact remainder.
 pub fn to_grayscale_rgba(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
     debug_assert_eq!(
         rgba.len(),
@@ -128,7 +128,7 @@ pub fn to_grayscale_rgba(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
     );
     let mut out = Vec::with_capacity(rgba.len());
     for px in rgba.chunks_exact(4) {
-        // Rec.601 luma. f32 누적 후 반올림 — 정수 근사 누적오차 회피.
+        // Rec.601 luma. Round after f32 accumulation — avoids the accumulated error of integer approximation.
         let luma = 0.299 * px[0] as f32 + 0.587 * px[1] as f32 + 0.114 * px[2] as f32;
         let g = luma.round().clamp(0.0, 255.0) as u8;
         out.push(g);
@@ -139,7 +139,7 @@ pub fn to_grayscale_rgba(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
     out
 }
 
-// ── 테스트 (OS/GUI 무의존 순수 단위) ─────────────────────────────────────────────────
+// ── Tests (pure units with no OS/GUI dependence) ─────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -176,8 +176,8 @@ mod tests {
 
     #[test]
     fn all_variants_present_in_all_array() {
-        // ALL 누락 방지: 새 variant 를 추가하면 아래 exhaustive match 가 컴파일 에러를 내
-        // (non-exhaustive) "이 variant 를 ALL 에 넣었는지" 를 강제 인지하게 한다.
+        // Preventing an ALL omission: if a new variant is added, the exhaustive match below gives a compile error
+        // (non-exhaustive) that forces awareness of "did you put this variant in ALL".
         fn assert_in_all(a: MenuAction) {
             assert!(
                 MenuAction::ALL.contains(&a),
@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn menu_ids_are_unique() {
-        // id 충돌이면 클릭 라우팅이 깨진다.
+        // If ids collide, click routing breaks.
         let ids: Vec<&str> = MenuAction::ALL.iter().map(|a| a.menu_id()).collect();
         let mut dedup = ids.clone();
         dedup.sort_unstable();
@@ -213,8 +213,8 @@ mod tests {
         assert_eq!(labels.len(), dedup.len(), "label 중복: {labels:?}");
     }
 
-    // ── 보이기·숨기기 대상 창 ──
-    // 팝아웃 판정은 운영과 같은 정본을 넘긴다 — 테스트용 판정을 따로 두면 정본이 바뀌어도 여기가 초록이다.
+    // ── Target windows for show·hide ──
+    // Pass the same canonical popout decision as production — with a separate decision for tests, this stays green even if the canonical one changes.
     use crate::commands::popout::is_popup_label;
 
     #[test]
@@ -257,7 +257,7 @@ mod tests {
         );
     }
 
-    // 발급 라벨에는 실행 표식이 붙는다 — 순서는 그 뒤 순번으로 정한다(표식이 숫자뿐이어도).
+    // An issued label carries a run marker — the order is decided by the sequence number after it (even if the marker is only digits).
     #[test]
     fn ui_windows_orders_issued_popouts_by_their_trailing_number() {
         use crate::commands::popout::popup_label;
@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn ui_windows_puts_unnumbered_popouts_after_numbered_in_lexical_order() {
-        // 빈 꼬리 · 숫자 아닌 꼬리 · u64 를 넘는 꼬리는 번호가 없는 것으로 본다.
+        // An empty tail · a non-numeric tail · a tail over u64 is treated as having no number.
         let labels = [
             "slot-popup-x",
             "slot-popup-99999999999999999999999",
@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn ui_windows_breaks_equal_numbers_by_label() {
-        // "007" 과 "7" 은 같은 번호다 — 라벨로 갈라 순서가 도착 순서에 기대지 않게 한다.
+        // "007" and "7" are the same number — split by label so the order does not lean on arrival order.
         let a = ["slot-popup-7", "slot-popup-007"];
         let b = ["slot-popup-007", "slot-popup-7"];
         assert_eq!(
@@ -326,8 +326,8 @@ mod tests {
     #[test]
     fn grayscale_converts_color_to_gray_preserving_alpha() {
         let rgba = [
-            200u8, 10, 30, 128, // 빨강 계열, alpha=128
-            10, 200, 30, 255, // 초록 계열, alpha=255
+            200u8, 10, 30, 128, // Reddish, alpha=128
+            10, 200, 30, 255, // Greenish, alpha=255
         ];
         let out = to_grayscale_rgba(&rgba, 2, 1);
         assert_eq!(out.len(), rgba.len(), "길이 보존");

@@ -1,16 +1,16 @@
-# S16 TRD — PC 미러 버퍼 제거: 뷰 직결 replay (view-direct replay) — rev4
+# S16 TRD — Removing the PC mirror buffer: view-direct replay — rev4
 
-> **왜/무엇 = ADR-0046(ADR-0040 supersede + 부분 supersede 목록 §7)** + 리서치(2026-07-05 medium). 이 문서 = **어떻게**. 리뷰 이력: rev2 = `/review trd deep`(BLOCK 2·FIX 1) → gen 펜스. rev3 = 재검증(BLOCK) → **single-flight 1:1 결합**(셈 기반 결합 금지 — 마지막값 각인·FIFO 카운팅 둘 다 유실/desync 실증). rev4 = 3차(FIX) → acked 게이트·진행 기반 deadline·단절 시 마커 미발행·full-replay 전제 명문화.
-> **확정 결정(사용자, 2026-07-05):** ① 뷰별 직구독(각 뷰가 데몬 ring에서 직접 replay 수신, src-tauri = 무상태 통과) · ② 갭 정책 = 보관 하한부터 replay(하한 너머 복원 비목표 — 이력 정본 = claude 세션 `--resume`) · ③ 모바일/원격 캐싱 = transport seam 자리만 · ④ 게이트 통과분 단계별 커밋(push 없음).
-> **내부 결정(메인 — 아침 보고 대상):** ⓐ wire 다중화 = 에이전트당 wire 구독 1개 + 뷰 mount마다 전량 재replay + 뷰별 dedup(frame sub_id 프로토콜 확장 거부 — 체감 동일, 파급 큼). ⓑ **재연결 = 전량 재replay 수용**(기존 tail-resume 대비 회귀 맞음 — PC loopback·재연결 희소라 수용, 원격은 seam에서 after_seq resume으로 해결. §4). ⓒ replay 경계 = Channel 내부 마커 + gen 펜스(리뷰 3인 수렴 지시).
+> **Why/what = ADR-0046 (supersedes ADR-0040 + partial-supersede list §7)** + research (2026-07-05 medium). This document = **how**. Review history: rev2 = `/review trd deep` (BLOCK 2, FIX 1) → gen fence. rev3 = re-verification (BLOCK) → **single-flight 1:1 coupling** (counting-based coupling is forbidden — both last-value stamping and FIFO counting were shown to lose events or desync). rev4 = third round (FIX) → acked gate, progress-based deadline, no marker emitted on disconnect, full-replay premise made explicit.
+> **Confirmed decisions (user, 2026-07-05):** ① per-view direct subscription (each view receives replay directly from the daemon ring; src-tauri = stateless pass-through) · ② gap policy = replay from the retention floor (restoring beyond the floor is a non-goal — the history source of truth = claude session `--resume`) · ③ mobile/remote caching = placeholder only at the transport seam · ④ per-step commits of what passes the gates (no push).
+> **Internal decisions (main — to be reported in the morning):** ⓐ wire multiplexing = one wire subscription per agent + full re-replay on every view mount + per-view dedup (extending the frame with a sub_id protocol is rejected — same perceived result, large blast radius). ⓑ **Reconnect = full re-replay accepted** (a regression versus the existing tail-resume, confirmed — accepted because PC loopback and reconnects are rare; remote is solved with after_seq resume at the seam. §4). ⓒ replay boundary = in-Channel marker + gen fence (the three reviewers converged on this).
 
-## 1. 목적·범위
+## 1. Purpose and scope
 
-src-tauri의 데몬 버퍼 미러(`AgentBufferStore`/`OutputViewStore`/`BoundedSeqLog`/per-view cursor)를 **전부 제거**, remount/리로드/새 창 = **데몬 ring 전량 재replay**로 대체. 진도 상태의 거처가 "웹뷰 뷰 단위" 한 곳이 되어 미러↔데몬↔화면 3자 동기화가 소멸한다. `resync_output`(23a8c47 증상 대응)도 흡수·폐기.
+Remove the daemon buffer mirror in src-tauri (`AgentBufferStore`/`OutputViewStore`/`BoundedSeqLog`/per-view cursor) **entirely**, and replace it with remount/reload/new window = **full re-replay of the daemon ring**. Progress state then lives in one place, "per webview view", and the three-way sync of mirror ↔ daemon ↔ screen disappears. `resync_output` (the symptom fix in 23a8c47) is also absorbed and discarded.
 
-**범위 밖:** 데몬측 화면 스냅샷(거부, ADR 기록). 모바일 캐싱 구현. JSON 렌더 잔여(S15 DEFER — 별도 스텝). mount 폭주 coalescing(§4 — 선택 최적화로만 기록, v1 미구현).
+**Out of scope:** a daemon-side screen snapshot (rejected, recorded in an ADR). Mobile caching implementation. Remaining JSON rendering (S15 DEFER — a separate step). Mount-storm coalescing (§4 — recorded only as an optional optimization, not implemented in v1).
 
-## 2. 데이터 흐름·프로토콜 (재설계 후)
+## 2. Data flow and protocol (after the redesign)
 
 ```
 데몬 ring(ReplayBuffer, 유일 보관자) ── R1: Ack→replay→ReplayComplete 단일 FIFO
@@ -28,96 +28,96 @@ src-tauri: 무상태 라우터 + replay gen 채번자
    phase: buffering(frame 축적) → 마커(gen ≥ myGen && epoch 일치)에만 sort+dedup flush → live(직행+뷰별 dedup)
 ```
 
-**gen 펜스 + single-flight 결합 (rev3 — 결합 방식 확정):** 뷰는 자기 `requestReplay`가 반환한 `myGen` **이상**의 성공 마커에만 flush — 남의(이전) replay 마커 조기 flush → 자기 replay 머리 dedup 유실(버그 B 재유입 경로)을 차단. 늦게 mount한 뷰의 버퍼 = 이전 replay 꼬리 + 자기 replay 전체 → sort+dedup flush = 완전. gen은 **Channel 내부 계약**(데몬 protocol 무변경).
+**gen fence + single-flight coupling (rev3 — coupling method settled):** a view flushes only on a successful marker **at or above** the `myGen` returned by its own `requestReplay` — this blocks early flush on someone else's (earlier) replay marker → loss of the head of its own replay through dedup (the path by which bug B re-enters). The buffer of a late-mounting view = tail of the earlier replay + its own whole replay → sort+dedup flush = complete. gen is an **in-Channel contract** (daemon protocol unchanged).
 
-**gen↔ReplayComplete 결합은 셈(카운팅)으로 추론하지 않는다** — 재검증에서 두 소박한 구현이 모두 격파됨: ⓐ 마지막값 각인 = 남의 Complete에 새 gen이 찍혀 조기 flush 유실 재발, ⓑ FIFO 카운팅 = Complete가 안 오는 실패 경로(agent 소멸 시 send_error로 Ack/Complete 자체 생략 — connection_core.rs:1041-1051·1080-1088)에서 한 칸 영구 desync → 모든 후속 뷰 flush 불가 → 무한 재요청 폭주. 대신 **에이전트당 single-flight**로 1:1 대응을 강제한다:
+**The gen↔ReplayComplete coupling is not inferred by counting** — re-verification broke both naive implementations: ⓐ last-value stamping = a new gen is stamped on someone else's Complete, so early-flush loss recurs; ⓑ FIFO counting = on a failure path where no Complete arrives (when the agent vanishes, send_error skips Ack/Complete themselves — connection_core.rs:1041-1051·1080-1088) it desyncs by one slot permanently → no later view can flush → endless re-request storm. Instead, **single-flight per agent** enforces the 1:1 correspondence:
 
-- src-tauri per-agent 상태: `{gen_counter(단조, 리셋 안 함), in_flight: Option<{gen, deadline}>, waiters(대기열)}`.
-- `request_replay(agent)`: in_flight 없음 → gen 채번·Subscribe(None) 송신·in_flight 설정, gen 반환. in_flight 있음 → **다음 1회 Subscribe에 병합**(대기열의 모든 요청 = 같은 다음 gen 반환 — 요청은 항상 뷰 SubState 등록 후 도착하므로 "그 뒤에 송신되는 Sub"에 병합해도 안전. rev2의 coalescing 안전조건이 구조로 충족됨).
-- **in_flight 수명 = sent → (SubscribeAck) → acked → (ReplayComplete) → 마커.** Complete는 **acked 상태의 in_flight에만** 각인한다 — wire 순서가 [Ack_k]…[Complete_k][Ack_k+1]이므로, Ack 전에 도착한 Complete는 증명 가능하게 전대(前代)의 고아 → 무시(오귀속 원천 차단, rev4). 각인 시 **성공 마커(gen)** 송신·in_flight 해제 → 대기열 있으면 다음 Subscribe 송신.
-- **deadline = 진행 기반(rev4):** 절대 시간이 아니라 **그 에이전트의 frame/Ack 수신마다 리셋** — 건강한 느린 replay(디버그 빌드·경합)가 스트리밍 중인 동안은 절대 트립되지 않는다. 진행 없이 deadline 초과(agent 소멸·subscribe 실패로 Ack/Complete 자체가 안 옴): **실패 마커(gen, flags.failed)** 송신·in_flight 해제·다음 진행. (절대 deadline은 healthy-slow replay에서 오탐 → 후속 Complete가 다음 gen에 오각인되는 desync를 만든다 — 재검증 NEW-A로 기각.)
-- **연결 단절 시(rev4):** in_flight·대기열 **내부 클리어만** — 실패 마커를 웹뷰로 보내지 않는다(재요청 구동자는 connected 전이 단독 — 이중 구동·outage 중 사다리 소진 방지). gen_counter는 단조 유지(구세대 마커 오인 방지).
+- src-tauri per-agent state: `{gen_counter(단조, 리셋 안 함), in_flight: Option<{gen, deadline}>, waiters(대기열)}`.
+- `request_replay(agent)`: no in_flight → assign gen, send Subscribe(None), set in_flight, return gen. in_flight present → **merge into the next single Subscribe** (every request in the queue = returns the same next gen — a request always arrives after the view's SubState is registered, so merging into "the Sub sent after that" is safe. The coalescing safety condition of rev2 is met by structure).
+- **in_flight lifetime = sent → (SubscribeAck) → acked → (ReplayComplete) → marker.** Complete is stamped **only onto an in_flight in the acked state** — because the wire order is [Ack_k]…[Complete_k][Ack_k+1], a Complete that arrives before the Ack is provably an orphan of the previous generation → ignored (misattribution blocked at the source, rev4). On stamping, send a **success marker (gen)**, release in_flight → if the queue is non-empty, send the next Subscribe.
+- **deadline = progress-based (rev4):** not absolute time but **reset on every frame/Ack received for that agent** — a healthy slow replay (debug build, contention) never trips it while it is streaming. Deadline exceeded without progress (agent vanished or subscribe failed so no Ack/Complete arrives at all): send a **failure marker (gen, flags.failed)**, release in_flight, move on. (An absolute deadline gives false positives on a healthy-slow replay → a later Complete is mis-stamped onto the next gen, creating a desync — rejected by re-verification NEW-A.)
+- **On connection disconnect (rev4):** **internal clear only** of in_flight and the queue — no failure marker is sent to the webview (the only driver of re-requests is the connected transition — avoids double driving and exhausting the ladder during an outage). gen_counter stays monotonic (to avoid mistaking an old-generation marker).
 
-**replay 트리거 = 뷰 주도 일원화:** wire Subscribe(None)를 보내는 곳은 `request_replay`가 유일. ① 뷰 mount/remount → requestReplay ② 창 리로드 → 각 뷰가 mount하며 requestReplay(subscribe_output은 Channel 등록만) ③ WS 재연결 → 프론트가 `daemon-connection-state` connected 전이에서 mounted 뷰 전원 buffering 리셋 + requestReplay(= 마커 재장전, buffering 고착 자가 복구). src-tauri 재연결 훅의 eager 재구독·seq 읽기 삭제. 라우터는 **Unsubscribe(더 안 보이는 agent 정리)만** wire에 보낸다.
+**Replay trigger = view-driven, unified:** `request_replay` is the only place that sends a wire Subscribe(None). ① view mount/remount → requestReplay ② window reload → each view calls requestReplay as it mounts (subscribe_output only registers the Channel) ③ WS reconnect → on the `daemon-connection-state` connected transition the frontend resets every mounted view to buffering + requestReplay (= re-arms the marker, self-recovery from a stuck buffering). The eager resubscribe and seq read in the src-tauri reconnect hook are deleted. The router sends **only Unsubscribe (cleanup of agents no longer visible)** on the wire.
 
-**뷰 상태전이표 (F1 — 코딩 전 고정):**
+**View state transition table (F1 — fixed before coding):**
 
-| 상태 | 이벤트 | 전이·동작 |
+| State | Event | Transition / action |
 |---|---|---|
-| buffering | frame(epoch=대기 epoch 또는 미정) | buffer에 push(상한 §4, 초과 시 drop-oldest) |
-| buffering | frame(epoch 더 높음) | buffer 폐기 → 새 epoch로 buffering + **requestReplay 재발행(새 myGen)** — 구 epoch 대상이던 기존 myGen 마커는 무효(재검증 NEW-5) |
-| buffering | 마커(gen<myGen 또는 epoch 불일치) | 무시(남의/구세대 replay) |
-| buffering | 마커(gen≥myGen, epoch 일치, flags.failed) | flush 금지 — **buffer는 유지한 채**(sort+dedup가 중복 흡수, 폐기 불필요) 재요청 사다리(아래 bounded 규칙) |
-| buffering | 마커(gen≥myGen, epoch 일치, 성공, **token 현재**) | sort+seq dedup flush → live(epoch 채택, lastDeliveredSeq=꼬리) · truncated면 경고 표면화 |
-| buffering | 마커(token 불일치 — StrictMode 사망 구독) | 무시(생존 구독의 마커만 유효) |
-| buffering | **마커 도착 시 myGen 미확정**(invoke 응답이 Channel보다 늦는 파이프 교차 — 재검증 NEW-3) | 마커를 버리지 않고 **최고 gen 마커 1개 보관** → myGen 확정 시 재평가 |
-| buffering | watchdog 만료(예: 10s) | **flush 금지** — requestReplay 재발행(새 myGen). 부분 flush 금지 |
-| buffering | buffer 상한 초과 | buffer 폐기 + requestReplay 재발행(부분 flush 금지) |
-| buffering | connected 전이(재연결) | buffer 폐기 → requestReplay 재발행 |
-| live | frame(epoch 일치, seq>lastDeliveredSeq) | 전달 + 진도 갱신 |
-| live | frame(epoch 일치, seq≤) | dedup drop(중복 replay 흡수) |
-| live | frame(epoch 더 높음) | drop — epoch 전환은 기존 `[agentId, epoch]` remount 흐름이 처리(remount→새 구독→replay가 전량 재전달) |
-| live | 마커(어떤 gen이든) | 무시(fan-out으로 도달하는 남의 replay 경계 — live 뷰는 dedup만으로 충분) |
-| live | connected 전이(재연결) | buffering 리셋 + requestReplay |
-| any | unsubscribe(viewId, token 일치) | SubState 제거 |
+| buffering | frame(epoch = awaited epoch or undetermined) | push to buffer (cap §4, drop-oldest when exceeded) |
+| buffering | frame(epoch higher) | discard buffer → buffering with the new epoch + **reissue requestReplay (new myGen)** — the existing myGen marker, aimed at the old epoch, is invalid (re-verification NEW-5) |
+| buffering | marker(gen<myGen or epoch mismatch) | ignore (someone else's / old-generation replay) |
+| buffering | marker(gen≥myGen, epoch match, flags.failed) | no flush — **keep the buffer** (sort+dedup absorbs duplicates, no need to discard) and go to the re-request ladder (bounded rule below) |
+| buffering | marker(gen≥myGen, epoch match, success, **token current**) | sort+seq dedup flush → live (adopt epoch, lastDeliveredSeq = tail) · if truncated, surface a warning |
+| buffering | marker(token mismatch — StrictMode dead subscription) | ignore (only markers for the surviving subscription are valid) |
+| buffering | **marker arrives while myGen is unset** (pipe crossing where the invoke response is later than the Channel — re-verification NEW-3) | do not drop the marker; **keep the one highest-gen marker** → re-evaluate when myGen is set |
+| buffering | watchdog expiry (e.g. 10s) | **no flush** — reissue requestReplay (new myGen). No partial flush |
+| buffering | buffer cap exceeded | discard buffer + reissue requestReplay (no partial flush) |
+| buffering | connected transition (reconnect) | discard buffer → reissue requestReplay |
+| live | frame(epoch match, seq>lastDeliveredSeq) | deliver + update progress |
+| live | frame(epoch match, seq≤) | dedup drop (absorbs duplicate replay) |
+| live | frame(epoch higher) | drop — the epoch transition is handled by the existing `[agentId, epoch]` remount flow (remount → new subscription → replay redelivers everything) |
+| live | marker(any gen) | ignore (the boundary of someone else's replay, reaching us by fan-out — for a live view, dedup alone is enough) |
+| live | connected transition (reconnect) | reset to buffering + requestReplay |
+| any | unsubscribe(viewId, token match) | remove SubState |
 
-**재요청 사다리(bounded — 재검증 NEW-4):** watchdog/실패 마커/상한 초과에 의한 requestReplay 재발행은 **시도 상한(3회) + 지수 백오프**. 소진 시 뷰를 명시적 에러 상태로 전이(무한 폭주 금지)하고 슬롯에 표면화 — 이 에러 상태는 §5 LLM 제어 표면에서도 조회 가능해야 한다. `[agentId, epoch]` remount·connected 전이는 사다리를 리셋한다.
+**Re-request ladder (bounded — re-verification NEW-4):** reissuing requestReplay because of watchdog / failure marker / cap exceeded has a **limit on attempts (3) + exponential backoff**. When exhausted, move the view to an explicit error state (no unbounded storm) and surface it in the slot — this error state must also be queryable from the §5 LLM control surface. `[agentId, epoch]` remount and the connected transition reset the ladder.
 
-## 3. Seam별 설계
+## 3. Design per seam
 
-### 데몬·protocol (무변경)
-`connection_core.rs` handle_subscribe(sink 교체+원자 스냅+R1)·frame 포맷·codec 전부 그대로. 데몬 불변식(에이전트당 단일 무손실 스트림, viewer 불가지) 보존.
+### Daemon·protocol (unchanged)
+`connection_core.rs` handle_subscribe (sink swap + atomic snapshot + R1), frame format, and codec all stay as they are. The daemon invariant (a single lossless stream per agent, viewer-agnostic) is preserved.
 
 ### src-tauri
-| # | 파일 | 변경 |
+| # | File | Change |
 |---|---|---|
-| T1 | `output_channel.rs` | `AgentBufferStore`·`build_deliverable`·`flush_snapshot` 제거. `WindowChannelRegistry`(창→Channel) 존속, 죽은 Channel = send 실패 시 제거 유지 |
-| T2 | `daemon_client/connection.rs` | binary arm: 버퍼·cursor 제거 → **epoch 필터(T5) 통과분만** targets∩registered 창에 원본 frame 통과. text arm: SubscribeAck→epoch 갱신+truncated 기억, ReplayComplete→**gen 각인 마커** 합성을 **binary frame과 같은 Channel::send 경로로** 송신(★app.emit 경유 금지 — 순서 붕괴, 리뷰 finding). `ReplaySlots`/`DropSlots` arm·`resubscribe_and_sweep`의 seq 읽기·eager 재구독 삭제 |
-| T3 | `commands/agent.rs` | `subscribe_output` = Channel 등록만. `resync_output` → **`request_replay(agent_id) -> gen`**(§2 single-flight: 즉시 송신 또는 다음 Sub에 병합, gen 반환). `forward_daemon_command`의 Subscribe/Unsubscribe 차단 존속(BLOCK-1) |
-| T4 | `output_router.rs` | `SubscriptionDelta` axis B 제거. wire엔 **Unsubscribe만** 라우터가 발행(prune). targets() 라우팅 존속 |
-| T5 | `daemon_client/protocol_state.rs` | epoch 추적 존속하되 **"존속"이 아니라 재배선**: 현 binary 핫패스는 decide_epoch를 안 부름(epoch 필터가 미러 on_frame에 접혀 있었음 — 리뷰 실측). 새 binary arm이 `decide_epoch`(SubState.epoch, Ack로 갱신)를 직접 호출해 stale epoch frame을 통과 전 drop. per-agent **single-flight 상태**(`gen_counter`·`in_flight{gen,deadline}`·대기열·`truncated`) 추가 — **단절 시 in_flight·대기열 실패 처리 후 클리어, gen_counter는 단조 유지**(재검증 NEW-2). (§7 상태 허용 범위) |
-| T6 | `crates/engram-dashboard-core` | `output_view_store.rs`·`output_view_buffer.rs` 삭제(+테스트) — 미러 전용, 타 사용처 없음(배선 지도 + 리뷰어 grep 재확인) |
+| T1 | `output_channel.rs` | Remove `AgentBufferStore`, `build_deliverable`, `flush_snapshot`. `WindowChannelRegistry` (window→Channel) stays; a dead Channel is still removed on send failure |
+| T2 | `daemon_client/connection.rs` | binary arm: remove buffer and cursor → pass the original frame to targets∩registered windows **only for what passes the epoch filter (T5)**. text arm: SubscribeAck→update epoch + remember truncated; ReplayComplete→synthesize the **gen-stamped marker** and send it **through the same Channel::send path as the binary frame** (★no app.emit route — it breaks ordering, review finding). Delete the `ReplaySlots`/`DropSlots` arms and the seq read and eager resubscribe in `resubscribe_and_sweep` |
+| T3 | `commands/agent.rs` | `subscribe_output` = Channel registration only. `resync_output` → **`request_replay(agent_id) -> gen`** (§2 single-flight: send immediately or merge into the next Sub, return gen). The Subscribe/Unsubscribe block in `forward_daemon_command` stays (BLOCK-1) |
+| T4 | `output_router.rs` | Remove `SubscriptionDelta` axis B. On the wire the router emits **only Unsubscribe** (prune). targets() routing stays |
+| T5 | `daemon_client/protocol_state.rs` | epoch tracking stays, but it is **a rewiring, not "staying"**: the current binary hot path does not call decide_epoch (the epoch filter was folded into the mirror's on_frame — review measurement). The new binary arm calls `decide_epoch` (SubState.epoch, updated by Ack) directly and drops stale-epoch frames before passing. Add per-agent **single-flight state** (`gen_counter`, `in_flight{gen,deadline}`, queue, `truncated`) — **on disconnect, in_flight and queue are failed and then cleared; gen_counter stays monotonic** (re-verification NEW-2). (§7 allowed state scope) |
+| T6 | `crates/engram-dashboard-core` | Delete `output_view_store.rs` and `output_view_buffer.rs` (+tests) — mirror-only, no other users (wiring map + reviewer grep re-check) |
 
-### 프론트 (TS)
-| # | 파일 | 변경 |
+### Frontend (TS)
+| # | File | Change |
 |---|---|---|
-| F1 | `api/protocolClient.ts` | `subs` 키 viewId. `SubState{agentId, phase, buffer[], myGen, lastDeliveredSeq, epoch, token}` + §2 전이표 구현. **token 가드를 마커 도착 시점에 재평가**(등록 시점 아님 — 리뷰 finding). frame→같은 agent 뷰들 fan-out. `pendingBuffers`·`resubscribeAll`(wire Subscribe 송신 경로) 삭제 — 유일 호출처 onConnectionStateChange뿐임을 리뷰어 확인. connected 전이 = 뷰 buffering 리셋+재요청으로 대체 |
-| F2 | `api/transport.ts`·`tauriTransport.ts` | `requestReplay(agentId) -> Promise<gen>`. 마커(tag=255)는 **transport가 정규화해 제어 이벤트로** ProtocolClient에 전달(공개 agentClient API에 마커 개념 노출 금지 — Designer finding). frame decode에 **미지 tag 관용 skip** 가드(M0) |
-| F3 | `components/slot/*` 구독 effect | `subscribeOutput(viewId, agentId, ...)` 시그니처. `[agentId, epoch]` effect·`terminal.reset()` 구독 전·기존 micro-rules 유지 — epoch 전환 재장전이 이 effect에 걸림(race 렌즈 #4: 재시작 복구의 유일한 re-arm이므로 vitest로 고정) |
-| F4 | `ViewLayoutRenderer.tsx` | 61-63 dedup workaround 제거 |
+| F1 | `api/protocolClient.ts` | `subs` keyed by viewId. `SubState{agentId, phase, buffer[], myGen, lastDeliveredSeq, epoch, token}` + implement the §2 transition table. **Re-evaluate the token guard when the marker arrives** (not at registration time — review finding). frame → fan-out to views of the same agent. Delete `pendingBuffers` and `resubscribeAll` (the wire Subscribe send path) — the reviewer confirmed its only caller is onConnectionStateChange. The connected transition = replaced by view buffering reset + re-request |
+| F2 | `api/transport.ts`, `tauriTransport.ts` | `requestReplay(agentId) -> Promise<gen>`. The marker (tag=255) is **normalized by the transport into a control event** and delivered to ProtocolClient (do not expose the marker concept in the public agentClient API — Designer finding). Add a guard to frame decode that **tolerantly skips unknown tags** (M0) |
+| F3 | `components/slot/*` subscribe effect | `subscribeOutput(viewId, agentId, ...)` signature. The `[agentId, epoch]` effect, `terminal.reset()` before subscribe, and existing micro-rules stay — the epoch-transition re-arm hangs on this effect (race lens #4: it is the only re-arm for restart recovery, so pin it with vitest) |
+| F4 | `ViewLayoutRenderer.tsx` | Remove the lines 61-63 dedup workaround |
 
-**마커 frame 규격(Channel 내부 계약):** `[tag=255][agentId:16][epoch:4][gen:8][flags:1(bit0=truncated, bit1=failed)]`. 데몬 codec 미정의 — src-tauri↔웹뷰 계층 문서화. 미지 tag는 웹뷰가 조용히 skip(전방 호환). 모든 `request_replay`는 **최소 1개의 마커(성공 또는 실패)로 종결**된다 — Complete 수신(성공) / deadline 초과·단절(실패). "정확히 1개"는 아니다: 좀비 late-Complete에서 같은 gen의 실패 마커(deadline) 뒤에 성공 마커(늦은 Complete)가 뒤따르는 failed→success 쌍이 가능하며, gen 펜스가 이를 흡수한다(뷰는 실패 마커를 사다리로 넘겼다가 뒤이은 성공 마커에 flush). 이 결정성이 프론트 상태기계의 전제다.
+**Marker frame spec (in-Channel contract):** `[tag=255][agentId:16][epoch:4][gen:8][flags:1(bit0=truncated, bit1=failed)]`. Not defined in the daemon codec — documented at the src-tauri↔webview layer. The webview silently skips an unknown tag (forward compatibility). Every `request_replay` is **closed by at least one marker (success or failure)** — Complete received (success) / deadline exceeded or disconnect (failure). It is not "exactly one": with a zombie late-Complete, a failed→success pair is possible, where a success marker (late Complete) follows a failure marker (deadline) of the same gen, and the gen fence absorbs it (the view passes the failure marker to the ladder and then flushes on the following success marker). This determinism is the premise of the frontend state machine.
 
-## 4. 볼륨·트레이드오프·리스크
+## 4. Volume, trade-offs, risks
 
-- **순 감소:** 미러+테스트 −600 LOC급(core/src-tauri), 프론트 ±0~+150(전이표 기계 추가 vs pendingBuffers/resubscribeAll 삭제).
-- **재연결 회귀(명시 수용 — 아침 보고):** 기존 = tail-resume(after_seq), 신규 = 뷰당 전량 재replay. PC loopback·재연결 희소로 수용. 원격/모바일 carrier는 transport seam에서 after_seq resume+캐싱으로 해결(이 TRD 비범위). **src-tauri에 seq를 남기는 절충은 §7 위반이라 거부.**
-- **mount 폭주:** single-flight가 구조적으로 coalescing한다(in-flight 중 도착한 요청 전부 → 다음 Sub 1회에 병합) — N뷰 동시 remount ≤ 2회 replay.
-- **뷰 buffering 상한:** ring 상한의 2배(4MB/8192) per view — 버퍼가 "이전 replay 꼬리 + 자기 replay 전체"를 담을 수 있어야 하므로(Codex 재리뷰 #5). 초과 시 **부분 유지(drop-oldest) 금지** → buffer 폐기 + 재요청(사다리 적용). 병리 케이스 방어용이며 정상 도달 불가.
-- **mid-replay drop(데몬 outbound 포화로 replay 일부 유실 — connection_core.rs:1105 Error) = 현행 동등 한계:** 현행도 이 Error를 소비하지 않는다(emit_broadcast가 버림 — 리뷰 실측). 신설계도 v1 동일(성공 마커 후 gap 가능, 발생률 극저). 데몬 Error 귀속화(요청 상관) 후 실패 마커로 승격은 백로그로 기록.
-- **고위험 seam:** T2 main_loop(락 규율 — 락이 줄어드는 방향) · 마커 동일 Channel 경로 강제 · F1 전이표(StrictMode·epoch 회전·재연결 교차) → 코더 high · `/review code deep` · `/qa full`.
+- **Net reduction:** mirror + tests −600 LOC class (core/src-tauri), frontend ±0 to +150 (adding the transition-table machine vs deleting pendingBuffers/resubscribeAll).
+- **Reconnect regression (explicitly accepted — morning report):** before = tail-resume (after_seq), now = full re-replay per view. Accepted because PC loopback and reconnects are rare. Remote/mobile carriers are solved with after_seq resume + caching at the transport seam (outside the scope of this TRD). **The compromise of keeping seq in src-tauri is rejected because it violates §7.**
+- **Mount storm:** single-flight coalesces structurally (every request that arrives during in-flight → merged into the next single Sub) — N views remounting at once ≤ 2 replays.
+- **View buffering cap:** twice the ring cap (4MB/8192) per view — because the buffer must be able to hold "tail of the earlier replay + its own whole replay" (Codex re-review #5). When exceeded, **no partial keep (drop-oldest) is allowed** → discard buffer + re-request (ladder applies). It defends against pathological cases and is unreachable in normal operation.
+- **mid-replay drop (part of the replay lost because the daemon outbound is saturated — connection_core.rs:1105 Error) = a limit equal to the current one:** the current code does not consume this Error either (emit_broadcast drops it — review measurement). The new design is the same in v1 (a gap is possible after a success marker, very low rate). Attributing the daemon Error (request correlation) and then promoting it to a failure marker is recorded as backlog.
+- **High-risk seams:** T2 main_loop (lock discipline — the direction is fewer locks) · forcing the marker onto the same Channel path · F1 transition table (StrictMode, epoch rotation, reconnect crossings) → coder high · `/review code deep` · `/qa full`.
 
-## 5. 테스트 (TDD, ADR-0012)
+## 5. Tests (TDD, ADR-0012)
 
-- **rust(src-tauri):** 라우팅 순수부(targets∩registered) · **single-flight 상태기계**(in-flight 1개 강제·대기열 병합·**acked 게이트: Ack 전 도착 Complete=고아 무시**·Complete→성공 마커 1:1·**진행 기반 deadline**(frame/Ack마다 리셋, healthy-slow replay 무오탐)→실패 마커·**Complete 누락(agent 소멸)에도 desync 없음**·단절 시 내부 클리어(마커 미발행)+gen 단조 유지) · 마커가 replay 꼬리 뒤 + **binary와 동일 Channel 경로**(R1 상대 순서 fixture) · epoch 필터 재배선(stale epoch frame drop) · truncated/failed 플래그 전파.
-- **vitest(F1) — 리뷰 지적 시나리오 전부 고정:** ★**엇갈린 mount(진행 중 replay 꼬리만 받은 뷰가 남의 마커 무시 → 자기 gen 마커에 완전 flush)** · 같은 agent 2뷰 fan-out(버그 B 회귀) · live frame이 replay보다 먼저 와도 sort+dedup 복원 · 마커 token 불일치 무시(StrictMode) · **마커가 myGen 확정보다 먼저 도착(보관→재평가)** · epoch 회전 중 buffering(폐기+재요청, 구 epoch 마커 무시) · 재연결 중 buffering(폐기+재요청) · 실패 마커→사다리(상한 도달 시 에러 상태) · watchdog = 재요청이지 flush 아님 · 뷰별 dedup 독립 · unsubscribe 청소.
-- **Channel 순서 가정:** tauriTransport 단위(모의 Channel 순서) + cdp 실측으로 이중 고정.
-- **게이트:** `cargo build`·`cargo test --workspace --exclude engram-dashboard`·`cargo test -p engram-dashboard --no-run`·`cargo fmt --check`·코어격리 rg 0줄·`npx tsc --noEmit`·`npm test`.
-- **cdp 실측(완료 기준):** 단일 slot remount 3종(23a8c47 케이스) · **동일 agent 2슬롯 공유+리로드(버그 B 재현) 복원** · split 직후 즉시 재split(엇갈린 mount 실촉발) · tag1 리로드 복원 · 재연결(클라 재시작) 복원 · 에이전트 재시작(epoch 전환) 복원.
+- **rust (src-tauri):** pure routing part (targets∩registered) · **single-flight state machine** (exactly one in-flight enforced, queue merge, **acked gate: a Complete arriving before Ack = orphan, ignored**, Complete→success marker 1:1, **progress-based deadline** (reset on every frame/Ack, no false positives on a healthy-slow replay)→failure marker, **no desync even when Complete is missing (agent vanished)**, internal clear on disconnect (no marker emitted) + gen stays monotonic) · marker comes after the replay tail + **on the same Channel path as binary** (R1 relative-order fixture) · epoch filter rewiring (stale-epoch frame dropped) · truncated/failed flag propagation.
+- **vitest (F1) — pin every scenario the review raised:** ★**staggered mount (a view that received only the tail of an in-progress replay ignores someone else's marker → flushes completely on its own gen marker)** · fan-out to 2 views of the same agent (bug B regression) · live frame arriving before replay is still restored by sort+dedup · ignore marker with token mismatch (StrictMode) · **marker arrives before myGen is set (keep→re-evaluate)** · buffering during epoch rotation (discard + re-request, old-epoch marker ignored) · buffering during reconnect (discard + re-request) · failure marker→ladder (error state when the cap is reached) · watchdog = re-request, not flush · per-view dedup independent · unsubscribe cleanup.
+- **Channel ordering assumption:** pinned twice, by a tauriTransport unit test (mock Channel ordering) and by a cdp measurement.
+- **Gates:** `cargo build` · `cargo test --workspace --exclude engram-dashboard` · `cargo test -p engram-dashboard --no-run` · `cargo fmt --check` · core-isolation rg 0 lines · `npx tsc --noEmit` · `npm test`.
+- **cdp measurement (completion criteria):** 3 kinds of single-slot remount (the 23a8c47 case) · **restore with the same agent shared by 2 slots + reload (reproduces bug B)** · immediate re-split right after a split (actually triggers the staggered mount) · tag1 reload restore · reconnect (client restart) restore · agent restart (epoch transition) restore.
 
-## 6. 구현 순서 (모듈별 커밋)
+## 6. Implementation order (commit per module)
 
-0. **M0 전방 호환 가드:** 프론트 frame decode 미지 tag 관용 skip(+test) — M1을 프론트 교체 전에 올릴 수 있게.
-1. **M1 src-tauri 전환(T1~T5):** 미러 제거 + request_replay/gen + 마커 + epoch 필터 재배선 + rust 테스트.
-2. **M2 프론트 per-view(F1~F4):** 전이표 + vitest.
-3. **M3 잔재 정리(T6):** core 미러 파일 삭제 · 구 anchor 갱신(protocolClient.ts:479 epoch 권위 주석, connection.rs ADR-0037 dedup 주석 등 — §7 supersede와 짝) · `// ADR-0046` 부착.
-4. **M4 cdp 실측** → step-log·문서 정리.
+0. **M0 forward-compat guard:** the frontend frame decode tolerantly skips unknown tags (+test) — so M1 can land before the frontend swap.
+1. **M1 src-tauri switch (T1~T5):** remove the mirror + request_replay/gen + marker + epoch filter rewiring + rust tests.
+2. **M2 frontend per-view (F1~F4):** transition table + vitest.
+3. **M3 cleanup of leftovers (T6):** delete the core mirror files · update old anchors (the protocolClient.ts:479 epoch-authority comment, the connection.rs ADR-0037 dedup comment, etc. — paired with the §7 supersede) · attach `// ADR-0046`.
+4. **M4 cdp measurement** → step-log and document cleanup.
 
-## 7. 불변식·ADR 파급
+## 7. Invariants and ADR impact
 
-- **BLOCK-1 전면화:** 프론트는 wire Subscribe/Unsubscribe를 어떤 경로로도 안 보낸다(resubscribeAll 예외 삭제). wire 구독 형성 = request_replay 단독, 정리 = 라우터 Unsubscribe 단독. **단, BLOCK-1(프론트 wire Subscribe 금지)은 src-tauri 허브 경로(TauriTransport) 한정** — direct-daemon carrier(WsTransport, legacy/test 전용)는 1연결=1구독이라 storm 전제가 없어 자체 wire Subscribe로 replay를 형성한다(운영 carrier 아님, clientFactory.ts:24).
-- **src-tauri 상태 허용 범위(재도입 방지선):** per-agent `epoch`(Ack 권위) + single-flight 부기(`gen_counter`·`in_flight`·대기열·`truncated`) = **요청 부기(bookkeeping)**로 허용 — 전부 "진행 중 요청"의 수명만 갖고 단절 시 클리어(gen_counter만 단조 유지). **출력 진도 상태(seq/cursor/버퍼) 금지** — 진도의 유일한 거처 = 웹뷰 뷰 단위 `lastDeliveredSeq`.
-- **R1(데몬) 무변경.**
-- **★gen 펜스의 정합 전제 = "모든 replay는 보관 하한부터 전량"(full-from-oldest).** "gen≥myGen 마커에 flush"가 안전한 이유는 같은 에이전트의 후속 replay가 항상 이전의 누적 상위집합이기 때문이다. **원격 seam에서 after_seq 부분 resume을 도입하는 순간 이 전제가 깨진다** — 그때는 뷰별 마커 상관(정확한 gen 일치 등)을 먼저 강화해야 한다(재검증 NEW-C, ADR에 명시).
-- **ADR 파급(신규 ADR에 명시 — 리뷰 지적):** ADR-0040 **전체 supersede** · ADR-0037 "dedup/전송 의미론 Rust 단독 진실원" 조항 **부분 supersede**(dedup 거처 = 웹뷰 뷰 단위로 이동) · ADR-0007 "프론트 epoch 권위 = SubscribeAck 단독" 조항 **부분 supersede**(src-tauri decide_epoch 1차 필터 + 프론트는 필터된 frame/마커 epoch 채택) · ADR-0043 deliverable gate 메커니즘 **폐기 반영** · ADR-0041/0042 axis A는 계승(형태 변경: eager→view-driven).
-- 모바일/원격 캐싱 = transport 구현 내부만 허용(ProtocolClient 인터페이스 불변) — 자리만.
+- **BLOCK-1 applied across the board:** the frontend never sends a wire Subscribe/Unsubscribe by any path (the resubscribeAll exception is deleted). Wire subscription formation = request_replay alone, cleanup = router Unsubscribe alone. **However, BLOCK-1 (no frontend wire Subscribe) is limited to the src-tauri hub path (TauriTransport)** — the direct-daemon carrier (WsTransport, legacy/test only) has 1 connection = 1 subscription, so the storm premise does not exist and it forms replay with its own wire Subscribe (not the production carrier, clientFactory.ts:24).
+- **Allowed state scope in src-tauri (the line that prevents re-introduction):** per-agent `epoch` (Ack authority) + single-flight bookkeeping (`gen_counter`, `in_flight`, queue, `truncated`) are allowed as **request bookkeeping** — all of it lives only as long as the "request in progress" and is cleared on disconnect (only gen_counter stays monotonic). **Output progress state (seq/cursor/buffer) is forbidden** — the only home of progress = the webview per-view `lastDeliveredSeq`.
+- **R1 (daemon) unchanged.**
+- **★The consistency premise of the gen fence = "every replay is in full from the retention floor" (full-from-oldest).** "Flush on a gen≥myGen marker" is safe because a later replay of the same agent is always a cumulative superset of the earlier one. **The moment after_seq partial resume is introduced at the remote seam, this premise breaks** — at that point per-view marker correlation (exact gen match, etc.) must be strengthened first (re-verification NEW-C, stated explicitly in the ADR).
+- **ADR impact (to be stated in the new ADR — review finding):** ADR-0040 **superseded entirely** · ADR-0037 clause "dedup/transport semantics: Rust is the single source of truth" **partially superseded** (the home of dedup moves to the webview per-view level) · ADR-0007 clause "frontend epoch authority = SubscribeAck alone" **partially superseded** (src-tauri decide_epoch as the first-stage filter + the frontend adopts the epoch of the filtered frames/markers) · ADR-0043 deliverable gate mechanism **discarded, reflected** · ADR-0041/0042 axis A inherited (form changed: eager→view-driven).
+- Mobile/remote caching = allowed only inside the transport implementation (ProtocolClient interface unchanged) — placeholder only.

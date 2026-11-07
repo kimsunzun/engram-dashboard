@@ -1,12 +1,12 @@
-//! inputs_pending — (에이전트, epoch)별 **대기 목록 표**: "이 화신의 사용자 대기 목록이 비지 않았다".
+//! inputs_pending — a **pending-list table** per (agent, epoch): "this incarnation's user pending list is not empty".
 //!
-//! ★턴 관측 표(`turn`)와 같은 모양의 잎 표이고, 따로 있는 이유는 쓰는 자리가 달라서다★: 턴 관측 표의
-//!   `in_turn` 을 쓰는 자리는 분류기와 정리 두 지점뿐이어야 한다(ADR-0127 「세 번째 호출자」). 이 사실은
-//!   코어가 명부를 환원한 emit 안에서 적으므로 그 표에 칸을 더하지 않는다.
-//! ★읽는 쪽 = 우편의 바쁨(데몬 어댑터)★ — 이 값이 참인 동안 우편은 들지 않고, ★fail-open 상한이 없다★
-//!   (사용자 결정 N8 — ADR-0104 「늦게 가는 것 < 안 가는 것」의 의도된 예외).
-//! ★락 = 이 표 하나, leaf★: 잡은 채 밖을 부르지 않는다(ADR-0006). 항목을 `AgentId` 로 키잡고 epoch 은
-//!   값으로 든다 — 근거는 `turn` 모듈 헤더와 같다.
+//! ★A leaf table of the same shape as the turn-observation table (`turn`), and it is separate because the place that uses it differs★: the places that use
+//!   the turn-observation table's `in_turn` must be only two points, the classifier and cleanup (ADR-0127 「세 번째 호출자」 (the third caller)). This fact is
+//!   written by the core inside the emit that reduced the registry, so we do not add a field to that table.
+//! ★Reader = mail busyness (daemon adapter)★ — while this value is true, mail does not go in, and ★there is no fail-open cap★
+//!   (user decision N8 — an intended exception to ADR-0104's 「늦게 가는 것 < 안 가는 것」 (going late < not going)).
+//! ★Lock = this one table, a leaf★: we do not call outward while holding it (ADR-0006). Entries are keyed by `AgentId` and the epoch is held
+//!   as the value — the grounds are the same as the `turn` module header.
 // ADR-0231
 // ADR-0006
 
@@ -17,7 +17,7 @@ use engram_dashboard_base::sync;
 
 use crate::types::AgentId;
 
-/// 대기 목록 표 — `AgentManager` 가 하나 소유한다.
+/// The pending-list table — owned one per `AgentManager`.
 pub struct InputsPendingTable {
     entries: Mutex<HashMap<AgentId, Entry>>,
 }
@@ -25,7 +25,7 @@ pub struct InputsPendingTable {
 struct Entry {
     epoch: u32,
     pending: bool,
-    /// 이 항목을 마지막으로 갱신한 출력 seq(같은 epoch 안에서만 비교 가능).
+    /// The output seq that last updated this entry (comparable only within the same epoch).
     last_seq: u64,
 }
 
@@ -42,13 +42,13 @@ impl InputsPendingTable {
         }
     }
 
-    /// poison 내성 — 매니저 전역 표라 한 홀더의 패닉이 전 에이전트로 번지지 않게 한다(`turn` 과 같은 판단).
+    /// Poison tolerance — it is a manager-wide table, so one holder's panic must not spread to every agent (the same judgment as `turn`).
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<AgentId, Entry>> {
         sync::lock(&self.entries)
     }
 
-    /// 이 화신이 이 id 의 자리를 차지한다 — 있던 항목을 무조건 갈아치우고 "목록 빔" 으로 시작한다.
-    /// ★세션이 관측 가능해지기 전에 부른다★(주인 = `AgentManager::spawn_session`, 턴 관측 등록과 같은 자리).
+    /// This incarnation takes this id's place — it unconditionally replaces any existing entry and starts at "list empty".
+    /// ★Call it before the session becomes observable★ (owner = `AgentManager::spawn_session`, the same place as the turn-observation registration).
     pub fn register(&self, id: AgentId, epoch: u32) {
         self.lock().insert(
             id,
@@ -60,12 +60,12 @@ impl InputsPendingTable {
         );
     }
 
-    /// 목록이 비었다↔찼다를 적는다. `seq` = 그 값을 낳은 목록 사건의 출력 seq.
+    /// Record the list going empty↔full. `seq` = the output seq of the list event that produced that value.
     ///
-    /// ★더 작은 seq 의 쓰기를 버린다★: 「비었다」는 replay 락 밖으로 미뤄 적히므로, 그 사이 다른 스레드가
-    ///   락 안에서 적은 더 늦은 「찼다」를 덮으면 안 된다.
-    /// ★표식이 다르거나 항목이 없으면 버린다(턴 관측 표와 다르다)★: 이 사실에는 상한이 없어서, 정리 뒤에
-    ///   늦게 온 쓰기가 항목을 되살리면 그것을 지울 계기가 없다. 그래서 자리를 만드는 동사는 `register` 하나다.
+    /// ★Drop writes with a smaller seq★: 「비었다」 (became empty) is written deferred outside the replay lock, so it must not overwrite a later
+    ///   「찼다」 (became full) that another thread wrote inside the lock in between.
+    /// ★Drop it if the marker differs or the entry is missing (unlike the turn-observation table)★: this fact has no cap, so if a write that arrives
+    ///   late after cleanup revives the entry, there is no trigger to erase it. That is why the verb that creates an entry is `register` alone.
     pub fn set(&self, id: AgentId, epoch: u32, seq: u64, pending: bool) {
         let mut g = self.lock();
         let Some(e) = g.get_mut(&id) else {
@@ -78,7 +78,7 @@ impl InputsPendingTable {
         e.last_seq = seq;
     }
 
-    /// 이 (에이전트, epoch)의 값. `None` = 항목 없음(다른 epoch 만 있는 경우 포함).
+    /// The value for this (agent, epoch). `None` = no entry (including the case where only another epoch exists).
     pub fn get(&self, id: AgentId, epoch: u32) -> Option<bool> {
         self.lock()
             .get(&id)
@@ -86,7 +86,7 @@ impl InputsPendingTable {
             .map(|e| e.pending)
     }
 
-    /// 이 화신의 항목 제거 — epoch 이 일치할 때만(지각한 호출이 새 화신의 항목을 지우지 못하게).
+    /// Remove this incarnation's entry — only when the epoch matches (so that a late call cannot erase the new incarnation's entry).
     pub fn forget(&self, id: AgentId, epoch: u32) {
         let mut g = self.lock();
         if g.get(&id).is_some_and(|e| e.epoch == epoch) {

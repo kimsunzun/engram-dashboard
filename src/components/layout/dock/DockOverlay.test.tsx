@@ -1,5 +1,5 @@
-// DockOverlay 단위테스트 — TRD S21-slot-docking §4-4 안내 그리기(입력 = `OverlayView` 하나 · 판정 없음) · 움직임(나타남 · 사라짐
-//   150 ms · 자리 옮김 70 ms).
+// DockOverlay unit test — TRD S21-slot-docking §4-4 guide drawing (input = one `OverlayView` · no decision) · motion (appear · disappear
+//   150 ms · move 70 ms).
 
 import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'

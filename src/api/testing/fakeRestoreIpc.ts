@@ -1,5 +1,5 @@
-// 테스트 전용 — `RestoreIpc` 가짜. 셸 쪽 상태(`server.view`)를 시험이 바꾸고, `restore_status` 는 **부른 순간의** 값을
-// 돌려준다. 등록 · 당기기 · 답은 시험이 붙잡았다 놓을 수 있다.
+// Test only — a fake of `RestoreIpc`. The test changes the shell-side state (`server.view`), and `restore_status` returns the value **at the moment it is called**.
+// Registration · pull · answer can be held and released by the test.
 
 import type {
   AnswerReply,
@@ -35,7 +35,7 @@ export function view(
     saved_at_ms: awaiting ? 1_759_640_000_000 : null,
     windows: awaiting ? 2 : null,
     tabs: awaiting ? 5 : null,
-    // 셸 계약 — 묻는 동안은 `saves` 와 같다(`RestoreStatusView.ts`). 시험이 `durable` 을 따로 주면 그것이 이긴다.
+    // Shell contract — while asking it equals `saves` (`RestoreStatusView.ts`). If the test gives `durable` separately, that wins.
     durable: awaiting ? saves : null,
     saves,
     state_file: 'ok' as StateFileStatus,
@@ -49,15 +49,15 @@ export function fakeRestoreIpc(initial: RestoreStatusView) {
   let handler: ((payload: unknown) => void) | undefined
   let unlistenCalls = 0
   let listenGate: Promise<void> = Promise.resolve()
-  /** 켜면 `restore_status` 가 바로 답하지 않고 여기 쌓인다 — 시험이 순서를 골라 푼다. */
+  /** When on, `restore_status` does not answer right away but piles up here — the test picks an order and releases them. */
   const heldStatus: Array<(v: RestoreStatusView) => void> = []
   let holdStatus = false
-  /** 켜면 `restore_status` 가 거절한다(IPC 미준비 흉내). */
+  /** When on, `restore_status` rejects (imitates IPC not ready). */
   let failStatus = false
-  /** 켜면 `listen` 이 거절한다. */
+  /** When on, `listen` rejects. */
   let failListen = false
   const answerArgs: boolean[] = []
-  /** `restore_answer` 의 동작 — 기본 = 받아서 `answered` 로 바꾸고 성공. `saves` · `state_file` 은 답해도 그대로다. */
+  /** Behavior of `restore_answer` — default = accept it, change to `answered`, and succeed. `saves` · `state_file` stay as they are even when answered. */
   let onAnswer: (accept: boolean) => Promise<AnswerReply> = async accept => {
     server.view = view('answered', { saves: server.view.saves, state_file: server.view.state_file })
     return { restored_windows: accept ? 1 : 0, durable: server.view.saves }
@@ -104,7 +104,7 @@ export function fakeRestoreIpc(initial: RestoreStatusView) {
       return unlistenCalls
     },
     hasListener: () => handler !== undefined,
-    /** 지금 등록된 핸들러 — 풀린 뒤에도 쥐고 불러 「죽은 설치에 늦게 온 배달」을 흉내 낸다. */
+    /** The currently registered handler — held and called even after release to imitate 「죽은 설치에 늦게 온 배달」 (a late delivery to a dead install). */
     currentHandler: () => handler,
     holdListen(): () => void {
       const d = deferred<void>()
@@ -124,7 +124,7 @@ export function fakeRestoreIpc(initial: RestoreStatusView) {
     setOnAnswer(fn: (accept: boolean) => Promise<AnswerReply>): void {
       onAnswer = fn
     },
-    /** 셸의 `restore:changed` — 짐은 `crash_copy` 한 칸이다. */
+    /** The shell's `restore:changed` — the payload is the single `crash_copy` field. */
     push(payload: CrashCopyStatus = server.view.crash_copy): void {
       if (!handler) throw new Error(`${EVT_RESTORE_CHANGED} 리스너가 아직 없다`)
       handler(payload)
@@ -132,7 +132,7 @@ export function fakeRestoreIpc(initial: RestoreStatusView) {
   }
 }
 
-/** 마이크로태스크 사슬(등록 → 당기기 → 적용)을 흘려보낸다. */
+/** Flush the microtask chain (registration → pull → apply). */
 export async function flush(): Promise<void> {
   for (let i = 0; i < 20; i++) await Promise.resolve()
 }

@@ -69,8 +69,8 @@ describe('command registry (ADR-0055)', () => {
     expect(list()).toEqual([])
   })
 
-  // ★help 가 투영에 실려야 버스로 나갈 길이 생긴다★(TRD §6 Step 4): 셸이 이 값을 카탈로그 항목으로 펴서
-  //   데몬 명부에 얹는다. 빠지면 이름만 등록돼 발견한 호출자가 인자를 채울 재료가 없다(ADR-0156).
+  // ★help must be carried in the projection for there to be a way onto the bus★ (TRD §6 Step 4): the shell unfolds this value into a catalog entry
+  //   and puts it on the daemon registry. If missing, only the name is registered and a caller that finds it has no material to fill the arguments (ADR-0156).
   it('list: help 를 그대로 실어 나른다(없으면 undefined)', () => {
     const help = {
       summary: '테마를 바꾼다',
@@ -85,9 +85,9 @@ describe('command registry (ADR-0055)', () => {
     expect(items.find(i => i.id === 'local.only')!.help).toBeUndefined()
   })
 
-  // ★스냅샷이라는 계약은 help 칸에서 가장 쉽게 깨진다★: 값 필드만 있을 땐 얕은 복사로 충분했지만
-  //   help 는 객체 두 겹(args → enum 배열)이라, 그대로 넘기면 소비자가 등록된 command 를 직접 고친다.
-  //   toEqual 만 쓰면 별칭이어도 통과하므로 **변조 후 다시 읽어** 잰다.
+  // ★The snapshot contract breaks most easily at the help field★: with value fields alone a shallow copy was enough, but
+  //   help is two levels of object (args → enum array), so handing it over as is lets a consumer directly edit a registered command.
+  //   toEqual alone passes even with an alias, so we measure by **re-reading after tampering**.
   it('list/getCommand: help 는 사본이라 소비자가 고쳐도 레지스트리가 안 바뀐다', () => {
     register({
       id: 'demo.theme',
@@ -127,11 +127,11 @@ describe('command registry (ADR-0055)', () => {
   })
 })
 
-// ── humanOnly — 호출자 축으로 닫는 문(2026-09-08) ─────────────────────────
+// ── humanOnly — a door closed on the caller axis (2026-09-08) ─────────────────────────
 //
-// 레지스트리 항목 하나가 사람 메뉴와 LLM 표면을 겸직한다. 둘 중 한쪽에만 열려야 하는 동작은 `when` 으로 못
-// 가른다(`when` 은 호출자를 모르고, 두 진입점 어느 쪽도 읽지 않는다) — 그래서 진입점을 둘로 갈랐고, 이 구획이
-// 그 갈람을 재는 자리다.
+// One registry entry serves both the human menu and the LLM surface. An action that must be open to only one of the two cannot be
+// told apart by `when` (`when` does not know the caller, and neither entry point reads it) — so the entry point was split in two, and this section
+// is the place that measures that split.
 describe('humanOnly 게이트', () => {
   it('run(LLM 진입점): 사유를 실어 throw 하고 handler 를 부르지 않는다', () => {
     const spy = vi.fn(() => 'ran')

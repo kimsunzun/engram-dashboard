@@ -1,9 +1,9 @@
-# S9 상세 코드 기획 — 코어 GO 범위
+# S9 detailed code plan — core GO scope
 
-근거: `session-restore-lld.md`(§12 확정) + `s9-final-review-fable.md`(LLD 개정 7건) + `spike-results.md`.
-범위: **코어 GO**(프로필/분리/spawn/persist/복원/watcher/fallback). **자동재시작은 게이트** — 설계만 남기고 구현 보류.
+Source: `session-restore-lld.md` (§12 confirmed) + `s9-final-review-fable.md` (7 LLD revisions) + `spike-results.md`.
+Scope: **core GO** (profile/separation/spawn/persist/restore/watcher/fallback). **Auto-restart is gated** — only the design remains; implementation is on hold.
 
-## A. 데이터 모델 — `pty/types.rs` 확장
+## A. Data model — extend `pty/types.rs`
 
 ```rust
 pub struct AgentProfile {
@@ -24,7 +24,7 @@ pub enum SpawnMode { Fresh, Resume }
 pub enum RestoreOutcome { Resumed, FreshFallback { reason: String } }  // agent-restore-result
 ```
 
-## B. `persistence/` (신규 모듈)
+## B. `persistence/` (new module)
 
 ```rust
 pub fn save_profiles(profiles: &[AgentProfile]) -> io::Result<()>;
@@ -34,7 +34,7 @@ pub fn load_profiles() -> io::Result<Vec<AgentProfile>>;
 fn warn_if_secret(env: &[(String,String)]);  // 키/토큰 패턴 경고 (보안)
 ```
 
-## C. `pty/session_tracker.rs` (신규 — sid watcher, best-effort)
+## C. `pty/session_tracker.rs` (new — sid watcher, best-effort)
 
 ```rust
 /// PID shim 우회: sessions/<child_pid>.json 우선, 없으면 sessions/*.json에서 sessionId==expected 스캔(결정적).
@@ -45,9 +45,9 @@ pub fn self_test(child_pid: u32, expected_sid: Uuid) -> SelfTestResult;
 pub fn spawn_session_watcher(agent_id: AgentId, expected: Uuid, on_change: impl Fn(Uuid));
 // version 게이트 + feature 토글. 읽기 공유위반 시 짧은 재시도.
 ```
-> 갱신 콜백 → **즉시 atomic persist** (clear→관측→persist 전 크래시 시 stale 복원 방지, 1-b).
+> Update callback → **immediate atomic persist** (prevents a stale restore if a crash happens between clear → observation → persist, 1-b).
 
-## D. `pty/manager.rs` 변경
+## D. `pty/manager.rs` changes
 
 ```rust
 pub fn spawn_agent(&self, profile: &AgentProfile, mode: SpawnMode) -> Result<AgentInfo, PtyError>;
@@ -63,69 +63,69 @@ pub fn restore_all(&self) -> Vec<RestoreOutcome>;
 pub fn restart_agent(&self, id: AgentId);  // [게이트] 전용 태스크에서만. 사다리 resume2→fresh→정지. epoch++.
 ```
 
-## E. LLD 개정 (fable 7건 — §6 충돌 닫기)
+## E. LLD revisions (fable's 7 items — close the §6 conflict)
 
-**백엔드 `backend-lld-stage1.md`:**
-- (a) §9: 재시작 시 같은 AgentId로 **새 PtySession 맵 교체 삽입** + `epoch++` (Exited→재진입 허용)
-- (b) §10 스레드 목록: **restart 전용 태스크** 1행 (drain은 신호만, respawn은 태스크가)
-- (c) §7 unsubscribe: stale sinkId retain not-found 무해 (명시)
-- (d) §5/§8: StatusSink에 `restore-result` + `epoch` 반영
+**Backend `backend-lld-stage1.md`:**
+- (a) §9: on restart, **insert a new PtySession by replacing the map entry** under the same AgentId + `epoch++` (allow Exited→re-entry)
+- (b) §10 thread list: one row for a **restart-dedicated task** (drain only signals; the task does the respawn)
+- (c) §7 unsubscribe: a stale sinkId finding nothing in retain is harmless (state it explicitly)
+- (d) §5/§8: reflect `restore-result` + `epoch` in StatusSink
 
-**프론트 `frontend-integration-lld.md`:**
-- (e) §4: subscribe effect deps `[agentId, epoch]` (epoch 증가 = 재구독 트리거)
-- (f) §4-1: 재시작 배너 순서 (terminal.reset → 배너 → replay)
-- (g) §1/§4: `Restarting` 표시 또는 Exited→Running 재진입 허용
+**Frontend `frontend-integration-lld.md`:**
+- (e) §4: subscribe effect deps `[agentId, epoch]` (an epoch increase = a resubscribe trigger)
+- (f) §4-1: restart banner order (terminal.reset → banner → replay)
+- (g) §1/§4: show `Restarting`, or allow Exited→Running re-entry
 
 ## F. `commands/` + `lib.rs`
 
-- profile CRUD: `create_agent`(프로필) / `update_profile` / `delete_agent` / `list_profiles`
-- setup: `init_logging` 후 `restore_all()` 트리거 (stagger)
-- `agent-restore-result` 이벤트 emit (TauriStatusSink 확장)
+- profile CRUD: `create_agent` (profile) / `update_profile` / `delete_agent` / `list_profiles`
+- setup: trigger `restore_all()` after `init_logging` (stagger)
+- emit the `agent-restore-result` event (extend TauriStatusSink)
 
-## G. 구현 순서
+## G. Implementation order
 
-1. `dunce` 의존 추가 (Cargo.toml)
-2. types 확장 (AgentProfile, epoch, RestoreOutcome)
+1. Add the `dunce` dependency (Cargo.toml)
+2. Extend types (AgentProfile, epoch, RestoreOutcome)
 3. persistence (atomic save/load)
-4. **session_tracker + spike 추가**(PtyManager 경로 spawn → `<child_pid>.json` 일치 self-test, 1-a 확인)
+4. **session_tracker + an added spike** (spawn through the PtyManager path → self-test that `<child_pid>.json` matches, confirms 1-a)
 5. manager: spawn_agent(profile)/restore_all + fresh fallback
-6. LLD 개정 (a~g) → 그 위에 commands/lib 복원 트리거 + epoch 재구독(프론트)
-7. **[게이트]** restart_agent 전용 태스크 (코어 안정 후)
+6. LLD revisions (a~g) → on top of that, the commands/lib restore trigger + epoch resubscribe (frontend)
+7. **[Gate]** the restart_agent dedicated task (after the core is stable)
 
-## 보안·방어
-- `profile.env` 자격증명 금지(문서+패턴 경고), 이상적으로 시크릿 persist 제외 목록
-- `sessions/<pid>.json` best-effort 등급 유지(correctness 의존 금지)
-- `CLAUDE_CONFIG_DIR` 고려(sessions 경로 해석)
+## Security and defense
+- No credentials in `profile.env` (docs + pattern warning), ideally an exclusion list so secrets are not persisted
+- Keep the `sessions/<pid>.json` at best-effort grade (do not depend on it for correctness)
+- Consider `CLAUDE_CONFIG_DIR` (resolving the sessions path)
 
-## H. 3자 검토 통합 (착수 전 필수 보강 — fable/Gemini/GPT)
+## H. 3-party review integration (mandatory reinforcement before starting — fable/Gemini/GPT)
 
-**판정: 3자 조건부 GO.** 리뷰 전문: `s9-code-plan-review-fable.md`, `code-plan-review-gemini.md`, `-gpt.md`.
+**Verdict: 3 parties conditional GO.** Full reviews: `s9-code-plan-review-fable.md`, `code-plan-review-gemini.md`, `-gpt.md`.
 
-### H-1. 만장일치/다수 보강
-1. **self_test (3자):** 즉시 1회 호출 = 레이스(spawn 직후 `sessions/<pid>.json` 미생성). → **bounded retry/지수백오프 폴링**(상한 내) + `startedAt`/`updatedAt` 검증 + 실패 시 degraded 상태 저장(추적만 끔, 무손상).
-2. **구현 순서 (3자):** **E(LLD 개정)를 D(manager) 앞으로.** manager가 E의 의미론(맵 교체/epoch/Exited→재진입)을 구현하므로 LLD 선행 필수.
-3. **atomic persist 강화 (Gemini/GPT):** flush→rename만으론 부족 → **같은 디렉토리 tmp + `sync_all` + rename + parent dir fsync.** `std::fs::rename` 크로스 파일시스템 오류 처리.
-4. **ProfileRegistry 신설 (fable 최대누락 + GPT):** `Mutex<HashMap<AgentId, AgentProfile>>` + 변경시 save. 프로필 인메모리 **단일 소유자** — sid 생성·갱신·CRUD·watcher 콜백의 갱신 대상. **`sid==None`일 때 새 sid 생성·persist = ProfileRegistry 책임**(spawn_agent 아님).
-5. **epoch++ 규칙화 (fable):** "같은 AgentId 맵 교체" **모든 지점** = epoch++ (restart + **fresh fallback respawn 포함**).
-6. **watcher (Gemini/fable):** manager **단일 watcher** + 파일명 디스패치(에이전트당 N개 금지) + **정지 핸들 반환**(kill/respawn 시 좀비 방지). 시그니처에 스레드 안정성 명시.
-7. **fallback 정밀 (Gemini/fable):** resume 실패 감지 = **"조기 종료 윈도"**(spawn 후 T초 내 `Exited{code≠0}` = resume 실패 → fallback). 잘못된 fallback로 대화 강제 유실 금지. **종점: fresh도 실패 → `Failed`+정지(재귀 금지).**
-8. **restore_all 반환 (GPT/fable):** `Vec<{agent_id, epoch, outcome: Resumed | FreshFallback{old_sid,new_sid,reason} | Blocked | Failed}>`. setup 동기 호출 금지 → **백그라운드 태스크**(앱 창 블로킹 방지).
+### H-1. Unanimous/majority reinforcements
+1. **self_test (3 parties):** a single immediate call = a race (`sessions/<pid>.json` is not yet created right after spawn). → **bounded retry / exponential-backoff polling** (within a limit) + `startedAt`/`updatedAt` verification + on failure save a degraded state (turn off only the tracking, without damage).
+2. **Implementation order (3 parties):** **put E (LLD revisions) before D (manager).** The manager implements E's semantics (map replacement/epoch/Exited→re-entry), so the LLD must come first.
+3. **Stronger atomic persist (Gemini/GPT):** flush→rename alone is not enough → **tmp in the same directory + `sync_all` + rename + parent dir fsync.** Handle `std::fs::rename` cross-filesystem errors.
+4. **Add a ProfileRegistry (fable's biggest omission + GPT):** `Mutex<HashMap<AgentId, AgentProfile>>` + save on change. The **single in-memory owner** of profiles — the update target for sid generation/update, CRUD, and watcher callbacks. **When `sid==None`, generating and persisting a new sid = the ProfileRegistry's responsibility** (not spawn_agent's).
+5. **Make epoch++ a rule (fable):** **every point** that does a "same AgentId map replacement" = epoch++ (restart + **including the fresh fallback respawn**).
+6. **watcher (Gemini/fable):** a **single watcher** in the manager + dispatch by file name (no N per agent) + **return a stop handle** (to prevent zombies on kill/respawn). State thread safety in the signature.
+7. **Precise fallback (Gemini/fable):** resume failure detection = **an "early exit window"** (`Exited{code≠0}` within T seconds after spawn = resume failure → fallback). No forced conversation loss by a wrong fallback. **Endpoint: if fresh also fails → `Failed` + stop (no recursion).**
+8. **restore_all return (GPT/fable):** `Vec<{agent_id, epoch, outcome: Resumed | FreshFallback{old_sid,new_sid,reason} | Blocked | Failed}>`. No synchronous call in setup → **a background task** (prevents blocking the app window).
 
-### H-2. 미래 확장 (3자: trait 경계만 + YAGNI)
-- **지금 할 것 2건:** claude 전용 지식 → `pty/claude.rs` 격리(codex 대비+정리 이득) / 프로필 → 중립 `profile.rs`(types.rs 아님).
-- **YAGNI:** 전면 `AgentSession` trait / 비-PTY API 일반화 = 두 번째 구현 때. 모바일 WS·codex는 OutputSink/StatusSink seam으로 흡수(지금 준비 불요).
+### H-2. Future extension (3 parties: only a trait boundary + YAGNI)
+- **Two things to do now:** isolate claude-specific knowledge into `pty/claude.rs` (prepares for codex + cleanup benefit) / put the profile in a neutral `profile.rs` (not types.rs).
+- **YAGNI:** a full `AgentSession` trait / generalizing non-PTY APIs = at the second implementation. Mobile WS and codex are absorbed through the OutputSink/StatusSink seam (no preparation needed now).
 
-### H-3. A 데이터 보강
-- `restart_policy`(필드만 추가 + 기본 `Never` — schema 마이그레이션 절약) / `last_restore`(코어 GO 범위라 복원).
+### H-3. A data reinforcement
+- `restart_policy` (add only the field + default `Never` — saves a schema migration) / `last_restore` (restored because it is within core GO scope).
 
-### H-4. 개정 구현 순서 (E 선행 반영)
-1. `dunce` + `profile.rs`(중립 타입) + **ProfileRegistry**
-2. persistence (atomic 강화)
-3. session_tracker (단일 watcher + self_test 폴링) + **spike: PtyManager 경로 spawn → `<child_pid>.json` PID 일치 확인**
-4. **LLD 개정 a~g (코어 前 선행)**
-5. `pty/claude.rs` 격리 + manager: spawn_agent / restore_all(백그라운드) / fallback(종점)
-6. commands/lib + 프론트 epoch 재구독
-7. **[게이트]** restart 전용 태스크
+### H-4. Revised implementation order (E-first applied)
+1. `dunce` + `profile.rs` (neutral types) + **ProfileRegistry**
+2. persistence (stronger atomic)
+3. session_tracker (single watcher + self_test polling) + **spike: spawn through the PtyManager path → confirm `<child_pid>.json` PID match**
+4. **LLD revisions a~g (before the core)**
+5. `pty/claude.rs` isolation + manager: spawn_agent / restore_all (background) / fallback (endpoint)
+6. commands/lib + frontend epoch resubscribe
+7. **[Gate]** the restart dedicated task
 
-### H-5. 분배 규칙
-ProfileRegistry 단위 추가. A 후 B·C 병렬 가능. **각 모듈 산출물에 "구현 LLD 절 번호" 명기**(컴플라이언스 대조 효율).
+### H-5. Distribution rules
+Add a ProfileRegistry unit. After A, B and C can run in parallel. **State the "implemented LLD section number" in each module's deliverable** (efficient compliance cross-checking).

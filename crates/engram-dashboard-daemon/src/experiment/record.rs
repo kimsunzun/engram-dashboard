@@ -1,13 +1,13 @@
-//! JSONL 레코드 타입 + 직렬화 + raw stream-json 라인 파서 (ADR-0090 Stage 2 파일럿).
+//! JSONL record types + serialization + raw stream-json line parser (ADR-0090 Stage 2 pilot).
 //!
-//! ## 역할
-//! (1) **JSONL 레코드**: 파일럿이 런마다 append 하는 NDJSON 레코드들의 serde 타입.
-//! (2) **raw stream-json 라인 파서**: 인자는 raw stream-json/트랜스크립트 라인이다(디코딩된 OutputEvent
-//!     아님). `experiment::transcript` 탭이 라인마다 호출하는 live 경로다 — raw 라인이 왜 탭에만 사는지는
-//!     `transcript` 모듈 헤더가 정본.
+//! ## Role
+//! (1) **JSONL records**: serde types of the NDJSON records the pilot appends on every run.
+//! (2) **raw stream-json line parser**: the input is a raw stream-json/transcript line (not a decoded OutputEvent).
+//!     It is the live path the `experiment::transcript` tap calls on every line — why raw lines live only in the tap is
+//!     in the `transcript` module header, the authority.
 //!
-//! ## 핵심 불변식
-//! - **필러 원문 미기록**(ADR-0090 d2): turn 레코드는 body 를 담지 않고 sha256 + len 만.
+//! ## Core invariants
+//! - **Filler original text not recorded** (ADR-0090 d2): a turn record carries no body, only sha256 + len.
 // ADR-0090
 
 use engram_dashboard_base::text::hex_lower;
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use super::probe::ProbeScores;
 
-/// 한 런의 파일 = header 1개 + 다수 turn/injection/probe/… + summary 1개(마지막).
+/// One run's file = 1 header + many turn/injection/probe/… + 1 summary (last).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Record {
@@ -31,37 +31,37 @@ pub enum Record {
 }
 
 impl Record {
-    /// 끝에 개행 없음 — 파일 라이터가 붙인다. 직렬화 실패는 에러 라인으로 대체 — 레코드 하나가
-    /// 파일 전체를 깨지 않게.
+    /// No newline at the end — the file writer adds it. A serialization failure is replaced by an error line — so one record
+    /// does not break the whole file.
     pub fn to_jsonl_line(&self) -> String {
         serde_json::to_string(self)
             .unwrap_or_else(|e| format!(r#"{{"type":"serialize_error","error":"{}"}}"#, e))
     }
 }
 
-/// 재현성 핀 + 설정(ADR-0088 d5a). 파일 첫 줄.
+/// Reproducibility pin + config (ADR-0088 d5a). First line of the file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeaderRecord {
     pub claude_version: Option<String>,
     pub daemon_git_commit: Option<String>,
-    /// 요청 모델 핀(CLI 별칭 — 예: "sonnet").
+    /// Requested model pin (CLI alias — e.g. "sonnet").
     pub model_pin: String,
-    /// 트랜스크립트 탭의 system/init 이 보고한 해석된 정확 모델 id(탭 부재/init 라인 부재 시 None).
+    /// The resolved exact model id reported by the transcript tap's system/init (None when the tap or the init line is absent).
     pub resolved_model: Option<String>,
-    /// resolved_model 을 못 채운 사유(honest gap note — 탭 성공 시 None).
+    /// Reason resolved_model could not be filled (honest gap note — None when the tap succeeded).
     pub resolved_model_note: Option<String>,
-    /// 트랜스크립트 탭이 세션 JSONL 을 찾았나(best-effort 측정 탭 — ADR-0008 경계). false 면 실 usage·모델
-    /// id 는 부재하고 드라이버는 문자 추정으로 폴백한다.
+    /// Did the transcript tap find the session JSONL (best-effort measurement tap — ADR-0008 boundary). If false, real usage and model
+    /// id are absent and the driver falls back to character estimates.
     pub transcript_available: bool,
-    /// 찾은 트랜스크립트 절대 경로(사후 대조용). 부재 시 None.
+    /// Absolute path of the transcript found (for after-the-fact cross-checking). None if absent.
     pub transcript_path: Option<String>,
-    /// RFC3339 근사 문자열.
+    /// Approximate RFC3339 string.
     pub timestamp_utc: String,
     /// 0-base.
     pub run_index: u32,
-    /// 주입 마커의 스코프.
+    /// Scope of the injection marker.
     pub run_id: String,
-    /// `cli::PilotConfig` 를 평면 직렬화한 것.
+    /// `cli::PilotConfig` serialized flat.
     pub config: serde_json::Value,
 }
 
@@ -71,57 +71,57 @@ pub struct TurnRecord {
     /// task|fill|inject|probe|final.
     pub kind: String,
     pub chars_sent: usize,
-    /// 보낸 본문의 sha256(hex) — `chars_sent` 와 같은 본문. inject 턴은 봉투가 아니라 authored note body
-    ///   의 해시다(봉투 실 바이트수 = `InjectionRecord.bytes_requested`).
+    /// sha256 (hex) of the body sent — the same body as `chars_sent`. For an inject turn it is the hash of the authored note body,
+    ///   not the envelope (envelope actual byte count = `InjectionRecord.bytes_requested`).
     pub body_sha256: String,
     pub usage: Option<UsageSnapshot>,
     pub wallclock_ms: u64,
 }
 
-/// 실측·추정 두 계열을 **둘 다** 남겨 사후에 추정↔실측 비율을 캘리브레이션한다(파일럿 산출물).
+/// Keep **both** the measured and estimated series, so the estimated↔measured ratio can be calibrated afterwards (a pilot product).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct UsageSnapshot {
-    /// 디코딩된 `Usage.input_tokens` — 그 턴 증분이지 누적 컨텍스트가 아니다.
+    /// Decoded `Usage.input_tokens` — that turn's increment, not the cumulative context.
     pub input_tokens: u64,
     pub output_tokens: u64,
-    /// 트랜스크립트 탭이 준 실 컨텍스트 footprint(`RealUsage::context_footprint`). 탭 부재 시 None.
+    /// Real context footprint given by the transcript tap (`RealUsage::context_footprint`). None when the tap is absent.
     pub context_tokens_real: Option<u64>,
-    /// 우리가 보낸 누적 문자수 기반 추정 — 폴백·캘리브레이션 기준.
+    /// An estimate based on the cumulative character count we sent — the fallback and calibration reference.
     pub context_tokens_estimate: u64,
 }
 
-/// 주입 관측 — 실 control 경로 배달.
+/// Injection observation — delivery over the real control path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InjectionRecord {
-    /// 몇 번째 주입인가(0-base).
+    /// Which injection is it (0-based).
     pub k: u32,
-    /// 이 주입이 발화된 fill 분율(설정 inject_at 값).
+    /// The fill fraction at which this injection fired (the config inject_at value).
     pub at_fraction: f64,
     pub msg_id: String,
-    /// 정답 — 프로브 채점 대조용. 실험 메타라 원문 미기록 불변식의 예외로 기록한다.
+    /// Answers — for cross-checking probe grading. They are experiment meta so they are recorded as an exception to the no-original-text invariant.
     pub codeword: String,
     pub sender_name: String,
     /// `DeliveryObservation::is_delivered`.
     pub delivered: bool,
-    /// 봉투 크기.
+    /// Envelope size.
     pub bytes_requested: usize,
     pub bytes_written: Option<usize>,
-    /// write 가 착지한 수신자 epoch(ADR-0088 — 성공 시 Some).
+    /// The recipient epoch the write landed on (ADR-0088 — Some on success).
     pub to_epoch: Option<u32>,
     pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProbeRecord {
-    /// FINAL REPORT 는 None.
+    /// None for FINAL REPORT.
     pub for_injection_k: Option<u32>,
-    /// ★finding 4★: 이 프로브가 소비한 실 턴 인덱스(0-base) — `TurnRecord`(kind="probe")와 같은 인덱스.
-    ///   이전엔 프로브가 turn_idx 를 올리면서도 TurnRecord 를 안 남겨 인덱스 구멍(hole)이 생겼다.
+    /// ★finding 4★: the real turn index (0-based) this probe consumed — the same index as `TurnRecord` (kind="probe").
+    ///   Previously a probe bumped turn_idx without leaving a TurnRecord, creating a hole in the index.
     pub turn_idx: u32,
-    /// 프로브도 컨텍스트를 소비하는 실 턴이라 fill/inject 턴과 동일하게 계열에 남긴다(캘리브레이션 정합).
+    /// A probe is also a real turn that consumes context, so it is left in the series the same as fill/inject turns (calibration consistency).
     pub usage: Option<UsageSnapshot>,
     pub question: String,
-    /// 4KB 캡 — 잘려 있을 수 있다.
+    /// 4KB cap — may be truncated.
     pub response: String,
     pub final_report: bool,
     pub scores: ProbeScores,
@@ -129,9 +129,9 @@ pub struct ProbeRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistogramRecord {
-    /// key = 이벤트 `type` 또는 `type/subtype`, value = 건수.
+    /// key = event `type` or `type/subtype`, value = count.
     pub counts: std::collections::BTreeMap<String, u64>,
-    /// 이 히스토그램이 raw stream-json 타입인지 디코딩된 이벤트 variant 인지(honest scope).
+    /// Whether this histogram is of raw stream-json types or of decoded event variants (honest scope).
     pub source: String,
 }
 
@@ -140,16 +140,16 @@ pub struct SuspectedCompactionRecord {
     pub flagged_turn_idxs: Vec<u32>,
 }
 
-/// "compact" 를 언급한 라인 verbatim(best-effort).
+/// Lines mentioning "compact", verbatim (best-effort).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactSignalRecord {
-    /// 4KB 캡 — 잘려 있을 수 있다.
+    /// 4KB cap — may be truncated.
     pub verbatim: String,
-    /// 어디서 스캔했나 — 디코딩된 Structured/Error 텍스트 또는 raw 트랜스크립트 라인.
+    /// Where it was scanned — decoded Structured/Error text or a raw transcript line.
     pub source: String,
 }
 
-/// 정지 이벤트 — `reason` 은 턴 대기 타임아웃 등.
+/// Stop event — `reason` is a turn-wait timeout etc.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StallRecord {
     pub turn_idx: u32,
@@ -162,18 +162,18 @@ pub struct SummaryRecord {
     pub max_context_tokens: u64,
     pub total_turns: u32,
     pub duration_ms: u64,
-    /// abort 로 끝났으면 사유(정상 완료면 None).
+    /// The reason if it ended by abort (None if it completed normally).
     pub abort_reason: Option<String>,
-    /// ★finding 1★: 런 끝 authoritative 트랜스크립트 파싱이 확정한 정확 모델 id. 헤더의 resolved_model 은
-    ///   스폰 직후엔 대개 None(트랜스크립트가 첫 턴 뒤에야 써짐)이라 재현성 핀(ADR-0088 d5a)이 헤더만 보면
-    ///   유실된다 — summary 가 런 끝 시점의 확정 값으로 핀을 보존한다. 탭 부재/모델 라인 부재 시 None.
+    /// ★finding 1★: the exact model id fixed by the authoritative transcript parse at the end of the run. The header's resolved_model is
+    ///   usually None right after spawn (the transcript is written only after the first turn), so the reproducibility pin (ADR-0088 d5a) is
+    ///   lost if it relies on the header alone — the summary preserves the pin with the value fixed at the end of the run. None if the tap or the model line is absent.
     pub resolved_model: Option<String>,
-    /// 런 끝 시점 값(의미는 `HeaderRecord` 의 동명 필드).
+    /// Values at the end of the run (the meaning is that of the same-named field in `HeaderRecord`).
     pub transcript_available: bool,
     pub transcript_path: Option<String>,
 }
 
-/// probe/compact verbatim 의 파일 폭주 방지(ADR-0090 — 파일 크기·노이즈 억제).
+/// Prevents file runaway from probe/compact verbatim (ADR-0090 — suppresses file size and noise).
 pub const RESPONSE_CAP_BYTES: usize = 4096;
 
 pub fn cap_response(s: &str) -> String {
@@ -187,15 +187,15 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hex_lower(&Sha256::digest(data))
 }
 
-/// 실측 스키마(claude 2.1.170): `{"type":"system","subtype":"init",...,"model":"claude-...",...}`.
+/// Measured schema (claude 2.1.170): `{"type":"system","subtype":"init",...,"model":"claude-...",...}`.
 pub fn parse_init_model(line: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     if v.get("type").and_then(|t| t.as_str()) != Some("system") {
         return None;
     }
-    // ★finding 14 fix★: subtype 부재 시 model 존재만으로 통과하던 때는 `{"type":"system","model":"spoof"}`
-    //   같은 위조 라인이 권위 있는 모델 id 로 들어왔다(스푸핑 표면) — 완화 금지. stream-json headless 경로의
-    //   진짜 모델 id 는 `model_from_assistant_line`(assistant.message.model)이 담당하므로 잃는 정당 소스는 없다.
+    // ★finding 14 fix★: back when the check passed on the mere presence of model without subtype, a forged line like `{"type":"system","model":"spoof"}`
+    //   got in as an authoritative model id (a spoofing surface) — do not relax. The real model id of the stream-json headless path is
+    //   handled by `model_from_assistant_line` (assistant.message.model), so no legitimate source is lost.
     if v.get("subtype").and_then(|s| s.as_str()) != Some("init") {
         return None;
     }
@@ -236,14 +236,14 @@ pub fn line_mentions_compact(line: &str) -> bool {
 }
 
 // ── std-only SHA-256 (FIPS 180-4) ──────────────────────────────────────────────────
-// ★왜 손구현인가★: ADR-0090 이 신규 의존성 추가를 금지하고(no new deps) 워크스페이스에 sha2 가 없다.
-//   성능은 무관하다 — 런당 수십~수백 문서라 벽시계에 안 잡힌다.
+// ★Why hand-implemented★: ADR-0090 forbids adding new dependencies (no new deps) and the workspace has no sha2.
+//   Performance is irrelevant — tens to hundreds of documents per run do not register on the wall clock.
 
 struct Sha256;
 
 impl Sha256 {
     fn digest(data: &[u8]) -> [u8; 32] {
-        // 초기 해시값(FIPS 180-4 §5.3.3).
+        // Initial hash values (FIPS 180-4 §5.3.3).
         let mut h: [u32; 8] = [
             0x6a09_e667,
             0xbb67_ae85,
@@ -254,7 +254,7 @@ impl Sha256 {
             0x1f83_d9ab,
             0x5be0_cd19,
         ];
-        // 라운드 상수(§4.2.2).
+        // Round constants (§4.2.2).
         const K: [u32; 64] = [
             0x428a_2f98,
             0x7137_4491,
@@ -322,7 +322,7 @@ impl Sha256 {
             0xc671_78f2,
         ];
 
-        // 패딩(§5.1.1).
+        // Padding (§5.1.1).
         let bit_len = (data.len() as u64).wrapping_mul(8);
         let mut msg = data.to_vec();
         msg.push(0x80);
@@ -443,8 +443,8 @@ mod tests {
         assert!(std::str::from_utf8(capped.as_bytes()).is_ok());
     }
 
-    /// 상한이 글자 한가운데면 **아래** 경계에서 자른다 — 넘기지 않으면서 가장 많이 남긴다.
-    /// 4096 은 3 의 배수가 아니라 `'가'`(3 바이트) 열에서 상한이 글자 한가운데 떨어진다.
+    /// If the cap falls in the middle of a character, cut at the **lower** boundary — keep as much as possible without exceeding it.
+    /// 4096 is not a multiple of 3, so in a run of `'가'` (3 bytes) the cap falls in the middle of a character.
     #[test]
     fn cap_response_cuts_at_the_last_boundary_below_the_cap() {
         let s = "가".repeat(RESPONSE_CAP_BYTES);

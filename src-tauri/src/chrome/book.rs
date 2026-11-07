@@ -1,38 +1,38 @@
-//! 창 크롬 장부 — 창마다 마지막으로 입힌 OS 제목과 그 판 · 웹이 보고한 최소 창 크기와 OS 에 입힌 값 · 열기 표시(TRD
-//! S26-window-chrome §4-4 · §5-1 · §7-7). Tauri 를 모른다 — 어댑터(`crate::chrome`)가 잎 락으로 쥐고 메인 스레드 일 하나
-//! 안에서 [`apply_title`] · [`report_min`] · [`apply_min`] 으로 부른다.
+//! Window chrome ledger — per window, the OS title last applied and its version · the minimum window size reported by the web and the value applied to the OS · the opening mark (TRD
+//! S26-window-chrome §4-4 · §5-1 · §7-7). It knows nothing of Tauri — the adapter (`crate::chrome`) holds it under a leaf lock and calls
+//! [`apply_title`] · [`report_min`] · [`apply_min`] from inside a single main-thread job.
 //!
-//! ★창 항목은 그 OS 창이 있는 것을 본 뒤에만 만든다★ — 창 확인은 부르는 쪽 몫이고, 없으면 장부를 만지지 않는다.
-//! `Destroyed` 가 항목을 잊은 뒤 늦게 온 제목 일이 항목을 되살리지 않게 하려는 것이다. 확인과 적기가 같은 메인 스레드
-//! 일 안이고 `Destroyed` 처리기도 메인 스레드라 그 사이에 잊기가 끼어들 수 없다. label 은 한 실행 안에서 다시 쓰이지
-//! 않아 묘비를 두지 않는다.
+//! ★A window entry is created only after seeing that the OS window exists★ — checking the window is the caller's job, and if it is absent the ledger is not touched.
+//! This is so that a late title job arriving after `Destroyed` has forgotten the entry does not revive it. The check and the write are in the same main-thread
+//! job and the `Destroyed` handler is also on the main thread, so forgetting cannot come in between. A label is not reused
+//! within one run, so no tombstone is kept.
 //!
-//! ★OS 최소 크기는 보통 크기 창에만 입힌다 — 최대화 · 최소화 창에는 입히지도 걷지도 않는다★. tao 0.35.3 의 최소 크기
-//! 세터(`set_min_inner_size`)는 지금 크기를 다시 입혀(`set_inner_size`) OS 가 새 한계를 다시 보게 하는데, 그 세터가
-//! 최대화 깃발을 내려 최대화 창을 `SW_RESTORE` 로 원래 크기로 되돌린다 — 숨은 창이면 보이며 활성화한다(tao
-//! `platform_impl/windows/window.rs` `set_min_inner_size` · `set_inner_size` → `window_state.rs` `apply_diff` · 소스
-//! 독해). 그래서 최대화 · 최소화 동안 온 보고는 적어 두고, 창이 보통 크기가 되면(`Resized` — [`ChromeBook::on_frame`])
-//! 입힌다. 최대화 동안 최소 크기를 걷지 않는 것은 그 때문이다 — 최대화 사각형은 작업 영역이고(tao 의 테두리 없는 창
-//! `WM_NCCALCSIZE`) 웹이 보고하는 최소 크기(수백 px)가 그보다 작아 끼어들 일이 없다(작업 영역이 그보다 좁은 화면은
-//! QA S8 이 잰다).
+//! ★The OS minimum size is applied only to normal-size windows — for maximized · minimized windows it is neither applied nor lifted★. The minimum-size
+//! setter of tao 0.35.3 (`set_min_inner_size`) re-applies the current size (`set_inner_size`) so that the OS sees the new limit again, and that setter
+//! lowers the maximized flag and returns a maximized window to its original size with `SW_RESTORE` — for a hidden window it becomes visible and activated (tao
+//! `platform_impl/windows/window.rs` `set_min_inner_size` · `set_inner_size` → `window_state.rs` `apply_diff` · source
+//! reading). So reports that arrive during maximize · minimize are recorded, and applied when the window becomes normal size (`Resized` — [`ChromeBook::on_frame`]).
+//! That is why the minimum size is not lifted during maximize — the maximized rectangle is the work area (tao's frameless window
+//! `WM_NCCALCSIZE`) and the minimum size the web reports (a few hundred px) is smaller than that, so it never gets in the way (screens whose work area is narrower than that
+//! are measured by QA S8).
 //!
-//! ★열기 표시는 그 창의 최소 크기를 받은 뒤 한 번 판정한다★([`ChromeBook::mark_opening`]) — 이미 받았으면 표시를 적는
-//! 그 자리에서(다시 짓지 않는 창 — 런타임 사본 수락의 main · 그 페이지는 값이 바뀌지 않으면 다시 보고하지 않는다), 아직이면
-//! 다음에 받아들인 보고에서. 웹은 창 번호를 받기 전(예열 창의 대기 · 로딩 · 부팅 실패)에는 보고하지 않는다 — 그래서 예열
-//! 창을 들일 때 적은 표시를 대기 중 보고가 먼저 거두지 못한다(`titleRow/TitleRow.tsx`). 다시 짓지 않는 창에 새 자리를
-//! 입힐 때는 그 전에 입힌 OS 최소 크기를 걷고 표시를 세운다([`ChromeBook::lift_min`]) — 걷지 않으면 OS 가 좁은 자리를
-//! 왼쪽 끝을 둔 채 최소 크기로 키워 넓혀 당기기가 할 일이 없어진다. ★걷기의 장부 적기와 OS 걷기는 메인 스레드 일 하나다★
-//! ([`lift`]) — 둘이 갈리면 그 사이에 온 보고가 입힌 값을 뒤늦은 OS 걷기가 지워, 장부는 「입혔다」인데 OS 에는 최소 크기가
-//! 없게 남는다(U8b 리뷰 2). 표시가 서 있는 동안 크기 바뀜은 OS 최소 크기를 입히지 않는다([`ChromeBook::on_frame`]) — 걷기가
-//! 낸 크기 바뀜이 곧바로 다시 입히지 않게. 받아 둔 최소 크기가 있는 창의 표시는 그 값을 늘 다시 입힌다
-//! ([`ChromeBook::mark_opening`]) — 장부와 OS 가 어긋났어도 열 때 고친다.
+//! ★The opening mark is decided once after the window's minimum size has been received★([`ChromeBook::mark_opening`]) — if already received, right
+//! where the mark is written (a window that is not rebuilt — main in runtime copy acceptance · that page does not report again if the value is unchanged), if not yet, at
+//! the next accepted report. The web does not report before it receives the window number (the prewarmed window's waiting · loading · boot failure) — so the mark written when
+//! a prewarmed window is taken in cannot be withdrawn first by a report made while waiting (`titleRow/TitleRow.tsx`). When applying a new place to a window that is not rebuilt,
+//! the OS minimum size applied before that is lifted and the mark is raised ([`ChromeBook::lift_min`]) — if not lifted, the OS grows a narrow place to the minimum size
+//! keeping its left edge fixed, and widen-and-pull-in has nothing left to do. ★Writing the lift in the ledger and the OS lift are a single main-thread job★
+//! ([`lift`]) — if the two split, a report arriving between them has its applied value erased by the late OS lift, leaving the ledger saying 「입혔다」 (applied) while the OS has no
+//! minimum size (U8b review 2). While the mark is raised, a size change does not apply the OS minimum size ([`ChromeBook::on_frame`]) — so that a size change
+//! emitted by the lift does not immediately re-apply it. The mark of a window that has a received minimum size always re-applies that value
+//! ([`ChromeBook::mark_opening`]) — even if the ledger and the OS have drifted apart, it is fixed on opening.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 use engram_dashboard_base::sync;
 
-// ADR-0303 — 크롬식 제목 표시줄
+// ADR-0303 — chrome-style title bar
 #[derive(Debug, Default)]
 pub(crate) struct ChromeBook {
     windows: HashMap<String, WindowChrome>,
@@ -42,16 +42,16 @@ pub(crate) struct ChromeBook {
 struct WindowChrome {
     title: Option<TitleMark>,
     min: Option<MinMark>,
-    // 열기 표시 — 셸이 그 창을 열 때 세우고([`ChromeBook::mark_opening`] · 새 자리 앞의 [`ChromeBook::lift_min`]) 최소
-    //   크기를 받은 첫 판정이 거둔다(표시를 적을 때 이미 받았으면 그 자리 · 아니면 다음 보고). 넓혀 당기기는 이 표시를 거둔
-    //   판정에서만 한다(열 때 한 번 — TRD §7-7 · PRD R20 · AC34). 서 있는 동안 크기 바뀜은 OS 최소 크기를 입히지 않는다.
+    // Opening mark — raised when the shell opens that window ([`ChromeBook::mark_opening`] · [`ChromeBook::lift_min`] before a new place) and
+    //   withdrawn by the first decision that receives the minimum size (right there if already received when the mark is written · otherwise the next report). Widen-and-pull-in is done
+    //   only in the decision that withdraws this mark (once on opening — TRD §7-7 · PRD R20 · AC34). While it is up, a size change does not apply the OS minimum size.
     opening: bool,
-    // OS 창에 마지막으로 입힌 최소 크기 — `None` = 아직 입히지 않았거나 입히다 실패했다.
+    // The minimum size last applied to the OS window — `None` = not yet applied, or applying failed.
     applied: Option<MinSize>,
 }
 
 impl WindowChrome {
-    // 적은 최소 크기가 OS 에 입힌 값과 다르면 그 값 — 입힌 것으로 적는다(못 입혔으면 부르는 쪽이
+    // If the recorded minimum size differs from the value applied to the OS, that value — it is recorded as applied (if it could not be applied the caller calls
     //   [`ChromeBook::min_failed`]).
     fn next_min(&mut self) -> Option<MinSize> {
         let want = self.min.as_ref()?.size;
@@ -63,45 +63,45 @@ impl WindowChrome {
     }
 }
 
-/// 최소 크기를 입힐지 정할 때의 그 창 크기 상태 — 어댑터가 판정과 같은 메인 스레드 일 안에서 읽는다(모듈 머리).
+/// The window's size state when deciding whether to apply the minimum size — the adapter reads it inside the same main-thread job as the decision (module head).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FrameState {
-    /// 보통 크기(보이든 숨었든 — 숨은 창의 미룬 최대화는 아직 보통 크기다) — 최소 크기를 입힌다.
+    /// Normal size (visible or hidden — a hidden window's deferred maximize is still normal size) — the minimum size is applied.
     Normal,
-    /// 최대화 · 최소화 · 못 읽음 — 지금 OS 최소 크기를 건드리지 않는다(모듈 머리).
+    /// Maximized · minimized · unreadable — the OS minimum size is not touched now (module head).
     Other,
 }
 
-/// 최소 크기 판정 — 어댑터가 장부 락 밖에서 [`apply_min`] 으로 입힌다.
+/// Minimum-size decision — the adapter applies it with [`apply_min`] outside the ledger lock.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct MinPlan {
-    /// 넓혀 당기기 — 보통 크기가 이 폭보다 좁으면 넓히고 작업 영역 안으로 당긴다(`state::placement::fit_min_width`).
+    /// Widen-and-pull-in — if the normal size is narrower than this width, widen it and pull it into the work area (`state::placement::fit_min_width`).
     pub(crate) widen: Option<MinSize>,
-    /// OS 최소 크기로 입힐 값 — `None` = OS 를 건드리지 않는다.
+    /// The value to apply as the OS minimum size — `None` = do not touch the OS.
     pub(crate) set_min: Option<MinSize>,
 }
 
-/// [`ChromeBook::on_min_report`] 의 답.
+/// The answer of [`ChromeBook::on_min_report`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MinReport {
     pub(crate) verdict: MinVerdict,
     pub(crate) plan: MinPlan,
 }
 
-/// 웹이 그 창의 제목 줄로 센 최소 창 크기(CSS px = 논리 px · 보통 상태 기준 — TRD S26-window-chrome §7-7). 두 값 다
-/// `1..=MIN_SIZE_MAX` 다([`MinSize::new`]).
+/// The minimum window size the web measured for that window's title row (CSS px = logical px · based on the normal state — TRD S26-window-chrome §7-7). Both values
+/// are `1..=MIN_SIZE_MAX` ([`MinSize::new`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MinSize {
     pub(crate) width: u32,
     pub(crate) height: u32,
 }
 
-// 웹 셈의 가장 큰 값(세 자리 번호 표식 · 단추 셋 · 칸 최소 상한 1000)보다 넉넉히 크다 — 그 너머는 셈 잘못으로 본다. 입히면
-//   창이 화면보다 커진다.
+// Generously larger than the largest value of the web measurement (a three-digit number marker · three buttons · area minimum cap 1000) — anything beyond that is seen as a measurement error. If applied,
+//   the window would become larger than the screen.
 const MIN_SIZE_MAX: u32 = 4096;
 
 impl MinSize {
-    /// 둘 중 하나라도 `1..=MIN_SIZE_MAX`(4096) 밖이면 `Err`(그 문구).
+    /// `Err` (that message) if either one is outside `1..=MIN_SIZE_MAX` (4096).
     pub(crate) fn new(width: u32, height: u32) -> Result<Self, String> {
         let range = 1..=MIN_SIZE_MAX;
         if !range.contains(&width) || !range.contains(&height) {
@@ -113,9 +113,9 @@ impl MinSize {
     }
 }
 
-/// 최소 크기 보고 하나의 차례(TRD S26-window-chrome §7-7) — `epoch` = 그 창의 웹 페이지를 읽은 벽시계 ms(웹
-/// `Math.floor(performance.timeOrigin)` — 다시 읽을수록 크다. 같은 ms 에 읽은 두 페이지는 한 페이지로 섞인다 — 다루지
-/// 않는다) · `seq` = 그 페이지 안에서 보낼 때마다(재시도 포함) 하나 오르는 순번(1 부터).
+/// The order of one minimum-size report (TRD S26-window-chrome §7-7) — `epoch` = the wall-clock ms at which the web page of that window was loaded (web
+/// `Math.floor(performance.timeOrigin)` — the later it is reloaded, the larger. Two pages loaded in the same ms are mixed into one page — not
+/// handled) · `seq` = a sequence number that rises by one on every send within that page (retries included) (from 1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MinOrder {
     pub(crate) epoch: u64,
@@ -128,42 +128,42 @@ struct MinMark {
     size: MinSize,
 }
 
-/// [`ChromeBook::record_min`] 의 판정.
+/// The decision of [`ChromeBook::record_min`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MinVerdict {
-    /// 받아들였고 직전 값과 다르다(그 창의 첫 보고 포함).
+    /// Accepted and different from the previous value (including that window's first report).
     Changed,
-    /// 받아들였고 직전 값과 같다.
+    /// Accepted and the same as the previous value.
     Same,
-    /// 받아들인 것보다 옛 `epoch` 이거나, 같은 `epoch` 에서 이미 받아들인 `seq` 보다 새 순번이 아니다 — 웹이 시한에 놓은
-    /// 옛 시도(다시 읽기 전 페이지의 것 포함)가 늦게 닿았다. 적지 않는다.
+    /// Has an `epoch` older than the accepted one, or, in the same `epoch`, a sequence number no newer than the already accepted `seq` — an old attempt the web
+    /// left on a deadline (including one from the page before reload) arrived late. It is not recorded.
     Stale,
 }
 
 #[derive(Debug)]
 struct TitleMark {
     version: u64,
-    // `None` = 그 판을 입히다 실패했다 — 다음 새 판은 글자가 같아도 입힌다.
+    // `None` = applying that version failed — the next new version is applied even if its text is the same.
     text: Option<String>,
 }
 
-/// [`ChromeBook::accept_title`] 의 판정.
+/// The decision of [`ChromeBook::accept_title`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TitleVerdict {
-    /// 새 판이고 글자가 바뀌었다 — 입힌다.
+    /// A new version and the text changed — apply it.
     Set,
-    /// 새 판이지만 마지막으로 입힌 글자와 같다 — OS 를 부르지 않는다.
+    /// A new version but the same as the text last applied — the OS is not called.
     Same,
-    /// 그 창에 이미 받아들인 판보다 새 판이 아니다 — 차례가 뒤바뀌어 늦게 온 옛 알림이다.
+    /// Not newer than the version already accepted for that window — an old notification that arrived late because the order got reversed.
     Stale,
 }
 
 impl ChromeBook {
-    /// 창 `label` 에 판 `version` 의 제목 `title` 을 입힐지 정하고 적는다. 판은 그 창에 받아들인 마지막 판보다 클 때만
-    /// 받아들이고(같은 판은 옛 판이다), 받아들이면 `Same` 이어도 판을 적는다 — 뒤에 온 옛 판이 같은 글자 뒤에 숨어
-    /// 들어오지 못하게. `Set` 이면 부르는 쪽이 곧 입힌다(못 입혔으면 [`Self::title_failed`]). 항목이 없으면 만든다 —
-    /// 그 OS 창이 지금 있는지는 부르는 쪽이 먼저 본다(모듈 머리).
-    // ADR-0301 — 탭 이름 · OS 제목
+    /// Decide whether to apply title `title` of version `version` to window `label`, and record it. A version is accepted only when it is greater than the last version accepted for that window
+    /// (the same version is an old version), and when accepted the version is recorded even if it is `Same` — so that a later old version cannot slip in
+    /// behind the same text. If `Set`, the caller applies it right away (if it could not, [`Self::title_failed`]). If there is no entry it is created —
+    /// whether that OS window exists now is checked by the caller first (module head).
+    // ADR-0301 — tab name · OS title
     pub(crate) fn accept_title(&mut self, label: &str, version: u64, title: &str) -> TitleVerdict {
         let window = self.windows.entry(label.to_owned()).or_default();
         let Some(mark) = &mut window.title else {
@@ -184,7 +184,7 @@ impl ChromeBook {
         TitleVerdict::Set
     }
 
-    /// `Set` 으로 받아들인 `label` 의 제목을 못 입혔다 — 판은 두고 글자만 지워, 다음 새 판은 글자가 같아도 입힌다.
+    /// The title of `label` accepted as `Set` could not be applied — the version is kept and only the text is cleared, so the next new version is applied even if its text is the same.
     pub(crate) fn title_failed(&mut self, label: &str) {
         if let Some(mark) = self
             .windows
@@ -195,9 +195,9 @@ impl ChromeBook {
         }
     }
 
-    /// 창 `label` 의 최소 크기 보고를 적는다. 받아들인 것보다 옛 `epoch` 는 버리고, 같은 `epoch` 안에서는 받아들인 마지막
-    /// `seq` 보다 클 때만 받아들이며, 더 큰 `epoch`(그 창의 페이지를 다시 읽었다)면 순번을 새로 센다 — 그래서 보고가 닿는
-    /// 차례와 무관하게 가장 새 페이지가 마지막으로 보낸 값이 남는다. 항목이 없으면 만든다(창 확인은 부르는 쪽 — 모듈 머리).
+    /// Record the minimum-size report of window `label`. An `epoch` older than the accepted one is discarded, within the same `epoch` it is accepted only when greater than the last accepted
+    /// `seq`, and with a larger `epoch` (that window's page was reloaded) the sequence is counted afresh — so regardless of the order in which reports arrive, the value
+    /// sent last by the newest page remains. If there is no entry it is created (checking the window is the caller's job — module head).
     pub(crate) fn record_min(&mut self, label: &str, order: MinOrder, min: MinSize) -> MinVerdict {
         let window = self.windows.entry(label.to_owned()).or_default();
         let verdict = match &window.min {
@@ -211,13 +211,13 @@ impl ChromeBook {
         verdict
     }
 
-    /// 창 `label` 을 셸이 막 열었다(TRD §7-7 — 창 포트의 새로 짓기 · 맡긴 예열 창의 확정 · 부팅 복원 창 짓기 · 사본 수락의
-    /// 숨긴 팝아웃 짓기 · 사본 수락의 main 자리 입히기) — 넓혀 당기기를 한 번 판정한다. 그 창의 최소 크기를 아직 받지
-    /// 않았으면 표시를 세워 다음에 받아들인 보고가 판정하고([`Self::on_min_report`]) 빈 판정이다. 이미 받았으면 지금 `state`
-    /// 로 판정하고 표시를 거둔다 — 보통 크기면 넓혀 당기고 ★그 값을 늘 OS 에 다시 입힌다★(입힌 값으로 적은 것과 같아도 —
-    /// 장부와 OS 가 어긋났어도 이 판정이 고친다 · TRD §7-7 · U8b 리뷰 2 수정). 최대화 · 최소화면 넓히지도 입히지도 않는다(열
-    /// 때 한 번 · 모듈 머리). 항목이 없으면 만든다(창 확인은 부르는 쪽 — 모듈 머리). `state` 는 자리를 입힌 뒤에 읽는다.
-    // ADR-0303 — 크롬식 제목 표시줄
+    /// The shell has just opened window `label` (TRD §7-7 — a window port's fresh build · confirmation of an entrusted prewarmed window · boot-restore window build · the
+    /// hidden pop-out build of copy acceptance · placing the main slot of copy acceptance) — decide widen-and-pull-in once. If that window's minimum size has not yet been
+    /// received, raise the mark so that the next accepted report decides ([`Self::on_min_report`]), and return an empty decision. If already received, decide now with `state`
+    /// and withdraw the mark — if normal size, widen and pull in, and ★always re-apply that value to the OS★ (even if it equals what is recorded as applied —
+    /// this decision fixes a ledger/OS drift · TRD §7-7 · U8b review 2 fix). If maximized · minimized, neither widen nor apply (once on
+    /// opening · module head). If there is no entry it is created (checking the window is the caller's job — module head). `state` is read after the place is applied.
+    // ADR-0303 — chrome-style title bar
     pub(crate) fn mark_opening(&mut self, label: &str, state: FrameState) -> MinPlan {
         let window = self.windows.entry(label.to_owned()).or_default();
         let Some(min) = window.min.as_ref().map(|mark| mark.size) else {
@@ -235,12 +235,12 @@ impl ChromeBook {
         }
     }
 
-    /// 셸이 다시 짓지 않는 창 `label` 에 새 보통 자리를 입히려 한다(런타임 사본 수락의 main) — 열기 표시를 세우고, 보통
-    /// 크기이고 OS 최소 크기를 입혀 두었으면 입힌 값을 잊는다. `true` = 부르는 쪽이 OS 최소 크기를 걷는다(모듈 머리 —
-    /// 걷지 않으면 OS 가 좁은 자리를 키워 넓혀 당기기가 할 일이 없다). 최대화 · 최소화 창은 걷지 않는다(걷는 세터가 최대화를
-    /// 푼다 — 모듈 머리). 자리를 입힌 뒤 [`Self::mark_opening`] 이 넓혀 당기고 다시 입힌다. 몸통 = [`lift`](메인 스레드 일
-    /// 하나). 항목을 만들지 않는다 — 항목이 없으면 걷을 것도 없다.
-    // ADR-0303 — 크롬식 제목 표시줄
+    /// The shell is about to apply a new normal place to window `label`, which it does not rebuild (main in runtime copy acceptance) — raise the opening mark, and if it is normal
+    /// size and the OS minimum size has been applied, forget the applied value. `true` = the caller lifts the OS minimum size (module head —
+    /// if not lifted, the OS grows a narrow place and widen-and-pull-in has nothing to do). Maximized · minimized windows are not lifted (the lifting setter
+    /// releases the maximize — module head). After the place is applied, [`Self::mark_opening`] widens and pulls in and re-applies. Body = [`lift`] (a single main-thread
+    /// job). It does not create an entry — if there is no entry there is nothing to lift.
+    // ADR-0303 — chrome-style title bar
     pub(crate) fn lift_min(&mut self, label: &str, state: FrameState) -> bool {
         let Some(window) = self.windows.get_mut(label) else {
             return false;
@@ -249,11 +249,11 @@ impl ChromeBook {
         state == FrameState::Normal && window.applied.take().is_some()
     }
 
-    /// 최소 크기 보고 하나 — 적고([`Self::record_min`]) 무엇을 입힐지 정한다. 옛 순번(`Stale`)이면 아무것도 입히지 않고
-    /// 열기 표시도 두지 않는다. 받아들인 보고는 열기 표시를 거두고, 넓혀 당기기는 그 표시가 있었고 지금 보통 크기일 때만이다
-    /// (최대화 · 최소화 동안 연 창은 넓히지 않는다 — 열 때 한 번). OS 최소 크기는 보통 크기일 때 입힌 값과 다르면 입힌다
-    /// (그 밖은 [`Self::on_frame`] 이 보통 크기가 될 때 입힌다 — 모듈 머리).
-    // ADR-0303 — 크롬식 제목 표시줄
+    /// One minimum-size report — record it ([`Self::record_min`]) and decide what to apply. If the sequence is old (`Stale`), nothing is applied and
+    /// the opening mark is not withdrawn either. An accepted report withdraws the opening mark, and widen-and-pull-in happens only if that mark was up and the window is now normal size
+    /// (a window opened during maximize · minimize is not widened — once on opening). At normal size, the OS minimum size is applied if it differs from the applied value
+    /// (otherwise [`Self::on_frame`] applies it when the window becomes normal size — module head).
+    // ADR-0303 — chrome-style title bar
     pub(crate) fn on_min_report(
         &mut self,
         label: &str,
@@ -280,9 +280,9 @@ impl ChromeBook {
         }
     }
 
-    /// 창 `label` 의 크기 상태가 바뀌었다(`Resized` — 최대화 · 최소화에서 돌아옴 포함) — 보통 크기가 됐고 적은 최소 크기를
-    /// 아직 OS 에 입히지 않았으면 그 값을 입히게 한다(넓혀 당기기는 하지 않는다). 열기 표시가 서 있으면 입히지 않는다 — 그
-    /// 표시를 거두는 판정이 넓혀 당긴 뒤 입힌다(모듈 머리). 항목을 만들지 않는다.
+    /// The size state of window `label` changed (`Resized` — including return from maximize · minimize) — if it became normal size and the recorded minimum size
+    /// has not yet been applied to the OS, have that value applied (no widen-and-pull-in). If the opening mark is up, it is not applied — the decision
+    /// that withdraws that mark applies it after widening and pulling in (module head). It does not create an entry.
     pub(crate) fn on_frame(&mut self, label: &str, state: FrameState) -> MinPlan {
         let set_min = match (state, self.windows.get_mut(label)) {
             (FrameState::Normal, Some(window)) if !window.opening => window.next_min(),
@@ -294,23 +294,23 @@ impl ChromeBook {
         }
     }
 
-    /// 판정이 입히라고 한 OS 최소 크기를 못 입혔다 — 입힌 값을 잊어 다음 보고 · 크기 바뀜이 다시 입힌다.
+    /// The OS minimum size the decision said to apply could not be applied — forget the applied value so the next report · size change applies it again.
     pub(crate) fn min_failed(&mut self, label: &str) {
         if let Some(window) = self.windows.get_mut(label) {
             window.applied = None;
         }
     }
 
-    /// 창 `label` 의 항목을 잊는다 — 그 OS 창의 `Destroyed`. 없으면 무동작.
+    /// Forget the entry of window `label` — the `Destroyed` of that OS window. A no-op if absent.
     pub(crate) fn forget(&mut self, label: &str) {
         self.windows.remove(label);
     }
 }
 
-/// 최소 크기 보고 하나의 몸통 — `window` = 그 label 의 OS 창의 지금 크기 상태(`None` = 창이 없다 · 부르는 쪽이 같은 메인
-/// 스레드 일 안에서 읽는다 — 모듈 머리). 범위 밖이면 `Err` 이고 장부를 만지지 않는다(순번도 적지 않는다). 창이 없으면 적지
-/// 않고 `Ok(None)`. 옛 순번이면 적지 않고 빈 판정이다. 판정은 [`ChromeBook::on_min_report`] — 입히기는 부르는 쪽이 장부
-/// 락 밖에서 [`apply_min`] 으로 한다.
+/// The body of one minimum-size report — `window` = the current size state of the OS window of that label (`None` = no window · the caller reads it inside the same main-thread
+/// job — module head). If out of range it is `Err` and the ledger is not touched (the sequence is not recorded either). If there is no window nothing is recorded
+/// and `Ok(None)`. If the sequence is old it is not recorded and the decision is empty. The decision is [`ChromeBook::on_min_report`] — applying is done by the caller outside the ledger
+/// lock with [`apply_min`].
 pub(crate) fn report_min(
     book: &Mutex<ChromeBook>,
     label: &str,
@@ -343,23 +343,23 @@ pub(crate) fn report_min(
     Ok(Some(report))
 }
 
-/// 최소 크기를 입히는 창 하나의 OS 조작 — [`apply_min`] 이 창 없이 시험되게 끊은 자리. 실물 = `crate::chrome` 의 Tauri 창.
+/// The OS operations on one window to which the minimum size is applied — a seam cut so that [`apply_min`] can be tested without a window. The real thing = the Tauri window of `crate::chrome`.
 pub(crate) trait MinWindow {
-    /// 보통 크기가 `min_w`(논리 px)보다 좁으면 그 폭으로 넓히고 작업 영역 안으로 당긴다(`state::placement::fit_min_width`).
-    /// `Ok(true)` = 옮겼다 · `Ok(false)` = 넓힐 일이 없었다.
+    /// If the normal size is narrower than `min_w` (logical px), widen it to that width and pull it into the work area (`state::placement::fit_min_width`).
+    /// `Ok(true)` = moved · `Ok(false)` = there was nothing to widen.
     fn widen_to(&self, min_w: u32) -> Result<bool, String>;
-    /// OS 최소 크기를 입힌다 — `min` = 웹이 보고한 논리 안쪽 px. 안쪽이 그 값 아래로 줄지 않게 하는 것은 실물의 몫이다
+    /// Apply the OS minimum size — `min` = the logical inner px the web reported. Keeping the inner size from shrinking below that value is the real implementation's job
     /// ([`os_min_size`]).
     fn apply_min_size(&self, min: MinSize) -> Result<(), String>;
-    /// OS 최소 크기를 걷는다([`lift`]).
+    /// Lift the OS minimum size ([`lift`]).
     fn clear_min_size(&self) -> Result<(), String>;
 }
 
-/// 새 자리 앞 걷기 일 하나의 몸통(`crate::chrome::lift_min` 이 메인 스레드 일로 넘긴다) — `state` · `window` = 그 label 의
-/// OS 창과 그 크기 상태(부르는 쪽이 같은 일 안에서 창이 있는 것을 보고 읽는다). 장부에 걷기를 적고([`ChromeBook::lift_min`])
-/// 걷을 값이 있었으면 장부 락을 놓은 뒤 OS 최소 크기를 걷는다. ★적기와 걷기가 한 메인 스레드 일 안이라 그 창의 보고(메인
-/// 스레드 동기 명령)가 그 사이에 끼지 않는다★(모듈 머리). 못 걷었으면 warn 만 남긴다 — 장부는 걷은 것으로 적었고, 열기
-/// 표시의 판정이 받아 둔 값을 다시 입힌다([`ChromeBook::mark_opening`] — OS 에 남은 옛 값이 넓혀 당기기를 막을 수는 있다).
+/// The body of the lift job before a new place (`crate::chrome::lift_min` hands it over as a main-thread job) — `state` · `window` = the OS window of that label
+/// and its size state (the caller sees that the window exists and reads it inside the same job). Write the lift in the ledger ([`ChromeBook::lift_min`]) and,
+/// if there was a value to lift, lift the OS minimum size after releasing the ledger lock. ★Because writing and lifting are inside one main-thread job, that window's report (a main-thread
+/// synchronous command) cannot come in between★ (module head). If lifting failed, only a warn is left — the ledger recorded it as lifted, and the decision of the opening
+/// mark re-applies the stored value ([`ChromeBook::mark_opening`] — an old value remaining in the OS could block widen-and-pull-in).
 pub(crate) fn lift(
     book: &Mutex<ChromeBook>,
     label: &str,
@@ -378,18 +378,18 @@ pub(crate) fn lift(
     }
 }
 
-/// OS 최소 크기 세터(Tauri `set_min_size` → tao `set_min_inner_size`)에 넘길 논리 크기 — 웹이 보고한 안쪽 최소 크기 `min` 에
-/// 그 창의 보이지 않는 테두리(`frame_w` · `frame_h` = 바깥 − 안쪽 폭 · 높이 · 물리 px)를 배율 `scale` 로 논리로 풀어 더한다.
-/// 배율이 유한한 양수가 아니면 더하지 않는다.
+/// The logical size to pass to the OS minimum-size setter (Tauri `set_min_size` → tao `set_min_inner_size`) — to the inner minimum size `min` the web reported, add
+/// that window's invisible border (`frame_w` · `frame_h` = outer − inner width · height · physical px), converted to logical with scale `scale`.
+/// If the scale is not a finite positive number, nothing is added.
 ///
-/// 까닭(tao 0.35.3 · 소스 독해): 세터의 이름은 「안쪽」이지만 `WM_GETMINMAXINFO` 처리(`platform_impl/windows/event_loop.rs`)는
-/// 최소 추적 크기를 그 값에서 `util::adjust_size` 로 셈하고, 그 셈(`util.rs` `adjust_window_rect`)은 틀 없는 창이면
-/// `WS_CAPTION` · `WS_SIZEBOX` 를 빼고 `AdjustWindowRectEx` 를 불러 테두리를 더하지 않는다. 그런데 그림자를 단 틀 없는 창은
-/// `WM_NCCALCSIZE` 가 안쪽을 좌우 · 아래로 크기 조절 테두리만큼 · 위로 한두 px(Windows 11) 줄인다(`util.rs`
-/// `calculate_insets_for_dpi`) — 그래서 그대로 넘기면 안쪽이 보고한 값보다 그 테두리만큼(100 % 에서 폭 약 16 · 높이 약 9 px)
-/// 좁게 끌려 줄어든다. 같은 판의 크기 세터(`set_inner_size`)는 그 차이를 더한다(`undecorated_with_shadows`). 테두리는 배율에
-/// 비례하므로 논리 값은 모니터를 옮겨도 거의 그대로다 — 다만 위 테두리의 반올림 몫이 1 px 안쪽으로 어긋날 수 있다.
-// ADR-0303 — 크롬식 제목 표시줄
+/// Reason (tao 0.35.3 · source reading): the setter's name says 「안쪽」 (inner), but the `WM_GETMINMAXINFO` handling (`platform_impl/windows/event_loop.rs`)
+/// computes the minimum tracking size from that value with `util::adjust_size`, and that computation (`util.rs` `adjust_window_rect`), for a frameless window,
+/// removes `WS_CAPTION` · `WS_SIZEBOX` and calls `AdjustWindowRectEx`, so no border is added. But for a frameless window with a shadow,
+/// `WM_NCCALCSIZE` shrinks the inner area by the resize border on left · right · bottom and by one or two px on top (Windows 11) (`util.rs`
+/// `calculate_insets_for_dpi`) — so if passed as is, the inner area is dragged narrower than the reported value by that border (about 16 wide · 9 high px at 100 %).
+/// The size setter of the same version (`set_inner_size`) adds that difference (`undecorated_with_shadows`). The border is proportional to the scale,
+/// so the logical value stays almost the same across monitor moves — only the rounding share of the top border may be off by up to 1 px.
+// ADR-0303 — chrome-style title bar
 pub(crate) fn os_min_size(min: MinSize, frame_w: u32, frame_h: u32, scale: f64) -> (f64, f64) {
     let (width, height) = (f64::from(min.width), f64::from(min.height));
     if !(scale.is_finite() && scale > 0.0) {
@@ -401,9 +401,9 @@ pub(crate) fn os_min_size(min: MinSize, frame_w: u32, frame_h: u32, scale: f64) 
     )
 }
 
-/// 판정 `plan` 을 창 `label` 에 입힌다 — 장부 락 밖에서 부른다(잎 락 — 쥔 채 OS 를 부르지 않는다). ★넓혀 당기기가
-/// 먼저다★ — OS 최소 크기를 먼저 입히면 OS 가 왼쪽 끝을 두고 오른쪽으로 넓혀 작업 영역 밖으로 민 뒤에 당기게 된다. 못 한
-/// 일은 warn 을 남기고, 못 입힌 OS 최소 크기는 장부에 적는다([`ChromeBook::min_failed`]).
+/// Apply decision `plan` to window `label` — called outside the ledger lock (a leaf lock — the OS is not called while holding it). ★Widen-and-pull-in
+/// comes first★ — if the OS minimum size were applied first, the OS would widen it to the right keeping the left edge, push it out of the work area, and only then pull it back. What failed
+/// gets a warn, and an OS minimum size that could not be applied is recorded in the ledger ([`ChromeBook::min_failed`]).
 pub(crate) fn apply_min(
     book: &Mutex<ChromeBook>,
     label: &str,
@@ -429,7 +429,7 @@ pub(crate) fn apply_min(
     }
     if let Some(min) = plan.set_min {
         match window.apply_min_size(min) {
-            // QA 재료(S8 — 최대화 동안 입히지 않는 것 · 보통이 되면 입히는 것을 로그로 가른다).
+            // QA material (S8 — the log tells apart "not applied during maximize" from "applied once normal").
             Ok(()) => tracing::debug!(
                 module = "chrome",
                 label,
@@ -451,9 +451,9 @@ pub(crate) fn apply_min(
     }
 }
 
-/// 제목 일 하나의 몸통 — 메인 스레드에서 돈다. `window` = 그 label 의 OS 창(없으면 `None` — 닫혔다). 창이 없으면 장부를
-/// 만지지 않고 끝낸다. 판정은 `book` 락 안이고, `set_title` 은 그 락을 놓은 뒤 부른다(잎 락 — 쥔 채 OS 를 부르지
-/// 않는다 · TRD S26-window-chrome §5-1). 실패는 warn 을 남기고 장부에 적는다([`ChromeBook::title_failed`]).
+/// The body of one title job — runs on the main thread. `window` = the OS window of that label (`None` if absent — it was closed). If there is no window it finishes without
+/// touching the ledger. The decision is inside the `book` lock, and `set_title` is called after releasing that lock (a leaf lock — the OS is not called while
+/// holding it · TRD S26-window-chrome §5-1). A failure leaves a warn and is recorded in the ledger ([`ChromeBook::title_failed`]).
 pub(crate) fn apply_title<W>(
     book: &Mutex<ChromeBook>,
     label: &str,
@@ -579,11 +579,11 @@ mod tests {
         book.forget("never-seen");
     }
 
-    // ── apply_title(메인 스레드 일) ──
+    // ── apply_title (main-thread job) ──
 
     struct FakeWindow;
 
-    // 부른 제목 · 그때 장부 락이 놓여 있었나.
+    // The title called · whether the ledger lock was released at that time.
     fn run(
         book: &Mutex<ChromeBook>,
         version: u64,
@@ -627,7 +627,7 @@ mod tests {
         );
     }
 
-    // `Destroyed` 가 잊은 뒤 늦게 온 일 — 창이 없으니 항목을 되살리지 않는다(TRD S26-window-chrome §4-4).
+    // A job that arrived late after `Destroyed` forgot it — there is no window, so the entry is not revived (TRD S26-window-chrome §4-4).
     #[test]
     fn a_late_job_after_forget_finds_no_window_and_leaves_no_entry() {
         let book = Mutex::new(ChromeBook::default());
@@ -658,7 +658,7 @@ mod tests {
         );
     }
 
-    // ── 최소 크기 보고 ──
+    // ── minimum-size report ──
 
     const EPOCH: u64 = 1_761_000_000_000;
 
@@ -679,7 +679,7 @@ mod tests {
             .map(|m| m.size)
     }
 
-    // 보통 크기 창의 보고 하나 — `open` = 그 OS 창이 있다. `Ok(true)` = 적었고 직전 보고와 달랐다.
+    // One report of a normal-size window — `open` = that OS window exists. `Ok(true)` = recorded and different from the previous report.
     fn changed(
         book: &Mutex<ChromeBook>,
         label: &str,
@@ -753,7 +753,7 @@ mod tests {
         assert_eq!(min_of(&book, POPUP), Some(size(MIN_SIZE_MAX, MIN_SIZE_MAX)));
     }
 
-    // 웹이 시한에 놓은 시도가 더 새 시도 뒤에 셸에 닿은 경우(TRD S26-window-chrome §7-7).
+    // The case where an attempt the web left on a deadline reaches the shell after a newer attempt (TRD S26-window-chrome §7-7).
     #[test]
     fn an_older_or_equal_seq_of_the_same_epoch_is_dropped() {
         let book = Mutex::new(ChromeBook::default());
@@ -790,7 +790,7 @@ mod tests {
         );
     }
 
-    // 같은 창의 페이지를 다시 읽으면 웹의 순번이 1 부터 다시 간다.
+    // If the page of the same window is reloaded, the web's sequence starts again from 1.
     #[test]
     fn a_new_epoch_restarts_the_seq() {
         let book = Mutex::new(ChromeBook::default());
@@ -805,7 +805,7 @@ mod tests {
         assert_eq!(min_of(&book, POPUP), Some(size(286, 64)));
     }
 
-    // 페이지 A 의 시도가 시한에 놓인 채, 다시 읽은 페이지 B 의 보고가 먼저 받아들여지고 A 의 것이 늦게 닿은 경우.
+    // The case where page A's attempt is left on a deadline, the report of the reloaded page B is accepted first, and A's arrives late.
     #[test]
     fn a_late_report_of_an_older_epoch_after_a_newer_one_is_dropped() {
         let book = Mutex::new(ChromeBook::default());
@@ -839,7 +839,7 @@ mod tests {
         assert_eq!(changed(&book, POPUP, 295, 64, nth(1), true), Ok(true));
     }
 
-    // `Destroyed` 가 잊은 뒤 늦게 온 보고 — 창이 없으니 항목을 되살리지 않는다(모듈 머리).
+    // A report that arrived late after `Destroyed` forgot it — there is no window, so the entry is not revived (module head).
     #[test]
     fn a_min_report_without_the_window_leaves_no_entry() {
         let book = Mutex::new(ChromeBook::default());
@@ -859,7 +859,7 @@ mod tests {
         assert_eq!(changed(&book, POPUP, 286, 64, nth(1), true), Ok(true));
     }
 
-    // ── 최소 크기 입히기 · 넓혀 당기기 판정(TRD S26-window-chrome §7-7) ──
+    // ── minimum-size apply · widen-and-pull-in decision (TRD S26-window-chrome §7-7) ──
 
     use FrameState::{Normal, Other};
 
@@ -893,7 +893,7 @@ mod tests {
         );
     }
 
-    // 최대화 · 최소화 창에 OS 최소 크기를 입히면 tao 가 원래 크기로 되돌린다(모듈 머리) — 보통 크기가 될 때 입힌다.
+    // If the OS minimum size is applied to a maximized · minimized window, tao returns it to its original size (module head) — apply it when it becomes normal size.
     #[test]
     fn a_maximized_or_minimized_window_gets_its_min_when_it_is_normal_again() {
         let mut book = ChromeBook::default();
@@ -930,7 +930,7 @@ mod tests {
         assert!(book.windows.is_empty());
     }
 
-    // 넓혀 당기기는 열 때 한 번이다 — 사람이 창을 끌어 좁은 모니터로 옮기는 동안은 OS 최소 크기만 걸린다(PRD R20 · AC34).
+    // Widen-and-pull-in is once on opening — while a person drags the window to a narrower monitor, only the OS minimum size applies (PRD R20 · AC34).
     #[test]
     fn only_the_first_report_after_an_opening_mark_widens() {
         let mut book = ChromeBook::default();
@@ -973,8 +973,8 @@ mod tests {
         );
     }
 
-    // 다시 짓지 않는 창(런타임 사본 수락의 main) — 그 페이지는 값이 바뀌지 않으면 다시 보고하지 않아, 표시를 적는 자리에서
-    //   판정한다(모듈 머리).
+    // A window that is not rebuilt (main in runtime copy acceptance) — its page does not report again if the value is unchanged, so the decision is made
+    //   at the place where the mark is written (module head).
     #[test]
     fn marking_a_window_whose_min_is_known_widens_at_once_and_spends_the_mark() {
         let mut book = ChromeBook::default();
@@ -1004,8 +1004,8 @@ mod tests {
         assert_eq!(plan(&mut book, 2, size(295, 64), Normal).widen, None);
     }
 
-    // 새 자리 앞에 걷은 OS 최소 크기는 표시를 거두는 판정이 넓혀 당긴 뒤 다시 입힌다 — 그 사이의 크기 바뀜(걷기 · 자리
-    //   입히기가 낸다)은 입히지 않는다(모듈 머리).
+    // The OS minimum size lifted before a new place is re-applied by the decision that withdraws the mark, after widen-and-pull-in — size changes in between (emitted by lifting · placing)
+    //   are not applied (module head).
     #[test]
     fn a_lifted_min_is_held_until_the_mark_widens_and_applies_it_again() {
         let mut book = ChromeBook::default();
@@ -1023,10 +1023,10 @@ mod tests {
         assert_eq!(book.on_frame(POPUP, Normal), MinPlan::default());
     }
 
-    // 걷기와 열기 표시 사이에 그 창의 보고가 낀 차례(U8b 리뷰 2) — 보고가 표시를 거두고 새 값을 입혔어도 열기 표시가 그
-    //   값을 다시 입힌다. 걷기 · 보고는 메인 스레드 일 하나씩이라 둘 사이에 끼는 OS 걷기는 이제 없다(모듈 머리). 단 그 뒤
-    //   자리 세터가 OS 최소 크기에 걸려 좁은 자리를 왼쪽 끝을 둔 채 키웠으면 폭이 이미 최소라 `fit_min_width` 는 당기지
-    //   않는다 — 작업 영역 오른쪽으로 넘친 채 남을 수 있다(드묾 · 받아들임 · TRD §7-7).
+    // A sequence where that window's report slipped in between the lift and the opening mark (U8b review 2) — even if the report withdrew the mark and applied a new
+    //   value, the opening mark re-applies that value. The lift and the report are one main-thread job each, so there is now no OS lift that can slip between them (module head). But if afterwards
+    //   the place setter was caught on the OS minimum size and grew a narrow place keeping its left edge, the width is already at the minimum so `fit_min_width` does not
+    //   pull it in — it may remain spilled past the right of the work area (rare · accepted · TRD §7-7).
     #[test]
     fn a_report_between_the_lift_and_the_mark_still_ends_with_the_min_applied() {
         let mut book = ChromeBook::default();
@@ -1121,7 +1121,7 @@ mod tests {
         );
     }
 
-    // ── OS 최소 크기에 더하는 보이지 않는 테두리(`os_min_size`) ──
+    // ── invisible border added to the OS minimum size (`os_min_size`) ──
 
     #[test]
     fn the_os_min_adds_the_invisible_frame_in_logical_px() {
@@ -1160,9 +1160,9 @@ mod tests {
         );
     }
 
-    // ── apply_min(입히기 차례) ──
+    // ── apply_min (apply sequence) ──
 
-    // 부른 일 · 그때 장부 락이 놓여 있었나.
+    // The job called · whether the ledger lock was released at that time.
     struct FakeMinWindow<'a> {
         book: &'a Mutex<ChromeBook>,
         calls: RefCell<Vec<(String, bool)>>,
@@ -1203,7 +1203,7 @@ mod tests {
         }
     }
 
-    // ── lift(새 자리 앞 걷기 일) ──
+    // ── lift (lift job before a new place) ──
 
     #[test]
     fn a_lift_clears_the_os_min_outside_the_book_lock_only_when_one_was_applied() {
@@ -1245,7 +1245,7 @@ mod tests {
         assert!(window.calls.into_inner().is_empty());
     }
 
-    // 못 걷었어도 장부는 걷은 것으로 남고 열기 표시가 받아 둔 값을 다시 입힌다.
+    // Even if lifting failed, the ledger stays as lifted and the opening mark re-applies the stored value.
     #[test]
     fn a_failed_lift_is_repaired_by_the_mark() {
         let book = Mutex::new(ChromeBook::default());

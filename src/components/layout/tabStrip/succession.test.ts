@@ -1,4 +1,4 @@
-// TRD S21-slot-docking §8-2 `succession`: 셸 `succession_gives_the_same_tab_as_closing` 과 같은 표(n = 1…4 × 빠지는 자리).
+// TRD S21-slot-docking §8-2 `succession`: the same table as shell `succession_gives_the_same_tab_as_closing` (n = 1…4 × removed position).
 
 import { describe, expect, it } from 'vitest'
 
@@ -7,7 +7,7 @@ import { succession } from './succession'
 const TABS = ['t0', 't1', 't2', 't3']
 
 describe('succession — 오른쪽 이웃 → 왼쪽', () => {
-  // [n, 빠지는 자리, 이을 탭]
+  // [n, removed position, tab to succeed]
   const table: Array<[number, number, string | null]> = [
     [1, 0, null],
     [2, 0, 't1'],

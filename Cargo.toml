@@ -1,47 +1,47 @@
-# Cargo workspace 루트 (S12 phase 1). 정적 링크.
-# 멤버 11: protocol(경계 계약) · base(바닥 기반층 — 로깅·범용 도우미, 잎 crate, ADR-0175 · ADR-0269) ·
-#   platform(OS 층 — OS 에 따라 달라지는 운영 코드, 워크스페이스 crate 의존 0, ADR-0266 · ADR-0275) ·
-#   agent(에이전트 코어, Tauri import 0 — 옛 core, ADR-0175) · command(명령 버스 도구 — 워크스페이스
-#   crate 의존 0·명령 0개, ADR-0155) · messaging(메시징 커널 — 워크스페이스 crate
-#   무의존, ADR-0110) · net(네트워크 행 — WS·프레임 포트·단일 인스턴스·portfile, ADR-0129) ·
-#   transport(재사용 전송 lib — 워크스페이스 crate 의존 0, ADR-0177) ·
-#   daemon(에이전트 호스트 + 조립실) · cli(제어 평면 CLI engram.exe — bin 전용, ADR-0273) ·
-#   src-tauri(데몬 클라이언트 셸).
+# Cargo workspace root (S12 phase 1). Static linking.
+# 11 members: protocol (boundary contract) · base (bottom foundation layer — logging and general helpers, leaf crate, ADR-0175 · ADR-0269) ·
+#   platform (OS layer — operational code that varies by OS, 0 workspace crate dependencies, ADR-0266 · ADR-0275) ·
+#   agent (agent core, 0 Tauri imports — the old core, ADR-0175) · command (command-bus tooling — 0 workspace
+#   crate dependencies, 0 commands, ADR-0155) · messaging (messaging kernel — no workspace crate
+#   dependencies, ADR-0110) · net (network layer — WS, frame port, single instance, portfile, ADR-0129) ·
+#   transport (reusable transport lib — 0 workspace crate dependencies, ADR-0177) ·
+#   daemon (agent host + assembly room) · cli (control-plane CLI engram.exe — bin only, ADR-0273) ·
+#   src-tauri (daemon client shell).
 [workspace]
 resolver = "2"
 members = [
     "crates/engram-dashboard-protocol",
-    # ADR-0175 결정 1 · ADR-0269: 바닥 기반층 잎 crate(데이터 파일 file · 로깅 · 범용 도우미 text·time·path·sync·writable · 시험 대기 testing). 입주 조건 셋(지금 여러
-    #   곳에서 쓰이거나 복사돼 있을 것 · 도메인 지식 0 · 입주자끼리 무참조)의 정본은 그 crate lib.rs 헤더다.
+    # ADR-0175 decision 1 · ADR-0269: bottom foundation layer leaf crate (data file file · logging · general helpers text·time·path·sync·writable · test waiting testing). The three tenancy conditions (used or copied in several
+    #   places now · 0 domain knowledge · tenants reference nothing of each other) are defined in the header of that crate's lib.rs.
     "crates/engram-dashboard-base",
-    # ADR-0266 · ADR-0275: OS 층 잎 crate(OS 에 따라 달라지는 운영 코드 — 워크스페이스 crate 의존 0, base 도
-    #   의존하지 않는다). 불변식 · 격리 게이트의 정본은 그 crate lib.rs 헤더다.
+    # ADR-0266 · ADR-0275: OS layer leaf crate (operational code that varies by OS — 0 workspace crate dependencies, and it does not
+    #   depend on base either). The invariants and the isolation gate are defined in the header of that crate's lib.rs.
     "crates/engram-dashboard-platform",
     "crates/engram-dashboard-agent",
-    # ADR-0155: 명령 버스 도구 lib(봉투·오류·선언 매크로·표·라우팅). 선언은 생산자 옆에 살고 이 crate 는
-    #   도구만 담는다 — 여기에 명령이 하나라도 생기면 중앙 카탈로그가 다른 문으로 돌아온다.
+    # ADR-0155: command-bus tooling lib (envelope · errors · declaration macros · table · routing). Declarations live next to their producers and this crate
+    #   holds only the tooling — if even one command appears here, the central catalog comes back in through another door.
     "crates/engram-dashboard-command",
-    # ADR-0110: 메시징 커널 lib(워크스페이스 crate 무의존 — 완전 상호무지).
+    # ADR-0110: messaging kernel lib (no workspace crate dependencies — fully mutually ignorant).
     "crates/engram-dashboard-messaging",
-    # ADR-0129 슬라이스 1: 네트워크 행 lib(에이전트 어휘를 타입으로도 모른다 — **단 auth 핸드셰이크의
-    #   두 이름은 0-4 이월분으로 예외**). 그 crate lib.rs 헤더가 격리 게이트·예외 근거의 정본.
+    # ADR-0129 slice 1: network layer lib (it does not know the agent vocabulary even as types — **except the
+    #   two names in the auth handshake, carried over from 0-4**). The header of that crate's lib.rs is the source of truth for the isolation gate and the exception's rationale.
     "crates/engram-dashboard-net",
-    # ADR-0177: 재사용 전송 lib(워크스페이스 crate 의존 0 · 타입 seam 은 `Wire` 제네릭 · 전송/시간은 dyn).
-    #   ★기존 net 을 뜯지 않는다★ — 새로 세워 독립 검증한 뒤 단계별로 붙인다. 순수 층(machine·pending·
-    #   stream)의 tokio 0줄 게이트를 포함해 격리 게이트의 정본은 그 crate lib.rs 헤더다.
+    # ADR-0177: reusable transport lib (0 workspace crate dependencies · the type seam is the `Wire` generic · transport/time are dyn).
+    #   ★Do not tear apart the existing net★ — build this new, verify it independently, then attach it step by step. The isolation gates, including the
+    #   zero-lines-of-tokio gate on the pure layers (machine·pending·stream), are defined in the header of that crate's lib.rs.
     "crates/engram-dashboard-transport",
     "crates/engram-dashboard-daemon",
-    # ADR-0273: 제어 평면 CLI(engram.exe)를 뽑는 bin 전용 패키지 — 데몬 패키지를 의존하지 않는다.
+    # ADR-0273: bin-only package that produces the control-plane CLI (engram.exe) — it does not depend on the daemon package.
     "crates/engram-dashboard-cli",
     "src-tauri",
 ]
 
-# profile 은 workspace 루트에만 둘 수 있다(멤버에 두면 무시+경고). src-tauri 에서 이동.
+# A profile can be placed only in the workspace root (in a member it is ignored with a warning). Moved from src-tauri.
 [profile.release]
-# panic 은 기본(unwind) — 가둔 자리(에이전트 펌프 셋 · 입력 라이터 — ADR-0293)가 되감기로 실패에 접히고,
-# 표시 밖 패닉은 데몬 · 셸의 패닉 훅이 즉시 끝낸다(ADR-0292). `panic = "abort"` 로 되돌리면 가둔 자리의 패닉도
-# 프로세스 종료가 된다 — 되돌림은 ADR-0292 결정 7 의 비상 경로이고, 그때 `rg "ADR-0292" crates src-tauri/src`
-# 의 가둔 자리 서술도 고친다(TRD S21-panic-policy §4-7).
+# panic is the default (unwind) — the contained sites (the three agent pumps · the input writer — ADR-0293) fold into a failure by unwinding,
+# and a panic outside the containment mark is ended at once by the panic hook of the daemon and the shell (ADR-0292). Switching back to `panic = "abort"` makes
+# a panic in a contained site terminate the process too — switching back is the emergency path of ADR-0292 decision 7, and then the descriptions of the contained sites found by `rg "ADR-0292" crates src-tauri/src`
+# must be fixed as well (TRD S21-panic-policy §4-7).
 codegen-units = 1
 lto = true
 opt-level = "s"

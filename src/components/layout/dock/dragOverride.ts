@@ -1,76 +1,76 @@
-// TRD S21-slot-docking §2-4 · §4-6: 출처 창의 「바꿔 그리기」 — 끄는 동안 커서가 자기 탭바 구역 밖이면 끄는 탭 대신 남은 탭을
-//   보이는 웹 표시(R15 · 모델은 그대로)와, 놓은 뒤 그 표시 · 탭바 순서 이동 모습(transform)을 언제 거두나를 정하는 순수 리듀서.
-//   원래 선택 되돌리기(`switch_tab_if(initial, expect = 끄는 탭)`)를 낼지도 여기서 정한다 — 내는 것은 부르는 쪽(출처 훅)이다.
-// ★시한이 없다★ — 푸는 계기는 넷뿐이다: ① 그 끌기의 `tab_drop:done`(자기 invoke 오류면 곧바로) ② dragend 뒤 끄는 탭을 활성으로
-//   두지 않는 `window:tabs-updated` ③ 그 창의 다음 pointerdown · dragstart ④ 셸이 끝을 정하지 않는 출처 dragend(같은 웹뷰 제자리
-//   놓기 · 엔진이 접은 끌기). 시한으로 풀면 `Drop` 적용 전에 끄는 탭이 한두 프레임 보인다. 되돌리기를 기다리는 동안은 그
-//   되돌리기의 오류도 푼다(모델 활성으로 물러남 — TRD §4-6).
-// 부르는 쪽 약속: 사건은 그 창 스토어에 적용한 **뒤의** 탭 상태(`WindowModel`)와 함께 넣는다. dragend 는 그 끌기의 `DragEnd`
-//   invoke 를 보내기 **전에** 넣는다 — 그래야 dragend 전에 닿은 `done` 이 받은 창의 `Drop` 몫이라고 가를 수 있다.
+// TRD S21-slot-docking §2-4 · §4-6: the source window's 「바꿔 그리기」 (swap redraw) — a pure reducer that decides, when the cursor is outside its own tab bar zone during a drag, the web display
+//   showing the remaining tab instead of the dragged tab (R15 · the model is unchanged), and when to withdraw that display · the tab bar's order-move look (transform) after the drop.
+//   It also decides here whether to issue the original-selection revert (`switch_tab_if(initial, expect = 끄는 탭)`) — issuing is done by the caller (the source hook).
+// ★There is no deadline★ — there are only four triggers for release: ① that drag's `tab_drop:done` (immediately if its own invoke errored) ② after dragend, a `window:tabs-updated` that does not
+//   leave the dragged tab active ③ the next pointerdown · dragstart of that window ④ a source dragend whose end the shell does not decide (drop in place in the same webview ·
+//   a drag the engine collapsed). Releasing by a deadline would show the dragged tab for a frame or two before `Drop` is applied. While waiting for the revert, that
+//   revert's error also releases (falls back to the model active — TRD §4-6).
+// Caller's promise: feed events together with the tab state (`WindowModel`) **after** it was applied to that window's store. Feed dragend **before**
+//   sending that drag's `DragEnd` invoke — so that a `done` that arrived before dragend can be told apart as the receiving window's `Drop` share.
 
 import type { DropOutcome } from '../../../../src-tauri/bindings/DropOutcome'
 import type { EndEffect } from '../../../../src-tauri/bindings/EndEffect'
 import { succession } from '../tabStrip/succession'
 
-/** 그 창의 탭 상태 — 스토어 `windows[label]` 의 탭 id 목록과 활성(모르면 `null`). */
+/** That window's tab state — the tab id list of store `windows[label]` and the active (`null` if unknown). */
 export interface WindowModel {
   tabs: readonly string[]
   active: string | null
 }
 
-/** 출처 창이 쥐는 끌기 하나. `idle` = 바꿔 그리기 없음(그리는 탭 = 모델 활성 · transform 0). */
+/** One drag held by the source window. `idle` = no swap redraw (drawn tab = model active · transform 0). */
 export type OverrideState =
   | { phase: 'idle' }
   /**
-   * 되돌리기(`Revert`)를 냈고 그 활성이 모델에 닿기를 기다린다 — 그동안 `to` 를 그린다(transform 0). 풀면 곧바로 모델
-   * 활성(아직 끄는 탭)을 그려 `to` → 끄는 탭 → `to` 로 번쩍인다(메인 결정 2026-10-20). 되돌리기가 끝내 닿지 않으면 ② · ③ 이 푼다
-   * — 셸이 조건이 어긋나 안 바꿨으면 그사이 활성을 바꾼 쪽의 알림이 ② 다.
+   * A revert (`Revert`) was issued and it waits for that active to reach the model — meanwhile `to` is drawn (transform 0). If released, the model
+   * active (still the dragged tab) would be drawn immediately and flash `to` → dragged tab → `to` (main decision 2026-10-20). If the revert never arrives, ② · ③ release it
+   * — if the shell did not change anything because the condition no longer held, the notice from whoever changed the active in the meantime is ②.
    */
   | { phase: 'reverting'; drag: string; view: string; to: string }
   | {
-      /** `live` = dragstart ~ dragend · `ended` = dragend 뒤 풀 계기를 기다림. */
+      /** `live` = dragstart ~ dragend · `ended` = after dragend, waiting for a release trigger. */
       phase: 'live' | 'ended'
-      /** 출처 창 label — 되돌리기를 보낼 창. */
+      /** Source window label — the window to send the revert to. */
       window: string
       drag: string
       view: string
       initial: string | null
-      /** 구역 밖에서 보일 남은 탭 — 셸이 놓을 때 고르는 `successor` 와 같다(TRD §3-3). `null` = 탭 하나뿐(바꿔 그림 없음). */
+      /** The remaining tab to be shown outside the zone — the same as the `successor` the shell picks at drop (TRD §3-3). `null` = only one tab (no swap redraw). */
       remaining: string | null
-      /** dragstart 때 그 창 탭 순서 — 이 순서가 그대로인 동안만 순서 이동 모습을 그린다. */
+      /** That window's tab order at dragstart — the order-move look is drawn only while this order stays as is. */
       startTabs: readonly string[]
-      /** 커서가 자기 탭바 구역 밖이다(창 밖 포함). dragend 뒤에는 그때 값에 머문다. */
+      /** The cursor is outside its own tab bar zone (including outside the window). After dragend it stays at the value at that time. */
       out: boolean
-      /** 자기 dragend 의 `dropEffect` — `live` 동안 `null`. */
+      /** `dropEffect` of its own dragend — `null` during `live`. */
       effect: EndEffect | null
-      /** 이 끌기의 `done{applied}` 를 받았다 — 탭 목록이 dragstart 때와 달라지면 푼다. */
+      /** Received this drag's `done{applied}` — release if the tab list differs from dragstart. */
       applied: boolean
     }
 
 export type OverrideEvent =
-  /** 출처 dragstart — 앞 끌기는 버린다(③). `window` = 출처 창 label · `initial` = 누르기 전 그 창 모델 활성. */
+  /** Source dragstart — discards the previous drag (③). `window` = source window label · `initial` = that window's model active before the press. */
   | { type: 'start'; window: string; drag: string; view: string; initial: string | null }
-  /** 커서가 자기 탭바 구역에 들어옴(`out: false`) · 벗어남(`out: true`) — dragend 전까지만 듣는다. */
+  /** The cursor entered (`out: false`) · left (`out: true`) its own tab bar zone — heard only until dragend. */
   | { type: 'zone'; out: boolean }
   /**
-   * 출처 dragend. `local` = 이 끌기의 끝을 셸에 보내지 않아 여기서 푼다(④ · 되돌리지 않음 — 누른 탭이 활성으로 남아 클릭과 같다):
-   * 이 웹뷰의 drop 이 같은 창 같은 자리라 보내지 않았다 · dragstart 와 같은 task 에서 난 dragend = 엔진이 OS 끌기를 열지 못하고
-   * 접었다(옛 HTML5 끌기 실측 — dragstart 뒤 0–1 ms · 메인 결정 2026-10-20 — 셸에 아무것도 보내지 않는다).
+   * Source dragend. `local` = this drag's end is not sent to the shell, so it is released here (④ · no revert — the pressed tab stays active, same as a click):
+   * this webview's drop was at the same place in the same window so it was not sent · a dragend that occurred in the same task as dragstart = the engine could not open an OS drag and
+   * collapsed it (measured on the old HTML5 drag — 0–1 ms after dragstart · main decision 2026-10-20 — nothing is sent to the shell).
    */
   | { type: 'end'; effect: EndEffect; local: boolean }
   | { type: 'done'; drag: string; outcome: DropOutcome }
-  /** 자기 `tab_drop` invoke 가 오류로 끝남. */
+  /** Its own `tab_drop` invoke ended with an error. */
   | { type: 'sendFailed'; drag: string }
-  /** 그 끌기의 되돌리기(`switch_tab_if`)가 오류로 끝남 — 기다리던 활성이 오지 않으니 모델 활성으로 물러난다(TRD §4-6). */
+  /** That drag's revert (`switch_tab_if`) ended with an error — the awaited active does not arrive, so it falls back to the model active (TRD §4-6). */
   | { type: 'revertFailed'; drag: string }
-  /** 그 창의 `window:tabs-updated` 를 스토어에 적용함. */
+  /** That window's `window:tabs-updated` was applied to the store. */
   | { type: 'tabs' }
-  /** 그 창의 pointerdown. */
+  /** That window's pointerdown. */
   | { type: 'pointerdown' }
 
 /**
- * 원래 선택 되돌리기(R12 · R15) — `switch_tab_if(window, to, expect)` 로 낸다: 셸은 그 창 활성이 아직 `expect`(누름이 활성으로
- * 한 끄는 탭)일 때만 `to` 로 바꾼다. 그래서 되돌리기가 닿기 전에 사용자 · LLM 이 고른 탭을 덮지 않는다(웹 스토어가 늦어도).
+ * Revert to the original selection (R12 · R15) — issued as `switch_tab_if(window, to, expect)`: the shell changes to `to` only when that window's active is still `expect` (the dragged tab
+ * that the press made active). So a tab chosen by the user · LLM before the revert arrives is not overwritten (even if the web store is late).
  */
 export interface Revert {
   window: string
@@ -80,7 +80,7 @@ export interface Revert {
 
 export interface OverrideStep {
   state: OverrideState
-  /** 낼 되돌리기 — 끌기 하나에 많아야 한 번이다. */
+  /** The revert to issue — at most once per drag. */
   revert: Revert | null
 }
 
@@ -115,7 +115,7 @@ export function stepOverride(state: OverrideState, event: OverrideEvent, model: 
   if (state.phase === 'reverting') {
     if (event.type === 'pointerdown') return released()
     if (event.type === 'revertFailed' && event.drag === state.drag) return released()
-    // 되돌리기가 닿음(활성 = `to`) · LLM 이 다른 탭으로 바꿈 · 끄는 탭이 떠남 — 셋 다 활성이 끄는 탭이 아니게 된 것이다(②).
+    // The revert arrived (active = `to`) · the LLM changed to another tab · the dragged tab left — all three mean the active is no longer the dragged tab (②).
     if (event.type === 'tabs' && model.active !== state.view) return released()
     return same
   }
@@ -136,13 +136,13 @@ export function stepOverride(state: OverrideState, event: OverrideEvent, model: 
       if (event.drag !== state.drag) return same
       if (event.outcome === 'rejected') return released()
       if (event.outcome === 'applied') {
-        // 탭 하나뿐인 창은 바꿔 그림이 없어 목록 바뀜을 기다릴 것이 없다(옮겨진 팝아웃은 목록이 그대로다).
+        // A window with only one tab has no swap redraw, so there is nothing to wait for in a list change (a moved popout keeps the same list).
         const next = { ...state, applied: true }
         return state.remaining === null || orderChanged(next, model) ? released() : { state: next, revert: null }
       }
-      // 취소 · 무시. dragend 전에 닿은 것은 받은 창의 `Drop` 몫이다 — 출처 dragend 는 `move` 다. `move` 면 받은 곳의 `Drop` 결과가
-      //   뒤따르거나 그 창이 보내지 않았다(같은 창 같은 자리) — 이것으로 풀면 `Drop` 적용 전에 끄는 탭이 보이고, 되돌리면 클릭과
-      //   달라진다.
+      // Cancel · ignore. What arrived before dragend belongs to the receiving window's `Drop` — the source dragend is `move`. If `move`, the receiving side's `Drop` result
+      //   follows or that window did not send it (same window, same place) — releasing on this would show the dragged tab before `Drop` is applied, and reverting would
+      //   differ from a click.
       if (state.phase === 'live' || state.effect === 'move') return same
       const to = revertTarget(state, model)
       return to === null
@@ -153,15 +153,15 @@ export function stepOverride(state: OverrideState, event: OverrideEvent, model: 
           }
     }
     case 'tabs':
-      // 끄는 탭이 그 창을 떠났다 — 어느 때든 푼다(메인 결정 2026-10-20). 옮겨 나감이면 모델 활성이 곧 남은 탭이고, 끄는 중
-      //   닫혔으면 떨어진 머리의 dragend 가 오지 않는다.
+      // The dragged tab left that window — release at any time (main decision 2026-10-20). If it moved out, the model active is already the remaining tab, and if it was closed
+      //   during the drag, the dragend of the detached head never arrives.
       if (!model.tabs.includes(state.view)) return released()
       if (state.applied && orderChanged(state, model)) return released()
       return state.phase === 'ended' && model.active !== state.view ? released() : same
   }
 }
 
-/** 그 창이 지금 그릴 탭 — 바꿔 그리는 동안은 남은 탭 · 되돌리기를 기다리는 동안은 되돌릴 탭, 아니면 모델 활성. */
+/** The tab that window draws now — the remaining tab while swap-redrawing · the tab to revert to while waiting for the revert, otherwise the model active. */
 export function shownTab(state: OverrideState, model: WindowModel): string | null {
   if (state.phase === 'reverting') return model.tabs.includes(state.to) ? state.to : model.active
   if (state.phase !== 'idle' && state.out && state.remaining !== null && model.tabs.includes(state.remaining)) {
@@ -171,8 +171,8 @@ export function shownTab(state: OverrideState, model: WindowModel): string | nul
 }
 
 /**
- * 탭바 순서 이동 모습(transform)을 그려도 되나 — 끌기가 풀리지 않았고 그 창 탭 순서가 dragstart 때 그대로일 때만. 모델 순서가
- * 바뀐 그 프레임에 거둬야 놓은 탭이 튀지 않는다(TRD §2-4 · §8-3 ④).
+ * Whether the tab bar's order-move look (transform) may be drawn — only while the drag is not released and that window's tab order is still as at dragstart. It must be withdrawn on the frame the model order
+ * changes so the dropped tab does not jump (TRD §2-4 · §8-3 ④).
  */
 export function stripHeld(state: OverrideState, model: WindowModel): boolean {
   return (state.phase === 'live' || state.phase === 'ended') && sameOrder(state.startTabs, model.tabs)
@@ -187,8 +187,8 @@ function sameOrder(a: readonly string[], b: readonly string[]): boolean {
 }
 
 /**
- * 취소 · 무시 뒤 되돌릴 탭(TRD §4-6) — 누름의 `switch_tab` 이 바꾼 활성을 누르기 전으로. 건너뜀 = `initial` 없음 · 끄는 탭 자신 ·
- * 그 창 탭이 아님 · 그 창 활성이 이미 끄는 탭이 아님(그사이 사용자 · LLM 이 바꿨다 — 덮지 않는다).
+ * The tab to revert after cancel · ignore (TRD §4-6) — the active changed by the press's `switch_tab` back to what it was before the press. Skipped = no `initial` · the dragged tab itself ·
+ * not a tab of that window · that window's active is already not the dragged tab (the user · LLM changed it in the meantime — do not overwrite).
  */
 function revertTarget(state: { view: string; initial: string | null }, model: WindowModel): string | null {
   const { view, initial } = state

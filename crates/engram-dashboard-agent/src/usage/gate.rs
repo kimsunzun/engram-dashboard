@@ -1,8 +1,8 @@
-//! 줍기 차단 — 기본 계정이 아닌 에이전트의 디코더가 내는 사용량 관측을 흘려보내지 않는다.
+//! Pickup block — does not let through the usage observations emitted by the decoder of an agent that is not the default account.
 //!
-//! ★왜 막나★: 받는 쪽의 사용량 칸은 `(벤더, 기본 계정)` 하나다. 다른 계정으로 뜬 에이전트의 관측을
-//!   흘려보내면 그 계정의 값이 기본 계정 칸에 섞인다. 어느 env 가 계정을 가르는지는 벤더 지식이라 판정은
-//!   각 벤더 backend 가 하고, 이 모듈은 그 판정을 적용하는 감싸개와 env 비교만 갖는다.
+//! ★Why block it★: the receiving side's usage entry is the single `(벤더, 기본 계정)`. If observations of an agent spawned with another account
+//!   were let through, that account's values would mix into the default-account entry. Which env tells accounts apart is vendor knowledge, so the decision is made by
+//!   each vendor backend, and this module has only the wrapper that applies that decision and the env comparison.
 
 use std::ffi::OsStr;
 
@@ -11,14 +11,14 @@ use crate::types::OutputEvent;
 
 use super::UsageObservation;
 
-/// 사용량을 막는 디코더 감싸개 — [`OutputDecoder::take_usage`] 가 늘 빈 벡터이고, 출력 이벤트는 그대로
-/// 통과한다. 줍는 에이전트의 디코더는 감싸지 않는다 — 감싸는 것은 줍지 않기로 판정된 에이전트뿐이다(판정 =
-/// 각 벤더 backend 의 `gate_decoder`).
+/// A decoder wrapper that blocks usage — [`OutputDecoder::take_usage`] is always an empty vector, and output events pass
+/// through as they are. The decoder of an agent that picks up is not wrapped — only an agent decided not to pick up is wrapped (decision =
+/// `gate_decoder` of each vendor backend).
 ///
-/// ★trait 의 메서드를 **전부** 안쪽으로 넘긴다 — 기본 몸체가 있는 것까지★: 넘기지 않은 메서드는
-///   컴파일은 되지만 감싼 순간 기본 동작으로 바뀐다. 그 피해가 닿는 범위는 기본 계정이 아닌 에이전트뿐이다
-///   (감싸는 것이 그쪽뿐이라). 오늘 목록 = `decode` · `flush` · `take_usage`. trait 에 메서드가 늘면 여기에도
-///   넘기기를 더한다.
+/// ★Forward **all** the trait's methods inward — even those with a default body★: a method not forwarded
+///   compiles but turns into the default behavior the moment it is wrapped. The damage reaches only agents that are not the default account
+///   (since only they are wrapped). Today's list = `decode` · `flush` · `take_usage`. When the trait gains a method,
+///   add the forwarding here too.
 pub struct UsageGate {
     inner: Box<dyn OutputDecoder>,
 }
@@ -39,25 +39,25 @@ impl OutputDecoder for UsageGate {
     }
 
     fn take_usage(&mut self) -> Vec<UsageObservation> {
-        // 막아도 안쪽은 비운다 — 안 비우면 에이전트가 사는 내내 안쪽 벡터가 자란다.
+        // Even when blocking, it empties the inside — if not emptied, the inner vector grows for the whole life of the agent.
         drop(self.inner.take_usage());
         Vec::new()
     }
 }
 
-/// 스폰 명세의 env 가 `key` 를 데몬 자신의 값과 **다르게** 두는가 — 계정 env 에 대한 줍기 판정의 중립 부분.
+/// Does the spawn spec's env set `key` **differently** from the daemon's own value — the neutral part of the pickup decision on the account env.
 ///
-/// - `spec_env` = 자식에게 **더하는** env(자식은 나머지를 데몬에게서 물려받는다). 같은 키가 여럿이면 마지막이
-///   이긴다(스폰이 차례로 적용한다).
-/// - `daemon_value` = 데몬 프로세스 자신의 그 env 값. 호출자가 읽어 넘긴다 — 이 함수는 프로세스 env 를
-///   읽지 않는다.
-/// - 결과: 명세에 그 키가 없으면 `false`(물려받는다) · 있고 데몬 값과 같으면 `false` · 데몬에는 없는데 명세에
-///   있거나 값이 다르면 `true`.
+/// - `spec_env` = env **added** for the child (the child inherits the rest from the daemon). If the same key appears several times the last
+///   one wins (spawn applies them in order).
+/// - `daemon_value` = the daemon process's own value of that env. The caller reads and passes it — this function does not
+///   read the process env.
+/// - Result: `false` if the spec has no such key (inherited) · `false` if present and equal to the daemon value · `true` if absent from the daemon but
+///   present in the spec, or the value differs.
 ///
-/// ★키는 ASCII 대소문자를 가리지 않고 비교하고, 값은 바이트 그대로 비교한다★ — 틀린다면 「다르다」 쪽으로
-///   틀리게 골랐다. 그쪽의 대가는 그 에이전트의 관측 몇 건을 줍지 않는 것뿐이지만, 반대쪽은 다른 계정의
-///   값이 기본 칸에 섞인다. 그래서 경로 정규화(끝 구분자·대소문자)도, 빈 값을 「없음」으로 접는 것도 하지
-///   않는다. (Windows 는 env 이름이 대소문자를 가리지 않는다 — POSIX 에서는 이 비교가 더 넓게 잡을 뿐이다.)
+/// ★Keys are compared ASCII case-insensitively and values byte for byte★ — if it errs, we chose to err toward 「다르다」
+///   (different). The cost on that side is only not picking up a few observations of that agent, but on the other side another account's
+///   values mix into the default entry. So we do neither path normalization (trailing separator · case) nor folding an empty value into 「없음」 (absent).
+///   (On Windows env names are case-insensitive — on POSIX this comparison just catches more.)
 pub fn env_overrides_daemon(
     spec_env: &[(String, String)],
     key: &str,
@@ -94,8 +94,8 @@ mod tests {
         }
     }
 
-    /// 메서드마다 자기만의 산출을 내는 디코더 — 감싸개가 어느 하나를 안쪽으로 안 넘기면 그 산출이 사라진다.
-    /// 쌓아 둔 관측(`pending`)은 밖에서도 보인다 — 감싸개가 안쪽을 비웠는지를 거기서 잰다.
+    /// A decoder that makes its own output per method — if the wrapper fails to forward any one inward, that output disappears.
+    /// The accumulated observations (`pending`) are visible from outside too — that is where we measure whether the wrapper emptied the inside.
     struct Distinct {
         decoded: Arc<Mutex<Vec<u8>>>,
         pending: Arc<Mutex<Vec<UsageObservation>>>,
@@ -138,7 +138,7 @@ mod tests {
             .collect()
     }
 
-    // ── 전달(기본 몸체가 있는 `take_usage` 포함) ──
+    // ── Forwarding (including `take_usage`, which has a default body) ──
 
     #[test]
     fn blocking_gate_forwards_every_method_but_never_usage() {
@@ -154,7 +154,7 @@ mod tests {
         );
     }
 
-    /// 막는 감싸개도 안쪽을 비운다 — 아니면 안쪽 벡터가 에이전트 수명 내내 자란다.
+    /// The blocking wrapper also empties the inside — otherwise the inner vector grows for the agent's whole life.
     #[test]
     fn blocking_gate_still_drains_the_inner_decoder() {
         let (mut g, _, pending) = gate();
@@ -168,7 +168,7 @@ mod tests {
         }
     }
 
-    // ── env 판정 ──
+    // ── env decision ──
 
     fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs

@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-/// `cond` 가 참이 될 때까지 20 ms 마다 본다. 시한이 지나면 마지막으로 한 번 더 보고 그 값을 돌려준다.
+/// Checks every 20 ms until `cond` becomes true. After the deadline it checks once more at the end and returns that value.
 pub fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -30,7 +30,7 @@ mod tests {
         assert_eq!(looks, 1);
     }
 
-    /// 시한 0 이면 반복 안에서는 한 번도 안 본다 — 그래도 참을 돌려받는 것이 마감 뒤 한 번의 증거다.
+    /// With a deadline of 0 it never checks inside the loop — still, getting true back is the evidence of the single check after the deadline.
     #[test]
     fn a_zero_timeout_still_takes_the_last_look() {
         let mut looks = 0;

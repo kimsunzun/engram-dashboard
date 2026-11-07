@@ -1,35 +1,57 @@
-# 핸드오프: 패닉 정책 구현 U1~U5 + ADR-0293 완료 · 실 claude 통과 · 남은 = 사용자 판단 1건(ADR 개정 링크)
+# Handoff: S33 English translation — docs done, code comments done for non-overlapping files; waiting on open-branch merges + one user decision
 
-## 한 줄 상태 · 다음 첫 액션
-브랜치 `v0.3.3/refactor/crate-boundaries` · HEAD = ADR-0293 철거 `17a91520` 뒤 문서 커밋(push) · 워킹트리 깨끗. 패닉 정책 구현(TRD `docs/process/S21-panic-policy/trd.md` · ADR-0292) U1~U5 전부 착지.
-★다음 첫 액션 = 아래 「사용자 판단 거리」를 하나씩 묻는다(5번 — 1~4번은 해소).★ 그다음 순서(옛 핸드오프 · step-log): 우편 주소 id 통일(T-29) → 3단계 transport.
-사용자 지시: 자율 모드 · 단위마다 로컬 커밋 · push 는 몰아서 · master 머지 · 태그는 사용자 확인.
+## Read first
 
-## 이번 세션 커밋
-U3 `f03dd10c`(훅 설치) · U4-C `c9d15023`(주석 40 파일) · U4-T `06c23844`(CLI 정리 실프로세스 시험 · CLAUDE.md 수치 60 · 4371) · U4 문서 `37e58f9a` · U5 `40b8a08e`(`panic = "abort"` 삭제 + step-log 항목). 상세 = step-log 끝 항목.
-- 결정 A 성립: 가둔 펌프 패닉 뒤 CLI 트리가 명시 종료 없이 수 ms~20 ms 에 사라짐(세 펌프 · Windows).
-- U5 크기(abort → unwind · 같은 빌드 명령): 데몬 +51% · 셸 +76% · CLI +19% — 사용자에게 보고함, 문제 삼을지 미답.
-- 배포판 셸 + 데몬 실 창 실측 PASS · graceful 종료 exit 0/0.
+- Review is **Claude only** (user 2026-11-06). Keep ≤4 workers in parallel; worker briefs forbid spawning sub-subagents.
+- **Do not touch files open branches edit** (`v0.5.0/feat/preset-library`, `v0.4.1/refactor/transport-attach`): list in kit `ob-code.txt` (code) — re-generate with `git diff --name-only master...<branch>` before any new batch.
+- The kit in `.claude/handoff/attachments/s33-translation-kit/` hard-codes this session's scratchpad path (`...\1a841754-91ce-4664-95a7-b11099a2faad\scratchpad\kit`). Copy it to the new scratchpad and fix the path in `*.sh`, `brief-*.md` (search `1a841754`).
+- `python` in Git Bash is a Store stub — use `py`. `comments.py` needs TypeScript: `export COMMENTS_TS=I:/Engram/apps/engram-dashboard/node_modules/typescript` (this worktree now also has `node_modules` from `npm ci`).
+- User said: keep going without stopping for context % or handoff (auto-handoff for this session turned off).
 
-## 사용자 판단 거리 (하나씩 묻기)
-1. ~~실 claude 시험 6건~~ — ★해소(사용자 승인 2026-10-12)★: U5 커밋 뒤 qa 바인딩 실 claude 레인으로 6/6 통과(claude 2.1.284). 옛 「실 claude 시험 금지」 주의는 걷는다 — CLAUDE.md · qa 바인딩대로 로컬에서 돌린다.
-2. ~~U2 허용 목록 범위~~ — ★해소(사용자 결정 2026-10-12)★: 허용 목록 명령 둘의 가둠을 걷었다(ADR-0293 `fcebe727` · 코드 `17a91520`). 가둠 = 에이전트 펌프 셋 + 입력 라이터뿐.
-3. ~~데몬 sweep 의 catch 갈래~~ — ★해소(사용자 결정 2026-10-12)★: 걷었다(step-log 해소 줄의 커밋).
-4. ~~로그 초기화 실패 시 기동 거부~~ — ★해소(사용자 결정 2026-10-12)★: 두지 않는다(TRD §7 잔여).
-5. 근거가 「release=abort」에 기대던 ADR(0199:46 · 0226:43,75 · 0233:46 · 0262:105 K7 · 0275:16,52,87 S2 · 0281:46 · 0142:57)의 개정 링크(ADR 근거 수정 = 결정 날조 금지라 사용자 확인). ADR-0275 S2 는 근거가 실효로도 거짓(가둔 펌프에서 운영 오염 가능 — base `sync` 계약 3 은 고침).
-- 손대지 않은 이력 TRD 의 같은 서술: usage-limit-slot:67 · storage:301,918 · codex-backend resume-after-first-turn:101-103,298,529 · crate-boundaries 1-1:64,201,325,556 · chat-ux t40:262 · S20:629.
+## One-line state · next first action
 
-## 검증 상태
-- 돌린 것: 단위마다 `/review code`(deep · full · light) · `/qa`(full · standard). 마지막 `/qa full`(U5) = 60 결과 줄 · 4371 · 0 · 30 · 격리 · tsc · npm 2021 · 배포판 GUI.
-- 실 claude 6건: 따로 돌려 6/6 통과(5 건 9.7 s · `c1_park_then_spawn_auto_delivers` 20 s).
-- 안 돌린 것: `real_wmi` · real-claude/usage/backend_contract 레인 · 비-Windows. `stop_smoke` 의 `send_stop_makes_real_daemon_self_exit` = T-52 선재 실패(Timeout).
-- 미측정(TRD · 시험 헤더에 적음): 활성화 판정 창 · codex 핸드셰이크 중 패닉.
+- State: all translatable `docs/` md done (86 small/medium + 10 large); code comments done for every file the open branches do not touch (all crates, src-tauri, frontend src/, Cargo.toml/scripts `#` comments). 70 commits ahead of master, not pushed.
+- Next first action: ask the user the open decision below (LLM-facing doc comments). Then, when the open branches merge into master, translate their files (docs: 13 ADRs + 3 docs + step-log/tracking etc.; code: 164 files ~9.5k blocks; also research 31 / ADR ~69 they add).
 
-## do-not / 주의
-- Git Bash 에 `rg` 없음(QA 워커는 scratchpad `qa/bin/rg.exe` 를 썼다 — 다음 세션엔 없을 수 있음). python 은 스토어 바로가기라 실행 안 됨.
-- 시험 · tauri build 가 `crates/engram-dashboard-agent/bindings/*.ts` · `src-tauri/Cargo.toml` 을 줄끝만 바꿔 ` M` — `git diff --numstat` 0 이면 `git checkout -- <경로>`.
-- 재리뷰는 리뷰어 resume. codex 병렬 두 개 뒤 `--resume` 금지. codex blind 지시서엔 단계 순서 같은 범위 사실을 처음부터.
-- 실프로세스 시험 지시서엔 정리 안전 요건(신원 대조 handle 로만 끄기 · guard 를 spawn 전 · 자식이 자기 신원 알림 · 실패 갈래 도달 증명)을 처음부터(implement feedback 적립).
+## Repo state (measured 2026-11-07 17:15)
 
-## 정지 조건
-- 리뷰 BLOCK · 정면 대립 · 하드캡 초과 → 사용자에게. master 머지 · 태그 · ADR 근거 수정 → 사용자 확인.
+- Branch `v0.5.0/docs/english-translation`, HEAD `d79173b7`, 70 ahead / 2 behind local master, no remote branch. Working tree clean except pre-existing untracked `.claude/handoff/attachments/*`. The handoff commit comes after this text.
+
+## Verification
+
+- Docs: `py check_doc.py --no-adr <orig> <out>` 0 ERR per batch; big docs split/join byte-exact (`split_big.py`), masked-span pipeline (`mask.py`) for b5–b10.
+- Code: per batch `comments.py verify` (code with comments stripped byte-identical, each comment keeps line count/start line) + crate tests: base, cli, command, platform, protocol+net, messaging, daemon, engram-dashboard (src-tauri, 1646 tests), agent+transport — all green; frontend `npx vitest run` 124 files / 2802 tests green. Bindings regenerated where doc comments changed (protocol `AgentCommand.ts`, src-tauri 38 files) and committed.
+- Not done: CI (branch not pushed); clippy not run (CI does not run it either).
+
+## Failed approaches (do not repeat)
+
+- Sonnet translators ignore "write 「」 Korean from the first draft" and restore afterwards; a restore pass swapped spans while keeping source order (invisible to order checks). Fix = mask spans as tokens (docs) / extract comment text only (code).
+- `cspan.py` early versions missed extra lines in a block and spans wrapping a line break; fixed (joins block before matching; ``` in prose hidden).
+- `grep -P` unusable in this shell locale; use awk/py.
+
+## Resume command
+
+`git -C I:/Engram/apps/engram-dashboard-wt2 log --oneline master..HEAD | head -20`
+
+## Decisions
+
+User decisions:
+- (묻지 않음) code-comment method · 상황: CLAUDE.md says code changes go through /engram-implement · 선택지 doc-translation method ★ / engram-implement · 고른 것 「ㅇㅇ 그냥 문서 번역 방식으로하고」 · 추천과 같음.
+- (묻지 않음) open-branch overlap · 상황: 164 code files overlap · 선택지 defer until merge ★ / translate now and let them resolve conflicts · 고른 것 요지: proceed now on non-overlap, defer overlap · 추천과 같음.
+- (묻지 않음) keep going · 고른 것 「쭉 진행해 나 외출」, 「컨텍스트 55프로에서 걸렸을때 멈추지 말라는거」, 「너 한도 초과되도 그냥 진행하면 될것같아」.
+
+Claude decisions:
+- Comments keep line count per block (docs/ADRs cite `file:line`); 「」 quotes, UI strings, Korean inside backticks stay Korean; ADR-NNNN kept.
+- Generated `bindings/` are never translated directly — regenerated from Rust by the crate tests.
+- Trailing `#` comments and `#` lines inside heredoc data are not extracted (6 + 5 left, manual).
+
+Open (not decided):
+- **Doc comments that become LLM-facing runtime text** (schemars descriptions in `crates/engram-dashboard-daemon/src/control/mcp_server.rs`; `declare_commands!` types in `crates/engram-dashboard-agent/src/commands.rs`, `crates/engram-dashboard-agent/tests/command_alphabet.rs`, `src-tauri/src/layout/commands.rs`): translate (LLM reads English) or keep Korean like string literals? Kit `llmdoc-files.txt`; `mkbatch.sh` skips them.
+- Push the branch for backup / CI? (never answered).
+- Sweep of committed docs: span swaps that keep source order; kept-Korean 「」 pointers to translated headings (`ptr_check.py --git master`, noisy). Sweep of committed code batches c2/c6/c8: wrapped 「」 quotes rendered in English.
+- `.git-blame-ignore-revs` with all S33 commits at integration.
+
+## References
+
+- Kit: `.claude/handoff/attachments/s33-translation-kit/` — `progress.md` (pipeline notes), `comments.py`, `ctxt.py`, `cspan.py`, `mkbatch.sh`, `fincmt.sh`, `brief-comments.md`, `brief-review-comments.md`, docs tools (`check_doc.py`, `split_big.py`, `mask.py`, `span_order.py`, `ptr_check.py`, briefs), `ob-code.txt`, `llmdoc-files.txt`.
+- `docs/process/S33-english-translation/glossary.md`, `docs/process/step-log.md` § S33.

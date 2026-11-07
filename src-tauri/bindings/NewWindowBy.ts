@@ -2,10 +2,10 @@
 import type { EndEffect } from "./EndEffect";
 
 /**
- * 새 창 놓기를 보낸 쪽.
+ * The side that sent the new-window drop.
  *
- * - `drop`: 우리 웹뷰의 drop — 놓기가 확실하다.
- * - `drag_end`: 출처의 dragend(`dropEffect` 가 무엇이든 늘 하나) — 셸이 끌기가 끝난 뒤의 입력 상태 · 커서 밑 맨 위
- *   창으로 취소 · 무시 · 새 창을 가른다. 같은 끌기의 `drop` 이 따로 오면 그것이 이긴다.
+ * - `drop`: a drop in our webview — the drop is certain.
+ * - `drag_end`: the source's dragend (always exactly one whatever `dropEffect` is) — the shell distinguishes cancel · ignore · new window by the input state after the drag ended · the topmost
+ *   window under the cursor. If the same drag's `drop` comes separately, it wins.
  */
 export type NewWindowBy = { "type": "drop" } | { "type": "drag_end", effect: EndEffect, };

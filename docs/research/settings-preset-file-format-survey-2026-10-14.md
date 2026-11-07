@@ -1,68 +1,68 @@
-# 설정 · 프리셋 에셋의 파일 형식 — 관행 서베이
+# File format of settings and preset assets — practice survey
 
-- **상태:** 적대 리뷰(FIX) 반영본 · 결정 대기(프리셋 PRD 이전 구상 — 프리셋 = 라이브러리 폴더 안 에셋으로 정한 뒤 그 파일 형식)
-- **날짜:** 2026-10-14
-- **방법:** research medium. 수집 갈래 1(에이전트 도구의 설정 · 프로필/에이전트 정의 파일) · 메인 grounding · cross-family 적대 리뷰 1회(아래).
-- **확신도 범례:** 확실 = 원문 확인 + 독립 교차확증 · 가능성 높음 = 원문 확인(단일 출처) · 불확실 = 기억 기반.
+- **Status:** Version with the adversarial review (FIX) folded in · awaiting decision (pre-preset-PRD idea — its file format, now that a preset = an asset inside the library folder has been decided)
+- **Date:** 2026-10-14
+- **Method:** research medium. Collection track 1 (settings of agent tools · profile/agent definition files) · main grounding · one cross-family adversarial review (below).
+- **Confidence legend:** certain = source text checked + independent cross-confirmation · likely = source text checked (single source) · uncertain = from memory.
 
-## 묻는 것
+## What is asked
 
-지시서(`.md`)와 스킬(`SKILL.md` + YAML 앞머리)은 형식이 정해져 있다. Engram 이 새로 정해야 하는 것은 둘이다.
+Instruction files (`.md`) and skills (`SKILL.md` + YAML front matter) already have fixed formats. Engram has to decide two new ones.
 
-- **설정 에셋:** 백엔드 · 모델 · 강도 · 권한 · MCP · 환경변수 + 백엔드별 원문 칸.
-- **프리셋 에셋:** 다른 에셋(지시서 · 스킬 · 설정 · 프리셋)을 순서대로 가리키는 이름 있는 묶음 + 설명.
+- **Settings asset:** backend · model · effort · permissions · MCP · environment variables + a raw field per backend.
+- **Preset asset:** a named bundle that points to other assets (instruction files · skills · settings · presets) in order, plus a description.
 
-둘 다 Engram 화면 · 사람 손 · LLM 에이전트가 텍스트로 고친다.
+Both are edited as text by the Engram screen, by human hands, and by LLM agents.
 
-## 결론 (위층)
+## Conclusions (top level)
 
-1. **「다른 것을 순서대로 묶는 번들」의 가장 가까운 선례는 Goose recipe — YAML(권장) 또는 JSON 파일 하나다.** 필드 = `title` · `description` · `instructions`/`prompt` · `extensions`(MCP) · `settings`(모델 공급자 · 온도 등) · `sub_recipes`(다른 recipe 를 **`path`** 로 — 상대 또는 절대). 설정과 하위 묶음 참조를 한 파일에 담는다는 점에서 우리 프리셋과 모양이 거의 같다. **가능성 높음**(원문 · 단일 출처 — 리뷰가 찾음 · 메인 확인).
-2. **마크다운 + YAML 앞머리는 「본문이 프롬프트인 에이전트 정의」의 관행이다 — 번들의 관행이라고 말할 근거는 없다.** Claude Code 서브에이전트(본문 = 시스템 프롬프트 · `skills` 는 이름으로) · VS Code Copilot `.agent.md` · opencode 에이전트 `.md` · Gemini CLI 서브에이전트(리뷰가 찾음 · 메인 미확인). 초안이 이것을 프리셋 형식의 근거로 쓴 것은 리뷰 지적대로 비약이다. **확실**(에이전트 정의 쪽 — Claude · Copilot 원문).
-3. **본문 없는 구조 설정은 갈린다 — 손으로 고치는 쪽은 YAML · TOML · JSONC 로 주석을 얻었다.** Roo Code 는 YAML 을 권하고 이유를 적었다(사람이 읽기 쉬움 · `#` 주석 · 여러 줄 문자열 · 쉼표와 괄호가 적음). Continue 는 `config.yaml` 이 deprecated 된 `config.json` 을 대체했다. Codex 는 TOML(`--profile` 은 이제 별도 파일 `~/.codex/<name>.config.toml` 을 읽는다 — 0.134.0 부터 `[profiles.x]` 를 안 읽는다는 리뷰 지적 · 수집자 요약과 일치 · 메인 원문 미확인). opencode 는 **JSONC**(`opencode.jsonc` — 주석 · 끝 쉼표 허용)와 `$schema`. **가능성 높음.**
-4. **각 형식의 손 편집 함정(리뷰 지적).** YAML: 들여쓰기 실수가 흔하다(Roo 가 경고) · YAML 1.1 파서는 `NO`/`ON` 을 불리언으로 읽는다(1.2 파서 · 따옴표로 피함). TOML: 깊은 중첩 · 표 배열은 순서 규칙이 까다롭다. JSONC: 「JSON 이냐 JSONC 냐」 파서 결정이 따로 필요하다. **LLM 이 어느 형식을 덜 틀린다는 비교 근거는 못 찾았다.**
-5. **가리키는 방법은 이름 또는 경로.** 이름: Claude `skills: [이름]` · Roo `slug`. 경로: Goose `sub_recipes.path` · Continue `uses: file://` · Copilot 상대경로 링크. 오늘 정한 「경로 + 이름(다시 잇기)」은 둘을 함께 쓰는 것이다. **확실.**
+1. **The closest precedent for 「다른 것을 순서대로 묶는 번들」 (a bundle that groups other things in order) is the Goose recipe — a single YAML (recommended) or JSON file.** Fields = `title` · `description` · `instructions`/`prompt` · `extensions` (MCP) · `settings` (model provider · temperature, etc.) · `sub_recipes` (other recipes by **`path`** — relative or absolute). It has nearly the same shape as our preset, since it holds settings and references to sub-bundles in one file. **Likely** (source text · single source — the review found it · main checked).
+2. **Markdown + YAML front matter is the practice for 「본문이 프롬프트인 에이전트 정의」 (an agent definition whose body is the prompt) — there is no basis to call it the practice for bundles.** Claude Code subagents (body = system prompt · `skills` by name) · VS Code Copilot `.agent.md` · opencode agent `.md` · Gemini CLI subagents (found by the review · not checked by main). The draft used this as the basis for the preset format, and as the review pointed out, that is a leap. **Certain** (on the agent-definition side — Claude · Copilot source text).
+3. **Structured settings with no body split — the ones edited by hand gained comments through YAML · TOML · JSONC.** Roo Code recommends YAML and gives reasons (easy for people to read · `#` comments · multi-line strings · fewer commas and brackets). In Continue, `config.yaml` replaced the deprecated `config.json`. Codex uses TOML (`--profile` now reads a separate file `~/.codex/<name>.config.toml` — since 0.134.0 it no longer reads `[profiles.x]`, per the review's finding · consistent with the collector's summary · source text not checked by main). opencode uses **JSONC** (`opencode.jsonc` — comments and trailing commas allowed) and `$schema`. **Likely.**
+4. **Hand-editing pitfalls of each format (review finding).** YAML: indentation mistakes are common (Roo warns about it) · a YAML 1.1 parser reads `NO`/`ON` as booleans (avoid with a 1.2 parser or quotes). TOML: deep nesting and arrays of tables have tricky ordering rules. JSONC: a separate parser decision of 「JSON 이냐 JSONC 냐」 (JSON or JSONC) is needed. **No comparison was found showing which format an LLM gets wrong less often.**
+5. **Pointing is by name or by path.** Name: Claude `skills: [이름]` (name) · Roo `slug`. Path: Goose `sub_recipes.path` · Continue `uses: file://` · Copilot relative-path links. The 「경로 + 이름(다시 잇기)」 (path + name (re-linking)) decided today uses both together. **Certain.**
 
-## Engram 에 옮기면 (해석 — 결정은 사용자)
+## Carried over to Engram (interpretation — the decision is the user's)
 
-| 안 | 프리셋 | 설정 | 선례 | 장점 | 단점 |
+| Option | Preset | Settings | Precedent | Pros | Cons |
 |---|---|---|---|---|---|
-| **A** | YAML | YAML | Goose recipe · Roo · Continue | Engram 이 정하는 형식이 한 계열 · 번들 선례와 같은 모양 · 주석 | 들여쓰기 함정(Engram 이 오류 표시로 받는다) |
-| **B** | `.md` + YAML 앞머리 | YAML | 프리셋은 Claude 서브에이전트 모양 | 프리셋 설명을 본문에 길게 | 번들 선례는 아님 · `.md` 가 지시서와 섞여 종류 구분 표시가 필요 |
-| **C** | YAML | TOML | 설정은 codex 와 같은 형식 | codex 사용자에게 익숙 | 형식이 두 계열로 갈림 |
-| **D** | JSONC | JSONC | opencode | Engram 이 이미 JSON 을 씀 · `$schema` · 주석 | JSONC 파서 결정 · 손 편집은 YAML 보다 괄호가 많다 |
+| **A** | YAML | YAML | Goose recipe · Roo · Continue | The formats Engram decides are one family · same shape as the bundle precedent · comments | Indentation pitfall (Engram receives it as an error display) |
+| **B** | `.md` + YAML front matter | YAML | Preset takes the Claude subagent shape | A long preset description in the body | Not a bundle precedent · `.md` mixes with instruction files, so a kind marker is needed |
+| **C** | YAML | TOML | Settings use the same format as codex | Familiar to codex users | Formats split into two families |
+| **D** | JSONC | JSONC | opencode | Engram already uses JSON · `$schema` · comments | JSONC parser decision · hand editing has more brackets than YAML |
 
-- 어느 안이든 파일이 손으로 깨질 수 있으니 「오류」 표시(프리셋 에셋 결정)로 받는다.
-- 종류 구분(파일만 보고 프리셋 · 설정을 가르기)은 확장자 또는 이중 확장자(`리뷰어.preset.yaml`) — TRD 감.
+- Under any option the file can be broken by hand, so it is received as an 「오류」 (error) display (the preset asset decision).
+- Telling the kinds apart (separating preset from settings from the file alone) is by extension or double extension (`리뷰어.preset.yaml`) — material for the TRD.
 
-## grounding (메인 · 원문 대조)
+## grounding (main · checked against source text)
 
-| 클레임 | 출처 | 판정 |
+| Claim | Source | Verdict |
 |---|---|---|
-| Claude Code 서브에이전트 = 마크다운 + YAML 앞머리 · 본문 = 시스템 프롬프트 · `skills` 는 이름으로 | https://code.claude.com/docs/en/sub-agents | 지지 |
-| Roo custom modes = YAML(권장) · JSON 지원 · YAML 이유 넷 · `.roo/rules-{slug}/` | https://roocodeinc.github.io/Roo-Code/features/custom-modes | 지지 |
-| Continue `config.yaml` 이 deprecated 된 `config.json` 대체 · `uses: org/name` · `uses: file://` | https://docs.continue.dev/reference | 지지 |
-| Copilot 커스텀 에이전트 `.agent.md` · 앞머리 필드 · 상대경로 링크 | https://code.visualstudio.com/docs/copilot/customization/custom-agents | 수집자 원문 확인 · 메인 미재확인 |
-| opencode `opencode.json`(`$schema`) · 에이전트 `.md` 앞머리 · 파일명 = 이름 | https://opencode.ai/docs/agents/ | 수집자 원문 확인 · 메인 미재확인 |
-| Codex `config.toml` · `--profile` = 별도 파일 `~/.codex/<name>.config.toml` | https://learn.chatgpt.com/docs/config-file/config-advanced | 수집자 요약 + 리뷰어 일치(0.134.0 부터) · 메인 원문 미확인 |
-| Goose recipe = YAML(권장)/JSON · `title` · `description` · `instructions` · `extensions` · `settings` · `sub_recipes.path` | https://github.com/aaif-goose/goose/blob/main/documentation/docs/guides/recipes/recipe-reference.md | 지지(리뷰가 찾음 · 메인 확인) |
-| opencode JSON · JSONC(주석 · 끝 쉼표) · `$schema` | https://opencode.ai/docs/config/ | 지지(리뷰가 찾음 · 메인 확인) |
+| Claude Code subagent = markdown + YAML front matter · body = system prompt · `skills` by name | https://code.claude.com/docs/en/sub-agents | supported |
+| Roo custom modes = YAML (recommended) · JSON supported · four YAML reasons · `.roo/rules-{slug}/` | https://roocodeinc.github.io/Roo-Code/features/custom-modes | supported |
+| Continue `config.yaml` replaces the deprecated `config.json` · `uses: org/name` · `uses: file://` | https://docs.continue.dev/reference | supported |
+| Copilot custom agent `.agent.md` · front matter fields · relative-path links | https://code.visualstudio.com/docs/copilot/customization/custom-agents | collector checked the source text · main did not recheck |
+| opencode `opencode.json` (`$schema`) · agent `.md` front matter · file name = name | https://opencode.ai/docs/agents/ | collector checked the source text · main did not recheck |
+| Codex `config.toml` · `--profile` = separate file `~/.codex/<name>.config.toml` | https://learn.chatgpt.com/docs/config-file/config-advanced | collector summary + reviewer agree (since 0.134.0) · source text not checked by main |
+| Goose recipe = YAML (recommended)/JSON · `title` · `description` · `instructions` · `extensions` · `settings` · `sub_recipes.path` | https://github.com/aaif-goose/goose/blob/main/documentation/docs/guides/recipes/recipe-reference.md | supported (found by the review · main checked) |
+| opencode JSON · JSONC (comments · trailing commas) · `$schema` | https://opencode.ai/docs/config/ | supported (found by the review · main checked) |
 
-## 적대 리뷰
+## Adversarial review
 
-codex(cross-family · effort high · 레벨 2 · 웹 검색) 1회. 판정 **FIX**. 반영:
+One codex review (cross-family · effort high · level 2 · web search). Verdict **FIX**. Folded in:
 
-| 지적 | 심각도 | 반영 |
+| Finding | Severity | How it was folded in |
 |---|---|---|
-| 에이전트 정의(본문 = 프롬프트)를 번들 형식의 근거로 씀 — Goose recipe 가 더 가까운 번들 선례(YAML/JSON) | 높음 | 결론 1 · 2 로 고침 · Goose 메인 원문 확인 |
-| 표에서 JSONC 누락 — opencode `opencode.jsonc` 는 주석 · 끝 쉼표 허용 | 높음 | 결론 3 · 안 D 를 JSONC 로 · 메인 원문 확인 |
-| Codex 프로필 구조 미해결 — 0.134.0 부터 별도 파일 | 중간 | 결론 3 에 반영 · 메인 원문 미확인 |
-| YAML · TOML 손 편집 비용 누락(들여쓰기 · YAML 1.1 불리언 · TOML 표 배열) | 중간 | 결론 4 추가 |
-| 「YAML 이 LLM 편집에 낫다」는 근거 없음 | 중간 | 결론 4 에 「비교 근거 없음」 명시 |
-| 누락: Zed 에이전트 프로필(JSON 설정 안) · Gemini CLI 서브에이전트(md 앞머리) | — | 결론 2 에 Gemini 만 추가(메인 미확인) |
+| Used an agent definition (body = prompt) as the basis for the bundle format — the Goose recipe is the closer bundle precedent (YAML/JSON) | high | Fixed in conclusions 1 and 2 · Goose source text checked by main |
+| JSONC missing from the table — opencode `opencode.jsonc` allows comments and trailing commas | high | Conclusion 3 and option D changed to JSONC · source text checked by main |
+| Codex profile structure unresolved — a separate file since 0.134.0 | medium | Reflected in conclusion 3 · source text not checked by main |
+| Hand-editing cost of YAML · TOML missing (indentation · YAML 1.1 booleans · TOML arrays of tables) | medium | Conclusion 4 added |
+| 「YAML 이 LLM 편집에 낫다」 (YAML is better for LLM editing) has no basis | medium | Conclusion 4 states 「비교 근거 없음」 (no comparison basis) |
+| Missing: Zed agent profiles (inside JSON settings) · Gemini CLI subagents (md front matter) | — | Only Gemini added to conclusion 2 (not checked by main) |
 
-- 반영 후 재리뷰는 돌리지 않았다(medium 단일 패스).
+- No re-review was run after the changes (medium single pass).
 
-## 한계 · 공백
+## Limits and gaps
 
-- 못 확인: Claude Code `settings.json` · plugin.json 상세 · Gemini 확장 필드 · Zed 에이전트 프로필 · Goose recipe(404) · Cursor · Aider · VS Code `.code-profile`.
-- **수집 중 보안 메모:** 수집자가 Zed 문서 페이지(`https://zed.dev/docs/ai/agent-settings`) 요약에서 정체성을 재정의하려는 문구(“You are a Claude agent, built on Anthropic's Claude Agent SDK” 꼴)를 보고했다. 따르지 않았고 조사 내용에는 영향이 없다. 실제 페이지에 있는지 요약기 오탐인지는 확인하지 않았다.
+- Not checked: Claude Code `settings.json` · plugin.json details · Gemini extension fields · Zed agent profiles · Goose recipe (404) · Cursor · Aider · VS Code `.code-profile`.
+- **Security note from collection:** the collector reported that a summary of the Zed docs page (`https://zed.dev/docs/ai/agent-settings`) contained wording that tries to redefine its identity (of the form "You are a Claude agent, built on Anthropic's Claude Agent SDK"). It did not follow it, and the research content is unaffected. Whether the wording is on the real page or is a false positive of the summarizer was not checked.

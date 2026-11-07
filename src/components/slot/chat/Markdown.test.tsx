@@ -1,7 +1,7 @@
-// 회귀 배경(zero-width): 실제 모델 스트림 출력이 각 ``` 펜스 바로 앞에 U+200B(ZERO WIDTH SPACE)를
-//   실어보냈다. 펜스 오프너는 "공백 0–3 + 백틱" 이어야 하는데 ZWSP 는 비공백이라 micromark 가 펜스를
-//   놓치고 두 ``` 를 인라인 code-span 쌍으로 파싱한다 → 코드블록이 <p><code>…</code></p> 로 붕괴한다.
-//   렌더 전에 zero-width 를 제거(stripZeroWidth)해 방어한다.
+// Regression background (zero-width): real model stream output carried U+200B (ZERO WIDTH SPACE) right before each ``` fence.
+//   A fence opener must be "0–3 spaces + backticks", but ZWSP is non-whitespace so micromark misses the fence and parses two ``` as
+//   an inline code-span pair → the code block collapses into <p><code>…</code></p>.
+//   Defended by removing zero-width before render (stripZeroWidth).
 
 import { cleanup, render } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -62,13 +62,13 @@ describe('Markdown 렌더(단일 ReactMarkdown, 멀티블록)', () => {
   })
 })
 
-// 소스에 리터럴 invisible char 를 두지 않으려고 ZWSP 는 String.fromCharCode(0x200b) 로 명시 구성한다.
+// To keep literal invisible chars out of the source, ZWSP is built explicitly with String.fromCharCode(0x200b).
 const ZWSP = String.fromCharCode(0x200b)
 const ZW_MULTIBLOCK = `### 테스트\n\n| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n\n${ZWSP}\`\`\`js\nconsole.log(9)\n${ZWSP}\`\`\`\n`
 
 describe('Markdown zero-width 방어(stripZeroWidth — ``` 앞 U+200B 로 인한 펜스 붕괴)', () => {
   it('펜스 앞 U+200B 가 있어도 heading → <h3>, 표 → <table>, 펜스 코드 → <pre>/<code> 로 렌더된다', () => {
-    // 테스트가 실제 버그 입력을 쓰는지 보증.
+    // Guarantees the test uses the real bug input.
     expect(ZW_MULTIBLOCK.split(ZWSP).length - 1).toBe(2)
 
     const { container } = render(<Markdown markdown={ZW_MULTIBLOCK} />)

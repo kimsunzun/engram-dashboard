@@ -1,46 +1,46 @@
-# ADR-0187: codex Phase 2 통로를 app-server 로 확정한다 — exec 는 글자를 흘리지 않는다
+# ADR-0187: Settle the codex Phase 2 channel on app-server — exec does not stream characters
 
-- 상태: 확정 (2026-09-09, 근거: 사용자 결정 + 세 모드 실측)
-- 관련: ADR-0004(백엔드 지식 격리) · ADR-0044(입력 인코딩·출력 정제) · ADR-0185(세션 복원 불변식) · `.claude/handoff/attachments/codex-measurements-2026-09-09.md`(실측 정본) · `docs/process/S21-codex-backend/trd-phase2a.md` §10-8 · step-log S21
+- 상태: 확정 (2026-09-09, basis: user decision + measurement of three modes)
+- 관련: ADR-0004 (backend knowledge isolation) · ADR-0044 (input encoding · output cleaning) · ADR-0185 (session-restore invariant) · `.claude/handoff/attachments/codex-measurements-2026-09-09.md` (canonical measurements) · `docs/process/S21-codex-backend/trd-phase2a.md` §10-8 · step-log S21
 
 ## 맥락
 
-Phase 1 은 codex 를 **사람용 대화 화면**(인자 없는 `codex`)으로 PTY 에 띄워 기존 xterm 경로에 그렸다. Phase 2 는 그 출력을 우리 챗 표면에 **중립 어휘로** 그리는 것이 목표이고, 그러려면 codex 를 사람 화면이 아닌 방식으로 조종해야 한다. 조종 방법의 후보가 셋이었다 — `codex app-server`(다른 프로그램이 JSON-RPC 로 조종) · `codex exec --json`(한 번 시키고 JSON 줄을 받고 종료) · 공식 SDK.
+Phase 1 started codex in a PTY as a **conversation screen for humans** (`codex` with no arguments) and drew it along the existing xterm path. The goal of Phase 2 is to draw that output on our chat surface **in the neutral vocabulary**, and for that codex has to be driven in a way other than the human screen. There were three candidate ways to drive it — `codex app-server` (another program drives it over JSON-RPC) · `codex exec --json` (give it one job, receive JSON lines, and it exits) · the official SDK.
 
-★**이 선택을 미룬 대가가 실제로 발생했다**★ — 조사 보고서의 적대 리뷰가 「표본이 app-server 쪽으로 편향됐다」(HIGH 5)고 지적했는데도 재지 않고 Phase 2a 설계 문서를 세 판까지 고쳤다. 그 문서의 §10 은 이 항목을 **질문 순서 맨 위**로 표시하고 있었고, 다른 열다섯 항목이 여기 매달려 있었다.
+★**The cost of postponing this choice actually occurred**★ — even though the adversarial review of the survey report pointed out 「표본이 app-server 쪽으로 편향됐다」 (the sample is biased toward app-server) (HIGH 5), the Phase 2a design document was revised up to a third edition without measuring. §10 of that document had marked this item **at the top of the question order**, and fifteen other items hung from it.
 
 ## 결정
 
-**Phase 2 의 통로는 `codex app-server` 다.** 우리 클라이언트가 그 프로세스에 줄단위 JSON-RPC 로 요청을 보내고 알림을 받는다.
+**The Phase 2 channel is `codex app-server`.** Our client sends requests to that process and receives notifications over line-delimited JSON-RPC.
 
-- 보낼 요청은 실측 기준 **세 종**이다 — `thread/start` · `turn/start` · `turn/interrupt`.
-- **서버가 우리에게 먼저 묻는 요청은 2a 범위에서 다루지 않는다** — 읽기 전용 + 승인 없음 조건에서 실측 0 건이었다(선언은 11 종). 그 조건이 바뀌면 이 면제가 죽는다.
-- 대화 id 는 codex 가 발급하고 우리는 응답에서 수령한다(ADR-0185 결정 1 그대로).
+- The requests to send are **three kinds** by measurement — `thread/start` · `turn/start` · `turn/interrupt`.
+- **Requests where the server asks us first are not handled in the 2a scope** — under the read-only + no-approval condition the measurement was 0 (11 kinds are declared). If that condition changes, this exemption dies.
+- The conversation id is issued by codex and we receive it from the response (ADR-0185 decision 1 as is).
 
 ## 거부한 대안
 
-- **`codex exec --json`** — ★**글자가 흐르지 않는다(실측)**★. 도착한 이벤트가 `thread.started` · `turn.started` · `item.completed` · `turn.completed` **넷뿐**이고 메시지 본문은 완성된 채 한 번에 온다. 「1부터 30까지 세라」를 4.5 초에 죽였을 때 나온 것은 앞의 두 줄뿐이었고, 같은 시각 app-server 는 이미 조각을 10 개 보내고 있었다. 챗 표면에 얹으면 **턴이 끝날 때까지 화면이 빈다.** 부수 사실 둘: 턴 도중 끼어드는 수단이 없어 캔슬이 프로세스 강제 종료뿐이고, 그렇게 끊은 턴은 기록에 **사용자 메시지만** 남는다(어시스턴트 출력·종료 표식 없음). 그리고 승인 정책 플래그(`-a`)가 **`codex exec` 에는 아예 없다.**
-- **공식 SDK** — ★**존재하지 않는다(실측)**★. `codex --help` 에서 `sdk|library|npm|typescript|python` 검색 0 건, 설치된 `@openai/codex@0.153.4` 에도 0 건. 가장 가까운 둘은 라이브러리가 아니라 코드 생성·프로토콜이다(`app-server generate-ts` · `mcp-server`).
-- **Phase 1 의 PTY 대화 화면을 그대로 쓰기** — 화면이 터미널이라 챗 표면의 중립 어휘로 옮길 구조화 이벤트가 없다. Phase 1 이 이미 그 길이고, Phase 2 의 목표가 그 위에 있다.
+- **`codex exec --json`** — ★**characters do not stream (measured)**★. The events that arrived were **only four**: `thread.started` · `turn.started` · `item.completed` · `turn.completed`, and the message body comes whole, all at once. When we killed 「1부터 30까지 세라」 at 4.5 seconds, only the first two lines had come out, and at the same moment app-server had already sent 10 fragments. Put on the chat surface, **the screen stays empty until the turn ends.** Two side facts: there is no means of cutting in mid-turn, so cancel is only a forced process kill, and a turn cut that way leaves **only the user message** in the record (no assistant output, no end marker). And the approval-policy flag (`-a`) **does not exist at all on `codex exec`.**
+- **The official SDK** — ★**does not exist (measured)**★. Searching `codex --help` for `sdk|library|npm|typescript|python` gave 0 hits, and the installed `@openai/codex@0.153.4` also gave 0. The two closest are not libraries but code generation and a protocol (`app-server generate-ts` · `mcp-server`).
+- **Use the Phase 1 PTY conversation screen as it is** — the screen is a terminal, so there are no structured events to move into the chat surface's neutral vocabulary. Phase 1 is already that road, and the goal of Phase 2 lies beyond it.
 
 ## 근거
 
-정본 = `.claude/handoff/attachments/codex-measurements-2026-09-09.md`(codex-cli 0.153.4 · Windows 11 · 2026-09-09). 요지:
+Canonical source = `.claude/handoff/attachments/codex-measurements-2026-09-09.md` (codex-cli 0.153.4 · Windows 11 · 2026-09-09). In brief:
 
-- **app-server 는 조각을 흘린다** — 턴 중 `item/agentMessage/delta` 가 `{threadId, turnId, itemId, delta}` 로 연달아 오고, 관측된 알림이 11 종이다.
-- ★**`turn/interrupt` 가 18ms 에 성공하고 대화가 살아남는다**★ — 조각이 즉시 멈추고 `turn/completed` 가 `status:"interrupted"` 로 닫히며, **같은 `threadId` 로 다음 턴이 정상 동작했다.** 즉 캔슬이 프로세스 종료를 요구하지 않는다.
-- **대화 id 가 `Uuid` 로 파싱된다** — `thread.id == thread.sessionId`, UUIDv7 확인. 프로필의 기존 `Option<Uuid>` 칸에 그대로 들어간다.
-- **stdout 에 비-JSON 줄이 0**, stderr 0 바이트. teardown = stdin 닫기, 종료코드 0 을 46ms 에.
-- **스키마를 로컬에서 생성할 수 있다**(`generate-json-schema`, 네트워크·모델 호출 없음) — 번역 표를 추측 없이 채울 경로가 있다.
+- **app-server streams fragments** — during a turn `item/agentMessage/delta` arrives in succession as `{threadId, turnId, itemId, delta}`, and 11 kinds of notifications were observed.
+- ★**`turn/interrupt` succeeds in 18ms and the conversation survives**★ — the fragments stop at once, `turn/completed` closes with `status:"interrupted"`, and **the next turn with the same `threadId` worked normally.** That is, cancel does not require process termination.
+- **The conversation id parses as a `Uuid`** — `thread.id == thread.sessionId`, UUIDv7 confirmed. It goes as is into the profile's existing `Option<Uuid>` field.
+- **0 non-JSON lines on stdout**, 0 bytes on stderr. Teardown = close stdin, exit code 0 in 46ms.
+- **The schema can be generated locally** (`generate-json-schema`, no network or model call) — there is a path to fill the translation table without guessing.
 
-두 기각 모두 실측에 걸린다(서술만인 기각 없음).
+Both rejections are caught by measurement (no rejection rests on description alone).
 
 ## 영향 / 불변식
 
-- ★**PATH 의 `codex` 는 shim 이라 프로그램에서 직접 띄우면 `ENOENT` 다**★ — 우리 코드가 이미 `cmd.exe /c` 로 감싸는 것이 같은 이유의 처리이고, 그 감싸기를 걷으면 이 통로가 죽는다(`crates/engram-dashboard-agent/src/backend/mod.rs` 의 `console_command`).
-- **서버 응답은 `jsonrpc` 필드를 생략한다.** 응답·알림을 가르는 축은 방향과 모양(`method` 유무 · `result`/`error`)이고 **id 값이 아니다** — 서버 요청 id 와 우리 요청 id 는 값 공간이 겹칠 수 있다.
-- **턴 id 는 `result.turn.id`** 다(`result.turnId` 가 아니다). `turn/interrupt` 는 그 값을 문자열로 요구하고 `null` 을 `-32600` 으로 거부한다.
-- **중단된 메시지의 `item/completed` 는 오지 않는다** — 그 `item/started` 가 닫히지 않은 채 남으므로, 「시작한 아이템은 반드시 닫힌다」를 전제한 번역기는 깨진다.
-- **선언 ≠ 관측.** 스키마는 클라 요청 155 종 · 서버 알림 81 종 · 서버 요청 11 종을 선언하지만 관측된 것은 알림 11 종뿐이다. ★**스키마에 있다는 이유로 「온다」고 쓰지 말 것**★ — 이 저장소의 출처 등급이 `[스키마]` 와 `[실측]` 을 가르는 이유가 그것이다.
-- **이 결정이 여는 값** — Phase 2a 설계 문서의 §10 항목 다섯(요청·응답 계약 · 죽인 것 구별 · 정상 종료 · 인바운드 경로 · 드라이버의 프로필 접근)이 app-server 를 전제로만 성립한다. `exec` 를 골랐다면 그 다섯이 소멸했을 것이고, 그 크기 차이가 이 ADR 의 실질이다.
-- **이 결정을 다시 열 트리거** — ① 승인을 실제로 받기로 하면(ADR-0188 의 값 설계) 서버 요청 11 종이 살아나 「0 건」 면제가 죽는다 ② 상주 프로세스가 대화마다 하나씩 사는 비용·인증 만료로 서버가 죽어 기록이 잘리는 사고(상류 이슈로 보고됨)가 실제로 발생하면 `exec` 쪽 단발 실행이 다시 후보가 된다.
+- ★**`codex` on PATH is a shim, so launching it directly from a program gives `ENOENT`**★ — our code already wrapping it in `cmd.exe /c` is handling for the same reason, and removing that wrapping kills this channel (`console_command` in `crates/engram-dashboard-agent/src/backend/mod.rs`).
+- **Server responses omit the `jsonrpc` field.** The axis that separates responses from notifications is direction and shape (presence of `method` · `result`/`error`) and **not the id value** — the value space of server request ids and our request ids can overlap.
+- **The turn id is `result.turn.id`** (not `result.turnId`). `turn/interrupt` requires that value as a string and rejects `null` with `-32600`.
+- **The `item/completed` of an interrupted message does not come** — its `item/started` stays unclosed, so a translator that assumes 「시작한 아이템은 반드시 닫힌다」 (an item that starts is always closed) breaks.
+- **Declared ≠ observed.** The schema declares 155 client request kinds · 81 server notification kinds · 11 server request kinds, but what was observed is only 11 notification kinds. ★**Do not write 「온다」 (it comes) just because it is in the schema**★ — that is why this repository's source grades separate `[스키마]` from `[실측]`.
+- **The values this decision opens** — five items of §10 of the Phase 2a design document (request/response contract · telling killed from not · normal exit · inbound path · the driver's access to the profile) hold only with app-server as the premise. Had `exec` been chosen, those five would have vanished, and that difference in size is the substance of this ADR.
+- **Triggers to reopen this decision** — ① if approvals are actually to be received (the value design of ADR-0188), the 11 server request kinds come alive and the 「0 건」 (0 hits) exemption dies ② if the cost of one resident process per conversation, or an incident where the server dies and truncates the record because of an expired credential (reported as an upstream issue), actually occurs, one-shot `exec` becomes a candidate again.

@@ -6,15 +6,15 @@ export type SchemaItem = { key: string,
  */
 kind: string, default: string, 
 /**
- * `choice` 만 — 정규 철자.
+ * Only `choice` — canonical spelling.
  */
 choices: Array<string> | null, 
 /**
- * 양 끝 포함 · 정규형. `css-length` 는 받는 단위마다 한 값씩 `, ` 로 잇는다(`"8px, 0.5rem, 0.5em"`).
- * `choice` 는 `None`.
+ * Both ends inclusive · canonical form. `css-length` joins one value per accepted unit with `, ` (`"8px, 0.5rem, 0.5em"`).
+ * `choice` is `None`.
  */
 min: string | null, 
 /**
- * [`SchemaItem::min`] 과 같은 모양.
+ * Same shape as [`SchemaItem::min`].
  */
 max: string | null, description: string, };

@@ -97,7 +97,7 @@ describe('mergeTreeNodes', () => {
     expect(out.find(n => n.id === 'p2')).toMatchObject({ kind: 'reserved' })
   })
 
-  // ── ADR-0061 리치화: display_name override 전파 ──────────────────────────────
+  // ── ADR-0061 enrichment: display_name override propagation ──────────────────────────────
   it('display_name override → reserved 노드는 프로필 직접, running 노드는 매칭 프로필에서 이어받음', () => {
     const out = mergeTreeNodes(
       [profile('p-run', '', 0, '실행override'), profile('p-res', '', 0, '예약override')],
@@ -114,9 +114,9 @@ describe('mergeTreeNodes', () => {
     expect(out.find(n => n.id === 'a')?.displayName).toBeNull()
   })
 
-  // ── ADR-0072 드롭 가드: hasProfile(프로필 유무) ─────────────────────────────────
-  //   reparent 는 child·parent 둘 다 실 프로필이 있어야 성립(백엔드가 no-profile op 를 거부).
-  //   hasProfile 은 프론트 드래그/드롭 pre-filter 의 근거 필드다.
+  // ── ADR-0072 drop guard: hasProfile (whether a profile exists) ─────────────────────────────────
+  //   reparent holds only when both child and parent have a real profile (the backend rejects a no-profile op).
+  //   hasProfile is the basis field of the frontend drag/drop pre-filter.
   describe('hasProfile(드롭 가드, ADR-0072)', () => {
     it('reserved 노드 → hasProfile=true(프로필에서 생성)', () => {
       const out = mergeTreeNodes([profile('p1', '예약')], [])
@@ -144,9 +144,9 @@ describe('mergeTreeNodes', () => {
     })
   })
 
-  // ── MINOR-2: 결정적 정렬 회귀 가드 ──────────────────────────────────────────
-  // 백엔드 listProfiles/agents 가 HashMap iteration(비결정적) 순서로 올 수 있어,
-  // 정렬이 없으면 refetch 마다 노드가 튄다. "같은 입력 집합이면 항상 같은 순서" 보장.
+  // ── MINOR-2: deterministic sort regression guard ──────────────────────────────────────────
+  // The backend listProfiles/agents can arrive in HashMap iteration (non-deterministic) order,
+  // so without sorting, nodes jump on every refetch. Guarantees "the same input set always gives the same order".
   describe('결정적 정렬(MINOR-2)', () => {
     it('reserved 는 created_at 오름차순, 입력 순서와 무관', () => {
       const p1 = profile('zzz', '나중', 200)
@@ -173,12 +173,12 @@ describe('mergeTreeNodes', () => {
     })
   })
 
-  // ── MINOR-3 / MAJOR-1: 종료 세션 + 같은 id 프로필 공존(현재 동작 박제) ───────
-  // 알려진 한계(MAJOR-1): ADR-0016 의 reap/재시작이 미구현(파킹, 사용자 결정 대기)이라,
-  // 세션이 종료(Exited/Killed/Failed)되어도 agents[] 에서 사라지지 않는다(T-4). 그래서
-  // 같은 id 의 프로필이 있어도 머지는 그 id 를 여전히 running-kind 로 분류하고 reserved 로
-  // 되돌리지 않는다 → 종료된 깡통을 더블클릭으로 재활성화할 수 없다.
-  // 아래는 그 "현재 동작"을 회귀 가드로 박제한다(동작 변경 아님 — 프론트 우회 금지).
+  // ── MINOR-3 / MAJOR-1: exited session + same-id profile coexist (pinning current behavior) ───────
+  // Known limitation (MAJOR-1): the reap/restart of ADR-0016 is unimplemented (parked, awaiting a user decision), so
+  // even when a session exits (Exited/Killed/Failed) it does not disappear from agents[] (T-4). So
+  // even if a profile with the same id exists, the merge still classifies that id as running-kind and does not
+  // revert it to reserved → an exited empty shell cannot be reactivated by double-click.
+  // Below we pin that "current behavior" as a regression guard (not a behavior change — no frontend workaround).
   describe('종료 세션 + 동명 프로필 공존(현재 동작 박제, MAJOR-1 알려진 한계)', () => {
     const terminalStatuses: AgentInfo['status'][] = [
       { type: 'Exited', code: 0 },
@@ -201,9 +201,9 @@ describe('mergeTreeNodes', () => {
     }
   })
 
-  // ── ADR-0072: parent_id 계층화(1단 중첩) ──────────────────────────────────────
-  //   parent_id 로 자식을 부모 children 에 꽂는 forest 반환. 1단만(자식의 children 은 항상 빈 배열).
-  //   백엔드가 cycle/2단을 강제하지만 프론트는 데이터가 어긋나도 방어적으로 루트 승격(2단 금지).
+  // ── ADR-0072: parent_id hierarchy (1-level nesting) ──────────────────────────────────────
+  //   Returns a forest that plugs children into the parent's children by parent_id. Only 1 level (a child's children is always an empty array).
+  //   The backend enforces cycle/2-level, but the frontend defensively promotes to root even if data is out of step (2-level forbidden).
   describe('계층화(parent_id, ADR-0072)', () => {
     it('parent_id 없으면 전부 루트(children 빈 배열)', () => {
       const out = mergeTreeNodes([profile('p1', 'A'), profile('p2', 'B')], [])
@@ -225,7 +225,7 @@ describe('mergeTreeNodes', () => {
     })
 
     it('running 부모 + reserved 자식 혼합(머지 계층 유지, ADR-0018 ⊕ ADR-0072)', () => {
-      // parent_id 는 프로필에서만 오므로 자식 프로필이 A 를 가리킨다.
+      // parent_id comes only from profiles, so the child profile points at A.
       const out = mergeTreeNodes(
         [profile('A', '', 1, null, null), profile('B', '', 2, null, 'A')],
         [agent('A', '실행부모')],
@@ -286,8 +286,8 @@ describe('mergeTreeNodes', () => {
   })
 })
 
-// ADR-0148: 트리의 "실행중 vs 예약" 판정을 id 하나로 물어보는 형태. 슬롯 렌더 게이트가 같은 함수를 쓴다 —
-// 규칙이 두 곳에서 갈리면 종료된 에이전트의 슬롯 표현이 트리와 어긋난다.
+// ADR-0148: the form that asks the tree's "running vs reserved" decision by a single id. The slot render gate uses the same function —
+// if the rule diverges in two places, the slot presentation of an exited agent goes out of step with the tree.
 describe('agentPresence', () => {
   it('명부에 있으면 running — terminal 상태여도 세션이 아직 있으므로 running 이다', () => {
     const dead = agent('A', '', true, { type: 'Killed' })
@@ -316,9 +316,9 @@ describe('agentPresence', () => {
   })
 })
 
-// ── 마지막 실패 축(ADR-0172) ──────────────────────────────────────────────────
-// AgentInfo wire 엔 없는 축이라 running 노드도 매칭 프로필에서 이어받아야 한다 — 안 이어받으면
-// "다시 떴는데 아직 첫 대화 전" 상태를 화면이 판정할 재료가 없다.
+// ── last failure axis (ADR-0172) ──────────────────────────────────────────────────
+// It is an axis absent from the AgentInfo wire, so a running node must also inherit it from the matching profile — if it does not,
+// the screen has no material to decide the state "came up again but before the first conversation".
 describe('mergeTreeNodes — lastFailure', () => {
   it('예약 노드는 프로필의 값을 그대로 싣는다', () => {
     const out = mergeTreeNodes([profile('p1', '', 0, null, null, 'NoConversationToResume')], [])

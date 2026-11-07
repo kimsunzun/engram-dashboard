@@ -1,4 +1,4 @@
-// ADR-0237: 사라지는 칸 안 버튼이 쥔 포커스를 칸 컨테이너(tabindex -1)로 옮긴다 — 쥐지 않았으면 빼앗지 않는다.
+// ADR-0237: moves the focus held by a button in a disappearing area to the area container (tabindex -1) — does not steal focus if it was not held.
 
 import { afterEach, describe, expect, it } from 'vitest'
 

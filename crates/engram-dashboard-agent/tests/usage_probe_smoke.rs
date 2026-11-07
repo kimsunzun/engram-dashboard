@@ -1,14 +1,14 @@
-//! 사용량 조회기의 실 CLI 스모크 — 설치·로그인된 claude·codex 에 **운영 경로 그대로** 조회를 보낸다: 등록부
-//! (`usage_probe_for`) → [`UsageProbe::query`] → 실 [`OsProbeSpawner`](Windows = `cmd.exe /c <cli> …`), 마감 =
-//! 조회기 정책의 시한(받는 쪽이 만드는 것과 같다).
+//! Real-CLI smoke of the usage querier — sends a query to the installed, logged-in claude · codex through **the production path as is**: registry
+//! (`usage_probe_for`) → [`UsageProbe::query`] → real [`OsProbeSpawner`] (Windows = `cmd.exe /c <cli> …`), deadline =
+//! the deadline of the querier policy (the same as what the receiving side makes).
 //!
-//! ★전부 `#[ignore]` 다★ — 로그인된 CLI 와 계정의 조회 제한을 쓴다(CI 러너에는 둘 다 없다). 로컬에서만:
+//! ★All are `#[ignore]`★ — they use a logged-in CLI and the account's query limit (a CI runner has neither). Locally only:
 //!   `cargo test -p engram-dashboard-agent --test usage_probe_smoke -- --ignored --nocapture --test-threads=1`
-//!   `--test-threads=1` = 조회를 겹쳐 보내지 않는다(조회 제한을 한꺼번에 쓰지 않게).
-//! ★찍는 것은 가린 요약뿐이다★ — 창 수치·리셋 시각·plan·모델 이름·줄의 모양(키와 타입). env 값·토큰·문자열
-//!   값은 찍지 않는다. 예외 = 로그아웃 시험의 상류 문구(빈 설정 폴더라 계정 정보가 없다 — 토큰 모양·경로는 가린다).
-//! ★파일을 OS 로 막지 않는다★ — 조회 명령의 OS 분기는 조회기 안에 있다. 줍기 모양 수집(`…_passive_parser`)만
-//!   조회기 밖에서 CLI 를 띄우므로 운영과 같은 감싸기([`console_command`])를 그대로 부른다.
+//!   `--test-threads=1` = do not send queries overlapping (so the query limit is not used all at once).
+//! ★What is printed is only a masked summary★ — window numbers · reset times · plan · model names · the shape of lines (keys and types). env values · tokens · string
+//!   values are not printed. Exception = the upstream phrase of the logout test (an empty config folder has no account information — token shapes · paths are masked).
+//! ★Do not gate the file by OS★ — the OS branching of the query command is inside the querier. Only the pickup-shape collection (`…_passive_parser`)
+//!   launches the CLI outside the querier, so it calls the same wrapping as production ([`console_command`]) as is.
 // ADR-0230
 
 use std::fs;
@@ -27,16 +27,16 @@ use engram_dashboard_agent::usage::{
 };
 use engram_dashboard_platform::shell::console_command;
 
-/// 조회 한 번이 돌아와야 하는 상한 = 시한 + 자식 drop 의 종료 대기([`UsageProbe::query`] 계약) + 여유.
+/// The bound within which one query must return = deadline + the child drop's wait for exit ([`UsageProbe::query`] contract) + leeway.
 const RETURN_SLACK: Duration = Duration::from_secs(3);
 
-/// 줍기 모양 수집의 모델 턴 한 번의 시한.
+/// The deadline of one model turn for the pickup-shape collection.
 const TURN_TIMEOUT: Duration = Duration::from_secs(120);
-/// 턴이 끝난 뒤 늦게 오는 알림을 더 기다리는 시간.
+/// Time to wait further for a notification that arrives late after the turn ends.
 const TURN_TAIL: Duration = Duration::from_millis(1500);
 const TURN_PROMPT: &str = "Reply with just OK.";
 
-// ── 운영 경로 조회 ───────────────────────────────────────────────────────────────
+// ── Production-path query ─────────────────────────────────────────────────────
 
 #[test]
 #[ignore = "실 claude CLI·로그인·계정의 조회 제한을 쓴다"]
@@ -64,17 +64,17 @@ fn codex_rate_limits_read_answers_through_the_operating_command() {
     assert_eq!(obs.vendor.as_str(), "codex");
 }
 
-/// 빈 설정 폴더 = 로그인 없음. 분류를 단정하지 않는다 — 응답 모양 수집이 목적이다(TRD §6 #4). 재는 계약은
-/// 둘이다: 마감 안에 돌아온다 · 성공으로 돌아오면 「한도 정보 없음」이다.
-/// ★실측(claude 2.1.280 · 2026-09-27) = 오류가 아니라 성공 응답이다★ — `rate_limits: null` ·
-/// `subscription_type: null` · `rate_limits_available: false`(로그인된 쪽은 `true`). 상류 오류 문구는 없었다.
+/// An empty config folder = no login. We do not assert the classification — the aim is collecting the response shape (TRD §6 #4). The contracts measured are
+/// two: it returns within the deadline · if it returns as success it is 「한도 정보 없음」 (no limit information).
+/// ★Measured (claude 2.1.280 · 2026-09-27) = it is a success response, not an error★ — `rate_limits: null` ·
+/// `subscription_type: null` · `rate_limits_available: false` (`true` on the logged-in side). There was no upstream error phrase.
 #[test]
 #[ignore = "실 claude CLI 를 쓴다"]
 fn claude_logged_out_answer_shape() {
     let root = TempTree::fresh("claude-logged-out");
     let config = TempTree::fresh("claude-empty-config");
     let config_dir = config.path().to_str().expect("유니코드 경로").to_owned();
-    // 데몬 env 에서 남기는 로그인 키와 API 키 경로도 뺀다 — 남으면 빈 설정 폴더여도 로그인된 채로 조회한다.
+    // Also strip the login keys and API-key paths that the daemon env leaves — if they remain, it queries still logged in even with an empty config folder.
     let login_env = [
         "CLAUDE_CODE_OAUTH_TOKEN",
         "ANTHROPIC_API_KEY",
@@ -98,7 +98,7 @@ fn claude_logged_out_answer_shape() {
     run.report_upstream_text();
     let entries = config.entries();
     eprintln!("[logged-out] config dir entries after the run: {entries:?}");
-    // 답 직후 kill 하면 CLI 가 쓰던 설정 파일의 잠금·임시 파일이 남았다 — 조회가 자식에게 끝낼 유예를 주는지 본다.
+    // Killing right after the answer left lock · temp files of the config file the CLI was writing — checks whether the query gives the child a grace period to finish.
     let leftovers: Vec<&String> = entries
         .iter()
         .filter(|name| {
@@ -119,8 +119,8 @@ fn claude_logged_out_answer_shape() {
     }
 }
 
-/// TRD §6 #18 — 개발 빌드의 데이터 폴더는 저장소 안이라, CLI 가 작업 폴더에서 위로 올라가며 저장소의
-/// `.claude/settings.json`·CLAUDE.md 를 읽을 수 있다. 그래도 조회가 서는지 잰다.
+/// TRD §6 #18 — the development build's data folder is inside the repository, so the CLI can climb up from its working folder and read the repository's
+/// `.claude/settings.json`·CLAUDE.md. We measure that the query still stands.
 #[test]
 #[ignore = "실 claude CLI·로그인·계정의 조회 제한을 쓴다"]
 fn claude_get_usage_answers_with_the_scratch_root_inside_the_repo() {
@@ -131,9 +131,9 @@ fn claude_get_usage_answers_with_the_scratch_root_inside_the_repo() {
         .expect("저장소 안 작업 폴더에서도 claude 조회가 성공해야 한다");
 }
 
-/// 답 뒤 유예(`FINISH_GRACE`)의 실측 — 조회기의 대화를 운영 명령 그대로 돌리되, 답을 받고 stdin 을 닫은 뒤의
-/// 대기만 [`EXIT_WINDOW`] 로 늘려 claude 가 **스스로** 끝나기까지를 잰다(창 안에 안 끝나면 그때 끊긴다). 그 사이
-/// 전역 설정 파일(`.claude.json`)은 수정 시각과 잠금 파일의 있고 없음만 본다 — 내용은 읽지 않는다.
+/// Measuring the grace after the answer (`FINISH_GRACE`) — runs the querier's conversation with the production command as is, but only the wait after
+/// receiving the answer and closing stdin is extended to [`EXIT_WINDOW`], to measure how long claude takes to end **by itself** (if it does not end within the window, it is cut then). In the meantime
+/// the global config file (`.claude.json`) is looked at only for modification time and the presence of a lock file — the content is not read.
 #[test]
 #[ignore = "실 claude CLI·로그인·계정의 조회 제한을 쓴다"]
 fn claude_exit_after_stdin_close_measurement() {
@@ -195,11 +195,11 @@ fn claude_exit_after_stdin_close_measurement() {
     eprintln!("   leftover scratch = {:?}", root.entries());
 }
 
-/// stdin 을 닫은 뒤 claude 가 스스로 끝나기를 기다리는 상한(운영 유예보다 훨씬 길다).
+/// Upper bound on waiting for claude to end by itself after stdin is closed (far longer than the production grace period).
 const EXIT_WINDOW: Duration = Duration::from_secs(10);
 
-/// claude 의 전역 설정 파일 — `CLAUDE_CONFIG_DIR` 가 있으면 그 안, 없으면 홈 폴더의 `.claude.json`(조회기는 그
-/// env 를 남긴다). ★미확인★: CLI 의 경로 규칙을 소스로 확인하지 않았다 — 파일이 없으면 시각을 못 잰다.
+/// claude's global config file — inside `CLAUDE_CONFIG_DIR` if set, otherwise `.claude.json` in the home folder (the querier leaves that
+/// env). ★Unverified★: the CLI's path rule was not checked against the source — if the file does not exist the time cannot be measured.
 fn claude_global_config() -> (Option<PathBuf>, &'static str) {
     let (dir, source) = match std::env::var_os("CLAUDE_CONFIG_DIR") {
         Some(dir) => (Some(PathBuf::from(dir)), "CLAUDE_CONFIG_DIR"),
@@ -214,7 +214,7 @@ fn claude_global_config() -> (Option<PathBuf>, &'static str) {
     (path.filter(|p| p.is_file()), source)
 }
 
-/// 설정 파일의 한 시점 — 수정 시각과 옆 잠금 파일의 있고 없음(내용은 읽지 않는다).
+/// One point in time of the config file — modification time and the presence of a neighboring lock file (the content is not read).
 #[derive(Default, Clone, Copy)]
 struct ConfigMark {
     modified: Option<SystemTime>,
@@ -245,7 +245,7 @@ struct PatientLog {
     at_exit: Option<ConfigMark>,
 }
 
-/// 실 스포너를 감싸 stdin 을 닫은 뒤의 마감만 [`EXIT_WINDOW`] 로 늘린다 — 그 밖은 조회기의 대화 그대로다.
+/// Wraps the real spawner and extends only the deadline after stdin is closed to [`EXIT_WINDOW`] — everything else is the querier's conversation as is.
 struct PatientSpawner {
     config: Option<PathBuf>,
     log: Arc<Mutex<PatientLog>>,
@@ -336,7 +336,7 @@ impl ProbeChild for PatientChild {
     }
 }
 
-// ── 줍기 모양 수집 — 짧은 실 턴의 원 줄을 줍기 해석기에 먹인다 ─────────────────────────
+// ── Pickup-shape collection — feeds the raw lines of a short real turn to the pickup interpreter ─────────
 
 #[test]
 #[ignore = "실 claude 모델 턴 하나를 쓴다"]
@@ -415,7 +415,7 @@ fn codex_turn_rate_limits_updated_through_the_passive_parser() {
         output_format: AgentOutputFormat::StreamJson,
     })
     .expect("app-server 디코더");
-    // 운영 통로는 우리 요청의 응답을 대기표가 가져가고 나머지 줄을 번역기에 넘긴다 — 응답 줄은 먹이지 않는다.
+    // In the production path the wait ticket takes the response to our request and passes the remaining lines to the translator — response lines are not fed.
     for line in lines.iter().filter(|line| !is_rpc_response(line)) {
         decoder.decode(format!("{line}\n").as_bytes());
     }
@@ -428,9 +428,9 @@ fn codex_turn_rate_limits_updated_through_the_passive_parser() {
     eprintln!("[codex turn] leftover scratch: {:?}", root.entries());
 }
 
-// ── 조회 구동 ─────────────────────────────────────────────────────────────────────
+// ── Query driving ─────────────────────────────────────────────────────────────
 
-/// 조회 명령에 더하는 env 조정 — 조회기가 만든 명령에 얹는다(`env_set` 이 나중에 적용된다).
+/// Env adjustments added to the query command — layered on the command the querier made (`env_set` is applied later).
 #[derive(Default)]
 struct Tweaks {
     env_set: Vec<(String, String)>,
@@ -509,7 +509,7 @@ impl ProbeRun {
         eprintln!("   leftover scratch = {:?}", root.entries());
     }
 
-    /// 로그아웃 시험 전용 — 상류 문구를 가려서 찍는다(분류 표가 추정이라 실제 문구가 필요하다).
+    /// Only for the logout test — prints the upstream phrase masked (the classification table is a guess, so the real phrase is needed).
     fn report_upstream_text(&self) {
         for line in &self.log.lines {
             let Ok(value) = serde_json::from_str::<Value>(line) else {
@@ -547,10 +547,10 @@ fn error_kind(err: &ProbeFailure) -> String {
     }
 }
 
-// ── 기록 겹 — 실 스포너를 감싸 줄·종료 상태를 붙든다 ─────────────────────────────────
+// ── Recording layer — wraps the real spawner and holds the lines · exit status ─────────────────
 
-/// 조회기가 밖에 내는 상류 원문은 이름 붙은 칸의 값 하나(가린 원문 칸)뿐이다 — 응답 줄의 모양 수집은 이 겹에서만
-/// 된다. 자식은 여전히 실 [`OsProbeSpawner`] 가 띄운다.
+/// The upstream original text the querier puts out is only the value of one named field (the masked original-text field) — collecting the shape of response lines is done only in
+/// this layer. The child is still spawned by the real [`OsProbeSpawner`].
 struct Recorder {
     tweaks: Tweaks,
     log: Arc<Mutex<ChildLog>>,
@@ -561,7 +561,7 @@ struct ChildLog {
     command: Option<String>,
     lines: Vec<String>,
     exit: Option<ExitInfo>,
-    /// 답을 받은 뒤의 판정 없는 종료 대기가 받은 코드(`Some(None)` = 코드 없이 끝났다).
+    /// The code received by the wait for exit without a decision after the answer (`Some(None)` = ended without a code).
     exit_code: Option<Option<i32>>,
     stderr_lines: usize,
 }
@@ -642,7 +642,7 @@ impl ProbeChild for RecordingChild {
     }
 }
 
-/// 필드 drop(트리 kill)보다 먼저 돈다 — 그 시점까지 들어온 stderr 줄 수를 적는다(내용은 적지 않는다).
+/// Runs before the field drop (tree kill) — records the number of stderr lines that had come in by then (the content is not recorded).
 impl Drop for RecordingChild {
     fn drop(&mut self) {
         let count = self.inner.stderr_tail().len();
@@ -652,10 +652,10 @@ impl Drop for RecordingChild {
     }
 }
 
-// ── 줍기 모양 수집용 실 턴 ─────────────────────────────────────────────────────────
+// ── Real turn for pickup-shape collection ─────────────────────────────────────
 
-/// 데몬 env 에서 조회기가 벗기는 것과 같은 규칙 — `CLAUDE` 로 시작하는 키 중 기본 로그인 둘이 아닌 것.
-/// 부모가 claude 세션이면 그 세션의 표식 env 가 자식 CLI 의 동작을 바꾼다.
+/// The same rule as what the querier strips from the daemon env — keys starting with `CLAUDE` other than the two default logins.
+/// If the parent is a claude session, that session's marker env changes the behavior of the child CLI.
 fn claude_env_to_strip() -> Vec<String> {
     std::env::vars_os()
         .filter_map(|(key, _)| key.into_string().ok())
@@ -671,7 +671,7 @@ fn claude_env_to_strip() -> Vec<String> {
         .collect()
 }
 
-/// stream-json 턴 하나의 stdout 줄 전량 — 에이전트 스폰의 stream-json 핵심 인자 + 조회기와 같은 훅·MCP 차단.
+/// All stdout lines of one stream-json turn — the core stream-json arguments of agent spawn + the same hook · MCP blocking as the querier.
 fn claude_turn_lines(scratch: &Path, deadline: Instant) -> Result<Vec<String>, ProbeError> {
     let settings = scratch.join("settings.json");
     let mcp = scratch.join("mcp.json");
@@ -694,7 +694,7 @@ fn claude_turn_lines(scratch: &Path, deadline: Instant) -> Result<Vec<String>, P
     .collect();
     args.push(path(&settings));
     args.push("--strict-mcp-config".to_owned());
-    // `--mcp-config` 는 값을 여럿 받는 플래그라 맨 끝에 둔다(조회기의 같은 자리 주석).
+    // `--mcp-config` is a flag that takes several values, so put it at the very end (the comment at the same place in the querier).
     args.push("--mcp-config".to_owned());
     args.push(path(&mcp));
     let (program, args) = console_command("claude", args);
@@ -721,10 +721,10 @@ fn claude_turn_lines(scratch: &Path, deadline: Instant) -> Result<Vec<String>, P
     Ok(lines)
 }
 
-/// app-server 턴 하나의 stdout 줄 전량 — 악수 → 스레드 → 턴 → `turn/completed`.
+/// All stdout lines of one app-server turn — handshake → thread → turn → `turn/completed`.
 ///
-/// ★스레드의 작업 폴더 = 저장소 루트★ — 처음 보는 폴더면 codex 가 그 폴더를 자기 설정 파일에 신뢰로 적는다
-/// (`commands.rs` 의 codex 정책 주석 — 실측 0.155.1). 매번 새 임시 폴더를 쓰면 사용자 설정에 지워진 경로가 쌓인다.
+/// ★The thread's working folder = the repository root★ — if it is a folder seen for the first time, codex writes that folder into its own config file as trusted
+/// (the codex policy comment in `commands.rs` — measured 0.155.1). Using a fresh temp folder every time piles deleted paths into the user's config.
 fn codex_turn_lines(scratch: &Path, deadline: Instant) -> Result<Vec<String>, ProbeError> {
     let (program, args) =
         console_command("codex", vec!["app-server".to_owned(), "--stdio".to_owned()]);
@@ -770,7 +770,7 @@ fn codex_turn_lines(scratch: &Path, deadline: Instant) -> Result<Vec<String>, Pr
     Ok(lines)
 }
 
-/// `done` 인 줄까지 읽는다(그 줄 포함). 서버 **요청**(id + method)은 거절로 답한다 — 안 답하면 상대가 멈춘다.
+/// Reads up to the line that is `done` (including that line). A server **request** (id + method) is answered with a refusal — if we do not answer, the other side stalls.
 fn read_until(
     child: &mut dyn ProbeChild,
     lines: &mut Vec<String>,
@@ -798,7 +798,7 @@ fn read_until(
     }
 }
 
-/// 끝 신호 뒤에 늦게 오는 줄을 [`TURN_TAIL`] 동안 더 줍는다. 마감을 넘기면 자식이 끊긴다 — 여기서는 그게 끝이다.
+/// Picks up lines that arrive late after the end signal for [`TURN_TAIL`] more. If the deadline is exceeded the child is cut — here that is the end.
 fn read_tail(child: &mut dyn ProbeChild, lines: &mut Vec<String>) {
     let until = Instant::now() + TURN_TAIL;
     while let Ok(Some(line)) = child.read_line(until) {
@@ -806,7 +806,7 @@ fn read_tail(child: &mut dyn ProbeChild, lines: &mut Vec<String>) {
     }
 }
 
-// ── 가린 요약 ─────────────────────────────────────────────────────────────────────
+// ── Masked summary ────────────────────────────────────────────────────────────
 
 fn summarize(obs: &UsageObservation) -> String {
     let mut out = format!(
@@ -847,7 +847,7 @@ fn window_text(window: Option<&WindowObs>) -> String {
     )
 }
 
-/// epoch 초 → `YYYY-MM-DDTHH:MM:SSZ (+남은 시간)`. 달력 변환 = 그레고리력 일수 공식(proleptic).
+/// epoch seconds → `YYYY-MM-DDTHH:MM:SSZ (+남은 시간)`. Calendar conversion = the Gregorian day-count formula (proleptic).
 fn iso_utc(secs: i64) -> String {
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
@@ -874,7 +874,7 @@ fn iso_utc(secs: i64) -> String {
     )
 }
 
-/// 줄의 종류 — claude = `type[/subtype]` · codex = `method`(알림·요청) 또는 `response#id`/`error#id`.
+/// Kind of line — claude = `type[/subtype]` · codex = `method` (notification · request) or `response#id`/`error#id`.
 fn kind_of(line: &str) -> String {
     let Ok(value) = serde_json::from_str::<Value>(line) else {
         return format!("non-json({} bytes)", line.len());
@@ -913,13 +913,13 @@ fn is_rpc_response(line: &str) -> bool {
         .is_ok_and(|v| v.get("id").is_some() && v.get("method").is_none())
 }
 
-/// 조회의 답 줄 — claude `control_response` · codex 응답·오류.
+/// The answer line of a query — claude `control_response` · codex response · error.
 fn is_answer_line(line: &str) -> bool {
     let kind = kind_of(line);
     kind.starts_with("control_response") || is_rpc_response(line)
 }
 
-/// 값을 뺀 줄의 모양. 참거짓은 보이고, 문자열 값은 식별 낱말(아래 목록)만 보이고 나머지는 `str`, 수는 `num`.
+/// The shape of a line with values removed. Booleans are visible, string values show only identifying words (list below) and the rest `str`, numbers `num`.
 fn shape_of_line(line: &str) -> String {
     match serde_json::from_str::<Value>(line) {
         Ok(value) => shape(&value, None),
@@ -927,7 +927,7 @@ fn shape_of_line(line: &str) -> String {
     }
 }
 
-/// 값을 찍어도 되는 문자열 칸 — 종류를 가르는 낱말뿐이다(계정·경로·문구가 실리지 않는 칸).
+/// String fields whose values may be printed — only words that tell the kind apart (fields that carry no account · path · phrase).
 const SHOWN_STRING_KEYS: [&str; 9] = [
     "type",
     "subtype",
@@ -965,7 +965,7 @@ fn shape(value: &Value, key: Option<&str>) -> String {
     }
 }
 
-/// `rate_limit_info` 의 수치 칸 — 계정 정보가 없는 칸만.
+/// Numeric fields of `rate_limit_info` — only those with no account information.
 fn rate_limit_info_values(line: &str) -> String {
     let Ok(value) = serde_json::from_str::<Value>(line) else {
         return "non-json".to_owned();
@@ -983,7 +983,7 @@ fn rate_limit_info_values(line: &str) -> String {
     )
 }
 
-/// `params.rateLimits.limitId` 가 있나 · 무엇인가(짧은 식별 낱말일 때만 값을 보인다).
+/// Whether `params.rateLimits.limitId` exists · what it is (the value is shown only when it is a short identifying word).
 fn codex_limit_id(line: &str) -> String {
     let Ok(value) = serde_json::from_str::<Value>(line) else {
         return "non-json".to_owned();
@@ -1003,7 +1003,7 @@ fn codex_limit_id(line: &str) -> String {
     }
 }
 
-/// 상류 문구를 찍기 전에 토큰 모양·사용자 경로를 가리고 자른다.
+/// Masks token shapes · user paths and truncates before printing an upstream phrase.
 fn redact(text: &str) -> String {
     let mut out = engram_dashboard_base::logging::mask_secrets(text);
     for (dir, label) in [
@@ -1027,13 +1027,13 @@ fn redact(text: &str) -> String {
     out.chars().take(240).collect()
 }
 
-// ── 임시 폴더 ─────────────────────────────────────────────────────────────────────
+// ── Temp folder ───────────────────────────────────────────────────────────────
 
 fn repo_root() -> PathBuf {
     dunce::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")).expect("저장소 루트")
 }
 
-/// 시험이 만든 폴더 하나 — drop 하면 통째로 지운다.
+/// One folder the test made — deleted whole on drop.
 struct TempTree {
     path: PathBuf,
 }
@@ -1046,7 +1046,7 @@ impl TempTree {
         )))
     }
 
-    /// 지난 실행이 남긴 같은 폴더가 있으면 지우고 새로 만든다.
+    /// If a same folder left by a previous run exists, delete it and make it anew.
     fn at(path: PathBuf) -> Self {
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).expect("시험 폴더");

@@ -1,55 +1,55 @@
-# Engram Dashboard — 문서 인덱스
+# Engram Dashboard — Docs Index
 
-Claude 에이전트들을 한 화면에서 관리하는 네이티브 대시보드.
-Tauri v2 + React + xterm.js (프론트) / Rust + portable-pty (백엔드).
+A native dashboard that manages Claude agents on one screen.
+Tauri v2 + React + xterm.js (frontend) / Rust + portable-pty (backend).
 
-> **문서 작업 전 이 파일부터 본다.** 어떤 문서가 있고, 새 내용을 어디에 넣는지가 여기 있다.
+> **Read this file first before doing any documentation work.** It lists which documents exist and where new content goes.
 
-## 처음이면 — 읽는 순서
+## If you are new — reading order
 
-통독이 아니라 **점프형 소비**다 — 만지는 영역으로 좁혀 필요한 곳만 본다.
+This is **jump-style consumption**, not a read-through — narrow down to the area you are touching and read only what you need.
 
-> **전체 그림이 먼저 필요하면** → `reference/architecture.md`(모듈 · 연결도 · 런타임 불변식).
+> **If you need the big picture first** → `reference/architecture.md` (modules · connection map · runtime invariants).
 
-1. `../CLAUDE.md` — 개발 순서 · 브랜치·커밋 · 설계 원칙 · 모듈(항상 로드).
-2. 이 `docs/README.md` — 상태·구조 허브.
-3. 만지는 영역 좁히기 — `decisions/README.md` 인덱스 + 코드 `// ADR-NNNN` 앵커(`rg "ADR-"`).
-4. 왜 → `decisions/` — ADR(결정 + 거부 대안).
-5. 언제/무엇 → `process/step-log.md` — 타임라인.
-6. 근거 → `research/` — 선행조사.
-7. 정설/컨벤션 → `reference/` — 코드 동기화 캐논.
+1. `../CLAUDE.md` — development order · branch/commit · design principles · modules (always loaded).
+2. This `docs/README.md` — the hub for status and structure.
+3. Narrow down the area you are touching — the `decisions/README.md` index + the `// ADR-NNNN` anchors in code (`rg "ADR-"`).
+4. Why → `decisions/` — ADRs (decision + rejected alternatives).
+5. When/what → `process/step-log.md` — the timeline.
+6. Evidence → `research/` — prior research.
+7. Canon/conventions → `reference/` — the code-synchronized canon.
 
-## 문서 종류
+## Document kinds
 
-| 폴더/파일 | 무엇 |
+| Folder/file | What it is |
 |---|---|
-| `process/SN-name/` | "이렇게 만들어왔다" — **폴더가 곧 step**(이름만 봐도 자명). 실재 목록은 `ls docs/process/`, 흐름은 `step-log.md`. *step 목록을 여기에 손으로 베끼지 않는다 — 베끼면 어긋난다(rot).* |
-| `process/step-log.md` | ★ 타임라인 — 언제 무엇을 어떻게. **step 흐름의 단일 출처.** |
-| `decisions/` | "왜 이렇게 정했나" — 결정 + 거부한 대안(ADR). 영구 누적. |
-| `tracking.md` | 열린 보류 항목(T-). "재도입 시점"이 트리거. 해결되면 빼고, 번호를 가리키는 곳이 있으면 `tracking-archive.md` 로 한 줄 옮긴다. |
-| `tracking-archive.md` | `tracking.md` 에서 해소·종결된 항목 중 다른 문서·코드가 번호로 가리키는 것만 한 줄씩. 전문 = git 이력. |
-| `todo.md` | **아직 안 한 것** — 할 일 목록의 **색인**. 항목당 한 줄(항목·상태·포인터)이고 상세는 `todo/<이름>.md`가 갖는다. 상태 넷 = 착수 가능·트리거 대기·소유됨·확인만 됨. 해결되면 지운다. ★과도기(사용자 결정 2026-09-30 — `tracking.md` T-37): 폐기 예정이다 — 새 항목은 여기가 아니라 `tracking.md` 에 T- 로 쌓는다★ |
-| `research/` | step 착수 전 선행조사(조사·비교·미결질문). |
-| `refactoring/` | 리팩토링 재료 — 분리·병합 **경계 실측**, 구조 부채 계측, 계획·순서. **한 곳에서 훑어보려고 `research/`에서 갈라냈다**(사용자 지적 2026-08-23: 조사 더미에 묻혀 못 찾는다). 열람면·경계 규약 = 그 폴더 `README.md`. |
-| `reference/` | 코드 동기화 정설(진화형 캐논 — 제자리 수정). 실재 목록 = `ls docs/reference/`(주석·로깅·디버깅 컨벤션 등). *손으로 열거하지 않는다(rot).* |
-| `reference/structure/` | 주제별 **상세 구조** — 재사용 부품이고 **파일 하나 = 주제 하나**(브리핑·덱·TRD 가 여기를 가리키고 베끼지 않는다). ★조감도가 아니다★ — 전체 그림은 `reference/architecture.md` 가 갖는다. 실재 목록 = `ls docs/reference/structure/`. |
-| `handbook/` | 문서·프로세스 **시스템 설명서**. `documentation-system.md`(개발 플로우↔문서 매핑·불변식·자동화 맵) · `branch-commit.md`(주제 시작 `S<n>` 받기 · 통합 절차). "문서들이 어디에 왜 박히나"의 큰 그림. |
+| `process/SN-name/` | "How we have built it" — **a folder is a step** (self-evident from the name alone). The real list is `ls docs/process/`, the flow is `step-log.md`. *Do not copy the step list here by hand — a copy drifts (rot).* |
+| `process/step-log.md` | ★ Timeline — when, what, how. **The single source for the step flow.** |
+| `decisions/` | "Why we decided this way" — decisions + rejected alternatives (ADRs). Accumulates permanently. |
+| `tracking.md` | Open deferred items (T-). The "re-introduction point" is the trigger. When one is resolved, remove it, and if anything points to its number, move it to `tracking-archive.md` as one line. |
+| `tracking-archive.md` | Only those items resolved or closed in `tracking.md` that other documents or code point to by number, one line each. Full text = git history. |
+| `todo.md` | **What is not done yet** — the **index** of the to-do list. One line per item (item · status · pointer); the detail lives in `todo/<이름>.md`. Four states = ready to start · waiting on trigger · owned · confirmed only. Delete an item when it is resolved. ★Transitional (user decision 2026-09-30 — `tracking.md` T-37): it is to be discarded — pile new items up in `tracking.md` as T-, not here★ |
+| `research/` | Prior research before a step starts (investigation, comparison, open questions). |
+| `refactoring/` | Refactoring material — **measured boundaries** for splitting/merging, structural-debt measurements, plans and order. **Split out of `research/` so it can be skimmed in one place** (user remark 2026-08-23: it gets buried in the research pile and cannot be found). Browsing surface and boundary rules = that folder's `README.md`. |
+| `reference/` | Code-synchronized canon (evolving canon — edited in place). The real list = `ls docs/reference/` (comment, logging and debugging conventions, etc.). *Do not enumerate by hand (rot).* |
+| `reference/structure/` | **Detailed structure** by topic — reusable parts, **one file = one topic** (briefings · decks · TRDs point here and do not copy it). ★Not a bird's-eye view★ — the whole picture is held by `reference/architecture.md`. The real list = `ls docs/reference/structure/`. |
+| `handbook/` | **System manuals** for documents and process. `documentation-system.md` (development flow ↔ document mapping · invariants · automation map) · `branch-commit.md` (getting `S<n>` at topic start · integration procedure). The big picture of "where and why the documents are placed". |
 
-## 새 내용을 어디에 넣나
+## Where new content goes
 
-- 설계 **결정**을 내렸다(+버린 대안) → `decisions/` ADR (작업 전 관련 ADR 먼저 읽기)
-- 지금 안 하고 **나중에** 다룰 것·미결 질문 → `tracking.md` (T-/D-)
-- **무엇을 언제** 했나 → `step-log.md`
-- step 착수 전 **조사** → `research/`
-- **리팩토링** 경계 실측·구조 부채 계측·계획 → `refactoring/` (결정이 아니다 — 결정하면 `decisions/`에 박고 거기서 링크. 「나중에 다룬다」는 `tracking.md` T-)
-- 코드와 동기화되는 **정설(진화형 캐논)** → `reference/` (제자리 수정, ADR 아님 — ADR이 *왜*면 캐논은 *실천 규약*)
-- 새 기능 **설계 착수** → `process/SN-name/` 새 폴더 (관련 `research/`·ADR 먼저 참조)
+- You made a design **decision** (+ discarded alternatives) → an ADR in `decisions/` (read the related ADRs before working)
+- Something to handle **later**, not now, or an open question → `tracking.md` (T-/D-)
+- **What was done, when** → `step-log.md`
+- **Research** before a step starts → `research/`
+- **Refactoring** boundary measurements · structural-debt measurements · plans → `refactoring/` (not a decision — if you decide, record it in `decisions/` and link from there. 「나중에 다룬다」 (handle later) goes to `tracking.md` as a T-)
+- **Canon (evolving canon)** synchronized with code → `reference/` (edited in place, not an ADR — if an ADR is the *why*, canon is the *practice convention*)
+- Starting a new feature **design** → a new folder `process/SN-name/` (read the related `research/` and ADRs first)
 
-**★ 고아 금지:** 새 문서를 만들면 위 경로·`tracking.md`·코드앵커(`// see …`) 중 하나에 반드시 링크한다. 안 하면 다음 세션이 못 찾는다.
+**★ No orphans:** when you create a new document, link it from at least one of the paths above, `tracking.md`, or a code anchor (`// see …`). If you do not, the next session cannot find it.
 
-## 진행 상태
+## Progress status
 
-이 파일에서 중복 관리하지 않는다(rot 방지). 단일 출처:
-- **언제/무엇 (타임라인):** `process/step-log.md` ★ 항상 최신
-- **왜 (결정·거부 대안):** `decisions/`
-- **보류 (T-/D-):** `tracking.md`
+Do not maintain this in duplicate in this file (to prevent rot). Single sources:
+- **When/what (timeline):** `process/step-log.md` ★ always latest
+- **Why (decisions, rejected alternatives):** `decisions/`
+- **Deferred (T-/D-):** `tracking.md`

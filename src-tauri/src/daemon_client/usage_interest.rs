@@ -1,37 +1,37 @@
-//! 셸의 사용량 관심 — 레이아웃에서 데몬 사용량 구독 집합을 계산하고, 그 구독을 데몬과 맞춰 두는 상태기
+//! The shell's usage interest — a state machine that computes the daemon usage subscription set from the layout and keeps that subscription in line with the daemon
 //! (TRD S21 usage-limit-slot §1-7).
 //!
-//! ## 무엇을 소유하나
-//! - **관심** = 숨김 표시가 없는 창마다 그 창 **활성 탭**의 사용량 슬롯이 켠 회사의 합집합
-//!   ([`interest_from_layout`]). 최소화는 셸이 추적하지 않으므로 보임이다(사용자 결정 2026-09-27). 어느 창의
-//!   탭도 아닌 뷰(슬롯 옮기기의 임시 뷰)는 빠진다. 모델에만 남은 창(OS 창 없이 모델에 남은 창 — `layout::apply`
-//!   의 `WindowHost` doc 이 적은 미해결)은 보임으로 센다.
-//! - **방송 받을 창** = 어느 탭이든 사용량 슬롯이 있는 창, 숨은 창 포함([`usage_slot_windows`]) — 다시 보이면
-//!   곧바로 최신이다.
-//! - [`UsageInterest`] — 그 둘의 마지막 값 · 이 소켓에 마지막으로 보낸 집합(`sent`) · 줄임 지연 · 이 소켓에서
-//!   받은 스냅숏 캐시.
+//! ## What it owns
+//! - **Interest** = the union of the companies turned on by the usage slots of the **active tab** of every window that has no hidden mark
+//!   ([`interest_from_layout`]). Minimize is not tracked by the shell, so it counts as visible (user decision 2026-09-27). A view that is
+//!   not any window's tab (the temporary view of a slot move) is excluded. A window left only in the model (a window left in the model without an OS window — the unresolved issue noted in
+//!   the `WindowHost` doc of `layout::apply`) is counted as visible.
+//! - **Windows to receive broadcasts** = windows that have a usage slot in any tab, hidden windows included ([`usage_slot_windows`]) — when shown again it is
+//!   up to date right away.
+//! - [`UsageInterest`] — the last values of those two · the set last sent on this socket (`sent`) · the reduction delay · the snapshot
+//!   cache received on this socket.
 //!
-//! ## ★순수 — Tauri·소켓·tokio·시계 모름★
-//! 시각은 호출자가 넣는다(`now`). 메서드는 결과만 돌려주고 소켓 쓰기·emit·타이머 기동은 호출자 몫이다 —
-//! 그래서 시험은 가짜 시각으로 결정론이다(`cargo test -p engram-dashboard --test lib_unit`).
+//! ## ★Pure — knows nothing of Tauri · sockets · tokio · clocks★
+//! Time is supplied by the caller (`now`). Methods only return results, and socket writes · emit · timer starts are the caller's job —
+//! so tests are deterministic with a fake time (`cargo test -p engram-dashboard --test lib_unit`).
 //!
-//! ## ★한 직렬 경로 — 보낼 집합은 연결 태스크만 꺼낸다★
-//! 관심을 바꾸는 쪽(레이아웃 재계산 · 숨김 · 줄임 타이머)은 집합 없는 넛지만 넣고, 연결 태스크가 그것을 꺼낼
-//! 때 [`UsageInterest::sync`] 로 **그때의** 관심을 읽어 보낸다 — 읽는 순서 = 보내는 순서라 소켓의 마지막 한
-//! 장이 늘 최신 관심이다. 호출자가 락 안에서 집합을 읽어 락 밖에서 보내는 모양은 두 변경이 읽기와 전송 사이에서
-//! 엇갈리면 옛 집합이 마지막으로 닿는다 — 되살리지 말 것(TRD §3 #74). 그래서 [`InterestAction`] 은 집합을
-//! 싣지 않고, 연결 태스크 전용 메서드(`sync`·`on_socket_open`·`on_socket_lost`·`on_snapshot`)는 `daemon_client`
-//! 밖에 열지 않는다.
+//! ## ★One serial path — only the connection task takes out the set to send★
+//! The side that changes interest (layout recompute · hide · reduction timer) puts in only a nudge with no set, and when the connection task takes it out it
+//! reads **the then-current** interest with [`UsageInterest::sync`] and sends — read order = send order, so the last one
+//! on the socket is always the latest interest. The shape where the caller reads the set inside the lock and sends outside the lock lets the old set arrive last if two changes
+//! cross between the read and the send — do not revive it (TRD §3 #74). So [`InterestAction`] does not
+//! carry a set, and the connection-task-only methods (`sync`·`on_socket_open`·`on_socket_lost`·`on_snapshot`) are not opened outside
+//! `daemon_client`.
 //!
-//! ## ★소켓 표식 가드★
-//! 연결 태스크가 부르는 메서드는 모두 자기 소켓 표식(`socket_epoch` — ADR-0195 · `0` = 소켓 없음)을 싣고,
-//! 지금 표식이 아니면(여닫기의 열기는 본 가장 큰 표식보다 크지 않으면) 아무것도 안 한다 — 승계로 밀려난
-//! 태스크의 늦은 호출이 새 소켓의 `sent`·캐시를 덮지 못하게. 대소 비교가 뜻을 갖는 것은 표식 채번기가
-//! 되감기지 않기 때문이고(`lifecycle.rs`), 그래서 셸 프로세스 수명 안에서만 성립한다.
+//! ## ★Socket marker guard★
+//! Every method the connection task calls carries its own socket marker (`socket_epoch` — ADR-0195 · `0` = no socket) and
+//! does nothing if it is not the current marker (for the open of open/close, if it is not larger than the largest marker seen) — so that a late call from a task
+//! superseded by succession cannot overwrite the new socket's `sent` · cache. Magnitude comparison has meaning because the marker numbering counter
+//! is never rewound (`lifecycle.rs`), so it holds only within the shell process lifetime.
 //!
-//! ## 락 차례
-//! 이 상태를 감싸는 락은 `ViewManager → 사용량 관심 → lifecycle` 차례의 가운데다 — 잎이 **아니다**(넛지를
-//! 넣는 자리가 lifecycle 락을 잡는다). 이 파일은 락을 모른다.
+//! ## Lock order
+//! The lock wrapping this state is in the middle of the `ViewManager → 사용량 관심 → lifecycle` order — it is **not** a leaf (the place that
+//! puts in a nudge takes the lifecycle lock). This file does not know about locks.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
@@ -43,14 +43,14 @@ use engram_dashboard_protocol::{
 use crate::layout::manager::WindowLabel;
 use crate::layout::{LayoutNode, SlotContent, ViewManager};
 
-/// 관심이 줄 때 데몬에 보내기까지 기다리는 시간 — 곧 되돌아오는 줄임(다른 탭으로 갔다 돌아오기 · 표시 토글을
-/// 껐다 켜기 · 트레이로 숨겼다 되살리기 · 슬롯·탭을 닫고 1.5초 안에 다시 놓기)을 데몬에 보내지 않으려는 창이다.
-/// 늘어남은 기다리지 않는다. ★슬롯을 다른 창으로 옮기기는 이 창에 기대지 않는다★ — 원본 슬롯이 새 창에 붙는
-/// 단계까지 남았다가 그 붙이기와 같은 락 안에서 닫히므로 관심이 애초에 줄지 않는다
+/// The time to wait before sending to the daemon when interest shrinks — a window to avoid sending to the daemon reductions that soon come back (going to another tab and returning · toggling a display switch
+/// off and on · hiding to the tray and reviving · closing a slot·tab and putting it back within 1.5 seconds).
+/// Growth is not waited for. ★Moving a slot to another window does not rely on this delay★ — the source slot
+/// remains until the step that attaches it to the new window and is closed inside the same lock as that attaching, so interest does not shrink in the first place
 /// (`layout::apply::move_slot_to_window`).
 pub const USAGE_INTEREST_SHRINK_DELAY: Duration = Duration::from_millis(1500);
 
-/// 숨김 표시가 없는 창마다 **활성 탭**의 사용량 슬롯이 켠 회사의 합집합.
+/// The union of the companies turned on by the usage slots of the **active tab** of every window that has no hidden mark.
 pub fn interest_from_layout(
     mgr: &ViewManager,
     hidden: &BTreeSet<WindowLabel>,
@@ -75,7 +75,7 @@ pub fn interest_from_layout(
     interest
 }
 
-/// 어느 탭이든(활성 아닌 탭 · 숨은 창 포함) 사용량 슬롯이 있는 창 — 켠 회사가 하나도 없는 슬롯도 든다.
+/// Windows that have a usage slot in any tab (inactive tabs · hidden windows included) — slots with no company turned on are included too.
 pub fn usage_slot_windows(mgr: &ViewManager) -> BTreeSet<WindowLabel> {
     mgr.windows
         .iter()
@@ -110,37 +110,37 @@ fn for_each_usage_slot(node: &LayoutNode, visit: &mut dyn FnMut(bool, bool)) {
     }
 }
 
-/// 줄임 지연 한 번의 세대. 지연 중에 관심이 다시 바뀌면 새 세대가 서거나 지연이 무효가 되어, 뒤늦게 깬 옛
-/// 타이머는 [`UsageInterest::deferral_elapsed`] 에서 `false` 를 받는다.
+/// The generation of one reduction delay. If interest changes again during the delay, a new generation stands or the delay becomes invalid, and an old
+/// timer that wakes late gets `false` in [`UsageInterest::deferral_elapsed`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShrinkGen(u64);
 
-/// 관심 재계산이 호출자에게 시키는 일 — `sent`(이 소켓에 마지막으로 보낸 집합)와 비교한 결과다. 버리면 늘어남이
-/// 데몬에 안 가거나 줄임이 영영 안 간다.
+/// What interest recomputation tells the caller to do — the result of comparing with `sent` (the set last sent on this socket). If discarded, growth does not
+/// reach the daemon or the reduction never does.
 #[must_use]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterestAction {
-    /// 할 일이 없다 — 관심 = `sent`(대기 중이던 줄임은 무효가 됐다), 또는 같은 관심의 줄임이 이미 대기 중이다
-    /// (그 세대·기한·타이머가 그대로 유효하다).
+    /// Nothing to do — interest = `sent` (a waiting reduction became invalid), or a reduction to the same interest is already waiting
+    /// (its generation · deadline · timer are still valid).
     Unchanged,
-    /// 관심에 `sent` 밖의 회사가 있다 — 곧바로 넛지 한 장.
+    /// Interest has a company outside `sent` — one nudge right away.
     Nudge,
-    /// 관심 ⊊ `sent` — `deadline` 에 [`UsageInterest::deferral_elapsed`]`(gen)` 를 불러 `true` 면 넛지 한 장.
+    /// Interest ⊊ `sent` — call [`UsageInterest::deferral_elapsed`]`(gen)` at `deadline`, and if `true`, one nudge.
     Defer { gen: ShrinkGen, deadline: Instant },
 }
 
-/// [`UsageInterest::on_snapshot`] 의 결과.
+/// The result of [`UsageInterest::on_snapshot`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SnapshotOutcome {
-    /// 그 스냅숏을 전달할 창(= [`usage_slot_windows`] 의 마지막 값). revision 과 무관하게 전달한다 — 가르는 것은
-    /// 웹뷰다. 지금 소켓의 스냅숏이 아니면 빈다.
+    /// The windows to deliver that snapshot to (= the last value of [`usage_slot_windows`]). It is delivered regardless of revision — telling them apart is
+    /// the webview's job. It is empty if it is not a snapshot of the current socket.
     pub labels: Vec<WindowLabel>,
-    /// 같은 소켓에 곧바로 쓸 `UsageSubscribe` 집합 — 데몬이 실어 온 구독 집합이 셸이 데몬에 있기를 바라는
-    /// 집합과 다를 때만 선다. 다를 때마다 선다(억제 없음 — [`UsageInterest::on_snapshot`]).
+    /// The `UsageSubscribe` set to write straight to the same socket — it stands only when the subscription set the daemon carried differs from the
+    /// set the shell wants to have on the daemon. It stands every time it differs (no suppression — [`UsageInterest::on_snapshot`]).
     pub resend: Option<BTreeSet<AgentBackendKind>>,
 }
 
-/// 웹뷰 pull 에 건넬 것 — 캐시 전부(핸드오프 보정 뒤, 회사 순)와 지금 소켓 표식. 소켓이 없으면 `0` 과 빈 목록.
+/// What to hand to a webview pull — the whole cache (after handoff correction, in company order) and the current socket marker. If there is no socket, `0` and an empty list.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WebviewUsageSnapshot {
     pub socket_epoch: u64,
@@ -153,11 +153,11 @@ struct Cached {
     received: Instant,
 }
 
-/// 셸 하나의 사용량 관심 상태. 셸이 여는 데몬 연결은 하나라 캐시 열쇠 (연결, 회사) 의 연결 칸은 「지금 소켓」
-/// 곧 `socket_epoch` 다 — 소켓이 바뀌면 캐시를 비운다.
+/// The usage interest state of one shell. The shell opens one daemon connection, so the connection field of the cache key (connection, company) is 「지금 소켓」 (the current socket),
+/// that is `socket_epoch` — when the socket changes the cache is emptied.
 #[derive(Debug, Default)]
 pub struct UsageInterest {
-    /// 셸이 숨긴 창(트레이). 소멸한 창의 label 은 [`UsageInterest::forget_window`] 가 지운다.
+    /// Windows the shell hid (tray). The label of a destroyed window is erased by [`UsageInterest::forget_window`].
     hidden: BTreeSet<WindowLabel>,
     interest: BTreeSet<AgentBackendKind>,
     usage_windows: BTreeSet<WindowLabel>,
@@ -166,8 +166,8 @@ pub struct UsageInterest {
     sent: BTreeSet<AgentBackendKind>,
     cache: BTreeMap<AgentBackendKind, Cached>,
     shrink_seq: u64,
-    /// ★불변식 — 서 있으면 `interest ⊊ sent` 이고 `interest` 는 그 줄임을 세운 관심 그대로다★(줄임을 세우는
-    /// 것도 무르는 것도 재계산 · 보냄 · 소켓 여닫기뿐이고, 그동안 `sent` 를 바꾸는 자리는 줄임을 무른다).
+    /// ★Invariant — while standing, `interest ⊊ sent` and `interest` is exactly the interest that set up that reduction★ (setting up a reduction
+    /// and cancelling it are only recompute · send · socket open/close, and any place that changes `sent` in the meantime cancels the reduction).
     shrink_pending: Option<ShrinkGen>,
 }
 
@@ -176,11 +176,11 @@ impl UsageInterest {
         Self::default()
     }
 
-    /// 레이아웃·보임이 바뀐 뒤 관심과 방송 받을 창을 새로 계산한다 — ViewManager 락 안에서 부른다.
+    /// After layout · visibility changes, recompute the interest and the windows to receive broadcasts — called inside the ViewManager lock.
     ///
-    /// ★숨김 표시는 여기서 지우지 않는다★ — 모델에 아직 없는 label 의 표시도 남긴다: 새 창으로 슬롯 옮기기는
-    /// OS 창을 먼저 열고(phase B) 락을 놓았다가 모델 창을 더하므로(phase C), 그 틈의 트레이 숨김이 지워지면
-    /// 숨은 팝아웃이 보임으로 센다. 지우는 것은 창 소멸뿐이다([`Self::forget_window`]).
+    /// ★The hidden mark is not erased here★ — a mark for a label not yet in the model is also kept: moving a slot to a new window
+    /// opens the OS window first (phase B), releases the lock, and then adds the model window (phase C), so if the tray hide in that gap were erased,
+    /// a hidden pop-out would be counted as visible. Only window destruction erases it ([`Self::forget_window`]).
     pub(super) fn recompute(&mut self, mgr: &ViewManager, now: Instant) -> InterestAction {
         let before = std::mem::replace(&mut self.interest, interest_from_layout(mgr, &self.hidden));
         self.usage_windows = usage_slot_windows(mgr);
@@ -188,8 +188,8 @@ impl UsageInterest {
             self.shrink_pending = None;
             InterestAction::Nudge
         } else if self.shrink_pending.is_some() && self.interest == before {
-            // 같은 줄임이 이미 대기 중이다 — 세대·기한을 그대로 두어 관계없는 재계산이 줄임을 미루지 못하게 한다
-            // (TRD §1-7 「recompute」 · §3 #91 — 같은 관심이면 새 세대를 뽑지 않는다).
+            // The same reduction is already waiting — leave the generation · deadline as they are so an unrelated recompute cannot postpone the reduction
+            // (TRD §1-7 「recompute」 · §3 #91 — with the same interest a new generation is not drawn).
             InterestAction::Unchanged
         } else if self.interest != self.sent {
             self.shrink_seq += 1;
@@ -205,8 +205,8 @@ impl UsageInterest {
         }
     }
 
-    /// 창 `label` 이 소멸했다(팝업 소멸 정리가 모델에서 창을 지운 같은 락 안에서) — 숨김 표시를 지우고
-    /// [`Self::recompute`] 와 같다. label 은 다시 쓰이지 않아 남겨 두면 숨긴 채 닫힌 팝아웃마다 한 칸씩 샌다.
+    /// Window `label` was destroyed (inside the same lock in which popup destruction cleanup erased the window from the model) — erase the hidden mark and
+    /// act the same as [`Self::recompute`]. A label is not reused, so if left it leaks one entry for every pop-out that closed while hidden.
     pub(super) fn forget_window(
         &mut self,
         label: &str,
@@ -217,7 +217,7 @@ impl UsageInterest {
         self.recompute(mgr, now)
     }
 
-    /// 셸이 창 `label` 을 숨기거나(`false`) 다시 보인 뒤(`true`) — 숨김 표시를 고치고 [`Self::recompute`] 와 같다.
+    /// After the shell hides (`false`) or re-shows (`true`) window `label` — fix the hidden mark and act the same as [`Self::recompute`].
     pub(super) fn set_visible(
         &mut self,
         label: &str,
@@ -233,10 +233,10 @@ impl UsageInterest {
         self.recompute(mgr, now)
     }
 
-    /// 줄임 타이머가 기한에 부른다. `true` = 그 줄임이 아직 유효했다 → 넛지 한 장.
+    /// The reduction timer calls it at the deadline. `true` = that reduction was still valid → one nudge.
     ///
-    /// ★대기는 전달이 아니라 기한에 끝난다★ — 그 넛지가 사라져도(명령 채널 포화) 대기는 이미 끝났으므로 다음
-    /// 스냅숏의 대조가 관심과 비교해 고친다([`Self::on_snapshot`]).
+    /// ★The wait ends at the deadline, not at delivery★ — even if that nudge disappears (command channel saturated), the wait has already ended, so the next
+    /// snapshot's cross-check compares with interest and fixes it ([`Self::on_snapshot`]).
     pub(super) fn deferral_elapsed(&mut self, gen: ShrinkGen) -> bool {
         if self.shrink_pending == Some(gen) {
             self.shrink_pending = None;
@@ -246,14 +246,14 @@ impl UsageInterest {
         }
     }
 
-    /// 연결 태스크가 소켓 `socket_epoch` 에 쓸 `UsageSubscribe` 집합 — `None` = 쓸 것 없음.
+    /// The `UsageSubscribe` set the connection task will write to socket `socket_epoch` — `None` = nothing to write.
     ///
-    /// - `force` = ⟳ 새로고침 프레임을 쓰기 직전 — 늘 관심을 준다(같은 집합이면 데몬에서 멱등).
-    /// - 넛지를 꺼낼 때(`force = false`): 대기 중인 줄임이 있으면 관심에 `sent` 밖 회사가 있을 때만(순수 줄임은
-    ///   기한의 몫), 없으면 관심 ≠ `sent` 일 때만.
+    /// - `force` = right before writing a ⟳ refresh frame — always gives the interest (idempotent on the daemon if the set is the same).
+    /// - When taking out a nudge (`force = false`): if a reduction is waiting, only when interest has a company outside `sent` (a pure reduction
+    ///   is up to the deadline), otherwise only when interest ≠ `sent`.
     ///
-    /// `Some` 이면 `sent := 관심` · 대기 중인 줄임 무효. `sent` 기준이라 거푸 불러도 둘째부터 `None` 이다(멱등 —
-    /// 새 소켓의 `cmd_tx` 저장 직후 넛지가 여기 기댄다). 지금 소켓이 아니면 `None`.
+    /// If `Some`, `sent := 관심` · a waiting reduction becomes invalid. It is based on `sent`, so even if called repeatedly the second onward is `None` (idempotent —
+    /// the nudge right after storing the new socket's `cmd_tx` relies on this). `None` if it is not the current socket.
     pub(super) fn sync(
         &mut self,
         socket_epoch: u64,
@@ -277,11 +277,11 @@ impl UsageInterest {
         Some(self.interest.clone())
     }
 
-    /// 새 소켓이 명령 창구를 연 뒤, 명령 채널을 읽기 전에 부른다 — `Some` 이면 그 집합을 새 소켓에 직접 한 장.
+    /// Called after the new socket opened the command endpoint, before reading the command channel — if `Some`, one frame of that set directly to the new socket.
     ///
-    /// 본 가장 큰 표식보다 큰 표식에서만 움직인다(그 밖엔 `None` · 아무것도 안 바뀜). 움직이면 캐시를 비우고
-    /// `sent := 관심` · 대기 중인 줄임 무효이며, 관심이 비었으면 보낼 것이 없어 `None` 이다(새 연결의 데몬 쪽
-    /// 구독은 빈 집합이다).
+    /// It moves only on a marker larger than the largest one seen (otherwise `None` · nothing changes). When it moves it empties the cache and
+    /// `sent := 관심` · a waiting reduction becomes invalid, and if interest is empty there is nothing to send so `None` (the daemon-side
+    /// subscription of a new connection is the empty set).
     pub(super) fn on_socket_open(
         &mut self,
         socket_epoch: u64,
@@ -302,8 +302,8 @@ impl UsageInterest {
         (!self.interest.is_empty()).then(|| self.interest.clone())
     }
 
-    /// 소켓 `socket_epoch` 가 끝났다(사유 무관). 지금 소켓일 때만 캐시를 비우고 `sent := ∅` · 소켓 없음으로.
-    /// 대기 중인 줄임도 무효다 — 줄일 `sent` 가 사라졌고, 새 소켓은 열 때 관심을 통째로 다시 보낸다.
+    /// Socket `socket_epoch` ended (regardless of reason). Only if it is the current socket, empty the cache and set `sent := ∅` · no socket.
+    /// A waiting reduction is invalid too — the `sent` to reduce is gone, and a new socket sends the interest in full again on open.
     pub(super) fn on_socket_lost(&mut self, socket_epoch: u64) {
         if !self.is_current(socket_epoch) {
             self.log_foreign("on_socket_lost", socket_epoch);
@@ -315,18 +315,18 @@ impl UsageInterest {
         self.socket_epoch = 0;
     }
 
-    /// 소켓 `socket_epoch` 로 스냅숏 한 장이 왔다 — `subscribed` = 데몬이 그 한 장에 실은 그 연결의 구독 집합.
+    /// One snapshot arrived on socket `socket_epoch` — `subscribed` = the subscription set of that connection that the daemon carried in that one snapshot.
     ///
-    /// - 캐시 = 회사당 **최고** revision — 더 작은 revision 이 늦게 닿아도 바꾸지 않고, 같거나 크면 바꾼다(받은
-    ///   시각 = `now`). 데몬이 첫 스냅숏을 명부 락 밖에서 보내 마지막 도착이 최고가 아닐 수 있다.
-    /// - ★대조★: 바라는 집합 = 대기 중인 줄임이 있으면 `sent`, 없으면 관심. `subscribed` 가 그것과 다르면
-    ///   `resend` = 바라는 집합이다. 대기 중인 줄임이 있으면 대기·`sent` 를 그대로 둔다 — 1.5초 창 안에 닿은 낡은
-    ///   한 장이 줄임을 앞당기면 안 된다. 없으면 `sent := 관심`.
-    /// - ★어긋날 때마다 되보낸다 — 억제하지 말 것★: 같은 짝을 억제하던 모양은 앞선 토글 왕복이 남긴 낡은 기록과
-    ///   데몬이 거절한 교정 재전송이 같은 짝을 다시 싣고 와 필요한 재전송을 막았다(TRD §3 #84). 되먹임이 유한한
-    ///   것은 데몬의 같은 집합 교체가 첫 스냅숏을 안 내기 때문이다. 어긋남마다 `debug` 한 줄.
+    /// - Cache = **highest** revision per company — a smaller revision arriving late does not change it, and an equal or larger one does (receipt
+    ///   time = `now`). The daemon sends the first snapshot outside the registry lock, so the last to arrive may not be the highest.
+    /// - ★Cross-check★: wanted set = `sent` if a reduction is waiting, otherwise interest. If `subscribed` differs from it,
+    ///   `resend` = the wanted set. If a reduction is waiting, the wait · `sent` are left as they are — a stale
+    ///   snapshot arriving inside the 1.5-second window must not pull the reduction forward. Otherwise `sent := 관심`.
+    /// - ★Resend on every mismatch — do not suppress★: in the shape that suppressed the same pair, a stale record left by an earlier toggle round trip and
+    ///   a correction resend the daemon rejected brought the same pair back and blocked a needed resend (TRD §3 #84). The feedback is finite
+    ///   because the daemon's same-set replacement does not emit a first snapshot. One `debug` line per mismatch.
     ///
-    /// 지금 소켓이 아니면 아무것도 안 한다(빈 결과 · 캐시 불변).
+    /// If it is not the current socket, nothing is done (empty result · cache unchanged).
     pub(super) fn on_snapshot(
         &mut self,
         socket_epoch: u64,
@@ -379,11 +379,11 @@ impl UsageInterest {
         }
     }
 
-    /// 웹뷰 pull 이 부른다 — 캐시 전부를 핸드오프 보정해 건넨다(데몬 왕복 없음).
+    /// Called by a webview pull — hands over the whole cache with handoff correction (no daemon round trip).
     ///
-    /// ★핸드오프 보정★: 받은 뒤 흐른 정수 초 `d` 만큼 상대 칸을 옮긴다 — 창마다(모델별 포함) `age_secs + d` ·
-    /// `Failed.next_attempt_in_secs`·`Rejected.retry_in_secs` 는 `− d`(0 포화). 안 하면 오래된 캐시(길게는
-    /// 15분)가 값을 그만큼 젊게·대기를 그만큼 길게 보인다.
+    /// ★Handoff correction★: shifts relative fields by the whole seconds `d` elapsed since receipt — `age_secs + d` per window (per model included) ·
+    /// `Failed.next_attempt_in_secs` · `Rejected.retry_in_secs` get `− d` (saturating at 0). Without it, an old cache (as long as
+    /// 15 minutes) shows the value that much younger · the wait that much longer.
     pub fn snapshot_for_webview(&self, now: Instant) -> WebviewUsageSnapshot {
         WebviewUsageSnapshot {
             socket_epoch: self.socket_epoch,
@@ -424,7 +424,7 @@ fn handed_off(snapshot: &UsageLimitSnapshot, elapsed_secs: u64) -> UsageLimitSna
     out.model_scoped
         .iter_mut()
         .for_each(|scoped| age(&mut scoped.window));
-    // 와일드카드를 두지 않는다 — 상대 초를 싣는 상태가 늘면 여기서 컴파일이 깨져야 한다.
+    // No wildcard is kept — if a state that carries relative seconds is added, the compile must break here.
     match &mut out.state {
         UsageVendorState::Failed {
             next_attempt_in_secs,
@@ -485,7 +485,7 @@ mod tests {
         mgr.windows[MAIN_WINDOW_LABEL].active
     }
 
-    /// main 의 활성 탭 = 사용량 슬롯 하나(`show_claude`·`show_codex`).
+    /// main's active tab = one usage slot (`show_claude` · `show_codex`).
     fn main_with(show_claude: bool, show_codex: bool) -> (ViewManager, Uuid) {
         let mut mgr = ViewManager::new();
         let view = main_active(&mgr);
@@ -519,7 +519,7 @@ mod tests {
         }
     }
 
-    /// 소켓 1 이 열려 있고 `sent` = 관심인 상태(관심은 `mgr` 에서).
+    /// A state where socket 1 is open and `sent` = interest (the interest is from `mgr`).
     fn connected(mgr: &ViewManager, t0: Instant) -> UsageInterest {
         let mut ui = UsageInterest::new();
         let _ = ui.recompute(mgr, t0);
@@ -534,7 +534,7 @@ mod tests {
         }
     }
 
-    // ── 레이아웃 → 관심 ──────────────────────────────────────────────────────────
+    // ── layout → interest ──────────────────────────────────────────────────────────
 
     #[test]
     fn the_active_tab_counts_and_an_inactive_tab_does_not() {
@@ -554,7 +554,7 @@ mod tests {
         assert_eq!(interest_from_layout(&mgr, &labels(&[])), set(&[Claude]));
     }
 
-    /// 숨김 표시만 뺀다 — 최소화는 셸이 모르므로 숨김 표시가 없는 창은 (최소화돼 있어도) 보임이다.
+    /// Only the hidden mark is subtracted — the shell does not know minimize, so a window with no hidden mark is visible (even if minimized).
     #[test]
     fn only_the_hidden_mark_drops_a_window() {
         let (mgr, _) = main_with(true, true);
@@ -610,7 +610,7 @@ mod tests {
         );
     }
 
-    /// 슬롯 옮기기 phase A 의 임시 뷰는 어느 창의 탭도 아니다.
+    /// The temporary view of slot move phase A is not any window's tab.
     #[test]
     fn a_view_owned_by_no_window_drops_out() {
         let (mut mgr, slot) = main_with(true, true);
@@ -646,8 +646,8 @@ mod tests {
         assert!(ui.usage_windows.is_empty());
     }
 
-    /// 새 창으로 옮기기는 OS 창을 먼저 열고 락을 놓은 뒤 모델 창을 더한다 — 그 틈의 트레이 숨김이 살아남아야
-    /// 모델 창이 선 뒤에도 그 팝아웃이 숨은 창으로 센다.
+    /// Moving to a new window opens the OS window first, releases the lock, and then adds the model window — the tray hide in that gap must survive
+    /// so that the pop-out still counts as a hidden window after the model window stands.
     #[test]
     fn a_hide_mark_before_the_model_window_exists_survives_until_forgotten() {
         let t0 = Instant::now();
@@ -675,7 +675,7 @@ mod tests {
         assert!(ui.hidden.is_empty());
     }
 
-    // ── 늘어남·줄어듦 (가짜 시각) ─────────────────────────────────────────────────
+    // ── growth · shrinkage (fake time) ─────────────────────────────────────────────────
 
     #[test]
     fn growth_nudges_at_once_and_sync_sends_it_once() {
@@ -716,7 +716,7 @@ mod tests {
         assert_eq!(ui.sync(1, false), None);
     }
 
-    /// 트레이로 숨겼다 되살리기·슬롯을 닫고 곧 다시 놓기처럼 기한 안에 `sent` 로 돌아오면 데몬에 아무것도 안 간다.
+    /// If it returns to `sent` within the deadline, like hiding to the tray and reviving · closing a slot and soon putting it back, nothing goes to the daemon.
     #[test]
     fn returning_to_sent_within_the_delay_cancels_the_shrink() {
         let t0 = Instant::now();
@@ -733,7 +733,7 @@ mod tests {
         assert!(!ui.deferral_elapsed(gen), "무효가 된 대기의 뒤늦은 기한");
         assert_eq!(ui.sync(1, false), None);
 
-        // 레이아웃 쪽도 같다 — 슬롯을 비웠다가(줄임) 1.5초 안에 다른 창에 다시 놓으면(원상) 아무것도 안 간다.
+        // The layout side is the same — if a slot is emptied (reduction) and put back in another window within 1.5 seconds (restored), nothing goes.
         let view = main_active(&mgr);
         let slot = root_slot(&mgr, view);
         mgr.set_slot_content(view, slot, SlotContent::Empty)
@@ -771,8 +771,8 @@ mod tests {
         assert_eq!(ui.sync(1, false), Some(set(&[])));
     }
 
-    /// 대기 중인 줄임과 같은 관심을 내는 재계산(관계없는 레이아웃 변경)은 세대·기한을 그대로 둔다 — 잇단
-    /// 재계산이 줄임을 미루지 못한다.
+    /// A recompute that yields the same interest as a waiting reduction (an unrelated layout change) leaves the generation · deadline as they are — successive
+    /// recomputes cannot postpone the reduction.
     #[test]
     fn unrelated_recomputes_during_a_pending_shrink_do_not_postpone_it() {
         let t0 = Instant::now();
@@ -838,7 +838,7 @@ mod tests {
         assert_eq!(ui.sync(1, false), Some(set(&[Claude])));
     }
 
-    /// 한 직렬 경로 ① — 두 재계산의 넛지가 엇갈려 처리돼도 소켓의 마지막 한 장 = 마지막 관심.
+    /// One serial path ① — even if the nudges of two recomputes are handled crossed, the last one on the socket = the last interest.
     #[test]
     fn crossed_nudges_still_leave_the_latest_interest_last() {
         let t0 = Instant::now();
@@ -847,18 +847,18 @@ mod tests {
         let view = main_active(&mgr);
 
         let slot = put(&mut mgr, view, usage(true, false));
-        assert_eq!(ui.recompute(&mgr, t0), InterestAction::Nudge); // 넛지 A
+        assert_eq!(ui.recompute(&mgr, t0), InterestAction::Nudge); // nudge A
         mgr.set_slot_content(view, slot, usage(true, true)).unwrap();
-        assert_eq!(ui.recompute(&mgr, t0), InterestAction::Nudge); // 넛지 B
+        assert_eq!(ui.recompute(&mgr, t0), InterestAction::Nudge); // nudge B
 
         let mut wire = Vec::new();
-        // 연결 태스크가 넛지 둘을 어느 차례로 꺼내든 읽는 것은 그때의 관심이다.
+        // In whatever order the connection task takes out the two nudges, what it reads is the then-current interest.
         wire.extend(ui.sync(1, false));
         wire.extend(ui.sync(1, false));
         assert_eq!(wire, vec![set(&[Claude, Codex])]);
     }
 
-    // ── 대조 (데몬이 실어 온 subscribed) ───────────────────────────────────────────
+    // ── cross-check (subscribed carried by the daemon) ───────────────────────────────────────────
 
     #[test]
     fn a_mismatch_without_a_pending_shrink_resends_the_interest() {
@@ -868,7 +868,7 @@ mod tests {
         let view = main_active(&mgr);
         mgr.set_slot_content(view, slot, usage(true, true)).unwrap();
         assert_eq!(ui.recompute(&mgr, t0), InterestAction::Nudge);
-        // 넛지가 사라졌다(명령 채널 포화) — 데몬은 여전히 claude 만 구독한다.
+        // The nudge disappeared (command channel saturated) — the daemon still subscribes only to claude.
         let out = ui.on_snapshot(1, &snap(Claude, 1), &[Claude], t0);
         assert_eq!(out.resend, Some(set(&[Claude, Codex])));
         assert_eq!(ui.sent, set(&[Claude, Codex]));
@@ -888,7 +888,7 @@ mod tests {
         assert_eq!(out.labels, vec![MAIN_WINDOW_LABEL.to_string()]);
     }
 
-    /// 한 직렬 경로 ② — 줄임 지연 중 빠질 회사의 방송은 데몬이 아직 옛 `sent` 를 구독한 정당한 것이다.
+    /// One serial path ② — a broadcast of a company about to drop out during the reduction delay is legitimate, since the daemon still subscribes to the old `sent`.
     #[test]
     fn during_a_pending_shrink_subscribed_equal_to_sent_is_left_alone() {
         let t0 = Instant::now();
@@ -904,7 +904,7 @@ mod tests {
         assert_eq!(ui.sent, set(&[Claude, Codex]));
     }
 
-    /// 1.5초 창 안에 닿은 낡은 한 장은 `sent` 를 되보낼 뿐 줄임을 앞당기지 않는다.
+    /// A stale snapshot that arrives inside the 1.5-second window only resends `sent` and does not pull the reduction forward.
     #[test]
     fn during_a_pending_shrink_a_mismatch_resends_sent_and_keeps_waiting() {
         let t0 = Instant::now();
@@ -922,7 +922,7 @@ mod tests {
         assert_eq!(ui.sync(1, false), Some(set(&[Claude])));
     }
 
-    /// 줄임 넛지가 기한 뒤에 사라졌다 — 빠질 회사의 다음 스냅숏이 고친다.
+    /// The reduction nudge disappeared after the deadline — the next snapshot of the company about to drop out fixes it.
     #[test]
     fn a_lost_shrink_nudge_is_healed_by_the_next_snapshot() {
         let t0 = Instant::now();
@@ -931,14 +931,14 @@ mod tests {
         mgr.set_slot_content(main_active(&mgr), slot, usage(true, false))
             .unwrap();
         let gen = defer_gen(ui.recompute(&mgr, t0));
-        assert!(ui.deferral_elapsed(gen)); // 넛지 한 장 → 채널 포화로 버려짐(sync 없음)
+        assert!(ui.deferral_elapsed(gen)); // One nudge → discarded by channel saturation (no sync)
 
         let out = ui.on_snapshot(1, &snap(Codex, 3), &[Claude, Codex], t0);
         assert_eq!(out.resend, Some(set(&[Claude])));
         assert_eq!(ui.sent, set(&[Claude]));
     }
 
-    /// 끈질긴 어긋남 — 같은 `subscribed` 가 세 번 오면 세 번 되보내고, 한 장마다 debug 한 줄.
+    /// Persistent mismatch — if the same `subscribed` comes three times, it is resent three times, with one debug line per snapshot.
     #[test]
     fn a_persistent_mismatch_resends_every_time_and_logs_each() {
         let t0 = Instant::now();
@@ -955,9 +955,9 @@ mod tests {
                 .count()
         };
         let resends = tracing::subscriber::with_default(DebugLines(lines.clone()), || {
-            // 콜사이트 관심은 프로세스 전역 캐시다 — 다른 시험 스레드가 같은 콜사이트를 이 구독자가 서기 전의
-            // 구독자 목록으로 등록하는 중이면 그 등록이 끝난 뒤 캐시가 「안 받음」으로 남는다(실측 — 병렬
-            // 실행에서 0 줄). 그래서 한 줄이 잡힐 때까지 캐시를 다시 짓고 되찔러 본 뒤 세기 시작한다.
+            // The callsite interest is a process-global cache — if another test thread is registering the same callsite with the subscriber list from before this subscriber stood,
+            // after that registration ends the cache is left as 「안 받음」 (not received) (measured — 0 lines in a parallel
+            // run). So rebuild the cache and re-poke until one line is caught, and only then start counting.
             for rev in 1..=100 {
                 tracing::callsite::rebuild_interest_cache();
                 ui.on_snapshot(1, &snap(Claude, rev), &[Claude], t0);
@@ -967,7 +967,7 @@ mod tests {
             }
             assert!(mismatches(&lines) > 0, "debug 줄을 잡을 수 없다");
             lines.lock().unwrap().clear();
-            // 세는 세 번도 매번 캐시를 다시 짓는다 — 위 경합은 한 번 잡힌 뒤에도 다시 날 수 있다.
+            // The three counted ones also rebuild the cache each time — the race above can occur again even after one has been caught.
             (101..=103)
                 .map(|rev| {
                     tracing::callsite::rebuild_interest_cache();
@@ -991,7 +991,7 @@ mod tests {
         assert!(ui.cache.is_empty());
     }
 
-    // ── ⟳ 강제 ────────────────────────────────────────────────────────────────
+    // ── ⟳ force ────────────────────────────────────────────────────────────────
 
     #[test]
     fn force_sends_even_when_sent_matches_and_cancels_a_pending_shrink() {
@@ -1009,7 +1009,7 @@ mod tests {
         assert_eq!(ui.sync(2, true), None, "지금 소켓이 아니면 강제도 없다");
     }
 
-    // ── 캐시 · 핸드오프 보정 ─────────────────────────────────────────────────────
+    // ── cache · handoff correction ─────────────────────────────────────────────────────
 
     #[test]
     fn the_cache_keeps_the_highest_revision_and_equal_replaces() {
@@ -1120,7 +1120,7 @@ mod tests {
         );
     }
 
-    // ── 소켓 표식 ─────────────────────────────────────────────────────────────
+    // ── socket marker ─────────────────────────────────────────────────────────────
 
     #[test]
     fn a_new_socket_clears_the_cache_and_sends_the_interest() {
@@ -1206,9 +1206,9 @@ mod tests {
         assert_eq!(ui.on_socket_open(2), Some(set(&[Claude])));
     }
 
-    // ── 로그 포획 ─────────────────────────────────────────────────────────────
+    // ── log capture ─────────────────────────────────────────────────────────────
 
-    /// 이 스레드의 debug 줄 메시지.
+    /// This thread's debug line messages.
     struct DebugLines(Arc<Mutex<Vec<String>>>);
 
     struct Message<'a>(&'a mut String);

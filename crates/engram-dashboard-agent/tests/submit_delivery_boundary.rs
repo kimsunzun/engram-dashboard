@@ -1,14 +1,14 @@
-//! ④ 배달 동사(`AgentSession::submit_input_observed`)의 **물리 경계** 회귀망.
+//! ④ A regression net at the **physical boundary** of the delivery verb (`AgentSession::submit_input_observed`).
 //!
-//! 이 파일의 두 항목은 큐 도입이 깨뜨린 두 계약을 각각 잰다. ★둘 다 seam 이 아니라 **실 OS 파이프**를
-//! 지난다★ — 재려는 것이 "무엇을 호출했나" 가 아니라 **수신자가 무엇을 언제 읽었나**이기 때문이다.
+//! The two items in this file each measure one of the two contracts that introducing the queue broke. ★Both go through a **real OS pipe**, not a seam
+//! ★ — because what we want to measure is not "what was called" but **what the receiver read, and when**.
 //!
-//! ★왜 seam 으로는 못 재나(기존 항목이 놓친 자리)★: `session.rs` 의 기존 pacing 회귀 항목은 주입한
-//!   sleeper 가 **불렸는지**만 기록한다. 큐가 생긴 뒤의 결함은 "대기를 안 했다" 가 아니라 "대기를 **엉뚱한
-//!   시점부터** 쟀다" 라서, 호출 기록만 보는 오라클은 그 결함을 그대로 통과시킨다. 실제 read 경계를 봐야
-//!   갈린다.
+//! ★Why a seam cannot measure it (the place the existing item missed)★: the existing pacing regression item in `session.rs` records only
+//!   **whether** the injected sleeper was called. The defect after the queue appeared is not "it did not wait" but "it measured the wait **from the wrong
+//!   moment**", so an oracle that looks only at the call record lets that defect pass as is. Only by looking at the real read boundary
+//!   can they be told apart.
 //!
-//! ★Windows 전용★: 자식이 powershell 이라 Windows 에서만 컴파일·실행한다(프로젝트 전제).
+//! ★Windows only★: the child is powershell, so it compiles and runs only on Windows (a project premise).
 // ADR-0088 · ADR-0038
 #![cfg(windows)]
 
@@ -29,7 +29,7 @@ use engram_dashboard_agent::types::{
     SinkError, SinkId, StatusSink,
 };
 
-// ── 수집 sink: 자식이 되울린 텍스트를 순서대로 모은다 ───────────────────────────────────
+// ── Collecting sink: gathers in order the text the child echoed back ───────────────────────
 #[derive(Clone)]
 struct TextSink {
     id: SinkId,
@@ -70,10 +70,10 @@ impl StatusSink for NoopStatusSink {
     fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
 }
 
-/// 실 파이프 자식 위에 `AgentSession` 을 세운다. ★encoder = `Raw`★ — 그래야 `submit_sequence()` 가
-/// `Some(b"\r")` 이라 이 파일이 재려는 **본문/제출 두 write** 경로가 실제로 돈다.
-/// ★pacing·sleeper 는 운영 기본값 그대로 둔다★(`with_submit_pacing` 로 줄이지 않는다) — 재려는 것이
-/// 그 대기가 만드는 물리 간격이다.
+/// Stands up `AgentSession` on a real pipe child. ★encoder = `Raw`★ — so that `submit_sequence()` is
+/// `Some(b"\r")` and the **body/submit two-write** path this file measures actually runs.
+/// ★Leave pacing · sleeper at the production defaults★ (do not shorten with `with_submit_pacing`) — what we measure is
+/// the physical interval that wait creates.
 fn session_over(script: &str) -> (AgentSession, TextSink) {
     let spec = CommandSpec {
         program: "powershell.exe".into(),
@@ -117,29 +117,29 @@ fn session_over(script: &str) -> (AgentSession, TextSink) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════
-// FINDING 2 — 제출 간격은 **본문이 실제로 나간 뒤**부터 재야 한다
+// FINDING 2 — the submit interval must be measured from **after the body has actually gone out**
 // ═══════════════════════════════════════════════════════════════════════════════════════════
 
-/// ★증명한다★: 제출 바이트(CR)가 **자기만의 read** 로 수신자에게 도착한다 — 즉 본문 꼬리와 한 덩이로
-///   묶이지 않는다. 그것이 `backend::SUBMIT_PACING` 이 실측으로 지키려는 성질 그 자체다(간격이 없으면
-///   claude TUI 가 CR 을 붙여넣은 텍스트의 일부로 읽어 **턴을 시작하지 않는다** — ADR-0038).
+/// ★Proves★: the submit byte (CR) arrives at the receiver with **its own read** — that is, it is not bundled into one chunk with the tail of the body. That is
+///   the very property `backend::SUBMIT_PACING` is meant to keep by measurement (without the interval the
+///   claude TUI reads CR as part of the pasted text and **does not start the turn** — ADR-0038).
 ///
-/// ★오라클★: 자식이 `Read()` 한 번마다 `READ <바이트수> <마지막바이트>` 한 줄을 되울린다. 마지막 줄이
-///   `READ 1 13` 이면 CR 이 홀로 읽힌 것이다. 어떤 줄이든 마지막 바이트가 13 인데 길이가 1 이 아니면
-///   본문과 함께 읽힌 것이고 = 이 결함이다.
+/// ★Oracle★: per `Read()` the child echoes one line `READ <바이트수> <마지막바이트>`. If the last line is
+///   `READ 1 13`, the CR was read alone. If any line has last byte 13 but length not 1, it was read
+///   together with the body, and = this defect.
 ///
-/// ★이 항목이 **고치기 전 코드에서 실제로 실패하는 이유**★: 고치기 전에는 대기를 **큐에 넣은 시각**부터
-///   쟀다. 본문 드레인이 대기보다 오래 걸리면(아래 자식은 그렇게 만들어져 있다) 500ms 가 지나도 본문이
-///   아직 나가는 중이라, 라이터가 본문을 끝내자마자 CR 을 이어 쓴다 → CR 이 본문 꼬리와 같은 read 에
-///   실린다. 고친 뒤에는 본문의 OS 착지를 먼저 확인하고 그 뒤 500ms 를 자므로 파이프가 비어 CR 이 홀로 선다.
+/// ★Why this item **actually fails on the pre-fix code**★: before the fix, the wait was measured from the **time it was put in the queue**.
+///   If draining the body takes longer than the wait (the child below is built that way), the body is still
+///   going out even after 500ms, so the writer writes the CR right after finishing the body → the CR rides in the same read as the tail of the body.
+///   After the fix, it first confirms the body's OS landing and then sleeps 500ms, so the pipe is empty and the CR stands alone.
 ///
-/// ★★리뷰어의 반례가 옳았다는 것을 이 자식이 보여 준다 — 「자식이 stdin 을 안 읽으니 어차피 안 먹힌다」는
-///   변명이 성립하지 않는다★★: 아래 자식은 **쉬지 않고 정상적으로 읽는다.** 그런데도 본문이 파이프
-///   버퍼보다 훨씬 커서 드레인에 여러 주기가 걸리고, 그 사이 간격이 0 으로 무너진다.
+/// ★★This child shows that the reviewer's counterexample was right — the excuse 「자식이 stdin 을 안 읽으니 어차피 안 먹힌다」 (the child does not read stdin, so it would not work anyway)
+///   does not hold★★: the child below **reads normally without rest.** Even so, the body is far larger than the pipe
+///   buffer, so draining takes several cycles, and the interval collapses to 0 in between.
 #[test]
 fn submit_byte_lands_in_its_own_read_even_when_the_body_takes_many_write_cycles() {
-    // 8KiB 씩 읽고 매 read 를 보고한 뒤 잠깐 쉰다 — "정상이지만 느린 수신자". 본문(아래 512KiB+)을
-    //   드레인하는 데 대략 64 주기가 필요해 SUBMIT_PACING(500ms)보다 오래 걸린다.
+    // Reads 8KiB at a time, reports each read, then rests briefly — a "normal but slow receiver". Draining the body (512KiB+ below)
+    //   takes roughly 64 cycles, so it takes longer than SUBMIT_PACING (500ms).
     let script = "\
 $stdin=[Console]::OpenStandardInput();\
 $out=New-Object System.IO.StreamWriter([Console]::OpenStandardOutput());\
@@ -150,8 +150,8 @@ Start-Sleep -Milliseconds 10}";
 
     let (session, sink) = session_over(script);
 
-    // ★8192 의 배수를 피한다★: 딱 떨어지면 본문 마지막 read 가 정확히 경계에서 끝나 CR 이 **우연히**
-    //   홀로 실릴 수 있다 — 그러면 결함이 있어도 통과한다(오라클이 눈먼다).
+    // ★Avoid multiples of 8192★: if it divides exactly, the body's last read ends exactly at the boundary and the CR may **by chance**
+    //   ride alone — then it passes even with the defect (the oracle goes blind).
     const BODY: usize = 512 * 1024 + 777;
     let body = vec![b'x'; BODY];
 
@@ -161,7 +161,7 @@ Start-Sleep -Milliseconds 10}";
         .expect("정상 수신자 상대 배달은 성공해야 한다");
     let elapsed = started.elapsed();
 
-    // 제출까지 마친 뒤 자식이 마지막 read 를 보고할 여유.
+    // Leeway for the child to report its last read after finishing through submit.
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let text = sink.text();
@@ -208,7 +208,7 @@ Start-Sleep -Milliseconds 10}";
     session.kill(Duration::from_secs(5));
 }
 
-/// 실패 메시지가 화면을 덮지 않게 마지막 몇 줄만.
+/// Only the last few lines, so a failure message does not cover the screen.
 fn tail(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let start = lines.len().saturating_sub(6);
@@ -216,25 +216,25 @@ fn tail(text: &str) -> String {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════
-// FINDING 1 — 배달 영수증은 **수락**이 아니라 **착지**를 뜻해야 한다
+// FINDING 1 — the delivery receipt must mean **landing**, not **acceptance**
 // ═══════════════════════════════════════════════════════════════════════════════════════════
 
-/// ★증명한다★: 본문이 실제로는 못 나갔는데 `submit_input_observed` 가 `Ok` 를 내지 않는다.
+/// ★Proves★: `submit_input_observed` does not emit `Ok` when the body actually could not go out.
 ///
-/// ★왜 이것이 CRITICAL 이었나★: 이 동사의 `Ok` 가 그대로 배달 영수증(`InjectReceipt` →
-///   `DeliveryObservation`)이 되고, 원장은 그것을 "배달 성공" 으로 적는다. 수락을 착지로 신고하면
-///   ADR-0088 이 가르려고 존재하는 두 경우가 **정확히 뒤집힌다** — 실제로는 전송이 실패했는데 원장에는
-///   "배달됐고 모델이 무시했다" 로 남는다. "다음 호출이 `Err` 를 낸다" 는 이미 적힌 그 레코드를 고치지 못한다.
+/// ★Why this was CRITICAL★: this verb's `Ok` becomes the delivery receipt as is (`InjectReceipt` →
+///   `DeliveryObservation`), and the ledger records it as "delivery succeeded". Reporting acceptance as landing makes
+///   the two cases ADR-0088 exists to tell apart **exactly flip** — the transmission actually failed, but the ledger
+///   says "delivered and the model ignored it". "The next call gives `Err`" cannot fix a record already written.
 ///
-/// ★이 항목이 **고치기 전 코드에서 실제로 실패하는 이유**★: 고치기 전 `submit_input_observed` 는 큐가
-///   받아 주기만 하면 `Ok(WriteOutcome)` 를 냈다. 아래 자식은 조금 읽고 죽으므로 라이터의 쓰기가 실패하고
-///   본문 대부분이 영영 안 나가는데도 영수증이 나왔다.
+/// ★Why this item **actually fails on the pre-fix code**★: before the fix `submit_input_observed` returned `Ok(WriteOutcome)` as soon as the queue
+///   accepted. The child below dies after reading a little, so the writer's write fails and
+///   most of the body never goes out, yet a receipt was issued.
 ///
-/// ★대조군을 같이 둔다★: 멀쩡한 수신자에게는 그대로 `Ok` 여야 한다 — 없으면 "전부 실패시켜서" 통과하는
-///   구현이 이 항목을 만족시킨다.
+/// ★Put a control group alongside★: for a healthy receiver it must still be `Ok` — without it, an implementation that passes by "failing everything"
+///   would satisfy this item.
 #[test]
 fn receipt_is_refused_when_the_body_never_reaches_the_child() {
-    // 대조군 먼저 — 계속 읽는 자식에게는 배달이 성립한다.
+    // Control group first — delivery holds for a child that keeps reading.
     {
         let script = "\
 $stdin=[Console]::OpenStandardInput();\
@@ -247,7 +247,7 @@ while(($n=$stdin.Read($buf,0,$buf.Length)) -gt 0){}";
         session.kill(Duration::from_secs(5));
     }
 
-    // 본 항목 — 64KiB 만 읽고 죽는 자식. 본문은 그보다 훨씬 크다.
+    // The item itself — a child that reads only 64KiB and dies. The body is far larger than that.
     const K: usize = 64 * 1024;
     let script = format!(
         "\

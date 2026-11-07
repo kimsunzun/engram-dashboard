@@ -1,32 +1,32 @@
-// RichSlot — 구조화(JSON 모드) 라이브 렌더 슬롯(ADR-0044/0045).
+// RichSlot — structured (JSON mode) live render slot (ADR-0044/0045).
 //
-//  라이브 모드(<RichSlot viewId agentId />) — 백엔드가 정제한 **구조화 출력 tag1** 프레임을 TerminalSlot 과
-//  같은 구독 규율로 받아 StructuredEventAccumulator 로 누적해 그린다 + 텍스트 입력창(Enter=전송,
-//  Shift+Enter=줄바꿈). 입력창 배치는 둘 — 대화가 있으면 하단 고정, 빈 상태면 화면 가운데(아래 ADR-0145).
+//  Live mode (<RichSlot viewId agentId />) — receives the backend-refined **structured output tag1** frames with the same subscription discipline as TerminalSlot,
+//  accumulates them in StructuredEventAccumulator and draws them + a text input box (Enter=send,
+//  Shift+Enter=newline). There are two input box layouts — pinned to the bottom when there is a conversation, centered on screen when empty (ADR-0145 below).
 //
-// ★M0 fixture 스파이크 제거(Brick 1)★: 살아있는 에이전트/데몬 없이 stream-json 샘플을 통짜 파싱해 그리던
-//   FixtureRichSlot(<RichSlot />, agentId 없음)과 그 lab/richslot 의존은 레거시 프론트 레이아웃 정리와 함께
-//   제거됐다. 스타일 튜닝은 lab 엔트리(별도)로 하고, 이 컴포넌트는 라이브 경로만 소유한다.
+// ★M0 fixture spike removed (Brick 1)★: FixtureRichSlot (<RichSlot />, no agentId), which parsed a stream-json sample whole
+//   and drew it without a live agent/daemon, and its lab/richslot dependency were removed along with the legacy frontend
+//   layout cleanup. Style tuning is done in a lab entry (separate), and this component owns only the live path.
 //
-// ★S15 소스 전환(ADR-0045)★: 라이브 누산 소스가 S14 NDJSON 바이트 파서에서 tag1
-//   StructuredEvent(StructuredEventAccumulator)로 바뀌었다. 백엔드가 출력을 정제해 self-describing
-//   이벤트로 흘리므로 프론트는 라인 재조립을 안 하고 이벤트 1건씩 소비한다. tag0(터미널 바이트)이 이 슬롯에
-//   오면 무시한다(구조화 슬롯이라 렌더 대상 아님 — tag 게이트).
+// ★S15 source switch (ADR-0045)★: the live accumulation source changed from the S14 NDJSON byte parser to tag1
+//   StructuredEvent (StructuredEventAccumulator). The backend refines the output and streams self-describing
+//   events, so the frontend does no line reassembly and consumes one event at a time. If tag0 (terminal bytes) arrives at
+//   this slot it is ignored (a structured slot, so not a render target — tag gate).
 //
-// ★빈 상태(ADR-0145)★: 복원 완료 신호('live') + 0건 + 미전송일 때만 표식·제품명·가운데
-//   입력창을 그린다. 판정에만 개입하고 구독·누산·전송 경로는 건드리지 않는다. 입력창은 두 배치가
-//   같은 엘리먼트다(전송·IME·포커스 가드를 한 벌로 유지 — 갈라 두지 말 것).
-//   ★이어받기 화신은 빈 상태 대신 로딩을 그린다(ADR-0226)★: 'live' 가 "저장된 대화를 이어받으려고 뜬
-//   화신" 이라고 알리면, 행을 그리는 이력이 오거나 · 사용자가 보내거나 · 에이전트가 부재가 될 때까지 대화
-//   영역에 로딩 패널을 얹는다. 입력창은 하단 배치로 활성이다 — 이력이 끝내 안 오면 입력이 빠져나갈 길이다.
+// ★Empty state (ADR-0145)★: only when restore-complete signal ('live') + 0 items + nothing sent does it draw the marker, product name and centered
+//   input box. It touches only the decision and leaves the subscription, accumulation and send paths alone. The two layouts of the input box are
+//   the same element (keep send · IME · focus guard as one set — do not split them).
+//   ★A resumed incarnation draws loading instead of the empty state (ADR-0226)★: if 'live' announces "an incarnation that came up to resume a saved
+//   conversation", a loading panel goes on the conversation area until history that draws rows arrives · the user sends · or the agent becomes absent.
+//   The input box is active in the bottom layout — it is the way out for input if history never comes.
 //
-// ★백엔드 표기★: 제목·표식·색조 셋이 claude 와 codex 를 가른다(정의처 = richBranding.ts). 표기는
-//   프로필에서 파생되는 표시값이라 설정도 command 도 두지 않는다 — 관측은 `data-rich-brand` 토큰으로 한다.
-//   ★이것으로 렌더러를 고르지 않는다★: 어느 슬롯을 띄울지는 여전히 capabilities 가 정한다(api/types.ts).
+// ★Backend notation★: title · marker · color tone, three of them, tell claude and codex apart (defined in richBranding.ts). The notation is
+//   a display value derived from the profile, so it has neither a setting nor a command — observe it via the `data-rich-brand` token.
+//   ★Do not pick the renderer with it★: which slot to show is still decided by capabilities (api/types.ts).
 //
-// ★층 분리★: 파싱/누적은 순수 TS(structuredAccumulator.ts)가, 렌더는 전용 컴포넌트(StructuredTextView)가
-//   소유한다. 이 컴포넌트는 "구독 → 누산기 급이 → 결과 렌더 + 입력 캡처"라는 순수 I/O 배선만 한다
-//   (§5 손발/두뇌 분리: 프론트=I/O, 제어는 백엔드측 핸들).
+// ★Layer separation★: parsing/accumulation is owned by pure TS (structuredAccumulator.ts), and rendering by a dedicated component (StructuredTextView).
+//   This component does only the pure I/O wiring of "subscribe → feed the accumulator → render the result + capture input"
+//   (§5 hands/brain separation: frontend = I/O, control is a handle on the backend side).
 
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 
@@ -45,8 +45,8 @@ import { WaitStrip } from './chat/WaitRow'
 import { richBranding } from './richBranding'
 import { SlotUnavailableVeil } from './SlotUnavailableVeil'
 import { ESC_SCOPE, isInterruptEscape, OVERLAY_SELECTOR } from './interruptKey'
-import './richBranding.css' // 색조 클래스 정의처(컴포넌트 옆 css 를 그 컴포넌트가 import 하는 규약).
-import { ScrollArea } from '../ui/scroll-area' // ADR-0053: 앱 전역 Radix 오버레이 스크롤바 seam
+import './richBranding.css' // Where the tone class is defined (the convention that a component imports the css next to it).
+import { ScrollArea } from '../ui/scroll-area' // ADR-0053: the app-wide Radix overlay scrollbar seam
 import { REPIN_ON_SEND, useScrollFollow } from './scrollFollow/useScrollFollow'
 import { JumpToBottom } from './scrollFollow/JumpToBottom'
 import { LoadingPanel } from '../ui/LoadingPanel'
@@ -54,144 +54,144 @@ import { basename } from '../../util/basename'
 import { t } from '../../i18n'
 
 interface RichSlotProps {
-  /** 구독 키(ADR-0046) = 슬롯 id. 같은 agentId 두 슬롯 독립 진도 — 버그 B 해소. */
+  /** Subscription key (ADR-0046) = slot id. Two slots with the same agentId have independent progress — bug B resolved. */
   viewId?: string
   agentId: string
 }
 
 export default function RichSlot({ viewId, agentId }: RichSlotProps) {
   const vid = viewId ?? agentId
-  // ★정체성(viewId·agentId)이 바뀌면 새로 마운트한다 — key★
-  //   목록·복원표시·전송표시를 구독 effect 에서 내리면, 그 커밋 한 번은 **새 props + 옛 상태**로 그려진다
-  //   (passive effect 는 페인트 뒤에 돈다). 같은 슬롯에 다른 에이전트를 배정하면 그 프레임에 이전
-  //   에이전트의 대화가 스친다. key 로 인스턴스를 갈면 옛 상태를 물려받는 커밋이 아예 존재하지 않는다.
-  //   부작용 = 입력 중이던 초안 소실. 다른 에이전트로 갈아타는 전환이라 수용한다.
-  //   ★화신(epoch)은 이 key 에 넣지 않는다★: 같은 에이전트의 재spawn 은 **인스턴스를 갈지 않는다** —
-  //   갈면 replay 가 오기도 전에 대화가 지워지고 되살릴 이력이 데몬에도 없다. 그 자리를 대신하는 것이
-  //   비우기 신호(onReset)이고, 아래 구독의 그 콜백이 인스턴스를 유지한 채 같은 일을 한다.
+  // ★When identity (viewId·agentId) changes, mount anew — key★
+  //   If the list, restore indicator and send indicator are taken down in the subscription effect, that one commit is drawn with **new props + old state**
+  //   (passive effects run after paint). Assigning a different agent to the same slot flashes the previous
+  //   agent's conversation in that frame. Replacing the instance with key means a commit inheriting old state does not exist at all.
+  //   Side effect = loss of the draft being typed. It is accepted because it is a switch to a different agent.
+  //   ★The incarnation (epoch) is not put in this key★: a re-spawn of the same agent **does not replace the instance** —
+  //   replacing it would erase the conversation before the replay arrives, and the daemon has no history to revive either. What takes that place is the
+  //   clearing signal (onReset), and that callback in the subscription below does the same job while keeping the instance.
   return <LiveRichSlot key={`${vid}|${agentId}`} viewId={vid} agentId={agentId} />
 }
 
 // ══════════════════════════════════════════════════════════════════════════════════
-// ② 라이브 모드 — 실스트림 구독 + 누산 + 입력창
+// ② Live mode — live stream subscription + accumulation + input box
 // ══════════════════════════════════════════════════════════════════════════════════
 
 function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) {
-  // 순서 보존 렌더 item 스트림(text/칩/구분선) — 누산기 스냅샷을 그대로 담는다(ADR-0045 §52).
+  // Order-preserving render item stream (text/chip/divider) — holds the accumulator snapshot as it is (ADR-0045 §52).
   const [items, setItems] = useState<StructuredItem[]>([])
-  // ADR-0231: 입력창 위 대기 입력 목록 — 누산기 `snapshotQueued()` 의 사본(그리기 거름까지 지난 것).
+  // ADR-0231: queued-input list above the input box — a copy of the accumulator's `snapshotQueued()` (after the draw filter too).
   const [queued, setQueued] = useState<readonly QueuedEntry[]>([])
   const [turnDone, setTurnDone] = useState(false)
-  // ★로컬 awaiting 플래그(FIX 5b)★: 전송 직후~첫 응답 바이트 도착 사이의 공백을 메운다. turnDone 은
-  //   누산기가 턴 종료 신호(MessageDone · TurnEnd)로만 세우므로, 직전 턴이 idle 인 상태에서 새로 보내면
-  //   첫 바이트 전까지 'idle' 로 보인다. 전송 즉시 이 플래그를 세워 'streaming' 으로 뒤집고, ★누산기가
-  //   **대기를 풀어도 된다고 답한** 프레임★이 오면 해제해 이후 표시를 turnDone 에 넘긴다(아래 구독 콜백).
+  // ★Local awaiting flag (FIX 5b)★: fills the gap between right after a send and arrival of the first response byte. turnDone is
+  //   set by the accumulator only from turn-end signals (MessageDone · TurnEnd), so a new send while the previous turn is idle
+  //   looks 'idle' until the first byte. This flag is set right on send to flip to 'streaming', and when a frame ★that the accumulator
+  //   **answered may release the wait**★ arrives it is cleared and later display is handed to turnDone (subscription callback below).
   const [awaiting, setAwaiting] = useState(false)
   const [input, setInput] = useState('')
   const inputRef = useRef<HTMLTextAreaElement>(null)
-  // ADR-0145: 이력 복원이 끝났다는 신호('live')를 받았나. 빈 상태 표시의 게이트이며 재구독마다 내린다.
+  // ADR-0145: did we receive the signal ('live') that history restore is finished? The gate of the empty-state display; lowered on every resubscribe.
   const [replayDone, setReplayDone] = useState(false)
-  // ADR-0226: 마지막 'live' 가 "이 화신은 저장된 대화를 이어받으려고 떴다" 고 알렸나(성공 여부가 아니다).
-  //   'live' 에서만 세우고, 비우기 콜백과 구독 effect 초기화에서 내린다.
+  // ADR-0226: did the last 'live' announce "this incarnation came up to resume a saved conversation" (not whether it succeeded).
+  //   Set only on 'live', and lowered in the clearing callback and the subscription effect reset.
   const [continuesConversation, setContinuesConversation] = useState(false)
-  // 구독이 마지막으로 알린 국면 — 아래 부재 막(ADR-0148)의 세 번째 근거.
+  // The phase the subscription last announced — the third basis of the absent curtain below (ADR-0148).
   const [phase, setPhase] = useState<ViewPhase | null>(null)
-  // ★ADR-0145: "이 인스턴스에서 이미 보냈다"★ — 전송이 실제로 나갔다는 사실. 전송 자체가 실패하면
-  //   아래 send 의 catch 가 되돌린다(아무것도 안 나간 슬롯은 첫 실행 화면으로 돌아가야 한다).
-  //   awaiting 으로 대신하지 않는 이유 = awaiting 은 item 을 만들지 않는 tag1 프레임(빈 델타 · user uuid
-  //   dedup 스킵 · 빈 MessageDone)에도 풀려서, 응답이 진행 중인데 items 가 아직 0건인 구간에 마스코트가
-  //   되돌아온다. 빈 상태는 "대화를 시작했나"만 보면 되므로 그 사실을 따로 든다(awaiting 의 스트리밍 힌트
-  //   역할은 그대로 — ADR-0044/0045).
+  // ★ADR-0145: "already sent on this instance"★ — the fact that a send actually went out. If the send itself fails,
+  //   the catch in send below reverts it (a slot where nothing went out must return to the first-run screen).
+  //   Why awaiting is not used instead = awaiting is also cleared by tag1 frames that create no item (empty delta · user uuid
+  //   dedup skip · empty MessageDone), so in a span where a response is in progress but items is still 0, the mascot
+  //   comes back. The empty state only needs to see "did a conversation start", so that fact is held separately (the streaming hint
+  //   role of awaiting is unchanged — ADR-0044/0045).
   const [hasSent, setHasSent] = useState(false)
-  // 재구독 effect 가 reset 으로 초기화한다(replay 규율).
+  // The resubscribe effect resets it (replay discipline).
   const accRef = useRef<StructuredEventAccumulator>(null as unknown as StructuredEventAccumulator)
   if (accRef.current === null) accRef.current = new StructuredEventAccumulator()
   const follow = useScrollFollow(viewId)
-  // 전송 순번 — 결말 콜백(성공·실패)이 "내가 아직 최신 전송인가"를 판정하는 근거. 앞선 전송의 뒤늦은
-  //   결말이 진행 중인 최신 전송의 표시를 지우거나 새 화신의 전송 사실을 날조하는 것을 막는다. 비우기
-  //   콜백(onReset)도 여기를 올려 날아가던 전송을 무효화한다(state 가 아니라 ref: 표시에 안 쓰인다).
+  // Send sequence — the basis on which an outcome callback (success·failure) decides "am I still the latest send?". Prevents a belated
+  //   outcome of an earlier send from erasing the indicator of the latest send in progress or fabricating a send fact for the new incarnation. The clearing
+  //   callback (onReset) also bumps it here to invalidate a send in flight (a ref, not state: it is not used for display).
   const sendSeqRef = useRef(0)
-  // 이 인스턴스에서 성공적으로 나간 전송이 하나라도 있나. 있으면 이후 전송이 실패해도 첫 실행 화면으로
-  //   되돌리지 않는다 — 앞선 전송의 응답이 오는 중일 수 있다.
+  // Has any send gone out successfully from this instance? If so, even if a later send fails it does not
+  //   revert to the first-run screen — the response to an earlier send may be on its way.
   const sendOkRef = useRef(false)
 
   const agents = useAgentStore((s) => s.agents)
   const agent = agents.find((a) => a.id === agentId) ?? null
-  // ADR-0148: 권위 명부를 받았나 — 받기 전(기동·재연결 직후)의 빈 명부를 "없어졌다" 로 오인하지 않기 위한 가드.
+  // ADR-0148: did we receive the authoritative registry? — a guard so the empty registry before receipt (right after boot/reconnect) is not mistaken for "gone".
   const agentsLoaded = useAgentStore((s) => s.agentsLoaded)
-  // ★부재 = terminal 상태로 발견 ∪ 명부 수신 후에도 해석 안 됨(ADR-0148)★. 후자가 종료(kill)의 실제 결말이다
-  //   — reaper 가 세션을 수거하며 명부에서 지우므로 status 로는 잡히지 않는다. 이걸 부재로 안 보면 죽은
-  //   에이전트의 입력창이 활성으로 남아 전송을 시도할 수 있다.
+  // ★Absent = found in terminal state ∪ unresolved even after the registry is received (ADR-0148)★. The latter is the real outcome of a kill
+  //   — the reaper collects the session and removes it from the registry, so status does not catch it. If it were not seen as absent, the dead
+  //   agent's input box would stay active and could attempt a send.
   const agentGone =
     (agentsLoaded && agent == null) ||
     (agent != null &&
       (agent.status.type === 'Exited' || agent.status.type === 'Killed' || agent.status.type === 'Failed'))
 
-  // ADR-0148 결정 1 / ADR-0149 결정 4: 연결이 끊긴 것도 "타겟한 에이전트가 지금 없다" 로 같게 본다(사용자
-  //   결정). 기존 연결 상태 표면(agentClient)을 **읽기만** 한다 — 새 전역 핸들·새 스토어를 만들지 않는다
-  //   (ConnectionNotice 와 동형). 구독 콜백은 등록 즉시 현재 상태로 1회 발화하므로 초기값 동기화 불요.
+  // ADR-0148 decision 1 / ADR-0149 decision 4: a lost connection is also seen the same as "the targeted agent is not there now" (user
+  //   decision). It only **reads** the existing connection state surface (agentClient) — it creates no new global handle or store
+  //   (same shape as ConnectionNotice). The subscription callback fires once with the current state on registration, so no initial value sync is needed.
   const [connected, setConnected] = useState(() => agentClient.connectionState === 'connected')
   useEffect(() => agentClient.onConnectionStateChange((s) => setConnected(s === 'connected')), [])
-  // 구독 국면을 함께 본다 — 소켓은 섰는데 명부에 그 에이전트가 없는 구간('detached')과 재요청 사다리를
-  //   소진한 구간('error')이 여기 든다(연결 상태만 보면 둘 다 "정상"으로 읽혀 죽은 슬롯이 살아 있는 척한다).
+  // Also looks at the subscription phase — the span where the socket is up but the registry has no such agent ('detached') and the span where the re-request ladder is
+  //   exhausted ('error') fall in here (looking only at connection state reads both as "normal", so a dead slot pretends to be alive).
   const subscriptionDown = phase === 'detached' || phase === 'error'
   const agentUnavailable = agentGone || !connected || subscriptionDown
 
-  // ★정체성 라벨(§ user request)★: json 모드는 터미널의 claude 웰컴 배너 같은 "어느 에이전트인지" 신호가
-  //   없다. 입력창 위 대기 줄(WaitStrip)의 오른쪽에 작은 라벨로 이름만 표시한다(아래 render). 표시명은
-  //   트리(displayNameOf)와 동일 규칙: display_name override ?? agent.name ?? cwd basename(중복 이름 허용).
+  // ★Identity label (§ user request)★: json mode has no "which agent is this" signal like the terminal's claude welcome banner.
+  //   Only the name is shown as a small label on the right of the wait strip (WaitStrip) above the input box (render below). The display name follows the same rule as the
+  //   tree (displayNameOf): display_name override ?? agent.name ?? cwd basename (duplicate names allowed).
   const profiles = useAgentStore((s) => s.profiles)
-  // profiles 는 실 store 에선 항상 배열([])이지만, 일부 단위테스트 mock 은 s.profiles 를 안 채운다 → 방어적 옵셔널.
+  // profiles is always an array ([]) in the real store, but some unit test mocks do not fill s.profiles → defensive optional.
   const profile = profiles?.find((p) => p.id === agentId) ?? null
   const cwd = agent?.cwd ?? profile?.cwd ?? ''
-  // ★basename 만★: agent.name 은 프로필의 name(=우리가 createClaudeProfile 에 넘긴 full cwd)이라 풀 경로가
-  //   뜬다 → 트리(displayNameOf)와 동일하게 display_name override 없으면 basename(cwd)만 쓴다("Filter Library").
+  // ★basename only★: agent.name is the profile's name (= the full cwd we passed to createClaudeProfile), so the full path
+  //   shows up → as in the tree (displayNameOf), without a display_name override only basename(cwd) is used ("Filter Library").
   const headerName = profile?.display_name ?? basename(cwd)
-  // ★백엔드 표기(제목·표식·색조)★: 리치 모드는 claude 와 codex 를 똑같이 그려 누구와 말하는지 화면에
-  //   신호가 없었다. 판정 근거는 프로필의 실행 명령 종류 하나이고, 프로필이 없으면 claude 표기 그대로다
-  //   (회귀 없는 기본값 — 사유는 richBranding.ts). ★렌더러 선택은 여전히 capabilities 가 한다★.
-  //   ★`command` 도 옵셔널로 탄다★ — 타입상 필수지만 위 profiles 와 같은 이유로 그 칸을 안 채우는 mock 이
-  //   실재한다(빠지면 표기가 아니라 슬롯 전체가 죽는다). 못 읽으면 기본값으로 떨어지는 쪽이 맞다.
+  // ★Backend notation (title·marker·color tone)★: rich mode drew claude and codex identically, so the screen had no
+  //   signal of who you are talking to. The basis of the decision is one thing — the kind of the profile's run command — and with no profile it stays the claude notation
+  //   (a regression-free default — reason in richBranding.ts). ★Renderer selection is still done by capabilities★.
+  //   ★`command` is also carried as optional★ — it is required by type, but for the same reason as profiles above, mocks that do not fill that field
+  //   really exist (if missing, not the notation but the whole slot dies). Falling to the default when it cannot be read is right.
   const branding = richBranding(profile?.command?.kind)
 
-  // 출력 구독 — TerminalSlot 규율 미러: seq dedup(컴포넌트 방어 — 클라도 내부 dedup),
-  // 정확한 unsubscribe(stale 가드 토큰은 클라 소유).
+  // Output subscription — mirrors the TerminalSlot discipline: seq dedup (component defense — the client also dedups internally),
+  // exact unsubscribe (the stale guard token is owned by the client).
   useEffect(() => {
     const acc = accRef.current
-    acc.reset() // 히스토리 replay 가 동일 상태로 재구성(StrictMode 중복도 방지)
+    acc.reset() // History replay reconstructs the same state (also prevents StrictMode duplicates)
     setItems([])
     setQueued([])
     setTurnDone(false)
-    setAwaiting(false) // 스트리밍 힌트 stale 방지
-    // ADR-0145: 복원 완료 표시도 여기서 내린다 — 안 내리면 이전 세션의 완료 상태를 물려받아 목록이 빈
-    //   복원 구간에 빈 상태가 떴다가 대화로 바뀌는 깜빡임이 되살아난다.
-    // ★정체성 변경(viewId·agentId)은 key remount 가 처리한다★ — 이 자리의 초기화가 실제로 일 하는 경우는
-    //   StrictMode 이중 마운트처럼 **같은 인스턴스에서 effect 가 다시 도는** 경로뿐이다(누산기 ref 는 그
-    //   사이 살아남는다). 그래도 남겨 둔다 — key 가 사라지면 이게 유일한 방어선이다.
-    //   ★같은 에이전트의 재spawn 은 여기로 오지 않는다★ — 그건 아래 비우기 콜백(onReset)이 받는다.
+    setAwaiting(false) // Prevents a stale streaming hint
+    // ADR-0145: the restore-complete indicator is lowered here too — if not, it inherits the previous session's complete state and the flicker where the empty state shows
+    //   in the restore span with an empty list and then flips to the conversation comes back.
+    // ★Identity change (viewId·agentId) is handled by key remount★ — the only case where the reset in this place really works is the path where
+    //   **the effect runs again on the same instance**, like StrictMode double mount (the accumulator ref survives in between). Still kept —
+    //   if key goes away this is the only line of defense.
+    //   ★A re-spawn of the same agent does not come here★ — that is received by the clearing callback (onReset) below.
     setReplayDone(false)
     setContinuesConversation(false)
     setHasSent(false)
-    setPhase(null) // 새 구독의 국면은 그 구독의 통지가 다시 세운다.
-    follow.pin() // ADR-0242: 비운 뒤 오는 이력이 바닥에 착지한다.
-    // ★도구 묶음의 고른 펼침은 여기서 비우지 않는다★(ADR-0239) — 같은 화신의 replay 는 같은 묶음 키로 재구성돼
-    //   고른 값이 그대로 다시 붙어야 한다. 비우는 자리는 아래 비우기 콜백(onReset) 하나다.
+    setPhase(null) // The phase of a new subscription is set again by that subscription's notification.
+    follow.pin() // ADR-0242: the history that arrives after clearing lands at the bottom.
+    // ★The tool bundle's chosen expansion is not cleared here★ (ADR-0239) — the replay of the same incarnation is rebuilt with the same bundle keys, so
+    //   the chosen value must attach again as is. The only place that clears is the clearing callback (onReset) below.
 
     let sub: OutputSubscription | null = null
     let cancelled = false
     const lastSeq = { current: -1 }
-    // ADR-0244: 이 화신의 첫 'live' 를 지났나 — 그 전의 프레임은 이 뷰가 처음 짓는 이력이다(아래 턴 끝 재기가 거른다).
+    // ADR-0244: have we passed this incarnation's first 'live'? — frames before it are history this view builds for the first time (the turn-end measurement below filters them).
     let caughtUp = false
 
-    // 목록이 빈 채로 머무는 동안은 같은 참조를 지킨다 — 거의 모든 프레임이 이 경우라 리렌더를 늘리지 않는다.
+    // While the list stays empty it keeps the same reference — almost every frame is this case, so re-renders are not increased.
     const refreshQueued = (): void => {
       const next = acc.snapshotQueued()
       setQueued((prev) => (prev.length === 0 && next.length === 0 ? prev : next))
     }
 
-    // ★재부착 대조(ADR-0231 · TRD §5-7)★: 링 상한을 넘는 긴 턴에서 다시 붙으면 `Queued` 가 링에서 밀려나
-    //   아직 대기 중인 항목이 이 창의 목록에서 사라진다 — `'live'` 마다 데몬 명부를 한 번 물어 맞춘다.
-    //   답이 늦게 와도 스냅숏 seq 로 라이브 사건과 맞추고(누산기), 이 replay 주기를 떠나면 세대로 버린다.
+    // ★Re-attach check (ADR-0231 · TRD §5-7)★: when reattaching in a long turn past the ring cap, `Queued` is pushed out of the ring and
+    //   items still waiting vanish from this window's list — on every `'live'` the daemon registry is asked once to reconcile.
+    //   Even if the reply is late it is matched with live events by the snapshot seq (accumulator), and on leaving this replay cycle it is dropped by generation.
     const reconcileQueued = (epoch: number): void => {
       const gen = acc.beginQueuedReconcile(epoch)
       agentClient.listQueuedInputs(agentId).then(
@@ -199,7 +199,7 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
           if (cancelled) return
           if (acc.offerQueuedSnapshot(gen, listing) === 'applied') refreshQueued()
         },
-        // 잠든 에이전트(NOT_FOUND)·끊김 — 목록은 링이 준 그대로 둔다. 기록만 멈춘다.
+        // Sleeping agent (NOT_FOUND) · disconnect — the list is left as the ring gave it. Only the record stops.
         () => {
           if (!cancelled) acc.abandonQueuedReconcile(gen)
         },
@@ -214,68 +214,68 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
           if (cancelled) return
           if (chunk.seq <= lastSeq.current) return
           lastSeq.current = chunk.seq
-          // ★tag 게이트(S15/ADR-0045)★: 이 슬롯은 구조화(tag1)만 렌더한다. tag0(터미널 raw 바이트)이 오면
-          //   무시한다 — 구조화 에이전트라도 백엔드가 tag0 을 흘릴 수 있고(과도기), xterm 이 아니라 여기서
-          //   바이트를 파싱하면 깨진다. seq 는 위에서 이미 전진시켰으므로(tag 무관 한 seq 공간) dedup 은
-          //   tag0 를 건너뛰어도 정합하다. 누산기에도 seq 는 알린다 — 쥔 대조 답이 그 seq 를 기다릴 수 있다.
+          // ★tag gate (S15/ADR-0045)★: this slot renders only structured (tag1). When tag0 (terminal raw bytes) arrives it is
+          //   ignored — even a structured agent may have the backend stream tag0 (transitional), and parsing the bytes here instead of xterm
+          //   breaks them. seq was already advanced above (one seq space regardless of tag), so dedup stays consistent even
+          //   when tag0 is skipped. The seq is also told to the accumulator — a held check reply may be waiting for that seq.
           if (chunk.tag !== FRAME_TAG_STRUCTURED_EVENT) {
             if (acc.observeSeq(chunk.seq)) refreshQueued()
             return
           }
-          // tag1 payload = StructuredEvent JSON 1건.
+          // tag1 payload = one StructuredEvent JSON.
           const boundariesBefore = acc.turnBoundaryCount()
           const releasesAwaiting = acc.feed(chunk.bytes, chunk.seq)
-          // ADR-0244: 이 프레임이 턴 경계(MessageDone · TurnEnd — 결말 무관)다 — 「중단하는 중」을 걷는다. ★렌더(`streaming`)가
-          //   아니라 프레임에서 재는 것은 끝 사건과 다음 턴의 첫 프레임이 한 렌더로 묶이면 `streaming` 이 한 번도 거짓으로 안
-          //   그려지기 때문이다★ — 그러면 표시가 다음 턴까지 남고 그 턴의 Esc 가 무시된다. ★누산기의 끝 아님 → 끝 전이로
-          //   재지 말 것★ — 보낸 직후(누산기는 앞 턴의 끝을 읽던 채)에 끊은 턴의 끝은 그 전이가 없다.
-          // ★첫 'live' 전의 프레임은 세지 않는다★ — 같은 에이전트의 뷰가 새로 붙으면 빈 누산기가 이력을 다시 지으며 옛 턴
-          //   끝마다 끝으로 넘어가, 다른 뷰에서 끊는 중인 턴의 표시를 일찍 걷는다(그러면 다시 친 Esc 가 두 번째 끊기를 보낸다).
-          //   그 뒤의 같은 화신 재buffering 이 흘리는 프레임은 세도 된다 — 위 seq 거름을 지난 것은 이 뷰가 처음 보는 프레임이다.
+          // ADR-0244: this frame is a turn boundary (MessageDone · TurnEnd — whatever the outcome) — lift 「중단하는 중」 (interrupting). ★The reason it is measured on the frame, not on
+          //   the render (`streaming`), is that if an end event and the next turn's first frame are batched into one render, `streaming` is never drawn false★
+          //   — then the indicator stays until the next turn and that turn's Esc is ignored. ★Do not measure it by the accumulator's not-end → end transition★
+          //   — the end of a turn interrupted right after a send (the accumulator still reading the previous turn's end) has no such transition.
+          // ★Frames before the first 'live' are not counted★ — when a new view of the same agent attaches, an empty accumulator rebuilds the history and goes to end at
+          //   every old turn end, lifting early the indicator of a turn being interrupted from another view (then an Esc pressed again sends a second interrupt).
+          //   Frames that a later same-incarnation re-buffering streams may be counted — what passed the seq filter above is a frame this view sees for the first time.
           if (caughtUp && acc.turnBoundaryCount() !== boundariesBefore) useInterruptStore.getState().end(agentId)
-          // 새 참조로 set(누산기 내부 배열을 in-place 갱신하므로, 상위 배열 참조를 새로 떠 리렌더 보장).
-          //   반환값과 무관하게 먼저 그린다 — 대기를 풀지 않는 프레임도 앞선 행을 바꿨을 수 있다(아래 ②).
+          // Set with a new reference (the accumulator updates its internal array in place, so a new outer array reference is taken to guarantee a re-render).
+          //   Drawn first regardless of the return value — a frame that does not release the wait may also have changed an earlier row (② below).
           setItems([...acc.snapshot()])
           refreshQueued()
           setTurnDone(acc.isTurnDone())
-          // ★`feed` 가 풀어도 된다고 답한 프레임에만 표시 주도권을 turnDone 에 넘긴다★. `false` 는 둘이다 —
-          //   ① 못 알아들은 프레임(모르는 종류·malformed JSON)은 turnDone 을 갱신하지 못하므로, 그때 awaiting 을
-          //   풀면 표시가 **직전 턴의** 낡은 turnDone 으로 판정된다 — 둘째 턴부터는 그 값이 true 라 응답이 도는
-          //   중에 대기 표시가 꺼진다(첫 턴만 보는 테스트로는 안 보이던 결함).
-          //   ② 도구 끝 결과(`ToolResult`)는 알아들었지만 응답이 아니다 — codex 는 끊어도 도는 명령을 죽이지 않아
-          //   지난 턴 도구의 끝이 늦게 오고, 보낸 직후 · 첫 답 전에 들면 새 턴의 대기 표시가 답 없이 꺼진다(ADR-0241).
+          // ★Display control is handed to turnDone only for frames `feed` answered may release★. `false` has two cases —
+          //   ① a frame that was not understood (unknown kind · malformed JSON) cannot update turnDone, so releasing awaiting then
+          //   decides the display by the **previous turn's** stale turnDone — from the second turn that value is true, so the wait indicator goes off
+          //   while the response is running (a defect that a test seeing only the first turn could not see).
+          //   ② A tool end result (`ToolResult`) is understood but is not a response — codex does not kill a running command even when interrupted, so
+          //   the end of a previous turn's tool arrives late, and if it lands right after a send · before the first reply, the new turn's wait indicator goes off with no reply (ADR-0241).
           if (releasesAwaiting) setAwaiting(false)
         },
-        // ADR-0145: replay 국면 콜백 — 'live' 는 데몬이 복원 끝에 넣은 표식을 클라가 소비해 버퍼를 비운
-        //   시점이다(protocolClient.flushToLive). 이력이 0건인 새 에이전트에도 같은 신호가 오므로
-        //   "복원 끝 + 0건"이 정확히 갈린다. 'buffering'(복원 중) · 'error'(replay 재요청 소진)에서는
-        //   내려 둔다 — 둘 다 빈 상태를 그리면 안 되는 구간이다(복원 중 깜빡임 / 실패는 현행 빈 화면 유지).
+        // ADR-0145: replay phase callback — 'live' is the point where the client consumed the marker the daemon put at the end of restore and emptied the buffer
+        //   (protocolClient.flushToLive). A new agent with 0 history items also gets the same signal, so
+        //   "restore end + 0 items" is told apart exactly. It is lowered on 'buffering' (restoring) and 'error' (replay re-request exhausted)
+        //   — both are spans where the empty state must not be drawn (flicker during restore / on failure the current blank screen is kept).
         (state, info) => {
           if (cancelled) return
           setReplayDone(state === 'live')
           setPhase(state)
           if (state === 'live') {
-            // ADR-0244: 처음 따라잡았는데 열린 턴이 없다 = 끊으려던 턴은 이미 끝났다 — 그 끝이 따라잡기 전 이력에만 들어
-            //   있으면(끊던 뷰가 사라진 뒤 붙은 뷰 · 첫 buffering 중에 명령을 부름) 위 턴 끝 재기도 대기 표시 꺼짐도 못 본다.
-            //   ★열린 턴으로 끝나면 걷지 않는다★ — 다른 뷰에서 끊는 중인 턴이 바로 그 열린 턴이다.
+            // ADR-0244: caught up for the first time and there is no open turn = the turn we meant to interrupt already ended — if that end is only in history before the catch-up
+            //   (a view that attached after the interrupting view vanished · a command called during the first buffering), neither the turn-end measurement above nor the wait indicator going off can see it.
+            //   ★If it ends with an open turn, do not lift★ — the turn being interrupted from another view is exactly that open turn.
             if (!caughtUp && acc.isTurnDone()) useInterruptStore.getState().end(agentId)
             caughtUp = true
             setContinuesConversation(info?.continuesConversation ?? false)
-            // 표식이 없으면 답이 어느 화신 것인지 못 가르므로 대조하지 않는다(링이 준 목록 그대로 — 오늘과 같다).
+            // With no marker we cannot tell which incarnation the reply belongs to, so no check is made (the list as the ring gave it — same as today).
             if (info?.epoch !== undefined) reconcileQueued(info.epoch)
           } else {
-            // live 를 떠났다 — 새 replay 주기다. 진행 중인 대조는 옛 주기의 것이라 버린다(대조 세대).
-            //   ★붙듦 넘침의 `startBuffering` 도 여기('buffering')로 온다★ — 같은 화신이라 비우기(onReset)는 안 온다.
+            // Left live — this is a new replay cycle. A check in progress belongs to the old cycle and is dropped (check generation).
+            //   ★`startBuffering` from hold overflow also comes here ('buffering')★ — it is the same incarnation, so clearing (onReset) does not come.
             acc.abandonQueuedReconcile()
           }
         },
-        // 비우기 의무·onReset 필수 전달의 근거는 TerminalSlot 동형(여기선 누산기까지 되돌린다).
-        // ★전송 흔적도 함께 내린다★: 이 콜백은 **다른 화신**의 이력이 지금부터 온다는 뜻이라, 앞서 나간
-        //   전송은 이미 사라진 화신이 받았고 그 답은 영영 오지 않는다. 남겨 두면 대기 표시(awaiting)가
-        //   고착되고, 이력 0건인 새 화신에 첫 실행 화면(마스코트)이 안 떠 "빈 슬롯인데 대화 중" 으로 보인다.
-        //   ★같은 화신 이어보기에는 이 콜백이 오지 않는다★ — 그 구간의 대기 표시는 그대로 유지된다.
-        // ★replayDone 은 내리지 않는다★: 이 콜백은 새 화신의 replay 가 **도착한** 자리라 바로 뒤 같은 틱에
-        //   'live' 가 따라온다. 복원 중 구간을 여는 것은 그보다 앞선 'buffering' 통지다(ADR-0145).
+        // The reason for the clearing duty and the mandatory onReset pass-through is the same as TerminalSlot (here it rolls back the accumulator too).
+        // ★Send traces are taken down too★: this callback means history of **another incarnation** is coming from now on, so a
+        //   send that went out earlier was received by an incarnation that is already gone and its reply never comes. If left, the wait indicator (awaiting)
+        //   sticks, and the new incarnation with 0 history items does not show the first-run screen (mascot), looking like "empty slot but in conversation".
+        //   ★This callback does not come on resuming the same incarnation★ — the wait indicator in that span stays as it is.
+        // ★replayDone is not lowered★: this callback is the place where the new incarnation's replay has **arrived**, so
+        //   'live' follows in the same tick right after. What opens the restoring span is the 'buffering' notification before it (ADR-0145).
         () => {
           if (cancelled) return
           acc.reset()
@@ -284,21 +284,21 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
           setTurnDone(false)
           setAwaiting(false)
           setHasSent(false)
-          follow.pin() // ADR-0242: 새 화신의 이력이 바닥에 착지한다.
-          // ADR-0239: 고른 펼침도 비운다 — 새 화신은 사건열이 달라, 누산기가 0 부터 다시 매긴 항목 번호의 묶음 키
-          //   (`item:<itemId>`)가 옛 선택과 다른 묶음을 가리킨다.
+          follow.pin() // ADR-0242: the new incarnation's history lands at the bottom.
+          // ADR-0239: the chosen expansion is cleared too — the new incarnation has a different event sequence, so the bundle key of an item number the accumulator numbers from 0 again
+          //   (`item:<itemId>`) points to a different bundle than the old selection.
           useToolGroupStore.getState().clear(viewId)
-          // ADR-0244: 끊으려던 턴은 사라진 화신의 것이다. 같은 틱의 새 이력이 턴을 열어 두면 아래 `streaming` 이 거짓으로
-          //   그려지지 않으므로 여기서 걷는다.
+          // ADR-0244: the turn we meant to interrupt belongs to the vanished incarnation. If new history in the same tick leaves a turn open, `streaming` below is never
+          //   drawn false, so it is lifted here.
           useInterruptStore.getState().end(agentId)
-          caughtUp = false // 새 화신의 이력이 지금부터 흐른다 — 바로 뒤 같은 틱의 'live' 가 다시 세운다.
-          // ADR-0226: 새 화신이 이어받기 화신인지는 바로 뒤 같은 틱의 'live' 가 다시 알린다.
+          caughtUp = false // The new incarnation's history flows from now on — 'live' in the same tick right after sets it again.
+          // ADR-0226: whether the new incarnation is a resumed incarnation is announced again by 'live' in the same tick right after.
           setContinuesConversation(false)
           sendOkRef.current = false
-          // ★날아가던 전송을 순번으로 무효화한다★: 앞 화신에 보낸 전송은 여기서 흔적을 내려도 promise
-          //   자체는 살아 있어 나중에 결말이 온다. 순번을 올려 두지 않으면 그 뒤늦은 성공이 새 화신의
-          //   sendOkRef 를 세우고("이 인스턴스에서 나간 전송이 있다"), 이후 실전 전송이 실패해도 첫 실행
-          //   화면으로 돌아가지 못한다 — 아무것도 받지 못한 새 화신이 대화 중으로 남는다.
+          // ★A send in flight is invalidated by the sequence★: for a send made to the previous incarnation, even if the traces are taken down here the promise
+          //   itself is alive and its outcome comes later. If the sequence is not bumped, that belated success sets the new incarnation's
+          //   sendOkRef ("a send went out from this instance"), and even if a later real send fails, it cannot return to the first-run
+          //   screen — the new incarnation that received nothing stays as in-conversation.
           sendSeqRef.current++
           lastSeq.current = -1
         },
@@ -310,68 +310,68 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
         }
         sub = handle
       })
-      // 구독 실패(직전 kill 등)는 unhandled rejection 방지로 흡수.
+      // A subscription failure (just-before kill etc.) is absorbed to prevent an unhandled rejection.
       .catch(() => {})
 
     return () => {
       cancelled = true
       sub?.unsubscribe()
     }
-    // viewId 포함 — 구독 키(ADR-0046, 같은 agentId 두 슬롯 독립). ★화신은 넣지 않는다 — 근거는 위 key 주석.★
-    // ★`follow` 도 넣지 않는다★ — 그 `pin` 은 마운트 수명 동안 같은 함수다(ADR-0242 · `useScrollFollow` 머리).
+    // viewId included — it is the subscription key (ADR-0046, two slots with the same agentId are independent). ★The incarnation is not put in — reason in the key comment above.★
+    // ★`follow` is not put in either★ — its `pin` is the same function for the whole mount lifetime (ADR-0242 · the head of `useScrollFollow`).
   }, [viewId, agentId])
 
-  // ADR-0239: 이 슬롯의 대화 뷰가 지금 마운트돼 있다고 펼침 저장소에 알린다 — 묶이지 않은 슬롯에는 머리 토글도
-  //   `chat.toolGroup.setExpanded` 도 적지 못한다. 정리에서 돌려받은 해제를 부른다(고른 펼침은 남는다).
-  //   `getState` 로 부르는 것은 이 컴포넌트가 저장소를 구독하지 않게 하려는 것이다 — 펼침을 읽는 것은 `ToolGroupRow` 다.
+  // ADR-0239: tells the expansion store that this slot's conversation view is mounted now — neither the head toggle nor
+  //   `chat.toolGroup.setExpanded` can write to an unbound slot. Calls the release returned from cleanup (the chosen expansion stays).
+  //   Calling via `getState` keeps this component from subscribing to the store — what reads the expansion is `ToolGroupRow`.
   useEffect(() => useToolGroupStore.getState().bind(viewId, agentId), [viewId, agentId])
 
-  // ADR-0244: 이 창에 그 에이전트의 대화 뷰가 있다고 알린다 — 없는 에이전트에는 명령이 「중단하는 중」을 세우지 않고, 마지막
-  //   뷰가 풀리면 걷힌다(`store/interruptStore.ts` 머리).
-  //   ★이 뷰의 구독이 멈춘 동안(`detached` · `error`)은 세지 않는다★ — 턴 끝을 볼 수 없는 뷰다. 공유 상태를 여기서 직접
-  //   걷으면 같은 에이전트의 멀쩡한 다른 뷰가 끊는 중인 표시까지 지워, 턴이 끝나기 전에 두 번째 끊기가 나간다. 빠지기만
-  //   하면 남은 멀쩡한 뷰가 없을 때만 마지막 뷰 규칙이 걷는다.
+  // ADR-0244: tells that this window has a conversation view of that agent — for an agent that has none the command does not set 「중단하는 중」 (interrupting), and when the last
+  //   view is released it is lifted (head of `store/interruptStore.ts`).
+  //   ★It is not counted while this view's subscription is stopped (`detached` · `error`)★ — it is a view that cannot see the turn end. If the shared state were
+  //   lifted here directly it would also erase the interrupting indicator of another healthy view of the same agent, and a second interrupt would go out before the turn ends. Just
+  //   dropping out lets the last-view rule lift it only when no healthy view remains.
   useEffect(
     () => (subscriptionDown ? undefined : useInterruptStore.getState().watch(agentId)),
     [agentId, subscriptionDown],
   )
   const interrupting = useInterruptStore((s) => pendingInterrupt(s, agentId) !== undefined)
 
-  // ADR-0242 · TRD S21-chat-ux §4-5: 사람이 마지막이 아닌 묶음을 펼치면 따라가기를 푼다 — 붙은 채면 펼친 높이만큼
-  //   바닥으로 다시 내려가 누른 머리가 화면 위로 밀려난다. 마지막 묶음은 붙음을 그대로 둔다.
+  // ADR-0242 · TRD S21-chat-ux §4-5: when a human expands a non-last bundle, follow is released — if kept pinned, it would go back down to the bottom by the expanded height
+  //   and push the pressed head up off the screen. The last bundle leaves the pin as it is.
   const onGroupToggle = (isLast: boolean): void => {
     if (!isLast) follow.unpin()
   }
 
   const send = (): void => {
-    // ★1 전송 == 완결된 유저 턴 1개(ADR-0044/0004)★: 텍스트 전체를 한 번에 보낸다. 백엔드 encoder 가
-    //   claude 유저 JSON 라인으로 감싸므로 여기서 개행 추가·래핑 금지(raw 텍스트 바이트만).
-    // ★전송 게이트는 turnDone 을 검사하지 않는다 — 의도된 동작(ADR-0044 메커니즘 A: 스트리밍 중
-    //   mid-turn 가이던스 주입 허용)★. 여기에 턴 잠금(스트리밍 중 전송 차단)을 넣지 말 것.
-    // ★막는 조건 = 막을 올리는 조건(agentUnavailable)★: 막은 pointer-events-none 이라 조작을 가리지
-    //   않고, disabled 도 프로그램적 키 이벤트를 막지 못한다 — 종료만 보면 연결이 끊긴 슬롯에서 전송이
-    //   나가 실패하고, 그 실패는 대기 표시만 흔들 뿐 사용자에겐 무반응으로 보인다.
+    // ★1 send == 1 completed user turn (ADR-0044/0004)★: the whole text is sent at once. The backend encoder wraps it
+    //   in a claude user JSON line, so no newline appending or wrapping here (raw text bytes only).
+    // ★The send gate does not check turnDone — intended behavior (ADR-0044 mechanism A: allow mid-turn
+    //   guidance injection while streaming)★. Do not put a turn lock (blocking sends while streaming) here.
+    // ★Blocking condition = curtain-raising condition (agentUnavailable)★: the curtain is pointer-events-none so it does not intercept
+    //   operation, and disabled cannot stop programmatic key events either — looking at exit alone lets a send go out from a disconnected slot and
+    //   fail, and that failure only shakes the wait indicator while the user sees no response.
     if (!input.trim() || agentUnavailable) return
-    // FIX 5a: 가드도 trim 으로 판정하므로 실제 전송도 trim 일관.
+    // FIX 5a: the guard also decides by trim, so the actual send is trim-consistent too.
     const text = input.trim()
     setInput('')
-    if (REPIN_ON_SEND) follow.pin() // ADR-0242 · U4: 보낸 글의 답이 화면 밖에서 흐르지 않게 한다.
-    setAwaiting(true) // FIX 5b: 첫 바이트를 기다리지 않고 즉시 streaming 힌트로 전환
-    setHasSent(true) // ADR-0145: 대화가 시작됐으므로 첫 실행 화면을 내린다(실패하면 아래에서 되돌린다)
+    if (REPIN_ON_SEND) follow.pin() // ADR-0242 · U4: keeps the reply to sent text from flowing off screen.
+    setAwaiting(true) // FIX 5b: switch to the streaming hint at once without waiting for the first byte
+    setHasSent(true) // ADR-0145: a conversation has started, so the first-run screen is taken down (reverted below on failure)
     const token = ++sendSeqRef.current
-    // ★write 실패 시 되돌리기★: writeStdin promise 가 reject 되면(전송 자체 실패) 응답 이벤트가 영영
-    //   안 온다 → awaiting 이 계속 걸려 'streaming'/Thinking 표시가 무한 고착되고, hasSent 가 남아 아무것도
-    //   보내지 못한 슬롯이 첫 실행 화면으로 못 돌아간다. 실패 경로에서 둘 다 되돌린다(파생 표현값만 교정 —
-    //   WIRE 불변, ADR-0044/45/46).
-    // ★단 최신 전송의 실패만 되돌린다★: 이 catch 는 어느 전송의 실패인지 스스로 모른다. A→B 로 보낸 뒤
-    //   A 가 뒤늦게 reject 되면, 가드가 없으면 진행 중인 B 의 대기 표시를 지운다. 화신이 갈린 뒤 도착한
-    //   실패도 같은 순번 가드가 흡수한다 — 비우기 콜백이 순번을 올려 두므로 그보다 앞선 전송은 결말이
-    //   성공이든 실패든 어긋난다(재spawn 은 인스턴스를 갈지 않아 그 결말이 같은 인스턴스로 떨어진다).
+    // ★Revert on write failure★: if the writeStdin promise rejects (the send itself fails), the response event never
+    //   comes → awaiting stays set so the 'streaming'/Thinking indicator sticks forever, and hasSent remains so a slot that sent
+    //   nothing cannot return to the first-run screen. The failure path reverts both (only the derived display value is corrected —
+    //   WIRE unchanged, ADR-0044/45/46).
+    // ★But only the failure of the latest send reverts★: this catch does not know by itself which send failed. After sending A→B,
+    //   if A rejects belatedly, without a guard it erases the wait indicator of B in progress. A failure that arrives after the incarnation changes
+    //   is absorbed by the same sequence guard — the clearing callback bumps the sequence, so any send before it is out of step whether its outcome is
+    //   success or failure (a re-spawn does not replace the instance, so that outcome lands on the same instance).
     void agentClient
       .writeStdin(agentId, new TextEncoder().encode(text))
       .then(() => {
-        // 성공도 실패와 같은 순번 가드를 지난다 — 비우기가 지나간 뒤 도착한 성공은 사라진 화신의 것이라
-        //   "이 화신에서 나간 전송" 으로 세면 안 된다(둘 중 하나만 걸면 그 사이 창이 남는다).
+        // Success passes the same sequence guard as failure — a success arriving after clearing passed belongs to the vanished incarnation, and
+        //   counting it as "a send that went out from this incarnation" is wrong (guarding only one of the two leaves a window between them).
         if (sendSeqRef.current !== token) return
         sendOkRef.current = true
       })
@@ -379,75 +379,75 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
         console.warn('[RichSlot] writeStdin failed — clearing awaiting:', err)
         if (sendSeqRef.current !== token) return
         setAwaiting(false)
-        // 앞서 성공한 전송이 있으면 그 응답이 오는 중이므로 첫 실행 화면으로 되돌리지 않는다.
+        // If an earlier send succeeded, its response may be on its way, so it does not revert to the first-run screen.
         if (!sendOkRef.current) setHasSent(false)
       })
   }
 
-  // 이력 행이 하나라도 도착했나 — 이어받기 로딩(ADR-0226)을 끝내는 첫 항.
-  //   ★items.length 로 대신하지 말 것★: 이어받기의 첫 라이브 프레임이 행을 안 그리는 usage 라, 그걸
-  //   "이력 도착" 으로 읽으면 이력이 오기 전 빈 목록이 비친다.
-  //   ★턴 구분선(separator)도 세지 않는다★: 선행 item 이 usage 뿐이어도 턴 경계가 구분선을 붙이는데(누산기
-  //   closeTurn), 그것은 빈 12px 스페이서라 이력이 아니다. 세면 로딩이 걷히고 첫 화면도 없는 빈 판이 남는다.
-  //   ★'boundary' 전체를 빼지 말 것★ — 유저 말풍선도 'boundary' 다(StructuredTextView rowKindOf).
+  // Has at least one history row arrived? — the first term that ends the resume loading (ADR-0226).
+  //   ★Do not replace it with items.length★: the first live frame of a resume is usage, which draws no row, and reading it
+  //   as "history arrived" would show an empty list before history arrives.
+  //   ★Turn dividers (separator) are not counted either★: even when the preceding item is only usage, the turn boundary attaches a divider (accumulator
+  //   closeTurn), but it is an empty 12px spacer, not history. Counting it lifts the loading and leaves an empty panel with no first screen.
+  //   ★Do not drop all of 'boundary'★ — the user bubble is also 'boundary' (StructuredTextView rowKindOf).
   const hasHistoryRow = items.some((item) => isRenderedItem(item) && item.kind !== 'separator')
 
-  // ADR-0145: 빈 상태 = 복원 완료 신호 + 0건 + 이 구독에서 아직 안 보냄. 0건만 보고 그리면 이력이 있는
-  //   세션도 복원이 끝나기 전엔 0건이라 안내가 떴다가 대화로 바뀐다(깜빡임). hasSent 를 함께 보는 이유 =
-  //   첫 전송 직후 items 가 채워지기 전 구간도 이미 "대화 시작"이라 빈 상태가 아니다.
-  //   ADR-0226: 이어받기 화신은 복원 끝 + 0건이어도 이력이 뒤따라올 수 있어 빈 상태 대신 아래 로딩을 그린다.
-  //   ADR-0231: 다른 창·LLM 이 보낸 대기 입력이 서 있어도 첫 화면이 아니다.
+  // ADR-0145: empty state = restore-complete signal + 0 items + nothing sent yet on this subscription. Drawing on 0 items alone makes even a session with history
+  //   have 0 items before restore ends, so the intro shows and then flips to the conversation (flicker). Why hasSent is looked at too =
+  //   the span right after the first send before items fill is already "conversation started", so it is not the empty state.
+  //   ADR-0226: a resumed incarnation may have history following even at restore end + 0 items, so it draws the loading below instead of the empty state.
+  //   ADR-0231: queued input from another window or an LLM standing there is not the first screen either.
   const hasQueued = queued.length > 0
   const showEmpty =
     replayDone && !continuesConversation && !hasSent && items.length === 0 && !hasQueued
 
-  // ADR-0226: 이어받기 화신이 아직 이력을 못 받았다 — 국면(복원 중·부재)과 무관한 부분. 끝나는 길은
-  //   첫 행(hasHistoryRow — 이력이든 전달된 말풍선이든) · 재시작(새 화신의 비우기 + 'live' 거짓) 둘이다.
-  // ADR-0231: ★입력(hasSent)을 끝나는 길로 되살리지 말 것★ — 연결 중 친 글은 행이 아니라 대기 목록에 서고,
-  //   이력이 오면 이력이, 끝내 안 오면 연결 뒤 전달된 말풍선이 로딩을 걷는다. 입력으로 걷으면 이력이 오기 전
-  //   빈 판이 비친다.
+  // ADR-0226: a resumed incarnation has not yet received history — the part independent of phase (restoring · absent). It ends in
+  //   two ways: the first row (hasHistoryRow — history or a delivered bubble) · restart (the new incarnation's clearing + 'live' false).
+  // ADR-0231: ★Do not revive input (hasSent) as a way to end it★ — text typed while connecting stands in the queued list, not as a row, and
+  //   if history comes the history lifts the loading, and if it never comes the bubble delivered after connecting does. Lifting it by input shows an
+  //   empty panel before history arrives.
   const historyPending = continuesConversation && !hasHistoryRow
-  // 그 대기를 로딩 패널로 **그리는** 조건 — 복원이 끝났고 막이 없을 때만(부재면 막이 이긴다).
-  //   ★타이머로 끝내지 않는다★(ADR-0038) — 이력이 끝내 안 오면 입력이 빠져나갈 길이다.
+  // The condition to **draw** that wait as a loading panel — only when restore has ended and there is no curtain (if absent, the curtain wins).
+  //   ★Do not end it with a timer★ (ADR-0038) — if history never comes, this is the way out for input.
   const awaitingHistory = replayDone && historyPending && !agentUnavailable
 
-  // ★FIX 5★: 초기 turnDone=false 인데 items 가 비어 있으면(fresh/idle 슬롯) !turnDone 만으로 shimmer·streaming
-  //   배지가 뜨는 오작동이 있었다. items.length>0 조건으로 좁혀 idle 을 idle 로 표시하되, (a) 실제 스트리밍 중
-  //   신호와 (b) '전송 직후 첫 토큰 대기(awaiting)' 는 그대로 살린다.
-  //   ADR-0226: 이력 대기 중에는 대기 표시를 내린다 — usage 만 온 창에서 로딩 패널과 함께 뜬다. 그 밖의
-  //   창은 위 규칙 그대로다. ★awaitingHistory 가 아니라 historyPending 으로 내린다★: 같은 화신 재부착의
-  //   'buffering' 이나 부재 막 동안 패널만 잠깐 내려간 창에 대기 표시(경과 초 포함)가 끼면 패널 → 표시 → 패널로
-  //   깜빡인다. ★awaiting 항은 이 게이트 밖에 둔다★: 연결 중 친 글은 로딩을 걷지 않으므로 전송 직후 둘이
-  //   겹친다 — 대기 목록 사건이 오면 awaiting 이 풀려 대기 표시가 내려간다. 그 사건이 없는 길(목록을 안 쓰는
-  //   통로 · 판정 전)에서는 이 표시가 「보낸 글이 걸려 있다」의 유일한 표시라 게이트 안으로 넣지 않는다.
-  //   (파생 표현값 — 구독/누산/send 데이터 흐름은 건드리지 않는다. ADR-0044/0045/0046.)
+  // ★FIX 5★: with initial turnDone=false and empty items (fresh/idle slot), !turnDone alone made the shimmer·streaming
+  //   badge show wrongly. Narrowed with the items.length>0 condition to display idle as idle, while (a) the real streaming
+  //   signal and (b) 'waiting for the first token right after a send (awaiting)' are kept as they are.
+  //   ADR-0226: the wait indicator is taken down during history wait — it would show together with the loading panel in a window that received only usage. In other
+  //   windows the rule above holds as is. ★It is taken down by historyPending, not awaitingHistory★: if the wait indicator (with elapsed seconds) gets in a window where only the panel
+  //   briefly went down during 'buffering' of a same-incarnation reattach or the absent curtain, it flickers panel → indicator → panel.
+  //   ★The awaiting term is kept outside this gate★: text typed while connecting does not lift the loading, so right after a send the two
+  //   overlap — when the queued-list event comes awaiting is released and the wait indicator goes down. On a path without that event (a
+  //   path that does not use the list · before the decision) this indicator is the only sign of 「보낸 글이 걸려 있다」 (sent text is pending), so it is not put inside the gate.
+  //   (Derived display value — the subscribe/accumulate/send data flow is untouched. ADR-0044/0045/0046.)
   const streaming = awaiting || (!turnDone && items.length > 0 && !historyPending)
 
-  // ADR-0244: 대기 표시가 턴 경계 없이 꺼져도 「중단하는 중」을 걷는다 — 보낸 글이 턴을 열지 않고 대기 목록에 섰다(끊을
-  //   턴이 아직 없다). 다음에 서는 대기 표시는 그 글이 여는 새 턴의 것이다. 켜짐 → 꺼짐에서만 걷는다 — 마운트 때 거짓인 것은
-  //   끝이 아니다.
+  // ADR-0244: lift 「중단하는 중」 (interrupting) even when the wait indicator goes off with no turn boundary — the sent text stood in the queued list without opening a turn (there is
+  //   no turn to interrupt yet). The next wait indicator to stand belongs to the new turn that text opens. Lift only on on → off — something false at mount
+  //   is not an end.
   const wasStreamingRef = useRef(streaming)
   useEffect(() => {
     if (wasStreamingRef.current && !streaming) useInterruptStore.getState().end(agentId)
     wasStreamingRef.current = streaming
   }, [streaming, agentId])
-  // ADR-0244: 에이전트가 없어졌거나 연결이 끊긴 동안은 이 창의 어느 뷰도 턴 끝을 볼 길이 없다 — 남겨 두면 이 창의 끊기
-  //   명령이 보내지 않고 「이미 보냈다」로만 답한다. ★연결이 잠깐 끊겨도 걷는다★ — 다시 붙은 뒤의 Esc 는 오늘처럼 다시 끊는다.
-  //   ★이 뷰 자신의 구독 정지(`subscriptionDown`)는 여기 넣지 않는다★ — 그것은 위 `watch` 에서 빠지는 것으로 다룬다.
+  // ADR-0244: while the agent is gone or the connection is lost, no view in this window has a way to see the turn end — if left, this window's interrupt
+  //   command sends nothing and only answers 「이미 보냈다」 (already sent). ★It lifts even on a brief disconnect★ — an Esc after reattaching interrupts again as today.
+  //   ★This view's own subscription stop (`subscriptionDown`) is not put in here★ — it is handled by dropping out of `watch` above.
   const agentOrConnectionDown = agentGone || !connected
   useEffect(() => {
     if (agentOrConnectionDown && interrupting) useInterruptStore.getState().end(agentId)
   }, [agentOrConnectionDown, interrupting, agentId])
 
-  // ADR-0237: 칸 안 어디서든(U6) 맨 Esc = 도는 턴 끊기. ★capture 인 이유★: 입력창 onKeyDown 이 전파를 먼저
-  //   끊어 bubble 로는 입력창의 Esc 가 여기 안 온다. ★대화의 낙관 상태(awaiting · turnDone)를 바꾸지 않는다★ — 끊겼다는
-  //   것은 턴 끝 사건이 알린다. 「중단하는 중」은 명령이 세운다(ADR-0244 — 사람 키와 LLM 이 같은 길). 입력창 글도 건드리지
-  //   않는다. 턴이 열리기 전(보낸 직후)의 Esc 는 통로가 거절하고(명령이 「중단하는 중」을 걷는다) fireAndForget 이
-  //   경고로 삼킨다 — 다시 누르면 된다.
-  // ★능력은 옵셔널로 탄다★ — 못 읽으면 끊지 않는 쪽이 맞다(위 `command` 와 같은 사유).
+  // ADR-0237: a bare Esc anywhere in the area (U6) = interrupt the running turn. ★Why capture★: the input box onKeyDown cuts propagation first,
+  //   so with bubble the input box's Esc would not arrive here. ★It does not change the conversation's optimistic state (awaiting · turnDone)★ — that it was interrupted
+  //   is announced by the turn-end event. 「중단하는 중」 (interrupting) is set by the command (ADR-0244 — the human key and the LLM take the same path). It does not touch the text in the input box
+  //   either. An Esc before a turn opens (right after a send) is refused by the path (the command lifts 「중단하는 중」) and fireAndForget swallows it
+  //   as a warning — just press it again.
+  // ★The capability is carried as optional★ — if it cannot be read, not interrupting is right (same reason as `command` above).
   const canInterrupt = agent?.capabilities?.control?.interrupt === true
   const onRootKeyDownCapture = (e: KeyboardEvent<HTMLDivElement>): void => {
-    // 오버레이를 재기 전에 Esc 만 거른다 — 타자마다 문서를 훑지 않게.
+    // Filters only Esc before measuring the overlay — so the document is not scanned on every keystroke.
     if (e.key !== 'Escape') return
     const fire = isInterruptEscape(e, {
       streaming,
@@ -465,12 +465,12 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
 
   return (
     <div
-      // 빈 상태에선 루트가 곧 정렬 컨테이너다(justify-center) — [마스코트·문구·입력창] 묶음을 통째로
-      //   세로 가운데 놓는다. 위아래 spacer 로 나누면 위쪽에 든 마스코트·문구 높이만큼 묶음이 위로 밀린다.
-      // relative = 아래 부재 오버레이(absolute inset-0)의 앵커.
-      // 색조는 클래스 하나로 들어온다(정의처 = richBranding.css) — claude 는 '' 라 현행 모습 그대로다.
-      // tabIndex -1 = 칸 루트가 클릭 · 코드로만 포커스를 받는다(탭 순서 밖) — 본문 여백을 눌러도 Esc 가 이 칸에
-      //   온다(ADR-0237 U6). 대화 글을 누르면 스크롤 뷰포트가 먼저 받지만 keydown 은 그대로 여기로 번진다.
+      // In the empty state the root is the alignment container itself (justify-center) — the [mascot·text·input box] group is placed
+      //   at the vertical center as a whole. Splitting with top and bottom spacers would push the group up by the height of the mascot·text in the top part.
+      // relative = the anchor of the absent overlay below (absolute inset-0).
+      // The tone comes in as a single class (defined in richBranding.css) — claude is '' so it looks exactly as now.
+      // tabIndex -1 = the area root receives focus only by click · code (outside tab order) — pressing the body margin also makes Esc
+      //   reach this area (ADR-0237 U6). Pressing conversation text makes the scroll viewport receive it first, but keydown still bubbles up here.
       tabIndex={-1}
       onKeyDownCapture={onRootKeyDownCapture}
       className={[
@@ -480,16 +480,16 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
       ]
         .filter(Boolean)
         .join(' ')}
-      data-rich-live="1" // cdp eval 에서 라이브 RichSlot 마운트 여부 확인용
+      data-rich-live="1" // For checking in cdp eval whether the live RichSlot is mounted
       data-agent-id={agentId}
-      // ★표식에도 같은 토큰이 붙지만 여기를 지우지 말 것★ — 대화가 시작되면 제목·표식이 함께 접혀
-      //   (ADR-0145 빈 상태) 그때 백엔드를 말하는 DOM 이 이 속성뿐이다.
+      // ★The same token is on the marker too, but do not remove it here★ — when a conversation starts the title and marker fold away together
+      //   (ADR-0145 empty state), and then this attribute is the only DOM that tells the backend.
       data-rich-brand={branding.brand}
       data-rich-awaiting-history={awaitingHistory ? '1' : undefined}
     >
-      {/* 대화 렌더(스크롤) — ScrollArea seam(ADR-0053: 앱 전역 Radix 오버레이 스크롤바). 순서 보존 item 스트림.
-          ★ref 는 이 seam 이 실제 스크롤 노드(Radix Viewport)로 forward 한다 — 스크롤 따라가기(ADR-0242)가 그
-          노드를 재고 쓴다(Root 를 겨누면 스크롤이 안 된다). CC 룩 렌더는 StructuredTextView 소관. */}
+      {/* Conversation render (scroll) — the ScrollArea seam (ADR-0053: the app-wide Radix overlay scrollbar). Order-preserving item stream.
+          ★The ref is forwarded by this seam to the real scroll node (Radix Viewport) — scroll-follow (ADR-0242) measures and writes that
+          node (aiming at the Root does not scroll). The CC-look render is StructuredTextView's concern. */}
       {!showEmpty && (
         <ScrollArea ref={follow.viewportRef} className="min-h-0 flex-1">
           <StructuredTextView
@@ -498,27 +498,27 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
             slotId={viewId}
             onGroupToggle={onGroupToggle}
           />
-          {/* ADR-0226 이력 대기 — 대화 영역 가운데 아이콘 + 옅은 막(사용자 결정 2026-09-24).
-              ★여기 두는 이유★: absolute 의 기준이 ScrollArea 루트(seam 의 relative)라 대화 영역만 정확히
-              덮고 스크롤되지 않으며, 그 아래 형제인 입력창에는 닿지 않는다. 이는 Radix Viewport 와 그 안쪽
-              래퍼에 position 이 없다는 데 기댄다(@radix-ui/react-scroll-area dist 소스 확인) — 안쪽 래퍼가
-              positioned 가 되면 기준이 그리로 옮겨 막이 내용 높이(대기 중엔 하단 여백 한 줄)로 줄어든다.
-              슬롯 루트 자식으로 두면 입력창까지 덮는다.
-              pointer-events-none — 스크롤·선택·클릭이 그대로 통과한다.
-              막 색이 background 가 아니라 foreground 옅은 틴트인 이유 = 이 막이 덮는 영역은 늘 비어 있다(이력
-              행이 오면 대기가 끝난다). background 계열이면 같은 색 위에 같은 색이라 보이지 않는다. */}
+          {/* ADR-0226 history wait — an icon in the center of the conversation area + a pale curtain (user decision 2026-09-24).
+              ★Why it is placed here★: the absolute reference is the ScrollArea root (the seam's relative), so it covers exactly
+              the conversation area only and does not scroll, and does not reach the input box, its sibling below. This leans on the Radix Viewport and its inner
+              wrapper having no position (checked in the @radix-ui/react-scroll-area dist source) — if the inner wrapper becomes
+              positioned, the reference moves there and the curtain shrinks to the content height (while waiting, one line of bottom margin).
+              Placing it as a child of the slot root would cover the input box too.
+              pointer-events-none — scroll, selection and clicks pass straight through.
+              Why the curtain color is a pale foreground tint, not background = the area this curtain covers is always empty (waiting ends
+              when a history row arrives). With a background-family color it would be the same color on the same color and invisible. */}
           {awaitingHistory && (
             <LoadingPanel className="pointer-events-none absolute inset-0 bg-foreground/8" />
           )}
           <JumpToBottom follow={follow} />
         </ScrollArea>
       )}
-      {/* 대기 표시 줄 — 스크롤 목록 밖이라 켜지고 꺼져도 대화 높이와 바닥 따라가기를 흔들지 않는다(WaitRow 헤더).
-          ★`{조건 && …}` 로 자식 자리를 하나 고정해 둔다★ — 아래 입력 묶음의 자리가 밀리지 않는다(textarea 주석).
-          ★정체성 라벨(§ user request)은 이 줄의 오른쪽 칸이다★ — claude-code 터미널처럼 입력창 바로 위 우측에 어느
-          에이전트인지 이름만 표시한다(중복 이름 허용 · 상태 글리프는 트리 몫). 대기 글과 한 줄을 나눠 쓰고 좁으면 라벨이
-          잘린다. 입력 묶음 위에 띄워 겹치면(absolute) 좁은 칸에서 「중단하는 중…」 과 경과 초를 가린다. 빈 상태에는 줄이
-          없어 라벨도 없다 — 입력창 바로 위가 제품명 문구 자리다(ADR-0145 §2 구성). */}
+      {/* Wait indicator row — outside the scroll list, so turning on and off does not shake conversation height or bottom-follow (WaitRow header).
+          ★`{조건 && …}` pins one child position★ — the position of the input group below does not shift (textarea comment).
+          ★The identity label (§ user request) is this row's right-hand area★ — like the claude-code terminal, only the name of which
+          agent it is shows at the upper right just above the input box (duplicate names allowed · status glyph is the tree's job). It shares the line with wait text, and when narrow the label is
+          cut off. If it floated over the input group (absolute), in a narrow area it would cover 「중단하는 중…」 (interrupting…) and the elapsed seconds. The empty state has no
+          row so no label either — just above the input box is where the product name text goes (ADR-0145 §2 layout). */}
       {!showEmpty && (
         <WaitStrip
           streaming={streaming}
@@ -535,12 +535,12 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
         />
       )}
 
-      {/* ADR-0145 빈 상태 윗단 — 표식 + 제품명. 세로 중앙 정렬은 루트가 잡고(justify-center)
-          여기는 자기 높이만 차지한다. 문구는 제품명이라 번역 대상이 아니다(ADR-0145) — codex 쪽도 같은
-          이유로 i18n 을 타지 않는다. 둘 중 무엇을 그릴지는 richBranding 한 판정이 정한다.
-          ★공간이 줄 때 줄어드는 쪽은 마스코트뿐★: 마스코트 칸만 shrink+overflow-hidden 이라 슬롯이
-          낮아지면 자연스럽게 잘려 사라지고, 문구·입력창은 flex-none 으로 온전히 남는다
-          (임계 높이로 통째 숨기던 방식은 툭 사라져 부자연스럽다는 사용자 판단으로 폐기). */}
+      {/* ADR-0145 empty-state upper part — marker + product name. Vertical centering is done by the root (justify-center),
+          and this takes only its own height. The text is a product name so it is not a translation target (ADR-0145) — codex's side also does not use i18n for the same
+          reason. Which of the two to draw is decided by the single richBranding decision.
+          ★When space shrinks, only the mascot shrinks★: only the mascot area is shrink+overflow-hidden, so when the slot gets
+          lower it is naturally cut off and disappears, while the text and input box stay whole with flex-none
+          (the way of hiding everything at a threshold height was discarded on the user's judgment that it vanishes abruptly and feels unnatural). */}
       {showEmpty && (
         <div data-rich-empty="1" className="flex min-h-0 flex-col items-center px-4 pb-8">
           <div className="min-h-0 shrink overflow-hidden">
@@ -552,15 +552,15 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
         </div>
       )}
 
-      {/* 입력 묶음 = [대기 입력 목록 · 입력창](ADR-0231). 목록은 입력창 **위**에 선다.
-          ★textarea 는 두 배치에서 같은 엘리먼트다(ADR-0145)★: 자리(부모 children 인덱스)를 고정하고
-          className·rows 만 갈아 React 가 remount 하지 않게 한다 — 갈라 두면 전송·IME·포커스 가드가
-          두 벌이 되고, 전환 순간 입력 중이던 포커스가 끊긴다. 목록이 `{조건 && …}` 로 **늘 같은 자식 자리**를
-          차지하는 것도 같은 이유다(목록이 서고 빠질 때 입력창 줄이 밀리지 않는다). */}
+      {/* Input group = [queued-input list · input box] (ADR-0231). The list stands **above** the input box.
+          ★The textarea is the same element in both layouts (ADR-0145)★: the position (parent children index) is fixed
+          and only className·rows are swapped so React does not remount — if split, send · IME · focus guard become
+          two sets, and the focus being typed in breaks at the moment of transition. The list occupying **always the same child position** with `{조건 && …}` is
+          for the same reason (the input box row does not shift when the list stands and leaves). */}
       <div className={showEmpty ? 'flex flex-none flex-col' : 'flex flex-none flex-col border-t border-border'}>
         {hasQueued && <QueuedInputList agentId={agentId} entries={queued} />}
-        {/* 입력창 — Enter 전송 / Shift+Enter 줄바꿈(별도 전송 버튼 없음). ★포커스 가드★: stopPropagation
-            으로 키 입력이 상위/전역 키바인딩으로 새지 않게 한다(터미널 슬롯의 onData 캡처와 동형 격리). */}
+        {/* Input box — Enter sends / Shift+Enter newline (no separate send button). ★Focus guard★: stopPropagation
+            keeps key input from leaking to parent/global keybindings (same isolation as the terminal slot's onData capture). */}
         <div
           className={
             showEmpty
@@ -574,19 +574,19 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
               e.stopPropagation()
-              // ★한국어 IME 조합 확정 Enter 오발사 방지(주 사용자가 한국어)★: WebView2 에서 한글 조합을
-              //   확정하는 Enter 는 isComposing=true(keyCode 229)로 keydown 이 온다 — 이걸 전송으로 처리하면
-              //   조합만 끝내려던 Enter 가 미완성 입력을 조기 전송한다. 조합 중 Enter 는 전송 분기 전에 흘려보낸다.
+              // ★Preventing misfire of the Enter that confirms Korean IME composition (the main user is Korean)★: in WebView2 the Enter that
+              //   confirms Hangul composition comes as keydown with isComposing=true (keyCode 229) — handling this as a send makes
+              //   an Enter that only meant to end composition send unfinished input early. An Enter during composition is let through before the send branch.
               if (e.nativeEvent.isComposing || e.keyCode === 229) return
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault()
                 send()
               }
             }}
-            // 우선순위 = 종료 > 빈 상태 > 하단. 종료 표시가 먼저다(어느 배치든 종료면 그 사실이 이긴다).
-            // ★비활성(disabled)은 이보다 넓고 문구는 종료만 말한다★: 연결 끊김·구독 정지에 "종료됨" 을
-            //   적으면 판정이 흔들리는 구간에 단정을 남기게 되고, 그건 막이 문구를 뺀 이유와 어긋난다
-            //   (SlotUnavailableVeil 헤더).
+            // Priority = ended > empty state > bottom. The ended indicator comes first (in either layout, if ended, that fact wins).
+            // ★Disabled is wider than this and the text speaks only of exit★: writing "종료됨" (ended) for
+            //   disconnect/subscription stop would leave an assertion in a span where the decision wavers, and that conflicts with the reason the curtain left out text
+            //   (SlotUnavailableVeil header).
             placeholder={
               agentGone
                 ? t('agent.terminatedPlaceholder')
@@ -596,9 +596,9 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
             }
             disabled={agentUnavailable}
             rows={showEmpty ? 3 : 2}
-            // 빈 상태만 둥근 모서리에 조금 크게(ADR-0145 §5) — 하단 배치는 기존 고대비 바 그대로.
-            // 하단 좌우 여백은 대화 본문(ChatRow px-4)과 들여쓰기를 크게 어긋내지 않는 선으로 잡고 세로
-            // 여백은 그대로 둬 바 높이·성격을 유지한다. 빈 상태는 넓은 박스라 좌우를 더 주고 위쪽도 한 단계 띄운다.
+            // Only the empty state gets rounded corners and a slightly larger size (ADR-0145 §5) — the bottom layout is the existing high-contrast bar as is.
+            // The bottom side margins are set at a line that does not shift indentation much from the conversation body (ChatRow px-4) and the vertical
+            // margin is left alone to keep the bar's height and character. The empty state is a wide box so it gets more side margin and the top is lifted a step too.
             className={
               showEmpty
                 ? 'w-full max-w-[560px] resize-none rounded-xl border border-border bg-surface px-5 py-4 text-[14px] text-foreground outline-none placeholder:text-muted focus:border-accent disabled:opacity-50'
@@ -608,9 +608,9 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
         </div>
       </div>
 
-      {/* ADR-0148: 타겟한 에이전트가 지금 없을 때(프로세스 종료 · 연결 끊김 · 구독이 출력을 못 내는 상태 —
-          셋을 같게 본다) 슬롯을 죽인다. 모습은 세 슬롯 공용(SlotUnavailableVeil). 마지막 자식으로 두는
-          이유 = 앞 자식들의 인덱스를 밀지 않아야 입력창이 remount 되지 않는다(위 textarea 주석). */}
+      {/* ADR-0148: when the targeted agent is not there now (process exit · connection lost · the subscription cannot produce output —
+          the three are seen as the same) it kills the slot. The look is shared by the three slots (SlotUnavailableVeil). Why it is placed as the last child =
+          the indexes of earlier children must not shift so the input box is not remounted (textarea comment above). */}
       {agentUnavailable && <SlotUnavailableVeil phase={phase} />}
     </div>
   )

@@ -1,24 +1,24 @@
-//! 패닉 가둠 표시와 가두지 못한 패닉의 훅 몸통(ADR-0292).
+//! Panic containment mark and the hook body for panics that were not contained (ADR-0292).
 //!
-//! 가두는 자리는 [`contain`] 으로 감싸고, 그 안에서 여러 에이전트가 함께 쓰는 상태를 고치는 호출은
-//! [`uncontained`] 로 감싼다. 둘을 가르는 것은 스레드 지역 깊이 하나다 — 훅 몸통([`hook`])은 늘 사유를
-//! 로그하고 이전 훅을 부른 뒤, 깊이가 0 이면 끝내기(운영 = `std::process::abort` — [`install_hook`])를 부르고
-//! 아니면 돌아가 되감기가 그 [`contain`] 까지 가서 `Err` 로 접힌다. 가둔 패닉의 자리(파일 · 줄)가 남는 곳은 그
-//! 사유 줄뿐이다.
+//! A containing site is wrapped in [`contain`], and inside it a call that fixes state shared by several agents is
+//! wrapped in [`uncontained`]. What tells the two apart is one thread-local depth — the hook body ([`hook`]) always
+//! logs the reason and calls the previous hook, then if the depth is 0 calls the end (production = `std::process::abort` — [`install_hook`]),
+//! otherwise returns, and unwinding goes up to that [`contain`] and is folded into `Err`. The only place where the location (file · line) of a contained panic remains is that
+//! reason line.
 //!
-//! ★표시가 있어야 하는 까닭★ — std 의 훅은 패닉한 스레드에서 **되감기 전에** 돈다. 표시 없이 「잡히지 않을
-//! 패닉 = 끝」 훅을 걸면 `catch_unwind` 가 잡으려던 패닉까지 끝낸다.
+//! ★Why the mark is needed★ — std's hook runs on the panicking thread **before unwinding**. If a 「잡히지 않을
+//! 패닉 = 끝」 (an uncaught panic = end) hook is installed without a mark, it ends even the panics that `catch_unwind` meant to catch.
 //!
-//! ★불변식 — 표시 범위 ⊆ 그것을 잡는 catch 클로저★: 깊이를 올리는 길은 [`contain`] 하나이고, 거기서 올림과
-//! 잡음은 한 몸이다. 깊이만 따로 올리는 공개 수단을 두지 않는다 — 잡는 이 없이 표시가 서면 그 안의 패닉이 훅을
-//! 지나 스레드만 죽인다(펌프라면 끝 전이 없이 `Running` 으로 남는 에이전트와 산 CLI — ADR-0005 · ADR-0290).
+//! ★Invariant — mark range ⊆ the catch closure that catches it★: the only path that raises the depth is [`contain`], and there raising and
+//! catching are one body. No public means to raise only the depth is provided — if a mark stands with no one to catch, a panic inside it passes the hook
+//! and kills only the thread (for a pump, an agent left as `Running` with no terminal transition, and a live CLI — ADR-0005 · ADR-0290).
 //!
-//! 표시는 스레드를 따라가지 않는다 — 감싼 코드가 띄운 스레드 · 태스크는 표시 밖(= 끝냄)이다. 비동기 표시도
-//! 없다: 가두는 자리가 전부 동기이고, async 자리를 가두려면 태스크 지역 표시가 따로 있어야 한다.
+//! The mark does not follow threads — a thread or task launched by the wrapped code is outside the mark (= ends). There is no async mark either:
+//! all containing sites are synchronous, and containing an async site would need a separate task-local mark.
 //!
-//! 로그는 `tracing` facade 를 바로 부른다 — 이 crate 의 `logging` 입주자를 부르지 않는다(lib.rs 게이트 ③).
-//! 쥔 채 패닉한 스레드가 로그 파일에 다시 들어가는 자기교착과, 남이 쥔 채 멎은 파일 잠금 앞의 끝없는 대기는 그
-//! 입주자의 파일 sink 가 막는다(그 줄을 버린다). `tracing` 내부 잠금 앞의 대기는 막지 않는다.
+//! Logging calls the `tracing` facade directly — it does not call this crate's `logging` tenant (lib.rs gate ③).
+//! The self-deadlock of a thread that panicked while holding it re-entering the log file, and endless waiting at a file lock held and stuck by another, are
+//! blocked by that tenant's file sink (it drops the line). Waiting at the `tracing` internal lock is not blocked.
 // ADR-0292
 
 use std::any::Any;
@@ -28,21 +28,21 @@ use std::panic::{catch_unwind, PanicHookInfo, UnwindSafe};
 use std::sync::Once;
 
 thread_local! {
-    // const 초기화 + `Drop` 없는 값이라 스레드 해체 중(TLS 소멸자 안)에도 읽힌다고 보지만, 이는 std 구현의
-    //   동작이지 문서화된 보장이 아니다. 못 읽으면 「표시 없음」 = 끝내는 쪽으로 읽는다.
+    // Const-initialized and a value without `Drop`, so it is thought to be readable even during thread teardown (inside a TLS destructor), but that is std implementation
+    //   behavior, not a documented guarantee. If it cannot be read, it is read as 「표시 없음」 (no mark) = the ending side.
     static DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
 const NON_STRING_PAYLOAD: &str = "<non-string panic payload>";
 
-/// 이 스레드가 지금 [`contain`] 안이고 그 안의 [`uncontained`] 밖인가. 못 읽으면 `false`.
+/// Is this thread now inside [`contain`] and outside its [`uncontained`]? `false` if it cannot be read.
 pub fn is_contained() -> bool {
     DEPTH.try_with(|d| d.get() > 0).unwrap_or(false)
 }
 
-/// 깊이를 바꾸고, drop 에서 바꾸기 전 값으로 되돌린다 — 되감기로 빠져나가도 되돌아간다.
+/// Changes the depth, and on drop restores the value from before the change — it is restored even when leaving by unwinding.
 ///
-/// ★drop 은 패닉하지 않는다★ — 되감기 중의 소멸자 패닉은 abort 다. 그래서 `try_with` 만 쓴다.
+/// ★drop does not panic★ — a destructor panic during unwinding is abort. So only `try_with` is used.
 struct Depth {
     before: Option<u32>,
 }
@@ -68,7 +68,7 @@ impl Drop for Depth {
     }
 }
 
-/// [`contain`] 이 잡은 패닉 — 페이로드를 [`payload_text`] 로 옮긴 문장만 나른다.
+/// A panic caught by [`contain`] — carries only the sentence into which the payload was turned by [`payload_text`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Caught {
     message: String,
@@ -86,12 +86,12 @@ impl fmt::Display for Caught {
     }
 }
 
-/// `f` 를 표시 안에서 돌리고 그 패닉을 잡는다 — 잡은 패닉 = `Err`.
+/// Runs `f` inside the mark and catches its panic — a caught panic = `Err`.
 ///
-/// 표시는 `f` 가 끝나거나 되감겨 나올 때 들어오기 전 값으로 돌아간다. 사유 줄은 훅이 표시와 무관하게 남기므로
-/// 부르는 쪽은 다시 로그하지 않고 실패 표면(`Failed` · 입력 거절)만 낸다 — 단 훅 줄에 없는
-/// 귀속(에이전트 id 등)은 남긴다.
-/// 잡은 페이로드는 이 표시가 내려간 뒤 버려진다 — 그 drop 의 패닉은 바깥 표시로 판정된다.
+/// The mark returns to its pre-entry value when `f` ends or unwinds out. The hook leaves the reason line regardless of the mark, so
+/// the caller does not log again and only emits the failure surface (`Failed` · input rejection) — but it does keep an
+/// attribution not in the hook line (agent id etc.).
+/// The caught payload is dropped after this mark is lowered — a panic in that drop is decided by the outer mark.
 // ADR-0292
 pub fn contain<T>(f: impl FnOnce() -> T + UnwindSafe) -> Result<T, Caught> {
     catch_unwind(move || {
@@ -103,21 +103,21 @@ pub fn contain<T>(f: impl FnOnce() -> T + UnwindSafe) -> Result<T, Caught> {
     })
 }
 
-/// `f` 를 표시 밖에서 돌린다 — 그 안의 패닉은 바깥에 [`contain`] 이 있어도 훅이 끝낸다. 끝나면(되감겨 나와도)
-/// 표시가 들어오기 전 값으로 돌아온다. 그 안에서 다시 [`contain`] 을 부르면 그 범위는 다시 가둬진다.
+/// Runs `f` outside the mark — a panic inside it ends via the hook even if there is a [`contain`] outside. When it finishes (even by unwinding out),
+/// the mark returns to its pre-entry value. If [`contain`] is called again inside it, that range is contained again.
 ///
-/// 가둔 코드가 여러 에이전트의 공유 상태를 고치는 호출을 감싼다 — 반쯤 고친 공유 상태를 남긴 채 이어 가지
-/// 않게(ADR-0292 결정 3).
+/// Contained code wraps with this a call that fixes state shared by several agents — so as not to carry on leaving half-fixed shared state
+/// (ADR-0292 decision 3).
 // ADR-0292
 pub fn uncontained<T>(f: impl FnOnce() -> T) -> T {
     let _lowered = Depth::change(|_| 0);
     f()
 }
 
-/// 패닉 페이로드 → 문장. `&str` · `String` 이 아니면 `"<non-string panic payload>"`.
+/// Panic payload → sentence. If it is not `&str` · `String`, `"<non-string panic payload>"`.
 ///
-/// `catch_unwind` 의 `Box<dyn Any + Send>` 를 `&payload` 로 넘겨도 컴파일된다(상자 자체가 `Any` 라 말없이
-/// 바뀐다) — 그 한 겹은 여기서 벗긴다.
+/// Passing the `Box<dyn Any + Send>` of `catch_unwind` as `&payload` also compiles (the box itself is `Any`, so it silently
+/// changes) — that one layer is peeled off here.
 pub fn payload_text(payload: &(dyn Any + Send)) -> String {
     if let Some(inner) = payload.downcast_ref::<Box<dyn Any + Send>>() {
         return payload_text(&**inner);
@@ -129,12 +129,12 @@ pub fn payload_text(payload: &(dyn Any + Send)) -> String {
         .unwrap_or_else(|| NON_STRING_PAYLOAD.to_string())
 }
 
-/// 훅 몸통 — 사유 줄을 로그하고 이전 훅을 부른 뒤, 표시 밖이면 `end` 를 부른다.
+/// Hook body — logs the reason line and calls the previous hook, then calls `end` if outside the mark.
 ///
-/// 판정은 들어온 때의 표시로 한다. 표시 안이면 돌아가고 되감기가 그 [`contain`] 까지 간다.
-/// 로그는 표시와 무관하다 — 패닉 자리(파일 · 줄)는 훅에서만 보이므로, 잡고 로그하지 않는 자리의 기록도 여기
-/// 남는다. `end` 가 돌아오면(시험) 이 함수도 돌아가고 되감기가 이어진다.
-/// ★여기서 난 패닉(이전 훅 안 포함)은 표시와 무관하게 std 가 곧장 abort 한다★ — 훅 안의 패닉은 되감기지 않는다.
+/// The decision uses the mark at the time of entry. If inside the mark it returns and unwinding goes up to that [`contain`].
+/// Logging is independent of the mark — the panic location (file · line) is visible only in the hook, so a record of a site that catches and does not log also
+/// remains here. If `end` returns (tests), this function returns too and unwinding continues.
+/// ★A panic that occurs here (including inside the previous hook) is aborted by std at once regardless of the mark★ — a panic inside a hook does not unwind.
 // ADR-0292
 pub fn hook(info: &PanicHookInfo<'_>, previous: &dyn Fn(&PanicHookInfo<'_>), end: &dyn Fn()) {
     let contained = is_contained();
@@ -152,8 +152,8 @@ pub fn hook(info: &PanicHookInfo<'_>, previous: &dyn Fn(&PanicHookInfo<'_>), end
     }
 }
 
-/// [`hook`] 을 프로세스 훅으로 건다 — 끝내기 = `std::process::abort`, 이전 훅 = 걸 때 있던 훅(std 기본이면
-/// stderr 출력). 멱등이다(두 번째부터 아무것도 안 한다).
+/// Installs [`hook`] as the process hook — end = `std::process::abort`, previous hook = the hook present at install time (if it is the std default,
+/// stderr output). Idempotent (from the second call it does nothing).
 // ADR-0292
 pub fn install_hook() {
     static INSTALLED: Once = Once::new();
@@ -179,7 +179,7 @@ mod tests {
         DEPTH.with(Cell::get)
     }
 
-    /// 훅은 프로세스 전역이다 — 갈아 끼우는 시험끼리 겹치지 않게 한 자물쇠로 줄 세운다.
+    /// The hook is process-global — tests that swap it are lined up behind one lock so they do not overlap.
     static HOOK: Mutex<()> = Mutex::new(());
 
     #[derive(Default)]
@@ -188,8 +188,8 @@ mod tests {
         ended: AtomicUsize,
     }
 
-    /// 이 스레드의 패닉만 [`hook`] 에 넘기는 훅을 걸고 `body` 를 돌린다 — 이전 훅 · 끝내기는 세기만 한다.
-    /// 다른 스레드(같은 바이너리의 다른 시험)의 패닉은 원래 훅으로 넘긴다.
+    /// Installs a hook that passes only this thread's panics to [`hook`] and runs `body` — the previous hook · end only count.
+    /// Panics of other threads (other tests of the same binary) are passed to the original hook.
     fn under_hook<T>(body: impl FnOnce() -> T) -> (std::thread::Result<T>, Arc<Heard>) {
         let _held = HOOK.lock().unwrap_or_else(PoisonError::into_inner);
         let me = std::thread::current().id();
@@ -212,8 +212,8 @@ mod tests {
                 );
             }));
         }
-        // ★되돌리기를 `Drop` 으로 옮기지 말 것★ — std 는 패닉 중인 스레드의 `set_hook` 을 거부하고, 되감기 중
-        //   소멸자 안의 그 패닉은 abort 다(command `with_quiet_panic_hook` 과 같은 까닭). 잡은 뒤에 되돌린다.
+        // ★Do not move the restore into `Drop`★ — std refuses `set_hook` on a panicking thread, and that panic inside a destructor
+        //   during unwinding is abort (same reason as command `with_quiet_panic_hook`). Restore after catching.
         let outcome = catch_unwind(AssertUnwindSafe(body));
         drop(std::panic::take_hook());
         match Arc::try_unwrap(original) {
@@ -223,7 +223,7 @@ mod tests {
         (outcome, heard)
     }
 
-    // ── 표시 깊이 ──
+    // ── Mark depth ──
 
     #[test]
     fn contain_raises_the_mark_only_inside_and_nests() {
@@ -266,7 +266,7 @@ mod tests {
         assert_eq!(depth(), 0);
     }
 
-    // ── 표시 끔 ──
+    // ── Mark off ──
 
     #[test]
     fn uncontained_lowers_the_mark_to_zero_and_restores_it() {
@@ -301,7 +301,7 @@ mod tests {
         assert_eq!(depth(), 0);
     }
 
-    // ── 훅 판정 ──
+    // ── Hook decision ──
 
     #[test]
     fn a_panic_inside_contain_does_not_end() {
@@ -359,7 +359,7 @@ mod tests {
         }
     }
 
-    /// 데몬 훅이 남기던 사유 줄(스레드 · 문장 · 자리)과 같은 꼴 — 표시 안에서도 남긴다.
+    /// The same shape as the reason line the daemon hook used to leave (thread · sentence · location) — it is left even inside the mark.
     #[test]
     fn the_hook_logs_the_reason_line_even_inside_contain() {
         let written = Arc::new(Mutex::new(Vec::new()));
@@ -391,7 +391,7 @@ mod tests {
         assert!(text.contains("panic.rs:"), "패닉 자리: {text}");
     }
 
-    // ── 페이로드 문장 ──
+    // ── Payload sentence ──
 
     #[test]
     fn payload_text_reads_str_and_string_and_names_the_rest() {

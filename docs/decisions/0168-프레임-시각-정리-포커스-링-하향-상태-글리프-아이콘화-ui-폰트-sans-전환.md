@@ -1,63 +1,63 @@
-# ADR-0168: 프레임 시각 정리 — 포커스 링 하향, 상태 글리프 아이콘화, UI 폰트 sans 전환
+# ADR-0168: Frame visual cleanup — lowering the focus ring, turning status glyphs into icons, switching the UI font to sans
 
-- 상태: 확정 (2026-08-23, 근거: 사용자 결정 5건(실화면 대조) + 폰트 설치 여부 canvas 폭 실측 + 테마 토큰 값 실측 + `/review code full` 2인 적대) · 부분 폐기 by ADR-0227 (결정 7 allotment sash 토큰) · 부분 폐기 by ADR-0295 (결정 5 중 위 모서리 반지름과 구분선 규칙과 비활성 탭 토큰만) · 부분 폐기 by ADR-0298 (결정 5 ① 활성 탭이 바보다 밝다와 그 불변식을 다크에서만 그리고 비활성 탭 글자색을 다크와 라이트에서)
-- 관련: Amends ADR-0066 (포커스 링 강도 40퍼센트로 하향) · Amends ADR-0062 (상태 표시를 문자에서 아이콘으로 교체) · Amends ADR-0075 (글리프 매핑 심볼 교체) · ADR-0047(Tailwind) · ADR-0143(빈 슬롯 안내) · ADR-0072(트리 계층) · CLAUDE.md 「LLM-우선 제어」 · Amended by ADR-0227 (결정 7 allotment sash 토큰) · Amended by ADR-0295 (결정 5 중 위 모서리 반지름과 구분선 규칙과 비활성 탭 토큰만) · Amended by ADR-0298 (결정 5 ① 활성 탭이 바보다 밝다와 그 불변식을 다크에서만 그리고 비활성 탭 글자색을 다크와 라이트에서)
+- 상태: 확정 (2026-08-23, basis: 5 user decisions (compared on the real screen) + measuring with canvas width whether the fonts are installed + measuring the theme token values + `/review code full` 2-person adversarial) · 부분 폐기 by ADR-0227 (decision 7 allotment sash token) · 부분 폐기 by ADR-0295 (of decision 5, only the top corner radius, the divider rule and the inactive tab token) · 부분 폐기 by ADR-0298 (of decision 5 ① the active tab is brighter than the bar and its invariant, only: drawn in dark only, and the inactive tab text color in dark and light)
+- 관련: Amends ADR-0066 (lowering the focus ring strength to 40 percent) · Amends ADR-0062 (replacing the status display from characters to icons) · Amends ADR-0075 (swapping the glyph mapping symbols) · ADR-0047(Tailwind) · ADR-0143(empty slot guidance) · ADR-0072(tree hierarchy) · CLAUDE.md 「LLM-우선 제어」 · Amended by ADR-0227 (decision 7 allotment sash token) · Amended by ADR-0295 (of decision 5, only the top corner radius, the divider rule and the inactive tab token) · Amended by ADR-0298 (of decision 5 ① the active tab is brighter than the bar and its invariant, only: drawn in dark only, and the inactive tab text color in dark and light)
 
 ## 맥락
 
-성숙 피어(orca)와 우리 화면을 나란히 놓고 보니 우리 쪽이 "손으로 만든 티"가 났다. 원인을 프레임(탭·패널 헤더·트리·경계선)으로 좁혀 실측한 결과 네 가지가 나왔다.
+Putting a mature peer (orca) and our screen side by side, ours looked hand-made. Narrowing the cause to the frame (tabs · panel headers · tree · borders) and measuring gave four things.
 
-1. **UI 셸 전체가 모노스페이스로 그려지고 있었다.** `--font-ui`가 `'JetBrains Mono', monospace`인데 ★그 폰트는 이 환경에 설치돼 있지 않았다★ — 저장소에 `@font-face`가 하나도 없어 시스템 설치에만 의존하는데, 실제로는 **일반 monospace 대체 폰트**로 렌더되고 있었다. 즉 의도한 폰트가 한 번도 적용된 적이 없다. `--font-claude-prose`의 `Inter`도 같다.
-2. **프레임이 선(border)으로 구획돼 고대비였다.** 탭마다 세로 구분선, 패널 헤더마다 밑줄, 그 위에 accent 파란색이 두 곳(탭 활성 밑줄 2px · 슬롯 포커스 링 65%)에서 동시에 튀었다.
-3. **상태 글리프가 폰트 문자였다**(`● ◻ ✗ ○`). 문자는 폰트마다 크기·굵기·베이스라인이 달라 행 라벨과 세로 정렬이 어긋난다. ①을 고쳐 sans로 넘어가자 이 어긋남이 더 드러났다.
-4. **분할선이 테마와 끊겨 있었다.** allotment 기본 CSS의 `--separator-border`(회색 리터럴)·`--focus-border`(VS Code 파랑 `#007fd4`)가 `:root`에 하드코딩돼 우리 테마 전환을 따라오지 않았다.
+1. **The whole UI shell was being drawn in monospace.** `--font-ui` is `'JetBrains Mono', monospace`, but ★that font was not installed in this environment★ — the repository has no `@font-face` at all and depends only on a system install, and in practice it was being rendered with a **generic monospace fallback font**. That is, the intended font was never applied even once. The `Inter` of `--font-claude-prose` is the same.
+2. **The frame was divided by lines (border) and was high-contrast.** A vertical divider per tab, an underline per panel header, and on top of that the accent blue popped out in two places at once (the tab active underline 2px · the slot focus ring 65%).
+3. **The status glyphs were font characters** (`● ◻ ✗ ○`). Characters differ in size, weight and baseline per font, so they misalign vertically with the row label. After fixing ① and moving to sans this misalignment showed even more.
+4. **The split lines were cut off from the theme.** The `--separator-border` (a gray literal) and `--focus-border` (VS Code blue `#007fd4`) of allotment's default CSS were hard-coded in `:root` and did not follow our theme switch.
 
 ## 결정
 
-**1. 슬롯 포커스 링 = accent 40%** (옛 65% — ADR-0066 결정 4). 사용자가 65 → 50 → 40을 실화면에서 눈으로 비교해 고른 값이다.
+**1. Slot focus ring = accent 40%** (formerly 65% — ADR-0066 decision 4). A value the user chose by comparing 65 → 50 → 40 with their eyes on the real screen.
 
-**2. 상태 글리프 = lucide 아이콘 매핑.** 문자와 **모양을 1:1로** 맞춘다 — `Running`=채운 원 · `Exiting`/`Exited`/`Killed`=사각 · `Failed`=X · `Reserved`/미지=빈 원. 순수 함수 `statusGlyphIcon(status)`가 `{ Icon, fill, shape }`를 돌려주고, 문자열판 `statusGlyph`는 삭제한다. **`statusGlyphColor`는 무변경**이다.
+**2. Status glyph = a lucide icon mapping.** Match the **shape 1:1** with the character — `Running`=filled circle · `Exiting`/`Exited`/`Killed`=square · `Failed`=X · `Reserved`/unknown=empty circle. The pure function `statusGlyphIcon(status)` returns `{ Icon, fill, shape }`, and the string version `statusGlyph` is deleted. **`statusGlyphColor` is unchanged.**
 
-**3. DOM 판독 계약 2건을 명시적으로 만든다.** 문자를 SVG로 바꾸면 `textContent`가 비어 상태 판독 채널이 사라지므로 `data-agent-glyph-shape`(4토큰)로 승계한다. 트리 선택도 배경색이 유일 채널이었으므로 `data-selected`·`aria-selected`를 단다. 둘 다 CDP·LLM 셀렉터 표면이다.
+**3. Make two DOM read contracts explicit.** Changing characters to SVG empties `textContent`, so the status read channel disappears, hence `data-agent-glyph-shape` (4 tokens) takes it over. Tree selection also had the background color as its only channel, so `data-selected` and `aria-selected` are attached. Both are CDP and LLM selector surfaces.
 
-**4. UI 폰트 = `'Segoe UI Variable Text', 'Segoe UI', 'Malgun Gothic', system-ui, sans-serif`.** 전부 Windows 내장이라 실제로 적용된다. 라틴은 Segoe UI, 한글은 Malgun Gothic 자동 폴백(Windows 기본 동작 그대로).
+**4. UI font = `'Segoe UI Variable Text', 'Segoe UI', 'Malgun Gothic', system-ui, sans-serif`.** All are built into Windows, so it is actually applied. Latin is Segoe UI, and Korean falls back automatically to Malgun Gothic (the Windows default behavior as is).
 
-**5. 탭 = Chrome 배치.** accent 밑줄을 걷고(단색) 아래 넷으로 활성을 표시한다 — ① **활성 탭이 바보다 밝다**(활성 = `--bg-secondary`, 바 = `--bg`) ② 위 모서리 6px 라운드 ③ **비활성 탭 사이에만** 세로 구분선(활성 탭 양옆은 없다 — 떠오른 조각이라) ④ 닫기 `×` **항상 표시**. 비활성 탭 채움은 새 토큰 `--tab-inactive-bg`가 테마별로 정한다(light만 한 톤 눌러 흰 활성 탭이 떠오르게, dark·e-ink는 `transparent`).
+**5. Tabs = Chrome layout.** Remove the accent underline (solid color) and mark the active tab with the four below — ① **the active tab is brighter than the bar** (active = `--bg-secondary`, bar = `--bg`) ② top corners rounded 6px ③ a vertical divider **only between inactive tabs** (none on either side of the active tab — because it is a raised piece) ④ the close `×` **always shown**. The inactive tab fill is set per theme by the new token `--tab-inactive-bg` (only light is pressed down one tone so the white active tab rises, dark and e-ink are `transparent`).
 
-**6. 트리 선택 배경 = `color-mix(in srgb, var(--text) 12%, var(--bg-secondary))`.** `--text`를 섞는 이유는 그 토큰이 정의상 배경과 대비되므로 **세 테마 모두에서** 차이가 남기 때문이다.
+**6. Tree selection background = `color-mix(in srgb, var(--text) 12%, var(--bg-secondary))`.** The reason for mixing in `--text` is that this token by definition contrasts with the background, so a difference remains **in all three themes**.
 
-**7. allotment sash 토큰을 테마에 묶는다** — `html:root`에서 `--separator-border: var(--border)` · `--focus-border: var(--accent)`. `html:root`(0,1,1)를 쓰는 이유는 allotment가 `:root`(0,1,0)에 선언하고 번들에서 **뒤에** 오기 때문이다(순서로는 진다).
+**7. Tie the allotment sash tokens to the theme** — in `html:root`, `--separator-border: var(--border)` · `--focus-border: var(--accent)`. The reason for using `html:root` (0,1,1) is that allotment declares at `:root` (0,1,0) and it comes **later** in the bundle (it would lose by order).
 
 ## 거부한 대안
 
-- **포커스 링 65% 유지** — 프레임에서 가장 튀어 "고대비"의 주범이었다. 사용자가 실화면 대조로 판정. ★ADR-0066이 40%를 명시적으로 거부했던 값과 같은 40%다★ — 그 거부 근거는 "약한 포커스 표시가 반복 UX 불만(VS Code #24586, JetBrains IDEA-102931)"이라는 **일반 서베이**였고 실물 대조가 아니었다. 이번은 실화면 3단 비교라 이쪽이 우선한다. **되돌릴 거면 이 줄만 올리면 된다.**
-- **포커스 링 50%** — 중간값으로 실제 적용해 봤으나 여전히 튄다고 판정(실화면).
-- **텍스트 문자 글리프 유지** — 폰트 의존 정렬 어긋남이 sans 전환 후 악화. 다만 ★모양이 상태를 담는다는 ADR-0062의 원칙은 버리지 않았다★ — lucide 아이콘도 모양이라 e-ink에서 색이 중립화돼도 네 모양이 갈린다(실측: e-ink는 `--status-running`이 `var(--text-muted)`라 네 글리프가 동색이 되고 모양만 남는다).
-- **색으로만 상태 구분** — e-ink가 색을 무력화하므로 모양이 유일 신호다. ADR-0062/0075 원칙 그대로 거부.
-- **트리 선택 배경 `--surface-elevated`** — 실제로 한 번 채택했다가 리뷰에서 걸러냈다. ★light(`#ffffff`)·e-ink(`#f0f0f0`)에서 패널 배경 `--bg-secondary`(`#fff`·`#f0f0f0`)와 **값이 같아** 선택 표시가 통째로 사라진다★. dark(#141414 vs #262626)만 갈려서 화면 대조로는 안 잡혔다(테마 파일 값 실측).
-- **트리 선택 배경 accent 15% wash** — 파란 wash라 5번 단색 기조와 충돌.
-- **탭 배치: 활성 탭 = `--bg`(바 = `--bg-secondary`)** — 실제로 적용했다가 되돌렸다. 활성 탭이 프레임에서 **가장 어두워져 구멍처럼** 읽혔다(사용자 판단, 실화면).
-- **탭 배치: 바 = `color-mix(--text 25%, --bg)`** — 대비를 1.07 → 1.8:1로 올리려는 안. 실제로 적용했다가 되돌렸다 — 바가 트리 패널과 따로 노는 회색 띠가 돼 "프레임을 조용하게"라는 이 작업의 목표와 정면 충돌했다(사용자 판단, 실화면).
-- **탭 활성 대비를 WCAG UI 기준 3:1까지 올리기** — 거기까지 가려면 40%+ 를 섞어야 하고 위 회색 띠 문제가 그대로 재발한다. 같은 자리를 Chrome·VS Code도 1.3~2:1로 둔다. **활성 판정을 명도 단독에 걸지 않는 쪽**(글자색 + 구분선 + 항상 보이는 `×`)으로 해소했다.
-- **닫기 `×` 를 호버 시에만 표시** — 실제로 넣었다가 되돌렸다. 투명도만 0으로 만드는 방식이라 **버튼이 여전히 키보드 포커스를 받고 Enter로 닫혔다** — 무엇이 닫히는지 화면에 아무 표시 없이(리뷰 지적 + 사용자 판단 "닫기 버튼은 그냥 보여야 한다").
-- **`--font-ui`에 JetBrains Mono 유지** — 미설치라 애초에 적용된 적이 없다(canvas 폭 실측: `"JetBrains Mono"` 요청 폭 = 일반 sans 대체 폭). 목록·라벨이 터미널 출력처럼 읽히는 것도 별개 문제.
-- **Nanum Gothic / Pretendard / Noto Sans KR 지정** — 셋 다 미설치(같은 폭 실측). Windows 기본 탑재가 아니라 지정해도 조용히 대체된다.
+- **Keep the focus ring at 65%** — it popped out most in the frame and was the main culprit of "high contrast". The user decided by comparing on the real screen. ★It is the same 40% as the value ADR-0066 explicitly rejected★ — the ground of that rejection was a **general survey** saying "a weak focus indication is a repeated UX complaint (VS Code #24586, JetBrains IDEA-102931)", not a comparison with the real thing. This time it is a 3-step comparison on the real screen, so this takes priority. **To revert, raise only this line.**
+- **Focus ring 50%** — actually applied it as the middle value, but judged it still pops out (real screen).
+- **Keep the text character glyphs** — the font-dependent alignment mismatch worsened after the sans switch. But ★the principle of ADR-0062 that shape carries the status was not abandoned★ — a lucide icon is also a shape, so even when color is neutralized in e-ink the four shapes still separate (measured: in e-ink `--status-running` is `var(--text-muted)`, so the four glyphs become the same color and only the shape remains).
+- **Distinguish status by color alone** — e-ink disables color, so shape is the only signal. Rejected as is per the ADR-0062/0075 principle.
+- **Tree selection background `--surface-elevated`** — actually adopted once and then filtered out in review. ★In light (`#ffffff`) and e-ink (`#f0f0f0`) it has **the same value** as the panel background `--bg-secondary` (`#fff`·`#f0f0f0`), so the selection indication vanishes entirely★. Only dark (#141414 vs #262626) differs, so it was not caught by screen comparison (measured from the theme file values).
+- **Tree selection background accent 15% wash** — being a blue wash it clashes with the solid-color tone of item 5.
+- **Tab layout: active tab = `--bg` (bar = `--bg-secondary`)** — actually applied and then reverted. The active tab became **the darkest in the frame and read like a hole** (the user's judgment, real screen).
+- **Tab layout: bar = `color-mix(--text 25%, --bg)`** — a proposal to raise the contrast from 1.07 to 1.8:1. Actually applied and then reverted — the bar became a gray band at odds with the tree panel and clashed head-on with the goal of this work, "make the frame quiet" (the user's judgment, real screen).
+- **Raise the tab active contrast to the WCAG UI criterion of 3:1** — to get there 40%+ must be mixed in and the gray band problem above recurs as is. Chrome and VS Code also keep the same place at 1.3~2:1. It was resolved by **not resting the active decision on lightness alone** (text color + divider + the always-visible `×`).
+- **Show the close `×` only on hover** — actually put in and then reverted. Since it only sets the opacity to 0, **the button still received keyboard focus and closed with Enter** — with no indication on screen of what is being closed (review finding + the user's judgment "닫기 버튼은 그냥 보여야 한다" — the close button should simply be visible).
+- **Keep JetBrains Mono in `--font-ui`** — it is not installed, so it was never applied in the first place (canvas width measurement: the requested width of `"JetBrains Mono"` = the generic sans fallback width). That lists and labels read like terminal output is also a separate problem.
+- **Specify Nanum Gothic / Pretendard / Noto Sans KR** — all three are not installed (same width measurement). They are not bundled with Windows, so even if specified they are silently replaced.
 
 ## 근거
 
-- **폰트 설치 여부 = canvas 텍스트 폭 실측**(`document.fonts.check()`는 Chromium에서 로컬 폰트에 거의 항상 true를 돌려줘 못 쓴다). 14px `"Handgloves 123 illWW"` 기준 — 일반 sans 144.59 / JetBrains Mono 144.59(=미설치) / Inter 144.59(=미설치) / Pretendard 144.59(=미설치) / **Segoe UI 139.67(=설치)** / Malgun Gothic 144.51(=설치).
-- **테마 토큰 대비 = `src/styles/theme.css` 값 직독.** light `--bg-secondary: #fff` / `--surface-elevated: #ffffff`, e-ink 둘 다 `#f0f0f0`.
-- **allotment 특이도 = 빌드 산출 CSS 바이트 오프셋 대조**로 확인(우리 규칙이 앞, allotment가 뒤 → 순서로는 짐 → 특이도로 이김).
-- **`/review code full`** 2인 적대 — doc-aware(불변식 breaker) + cross-family blind. 트리 선택 소실과 이 ADR 자체의 부재가 거기서 나왔다.
+- **Whether fonts are installed = canvas text width measurement** (`document.fonts.check()` almost always returns true for local fonts in Chromium and cannot be used). At 14px with `"Handgloves 123 illWW"` — generic sans 144.59 / JetBrains Mono 144.59 (= not installed) / Inter 144.59 (= not installed) / Pretendard 144.59 (= not installed) / **Segoe UI 139.67 (= installed)** / Malgun Gothic 144.51 (= installed).
+- **Theme token contrast = reading the `src/styles/theme.css` values directly.** light `--bg-secondary: #fff` / `--surface-elevated: #ffffff`, e-ink both `#f0f0f0`.
+- **allotment specificity = confirmed by comparing byte offsets in the build output CSS** (our rule first, allotment later → loses by order → wins by specificity).
+- **`/review code full`** 2-person adversarial — doc-aware (invariant breaker) + cross-family blind. The tree selection loss and the absence of this ADR itself came out of that.
 
 ## 영향 / 불변식
 
-- **★탭 바는 활성 탭보다 어두워야 한다★**(바 = `--bg` · 활성 = `--bg-secondary`). 뒤집으면 활성 탭이 "파낸 홈"으로 읽힌다 — 실제로 겪고 되돌린 실패다. ☞ **e-ink는 이 관계가 역전돼 있다**(`--bg: #ffffff` > `--bg-secondary: #f0f0f0`) — 그 테마에선 글자색과 비활성 구분선이 활성 표시를 진다. 미해소 잔여.
-- **★명도차 단독에 활성 판정을 걸지 않는다★** — 바↔활성 탭 대비는 dark 1.07:1 수준이다(실측). 활성 판정은 명도 + 글자색(`--text` vs `--text-muted`) + 비활성 구분선 + 항상 보이는 `×` 넷이 함께 진다. **그중 하나를 떼면 나머지로 버티는지 다시 재야 한다.**
-- **★닫기 `×` 를 투명도로 숨기지 말 것★** — `opacity: 0`은 페인팅만 끄고 hit-test·탭 순서는 그대로다. 숨기려면 렌더 자체를 빼거나 포커스에서도 함께 제외해야 한다.
-- **상태 아이콘엔 `role="img" + aria-label` 이 필요하다** — lucide 는 접근성 prop 이 없으면 svg 에 `aria-hidden` 을 자동으로 붙여 아이콘을 접근성 트리에서 지운다. 문자 글리프 시절엔 `textContent` 가 그 역할을 했다. 빼면 Running 행과 Exited 행이 똑같이 읽힌다.
-- **★트리 선택 배경에 `--surface-elevated`·`--bg-secondary`를 그대로 쓰지 말 것★** — 테마별로 패널 배경과 동색이 된다. 회귀망 = `AgentList.test.tsx`의 "선택 배경은 패널 배경을 그대로 쓰지 않는다".
-- **★`◐`(입력 대기)는 여전히 점등 금지★** — ADR-0062의 이 조항은 개정되지 않았다. 회귀망은 문자 비교에서 **치역 allowlist**로 옮겼다(4모양 밖 아이콘을 돌려주는 분기가 붙으면 실패). 다만 여전히 입력 목록 구동이라 목록에 없는 status 이름은 default로 떨어져 통과한다 — 옛 테스트와 같은 한계.
-- **`data-agent-glyph-shape`·`data-selected`는 셀렉터 계약이다** — 지우거나 토큰을 바꾸면 CDP 실측 스크립트와 LLM 제어 경로가 조용히 눈이 먼다.
-- **폰트는 여전히 시스템 설치 의존이다** — 이 스택은 Windows에서만 보장된다. 모든 환경에서 픽셀까지 동일하게 하려면 `@font-face` 번들링이 필요하고, 그건 **미결**이다(라이선스 확인이 선행). 거부가 아니라 보류.
-- `--font-claude-prose`·`--font-claude-header`의 `Inter`도 미설치지만 **이번 범위 밖**이라 그대로 뒀다(챗 본문 = 슬롯 내부).
+- **★The tab bar must be darker than the active tab★** (bar = `--bg` · active = `--bg-secondary`). If reversed, the active tab reads as a "carved groove" — a failure actually experienced and reverted. ☞ **In e-ink this relation is inverted** (`--bg: #ffffff` > `--bg-secondary: #f0f0f0`) — in that theme the text color and the inactive divider carry the active indication. An unresolved residual.
+- **★Do not rest the active decision on the lightness difference alone★** — the bar↔active tab contrast is around 1.07:1 in dark (measured). The active decision is carried together by four: lightness + text color (`--text` vs `--text-muted`) + the inactive divider + the always-visible `×`. **If you remove one of them, re-measure whether the rest hold.**
+- **★Do not hide the close `×` with opacity★** — `opacity: 0` turns off only painting, while hit-test and tab order stay. To hide it, remove the render itself or exclude it from focus as well.
+- **The status icon needs `role="img" + aria-label`** — without an accessibility prop lucide automatically attaches `aria-hidden` to the svg and erases the icon from the accessibility tree. In the character glyph days `textContent` played that role. Without it a Running row and an Exited row read the same.
+- **★Do not use `--surface-elevated` or `--bg-secondary` as is for the tree selection background★** — they become the same color as the panel background in some themes. The regression net = "선택 배경은 패널 배경을 그대로 쓰지 않는다" (the selection background does not use the panel background as is) in `AgentList.test.tsx`.
+- **★`◐` (waiting for input) is still forbidden to light up★** — this clause of ADR-0062 was not amended. The regression net moved from character comparison to a **range allowlist** (it fails if a branch is added that returns an icon outside the 4 shapes). However, it is still driven by an input list, so a status name not in the list falls to default and passes — the same limit as the old test.
+- **`data-agent-glyph-shape` and `data-selected` are selector contracts** — deleting them or changing the tokens silently blinds the CDP measurement scripts and the LLM control path.
+- **The font still depends on a system install** — this stack is guaranteed only on Windows. Making it pixel-identical in every environment needs `@font-face` bundling, and that is **open** (checking the license comes first). Not a rejection but a deferral.
+- The `Inter` in `--font-claude-prose` and `--font-claude-header` is also not installed, but it is **outside this scope**, so it was left as is (chat body = inside a slot).

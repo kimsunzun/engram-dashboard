@@ -1,23 +1,23 @@
-//! 입력 장치의 지금 상태 — 커서 자리 · 주 버튼 · Esc 가 눌려 있나. 어느 스레드에서나 부른다(놓기 명령이 끌기가 끝난
-//! 뒤에 읽는 자리 — TRD S21-slot-docking 7판 §3-2).
+//! The current state of input devices — cursor position, primary button, whether Esc is pressed. Callable from any thread (the place where the drop command reads
+//! after the drag ends — TRD S21-slot-docking 7th edition §3-2).
 //!
-//! 셋 다 OS 의 비동기 상태를 읽는다 — 메시지 큐를 거치지 않으므로 웹뷰가 쥔 캡처 · 다른 프로세스의 창과 무관하게
-//! 지금 장치 상태다. ★보안 데스크톱(잠금 화면 · UAC)이 앞에 있으면 OS 가 답하지 않는다★ — 커서는 `None`, 버튼은
-//! 떨어진 것으로 온다(MS `GetCursorPos` · `GetAsyncKeyState` 문서 · TRD S21-slot-docking 6.3판 §12 M14).
+//! All three read the OS's asynchronous state — they bypass the message queue, so whatever capture the webview holds or whatever another process's window does, they give
+//! the current device state. ★If a secure desktop (lock screen, UAC) is in front, the OS does not answer★ — the cursor comes back `None` and the button
+//! as released (MS `GetCursorPos` and `GetAsyncKeyState` docs · TRD S21-slot-docking 6.3rd edition §12 M14).
 
 // ADR-0266
 // ADR-0295
 
 use crate::window::PhysPoint;
 
-/// 화면의 커서 자리(Win32 `GetCursorPos`). `None` = OS 가 답하지 않았다(보안 데스크톱 따위) · Windows 밖.
+/// The cursor position on screen (Win32 `GetCursorPos`). `None` = the OS did not answer (secure desktop and the like) · outside Windows.
 pub fn cursor_pos() -> Option<PhysPoint> {
     #[cfg(windows)]
     {
         use windows::Win32::Foundation::POINT;
         use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
         let mut p = POINT::default();
-        // SAFETY: 살아 있는 지역 점에 쓰는 조회 하나.
+        // SAFETY: one query that writes into a live local point.
         unsafe { GetCursorPos(&mut p) }
             .ok()
             .map(|()| PhysPoint { x: p.x, y: p.y })
@@ -28,14 +28,14 @@ pub fn cursor_pos() -> Option<PhysPoint> {
     }
 }
 
-/// 주 버튼이 지금 눌려 있나. 왼손잡이 설정(단추 바꿈 `SM_SWAPBUTTON`)이면 물리 오른쪽 버튼이다 —
-/// `GetAsyncKeyState` 는 논리 버튼이 아니라 물리 버튼을 본다(MS 문서). Windows 밖 = 거짓.
+/// Is the primary button pressed now. With the left-handed setting (button swap `SM_SWAPBUTTON`) it is the physical right button —
+/// `GetAsyncKeyState` looks at the physical button, not the logical one (MS docs). Outside Windows = false.
 pub fn primary_button_down() -> bool {
     #[cfg(windows)]
     {
         use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
         use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SWAPBUTTON};
-        // SAFETY: 값만 읽는 조회 둘.
+        // SAFETY: two queries that only read values.
         unsafe {
             let swapped = GetSystemMetrics(SM_SWAPBUTTON) != 0;
             (GetAsyncKeyState(primary_vk(swapped).0 as i32) as u16 & 0x8000) != 0
@@ -47,14 +47,14 @@ pub fn primary_button_down() -> bool {
     }
 }
 
-/// Esc 가 지금 눌려 있나(Win32 `GetAsyncKeyState(VK_ESCAPE)`). 아주 짧게 친 Esc 는 이미 떨어진 것으로 읽힐 수 있다
-/// (스파이크 2026-10-20 — 짧은 Esc 를 OS 가 놓침 1/5). Windows 밖 = 거짓.
+/// Is Esc pressed now (Win32 `GetAsyncKeyState(VK_ESCAPE)`). A very short Esc tap may already read as released
+/// (spike 2026-10-20 — the OS missed a short Esc 1/5). Outside Windows = false.
 // TRD S21-slot-docking §3-2
 pub fn escape_down() -> bool {
     #[cfg(windows)]
     {
         use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE};
-        // SAFETY: 값만 읽는 조회 하나.
+        // SAFETY: one query that only reads a value.
         unsafe { (GetAsyncKeyState(VK_ESCAPE.0 as i32) as u16 & 0x8000) != 0 }
     }
     #[cfg(not(windows))]
@@ -84,7 +84,7 @@ mod tests {
         assert_eq!(primary_vk(true), VK_RBUTTON);
     }
 
-    /// 대화형 데스크톱이 앞에 있어야 답한다 — CI 러너 · 잠금 화면에서는 `None` 이 정답일 수 있어 손으로 돌린다.
+    /// It answers only when an interactive desktop is in front — on a CI runner or lock screen `None` may be the correct answer, so it is run by hand.
     #[test]
     #[ignore = "대화형 데스크톱에서 손으로"]
     fn cursor_and_button_answer_on_an_interactive_desktop() {
@@ -96,12 +96,12 @@ mod tests {
     }
 }
 
-// OS 와 무관하게 컴파일된다 — Windows 밖에서는 늘 거짓이라 같은 단언이 선다.
+// It compiles regardless of OS — outside Windows it is always false, so the same assertion holds.
 #[cfg(test)]
 mod portable_tests {
     use super::*;
 
-    // CI 러너 · 손대지 않은 개발 PC — 아무도 Esc 를 쥐고 있지 않다.
+    // A CI runner or an untouched dev PC — nobody is holding Esc.
     #[test]
     fn escape_reads_up_when_nobody_holds_it() {
         assert!(!escape_down());

@@ -1,16 +1,16 @@
-# Engram Dashboard — 설계 문서
+# Engram Dashboard — Design Documents
 
-Engram 에이전트 관리 데스크톱 앱의 설계·결정 기록.
-실제 앱 코드는 `apps/engram-dashboard/` 에 있다.
+Design and decision records for the Engram agent-management desktop app.
+The actual app code is in `apps/engram-dashboard/`.
 
-## 문서 목록
+## Document list
 
-- [architecture.md](architecture.md) — 기술 스택, 컴포넌트 구조
-- [requirements.md](requirements.md) — 기능 요구사항
+- [architecture.md](architecture.md) — tech stack, component structure
+- [requirements.md](requirements.md) — functional requirements
 
-## 핵심 결정
+## Key decisions
 
-- **스택**: Tauri + React + xterm.js + Monaco DiffEditor
-- **코드 위치**: `I:\Engram\apps\engram-dashboard\`
-- WezTerm 임베드 불가 → xterm.js로 직접 터미널 렌더링
-- 기존 CCB(Claude Code Bridge) 포크 아닌 처음부터 제작
+- **Stack**: Tauri + React + xterm.js + Monaco DiffEditor
+- **Code location**: `I:\Engram\apps\engram-dashboard\`
+- WezTerm cannot be embedded → render the terminal directly with xterm.js
+- Built from scratch, not a fork of the existing CCB (Claude Code Bridge)

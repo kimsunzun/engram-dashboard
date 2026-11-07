@@ -1,27 +1,27 @@
-//! engram-dashboard-messaging — S18 메시징 커널 crate(ADR-0103/0104/0110).
+//! engram-dashboard-messaging — the S18 messaging kernel crate (ADR-0103/0104/0110).
 //!
-//! ★역할★: "데몬이 살아 있는 동안 에이전트 간 메시지가 확실히 가게 한다" 는 정책을 담는다.
+//! ★Role★: holds the policy "make messages between agents reliably go through while the daemon is alive".
 //!
-//! ★완전 상호무지(load-bearing — ADR-0110 결정 2)★: 이 crate 는 **워크스페이스의 어떤 crate 에도
-//! 의존하지 않는다**(agent 포함). 외부 의존은 `uuid`·`tracing` 뿐이다. 그래서 에이전트 매니저·출력
-//! sink·제어 레지스트리 같은 호스트 실물을 **타입으로도 알지 못한다** — 그 이름들은 이 crate 안에
-//! 아예 등장하지 않고(격리 grep 게이트), 접합점은 전부 이
-//! crate 가 소유한 계약(포트 trait)으로만 뚫린다: `service::DeliveryPort`(배달 실물) ·
-//! `service::ControlPlanePort`(봉투 포맷 조회·배달 관측 기록) · `service::FlushTrigger`(도어벨) ·
-//! `busy::TurnFacts`(턴 관측 사실 조회) · `busy::IdleNotifier`(유휴 통지). 실물 어댑터는 호스트(데몬)가
-//! 소유한다. 여기에 워크스페이스 의존을 추가하고 싶어지면 그건 "포트를 파야 한다" 는 신호이지 벽을
-//! 뚫을 이유가 아니다 — 컴파일러가 강제하는 벽이 이 구조의 요점이다(규약이 아니라 구조).
+//! ★Complete mutual ignorance (load-bearing — ADR-0110 decision 2)★: this crate **depends on no crate in the
+//! workspace** (agent included). The only external dependencies are `uuid` and `tracing`. So it **does not know, even as a type,** real host
+//! objects like the agent manager, output sink and control registry — those names do not appear
+//! in this crate at all (isolation grep gate), and the joints are cut only through contracts
+//! (port traits) this crate owns: `service::DeliveryPort` (the real delivery) ·
+//! `service::ControlPlanePort` (envelope format lookup · delivery observation record) · `service::FlushTrigger` (doorbell) ·
+//! `busy::TurnFacts` (turn observation fact lookup) · `busy::IdleNotifier` (idle notification). The real adapters are owned by the host (daemon).
+//! If you feel like adding a workspace dependency here, that is a sign "a port must be dug", not a reason to
+//! break the wall — the compiler-enforced wall is the point of this structure (structure, not convention).
 //!
-//! ★순수성 불변식(load-bearing — ADR-0104 seam 격리, ADR-0012)★: `mailbox`·`ledger`·`groups` 는
-//! tokio·스레드를 쓰지 않고(동시성은 상위 서비스 소유), **로직 안에서 `Instant::now()`/
-//! `SystemTime::now()` 를 절대 부르지 않으며**(시간 의존 메서드는 `now: Instant` 를 **인자로
-//! 주입받는다** — clock injection: TTL 경계·타임아웃을 결정적 단위 테스트로 단언 가능, now 를 손으로
-//! 밀어 시계 조작), 전역 가변 상태를 두지 않는다. 이 불변식이 깨지면 단위 테스트가 실시간 sleep 에
-//! 의존하게 되고(느림·플레이키), seam 격리가 무너진다.
+//! ★Purity invariant (load-bearing — ADR-0104 seam isolation, ADR-0012)★: `mailbox`·`ledger`·`groups` do
+//! not use tokio or threads (concurrency is owned by the upper service), **never call `Instant::now()`/
+//! `SystemTime::now()` inside the logic** (time-dependent methods **take `now: Instant` as an
+//! argument** — clock injection: TTL boundaries and timeouts can be asserted in deterministic unit tests, and the clock is manipulated by
+//! pushing now by hand), and hold no global mutable state. If this invariant breaks, unit tests become
+//! dependent on real-time sleeps (slow, flaky) and seam isolation collapses.
 //!
-//! ★시간 타입 = `std::time::Instant`★: 봉투에 노출되지 않는 **내부 데이터**(spec §5 — 상태 전이 시각이
-//!   곧 회신·발신 시각이나 봉투 미노출)라 monotonic `Instant` 로 충분하다(벽시계 표시가 필요해지면 v2 에서
-//!   `SystemTime` 축을 무파괴 추가). TTL·reply-by 는 `Duration` 오프셋으로 표현해 주입된 now 와 비교한다.
+//! ★Time type = `std::time::Instant`★: it is **internal data** not exposed in the envelope (spec §5 — the state-transition time is
+//!   the reply/send time, but it is not exposed in the envelope), so a monotonic `Instant` is enough (if wall-clock display becomes needed, a
+//!   `SystemTime` axis will be added non-breakingly in v2). TTL and reply-by are expressed as `Duration` offsets and compared with the injected now.
 // ADR-0103
 // ADR-0104
 // ADR-0110
@@ -33,16 +33,16 @@ pub mod ledger;
 pub mod mailbox;
 pub mod service;
 
-/// ★왜 agent 의 `AgentId` 를 안 쓰나(load-bearing)★: 그걸 쓰는 순간 이 crate 가 워크스페이스 crate 에
-///   의존하게 돼 완전 무지가 깨진다. 바닥 타입이 같은 `uuid::Uuid` 라 호스트(데몬)의 `AgentId` 값이
-///   경계에서 **무변환으로 통과**한다 — 즉 벽을 세우는 비용이 사실상 0 이다(ADR-0110 근거: 경계 호출
-///   ~66곳 무수정 컴파일). 미래에 에이전트 아닌 참여자(외부 메일 서비스·사람)가 생겨도 이 중립 이름이
-///   그대로 버틴다.
+/// ★Why the agent's `AgentId` is not used (load-bearing)★: the moment it is used this crate depends on a workspace crate
+///   and complete ignorance breaks. The base type is the same `uuid::Uuid`, so the host (daemon) `AgentId` value
+///   **passes through the boundary unconverted** — i.e. the cost of raising the wall is practically 0 (ADR-0110 basis: ~66 boundary
+///   call sites compile unmodified). Even if non-agent participants (an external mail service · a person) appear in the future, this neutral name
+///   holds as is.
 pub type PeerId = uuid::Uuid;
 
-/// 시험용 결정적 id — 같은 이름이면 늘 같은 id 다. 같은 이름으로 다시 띄운 에이전트를 「같은 에이전트의
-/// 새 화신」으로 읽게 한다(ADR-0309 — 우편 키가 id). 서로 다른 실체여야 하는 동명은 이걸 쓰지 않는다.
-/// std 만 쓰는 FNV-1a 128 이다 — uuid `v5` 기능을 들이면 의존 상한(ADR-0110)이 바뀐다.
+/// Deterministic id for tests — the same name always gives the same id. It makes an agent relaunched under the same name read as 「같은 에이전트의
+/// 새 화신」 (a new incarnation of the same agent) (ADR-0309 — the mail key is the id). Same-name entities that must be different do not use this.
+/// It is an FNV-1a 128 using only std — bringing in the uuid `v5` feature would change the dependency ceiling (ADR-0110).
 #[cfg(test)]
 pub(crate) fn tid(name: &str) -> PeerId {
     const OFFSET: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
@@ -53,12 +53,12 @@ pub(crate) fn tid(name: &str) -> PeerId {
     PeerId::from_u128(hash)
 }
 
-/// ★왜 데몬의 `BoundIdentity` 를 안 쓰나★: 그건 제어 채널 토큰 바인딩 개념(호스트 인증의 산물)이라
-///   메시징 커널이 알 이유가 없다. 커널이 쓰는 건 "누가·어느 세대로 보냈나" 두 필드뿐이다. 호스트가
-///   경계에서 2필드 복사로 변환한다(데몬 측 `From<BoundIdentity>`).
+/// ★Why the daemon's `BoundIdentity` is not used★: that is a control-channel token binding concept (a product of host authentication), so
+///   the messaging kernel has no reason to know it. The kernel uses only two fields, "who sent it and from which generation". The host
+///   converts at the boundary with a 2-field copy (the daemon-side `From<BoundIdentity>`).
 ///
-/// ★epoch 가 신원의 일부인 이유(load-bearing)★: 같은 참여자라도 재spawn 하면 문맥이 끊긴다. 회신
-///   추적·stale 판정이 epoch 를 함께 봐야 죽은 세대의 발신을 산 세대의 것으로 오인하지 않는다.
+/// ★Why epoch is part of identity (load-bearing)★: even the same participant loses context when re-spawned. Reply
+///   tracking and stale decisions must look at epoch together so a send from a dead generation is not mistaken for one from the live generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SenderIdentity {
     pub peer_id: PeerId,

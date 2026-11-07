@@ -1,19 +1,19 @@
-//! 데스크톱 창의 OS 규칙 — 창 정체 · 자리와 z 순서 · 보임 · 자리 되돌리기 · 커서 밑 맨 위 창 · 창 진단 사실(로그
-//! 몫) · 전경 창이 이 프로세스의 것인가 · 그 창이 전경 창인가 · 제목 줄 크롬 모양(TRD S26-window-chrome §6-2 · §7-11).
+//! The OS rules of desktop windows — window identity · position and z order · visibility · restoring position · topmost window under the cursor · window
+//! diagnostic facts (the log's job) · whether the foreground window is this process's · whether that window is the foreground window · title-bar chrome shape (TRD S26-window-chrome §6-2 · §7-11).
 //!
-//! 창은 `raw-window-handle` 0.6 의 [`HasWindowHandle`] 로 받고 그 핸들의 변이 맞추기(Windows = `Win32` · 그 밖 =
-//! [`WindowError::Unsupported`])를 이 모듈이 한다 — 부르는 쪽이 변이를 맞추면 그것도 이 crate 밖의 런타임 OS
-//! 가름이다(TRD S21-slot-docking 6.3판 §8 · B10 · 7판 §5-1). 창을 바꾸는 함수는 날 Win32 호출이라 창
-//! 툴킷(tao)의 깃발을 거치지 않는다 — 툴킷이 아는 보임과 어긋날 수 있다는 것이 부르는 쪽 계약이다(TRD
+//! A window is received as `raw-window-handle` 0.6's [`HasWindowHandle`], and matching that handle's variant (Windows = `Win32` · otherwise =
+//! [`WindowError::Unsupported`]) is done by this module — if the caller matched the variant, that too would be a runtime OS
+//! split outside this crate (TRD S21-slot-docking 6.3rd edition §8 · B10 · 7th edition §5-1). The functions that change a window are raw Win32 calls, so they do not go through the window
+//! toolkit's (tao's) flags — that it may disagree with the visibility the toolkit knows is the caller's contract (TRD
 //! S21-slot-docking §9-3 I29).
 //!
-//! ★스레드★ — 창을 바꾸는 함수([`place_window`] · [`restore_placement`])는 그 창을 만든 스레드(메인)에서
-//! 부른다. 다른 스레드에서 부르면 Win32 가 그 창 스레드에 메시지를 보내고 답을 기다린다 — 그 스레드가 부른 쪽을
-//! 기다리고 있으면 교착이다. 읽기([`NativeWindow::of`] · [`top_level_at`] · [`describe_window`] ·
-//! [`foreground_is_current_process`] · [`is_foreground`])는 어느 스레드에서나 된다.
+//! ★Threads★ — the functions that change a window ([`place_window`] · [`restore_placement`]) are called from the thread that created that window (main).
+//! Called from another thread, Win32 sends a message to that window's thread and waits for the answer — if that thread is
+//! waiting on the caller, it deadlocks. Reads ([`NativeWindow::of`] · [`top_level_at`] · [`describe_window`] ·
+//! [`foreground_is_current_process`] · [`is_foreground`]) work from any thread.
 //!
-//! 스냅 레이아웃 오버레이(최대화 단추 위 자식 창)는 하위 모듈 `snap` 이고 cargo 기능 `snap-overlay` 뒤다 — 기본 꺼짐(TRD
-//! S26-window-chrome §8-4 · 사용자 결정 Q1 2026-10-24).
+//! The snap layout overlay (a child window over the maximize button) is the submodule `snap` and sits behind the cargo feature `snap-overlay` — off by default (TRD
+//! S26-window-chrome §8-4 · user decision Q1 2026-10-24).
 
 // ADR-0266
 // ADR-0295
@@ -23,18 +23,18 @@ use std::io;
 
 use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle};
 
-// ADR-0304 — 스냅 오버레이 feature
+// ADR-0304 — snap overlay feature
 #[cfg(feature = "snap-overlay")]
 pub mod snap;
 
-/// 화면의 물리 px 점. 프로세스가 모니터별 DPI 인식(v2 — tao 가 켠다)이 아니면 OS 가 배율로 가상화한 값이 온다.
+/// A screen point in physical px. If the process is not per-monitor DPI aware (v2 — tao turns it on), the OS gives a value virtualized by scaling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct PhysPoint {
     pub x: i32,
     pub y: i32,
 }
 
-/// 화면의 물리 px 사각형 — 왼쪽 위 `(x, y)` 와 크기. 점을 품는지는 반열림이다(`x ≤ 점 < x + width`).
+/// A screen rectangle in physical px — top-left `(x, y)` and size. Whether it contains a point is half-open (`x ≤ 점 < x + width`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct PhysRect {
     pub x: i32,
@@ -43,50 +43,50 @@ pub struct PhysRect {
     pub height: i32,
 }
 
-/// 창 정체 — 같은 창인가 비교([`top_level_at`] 의 답) · [`ZOrder::After`] 의 기준에 쓴다. 안은 부르는 쪽이
-/// 모른다(Windows = HWND 값).
+/// Window identity — compare whether it is the same window (the answer of [`top_level_at`]) · used as the reference of [`ZOrder::After`]. The caller does not
+/// know the inside (Windows = the HWND value).
 ///
-/// ★창이 사라진 뒤에도 값은 남는다★ — OS 가 같은 값을 새 창에 다시 줄 수 있어, 오래 쥔 값끼리의 같음은 「같은
-/// 창」을 보증하지 않는다.
+/// ★The value remains even after the window is gone★ — the OS may give the same value again to a new window, so equality between long-held values does not
+/// guarantee "the same window".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NativeWindow(isize);
 
 impl NativeWindow {
-    /// `None` = 핸들을 못 얻었거나(창이 아직 · 이미 없다) 이 crate 가 다루는 창 핸들이 아니다 — Windows 밖에서는
-    /// 늘 `None` 이다.
+    /// `None` = the handle could not be obtained (the window does not exist yet or any more) or it is not a window handle this crate handles — outside Windows it is
+    /// always `None`.
     pub fn of(w: &impl HasWindowHandle) -> Option<NativeWindow> {
         raw_of(w).ok().map(NativeWindow)
     }
 }
 
-/// 로그 몫 — 창 들여다보기 도구(Spy++ 따위)가 쓰는 16진 핸들 값.
+/// The log's job — the hexadecimal handle value that window-inspection tools (Spy++ and the like) use.
 impl fmt::LowerHex for NativeWindow {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::LowerHex::fmt(&self.0, f)
     }
 }
 
-/// 창을 놓을 z 자리 — [`place_window`] 의 인자.
+/// The z position at which to place a window — the argument of [`place_window`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZOrder {
-    /// 항상 위 띠의 맨 위 — 그 창을 항상 위로 만든다(Win32 `HWND_TOPMOST`).
+    /// The very top of the always-on-top band — makes that window always on top (Win32 `HWND_TOPMOST`).
     Topmost,
-    /// 그 창이 든 띠(항상 위 · 보통)의 맨 위.
+    /// The very top of the band the window is in (always-on-top · normal).
     Top,
-    /// 이 창 바로 아래.
+    /// Directly below this window.
     After(NativeWindow),
-    /// z 순서를 건드리지 않는다 — 단 [`place_window`] 의 `activate` 가 참이면 활성이 된 창은 OS 가 맨 위로 올린다.
+    /// Does not touch the z order — but if `activate` of [`place_window`] is true, the OS raises the window that became active to the top.
     Keep,
 }
 
-/// 창 함수의 실패.
+/// Failure of a window function.
 #[derive(Debug)]
 pub enum WindowError {
-    /// 이 OS 에서는 이 수단이 없다 — Windows 밖이거나 Win32 창이 아닌 핸들이다.
+    /// This OS has no such means — outside Windows, or the handle is not a Win32 window.
     Unsupported,
-    /// 핸들을 못 얻었거나 그 창이 이미 없다.
+    /// The handle could not be obtained or that window is already gone.
     NoWindow,
-    /// OS 호출이 실패했다 — 문구에 그 호출 이름과 OS 오류가 든다.
+    /// An OS call failed — the message holds that call's name and the OS error.
     Os(io::Error),
 }
 
@@ -102,7 +102,7 @@ impl fmt::Display for WindowError {
 
 impl std::error::Error for WindowError {}
 
-/// 핸들의 변이를 맞춘다 — 창 함수가 다루는 것은 Win32 창 하나뿐이다.
+/// Matches the handle's variant — the window functions handle only a Win32 window.
 fn raw_of(w: &impl HasWindowHandle) -> Result<isize, WindowError> {
     let handle = w.window_handle().map_err(|e| match e {
         HandleError::NotSupported => WindowError::Unsupported,
@@ -114,16 +114,16 @@ fn raw_of(w: &impl HasWindowHandle) -> Result<isize, WindowError> {
     }
 }
 
-/// 자리 · 크기 · z · 보임 · 활성을 한 번의 `SetWindowPos` 로 입힌다(TRD S21-slot-docking §9-3 I29 — 깜빡임 없이 한
-/// 번에 놓는다).
+/// Applies position · size · z · visibility · activation with one `SetWindowPos` (TRD S21-slot-docking §9-3 I29 — places it in
+/// one go without flicker).
 ///
-/// - `rect: None` = 자리 · 크기를 그대로 둔다(제자리 보이기 — `show` 와 함께 쓴다).
-/// - `show` = 거짓이면 보임을 건드리지 않는다(숨기지 않는다).
-/// - `activate` = 참이면 그 창을 전경으로 청한다 — 활성이 되면 `z` 가 [`ZOrder::Keep`] 이어도 맨 위로 온다.
-///   ★OS 가 거절하면 그대로 두고 `Ok` 다★ — tao 의 `force_window_active` 처럼 Alt 를 합성해 전경을 빼앗지 않는다:
-///   포커스를 빼앗지 않고 올리기만 한다(ADR-0299 결정 5 · TRD S21-slot-docking §9-3 I5 · I29). 거절됐는지는 [`is_foreground`](그 창이 전경인가)로 따로 본다.
+/// - `rect: None` = leave position · size as is (show in place — used with `show`).
+/// - `show` = if false, visibility is not touched (it does not hide).
+/// - `activate` = if true, asks for that window to be the foreground — once active it comes to the top even if `z` is [`ZOrder::Keep`].
+///   ★If the OS refuses, it is left as is and returns `Ok`★ — unlike tao's `force_window_active`, it does not synthesize Alt to steal the foreground:
+///   it only raises without stealing focus (ADR-0299 decision 5 · TRD S21-slot-docking §9-3 I5 · I29). Whether it was refused is checked separately with [`is_foreground`] (is that window the foreground).
 ///
-/// Windows 밖 = [`WindowError::Unsupported`].
+/// Outside Windows = [`WindowError::Unsupported`].
 // ADR-0295
 // ADR-0299
 pub fn place_window(
@@ -144,16 +144,16 @@ pub fn place_window(
     }
 }
 
-/// 화면 점 `p` 를 품은 맨 위 최상위 창 — z 순서 위에서부터 걸으며 보이고 · 최소화 아니고 ·
-/// 가려지지(DWM cloaked — 다른 가상 데스크톱 따위) 않고 · 비쳐 보이는 창이 아닌 첫 창이다. 비쳐 보이는 창 = 클릭이
-/// 지나가는 창(`WS_EX_LAYERED` + `WS_EX_TRANSPARENT` — 모든 창) · 다른 앱의 layered 창 중 창 전체 알파가 0 이거나
-/// 색 키가 있는 창이다. 픽셀마다 알파를 주는 다른 앱 layered 창은 가리는 창으로 친다(판정 = `hit_accepts`). 우리
-/// 창인지는 부르는 쪽이 [`NativeWindow::of`] 와 견준다 — 놓기 명령은 다른 앱 창 · 바탕화면이 오면 새 창으로
-/// 읽는다(TRD S21-slot-docking §3-5 ④ · PRD R22).
+/// The topmost top-level window containing screen point `p` — walking down from the top of the z order, the first window that is visible · not minimized ·
+/// not hidden (DWM cloaked — another virtual desktop and the like) · and not a see-through window. See-through window = a window that
+/// clicks pass through (`WS_EX_LAYERED` + `WS_EX_TRANSPARENT` — any window) · among other apps' layered windows, one whose whole-window alpha is 0 or
+/// that has a color key. Another app's layered window with per-pixel alpha counts as a covering window (decision = `hit_accepts`). Whether it is our
+/// window is compared by the caller with [`NativeWindow::of`] — the drop command reads another app's window or the desktop as a new window
+/// (TRD S21-slot-docking §3-5 ④ · PRD R22).
 ///
-/// 「품는다」는 OS 바깥 사각형(`GetWindowRect` — 보이지 않는 크기 조절 테두리 포함)이다. OS 의 적중 판정도 그
-/// 테두리를 그 창으로 친다. 단 창 모양(`SetWindowRgn`)이 있는 창은 점이 그 모양 안이어야 한다. `None` = 품은 창이
-/// 없다 · Windows 밖.
+/// 「품는다」 (contains) means the OS outer rectangle (`GetWindowRect` — including the invisible resize border). The OS hit test also counts that
+/// border as that window. But for a window with a window shape (`SetWindowRgn`), the point must be inside that shape. `None` = no window
+/// contains it · outside Windows.
 // ADR-0295
 // ADR-0296
 pub fn top_level_at(p: PhysPoint) -> Option<NativeWindow> {
@@ -168,39 +168,39 @@ pub fn top_level_at(p: PhysPoint) -> Option<NativeWindow> {
     }
 }
 
-/// layered 창(Win32 `WS_EX_LAYERED`)이 얼마나 비쳐 보이는가 — OS 에서 읽을 수 있는 만큼.
+/// How see-through a layered window (Win32 `WS_EX_LAYERED`) is — as far as the OS lets us read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayeredKind {
     NotLayered,
-    /// `SetLayeredWindowAttributes` 로 준 창 전체 알파 — `LWA_ALPHA` 없이 준 창은 255(불투명)다.
+    /// The whole-window alpha given with `SetLayeredWindowAttributes` — a window given without `LWA_ALPHA` is 255 (opaque).
     Alpha(u8),
-    /// `SetLayeredWindowAttributes` 의 색 키(`LWA_COLORKEY`) — 그 색 픽셀은 그려지지 않고 클릭도 지나간다. 창 전체
-    /// 알파가 함께 있어도 이것이다.
+    /// The color key (`LWA_COLORKEY`) of `SetLayeredWindowAttributes` — pixels of that color are not drawn and clicks pass through. Even if a whole-window
+    /// alpha is also present, it is this.
     ColorKey,
-    /// 속성을 못 읽었다 — 픽셀마다 알파를 주는 `UpdateLayeredWindow` 창이면 OS 가 답하지 않는다(MS
-    /// `GetLayeredWindowAttributes` 문서). 속성을 아직 안 준 layered 창도 여기다(실측). 어느 픽셀이 비었는지는 모른다.
+    /// The attributes could not be read — for an `UpdateLayeredWindow` window with per-pixel alpha, the OS does not answer (MS
+    /// `GetLayeredWindowAttributes` docs). A layered window with no attributes given yet also lands here (measured). Which pixels are empty is not known.
     PerPixel,
 }
 
-/// 창 하나의 진단 사실 — [`describe_window`] 의 답(로그 몫).
+/// Diagnostic facts of one window — the answer of [`describe_window`] (the log's job).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowFacts {
-    /// 그 창을 만든 프로세스 — 0 = 그 사이 사라졌다.
+    /// The process that created that window — 0 = it vanished in the meantime.
     pub pid: u32,
-    /// 창 클래스 이름 — 못 읽었으면 빈 문자열.
+    /// Window class name — empty string if it could not be read.
     pub class: String,
-    /// 확장 스타일(Win32 `GWL_EXSTYLE` 값) — 못 읽었으면 0.
+    /// Extended style (Win32 `GWL_EXSTYLE` value) — 0 if it could not be read.
     pub ex_style: u32,
-    /// 확장 스타일을 못 읽었으면 `NotLayered` 다.
+    /// If the extended style could not be read, it is `NotLayered`.
     pub layered: LayeredKind,
-    /// 오른쪽에서 왼쪽 배치(`WS_EX_LAYOUTRTL`) — 창 모양 좌표를 오른쪽 위에서 잰다.
+    /// Right-to-left layout (`WS_EX_LAYOUTRTL`) — window-shape coordinates are measured from the top right.
     pub rtl: bool,
-    /// 창 모양(Win32 `SetWindowRgn`)이 있다.
+    /// It has a window shape (Win32 `SetWindowRgn`).
     pub has_region: bool,
 }
 
-/// 그 창의 진단 사실 — 창에 메시지를 보내지 않는 조회뿐이라 응답 없는 다른 앱 창에도 막히지 않는다. `None` =
-/// 그 창이 없다 · Windows 밖.
+/// Diagnostic facts of that window — only queries that send no message to the window, so even an unresponsive other-app window does not block them. `None` =
+/// that window does not exist · outside Windows.
 pub fn describe_window(w: NativeWindow) -> Option<WindowFacts> {
     #[cfg(windows)]
     {
@@ -213,18 +213,18 @@ pub fn describe_window(w: NativeWindow) -> Option<WindowFacts> {
     }
 }
 
-/// 보통 자리 `normal`(★화면 좌표★)과 최대화를 되돌린다(`SetWindowPlacement` · TRD S21-slot-docking §5-1).
+/// Restores the normal position `normal` (★screen coordinates★) and maximization (`SetWindowPlacement` · TRD S21-slot-docking §5-1).
 ///
-/// - 좌표계 — `WINDOWPLACEMENT` 의 보통 자리는 `WS_EX_TOOLWINDOW` 가 없는 최상위 창이면 작업 공간 좌표(그 모니터
-///   작업 영역의 왼쪽 위가 0 — 작업 표시줄이 위 · 왼쪽에 있으면 그만큼 밀린다)이고 있으면 화면 좌표다(MS
-///   `WINDOWPLACEMENT` 문서 · TRD S21-slot-docking 6.3판 E12). 이 함수가 그 창의 지금 확장 스타일과 `normal` 에
-///   가장 가까운 모니터로 옮겨 넣는다 — 그래서 그 창의 `WS_EX_TOOLWINDOW` 를 바꾸는 일은 이 함수보다 먼저 끝낸다.
-/// - `activate` = 거짓이면 보통 자리는 활성화 없이 보인다(`SW_SHOWNOACTIVATE`). ★`maximized` 는 `activate` 와
-///   무관하게 `SW_SHOWMAXIMIZED` 다★ — Win32 에 활성화 없이 최대화로 보이는 show 명령이 없다. 그래서 OS 의 전경
-///   규칙이 허락하면 활성이 된다(미확인 — TRD S21-slot-docking 6.3판 §12 M6 · §15-2 S-c).
-/// - OS 는 화면 밖으로 완전히 나가는 보통 자리를 화면 안으로 고쳐 넣는다(MS `SetWindowPlacement` 문서).
+/// - Coordinate system — the normal position of `WINDOWPLACEMENT` is, for a top-level window without `WS_EX_TOOLWINDOW`, in workspace coordinates (the top left of that monitor's
+///   work area is 0 — if the taskbar is at the top or left it is shifted by that much), and with it, in screen coordinates (MS
+///   `WINDOWPLACEMENT` docs · TRD S21-slot-docking 6.3rd edition E12). This function converts it using that window's current extended style and the monitor nearest to `normal`
+///   — so changing that window's `WS_EX_TOOLWINDOW` is finished before this function.
+/// - `activate` = if false, the normal position is shown without activation (`SW_SHOWNOACTIVATE`). ★`maximized` is `SW_SHOWMAXIMIZED` regardless of
+///   `activate`★ — Win32 has no show command that shows maximized without activation. So if the OS's foreground
+///   rules allow, it becomes active (unconfirmed — TRD S21-slot-docking 6.3rd edition §12 M6 · §15-2 S-c).
+/// - The OS fixes a normal position that goes entirely off screen back onto the screen (MS `SetWindowPlacement` docs).
 ///
-/// Windows 밖 = [`WindowError::Unsupported`].
+/// Outside Windows = [`WindowError::Unsupported`].
 // ADR-0295
 pub fn restore_placement(
     w: &impl HasWindowHandle,
@@ -243,17 +243,17 @@ pub fn restore_placement(
     }
 }
 
-/// 지금 전경 창이 이 프로세스의 것인가. `None` = 이 OS 에서는 답할 수단이 이 crate 에 없다 — 부르는 쪽이 자기
-/// 수단(창 툴킷의 포커스 게터 따위)으로 판정한다(lib.rs 「들이는 규칙」 3 — Windows 밖 갈래는 자리채움).
+/// Is the current foreground window this process's. `None` = this crate has no means to answer on this OS — the caller decides with its own
+/// means (the window toolkit's focus getter and the like) (lib.rs 「들이는 규칙」 3 — the branch outside Windows is a placeholder).
 ///
-/// Windows = `GetForegroundWindow` 의 창을 만든 스레드의 PID 가 이 프로세스의 PID 와 같은가. 전경 창이 없거나 그
-/// 사이 사라졌으면 `Some(false)` 다.
+/// Windows = is the PID of the thread that created the window of `GetForegroundWindow` the same as this process's PID. If there is no foreground window or it
+/// vanished in the meantime, `Some(false)`.
 #[cfg(windows)]
 pub fn foreground_is_current_process() -> Option<bool> {
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
     let mut pid = 0u32;
-    // SAFETY: 인자 없는 조회 하나와, 살아 있는 지역 변수에 PID 를 쓰는 조회 하나다. 전경 창이 없거나 그 사이
-    //   사라졌으면 PID 가 0 으로 남는다.
+    // SAFETY: one query with no arguments, and one query that writes a PID into a live local variable. If there is no foreground window or it
+    //   vanished in the meantime, the PID stays 0.
     unsafe {
         let foreground = GetForegroundWindow();
         if !foreground.is_invalid() {
@@ -267,13 +267,13 @@ pub fn foreground_is_current_process() -> Option<bool> {
     None
 }
 
-/// 그 창이 지금 OS 전경 창인가 — 전경 창은 하나라 많아야 한 창만 참이다. `None` = 이 OS 에서는 답할 수단이 이 crate 에
-/// 없다 — 부르는 쪽이 자기 수단(창 툴킷의 포커스 게터 따위)으로 판정한다([`foreground_is_current_process`] 와 같다).
+/// Is that window the OS foreground window now — there is only one foreground window, so at most one window is true. `None` = this crate has no means to answer on this OS
+/// — the caller decides with its own means (the window toolkit's focus getter and the like) (same as [`foreground_is_current_process`]).
 ///
-/// Windows = `GetForegroundWindow` 가 그 최상위 창인가. 핸들을 못 얻었거나 그 창이 이미 없으면 `Some(false)` 다. 창
-/// 툴킷의 포커스 게터와 다른 답일 수 있다 — WebView2 를 품은 창은 웹뷰가 키보드 포커스를 쥔 동안 그 게터가 거짓이다
+/// Windows = is `GetForegroundWindow` that top-level window. If the handle could not be obtained or that window is already gone, `Some(false)`. It may
+/// differ from the window toolkit's focus getter — for a window that hosts WebView2, that getter is false while the webview holds keyboard focus
 /// (TRD S26-window-chrome §6-2 「앞 창 판정」).
-// ADR-0302 — 창 상태 명령(앞 창 판정)
+// ADR-0302 — window state command (foreground window decision)
 pub fn is_foreground(w: &impl HasWindowHandle) -> Option<bool> {
     #[cfg(windows)]
     {
@@ -286,20 +286,20 @@ pub fn is_foreground(w: &impl HasWindowHandle) -> Option<bool> {
     }
 }
 
-/// 창 제목 줄의 크롬 모양 — [`caption_style`] 의 답.
+/// The chrome shape of a window's title bar — the answer of [`caption_style`].
 ///
-/// - `drawn_buttons` = 최소화 · 최대화 · 닫기 단추를 앱이 그린다(OS 틀을 걷는다). 거짓 = OS 가 단추를 그린다.
-/// - `leading_inset` = 제목 줄 왼쪽에서 앱이 비워 둘 폭(CSS px) — OS 가 그 자리에 단추를 그린다.
+/// - `drawn_buttons` = the app draws the minimize · maximize · close buttons (it strips the OS frame). False = the OS draws the buttons.
+/// - `leading_inset` = the width (CSS px) the app leaves empty at the left of the title bar — the OS draws buttons in that spot.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CaptionStyle {
     pub drawn_buttons: bool,
     pub leading_inset: f64,
 }
 
-/// 이 OS 의 제목 줄 크롬 모양(TRD S26-window-chrome §7-11) — 늘 `{ drawn_buttons: true, leading_inset: 0 }` 이다. macOS
-/// 는 신호등 단추를 OS 가 그리므로 `{ false, <신호등 폭> }` 이어야 하는데, 그 폭을 재지 않았고 macOS 를 짓지 않아 그
-/// 갈래를 두지 않았다 — macOS 를 지을 때 이 함수 안에 더한다.
-// ADR-0303 — 크롬식 제목 표시줄
+/// The title-bar chrome shape of this OS (TRD S26-window-chrome §7-11) — always `{ drawn_buttons: true, leading_inset: 0 }`. On macOS
+/// the OS draws the traffic-light buttons, so it should be `{ false, <신호등 폭> }`, but that width was not measured and macOS is not built, so that
+/// branch was not added — add it inside this function when building macOS.
+// ADR-0303 — chrome-style title bar
 pub fn caption_style() -> CaptionStyle {
     CaptionStyle {
         drawn_buttons: true,
@@ -307,8 +307,8 @@ pub fn caption_style() -> CaptionStyle {
     }
 }
 
-/// 화면 좌표 사각형을 작업 공간 좌표로 — 모니터 왼쪽 위에서 작업 영역 왼쪽 위까지 민 만큼 뺀다. Chromium 이 읽을
-/// 때 쓰는 반대 셈과 같은 꼴이다(hwnd_message_handler.cc `GetWindowPlacement` — `rcWork − rcMonitor` 를 더한다).
+/// A screen-coordinate rectangle to workspace coordinates — subtract the shift from the monitor's top left to the work area's top left. It has the same form as the opposite
+/// computation Chromium uses when reading (hwnd_message_handler.cc `GetWindowPlacement` — it adds `rcWork − rcMonitor`).
 fn screen_to_workspace(rect: PhysRect, monitor: PhysRect, work: PhysRect) -> PhysRect {
     PhysRect {
         x: rect.x - (work.x - monitor.x),
@@ -321,32 +321,32 @@ fn contains(r: PhysRect, p: PhysPoint) -> bool {
     p.x >= r.x && p.x < r.x + r.width && p.y >= r.y && p.y < r.y + r.height
 }
 
-/// 점과 그 창의 창 모양(Win32 `SetWindowRgn`) — [`hit_accepts`] 의 재료.
+/// A point and that window's window shape (Win32 `SetWindowRgn`) — the material of [`hit_accepts`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RegionHit {
-    /// 창 모양이 없다(또는 못 읽었다) — 바깥 사각형 전체가 그 창이다.
+    /// There is no window shape (or it could not be read) — the whole outer rectangle is that window.
     NoRegion,
     Inside,
     Outside,
 }
 
-/// 점을 바깥 사각형에 품은(보이고 · 최소화 아니고 · 가려지지 않은) 창을 [`top_level_at`] 의 답으로 치는가 — OS 의
-/// 적중 판정을 읽을 수 있는 만큼 따른다. `ours` = 이 프로세스의 창 · `transparent` = `WS_EX_TRANSPARENT`.
+/// Does it count a window containing the point in its outer rectangle (visible · not minimized · not hidden) as the answer of [`top_level_at`] — it follows the OS's
+/// hit test as far as it can be read. `ours` = this process's window · `transparent` = `WS_EX_TRANSPARENT`.
 ///
-/// - layered + `WS_EX_TRANSPARENT` 창은 건너뛴다 — 클릭이 지나간다(MS 「Layered Windows」 · OS `WindowFromPoint` 도
-///   건너뛴다). `WS_EX_TRANSPARENT` 만 켜진 창은 가리는 창이다 — 그 깃발 혼자는 그리기 순서일 뿐 클릭은 그 창이 받는다(실측 —
-///   `WindowFromPoint` 와 견준 시험 `transparent_only_window_still_takes_the_click`).
-/// - 다른 앱 layered 창은 창 전체 알파 0 · 색 키면 건너뛴다. OS 는 알파 0 · 색 키 픽셀에서만 클릭을 지나가게 하는데
-///   (MS 「Layered Windows」) 픽셀은 못 읽어 색 키 창은 창 전체를 비친 것으로 친다 — 대가: 그 창의 칠해진 자리
-///   밑도 가려지지 않은 자리다. 늘 위인 녹화 영역 틀(화면 녹화 도구 따위) 밑의 놓기가
-///   다른 앱 창 위 놓기로 읽혀 우리 창이 아니라 새 창으로 가는 것을 이 갈래로 막는다 — 그 틀이 픽셀마다 알파 창이면 풀리지 않는데 어느 쪽인지 재지 않았다.
-/// - 그 밖의 다른 앱 layered 창(알파 1 이상 · 픽셀마다 알파)은 가리는 창이다 — 불투명하게 그리는 layered 앱이 많다
-///   (WPF `AllowsTransparency` · Electron `transparent` · Qt 반투명 창). 다 건너뛰면 놓기 끝 판정이 그 앱 위 놓기를
-///   그 밑에 가린 우리 창 위 놓기로 읽어 새 창이 생기지 않는다(TRD S21-slot-docking §3-5 ③ · ④). Chromium `TopMostFinder`(Chrome 70 `window_finder_win.cc`)는 layered ·
-///   `WS_EX_TRANSPARENT` 중 하나만 켜져도 건너뛰는데, 이 대가를 받지 않으려고 따르지 않는다.
-/// - 우리 창은 클릭 통과 창만 건너뛴다 — tao 는 커서 무시 창에만 layered 를 켠다(tao 0.35.3 `window_state.rs`
+/// - A layered + `WS_EX_TRANSPARENT` window is skipped — clicks pass through (MS 「Layered Windows」 · the OS `WindowFromPoint` also
+///   skips it). A window with only `WS_EX_TRANSPARENT` on is a covering window — that flag alone is just drawing order and the window still receives the click (measured —
+///   the test `transparent_only_window_still_takes_the_click`, compared against `WindowFromPoint`).
+/// - Another app's layered window is skipped if whole-window alpha is 0 or it has a color key. The OS lets clicks pass through only at alpha 0 or color-key pixels
+///   (MS 「Layered Windows」), but pixels cannot be read, so a color-key window is treated as see-through as a whole — the cost: the painted area of that window
+///   is also treated as uncovered. This branch prevents a drop under an always-on-top recording-area frame (a screen-recording tool and the like) from being
+///   read as a drop over another app's window and going to a new window instead of our window — it does not resolve if that frame is a per-pixel-alpha window, and which one it is was not measured.
+/// - Any other app's layered window (alpha 1 or more · per-pixel alpha) is a covering window — many layered apps draw opaquely
+///   (WPF `AllowsTransparency` · Electron `transparent` · Qt translucent windows). If all were skipped, the drop-end decision would read a drop over that app as a drop over
+///   our window hidden under it, and no new window would be created (TRD S21-slot-docking §3-5 ③ · ④). Chromium `TopMostFinder` (Chrome 70 `window_finder_win.cc`) skips a window if either layered or
+///   `WS_EX_TRANSPARENT` alone is on, but we do not follow it, to avoid paying this cost.
+/// - Our window is skipped only if it is click-through — tao turns on layered only for cursor-ignoring windows (tao 0.35.3 `window_state.rs`
 ///   `IGNORE_CURSOR_EVENT`).
-/// - 창 모양이 있으면 점이 그 안이어야 한다 — 모양 밖은 그 창이 그리지도 클릭을 받지도 않는다(Chromium 같은 곳).
+/// - If there is a window shape, the point must be inside it — outside the shape that window neither draws nor receives clicks (as in Chromium).
 // ADR-0295
 // ADR-0296
 fn hit_accepts(ours: bool, layered: LayeredKind, transparent: bool, region: RegionHit) -> bool {
@@ -384,13 +384,13 @@ mod win {
         PhysRect, RegionHit, WindowError, WindowFacts, ZOrder,
     };
 
-    /// 최상위 창 z 걷기의 상한 — MS 는 `GetWindow` 로 걸으면 그동안 z 순서가 바뀌어 끝없이 돌 수 있다고 적는다
-    /// (`GetWindow` 문서). 한 데스크톱의 최상위 창은 숨은 것까지 수천 개를 넘지 않는다.
+    /// Upper bound of the top-level window z walk — MS writes that walking with `GetWindow` can loop endlessly because the z order changes meanwhile
+    /// (`GetWindow` docs). The top-level windows of one desktop, hidden ones included, do not exceed a few thousand.
     const MAX_Z_WALK: usize = 16_384;
 
     pub(super) fn hwnd_of(w: &impl HasWindowHandle) -> Result<HWND, WindowError> {
         let hwnd = HWND(raw_of(w)? as *mut c_void);
-        // SAFETY: 값만 보는 조회다 — 사라진 핸들이면 거짓이다.
+        // SAFETY: a query that only reads a value — a vanished handle gives false.
         if unsafe { IsWindow(hwnd) }.as_bool() {
             Ok(hwnd)
         } else {
@@ -406,7 +406,7 @@ mod win {
         let Ok(hwnd) = hwnd_of(w) else {
             return false;
         };
-        // SAFETY: 인자 없는 조회다.
+        // SAFETY: a query with no arguments.
         let foreground = unsafe { GetForegroundWindow() };
         foreground == hwnd
     }
@@ -415,9 +415,9 @@ mod win {
         WindowError::Os(io::Error::other(format!("{api}: {e}")))
     }
 
-    /// `place_window` 의 `SetWindowPos` 인자 — (z 기준 창, 깃발). `Keep` 의 `SWP_NOZORDER` 는 z 기준 창만 무시하게
-    /// 할 뿐 활성화가 창을 올리는 것은 막지 않는다(MS `SetWindowPos` 문서 — `SWP_NOACTIVATE` 가 없으면 활성으로
-    /// 그 띠의 맨 위 · 뒤따르는 `SetForegroundWindow` 도 그렇다).
+    /// The `SetWindowPos` arguments of `place_window` — (z reference window, flags). `Keep`'s `SWP_NOZORDER` only makes the z reference window ignored; it does not
+    /// stop activation from raising the window (MS `SetWindowPos` docs — without `SWP_NOACTIVATE`, activating takes it to the
+    /// top of its band, and so does a following `SetForegroundWindow`).
     pub(super) fn place_plan(
         keep_rect: bool,
         z: ZOrder,
@@ -455,12 +455,12 @@ mod win {
     ) -> Result<(), WindowError> {
         let (after, flags) = place_plan(rect.is_none(), z, show, activate);
         let r = rect.unwrap_or_default();
-        // SAFETY: 살아 있는 창 핸들(`hwnd_of` 가 걸렀다)과 값 인자뿐이다.
+        // SAFETY: only a live window handle (filtered by `hwnd_of`) and value arguments.
         unsafe { SetWindowPos(hwnd, after, r.x, r.y, r.width, r.height, flags) }
             .map_err(|e| os("SetWindowPos", e))?;
         if activate {
-            // 거절(거짓)은 실패가 아니다 — `place_window` 문서.
-            // SAFETY: 살아 있는 창 핸들 하나.
+            // A refusal (false) is not a failure — see the `place_window` docs.
+            // SAFETY: one live window handle.
             let _ = unsafe { SetForegroundWindow(hwnd) };
         }
         Ok(())
@@ -485,7 +485,7 @@ mod win {
     }
 
     fn ex_style(hwnd: HWND) -> Result<u32, WindowError> {
-        // SAFETY: 살아 있는 창 핸들. 0 은 정당한 값일 수 있어 마지막 오류를 지운 뒤 읽고 함께 본다(MS 문서).
+        // SAFETY: a live window handle. 0 can be a legitimate value, so clear the last error, then read, and look at it together (MS docs).
         unsafe {
             SetLastError(WIN32_ERROR(0));
             let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
@@ -510,7 +510,7 @@ mod win {
                 cbSize: std::mem::size_of::<MONITORINFO>() as u32,
                 ..Default::default()
             };
-            // SAFETY: 살아 있는 지역 사각형 · 구조체를 가리키는 포인터뿐이다. `NEAREST` 라 모니터는 늘 있다.
+            // SAFETY: only pointers to a live local rectangle and struct. With `NEAREST` a monitor always exists.
             let ok = unsafe {
                 let monitor = MonitorFromRect(&to_win(normal), MONITOR_DEFAULTTONEAREST);
                 GetMonitorInfoW(monitor, &mut mi)
@@ -524,7 +524,7 @@ mod win {
             length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
             ..Default::default()
         };
-        // SAFETY: 살아 있는 창 핸들과 길이를 채운 지역 구조체.
+        // SAFETY: a live window handle and a local struct with its length filled in.
         unsafe { GetWindowPlacement(hwnd, &mut wp) }.map_err(|e| os("GetWindowPlacement", e))?;
         wp.flags = WINDOWPLACEMENT_FLAGS(0);
         wp.rcNormalPosition = to_win(stored);
@@ -536,14 +536,14 @@ mod win {
             SW_SHOWNOACTIVATE
         };
         wp.showCmd = show.0 as u32;
-        // SAFETY: 위와 같다.
+        // SAFETY: same as above.
         unsafe { SetWindowPlacement(hwnd, &wp) }.map_err(|e| os("SetWindowPlacement", e))?;
         Ok(())
     }
 
     fn cloaked(hwnd: HWND) -> bool {
         let mut v = 0u32;
-        // SAFETY: 살아 있는 지역 u32 에 4 바이트를 쓰는 조회. DWM 이 없거나 실패하면 가려지지 않은 것으로 친다.
+        // SAFETY: a query that writes 4 bytes into a live local u32. If DWM is absent or it fails, the window counts as not hidden.
         unsafe {
             DwmGetWindowAttribute(
                 hwnd,
@@ -556,33 +556,33 @@ mod win {
             && v != 0
     }
 
-    /// 그 창을 만든 프로세스 — 사라진 창이면 0.
+    /// The process that created that window — 0 if the window vanished.
     fn pid_of(hwnd: HWND) -> u32 {
         let mut pid = 0u32;
-        // SAFETY: 살아 있는 지역 변수에 PID 를 쓰는 조회 — 사라진 창이면 0 으로 남는다.
+        // SAFETY: a query that writes a PID into a live local variable — if the window vanished it stays 0.
         unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
         pid
     }
 
-    /// 창 모양의 사본 — `GetWindowRgn` 이 부르는 쪽이 만든 영역에 베껴 준다. 버리면 지운다.
+    /// A copy of the window shape — `GetWindowRgn` copies it into a region the caller created. Deleted when dropped.
     struct Region(HRGN);
 
     impl Drop for Region {
         fn drop(&mut self) {
-            // SAFETY: 이 값이 만든 영역이고 창에 넘기지 않았다(베껴 받기만 했다).
+            // SAFETY: a region this value created and did not hand to a window (it only received a copy).
             let _ = unsafe { DeleteObject(self.0) };
         }
     }
 
-    /// 그 창의 창 모양 — 없거나 · 못 읽었거나 · 받을 영역을 못 만들었으면 `None`.
+    /// That window's window shape — `None` if there is none · it could not be read · or the region to receive it could not be created.
     fn window_region(hwnd: HWND) -> Option<Region> {
-        // SAFETY: 값 인자뿐이다 — 실패하면 null.
+        // SAFETY: only value arguments — null on failure.
         let rgn = unsafe { CreateRectRgn(0, 0, 0, 0) };
         if rgn.is_invalid() {
             return None;
         }
         let rgn = Region(rgn);
-        // SAFETY: 살아 있는 영역 핸들 — 창이 사라졌거나 모양이 없으면 `RGN_ERROR`.
+        // SAFETY: a live region handle — `RGN_ERROR` if the window vanished or has no shape.
         (unsafe { GetWindowRgn(hwnd, rgn.0) } != RGN_ERROR).then_some(rgn)
     }
 
@@ -590,16 +590,16 @@ mod win {
         let Some(rgn) = window_region(hwnd) else {
             return RegionHit::NoRegion;
         };
-        // 창 모양 좌표는 바깥 사각형의 왼쪽 위가 0 이다(MS `GetWindowRgn` 문서). `WS_EX_LAYOUTRTL` 창은 오른쪽 위가 0
-        //   이고 x 가 왼쪽으로 는다 — 맨 오른쪽 픽셀이 x = 0(실측 — OS 적중 판정 `WindowFromPoint` 와 견준 시험
-        //   `top_level_at_mirrors_the_region_of_rtl_windows`). DPI 인식이 다른 다른 앱 창의 모양이 그 창의 논리
-        //   좌표로 오는지는 재지 않았다 — 그러면 그 창의 모양 판정이 배율만큼 어긋난다.
+        // Window-shape coordinates have 0 at the top left of the outer rectangle (MS `GetWindowRgn` docs). A `WS_EX_LAYOUTRTL` window has 0 at the top right
+        //   and x grows to the left — the rightmost pixel is x = 0 (measured — the test `top_level_at_mirrors_the_region_of_rtl_windows`,
+        //   compared against the OS hit test `WindowFromPoint`). Whether another app's window with a different DPI awareness reports its shape in that window's logical
+        //   coordinates was not measured — if so, that window's shape decision is off by the scale factor.
         let x = if rtl {
             outer.right - 1 - p.x
         } else {
             p.x - outer.left
         };
-        // SAFETY: 살아 있는 영역 핸들과 값 인자.
+        // SAFETY: a live region handle and value arguments.
         if unsafe { PtInRegion(rgn.0, x, p.y - outer.top) }.as_bool() {
             RegionHit::Inside
         } else {
@@ -613,8 +613,8 @@ mod win {
         }
         let mut alpha = 0u8;
         let mut flags = LAYERED_WINDOW_ATTRIBUTES_FLAGS(0);
-        // 다른 프로세스의 창에도 답하는지는 재지 않았다 — 못 받으면 `PerPixel` 이라 가리는 창(놓기면 새 창 쪽)으로 떨어진다.
-        // SAFETY: 살아 있는 지역 변수에 쓰는 조회다(색 키 값은 받지 않는다). 사라진 창이면 실패한다.
+        // Whether it also answers for another process's window was not measured — if not received it is `PerPixel`, so it falls to a covering window (the new-window side for a drop).
+        // SAFETY: a query that writes into a live local variable (the color key value is not taken). It fails if the window vanished.
         if unsafe { GetLayeredWindowAttributes(hwnd, None, Some(&mut alpha), Some(&mut flags)) }
             .is_err()
         {
@@ -631,7 +631,7 @@ mod win {
 
     fn candidate(hwnd: HWND, p: PhysPoint) -> bool {
         let mut r = RECT::default();
-        // SAFETY: 걷는 동안 사라진 창이면 조회가 실패하거나 거짓을 돌려준다 — 그 창은 건너뛴다.
+        // SAFETY: for a window that vanished during the walk the query fails or returns false — that window is skipped.
         unsafe {
             if GetWindowRect(hwnd, &mut r).is_err() || !contains(to_rect(r), p) {
                 return false;
@@ -656,13 +656,13 @@ mod win {
 
     pub(super) fn describe(w: NativeWindow) -> Option<WindowFacts> {
         let hwnd = HWND(w.0 as *mut c_void);
-        // SAFETY: 값만 보는 조회 — 사라진 핸들이면 거짓이다.
+        // SAFETY: a query that only reads a value — a vanished handle gives false.
         if !unsafe { IsWindow(hwnd) }.as_bool() {
             return None;
         }
-        // 창 클래스 이름은 256 자를 넘지 않는다(MS `WNDCLASSEXW` 문서).
+        // A window class name does not exceed 256 characters (MS `WNDCLASSEXW` docs).
         let mut class = [0u16; 256];
-        // SAFETY: 살아 있는 지역 버퍼 — 돌려준 길이만큼 썼다(실패면 0).
+        // SAFETY: a live local buffer — it wrote as many as the returned length (0 on failure).
         let len = unsafe { GetClassNameW(hwnd, &mut class) }.max(0) as usize;
         let ex = ex_style(hwnd).unwrap_or(0);
         Some(WindowFacts {
@@ -676,13 +676,13 @@ mod win {
     }
 
     pub(super) fn top_level_at(p: PhysPoint) -> Option<NativeWindow> {
-        // SAFETY: 인자 없는(null = 바탕) 조회 — 최상위 창 z 순서의 맨 위.
+        // SAFETY: a query with no arguments (null = the desktop) — the top of the top-level window z order.
         let mut hwnd = unsafe { GetTopWindow(HWND::default()) }.ok()?;
         for _ in 0..MAX_Z_WALK {
             if candidate(hwnd, p) {
                 return Some(native(hwnd));
             }
-            // SAFETY: 값 조회 — 맨 아래거나 그 사이 사라진 창이면 실패한다.
+            // SAFETY: a value query — it fails if it is the bottom or the window vanished in the meantime.
             hwnd = unsafe { GetWindow(hwnd, GW_HWNDNEXT) }.ok()?;
         }
         None
@@ -693,7 +693,7 @@ mod win {
 mod tests {
     use super::*;
 
-    // ── 순수 셈 ──
+    // ── pure computation ──
 
     #[test]
     fn caption_style_has_the_app_draw_the_buttons_with_no_leading_inset() {
@@ -720,7 +720,7 @@ mod tests {
             width: 800,
             height: 600,
         };
-        // (작업 영역, 기대) — 작업 표시줄 아래 · 위 · 왼쪽 · 둘째 모니터의 위
+        // (work area, expected) — below the taskbar · above · left · on the second monitor
         let cases = [
             (
                 PhysRect {
@@ -806,9 +806,9 @@ mod tests {
     fn hit_accepts_skips_see_through_foreign_windows_and_points_outside_the_region() {
         use LayeredKind::{Alpha, ColorKey, NotLayered, PerPixel};
         use RegionHit::{Inside, NoRegion, Outside};
-        // (ours, layered, transparent, region, 기대)
+        // (ours, layered, transparent, region, expected)
         let cases = [
-            // 다른 앱 창
+            // Another app's window
             (false, NotLayered, false, NoRegion, true),
             (false, NotLayered, true, NoRegion, true),
             (false, Alpha(255), false, NoRegion, true),
@@ -818,7 +818,7 @@ mod tests {
             (false, PerPixel, false, NoRegion, true),
             (false, Alpha(255), true, NoRegion, false),
             (false, PerPixel, true, NoRegion, false),
-            // 우리 창 — 클릭 통과만 건너뛴다
+            // Our window — only click-through is skipped
             (true, NotLayered, false, NoRegion, true),
             (true, NotLayered, true, NoRegion, true),
             (true, Alpha(0), false, NoRegion, true),
@@ -826,7 +826,7 @@ mod tests {
             (true, PerPixel, false, NoRegion, true),
             (true, Alpha(255), true, NoRegion, false),
             (true, PerPixel, true, NoRegion, false),
-            // 창 모양
+            // Window shape
             (false, NotLayered, false, Inside, true),
             (false, NotLayered, false, Outside, false),
             (false, Alpha(255), false, Inside, true),
@@ -867,7 +867,7 @@ mod tests {
         assert_eq!(flags, SWP_NOACTIVATE);
     }
 
-    // ── 실 창 — 화면 밖 자리 · 활성 없음(보는 사람 화면에 안 나온다) ──
+    // ── real windows — off-screen position · no activation (does not appear on the viewer's screen) ──
 
     #[cfg(windows)]
     mod real {
@@ -882,26 +882,26 @@ mod tests {
         };
 
         fn visible(w: &TestWindow) -> bool {
-            // SAFETY: 값만 보는 조회.
+            // SAFETY: a query that only reads a value.
             unsafe { IsWindowVisible(w.hwnd()) }.as_bool()
         }
 
         fn hide(w: &TestWindow) {
-            // 돌려주는 값은 전의 보임이지 성공 여부가 아니다.
-            // SAFETY: 이 시험이 쥔 살아 있는 창.
+            // The returned value is the previous visibility, not whether it succeeded.
+            // SAFETY: a live window held by this test.
             let _ = unsafe { ShowWindow(w.hwnd(), SW_HIDE) };
         }
 
-        /// 확장 스타일을 고르는 테두리 없는 도구 창 — [`TestWindow`] 는 확장 스타일을 못 고른다. `rect` 에 늘 위로
-        /// 활성 없이 보인다. 버리면 부순다.
+        /// A borderless tool window with a chosen extended style — [`TestWindow`] cannot choose the extended style. At `rect` it is always shown on top
+        /// without activation. Destroyed when dropped.
         struct StyledWindow(HWND);
 
         impl StyledWindow {
             fn new(ex: WINDOW_EX_STYLE, rect: PhysRect) -> Self {
-                // `SS_NOTIFY`(이 crate 가 켜지 않은 `Win32_UI_Controls` 의 상수) — 없으면 STATIC 이 OS 적중 판정에
-                //   답하지 않아 `WindowFromPoint` 가 그 창을 지나간다(실측).
+                // `SS_NOTIFY` (a constant of `Win32_UI_Controls`, which this crate does not turn on) — without it STATIC does not answer the OS hit test
+                //   and `WindowFromPoint` passes over that window (measured).
                 const SS_NOTIFY: WINDOW_STYLE = WINDOW_STYLE(0x100);
-                // SAFETY: 시스템 클래스 이름 · 값 인자뿐이다. 인스턴스 · 부모 · 메뉴 없음.
+                // SAFETY: only a system class name and value arguments. No instance, parent or menu.
                 let hwnd = unsafe {
                     CreateWindowExW(
                         WS_EX_TOOLWINDOW | ex,
@@ -920,7 +920,7 @@ mod tests {
                 }
                 .expect("시험 창 짓기");
                 let w = Self(hwnd);
-                // SAFETY: 이 값이 지은 살아 있는 창과 값 인자.
+                // SAFETY: a live window this value built and value arguments.
                 unsafe {
                     SetWindowPos(
                         hwnd,
@@ -943,7 +943,7 @@ mod tests {
 
         impl Drop for StyledWindow {
             fn drop(&mut self) {
-                // SAFETY: 이 값이 지은 창.
+                // SAFETY: a window this value built.
                 let _ = unsafe { DestroyWindow(self.0) };
             }
         }
@@ -955,8 +955,8 @@ mod tests {
             assert_eq!(n, NativeWindow(w.hwnd().0 as isize));
         }
 
-        // 숨은 창 · 사라진 창은 전경이 아니다. 참 갈래는 전경을 빼앗지 않고 지금 전경 창으로 잰다 — 전경 창이 없거나(서비스
-        //   세션) 재는 사이 바뀌면 그 갈래는 건너뛴다.
+        // A hidden window · a vanished window is not the foreground. The true branch measures against the current foreground window without stealing the foreground — if there is no foreground window (service
+        //   session) or it changes while measuring, that branch is skipped.
         #[test]
         fn is_foreground_is_true_only_for_the_foreground_window() {
             use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
@@ -965,7 +965,7 @@ mod tests {
             let gone = w.handle_only();
             drop(w);
             assert_eq!(is_foreground(&gone), Some(false), "사라진 창");
-            // SAFETY: 인자 없는 조회 둘.
+            // SAFETY: two queries with no arguments.
             let (before, answer, after) = unsafe {
                 let before = GetForegroundWindow();
                 let answer = is_foreground(&TestWindow::borrowed(before));
@@ -1050,12 +1050,12 @@ mod tests {
             assert_eq!(top_level_at(right_edge), None, "오른쪽 변은 밖이다");
             hide(&above);
             assert_eq!(top_level_at(p), Some(b), "숨은 창은 대상이 아니다");
-            // SAFETY: 이 시험이 쥔 살아 있는 창 — 활성 없이 최소화한다.
+            // SAFETY: a live window held by this test — minimize without activation.
             unsafe {
                 let _ = ShowWindow(below.hwnd(), SW_SHOWMINNOACTIVE);
             }
             let mut r = windows::Win32::Foundation::RECT::default();
-            // SAFETY: 위와 같다.
+            // SAFETY: same as above.
             unsafe { GetWindowRect(below.hwnd(), &mut r) }.unwrap();
             let in_icon = PhysPoint {
                 x: r.left,
@@ -1066,7 +1066,7 @@ mod tests {
                 Some(b),
                 "최소화된 창은 대상이 아니다"
             );
-            // SAFETY: 위와 같다.
+            // SAFETY: same as above.
             unsafe {
                 let _ = ShowWindow(above.hwnd(), SW_SHOWNOACTIVATE);
             }
@@ -1091,7 +1091,7 @@ mod tests {
                 NativeWindow::of(&below).unwrap(),
             );
             assert!(!describe_window(a).unwrap().has_region);
-            // SAFETY: 이 시험이 쥔 살아 있는 창 — 성공하면 영역은 OS 것이 된다(지우지 않는다).
+            // SAFETY: a live window held by this test — on success the region belongs to the OS (do not delete it).
             unsafe {
                 let rgn = CreateRectRgn(0, 0, 100, 100);
                 assert_ne!(SetWindowRgn(above.hwnd(), rgn, false), 0);
@@ -1129,19 +1129,19 @@ mod tests {
             };
             for (ex, rtl) in [(WINDOW_EX_STYLE(0), false), (WS_EX_LAYOUTRTL, true)] {
                 let w = StyledWindow::new(ex, rect);
-                // SAFETY: 이 시험이 쥔 살아 있는 창 — 성공하면 영역은 OS 것이 된다(지우지 않는다).
+                // SAFETY: a live window held by this test — on success the region belongs to the OS (do not delete it).
                 unsafe {
                     assert_ne!(SetWindowRgn(w.0, CreateRectRgn(0, 0, 100, 200), false), 0);
                 }
                 assert_eq!(describe_window(w.native()).unwrap().rtl, rtl);
-                // 모양 x [0, 100) — 왼쪽 배치면 왼쪽 절반 · 오른쪽 배치면 오른쪽 절반이 그 창이다.
+                // Shape x [0, 100) — with left layout the left half is that window · with right layout the right half is.
                 for dx in [0, 99, 100, 199] {
                     let p = PhysPoint {
                         x: rect.x + dx,
                         y: rect.y + 50,
                     };
                     let want = (dx < 100) != rtl;
-                    // SAFETY: 값 인자 조회.
+                    // SAFETY: a value-argument query.
                     let os_hit = unsafe { WindowFromPoint(POINT { x: p.x, y: p.y }) } == w.0;
                     assert_eq!(os_hit, want, "OS 적중 판정 rtl={rtl} dx={dx}");
                     assert_eq!(
@@ -1168,7 +1168,7 @@ mod tests {
                 x: rect.x + 10,
                 y: rect.y + 10,
             };
-            // SAFETY: 값 인자 조회.
+            // SAFETY: a value-argument query.
             let os_hit = unsafe { WindowFromPoint(POINT { x: p.x, y: p.y }) } == w.0;
             assert!(os_hit, "OS 적중 판정");
             assert_eq!(top_level_at(p), Some(w.native()));
@@ -1211,7 +1211,7 @@ mod tests {
                 (LWA_ALPHA | LWA_COLORKEY, 0, LayeredKind::ColorKey),
             ];
             for (flags, alpha, want) in cases {
-                // SAFETY: 이 시험이 쥔 살아 있는 layered 창과 값 인자.
+                // SAFETY: a live layered window held by this test and value arguments.
                 unsafe { SetLayeredWindowAttributes(w.0, COLORREF(0), alpha, flags) }
                     .expect("layered 속성");
                 assert_eq!(
@@ -1220,7 +1220,7 @@ mod tests {
                     "flags={flags:?} alpha={alpha}"
                 );
             }
-            // 우리 창은 클릭 통과만 건너뛴다 — 색 키 창도 답이다(`hit_accepts`).
+            // Our window is skipped only if click-through — a color-key window is also an answer (`hit_accepts`).
             let p = PhysPoint {
                 x: rect.x + 10,
                 y: rect.y + 10,
@@ -1228,7 +1228,7 @@ mod tests {
             assert_eq!(top_level_at(p), Some(w.native()));
         }
 
-        /// 보통(도구 아닌) 창을 화면 안에 보이므로 보는 사람 화면에 잠깐 나온다 — 데스크톱 세션에서 손으로 돌린다.
+        /// It shows an ordinary (non-tool) window on screen, so it briefly appears on the viewer's screen — run it by hand in a desktop session.
         #[test]
         #[ignore = "화면 안에 창을 잠깐 보인다 — 데스크톱 세션에서 손으로"]
         fn restore_placement_round_trips_screen_coordinates() {

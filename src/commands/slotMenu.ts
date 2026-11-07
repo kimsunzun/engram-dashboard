@@ -1,20 +1,20 @@
-// ADR-0064: 슬롯 우클릭 메뉴 항목을 "command id 참조"로만 조립한다(메뉴에서 직접 store 호출 금지 —
-//   ADR-0064 불변식). 공통 슬롯 ops 는 target='*' 로, 콘텐츠 전용 항목은 target=<SlotContentType> 로
-//   같은 API(registerSlotMenu)를 통해 기여된다(VS Code contributes.menus 결).
+// ADR-0064: assemble the slot right-click menu items only as "command id references" (no direct store calls from the menu —
+//   ADR-0064 invariant). Common slot ops are contributed with target='*', and content-specific items with target=<SlotContentType>,
+//   through the same API (registerSlotMenu) (in the vein of VS Code contributes.menus).
 //
-// ★DOM-free 유지★: registry.ts 와 동일하게 순수 Map/함수라 headless(vitest)로 단위테스트된다. DOM/Tauri
-//   의존은 command handler(*Commands.ts / slotCommands.ts)로 밀어낸다.
+// ★Stay DOM-free★: like registry.ts, it is a pure Map/functions, so it is unit-tested headless (vitest). DOM/Tauri
+//   dependence is pushed out to the command handlers (*Commands.ts / slotCommands.ts).
 
 import type { SlotContent } from '../api/layoutTypes'
 import { getCommand } from './registry'
 
-/** '*' = 모든 슬롯(공통). */
+/** '*' = all slots (common). */
 export type SlotMenuTarget = SlotContent['type'] | '*'
 
 /**
- * 메뉴를 연 슬롯의 실행 컨텍스트 — 조립처(`LayoutLeaf`)가 싣는다. `agentId` 는 배정 슬롯만.
- * ★메뉴 상태(☑·활성)의 유일한 출처다★ — [`SlotMenuItem.checked`]·[`SlotMenuItem.enabled`] 는 이것만 읽는다. 스토어
- * 상태가 필요하면 조립처가 구독해 여기 싣는다(구독하므로 열린 메뉴도 따라 다시 그린다).
+ * The execution context of the slot that opened the menu — the assembly site (`LayoutLeaf`) carries it. `agentId` only for an assigned slot.
+ * ★The only source of menu state (☑ · enabled)★ — [`SlotMenuItem.checked`] · [`SlotMenuItem.enabled`] read only this. If store
+ * state is needed, the assembly site subscribes and carries it here (since it subscribes, an open menu is redrawn to follow).
  */
 export interface SlotMenuCtx {
   viewId: string | null
@@ -24,64 +24,64 @@ export interface SlotMenuCtx {
 }
 
 /**
- * 기여 항목(ADR-0064 고정 스키마 + ADR-0065 additive 확장). 두 형태 중 하나다:
- *   - **실행 항목**: `commandId` 있음(+ `children` 없음). title/run 은 빌드 시 registry 에서 resolve.
- *   - **컨테이너**(1단 서브메뉴): `children` 있음 + 자체 `title` 필수(+ `commandId` 없음).
- * 둘 다 없거나 둘 다 있으면 dev 에러(fail-loud, ADR-0065 §영향/불변식). hideOn·children·title 은 모두
- * 옵셔널이라 기존 `{commandId, group, order}` 기여는 무변경으로 그대로 유효(하위호환).
+ * A contribution item (ADR-0064 fixed schema + ADR-0065 additive extension). It is one of two shapes:
+ *   - **Execution item**: has `commandId` (+ no `children`). title/run are resolved from the registry at build time.
+ *   - **Container** (1-level submenu): has `children` + its own `title` required (+ no `commandId`).
+ * Neither or both is a dev error (fail-loud, ADR-0065 §영향/불변식). hideOn · children · title are all
+ * optional, so an existing `{commandId, group, order}` contribution stays valid unchanged (backward compatible).
  */
 export interface SlotMenuItem {
-  /** 실행 항목의 registry command id(예: 'slot.close'). 컨테이너면 생략. fail-loud: 미등록이면 buildSlotMenu 가 skip+error 로그. */
+  /** The registry command id of an execution item (e.g. 'slot.close'). Omitted for a container. fail-loud: if unregistered, buildSlotMenu skips + logs an error. */
   commandId?: string
-  /** 컨테이너(children 有) 표기 이름. 실행 항목이면 생략(registry title 을 쓴다). */
+  /** Display name of a container (has children). Omitted for an execution item (the registry title is used). */
   title?: string
-  /** 정렬 1축(그룹) — 'content'(콘텐츠 전용) 먼저, 'slot-ops'(공통) 나중. GROUP_ORDER 로 순서 고정. */
+  /** Sort axis 1 (group) — 'content' (content-specific) first, 'slot-ops' (common) later. Order fixed by GROUP_ORDER. */
   group: string
-  /** 정렬 2축(그룹 내 순서). 같은 group 안에서 오름차순. */
+  /** Sort axis 2 (order within the group). Ascending within the same group. */
   order: number
   /**
-   * ADR-0065 제외 조건 — 나열된 콘텐츠 타입 슬롯에서 이 항목을 숨긴다(subtraction 전용, allowlist 아님).
-   * 예: slot.empty 에 `['empty']` → '*' 보편 등록은 유지하되 빈 슬롯에서만 뺀다(공통 ops 단일소스 유지).
+   * ADR-0065 exclusion condition — hides this item in slots of the listed content types (subtraction only, not an allowlist).
+   * E.g. `['empty']` on slot.empty → the '*' universal registration is kept but removed only from empty slots (common ops single source kept).
    */
   hideOn?: SlotContent['type'][]
-  /** ADR-0065 1단 서브메뉴 자식들. 있으면 이 항목은 컨테이너(commandId 없이 title 필수). 자식은 flat 실행 항목만(중첩 금지). */
+  /** ADR-0065 1-level submenu children. If present this item is a container (title required without commandId). Children are flat execution items only (no nesting). */
   children?: SlotMenuItem[]
   /**
-   * 있으면 이 실행 항목은 켜고 끄는 항목이고, 값이 ☑ 다(렌더러 = `menuitemcheckbox`). 컨테이너엔 못 단다.
-   * ★ctx 만 읽는다 — store 를 읽지 말 것★(ADR-0064 「메뉴에서 직접 store 호출 금지」): title 이 빌드 때 고정이라
-   * 상태를 실을 곳이 여기뿐이고, 상태는 조립처가 ctx 에 실어 준다.
+   * If present, this execution item is a toggle and the value is the ☑ (renderer = `menuitemcheckbox`). Cannot be attached to a container.
+   * ★Reads only ctx — do not read the store★ (ADR-0064 「메뉴에서 직접 store 호출 금지」 — no direct store calls from the menu): the title is fixed at build time, so
+   * this is the only place to carry state, and the assembly site puts state in ctx for it.
    */
   checked?: (ctx: SlotMenuCtx) => boolean
   /**
-   * false 면 렌더러가 비활성으로 그린다(클릭해도 실행 안 함). 없으면 늘 활성. 컨테이너엔 못 단다. `checked` 와 같은
-   * 규칙 — ★ctx 만 읽는다★. command 의 `when` 과 다른 축이다: `when` 은 키바인딩이 「못 본 것처럼 넘기는」 UI
-   * 컨텍스트 게이트이고 메뉴는 읽지 않는다.
+   * If false the renderer draws it disabled (clicking does not run it). Always enabled if absent. Cannot be attached to a container. Same rule as `checked`
+   * — ★reads only ctx★. A different axis from the command's `when`: `when` is a UI context gate that keybindings 「못 본 것처럼 넘기는」
+   * (pass over as if unseen), and the menu does not read it.
    */
   enabled?: (ctx: SlotMenuCtx) => boolean
 }
 
 /**
- * buildSlotMenu 산출 = 렌더러가 그대로 쓰는 resolve 된 항목(+ 그룹 경계 표시).
- * children 이 있으면 컨테이너(1단 서브메뉴) — 렌더러는 이 경우 run 을 부르지 않고 hover flyout 으로 children 을 편다.
+ * The buildSlotMenu output = resolved items the renderer uses as is (+ group boundary marks).
+ * If children exist it is a container (1-level submenu) — the renderer does not call run in this case and unfolds children as a hover flyout.
  */
 export interface ResolvedSlotMenuItem {
   id: string
   title: string
   run: (args?: Record<string, unknown>) => unknown
   group: string
-  /** 이 항목이 자기 그룹의 첫 항목이면서 앞에 다른 그룹이 있었으면 true(렌더러가 구분선을 그린다). */
+  /** True if this item is the first of its group and another group came before it (the renderer draws a divider). */
   separatorBefore: boolean
-  /** ADR-0065 1단 서브메뉴 — 컨테이너면 resolve 된 자식들. 실행 항목이면 undefined. */
+  /** ADR-0065 1-level submenu — the resolved children if a container. undefined if an execution item. */
   children?: ResolvedSlotMenuItem[]
-  /** 기여의 [`SlotMenuItem.checked`] 그대로. 없으면 켜고 끄는 항목이 아니다. */
+  /** The contribution's [`SlotMenuItem.checked`] as is. If absent it is not a toggle. */
   checked?: (ctx: SlotMenuCtx) => boolean
-  /** 기여의 [`SlotMenuItem.enabled`] 그대로. 없으면 늘 활성. */
+  /** The contribution's [`SlotMenuItem.enabled`] as is. If absent always enabled. */
   enabled?: (ctx: SlotMenuCtx) => boolean
 }
 
-// ★그룹 렌더 순서 고정★(ADR-0064 §5): 콘텐츠 전용('content')을 위에, 공통 슬롯 ops('slot-ops')를 아래에
-//   두고 그 사이에 구분선. 여기 없는 group 은 뒤로 밀되(Infinity) 이름순 안정 정렬 — 새 group 추가 시
-//   여기 명시해 순서를 고정한다(암묵 순서 금지).
+// ★Group render order fixed★ (ADR-0064 §5): content-specific ('content') on top, common slot ops ('slot-ops') below,
+//   with a divider between. A group not listed here is pushed back (Infinity) with a stable name-order sort — when adding a new group
+//   specify it here to fix the order (no implicit order).
 const GROUP_ORDER: Record<string, number> = {
   content: 0,
   'slot-ops': 1,
@@ -98,9 +98,9 @@ function itemKey(item: SlotMenuItem): string {
 }
 
 /**
- * 슬롯 메뉴 기여 등록. 같은 (target, key) 재기여는 조용히 덮지 않고 warn 후 교체한다
- * (registry.register 와 동형 — HMR 재평가·중복 로드·오타를 드러낸다). idempotent: 마지막 등록이 이긴다.
- * key = commandId(실행 항목) 또는 'container:'+title(컨테이너) — 컨테이너는 commandId 가 없어 title 로 식별한다.
+ * Register a slot menu contribution. Re-contributing the same (target, key) is not silently overwritten but warned about and then replaced
+ * (isomorphic to registry.register — reveals HMR re-evaluation, duplicate loads, and typos). idempotent: the last registration wins.
+ * key = commandId (execution item) or 'container:'+title (container) — a container has no commandId, so it is identified by title.
  */
 export function registerSlotMenu(target: SlotMenuTarget, items: SlotMenuItem[]): void {
   const list = contributions.get(target) ?? []
@@ -117,11 +117,11 @@ export function registerSlotMenu(target: SlotMenuTarget, items: SlotMenuItem[]):
   contributions.set(target, list)
 }
 
-/** 등록 순서 무관 — (group, order) 로만 결정적. */
+/** Independent of registration order — deterministic by (group, order) alone. */
 function compareItems(a: SlotMenuItem, b: SlotMenuItem): number {
   const gr = groupRank(a.group) - groupRank(b.group)
   if (gr !== 0) return gr
-  // 같은 랭크의 서로 다른 group 명(둘 다 미등록 등) — 이름순으로 안정화.
+  // Different group names of the same rank (both unregistered, etc.) — stabilized by name order.
   if (a.group !== b.group) return a.group < b.group ? -1 : 1
   if (a.order !== b.order) return a.order - b.order
   const ka = itemKey(a)
@@ -130,9 +130,9 @@ function compareItems(a: SlotMenuItem, b: SlotMenuItem): number {
 }
 
 /**
- * 실패(미등록 등) 시 null(skip).
- * ★fail-loud but crash-free(FIX-1)★: 렌더 시점(우클릭) 호출이라 throw 하면 error boundary 부재 시 앱 blank.
- *   시끄럽게 console.error 하고 그 항목만 null 로 skip 한다(부팅 전수 검증은 validateSlotMenuContributions).
+ * null (skip) on failure (unregistered, etc.).
+ * ★fail-loud but crash-free (FIX-1)★: it is called at render time (right click), so a throw would blank the app without an error boundary.
+ *   Loudly console.error and skip only that item as null (full boot-time validation is validateSlotMenuContributions).
  */
 function resolveRunnable(commandId: string, target: SlotContent['type']): ResolvedSlotMenuItem | null {
   const cmd = getCommand(commandId)
@@ -152,11 +152,11 @@ function withCtxPredicates(entry: ResolvedSlotMenuItem, item: SlotMenuItem): Res
 }
 
 /**
- * 항목 형태 검증(ADR-0065 §영향/불변식) — 실행 항목 XOR 컨테이너. 위반이면 시끄럽게 로그하고 false(skip).
- *   - 실행 항목: commandId 有 + children 無.
- *   - 컨테이너: children 有(비어있지 않음) + title 有 + commandId 無.
- * ★1단 한정★: nested=true(= 이 항목이 이미 컨테이너의 자식)면 children 을 또 가지는 것은 2단 중첩이라 금지.
- * ★fail-loud but crash-free★: buildSlotMenu 의 FIX-1 스타일과 동형 — dev 에러(console.error) + skip.
+ * Item shape validation (ADR-0065 §영향/불변식) — execution item XOR container. On violation, log loudly and return false (skip).
+ *   - Execution item: commandId present + children absent.
+ *   - Container: children present (non-empty) + title present + commandId absent.
+ * ★Limited to 1 level★: if nested=true (= this item is already a child of a container), having children again is 2-level nesting and forbidden.
+ * ★fail-loud but crash-free★: isomorphic to the FIX-1 style of buildSlotMenu — dev error (console.error) + skip.
  */
 function validateItemShape(item: SlotMenuItem, target: SlotMenuTarget, nested: boolean): boolean {
   const hasCmd = typeof item.commandId === 'string' && item.commandId.length > 0
@@ -190,26 +190,26 @@ function validateItemShape(item: SlotMenuItem, target: SlotMenuTarget, nested: b
 }
 
 /**
- * contentType 기여 ∪ '*'(공통) 기여를 모아 결정적 정렬 → registry resolve → 렌더 가능한 항목 배열.
+ * Gather the contentType contributions ∪ '*' (common) contributions, sort deterministically → registry resolve → an array of renderable items.
  *
- * ★정렬은 등록 순서 무관 — (groupRank, order) 로만★(ADR-0064): import 순서·HMR 순서에 렌더가 흔들리지
- *   않게 한다. 안정 정렬을 위해 group 은 GROUP_ORDER 랭크, 그 안은 order, 동률이면 key(commandId/title) 로 타이브레이크.
- * ★hideOn 필터(ADR-0065)★: hideOn 에 contentType 이 포함된 항목은 먼저 뺀다(subtraction — '*' 보편성은 유지,
- *   특정 타입만 제외). 공통 ops 단일소스('*') 불변식을 유지하면서 빈 슬롯에서 slot.empty 를 트림한다.
- * ★1단 서브메뉴(ADR-0065)★: children 있는 컨테이너는 title passthrough + 각 자식 commandId 를 resolve 한다.
- *   ★자식은 선언 순서 보존★(최상위와 달리 재정렬 없음) — 기여가 이미 의도한 상대 순서로 나열한다(ADR-0065
- *   "keeping their relative order"). 자식이 또 children 을 가지면 2단 중첩이라 dev 에러 + skip(nested=true).
- *   ★hideOn 은 자식에도 적용(FIX-2)★: 최상위와 동일 subtraction 을 자식마다 돌린다(가시성 계약 = 자식 포함).
- *   ★빈 컨테이너 omit(FIX-1)★: 자식이 전부 skip(미등록·2단 중첩·hideOn)돼 비면 컨테이너를 leaf 로 오인해
- *   dead 항목이 되므로 컨테이너째 console.error + skip(children:[] 로 emit 하지 않는다).
- * ★dedupe(FIX-2)★: '*'(공통) 와 contentType(전용) 가 같은 key 를 기여하면 중복 항목·중복 React key 가 생긴다.
- *   정렬 후 key 로 dedupe 해 최종 순서의 *첫 등장*만 남긴다(content 그룹이 slot-ops 보다 먼저 정렬되므로,
- *   공통 op 를 콘텐츠가 재선언하면 content 쪽이 이긴다 — 다만 공통 op 재선언은 원래 없어야 하고 방어적 dedupe).
- * ★fail-loud but crash-free(FIX-1)★: 미등록 commandId·형태 위반은 throw 하지 않고 console.error + skip.
- * separatorBefore: 그룹이 바뀌는 첫 항목(맨 앞 제외)에 true → 렌더러가 그 위에 구분선을 그린다.
+ * ★Sorting is independent of registration order — only by (groupRank, order)★ (ADR-0064): so the render does not wobble with
+ *   import order or HMR order. For stable sorting, group uses the GROUP_ORDER rank, within it order, and ties break by key (commandId/title).
+ * ★hideOn filter (ADR-0065)★: an item whose hideOn includes the contentType is removed first (subtraction — the '*' universality is kept,
+ *   only the specific type is excluded). Trims slot.empty on empty slots while keeping the common ops single-source ('*') invariant.
+ * ★1-level submenu (ADR-0065)★: a container with children passes the title through + resolves each child's commandId.
+ *   ★Children keep declaration order★ (no reordering, unlike the top level) — the contribution already lists them in the intended relative order (ADR-0065
+ *   "keeping their relative order"). If a child has children again that is 2-level nesting, so dev error + skip (nested=true).
+ *   ★hideOn also applies to children (FIX-2)★: run the same subtraction as the top level on each child (visibility contract = children included).
+ *   ★Omit an empty container (FIX-1)★: if all children are skipped (unregistered · 2-level nesting · hideOn) and it empties, the container would be mistaken for a leaf and
+ *   become a dead item, so the whole container gets console.error + skip (do not emit it with children:[]).
+ * ★dedupe (FIX-2)★: if '*' (common) and contentType (specific) contribute the same key, duplicate items · duplicate React keys result.
+ *   After sorting, dedupe by key and leave only the *first appearance* in the final order (the content group sorts before slot-ops,
+ *   so if content redeclares a common op the content side wins — though redeclaring a common op should not exist in the first place, and this is a defensive dedupe).
+ * ★fail-loud but crash-free (FIX-1)★: an unregistered commandId or a shape violation does not throw but does console.error + skip.
+ * separatorBefore: true on the first item where the group changes (excluding the very first) → the renderer draws a divider above it.
  */
 export function buildSlotMenu(contentType: SlotContent['type']): ResolvedSlotMenuItem[] {
-  // contentType==='*' 는 타입상 불가(SlotContent['type']).
+  // contentType==='*' is impossible by type (SlotContent['type']).
   const merged: SlotMenuItem[] = [...(contributions.get('*') ?? []), ...(contributions.get(contentType) ?? [])]
 
   const visible = merged.filter(item => !(item.hideOn?.includes(contentType) ?? false))
@@ -220,7 +220,7 @@ export function buildSlotMenu(contentType: SlotContent['type']): ResolvedSlotMen
   const seen = new Set<string>()
   let prevGroup: string | null = null
   for (const item of sorted) {
-    // ★skip 은 seen·prevGroup 을 갱신하지 않는다★ — 구분선 계산이 실제 렌더 순서를 따르게.
+    // ★A skip does not update seen · prevGroup★ — so the divider calculation follows the actual render order.
     const key = itemKey(item)
     if (seen.has(key)) continue
     if (!validateItemShape(item, contentType, false)) continue
@@ -231,7 +231,7 @@ export function buildSlotMenu(contentType: SlotContent['type']): ResolvedSlotMen
       for (const child of item.children) {
         if (child.hideOn?.includes(contentType) ?? false) continue
         if (!validateItemShape(child, contentType, true)) continue
-        // 컨테이너 자식은 항상 실행 항목(validateItemShape nested=true 가 children 재보유를 막음).
+        // A container's children are always execution items (validateItemShape nested=true prevents them from holding children again).
         const rc = resolveRunnable(child.commandId as string, contentType)
         if (rc) children.push(withCtxPredicates(rc, child))
       }
@@ -242,7 +242,7 @@ export function buildSlotMenu(contentType: SlotContent['type']): ResolvedSlotMen
         continue
       }
       entry = {
-        // 컨테이너 id 는 title 기반 합성(commandId 없음) — React key·data-attr 용. run 은 no-op(렌더러가 안 부름).
+        // A container id is synthesized from the title (no commandId) — for the React key · data-attr. run is a no-op (the renderer does not call it).
         id: `container:${item.title}`,
         title: item.title as string,
         run: () => undefined,
@@ -270,18 +270,18 @@ export function buildSlotMenu(contentType: SlotContent['type']): ResolvedSlotMen
 }
 
 /**
- * 부팅 전수 검증(FIX-1 + FIX-3) — 등록된 모든 기여를 우클릭 없이 부팅 즉시 검사한다. 두 종류:
- *   1. **형태 검증(FIX-3)** — validateItemShape 를 자식까지 재귀로 돌린다(both-cmd-and-children / 2단 중첩 /
- *      컨테이너 title 누락). 옛 버전은 commandId 존재만 봐서 형태 위반이 우클릭(buildSlotMenu) 때만 잡혔다 —
- *      이제 부팅(dev-time)에 발각된다.
- *   2. **commandId 존재(FIX-1)** — 실행 항목·컨테이너 자식의 commandId 가 registry 에 있는지 확인.
- * 둘 다 crash 없이 console.error(부팅 부수효과 최소 — buildSlotMenu 의 skip+log 와 짝, throw 로 승격 금지).
- * ★buildSlotMenu 와 달리 정렬/resolve/hideOn 은 하지 않는다★ — 순수 검증만(가시성은 렌더 관심사).
+ * Full boot-time validation (FIX-1 + FIX-3) — inspects every registered contribution right at boot without a right click. Two kinds:
+ *   1. **Shape validation (FIX-3)** — run validateItemShape recursively down to the children (both-cmd-and-children / 2-level nesting /
+ *      container title missing). The old version looked only at commandId existence, so shape violations were caught only on right click (buildSlotMenu) —
+ *      now they are discovered at boot (dev-time).
+ *   2. **commandId existence (FIX-1)** — check that the commandId of execution items · container children is in the registry.
+ * Both console.error without crashing (minimal boot side effects — paired with the skip+log of buildSlotMenu, do not promote to a throw).
+ * ★Unlike buildSlotMenu, it does no sorting/resolve/hideOn★ — pure validation only (visibility is a render concern).
  */
 export function validateSlotMenuContributions(): void {
   for (const [target, items] of contributions) {
     for (const item of items) {
-      // FIX-3: 위반이면 아래 commandId 검증은 무의미하므로 skip.
+      // FIX-3: on violation the commandId validation below is meaningless, so skip.
       if (!validateItemShape(item, target, false)) continue
       if (item.children) {
         for (const child of item.children) {
@@ -303,7 +303,7 @@ export function validateSlotMenuContributions(): void {
   }
 }
 
-/** 테스트 전용 — 기여 초기화(테스트 간 격리). 프로덕션 코드에서 호출 금지(registry.__reset… 미러). */
+/** Test only — contribution reset (isolation between tests). Do not call from production code (mirrors registry.__reset…). */
 export function __resetSlotMenuForTest(): void {
   contributions.clear()
 }

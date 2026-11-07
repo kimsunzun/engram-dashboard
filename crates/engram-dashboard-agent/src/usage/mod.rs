@@ -1,12 +1,12 @@
-//! 사용량 한도 관측의 벤더 중립 어휘 — 백엔드가 만들고 데몬이 받는다([`crate::types::StatusSink::usage_observed`]).
+//! The vendor-neutral vocabulary of usage-limit observations — made by backends and received by the daemon ([`crate::types::StatusSink::usage_observed`]).
 //!
-//! ★벤더 이름·정책(쿨타임·시한)을 여기 두지 않는다★ — 그것은 각 벤더의 backend 모듈이 진다(ADR-0004
-//!   「백엔드 확장」). 이 모듈은 벤더를 불투명 낱말 하나로만 안다.
-//! 생산자 쪽 공용 도구도 여기 산다 — 칸 값 정규화([`used_pct_from_fraction`] 등) · 상류 문자열 도구
-//! ([`display_text`]·[`has_word`]) · 비정상 결과의 근거와 상류 원문([`UsageDetail`]·[`UpstreamText`]) · 기본 계정이
-//! 아닌 에이전트의 줍기를 막는 디코더 감싸개([`UsageGate`]).
-//! 능동 조회의 seam([`UsageProbe`]·[`ProbeSpawner`])과 그 실물([`OsProbeSpawner`]·[`ScratchDir`])도 여기다 —
-//! 벤더 조회기는 각 backend 가 이 seam 위에 구현한다.
+//! ★Do not put vendor names · policy (cooldown · deadline) here★ — each vendor's backend module carries them (ADR-0004
+//!   「백엔드 확장」). This module knows a vendor only as one opaque word.
+//! Shared producer-side tools live here too — field value normalization ([`used_pct_from_fraction`] etc.) · upstream string tools
+//! ([`display_text`]·[`has_word`]) · the grounds of an abnormal result and the upstream original text ([`UsageDetail`]·[`UpstreamText`]) · the decoder wrapper that blocks the pickup of agents that are not the
+//! default account ([`UsageGate`]).
+//! The seam of active query ([`UsageProbe`]·[`ProbeSpawner`]) and its real implementations ([`OsProbeSpawner`]·[`ScratchDir`]) are here too —
+//! each backend implements the vendor query on top of this seam.
 // ADR-0004
 
 mod detail;
@@ -32,13 +32,13 @@ pub use process::{OsProbeSpawner, KILL_WAIT};
 pub use scratch::{sweep_stale_scratch, ScratchDir};
 pub use text::{display_text, has_word};
 
-/// 벤더를 가리키는 불투명 낱말 — 받는 쪽은 해석하지 않고 칸 키로만 쓴다.
+/// An opaque word that points at a vendor — the receiving side does not interpret it and uses it only as an entry key.
 ///
-/// ★정본 철자는 벤더가 선언한 `&'static str` 하나다★ — 들어오는 낱말(wire 소문자 · 버스 대문자 시작)은
-///   그 정본으로 접은 뒤 키로 삼는다. 접지 않은 낱말로 키를 만들면 두 입구가 다른 칸을 친다.
-/// ★`&'static str` 만 받는 것은 의도다★ — 디스크·wire 에서 온 문자열로는 (leak 하지 않는 한) 키를 만들
-///   수 없어 정본을 거치게 된다. `String` 으로 넓히지 말 것. 단 리터럴은 막지 못한다 — `new` 를 부르는
-///   것은 벤더 선언과 시험 대역뿐이어야 한다(데몬이 벤더 리터럴로 부르면 ADR-0004 위반).
+/// ★The canonical spelling is the single `&'static str` the vendor declared★ — incoming words (wire lowercase · bus capitalized)
+///   are folded to that canonical form before being used as the key. A key made from an unfolded word makes the two entrances hit different entries.
+/// ★Accepting only `&'static str` is intended★: a string from disk · wire cannot make a key (unless leaked), so it has to go through the canonical form.
+///   Do not widen it to `String`. But literals cannot be blocked — only vendor declarations and test doubles should call `new`
+///   (the daemon calling it with a vendor literal violates ADR-0004).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct UsageVendorKey(&'static str);
 
@@ -52,9 +52,9 @@ impl UsageVendorKey {
     }
 }
 
-/// 같은 벤더 안의 계정을 가르는 낱말. ★지금은 늘 [`Default`] 값(`"default"` — 데몬 env 의 기본 로그인)
-/// 이다★ — 칸을 미리 둔 이유는 여러 데몬에 붙는 클라이언트가 값의 출처를 가를 수 있게 하려는 것이다.
-/// 그 낱말은 wire·디스크로 나간다.
+/// A word that tells accounts apart within the same vendor. ★For now it is always the [`Default`] value (`"default"` — the daemon env's default login)
+/// ★ — the field is laid down early so that a client attached to several daemons can tell where a value came from.
+/// That word goes out over the wire · to disk.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UsageAccountKey(String);
 
@@ -70,47 +70,47 @@ impl Default for UsageAccountKey {
     }
 }
 
-/// 사용량 상태 한 칸의 키 — `(벤더, 계정)`.
+/// The key of one usage-state entry — `(벤더, 계정)`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UsageKey {
     pub vendor: UsageVendorKey,
     pub account: UsageAccountKey,
 }
 
-/// 한도 창 하나의 관측.
+/// An observation of one limit window.
 ///
-/// - `used_pct` = **쓴** 양의 백분율(남은 양이 아니다). 생산자가 0–100 의 유한수로 정규화해 싣는다.
-/// - `resets_at` = 그 창이 리셋되는 시각, epoch 초.
-/// - 두 칸 모두 `None` = 모른다이지 0 이 아니다.
+/// - `used_pct` = the percentage of the amount **used** (not the amount remaining). The producer normalizes it to a finite number 0–100 and carries it.
+/// - `resets_at` = the time that window resets, epoch seconds.
+/// - `None` in both fields = unknown, not 0.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WindowObs {
     pub used_pct: Option<f64>,
     pub resets_at: Option<i64>,
 }
 
-/// 모델별 주간 창 하나. `label` = 벤더가 준 표시용 이름(키로 쓰지 않는다).
+/// One per-model weekly window. `label` = the display name the vendor gave (not used as a key).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScopedWindowObs {
     pub label: String,
     pub window: WindowObs,
 }
 
-/// 관측이 어디서 왔나. 빠진 칸의 뜻은 이것과 무관하다([`UsageObservation`]).
+/// Where the observation came from. What a missing field means is unrelated to this ([`UsageObservation`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsageSource {
-    /// 대화 스트림에서 주웠다.
+    /// Picked up from a conversation stream.
     Passive,
-    /// 조회로 받았다.
+    /// Received by query.
     Active,
 }
 
-/// 한 벤더의 사용량 관측 한 건.
+/// One usage observation of one vendor.
 ///
-/// ★빠진 칸(`None`)은 출처와 무관하게 「안 실렸다」다★ — 받는 쪽은 들고 있던 값을 그대로 둔다
-///   (`model_scoped`·`plan` 도 같다). 조회 결과의 null 창도 「없음」이 아니다.
-/// `model_scoped: Some` 은 목록 전량 교체다 — 항목 단위로 합치지 않는다. `Some(vec![])` 는
-///   「모델별 창 없음」이다 — 받는 쪽은 쥔 목록을 비운다(생산자는 그릇을 읽었는데 항목이 0 이면 이것을 낸다).
-/// ★관측 시각을 싣지 않는다★ — 받는 데몬이 찍는다. 생산자(디코더)는 시계를 갖지 않는다.
+/// ★A missing field (`None`) means 「안 실렸다」 (not carried) regardless of source★ — the receiving side leaves the value it held as is
+///   (the same for `model_scoped` · `plan`). A null window in a query result is not 「없음」 (none) either.
+/// `model_scoped: Some` replaces the whole list — it is not merged per item. `Some(vec![])` is
+///   「모델별 창 없음」 (no per-model window) — the receiver empties the list it holds (the producer emits this when it read the container and it had 0 items).
+/// ★Does not carry the observation time★ — the receiving daemon stamps it. The producer (decoder) has no clock.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageObservation {
     pub vendor: UsageVendorKey,
@@ -119,12 +119,12 @@ pub struct UsageObservation {
     pub model_scoped: Option<Vec<ScopedWindowObs>>,
     pub plan: Option<String>,
     pub source: UsageSource,
-    /// `Some` = 조회는 성공했는데 상류가 「이 계정엔 한도 정보가 없다」고 답했다 — 값은 그 근거다(Claude
-    /// `rate_limits_available: false` — API 키·Bedrock·Vertex·profile 권한 없는 토큰·로그아웃).
-    /// `Some` 이면 창 칸(`five_hour`·`weekly`·`model_scoped`)은 전부 `None` 이고 `source` 는
-    /// `Active` 다 — 만드는 쪽이 지키는 약속이다. 받는 쪽은 창 값을 전부 비우고 「정보 없음」
-    /// 상태로 접는다 — 실패가 아니다(실패는 들고 있던 값을 그대로 둔다).
-    /// `Passive` 관측은 언제나 `None` 이다.
+    /// `Some` = the query succeeded but upstream answered 「이 계정엔 한도 정보가 없다」 (this account has no limit information) — the value is its grounds (Claude
+    /// `rate_limits_available: false` — API key · Bedrock · Vertex · a token without profile permission · logged out).
+    /// If `Some`, the window fields (`five_hour` · `weekly` · `model_scoped`) are all `None` and `source` is
+    /// `Active` — a promise kept by the maker. The receiver empties all window values and folds into the 「정보 없음」 (no information)
+    /// state — it is not a failure (a failure leaves the held values as they are).
+    /// A `Passive` observation is always `None`.
     pub limits_unavailable: Option<UsageDetail>,
 }
 
@@ -149,7 +149,7 @@ mod tests {
         }
     }
 
-    /// 필수 훅만 구현한 sink — 새 훅을 안 쓰는 기존 sink 전부가 이 모양이다.
+    /// A sink that implements only the required hooks — every existing sink that does not use the new hooks has this shape.
     struct RequiredOnly {
         calls: AtomicUsize,
     }
@@ -176,14 +176,14 @@ mod tests {
         );
     }
 
-    /// 계정 낱말은 wire(`account_key`)와 디스크로 나간다 — 바뀌면 저장된 칸과 어긋난다.
+    /// The account word goes out over the wire (`account_key`) and to disk — if changed, it no longer matches stored entries.
     #[test]
     fn the_default_account_word_is_default() {
         assert_eq!(UsageAccountKey::default().as_str(), "default");
     }
 
-    /// 데몬의 구독 집합(`BTreeSet`)이 이 순서로 돈다 — 낱말의 주소가 아니라 문자열 순서여야 같은 낱말이
-    /// 한 원소가 되고 집합끼리의 비교가 선다.
+    /// The daemon's subscription set (`BTreeSet`) iterates in this order — it must be string order, not the word's address, so the same word
+    /// becomes one element and comparing sets works.
     #[test]
     fn vendor_keys_order_as_their_words() {
         let mut keys = vec![

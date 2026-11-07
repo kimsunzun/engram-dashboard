@@ -1,10 +1,10 @@
-// ADR-0242: 채팅·텍스트 슬롯(RichSlot · DomSlot)의 스크롤 따라가기를 부르는 창 안 command — `slot.scrollToBottom`.
-//   손잡이는 슬롯의 훅이 마운트하며 올린 모듈 맵(`followRegistry`)에서 찾고, 상태는 그 훅이 소유한다
-//   (ADR-0055 — 레지스트리는 상태 권위가 아니다). 사람의 「맨 아래로」 버튼과 LLM(`__engramCmd`)이 같은 `pin()` 을 흔든다.
+// ADR-0242: the in-window command that invokes scroll-follow of chat · text slots (RichSlot · DomSlot) — `slot.scrollToBottom`.
+//   The handle is found in the module map (`followRegistry`) that the slot's hook raised on mount, and the state is owned by that hook
+//   (ADR-0055 — the registry is not a state authority). The human 「맨 아래로」 (to bottom) button and the LLM (`__engramCmd`) shake the same `pin()`.
 //
-// ★`help` 를 달지 않는다 — 버스에 올리지 말 것★(ADR-0167): 스크롤 위치는 창마다 따로 있는 프론트 상태다.
-//   버스 봉투가 갈 창은 셸이 고르므로 그 슬롯을 소유하지 않은 창이 받을 수 있고, 그 창엔 손잡이가 없어 살아
-//   있는 슬롯에 「없다」로 답한다. 라우팅 사유의 정본 = `renderModeCommands.ts` 머리 주석.
+// ★Do not attach `help` — do not put it on the bus★ (ADR-0167): scroll position is frontend state that exists separately per window.
+//   The window the bus envelope goes to is chosen by the shell, so a window that does not own that slot may receive it, and that window has no handle so it answers a live
+//   slot with 「없다」 (not found). The canonical source of the routing reason = the head comment of `renderModeCommands.ts`.
 
 import { t } from '../i18n'
 import { getFollow } from '../components/slot/scrollFollow/followRegistry'
@@ -14,7 +14,7 @@ register({
   id: 'slot.scrollToBottom',
   title: t('slot.scrollToBottom'),
   category: 'slot',
-  // 돌려주는 값 = `{ pinned: true }`. 숨은 탭이면 붙음만 세우고 쓰기는 그 탭이 보일 때 한다.
+  // Return value = `{ pinned: true }`. For a hidden tab, only set the pinned state and do the scroll write when that tab is shown.
   run: args => {
     const cmd = 'slot.scrollToBottom'
     const slotId = args?.slotId

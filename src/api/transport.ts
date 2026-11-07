@@ -1,31 +1,31 @@
-// Transport — carrier(전송) 추상 (ADR-0020 결정3).
+// Transport — carrier (transport) abstraction (ADR-0020 decision 3).
 //
-// ProtocolClient 가 carrier 디테일(소켓/Channel/바이트)을 모르게 하는 seam: carrier 는 수신 프레임을
-// 정규화된 InboundMessage 로 풀어 올리고(onMessage), 명령은 AgentCommand wire 객체로 받는다(send).
-// 연결 상태도 carrier 소유 — connected 를 떠나면 ProtocolClient 가 모든 뷰를 detached 로 내려앉히므로
-// (ADR-0046 amend: 재부착 계기는 소켓이 아니라 권위 명부다), 상태를 흔들면 슬롯이 그때마다 부재 표시로
-// 깜빡인다.
+// A seam so ProtocolClient does not know carrier details (socket/Channel/bytes): the carrier unpacks inbound frames into
+// a normalized InboundMessage and passes it up (onMessage), and takes commands as AgentCommand wire objects (send).
+// Connection state is also owned by the carrier — when it leaves connected, ProtocolClient drops every view to detached
+// (ADR-0046 amend: the trigger to re-attach is the authoritative registry, not the socket), so shaking the state makes
+// slots flicker to the absent display each time.
 
 import type { ConnectionState, UsageSnapshotPull } from './agentClient'
 
 /**
- * carrier 가 ProtocolClient 로 올리는 **정규화된 수신 메시지**. carrier 별 인코딩(WS binary frame /
- * TauriOutbound)은 transport 가 이미 풀었다. control 의 event = externally-tagged AgentEvent JSON.
+ * The **normalized inbound message** the carrier passes up to ProtocolClient. The per-carrier encoding (WS binary frame /
+ * TauriOutbound) was already unpacked by the transport. The control event = externally-tagged AgentEvent JSON.
  *
- * Auth/Hello 는 transport 내부(handshake)에서 소비되고 여기로 올라오지 않는다.
+ * Auth/Hello is consumed inside the transport (handshake) and does not come up here.
  */
 export type InboundMessage =
   | { kind: 'control'; event: Record<string, unknown> }
-  // tag = frame 종류(0=터미널 바이트 / 1=StructuredEvent JSON) — 상수 정본은 wsFrame.ts.
+  // tag = frame kind (0 = terminal bytes / 1 = StructuredEvent JSON) — the source of truth for the constants is wsFrame.ts.
   | { kind: 'output'; tag: number; agentId: string; epoch: number; seq: number; bytes: Uint8Array }
-  // ★replay 경계 마커(ADR-0046)★: src-tauri 가 각 replay 종결마다 같은 출력 Channel 로 흘리는 tag=255
-  //   프레임의 정규화. 공개 agentClient 표면엔 노출하지 않는다 — 마커는 프론트 내부 상태기계 전용
-  //   (Designer 리뷰 요구). failed=true 면 이 replay 가 완결 없이 종결됨(deadline/단절).
-  //   continuesConversation = 이 화신이 저장된 대화를 이어받으려고 떴다(ADR-0226 — 성공 여부 아님).
-  //   실패 경계는 언제나 false.
-  //   replayFrom = 이 replay 의 머리 — 데몬 SubscribeAck 의 `replay_from`(실제로 처음 보낸 seq · 링이
-  //   비었으면 다음에 발급할 seq). ★버퍼의 최소 seq 로 대신하지 말 것★ — replay 가 비면 틀린다(ADR-0231).
-  //   실패 경계에선 뜻이 없다(flush 하지 않는다).
+  // ★Replay boundary marker (ADR-0046)★: the normalization of the tag=255 frame that src-tauri sends down the same output Channel
+  //   at the end of each replay. It is not exposed on the public agentClient surface — the marker is only for the frontend's internal state machine
+  //   (Designer review requirement). failed=true means this replay ended without completing (deadline/disconnect).
+  //   continuesConversation = this incarnation came up to resume a saved conversation (ADR-0226 — not whether it succeeded).
+  //   A failure boundary is always false.
+  //   replayFrom = the head of this replay — the daemon SubscribeAck's `replay_from` (the seq actually sent first · the next seq to be issued
+  //   if the ring is empty). ★Do not substitute the buffer's minimum seq★ — it is wrong when the replay is empty (ADR-0231).
+  //   Meaningless at a failure boundary (no flush).
   | {
       kind: 'replayBoundary'
       agentId: string
@@ -37,49 +37,49 @@ export type InboundMessage =
       replayFrom: number
     }
 
-/** carrier 추상 — ProtocolClient 가 의존하는 유일한 전송 표면(daemon 접속 전용, ADR-0029). */
+/** The carrier abstraction — the only transport surface ProtocolClient depends on (daemon connection only, ADR-0029). */
 export interface Transport {
   readonly connectionState: ConnectionState
 
-  /** 등록 즉시 현재 상태를 1회 통지한 뒤 변화 시 호출. 반환은 해제 함수. */
+  /** Notifies the current state once immediately on registration, then is called on change. Returns a release function. */
   onConnectionStateChange(cb: (state: ConnectionState) => void): () => void
 
-  /** 콜백은 1개만 보관된다 — 재등록은 앞의 것을 교체(ProtocolClient 가 유일 라우터). 반환은 해제 함수. */
+  /** Only 1 callback is kept — re-registering replaces the earlier one (ProtocolClient is the sole router). Returns a release function. */
   onMessage(cb: (msg: InboundMessage) => void): () => void
 
-  /** 명령 전송(AgentCommand wire 객체). 호출 전 연결 보장은 호출자 몫 — ProtocolClient 는 ensureReady() 를 await 한다. */
+  /** Send a command (AgentCommand wire object). Ensuring the connection before the call is the caller's job — ProtocolClient awaits ensureReady(). */
   send(payload: unknown): void | Promise<void>
 
   /**
-   * 전송 준비 보장 = **attach-only**(ADR-0021 불변식). 명령/구독 경로가 매 호출 전에 await 한다 — 이
-   * 경로는 **절대 데몬을 spawn 하지 않는다**(데몬 끈 뒤 키 한 번·리사이즈가 respawn 하면 안 된다).
-   * 명시 close 뒤엔 즉시 reject — 복구는 start() 뿐.
+   * Ensures transport readiness = **attach-only** (ADR-0021 invariant). The command/subscribe path awaits it before every call — this
+   * path **never spawns the daemon** (a key press or resize after turning the daemon off must not respawn it).
+   * After an explicit close it rejects immediately — recovery is start() only.
    */
   ensureReady(): Promise<void>
 
   /**
-   * **명시 spawn 진입점**(ADR-0021 §1) — 데몬을 띄울 수 있는 유일한 경로다(부팅 연결 / 사용자
-   * daemon_start). 명령 경로(ensureReady)와 분리해 "명령의 부수효과로 respawn" 을 차단한다.
+   * **The explicit spawn entry point** (ADR-0021 §1) — the only path that can bring up the daemon (boot connect / user
+   * daemon_start). Separated from the command path (ensureReady) to block "respawn as a side effect of a command".
    */
   start(): Promise<void>
 
-  /** 명시 종료(재연결 중단 + carrier 정리). 이후 connectionState='down'. */
+  /** Explicit stop (stop reconnecting + clean up the carrier). Afterwards connectionState='down'. */
   close(): void
 
   /**
-   * 뷰 주도 replay 요청(ADR-0046 F2) — 그 agent 의 **데몬 ring 전량 재replay**(증분 아님)를 요청하고
-   * 부여된 gen 을 회수한다. gen 은 u64 단조 카운터 — 마커 frame 이 8바이트 BE 로 싣고 ProtocolClient 가
-   * `요청 gen ≤ 마커 gen` 펜스로 비교하므로 폭을 맞춰 BigInt 로 통일한다.
+   * View-driven replay request (ADR-0046 F2) — requests a **full re-replay of that agent's daemon ring** (not incremental)
+   * and retrieves the assigned gen. gen is a u64 monotonic counter — the marker frame carries it as 8-byte BE and ProtocolClient compares
+   * it with the fence `요청 gen ≤ 마커 gen`, so we match the width and unify on BigInt.
    *
-   * ★계약(FIX-6 정정)★: 모든 requestReplay 는 **최소 1개의 replayBoundary 이벤트**로 종결되거나 연결이
-   * 끊긴다(끊기면 마커 미발행 — connected 재전이가 재구동). "정확히 1개"가 아니다: 실패 마커(deadline)
-   * 뒤에 같은 gen 의 늦은 성공 마커가 오는 failed→성공 쌍은 정상 경로다.
+   * ★Contract (FIX-6 correction)★: every requestReplay ends with **at least 1 replayBoundary event** or the connection
+   * drops (when dropped no marker is emitted — a connected re-transition restarts it). It is not "exactly 1": the failed→success pair, where a late success marker
+   * of the same gen follows a failure marker (deadline), is a normal path.
    */
   requestReplay(agentId: string): Promise<bigint>
 
   /**
-   * 셸 사용량 캐시 pull(TRD S21 usage-limit-slot §1-8) — 셸 커맨드라 명령 경로(ensureReady)를 타지 않고 데몬도
-   * 거치지 않는다. 계약은 [`AgentClient.getUsageSnapshot`] 그대로다(셸이 없는 carrier = `{socketEpoch: 0, snapshots: []}`).
+   * Shell usage cache pull (TRD S21 usage-limit-slot §1-8) — it is a shell command, so it does not take the command path (ensureReady) and does not
+   * go through the daemon. The contract is exactly [`AgentClient.getUsageSnapshot`] (a carrier with no shell = `{socketEpoch: 0, snapshots: []}`).
    */
   getUsageSnapshot(): Promise<UsageSnapshotPull>
 }

@@ -13,7 +13,7 @@ function flushFrame() {
   cbs.forEach(cb => cb(0))
 }
 
-// 타이머만 가짜로 — 기본 가짜는 `requestAnimationFrame` 도 갈아 위의 손 프레임(`flushFrame`)을 우회한다.
+// Fake only the timers — the default fake also swaps `requestAnimationFrame`, bypassing the manual frame (`flushFrame`) above.
 function useFakeTimeouts() {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
 }
@@ -101,7 +101,7 @@ describe('reportFirstPaint', () => {
     warn.mockRestore()
   })
 
-  // ── 채택 번호(TRD S21-slot-docking §3-9 I26) — 채택한 창의 셸 문은 그 번호를 실은 알림만 받는다 ──
+  // ── Adoption number (TRD S21-slot-docking §3-9 I26) — the shell door of the adopting window accepts only notices carrying that number ──
 
   it('이미 보낸 페이지도 새 채택 번호로 부르면 한 번 더 보내고 그 알림이 번호를 싣는다 · 같은 번호 · null 로는 더 보내지 않는다', () => {
     setVisibility('hidden')

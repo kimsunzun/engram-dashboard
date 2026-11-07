@@ -35,7 +35,7 @@ pub(super) fn split(
     }
 }
 
-// 반분 사슬 — 늘 b 쪽이 다음 단이다(`layout::dock` 시험과 같은 모양).
+// Halving chain — b is always the next level (same shape as the `layout::dock` tests).
 pub(super) fn half_chain(dir: SplitDir, depth: u128, base: u128) -> LayoutNode {
     let mut node = slot(base);
     for i in 1..=depth {
@@ -68,7 +68,7 @@ fn frame_of(frames: &[(Uuid, PxRect)], n: u128) -> PxRect {
         .1
 }
 
-// 창 안쪽 탭바(끌기 영역) = (0,0)–(600,28) · 캔버스 원점 = (0,28) → 캔버스 좌표의 탭바 구역 = (0,−43)–(600,15).
+// Tab bar inside the window (drag area) = (0,0)–(600,28) · canvas origin = (0,28) → tab bar zone in canvas coordinates = (0,−43)–(600,15).
 const ZONE: RectCss = RectCss {
     x0: 0.0,
     y0: -43.0,
@@ -90,7 +90,7 @@ fn targets<'a>(
     }
 }
 
-// 점에서 고른 띠 — (칸 번호 · 바깥이면 0, 변).
+// Band picked at a point — (area number · 0 if outside, side).
 fn picked(w: &WindowTargets, p: PointCss) -> Option<(u128, DockSide)> {
     let all = effective_bands(w);
     let near = bands_at(w, p);
@@ -103,9 +103,9 @@ fn picked(w: &WindowTargets, p: PointCss) -> Option<(u128, DockSide)> {
     })
 }
 
-// ── 탭바 구역 (R2 · C3) ───────────────────────────────────────────────────────
+// ── tab bar zone (R2 · C3) ────────────────────────────────────────────────────
 
-// 끌기 영역 = 첫 탭 왼쪽 4 부터 폭 500(`+` 는 그 오른쪽 · C3) · 탭바 줄 0..28.
+// Drag area = from 4 left of the first tab, width 500 (`+` is to its right · C3) · tab bar row 0..28.
 const AREA: RectCss = RectCss {
     x0: 4.0,
     y0: 0.0,
@@ -138,7 +138,7 @@ fn the_zone_is_half_open_on_both_axes() {
 
 #[test]
 fn the_zone_in_the_canvas_widens_to_whole_pixels() {
-    // 배율 125% 의 탭바 끝 28.125 → 구역 끝 43.125 · 캔버스 원점 28 → 캔버스 15.125 → 16.
+    // Tab bar end 28.125 at scale 125% → zone end 43.125 · canvas origin 28 → canvas 15.125 → 16.
     let zone = strip_zone(rect(0.0, 0.0, 600.5, 28.125));
     assert_eq!(
         zone_in_canvas(zone, pt(0.25, 28.0)),
@@ -146,7 +146,7 @@ fn the_zone_in_the_canvas_widens_to_whole_pixels() {
     );
 }
 
-// ── 띠 두께 (R3 · G5 · G19) ───────────────────────────────────────────────────
+// ── band thickness (R3 · G5 · G19) ────────────────────────────────────────────
 
 #[test]
 fn the_band_is_ten_percent_rounded_half_away_from_zero_over_a_12_px_floor() {
@@ -157,8 +157,8 @@ fn the_band_is_ten_percent_rounded_half_away_from_zero_over_a_12_px_floor() {
         (135, 14),   // 13.5
         (124, 12),
         (115, 12), // 11.5 → 12
-        (50, 12),  // AC39 — 5 보다 최소 두께
-        (8, 8),    // 칸이 최소 두께보다 좁으면 칸 전체
+        (50, 12),  // AC39 — minimum thickness instead of 5
+        (8, 8),    // If the area is narrower than the minimum thickness, the whole area
         (0, 0),
     ] {
         assert_eq!(band_thickness(len), want, "칸 길이 {len}");
@@ -188,8 +188,8 @@ fn each_slot_band_hugs_its_own_edge() {
 
 #[test]
 fn a_slot_on_the_canvas_edge_moves_its_band_inside_the_outer_band() {
-    // 칸 (0,272)–(882,544) · 캔버스 882 × 544 — 왼쪽 · 오른쪽 · 아래 변이 캔버스 변이다. 두께는 칸 틀 길이로
-    // 센다(좌우 88 · 위아래 27).
+    // Area (0,272)–(882,544) · canvas 882 × 544 — the left, right and bottom sides are canvas sides. Thickness is
+    // measured by the length of the area frame (left/right 88 · top/bottom 27).
     let canvas = CanvasPx { w: 882, h: 544 };
     let frame = px(0, 272, 882, 544);
     let all = SIDE_ORDER;
@@ -204,7 +204,7 @@ fn a_slot_on_the_canvas_edge_moves_its_band_inside_the_outer_band() {
         px(20, 272, 108, 524)
     );
     assert_eq!(slot_band(frame, room, DockSide::Top), px(20, 272, 862, 299));
-    // 바깥 띠가 막힌 변은 밀지 않는다(AC36) · 캔버스 변에 안 닿은 칸은 그대로.
+    // A side blocked by the outer band is not pushed (AC36) · an area that does not touch the canvas side stays as is.
     assert_eq!(
         band_frame(frame, canvas, &[DockSide::Left, DockSide::Right]),
         px(20, 272, 862, 544)
@@ -213,7 +213,7 @@ fn a_slot_on_the_canvas_edge_moves_its_band_inside_the_outer_band() {
         band_frame(px(100, 50, 700, 450), CANVAS, &all),
         px(100, 50, 700, 450)
     );
-    // 바깥 띠 몫 안에 다 드는 칸 = 빈 띠 틀 · 띠도 빈다.
+    // An area that fits entirely within the outer band's share = empty band frame · the band is empty too.
     let sliver = px(0, 0, 15, 544);
     let room = band_frame(sliver, canvas, &all);
     assert!(is_empty(&room), "{room:?}");
@@ -242,7 +242,7 @@ fn outer_strips_are_20_px_and_shrink_to_a_tiny_canvas() {
     );
 }
 
-// ── 사각형 빼기 ───────────────────────────────────────────────────────────────
+// ── rectangle subtraction ─────────────────────────────────────────────────────
 
 #[test]
 fn subtracting_keeps_exactly_the_uncovered_pixels() {
@@ -269,7 +269,7 @@ fn subtracting_keeps_exactly_the_uncovered_pixels() {
         subtract(px(5, 5, 5, 9), px(0, 0, 1, 1)).is_empty(),
         "빈 사각형"
     );
-    // 조각을 다시 모으면 r − cut 의 픽셀 수와 같다.
+    // Gathering the pieces again gives the same pixel count as r − cut.
     for cut in [px(0, 12, 40, 20), px(20, 0, 25, 100), px(12, 12, 13, 13)] {
         let area: u32 = subtract(r, cut)
             .iter()
@@ -281,7 +281,7 @@ fn subtracting_keeps_exactly_the_uncovered_pixels() {
     }
 }
 
-// ── 칸 찾기 ───────────────────────────────────────────────────────────────────
+// ── area lookup ───────────────────────────────────────────────────────────────
 
 #[test]
 fn frame_at_finds_the_slot_under_a_point_and_nothing_outside() {
@@ -301,7 +301,7 @@ fn frame_at_finds_the_slot_under_a_point_and_nothing_outside() {
 
 #[test]
 fn shared_slot_edges_belong_to_the_right_and_lower_slot() {
-    // 이웃 칸이 같은 정수 경계를 나눠 점 하나에 칸 하나다.
+    // Neighboring areas share the same integer boundary, so one point gives one area.
     let layout = split(
         100,
         SplitDir::LeftRight,
@@ -320,12 +320,12 @@ fn shared_slot_edges_belong_to_the_right_and_lower_slot() {
     assert_eq!(at(800.0, by - 0.001), Some(2));
 }
 
-// ── 고르기 — 좌우 반분 · 탭바 구역 있음 (R6a ①②③) ─────────────────────────────
+// ── picking — left/right halving · tab bar zone present (R6a ①②③) ─────────────
 
 #[test]
 fn picking_on_a_left_right_split_follows_the_band_order_and_half_open_edges() {
-    // 칸 1 = [0,600) · 칸 2 = [600,1200) — 좌우 띠 60 · 위아래 띠 80 · 바깥 띠 20 · 탭바 구역 = x<600 · y<15.
-    // 캔버스 변의 칸 띠는 바깥 띠 안쪽에 선다 — 칸 1 띠 틀 = (20,20)–(600,780) · 칸 2 = (600,20)–(1180,780).
+    // Area 1 = [0,600) · area 2 = [600,1200) — left/right bands 60 · top/bottom bands 80 · outer band 20 · tab bar zone = x<600 · y<15.
+    // An area band on a canvas side stands inside the outer band — area 1 band frame = (20,20)–(600,780) · area 2 = (600,20)–(1180,780).
     let layout = split(100, SplitDir::LeftRight, 0.5, slot(1), slot(2));
     let incoming = slot(9);
     let w = targets(&layout, &incoming, dip(400.0, 300.0));
@@ -429,8 +429,8 @@ fn picking_on_a_left_right_split_follows_the_band_order_and_half_open_edges() {
 
 #[test]
 fn a_point_on_an_area_is_chosen_there_and_only_there() {
-    // 영역 = 붙는 곳: 영역마다 그 안 픽셀 가운데를 짚으면 그 띠(모서리는 둘 중 정규화 거리)가 골리고, 영역 밖
-    // 점에서는 그 띠가 골리지 않는다.
+    // Region = where it attaches: pointing at the middle of any pixel in a region picks that band (at a corner, the one with the smaller
+    // normalized distance), and a point outside the region does not pick that band.
     let layout = split(
         100,
         SplitDir::LeftRight,
@@ -458,9 +458,9 @@ fn a_point_on_an_area_is_chosen_there_and_only_there() {
     }
 }
 
-// ── 칸 구역 선 (사용자 결정 2026-10-19) ───────────────────────────────────────
+// ── area zone lines (user decision 2026-10-19) ────────────────────────────────
 
-// 칸 `f` 의 `side` 변 구역 — 칸 변의 두 모서리와 가운데 `c` 의 같은 쪽 두 모서리.
+// Zone of the `side` side of area `f` — the two corners of the area's side and the two corners on the same side of the center `c`.
 fn side_zone(f: PxRect, c: RectCss, side: DockSide) -> [(f64, f64); 4] {
     let (x0, y0, x1, y1) = (
         f64::from(f.x0),
@@ -476,7 +476,7 @@ fn side_zone(f: PxRect, c: RectCss, side: DockSide) -> [(f64, f64); 4] {
     }
 }
 
-// 볼록 다각형 — 경계 포함 · 감는 방향 무관.
+// Convex polygon — boundary included · winding direction does not matter.
 fn convex_holds(poly: &[(f64, f64)], p: PointCss) -> bool {
     let cross: Vec<f64> = (0..poly.len())
         .map(|i| {
@@ -491,7 +491,7 @@ fn convex_holds(poly: &[(f64, f64)], p: PointCss) -> bool {
 fn the_centre_is_the_slot_less_its_band_thickness() {
     let frame = px(100, 50, 700, 450);
     assert_eq!(slot_centre(frame, frame), rect(160.0, 90.0, 640.0, 410.0));
-    // 캔버스 변에 닿은 칸 — 띠 틀(바깥 띠 안쪽)에서 칸 틀 길이로 센 두께(좌우 88 · 위아래 27)만큼.
+    // Area touching a canvas side — thickness measured from the band frame (inside the outer band) by the area frame length (left/right 88 · top/bottom 27).
     let frame = px(0, 272, 882, 544);
     assert_eq!(
         slot_centre(frame, px(20, 272, 862, 524)),
@@ -501,14 +501,14 @@ fn the_centre_is_the_slot_less_its_band_thickness() {
 
 #[test]
 fn a_narrow_slot_shrinks_its_centre_to_the_middle_line() {
-    // 폭 20 → 좌우 띠 12 가 겹친다 — 가운데 = x 20 선분 · 위아래는 같은 비(20 ÷ 24)만큼만 들어온다.
+    // Width 20 → the left and right bands of 12 overlap — the center = the line segment x 20 · top/bottom come in only by the same ratio (20 ÷ 24).
     let frame = px(10, 0, 30, 400);
     let c = slot_centre(frame, frame);
     assert_eq!((c.x0, c.x1), (20.0, 20.0));
     let inset = 40.0 * 20.0 / 24.0;
     assert!((c.y0 - inset).abs() < 1e-9, "{c:?}");
     assert!((c.y1 - (400.0 - inset)).abs() < 1e-9, "{c:?}");
-    // 칸이 최소 두께보다 좁으면(띠 = 칸 전체) 칸 가운데에서 만난다.
+    // If the area is narrower than the minimum thickness (band = whole area), they meet at the area center.
     let frame = px(10, 0, 18, 400);
     let c = slot_centre(frame, frame);
     assert_eq!((c.x0, c.x1, c.y0, c.y1), (14.0, 14.0, 20.0, 380.0));
@@ -516,9 +516,9 @@ fn a_narrow_slot_shrinks_its_centre_to_the_middle_line() {
 
 #[test]
 fn the_centre_diagonals_are_where_neighbouring_slot_bands_meet() {
-    // 칸 띠가 골린 점은 그 변의 사다리꼴(띠 틀 변 · 대각선 둘 · 가운데 변) 안이고, 어느 띠도 탭바 구역도 아닌 점은
-    // 가운데 안이다 — 둘째 배치의 폭 20 칸(가운데가 선분) · 셋째의 캔버스 아래 변 칸(위아래 띠 27) · 넷째의
-    // 캔버스 왼쪽 변 칸(폭 30 — 띠 틀 폭 10 · 좌우 띠가 띠 틀 전체) 포함.
+    // A point picked by an area band is inside the trapezoid of that side (band frame side · two diagonals · center side), and a point that is
+    // in no band and not in the tab bar zone is inside the center — including the width-20 area of the second layout (the center is a segment), the
+    // canvas bottom side area of the third (top/bottom bands 27) and the canvas left side area of the fourth (width 30 — band frame width 10 · the left/right bands are the whole band frame).
     let layouts = [
         split(
             100,
@@ -578,8 +578,8 @@ fn the_centre_diagonals_are_where_neighbouring_slot_bands_meet() {
 
 #[test]
 fn an_edge_slot_keeps_a_reachable_edge_band_inside_the_outer_band() {
-    // 캔버스 882 × 544 · 위아래 반분 [좌우 반분 (가 · 나), 다] — 「다」 = (0,272)–(882,544) · 위아래 띠 27. 아래 띠가
-    // 칸 틀 변에 붙으면 y 517..544 가 바깥 아래 띠(마지막 20)와 겹친다 — 띠 틀 안쪽(y 497..524)에 서서 남는다.
+    // Canvas 882 × 544 · top/bottom halving [left/right halving (A · B), C] — 「다」 (C) = (0,272)–(882,544) · top/bottom bands 27. If the bottom band
+    // attaches to the area frame side, y 517..544 overlaps the outer bottom band (the last 20) — it stands inside the band frame (y 497..524) and remains.
     let canvas = CanvasPx { w: 882, h: 544 };
     let layout = split(
         100,
@@ -636,14 +636,14 @@ fn an_edge_slot_keeps_a_reachable_edge_band_inside_the_outer_band() {
     );
     assert_eq!(pick(441.0, 496.9), None, "아래 띠 바로 위");
     assert_eq!(pick(441.0, 408.0), None, "「다」 가운데");
-    // 그린 가운데의 아래 변 = 아래 띠의 위 변.
+    // Bottom side of the drawn center = top side of the bottom band.
     let room = band_frame(px(0, 272, 882, 544), canvas, &outer_sides(&all));
     assert_eq!(slot_centre(px(0, 272, 882, 544), room).y1, 497.0);
 }
 
 #[test]
 fn zone_lines_follow_the_slot_under_the_point_and_hide_on_the_outer_band() {
-    // 좌우 반분 1200 × 800 — 칸 1 띠 틀 = 바깥 띠(20) 안쪽 (20,20)–(600,780) · 띠 두께 60 × 80.
+    // Left/right halving 1200 × 800 — area 1 band frame = inside the outer band (20) (20,20)–(600,780) · band thickness 60 × 80.
     let layout = split(100, SplitDir::LeftRight, 0.5, slot(1), slot(2));
     let incoming = slot(9);
     let w = targets(&layout, &incoming, dip(400.0, 300.0));
@@ -665,7 +665,7 @@ fn zone_lines_follow_the_slot_under_the_point_and_hide_on_the_outer_band() {
     );
     assert_eq!(zones(10.0, 400.0), None, "바깥 띠 — 레이아웃 틀만");
     assert_eq!(zones(1200.0, 400.0), None, "캔버스 밖");
-    // 점의 띠만 셈한 목록으로도 같다.
+    // The same holds with a list that counts only the point's bands.
     for (x, y) in [(300.0, 400.0), (900.0, 64.0), (10.0, 400.0)] {
         let p = pt(x, y);
         assert_eq!(slot_zones(&w, &bands_at(&w, p), p), zones(x, y), "{p:?}");
@@ -674,7 +674,7 @@ fn zone_lines_follow_the_slot_under_the_point_and_hide_on_the_outer_band() {
 
 #[test]
 fn in_a_single_slot_window_the_zone_lines_stand_inside_the_outer_band() {
-    // 칸 하나 = 캔버스 전체 — 칸 띠 좌우 120 · 위아래 80 · 띠 틀 (20,20)–(1180,780).
+    // One area = the whole canvas — area bands left/right 120 · top/bottom 80 · band frame (20,20)–(1180,780).
     let layout = slot(1);
     let incoming = slot(9);
     let w = targets(&layout, &incoming, dip(400.0, 300.0));
@@ -726,7 +726,7 @@ fn an_edge_slots_zone_lines_start_from_its_band_frame() {
 
 #[test]
 fn a_slot_with_no_band_left_draws_no_lines() {
-    // 끄는 배치가 대상과 칸 id 를 나눠 `docked_tree` 가 모든 변을 거절한다(R8 의 막힘과 같은 꼴을 결정적으로).
+    // The dragged layout shares the target's area id, so `docked_tree` rejects every side (the same shape as the R8 block, made deterministic).
     let layout = slot(1);
     let w = targets(&layout, &layout, dip(400.0, 300.0));
     let all = effective_bands(&w);
@@ -736,12 +736,12 @@ fn a_slot_with_no_band_left_draws_no_lines() {
     }
 }
 
-// ── 막힌 띠 · 유효 영역 (R8 · R6a · AC36 · AC39) ──────────────────────────────
+// ── blocked bands · effective region (R8 · R6a · AC36 · AC39) ─────────────────
 
 #[test]
 fn a_band_that_would_leave_a_zero_area_slot_is_not_there() {
-    // 끼울 탭 = 좌우 반분 사슬 53 단(단독으로는 전부 면적이 있다) — 좌우로 붙이면 1/3 폭에 눌려 깊은 칸이
-    // 무너지고 위아래로 붙이면 폭이 그대로라 선다.
+    // Tab to insert = left/right halving chain of 53 levels (every area has size on its own) — attaching left/right squeezes it into 1/3 width and the deep area
+    // collapses, while attaching top/bottom keeps the width, so it stands.
     let incoming = half_chain(SplitDir::LeftRight, 53, 30_000);
     assert!(layout_geometry::compute(&incoming)
         .slots
@@ -758,7 +758,7 @@ fn a_band_that_would_leave_a_zero_area_slot_is_not_there() {
         .collect();
     for anchor in [DockAnchor::Outer, DockAnchor::Slot(id(1))] {
         for side in SIDE_ORDER {
-            // 칸 하나 = 캔버스 전체라 바깥 · 칸 띠의 몫이 같다.
+            // One area = the whole canvas, so the outer band and the area band have the same share.
             let share = attach_share(w.original, side, px(0, 0, 1200, 800));
             let ok = docked_tree(&layout, anchor, side, &incoming, share).is_ok();
             assert_eq!(sides.contains(&(anchor, side)), ok, "{anchor:?} {side:?}");
@@ -769,7 +769,7 @@ fn a_band_that_would_leave_a_zero_area_slot_is_not_there() {
         "전제: 오른쪽은 막힘"
     );
     assert!(sides.contains(&(DockAnchor::Slot(id(1)), DockSide::Top)));
-    // 칸 오른쪽 띠 자리를 짚어도 고를 것이 없다 — 놓으면 새 창(R8 · AC15).
+    // Pointing at the area's right band position picks nothing — dropping opens a new window (R8 · AC15).
     assert_eq!(picked(&w, pt(1150.0, 400.0)), None);
 }
 
@@ -790,7 +790,7 @@ fn a_missing_anchor_slot_has_no_landing() {
 
 #[test]
 fn a_small_slot_still_gets_a_minimum_band_it_can_dock_to() {
-    // AC39 — 폭 50 칸: 좌우 띠 = 최소 두께 12 · 붙는 폭 = min(원래, 25).
+    // AC39 — width-50 area: left/right bands = minimum thickness 12 · attach width = min(original, 25).
     let layout = split(100, SplitDir::LeftRight, 1150.0 / 1200.0, slot(1), slot(2));
     let incoming = slot(9);
     let w = WindowTargets {
@@ -813,7 +813,7 @@ fn a_small_slot_still_gets_a_minimum_band_it_can_dock_to() {
 
 #[test]
 fn a_top_row_slot_gives_way_to_the_zone_then_the_outer_top_band() {
-    // AC36 — 맨 위 줄 칸 「가」(칸 1 · 높이 400 → 위 띠 40) 위로 올리며.
+    // AC36 — moving up over the top-row area 「가」 (area 1 · height 400 → top band 40).
     let layout = split(100, SplitDir::TopBottom, 0.5, slot(1), slot(2));
     let incoming = slot(9);
     let w = targets(&layout, &incoming, dip(300.0, 300.0));
@@ -848,7 +848,7 @@ fn a_top_row_slot_gives_way_to_the_zone_then_the_outer_top_band() {
 
 #[test]
 fn a_low_top_row_slot_keeps_its_top_band_just_inside_the_outer_band() {
-    // 「가」 높이 100 → 위 띠 12 — 칸 틀 변에 붙으면 바깥 위 띠(20)에 다 덮이지만 그 아래(y 20..32)에 선다.
+    // 「가」 height 100 → top band 12 — attached to the area frame side it would be fully covered by the outer top band (20), but it stands below that (y 20..32).
     let layout = split(100, SplitDir::TopBottom, 0.125, slot(1), slot(2));
     let incoming = slot(9);
     let w = targets(&layout, &incoming, dip(300.0, 300.0));
@@ -863,7 +863,7 @@ fn a_low_top_row_slot_keeps_its_top_band_just_inside_the_outer_band() {
     assert_eq!(picked(&w, pt(900.0, 32.0)), None);
 }
 
-// AC36 마지막의 배치 — 레이아웃 전체 위에 붙이면 아래 반쪽의 깊은 사슬이 무너진다(바깥 위 띠가 막힘). 골든도 쓴다.
+// Layout for the end of AC36 — attaching above the whole layout collapses the deep chain of the bottom half (the outer top band is blocked). Also uses the golden.
 pub(super) fn blocked_outer_top_layout(incoming: &LayoutNode, original: SizeCss) -> LayoutNode {
     let share = attach_share(original, DockSide::Top, px(0, 0, 1200, 800));
     (40..120)
@@ -883,7 +883,7 @@ pub(super) fn blocked_outer_top_layout(incoming: &LayoutNode, original: SizeCss)
 
 #[test]
 fn a_blocked_outer_top_band_does_not_cover_the_slot_band_beneath() {
-    // AC36 마지막 — 그래도 「가」 위 띠는 탭바 구역 바로 아래부터 유효하고 골린다.
+    // End of AC36 — still, the top band of 「가」 is effective from just below the tab bar zone and gets picked.
     let incoming = slot(9);
     let original = dip(300.0, 300.0);
     let layout = blocked_outer_top_layout(&incoming, original);
@@ -906,7 +906,7 @@ fn a_blocked_outer_top_band_does_not_cover_the_slot_band_beneath() {
     );
 }
 
-// ── 미리보기 = 놓은 결과 (R4 · R7) ─────────────────────────────────────────────
+// ── preview = result of the drop (R4 · R7) ────────────────────────────────────
 
 #[test]
 fn the_landing_is_exactly_where_the_incoming_tab_will_be_drawn() {
@@ -943,7 +943,7 @@ fn the_landing_is_exactly_where_the_incoming_tab_will_be_drawn() {
                     l.y1.max(r.y1),
                 );
                 assert_eq!(b.landing, drawn, "{ctx}");
-                // 나누는 방향 길이 ≈ min(원래, 칸 절반)(±1 px — 정규화 경계의 반올림).
+                // Length in the splitting direction ≈ min(original, half the area)(±1 px — rounding of the normalized boundary).
                 let target = match b.anchor {
                     DockAnchor::Outer => px(0, 0, canvas.w, canvas.h),
                     DockAnchor::Slot(s) => frame_of(&frames(&layout, canvas), s.as_u128()),
@@ -1007,9 +1007,9 @@ fn ac44_the_outer_top_landing_is_the_original_height_capped_at_half() {
     }
 }
 
-// ── 붙는 몫 (R7 · AC2 · AC39 · AC44) ──────────────────────────────────────────
+// ── attach share (R7 · AC2 · AC39 · AC44) ─────────────────────────────────────
 
-// 몫 × 칸 길이 = 붙는 길이(px). 반올림은 실제 칸 경계가 하므로 여기서는 셈 값 그대로 본다.
+// Share × area length = attach length (px). The real area boundary does the rounding, so the computed value is checked as is here.
 fn attached_len(original: SizeCss, side: DockSide, target: PxRect) -> f64 {
     let t = match side {
         DockSide::Left | DockSide::Right => target.x1 - target.x0,
@@ -1138,7 +1138,7 @@ fn the_share_is_finite_and_in_range_for_every_input() {
         px(0, 0, 2, 3),
         px(5, 7, 605, 407),
         px(0, 0, u32::MAX, u32::MAX),
-        px(9, 9, 3, 3), // 뒤집힌 사각형 — 길이 0 으로 읽는다
+        px(9, 9, 3, 3), // Inverted rectangle — read as length 0
     ];
     for l in lengths {
         for t in targets {
@@ -1188,10 +1188,10 @@ fn edge_inputs_go_to_the_documented_ends() {
     );
 }
 
-// ── 상수 내보내기 (TRD §4-5 · §8-1 ⑪) ─────────────────────────────────────────
+// ── constant export (TRD §4-5 · §8-1 ⑪) ───────────────────────────────────────
 
-/// 생성물 `DockConstants.ts` 의 값 묶음 — 키 = Rust 상수 이름 · 차례 = 선언 차례(serde 가 지킨다). 골든 머리
-/// `_constants` 도 이 묶음이다.
+/// Value bundle of the generated `DockConstants.ts` — key = Rust constant name · order = declaration order (serde keeps it). The golden header
+/// `_constants` is this bundle too.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub(super) struct DockConstantsValues {
@@ -1234,8 +1234,8 @@ fn render_dock_constants() -> String {
     )
 }
 
-// 이름이 `export_bindings_` 로 시작해야 한다 — ts-rs 내보내기와 같은 무리로 셸 `lib_unit` 이 돌 때마다 다시 쓰고, CI
-// 생성물 동기 게이트가 커밋본과의 어긋남을 잡는다. ts-rs `TS` derive 로 내보내지 않는 것은 값(`as const`)이 필요해서다.
+// The name must start with `export_bindings_` — in the same group as the ts-rs export, it rewrites the file every time the shell `lib_unit` runs, and the CI
+// generated-output sync gate catches any mismatch with the committed copy. It is not exported with the ts-rs `TS` derive because a value (`as const`) is needed.
 #[test]
 fn export_bindings_dock_constants() {
     let path = dock_constants_path();
@@ -1243,8 +1243,8 @@ fn export_bindings_dock_constants() {
     assert_eq!(text, render_dock_constants(), "두 번 뜨면 같은 바이트");
     std::fs::write(&path, &text).expect("DockConstants.ts 쓰기");
     let written = std::fs::read_to_string(&path).expect("DockConstants.ts 읽기");
-    // 같은 경로를 다른 내보내기(ts-rs 의 `DockConstants` 타입 등)가 덮어쓰면 여기 서명이 깨진다 — 병렬 시험과의 경주가
-    // 있어 늘 잡히지는 않는다(진짜 그물 = CI 생성물 동기 게이트).
+    // If another export (such as the ts-rs `DockConstants` type) overwrites the same path, the signature here breaks — there is a race with parallel tests,
+    // so it is not always caught (the real safety net = the CI generated-output sync gate).
     assert!(
         written.contains("export const DOCK_CONSTANTS")
             && written.contains("typeof DOCK_CONSTANTS"),
@@ -1266,12 +1266,12 @@ fn export_bindings_dock_constants() {
     assert_eq!(read["SIDE_ORDER"][0], "Left");
 }
 
-// NTFS 는 대소문자를 가리지 않고 이 저장소는 `core.ignorecase=true` 이며 CI 러너도 Windows 다 — 대소문자만 다른 생성물
-// 둘은 서로를 덮어쓴다(TRD §4-5 규칙). 디렉터리를 읽어 견주면 겹친 둘이 이미 한 파일이라 늘 통과하므로 git 색인을 본다.
-// `--others` 는 아직 커밋하지 않은 새 생성물도 넣으려는 것이다.
+// NTFS is case-insensitive, this repository has `core.ignorecase=true` and the CI runner is Windows too — two generated files that differ only in case
+// overwrite each other (TRD §4-5 rule). Reading the directory and comparing would always pass, since the overlapping two are already one file, so we look at the git index.
+// `--others` is there to include new generated files that are not committed yet.
 #[test]
 fn generated_bindings_never_differ_only_by_case() {
-    // 셸 시험의 cwd 는 `src-tauri/` 라 경로는 그 기준(`bindings`)이다 — `src-tauri/bindings` 는 빈 목록이 된다.
+    // The shell test's cwd is `src-tauri/`, so the path is relative to that (`bindings`) — `src-tauri/bindings` would become an empty list.
     let out = Command::new("git")
         .arg("-C")
         .arg(env!("CARGO_MANIFEST_DIR"))

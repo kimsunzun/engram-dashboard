@@ -1,25 +1,25 @@
-//! 웹뷰 환경 — 이 셸 프로세스의 WebView 창이 쓰는 데이터 폴더와 브라우저 인자([`WebviewEnv`]) (TRD S21-storage §4).
+//! Webview environment — the data folder and browser arguments ([`WebviewEnv`]) that the WebView windows of this shell process use (TRD S21-storage §4).
 //!
-//! - ★같은 데이터 폴더의 창은 환경 옵션이 같아야 한다★ — 어긴 창은 `build()` 가 `Ok` 인데 OS 창이 안 생긴다
-//!   (ADR-0054 의 유령 창). 그래서 창을 만드는 코드는 전부 [`WebviewEnv::finish`] 를 지나고, 그 값은 셸에 하나인
-//!   인스턴스에서 나온다. 설정이 선언한 창(main)도 예외가 아니다 — Tauri 가 만들지 않게 두고
-//!   (`tauri.conf.json` 의 `"create": false`) 부팅 단계 ⑧ 이 `from_config` 로 만들어 이 마무리에 넘긴다
+//! - ★Windows with the same data folder must have the same environment options★ — a window that violates this gets `Ok` from `build()` but no OS window appears
+//!   (the ghost window of ADR-0054). So all code that creates windows passes through [`WebviewEnv::finish`], and that value comes from the
+//!   one-per-shell instance. The window the config declares (main) is no exception — Tauri is left not to create it
+//!   (`"create": false` in `tauri.conf.json`) and boot step 8 creates it with `from_config` and hands it to this finishing step
 //!   (`state::placement`).
-//! - ★환경 옵션 넷(폴더 · 브라우저 인자 · 확장 · 스크롤바 모양)을 마무리가 정한다★ — wry 0.55.1 `webview2` 의
-//!   `create_environment` 가 환경에 싣는 것이 이 넷이다. 셋은 늘 같은 값으로 박는다. 폴더만 빌더가 지우지 못해,
-//!   기본 폴더로 물러날 때 설정 창 선언이 적은 `dataDirectory` 가 남는다 — 그래서 이 모듈 시험이 설정을 본다.
-//! - ★폴더는 프로세스당 한 번 정한다★ — `<데이터 루트>\webview` 에 쓸 수 있으면 그 폴더, 못 쓰면 폴더를 넘기지 않아
-//!   Tauri 기본 폴더(`LocalData/<identifier>`)로 물러나고 warn 한다(멈추지 않는다 — TRD §6 D8). 창마다 다시 묻지
-//!   않는다: 창 사이에 답이 바뀌면 한 프로세스의 창들이 다른 폴더를 받는다. 데이터 루트 전체를 못 쓰는 경우의 사유는
-//!   창이 뜬 뒤 데몬 연결 실패로 창 안에 보인다(ADR-0134 결정 4 · ADR-0135).
-//! - ★확인하는 폴더와 넘기는 폴더는 같은 절대 경로다★ — 데이터 루트는 상대 경로일 수 있다(`ENGRAM_DATA_DIR` 을 그대로
-//!   쓴다). WebView2 가 상대 경로를 무엇에 대어 푸는지는 확인하지 않았다 — 상대 경로를 넘기면 확인한 폴더와 쓰는
-//!   폴더가 갈릴 수 있다.
-//! - ★창 바탕과 첫 테마([`Backdrop`])도 마무리가 붙인다★ — 환경 옵션이 아니라 창마다 다른 값(그 창의 유효 테마)이지만,
-//!   창을 만드는 코드가 모두 여기를 지나므로 인자로 받아 빠짐없이 붙인다.
-//! - ★OS 틀(제목 표시줄 · 단추)도 마무리가 걷는다★ — 앱이 제목 줄 · 창 단추를 그리는 OS(platform
-//!   `window::caption_style` 의 `drawn_buttons`)면 `decorations(false)` · `shadow(true)` 다(TRD S26-window-chrome §8-1).
-//!   창마다 따로 걷지 않고 한 곳이다 — `tauri.conf.json` 의 창 선언에도 적지 않는다(이 모듈 시험이 설정을 본다).
+//! - ★The finishing step decides the four environment options (folder · browser arguments · extensions · scrollbar style)★ — these four are what
+//!   `create_environment` of wry 0.55.1 `webview2` puts into the environment. Three are always pinned to the same values. Only the folder cannot be cleared by the builder,
+//!   so when it falls back to the default folder, the `dataDirectory` written by the config window declaration remains — so this module's test looks at the config.
+//! - ★The folder is decided once per process★ — if `<데이터 루트>\webview` is writable that folder, and if not no folder is passed,
+//!   falling back to Tauri's default folder (`LocalData/<identifier>`) with a warn (it does not stop — TRD §6 D8). It is not asked again per window:
+//!   if the answer changed between windows, the windows of one process would get different folders. The reason when the whole data root is unusable
+//!   shows inside the window after it comes up, as a daemon connection failure (ADR-0134 decision 4 · ADR-0135).
+//! - ★The folder that is checked and the folder that is passed are the same absolute path★ — the data root may be a relative path (`ENGRAM_DATA_DIR` is
+//!   used as is). What WebView2 resolves a relative path against was not checked — if a relative path is passed, the checked folder and the
+//!   folder in use may diverge.
+//! - ★The window background and first theme ([`Backdrop`]) are also attached by the finishing step★ — it is not an environment option but a value that differs per window (that window's effective theme),
+//!   but since all code that creates windows passes through here, it is taken as an argument and attached without omission.
+//! - ★The OS frame (title bar · buttons) is also lifted by the finishing step★ — on an OS where the app draws the title bar · window buttons (platform
+//!   `drawn_buttons` of `window::caption_style`) it is `decorations(false)` · `shadow(true)` (TRD S26-window-chrome §8-1).
+//!   It is in one place, not lifted per window — and it is not written in the window declaration of `tauri.conf.json` either (this module's test looks at the config).
 // ADR-0054
 
 use std::path::{Path, PathBuf};
@@ -33,33 +33,33 @@ use tauri::{Manager, Runtime, WebviewWindow, WebviewWindowBuilder};
 use crate::discovery::DataLayout;
 use crate::theme::{EffectiveThemes, UiTheme, DEFAULT_THEME};
 
-/// WebView2 브라우저 인자 — 이 값이 유일한 출처다. 설정 창도 이 값을 받으므로 `tauri.conf.json` 에는 적지 않는다
-/// (적으면 이 모듈 시험이 걸린다 — 설정 JSON 은 주석을 못 달아 사유를 여기 둔다).
+/// The WebView2 browser arguments — this value is the only source. The config window also receives this value, so it is not written in `tauri.conf.json`
+/// (if written, this module's test catches it — config JSON cannot carry comments, so the reason is put here).
 ///
-/// ★wry 기본값(`msSmartScreenProtection` 까지 끄는 것)으로 바꾸지 말 것★ — 불변식은 「표준값」이 아니라 「같은 폴더
-/// 안에서 서로 같다」이다(ADR-0054 거부한 대안).
+/// ★Do not change it to the wry default (which even turns off `msSmartScreenProtection`)★ — the invariant is not 「표준값」 (the standard value) but 「같은 폴더
+/// 안에서 서로 같다」 (the same among themselves within the same folder) (the alternative ADR-0054 rejected).
 pub(crate) const WEBVIEW2_BROWSER_ARGS: &str =
     "--disable-features=msWebOOUI,msPdfOOUI --autoplay-policy=no-user-gesture-required";
 
 type WriteCheck = fn(&Path) -> Result<(), String>;
 
-/// 창을 만들 때 칠하는 창 · 웹뷰 바탕과 페이지의 첫 테마 — 셸이 정한 테마가 IPC 로 닿기 전에 보이는 것이다. 창 바탕은
-/// 창을 보일 때 지우는 색이고(`crate::first_paint` — 창은 첫 화면 뒤에 보이지만 시한으로 먼저 보일 수 있다), 웹뷰 바탕을
-/// 칠하지 않으면 페이지가 칠해지기 전에 WebView2 기본 흰 바탕이 비친다. 첫 테마를 박지 않으면 페이지가 dark 기본값으로
-/// 한 번 그려진다(`src/theme/bootTheme.ts`).
+/// The window · webview background and the page's first theme painted when creating a window — what is seen before the theme the shell decided arrives over IPC. The window background is
+/// a color erased when the window is shown (`crate::first_paint` — the window is shown after first paint, but may be shown earlier by the time limit), and if the webview background is
+/// not painted, WebView2's default white background shows through before the page is painted. If the first theme is not embedded, the page is drawn once with the dark default
+/// (`src/theme/bootTheme.ts`).
 ///
-/// 투명 창을 새로 지을 땐 칠하지 않는 갈래를 되살린다 — 칠하면 tauri-runtime-wry 2.11.3 이 투명 창의 바닥을 그 색으로
-/// 채워(`window/windows.rs` 의 `draw_surface` — 알파를 버린다) 창이 불투명해진다(소스 독해).
+/// When newly building a transparent window, revive the branch that does not paint — if painted, tauri-runtime-wry 2.11.3 fills the bottom of a transparent window with that color
+/// (`draw_surface` in `window/windows.rs` — it discards alpha) and the window becomes opaque (source reading).
 pub(crate) enum Backdrop {
-    /// 그 테마의 페이지 바탕색([`UiTheme::page_background`])을 칠하고, 페이지 스크립트보다 먼저 도는 초기화
-    /// 스크립트로 `data-theme` 를 박는다 — 그 창 `label` 이 이 웹뷰에서 마지막으로 칠한 테마([`THEME_MEMORY_PREFIX`])가
-    /// 있으면 그 값, 없으면 `theme`.
+    /// Paint that theme's page background color ([`UiTheme::page_background`]) and embed `data-theme` with an initialization
+    /// script that runs before the page script — if the theme that window `label` last painted in this webview ([`THEME_MEMORY_PREFIX`]) exists
+    /// use that value, otherwise `theme`.
     Theme { label: String, theme: UiTheme },
 }
 
 impl Backdrop {
-    /// 그 창의 유효 테마로 칠한다 — 아직 모델에 없는 창은 미리 정한 그 창의 테마(`EffectiveThemes::stage`), 없으면
-    /// 전역 테마다. 테마 상태가 없으면 기본 테마다(셸은 빌더에서 등록해 닿지 않는다).
+    /// Paint with that window's effective theme — for a window not yet in the model it is the window's theme decided in advance (`EffectiveThemes::stage`), and if none,
+    /// the global theme. If there is no theme state it is the default theme (the shell registers it in the builder so this is never reached).
     pub(crate) fn for_window<R: Runtime, M: Manager<R>>(manager: &M, label: &str) -> Self {
         let theme = manager
             .try_state::<Arc<EffectiveThemes>>()
@@ -71,25 +71,25 @@ impl Backdrop {
     }
 }
 
-/// 창이 마지막으로 칠한 테마를 그 웹뷰의 `sessionStorage` 에 적는 키의 머리 — 뒤에 창 label 이 붙는다. 프론트가
-/// 테마를 붙일 때마다 적고(`src/theme/themeMemory.ts`) 초기화 스크립트가 다시 읽기(F5 · HMR 전체 새로고침) 때 먼저
-/// 읽는다 — 그 스크립트는 창을 만들 때의 테마로 굳어 있어, 그 뒤 테마가 바뀐 창을 다시 읽으면 옛 테마로 한 번 그려진다.
+/// The head of the key under which the theme a window last painted is written into that webview's `sessionStorage` — the window label is appended. The frontend
+/// writes it whenever it attaches a theme (`src/theme/themeMemory.ts`), and the initialization script reads it first on a reload (F5 · HMR full reload)
+/// — that script is frozen to the theme at window creation, so reloading a window whose theme changed afterward would draw once with the old theme.
 ///
-/// ★`src/theme/themeMemory.ts` 의 `THEME_KEY_PREFIX` 와 같은 철자여야 한다★ — 어긋나면 오류 없이 기억을 못 찾는다
-/// (이 모듈 시험이 그 파일을 읽어 맞댄다). ★`localStorage` 로 바꾸지 말 것★ — 실행을 넘어 남는데 팝아웃 label 은
-/// 실행마다 새로 나므로(실행 표식 · 실행 안 순번은 다시 쓰지 않는다 — `commands::popout::popup_label`) 팝아웃 하나에
-/// 키 하나씩 영영 쌓인다. 다음 실행이 같은 label 을 받을 확률은 약 2⁻³² 라 남의 테마를 물려받는 것은 까닭이 아니다.
-/// `sessionStorage` 는 HTML 표준상 최상위 브라우징 컨텍스트마다 따로이고 다시 읽기를 넘어 산다 — WebView2 의 새 창이
-/// 빈 저장소로 시작하는지는 실측하지 않았다(아니어도 label 이 실행 안에서 다시 쓰이지 않아 새 창이 남의 키를 읽지는
-/// 않는다).
+/// ★It must have the same spelling as `THEME_KEY_PREFIX` of `src/theme/themeMemory.ts`★ — if they diverge, memory is not found without an error
+/// (this module's test reads that file and puts them side by side). ★Do not change it to `localStorage`★ — it persists across runs, but popout labels are
+/// new each run (the run marker · the in-run sequence number is not reused — `commands::popout::popup_label`), so one
+/// key per popout would pile up forever. The chance that the next run gets the same label is about 2⁻³², so inheriting someone else's theme is not a reason.
+/// `sessionStorage` is separate per top-level browsing context by the HTML standard and survives reloads — whether a new WebView2 window
+/// starts with an empty storage was not measured (even if not, labels are not reused within a run, so a new window does not
+/// read someone else's key).
 pub(crate) const THEME_MEMORY_PREFIX: &str = "engram.theme.";
 
-/// 떠 있는 창의 바탕을 그 테마로 다시 칠한다 — 테마를 밀 때 창마다 부른다(`commands::settings`).
+/// Repaint the background of a window that is up with that theme — called per window when pushing the theme (`commands::settings`).
 ///
-/// tao 0.35.3 쪽 칠하기는 색을 적고 다시 그리기만 한다(`InvalidateRect` + `UpdateWindow`) — 창 깃발을 건드리지 않아, 숨긴 채
-/// 기다리는 창(예비 창 — `commands::spare`)에 불러도 그 창이 보이지 않는다(소스 독해).
+/// Painting on the tao 0.35.3 side only writes the color and redraws (`InvalidateRect` + `UpdateWindow`) — it does not touch window flags, so even calling it on a window waiting
+/// hidden (a spare window — `commands::spare`) does not make that window visible (source reading).
 pub(crate) fn repaint<R: Runtime>(window: &WebviewWindow<R>, theme: UiTheme) {
-    // 바탕은 페이지가 덮기 전에만 보이는 색이라 배달(테마 알림)을 실패로 만들 사유가 아니다 — 로그로만 남긴다.
+    // The background is a color seen only before the page covers it, so it is no reason to make delivery (the theme notification) a failure — it is only left in the log.
     if let Err(e) = window.set_background_color(Some(color(theme))) {
         tracing::debug!(
             module = "webview_env",
@@ -104,11 +104,11 @@ fn color(theme: UiTheme) -> Color {
     Color(r, g, b, 255)
 }
 
-// 초기화 스크립트는 다시 읽기마다 다시 돈다 — 기억한 테마(`THEME_MEMORY_PREFIX`)가 세 철자 중 하나면 그 값, 아니면(첫
-//   읽기 · 저장소를 못 읽음) 창을 만들 때의 테마를 박는다.
-// 키는 JSON 문자열로 넣는다 — label 은 셸이 짓지만 따옴표 · 역슬래시가 섞여도 스크립트가 깨지지 않게.
-// 문서가 막 생긴 때 `document.documentElement` 가 이미 있는지는 WebView2 에서 확인하지 않았다 — 없으면 뿌리 요소가 붙는
-//   순간(관찰자 콜백 = 마이크로태스크라 페이지 스크립트 · 첫 페인트보다 앞) 박는다.
+// The initialization script runs again on every reload — if the remembered theme (`THEME_MEMORY_PREFIX`) is one of the three spellings, that value, otherwise (first
+//   load · storage unreadable) it embeds the theme at window creation.
+// The key is put in as a JSON string — the label is made by the shell, but so the script does not break even if quotes · backslashes are mixed in.
+// Whether `document.documentElement` already exists at the moment the document is born was not checked in WebView2 — if not, it embeds when the root element
+//   attaches (observer callback = a microtask, so earlier than page scripts · first paint).
 fn theme_script(label: &str, theme: UiTheme) -> String {
     let key = serde_json::Value::from(format!("{THEME_MEMORY_PREFIX}{label}"));
     let names = serde_json::Value::from(UiTheme::ALL.map(UiTheme::as_wire).to_vec());
@@ -121,9 +121,9 @@ fn theme_script(label: &str, theme: UiTheme) -> String {
     )
 }
 
-/// 이 프로세스의 웹뷰 환경 — 셸에 하나다(`Arc` 로 나눠 쥔다 · 빌더에서 manage).
+/// The webview environment of this process — one per shell (shared with `Arc` · managed in the builder).
 ///
-/// ★`Clone` 을 달지 말 것★ — 결정 칸이 둘로 갈리면 사본마다 따로 정해 창마다 다른 폴더를 받을 수 있다.
+/// ★Do not attach `Clone`★ — if the decision field splits into two, each copy decides separately and windows may receive different folders.
 pub(crate) struct WebviewEnv {
     dir: PathBuf,
     check: WriteCheck,
@@ -143,20 +143,20 @@ impl WebviewEnv {
         }
     }
 
-    /// 창에 넘길 데이터 폴더(절대 경로) — `None` = 넘기지 않는다(Tauri 기본 폴더). 처음 부를 때 쓰기 확인을 한 번 하고,
-    /// 그 뒤로는 같은 답을 돌려준다(동시에 불려도 확인은 한 번이다).
+    /// The data folder to pass to windows (absolute path) — `None` = do not pass (Tauri's default folder). On the first call it does a write check once,
+    /// and after that returns the same answer (even if called concurrently, the check happens once).
     pub(crate) fn chosen_dir(&self) -> Option<&Path> {
         self.chosen
             .get_or_init(|| choose(&self.dir, self.check))
             .as_deref()
     }
 
-    /// 창 빌더에 웹뷰 환경 옵션(폴더 · 브라우저 인자 · 확장 · 스크롤바 모양)과 바탕 · 첫 테마(`backdrop`)를 붙이고 드롭
-    /// 처리기를 끈다 — 창을 만드는 모든 코드가 `build()` 앞에서 지난다. 앱이 창 단추를 그리는 OS 면 OS 틀을 걷고 그림자를
-    /// 남긴다(모듈 머리). 앞서 빌더에 붙은 값(설정 창이 `from_config` 로 받은 것 포함)은 덮는다 — 폴더는 예외다(물러날 때
-    /// 붙이지 않는다). 초기화 스크립트는 덮지 않고 앞서 붙은 것 뒤에 더한다.
+    /// Attach the webview environment options (folder · browser arguments · extensions · scrollbar style) and the background · first theme (`backdrop`) to the window builder and turn off the drop
+    /// handler — all code that creates windows passes through before `build()`. On an OS where the app draws window buttons, lift the OS frame and
+    /// keep the shadow (module header). Values attached earlier to the builder (including what the config window received with `from_config`) are overwritten — the folder is the exception (it is not
+    /// attached on fallback). The initialization script is not overwritten and is added after what was attached earlier.
     ///
-    /// 폴더는 OS 를 가리지 않고 넘긴다 — 그 값을 쓰느냐는 Tauri 의 플랫폼 구현 몫이다(CLAUDE.md 「플랫폼 중립」).
+    /// The folder is passed regardless of OS — whether that value is used is up to Tauri's platform implementation (CLAUDE.md 「플랫폼 중립」).
     pub(crate) fn finish<'a, R: Runtime, M: Manager<R>>(
         &self,
         builder: WebviewWindowBuilder<'a, R, M>,
@@ -166,7 +166,7 @@ impl WebviewEnv {
     }
 }
 
-// 마무리가 붙이는 것 — 실 빌더는 붙인 값을 읽을 길이 없어 시험이 가짜 빌더로 무엇을 붙였나 본다.
+// What the finishing step attaches — a real builder has no way to read back what was attached, so the test uses a fake builder to see what was attached.
 trait EnvOptions: Sized {
     fn browser_args(self, args: &str) -> Self;
     fn extensions(self, enabled: bool) -> Self;
@@ -200,12 +200,12 @@ impl<'a, R: Runtime, M: Manager<R>> EnvOptions for WebviewWindowBuilder<'a, R, M
         self.data_directory(dir)
     }
 
-    // 창 층(tao)과 웹뷰 층(WebView2 `DefaultBackgroundColor`)을 함께 칠한다.
+    // Paint both the window layer (tao) and the webview layer (WebView2 `DefaultBackgroundColor`).
     fn background(self, color: Color) -> Self {
         self.background_color(color)
     }
 
-    // 주 프레임에만 돈다(tauri 2.11.3 — 하위 프레임까지는 `initialization_script_for_all_frames`).
+    // Runs only in the main frame (tauri 2.11.3 — for sub-frames too it is `initialization_script_for_all_frames`).
     fn init_script(self, script: String) -> Self {
         self.initialization_script(script)
     }
@@ -214,8 +214,8 @@ impl<'a, R: Runtime, M: Manager<R>> EnvOptions for WebviewWindowBuilder<'a, R, M
         self.decorations(on)
     }
 
-    // 테두리 없는 창에 그림자 · 둥근 모서리 · 1 px 테두리를 남긴다(Windows 11 — 모양은 QA S10). tao 는 이 창의 둘레에 크기
-    //   조절용 보이지 않는 테두리를 둔다(tao 0.35.3 `WM_NCCALCSIZE` · `calculate_insets_for_dpi`).
+    // Keep the shadow · rounded corners · 1 px border on a borderless window (Windows 11 — the look is QA S10). tao puts an invisible border for resizing
+    //   around this window (tao 0.35.3 `WM_NCCALCSIZE` · `calculate_insets_for_dpi`).
     fn shadowed(self, on: bool) -> Self {
         self.shadow(on)
     }
@@ -231,12 +231,12 @@ fn attach<B: EnvOptions>(
         .browser_args(WEBVIEW2_BROWSER_ARGS)
         .extensions(false)
         .scroll_bars(ScrollBarStyle::Default)
-        // 켜 두면 wry 가 웹뷰 자식 창의 드롭 대상(`IDropTarget`)을 자기 것으로 갈아 끼우고 웹뷰 것에 넘기지 않아(wry
-        //   0.55.1 `src/webview2/drag_drop.rs`) 문서 안 HTML5 끌어 놓기가 통째로 죽는다 — 에이전트 트리 옮기기
-        //   (react-arborist 의 react-dnd HTML5 백엔드)와 입력창에 글자 끌어 놓기가 그 사건으로 돈다. 잃는 것은 Tauri 의
-        //   파일 끌어 놓기 사건뿐이고 쓰는 곳이 없다. 대가로 바깥 파일 · URL 놓기를 웹뷰가 받아 그리로 탐색하므로
-        //   `fileDropGuard.ts` 가 그 놓기를 막는다.
-        // TRD S21-slot-docking 6.3판 §14 G8
+        // If left on, wry replaces the webview child window's drop target (`IDropTarget`) with its own and does not pass it on to the webview's (wry
+        //   0.55.1 `src/webview2/drag_drop.rs`), so HTML5 drag and drop inside the document dies entirely — the agent-tree move
+        //   (react-dnd HTML5 backend of react-arborist) and dragging text into the input box run on that event. All that is lost is Tauri's
+        //   file drag-and-drop event, and nothing uses it. In exchange, the webview receives drops of outside files · URLs and navigates there, so
+        //   `fileDropGuard.ts` blocks those drops.
+        // TRD S21-slot-docking edition 6.3 §14 G8
         .no_drop_handler();
     let builder = match dir {
         Some(dir) => builder.data_dir(dir.to_path_buf()),
@@ -246,8 +246,8 @@ fn attach<B: EnvOptions>(
     let builder = builder
         .background(color(theme))
         .init_script(theme_script(&label, theme));
-    // 앱이 단추를 그리지 않는 OS(macOS 몫 — 지금 없다)는 OS 틀을 그대로 둔다(TRD S26-window-chrome §7-11).
-    // ADR-0303 — 크롬식 제목 표시줄
+    // An OS where the app does not draw buttons (macOS's share — none for now) leaves the OS frame as is (TRD S26-window-chrome §7-11).
+    // ADR-0303 — Chrome-style title bar
     if caption.drawn_buttons {
         builder.decorated(false).shadowed(true)
     } else {
@@ -255,7 +255,7 @@ fn attach<B: EnvOptions>(
     }
 }
 
-// 절대 경로로 바꾼 뒤 확인한다(모듈 머리) — 바꾸지 못하면 못 쓰는 폴더와 같이 물러난다.
+// Check after converting to an absolute path (module header) — if it cannot be converted, it falls back the same as an unusable folder.
 fn choose(dir: &Path, check: impl FnOnce(&Path) -> Result<(), String>) -> Option<PathBuf> {
     let (dir, checked) = match std::path::absolute(dir) {
         Ok(absolute) => {
@@ -285,13 +285,13 @@ fn choose(dir: &Path, check: impl FnOnce(&Path) -> Result<(), String>) -> Option
     }
 }
 
-/// 폴더를 만들지 않는다(만들어 봤으면 되돌린다) — 폴더는 창을 만들 때 Tauri 가 만든다.
+/// Does not create the folder (if it was created to try, it is undone) — the folder is created by Tauri when it creates the window.
 fn fs_check(dir: &Path) -> Result<(), String> {
     crate::discovery::check_data_dir_writable(dir).map_err(webview_reason)
 }
 
-// 실패 사유만 꺼낸다 — 그 오류의 문구(「쓰기 가능한 위치에 압축을 풀어 주세요」)는 데이터 루트를 두고 쓴 조치라 웹뷰 폴더에
-//   맞지 않는다. 경로는 로그의 `dir` 칸이 싣는다.
+// Take out only the failure reason — that error's text (「쓰기 가능한 위치에 압축을 풀어 주세요」, unzip to a writable location) is a remedy written with the data root in mind and does not
+//   suit the webview folder. The path is carried by the `dir` field of the log.
 fn webview_reason(e: crate::discovery::DiscoveryError) -> String {
     match e {
         crate::discovery::DiscoveryError::DataDirUnwritable { reason, .. } => reason,
@@ -318,7 +318,7 @@ mod tests {
         dir
     }
 
-    // ── 결정 ──
+    // ── Decision ──
 
     #[test]
     fn a_writable_dir_is_chosen() {
@@ -393,7 +393,7 @@ mod tests {
         assert_eq!(CHECKS.load(Ordering::SeqCst), 1);
     }
 
-    // ── 운영 확인(discovery) 그대로 ──
+    // ── Production check (discovery) as is ──
 
     #[test]
     fn real_check_chooses_an_existing_dir() {
@@ -425,13 +425,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    // ── 마무리가 붙이는 것 ──
+    // ── What the finishing step attaches ──
 
     #[derive(Debug, PartialEq)]
     enum Attached {
         BrowserArgs(String),
         Extensions(bool),
-        // 런타임 쪽 `ScrollBarStyle` 은 `PartialEq` 가 없어 Debug 철자로 견준다.
+        // The runtime-side `ScrollBarStyle` has no `PartialEq`, so compare by Debug spelling.
         ScrollBars(String),
         NoDropHandler,
         DataDir(PathBuf),
@@ -491,13 +491,13 @@ mod tests {
         }
     }
 
-    /// 앱이 창 단추를 그리는 OS(지금 모든 OS — platform `caption_style`).
+    /// An OS where the app draws window buttons (every OS for now — platform `caption_style`).
     const DRAWN: CaptionStyle = CaptionStyle {
         drawn_buttons: true,
         leading_inset: 0.0,
     };
 
-    /// OS 틀을 걷고 그림자를 남긴다(TRD S26-window-chrome §8-1).
+    /// Lift the OS frame and keep the shadow (TRD S26-window-chrome §8-1).
     fn frameless() -> [Attached; 2] {
         [Attached::Decorations(false), Attached::Shadow(true)]
     }
@@ -546,7 +546,7 @@ mod tests {
         );
     }
 
-    /// 앱이 창 단추를 그리면 OS 틀을 걷고 그림자를 남긴다 — 그리지 않는 OS(macOS 몫 — 지금 없다)는 OS 틀을 그대로 둔다
+    /// If the app draws window buttons, lift the OS frame and keep the shadow — an OS that does not draw them (macOS's share — none for now) leaves the OS frame as is
     /// (TRD S26-window-chrome §7-11 · §8-1).
     #[test]
     fn the_os_frame_is_dropped_only_where_the_app_draws_the_caption_buttons() {
@@ -569,8 +569,8 @@ mod tests {
         );
     }
 
-    /// OS 틀은 마무리 한 곳이 정한다 — 설정 창 선언이 `decorations` · `shadow` 를 적으면 마무리와 두 출처가 된다(TRD
-    /// S26-window-chrome §8-1). 설정 JSON 은 주석을 못 달아 사유를 여기 둔다.
+    /// The OS frame is decided in one place, the finishing step — if the config window declaration wrote `decorations` · `shadow`, there would be two sources with the finishing step (TRD
+    /// S26-window-chrome §8-1). Config JSON cannot carry comments, so the reason is put here.
     #[test]
     fn config_windows_leave_the_os_frame_to_finish() {
         let conf: serde_json::Value =
@@ -613,8 +613,8 @@ mod tests {
         }
     }
 
-    /// 다시 읽기 때는 그 창이 마지막으로 칠한 테마를 먼저 읽고, 없거나 · 모르는 철자거나 · 저장소를 못 읽으면 만들 때의
-    /// 테마다.
+    /// On reload, first read the theme that window last painted, and if there is none · an unknown spelling · or the storage is unreadable, it is the theme at
+    /// creation.
     #[test]
     fn the_theme_script_reads_the_windows_remembered_theme_first() {
         let script = theme_script("slot-popup-3", UiTheme::Light);
@@ -638,7 +638,7 @@ mod tests {
         );
     }
 
-    /// 프론트가 적는 키와 초기화 스크립트가 읽는 키가 같은 머리다 — 어긋나면 다시 읽기 때 기억을 못 찾는다.
+    /// The key the frontend writes and the key the initialization script reads have the same head — if they diverge, memory is not found on reload.
     #[test]
     fn the_memory_prefix_is_the_one_the_frontend_writes() {
         let ts = include_str!("../../src/theme/themeMemory.ts");
@@ -650,7 +650,7 @@ mod tests {
         );
     }
 
-    // ── 설정 창의 환경 옵션 ──
+    // ── Environment options of the config window ──
 
     fn environment_options(
         window: &WindowConfig,
@@ -663,9 +663,9 @@ mod tests {
         )
     }
 
-    // 폴더 칸은 이 시험이 유일한 벽이다 — 설정 창 선언이 `dataDirectory` 를 적으면 마무리가 기본 폴더로 물러날 때 그 값을
-    //   지우지 못해 설정 창만 다른 폴더를 받는다. 나머지 셋은 마무리가 덮어 갈리지 않지만, 적힌 값이 실제와 다르게 읽히지
-    //   않게(출처 하나) 함께 기본값을 요구한다.
+    // For the folder field this test is the only wall — if the config window declaration wrote `dataDirectory`, the finishing step could not clear that value when it falls back to the default folder,
+    //   so only the config window would get a different folder. The other three are overwritten by the finishing step and do not diverge, but so that the written value is not read
+    //   as different from the real one (one source), it demands the defaults for them too.
     #[test]
     fn config_windows_leave_every_environment_option_at_the_default() {
         let conf: serde_json::Value =

@@ -1,6 +1,6 @@
-// 테스트 전용 — 셸 도킹 띠 · 새 창 크기 규칙과 공유하는 골든(`bands_golden.json`)을 **경로에서** 읽는다(TRD S21-slot-docking
-//   §4-5 · §8-2). ★사본을 두지 않는다★ — 사본이면 Rust 쪽 골든만 고쳐도 TS 시험이 초록으로 남아 두 판이 조용히 갈라진다.
-// 파일 형식의 정본은 그 파일 머리의 `_format`(같은 글 = 셸 `src-tauri/src/layout/bands/golden.rs` 머리)이다.
+// Test only — reads the golden (`bands_golden.json`) shared with the shell docking band · new window size rules **from its path** (TRD S21-slot-docking
+//   §4-5 · §8-2). ★Do not keep a copy★ — with a copy, fixing only the Rust-side golden would leave the TS test green and the two versions would diverge silently.
+// The canonical file format is `_format` at the head of that file (same text = the head of the shell `src-tauri/src/layout/bands/golden.rs`).
 
 import goldenSource from '../../../../../src-tauri/src/layout/bands_golden.json?raw'
 import type { LayoutNode } from '../../../../api/layoutTypes'
@@ -14,7 +14,7 @@ import type { CanvasPx, PxRect, RatioLimits } from '../dockedTree'
 import type { RectCss, SlotZones } from '../overlayTypes'
 import { parseShape } from '../tabDragData'
 
-/** 골든의 띠 줄 — `anchor` = `"outer"` 또는 칸 id. */
+/** Band line of the golden — `anchor` = `"outer"` or an area id. */
 export interface GoldenBand {
   anchor: string
   side: DockSide
@@ -30,7 +30,7 @@ export interface GoldenSlot {
   zones: SlotZones | null
 }
 
-/** `[x, y, pick, zones]` — 캔버스 CSS px · `pick` = `"strip"` | 띠 자리 | `null` · `zones` = 칸 자리 | `null`. */
+/** `[x, y, pick, zones]` — canvas CSS px · `pick` = `"strip"` | band position | `null` · `zones` = area position | `null`. */
 export type GoldenPoint = [number, number, 'strip' | number | null, number | null]
 
 export interface GoldenBandsCase {
@@ -71,7 +71,7 @@ export interface BandsGolden {
 
 export const bandsGolden = JSON.parse(goldenSource) as BandsGolden
 
-/** 골든 한 창 → `windowBands` 의 입력(셸 골든 `Eval::new` 의 짝). */
+/** One golden window → input of `windowBands` (counterpart of shell golden `Eval::new`). */
 export function bandsInputOf(c: GoldenBandsCase): BandsInput {
   const incoming = parseShape(c.shape)
   if (incoming === null) throw new Error(`${c.name}: 모양 ${c.shape} 이 읽히지 않는다`)
@@ -85,7 +85,7 @@ export function bandsInputOf(c: GoldenBandsCase): BandsInput {
   }
 }
 
-/** 골든 줄의 `anchor` 꼴. */
+/** The `anchor` form of a golden line. */
 export function goldenAnchor(a: DropAnchor): string {
   return a.type === 'outer' ? 'outer' : a.id
 }

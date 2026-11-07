@@ -6,12 +6,12 @@ import { comboOf, installKeybindings, isEditableTarget, setKeybindingsPaused } f
 import { useThemeStore } from '../store/themeStore'
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ★jsdom 은 HTMLElement.isContentEditable 을 구현하지 않는다(항상 undefined)★ — 실제 WebView2/브라우저는
-//   HTML 스펙대로 *실효* 편집 가능성을 돌려주지만 jsdom 은 스텁조차 없다. 프로덕션 가드(isEditableTarget)는
-//   isContentEditable 을 권위로 삼으므로(FIX-A), 테스트가 jsdom 의 깨진 값에 기대면 contenteditable 계약을
-//   전혀 검증하지 못한다. 그래서 테스트에서만 스펙 준수 isContentEditable getter 를 요소에 심어(contentEditable
-//   속성 체인을 걸어올라 실효 편집성 계산) 실제 브라우저 시맨틱으로 계약을 확인한다. plaintext-only/상속/"false"
-//   섬 경계까지 스펙대로 반영된다. (프로덕션 코드는 건드리지 않는다.)
+// ★jsdom does not implement HTMLElement.isContentEditable (always undefined)★ — real WebView2/browsers
+//   return the *effective* editability per the HTML spec, but jsdom has not even a stub. The production guard (isEditableTarget)
+//   treats isContentEditable as the authority (FIX-A), so if a test leaned on jsdom's broken value it would verify
+//   the contenteditable contract not at all. So only in tests we plant a spec-compliant isContentEditable getter on the element (computing effective
+//   editability by walking up the contentEditable attribute chain) to check the contract with real browser semantics. plaintext-only/inheritance/"false"
+//   island boundaries are reflected per spec too. (Production code is not touched.)
 function withSpecContentEditable(el: HTMLElement): HTMLElement {
   Object.defineProperty(el, 'isContentEditable', {
     configurable: true,
@@ -137,14 +137,14 @@ describe('comboOf (키 조합 정규화)', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// FIX-6: 순수 술어가 아니라 *실제 설치된 리스너* 를 통해 검증한다.
+// FIX-6: verify through the *actually installed listener*, not a pure predicate.
 // ─────────────────────────────────────────────────────────────────────────────
 describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
   let dispose: (() => void) | null = null
 
   beforeEach(() => {
     __resetRegistryForTest()
-    // 각 테스트가 자기 command 를 등록하므로 어느 어댑터 모듈의 부수효과 import 에도 의존하지 않는다.
+    // Each test registers its own command, so it depends on the side-effect import of no adapter module.
   })
 
   afterEach(() => {
@@ -168,7 +168,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
 
   it('비편집 타겟(document.body)에서 ctrl+tab → 바인딩 command 실행 + preventDefault', () => {
     const spy = vi.fn()
-    // 기본 바인딩(ctrl+tab → tab.next)을 이 테스트용 spy command 로 갈아끼운다.
+    // Swap the default binding (ctrl+tab → tab.next) for this test's spy command.
     register({ id: 'tab.next', title: 'next', run: spy })
     dispose = installKeybindings()
 
@@ -178,11 +178,11 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
   })
 
   it('배선이 store 액션까지 닿는다(document.body keydown)', () => {
-    // ★진짜 어댑터를 안 태운다★ — 어댑터는 모듈 side-effect 로 register 하는데, 다른 테스트가 이미
-    // 캐시-import 했으면 `__resetRegistryForTest()` 뒤 재등록되지 않는다(테스트 순서 의존). 그래서 이
-    // 자리에 직접 등록해 "키 → run → store 액션" 전 구간이 닿는지만 본다.
-    // ★store 로 themeStore 를 고른 것은 그것이 **Tauri 없이 관측되는 store** 라서다★ — 이 키가 실제로
-    // 부르는 `tab.next` 의 store(viewStore)는 invoke 를 타므로 여기서 재려면 배선 아닌 mock 을 재게 된다.
+    // ★Do not run the real adapter★ — adapters register as a module side effect, and if another test already
+    // cache-imported it, it is not re-registered after `__resetRegistryForTest()` (test-order dependence). So we register directly in this
+    // place and only check that the whole "key → run → store action" span connects.
+    // ★themeStore is chosen as the store because it is a **store observable without Tauri**★ — the store (viewStore) of the `tab.next`
+    // that this key actually calls goes through invoke, so measuring it here would measure a mock, not the wiring.
     useThemeStore.getState().setTheme('dark')
     const THEMES = ['dark', 'light', 'e-ink'] as const
     register({
@@ -238,7 +238,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
     expect(spy).not.toHaveBeenCalled()
   })
 
-  // ── 복원 모달이 떠 있는 동안 멈춤(TRD S21-storage §6-7 N4) ──
+  // ── Stops while the restore modal is up (TRD S21-storage §6-7 N4) ──
   it('멈춘 동안에는 발화하지 않고 preventDefault 도 안 한다', () => {
     const spy = vi.fn()
     register({ id: 'tab.next', title: 'next', run: spy })
@@ -313,7 +313,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
     })
     dispose = installKeybindings()
 
-    // dispatchEvent 는 리스너에서 throw 가 새어나오지 않으면 정상 반환한다(핸들러 밖 uncaught 없음).
+    // dispatchEvent returns normally if no throw leaks out of the listener (no uncaught outside the handler).
     const e = fireCtrlTab(document.body)
     expect(spy).not.toHaveBeenCalled()
     expect(e.defaultPrevented).toBe(false)

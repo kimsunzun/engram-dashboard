@@ -1,5 +1,5 @@
-// TRD S26-window-chrome §8-4 — 스냅 레이아웃 오버레이의 웹 몫: 물리 px 사각형 셈 · 켰을 때만 보고 · 같은 값 다시 안 보냄 ·
-//   맴돎 사건 · 떼면 걷기와 듣기 풀기. 창 사실 칸이 이 길을 여닫는지는 `TitleRow.test.tsx` 가 본다.
+// TRD S26-window-chrome §8-4 — the web's share of the snap layout overlay: physical px rectangle computation · report only when on · the same value is not sent again ·
+//   hover events · withdrawing and releasing listening on detach. Whether the window fact field opens and closes this path is covered by `TitleRow.test.tsx`.
 
 import { act, cleanup, renderHook } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -33,7 +33,7 @@ function button(rect: { x: number; y: number; width: number; height: number }) {
   return { el, ref: { current: el }, move: (next: typeof rect) => (current = next) }
 }
 
-// 맴돎 사건 등록(`listen` 의 약속)이 풀리기를 기다린다.
+// Waits for the registration of hover event listening (the promise of `listen`) to resolve.
 const settle = () => act(async () => {})
 
 afterEach(() => {

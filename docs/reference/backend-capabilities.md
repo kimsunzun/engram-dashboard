@@ -1,143 +1,143 @@
-# 백엔드 기능 대조표
+# Backend capability comparison table
 
-우리가 붙이는 **에이전트 CLI 들이 실제로 무엇을 주는가**를 한 곳에 모은다. 코드가 아니라 **바깥 사실**이 대상이다 — 우리 구조는 `structure/agent-backend.md`, 이 문서는 그 구조가 기대는 **상대편 계약**을 적는다.
+This gathers in one place **what the agent CLIs we attach actually give us**. The subject is not code but **outside facts** — our structure is in `structure/agent-backend.md`; this document records the **counterpart's contract** that structure relies on.
 
-**쓰는 법 — 기능을 붙이기 전에 이 표의 그 줄을 먼저 채운다.** 비어 있으면 조사부터 하고, 조사 결과를 여기 적은 뒤 코드로 간다. 그때그때 찾아 쓰고 버리면 다음 세션이 같은 것을 다시 판다(실발생: `clientUserMessageId` 를 못 찾아 ADR-0193 이 「합칠 키가 없다」로 기각됐는데, 그 필드는 그때도 있었다).
+**How to use it — before attaching a feature, fill in that row of this table first.** If it is empty, research first, write the result here, and only then go to code. If you look things up as needed and throw them away, the next session digs up the same thing again (it actually happened: `clientUserMessageId` was not found, so ADR-0193 was rejected on 「합칠 키가 없다」, yet that field existed even then).
 
-## 이 표의 규칙
+## Rules of this table
 
-- ★**모르는 칸은 비워 두고 `미확인` 으로 적는다 — 추측으로 채우지 않는다.**★ 빈 칸은 다음 조사 대상 목록이다.
-- ★**버전을 함께 적는다.**★ 여기 적힌 것은 **그 버전에서 관측한 사실**이고 벤더가 바꾸면 낡는다. 버전 없는 줄은 못 믿는다. ★**유도한 버전에는 `추정` 을 달아 실측값과 가른다**★ — 그 라운드 기록에 버전 문자열이 없어 앞뒤 기록에서 끌어온 것이 여기 든다. 되재면 `추정` 을 떼고 실측값을 적는다.
-- **근거 등급을 붙인다:** `소스` = 벤더 소스/스키마 직독 · `실측` = 우리가 실제로 돌려 봄 · `문서` = 벤더 문서 · `관측` = 값이 그렇게 보였을 뿐.
-  ★**`문서` 는 가장 약한 등급이다**★ — codex 공개 문서는 thread id 예시로 `"thr_123"` 을 쓰는데 **실서버가 그 값을 거부한다**(실측). 문서와 소스가 갈리면 소스를 믿는다.
-- 우리 쪽 구현 여부는 여기 적지 않는다 — 그건 코드와 TRD 소관이다. 이 표는 **상대가 주는 것**만 적는다.
+- ★**Leave a cell you do not know empty and write `미확인` (unverified; the cells of this translation say "unverified") — do not fill it by guessing.**★ An empty cell is the list of the next research targets.
+- ★**Write the version with it.**★ What is written here is **a fact observed on that version** and it goes stale when the vendor changes it. A row with no version cannot be trusted. ★**A derived version gets `추정` (estimated), to tell it apart from a measured value**★ — what lands here is a version pulled from the records before and after because that round's record has no version string. When it is measured again, drop `추정` and write the measured value.
+- **Attach an evidence grade:** `소스` (source) = read the vendor source/schema directly · `실측` (measured) = we actually ran it · `문서` (docs) = vendor documentation · `관측` (observed) = the value merely looked like that.
+  ★**`문서` (docs) is the weakest grade**★ — codex's public documentation uses `"thr_123"` as the thread id example, but **the real server rejects that value** (measured). When documentation and source disagree, trust the source.
+- Whether we implement it on our side is not written here — that is for the code and the TRD. This table writes **only what the counterpart gives**.
 
-**마지막 갱신:** 2026-09-21 · **기준 버전** = **claude** 2.1.170 · **codex** 0.154.0 — ★**이 기준 버전이 덮는 범위는 §1·§2 다**★(그 라운드가 그렇게 적어 둔 것을 되살렸다 · 2026-09-22 — **적어 둔 기록이지 표기가 없다는 사실에서 끌어낸 추론이 아니다.** 그래서 `추정` 을 달지 않는다). §2.5 의 락·`originator` 줄은 0.155.x 에서 잰 것이라 그 자리에 버전을 달았다. ★**이 귀속은 그때 그 두 절에 걸린다**★ — 뒤에 더하는 줄은 자기 버전을 스스로 달아야 한다.
+**Last updated:** 2026-09-21 · **baseline versions** = **claude** 2.1.170 · **codex** 0.154.0 — ★**the range this baseline covers is §1 and §2**★ (restored what that round wrote down · 2026-09-22 — **it is a record that was written down, not an inference drawn from the absence of a notation.** So `추정` is not attached). The lock and `originator` rows of §2.5 were measured on 0.155.x, so a version is attached at that place. ★**This attribution applies to those two sections as of then**★ — a row added later must attach its own version itself.
 
-★**절 목록을 여기서 늘려 가며 세지 않는다**★ — 절이 늘 때마다 「어느 절이 어느 버전인가」를 여기 더하면 한 줄만 다시 잴 때도 뒤처진다(같은 이유로 게이트 개수도 세지 않고 crate 헤더를 가리킨다). **버전을 단 줄은 그 표기가 정본이다.** ★**버전을 안 단 줄을 「그러니 기준 버전에서 쟀다」로 읽지 말 것 — 표기의 부재는 증거가 아니다**★. 위 머리글이 **범위를 찍어 귀속시켜 둔 절**(§1·§2)이 아니면 버전 미상이고, 위 규칙대로 못 믿는다 — 채우려면 그 줄의 출처 기록을 되짚어야 한다. ★**가름은 여기다 — 「이 절을 이 버전에서 쟀다」고 적어 둔 진술은 기록이고, 표기가 없다는 사실에서 끌어낸 일반 추론은 기록이 아니다**★. 뒤엣것으로 적혀 있던 옛 문장(「버전을 안 단 줄은 기준 버전에서 잰 것이다」)은 폐기했다(2026-09-22 · 그 문장은 §2.5 codex 의 버전 없는 줄 셋을 **0.154.0 에서 쟀다**고 단언하게 만들었는데, 그 라운드는 0.155.x 였다).
+★**Do not keep counting the section list here**★ — if we add 「어느 절이 어느 버전인가」 here every time sections grow, it falls behind even when only one row is re-measured (for the same reason we do not count the gates and instead point to the crate header). **For a row with a version attached, that notation is canonical.** ★**Do not read a row without a version as 「그러니 기준 버전에서 쟀다」 — the absence of a notation is not evidence**★. Unless it is a section the header above **attributed by pinning down the range** (§1·§2), the version is unknown, and by the rule above it cannot be trusted — to fill it, you have to trace back that row's source record. ★**The line is drawn here — a statement that says 「이 절을 이 버전에서 쟀다」 is a record, and a general inference drawn from the absence of a notation is not a record**★. The old sentence that had been written as the latter (「버전을 안 단 줄은 기준 버전에서 잰 것이다」) was discarded (2026-09-22 · that sentence made us assert that the three version-less rows of §2.5 codex were **measured on 0.154.0**, but that round was 0.155.x).
 
-★**claude 쪽 기준 버전은 이미 설치본과 갈렸다**★ — `docs/process/step-log.md:2310` 이 설치본을 **2.1.269** 로 적고 그 자리에서 「우리 근거 버전은 2.1.170, 드리프트」라고 못 박는다(이 문서를 고치는 2026-09-22 에 `claude --version` 도 같은 값). 그러니 **claude 칸을 현재 설치본의 사실로 읽지 말 것** — 다시 재기 전까지 기준 버전은 「그때 그 관측」의 이름일 뿐이다.
+★**The claude-side baseline version has already diverged from the installed one**★ — `docs/process/step-log.md:2310` writes the installed one as **2.1.269** and in that same place nails down 「우리 근거 버전은 2.1.170, 드리프트」 (`claude --version` gives the same value on 2026-09-22, when this document is being fixed). So **do not read the claude column as a fact about the currently installed one** — until it is measured again, the baseline version is only the name of 「그때 그 관측」.
 
 ---
 
-## 1. 세션 정체성·복원
+## 1. Session identity and restore
 
 | | claude | codex (app-server) |
 |---|---|---|
-| **누가 id 를 발급하나** | **우리** — 우리가 뽑아 `--session-id <uuid>` 로 강제한다 (소스) | **codex** — `thread/start` **응답**의 `thread.id` 로 받는다 (소스·실측) |
-| **id 형식** | 우리가 뽑은 UUID | **UUID** — 타입이 `uuid::Uuid` newtype 이고 역직렬화가 `Uuid::parse_str` 를 부른다. 생성은 `Uuid::now_v7()`. **비-UUID 는 서버가 거부**한다 (소스·실측). ★단 JSON 스키마엔 그냥 `string` 으로 나온다 — 생성기 탓이 아니라 **그 타입이 스키마를 무제한 String 으로 직접 구현**하기 때문이다★. 그리고 벤더 주석은 「**codex 가 발급한** id 는 UUIDv7」로 한정한다 — 장래 hosted·import 경로까지 보장하지 않는다 |
-| **이어붙이는 방법** | 스폰 **인자** `--resume <uuid>` (소스) | 스폰 **후** 핸드셰이크 다음 첫 요청을 `thread/start` 대신 `thread/resume { threadId }` 로 (소스) |
-| **모르는 id 를 주면** | **정직하게 실패한다** — `No conversation found …` + 종료코드 ≠ 0. 조용히 새 대화를 열지 않는다 (실측 = `docs/process/S9-session-restore/spike-results.md` · ADR-0082 · 회귀망이 그 문구와 종료코드를 재현한다). ★**터미널 모드 codex 와 정반대다**★ — 그쪽은 모르는 값을 세션 이름으로 재해석해 종료코드 `0` 으로 새 대화를 연다(§2.5 codex) | **에러** `-32600` `no rollout found for thread id` — 조용히 새 대화를 열지 않는다 (실측). ★**`-32600` 을 「모르는 스레드」 신호로 쓰면 안 된다**★ — 설정 로딩 실패 등 다른 잘못된 요청도 같은 코드다. 메시지를 봐야 가른다. ★**터미널 모드의 `codex resume <값>` 은 이와 정반대다 — §2.5 codex 를 볼 것**★ |
-| **cwd 가 다르면** | 미확인 | **이어진다.** 정체성은 워크스페이스가 아니라 `CODEX_HOME`(`~/.codex`) 단위다. 응답의 `cwd` 는 **스레드에 기록된 원래 cwd** (실측) |
-| **시간 만료** | 미확인 | **없다** — 3개월·13 마이너 버전 전 스레드가 그대로 resume 됐다 (실측). 흔히 인용되는 30분은 만료가 아니라 **메모리 언로드 유예**다 (문서) |
-| **세션 목록 조회** | 미확인 (`~/.claude/projects/**/*.jsonl` 파일 스캔이 통용되는 우회) | **있다 — `thread/list`.** 커서 페이지네이션 + `cwd`·`archived`·`searchTerm` 등 필터 (소스·실측) |
-| **id 를 잃었을 때 회수** | 미확인 | **부분적으로만.** `thread/list` → `thread/resume` 입양이 되고 codex 자신도 데몬 복구에 그 쌍을 쓴다 (소스). ★**단 크래시 창은 이걸로 못 메운다**★ — 아래 참조. ★**도는 프로세스라면 OS 에 물어 알 수 있다**★ — writer 락의 홀더가 그 프로세스다(§2.5 codex) |
-| **디스크 위치** | `~/.claude/projects/<경로>/<uuid>.jsonl` (관측) | `$CODEX_HOME/sessions/<YYYY>/<MM>/<DD>/rollout-<타임스탬프>-<uuid>.jsonl`. 첫 줄 `session_meta` 가 권위 (실측) |
-| **파일명에서 id 복원** | ★**깨진 사례가 있다**★ — 최근 claude 는 transcript 파일명 UUID 가 hook 이 보고한 session_id 와 **다르다**(orca 주석에 박제) | 대체로 되지만 **`thread/revert` 는 스레드 id 를 유지한 채 다른 rollout id 로 새 파일을 만든다** — 권위는 파일명이 아니라 `session_meta.id` (소스) |
+| **Who issues the id** | **We do** — we draw it and force it with `--session-id <uuid>` (source) | **codex** — received as `thread.id` in the **response** to `thread/start` (source · measured) |
+| **id format** (id 형식) | the UUID we drew | **UUID** — the type is a `uuid::Uuid` newtype and deserialization calls `Uuid::parse_str`. Generation is `Uuid::now_v7()`. **A non-UUID is rejected by the server** (source · measured). ★But in the JSON schema it comes out as a plain `string` — not because of the generator but because **that type implements the schema directly as an unconstrained String**★. And the vendor comment limits it to 「**codex 가 발급한** id 는 UUIDv7」 — it does not guarantee future hosted · import paths |
+| **How to attach to an existing one** | spawn **argument** `--resume <uuid>` (source) | **after** spawning, the first request after the handshake is `thread/resume { threadId }` instead of `thread/start` (source) |
+| **If given an unknown id** | **Fails honestly** — `No conversation found …` + exit code ≠ 0. It does not quietly open a new conversation (measured = `docs/process/S9-session-restore/spike-results.md` · ADR-0082 · the regression net reproduces that wording and the exit code). ★**The exact opposite of terminal-mode codex**★ — that one reinterprets an unknown value as a session name and opens a new conversation with exit code `0` (§2.5 codex) | **Error** `-32600` `no rollout found for thread id` — it does not quietly open a new conversation (measured). ★**Do not use `-32600` as a 「모르는 스레드」 signal**★ — other invalid requests, such as a config loading failure, have the same code. You have to look at the message to tell them apart. ★**Terminal mode's `codex resume <값>` is the exact opposite of this — see §2.5 codex**★ |
+| **If the cwd differs** | unverified | **It resumes.** Identity is per `CODEX_HOME` (`~/.codex`), not per workspace. The `cwd` in the response is **the original cwd recorded on the thread** (measured) |
+| **Time expiry** | unverified | **None** — a thread from 3 months and 13 minor versions earlier resumed as is (measured). The often-cited 30 minutes is not an expiry but a **memory-unload grace period** (docs) |
+| **Listing sessions** | unverified (scanning the `~/.claude/projects/**/*.jsonl` files is the common workaround) | **There is — `thread/list`.** Cursor pagination + filters such as `cwd` · `archived` · `searchTerm` (source · measured) |
+| **Recovery when the id is lost** | unverified | **Only partially.** Adoption through `thread/list` → `thread/resume` works, and codex itself uses that pair for daemon recovery (source). ★**But the crash window cannot be filled by this**★ — see below. ★**If the process is running, you can ask the OS and find out**★ — the holder of the writer lock is that process (§2.5 codex) |
+| **Disk location** | `~/.claude/projects/<경로>/<uuid>.jsonl` (observed) | `$CODEX_HOME/sessions/<YYYY>/<MM>/<DD>/rollout-<타임스탬프>-<uuid>.jsonl`. The first line, `session_meta`, is authoritative (measured) |
+| **Recovering the id from the file name** | ★**There are broken cases**★ — recent claude's transcript file name UUID is **different** from the session_id the hook reports (pinned in an orca comment) | Mostly works, but **`thread/revert` keeps the thread id and creates a new file with a different rollout id** — the authority is `session_meta.id`, not the file name (source) |
 
-**그래서 codex 에만 있는 위험:** id 가 **응답으로 와야** 손에 들어오므로, 받은 뒤 디스크에 적기 전에 죽으면 그 스레드를 잃는다. ★id 쪽은 첫 제출 전 영속으로 좁혔는데(2026-09-24 · ADR-0226) codex 에선 한 칸 다시 열렸다★ — codex app-server 는 **상대가 첫 유저 메시지를 되울릴 때** 영속한다(사용자 결정 2026-09-26 · ADR-0233 — ADR-0226 을 개정 · 코드 = 통로의 `witness_first_turn`). 그래서 **첫 턴을 보내고 그 되울림이 오기 전에 죽으면 id 가 남지 않는다.** codex 터미널은 첫 턴 전 영속이 애초에 성립하지 않는다(ADR-0226 결정 11). 메시지 내용의 내구성은 여전히 없다. claude 는 우리가 뽑으니 그 창이 없다.
+**So the risk only codex has (codex 에만 있는 위험):** the id is only in hand once it **arrives in a response**, so if the process dies after receiving it and before writing it to disk, that thread is lost. ★The id side was narrowed to persisting before the first submit (2026-09-24 · ADR-0226), but with codex it was reopened by one step★ — on the codex app-server path the id is persisted **when the counterpart echoes the first user message** (user decision 2026-09-26 · ADR-0233 — amends ADR-0226 · code = `witness_first_turn` of the channel). So **if it dies after sending the first turn and before that echo arrives, no id remains.** For the codex terminal, persisting before the first turn does not hold in the first place (ADR-0226 decision 11). There is still no durability for the message content. claude has no such window, because we draw the id.
 
-★**종단 실측 (2026-09-15) — 위 「id 형식」 줄의 소스 판독이 우리 경로에서 확인됐다**★. 실물 app-server 를 GUI 로 띄워 핸드셰이크만 태웠다(턴 0 · 모델 사용량 0 — `thread/start` 는 턴 앞이다):
+★**End-to-end measurement (2026-09-15) — the source reading of the 「id 형식」 row above was confirmed on our path**★. We launched a real app-server through the GUI and ran only the handshake (turn 0 · model usage 0 — `thread/start` comes before a turn):
 
-- 받은 id = `01a0a08f-9247-7612-9b1f-dadc61693dee` — 버전 니블 `7`, 즉 **UUIDv7 이 소스 판독대로 실제로 온다.** 36자 정규형이고 `urn:`·중괄호 같은 장식이 없다.
-- 그 값이 `backend_session_id` 에 앉고 `agents.json` 까지 내려가 **kill 후에도 남았다.** ★그때의 사실이다 — D1 이후(2026-09-24 · ADR-0226) 0턴 세션은 영속되지 않는다★: 받은 id 는 첫 제출 래치에 머물다 영속된다 — 지금 그 시점과 남는 창은 §1 참조(위 「codex 에만 있는 위험」).
-- 대조군 = **Terminal 모드 프로필은 `null` 그대로**. app-server 가 아니면 id 도 없다 — 두 모드가 실제로 갈린다.
-- ★**그래서 저장 칸 `Option<Uuid>` 를 문자열로 넓힐 이유가 없다는 것도 함께 확정됐다**★(한때 걱정거리였다).
-- ★**단 우리 명부 안에서 UUID 버전이 백엔드마다 갈린다**★ — claude 는 우리가 v4 를 뽑고 codex 는 v7 을 받는다. 저장소의 모든 테스트가 `Uuid::new_v4()` 로 민팅하므로 **어느 테스트도 그 차이를 만나지 않는다.** 버전 검증을 넣지 말 것 — `Uuid::parse_str` 는 버전을 안 보고, 그래서 두 쪽을 다 받는다.
-- **이 실측이 덮지 않는 것:** wire 바이트 자체는 안 봤다(JSON-RPC 응답 본문을 찍는 자리가 없다 — 본 것은 우리 파싱 결과와 codex 가 자기 stderr 에 찍은 같은 값 둘이다). 그리고 `thread/start` 는 **rollout 파일을 만들지 않는다**는 것이 여기서도 재확인됐다 — 실측 내내 `~/.codex/sessions/` 파일 수가 그대로였다(아래 크래시 창 항목의 근거가 하나 늘었다).
+- The id received = `01a0a08f-9247-7612-9b1f-dadc61693dee` — version nibble `7`, i.e. **UUIDv7 really does arrive, as the source reading said.** It is the 36-character canonical form with no decoration such as `urn:` or braces.
+- That value sat in `backend_session_id`, went down into `agents.json` and **remained after kill.** ★That is the fact at the time — after D1 (2026-09-24 · ADR-0226) a 0-turn session is not persisted★: the received id stays in the first-submit latch and is persisted afterwards — for that point and the window that remains now, see §1 (「codex 에만 있는 위험」 above).
+- The control group = **a Terminal-mode profile stays `null`**. Without the app-server there is no id — the two modes really do diverge.
+- ★**So it was also confirmed that there is no reason to widen the storage field `Option<Uuid>` to a string**★ (it was once a worry).
+- ★**But inside our registry the UUID version differs per backend**★ — for claude we draw v4 and for codex we receive v7. Every test in the repository mints with `Uuid::new_v4()`, so **no test meets that difference.** Do not add version validation — `Uuid::parse_str` does not look at the version, and so it accepts both.
+- **What this measurement does not cover:** we did not look at the wire bytes themselves (there is no place that prints the JSON-RPC response body — what we saw is two things: our parsing result and the same value codex printed to its own stderr). And it was reconfirmed here that `thread/start` **does not create a rollout file** — the number of files in `~/.codex/sessions/` stayed the same throughout the measurement (one more ground for the crash-window item below).
 
-★**그리고 그 창은 `thread/list` 로 못 메운다 — 적대 검증이 뒤집은 항목이다**★: codex 0.154.0 자기 테스트가 **새 스레드는 첫 사용자 메시지가 오기 전까지 rollout 이 없다**고 단언한다. 즉 `thread/start` 직후 죽으면 id 는 발급됐는데 디스크에 아무것도 없어 `thread/list` 에도 안 잡히고 `thread/resume` 도 못 찾는다. **입양은 「이미 대화가 오간 스레드」를 되찾는 수단이지 크래시 창의 해법이 아니다.** 해법 후보는 **보내기 전에 우리 쪽에 먼저 적어 두는 것**(id 를 받기 전이라도 「이 프로필이 스레드를 시작하려 한다」를 기록) — 아직 설계 안 함.
+★**And that window cannot be filled with `thread/list` — an item the adversarial verification overturned**★: codex 0.154.0's own tests assert that **a new thread has no rollout until the first user message arrives**. That is, if it dies right after `thread/start`, the id was issued but there is nothing on disk, so `thread/list` does not catch it and `thread/resume` cannot find it. **Adoption is a means of recovering 「이미 대화가 오간 스레드」, not the solution to the crash window.** A candidate solution is **to write it down on our side first, before sending** (record 「이 프로필이 스레드를 시작하려 한다」 even before receiving the id) — not designed yet.
 
-**덧붙는 한계 둘:** `thread/list` 는 기본 필터에서 archive 된 것과 일부 source 종류를 **빼고** 준다 — 완전한 명부가 아니다. 그리고 `archive` 는 되돌리기 전까지 resume 을 막고 `thread/delete` 는 영구 삭제다.
+**Two added limits:** `thread/list` gives its results with archived ones and some source kinds **left out** under the default filter — it is not a complete registry. And `archive` blocks resume until it is undone, while `thread/delete` is a permanent delete.
 
-## 2. 입력과 에코
+## 2. Input and echo
 
 | | claude | codex (app-server) |
 |---|---|---|
-| **보낸 입력을 되울려주나** | 기본 안 준다. **`--replay-user-messages`** 를 줘야 되울린다 (소스) ★`--input-format`·`--output-format` 둘 다 `stream-json` 이어야 한다★ | **준다** — `item/*` 의 `userMessage` (소스·실측) |
-| **우리 id 를 실을 칸** | 있다 — 우리가 stdin user 라인에 넣은 uuid 를 그대로 되울려준다 (소스) | ★**있다 — `turn/start` 의 `clientUserMessageId`**★. 되울린 항목이 그 값을 `clientId` 로 달고 온다. **`turn/start` 경로에서도 에코된다** — 0.154.0 통합 테스트가 그것을 단언한다(소스). **codex 0.140.0 부터**, 0.135.0 엔 없다 ★공개 문서엔 이 필드가 없어서 문서만 보면 「없다」로 읽힌다★ |
-| **같은 id 로 두 번 보내면** | 미확인 | ★**중복 제거를 해 주지 않는다**★ — 같은 `clientUserMessageId` 로 두 번 보내면 **모델에 두 번 갈 수 있는데 화면엔 합쳐져 한 줄로 보인다**. 이 id 는 **상관 키이지 멱등 키가 아니다** (소스·벤더 이슈). 재전송·재연결 경로를 짤 때 이걸 전제로 깔지 말 것 |
-| **되울린 내용이 원문 그대로인가** | 미확인 | ★**아니다 — 정규화한다**★. 그래서 codex 자기 TUI 는 매칭이 성사되면 서버 투영을 버리고 **로컬 사본**을 렌더한다 (소스) |
-| **벤더 자기 클라이언트는 어떻게 하나** | — | 턴이 안 돌면 **보내기 전에** 로컬 렌더 후 에코는 내용 동일성으로 무시. 턴이 돌면(steer) 로컬 렌더를 **안 하고** 대기했다가 에코 도착 시 로컬 사본을 렌더. 매칭 키는 `clientId` 우선, 없으면 「본문 + 이미지 개수」 폴백 (소스) |
-| **구버전 폴백** | — | 내용 비교 키. ★오디오·mention 만 다른 두 전송은 **같은 키가 된다**★(벤더 TODO 주석) |
+| **Does it echo the input we sent** | By default it does not. You have to pass **`--replay-user-messages`** for it to echo (source) ★both `--input-format` and `--output-format` must be `stream-json`★ | **It does** — the `userMessage` of `item/*` (source · measured) |
+| **A field to carry our id** | There is — the uuid we put on the stdin user line is echoed back as is (source) | ★**There is — `clientUserMessageId` of `turn/start`**★. The echoed item comes with that value as `clientId`. **It is echoed on the `turn/start` path too** — the 0.154.0 integration test asserts it (source). **From codex 0.140.0**; 0.135.0 does not have it ★the public documentation does not have this field, so reading only the documentation gives 「없다」★ |
+| **If we send twice with the same id** | unverified | ★**It does not deduplicate**★ — sending twice with the same `clientUserMessageId` **may reach the model twice, yet on screen they are merged and look like one line**. This id is **a correlation key, not an idempotency key** (source · vendor issue). Do not lay this down as a premise when building the resend · reconnect paths |
+| **Is the echoed content the original verbatim** | unverified | ★**No — it normalizes**★. So codex's own TUI, when the match succeeds, discards the server projection and renders **the local copy** (source) |
+| **What the vendor's own client does** | — | If no turn is running, it renders locally **before sending** and ignores the echo by content equality. If a turn is running (steer), it **does not** render locally, waits, and renders the local copy when the echo arrives. The matching key is `clientId` first, and without it the fallback 「본문 + 이미지 개수」 (source) |
+| **Old-version fallback** | — | A content-comparison key. ★Two sends that differ only in audio · mention **become the same key**★ (vendor TODO comment) |
 
-## 2.5. 기동 인자·모드 (이미 알고 있던 실측 — 흩어져 있던 것을 모은다)
+## 2.5. Launch arguments and modes (measurements we already knew — the scattered ones are gathered here)
 
 ### claude
 
-| 사실 | 근거 |
+| Fact | Basis |
 |---|---|
-| JSON 모드는 `-p` **전용**이다 — `--input-format stream-json` · `--output-format stream-json` 과 함께 쓴다 | 소스 · `--help` 가 "only works with --print" 라 적는다 |
-| ★**`--verbose` 가 없으면 즉사한다**★ — `--help` 엔 문구가 없는데 런타임이 "When using --print, --output-format=stream-json requires --verbose" 로 죽인다. 증상은 **스폰 직후 에이전트 소멸** | 실측 2026-07-02 (claude 2.1.170) |
-| stream-json 헤드리스도 `--resume <sid>` 를 지원한다 — `-p` 계열과 공존하고 "session already in use" 없이 과거 대화를 무손실 재개 | 실측 2026-07-13 (claude 2.1.170) |
-| ★**`thinking` 블록은 env `MAX_THINKING_TOKENS` 가 있어야 나온다**★ — CLI 기본은 꺼져 있다 | 실측 2026-07-06 (ADR-0049) |
-| 작업 루트는 `--cd` 가 정한다. env 는 넘긴 상태 디렉터리로 실제로 쓴다 | 실측 (계약 시험대가 실 프로세스로 잰다) |
-| 세션 id 가 **도중에 바뀐다** — 사용자가 `/clear` 하면 갈린다. 그래서 파일 폴링 감시가 필요하다 | 소스·관측 |
-| 제어 채널을 지원한다 | 소스 |
+| JSON mode is **`-p` only** — used together with `--input-format stream-json` · `--output-format stream-json` | source · `--help` writes "only works with --print" |
+| ★**It dies instantly without `--verbose`**★ — `--help` has no such wording, but the runtime kills it with "When using --print, --output-format=stream-json requires --verbose". The symptom is **the agent vanishing right after spawn** | measured 2026-07-02 (claude 2.1.170) |
+| Headless stream-json also supports `--resume <sid>` — it coexists with the `-p` family and resumes a past conversation losslessly with no "session already in use" | measured 2026-07-13 (claude 2.1.170) |
+| ★**A `thinking` block appears only when the env `MAX_THINKING_TOKENS` is set**★ — the CLI default is off | measured 2026-07-06 (ADR-0049) |
+| The working root is set by `--cd`. The env actually uses the state directory we pass | measured (the contract test bench measures it with a real process) |
+| The session id **changes midway** — it forks when the user does `/clear`. That is why file-polling watching is needed | source · observed |
+| Supports a control channel | source |
 
 ### codex
 
-| 사실 | 근거 |
+| Fact | Basis |
 |---|---|
-| **터미널 모드에도 스레드는 있다 — 없는 것은 그것을 말해 주는 채널이다.** 이어붙이기는 `codex resume <thread id>` 하위 명령으로 된다(실측 0.155.0 — 같은 id 가 보존되고 기록이 이어 붙는다). 되울림은 해당 없음 | 소스·실측 |
-| ★**도는 스레드의 id 를 OS 에 물어 알 수 있다**★ — codex 프로세스가 `$CODEX_HOME/thread-writer-locks/<thread id>.lock` 을 **열어 쥔 채로** 돈다. 홀더는 `codex.exe` 자신이고 래퍼가 아니며, 파일은 0바이트라 이름만이 정보다. 기동 후 0.735·0.879·0.907·1.891 초에 생긴 것을 쟀고(재현 안 된 21 초 사례 하나) **첫 턴 이전**이다 | 실측 2026-09-21 (0.155.x 추정) |
-| **죽은 락과 산 락이 구분된다** — 소유 프로세스를 죽인 뒤 같은 파일을 물으면 홀더 0 이다. codex 자신도 기동 때 죽은 락을 쓸어낸다. 관리자 권한은 필요 없다 | 실측 2026-09-21 (0.155.x 추정) |
-| **`CODEX_HOME` 은 건 프로세스에만 적용된다** — 위 락 폴더도 그 홈 아래로 따라 옮겨 간다. 락 폴더 이름·배치는 **문서화돼 있지 않다** — 상류가 바꾸면 오류가 아니라 조용히 후보 0 이 된다 | 실측 2026-09-21 (0.155.x 추정) |
-| ★**기록 쪽에는 PID 가 없다**★ — rollout JSONL · `state_5.threads` 40개 칼럼 · `sandbox.*.log` 어디에도 pid·ppid·tty·host·명령줄·환경변수가 없다(전수 훑기). 디스크 기록만 읽어서는 「이 스레드가 우리 자식의 것인가」를 만들 수 없다 | 실측 2026-09-21 (0.155.x 추정) |
-| **`CODEX_INTERNAL_ORIGINATOR_OVERRIDE`** — 상류가 문서화하지 않은 내부 변수. 건 값이 세션 기록의 `originator` 칸에 그대로 남는다(임의 문자열 3종 · allowlist 거절 없음). 없어지면 오류가 아니라 조용한 무시 | 실측 (0.155.1) |
-| **`developer_instructions` 로 넘긴 텍스트는 rollout 에 verbatim 으로 남는다** — 단 sqlite 쪽에는 안 간다 | 실측 2026-09-21 (0.155.x 추정) |
-| ★**`codex resume <값>` 은 틀려도 실패하지 않는다**★ — 스레드 id 로 못 읽는 문자열을 주면 그것을 **세션 이름**으로 재해석해 **새 세션을 조용히 만들고** 종료 코드 `0` 으로 끝나며 턴이 과금된다. app-server 의 `thread/resume`(모르는 id → `-32600` 에러)과 **정반대 성질**이라 두 모드를 같은 규칙으로 다루면 안 된다 | 실측 2026-09-21 (0.155.x 추정) |
-| `thread/start` 파라미터 = 전부 선택(`threadId` 없음) — `approvalPolicy` · `approvalsReviewer` · `baseInstructions` · `config` · `cwd` · `developerInstructions` · `ephemeral` · `model` · `modelProvider` · `personality` · `sandbox` · `serviceName` · `serviceTier` · `sessionStartSource` · `threadSource`. ★`input` · `clientUserMessageId` 는 여기 없다★ — 이 줄의 옛 판은 `turn/start` 의 칸을 여기 적었다(우리 구조체도 둘을 가른다 — `backend/codex/protocol.rs` 의 `ThreadStartParams` · `TurnStartParams`) | 소스 (0.156.1 스키마) |
-| `turn/start` 파라미터 = 필수 `threadId` · `input` + 선택 `clientUserMessageId` · `turnTrigger` · `toolOutput` · `cwd`(턴 단위 덮어쓰기) 등 | 소스 (0.156.1 스키마) |
-| `thread/resume` 는 `threadId` 만 필수. 선택 인자 다수 — `cwd` · `model` · `sandbox` · `approvalPolicy` · `excludeTurns` · `initialTurnsPage` · `personality` 등 | 소스 |
-| `excludeTurns: true` = `thread.turns` 를 안 채우고 메타데이터와 live-resume 상태만 준다. **이력 전량 하이드레이션은 deprecated** 이고 `thread/turns/list`·`thread/items/list` 와 함께 쓰라고 스키마가 안내한다 | 소스 |
-| 우선순위 규칙: 비실행 스레드는 `history` > 비어있지 않은 `path` > `threadId`. `threadId` 가 **실행 중인** 스레드를 가리키면 거기 재합류하고 `path` 는 일치 검사로만 쓰인다 | 소스 |
-| **sub-agent 스레드는 단독 resume 이 거부된다** — 부모를 먼저 resume 하거나 `thread/read` 로 들여다봐야 한다 | 소스 |
-| `thread/*` 메서드가 70여 개 있다 (`thread/read` · `thread/turns/list` · `thread/items/list` · `thread/search` · `thread/fork` · `thread/archive` · `thread/delete` …) | 소스 |
-| `history` · `path` 인자는 **UNSTABLE** 로 표시돼 있다(`history` 는 Codex Cloud 전용, 스키마가 "DO NOT USE" 라 적는다) | 소스 |
+| **Terminal mode has threads too — what is missing is a channel that tells us about them.** Attaching works with the `codex resume <thread id>` subcommand (measured 0.155.0 — the same id is preserved and the record is appended). Echo is not applicable | source · measured |
+| ★**You can ask the OS for the id of a running thread**★ — the codex process runs **holding open** `$CODEX_HOME/thread-writer-locks/<thread id>.lock`. The holder is `codex.exe` itself, not a wrapper, and the file is 0 bytes, so only the name is information. We measured it appearing 0.735 · 0.879 · 0.907 · 1.891 seconds after launch (plus one 21-second case that did not reproduce), which is **before the first turn** | measured 2026-09-21 (0.155.x estimated) |
+| **A dead lock and a live lock can be told apart** — after killing the owning process, asking about the same file gives holder 0. codex itself also sweeps away dead locks at launch. Administrator rights are not needed | measured 2026-09-21 (0.155.x estimated) |
+| **`CODEX_HOME` applies only to the process it is set on** — the lock folder above also moves along under that home. The lock folder's name · layout is **not documented** — if upstream changes it, we get not an error but silently 0 candidates | measured 2026-09-21 (0.155.x estimated) |
+| ★**The record side has no PID**★ — none of the rollout JSONL · the 40 columns of `state_5.threads` · `sandbox.*.log` has pid · ppid · tty · host · command line · environment variables (exhaustive sweep). From the disk records alone, you cannot build 「이 스레드가 우리 자식의 것인가」 | measured 2026-09-21 (0.155.x estimated) |
+| **`CODEX_INTERNAL_ORIGINATOR_OVERRIDE`** — an internal variable upstream does not document. The value we set stays as is in the `originator` field of the session record (3 arbitrary strings · no allowlist rejection). If it goes away, it is silently ignored, not an error | measured (0.155.1) |
+| **Text passed as `developer_instructions` stays verbatim in the rollout** — but does not go to the sqlite side | measured 2026-09-21 (0.155.x estimated) |
+| ★**`codex resume <값>` does not fail even when wrong**★ — given a string it cannot read as a thread id, it reinterprets it as a **session name**, **quietly creates a new session**, ends with exit code `0`, and the turn is billed. It is **the opposite in nature** to the app-server's `thread/resume` (unknown id → `-32600` error), so the two modes must not be handled by the same rule | measured 2026-09-21 (0.155.x estimated) |
+| `thread/start` parameters = all optional (no `threadId`) — `approvalPolicy` · `approvalsReviewer` · `baseInstructions` · `config` · `cwd` · `developerInstructions` · `ephemeral` · `model` · `modelProvider` · `personality` · `sandbox` · `serviceName` · `serviceTier` · `sessionStartSource` · `threadSource`. ★`input` · `clientUserMessageId` are not here★ — the old edition of this row wrote the fields of `turn/start` here (our structs also keep the two apart — `ThreadStartParams` · `TurnStartParams` of `backend/codex/protocol.rs`) | source (0.156.1 schema) |
+| `turn/start` parameters = required `threadId` · `input` + optional `clientUserMessageId` · `turnTrigger` · `toolOutput` · `cwd` (per-turn override) etc. | source (0.156.1 schema) |
+| `thread/resume` requires only `threadId`. Many optional arguments — `cwd` · `model` · `sandbox` · `approvalPolicy` · `excludeTurns` · `initialTurnsPage` · `personality` etc. | source |
+| `excludeTurns: true` = does not fill `thread.turns` and gives only metadata and the live-resume state. **Full-history hydration is deprecated**, and the schema advises using it together with `thread/turns/list` · `thread/items/list` | source |
+| Priority rule: for a non-running thread, `history` > a non-empty `path` > `threadId`. If `threadId` points to a thread that **is running**, it rejoins there and `path` is used only for a match check | source |
+| **A sub-agent thread is refused a standalone resume** — you must resume the parent first or peek with `thread/read` | source |
+| There are 70-odd `thread/*` methods (`thread/read` · `thread/turns/list` · `thread/items/list` · `thread/search` · `thread/fork` · `thread/archive` · `thread/delete` …) | source |
+| The `history` · `path` arguments are marked **UNSTABLE** (`history` is Codex Cloud only; the schema writes "DO NOT USE") | source |
 
-★**위 표의 「소스」 줄은 로컬에서 대조할 수 있다**★ — `codex app-server generate-json-schema` 가 설치된 그 버전의 스키마를 뽑는다(`thread/start` · `turn/start` 줄이 그렇게 0.156.1 로 대조됐다 — 두 파라미터 목록이 뒤섞여 있던 옛 판을 그 대조가 잡았다).
+★**The 「소스」 rows of the table above can be checked against local**★ — `codex app-server generate-json-schema` extracts the schema of that installed version (the `thread/start` · `turn/start` rows were checked against 0.156.1 that way — that check caught the old edition in which the two parameter lists were mixed up).
 
-★**위 표의 `(0.155.x 추정)` 은 그 라운드가 적어 둔 버전이 아니다**★ — 그 줄들이 나온 **ADR-0218 라운드 기록에 버전 문자열이 없다**(`docs/decisions/0218-…` 전문 · `docs/process/step-log.md:2445` 이하). 앞뒤 기록이 설치본을 `0.155.1` 로 적고 있어 그 사이로 끼운 것이다 — 전날 ADR-0216 이 `codex --version` 으로 확인했고, **같은 날 먼저 선 ADR-0217** 이 자기 실측을 `codex-cli 0.155.1` 이라 적는다(그 라운드가 0217 → 0218 로 갈아탄 경위 = step-log:2447). 이 문서를 고치는 2026-09-22 에 다시 물어도 `codex-cli 0.155.1` 이다. ★**그래도 「그 라운드가 0.155.1 이었다」는 실측이 아니라 양쪽 관측 사이를 이은 추론이다**★ — 되재면 `추정` 을 떼고 실측값을 적는다.
+★**The `(0.155.x 추정)` (shown as "(0.155.x estimated)") in the table above is not a version that round wrote down**★ — **the ADR-0218 round's record has no version string** (the full text of `docs/decisions/0218-…` · `docs/process/step-log.md:2445` and below). The records before and after write the installed one as `0.155.1`, so we slotted it in between — the day before, ADR-0216 confirmed with `codex --version`, and **ADR-0217, which stood first the same day,** writes its own measurement as `codex-cli 0.155.1` (how that round switched from 0217 to 0218 = step-log:2447). Asking again on 2026-09-22, when this document is being fixed, still gives `codex-cli 0.155.1`. ★**Even so, 「그 라운드가 0.155.1 이었다」 is not a measurement but an inference bridging the observations on both sides**★ — when it is measured again, drop `추정` and write the measured value.
 
 ### gemini
 
-붙인 적이 없다. 명령 변형도 갈림 표 항목도 없어 **도달 불가**이고, 이 문서에 적을 관측이 하나도 없다.
+We have never attached it. There is neither a command variant nor an item in the divergence table, so it is **unreachable**, and there is not a single observation to write in this document.
 
-## 3. 승인·권한
+## 3. Approval and permissions
 
 | | claude | codex (app-server) |
 |---|---|---|
-| **승인 요청이 오나** | 우리는 `--permission-mode bypassPermissions` 로 무조건 주입해 안 오게 한다 (소스 · ADR-0097) | `thread/start`·`thread/resume` 에 `approvalPolicy`·`sandbox` 를 넘긴다. **실제 요청이 오는 경로는 우리가 실행해 본 적이 없다** — 미확인 |
+| **Do approval requests arrive** | We unconditionally inject `--permission-mode bypassPermissions` so they do not arrive (source · ADR-0097) | We pass `approvalPolicy` · `sandbox` to `thread/start` · `thread/resume`. **We have never run the path on which a real request arrives** — unverified |
 
-## 3.5. 붙일 때 밟는 함정 (피어 구현이 주석으로 남긴 것)
+## 3.5. Traps to step on when attaching (left as comments by peer implementations)
 
-- ★**codex 항목은 두 번 온다**★ — `item/started` 와 `item/completed` 로 같은 항목이 두 번 도착한다. 중복 제거 없이 렌더하면 두 벌 뜬다 (피어 구현이 그 가드를 둔다).
-- ★**`thread/list` 행의 `cwd` 는 optional 이다**★ — 없는 행을 「cwd 가 같다」로 취급하면 엉뚱한 스레드에 매칭된다. cwd 로 거를 땐 **없는 행을 버리고**, 목록 상한을 넉넉히 잡는다(대부분 행이 다른 cwd 라 기본 상한으론 못 찾는다).
-- **`thread.sessionId` 와 `thread.id` 가 같은 값으로 관측된다** — 둘이 항상 같다는 보장은 확인 못 했다. 하나를 다른 하나의 대용으로 쓰지 말 것 (관측).
-- **claude 의 transcript 파일명 UUID 는 세션 id 와 다를 수 있다** — id 로 파일 경로를 조립하는 코드는 깨진다. 경로가 필요하면 경로를 따로 들고 다닌다 (피어 구현의 실제 회귀).
-- **파일을 원자적으로 바꾸는 것과 내구성은 다르다** — rename 은 읽는 쪽엔 원자적이지만 fsync 없이는 전원이 끊기면 옛 내용이나 빈 파일이 남는다 (피어 구현 주석).
+- ★**A codex item arrives twice**★ — the same item arrives twice as `item/started` and `item/completed`. Rendering without deduplication shows two copies (the peer implementation has a guard for it).
+- ★**The `cwd` of a `thread/list` row is optional**★ — treating a row without it as 「cwd 가 같다」 matches the wrong thread. When filtering by cwd, **discard rows without it** and set the list limit generously (most rows have a different cwd, so the default limit cannot find it).
+- **`thread.sessionId` and `thread.id` are observed to be the same value** — we have not confirmed a guarantee that the two are always the same. Do not use one as a stand-in for the other (observed).
+- **The transcript file name UUID of claude can differ from the session id** — code that assembles a file path from the id breaks. If you need the path, carry the path separately (an actual regression in a peer implementation).
+- **Replacing a file atomically is different from durability** — a rename is atomic to the reader, but without fsync a power cut leaves the old content or an empty file (peer implementation comment).
 
-## 4. 미확인 — 다음 조사 대상
+## 4. Unverified — the next research targets
 
-- **claude 쪽 칸 다수** — 위 표에서 `미확인` 인 줄 전부. claude 는 오래 써 왔지만 이 축들을 정리해 둔 적이 없다.
-- ★**크래시 창을 어떻게 메울지 — 설계가 없다**★. 입양이 답이 아니라는 것만 확정됐다(§1). ★id 쪽도 다 닫히지 않았다★ — 남는 창은 §1 참조(「codex 에만 있는 위험」). 메시지 내용의 내구성은 여전히 없다. 후보 = 보내기 전에 우리 쪽에 먼저 적는 내구 기록(스레드 id · 우리 메시지 id · 보낸 내용 · 상태를 한 덩어리로).
-- **애매한 끊김에서의 복구** — codex 는 요청을 받았는데 우리가 응답을 못 받(거나 적기 전에 죽)은 구간. 위 「멱등 아님」과 맞물려 **재전송이 안전하지 않다**.
-- **archive 된 스레드**를 우리가 만나면 어떻게 보이나 — resume 이 막힌다는 것만 안다.
-- **같은 스레드를 둘이 동시에 열면** 어떻게 되나 — 소유권 규칙 미확인.
-- **rollout 파일이 손상·누락됐을 때** 의 동작 미확인.
-- **재시작 후 `CODEX_HOME` 이 달라지면** 이어붙이기가 통째로 실패한다 — 우리가 그 값을 고정하고 있는지 확인 안 했다.
-- **한 codex 프로세스가 writer 락을 둘 이상 쥐는 경우가 있나** — 미측정. 이 값이 「없다」로 확정되기 전에는 락 홀더로 스레드를 고르는 쪽이 그 경우를 거절해야 한다.
-- **`codex exec` 가 writer 락을 만드나** — 미측정(우리 경로는 TUI 라 당장은 무관).
-- **hosted/cloud 백엔드가 비-UUID thread id 를 주나** — 로컬 app-server 는 비-UUID 를 거부하지만 벤더 주석이 「codex 가 발급한 id 는 UUIDv7」로 한정한다.
-- **rollout 파일 정리(GC)·보존 정책** — 「만료 없음」은 성공 1회에 근거한 하한이다.
+- **Many cells on the claude side** — every row marked `미확인` (unverified) in the tables above. We have used claude for a long time but have never sorted out these axes.
+- ★**How to fill the crash window — there is no design**★. Only this was settled: adoption is not the answer (§1). ★The id side is not fully closed either★ — for the window that remains see §1 (「codex 에만 있는 위험」). There is still no durability for the message content. Candidate = a durable record written on our side first, before sending (thread id · our message id · the content sent · the state as one unit).
+- **Recovery from an ambiguous disconnect** — the span in which codex received the request but we did not get the response (or died before writing it down). Interlocked with 「멱등 아님」 above, **resending is not safe**.
+- **How an archived thread** looks when we meet it — we only know that resume is blocked.
+- **What happens if two open the same thread at the same time** — the ownership rule is unverified.
+- Behavior **when the rollout file is damaged or missing** is unverified.
+- **If `CODEX_HOME` differs after a restart**, attaching fails altogether — we have not checked whether we pin that value.
+- **Is there a case where one codex process holds two or more writer locks** — unmeasured. Until this value is settled as 「없다」, the side that picks a thread by lock holder must reject that case.
+- **Does `codex exec` create a writer lock** — unmeasured (our path is the TUI, so it is irrelevant for now).
+- **Does a hosted/cloud backend give a non-UUID thread id** — the local app-server rejects non-UUIDs, but the vendor comment limits it to 「codex 가 발급한 id 는 UUIDv7」.
+- **Rollout file cleanup (GC) · retention policy** — 「만료 없음」 is a lower bound based on one success.
 
-## 조사 방법 메모 (다음 사람이 싸게 하도록)
+## Research method notes (so the next person does it cheaply)
 
-- ★**벤더 CLI 는 `--help` 로 스키마 내보내기 서브커맨드를 먼저 찾는다**★ — codex 는 `codex app-server generate-json-schema` · `generate-ts` 가 있어 **우리가 쓰는 바로 그 버전의 스펙**을 뽑는다. GitHub main 보다 정확하다.
-- ★**「이 백엔드에 X API 가 있나」는 API 문서보다 그것을 쓰는 클라이언트 클론을 먼저 grep 한다**★ — 존재뿐 아니라 실제 파라미터와 함정까지 같이 나온다. 클론 위치 = `../../../Engram_Workspace/opensource/`(repo 밖 · 미추적).
-- 웹 검색은 이 부류에서 수확이 낮았다 — 이슈 제목 말고는 결정적 근거를 준 적이 거의 없다.
+- ★**With a vendor CLI, first look in `--help` for a schema-export subcommand**★ — codex has `codex app-server generate-json-schema` · `generate-ts`, which extract **the spec of the very version we use**. It is more accurate than GitHub main.
+- ★**For 「이 백엔드에 X API 가 있나」, grep a client clone that uses it before the API docs**★ — not just existence but the real parameters and traps come out together. Clone location = `../../../Engram_Workspace/opensource/` (outside the repo · untracked).
+- Web search had a low yield in this class — it has almost never given decisive evidence beyond issue titles.
 
-## 출처
+## Sources
 
-벤더 소스는 `openai/codex` 의 `codex-rs/protocol/src/thread_id.rs` · `codex-rs/app-server-protocol/src/protocol/v2/thread.rs` · `codex-rs/app-server/README.md` · `codex-rs/tui/src/chatwidget/`. 공개 문서는 `learn.chatgpt.com/docs/app-server`(★예시가 실제와 어긋난다★). 피어 구현은 위 클론의 `paseo`(codex app-server 실사용) · `orca`(에코 매칭·durability 주석).
+The vendor sources are `codex-rs/protocol/src/thread_id.rs` · `codex-rs/app-server-protocol/src/protocol/v2/thread.rs` · `codex-rs/app-server/README.md` · `codex-rs/tui/src/chatwidget/` of `openai/codex`. The public documentation is `learn.chatgpt.com/docs/app-server` (★its examples differ from reality★). The peer implementations are `paseo` (real use of the codex app-server) and `orca` (echo matching · durability comments) in the clone above.

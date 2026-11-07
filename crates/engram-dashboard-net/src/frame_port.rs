@@ -1,32 +1,32 @@
-//! 불투명 프레임 포트 — 네트워크 행과 위층 사이의 계약(ADR-0129).
+//! Opaque frame port — the contract between the network row and the upper layer (ADR-0129).
 //!
-//! 여기 정의된 계약이 아는 프레임 어휘는 아래 `Frame` 이 전부다. 프로토콜 디코드·인코딩과 그 타입들은
-//! 이 계약에 들어오지 않는다 — 그 어휘의 소비자는 위층(데몬 crate 의 `agent_conn`)이고, 이 crate 안에
-//! 남은 예외는 lib.rs 헤더가 기록한다.
-//! 계약(trait)은 아래층인 네트워크 행이 소유하고 실물은 양쪽이 나눠 꽂는다 — `FrameSink`(연결당
-//! 출구)와 `FrameFanout`(전-연결 출구)은 네트워크 행(`ws::ConnFrameSink`·`ws::ConnRegistry`)이,
-//! `ConnectionHandler`/`ConnectionHandlerFactory` 는 위층이 구현한다(ADR-0110 의 포트 소유 idiom과
-//! 같은 결).
+//! The frame vocabulary the contract defined here knows is only `Frame` below. Protocol decode/encode and its types do not
+//! enter this contract — the consumer of that vocabulary is the upper layer (`agent_conn` in the daemon crate), and the
+//! exception left inside this crate is recorded by the lib.rs header.
+//! The contract (trait) is owned by the lower layer, the network row, and the concrete parts are plugged in by both sides — `FrameSink` (the
+//! per-connection exit) and `FrameFanout` (the all-connection exit) are implemented by the network row (`ws::ConnFrameSink`·`ws::ConnRegistry`),
+//! `ConnectionHandler`/`ConnectionHandlerFactory` by the upper layer (the same vein as the port-ownership idiom
+//! of ADR-0110).
 
 use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
 
-/// 연결 식별자(단조 증가). 두 포트 trait 의 모든 메서드가 이걸 받는다 — 그래서 carrier 구현이 아니라
-/// 포트 쪽에 산다.
+/// Connection identifier (monotonically increasing). Every method of the two port traits takes it — so it lives on the
+/// port side, not in a carrier implementation.
 pub type ConnId = u64;
 
-/// 연결당 단일 writer 큐로 흐르는 출력 단위 — 프레임 어휘는 이 셋이 전부다.
+/// The output unit flowing into the single per-connection writer queue — these three are the whole frame vocabulary.
 #[derive(Debug)]
 pub enum Frame {
     Text(String),
     Binary(Vec<u8>),
-    /// 연결 종료 — writer 가 이걸 받으면 close 후 루프를 나간다. 큐 **안**으로 들어가므로 앞서 넣은
-    /// 프레임이 먼저 다 나간다(FIFO). `reason` 은 로그/디버깅용이라 클라에 전달되지 않는다.
+    /// Connection end — when the writer receives this it closes and leaves the loop. It enters **into** the queue, so the
+    /// frames put in earlier all go out first (FIFO). `reason` is for logs/debugging and is not delivered to the client.
     Close(String),
 }
 
-/// 프레임 큐잉 실패 — 연결 송신 큐가 포화이거나 이미 닫혔다.
+/// Frame queuing failed — the connection send queue is saturated or already closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameError;
 
@@ -38,129 +38,129 @@ impl std::fmt::Display for FrameError {
 
 impl std::error::Error for FrameError {}
 
-/// 한 연결로 나가는 프레임의 유일한 출구. 위층은 이걸로만 내보내므로 네트워크 행은 실린 내용의
-/// 어휘를 모른다.
+/// The only exit for frames leaving on one connection. The upper layer sends only through this, so the network row does not know the
+/// vocabulary of what is carried.
 ///
-/// ★두 메서드는 포화 시 **다르게 행동한다**(load-bearing 비대칭)★:
-/// - `try_send` = **논블록 전용**. 출력 pump 스레드·status 콜백 같은 block 금지 경로에서 불린다.
-///   포화면 즉시 `FrameError` 이고, 구현은 그 순간 큐 **밖**의 종료 신호를 울려야 한다 — 포화
-///   상태에선 `Frame::Close` 조차 큐에 못 들어가 좀비 연결이 되기 때문이다(`ws` 모듈 헤더).
-/// - `send` = async 문맥 전용, backpressure 허용(자리가 날 때까지 대기). 여기서는 종료 신호를
-///   **울리지 않는다** — 기다릴 수 있는 호출자라 슬로우 소비자 판정 대상이 아니다.
+/// ★The two methods **behave differently** on saturation (load-bearing asymmetry)★:
+/// - `try_send` = **non-blocking only**. Called from paths where blocking is forbidden, such as the output pump thread and status callbacks.
+///   On saturation it is an immediate `FrameError`, and the implementation must ring the close signal **outside** the queue at that moment — because in the saturated
+///   state even `Frame::Close` cannot enter the queue and the connection becomes a zombie (the `ws` module header).
+/// - `send` = async context only, backpressure allowed (waits until a slot opens). It does **not ring** the close signal here
+///   — the caller can wait, so it is not a candidate for a slow-consumer decision.
 pub trait FrameSink: Send + Sync {
     fn try_send(&self, frame: Frame) -> Result<(), FrameError>;
 
     fn send(&self, frame: Frame) -> BoxFuture<'_, Result<(), FrameError>>;
 }
 
-/// 등록된 연결 **전부**를 대상으로 같은 text 를 미는 전-연결 팬아웃 표면(실제 배달은 아래 의무 2·3
-/// 대로 best-effort). 불투명 프레임 구멍의 두 번째 모양이다 — 연결당은 위 `FrameSink`, 전-연결은
-/// 이것(ADR-0129 결정 1의 2026-08-04 note).
+/// An all-connection fanout surface that pushes the same text to **all** registered connections (actual delivery is best-effort per
+/// duties 2 and 3 below). The second shape of the opaque frame hole — per connection is `FrameSink` above, all-connection is
+/// this (the 2026-08-04 note of ADR-0129 decision 1).
 ///
-/// ★`Frame` 이 아니라 `String` 인 이유★: 이 포트로 넘어오는 것은 위층이 **이미 인코딩해 둔 text** 하나다
-///   (무엇을 인코딩한 것인지는 위층 사정이고 이 계약의 관심사가 아니다). `Frame` 으로 넓히면
-///   `Frame::Close` 를 전 연결에 흘리는 것 — 즉 **전-연결 수명 조작** — 이 위층에서 표현 가능해지는데,
-///   연결 수명은 네트워크 행이 소유하는 관심사다. 좁은 타입이 그 조작을 애초에 표현 불가로 만든다.
-///   덧붙여 `Frame` 은 `Clone` 이 아니므로, 팬아웃 구현이 연결마다 복제하려면 페이로드를 다시 꺼내
-///   감싸야 한다 — 좁은 타입은 그 복제 루프도 정직하게 유지한다.
+/// ★Why `String` and not `Frame`★: what comes through this port is one **already-encoded text** from the upper layer
+///   (what was encoded is the upper layer's business and not this contract's concern). Widening to `Frame` would make
+///   pushing `Frame::Close` to all connections — that is, **an all-connection lifetime operation** — expressible in the upper layer,
+///   but connection lifetime is a concern owned by the network row. The narrow type makes that operation inexpressible in the first place.
+///   In addition, `Frame` is not `Clone`, so for a fanout implementation to copy it per connection it would have to take the payload back out and
+///   wrap it again — the narrow type keeps that copy loop honest too.
 ///
-/// ★구현 의무 셋 — 위층 동작이 여기 걸려 있다★:
-/// 1. **논블록**. 코어의 동기 스레드(pump/manager 의 상태 콜백)에서도 불린다. 여기서 block 하면
-///    에이전트 출력 pump 가 통째로 선다.
-/// 2. **연결 하나의 실패가 나머지를 막지 않는다**. 큐가 포화한 연결은 건너뛰고 남은 연결에 계속
-///    배달해야 한다 — 어기면 슬로우 클라 하나가 전 클라의 갱신을 세운다.
-/// 3. **실패를 호출자에게 알리지 않는다**(반환값 없음). 누가 못 받았는지는 이 포트로 관측되지
-///    않으므로 호출자는 배달을 전제해선 안 된다.
+/// ★Three implementation duties — upper-layer behavior hangs on them★:
+/// 1. **Non-blocking**. It is also called from the core's sync threads (the status callback of the pump/manager). If it blocks here,
+///    the agent output pump stops entirely.
+/// 2. **One connection's failure does not block the rest**. A connection whose queue is saturated must be skipped and delivery must
+///    continue to the remaining connections — violate this and one slow client stalls updates for all clients.
+/// 3. **Failure is not reported to the caller** (no return value). Who failed to receive is not observable through this port, so the
+///    caller must not presume delivery.
 ///
-/// ★`FrameSink::try_send` 와의 비대칭(load-bearing)★: 연결당 `try_send` 는 포화를 만나면 그 연결의
-///   종료 신호를 울리지만, **팬아웃의 포화는 연결 종료로 잇지 않는다**. 겨냥한 연결이 없는 호출이라
-///   슬로우 소비자 판정을 여기 얹지 않는다는 뜻이고, 바꾸려면 별도 결정이 필요하다.
+/// ★Asymmetry with `FrameSink::try_send` (load-bearing)★: per-connection `try_send` rings that connection's
+///   close signal on saturation, but **fanout saturation does not lead to connection close**. Since the call targets no particular connection,
+///   it means no slow-consumer decision is put on it here, and changing that needs a separate decision.
 pub trait FrameFanout: Send + Sync {
     fn broadcast_text(&self, text: String);
 }
 
-/// 프레임 하나를 처리한 뒤 수신 루프가 할 일.
+/// What the receive loop does after handling one frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnFlow {
     Continue,
-    /// 수신 루프를 빠져나와 이 연결을 닫는다(예: StopDaemon·프로토콜 위반).
+    /// Leave the receive loop and close this connection (e.g. StopDaemon · protocol violation).
     Close,
 }
 
-/// 도착순 줄이 **가득 찬 상태에서** 들어온 프레임 하나의 처분 — 위층이 정한다.
+/// The disposition of one frame that arrived **while the arrival-order queue is full** — the upper layer decides.
 ///
-/// ★왜 위층인가★: 「이것은 줄 뒤에서 굶으면 안 되는 것인가」는 프레임의 **뜻**을 알아야 하는 판정인데,
-///   네트워크 행은 에이전트 어휘를 타입으로도 모른다(ADR-0129). 그래서 포화 순간에만 되묻는다.
+/// ★Why the upper layer★: 「이것은 줄 뒤에서 굶으면 안 되는 것인가」 (must this not starve behind the queue) is a decision that needs to know the **meaning** of a frame, and
+///   the network row does not know the agent vocabulary even as a type (ADR-0129). So it asks back only at the moment of saturation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Saturated {
-    /// 굶으면 안 되는 프레임 — 도착순 줄을 **건너뛰어** 따로 처리한다. 즉 이 프레임은 앞서 줄에 든
-    /// 것들보다 먼저 처리될 수 있다.
+    /// A frame that must not starve — it **skips** the arrival-order queue and is handled separately. That is, this frame may be handled
+    /// before those that entered the queue earlier.
     Bypass,
-    /// 위층이 **이미 거절을 답장했다** — 네트워크 행은 이 프레임을 버리고 계속 읽는다.
+    /// The upper layer **has already replied with a refusal** — the network row drops this frame and keeps reading.
     Refused,
-    /// 위층이 거절을 **답장하지 못했다**(그 연결의 송신 큐도 포화이거나 닫혔다) — 네트워크 행은 이
-    /// 프레임을 버리고 **연결을 끝낸다**.
+    /// The upper layer **could not reply with a refusal** (that connection's send queue is also saturated or closed) — the network row drops this
+    /// frame and **ends the connection**.
     ///
-    /// ★[`Refused`](Self::Refused) 와 갈라 두는 이유★: 저쪽의 「버리고 계속 읽는다」가 성립하는 근거는
-    ///   **보낸 쪽이 답을 받는다**는 것 하나뿐이다(아래 의무 2). 답장이 실패했는데 같은 값을 돌려주면
-    ///   네트워크 행은 없는 답장을 믿고 프레임을 버리고, 보낸 쪽은 **명령도 그 거절도** 받지 못한 채
-    ///   자기 마감시각까지 기다린다 — 조용한 유실이 바로 이 갈래로 되돌아온다.
-    /// ★끊는 것이 맞는 이유★: 이 값이 나오는 상황은 **양쪽 큐가 동시에 포화**다. 그 연결로는 더 받을
-    ///   수도 더 답할 수도 없으므로, 송신 큐 포화가 이미 고른 처분([`FrameSink::try_send`] 의 비대칭)과
-    ///   같은 자리로 수렴한다 — 「답장을 만들 수 없으면 끊는다」.
+    /// ★Why it is kept apart from [`Refused`](Self::Refused)★: the only basis on which that one's 「버리고 계속 읽는다」 (drop and keep reading) holds is
+    ///   that **the sender gets a reply** (duty 2 below). If the reply failed and we returned the same value, the
+    ///   network row would trust a reply that does not exist and drop the frame, and the sender would wait until its own deadline
+    ///   receiving **neither the command nor its refusal** — silent loss returns through exactly this branch.
+    /// ★Why cutting is right★: this value arises when **both queues are saturated at once**. That connection can neither receive
+    ///   more nor reply more, so it converges to the same place as the disposition send-queue saturation already chose (the asymmetry of [`FrameSink::try_send`]) —
+    ///   「답장을 만들 수 없으면 끊는다」 (if no reply can be made, cut).
     Unanswered,
 }
 
-/// 한 연결의 수명 이벤트를 받는 위층 핸들러. 네트워크 행은 소켓과 프레임만 다루고 "그 프레임이
-/// 무슨 뜻인가" 는 전부 이 trait 뒤로 넘긴다.
+/// The upper-layer handler that receives one connection's lifetime events. The network row handles only sockets and frames and hands off
+/// "what that frame means" entirely behind this trait.
 ///
-/// ★호출 순서★: `on_connect` → (`on_text` | `on_binary`)\* → `on_disconnect`. 연결당 `on_connect`·
-///   `on_disconnect` 는 각 1회, 가운데는 0회 이상이다.
+/// ★Call order★: `on_connect` → (`on_text` | `on_binary`)\* → `on_disconnect`. Per connection `on_connect` and
+///   `on_disconnect` are each once, and the middle is zero or more.
 ///
-/// ★★가운데 호출들의 계약 — **도착 순서대로, 서로 겹치지 않게**★★: 네트워크 행은 연결마다 단일
-///   소비자 task 하나로 이 둘을 부른다. 앞 호출이 반환하기 전에 다음 호출이 시작되는 일은 없고,
-///   순서는 소켓에 도착한 순서다. 구현의 순서 불변식(같은 대상에 대한 연속 입력 · 권한 획득과 그
-///   뒤의 사용 · 구독과 그 해지 · 등록과 그 차분)은 **전부 이 한 성질 위에 서 있다.**
-/// ★그 계약의 **유일한 예외 = 구현이 스스로 고른 것**★: 수신 줄이 포화일 때 구현이
-///   [`Saturated::Bypass`] 를 고른 프레임은 별도 task 에서 처리되므로, 줄에 든 것들보다 **먼저 그리고
-///   겹쳐서** 돌 수 있다. 예외를 만드는 쪽도 그 대가를 아는 쪽도 구현이다 — 네트워크 행은 어느
-///   프레임이 그래도 되는지 판단하지 않는다([`ConnectionHandler::on_inbound_saturated`]).
-/// ★그 대가 = 이 호출이 오래 걸리면 그 연결의 **다음 프레임도 함께 늦는다**★. 소켓에서 꺼내는 일은
-///   더 이상 막히지 않지만(읽기 루프는 따로 돈다) 처리 줄은 하나다. 그래서 **오래 걸리는 일을 이
-///   줄에서 떼는 판단은 구현의 몫**이다 — 순서가 뜻을 갖지 않는 작업이라고 스스로 판정한 것만
-///   `spawn` 해 내보내고, 그 판정 근거를 그 자리에 적어야 한다. 네트워크 행은 어느 프레임이 오래
-///   걸리는지 알 수 없으므로(어휘를 모른다) 그 분류를 대신해 줄 수 없다.
+/// ★★Contract of the middle calls — **in arrival order, never overlapping**★★: the network row calls these two from one
+///   single-consumer task per connection. The next call never starts before the previous one returns, and
+///   the order is the order of arrival on the socket. The implementation's ordering invariants (consecutive inputs to the same target · acquiring a permission and
+///   its later use · a subscription and its release · a registration and its diff) **all stand on this one property.**
+/// ★The contract's **only exception = what the implementation chooses itself**★: a frame for which the implementation chose
+///   [`Saturated::Bypass`] when the receive queue is saturated is handled in a separate task, so it can run **before and
+///   overlapping** those in the queue. The implementation both makes the exception and is the one that knows its cost — the network row does not judge which
+///   frame may do so ([`ConnectionHandler::on_inbound_saturated`]).
+/// ★The cost = if this call takes long, **that connection's next frames are delayed with it**★. Taking from the socket
+///   no longer blocks (the read loop runs separately) but the handling queue is one. So **the judgment to detach long-running work from this
+///   queue is the implementation's** — only work it has itself judged to have no meaningful order may be
+///   `spawn`ed out, and the grounds for that decision must be written on the spot. The network row cannot know which frame takes
+///   long (it does not know the vocabulary), so it cannot do that classification on its behalf.
 ///
-/// ★`on_disconnect` 는 조용한 시점이 **아니다** — 구현이 반드시 알아야 하는 잔여 경쟁★:
-///   네트워크 행은 이 호출 직전에 살아남은 task 에 `abort()` 를 걸지만 그 완료를 기다리지 않는다.
-///   `abort()` 는 취소 *요청*이라, 멀티 워커 런타임에서는 취소된 **디스패치 task** 가 아직
-///   `on_text`/`on_binary` 의 `.await` 안에 있을 수 있다 — 즉 그 호출과 `on_disconnect` 가 **겹칠 수
-///   있다**. 예: `on_disconnect` 가 구독 목록을 스냅샷한 **뒤** 등록된 구독은 정리에서 빠진다.
-///   ★구현이 `spawn` 해 내보낸 일은 이 `abort()` 가 **닿지도 않는다**★ — 그 task 는 네트워크 행이
-///   모르는 것이라 연결이 정리된 뒤에도 계속 돌 수 있다. 내보낸 일이 이 연결의 상태를 되살릴 수
-///   없게 만드는 것은 그것을 내보낸 구현의 책임이다.
-///   구현은 자기 상태를 스스로 동기화해야 하고 "이 시점엔 아무도 안 건드린다" 를 전제하면 안 된다.
-///   ★이 경쟁은 이 포트가 만든 것이 아니라 HEAD 도 동일하다★(정리 블록이 `handle_connection` 안에
-///   인라인이던 때도 abort 직후 그대로 실행됐다) — 닫을지 여부는 이 슬라이스 밖의 별도 결정이다.
+/// ★`on_disconnect` is **not** a quiet moment — a residual race the implementation must know★:
+///   Just before this call the network row calls `abort()` on the surviving tasks but does not wait for their completion.
+///   `abort()` is a cancel *request*, so on a multi-worker runtime the cancelled **dispatch task** may still be
+///   inside the `.await` of `on_text`/`on_binary` — that is, that call and `on_disconnect` **can
+///   overlap**. Example: a subscription registered **after** `on_disconnect` snapshots the subscription list is missed by the cleanup.
+///   ★Work the implementation `spawn`ed out is **not even reached** by this `abort()`★ — that task is unknown to the network row,
+///   so it may keep running after the connection is cleaned up. Making sure the sent-out work cannot
+///   revive this connection's state is the responsibility of the implementation that sent it out.
+///   The implementation must synchronize its own state and must not assume "nobody touches it at this point".
+///   ★This race was not made by this port; HEAD has it too★ (even when the cleanup block was inline in `handle_connection`, it ran
+///   right after abort as is) — whether to close it is a separate decision outside this slice.
 ///
-/// ★`&Arc<dyn FrameSink>` 인 이유★: 구현이 이 연결보다 오래 사는 sink(코어 subscribers 에 등록되는
-///   출력 sink)를 만들려면 `'static` 공유 핸들이 필요하다 — 빌린 참조로는 못 만든다.
-/// ★async 표현★: `async fn` in trait 은 dyn 호환이 아니므로 수동 `BoxFuture` 로 쓴다(새 의존 없이).
+/// ★Why `&Arc<dyn FrameSink>`★: for the implementation to build a sink that outlives this connection (an output sink
+///   registered in the core subscribers) it needs a `'static` shared handle — a borrowed reference cannot do it.
+/// ★async representation★: `async fn` in a trait is not dyn compatible, so it is written as a manual `BoxFuture` (with no new dependency).
 pub trait ConnectionHandler: Send + Sync {
-    /// 연결 직후 1회. 여기서 넣은 프레임이 **이 핸들러가 내보내는** 첫 출력이다.
+    /// Once, right after connect. A frame put in here is the first output **this handler emits**.
     ///
-    /// ★연결 전체의 첫 프레임이라는 뜻은 아니다★: 등록이 이 호출보다 앞서므로, 그 사이 전-연결
-    ///   팬아웃(`FrameFanout`)이 같은 큐에 먼저 넣었을 수 있다. FIFO 선두를 점유한다고 가정하지 말 것.
+    /// ★It does not mean the first frame of the whole connection★: registration precedes this call, so in between the all-connection
+    ///   fanout (`FrameFanout`) may have put frames into the same queue first. Do not assume it holds the FIFO head.
     ///
-    /// ★큐 소비자가 아직 없다 — 이게 호출자 쪽 조건이 아니라 **구현 쪽 의무**다★: 이 호출은
-    ///   writer task 가 **뜨기 전에** await 되므로 여기서 넣는 프레임은 아무도 빼가지 않는다.
-    ///   그래서 ① 프레임을 조금만 넣고 ② 그 밖의 이유로도 오래 block 하면 안 된다. 어기면
-    ///   `FrameSink::send` 가 영영 반환하지 않고, 그 연결은 **인증·등록된 채로 reader 도 writer 도
-    ///   타임아웃도 `on_disconnect` 도 없이** 남는다.
+    /// ★No queue consumer yet — this is not a caller-side condition but an **implementation-side duty**★: this call
+    ///   is awaited **before the writer task starts**, so frames put in here are taken by nobody.
+    ///   So ① put in only a few frames and ② do not block for long for any other reason either. Violate this and
+    ///   `FrameSink::send` never returns, and that connection remains **authenticated and registered but with no reader, no writer, no
+    ///   timeout and no `on_disconnect`**.
     ///
-    /// ★안전 상한을 숫자로 못 박을 수 없다★: 큐 용량(`ws::CONN_TX_CAP`)을 그 상한으로 읽지 말 것.
-    ///   연결은 이 호출 **전에** 이미 fanout 레지스트리에 등록되므로, 그 순간부터 전-연결 팬아웃
-    ///   (`FrameFanout`)이 같은 큐에 동시에 슬롯을 넣는다. 즉 실제 여유는 용량보다 **작고 가변**이다.
+    /// ★A safe upper bound cannot be nailed down as a number★: do not read the queue capacity (`ws::CONN_TX_CAP`) as that bound.
+    ///   The connection is registered in the fanout registry already **before** this call, so from that moment the all-connection fanout
+    ///   (`FrameFanout`) puts slots into the same queue concurrently. So the real headroom is **smaller than the capacity and variable**.
     fn on_connect<'a>(
         &'a self,
         conn_id: ConnId,
@@ -174,8 +174,8 @@ pub trait ConnectionHandler: Send + Sync {
         frames: &'a Arc<dyn FrameSink>,
     ) -> BoxFuture<'a, ConnFlow>;
 
-    /// 클라 → 데몬 binary 프레임. **어떤 프레임 종류가 유효한가는 위층 프로토콜의 판단**이라
-    /// 네트워크 행이 거부하지 않고 그대로 올린다.
+    /// Client → daemon binary frame. **Which frame kinds are valid is the upper-layer protocol's judgment**, so
+    /// the network row does not reject and passes it up as is.
     fn on_binary<'a>(
         &'a self,
         conn_id: ConnId,
@@ -183,23 +183,23 @@ pub trait ConnectionHandler: Send + Sync {
         frames: &'a Arc<dyn FrameSink>,
     ) -> BoxFuture<'a, ConnFlow>;
 
-    /// 도착순 줄이 **가득 찬 상태에서** text 프레임이 도착했을 때만 불린다 — 정상 경로의 비용은 0 이다.
+    /// Called only when a text frame arrives **while the arrival-order queue is full** — the normal-path cost is 0.
     ///
-    /// ★이 갈래가 없으면 무엇이 깨지나★: 줄이 찼을 때 읽기 루프가 그냥 기다리면, **그 뒤에 오는
-    ///   프레임은 소켓에서 꺼내지지도 않는다** — TCP 는 스트림이라 뒤엣것을 먼저 볼 방법이 없다. 그러면
-    ///   막힌 줄을 풀어 줄 수 있는 취소 명령조차 그 줄 뒤에서 굶는다. 그래서 「기다린다」 대신 이
-    ///   한 프레임의 처분을 위층에 물어 **읽기를 멈추지 않는다.**
+    /// ★What breaks without this branch★: if the read loop just waits when the queue is full, **the frames after it
+    ///   are not even taken from the socket** — TCP is a stream, so there is no way to see later ones first. Then
+    ///   even a cancel command that could unclog the blocked queue starves behind that queue. So instead of 「기다린다」 (waiting), it asks the
+    ///   upper layer for the disposition of this one frame and **does not stop reading.**
     ///
-    /// ★구현 의무 1 — 논블록·짧게★: sync 이고 읽기 루프 위에서 돈다. 여기서 I/O 를 하면 그만큼 소켓이
-    ///   선다. 실제 처리를 하지 말고 **분류만** 할 것.
-    /// ★구현 의무 2 — [`Saturated::Refused`] 를 고르면 답장은 **이미 보냈어야 한다**★: 네트워크 행은
-    ///   그 프레임을 버리고 계속 읽으므로, 답장이 없으면 보낸 쪽은 자기 마감시각까지 답도 오류도 받지
-    ///   못한다. 조용한 유실은 이 갈래의 목적이 아니다. ★그 답장 시도가 **실패했다면**
-    ///   [`Saturated::Unanswered`] 를 돌려줄 것★ — 결과를 버리고 `Refused` 를 돌려주면 그 의무를
-    ///   지킨 척하는 것이고, 네트워크 행에는 그것을 되짚을 수단이 없다.
-    /// ★구현 의무 3 — [`Saturated::Bypass`] 는 **순서를 포기해도 되는 것에만**★: 그 프레임은 줄에 이미
-    ///   든 것들보다 먼저·겹쳐서 처리된다(위 계약의 예외). 앞선 프레임과 인과가 있는 것에 이걸 고르면
-    ///   조용한 순서 결함이 된다.
+    /// ★Implementation duty 1 — non-blocking · short★: it is sync and runs on top of the read loop. Doing I/O here stalls the socket by
+    ///   that much. Do not do the actual handling; **only classify**.
+    /// ★Implementation duty 2 — if you choose [`Saturated::Refused`], the reply **must already have been sent**★: the network row
+    ///   drops that frame and keeps reading, so without a reply the sender gets neither an answer nor an error until its own
+    ///   deadline. Silent loss is not the purpose of this branch. ★If that reply attempt **failed**,
+    ///   return [`Saturated::Unanswered`]★ — discarding the result and returning `Refused` is pretending to have
+    ///   kept that duty, and the network row has no means to trace it back.
+    /// ★Implementation duty 3 — [`Saturated::Bypass`] only for **what may give up ordering**★: that frame is handled before and
+    ///   overlapping those already in the queue (the exception to the contract above). Choosing this for something causally linked to an earlier frame becomes
+    ///   a silent ordering defect.
     fn on_inbound_saturated(
         &self,
         conn_id: ConnId,
@@ -207,36 +207,36 @@ pub trait ConnectionHandler: Send + Sync {
         frames: &Arc<dyn FrameSink>,
     ) -> Saturated;
 
-    /// 연결 정리(구독 해제·자원 반납). 동기 — 정리 경로에 await 지점이 없다.
+    /// Connection cleanup (release subscriptions · return resources). Sync — the cleanup path has no await point.
     ///
-    /// ★구현 의무 — 반환 시점까지 자기가 만든 `FrameSink` 사본을 **전부 놓아야 한다**★: 이 포트를
-    ///   통해 만든 sink(특히 오래 사는 곳에 등록한 것)를 여기서 회수하지 않으면, 네트워크 행의 송신
-    ///   큐 사본이 살아남아 writer task 가 스스로 끝나지 못한다(연결이 끝나도 회수되지 않는 task).
-    ///   현 구현이 이 의무를 어떻게 지키는지, 그리고 그 회수를 놓치는 알려진 경쟁은
-    ///   데몬 crate 의 `agent_conn::AgentConnection::on_disconnect` 주석에 있다 — 위 abort-겹침 경쟁과
-    ///   같은 뿌리다.
+    /// ★Implementation duty — by the time it returns, **all** copies of the `FrameSink` it made must be released★: if the sinks made
+    ///   through this port (especially those registered in a long-lived place) are not reclaimed here, the network row's send
+    ///   queue copy survives and the writer task cannot end by itself
+    ///   (a task that is not reclaimed even when the connection ends).
+    ///   How the current implementation keeps this duty, and the known race that misses that reclaim, are in the
+    ///   comment of `agent_conn::AgentConnection::on_disconnect` in the daemon crate — the same root as the abort-overlap race above.
     ///
-    /// ★이 시점 이 연결은 아직 fanout 레지스트리에 남아 있다★(등록 해제는 네트워크 행이 이 호출
-    /// **뒤에** 한다). 다만 여기서 나가는 브로드캐스트가 **자기 자신에게 배달된다고 전제할 수 없다**
-    /// — 사실상 대개 버려지지만 보장은 아니다:
-    /// - writer 가 **먼저 끝난 갈래**에서는 큐의 수신단이 이미 사라져 확실히 버려진다.
-    /// - reader 가 먼저 끝난 갈래에서는 writer 가 `abort()` **표시만** 된 상태라, 취소가 실제로
-    ///   먹기 전에 이미 큐에 든 프레임을 집어 소켓으로 내보낼 수 있다.
-    /// 그래서 안전한 방향 하나만 지키면 된다 — **자기 배달을 전제로 한 정리 로직을 쓰지 말 것.**
+    /// ★At this point this connection is still in the fanout registry★ (the network row unregisters **after** this
+    /// call). Still, a broadcast going out from here **cannot be assumed to be delivered to itself**
+    /// — in practice it is usually dropped but that is not guaranteed:
+    /// - In the branch where the writer **ended first**, the queue's receiving end is already gone, so it is surely dropped.
+    /// - In the branch where the reader ended first, the writer is only **marked** for `abort()`, so before the cancel
+    ///   actually takes effect it may pick a frame already in the queue and send it out to the socket.
+    /// So only one safe direction needs keeping — **do not write cleanup logic that presumes self-delivery.**
     ///
-    /// ★이 순서에 배달 정합성이 걸려 있지는 **않다**★: 브로드캐스트는 레지스트리 맵 스냅샷을 떠서
-    /// 돌므로, 등록 해제를 앞당기든 미루든 **다른 연결들이 받는 것은 완전히 같다**. 이 순서를 지키는
-    /// 이유는 ADR-0129 슬라이스를 순수 리팩터로 유지하려는 것뿐이다(HEAD 와 같은 순서).
+    /// ★Delivery consistency does **not** hang on this order★: the broadcast takes a snapshot of the registry map and
+    /// walks it, so whether unregistration is moved earlier or later, **what the other connections receive is exactly the same**. The reason
+    /// to keep this order is only to keep the ADR-0129 slice a pure refactor (the same order as HEAD).
     fn on_disconnect(&self, conn_id: ConnId);
 }
 
-/// 연결마다 핸들러를 만드는 위층 공장. `handle_connection` 은 이것 하나만 들기 때문에 에이전트
-/// 어휘를 타입으로도 모른다.
+/// The upper-layer factory that makes a handler per connection. Because `handle_connection` holds only this, it does not know the agent
+/// vocabulary even as a type.
 pub trait ConnectionHandlerFactory: Send + Sync {
     fn handler_for(&self, conn_id: ConnId) -> Arc<dyn ConnectionHandler>;
 
-    /// 핸드셰이크 실패를 클라에 알릴 text 프레임. 이 시점엔 연결 큐도 핸들러도 아직 없고 네트워크
-    /// 행은 오류 표현 어휘를 모르므로, 인코딩만 위층에서 받아 소켓으로 그대로 흘린다.
-    /// `None` = 인코딩 실패 → 본문 없이 close 만 한다.
+    /// A text frame that tells the client the handshake failed. At this point there is neither a connection queue nor a handler yet, and the network
+    /// row does not know the error-expression vocabulary, so it takes only the encoding from the upper layer and passes it straight to the socket.
+    /// `None` = encoding failed → only close, with no body.
     fn handshake_error_frame(&self, message: &str) -> Option<String>;
 }

@@ -1,165 +1,165 @@
-# herdr·orca 직접 써 보기 — 실행법과 orca 오케스트레이션의 실체
+# Trying herdr and orca Hands-On — How to Run Them and What orca Orchestration Really Is
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| **상태** | 1 패스 기록 — herdr 는 **소스 빌드까지 실측**(TUI 미기동) · orca 는 **소스·이슈 독해**(앱은 사용자가 설치해 쓰는 중이고, 이 문서는 앱을 직접 몰지 않았다) |
-| **날짜** | 2026-09-23 |
-| **방법** | herdr 참조 클론 안에서 `cargo build --release` 실행 · 두 클론(`I:\Engram_Workspace\opensource\{herdr,orca}`) 정독 · GitHub 이슈·릴리즈 조회(gh) |
-| **확신도 범례** | **실측** = 우리가 직접 돌려 봤다 · **소스 확인** = 클론·README 를 읽었다 · **이슈 확인** = GitHub 이슈·릴리즈·검색 결과(gh, 2026-09-23) · **추정** = 정황뿐 |
-| **왜** | 「받아 둔 클론」 둘을 읽기만 하다가 실제로 써 보기로 했다. herdr 는 데몬 모델의 가장 가까운 피어라 **돌아가는 물건**이 필요했고, orca 는 사용자가 설치했는데 **오케스트레이션이 안 되는 것 같다**는 체감의 정체를 가려야 했다 |
+| **Status** | A first-pass record — herdr was **measured through a source build** (TUI not launched) · orca was **read from source and issues** (the user has installed and is using the app, and this document did not drive the app itself) |
+| **Date** | 2026-09-23 |
+| **Method** | Ran `cargo build --release` inside the herdr reference clone · read both clones (`I:\Engram_Workspace\opensource\{herdr,orca}`) closely · looked up GitHub issues and releases (gh) |
+| **Confidence legend** | **measured** = we ran it ourselves · **source confirmed** = we read the clone or README · **issue confirmed** = GitHub issues, releases or search results (gh, 2026-09-23) · **estimate** = circumstantial only |
+| **Why** | We had only been reading the two 「받아 둔 클론」, and decided to actually use them. herdr is the closest peer of the daemon model, so we needed **a running thing**, and for orca, which the user installed, we had to sort out what lay behind the feeling that **orchestration does not seem to work** |
 
-> ★**먼저 읽을 것 — 둘 다 옛 문서의 전제를 바꾼다**★
+> ★**Read this first — both change the premise of older documents**★
 >
-> 1. ★**herdr 클론은 더 이상 master 가 아니다**★ — `v0.9.1` 태그(`065ef9d`)에 detached 로 서 있고 **그 자리에서 빌드했다**(읽기 참조와 실행 빌드를 한 곳에 둔다 — 사용자 결정). 이 날짜 전 문서의 herdr `파일:줄` 포인터는 옛 master `624dfd4` 기준이라 **지금 체크아웃에서는 줄이 어긋난다** — `git show 624dfd4:<경로>` 로 연다(로컬 `master` ref 는 그대로 있다).
-> 2. ★**orca 의 「Orchestration」은 앱이 알아서 모는 기능이 아니다**★ — 실행 중인 앱 런타임이 Run·Task·Dispatch 상태와 라우팅을 쥐지만 **워커를 스케줄하거나 배치하지 않는다.** 모는 것은 **코디네이터 에이전트**이고, CLI 명령군 + 에이전트 스킬로 그 런타임을 부른다. UI 에서 켜면 무언가가 알아서 배치되는 물건이 아니다(§2-3).
+> 1. ★**The herdr clone is no longer on master**★ — it stands detached at the `v0.9.1` tag (`065ef9d`) and **we built in that place** (the read reference and the executable build live in one place — a user decision). The herdr `파일:줄` pointers in documents before this date are based on the old master `624dfd4`, so **the lines are off in the current checkout** — open them with `git show 624dfd4:<경로>` (the local `master` ref is still there).
+> 2. ★**orca's 「Orchestration」 is not a feature the app drives by itself**★ — the running app runtime holds the Run, Task and Dispatch state and the routing, but it **does not schedule or place workers.** What drives it is a **coordinator agent**, which calls that runtime through a CLI command family + an agent skill. It is not a thing where turning it on in the UI makes something place work automatically (§2-3).
 
 ---
 
-## 0. 결론
+## 0. Conclusion
 
-- **herdr** — Windows 는 GA 다(소스 확인). 소스 빌드는 **README 개발 절에는 없고 `AGENTS.md` 에만 있는 전제 하나(Zig 0.16.0)**만 채우면 6분에 컴파일러 경고 0(`build.rs` 의 `cargo:warning` 1줄 제외)으로 선다(실측). 확인은 `herdr.exe --version` 까지이고 ★**TUI 는 아직 안 띄웠다**★.
-- **orca** — 「안 되는 것 같다」의 1순위 후보는 **기대 불일치**(추정)이고, 그다음이 **CLI·스킬 미설치/미연결**과 **Windows 결함**(둘 다 이슈 확인 — 열린 것이 여럿)이다. ★**사용자의 실제 실패 양상·버전은 모른다**★ — 순위는 그것 없이 세웠다(§2-6).
+- **herdr** — Windows is GA (source confirmed). The source build stands in 6 minutes with zero compiler warnings (excluding the one `cargo:warning` line from `build.rs`) once you fill **one prerequisite that is not in the README development section and appears only in `AGENTS.md` (Zig 0.16.0)** (measured). Verification went as far as `herdr.exe --version`, and ★**the TUI has not been launched yet**★.
+- **orca** — the number-one candidate for 「안 되는 것 같다」 (it does not seem to work) is **a mismatch of expectations** (estimate), followed by **CLI·skill not installed/not connected** and **Windows defects** (both issue confirmed — several are open). ★**We do not know the user's actual failure symptoms or version**★ — the ranking was built without that (§2-6).
 
 ---
 
 ## 1. herdr (`herdrdev/herdr` · Apache-2.0)
 
-### 1-1. 받는 길 셋
+### 1-1. Three ways to get it
 
-| 길 | 무엇 | 비고 |
+| Way | What | Note |
 |---|---|---|
-| 공식 설치 스크립트 | PowerShell 한 줄(아래 코드 블록) — PATH 등록 · 버전별 폴더 + `current` junction 으로 업데이트 | ★**보안 정책 확인이 먼저다**★(아래) |
-| 릴리즈 zip | 최신 안정판 `v0.9.1`(2026-09-16) · 자산에 `herdr-windows-x86_64.zip`(이슈 확인) | 앱 로컬 ConPTY 런타임을 함께 싣는다(§1-3) |
-| **소스 빌드(이번에 고른 길)** | 참조 클론 안에서 빌드(§1-2) | ConPTY 런타임이 안 실린다 |
+| Official install script | One PowerShell line (code block below) — PATH registration · updates through a per-version folder + a `current` junction | ★**Check the security policy first**★ (below) |
+| Release zip | Latest stable `v0.9.1` (2026-09-16) · `herdr-windows-x86_64.zip` among the assets (issue confirmed) | Ships an app-local ConPTY runtime with it (§1-3) |
+| **Source build (the way chosen this time)** | Build inside the reference clone (§1-2) | The ConPTY runtime is not shipped |
 
-공식 설치 스크립트(소스 확인 — `docs/next/website/src/content/docs/windows-beta.mdx:12-14`):
+The official install script (source confirmed — `docs/next/website/src/content/docs/windows-beta.mdx:12-14`):
 
 ```powershell
 powershell -ExecutionPolicy Bypass -c "irm https://herdr.dev/install.ps1 | iex"
 ```
 
-엔드포인트 보안이 이 fileless PowerShell 명령을 막는 PC 를 위해 **herdr 가 스스로 대안을 적어 둔다** — `install.cmd` 를 `curl.exe` 로 받아 돌린다(`windows-beta.mdx:16-20`):
+For PCs where endpoint security blocks this fileless PowerShell command, **herdr itself writes down an alternative** — download `install.cmd` with `curl.exe` and run it (`windows-beta.mdx:16-20`):
 
 ```cmd
 curl.exe -fsSLo install.cmd https://herdr.dev/install.cmd && install.cmd && del install.cmd
 ```
 
-★**둘 다 원격 스크립트를 받아 실행하는 방식이라 보안 정책 확인이 먼저다**★(앞의 것은 실행 정책 우회까지 건다) — 가부는 이 문서가 내리지 않는다. 대안 경로는 **막힘을 비켜 가는 길이지 허가가 아니다.**
+★**Both download and run a remote script, so check the security policy first**★ (the former even bypasses the execution policy) — this document does not rule on whether to do it. The alternative path is **a way around the block, not a permission.**
 
-- Windows GA 의 근거(소스 확인): `docs/next/CHANGELOG.md:147`("Windows support is now generally available through stable releases…") · `docs/next/website/src/content/docs/install.mdx:6`("generally available, with documented platform-specific limitations and ongoing fixes"). ★줄 번호는 `v0.9.1` 체크아웃 기준이다★ — 옛 master 에서는 CHANGELOG 가 `:32` 였다.
+- Basis for Windows GA (source confirmed): `docs/next/CHANGELOG.md:147` ("Windows support is now generally available through stable releases…") · `docs/next/website/src/content/docs/install.mdx:6` ("generally available, with documented platform-specific limitations and ongoing fixes"). ★The line numbers are based on the `v0.9.1` checkout★ — on the old master the CHANGELOG line was `:32`.
 
-### 1-2. 소스 빌드 — 실측 2026-09-23
+### 1-2. Source build — measured 2026-09-23
 
-1. **클론을 태그로 옮겼다.** 받아 둔 클론은 shallow · master `624dfd4`(2026-08-20, 원격보다 256 커밋 뒤)였다. `git fetch --depth 50 origin tag v0.9.1` → `git switch --detach v0.9.1` 로 ★**`065ef9d`("release: v0.9.1", 2026-09-16)에 detached**★. 여전히 shallow 이고 로컬 `master` ref 는 안 건드렸다.
-2. **Rust 1.96.1.** `rust-toolchain.toml` 이 채널과 컴포넌트(`clippy`·`rustfmt`)를 고정하고 rustup 이 자동 설치한다(`~/.rustup/toolchains/` 약 1.4 GB). ★**함정 — 전경에서 친 `rustup show active-toolchain` 이 조용히 그 설치를 방아쇠로 당겨 도구 제한 120초에 걸렸다**★ → **클론 안에서** 인자 없는 `rustup toolchain install` 을 **먼저, 명시적으로(또는 백그라운드로)** 돌린다. 인자가 없으면 그 디렉터리의 활성 툴체인을 깔므로(`rustup help toolchain install` — "by default the active toolchain") `rust-toolchain.toml` 이 적은 컴포넌트까지 함께 온다. 버전 번호를 손으로 박으면 그 파일과 따로 낡는다.
-3. ★**README 개발 절에 없는 전제 — Zig 0.16.0**★. `build.rs` 가 vendored libghostty-vt 를 `zig` 로 짓고 없으면 panic 한다(소스 확인 — env `ZIG` 을 읽는 자리 `build.rs:64` · 「requires Zig 0.16.0」 panic `:92-97` · 최소 버전 `vendor/libghostty-vt/build.zig.zon:6`). ★**적힌 곳은 있다 — `AGENTS.md:188-190`**★("Herdr currently requires Zig 0.16.0, so set `$env:ZIG = …`" — Windows VM 에서 빌드하는 기여자·에이전트용 안내)이고, README 는 AI 에이전트에게 그 파일부터 읽으라고 한다(`README.md:70`). **빠진 곳은 사람이 먼저 보는 두 자리다** — README 개발 절(`README.md:72-81`, `cargo build --release` 만 적는다)과 웹사이트 문서(`docs/next/website/src/content/` 아래 전부 — 대소문자 무시 `zig` 0건). 빌드가 실패하면 위 panic 문구가 같은 말을 한다. ziglang.org 의 포터블 zip 을 **`index.json` 의 sha256 과 대조**한 뒤 `<클론>/.local/zig-x86_64-windows-0.16.0/` 에 풀었다(`.local/` 은 herdr `.gitignore:18`). **PATH 는 안 바꾸고 빌드에만 env `ZIG=<경로>` 로 넘겼다.**
-4. **빌드.** `cargo build --release --locked` — `--locked` 는 추적되는 `Cargo.lock` 이 다시 쓰이지 않게 하려는 것이다. 이 저장소의 `scripts/run-detached.ps1` 로 셸 트리 밖에서 돌리고 출력은 파일로만 받았다. `Finished release … in 6m 00s` · 컴파일러 경고 0(`build.rs` 의 `cargo:warning` 1줄 제외 — 아래).
-5. **산출물.** `target/release/herdr.exe` 25,570,304 바이트 · `herdr.exe --version` → `herdr 0.9.1`.
+1. **We moved the clone to the tag.** The clone we had was shallow · master `624dfd4` (2026-08-20, 256 commits behind the remote). With `git fetch --depth 50 origin tag v0.9.1` → `git switch --detach v0.9.1` it is ★**detached at `065ef9d` ("release: v0.9.1", 2026-09-16)**★. It is still shallow and we did not touch the local `master` ref.
+2. **Rust 1.96.1.** `rust-toolchain.toml` pins the channel and components (`clippy`·`rustfmt`) and rustup installs them automatically (about 1.4 GB under `~/.rustup/toolchains/`). ★**Trap — a `rustup show active-toolchain` typed in the foreground silently triggered that installation and hit the tool limit of 120 seconds**★ → run an argument-less `rustup toolchain install` **inside the clone** **first, explicitly (or in the background)**. Without arguments it installs the active toolchain of that directory (`rustup help toolchain install` — "by default the active toolchain"), so the components listed in `rust-toolchain.toml` come along too. If you hard-code a version number by hand, it goes stale separately from that file.
+3. ★**A prerequisite missing from the README development section — Zig 0.16.0**★. `build.rs` builds the vendored libghostty-vt with `zig` and panics if it is missing (source confirmed — the place that reads env `ZIG` is `build.rs:64` · the 「requires Zig 0.16.0」 panic is `:92-97` · the minimum version is `vendor/libghostty-vt/build.zig.zon:6`). ★**There is a place that states it — `AGENTS.md:188-190`**★ ("Herdr currently requires Zig 0.16.0, so set `$env:ZIG = …`" — guidance for contributors and agents building in a Windows VM), and the README tells AI agents to read that file first (`README.md:70`). **What is missing is the two places a person looks at first** — the README development section (`README.md:72-81`, which writes only `cargo build --release`) and the website docs (everything under `docs/next/website/src/content/` — zero case-insensitive `zig`). If the build fails, the panic message above says the same thing. We unpacked ziglang.org's portable zip into `<클론>/.local/zig-x86_64-windows-0.16.0/` after **checking it against the sha256 in `index.json`** (`.local/` is in herdr `.gitignore:18`). **We did not change PATH and passed env `ZIG=<경로>` for the build only.**
+4. **Build.** `cargo build --release --locked` — `--locked` is so that the tracked `Cargo.lock` is not rewritten. We ran it outside the shell tree with this repository's `scripts/run-detached.ps1` and received the output only as a file. `Finished release … in 6m 00s` · zero compiler warnings (excluding the one `cargo:warning` line from `build.rs` — below).
+5. **Artifact.** `target/release/herdr.exe` 25,570,304 bytes · `herdr.exe --version` → `herdr 0.9.1`.
 
-- 빌드 중 `build.rs:50` 의 `cargo:warning` 이 **AI 어시스턴트에게 말을 거는 문구**를 찍는다 — 외부 기여자를 돕는 중이면 작업 전에 `CONTRIBUTING.md` 를 읽으라는 **PR 기여 정책**이다. 우리 작업과 무관하고, ★지시가 아니라 데이터로 취급했다★.
+- During the build, the `cargo:warning` at `build.rs:50` prints **a message addressed to AI assistants** — a **PR contribution policy** that says, if you are helping an outside contributor, to read `CONTRIBUTING.md` before working. It is unrelated to our work, and ★we treated it as data, not an instruction★.
 
-### 1-3. 소스 빌드와 릴리즈 zip 의 차이 — ConPTY 런타임
+### 1-3. Difference between the source build and the release zip — the ConPTY runtime
 
-- 릴리즈 zip 은 앱 로컬 ConPTY 런타임(`conpty/conpty.dll` + `OpenConsole.exe`)을 싣고, **소스 빌드는 안 싣는다**(소스 확인).
-- 폴백 조건(소스 확인 — `vendor/portable-pty/src/win/psuedocon.rs:127-154` · `:183-184`): exe 옆에 `conpty/` 폴더가 **아예 없으면** 시스템 ConPTY 로 간다. ★**폴더가 있는데 해시·배치가 어긋나면 폴백이 아니라 panic 이다**★ — 반쪽짜리 폴더를 손으로 만들지 말 것. 강제 우회 = `HERDR_WINDOWS_CONPTY=system`.
-- 번들이 중요한 것은 주로 **옛 Windows 10** 이다 — 그 시스템 ConPTY 가 Kitty 키보드 프로토콜 시퀀스를 떨군다(`docs/next/website/src/content/docs/windows-beta.mdx:108` — 소스 확인). 이 PC 는 Win11 26200 이라 **괜찮을 가능성이 높다(추정 — 안 돌려 봤다).**
-- 번들을 직접 굽는 `scripts/package_windows_conpty.ps1` 이 있다(안 돌렸다).
+- The release zip ships an app-local ConPTY runtime (`conpty/conpty.dll` + `OpenConsole.exe`), and **the source build does not** (source confirmed).
+- Fallback condition (source confirmed — `vendor/portable-pty/src/win/psuedocon.rs:127-154` · `:183-184`): if the `conpty/` folder **is entirely absent** next to the exe, it goes to the system ConPTY. ★**If the folder exists but the hash or layout is off, it is a panic, not a fallback**★ — do not hand-make a half-built folder. The forced bypass = `HERDR_WINDOWS_CONPTY=system`.
+- The bundle matters mainly on **old Windows 10** — its system ConPTY drops Kitty keyboard protocol sequences (`docs/next/website/src/content/docs/windows-beta.mdx:108` — source confirmed). This PC is Win11 26200, so it is **likely fine (estimate — we did not run it).**
+- There is a `scripts/package_windows_conpty.ps1` that bakes the bundle yourself (we did not run it).
 
-### 1-4. 남긴 것 — 지울 때 쓸 목록
+### 1-4. What we left behind — a list to use when deleting
 
-| 자리 | 크기 | 비고 |
+| Place | Size | Note |
 |---|---|---|
-| 클론 `.local/`(zig) | 382 MB | gitignore |
-| 클론 `target/` | 633 MB | gitignore |
-| 클론 `vendor/libghostty-vt/{.zig-cache,zig-out,zig-pkg}/` | 안 쟀다 | gitignore |
-| `~/.rustup/toolchains/` 의 1.96.1 | 약 1.4 GB | 클론 밖 |
-| `%LOCALAPPDATA%\zig` 캐시 | 59 MB | 클론 밖 |
-| `~/.cargo/registry` 의 crate 들 | 안 쟀다 | 클론 밖 |
+| clone `.local/` (zig) | 382 MB | gitignore |
+| clone `target/` | 633 MB | gitignore |
+| clone `vendor/libghostty-vt/{.zig-cache,zig-out,zig-pkg}/` | not measured | gitignore |
+| 1.96.1 under `~/.rustup/toolchains/` | about 1.4 GB | outside the clone |
+| `%LOCALAPPDATA%\zig` cache | 59 MB | outside the clone |
+| crates in `~/.cargo/registry` | not measured | outside the clone |
 
-### 1-5. 쓰는 법 (소스 확인 — README · 공식 문서)
+### 1-5. How to use it (source confirmed — README · official docs)
 
-- 작업할 폴더에서 `herdr` 를 친다. `ctrl+b q` 로 떼어 내고 `herdr` 로 다시 붙는다 — **떼어 내도 에이전트는 계속 돈다.**
-- ★**GUI 창이 아니라 터미널 안의 TUI 다.**★
-- 문서 색인 = herdr.dev/docs(quick start · supported agents · keyboard · configuration · session state · remote · socket api · plugins).
-- **한국어 IME** — `experimental.switch_ascii_input_source_in_prefix` 의 Windows 지원은 **한국어 IME 한정**이다(`docs/next/website/src/content/docs/configuration.mdx:562` — 옛 master 에서는 `:517`).
+- Type `herdr` in the folder you will work in. Detach with `ctrl+b q` and reattach with `herdr` — **agents keep running even when detached.**
+- ★**It is a TUI inside a terminal, not a GUI window.**★
+- Docs index = herdr.dev/docs (quick start · supported agents · keyboard · configuration · session state · remote · socket api · plugins).
+- **Korean IME** — Windows support for `experimental.switch_ascii_input_source_in_prefix` is **limited to the Korean IME** (`docs/next/website/src/content/docs/configuration.mdx:562` — `:517` on the old master).
 
 ---
 
 ## 2. orca (`stablyai/orca` · MIT)
 
-### 2-1. 클론과 현행의 거리
+### 2-1. Distance between the clone and the current version
 
-- 로컬 클론은 ★**2026-08-20 의 shallow 50 커밋 스냅숏(`df7460af`) — 현행보다 약 한 달 뒤**★(소스 확인).
-- 현행(★**2026-09-23 gh 조회 시점의 스냅숏 — 거의 매일 바뀐다**★): 최신 릴리즈 `v1.4.207`(2026-09-22) · 거의 매일 릴리즈 · 75.7k★ · 마지막 push 2026-09-23(이슈 확인). 버전을 인용할 땐 이 값을 베끼지 말고 `gh release list -R stablyai/orca` 로 다시 본다.
-- ★**그래서 아래 「소스 확인」은 한 달 전 코드의 말이다**★ — 현행과 갈린 것이 확인된 자리는 그 자리에 적었다.
+- The local clone is ★**a shallow 50-commit snapshot from 2026-08-20 (`df7460af`) — about a month behind the current version**★ (source confirmed).
+- Current (★**a snapshot at the time of the 2026-09-23 gh lookup — it changes almost daily**★): latest release `v1.4.207` (2026-09-22) · a release almost every day · 75.7k★ · last push 2026-09-23 (issue confirmed). When citing a version, do not copy these values; look again with `gh release list -R stablyai/orca`.
+- ★**So the 「소스 확인」 (source confirmed) below speaks for code from a month ago**★ — where a divergence from the current version was confirmed, we wrote it at that spot.
 
-### 2-2. 기능 지도 (소스 확인 — README + `src/`)
+### 2-2. Feature map (source confirmed — README + `src/`)
 
-- **병렬 워크트리** — 격리된 워크트리 하나에 에이전트 하나 · 자식/최상위 계보 · 같은 프롬프트를 여러 에이전트에. 워크트리별 셋업 훅 = `orca.yaml`.
-- **에이전트** — CLI 에이전트 약 29종을 **평범한 PTY** 로(Claude Code · Codex · Gemini · OpenCode · Cursor · Copilot …). 계정 전환 + Claude/Codex 사용량 추적.
-- **터미널** — WebGL xterm · 분할 · 재시작을 넘는 스크롤백(Windows 는 LOCALAPPDATA 아래 터미널 데몬 — `config/electron-builder.config.cjs:355-363`).
-- **리뷰 루프** — diff 줄 코멘트를 에이전트에게 되돌려 보낸다 · GitHub·Linear PR/이슈를 앱 안에서. `src/main/` 에 gitlab·bitbucket·azure-devops·gitea·jira 디렉터리도 있다(성숙도는 **추정** — 안 읽었다).
-- **편집·브라우저** — VS Code 풍 에디터 · 내장 Chromium + 「Design Mode」 · Computer Use(win32 provider).
-- **Orca CLI** — `orca worktree create` · `terminal create/send/read/wait` · 브라우저 snapshot/click/fill. **에이전트도 이것을 쓴다.**
-- **실험 토글**(Settings > Experimental) — Pet · Agents View · Agent Dashboard(칸반) · **Chat UI** · Terminal attention · Agent sleep · New card style(워크트리 카드) · Cloud VM(목록 = `src/renderer/src/components/settings/experimental-search.ts:9-234`). Chat UI 는 클론에도 있다 — 이름 `native-chat-experimental-search-entry.ts:7` · 등록 `experimental-search.ts:142` · 렌더 `ExperimentalPane.tsx:143-144` · 본체 `src/main/native-chat/`.
-- **원격·모바일** — SSH 원격 워크트리 · Linux 헤드리스 `orca serve` · iOS/Android 컴패니언.
-- **Windows** — NSIS 설치본 · 안정판은 SignPath 서명(`electron-builder.config.cjs:319-331`) · WSL 지원.
+- **Parallel worktrees** — one agent per isolated worktree · child/top-level lineage · the same prompt to several agents. Per-worktree setup hook = `orca.yaml`.
+- **Agents** — about 29 kinds of CLI agents as **plain PTYs** (Claude Code · Codex · Gemini · OpenCode · Cursor · Copilot …). Account switching + Claude/Codex usage tracking.
+- **Terminal** — WebGL xterm · splits · scrollback that survives restarts (on Windows, a terminal daemon under LOCALAPPDATA — `config/electron-builder.config.cjs:355-363`).
+- **Review loop** — sends diff line comments back to the agent · GitHub·Linear PRs/issues inside the app. `src/main/` also has gitlab·bitbucket·azure-devops·gitea·jira directories (their maturity is an **estimate** — we did not read them).
+- **Editor·browser** — a VS Code-style editor · built-in Chromium + 「Design Mode」 · Computer Use (win32 provider).
+- **Orca CLI** — `orca worktree create` · `terminal create/send/read/wait` · browser snapshot/click/fill. **Agents use this too.**
+- **Experimental toggles** (Settings > Experimental) — Pet · Agents View · Agent Dashboard (kanban) · **Chat UI** · Terminal attention · Agent sleep · New card style (worktree card) · Cloud VM (the list = `src/renderer/src/components/settings/experimental-search.ts:9-234`). Chat UI is in the clone too — name `native-chat-experimental-search-entry.ts:7` · registration `experimental-search.ts:142` · rendering `ExperimentalPane.tsx:143-144` · body `src/main/native-chat/`.
+- **Remote·mobile** — SSH remote worktrees · Linux headless `orca serve` · iOS/Android companions.
+- **Windows** — NSIS installer · the stable build is SignPath-signed (`electron-builder.config.cjs:319-331`) · WSL support.
 
-### 2-3. ★오케스트레이션의 실체 — 앱 런타임은 기록·라우팅하고, 모는 것은 코디네이터 에이전트다★ (소스 확인 — `skill-guides/orchestration.md`)
+### 2-3. ★The reality of orchestration — the app runtime records and routes, and what drives it is a coordinator agent★ (source confirmed — `skill-guides/orchestration.md`)
 
-「Orca Orchestration」 = **실행 중인 Orca 런타임이 쥔 조율 상태 + 그것을 부르는 `orca orchestration …` CLI 명령군 + 에이전트 스킬 `orchestration`**. CLI 명령은 **실행 중인 런타임으로 가는 RPC** 다(`:52` "`orca orchestration` commands are RPC calls to the running Orca runtime") — 런타임이 Run·Task·Dispatch 와 메시지를 기록하고 라우팅하며, 복구 명령 `reset` 이 지우는 것도 「local orchestration database state」다(`:287`). 현 master 가이드는 첫 문단에서 이것을 "Orca's structured coordination layer. It records who owns work…" 로 부른다(gh 조회 2026-09-23).
+「Orca Orchestration」 = **the coordination state held by the running Orca runtime + the `orca orchestration …` CLI command family that calls it + the agent skill `orchestration`**. The CLI commands are **RPC to the running runtime** (`:52` "`orca orchestration` commands are RPC calls to the running Orca runtime") — the runtime records and routes Runs, Tasks, Dispatches and messages, and what the recovery command `reset` clears is also the 「local orchestration database state」 (`:287`). The current master guide calls this, in its first paragraph, "Orca's structured coordination layer. It records who owns work…" (gh lookup 2026-09-23).
 
-| 어휘 | 뜻 |
+| Term | Meaning |
 |---|---|
-| Run | 코디네이터의 이름공간 + 수신함 |
-| Task | 작업 항목(의존 그래프는 선택) |
-| Dispatch | 한 번의 시도 |
+| Run | the coordinator's namespace + inbox |
+| Task | a work item (a dependency graph is optional) |
+| Dispatch | a single attempt |
 
-- 명령: `worker-start` · `send` / `check --wait` / `ask` / `reply` · `worker_done` · 결정 게이트 · `worker-release`.
-- ★**가이드가 스스로 못 박는다**★ — "a Run … never schedules or places workers"(`:104`) · "Agents still choose placement and concurrency; Orca does not schedule workers or infer conflicts"(`:181`). **배치와 동시성은 코디네이터 에이전트가 CLI 를 불러 정하고, 런타임은 기록하고 라우팅한다**("Orca routes them to that Dispatch's Run" — `:104`).
-- 옛 스케줄러 명령(`coordinator-start/stop` · `run` · `run-stop`)은 **은퇴했다** — 효과 없이 복구 안내만 돌려준다(`:285`).
+- Commands: `worker-start` · `send` / `check --wait` / `ask` / `reply` · `worker_done` · decision gates · `worker-release`.
+- ★**The guide pins it down itself**★ — "a Run … never schedules or places workers" (`:104`) · "Agents still choose placement and concurrency; Orca does not schedule workers or infer conflicts" (`:181`). **The coordinator agent decides placement and concurrency by calling the CLI, and the runtime records and routes** ("Orca routes them to that Dispatch's Run" — `:104`).
+- The old scheduler commands (`coordinator-start/stop` · `run` · `run-stop`) are **retired** — they return only recovery guidance with no effect (`:285`).
 
-### 2-4. 켜는 법 (소스 확인)
+### 2-4. How to turn it on (source confirmed)
 
-1. ★**Orca 앱(런타임)이 떠 있어야 한다**★ — 가이드의 전제 첫 줄이 "`orca status --json` should show a running runtime" 이다(`skill-guides/orchestration.md:49` · 현 master 가이드도 첫 단계에서 런타임부터 확인한다 — gh 조회 2026-09-23). 명령이 그 런타임으로 가는 RPC 라(`:52`) 런타임이 없으면 갈 곳이 없다(추정 — 꺼 놓고 돌려 보지는 않았다).
-2. **Orca CLI 를 PATH 에 올린다** — Settings 에서, 또는 아래 대화상자가 함께 한다. Windows 는 **사용자 PATH 를 레지스트리에** 쓴다. ★**설치 프로그램은 이것을 안 한다**★(`src/main/cli/cli-installer.ts:208`).
-3. **스킬 설치** — 앱의 「Enable orchestration」 대화상자가 **2·3 을 한 버튼으로 한다**: 「Install CLI & skill」(`src/renderer/src/components/floating-terminal/FloatingTerminalOrchestrationDialog.tsx:156`)이 터미널을 열기 전에 CLI 가 PATH 에 없으면 먼저 등록하고(`:165-170` 의 `onBeforeOpenTerminal` → `src/renderer/src/lib/agent-skill-cli-prerequisite.ts:21` → `:43` `window.api.cli.install()`), 그다음 스킬 설치 명령을 도는 터미널을 연다. 명령 문자열은 `src/shared/agent-feature-install-commands.ts` 가 **조립만** 한다. 손으로 치면 `npx skills add https://github.com/stablyai/orca --skill orchestration --global`(Node 필요).
-   - ★**이 명령도 보안 정책 확인이 먼저다**★ — 서드파티 npm 패키지(`skills`)를 받아 실행하고, 그것이 **전역 에이전트 스킬 폴더에 쓴다**(`--agent` 를 안 주고 감지가 0 이면 알려진 에이전트 약 75종 전부에 깐다고 조립기 주석이 적는다 — `agent-feature-install-commands.ts:50-52`). 가부는 이 문서가 내리지 않는다.
-4. **에이전트에게 조율·감독을 시키거나 `/orchestration` 을 친다.**
+1. ★**The Orca app (runtime) must be running**★ — the first line of the guide's prerequisites is "`orca status --json` should show a running runtime" (`skill-guides/orchestration.md:49` · the current master guide also checks the runtime first in its first step — gh lookup 2026-09-23). Because the commands are RPC to that runtime (`:52`), with no runtime they have nowhere to go (estimate — we did not run it with the runtime off).
+2. **Put the Orca CLI on PATH** — in Settings, or the dialog below does it together. On Windows it writes the **user PATH into the registry**. ★**The installer does not do this**★ (`src/main/cli/cli-installer.ts:208`).
+3. **Install the skill** — the app's 「Enable orchestration」 dialog **does 2 and 3 with one button**: 「Install CLI & skill」 (`src/renderer/src/components/floating-terminal/FloatingTerminalOrchestrationDialog.tsx:156`) first registers the CLI if it is not on PATH before opening the terminal (`onBeforeOpenTerminal` at `:165-170` → `src/renderer/src/lib/agent-skill-cli-prerequisite.ts:21` → `window.api.cli.install()` at `:43`), then opens a terminal that runs the skill install command. `src/shared/agent-feature-install-commands.ts` only **assembles** the command string. Typed by hand: `npx skills add https://github.com/stablyai/orca --skill orchestration --global` (needs Node).
+   - ★**Check the security policy first for this command too**★ — it downloads and runs a third-party npm package (`skills`), which **writes to the global agent skill folder** (if `--agent` is not given and detection finds 0, the assembler's comment says it installs to all of about 75 known agents — `agent-feature-install-commands.ts:50-52`). This document does not rule on whether to do it.
+4. **Ask an agent to coordinate and supervise, or type `/orchestration`.**
 
-- localStorage `orca.orchestration.enabled`(`src/renderer/src/lib/orchestration-setup-state.ts:2`)는 **셋업을 마쳤다는 표시일 뿐**이다.
-- ★클론 가이드의 "must be enabled in Settings > Experimental"(`skill-guides/orchestration.md:51`)은 낡았다★ — 그런 항목이 없고, 현 master 가이드에서는 그 줄이 빠졌다.
+- The localStorage `orca.orchestration.enabled` (`src/renderer/src/lib/orchestration-setup-state.ts:2`) is **only a mark that setup is finished**.
+- ★The clone guide's "must be enabled in Settings > Experimental" (`skill-guides/orchestration.md:51`) is stale★ — there is no such item, and in the current master guide that line is gone.
 
-### 2-5. 「안 되는 것 같다」의 후보 — 순위
+### 2-5. Candidates for 「안 되는 것 같다」 (it does not seem to work) — ranking
 
-| 순위 | 후보 | 근거 |
+| Rank | Candidate | Basis |
 |---|---|---|
-| 1 | **기대 불일치** — 「The AI Orchestrator」로 내세우지만 UI 에서 알아서 조율하는 것은 없다 | 추정(전제 = §2-3) |
-| 2 | **CLI·스킬 미설치 또는 미연결** — 대화상자(§2-4 의 3)가 CLI 와 스킬을 함께 깔아 주므로, 남는 모양은 ① 대화상자를 건너뛰고 손으로 반만 깐 경우 ② 스킬은 깔렸는데 **쓰는 에이전트에 연결되지 않은** 경우 ③ 근거 칸의 이슈들이다 | 이슈 확인 — #14303(메인테이너: "you don't have the CLI installed") · #12422("Agents: not linked") · #18263(Windows · 공유 provider-home 링크 · open) · #21095/#17935(스킬 설명 1024자 초과) |
-| 3 | **Windows 결함** | 이슈 확인 — #14505(Claude 워커에 task 프롬프트가 **제출 안 된 채** 얹힘 · 1.4.205 · Win11 에서 12/12 · 2026-09-21 · open) · #22345(1.4.207 에서 `--worktree new-child/new-top-level` 이 `selector_not_found` — ★**가이드 예시가 글자 그대로 실패한다**★) · #14502(패키지된 Windows 빌드의 번들 zod 손상 — 1.4.180 에서 보고 · 현행 재현 모름) · #15825 · #20695 |
-| 4 | **에이전트가 스킬을 무시** | 이슈 확인 — #16075(Claude Code 가 `/orchestration` 을 자기 네이티브 서브에이전트로 갈아 끼움 · Win 1.4.186 · open) |
-| 5 | **Claude/Codex 밖 백엔드 불안정** | 이슈 확인 — #18399/#16902(Grok) · #11721/#22250(Antigravity) · #17326/#18725(Windows 의 Qwen) · #15125(`dispatch --inject` 는 claude/codex/gemini/cursor 만) |
-| 6 | UI/UX | 이슈 확인 — #4374 · #17701 · #21955 |
+| 1 | **Mismatch of expectations** — it is promoted as 「The AI Orchestrator」, but nothing in the UI coordinates by itself | estimate (premise = §2-3) |
+| 2 | **CLI·skill not installed or not connected** — the dialog (§2-4 step 3) installs the CLI and the skill together, so the shapes left over are ① the dialog was skipped and only half was installed by hand ② the skill is installed but **not connected to the agent that uses it** ③ the issues in the basis column | issue confirmed — #14303 (maintainer: "you don't have the CLI installed") · #12422 ("Agents: not linked") · #18263 (Windows · shared provider-home link · open) · #21095/#17935 (skill description over 1024 characters) |
+| 3 | **Windows defects** | issue confirmed — #14505 (the task prompt is placed on a Claude worker **without being submitted** · 1.4.205 · 12/12 on Win11 · 2026-09-21 · open) · #22345 (on 1.4.207 `--worktree new-child/new-top-level` gives `selector_not_found` — ★**the guide's example fails literally**★) · #14502 (the bundled zod is corrupted in the packaged Windows build — reported on 1.4.180 · whether it reproduces now is unknown) · #15825 · #20695 |
+| 4 | **The agent ignores the skill** | issue confirmed — #16075 (Claude Code swaps `/orchestration` for its own native subagents · Win 1.4.186 · open) |
+| 5 | **Backends other than Claude/Codex are unstable** | issue confirmed — #18399/#16902 (Grok) · #11721/#22250 (Antigravity) · #17326/#18725 (Qwen on Windows) · #15125 (`dispatch --inject` works only for claude/codex/gemini/cursor) |
+| 6 | UI/UX | issue confirmed — #4374 · #17701 · #21955 |
 
-- **규모** — `orchestration` 라벨 열린 이슈 157건, 그중 `os:Windows` 도 붙은 것 38건(gh 검색 2026-09-23 — 이슈 확인).
+- **Scale** — 157 open issues with the `orchestration` label, of which 38 also carry `os:Windows` (gh search 2026-09-23 — issue confirmed).
 
-### 2-6. 모르는 것
+### 2-6. What we do not know
 
-- #14502 가 1.4.207 에서도 재현되는지.
-- 로그인·계정 관문이 있는지 — 본 것은 없다(추정).
-- ★**사용자의 실제 실패 양상과 버전**★ — 실패 화면 하나로 위 순위가 뒤집힐 수 있다.
-
----
-
-## 3. 우리와 닿는 자리 (관찰만 — 결정 아님)
-
-- **orca 오케스트레이션의 모양이 우리 것과 같다** — 코디네이터 에이전트가 CLI 를 부르고 `ask`/`reply` 가 있는 우편으로 주고받는다. 우리는 에이전트가 `engram` CLI 와 `eg_send`(`reply_to`)로 같은 일을 한다. ★**상태를 쥐는 자리도 같다**★ — orca 런타임이 Run·Task·Dispatch 와 메시지를 기록하고 라우팅하듯, 우리도 **데몬이 우편을 쥔다**(메시징 커널을 데몬이 호스팅하고 — ADR-0110 — 배달 기록·파킹·회신 계약을 커널이 관리한다: `crates/engram-dashboard-messaging/src/service.rs`). 「앱이 스케줄하지 않고 에이전트가 CLI 로 몬다」는 **우리만의 선택이 아니다.** herdr 도 README 가 같은 모양을 적는다 — 에이전트가 CLI·socket api 로 페인을 띄우고 서로 프롬프트를 보내고 상대가 막힐 때까지 기다린다(`README.md:34` — 소스 확인).
-- **herdr 는 여전히 데몬 모델의 가장 가까운 피어다**(CLAUDE.md 「참조 구현」). 이번에 달라진 것은 **돌아가는 바이너리가 생겼다**는 것뿐이다.
+- Whether #14502 also reproduces on 1.4.207.
+- Whether there is a login or account gate — we saw none (estimate).
+- ★**The user's actual failure symptoms and version**★ — a single failure screen could overturn the ranking above.
 
 ---
 
-## 4. 안 한 것
+## 3. Where this touches ours (observation only — not a decision)
 
-- herdr TUI 기동 · 실제 에이전트 붙이기 · 떼기/다시 붙기 — 전부 미실행.
-- herdr ConPTY 번들 굽기(`scripts/package_windows_conpty.ps1`) — 미실행.
-- orca 앱을 이 문서가 직접 몰지 않았다 — 기능 지도는 한 달 전 클론 + README 독해다.
+- **The shape of orca orchestration is the same as ours** — a coordinator agent calls the CLI and they exchange through mail that has `ask`/`reply`. Our agents do the same thing with the `engram` CLI and `eg_send` (`reply_to`). ★**The place that holds the state is the same too**★ — just as the orca runtime records and routes Runs, Tasks, Dispatches and messages, **our daemon holds the mail** (the daemon hosts the messaging kernel — ADR-0110 — and the kernel manages delivery records, parking and the reply contract: `crates/engram-dashboard-messaging/src/service.rs`). 「앱이 스케줄하지 않고 에이전트가 CLI 로 몬다」 is **not a choice unique to us.** herdr's README also describes the same shape — an agent opens panes through the CLI·socket api, sends prompts to one another, and waits until the other is blocked (`README.md:34` — source confirmed).
+- **herdr is still the closest peer of the daemon model** (CLAUDE.md 「참조 구현」). All that changed this time is that **we now have a running binary**.
+
+---
+
+## 4. What we did not do
+
+- Launching the herdr TUI · attaching a real agent · detaching/reattaching — none run.
+- Baking the herdr ConPTY bundle (`scripts/package_windows_conpty.ps1`) — not run.
+- This document did not drive the orca app itself — the feature map is a month-old clone + a reading of the README.

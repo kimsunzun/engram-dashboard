@@ -1,20 +1,20 @@
-// command 인자 가방으로 들어온 enum 낱말을 **선언된 철자**로 접는 한 곳.
+// The one place that folds an enum word coming in through the command argument bag to its **declared spelling**.
 //
-// ★대소문자만 접는다 — 유효 집합은 넓히지 않는다★: 호출자는 아무 대소문자로 써도 되지만, 여기를 지나
-//   나가는 값은 언제나 `declared` 에 적힌 철자 그대로다. 모르는 낱말은 여전히 `undefined` 로 떨어져
-//   호출부가 원래 하던 거절을 그대로 한다(거절 문구·조건은 각 호출부 소관 — 이 모듈은 판정만 준다).
+// ★Only letter case is folded — the valid set is not widened★: the caller may write any case, but the value that
+//   goes out through here is always the spelling written in `declared`. An unknown word still falls to `undefined`, and
+//   the call site does the rejection it used to do (the rejection wording · condition is each call site's concern — this module only gives the decision).
 
 /**
- * `declared` 중 `raw` 와 대소문자 무시로 같은 항목을 돌려준다. 못 찾거나 문자열이 아니면 `undefined`.
+ * Returns the item of `declared` equal to `raw` ignoring case. `undefined` if not found or not a string.
  *
- * ★반환은 항상 `declared` 의 원소다 — 호출자가 준 문자열이 아니다★. 백엔드로 나가는 wire 값이 선언
- * 철자와 바이트 단위로 같아야 하므로, 이 반환을 그대로 실어 보내면 된다.
+ * ★The return is always an element of `declared` — not the string the caller gave★. The wire value going out to the backend must be
+ * byte-identical to the declared spelling, so this return can be sent as is.
  *
- * ★완전 일치를 먼저 본다★ — `declared` 에 대소문자만 다른 두 철자가 들어오는 날에도 정확히 쓴 호출자는
- * 자기가 쓴 철자를 받는다(그 경우 나머지 해소는 선언 순서로 결정되며, 그런 집합은 애초에 만들지 않는다).
+ * ★Exact match is checked first★ — even on the day two spellings differing only in case enter `declared`, a caller who writes it exactly
+ * receives the spelling they wrote (in that case the rest is resolved by declaration order, and such a set is never built in the first place).
  *
- * 접기는 `toLowerCase`(로케일 비의존)로 한다 — `toLocaleLowerCase` 는 터키어 로케일에서 `I` 를 `ı` 로
- * 접어 같은 낱말이 기계마다 다르게 판정된다.
+ * Folding uses `toLowerCase` (locale-independent) — `toLocaleLowerCase` folds `I` to `ı` in the Turkish locale,
+ * so the same word would be decided differently from machine to machine.
  */
 export function matchDeclaredSpelling<T extends string>(
   raw: unknown,

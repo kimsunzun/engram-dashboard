@@ -1,8 +1,8 @@
-// 터미널 모드 mock ANSI fixture — 컬러 + box-drawing(80칼럼 초과) 으로 좁은 폭 깨짐 재현.
+// Terminal mode mock ANSI fixture — reproduces breakage at narrow widths with color + box-drawing (over 80 columns).
 //
-// 실측 claude welcome 캡처가 이상적이나(interactive PTY 라 캡처 까다로움), 깨짐 재현에는
-// 통제된 합성 샘플이 더 낫다 — 박스 폭을 의도적으로 넓게(>80) 잡아 좁은 슬롯에서 줄바꿈/
-// 박스 깨짐을 확실히 유발한다. 실측 welcome 은 메인 앱 실측 단계에서 별도 확보.
+// A measured claude welcome capture would be ideal (but an interactive PTY is tricky to capture), but for reproducing breakage a
+// controlled synthetic sample is better — the box width is deliberately set wide (>80) so a narrow slot reliably causes line wrapping /
+// box breakage. The measured welcome is obtained separately in the main app measurement phase.
 
 const ESC = '\x1b'
 const C = {
@@ -14,7 +14,7 @@ const C = {
   dim: `${ESC}[2m`,
 }
 
-// >80 이어야 좁은 슬롯에서 우측 테두리가 다음 줄로 밀려 깨진다.
+// It must be >80 so that in a narrow slot the right border is pushed to the next line and breaks.
 const W = 86
 const bar = '─'.repeat(W)
 const pad = (s: string, visibleLen: number) => s + ' '.repeat(Math.max(0, W - visibleLen))

@@ -1,15 +1,15 @@
-// 사용량 슬롯의 command(TRD S21 usage-limit-slot §1-8) — 새로고침과 회사별 표시 토글. 작은 표시의 ⟳(켠 회사 전부) ·
-//   팝업의 회사별 ⟳(`vendor` 인자 — 그 회사 하나 · ADR-0259) · 팝업의 표시 토글 줄이 이것을 부른다.
+// Commands of the usage slot (TRD S21 usage-limit-slot §1-8) — refresh and the per-vendor display toggle. The ⟳ of the small display (all enabled vendors) ·
+//   the per-vendor ⟳ in the popup (`vendor` argument — that one vendor · ADR-0259) · the display toggle row in the popup call these.
 //
-// ★슬롯 우클릭 메뉴에 기여하지 않는다(사용자 결정 2026-09-29)★ — 새로고침은 작은 표시·팝업의 ⟳, 표시 토글은 팝업이 진다.
-// ★`help` 를 달지 않는다(TRD §3 #26)★ — 달면 버스에 올라 데몬의 `usage.refresh` 와 겹친다. 밖(LLM·CLI)의 길은 이미
-//   있다: 조회 = `usage.get`/`usage.refresh`, 표시 = `layout.setSlotContent` 의 show_* 칸. 창 안에서는
-//   `__engramCmd.run(id, {viewId, slotId, content})` 로 이 셋을 그대로 부른다(새로고침은 `vendor` 를 더하면 회사 하나).
+// ★Does not contribute to the slot right-click menu (user decision 2026-09-29)★ — refresh is carried by the ⟳ of the small display · popup, and the display toggle by the popup.
+// ★Do not attach `help` (TRD §3 #26)★ — if attached it goes on the bus and overlaps the daemon's `usage.refresh`. The path from outside (LLM · CLI) already
+//   exists: query = `usage.get`/`usage.refresh`, display = the show_* fields of `layout.setSlotContent`. Inside the window,
+//   call these three as is with `__engramCmd.run(id, {viewId, slotId, content})` (refresh with `vendor` added is one vendor).
 // ADR-0258
-// ★표시 토글은 제 칸 하나만 쓴다★ — 부른 쪽이 준 슬롯 내용에서 그 칸을 뒤집은 절댓값 하나를 `set_usage_slot` 으로
-//   보내고, 다른 칸은 셸이 락 안에서 지금 값으로 지킨다. 두 칸을 다 지어 보내면(전량 교체) 방송 전에 연달은 다른 회사
-//   토글을 옛 값으로 되돌린다 — 웹뷰의 content 는 방송이 닿기 전엔 낡았다. 절댓값이라 방송 전에 같은 칸을 두 번
-//   누르면 같은 값이 두 번 간다(둘째 누름이 첫째를 되돌리지 않는다).
+// ★A display toggle writes only its own field★ — from the slot content the caller gave, it sends one absolute value with that field flipped to `set_usage_slot`,
+//   and the shell keeps the other fields at their current values inside the lock. If both fields were built and sent (full replacement), another vendor's
+//   toggle made in succession before the broadcast would be reverted to the old value — the webview's content is stale until the broadcast arrives. Being an absolute value, pressing the same field twice
+//   before the broadcast sends the same value twice (the second press does not revert the first).
 
 import type { SlotContent } from '../api/layoutTypes'
 import type { AgentBackendKind } from '../api/types'
@@ -20,7 +20,7 @@ import { register, type CommandArgs } from './registry'
 
 type UsageContent = Extract<SlotContent, { type: 'usage' }>
 
-/** 회사마다 그 회사를 켜고 끄는 슬롯 내용 칸 — `vendor` 인자를 가리는 표이기도 하다(회사가 늘면 타입이 빠진 줄을 잡는다). */
+/** The slot content field that turns each vendor on and off — also the table that tells apart the `vendor` argument (when vendors grow, the type catches the missing line). */
 const SHOW_FIELD: Record<AgentBackendKind, 'show_claude' | 'show_codex'> = {
   claude: 'show_claude',
   codex: 'show_codex',
@@ -31,8 +31,8 @@ function isVendor(value: unknown): value is AgentBackendKind {
 }
 
 /**
- * 두 칸이 다 boolean 인 사용량 content — 켠 회사 전부의 ⟳ 는 두 칸을 다 읽는다. 회사 하나의 ⟳ 와 토글은 제 칸만 읽지만
- * 인자 계약을 하나로 둔다.
+ * Usage content where both fields are boolean — the ⟳ of all enabled vendors reads both fields. The ⟳ and toggle of one vendor read only their own field, but
+ * we keep a single argument contract.
  */
 function requireUsageContent(args: CommandArgs | undefined, cmd: string): UsageContent {
   const content = args?.content as Partial<Record<string, unknown>> | undefined
@@ -53,9 +53,9 @@ register({
     const cmd = 'usageSlot.refresh'
     const content = requireUsageContent(args, cmd)
     const usage = useUsageStore.getState()
-    // 조용한 no-op 으로 삼키지 않는다 — 부른 쪽이 「됐다」로 읽는다. 두 ⟳ 는 보낼 곳이 없으면 누름을 막으므로
-    //   (`UsageSlot`) 거기서 여기 닿는 것은 그린 뒤 누르기 전에 거절이 닿은 틈뿐이고, 그 throw 는 버튼이 부르는
-    //   `fireAndForget` 이 잡아 로그로 남긴다.
+    // Do not swallow it as a silent no-op — the caller would read it as 「됐다」 (done). Both ⟳ block the press when there is nowhere to send,
+    //   (`UsageSlot`) so what reaches here from there is only the gap where a rejection arrived after drawing and before the press, and that throw is
+    //   caught by the `fireAndForget` the button calls and left in the log.
     const vendor = args?.vendor
     if (vendor !== undefined) {
       if (!isVendor(vendor)) {

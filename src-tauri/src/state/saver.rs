@@ -1,23 +1,23 @@
-//! 기록기 — 부팅 단계 뒤 `state.json` 을 쓰는 유일한 쪽이자 크래시 사본 `state.crash.json` 을 지우는 유일한
-//! 쪽(TRD S21-storage §6-4). 스레드 하나가 돌고, 다른 스레드는 [`SaverHandle`] 로 요청을 보내 답을 기다릴
-//! 뿐이다 — 쓰는 쪽이 하나라 쓰기끼리 겹치지 않는다.
+//! The recorder — the only one that writes `state.json` after the boot steps and the only one that deletes the crash copy `state.crash.json`
+//! (TRD S21-storage §6-4). One thread runs, and other threads only send requests through [`SaverHandle`] and wait for the answer
+//! — there is a single writer, so writes do not overlap.
 //!
-//! - **주기 저장:** [`POLL_INTERVAL`] 마다 변경 번호를 읽어, 바뀌었으면 마지막 변경 뒤 [`QUIET`] 동안
-//!   조용하거나 첫 변경 뒤 [`MAX_DELAY`] 가 지났을 때 스냅숏을 통째로 쓴다.
-//! - **쓰기 실패 = 로그만**(사용자 결정 D8). 스냅숏 원천 실패 · 디스크 오류면 그 변경을 안 쓴 것으로 남겨
-//!   디바운스가 다시 쓰고, 코덱이 거절한 스냅숏(다음 부팅이 못 읽을 모양)은 다음 변경을 기다린다. 정상 종료
-//!   쓰기(`Final`)는 실패해도 다시 하지 않는다 — 기록기가 그대로 끝난다.
-//! - **쓰기마다 그 직전에 지금 `state.json` 을 다시 판정한다**(base `file` 규칙 — 머리 모양까지). 새 판이 쓴
-//!   파일이면 쓰지 않고 코덱 거절처럼 다음 변경을 기다리고, 못 읽었으면 디스크 오류처럼 디바운스 뒤 다시 판정한다.
-//!   손상된 파일 · 이 실행이 아직 쓰지 않은 동안 놓인 쓸 만한 파일은 `state.json.corrupt` 로 떠 둔 뒤 쓴다 — 떠
-//!   두기가 실패해도 쓴다(D8).
-//! - **해결 칸** = 답한 크래시 사본의 해시. ★기록기가 `Resolve` 를 **꺼낼 때** 선다★ — 보내는 쪽이 세우면 꺼내기
-//!   전에 뜬 스냅숏(답 뒤의 화면을 아직 안 담은 것)이 해시를 싣는다(I8). 선 뒤로 쓰는 스냅숏마다 실리고, 쓰기가
-//!   성공할 때마다 사본을 다시 읽어 해시가 같을 때만 지운다(N1). 지웠거나 · 없거나 · 다른 사본이면 칸을 비운다.
-//! - **닫힘** = [`SaverHandle::finish`] 가 마감을 넘기면 세우는 표지. 선 뒤로는 발행(rename)도 사본 지우기도
-//!   떠 두기도 하지 않는다 — 다음 부팅이 직전의 `clean_exit:false` 를 읽고 묻는다.
+//! - **Periodic save:** every [`POLL_INTERVAL`] it reads the change number, and if it changed, it writes the whole snapshot when it has been
+//!   quiet for [`QUIET`] after the last change or [`MAX_DELAY`] has passed after the first change.
+//! - **A write failure = log only** (user decision D8). If the snapshot source fails · on a disk error, that change is left as not written
+//!   and the debounce writes again; a snapshot the codec rejected (a shape the next boot cannot read) waits for the next change. A clean-exit
+//!   write (`Final`) is not redone even on failure — the recorder just ends.
+//! - **Right before every write it decides again on the current `state.json`** (the base `file` rules — down to the header shape). If it is a
+//!   file written by a newer version, it does not write and, like a codec rejection, waits for the next change; if it could not read it, it decides again after the debounce, like a disk error.
+//!   A corrupt file · a usable file that was placed while this run had not yet written is copied aside as `state.json.corrupt` and then written — it writes
+//!   even if copying aside fails (D8).
+//! - **Resolved slot** = the hash of the crash copy that was answered. ★It stands when the recorder **takes out** `Resolve`★ — if the sender sets it, a snapshot
+//!   taken before it is taken out (one that does not yet hold the post-answer screen) carries the hash (I8). From then on it is carried by every snapshot written, and each time a write
+//!   succeeds it rereads the copy and deletes it only if the hash is the same (N1). If deleted · absent · a different copy, the slot is cleared.
+//! - **Closed** = a marker set when [`SaverHandle::finish`] misses its deadline. Once it stands, neither publishing (rename) nor deleting the copy nor
+//!   copying aside happens — the next boot reads the preceding `clean_exit:false` and asks.
 //!
-//! 기록기는 락을 쥐지 않는다 — 스냅숏 원천이 자기 락 안에서 복사해 건네고, 직렬화 · 디스크는 그 밖에서 한다
+//! The recorder holds no lock — the snapshot source copies inside its own lock and hands it over, and serialization · disk happen outside it
 //! (§6-3).
 
 use std::fmt;
@@ -39,66 +39,66 @@ use crate::file_hooks::OS_HOOKS;
 pub const POLL_INTERVAL: Duration = Duration::from_millis(500);
 pub const QUIET: Duration = Duration::from_secs(1);
 pub const MAX_DELAY: Duration = Duration::from_secs(5);
-/// 종료(`Final`)와 복원 확정(`Resolve`)이 답을 기다리는 마감(TRD §6-4 · §6-7). ★부팅의 셸 실행 잠금 대기(약
-/// 3초 — §6-5 ①)가 이보다 길어야 한다★ — 짧으면 새 인스턴스가 앞 인스턴스의 정상 종료 쓰기를 기다리지 않는다.
+/// The deadline for which exit (`Final`) and restore settlement (`Resolve`) wait for the answer (TRD §6-4 · §6-7). ★The boot's shell-run lock wait (about
+/// 3 seconds — §6-5 ①) must be longer than this★ — if shorter, a new instance does not wait for the previous instance's clean-exit write.
 pub const REPLY_DEADLINE: Duration = Duration::from_secs(2);
 
-/// 스냅숏 원천 — 운영은 `ViewManager` 다([`super::boot_plugin::LiveSource`]). 기록기 스레드에서 불린다.
+/// The snapshot source — production is `ViewManager` ([`super::boot_plugin::LiveSource`]). Called on the recorder thread.
 ///
-/// - ★패닉하지 않는다★ — 셸은 아무것도 가두지 않아 이 스레드의 패닉은 훅이 앱을 통째로 끝낸다(ADR-0292).
-///   독 든 락은 되살리거나(`engram_dashboard_base::sync`) [`Self::snapshot`] 이 `Err` 를 돌려준다.
-/// - ★[`SaverHandle::finish`] · [`SaverHandle::resolve`] 를 부른 스레드를 기다리지 않는다★ — 그 스레드는 답을
-///   기다리며 서 있다. 그 스레드가 쥔 락을 잡으려 들면 기록기가 마감까지 서 있게 되고, `finish` 면 정상 종료가
-///   매번 마감을 넘겨 모든 정상 종료가 비정상 종료로 읽힌다.
-/// - ★Tauri 창 게터(`outer_position` · `inner_size` · `is_maximized` 등)를 부르지 않는다★ — 메인 스레드 밖에서
-///   부르면 메인 스레드가 답할 때까지 서는데, `finish` 는 `RunEvent::Exit` 에서 바로 그 메인 스레드가 부르고
-///   답을 기다린다. 위치 · 크기는 `WindowEvent` 에서 모델에 적어 두고(P3b) 여기서는 모델만 읽는다.
+/// - ★It does not panic★ — the shell isolates nothing, so a panic on this thread makes the hook end the whole app (ADR-0292).
+///   A poisoned lock is revived (`engram_dashboard_base::sync`) or [`Self::snapshot`] returns `Err`.
+/// - ★It does not wait for the thread that called [`SaverHandle::finish`] · [`SaverHandle::resolve`]★ — that thread is standing
+///   waiting for the answer. If it tries to take a lock that thread holds, the recorder stands until the deadline, and for `finish` a clean exit
+///   would miss the deadline every time and every clean exit would be read as an abnormal exit.
+/// - ★It does not call Tauri window getters (`outer_position` · `inner_size` · `is_maximized`, etc.)★ — called from off the main thread,
+///   it stands until the main thread answers, but `finish` is called by exactly that main thread in `RunEvent::Exit`, which then
+///   waits for the answer. Position · size are written into the model at `WindowEvent` (P3b) and here only the model is read.
 pub trait SnapshotSource: Send + 'static {
-    /// 변경 번호 — 기록기는 같은지만 본다(대소를 보지 않는다). ★번호를 되돌리거나 초기화하지 않는다★ — 기록기가
-    /// 마지막으로 본 값과 다시 같아지면 그 사이의 변경을 못 본다.
+    /// The change number — the recorder only checks whether it is the same (it does not look at magnitude). ★Do not roll the number back or reset it★ — if it becomes the same again as
+    /// the value the recorder last saw, it misses the changes in between.
     type Revision: Clone + PartialEq + Send + 'static;
 
-    /// 0.5초마다 부른다 — 짧게 끝나야 한다.
+    /// Called every 0.5 seconds — it must finish quickly.
     ///
-    /// ★번호는 그 변경이 [`Self::snapshot`] 에 보이는 것과 같은 임계구역에서, 또는 그 뒤에 올라야 한다★ — 기록기는
-    /// 번호를 먼저 읽고 스냅숏을 뜬 뒤 그 번호를 「쓴 것」으로 친다. 번호가 변경보다 먼저 오르면 그 변경을 빠뜨린
-    /// 스냅숏이 다음 변경 때까지 디스크의 마지막 상태로 남는다.
+    /// ★The number must go up in the same critical section in which that change becomes visible to [`Self::snapshot`], or after it★ — the recorder
+    /// reads the number first, takes the snapshot, and then treats that number as 「쓴 것」 (written). If the number goes up before the change, a snapshot that missed that change
+    /// stays as the last state on disk until the next change.
     fn revision(&self) -> Self::Revision;
 
-    /// 창 전부 — 자기 락 안에서 복사해 소유한 값으로 돌려준다. 파일 머리(`version` · `saved_at_ms` ·
-    /// `clean_exit` · `resolved_crash_copy`)는 기록기가 채운다.
+    /// All windows — copied inside its own lock and returned as an owned value. The file header (`version` · `saved_at_ms` ·
+    /// `clean_exit` · `resolved_crash_copy`) is filled in by the recorder.
     ///
-    /// `Err` = 이번엔 못 뜬다(사유 한 줄) — 기록기는 디스크 오류와 같이 실패한 쓰기로 치고 디바운스 뒤 다시
-    /// 뜬다(정상 종료 쓰기면 그대로 끝난다).
+    /// `Err` = it cannot be taken this time (one reason line) — the recorder treats it as a failed write like a disk error and takes it again
+    /// after the debounce (for a clean-exit write it just ends).
     fn snapshot(&self) -> Result<Vec<WindowEntry>, String>;
 }
 
-/// 기록기가 만지는 두 파일 — 운영은 [`Fs`].
+/// The two files the recorder touches — production is [`Fs`].
 pub trait StateFiles: Send + 'static {
-    /// `state.json` 을 원자적으로 갈아끼운다 — `skip` 을 rename 앞마다 물어 서 있으면 발행하지 않고
-    /// [`WriteOutcome::Skipped`](`file::write_atomic_unless` 와 같은 계약). 폴더가 없으면 만든다.
+    /// Atomically swap `state.json` — ask `skip` before every rename, and if it says stand, do not publish and return
+    /// [`WriteOutcome::Skipped`] (the same contract as `file::write_atomic_unless`). Create the folder if it is missing.
     fn write_state(&self, text: &str, skip: &dyn Fn() -> bool) -> io::Result<WriteOutcome>;
 
-    /// `state.json` 원문 — 저장 직전 재판정의 원천. [`Self::read_crash_copy`] 와 같은 계약.
+    /// The original text of `state.json` — the source of the re-decision right before saving. The same contract as [`Self::read_crash_copy`].
     // ADR-0291 R16
     fn read_state(&self) -> io::Result<String>;
 
-    /// `state.json` 을 `state.json.corrupt` 로 떠 둔다 — 돌려주는 값 = 사본 자리(`file::copy_aside`).
+    /// Copy `state.json` aside as `state.json.corrupt` — returns the copy's location (`file::copy_aside`).
     fn copy_aside_state(&self) -> io::Result<PathBuf>;
 
-    /// 크래시 사본의 원문 — 없으면 `NotFound`, 상한 초과 · UTF-8 아님은 `InvalidData`
-    /// (`file::read_file_capped` 와 같은 계약).
+    /// The crash copy's original text — `NotFound` if absent, `InvalidData` if over the limit · not UTF-8
+    /// (the same contract as `file::read_file_capped`).
     fn read_crash_copy(&self) -> io::Result<String>;
 
-    /// 없으면 `NotFound`.
+    /// `NotFound` if absent.
     fn remove_crash_copy(&self) -> io::Result<()>;
 }
 
-/// 기록기의 시계 — 지금 읽기([`Clock::now`])는 디바운스만 재고, 스냅숏의 `saved_at_ms` 를 더한다. 실물 =
+/// The recorder's clock — the current read ([`Clock::now`]) only measures the debounce, and this trait adds the snapshot's `saved_at_ms`. The real one =
 /// [`SystemClock`].
 // ADR-0275 · ADR-0291
 pub trait SaverClock: Clock + 'static {
-    /// 스냅숏의 `saved_at_ms` — 유닉스 시각 ms.
+    /// The snapshot's `saved_at_ms` — Unix time in ms.
     fn wall_ms(&self) -> u64;
 }
 
@@ -108,7 +108,7 @@ impl SaverClock for SystemClock {
     }
 }
 
-/// 운영 파일 — 경로는 부르는 쪽이 정한다(배치 = [`super::boot_plugin`]).
+/// Production files — the caller decides the path (placement = [`super::boot_plugin`]).
 pub struct Fs {
     state: PathBuf,
     crash_copy: PathBuf,
@@ -137,36 +137,36 @@ impl StateFiles for Fs {
         file::read_file_capped(&self.crash_copy, STATE_READ_CAP, OS_HOOKS)
     }
 
-    // 잠김 재시도를 하지 않는다 — 못 지우면 해결 칸이 남아 뒤의 성공 쓰기마다 다시 지운다.
+    // No lock-retry — if it cannot be deleted, the resolved slot stays and is deleted again at every later successful write.
     fn remove_crash_copy(&self) -> io::Result<()> {
         std::fs::remove_file(&self.crash_copy)
     }
 }
 
-/// 기록기 쓰기 하나의 결과.
+/// The result of one recorder write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveOutcome {
-    /// 발행했다(rename).
+    /// Published (rename).
     Written,
-    /// 닫힌 뒤라 발행하지 않았다 — 실패가 아니고 다시 하지 않는다.
+    /// Not published because it is closed — not a failure and not redone.
     Skipped,
-    /// 스냅숏 원천 실패 · 코덱 거절([`EncodeError`]) · 저장 직전 재판정의 거절(새 판 · 못 읽음) · 디스크 오류.
-    /// 해결 칸은 그대로라 다음 성공 쓰기가 싣는다 — 정상 종료 쓰기(`Final`)의 실패 뒤엔 다음 쓰기가 없다.
+    /// Snapshot source failure · codec rejection ([`EncodeError`]) · rejection by the re-decision right before saving (newer version · unreadable) · disk error.
+    /// The resolved slot stays as is, so the next successful write carries it — after a failure of the clean-exit write (`Final`) there is no next write.
     Failed,
 }
 
-/// 요청을 보내고 마감까지 기다린 결과.
+/// The result of sending a request and waiting until the deadline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestOutcome {
     Done(SaveOutcome),
-    /// 마감 안에 답이 없었다 — 요청은 줄에 남아 나중에 처리될 수 있다.
+    /// No answer within the deadline — the request stays in the queue and may be processed later.
     TimedOut,
-    /// 답이 오지 않는다 — 기록기 스레드가 이미 끝났거나 처리 도중 죽었다.
+    /// No answer will come — the recorder thread has already ended or died while processing.
     SaverGone,
 }
 
-/// 기록기에 요청을 보내는 손잡이 — 복제해 나눠 쥔다. 모든 손잡이가 사라지면 기록기는 정상 종료 쓰기 없이
-/// 끝난다(다음 부팅은 비정상 종료로 읽는다).
+/// The handle for sending requests to the recorder — cloned and shared. When all handles are gone, the recorder ends without a clean-exit
+/// write (the next boot reads it as an abnormal exit).
 #[derive(Clone)]
 pub struct SaverHandle {
     requests: Sender<Request>,
@@ -174,11 +174,11 @@ pub struct SaverHandle {
 }
 
 impl SaverHandle {
-    /// 답한 크래시 사본의 해시를 디스크에 붙인다(TRD §6-7 ⑤). `Done(Written)` = 그 해시를 실은 `state.json` 이
-    /// 발행됐다 — 사본 지우기의 성패는 담지 않는다.
+    /// Attach the hash of the answered crash copy to disk (TRD §6-7 ⑤). `Done(Written)` = a `state.json` carrying that hash
+    /// was published — it does not carry whether deleting the copy succeeded.
     ///
-    /// ★기다리는 동안 [`SnapshotSource`] 가 잡을 락(`ViewManager`)을 쥐지 않는다★ — 쥐면 기록기가 그
-    /// 락에서 마감까지 서 있어 답이 `TimedOut` 이 된다.
+    /// ★While waiting, do not hold a lock (`ViewManager`) that [`SnapshotSource`] will take★ — if held, the recorder stands
+    /// at that lock until the deadline and the answer becomes `TimedOut`.
     pub fn resolve(&self, hash: String, deadline: Duration) -> RequestOutcome {
         match self.send(|reply| Request::Resolve { hash, reply }) {
             Some(answer) => wait(answer, deadline),
@@ -186,12 +186,12 @@ impl SaverHandle {
         }
     }
 
-    /// `clean_exit:true` 를 쓰고 기록기를 끝낸다. ★마감을 넘기면 닫힘을 세우고 돌아간다 — 갇힌 스레드를 기다리지
-    /// 않는다★. 그 뒤 기록기는 발행하지 않는다 — 단 닫힘을 세우기 직전에 rename 을 지난 쓰기는 이미 발행됐다
-    /// (그 내용은 이 `Final` 이거나 더 이른 `clean_exit:false` 다 — §12 R12).
+    /// Write `clean_exit:true` and end the recorder. ★If the deadline is missed, set closed and return — it does not wait for the stuck
+    /// thread★. After that the recorder does not publish — except a write that passed rename just before closed was set has already been published
+    /// (its content is this `Final` or an earlier `clean_exit:false` — §12 R12).
     ///
-    /// ★기다리는 동안 [`SnapshotSource`] 가 잡을 락(`ViewManager`)을 쥐지 않는다★ — 쥐면 `Final` 이 늘
-    /// 마감을 넘겨 모든 정상 종료가 비정상 종료로 읽힌다.
+    /// ★While waiting, do not hold a lock (`ViewManager`) that [`SnapshotSource`] will take★ — if held, `Final` always
+    /// misses the deadline and every clean exit is read as an abnormal exit.
     pub fn finish(&self, deadline: Duration) -> RequestOutcome {
         let outcome = match self.send(|reply| Request::Final { reply }) {
             Some(answer) => wait(answer, deadline),
@@ -208,8 +208,8 @@ impl SaverHandle {
         outcome
     }
 
-    /// 닫힘을 세운다 — 그 뒤 기록기는 발행하지 않는다(쓰기 · `Resolve` · `Final` 모두 `Skipped`). 스레드는 손잡이가
-    /// 모두 사라질 때 끝난다.
+    /// Set closed — after that the recorder does not publish (writes · `Resolve` · `Final` are all `Skipped`). The thread ends when all
+    /// handles are gone.
     pub fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
     }
@@ -223,8 +223,8 @@ impl SaverHandle {
     }
 }
 
-/// 기록기의 닫힘 표지 — [`spawn`] 앞에 만들어 띄우는 쪽과 나눠 쥔다. 세우면 그 기록기는 발행하지 않는다
-/// ([`SaverHandle::close`] 와 같은 표지). 띄우는 동안 손잡이가 아직 없는 쪽(종료)도 이것으로 닫을 수 있다.
+/// The recorder's closed marker — made before [`spawn`] and shared with the side that starts it. When set, that recorder does not publish
+/// (the same marker as [`SaverHandle::close`]). The side that has no handle yet while starting (exit) can also close with it.
 #[derive(Clone, Default)]
 pub struct CloseFlag(Arc<AtomicBool>);
 
@@ -242,13 +242,13 @@ fn wait(answer: Receiver<SaveOutcome>, deadline: Duration) -> RequestOutcome {
     }
 }
 
-/// 기록기 스레드를 띄운다. `boot_revision` = 부팅 첫 쓰기(§6-5 ⑤)가 담은 변경 번호 — 그 뒤 바뀐 것을 첫 주기가
-/// 싣는다. `carry_resolved` = 부팅이 못 지운 답한 사본의 해시 — 첫 쓰기가 이미 실었으므로 다음 성공 쓰기 뒤
-/// 지우기를 다시 해 본다. `claim` = 이 실행이 `state.json` 을 이미 자기 것으로 잡았나(부팅이 정한다 —
-/// `boot::saver_claim`) — `NotYet` 이면 첫 쓰기 전에 그 자리의 쓸 만한 파일을 떠 둔다. `closed` = 이 기록기의
-/// 닫힘 표지 — 띄우기 전에 서 있으면 처음부터 발행하지 않는다.
+/// Start the recorder thread. `boot_revision` = the change number carried by the boot's first write (§6-5 ⑤) — the first period carries what changed after that.
+/// `carry_resolved` = the hash of the answered copy that boot could not delete — the first write already carried it, so retry the deletion
+/// after the next successful write. `claim` = whether this run has already claimed `state.json` as its own (boot decides —
+/// `boot::saver_claim`) — if `NotYet`, copy aside the usable file in that spot before the first write. `closed` = this recorder's
+/// closed marker — if set before starting, it does not publish from the start.
 ///
-/// `Err` = 스레드를 못 띄웠다.
+/// `Err` = the thread could not be started.
 pub fn spawn<S, F, C>(
     source: S,
     files: F,
@@ -313,7 +313,7 @@ where
 {
     let _panic_note = PanicNote;
     tracing::info!(module = "state", "기록기 시작");
-    // 요청이 잦아도 확인이 밀리지 않게 마감 시각으로 잰다.
+    // Measure by deadline time so that checks do not get pushed back even when requests are frequent.
     let mut next_tick = saver.clock.now() + poll;
     loop {
         let wait = next_tick.saturating_duration_since(saver.clock.now());
@@ -347,8 +347,8 @@ where
     }
 }
 
-/// 기록기 스레드가 패닉으로 풀릴 때 한 줄 남긴다. ★훅 없는 시험 빌드에서만 닿는다★ — 셸은 훅이 되감기 전에
-/// 사유 줄을 남기고 프로세스째 끝내 이 줄까지 오지 않는다(ADR-0292).
+/// Leave one line when the recorder thread is released by a panic. ★It is reached only in test builds without the hook★ — in the shell the hook leaves
+/// a reason line and ends the whole process before unwinding, so it never gets to this line (ADR-0292).
 struct PanicNote;
 
 impl Drop for PanicNote {
@@ -383,11 +383,11 @@ enum Cause {
 enum Failure {
     Snapshot(String),
     Rejected(EncodeError),
-    /// 저장 직전 재판정의 거절 — 지금 `state.json` 이 이 셸보다 새 판이 쓴 것이다(그 판).
+    /// Rejection by the re-decision right before saving — the current `state.json` was written by a version newer than this shell (that version).
     Newer {
         found: u64,
     },
-    /// 저장 직전 재판정의 거절 — 지금 `state.json` 을 못 읽어 덮어도 되는지 모른다.
+    /// Rejection by the re-decision right before saving — the current `state.json` could not be read, so it is unknown whether overwriting is allowed.
     Unreadable(io::Error),
     Disk(io::Error),
 }
@@ -428,15 +428,15 @@ enum FailureKind {
     Disk,
 }
 
-/// 답한 사본 정리(N1)가 실패한 갈래.
+/// The branch where cleaning up the answered copy (N1) failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CopyFailure {
     Read,
     Remove,
 }
 
-/// 끊기지 않고 이어진 실패. 갈래가 처음이거나 바뀔 때만 제 레벨로 남기고, 같은 갈래의 되풀이는 debug 로 접는다
-/// — 디스크 오류가 이어지면 1초마다 다시 쓰므로 접지 않으면 파일 로그가 그 줄로 찬다.
+/// A failure that continues without a break. Only when the branch is the first or changes is it logged at its own level, and a repeat of the same branch is folded to debug
+/// — if a disk error continues it rewrites every second, so without folding the file log fills with that line.
 #[derive(Debug, PartialEq, Eq)]
 struct Streak<K> {
     current: Option<(K, u32)>,
@@ -449,7 +449,7 @@ impl<K> Default for Streak<K> {
 }
 
 impl<K: Copy + PartialEq> Streak<K> {
-    /// 실패 하나를 센다 — `true` = 제 레벨로 남길 차례다.
+    /// Count one failure — `true` = it is the turn to log at its own level.
     fn fail(&mut self, kind: K) -> bool {
         match &mut self.current {
             Some((current, failures)) => {
@@ -469,7 +469,7 @@ impl<K: Copy + PartialEq> Streak<K> {
         self.current.map_or(0, |(_, failures)| failures)
     }
 
-    /// `Some(n)` = 이어지던 실패가 n번 만에 끝났다.
+    /// `Some(n)` = the failure that was continuing ended after n times.
     fn end(&mut self) -> Option<u32> {
         self.current.take().map(|(_, failures)| failures)
     }
@@ -480,17 +480,17 @@ struct Saver<S: SnapshotSource, F: StateFiles, C: SaverClock> {
     files: F,
     clock: C,
     closed: Arc<AtomicBool>,
-    /// 마지막으로 본 번호 — 이것과 다르면 새 변경이다.
+    /// The last number seen — if different from this, it is a new change.
     seen: S::Revision,
-    /// 디스크에 아직 안 간 것(변경 · 실패한 쓰기)이 생긴 때 — `None` = 쓸 것이 없다.
+    /// The time something not yet on disk (a change · a failed write) arose — `None` = nothing to write.
     pending_since: Option<Instant>,
     last_change_at: Instant,
     resolved: Option<String>,
-    /// 이 실행이 `state.json` 을 이미 자기 것으로 잡았나 — 첫 성공 쓰기 뒤 `Adopted`.
+    /// Has this run already claimed `state.json` as its own — `Adopted` after the first successful write.
     claim: Claim,
     write_failures: Streak<FailureKind>,
     copy_failures: Streak<CopyFailure>,
-    /// 떠 두기 실패의 이어짐 — 쓰기는 그래도 하므로 쓰기 실패 줄과 따로 접는다.
+    /// Continuation of copy-aside failures — the write still happens, so it is folded separately from the write-failure line.
     aside_failures: Streak<()>,
 }
 
@@ -555,8 +555,8 @@ impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
         if self.is_closed() {
             return SaveOutcome::Skipped;
         }
-        // 번호를 스냅숏보다 먼저 읽는다 — 그 사이의 변경은 스냅숏에 들고도 번호로는 「안 씀」으로 남아 한 번 더
-        // 쓸 뿐이다. 거꾸로면 스냅숏에 없는 변경을 쓴 것으로 친다.
+        // Read the number before the snapshot — a change in between is in the snapshot but remains 「안 씀」 (not written) by number, so it is merely written one more time.
+        // The other way round, a change not in the snapshot would be treated as written.
         let revision = self.source.revision();
         let windows = match self.source.snapshot() {
             Ok(windows) => windows,
@@ -596,7 +596,7 @@ impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
                         "상태 파일 쓰기가 실패 뒤 다시 성공했다"
                     );
                 }
-                // ADR-0291 R15: 쓰기가 한 번 성공하면 떠 두기 실패도 다시 처음부터 센다(다음 실패는 다시 error).
+                // ADR-0291 R15: once a write succeeds, the copy-aside failure count also restarts from the beginning (the next failure is error again).
                 self.aside_failures.end();
                 match cause {
                     Cause::Periodic => {
@@ -630,19 +630,19 @@ impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
         }
     }
 
-    /// 쓰기 직전에 지금 `state.json` 을 다시 읽어 판정한다 — 덮어도 되면 `Ok`(떠 둘 것이면 떠 둔 뒤 · 떠 두기가
-    /// 실패해도 `Ok`), 거절이면 그 까닭.
+    /// Right before writing, read the current `state.json` again and decide — `Ok` if overwriting is allowed (if it must be copied aside, after copying aside · `Ok` even if copying
+    /// aside fails), and if rejected, the reason.
     ///
-    /// ★적재 때 판정을 들고 있지 않는다★ — 실행 중에 새 판으로 바뀐 파일을 덮지 않고, 첫 쓰기 뒤 우리 파일을
-    /// 쓰기마다 떠 두지도 않는다.
+    /// ★Do not hold the decision from load time★ — do not overwrite a file that changed to a newer version during the run, and after the first write do not
+    /// copy our own file aside on every write.
     // ADR-0291 R8 · R16 (D5 · D14 · E5)
     fn judge_state(&mut self) -> Result<(), Failure> {
         let current = file::classify(self.files.read_state(), &codec::STATE_SPEC);
         match current.write_policy(self.claim) {
             WritePolicy::Write => Ok(()),
             WritePolicy::CopyAsideFirst => {
-                // 닫힌 뒤엔 그 쓰기가 발행되지 않으므로 떠 둘 까닭이 없다 — 관문을 지난 새 인스턴스의 파일을
-                //   건드리지 않는다.
+                // After closed, that write is not published, so there is no reason to copy aside — do not touch the file of a new instance that passed
+                //   the gate.
                 if !self.is_closed() {
                     self.copy_state_aside(&current);
                 }
@@ -651,13 +651,13 @@ impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
             WritePolicy::Refuse(Refused::Newer { found }) => Err(Failure::Newer { found }),
             WritePolicy::Refuse(Refused::ReadFailed) => Err(Failure::Unreadable(match current {
                 file::Loaded::Failed(error) => error,
-                // 판정 표는 읽기 실패에만 이 거절을 낸다.
+                // The decision table issues this rejection only for read failures.
                 _ => io::Error::other("state.json 을 못 읽었다"),
             })),
         }
     }
 
-    /// 덮기 전에 지금 `state.json` 을 떠 둔다 — 실패해도 그 쓰기는 한다(D8 — 화면 상태는 진행이 먼저다).
+    /// Copy `state.json` aside before overwriting — the write is done even if it fails (D8 — for screen state, progress comes first).
     fn copy_state_aside(&mut self, current: &file::Loaded) {
         let what = match current {
             file::Loaded::Parsed(file::Parsed::Usable { .. }) => {
@@ -686,10 +686,10 @@ impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
         }
     }
 
-    /// 다시 쓸 때를 정한다. 스냅숏 · 디스크 실패와 지금 파일을 못 읽은 거절은 디바운스를 지금부터 다시 재
-    /// [`QUIET`] 뒤에 다시 쓴다(그때 다시 판정한다). 코덱 거절과 새 판 거절은 같은 번호로 다시 해도 같으므로 그
-    /// 번호를 본 것으로 치고 다음 변경을 기다린다 — 새 판 파일을 주기마다 다시 읽지 않는다. `Final` 이면 스레드가
-    /// 곧 끝나 어느 쪽도 오지 않는다.
+    /// Decide when to write again. For snapshot · disk failures and a rejection where the current file could not be read, the debounce is measured again from now and it writes again
+    /// after [`QUIET`] (deciding again then). A codec rejection and a newer-version rejection would be the same if retried with the same number, so treat
+    /// that number as seen and wait for the next change — the newer-version file is not reread every period. For `Final` the thread
+    /// ends soon and neither comes.
     // ADR-0291 (D5)
     fn failed(&mut self, cause: Cause, failure: Failure, revision: S::Revision) {
         match failure {
@@ -741,11 +741,11 @@ impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
         }
     }
 
-    /// N1 — 사본을 다시 읽어 해결 칸의 해시와 같을 때만 지운다. 잠금 없이 진행한 부팅이나 마감 경합에서 새
-    /// 인스턴스가 뜬 새 사본을 낡은 기록기가 지우지 않게 한다.
+    /// N1 — reread the copy and delete it only if it equals the hash in the resolved slot. This keeps a stale recorder from deleting a new copy that a new
+    /// instance made, in a boot that went on without the lock or in a deadline race.
     ///
-    /// ★읽기와 지우기 사이는 원자적이지 않다★ — 그 틈에 새 사본이 들어오면 지운다. 막는 것은 셸 실행 잠금(I1)과
-    /// 지우기 직전의 닫힘 확인이고, 이 확인은 그 둘이 빠진 길을 좁힐 뿐이다.
+    /// ★Between the read and the delete is not atomic★ — if a new copy comes in in that gap, it is deleted. What blocks it is the shell-run lock (I1) and
+    /// the closed check right before deleting, and that check only narrows the path where those two are missing.
     fn drop_answered_copy(&mut self) {
         let Some(hash) = self.resolved.clone() else {
             return;
@@ -778,13 +778,13 @@ impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
                 );
                 true
             }
-            // 읽기 오류의 가름은 base 판정 하나다.
+            // The classification of read errors is a single base decision.
             Err(error) => match file::classify(Err(error), &codec::STATE_SPEC) {
                 file::Loaded::Missing => {
                     tracing::info!(module = "state", hash = %hash, "답한 크래시 사본이 이미 없다");
                     true
                 }
-                // 답한 사본은 상한 안의 UTF-8 이었다 — 그렇지 않은 사본은 다른 사본이다.
+                // The answered copy was UTF-8 within the limit — a copy that is not is a different copy.
                 file::Loaded::Parsed(parsed) => {
                     tracing::warn!(
                         module = "state",
@@ -870,7 +870,7 @@ mod tests {
             self.revision.load(Ordering::SeqCst)
         }
 
-        /// 창 id 에 번호를 실어 어느 때의 스냅숏인지 시험이 읽는다.
+        /// Carry a number in the window id so the test can read which moment's snapshot it is.
         fn snapshot(&self) -> Result<Vec<WindowEntry>, String> {
             self.snapshots.fetch_add(1, Ordering::SeqCst);
             if self.fail_snapshot.load(Ordering::SeqCst) {
@@ -905,12 +905,12 @@ mod tests {
         published: Vec<StateFile>,
         write_calls: usize,
         fail_writes: bool,
-        /// 지금 `state.json` 원문 — 발행하면 그 글이 된다. `None` = 없음.
+        /// The current `state.json` original text — if published it becomes that text. `None` = absent.
         state: Option<String>,
-        /// 서 있으면 `read_state` 가 이 종류로 실패한다.
+        /// If set, `read_state` fails with this kind.
         fail_state_read: Option<io::ErrorKind>,
         state_reads: usize,
-        /// 떠 둔 `state.json.corrupt` 원문 — 하나뿐이라 뜰 때마다 덮인다.
+        /// The original text of the copied-aside `state.json.corrupt` — there is only one, so it is overwritten each time it is copied.
         state_aside: Option<String>,
         aside_calls: usize,
         fail_aside: bool,
@@ -918,7 +918,7 @@ mod tests {
         fail_read: Option<io::ErrorKind>,
         fail_remove: bool,
         remove_calls: usize,
-        /// 발행 직후 세운다 — rename 을 지난 뒤 닫힘이 선 경합을 흉내 낸다.
+        /// Set right after publishing — imitates a race where closed was set after passing rename.
         close_after_publish: Option<Arc<AtomicBool>>,
     }
 
@@ -944,13 +944,13 @@ mod tests {
             self.disk.lock().unwrap()
         }
 
-        /// (`state.json` 읽기, `write_state` 호출, 떠 두기 호출) 수.
+        /// The counts of (`state.json` reads, `write_state` calls, copy-aside calls).
         fn counts(&self) -> (usize, usize, usize) {
             let disk = self.disk();
             (disk.state_reads, disk.write_calls, disk.aside_calls)
         }
 
-        /// 다음 `write_state` 하나를 rename 앞에서 세운다 — 돌려받은 수신자로 들어섰음을 보고, 송신자로 푼다.
+        /// Stop the next `write_state` before rename — see from the returned receiver that it has stepped in, and release it with the sender.
         fn arm_gate(&self) -> (Receiver<()>, Sender<()>) {
             let (entered, entered_rx) = mpsc::channel();
             let (release_tx, release) = mpsc::channel();
@@ -1093,7 +1093,7 @@ mod tests {
     }
 
     impl Rig {
-        /// 운영 스레드처럼 [`POLL_INTERVAL`] 뒤에 한 번 확인한다.
+        /// Check once after [`POLL_INTERVAL`] like the production thread.
         fn tick(&mut self) {
             self.clock.advance(POLL_INTERVAL);
             self.saver.tick();
@@ -1113,7 +1113,7 @@ mod tests {
             self.published().pop().expect("발행된 스냅숏이 있다")
         }
 
-        /// 바꾸고 조용히 1초가 지날 때까지 확인한다 — 주기 쓰기 한 번.
+        /// Check until 1 second has passed quietly after a change — one periodic write.
         fn change_and_settle(&mut self) {
             self.source.change();
             self.ticks(3);
@@ -1124,7 +1124,7 @@ mod tests {
         codec::crash_copy_hash(text)
     }
 
-    // ── 주기 저장 ──
+    // ── Periodic save ──
 
     #[test]
     fn nothing_is_written_while_the_revision_stays() {
@@ -1137,10 +1137,10 @@ mod tests {
     fn a_change_is_written_after_one_quiet_second() {
         let mut rig = rig(FakeFiles::default(), None);
         rig.source.change();
-        rig.tick(); // 0.5초 — 변경을 본다
-        rig.tick(); // 1.0초 — 0.5초 조용
+        rig.tick(); // 0.5 s — sees the change
+        rig.tick(); // 1.0 s — 0.5 s quiet
         assert_eq!(rig.files.disk().write_calls, 0);
-        rig.tick(); // 1.5초 — 1초 조용
+        rig.tick(); // 1.5 s — 1 s quiet
         assert_eq!(rig.published().len(), 1);
         let state = rig.last();
         assert_eq!(state.windows[0].id, "rev-1");
@@ -1276,7 +1276,7 @@ mod tests {
         assert_eq!(rig.published().len(), 1);
     }
 
-    // ── 저장 직전 재판정(ADR-0291 R16) ──
+    // ── Re-decision right before saving (ADR-0291 R16) ──
 
     const NEWER: &str = r#"{"version":2,"saved_at_ms":1,"clean_exit":false,"windows":[]}"#;
 
@@ -1291,7 +1291,7 @@ mod tests {
         .unwrap()
     }
 
-    /// D5: 새 판 거절은 코덱 거절처럼 다음 변경까지 기다린다 — 같은 번호로는 그 파일을 다시 읽지 않는다.
+    /// D5: a newer-version rejection waits for the next change like a codec rejection — the file is not reread with the same number.
     #[test]
     fn a_newer_state_file_is_never_overwritten_and_is_judged_again_only_on_a_change() {
         let mut rig = rig(FakeFiles::default(), None);
@@ -1320,7 +1320,7 @@ mod tests {
         );
     }
 
-    /// D5: 못 읽은 거절은 디스크 오류처럼 디바운스 뒤 다시 판정한다 — 잠김이 풀리면 이어 쓴다.
+    /// D5: an unreadable rejection is decided again after the debounce like a disk error — once the lock is released it continues writing.
     #[test]
     fn an_unreadable_state_file_is_judged_again_after_the_quiet_period() {
         let mut rig = rig(FakeFiles::default(), None);
@@ -1346,7 +1346,7 @@ mod tests {
         );
     }
 
-    /// D1: 머리를 못 읽는 파일도 버전 문을 지났을 뿐 손상이다 — 떠 둔 뒤 쓴다.
+    /// D1: a file whose header cannot be read is also corrupt, it merely passed the version gate — copy it aside and then write.
     #[test]
     fn a_corrupt_state_file_is_copied_aside_once_before_it_is_replaced() {
         for broken in ["{broken", r#"{"version":1}"#] {
@@ -1370,7 +1370,7 @@ mod tests {
         }
     }
 
-    /// D14: 이 실행이 아직 그 파일을 잡지 않았으면(`NotYet`) 그 자리의 쓸 만한 파일도 덮기 전에 떠 둔다.
+    /// D14: if this run has not yet claimed that file (`NotYet`), the usable file in that spot is also copied aside before overwriting.
     #[test]
     fn a_usable_file_is_copied_aside_only_while_the_run_has_not_claimed_it() {
         let placed = a_usable_file();
@@ -1397,7 +1397,7 @@ mod tests {
         );
     }
 
-    /// E5 · D8: 떠 두기가 실패해도 그 쓰기는 발행한다 — 화면 상태는 진행이 먼저다.
+    /// E5 · D8: even if copying aside fails, that write is published — for screen state, progress comes first.
     #[test]
     fn a_failed_copy_aside_still_publishes_the_write() {
         let mut rig = rig(FakeFiles::default(), None);
@@ -1413,8 +1413,8 @@ mod tests {
         assert_eq!(disk.published.len(), 1, "떠 두기가 실패해도 쓴다");
     }
 
-    /// R15: 쓰기가 한 번 성공하면 떠 두기 실패의 이어짐도 끝난다 — 그 뒤의 떠 두기 실패는 새 이어짐의 첫 실패라
-    /// 다시 error 로 남는다.
+    /// R15: once a write succeeds, the continuation of copy-aside failures ends too — a copy-aside failure after that is the first failure of a new continuation, so
+    /// it is logged at error again.
     #[test]
     fn a_successful_write_ends_the_copy_aside_failure_streak() {
         let mut rig = rig(FakeFiles::default(), None);
@@ -1441,7 +1441,7 @@ mod tests {
         );
     }
 
-    // ── 해결 칸 ──
+    // ── Resolved slot ──
 
     #[test]
     fn resolve_writes_at_once_and_carries_the_hash() {
@@ -1581,7 +1581,7 @@ mod tests {
         assert_eq!(rig.files.disk().crash_copy, None);
     }
 
-    // ── 정상 종료 · 닫힘 ──
+    // ── Clean exit · closed ──
 
     #[test]
     fn final_writes_a_clean_exit_and_leaves_an_unanswered_copy() {
@@ -1629,7 +1629,7 @@ mod tests {
         assert_eq!(disk.crash_copy.as_deref(), Some(COPY));
     }
 
-    // ── 스레드 ──
+    // ── Thread ──
 
     fn started(
         files: FakeFiles,
@@ -1674,7 +1674,7 @@ mod tests {
         let (entered, release) = files.arm_gate();
         let (handle, thread, _, _) = started(files.clone(), None, POLL_INTERVAL);
 
-        // 사본을 지울 답을 쓰다가 rename 앞에 갇힌 채로 종료를 맞는다.
+        // Exit arrives while stuck before rename in writing an answer that deletes the copy.
         let stuck = handle
             .send(|reply| Request::Resolve {
                 hash: hash(COPY),
@@ -1732,7 +1732,7 @@ mod tests {
             assert!(attempts < 500, "주기 쓰기가 시작되지 않았다");
             clock.advance(QUIET);
         }
-        // 주기 쓰기가 rename 앞에 서 있는 동안 보낸다 — 아직 꺼내지 않았다.
+        // Send it while a periodic write is standing before rename — it has not been taken out yet.
         let answer = handle
             .send(|reply| Request::Resolve {
                 hash: "abc".into(),
@@ -1757,7 +1757,7 @@ mod tests {
         thread.join().unwrap();
     }
 
-    // ── 운영 파일 ──
+    // ── Production files ──
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -1805,7 +1805,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// 실물 이음매의 재판정 두 연산 + R11(실행 중에 지워진 폴더도 쓰기가 다시 만든다).
+    /// The two re-decision operations of the real seam + R11 (even a folder deleted during the run is recreated by a write).
     #[test]
     fn fs_reads_and_copies_aside_the_real_state_file_and_remakes_a_missing_folder() {
         let root = temp_dir("fs-state");

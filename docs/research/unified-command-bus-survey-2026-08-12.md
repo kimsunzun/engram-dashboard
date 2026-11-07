@@ -1,213 +1,213 @@
-# 통합 command 버스 — 선례 서베이 (설계-결정 모드)
+# Unified command bus — precedent survey (design-decision mode)
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| 상태 | **적대 리뷰 완료 · 판정 BLOCK · 정정 반영본** ★리뷰 정정★ (초판 표기 = "초안 — grounding·적대 리뷰 전") |
-| tier | deep (주계열 5갈래 + 피어 갈래에 타계열 병렬 수집 1) + 타계열 적대 리뷰 1회 |
-| 방법 | 갈래별 수집자 병렬 스폰(웹 검색 12~18회 + 1차 출처 fetch) → 메인 취합 → 타계열 적대 리뷰 |
-| 날짜 | 2026-08-12 |
-| 미완 | 리뷰가 낸 열린 항목(§8 상위 대안 · §9 빠진 계약 조항) 미해결 · grounding 전수 미실시 |
-| 확신도 범례 | ★리뷰 정정★ 태그는 더 이상 수집자 자기보고가 아니다(초판 범례 = "수집자 자기보고, 최종 태그는 grounding+리뷰에서 파생"). **리뷰를 통과한 클레임은 원래 태그(확실 / 가능성 높음 / 불확실)를 유지 · 반증된 클레임은 `반증` 표시 · 표본 부족으로 강등된 클레임은 `표본 한정` 표시.** |
+| Status | **adversarial review complete · verdict BLOCK · edition with corrections applied** ★Review correction★ (first edition's label = "draft — before grounding and adversarial review") |
+| tier | deep (5 main-family tracks + 1 parallel cross-family collection on the peer track) + 1 cross-family adversarial review |
+| Method | collectors spawned in parallel per track (12–18 web searches + primary-source fetches) → main aggregation → cross-family adversarial review |
+| Date | 2026-08-12 |
+| Incomplete | the open items raised by the review (§8 higher-ranked alternatives · §9 missing contract clauses) are unresolved · exhaustive grounding not done |
+| Confidence legend | ★Review correction★ The tags are no longer a collector self-report (first-edition legend = "collector self-report, the final tag derived from grounding + review"). **A claim that passed the review keeps its original tag (certain / likely / uncertain) · a refuted claim is marked `반증` (refuted) · a claim downgraded for lack of sample is marked `표본 한정` (sample-limited).** |
 
-★리뷰 정정★ **§8·§9의 열린 항목이 닫히기 전까지 본 보고서를 ADR 거부 근거로 사용할 수 없다.** 판정이 BLOCK이고, 최근접 선례 분류(Zellij·OBS·LSP)와 가장 무겁게 쓰인 "선례 없음" 주장이 반증돼 §4 적합도 표와 §5 거부 대안 초안의 근거가 아직 서지 않는다.
+★Review correction★ **Until the open items of §8 and §9 are closed, this report cannot be used as grounds for rejecting an alternative in an ADR.** The verdict is BLOCK, and because the classification of the closest precedents (Zellij · OBS · LSP) and the most heavily used "no precedent" claim were refuted, the grounds for the §4 fit table and the §5 draft of rejected alternatives do not stand yet.
 
-## 0. 우리 제약 (적합도 판정 축)
+## 0. Our constraints (axes for the fit decision)
 
-| # | 제약 | 근거 |
+| # | Constraint | Basis |
 |---|---|---|
-| C1 | **데몬은 클라이언트 셸을 모른다** — 격리가 불변식 | ADR 계열 결정 · 코드 실측 |
-| C2 | 새 crate 의존·새 외부 툴체인 도입 비용이 크다(격리 게이트·의존 상한) | CLAUDE.md 게이트 목록 |
-| C3 | 이미 신뢰하는 파생 경로가 있다(Rust 타입 → TS 생성물 23개 + CI drift 게이트) | 실측 |
-| C4 | LLM 호출자가 1급 소비자 — 사람 클릭과 같은 계약으로 합류 | 「LLM-우선 제어」 |
-| C5 | 전송에 코드를 묶지 않는다(교체 가능) | 「아키텍처 원칙」 |
-| C6 | 수행 함수는 세 프로세스에 흩어져 공유 불가 — 공유 대상은 계약뿐 | 실측 |
-| C7 | 목록 필터는 교육 수단이지 강제 수단이 아니다 | 기존 결정(우편 격리) |
+| C1 | **The daemon does not know the client shell** — isolation is the invariant | ADR-series decisions · code measurement |
+| C2 | The cost of introducing a new crate dependency or a new external toolchain is high (isolation gate · dependency cap) | the CLAUDE.md gate list |
+| C3 | There is already a derivation path we trust (Rust types → 23 TS generated outputs + a CI drift gate) | measured |
+| C4 | An LLM caller is a first-class consumer — it joins under the same contract as a human click | 「LLM-우선 제어」 (LLM-first control) |
+| C5 | Do not tie code to the transport (swappable) | 「아키텍처 원칙」 (Architecture principles) |
+| C6 | The executing functions are scattered across three processes and cannot be shared — only the contract is shared | measured |
+| C7 | A list filter is a means of education, not a means of enforcement | existing decision (mail isolation) |
 
-## 1. 선례가 갈리는 네 가지 전략
+## 1. Four strategies on which the precedents split
 
-수집 결과 단일 지배 패턴은 없고 네 묶음으로 갈렸다.
+The collection found no single dominant pattern, and it split into four groups.
 
-| 전략 | 대표 | 특징 | 우리 적합 |
+| Strategy | Representatives | Characteristics | Fit for us |
 |---|---|---|---|
-| **A. 자기서술 버스 + 런타임 조회** | D-Bus(Introspect), gRPC reflection, Kubernetes discovery | 살아 있는 프로세스가 자기 명령·인자를 XML/스키마로 토해낸다 | 부분 — 조회 모델로는 최상, 단 취합자 문제(§4-③) |
-| **B. capability 협상 + 런타임 동적 등록/해제** ★리뷰 정정★(초판 명칭 = "세션 시작 capability 협상 + 정적 목록") | LSP, DAP, WebDriver BiDi | 규격이 명령·인자·결과를 정적으로 정의하고, "지금 무엇을 지원하는가"는 초기화 선언 **+ 런타임 등록/해제**로 바뀐다 | 부분 — `반증` 초판의 "`initialize`에서 한 번 선언, 이후 목록 고정"은 틀렸다(LSP `client/registerCapability`·`client/unregisterCapability`). "인자 스키마가 협상에 안 들어간다"도 LSP 사용자 정의 명령 인자에 한정된 얘기다. 출처(리뷰 제시): <https://github.com/microsoft/language-server-protocol/blob/gh-pages/_specifications/lsp/3.18/specification.md> · <https://github.com/microsoft/vscode-languageserver-node> |
-| **C. 데몬 + 얇은 클라이언트, 단일 타입드 어휘** | **WezTerm**, Zellij(부분 선례), tmux, sway/Hyprland, Docker/K8s | 하나의 명령 열거형이 여러 입력 경로를 먹인다 — 단 그 열거형이 *모든* 표면을 덮는다는 보장은 없다 ★리뷰 정정★(초판 = "키바인딩·CLI·플러그인을 모두 먹인다") | **부분 최상** — 우리 형태와 가장 가깝지만 "유일 계약" 선례는 확보 못했다(§1 피어 절) ★리뷰 정정★(초판 = "최상 — 우리 형태와 동형") |
-| **D. 인프로세스 레지스트리, 외부 미도달** | **VS Code** ★리뷰 정정★ 초판은 OBS도 넣었으나 `반증` — 아래 별항 | 목록도 있고 조회도 되는데 외부 호출자가 못 닿는다 | **우리 현재 상태 = 목표 아님(반면교사)** |
+| **A. Self-describing bus + runtime lookup** | D-Bus (Introspect), gRPC reflection, Kubernetes discovery | a living process spits out its own commands and arguments as XML/schema | partial — the best as a lookup model, but the aggregator problem (§4-③) |
+| **B. Capability negotiation + runtime dynamic register/unregister** ★Review correction★ (first edition's name = "capability negotiation at session start + static list") | LSP, DAP, WebDriver BiDi | the spec statically defines commands, arguments and results, and "what is supported now" changes through the initialization declaration **+ runtime register/unregister** | partial — `반증` The first edition's "declared once in `initialize`, then the list is fixed" is wrong (LSP `client/registerCapability`·`client/unregisterCapability`). "Argument schemas do not enter the negotiation" is also true only for the arguments of LSP user-defined commands. Sources (given by the review): <https://github.com/microsoft/language-server-protocol/blob/gh-pages/_specifications/lsp/3.18/specification.md> · <https://github.com/microsoft/vscode-languageserver-node> |
+| **C. Daemon + thin client, a single typed vocabulary** | **WezTerm**, Zellij (partial precedent), tmux, sway/Hyprland, Docker/K8s | one command enum feeds several input paths — but there is no guarantee that this enum covers *every* surface ★Review correction★ (first edition = "feeds keybindings, CLI and plugins all") | **partly best** — closest to our shape, but we did not secure a precedent for a "sole contract" (§1 peer section) ★Review correction★ (first edition = "best — isomorphic to our shape") |
+| **D. In-process registry, unreachable from outside** | **VS Code** ★Review correction★ The first edition also put OBS here, but `반증` — see the separate item below | there is a list and lookup works, but an external caller cannot reach it | **our current state = not the goal (cautionary example)** |
 
-### 가장 가까운 피어 2건 — 1건은 부분 선례로 강등
+### The two closest peers — 1 downgraded to a partial precedent
 
-- **Zellij — 부분 선례.** `반증` ★리뷰 정정★ 초판은 "단일 `Action` 열거형이 유일한 명령 어휘 · 키바인딩·CLI·플러그인이 전부 그 열거형으로 수렴 · **우리 계획의 실물 선례**"라고 썼다. 실제로 `Action`은 소스상 **키에 바인딩 가능한 액션** 집합이고, 플러그인 API는 `open_file`·`switch_session`·`cli_pipe_output`·`reconfigure` 같은 **별도 함수 표면**을 대규모로 갖는다(`run_action`은 그중 하나일 뿐). 최상위 CLI에도 `list-sessions`·`kill-all-sessions`·`setup`처럼 `Action` 밖의 명령이 있다. → **일부 액션 경로에서 열거형을 재사용하는 선례이지, GUI·CLI·플러그인 유일 계약의 선례가 아니다.** 유효하게 남는 부분: CLI가 인자를 파싱해 클라이언트→서버 메시지로 직렬화(protobuf, 길이 접두)해 서버 프로세스로 넘긴다.
-  출처(리뷰 제시): <https://github.com/zellij-org/zellij/blob/main/zellij-utils/src/input/actions.rs> · <https://zellij.dev/documentation/plugin-api-commands> · <https://zellij.dev/documentation/commands>
-- **WezTerm** — mux-server(데몬)/GUI/CLI 3분할, 자체 Rust PDU 코덱 + 요청 일련번호로 응답 짝짓기. 우리 데몬 프로토콜과 형태가 거의 같다. (가능성 높음) 리뷰가 추가 확인: 일련번호와 대기 promise를 잇는 명시적 상관 구조를 쓰며, 호환 불가 변경 시 올리는 **명시적 코덱 버전**도 둔다(§9). <https://github.com/wezterm/wezterm/blob/main/wezterm-client/src/client.rs> · <https://github.com/wezterm/wezterm/blob/main/codec/src/lib.rs>
+- **Zellij — a partial precedent.** `반증` ★Review correction★ The first edition wrote "a single `Action` enum is the only command vocabulary · keybindings, CLI and plugins all converge on that enum · **a real precedent for our plan**". In fact, in the source `Action` is the set of **actions that can be bound to keys**, and the plugin API has a large **separate function surface** such as `open_file`·`switch_session`·`cli_pipe_output`·`reconfigure` (`run_action` is just one of them). The top-level CLI too has commands outside `Action`, such as `list-sessions`·`kill-all-sessions`·`setup`. → **It is a precedent of reusing the enum on some action paths, not a precedent of a sole contract for GUI, CLI and plugins.** What remains valid: the CLI parses arguments, serializes them into a client→server message (protobuf, length prefix) and passes it to the server process.
+  Sources (given by the review): <https://github.com/zellij-org/zellij/blob/main/zellij-utils/src/input/actions.rs> · <https://zellij.dev/documentation/plugin-api-commands> · <https://zellij.dev/documentation/commands>
+- **WezTerm** — a 3-way split of mux-server (daemon)/GUI/CLI, with its own Rust PDU codec + request serial numbers to pair responses. The shape is almost the same as our daemon protocol. (likely) Additional confirmation by the review: it uses an explicit correlation structure that connects serial numbers to waiting promises, and it also keeps an **explicit codec version** raised on incompatible changes (§9). <https://github.com/wezterm/wezterm/blob/main/wezterm-client/src/client.rs> · <https://github.com/wezterm/wezterm/blob/main/codec/src/lib.rs>
 
-### ★리뷰 정정★ OBS는 D계열(외부 미도달)이 아니다 — `반증`
+### ★Review correction★ OBS does not belong to family D (unreachable from outside) — `반증`
 
-초판은 D계열에 **VS Code와 OBS(단일 프로세스)** 를 넣었다. OBS Studio는 28 이상에서 **외부 애플리케이션·스크립트가 붙는 WebSocket 제어 API를 기본 포함**하고, 플러그인이 vendor request/event를 더하는 확장 API도 있다. → OBS는 반면교사가 아니라 **외부 호출 가능한 명령 표면의 선례**다. D계열 예시는 **VS Code만** 남긴다.
-출처(리뷰 제시): <https://obsproject.com/kb/remote-control-guide> · <https://obsproject.com/kb/developer-guide> · <https://github.com/obsproject/obs-websocket/blob/master/docs/generated/protocol.md>
+The first edition put **VS Code and OBS (single process)** in family D. OBS Studio, from version 28 on, **includes by default a WebSocket control API to which external applications and scripts attach**, and there is also an extension API through which plugins add vendor requests/events. → OBS is not a cautionary example but a **precedent of an externally callable command surface**. Only **VS Code** is left as the example of family D.
+Sources (given by the review): <https://obsproject.com/kb/remote-control-guide> · <https://obsproject.com/kb/developer-guide> · <https://github.com/obsproject/obs-websocket/blob/master/docs/generated/protocol.md>
 
-### 리뷰가 지적한 누락 선례 2건 (리뷰 출처 — 원 수집자 독립 검증 없음)
+### 2 missing precedents pointed out by the review (review sources — no independent verification by the original collectors)
 
-- **모바일 OS 타입드 액션 프레임워크(Apple App Intents).** 앱 코드에서 typed action을 **선언**하면 **컴파일러가 발견용 메타데이터를 생성**하고, 시스템 수준 어시스턴트·단축어·검색이 그것을 소비한다. 사용자는 여러 앱의 액션을 하나의 워크플로로 조합한다. → **GUI·자동화·LLM 계열 호출자가 하나의 계약을 공유하는, 지금까지 확보된 가장 가까운 선례.** (리뷰 제시 · 본 보고서 수집자 미검증)
+- **A mobile-OS typed-action framework (Apple App Intents).** When typed actions are **declared** in app code, **the compiler generates discovery metadata**, and system-level assistants, shortcuts and search consume it. The user composes actions from several apps into one workflow. → **The closest precedent secured so far in which GUI, automation and LLM-type callers share one contract.** (given by the review · not verified by this report's collectors)
   <https://developer.apple.com/documentation/appintents> · <https://developer.apple.com/documentation/appintents/creating-your-first-app-intent>
-- **에이전트 프로토콜 확장(MCP Apps).** 샌드박스된 뷰가 **호스트를 거쳐 서버 측 도구를 호출**하고, 도구를 모델에게·앱에게·양쪽에 노출할 수 있으며, 테마·로케일·표시 모드 같은 **호스트 컨텍스트가 뷰로 전달**된다. 웹뷰 + 챗/LLM + 도구 가시성이 한자리에 있는 우리 문제와 직접 인접하다. 단 **셸이 소유한 핸들러 문제를 자동으로 풀지는 않는다.** (리뷰 제시 · 미검증)
+- **An agent-protocol extension (MCP Apps).** A sandboxed view **calls server-side tools through the host**, tools can be exposed to the model, to the app, or to both, and **host context** such as theme, locale and display mode **is passed to the view**. It is directly adjacent to our problem, where a webview + chat/LLM + tool visibility are in one place. However, **it does not automatically solve the problem of handlers owned by the shell.** (given by the review · unverified)
   <https://apps.extensions.modelcontextprotocol.io/api/documents/Overview.html>
 
-### 반면교사 (언리얼 선례)
+### Cautionary example (the Unreal precedent)
 
-**Unreal Engine은 명령 표면이 둘로 갈린 채 수렴하지 않았다** — 콘솔 명령 레지스트리와 원격 제어 HTTP/WS API가 **서로 다른 선언 기구**이고, 콘솔 명령이 자동으로 원격 노출되지 않는다. 둘을 아우르는 열거 경로도 없다. "합치지 않으면 이렇게 된다"의 구체 사례. (확실 — 별개 시스템 / 가능성 높음 — 브리지 부재)
+**Unreal Engine's command surface split in two and did not converge** — the console command registry and the remote-control HTTP/WS API are **different declaration mechanisms**, and a console command is not automatically exposed remotely. There is also no enumeration path that spans both. A concrete case of "this is what happens if you do not merge." (certain — they are separate systems / likely — absence of a bridge)
 
-## 2. 우리 종이 설계(중계) 대조 — 맞은 것과 다시 볼 것
+## 2. Comparison with our paper design (relay) — what was right and what to look at again
 
-### ★다시 볼 것 1건 (확정 결정 조항)
+### ★1 item to look at again (a confirmed decision clause)
 
-**"데몬은 봉투를 뜯지 않는다"가 선례와 절반만 일치한다.** ★정정(타계열 교차수집 반증)★ — 초판은 "조사한 모든 성숙 구현"이라 일반화했으나 **중계자는 두 종류로 갈린다**:
+**"The daemon does not open the envelope" matches the precedents only by half.** ★Correction (cross-family cross-collection refutation)★ — the first edition generalized to "every mature implementation we surveyed", but **relayers split into two kinds**:
 
-- **(가) 전송 계층 중계 — 겉봉만 읽고 속은 안 뜯는다.** 아래 표. 우리 종이 설계가 가정한 쪽.
-- **(나) 정책을 쥔 파사드 데몬 — 본문까지 뜯는다.** 패키지 관리 데몬은 요청을 **큐잉·인가·정규화한 뒤** 백엔드를 부른다(= 불투명 전달이 아닌 검사·번역 파사드). 데스크톱 포털 프런트는 호출자 신원·요청/세션 객체·권한·응답 신호까지 추적한다. 이미지 편집기 코어 레지스트리는 등록된 **타입·기본값·실행 모드·반환값을 저장하고 강제**한다. 셋 다 성숙 구현이며 "안 뜯는다"의 반례다(타계열 수집자: certain).
+- **(a) Transport-layer relay — reads only the outer cover and does not open the inside.** The table below. The side that our paper design assumed.
+- **(b) A facade daemon that holds policy — opens up to the body.** A package-management daemon calls the backend **after queueing, authorizing and normalizing** the request (= an inspecting and translating facade, not an opaque pass-through). A desktop-portal front tracks even the caller identity, the request/session objects, permissions and response signals. An image-editor core registry **stores and enforces the registered types, defaults, run modes and return values**. All three are mature implementations and are counterexamples to "does not open" (cross-family collector: certain).
 
-**우리 데몬은 이미 (나)에 가깝다** — 자격증명 인가와 명단 검사를 자기가 한다. 따라서 "겉봉만"이 유일 정답이 아니고, 선택지가 하나 늘었다(§6 쟁점 A).
+**Our daemon is already close to (b)** — it does credential authorization and the list check itself. So "outer cover only" is not the one right answer, and one more option has appeared (§6 issue A).
 
-전송 계층 중계(가)의 겉봉/속 경계. ★리뷰 정정★ **"속"은 *기본 라우팅 경로*를 말하며, 무조건 본문을 안 읽는다는 뜻이 아니다**(D-Bus 행 참조):
+The outer-cover/inside boundary of the transport-layer relay (a). ★Review correction★ **"Inside" means the *default routing path* and does not mean that the body is never read under any condition** (see the D-Bus row):
 
-| 시스템 | 겉봉(읽는다) | 속(기본 경로에서는 안 뜯는다) |
+| System | Outer cover (read) | Inside (not opened on the default path) |
 |---|---|---|
-| D-Bus | PATH/INTERFACE/MEMBER/DESTINATION/SENDER | marshalled body — **무조건은 아니다** ★리뷰 정정★: match rule이 `arg0`·`argNpath`·`arg0namespace` 등으로 **본문 인자를 검사**할 수 있고 reference daemon이 이를 구현한다. 정확한 표현 = "기본 라우팅·ACL은 주로 헤더 기반이나 일부 match 기능은 본문을 해석한다"(<https://dbus.freedesktop.org/doc/dbus-specification.html>) |
-| AMQP | exchange/routing-key (correlation_id는 **응답 워커가** 복사 — 브로커가 아니다, ★리뷰 정정★ 아래 짝번호 항목) | body |
-| NATS | subject 문자열 | payload bytes |
-| JSON-RPC 계열(LSP·MCP) | `method`, `id` | `params` |
+| D-Bus | PATH/INTERFACE/MEMBER/DESTINATION/SENDER | marshalled body — **not unconditionally** ★Review correction★: a match rule can **inspect body arguments** with `arg0`·`argNpath`·`arg0namespace` and so on, and the reference daemon implements this. The accurate wording = "default routing and ACLs are mainly header-based, but some match features interpret the body" (<https://dbus.freedesktop.org/doc/dbus-specification.html>) |
+| AMQP | exchange/routing-key (correlation_id is copied by **the reply worker** — not by the broker, ★Review correction★ see the pairing-number item below) | body |
+| NATS | subject string | payload bytes |
+| JSON-RPC family (LSP·MCP) | `method`, `id` | `params` |
 
-**명령 이름까지 불투명 봉투 안에 넣은 선례는 없었다.** 이름이 겉봉에 있으면 데몬이 인자를 몰라도 **명령 단위 권한·관측**이 가능하고(D-Bus 정책이 정확히 인터페이스·메서드 단위로 ACL을 건다), 감추면 그게 전부 불가능해진다. → **사용자 결정 안건.**
+**There was no precedent that put even the command name inside an opaque envelope.** If the name is on the outer cover, **command-level permission and observability** are possible even when the daemon does not know the arguments (D-Bus policy applies ACLs exactly at the interface and method level), and if it is hidden all of that becomes impossible. → **An item for the user's decision.**
 
-### 잘 고른 것으로 확인된 것
+### What was confirmed as well chosen
 
-- **요청 짝 번호를 caller가 한 번 정해 끝까지 그대로** — JSON-RPC/LSP/MCP는 응답이 **caller가 만든 같은 `id`를 그대로 반환**하므로 정확히 이 방식(확실). 별도 relay_id를 두지 않은 우리 선택과 일치.
-  - ★리뷰 정정★ **기제 귀속이 틀렸다.** 초판은 "AMQP `correlation_id`, JSON-RPC/LSP/MCP `id`, Jupyter `msg_id`/`parent_header`가 **모두 이 방식**"이라 묶었다. 실제로는 ㉠ 메시지 브로커 계열(AMQP/RabbitMQ RPC)에서 `correlationId`를 복사하는 주체가 **브로커가 아니라 응답 메시지를 만드는 워커**이고, ㉡ 노트북 프로토콜(Jupyter)은 **메시지마다 새 `msg_id`를 발급**하고 요청 헤더 **전체를 `parent_header`로 복사**한다. → **상관관계 *원리*는 공유하지만 wire 기제와 책임 주체가 다르다.** "선례가 caller 번호를 그대로 되돌린다"는 문장은 JSON-RPC 계열에만 걸 수 있다.
-    출처(리뷰 제시): <https://www.jsonrpc.org/specification> · <https://www.rabbitmq.com/tutorials/tutorial-six-kotlin> · <https://jupyter-client.readthedocs.io/en/latest/messaging.html>
-- **연결이 하나면 전역 유일성은 불필요** — D-Bus SERIAL은 연결 단위 유일성만 요구한다. 위상이 반환 경로를 보장하기 때문(확실). 데몬↔셸 단일 연결인 우리 경우와 같은 논거.
-- **기다리는 자리에서 실행하지 않기** — 여러 계열이 독립적으로 재발견한 고전 실패(액터 자기호출 교착, 동기 IPC가 렌더러 전체를 얼림 → 항상 비동기로 전환, 액터 재진입 모드를 정책으로 형식화). Rust 쪽 기계적 근거까지 나왔다: 바운드 채널은 send가 블록해 순환이 교착되지만 **oneshot은 send가 블록하지 않아 교착 순환에 낄 수 없다**(가능성 높음). 우리 "연결 태스크 밖에서 적용 + oneshot 상관"이 정확히 이 처방.
-- **역할 등록 후 목록 부재 처리** — 세 갈래로 갈리고 셋 다 실재: 즉시 타입드 실패(no-responders/UnknownMethod), 큐잉+타임아웃, 온디맨드 기동. 우리 "인증 후 역할 등록" 모델은 D-Bus의 이름 요청/소유자 변경 통지 형태와 가장 닮았다.
-- **권한 검사는 호출마다 하는 쪽이 조사 표본의 표준** — `반증` ★리뷰 정정★ 초판은 "등록·협상 시점에 한 번 … 세션 식별자로만 라우팅하는 쪽이 흔하다"고 썼다. **보고서가 스스로 대표 선례로 든 시스템들이 반대다**: 버스 데몬은 메시지가 연결 사이로 라우팅될 때 정책을 확인하고, 클러스터 API는 **요청마다** 요청 속성을 인가하며, RPC 인터셉터는 본질적으로 **per-call**이다. 빈도·표본 근거도 제시되지 않았다. → 정정된 진술: **매 호출 검사가 조사한 시스템들의 표준**이고, "한 번 검사한 뒤 세션 식별자로만 라우팅"은 **일부 세션 지향 시스템에서 관찰되는 최적화**이지 흔한 패턴이 아니다.
-  출처(리뷰 제시): <https://dbus.freedesktop.org/doc/dbus-daemon.1.html> · <https://kubernetes.io/docs/reference/access-authn-authz/authorization/index.html> · <https://grpc.io/docs/guides/interceptors/>
+- **The caller fixes the request pairing number once and keeps it unchanged to the end** — in JSON-RPC/LSP/MCP the response **returns the same `id` that the caller made, as is**, so this is exactly that approach (certain). It matches our choice of not having a separate relay_id.
+  - ★Review correction★ **The attribution of the mechanism was wrong.** The first edition lumped together "AMQP `correlation_id`, JSON-RPC/LSP/MCP `id`, Jupyter `msg_id`/`parent_header` all work **in this way**". In fact ㉠ in the message-broker family (AMQP/RabbitMQ RPC) the party that copies `correlationId` is **not the broker but the worker that makes the reply message**, and ㉡ the notebook protocol (Jupyter) **issues a new `msg_id` for each message** and copies **the whole request header into `parent_header`**. → **They share the correlation *principle*, but the wire mechanism and the responsible party differ.** The sentence "the precedents return the caller's number as is" can be applied only to the JSON-RPC family.
+    Sources (given by the review): <https://www.jsonrpc.org/specification> · <https://www.rabbitmq.com/tutorials/tutorial-six-kotlin> · <https://jupyter-client.readthedocs.io/en/latest/messaging.html>
+- **If there is one connection, global uniqueness is unnecessary** — D-Bus SERIAL requires uniqueness only per connection, because the topology guarantees the return path (certain). The same argument as our case of a single daemon↔shell connection.
+- **Do not execute at the place that is waiting** — a classic failure that several families rediscovered independently (actor self-call deadlock, synchronous IPC freezing the whole renderer → always switch to async, formalizing the actor re-entrancy mode as policy). A mechanical grounding on the Rust side also appeared: with a bounded channel, send blocks so a cycle deadlocks, but **a oneshot's send does not block, so it cannot take part in a deadlock cycle** (likely). Our "apply outside the connection task + oneshot correlation" is exactly this prescription.
+- **Handling an absent entry after role registration** — it splits three ways and all three exist: an immediate typed failure (no-responders/UnknownMethod), queueing + timeout, on-demand launch. Our "role registration after authentication" model most resembles the shape of D-Bus's name request/owner-change notification.
+- **Checking permissions on every call is the standard in the surveyed sample** — `반증` ★Review correction★ The first edition wrote "it is common to check once at registration/negotiation time … and route by session identifier alone". **The systems the report itself cited as representative precedents say the opposite**: a bus daemon checks policy when a message is routed between connections, a cluster API authorizes request attributes **on every request**, and an RPC interceptor is essentially **per-call**. No frequency or sample grounds were given either. → Corrected statement: **a check on every call is the standard of the surveyed systems**, and "check once and then route only by session identifier" is **an optimization observed in some session-oriented systems**, not a common pattern.
+  Sources (given by the review): <https://dbus.freedesktop.org/doc/dbus-daemon.1.html> · <https://kubernetes.io/docs/reference/access-authn-authz/authorization/index.html> · <https://grpc.io/docs/guides/interceptors/>
 
-## 3. 갈림길별 근거
+## 3. Grounds by fork
 
-### ① 생성 범위 — 이름만 vs 인자까지
+### ① Generation scope — names only vs down to the arguments
 
-**결론: 인자까지. 단 근거를 좁혔다** ★리뷰 정정★ — 초판 근거는 "반대편에 선례 근거가 없다"였으나 그 형태로는 지지되지 않는다. 성립하는 진술은 **"우리 조건(두 프로세스 사이 고정 계약)에 해당하는 조사 표본이 전부 인자까지 생성한다"**뿐이다.
+**Conclusion: down to the arguments. But the grounds were narrowed** ★Review correction★ — the first edition's ground was "there is no precedent evidence on the other side", but in that form it is not supported. The statement that holds is only **"every surveyed sample that matches our condition (a fixed contract between two processes) generates down to the arguments"**.
 
-- **조사 표본에서는 "생성기를 두고 이름만 생성하는" 성숙 사례를 찾지 못했다.** `표본 한정` ★리뷰 정정★ 초판 표현 = "성숙 사례 0건". 표본 안(protobuf/gRPC, LSP 메타모델, WebIDL/Blink, tauri-specta)은 모두 이름+인자+반환을 함께 생성한다(확실). 그러나 **검색 범위·포함 기준을 제시하지 않았으므로 "0건"이라는 전역 주장은 지지되지 않는다.** 반례가 확보된 것도 아니라 반증은 아니지만, **이 문장 하나로는 ADR 거부 사유로 불충분하다.**
-- 이름만인 곳은 전부 **생성기가 아예 없는** 경우다 — VS Code 기여점(`command`/`title`만, 인자 필드가 스키마에 존재하지 않음), 맨 Electron IPC(문자열 채널 + `any[]`), 맨 Tauri `invoke`, 슬랙 슬래시 명령(인자가 자유 텍스트). 이유는 절약이 아니라 **인자가 선언 시점에 고정되지 않는 구조**(사람 클릭·자유 입력)다(확실 + 가능성 높음).
-- 우리는 그 반대 조건(두 프로세스 사이 고정 계약)이므로 이름만 선택을 지지하는 근거가 표본 안에 없다.
-- **값싼 길:** 새 IDL·툴체인 도입(C2 위반) 대신 **이미 신뢰하는 파생 계열의 범위를 넓히는 쪽**. 현재 도구는 데이터 모양만 파생하고 명령 자체(이름+인자+호출 껍데기)는 안 만들며, 같은 계열 형제 도구(`tauri-specta`, `specta`)가 정확히 그 범위를 덮는다. 단 pre-1.0(rc) 태그라 API 변동 가능성이 있고, 생성 시점이 "디버그 빌드 실행 시"라 **우리처럼 CI diff 게이트를 직접 붙여야 한다**(가능성 높음).
-  - ★리뷰 정정★ **"정확히 그 범위를 덮는다"는 그대로 쓸 수 없다.** ㉠ 그 도구의 **생성물이 앱 프레임워크의 invoke 경로(`__TAURI_INVOKE`)를 직접 호출**하므로 C5(전송에 코드를 묶지 않는다)와 그대로 호환되지 않는다 — §4의 C5 `○`를 `△`로 내렸다. ㉡ 현 파생기가 같은 계열이라는 사실만으로 그 형제 도구가 **새 crate·새 게이트가 아니게 되지는 않는다**(C2는 여전히 산다). → 리뷰가 제시한 형태: **명령 메타모델만 재사용하고 전송 어댑터는 별도로 생성**한다.
-    출처(리뷰 제시): <https://github.com/specta-rs/tauri-specta/releases> · <https://docs.rs/tauri-specta/latest/tauri_specta/>
-- **경고 1 (drift):** LSP 메타모델은 산문 규격이 "모든 열거형은 미지 값을 허용해야 한다"고 정하는데 메타모델이 그 표식을 일부 빠뜨려, 엄격한 생성기가 **닫힌 열거형**을 만들고 실제 클라이언트를 깨뜨렸다(가능성 높음 — 단일 신고자). → 생성기가 **계약 자체의 확장 규칙에 충실한지**가 생성기 존재만큼 중요하다.
-- **경고 2 (드리프트 게이트):** 팀이 실제로 신뢰하는 방식은 생성물에 대한 **CI diff/호환성 게이트**다(우리가 이미 하는 것과 동일). 런타임 handshake는 다른 목적(여러 독립 서버의 부분 구현 관용)이며 drift 검출용이 아니다.
+- **In the surveyed sample we did not find a mature case that "has a generator and generates only names".** `표본 한정` ★Review correction★ First edition's wording = "0 mature cases". The cases inside the sample (protobuf/gRPC, the LSP metamodel, WebIDL/Blink, tauri-specta) all generate name + arguments + return together (certain). But **because the search scope and inclusion criteria were not given, the global claim of "0 cases" is not supported.** No counterexample was secured either, so it is not a refutation, but **this one sentence alone is insufficient as a reason to reject in an ADR.**
+- The places that are names only are all cases **with no generator at all** — VS Code contribution points (only `command`/`title`, no argument field exists in the schema), bare Electron IPC (string channel + `any[]`), bare Tauri `invoke`, Slack slash commands (arguments are free text). The reason is not economy but a **structure where arguments are not fixed at declaration time** (human clicks · free input) (certain + likely).
+- We are in the opposite condition (a fixed contract between two processes), so there is no ground inside the sample that supports choosing names only.
+- **The cheap path:** instead of introducing a new IDL or toolchain (violates C2), **widen the scope of the derivation family we already trust**. The current tool derives only the data shapes and does not make the commands themselves (name + arguments + call shell), and a sibling tool of the same family (`tauri-specta`, `specta`) covers exactly that scope. However, it is tagged pre-1.0 (rc) so the API may change, and the generation time is "when running a debug build" so **we have to attach a CI diff gate ourselves, as we do now** (likely).
+  - ★Review correction★ **"Covers exactly that scope" cannot be used as it is.** ㉠ **The output of that tool directly calls the app framework's invoke path (`__TAURI_INVOKE`)**, so it is not compatible with C5 (do not tie code to the transport) as it is — the C5 `○` in §4 was lowered to `△`. ㉡ The fact that the current deriver is of the same family does not make that sibling tool **stop being a new crate and a new gate** (C2 still applies). → The shape the review gave: **reuse only the command metamodel and generate the transport adapter separately.**
+    Sources (given by the review): <https://github.com/specta-rs/tauri-specta/releases> · <https://docs.rs/tauri-specta/latest/tauri_specta/>
+- **Warning 1 (drift):** the prose spec of the LSP metamodel says "every enum must allow unknown values", but the metamodel omitted that marker in places, so a strict generator produced **closed enums** and broke real clients (likely — a single reporter). → Whether the generator is **faithful to the extension rules of the contract itself** matters as much as the existence of the generator.
+- **Warning 2 (drift gate):** what teams actually trust is a **CI diff/compatibility gate** on the generated output (the same as what we already do). A runtime handshake has a different purpose (tolerating partial implementations by several independent servers) and is not for drift detection.
 
-### ② 조회도 명령인가
+### ② Is a query also a command
 
-**쟁점 — 근거가 양쪽으로 갈린다(수렴 실패).**
+**Open issue — the evidence splits both ways (convergence failed).**
 
-- **합치는 쪽:** LSP·D-Bus·K8s·Docker·sway/Hyprland·WezTerm·Zellij·CDP·OBS·mpv — 읽기와 쓰기가 **같은 봉투/등록 기구**를 탄다. 피어 갈래는 "합치는 게 정상"으로 봤다(확실).
-- **가르는 쪽:** GraphQL은 query/mutation을 **실행 의미까지 다르게** 갈랐고(뮤테이션 직렬 실행), MCP는 읽기(Resources)와 실행(Tools)을 다른 프로토콜 이름공간으로 갈랐다(확실). D-Bus도 속성 읽기는 별도 인터페이스, sway도 RUN_COMMAND vs GET_* 별개 메시지형이다(확실).
-- **평면 병합 쪽의 실물 처리:** VS Code는 하나의 이름공간에 두고 **팔레트 노출을 조건절로 큐레이션**한다 — 두 번째 레지스트리가 아니라 메타데이터 층(확실). Redux는 애초에 순수 읽기를 액션 목록에 넣지 않는다(선택자라는 별 기구).
-- **실패 사례:** 매크로 기록에서 비변경 조작을 "기록 불가"로 배제(포토샵), 고빈도 액션이 시간여행 로그를 질식시켜 블랙리스트 권고(Redux DevTools) — 둘 다 "읽기가 실행 이력을 오염시킨다"의 실물(가능성 높음/확실).
-- **읽기/쓰기 표식은 자문인가 강제인가:** MCP의 읽기전용 힌트는 **보장 없는 힌트**라고 명시("신뢰할 수 없는 서버는 거짓말할 수 있다")이고 HTTP의 안전 메서드도 서술적일 뿐이다(확실). 반대로 K8s는 읽기/쓰기 동사를 **강제되는 권한 범주**로 둔다(확실). → 우리 C7과 정합: 표식은 교육, 강제는 서버.
-- **이관 사례 없음:** 명령 팔레트류에서 "합쳤다가 갈랐다/갈랐다가 합쳤다"는 이관 이야기는 못 찾았다(모름).
+- **The merging side:** LSP·D-Bus·K8s·Docker·sway/Hyprland·WezTerm·Zellij·CDP·OBS·mpv — reads and writes ride the **same envelope/registration mechanism**. The peer track saw "merging is normal" (certain).
+- **The splitting side:** GraphQL split query/mutation even in **execution semantics** (mutations run serially), and MCP split reads (Resources) and execution (Tools) into different protocol namespaces (certain). In D-Bus too, property reads are a separate interface, and in sway RUN_COMMAND vs GET_* are separate message types (certain).
+- **How the flat-merge side handles it in practice:** VS Code keeps one namespace and **curates palette exposure with a condition clause** — a metadata layer, not a second registry (certain). Redux does not put pure reads in the action list in the first place (selectors are a separate mechanism).
+- **Failure cases:** macro recording excludes non-mutating operations as "not recordable" (Photoshop), and high-frequency actions choke the time-travel log so a blacklist is recommended (Redux DevTools) — both are real cases of "reads pollute the execution history" (likely/certain).
+- **Is the read/write marker advisory or enforced:** MCP's read-only hint is explicitly a **hint with no guarantee** ("an untrusted server can lie"), and HTTP's safe methods are only descriptive (certain). By contrast, K8s makes the read/write verbs **an enforced permission category** (certain). → Consistent with our C7: the marker is for education, enforcement is the server's.
+- **No migration cases:** we did not find a migration story of "merged and then split / split and then merged" in command-palette-type systems (unknown).
 
-### ③ 화면 전용 명령의 선언 위치 · 목록 취합자
+### ③ Where screen-only commands are declared · the list aggregator
 
-**★리뷰 정정★ "우리 구조 고유의 열린 문제 — 직접 이식 가능한 선례가 없다"는 반증됐다.** `반증` — 비중앙 당사자가 목록을 갖는 기제의 선례가 실재한다(아래 반례 가·나). 남는 문제는 "선례가 없다"가 아니라 **"어느 선례 형태를 택할지"**다.
+**★Review correction★ "An open problem unique to our structure — there is no directly portable precedent" was refuted.** `반증` — precedents of a mechanism where a non-central party holds the list really exist (counterexamples (a) and (b) below). What remains is not "there is no precedent" but **"which precedent shape to choose"**.
 
-- 여러 주인의 명령을 하나의 목록으로 합치는 주체가 **이미 구조적으로 중앙인 쪽**인 경우가 표본에서 다수였다(버스 데몬, 권한 데몬, 클러스터 취합 컨트롤러)(확실). ★리뷰 정정★ 초판의 "**예외 없이**"는 폐기 — 아래 반례 (가)가 예외다.
-- 중앙이 없으면 **부르는 쪽이 각 서버에 따로 물어 자기가 합친다**(MCP 클라이언트가 서버별 목록을 받아 이름공간을 붙여 병합; 서버 간 취합자는 프로토콜에 없다)(확실).
-- C1(데몬은 셸을 모른다)이 살아 있으면 데몬은 취합자가 될 자격이 없다 — 이 부분은 유효하다. 초판은 여기에 두 갈래(런타임 조회·선언 파생)의 **독립 기권**을 붙여 "비중앙 당사자가 남을 대신해 목록을 합치는 기제의 선례 없음(모름)"이라 결론했다. → **`반증`. 아래 두 반례로 폐기한다.** ★리뷰 정정★
-- **★반례 (가) — 진짜 반증: 탈중앙 발견형 로보틱스 미들웨어(ROS 2).** **중앙 마스터가 없고**, 임의의 로컬 노드가 **자기가 발견한 그래프에서 전체 서비스 이름·타입을 조회**한다(공식 API가 "given local node가 지금까지 발견한 모든 service names and types"를 반환한다고 명시). 중앙 당사자 없이 비중앙 당사자가 목록을 갖는 기제이므로 **"선례 없음"을 정면으로 반증한다.**
+- In the sample, the party that merges the commands of many owners into one list was in most cases **already structurally central** (bus daemon, permission daemon, cluster aggregation controller) (certain). ★Review correction★ The first edition's "**without exception**" is withdrawn — counterexample (a) below is the exception.
+- Without a center, **the calling side asks each server separately and merges them itself** (an MCP client receives the per-server lists, attaches namespaces and merges; there is no inter-server aggregator in the protocol) (certain).
+- If C1 (the daemon does not know the shell) holds, the daemon is not qualified to be the aggregator — this part is valid. To this the first edition attached the **independent abstentions** of two tracks (runtime lookup · declaration derivation) and concluded "no precedent of a mechanism where a non-central party merges lists on behalf of others (unknown)". → **`반증`. Withdrawn by the two counterexamples below.** ★Review correction★
+- **★Counterexample (a) — a true refutation: a decentralized discovery-type robotics middleware (ROS 2).** **There is no central master**, and any local node **queries all service names and types from the graph it has discovered** (the official API states that it returns all service names and types that the given local node has discovered so far — back-translated). Because it is a mechanism where a non-central party holds the list without any central party, it **directly refutes "no precedent".**
   <https://docs.ros.org/en/ros2_packages/rolling/api/rmw/generated/function_get__service__names__and__types_8h_1abf495afaafacac33473d5f6c9c451ab4.html> · <https://docs.ros.org/en/lyrical/Concepts/Intermediate/About-Domain-ID.html>
-- **★반례 (나) — 부분 반례: 모바일 OS 인텐트 열거(Android).** 임의 애플리케이션이 `queryIntentActivities()`로 **자신이 미리 알지 못한 다른 앱의 핸들러를 열거**해 자체 선택 UI를 구성한다. **단 이것은 "선례 없음"을 완전히 반증하지 않는다** — 그 패키지/인텐트 레지스트리 **자체가 중앙 OS 서비스**이고 앱은 그 중앙 레지스트리에 질의할 뿐이다. 실제로 입증하는 것은 탈중앙 취합이 아니라 **중앙 레지스트리 위에서의 호출자 측 병합·선택**이며, (가)와는 **다른 기제**다. (이 구분은 리뷰가 하지 않았고 본 정정에서 추가한 것이다 — 리뷰는 (가)·(나)를 동등한 "정확한 선례"로 묶었다.)
+- **★Counterexample (b) — a partial counterexample: mobile-OS intent enumeration (Android).** An arbitrary application uses `queryIntentActivities()` to **enumerate the handlers of other apps it did not know in advance** and builds its own selection UI. **However, this does not completely refute "no precedent"** — the package/intent registry **itself is a central OS service** and the app only queries that central registry. What it actually proves is not decentralized aggregation but **caller-side merging and selection on top of a central registry**, a **different mechanism** from (a). (This distinction was not made by the review and was added in this correction — the review lumped (a) and (b) together as equal "exact precedents".)
   <https://developer.android.com/guide/components/intents-filters> · <https://developer.android.com/reference/android/content/pm/PackageManager.html>
-- **부분 반례 (다) — CDP.** 크롬 개발자 프로토콜은 **일부 도메인은 렌더러 프로세스가, 일부는 브라우저 프로세스가 구현**하는데 호출자에게는 **하나의 프로토콜 표면**으로 보이고, 살아 있는 브라우저가 `/json/protocol`로 전체 스키마를 서빙한다(확실/가능성 높음). 즉 "핸들러가 여러 프로세스에 흩어진 채 단일 계약+단일 조회"는 실존한다. **다만 그 브라우저 프로세스는 렌더러를 아는 중앙**이라 C1을 우회하지는 못한다. → grounding에서 정밀 확인 대상.
-- 참고: Neovim은 **런타임 조회가 이름뿐 아니라 함수 서명까지** 돌려주고(확실), 원격 플러그인 호스트(별 프로세스)가 자기 명령을 코어 이름공간에 **등록**해 호출자에게는 내장과 구분되지 않는다(확실). ③의 실행 가능한 형태 중 하나 — "셸이 자기 명령을 데몬 이름공간에 등록"은 C1을 깨지 않고도 가능한지 검토 대상.
-- **추가 후보(타계열 수집) — 명시적 주인 선택 계층.** 데스크톱 포털은 **공개 계약을 프런트가 쥐고 실제 구현은 여러 백엔드 프로세스 중 하나에 위임**하며, 같은 인터페이스를 여러 백엔드가 주장할 때 **설정 파일의 순서 있는 선호 목록으로 첫 일치를 고른다**(certain). ③(선언 위치·취합)과 ④(다중 주인)를 동시에 건드리는 유일한 구체 기제이므로 후속 검토 우선순위 1.
+- **Partial counterexample (c) — CDP.** The Chrome DevTools Protocol has **some domains implemented by the renderer process and some by the browser process**, yet to the caller it looks like **one protocol surface**, and a live browser serves the whole schema through `/json/protocol` (certain/likely). That is, "handlers scattered across several processes with a single contract + single lookup" really exists. **However, that browser process is a center that knows the renderers, so it does not get around C1.** → A target for precise confirmation in grounding.
+- Note: in Neovim **the runtime lookup returns not only names but also function signatures** (certain), and remote plugin hosts (separate processes) **register** their own commands into the core namespace so that, to callers, they are indistinguishable from built-ins (certain). One of the workable shapes of ③ — whether "the shell registers its own commands into the daemon namespace" is possible without breaking C1 is a subject for review.
+- **An additional candidate (cross-family collection) — an explicit owner-selection layer.** The desktop portal has **the front hold the public contract while delegating the real implementation to one of several backend processes**, and when several backends claim the same interface, it **picks the first match from an ordered preference list in a config file** (certain). Since it is the only concrete mechanism that touches ③ (declaration location · aggregation) and ④ (multiple owners) at once, it is priority 1 for follow-up review.
 
-### ④ 한 명령에 주인이 여럿인가
+### ④ Can one command have several owners
 
-**결론: 단일 소유 강제 + 시끄러운 실패가 다수이되 만장일치는 아니다. 팬아웃은 이벤트의 성질이다.** ★정정★ — 초판의 "주류"는 반례 2건으로 약화된다(맨 아래 정정 항목).
+**Conclusion: forcing a single owner + loud failure is the majority but not unanimous. Fan-out is a property of events.** ★Correction★ — the first edition's "mainstream" is weakened by 2 counterexamples (the correction items at the very bottom).
 
-- 명령/질의는 정확히 하나의 핸들러, **이벤트는 팬아웃** — 여러 프레임워크가 같은 선을 긋는다(중복 등록 시 예외, 핸들러 없으면 오류). D-Bus도 메서드는 유니캐스트(미소유 시 명시적 오류), 시그널은 브로드캐스트(구독자 0도 정상)(확실).
-- **미등록 이름 처리 3형태:** ① 프로토콜 오류(gRPC UNIMPLEMENTED, JSON-RPC -32601, VS Code "command not found" — 단 **호출 시점에만** 드러난다) ② 조용한 무시(Redux — 단 이건 애초에 브로드캐스트 구조) ③ 비활성/회색(WPF — 단 이건 **문맥상 불가**한 알려진 명령이고 전역 미등록 이름이 아니다). → 우리 시나리오에 맞는 건 ①.
-- **우리 "시끄럽게 실패"는 지지받는다.** 더 강한 선택지도 나왔다: **빌드 시점 강제**. gRPC Go는 전방호환 임베드를 빼면 컴파일 에러로 잡고, Rust tonic은 기본 구현체가 있어 빈 impl도 컴파일되는데 **관리자들이 "스키마 변경 후 컴파일러 신호를 죽인다"며 제거 논의를 열어 두었다**(확실 — 이슈 존재/논지, 가능성 높음 — 결론 미확인).
-- **"시끄럽다 ≠ 디버깅 쉽다":** VS Code는 중복 등록을 던지지만 오류가 **뒤에 등록한 무고한 쪽**에서 터져 원인 추적이 어렵다는 실사례가 있다(가능성 높음).
-- **조용한 덮어쓰기의 실패 이관 사례:** 블렌더는 과거 같은 식별자를 조용히 덮어썼고(사고 발생), 이후 **내장 연산자 덮어쓰기를 아예 차단**하는 쪽으로 옮겼다(가능성 높음). 우리 선택 방향과 같은 이동.
-- **우선순위 그림자의 실비용(언리얼 선례):** 언리얼 강화 입력은 같은 액션을 여러 매핑 컨텍스트가 물 수 있고 최우선만 먹는데, **소유 UI가 사라진 뒤에도 남은 컨텍스트가 조용히 입력을 가로채는** 것이 문서화된 함정이다(가능성 높음). 조용한 그림자를 우리가 택하면 같은 값을 낸다.
-- 반례 1건: DOM 단일 슬롯 핸들러는 조용히 마지막이 이긴다(확실) — 단 도메인이 다르다.
-- **★정정 — "명령 디스패치 계열에 조용한 덮어쓰기 선례 없음"은 틀렸다.** 타계열 수집이 반례를 냈다: 한 이미지 편집기의 절차 레지스트리는 GUI·배치·플러그인이 모두 수렴하는 명령 디스패치인데, **같은 이름 재등록이 지금도 조용히 앞 것을 덮어쓴다**(문서가 하지 말라고 경고만 한다, certain). 즉 선례는 있고, **그 선례 스스로 권하지 않는다** — 논거를 "선례 없음"에서 "선례가 있으나 당사자가 경고한다"로 바꿔야 한다.
-- **★정정 — 단일 소유 "강제"도 만장일치가 아니다.** 로보틱스 미들웨어의 서비스는 주소 지정형 요청/응답인데 **같은 이름에 여러 서버가 등록될 수 있고 누가 받는지가 규격상 미정의**다(certain). 수집자 자신도 "피해야 할 정책"으로 분류했으나, "선례가 전부 강제한다"는 사실 주장은 성립하지 않는다.
+- A command/query has exactly one handler, **events fan out** — several frameworks draw the same line (an exception on duplicate registration, an error if there is no handler). In D-Bus too, a method is unicast (an explicit error if unowned) and a signal is broadcast (zero subscribers is also normal) (certain).
+- **3 forms of handling an unregistered name:** ① a protocol error (gRPC UNIMPLEMENTED, JSON-RPC -32601, VS Code "command not found" — but it shows up **only at call time**) ② silent ignoring (Redux — but this is a broadcast structure to begin with) ③ disabled/grayed out (WPF — but this is a known command that is **impossible in context**, not a globally unregistered name). → The one that fits our scenario is ①.
+- **Our "fail loudly" is supported.** A stronger option also appeared: **build-time enforcement**. gRPC Go catches it as a compile error if the forward-compatible embed is left out, while Rust tonic has a default implementation so even an empty impl compiles, and **maintainers have left a removal discussion open on the grounds that it kills the compiler signal after a schema change** (certain — the issue and its argument exist, likely — the conclusion is unchecked).
+- **"Loud ≠ easy to debug":** there is a real case where VS Code throws on duplicate registration but the error blows up in **the innocent party that registered later**, making the cause hard to trace (likely).
+- **A migration case away from silent overwrite:** Blender used to overwrite the same identifier silently (accidents happened), and then moved toward **blocking overwriting of built-in operators altogether** (likely). The same movement as our chosen direction.
+- **The real cost of priority shadowing (Unreal precedent):** in Unreal Enhanced Input, several mapping contexts can bind the same action and only the highest priority takes it, and a documented pitfall is that **a leftover context silently intercepts input even after the owning UI is gone** (likely). If we choose a silent shadow, we pay the same price.
+- 1 counterexample: a DOM single-slot handler silently lets the last one win (certain) — but the domain is different.
+- **★Correction — "no precedent of silent overwrite in the command-dispatch family" was wrong.** The cross-family collection produced a counterexample: the procedure registry of an image editor is a command dispatch on which GUI, batch and plugins all converge, and **re-registering the same name silently overwrites the earlier one even now** (the docs only warn not to do it, certain). That is, a precedent exists, and **that precedent itself does not recommend it** — the argument must change from "no precedent" to "a precedent exists but the party warns against it".
+- **★Correction — "forcing" a single owner is not unanimous either.** A robotics middleware's service is an addressed request/response, but **several servers can register under the same name and who receives is undefined by the spec** (certain). The collector itself classified it as a "policy to avoid", but the factual claim that "all precedents enforce it" does not hold.
 
-## 4. 제약 적합도 표
+## 4. Constraint fit table
 
-| 후보 | C1 격리 | C2 새 의존 | C3 기존 파생 재사용 | C4 LLM 1급 | C5 전송 교체 | C6 계약만 공유 | 종합 |
+| Candidate | C1 isolation | C2 new dependency | C3 reuse of existing derivation | C4 LLM first-class | C5 transport swap | C6 contract-only sharing | Overall |
 |---|---|---|---|---|---|---|---|
-| **C계열: 단일 타입드 명령 어휘 + 데몬 중계** (WezTerm형 · Zellij는 부분 선례) | △ 취합자 미정 | ○ | ○ | △ ★리뷰 정정★ 타입 공유 ≠ LLM 계약(런타임 열거 이름·설명·입력 스키마·부작용 메타데이터가 더 필요) — 초판 `○` | ○ | △ ★리뷰 정정★ 계약은 공유되나 **누가 지금 소유·생존·라우팅하는지** 미해결 — 초판 `○` | **차선 — §8 1위(하이브리드)에 밀림** ★리뷰 정정★(초판 "주 후보") |
-| 파생 범위 확대(현 계열 형제 도구) | ○ | △ pre-1.0 **+ 새 crate·새 게이트인 것은 그대로** ★리뷰 정정★ | ◎ 동일 계열 | ○ | △ ★리뷰 정정★ 생성물이 앱 프레임워크 invoke 경로를 직접 호출 → 전송 교체와 충돌(초판 `○`) | ○ | **①의 실행 수단 — 단 메타모델만 재사용 + 전송 어댑터 별도 생성 형태로** |
-| 새 IDL 툴체인(protobuf/WebIDL형) | ○ | ✕ 새 툴체인·게이트 | ✕ | ○ | ○ | ○ | 거부 후보 |
-| A계열: 자기서술 + 런타임 Introspect | △ ★리뷰 정정★ 중앙 취합자가 필연은 아니다 — 탈중앙 발견형 선례 존재(§3-③ 반례 가). 초판 `✕ 중앙 취합자 전제` | △ | △ | ◎ | ○ | ○ | 조회 모델 + **발견 층** 차용 |
-| B계열: capability 협상 + **런타임 동적 등록/해제** ★리뷰 정정★(초판 "정적 목록") | ○ | ○ | △ | △ ★리뷰 정정★ 정적 프로토콜 스키마 + 런타임 capability 비트를 결합하면 LLM 호출자에게 제공 가능하므로 `✕`는 근거 없음. 초판 `✕ 인자 스키마 없음`은 LSP 사용자 정의 명령 인자의 느슨함을 전략 전체로 일반화한 것(WebDriver BiDi는 각 명령의 method·params·result를 규격에 정적 정의: <https://w3c.github.io/webdriver-bidi/>) | ○ | ○ | 부분 차용 → §8 1위의 등록 층 원천 |
-| D계열: 인프로세스 레지스트리 유지(VS Code형 — OBS 제외 ★리뷰 정정★) | ○ | ◎ | ◎ | ✕ 외부 미도달 | ○ | ○ | **현상 유지 = 목표 미달** |
+| **Family C: a single typed command vocabulary + daemon relay** (WezTerm type · Zellij is a partial precedent) | △ aggregator undecided | ○ | ○ | △ ★Review correction★ sharing types ≠ an LLM contract (runtime-enumerated name · description · input schema · side-effect metadata are also needed) — first edition `○` | ○ | △ ★Review correction★ the contract is shared but **who owns, is alive and routes right now** is unresolved — first edition `○` | **second choice — pushed down by §8 first place (hybrid)** ★Review correction★ (first edition "main candidate") |
+| Widen the derivation scope (sibling tool of the current family) | ○ | △ pre-1.0 **+ it stays a new crate and a new gate** ★Review correction★ | ◎ same family | ○ | △ ★Review correction★ the output directly calls the app framework's invoke path → conflicts with transport swap (first edition `○`) | ○ | **the means of carrying out ① — but in the form of reusing only the metamodel + generating the transport adapter separately** |
+| A new IDL toolchain (protobuf/WebIDL type) | ○ | ✕ new toolchain and gate | ✕ | ○ | ○ | ○ | rejection candidate |
+| Family A: self-description + runtime Introspect | △ ★Review correction★ a central aggregator is not inevitable — a decentralized discovery-type precedent exists (§3-③ counterexample (a)). First edition `✕ 중앙 취합자 전제` | △ | △ | ◎ | ○ | ○ | borrow the lookup model + **a discovery layer** |
+| Family B: capability negotiation + **runtime dynamic register/unregister** ★Review correction★ (first edition "static list") | ○ | ○ | △ | △ ★Review correction★ combining a static protocol schema with runtime capability bits can serve LLM callers, so the `✕` has no basis. The first edition's `✕ 인자 스키마 없음` generalized the looseness of LSP user-defined command arguments to the whole strategy (WebDriver BiDi statically defines each command's method·params·result in the spec: <https://w3c.github.io/webdriver-bidi/>) | ○ | ○ | partial borrowing → the source of the registration layer of §8 first place |
+| Family D: keep the in-process registry (VS Code type — OBS excluded ★Review correction★) | ○ | ◎ | ◎ | ✕ unreachable from outside | ○ | ○ | **status quo = falls short of the goal** |
 
-★리뷰 정정★ **표 전체가 아직 결정 근거로 서지 않는다.** 리뷰는 "취합자 미정을 인정하면서 C4·C6를 `○`로 준 것은 결론 선취"라고 판정했다 — LLM 호출자에게는 런타임에 열거되는 이름·설명·입력 JSON Schema·(선택)출력 Schema·부작용 메타데이터가 필요하고, 에이전트 프로토콜도 도구 정의에 유효한 입력 스키마를 요구한다. <https://modelcontextprotocol.io/specification/2025-11-25/server/tools>
+★Review correction★ **The whole table does not stand as decision grounds yet.** The review decided that granting `○` on C4·C6 while admitting the aggregator is undecided pre-empts the conclusion — an LLM caller needs runtime-enumerated names, descriptions, input JSON Schema, (optional) output Schema and side-effect metadata, and agent protocols also require a valid input schema in a tool definition. <https://modelcontextprotocol.io/specification/2025-11-25/server/tools>
 
-## 5. 거부 후보 → ADR 거부 대안 초안
+## 5. Rejection candidates → draft of the ADR's rejected alternatives
 
-1. **이름만 생성** — `표본 한정` ★리뷰 정정★ 초판 사유 = "생성기를 둔 성숙 사례 0건". **조사 표본에서 찾지 못했다**로 내리고, **이 사유 단독으로는 ADR 거부 근거로 불충분**하다(§3-①). 남는 유효 논거: 이름만인 사례는 인자가 선언 시점에 고정되지 않는 구조뿐이고 우리는 반대 조건.
-2. **새 IDL·툴체인 도입** — C2 위반(격리 게이트·의존 상한). 이미 신뢰하는 파생 경로가 같은 일을 한다. ★리뷰 정정★ 단 같은 계열 형제 도구도 **새 crate·새 게이트**이므로 C2 논거는 그 후보에도 걸린다(§3-①).
-3. **데몬을 목록 취합자로 승격** — C1 파괴(이 부분 유효). ★리뷰 정정★ 초판이 덧붙인 "**선례가 전부 중앙 당사자**"는 `반증`이다(§3-③ 반례 가 = 중앙 마스터 없는 탈중앙 발견형). 거부 사유는 우리 제약(C1)과의 충돌 하나로 좁힌다.
-4. **목록 필터를 강제 수단으로 사용** — C7 위반 + 선례 다수가 목록과 검사를 별개 기구로 둔다(권한 데몬의 열거/검사 분리, 클러스터 discovery는 권한과 무관하게 동일).
-5. **프론트에 두 번째 제어 표면 추가** — 언리얼의 두 갈린 표면이 실물 반면교사.
-6. **조용한 덮어쓰기·조용한 무시** — ★근거 교체★ 선례는 존재하나(이미지 편집기 절차 레지스트리) **당사자 문서가 하지 말라고 경고**하고, 다른 성숙 사례는 조용한 덮어쓰기에서 **차단으로 이관**했으며(블렌더), 라우팅을 미정의로 남긴 사례는 수집자가 "피해야 할 정책"으로 분류했다. 언리얼에서 조용한 그림자의 실비용도 확인됐다. → 거부 사유는 "선례 없음"이 아니라 **"선례가 있고 그 선례가 후회한다"**.
+1. **Generate names only** — `표본 한정` ★Review correction★ First edition's reason = "0 mature cases that have a generator". It is lowered to **not found in the surveyed sample**, and **this reason alone is insufficient as grounds for ADR rejection** (§3-①). The remaining valid argument: the names-only cases are only structures where arguments are not fixed at declaration time, and we are in the opposite condition.
+2. **Introduce a new IDL or toolchain** — violates C2 (isolation gate · dependency cap). The derivation path we already trust does the same job. ★Review correction★ However, a sibling tool of the same family is also a **new crate and a new gate**, so the C2 argument applies to that candidate too (§3-①).
+3. **Promote the daemon to list aggregator** — breaks C1 (this part is valid). ★Review correction★ The "**all precedents are central parties**" that the first edition added is `반증` (§3-③ counterexample (a) = decentralized discovery with no central master). The reason for rejection is narrowed to a single conflict with our constraint (C1).
+4. **Use a list filter as a means of enforcement** — violates C7 + many precedents keep the list and the check as separate mechanisms (the permission daemon's separation of enumeration and checking; cluster discovery is the same regardless of permissions).
+5. **Add a second control surface to the frontend** — Unreal's two split surfaces are the real cautionary example.
+6. **Silent overwrite · silent ignore** — ★Basis replaced★ a precedent exists (the image editor's procedure registry), but **the party's own documentation warns against it**, another mature case **migrated from silent overwrite to blocking** (Blender), and the case that left routing undefined was classified by the collector as a "policy to avoid". The real cost of a silent shadow was also confirmed in Unreal. → The reason for rejection is not "no precedent" but **"a precedent exists and that precedent regrets it"**.
 
-## 6. 쟁점 · 한계 · 기권
+## 6. Open issues · limits · abstentions
 
-- **본 보고서의 사용 한계 (경고):** ★리뷰 정정★ §8·§9의 열린 항목이 닫히기 전까지 **ADR 거부 근거로 사용 금지**(메타헤더 아래 문장과 동일).
-- **쟁점 A (사용자 결정 대기):** 중계자가 무엇까지 읽을지 — 확정 ADR의 "봉투를 뜯지 않는다" 조항과 얽힌다. 선례가 **두 종류로 갈리므로 선택지가 셋**이다: ㉠ 완전 불투명(선례 없음) ㉡ 겉봉에 이름+짝번호만(전송 계층 중계의 **기본 경로** — ★리뷰 정정★ 초판의 "전송 계층 중계 전부"는 과장이다. 버스 데몬은 match rule로 본문 인자를 검사할 수 있다(§2). 명령 단위 권한·관측이 공짜로 열리는 이점은 유효) ㉢ 본문까지 인가·정규화(정책을 쥔 파사드 데몬들 — 우리 데몬의 현재 성격에 가장 가깝다). 되돌리는 비용은 ㉡→㉢이 형식 변경이라 크다.
-- **쟁점 B (갈림길 ②):** 조회를 같은 목록에 담을지 — 근거가 양쪽으로 갈렸다. 구조적으로 가른 쪽(GraphQL·MCP)은 실행 의미가 다르기 때문이고, 합친 쪽은 봉투를 공유하되 노출을 큐레이션한다. **메인이 승자를 고르지 않는다.**
-- **교차수집 결과(한계 1 해소):** 타계열 피어 수집을 BLIND로 돌려 대조했다. **양쪽 어느 것도 상위집합이 아니다** — 타계열은 우리 최근접 피어 2건(터미널 멀티플렉서 계열)과 코드 생성·IDL 계열 전체를 못 봤고, 주계열은 정책 파사드 데몬 계열·로보틱스 미들웨어·주인 선택 계층·플러그인 프로세스 레지스트리를 못 봤다. **정정 3건이 이 대조에서 나왔다**(§2 겉봉 일반화 · §3-④ 조용한 덮어쓰기 선례 없음 · §3-④ 단일 소유 강제가 주류). ★리뷰 정정★ 초판이 "양쪽 모두 미탐색 공백"으로 남긴 **모바일 OS 앱 간 명령 표면에서 이후 핵심 반례와 최근접 누락 선례가 나왔다**(§3-③ 반례 나 · §1 누락 선례 2건) — 선택 사항이 아니라 우선 조사 대상이었다. 빌드/CI · DAW 계열은 여전히 미탐색.
-- **한계 2:** ★리뷰 정정★ 적대 리뷰는 **실시했고 판정은 BLOCK**이다(초판 = "적대 리뷰 미실시 · 확신도는 수집자 자기보고"). grounding(클레임↔출처 함의) **전수**는 여전히 미실시이고, 리뷰의 스팟체크 5건 중 4건이 NOT SUPPORTED·1건이 PARTIALLY SUPPORTED로 나왔다.
-- **기권(수집자 명시):** ~~비중앙 당사자의 목록 취합 기제~~ → ★리뷰 정정★ **기권 철회 — 반증됨**(§3-③ 반례 가·나). 남는 기권: "A가 선언하고 B가 구현"의 문서화된 패턴 · 명령 팔레트류의 병합↔분리 이관 사례 · 일부 시스템의 미등록 이름 처리 세부.
-- **미탐색 세계:** ★리뷰 정정★ 모바일 OS 앱 간 명령 표면(안드로이드 인텐트·iOS App Intents)은 **리뷰가 채웠다**(§1·§3-③ — 단 리뷰 출처이고 원 수집자 미검증). 남는 미탐색: 빌드/CI 계열, DAW 플러그인 파라미터 자동화. 새 묶음을 더할지 미확인.
+- **Usage limit of this report (warning):** ★Review correction★ **do not use as grounds for ADR rejection** until the open items of §8 and §9 are closed (the same as the sentence under the meta header).
+- **Issue A (awaiting the user's decision):** how much the relayer reads — it is entangled with the "does not open the envelope" clause of the confirmed ADR. Because the precedents **split into two kinds, there are three options**: ㉠ fully opaque (no precedent) ㉡ only the name + pairing number on the outer cover (the **default path** of a transport-layer relay — ★Review correction★ the first edition's "all transport-layer relays" is an overstatement. A bus daemon can inspect body arguments with a match rule (§2). The advantage that command-level permission and observability open up for free is valid) ㉢ authorize and normalize down to the body (facade daemons that hold policy — the closest to the current nature of our daemon). The cost of reversing is high because ㉡→㉢ is a format change.
+- **Issue B (fork ②):** whether to put queries in the same list — the evidence split both ways. The side that split them structurally (GraphQL·MCP) did so because the execution semantics differ, and the side that merged them shares the envelope but curates exposure. **The main model does not pick a winner.**
+- **Cross-collection result (limit 1 resolved):** the cross-family peer collection was run BLIND and compared. **Neither side is a superset of the other** — the other family did not see our 2 closest peers (the terminal-multiplexer family) or the whole code-generation·IDL family, and the main family did not see the policy-facade-daemon family, the robotics middleware, the owner-selection layer or the plugin-process registry. **3 corrections came out of this comparison** (the §2 outer-cover generalization · the §3-④ no precedent of silent overwrite · the §3-④ forced single ownership being mainstream). ★Review correction★ **From the mobile-OS inter-app command surface, which the first edition left as a "gap unexplored by both sides", a key counterexample and the closest missing precedent later came out** (§3-③ counterexample (b) · §1 two missing precedents) — it was a priority subject to investigate, not optional. The build/CI and DAW families are still unexplored.
+- **Limit 2:** ★Review correction★ The adversarial review **was carried out and its verdict is BLOCK** (first edition = "adversarial review not carried out · confidence is collector self-report"). **Exhaustive** grounding (claim ↔ source implication) is still not done, and of the review's 5 spot checks, 4 came out NOT SUPPORTED and 1 PARTIALLY SUPPORTED.
+- **Abstentions (stated by the collectors):** ~~the aggregation mechanism of a non-central party's list~~ → ★Review correction★ **abstention withdrawn — refuted** (§3-③ counterexamples (a)·(b)). Remaining abstentions: the documented pattern of "A declares and B implements" · migration cases between merging and splitting in command-palette-type systems · details of unregistered-name handling in some systems.
+- **Unexplored world:** ★Review correction★ The mobile-OS inter-app command surface (Android intents · iOS App Intents) **was filled in by the review** (§1·§3-③ — but it is a review source and unverified by the original collectors). Remaining unexplored: the build/CI family, DAW plugin parameter automation. Whether to add a new group is unchecked.
 
-## 7. 다음 단계
+## 7. Next steps
 
-1. 타계열 피어 수집 회수 → §1 피어 절 갱신(누락 보강). **완료**(정정 3건 반영).
-2. load-bearing 클레임 grounding 전수(특히 §2 겉봉 표, §3-① "생성기 두고 이름만 0건", §3-③ CDP 부분 반례). **미실시 — 리뷰 스팟체크만 있다.**
-3. 타계열 적대 리뷰(레벨 4~5) → 확신도 태그 파생. **완료 — 판정 BLOCK, 본 문서가 정정 반영본.**
-4. **★신규 — §9의 계약 조항을 설계에 채운다**(프로토콜 버전·미지 명령·필드 추가 규칙·소유자 부재·취소/진행·타임아웃/재시도·타입드 오류). 이게 비면 §8 어느 안도 완성 아키텍처가 아니다.
-5. **★신규 — §8 1위(하이브리드) vs 2위(보고서안)를 선택지로 사용자에게.** 갈림 근거는 "등록/발견 층을 둘 것인가"다.
-6. 쟁점 A·B를 선택지로 사용자에게 → 결정 시 `/adr`(0022 확정화 또는 후속) + §5 거부 대안 이관. **단 §5는 위 정정 반영 전까지 거부 근거로 쓰지 않는다.**
+1. Retrieve the cross-family peer collection → update the §1 peer section (fill in omissions). **Done** (3 corrections applied).
+2. Exhaustive grounding of load-bearing claims (especially the §2 outer-cover table, §3-① "0 cases of a generator with names only", §3-③ the CDP partial counterexample). **Not done — only the review's spot checks exist.**
+3. Cross-family adversarial review (levels 4–5) → derive confidence tags. **Done — verdict BLOCK, this document is the edition with corrections applied.**
+4. **★New — fill the contract clauses of §9 into the design** (protocol version · unknown command · field-addition rule · owner absence · cancel/progress · timeout/retry · typed errors). If these are empty, none of the §8 proposals is a complete architecture.
+5. **★New — give the user §8 first place (hybrid) vs second place (the report's proposal) as options.** The basis for the split is "whether to have a registration/discovery layer".
+6. Give the user issues A·B as options → on decision, `/adr` (making 0022 confirmed or a follow-up) + moving the §5 rejected alternatives. **However, §5 is not used as grounds for rejection until the corrections above are applied.**
 
-## 8. 리뷰가 제시한 상위 대안
+## 8. Higher-ranked alternatives given by the review
 
-적대 리뷰가 순위를 매긴 대안 3안. **1위가 본 보고서 자체안(2위)보다 앞선다** — 아래 갈림 근거 참조.
+3 alternatives ranked by the adversarial review. **First place ranks ahead of this report's own proposal (second place)** — see the basis for the split below.
 
-1. **★신 선두안 — 정적 타입드 카탈로그 + 런타임 소유자/capability 등록 하이브리드.** Rust에서 명령 **이름·입력·출력·설명·오류·부작용 메타데이터를 한 번 선언**하고 **TS 바인딩과 LLM용 스키마를 함께 생성**하되, 각 프로세스는 시작 시 **자신이 지금 구현하는 부분집합만** 범용 브로커에 등록한다. 데몬은 "클라이언트 셸"이라는 **구체 개념을 몰라도** 소유자 토큰 + 연결만 알면 된다. C3(이미 신뢰하는 파생 경로)를 살리면서 탈중앙 발견(로보틱스 미들웨어)과 런타임 동적 등록(LSP)의 검증된 가용성 모델을 결합한다. 리뷰 판정: 현 증거상 제약 적합성과 선례 지지가 가장 강하다.
-2. **보고서안 — 정적 Rust 어휘 → TS 생성 + 데몬 중계.** drift 방지와 전송 독립 방향은 타당하다. 그러나 **Zellij는 주장했던 완전 동형 선례가 아니고**(§1), **소유자 바인딩·런타임 가용성·LLM 스키마·버전 협상**이 붙지 않으면 완성된 아키텍처가 아니다. 중계 봉투에는 명령 이름·호출자 신원·요청 ID·대상/소유자·프로토콜 버전을 두는 편이 근거가 강하다.
-3. **호출자/셸 측 발견 + 취합.** CLI·LLM 호스트 또는 클라이언트 셸이 도달 가능한 각 소유자에게 목록을 물어 이름공간을 병합한다. 로보틱스 미들웨어의 로컬 그래프 조회, 모바일 OS 인텐트 매칭, MCP 다중 서버/클라이언트 모델이 지지한다. 데몬의 셸 무지를 **가장 깨끗하게 보존**하지만, 모든 호출자에 발견·병합 로직이 중복되거나 공용 클라이언트 라이브러리가 필요하고, headless 상황의 셸 소유 명령 정책을 따로 정해야 한다.
+1. **★New leading proposal — a static typed catalog + a hybrid of runtime owner/capability registration.** In Rust, **declare the command name · input · output · description · errors · side-effect metadata once**, and **generate the TS bindings and the LLM schema together**, while each process at startup registers with a generic broker **only the subset it implements right now**. The daemon needs to know only the owner token + the connection, without knowing the **concrete concept** of a "client shell". It keeps C3 (the derivation path we already trust) alive while combining the proven availability models of decentralized discovery (robotics middleware) and runtime dynamic registration (LSP). Review verdict: on the current evidence it has the strongest constraint fit and precedent support.
+2. **The report's proposal — a static Rust vocabulary → TS generation + daemon relay.** The direction of drift prevention and transport independence is sound. But **Zellij is not the fully isomorphic precedent that was claimed** (§1), and unless **owner binding · runtime availability · LLM schema · version negotiation** are attached, it is not a complete architecture. The grounds are stronger if the relay envelope carries the command name, caller identity, request ID, target/owner and protocol version.
+3. **Caller/shell-side discovery + aggregation.** A CLI·LLM host or a client shell asks each reachable owner for its list and merges the namespaces. It is supported by the robotics middleware's local graph query, mobile-OS intent matching, and the MCP multi-server/client model. It **preserves the daemon's ignorance of the shell most cleanly**, but the discovery and merge logic is duplicated in every caller or a shared client library is needed, and the policy for shell-owned commands in headless situations has to be decided separately.
 
-**1위와 2위를 가르는 증거:** "정적 타입 계약"이 아니라 **소유자와 가용성이 런타임에 변하는 분산 시스템은 별도의 등록/발견 층을 둔다**는 선례(로보틱스 미들웨어 · LSP 동적 등록)다. **보고서안에는 그 층이 미정이다.**
+**The evidence that separates first and second place:** the precedent that a distributed system whose **owners and availability change at runtime has a separate registration/discovery layer**, not a "static typed contract" (robotics middleware · LSP dynamic registration). **In the report's proposal that layer is undecided.**
 
-## 9. 설계에 빠진 계약 조항
+## 9. Contract clauses missing from the design
 
-**보고서안(단일 열거형 + 데몬 중계)에는 진화·실패 계약이 없다.** 리뷰가 지목한 최소 필수 조항:
+**The report's proposal (a single enum + daemon relay) has no evolution or failure contract.** The minimum required clauses the review pointed out:
 
-| 조항 | 왜 필요한가 |
+| Clause | Why it is needed |
 |---|---|
-| 프로토콜 버전 | 독립 프로세스가 서로 다른 시점의 빌드로 만난다 |
-| 미지 명령 처리 | 이름이 겉봉에 있어도 받는 쪽이 그 이름을 모를 수 있다 |
-| 필드 추가 규칙(additive) | 확장이 기존 호출자를 깨지 않아야 한다 |
-| 소유자 부재 | 등록된 주인이 사라진 상태의 응답 형태 |
-| 취소 · 진행 보고 | 장시간 명령의 중단·중간 상태 |
-| 타임아웃 · 재시도 | 중계 경로가 응답하지 않을 때 |
-| 타입드 오류 모델 | 실패를 문자열이 아니라 계약으로 |
+| Protocol version | independent processes meet as builds from different points in time |
+| Unknown-command handling | even if the name is on the outer cover, the receiving side may not know that name |
+| Field-addition rule (additive) | an extension must not break existing callers |
+| Owner absence | the shape of the response when a registered owner has disappeared |
+| Cancel · progress reporting | interruption and intermediate state of long-running commands |
+| Timeout · retry | when the relay path does not respond |
+| Typed error model | failure as a contract, not as a string |
 
-- **자기모순 지적:** 보고서는 §3-① 경고 1에서 LSP의 닫힌 열거형 사고를 경고하면서 **자기 계약의 확장 규칙은 제시하지 않는다.**
-- **선례:** 최근접 피어(WezTerm)조차 **호환 불가한 타입/프로토콜 변경 시 올리는 명시적 코덱 버전**을 둔다. <https://github.com/wezterm/wezterm/blob/main/codec/src/lib.rs>
+- **Self-contradiction pointed out:** while warning in §3-① warning 1 about the closed-enum accident of LSP, the report **does not present the extension rule of its own contract.**
+- **Precedent:** even the closest peer (WezTerm) keeps an **explicit codec version raised on incompatible type/protocol changes**. <https://github.com/wezterm/wezterm/blob/main/codec/src/lib.rs>

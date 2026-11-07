@@ -1,5 +1,5 @@
-// windowCanvasReport 단위테스트 — `lastSent` 구독(ADR-0227). 구분선 드래그의 허용 범위(`useSplitDrag`)가 소비한다.
-// 무엇을 언제 보내나(한 번에 하나·합치기·재시도)는 `WindowLayout.test.tsx` 가 잰다. 여기서는 알림만 본다.
+// windowCanvasReport unit test — the `lastSent` subscription (ADR-0227). The divider drag's allowed range (`useSplitDrag`) consumes it.
+// What is sent and when (one at a time, coalescing, retry) is measured by `WindowLayout.test.tsx`. Here only notifications are checked.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -61,7 +61,7 @@ describe('subscribeCanvasReport', () => {
       { w: 200, h: 100 },
     ])
 
-    // 같은 크기는 보내지도 알리지도 않는다.
+    // The same size is neither sent nor notified.
     await report(200, 100)
     expect(reportCalls()).toHaveLength(2)
     expect(seen).toHaveLength(2)

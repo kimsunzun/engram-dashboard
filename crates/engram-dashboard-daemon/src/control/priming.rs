@@ -1,20 +1,20 @@
-//! PrimingProvider seam(ADR-0092 수신 계약) — 스폰 시 시스템 프롬프트에 주입할 프라이밍 파일의
-//! **절대경로**를 산출한다.
+//! PrimingProvider seam (ADR-0092 receive contract) — yields the **absolute path** of the priming file to inject
+//! into the system prompt at spawn.
 //!
-//! ★역할★: 데몬이 스폰(provision)마다 이 seam 에 프라이밍 파일 경로를 물어, 있으면 그 절대경로를
-//!   `ControlEndpoint.priming_file` 로 실어 보낸다. 이 모듈은 **경로만** 다룬다 — 파일 내용을 읽지
-//!   않는다(하드코딩 금지, ADR-0092: 내용은 외부 MD `prompts/agent-priming.md` 에만 산다).
+//! ★Role★: at every spawn (provision) the daemon asks this seam for the priming file path, and if there is one sends that absolute path
+//!   as `ControlEndpoint.priming_file`. This module deals with the **path only** — it does not read the file
+//!   content (no hardcoding, ADR-0092: the content lives only in the external MD `prompts/agent-priming.md`).
 //!
-//! ★seam 인 이유(ADR-0092 "길은 뚫어둔다")★: 현재 구현체(`FilePrimingProvider`)는 **에이전트를 가리지
-//!   않고 공용 파일 하나**만 준다(임시판). 미래에 에이전트별 프롬프트 인젝션/스킬등록 시스템이 오면 이
-//!   trait 의 구현만 갈아끼워(에이전트별·capability 별 프라이밍) 배선을 안 바꾸고 흡수한다.
-//!   그래서 provision 이 `PrimingProvider` trait 에만 의존하게 둔다.
+//! ★Why a seam (ADR-0092 "leave the road open")★: the current implementation (`FilePrimingProvider`) gives **one shared file
+//!   regardless of agent** (a stopgap). When a per-agent prompt injection / skill registration system arrives in the future, only this
+//!   trait's implementation is swapped (per-agent · per-capability priming) and it is absorbed without changing the wiring.
+//!   So provision is made to depend only on the `PrimingProvider` trait.
 //!
-//! ★graceful(스폰을 막지 않는다)★: 해석된 파일이 없으면 `None` 을 돌려주고 warn 로그만 남긴다 — 프라이밍
-//!   부재는 스폰 실패 사유가 아니다(제어 채널 provision 의 fail-closed 와 **다른** 정책). 에이전트는
-//!   프라이밍 없이 뜬다(수신 계약 미적용이나 기능적으로는 동작).
+//! ★Graceful (does not block the spawn)★: if there is no resolved file it returns `None` and leaves only a warn log — the absence of
+//!   priming is not a reason for spawn failure (a **different** policy from the control channel provision's fail-closed). The agent
+//!   comes up without priming (the receive contract is not applied, but it works functionally).
 //!
-//! tauri import 0(daemon crate).
+//! tauri import 0 (daemon crate).
 // ADR-0092
 
 use std::path::PathBuf;
@@ -23,17 +23,17 @@ use engram_dashboard_agent::types::{
     CLI_EXE_ENV, CLI_EXE_NAME, CLI_GROUP_MAIL, CLI_MAIL_FLAGS, CLI_MAIL_VERBS,
 };
 
-/// 토큰을 이어 가는 문자 — 이 문자가 매치 양옆에 붙어 있으면 **다른 낱말의 일부**다.
+/// A character that continues a token — if this character is attached on either side of a match, it is **part of another word**.
 ///
-/// ★경계 없이 substring 만 보면 평범한 산문이 걸린다(실측 리뷰)★: `The Engram mailbox is managed by the
-///   daemon.` 이 `engram mail` 을 품고 `--token` 이 `--to` 를 품는다. 그 오탐은 단순 소음이 아니라
-///   **오진단**이다 — 금지 게이트가 죄 없는 문장을 걸고, 에러 메시지는 운영자에게 그 문장을 지우라고 한다.
-///   `-`·`_` 까지 포함하는 이유는 플래그·식별자가 그 문자로 이어지기 때문이다(`--to-be`·`--token`).
+/// ★Looking at a bare substring with no boundary catches ordinary prose (measured review)★: `The Engram mailbox is managed by the
+///   daemon.` contains `engram mail` and `--token` contains `--to`. That false positive is not mere noise but a
+///   **misdiagnosis** — the prohibition gate flags an innocent sentence, and the error message tells the operator to delete that sentence.
+///   The reason `-` and `_` are included is that flags and identifiers are joined by those characters (`--to-be`·`--token`).
 fn continues_token(ch: char) -> bool {
     ch.is_alphanumeric() || ch == '-' || ch == '_'
 }
 
-/// `needle` 이 **낱말 경계**로 끊겨 등장하는가. `engram mail send` ✓ · `engram mailbox` ✗ ·
+/// Does `needle` appear delimited by a **word boundary**. `engram mail send` ✓ · `engram mailbox` ✗ ·
 /// `--to bob` ✓ · `--token` ✗.
 fn contains_bounded(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
@@ -59,39 +59,39 @@ fn contains_bounded(haystack: &str, needle: &str) -> bool {
     false
 }
 
-/// 프라이밍 본문 토큰 매칭용 정규화. **순서가 load-bearing 이다**: ① 문자 단위 접기(소문자 · 구분 기호 →
-/// 공백 · 무의미 문자 삭제) → ② 구조 제거(HTML 주석) → ③ 공백 축약. **모든 판정 arm 이 이걸 통과한
-/// 문자열만 본다**(원문 비교 경로 없음) — 그래야 "어느 arm 은 접히고 어느 arm 은 안 접힌다" 는 예외가 없다.
+/// Normalization for token matching in the priming body. **The order is load-bearing**: ① character-level folding (lowercase · separators →
+/// space · deleting meaningless characters) → ② structure removal (HTML comments) → ③ whitespace collapse. **Every decision arm sees only
+/// a string that passed through this** (no raw-text comparison path) — so there is no exception like "some arm folds and some arm does not".
 ///
-/// ★①이 ②보다 먼저인 이유(뒤집으면 서로를 무력화한다 — 실측 리뷰)★: 제로폭 문자나 이스케이프가 주석 닫는
-///   표시 안에 끼면(`<!--x--` + 제로폭 + `>`) ②는 그 주석을 못 닫힌 것으로 보고 남긴다. 그러면 명령이 주석
-///   텍스트에 끊긴 채 판정을 통과한다. 먼저 접어 두면 그 조합이 성립하지 않는다.
-/// ★왜 정규화가 필요한가(여러 낱말 토큰의 취약점)★: 판정 토큰이 여러 낱말이라, 원문 그대로 비교하면
-///   줄바꿈으로 끊긴 문장·연속 공백·`**engram** mail` 같은 강조가 전부 "안 가르침" 으로 읽힌다. 그 방향의
-///   오판은 MCP 가능 스폰에 CLI-교육 프라이밍을 통과시켜 ADR-0099 의 발신 freeze 를 정상 negative 로
-///   오귀속하게 만든다 — 판정기가 막으려던 바로 그 부류다.
-/// ★두 문자 부류를 가른다★: **구분 기호**(`*`·백틱·`~`·중괄호·따옴표)는 낱말 **사이**에 서므로 **공백으로**
-///   바꾼다 — 지워 버리면 `` `--to`-recipient `` 가 `--to-recipient` 로 **붙어** 판정이 뒤집히고,
-///   `"${ENGRAM_CLI_EXE}" mail send` 의 인접이 깨진다. **무의미 문자**(`_`·백슬래시·제로폭류)는 낱말 **안**에
-///   끼므로 지운다 — 이스케이프된 env 이름이 한 토큰으로 접혀야 실제 이름과 맞는다.
-/// ★닫히지 않은 `<!--` 는 남긴다★: 프라이밍은 렌더링되지 않고 **원문 그대로** 시스템 프롬프트에 주입되므로,
-///   렌더러 흉내로 뒷부분을 통째로 버리면 에이전트에겐 보이는 텍스트가 판정기에게만 사라진다.
-/// ★찾는 토큰도 같은 정규화를 거친 값으로 만든다★: 리터럴을 손으로 적지 말고 `normalized_token()` 을 쓸 것.
+/// ★Why ① comes before ② (reversed, they neutralize each other — measured review)★: if a zero-width character or an escape gets inside the comment-closing
+///   marker (`<!--x--` + zero-width + `>`), ② sees that comment as unclosed and leaves it. Then the command passes the decision while broken up
+///   by the comment text. If folded first, that combination does not hold.
+/// ★Why normalization is needed (the weakness of multi-word tokens)★: the decision token is several words, so compared in raw form,
+///   a sentence broken by a line break, consecutive spaces, and emphasis like `**engram** mail` all read as "does not teach". A misjudgment in that direction
+///   lets CLI-teaching priming pass for an MCP-capable spawn and makes ADR-0099's send freeze get
+///   misattributed as a normal negative — the very class the decider was meant to block.
+/// ★Two character classes are told apart★: **separators** (`*`·backtick·`~`·braces·quotes) stand **between** words so they are
+///   replaced **with a space** — deleting them would **join** `` `--to`-recipient `` into `--to-recipient` and flip the decision,
+///   and would break the adjacency of `"${ENGRAM_CLI_EXE}" mail send`. **Meaningless characters** (`_`·backslash·zero-width kinds) get stuck **inside**
+///   a word so they are deleted — an escaped env name must fold into one token to match the real name.
+/// ★An unclosed `<!--` is kept★: priming is not rendered and is injected into the system prompt **verbatim**, so
+///   throwing away the whole tail by imitating a renderer would leave text visible to the agent that vanishes only for the decider.
+/// ★The token we search for is also made from a value that went through the same normalization★: do not type a literal by hand; use `normalized_token()`.
 fn normalize_for_token_match(content: &str) -> String {
-    // ① 문자 단위 접기.
+    // ① Character-level folding.
     let mut folded = String::with_capacity(content.len());
     for ch in content.chars() {
         match ch {
-            // 낱말 사이에 서는 구분 기호 — 공백으로(삭제하면 양옆 토큰이 붙는다).
+            // Separators that stand between words — to a space (deleting would join the tokens on either side).
             '*' | '`' | '~' | '{' | '}' | '"' | '\'' => folded.push(' '),
-            // 낱말 안에 끼는 무의미 문자 — 삭제(마크다운 강조/이스케이프 + 보이지 않는 서식 문자).
+            // Meaningless characters that get inside a word — delete (markdown emphasis/escape + invisible formatting characters).
             '_' | '\\' | '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{200E}' | '\u{200F}'
             | '\u{2060}' | '\u{FEFF}' | '\u{00AD}' => {}
             other => folded.extend(other.to_lowercase()),
         }
     }
 
-    // ② 구조 제거 — 닫힌 HTML 주석만.
+    // ② Structure removal — closed HTML comments only.
     let mut stripped = String::with_capacity(folded.len());
     let mut rest = folded.as_str();
     while let Some(open) = rest.find("<!--") {
@@ -106,7 +106,7 @@ fn normalize_for_token_match(content: &str) -> String {
     }
     stripped.push_str(rest);
 
-    // ③ 공백 축약(①·②가 만든 연속 공백까지 여기서 한 번에).
+    // ③ Whitespace collapse (including consecutive spaces made by ① and ②, all at once here).
     let mut out = String::with_capacity(stripped.len());
     let mut last_was_space = false;
     for ch in stripped.chars() {
@@ -126,46 +126,46 @@ fn normalize_for_token_match(content: &str) -> String {
     out
 }
 
-/// 찾는 토큰을 본문과 **같은 규칙**으로 접는다(리터럴 손타이핑 금지 — 정규화가 바뀌면 함께 움직인다).
+/// Fold the token we search for by the **same rules** as the body (no hand-typing literals — they move together when normalization changes).
 fn normalized_token(raw: &str) -> String {
     normalize_for_token_match(raw)
 }
 
-/// 본문이 **우편 CLI 발신을 가르치는가**(강한 신호) — 판정 대상은 **실행 가능한 호출 형태**뿐이다:
-/// 실행 주체(실행파일 이름 또는 env 변수) + 계열 토큰 + **동사**의 인접(`engram mail send` 등).
+/// Does the body **teach mail CLI sending** (strong signal) — the decision target is **only the executable call form**:
+/// the executor (executable name or env variable) + family token + the adjacency of a **verb** (`engram mail send` etc.).
 ///
-/// ★이름만 등장하는 것은 교육이 아니다★: `ENGRAM_CLI_EXE is reserved for diagnostics; do not use it to send
-///   mail.` 은 **쓰지 말라는 문장**인데 예전 판정은 이걸 교육으로 셌다. 그래서 변수는 뒤에 계열 토큰이
-///   붙을 때만 교육이고, 맨 언급은 `mentions_mail_cli_surface`(표면 흔적)로만 센다.
-/// ★변수 형태를 교육에서 빼지 않는 이유(실재하는 교육 형태다)★: 변수로 부르는 호출은 명령 이름을 **한 번도
-///   적지 않는다** — `run \`$ENGRAM_CLI_EXE mail send --to alice\`` 가 그 예이고, ADR-0098 이 기록한 옛
-///   프라이밍이 정확히 그 형태였다(그래서 grant 가 미매칭됐다). 이걸 교육에서 빼면 그런 파일이 "발신을 안
-///   가르침" 으로 읽혀 `--cli-only` 요구 게이트가 멀쩡한 실험을 거부한다.
-/// ★basename 이 아니라 본문으로 판정한다 — 되돌리지 마라★: 이전 판본은 하드코딩된 basename 리스트만 봤고,
-///   새 CLI-지시 프라이밍이 그 리스트에서 누락되자 가드가 조용히 우회돼 CLI 바이너리 부재(인프라 부재)가
-///   SETUP-SKIP 대신 정상 negative(B_SENT=false)로 오귀속됐다. 대소문자·공백·강조를 접는 이유도 같다.
-/// ★bare 실행파일 이름으로 보면 안 된다★: MCP 프라이밍이 같은 단어를 MCP **서버 이름**으로 정당하게
-///   쓰므로(`on the engram server`), bare 판정은 MCP 전용 파일을 CLI-지시로 잡아 모든 MCP 실행을 스폰 전에
-///   거부한다. 그래서 판정은 **계열 토큰과의 인접**이고, 그 매치는 낱말 경계로 끊는다(`engram mailbox` 제외).
-/// ★동사까지 요구한다★: `engram mail` 만으로는 **실행되지 않는 조각**이라 "가르쳤다" 가 거짓이 된다.
-///   그 조각을 교육으로 세면 `--cli-only` 요구 게이트가 만족돼, 동사를 모르는 B 의 미발신이 정상 negative 로
-///   채점된다 — 이 판정기가 막으려는 오귀속 그 자체다. 동사 목록은 agent `CLI_MAIL_VERBS`(파서와 공유).
-/// ★이 게이트가 **못 잡는** 것(알려진 한계 — 늘리려 하기 전에 읽을 것)★:
-///   - **부정문**: `Do NOT use engram mail send; use MCP instead.` 는 여전히 "가르침" 으로 잡힌다. 문장의
-///     부정 여부를 텍스트로 판정하는 것은 휴리스틱 늪이라 **의도적으로 시도하지 않는다**(사용자 결정
-///     2026-08-04, 이번 라운드 재확인). 대가는 그런 파일을 `--cli-only` 없이 넘길 때의 헛된 SETUP-FAIL
-///     이고, 운영 프라이밍 2종엔 그런 문장이 없어 실경로 영향은 0 이다. **요란한 거부가 조용한 오귀속보다
-///     낫다** 는 이 게이트의 기조와 같은 방향이다.
-///   - **셸 문법 일반**: 이건 토큰 인접 매처지 셸 파서가 아니다. 변수 재바인딩(`X=$ENGRAM_CLI_EXE; $X mail
-///     send`)·별칭·여러 줄 분할 호출은 못 본다. 여기를 파서로 키우는 대신, 그 부류가 실제로 나오면 그때
-///     프라이밍 쪽을 고친다.
-///   - **괄호류 구분 기호**: `{}`·따옴표는 낱말 사이 기호로 접지만 `()`·`[]` 는 접지 않는다 — `engram
-///     (mail) 계열` 같은 산문이 명령으로 잡히는 오탐(그쪽이 더 나쁘다)을 피하기 위해서다.
-/// ★계열을 **우편으로 한정**하는 것도 의도다(임의 계열로 넓히지 말 것)★: 이 판정이 지키는 불변식은
-///   ADR-0128/0099 의 **우편** 교육↔배선 등호이고, 오귀속되는 관측도 우편 발신(`B_SENT`)이다. 제어 계열
-///   (`engram help`·후속 `engram agent …`)은 **모든** 스폰이 쓰는 표면이라(ADR-0132 결정 4·5) 그것까지
-///   세면 ① MCP 프라이밍이 제어 한 줄만으로 거부되고 ② "발신 방법을 하나도 안 가르친 `--cli-only`
-///   프라이밍" 이 역방향 게이트를 통과한다 — 지금 막고 있는 오귀속이 양쪽에서 되살아난다.
+/// ★A mere appearance of the name is not teaching★: `ENGRAM_CLI_EXE is reserved for diagnostics; do not use it to send
+///   mail.` is a **sentence saying not to use it**, yet the old decision counted it as teaching. So a variable is teaching only when a family token
+///   follows it, and a bare mention is counted only as `mentions_mail_cli_surface` (surface trace).
+/// ★Why the variable form is not removed from teaching (it is a real teaching form)★: a call made through a variable **never
+///   writes the command name** — `run \`$ENGRAM_CLI_EXE mail send --to alice\`` is the example, and the old
+///   priming recorded in ADR-0098 was exactly that form (that is why the grant was unmatched). If this is removed from teaching, such a file
+///   reads as "does not teach sending" and the `--cli-only` requirement gate rejects a perfectly fine experiment.
+/// ★Decide by body, not by basename — do not revert★: the earlier edition looked only at a hardcoded basename list, and
+///   when new CLI-instructing priming was missing from that list, the guard was quietly bypassed and the absence of the CLI binary (absence of infrastructure) was
+///   misattributed as a normal negative (B_SENT=false) instead of SETUP-SKIP. Folding case, whitespace and emphasis is for the same reason.
+/// ★Looking at the bare executable name is not allowed★: MCP priming legitimately uses the same word as the MCP **server name**
+///   (`on the engram server`), so a bare decision catches MCP-only files as CLI-instructing and rejects every MCP run before spawn.
+///   So the decision is **adjacency to the family token**, and that match is cut at word boundaries (`engram mailbox` excluded).
+/// ★A verb is required as well★: `engram mail` alone is a **fragment that cannot be executed**, so "taught" would be false.
+///   If that fragment were counted as teaching, the `--cli-only` requirement gate would be satisfied, and B's non-send because it does not know the verb would be graded as a normal negative
+///   — the very misattribution this decider is meant to block. The verb list is agent `CLI_MAIL_VERBS` (shared with the parser).
+/// ★What this gate **cannot catch** (known limits — read before trying to extend it)★:
+///   - **Negation**: `Do NOT use engram mail send; use MCP instead.` is still caught as "teaching". Deciding the
+///     negation of a sentence by text is a heuristic swamp, so we **deliberately do not attempt it** (user decision
+///     2026-08-04, reconfirmed this round). The price is a pointless SETUP-FAIL when passing such a file without `--cli-only`,
+///     and the two production primings contain no such sentence, so the real-path impact is 0. It points the same way as this gate's stance that **a loud refusal is
+///     better than a quiet misattribution**.
+///   - **Shell syntax in general**: this is a token-adjacency matcher, not a shell parser. Variable rebinding (`X=$ENGRAM_CLI_EXE; $X mail
+///     send`), aliases and calls split across lines are not seen. Instead of growing this into a parser, if that class really appears, we then
+///     fix the priming side.
+///   - **Bracket-type separators**: `{}` and quotes are folded as between-word symbols but `()` and `[]` are not — this is to avoid a false positive where prose like `engram
+///     (mail) family` gets caught as a command (that side is worse).
+/// ★Limiting the family **to mail** is also intentional (do not widen it to arbitrary families)★: the invariant this decision guards is
+///   ADR-0128/0099's **mail** teaching↔wiring equality, and the misattributed observation is also a mail send (`B_SENT`). The control family
+///   (`engram help` · the later `engram agent …`) is a surface **every** spawn uses (ADR-0132 decisions 4 and 5), so counting even that
+///   would make ① MCP priming rejected over a single control line and ② "`--cli-only` priming that teaches no sending method at all"
+///   pass the reverse gate — the misattribution now being blocked would revive on both sides.
 // ADR-0128
 // ADR-0132
 pub fn teaches_mail_cli(content: &str) -> bool {
@@ -182,21 +182,21 @@ pub fn teaches_mail_cli(content: &str) -> bool {
     })
 }
 
-/// 본문에 **우편 CLI 표면의 흔적이 있는가**(넓은 신호) — 강한 신호 ∪ CLI 절대경로 env 변수 이름 ∪ CLI 전용
-/// 플래그 표기.
+/// Does the body have **a trace of the mail CLI surface** (broad signal) — strong signal ∪ CLI absolute-path env variable names ∪ CLI-only
+/// flag notation.
 ///
-/// ★왜 강한 신호와 나눠 두는가(둘을 합치면 한쪽이 반드시 틀린다)★: 두 게이트의 요구가 반대다.
-///   - **금지 방향**(MCP 가능 스폰이 CLI 교육을 지니면 안 된다)은 의심스러우면 막는 게 안전하다 →
-///     이 넓은 신호를 쓴다. 명령 이름을 안 적고 플래그·변수만 적은 문서도 CLI 표면이 새어 든 것이다.
-///   - **요구 방향**(`--cli-only` 는 CLI 발신 교육을 **요구**한다)에 이 넓은 신호를 쓰면, 플래그만 스치고
-///     호출 형태는 안 가르친 문서가 통과해 B 가 발신 방법을 모른 채 도는 실험이 valid 로 채점된다.
-///     그쪽은 `teaches_mail_cli`(강한 신호)여야 한다.
+/// ★Why it is kept separate from the strong signal (merge the two and one side is certain to be wrong)★: the two gates need opposite things.
+///   - **Prohibit direction** (an MCP-capable spawn must not carry CLI teaching): when in doubt, blocking is safe →
+///     use this broad signal. A document that writes only flags and variables without the command name has also leaked the CLI surface.
+///   - **Require direction** (`--cli-only` **requires** CLI send teaching): if this broad signal were used here, a document that only brushes a flag and
+///     does not teach the call form would pass, and an experiment where B runs without knowing how to send would be graded valid.
+///     That side must be `teaches_mail_cli` (the strong signal).
 pub fn mentions_mail_cli_surface(content: &str) -> bool {
     if teaches_mail_cli(content) {
         return true;
     }
     let normalized = normalize_for_token_match(content);
-    // 동사 없는 `engram mail` 조각도 **표면**으로는 센다 — 실행은 못 해도 CLI 표면이 새어 든 문서다.
+    // A verbless `engram mail` fragment is also counted as a **surface** — it cannot execute, but it is a document where the CLI surface has leaked.
     let group_form = format!(
         "{} {}",
         normalized_token(CLI_EXE_NAME),
@@ -212,30 +212,30 @@ pub fn mentions_mail_cli_surface(content: &str) -> bool {
         .any(|f| contains_bounded(&normalized, &normalized_token(f)))
 }
 
-/// Send+Sync+'static — DaemonControlChannel 이 Arc 로 들고 provision 마다 부른다.
+/// Send+Sync+'static — DaemonControlChannel holds it as an Arc and calls it at every provision.
 pub trait PrimingProvider: Send + Sync + 'static {
-    /// 이번 스폰에 주입할 프라이밍 MD 파일의 **절대경로**. 없거나(파일 부재) 미구성이면 `None`.
-    /// ★절대경로 계약★: 에이전트의 cwd 는 데몬/repo 와 다르므로(각 워크스페이스) 반드시 절대경로여야
-    ///   claude 가 파일을 찾는다 — 상대경로면 에이전트 cwd 기준으로 해석돼 어긋난다.
+    /// The **absolute path** of the priming MD file to inject into this spawn. `None` if it is absent (file missing) or unconfigured.
+    /// ★Absolute path contract★: the agent's cwd differs from the daemon/repo (each workspace), so it must be an absolute path
+    ///   for claude to find the file — a relative path would be resolved against the agent's cwd and miss.
     ///
-    /// ★**누구에게 주입할지는 이 seam 이 정하지 않는다**★: 정합 불변식(프라이밍이 **가르치는** 우편
-    ///   채널 == 그 스폰이 실제로 **쓸 수 있는** 우편 채널 — 어기면 ADR-0099 가 실측한 발신 freeze)의
-    ///   판정 재료는 `uses_mail`·`accepts_mcp_config` 이고 그건 데몬만 안다. 그래서 **부를지 말지**를
-    ///   provision 이 먼저 고르고, 이 seam 은 「줄 파일이 있나」에만 답한다. 그 짝의 정본은
+    /// ★**Who gets the injection is not decided by this seam**★: the material for deciding the consistency invariant (the mail
+    ///   channel priming **teaches** == the mail channel that spawn can actually **use** — violate it and you get the send freeze ADR-0099 measured)
+    ///   is `uses_mail` and `accepts_mcp_config`, and only the daemon knows them. So provision first chooses **whether to call**,
+    ///   and this seam answers only 「줄 파일이 있나」 (is there a file to give). The authority for that pairing is
     ///   `DaemonControlChannel::provision`.
     // ADR-0126
     // ADR-0133
     fn priming_file(&self) -> Option<PathBuf>;
 }
 
-/// ★왜 base 를 exe 기준 루트로 받나(ADR-0092, 두 리뷰어 PRIMARY)★: 예전엔 base 를 데몬 프로세스 cwd
-///   (`from_cwd`)로 삼았다 — 그러나 운영 데몬은 WMI Win32_Process.Create 로 떠 **부모 cwd 를 상속하지
-///   않아**(cwd=System32) 프라이밍이 **조용히 비활성**됐다. 해결 = `default_data_dir` 이 `.engram-dev`
-///   를 anchor 할 때 쓰는 것과 **동일한 exe-walk-up 패턴**(`data_dir::find_install_root`)을 재사용해
-///   신뢰 가능한 절대 루트를 base 로 삼는다(cwd 불신).
+/// ★Why base is taken as the exe-based root (ADR-0092, both reviewers PRIMARY)★: earlier, base was the daemon process cwd
+///   (`from_cwd`) — but the production daemon is launched through WMI Win32_Process.Create and **does not inherit the parent cwd**
+///   (cwd=System32), so priming was **quietly disabled**. The fix = reuse the **same exe-walk-up pattern**
+///   (`data_dir::find_install_root`) that `default_data_dir` uses to anchor `.engram-dev`, and take a
+///   trustworthy absolute root as base (distrust cwd).
 ///
-/// ★왜 base 주입(new)인가★: 루트 해석을 이 모듈이 직접 하지 않고 생성 시 base 를 받는다 — 테스트가
-///   base 를 임시 dir 로 바꿔 cwd/exe 오염 없이 결정적으로 검증하게(seam 다움). 운영 배선은 from_install_root.
+/// ★Why base injection (new)★: this module does not resolve the root itself but takes base at construction — so tests can
+///   swap base for a temp dir and verify deterministically without cwd/exe contamination (seam-like). The production wiring is from_install_root.
 pub struct FilePrimingProvider {
     base_dir: PathBuf,
 }
@@ -243,20 +243,20 @@ pub struct FilePrimingProvider {
 const REL_MCP_PRIMARY: &str = "prompts/agent-priming.md";
 const ENV_OVERRIDE: &str = "ENGRAM_PRIMING_FILE";
 
-/// ★cmd.exe 부패 위험 문자(ADR-0092, Codex #1+#5)★: Windows 에서 claude 인자는 `console_command`
-///   (platform crate 의 `shell`)가 `cmd.exe /c claude …` 로 감싸 실행한다 — 이 경로가 `%VAR%` 를 **따옴표
-///   안에서도** 확장하고, `& ^ | < >` 를 셸 메타로 해석해 인자를 부패시킨다. 프라이밍 경로에 이 문자가
-///   있으면 claude 가 엉뚱한/잘린 경로를 받으므로 아예 주입하지 않는다(None).
-///   ★PRE-EXISTING·별도 follow-up(scope, ADR-0092)★: `console_command` 자체의 cmd.exe 이스케이프 결함은
-///   이 슬라이스가 도입한 게 아니라 **기존** 문제이고, 같은 경로로 실리는 `--mcp-config`(config_path)도
-///   동일하게 노출된다(그건 데몬이 만드는 경로라 사실상 안전하나 원리는 같다). 여기선 슬라이스 수준의
-///   싼 방어(프라이밍 경로 필터)만 하고, console_command 를 고치지 않는다 — 그건 **모든 backend** 인자에
-///   영향을 주는 별도 과업으로 추적한다(scope creep 회피).
+/// ★Characters that corrupt under cmd.exe (ADR-0092, Codex #1+#5)★: on Windows, claude arguments are wrapped by `console_command`
+///   (the platform crate's `shell`) as `cmd.exe /c claude …` and run — this path expands `%VAR%` **even inside quotes** and
+///   interprets `& ^ | < >` as shell metacharacters, corrupting the argument. If a priming path contains these characters,
+///   claude would receive a wrong/truncated path, so we do not inject at all (None).
+///   ★PRE-EXISTING · separate follow-up (scope, ADR-0092)★: the cmd.exe escaping flaw of `console_command` itself is
+///   not introduced by this slice but is an **existing** problem, and `--mcp-config` (config_path), carried by the same path, is
+///   exposed in the same way (that one is a path the daemon makes so it is practically safe, but the principle is the same). Here we do only the
+///   slice-level cheap defense (the priming path filter) and do not fix console_command — that is tracked as a separate task that
+///   affects the arguments of **all backends** (avoiding scope creep).
 const CMD_UNSAFE_CHARS: &[char] = &['%', '&', '^', '|', '<', '>'];
 
-/// ★왜 UTF-8 도 보나(Codex #5)★: 인자는 최종적으로 `to_string_lossy()` 로 문자열화돼 CLI 에 실린다
-///   (`backend/claude/`). 비-UTF8 경로는 그 lossy 변환에서 U+FFFD 로 **손상**돼 claude 가 존재하지 않는 경로를
-///   받는다. 그런 경로는 애초에 주입하지 않는다(손상된 경로 < 프라이밍 없음).
+/// ★Why UTF-8 is checked too (Codex #5)★: arguments are finally stringified with `to_string_lossy()` and carried to the CLI
+///   (`backend/claude/`). A non-UTF8 path is **corrupted** to U+FFFD by that lossy conversion and claude receives a nonexistent path.
+///   Such a path is not injected in the first place (a corrupted path < no priming).
 fn path_is_cli_safe(p: &std::path::Path) -> bool {
     let Some(s) = p.to_str() else {
         return false;
@@ -269,16 +269,16 @@ impl FilePrimingProvider {
         Self { base_dir }
     }
 
-    /// 루트를 못 얻으면(current_exe 실패 등) base 를 `.`(상대)로 둔다 — 그 경우 absolutize 가 절대화에
-    ///   실패해 None 을 산출한다(상대경로 절대 미주입).
+    /// If the root cannot be obtained (current_exe failure etc.), base is set to `.` (relative) — in that case absolutize fails to
+    ///   make it absolute and yields None (a relative path is never injected).
     pub fn from_install_root() -> Self {
         let base = crate::data_dir::find_install_root().unwrap_or_else(|| PathBuf::from("."));
         Self::new(base)
     }
 
-    /// ★absolute-or-None 계약(ADR-0092, Codex #3)★: 예전엔 base 가 상대면 current_dir 로 한 번 더
-    ///   절대화를 **시도**했고, 그마저 실패하면 상대 PathBuf 를 그대로 돌렸다.
-    ///   이제 cwd 폴백을 제거하고, 절대화 못 하면 엄격히 None 을 낸다(상대경로는 절대 Some 이 되지 않는다).
+    /// ★absolute-or-None contract (ADR-0092, Codex #3)★: earlier, if base was relative it **tried** to make it absolute once more with current_dir,
+    ///   and if even that failed it returned the relative PathBuf as it was.
+    ///   Now the cwd fallback is removed, and if it cannot be made absolute it strictly yields None (a relative path never becomes Some).
     fn absolutize(&self, p: PathBuf) -> Option<PathBuf> {
         if p.is_absolute() {
             return Some(p);
@@ -303,10 +303,10 @@ impl FilePrimingProvider {
             );
             return None;
         }
-        // ★TOCTOU 잔여(수용, ADR-0092 Codex #4)★: 여기 is_file 통과 시점과 claude 가 실제로 파일을
-        //   여는 시점(스폰 뒤) 사이에 파일이 사라지면 claude 는 프라이밍 없이 뜨거나 에러를 낸다. 프라이밍
-        //   파일은 racing 대상이 아닌 안정 인프라(버전관리 MD)라 저위험 — best-effort 존재 검사로 수용하고
-        //   락을 걸지 않는다(비용 대비 무가치). 잔여 리스크는 graceful 부재와 동급(스폰은 계속 뜬다).
+        // ★TOCTOU residue (accepted, ADR-0092 Codex #4)★: if the file disappears between the moment is_file passes here and the moment claude
+        //   actually opens the file (after spawn), claude comes up without priming or raises an error. The priming
+        //   file is stable infrastructure (version-controlled MD), not a racing target, so the risk is low — accepted as a best-effort existence check and
+        //   no lock is taken (not worth the cost). The residual risk is on par with graceful absence (the spawn still comes up).
         if abs.is_file() {
             return Some(abs);
         }
@@ -321,12 +321,12 @@ impl FilePrimingProvider {
 
 impl PrimingProvider for FilePrimingProvider {
     fn priming_file(&self) -> Option<PathBuf> {
-        // ★override 실패는 fixed 로 폴백하지 않는다★: 명시 override 를 조용히 다른 파일로 갈아치우면
-        //   혼란스럽다. 어느 관문에서 걸리든 None(프라이밍 없이 진행 — resolve_checked 가 warn).
-        // ★env override 가 고정 파일을 이긴다(ADR-0099 test-seam)★: 하네스/운영자가 특정 프라이밍을
-        //   강제할 수 있다(roundtrip_smoke `--priming` 이 이 env 로 넘긴다). 운영은 미설정이라 아래 고정
-        //   파일이 산다. ★단 provision 이 이 seam 을 **안 부르기로** 한 스폰은 이 override 로도 되살아나지
-        //   않는다★ — 그 판정은 우편 인가와 한 몸이라 env 하나로 뒤집히면 안 된다(trait doc 이 정본).
+        // ★An override failure does not fall back to fixed★: quietly swapping an explicit override for a different file is
+        //   confusing. Whichever gate it is caught at, None (proceed without priming — resolve_checked warns).
+        // ★The env override beats the fixed file (ADR-0099 test-seam)★: a harness/operator can
+        //   force a specific priming (roundtrip_smoke `--priming` passes it through this env). Production leaves it unset so the fixed
+        //   file below lives. ★But a spawn that provision has **decided not to call** this seam is not revived by this override either★ —
+        //   that decision is one body with the mail authorization, so it must not be flipped by a single env (the trait doc is the authority).
         if let Some(v) = std::env::var_os(ENV_OVERRIDE) {
             if !v.is_empty() {
                 return self.resolve_checked(PathBuf::from(v), "override");
@@ -337,8 +337,8 @@ impl PrimingProvider for FilePrimingProvider {
     }
 }
 
-/// 프라이밍 무관 테스트·경로에서 seam 을 채우되 `--append-system-prompt-file` 이 안 붙게 한다.
-/// 실물 파일 의존을 없애 테스트를 결정적으로 둔다.
+/// Fills the seam in tests and paths unrelated to priming while keeping `--append-system-prompt-file` from being attached.
+/// Removing the dependence on a real file keeps the test deterministic.
 pub struct NoopPrimingProvider;
 
 impl PrimingProvider for NoopPrimingProvider {
@@ -347,8 +347,8 @@ impl PrimingProvider for NoopPrimingProvider {
     }
 }
 
-/// 고정 경로 provider(테스트 전용) — 주어진 절대경로를 그대로 돌려준다(존재 검사 없음). 스폰 배선에
-/// 프라이밍이 실려 내려가는지 확인하는 통합 테스트에서 쓴다.
+/// Fixed-path provider (test only) — returns the given absolute path as is (no existence check). Used in integration tests that
+/// confirm priming is carried down through the spawn wiring.
 pub struct FixedPrimingProvider(pub PathBuf);
 
 impl PrimingProvider for FixedPrimingProvider {
@@ -364,8 +364,8 @@ mod tests {
     use std::io::Write as _;
     use std::sync::Mutex;
 
-    /// ★env 는 프로세스 전역★: `ENGRAM_PRIMING_FILE` 을 만지는 테스트끼리 병렬 실행 시 set/remove 가
-    ///   서로를 지운다(플레이키). 이 mutex 로 그 테스트들을 직렬화한다(cargo 는 기본 병렬이라 필수).
+    /// ★env is process-global★: when tests that touch `ENGRAM_PRIMING_FILE` run in parallel, set/remove
+    ///   erase each other (flaky). This mutex serializes those tests (cargo is parallel by default so it is required).
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn make_fixture_dir() -> PathBuf {
@@ -441,7 +441,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // ── ADR-0092 하드닝: absolute-or-None 계약(Codex #3) ──────────────────────────────
+    // ── ADR-0092 hardening: absolute-or-None contract (Codex #3) ──────────────────────────────
     #[test]
     fn relative_base_yields_none_never_relative_path() {
         let _env = ENV_LOCK.lock().unwrap();
@@ -453,7 +453,7 @@ mod tests {
         );
     }
 
-    // ── ADR-0092 하드닝: cmd.exe 메타문자 경로 → None(Codex #1+#5) ────────────────────
+    // ── ADR-0092 hardening: cmd.exe metacharacter path → None (Codex #1+#5) ────────────────────
     #[test]
     fn cmd_metachar_in_path_yields_none() {
         let _env = ENV_LOCK.lock().unwrap();
@@ -473,7 +473,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    // ── ADR-0092 하드닝: path_is_cli_safe 단위(메타문자별) ────────────────────────────
+    // ── ADR-0092 hardening: path_is_cli_safe unit (per metacharacter) ────────────────────────────
     #[test]
     fn path_is_cli_safe_rejects_each_metachar() {
         for c in CMD_UNSAFE_CHARS {
@@ -489,8 +489,8 @@ mod tests {
         );
     }
 
-    // ── ADR-0099/0126: 정합 불변식 pin(content-based) — 운영 프라이밍 파일이 실제로 가르치는 채널 ──────
-    /// 테스트는 항상 컴파일타임 소스 트리 안에서 도므로 MANIFEST_DIR 이 신뢰 가능하다.
+    // ── ADR-0099/0126: consistency invariant pin (content-based) — the channel the production priming file actually teaches ──────
+    /// Tests always run inside the compile-time source tree, so MANIFEST_DIR is trustworthy.
     fn repo_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")) // .../crates/engram-dashboard-daemon
             .parent()
@@ -499,8 +499,8 @@ mod tests {
             .to_path_buf()
     }
 
-    // ── 판정기 정규화(두 단어 토큰의 취약점) ────────────────────────────────────────────────
-    /// 되돌리면 MCP 가능 스폰이 CLI-교육 프라이밍을 달고 통과한다 — 각 케이스가 그 우회 경로 하나씩이다.
+    // ── Decider normalization (the weakness of two-word tokens) ────────────────────────────────────────────────
+    /// If reverted, an MCP-capable spawn passes carrying CLI-teaching priming — each case is one such bypass path.
     #[test]
     fn teaches_mail_cli_survives_whitespace_case_and_markdown_between_the_two_words() {
         for text in [
@@ -510,17 +510,17 @@ mod tests {
             "run `engram mail send`",
             "run **engram** mail send",
             "run *engram* *mail* send",
-            "run engram  mail send",    // 공백 2칸
-            "run engram\nmail send",    // 줄바꿈으로 끊긴 문장
-            "run engram\n   mail send", // 줄바꿈 + 들여쓰기
+            "run engram  mail send",    // two spaces
+            "run engram\nmail send",    // a sentence broken by a line break
+            "run engram\n   mail send", // line break + indentation
             "run engram\tmail send",
         ] {
             assert!(teaches_mail_cli(text), "CLI 교육으로 잡혀야: {text:?}");
         }
     }
 
-    /// bare 이름 판정으로 되돌아가면 MCP 전용 프라이밍이 전부 CLI-교육으로 잡혀 MCP 실행이 스폰 전에
-    /// 거부된다 — 그 회귀를 막는 음성 케이스.
+    /// If it goes back to bare-name decisions, all MCP-only priming gets caught as CLI teaching and MCP runs are
+    /// rejected before spawn — a negative case that prevents that regression.
     #[test]
     fn mcp_only_prose_is_not_mistaken_for_cli_teaching() {
         for text in [
@@ -539,8 +539,8 @@ mod tests {
         }
     }
 
-    /// ★경계 없는 substring 으로 되돌리면 평범한 산문이 걸린다★ — 그 오탐은 소음이 아니라 오진단이다:
-    ///   금지 게이트가 죄 없는 문장을 걸고, 메시지는 운영자에게 그 문장을 지우라고 지시한다.
+    /// ★If reverted to a boundary-less substring, ordinary prose gets caught★ — that false positive is not noise but a misdiagnosis:
+    ///   the prohibition gate flags an innocent sentence, and the message instructs the operator to delete that sentence.
     #[test]
     fn ordinary_prose_that_merely_contains_the_tokens_is_not_a_match() {
         for text in [
@@ -559,7 +559,7 @@ mod tests {
         }
     }
 
-    /// 렌더링엔 안 보이지만 정규화를 그냥 통과하던 구성 — 금지 게이트를 우회시킨다.
+    /// A construct that does not show in rendering but used to pass straight through normalization — it bypasses the prohibition gate.
     #[test]
     fn markdown_constructs_between_the_two_words_do_not_hide_the_command() {
         for text in [
@@ -568,25 +568,25 @@ mod tests {
             "Run engram\u{200B} mail pending",
             "Run engram\u{00AD} mail pending",
             "Run engram\\ mail pending",
-            // 문자 접기가 구조 제거보다 **먼저** 돌지 않으면 이 조합이 주석을 살린 채 통과한다.
+            // If character folding does not run **before** structure removal, this combination passes with the comment kept alive.
             "Run engram<!--split--\u{200B}> mail pending",
             "Run engram<!--split--\\> mail pending",
-            // 구분 기호는 지우지 않고 **공백으로** 바꿔야 인접이 산다.
+            // Separators must be turned **into spaces** rather than deleted for adjacency to survive.
             "run \"${ENGRAM_CLI_EXE}\" mail send --to alice --body hi",
             "run `engram` `mail` `send`",
         ] {
             assert!(teaches_mail_cli(text), "CLI 교육으로 잡혀야: {text:?}");
         }
-        // 닫히지 않은 주석은 뒤를 버리지 않는다 — 프라이밍은 렌더링 없이 원문 그대로 주입되므로,
-        //   렌더러 흉내로 잘라내면 에이전트에겐 보이는 텍스트가 판정기에게만 사라진다.
+        // An unclosed comment does not discard what follows — priming is injected verbatim without rendering, so
+        //   cutting it out by imitating a renderer would leave text visible to the agent that vanishes only for the decider.
         assert!(
             teaches_mail_cli("intro <!-- unterminated\nRun engram mail send --to bob"),
             "닫히지 않은 주석 뒤의 교육도 보여야"
         );
     }
 
-    /// ★변수 이름을 **부르는** 것과 **언급하는** 것은 다르다★: 금지 문장이 교육으로 세지면 안 되고,
-    ///   변수로 부르는 실제 호출(옛 프라이밍의 형태 — ADR-0098)은 교육으로 세야 한다.
+    /// ★**Calling** a variable name and **mentioning** it are different★: a prohibition sentence must not be counted as teaching,
+    ///   while a real call made through the variable (the form of the old priming — ADR-0098) must be counted as teaching.
     #[test]
     fn env_var_counts_as_teaching_only_in_an_invocation_shape() {
         let mention = "ENGRAM_CLI_EXE is reserved for diagnostics; do not use it to send mail.";
@@ -608,15 +608,15 @@ mod tests {
         }
     }
 
-    /// 넓은 신호만 잡는 자리 — 실행 가능한 호출을 안 적은 문서(금지 방향에서만 쓰인다).
+    /// A spot that catches only the broad signal — a document that does not write an executable call (used only in the prohibit direction).
     #[test]
     fn surface_evidence_without_a_runnable_invocation_is_not_teaching() {
         for text in [
             "pass --to <name> and --body <text> to deliver",
-            // 동사 없는 조각 — 실행되지 않으므로 "가르쳤다" 가 아니다.
+            // A verbless fragment — it cannot execute, so it is not "taught".
             "Run engram mail",
             "the engram mail surface exists",
-            // 구분 기호를 공백으로 접기 때문에 이 표기도 플래그로 보인다.
+            // Because separators are folded into spaces, this notation also looks like a flag.
             "the `--to`-recipient argument",
         ] {
             assert!(mentions_mail_cli_surface(text), "표면 흔적: {text:?}");
@@ -627,9 +627,9 @@ mod tests {
         }
     }
 
-    /// ★알려진 한계를 **테스트로 박제**한다★: 부정문은 여전히 "가르침" 으로 잡힌다 — 문장 부정 판정은
-    ///   휴리스틱 늪이라 의도적으로 시도하지 않는다(요란한 거부 > 조용한 오귀속). 이 테스트가 빨개지면
-    ///   누군가 negation 판정을 넣은 것이고, 그건 결정 사항이다.
+    /// ★The known limit is **pinned by a test**★: negation is still caught as "teaching" — deciding sentence negation is
+    ///   a heuristic swamp so we deliberately do not attempt it (loud refusal > quiet misattribution). If this test goes red,
+    ///   someone put in negation decisions, and that is a decision matter.
     #[test]
     fn a_prohibition_sentence_still_reads_as_teaching_known_limit() {
         assert!(teaches_mail_cli(
@@ -637,24 +637,24 @@ mod tests {
         ));
     }
 
-    /// ★입구 **이름**을 가르치는 자리는 더 이상 이 파일이 아니다★: 프라이밍은 포인터 한 줄
-    ///   (`engram help`)로 줄었고, `eg_send` 라는 낱말을 에이전트가 읽는 곳은 그 툴의 **설명문**
-    ///   뿐이다(rmcp 가 tools/list 에 싣는다). 그래서 그 반쪽은
-    ///   `control/mcp_server.rs::the_send_message_entry_teaches_its_own_call` 로 옮겼다 — 표면을 소유한
-    ///   파일이 그 표면을 지킨다. 여기 남은 것은 **주어가 여전히 프라이밍 파일인** 반쪽,
-    ///   곧 ADR-0126 결정 1(우회 교육 폐지)의 CLI 표면 부재다.
+    /// ★The place that teaches the entry **name** is no longer this file★: priming shrank to a one-line pointer
+    ///   (`engram help`), and the only place an agent reads the word `eg_send` is that tool's **description**
+    ///   (rmcp puts it in tools/list). So that half moved to
+    ///   `control/mcp_server.rs::the_send_message_entry_teaches_its_own_call` — the
+    ///   file that owns the surface guards that surface. What remains here is the half **whose subject is still the priming file**,
+    ///   that is, the absence of the CLI surface under ADR-0126 decision 1 (abolishing roundabout teaching).
     // ADR-0126
     // ADR-0128
     #[test]
     fn production_priming_file_carries_no_mail_cli_surface() {
         let root = repo_root();
         let a = std::fs::read_to_string(root.join(REL_MCP_PRIMARY)).expect("A 프라이밍 파일 존재");
-        // A 의 CLI 표면 **전면** 부재 — ADR-0126 영향/불변식의 검사 목록 그대로(명령 표기 + 딸린 플래그).
-        //   이름만 지우고 플래그 표기가 남으면 우회 교육이 반쪽으로 살아남는다.
-        // ★맨 `contains` 로 되돌리지 말 것★: 대소문자·줄바꿈·마크다운 강조로 표기만 흐트러뜨려도
-        //   `!a.contains(...)` 는 통과한다 — 판정기와 **같은 정규화·같은 낱말 경계**를 써야 이 pin 이
-        //   실제로 막고, `--token` 같은 평범한 낱말에 헛걸리지도 않는다.
-        //   (`mentions_mail_cli_surface` = 호출 형태 ∪ `engram mail` 조각 ∪ env 변수 이름 ∪ CLI 전용 플래그.)
+        // **Total** absence of A's CLI surface — exactly the check list of the ADR-0126 impact/invariant (command notation + accompanying flags).
+        //   If only the name is erased and flag notation remains, the roundabout teaching survives in half.
+        // ★Do not revert to a bare `contains`★: even merely scrambling the notation with case, line breaks or markdown emphasis
+        //   lets `!a.contains(...)` pass — this pin actually blocks only when it uses **the same normalization and the same word boundary** as the decider,
+        //   and it also does not falsely catch ordinary words like `--token`.
+        //   (`mentions_mail_cli_surface` = call form ∪ `engram mail` fragment ∪ env variable names ∪ CLI-only flags.)
         assert!(
             !mentions_mail_cli_surface(&a),
             "A(McpPrimary)에 CLI 표면(호출 형태 · `engram mail` 조각 · env 변수 이름 · CLI 전용 플래그 중 \
@@ -663,13 +663,13 @@ mod tests {
         );
     }
 
-    /// ★제어 발견은 우편 채널과 무관하다(ADR-0132 결정 4·5 · ADR-0133)★: 제어 동사는 전원에게 열려 있으므로
-    ///   프라이밍이 계열마다 한 줄(`engram help <계열>`)로 그 표면을 가리킨다. ★우편 계열은 이제 조건 없이
-    ///   그 목록에 선다★ — 스폰이 심던 표식은 ADR-0220 결정 4 로 걷혔다.
+    /// ★Control discovery is unrelated to the mail channel (ADR-0132 decisions 4 and 5 · ADR-0133)★: control verbs are open to everyone, so
+    ///   priming points to that surface with one line per family (`engram help <계열>` (family)). ★The mail family now stands in that list
+    ///   unconditionally★ — the marker spawn used to plant was withdrawn by ADR-0220 decision 4.
     ///
-    /// ★이 줄이 판정기를 건드리면 안 된다★: 그러면 A 의 CLI-표면 부재 pin(위 테스트)이 깨진다. 제어 계열을
-    ///   판정기에 넣어 그 pin 을 완화하는 방향으로 고치지 말 것 — 제어는 전원이 쓰는 표면이라 채널을
-    ///   가르는 신호가 될 수 없고, 넣으면 게이트가 양방향으로 무의미해진다(`teaches_mail_cli` 주석 정본).
+    /// ★This line must not touch the decider★: otherwise A's CLI-surface absence pin (the test above) breaks. Do not fix it by putting the control family into the
+    ///   decider to loosen that pin — control is a surface everyone uses so it cannot be a signal that separates channels, and putting it in makes the gate meaningless in both
+    ///   directions (the `teaches_mail_cli` comment is the authority).
     // ADR-0133
     #[test]
     fn production_priming_files_point_at_the_control_surface() {
@@ -690,22 +690,22 @@ mod tests {
         );
     }
 
-    // ★에스컬레이션 pin 은 여기 있었고, 지금은 없다 — 그 부재를 적어 둔다★: 옵 ADR-0126 결정 2·5 가
-    //   요구하던 "broken channel" 에스컬레이션 문장을 이 자리의 테스트가 불있었다. 그 문장은 프라이밍 본문의
-    //   행동 규칙 네 줄과 **함께** 걷혔고(사용자 결정 2026-09-19) 되돌아오지 않는다.
-    //   그 뒤 한 번 재배선됐던 잔존본(`production_priming_file_points_at_discovery_entrypoint`)은
-    //   위 `production_priming_files_point_at_the_control_surface` 와 **같은 파일에서 같은 리터럴을**
-    //   보는 엄밀한 중복이어서(저쪽은 그 위에 불변식 둘을 더 진다) 2026-09-20 에 지웠다 — 커버리지는
-    //   줄지 않았다.
-    // ★그래서 에스컬레이션 축을 지금 묶어 두는 pin 은 **하나도 없다**★ — 그 문장이 조용히 되살아나도,
-    //   반대로 다시 필요해져도 어느 게이트도 알려 주지 않는다. 그 갭의 기록은 ADR-0213 「영향」이 진다.
+    // ★The escalation pin was here, and now it is not — the absence is noted★: a test at this spot held the "broken channel"
+    //   escalation sentence that the old ADR-0126 decisions 2 and 5 required. That sentence was withdrawn **together with** the four behavior-rule
+    //   lines of the priming body (user decision 2026-09-19) and will not come back.
+    //   The remnant that was rewired once after that (`production_priming_file_points_at_discovery_entrypoint`) was
+    //   a strict duplicate **looking at the same literal in the same file** as the
+    //   `production_priming_files_point_at_the_control_surface` above (that one carries two more invariants on top), so it was deleted on 2026-09-20 — coverage
+    //   did not shrink.
+    // ★So there is **not a single pin** holding the escalation axis now★ — if that sentence quietly comes back to life, or conversely becomes needed again,
+    //   no gate would tell us. The record of that gap is carried by the ADR-0213 「영향」 (impact) section.
 
-    // ★C3 회신 계약(ADR-0103 결정 2/3)의 pin 은 여기 없다 — 되살리지 말 것★: 프라이밍은 봉투 문법을
-    //   더 이상 싣지 않는다(포인터로 줄었다). 계약은 두 표면으로 갈려 각자의 파일이 지킨다 —
-    //   봉투 인식(`type="request"` · `<notice>` · 받은 id 로 회신)은 `control/help.rs` 의
-    //   `the_mail_screen_teaches_the_reply_contract` 가, 툴 인자 표기(snake_case `reply_to`·`reply_by`)는
-    //   `control/mcp_server.rs` 의 **입력 스키마** pin 이 본다(설명문이 아니다 — ADR-0220 결정 3 으로
-    //   인자 계약의 집이 스키마로 옮겼다). ★프라이밍은 이제 행동 규칙도 지지 않는다★ — 그 네 줄과 에스컬레이션 pin 은
-    //   함께 걷혔다(위 주석). 프라이밍에 남은 load-bearing 성질은 발견 입구 한 줄뿐이고, 그
-    //   문법을 여기로 도로 끌어오면 같은 계약이 세 곳에서 갈라진다.
+    // ★There is no pin for the C3 reply contract (ADR-0103 decisions 2/3) here — do not revive it★: priming no longer carries the
+    //   envelope grammar (it shrank to a pointer). The contract is split across two surfaces and each file guards its own —
+    //   envelope recognition (`type="request"` · `<notice>` · reply with the received id) is covered by `the_mail_screen_teaches_the_reply_contract` in `control/help.rs`,
+    //   and tool argument notation (snake_case `reply_to`·`reply_by`) by the **input schema** pin in
+    //   `control/mcp_server.rs` (not the description — ADR-0220 decision 3 moved the
+    //   home of the argument contract to the schema). ★Priming no longer carries behavior rules either★ — those four lines and the escalation pin were
+    //   withdrawn together (the comment above). The only load-bearing property left in priming is the one discovery entry line, and
+    //   dragging that grammar back here would split the same contract in three places.
 }

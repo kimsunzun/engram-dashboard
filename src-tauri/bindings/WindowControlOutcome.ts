@@ -2,13 +2,13 @@
 import type { WindowCloseResult } from "./WindowCloseResult";
 
 /**
- * invoke `window_control` 의 답 — 칸의 뜻은 버스 답과 같고, 그 동작이 싣지 않는 칸은 거짓 · `null` 이다.
+ * The answer of invoke `window_control` — the meaning of the fields is the same as the bus answer, and a field that the action does not carry is false · `null`.
  *
- * - `deferred` = 보이지 않는 창이라 바랄 최대화 상태를 적어 뒀다(보일 때 입힌다) — `maximize` · `unmaximize`.
- * - `pending` = 첫 화면 전인 창이라 아무것도 하지 않았다(곧 보인다) — `raise`.
- * - `shown_all` = 숨은 창이라 먼저 모든 창을 보였다 — `raise`.
- * - `focused` = 끝난 뒤 그 창(`show_all` 이면 main)이 OS 전경 창이다 — 사실 그대로다(남의 앱이 전경이면 맨 위로만
- *   올리고 거짓) — `raise` · `show_all`.
- * - `close` = `close` 의 결말 — 그 밖의 동작은 `null`.
+ * - `deferred` = it was an invisible window, so the wished maximize state was recorded (applied when shown) — `maximize` · `unmaximize`.
+ * - `pending` = it was a window before first paint, so nothing was done (it will be visible soon) — `raise`.
+ * - `shown_all` = it was a hidden window, so all windows were shown first — `raise`.
+ * - `focused` = after finishing, that window (main for `show_all`) is the OS foreground window — the fact as it is (if another app is foreground, it is only
+ *   raised to the top and false) — `raise` · `show_all`.
+ * - `close` = the outcome of `close` — `null` for other actions.
  */
 export type WindowControlOutcome = { deferred: boolean, pending: boolean, shown_all: boolean, focused: boolean, close: WindowCloseResult | null, };

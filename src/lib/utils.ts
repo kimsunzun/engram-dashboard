@@ -1,4 +1,4 @@
-// ADR-0047: shadcn 관례 위치(src/lib/utils.ts)에 둔다.
+// ADR-0047: placed at the shadcn convention location (src/lib/utils.ts).
 import { clsx, type ClassValue } from 'clsx'
 import { twMerge } from 'tailwind-merge'
 

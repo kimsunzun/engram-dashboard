@@ -1,12 +1,12 @@
-//! 사용량 스케줄러 — 데몬마다 스레드 하나(`usage-scheduler`)가 구독된 벤더의 자동 조회 기한·리셋 시각·거절 끝·
-//! 합침 기한 중 가장 이른 때 깨어 [`UsageBook::plan_tick`](super::book::UsageBook::plan_tick) 의 계획을 나른다
-//! (TRD §1-4 「스케줄러」 · §3 #58).
+//! Usage scheduler — one thread per daemon (`usage-scheduler`) wakes at the earliest of the subscribed vendors' automatic query deadline · reset time · refusal end ·
+//! coalescing deadline and carries the plan of [`UsageBook::plan_tick`](super::book::UsageBook::plan_tick)
+//! (TRD §1-4 「스케줄러」 (scheduler) · §3 #58).
 //!
-//! ★스레드는 서비스를 `Weak` 로만 쥔다 — 잠든 동안엔 강한 참조가 없다★. 그래서 서비스가 사라지면 깨우기 송신단도
-//!   함께 사라져(`Disconnected`) 스레드가 스스로 끝난다 — 막힌 조회가 진행 중이어도 · 종료 절차에 단계가 없다.
-//! ★깨어난 뒤의 판정은 늘 서비스의 시계로 잰다★ — 대기 타이머의 시계는 절전 시간을 안 셀 수 있다(TRD §6 #2).
-//!   잠 상한 [`SCHEDULE_MAX_SLEEP`] 이 복귀·벽시계 이동 뒤의 늦음을 묶는다.
-//! 진입점 = [`spawn_scheduler`] — 조립이 [`UsageService::new`] 가 준 수신단으로 한 번 부른다.
+//! ★The thread holds the service only as a `Weak` — while asleep it has no strong reference★. So when the service disappears the wake sender
+//!   disappears too (`Disconnected`) and the thread ends by itself — even with a blocked query in flight · the shutdown procedure has no step.
+//! ★The decision after waking is always measured by the service's clock★ — the wait timer's clock may not count sleep time (TRD §6 #2).
+//!   The sleep cap [`SCHEDULE_MAX_SLEEP`] bounds lateness after resume or a wall-clock shift.
+//! Entry point = [`spawn_scheduler`] — the assembly calls it once with the receiver [`UsageService::new`] gave.
 // ADR-0006
 
 use std::io;
@@ -18,16 +18,16 @@ use std::time::{Duration, Instant};
 use super::book::SCHEDULE_MAX_SLEEP;
 use super::UsageService;
 
-/// 기다림 하한 — 이보다 짧은 기다림은 이만큼으로 올린다(그 기한은 많아야 이만큼 늦는다). 목적 = 0 이 새어
-/// 들어와도(계약이 깨진 계획 · 나르는 동안 기한이 지나감) 이 스레드가 책 락을 쉼 없이 두드리지 않게.
+/// Wait floor — a wait shorter than this is raised to this (that deadline is late by this much at most). Purpose = so that even if a 0 leaks
+/// in (a plan with a broken contract · a deadline passing while carrying) this thread does not hammer the book lock without rest.
 const SCHEDULE_MIN_SLEEP: Duration = Duration::from_millis(10);
 
-/// 스케줄러 스레드를 띄운다. `wakes` = [`UsageService::new`] 가 함께 돌려준 수신단 — 다른 수신단을 넘기면 서비스의
-/// 깨움(구독 교체·조회 끝·줍기)을 못 듣고 서비스 drop 에도 잠 상한까지 늦게 끝난다.
+/// Launch the scheduler thread. `wakes` = the receiver [`UsageService::new`] returned together — if another receiver is passed, it cannot hear the service's
+/// wakes (subscription replacement · query end · pickup) and even on service drop it ends late up to the sleep cap.
 ///
-/// 핸들을 놓으면 분리된 채 돈다 — 기다릴 일이 없다(서비스가 사라지면 스스로 끝난다). `Err` = 스레드를 못 띄웠다 —
-/// 서비스는 그대로 돌지만 시간이 이끄는 일이 전부 멈춘다: 자동 조회 · 기한이 차서 나가는 발행 · 못 갚은 발행 빚의
-/// 회수(TRD §3 #86). 요청(⟳·버스)·줍기·구독 교체는 그대로 돈다. 남기는 것은 부른 쪽 몫이다.
+/// If the handle is dropped it runs detached — there is nothing to wait for (it ends by itself when the service disappears). `Err` = the thread could not be launched —
+/// the service runs on but everything time drives stops: automatic queries · emission that goes out when a deadline is reached · collecting debt of emission not repaid
+/// (TRD §3 #86). Requests (⟳ · bus) · pickup · subscription replacement run on. What to leave behind is the caller's share.
 pub fn spawn_scheduler(
     service: &Arc<UsageService>,
     wakes: Receiver<()>,
@@ -44,8 +44,8 @@ fn run(service: Weak<UsageService>, wakes: Receiver<()>) {
             break;
         };
         let next = tick(&strong);
-        // 잠들기 전에 놓는다 — 이 스레드가 마지막 소유자면 서비스가 여기서 사라지고, 송신단도 함께 사라져 아래
-        //   대기가 곧바로 `Disconnected` 를 본다.
+        // Drop it before sleeping — if this thread is the last owner the service disappears here, and the sender disappears with it so the wait below
+        //   sees `Disconnected` at once.
         drop(strong);
         match wakes.recv_timeout(next.wait()) {
             Ok(()) | Err(RecvTimeoutError::Timeout) => {}
@@ -55,29 +55,29 @@ fn run(service: Weak<UsageService>, wakes: Receiver<()>) {
     tracing::debug!("사용량 서비스가 사라졌다 — 스케줄러를 끝낸다");
 }
 
-/// 한 번의 결과 — 계획이 시각을 읽은 순간(`planned`)부터 `sleep` 뒤에 깬다.
+/// The result of one pass — wake after `sleep` counted from the moment the plan read the time (`planned`).
 struct Tick {
     planned: Instant,
     sleep: Duration,
 }
 
 impl Tick {
-    /// 지금부터 기다릴 시간 — 계획 뒤 흐른 만큼(나르기 포함)을 빼고 [`SCHEDULE_MIN_SLEEP`, `SCHEDULE_MAX_SLEEP`]
-    /// 로 자른다. 그래서 나르는 동안 지난 기한은 하한 뒤 곧바로 다시 계획한다.
+    /// The time to wait from now — subtract what has flowed since the plan (including carrying) and clamp to [`SCHEDULE_MIN_SLEEP`, `SCHEDULE_MAX_SLEEP`].
+    /// So a deadline that passed while carrying is planned again right after the floor.
     fn wait(&self) -> Duration {
         bounded(self.sleep.saturating_sub(self.planned.elapsed()))
     }
 }
 
-/// 스케줄러 한 번 — 계획을 뜨고 나른다. 락 차례 = 명부{합집합 사본} → 책{계획} → 어느 락도 없이 발행·조회 기동
-/// (TRD §1-4 경로 표 「스케줄러 `tick`」).
+/// One scheduler pass — take a plan and carry it. Lock order = registry {union copy} → book {plan} → emission · query launch without any lock
+/// (TRD §1-4 path table 「스케줄러 `tick`」 (scheduler tick)).
 fn tick(service: &UsageService) -> Tick {
     let subscribed = service.watch.union();
     let (plan, planned) = {
         let mut desk = service.desk();
-        // 시각은 책 락 안에서 읽는다 — 다른 경로의 적용 순서와 시각 순서가 어긋나지 않는다.
+        // The time is read inside the book lock — so the application order and time order of other paths do not go out of step.
         let now = service.now();
-        // 흐른 시간은 서비스 시계가 아니라 기다림(`recv_timeout`)이 재는 시계로 잰다.
+        // Elapsed time is measured not by the service clock but by the clock the wait (`recv_timeout`) measures.
         let planned = Instant::now();
         (desk.book.plan_tick(&subscribed, now), planned)
     };
@@ -88,7 +88,7 @@ fn tick(service: &UsageService) -> Tick {
 }
 
 fn bounded(sleep: Duration) -> Duration {
-    // `clamp` 를 쓰지 않는다 — 하한 > 상한이면 패닉한다(가둠 표시 밖이라 데몬 종료 · ADR-0292).
+    // Do not use `clamp` — it panics if floor > cap (outside the containment mark so it ends the daemon · ADR-0292).
     sleep.max(SCHEDULE_MIN_SLEEP).min(SCHEDULE_MAX_SLEEP)
 }
 
@@ -108,7 +108,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{mpsc, Mutex};
 
-    /// 칸에 끝난 조회 하나를 새긴다 — 자동 조회 기한이 쿨타임 뒤로 밀려 `tick` 이 조회를 열지 않는다. 빚도 갚는다.
+    /// Stamp one finished query onto the cell — the automatic query deadline is pushed past the cooldown so `tick` does not open a query. It also repays the debt.
     fn settle(rig: &Rig, i: usize, obs: UsageObservation) {
         let now = rig.service.now();
         let mut desk = rig.service.desk();
@@ -117,13 +117,13 @@ mod tests {
         desk.book.broadcast_sheet(&key(i), now);
     }
 
-    /// 스케줄러를 띄운다 — 틀의 깸 수신단을 꺼내 넘긴다(틀은 그 뒤 깸을 못 센다).
+    /// Launch the scheduler — take out the frame's wake receiver and pass it (the frame cannot count wakes after that).
     fn launch(rig: &mut Rig) -> JoinHandle<()> {
         let wakes = std::mem::replace(&mut rig.wakes, mpsc::sync_channel(1).1);
         spawn_scheduler(&rig.service, wakes).expect("스케줄러 스레드")
     }
 
-    /// 상한 안에 끝나야 한다 — 잠 상한(60초)보다 훨씬 짧아, 여기서 끝나면 깨움이나 drop 이 끝낸 것이다.
+    /// It must end within the cap — far shorter than the sleep cap (60 seconds), so if it ends here a wake or a drop ended it.
     fn join_within(handle: JoinHandle<()>, what: &str) {
         wait_until(what, || handle.is_finished());
         handle.join().expect("스케줄러 스레드는 패닉하지 않는다");
@@ -136,7 +136,7 @@ mod tests {
         let (rig, _clock) = rig();
         let idle = rig.subscriber(1, &[]);
         {
-            // 빚을 남긴 칸 — 거절로 끝난 조회를 발행 없이 새긴다.
+            // A cell that left a debt — stamp a query that ended in refusal without emitting.
             let now = rig.service.now();
             let mut desk = rig.service.desk();
             assert!(desk.book.begin_probe(&key(1)));
@@ -296,7 +296,7 @@ mod tests {
         assert_eq!(capped.wait(), SCHEDULE_MAX_SLEEP);
     }
 
-    /// 받은 순간을 적고 잠깐 머문다 — 그 뒤에 잰 시각은 적힌 순간보다 늦다.
+    /// Write down the moment received and stay briefly — a time measured after that is later than the written moment.
     struct Stamping(Arc<Mutex<Vec<Instant>>>);
 
     impl UsageOutlet for Stamping {
@@ -333,9 +333,9 @@ mod tests {
         assert_eq!(bounded(Duration::MAX), SCHEDULE_MAX_SLEEP);
     }
 
-    // ── 구동 스레드 ──
+    // ── Driver thread ──
 
-    /// 읽힌 수를 세는 손 시계 — 연결이 구독하기 전 시계를 읽는 것은 스케줄러의 `tick` 뿐이다.
+    /// A hand clock that counts reads — before a connection subscribes, the only one reading the clock is the scheduler's `tick`.
     struct Counted {
         inner: ManualUsageClock,
         reads: AtomicUsize,
@@ -352,7 +352,7 @@ mod tests {
         }
     }
 
-    /// 칸 하나 · 세는 시계의 틀.
+    /// One cell · the frame of the counting clock.
     fn counted_rig() -> (Rig, Arc<Counted>) {
         let clock = Arc::new(Counted {
             inner: ManualUsageClock::new(Duration::from_secs(100), T0),
@@ -361,7 +361,7 @@ mod tests {
         (rig_with(clock.clone(), 1), clock)
     }
 
-    /// 첫 `tick` 을 마치고 잠들 때까지 — 시계를 읽었고 강한 참조를 놓았다. 구독이 없으면 그 잠은 상한이다.
+    /// Until it finishes the first `tick` and goes to sleep — it read the clock and dropped the strong reference. If there is no subscription that sleep is the cap.
     fn wait_asleep(rig: &Rig, clock: &Counted) {
         wait_until("첫 tick 뒤 잠들었다", || {
             clock.reads.load(Ordering::SeqCst) >= 1 && Arc::strong_count(&rig.service) == 1
@@ -377,7 +377,7 @@ mod tests {
         wait_asleep(&rig, &clock);
 
         rig.service.replace_subscription(1, set(&[0]));
-        // 「갱신 중」 한 장은 계획(책 락 안)이 아니라 나르기(락 밖)에서 닿는다 — 닿은 한 장을 기다린다.
+        // The 「갱신 중」 (refreshing) sheet arrives at carrying (outside the lock), not at the plan (inside the book lock) — wait for the sheet that arrived.
         wait_until(
             "깨어 새로 든 벤더의 「갱신 중」 한 장이 닿았다",
             || frames(&log).last().is_some_and(|f| f.snapshot.in_flight),
@@ -393,7 +393,7 @@ mod tests {
         let (mut rig, _clock) = rig();
         let _log = rig.subscriber(1, &[0]);
         let handle = launch(&mut rig);
-        // 조회기는 대본을 받을 때까지 막힌다 — 대본 송신단은 `rig` 에 남아 끝까지 아무도 답하지 않는다.
+        // The prober blocks until it receives a script — the script sender stays in `rig` and nobody answers to the end.
         wait_until("조회를 열고 잠들었다", || {
             rig.queries(0) == 1 && Arc::strong_count(&rig.service) == 1
         });
@@ -421,7 +421,7 @@ mod tests {
     #[test]
     fn a_wake_after_the_service_is_gone_ends_the_scheduler() {
         let (rig, clock) = counted_rig();
-        // 서비스 밖의 송신단 — 서비스가 사라져도 `Disconnected` 가 아니므로 깨워야 upgrade 실패를 본다.
+        // A sender outside the service — even if the service disappears it is not `Disconnected`, so it must be woken to see the upgrade failure.
         let (wake, wakes) = mpsc::sync_channel(1);
         let handle = spawn_scheduler(&rig.service, wakes).expect("스케줄러 스레드");
         wait_asleep(&rig, &clock);
