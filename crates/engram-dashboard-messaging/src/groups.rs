@@ -1,51 +1,51 @@
-//! groups — `@`주소 해석 seam(spec §4 · ADR-0104 결정 1 · **ADR-0111 결정 4 · ADR-0112 결정 1 ·
-//! ADR-0121 결정 1**).
+//! groups — `@` address resolution seam (spec §4 · ADR-0104 decision 1 · **ADR-0111 decision 4 · ADR-0112 decision 1 ·
+//! ADR-0121 decision 1**).
 //!
-//! ★역할★: "`@`주소 → 멤버(id · 이름) 목록" 을 펼친다. **v1 소스는 내장 하나뿐이고 그 안의 어휘가 둘**이다
-//!   (ADR-0121): **`@here`** = 지금 살아 있는 전원 · **`@all`** = 명부 전원(산 것 **+ 잠든 것**). 펼친 멤버는
-//!   **명부의 id 를 그대로** 든다(ADR-0309 결정 3 — 이름 → id 왕복 없음). 같은 프로필은 다시 띄워도 id 가
-//!   같아 재스폰을 넘어 같은 멤버이고, 주소(`@all`)와 응답 표기는 이름이다(ADR-0101).
+//! ★Role★: expands "`@` address → member (id · name) list". **The v1 source is a single built-in one, with two vocabulary words inside it**
+//!   (ADR-0121): **`@here`** = everyone alive right now · **`@all`** = everyone in the registry (alive **+ sleeping**). The expanded members
+//!   carry **the registry's id as is** (ADR-0309 decision 3 — no name → id round trip). The same profile has the same id even when launched again,
+//!   so it is the same member across re-spawns, and the address (`@all`) and the response notation are names (ADR-0101).
 //!
-//! ★두 어휘가 **다른 명단 풀**을 읽는 것이 결정 그 자체다(load-bearing — ADR-0121 §영향)★: 같은 풀을
-//!   보게 만들면 "all" 이 다시 거짓 이름이 되고(잠든 상대를 놓친 채 발신 LLM 은 "전원에게 알렸다" 고 믿는다)
-//!   `@here` 는 존재 이유를 잃는다. 그래서 아래 계약 스위트가 두 어휘의 소스 분리를 축으로 단언한다.
+//! ★The fact that the two words read **different list pools** is the decision itself (load-bearing — ADR-0121 §impact)★: making them
+//!   see the same pool would turn "all" into a false name again (the sending LLM believes "everyone was told" while missing a sleeping peer)
+//!   and `@here` would lose its reason to exist. So the contract suite below asserts the source separation of the two words as an axis.
 //!
-//! ★그룹은 발송 경로가 아니라 **주소 해석 매크로**다(ADR-0111 결정 4 — 이 모듈의 존재 이유)★: 펼친
-//!   멤버들은 직접 지목한 수신자와 **완전히 같은** 경로로 흐른다(spec §5 다중 수신자 fan-out). 그룹 전용
-//!   배달 규칙(죽은 멤버 skip · 발송 순간 `(id,epoch)` 결박 · 전용 fan-out 분기)은 **전부 폐지**됐다 —
-//!   되살리면 ADR-0111 위반이다.
+//! ★A group is an **address-resolution macro**, not a send path (ADR-0111 decision 4 — this module's reason to exist)★: the expanded
+//!   members flow through **exactly the same** path as directly named recipients (spec §5 multi-recipient fan-out). The group-specific
+//!   delivery rules (skipping dead members · binding `(id,epoch)` at the send moment · a dedicated fan-out branch) were **all** abolished —
+//!   reviving them violates ADR-0111.
 //!
-//! ★사용자 정의 그룹은 제거됐다(ADR-0111 결정 4 · ADR-0112 결정 1)★: 런타임 등록 명단(레지스트리) ·
-//!   `group` MCP 툴 · CLI `group` 서브커맨드 · ADR-0109 관리 semantics 일체가 사라졌다. 저장형·이름붙인
-//!   그룹은 실수요가 서는 시점(폴더 그룹이 1순위 후보)에 **재설계**한다 — 그룹을 위한 저장 구조를 미리
-//!   두지 않는다.
+//! ★User-defined groups were removed (ADR-0111 decision 4 · ADR-0112 decision 1)★: the runtime-registered list (registry) ·
+//!   the `group` MCP tool · the CLI `group` subcommand · ADR-0109 management semantics are all gone. Stored, named
+//!   groups will be **redesigned** when real demand stands up (folder groups are the first candidate) — no storage structure for groups
+//!   is laid down in advance.
 //!
-//! ★해석 seam 은 유지한다(ADR-0104 결정 1 의 *방향* 존속, 소스만 축소)★: 미래 소스(폴더 `@폴더명`)를
-//!   메시징 파이프라인을 건드리지 않고 추가할 수 있게 `GroupSource` 확장점을 남긴다. v1 구현은
-//!   `BuiltinGroups`(= `@all`·`@here`) 하나다. **over-build 금지** — 폴더/계층 구현은 지금 만들지 않는다.
+//! ★The resolution seam is kept (the *direction* of ADR-0104 decision 1 survives, only the sources shrink)★: the `GroupSource` extension point is left so a future source (folder `@폴더명`)
+//!   can be added without touching the messaging pipeline. The v1 implementation is
+//!   `BuiltinGroups` (= `@all`·`@here`) alone. **No over-build** — folder/hierarchy implementations are not built now.
 //!
-//! ★순수·기계적 해석(load-bearing 경계, ADR-0104)★: `resolve` 는 멤버 목록으로 **펼치기만** 한다 —
-//!   살아있음 판정·발신자 제외·중복 제거·로스터 대조는 전부 상위(`MessagingService`)의 몫이다. 특히
-//!   **"펼침 결과 0명" 은 여기서 에러가 아니다**(빈 목록을 그대로 돌려준다): `GROUP_EMPTY` 는 펼침 + 명시
-//!   지목을 합친 **최종 수신자 집합**이 비었을 때만 나는 판정이라(ADR-0114 결정 3) 이 층에서 알 수 없다.
+//! ★Pure, mechanical resolution (load-bearing boundary, ADR-0104)★: `resolve` **only expands** to a member list —
+//!   alive decisions, sender exclusion, deduplication and roster matching are all the upper layer's (`MessagingService`) job. In particular
+//!   **"expansion result of 0 members" is not an error here** (the empty list is returned as is): `GROUP_EMPTY` is a decision raised only when the **final recipient set** —
+//!   expansion plus explicit picks combined — is empty (ADR-0114 decision 3), so this layer cannot know.
 // ADR-0111
 // ADR-0112
 
 use crate::PeerId;
 
-/// 내장 어휘 `@all` — **명부 전원**(산 것 + 잠든 것) **− 발신자**(spec §4 · ADR-0121 결정 1).
+/// Built-in word `@all` — **everyone in the registry** (alive + sleeping) **− sender** (spec §4 · ADR-0121 decision 1).
 pub const ALL_GROUP: &str = "@all";
 
-/// 내장 어휘 `@here` — **지금 살아 있는 전원** **− 발신자**(spec §4 · ADR-0121 결정 1).
+/// Built-in word `@here` — **everyone alive right now** **− sender** (spec §4 · ADR-0121 decision 1).
 ///
-/// ★어휘 선택 근거★: Slack 이 같은 구분을 쓴다(`@channel` = 전원 / `@here` = 지금 활성) — 에이전트를
-///   구동하는 LLM 이 그 관례를 이미 알고 있을 가능성이 높다(ADR-0121 §근거).
+/// ★Basis for the word choice★: Slack uses the same distinction (`@channel` = everyone / `@here` = currently active) — the LLM driving the agent
+///   likely already knows that convention (ADR-0121 §rationale).
 pub const HERE_GROUP: &str = "@here";
 
-/// 펼침의 멤버 하나 — 명부가 준 id 와 그 순간 이름.
+/// One member of the expansion — the id the registry gave and the name at that moment.
 ///
-/// 상위는 이 id 로 받는 이를 바로 잡는다 — 이름으로 다시 풀면 동명 쌍둥이(서로 다른 에이전트)가 한
-/// 수신자로 접히거나 `RECIPIENT_AMBIGUOUS` 가 된다(ADR-0309 결정 3 · TRD S29 §4 X1).
+/// The upper layer picks the recipient by this id directly — resolving again by name would fold same-name twins (different agents) into one
+/// recipient or turn them into `RECIPIENT_AMBIGUOUS` (ADR-0309 decision 3 · TRD S29 §4 X1).
 // ADR-0309
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupMember {
@@ -53,44 +53,44 @@ pub struct GroupMember {
     pub name: String,
 }
 
-/// 해석기가 읽는 **명단 풀 두 개**(ADR-0121 결정 1) — 호출자가 락 밖 스냅샷에서 만들어 주입한다.
+/// The **two list pools** the resolver reads (ADR-0121 decision 1) — the caller builds them from a snapshot taken outside the lock and injects them.
 ///
-/// ★왜 한 슬라이스가 아니라 풀 둘인가(load-bearing — 소스 지식이 파이프라인에 새지 않게)★: "어느 어휘가
-///   어느 풀을 읽나" 는 **소스의 지식**이다. 상위가 어휘별로 다른 슬라이스를 골라 넘기는 형태였다면
-///   파이프라인이 `@all`/`@here` 를 알아야 하고, 그러면 미래 소스(폴더 `@폴더명`)가 자기 풀을 고를 수
-///   없어진다(ADR-0104 "소스 지식이 파이프라인에 새면 위반"). 그래서 풀을 **둘 다** 넘기고 선택은 소스가 한다.
-/// ★발신자 제외는 호출자가 이미 적용한 상태★로 온다(spec §4 — 펼침에서 발신자를 뺀다. 정본이 ADR-0111 이
-///   아니라 spec 이라는 점이 load-bearing: 0111 결정 4 에 그 문구가 없어 거기만 보면 빠뜨린다).
+/// ★Why two pools and not one slice (load-bearing — so source knowledge does not leak into the pipeline)★: "which word
+///   reads which pool" is **knowledge of the source**. If the upper layer picked a different slice per word and passed it in,
+///   the pipeline would have to know `@all`/`@here`, and then a future source (folder `@폴더명`) could not pick its own pool
+///   (ADR-0104 "it is a violation if source knowledge leaks into the pipeline"). So **both** pools are passed and the source chooses.
+/// ★Sender exclusion arrives already applied by the caller★ (spec §4 — the sender is removed from the expansion. That the source of truth is the spec and not ADR-0111
+///   is load-bearing: decision 4 of 0111 lacks that phrase, so looking only there you would miss it).
 #[derive(Debug, Clone, Copy)]
 pub struct MemberPools<'a> {
-    /// 지금 살아 있는 멤버들 — `@here` 의 명단이자 `@all` 의 앞부분.
+    /// Members alive right now — the list of `@here` and the first part of `@all`.
     pub live: &'a [GroupMember],
-    /// 잠든 멤버들(프로필 실재·그 세션은 살아 있지 않음) — **`@all` 만** 이걸 함께 읽는다.
-    ///   ★동명을 접지 않은 채 온다★: 이 층의 계약이 **호출자가 준 풀을 verbatim 돌려준다**(정렬·dedup·필터
-    ///   금지)라서다 — 같은 이름의 두 멤버는 서로 다른 수신자다(ADR-0309 · TRD S29 §4 X1).
+    /// Sleeping members (profile exists, its session is not alive) — **only `@all`** reads this too.
+    ///   ★It arrives with same names not folded★: because the contract of this layer is to **return the pool the caller gave verbatim** (no sorting,
+    ///   dedup or filtering) — two members with the same name are different recipients (ADR-0309 · TRD S29 §4 X1).
     pub dormant: &'a [GroupMember],
 }
 
-/// `@`주소 해석 에러 — 상위가 wire 에러 코드로 매핑한다(spec §4).
+/// `@` address resolution error — the upper layer maps it to a wire error code (spec §4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GroupError {
-    /// `@` 네임스페이스 규약 위반 — 정규화 실패.
+    /// `@` namespace convention violation — normalization failed.
     InvalidName { name: String },
-    /// 내장 어휘가 아닌 `@이름` — 존재하지 않는 주소 → `GROUP_NOT_FOUND`(발송 단위 전체 반려, ADR-0114 결정 3).
+    /// An `@이름` that is not a built-in word — a nonexistent address → `GROUP_NOT_FOUND` (the whole send unit is bounced, ADR-0114 decision 3).
     NotFound { name: String },
 }
 
-/// ★그룹 주소 정규화 — **seam 레벨** 자유 함수(C4 리뷰 fix F · ADR-0104 결정 1)★
+/// ★Group address normalization — a **seam-level** free function (C4 review fix F · ADR-0104 decision 1)★
 ///
-/// ★왜 소스 구현의 메서드가 아니라 자유 함수인가(load-bearing — seam 경계)★: 발송 파이프라인은 소스에
-///   물어보기 **전에** 이름을 정규화한다(봉투 `to` 토큰·에러 hint 가 그 값을 쓴다). 그 정규화가 특정 소스
-///   구현의 메서드면 파이프라인이 그 타입에 묶여, 이름 문법이 다른 미래 소스가 도달 불가해진다(ADR-0104
-///   "소스 지식이 파이프라인에 새면 위반"). 그래서 규약을 소스 밖 seam 레벨에 두고 전원이 공유한다.
+/// ★Why a free function and not a method of a source implementation (load-bearing — seam boundary)★: the send pipeline normalizes the name **before**
+///   asking the source (the envelope `to` token and the error hint use that value). If that normalization were a method of a specific source
+///   implementation, the pipeline would be tied to that type, and a future source with a different name grammar would become unreachable (ADR-0104
+///   "it is a violation if source knowledge leaks into the pipeline"). So the convention is placed at the seam level outside the sources and shared by all.
 ///
-/// ★엄격 규약(load-bearing — @-네임스페이스 계약)★: 그룹 이름은 **반드시 정확히 하나의 선행 `@`** 로
-/// 시작해야 한다. 선행 `@` 가 없으면(`coders`) `InvalidName` — 관대 보정(`coders` → `@coders`)은 사람/그룹
-/// 구분이 `@` 하나에 걸린 계약을 흐려 거부됐다. `@` 뒤 본문이 비었거나 공백만이면, 또 본문에 `@` 가 더
-/// 있으면(`@@x`·`@a@b`) 역시 `InvalidName`.
+/// ★Strict convention (load-bearing — @-namespace contract)★: a group name **must start with exactly one leading `@`**.
+/// If there is no leading `@` (`coders`) it is `InvalidName` — lenient correction (`coders` → `@coders`) was rejected because it blurs the contract in which the person/group
+/// distinction hangs on a single `@`. If the body after `@` is empty or only whitespace, or the body has another `@`
+/// (`@@x`·`@a@b`), it is likewise `InvalidName`.
 // ADR-0104
 pub fn normalize_group_name(name: &str) -> Result<String, GroupError> {
     let trimmed = name.trim();
@@ -107,13 +107,13 @@ pub fn normalize_group_name(name: &str) -> Result<String, GroupError> {
     Ok(format!("@{body}"))
 }
 
-/// 그룹 해석 소스(seam — ADR-0104 결정 1). "`@`주소 → 멤버 목록" 해석기의 확장점.
+/// Group resolution source (seam — ADR-0104 decision 1). The extension point of the "`@` address → member list" resolver.
 pub trait GroupSource {
-    /// 이 소스가 그 주소를 모르면 `NotFound`.
+    /// `NotFound` if this source does not know that address.
     fn resolve(&self, group: &str, pools: MemberPools<'_>) -> Result<Vec<GroupMember>, GroupError>;
 }
 
-/// v1 유일 소스 — 내장 두 어휘(`@all`·`@here`)만 안다(무저장 즉석 계산, ADR-0111 결정 4 · ADR-0121 결정 1).
+/// The only v1 source — it knows only the two built-in words (`@all`·`@here`) (no storage, computed on the spot, ADR-0111 decision 4 · ADR-0121 decision 1).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct BuiltinGroups;
 
@@ -134,18 +134,18 @@ impl GroupSource for BuiltinGroups {
     }
 }
 
-/// ★`GroupSource` 계약 스위트 — 소스 교체 내구성 그물(사용자 지시 2026-07-26)★
+/// ★`GroupSource` contract suite — a safety net for durability under source swaps (user instruction 2026-07-26)★
 ///
-/// ★왜 이게 있나(load-bearing — 이 모듈의 존재 이유)★: `GroupSource` 는 **미래에 갈아끼울 것을 전제로**
-///   깐 seam 이다(ADR-0104 결정 1 — 폴더가 데몬 소유로 생기면 `@폴더명` 소스가 추가된다). 그때 새 구현이
-///   조용히 다른 의미를 갖게 되는 게 최악이다: `@all` 이 정렬돼 나오거나, **`@here` 가 잠든 이름까지 읽거나**,
-///   빈 스냅샷이 에러로 접히거나, `@` 규약이 관대해지거나 — 전부 **컴파일은 되고 기존 테스트는 초록**인
-///   채로 방송 의미만 뒤집힌다. 그래서 해석 의미론을 구현이 아니라 **트레잇에 대해** 단언하는 재사용
-///   스위트를 둔다.
+/// ★Why it exists (load-bearing — this module's reason to exist)★: `GroupSource` is a seam laid down **on the premise that it will be swapped in the future**
+///   (ADR-0104 decision 1 — once folders become daemon-owned, an `@폴더명` source is added). The worst case is that the new implementation
+///   quietly takes on a different meaning: `@all` comes out sorted, **`@here` reads sleeping names too**,
+///   an empty snapshot is folded into an error, or the `@` convention turns lenient — all of these **compile and leave existing tests green**
+///   while only the broadcast meaning flips. So there is a reusable suite that asserts the resolution semantics **against the trait**, not the
+///   implementation.
 ///
-/// ★이 스위트가 빨개지면★: 고칠 대상은 **스위트가 아니라 결정**이다. 해석 의미론은 spec §4 · ADR-0111
-///   결정 4 · ADR-0114 결정 3 · ADR-0121 결정 1 이 정한 사용자 결정 사항이라, 여기 단언을 느슨하게 만드는
-///   수정은 곧 계약 변경이다 — 사용자 재가 없이 완화하지 말 것.
+/// ★When this suite goes red★: what to fix is **the decision, not the suite**. The resolution semantics are user-decided matters set by spec §4 · ADR-0111
+///   decision 4 · ADR-0114 decision 3 · ADR-0121 decision 1, so a fix that loosens the assertions here
+///   is a contract change — do not relax them without user ratification.
 #[cfg(any(test, feature = "test-harness"))]
 pub mod contract {
     use super::{GroupError, GroupMember, GroupSource, MemberPools, ALL_GROUP, HERE_GROUP};
@@ -153,14 +153,14 @@ pub mod contract {
 
     #[derive(Debug, Clone)]
     pub struct GroupSourceFixture {
-        /// 이 소스가 **모르는** 주소 이름(`NotFound` 축). 이미 정규화된 형태(`@nope`)여야 한다.
+        /// An address name this source **does not know** (the `NotFound` axis). It must already be in normalized form (`@nope`).
         pub unknown: String,
-        /// 이 소스가 내장 어휘(`@all`·`@here`)를 **소유**하는가. v1 `BuiltinGroups` = true.
-        ///   미래 폴더 소스 = 보통 false.
+        /// Does this source **own** the built-in words (`@all`·`@here`). v1 `BuiltinGroups` = true.
+        ///   A future folder source = usually false.
         pub handles_builtins: bool,
     }
 
-    /// 멤버마다 서로 다른 id(`base` 부터 순번) — 같은 이름이 여럿이면 그것이 동명 쌍둥이다.
+    /// A different id for each member (sequence from `base`) — if several share one name, those are same-name twins.
     fn members(base: u128, names: &[&str]) -> Vec<GroupMember> {
         names
             .iter()
@@ -172,15 +172,15 @@ pub mod contract {
             .collect()
     }
 
-    /// ★`GroupSource` 해석 의미론 계약 — 어떤 구현이든 이걸 통과해야 한다(spec §4 · ADR-0111/0114/0121)★.
+    /// ★`GroupSource` resolution semantics contract — any implementation must pass this (spec §4 · ADR-0111/0114/0121)★.
     ///
-    /// ★단언 문구 앞의 `axisN-…:` 토큰(load-bearing)★: 모든 실패 메시지는 **축마다 유일한** 토큰으로
-    ///   시작한다. 자체검증 테스트가 `#[should_panic(expected = …)]` 로 "그물이 무는지" 확인하는데, 부분
-    ///   문자열이 여러 축에 겹치면 엉뚱한 축이 먼저 터져도 초록이 된다. **토큰을 바꾸면 핀도 함께 고칠 것.**
+    /// ★The `axisN-…:` token before assertion messages (load-bearing)★: every failure message starts with a token that is **unique per
+    ///   axis**. The self-check tests confirm "the net bites" with `#[should_panic(expected = …)]`, and if a substring
+    ///   overlaps across axes, the wrong axis blowing up first still comes out green. **If you change a token, fix the pin too.**
     pub fn assert_group_source_contract(src: &dyn GroupSource, fx: &GroupSourceFixture) {
-        // ── 1·1b·1c·2. 내장 어휘 축 ────────────────────────────────────────────────────────
-        // 정렬하면 상위의 행 순서 규칙(명시 토큰 → 펼침 사전순)이 두 층에 흩어지고, 이름으로 dedup 하면
-        //   동명 쌍둥이(서로 다른 id)가 소스 단계에서 한 수신자로 접힌다(ADR-0309 · TRD S29 §4 X1).
+        // ── 1·1b·1c·2. Built-in word axis ────────────────────────────────────────────────────────
+        // Sorting would scatter the upper layer's row-order rule (explicit tokens → expansion alphabetical) across two layers, and
+        //   deduping by name would fold same-name twins (different ids) into one recipient at the source stage (ADR-0309 · TRD S29 §4 X1).
         let live = members(1, &["zeta", "alpha", "zeta", "mid"]);
         let dormant = members(100, &["sleepy", "twin", "twin"]);
         let pools = MemberPools {
@@ -231,7 +231,7 @@ pub mod contract {
             }
         }
 
-        // ── 3. NotFound 축 ────────────────────────────────────────────────────────────────
+        // ── 3. NotFound axis ────────────────────────────────────────────────────────────────
         assert_eq!(
             src.resolve(&fx.unknown, pools),
             Err(GroupError::NotFound {
@@ -240,7 +240,7 @@ pub mod contract {
             "axis3-unknown-notfound: 모르는 주소는 NotFound 이고 name 은 정규화된 이름을 실어야 한다(상위가 hint 에 되쓴다)"
         );
 
-        // ── 4. `@` 네임스페이스 규약 ───────────────────────────────────────────────────────
+        // ── 4. `@` namespace convention ───────────────────────────────────────────────────────
         for bad in ["", "@", "  @  ", "@@x", "@@", "@a@b", "plain-name"] {
             assert!(
                 matches!(src.resolve(bad, pools), Err(GroupError::InvalidName { .. })),
@@ -248,8 +248,8 @@ pub mod contract {
             );
         }
 
-        // ── 5. 결정성 — 같은 입력 두 번, 같은 답 ────────────────────────────────────────────
-        // 이게 깨지면 "발송 순간 스냅샷 한 장" 계약이 의미를 잃는다(같은 순간의 두 질문이 다른 세계를 본다).
+        // ── 5. Determinism — the same input twice, the same answer ────────────────────────────────────────────
+        // If this breaks, the "one snapshot at the send moment" contract loses its meaning (two questions at the same moment see different worlds).
         assert_eq!(
             src.resolve(&fx.unknown, pools),
             src.resolve(&fx.unknown, pools),
@@ -272,7 +272,7 @@ mod tests {
     use super::contract::{assert_group_source_contract, GroupSourceFixture};
     use super::*;
 
-    /// 멤버마다 무작위 id — 같은 이름을 두 번 적으면 동명 쌍둥이다.
+    /// A random id for each member — writing the same name twice makes same-name twins.
     fn members(v: &[&str]) -> Vec<GroupMember> {
         v.iter()
             .map(|s| GroupMember {
@@ -390,7 +390,7 @@ mod tests {
         assert_group_source_contract(&SortingSource, &builtin_fixture());
     }
 
-    /// ★ADR-0309 그물★ — 이름으로 접는 소스(동명 쌍둥이 중 하나가 펼침에서 사라진다).
+    /// ★ADR-0309 net★ — a source that folds by name (one of the same-name twins vanishes from the expansion).
     struct NameFoldingSource;
     impl GroupSource for NameFoldingSource {
         fn resolve(
@@ -423,7 +423,7 @@ mod tests {
         assert_group_source_contract(&NameFoldingSource, &builtin_fixture());
     }
 
-    /// ★ADR-0121 그물★ — 옛 `@all`(로스터만 읽는 것) 회귀.
+    /// ★ADR-0121 net★ — regression of the old `@all` (reading only the roster).
     struct LiveOnlyAllSource;
     impl GroupSource for LiveOnlyAllSource {
         fn resolve(
@@ -445,7 +445,7 @@ mod tests {
         assert_group_source_contract(&LiveOnlyAllSource, &builtin_fixture());
     }
 
-    /// ★ADR-0121 그물(반대 방향)★ — `@here` 가 dormant 를 읽는 회귀.
+    /// ★ADR-0121 net (opposite direction)★ — regression where `@here` reads dormant.
     struct HereReadsDormantSource;
     impl GroupSource for HereReadsDormantSource {
         fn resolve(
@@ -469,7 +469,7 @@ mod tests {
         assert_group_source_contract(&HereReadsDormantSource, &builtin_fixture());
     }
 
-    /// 옛 `GroupError::Empty` 회귀 그물 — axis2 가 물어야 한다.
+    /// Regression net for the old `GroupError::Empty` — axis2 must bite (catch it).
     struct EmptyRejectingSource;
     impl GroupSource for EmptyRejectingSource {
         fn resolve(
