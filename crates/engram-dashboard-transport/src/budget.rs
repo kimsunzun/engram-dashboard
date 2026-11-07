@@ -1,40 +1,40 @@
-//! 받은 것의 바이트 셈 — ★구동 층★(TRD 3 §3-0 ① · ADR-0310 결정 17).
+//! Byte tally of what has been received — ★driving layer★ (TRD 3 §3-0 ① · ADR-0310 decision 17).
 //!
-//! 감독 하나에 셈 하나([`Ledger`])다. 읽기 태스크가 통로에서 프레임을 읽는 순간 그 페이로드 길이를 더하고
-//! ([`Ledger::charge`]), 그 몫([`Charge`])은 항목을 따라 앞잡이 줄 → 순서 칸 → 위로 올라가는 줄을 건너가다(그
-//! 사이 이어받기 창에 붙들릴 수도 있다) 떨어지며 뺀다 — 받는 쪽이 꺼낼 때, 또는 감독이 버릴 때(답장 · 겹친 조각
-//! · 답이 와 창에서 버린 조각). ★그래서 세 층과 창을 셈 하나가 덮는다★ — 층마다 따로 재면 각 층이 자기 상한까지
-//! 채워 합이 곱으로 커진다(앞잡이 512칸 × 한 메시지 상한이 그 모양이다).
+//! One tally per supervisor ([`Ledger`]). The moment the read task reads a frame off the link, it adds that payload length
+//! ([`Ledger::charge`]); that share ([`Charge`]) travels with the item through the front queue → ordering area → upward queue (it may
+//! be held by the resume window along the way) and is subtracted when it drops — when the receiver takes it out, or when the supervisor discards it (a reply · an overlapping
+//! fragment · a fragment the window drops when the answer arrives). ★So one tally covers the three layers and the window★ — measuring each layer separately would let each fill up to its own cap
+//! so the sum grows as a product (front queue 512 entries × the one-message cap is that shape).
 //!
-//! ★몫은 항목에 실리고 층에 실리지 않는다★ — 항목이 앞잡이 줄 · 순서 칸 · 수신단([`crate::Inbox`])을 건너가는
-//! 동안 자기를 넣은 감독의 셈을 쥐고 가야 세 층을 셈 하나가 덮는다. 수신단을 떨어뜨리면 든 항목과 함께 몫도
-//! 떨어진다.
+//! ★The share rides on the item, not on a layer★ — while an item crosses the front queue · ordering area · inbox ([`crate::Inbox`]),
+//! it must hold the tally of the supervisor that put it in, so that one tally covers all three layers. Dropping the inbox
+//! drops the shares along with the items it holds.
 //!
-//! ★셈 안에서 창 몫을 따로 센다★ — 이어받기 창이 붙든 스트림 조각의 바이트다. 감독이 붙들 때 더하고
-//! ([`Charge::hold`]) 창에서 내보내거나 버릴 때 뺀다. 셈 전체(물높이)는 그대로다. 예산 B 를 읽기 몫과 창 상한으로
-//! 나눠 각자 상한을 건다.
-//! - 읽기 문 — 「물높이 − 창 몫」이 읽기 몫 이상이면 읽기 태스크가 통로를 더 안 읽는다. 판정은 「더하기 전
-//!   물높이」(net `CONN_RX_MAX_BYTES` 와 같은 규칙)라 문이 열려 있으면 크기와 무관하게 한 장은 들어간다.
-//!   ★창 몫을 문에서 빼는 것이 요점이다★ — 붙든 조각이 읽기를 세우면 그 구멍을 메울 재생분을 못 읽고, 창이
-//!   시한에 닫힌 뒤 늦게 온 재생분은 지나간 번호로 버려진다. 메울 수 있던 구멍이 영구 손실이 된다.
-//! - 창 상한 — 창 몫은 상한을 한 장도 넘겨 쥐지 않는다. 넘길 조각은 붙들지 않고 그 창을 잘림으로 닫는다
-//!   (`Supervisor::route`).
+//! ★The window share is counted separately inside the tally★ — it is the bytes of stream fragments the resume window holds. The supervisor adds it when holding
+//! ([`Charge::hold`]) and subtracts it when releasing from the window or discarding. The whole tally (fill level) stays the same. Budget B is
+//! split into a read share and a window cap, and each gets its own cap.
+//! - Read gate — if 「물높이 − 창 몫」 (fill level minus window share) is at least the read share, the read task stops reading the link. The decision uses 「더하기 전
+//!   물높이」 (the fill level before adding; the same rule as net `CONN_RX_MAX_BYTES`), so while the gate is open one frame gets in whatever its size.
+//!   ★Subtracting the window share at the gate is the point★ — if held fragments stopped reading, the replay that would fill their hole could not be read, and
+//!   a replay arriving late, after the window closed at its deadline, is discarded as a past number. A hole that could have been filled becomes a permanent loss.
+//! - Window cap — the window share never goes over the cap, not even by one frame. A fragment that would exceed it is not held and the window
+//!   is closed as truncated (`Supervisor::route`).
 //!
-//! ★나누기는 스트림 조각을 처음 볼 때 시작한다([`Ledger::use_streams`])★ — 그 전에는 읽기 몫 = B · 창 상한 = 0
-//! 이고, 그 뒤로는 반씩이다([`split`]). 스트림 층을 안 쓰는 상대(ADR-0310 결정 16 — 두 Wire 의 `stream_mark` 가
-//! 늘 `None`)는 창이 붙들 일이 없다 — 처음부터 반씩 나누면 창 몫은 늘 0 인 채 읽기 문만 반으로 준다. `Wire` 에는
-//! 스트림을 쓰는지 미리 알리는 칸이 없어서(칸을 더하면 소비자 전부가 깨진다 — `wire.rs`) 처음 본 조각으로 안다.
+//! ★Splitting starts when the first stream fragment is seen ([`Ledger::use_streams`])★ — before that, read share = B · window cap = 0,
+//! and after that it is half and half ([`split`]). A peer that does not use the stream layer (ADR-0310 decision 16 — both Wires' `stream_mark` is
+//! always `None`) never has anything for the window to hold — splitting in half from the start would leave the window share at 0 and only halve the read gate. `Wire` has
+//! no field that announces in advance whether streams are used (adding one would break every consumer — `wire.rs`), so it is learned from the first fragment seen.
 //!
-//! 그래서 셈 전체의 천장 = 읽기 몫 + 창 상한 + 한 메시지 = B + M(TRD 3 §3-0 ①). 셈을 늘리는 것은 읽기 하나뿐이고
-//! 읽기는 문이 열렸을 때(그때 물높이 < 읽기 몫 + 창 상한) 한 장씩만 한다 — 창에 넣고 빼는 것은 물높이를 안
-//! 바꾸고, 문이 열린 것을 본 뒤 그 한 장을 읽기 전에 창에서 꺼낸 몫이 문을 다시 닫아도 물높이는 그대로다.
-//! 나누기가 시작되는 순간에도 그대로다 — 읽기 몫이 B 에서 반으로 줄 뿐이라 문은 닫히는 쪽으로만 움직이고, 그때까지
-//! 든 것은 B + M 밑이다. 한 메시지의 상한은 어댑터가 정한다(crate 헤더 「알려진 한계」).
+//! So the ceiling of the whole tally = read share + window cap + one message = B + M (TRD 3 §3-0 ①). Only a read grows the tally,
+//! and a read happens only while the gate is open (fill level < read share + window cap at that moment), one frame at a time — putting into or taking out of the window does not
+//! change the fill level, and even if a share taken out of the window after the gate was seen open but before that one frame is read closes the gate again, the fill level stays the same.
+//! It also holds at the moment splitting starts — the read share only drops from B to half, so the gate moves only toward closing, and what is held
+//! until then is below B + M. The cap for one message is set by the adapter (crate header 「알려진 한계」 (known limits)).
 //!
-//! ★셈은 자물쇠 하나 아래 바꾼다★ — 문을 여닫는 쪽이 세 태스크다: 읽기 태스크(더해서 닫는다) · 감독(창에 넣어
-//! 열고, 꺼내 닫고, 버려 연다) · 받는 쪽(꺼내서 연다). 자물쇠가 문이 닫힌 시각과 닫혔다 다시 열린 구간을 문 상태와
-//! 함께 적어([`Ledger::take_shut`]), 감독이 붙듦을 늦게 알아채도 그것이 시작된 시각을 잃지 않고, 감독이 쓰기를
-//! 기다리던 사이 문이 닫혔다 다시 열렸어도 그 시간을 잃지 않는다.
+//! ★The tally is changed under one lock★ — three tasks open and close the gate: the read task (adds, then closes) · the supervisor (puts into the window and
+//! opens, takes out and closes, discards and opens) · the receiver (takes out and opens). Along with the gate state, the lock records the time the gate closed and the stretches where it
+//! closed and reopened ([`Ledger::take_shut`]), so that even if the supervisor notices a hold late, it does not lose the time that hold began, and
+//! even if the gate closed and reopened while the supervisor was waiting to write, it does not lose that time.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -43,50 +43,50 @@ use tokio::sync::Notify;
 
 use crate::clock::Clock;
 
-/// 스트림을 쓰는 감독의 예산 B 를 (읽기 몫, 창 상한)으로 나눈다. 읽기 몫은 0 이 되지 않는다 — 0 이면 문이 영영
-/// 안 열린다.
+/// Splits the budget B of a stream-using supervisor into (read share, window cap). The read share never becomes 0 — at 0 the gate would never
+/// open.
 ///
-/// 반씩인 까닭 = 둘의 합이 B 라야 셈 전체의 천장이 B + M 이고(ADR-0310 결정 17), 반씩이 어느 쪽도 굶기지 않는
-/// 가장 단순한 값이다(메인이 정한 내부 값 — 실측 근거는 없다).
+/// Why half and half = the two must sum to B so that the ceiling of the whole tally is B + M (ADR-0310 decision 17), and half and half is the
+/// simplest value that starves neither side (an internal value set by the main session — there is no measured basis).
 pub(crate) const fn split(budget: usize) -> (usize, usize) {
     let read = if budget / 2 == 0 { 1 } else { budget / 2 };
     (read, budget.saturating_sub(read))
 }
 
-/// 감독 하나가 받아 쥔 페이로드 바이트의 셈 — 창 몫을 그 안에 따로 센다(이 파일 헤더).
+/// Tally of payload bytes held by one supervisor — the window share is counted separately inside it (this file's header).
 pub(crate) struct Ledger {
     counts: Mutex<Counts>,
-    /// 예산 B — 읽기 몫과 창 상한은 [`Ledger::caps`] 가 스트림을 쓰는지에 따라 낸다.
+    /// Budget B — the read share and window cap are derived by [`Ledger::caps`] depending on whether streams are used.
     budget: usize,
-    /// 문이 닫힌 시각을 적는 시계 — 감독과 같은 시계라야 감독의 시한 계산과 맞는다.
+    /// Clock that records the time the gate closed — it must be the supervisor's own clock to agree with the supervisor's deadline calculation.
     clock: Arc<dyn Clock>,
-    /// 읽기 문이 열렸다 — 읽기 태스크 몫.
+    /// The read gate opened — the read task's share.
     reader_room: Notify,
-    /// 같은 사실의 감독 몫. ★깨울 손잡이를 둘로 가른다★ — `notify_one` 은 기다리는 쪽 하나만 깨우고 남는
-    /// 표는 하나만 쥐므로, 둘이 한 손잡이를 나눠 쓰면 한쪽이 상대 몫을 먹고 다른 쪽은 안 깨어난다.
+    /// The same fact, the supervisor's share. ★The wake-up handle is split in two★ — `notify_one` wakes only one waiter and stores
+    /// only one leftover permit, so if the two shared one handle, one side would eat the other's permit and the other would not wake.
     holder_room: Notify,
 }
 
 struct Counts {
-    /// 셈 전체(물높이) — 창 몫 포함.
+    /// Whole tally (fill level) — includes the window share.
     level: usize,
     held: usize,
-    /// 스트림 조각을 봤나 — 그 뒤로는 예산을 반씩 나눈다([`Ledger::use_streams`]).
+    /// Whether a stream fragment has been seen — after that the budget is split in half ([`Ledger::use_streams`]).
     streams: bool,
-    /// 읽기 문이 닫혀 있으면 닫힌 시각.
+    /// The time the gate closed, if the read gate is closed.
     shut_at: Option<Instant>,
-    /// 지난 [`Ledger::take_shut`] 뒤 닫혔다 다시 열린 구간들.
+    /// Stretches that closed and reopened since the last [`Ledger::take_shut`].
     closed: Closed,
 }
 
-/// 읽기 문이 닫혔다 다시 열린 구간들의 요약. 구간은 서로 겹치지 않고 시각 순이다.
+/// Summary of the stretches where the read gate closed and reopened. Stretches do not overlap and are in time order.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Closed {
-    /// 길이의 합.
+    /// Sum of lengths.
     pub total: Duration,
-    /// 첫 구간이 닫힌 시각. 구간이 없으면 `None`.
+    /// Time the first stretch closed. `None` if there are no stretches.
     pub from: Option<Instant>,
-    /// 마지막 구간이 열린 시각. 구간이 없으면 `None`.
+    /// Time the last stretch opened. `None` if there are no stretches.
     pub until: Option<Instant>,
 }
 
@@ -100,12 +100,12 @@ impl Closed {
     }
 }
 
-/// [`Ledger::take_shut`] 의 답 — 지난번 물은 뒤 읽기 문이 닫혀 있던 시간.
+/// Answer of [`Ledger::take_shut`] — how long the read gate was closed since the last query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Shut {
-    /// 지금 닫혀 있으면 닫힌 시각.
+    /// The time it closed, if it is closed now.
     pub since: Option<Instant>,
-    /// 그 사이 닫혔다 다시 열린 구간들 — 다 `since` 보다 앞이다.
+    /// Stretches that closed and reopened in between — all earlier than `since`.
     pub closed: Closed,
 }
 
@@ -126,8 +126,8 @@ impl Ledger {
         })
     }
 
-    /// (읽기 몫, 창 상한) — 스트림을 쓰기 전에는 예산 전부가 읽기 몫이다(이 파일 헤더). 어느 쪽이든 합은 예산
-    /// 이하라 천장 B + M 이 선다(예산 0 이면 읽기 몫 1 — 문이 영영 안 열리지 않게).
+    /// (read share, window cap) — before streams are used, the whole budget is the read share (this file's header). Either way the sum is at most
+    /// the budget, so the ceiling B + M holds (at budget 0 the read share is 1 — so the gate never stays shut forever).
     fn caps(&self, streams: bool) -> (usize, usize) {
         if streams {
             split(self.budget)
@@ -136,31 +136,31 @@ impl Ledger {
         }
     }
 
-    // 자물쇠 안에서는 덧셈 · 뺄셈 · 시각 읽기뿐이라 오염돼도 셈은 온전하다.
+    // Inside the lock there is only addition · subtraction · reading the time, so the tally stays intact even when poisoned.
     fn counts(&self) -> MutexGuard<'_, Counts> {
         self.counts.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// 셈 전체 — 창 몫 포함.
+    /// Whole tally — includes the window share.
     #[cfg(test)]
     pub(crate) fn level(&self) -> usize {
         self.counts().level
     }
 
-    /// 그중 이어받기 창이 붙든 몫.
+    /// The part of it held by the resume window.
     #[cfg(test)]
     pub(crate) fn held(&self) -> usize {
         self.counts().held
     }
 
-    /// 읽기 문이 닫혔나 — 읽기 태스크가 통로를 안 읽는 조건이다.
+    /// Whether the read gate is closed — the condition under which the read task does not read the link.
     pub(crate) fn over(&self) -> bool {
         self.counts().shut_at.is_some()
     }
 
-    /// 읽기 문이 지금 닫혀 있으면 닫힌 시각과, 지난번 부른 뒤 닫혔다 다시 열린 구간들을 돌려주고 그 구간들은
-    /// 잊는다(시각은 이 셈의 시계로). 감독이 붙든 시간을 셀 때 부른다(`Supervisor::track_pause`) — 부르는 쪽이
-    /// 둘이면 한쪽이 가져간 구간을 다른 쪽은 못 본다.
+    /// If the read gate is closed now, returns the time it closed and the stretches that closed and reopened since the last call, and
+    /// forgets those stretches (times by this tally's clock). Called when the supervisor counts how long it held (`Supervisor::track_pause`) — with two
+    /// callers, one would not see the stretches the other took.
     pub(crate) fn take_shut(&self) -> Shut {
         let mut c = self.counts();
         Shut {
@@ -169,14 +169,14 @@ impl Ledger {
         }
     }
 
-    /// 스트림 조각을 봤다 — 이 뒤로는 예산을 읽기 몫과 창 상한으로 반씩 나눈다(이 파일 헤더). 되돌리지 않는다.
-    /// 읽기 몫이 주는 쪽이라 문이 닫힐 수는 있어도 열리지는 않는다.
+    /// A stream fragment was seen — from here on the budget is split in half into read share and window cap (this file's header). Never undone.
+    /// The read share only shrinks, so the gate may close but never opens because of this.
     pub(crate) fn use_streams(&self) {
         self.update(|c| c.streams = true);
     }
 
-    /// 이 바이트를 창에 더 붙들 수 있나 — 창 상한 판정이다. 읽기 문과 달리 「더한 뒤」로 잰다 — 창 몫은 한
-    /// 장도 상한을 넘겨 쥐지 않는다. [`Ledger::use_streams`] 전에는 상한이 0 이라 늘 거짓이다.
+    /// Whether these bytes can still be held in the window — the window cap decision. Unlike the read gate, it measures 「더한 뒤」 (after adding) — the window share never goes
+    /// over the cap, not even by one frame. Before [`Ledger::use_streams`] the cap is 0, so this is always false.
     pub(crate) fn window_fits(&self, bytes: usize) -> bool {
         let c = self.counts();
         c.held.saturating_add(bytes) <= self.caps(c.streams).1
@@ -194,14 +194,14 @@ impl Ledger {
         }
     }
 
-    /// 읽기 문이 열릴 때까지 기다린다 — 읽기 태스크가 다음 읽기 앞에서 부른다.
+    /// Waits until the read gate opens — called by the read task before its next read.
     pub(crate) async fn reader_room(&self) {
         while self.over() {
             self.reader_room.notified().await;
         }
     }
 
-    /// 같은 기다림의 감독 몫. ★취소 안전 — `select!` 팔에 건다★: 폴링마다 문부터 본다.
+    /// The supervisor's share of the same wait. ★Cancel-safe — hang it on a `select!` arm★: it checks the gate first on every poll.
     pub(crate) async fn holder_room(&self) {
         while self.over() {
             self.holder_room.notified().await;
@@ -226,9 +226,9 @@ impl Ledger {
                 _ => false,
             }
         };
-        // ★문이 열릴 때마다 깨운다★ — 깨어난 쪽은 문을 다시 보고 닫혀 있으면 다시 잔다(위 `while`). 그래서
-        //   자는 동안 문이 몇 번 여닫혀도 남는 표 하나로 충분하고, 기다리기 전에 열렸으면 그 표가 다음 기다림을
-        //   곧바로 끝낸다. 깨우기는 자물쇠 밖이다 — 깨어난 쪽이 곧바로 그 자물쇠를 잡는다.
+        // ★Wake on every gate opening★ — the woken side looks at the gate again and sleeps again if it is closed (the `while` above). So
+        //   however many times the gate opens and closes while it sleeps, one leftover permit is enough, and if the gate opened before the wait, that permit ends the next wait
+        //   at once. The wake happens outside the lock — the woken side takes that lock right away.
         if opened {
             self.reader_room.notify_one();
             self.holder_room.notify_one();
@@ -236,16 +236,16 @@ impl Ledger {
     }
 }
 
-/// 항목 하나가 쥔 바이트 몫. 떨어질 때 자기 셈에서 뺀다(창 몫이면 창 몫에서도).
+/// Share of bytes held by one item. When it drops it subtracts from its own tally (and from the window share too, if it is a window share).
 pub(crate) struct Charge {
     ledger: Option<Arc<Ledger>>,
     bytes: usize,
-    /// 창 몫에 서 있나.
+    /// Whether it stands in the window share.
     held: bool,
 }
 
 impl Charge {
-    /// 바이트를 안 쥔 항목(생애 사건 · 신고)의 몫.
+    /// Share of an item that holds no bytes (a lifecycle event · a report).
     pub(crate) fn none() -> Self {
         Self {
             ledger: None,
@@ -258,8 +258,8 @@ impl Charge {
         self.bytes
     }
 
-    /// 이 몫을 창 몫으로 센다 — 감독이 조각을 이어받기 창에 붙들 때 부른다. 물높이는 그대로이고 읽기 문이
-    /// 열릴 수 있다(그러면 깨운다). 이미 창 몫이거나 빈 몫이면 그대로다.
+    /// Counts this share as a window share — called when the supervisor holds a fragment in the resume window. The fill level stays the same and the read gate
+    /// may open (then it wakes). If it is already a window share or an empty share, nothing changes.
     pub(crate) fn hold(&mut self) {
         if let (Some(ledger), false) = (&self.ledger, self.held) {
             let bytes = self.bytes;
@@ -268,7 +268,7 @@ impl Charge {
         }
     }
 
-    /// 창 몫에서 뺀다 — 창에서 내보낼 때 부른다. 물높이는 그대로이고 읽기 문이 닫힐 수 있다(그 시각을 적는다).
+    /// Subtracts from the window share — called when releasing from the window. The fill level stays the same and the read gate may close (that time is recorded).
     pub(crate) fn unhold(&mut self) {
         if let (Some(ledger), true) = (&self.ledger, self.held) {
             let bytes = self.bytes;
@@ -292,7 +292,7 @@ impl Drop for Charge {
     }
 }
 
-/// 몫을 쥔 채 건너가는 항목.
+/// An item that crosses holding its share.
 pub(crate) struct Charged<T> {
     pub item: T,
     pub charge: Charge,
@@ -306,7 +306,7 @@ impl<T> Charged<T> {
         }
     }
 
-    /// 꺼낸다 — 몫은 여기서 떨어진다(받는 쪽이 꺼냈다).
+    /// Takes it out — the share drops here (the receiver took it out).
     pub(crate) fn into_item(self) -> T {
         let Self { item, charge } = self;
         drop(charge);
@@ -321,7 +321,7 @@ mod tests {
     use futures_util::future::poll_immediate;
     use std::time::Duration;
 
-    /// 스트림을 쓰는 예산 20 = 읽기 몫 10 · 창 상한 10.
+    /// Stream-using budget 20 = read share 10 · window cap 10.
     fn ledger() -> (Arc<Ledger>, ManualClock) {
         let clock = ManualClock::new();
         let ledger = Ledger::new(20, clock.handle());
@@ -379,7 +379,7 @@ mod tests {
         assert_eq!(ledger.level(), 0);
     }
 
-    // ★두 쪽이 다 잠든 채로 문이 열린다★ — 잠들기 전이면 문 확인이 먼저 풀어 줘서 깨우기를 재지 못한다.
+    // ★The gate opens while both sides are asleep★ — if it were before going to sleep, the gate check would release them first and the wake-up could not be measured.
     #[tokio::test]
     async fn opening_the_gate_wakes_both_the_reader_and_the_holder() {
         let (ledger, _clock) = ledger();
@@ -419,8 +419,8 @@ mod tests {
         );
     }
 
-    // ★창 몫으로 센 조각은 읽기 문을 세우지 않는다★ — 붙든 조각이 그 구멍을 메울 재생분의 읽기를 막지 않는다는
-    //   것의 실물이다. 물높이는 그대로다(셈 하나).
+    // ★A fragment counted as a window share does not stop the read gate★ — this is the concrete case of held fragments not blocking the read of the replay that would fill
+    //   their hole. The fill level stays the same (one tally).
     #[tokio::test]
     async fn holding_a_charge_takes_it_out_of_the_gate_but_not_out_of_the_level() {
         let (ledger, _clock) = ledger();
@@ -492,8 +492,8 @@ mod tests {
         drop(small);
     }
 
-    // ★닫혔다 다시 열린 구간을 감독이 물을 때까지 모은다★ — 감독이 쓰기를 기다리는 사이 문이 여닫히면 바퀴
-    //   첫머리에서는 열린 문만 본다. 그 시간을 잃으면 창 시한으로 세져 메울 수 있던 구멍이 잘림으로 접힌다.
+    // ★Gather the stretches that closed and reopened until the supervisor asks★ — if the gate opens and closes while the supervisor waits to write, the start of the
+    //   loop sees only an open gate. If that time were lost, it would be counted toward the window deadline and a hole that could have been filled would fold into truncation.
     #[test]
     fn the_gate_adds_up_every_interval_it_was_shut_until_asked() {
         let (ledger, clock) = ledger();
@@ -544,8 +544,8 @@ mod tests {
         );
     }
 
-    // ★스트림 조각을 보기 전에는 예산 전부가 읽기 몫이고 창 상한은 0 이다★ — 스트림을 안 쓰는 상대(ADR-0310
-    //   결정 16)의 읽기 문을 반으로 줄이지 않는다. 조각을 보면 반씩 나누고, 이미 반 넘게 쥐었으면 그 자리에서 닫힌다.
+    // ★Before a stream fragment is seen, the whole budget is the read share and the window cap is 0★ — the read gate of a peer that does not use streams (ADR-0310
+    //   decision 16) is not halved. Once a fragment is seen the budget is split in half, and if more than half is already held, the gate closes on the spot.
     #[test]
     fn the_whole_budget_is_the_read_share_until_streams_are_used() {
         let clock = ManualClock::new();
